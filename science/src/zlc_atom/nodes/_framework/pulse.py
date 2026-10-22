@@ -8,6 +8,12 @@ receive; a run plays a document through ``pulse_run``, waits through
 are the same catalogue entries the UI and MCP use, so a run's claims apply
 to a node exactly as to any other client.
 
+A run's ``pulse_stop`` answers once the board is SAFE and raises when it would
+not go safe (v2 ``sequencer.safe()``). The documents a run plays are pinned at
+their first fire: a later fire of a file changed meanwhile is refused with
+``PULSE_CHANGED`` in its words, so the run's record names one pulse.  A run
+that ends with a FIRE of its unreported has the board made SAFE by the core.
+
 The description a pulse resource resolves to::
 
     {"path": "<absolute document path>", "name": "<file stem>",
@@ -115,6 +121,32 @@ class PulseBoard:
                               "rows": [[float(value) for value in row] for row in scan["rows"]]}
         return self._core("pulse_run", **params)
 
+    def load(
+        self,
+        document: str | Path,
+        *,
+        api_values: Mapping[str, tuple[float, str]] | None = None,
+        scan: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        """LOAD ``document`` without firing (v2 ``arm_sequencer``), so the FIRE
+        later is the FIRE alone; the receipt is :meth:`run`'s without
+        ``command_id``, its ``applied`` and ``timing`` those of the LOAD."""
+
+        params: dict[str, Any] = dict(
+            document=str(document), stage="load",
+            api_values={key: [float(value), str(unit)] for key, (value, unit) in (api_values or {}).items()})
+        if scan is not None:
+            params["scan"] = {"fields": [str(field) for field in scan["fields"]],
+                              "rows": [[float(value) for value in row] for row in scan["rows"]]}
+        return self._core("pulse_run", **params)
+
+    def fire_loaded(self, document: str | Path, *, run_repeats: int = 1, scan_repeats: int = 1) -> Mapping[str, Any]:
+        """FIRE what :meth:`load` left on the board (refused if it no longer
+        holds it); the receipt has ``command_id``, ``applied`` and ``timing``."""
+
+        return self._core("pulse_run", document=str(document), stage="fire",
+                          run_repeats=int(run_repeats), scan_repeats=int(scan_repeats))
+
     def wait_done(self, command_id: int, timeout_seconds: float) -> Mapping[str, Any] | None:
         """That FIRE's completion report, or None when it has not completed in time."""
 
@@ -139,13 +171,15 @@ class PulseBoard:
                 return report
 
     def stop(self) -> Mapping[str, Any]:
-        """SAFE now."""
+        """SAFE now; answers once the board is safe, raises when it is not."""
 
         return self._core("pulse_stop")
 
 
 #: What a run that ends because it was stopped says, wherever it noticed.
 CANCELLED = "the run was cancelled"
+#: In the words of a fire refused because the run's pulse file changed (the core's PULSE_CHANGED).
+PULSE_CHANGED = "changed during this run"
 #: How long one wait for a report blocks before Stop is read again.
 _REPORT_SLICE_SECONDS = 0.1
 
@@ -159,6 +193,7 @@ def check_cancelled(context: object) -> None:
 
 __all__ = [
     "CANCELLED",
+    "PULSE_CHANGED",
     "PULSE_RESOURCE_PREFIX",
     "PulseBoard",
     "STATUS_DONE",

@@ -86,7 +86,10 @@ export class PulseEditorView implements View {
     if (this.tabs.currentKey !== pulse.page && PAGES.includes(pulse.page as (typeof PAGES)[number])) this.tabs.setCurrent(pulse.page);
     if (pulse.message && pulse.message.id > this.shownMessage) {
       this.shownMessage = pulse.message.id;
-      void message("Pulse", pulse.message.text);
+      // v2 Sync: replacing unsaved work with the board's pulse asks first, then syncs again.
+      if (pulse.message.kind === "sync_discard") {
+        void confirmPulseDiscard().then(discard => { if (discard) this.send({ action: "pulse_sync", discard_changes: true }, "Syncing…"); });
+      } else void message("Pulse", pulse.message.text);
     }
   }
 

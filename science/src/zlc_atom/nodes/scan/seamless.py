@@ -184,6 +184,7 @@ class SeamlessScanMeasurement:
         acquisition_logic: str = "",
         api_values: Mapping[str, tuple[float, str]] | None = None,
         unapplied_api_values: Mapping[str, float] | None = None,
+        sequencer_key: str = "",
     ) -> None:
         self.pulse = pulse_description(pulse)
         #: The file the operator chose; the pulse is named by it wherever a
@@ -195,7 +196,8 @@ class SeamlessScanMeasurement:
         #: API values the draft keeps for names this pulse does not declare:
         #: applied to nothing, and named in the run record as such.
         self.unapplied_api_values = dict(unapplied_api_values or {})
-        self.sequencer_key = "sequencer"
+        #: The sequencer instance the run claims, as its record names it.
+        self.sequencer_key = str(sequencer_key)
         self.source_signal = str(source_signal)
         if not self.source_signal.strip():
             raise ValueError("a seamless scan needs the signal it collects")

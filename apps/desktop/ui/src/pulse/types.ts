@@ -48,7 +48,7 @@ export type Preview = { include_off: boolean; size: string | null; selectors: bo
 export type PulseState = {
   revision: number; path: string; dirty: boolean; page: string; title: string; summary: string;
   status: "idle" | "dirty-ready" | "running-synced" | "running-stale" | "unreachable"; dot: "idle" | "running" | "warning" | "error";
-  busy: string | null; stopping: boolean; message: { id: number; kind: "info" | "warning"; text: string } | null; last_warning: string;
+  busy: string | null; stopping: boolean; message: { id: number; kind: "info" | "warning" | "sync_discard"; text: string } | null; last_warning: string;
   has_pulse: boolean; schedule: Schedule; item_order: Item[]; connection: Connection; control: Control;
   config_mode: { enabled: boolean; busy: boolean; error: string }; scan: ScanPage; config: ConfigPage; subpulse: SubpulsePage;
   target: TargetPage; preview: Preview; board: Record<string, unknown>; time_units: string[]; save_folder: string; proposed_path: string;
