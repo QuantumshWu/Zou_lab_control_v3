@@ -15,12 +15,15 @@ engine reports goes to `.local\logs` (below), and an error that stops it is
 also shown in a message box. The engine is not in git: `bin\release.json` names
 the release this checkout runs (its version, tag, the source stamp and commit
 it was built from, and its archive's name, size and sha256). When `bin\engine`
-is missing or of another release, the launcher never starts it:
-`installation.exe` downloads this checkout's release in a console window of
-its own (`tools\fetch_engine.ps1`: the archive from the GitHub release, its
-size and sha256 checked, unpacked beside the live engine as `bin\engine.next`
-and renamed in) and then opens; the other three open `installation.exe` for
-it. An engine still running is never replaced: the download waits in
+is of another release, `experiment.exe`, `figure_viewer.exe` and
+`pulse_editor.exe` do not start it but open `installation.exe`, which opens as
+it is: its program row reads *Update*, and nothing is downloaded until the
+operator installs it there. When there is no engine at all (or one from before
+releases were downloaded), `installation.exe` asks first, then downloads this
+checkout's release in a console window of its own. Either way the download is
+`tools\fetch_engine.ps1`: the archive from the GitHub release, its size and
+sha256 checked, unpacked beside the live engine as `bin\engine.next` and renamed
+in. An engine still running is never replaced: the download waits in
 `bin\engine.next` and goes in when the programs next start.
 
 `bin` holds the rest:
@@ -118,7 +121,7 @@ git fetch origin
 git reset --hard origin/main
 ```
 
-then start `installation.exe`, which downloads the program. The old history's
+then start `installation.exe` and answer Yes to download the program. The old history's
 objects can be dropped with `git reflog expire --expire=now --all` and
 `git gc --prune=now`.
 
@@ -132,7 +135,7 @@ in the same place:
 4. Move `workspace`, `.tools`, `.local` and `.zlc_python_path` from the old
    folder into the new one (the science environment keeps working: its path is
    the same).
-5. Start `installation.exe`: it downloads the program. Once the experiment runs,
+5. Start `installation.exe` and answer Yes to download the program. Once the experiment runs,
    delete the old folder.
 
 ## A development machine

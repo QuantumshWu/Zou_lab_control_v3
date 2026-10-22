@@ -6,11 +6,13 @@
 //! errors. It has no window and no console.
 //!
 //! The engine is not in git: bin\release.json names the release this checkout
-//! runs. A downloaded engine waiting in bin\engine.next goes in first. An
-//! engine that is missing or of another release is never started:
-//! installation.exe puts this checkout's release in place in a console window
-//! of its own (tools\fetch_engine.ps1) and then opens, and the other three open
-//! installation.exe for it.
+//! runs. A downloaded engine waiting in bin\engine.next (an update the operator
+//! chose) goes in first. experiment.exe, figure_viewer.exe and pulse_editor.exe
+//! never start an engine of another release: they open installation.exe, which
+//! opens with the engine as it is -- its Zou lab control row offers the update.
+//! Only an engine the installer cannot run on (none, or one from before
+//! releases were downloaded) is downloaded at its start, and only when the
+//! operator says yes, in a console window of its own (tools\fetch_engine.ps1).
 #![windows_subsystem = "windows"]
 use std::ffi::OsString;
 use std::os::windows::process::CommandExt;
@@ -44,16 +46,26 @@ fn launch() -> Result<(), String> {
     };
     // A downloaded engine goes in before anything starts (a closing engine is given a few seconds).
     if bin.join("engine.next").is_dir() { fetch(&root, &["-Swap", "10"], false)?; }
-    if !current(&bin) {
+    let installed = std::fs::read_to_string(bin.join("engine").join("SOURCE")).ok().filter(|_| engine.is_file());
+    let record = std::fs::read_to_string(bin.join("release.json")).ok();
+    if !current(installed.as_deref(), record.as_deref()) {
         if name != "installation" {
             Command::new(exe.with_file_name("installation.exe")).args(["--for", &name]).spawn()
-                .map_err(|error| format!("This checkout's program is not in place, and installation.exe, which puts it there, does not start: {error}"))?;
+                .map_err(|error| format!("This checkout's program is not in place, and installation.exe, which updates it, does not start: {error}"))?;
             return Ok(());
         }
-        let asker = std::env::args().skip_while(|arg| arg != "--for").nth(1).unwrap_or_else(|| name.clone());
-        // The console window said why it failed and waited for the operator.
-        if !fetch(&root, &["-For", &asker], true)?.success() { std::process::exit(1); }
-        if !current(&bin) { return Err(format!("{} is still not this checkout's release (bin\\release.json): start installation.exe again once every Zou lab program is closed.", engine.display())); }
+        // An installer that offers the update runs as it is; one that does not exist or cannot is asked for.
+        if !installed.as_deref().is_some_and(|text| text.lines().any(|line| line.starts_with("version "))) {
+            let asker = std::env::args().skip_while(|arg| arg != "--for").nth(1).unwrap_or_else(|| name.clone());
+            let record = record.as_deref().unwrap_or_default();
+            let size = field(record, "size").and_then(|bytes| bytes.parse::<f64>().ok()).unwrap_or(0.0) / 1_048_576.0;
+            let what = if installed.is_some() { "The program in this checkout is from before its releases were downloaded and cannot update itself." }
+                       else { "The program is not installed in this checkout." };
+            let question = format!("{what}\n\nDownload this checkout's release now (v{}, {size:.0} MB)?", field(record, "version").unwrap_or_default());
+            if !ask(&question) { return Ok(()); }
+            // The console window said why it failed and waited for the operator.
+            if !fetch(&root, &["-For", &asker], true)?.success() { std::process::exit(1); }
+        }
     }
     let mut command = Command::new(&engine);
     command.args(mode);
@@ -62,22 +74,30 @@ fn launch() -> Result<(), String> {
     Ok(())
 }
 
-/// Whether bin\engine is the release bin\release.json names (the same source stamp in its
-/// SOURCE). A checkout that names no release runs the engine it has.
-fn current(bin: &Path) -> bool {
-    if !bin.join("engine").join("zlc-desktop.exe").is_file() { return false; }
-    let Ok(record) = std::fs::read_to_string(bin.join("release.json")) else { return true };
-    let have = std::fs::read_to_string(bin.join("engine").join("SOURCE")).ok()
-        .and_then(|text| text.lines().find_map(|line| line.strip_prefix("source ").map(|stamp| stamp.trim().to_owned())));
-    field(&record, "source").is_some_and(|wanted| Some(wanted) == have)
+/// Whether the engine (its SOURCE, when it is there) is the release bin\release.json names: the
+/// same source stamp. A checkout that names no release runs the engine it has.
+fn current(installed: Option<&str>, record: Option<&str>) -> bool {
+    let Some(installed) = installed else { return false };
+    let Some(record) = record else { return true };
+    let have = installed.lines().find_map(|line| line.strip_prefix("source ").map(str::trim));
+    field(record, "source").is_some_and(|wanted| Some(wanted.as_str()) == have)
 }
 
-/// A string value of tools\release.ps1's JSON (one level, no escapes in its values).
+/// A value of tools\release.ps1's JSON, as written (a string's text, a number's digits; no escapes).
 fn field(json: &str, key: &str) -> Option<String> {
     let rest = &json[json.find(&format!("\"{key}\""))? + key.len() + 2..];
     let rest = rest[rest.find(':')? + 1..].trim_start();
-    let value = rest.strip_prefix('"')?;
-    Some(value[..value.find('"')?].to_owned())
+    let value = match rest.strip_prefix('"') { Some(text) => &text[..text.find('"')?], None => rest.split([',', '\r', '\n', '}']).next()?.trim() };
+    Some(value.to_owned())
+}
+
+/// A yes/no question in a message box; windows parked off-screen (ZLC_V3_WINDOW_AT, automation) take the yes.
+fn ask(question: &str) -> bool {
+    if std::env::var_os("ZLC_V3_WINDOW_AT").is_some() { return true; }
+    let text: Vec<u16> = question.encode_utf16().chain([0]).collect();
+    let title: Vec<u16> = "Zou lab control".encode_utf16().chain([0]).collect();
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_SETFOREGROUND, MB_YESNO, MessageBoxW};
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND) == IDYES }
 }
 
 /// tools\fetch_engine.ps1 with these arguments, waited for: in a console window of its own when
@@ -101,7 +121,16 @@ mod tests {
         let record = "{\r\n    \"version\":  \"2026.10.22.1\",\r\n    \"source\":  \"ab12\",\r\n    \"asset\":  {\r\n        \"name\":  \"zlc-engine-2026.10.22.1.zip\",\r\n        \"size\":  123\r\n    }\r\n}";
         assert_eq!(super::field(record, "source").as_deref(), Some("ab12"));
         assert_eq!(super::field(record, "version").as_deref(), Some("2026.10.22.1"));
-        assert_eq!(super::field(record, "size"), None);
+        assert_eq!(super::field(record, "size").as_deref(), Some("123"));
         assert_eq!(super::field(record, "commit"), None);
+    }
+
+    #[test]
+    fn an_engine_is_current_when_its_source_is_the_release_record_s() {
+        let record = "{ \"version\":  \"2026.10.22.1\", \"source\":  \"ab12\" }";
+        assert!(super::current(Some("source ab12\r\ncommit c\r\nversion 2026.10.22.1\r\n"), Some(record)));
+        assert!(!super::current(Some("source ff00\r\n"), Some(record)));
+        assert!(!super::current(None, Some(record)));
+        assert!(super::current(Some("source ff00\r\n"), None));
     }
 }

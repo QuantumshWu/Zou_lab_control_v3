@@ -30,7 +30,10 @@ from that file and stops when the estimate is over the config's `target_pct`.
 The default mode skips synthesis when the Vivado version, part, top, HDL,
 create Tcl, XDC, config and geometry all match the receipt saved with the last
 build (`build\ps\.zlc_src_hash`) and the bitstream and routed reports are
-unchanged since; it then programs that bitstream.
+unchanged since; it then programs that bitstream. installation.exe's FPGA card
+reads the same receipt to say whether the bitstream matches the sources, by the
+Vivado identity the build kept beside it (`.zlc_vivado_id`; a build from before
+it was kept is compared by `vivado -version`, as a build compares).
 
 The build lives in `build\` (ignored by git). The short project name `ps`
 keeps Vivado's debug-core temp path under the Windows MAX_PATH limit; check the

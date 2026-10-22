@@ -16,13 +16,13 @@ for devices and logic nodes.
 On a Windows PC with this repository checked out and the Python v2 runs with
 (3.13 or newer: Anaconda or python.org's, found as v2's launchers find it):
 
-1. Run `installation.exe` once. The first time, a small window downloads the
-   program: this checkout's release of the engine (about 10 MB, from this
-   repository's GitHub releases; `bin\release.json` names it). Then it shows what
-   this PC has and installs what is selected: the program (its card says which
-   release is installed and how it relates to this checkout, and, when GitHub
-   answers, whether a newer release is published -- pull the repository to get
-   it), the plugins' Python environment inside this folder
+1. Run `installation.exe` once. The first time it asks to download the program:
+   this checkout's release of the engine (about 10 MB, from this repository's
+   GitHub releases; `bin\release.json` names it). Then it shows what this PC has
+   and installs what is selected: the program (its card says which release is
+   installed and how it relates to this checkout -- *Update* after a pull that
+   brings a new release -- and, when GitHub answers, whether a newer release is
+   published: pull the repository to get it), the plugins' Python environment inside this folder
    (`.tools\science-env`; nothing outside the checkout is changed) with the
    instrument links, Basler pylon on the PC with a Basler camera, and on the PC
    that runs SLM rearrangement the GPU packages, warmed for its GPU. What is
@@ -37,8 +37,8 @@ On a Windows PC with this repository checked out and the Python v2 runs with
 | `pulse_editor.exe` | PulseGUI@Zou lab alone (Offline, Virtual or a remote board) |
 
 They run the release in `bin\engine`, so a lab PC needs no compiler. After a pull
-that brings a new release, each of them sends you to `installation.exe`, which
-puts the matching program in place first.
+that brings a new release, each of them opens `installation.exe` instead, where
+the program reads *Update*.
 Experiment data lives in `workspace\` inside the checkout (apparatus, layouts,
 pulses, runs; not tracked by git); `ZLC_WORKSPACE` points elsewhere.
 

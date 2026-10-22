@@ -55,16 +55,99 @@ $impl = Join-Path $projectDir 'ps.runs\impl_1'
 $bit = Join-Path $impl "$top.bit"
 $reports = @('timing_summary', 'bus_skew', 'utilization') | ForEach-Object { Join-Path $impl "${top}_${_}_routed.rpt" }
 $config = Join-Path $fpga 'board_config\streamer_config.json'
+# The bitstream's inputs: the HDL, the geometry header a build derives from the config, the create Tcl, the XDC.
+if (-not $env:ZLC_PS_XDC) { $env:ZLC_PS_XDC = Join-Path $fpga 'board_config\board.xdc' }
+$xdc = $env:ZLC_PS_XDC
+$engine = Join-Path $streamer 'zlc_period_streamer.v'
+$topFile = Join-Path $streamer "$top.v"
+$create = Join-Path $streamer $createTcl
+$header = Join-Path $streamer 'zlc_geometry.vh'
+
+# The build receipt, byte for byte v2's: sha256 of 'tool\0' + Vivado's -version output +
+# 'part\0' + part + 'top\0' + top + each input's checkout-relative path, '\0' and bytes; then
+# one over the bitstream and routed reports relative to the project; "<sources>:<artifacts>".
+# program_fpga.tcl is not an input: it loads a bit and cannot change one.
+function Get-RelativePath([string]$Path, [string]$Start) {
+    # os.path.relpath on Windows, with '/' between the parts.
+    $pathParts = @([IO.Path]::GetFullPath($Path) -split '\\' | Where-Object { $_ })
+    $startParts = @([IO.Path]::GetFullPath($Start) -split '\\' | Where-Object { $_ })
+    if ($pathParts[0] -ne $startParts[0]) { return $null }
+    $common = 1
+    while ($common -lt $pathParts.Count -and $common -lt $startParts.Count -and $pathParts[$common] -eq $startParts[$common]) { $common++ }
+    $relative = @(@('..') * ($startParts.Count - $common)) + @($pathParts | Select-Object -Skip $common)
+    if ($relative.Count) { $relative -join '/' } else { '.' }
+}
+function Get-Digest([byte[]]$Head, [string[]]$Files, [string]$Base) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $add = { param([byte[]]$bytes) [void]$sha.TransformBlock($bytes, 0, $bytes.Length, $null, 0) }
+        & $add $Head
+        foreach ($file in $Files) {
+            if (-not $file -or -not (Test-Path -LiteralPath $file -PathType Leaf)) { return $null }
+            $relative = Get-RelativePath $file $Base
+            if ($null -eq $relative) { return $null }
+            & $add ([Text.Encoding]::UTF8.GetBytes($relative) + [byte[]]@(0))
+            & $add ([IO.File]::ReadAllBytes($file))
+        }
+        [void]$sha.TransformFinalBlock([byte[]]@(), 0, 0)
+        -join ($sha.Hash | ForEach-Object { $_.ToString('x2') })
+    }
+    finally { $sha.Dispose() }
+}
+# Vivado's build identity, its -version output (run from the build root); -Saved: the one the
+# last build's receipt was made with, kept beside it (else run, for a build from before it was kept).
+$identityFile = Join-Path $projectDir '.zlc_vivado_id'
+function Get-VivadoIdentity([switch]$Saved) {
+    if ($Saved -and (Test-Path -LiteralPath $identityFile)) { return ,[IO.File]::ReadAllBytes($identityFile) }
+    if (-not $vivado) { return $null }
+    $identity = Join-Path $buildRoot '.zlc_vivado_id.tmp'
+    Push-Location -LiteralPath $buildRoot
+    try { Invoke-Program { & cmd.exe /d /c call $vivado -version '>' $identity '2>&1' } }
+    finally { Pop-Location }
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $identity)) {
+        Write-Host 'ERROR: could not read the selected Vivado build identity.'
+        Remove-Item -LiteralPath $identity -ErrorAction SilentlyContinue
+        return $null
+    }
+    $bytes = [IO.File]::ReadAllBytes($identity)
+    Remove-Item -LiteralPath $identity
+    ,$bytes
+}
+function Get-SourceDigest([byte[]]$Identity) {
+    $text = [Text.Encoding]::UTF8
+    $head = $text.GetBytes("tool`0") + $Identity + $text.GetBytes("part`0$($env:ZLC_PS_FPGA_PART)") + $text.GetBytes("top`0$top")
+    $geom = if ($env:ZLC_PS_GEOM_TCL -and (Test-Path -LiteralPath $env:ZLC_PS_GEOM_TCL)) { $env:ZLC_PS_GEOM_TCL } else { '' }
+    Get-Digest $head @($engine, (Join-Path $streamer 'zlc_uart_bridge.v'), $topFile, $header, $create, $xdc, $config, $geom) $root
+}
+function Get-ArtifactDigest { Get-Digest ([byte[]]@()) (@($bit) + $reports) $projectDir }
+
+# :zlc_check_prebuilt -- whether the last build's receipt still names these inputs and its
+# outputs: $null when the inputs cannot be hashed (no Vivado identity, an input missing).
+$receiptFile = Join-Path $projectDir '.zlc_src_hash'
+function Test-Prebuilt([byte[]]$Identity) {
+    $sources = if ($Identity) { Get-SourceDigest $Identity } else { $null }
+    if (-not $sources) { return $null }
+    $artifacts = Get-ArtifactDigest
+    [bool]($artifacts -and "${sources}:$artifacts" -eq (Get-Content -LiteralPath $receiptFile -TotalCount 1))
+}
 
 if ($Action -eq 'status') {
     # One JSON line: the Vivado a build would run, the configured part (or why the config is
-    # refused) and the bitstream a build left.
+    # refused), the bitstream a build left, when, and whether the receipt of that build still
+    # matches the sources (the build's own rule; $null: no receipt, or not comparable).
     $vivado = Find-Vivado
     $answer = @(Invoke-Program { & $tool fpga --require --config $config 2>&1 } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     $valid = $LASTEXITCODE -eq 0
+    $built = (Test-Path -LiteralPath $bit) -and (Test-Path -LiteralPath $receiptFile) -and $valid -and $answer.Count
+    if ($built) {
+        if (-not $env:ZLC_PS_FPGA_PART) { $env:ZLC_PS_FPGA_PART = $answer[0] }
+        if (-not $env:ZLC_PS_GEOM_TCL) { $env:ZLC_PS_GEOM_TCL = Join-Path $buildRoot 'geom.tcl' }
+    }
     [ordered]@{ vivado = $vivado; version = $(if ($vivado -match '[\\/]Vivado[\\/]([^\\/]+)[\\/]') { $Matches[1] } else { $null }); config = $config
                 part = $(if ($valid -and $answer.Count) { $answer[0] } else { $null }); config_error = $(if (-not $valid) { $answer -join ' ' } else { $null })
-                bitstream = $(if (Test-Path -LiteralPath $bit) { $bit } else { $null }) } | ConvertTo-Json -Compress
+                bitstream = $(if (Test-Path -LiteralPath $bit) { $bit } else { $null })
+                bitstream_built = $(if (Test-Path -LiteralPath $bit) { (Get-Item -LiteralPath $bit).LastWriteTime.ToString('yyyy-MM-dd HH:mm') } else { $null })
+                bitstream_current = $(if ($built) { Test-Prebuilt (Get-VivadoIdentity -Saved) } else { $null }) } | ConvertTo-Json -Compress
     exit 0
 }
 
@@ -79,11 +162,6 @@ try { Set-Content -LiteralPath $buildRoot -Stream 'com.dropbox.ignored' -Value 1
 Write-Host "ZLC build root: $buildRoot"
 
 # :zlc_verify_sources
-if (-not $env:ZLC_PS_XDC) { $env:ZLC_PS_XDC = Join-Path $fpga 'board_config\board.xdc' }
-$xdc = $env:ZLC_PS_XDC
-$engine = Join-Path $streamer 'zlc_period_streamer.v'
-$topFile = Join-Path $streamer "$top.v"
-$create = Join-Path $streamer $createTcl
 if (-not (Test-Path -LiteralPath $engine)) { Stop-Build "ERROR: missing FINAL engine HDL: $engine" 2 }
 if (-not (Test-Path -LiteralPath $topFile)) { Stop-Build "ERROR: missing FINAL top HDL: $topFile" 2 }
 if (-not (Test-Path -LiteralPath $create)) { Stop-Build "ERROR: missing FINAL build Tcl: $create" 2 }
@@ -134,7 +212,6 @@ if ($Action -eq 'flash') { Write-Host 'ZLC FPGA pulse streamer: program SPI flas
 if ($Action -eq 'program') { Invoke-FpgaProgram; exit 0 }
 
 # :zlc_emit_geom -- only a build derives files from the config: the RTL header in place, the geometry Tcl in the build root.
-$header = Join-Path $streamer 'zlc_geometry.vh'
 $geomFailure = @('', 'ERROR: failed to derive FPGA geometry from streamer_config.json.', "  config: $config", "  header: $header",
                  "  geom tcl: $(Join-Path $buildRoot 'geom.tcl')", '  The reason is printed above, from zlc-pulse-server fpga.')
 Invoke-Program { & $tool fpga --config $config --emit-geometry-vh $header } | Out-Null
@@ -151,65 +228,12 @@ Write-Host "ZLC geometry tcl: $($env:ZLC_PS_GEOM_TCL) (from streamer_config.json
 Invoke-Program { & $tool fpga --config $config --part $env:ZLC_PS_FPGA_PART }
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
-# The build receipt, byte for byte v2's: sha256 of 'tool\0' + Vivado's -version output +
-# 'part\0' + part + 'top\0' + top + each input's checkout-relative path, '\0' and bytes; then
-# one over the bitstream and routed reports relative to the project; "<sources>:<artifacts>".
-# program_fpga.tcl is not an input: it loads a bit and cannot change one.
-function Get-RelativePath([string]$Path, [string]$Start) {
-    # os.path.relpath on Windows, with '/' between the parts.
-    $pathParts = @([IO.Path]::GetFullPath($Path) -split '\\' | Where-Object { $_ })
-    $startParts = @([IO.Path]::GetFullPath($Start) -split '\\' | Where-Object { $_ })
-    if ($pathParts[0] -ne $startParts[0]) { return $null }
-    $common = 1
-    while ($common -lt $pathParts.Count -and $common -lt $startParts.Count -and $pathParts[$common] -eq $startParts[$common]) { $common++ }
-    $relative = @(@('..') * ($startParts.Count - $common)) + @($pathParts | Select-Object -Skip $common)
-    if ($relative.Count) { $relative -join '/' } else { '.' }
-}
-function Get-Digest([byte[]]$Head, [string[]]$Files, [string]$Base) {
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $add = { param([byte[]]$bytes) [void]$sha.TransformBlock($bytes, 0, $bytes.Length, $null, 0) }
-        & $add $Head
-        foreach ($file in $Files) {
-            if (-not $file -or -not (Test-Path -LiteralPath $file -PathType Leaf)) { return $null }
-            $relative = Get-RelativePath $file $Base
-            if ($null -eq $relative) { return $null }
-            & $add ([Text.Encoding]::UTF8.GetBytes($relative) + [byte[]]@(0))
-            & $add ([IO.File]::ReadAllBytes($file))
-        }
-        [void]$sha.TransformFinalBlock([byte[]]@(), 0, 0)
-        -join ($sha.Hash | ForEach-Object { $_.ToString('x2') })
-    }
-    finally { $sha.Dispose() }
-}
-function Get-SourceDigest {
-    $identity = Join-Path $buildRoot '.zlc_vivado_id.tmp'
-    Push-Location -LiteralPath $buildRoot
-    try { Invoke-Program { & cmd.exe /d /c call $vivado -version '>' $identity '2>&1' } }
-    finally { Pop-Location }
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $identity)) {
-        Write-Host 'ERROR: could not read the selected Vivado build identity.'
-        Remove-Item -LiteralPath $identity -ErrorAction SilentlyContinue
-        return $null
-    }
-    $text = [Text.Encoding]::UTF8
-    $head = $text.GetBytes("tool`0") + [IO.File]::ReadAllBytes($identity) + $text.GetBytes("part`0$($env:ZLC_PS_FPGA_PART)") + $text.GetBytes("top`0$top")
-    Remove-Item -LiteralPath $identity
-    $geom = if ($env:ZLC_PS_GEOM_TCL -and (Test-Path -LiteralPath $env:ZLC_PS_GEOM_TCL)) { $env:ZLC_PS_GEOM_TCL } else { '' }
-    Get-Digest $head @($engine, (Join-Path $streamer 'zlc_uart_bridge.v'), $topFile, $header, $create, $xdc, $config, $geom) $root
-}
-function Get-ArtifactDigest { Get-Digest ([byte[]]@()) (@($bit) + $reports) $projectDir }
-
-# :zlc_check_prebuilt -- skip synthesis when the receipt still matches; the default mode then programs that bit.
+# Skip synthesis when the receipt still matches; the default mode then programs that bit.
 # (Checked under --force-build too, as v2 did; only the skip is forced off.)
-$receiptFile = Join-Path $projectDir '.zlc_src_hash'
-$prebuilt = $false
-if (Test-Path -LiteralPath $receiptFile) {
-    $sources = Get-SourceDigest
-    $artifacts = if ($sources) { Get-ArtifactDigest } else { $null }
-    $prebuilt = $sources -and $artifacts -and "${sources}:$artifacts" -eq (Get-Content -LiteralPath $receiptFile -TotalCount 1)
-}
+$identity = if (Test-Path -LiteralPath $receiptFile) { Get-VivadoIdentity } else { $null }
+$prebuilt = (Test-Prebuilt $identity) -eq $true
 if (-not $ForceBuild -and $prebuilt) {
+    [IO.File]::WriteAllBytes($identityFile, $identity)
     Write-Host 'ZLC bitstream is up to date (sources unchanged since last build) -- skipping build.'
     Write-Host "ZLC   bit: $bit"
     Write-Host 'ZLC   (force a rebuild with: build_and_program.bat --force-build)'
@@ -219,11 +243,13 @@ if (-not $ForceBuild -and $prebuilt) {
 
 Write-Host 'ZLC FPGA pulse streamer: build FINAL bitstream (period table + nested loops + autonomous scan, JTAG-to-AXI)'
 Invoke-Tcl $createTcl
-# :zlc_save_src_hash
-$sources = Get-SourceDigest
+# :zlc_save_src_hash -- with the Vivado identity it was made with (installation.exe compares by it).
+$identity = Get-VivadoIdentity
+$sources = if ($identity) { Get-SourceDigest $identity } else { $null }
 if (-not $sources) { Stop-Build 'ERROR: the bitstream inputs could not be hashed; refusing an unqualified build receipt.' }
 $artifacts = Get-ArtifactDigest
 if (-not $artifacts) { Stop-Build 'ERROR: bitstream or routed reports are missing; refusing an incomplete build receipt.' }
 Set-Content -LiteralPath $receiptFile -Value "${sources}:$artifacts" -Encoding ascii
+[IO.File]::WriteAllBytes($identityFile, $identity)
 if ($Action -eq 'build_program') { Invoke-FpgaProgram }
 exit 0

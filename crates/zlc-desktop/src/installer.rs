@@ -320,9 +320,17 @@ impl Installer {
                     (Some(part), _) => row("board", "fpga", "Board configuration", "ok", format!("{part} · {config}")),
                     (None, error) => row("board", "fpga", "Board configuration", "error", error.unwrap_or("The board configuration is refused").into()),
                 });
-                rows.push(match fpga["bitstream"].as_str() {
-                    Some(bit) => row("bitstream", "fpga", "Bitstream", "ok", bit.into()),
-                    None => row("bitstream", "fpga", "Bitstream", "optional", "Not built on this PC".into()),
+                // Against the sources by the build's own receipt (tools\fpga.ps1): what Build would skip or redo.
+                let built = fpga["bitstream_built"].as_str().unwrap_or("?");
+                rows.push(match (fpga["bitstream"].as_str(), fpga["bitstream_current"].as_bool()) {
+                    (None, _) => row("bitstream", "fpga", "Bitstream", "optional", "Not built on this PC".into()),
+                    (Some(bit), Some(true)) => row("bitstream", "fpga", "Bitstream", "ok", format!("Matches the sources (built {built}) · {bit}")),
+                    (Some(bit), Some(false)) => {
+                        let mut stale = row("bitstream", "fpga", "Bitstream", "missing", format!("Older than the sources (built {built}): Build makes it again · {bit}"));
+                        stale["words"] = json!("Out of date");
+                        stale
+                    }
+                    (Some(bit), None) => row("bitstream", "fpga", "Bitstream", "ok", format!("Built {built}; not compared with the sources (no build receipt or Vivado here) · {bit}")),
                 });
             }
         }
