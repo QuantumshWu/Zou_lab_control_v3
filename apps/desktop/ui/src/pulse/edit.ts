@@ -4,7 +4,7 @@
 // column on one line per port; under it the Control, Connection and Ports
 // cards.  A click picks an item (Shift/Ctrl adds), a click between cards
 // picks that gap; dragging a card moves it.  Every change is a command.
-import { ComboBox, Readout, Segmented, SpinBox, checkBox, command, element, setChecked, setElided, setMiddle, setState, setText, setTitle, statusDot, switchButton, token,
+import { ComboBox, Readout, Segmented, SpinBox, assign, checkBox, command, element, setChecked, setElided, setMiddle, setState, setText, setTitle, statusDot, switchButton, token,
   type Command as Button } from "../fluent/index.js";
 import type { BracketVM, ComponentVM, FieldVM, Item, PeriodVM, PortRow, PulseState, Schedule } from "./types.js";
 import { type Owner, RepeatsBox, type Send, TextBox, ValueBox, confirmPulseDiscard, drawBadges, editCommand } from "./widgets.js";
@@ -110,7 +110,7 @@ class PeriodCard {
         // A spacer's circles carry no labels: its neighbours' rows say which is which (v2: on hover).
         if (words) setText(words, spacer ? "" : port.label);
         setTitle(box, spacer ? port.label : "");
-        box.disabled = period.readonly;
+        assign(box, "disabled", period.readonly);
         nodes.push(this.row(box, port.key));
       } else if (port.kind === "dac" && analog.has(port.key)) {
         const shown = analog.get(port.key)!;
@@ -130,7 +130,7 @@ class PeriodCard {
         cell.mode.disabled = period.readonly || spacer || shown.field.config_active;
         cell.mode.title = spacer ? `${port.label}: a spacer holds the DAC` : `${port.label}: ${shown.mode}`;
         cell.row.classList.toggle("held", spacer);
-        cell.value.root.hidden = spacer;
+        assign(cell.value.root, "hidden", spacer);
         // The port's own code range, said where it is typed (v2 PeriodCard's DAC edit).
         cell.value.tip = `${port.label}: signed integer ${port.lo}..${port.hi} (0 = 0 V)\nEdit Scan and value source`;
         if (!spacer) cell.value.show(shown.field, !period.readonly);

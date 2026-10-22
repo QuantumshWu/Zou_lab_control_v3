@@ -1,4 +1,4 @@
-import { element, type Value } from "./dom.js";
+import { assign, element, type Value } from "./dom.js";
 
 export type Choice = {
   value: Value;
@@ -112,7 +112,7 @@ export class ComboBox {
 
   get value(): Value { return this.current; }
   set value(value: Value) { this.current = value; this.show(); }
-  set disabled(disabled: boolean) { this.root.disabled = disabled; }
+  set disabled(disabled: boolean) { assign(this.root, "disabled", disabled); }
   set title(text: string) { if (this.root.title !== text) this.root.title = text; }
 
   private show(): void {
@@ -194,6 +194,6 @@ export class EditableCombo {
     if (!typing) { this.draft = false; if (this.input.value !== key) this.input.value = key; }
   }
 
-  set disabled(disabled: boolean) { this.input.disabled = disabled; this.root.classList.toggle("disabled", disabled); }
+  set disabled(disabled: boolean) { assign(this.input, "disabled", disabled); this.root.classList.toggle("disabled", disabled); }
   set title(text: string) { if (this.input.title !== text) this.input.title = text; }
 }

@@ -253,18 +253,58 @@ mod tests {
         assert!(asked("resolve_device_claims").2["devices"].get("tunable:rf").is_none());
         workbench.on_event(Event::Answered { ticket, result: Ok(json!({"ports": [{"port": "device:rf:frequency"}]})) }, &mut host);
         let state = workbench.state(&host);
-        assert_eq!((&state["logic"][0]["status"], &state["logic"][0]["answered"]), (&json!("Draft: Checking the draft…"), &json!(false)));
+        assert_eq!(state["logic"][0]["status"], "Draft: Checking the draft…");
         let (_, ticket, _) = asked("resolve_device_claims");
         workbench.on_event(Event::Answered { ticket, result: Ok(json!({"tunable:rf": {"instance": "rf", "fields": ["frequency"]}})) }, &mut host);
         let state = workbench.state(&host);
-        assert_eq!((&state["logic"][0]["editor_facts"]["ports"][0]["port"], &state["logic"][0]["can_start"], &state["logic"][0]["answered"]),
-                   (&json!("device:rf:frequency"), &json!(true), &json!(true)));
+        assert_eq!((&state["logic"][0]["editor_facts"]["ports"][0]["port"], &state["logic"][0]["can_start"]), (&json!("device:rf:frequency"), &json!(true)));
         apply(&mut workbench, &mut host, "start_node", json!({"node": "device_scan"})).unwrap();
         assert_eq!(calls.borrow().1.last().unwrap().devices["tunable:rf"], "rf");
         let refused = apply(&mut workbench, &mut host, "tune_device", json!({"device": "rf", "field": "frequency", "value": 1.0}));
         assert_eq!(refused.unwrap_err(), "frequency: Protected by device_scan");
         let refused = apply(&mut workbench, &mut host, "tune_device", json!({"device": "rf", "field": "amplitude", "value": 1.0}));
         assert!(refused.unwrap_err().starts_with("amplitude: Stop the active Logic"), "an unnamed field is claimed, not protected");
+    }
+
+    /// A node is drawn at once from its type's answers for its default draft (the catalogue's),
+    /// before its plugin has started; an edit of one field leaves the others as the newest
+    /// answers drew them while the plugin checks it (v2 answered at once): the field the plugin
+    /// fills keeps its value and choices, no problem of a half-checked draft shows, and a Start
+    /// waits for the check.
+    #[test]
+    fn a_node_is_drawn_at_once_and_an_edit_keeps_the_other_fields() {
+        let root = scratch("recheck");
+        let mut catalog = catalog();
+        let choices = json!({"window": [["short", "Short"], ["long", "Long"]]});
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "windows", "kind": "node", "label": "Windows", "parameters": [
+            {"name": "samples", "type": "int", "label": "Samples", "default": 200},
+            {"name": "window", "type": "text", "label": "Window", "default": "", "required": true}],
+            "node": {"node_kind": "task", "outputs": [], "queries": ["resolve_defaults", "resolve_field_choices"],
+                     "answers": {"resolve_defaults": {"window": "short"}, "resolve_field_choices": choices}}}));
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        let drawn = |workbench: &Workbench, host: &FakeHost| {
+            let state = workbench.state(host);
+            let row = &state["logic"][0];
+            (row["controls"][1].clone(), row["status"].clone(), row["can_start"].clone())
+        };
+        let answer = |workbench: &mut Workbench, host: &mut FakeHost| for (name, result) in [("resolve_defaults", json!({"window": "short"})),
+            ("resolve_field_choices", choices.clone())] {
+            let ticket = calls.borrow().2.iter().rev().find(|(query, ..)| query == name).unwrap().1;
+            workbench.on_event(Event::Answered { ticket, result: Ok(result) }, host);
+        };
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "windows"})).unwrap();
+        let first = drawn(&workbench, &host);
+        assert_eq!((&first.0["kind"], &first.0["value"], &first.1), (&json!("choice"), &json!("short"), &json!("not started")));
+        workbench.on_event(Event::Opened { instance: "windows".into(), working_point: Value::Null }, &mut host);
+        answer(&mut workbench, &mut host);
+        assert_eq!(drawn(&workbench, &host), first, "its own answers change nothing its type's had drawn");
+        apply(&mut workbench, &mut host, "edit_node", json!({"node": "windows", "values": {"samples": 250}})).unwrap();
+        assert_eq!(drawn(&workbench, &host), first, "the window field, the status and Start stay while the plugin checks");
+        assert_eq!(apply(&mut workbench, &mut host, "start_node", json!({"node": "windows"})).unwrap()["phase"], "checking");
+        answer(&mut workbench, &mut host);
+        assert_eq!(calls.borrow().1.len(), 1, "the Start went once the draft was checked");
     }
 
     /// A reader's `source` fact is its producer's describe_output_frames answer for

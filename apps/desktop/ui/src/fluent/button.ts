@@ -1,4 +1,4 @@
-import { element } from "./dom.js";
+import { assign, element } from "./dom.js";
 import { fitWords, setGlyph } from "./ink.js";
 
 /** What a command DOES, which is all its face may say (zlc_ui BUTTON_ROLES):
@@ -79,7 +79,7 @@ export class Command {
 
   get text(): string { return this.label; }
   set text(text: string) { if (text !== this.label) { this.label = text; this.show(); } }
-  set disabled(disabled: boolean) { this.root.disabled = disabled; if (disabled) this.root.classList.remove("armed"); }
+  set disabled(disabled: boolean) { assign(this.root, "disabled", disabled); if (disabled && this.root.classList.contains("armed")) this.root.classList.remove("armed"); }
   get disabled(): boolean { return this.root.disabled; }
   set hidden(hidden: boolean) { this.root.hidden = hidden; }
   set title(text: string) { if (this.root.title !== text) this.root.title = text; }

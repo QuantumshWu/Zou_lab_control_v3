@@ -3,7 +3,7 @@
 // with its binding badge and popup (FluentScanLineEdit): the badge says
 // where the next run's value comes from -- the Pulse default, a Scan slot,
 // an API caller or the Config file -- and opens the choice.
-import { EditableCombo, Segmented, SpinBox, checked, confirm, element, glyphFont, inkText, metrics, pointPx, setChecked, setText, setTitle, switchButton, token } from "../fluent/index.js";
+import { EditableCombo, Segmented, SpinBox, assign, checked, confirm, element, glyphFont, inkText, metrics, pointPx, setChecked, setText, setTitle, switchButton, token } from "../fluent/index.js";
 import type { FieldVM } from "./types.js";
 
 /** v2 confirm_pulse_discard: the one question Open, Clear all and a recorded pulse ask before the draft goes. */
@@ -323,11 +323,11 @@ export class ValueBox {
       hi: kind === "int" && Number.isFinite(field.validator_hi) ? field.validator_hi : null, resolution: field.resolution || 0, allowAny: field.allow_any };
     // v2 set_field_state: read-only while Config supplies it, and still not greyed.
     this.box.show(field.text, writable || field.config_active);
-    this.box.root.readOnly = !writable || field.config_active;
+    assign(this.box.root, "readOnly", !writable || field.config_active);
     drawBadges(this.badge, badges(field));
     // A read-only card's binding is not editable either (v2 _read_only).
     const bindable = field.binding_editable && editable;
-    this.badge.disabled = !(bindable && (writable || field.config_active));
+    assign(this.badge, "disabled", !(bindable && (writable || field.config_active)));
     if (this.popup?.open) { if (this.badge.disabled || (!writable && !field.config_active)) this.popup.root.hidePopover(); else this.popup.project(field); }
     const shade = tone(field, writable);
     if (shade) this.root.dataset.tone = shade; else delete this.root.dataset.tone;

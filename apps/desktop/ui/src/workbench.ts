@@ -126,8 +126,6 @@ export type LogicRow = {
   outputs: { signal: string; contract: string; label: string; shape: string | null }[];
   issues: string[];
   can_start: boolean;
-  /** Its plugin has answered this draft's queries (or could not start): a fresh node's page is drawn from then on. */
-  answered: boolean;
   /** Anything to stop: running, following its source, a queued start. */
   can_stop: boolean;
   /** The node declares a preview the Plot switch would open. */

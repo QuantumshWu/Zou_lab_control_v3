@@ -34,6 +34,12 @@ export function setTitle(node: HTMLElement, text: string): void {
   if (node.title !== text) node.title = text;
 }
 
+/** A property written only when it changes: writing the value a node already has is still a
+ * DOM change (a re-render of what did not change). */
+export function assign<T extends object, K extends keyof T>(node: T, key: K, value: T[K]): void {
+  if (node[key] !== value) node[key] = value;
+}
+
 /** ElidedLabel: one line that ends in an ellipsis when it does not fit, the
  * whole text in its tooltip. */
 export function elided(text = "", className = ""): HTMLSpanElement {

@@ -9,10 +9,11 @@ plugin's own process calls; the core sees only ``descriptor()``.
 from __future__ import annotations
 
 import enum
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
-from .wire import plain
+from .wire import Encoder, plain
 
 
 def _fields(schema: object) -> tuple[object, ...]:
@@ -300,6 +301,11 @@ QUERY_PARAMETERS: dict[str, tuple[str, ...]] = {
     "describe_output_frames": ("values", "output_name", "source"),
 }
 NODE_QUERIES = tuple(QUERY_PARAMETERS)
+#: The draft queries a node type answers for its default draft in its catalogue entry
+#: (``node.answers``): a node just added is drawn from them at once, its own process's
+#: answers replacing them when they land.
+FIRST_ANSWERS = ("declare_outputs", "declare_previews", "resolve_field_availability", "resolve_field_choices",
+                 "resolve_defaults", "resolve_device_claims", "editor_facts")
 
 
 @dataclass(frozen=True)
@@ -383,6 +389,26 @@ class NodeType:
     def type_id(self) -> str:
         return self.api_name
 
+    def first_answers(self, parameters: list[dict[str, Any]]) -> dict[str, Any]:
+        """Each draft query's answer for the default draft, as no bench yet: no devices, files,
+        source or bundle. A query that cannot answer it is left to the node's own process."""
+
+        facts = {"values": {item["name"]: item["default"] for item in parameters}, "devices": {}, "resources": {},
+                 "source": None, "bundle": [], "artifacts": {"inputs": {}, "resolved": {}}}
+        answers: dict[str, Any] = {}
+        for name in FIRST_ANSWERS:
+            function = getattr(self, name)
+            if function is None:
+                continue
+            try:
+                # As the node's process sends it to the core (a plain query reply).
+                answer = Encoder(None, plain=True)(function(*(facts[parameter] for parameter in QUERY_PARAMETERS[name])))
+                json.dumps(answer, allow_nan=False)
+            except Exception:  # noqa: BLE001 -- a default draft it cannot answer waits for the node's own
+                continue
+            answers[name] = answer
+        return answers
+
     def descriptor(self, module: str) -> dict[str, Any]:
         inputs, artifact_inputs = [], []
         for item in self.input_specs:
@@ -397,6 +423,7 @@ class NodeType:
                                         "file_filter": str(getattr(codec, "file_filter", "")),
                                         "required": bool(getattr(item, "required", True)),
                                         "frame_claims": bool(getattr(item, "frame_claims", False))})
+        parameters = [field_json(item) for item in _fields(self.authoring_schema)]
         previews = [{"output": item.output.name, "plot_kind": item.plot_kind, "semantic": plain(dict(item.semantic)),
                      "producer": item.producer, "overlay": None if item.overlay is None else item.overlay.name}
                     for item in (self.node_previews or ())]
@@ -404,7 +431,7 @@ class NodeType:
             "type_id": self.api_name, "kind": "node", "family": self.kind.value,
             "label": self.label or self.api_name, "description": self.description.strip(), "module": module,
             "process_group": None, "capabilities": [],
-            "parameters": [field_json(item) for item in _fields(self.authoring_schema)],
+            "parameters": parameters,
             "physical_outputs": [], "commands": [],
             "node": {
                 "node_kind": self.kind.value, "inputs": inputs, "artifact_inputs": artifact_inputs,
@@ -423,6 +450,7 @@ class NodeType:
                                          "argument": getattr(item, "argument_name", "") or item.field_name}
                                         for item in self.workspace_resources],
                 "replaces": {name: plain(dict(values)) for name, values in self.replaces.items()},
+                "answers": self.first_answers(parameters),
             },
             "queries": [name for name in NODE_QUERIES if getattr(self, name) is not None]
                        + (["selection_patch"] if self.selection_mappings else []),

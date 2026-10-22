@@ -44,8 +44,11 @@ pub struct Node {
     pub pending: Option<PendingStart>,
     pub removing: bool,
     pub instance: Instance,
-    /// Plugin query answers: name -> (draft revision, answer).
+    /// Plugin query answers, the newest of each: name -> (draft revision, answer). What the
+    /// page draws and the issues it shows come from them, a newer draft's too until its own land.
     pub answers: BTreeMap<String, (u64, Result<Value, String>)>,
+    /// The queries answered for this draft (a Start waits until each is).
+    pub checked: BTreeSet<String>,
     /// The workspace resources the draft names, read at its last change: field -> resolved value.
     pub resources: Map<String, Value>,
     /// Why a named resource could not be read (Start is refused while any).
@@ -54,13 +57,23 @@ pub struct Node {
     pub start_after_check: Option<(String, Option<(String, u64, String)>)>,
 }
 
-/// The node editor's model (`editor_facts`): shown until a newer draft's answer lands.
+/// The node editor's model (`editor_facts`).
 const EDITOR_FACTS: &str = "editor_facts";
 
 impl Node {
-    /// A new draft: every answer was for the old one, except that the editor keeps
-    /// drawing its last model until the new one lands, so it does not blink.
-    fn forget_answers(&mut self) { self.answers.retain(|name, _| name == EDITOR_FACTS); }
+    /// A node on the board, drawn at once from its type's answers for its default draft (the
+    /// catalogue's) until its own process answers its draft.
+    pub(crate) fn new(id: String, name: String, type_id: String, draft: Draft, auto_preview: bool, descriptor: Option<&TypeDescriptor>) -> Self {
+        let answers = descriptor.map(|item| item.node().answers.iter().map(|(query, answer)| (query.clone(), (0, Ok(answer.clone())))).collect()).unwrap_or_default();
+        Node { id, name, type_id, draft, auto_preview, revision: 1, running: None, run: None, starts: 0, error: None, follow: false, follow_attempted: None,
+               pending: None, removing: false, instance: Instance::Opening, answers, checked: BTreeSet::new(), resources: Map::new(), resource_issues: Vec::new(),
+               start_after_check: None }
+    }
+
+    /// A new draft, or the same one asked again: its queries are outstanding until answered anew.
+    /// The page goes on drawing the newest answers meanwhile (v2 answered a draft at once), so a
+    /// field the edit did not touch keeps its value, its choices and its words.
+    fn recheck(&mut self) { self.checked.clear(); }
 }
 
 #[derive(Clone, Debug)]
@@ -299,8 +312,8 @@ impl Workbench {
     /// source's producer answered for that output, else null.
     fn source_frames(&self, node: &Node) -> Value {
         let Some((producer, output)) = split_signal(&node.draft.source_signal) else { return Value::Null };
-        self.node(producer).and_then(|producer| producer.answers.get(&format!("{FRAMES_QUERY}:{output}"))
-            .filter(|(revision, _)| *revision == producer.revision)).and_then(|(_, answer)| answer.clone().ok()).unwrap_or(Value::Null)
+        self.node(producer).and_then(|producer| producer.answers.get(&format!("{FRAMES_QUERY}:{output}")))
+            .and_then(|(_, answer)| answer.clone().ok()).unwrap_or(Value::Null)
     }
 
     /// The signals a node's source bundle holds, by member name: every output of the source's
@@ -371,8 +384,7 @@ impl Workbench {
     /// The devices the draft itself names (`resolve_device_claims`: a scan's device
     /// axes), each claimed for its named fields and passed as its own argument.
     fn named_claims(node: &Node) -> Vec<Claim> {
-        let Some((revision, Ok(Value::Object(named)))) = node.answers.get("resolve_device_claims") else { return Vec::new() };
-        if *revision != node.revision { return Vec::new(); }
+        let Some((_, Ok(Value::Object(named)))) = node.answers.get("resolve_device_claims") else { return Vec::new() };
         named.iter().filter_map(|(argument, claim)| claim["instance"].as_str().map(|device| Claim { argument: argument.clone(), device: device.to_owned(),
             protected: Some(claim["fields"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()) })).collect()
     }
@@ -406,8 +418,8 @@ impl Workbench {
     }
 
     fn node_defaults(&self, node: &Node, values: &mut Map<String, Value>) {
-        let Some((revision, Ok(Value::Object(offered)))) = node.answers.get("resolve_defaults") else { return };
-        let Some(descriptor) = self.catalog.get(&node.type_id).filter(|_| *revision == node.revision) else { return };
+        let Some((_, Ok(Value::Object(offered)))) = node.answers.get("resolve_defaults") else { return };
+        let Some(descriptor) = self.catalog.get(&node.type_id) else { return };
         for (name, value) in offered {
             let Some(field) = descriptor.parameters.iter().find(|field| &field.name == name) else { continue };
             let empty = match values.get(name) { None | Some(Value::Null) => true, Some(Value::String(text)) => text.trim().is_empty(), _ => false };
@@ -418,8 +430,8 @@ impl Workbench {
     /// v2: a switch the chosen device cannot do has one neutral effective value, off; the raw
     /// draft keeps the operator's choice, so a capable device brings it back.
     fn unavailable_switches_off(&self, node: &Node, values: &mut Map<String, Value>) {
-        let Some((revision, Ok(Value::Object(unavailable)))) = node.answers.get("resolve_field_availability") else { return };
-        let Some(descriptor) = self.catalog.get(&node.type_id).filter(|_| *revision == node.revision) else { return };
+        let Some((_, Ok(Value::Object(unavailable)))) = node.answers.get("resolve_field_availability") else { return };
+        let Some(descriptor) = self.catalog.get(&node.type_id) else { return };
         for field in descriptor.parameters.iter().filter(|field| field.kind == "bool" && unavailable.contains_key(&field.name)) {
             values.insert(field.name.clone(), Value::Bool(false));
         }
@@ -441,6 +453,7 @@ impl Workbench {
         let mut changed = None;
         if let Ok(node) = self.node_mut(id) {
             if node.revision == revision {
+                node.checked.insert(name.to_owned());
                 let previous = node.answers.insert(name.to_owned(), (revision, result.clone()));
                 let fresh = previous.is_none_or(|(before, answer)| before != revision || answer != result);
                 changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| fresh).map(|output| signal_key(id, output));
@@ -495,9 +508,7 @@ impl Workbench {
         let draft = Draft { values, source_signal: params["source_signal"].as_str().unwrap_or("").trim().to_owned(), device_keys,
             artifact_inputs: params["artifact_inputs"].as_object().cloned().unwrap_or_default() };
         self.plugins.open(&id, type_id, &json!({}), &json!({}));
-        self.nodes.push(Node { id: id.clone(), name, type_id: type_id.to_owned(), draft, auto_preview: params["auto_preview"].as_bool().unwrap_or(true),
-            revision: 1, running: None, run: None, starts: 0, error: None, follow: false, follow_attempted: None, pending: None,
-            removing: false, instance: Instance::Opening, answers: BTreeMap::new(), resources: Map::new(), resource_issues: Vec::new(), start_after_check: None });
+        self.nodes.push(Node::new(id.clone(), name, type_id.to_owned(), draft, params["auto_preview"].as_bool().unwrap_or(true), Some(&descriptor)));
         self.board.dirty = true;
         let _ = host;
         Ok(json!({"node": id}))
@@ -572,7 +583,7 @@ impl Workbench {
             node.draft = draft;
             node.revision += 1;
             node.error = None;
-            node.forget_answers();
+            node.recheck();
         }
         let revision = node.revision;
         if changed { self.send_queries(id); }
@@ -642,7 +653,7 @@ impl Workbench {
 
     pub(crate) fn check_node(&mut self, id: &str, host: &mut dyn Host) -> Result<Value, String> {
         let node = self.node_mut(id)?;
-        node.forget_answers();
+        node.recheck();
         node.error = None;
         self.send_queries(id);
         let signals = host.signals();
@@ -657,7 +668,7 @@ impl Workbench {
         if node.draft != running {
             node.draft = running;
             node.revision += 1;
-            node.forget_answers();
+            node.recheck();
             node.error = None;
             self.send_queries(id);
         }
@@ -676,12 +687,12 @@ impl Workbench {
         }
         issues.extend(node.resource_issues.iter().cloned());
         issues.extend(fields::completeness_issue(&descriptor.parameters, &self.draft_values(node)));
-        let answer = |name: &str| node.answers.get(name).filter(|(revision, _)| *revision == node.revision).map(|(_, answer)| answer);
+        let answer = |name: &str| node.answers.get(name).map(|(_, answer)| answer);
         let outstanding = spec.queries.iter().filter(|name| DRAFT_QUERIES.contains(&name.as_str()))
             .filter(|name| name.as_str() != ADMIT_SOURCE || self.bundle_complete(&node.id))
-            .any(|name| answer(name).is_none());
+            .any(|name| !node.checked.contains(name));
         // What the variables cannot compute from what the source published (v2: draft issues).
-        if let Some(Ok(Value::Array(found))) = answer(ADMIT_SOURCE) {
+        if let Some(Ok(Value::Array(found))) = answer(ADMIT_SOURCE).filter(|_| self.bundle_complete(&node.id)) {
             issues.extend(found.iter().filter_map(Value::as_str).map(str::to_owned));
         }
         if outstanding && node.instance == Instance::Open { issues.push(CHECKING.into()); }
@@ -1074,7 +1085,7 @@ impl Workbench {
                     let node = &mut self.nodes[index];
                     node.draft.device_keys.insert(requirement.argument.clone(), device.to_owned());
                     node.revision += 1;
-                    node.forget_answers();
+                    node.recheck();
                     changed.push(node.id.clone());
                 }
             }
@@ -1269,7 +1280,11 @@ impl Workbench {
 
     pub(crate) fn node_row(&self, node: &Node, signals: &[SignalInfo]) -> Value {
         let descriptor = self.catalog.get(&node.type_id);
-        let issues = self.issues(node, signals);
+        // A draft its plugin is still starting for, or checking, shows what the newest answers it
+        // has say (its type's for a new node); a Start waits for its own (v2 answered at once).
+        let known = descriptor.is_some_and(|item| item.node().queries.iter()
+            .filter(|name| DRAFT_QUERIES.contains(&name.as_str()) && name.as_str() != ADMIT_SOURCE).all(|name| node.answers.contains_key(name)));
+        let issues: Vec<String> = self.issues(node, signals).into_iter().filter(|issue| !(known && (issue == CHECKING || issue.ends_with(STARTING_PLUGIN)))).collect();
         let run = node.run.as_deref().and_then(|id| self.run(id));
         let active = run.filter(|run| !run.terminal());
         let edited = node.running.as_ref().is_some_and(|running| *running != node.draft);
@@ -1321,8 +1336,7 @@ impl Workbench {
             let mut controls = fields::controls(&item.parameters, &self.draft_values(node), "field", &problems);
             // Shown, not the operator's (v2 project_logic_schema): a derived field, with its
             // description as the reason, and one the chosen device cannot do, with the device's.
-            let unavailable = node.answers.get("resolve_field_availability").filter(|(revision, _)| *revision == node.revision)
-                .and_then(|(_, answer)| answer.as_ref().ok()).and_then(Value::as_object);
+            let unavailable = node.answers.get("resolve_field_availability").and_then(|(_, answer)| answer.as_ref().ok()).and_then(Value::as_object);
             for (control, field) in controls.iter_mut().zip(&item.parameters) {
                 let reason = unavailable.and_then(|reasons| reasons.get(&field.name)).and_then(Value::as_str).filter(|reason| !reason.trim().is_empty())
                     .map(str::to_owned).or_else(|| field.derived.then(|| field.description.clone().unwrap_or_default()));
@@ -1330,8 +1344,7 @@ impl Workbench {
             }
             // Options the draft decides (an SLM rearrangement's imaging periods are its pulse's
             // periods): the field is a choice of them; a held value not among them stays, unavailable.
-            let offered = node.answers.get("resolve_field_choices").filter(|(revision, _)| *revision == node.revision)
-                .and_then(|(_, answer)| answer.as_ref().ok()).and_then(Value::as_object);
+            let offered = node.answers.get("resolve_field_choices").and_then(|(_, answer)| answer.as_ref().ok()).and_then(Value::as_object);
             for (name, choices) in offered.into_iter().flatten() {
                 let Some(control) = controls.iter_mut().find(|control| control["name"] == name.as_str()) else { continue };
                 let mut choices = choices.as_array().cloned().unwrap_or_default();
@@ -1391,15 +1404,6 @@ impl Workbench {
             "outputs": self.node_outputs(node).into_iter().map(|(signal, contract)| json!({"signal": signal, "contract": contract,
                 "label": self.signal_label(&signal), "shape": signals.iter().find(|item| item.name == signal).map(|item| item.shape.clone())})).collect::<Vec<_>>(),
             "issues": issues, "can_start": issues.is_empty(), "edited": edited,
-            // Whether the plugin has answered this draft's queries (its editors, previews and field
-            // facts are those answers; a plugin that could not start answers none): a fresh node's
-            // page is first drawn from them, not before.
-            "answered": match &node.instance {
-                Instance::Opening => false,
-                Instance::Failed(_) => true,
-                Instance::Open => descriptor.is_none_or(|item| item.node().queries.iter()
-                    .filter(|name| DRAFT_QUERIES.contains(&name.as_str()) && name.as_str() != ADMIT_SOURCE).all(|name| node.answers.contains_key(name))),
-            },
             "can_stop": phase != "idle", "preview_offered": !self.node_previews(node).is_empty(),
             "state": state, "status": status, "phase": phase,
             // v2 _producer_projection: the draft fields a selector of its output writes.

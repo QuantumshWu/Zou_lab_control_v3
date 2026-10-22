@@ -56,6 +56,9 @@ pub struct NodeSpec {
     pub selection_mappings: Vec<SelectionMapping>,
     /// Node types this one took over: a saved row naming one loads as this type, its values with these over them.
     pub replaces: std::collections::BTreeMap<String, serde_json::Map<String, Value>>,
+    /// The draft queries' answers for the type's default draft (its catalogue entry): a node
+    /// is drawn from them at once, its own process's answers replacing them when they land.
+    pub answers: serde_json::Map<String, Value>,
 }
 
 /// A selector of `selector_kind` on a `plot_kind` panel writes `draft_fields`.

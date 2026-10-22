@@ -2,7 +2,7 @@
 // LogicEditorView).  Both draw one node's projection and send its intents;
 // admission, follow intent, restarts and claims are the workbench's.
 import {
-  Command, Field, Legend, Readout, StatusLine, command, element, fieldKind, form, row as formRow, sectionTitle, setChecked, setState,
+  Command, Field, Legend, Readout, StatusLine, assign, command, element, fieldKind, form, row as formRow, sectionTitle, setChecked, setState, setTitle,
   PathEdit, shareLabelColumn, switchButton, type FieldSpec, type PathAsk, type StatusWord, type Value,
 } from "../fluent/index.js";
 import type { ArtifactValue, EditorFacts, LogicRow } from "../workbench.js";
@@ -113,7 +113,7 @@ export class LogicRowView {
   update(projection: NodeProjection, takeover: { active: boolean; owns: boolean }): void {
     this.projection = projection;
     this.name.text = projection.name;
-    this.name.root.title = [projection.name, ...projection.details].filter(Boolean).join(" · ");
+    setTitle(this.name.root, [projection.name, ...projection.details].filter(Boolean).join(" · "));
     const words = kindWords(projection.kind);
     const current = this.kind.querySelector<HTMLElement>(".current")!;
     if (current.textContent !== words) current.textContent = words;
@@ -121,7 +121,7 @@ export class LogicRowView {
     setState(this.dot, word);
     setState(this.status, word);
     if (this.status.textContent !== projection.status) { this.status.textContent = projection.status; this.status.title = projection.status; }
-    this.plot.hidden = !projection.previewOffered;
+    assign(this.plot, "hidden", !projection.previewOffered);
     setChecked(this.plot, projection.autoPreview);
     // A running Task owns the console: rows stay readable, and the task's
     // own row keeps its Stop (the strip's Stop task is the same command).
@@ -129,7 +129,7 @@ export class LogicRowView {
     this.start.text = startLabel(projection);
     this.start.disabled = !free || !projection.canStart || projection.pending;
     this.stop.disabled = !projection.canStop || !(free || takeover.owns);
-    this.plot.disabled = !free;
+    assign(this.plot, "disabled", !free);
     this.remove.disabled = !free;
     for (const node of [this.dot, this.status, this.plot, this.start.root, this.stop.root, this.remove.root]) node.classList.toggle("kept-place", Boolean(projection.publisher));
     this.legend.setRows(projection.outputs);
@@ -174,7 +174,6 @@ export class LogicEditorView {
   private editorError = element("p", "field-error editor-error");
   private artifacts: Element[] = [];
   private artifactSignature = "";
-  private drawn = false;
 
   constructor(readonly id: string, private intents: EditorIntents) {
     const header = element("div", "logic-editor-header");
@@ -221,14 +220,10 @@ export class LogicEditorView {
     this.row = row;
     this.projection = projection;
     this.title.text = projection.name;
-    this.title.root.title = [projection.name, ...projection.details].join(" · ");
+    setTitle(this.title.root, [projection.name, ...projection.details].join(" · "));
     const kind = kindWords(projection.kind);
     if (this.kind.textContent !== kind) this.kind.textContent = kind;
     this.statusLine.show(projection.status, STATE_WORDS[projection.state]);
-    // A fresh node's rows, editors and commands are its plugin's first answers: drawn once they are
-    // in, and kept while a later draft's answers are on their way.
-    this.drawn ||= row.answered;
-    this.body.hidden = this.footer.hidden = !this.drawn;
     const locked = takeover.active && !takeover.owns ? "A running task owns the console" : "";
     const specs: { key: string; group?: string; spec: FieldSpec; commit(value: Value): number }[] = [];
     // THE NAME: what the node is called on its row, this page and its tab.
@@ -300,11 +295,13 @@ export class LogicEditorView {
     while (cursor) { const next: Element | null = (cursor as Element).nextElementSibling; (cursor as Element).remove(); cursor = next; }
     const problem = row.editor_facts_error ? `The editor cannot be drawn: ${row.editor_facts_error}` : "";
     if (this.editorError.textContent !== problem) this.editorError.textContent = problem;
-    this.editorError.hidden = !problem;
+    assign(this.editorError, "hidden", !problem);
     if (this.editors.length) {
-      // A state push that changes nothing an editor draws costs it nothing.
+      // A state push that changes nothing an editor draws costs it nothing: its model, the lock,
+      // the node's name and the fields it manages (an edit of another field leaves it as it is).
       for (const editor of this.editors) {
-        const key = JSON.stringify([editor.facts, locked, row.name, row.draft_revision]);
+        const fields = editor.facts.manages.map(name => [row.values[name], row.controls.find(control => control.name === name)]);
+        const key = JSON.stringify([editor.facts, locked, row.name, fields]);
         if (key === editor.key) continue;
         editor.key = key;
         editor.view.update(row, editor.facts, locked);
@@ -312,9 +309,9 @@ export class LogicEditorView {
       }
     } else this.body.style.removeProperty("--label-width");
     const free = !takeover.active;
-    this.plot.hidden = !projection.previewOffered;
+    assign(this.plot, "hidden", !projection.previewOffered);
     setChecked(this.plot, projection.autoPreview);
-    this.plot.disabled = !free;
+    assign(this.plot, "disabled", !free);
     this.start.text = startLabel(projection);
     this.start.setDirty(projection.edited && projection.canStop);
     this.start.disabled = !free || !projection.canStart || projection.pending;

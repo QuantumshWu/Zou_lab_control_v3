@@ -1,4 +1,4 @@
-import { element, labelColumnWidth, token, type Value } from "./dom.js";
+import { assign, element, labelColumnWidth, setText, setTitle, token, type Value } from "./dom.js";
 import { fontOf, measurer, setMiddle, wholeText } from "./elide.js";
 import { comboFace, hintWidest } from "./combo.js";
 import { SpinBox, decimals } from "./spin.js";
@@ -278,6 +278,8 @@ export class Field {
     this.root.classList.toggle("pending", this.pending !== null);
   }
 
+  /** The row brought to `spec`, writing only what changed: a row the edit of another did not
+   * touch is not drawn again (its value, choices, focus and words stay as they are). */
   update(spec: FieldSpec, response?: number, failed = false): void {
     spec = normalField(spec);
     // Read in another spelling, a device's number starts again from its first step in it.
@@ -289,19 +291,20 @@ export class Field {
     const words = this.marked && (spec.required ?? !spec.allow_none) ? `${label} *` : label;
     // _fit_label: a label wider than the column the form gives it keeps its start and its end.
     setMiddle(this.label, words, "none");
-    this.label.title = spec.description || spec.label;
-    const reason = spec.unavailable_reason || (spec.enabled === false ? "Not used with the current settings" : "");
-    if (this.problem.textContent !== (spec.problem || "")) this.problem.textContent = spec.problem || "";
-    this.problem.hidden = !spec.problem;
+    setTitle(this.label, spec.description || spec.label);
+    const reason = this.reason();
+    setText(this.problem, spec.problem || "");
+    assign(this.problem, "hidden", !spec.problem);
     if (this.input instanceof Segmented) {
-      this.input.root.title = reason;
+      setTitle(this.input.root, reason);
       this.input.disabled = Boolean(reason);
     } else {
-      this.input.title = reason || spec.description || "";
-      this.input.disabled = Boolean(reason);
+      // A path's own tip (the file it names) is its value's (showValue).
+      if (reason || !this.path) setTitle(this.input, reason || spec.description || "");
+      assign(this.input, "disabled", Boolean(reason));
     }
-    if (this.path) this.path.browse.disabled = this.path.refresh.disabled = Boolean(reason);
-    if (this.automatic) this.automatic.disabled = Boolean(reason);
+    if (this.path) { assign(this.path.browse, "disabled", Boolean(reason)); assign(this.path.refresh, "disabled", Boolean(reason)); }
+    if (this.automatic) assign(this.automatic, "disabled", Boolean(reason));
     if (this.unitPicker) { this.unitPicker.disabled = Boolean(reason); this.updateUnits(); }
     this.complete(response, failed);
     if (this.tree) this.tree.setTree(spec.tree ?? [], this.tree.value, spec.allow_none ? spec.placeholder || "(none)" : null);
@@ -313,10 +316,15 @@ export class Field {
       const option = [...this.input.options].find(option => option.value === "@scope");
       const text = cycle.index === null ? "Scope" : `Scope: ${cycle.label}`;
       if (option && option.text !== text) option.text = text;
-      this.input.title = reason || (cycle.index === null ? "" : `Scope: ${cycle.label} · click the words, then scroll or use ↑ / ↓ to change the coordinate (${cycle.count} values)`);
+      setTitle(this.input, reason || (cycle.index === null ? "" : `Scope: ${cycle.label} · click the words, then scroll or use ↑ / ↓ to change the coordinate (${cycle.count} values)`));
     }
     if (!this.cycleSelected()) this.setCycleActive(false);
     this.spin?.refresh();
+  }
+
+  /** Why the row cannot be edited now (its tip then), or empty. */
+  private reason(): string {
+    return this.spec.unavailable_reason || (this.spec.enabled === false ? "Not used with the current settings" : "");
   }
 
   private cycleSelected(): boolean {
@@ -364,14 +372,15 @@ export class Field {
     if (this.automatic) {
       setChecked(this.automatic, automatic);
       // While Auto holds the value its editor shows what Auto resolves to.
-      if (!(this.input instanceof Segmented)) this.input.disabled = automatic || Boolean(this.spec.unavailable_reason);
+      if (!(this.input instanceof Segmented)) assign(this.input, "disabled", automatic || Boolean(this.spec.unavailable_reason));
     }
     const shown = automatic ? (this.spec.automatic_value ?? null) : value;
     if (this.tree) {
       this.tree.value = shown === null ? "" : String(shown);
     } else if (this.input instanceof HTMLSelectElement) {
       const select = this.input;
-      select.value = this.spec.cycle?.index !== null && this.spec.cycle?.index !== undefined ? "@scope" : encode(shown);
+      // A select told the value it already shows still draws its face again.
+      assign(select, "value", this.spec.cycle?.index !== null && this.spec.cycle?.index !== undefined ? "@scope" : encode(shown));
       if (select.selectedIndex < 0 && automatic && select.options.length) select.selectedIndex = 0;
       select.classList.toggle("blank", value === null && !this.automatic);
     } else if (this.path) {
@@ -379,13 +388,13 @@ export class Field {
       this.path.value = text;
       // v2 _show_tooltip: the path it names (a relative one in its folder), then what the field is.
       const named = text && this.spec.directory && !/^([a-z]:)?[\\/]/i.test(text) ? `${this.spec.directory}\\${text}` : text;
-      if (!this.spec.unavailable_reason) this.path.input.title = [named, this.spec.description].filter(Boolean).join("\n");
+      if (!this.reason()) setTitle(this.path.input, [named, this.spec.description].filter(Boolean).join("\n"));
     } else if (this.input instanceof HTMLInputElement) {
       const rows = this.spec.kind === "rows" ? (shown as unknown as unknown[] | null) : null;
       // A pair is one fact written "y, x"; the owner reads the text back.
       const text = rows ? `${rows.length} row${rows.length === 1 ? "" : "s"}` : shown === null ? "" : this.spec.text !== undefined && shown === this.spec.value ? this.spec.text
         : Array.isArray(shown) ? (shown as unknown[]).join(", ") : String(shown);
-      this.input.readOnly = this.spec.kind === "rows";
+      assign(this.input, "readOnly", this.spec.kind === "rows");
       if ((this.spin ? this.spin.text : this.input.value) !== text) this.input.value = text;
       // v2 qt_form: a blank-or-number box says its blank label, else "(required)" / "(optional)";
       // a text box its description (cut at 48).
@@ -397,7 +406,7 @@ export class Field {
       this.input.setCurrent(value);
     } else {
       setChecked(this.input, Boolean(value));
-      this.input.setAttribute("aria-label", this.spec.label);
+      if (this.input.getAttribute("aria-label") !== this.spec.label) this.input.setAttribute("aria-label", this.spec.label);
     }
   }
 
