@@ -285,11 +285,6 @@ pub struct RunRequest {
     pub outputs: BTreeMap<String, String>,
 }
 
-/// A processor's delivery bounds (v2's follow queue): exact inputs fail the run
-/// past these, never drop a record.
-pub const PROCESSOR_MAX_EVENTS: usize = 64;
-pub const PROCESSOR_MAX_BYTES: usize = 2 << 30;
-
 struct OutputState { signal: Arc<str>, schema: Arc<DatasetSchema>, finite: bool, chunk: Option<Arc<DatasetSchema>> }
 
 struct RunState {
@@ -346,7 +341,7 @@ struct State {
     awaiting: HashMap<String, (String, Option<Source>)>,
 }
 
-struct Follower { instance: String, run: String, signal: String, node: Value, sources: std::sync::mpsc::Sender<Source> }
+struct Follower { instance: String, run: String, signal: String, input: Value, sources: std::sync::mpsc::Sender<Source> }
 
 /// A processor's subscribed input (§5).
 struct Source { feed: Feed, bundle: bool, input: String, generation: GenerationId }
@@ -609,6 +604,8 @@ impl PluginHost {
         };
         let closed = process.request("close", json!({"instance": instance}), deadline);
         inner.forget(instance, &descriptor);
+        // A node closed (removed, or its layout replaced) takes its signals with it (v2 retire).
+        let _ = inner.runtime.withdraw(instance);
         process.instances.lock().unwrap().remove(instance);
         inner.release_process(&process);
         closed.map(|_| ())
@@ -676,31 +673,34 @@ impl PluginHost {
             if entry.run.is_some() { return Err(CallError::new(ErrorKind::Refused, format!("{instance} is already running"))); }
             let process = entry.serving.process().cloned().ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not a node of this core")))?;
             // A processor's input is subscribed before it starts: nothing published
-            // in between is lost; a sealed finite source gives its whole dataset.
-            // Another node started on a source signal over its dataset input (a scan
-            // that fires the pulse driving that source) takes the same deliveries
-            // through RunContext.next_input.
+            // in between is lost, a live finite source replays what it has committed
+            // (v2) and a sealed one gives its whole dataset. Another node started on a
+            // source signal over an exact dataset input (a scan that fires the pulse
+            // driving that source) takes the same deliveries through RunContext.next_input;
+            // over a 'latest' input it reads its source by name (v2: no source route).
             let mut following = None;
             // A following processor reads the generation it waited for from its first commit.
             let parked = state.awaiting.get_mut(instance).filter(|(signal, _)| Some(signal.as_str()) == request.source_signal.as_deref())
                 .and_then(|(_, parked)| parked.take());
             let entry = state.instances.get(instance).expect("checked");
+            let input = entry.descriptor.active_input(&request.values);
             let source = match &entry.descriptor.node {
                 Some(node) if node["node_kind"] == "processor" => Some(match parked {
                     Some(source) => source,
-                    None => inner.subscribe_source(node, request.source_signal.as_deref())?,
+                    None => inner.subscribe_source(input, request.source_signal.as_deref(), Start::Replay)?,
                 }),
-                Some(node) if request.source_signal.is_some() && node["inputs"].as_array().is_some_and(|inputs| !inputs.is_empty()) => {
-                    // It follows the signal by name: the generation publishing now, if
-                    // any, then each one that begins while it runs (the acquisition it
-                    // restarts), subscribed before that generation's first commit.
-                    let (sources, received) = std::sync::mpsc::channel();
-                    if let Ok(source) = inner.subscribe_source(node, request.source_signal.as_deref()) { let _ = sources.send(source); }
-                    following = Some((Follower { instance: instance.to_owned(), run: run.clone(), signal: request.source_signal.clone().unwrap_or_default(),
-                        node: node.clone(), sources }, received));
+                _ => {
+                    if let Some(input) = input.filter(|input| request.source_signal.is_some() && input["delivery"] == "exact") {
+                        // It follows the signal by name: the generation publishing now, if
+                        // any, then each one that begins while it runs (the acquisition it
+                        // restarts), subscribed before that generation's first commit.
+                        let (sources, received) = std::sync::mpsc::channel();
+                        if let Ok(source) = inner.subscribe_source(Some(input), request.source_signal.as_deref(), Start::Current) { let _ = sources.send(source); }
+                        following = Some((Follower { instance: instance.to_owned(), run: run.clone(), signal: request.source_signal.clone().unwrap_or_default(),
+                            input: input.clone(), sources }, received));
+                    }
                     None
                 }
-                _ => None,
             };
             let route = request.source_signal.as_deref().filter(|_| source.is_some() || following.is_some())
                 .map(|signal| (Arc::from(signal), source.as_ref().map(|source| source.generation)));
@@ -918,13 +918,14 @@ impl Inner {
         self.processes.lock().unwrap().remove(&process.pid());
     }
 
-    /// End a run: seal its generation with the outcome and release its claims.
     /// End the instance's current run `run`: its devices released, its generation sealed (whose id it answers).
+    /// A processor that did not finish with its source is withdrawn, its signals with it (v2).
     fn end_run(&self, instance: &str, run: &str, outcome: &str, detail: &Value) -> Option<String> {
-        let ended = {
+        let (ended, processor) = {
             let mut state = self.state.lock().unwrap();
             let entry = state.instances.get_mut(instance)?;
             if entry.run.as_ref().is_none_or(|current| current.id != run) { return None; }
+            let processor = entry.descriptor.node.as_ref().is_some_and(|node| node["node_kind"] == "processor");
             let ended = entry.run.take().unwrap();
             state.followers.retain(|follower| !(follower.instance == instance && follower.run == run));
             for device in ended.devices.values() {
@@ -932,14 +933,15 @@ impl Inner {
                     if target.claimed_by.as_deref() == Some(run) { target.claimed_by = None; }
                 }
             }
-            ended
+            (ended, processor)
         };
         let generation = ended.generation.as_ref()?;
         let mut sealed = detail.clone();
         sealed["status"] = json!(outcome);
         sealed["run"] = json!(ended.id);
         sealed["origin"] = json!(ended.origin.to_string());
-        if let Err(error) = self.runtime.seal(generation, sealed) { eprintln!("Plugin run {run} seal: {error}"); }
+        let result = if processor && outcome != "completed" { self.runtime.retire(generation) } else { self.runtime.seal(generation, sealed) };
+        if let Err(error) = result { eprintln!("Plugin run {run} end: {error}"); }
         Some(generation.id().as_uuid().to_string())
     }
 
@@ -1123,13 +1125,13 @@ impl Inner {
         run.outputs = outputs;
         // Runs following one of these signals read this generation from its first commit.
         for follower in state.followers.iter().filter(|follower| declared.contains(&follower.signal)) {
-            if let Ok(source) = self.subscribe_source(&follower.node, Some(&follower.signal)) { let _ = follower.sources.send(source); }
+            if let Ok(source) = self.subscribe_source(Some(&follower.input), Some(&follower.signal), Start::Current) { let _ = follower.sources.send(source); }
         }
         // So do the processors waiting for one of them: the run the application starts on it takes this.
         let State { awaiting, instances, .. } = &mut *state;
         for (instance, (signal, parked)) in awaiting.iter_mut().filter(|(_, (signal, _))| declared.contains(signal)) {
-            if let Some(node) = instances.get(instance).and_then(|entry| entry.descriptor.node.as_ref()) {
-                *parked = self.subscribe_source(node, Some(signal)).ok();
+            if let Some(entry) = instances.get(instance) {
+                *parked = self.subscribe_source(entry.descriptor.active_input(&Value::Null), Some(signal), Start::Replay).ok();
             }
         }
         Ok(json!({"generation": id}))
@@ -1317,12 +1319,12 @@ impl Inner {
         Ok((reply.value, returned))
     }
 
-    /// Subscribe a processor's input: one signal, or with `select_bundle` every
-    /// output of that signal's producer, delivered together as one bundle.
-    fn subscribe_source(&self, node: &Value, signal: Option<&str>) -> Result<Source, CallError> {
+    /// Subscribe a run's dataset input: one signal, or with `select_bundle` every
+    /// output of that signal's producer, delivered together as one bundle; an exact
+    /// input from `start` on, as v2's follow queue.
+    fn subscribe_source(&self, input: Option<&Value>, signal: Option<&str>, start: Start) -> Result<Source, CallError> {
         let invalid = |message: String| CallError::new(ErrorKind::Invalid, message);
-        let input = node["inputs"].as_array().and_then(|inputs| inputs.first())
-            .ok_or_else(|| invalid("a processor declares one dataset input".into()))?;
+        let input = input.ok_or_else(|| invalid("the node has no enabled dataset input".into()))?;
         let signal = signal.ok_or_else(|| invalid("a processor run needs its source signal".into()))?;
         let signals = self.runtime.signals();
         let anchor = signals.iter().rev().find(|item| item.signal.as_ref() == signal)
@@ -1338,21 +1340,23 @@ impl Inner {
             return Ok(Source { feed: Feed::Sealed(reads), bundle, input: name, generation: anchor.generation.id() });
         }
         let requests = members.map(|item| ReadRequest { signal: item.signal.clone(), mode: ReadMode::Event }).collect();
-        let policy = if input["delivery"] == "latest" { DeliveryPolicy::Latest }
-            else { DeliveryPolicy::Exact { max_events: PROCESSOR_MAX_EVENTS, max_referenced_bytes: PROCESSOR_MAX_BYTES } };
-        let subscription = self.runtime.subscribe_reads(&anchor.generation, requests, policy, Start::Current)
+        let (policy, start) = if input["delivery"] == "latest" { (DeliveryPolicy::Latest, Start::Current) } else { (DeliveryPolicy::Follow, start) };
+        let subscription = self.runtime.subscribe_reads(&anchor.generation, requests, policy, start)
             .map_err(|error| CallError::from(error.to_string()))?;
         Ok(Source { feed: Feed::Live(subscription), bundle, input: name, generation: anchor.generation.id() })
     }
 }
 
-const PROCESSOR_DEADLINE: Duration = Duration::from_secs(600);
+/// A delivery waits as long as its run: answered when the run takes it, refused
+/// (`stale_run`) when the run ends first, lost with the process. How long a run
+/// leaves its input waiting says nothing about the process's health.
+const DELIVERY_WAIT: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// A processor run's deliveries, in order, one at a time: the next waits for the
 /// plugin to have evaluated and committed the previous (v2's follow processor).
 /// The source's seal or retirement ends the run; an exact queue overflow fails it.
 fn deliver(weak: Weak<Inner>, instance: String, run: String, process: Arc<PluginProcess>, source: Source) {
-    let send = |params: Value| process.request("run.deliver", params, PROCESSOR_DEADLINE).is_ok();
+    let send = |params: Value| process.request_untracked("run.deliver", params, DELIVERY_WAIT).is_ok();
     let base = json!({"instance": instance, "run": run});
     let with = |kind: &str, extra: Value| { let mut params = base.clone(); params["kind"] = json!(kind);
         if let (Some(target), Some(source)) = (params.as_object_mut(), extra.as_object()) { target.extend(source.clone()); } params };
@@ -1395,7 +1399,7 @@ fn deliver(weak: Weak<Inner>, instance: String, run: String, process: Arc<Plugin
 /// arrives; a source that ends (sealed, retired) leaves it waiting for the next one,
 /// and the run's own timeouts decide (v2 read the signal by name across restarts).
 fn follow(weak: Weak<Inner>, instance: String, run: String, process: Arc<PluginProcess>, sources: std::sync::mpsc::Receiver<Source>) {
-    let send = |params: Value| process.request("run.deliver", params, PROCESSOR_DEADLINE).is_ok();
+    let send = |params: Value| process.request_untracked("run.deliver", params, DELIVERY_WAIT).is_ok();
     let base = json!({"instance": instance, "run": run});
     let with = |kind: &str, extra: Value| { let mut params = base.clone(); params["kind"] = json!(kind);
         if let (Some(target), Some(source)) = (params.as_object_mut(), extra.as_object()) { target.extend(source.clone()); } params };

@@ -258,10 +258,12 @@ holding the blocks its arrays are on) and the
 run thread waits for `PluginHost::respond(ticket, result)`.
 
 **Processors** have no `execute`. At `run.start` the core subscribes the node's
-one dataset input (`RunRequest.source_signal`; with `select_bundle`, every output
-of that signal's producer, delivered together) on the source's generation,
-`Start::Current`, exact (64 events / 2 GiB, overflow fails the run) or latest as
-declared. A following processor (`PluginHost::follow`, from Start until Stop) is
+dataset input (the first whose `enabled_when` the run's values meet;
+`RunRequest.source_signal`; with `select_bundle`, every output of that signal's
+producer, delivered together) on the source's generation: exact under v2's follow
+bounds (1024 events pending, pinning at most max(128 MiB, 32 × the first event's
+own payload); overflow fails the run), a live finite source first replaying the
+events it has committed, or latest as declared. A following processor (`PluginHost::follow`, from Start until Stop) is
 subscribed instead at each source generation's `run.begin`, before its first
 commit, and the run the application starts on that generation takes it: however
 late that run starts, it reads the generation from its first event. Each delivery is the request `run.deliver {run, kind: "data", inputs:
@@ -286,12 +288,21 @@ delivered whole, once, then `sealed` (v2's frozen processor): each member is its
 run's complete dataset (`segments` as placed), its own `canonical_schema` with
 `cell_origin` (0, 0); a sealed live source delivers its current event.
 
-A node of another kind started with a source signal over its dataset input (the
-seamless scan: it fires the pulse that drives its own source) is subscribed the
-same way and gets the same `run.deliver` requests; its `execute` takes them in
-order with `ctx.next_input(timeout)` (acknowledged as taken, so the next is sent)
-and drops what came before a sampling boundary with `ctx.discard_inputs()`. A
-`sealed`/`retired`/`failed` delivery ends the wait with an error.
+A node of another kind started with a source signal over an exact dataset input
+(the seamless scan: it fires the pulse that drives its own source) is subscribed the
+same way, from the source's current event, and gets the same `run.deliver` requests;
+its `execute` takes them in order with `ctx.next_input(timeout)` (acknowledged as
+taken, so the next is sent) and drops what came before a sampling boundary with
+`ctx.discard_inputs()`. A `sealed`/`retired`/`failed` delivery ends the wait with an
+error. Over a `latest` input it reads its source by name (`ctx.read`): nothing is
+delivered and the run is no route of that signal (v2: `source_name` only for exact).
+
+A delivery waits as long as its run: answered when the run takes it, refused
+(`stale_run`, its leases let go) when the run ends first, lost with the process; how
+long a run leaves its input waiting is not a health fact (an untracked request). A
+processor that ends before its source (stopped, failed, its source run replaced) is
+withdrawn with its signals (v2); one completed with its source is sealed. Closing a
+node instance withdraws its last run.
 
 `ctx` (the SDK's `RunContext`) keeps v2's `NodeExecutionContext` surface:
 `instance_id`, `generation`, `cancel_requested()`, `report_ready()`,

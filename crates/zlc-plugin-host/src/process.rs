@@ -25,7 +25,8 @@ pub(crate) struct PluginProcess {
     /// The process group (`group:<name>`) or the type (`type:<id>`) it serves.
     pub key: String,
     writer: Mutex<Option<ChildStdin>>,
-    pending: Mutex<HashMap<u64, mpsc::Sender<Incoming>>>,
+    /// Each request's waiter, and whether its deadline watches the process.
+    pending: Mutex<HashMap<u64, (mpsc::Sender<Incoming>, bool)>>,
     next: AtomicU64,
     pub alive: AtomicBool,
     /// Set when the core itself ends the process: its exit is then no failure.
@@ -90,7 +91,7 @@ impl PluginProcess {
         if !self.alive.load(Ordering::Acquire) { return Err(CallError::lost("the plugin process has ended")); }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (sender, answer) = mpsc::channel();
-        self.pending.lock().unwrap().insert(id, sender);
+        self.pending.lock().unwrap().insert(id, (sender, track));
         let message = json!({"t": "req", "id": id, "op": op, "p": params, "blocks": blocks,
                              "deadline_ms": deadline.as_millis() as u64});
         if let Err(error) = self.send(&message) {
@@ -115,11 +116,11 @@ impl PluginProcess {
     /// Deliver a response; a late answer to an overdue request is only dropped.
     pub fn resolve(&self, id: u64, incoming: Incoming) {
         self.overdue.lock().unwrap().remove(&id);
-        if let Some(sender) = self.pending.lock().unwrap().remove(&id) { let _ = sender.send(incoming); }
+        if let Some((sender, _)) = self.pending.lock().unwrap().remove(&id) { let _ = sender.send(incoming); }
     }
 
-    /// Whether a request is in flight (its own deadline then watches the process).
-    pub fn busy(&self) -> bool { !self.pending.lock().unwrap().is_empty() }
+    /// Whether a tracked request is in flight (its own deadline then watches the process).
+    pub fn busy(&self) -> bool { self.pending.lock().unwrap().values().any(|(_, tracked)| *tracked) }
 
     /// The oldest unanswered overdue request's age.
     pub fn overdue_for(&self) -> Option<Duration> {
