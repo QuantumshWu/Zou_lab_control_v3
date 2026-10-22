@@ -608,7 +608,7 @@ impl PluginHost {
         let closed = process.request("close", json!({"instance": instance}), deadline);
         inner.forget(instance, &descriptor);
         // A node closed (removed, or its layout replaced) takes its signals with it (v2 retire).
-        let _ = inner.runtime.withdraw(instance);
+        if !descriptor.is_device() { let _ = inner.runtime.withdraw(public_instance(instance)); }
         process.instances.lock().unwrap().remove(instance);
         inner.release_process(&process);
         closed.map(|_| ())

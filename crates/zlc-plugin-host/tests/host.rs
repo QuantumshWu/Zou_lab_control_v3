@@ -200,7 +200,7 @@ fn a_run_follows_only_an_exact_input_and_what_ends_early_leaves_with_its_signals
             _ => {}
         }
     };
-    let request = |values, source: Option<&str>, output: (&str, &str)| RunRequest { values, devices: Default::default(), origin: Origin::Operator,
+    let request = |values, source: Option<&str>, output: (&str, &str)| RunRequest { values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: source.map(str::to_owned), run_directory: None, outputs: [(output.0.to_owned(), output.1.to_owned())].into() };
     let published = |signal: &str| {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
