@@ -1,11 +1,11 @@
 {
-    "version":  "2026.10.22.2",
-    "tag":  "v2026.10.22.2",
-    "source":  "99e6411f2a9889c264497104e510bb8ddd061b7a0494051fc5fafb30ecbb7306",
-    "commit":  "6d718b355aaaf1954099d6cb262e36526d7d8271",
+    "version":  "2026.10.22.3",
+    "tag":  "v2026.10.22.3",
+    "source":  "ba72acb765c55b1fc0dd2d51abcf2b46fb1006b65bcff76aea55fce0db657104",
+    "commit":  "96031eea762aced953df6372789191c6b7b7644e",
     "asset":  {
-                  "name":  "zlc-engine-2026.10.22.2.zip",
-                  "size":  10891283,
-                  "sha256":  "255d096e8aaea57629cc78cf3dee31a40c4ee97ba12495d741f43ed61fd7ddf4"
+                  "name":  "zlc-engine-2026.10.22.3.zip",
+                  "size":  11048696,
+                  "sha256":  "e683d2049033551af284cfe5bab5f1533f527fdbd2c45639d2adff25f3096c03"
               }
 }
