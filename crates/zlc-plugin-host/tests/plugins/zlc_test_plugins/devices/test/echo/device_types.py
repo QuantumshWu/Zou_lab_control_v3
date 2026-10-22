@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_plugin import Command, DeviceType, FileParam, PhysicalOutput, allocate, notifier
+from zlc_plugin import Command, DeviceType, FileParam, Opened, PhysicalOutput, allocate, notifier
 
 SCHEMA = AuthoringSchema((AuthoringField("gain", "float", "Gain", 1.0, minimum=0.0),))
 SIZE = AuthoringSchema((AuthoringField("size", "int", "Size", 4, required=True, minimum=1),))
@@ -51,7 +51,19 @@ class EchoDevice:
         time.sleep(seconds)
 
 
+SERVED = AuthoringSchema((AuthoringField("port", "int", "Serve on port", 18990, minimum=1, maximum=65535),))
+
+
+def _served(key, values):
+    """A device with a server of its own: its admissions are what Remote did to it."""
+    device = EchoDevice(values)
+    device.admitted = []
+    return Opened(device, lambda: None, admit_peers=device.admitted.append)
+
+
 DEVICE_TYPES = (
+    DeviceType("test.served", "test", SERVED, ("test.echo",), factory=_served,
+               announce=lambda values: ("test.echo", {"port": int(values["port"])})),
     DeviceType("test.echo", "test", SCHEMA, ("test.echo",), factory=lambda key, values: EchoDevice(values),
                physical_outputs=(PhysicalOutput("beam"),),
                commands=(Command("frame_total", "Total of a test frame.", read_only=True,

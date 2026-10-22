@@ -447,6 +447,21 @@ mod tests {
         assert_eq!((found["type_id"].as_str(), found["parameters"]["exposure_seconds"].as_f64()), (Some("camera.virtual_mot"), Some(0.05)));
         apply(&mut workbench, &mut host, "add_discovered", json!({"instance_id": "cam_1"})).unwrap();
         assert_eq!(workbench.device_rows()[0]["pending"], "add");
+        // Loaded, then left out by another apparatus: its Remove is no refusal, and the scan's Add brings it back as itself.
+        apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+        workbench.on_event(Event::Opened { instance: "cam_1".into(), working_point: json!({}) }, &mut host);
+        std::fs::write(root.join("other.json"), r#"{"format": "zlc.installation", "devices": []}"#).unwrap();
+        apply(&mut workbench, &mut host, "load_apparatus", json!({"path": "other.json"})).unwrap();
+        assert_eq!(workbench.device_rows()[0]["pending"], "remove");
+        apply(&mut workbench, &mut host, "remove_device", json!({"device": "cam_1"})).unwrap();
+        apply(&mut workbench, &mut host, "add_discovered", json!({"instance_id": "cam_1"})).unwrap();
+        // (other.json's simulation is the defaults: the simulated camera is reopened, not opened twice.)
+        assert_eq!(apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap()["opening"], json!([]));
+        workbench.on_event(Event::Closed { instance: "cam_1".into(), error: None }, &mut host);
+        workbench.on_event(Event::Opened { instance: "cam_1".into(), working_point: json!({}) }, &mut host);
+        // Lost while open (the computer that publishes it went away): said at once.
+        workbench.on_event(Event::Failed { instance: "cam_1".into(), error: "pc2 withdrew it".into() }, &mut host);
+        assert_eq!(workbench.apparatus_state()["report"]["text"], "cam_1 lost: pc2 withdrew it");
     }
 
     #[test]

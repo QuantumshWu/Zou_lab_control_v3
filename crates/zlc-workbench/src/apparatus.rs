@@ -234,7 +234,8 @@ impl Workbench {
     }
 
     pub(crate) fn remove_device(&mut self, id: &str) -> Result<Value, String> {
-        self.apparatus.entry(id)?;
+        // A loaded device the draft no longer holds is out already: Apply closes it.
+        if !self.devices.contains_key(id) { self.apparatus.entry(id)?; }
         self.apparatus.draft.retain(|entry| entry.instance_id != id);
         self.report = (format!("removed {id}"), "task");
         Ok(json!({"device": id}))
@@ -376,10 +377,11 @@ impl Workbench {
     pub(crate) fn add_discovered(&mut self, id: &str) -> Result<Value, String> {
         let entry = self.apparatus.discovered.iter().find(|entry| entry.instance_id == id).cloned().ok_or_else(|| format!("No discovered device {id:?}"))?;
         // v2's words for a device already there; a node's id is said as Add device says it.
-        if self.apparatus.draft.iter().any(|item| item.instance_id == entry.instance_id || item.role == entry.role) || self.devices.contains_key(&entry.instance_id) {
+        // A loaded device the draft dropped comes back as itself (Apply keeps it open).
+        if self.apparatus.draft.iter().any(|item| item.instance_id == entry.instance_id || item.role == entry.role) {
             return Err(format!("{} is already configured", entry.role));
         }
-        if let Some(clash) = self.id_in_use(&entry.instance_id) { return Err(clash); }
+        if !self.devices.contains_key(&entry.instance_id) { if let Some(clash) = self.id_in_use(&entry.instance_id) { return Err(clash); } }
         self.apparatus.draft.push(entry);
         Ok(json!({"device": id}))
     }
@@ -670,6 +672,9 @@ impl Workbench {
 
     pub(crate) fn device_failed(&mut self, id: &str, error: String) -> bool {
         let Some(live) = self.devices.get_mut(id) else { return false };
+        // An open device lost (its process, or the computer that publishes it) is said at once;
+        // one that failed to open is said by the Init or Apply it belongs to.
+        if live.state == LiveState::Open { self.report = (format!("{} lost: {error}", live.entry.role), "error"); }
         live.state = LiveState::Failed;
         live.error = Some(error);
         live.fields = None;

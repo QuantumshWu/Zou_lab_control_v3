@@ -235,8 +235,11 @@ export class DeviceManagerView implements View {
     const changed = apparatus?.action === "apply";
     setState(this.dot, changed ? "warning" : live ? "running" : "idle");
     this.dot.title = changed ? "Configuration differs from the active installation" : live ? "Active installation" : "No active installation";
-    this.updateFamilies(apparatus, devices, state);
-    this.updateDiscovered(apparatus, devices);
+    // The Config page is the draft (v2 set_devices): a loaded device it no longer holds is the
+    // Loaded session's, and Apply closes it.
+    const draft = devices.filter(device => device.pending !== "remove");
+    this.updateFamilies(apparatus, draft, state);
+    this.updateDiscovered(apparatus, draft);
     this.updateLoaded(devices, busy);
     this.updateSharing(this.ctx.latest.share as Share | undefined);
     // One primary at a time: Save while the draft is unsaved, else the lifecycle.
@@ -328,7 +331,7 @@ export class DeviceManagerView implements View {
    * and the Remote switch, all of them disabled while a device change runs (v2 _refresh_controls). */
   private updateLoaded(devices: DeviceRow[], busy: boolean): void {
     const loaded = devices.filter(device => LOADED.has(device.state));
-    const signature = JSON.stringify([loaded.map(device => [device.instance_id, device.role, device.type_id, device.published]), busy]);
+    const signature = JSON.stringify([loaded.map(device => [device.instance_id, device.role, device.type_id, device.published, device.publishable]), busy]);
     if (this.loadedList.dataset.signature === signature) return;
     this.loadedList.dataset.signature = signature;
     this.loadedList.replaceChildren(...loaded.map(device => {
@@ -345,7 +348,9 @@ export class DeviceManagerView implements View {
         `${device.instance_id}: ${on ? "publishing on" : "withdrawing from"} the bench fabric`), "Remote");
       setChecked(remote, Boolean(device.published));
       for (const button of [control, log, close]) button.disabled = busy;
-      remote.disabled = busy;
+      // A device another computer publishes is published there, not here (publish_device refuses it).
+      remote.disabled = busy || (!device.publishable && !device.published);
+      if (device.remote) remote.title = `Published by ${device.remote.publisher}`;
       line.append(identity, control.root, log.root, close.root, remote);
       return line;
     }));

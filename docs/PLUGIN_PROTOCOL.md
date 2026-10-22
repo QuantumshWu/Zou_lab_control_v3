@@ -74,6 +74,7 @@ A type descriptor (JSON, the only form the core sees):
   "physical_outputs": [{"name": "mot_coils"}],   // device only: what Stop all drives safe
   "commands": [Command...],              // operator/AI commands (section 8)
   "control_window": "slm-editor",        // device only: the window its Control opens ("" = the field form)
+  "announces": false,                    // device only: it has a server of its own (section 10)
   "node": {                              // node only
     "node_kind": "measurement",          // measurement | task | processor
     "inputs": [{"name": "source", "contract": "zlc.camera.frames", "delivery": "exact", "select_bundle": false}],
@@ -209,7 +210,7 @@ Core -> plugin requests (each names its `instance`): `hello`, `open`, `configure
 `close`, `exit`, `ping`, `spi {method, args, kwargs}` (call the open device's
 adapter; `get:<name>` reads a property), `command {name, params}` (section 8),
 `fields {units?}` / `tune {field, value, unit?}` / `values` (the tunable quartet), `make_safe
-{output}`, `query {name, values?, devices?, resources?, source?, output_name?,
+{output}`, `publish {published}` (Remote of a type that `announces`: section 10), `query {name, values?, devices?, resources?, source?, output_name?,
 installation?}` (the facts by name; the SDK calls the v2 callable with them in v2's
 positional order, `zlc_plugin.declare.QUERY_PARAMETERS`; `devices` become proxies), `run.start`. Events: `release
 {blocks}`, `run.stop {run}`. A request with `"plain": true` gets its result as
@@ -473,6 +474,19 @@ and figure archives are native: a figure is described with
 `run.figure`; the image point overlay vocabulary is data (`zlc_data.point_overlay`).
 
 ## 10. Between cores (`crates/zlc-fabric`, v2's device fabric)
+
+Remote on is one flow whatever the device, as v2's: the other computer's Scan
+hardware lists it as `remote_<instance>`, the operator adds it from that list,
+and from then on it is an apparatus row like any other (Init opens it, Remove
+takes it out). A device with a server of its own -- the pulse board
+(`sequencer.local`), the SLM head (`slm.hamamatsu_x15213_local`, SDK
+`DeviceType(announce=...)` and `Opened(admit_peers=...)`) -- is announced as the
+client type another computer opens at that server (`sequencer.hardware`,
+`slm.hamamatsu_x15213`, the host being the address the scan reached): Remote on
+asks it `publish {published: true}`, its server admits other machines, and the
+answer `{type_id, parameters}` is announced; off asks `publish {published:
+false}` and the server drops them. Any other device is served by the fabric
+itself and offered as `remote.device` (v2's `remote.tunable`):
 
 A device can be served by another core: the publishing core hands an open
 device over (`PluginHost::lend_out`; its own runs, commands, tunes and calls are

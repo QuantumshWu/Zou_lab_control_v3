@@ -1600,7 +1600,7 @@ def _local_factory(key: str, values: Mapping[str, object]) -> Opened:
         finally:
             _stop_server()
 
-    return Opened(client, _close)
+    return Opened(client, _close, admit_peers=server.admit_peers)
 
 
 DEVICE_TYPES = (
@@ -1636,6 +1636,8 @@ DEVICE_TYPES = (
         control_window=CONTROL_WINDOW,
         # Its in-process server's narration is this device's log (v2).
         log_channels=("zlc_atom.devices.slm",),
+        # Remote on: other machines open it as the network SLM at its server (v2 _announce_local).
+        announce=lambda values: (_TYPE_ID, {"port": int(values["port"])}),
     ),
 )
 

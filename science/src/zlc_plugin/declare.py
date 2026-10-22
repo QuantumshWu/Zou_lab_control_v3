@@ -150,10 +150,13 @@ class PhysicalOutput:
 
 @dataclass(frozen=True)
 class Opened:
-    """A factory's result when closing needs more than ``adapter.close()``."""
+    """A factory's result when closing needs more than ``adapter.close()``.
+    ``admit_peers(bool)``: the server of a type that announces one (DeviceType
+    ``announce``) admits other machines while the device is published."""
 
     adapter: object
     close: Callable[[], None]
+    admit_peers: Callable[[bool], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +193,12 @@ class DeviceType:
     #: Logger-name prefixes this type's code narrates under (v2 log_channels): their
     #: INFO lines are its device log, beside the lines ending in ``device=<identity>``.
     log_channels: tuple[str, ...] = ()
+    #: A device with a server of its own (v2 announce: a local SLM head, a local pulse
+    #: board): ``announce(values)`` is the client type another machine opens and its
+    #: endpoint (``{"port": ...}``; the peer dials the address it found this machine at).
+    #: Remote on then announces that, and the factory's ``Opened.admit_peers`` opens the
+    #: server to other machines; any other device is served by the bench fabric itself.
+    announce: Callable[[Mapping[str, Any]], tuple[str, Mapping[str, Any]]] | None = None
 
     def __post_init__(self) -> None:
         if not self.type_id or not self.family:
@@ -221,6 +230,7 @@ class DeviceType:
             "commands": [command.descriptor() for command in self.commands],
             "queries": ["discover"] if self.discover is not None else [], "addable": self.addable,
             "concurrent": list(self.concurrent), "control_window": self.control_window,
+            "announces": self.announce is not None,
         }
 
 

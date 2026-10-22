@@ -82,6 +82,15 @@ impl Publisher {
     /// itself came from the fabric (a relay loop).
     pub fn publish(&self, instance: &str, role: &str) -> Result<(), String> {
         let descriptor = self.shared.host.descriptor(instance).ok_or_else(|| format!("{instance} is not open"))?;
+        if descriptor.announces {
+            // A server of its own (v2 announce: a local SLM head): it admits other machines and
+            // is announced as the client type they open there, as the pulse board is.
+            let answer = self.shared.host.call(instance, "publish", json!({"published": true}), SAFE_DEADLINE).map_err(|error| error.message)?.value;
+            let type_id = answer["type_id"].as_str().unwrap_or_default().to_owned();
+            let label = self.shared.host.catalog().ok().and_then(|catalog| catalog.find(&type_id).map(|item| item.label.clone())).unwrap_or_else(|| type_id.clone());
+            self.publish_own(instance, role, &type_id, &label, answer["parameters"].clone());
+            return Ok(());
+        }
         let (shared, name) = (Arc::downgrade(&self.shared), instance.to_owned());
         let forward: Forward = Arc::new(move |op, params, lends| if let Some(shared) = shared.upgrade() { shared.forward(&name, op, params, lends); });
         self.shared.host.lend_out(instance, forward).map_err(|error| error.message)?;
@@ -94,7 +103,10 @@ impl Publisher {
     /// finished, its outputs safe if it was in use, then usable here again.
     pub fn withdraw(&self, instance: &str) -> Result<(), String> {
         if lock(&self.shared.own).remove(instance).is_some() {
-            self.shared.note(instance, &format!("FABRIC WITHDRAW device={instance}"));
+            // A plugin device's own server drops the other machines (the pulse board's host does its own).
+            let refused = self.shared.host.descriptor(instance).filter(|descriptor| descriptor.announces)
+                .and_then(|_| self.shared.host.call(instance, "publish", json!({"published": false}), SAFE_DEADLINE).err());
+            self.shared.note(instance, &format!("FABRIC WITHDRAW device={instance}{}", refused.map(|error| format!(" error={:?}", error.message)).unwrap_or_default()));
             return Ok(());
         }
         let offer = lock(&self.shared.offers).remove(instance).ok_or_else(|| format!("{instance} is not published"))?;
