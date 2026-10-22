@@ -52,6 +52,10 @@ pub struct TypeDescriptor {
     /// The window a device's Control opens instead of the field form ("slm-editor"); empty for the form.
     #[serde(default)]
     pub control_window: String,
+    /// A device with a server of its own (SDK `announce`): Remote on announces the client
+    /// type another machine opens there (the instance op `publish`), as the pulse board's.
+    #[serde(default)]
+    pub announces: bool,
 }
 
 fn yes() -> bool { true }

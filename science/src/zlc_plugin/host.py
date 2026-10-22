@@ -275,6 +275,7 @@ class Instance:
         self.declared: DeviceType | NodeType | None = None
         self.adapter: object | None = None
         self.closer: Callable[[], None] | None = None
+        self.admit_peers: Callable[[bool], None] | None = None
         self.values: dict[str, Any] = {}
         #: ``device=<identity>``: how this device's own log lines end (v2 identity_token).
         self.log_token: str | None = None
@@ -390,7 +391,7 @@ def _open(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
         instance.values = values
         opened = declared.factory(instance.name, values)
         if isinstance(opened, Opened):
-            instance.adapter, instance.closer = opened.adapter, opened.close
+            instance.adapter, instance.closer, instance.admit_peers = opened.adapter, opened.close, opened.admit_peers
         else:
             instance.adapter, instance.closer = opened, getattr(opened, "close", None)
         identity = getattr(instance.adapter, "identity", None)
@@ -552,6 +553,18 @@ def _values(instance: Instance, params: dict[str, Any]) -> Any:
     return {"values": plain(dict(adapter.tunable_values())), "provenance": plain(dict(adapter.settings_provenance()))}
 
 
+def _publish(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
+    """Remote on or off for a device with a server of its own (DeviceType.announce):
+    its server admits other machines or drops them; the answer is what a peer opens."""
+
+    declared = instance.device()
+    if declared.announce is None or instance.admit_peers is None:
+        raise PluginError("invalid", f"{instance.name} has no server of its own to announce")
+    instance.admit_peers(bool(params.get("published")))
+    type_id, endpoint = declared.announce(dict(instance.values))
+    return {"type_id": str(type_id), "parameters": dict(endpoint)}
+
+
 def _make_safe(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
     instance.device()
     make_safe = getattr(instance.adapter, "make_safe", None)
@@ -627,7 +640,7 @@ def _run_start(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
 
 _HANDLERS: dict[str, Callable[[Instance, dict[str, Any]], Any]] = {
     "open": _open, "configure": _configure, "close": _close, "spi": _spi, "command": _command,
-    "fields": _fields, "tune": _tune, "values": _values, "make_safe": _make_safe, "query": _query,
+    "fields": _fields, "tune": _tune, "values": _values, "make_safe": _make_safe, "query": _query, "publish": _publish,
     "run.start": _run_start,
 }
 

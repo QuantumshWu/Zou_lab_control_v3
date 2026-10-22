@@ -154,6 +154,26 @@ fn a_published_device_serves_another_core_through_its_blocks_claims_and_safe_act
     b.host.shutdown();
 }
 
+#[test]
+fn a_device_with_its_own_server_is_announced_as_the_client_type_another_machine_opens() {
+    let (Some(a), Some(b)) = (core(), core()) else { return };
+    a.host.open("served", "test.served", json!({"port": 18990}), json!({})).unwrap();
+    let publisher = Publisher::start(a.host.clone(), bench("pc2"), "127.0.0.1", 0).unwrap();
+    publisher.publish("served", "Served").unwrap();
+    let admitted = || a.host.spi("served", "get:admitted", json!([]), json!({}), Duration::from_secs(5)).unwrap().value;
+    assert_eq!(admitted(), json!([true]));
+    // Scan hardware offers it as v2 did the local pulse board and SLM head: its client type, at the address found.
+    let (found, notes) = zlc_fabric::discover(&bench("pc1"), publisher.port(), &[format!("127.0.0.1:{}", publisher.port())], b.host.registry(), Duration::from_millis(500));
+    assert_eq!(found.len(), 1, "{found:?} {notes:?}");
+    assert_eq!((found[0]["instance_id"].as_str(), found[0]["type_id"].as_str()), (Some("remote_served"), Some("test.echo")));
+    assert_eq!(found[0]["parameters"], json!({"port": 18990, "host": "127.0.0.1"}));
+    publisher.withdraw("served").unwrap();
+    assert_eq!(admitted(), json!([true, false]));
+    drop(publisher);
+    a.host.shutdown();
+    b.host.shutdown();
+}
+
 /// A TCP relay the test can cut (a network blip) or refuse (a dead machine).
 struct Relay { port: u16, pairs: Arc<Mutex<Vec<(TcpStream, TcpStream)>>>, refusing: Arc<AtomicBool> }
 
