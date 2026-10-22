@@ -249,17 +249,35 @@ impl WindowRead {
     }
 }
 
+/// What a same-shot route's output keeps of its recent shots, apart from any panel's
+/// window, so its group can be shown at a slower member's shot (`coherent_front`):
+/// shots, and event bytes (a route deriving whole camera frames keeps fewer).
+const GROUP_SHOTS: usize = 64;
+const GROUP_BYTES: usize = 64 << 20;
+
 struct Signal {
     schema: Arc<DatasetSchema>, latest: Option<Arc<Publication>>,
     last_ordinal: Option<u64>,
     head: Option<Arc<PayloadLineage>>,
     history: VecDeque<Arc<Publication>>, demands: BTreeMap<u64, usize>,
+    /// A same-shot route's output's recent publications (None: not a route's).
+    recent: Option<VecDeque<Arc<Publication>>>,
     views: HashMap<usize, Weak<WindowRead>>, view_epoch: u64,
     window_schemas: HashMap<usize, Arc<DatasetSchema>>, history_axis: Arc<str>,
     store: Option<DatasetStore>, history_capable: bool,
 }
 impl Signal {
     fn capacity(&self) -> usize { self.demands.values().copied().max().unwrap_or(0) }
+    fn keep_recent(&mut self, publication: &Arc<Publication>, garbage: &mut Vec<Arc<Publication>>) {
+        let Some(recent) = &mut self.recent else { return };
+        recent.push_back(publication.clone());
+        let mut bytes = 0;
+        let kept = recent.iter().rev().take(GROUP_SHOTS).take_while(|p| {
+            bytes += p.data.as_ref().map_or(0, |data| data.payload_bytes());
+            bytes <= GROUP_BYTES
+        }).count();
+        while recent.len() > kept.max(1) { garbage.push(recent.pop_front().unwrap()); }
+    }
     fn trim(&mut self, garbage: &mut Vec<Arc<Publication>>) -> bool {
         let capacity = self.capacity();
         let Some(latest) = &self.latest else { return false; };
@@ -389,10 +407,22 @@ fn ancestry(publication:&Arc<Publication>) -> Option<HashMap<Arc<str>,Read>> {
 #[derive(Default)]
 pub struct Front(HashMap<Arc<str>,Read>);
 
+/// The shot a group's leaves are shown at: theirs when they agree; else, when each
+/// stems from one shot of one source run, the slowest leaf's.
+fn group_shot<'a>(newest:impl Iterator<Item=Option<&'a Read>>) -> Option<HashSet<EventIdentity>> {
+    let shots=newest.map(|read|read.map(Read::shot_roots)).collect::<Option<Vec<_>>>()?;
+    let first=shots.first()?;
+    if shots.iter().all(|shot|shot==first) {return Some(first.clone());}
+    let roots=shots.iter().map(|shot|(shot.len()==1).then(||*shot.iter().next().unwrap())).collect::<Option<Vec<_>>>()?;
+    if roots.iter().any(|(generation,_)|*generation!=roots[0].0) {return None;}
+    roots.iter().min_by_key(|(_,revision)|*revision).map(|root|HashSet::from([*root]))
+}
+
 /// Pure requested-component selection, following v2 front.build_front. The
-/// registry owns payload lifetime; this algorithm never acquires history.
+/// registry owns payload lifetime; this algorithm only reads what is retained.
 fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],previous:&Front) -> HashMap<Arc<str>,Read> {
     let mut latest=HashMap::new();
+    let mut retained=HashMap::new();
     let mut adjacency:HashMap<Arc<str>,HashSet<Arc<str>>>=HashMap::new();
     let mut source_by_output=HashMap::new();
     let mut bundles:HashMap<EventIdentity,HashSet<Arc<str>>>=HashMap::new();
@@ -405,6 +435,7 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
             .map(|(name,_)|name.clone()).collect::<HashSet<_>>());
         for name in names.iter() {bundle_of.insert(name.clone(),names.clone());}
         for (name,signal) in &run.signals {
+            retained.insert(name.clone(),signal);
             if let Some(event)=&signal.latest {
                 latest.insert(name.clone(),dataset_read(event.clone()));
                 bundles.entry(event_identity(&event.key)).or_default().insert(name.clone());
@@ -424,6 +455,7 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
     }
     let requested:HashSet<_>=requests.iter().filter(|(generation,name,_)|state.signals.get(name)==Some(&generation.id))
         .map(|(_,name,_)|name.clone()).collect();
+    let windowed:HashSet<_>=requests.iter().filter(|(_,_,width)|width.is_some_and(|width|width>1)).map(|(_,name,_)|name.clone()).collect();
     let mut pending=requested.clone();let mut selected=latest.clone();
     let is_ancestor=|ancestor:&Arc<str>,descendant:&Arc<str>| {
         let mut seen=HashSet::new();let mut current=descendant;
@@ -443,18 +475,31 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
         pending.retain(|name|!component.contains(name));
         let required:Vec<_>=component.intersection(&requested).cloned().collect();
         let leaves:Vec<_>=required.iter().filter(|name|!required.iter().any(|other|other!=*name && is_ancestor(name,other))).collect();
-        let mut roots=None;let mut joined=HashMap::new();let mut coherent=!leaves.is_empty();
-        for name in leaves {
-            let Some(read)=latest.get(name) else {coherent=false;break;};
-            let event=read.anchor();let current=causal_events(&event.key,&event.event,true);
-            if roots.as_ref().is_some_and(|previous|*previous!=current) {coherent=false;break;}
-            roots=Some(current);
-            let Some(ancestors)=ancestry(event) else {coherent=false;break;};
+        // Every leaf at one shot: the slowest leaf's, the others read at it from what
+        // they keep. (v2 kept the last group until every newest agreed, which a
+        // member answering at display cadence beside per-shot processors never lets
+        // happen: the board stood still while acquiring.)
+        let shot=group_shot(leaves.iter().map(|name|latest.get(*name)));
+        // A panel's window of a member is anchored in what that window retains.
+        let at_shot=|name:&Arc<str>,shot:&HashSet<EventIdentity>| latest.get(name).filter(|read:&&Read|read.shot_roots()==*shot).cloned().or_else(|| {
+            let signal:&Signal=retained.get(name)?;
+            let kept=if windowed.contains(name) {Some(&signal.history)} else {signal.recent.as_ref()};
+            kept?.iter().rev().find(|event|causal_events(&event.key,&event.event,true)==*shot).map(|event|dataset_read(event.clone()))
+        });
+        let mut joined=HashMap::new();let mut coherent=shot.is_some();
+        for name in shot.as_ref().map_or(&[][..],|_|&leaves[..]) {
+            let Some(ancestors)=at_shot(name,shot.as_ref().unwrap()).and_then(|read|ancestry(read.anchor())) else {coherent=false;break;};
             for (name,ancestor) in ancestors {
                 if joined.get(&name).is_some_and(|old:&Read|old.key()!=ancestor.key()) {coherent=false;break;}
                 joined.insert(name,ancestor);
             }
             if !coherent {break;}
+        }
+        // A member beside the leaves' lineage at that shot (an ancestor's sibling) is read at it too.
+        if let Some(shot)=shot.as_ref().filter(|_|coherent) {
+            for name in &required {
+                if !joined.contains_key(name) { if let Some(read)=at_shot(name,shot) {joined.insert(name.clone(),read);} }
+            }
         }
         coherent &= required.iter().all(|name|joined.get(name)
             .is_some_and(|read|state.signals.get(name)==Some(&read.key().generation)));
@@ -747,7 +792,7 @@ impl Runtime {
                 state.signals.insert(output.signal.clone(), token.id);
                 let store = matches!(output.storage,Storage::Finite).then(|| DatasetStore::new(output.schema.clone()));
                 (output.signal, Signal { schema: output.schema, latest: None, last_ordinal:None, head:None, history: VecDeque::new(),
-                    demands: BTreeMap::new(), views: HashMap::new(), view_epoch: 0,
+                    demands: BTreeMap::new(), recent: source.as_ref().filter(|source|source.coherent).map(|_|VecDeque::new()), views: HashMap::new(), view_epoch: 0,
                     window_schemas: HashMap::new(), history_axis, store,
                     history_capable: matches!(output.storage,Storage::Latest) })
             }).collect();
@@ -875,6 +920,7 @@ impl Runtime {
                 if let Some(ordinal)=publication.key.ordinal {signal.last_ordinal=Some(ordinal);}
                 if let Some(previous)=signal.head.replace(head.clone()) {heads.push(previous);}
                 if let Some(previous) = signal.latest.replace(publication.clone()) { garbage.push(previous); }
+                signal.keep_recent(publication,&mut garbage);
                 if signal.capacity() > 0 {
                     // Recomputing the same source ordinal revises that sample;
                     // it is not an invented extra camera shot.
@@ -1411,42 +1457,70 @@ mod tests {
     }
 
     #[test]
-    fn a_judgement_and_its_picture_are_one_shot_whoever_else_consumes_them() {
-        // v2's same-shot group through plugin processors: Occupancy lags the
-        // camera, so the frames it judged -- not the camera's newest -- go with
-        // its judgement; an undisplayed Frame Survival and another board's
-        // reads change nothing on this board.
+    fn a_shot_and_everything_derived_from_it_are_shown_together() {
+        // v2's same-shot group is lineage: the camera frames, Occupancy's judgement
+        // and counts, Frame Survival of the judgement, a Derive of the counts and an
+        // ROI of the frames show one shot together. The group is at its slowest
+        // member's shot (the ROI answers at display cadence, not every shot) and
+        // moves on with it; a fit, computed on the shown picture, holds nothing.
         let plane=Runtime::new();let schema=schema();
-        let declaration=|name:&str|vec![Declaration {signal:name.into(),schema:schema.clone(),storage:Storage::Latest}];
-        let judged=|source:&Arc<Delivery>,name:&str,ordinal|Bundle {parents:vec![source.publications[0].clone()],..bundle(&schema,&[name],ordinal)};
+        let declaration=|names:&[&str]|names.iter().map(|name|Declaration {signal:(*name).into(),schema:schema.clone(),storage:Storage::Latest}).collect::<Vec<_>>();
+        let of=|source:&Arc<Publication>,names:&[&str],ordinal|Bundle {parents:vec![source.clone()],..bundle(&schema,names,ordinal)};
         let ordinals=|reads:Vec<Result<Read>>|reads.into_iter().map(|read|read.unwrap().key().ordinal.unwrap()).collect::<Vec<_>>();
-        let camera=plane.begin("camera",declaration("frames"),json!({})).unwrap();
-        let shot0=plane.commit(&camera,&bundle(&schema,&["frames"],0)).unwrap();
-        let occupancy=plane.begin_consuming("occupancy",declaration("occupied"),json!({}),"frames".into(),Some(camera.id())).unwrap();
-        let occupied0=plane.commit(&occupancy,&judged(&shot0,"occupied",0)).unwrap();
-        let survival=plane.begin_consuming("survival",declaration("survival"),json!({}),"occupied".into(),Some(occupancy.id())).unwrap();
-        plane.commit(&survival,&judged(&occupied0,"survival",0)).unwrap();
-        let shot1=plane.commit(&camera,&bundle(&schema,&["frames"],1)).unwrap();
-        plane.commit(&occupancy,&judged(&shot1,"occupied",1)).unwrap();
-        let shot2=plane.commit(&camera,&bundle(&schema,&["frames"],2)).unwrap();
-        let (mut board,mut other)=(Front::default(),Front::default());
-        let overlay=vec![(camera.clone(),"frames".into(),None),(occupancy.clone(),"occupied".into(),None)];
-        let pair=plane.read_coherent_views(&overlay,&mut board);
-        assert_eq!(pair[0].as_ref().unwrap().shot_roots(),pair[1].as_ref().unwrap().shot_roots());
-        assert_eq!(ordinals(pair),[1,1]);
-        // A board that shows Frame Survival too shows its shot: one group, as v2.
-        let mut chain=overlay.clone();chain.push((survival.clone(),"survival".into(),None));
-        assert_eq!(ordinals(plane.read_coherent_views(&chain,&mut other)),[0,0,0]);
-        assert_eq!(ordinals(plane.read_coherent_views(&overlay,&mut board)),[1,1]);
+        let camera=plane.begin("camera",declaration(&["frames"]),json!({})).unwrap();
+        let occupancy=plane.begin_consuming("occupancy",declaration(&["occupied","counts"]),json!({}),"frames".into(),Some(camera.id())).unwrap();
+        let survival=plane.begin_consuming("survival",declaration(&["survival"]),json!({}),"occupied".into(),Some(occupancy.id())).unwrap();
+        let derive=plane.begin_consuming("derive",declaration(&["scaled"]),json!({}),"counts".into(),Some(occupancy.id())).unwrap();
+        // One shot through the camera, Occupancy and Derive: (frames, occupied).
+        let shot=|ordinal| {
+            let frames=plane.commit(&camera,&bundle(&schema,&["frames"],ordinal)).unwrap().publications[0].clone();
+            let judged=plane.commit(&occupancy,&of(&frames,&["occupied","counts"],ordinal)).unwrap();
+            plane.commit(&derive,&of(&judged.publications[1],&["scaled"],ordinal)).unwrap();
+            (frames,judged.publications[0].clone())
+        };
+        let survive=|occupied:&Arc<Publication>,ordinal| {plane.commit(&survival,&of(occupied,&["survival"],ordinal)).unwrap();};
+        let (frames0,occupied0)=shot(0);
+        survive(&occupied0,0);
+        let roi=plane.begin_derived("roi",declaration(&["roi_mean"]),json!({}),frames0.key(),true).unwrap();
+        let fit=plane.begin_derived("fit",declaration(&["amplitude"]),json!({}),frames0.key(),false).unwrap();
+        plane.commit(&roi,&of(&frames0,&["roi_mean"],0)).unwrap();
+        plane.commit(&fit,&of(&frames0,&["amplitude"],0)).unwrap();
+        let tree=vec![(camera.clone(),"frames".into(),None),(occupancy.clone(),"occupied".into(),None),(occupancy.clone(),"counts".into(),None),
+            (survival.clone(),"survival".into(),Some(4)),(derive.clone(),"scaled".into(),Some(4)),(roi.clone(),"roi_mean".into(),Some(4))];
+        let _windows=[(&survival,"survival"),(&derive,"scaled"),(&roi,"roi_mean")].map(|(run,name)|plane.retain_history(run,name,4).unwrap());
+        let mut board=Front::default();
+        assert_eq!(ordinals(plane.read_coherent_views(&tree,&mut board)),[0;6]);
+        // Shot 1: every per-shot member has it, the ROI has not answered it: the group is at the ROI's shot.
+        let (_,occupied1)=shot(1);
+        survive(&occupied1,1);
+        assert_eq!(ordinals(plane.read_coherent_views(&tree,&mut board)),[0;6]);
+        // Shot 2: the ROI answers it, Frame Survival is slow and has not: none moves on alone.
+        let (frames2,occupied2)=shot(2);
+        plane.commit(&roi,&of(&frames2,&["roi_mean"],2)).unwrap();
+        assert_eq!(ordinals(plane.read_coherent_views(&tree,&mut board)),[0;6]);
+        survive(&occupied2,2);
+        assert_eq!(ordinals(plane.read_coherent_views(&tree,&mut board)),[2;6]);
+        // The camera, Occupancy, Derive and the ROI two shots on: the group waits at Frame Survival's.
+        let (frames3,_)=shot(3);
+        let (frames4,_)=shot(4);
+        plane.commit(&roi,&of(&frames4,&["roi_mean"],4)).unwrap();
+        plane.commit(&fit,&of(&frames3,&["amplitude"],3)).unwrap();
+        let shown=plane.read_coherent_views(&tree,&mut board);
+        assert!(shown.iter().all(|read|read.as_ref().unwrap().shot_roots()==shown[0].as_ref().unwrap().shot_roots()));
+        assert_eq!(ordinals(shown),[2;6]);
+        // The fit follows the picture it was computed on; it holds no group, and a board without Frame Survival is not held by it.
+        let mut with_fit=tree.clone();with_fit.push((fit.clone(),"amplitude".into(),None));
+        assert_eq!(ordinals(plane.read_coherent_views(&with_fit,&mut Front::default())),[2,2,2,2,2,2,3]);
+        assert_eq!(ordinals(plane.read_coherent_views(&[tree[0].clone(),tree[1].clone(),tree[4].clone(),tree[5].clone()],&mut Front::default())),[4;4]);
         // A processor is no derived owner: it still commits its replaced source
         // run's queue, and once finished it holds none of the next run's pictures.
         plane.seal(&camera,json!({})).unwrap();
-        let next=plane.begin("camera",declaration("frames"),json!({})).unwrap();
+        let next=plane.begin("camera",declaration(&["frames"]),json!({})).unwrap();
         plane.commit(&next,&bundle(&schema,&["frames"],0)).unwrap();
-        plane.commit(&occupancy,&judged(&shot2,"occupied",2)).unwrap();
+        plane.commit(&occupancy,&of(&frames3,&["occupied","counts"],5)).unwrap();
         plane.seal(&occupancy,json!({})).unwrap();
         let pair=vec![(next,"frames".into(),None),(occupancy,"occupied".into(),None)];
-        assert_eq!(ordinals(plane.read_coherent_views(&pair,&mut board)),[0,2]);
+        assert_eq!(ordinals(plane.read_coherent_views(&pair,&mut board)),[0,5]);
     }
 
     #[test]

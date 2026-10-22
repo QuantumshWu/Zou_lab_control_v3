@@ -1,15 +1,23 @@
 //! The live board's display cadence (v2 zlc_runtime.presentation HarmonicClock and
-//! BoardScheduler): a panel's update interval caps how often it takes new data,
-//! measured from the picture it last staged. A panel never staged is due at once;
-//! a late turn shows the newest data and never replays the shots it missed. A panel
-//! inside its interval keeps the data it shows, so its fit and readouts do not move.
+//! BoardScheduler): a panel's update interval caps how often it takes new data. Its
+//! interval's crossings count on one board clock, so panels of one interval take
+//! new data in the same turn and a slower harmonic interval's crossings are the
+//! faster's: panels showing one shot group flip together (a panel's own phase, as
+//! from the picture it last staged, kept a panel added later a turn apart from the
+//! others for good). A panel is due once a crossing has passed since it last staged;
+//! a panel never staged joins the board's next crossing (at once on a board that
+//! has shown nothing). A late turn shows the newest data and never replays the shots
+//! it missed. A panel inside its interval keeps the data it shows, so its fit and
+//! readouts do not move.
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct Cadence {
-    /// When each panel last staged new data: its interval runs from there.
+    /// The board clock every interval's crossings count from.
+    origin: Option<Instant>,
+    /// When each panel last staged new data.
     staged: BTreeMap<String, Instant>,
     /// When the board's current job was dispatched (a panel it presents staged then).
     dispatched: Option<Instant>,
@@ -22,7 +30,14 @@ impl Cadence {
     /// `None` when none may (the board then waits for the first that may).
     pub fn plan(&mut self, intervals: &BTreeMap<String, u64>, now: Instant) -> Option<BTreeSet<String>> {
         self.staged.retain(|panel, _| intervals.contains_key(panel));
-        let due_at = |panel: &str, interval: u64| self.staged.get(panel).map(|at| *at + Duration::from_millis(interval));
+        let origin = *self.origin.get_or_insert(now);
+        let board = self.staged.values().max().copied();
+        // The first crossing of `interval` after `at`.
+        let crossing = |at: Instant, interval: u64| {
+            let interval = interval.max(1);
+            origin + Duration::from_millis((at.saturating_duration_since(origin).as_millis() as u64 / interval + 1) * interval)
+        };
+        let due_at = |panel: &str, interval: u64| self.staged.get(panel).copied().or(board).map(|at| crossing(at, interval));
         let held: BTreeMap<&str, Instant> = intervals.iter()
             .filter_map(|(panel, interval)| due_at(panel, *interval).filter(|at| *at > now).map(|at| (panel.as_str(), at))).collect();
         self.next = held.values().min().copied();
@@ -107,26 +122,32 @@ mod tests {
     fn board(entries: &[(&str, u64)]) -> BTreeMap<String, u64> { entries.iter().map(|(panel, ms)| ((*panel).to_owned(), *ms)).collect() }
 
     #[test]
-    fn an_interval_is_a_rate_cap_from_the_last_staging() {
+    fn intervals_cross_on_one_board_clock() {
         let mut cadence = Cadence::default();
         let intervals = board(&[("panel-1", 100), ("panel-2", 800)]);
         let start = Instant::now();
-        // Never staged: both due at once.
+        // A board that has shown nothing: both due at once.
         assert_eq!(cadence.plan(&intervals, start), Some(BTreeSet::new()));
         cadence.presented(&["panel-1".to_owned(), "panel-2".to_owned()]);
-        // 150 ms on: panel-1 may take new data, panel-2 is held until 800 ms.
+        // 150 ms on: panel-1 has crossed 100, panel-2 is held until 800.
         let held = cadence.plan(&intervals, start + Duration::from_millis(150)).unwrap();
         assert_eq!(held, ["panel-2".to_owned()].into());
         assert_eq!(cadence.wake_at(), Some(start + Duration::from_millis(800)));
         cadence.presented(&["panel-1".to_owned()]);
-        // 200 ms on: neither may (panel-1 staged at 150): the board waits for 250.
-        assert_eq!(cadence.plan(&intervals, start + Duration::from_millis(200)), None);
-        assert_eq!(cadence.wake_at(), Some(start + Duration::from_millis(250)));
-        assert!(!cadence.owed(start + Duration::from_millis(240)));
-        assert!(cadence.owed(start + Duration::from_millis(250)));
+        // A late turn does not move the clock: panel-1, staged at 150, is due at the 200 crossing.
+        assert_eq!(cadence.plan(&intervals, start + Duration::from_millis(190)), None);
+        assert_eq!(cadence.wake_at(), Some(start + Duration::from_millis(200)));
+        assert!(!cadence.owed(start + Duration::from_millis(199)));
+        assert!(cadence.owed(start + Duration::from_millis(200)));
+        // A panel added later joins the board's next crossing, in step with panel-1.
+        let intervals = board(&[("panel-1", 100), ("panel-2", 800), ("panel-3", 100)]);
+        let held = cadence.plan(&intervals, start + Duration::from_millis(200)).unwrap();
+        assert_eq!(held, ["panel-2".to_owned()].into());
+        cadence.presented(&["panel-1".to_owned(), "panel-3".to_owned()]);
+        // The 800 crossing is every interval's: all three in one turn.
+        assert_eq!(cadence.plan(&intervals, start + Duration::from_millis(800)), Some(BTreeSet::new()));
         // A due panel that showed nothing new keeps its old staging: due at once later.
-        assert_eq!(cadence.plan(&intervals, start + Duration::from_millis(900)), Some(BTreeSet::new()));
         cadence.presented(&[]);
-        assert_eq!(cadence.plan(&intervals, start + Duration::from_millis(910)), Some(BTreeSet::new()));
+        assert_eq!(cadence.plan(&intervals, start + Duration::from_millis(810)), Some(BTreeSet::new()));
     }
 }
