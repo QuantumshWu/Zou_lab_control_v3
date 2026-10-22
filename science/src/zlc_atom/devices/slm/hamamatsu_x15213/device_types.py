@@ -1637,7 +1637,7 @@ DEVICE_TYPES = (
         # Its in-process server's narration is this device's log (v2).
         log_channels=("zlc_atom.devices.slm",),
         # Remote on: other machines open it as the network SLM at its server (v2 _announce_local).
-        announce=lambda values: (_TYPE_ID, {"port": int(values["port"])}),
+        announce=(_TYPE_ID, lambda values: {"port": int(values["port"])}),
     ),
 )
 

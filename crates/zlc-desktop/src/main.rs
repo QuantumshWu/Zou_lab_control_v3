@@ -1733,7 +1733,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 Event::UserEvent(event @ (AppEvent::Plugin(_) | AppEvent::Workbench(_) | AppEvent::CatalogReady)) => {
                     let events = match event {
                         AppEvent::Plugin(event) => builtin.host_event(event),
-                        AppEvent::Workbench(event) => std::iter::once(event).chain(builtin.replay()).collect(),
+                        AppEvent::Workbench(event) => {
+                            // A sequencer lost with its computer lets its board go: the device is held failed.
+                            if let zlc_workbench::Event::Failed { instance, .. } = &event { pulse.lose_device(instance); }
+                            std::iter::once(event).chain(builtin.replay()).collect()
+                        }
                         _ => { trace::point("startup.catalog", || json!({})); builtin.catalog_ready(); workbench.refresh_catalog(); Vec::new() }
                     };
                     let mut host = workbench_host::DesktopHost { runtime: &runtime, bindings: &mut bindings, accepted: &accepted,
@@ -1821,7 +1825,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 return Ok(json!({}));
                             }
                             let port = pulse.admit_peers(&instance, true)?;
-                            bench.publish_own(host, &instance, &role, "sequencer.hardware", "Pulse board", json!({"port": port}))
+                            bench.publish_own(host, &instance, &role, pulse_host::ANNOUNCED_AS, "Pulse board", json!({"port": port}))
                                 .inspect_err(|_| { let _ = pulse.admit_peers(&instance, false); })
                         })();
                         let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Answered { ticket, result }));

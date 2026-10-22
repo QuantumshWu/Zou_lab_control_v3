@@ -74,7 +74,7 @@ A type descriptor (JSON, the only form the core sees):
   "physical_outputs": [{"name": "mot_coils"}],   // device only: what Stop all drives safe
   "commands": [Command...],              // operator/AI commands (section 8)
   "control_window": "slm-editor",        // device only: the window its Control opens ("" = the field form)
-  "announces": false,                    // device only: it has a server of its own (section 10)
+  "announces": "",                       // device only: the client type its own server is opened as (section 10)
   "node": {                              // node only
     "node_kind": "measurement",          // measurement | task | processor
     "inputs": [{"name": "source", "contract": "zlc.camera.frames", "delivery": "exact", "select_bundle": false}],

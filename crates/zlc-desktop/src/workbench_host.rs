@@ -474,6 +474,29 @@ impl Builtin {
 
     /// Do `work` with the host off the window's turn; its answer is an event.
     /// The next open/close turn of an instance.
+    /// A client of a type another computer announces (its own server: the pulse board, the SLM
+    /// head) is watched on the bench fabric: the link that decides when a remote.device's
+    /// computer is gone decides it for this one too, and it is lost with that reason -- a plugin
+    /// device as a remote.device is (`PluginHost::lost`), the native board through the workbench.
+    fn watch(&self, instance: &str, type_id: &str, parameters: &Value) {
+        let (bench, host, reply, announced) = {
+            let stand = self.0.borrow();
+            let native = stand.native.as_ref().is_some_and(|(types, _)| types.iter().any(|item| item["announces"] == type_id));
+            let plugin = || stand.host.as_ref().and_then(|host| host.catalog().ok()).is_some_and(|catalog| catalog.types.iter().any(|item| item.announces == type_id));
+            (stand.bench.clone(), stand.host.clone(), stand.reply.clone(), native || plugin())
+        };
+        let Some(bench) = bench.filter(|_| announced) else { return };
+        let (name, kind, parameters) = (instance.to_owned(), type_id.to_owned(), parameters.clone());
+        let registry = host.as_ref().map(|host| host.registry().clone()).unwrap_or_else(|| zlc_plugin_host::Registry::standalone("fabric-watch"));
+        let _ = std::thread::Builder::new().name("zlc-fabric-watch".into()).spawn(move || {
+            let lost = name.clone();
+            bench.watch(registry, &name, &kind, &parameters, move |reason| match host.as_ref().filter(|host| host.descriptor(&lost).is_some()) {
+                Some(host) => host.lost(&lost, reason),
+                None => reply(Event::Failed { instance: lost.clone(), error: reason.to_owned() }),
+            });
+        });
+    }
+
     fn turn(&self, instance: &str) -> (u64, Arc<Gate>) {
         let mut stand = self.0.borrow_mut();
         let entry = stand.lifecycles.entry(instance.to_owned()).or_insert_with(|| (0, Arc::new(Gate::default())));
@@ -526,6 +549,7 @@ impl Plugins for Builtin {
         })
     }
     fn open(&mut self, instance: &str, type_id: &str, parameters: &Value, context: &Value) {
+        self.watch(instance, type_id, parameters);
         if let Some(handler) = self.native_handler(Some(type_id), instance) {
             self.0.borrow_mut().native_instances.insert(instance.to_owned(), type_id.to_owned());
             handler(NativeRequest::Open { instance: instance.to_owned(), type_id: type_id.to_owned(), parameters: parameters.clone(), context: context.clone() });
@@ -543,7 +567,10 @@ impl Plugins for Builtin {
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Failed { instance: instance.into(), error }); }
     }
     fn close(&mut self, instance: &str) {
+        if let Some(bench) = self.bench() { bench.unwatch(instance); }
         if let Some(handler) = self.native_handler(None, instance) {
+            // The board this computer announces is taken back first, as a plugin device is (the computers watching it lose it).
+            if let Some(bench) = self.bench() { bench.withdraw_if_published(instance); }
             self.0.borrow_mut().native_instances.remove(instance);
             handler(NativeRequest::Close { instance: instance.to_owned() });
             return;

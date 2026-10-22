@@ -25,6 +25,9 @@ const INSTANCE_OPS: [&str; 6] = ["spi", "fields", "tune", "values", "command", "
 
 struct Offer { role: String, descriptor: Arc<TypeDescriptor>, attached: Option<(u64, String)> }
 
+/// A device with a server of its own: what it is announced as, and the cores watching it.
+struct Own { role: String, type_id: String, label: String, parameters: Value, watchers: Vec<u64> }
+
 struct Shared {
     host: PluginHost,
     bench: Bench,
@@ -34,7 +37,7 @@ struct Shared {
     closing: AtomicBool,
     offers: Mutex<BTreeMap<String, Offer>>,
     /// Devices with a server of their own (the pulse board): announced, never served here.
-    own: Mutex<BTreeMap<String, (String, String, String, Value)>>,
+    own: Mutex<BTreeMap<String, Own>>,
     in_flight: Mutex<HashMap<String, usize>>,
     settled: Condvar,
     /// Every authenticated connection's writer.
@@ -82,7 +85,7 @@ impl Publisher {
     /// itself came from the fabric (a relay loop).
     pub fn publish(&self, instance: &str, role: &str) -> Result<(), String> {
         let descriptor = self.shared.host.descriptor(instance).ok_or_else(|| format!("{instance} is not open"))?;
-        if descriptor.announces {
+        if !descriptor.announces.is_empty() {
             // A server of its own (v2 announce: a local SLM head): it admits other machines and
             // is announced as the client type they open there, as the pulse board is.
             let answer = self.shared.host.call(instance, "publish", json!({"published": true}), SAFE_DEADLINE).map_err(|error| error.message)?.value;
@@ -102,18 +105,17 @@ impl Publisher {
     /// Take a device back: off offer, its user told, its requests in flight
     /// finished, its outputs safe if it was in use, then usable here again.
     pub fn withdraw(&self, instance: &str) -> Result<(), String> {
-        if lock(&self.shared.own).remove(instance).is_some() {
+        if let Some(own) = lock(&self.shared.own).remove(instance) {
+            // The cores watching it lose it now, as a remote.device's user does.
+            for connection in own.watchers { self.shared.withdrawn(connection, instance); }
             // A plugin device's own server drops the other machines (the pulse board's host does its own).
-            let refused = self.shared.host.descriptor(instance).filter(|descriptor| descriptor.announces)
+            let refused = self.shared.host.descriptor(instance).filter(|descriptor| !descriptor.announces.is_empty())
                 .and_then(|_| self.shared.host.call(instance, "publish", json!({"published": false}), SAFE_DEADLINE).err());
             self.shared.note(instance, &format!("FABRIC WITHDRAW device={instance}{}", refused.map(|error| format!(" error={:?}", error.message)).unwrap_or_default()));
             return Ok(());
         }
         let offer = lock(&self.shared.offers).remove(instance).ok_or_else(|| format!("{instance} is not published"))?;
-        if let Some((connection, _)) = &offer.attached {
-            self.shared.tell(*connection, &json!({"t": "evt", "op": "withdrawn", "p": {"instance": instance,
-                "reason": format!("{} withdrew it from the bench fabric", self.shared.bench.name)}}));
-        }
+        if let Some((connection, _)) = &offer.attached { self.shared.withdrawn(*connection, instance); }
         let mut busy = lock(&self.shared.in_flight);
         let until = Instant::now() + WITHDRAW_WAIT;
         while busy.get(instance).copied().unwrap_or(0) > 0 && Instant::now() < until {
@@ -130,7 +132,7 @@ impl Publisher {
     /// announced its client type): the using core dials `parameters` itself, at
     /// the address it reached this one at.
     pub fn publish_own(&self, instance: &str, role: &str, type_id: &str, label: &str, parameters: Value) {
-        lock(&self.shared.own).insert(instance.to_owned(), (role.to_owned(), type_id.to_owned(), label.to_owned(), parameters));
+        lock(&self.shared.own).insert(instance.to_owned(), Own { role: role.to_owned(), type_id: type_id.to_owned(), label: label.to_owned(), parameters, watchers: Vec::new() });
         self.shared.note(instance, &format!("FABRIC PUBLISH device={instance} as {type_id} (its own server)"));
     }
 
@@ -138,7 +140,7 @@ impl Publisher {
     pub fn offers(&self) -> Vec<Value> {
         let mut offers: Vec<Value> = lock(&self.shared.offers).iter().map(|(instance, offer)| json!({"instance": instance, "role": offer.role,
             "in_use_by": offer.attached.as_ref().map(|(_, client)| client.clone())})).collect();
-        offers.extend(lock(&self.shared.own).iter().map(|(instance, (role, ..))| json!({"instance": instance, "role": role, "in_use_by": null})));
+        offers.extend(lock(&self.shared.own).iter().map(|(instance, own)| json!({"instance": instance, "role": own.role, "in_use_by": null})));
         offers
     }
 
@@ -182,6 +184,12 @@ impl Shared {
         if let Some(writer) = writer { let _ = send(&mut lock(&writer), message); }
     }
 
+    /// The core using or watching `instance` loses it: this computer took it back.
+    fn withdrawn(&self, connection: u64, instance: &str) {
+        self.tell(connection, &json!({"t": "evt", "op": "withdrawn", "p": {"instance": instance,
+            "reason": format!("{} withdrew it from the bench fabric", self.bench.name)}}));
+    }
+
     /// What a published device says for itself (its notices, its log) goes to
     /// the core using it, its arrays as blocks; nobody attached, nobody hears.
     fn forward(&self, instance: &str, op: &str, params: &Value, lends: Vec<Arc<Lend>>) {
@@ -212,11 +220,21 @@ impl Shared {
                     "instance_id": instance, "role": offer.role, "type_id": offer.descriptor.type_id, "label": offer.descriptor.label,
                     "family": offer.descriptor.family, "in_use_by": offer.attached.as_ref().map(|(_, holder)| holder.clone())})).collect();
                 // A device with its own server is announced as its client type at its own port.
-                devices.extend(lock(&self.own).iter().map(|(instance, (role, type_id, label, parameters))| json!({
-                    "instance_id": instance, "role": role, "type_id": type_id, "label": label, "own": true, "parameters": parameters})));
+                devices.extend(lock(&self.own).iter().map(|(instance, own)| json!({
+                    "instance_id": instance, "role": own.role, "type_id": own.type_id, "label": own.label, "own": true, "parameters": own.parameters})));
                 Ok((json!({"publisher": self.bench.name, "devices": devices}), Vec::new()))
             }
             "attach" => self.attach(connection, client, &instance).map(|value| (value, Vec::new())),
+            // A core using a device announced here (its client type at its own server) learns from
+            // this connection when it is withdrawn, or that this computer is gone (silence).
+            "watch" => {
+                let mut own = lock(&self.own);
+                let (instance, watched) = own.iter_mut().find(|(_, own)| own.type_id == params["type_id"].as_str().unwrap_or_default()
+                        && own.parameters["port"] == params["port"])
+                    .ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{} announces no {} at port {}", self.bench.name, params["type_id"], params["port"])))?;
+                if !watched.watchers.contains(&connection) { watched.watchers.push(connection); }
+                Ok((json!({"instance": instance, "publisher": self.bench.name}), Vec::new()))
+            }
             "detach" => {
                 let released = {
                     let mut offers = lock(&self.offers);
@@ -326,6 +344,7 @@ fn connection(shared: Arc<Shared>, mut stream: TcpStream, id: u64) {
         }
     };
     lock(&shared.peers).remove(&id);
+    for own in lock(&shared.own).values_mut() { own.watchers.retain(|watcher| *watcher != id); }
     let _ = lock(&writer).shutdown(std::net::Shutdown::Both);
     // What this user held stays on offer for its return; what it drove is made safe now.
     let released: Vec<(String, Arc<TypeDescriptor>)> = lock(&shared.offers).iter_mut()

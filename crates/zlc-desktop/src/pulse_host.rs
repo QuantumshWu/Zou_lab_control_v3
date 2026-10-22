@@ -294,6 +294,9 @@ fn open_device(type_id: &str, parameters: &Value, narrate: Box<dyn Fn(String) + 
     Ok((board, child))
 }
 
+/// What the board on this computer is announced as (v2 _announce_local): other computers open it there.
+pub const ANNOUNCED_AS: &str = "sequencer.hardware";
+
 /// The native device types as the workbench reads descriptors.
 pub fn device_descriptors() -> Vec<Value> {
     let config_file = json!({"name": "config_file", "type": "str", "label": "Config file (optional)", "default": "",
@@ -305,7 +308,7 @@ pub fn device_descriptors() -> Vec<Value> {
         "type_id": type_id, "kind": "device", "family": "sequencer", "label": label, "description": description, "module": "zlc_pulse (native)",
         "process_group": group, "capabilities": ["sequencer.streamer"], "parameters": parameters, "physical_outputs": output, "commands": [],
         "addable": true});
-    vec![
+    let mut types = vec![
         common("sequencer.virtual", "Virtual sequencer", "The pulse board's memory twin, played at wall time into the simulated world \
                 (simulation.board): the virtual apparatus' sequencer.", Some("simulation"), json!([config_file])),
         common("sequencer.hardware", "Pulse server", "The real pulse board, reached over the network through the pulse server that owns it.",
@@ -320,7 +323,9 @@ pub fn device_descriptors() -> Vec<Value> {
                       {"name": "uart_port", "type": "str", "label": "UART port (blank = probe)", "default": ""},
                       {"name": "port", "type": "int", "label": "Serve on port", "default": zlc_pulse::remote::DEFAULT_PORT, "minimum": 1, "maximum": 65535},
                       config_file])),
-    ]
+    ];
+    for item in &mut types { if item["type_id"] == "sequencer.local" { item["announces"] = json!(ANNOUNCED_AS); } }
+    types
 }
 
 impl PulseHost {
@@ -660,6 +665,16 @@ impl PulseHost {
             post(PulseEvent::Closed { instance: instance.to_owned(), error: None });
             return;
         }
+        self.let_go(instance, true);
+    }
+
+    /// The board's computer is gone (the workbench holds the device failed): the editor lets it go, nobody is told it closed.
+    pub fn lose_device(&mut self, instance: &str) {
+        if self.given.as_ref().is_some_and(|given| given.instance == instance) { self.let_go(instance, false); }
+    }
+
+    fn let_go(&mut self, instance: &str, closed: bool) {
+        let post = self.post.clone();
         let given = self.given.take().expect("checked");
         let board = self.editor.board().cloned();
         self.editor.detach_given();
@@ -670,7 +685,7 @@ impl PulseHost {
             let error = board.and_then(|board| board.close().err()).map(|error| error.message);
             if let Some(served) = given.child { served.end(); }
             if let (Some(host), Some(world)) = (plugins, &given.world) { let _ = host.close(world); }
-            post(PulseEvent::Closed { instance, error });
+            if closed { post(PulseEvent::Closed { instance, error }); }
         });
     }
 

@@ -561,8 +561,8 @@ def _publish(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
     if declared.announce is None or instance.admit_peers is None:
         raise PluginError("invalid", f"{instance.name} has no server of its own to announce")
     instance.admit_peers(bool(params.get("published")))
-    type_id, endpoint = declared.announce(dict(instance.values))
-    return {"type_id": str(type_id), "parameters": dict(endpoint)}
+    type_id, endpoint = declared.announce
+    return {"type_id": str(type_id), "parameters": dict(endpoint(dict(instance.values)))}
 
 
 def _make_safe(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:

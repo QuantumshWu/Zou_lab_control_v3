@@ -380,6 +380,8 @@ pub struct PluginHost { inner: Arc<Inner> }
 
 const OPEN_DEADLINE: Duration = Duration::from_secs(180);
 const CALL_DEADLINE: Duration = Duration::from_secs(120);
+/// How long a lost device's client may take to let its dead server go.
+const LOST_CLOSE: Duration = Duration::from_secs(10);
 /// How long an instance may take to close when the application ends.
 const SHUTDOWN_CLOSE: Duration = Duration::from_secs(3);
 const SAFE_DEADLINE: Duration = Duration::from_secs(2);
@@ -506,14 +508,13 @@ impl PluginHost {
     /// Whether an open device speaks the tunable quartet.
     pub fn tunable(&self, instance: &str) -> bool { self.inner.state.lock().unwrap().instances.get(instance).is_some_and(|entry| entry.tunable) }
 
-    /// An endpoint is gone for good: the instance is lost as a crashed plugin's is
-    /// (v2's error state; Apply opens it again).
-    pub fn endpoint_lost(&self, instance: &str, reason: &str) {
-        let descriptor = {
-            let state = self.inner.state.lock().unwrap();
-            match state.instances.get(instance) { Some(entry) if matches!(entry.serving, Serving::Remote(_)) => entry.descriptor.clone(), _ => return }
-        };
-        self.inner.forget(instance, &descriptor);
+    /// A device whose other computer is gone for good (zlc-fabric decides: it withdrew
+    /// the device, or fell silent): whether the device is served through the fabric or is
+    /// a client of that computer's own server, it leaves this core as a crashed plugin's
+    /// does (v2's error state; Apply opens it again).
+    pub fn lost(&self, instance: &str, reason: &str) {
+        if !self.inner.state.lock().unwrap().instances.get(instance).is_some_and(|entry| entry.descriptor.is_device()) { return; }
+        let _ = self.close_within(instance, LOST_CLOSE);
         (self.inner.events)(HostEvent::Failed { instances: vec![instance.to_owned()], reason: reason.to_owned() });
     }
 

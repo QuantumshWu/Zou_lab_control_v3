@@ -63,7 +63,7 @@ def _served(key, values):
 
 DEVICE_TYPES = (
     DeviceType("test.served", "test", SERVED, ("test.echo",), factory=_served,
-               announce=lambda values: ("test.echo", {"port": int(values["port"])})),
+               announce=("test.echo", lambda values: {"port": int(values["port"])})),
     DeviceType("test.echo", "test", SCHEMA, ("test.echo",), factory=lambda key, values: EchoDevice(values),
                physical_outputs=(PhysicalOutput("beam"),),
                commands=(Command("frame_total", "Total of a test frame.", read_only=True,

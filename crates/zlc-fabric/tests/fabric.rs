@@ -46,7 +46,7 @@ fn attach(core: &Core, port: u16, instance: &str, local: &str, bench: Bench) -> 
     link.on_event(move |op, params, lends| told.remote_event(&name, op, params, lends));
     core.host.attach(local, attached.descriptor, Arc::new(link.clone()), attached.tunable).unwrap();
     let (lost, name) = (core.host.clone(), local.to_owned());
-    link.on_failure(|_| {}, move |reason| lost.endpoint_lost(&name, reason));
+    link.on_failure(|_| {}, move |reason| lost.lost(&name, reason));
     link
 }
 
@@ -167,8 +167,16 @@ fn a_device_with_its_own_server_is_announced_as_the_client_type_another_machine_
     assert_eq!(found.len(), 1, "{found:?} {notes:?}");
     assert_eq!((found[0]["instance_id"].as_str(), found[0]["type_id"].as_str()), (Some("remote_served"), Some("test.echo")));
     assert_eq!(found[0]["parameters"], json!({"port": 18990, "host": "127.0.0.1"}));
+    // A core using it as that client watches the announcement: the withdrawal reaches it as a remote.device's does.
+    assert!(Link::watch("127.0.0.1", publisher.port(), "test.echo", &json!(1), bench("pc1"), b.host.registry().clone()).is_err(), "nothing there");
+    let watch = Link::watch("127.0.0.1", publisher.port(), "test.echo", &json!(18990), bench("pc1"), b.host.registry().clone()).unwrap();
+    let (sender, lost) = mpsc::channel();
+    let sender = Mutex::new(sender);
+    watch.on_failure(|_| {}, move |reason| { let _ = sender.lock().unwrap().send(reason.to_owned()); });
     publisher.withdraw("served").unwrap();
     assert_eq!(admitted(), json!([true, false]));
+    let reason = lost.recv_timeout(Duration::from_secs(5)).expect("the watch is told");
+    assert!(reason.contains("withdrew"), "{reason}");
     drop(publisher);
     a.host.shutdown();
     b.host.shutdown();

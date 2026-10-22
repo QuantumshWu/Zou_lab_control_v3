@@ -39,6 +39,8 @@ struct Shared {
     host: String,
     port: u16,
     instance: String,
+    /// What each connection asks first: `attach` (a device served here) or `watch` (one announced here).
+    first: (&'static str, Value),
     bench: Bench,
     registry: Arc<Registry>,
     state: Mutex<State>,
@@ -75,13 +77,32 @@ fn dial(host: &str, port: u16) -> Result<TcpStream, String> {
 }
 
 impl Link {
+    fn new(host: &str, port: u16, instance: &str, first: (&'static str, Value), bench: Bench, registry: Arc<Registry>) -> Link {
+        Link(Arc::new(Shared { host: host.trim().to_owned(), port, instance: instance.trim().to_owned(), first, bench, registry,
+            state: Mutex::new(State { status: Status::Relinking, writer: None, generation: 0 }), changed: Condvar::new(),
+            pending: Mutex::default(), next: AtomicU64::new(1), log: Mutex::default(), broke: Mutex::new(None), lost: Mutex::new(None), told: Mutex::new(None) }))
+    }
+
     /// Dial `host:port` and attach its published `instance`.
     pub fn open(host: &str, port: u16, instance: &str, bench: Bench, registry: Arc<Registry>) -> Result<(Link, Attached), String> {
-        let link = Link(Arc::new(Shared { host: host.trim().to_owned(), port, instance: instance.trim().to_owned(), bench, registry,
-            state: Mutex::new(State { status: Status::Relinking, writer: None, generation: 0 }), changed: Condvar::new(),
-            pending: Mutex::default(), next: AtomicU64::new(1), log: Mutex::default(), broke: Mutex::new(None), lost: Mutex::new(None), told: Mutex::new(None) }));
-        match link.connect() {
+        let link = Link::new(host, port, instance, ("attach", json!({"instance": instance.trim()})), bench, registry);
+        let attached = link.connect().and_then(|value| {
+            let descriptor: TypeDescriptor = serde_json::from_value(value["descriptor"].clone()).map_err(|error| format!("the publisher's descriptor: {error}"))?;
+            Ok(Attached { descriptor, role: value["role"].as_str().unwrap_or("").to_owned(), tunable: value["tunable"] == true,
+                          publisher: value["publisher"].as_str().unwrap_or("").to_owned() })
+        });
+        match attached {
             Ok(attached) => { link.note(format!("FABRIC LINKED device={} at {}:{} publisher={}", link.0.instance, link.0.host, link.0.port, attached.publisher)); Ok((link, attached)) }
+            Err(error) => { link.shut(Status::Closed); Err(error) }
+        }
+    }
+
+    /// Dial `host:port` and watch what it announces as `type_id` at its own server's `server_port`:
+    /// the link breaks, relinks and is lost exactly as a served device's does (withdrawn, silent).
+    pub fn watch(host: &str, port: u16, type_id: &str, server_port: &Value, bench: Bench, registry: Arc<Registry>) -> Result<Link, String> {
+        let link = Link::new(host, port, &format!("{type_id} at {}:{server_port}", host.trim()), ("watch", json!({"type_id": type_id, "port": server_port})), bench, registry);
+        match link.connect() {
+            Ok(answer) => { link.note(format!("FABRIC WATCHING {} publisher={}", answer["instance"], answer["publisher"])); Ok(link) }
             Err(error) => { link.shut(Status::Closed); Err(error) }
         }
     }
@@ -106,10 +127,10 @@ impl Link {
         log.push_back(line);
     }
 
-    /// One connection: handshake, its reader and beat, then the attach on it.
-    fn connect(&self) -> Result<Attached, String> {
+    /// One connection: handshake, its reader and beat, then its first request (attach or watch).
+    fn connect(&self) -> Result<Value, String> {
         let mut stream = dial(&self.0.host, self.0.port)?;
-        let publisher = client_handshake(&mut stream, &self.0.bench, &self.0.registry)?;
+        client_handshake(&mut stream, &self.0.bench, &self.0.registry)?;
         let writer = Arc::new(Mutex::new(stream.try_clone().map_err(|error| error.to_string())?));
         let generation = {
             let mut state = lock(&self.0.state);
@@ -127,21 +148,17 @@ impl Link {
                 std::thread::sleep(BEAT);
             }
         });
-        let answer = self.exchange(generation, "attach", json!({"instance": self.0.instance}), Vec::new(), Duration::from_secs(10));
-        let attached = answer.map_err(|error| error.message).and_then(|(value, _)| {
-            let descriptor: TypeDescriptor = serde_json::from_value(value["descriptor"].clone()).map_err(|error| format!("the publisher's descriptor: {error}"))?;
-            Ok(Attached { descriptor, role: value["role"].as_str().unwrap_or("").to_owned(), tunable: value["tunable"] == true,
-                          publisher: value["publisher"].as_str().unwrap_or(&publisher).to_owned() })
-        });
+        let (op, params) = &self.0.first;
+        let answer = self.exchange(generation, op, params.clone(), Vec::new(), Duration::from_secs(10)).map(|(value, _)| value).map_err(|error| error.message);
         let mut state = lock(&self.0.state);
-        match &attached {
+        match &answer {
             Ok(_) if state.generation == generation => { state.status = Status::Up; self.0.changed.notify_all(); }
             _ => {
                 if state.generation == generation { state.writer = None; state.generation += 1; }
                 let _ = lock(&writer).shutdown(std::net::Shutdown::Both);
             }
         }
-        attached
+        answer
     }
 
     /// Frames from the publisher until the connection ends.

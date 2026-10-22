@@ -2,12 +2,13 @@
 //! publishes (the Device Manager's Remote switch) and the devices of other
 //! computers it opens as `remote.device` rows. No key: as v2's fabric, a
 //! computer is reachable only while Remote is on for one of its devices.
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use zlc_fabric::{Link, Publisher};
-use zlc_plugin_host::{CallError, ErrorKind, PluginHost};
+use zlc_plugin_host::{CallError, Endpoint, ErrorKind, PluginHost, Registry};
 
 /// A fabric line for a device's log: (instance, line).
 pub type Note = Arc<dyn Fn(&str, &str) + Send + Sync>;
@@ -17,6 +18,8 @@ struct Inner {
     /// Shared out of the lock: a withdrawal waits on the device, the state never does.
     publisher: Mutex<Option<Arc<Publisher>>>,
     note: Note,
+    /// Clients of another computer's own server, watched on the fabric: instance -> link.
+    watches: Mutex<BTreeMap<String, Link>>,
 }
 
 #[derive(Clone)]
@@ -26,7 +29,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { mutex.lock().unwr
 
 impl Bench {
     pub fn new(note: Note) -> Bench {
-        Bench(Arc::new(Inner { bench: zlc_fabric::Bench::new(), publisher: Mutex::new(None), note }))
+        Bench(Arc::new(Inner { bench: zlc_fabric::Bench::new(), publisher: Mutex::new(None), note, watches: Mutex::default() }))
     }
 
     fn bench(&self) -> zlc_fabric::Bench { self.0.bench.clone() }
@@ -51,9 +54,34 @@ impl Bench {
         }
         let (lost, name) = (host.clone(), instance.to_owned());
         let (noted, again) = (self.0.note.clone(), instance.to_owned());
-        link.on_failure(move |reason| noted(&name, &format!("FABRIC BROKE {reason}")), move |reason| lost.endpoint_lost(&again, reason));
+        link.on_failure(move |reason| noted(&name, &format!("FABRIC BROKE {reason}")), move |reason| lost.lost(&again, reason));
         (self.0.note)(instance, &format!("FABRIC LINKED {} on {} ({}:{port})", published, attached.publisher, address));
         Ok(point)
+    }
+
+    /// Watch `instance`, a client of another computer's own server (`type_id`, announced
+    /// there: the pulse board as sequencer.hardware, the SLM head as slm.hamamatsu_x15213):
+    /// when a bench computer at its `host` announces that server, the fabric says when that
+    /// computer withdraws it or goes away -- the link, beats and words a remote.device's are
+    /// lost by -- and `lost` is told why. A server no bench computer announces is not watched.
+    pub fn watch(&self, registry: Arc<Registry>, instance: &str, type_id: &str, parameters: &Value, lost: impl Fn(&str) + Send + Sync + 'static) {
+        let Some(host) = parameters["host"].as_str().map(str::trim).filter(|host| !host.is_empty()) else { return };
+        // Where a fabric listens on that host: a named peer there, else this bench's port.
+        let mut ports: Vec<u16> = zlc_fabric::named_peers().iter().filter_map(|peer| match peer.rsplit_once(':') {
+            Some((name, port)) => (name == host).then(|| port.parse().ok()).flatten(),
+            None => (peer == host).then_some(zlc_fabric::DEFAULT_PORT),
+        }).collect();
+        ports.push(zlc_fabric::port());
+        let Some(link) = ports.into_iter().find_map(|port| Link::watch(host, port, type_id, &parameters["port"], self.bench(), registry.clone()).ok()) else { return };
+        let (noted, name) = (self.0.note.clone(), instance.to_owned());
+        link.on_failure(move |reason| noted(&name, &format!("FABRIC BROKE {reason}")), lost);
+        if let Some(old) = lock(&self.0.watches).insert(instance.to_owned(), link) { old.close(); }
+    }
+
+    /// The device closed here: nothing to watch for it any more.
+    pub fn unwatch(&self, instance: &str) {
+        let link = lock(&self.0.watches).remove(instance);
+        if let Some(link) = link { link.close(); }
     }
 
     /// Remote on or off for an open device of this computer.
