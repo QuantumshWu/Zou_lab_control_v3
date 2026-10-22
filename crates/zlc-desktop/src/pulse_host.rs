@@ -328,6 +328,10 @@ pub fn device_descriptors() -> Vec<Value> {
                       config_file])),
     ];
     for item in &mut types { if item["type_id"] == "sequencer.local" { item["announces"] = json!(ANNOUNCED_AS); } }
+    // The board a row names (v2 pulse_board_identity): one pulse server serves one board, here or reached over the network.
+    for (type_id, identity) in [("sequencer.hardware", "pulse-server:{host}:{port}"), ("sequencer.local", "pulse-server:127.0.0.1:{port}")] {
+        if let Some(item) = types.iter_mut().find(|item| item["type_id"] == type_id) { item["identity"] = json!(identity); }
+    }
     types
 }
 

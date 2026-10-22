@@ -107,6 +107,10 @@ instance's own process through `query` (section 5): `declare_outputs`,
 `admit_resources`, `estimate_run`, `selection_patch`, `describe_output_frames`.
 `queries` lists which ones a type implements. They are pure functions of the
 draft values, resolved devices (as proxies) and resources; they never start work.
+Every node also answers `admit(values, resources, artifacts)` (the SDK, v2
+`finalize_logic_draft`): the draft projected by its schema with the cross-field
+validator, the type's `admit_resources`, and each artifact file decoded; its answers,
+like any draft query that fails, are the draft's issues and Start waits for it.
 `editor_facts(values, resources, devices, source)` answers the model of a node's own
 editor, `{editor: kind, manages: [field, ...], ...}`: the UI's editor of that kind
 draws it in place of the fields it manages and writes them back with `edit_node`; it
@@ -121,7 +125,9 @@ columns, cells}`, `selected`, `states`, `tips`, `identity`, `override_rows/_cell
 `resolve_device_claims(values)` answers `{argument: {instance, fields}}`: devices
 the draft itself names (a scan's `device:<key>:<field>` axes), beside the declared
 requirements; the core claims those fields for the run (Device Control cannot
-move them meanwhile) and passes each device as `argument` (a tunable proxy).
+move them meanwhile) and passes each device as `argument` (a tunable proxy). Such a
+claim shares the device (v2's runtime claim, `RunRequest.shared`): it conflicts with
+no other run's claim, while two exclusive claims never hold one device.
 `resolve_field_choices(values, resources)` answers `{field: [[value, label], ...]}`
 for fields whose options come from the draft (an SLM rearrangement's imaging
 periods are the chosen pulse's periods); the form shows that field as a choice,

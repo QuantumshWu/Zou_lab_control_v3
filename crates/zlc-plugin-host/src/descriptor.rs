@@ -56,6 +56,9 @@ pub struct TypeDescriptor {
     /// type another machine opens there (the instance op `publish`), as the pulse board's.
     #[serde(default)]
     pub announces: String,
+    /// The physical instrument a row names, over its parameters (`rigol-dg4000:{resource}`).
+    #[serde(default)]
+    pub identity: String,
 }
 
 fn yes() -> bool { true }

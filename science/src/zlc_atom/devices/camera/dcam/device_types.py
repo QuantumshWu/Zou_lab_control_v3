@@ -92,6 +92,7 @@ DEVICE_TYPES = (
         DCAM_CAMERA_SCHEMA,
         ("camera.adapter",),
         factory=_dcam_factory,
+        identity="dcam-camera:index={device_index}",
         label="Hamamatsu qCMOS (DCAM)",
         description=(
             "Hamamatsu ORCA-Quest qCMOS over DCAM-API: externally triggered (rising edge) "

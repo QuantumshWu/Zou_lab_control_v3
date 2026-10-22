@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use zlc_core::control::{Origin, SafeActions};
+use zlc_core::control::{Origin, SafeActions, public_instance};
 use zlc_core::runtime::{Bundle, Declaration, DeliveryKind, DeliveryPolicy, Generation, GenerationId, HistoryLease, Input, Read, ReadKind,
     ReadMode, ReadRequest, RunRecord, Runtime, RuntimeError, Start, Storage, Subscription};
 use zlc_core::schema::{DatasetSchema, DomainRole};
@@ -276,6 +276,8 @@ pub struct RunRequest {
     pub values: Value,
     /// Device instance per requirement argument.
     pub devices: BTreeMap<String, String>,
+    /// The arguments whose device the run shares (a scan's device axis); it takes every other one exclusively.
+    pub shared: std::collections::BTreeSet<String>,
     pub origin: Origin,
     pub resources: Value,
     /// A processor's input: the signal its deliveries come from (§5).
@@ -311,8 +313,9 @@ struct Instance {
     tunable: bool,
     /// The read-only methods the opened device implements (its open reply): what a draft query may call.
     reads: Vec<String>,
-    /// The run that claimed this device.
-    claimed_by: Option<String>,
+    /// The runs that claim this device, each exclusively or not (v2 DeviceClaim): two
+    /// exclusive claims never hold one device; a shared one (a scan's axis) sits beside either.
+    claims: Vec<(String, bool)>,
     /// Handed to another core (`lend_out`): nothing here may use it until taken
     /// back, and what it says for itself goes to that core.
     published: Option<Forward>,
@@ -532,7 +535,7 @@ impl PluginHost {
         if matches!(entry.serving, Serving::Remote(_)) {
             return Err(CallError::new(ErrorKind::Refused, format!("{instance} already comes from the bench fabric -- publish it on the machine that owns it")));
         }
-        if let Some(run) = &entry.claimed_by { return Err(CallError::new(ErrorKind::Refused, format!("{instance} is claimed by run {run}"))); }
+        if let Some((run, _)) = entry.claims.first() { return Err(CallError::new(ErrorKind::Refused, format!("{instance} is claimed by run {run}"))); }
         entry.published = Some(forward);
         Ok(())
     }
@@ -619,7 +622,7 @@ impl PluginHost {
         let state = self.inner.state.lock().unwrap();
         let entry = state.instances.get(instance).ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not open")))?;
         if entry.published.is_some() { return Err(published_refusal(instance)); }
-        if let Some(run) = &entry.claimed_by { return Err(CallError::new(ErrorKind::NotClaimed, format!("{instance} is claimed by run {run}"))); }
+        if let Some((run, _)) = entry.claims.first() { return Err(CallError::new(ErrorKind::NotClaimed, format!("{instance} is claimed by run {run}"))); }
         Ok(())
     }
 
@@ -708,14 +711,17 @@ impl PluginHost {
             for (argument, device) in &request.devices {
                 let target = state.instances.get(device).filter(|target| target.descriptor.is_device())
                     .ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{device} is not an open device")))?;
-                if let Some(owner) = &target.claimed_by {
+                let exclusive = !request.shared.contains(argument);
+                if let Some((owner, _)) = target.claims.iter().find(|(_, held)| exclusive && *held) {
                     return Err(CallError::new(ErrorKind::Refused, format!("{device} is claimed by run {owner}")));
                 }
                 if target.published.is_some() { return Err(published_refusal(device)); }
                 devices.insert(argument.clone(), json!({"instance": device, "type_id": target.descriptor.type_id,
                     "capabilities": target.descriptor.capabilities, "tunable": target.tunable}));
             }
-            for device in request.devices.values() { state.instances.get_mut(device).unwrap().claimed_by = Some(run.clone()); }
+            for (argument, device) in &request.devices {
+                state.instances.get_mut(device).unwrap().claims.push((run.clone(), !request.shared.contains(argument)));
+            }
             state.instances.get_mut(instance).unwrap().run = Some(RunState { id: run.clone(), origin: request.origin.clone(),
                 devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, route, outputs: HashMap::new(),
                 histories: Vec::new() });
@@ -871,7 +877,7 @@ impl Inner {
     /// An opened instance joins the host: its outputs Stop all, its commands the catalogue.
     fn admit(self: &Arc<Self>, instance: &str, descriptor: Arc<TypeDescriptor>, serving: Serving, tunable: bool, reads: Vec<String>) -> Result<(), CallError> {
         self.state.lock().unwrap().instances.insert(instance.to_owned(),
-            Instance { descriptor: descriptor.clone(), serving, tunable, reads, claimed_by: None, published: None, run: None });
+            Instance { descriptor: descriptor.clone(), serving, tunable, reads, claims: Vec::new(), published: None, run: None });
         for output in &descriptor.physical_outputs {
             let (weak, name, port) = (Arc::downgrade(self), instance.to_owned(), output.name.clone());
             self.safe.register(&format!("{instance}/{}", output.name), Arc::new(move || {
@@ -929,7 +935,7 @@ impl Inner {
             state.followers.retain(|follower| !(follower.instance == instance && follower.run == run));
             for device in ended.devices.values() {
                 if let Some(target) = state.instances.get_mut(device) {
-                    if target.claimed_by.as_deref() == Some(run) { target.claimed_by = None; }
+                    target.claims.retain(|(owner, _)| owner != run);
                 }
             }
             ended
@@ -1105,7 +1111,7 @@ impl Inner {
         let run = Self::run_of(&mut state, params)?;
         if run.generation.is_some() { return Err(CallError::new(ErrorKind::Refused, "this run already declared its outputs")); }
         let declarations = declarations.into_iter().map(|(name, schema, finite)| {
-            let signal: Arc<str> = run.signals.get(&name).cloned().unwrap_or_else(|| format!("{instance}/{name}")).into();
+            let signal: Arc<str> = run.signals.get(&name).cloned().unwrap_or_else(|| format!("{}/{name}", public_instance(&instance))).into();
             outputs.insert(name, OutputState { signal: signal.clone(), schema: schema.clone(), finite, chunk: None });
             Declaration { signal, schema, storage: if finite { Storage::Finite } else { Storage::Latest } }
         }).collect();
@@ -1114,8 +1120,8 @@ impl Inner {
         // A run consuming a source commits each result with the event it is of: the
         // Runtime selects a picture and its judgement as one shot through this route.
         let generation = match run.route.clone() {
-            Some((source, of)) => self.runtime.begin_consuming(instance.as_str(), declarations, record, source, of),
-            None => self.runtime.begin(instance.as_str(), declarations, record),
+            Some((source, of)) => self.runtime.begin_consuming(public_instance(&instance), declarations, record, source, of),
+            None => self.runtime.begin(public_instance(&instance), declarations, record),
         }.map_err(|error| CallError::from(error.to_string()))?;
         let id = generation.id().as_uuid().to_string();
         run.generation = Some(generation);
@@ -1185,7 +1191,7 @@ impl Inner {
         let own = {
             let mut state = self.state.lock().unwrap();
             let instance = params["instance"].as_str().unwrap_or("");
-            asked.strip_prefix(&format!("{instance}/")).and_then(|output| Self::run_of(&mut state, params).ok()
+            asked.strip_prefix(&format!("{}/", public_instance(instance))).and_then(|output| Self::run_of(&mut state, params).ok()
                 .and_then(|run| run.outputs.get(output).map(|declared| declared.signal.to_string())))
         };
         let signal = own.as_deref().unwrap_or(asked);

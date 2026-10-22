@@ -27,6 +27,9 @@ pub struct TypeDescriptor {
     pub queries: Vec<String>,
     /// The window its Control opens instead of the field form (`slm-editor`); empty for the form.
     pub control_window: String,
+    /// The physical instrument a row of this type names, from its settings (v2's bound
+    /// identity): `rigol-dg4000:{resource}`. Empty: every row is its own instrument.
+    pub identity: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

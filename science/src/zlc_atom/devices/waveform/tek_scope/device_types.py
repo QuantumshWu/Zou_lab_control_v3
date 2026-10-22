@@ -58,6 +58,7 @@ DEVICE_TYPES = (
         TEK_SCOPE_SCHEMA,
         ("waveform.source",),
         factory=_factory,
+        identity="visa:{resource}",
         label="Tektronix oscilloscope",
         description=(
             "Tektronix DPO/MSO/MDO/TDS scope over VISA: one record per single-sequence "

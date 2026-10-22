@@ -200,6 +200,10 @@ class DeviceType:
     #: Remote on then announces that, and the factory's ``Opened.admit_peers`` opens the
     #: server to other machines; any other device is served by the bench fabric itself.
     announce: tuple[str, Callable[[Mapping[str, Any]], Mapping[str, Any]]] | None = None
+    #: The physical instrument a row names, over its parameters (v2's bound identity):
+    #: ``"rigol-dg4000:{resource}"``. The core refuses a second row naming one already
+    #: bound, before opening it. Empty: every row is its own instrument (a virtual one).
+    identity: str = ""
 
     def __post_init__(self) -> None:
         if not self.type_id or not self.family:
@@ -232,6 +236,7 @@ class DeviceType:
             "queries": ["discover"] if self.discover is not None else [], "addable": self.addable,
             "concurrent": list(self.concurrent), "control_window": self.control_window,
             "announces": self.announce[0] if self.announce is not None else "",
+            "identity": self.identity,
         }
 
 
@@ -301,6 +306,10 @@ QUERY_PARAMETERS: dict[str, tuple[str, ...]] = {
     "describe_output_frames": ("values", "output_name", "source"),
 }
 NODE_QUERIES = tuple(QUERY_PARAMETERS)
+#: Every node answers it, from its schema, admit_resources and artifact codecs (host._admit).
+ADMIT = "admit"
+#: A logic node's plugin instance is named under this prefix (zlc_core::control::NODE_INSTANCE).
+NODE_INSTANCE = "node/"
 #: The draft queries a node type answers for its default draft in its catalogue entry
 #: (``node.answers``): a node just added is drawn from them at once, its own process's
 #: answers replacing them when they land.
@@ -453,10 +462,10 @@ class NodeType:
                 "answers": self.first_answers(parameters),
             },
             "queries": [name for name in NODE_QUERIES if getattr(self, name) is not None]
-                       + (["selection_patch"] if self.selection_mappings else []),
+                       + [ADMIT] + (["selection_patch"] if self.selection_mappings else []),
         }
 
 
-__all__ = ["Command", "DatasetInput", "DatasetOutputDeclaration", "DeviceRequirement", "DeviceType",
+__all__ = ["ADMIT", "NODE_INSTANCE", "Command", "DatasetInput", "DatasetOutputDeclaration", "DeviceRequirement", "DeviceType",
            "NODE_QUERIES", "QUERY_PARAMETERS", "NodeKind", "NodeType", "Opened", "PhysicalOutput",
            "field_json", "object_schema"]

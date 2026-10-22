@@ -106,6 +106,7 @@ pub fn catalog() -> Value {
 mod tests {
     use super::*;
     use crate::{Event, Workbench, workspace};
+    use zlc_core::control::node_instance;
     use zlc_core::control::Origin;
 
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -169,7 +170,7 @@ mod tests {
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "seamless_scan", "values": {"acquisition_logic": "camera_measurement"},
             "source_signal": "@logic/camera_measurement/frames"})).unwrap();
         for node in ["camera_measurement", "seamless_scan"] {
-            workbench.on_event(Event::Opened { instance: node.into(), working_point: Value::Null }, &mut host);
+            workbench.on_event(Event::Opened { instance: node_instance(node), working_point: Value::Null }, &mut host);
         }
         assert_eq!(workbench.node("camera_measurement").unwrap().draft.device_keys["camera"], "mot_camera");
         apply(&mut workbench, &mut host, "start_node", json!({"node": "seamless_scan"})).unwrap();
@@ -246,7 +247,7 @@ mod tests {
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
         workbench.on_event(Event::Opened { instance: "rf".into(), working_point: json!({"state": "open", "tunable": true}) }, &mut host);
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "device_scan", "values": {"plan": "device:rf:frequency"}})).unwrap();
-        workbench.on_event(Event::Opened { instance: "device_scan".into(), working_point: Value::Null }, &mut host);
+        workbench.on_event(Event::Opened { instance: node_instance("device_scan"), working_point: Value::Null }, &mut host);
         let asked = |name: &str| calls.borrow().2.iter().rev().find(|(query, ..)| query == name).cloned().unwrap();
         let (_, ticket, args) = asked("editor_facts");
         assert_eq!(args["devices"]["tunable:rf"]["instance"], "rf", "the editor is offered every tunable device");
@@ -297,7 +298,7 @@ mod tests {
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "windows"})).unwrap();
         let first = drawn(&workbench, &host);
         assert_eq!((&first.0["kind"], &first.0["value"], &first.1), (&json!("choice"), &json!("short"), &json!("not started")));
-        workbench.on_event(Event::Opened { instance: "windows".into(), working_point: Value::Null }, &mut host);
+        workbench.on_event(Event::Opened { instance: node_instance("windows"), working_point: Value::Null }, &mut host);
         answer(&mut workbench, &mut host);
         assert_eq!(drawn(&workbench, &host), first, "its own answers change nothing its type's had drawn");
         apply(&mut workbench, &mut host, "edit_node", json!({"node": "windows", "values": {"samples": 250}})).unwrap();
@@ -323,7 +324,7 @@ mod tests {
         let mut host = FakeHost::default();
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "survival", "source_signal": "@logic/camera_measurement/frames"})).unwrap();
-        for node in ["camera_measurement", "survival"] { workbench.on_event(Event::Opened { instance: node.into(), working_point: Value::Null }, &mut host); }
+        for node in ["camera_measurement", "survival"] { workbench.on_event(Event::Opened { instance: node_instance(node), working_point: Value::Null }, &mut host); }
         let asked = |name: &str| calls.borrow().2.iter().rev().find(|(query, ..)| query == name).cloned().unwrap();
         assert_eq!(asked("editor_facts").2["source"], Value::Null, "nothing answered yet");
         let (_, ticket, args) = asked("describe_output_frames");
@@ -347,7 +348,7 @@ mod tests {
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "derive", "source_signal": "@logic/camera_measurement/frames"})).unwrap();
         workbench.on_runtime(&mut host);
-        workbench.on_event(Event::Opened { instance: "derive".into(), working_point: Value::Null }, &mut host);
+        workbench.on_event(Event::Opened { instance: node_instance("derive"), working_point: Value::Null }, &mut host);
         let asked = |name: &str| calls.borrow().2.iter().rev().find(|(query, ..)| query == name).cloned();
         assert_eq!(asked("editor_facts").unwrap().2["bundle"], json!([{"name": "frames", "schema": null, "event_schema": null}]));
         assert!(asked("admit_source").is_none(), "nothing to admit before the members publish");
@@ -620,7 +621,7 @@ mod tests {
         let root = scratch("layout-entries");
         let (mut workbench, _calls) = workbench(&root);
         let mut host = FakeHost::default();
-        // A device called as a node of the layout is: the node gets a fresh internal ID here.
+        // A device called as a node of the layout is: both keep their ids (nodes are named apart, as in v2).
         apply(&mut workbench, &mut host, "add_device", json!({"type_id": "camera.virtual_mot", "instance_id": "camera_measurement"})).unwrap();
         let layout = json!({"format": "zlc.console-board",
             "panels": [{"panel_id": "panel-1", "kind": "image", "signal": "@logic/camera_measurement/frames", "title": ""},
@@ -633,31 +634,31 @@ mod tests {
         let read = apply(&mut workbench, &mut host, "read_layout", json!({"path": "board.json"})).unwrap();
         let nodes: Vec<(&str, &str, &str)> = read["nodes"].as_array().unwrap().iter()
             .map(|node| (node["node_id"].as_str().unwrap(), node["name"].as_str().unwrap(), node["source_signal"].as_str().unwrap())).collect();
-        assert_eq!(nodes, [("camera_measurement2", "camera_measurement", ""), ("occupancy", "occupancy", "@logic/camera_measurement2/frames"),
+        assert_eq!(nodes, [("camera_measurement", "camera_measurement", ""), ("occupancy", "occupancy", "@logic/camera_measurement/frames"),
                            ("occupancy2", "occupancy2", "")]);
         // A type another took over loads as that one, with the values that make it the same node.
         assert_eq!(read["nodes"].as_array().unwrap()[1..].iter().map(|node| (node["type_id"].as_str().unwrap(), node["values"]["post_selection"].as_bool().unwrap()))
             .collect::<Vec<_>>(), [("occupancy", false), ("occupancy", true)]);
-        assert_eq!(read["panels"].as_array().unwrap().iter().map(|panel| panel["signal"].as_str().unwrap()).collect::<Vec<_>>(), ["@logic/camera_measurement2/frames"]);
+        assert_eq!(read["panels"].as_array().unwrap().iter().map(|panel| panel["signal"].as_str().unwrap()).collect::<Vec<_>>(), ["@logic/camera_measurement/frames"]);
         let notes = read["notes"].as_array().unwrap().iter().map(|note| note.as_str().unwrap()).collect::<Vec<_>>().join("\n");
         for said in ["panel entry 2: \"sparkline\" is not a Task Console plot kind; it is left out", "panel entry 3: it requires panel_id; it is left out",
-                     "logic entry 2: no logic node named \"not_a_node\"; it is left out", "the node's internal ID is camera_measurement2 on this board",
+                     "logic entry 2: no logic node named \"not_a_node\"; it is left out",
                      "logic camera_measurement: Repeat", "logic occupancy: its auto_preview \"yes\" cannot be read",
                      "logic occupancy2 is called by its internal ID: Another node is already called “occupancy”."] {
             assert!(notes.contains(said), "{said:?} in\n{notes}");
         }
-        // Devices and nodes never share an id: the clash is said where the id is given, not at Init.
+        // A device and a node may share an id (their plugin instances are named apart); only one
+        // of each kind holds it. An apparatus read with the board's ids drops nothing.
         apply(&mut workbench, &mut host, "load_layout", json!({"path": "board.json"})).unwrap();
-        assert_eq!(apply(&mut workbench, &mut host, "add_device", json!({"type_id": "sequencer.virtual", "instance_id": "occupancy"})).unwrap_err(),
-                   "occupancy is already used by node occupancy");
+        apply(&mut workbench, &mut host, "add_device", json!({"type_id": "sequencer.virtual", "instance_id": "occupancy"})).unwrap();
         assert_eq!(apply(&mut workbench, &mut host, "add_node", json!({"type_id": "occupancy", "node_id": "camera_measurement"})).unwrap_err(),
-                   "camera_measurement is already used by device camera_measurement");
+                   "camera_measurement is already used by node camera_measurement");
         std::fs::write(root.join("bench.json"), r#"{"format": "zlc.installation", "simulation": {}, "devices": [
             {"instance_id": "occupancy2", "role": "occupancy2", "type_id": "sequencer.virtual", "parameters": {}},
             {"instance_id": "sequencer", "role": "sequencer", "type_id": "sequencer.virtual", "parameters": {}}]}"#).unwrap();
         let loaded = apply(&mut workbench, &mut host, "load_apparatus", json!({"path": "bench.json"})).unwrap();
-        assert_eq!(loaded["skipped"], json!(["device 1: occupancy2 is already used by node occupancy2"]));
-        assert_eq!(workbench.apparatus.draft.iter().map(|entry| entry.instance_id.as_str()).collect::<Vec<_>>(), ["sequencer"]);
+        assert_eq!(loaded["skipped"], json!([]));
+        assert_eq!(workbench.apparatus.draft.iter().map(|entry| entry.instance_id.as_str()).collect::<Vec<_>>(), ["occupancy2", "sequencer"]);
     }
 
     /// Where a dialog opens, spelled as the shell is handed it (a `/` path is refused there).
@@ -732,7 +733,7 @@ mod tests {
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
         workbench.on_event(Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
-        workbench.on_event(Event::Opened { instance: "camera_measurement".into(), working_point: Value::Null }, &mut host);
+        workbench.on_event(Event::Opened { instance: node_instance("camera_measurement"), working_point: Value::Null }, &mut host);
         workbench.device_users().lock().unwrap().insert("mot_camera".into(), "PulseGUI".into());
         assert_eq!(apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap_err(), "device is in use by PulseGUI");
         assert!(calls.borrow().1.is_empty(), "nothing was launched");
@@ -752,7 +753,7 @@ mod tests {
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
         workbench.on_event(Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
-        workbench.on_event(Event::Opened { instance: "camera_measurement".into(), working_point: Value::Null }, &mut host);
+        workbench.on_event(Event::Opened { instance: node_instance("camera_measurement"), working_point: Value::Null }, &mut host);
         apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
         workspace::write_readable(&root.join("board.json"), &json!({"format": "zlc.console-board", "panels": [],
             "logic": [{"node_id": "occupancy", "api_name": "occupancy", "auto_preview": "yes"}]})).unwrap();
@@ -770,5 +771,310 @@ mod tests {
         workbench.on_event(Event::RunFinished { run: "camera_measurement#1".into(), outcome: "failed".into(), error: None, generation: None }, &mut host);
         assert_eq!(workbench.console_report, ("layout loaded".into(), "task"));
         assert_eq!(workbench.nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(), ["occupancy"]);
+    }
+
+    // ------------------------------------------------- guards of the v2 audit (AUDIT_out/workbench.md)
+
+    const RIG: &str = r#"{"format": "zlc.installation", "simulation": {},
+      "devices": [{"instance_id": "mot_camera", "role": "mot_camera", "type_id": "camera.virtual_mot", "parameters": {"exposure_seconds": 0.02}},
+                  {"instance_id": "sequencer", "role": "sequencer", "type_id": "sequencer.virtual", "parameters": {}}]}"#;
+
+    /// The rig above, Initialized and open.
+    fn rig(name: &str, catalog: Value) -> (std::path::PathBuf, Workbench, Rc<RefCell<Calls>>, FakeHost) {
+        let root = scratch(name);
+        std::fs::write(root.join("apparatus.json"), RIG).unwrap();
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+        for device in ["mot_camera", "sequencer"] {
+            workbench.on_event(Event::Opened { instance: device.into(), working_point: json!({"tunable": true}) }, &mut host);
+        }
+        (root, workbench, calls, host)
+    }
+
+    fn add_open_node(workbench: &mut Workbench, host: &mut FakeHost, params: Value) {
+        let node = apply(workbench, host, "add_node", params).unwrap()["node"].as_str().unwrap().to_owned();
+        workbench.on_event(Event::Opened { instance: node_instance(&node), working_point: Value::Null }, host);
+    }
+
+    fn count(calls: &Rc<RefCell<Calls>>, line: &str) -> usize { calls.borrow().0.iter().filter(|call| call.as_str() == line).count() }
+
+    fn asked(calls: &Rc<RefCell<Calls>>, name: &str) -> u64 { calls.borrow().2.iter().rev().find(|(query, ..)| query == name).unwrap().1 }
+
+    /// v2 _active_differs: a failed device and changed simulation settings are an Apply, not a Shut down.
+    #[test]
+    fn a_failed_device_and_changed_simulation_are_applied() {
+        let (_root, mut workbench, calls, mut host) = rig("audit-apply", catalog());
+        workbench.on_event(Event::Failed { instance: "mot_camera".into(), error: "the plugin process exited".into() }, &mut host);
+        assert_eq!(workbench.apparatus_state()["action"], "apply");
+        apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+        assert_eq!(count(&calls, "open mot_camera camera.virtual_mot"), 2, "Apply opens it again");
+        workbench.on_event(Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
+        assert_eq!(workbench.apparatus_state()["action"], "shut_down");
+        apply(&mut workbench, &mut host, "edit_simulation", json!({"values": {"seed": 5}})).unwrap();
+        assert_eq!(workbench.apparatus_state()["action"], "apply");
+    }
+
+    /// v2 _path_unread: a file not read in full is never replaced by Save unless asked; the draft is not that file.
+    #[test]
+    fn an_apparatus_not_read_in_full_is_not_written_back_smaller() {
+        let root = scratch("audit-unread");
+        let path = root.join("apparatus.json");
+        std::fs::write(&path, r#"{"format": "zlc.installation", "simulation": {},
+          "devices": [{"instance_id": "a", "role": "cam", "type_id": "camera.virtual_mot", "parameters": {"exposure_seconds": 0.02, "gone": 1}},
+                      {"instance_id": "b", "role": "cam", "type_id": "camera.virtual_mot", "parameters": {}}]}"#).unwrap();
+        let (mut bench, _calls) = workbench(&root);
+        let mut host = FakeHost::default();
+        let state = bench.apparatus_state();
+        assert_eq!((state["dirty"].as_bool(), state["unread"].as_str()), (Some(true), Some("2 of its devices or settings were left out")));
+        let refused = apply(&mut bench, &mut host, "save_apparatus", json!({"path": path.display().to_string()})).unwrap_err();
+        assert!(refused.starts_with("apparatus.json was not read in full"), "{refused}");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("\"b\""), "the file keeps what the draft left out");
+        apply(&mut bench, &mut host, "save_apparatus", json!({"path": path.display().to_string(), "replace_unread": true})).unwrap();
+        assert_eq!(bench.apparatus_state()["dirty"], false);
+        // A file that cannot be read at all: the draft is empty and not that file.
+        std::fs::write(&path, "{ \"format\": ").unwrap();
+        let (mut unread, _calls) = workbench(&root);
+        assert!(unread.apparatus_state()["unread"].as_str().unwrap().starts_with("it could not be read"));
+        apply(&mut unread, &mut host, "add_device", json!({"type_id": "camera.virtual_mot"})).unwrap();
+        assert!(apply(&mut unread, &mut host, "save_apparatus", json!({"path": path.display().to_string()})).is_err());
+        apply(&mut unread, &mut host, "save_apparatus", json!({"path": root.join("other.json").display().to_string()})).unwrap();
+    }
+
+    /// v2 DeviceUseCoordinator: one record of who uses a device; Apply, Close, Remote and a driving
+    /// command are refused while the Pulse Editor drives it, in v2's words.
+    #[test]
+    fn a_device_an_outside_driver_holds_is_not_changed_published_or_driven() {
+        let (_root, mut workbench, calls, mut host) = rig("audit-outside", catalog());
+        workbench.device_users().lock().unwrap().insert("sequencer".into(), "PulseGUI".into());
+        workbench.device_users().lock().unwrap().insert("mot_camera".into(), "PulseGUI".into());
+        assert_eq!(apply(&mut workbench, &mut host, "publish_device", json!({"device": "sequencer", "published": true})).unwrap_err(),
+                   "sequencer: not published -- device is in use by PulseGUI");
+        apply(&mut workbench, &mut host, "edit_device", json!({"device": "mot_camera", "parameters": {"exposure_seconds": 0.07}})).unwrap();
+        assert_eq!(apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap_err(), "device changes did not apply: device is in use by PulseGUI");
+        assert_eq!(apply(&mut workbench, &mut host, "close_device", json!({"device": "sequencer"})).unwrap_err(),
+                   "device changes did not apply: device is in use by PulseGUI");
+        assert_eq!(apply(&mut workbench, &mut host, "mot_camera__editor_send", json!({})).unwrap_err(), "device is in use by PulseGUI");
+        assert!(!calls.borrow().0.iter().any(|call| call.starts_with("close") || call.starts_with("publish")), "{:?}", calls.borrow().0);
+    }
+
+    /// v2 broker: one physical instrument binds one row; the later row naming it is refused before it opens.
+    #[test]
+    fn one_instrument_binds_one_row() {
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "rf.visa", "kind": "device", "family": "rf", "label": "VISA RF",
+            "capabilities": ["rf.source"], "identity": "visa:{resource}", "parameters": [{"name": "resource", "type": "str", "label": "Resource", "default": ""}]}));
+        let root = scratch("audit-identity");
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        for (id, resource) in [("rf", "TCPIP::10.0.0.5::INSTR"), ("rf2", "tcpip::10.0.0.5::instr"), ("rf3", "TCPIP::10.0.0.6::INSTR")] {
+            apply(&mut workbench, &mut host, "add_device", json!({"type_id": "rf.visa", "instance_id": id, "parameters": {"resource": resource}})).unwrap();
+        }
+        apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+        let rows = workbench.device_rows();
+        assert_eq!(rows.iter().map(|row| row["state"].as_str().unwrap()).collect::<Vec<_>>(), ["opening", "failed", "opening"]);
+        assert_eq!(rows[1]["error"], "RuntimeError: physical device 'visa:tcpip::10.0.0.5::instr' is already bound (to rf)");
+        assert_eq!(count(&calls, "open rf2 rf.visa"), 0, "refused before it is opened");
+    }
+
+    /// v2: a row can always be started again; a node whose plugin process was lost opens again on check or Start.
+    #[test]
+    fn a_node_whose_plugin_was_lost_opens_again() {
+        let (_root, mut workbench, calls, mut host) = rig("audit-reopen", catalog());
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
+        workbench.on_event(Event::Failed { instance: node_instance("camera_measurement"), error: "the plugin process exited".into() }, &mut host);
+        let started = apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
+        assert_eq!((started["phase"].as_str(), count(&calls, "open node/camera_measurement camera_measurement")), (Some("checking"), 2));
+        workbench.on_event(Event::Opened { instance: node_instance("camera_measurement"), working_point: Value::Null }, &mut host);
+        assert_eq!(calls.borrow().1.last().unwrap().run, "camera_measurement#1", "the Start goes once it is open");
+    }
+
+    /// The draft queries: `admit` is asked, its answers and any failed query are the draft's issues.
+    #[test]
+    fn what_only_the_plugin_can_admit_is_a_draft_issue() {
+        let mut catalog = catalog();
+        for item in catalog["types"].as_array_mut().unwrap().iter_mut().filter(|item| item["type_id"] == "camera_measurement") {
+            item["node"]["queries"] = json!(["declare_outputs", "admit"]);
+        }
+        let (_root, mut workbench, calls, mut host) = rig("audit-admit", catalog);
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
+        assert_eq!(apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap()["phase"], "checking");
+        workbench.on_event(Event::Answered { ticket: asked(&calls, "admit"), result: Ok(json!(["Frames per cycle exceeds the pulse's frames"])) }, &mut host);
+        workbench.on_event(Event::Answered { ticket: asked(&calls, "declare_outputs"), result: Err("boom".into()) }, &mut host);
+        let issues = workbench.state(&host)["logic"][0]["issues"].clone();
+        assert_eq!(issues, json!(["Frames per cycle exceeds the pulse's frames", "declare_outputs: boom"]));
+        assert!(calls.borrow().1.is_empty(), "the Start that waited is refused, not run");
+    }
+
+    /// v2 LogicCandidate / finalize(draft=running): a start queued behind another run, the draft
+    /// edited meanwhile, still claims and passes what its own configuration named.
+    #[test]
+    fn a_queued_start_keeps_what_its_configuration_named() {
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().extend([
+            json!({"type_id": "rf.virtual", "kind": "device", "family": "rf", "label": "Virtual RF", "capabilities": ["rf.source"], "parameters": []}),
+            json!({"type_id": "device_scan", "kind": "node", "label": "Device scan", "parameters": [{"name": "plan", "type": "text", "label": "Plan", "default": ""}],
+                   "node": {"node_kind": "measurement", "outputs": [], "queries": ["resolve_device_claims"]}})]);
+        let root = scratch("audit-frozen");
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        apply(&mut workbench, &mut host, "add_device", json!({"type_id": "rf.virtual", "instance_id": "rf"})).unwrap();
+        apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+        workbench.on_event(Event::Opened { instance: "rf".into(), working_point: json!({"tunable": true}) }, &mut host);
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "device_scan", "values": {"plan": "device:rf:frequency"}}));
+        let named = |field: &str| json!({"tunable:rf": {"instance": "rf", "fields": [field]}});
+        workbench.on_event(Event::Answered { ticket: asked(&calls, "resolve_device_claims"), result: Ok(named("frequency")) }, &mut host);
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "device_scan"})).unwrap();
+        // A Restart waits for its own run: queued, edited meanwhile, then started with what it was started with.
+        assert_eq!(apply(&mut workbench, &mut host, "start_node", json!({"node": "device_scan"})).unwrap()["phase"], "waiting");
+        apply(&mut workbench, &mut host, "edit_node", json!({"node": "device_scan", "values": {"plan": "device:rf:amplitude"}})).unwrap();
+        workbench.on_event(Event::Answered { ticket: asked(&calls, "resolve_device_claims"), result: Ok(named("amplitude")) }, &mut host);
+        workbench.on_event(Event::RunFinished { run: "device_scan#1".into(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
+        let spec = calls.borrow().1.last().cloned().unwrap();
+        assert_eq!((spec.run.as_str(), spec.values["plan"].as_str(), spec.devices.get("tunable:rf").map(String::as_str)),
+                   ("device_scan#2", Some("device:rf:frequency"), Some("rf")));
+        assert!(spec.shared.contains("tunable:rf"), "a device the draft names is shared, its fields protected");
+        assert_eq!(workbench.run("device_scan#2").unwrap().claims[0].protected, Some(vec!["frequency".to_owned()]));
+    }
+
+    /// v2 runtime claims are not exclusive: a scan of the camera its acquisition uses keeps running.
+    #[test]
+    fn a_scan_of_its_acquisition_camera_runs() {
+        let mut catalog = catalog();
+        for item in catalog["types"].as_array_mut().unwrap().iter_mut().filter(|item| item["type_id"] == "seamless_scan") {
+            item["node"]["queries"] = json!(["resolve_device_claims"]);
+        }
+        let (_root, mut workbench, calls, mut host) = rig("audit-shared", catalog);
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "occupancy"}));
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "seamless_scan", "values": {"acquisition_logic": "camera_measurement"},
+            "source_signal": "@logic/camera_measurement/frames"}));
+        workbench.on_event(Event::Answered { ticket: asked(&calls, "resolve_device_claims"),
+            result: Ok(json!({"tunable:mot_camera": {"instance": "mot_camera", "fields": ["exposure_seconds"]}})) }, &mut host);
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "seamless_scan"})).unwrap();
+        workbench.on_event(Event::RunStarted { run: "seamless_scan#1".into() }, &mut host);
+        workbench.on_event(Event::RunAcquire { run: "seamless_scan#1".into(), ticket: 7, node: "camera_measurement".into(), completion: "ready".into() }, &mut host);
+        assert_eq!(workbench.run("seamless_scan#1").unwrap().state, "running");
+        assert_eq!(calls.borrow().1.last().unwrap().run, "camera_measurement#1");
+        // While the Task runs, only its own acquisition chain starts.
+        workbench.on_event(Event::RunAcquire { run: "seamless_scan#1".into(), ticket: 8, node: "occupancy".into(), completion: "ready".into() }, &mut host);
+        assert_eq!(count(&calls, "acquired seamless_scan#1 8 false"), 1);
+        // A run asked to stop starts nothing more.
+        apply(&mut workbench, &mut host, "stop_node", json!({"node": "seamless_scan"})).unwrap();
+        workbench.on_event(Event::RunAcquire { run: "seamless_scan#1".into(), ticket: 9, node: "camera_measurement".into(), completion: "ready".into() }, &mut host);
+        assert_eq!(count(&calls, "acquired seamless_scan#1 9 false"), 1);
+    }
+
+    /// v2: Stop always reaches the run, and a request made after it is the Stop, never shown.
+    #[test]
+    fn every_stop_is_sent_and_a_request_after_it_is_answered_as_stopped() {
+        let (_root, mut workbench, calls, mut host) = rig("audit-stop", catalog());
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
+        apply(&mut workbench, &mut host, "stop_node", json!({"node": "camera_measurement"})).unwrap();
+        apply(&mut workbench, &mut host, "stop_node", json!({"node": "camera_measurement"})).unwrap();
+        assert_eq!(count(&calls, "stop camera_measurement#1"), 2);
+        workbench.on_event(Event::RunRequest { run: "camera_measurement#1".into(), request: json!({"request": "camera_measurement#1:4", "kind": "point-selection"}) }, &mut host);
+        assert_eq!(count(&calls, "answer camera_measurement#1 camera_measurement#1:4 false"), 1);
+        assert!(workbench.run("camera_measurement#1").unwrap().request.is_none());
+    }
+
+    /// v2: a physical axis set by hand is confirmed by the operator only; anyone may cancel it.
+    #[test]
+    fn a_manual_axis_is_answered_by_the_operator() {
+        let (_root, mut workbench, _calls, mut host) = rig("audit-manual", catalog());
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
+        workbench.on_event(Event::RunRequest { run: "camera_measurement#1".into(), request: json!({"request": "r1", "kind": "manual-axis"}) }, &mut host);
+        let answer = json!({"node": "camera_measurement", "request": "r1", "response": {}});
+        workbench.apply("answer_request", &answer, &Origin::Remote("ai".into()), 1, &mut host);
+        assert!(workbench.take_replies().pop().unwrap().1.unwrap_err().starts_with("Physical manual-axis requests cannot be answered here"));
+        assert!(apply(&mut workbench, &mut host, "answer_request", answer).is_ok());
+    }
+
+    /// v2 field_policy: a claim protects the fields its device couples to the ones it names.
+    #[test]
+    fn a_protected_field_protects_the_fields_coupled_to_it() {
+        let (_root, mut workbench, calls, mut host) = rig("audit-coupled", catalog());
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
+        workbench.apply("read_device", &json!({"device": "mot_camera"}), &Origin::Operator, 2, &mut host);
+        let row = |name: &str, group: [&str; 2]| json!({"field": {"name": name, "type": "float", "label": name, "default": 0.0}, "current": 1.0,
+            "live_write": true, "dependency_group": group});
+        workbench.on_event(Event::Answered { ticket: asked(&calls, "fields"),
+            result: Ok(json!([row("exposure_seconds", ["exposure_seconds", "gain"]), row("gain", ["gain", "exposure_seconds"])])) }, &mut host);
+        assert_eq!(apply(&mut workbench, &mut host, "tune_device", json!({"device": "mot_camera", "field": "gain", "value": 2.0})).unwrap_err(),
+                   "gain: Protected by camera_measurement");
+    }
+
+    /// v2 InstallationConfig, v2 discover: two devices of one name do not open; a scan waits for a device change.
+    #[test]
+    fn a_draft_with_two_devices_of_one_name_does_not_open_and_a_scan_waits_for_init() {
+        let mut catalog = catalog();
+        for item in catalog["types"].as_array_mut().unwrap().iter_mut().filter(|item| item["type_id"] == "camera.virtual_mot") { item["queries"] = json!(["discover"]); }
+        let root = scratch("audit-names");
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        for id in ["a", "b"] { apply(&mut workbench, &mut host, "add_device", json!({"type_id": "camera.virtual_mot", "instance_id": id})).unwrap(); }
+        apply(&mut workbench, &mut host, "edit_device", json!({"device": "b", "role": "a"})).unwrap();
+        assert_eq!(apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap_err(), "this apparatus cannot be initialized: duplicate device role: ['a']");
+        apply(&mut workbench, &mut host, "edit_device", json!({"device": "b", "role": "b"})).unwrap();
+        apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+        assert_eq!(apply(&mut workbench, &mut host, "discover_devices", json!({})).unwrap_err(), "finish the current device change before scanning hardware");
+    }
+
+    /// v2 device maintenance waits 30 s for the runs it stops, then leaves the device as it is and says who it waited for.
+    #[test]
+    fn an_apply_waits_thirty_seconds_for_the_runs_it_stops() {
+        let (_root, mut workbench, _calls, mut host) = rig("audit-wait", catalog());
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
+        apply(&mut workbench, &mut host, "edit_device", json!({"device": "mot_camera", "parameters": {"exposure_seconds": 0.07}})).unwrap();
+        apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+        workbench.poll(std::time::Instant::now());
+        assert_eq!(workbench.apparatus_state()["busy"], "applying device changes");
+        workbench.poll(std::time::Instant::now() + std::time::Duration::from_secs(31));
+        let state = workbench.apparatus_state();
+        assert_eq!((state["busy"].clone(), state["report"]["text"].clone(), state["action"].clone()),
+                   (Value::Null, json!("device changes did not apply: device maintenance still waits for camera_measurement"), json!("apply")));
+    }
+
+    /// v2: a region's draft fields are the run's own once it starts; closing the region keeps them.
+    #[test]
+    fn a_started_run_keeps_what_a_region_set() {
+        let mut catalog = catalog();
+        for item in catalog["types"].as_array_mut().unwrap().iter_mut().filter(|item| item["type_id"] == "camera_measurement") {
+            item["node"]["selection_mappings"] = json!([{"plot_kind": "image", "selector_kind": "area", "draft_fields": ["frames_per_cycle"]}]);
+        }
+        let (_root, mut workbench, calls, mut host) = rig("audit-region", catalog);
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
+        let panel = host.add_panel("", "@logic/camera_measurement/frames", "image", 1, json!({})).unwrap();
+        workbench.panel_added(&panel);
+        workbench.panel_selection(&panel, "@logic/camera_measurement/frames", Some(&json!({"plot_kind": "image", "selector_kind": "area"})), &json!({}));
+        workbench.on_event(Event::Answered { ticket: asked(&calls, "selection_patch"), result: Ok(json!({"frames_per_cycle": 3})) }, &mut host);
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
+        workbench.panel_closed(&panel);
+        assert_eq!(workbench.node("camera_measurement").unwrap().draft.values["frames_per_cycle"], 3);
+    }
+
+    /// v2 lab_run_recipe: followers are standing processors, each once, apart from the entry node.
+    #[test]
+    fn a_recipe_follows_with_processors_only() {
+        let root = scratch("audit-recipe");
+        let (mut workbench, _calls) = workbench(&root);
+        let mut host = FakeHost::default();
+        std::fs::create_dir_all(root.join("recipes")).unwrap();
+        let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("recipes");
+        let text = std::fs::read_to_string(bundled.join("trap_lifetime.recipe.json")).unwrap()
+            .replace(r#""followers": ["occupancy", "frame_survival"]"#, r#""followers": ["camera_measurement"]"#);
+        std::fs::write(root.join("recipes/trap_lifetime.recipe.json"), text).unwrap();
+        std::fs::copy(bundled.join("trap_lifetime.layout.json"), root.join("recipes/trap_lifetime.layout.json")).unwrap();
+        let parameters = json!({"camera": "c", "sequencer": "s", "pulse_path": "p.json", "calibrations": [], "scan_plan": "{}", "panel_semantic": {}});
+        assert_eq!(apply(&mut workbench, &mut host, "run_recipe", json!({"name": "trap_lifetime", "parameters": parameters})).unwrap_err(),
+                   "Recipe followers must be standing processors, not device executions");
     }
 }

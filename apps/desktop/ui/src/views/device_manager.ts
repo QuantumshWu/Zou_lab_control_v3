@@ -193,7 +193,9 @@ export class DeviceManagerView implements View {
     this.newButton = command("New…", () => this.showTemplates());
     const open = command("Open…", () => ctx.transport.send({ action: "load_apparatus" }, "Opening an apparatus…"));
     this.save = command("Save", () => {
-      const path = this.apparatus()?.path;
+      // v2: a draft not read in full from its file (unread) goes through Save as, which asks before replacing.
+      const apparatus = this.apparatus();
+      const path = apparatus?.unread ? "" : apparatus?.path;
       ctx.transport.send({ action: "save_apparatus", ...(path ? { path } : {}) }, "Saving the apparatus…");
     });
     const saveAs = command("Save as…", () => ctx.transport.send({ action: "save_apparatus" }, "Saving the apparatus…"));

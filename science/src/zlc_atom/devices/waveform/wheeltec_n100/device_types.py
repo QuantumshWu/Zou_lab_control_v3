@@ -57,6 +57,7 @@ DEVICE_TYPES = (
         WHEELTEC_N100_SCHEMA,
         ("waveform.source",),
         factory=_factory,
+        identity="wheeltec-n100:{port}",
         label="WHEELTEC N100 IMU",
         description=(
             "WHEELTEC N100 nine-axis IMU over its FDILink serial stream: magnetic field (uT), "

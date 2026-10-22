@@ -31,6 +31,8 @@ export type DeviceType = {
 
 export type Apparatus = {
   path: string; dirty: boolean;
+  /** Why the file at `path` was not read in full (v2 `_path_unread`): Save goes through Save as. */
+  unread?: string | null;
   simulation?: Record<string, Value>;
   types: DeviceType[];
   unavailable: { module: string; reason: string }[];

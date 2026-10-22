@@ -66,6 +66,7 @@ DEVICE_TYPES = (
         VAUNIX_LMS_SCHEMA,
         ("rf.source",),
         factory=_vaunix_factory,
+        identity="vaunix-lms:{serial}",
         label="Vaunix Lab Brick LMS",
         description=(
             "Vaunix Lab Brick LMS synthesizer over its vendor DLL: frequency on a 10 Hz grid, "

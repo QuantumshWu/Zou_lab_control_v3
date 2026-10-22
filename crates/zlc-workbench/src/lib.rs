@@ -76,12 +76,16 @@ pub enum Event {
 pub struct RunSpec {
     pub run: String,
     pub node_id: String,
+    /// The node's plugin instance (`zlc_core::control::node_instance`).
+    pub instance: String,
     pub type_id: String,
     /// Enabled authoring values only.
     pub values: Map<String, Value>,
     pub source_signal: String,
     /// Requirement argument -> device instance id.
     pub devices: BTreeMap<String, String>,
+    /// The arguments whose device the run shares (a scan's device axis: its fields protected, not the device).
+    pub shared: std::collections::BTreeSet<String>,
     pub artifacts: Map<String, Value>,
     /// Workspace resources by build argument, resolved (a pulse: its description).
     pub resources: Map<String, Value>,
@@ -147,6 +151,8 @@ pub struct Workbench {
     /// An Init, Apply, Close or shut down whose devices are still opening or
     /// closing: its line is said when the last one settles.
     pub(crate) settling: Option<apparatus::Settling>,
+    /// When the Apply or Close under way began (its wait for the runs it stops is bounded).
+    pub(crate) settling_since: Option<std::time::Instant>,
     /// The Task Console's one line of what just happened (v2 ConsolePresenter._report):
     /// "selectors disabled", "added <node>", "<node> started", "board cleared", ...
     /// Said when it happens, never re-derived per state push.
@@ -203,7 +209,7 @@ impl Workbench {
         let catalog = plugins.catalog();
         let mut workbench = Self { plugins, catalog, apparatus: apparatus::Apparatus::empty(workspace.apparatus()), workspace,
             devices: BTreeMap::new(), nodes: Vec::new(), runs: Vec::new(), board: layout::Board::default(), notes: Vec::new(),
-            report: (String::new(), "idle"), settling: None,
+            report: (String::new(), "idle"), settling: None, settling_since: None,
             // v2 set_deriving(False) when the console is built.
             console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None,
             tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), applied_simulation: None, scan: None, bundles: BTreeMap::new(),
@@ -228,7 +234,7 @@ impl Workbench {
     pub fn refresh_catalog(&mut self) {
         self.catalog = self.plugins.catalog();
         let path = self.apparatus.path.clone();
-        if self.devices.is_empty() && !self.apparatus.dirty() && path.is_file() {
+        if self.devices.is_empty() && !self.apparatus.edited() && path.is_file() {
             self.notes.clear();
             if let Err(error) = self.load_apparatus(&path) { self.notes.push(error); }
         } else {
@@ -335,7 +341,10 @@ impl Workbench {
             "discover_devices" => self.discover_devices(request),
             "add_discovered" => self.add_discovered(text(params, "instance_id")?).map(Some),
             "load_apparatus" => { let path = self.workspace.resolve(text(params, "path")?); self.load_apparatus(&path).map(Some) }
-            "save_apparatus" => { let path = self.workspace.resolve(text(params, "path")?); self.save_apparatus(&path).map(Some) }
+            "save_apparatus" => {
+                let path = self.workspace.resolve(text(params, "path")?);
+                self.save_apparatus(&path, params["replace_unread"].as_bool().unwrap_or(false)).map(Some)
+            }
             "apply_devices" => self.apply_devices(host).map(Some),
             "close_device" => self.close_device(text(params, "device")?, host).map(Some),
             "shut_down_devices" => self.shut_down_devices(host).map(Some),
@@ -351,7 +360,7 @@ impl Workbench {
             "start_node" => self.start_node(text(params, "node")?, params["expected_draft_revision"].as_u64(), &origin_text, None, host).map(Some),
             "stop_node" => self.stop_node(text(params, "node")?, host).map(Some),
             "remove_node" => self.remove_node(text(params, "node")?, host).map(Some),
-            "answer_request" => self.answer_request(text(params, "node")?, text(params, "request")?, &params["response"]).map(Some),
+            "answer_request" => self.answer_request(text(params, "node")?, text(params, "request")?, &params["response"], matches!(origin, Origin::Operator)).map(Some),
             "order_panels" => self.order_panels(params["order"].as_array().ok_or("order is required")?, host).map(Some),
             "rename_panel" => self.rename_panel(text(params, "panel")?, params["title"].as_str()).map(Some),
             "set_panel_interval" => self.set_panel_interval(text(params, "panel")?, params["interval_ms"].as_u64().ok_or("interval_ms is required")?).map(Some),
@@ -390,7 +399,7 @@ impl Workbench {
             Event::RunProgress { run, message, current, total } => {
                 if let Some(record) = self.run_mut(&run) { record.progress = Some(json!({"message": message, "current": current, "total": total})); }
             }
-            Event::RunRequest { run, request } => { if let Some(record) = self.run_mut(&run) { record.request = Some(request); } }
+            Event::RunRequest { run, request } => self.run_requested(&run, request),
             Event::RunArtifact { run, artifact } => { if let Some(record) = self.run_mut(&run) { record.artifacts.push(artifact); } }
             Event::RunAcquire { run, ticket, node, completion } => self.run_acquire(&run, ticket, &node, &completion, host),
             Event::RunFinished { run, outcome, error, generation } => self.run_finished(&run, &outcome, error, generation, host),

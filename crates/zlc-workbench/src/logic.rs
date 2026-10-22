@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value, json};
 
+use zlc_core::control::{NODE_INSTANCE, node_instance};
+
 use crate::{Host, RunSpec, SignalInfo, Ticket, TypeDescriptor, Workbench, fields, text, workspace};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -33,6 +35,8 @@ pub struct Node {
     pub revision: u64,
     /// The configuration the current run, follow or pending start uses.
     pub running: Option<Draft>,
+    /// The answers that configuration was started with.
+    pub frozen: Option<Frozen>,
     /// The current, else the last, run.
     pub run: Option<String>,
     pub starts: u64,
@@ -65,7 +69,7 @@ impl Node {
     /// catalogue's) until its own process answers its draft.
     pub(crate) fn new(id: String, name: String, type_id: String, draft: Draft, auto_preview: bool, descriptor: Option<&TypeDescriptor>) -> Self {
         let answers = descriptor.map(|item| item.node().answers.iter().map(|(query, answer)| (query.clone(), (0, Ok(answer.clone())))).collect()).unwrap_or_default();
-        Node { id, name, type_id, draft, auto_preview, revision: 1, running: None, run: None, starts: 0, error: None, follow: false, follow_attempted: None,
+        Node { id, name, type_id, draft, auto_preview, revision: 1, running: None, frozen: None, run: None, starts: 0, error: None, follow: false, follow_attempted: None,
                pending: None, removing: false, instance: Instance::Opening, answers, checked: BTreeSet::new(), resources: Map::new(), resource_issues: Vec::new(),
                start_after_check: None }
     }
@@ -76,8 +80,18 @@ impl Node {
     fn recheck(&mut self) { self.checked.clear(); }
 }
 
-#[derive(Clone, Debug)]
-pub struct Claim { pub argument: String, pub device: String, pub protected: Option<Vec<String>> }
+/// One device a run uses (v2 DeviceClaim). A declared requirement takes its device
+/// exclusively; a device the draft names for some of its fields (a scan's device axis,
+/// v2's runtime claim) shares it, its fields protected. Two runs conflict only when
+/// both claims on one device are exclusive (v2 `_conflict`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Claim { pub argument: String, pub device: String, pub protected: Option<Vec<String>>, pub exclusive: bool }
+
+/// What a Start froze of the draft it started (v2 LogicCandidate): its effective values
+/// and the devices it names. A restart from that configuration (queued, follow,
+/// acquisition) uses them after the draft has moved on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frozen { pub draft: Draft, pub values: Map<String, Value>, pub named: Vec<Claim> }
 
 pub struct Run {
     pub id: String,
@@ -122,7 +136,25 @@ impl Run {
 }
 
 /// A claim as Device Manager rows and Device Control show it.
-pub struct ClaimView { pub node: String, pub node_name: String, pub run: String, pub protected: Option<Vec<String>> }
+pub struct ClaimView { pub node: String, pub node_name: String, pub run: String, pub protected: Option<Vec<String>>, pub exclusive: bool }
+
+/// Who uses a device (v2 DeviceUseCoordinator): the runs that claim it, and the driver
+/// outside the workbench that holds it (the Pulse Editor playing the sequencer).
+pub struct DeviceUse { pub runs: Vec<ClaimView>, pub outside: Option<String> }
+
+impl DeviceUse {
+    /// Every user, by the name a sentence calls it: its nodes, then the outside driver.
+    pub fn users(&self) -> Vec<String> {
+        let mut users: Vec<String> = Vec::new();
+        for user in self.runs.iter().map(|claim| claim.node_name.clone()).chain(self.outside.clone()) {
+            if !users.contains(&user) { users.push(user); }
+        }
+        users
+    }
+}
+
+/// v2 DeviceUseBusy's words.
+pub(crate) fn in_use(users: &[String]) -> String { format!("device is in use by {}", users.join(", ")) }
 
 /// v2 `logic_name_text`: words one space apart.
 pub(crate) fn name_text(text: &str) -> String { text.split_whitespace().collect::<Vec<_>>().join(" ") }
@@ -155,15 +187,21 @@ pub fn signal_key(producer: &str, output: &str) -> String { format!("@logic/{pro
 
 /// The draft queries asked whenever a draft changes (PLUGIN_PROTOCOL §2);
 /// admission that needs data or files runs in the plugin at Start.
-const DRAFT_QUERIES: [&str; 8] = ["declare_outputs", "declare_previews", "resolve_field_availability", "resolve_field_choices", "resolve_defaults",
-                                  "resolve_device_claims", "editor_facts", ADMIT_SOURCE];
+const DRAFT_QUERIES: [&str; 9] = ["declare_outputs", "declare_previews", "resolve_field_availability", "resolve_field_choices", "resolve_defaults",
+                                  "resolve_device_claims", "editor_facts", ADMIT_SOURCE, ADMIT];
 /// What the draft cannot compute from what its source published (v2 admit_source): asked
 /// once every member of the source bundle has a schema; its answers are draft issues.
 const ADMIT_SOURCE: &str = "admit_source";
+/// What only the node's own code can say of the draft (v2 finalize_logic_draft): its values
+/// projected by its schema, validator included; its resources (admit_resources); its artifact
+/// files decoded. Every node answers it (the SDK); its answers are draft issues.
+const ADMIT: &str = "admit";
 /// The argument a device the draft names is claimed and passed as (`tunable:<key>`).
 const TUNABLE: &str = "tunable:";
 /// Asked per output; its answers feed the consumers' `source` fact.
 const FRAMES_QUERY: &str = "describe_output_frames";
+/// A run asking the operator to set a physical axis by hand (v2 manual_axis_setting).
+const MANUAL_AXIS: &str = "manual-axis";
 /// Admission issues that only mean "not yet": a Start waits them out.
 pub(crate) const CHECKING: &str = "Checking the draft…";
 pub(crate) const STARTING_PLUGIN: &str = " is starting its plugin";
@@ -186,9 +224,33 @@ impl Workbench {
     /// The node's current run, if it has not ended.
     pub(crate) fn active_run(&self, node: &Node) -> Option<&Run> { node.run.as_deref().and_then(|id| self.run(id)).filter(|run| !run.terminal()) }
 
+    /// The Task that has the board (v2 task takeover): running, or accepted and waiting to start.
     pub(crate) fn active_task(&self) -> Option<&Node> {
-        self.nodes.iter().find(|node| self.active_run(node).is_some()
+        self.nodes.iter().find(|node| (self.active_run(node).is_some() || node.pending.is_some() || node.start_after_check.is_some())
             && self.catalog.get(&node.type_id).is_some_and(|item| item.node().node_kind == "task"))
+    }
+
+    /// v2 `_task_acquisition_nodes`: the nodes a Task may start while it has the board -- the
+    /// acquisition its draft names and the processors its source comes through, and theirs.
+    pub(crate) fn task_acquisition_nodes(&self, task: &Node) -> BTreeSet<String> {
+        let (mut allowed, mut pending) = (BTreeSet::new(), vec![task.id.clone()]);
+        while let Some(id) = pending.pop() {
+            let Some(node) = self.node(&id).filter(|_| allowed.insert(id.clone())) else { continue };
+            let Some(descriptor) = self.catalog.get(&node.type_id) else { continue };
+            let effective = fields::effective(&descriptor.parameters, &node.draft.values);
+            let acquisition = descriptor.node().acquisition_input.as_ref().filter(|field| descriptor.parameters.iter()
+                .find(|item| &item.name == *field).is_none_or(|item| fields::enabled(item, &effective)));
+            if let Some(chosen) = acquisition.and_then(|field| node.draft.values.get(field)).and_then(Value::as_str).filter(|chosen| !chosen.trim().is_empty()) {
+                pending.push(chosen.to_owned());
+            }
+            let producer = split_signal(&node.draft.source_signal).map(|(producer, _)| producer.split('/').next().unwrap_or(producer));
+            if let Some(producer) = producer.filter(|producer| self.node(producer).and_then(|other| self.catalog.get(&other.type_id))
+                .is_some_and(|other| other.node().node_kind == "processor")) {
+                pending.push(producer.to_owned());
+            }
+        }
+        allowed.remove(&task.id);
+        allowed
     }
 
     /// What the strip is told outside a command (v2 ConsolePresenter._report): new notes,
@@ -255,7 +317,7 @@ impl Workbench {
 
     fn free_node_id(&self, type_id: &str) -> String {
         (1..).map(|n: u32| if n == 1 { type_id.to_owned() } else { format!("{type_id}{n}") })
-            .find(|id| !self.instance_taken(id) && self.name_problem(id, id).is_none()).unwrap()
+            .find(|id| self.node(id).is_none() && self.name_problem(id, id).is_none()).unwrap()
     }
 
     fn active_requirements<'a>(descriptor: &'a TypeDescriptor, values: &Map<String, Value>) -> Vec<&'a crate::types::DeviceRequirement> {
@@ -268,7 +330,10 @@ impl Workbench {
     fn has_source(descriptor: &TypeDescriptor) -> bool { !descriptor.node().inputs.is_empty() }
 
     /// Ask the node's process every draft query its type answers, for this revision.
-    fn send_queries(&mut self, id: &str) {
+    fn send_queries(&mut self, id: &str) { self.ask_queries(id, None) }
+
+    /// Ask the draft queries (`only`: just that one) for the node's current draft.
+    fn ask_queries(&mut self, id: &str, only: Option<&str>) {
         let Some(node) = self.node(id) else { return };
         let (resources, resource_issues) = self.read_resources(&node.type_id, &node.draft.values);
         let node = self.node_mut(id).unwrap();
@@ -292,19 +357,20 @@ impl Workbench {
         let editor = json!({"values": args["values"], "devices": self.device_infos(&bench), "resources": args["resources"], "source": source,
             "bundle": bundle, "artifacts": self.artifact_facts(node)});
         let admit = json!({"values": args["values"], "bundle": bundle});
+        let admitted = json!({"values": Value::Object(self.draft_values(node)), "resources": args["resources"], "artifacts": self.artifact_facts(node)});
         // Each output's frames, from the frames of this node's own source (v2 describe_output_frames).
         let frames: Vec<String> = if descriptor.node().queries.iter().any(|name| name == FRAMES_QUERY) {
             self.node_outputs(node).into_iter().filter_map(|(signal, _)| split_signal(&signal).map(|(_, output)| output.to_owned())).collect()
         } else { Vec::new() };
         for name in names {
-            if name == ADMIT_SOURCE && !complete { continue; }
+            if (name == ADMIT_SOURCE && !complete) || only.is_some_and(|only| only != name) { continue; }
             let ticket = self.ticket(Ticket::Query { node: id.to_owned(), revision, name: name.clone() });
-            let facts = match name.as_str() { EDITOR_FACTS => &editor, ADMIT_SOURCE => &admit, _ => &args };
-            self.plugins.query(id, ticket, &name, facts);
+            let facts = match name.as_str() { EDITOR_FACTS => &editor, ADMIT_SOURCE => &admit, ADMIT => &admitted, _ => &args };
+            self.plugins.query(&node_instance(id), ticket, &name, facts);
         }
-        for output in frames {
+        for output in frames.into_iter().filter(|_| only.is_none()) {
             let ticket = self.ticket(Ticket::Query { node: id.to_owned(), revision, name: format!("{FRAMES_QUERY}:{output}") });
-            self.plugins.query(id, ticket, FRAMES_QUERY, &json!({"values": args["values"], "output_name": output, "source": source}));
+            self.plugins.query(&node_instance(id), ticket, FRAMES_QUERY, &json!({"values": args["values"], "output_name": output, "source": source}));
         }
     }
 
@@ -386,7 +452,7 @@ impl Workbench {
     fn named_claims(node: &Node) -> Vec<Claim> {
         let Some((_, Ok(Value::Object(named)))) = node.answers.get("resolve_device_claims") else { return Vec::new() };
         named.iter().filter_map(|(argument, claim)| claim["instance"].as_str().map(|device| Claim { argument: argument.clone(), device: device.to_owned(),
-            protected: Some(claim["fields"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()) })).collect()
+            protected: Some(claim["fields"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()), exclusive: false })).collect()
     }
 
     /// Each enabled workspace resource a draft names, read now (v2 reads files at a draft's
@@ -451,12 +517,15 @@ impl Workbench {
 
     pub(crate) fn query_answered(&mut self, id: &str, revision: u64, name: &str, result: Result<Value, String>, host: &mut dyn Host) {
         let mut changed = None;
+        let mut readmit = false;
         if let Ok(node) = self.node_mut(id) {
             if node.revision == revision {
                 node.checked.insert(name.to_owned());
                 let previous = node.answers.insert(name.to_owned(), (revision, result.clone()));
                 let fresh = previous.is_none_or(|(before, answer)| before != revision || answer != result);
                 changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| fresh).map(|output| signal_key(id, output));
+                // Defaults the node fills in change what its schema admits: ask that again.
+                if name == "resolve_defaults" && fresh { node.checked.remove(ADMIT); readmit = true; }
             }
         }
         // New frames of an output: the nodes reading it ask again with their new source.
@@ -464,6 +533,7 @@ impl Workbench {
             let readers: Vec<String> = self.nodes.iter().filter(|node| node.draft.source_signal == signal).map(|node| node.id.clone()).collect();
             for reader in readers { self.send_queries(&reader); }
         }
+        if readmit { self.ask_queries(id, Some(ADMIT)); }
         self.start_checked(id, host);
     }
 
@@ -487,7 +557,7 @@ impl Workbench {
         let id = match params["node_id"].as_str() {
             Some(id) => {
                 let id = id.trim().to_owned();
-                if let Some(clash) = self.id_in_use(&id) { return Err(clash); }
+                if let Some(node) = self.node(&id) { return Err(format!("{id} is already used by node {}", node.name)); }
                 if let Some(problem) = self.name_problem(&id, &id) { return Err(problem); }
                 id
             }
@@ -507,7 +577,7 @@ impl Workbench {
         }
         let draft = Draft { values, source_signal: params["source_signal"].as_str().unwrap_or("").trim().to_owned(), device_keys,
             artifact_inputs: params["artifact_inputs"].as_object().cloned().unwrap_or_default() };
-        self.plugins.open(&id, type_id, &json!({}), &json!({}));
+        self.plugins.open(&node_instance(&id), type_id, &json!({}), &json!({}));
         self.nodes.push(Node::new(id.clone(), name, type_id.to_owned(), draft, params["auto_preview"].as_bool().unwrap_or(true), Some(&descriptor)));
         self.board.dirty = true;
         let _ = host;
@@ -611,7 +681,7 @@ impl Workbench {
         if !mapped { return false; }
         let (id, args) = (node.id.clone(), json!({"selection": selection, "draft": Value::Object(node.draft.values.clone()), "context": context}));
         let ticket = self.ticket(Ticket::Selection { node: id.clone(), panel: panel.to_owned(), selection: selection.clone() });
-        self.plugins.query(&id, ticket, "selection_patch", &args);
+        self.plugins.query(&node_instance(&id), ticket, "selection_patch", &args);
         false
     }
 
@@ -652,6 +722,7 @@ impl Workbench {
     }
 
     pub(crate) fn check_node(&mut self, id: &str, host: &mut dyn Host) -> Result<Value, String> {
+        self.reopen_failed(id);
         let node = self.node_mut(id)?;
         node.recheck();
         node.error = None;
@@ -695,6 +766,9 @@ impl Workbench {
         if let Some(Ok(Value::Array(found))) = answer(ADMIT_SOURCE).filter(|_| self.bundle_complete(&node.id)) {
             issues.extend(found.iter().filter_map(Value::as_str).map(str::to_owned));
         }
+        if let Some(Ok(Value::Array(found))) = answer(ADMIT) { issues.extend(found.iter().filter_map(Value::as_str).map(str::to_owned)); }
+        // A draft query its plugin could not answer is the draft's issue (v2 raised it where it finalized the draft).
+        for name in DRAFT_QUERIES { if let Some(Err(error)) = answer(name) { issues.push(format!("{name}: {error}")); } }
         if outstanding && node.instance == Instance::Open { issues.push(CHECKING.into()); }
         // v2: an acquisition the draft names (its field enabled) must be a measurement that
         // reports what the node waits for; none named is the node running without one.
@@ -738,7 +812,6 @@ impl Workbench {
                 }
             }
         }
-        if let Some(Err(error)) = answer("resolve_device_claims") { issues.push(format!("The devices this draft tunes: {error}")); }
         for claim in Self::named_claims(node).iter().filter(|claim| !self.device_open(&claim.device)) {
             issues.push(format!("{} is not an open device", self.device_role(&claim.device)));
         }
@@ -785,7 +858,8 @@ impl Workbench {
     pub(crate) fn claims_on(&self, device: &str) -> Vec<ClaimView> {
         self.nodes.iter().filter_map(|node| self.active_run(node).map(|run| (node, run)))
             .flat_map(|(node, run)| run.claims.iter().filter(|claim| claim.device == device)
-                .map(|claim| ClaimView { node: node.id.clone(), node_name: node.name.clone(), run: run.id.clone(), protected: claim.protected.clone() }))
+                .map(|claim| ClaimView { node: node.id.clone(), node_name: node.name.clone(), run: run.id.clone(), protected: claim.protected.clone(),
+                                         exclusive: claim.exclusive }))
             .collect()
     }
 
@@ -795,21 +869,37 @@ impl Workbench {
         nodes
     }
 
-    /// The devices a start of `node` would claim: (argument, instance, protected).
+    /// The nodes a start with `claims` must stop and wait for (v2 `_conflict`): those whose
+    /// run claims exclusively a device this start also takes exclusively.
+    fn conflicting_nodes(&self, claims: &[Claim]) -> BTreeSet<String> {
+        claims.iter().filter(|claim| claim.exclusive).flat_map(|claim| self.claims_on(&claim.device))
+            .filter(|held| held.exclusive).map(|held| held.node).collect()
+    }
+
+    /// Who uses a device now: the one question every admission that touches a device asks.
+    pub(crate) fn device_use(&self, device: &str) -> DeviceUse {
+        let outside = self.device_users.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(device).cloned();
+        DeviceUse { runs: self.claims_on(device), outside }
+    }
+
+    /// The devices a start of `node` with `draft` would claim. A draft other than the node's
+    /// own (a queued, follow or acquisition restart) names the devices it was started with.
     fn wanted_claims(&self, node: &Node, draft: &Draft) -> Vec<Claim> {
         let Some(descriptor) = self.catalog.get(&node.type_id) else { return Vec::new() };
         let mut claims: Vec<Claim> = Self::active_requirements(descriptor, &draft.values).into_iter().filter_map(|requirement| {
             draft.device_keys.get(&requirement.argument).filter(|key| !key.is_empty())
-                .map(|key| Claim { argument: requirement.argument.clone(), device: key.clone(), protected: requirement.protected_fields.clone() })
+                .map(|key| Claim { argument: requirement.argument.clone(), device: key.clone(), protected: requirement.protected_fields.clone(), exclusive: true })
         }).collect();
         if *draft == node.draft { claims.extend(Self::named_claims(node)); }
+        else if let Some(frozen) = node.frozen.as_ref().filter(|frozen| frozen.draft == *draft) { claims.extend(frozen.named.iter().cloned()); }
         claims
     }
 
     /// v2 DeviceUseBusy: a claimed device driven outside the workbench refuses the start.
     fn outside_use(&self, claims: &[Claim]) -> Option<String> {
-        let users = self.device_users.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        claims.iter().find_map(|claim| users.get(&claim.device)).map(|user| format!("device is in use by {user}"))
+        let mut users: Vec<String> = Vec::new();
+        for user in claims.iter().filter_map(|claim| self.device_use(&claim.device).outside) { if !users.contains(&user) { users.push(user); } }
+        (!users.is_empty()).then(|| in_use(&users))
     }
 
     /// Start, or Restart a running node (its run stops first).
@@ -820,14 +910,19 @@ impl Workbench {
         let node = self.node(id).ok_or_else(|| format!("No logic node {id:?}"))?;
         if node.removing { return Err(format!("{} is being removed", node.name)); }
         if let Some(task) = self.active_task().filter(|task| task.id != id) {
-            if acquisition.is_none() { return Err(format!("{} is running; stop the task before starting another node", task.name)); }
+            // v2 _task_acquisition_nodes: while a Task runs, only its own acquisition chain starts, and only for it.
+            if acquisition.is_none() || !self.task_acquisition_nodes(task).contains(id) {
+                return Err(format!("{} is running; stop the task before starting another node", task.name));
+            }
         }
         if let Some(expected) = expected.filter(|expected| *expected != node.revision) {
             return Err(format!("{} changed (draft revision {} is not {expected}); read it again", node.name, node.revision));
         }
+        let reopened = self.reopen_failed(id);
+        let node = self.node(id).unwrap();
         let signals = host.signals();
         let running = acquisition.as_ref().and(node.running.clone());
-        if running.is_none() {
+        if running.is_none() || reopened {
             let issues = self.issues(node, &signals);
             // The plugin has not answered for this draft yet: Start once it has.
             if !issues.is_empty() && issues.iter().all(|issue| waiting(issue)) {
@@ -843,6 +938,9 @@ impl Workbench {
         self.node_mut(id)?.start_after_check = None;
         let node = self.node(id).unwrap();
         let descriptor = self.node_type(&node.type_id)?;
+        // A Start from the draft freezes what its answers say of it (v2 LogicCandidate); a
+        // restart of the running configuration keeps what that one was started with.
+        let frozen = running.is_none().then(|| Frozen { draft: node.draft.clone(), values: self.draft_values(node), named: Self::named_claims(node) });
         let draft = running.unwrap_or_else(|| node.draft.clone());
         if let Some(error) = self.outside_use(&self.wanted_claims(node, &draft)) {
             self.node_mut(id)?.error = Some(error.clone());
@@ -850,10 +948,11 @@ impl Workbench {
         }
         let processor = descriptor.node().node_kind == "processor";
         let source_absent = processor && self.source_published(&signals, &draft.source_signal).is_none();
-        if processor { self.plugins.follow(id, Some(&draft.source_signal)); }
+        if processor { self.plugins.follow(&node_instance(id), Some(&draft.source_signal)); }
         let node = self.node_mut(id)?;
         node.error = None;
         node.running = Some(draft.clone());
+        if frozen.is_some() { node.frozen = frozen; }
         node.follow = processor;
         if processor { node.follow_attempted = None; }
         if source_absent && acquisition.is_none() {
@@ -864,7 +963,7 @@ impl Workbench {
         }
         node.pending = Some(PendingStart { origin: origin.to_owned(), acquisition });
         let claims = self.wanted_claims(self.node(id).unwrap(), &draft);
-        let mut holders: BTreeSet<String> = claims.iter().flat_map(|claim| self.claiming_nodes(&claim.device)).collect();
+        let mut holders = self.conflicting_nodes(&claims);
         if self.node(id).and_then(|node| self.active_run(node)).is_some() { holders.insert(id.to_owned()); }
         for holder in &holders { self.stop_run_of(holder, "another start needs its devices"); }
         self.launch_pending(host);
@@ -893,7 +992,7 @@ impl Workbench {
                 self.node_mut(&id).unwrap().error = Some(error);
                 continue;
             }
-            if claims.iter().any(|claim| !self.claiming_nodes(&claim.device).is_empty() || !self.device_open(&claim.device)) {
+            if !self.conflicting_nodes(&claims).is_empty() || claims.iter().any(|claim| !self.device_open(&claim.device)) {
                 if claims.iter().any(|claim| !self.device_open(&claim.device) && self.claiming_nodes(&claim.device).is_empty()) {
                     let pending = self.node_mut(&id).unwrap().pending.take();
                     let missing: Vec<&str> = claims.iter().filter(|claim| !self.device_open(&claim.device)).map(|claim| claim.device.as_str()).collect();
@@ -918,7 +1017,9 @@ impl Workbench {
         let task = descriptor.node().node_kind == "task";
         let run_id = format!("{id}#{}", node.starts + 1);
         // The node's own defaults apply to the draft they were answered for.
-        let authored = if draft == node.draft { self.draft_values(node) } else { draft.values.clone() };
+        let authored = if draft == node.draft { self.draft_values(node) }
+            else if let Some(frozen) = node.frozen.as_ref().filter(|frozen| frozen.draft == draft) { frozen.values.clone() }
+            else { draft.values.clone() };
         let effective: Map<String, Value> = descriptor.parameters.iter()
             .map(|field| (field.name.clone(), authored.get(&field.name).cloned().unwrap_or_else(|| field.default.clone()))).collect();
         // Start is a boundary at which named files are read again.
@@ -933,6 +1034,7 @@ impl Workbench {
                 (_, value) => value.clone(),
             })).collect();
         let devices: BTreeMap<String, String> = claims.iter().map(|claim| (claim.argument.clone(), claim.device.clone())).collect();
+        let shared: BTreeSet<String> = claims.iter().filter(|claim| !claim.exclusive).map(|claim| claim.argument.clone()).collect();
         let artifacts: Map<String, Value> = descriptor.node().artifact_inputs.iter().filter_map(|spec| draft.artifact_inputs.get(&spec.name)
             .map(|value| (spec.name.clone(), match value {
                 Value::String(path) => json!(self.workspace.resolve(path)),
@@ -962,14 +1064,17 @@ impl Workbench {
             let generation = signals.iter().find(|item| item.name == signal).map(|item| item.generation.clone());
             (signal, generation)
         }).collect();
-        let spec = RunSpec { run: run_id.clone(), node_id: id.to_owned(), type_id: node.type_id.clone(), values, source_signal: draft.source_signal.clone(),
-            devices, artifacts, resources, directory: directory.clone(), outputs, origin: pending.origin.clone() };
+        let spec = RunSpec { run: run_id.clone(), node_id: id.to_owned(), instance: node_instance(id), type_id: node.type_id.clone(), values, source_signal: draft.source_signal.clone(),
+            devices, shared, artifacts, resources, directory: directory.clone(), outputs, origin: pending.origin.clone() };
         let follow_generation = self.source_published(&signals, &draft.source_signal).map(|signal| signal.generation.clone());
         self.runs.push(Run { id: run_id.clone(), node: id.to_owned(), state: "starting".into(), ready: false,
             started_at, ended_at: None, progress: None, request: None, directory, artifacts: Vec::new(), generation: None, stop_reason: None,
             error: None, claims, start_record, previewed: BTreeSet::new(), preview_baseline, preview_panels: Vec::new(),
             acquisition: pending.acquisition.clone(), children: Vec::new() });
         self.trim_runs();
+        // v2 _activate_candidate: what a run starts with is its producer's own; a region that
+        // wrote it no longer gives it back.
+        self.selection_restore.retain(|(node, _), _| node != id);
         let node = self.node_mut(id)?;
         node.starts += 1;
         node.run = Some(run_id);
@@ -994,21 +1099,28 @@ impl Workbench {
     fn stop_run_of(&mut self, id: &str, reason: &str) {
         let Some(run) = self.node(id).and_then(|node| self.active_run(node)).map(|run| run.id.clone()) else { return };
         let run = self.run_mut(&run).unwrap();
-        if run.state != "stopping" {
-            run.state = "stopping".into();
-            run.stop_reason.get_or_insert_with(|| reason.to_owned());
-            let id = run.id.clone();
-            // The operator's request it waits on is cancelled with it (v2: Stop wakes the wait).
-            let request = run.request.take().and_then(|request| request["request"].as_str().map(str::to_owned));
-            self.plugins.stop(&id);
-            if let Some(request) = request { self.plugins.answer(&id, &request, None); }
-        }
+        run.state = "stopping".into();
+        run.stop_reason.get_or_insert_with(|| reason.to_owned());
+        let id = run.id.clone();
+        // The operator's request it waits on is cancelled with it (v2: Stop wakes the wait).
+        let request = run.request.take().and_then(|request| request["request"].as_str().map(str::to_owned));
+        // Every Stop is sent (v2 cancelled the host each time): one asked again is never a no-op.
+        self.plugins.stop(&id);
+        if let Some(request) = request { self.plugins.answer(&id, &request, None); }
+    }
+
+    /// A run asks the operator. One asked after its Stop is answered as stopped and never
+    /// shown (v2: Stop wakes the wait, and a request made after it does not wait).
+    pub(crate) fn run_requested(&mut self, id: &str, request: Value) {
+        let Some(run) = self.run_mut(id) else { return };
+        if run.state != "stopping" && !run.terminal() { run.request = Some(request); return; }
+        if let Some(name) = request["request"].as_str() { self.plugins.answer(id, name, None); }
     }
 
     /// Stop: following, a waiting start and the run itself end. Never refused.
     pub(crate) fn stop_node(&mut self, id: &str, _host: &mut dyn Host) -> Result<Value, String> {
         let node = self.node_mut(id)?;
-        if std::mem::take(&mut node.follow) { self.plugins.follow(id, None); }
+        if std::mem::take(&mut node.follow) { self.plugins.follow(&node_instance(id), None); }
         let node = self.node_mut(id)?;
         node.start_after_check = None;
         let pending = node.pending.take();
@@ -1019,7 +1131,7 @@ impl Workbench {
         self.stop_run_of(id, "the operator pressed Stop");
         for child in children { self.stop_run_of(&child, "its parent run stopped"); }
         let active = self.node(id).and_then(|node| self.active_run(node)).is_some();
-        if !active { self.node_mut(id)?.running = None; }
+        if !active { let node = self.node_mut(id)?; node.running = None; node.frozen = None; }
         Ok(json!({"node": id, "stopping": active}))
     }
 
@@ -1039,18 +1151,23 @@ impl Workbench {
         if let Some(node) = self.node(id) { self.console_report = (format!("removed {}", node.name), "task"); }
         self.nodes.retain(|node| node.id != id);
         self.selection_restore.retain(|(node, _), _| node != id);
-        self.plugins.close(id);
+        self.plugins.close(&node_instance(id));
         self.board.dirty = true;
     }
 
-    pub(crate) fn answer_request(&mut self, id: &str, request: &str, response: &Value) -> Result<Value, String> {
+    /// `operator`: the answer comes from the window (a client's and a run's do not).
+    pub(crate) fn answer_request(&mut self, id: &str, request: &str, response: &Value, operator: bool) -> Result<Value, String> {
         let node = self.node(id).ok_or_else(|| format!("No logic node {id:?}"))?;
         let run = self.active_run(node).ok_or_else(|| format!("{} is not running", node.name))?;
         let current = run.request.as_ref().and_then(|current| current["request"].as_str()).unwrap_or("");
         if current != request { return Err(format!("{request} is not {}'s current request{}", node.name,
             if current.is_empty() { String::new() } else { format!(" ({current} is)") })); }
-        let run_id = run.id.clone();
         let response = (!response.is_null()).then_some(response);
+        // v2: a physical setting only a hand makes is confirmed by the operator; anyone may cancel it (the run's Stop).
+        if response.is_some() && !operator && run.request.as_ref().is_some_and(|current| current["kind"] == MANUAL_AXIS) {
+            return Err("Physical manual-axis requests cannot be answered here; the operator answers them at the window".into());
+        }
+        let run_id = run.id.clone();
         if response.is_some_and(|response| !response.is_object()) { return Err("A response is an object of the request's fields, or null to cancel".into()); }
         // A cancel stops the run first, as v2's Stop woke the wait with the stop already set.
         if response.is_none() { self.stop_run_of(id, "the operator cancelled the request"); }
@@ -1068,24 +1185,25 @@ impl Workbench {
         }
         let args = json!({"values": self.draft_values(node), "devices": self.device_infos(&node.draft.device_keys), "resources": node.resources});
         let ticket = self.ticket(Ticket::Estimate { request });
-        self.plugins.query(id, ticket, "estimate_run", &args);
+        self.plugins.query(&node_instance(id), ticket, "estimate_run", &args);
         Ok(())
     }
 
-    pub(crate) fn instance_opened(&mut self, id: &str, working_point: Value, host: &mut dyn Host) {
-        if self.device_opened(id, working_point) {
-            self.default_device_keys(id);
+    /// A plugin instance opened: a node's (named `node/<id>`) or a device's.
+    pub(crate) fn instance_opened(&mut self, instance: &str, working_point: Value, host: &mut dyn Host) {
+        if let Some(id) = instance.strip_prefix(NODE_INSTANCE) {
+            if let Ok(node) = self.node_mut(id) {
+                node.instance = Instance::Open;
+                self.send_queries(id);
+                self.start_checked(id, host);
+            }
+        } else if self.device_opened(instance, working_point) {
+            self.default_device_keys(instance);
             self.refresh_editors();
             self.launch_pending(host);
             // Starts that waited for this device go now.
             let waiting: Vec<String> = self.nodes.iter().filter(|node| node.start_after_check.is_some()).map(|node| node.id.clone()).collect();
             for node in waiting { self.start_checked(&node, host); }
-            return;
-        }
-        if let Ok(node) = self.node_mut(id) {
-            node.instance = Instance::Open;
-            self.send_queries(id);
-            self.start_checked(id, host);
         }
     }
 
@@ -1109,15 +1227,17 @@ impl Workbench {
         for id in changed { self.send_queries(&id); }
     }
 
-    pub(crate) fn instance_failed(&mut self, id: &str, error: String, host: &mut dyn Host) {
-        if self.device_failed(id, error.clone()) {
-            for node in self.claiming_nodes(id) { self.stop_run_of(&node, "its device failed"); }
-            self.close_released();
-            // A Start that waited for this device now says why it cannot.
-            let waiting: Vec<String> = self.nodes.iter().filter(|node| node.start_after_check.is_some()).map(|node| node.id.clone()).collect();
-            for node in waiting { self.start_checked(&node, host); }
+    pub(crate) fn instance_failed(&mut self, instance: &str, error: String, host: &mut dyn Host) {
+        let Some(id) = instance.strip_prefix(NODE_INSTANCE) else {
+            if self.device_failed(instance, error) {
+                for node in self.claiming_nodes(instance) { self.stop_run_of(&node, "its device failed"); }
+                self.close_released();
+                // A Start that waited for this device now says why it cannot.
+                let waiting: Vec<String> = self.nodes.iter().filter(|node| node.start_after_check.is_some()).map(|node| node.id.clone()).collect();
+                for node in waiting { self.start_checked(&node, host); }
+            }
             return;
-        }
+        };
         if let Ok(node) = self.node_mut(id) { node.instance = Instance::Failed(error.clone()); }
         // A lost node process ends its run with that reason.
         if let Some(run) = self.node(id).and_then(|node| self.active_run(node)).map(|run| run.id.clone()) {
@@ -1125,9 +1245,21 @@ impl Workbench {
         }
     }
 
-    pub(crate) fn instance_closed(&mut self, id: &str, error: Option<String>, host: &mut dyn Host) {
-        if self.device_closed(id, error.clone()) { self.refresh_editors(); self.launch_pending(host); return; }
-        if let (Ok(node), Some(error)) = (self.node_mut(id), error) { node.instance = Instance::Failed(error); }
+    pub(crate) fn instance_closed(&mut self, instance: &str, error: Option<String>, host: &mut dyn Host) {
+        match instance.strip_prefix(NODE_INSTANCE) {
+            Some(id) => if let (Ok(node), Some(error)) = (self.node_mut(id), error) { node.instance = Instance::Failed(error); },
+            None => if self.device_closed(instance, error) { self.refresh_editors(); self.launch_pending(host); },
+        }
+    }
+
+    /// v2: a row can always be started again. A node whose plugin instance was lost (its process
+    /// ended) or did not open opens again, as Apply opens a device that failed.
+    fn reopen_failed(&mut self, id: &str) -> bool {
+        let Some(node) = self.nodes.iter_mut().find(|node| node.id == id && matches!(node.instance, Instance::Failed(_))) else { return false };
+        node.instance = Instance::Opening;
+        let type_id = node.type_id.clone();
+        self.plugins.open(&node_instance(id), &type_id, &json!({}), &json!({}));
+        true
     }
 
     pub(crate) fn run_started(&mut self, id: &str) {
@@ -1150,6 +1282,8 @@ impl Workbench {
     pub(crate) fn run_acquire(&mut self, parent: &str, ticket: u64, child: &str, completion: &str, host: &mut dyn Host) {
         let refuse = |workbench: &mut Self, error: String| workbench.plugins.acquired(parent, ticket, Err(error));
         let Some(parent_node) = self.run(parent).filter(|run| !run.terminal()).map(|run| run.node.clone()) else { return refuse(self, "the asking run has ended".into()) };
+        // v2 _restart_acquisition: a run asked to stop starts nothing more.
+        if self.run(parent).is_some_and(|run| run.state == "stopping") { return refuse(self, "stopped before acquisition restart".into()); }
         let Some(node) = self.node(child) else { return refuse(self, format!("No logic node {child:?}")) };
         if node.id == parent_node { return refuse(self, "A run cannot acquire itself".into()); }
         let request = Some((parent.to_owned(), ticket, completion.to_owned()));
@@ -1190,7 +1324,7 @@ impl Workbench {
                 let message = message.unwrap_or_else(|| "the run failed".into());
                 node.error = Some(if node.follow { format!("failed; restarts with the source's next run: {message}") } else { message });
             }
-            if !node.follow && node.pending.is_none() { node.running = None; }
+            if !node.follow && node.pending.is_none() { node.running = None; node.frozen = None; }
             if node.removing { self.retire_node(&node_id); }
         }
         self.close_released();
@@ -1201,8 +1335,11 @@ impl Workbench {
     /// Following processors start on each new publication generation of their source.
     pub(crate) fn follow_sources(&mut self, host: &mut dyn Host) {
         let signals = host.signals();
+        // v2 _follow_processor_sources: while a Task has the board, only its own chain restarts.
+        let allowed = self.active_task().map(|task| self.task_acquisition_nodes(task));
         let ready: Vec<(String, String)> = self.nodes.iter()
             .filter(|node| node.follow && node.pending.is_none() && self.active_run(node).is_none() && !node.removing)
+            .filter(|node| allowed.as_ref().is_none_or(|allowed| allowed.contains(&node.id)))
             .filter_map(|node| {
                 let source = node.running.as_ref().map(|draft| draft.source_signal.as_str()).unwrap_or(&node.draft.source_signal);
                 self.source_published(&signals, source).filter(|signal| node.follow_attempted.as_deref() != Some(signal.generation.as_str()))
@@ -1299,7 +1436,7 @@ impl Workbench {
         // A draft its plugin is still starting for, or checking, shows what the newest answers it
         // has say (its type's for a new node); a Start waits for its own (v2 answered at once).
         let known = descriptor.is_some_and(|item| item.node().queries.iter()
-            .filter(|name| DRAFT_QUERIES.contains(&name.as_str()) && name.as_str() != ADMIT_SOURCE).all(|name| node.answers.contains_key(name)));
+            .filter(|name| DRAFT_QUERIES.contains(&name.as_str()) && ![ADMIT_SOURCE, ADMIT].contains(&name.as_str())).all(|name| node.answers.contains_key(name)));
         let issues: Vec<String> = self.issues(node, signals).into_iter().filter(|issue| !(known && (issue == CHECKING || issue.ends_with(STARTING_PLUGIN)))).collect();
         let run = node.run.as_deref().and_then(|id| self.run(id));
         let active = run.filter(|run| !run.terminal());
@@ -1322,8 +1459,8 @@ impl Workbench {
         } else if node.start_after_check.is_some() {
             ("waiting", "running", "starting once the draft is checked".to_owned())
         } else if node.pending.is_some() {
-            let holders: BTreeSet<String> = node.running.as_ref().map(|draft| self.wanted_claims(node, draft)).unwrap_or_default()
-                .iter().flat_map(|claim| self.claims_on(&claim.device)).map(|claim| claim.node_name).collect();
+            let holders: BTreeSet<String> = self.conflicting_nodes(&node.running.as_ref().map(|draft| self.wanted_claims(node, draft)).unwrap_or_default())
+                .into_iter().filter(|holder| *holder != node.id).filter_map(|holder| self.node(&holder).map(|other| other.name.clone())).collect();
             ("waiting", "running", if holders.is_empty() { "restart queued".to_owned() } else { format!("waiting for {}", holders.into_iter().collect::<Vec<_>>().join(", ")) })
         } else if node.follow {
             let sealed = signals.iter().any(|signal| signal.name == source && signal.sealed);

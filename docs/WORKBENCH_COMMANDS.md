@@ -257,7 +257,7 @@ plugin event changes `state` again (use `wait`).
 | `discover_devices` | — | control | Scan hardware: every type with a scan (`types[].discoverable`) at once, in its own plugin process (PLUGIN_PROTOCOL `discover`), one 20 s deadline from the scan's start; fills `apparatus.discovered` (with each find's `type_id`) and answers `{found, message, severity}` once every family answered or the deadline passed (`discovered N devices; <families>: <reason>`, `no answer within 20s`, v2's words); a family's answer after the deadline is dropped. `apparatus.busy` says Scanning hardware; while the scan runs, or a family past the deadline still answers, `apply_devices` and another scan are refused (`hardware scan still running: <families>`). |
 | `add_discovered` | `instance_id` | control | Copies a discovered entry into the draft. |
 | `load_apparatus` | `path?` | control | Replaces the draft from a `zlc.installation` file, entry by entry: an entry v2 would refuse is left out (`skipped`, with why) and the rest load; dropped settings are `notes`. The Devices@ line says both. |
-| `save_apparatus` | `path?` | control | Writes the draft (atomic, strict). |
+| `save_apparatus` | `path?`, `replace_unread?` | control | Writes the draft (atomic, strict). A file the draft was not read from in full (it could not be read, or entries or settings were left out: `apparatus.unread` says why) is replaced only with `replace_unread` (the window's Save goes through Save as). |
 | `apply_devices` | — | control | Init / Apply: opens what the draft adds or changes (in parallel, admitted in operator order), closes what it removes; runs that claim a closing device are stopped first. Partial failures stay per instance. |
 | `close_device` | `device` | control | Close one live instance (its claiming runs are stopped first); the draft keeps it, so `apply_devices` reopens it. |
 | `shut_down_devices` | — | control | Shut down: stops every run, closes every instance. Never refused. |
@@ -278,7 +278,7 @@ plugin event changes `state` again (use `wait`).
 | `start_node` | `node`, `expected_draft_revision?` | control | Start, or Restart when running: admission (`issues` empty, devices open and unclaimed by other kinds of lease); claims; a Task gets its run directory and `start.json`; `run.start` to the instance. A processor whose source is not published follows it (starts when it publishes, restarts on its next run). With `auto_preview`, declared previews get panels when their signals first publish. |
 | `stop_node` | `node` | control | Stop: cancels a following processor, a waiting start and an operator request; the run drains, seals, writes `run.json`; claims release at terminal. Never refused. |
 | `remove_node` | `node` | control | Remove: a running node is stopped and removed at its terminal (`phase: removing`). |
-| `answer_request` | `node`, `request`, `response` (object, or null to cancel = Stop) | control | Operator input (`point-selection`, `manual-axis`, any kind a type declares): refused unless `request` is current. A `point-selection` payload names `output_name` (the image), `points` (`[id, label, x, y]`, x/y on the image's axes) and `confirm_label`; its answer is `{excluded_point_ids}`. The window reviews it in its own window (`review:<node>`, titled with the request, the other windows waiting) on `review-<node>`, an Image panel held on the image's read with the candidates drawn as the review marks them (window commands `open_point_review {node, request}`, `point_review_state {panel, excluded, selected}`, `close_point_review {node}`; closing the window answers null). |
+| `answer_request` | `node`, `request`, `response` (object, or null to cancel = Stop) | control | Operator input (`point-selection`, `manual-axis`, any kind a type declares): refused unless `request` is current; a `manual-axis` (a hand moves the knob) is answered only at the window, a client may only cancel it (v2). A request made after Stop is answered as the Stop and never shown. A `point-selection` payload names `output_name` (the image), `points` (`[id, label, x, y]`, x/y on the image's axes) and `confirm_label`; its answer is `{excluded_point_ids}`. The window reviews it in its own window (`review:<node>`, titled with the request, the other windows waiting) on `review-<node>`, an Image panel held on the image's read with the candidates drawn as the review marks them (window commands `open_point_review {node, request}`, `point_review_state {panel, excluded, selected}`, `close_point_review {node}`; closing the window answers null). |
 
 ### 4.4 Board and layout (v2 Task Console board)
 | Command | Parameters | Access | v2 action → effect |
@@ -408,7 +408,11 @@ window), `fit`, `selector`+`crosshair`→`selectors`, `focused_cell`→`facet_fo
 `{"format": "zlc.installation", "simulation": {...}, "devices": [{"instance_id",
 "role", "type_id", "parameters"}]}`, exactly these keys; strict JSON; written only by
 `save_apparatus`. An unknown `type_id` is kept and shown failed with the import
-reason; an unknown parameter is ignored with a note (v2 refused the whole file).
+reason; an unknown parameter is ignored with a note (v2 refused the whole file). Such a
+file is `unread`: the draft shows unsaved and Save does not write back fewer devices or
+settings than it holds. A device type may declare `identity` (`visa:{resource}`): of
+two rows naming one instrument the later is refused before it opens (v2's broker). A
+device and a logic node may share an id: a node's plugin instance is `node/<id>`.
 
 ### 7.3 Task runs (`zlc.task-start` / `zlc.task-run`)
 `<data>/<YYYY_MM_DD>/<api_name>[-n]/`, allocated only at a real Start. `start.json`
@@ -490,8 +494,9 @@ crash leaves only `start.json`. Measurements and processors have no run director
    `description`, and per-requirement `enabled_when`.
 4. A run asks for its acquisition node with an event (`run.acquire {node,
    completion}` → workbench `RunAcquire`), replacing v2's injected `restart_logic`.
-5. Claims are decided by the workbench (exclusive per instance for a run; Device
-   Control tunes are refused on protected fields); the host routes `device` calls to
+5. Claims are decided by the workbench (a requirement takes its device exclusively, a
+   device the draft names is shared, v2's rule; Device Control tunes are refused on
+   protected fields and the fields their dependency groups couple to); the host routes `device` calls to
    the instances `RunSpec.devices` names. Besides the requirements, a draft may name
    devices itself (`resolve_device_claims`: a scan's device axes): each is claimed with
    its named fields protected and passed as its own argument (`tunable:<key>`).

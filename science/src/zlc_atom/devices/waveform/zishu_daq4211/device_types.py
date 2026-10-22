@@ -146,6 +146,7 @@ DEVICE_TYPES = (
         ZISHU_DAQ4211_SCHEMA,
         ("waveform.source",),
         factory=_factory,
+        identity="zishu-daq:{serial}",
         label="ZishuTech DAQ-4211",
         description=(
             "ZishuTech DAQ-4211: eight synchronous 16-bit analog inputs over USB, each "

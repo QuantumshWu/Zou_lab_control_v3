@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use zlc_core::control::node_instance;
+
 use crate::logic::{Draft, Instance, Node, name_problem, name_text, signal_key, split_signal};
 use crate::{Host, Workbench, fields, workspace};
 
@@ -67,7 +69,7 @@ impl Board {
 }
 
 /// A resolved document on fresh panel ids, waiting to replace the board.
-/// `renamed`: the saved id of each panel, and of each node given a fresh one, to its id on this board.
+/// `renamed`: the saved id of each panel to its id on this board.
 pub struct Loaded { pub nodes: Vec<LoadedNode>, pub panels: Vec<LoadedPanel>, pub notes: Vec<String>, pub path: Option<PathBuf>, pub renamed: BTreeMap<String, String> }
 pub struct LoadedNode { pub id: String, pub name: String, pub type_id: String, pub draft: Draft, pub auto_preview: bool }
 pub struct LoadedPanel { pub panel: String, pub signal: String, pub kind: String, pub window: u64, pub target: Value, pub board: BoardPanel }
@@ -151,10 +153,8 @@ impl Workbench {
     /// Parse and resolve a layout document, touching nothing, entry by entry (v2
     /// `resolve_layout`): a panel or logic entry this board cannot carry is left out
     /// with its reason and every other one loads; a saved value that cannot be read,
-    /// or that its field refuses, is left at its default; a node whose internal ID a
-    /// device of this apparatus also holds gets a fresh one here (v3 opens devices and
-    /// nodes under one set of names), its references respelled. Each is said in
-    /// `notes`. Only a document that is not a board is refused.
+    /// or that its field refuses, is left at its default. Each is said in `notes`.
+    /// Only a document that is not a board is refused.
     fn resolve_layout(&self, document: &Value, host: &mut dyn Host) -> Result<Loaded, String> {
         let document = object(document, "a layout")?;
         if document.get("format").and_then(Value::as_str) != Some(FORMAT) { return Err("that file is not a saved board".into()); }
@@ -170,11 +170,10 @@ impl Workbench {
             }
         }
         let fresh = host.reserve_panel_ids(kept.len());
-        let mut renamed: BTreeMap<String, String> = kept.iter().map(|(saved, _)| saved.clone()).zip(fresh.iter().cloned()).collect();
-        let saved_ids: BTreeSet<String> = logic.iter().filter_map(|entry| entry["node_id"].as_str()).map(|id| id.trim().to_owned()).collect();
+        let renamed: BTreeMap<String, String> = kept.iter().map(|(saved, _)| saved.clone()).zip(fresh.iter().cloned()).collect();
         let mut nodes: Vec<LoadedNode> = Vec::new();
         for (index, entry) in logic.iter().enumerate() {
-            match self.logic_entry(entry, &nodes, &saved_ids, &mut renamed, &mut notes) {
+            match self.logic_entry(entry, &nodes, &renamed, &mut notes) {
                 Ok(node) => nodes.push(node),
                 Err(reason) => notes.push(format!("logic entry {}: {reason}; it is left out", index + 1)),
             }
@@ -237,7 +236,7 @@ impl Workbench {
 
     /// One saved logic row as v2 `_logic_from_tree` + `resolve_layout` read it, onto the
     /// rows `loaded` before it; Err says why it is left out.
-    fn logic_entry(&self, entry: &Value, loaded: &[LoadedNode], saved_ids: &BTreeSet<String>, renamed: &mut BTreeMap<String, String>,
+    fn logic_entry(&self, entry: &Value, loaded: &[LoadedNode], renamed: &BTreeMap<String, String>,
                    notes: &mut Vec<String>) -> Result<LoadedNode, String> {
         let entry = object(entry, "it")?;
         let saved_id = string(entry.get("node_id"), "", "its node_id")?.trim().to_owned();
@@ -258,14 +257,7 @@ impl Workbench {
             notes.push(format!("logic {saved_id} is called by its internal ID: {clash}"));
             name = saved_id.clone();
         }
-        let device = |id: &str| self.apparatus.draft.iter().any(|entry| entry.instance_id == id) || self.devices.contains_key(id);
-        let id = if device(&saved_id) {
-            let fresh = (2..).map(|n: u32| format!("{saved_id}{n}"))
-                .find(|id| !device(id) && !saved_ids.contains(id) && !renamed.values().any(|taken| taken == id)).unwrap();
-            notes.push(format!("logic {name}: a device of this apparatus is also called {saved_id}, so the node's internal ID is {fresh} on this board"));
-            renamed.insert(saved_id, fresh.clone());
-            fresh
-        } else { saved_id };
+        let id = saved_id;
         // A saved part that cannot be read is left at its default, and said.
         let mut part = |key: &str, read: &dyn Fn(&Value) -> bool| match entry.get(key) {
             Some(value) if !read(value) => { notes.push(format!("logic {name}: its {key} {value} cannot be read; it is at its default")); None }
@@ -358,9 +350,13 @@ impl Workbench {
         let (loaded, done) = self.board.pending.take().unwrap();
         let said = loaded.notes.clone();
         for panel in std::mem::take(&mut self.board.panels) { host.close_panel(&panel.panel); }
-        for node in std::mem::take(&mut self.nodes) { self.plugins.close(&node.id); }
+        for node in std::mem::take(&mut self.nodes) { self.plugins.close(&node_instance(&node.id)); }
+        // What the old board's regions set and read goes with it.
+        self.selection_restore.clear();
+        self.routed_selections.clear();
+        self.bundles.clear();
         for node in loaded.nodes {
-            self.plugins.open(&node.id, &node.type_id, &json!({}), &json!({}));
+            self.plugins.open(&node_instance(&node.id), &node.type_id, &json!({}), &json!({}));
             let descriptor = self.catalog.get(&node.type_id);
             self.nodes.push(Node::new(node.id, node.name, node.type_id, node.draft, node.auto_preview, descriptor));
         }
@@ -621,21 +617,30 @@ impl Workbench {
     /// entry node once their plugins have answered.
     pub(crate) fn run_recipe(&mut self, name: &str, parameters: &Value, start: bool, origin: &str, host: &mut dyn Host) -> Result<Value, String> {
         let (recipe, layout, _) = self.read_recipe(name, Some(&parameters.as_object().cloned().unwrap_or_default()))?;
+        let followers: Vec<&str> = recipe["followers"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let entry = recipe["entry_node"].as_str().unwrap_or("");
+        // v2 lab_run_recipe: each follower once, apart from the entry node, and a standing processor.
+        let unique: BTreeSet<&str> = followers.iter().copied().collect();
+        if unique.len() != followers.len() || unique.contains(entry) { return Err("A recipe starts each follower once, separately from its entry node".into()); }
+        let declared = |id: &str| layout["logic"].as_array().into_iter().flatten().find(|item| item["node_id"] == id).and_then(|item| item["api_name"].as_str())
+            .and_then(|type_id| self.catalog.get(type_id)).map(|item| item.node().node_kind.clone());
+        if followers.iter().any(|id| declared(id).as_deref() != Some("processor")) {
+            return Err("Recipe followers must be standing processors, not device executions".into());
+        }
         let mut loaded = self.resolve_layout(&layout, host)?;
         let renamed = loaded.renamed.clone();
         loaded.path = None;
         let notes = loaded.notes.clone();
         let reply = self.replace_board(loaded, "layout loaded", false, "stop running logic before loading a board", host)?;
-        // Its nodes by their ids on this board (one a device's id took has a fresh one).
-        let order: Vec<String> = recipe["followers"].as_array().into_iter().flatten().filter_map(Value::as_str)
-            .chain(recipe["entry_node"].as_str()).map(|id| renamed.get(id).cloned().unwrap_or_else(|| id.to_owned())).collect();
+        let order: Vec<String> = followers.iter().copied().chain([entry]).map(str::to_owned).collect();
         if start { self.board.recipe_start = Some((order.clone(), origin.to_owned())); }
         self.poll_recipe(host);
         Ok(json!({"recipe": name, "replaced": reply["replaced"], "nodes": order, "notes": notes,
             "result_panels": recipe["result_panels"].as_array().into_iter().flatten().filter_map(Value::as_str).filter_map(|saved| renamed.get(saved)).collect::<Vec<_>>()}))
     }
 
-    /// Start a loaded recipe's nodes once each has opened and answered its draft queries.
+    /// Start a loaded recipe's nodes once each has opened and answered its draft queries,
+    /// and only when every one of them may start (v2: validated first, then started in order).
     pub(crate) fn poll_recipe(&mut self, host: &mut dyn Host) {
         let Some((order, origin)) = self.board.recipe_start.clone() else { return };
         let signals = host.signals();
@@ -643,6 +648,12 @@ impl Workbench {
             && !self.issues(node, &signals).iter().any(|issue| issue == crate::logic::CHECKING || issue.ends_with(crate::logic::STARTING_PLUGIN))));
         if !settled { return; }
         self.board.recipe_start = None;
+        let invalid: Vec<String> = order.iter().filter_map(|id| self.node(id)).filter_map(|node| self.issues(node, &signals).first()
+            .map(|issue| format!("{}: {issue}", node.name))).collect();
+        if !invalid.is_empty() {
+            self.notes.push(format!("recipe: inputs are not valid, nothing started -- {}", invalid.join("; ")));
+            return;
+        }
         for id in order {
             if let Err(error) = self.start_node(&id, None, &origin, None, host) { self.notes.push(format!("recipe: {id}: {error}")); break; }
         }

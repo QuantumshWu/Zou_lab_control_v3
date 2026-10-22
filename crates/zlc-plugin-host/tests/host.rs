@@ -80,7 +80,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_a_crash_loses_one_instan
     // under the signal name its request gives; it asks the application through `core`.
     let frames_signal = "@logic/counter/frames";
     let run = host.start_run("counter", RunRequest { values: json!({"count": 3, "size": 128}),
-        devices: [("echo".to_owned(), "echo".to_owned())].into(), origin: Origin::Operator, resources: json!({}),
+        devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into() }).unwrap();
     assert_eq!(host.spi("echo", "frame", json!([2, 1]), json!({}), Duration::from_secs(5)).err().unwrap().kind, ErrorKind::NotClaimed);
     let finished = |run: &str| {
@@ -122,7 +122,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_a_crash_loses_one_instan
     // commits it with that event as parent and the same ordinal, then completes.
     host.open("doubler", "doubler", json!({}), json!({})).unwrap();
     let doubled_signal = "@logic/doubler/doubled";
-    let run = host.start_run("doubler", RunRequest { values: json!({}), devices: Default::default(), origin: Origin::Operator,
+    let run = host.start_run("doubler", RunRequest { values: json!({}), devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: Some(frames_signal.to_owned()), run_directory: None,
         outputs: [("doubled".to_owned(), doubled_signal.to_owned())].into() }).unwrap();
     let (outcome, result, error, ..) = finished(&run);
@@ -147,7 +147,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_a_crash_loses_one_instan
     while host.registry().holds(&lent) > 1 && std::time::Instant::now() < deadline { std::thread::sleep(Duration::from_millis(20)); }
     assert_eq!(host.registry().holds(&lent), 1, "only Runtime holds the last frame");
     let run = host.start_run("counter", RunRequest { values: json!({"count": 1, "size": 128}),
-        devices: [("echo".to_owned(), "echo".to_owned())].into(), origin: Origin::Operator, resources: json!({}),
+        devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into() }).unwrap();
     let (outcome, _, error, ..) = finished(&run);
     assert_eq!(outcome, "completed", "{error:?}");
@@ -157,10 +157,10 @@ fn devices_lend_frames_nodes_publish_through_claims_and_a_crash_loses_one_instan
     // however late its own run starts: here, after that source has sealed.
     host.follow("doubler", Some(frames_signal));
     let run = host.start_run("counter", RunRequest { values: json!({"count": 3, "size": 128}),
-        devices: [("echo".to_owned(), "echo".to_owned())].into(), origin: Origin::Operator, resources: json!({}),
+        devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into() }).unwrap();
     assert_eq!(finished(&run).0, "completed");
-    let run = host.start_run("doubler", RunRequest { values: json!({}), devices: Default::default(), origin: Origin::Operator,
+    let run = host.start_run("doubler", RunRequest { values: json!({}), devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: Some(frames_signal.to_owned()), run_directory: None,
         outputs: [("doubled".to_owned(), doubled_signal.to_owned())].into() }).unwrap();
     let (outcome, result, error, ..) = finished(&run);

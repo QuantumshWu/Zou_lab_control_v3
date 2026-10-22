@@ -131,8 +131,8 @@ pub struct Stand {
     reply: Arc<dyn Fn(Event) + Send + Sync>,
     /// Instances opened in the host: id -> type.
     instances: BTreeMap<String, String>,
-    /// Plugin-host runs: host run id -> (node instance, workbench run id).
-    host_runs: Arc<Mutex<BTreeMap<String, (String, String)>>>,
+    /// The one map between the workbench's runs and the plugin host's.
+    runs: Arc<Mutex<Runs>>,
     /// Host events of a run whose start reply has not arrived yet.
     unmapped: Vec<HostEvent>,
     /// Run directory per workbench run (artifacts must live inside it).
@@ -155,6 +155,24 @@ pub struct Stand {
     scanning: Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// Each instance's opens and closes, in the order asked: the next turn to hand out, and the gate.
     lifecycles: BTreeMap<String, (u64, Arc<Gate>)>,
+}
+
+/// Workbench runs and plugin-host runs. A run's host id is known only when its start
+/// answers; a Stop asked before that is kept here and sent the moment it is known.
+#[derive(Default)]
+struct Runs {
+    /// Host run id -> (host instance, workbench run id).
+    mapped: BTreeMap<String, (String, String)>,
+    /// Workbench runs whose start has not answered yet: whether a Stop waits for it.
+    starting: BTreeMap<String, bool>,
+}
+
+impl Runs {
+    /// (host run id, host instance) of a workbench run.
+    fn hosted(&self, ours: &str) -> Option<(String, String)> {
+        self.mapped.iter().find(|(_, (_, run))| run == ours).map(|(hosted, (instance, _))| (hosted.clone(), instance.clone()))
+    }
+    fn ours(&self, ours: &str) -> bool { self.starting.contains_key(ours) || self.mapped.values().any(|(_, run)| run == ours) }
 }
 
 /// One instance's open/close turns: a board replaced by one with the same node closes it and
@@ -200,7 +218,7 @@ pub(crate) fn descriptor(item: &zlc_plugin_host::TypeDescriptor) -> Value {
         "commands": item.commands.iter().map(|command| json!({"name": command.name, "summary": command.summary, "read_only": command.read_only,
             "drives": command.drives, "input_schema": command.input_schema, "params": command.params, "file": command.file})).collect::<Vec<_>>(),
         "addable": item.addable, "node": node, "queries": if item.node.is_none() { json!(item.queries) } else { json!([]) },
-        "control_window": item.control_window})
+        "control_window": item.control_window, "identity": item.identity})
 }
 
 fn origin(text: &str) -> Origin { if text == "operator" || text.is_empty() { Origin::Operator } else { Origin::Remote(text.to_owned()) } }
@@ -269,7 +287,7 @@ fn save_figure(params: &Value, lent: &Lent, directory: Option<std::path::PathBuf
 impl Builtin {
     pub fn new(runtime: Runtime, host: Option<PluginHost>, reply: Arc<dyn Fn(Event) + Send + Sync>,
                core: Arc<dyn Fn(crate::remote::RemoteCall) -> Result<(), String> + Send + Sync>) -> Self {
-        Self(Rc::new(RefCell::new(Stand { runtime, host, missing: None, catalog_ready: false, reply, instances: BTreeMap::new(), host_runs: Arc::default(),
+        Self(Rc::new(RefCell::new(Stand { runtime, host, missing: None, catalog_ready: false, reply, instances: BTreeMap::new(), runs: Arc::default(),
             unmapped: Vec::new(), directories: BTreeMap::new(), requests: BTreeMap::new(), core, events: Vec::new(), camera: None,
             acquisition: json!({"state": "idle", "produced": 0}), native: None, native_instances: BTreeMap::new(), bench: None, scanning: Arc::default(), lifecycles: BTreeMap::new() })))
     }
@@ -296,7 +314,7 @@ impl Builtin {
     /// Whether the latest Camera measurement run is still running.
     pub fn active(&self) -> bool {
         let stand = self.0.borrow();
-        stand.camera.as_ref().is_some_and(|(run, _)| stand.host_runs.lock().unwrap().values().any(|(_, ours)| ours == run))
+        stand.camera.as_ref().is_some_and(|(run, _)| stand.runs.lock().unwrap().ours(run))
     }
 
     /// The latest camera run's generation, from the signal it publishes.
@@ -327,13 +345,20 @@ impl Builtin {
         if let Some(error) = error { stand.acquisition["error"] = error["message"].clone(); }
     }
 
-    /// Ask every running plugin run to stop (closing the window).
+    /// Ask every plugin run to stop, one still starting as soon as it has (closing the window).
     pub fn stop_all(&self) {
-        let runs: Vec<(String, String)> = self.0.borrow().host_runs.lock().unwrap().iter().map(|(hosted, (node, _))| (hosted.clone(), node.clone())).collect();
-        for (hosted, node) in runs {
-            let _ = self.spawn("stop", move |host| Event::Log { line: match host.stop_run(&node, &hosted) {
-                Ok(()) => format!("stop requested for {hosted}"), Err(error) => format!("stop of {hosted}: {error}") }, instance: node });
-        }
+        let runs: Vec<(String, String)> = {
+            let stand = self.0.borrow();
+            let mut runs = stand.runs.lock().unwrap();
+            for asked in runs.starting.values_mut() { *asked = true; }
+            runs.mapped.iter().map(|(hosted, (instance, _))| (hosted.clone(), instance.clone())).collect()
+        };
+        for (hosted, instance) in runs { self.stop_hosted(hosted, instance); }
+    }
+
+    fn stop_hosted(&self, hosted: String, instance: String) {
+        let _ = self.spawn("stop", move |host| Event::Log { line: match host.stop_run(&instance, &hosted) {
+            Ok(()) => format!("stop requested for {hosted}"), Err(error) => format!("stop of {hosted}: {error}") }, instance });
     }
 
     /// A plugin host fact, as workbench events. A run's fact that arrives
@@ -348,7 +373,7 @@ impl Builtin {
             HostEvent::RunReady { run, .. } | HostEvent::RunProgress { run, .. } | HostEvent::RunFinished { run, .. } | HostEvent::Request { run, .. } => Some(run.clone()),
             _ => None,
         };
-        let ours = hosted.as_ref().map(|run| self.0.borrow().host_runs.lock().unwrap().get(run).map(|(_, ours)| ours.clone()));
+        let ours = hosted.as_ref().map(|run| self.0.borrow().runs.lock().unwrap().mapped.get(run).map(|(_, ours)| ours.clone()));
         let Some(ours) = ours.map_or(Some(String::new()), |ours| ours) else {
             let mut stand = self.0.borrow_mut();
             if stand.unmapped.len() >= 1024 { stand.unmapped.remove(0); }
@@ -362,7 +387,7 @@ impl Builtin {
             HostEvent::RunFinished { run, outcome, error, generation, .. } => {
                 self.camera_fact(&ours, if outcome == "failed" { "error" } else { "stopped" }, error.as_ref());
                 let mut stand = self.0.borrow_mut();
-                stand.host_runs.lock().unwrap().remove(&run);
+                stand.runs.lock().unwrap().mapped.remove(&run);
                 stand.directories.remove(&ours);
                 stand.requests.retain(|request, _| !request.starts_with(&format!("{ours}:")));
                 vec![Event::RunFinished { run: ours, outcome, error, generation }]
@@ -612,7 +637,8 @@ impl Plugins for Builtin {
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error) }); }
     }
     fn start(&mut self, run: &RunSpec) {
-        let runs = self.0.borrow().host_runs.clone();
+        let runs = self.0.borrow().runs.clone();
+        runs.lock().unwrap().starting.insert(run.run.clone(), false);
         {
             let mut stand = self.0.borrow_mut();
             if let Some(directory) = &run.directory { stand.directories.insert(run.run.clone(), directory.clone()); }
@@ -621,21 +647,30 @@ impl Plugins for Builtin {
                 stand.acquisition = json!({"state": "starting", "produced": 0});
             }
         }
-        let (node, ours) = (run.node_id.clone(), run.run.clone());
+        let (node, ours) = (run.instance.clone(), run.run.clone());
         // A native device (the pulse board) stays claimed here, in the workbench; the
         // plugin reaches it only through catalogue commands (pulse_run, ...), so the
         // plugin host is handed only the plugin devices.
         let devices = { let stand = self.0.borrow(); run.devices.iter().filter(|(_, instance)| !stand.native_instances.contains_key(*instance))
             .map(|(argument, instance)| (argument.clone(), instance.clone())).collect() };
-        let request = RunRequest { values: Value::Object(run.values.clone()), devices, origin: origin(&run.origin),
+        let request = RunRequest { values: Value::Object(run.values.clone()), devices, shared: run.shared.clone(), origin: origin(&run.origin),
             // Build arguments beside the values: chosen artifacts and resolved workspace resources.
             resources: Value::Object(run.artifacts.iter().chain(&run.resources).map(|(key, value)| (key.clone(), value.clone())).collect()), source_signal: (!run.source_signal.is_empty()).then(|| run.source_signal.clone()),
             run_directory: run.directory.clone(), outputs: run.outputs.clone() };
         let started = self.spawn("start", move |host| match host.start_run(&node, request) {
-            Ok(hosted) => { runs.lock().unwrap().insert(hosted, (node, ours.clone())); Event::RunStarted { run: ours } }
-            Err(error) => Event::RunFinished { run: ours, outcome: "failed".into(), error: Some(json!({"type": error.kind.name(), "message": error.message})), generation: None },
+            Ok(hosted) => {
+                // Mapped, and a Stop asked while it was starting goes now: no Stop is lost.
+                let stop = { let mut runs = runs.lock().unwrap(); runs.mapped.insert(hosted.clone(), (node.clone(), ours.clone())); runs.starting.remove(&ours).unwrap_or(false) };
+                if stop { let _ = host.stop_run(&node, &hosted); }
+                Event::RunStarted { run: ours }
+            }
+            Err(error) => {
+                runs.lock().unwrap().starting.remove(&ours);
+                Event::RunFinished { run: ours, outcome: "failed".into(), error: Some(json!({"type": error.kind.name(), "message": error.message})), generation: None }
+            }
         });
         if let Err(error) = started {
+            self.0.borrow().runs.lock().unwrap().starting.remove(&run.run);
             self.0.borrow_mut().events.push(Event::RunFinished { run: run.run.clone(), outcome: "failed".into(),
                 error: Some(json!({"type": "StartError", "message": error})), generation: None });
         }
@@ -646,11 +681,15 @@ impl Plugins for Builtin {
     }
     fn stop(&mut self, run: &str) {
         if self.0.borrow().camera.as_ref().is_some_and(|(camera, _)| camera == run) { self.0.borrow_mut().acquisition["state"] = json!("stopping"); }
-        let hosted = self.0.borrow().host_runs.lock().unwrap().iter().find(|(_, (_, ours))| ours == run).map(|(hosted, (node, _))| (hosted.clone(), node.clone()));
-        if let Some((hosted, node)) = hosted {
-            let _ = self.spawn("stop", move |host| Event::Log { line: match host.stop_run(&node, &hosted) {
-                Ok(()) => format!("stop requested for {hosted}"), Err(error) => format!("stop of {hosted}: {error}") }, instance: node });
-        }
+        let hosted = {
+            let stand = self.0.borrow();
+            let mut runs = stand.runs.lock().unwrap();
+            let hosted = runs.hosted(run);
+            // Still starting: its start sends the Stop once the host has named it.
+            if hosted.is_none() { if let Some(asked) = runs.starting.get_mut(run) { *asked = true; } }
+            hosted
+        };
+        if let Some((hosted, instance)) = hosted { self.stop_hosted(hosted, instance); }
     }
     fn answer(&mut self, _run: &str, request: &str, response: Option<&Value>) {
         let ticket = self.0.borrow_mut().requests.remove(request);

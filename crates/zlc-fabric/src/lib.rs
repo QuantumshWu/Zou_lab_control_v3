@@ -84,5 +84,5 @@ pub fn remote_type() -> serde_json::Value {
             {"name": "port", "type": "int", "label": "Fabric port", "default": DEFAULT_PORT, "minimum": 1, "maximum": 65535},
             {"name": "instance_id", "type": "str", "label": "Published instance", "default": "", "required": true},
         ],
-        "addable": false, "queries": ["discover"]})
+        "addable": false, "queries": ["discover"], "identity": "fabric:{host}:{port}/{instance_id}"})
 }

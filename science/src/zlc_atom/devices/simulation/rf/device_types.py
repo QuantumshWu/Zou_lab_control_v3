@@ -43,6 +43,7 @@ DEVICE_TYPES = (
         VIRTUAL_RF_SCHEMA,
         ("rf.source",),
         factory=_rf_factory,
+        identity="virtual-rf:{serial}",
         label="Virtual RF source",
         description=(
             "The Vaunix LMS driver over an in-memory brick (500 MHz-8 GHz, -40 to +10 dBm): "

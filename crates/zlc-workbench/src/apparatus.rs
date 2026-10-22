@@ -8,12 +8,15 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 use zlc_core::units::{DEFAULT_UNITS, NO_PREFIX, Number, format_quantity};
 
+use crate::logic::in_use;
 use crate::{Host, Ticket, Workbench, fields, text, workspace};
 
 pub const FORMAT: &str = "zlc.installation";
 const ENTRY_KEYS: [&str; 4] = ["instance_id", "role", "type_id", "parameters"];
 /// Types in this process group observe the one simulated world.
 const SIMULATION_GROUP: &str = "simulation";
+/// How long an Apply or Close waits for the runs it stopped (v2 device maintenance).
+const MAINTENANCE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry { pub instance_id: String, pub role: String, pub type_id: String, pub parameters: Map<String, Value> }
@@ -29,18 +32,25 @@ pub struct Apparatus {
     /// The draft as last read or saved (dirty = differs).
     baseline: Value,
     pub discovered: Vec<Entry>,
+    /// Why the file at `path` was not read in full (it could not be read, or entries or
+    /// settings were left out): the draft is not that file, and Save does not replace it
+    /// unless asked to (v2 `_path_unread`).
+    pub unread: Option<String>,
 }
 
 impl Apparatus {
     pub fn empty(path: PathBuf) -> Self {
-        let mut apparatus = Self { path, simulation: Map::new(), draft: Vec::new(), baseline: Value::Null, discovered: Vec::new() };
+        let mut apparatus = Self { path, simulation: Map::new(), draft: Vec::new(), baseline: Value::Null, discovered: Vec::new(), unread: None };
         apparatus.baseline = apparatus.tree();
         apparatus
     }
     pub fn tree(&self) -> Value {
         json!({"format": FORMAT, "simulation": self.simulation, "devices": self.draft.iter().map(Entry::tree).collect::<Vec<_>>()})
     }
-    pub fn dirty(&self) -> bool { self.tree() != self.baseline }
+    /// Changed since read or saved.
+    pub fn edited(&self) -> bool { self.tree() != self.baseline }
+    /// Not what its file holds: changed, or that file was not read in full.
+    pub fn dirty(&self) -> bool { self.unread.is_some() || self.edited() }
     fn entry(&self, id: &str) -> Result<&Entry, String> {
         self.draft.iter().find(|entry| entry.instance_id == id).ok_or_else(|| format!("No device {id:?} in the apparatus"))
     }
@@ -87,6 +97,8 @@ pub struct Live {
     pub descriptor: Option<crate::TypeDescriptor>,
     /// Handed to another bench computer (Remote on): nothing here uses it meanwhile.
     pub published: bool,
+    /// The physical instrument it binds (its type's identity), while it is loaded.
+    pub identity: Option<String>,
 }
 
 const PUBLISHED: &str = "published on the bench fabric -- withdraw Remote to control it here";
@@ -186,25 +198,19 @@ impl Workbench {
             .map(|entry| self.not_installed(&format!("{}: device type {} is not installed", entry.role, entry.type_id), &entry.type_id)).collect()
     }
 
-    /// Whether `id` already names a device (draft or live) or a node.
-    pub(crate) fn instance_taken(&self, id: &str) -> bool { self.id_in_use(id).is_some() }
-
-    /// Why `id` cannot name another device or node: devices and nodes never share an id,
-    /// so the clash is said where the id is given, not at Init.
-    pub(crate) fn id_in_use(&self, id: &str) -> Option<String> {
-        let device = self.apparatus.draft.iter().find(|entry| entry.instance_id == id).map(|entry| entry.role.as_str())
-            .or_else(|| self.devices.get(id).map(|live| live.entry.role.as_str()));
-        match (device, self.node(id)) {
-            (Some(role), _) => Some(format!("{id} is already used by device {role}")),
-            (None, Some(node)) => Some(format!("{id} is already used by node {}", node.name)),
-            (None, None) => None,
-        }
+    /// Why `id` cannot name another device: a device of the draft or a loaded one holds it.
+    /// Nodes are named apart from devices (their plugin instances under `node/`, as v2 kept
+    /// them apart), so a device and a node may share an id.
+    pub(crate) fn device_id_in_use(&self, id: &str) -> Option<String> {
+        self.apparatus.draft.iter().find(|entry| entry.instance_id == id).map(|entry| entry.role.as_str())
+            .or_else(|| self.devices.get(id).map(|live| live.entry.role.as_str()))
+            .map(|role| format!("{id} is already used by device {role}"))
     }
 
     /// v2 `_free_name`: the family, numbered from 2, that no device holds as its id or its name.
     fn free_device_id(&self, family: &str) -> String {
         (1..).map(|n: u32| if n == 1 { family.to_owned() } else { format!("{family}{n}") })
-            .find(|id| !self.instance_taken(id) && !self.apparatus.draft.iter().any(|entry| entry.role == *id)).unwrap()
+            .find(|id| self.device_id_in_use(id).is_none() && !self.apparatus.draft.iter().any(|entry| entry.role == *id)).unwrap()
     }
 
     fn draft_parameters(&self, type_id: &str, parameters: &Map<String, Value>) -> Result<Map<String, Value>, String> {
@@ -219,7 +225,7 @@ impl Workbench {
         let id = match params.get("instance_id").filter(|id| !id.is_null()) {
             Some(id) => {
                 let id = instance_id(id.as_str())?;
-                if let Some(clash) = self.id_in_use(id) { return Err(clash); }
+                if let Some(clash) = self.device_id_in_use(id) { return Err(clash); }
                 id.to_owned()
             }
             None => self.free_device_id(&family),
@@ -294,6 +300,10 @@ impl Workbench {
     /// draft. The reply comes when every type has answered (or missed its deadline).
     pub(crate) fn discover_devices(&mut self, request: u64) -> Result<Option<Value>, String> {
         self.not_scanning()?;
+        // v2 discover: a device change under way (opening what is on the bus) is not scanned over.
+        if self.settling.is_some() || self.devices.values().any(|live| matches!(live.state, LiveState::Opening | LiveState::Closing)) {
+            return Err("finish the current device change before scanning hardware".into());
+        }
         let types: Vec<String> = self.catalog.devices().filter(|item| item.discoverable()).map(|item| item.type_id.clone()).collect();
         if types.is_empty() {
             let why: String = self.unavailable_families().iter().map(|(reason, families)| format!("; {}: {reason}", families.join(", "))).collect();
@@ -381,7 +391,6 @@ impl Workbench {
         if self.apparatus.draft.iter().any(|item| item.instance_id == entry.instance_id || item.role == entry.role) {
             return Err(format!("{} is already configured", entry.role));
         }
-        if !self.devices.contains_key(&entry.instance_id) { if let Some(clash) = self.id_in_use(&entry.instance_id) { return Err(clash); } }
         self.apparatus.draft.push(entry);
         Ok(json!({"device": id}))
     }
@@ -393,10 +402,15 @@ impl Workbench {
     /// default, each with a note. The Devices@ line says all of it (v2 `_report`).
     pub(crate) fn load_apparatus(&mut self, path: &Path) -> Result<Value, String> {
         let read = workspace::read_strict(path, &format!("apparatus {}", path.display())).and_then(|document| self.read_apparatus(&document, path));
-        let (draft, simulation, skipped, notes) = match read {
+        let (draft, simulation, skipped, notes, lost) = match read {
             Ok(read) => read,
-            // v2 load: a file that cannot be read leaves the draft as it was and says why.
-            Err(error) => { self.report = (format!("cannot read {}: {error}", file_name(path)), "error"); return Err(error); }
+            // v2 load: a file that cannot be read leaves the draft as it was and says why; when it is
+            // the draft's own file, the draft is not that file and Save does not replace it.
+            Err(error) => {
+                if path == self.apparatus.path { self.apparatus.unread = Some(format!("it could not be read: {error}")); }
+                self.report = (format!("cannot read {}: {error}", file_name(path)), "error");
+                return Err(error);
+            }
         };
         let mut line = format!("{} from {}", counted(draft.len(), "device"), file_name(path));
         if !skipped.is_empty() { line += &format!(" · {} not loaded -- {}", skipped.len(), skipped.join("; ")); }
@@ -407,20 +421,24 @@ impl Workbench {
         self.apparatus.simulation = simulation;
         self.apparatus.path = path.to_path_buf();
         self.apparatus.baseline = self.apparatus.tree();
+        // Never written back with fewer devices or settings than the file has, unless asked to.
+        let left = lost + skipped.len();
+        self.apparatus.unread = (left > 0).then(|| format!("{left} of its devices or settings {} left out", if left == 1 { "was" } else { "were" }));
         Ok(json!({"path": path, "devices": self.apparatus.draft.len(), "skipped": skipped, "notes": notes}))
     }
 
     /// The draft and simulation a file holds, the entries left out (with why) and the notes.
-    fn read_apparatus(&self, document: &Value, path: &Path) -> Result<(Vec<Entry>, Map<String, Value>, Vec<String>, Vec<String>), String> {
+    fn read_apparatus(&self, document: &Value, path: &Path) -> Result<(Vec<Entry>, Map<String, Value>, Vec<String>, Vec<String>, usize), String> {
         let object = document.as_object().ok_or("An apparatus file is a JSON object")?;
         if object.get("format").and_then(Value::as_str) != Some(FORMAT) { return Err(format!("{} is not a saved apparatus ({FORMAT})", path.display())); }
         let devices = object.get("devices").and_then(Value::as_array).ok_or("devices must be a list")?;
-        let (mut draft, mut skipped, mut notes) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut draft, mut skipped, mut notes, mut lost) = (Vec::new(), Vec::new(), Vec::new(), 0);
         for key in object.keys().filter(|key| !["format", "simulation", "devices"].contains(&key.as_str())) {
             notes.push(format!("{key} is not part of an apparatus file; it was dropped"));
+            lost += 1;
         }
         for (index, item) in devices.iter().enumerate() {
-            match self.read_entry(item, &draft, &mut notes) {
+            match self.read_entry(item, &draft, &mut notes, &mut lost) {
                 Ok(entry) => draft.push(entry),
                 Err(reason) => skipped.push(format!("device {}: {reason}", index + 1)),
             }
@@ -428,15 +446,16 @@ impl Workbench {
         let saved = match object.get("simulation") {
             None => Map::new(),
             Some(Value::Object(saved)) => saved.clone(),
-            Some(_) => { notes.push("simulation must be an object; the simulation settings are at their defaults".into()); Map::new() }
+            Some(_) => { notes.push("simulation must be an object; the simulation settings are at their defaults".into()); lost += 1; Map::new() }
         };
         let (simulation, refusals) = fields::restore(&simulation_fields(), &saved)?;
+        lost += refusals.len();
         notes.extend(refusals.into_iter().map(|refusal| format!("simulation: {refusal}; it is at its default")));
-        Ok((draft, simulation, skipped, notes))
+        Ok((draft, simulation, skipped, notes, lost))
     }
 
     /// One device entry as v2 `DeviceInstanceConfig.from_dict` reads it; Err says why it is left out.
-    fn read_entry(&self, item: &Value, read: &[Entry], notes: &mut Vec<String>) -> Result<Entry, String> {
+    fn read_entry(&self, item: &Value, read: &[Entry], notes: &mut Vec<String>, lost: &mut usize) -> Result<Entry, String> {
         let entry = item.as_object().ok_or("a device entry is an object")?;
         let missing: Vec<&str> = ENTRY_KEYS.into_iter().filter(|key| !entry.contains_key(*key)).collect();
         if !missing.is_empty() { return Err(format!("a device entry has {}; this one has no {}", ENTRY_KEYS.join(", "), missing.join(", "))); }
@@ -445,17 +464,19 @@ impl Workbench {
         let type_id = entry_text(entry["type_id"].as_str(), "type_id")?.to_owned();
         let saved = entry["parameters"].as_object().ok_or_else(|| format!("{role}: device parameters must be an object"))?;
         if let Some(other) = read.iter().find(|other| other.instance_id == instance_id) { return Err(format!("{instance_id} is already used by device {}", other.role)); }
-        if let Some(node) = self.node(&instance_id) { return Err(format!("{instance_id} is already used by node {}", node.name)); }
         if read.iter().any(|other| other.role == role) { return Err(format!("another device is already called {role}")); }
         for key in entry.keys().filter(|key| !ENTRY_KEYS.contains(&key.as_str())) {
             notes.push(format!("{role}: {key} is not part of a device entry; it was dropped"));
+            *lost += 1;
         }
         let parameters = match self.catalog.get(&type_id) {
             Some(descriptor) => {
                 let (values, refusals) = fields::restore(&descriptor.parameters, saved).map_err(|error| format!("{role}: {error}"))?;
                 for gone in saved.keys().filter(|key| !descriptor.parameters.iter().any(|field| &field.name == *key)) {
                     notes.push(format!("{role}: {gone} is no longer a {type_id} setting; it was dropped"));
+                    *lost += 1;
                 }
+                *lost += refusals.len();
                 notes.extend(refusals.into_iter().map(|refusal| format!("{role}: {refusal}; it is at its default")));
                 values
             }
@@ -466,13 +487,18 @@ impl Workbench {
         Ok(Entry { instance_id, role, type_id, parameters })
     }
 
-    pub(crate) fn save_apparatus(&mut self, path: &Path) -> Result<Value, String> {
+    pub(crate) fn save_apparatus(&mut self, path: &Path, replace_unread: bool) -> Result<Value, String> {
+        // v2: a draft not read from its file goes to another file, or replaces it only when the operator says so.
+        if let Some(why) = self.apparatus.unread.as_ref().filter(|_| path == self.apparatus.path && path.is_file() && !replace_unread) {
+            return Err(format!("{} was not read in full ({why}); save it under another name, or replace it (what was left out is lost)", file_name(path)));
+        }
         let roles: BTreeSet<&str> = self.apparatus.draft.iter().map(|entry| entry.role.as_str()).collect();
         if roles.len() != self.apparatus.draft.len() { return Err("Two devices have the same name; rename one before saving".into()); }
         let tree = self.apparatus.tree();
         workspace::write_readable(path, &tree)?;
         self.apparatus.path = path.to_path_buf();
         self.apparatus.baseline = tree;
+        self.apparatus.unread = None;
         self.report = (format!("saved {} to {}", counted(self.apparatus.draft.len(), "device"), file_name(path)), "task");
         Ok(json!({"path": path}))
     }
@@ -481,10 +507,29 @@ impl Workbench {
         self.catalog.get(type_id).is_some_and(|item| item.process_group.as_deref() == Some(SIMULATION_GROUP))
     }
 
+    /// The instrument a row names (its type's identity over its settings), if its type says.
+    fn identity_of(&self, entry: &Entry) -> Option<String> {
+        let template = &self.catalog.get(&entry.type_id)?.identity;
+        if template.is_empty() { return None; }
+        let mut identity = template.clone();
+        for (name, value) in &entry.parameters {
+            let text = match value { Value::String(text) => text.trim().to_owned(), Value::Null => String::new(), other => other.to_string() };
+            identity = identity.replace(&format!("{{{name}}}"), &text);
+        }
+        Some(identity.to_lowercase())
+    }
+
     fn open_entry(&mut self, entry: Entry) {
         let context = if self.simulated(&entry.type_id) { json!({"simulation": self.apparatus.simulation}) } else { json!({}) };
         let complete = self.catalog.get(&entry.type_id).map(|item| fields::project_values(&item.parameters, &entry.parameters, true));
         let id = entry.instance_id.clone();
+        let identity = self.identity_of(&entry);
+        // v2's broker: one physical instrument is bound to one row. The rows open in the
+        // operator's order, so of two naming it the later is refused, and a row naming one
+        // a loaded device holds is refused before it is opened (opening takes it).
+        let bound = identity.as_ref().and_then(|identity| self.devices.values()
+            .find(|other| other.entry.instance_id != id && other.identity.as_ref() == Some(identity)
+                && matches!(other.state, LiveState::Opening | LiveState::Open | LiveState::Closing)).map(|other| (identity.clone(), other.entry.role.clone())));
         let failure = match (self.catalog.get(&entry.type_id), complete) {
             (None, _) => Some({
                 let words = format!("{} is not installed", entry.type_id);
@@ -493,12 +538,12 @@ impl Workbench {
             }),
             // v2: the factory's projection raised it, and _outcome names its type.
             (_, Some(Err(error))) => Some(format!("ValueError: {error}")),
-            _ => None,
+            _ => bound.map(|(identity, role)| format!("RuntimeError: physical device '{identity}' is already bound (to {role})")),
         };
         let state = if failure.is_some() { LiveState::Failed } else { LiveState::Opening };
         if failure.is_none() { self.plugins.open(&id, &entry.type_id, &Value::Object(entry.parameters.clone()), &context); }
         self.devices.insert(id, Live { entry, state, error: failure, working_point: Value::Null, fields: None, close_pending: false, reopen: None,
-            risk: None, units: BTreeMap::new(), descriptor: None, published: false });
+            risk: None, units: BTreeMap::new(), descriptor: None, published: false, identity });
     }
 
     /// The type a live instance is: the one it opened as, else its row's.
@@ -524,8 +569,9 @@ impl Workbench {
         if published {
             if live.published { return Err(format!("{id} is already published")); }
             if live.descriptor.is_some() { return Err(format!("{id}: this device already comes from the bench fabric -- publish it on the machine that owns it")); }
-            let holders: Vec<String> = self.claims_on(id).into_iter().map(|claim| claim.node_name).collect();
-            if !holders.is_empty() { return Err(format!("{}: not published -- {} uses it", live.entry.role, holders.join(", "))); }
+            // v2: publication is a command claim, refused while any run or outside driver uses the device.
+            let users = self.device_use(id).users();
+            if !users.is_empty() { return Err(format!("{id}: not published -- {}", in_use(&users))); }
         } else if !live.published { return Err(format!("{} is not published", live.entry.role)); }
         let role = live.entry.role.clone();
         let ticket = self.ticket(Ticket::Publish { device: id.to_owned(), published, request });
@@ -557,31 +603,77 @@ impl Workbench {
         if self.plugins.discovering() { return Err("the device types are still being discovered; Init once they are in".into()); }
         // v2: Init starts a session; with one running it is an Apply.
         let kind = if self.devices.is_empty() { Settling::Init } else { Settling::Apply };
-        let mut opened = Vec::new();
+        // v2 InstallationConfig: two devices of one name are not a configuration that opens.
+        let mut roles: Vec<&str> = self.apparatus.draft.iter().map(|entry| entry.role.as_str()).collect();
+        roles.sort_unstable();
+        let mut twice: Vec<&str> = roles.windows(2).filter(|pair| pair[0] == pair[1]).map(|pair| pair[0]).collect();
+        twice.dedup();
+        if !twice.is_empty() {
+            let error = format!("this apparatus cannot be {}: duplicate device role: [{}]", if kind == Settling::Init { "initialized" } else { "applied" },
+                                twice.iter().map(|role| format!("'{role}'")).collect::<Vec<_>>().join(", "));
+            self.report = (error.clone(), "error");
+            return Err(error);
+        }
+        // What changes, decided before anything is touched.
         let mut closing = Vec::new();
+        let mut reopened = Vec::new();
         let simulation_changed = self.applied_simulation.as_ref().is_some_and(|applied| *applied != self.apparatus.simulation);
-        for live_id in self.devices.keys().cloned().collect::<Vec<_>>() {
-            let wanted = self.apparatus.draft.iter().find(|entry| entry.instance_id == live_id).cloned();
-            let live = &self.devices[&live_id];
+        for (live_id, live) in &self.devices {
+            let wanted = self.apparatus.draft.iter().find(|entry| entry.instance_id == *live_id).cloned();
             // A published device is the other computer's: no rebuild or close of it here.
             let changes = wanted.as_ref().is_none_or(|entry| entry.type_id != live.entry.type_id || entry.parameters != live.entry.parameters);
             if live.published && changes { return Err(format!("{}: {PUBLISHED}", live.entry.role)); }
             match wanted {
-                None => closing.push((live_id, None)),
-                Some(entry) if live.state == LiveState::Failed => { self.devices.remove(&live_id); opened.push(entry.instance_id.clone()); self.open_entry(entry); }
+                None => closing.push((live_id.clone(), None)),
+                Some(_) if live.state == LiveState::Failed => reopened.push(live_id.clone()),
                 Some(entry) if entry.type_id != live.entry.type_id || entry.parameters != live.entry.parameters
-                    || (simulation_changed && self.simulated(&entry.type_id)) => closing.push((live_id, Some(entry))),
-                Some(entry) => { if let Some(live) = self.devices.get_mut(&live_id) { live.entry.role = entry.role; } }
+                    || (simulation_changed && self.simulated(&entry.type_id)) => closing.push((live_id.clone(), Some(entry))),
+                Some(_) => {}
             }
         }
+        // v2 _prepare_session_reconcile: a device driven outside the workbench (the Pulse Editor
+        // playing it) refuses the change before anything stops or closes.
+        let mut outside: Vec<String> = Vec::new();
+        for user in closing.iter().filter_map(|(id, _)| self.device_use(id).outside) { if !outside.contains(&user) { outside.push(user); } }
+        if !outside.is_empty() {
+            let error = format!("device changes did not apply: {}", in_use(&outside));
+            self.report = (error.clone(), "error");
+            return Err(error);
+        }
+        for entry in &self.apparatus.draft {
+            if let Some(live) = self.devices.get_mut(&entry.instance_id) { live.entry.role = entry.role.clone(); }
+        }
+        for id in &reopened { self.devices.remove(id); }
+        // Opened in the operator's order: of two rows naming one instrument the later is refused.
+        let mut opened = Vec::new();
         for entry in self.apparatus.draft.clone() {
             if !self.devices.contains_key(&entry.instance_id) { opened.push(entry.instance_id.clone()); self.open_entry(entry); }
         }
         let stopped = self.close_instances(closing.clone(), host);
         self.applied_simulation = Some(self.apparatus.simulation.clone());
         self.settling = Some(kind);
+        self.settling_since = Some(std::time::Instant::now());
         self.settle();
         Ok(json!({"opening": opened, "closing": closing.iter().map(|(id, _)| id).collect::<Vec<_>>(), "stopping": stopped}))
+    }
+
+    /// v2's device maintenance waits 30 s for the runs it stopped: a device still held then
+    /// is left as it is, the change not applied, and the line says who it waited for.
+    pub fn poll(&mut self, now: std::time::Instant) -> bool {
+        let Some(since) = self.settling_since else { return false };
+        if now.duration_since(since) < MAINTENANCE_WAIT || !matches!(self.settling, Some(Settling::Apply | Settling::Close(_))) { return false; }
+        let held: Vec<String> = self.devices.iter().filter(|(id, live)| live.close_pending && !self.claiming_nodes(id).is_empty())
+            .map(|(id, _)| id.clone()).collect();
+        if held.is_empty() { return false; }
+        let mut waiting: Vec<String> = Vec::new();
+        for id in &held {
+            for claim in self.claims_on(id) { if !waiting.contains(&claim.node_name) { waiting.push(claim.node_name); } }
+            if let Some(live) = self.devices.get_mut(id) { live.close_pending = false; live.reopen = None; }
+        }
+        self.settling = None;
+        self.settling_since = None;
+        self.report = (format!("device changes did not apply: device maintenance still waits for {}", waiting.join(", ")), "error");
+        true
     }
 
     /// Close instances after the runs that claim them stop; returns the nodes stopped.
@@ -618,8 +710,14 @@ impl Workbench {
     pub(crate) fn close_device(&mut self, id: &str, host: &mut dyn Host) -> Result<Value, String> {
         if !self.devices.contains_key(id) { return Err(format!("{id} is not open")); }
         self.refuse_published(&[id])?;
+        if let Some(user) = self.device_use(id).outside {
+            let error = format!("device changes did not apply: {}", in_use(&[user]));
+            self.report = (error.clone(), "error");
+            return Err(error);
+        }
         let stopped = self.close_instances(vec![(id.to_owned(), None)], host);
         self.settling = Some(Settling::Close(id.to_owned()));
+        self.settling_since = Some(std::time::Instant::now());
         self.settle();
         Ok(json!({"device": id, "stopping": stopped}))
     }
@@ -651,6 +749,7 @@ impl Workbench {
         let Some(kind) = self.settling.clone() else { return };
         if self.devices.values().any(|live| matches!(live.state, LiveState::Opening | LiveState::Closing) || live.close_pending) { return; }
         self.settling = None;
+        self.settling_since = None;
         // In the apparatus's order, as v2's session lists them.
         let mut ordered: Vec<&Live> = self.apparatus.draft.iter().filter_map(|entry| self.devices.get(&entry.instance_id)).collect();
         ordered.extend(self.devices.values().filter(|live| !self.apparatus.draft.iter().any(|entry| entry.instance_id == live.entry.instance_id)));
@@ -726,14 +825,32 @@ impl Workbench {
     /// v2's Device Control field policy: may `field` of `id` be tuned now (else why not).
     fn tune_policy(&self, id: &str, field: &str, live_write: bool, risk: Option<&str>) -> Result<(), String> {
         if self.devices.get(id).is_some_and(|live| live.published) { return Err(PUBLISHED.into()); }
-        let claims = self.claims_on(id);
-        let protected: Vec<&str> = claims.iter().filter(|claim| claim.protected.as_ref().is_none_or(|fields| fields.iter().any(|name| name == field)))
+        let using = self.device_use(id);
+        if let Some(user) = using.outside { return Err(in_use(&[user])); }
+        let claims = using.runs;
+        // v2 field_policy: a claim protects its fields and every field coupled to them through the
+        // device's dependency groups.
+        let coupled = self.coupled_fields(id, field);
+        let protected: Vec<&str> = claims.iter().filter(|claim| claim.protected.as_ref().is_none_or(|fields| fields.iter().any(|name| coupled.contains(name))))
             .map(|claim| claim.node_name.as_str()).collect();
         if !protected.is_empty() { return Err(format!("Protected by {}", protected.join(", "))); }
         if claims.is_empty() { return Ok(()); }
         if !live_write { return Err("Stop the active Logic; this field is not live-writable".into()); }
         if claims.iter().any(|claim| risk != Some(claim.run.as_str())) { return Err("Accept risk to edit this unclaimed live-safe field".into()); }
         Ok(())
+    }
+
+    /// `field` and every field its device couples it to, through dependency groups that share a field.
+    fn coupled_fields(&self, id: &str, field: &str) -> BTreeSet<String> {
+        let groups: Vec<Vec<String>> = self.devices.get(id).and_then(|live| live.fields.as_ref()).and_then(Value::as_array).into_iter().flatten()
+            .map(|row| row["dependency_group"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()).collect();
+        let mut reached = BTreeSet::from([field.to_owned()]);
+        loop {
+            let more: Vec<&String> = groups.iter().filter(|group| group.iter().any(|name| reached.contains(name))).flatten()
+                .filter(|name| !reached.contains(*name)).collect();
+            if more.is_empty() { return reached; }
+            reached.extend(more.into_iter().cloned());
+        }
     }
 
     /// Device Control rows (WORKBENCH_COMMANDS §3.3 `TunableField`): each tunable field the
@@ -817,10 +934,10 @@ impl Workbench {
     pub(crate) fn run_device_command(&mut self, name: &str, params: &Value, request: u64) -> Result<(), String> {
         let (instance, declared) = self.device_command(name).ok_or_else(|| format!("{name} is not a command of an open device"))?;
         self.refuse_published(&[instance.as_str()])?;
-        // A command that drives the device waits for no run: a run holding it refuses it (v2 DeviceUseBusy).
+        // A command that drives the device waits for no one: a run or an outside driver using it refuses it (v2 DeviceUseBusy).
         if declared["drives"] == true {
-            let holders: Vec<String> = self.claims_on(&instance).into_iter().map(|claim| claim.node_name).collect();
-            if !holders.is_empty() { return Err(format!("device is in use by {}", holders.join(", "))); }
+            let users = self.device_use(&instance).users();
+            if !users.is_empty() { return Err(in_use(&users)); }
         }
         let fields: Vec<fields::Field> = serde_json::from_value(declared["params"].clone()).unwrap_or_default();
         let supplied = params.as_object().cloned().unwrap_or_default();
@@ -851,12 +968,16 @@ impl Workbench {
 
     pub(crate) fn apparatus_state(&self) -> Value {
         let pending = self.apparatus.draft.iter().any(|entry| self.devices.get(&entry.instance_id).is_none_or(|live| live.entry != *entry))
-            || self.devices.keys().any(|id| self.apparatus.draft.iter().all(|entry| &entry.instance_id != id));
+            || self.devices.keys().any(|id| self.apparatus.draft.iter().all(|entry| &entry.instance_id != id))
+            // v2 _active_differs: a device that failed (a type this machine builds) is not loaded,
+            // and changed simulation settings are a changed apparatus: Apply opens them.
+            || self.devices.values().any(|live| live.state == LiveState::Failed && self.catalog.get(&live.entry.type_id).is_some())
+            || self.applied_simulation.as_ref().is_some_and(|applied| *applied != self.apparatus.simulation);
         let action = if self.devices.is_empty() { (!self.apparatus.draft.is_empty()).then_some("init") }
             else if pending { Some("apply") } else { Some("shut_down") };
         let busy = self.devices.values().filter(|live| matches!(live.state, LiveState::Opening | LiveState::Closing)).count();
         json!({
-            "path": self.apparatus.path, "dirty": self.apparatus.tree() != self.apparatus.baseline,
+            "path": self.apparatus.path, "dirty": self.apparatus.dirty(), "unread": self.apparatus.unread,
             "simulation": self.apparatus.simulation,
             "types": self.catalog.devices().map(crate::TypeDescriptor::summary).collect::<Vec<_>>(),
             "unavailable": self.catalog.errors.iter().map(|(module, reason)| json!({"module": module, "reason": reason})).collect::<Vec<_>>(),
@@ -890,7 +1011,7 @@ impl Workbench {
                 _ => None,
             };
             let claims: Vec<Value> = self.claims_on(id).into_iter().map(|claim| json!({"node_id": claim.node, "run": claim.run,
-                "protected_fields": claim.protected})).collect();
+                "protected_fields": claim.protected, "exclusive": claim.exclusive})).collect();
             // What it is once open (a remote row: the publisher's type); its settings stay its row's.
             let kind = live.and_then(|live| live.descriptor.as_ref()).or(descriptor);
             json!({

@@ -64,6 +64,16 @@ impl SafeActions {
 /// id its apparatus gives it everywhere else.
 pub fn tool_name(instance: &str, command: &str) -> String { format!("{}__{}", tool_word(instance), tool_word(command)) }
 
+/// A logic node's plugin instance is named under this prefix, devices under their own ids:
+/// a device and a node may share an id (v2 kept them apart), and an id never holds `/`.
+pub const NODE_INSTANCE: &str = "node/";
+
+/// The plugin instance of logic node `node`.
+pub fn node_instance(node: &str) -> String { format!("{NODE_INSTANCE}{node}") }
+
+/// The id an instance is known by outside the plugin host: a node's without its prefix.
+pub fn public_instance(instance: &str) -> &str { instance.strip_prefix(NODE_INSTANCE).unwrap_or(instance) }
+
 /// One part of a tool name. MCP clients take tool names of `[A-Za-z0-9_-]` and limit
 /// their length, while an id is whatever its apparatus says (v2: any text without `/`).
 /// A part that already is such a word -- letters, digits and single `_`, not ending in

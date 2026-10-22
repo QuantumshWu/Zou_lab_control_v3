@@ -84,6 +84,7 @@ DEVICE_TYPES = (
         PYLON_CAMERA_SCHEMA,
         ("camera.adapter",),
         factory=_pylon_factory,
+        identity="pylon-camera:serial={serial}",
         label="Basler camera (pylon)",
         description=(
             "Basler machine-vision camera over pypylon, Mono8: FrameStart on the configured "

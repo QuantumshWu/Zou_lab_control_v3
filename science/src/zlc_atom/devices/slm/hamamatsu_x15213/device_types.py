@@ -1610,6 +1610,7 @@ DEVICE_TYPES = (
         HAMAMATSU_X15213_SCHEMA,
         ("slm.phase",),
         factory=_factory,
+        identity="slm-server:{host}:{port}",
         label="Hamamatsu X15213 SLM (network)",
         description=(
             "A Hamamatsu LCOS-SLM X15213 served by its SLM server (this machine or another): "
@@ -1625,6 +1626,7 @@ DEVICE_TYPES = (
         X15213_LOCAL_SCHEMA,
         ("slm.phase",),
         factory=_local_factory,
+        identity="slm-server:127.0.0.1:{port}",
         label="Hamamatsu X15213 SLM (this machine)",
         description=(
             "The X15213 head plugged into this machine: opens it (DVI display by default, or "

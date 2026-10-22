@@ -455,6 +455,17 @@ pub struct PathRef { pub path: String }
 #[serde(deny_unknown_fields)]
 pub struct OptionalPath { pub path: Option<String> }
 
+/// Save the apparatus draft. A file this window did not read in full (it could not, or it left
+/// entries or settings out) is replaced only when `replace_unread` says so; else save under another name.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveApparatus {
+    /// A zlc.installation file; the window may omit it to ask with a file dialog.
+    pub path: Option<String>,
+    /// Replace the apparatus file this window did not read in full (what it left out is lost).
+    pub replace_unread: Option<bool>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecipeName { pub name: Option<String> }
@@ -1048,7 +1059,8 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!("discover_devices", Empty, control, false, "Scan for connected hardware; results appear in apparatus.discovered."),
     command!("add_discovered", Discovered, control, false, "Copy a discovered device into the apparatus draft."),
     command!("load_apparatus", OptionalPath, control, false, "Replace the apparatus draft from a zlc.installation file."),
-    command!("save_apparatus", OptionalPath, control, false, "Save the apparatus draft as a zlc.installation file."),
+    command!("save_apparatus", SaveApparatus, control, false,
+        "Save the apparatus draft as a zlc.installation file; replacing one it did not read in full needs replace_unread."),
     command!("apply_devices", Empty, control, false,
         "Init/Apply: open the devices the draft adds or changes, close those it removes (stopping runs that hold them). apparatus.action says which."),
     command!("close_device", DeviceRef, control, false, "Close one open device (its runs stop first); apply_devices reopens it."),

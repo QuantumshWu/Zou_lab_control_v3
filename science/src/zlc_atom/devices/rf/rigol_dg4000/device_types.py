@@ -78,6 +78,7 @@ DEVICE_TYPES = (
         RIGOL_DG4000_SCHEMA,
         ("rf.source",),
         factory=_rigol_factory,
+        identity="visa:{resource}",
         label="Rigol DG4000",
         description=(
             "Rigol DG4000 two-channel generator as an RF source over VISA SCPI: per channel "

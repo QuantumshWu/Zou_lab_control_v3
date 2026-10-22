@@ -909,8 +909,16 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     if matches!(action.as_str(), "start_camera" | "stop_camera") || zlc_workbench::Workbench::handles(&action)
                         || workbench.handles_command(&action) {
                         if let Some((title, filter, save, start, home)) = workbench.file_dialog(&action).filter(|_| command["path"].is_null()) {
+                            // v2 present=False: only the operator at the window is asked where a file goes; a
+                            // client or a run names it (no dialog appears for a command nobody at the window gave).
+                            if !origin.is_operator() || command.get("_run").is_some() {
+                                return Err(format!("provide {} path{}", match action.as_str() {
+                                    "load_apparatus" => "an apparatus", "save_apparatus" => "an explicit apparatus save", "load_layout" => "a layout", _ => "an explicit layout save",
+                                }, if save { "" } else { " to load without a dialog" }));
+                            }
                             match dialog::file(windows.hwnd(from.as_ref()), title, filter, save, &start, &home)? {
-                                Some(path) => command["path"] = json!(path),
+                                // The save dialog asked before replacing a file: it may replace one not read in full.
+                                Some(path) => { command["path"] = json!(path); if action == "save_apparatus" { command["replace_unread"] = json!(true); } }
                                 None => { let mut state = accepted.clone(); state["request"] = command["id"].clone(); return windows.send(&state); }
                             }
                         }
@@ -1843,6 +1851,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 },
                 Event::UserEvent(AppEvent::PulsePoll) => {
                     if !closing {
+                        // An Apply or Close that waited 30 s for the runs it stopped gives up and says so.
+                        if workbench.poll(std::time::Instant::now()) {
+                            workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
+                            windows.send(&accepted)?;
+                        }
                         tell_editor_claims(&mut pulse, &workbench);
                         pulse.editor.poll();
                         pulse.dispatch();

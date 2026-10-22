@@ -23,7 +23,7 @@ import numpy as np
 
 from . import capabilities, tunable
 from .blocks import Arena, Attachments
-from .declare import QUERY_PARAMETERS, DeviceType, NodeKind, NodeType, Opened, field_json
+from .declare import ADMIT, QUERY_PARAMETERS, DeviceType, NodeKind, NodeType, Opened, field_json
 from .describe import find
 from .wire import (PROTOCOL, Channel, Decoder, Encoder, PluginError, error_payload, plain, raise_remote)
 
@@ -580,6 +580,8 @@ def _query(instance: Instance, params: dict[str, Any]) -> Any:
     if isinstance(declared, NodeType):
         if name == "selection_patch":
             return declared_selection_patch(declared, params)
+        if name == ADMIT:
+            return _admit(declared, params)
         function = getattr(declared, name, None) if name in QUERY_PARAMETERS else None
         if function is not None:
             # The core names the facts; the v2 callable takes them positionally.
@@ -595,6 +597,69 @@ def _query(instance: Instance, params: dict[str, Any]) -> Any:
 
 #: The node instance whose draft query runs on this thread (its lane).
 _QUERYING = threading.local()
+
+
+def _admit(declared: NodeType, params: dict[str, Any]) -> list[str]:
+    """The draft's admission only its own code can answer (v2 finalize_logic_draft): its
+    values projected as its schema projects them, the cross-field validator included;
+    what its type says of the resources it was given (``admit_resources``); and each
+    artifact file it names, decoded. The issues, in that order; none is a draft Start
+    may take."""
+
+    values = dict(params.get("values") or {})
+    issues: list[str] = []
+    try:
+        projected = declared.project(values)
+    except (TypeError, ValueError) as error:
+        projected = None
+        # Only incomplete (the core says which field): a draft the schema refuses otherwise is an issue.
+        draft = getattr(declared.authoring_schema, "draft_values", None)
+        try:
+            if callable(draft):
+                draft(values)
+        except (TypeError, ValueError) as refused:
+            issues.append(str(refused))
+        else:
+            if not callable(draft):
+                issues.append(str(error))
+    if projected is not None and declared.admit_resources is not None:
+        issues.extend(str(issue) for issue in declared.admit_resources(projected, dict(params.get("resources") or {}), None))
+    issues.extend(_artifact_issues(declared, dict(params.get("artifacts") or {})))
+    return list(dict.fromkeys(issue for issue in issues if issue))
+
+
+#: Artifact files already decoded: (contract, path, size, modified) -> why it cannot be used ("" when it can).
+_DECODED: dict[tuple[str, str, int, int], str] = {}
+
+
+def _artifact_issues(declared: NodeType, artifacts: dict[str, Any]) -> list[str]:
+    """Why a file the draft names for an artifact input cannot be used (v2 ``_invalid_artifact``).
+    A file is decoded once while it stays the same; one that does not exist is the core's to say."""
+
+    inputs, resolved = dict(artifacts.get("inputs") or {}), dict(artifacts.get("resolved") or {})
+    issues = []
+    for spec in declared.input_specs:
+        codec = getattr(spec, "codec", None)
+        if codec is None or spec.name not in inputs:
+            continue
+        value = inputs[spec.name]
+        texts = [value] if isinstance(value, str) else [str(claim.get("path") or "") for claim in value if isinstance(claim, dict)] \
+            if isinstance(value, list) else []
+        for text in (text.strip() for text in texts):
+            path = Path(str(resolved.get(text) or text))
+            if not text or not path.is_file():
+                continue
+            stat = path.stat()
+            key = (codec.contract_id, str(path), stat.st_size, stat.st_mtime_ns)
+            if key not in _DECODED:
+                try:
+                    codec.resolve(path)
+                    _DECODED[key] = ""
+                except Exception as error:  # noqa: BLE001 -- the file's refusal is the draft's issue
+                    _DECODED[key] = f"{codec.contract_id} artifact “{text}” is invalid: {error}"
+            if _DECODED[key]:
+                issues.append(_DECODED[key])
+    return issues
 
 
 def core(command: str, **params: Any) -> Any:

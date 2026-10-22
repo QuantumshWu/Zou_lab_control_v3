@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
 
-from .declare import DatasetOutputDeclaration
+from .declare import NODE_INSTANCE, DatasetOutputDeclaration
 from .wire import PluginError
 
 if TYPE_CHECKING:
@@ -238,7 +238,10 @@ class RunContext:
 
     @property
     def instance_id(self) -> str:
-        return self._run.instance.name
+        """The node's id (its plugin instance is named under the core's node prefix)."""
+
+        name = self._run.instance.name
+        return name[len(NODE_INSTANCE):] if name.startswith(NODE_INSTANCE) else name
 
     @property
     def generation(self) -> str:
@@ -252,10 +255,10 @@ class RunContext:
     # ---------------------------------------------------------- lifecycle facts
 
     def _event(self, op: str, params: dict[str, Any]) -> None:
-        self._run.instance.process.event(op, {"instance": self.instance_id, "run": self.generation, **params})
+        self._run.instance.process.event(op, {"instance": self._run.instance.name, "run": self.generation, **params})
 
     def _request(self, op: str, params: dict[str, Any], **options: Any) -> Any:
-        return self._run.instance.process.request(op, {"instance": self.instance_id, "run": self.generation, **params},
+        return self._run.instance.process.request(op, {"instance": self._run.instance.name, "run": self.generation, **params},
                                                   **options)
 
     def report_ready(self) -> None:
@@ -311,8 +314,11 @@ class RunContext:
                                payload: Mapping[str, Any]) -> Mapping[str, Any]:
         """Wait for the operator's answer. A cancel, or the run's Stop, is the run
         stopping (v2: ``InterruptedError("operator input was cancelled")`` with
-        the stop set), so the run ends stopped, not failed."""
+        the stop set), so the run ends stopped, not failed. Asked after the Stop it is that
+        Stop at once: nothing is shown and nothing waits."""
 
+        if self._run.cancel.is_set():
+            raise InterruptedError("operator input was cancelled")
         try:
             return self._request("run.operator_input", {"kind": kind, "title": title, "message": message,
                                                         "payload": dict(payload)})
