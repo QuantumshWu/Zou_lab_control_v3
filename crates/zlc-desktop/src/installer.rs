@@ -273,16 +273,20 @@ impl Installer {
                 // What a part lacks is read in the environment, or (none yet) in the base Python a new
                 // one would use; a new one with packages of its own has none of them yet.
                 let usable = exists || science["inherit"] == true;
-                let base = if exists { "" } else { ": in the base Python the new environment uses" };
+                let base = if exists { "" } else { ": in the base Python" };
                 let text = |key: &str| science[key].as_str().unwrap_or("").to_owned();
                 let unmet = |part: &str| -> Vec<String> { science["unmet"][part].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect() };
                 let lacks = |parts: &[&str]| format!("Unmet: {}", parts.iter().flat_map(|part| unmet(part)).collect::<Vec<_>>().join("; "));
                 // The environment row reads what its step installs, the instrument links with it:
                 // its check box never stands checked beside "Installed".
-                let (state, detail) = if !exists {
+                // No venv: a base Python with everything is the environment, as v2 runs on it (the plugins run there too).
+                let complete = usable && unmet("core").is_empty() && unmet("devices").is_empty();
+                let (state, detail) = if !exists && complete {
+                    ("ok", format!("Python {} · uses the base Python {} (found through {})", text("version"), text("python"), text("source")))
+                } else if !exists {
                     let reuse = if science["inherit"] == true { "; its numpy, scipy and Pillow are used" } else { "" };
                     ("missing", format!("Not installed: made from Python {} at {} (found through {}){reuse}", text("version"), text("python"), text("source")))
-                } else if unmet("core").is_empty() && unmet("devices").is_empty() { ("ok", format!("Python {} · {}", text("version"), text("environment"))) }
+                } else if complete { ("ok", format!("Python {} · {}", text("version"), text("environment"))) }
                 else { ("missing", lacks(&["core", "devices"])) };
                 rows.push(row("environment", "python", "Science environment", state, detail));
                 let links = "pyserial, PyVISA, PyVISA-py, pyusb, libusb-package";
@@ -368,9 +372,10 @@ impl Installer {
             Step { title: named(title), script, arguments: dry(arguments), outcome: Outcome::Install, component: Some(component) };
         let mut steps = Vec::new();
         if wanted("program") { steps.push(step("program", "Program (this checkout's release)", "fetch_engine.ps1", &[])); }
-        // Pylon and the GPU install into the environment: one that is not there yet is made first.
-        let exists = matches!(self.answer(Check::Science), Some(Ok(science)) if science["exists"] == true);
-        if wanted("environment") || (!exists && (wanted("pylon") || wanted("slm_gpu"))) {
+        // Pylon and the GPU install into the environment (a venv, using the base's packages when it
+        // can): one whose base lacks numpy, scipy or Pillow is made first.
+        let usable = matches!(self.answer(Check::Science), Some(Ok(science)) if science["exists"] == true || science["inherit"] == true);
+        if wanted("environment") || (!usable && (wanted("pylon") || wanted("slm_gpu"))) {
             steps.push(step("environment", "Science environment", "install_science.ps1", &["-Group", "runtime"]));
         }
         if wanted("pylon") { steps.push(step("pylon", "Basler pylon", "install_science.ps1", &["-Group", "pylon"])); }

@@ -85,12 +85,14 @@ hashed by git's blob ids; a change to the Python plugins never rebuilds anything
    launchers find it: `ZLC_PY_CMD`, PATH, conda's base, the Anaconda, Miniconda,
    Miniforge and python.org folders). A machine with none gets a 64-bit CPython
    3.13 from python.org (3.13.12 is the tested release).
-2. `installation.exe` (`install_requirements.bat`): a venv of that Python in `.tools\science-env` with
-   numpy, scipy and Pillow and the instrument links (pyserial for the N100;
-   PyVISA, PyVISA-py, pyusb and libusb-package for the Rigol and Tek) at
-   `science\constraints.txt`'s versions; when that Python already has them all (a
-   v2 machine does) the venv uses them and nothing is downloaded. The base Python
-   is never changed. Basler pylon (`install_requirements.bat pylon`) adds
+2. `installation.exe` (`install_requirements.bat`): numpy, scipy and Pillow and
+   the instrument links (pyserial for the N100; PyVISA, PyVISA-py, pyusb and
+   libusb-package for the Rigol and Tek) at `science\constraints.txt`'s versions.
+   When that Python already has them all (a v2 machine does), it is the
+   environment as it is, as v2 runs on it: nothing is made or downloaded, and the
+   plugins run on it. Else pip installs what is missing into a venv of it,
+   `.tools\science-env` (using its packages when it has numpy, scipy and Pillow),
+   which is the environment from then on. The base Python is never changed. Basler pylon (`install_requirements.bat pylon`) adds
    Basler's pypylon, about 270 MB installed, on the PC with a Basler camera. v2
    neither installs nor pins it (a vendor runtime the machine has): any version
    the venv sees (its own or that Python's) counts, and only a PC without one

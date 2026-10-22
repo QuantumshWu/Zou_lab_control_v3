@@ -22,9 +22,10 @@ On a Windows PC with this repository checked out and the Python v2 runs with
    and installs what is selected: the program (its card says which release is
    installed and how it relates to this checkout -- *Update* after a pull that
    brings a new release -- and, when GitHub answers, whether a newer release is
-   published: pull the repository to get it), the plugins' Python environment inside this folder
-   (`.tools\science-env`; nothing outside the checkout is changed) with the
-   instrument links, Basler pylon on the PC with a Basler camera, and on the PC
+   published: pull the repository to get it), the plugins' Python environment (the
+   Python v2 runs with, as it is when it has everything v2 needs, else a venv of it
+   inside this folder, `.tools\science-env`; nothing outside the checkout is
+   changed) with the instrument links, Basler pylon on the PC with a Basler camera, and on the PC
    that runs SLM rearrangement the GPU packages, warmed for its GPU. What is
    missing or broken starts checked, and *Fill in missing* installs just that.
    Its FPGA card builds and programs the pulse board with Vivado.

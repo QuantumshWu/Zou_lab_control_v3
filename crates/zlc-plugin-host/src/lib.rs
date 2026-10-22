@@ -110,14 +110,26 @@ pub const NOT_INSTALLED: &str = "The plugin Python environment is not installed:
 /// The interpreter plugin processes (and every other Python the core starts) run:
 /// `ZLC_PLUGIN_PYTHON` (or `PYO3_PYTHON`) when set, else the checkout's science
 /// environment, `<tools>\science-env\Scripts\python.exe` with `<tools>` =
-/// `ZLC_V3_TOOLS` or `<checkout>\.tools` (tools\tools_root.ps1's rule), so the
-/// executable started from Explorer needs no launcher.
+/// `ZLC_V3_TOOLS` or `<checkout>\.tools` (tools\tools_root.ps1's rule), else --
+/// no venv made, as the base Python had everything -- the base Python v2 runs
+/// with, as installation.exe's own resolver finds it (`install_science.ps1
+/// -PluginPython`, asked once). The executable started from Explorer needs no launcher.
 pub fn plugin_python() -> Result<PathBuf, String> {
-    let named = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from);
-    if let Some(python) = named("ZLC_PLUGIN_PYTHON").or_else(|| named("PYO3_PYTHON")) { return Ok(python); }
-    let tools = named("ZLC_V3_TOOLS").unwrap_or_else(|| zlc_core::checkout::path(".tools"));
-    let python = tools.join("science-env").join("Scripts").join("python.exe");
-    if python.is_file() { Ok(python) } else { Err(NOT_INSTALLED.to_owned()) }
+    static FOUND: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    FOUND.get_or_init(|| {
+        let named = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from);
+        if let Some(python) = named("ZLC_PLUGIN_PYTHON").or_else(|| named("PYO3_PYTHON")) { return Ok(python); }
+        let tools = named("ZLC_V3_TOOLS").unwrap_or_else(|| zlc_core::checkout::path(".tools"));
+        let python = tools.join("science-env").join("Scripts").join("python.exe");
+        if python.is_file() { return Ok(python); }
+        use std::os::windows::process::CommandExt;
+        let script = zlc_core::checkout::path("tools").join("install_science.ps1");
+        let output = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]).arg(&script).arg("-PluginPython")
+            .stdin(Stdio::null()).creation_flags(0x0800_0000).output().map_err(|error| format!("{NOT_INSTALLED} ({}: {error})", script.display()))?; // CREATE_NO_WINDOW
+        let answer = String::from_utf8_lossy(&output.stdout);
+        let base = answer.lines().map(str::trim).rfind(|line| !line.is_empty()).map(PathBuf::from).filter(|path| path.is_file());
+        base.ok_or_else(|| format!("{NOT_INSTALLED} ({})", answer.trim().trim_start_matches("ERROR:").trim()))
+    }).clone()
 }
 
 /// What a plugin process needs in its environment beyond the interpreter, so no

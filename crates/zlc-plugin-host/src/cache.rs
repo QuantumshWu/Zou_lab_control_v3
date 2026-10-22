@@ -21,15 +21,16 @@ pub(crate) fn key(config: &HostConfig, environment: &[(&str, OsString)]) -> Stri
         root.hash(&mut hasher);
         tree(root, root, &mut hasher);
     }
-    // A venv: its configuration and what is installed in it (each distribution's folder names its version).
-    if let Some(venv) = config.python.parent().and_then(Path::parent) {
-        let settings = std::fs::read_to_string(venv.join("pyvenv.cfg")).unwrap_or_default();
-        settings.hash(&mut hasher);
-        listing(&venv.join("Lib").join("site-packages"), &mut hasher);
-        let inherits = settings.lines().any(|line| line.split_once('=').is_some_and(|(key, value)|
-            key.trim() == "include-system-site-packages" && value.trim().eq_ignore_ascii_case("true")));
-        if inherits { listing(&crate::base_home(&config.python).join("Lib").join("site-packages"), &mut hasher); }
-    }
+    // What is installed where the interpreter imports from (each distribution's folder names its
+    // version): a venv's configuration and packages, and the base's when it is a base Python run
+    // as it is or a venv uses it.
+    let venv = config.python.parent().and_then(Path::parent).map(|venv| venv.to_path_buf());
+    let settings = venv.as_ref().and_then(|venv| std::fs::read_to_string(venv.join("pyvenv.cfg")).ok());
+    settings.hash(&mut hasher);
+    if let (Some(venv), Some(_)) = (&venv, &settings) { listing(&venv.join("Lib").join("site-packages"), &mut hasher); }
+    let inherits = settings.as_deref().is_none_or(|settings| settings.lines().any(|line| line.split_once('=').is_some_and(|(key, value)|
+        key.trim() == "include-system-site-packages" && value.trim().eq_ignore_ascii_case("true"))));
+    if inherits { listing(&crate::base_home(&config.python).join("Lib").join("site-packages"), &mut hasher); }
     environment.hash(&mut hasher);
     ["PATH", "PYTHONPATH"].map(std::env::var_os).hash(&mut hasher);
     format!("{:016x}", hasher.finish())

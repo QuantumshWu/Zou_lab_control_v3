@@ -41,12 +41,93 @@ function Get-ZlcToolsRoot {
     Join-Path (Get-ZlcCheckout) '.tools'
 }
 
+# One candidate, believed only once it has run (a python.exe under WindowsApps is the Store's
+# stub): a 64-bit CPython of v2's version, 3.13 or newer, with venv. Answers the base
+# interpreter itself -- the one behind py.exe, a .bat or a venv -- or $null, a wrong one noted.
+$script:ZlcRejected = @()
+function Test-ZlcBasePython([string]$Candidate, [string[]]$Arguments = @()) {
+    if (-not $Candidate) { return $null }
+    $Candidate = $Candidate.Trim()
+    if ($Candidate -match '^call\s+(.+)$') { $Candidate = $Matches[1] }
+    $Candidate = $Candidate.Trim().Trim('"')
+    if (-not $Candidate -or $Candidate -like '*\WindowsApps\*' -or -not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $null }
+    $answer = @(Invoke-Quiet { & $Candidate @Arguments -c "import sys, venv, struct; print(getattr(sys, '_base_executable', '') or sys.executable); print(sys.implementation.name, *sys.version_info[:2], struct.calcsize('P') * 8)" })
+    if ($LASTEXITCODE -ne 0 -or $answer.Count -lt 2) { return $null }
+    $executable = "$($answer[0])".Trim()
+    if ("$($answer[1])".Trim() -notmatch '^(\S+) (\d+) (\d+) (\d+)$') { return $null }
+    if ($Matches[1] -ne 'cpython' -or [int]$Matches[2] -ne 3 -or [int]$Matches[3] -lt 13 -or $Matches[4] -ne '64') {
+        $script:ZlcRejected += "$executable ($($Matches[1]) $($Matches[2]).$($Matches[3]), $($Matches[4])-bit)"
+        return $null
+    }
+    if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { return $null }
+    $executable
+}
+
+# The Python v2 runs with, in v2 _resolve_tools.bat's order: ZLC_PY_CMD and ZLC_FPGA_PYTHON
+# (v2's), ZLC_PYTHON (this checkout's), the stored .zlc_python_path, python and py on PATH,
+# conda's base (CONDA_PREFIX, CONDA_EXE, conda info --base), the Anaconda, Miniconda and
+# Miniforge folders, then python.org's. PATH is where an interpreter announces itself, not
+# where it lives: Anaconda recommends leaving PATH alone and ships no py.exe.
+function Find-ZlcBasePython {
+    function Found([string]$Path, [string]$Source) { [pscustomobject]@{ Path = $Path; Source = $Source } }
+    foreach ($name in 'ZLC_PY_CMD', 'ZLC_FPGA_PYTHON', 'ZLC_PYTHON') {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if ($value) { $hit = Test-ZlcBasePython $value; if ($hit) { return Found $hit $name } }
+    }
+    if (Test-Path -LiteralPath (Join-Path (Get-ZlcCheckout) '.zlc_python_path') -PathType Leaf) {
+        $line = @(Get-Content -LiteralPath (Join-Path (Get-ZlcCheckout) '.zlc_python_path') -Encoding UTF8 -TotalCount 1)
+        $text = if ($line.Count) { "$($line[0])".Trim() } else { '' }
+        if ($text) {
+            $hit = Test-ZlcBasePython $text
+            if ($hit) { return Found $hit '.zlc_python_path' }
+            Write-Host "Ignoring stale .zlc_python_path: $text"
+        }
+    }
+    foreach ($name in 'python', 'py') {
+        foreach ($candidate in @(Invoke-Quiet { & where.exe $name })) {
+            $hit = Test-ZlcBasePython $candidate
+            if (-not $hit -and $name -eq 'py') { $hit = Test-ZlcBasePython $candidate @('-3') }
+            if ($hit) { return Found $hit "PATH ($name)" }
+        }
+    }
+    if ($env:CONDA_PREFIX) { $hit = Test-ZlcBasePython (Join-Path $env:CONDA_PREFIX 'python.exe'); if ($hit) { return Found $hit 'CONDA_PREFIX' } }
+    if ($env:CONDA_EXE) {
+        $base = Split-Path -Parent (Split-Path -Parent $env:CONDA_EXE)
+        if ($base) { $hit = Test-ZlcBasePython (Join-Path $base 'python.exe'); if ($hit) { return Found $hit 'CONDA_EXE' } }
+    }
+    if (Get-Command conda -ErrorAction SilentlyContinue) {
+        foreach ($base in @(Invoke-Quiet { & conda info --base })) {
+            if ("$base".Trim()) { $hit = Test-ZlcBasePython (Join-Path "$base".Trim() 'python.exe'); if ($hit) { return Found $hit 'conda info --base' } }
+        }
+    }
+    $roots = @($env:USERPROFILE, $env:LOCALAPPDATA, $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Continuum' }),
+               $env:ProgramData, $env:ProgramFiles, 'C:\') | Where-Object { $_ }
+    foreach ($folder in $roots) {
+        foreach ($distribution in 'anaconda3', 'miniconda3', 'miniforge3') {
+            $hit = Test-ZlcBasePython (Join-Path (Join-Path $folder $distribution) 'python.exe')
+            if ($hit) { return Found $hit 'the conda folders' }
+        }
+    }
+    $installs = @($(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs\Python' }), $env:ProgramFiles, ${env:ProgramFiles(x86)}, 'C:\') | Where-Object { $_ }
+    foreach ($folder in $installs) {
+        if (-not (Test-Path -LiteralPath $folder -PathType Container)) { continue }
+        foreach ($install in @(Get-ChildItem -LiteralPath $folder -Directory -Filter 'Python3*' -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $hit = Test-ZlcBasePython (Join-Path $install.FullName 'python.exe')
+            if ($hit) { return Found $hit 'the python.org folders' }
+        }
+    }
+    $null
+}
+
+# The Python the plugin processes run in (zlc-desktop asks install_science.ps1 -PluginPython):
+# the science environment's venv, else -- none made, as the base Python had everything --
+# the base Python itself, found as above.
 function Get-ZlcSciencePython {
     $python = Join-Path (Get-ZlcToolsRoot) 'science-env\Scripts\python.exe'
-    if (-not (Test-Path -LiteralPath $python)) {
-        throw "The science environment is not installed ($python). Run installation.exe."
-    }
-    $python
+    if (Test-Path -LiteralPath $python) { return $python }
+    $base = Find-ZlcBasePython
+    if (-not $base) { throw "There is no science environment ($python) and no Python 3.13 or newer. Run installation.exe." }
+    $base.Path
 }
 
 # The pinned portable toolchain tools\dev_setup.ps1 installs into the tools folder.

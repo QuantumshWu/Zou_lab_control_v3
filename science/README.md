@@ -11,8 +11,9 @@ see `docs/PLUGIN_PROTOCOL.md`); the desktop itself embeds no interpreter.
 
 Changing a plugin needs no build: it takes effect the next time its process starts
 (re-open the device or restart the node); a new device or node type appears when the
-app starts. The science environment, `.tools\science-env`, is set up by
-`installation.exe` (or `bin\scripts\install_requirements.bat`): a venv of the Python v2 runs with holding the third-party
+app starts. The science environment is set up by `installation.exe` (or
+`bin\scripts\install_requirements.bat`): the Python v2 runs with as it is when it
+already has what is below, else `.tools\science-env`, a venv of it holding the third-party
 packages `pyproject.toml` names (numpy, scipy, Pillow and the `devices` links;
 `pylon` for Basler's pypylon, `slm-gpu` for CuPy, `oracle` for a development
 machine's plotting oracle) at v2's versions (`constraints.txt` holds v2's pins, and only those). These packages themselves are not installed: the
