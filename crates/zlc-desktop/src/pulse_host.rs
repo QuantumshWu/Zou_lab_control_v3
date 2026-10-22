@@ -191,9 +191,10 @@ fn run_scan_program(python: Option<&Path>, source: &str) -> Result<Option<ScanTa
     use std::io::{Read, Write};
     use std::os::windows::process::CommandExt;
     let python = python.ok_or_else(|| format!("{} (scan programs run in it)", zlc_plugin_host::NOT_INSTALLED))?;
-    // The plugin processes' environment: the base installation's DLLs and the thread policy;
-    // a console program, given no console window (this application has none).
-    let mut child = std::process::Command::new(python).envs(zlc_plugin_host::plugin_environment(python)).args(["-I", "-c", SCAN_RUNNER]).stdin(std::process::Stdio::piped())
+    // Run as the plugin processes are (no -I: the same packages, user site and PYTHONPATH; no
+    // PYTHONHOME; the base installation's DLLs and the thread policy); a console program, given no
+    // console window (this application has none).
+    let mut child = std::process::Command::new(python).env_remove("PYTHONHOME").envs(zlc_plugin_host::plugin_environment(python)).args(["-c", SCAN_RUNNER]).stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .spawn().map_err(|error| error.to_string())?;
     let job = crate::job::limit(&child, Some(2048));

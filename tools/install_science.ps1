@@ -221,7 +221,7 @@ if ($fresh) {
 if ($make) {
     Write-Host "[1/5] Making the venv ..."
     Invoke-Program { & $interpreter @venvArguments }
-    if ($LASTEXITCODE -ne 0) { throw "Could not make the venv $venv." }
+    if ($LASTEXITCODE -ne 0) { throw "Could not make the venv $venv ($interpreter needs its venv module for it)." }
     $needed = @(Get-Lacking (Get-Unmet $python $groupParts) $groupParts)
 }
 elseif ($fresh) { Write-Host "[1/5] No venv: the plugins run on $interpreter as it is." }

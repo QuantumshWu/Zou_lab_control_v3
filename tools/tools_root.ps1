@@ -42,8 +42,10 @@ function Get-ZlcToolsRoot {
 }
 
 # One candidate, believed only once it has run (a python.exe under WindowsApps is the Store's
-# stub): a 64-bit CPython of v2's version, 3.13 or newer, with venv. Answers the base
-# interpreter itself -- the one behind py.exe, a .bat or a venv -- or $null, a wrong one noted.
+# stub): a 64-bit CPython of v2's version, 3.13 or newer, as v2 runs on it (a venv is made of it
+# only when pip must install something, install_science.ps1). Answers the interpreter v2 would
+# run -- the one behind py.exe or a .bat, a venv's own python with its packages -- or $null, a
+# wrong one noted.
 $script:ZlcRejected = @()
 function Test-ZlcBasePython([string]$Candidate, [string[]]$Arguments = @()) {
     if (-not $Candidate) { return $null }
@@ -51,7 +53,7 @@ function Test-ZlcBasePython([string]$Candidate, [string[]]$Arguments = @()) {
     if ($Candidate -match '^call\s+(.+)$') { $Candidate = $Matches[1] }
     $Candidate = $Candidate.Trim().Trim('"')
     if (-not $Candidate -or $Candidate -like '*\WindowsApps\*' -or -not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $null }
-    $answer = @(Invoke-Quiet { & $Candidate @Arguments -c "import sys, venv, struct; print(getattr(sys, '_base_executable', '') or sys.executable); print(sys.implementation.name, *sys.version_info[:2], struct.calcsize('P') * 8)" })
+    $answer = @(Invoke-Quiet { & $Candidate @Arguments -c "import sys, struct; print(sys.executable); print(sys.implementation.name, *sys.version_info[:2], struct.calcsize('P') * 8)" })
     if ($LASTEXITCODE -ne 0 -or $answer.Count -lt 2) { return $null }
     $executable = "$($answer[0])".Trim()
     if ("$($answer[1])".Trim() -notmatch '^(\S+) (\d+) (\d+) (\d+)$') { return $null }

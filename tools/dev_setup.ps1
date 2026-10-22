@@ -179,7 +179,7 @@ Step 'The crates of Cargo.lock (cargo fetch)' $fetched {
 # by the rule its installs decide by, finds nothing of the two groups unmet.
 $science = @(& (Join-Path $PSScriptRoot 'install_science.ps1') -Status | Where-Object { "$_".StartsWith('{') }) | Select-Object -Last 1
 $science = if ($science) { $science | ConvertFrom-Json } else { $null }
-$oraclePresent = $science -and $science.exists -and -not (@($science.unmet.core) + @($science.unmet.devices) + @($science.unmet.oracle)).Count
+$oraclePresent = $science -and ($science.exists -or $science.inherit) -and -not (@($science.unmet.core) + @($science.unmet.devices) + @($science.unmet.oracle)).Count
 Step 'The science environment and the plotting oracle' $oraclePresent {
     foreach ($group in 'runtime', 'oracle') {
         & (Join-Path $PSScriptRoot 'install_science.ps1') -Group $group

@@ -403,6 +403,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoopBuilder::<AppEvent>::with_user_event().build();
     // installation.exe: its window alone, no instrument behind it.
     if installing { let (context, setup) = window_setup()?; return installer::run(event_loop, context, setup, log); }
+    // The plugins' interpreter (installation.exe's resolver answers) is asked while the first window is made.
+    std::thread::spawn(|| { let _ = zlc_plugin_host::plugin_python(); });
     let proxy = event_loop.create_proxy();
     let worker_proxy = proxy.clone();
     let runtime = Runtime::new();

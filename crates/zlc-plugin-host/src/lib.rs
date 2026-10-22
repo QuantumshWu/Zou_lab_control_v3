@@ -108,20 +108,17 @@ impl HostConfig {
 pub const NOT_INSTALLED: &str = "The plugin Python environment is not installed: run installation.exe";
 
 /// The interpreter plugin processes (and every other Python the core starts) run:
-/// `ZLC_PLUGIN_PYTHON` (or `PYO3_PYTHON`) when set, else the checkout's science
-/// environment, `<tools>\science-env\Scripts\python.exe` with `<tools>` =
-/// `ZLC_V3_TOOLS` or `<checkout>\.tools` (tools\tools_root.ps1's rule), else --
-/// no venv made, as the base Python had everything -- the base Python v2 runs
-/// with, as installation.exe's own resolver finds it (`install_science.ps1
-/// -PluginPython`, asked once). The executable started from Explorer needs no launcher.
+/// `ZLC_PLUGIN_PYTHON` (or `PYO3_PYTHON`) when set, else the answer of the one
+/// resolver installation.exe's status, its install step and the GPU warmup use
+/// (tools\tools_root.ps1 Get-ZlcSciencePython, asked once through
+/// `install_science.ps1 -PluginPython`): the checkout's science environment
+/// when one was made, else the base Python v2 runs with, as it is. The
+/// executable started from Explorer needs no launcher.
 pub fn plugin_python() -> Result<PathBuf, String> {
     static FOUND: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
     FOUND.get_or_init(|| {
         let named = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from);
         if let Some(python) = named("ZLC_PLUGIN_PYTHON").or_else(|| named("PYO3_PYTHON")) { return Ok(python); }
-        let tools = named("ZLC_V3_TOOLS").unwrap_or_else(|| zlc_core::checkout::path(".tools"));
-        let python = tools.join("science-env").join("Scripts").join("python.exe");
-        if python.is_file() { return Ok(python); }
         use std::os::windows::process::CommandExt;
         let script = zlc_core::checkout::path("tools").join("install_science.ps1");
         let output = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]).arg(&script).arg("-PluginPython")
