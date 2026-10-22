@@ -129,6 +129,7 @@ def _build(
     *,
     camera: object = None,
     camera_key: str = "",
+    sequencer_key: str = "",
     slm: object,
     slm_key: str,
     calibration_path: object,
@@ -147,6 +148,7 @@ def _build(
     return SlmFeedbackTask(
         camera=camera,
         camera_key=camera_key,
+        sequencer_key=sequencer_key,
         slm=slm,
         slm_key=slm_key,
         calibration=calibration.value,

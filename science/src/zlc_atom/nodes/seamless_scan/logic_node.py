@@ -163,6 +163,7 @@ def _build(
     repeats: int = 1,
     shots_per_point: int = 1,
     acquisition_logic: str = "",
+    sequencer_key: str = "",
     **devices: object,
 ) -> SeamlessScanMeasurement:
     pulse = pulse_description(pulse_resource)
@@ -197,6 +198,7 @@ def _build(
         acquisition_logic=acquisition_logic,
         api_values=applied,
         unapplied_api_values=unapplied,
+        sequencer_key=sequencer_key,
     )
 
 

@@ -7,6 +7,7 @@
 //! superseded it.
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -92,11 +93,13 @@ pub enum Drive { Fire, Hold(usize) }
 /// One lane's answer.
 pub enum Outcome {
     Connected { operation: u64, mode: String, endpoint: String, released: Option<String>, result: Result<Option<(Arc<Board>, BoardState)>, String> },
-    Drove { operation: u64, drive: Drive, revision: u64, result: Result<(String, u32), String>, state: BoardState,
+    /// `result`: the FIRE's command id, or None when a later command superseded the gesture before it fired.
+    Drove { operation: u64, drive: Drive, revision: u64, result: Result<Option<u32>, String>, state: BoardState,
             source: Arc<Sequence>, rows: Vec<Vec<u64>>, finite: bool },
-    Stopped { result: Result<(), String>, state: BoardState },
-    Synced { operation: u64, result: Result<(Option<AppliedState>, BoardState), String> },
-    Polled { operation: u64, state: BoardState },
+    /// `board`: the board this Stop made safe (a Connect may have replaced it since).
+    Stopped { result: Result<(), String>, state: BoardState, board: Arc<Board> },
+    Synced { operation: u64, discard: bool, operator: bool, result: Result<(Option<AppliedState>, BoardState), String> },
+    Polled { operation: u64, epoch: u64, state: BoardState },
     Completed { run: u64, result: Result<Option<DoneReport>, String>, state: BoardState },
     Program { source: String, fields: Vec<(String, String)>, table: Result<Option<ScanTable>, String> },
 }
@@ -119,7 +122,15 @@ pub struct BoardLink {
     pub locked: Option<String>,
     pub busy: Option<String>,
     pub stopping: bool,
+    /// The latest board command (a later one supersedes it); `current` is it, for the lanes.
     pub operation: u64,
+    pub(crate) current: Arc<AtomicU64>,
+    /// The command that set `busy`: its delivery ends it, whatever superseded it (v2 `_run_device_command`).
+    pub(crate) busy_operation: u64,
+    /// A Stop's answer held until the command it superseded has delivered (v2 `_status_followups`).
+    pub(crate) deferred_stop: Option<Outcome>,
+    /// Bumped when someone else drove the board: a status answer asked before it is stale.
+    pub(crate) poll_epoch: u64,
     pub finite_run: Option<u64>,
     /// This editor's own FIRE plays (v2 `_drive_lease`): from its drive until the board stops.
     pub driving: bool,
@@ -188,17 +199,21 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, u16), String> {
 
 /// `_drive_program`: stop what plays (when it plays, or always for Hold),
 /// load, fire; a board touched and not handed the whole program goes SAFE.
+/// `current` says whether the gesture is still the latest command: a
+/// superseded one (a Stop, another command) touches the board no further and
+/// leaves it SAFE. The FIRE's command id, or None when it was not fired.
 fn drive(board: &Board, program: Arc<CompiledProgram>, source: Arc<Sequence>, rows: Vec<Vec<u64>>, run_repeats: u64, scan_repeats: u64,
-         halt_first: bool) -> Result<(String, u32), String> {
+         halt_first: bool, current: &dyn Fn() -> bool) -> Result<Option<u32>, String> {
     let mut touched = false;
-    let result = (|| -> zlc_pulse::Result<(String, u32)> {
-        let firing = board.snapshot().ok().and_then(|s| s.get("firing").and_then(Json::as_bool)).unwrap_or(false);
-        if halt_first || firing { touched = true; board.safe()?; }
-        touched = true;
-        let digest = program.digest();
-        board.load(program, Some(source), rows)?;
-        let (_applied, command_id) = board.fire(run_repeats, scan_repeats)?;
-        Ok((digest, command_id))
+    let result = (|| -> zlc_pulse::Result<Option<u32>> {
+        if current() && (halt_first || board.snapshot().ok().and_then(|s| s.get("firing").and_then(Json::as_bool)).unwrap_or(false)) {
+            touched = true;
+            board.safe()?;
+        }
+        if current() { touched = true; board.load(program, Some(source), rows)?; }
+        let fired = if current() { Some(board.fire(run_repeats, scan_repeats)?.1) } else { None };
+        if !current() && touched { board.safe()?; }
+        Ok(fired)
     })();
     result.map_err(|error| {
         if touched {
@@ -241,8 +256,21 @@ impl Editor {
         Ok(())
     }
 
-    fn submit_device(&mut self, summary: &str, work: Work) {
+    /// A new latest command: the one before it is superseded.
+    fn supersede(&mut self) {
         self.link.operation += 1;
+        self.link.current.store(self.link.operation, Ordering::SeqCst);
+    }
+
+    /// Whether `operation` is still the latest command, asked on a lane.
+    fn current(&self, operation: u64) -> impl Fn() -> bool + Send + 'static {
+        let current = self.link.current.clone();
+        move || current.load(Ordering::SeqCst) == operation
+    }
+
+    fn submit_device(&mut self, summary: &str, work: Work) {
+        self.supersede();
+        self.link.busy_operation = self.link.operation;
         self.link.busy = Some(summary.to_owned());
         self.summary_note = None;
         let done = Arc::new(Event::default());
@@ -271,12 +299,6 @@ impl Editor {
     fn adopt(&mut self, board: Arc<Board>, state: BoardState, mode: &str, endpoint: &str) {
         let description = board.description().clone();
         let name = board.name().to_owned();
-        // A Config file this editor loaded stays the apparatus' set of values.
-        if !self.config_loaded_path.is_empty() {
-            let _ = board.config().load_file(Some(std::path::Path::new(&self.config_loaded_path)));
-        } else if !self.config_loaded_values.is_empty() {
-            let _ = board.config().load_values(&self.config_loaded_values, "");
-        }
         self.link.board = Some(board);
         self.link.changed = true;
         self.link.facts = Some(Facts { description: description.clone(), name: name.clone() });
@@ -314,6 +336,14 @@ impl Editor {
         let had_sequence = self.state.sequence.is_some();
         if let Some(old) = self.link.board.take() { if self.link.locked.is_none() { let _ = old.close(); } }
         self.link.locked = Some(label.to_owned());
+        // v2 PE:1306: the session's board brings its own Config (the device row's file), which this editor shows as loaded.
+        self.config_loaded_path = board.config().source();
+        self.config_loaded_values = board.config().values();
+        if !self.config_dirty() {
+            self.config_path = self.config_loaded_path.clone();
+            self.config_rows = Self::rows_of(&self.config_loaded_values);
+            self.config_saved_rows = self.config_rows.clone();
+        }
         let state = BoardState::of(&board);
         self.adopt(board, state, CONNECTION_GIVEN, "");
         if !had_sequence { self.start_new_pulse(); }
@@ -385,12 +415,13 @@ impl Editor {
         let run_repeats = source.run_repeats;
         let finite = run_repeats > 0 && sweeps > 0;
         let (operation, revision) = (self.link.operation + 1, self.revision);
+        let current = self.current(operation);
         self.link.finite_run = None;
         // v2 acquires its drive at the command, before the board is touched.
         self.link.driving = true;
         self.submit_device("Starting...", Box::new(move || {
             let compiled = compile_sequence(&source, &geometry, clock).map(Arc::new).map_err(|error| error.message);
-            let result = compiled.and_then(|program| drive(&board, program, source.clone(), rows.clone(), run_repeats, sweeps, false));
+            let result = compiled.and_then(|program| drive(&board, program, source.clone(), rows.clone(), run_repeats, sweeps, false, &current));
             Outcome::Drove { operation, drive: Drive::Fire, revision, result, state: BoardState::of(&board), source, rows, finite }
         }));
         Ok(json!({"accepted": true}))
@@ -404,15 +435,7 @@ impl Editor {
         if !self.scan_armed() { return Err(if delta.is_some() { "Nothing is held to step" } else { "There is no scan to hold a point of" }.into()); }
         let count = self.state.section.scan_rows.len();
         let point = delta.map(|delta| (self.link.held_point.unwrap_or(0) as i64 + delta).clamp(0, count as i64 - 1) as usize);
-        let prepared = (|| -> zlc_pulse::Result<(Sequence, Vec<Vec<f64>>)> {
-            let sequence = self.state.sequence.as_ref().expect("checked");
-            let resolved = resolve_subpulse_sources(sequence, self.base_directory().as_deref())?;
-            let source = self.played_scan(&zlc_pulse::binding::resolve_api_parameters(&resolved, None)?)?;
-            let (geometry, _) = self.compiler_target()?;
-            let effective = prepare_scan_application(&source, &self.state.section.scan_rows, &geometry)?.0;
-            Ok((source, effective))
-        })();
-        let (source, effective) = match prepared {
+        let (source, effective) = match self.scan_points() {
             Ok(prepared) => prepared,
             Err(error) => {
                 let held = point.unwrap_or(0);
@@ -423,6 +446,7 @@ impl Editor {
         };
         let (geometry, clock) = self.compiler_target().map_err(|e| e.message)?;
         let (operation, revision) = (self.link.operation + 1, self.revision);
+        let current = self.current(operation);
         self.link.finite_run = None;
         self.link.driving = true;
         self.submit_device("Holding...", Box::new(move || {
@@ -431,7 +455,7 @@ impl Editor {
             let result = resolved.and_then(|resolved| compile_sequence(&resolved, &geometry, clock).map(|program| (resolved, Arc::new(program))))
                 .map_err(|error| error.message);
             let (result, source) = match result {
-                Ok((resolved, program)) => (drive(&board, program, resolved.clone(), Vec::new(), 0, 1, true), resolved),
+                Ok((resolved, program)) => (drive(&board, program, resolved.clone(), Vec::new(), 0, 1, true, &current), resolved),
                 Err(error) => (Err(error), Arc::new(source)),
             };
             Outcome::Drove { operation, drive: Drive::Hold(held), revision, result, state: BoardState::of(&board), source, rows: Vec::new(), finite: false }
@@ -439,12 +463,15 @@ impl Editor {
         Ok(json!({"accepted": true}))
     }
 
-    /// `stop`: SAFE now, whatever the board is doing; never queued behind a command.
+    /// `stop`: SAFE now, whatever the board is doing; never queued behind a
+    /// command. A run holding the board refuses it, as v2's device use did:
+    /// its node is stopped instead, and its own Stop makes the board safe.
     pub fn stop(&mut self) -> Result<Value, String> {
         self.last_warning.clear();
         if self.link.stopping { return Ok(json!({"accepted": true})); }
+        if let Some(holder) = &self.link.claimed_by { return Err(format!("device is in use by {holder}")); }
         let Some(board) = self.link.board.clone() else { return Ok(json!({"accepted": false})) };
-        self.link.operation += 1;
+        self.supersede();
         self.link.finite_run = None;
         self.link.stopping = true;
         self.summary_note = Some("Stopping...".into());
@@ -457,19 +484,20 @@ impl Editor {
                 pending.wait(Some(Duration::from_secs(5)));
                 result = board.safe().map(|_| ()).map_err(|error| error.message);
             }
-            Outcome::Stopped { result, state: BoardState::of(&board) }
+            Outcome::Stopped { result, state: BoardState::of(&board), board }
         }) });
         Ok(json!({"accepted": true}))
     }
 
-    /// `sync_from_sequencer`: what the board holds back into the editor.
-    pub fn sync(&mut self) -> Result<Value, String> {
+    /// `sync_from_sequencer`: what the board holds back into the editor;
+    /// `discard` lets it replace unsaved work (v2 asked first).
+    pub fn sync(&mut self, discard: bool) -> Result<Value, String> {
         self.device_available()?;
         let board = self.link.board.clone().ok_or("This editor is not connected to a sequencer")?;
-        let operation = self.link.operation + 1;
+        let (operation, operator) = (self.link.operation + 1, self.operator);
         self.submit_device("Syncing...", Box::new(move || {
             let result = board.applied().map(|applied| (applied, BoardState::of(&board))).map_err(|error| error.message);
-            Outcome::Synced { operation, result }
+            Outcome::Synced { operation, discard, operator, result }
         }));
         Ok(json!({"accepted": true}))
     }
@@ -479,13 +507,25 @@ impl Editor {
         if self.link.poll_in_flight || self.link.busy.is_some() || self.link.stopping { return; }
         let Some(board) = self.link.board.clone() else { return };
         self.link.poll_in_flight = true;
-        let operation = self.link.operation;
-        self.jobs.push(Job::Device { work: Box::new(move || Outcome::Polled { operation, state: BoardState::of(&board) }), done: Arc::new(Event::default()) });
+        let (operation, epoch) = (self.link.operation, self.link.poll_epoch);
+        self.jobs.push(Job::Device { work: Box::new(move || Outcome::Polled { operation, epoch, state: BoardState::of(&board) }), done: Arc::new(Event::default()) });
     }
 
-    /// Something else (a node's run) drove the board: what this editor last
-    /// heard is stale, so ask again.
-    pub fn board_touched(&mut self) { self.link.operation += 1; self.link.finite_run = None; self.poll(); }
+    /// Something else (a node's run) drove the board: a status answer asked
+    /// before it is stale, so ask again. The editor's own command in flight
+    /// is not superseded by it.
+    pub fn board_touched(&mut self) { self.link.poll_epoch += 1; self.link.finite_run = None; self.poll(); }
+
+    /// The draft as Hold plays a row of it: the executable pulse with the
+    /// armed table's fields, and the table quantized as the board plays it.
+    fn scan_points(&self) -> zlc_pulse::Result<(Sequence, Vec<Vec<f64>>)> {
+        let sequence = self.state.sequence.as_ref().ok_or_else(|| Error::new(Kind::Runtime, "no pulse is open"))?;
+        let resolved = resolve_subpulse_sources(sequence, self.base_directory().as_deref())?;
+        let source = self.played_scan(&zlc_pulse::binding::resolve_api_parameters(&resolved, None)?)?;
+        let (geometry, _) = self.compiler_target()?;
+        let effective = prepare_scan_application(&source, &self.state.section.scan_rows, &geometry)?.0;
+        Ok((source, effective))
+    }
 
     /// `_validate_control`: compile what On Pulse would play, with the loaded
     /// Config, without touching the board.
@@ -530,7 +570,9 @@ impl Editor {
     pub fn deliver(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Connected { operation, mode, endpoint, released, result } => {
-                if operation == self.link.operation { self.link.busy = None; }
+                // Delivered whatever superseded it (v2 always_deliver): the old board is
+                // hung up and the new one dialled, and only this takes the one and drops the other.
+                self.command_delivered(operation);
                 if let Some(error) = released {
                     self.warn(format!("The pulse server connection ended before the previous board could be told to stop ({error}). If that server \
                                        is still running it drives the board safe when a client disconnects; if it is not, THAT SEQUENCE IS STILL \
@@ -559,19 +601,24 @@ impl Editor {
                         self.warn(format!("Cannot connect to {name}: {error}"));
                     }
                 }
+                self.deliver_deferred_stop();
             }
             Outcome::Drove { operation, drive, revision, result, state, source, rows, finite } => {
-                if operation != self.link.operation { return; }
-                self.link.busy = None;
+                self.command_delivered(operation);
+                // A superseded gesture left the board SAFE; what superseded it reports the board.
+                if operation != self.link.operation { self.deliver_deferred_stop(); return; }
                 self.adopt_board_state(state.clone());
+                // v2: what the board reports holding IS what this revision plays -- its Config
+                // filled in -- not the digest of the editor's own compile.
+                let digest = state.applied_digest.clone();
                 match (result, drive) {
-                    (Ok((digest, command_id)), Drive::Fire) => {
+                    (Ok(fired), Drive::Fire) => {
                         self.link.held_point = None;
                         let geometry = self.compiler_target().map(|(g, _)| g).ok();
                         self.link.applied_scan = geometry.and_then(|geometry| applied_scan_text(&source, &rows, &digest, &geometry));
-                        if revision == self.revision { *self.link.digest.borrow_mut() = (revision + 1, digest.clone()); }
+                        if revision == self.revision { *self.link.digest.borrow_mut() = (revision + 1, digest); }
                         self.summary_note = Some("Started".into());
-                        if finite {
+                        if let (true, Some(command_id)) = (finite, fired) {
                             self.link.finite_run = Some(operation);
                             if let Some(board) = self.link.board.clone() {
                                 self.jobs.push(Job::Completion { work: Box::new(move || {
@@ -581,7 +628,7 @@ impl Editor {
                             }
                         }
                     }
-                    (Ok((digest, _)), Drive::Hold(held)) => {
+                    (Ok(_), Drive::Hold(held)) => {
                         let count = self.state.section.scan_rows.len();
                         self.link.held_point = Some(held);
                         self.link.held_program = Some((revision, digest));
@@ -599,8 +646,16 @@ impl Editor {
                     }
                 }
             }
-            Outcome::Stopped { result, state } => {
+            Outcome::Stopped { result, state, board } => {
+                // Heard after the command it superseded, which may yet change the board (v2).
+                if self.link.busy.is_some() {
+                    self.link.deferred_stop = Some(Outcome::Stopped { result, state, board });
+                    return;
+                }
                 self.link.stopping = false;
+                // A Connect delivered meanwhile: the board this Stop made safe is no longer
+                // this editor's, and the Connect said what became of it.
+                if !self.link.board.as_ref().is_some_and(|current| Arc::ptr_eq(current, &board)) { return; }
                 let worked = result.is_ok() && state.answering && !state.firing;
                 self.adopt_board_state(state);
                 if worked { self.summary_note = Some("Stopped".into()); }
@@ -610,16 +665,18 @@ impl Editor {
                     self.warn(message);
                 }
             }
-            Outcome::Synced { operation, result } => {
-                if operation == self.link.operation { self.link.busy = None; }
+            Outcome::Synced { operation, discard, operator, result } => {
+                self.command_delivered(operation);
+                // v2: a superseded Sync is not delivered; what superseded it reports the board.
+                if operation != self.link.operation { self.deliver_deferred_stop(); return; }
                 match result {
                     Err(error) => self.warn(format!("Cannot sync from the board: {error}")),
-                    Ok((applied, state)) => { self.adopt_board_state(state); self.adopt_applied(applied); }
+                    Ok((applied, state)) => { self.adopt_board_state(state); self.adopt_applied(applied, discard, operator); }
                 }
             }
-            Outcome::Polled { operation, state } => {
+            Outcome::Polled { operation, epoch, state } => {
                 self.link.poll_in_flight = false;
-                if operation == self.link.operation && self.link.busy.is_none() { self.adopt_board_state(state); }
+                if operation == self.link.operation && epoch == self.link.poll_epoch && self.link.busy.is_none() { self.adopt_board_state(state); }
             }
             Outcome::Completed { run, result, state } => {
                 if self.link.finite_run != Some(run) { return; }
@@ -640,9 +697,21 @@ impl Editor {
         }
     }
 
+    /// A device command's delivery: the busy it set is over, whatever
+    /// superseded it (v2 `_run_device_command.finished`).
+    fn command_delivered(&mut self, operation: u64) {
+        if self.link.busy_operation == operation { self.link.busy = None; }
+    }
+
+    /// A Stop held back for the command it superseded, now that it delivered.
+    fn deliver_deferred_stop(&mut self) {
+        if self.link.busy.is_none() { if let Some(stop) = self.link.deferred_stop.take() { self.deliver(stop); } }
+    }
+
     /// `_adopt_applied`: the board's pulse as the draft (asked first when it
-    /// would replace unsaved work; a board playing this draft keeps it).
-    fn adopt_applied(&mut self, applied: Option<AppliedState>) {
+    /// would replace unsaved work; a board playing this draft, or one row of
+    /// its scan as Hold and Step resolved it, keeps the draft and its table).
+    fn adopt_applied(&mut self, applied: Option<AppliedState>, discard: bool, operator: bool) {
         let Some(applied) = applied else { self.warn("The board has no pulse applied yet; there is nothing to sync"); return };
         let Some(source) = applied.source.clone() else {
             self.warn("The board is holding a compiled program it was given without its pulse, so there is nothing an editor can show");
@@ -656,8 +725,19 @@ impl Editor {
             self.done(format!("Synced from the board{SEPARATOR}{}", period_counts(&source.periods)));
             return;
         }
-        if self.dirty() {
-            self.warn("This editor has unsaved changes; save them or open the board's pulse after discarding them (Sync again)");
+        if let Some(held) = self.link.held_point.filter(|_| self.scan_armed()) {
+            let point = self.scan_points().ok().and_then(|(source, effective)| {
+                effective.get(held).and_then(|row| resolve_scan_point(&source, Some(row)).ok())
+            });
+            if point.is_some_and(|point| point == *adopted) {
+                self.done(format!("The board is holding scan point {} of this pulse; the draft and its scan table are kept", held + 1));
+                return;
+            }
+        }
+        if self.dirty() && !discard {
+            // v2 asked whether to discard (confirm_pulse_discard): the window asks, then syncs again.
+            if operator { self.ask_sync_discard(); }
+            else { self.warn("This editor has unsaved changes; save them, or pass discard_changes=true to replace them with the board's pulse"); }
             return;
         }
         let geometry = self.compiler_target().map(|(g, _)| g).ok();

@@ -713,6 +713,9 @@ pub struct PulseRun {
     pub scan_repeats: Option<u64>,
     /// A table the board plays: these scan slots (no other slot streams), each row run_repeats times.
     pub scan: Option<PulseScanTable>,
+    /// A run's two-step play: `load` puts the document on the board without firing (no command_id);
+    /// `fire` then fires what that load left there (repeats only). Default: both at once.
+    pub stage: Option<String>,
 }
 
 /// A scan table for the board: rows in the fields' own units, in this field order.
@@ -1101,13 +1104,16 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!("pulse_run", PulseRun, control, false,
         "Play a pulse document on the attached board with these API values (and a scan table): compile, load, fire. The receipt: \
          command_id for pulse_wait_done, the values played, the table as played, timing (period starts, lane rising edges, ticks)."),
-    command!("pulse_wait_done", PulseWait, read, false,
+    command!("pulse_wait_done", PulseWait, control, false,
         "Wait for one FIRE's report, taken once: {done, status done|error|underflow, cursor, elapsed_seconds, command_id, fault}; \
-         {done: false} while it plays. A FIRE that can no longer report (already reported, made safe, replaced) is refused."),
+         {done: false} while it plays. A FIRE that can no longer report (already reported, made safe, replaced) is refused, \
+         and so is any client but the run while a run holds the board (taking the report is that run's)."),
     command!("pulse_estimate", PulseEstimate, read, false,
         "The Pulse ticks a scan plan schedules, compiled for the attached board with its Config: per API point the board table's \
          ticks, its first row's and the output-delay bound; sums over the points; clock_hz."),
-    command!("pulse_stop", Empty, control, false, "Drive the pulse board SAFE now; the run being played stops. Never refused."),
+    command!("pulse_stop", Empty, control, false,
+        "Drive the pulse board SAFE now; what the editor plays stops. While a run holds the board it is refused (device is in use by \
+         <node>): stop that node, whose own Stop makes the board safe."),
     command!("pulse_state", Empty, read, false,
         "The Pulse Editor's facts: open document, periods, bindings, ports, scan table, Config, board state, last warning."),
     command!("pulse_open", PulseOpen, control, false, "Open a pulse document in the Pulse Editor."),
@@ -1129,7 +1135,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         "On Pulse: load what the editor shows and play it (Run and Scan repeats as authored)."),
     command!("pulse_hold", Empty, control, false, "Play the scan point the board is on, held until Stop."),
     command!("pulse_step", PulseStep, control, false, "Hold the scan point delta away from the held one."),
-    command!("pulse_sync", Empty, control, false, "Bring the pulse the board holds into the editor."),
+    command!("pulse_sync", PulseDiscard, control, false,
+        "Bring the pulse the board holds into the editor (it replaces unsaved changes only with discard_changes)."),
 ];
 
 pub fn find(name: &str) -> Option<&'static CommandSpec> { COMMANDS.iter().find(|spec| spec.name == name) }

@@ -1740,6 +1740,7 @@ class SlmFeedbackTask:
         save_figure_artifact: object = None,
         acquisition_logic: str = "",
         source_signal: str = "",
+        sequencer_key: str = "",
     ) -> None:
         if not isinstance(slm, SlmAdapter):
             raise TypeError("slm must implement SlmAdapter")
@@ -1819,8 +1820,7 @@ class SlmFeedbackTask:
         ).copy()
         self._site_centers_xy.setflags(write=False)
         self.camera, self.slm = camera, slm
-        # The pulse board is the core's, driven through its catalogue commands.
-        self.camera_key, self.sequencer_key, self.slm_key = camera_key, "sequencer", slm_key
+        self.camera_key, self.sequencer_key, self.slm_key = camera_key, str(sequencer_key), slm_key
         self.calibration, self.model = calibration, model
         self.target = frozen_target
         self.calibration_path = Path(calibration_path).expanduser().resolve()

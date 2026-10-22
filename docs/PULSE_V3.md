@@ -68,7 +68,16 @@ Run claims: a `core` command from a plugin run arrives with `_run`. `pulse_run`,
 claims the open sequencer device instance (`Workbench::run_claims`), exactly as a
 plugin device call is refused for an unclaimed device; a board attached only by
 the editor cannot be driven by a run. While a run claims the sequencer the editor's
-On Pulse / Hold / Step are refused (v2's device-use lease); Stop is never refused.
+On Pulse / Hold / Step / Stop and any other client's `pulse_run` / `pulse_wait_done` /
+`pulse_stop` are refused, "device is in use by <node>" (v2's device-use lease): the
+operator stops the node, whose own Stop makes the board safe. A run's `pulse_stop`
+answers with the SAFE's outcome, before the run goes on.
+
+A run's documents are pinned: the first `pulse_run` of a document reads it, and a
+later one of the same run that finds the file changed is refused ("changed during
+this run"), so a run's record names the one pulse it played. A run that ends -- its
+node returned, failed or was stopped, or its plugin process died -- with a FIRE of
+its still unreported has the board made SAFE (v2's per-node `finally`).
 
 ## Commands (bus catalogue, `crates/zlc-bus`)
 
@@ -87,16 +96,16 @@ read-only MCP client too; every other one is `control`.
 | `pulse_target` | control | Target page: apply port records. |
 | `pulse_preview` | control | Preview page: `include_off`, `selectors`, `size`; `save` writes the drawn figure (PNG). The drawing is the native `pulse_timeline` panel `pulse-preview`. |
 | `pulse_page` | control | The page shown (Edit, Preview, Scan, Value Config, Subpulse Config, Target); Preview redraws on show. |
-| `pulse_sync` | control | Read the board back and compare its digest with the editor's ("is the board playing what I see?"). |
+| `pulse_sync` | control | Bring the board's pulse into the editor; a board playing this draft, or one row of its scan (Hold, Step), keeps the draft and its table; unsaved changes are replaced only with `discard_changes` (the window asks, v2 confirm_pulse_discard). |
 | `pulse_validate` | read | Compile with the loaded Config, without touching the board. |
 | `pulse_connect` | control | Attach the editor to `virtual`, `remote` (`endpoint` host:port), `local` (a pulse server this app starts on the UART; never run in tests) or `offline`. Refused while an apparatus sequencer device holds the board. Opening a board drives it SAFE first. |
 | `pulse_fire` | control | On Pulse: load what the editor shows and fire it (Run/Scan repeats as authored). |
 | `pulse_hold`, `pulse_step` | control | Play one scan point as an ordinary pulse. |
 | `pulse_describe` | read | `{document}` → `{path, name, api_fields, scan_fields, unscannable, periods}` (what a node's pulse resource resolves to). `api_fields` in played order: `{field_id, label, kind, unit, value}`; `scan_fields` the template's scan slots in slot order: `{field_id, label, kind, unit}` (a DAC's unit is the signed code); both with the column facts `is_dac, lo, hi, limit_lo, limit_hi` (v2 `api_parameter_columns_for` / `scan_columns_for`); `unscannable` maps an API count of an empty bracket to the sentence why; `periods` `{period_id, name, label}`. |
-| `pulse_run` | control | `{document, api_values:{field_id:[number, unit]}, run_repeats, scan_repeats, scan?:{fields, rows}}`: a time converted exactly into its field's unit (any other field takes its own unit only); with `scan` exactly those fields are the board's scan slots (rows in the fields' units and order, quantized to what plays; two rows that play the same, a field the pulse lacks or more fields than the board's slots are refused), without it no slot streams; ABI check, compile, load, fire → `{command_id, api_values, applied (v2 sequencer archive snapshot), timing, scan?:{fields, rows as played}}`. `timing` is the program the FIRE plays (Config filled), one run of the table's first row, every loop body replayed at most twice: `{clock_hz, digest, duration_ticks, earliest_lane_delay_ticks, periods:[{period_id, name, label, starts, duration_ticks}], rising_edges:{lane: ticks}}` (non-clock lanes; v2 `frame_visits` / `trigger_edge_ticks`, `bracket_bodies=2`). |
-| `pulse_wait_done` | read | `{command_id, timeout_seconds}` → `{done, status: done\|error\|underflow, cursor, elapsed_seconds, command_id, fault}`, or `{done: false}` while that FIRE plays; waits off the command lane. See "One report per FIRE". |
+| `pulse_run` | control | `{document, api_values:{field_id:[number, unit]}, run_repeats, scan_repeats, scan?:{fields, rows}}`: a time converted exactly into its field's unit (any other field takes its own unit only); with `scan` exactly those fields are the board's scan slots (rows in the fields' units and order, quantized to what plays; two rows that play the same, a field the pulse lacks or more fields than the board's slots are refused), without it no slot streams; ABI check, compile, load, fire (a run's `stage: load` loads only and `stage: fire` fires what that load left on the board, v2's load-then-arm-then-fire) → `{command_id, api_values, applied (v2 sequencer archive snapshot), timing, scan?:{fields, rows as played}}`. `timing` is the program the FIRE plays (Config filled), one run of the table's first row, every loop body replayed at most twice: `{clock_hz, digest, duration_ticks, earliest_lane_delay_ticks, periods:[{period_id, name, label, starts, duration_ticks}], rising_edges:{lane: ticks}}` (non-clock lanes; v2 `frame_visits` / `trigger_edge_ticks`, `bracket_bodies=2`). |
+| `pulse_wait_done` | control | `{command_id, timeout_seconds}` → `{done, status: done\|error\|underflow, cursor, elapsed_seconds, command_id, fault}`, or `{done: false}` while that FIRE plays; waits off the command lane. See "One report per FIRE". |
 | `pulse_estimate` | read | `{document, api_points?:[{field_id:[number, unit]}] (≤ 256), scan?:{fields, columns}}` → `{clock_hz, table_ticks, delay_ticks, points:[{api_values, board_rows, first_row_ticks, table_ticks, delay_ticks}]}`: v2 `estimate_scan_time`'s compile loop, on the attached board's geometry with the Config it holds; the node multiplies by its host points, shots per point and sweeps. |
-| `pulse_stop` | control | SAFE now; never refused, never queued behind a pending LOAD/FIRE. |
+| `pulse_stop` | control | SAFE now, never queued behind a pending LOAD/FIRE (a superseded On Pulse / Hold goes no further and leaves the board SAFE); refused while a run holds the board. |
 
 ## One report per FIRE
 
@@ -119,7 +128,7 @@ answered at once.
 - On connect the host registers the board's SAFE as Stop all's safe action for
   output `pulse-streamer`; disconnect unregisters it. `pulse_stop` and `stop_all`
   run `PulseStreamer::safe` (stop observer, `CMD_SAFE`, verified readback) before the
-  result is reported, and are never refused.
+  result is reported; `stop_all` is never refused (it also stops the runs).
 - Stop is sticky exactly as in v2: a FIRE still being prepared (Config reread,
   compile, reload) when a Stop arrives is refused instead of being sent after it.
 - Editing, validating, saving and previewing are never blocked: they cannot move

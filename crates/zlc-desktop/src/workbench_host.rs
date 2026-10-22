@@ -624,12 +624,14 @@ impl Plugins for Builtin {
         let (node, ours) = (run.node_id.clone(), run.run.clone());
         // A native device (the pulse board) stays claimed here, in the workbench; the
         // plugin reaches it only through catalogue commands (pulse_run, ...), so the
-        // plugin host is handed only the plugin devices.
-        let devices = { let stand = self.0.borrow(); run.devices.iter().filter(|(_, instance)| !stand.native_instances.contains_key(*instance))
-            .map(|(argument, instance)| (argument.clone(), instance.clone())).collect() };
-        let request = RunRequest { values: Value::Object(run.values.clone()), devices, origin: origin(&run.origin),
+        // plugin host is handed only the plugin devices -- and of a native one only its
+        // key, `<argument>_key` as every claimed device's (a run record names the instance).
+        let (devices, native): (Vec<_>, Vec<_>) = { let stand = self.0.borrow(); run.devices.iter()
+            .map(|(argument, instance)| (argument.clone(), instance.clone())).partition(|(_, instance)| !stand.native_instances.contains_key(instance)) };
+        let keys = native.into_iter().map(|(argument, instance)| (format!("{argument}_key"), json!(instance)));
+        let request = RunRequest { values: Value::Object(run.values.clone()), devices: devices.into_iter().collect(), origin: origin(&run.origin),
             // Build arguments beside the values: chosen artifacts and resolved workspace resources.
-            resources: Value::Object(run.artifacts.iter().chain(&run.resources).map(|(key, value)| (key.clone(), value.clone())).collect()), source_signal: (!run.source_signal.is_empty()).then(|| run.source_signal.clone()),
+            resources: Value::Object(run.artifacts.iter().chain(&run.resources).map(|(key, value)| (key.clone(), value.clone())).chain(keys).collect()), source_signal: (!run.source_signal.is_empty()).then(|| run.source_signal.clone()),
             run_directory: run.directory.clone(), outputs: run.outputs.clone() };
         let started = self.spawn("start", move |host| match host.start_run(&node, request) {
             Ok(hosted) => { runs.lock().unwrap().insert(hosted, (node, ours.clone())); Event::RunStarted { run: ours } }
