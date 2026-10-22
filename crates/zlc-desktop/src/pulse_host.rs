@@ -560,7 +560,7 @@ impl PulseHost {
         }
         match action {
             "pulse_run" => {
-                if run.is_none() { if let Some(holder) = &claimant { return Handled::Now(Err(format!("The sequencer is in use by run {holder}"))); } }
+                if run.is_none() { if let Some(holder) = &claimant { return Handled::Now(Err(format!("device is in use by {holder}"))); } }
                 let Some(board) = self.editor.board().cloned() else { return Handled::Now(Err("no pulse board is attached".into())) };
                 board.set_world(self.world());
                 let document = PathBuf::from(command["document"].as_str().unwrap_or(""));

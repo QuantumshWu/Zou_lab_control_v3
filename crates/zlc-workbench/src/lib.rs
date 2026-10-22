@@ -529,7 +529,7 @@ impl Workbench {
 
     /// The active run that holds a device instance, if one does (the pulse
     /// editor may not drive a sequencer a run holds).
-    pub fn device_claimant(&self, device: &str) -> Option<String> { self.claims_on(device).into_iter().next().map(|claim| claim.run) }
+    pub fn device_claimant(&self, device: &str) -> Option<String> { self.claims_on(device).into_iter().next().map(|claim| claim.node_name) }
 
     /// The record an outside driver keeps of the devices it holds (see [`DeviceUsers`]).
     pub fn device_users(&self) -> DeviceUsers { self.device_users.clone() }

@@ -370,7 +370,7 @@ impl Editor {
     }
 
     fn require_board(&self) -> Result<Arc<Board>, String> {
-        if let Some(run) = &self.link.claimed_by { return Err(format!("The sequencer is in use by run {run}; stop it first")); }
+        if let Some(holder) = &self.link.claimed_by { return Err(format!("device is in use by {holder}")); }
         self.link.board.clone().ok_or_else(|| "This editor is not connected to a sequencer".to_owned())
     }
 
