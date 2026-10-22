@@ -806,6 +806,12 @@ impl Workbench {
         claims
     }
 
+    /// v2 DeviceUseBusy: a claimed device driven outside the workbench refuses the start.
+    fn outside_use(&self, claims: &[Claim]) -> Option<String> {
+        let users = self.device_users.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        claims.iter().find_map(|claim| users.get(&claim.device)).map(|user| format!("device is in use by {user}"))
+    }
+
     /// Start, or Restart a running node (its run stops first).
     /// `acquisition`: a parent run asks for this node, which then starts with
     /// its running configuration (or its draft) and answers the parent.
@@ -838,6 +844,10 @@ impl Workbench {
         let node = self.node(id).unwrap();
         let descriptor = self.node_type(&node.type_id)?;
         let draft = running.unwrap_or_else(|| node.draft.clone());
+        if let Some(error) = self.outside_use(&self.wanted_claims(node, &draft)) {
+            self.node_mut(id)?.error = Some(error.clone());
+            return Err(error);
+        }
         let processor = descriptor.node().node_kind == "processor";
         let source_absent = processor && self.source_published(&signals, &draft.source_signal).is_none();
         if processor { self.plugins.follow(id, Some(&draft.source_signal)); }
@@ -877,6 +887,12 @@ impl Workbench {
             if self.active_run(node).is_some() { continue; }
             let draft = node.running.clone().unwrap_or_else(|| node.draft.clone());
             let claims = self.wanted_claims(node, &draft);
+            if let Some(error) = self.outside_use(&claims) {
+                let pending = self.node_mut(&id).unwrap().pending.take();
+                if let Some((parent, ticket, _)) = pending.and_then(|pending| pending.acquisition) { self.plugins.acquired(&parent, ticket, Err(error.clone())); }
+                self.node_mut(&id).unwrap().error = Some(error);
+                continue;
+            }
             if claims.iter().any(|claim| !self.claiming_nodes(&claim.device).is_empty() || !self.device_open(&claim.device)) {
                 if claims.iter().any(|claim| !self.device_open(&claim.device) && self.claiming_nodes(&claim.device).is_empty()) {
                     let pending = self.node_mut(&id).unwrap().pending.take();

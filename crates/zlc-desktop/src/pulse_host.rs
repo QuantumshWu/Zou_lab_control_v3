@@ -136,6 +136,9 @@ pub struct PulseHost {
     /// Pointer messages for the preview, in order (a newer move replaces an unsent one).
     pointers: std::collections::VecDeque<Value>,
     pointer_busy: bool,
+    /// The workbench's record of outside drivers: the session's sequencer is "PulseGUI"'s while
+    /// the editor's own pulse plays (v2 `_drive_lease`), so no run may claim it meanwhile.
+    pub users: zlc_workbench::DeviceUsers,
 }
 
 /// The preview's front and its axes, as panels report theirs.
@@ -337,7 +340,7 @@ impl PulseHost {
         PulseHost { editor: Editor::new(deployed, pulses.to_path_buf()), device: Lane::new("pulse-command"), safe: Lane::new("pulse-safe"), program: Lane::new("pulse-program"),
                     preview: Lane::new("pulse-preview"), post, safe_actions, plugins, given: None, python, session: Arc::new(Mutex::new(None)),
                     dpr: 1.0, preview_busy: false, preview_key: String::new(), preview_wanted: false, frame: None, frames: 0,
-                    axes: Vec::new(), pointers: Default::default(), pointer_busy: false }
+                    axes: Vec::new(), pointers: Default::default(), pointer_busy: false, users: Default::default() }
     }
 
     /// The pulse section of a state message: the editor's view plus the preview's frame.
@@ -365,6 +368,9 @@ impl PulseHost {
 
     /// Run the editor's jobs on their lanes; move Stop all's SAFE with the board.
     pub fn dispatch(&mut self) {
+        // Every editor change ends here: the record is current before any later start is admitted.
+        let users = self.given.as_ref().filter(|_| self.editor.drives()).map(|given| (given.instance.clone(), "PulseGUI".to_owned()));
+        if let Ok(mut record) = self.users.lock() { *record = users.into_iter().collect(); }
         if let Some(board) = self.editor.take_board_change() {
             self.safe_actions.unregister(SAFE_OUTPUT);
             if let Some(board) = board {

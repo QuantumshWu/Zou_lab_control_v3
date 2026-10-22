@@ -171,7 +171,13 @@ pub struct Workbench {
     pub(crate) selection_restore: BTreeMap<(String, String), (String, Value)>,
     /// The region each panel last told its producer (a new read of the same region tells nothing).
     pub(crate) routed_selections: BTreeMap<String, Value>,
+    /// Devices driven from outside the workbench, by whom (the Pulse Editor playing on the session's sequencer).
+    pub(crate) device_users: DeviceUsers,
 }
+
+/// v2 DeviceUseCoordinator's other owners: each device driven from outside the workbench, by
+/// whom. Its driver writes it as it takes and leaves the device; a start that claims one is refused.
+pub type DeviceUsers = std::sync::Arc<std::sync::Mutex<BTreeMap<String, String>>>;
 
 /// Every command the workbench answers (the catalogue's workbench part).
 pub const COMMANDS: &[&str] = &[
@@ -201,7 +207,7 @@ impl Workbench {
             // v2 set_deriving(False) when the console is built.
             console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None,
             tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), applied_simulation: None, scan: None, bundles: BTreeMap::new(),
-            selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new() };
+            selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default() };
         let path = workbench.workspace.apparatus();
         if path.is_file() {
             if let Err(error) = workbench.load_apparatus(&path) { workbench.notes.push(error); }
@@ -524,6 +530,9 @@ impl Workbench {
     /// The active run that holds a device instance, if one does (the pulse
     /// editor may not drive a sequencer a run holds).
     pub fn device_claimant(&self, device: &str) -> Option<String> { self.claims_on(device).into_iter().next().map(|claim| claim.run) }
+
+    /// The record an outside driver keeps of the devices it holds (see [`DeviceUsers`]).
+    pub fn device_users(&self) -> DeviceUsers { self.device_users.clone() }
 
     /// A node's run, when it has reached `until` (`ready`, `terminal`, `request`).
     pub fn wait_reached(&self, node: &str, until: &str) -> Option<Value> {
