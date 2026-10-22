@@ -100,3 +100,12 @@ export class Keyed<T extends { root: Element }> {
   }
   get(key: string): T | undefined { return this.views.get(key); }
 }
+
+/** v2 setting_label_width, the one rule every label column is: the widest words' advance in whole Qt px
+ * (QFontMetrics; never less than the words, which are cut where they do not fit), the label trail after
+ * them, never below `minimum` -- in whole device px up. */
+export function labelColumnWidth(advances: readonly number[], minimum = token("--label-min")): number {
+  const q = token("--q");
+  const widest = Math.max(minimum, ...advances.map(advance => Math.max(Math.round(advance / q) * q, advance) + token("--label-trail")));
+  return Math.ceil(widest * devicePixelRatio - 1e-3) / devicePixelRatio;
+}

@@ -105,6 +105,18 @@ v3-only layout lengths have no v2 counterpart. They are scaled the same way:
 card), `--surface-min-h` (240), `--settings-min-w` (340) and `--body-top` (2,
 the card body inset of PanelCardView).
 
+## Alignment
+
+Every view stands on the same few edges; a view with its own number for one of them is a bug.
+
+| edge | the one rule |
+|---|---|
+| label column | `labelColumnWidth` (fluent/dom.ts, setting_label_width): forms (`shareLabelColumn`), a popup's form, Edit data, the info panes |
+| control column | the label column's end: a form's grid, a selection grid's first card, a row of [label, controls] |
+| a bordered card's content | `--card-inset` inside its edge (a card pad from its outer edge): cards, popups, the Setting frame, the SLM frames |
+| text in a field column | `--field-text-inset`: a field's text, a read-only value beside fields, a column heading over fields |
+| a check box's words | `--check-gap` after the box; a row without a box keeps the box's place (Installation's rows, Force rebuild in the state column) |
+
 ## Control mapping
 
 | v2 (zlc_ui) | v3 element | notes |

@@ -106,11 +106,13 @@
   --window-pad: calc(max(1px, round(calc(14px * var(--fluent)), 1px)) * var(--qt));   /* window_pad(1) = section_gap() */
   --window-pad-half: calc(max(1px, round(calc(7px * var(--fluent)), 1px)) * var(--qt)); /* window_pad(0.5) */
   --card-pad: calc(max(1px, round(calc(10px * var(--fluent)), 1px)) * var(--qt)); /* CARD_PAD */
+  --card-inset: calc(var(--card-pad) - var(--edge));                                         /* a bordered card's content: a card pad in from its outer edge, the edge inside it */
   --card-title-pad: calc(max(1px, round(calc(4px * var(--fluent)), 1px)) * var(--qt)); /* CARD_TITLE_PAD */
   --pad-v: calc(max(1px, round(calc(1px * var(--fluent)), 1px)) * var(--qt));     /* PADDING_V */
   --edit-pad-h: calc(max(1px, round(calc(4px * var(--fluent)), 1px)) * var(--qt)); /* EDIT_PADDING_H */
   --qline-margin: calc(2px * var(--qt));                                          /* QLineEditPrivate::horizontalMargin */
-  --field-text-inset: calc(var(--edge) + var(--edit-pad-h) + var(--qline-margin)); /* where a field's text starts */
+  --field-text-pad: calc(var(--edit-pad-h) + var(--qline-margin));               /* a field's text inside its border */
+  --field-text-inset: calc(var(--edge) + var(--field-text-pad));                  /* where a field's text starts: every read-only value in a field column starts here too */
   --elided-room: calc((round(calc(2px * var(--fluent)), 1px) + 1px) * var(--qt));          /* ElidedLabel.room(): scaled_px(2) + 1 beyond its words */
   --data-label-min: calc(max(48px, round(calc(68px * var(--fluent)), 1px)) * var(--qt));       /* the data editor's setting_label_width(minimum=68) */
   --data-label-cap: calc(max(1px, round(calc(224px * var(--fluent)), 1px)) * var(--qt));       /* ... and its cap: past it an axis name elides */
@@ -291,10 +293,8 @@
   --slm-page-pad-v: calc(8px * var(--qt));                 /* the Pattern page: contents margins 16, 8, spacing 6 */
   --slm-page-pad-h: calc(16px * var(--qt));
   --slm-page-gap: calc(6px * var(--qt));
-  --slm-frame-pad: calc(9px * var(--qt));                  /* a child box layout's default margins and spacing, from the outer edge */
   --slm-frame-gap: calc(6px * var(--qt));
-  --slm-layers-pad-v: calc(5px * var(--qt));               /* the layer grid: margins 8, 5; spacing 8, 4 */
-  --slm-layers-pad-h: calc(8px * var(--qt));
+  --slm-layers-pad-v: calc(5px * var(--qt));               /* the layer grid: margins 5 above and below (its sides are a card's); spacing 8, 4 */
   --slm-layers-gap-h: calc(8px * var(--qt));
   --slm-layers-gap-v: calc(4px * var(--qt));
   --slm-size-min-w: calc(76px * var(--qt));                /* the Size combo's minimum width */
@@ -303,7 +303,6 @@
   --slm-wave-gap-h: calc(8px * var(--qt));
   --slm-wave-gap-v: calc(6px * var(--qt));
   --slm-wave-min-w: calc(440px * var(--qt));
-  --slm-popup-pad: calc(20px * var(--qt));                 /* a popup's margins and its form's (10 + 10) */
   --slm-preset-min-w: calc(round(calc(470px * var(--fluent)), 1px) * var(--qt));
   /* show_fluent_popup_for_anchor: a popup is at least scaled_px(minimum_height, minimum=260) tall. */
   --slm-preset-min-h: calc(max(260px, round(calc(360px * var(--fluent)), 1px)) * var(--qt));

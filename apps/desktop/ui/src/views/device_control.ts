@@ -53,7 +53,7 @@ export class DeviceControlView {
     const title = titleRow("Owner: none", [this.refresh.root, this.risk]);
     this.owner = title.querySelector(".heading")!;
     const headings = ["Field", "Current", "Desired", "Device limits", "Live", "Apply", "Status"]
-      .map((words, index) => element("span", `column-heading${index === 1 ? " right" : index === 4 || index === 5 ? " centre" : ""}`, words));
+      .map((words, index) => element("span", `column-heading${index === 1 ? " right" : index === 2 ? " field" : index === 4 || index === 5 ? " centre" : ""}`, words));
     this.table.append(...headings);
     this.root.append(title, this.reason, this.table, this.strip.root);
   }

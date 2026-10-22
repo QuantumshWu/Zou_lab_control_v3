@@ -1,6 +1,6 @@
 import { command } from "./button.js";
 import { FlowGraph, type Graph } from "./flow_graph.js";
-import { element, setText, token } from "./dom.js";
+import { element, labelColumnWidth, setText, token } from "./dom.js";
 import { wordsWidth } from "./ink.js";
 import { elideMiddle, fontOf, measurer } from "./elide.js";
 import { Menu } from "./menu.js";
@@ -244,18 +244,11 @@ export class PathEdit {
   }
 }
 
-/** setting_label_width: the widest of `labels` (QFontMetrics.horizontalAdvance, a
- * whole Qt px) plus the label trail, never below the setting label minimum; 0
- * when there are none. */
+/** The pane's label column (setting_label_width) for the names its rows may carry; 0 when there are none. */
 function labelColumn(labels: readonly string[]): number {
   if (!labels.length) return 0;
-  const context = document.createElement("canvas").getContext("2d");
-  if (!context) return 0;
-  const style = getComputedStyle(document.body);
-  context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-  const q = token("--q");
-  const widest = Math.max(...labels.map(text => Math.round(context.measureText(text).width / q) * q));
-  return Math.max(widest + token("--label-trail"), token("--label-min"));
+  const advance = measurer(fontOf(getComputedStyle(document.body)));
+  return labelColumnWidth(labels.map(advance));
 }
 
 /** InfoPane._apply_pane_width: v2's pane is as wide as its label column and

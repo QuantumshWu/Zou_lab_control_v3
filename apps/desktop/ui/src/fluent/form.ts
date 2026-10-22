@@ -1,4 +1,4 @@
-import { element, token, type Value } from "./dom.js";
+import { element, labelColumnWidth, token, type Value } from "./dom.js";
 import { fontOf, measurer, setMiddle, wholeText } from "./elide.js";
 import { comboFace, hintWidest } from "./combo.js";
 import { SpinBox, decimals } from "./spin.js";
@@ -528,21 +528,13 @@ export function alignUnitPickers(host: HTMLElement): void {
 /** One label column for several forms (share_label_column): as wide as the
  * widest label any of them has, never below the setting label minimum. */
 export function shareLabelColumn(host: HTMLElement, floor = 0): void {
-  let widest = 0;
-  const q = token("--q");
   // A `.label-column` word stands in the column outside a form ("By hand");
   // words that come and go (a pulse's API values, `[data-label-room]`) get
   // the room their owner keeps for them (`floor`) and never set it.
-  for (const label of host.querySelectorAll<HTMLElement>(".form .field-label, .label-column")) {
-    const words = wholeText(label);
-    if (!words || !label.offsetParent || label.closest("[data-label-room]")) continue;
-    // The whole words' advance in whole Qt px (QFontMetrics; not what an elided label shows), never
-    // less than the words themselves (they are cut where they do not fit), plus the label's trail (padding-right).
-    const style = getComputedStyle(label), advance = measurer(fontOf(style))(words);
-    widest = Math.max(widest, Math.max(Math.round(advance / q) * q, advance) + (parseFloat(style.paddingRight) || 0));
-  }
-  widest = widest && Math.max(widest, floor, token("--label-min"));
-  const width = widest ? `${Math.ceil(widest * devicePixelRatio - 1e-3) / devicePixelRatio}px` : "";
+  const advances = [...host.querySelectorAll<HTMLElement>(".form .field-label, .label-column")]
+    .filter(label => wholeText(label) && label.offsetParent && !label.closest("[data-label-room]"))
+    .map(label => measurer(fontOf(getComputedStyle(label)))(wholeText(label)));
+  const width = advances.length ? `${labelColumnWidth(advances, Math.max(floor, token("--label-min")))}px` : "";
   if (host.style.getPropertyValue("--label-width") !== width) {
     if (width) host.style.setProperty("--label-width", width); else host.style.removeProperty("--label-width");
   }

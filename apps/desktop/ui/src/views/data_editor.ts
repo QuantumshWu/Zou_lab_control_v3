@@ -3,7 +3,7 @@
 // axis's values, and the Data card with the value table -- and the copy's
 // own commands under both.  Every Dataset rule is the host's (manual.rs):
 // this page shows its projection and sends the operator's intents.
-import { ComboBox, Field, GroupBox, Segmented, SpinBox, command, element, note, setText, summary, switchButton, setChecked, token, wholeText, type Value } from "../fluent/index.js";
+import { ComboBox, Field, GroupBox, Segmented, SpinBox, command, element, fontOf, labelColumnWidth, measurer, note, setText, summary, switchButton, setChecked, token, wholeText, type Value } from "../fluent/index.js";
 
 type Axis = { id: string; name: string; size: number; unit: string; domain: string; domain_label: string };
 type AxisRow = { axis_id: string; name: string; size: number; unit: string; mode: "rows" | "columns" | "scope"; index: number; scope_label: string };
@@ -548,14 +548,10 @@ export class DataEditorView {
 
   /** v2 _set_label_width: one column for the three cards, wide enough for every fixed label and axis row, capped. */
   private shareLabels(): void {
-    measure ??= document.createElement("canvas").getContext("2d");
-    if (!measure) return;
-    measure.font = getComputedStyle(this.root).font;
-    const trail = token("--label-trail");
-    const width = (labels: string[]): number => Math.max(token("--data-label-min"), ...labels.map(label => measure!.measureText(label).width + trail));
+    const advance = measurer(fontOf(getComputedStyle(this.root)));
+    const width = (labels: string[]): number => labelColumnWidth(labels.map(advance), token("--data-label-min"));
     const axisLabels = [...this.viewFields.values()].map(field => wholeText(field.root.querySelector<HTMLElement>(".field-label")!));
-    const column = Math.min(width([...STATIC_LABELS, ...axisLabels]), Math.max(width(STATIC_LABELS), token("--data-label-cap")));
-    const value = `${Math.ceil(column * devicePixelRatio) / devicePixelRatio}px`;
+    const value = `${Math.min(width([...STATIC_LABELS, ...axisLabels]), Math.max(width(STATIC_LABELS), token("--data-label-cap")))}px`;
     if (this.root.style.getPropertyValue("--label-width") !== value) this.root.style.setProperty("--label-width", value);
   }
 }

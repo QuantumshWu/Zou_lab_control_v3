@@ -107,8 +107,9 @@ class InstallationView implements View {
       this.cards.set(key, card);
       this.left.append(card.root);
     }
-    const actions = element("div", "list-row install-actions");
-    actions.append(...this.fpga.map(([, button]) => button.root), element("span", "spacer"), this.force);
+    const actions = element("div", "list-row install-actions"), steps = element("div", "install-steps");
+    steps.append(...this.fpga.map(([, button]) => button.root));
+    actions.append(steps, this.force);
     this.cards.get("fpga")!.body.append(actions);
     // A developer's toolchain: under Advanced, folded until asked for.
     this.disclosure.type = "button";

@@ -70,7 +70,7 @@
 .derive-inputs > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-bottom: var(--cap-lift); }
 .derive-inputs-form .field-label { align-self: start; }
 .derive-cards { display: flex; flex-direction: column; gap: var(--row-gap); }
-.derive-card { padding: calc(var(--card-pad) - var(--edge)); display: flex; flex-direction: column; gap: calc(var(--row-gap) / 2); }
+.derive-card { padding: var(--card-inset); display: flex; flex-direction: column; gap: calc(var(--row-gap) / 2); }
 /* Every line of every card on one column set; the operand column starts on
  * the page's control column (the lead takes what the label column leaves). */
 .derive-lines {

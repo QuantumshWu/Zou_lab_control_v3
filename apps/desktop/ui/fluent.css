@@ -129,7 +129,7 @@ input {
   width: 100%; min-width: 0; height: var(--control); margin: 0;
   border: var(--edge) solid var(--placeholder); border-radius: var(--radius);
   background: var(--surface); color: var(--text);
-  padding: var(--pad-v) calc(var(--edit-pad-h) + var(--qline-margin)) calc(var(--pad-v) + var(--cap-lift));
+  padding: var(--pad-v) var(--field-text-pad) calc(var(--pad-v) + var(--cap-lift));
   -webkit-user-select: text; user-select: text; cursor: text;
 }
 input:focus { border-color: var(--accent); }
@@ -153,7 +153,7 @@ select {
   width: 100%; min-width: var(--combo-min, 0px); height: var(--control); margin: 0;
   border: var(--edge) solid var(--placeholder); border-radius: var(--radius);
   background: var(--surface); color: var(--text);
-  padding: 0 calc(var(--combo-width) + var(--edge) + var(--edit-pad-h)) var(--cap-lift) calc(var(--edit-pad-h) + var(--qline-margin));
+  padding: 0 calc(var(--combo-width) + var(--edge) + var(--edit-pad-h)) var(--cap-lift) var(--field-text-pad);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: default;
 }
 /* The field says its states as an edit does: the accent edge under the
@@ -353,7 +353,7 @@ select.unit-picker { flex: none; width: auto; field-sizing: content; }
 .field-control.capped > input.number, .field-control.capped > .spin { flex: 1 1 0; }
 .field-control.capped::after { content: ""; flex: 1 1 0; margin-left: calc(-1 * var(--row-gap)); }
 /* An edit's frame and padding are its flex floor: the stretch has the same, so the halves are even. */
-.field-control.capped:has(> input.number)::after { padding-left: calc(2 * (var(--edge) + var(--edit-pad-h) + var(--qline-margin))); }
+.field-control.capped:has(> input.number)::after { padding-left: calc(2 * var(--field-text-inset)); }
 /* A form's number edge is its widest box's (share_label_column number_edge_hint):
  * only a form with a decimal box reserves the step chip's room. */
 :is(.config-column, .logic-editor-body, .settings-body):not(:has(.spin.decimal)) { --number-cap: var(--number-cap-plain); }
@@ -437,7 +437,7 @@ select.unit-picker { flex: none; width: auto; field-sizing: content; }
 .title-row .heading { flex: 0 1 auto; font-weight: var(--heading-weight); }
 .title-row .summary-text { flex: 1; text-align: right; color: var(--muted-ink); padding-bottom: var(--cap-lift); }
 /* The card's margins count from its outer edge, the painted edge inside them. */
-.group { display: flex; flex-direction: column; gap: var(--row-gap); padding: calc(var(--card-pad) - var(--edge)); min-width: 0; }
+.group { display: flex; flex-direction: column; gap: var(--row-gap); padding: var(--card-inset); min-width: 0; }
 .group.selected { background: var(--accent-tint); }
 .group-body { display: flex; flex-direction: column; gap: var(--row-gap); min-width: 0; }
 .group-body:empty { display: none; }
@@ -651,7 +651,7 @@ dialog.dialog::backdrop { background: transparent; }
 .check-combo {
   position: relative; justify-content: flex-start; width: 100%; min-width: 0; height: var(--control);
   border: var(--edge) solid var(--placeholder); border-radius: var(--radius); background: var(--surface); color: var(--text);
-  padding: 0 calc(var(--combo-width) + var(--edge) + var(--edit-pad-h)) var(--cap-lift) calc(var(--edit-pad-h) + var(--qline-margin));
+  padding: 0 calc(var(--combo-width) + var(--edge) + var(--edit-pad-h)) var(--cap-lift) var(--field-text-pad);
 }
 .check-combo:hover, .check-combo:active, .check-combo.open { background: var(--surface); border-color: var(--accent); }
 .check-combo:disabled { background: var(--bg); color: var(--disabled-ink); border-color: var(--placeholder); }
