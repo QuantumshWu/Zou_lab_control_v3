@@ -207,6 +207,13 @@ fn pulse_unsaved(state: &Value) -> Vec<&'static str> {
 }
 
 /// Whether any document shows `panel`.
+/// A run taking or leaving the session's sequencer is the Pulse Editor's news on this turn,
+/// not at its next poll (its On Pulse is enabled the moment the board is free).
+fn tell_editor_claims(pulse: &mut pulse_host::PulseHost, workbench: &zlc_workbench::Workbench) {
+    let claimant = pulse.apparatus_device().and_then(|device| workbench.device_claimant(&device));
+    if pulse.editor.set_claimed_by(claimant) { pulse.editor.poll(); pulse.dispatch(); }
+}
+
 /// A pointer resting or leaving, no button held: it only says where the pointer is.
 fn hovering(command: &Value) -> bool {
     command["action"] == "pointer" && (command["event"] == "leave" || (command["event"] == "move" && command["button"].is_null()
@@ -557,6 +564,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut pulse = pulse_host::PulseHost::new(Arc::new(move |event| {
         if let Ok(proxy) = pulse_proxy.lock() { let _ = proxy.send_event(AppEvent::Pulse(event)); }
     }), safe_actions.clone(), plugins.as_ref().ok().cloned(), &workbench.workspace().pulses());
+    pulse.users = workbench.device_users();
     // A pulse document chosen as a node's workspace resource resolves to its
     // description (PULSE_V3 `pulse_describe`), read by the one pulse codec.
     workbench.add_resource_resolver("zlc.pulse/", Arc::new(|path| zlc_pulse::run::describe_document(path).map_err(|error| error.to_string())
@@ -915,6 +923,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             _ => { workbench_host::run(&mut workbench, &builtin, &action, &remote::parameters(&command), &origin, request, &mut host); None }
                         };
                         if workbench.on_runtime(&mut host) { workbench_host::deliver(&mut workbench, &builtin, &mut host); }
+                        tell_editor_claims(&mut pulse, &workbench);
                         // A changed Overlay redraws the picture it is of, data or not.
                         if action == "set_panel_overlay" { pending.store(true, Ordering::Release); }
                         accepted["acquisition"] = builtin.acquisition();
@@ -1750,6 +1759,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
                     if !closing { windows.send(&accepted)?; }
+                    tell_editor_claims(&mut pulse, &workbench);
                 }
                 // v2 _route_exact_panel_selection: an Edit's region is its panel's.
                 Event::UserEvent(AppEvent::Selection(note)) => {
@@ -1827,8 +1837,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 },
                 Event::UserEvent(AppEvent::PulsePoll) => {
                     if !closing {
-                        let claimant = pulse.apparatus_device().and_then(|device| workbench.device_claimant(&device));
-                        pulse.editor.set_claimed_by(claimant);
+                        tell_editor_claims(&mut pulse, &workbench);
                         pulse.editor.poll();
                         pulse.dispatch();
                     }

@@ -681,6 +681,26 @@ mod tests {
         assert!(workbench.file_dialog("save_image").is_none());
     }
 
+    /// v2 DeviceUseBusy: while a device is driven from outside (the Pulse Editor's own pulse on the
+    /// sequencer), a start that claims it is refused and stops nothing; once it is free, it starts.
+    #[test]
+    fn a_start_is_refused_while_an_outside_driver_holds_its_device() {
+        let root = scratch("outside_use");
+        let (mut workbench, calls) = workbench(&root);
+        let mut host = FakeHost::default();
+        apply(&mut workbench, &mut host, "add_device", json!({"type_id": "camera.virtual_mot", "instance_id": "mot_camera"})).unwrap();
+        apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+        workbench.on_event(Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
+        workbench.on_event(Event::Opened { instance: "camera_measurement".into(), working_point: Value::Null }, &mut host);
+        workbench.device_users().lock().unwrap().insert("mot_camera".into(), "PulseGUI".into());
+        assert_eq!(apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap_err(), "device is in use by PulseGUI");
+        assert!(calls.borrow().1.is_empty(), "nothing was launched");
+        workbench.device_users().lock().unwrap().clear();
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
+        assert_eq!(calls.borrow().1.len(), 1, "launched once the device is free");
+    }
+
     /// v2 _replace_board: Clear or Open while a node runs stops it, says so, and replaces the
     /// board once it has stopped (whatever its outcome); a newer request takes the waiting one's place.
     #[test]

@@ -121,6 +121,8 @@ pub struct BoardLink {
     pub stopping: bool,
     pub operation: u64,
     pub finite_run: Option<u64>,
+    /// This editor's own FIRE plays (v2 `_drive_lease`): from its drive until the board stops.
+    pub driving: bool,
     /// The run that claims the board, when one does.
     pub claimed_by: Option<String>,
     pub held_point: Option<usize>,
@@ -262,7 +264,8 @@ impl Editor {
     pub fn connection_locked(&self) -> bool { self.link.locked.is_some() }
 
     /// The run that claims the sequencer, which the editor then may not drive.
-    pub fn set_claimed_by(&mut self, run: Option<String>) { self.link.claimed_by = run; }
+    /// The run that claims the board now; true when that changed.
+    pub fn set_claimed_by(&mut self, run: Option<String>) -> bool { std::mem::replace(&mut self.link.claimed_by, run) != self.link.claimed_by }
 
     // ------------------------------------------------------------- the attached board
     fn adopt(&mut self, board: Arc<Board>, state: BoardState, mode: &str, endpoint: &str) {
@@ -302,6 +305,7 @@ impl Editor {
         self.link.board_step_ns = None;
         self.link.state = BoardState::default();
         self.link.finite_run = None;
+        self.link.driving = false;
         self.revision += 1;
     }
 
@@ -382,6 +386,8 @@ impl Editor {
         let finite = run_repeats > 0 && sweeps > 0;
         let (operation, revision) = (self.link.operation + 1, self.revision);
         self.link.finite_run = None;
+        // v2 acquires its drive at the command, before the board is touched.
+        self.link.driving = true;
         self.submit_device("Starting...", Box::new(move || {
             let compiled = compile_sequence(&source, &geometry, clock).map(Arc::new).map_err(|error| error.message);
             let result = compiled.and_then(|program| drive(&board, program, source.clone(), rows.clone(), run_repeats, sweeps, false));
@@ -418,6 +424,7 @@ impl Editor {
         let (geometry, clock) = self.compiler_target().map_err(|e| e.message)?;
         let (operation, revision) = (self.link.operation + 1, self.revision);
         self.link.finite_run = None;
+        self.link.driving = true;
         self.submit_device("Holding...", Box::new(move || {
             let held = point.unwrap_or_else(|| board.cursor().ok().flatten().map_or(0, |cursor| cursor as usize % count.max(1)));
             let resolved = resolve_scan_point(&source, Some(&effective[held])).map(Arc::new);
@@ -510,7 +517,14 @@ impl Editor {
         self.execution_sequence().is_ok_and(|source| state.run_repeats == source.run_repeats && state.scan_repeats == sweeps)
     }
 
-    fn adopt_board_state(&mut self, state: BoardState) { self.link.state = state; }
+    fn adopt_board_state(&mut self, state: BoardState) {
+        if !state.firing { self.link.driving = false; }
+        self.link.state = state;
+    }
+
+    /// v2 `_drive_lease`: the board plays this editor's own pulse, so no run may take it
+    /// ("device is in use by PulseGUI") until Stop or its finite run ends.
+    pub fn drives(&self) -> bool { self.link.driving && self.link.claimed_by.is_none() }
 
     /// One lane's answer, applied if still current.
     pub fn deliver(&mut self, outcome: Outcome) {
