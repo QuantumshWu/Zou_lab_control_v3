@@ -234,6 +234,7 @@ def _build(
     *,
     camera: object = None,
     camera_key: str = "",
+    sequencer_key: str = "",
     pulse_resource: object = None,
     save_figure_artifact: object = None,
     **values: object,
@@ -263,8 +264,7 @@ def _build(
         request=CalibrationRequest(
             **analysis,
             camera_key=camera_key,
-            # The core's pulse board, driven through its catalogue commands.
-            sequencer_key="sequencer",
+            sequencer_key=sequencer_key,
             pulse_template=Path(str(pulse["path"])).name,
             repeats=int(authored["repeats"]),
             reference_exposure_seconds=float(

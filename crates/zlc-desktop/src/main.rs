@@ -209,9 +209,11 @@ fn pulse_unsaved(state: &Value) -> Vec<&'static str> {
 /// Whether any document shows `panel`.
 /// A run taking or leaving the session's sequencer is the Pulse Editor's news on this turn,
 /// not at its next poll (its On Pulse is enabled the moment the board is free).
+/// A run that has ended lets the board go on this turn too (a FIRE it left unreported goes SAFE).
 fn tell_editor_claims(pulse: &mut pulse_host::PulseHost, workbench: &zlc_workbench::Workbench) {
     let claimant = pulse.apparatus_device().and_then(|device| workbench.device_claimant(&device));
     if pulse.editor.set_claimed_by(claimant) { pulse.editor.poll(); pulse.dispatch(); }
+    pulse.settle_runs(|run| !workbench.run_claims(run).is_empty());
 }
 
 /// A pointer resting or leaving, no button held: it only says where the pointer is.
@@ -1788,11 +1790,12 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     let mut state = json!({"type": "state"});
                     match event {
                         pulse_host::PulseEvent::Outcome(outcome) => { pulse.editor.deliver(outcome); pulse.dispatch(); }
-                        pulse_host::PulseEvent::Reply { request, result, touched } => {
+                        pulse_host::PulseEvent::Reply { request, result, touched, run } => {
                             state["request"] = json!(request);
                             match result { Ok(value) => state["result"] = value, Err(error) => state["error"] = json!(error) }
-                            pulse.replied(touched);
+                            pulse.replied(touched, run);
                         }
+                        pulse_host::PulseEvent::Touched => pulse.replied(true, None),
                         pulse_host::PulseEvent::Opened { instance, result } => {
                             let event = match pulse.device_opened(&instance, &workbench.device_label(&instance), result) {
                                 Ok(point) => zlc_workbench::Event::Opened { instance, working_point: point },

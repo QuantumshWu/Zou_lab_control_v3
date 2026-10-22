@@ -101,6 +101,7 @@ def _build(
     slm: object,
     slm_key: str,
     calibration_path: object,
+    sequencer_key: str = "",
     science_context_path: object,
     pulse_resource: object,
     end_target_path: object = None,
@@ -127,6 +128,7 @@ def _build(
     return SlmRearrangementTask(
         camera=camera,
         camera_key=camera_key,
+        sequencer_key=sequencer_key,
         slm=slm,
         slm_key=slm_key,
         calibration=calibration.value,

@@ -40,6 +40,10 @@ pub const CONNECTION_VIRTUAL: &str = "virtual";
 pub const CONNECTION_REMOTE: &str = "remote";
 pub const CONNECTION_OFFLINE: &str = "offline";
 pub const CONNECTION_GIVEN: &str = "given";
+/// The message kind of Sync's question before the board's pulse replaces
+/// unsaved work (v2 confirm_pulse_discard): the window asks it, and a yes is
+/// `pulse_sync {discard_changes: true}`.
+pub const SYNC_DISCARD: &str = "sync_discard";
 pub use zlc_pulse::codec::{CONFIG_VALUES_DIRECTORY, CURRENT_CONFIG_VALUES};
 
 /// The deployed board as this computer's files describe it: what a pulse is
@@ -157,6 +161,12 @@ impl Editor {
         self.last_warning = text.clone();
         self.messages += 1;
         self.message = Some(Message { id: self.messages, kind: "warning", text: sentence(&text) });
+    }
+
+    /// Sync's question (`SYNC_DISCARD`), for the window to ask.
+    pub(crate) fn ask_sync_discard(&mut self) {
+        self.messages += 1;
+        self.message = Some(Message { id: self.messages, kind: SYNC_DISCARD, text: "Discard unsaved Pulse edits?".into() });
     }
 
     pub(crate) fn done(&mut self, text: impl Into<String>) {
@@ -594,7 +604,7 @@ impl Editor {
     // ------------------------------------------------------------- Value Config
     pub(crate) fn config_dirty(&self) -> bool { self.config_rows != self.config_saved_rows }
 
-    fn rows_of(values: &ConfigValues) -> Vec<[String; 3]> {
+    pub(crate) fn rows_of(values: &ConfigValues) -> Vec<[String; 3]> {
         values.iter().map(|(key, (value, unit))| [key.clone(), number(*value), unit.clone()]).collect()
     }
 
@@ -1280,15 +1290,37 @@ impl Editor {
         if !rows.is_empty() && !columns.is_empty() && sequence.run_repeats == 0 {
             slots.push_str(" Repeat on Edit is 0, so On Pulse stays at the first scan point until Stop Pulse.");
         }
+        // v2 _render_scan_progress: while the board plays a table and the page is shown, the line
+        // says where it is (a held row keeps its own line); otherwise it is the page's own words.
+        let polling = self.link.state.firing && !rows.is_empty() && self.page == SCAN_PAGE;
+        let (progress_text, progress_word) = match (polling, self.scan_progress_line()) {
+            (true, Some(line)) => (line, "task"),
+            (true, None) if self.link.held_point.is_none() => (String::new(), "task"),
+            _ => (self.scan_progress.0.clone(), self.scan_progress.1),
+        };
         json!({
             "slots_text": slots, "bindings": self.binding_records(), "table_text": table_text,
             "table_note": if stale { "Scan fields or units changed. Generate or open the scan table again." }
                           else if rows.is_empty() { "No scan table yet: write a program and press Run." } else { "" },
             "source_text": self.state.section.scan_source, "source_dirty": self.state.section.scan_source_dirty || stale,
-            "repeats": self.state.section.scan_repeats, "busy": self.scan_running, "progress_text": self.scan_progress.0,
-            "progress_word": self.scan_progress.1, "progress_polling": self.link.state.firing && !rows.is_empty() && self.page == SCAN_PAGE,
+            "repeats": self.state.section.scan_repeats, "busy": self.scan_running, "progress_text": progress_text,
+            "progress_word": progress_word, "progress_polling": polling,
             "points": rows.len(),
         })
+    }
+
+    /// "Scan: point i / N  field = value, ...": the board's row of the table it
+    /// was loaded with, while it still plays that program (v2 _render_scan_progress).
+    fn scan_progress_line(&self) -> Option<String> {
+        let state = &self.link.state;
+        let (digest, names, rows) = self.link.applied_scan.as_ref()?;
+        let cursor = state.cursor?;
+        if !state.firing || *digest != state.applied_digest || rows.is_empty() { return None; }
+        let point = cursor as usize % rows.len();
+        let values = names.iter().zip(&rows[point]).map(|(name, text)| format!("{name} = {text}")).collect::<Vec<_>>().join(", ");
+        let count = rows.len().to_string();
+        Some(format!("Scan: point {} / {count}{}", crate::text::figure_padded(&(point + 1).to_string(), &count),
+                     if values.is_empty() { String::new() } else { format!("  {values}") }))
     }
 
     fn config_page(&self) -> Value {
@@ -1549,7 +1581,7 @@ impl Editor {
             "pulse_hold" => self.hold(None),
             "pulse_step" => self.hold(Some(arg(args, "delta")?.as_i64().ok_or("delta must be an integer")?)),
             "pulse_stop" => self.stop(),
-            "pulse_sync" => self.sync(),
+            "pulse_sync" => self.sync(flag(args, "discard_changes")),
             "pulse_validate" => self.validate(),
             other => Err(format!("{other} is not a Pulse Editor command")),
         }

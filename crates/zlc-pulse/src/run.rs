@@ -11,7 +11,7 @@ use crate::binding::{api_bindings_in_period_order, apply_config_values, bracket_
 use crate::board::{Board, archive_snapshot};
 use crate::codec::{ConfigValues, read_pulse_document};
 use crate::compile::{CompiledProgram, compile_sequence};
-use crate::device::DoneReport;
+use crate::device::{AppliedState, DoneReport};
 use crate::error::{Error, Kind, Result, repr, value_error};
 use crate::json::Json;
 use crate::model::{FieldKind, FieldRef, Sequence};
@@ -194,29 +194,69 @@ fn played_json(table: &ScanRows) -> Json {
                       ("rows", Json::Array(table.rows.iter().map(|row| Json::Array(row.iter().map(|v| Json::Float(*v)).collect())).collect()))])
 }
 
+/// Plan, ABI check, compile and LOAD one read document.
+fn load_plan(board: &Board, sequence: &Sequence, api_values: &ApiValues, scan: Option<&ScanRows>) -> Result<RunPlan> {
+    let description = board.description();
+    let plan = plan_run(sequence, api_values, scan, &description.geometry)?;
+    if plan.resolved.target.abi_fingerprint() != description.target.abi_fingerprint() {
+        return value_error("pulse target ABI is incompatible with the connected board");
+    }
+    let program = Arc::new(compile_sequence(&plan.resolved, &description.geometry, description.clock_hz)?);
+    board.load(program, Some(plan.resolved.clone()), plan.rows.clone())?;
+    Ok(plan)
+}
+
+/// What the board holds or plays as a receipt: the command id of a FIRE, the
+/// archive snapshot, `timing` of the program (Config filled) and, from the
+/// plan, the API values (fields' units) and the rows as played.
+fn receipt(board: &Board, applied: &AppliedState, command_id: Option<u32>, plan: Option<&RunPlan>) -> Result<Json> {
+    let source = applied.source.clone().or_else(|| plan.map(|plan| plan.resolved.clone()))
+        .ok_or_else(|| Error::new(Kind::Runtime, "the board holds a program without its pulse"))?;
+    let timing = timing_json(&source, &applied.program, applied.rows.first().map_or(&[], Vec::as_slice))?;
+    let mut receipt = Vec::new();
+    if let Some(command_id) = command_id { receipt.push(("command_id", int(command_id))); }
+    if let Some(plan) = plan {
+        receipt.push(("api_values", Json::Object(plan.values.iter().map(|(key, value)| (key.clone(), Json::Float(*value))).collect())));
+    }
+    receipt.extend([("applied", archive_snapshot(board, applied)?), ("timing", timing)]);
+    if let Some(played) = plan.and_then(|plan| plan.played.as_ref()) { receipt.push(("scan", played_json(played))); }
+    Ok(Json::object(receipt))
+}
+
 /// `pulse_run`: plan, ABI check, compile, load and fire one document; the
 /// receipt is the FIRE's command id, the API values played (fields' units),
 /// the archive snapshot, `timing` of the program fired (Config filled) and,
 /// with a table, the rows as played.
 pub fn run_document(board: &Board, path: &Path, api_values: &ApiValues, scan: Option<&ScanRows>, run_repeats: u64, scan_repeats: u64) -> Result<Json> {
     let (_path, sequence) = read_document(path)?;
-    let description = board.description();
-    let plan = plan_run(&sequence, api_values, scan, &description.geometry)?;
-    if plan.resolved.target.abi_fingerprint() != description.target.abi_fingerprint() {
-        return value_error("pulse target ABI is incompatible with the connected board");
-    }
-    let program = Arc::new(compile_sequence(&plan.resolved, &description.geometry, description.clock_hz)?);
-    board.load(program, Some(plan.resolved.clone()), plan.rows.clone())?;
+    run_sequence(board, &sequence, api_values, scan, run_repeats, scan_repeats)
+}
+
+/// [`run_document`] of a document already read (a run's pinned pulse).
+pub fn run_sequence(board: &Board, sequence: &Sequence, api_values: &ApiValues, scan: Option<&ScanRows>, run_repeats: u64, scan_repeats: u64)
+    -> Result<Json> {
+    let plan = load_plan(board, sequence, api_values, scan)?;
     let (applied, command_id) = board.fire(run_repeats, scan_repeats)?;
-    let source = applied.source.clone().unwrap_or_else(|| plan.resolved.clone());
-    let timing = timing_json(&source, &applied.program, applied.rows.first().map_or(&[], Vec::as_slice))?;
-    let mut receipt = vec![
-        ("command_id", int(command_id)),
-        ("api_values", Json::Object(plan.values.iter().map(|(key, value)| (key.clone(), Json::Float(*value))).collect())),
-        ("applied", archive_snapshot(board, &applied)?), ("timing", timing),
-    ];
-    if let Some(played) = &plan.played { receipt.push(("scan", played_json(played))); }
-    Ok(Json::object(receipt))
+    receipt(board, &applied, Some(command_id), Some(&plan))
+}
+
+/// `pulse_run` stage `load` (v2 `arm_sequencer`): the document LOADed and not
+/// fired; the receipt has no command id, `applied` is the LOAD's.
+pub fn load_sequence(board: &Board, sequence: &Sequence, api_values: &ApiValues, scan: Option<&ScanRows>) -> Result<Json> {
+    let plan = load_plan(board, sequence, api_values, scan)?;
+    let applied = board.applied()?.ok_or_else(|| Error::new(Kind::Runtime, "the board reports no LOAD"))?;
+    receipt(board, &applied, None, Some(&plan))
+}
+
+/// `pulse_run` stage `fire`: FIRE what a LOAD put on the board, only while the
+/// board still holds that program (`loaded`: its digest).
+pub fn fire_loaded(board: &Board, loaded: &str, run_repeats: u64, scan_repeats: u64) -> Result<Json> {
+    let held = board.applied()?.map(|applied| applied.program.digest());
+    if held.as_deref() != Some(loaded) {
+        return Err(Error::new(Kind::Runtime, "the board no longer holds the pulse this run loaded; load it again"));
+    }
+    let (applied, command_id) = board.fire(run_repeats, scan_repeats)?;
+    receipt(board, &applied, Some(command_id), None)
 }
 
 /// `pulse_wait_done`'s answer: a report's words, or not done yet.

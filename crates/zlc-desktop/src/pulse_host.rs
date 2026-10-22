@@ -6,6 +6,7 @@
 //! a plugin run's pulse commands are held to the run's claims, and the
 //! sequencer apparatus devices (`sequencer.virtual|hardware|local`) are
 //! native: opening one attaches the board the editor and the runs share.
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -18,9 +19,10 @@ use zlc_plot::fit::FitEngine;
 use zlc_plot::interaction::gesture::InteractionDefaults;
 use zlc_plot::render::panel::NativeRendererFactory;
 use zlc_plot::session::{EngineFitLayer, PlotSession, SessionServices};
-use zlc_pulse::board::{Board, World};
-use zlc_pulse::run::{ScanAxes, ScanRows, describe_document, done_json, estimate_document, run_document};
+use zlc_pulse::board::{Board, Fate, World};
+use zlc_pulse::run::{ScanAxes, ScanRows, describe_document, done_json, estimate_document, fire_loaded, load_sequence, read_document, run_sequence};
 use zlc_pulse::json::Json;
+use zlc_pulse::model::Sequence;
 use zlc_pulse::scan::ScanTable;
 use zlc_pulse::transport::Event;
 use zlc_pulse_editor::editor::{Deployed, Editor};
@@ -38,8 +40,10 @@ pub const SAFE_OUTPUT: &str = "pulse-streamer";
 /// What a lane or a worker answers on the window's turn.
 pub enum PulseEvent {
     Outcome(Outcome),
-    /// A command answered later (a run, a completion wait).
-    Reply { request: u64, result: Result<Value, String>, touched: bool },
+    /// A command answered later (a run, a completion wait); `run`: what a run's pulse_run leaves it holding.
+    Reply { request: u64, result: Result<Value, String>, touched: bool, run: Option<RunReply> },
+    /// Someone else drove the board: the editor asks it again.
+    Touched,
     /// A native sequencer device opened (or did not).
     Opened { instance: String, result: Result<(Arc<Board>, Option<Served>), String> },
     Closed { instance: String, error: Option<String> },
@@ -82,6 +86,51 @@ impl World for PluginWorld {
 
 /// How a command was answered.
 pub enum Handled { Now(Result<Value, String>), Later }
+
+/// What one of a run's `pulse_run`s leaves the run holding: the document it
+/// read (pinned at the first), the FIRE it sent, the program a `load` stage
+/// put on the board (its digest).
+pub struct RunReply { run: String, pinned: Option<(PathBuf, Arc<Sequence>)>, fired: Option<u32>, loaded: Option<String> }
+
+/// A plugin run's use of the board: each pulse document as its first fire read
+/// it (a later fire of a changed file is refused: a run's record names one
+/// pulse), the FIRE it sent last, the program its `load` stage put on the board,
+/// and its `pulse_run`s still on the lane.
+#[derive(Default)]
+struct RunUse { pinned: BTreeMap<PathBuf, Arc<Sequence>>, fire: Option<u32>, loaded: Option<String>, in_flight: usize, ended: bool }
+
+/// The words a refused fire of a changed pulse file says (a node ends its batch on them).
+pub const PULSE_CHANGED: &str = "changed during this run";
+
+/// One `pulse_run` stage of a run (or a client): `load` (LOAD only, v2
+/// `arm_sequencer`), `fire` (FIRE what that LOAD put on the board) or both.
+fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Sequence>, loaded: Option<&str>, values: &[(String, (f64, String))],
+        scan: Option<&ScanRows>, runs: u64, sweeps: u64) -> (Result<Value, String>, Option<(PathBuf, Arc<Sequence>)>, Option<u32>, Option<String>) {
+    let fired = |receipt: &Json| receipt.get("command_id").and_then(Json::as_int).map(|id| id as u32);
+    if stage == "fire" {
+        let Some(loaded) = loaded else { return (Err("stage fire plays what this run's stage load put on the board; load it first".into()), None, None, None) };
+        return match fire_loaded(board, loaded, runs, sweeps) {
+            Ok(receipt) => { let id = fired(&receipt); (Ok(to_value(&receipt)), None, id, None) }
+            Err(error) => (Err(error.message), None, None, None),
+        };
+    }
+    let (path, sequence) = match read_document(document) { Ok(read) => read, Err(error) => return (Err(error.message), None, None, None) };
+    if pinned.is_some_and(|pinned| *pinned != sequence) {
+        let name = path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
+        return (Err(format!("the pulse {name} {PULSE_CHANGED}: the run's record names the pulse it began with, so the changed file is not played; \
+                             start the run again to play it")), None, None, None);
+    }
+    let played = if stage == "load" { load_sequence(board, &sequence, values, scan) } else { run_sequence(board, &sequence, values, scan, runs, sweeps) };
+    match played {
+        Err(error) => (Err(error.message), None, None, None),
+        Ok(receipt) => {
+            let digest = (stage == "load").then(|| receipt.get("applied").and_then(|applied| applied.get("program"))
+                .and_then(|program| program.get("digest")).and_then(Json::as_str).map(str::to_owned)).flatten();
+            let id = fired(&receipt);
+            (Ok(to_value(&receipt)), Some((path, Arc::new(sequence))), id, digest)
+        }
+    }
+}
 
 /// The apparatus device the board is: its instance, a local server child, and for the virtual
 /// board the plugin instance of its world side (line D's simulation.board, simulation group).
@@ -139,6 +188,8 @@ pub struct PulseHost {
     /// The workbench's record of outside drivers: the session's sequencer is "PulseGUI"'s while
     /// the editor's own pulse plays (v2 `_drive_lease`), so no run may claim it meanwhile.
     pub users: zlc_workbench::DeviceUsers,
+    /// Each plugin run's use of the board, until it has ended and its replies are in.
+    runs: BTreeMap<String, RunUse>,
 }
 
 /// The preview's front and its axes, as panels report theirs.
@@ -344,7 +395,7 @@ impl PulseHost {
         PulseHost { editor: Editor::new(deployed, pulses.to_path_buf()), device: Lane::new("pulse-command"), safe: Lane::new("pulse-safe"), program: Lane::new("pulse-program"),
                     preview: Lane::new("pulse-preview"), post, safe_actions, plugins, given: None, python, session: Arc::new(Mutex::new(None)),
                     dpr: 1.0, preview_busy: false, preview_key: String::new(), preview_wanted: false, frame: None, frames: 0,
-                    axes: Vec::new(), pointers: Default::default(), pointer_busy: false, users: Default::default() }
+                    axes: Vec::new(), pointers: Default::default(), pointer_busy: false, users: Default::default(), runs: BTreeMap::new() }
     }
 
     /// The pulse section of a state message: the editor's view plus the preview's frame.
@@ -560,21 +611,43 @@ impl PulseHost {
             "pulse_run" | "pulse_wait_done" | "pulse_stop" if run.is_some() => {
                 if let Err(error) = self.check_claims(run, &claims) { return Handled::Now(Err(error)); }
             }
+            // A run holding the board is the only client that may play on it or take its reports (v2 device use).
+            "pulse_run" | "pulse_wait_done" => if let Some(holder) = &claimant { return Handled::Now(Err(format!("device is in use by {holder}"))); },
             _ => {}
         }
         match action {
             "pulse_run" => {
-                if run.is_none() { if let Some(holder) = &claimant { return Handled::Now(Err(format!("device is in use by {holder}"))); } }
                 let Some(board) = self.editor.board().cloned() else { return Handled::Now(Err("no pulse board is attached".into())) };
+                let stage = command["stage"].as_str().unwrap_or("run").to_owned();
+                if stage != "run" && run.is_none() { return Handled::Now(Err("stage load and fire are a run's two-step play".into())); }
                 board.set_world(self.world());
                 let document = PathBuf::from(command["document"].as_str().unwrap_or(""));
                 let values = api_values(&command["api_values"]);
                 let scan = command["scan"].is_object().then(|| ScanRows { fields: strings(&command["scan"]["fields"]), rows: rows(&command["scan"]["rows"]) });
                 let (runs, sweeps) = (command["run_repeats"].as_u64().unwrap_or(1), command["scan_repeats"].as_u64().unwrap_or(1));
+                let owner = run.map(str::to_owned);
+                let used = owner.as_ref().map(|run| self.runs.entry(run.clone()).or_default());
+                let (pinned, loaded) = used.map_or((None, None), |used| {
+                    used.in_flight += 1;
+                    (used.pinned.get(&zlc_pulse::codec::absolute(&document)).cloned(), used.loaded.clone())
+                });
                 let post = self.post.clone();
                 self.device.run(move || {
-                    let result = run_document(&board, &document, &values, scan.as_ref(), runs, sweeps).map(|receipt| to_value(&receipt)).map_err(|error| error.message);
-                    post(PulseEvent::Reply { request, result, touched: true });
+                    let (result, pin, fired, loaded) = play(&board, &stage, &document, pinned.as_deref(), loaded.as_deref(), &values, scan.as_ref(), runs, sweeps);
+                    let run = owner.map(|run| RunReply { run, pinned: pin, fired, loaded });
+                    post(PulseEvent::Reply { request, result, touched: true, run });
+                });
+                return Handled::Later;
+            }
+            // A run's Stop answers with what the board said (v2 nodes' sequencer.safe()), before the
+            // run goes on; the editor's and a client's Stop is the editor's.
+            "pulse_stop" if run.is_some() => {
+                let Some(board) = self.editor.board().cloned() else { return Handled::Now(Err("no pulse board is attached".into())) };
+                let post = self.post.clone();
+                self.safe.run(move || {
+                    let result = board.safe().map(|readback| json!({"status": readback.status, "command_id": readback.command_id}))
+                        .map_err(|error| format!("the board did not go SAFE: {}", error.message));
+                    post(PulseEvent::Reply { request, result, touched: true, run: None });
                 });
                 return Handled::Later;
             }
@@ -585,7 +658,7 @@ impl PulseHost {
                 let post = self.post.clone();
                 let _ = std::thread::Builder::new().name("zlc-pulse-wait".into()).spawn(move || {
                     let result = board.wait_report(id, Some(timeout)).map(|report| to_value(&done_json(report.as_ref()))).map_err(|error| error.message);
-                    post(PulseEvent::Reply { request, result, touched: true });
+                    post(PulseEvent::Reply { request, result, touched: true, run: None });
                 });
                 return Handled::Later;
             }
@@ -599,7 +672,7 @@ impl PulseHost {
                 let post = self.post.clone();
                 let _ = std::thread::Builder::new().name("zlc-pulse-estimate".into()).spawn(move || {
                     let result = estimate_document(&board, &document, &points, axes.as_ref()).map(|estimate| to_value(&estimate)).map_err(|error| error.message);
-                    post(PulseEvent::Reply { request, result, touched: false });
+                    post(PulseEvent::Reply { request, result, touched: false, run: None });
                 });
                 return Handled::Later;
             }
@@ -626,8 +699,46 @@ impl PulseHost {
         Handled::Now(answer)
     }
 
-    /// A reply arrived: anything that drove the board makes the editor ask it again.
-    pub fn replied(&mut self, touched: bool) { if touched { self.editor.board_touched(); self.dispatch(); } }
+    /// A reply arrived: what a run's pulse_run leaves it holding is kept, and
+    /// anything that drove the board makes the editor ask it again.
+    pub fn replied(&mut self, touched: bool, run: Option<RunReply>) {
+        if let Some(RunReply { run, pinned, fired, loaded }) = run {
+            let used = self.runs.entry(run.clone()).or_default();
+            used.in_flight = used.in_flight.saturating_sub(1);
+            if let Some((path, sequence)) = pinned { used.pinned.entry(path).or_insert(sequence); }
+            if fired.is_some() { used.fire = fired; }
+            if loaded.is_some() { used.loaded = loaded; }
+            if used.ended && used.in_flight == 0 { self.settle_run(&run); }
+        }
+        if touched { self.editor.board_touched(); self.dispatch(); }
+    }
+
+    /// The runs that have ended (`active`: whether the workbench still runs one) are
+    /// let go once their replies are in: see [`Self::settle_run`].
+    pub fn settle_runs(&mut self, active: impl Fn(&str) -> bool) {
+        let ended: Vec<String> = self.runs.iter_mut().filter(|(run, used)| !used.ended && !active(run))
+            .map(|(run, used)| { used.ended = true; run.clone() }).collect();
+        for run in ended { if self.runs.get(&run).is_some_and(|used| used.in_flight == 0) { self.settle_run(&run); } }
+    }
+
+    /// A run is over -- its node returned, failed or was stopped, or its process
+    /// died: its pins go, and a FIRE of its that is still unreported (a run that
+    /// ended without its own Stop) is made SAFE and its report settled, as each
+    /// v2 node's finally did.
+    fn settle_run(&mut self, run: &str) {
+        let Some(used) = self.runs.remove(run) else { return };
+        let (Some(fire), Some(board)) = (used.fire, self.editor.board().cloned()) else { return };
+        if board.last_fire() != Some((fire, Fate::Pending)) { return; }
+        let (post, instance, run) = (self.post.clone(), self.given.as_ref().map(|given| given.instance.clone()), run.to_owned());
+        self.safe.run(move || {
+            let outcome = match board.safe() {
+                Ok(_) => format!("ZLC SAFE after {run}: it ended with FIRE {fire} unreported"),
+                Err(error) => format!("ZLC SAFE FAILED after {run} ended with FIRE {fire} unreported: {}", error.message),
+            };
+            if let Some((instance, line)) = instance.zip(narration(&outcome)) { post(PulseEvent::Log { instance, line }); }
+            post(PulseEvent::Touched);
+        });
+    }
 
     // ------------------------------------------------------------- native devices
     /// The apparatus opens a sequencer device: on the device lane.
@@ -724,10 +835,125 @@ impl PulseHost {
                 let post = self.post.clone();
                 self.device.run(move || {
                     let result = board.rejoin().map(|()| json!({})).map_err(|error| error.message);
-                    post(PulseEvent::Reply { request: 0, result, touched: true });
+                    post(PulseEvent::Reply { request: 0, result, touched: true, run: None });
                 });
             }
         }
         Ok(port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::{Receiver, channel};
+
+    /// A pulse host with the virtual board as the apparatus' sequencer, its lanes' events in a
+    /// channel, and a pulse document of its own (the run claims "sequencer").
+    fn host(name: &str) -> (PulseHost, Receiver<PulseEvent>, PathBuf) {
+        let folder = std::env::temp_dir().join(format!("zlc_pulse_host_{}_{name}", std::process::id()));
+        std::fs::create_dir_all(folder.join("pulses")).unwrap();
+        let (sender, events) = channel();
+        let sender = Mutex::new(sender);
+        let post: Post = Arc::new(move |event| { let _ = sender.lock().unwrap().send(event); });
+        let mut host = PulseHost::new(post, SafeActions::new(), None, &folder.join("pulses"));
+        let board = Arc::new(Board::virtual_board(None).unwrap());
+        host.device_opened("sequencer", "sequencer", Ok((board, None))).unwrap();
+        let document = folder.join("pulses").join("shot.json");
+        std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../zlc-pulse/tests/pulses/imaging_template.json"), &document).unwrap();
+        (host, events, document)
+    }
+
+    /// One command, answered now or by a lane (the editor's outcomes delivered meanwhile).
+    fn ask(host: &mut PulseHost, events: &Receiver<PulseEvent>, action: &str, command: Value, claimant: Option<&str>) -> Result<Value, String> {
+        let handled = host.command(action, &command, false, 1, |_| vec!["sequencer".to_owned()], claimant.map(str::to_owned), |_, _, _, _, _| Ok(None));
+        match handled {
+            Handled::Now(answer) => answer,
+            Handled::Later => loop {
+                match events.recv_timeout(Duration::from_secs(30)).expect("an answer") {
+                    PulseEvent::Reply { result, touched, run, .. } => { host.replied(touched, run); return result; }
+                    PulseEvent::Outcome(outcome) => { host.editor.deliver(outcome); host.dispatch(); }
+                    _ => {}
+                }
+            },
+        }
+    }
+
+    fn played(document: &Path, run: &str, repeats: u64) -> Value {
+        json!({"document": document.display().to_string(), "run_repeats": repeats, "_run": run})
+    }
+
+    fn board(host: &PulseHost) -> Arc<Board> { host.editor.board().unwrap().clone() }
+
+    /// A run's record names one pulse: a later fire of its file changed meanwhile is refused;
+    /// another run plays the new one.
+    #[test]
+    fn a_run_plays_the_pulse_it_began_with() {
+        let (mut host, events, document) = host("pinned");
+        let receipt = ask(&mut host, &events, "pulse_run", played(&document, "scan#1", 1), None).unwrap();
+        let id = receipt["command_id"].as_u64().unwrap();
+        let done = ask(&mut host, &events, "pulse_wait_done", json!({"command_id": id, "timeout_seconds": 30, "_run": "scan#1"}), None).unwrap();
+        assert_eq!(done["status"], "done");
+        let mut tree: Value = serde_json::from_str(&std::fs::read_to_string(&document).unwrap()).unwrap();
+        tree["periods"][1]["duration"] = json!(0.03);
+        std::fs::write(&document, tree.to_string()).unwrap();
+        let refused = ask(&mut host, &events, "pulse_run", played(&document, "scan#1", 1), None).unwrap_err();
+        assert!(refused.contains(PULSE_CHANGED), "{refused}");
+        let other = ask(&mut host, &events, "pulse_run", played(&document, "scan#2", 0), None).unwrap();
+        assert!(other["command_id"].is_u64());
+        ask(&mut host, &events, "pulse_stop", json!({"_run": "scan#2"}), None).unwrap();
+    }
+
+    /// v2 device use: while a run holds the board, no other client plays on it, takes its
+    /// reports or stops it.
+    #[test]
+    fn only_the_holding_run_drives_the_board() {
+        let (mut host, events, document) = host("claimed");
+        let claimant = Some("Calibration");
+        for (action, command) in [("pulse_wait_done", json!({"command_id": 1, "timeout_seconds": 0})),
+                                  ("pulse_run", json!({"document": document.display().to_string()})), ("pulse_stop", json!({}))] {
+            assert_eq!(ask(&mut host, &events, action, command, claimant).unwrap_err(), "device is in use by Calibration", "{action}");
+        }
+    }
+
+    /// v2 nodes' sequencer.safe(): a run's Stop answers once the board is SAFE.
+    #[test]
+    fn a_runs_stop_answers_with_the_safe() {
+        let (mut host, events, document) = host("stop");
+        let id = ask(&mut host, &events, "pulse_run", played(&document, "cal#1", 0), None).unwrap()["command_id"].as_u64().unwrap() as u32;
+        let answer = ask(&mut host, &events, "pulse_stop", json!({"_run": "cal#1"}), None).unwrap();
+        assert!(answer["status"].is_u64(), "{answer}");
+        assert_eq!(board(&host).last_fire(), Some((id, Fate::Safed)));
+    }
+
+    /// A run that ends with its FIRE unreported -- its process died, say -- leaves the board SAFE.
+    #[test]
+    fn a_run_ended_without_its_stop_leaves_the_board_safe() {
+        let (mut host, events, document) = host("ended");
+        let id = ask(&mut host, &events, "pulse_run", played(&document, "scan#1", 0), None).unwrap()["command_id"].as_u64().unwrap() as u32;
+        host.settle_runs(|_| true);
+        assert_eq!(board(&host).last_fire(), Some((id, Fate::Pending)), "still running");
+        host.settle_runs(|_| false);
+        loop {
+            if let PulseEvent::Touched = events.recv_timeout(Duration::from_secs(30)).expect("the SAFE") { break; }
+        }
+        assert_eq!(board(&host).last_fire(), Some((id, Fate::Safed)));
+    }
+
+    /// v2 slm_rearrangement: the Pulse is loaded first and the FIRE is then the FIRE alone.
+    #[test]
+    fn a_run_loads_then_fires() {
+        let (mut host, events, document) = host("stages");
+        let mut load = played(&document, "rearrangement#1", 1);
+        load["stage"] = json!("load");
+        let loaded = ask(&mut host, &events, "pulse_run", load, None).unwrap();
+        assert!(loaded.get("command_id").is_none() && loaded["timing"]["periods"].is_array(), "{loaded}");
+        assert_eq!(board(&host).last_fire(), None, "loaded, not fired");
+        let mut fire = played(&document, "rearrangement#1", 1);
+        fire["stage"] = json!("fire");
+        let fired = ask(&mut host, &events, "pulse_run", fire, None).unwrap();
+        let id = fired["command_id"].as_u64().unwrap();
+        let done = ask(&mut host, &events, "pulse_wait_done", json!({"command_id": id, "timeout_seconds": 30, "_run": "rearrangement#1"}), None).unwrap();
+        assert_eq!(done["status"], "done");
     }
 }

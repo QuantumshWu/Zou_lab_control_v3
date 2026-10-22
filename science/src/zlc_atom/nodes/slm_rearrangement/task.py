@@ -36,7 +36,7 @@ from zlc_atom.devices.slm.solver import (
 from zlc_atom.nodes.slm.rearrangement import compact_target, run_rearrangement
 from zlc_atom.nodes.calibration import TrapCalibration
 from zlc_atom.nodes.calibration.calibration import reads_photoelectrons, registration_order as _registration_order
-from zlc_atom.nodes._framework.pulse import STATUS_DONE, PulseBoard, check_cancelled, pulse_description
+from zlc_atom.nodes._framework.pulse import PULSE_CHANGED, STATUS_DONE, PulseBoard, check_cancelled, pulse_description
 from zlc_atom.nodes.camera.measurement import (
     CameraMeasurementNode, CameraMeasurementRequest, frames_snapshot)
 from zlc_atom.nodes.slm import plain_json as _plain_json
@@ -110,7 +110,7 @@ class SlmRearrangementTask:
     """The concrete experiment owner; devices retain acquisition and playback."""
     instance_id = "slm_rearrangement"
 
-    def __init__(self, *, camera, camera_key, slm, slm_key,
+    def __init__(self, *, camera, camera_key, slm, slm_key, sequencer_key="",
                  calibration, calibration_path, science_context,
                  science_context_path, target_rows=3, target_columns=3,
                  target_intensity=None, target_path=None,
@@ -121,8 +121,7 @@ class SlmRearrangementTask:
                  save_phase_sequence=True, save_figure_artifact=None,
                  shots=1):
         self.camera, self.slm = camera, slm
-        # The pulse board is the core's, driven through its catalogue commands.
-        self.camera_key, self.sequencer_key, self.slm_key = camera_key, "sequencer", slm_key
+        self.camera_key, self.sequencer_key, self.slm_key = camera_key, str(sequencer_key), slm_key
         self.calibration, self.science_context = calibration, science_context
         self.context_path, self.calibration_path = Path(science_context_path).resolve(), Path(calibration_path).resolve()
         self.target_rows, self.target_columns = int(target_rows), int(target_columns)
@@ -854,6 +853,11 @@ class SlmRearrangementTask:
                     if self.slm.last_command_receipt.get("outcome") != "known-new":
                         raise RuntimeError("SLM source-phase outcome was not confirmed")
                     self._timings["source_apply"] = (perf_counter()-start)*1000
+                    # v2's order: the Pulse is loaded before the camera is armed, so the
+                    # FIRE that starts the deadline below is the FIRE alone.
+                    start = perf_counter(); loaded = board.load(self.pulse_path)
+                    self._timings["pulse_load"] = (perf_counter()-start)*1000
+                    self._pulse_timing = pulse_timing(loaded["timing"], self.before_period, self.after_period)
                     nominal = self._frame_count*self._frame_interval
                     if self.frame_mode == "fixed":
                         self._timings["estimated_nominal_playback"] = nominal*1000
@@ -875,11 +879,8 @@ class SlmRearrangementTask:
                                             current=photo, total=2*self.shots)
                     firing_started = monotonic()
                     fire_wall = time_ns()
-                    # The board resolves, compiles, loads and fires the document; the
-                    # deadline below counts from before that whole request, so it
-                    # can only be earlier than the true one, never later.
-                    start = perf_counter(); receipt = board.run(self.pulse_path, run_repeats=1, scan_repeats=1)
-                    self._timings["pulse_run_request"] = (perf_counter()-start)*1000
+                    start = perf_counter(); receipt = board.fire_loaded(self.pulse_path, run_repeats=1, scan_repeats=1)
+                    self._timings["pulse_fire_request"] = (perf_counter()-start)*1000
                     self._pulse_timing = pulse_timing(receipt["timing"], self.before_period, self.after_period)
                     self._device_snapshots["sequencer"] = dict(receipt["applied"])
                     deadline = firing_started + self._pulse_timing["after_start_seconds"] + self._pulse_timing["earliest_lane_delay_seconds"]
@@ -1017,7 +1018,8 @@ class SlmRearrangementTask:
                     self._shot_reports.append(self._save(context, "completed"))
                     self._shot_saved = True
                 except Exception as error:
-                    if self.shots == 1 or context.cancel_requested() or isinstance(error, InterruptedError):
+                    # A changed pulse file fails every later shot alike: the batch ends.
+                    if self.shots == 1 or context.cancel_requested() or isinstance(error, InterruptedError) or PULSE_CHANGED in str(error):
                         raise
                     # One shot of a batch failed: make the board safe, keep what it
                     # recorded and fire the next one -- unless the board could not be
