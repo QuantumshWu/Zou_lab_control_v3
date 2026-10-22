@@ -206,7 +206,7 @@ image is drawn with; `overlay_choices` are the outputs of the overlay contract
 (`zlc_plot.image-point-overlay-status`) of nodes reading the same measurement as the
 panel's signal (v2 `overlay_signal_groups`). The desktop reads the judgement in the same
 coherent front as the image (the picture waits for its judgement while its producer runs
-or once both runs are sealed), builds the rings from the judgement run's
+or once both runs are sealed; a judgement of another shot is not drawn), builds the rings from the judgement run's
 `image_point_overlay_geometry` record and their colours from its data; without an
 Overlay a geometry recorded with the image's own run draws passive rings. The row shows
 for a panel whose surfaces are images (v2 paints_images): an Image, or a FacetGrid of

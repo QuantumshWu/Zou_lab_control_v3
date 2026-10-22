@@ -38,7 +38,7 @@ fn publish(runtime: &Runtime, generation: &Generation, shape: [usize; 2], values
     let data = DataBlock::new(camera_schema(shape, values.dtype()), values, Validity::Uniform(true), None).unwrap();
     runtime.commit(generation, &Bundle { inputs: vec![Input::Event { signal: "frames".into(), ordinal: 0, data, origin: None }],
         metadata: json!({}), parents: vec![] }).unwrap();
-    runtime.read_coherent_views(&[(generation.clone(), Arc::from("frames"), None)]).pop().unwrap().unwrap()
+    runtime.read_coherent_views(&[(generation.clone(), Arc::from("frames"), None)], &mut Default::default()).pop().unwrap().unwrap()
 }
 
 /// Six equal planes of values {0, 1, 3, 4, 6, 7} times `scale` plus `offset`.

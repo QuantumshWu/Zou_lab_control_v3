@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use zlc_core::control::{Origin, SafeActions};
-use zlc_core::runtime::{Bundle, Declaration, DeliveryKind, DeliveryPolicy, Generation, HistoryLease, Input, Read, ReadKind,
+use zlc_core::runtime::{Bundle, Declaration, DeliveryKind, DeliveryPolicy, Generation, GenerationId, HistoryLease, Input, Read, ReadKind,
     ReadMode, ReadRequest, RunRecord, Runtime, RuntimeError, Start, Storage, Subscription};
 use zlc_core::schema::{DatasetSchema, DomainRole};
 
@@ -289,6 +289,9 @@ struct RunState {
     devices: BTreeMap<String, String>,
     signals: BTreeMap<String, String>,
     generation: Option<Generation>,
+    /// The signal its commits derive from: one run of it (a processor's subscription),
+    /// or the signal across its runs (a run following it), declared at run.begin.
+    route: Option<(Arc<str>, Option<GenerationId>)>,
     outputs: HashMap<String, OutputState>,
     histories: Vec<HistoryLease>,
 }
@@ -337,7 +340,7 @@ struct State {
 struct Follower { instance: String, run: String, signal: String, node: Value, sources: std::sync::mpsc::Sender<Source> }
 
 /// A processor's subscribed input (§5).
-struct Source { feed: Feed, bundle: bool, input: String }
+struct Source { feed: Feed, bundle: bool, input: String, generation: GenerationId }
 
 /// A live source's deliveries, or the whole datasets of a finite run that has
 /// sealed (v2's frozen processor evaluated the dataset as it finished).
@@ -689,6 +692,8 @@ impl PluginHost {
                 }
                 _ => None,
             };
+            let route = request.source_signal.as_deref().filter(|_| source.is_some() || following.is_some())
+                .map(|signal| (Arc::from(signal), source.as_ref().map(|source| source.generation)));
             let mut devices = serde_json::Map::new();
             for (argument, device) in &request.devices {
                 let target = state.instances.get(device).filter(|target| target.descriptor.is_device())
@@ -702,7 +707,7 @@ impl PluginHost {
             }
             for device in request.devices.values() { state.instances.get_mut(device).unwrap().claimed_by = Some(run.clone()); }
             state.instances.get_mut(instance).unwrap().run = Some(RunState { id: run.clone(), origin: request.origin.clone(),
-                devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, outputs: HashMap::new(),
+                devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, route, outputs: HashMap::new(),
                 histories: Vec::new() });
             let following = following.map(|(follower, received)| { state.followers.push(follower); received });
             (process, devices, source, following)
@@ -1096,7 +1101,12 @@ impl Inner {
         }).collect();
         // The run record is the node's own; who started the run goes in its seal.
         let record = if params["record"].is_object() { params["record"].clone() } else { json!({}) };
-        let generation = self.runtime.begin(instance.as_str(), declarations, record).map_err(|error| CallError::from(error.to_string()))?;
+        // A run consuming a source commits each result with the event it is of: the
+        // Runtime selects a picture and its judgement as one shot through this route.
+        let generation = match run.route.clone() {
+            Some((source, of)) => self.runtime.begin_consuming(instance.as_str(), declarations, record, source, of),
+            None => self.runtime.begin(instance.as_str(), declarations, record),
+        }.map_err(|error| CallError::from(error.to_string()))?;
         let id = generation.id().as_uuid().to_string();
         run.generation = Some(generation);
         let declared: Vec<String> = outputs.values().map(|output| output.signal.to_string()).collect();
@@ -1315,14 +1325,14 @@ impl Inner {
             let views: Vec<_> = members.filter(|item| item.published).map(|item| (item.generation.clone(), item.signal.clone(), None)).collect();
             let reads = self.runtime.read_views(&views).into_iter().collect::<Result<Vec<_>, _>>()
                 .map_err(|error| CallError::from(format!("{signal}: {error}")))?;
-            return Ok(Source { feed: Feed::Sealed(reads), bundle, input: name });
+            return Ok(Source { feed: Feed::Sealed(reads), bundle, input: name, generation: anchor.generation.id() });
         }
         let requests = members.map(|item| ReadRequest { signal: item.signal.clone(), mode: ReadMode::Event }).collect();
         let policy = if input["delivery"] == "latest" { DeliveryPolicy::Latest }
             else { DeliveryPolicy::Exact { max_events: PROCESSOR_MAX_EVENTS, max_referenced_bytes: PROCESSOR_MAX_BYTES } };
         let subscription = self.runtime.subscribe_reads(&anchor.generation, requests, policy, Start::Current)
             .map_err(|error| CallError::from(error.to_string()))?;
-        Ok(Source { feed: Feed::Live(subscription), bundle, input: name })
+        Ok(Source { feed: Feed::Live(subscription), bundle, input: name, generation: anchor.generation.id() })
     }
 }
 

@@ -137,7 +137,9 @@ fn devices_lend_frames_nodes_publish_through_claims_and_a_crash_loses_one_instan
     assert!(values.as_slice().iter().all(|value| *value == 6));
 
     // The next run of a node drops its previous generation inside run.begin; when Runtime
-    // holds the last of a lent frame, its release reaches the owner from there.
+    // holds the last of a lent frame, its release reaches the owner from there. The
+    // doubler's result keeps the frame it judged (its same-shot picture) as long as it is
+    // the doubler's latest: the camera's next run leaves it, the doubler's next run drops it.
     let lent = block_of(data.values());
     drop((latest, derived));
     // The doubler's lease of it is released by its plugin, asynchronously.
@@ -149,7 +151,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_a_crash_loses_one_instan
         source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into() }).unwrap();
     let (outcome, _, error, ..) = finished(&run);
     assert_eq!(outcome, "completed", "{error:?}");
-    assert_eq!(host.registry().holds(&lent), 0);
+    assert_eq!(host.registry().holds(&lent), 1);
 
     // A following processor reads its source's next generation from its first commit,
     // however late its own run starts: here, after that source has sealed.
@@ -163,6 +165,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_a_crash_loses_one_instan
         outputs: [("doubled".to_owned(), doubled_signal.to_owned())].into() }).unwrap();
     let (outcome, result, error, ..) = finished(&run);
     assert_eq!((outcome.as_str(), &result), ("completed", &json!({"evaluated": 3})), "{error:?}");
+    assert_eq!(host.registry().holds(&lent), 0);
     host.follow("doubler", None);
 
     // A crash loses that instance only (v2: the device's error state); nothing else is touched.

@@ -1935,7 +1935,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     ticket += 1;
                     trace::point("job.dispatch",||json!({"job":ticket,"action":command["action"],"queue":queue.len(),
                         "inputs":inputs.iter().map(|input|json!({"panel":input.panel,"window":input.window,"epoch":input.epoch,
-                            "source":input.read.as_ref().map(|read|trace::key(read.key()))})).collect::<Vec<_>>()}));
+                            "source":input.read.as_ref().map(|read|trace::key(read.key())),
+                            "overlay":input.overlay.as_ref().map(|read|trace::key(read.key()))})).collect::<Vec<_>>()}));
                     if !in_viewer && importing.is_none() { cadence.dispatch(std::time::Instant::now()); }
                     let selected=importing.map(|candidate|&candidate.bindings).unwrap_or(viewers.get(&document).map_or(&bindings, |viewer| &viewer.bindings));
                     let archive=importing.map(|candidate|candidate.data.clone());
