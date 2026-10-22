@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::os::windows::io::AsRawHandle;
 use std::process::{Child, ChildStdin};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,7 @@ pub(crate) struct Incoming { pub message: Value, pub lends: Vec<Arc<Lend>> }
 pub(crate) struct PluginProcess {
     /// The interpreter's pid (the launcher's until the handshake names it).
     pid: AtomicU32,
-    /// The process group (`group:<name>`) or the type (`type:<id>`) it serves.
+    /// The process it is: the one plugin process (`plugins`) or an isolated type's (`type:<id>`).
     pub key: String,
     writer: Mutex<Option<ChildStdin>>,
     /// Each request's waiter, and whether its deadline watches the process.
@@ -34,8 +34,10 @@ pub(crate) struct PluginProcess {
     child: Mutex<Child>,
     log: Mutex<VecDeque<String>>,
     pub instances: Mutex<BTreeSet<String>>,
-    /// Requests that passed their deadline unanswered, by id.
-    overdue: Mutex<HashMap<u64, Instant>>,
+    /// Requests of no instance's using it now (the catalogue, a hardware scan).
+    pub users: AtomicUsize,
+    /// Requests that passed their deadline unanswered, by id: since when, and the instance asked.
+    overdue: Mutex<HashMap<u64, (Instant, Option<String>)>>,
     pub missed_pings: AtomicU64,
 }
 
@@ -49,7 +51,7 @@ impl PluginProcess {
         let process = Arc::new(Self {
             pid: AtomicU32::new(child.id()), key, writer: Mutex::new(Some(writer)), pending: Mutex::default(), next: AtomicU64::new(1),
             alive: AtomicBool::new(true), retiring: AtomicBool::new(false), child: Mutex::new(child),
-            log: Mutex::default(), instances: Mutex::default(), overdue: Mutex::default(), missed_pings: AtomicU64::new(0),
+            log: Mutex::default(), instances: Mutex::default(), users: AtomicUsize::new(0), overdue: Mutex::default(), missed_pings: AtomicU64::new(0),
         });
         (process, stdout, stderr)
     }
@@ -90,6 +92,7 @@ impl PluginProcess {
     fn exchange(&self, op: &str, params: Value, blocks: Vec<String>, deadline: Duration, track: bool) -> Result<Incoming, CallError> {
         if !self.alive.load(Ordering::Acquire) { return Err(CallError::lost("the plugin process has ended")); }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let instance = params["instance"].as_str().map(str::to_owned);
         let (sender, answer) = mpsc::channel();
         self.pending.lock().unwrap().insert(id, (sender, track));
         let message = json!({"t": "req", "id": id, "op": op, "p": params, "blocks": blocks,
@@ -104,7 +107,7 @@ impl PluginProcess {
                 None => Ok(incoming),
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if track { self.overdue.lock().unwrap().insert(id, Instant::now()); }
+                if track { self.overdue.lock().unwrap().insert(id, (Instant::now(), instance)); }
                 else { self.pending.lock().unwrap().remove(&id); }
                 Err(CallError::new(ErrorKind::Timeout, format!("{op} did not answer within {:.1} s", deadline.as_secs_f64())))
             }
@@ -119,12 +122,12 @@ impl PluginProcess {
         if let Some((sender, _)) = self.pending.lock().unwrap().remove(&id) { let _ = sender.send(incoming); }
     }
 
-    /// Whether a tracked request is in flight (its own deadline then watches the process).
-    pub fn busy(&self) -> bool { self.pending.lock().unwrap().values().any(|(_, tracked)| *tracked) }
-
-    /// The oldest unanswered overdue request's age.
-    pub fn overdue_for(&self) -> Option<Duration> {
-        self.overdue.lock().unwrap().values().map(Instant::elapsed).max()
+    /// The instances (None: the process's own request) whose requests have stayed
+    /// unanswered `grace` past their deadline, each told once.
+    pub fn overdue(&self, grace: Duration) -> Vec<Option<String>> {
+        let mut overdue = self.overdue.lock().unwrap();
+        let late: Vec<u64> = overdue.iter().filter(|(_, (since, _))| since.elapsed() > grace).map(|(id, _)| *id).collect();
+        late.into_iter().filter_map(|id| overdue.remove(&id)).map(|(_, instance)| instance).collect()
     }
 
     /// The channel ended: every waiter learns the process is gone.

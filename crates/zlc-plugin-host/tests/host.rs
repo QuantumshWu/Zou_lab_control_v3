@@ -30,7 +30,7 @@ fn block_of(values: &AnyBuffer) -> String {
 }
 
 #[test]
-fn devices_lend_frames_nodes_publish_through_claims_and_a_crash_loses_one_instance() {
+fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     let Some((host, runtime, safe, events)) = host() else { return };
     let catalog = host.catalog().unwrap();
     assert!(catalog.errors.is_empty(), "{:?}", catalog.errors);
@@ -109,6 +109,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_a_crash_loses_one_instan
     assert_eq!(latest.key().ordinal, Some(2));
     assert_eq!(latest.event().metadata, json!({"records": {"frames": {"index": 2}}}));
     let data = latest.data().unwrap();
+    let frame = std::sync::Arc::downgrade(data);
     assert_eq!(data.schema().physical_shape(), [1, 1, 128, 128]);
     let AnyBuffer::U16(published) = data.values() else { panic!("dtype") };
     assert!(published.as_slice().iter().all(|value| *value == 3));
@@ -165,21 +166,37 @@ fn devices_lend_frames_nodes_publish_through_claims_and_a_crash_loses_one_instan
         outputs: [("doubled".to_owned(), doubled_signal.to_owned())].into() }).unwrap();
     let (outcome, result, error, ..) = finished(&run);
     assert_eq!((outcome.as_str(), &result), ("completed", &json!({"evaluated": 3})), "{error:?}");
-    assert_eq!(host.registry().holds(&lent), 0);
+    // Its block went back to its owner; in the one plugin process the doubler's next
+    // output may already be in it.
+    assert!(frame.upgrade().is_none());
     host.follow("doubler", None);
 
-    // A crash loses that instance only (v2: the device's error state); nothing else is touched.
+    // Every instance, devices and nodes, is in the one plugin process.
+    let pids: std::collections::BTreeSet<u32> = host.instances().into_iter().map(|(.., pid)| pid).collect();
+    assert_eq!(pids.into_iter().collect::<Vec<_>>(), [pid]);
+    let failure = || loop {
+        if let HostEvent::Failed { instances, reason } = events.recv_timeout(Duration::from_secs(15)).expect("failure event") { break (instances, reason); }
+    };
+    // A call that overruns its deadline fails its instance only: it leaves the process,
+    // the others carry on, and it opens again (its stuck call ends on its own).
+    host.open("slow", "test.echo", json!({}), json!({})).unwrap();
+    let overran = host.spi("slow", "sleep", json!([10]), json!({}), Duration::from_millis(200)).err().unwrap();
+    assert_eq!(overran.kind, ErrorKind::Timeout, "{overran}");
+    assert_eq!(failure().0, ["slow"]);
+    host.spi("echo", "frame", json!([2, 1]), json!({}), Duration::from_secs(5)).unwrap();
+    host.open("slow", "test.echo", json!({}), json!({})).unwrap();
+    host.spi("slow", "frame", json!([2, 1]), json!({}), Duration::from_secs(5)).unwrap();
+    // A crash ends the process: every instance in it fails (v2: the device's error
+    // state), and each opens again in a new one.
     host.open("boom", "test.echo", json!({}), json!({})).unwrap();
     let crashed = host.spi("boom", "crash", json!([]), json!({}), Duration::from_secs(10)).err().unwrap();
     assert_eq!(crashed.kind, ErrorKind::Lost, "{crashed}");
-    let failed = loop {
-        if let HostEvent::Failed { instances, reason } = events.recv_timeout(Duration::from_secs(10)).expect("failure event") { break (instances, reason); }
-    };
-    assert_eq!(failed.0, ["boom"]);
+    let failed = failure();
+    assert!(["boom", "echo", "slow"].iter().all(|name| failed.0.iter().any(|lost| lost == name)), "{:?}", failed.0);
     assert!(failed.1.contains("(exit code 3)"), "{}", failed.1);
-    assert!(host.instances().iter().all(|(name, ..)| name != "boom"));
-    // The other device is untouched.
-    host.spi("echo", "frame", json!([2, 1]), json!({}), Duration::from_secs(5)).unwrap();
+    assert!(host.instances().is_empty());
+    host.open("echo", "test.echo", json!({"gain": 2.0}), json!({})).unwrap();
+    assert_ne!(host.instances()[0].2, pid);
 
     assert_eq!(host.spi("echo", "made_safe", json!([]), json!({}), Duration::from_secs(5)).unwrap().value, json!([]));
     // Stop all drives the open device's output safe through its plugin.

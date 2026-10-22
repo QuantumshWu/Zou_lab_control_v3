@@ -1,4 +1,4 @@
-//! Plugin type descriptors as the describe process reports them
+//! Plugin type descriptors as the plugin process's describe reports them
 //! (PLUGIN_PROTOCOL §2). The workbench reads them; it never branches on a
 //! concrete type.
 use serde::Deserialize;
@@ -16,7 +16,9 @@ pub struct TypeDescriptor {
     pub label: String,
     pub description: String,
     pub module: String,
-    pub process_group: Option<String>,
+    /// It stands in the simulated world: opened with the installation's simulation
+    /// parameters, and opened again when they change (v2 world_config).
+    pub simulation: bool,
     pub capabilities: Vec<String>,
     pub parameters: Vec<Field>,
     pub physical_outputs: Vec<PhysicalOutput>,

@@ -11,7 +11,7 @@ from zlc_atom.devices.waveform.contract import WaveformOutput
 from zlc_atom.devices.waveform.wheeltec_n100 import N100_OUTPUTS
 from zlc_plugin import DeviceType, Opened
 
-from ..authoring import SIMULATION_GROUP, acquire_world
+from ..authoring import acquire_world
 from .source import VirtualWaveformConfig, VirtualWaveformSource
 
 
@@ -113,7 +113,7 @@ DEVICE_TYPES = (
             "Simulated WHEELTEC N100 packet stream whose magnetometer reads the simulated "
             "world's bias field (the coil DACs the simulated board last played)."
         ),
-        process_group=SIMULATION_GROUP,
+        simulation=True,
     ),
     DeviceType(
         "waveform.virtual_scope",

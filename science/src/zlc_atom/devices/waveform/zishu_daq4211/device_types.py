@@ -153,8 +153,6 @@ DEVICE_TYPES = (
             "authored channel mapped from volts to its physical quantity; one record per "
             "record_samples samples."
         ),
-        # libdaq2 is a process singleton that counts claims per serial.
-        process_group="zishu_daq4211",
         discover=_discover,
     ),
 )

@@ -76,12 +76,12 @@ impl Host for FakeHost {
 /// occupancy processor and a scan task that acquires through the measurement.
 pub fn catalog() -> Value {
     json!({"protocol": [2, 0], "errors": [{"module": "zlc_atom.devices.camera.pylon.device_types", "error": "No module named pypylon"}], "types": [
-        {"type_id": "camera.virtual_mot", "kind": "device", "family": "camera", "label": "Virtual MOT camera", "process_group": "simulation",
+        {"type_id": "camera.virtual_mot", "kind": "device", "family": "camera", "label": "Virtual MOT camera", "simulation": true,
          "capabilities": ["camera.adapter"], "parameters": [{"name": "exposure_seconds", "type": "float", "label": "Exposure", "default": 0.1, "minimum": 0.0}],
          "commands": [{"name": "editor_send", "summary": "Send the draft", "drives": true, "params": [], "input_schema": {"type": "object"}},
                       {"name": "editor_save", "summary": "Save the draft", "params": [{"name": "path", "type": "str", "label": "File", "required": true}],
                        "input_schema": {"type": "object"}, "file": {"param": "path", "direction": "write"}}]},
-        {"type_id": "sequencer.virtual", "kind": "device", "family": "sequencer", "label": "Virtual sequencer", "process_group": "simulation",
+        {"type_id": "sequencer.virtual", "kind": "device", "family": "sequencer", "label": "Virtual sequencer", "simulation": true,
          "capabilities": ["sequencer.streamer"], "physical_outputs": [{"name": "mot_coils"}], "parameters": []},
         {"type_id": "camera_measurement", "kind": "node", "label": "Camera measurement", "parameters": [
             {"name": "repeat", "type": "int", "label": "Repeat", "default": 0},

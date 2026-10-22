@@ -9,7 +9,7 @@ from zlc_atom.devices.slm import CONCURRENT_SLM_METHODS, opened_slm
 from zlc_atom.devices.slm.editor import CONTROL_WINDOW, EDITOR_COMMANDS
 from zlc_plugin import DeviceType, Opened
 
-from ..authoring import SIMULATION_GROUP, acquire_world
+from ..authoring import acquire_world
 from .device import VirtualSLM
 
 
@@ -47,7 +47,7 @@ DEVICE_TYPES = (
             "Phase-only SLM of the simulated world: a commanded phase re-forms the world's "
             "trap roster (its FFT peaks), which the virtual cameras then image."
         ),
-        process_group=SIMULATION_GROUP,
+        simulation=True,
         concurrent=CONCURRENT_SLM_METHODS,
         commands=EDITOR_COMMANDS,
         control_window=CONTROL_WINDOW,

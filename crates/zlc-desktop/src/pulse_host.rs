@@ -358,19 +358,19 @@ pub fn device_descriptors() -> Vec<Value> {
     let output = json!([{"name": "sequence"}]);
     // One sequencer family, as v2's Device Manager offered it; the virtual board shares the
     // simulated world (the simulation settings reach it like every simulated device).
-    let common = |type_id: &str, label: &str, description: &str, group: Option<&str>, parameters: Value| json!({
+    let common = |type_id: &str, label: &str, description: &str, simulation: bool, parameters: Value| json!({
         "type_id": type_id, "kind": "device", "family": "sequencer", "label": label, "description": description, "module": "zlc_pulse (native)",
-        "process_group": group, "capabilities": ["sequencer.streamer"], "parameters": parameters, "physical_outputs": output, "commands": [],
+        "simulation": simulation, "capabilities": ["sequencer.streamer"], "parameters": parameters, "physical_outputs": output, "commands": [],
         "addable": true});
     let mut types = vec![
         common("sequencer.virtual", "Virtual sequencer", "The pulse board's memory twin, played at wall time into the simulated world \
-                (simulation.board): the virtual apparatus' sequencer.", Some("simulation"), json!([config_file])),
+                (simulation.board): the virtual apparatus' sequencer.", true, json!([config_file])),
         common("sequencer.hardware", "Pulse server", "The real pulse board, reached over the network through the pulse server that owns it.",
-               None, json!([{"name": "host", "type": "str", "label": "Pulse server host", "default": "127.0.0.1"},
+               false, json!([{"name": "host", "type": "str", "label": "Pulse server host", "default": "127.0.0.1"},
                                    {"name": "port", "type": "int", "label": "Pulse server port", "default": zlc_pulse::remote::DEFAULT_PORT, "minimum": 1, "maximum": 65535},
                                    config_file])),
         common("sequencer.local", "Pulse board on this computer", "The board plugged into this computer, served here by zlc-pulse-server \
-                (its UART, or its JTAG cable through a resident Vivado); this bench is its loopback client.", None,
+                (its UART, or its JTAG cable through a resident Vivado); this bench is its loopback client.", false,
                json!([{"name": "backend", "type": "choice", "label": "Board transport", "default": "auto",
                        "choices": [{"value": "auto", "label": "Auto (UART, else JTAG)"}, {"value": "uart", "label": "UART"},
                                    {"value": "jtag-axi", "label": "JTAG-to-AXI (Vivado)"}, {"value": "memory", "label": "Memory mock (no hardware)"}]},

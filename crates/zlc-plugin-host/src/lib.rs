@@ -1,10 +1,13 @@
 //! The Rust side of the plugin protocol (docs/PLUGIN_PROTOCOL.md).
 //!
-//! `PluginHost` starts one `python -m zlc_plugin host` process per plugin
-//! instance (one per process group), routes every request between the core,
-//! devices and nodes, owns the block registry, publishes node runs into the
-//! Runtime and registers physical outputs for Stop all. The core holds
-//! no interpreter: a plugin that crashes or hangs is a failed instance.
+//! `PluginHost` runs every plugin instance -- devices and logic nodes alike,
+//! each on its own lane -- in one `python -m zlc_plugin host` process, as v2
+//! ran them in one; a type that declares why it cannot share it (`isolated`)
+//! gets one of its own. It routes every request between the core, devices and
+//! nodes, owns the block registry, publishes node runs into the Runtime and
+//! registers physical outputs for Stop all. The core holds no interpreter: an
+//! instance whose call hangs is a failed instance, a process that stops
+//! answering is failed instances, and each can be opened again.
 pub mod blocks;
 mod cache;
 pub mod descriptor;
@@ -328,8 +331,6 @@ fn published_refusal(instance: &str) -> CallError {
 #[derive(Default)]
 struct State {
     instances: BTreeMap<String, Instance>,
-    /// Warm processes with no instance, by key, for the next open.
-    idle: HashMap<String, Arc<PluginProcess>>,
     leases: HashMap<u64, (u32, Read)>,
     next_lease: u64,
     /// Plugin requests the application has yet to answer: ticket -> (process, request id).
@@ -370,9 +371,10 @@ struct Inner {
     /// after `state` when both are needed, never before it.
     processes: Mutex<HashMap<u32, Arc<PluginProcess>>>,
     events: Box<dyn Fn(HostEvent) + Send + Sync>,
-    /// One gate per process group: finding or starting a group's process is one step, so
-    /// instances opened together (Init opens them in parallel) share one process, one world.
-    group_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One gate per process key: finding or starting its process, and letting one that
+    /// nothing uses go, are each one step, so instances opened together (Init opens them
+    /// in parallel) share one process, and a closing one never ends a process another is joining.
+    gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 /// The plugin host. Cheap to clone; clones share it.
@@ -388,6 +390,8 @@ const SHUTDOWN_CLOSE: Duration = Duration::from_secs(3);
 const SAFE_DEADLINE: Duration = Duration::from_secs(2);
 /// An unanswered request this long past its deadline makes the instance unresponsive.
 const OVERDUE_GRACE: Duration = Duration::from_secs(5);
+/// The key of the one plugin process every type shares unless it is `isolated`.
+const SHARED: &str = "plugins";
 
 /// An instance is named as its apparatus or board names it; only its commands' tool names are spelled for MCP.
 fn named(instance: &str) -> Result<(), CallError> {
@@ -405,7 +409,7 @@ impl PluginHost {
                 if let Some(inner) = owner.upgrade() { inner.release_to(pid, names); }
             }));
             Inner { environment: plugin_environment(&config.python), config, session, runtime, safe, registry, job, catalog: Mutex::new(None),
-                    state: Mutex::default(), processes: Mutex::default(), events: Box::new(events), group_gates: Mutex::default() }
+                    state: Mutex::default(), processes: Mutex::default(), events: Box::new(events), gates: Mutex::default() }
         });
         let watched = Arc::downgrade(&inner);
         std::thread::Builder::new().name("zlc-plugin-watch".into()).spawn(move || watch(watched)).map_err(|error| error.to_string())?;
@@ -425,14 +429,14 @@ impl PluginHost {
         let catalog = match kept {
             Some(catalog) => catalog,
             None => {
-                let output = self.inner.command().args(["-m", "zlc_plugin", "describe"]).args(&self.inner.config.packages)
-                    .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
-                    .map_err(|error| format!("Cannot run plugin discovery with {}: {error}", self.inner.config.python.display()))?;
-                if !output.status.success() {
-                    return Err(format!("Plugin discovery failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
-                }
-                let catalog: Catalog = serde_json::from_slice(&output.stdout).map_err(|error| format!("Plugin discovery answered: {error}"))?;
-                cache::write(&key, &output.stdout);
+                // The plugin process answers it, as it answers its instances: one interpreter,
+                // one environment; a process that nothing else uses goes once it has.
+                let process = self.inner.acquire(SHARED, None)?;
+                let answer = process.request_untracked("describe", json!({"packages": self.inner.config.packages}), OPEN_DEADLINE);
+                self.inner.done(&process);
+                let describe = answer.map_err(|error| format!("Plugin discovery failed: {error}"))?.message["ok"].take();
+                let catalog: Catalog = serde_json::from_value(describe.clone()).map_err(|error| format!("Plugin discovery answered: {error}"))?;
+                cache::write(&key, describe.to_string().as_bytes());
                 catalog
             }
         };
@@ -445,34 +449,28 @@ impl PluginHost {
         Ok(catalog)
     }
 
-    /// The process key a type opens in.
+    /// The process a type's instances open in: the one plugin process, or the type's
+    /// own when it declares why it cannot share it (`isolated`).
     pub fn key_of(descriptor: &TypeDescriptor) -> String {
-        descriptor.process_group.as_ref().map_or_else(|| format!("type:{}", descriptor.type_id), |group| format!("group:{group}"))
+        if descriptor.isolated.is_empty() { SHARED.to_owned() } else { format!("type:{}", descriptor.type_id) }
     }
 
-    /// Open one instance; `group` is its process group's parameters.
-    pub fn open(&self, instance: &str, type_id: &str, parameters: Value, group: Value) -> Result<Value, CallError> {
+    /// Open one instance; `simulation` is the installation's simulation parameters, for a
+    /// type standing in the simulated world.
+    pub fn open(&self, instance: &str, type_id: &str, parameters: Value, simulation: Value) -> Result<Value, CallError> {
         let inner = &self.inner;
         let catalog = self.catalog()?;
         let descriptor = Arc::new(catalog.find(type_id).cloned()
             .ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("No plugin type {type_id:?}")))?);
         named(instance)?;
-        let key = Self::key_of(&descriptor);
-        let gate = descriptor.process_group.as_ref().map(|_| inner.group_gate(&key));
-        let held = gate.as_ref().map(|gate| gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
-        let process = {
-            let mut state = inner.state.lock().unwrap();
+        {
+            let state = inner.state.lock().unwrap();
             if state.closed { return Err(CallError::lost("the plugin host is closed")); }
             if state.instances.contains_key(instance) { return Err(CallError::new(ErrorKind::Refused, format!("{instance} is already open"))); }
-            // A group shares the one process already serving it; anything else
-            // takes the warm idle process of its key, if one waits.
-            state.idle.remove(&key)
-        }.or_else(|| descriptor.process_group.as_ref().and_then(|_| inner.serving(&key)));
-        let process = match process { Some(process) => process, None => inner.spawn(&key)? };
-        process.instances.lock().unwrap().insert(instance.to_owned());
-        drop(held);
+        }
+        let process = inner.acquire(&Self::key_of(&descriptor), Some(instance))?;
         let opened = process.request("open", json!({"instance": instance, "type_id": type_id, "module": descriptor.module,
-            "parameters": parameters, "group": group, "plain": true}), OPEN_DEADLINE);
+            "parameters": parameters, "simulation": simulation, "plain": true}), OPEN_DEADLINE);
         let reply = match opened {
             Ok(reply) => reply,
             Err(error) => {
@@ -573,25 +571,21 @@ impl PluginHost {
     }
 
     /// A device type's hardware scan (v2 Scan hardware), with no instance opened:
-    /// in the process its instances would open in (a group's shared runtime is
-    /// the one asked), answering `{found, notes}` or the scan's refusal.
+    /// in the process its instances open in (a vendor runtime that is a process
+    /// singleton is the one its open devices use), answering `{found, notes}` or
+    /// the scan's refusal.
     pub fn discover(&self, type_id: &str, deadline: Duration) -> Result<Value, CallError> {
         let inner = &self.inner;
         let catalog = self.catalog()?;
         let descriptor = catalog.find(type_id).ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("No plugin type {type_id:?}")))?;
-        let key = Self::key_of(descriptor);
-        let process = {
-            let mut state = inner.state.lock().unwrap();
-            if state.closed { return Err(CallError::lost("the plugin host is closed")); }
-            state.idle.remove(&key).or_else(|| inner.live(&key))
-        };
-        let process = match process { Some(process) => process, None => inner.spawn(&key)? };
+        if inner.state.lock().unwrap().closed { return Err(CallError::lost("the plugin host is closed")); }
+        let process = inner.acquire(&Self::key_of(descriptor), None)?;
         let answer = process.request_untracked("discover", json!({"type_id": type_id, "module": descriptor.module, "plain": true}), deadline);
-        inner.release_process(&process);
+        inner.done(&process);
         answer.map(|reply| reply.message["ok"].clone())
     }
 
-    /// Close one instance; its process stays warm for the next open of its key.
+    /// Close one instance; a process it leaves with nothing to serve ends.
     pub fn close(&self, instance: &str) -> Result<(), CallError> { self.close_within(instance, CALL_DEADLINE) }
 
     fn close_within(&self, instance: &str, deadline: Duration) -> Result<(), CallError> {
@@ -787,8 +781,7 @@ impl PluginHost {
         let closers: Vec<_> = names.into_iter().map(|name| { let host = self.clone();
             std::thread::spawn(move || { if let Err(error) = host.close_within(&name, SHUTDOWN_CLOSE) { eprintln!("Plugin {name} close: {error}"); } }) }).collect();
         for closer in closers { let _ = closer.join(); }
-        let processes: Vec<_> = { self.inner.state.lock().unwrap().idle.clear();
-            self.inner.processes.lock().unwrap().drain().map(|(_, process)| process).collect() };
+        let processes: Vec<_> = self.inner.processes.lock().unwrap().drain().map(|(_, process)| process).collect();
         let retirers: Vec<_> = processes.into_iter().map(|process| { let inner = self.inner.clone();
             std::thread::spawn(move || inner.retire(&process)) }).collect();
         for retirer in retirers { let _ = retirer.join(); }
@@ -796,12 +789,25 @@ impl PluginHost {
 }
 
 impl Inner {
-    fn group_gate(&self, key: &str) -> Arc<Mutex<()>> { self.group_gates.lock().unwrap().entry(key.to_owned()).or_default().clone() }
+    fn gate(&self, key: &str) -> Arc<Mutex<()>> { self.gates.lock().unwrap().entry(key.to_owned()).or_default().clone() }
 
-    /// The live process already serving `key` (a process group's one process).
-    fn serving(&self, key: &str) -> Option<Arc<PluginProcess>> {
-        let state = self.state.lock().unwrap();
-        state.idle.get(key).cloned().or_else(|| self.live(key))
+    /// The live process of `key`, started if there is none, now in use by `instance`
+    /// (or by a request that is no instance's, until [`Inner::done`]).
+    fn acquire(self: &Arc<Self>, key: &str, instance: Option<&str>) -> Result<Arc<PluginProcess>, String> {
+        let gate = self.gate(key);
+        let _held = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let process = match self.live(key) { Some(process) => process, None => self.spawn(key)? };
+        match instance {
+            Some(instance) => { process.instances.lock().unwrap().insert(instance.to_owned()); }
+            None => { process.users.fetch_add(1, Ordering::AcqRel); }
+        }
+        Ok(process)
+    }
+
+    /// A request that was no instance's has been answered.
+    fn done(&self, process: &Arc<PluginProcess>) {
+        process.users.fetch_sub(1, Ordering::AcqRel);
+        self.release_process(process);
     }
 
     /// A live, non-retiring process of `key`.
@@ -905,16 +911,33 @@ impl Inner {
         if !descriptor.commands.is_empty() { drop(state); (self.events)(HostEvent::CatalogChanged); }
     }
 
-    /// A process with no instance left either waits warm for its key or ends.
+    /// A process nothing uses any more ends: none waits warm for the next open (no idle
+    /// interpreter, no pre-warming). Marked retiring under its gate, so an open from now
+    /// on starts a new one rather than joining it.
     fn release_process(&self, process: &Arc<PluginProcess>) {
-        if !process.instances.lock().unwrap().is_empty() { return; }
-        let mut state = self.state.lock().unwrap();
-        if !state.closed && process.alive.load(Ordering::Acquire) && !state.idle.contains_key(&process.key) {
-            state.idle.insert(process.key.clone(), process.clone());
-            return;
+        {
+            let gate = self.gate(&process.key);
+            let _held = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !process.instances.lock().unwrap().is_empty() || process.users.load(Ordering::Acquire) > 0
+                || process.retiring.swap(true, Ordering::AcqRel) { return; }
         }
-        drop(state);
         self.retire(process);
+    }
+
+    /// An instance whose call overran its deadline leaves its process, which carries on
+    /// with the others, and fails; it can be opened again.
+    fn unresponsive(&self, process: &Arc<PluginProcess>, instance: &str) {
+        let held = self.state.lock().unwrap().instances.get(instance).filter(|entry| entry.serving.pid() == process.pid())
+            .map(|entry| (entry.descriptor.clone(), entry.run.as_ref().map(|run| run.id.clone())));
+        let Some((descriptor, run)) = held else { return };
+        let reason = format!("{instance} did not answer within its deadline; it was taken out of the plugin process");
+        eprintln!("Plugin {}:{}: {reason}", process.key, process.pid());
+        let _ = process.event("abandon", json!({"instance": instance}));
+        if let Some(run) = run { self.end_run(instance, &run, "failed", &json!({"error": reason})); }
+        self.forget(instance, &descriptor);
+        process.instances.lock().unwrap().remove(instance);
+        (self.events)(HostEvent::Failed { instances: vec![instance.to_owned()], reason });
+        self.release_process(process);
     }
 
     fn retire(&self, process: &Arc<PluginProcess>) {
@@ -973,7 +996,6 @@ impl Inner {
         let released: Vec<_> = {
             self.processes.lock().unwrap().remove(&process.pid());
             let mut state = self.state.lock().unwrap();
-            state.idle.retain(|_, idle| idle.pid() != process.pid());
             state.requests.retain(|_, (asking, _)| !Arc::ptr_eq(asking, process));
             let held: Vec<u64> = state.leases.iter().filter(|(_, (holder, _))| *holder == process.pid()).map(|(lease, _)| *lease).collect();
             held.into_iter().filter_map(|lease| state.leases.remove(&lease)).collect()
@@ -1545,11 +1567,13 @@ fn read_loop(weak: Weak<Inner>, process: Arc<PluginProcess>, mut stdout: std::pr
     if let Some(inner) = weak.upgrade() { inner.process_exited(&process, reason); }
 }
 
-/// Health: one ping per second to each process with no request in flight;
-/// a request overdue past its grace, or `MISSED_PINGS` unanswered pings in a
-/// row, make the process unresponsive, and it is ended. The ping allowance is
-/// long because a Numba compilation holds the GIL for seconds.
-const MISSED_PINGS: u64 = 30;
+/// Health, per process: a ping every second, answered by its main thread whatever
+/// its lanes are doing. `MISSED_PINGS` unanswered in a row -- the interpreter itself
+/// is stuck -- end the process, and every instance in it fails (each can be opened
+/// again). A request overdue past its grace fails only the instance it was for: that
+/// instance leaves the process, the others carry on. The ping allowance is long
+/// because a Numba compilation holds the GIL for seconds.
+const MISSED_PINGS: u64 = 60;
 
 fn watch(weak: Weak<Inner>) {
     loop {
@@ -1559,16 +1583,16 @@ fn watch(weak: Weak<Inner>) {
         drop(inner);
         for process in processes {
             if process.retiring.load(Ordering::Acquire) || !process.alive.load(Ordering::Acquire) { continue; }
-            let overdue = process.overdue_for().is_some_and(|age| age > OVERDUE_GRACE);
+            let overdue = process.overdue(OVERDUE_GRACE);
+            // An overdue request of no instance's (the handshake) is the process's own.
             let missed = process.missed_pings.load(Ordering::Relaxed);
-            if overdue || missed >= MISSED_PINGS {
+            if overdue.iter().any(Option::is_none) || missed >= MISSED_PINGS {
                 eprintln!("Plugin {}:{} is unresponsive ({}); ending it", process.key, process.pid(),
-                          if overdue { "a request is overdue".to_owned() } else { format!("{missed} pings unanswered") });
+                          if missed >= MISSED_PINGS { format!("{missed} pings unanswered") } else { "a request is overdue".to_owned() });
                 process.kill();
                 continue;
             }
-            if process.busy() { process.missed_pings.store(0, Ordering::Relaxed); continue; }
-            // Synchronous: no ping of the watcher's is in flight at the busy check.
+            if let Some(inner) = weak.upgrade() { for instance in overdue.into_iter().flatten() { inner.unresponsive(&process, &instance); } }
             if process.ping() { process.missed_pings.store(0, Ordering::Relaxed); }
             else { process.missed_pings.fetch_add(1, Ordering::Relaxed); }
         }

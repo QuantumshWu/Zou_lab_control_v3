@@ -16,7 +16,7 @@ fn file() -> PathBuf { zlc_core::checkout::local("plugins").join("catalog.cache"
 /// The key of the catalogue `config` discovers with `environment`.
 pub(crate) fn key(config: &HostConfig, environment: &[(&str, OsString)]) -> String {
     let mut hasher = DefaultHasher::new();
-    ("zlc plugin catalogue 1", crate::PROTOCOL, &config.python, &config.packages).hash(&mut hasher);
+    ("zlc plugin catalogue 2", crate::PROTOCOL, &config.python, &config.packages).hash(&mut hasher);
     for root in &config.python_path {
         root.hash(&mut hasher);
         tree(root, root, &mut hasher);

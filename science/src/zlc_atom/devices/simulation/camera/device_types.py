@@ -9,7 +9,7 @@ from zlc_atom.devices.camera.contract import EXPOSURE_STEP_SECONDS
 from zlc_atom.devices.camera.roi_grid import ROI_FIELDS, authored_roi_xywh
 from zlc_plugin import DeviceType, Opened
 
-from ..authoring import SIMULATION_GROUP, acquire_world
+from ..authoring import acquire_world
 from ..world import DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX
 from .adapter import VirtualCamera, VirtualCameraConfig
 
@@ -130,7 +130,7 @@ DEVICE_TYPES = (
             "simulated pulse board fires on its camera channel, in counts with the "
             "world's offset and electrons per count."
         ),
-        process_group=SIMULATION_GROUP,
+        simulation=True,
     ),
     DeviceType(
         "camera.virtual_mot",
@@ -140,7 +140,7 @@ DEVICE_TYPES = (
         factory=_mot_camera,
         label="Virtual MOT camera",
         description="Simulated Mono8 MOT monitor camera: free-running frames of the simulated cloud.",
-        process_group=SIMULATION_GROUP,
+        simulation=True,
     ),
 )
 

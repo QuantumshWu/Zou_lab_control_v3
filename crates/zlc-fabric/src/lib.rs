@@ -78,7 +78,7 @@ pub fn remote_type() -> serde_json::Value {
         "type_id": REMOTE_TYPE, "kind": "device", "family": "remote", "label": "Device on another bench computer",
         "description": "A device another ZLC computer publishes on the bench fabric (its Device Manager row's Remote switch); \
                         Scan hardware finds it. It works here as it does there.",
-        "module": "zlc-fabric (native)", "process_group": null, "capabilities": [], "physical_outputs": [], "commands": [],
+        "module": "zlc-fabric (native)", "capabilities": [], "physical_outputs": [], "commands": [],
         "parameters": [
             {"name": "host", "type": "str", "label": "Fabric host", "default": "", "required": true},
             {"name": "port", "type": "int", "label": "Fabric port", "default": DEFAULT_PORT, "minimum": 1, "maximum": 65535},

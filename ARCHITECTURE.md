@@ -7,9 +7,10 @@
   (Devices@, TaskConsole@, FigureViewer@ per figure, PulseGUI@, device Control and
   Log, point review, SLM Editor) is a WebView2 window of this process, drawn by the
   TypeScript interface in `apps/desktop/ui`.
-- **Plugins** (Python, one process per device or logic-node instance; devices that
-  share a simulated world share one process). The desktop starts them as
-  `python -m zlc_plugin host` from the science environment and talks to them over a
+- **Plugins** (Python, every device and logic-node instance in one process, as
+  v2; a type that declares why it cannot share it gets one of its own). The desktop
+  starts it as `python -m zlc_plugin host` from the science environment, ends it when
+  nothing uses it, and talks to it over a
   framed channel; frames and arrays travel as shared-memory blocks lent to the
   runtime without copying ([plugin protocol](docs/PLUGIN_PROTOCOL.md)).
 - **A pulse server** only where a pulse board is attached to another computer

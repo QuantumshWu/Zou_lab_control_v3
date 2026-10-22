@@ -1,18 +1,16 @@
-"""Plugin discovery: ``python -m zlc_plugin describe <package>...``.
+"""Plugin discovery: the plugin host's ``describe`` request.
 
 Imports every ``device_types.py`` (``DEVICE_TYPES``) and ``logic_node.py``
 (``LOGIC_NODE``) under the named packages' ``devices``/``nodes`` folders and
-writes one JSON document to stdout. A leaf that fails to import is reported
-with its traceback; the others stay available (PLUGIN_PROTOCOL.md §2).
+answers one JSON document. A leaf that fails to import is reported with its
+traceback; the others stay available (PLUGIN_PROTOCOL.md §2).
 """
 
 from __future__ import annotations
 
 import importlib
 import importlib.util
-import json
 import pathlib
-import sys
 import traceback
 from typing import Any, Iterator
 
@@ -80,11 +78,3 @@ def describe(packages: list[str]) -> dict[str, Any]:
                            "traceback": "".join(traceback.format_exception(error))})
     return {"protocol": list(PROTOCOL), "types": types, "errors": errors, "templates": templates}
 
-
-def main(packages: list[str]) -> int:
-    channel = sys.stdout
-    sys.stdout = sys.stderr
-    document = describe(packages or ["zlc_atom"])
-    channel.write(json.dumps(document, allow_nan=False))
-    channel.flush()
-    return 0

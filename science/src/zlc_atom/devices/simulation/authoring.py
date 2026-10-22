@@ -1,10 +1,9 @@
 """What every virtual device is told about the one world it stands in.
 
 The apparatus has ONE simulated world. Every virtual device type declares
-``process_group = SIMULATION_GROUP``, so all of them run in one plugin host
-process, and each takes the world from ``acquire_world``: the first device to
-open builds it from the installation's simulation mapping (the process group's
-parameters), the last one to close drops it.
+``simulation=True`` and takes the world from ``acquire_world``: the first device
+to open in the plugin process builds it from the installation's simulation
+mapping (``zlc_plugin.simulation_parameters``), the last one to close drops it.
 """
 
 from __future__ import annotations
@@ -21,9 +20,6 @@ from .world import (
     SimulationWorld,
     SimulationWorldConfig,
 )
-
-#: The process group every virtual device type declares.
-SIMULATION_GROUP = "simulation"
 
 SIMULATION_WORLD_SCHEMA = AuthoringSchema(
     (
@@ -74,8 +70,8 @@ def acquire_world() -> tuple[SimulationWorld, Callable[[], None]]:
 
     return zlc_plugin.share(
         "simulation.world",
-        lambda: SimulationWorld(simulation_world_config(zlc_plugin.group())),
+        lambda: SimulationWorld(simulation_world_config(zlc_plugin.simulation_parameters())),
     )
 
 
-__all__ = ["SIMULATION_GROUP", "SIMULATION_WORLD_SCHEMA", "acquire_world", "simulation_world_config"]
+__all__ = ["SIMULATION_WORLD_SCHEMA", "acquire_world", "simulation_world_config"]

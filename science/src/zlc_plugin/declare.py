@@ -166,8 +166,8 @@ class DeviceType:
 
     ``factory(key, values)`` receives the instance key and the projected
     parameters and returns the opened adapter; ``adapter.close()`` closes it.
-    State shared between instances of one ``process_group`` is a module-level
-    owner (``zlc_plugin.shared``), not a context argument.
+    Every instance runs in the one plugin process: state its instances share
+    (the simulation world) is ``zlc_plugin.share``'s, not a context argument.
     """
 
     type_id: str
@@ -177,7 +177,14 @@ class DeviceType:
     factory: Callable[[str, Mapping[str, Any]], object]
     label: str = ""
     description: str = ""
-    process_group: str | None = None
+    #: It stands in the apparatus's simulated world (v2 world_config): opened with the
+    #: installation's simulation parameters (``zlc_plugin.simulation_parameters``) and
+    #: opened again when they change.
+    simulation: bool = False
+    #: Why it cannot share the one plugin process -- a vendor SDK that crashes or hangs
+    #: its process, a DLL that conflicts with another's, a GPU context that measurably
+    #: slows the others; its instances then share one process of their own. Empty: it shares.
+    isolated: str = ""
     physical_outputs: tuple[PhysicalOutput, ...] = ()
     commands: tuple[Command, ...] = ()
     #: Hardware scan, answered by ``query discover``: (found entries
@@ -229,7 +236,7 @@ class DeviceType:
         return {
             "type_id": self.type_id, "kind": "device", "family": self.family,
             "label": self.label or self.type_id, "description": self.description, "module": module,
-            "process_group": self.process_group, "capabilities": list(self.capabilities),
+            "simulation": self.simulation, "isolated": self.isolated, "capabilities": list(self.capabilities),
             "parameters": [field_json(item) for item in _fields(self.parameters)],
             "physical_outputs": [{"name": item.name} for item in self.physical_outputs],
             "commands": [command.descriptor() for command in self.commands],
@@ -368,6 +375,8 @@ class NodeType:
     acquisition_completion: str = "ready"
     reports_ready: bool = False
     label: str = ""
+    #: As a device type's: why it cannot share the one plugin process; empty: it shares.
+    isolated: str = ""
     #: ``{type_id: values}``: node types this one took over; a saved row naming
     #: one loads as this type, its values with these over them.
     replaces: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
@@ -439,7 +448,7 @@ class NodeType:
         return {
             "type_id": self.api_name, "kind": "node", "family": self.kind.value,
             "label": self.label or self.api_name, "description": self.description.strip(), "module": module,
-            "process_group": None, "capabilities": [],
+            "isolated": self.isolated, "capabilities": [],
             "parameters": parameters,
             "physical_outputs": [], "commands": [],
             "node": {

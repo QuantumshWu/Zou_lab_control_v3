@@ -1,9 +1,11 @@
-"""One plugin host process: ``python -m zlc_plugin host`` (PLUGIN_PROTOCOL.md §1, §3-§5).
+"""The plugin host process: ``python -m zlc_plugin host``, every device and node
+instance in one process (PLUGIN_PROTOCOL.md §1, §3-§5).
 
-The main thread reads frames. ``ping``, ``cancel``, ``release`` and
+The main thread reads frames. ``ping``, ``cancel``, ``release``, ``abandon`` and
 ``run.stop`` are answered there; every other request for an instance runs on
 that instance's lane thread, in arrival order. A node run executes on its own
-thread so its lane stays free for queries and its device calls' replies.
+thread so its lane stays free for queries and its device calls' replies. The
+catalogue (``describe``) and hardware scans (``discover``) run on threads of their own.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ import numpy as np
 from . import capabilities, tunable
 from .blocks import Arena, Attachments
 from .declare import ADMIT, QUERY_PARAMETERS, DeviceType, NodeKind, NodeType, Opened, field_json
-from .describe import find
+from .describe import describe, find
 from .wire import (PROTOCOL, Channel, Decoder, Encoder, PluginError, error_payload, plain, raise_remote)
 
 
@@ -85,7 +87,6 @@ class Process:
         self.attachments = Attachments(lambda name: self._releases.put(("blocks", name)))
         self.instances: dict[str, Instance] = {}
         self.shared: dict[str, Any] = {}
-        self.group: dict[str, Any] = {}
         self._pending: dict[int, _Pending] = {}
         self._pending_lock = threading.Lock()
         self._ids = itertools.count(1)
@@ -199,6 +200,12 @@ class Process:
             instance = self.instances.get(str(params.get("instance")))
             if instance is not None:
                 instance.stop_run(str(params.get("run")))
+        elif op == "abandon":
+            # The core gave up on an instance whose call overran its deadline (§7): it
+            # leaves now, so it can be opened again; its lane ends when that call returns.
+            instance = self.instances.pop(str(params.get("instance")), None)
+            if instance is not None:
+                instance.abandon()
 
     def _discover(self, identity: int, params: dict[str, Any]) -> None:
         try:
@@ -208,6 +215,12 @@ class Process:
             found, notes = declared.discover()
             self.reply(identity, {"found": [dict(entry) for entry in found], "notes": [str(note) for note in notes]}, plain=True)
         except BaseException as error:  # noqa: BLE001 -- the scan's own refusal, reported per family
+            self.reply(identity, error=error)
+
+    def _describe(self, identity: int, params: dict[str, Any]) -> None:
+        try:
+            self.reply(identity, describe([str(package) for package in params.get("packages") or ()]), plain=True)
+        except BaseException as error:  # noqa: BLE001 -- the catalogue's own failure, said to the core
             self.reply(identity, error=error)
 
     def _request(self, message: dict[str, Any]) -> str | None:
@@ -220,7 +233,6 @@ class Process:
                 self.reply(identity, error=PluginError("invalid", f"protocol {major} is not {PROTOCOL[0]}"))
                 return "exit"
             self.session = str(params["session"])
-            self.group = dict(params.get("group") or {})
             self.arena = Arena(self.session)
             self.reply(identity, {"protocol": list(PROTOCOL), "pid": os.getpid(),
                                   "python": sys.version.split()[0], "sdk": "zlc_plugin 1"})
@@ -231,12 +243,13 @@ class Process:
         if op == "exit":
             self.reply(identity, {})
             return "exit"
-        if op == "discover":
-            # A hardware scan of one type, no instance opened (v2 Scan hardware): on a
-            # thread of its own, so a vendor call that hangs holds up neither this
-            # process's other instances nor its channel; the core stops waiting at its
-            # deadline and a late answer is dropped.
-            threading.Thread(target=self._discover, args=(identity, params), name="zlc-discover", daemon=True).start()
+        if op in ("discover", "describe"):
+            # A hardware scan of one type, no instance opened (v2 Scan hardware), or the
+            # catalogue: on a thread of its own, so a vendor call that hangs or a slow
+            # import holds up neither this process's instances nor its channel; the core
+            # stops waiting at its deadline and a late answer is dropped.
+            target = self._discover if op == "discover" else self._describe
+            threading.Thread(target=target, args=(identity, params), name=f"zlc-{op}", daemon=True).start()
             return None
         name = str(params.get("instance", ""))
         instance = self.instances.get(name)
@@ -272,6 +285,7 @@ class Instance:
     def __init__(self, owner: Process, name: str) -> None:
         self.process = owner
         self.name = name
+        self.abandoned = False
         self.declared: DeviceType | NodeType | None = None
         self.adapter: object | None = None
         self.closer: Callable[[], None] | None = None
@@ -288,7 +302,16 @@ class Instance:
         while True:
             message = self.lane.get()
             if message is None or not self._handle(message):
-                return
+                break
+        if self.abandoned:
+            # Its overrunning call has returned: what the device holds is let go.
+            self.shutdown()
+
+    def abandon(self) -> None:
+        self.abandoned = True
+        for run in list(self.runs.values()):
+            run.cancel.set()
+        self.lane.put(None)
 
     def _handle(self, message: dict[str, Any]) -> bool:
         """Answer one request; False when the instance is gone.
@@ -388,9 +411,14 @@ def _open(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
     instance.declared = declared
     if isinstance(declared, DeviceType):
         values = _projected(declared.project, params.get("parameters"))
-        instance.process.group = dict(params.get("group") or {})
         instance.values = values
-        opened = declared.factory(instance.name, values)
+        # This open's simulation parameters (``simulation_parameters``), whatever else
+        # the process opens beside it.
+        _OPENING.simulation = dict(params.get("simulation") or {})
+        try:
+            opened = declared.factory(instance.name, values)
+        finally:
+            _OPENING.simulation = None
         if isinstance(opened, Opened):
             instance.adapter, instance.closer, instance.admit_peers = opened.adapter, opened.close, opened.admit_peers
         else:
@@ -919,14 +947,14 @@ _SHARED_LOCK = threading.RLock()
 def share(name: str, build: Callable[[], Any]) -> tuple[Any, Callable[[], None]]:
     """The one object of this name in this process, and a release for this user.
 
-    A process group's shared state (the simulation world) is built by its
-    first user and dropped when the last one releases it, so reopening every
-    device of the group starts from a fresh object.
+    State its instances share (the simulation world every virtual device stands
+    in) is built by its first user and dropped when the last one releases it, so
+    reopening them all starts from a fresh object.
     """
 
     owner = process()
-    # Instances of a group open on their own lanes at the same time (Init opens them in
-    # parallel): finding or building the object is one step, or each builds its own world.
+    # Instances open on their own lanes at the same time (Init opens them in parallel):
+    # finding or building the object is one step, or each builds its own world.
     with _SHARED_LOCK:
         entry = owner.shared.get(name)
         if entry is None:
@@ -946,10 +974,15 @@ def share(name: str, build: Callable[[], Any]) -> tuple[Any, Callable[[], None]]
     return entry[0], release
 
 
-def group() -> dict[str, Any]:
-    """The process group's parameters as the installation states them ({} outside a group)."""
+#: The device being opened on this thread: its simulation parameters.
+_OPENING = threading.local()
 
-    return dict(process().group)
+
+def simulation_parameters() -> dict[str, Any]:
+    """The installation's simulation parameters, as given to the device being opened
+    (its type declares ``simulation=True``); {} for any other."""
+
+    return dict(getattr(_OPENING, "simulation", None) or {})
 
 
 def allocate(shape: tuple[int, ...] | int, dtype: Any) -> Any:

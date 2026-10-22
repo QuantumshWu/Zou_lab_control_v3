@@ -213,7 +213,7 @@ pub(crate) fn descriptor(item: &zlc_plugin_host::TypeDescriptor) -> Value {
     let mut node = item.node.clone().unwrap_or(Value::Null);
     if node.is_object() { node["queries"] = json!(item.queries); }
     json!({"type_id": item.type_id, "kind": item.kind, "family": item.family, "label": item.label, "description": item.description,
-        "module": item.module, "process_group": item.process_group, "capabilities": item.capabilities, "parameters": item.parameters,
+        "module": item.module, "simulation": item.simulation, "capabilities": item.capabilities, "parameters": item.parameters,
         "physical_outputs": item.physical_outputs.iter().map(|output| json!({"name": output.name})).collect::<Vec<_>>(),
         "commands": item.commands.iter().map(|command| json!({"name": command.name, "summary": command.summary, "read_only": command.read_only,
             "drives": command.drives, "input_schema": command.input_schema, "params": command.params, "file": command.file})).collect::<Vec<_>>(),

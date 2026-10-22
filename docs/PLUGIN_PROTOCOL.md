@@ -2,7 +2,7 @@
 
 Python plugins (device drivers, logic nodes, the WGS/SLM glue they contain) run
 outside the Rust core. The core has no interpreter and no GIL; a plugin crash or
-hang loses that plugin, never the application or its data. This document is the
+hang loses plugins, never the application or its data. This document is the
 contract between `crates/zlc-plugin-host` (Rust) and `science/src/zlc_plugin`
 (the Python SDK). Changes after announcement are small commits titled `API: ...`.
 
@@ -13,27 +13,25 @@ is one Start..terminal of a node instance.
 
 ## 1. Process model
 
-**One host process per plugin instance.** The core starts
-`python -m zlc_plugin host` for every opened device instance and for every node
-instance; it lives until that instance is closed. A node instance keeps its
-process (and its warm imports, Numba caches, GPU context) across runs, so Start
-does not pay interpreter startup.
+**One plugin process, as v2.** The core runs every opened device instance and
+every node instance in one `python -m zlc_plugin host` process, each instance on
+its own lane (section 4), so devices still open in parallel and a node's run, a
+device's call and a query never wait on one another beyond the GIL. The process
+starts with the first instance (or the catalogue, or a hardware scan) and ends
+when nothing uses it any more: no process waits warm for the next open, none is
+started ahead. A node instance keeps its warm imports, Numba caches and GPU context
+across runs, so Start does not pay interpreter startup. State instances share --
+the simulation `SimulationWorld` every virtual device stands in, a vendor runtime
+that is a process singleton (libdaq2, DCAM) -- is simply in that one process.
+Plugins never render plots and never own Runtime history; the GIL that once made
+one process slow belonged to the plots, which are Rust now.
 
-**Process groups** are the one exception: a type may declare
-`process_group = "<key>"`; all open instances whose types name the same key share
-one host process, each still with its own lane (section 4). This exists only for
-real in-process shared state: the simulation `SimulationWorld` that the virtual
-camera, sequencer and SLM all observe, or a vendor library that is a process
-singleton (libdaq2 addressed by serial, DCAM). It is not a performance knob.
-
-Why per instance (rather than one shared plugin process): the v3 measurements
-put the four-panel slowness on one shared GIL (`FOUR_PANEL_GIL_ROOT_CAUSE.md`);
-a camera intake thread must not wait on another device's numpy or a node's fit.
-A vendor SDK that hangs or segfaults takes only its own instance. SDK thread
-affinity is per process. Devices open in parallel because they are separate
-processes ("devices do not compose": no device sees a sibling). Cost: one Python
-interpreter per instance (~40-150 MB with numpy/zlc_data), paid at open, not per
-run or per shot. Plugins never render plots and never own Runtime history.
+**Isolation by declaration only.** A type that truly cannot share the process
+declares why (`DeviceType(isolated="...")`, `NodeType(isolated="...")`, descriptor
+`isolated`): a vendor SDK that crashes or hangs its process, a DLL that conflicts
+with another's, a GPU context that measurably slows the others. Its instances
+then share one process of their own; the reason stands beside the declaration.
+No type declares it today.
 
 Every child is placed in one Windows Job object with KILL_ON_JOB_CLOSE, so no
 plugin survives the core (no orphan holding a camera). The core spawns children
@@ -41,9 +39,10 @@ with `PYTHONHOME` removed, `PYTHONPATH` = the configured science/plugin roots,
 the interpreter's base installation (a venv's `pyvenv.cfg` `home`; for conda its
 `Library\bin` and the other folders activation adds) first on `PATH`, and v2's
 thread policy (`OPENBLAS_NUM_THREADS` min(4, CPUs), `NUMBA_THREADING_LAYER=omp`,
-`OMP_WAIT_POLICY=PASSIVE`, each unless set). The interpreter is
-`ZLC_PLUGIN_PYTHON` when set, else the checkout's `.tools\science-env`
-(`ZLC_V3_TOOLS` moves `.tools`): the executable needs no launcher.
+`OMP_WAIT_POLICY=PASSIVE`, each unless set). The interpreter is the one
+`zlc_plugin_host::plugin_python` resolves (`ZLC_PLUGIN_PYTHON` when set, else the
+answer of `tools\install_science.ps1 -PluginPython`), for the plugin process, the
+catalogue and hardware scans alike: the executable needs no launcher.
 
 ## 2. Discovery and descriptors
 
@@ -52,9 +51,10 @@ Plugin folders follow v2's layout rule, one folder = one device:
 (a tuple of `zlc_plugin.DeviceType`) and `zlc_atom/nodes/<node>/logic_node.py`
 exporting `LOGIC_NODE` (a `zlc_plugin.NodeType`). Family folders hold only shared
 contracts. The descriptor is written once, in Python, beside the code it
-describes. The core learns it by running one short-lived
-`python -m zlc_plugin describe <package...>`, which imports each leaf module and
-prints one JSON document `{"protocol": [2, 0], "types": [...], "errors": [...]}`.
+describes. The core learns it by asking the plugin process `describe {packages}`,
+which imports each leaf module and answers one JSON document `{"protocol": [2, 0],
+"types": [...], "errors": [...]}` (kept in `.local\plugins\catalog.cache` until a
+source or the environment changes).
 A module that fails to import is reported in `errors` with its traceback; the
 other types remain available. The core never imports plugin code.
 
@@ -68,7 +68,8 @@ A type descriptor (JSON, the only form the core sees):
   "label": "Virtual MOT camera",
   "description": "What it is for, for operators and AI clients.",
   "module": "zlc_atom.devices.simulation.camera.device_types",
-  "process_group": null,
+  "simulation": true,                    // device only: stands in the simulated world (section 3)
+  "isolated": "",                        // why it cannot share the plugin process ("" = it shares; section 1)
   "capabilities": ["camera.adapter"],    // device: SPI contracts it implements
   "parameters": [Field...],              // instance configuration (authoring schema)
   "physical_outputs": [{"name": "mot_coils"}],   // device only: what Stop all drives safe
@@ -155,19 +156,23 @@ spawned -> ready -> open -> (idle <-> running) -> closing -> closed
 | Step | Core sends | Plugin does | Reply |
 |---|---|---|---|
 | handshake (process) | `hello {protocol, session}` | creates its block arena | `{protocol, pid, python, sdk}` |
-| open | `open {instance, type_id, module, parameters, group}` | imports the type's module; device: `factory(instance, projected parameters)` builds and opens the adapter; node: keeps the draft | `{state, tunable, reads}` |
+| open | `open {instance, type_id, module, parameters, simulation}` | imports the type's module; device: `factory(instance, projected parameters)` builds and opens the adapter; node: keeps the draft | `{state, tunable, reads}` |
 | configure | `configure {instance, parameters}` | device: `adapter.reconfigure(values)` or refuses | `{state}` |
 | start (node) | `run.start {instance, run, values, devices, resources, source_signal, run_directory, origin}` | builds the node (`build(**values, **devices, **{arg_key: instance})`), runs `execute(ctx)` on its run thread | `{run}` immediately; terminal via `run.finished` event |
 | stop (node) | event `run.stop {instance, run}` | sets the run's cancel flag | none |
 | health | `ping` | answered by the reader thread (proves the interpreter and GIL are alive) | `{}` |
-| hardware scan (process) | `discover {type_id, module}` (no instance; in the type's process, so a group's shared runtime -- DCAM -- is the one asked) | the type's `discover()` on a thread of its own | `{found: [{instance_id, role, parameters}], notes}`; the core stops waiting at its deadline (20 s, v2) and drops a late answer |
-| close | `close {instance}` | device: its closer (stop capture, release SDK); node: stop run | `{state}`; the process stays |
+| catalogue (process) | `describe {packages}` | imports every leaf module on a thread of its own | the descriptor document (section 2) |
+| hardware scan (process) | `discover {type_id, module}` (no instance; in the process its instances open in, so a vendor runtime that is a process singleton -- DCAM -- is the one its devices use) | the type's `discover()` on a thread of its own | `{found: [{instance_id, role, parameters}], notes}`; the core stops waiting at its deadline (20 s, v2) and drops a late answer |
+| close | `close {instance}` | device: its closer (stop capture, release SDK); node: stop run | `{state}`; a process left with nothing to serve ends |
+| abandon | event `abandon {instance}` | the instance leaves the process at once; its lane closes it when its overrunning call returns | none |
 | exit (process) | `exit` | closes what is left | `{}`, then exits 0 |
 
-`group` is the process group's parameters as the installation states them
-(the simulation mapping); `zlc_plugin.group()` returns them and
-`zlc_plugin.share(name, build)` gives a group's devices one shared object, built
-by the first and dropped by the last to close. Device open is per instance and
+`simulation` is the installation's simulation mapping, given to a device type
+that declares `simulation=True` (v2 world_config; the workbench opens those again
+when it changes); `zlc_plugin.simulation_parameters()` returns the ones the device
+being opened was given, and `zlc_plugin.share(name, build)` gives the process's
+instances one shared object (the world), built by the first and dropped by the
+last to close. Device open is per instance and
 parallel; the core admits opened instances in the operator's order (v2's
 `_build_together`). A failed open reports its error and the instance is gone;
 nothing half-open is admitted. The core ends a process with `exit` (or by
@@ -399,19 +404,23 @@ with the remote traceback attached as a note.
 
 Deadlines: the caller states `deadline_ms`; on expiry the caller gets `timeout`.
 The callee is not interrupted (a running operation stops cooperatively, through
-its bounded timeouts or the run's `run.stop`). An instance that leaves a request unanswered for deadline + 5 s,
-or, with no request in flight, misses 30 consecutive `ping`s (1 s period; a Numba
-compilation holds the GIL for seconds), is **unresponsive**: the core marks it
-failed, seals its running generation as failed with that reason, and terminates
-the process. Process exit (stdout EOF) is detected immediately and handled the
-same way, with the exit code and the last stderr lines as the reason.
+its bounded timeouts or the run's `run.stop`). An instance that leaves a request
+unanswered for deadline + 5 s is **unresponsive**: the core marks it failed, seals
+its running generation as failed with that reason and tells the process `abandon`;
+the process and its other instances carry on, and the instance can be opened again.
+A process whose reader thread misses 60 consecutive `ping`s (1 s period, sent
+whatever its lanes are doing; a Numba compilation holds the GIL for seconds) is
+stuck as a whole: the core terminates it. Process exit (stdout EOF) is detected
+immediately; every instance in the process then fails with the exit code and the
+last stderr lines as the reason, and each can be opened again.
 
 Stop all (core, `zlc_core::control::SafeActions`): on open the core registers every
 declared physical output; the safe action is `make_safe {output}` to the plugin
 (deadline 2 s), which calls the adapter's `make_safe(output)`. `stop_all` runs every
-one and is never refused. A device that fails, hangs or exits is that device's error
-state (v2): the runs that claim it stop with the error, nothing else is touched, and
-`apply_devices` reopens it.
+one and is never refused. A device that fails or hangs is that device's error state
+(v2): the runs that claim it stop with the error, nothing else is touched, and
+`apply_devices` reopens it. A plugin process that exits takes every instance in it
+into that state.
 
 Claims (core): `run.start` names the device instances bound to each requirement;
 the core claims them for the run. `device` calls are routed only to devices the

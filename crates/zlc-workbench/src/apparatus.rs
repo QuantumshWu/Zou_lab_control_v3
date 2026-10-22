@@ -13,8 +13,6 @@ use crate::{Host, Ticket, Workbench, fields, text, workspace};
 
 pub const FORMAT: &str = "zlc.installation";
 const ENTRY_KEYS: [&str; 4] = ["instance_id", "role", "type_id", "parameters"];
-/// Types in this process group observe the one simulated world.
-const SIMULATION_GROUP: &str = "simulation";
 /// How long an Apply or Close waits for the runs it stopped (v2 device maintenance).
 const MAINTENANCE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -504,7 +502,7 @@ impl Workbench {
     }
 
     fn simulated(&self, type_id: &str) -> bool {
-        self.catalog.get(type_id).is_some_and(|item| item.process_group.as_deref() == Some(SIMULATION_GROUP))
+        self.catalog.get(type_id).is_some_and(|item| item.simulation)
     }
 
     /// The instrument a row names (its type's identity over its settings), if its type says.

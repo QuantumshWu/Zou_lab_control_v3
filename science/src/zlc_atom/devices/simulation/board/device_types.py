@@ -25,7 +25,7 @@ from typing import Any, Mapping
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_plugin import DeviceType, Opened
 
-from ..authoring import SIMULATION_GROUP, acquire_world
+from ..authoring import acquire_world
 
 #: The board line wired to the virtual site camera's trigger, as ``board.xdc`` names it.
 CAMERA_TRIGGER_CHANNEL = "emCCD"
@@ -99,7 +99,7 @@ DEVICE_TYPES = (
             "probe and trap windows load and lose atoms, camera-trigger windows expose the "
             "virtual site camera, DAC buses set the bias field. Driven by the core's virtual sequencer."
         ),
-        process_group=SIMULATION_GROUP,
+        simulation=True,
         # SAFE must reach the run being played, which holds the lane.
         concurrent=("safe",),
         # Not an apparatus row: the core's virtual sequencer opens it as its world

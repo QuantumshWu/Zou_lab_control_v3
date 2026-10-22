@@ -1,4 +1,4 @@
-//! Plugin type descriptors as `python -m zlc_plugin describe` prints them (PLUGIN_PROTOCOL.md §2, §8).
+//! Plugin type descriptors as the plugin process's `describe` answers them (PLUGIN_PROTOCOL.md §2, §8).
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -37,7 +37,12 @@ pub struct TypeDescriptor {
     pub label: String,
     pub description: String,
     pub module: String,
-    pub process_group: Option<String>,
+    /// A device standing in the simulated world, opened with the installation's simulation parameters.
+    #[serde(default)]
+    pub simulation: bool,
+    /// Why the type cannot share the one plugin process; empty: it shares it.
+    #[serde(default)]
+    pub isolated: String,
     pub capabilities: Vec<String>,
     /// Authoring fields (PLUGIN_PROTOCOL.md §2 `Field`), as data.
     pub parameters: Vec<Value>,
@@ -118,7 +123,7 @@ mod tests {
         assert!(!method_reads("tune", &reads) && !method_reads("set_output", &reads));
         let descriptor: TypeDescriptor = serde_json::from_value(serde_json::json!({
             "type_id": "rf.x", "kind": "device", "family": "rf", "label": "x", "description": "", "module": "m",
-            "process_group": null, "capabilities": [], "parameters": [], "physical_outputs": [{"name": "rf"}],
+            "capabilities": [], "parameters": [], "physical_outputs": [{"name": "rf"}],
             "commands": [{"name": "status", "summary": "s", "read_only": true, "params": [], "input_schema": {}}], "queries": []})).unwrap();
         assert_eq!(descriptor.physical_outputs[0].name, "rf");
         assert!(descriptor.commands[0].read_only);

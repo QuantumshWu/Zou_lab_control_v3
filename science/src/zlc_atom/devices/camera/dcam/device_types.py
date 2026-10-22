@@ -99,9 +99,6 @@ DEVICE_TYPES = (
             "Mono16 frames, exposure, readout speed and ROI from the configuration; "
             "offset and electrons per count state its photoelectron conversion."
         ),
-        # DCAM's runtime is a process singleton shared by every camera and by
-        # discovery: all DCAM instances live in one host process.
-        process_group="dcam",
         discover=_discover_dcam,
     ),
 )
