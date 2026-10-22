@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
-use zlc_core::runtime::{Generation, HistoryLease, Read, Runtime, RuntimeError, SignalDescription, PublicationKey};
+use zlc_core::runtime::{Front, Generation, HistoryLease, Read, Runtime, RuntimeError, SignalDescription, PublicationKey};
 use zlc_plot::session::{ImagePointOverlay, OverlayArray, PointStatus};
 
 /// The worker must hold this same lock across the permission check and commit.
@@ -99,13 +99,15 @@ pub struct Panels {
     prefix: String,
     /// The point reviews' layer revisions, one counter for all.
     review_revision: u64,
+    /// This board's last same-shot selection, its own whatever other boards read.
+    front: Mutex<Front>,
 }
 
 impl Default for Panels { fn default() -> Self { Self::new() } }
 
 impl Panels {
     pub fn new() -> Self { Self::with_prefix("panel") }
-    pub fn with_prefix(prefix: impl Into<String>) -> Self { Self { bindings: BTreeMap::new(), next_id: 1, prefix: prefix.into(), review_revision: 0 } }
+    pub fn with_prefix(prefix: impl Into<String>) -> Self { Self { bindings: BTreeMap::new(), next_id: 1, prefix: prefix.into(), review_revision: 0, front: Mutex::default() } }
 
     pub fn has(&self, panel: &str) -> bool { self.bindings.contains_key(panel) }
 
@@ -347,7 +349,8 @@ impl Panels {
                 epoch: binding.epoch, read: None, overlay: None, layer: binding.layer.clone(), reason, waiting: blank });
         }
         // One Runtime lock captures all panels, including different windows on one source.
-        for ((index, overlay), answer) in positions.into_iter().zip(runtime.read_coherent_views(&requests)) {
+        let answers = runtime.read_coherent_views(&requests, &mut self.front.lock().unwrap_or_else(|error| error.into_inner()));
+        for ((index, overlay), answer) in positions.into_iter().zip(answers) {
             match answer {
                 Ok(read) if overlay => inputs[index].overlay = Some(read),
                 Ok(read) => inputs[index].read = Some(read),
@@ -355,6 +358,13 @@ impl Panels {
                 Err(_) if overlay => {}
                 Err(RuntimeError::NoData) => { inputs[index].reason = Some("Waiting for data".into()); inputs[index].waiting = true; }
                 Err(error) => inputs[index].reason = Some(error.to_string()),
+            }
+        }
+        // A judgement is drawn only on the shot it judged: one that is not of
+        // the picture (routed from elsewhere, or left from an older shot) is not drawn.
+        for input in &mut inputs {
+            if input.overlay.as_ref().is_some_and(|overlay| input.read.as_ref().is_none_or(|read| overlay.shot_roots() != read.shot_roots())) {
+                input.overlay = None;
             }
         }
         inputs
