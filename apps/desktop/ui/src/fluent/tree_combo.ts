@@ -1,5 +1,5 @@
 import { comboFace, hintWidest } from "./combo.js";
-import { element } from "./dom.js";
+import { assign, element } from "./dom.js";
 
 /** One keyed choice: its opaque key, its row's words, and what the closed box
  * says when it is picked (v2 choice_tree_groups' `full_label`). */
@@ -127,7 +127,7 @@ export class TreeCombo {
     this.root.classList.toggle("blank", !leaf);
     if (this.open) this.render();
   }
-  set disabled(disabled: boolean) { this.root.disabled = disabled; if (disabled && this.open) this.list.hidePopover(); }
+  set disabled(disabled: boolean) { assign(this.root, "disabled", disabled); if (disabled && this.open) this.list.hidePopover(); }
   set title(text: string) { if (this.root.title !== text) this.root.title = text; }
 
   private leaf(key: string): TreeLeaf | undefined {

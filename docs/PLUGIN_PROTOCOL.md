@@ -85,7 +85,8 @@ A type descriptor (JSON, the only form the core sees):
                  "protected_fields": ["exposure", "roi_x"], "enabled_when": null}],
     "previews": [...], "reports_ready": true, "acquisition_input": "", "acquisition_completion": "ready",
     "artifact_outputs": [...], "selection_mappings": [...], "workspace_resources": [...],
-    "replaces": {"post_selected_occupancy": {"post_selection": true}}  // types it took over: a saved row naming one loads as this type, these values over its own
+    "replaces": {"post_selected_occupancy": {"post_selection": true}},  // types it took over: a saved row naming one loads as this type, these values over its own
+    "answers": {"editor_facts": {...}, "resolve_defaults": {...}}  // its draft queries' answers for its default draft
   },
   "queries": ["declare_outputs", "resolve_field_availability"]
 }
@@ -125,6 +126,12 @@ move them meanwhile) and passes each device as `argument` (a tunable proxy).
 for fields whose options come from the draft (an SLM rearrangement's imaging
 periods are the chosen pulse's periods); the form shows that field as a choice,
 and a value it holds that is not among them as unavailable, never replaced.
+
+A node's page draws the newest answers it has, never an empty draft: a node just
+added draws `node.answers` (the SDK answers each draft query for the type's default
+draft, no devices, files or source, while it describes the type; one that cannot is
+left out), and a draft just edited draws the answers of the one before it until its
+own land. Only a Start waits for the draft's own answers (`Checking the draft…`).
 
 Capabilities name a device SPI by token (`camera.adapter`, `rf.source`,
 `slm.phase`, `waveform.source`; the pulse board is native and no plugin claims it:

@@ -361,9 +361,8 @@ impl Workbench {
         for node in std::mem::take(&mut self.nodes) { self.plugins.close(&node.id); }
         for node in loaded.nodes {
             self.plugins.open(&node.id, &node.type_id, &json!({}), &json!({}));
-            self.nodes.push(Node { id: node.id, name: node.name, type_id: node.type_id, draft: node.draft, auto_preview: node.auto_preview,
-                revision: 1, running: None, run: None, starts: 0, error: None, follow: false, follow_attempted: None, pending: None,
-                removing: false, instance: Instance::Opening, answers: BTreeMap::new(), resources: Map::new(), resource_issues: Vec::new(), start_after_check: None });
+            let descriptor = self.catalog.get(&node.type_id);
+            self.nodes.push(Node::new(node.id, node.name, node.type_id, node.draft, node.auto_preview, descriptor));
         }
         let mut notes = loaded.notes;
         for panel in loaded.panels {

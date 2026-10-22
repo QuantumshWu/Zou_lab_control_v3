@@ -1,5 +1,5 @@
 import { prompt } from "./dialog.js";
-import { button, element, token } from "./dom.js";
+import { assign, button, element, token } from "./dom.js";
 import { glyphFace, setGlyph } from "./ink.js";
 
 /** The decimal places `value` is written with (1e-05: 5). */
@@ -163,12 +163,12 @@ export class SpinBox {
   /** stepEnabled: a direction the box cannot move in is dimmed. */
   refresh(): void {
     const live = !this.input.disabled && !this.input.readOnly;
-    this.up.disabled = !live || this.target(1) === null;
-    this.down.disabled = !live || this.target(-1) === null;
+    assign(this.up, "disabled", !live || this.target(1) === null);
+    assign(this.down, "disabled", !live || this.target(-1) === null);
     if (!this.chip) return;
     const text = stepText(this.step());
     setGlyph(this.chip.firstElementChild as HTMLElement, text, "chip");
-    this.chip.disabled = this.input.disabled;
+    assign(this.chip, "disabled", this.input.disabled);
     const tip = live ? `Step ${text.slice(1)} · click to change` : `Step ${text.slice(1)}`;
     if (this.chip.title !== tip) this.chip.title = tip;
     if (this.fitted !== `${text} ${this.input.value}`) SpinBox.queue(this);

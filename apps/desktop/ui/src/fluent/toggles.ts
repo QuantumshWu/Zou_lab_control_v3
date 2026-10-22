@@ -1,4 +1,4 @@
-import { button, element, type Value } from "./dom.js";
+import { assign, button, element, type Value } from "./dom.js";
 
 const encode = (value: Value): string => JSON.stringify(value);
 
@@ -80,6 +80,6 @@ export class Segmented {
   }
   set disabled(disabled: boolean) {
     this.root.classList.toggle("disabled", disabled);
-    for (const node of this.buttons.values()) node.disabled = disabled;
+    for (const node of this.buttons.values()) assign(node, "disabled", disabled);
   }
 }
