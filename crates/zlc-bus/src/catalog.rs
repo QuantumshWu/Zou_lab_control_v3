@@ -1088,7 +1088,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!("estimate_node", NodeRef, read, false, "The node type's estimate of a run with this draft (duration, shots), when it gives one."),
     command!("start_node", StartNode, control, false,
         "Start (or restart) a node: claims its devices, starts its run; a processor follows its source. Task runs get a run directory."),
-    command!("stop_node", NodeRef, control, false, "Stop a node's run (data is kept and sealed). Never refused."),
+    command!("stop_node", NodeRef, control, false, "Stop a node's run (its data is kept and sealed; a processor's signals are withdrawn, as v2). Never refused."),
     command!("remove_node", NodeRef, control, false, "Remove a node; a running one stops first."),
     command!("answer_request", AnswerRequest, control, false, "Answer the operator request a running node is waiting on."),
     command!("list_runs", ListRuns, read, true, "Runs of this session, newest first."),

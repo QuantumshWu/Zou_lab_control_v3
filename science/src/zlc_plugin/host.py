@@ -302,11 +302,12 @@ class Instance:
         try:
             params = self.process.decode(message.get("p") or {})
             if op == "run.deliver":
-                # Answered by the run thread once the delivery is evaluated and committed.
+                # Answered by the run thread once taken, or refused once the run has ended.
                 run = self.runs.get(str(params.get("run")))
                 if run is None:
-                    raise PluginError("stale_run", f"{params.get('run')} is not running here")
-                run.deliveries.put((identity, params))
+                    _refuse_delivery(self.process, identity, params)
+                else:
+                    run.deliver(identity, params)
                 return True
             handler = _HANDLERS.get(op)
             if handler is None:
@@ -765,6 +766,8 @@ class Run:
         #: seal_terminal's facts: sealed runs ignore a later Stop.
         self.lock = threading.Lock()
         self.sealed = self.stop_accepted = self.partial = False
+        #: Set when the run has ended: a delivery is then refused, not queued.
+        self.ended = False
         self.partial_exit_writer: Callable[[str, BaseException], None] | None = None
         self.context = RunContext(self)
         #: A processor's deliveries (request id, params), answered once committed.
@@ -772,6 +775,23 @@ class Run:
         #: What this run's deliveries name by number: schemas, source run records.
         self.refs = RunRefs()
         self.thread = threading.Thread(target=self._main, name=f"zlc-run-{instance.name}", daemon=True)
+
+    def deliver(self, identity: int, params: dict[str, Any]) -> None:
+        """Queue one delivery for the run thread, which answers it; refuse one that comes after the end."""
+
+        with self.lock:
+            if not self.ended:
+                self.deliveries.put((identity, params))
+                return
+        _refuse_delivery(self.instance.process, identity, params)
+
+    def _end_deliveries(self) -> None:
+        """The run has ended: each delivery it did not take is refused, so the core's wait on it ends."""
+
+        with self.lock:
+            self.ended = True
+        while not self.deliveries.empty():
+            _refuse_delivery(self.instance.process, *self.deliveries.get_nowait())
 
     def _process(self, node: Any) -> dict[str, Any]:
         """v2's follow processor: evaluate each delivery in order and commit it
@@ -875,6 +895,15 @@ class Run:
             process.send({"t": "evt", "op": "run.finished", "p": encoded, "blocks": blocks})
         finally:
             self.instance.runs.pop(self.run_id, None)
+            self._end_deliveries()
+
+
+def _refuse_delivery(process: Any, identity: int, params: dict[str, Any]) -> None:
+    """Answer a delivery its run will not take (`stale_run`), letting go of its reads."""
+
+    for read in (params.get("inputs") or {}).values():
+        process.release_lease(int(read["lease"]))
+    process.reply(identity, error=PluginError("stale_run", f"{params.get('run')} is not running here"))
 
 
 def plain_result(value: Any) -> Any:

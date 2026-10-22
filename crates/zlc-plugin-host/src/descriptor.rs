@@ -66,6 +66,14 @@ fn yes() -> bool { true }
 impl TypeDescriptor {
     pub fn is_device(&self) -> bool { self.kind == "device" }
 
+    /// The dataset input a node run uses: the first whose `enabled_when` the run's
+    /// values (a parameter's default where not given) meet (v2 `dataset_inputs`).
+    pub fn active_input(&self, values: &Value) -> Option<&Value> {
+        let value = |name: &Value| name.as_str().and_then(|name| values.get(name)
+            .or_else(|| self.parameters.iter().find(|field| field["name"] == name).map(|field| &field["default"]))).unwrap_or(&Value::Null);
+        self.node.as_ref()?["inputs"].as_array()?.iter().find(|input| input["enabled_when"].as_array()
+            .is_none_or(|rule| rule.get(1).and_then(Value::as_array).is_some_and(|offered| offered.contains(value(&rule[0])))))
+    }
 }
 
 /// Whether an SPI method only reads: an attribute (`get:<name>`), the knobs

@@ -128,13 +128,25 @@ type Result<T> = std::result::Result<T, RuntimeError>;
 #[derive(Clone, Copy)]
 pub enum DeliveryPolicy {
     Latest,
-    /// Payload bounds deduplicate DataBlock owners; finite prefixes use their
-    /// largest queued prefix per generation/signal, conservatively summed.
-    /// Overflow fails this subscription without stalling the producer.
+    /// Payload bounds deduplicate DataBlock owners. An event counts the blocks
+    /// it pins itself (with its causal closure), never the finite prefix its
+    /// run's store already holds. Overflow fails this subscription without
+    /// stalling the producer.
     Exact { max_events: usize, max_referenced_bytes: usize },
+    /// v2's exact follow queue: at most 1024 events pending, pinning at most
+    /// max(128 MiB, 32 × its first event's payload).
+    Follow,
 }
+const FOLLOW_EVENTS: usize = 1024;
+const FOLLOW_BYTES: u128 = 128 << 20;
+const FOLLOW_FIRST_EVENTS: u128 = 32;
 #[derive(Clone, Copy)]
-pub enum Start { Next, Current }
+pub enum Start {
+    Next, Current,
+    /// Every event a finite run has committed, in commit order, then the live
+    /// ones (v2's exact follow of a finite run); otherwise as Current.
+    Replay,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadMode { Event, Dataset, Window(usize) }
@@ -265,9 +277,20 @@ struct Signal {
     views: HashMap<usize, Weak<WindowRead>>, view_epoch: u64,
     window_schemas: HashMap<usize, Arc<DatasetSchema>>, history_axis: Arc<str>,
     store: Option<DatasetStore>, history_capable: bool,
+    /// Each event the finite store holds, in its segment order: what a replay delivers.
+    events: Vec<(u64, Option<u64>, Arc<EventRecord>)>,
 }
 impl Signal {
     fn capacity(&self) -> usize { self.demands.values().copied().max().unwrap_or(0) }
+    /// The finite run's committed events from its store, each with its own block and
+    /// record (v2 replayed its commit chunks); the canonical layout is the run's now.
+    fn replay(&self, generation: GenerationId, name: &Arc<str>, run: &Arc<RunRecord>) -> Vec<Arc<Publication>> {
+        let Some(canonical) = self.store.as_ref().map(DatasetStore::snapshot) else { return Vec::new() };
+        canonical.segments().zip(&self.events).map(|(segment, (revision, ordinal, event))| Arc::new(Publication {
+            key: PublicationKey { generation, signal: name.clone(), revision: *revision, ordinal: *ordinal },
+            data: Some(segment.data().clone()), run: run.clone(), event: event.clone(), canonical: Some(canonical.clone()),
+            storage: Storage::Finite, lineage: Weak::new() })).collect()
+    }
     fn keep_recent(&mut self, publication: &Arc<Publication>, garbage: &mut Vec<Arc<Publication>>) {
         let Some(recent) = &mut self.recent else { return };
         recent.push_back(publication.clone());
@@ -434,16 +457,22 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
         let names=Arc::new(run.signals.iter().filter(|(_,signal)|!run.sealed || signal.latest.is_some())
             .map(|(name,_)|name.clone()).collect::<HashSet<_>>());
         for name in names.iter() {bundle_of.insert(name.clone(),names.clone());}
+        // A route is of its source's current shots: one bound to a source run only while
+        // that run is the source's current one, and once ended only beside a source run
+        // that has ended too (v2 seals a processor at its source's end and withdraws it
+        // otherwise); one following the signal across runs only while it runs.
+        let route=run.source.as_ref().filter(|source|source.coherent && match source.generation {
+            Some(generation) => state.signals.get(&source.signal)==Some(&generation)
+                && (!run.sealed || state.runs.get(&generation).is_some_and(|source|source.sealed)),
+            None => !run.sealed,
+        });
         for (name,signal) in &run.signals {
             retained.insert(name.clone(),signal);
             if let Some(event)=&signal.latest {
                 latest.insert(name.clone(),dataset_read(event.clone()));
                 bundles.entry(event_identity(&event.key)).or_default().insert(name.clone());
             }
-            // A finished route of a replaced source run is history, not a
-            // pending member of the current shot (v2 retires it).
-            if let Some(source)=run.source.as_ref().filter(|source|source.coherent && (!run.sealed
-                || source.generation.is_some_and(|generation|state.signals.get(&source.signal)==Some(&generation)))) {
+            if let Some(source)=route {
                 source_by_output.insert(name.clone(),source.signal.clone());
                 adjacency.entry(name.clone()).or_default().insert(source.signal.clone());
                 adjacency.entry(source.signal.clone()).or_default().insert(name.clone());
@@ -503,6 +532,13 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
         }
         coherent &= required.iter().all(|name|joined.get(name)
             .is_some_and(|read|state.signals.get(name)==Some(&read.key().generation)));
+        // A board never goes back to an older shot of a source run than it showed (a panel
+        // never regresses): a group behind it -- a member that joined late, a processor
+        // replaying its source's run -- keeps what it showed until it has caught up.
+        if let Some(shot)=shot.as_ref().filter(|_|coherent) {
+            coherent &= !previous.0.iter().filter(|(name,_)|component.contains(*name)).any(|(_,read)|
+                read.shot_roots().iter().any(|shown|shot.iter().any(|root|root.0==shown.0 && root.1<shown.1)));
+        }
         if !coherent {
             joined=previous.0.iter().filter(|(name,read)|component.contains(*name)
                 && state.signals.get(*name)==Some(&read.key().generation)).map(|(name,read)|(name.clone(),read.clone())).collect();
@@ -534,33 +570,21 @@ struct Subscriber {
     requests: Vec<ReadRequest>, policy: DeliveryPolicy,
     queue: VecDeque<Arc<Delivery>>, bytes: u128, terminal: Option<RuntimeError>,
     blocks: HashMap<usize, (Arc<DataBlock>, usize)>,
-    prefixes: HashMap<(GenerationId, Arc<str>), (usize, usize)>,
+    /// A Follow queue's first event's payload, which sizes its byte bound.
+    first: Option<u128>,
+    /// A finite run's committed events, delivered before the queue; its store holds them.
+    replay: VecDeque<Arc<Delivery>>,
     changed: Arc<Condvar>, interrupted: bool,
 }
 impl Subscriber {
+    /// The blocks an event pins itself: its own, or a Snapshot replacement's
+    /// independent ones. A finite event's run prefix is its store's, not the queue's.
     fn account_publication(&mut self, publication: &Publication, add: bool) {
-        if publication.storage==Storage::Finite {
-            let prefix=publication.canonical.as_ref().expect("finite publication has canonical prefix");
-            let key = (publication.key.generation,publication.key.signal.clone());
-            if add {
-                let held = self.prefixes.entry(key).or_default();
-                let bytes = prefix.payload_bytes();
-                self.bytes += bytes.saturating_sub(held.1) as u128;
-                held.0 += 1; held.1 = held.1.max(bytes);
-            } else {
-                let held = self.prefixes.get_mut(&key).unwrap();
-                held.0 -= 1;
-                if held.0 == 0 {
-                    self.bytes -= held.1 as u128;
-                    self.prefixes.remove(&key);
-                }
-            }
-        } else if let Some(dataset)=&publication.canonical {
-            // Snapshot replacements are independent datasets, not append-only
-            // prefixes. Deduplicate actual owners rather than taking one max.
-            for part in dataset.segments() {self.account_data(part.data(),add);}
-        } else {
-            self.account_data(publication.data.as_ref().expect("event payload"),add);
+        match (&publication.data, &publication.canonical) {
+            (Some(data), _) => self.account_data(data, add),
+            (None, Some(dataset)) if publication.storage == Storage::Snapshot =>
+                for part in dataset.segments() {self.account_data(part.data(),add);},
+            _ => {}
         }
     }
 
@@ -594,8 +618,8 @@ impl Subscriber {
     }
 
     fn clear_queue(&mut self, garbage: &mut Vec<Arc<Delivery>>) {
-        garbage.extend(self.queue.drain(..));
-        self.blocks.clear(); self.prefixes.clear(); self.bytes = 0;
+        garbage.extend(self.replay.drain(..).chain(self.queue.drain(..)));
+        self.blocks.clear(); self.bytes = 0;
     }
 
     fn enqueue(&mut self, delivery: Arc<Delivery>, garbage: &mut Vec<Arc<Delivery>>) -> Result<()> {
@@ -613,10 +637,17 @@ impl Subscriber {
                 self.queue=retained;
             }
         }
+        let before = self.bytes;
         self.account(&delivery, true);
+        if !delivery.reads.is_empty() { self.first.get_or_insert(self.bytes - before); }
         self.queue.push_back(delivery);
-        if let DeliveryPolicy::Exact { max_events, max_referenced_bytes } = self.policy {
-            if self.queue.len() > max_events || self.bytes > max_referenced_bytes as u128 {
+        let bound = match self.policy {
+            DeliveryPolicy::Latest => None,
+            DeliveryPolicy::Exact { max_events, max_referenced_bytes } => Some((max_events, max_referenced_bytes as u128)),
+            DeliveryPolicy::Follow => Some((FOLLOW_EVENTS, FOLLOW_BYTES.max(FOLLOW_FIRST_EVENTS * self.first.unwrap_or(0)))),
+        };
+        if let Some((max_events, max_bytes)) = bound {
+            if self.queue.len() > max_events || self.bytes > max_bytes {
                 let error = RuntimeError::SubscriptionOverflow {
                     events: self.queue.len(), referenced_bytes: self.bytes.min(usize::MAX as u128) as usize,
                 };
@@ -637,17 +668,25 @@ impl Subscriber {
             if let ReadMode::Window(width) = request.mode { validate_retention(signal,width)?; }
         }
         let mut current = Vec::new();
+        let mut replayed = BTreeMap::<u64, Vec<Arc<Publication>>>::new();
         for request in &self.requests {
             let signal = run.signals.get_mut(&request.signal).unwrap();
             if let ReadMode::Window(width) = request.mode {
                 signal.demands.insert(ticket,width);
                 if signal.history.is_empty() { signal.history.extend(signal.latest.iter().cloned()); }
             }
-            if matches!(start,Start::Current) {
+            if matches!(start,Start::Replay) && request.mode == ReadMode::Event && signal.store.is_some() {
+                for event in signal.replay(run.token.id,&request.signal,&run.record) { replayed.entry(event.key.revision).or_default().push(event); }
+            } else if !matches!(start,Start::Next) {
                 current.extend(signal.latest.iter().filter(|event|!matches!(request.mode,ReadMode::Event) || event.data.is_some()).cloned());
             }
         }
         let result = (|| {
+            for (revision,publications) in replayed {
+                let reads = capture_reads(run,&self.requests,&publications)?;
+                self.replay.push_back(Arc::new(Delivery {kind:DeliveryKind::Data,generation:run.token.id,
+                    revision:Some(revision),publications:publications.into(),reads}));
+            }
             if !current.is_empty() {
                 let reads = capture_reads(run,&self.requests,&current)?;
                 self.enqueue(Arc::new(Delivery {kind:DeliveryKind::Data,generation:run.token.id,
@@ -794,7 +833,7 @@ impl Runtime {
                 (output.signal, Signal { schema: output.schema, latest: None, last_ordinal:None, head:None, history: VecDeque::new(),
                     demands: BTreeMap::new(), recent: source.as_ref().filter(|source|source.coherent).map(|_|VecDeque::new()), views: HashMap::new(), view_epoch: 0,
                     window_schemas: HashMap::new(), history_axis, store,
-                    history_capable: matches!(output.storage,Storage::Latest) })
+                    history_capable: matches!(output.storage,Storage::Latest), events: Vec::new() })
             }).collect();
             state.owners.insert(owner.clone(), token.id);
             let mut run = Run { token: token.clone(), sealed: false, revision: 0, signals,
@@ -918,6 +957,9 @@ impl Runtime {
             for publication in publications.iter() {
                 let signal = run.signals.get_mut(&publication.key.signal).unwrap();
                 if let Some(ordinal)=publication.key.ordinal {signal.last_ordinal=Some(ordinal);}
+                if publication.storage==Storage::Finite && publication.data.is_some() {
+                    signal.events.push((revision,publication.key.ordinal,publication.event.clone()));
+                }
                 if let Some(previous)=signal.head.replace(head.clone()) {heads.push(previous);}
                 if let Some(previous) = signal.latest.replace(publication.clone()) { garbage.push(previous); }
                 signal.keep_recent(publication,&mut garbage);
@@ -1001,7 +1043,7 @@ impl Runtime {
     /// the asking surface's own last selection, and becomes this one.
     pub fn read_coherent_views(&self, requests:&[(Generation,Arc<str>,Option<usize>)], front:&mut Front) -> Vec<Result<Read>> {
         let mut state=self.inner.state.lock().unwrap();
-        let selected=coherent_front(&state,requests,front);
+        let mut selected=coherent_front(&state,requests,front);
         let answers=requests.iter().map(|(generation,name,width)| {
             let read=selected.get(name).filter(|read|read.key().generation==generation.id)
                 .ok_or(RuntimeError::NoData)?;
@@ -1010,6 +1052,13 @@ impl Runtime {
             else {Ok(read.clone())}
         }).collect();
         drop(state);
+        // A panel given nothing new keeps showing what it showed: that stays its board's.
+        let mut previous=std::mem::take(&mut front.0);
+        for (generation,name,_) in requests {
+            if let Some(read)=previous.remove(name).filter(|read|!selected.contains_key(name) && read.key().generation==generation.id) {
+                selected.insert(name.clone(),read);
+            }
+        }
         front.0=selected;
         answers
     }
@@ -1097,7 +1146,7 @@ impl Runtime {
             let ticket = take_ticket(&mut state)?;
             let generation = follow_owner.as_ref().and_then(|owner|state.owners.get(owner).copied()).or(generation);
             let mut subscriber = Subscriber { generation:None, follow_owner, requests: unique, policy,
-                queue: VecDeque::new(), bytes: 0, terminal:None, blocks:HashMap::new(),prefixes:HashMap::new(),
+                queue: VecDeque::new(), bytes: 0, terminal:None, blocks:HashMap::new(),first:None,replay:VecDeque::new(),
                 changed: Arc::new(Condvar::new()), interrupted: false };
             if let Some(generation)=generation {
                 let run=state.runs.get_mut(&generation).ok_or(RuntimeError::UnknownGeneration)?;
@@ -1136,12 +1185,18 @@ impl Runtime {
         Ok(())
     }
 
-    pub fn retire(&self, generation: &Generation) -> Result<()> {
+    pub fn retire(&self, generation: &Generation) -> Result<()> { self.remove(|_| Some(generation.id)) }
+
+    /// Withdraw an owner's run, ended or not (v2 withdraw_owner): its signals leave.
+    pub fn withdraw(&self, owner: &str) -> Result<()> { self.remove(|state| state.owners.get(owner).copied()) }
+
+    fn remove(&self, run: impl FnOnce(&State) -> Option<GenerationId>) -> Result<()> {
         let old;
         let mut deliveries=Vec::new();
         {
             let mut state = self.inner.state.lock().unwrap();
-            old = remove_run(&mut state, generation.id, &mut deliveries).ok_or(RuntimeError::UnknownGeneration)?;
+            let id = run(&state).ok_or(RuntimeError::UnknownGeneration)?;
+            old = remove_run(&mut state, id, &mut deliveries).ok_or(RuntimeError::UnknownGeneration)?;
             notify_changes(&state);
         }
         drop((old,deliveries));
@@ -1282,6 +1337,7 @@ impl Subscription {
         loop {
             let subscriber = state.subscribers.get_mut(&self.ticket).ok_or(RuntimeError::Closed)?;
             if std::mem::take(&mut subscriber.interrupted) { return Ok(None); }
+            if let Some(delivery) = subscriber.replay.pop_front() { return Ok(Some(delivery)); }
             if let Some(delivery) = subscriber.queue.pop_front() {
                 subscriber.account(&delivery, false);
                 return Ok(Some(delivery));
@@ -1298,7 +1354,7 @@ impl Subscription {
 mod tests {
     use super::*;
     use serde_json::json;
-    use crate::{DType, OwnedBuffer};
+    use crate::{AnyBuffer, DType, OwnedBuffer};
     use crate::dataset::Validity;
     use crate::schema::{Axis, Coordinates, Domain, ValueSchema, ValidityContract};
 
@@ -1452,8 +1508,10 @@ mod tests {
         assert!(matches!(plane.commit(&terminal,&terminal_bundle),Err(RuntimeError::SourceSuperseded)));
         assert!(matches!(plane.begin_derived("expired",declaration("expired"),json!({}),final_shot.key(),true),Err(RuntimeError::SourceSuperseded)));
         assert_eq!(plane.read_latest(&terminal,"terminal").unwrap().key.ordinal,Some(3));
+        // A route of the replaced run holds none of the next run's pictures (v2 retires it).
         let front=plane.read_coherent_views(&[(next_camera,"image".into(),None),(roi,"roi".into(),None)],&mut board);
-        assert!(front.iter().all(|read|matches!(read,Err(RuntimeError::NoData))));
+        assert_eq!(front[0].as_ref().unwrap().key().ordinal,Some(0));
+        assert!(front[1].is_ok());
     }
 
     #[test]
@@ -1597,8 +1655,9 @@ mod tests {
         assert_eq!(prefix.holes(),2);
         assert_eq!(prefix.payload_bytes(),12);
         assert_eq!(second.publications[0].canonical().unwrap().payload_bytes(),24);
+        // Each event pins its own block and its siblings' (12 bytes each), not its run's prefix.
         let cross_run = plane.follow_reads("paired",vec![ReadRequest {signal:"a".into(),mode:ReadMode::Dataset}],
-            DeliveryPolicy::Exact {max_events:8,max_referenced_bytes:36},Start::Current).unwrap();
+            DeliveryPolicy::Exact {max_events:8,max_referenced_bytes:35},Start::Current).unwrap();
         plane.seal(&finite,json!({"reason":"operator stop"})).unwrap();
         assert_eq!(plane.read_latest(&finite,"a").unwrap().canonical().unwrap().written_cells(),2);
         plane.retire(&finite).unwrap();
@@ -1617,7 +1676,7 @@ mod tests {
         let mut next = bundle(&schema,&["a"],0);
         if let Input::Event {origin,..}=&mut next.inputs[0] {*origin=Some([0,0]);}
         plane.commit(&restarted,&next).unwrap();
-        assert!(matches!(cross_run.next(Duration::ZERO),Err(RuntimeError::SubscriptionOverflow {events:4,referenced_bytes:48})));
+        assert!(matches!(cross_run.next(Duration::ZERO),Err(RuntimeError::SubscriptionOverflow {events:4,referenced_bytes:36})));
 
         // Declared, zero-sample finite data is a real canonical prefix, not
         // a dense invalid shot. Raw event consumers must not receive it.
@@ -1839,6 +1898,137 @@ mod tests {
         assert_eq!(latest.next(Duration::ZERO).unwrap().unwrap().reads[0].key().ordinal,Some(1));
         assert!(matches!(latest.next(Duration::ZERO).unwrap().unwrap().kind,DeliveryKind::Sealed {..}));
         assert!(latest.next(Duration::ZERO).unwrap().is_none());
+    }
+
+    /// A finite schema of `points` placements of the test event.
+    fn finite(schema:&Arc<DatasetSchema>,points:usize) -> Arc<DatasetSchema> {
+        let axis=Axis::new("scan".into(),"scan".into(),"coordinate".into(),Coordinates::Index {origin:0,len:points},None,None,None,None).unwrap();
+        DatasetSchema::new(schema.domain(DomainRole::Repeat).clone(),Domain::dense(vec![points],vec![axis]).unwrap(),
+            schema.domain(DomainRole::Cell).clone(),schema.value().clone()).unwrap()
+    }
+    fn placed(schema:&Arc<DatasetSchema>,signals:&[&str],ordinal:u64) -> Bundle {
+        let mut bundle=bundle(schema,signals,ordinal);
+        for input in &mut bundle.inputs {if let Input::Event {origin,..}=input {*origin=Some([0,ordinal as usize]);}}
+        bundle
+    }
+
+    #[test]
+    fn a_route_holds_its_sources_shot_only_while_it_is_of_that_run() {
+        // v2 seals a processor at its source's end and withdraws it otherwise (Stop,
+        // failure, a replaced source run): a route that ended before its source, or is
+        // bound to a replaced run, holds none of the source's pictures, sealed or not.
+        let plane=Runtime::new();let schema=schema();
+        let declaration=|name:&str|vec![Declaration {signal:name.into(),schema:schema.clone(),storage:Storage::Latest}];
+        let of=|source:&Arc<Delivery>,ordinal|Bundle {parents:vec![source.publications[0].clone()],..bundle(&schema,&["occupied"],ordinal)};
+        let shown=|camera:&Generation,occupancy:&Generation| plane.read_coherent_views(&[(camera.clone(),"frames".into(),None),
+            (occupancy.clone(),"occupied".into(),None)],&mut Front::default()).into_iter().map(|read|read.map(|read|read.key().ordinal.unwrap())).collect::<Vec<_>>();
+        let camera=plane.begin("camera",declaration("frames"),json!({})).unwrap();
+        let shot0=plane.commit(&camera,&bundle(&schema,&["frames"],0)).unwrap();
+        let occupancy=plane.begin_consuming("occupancy",declaration("occupied"),json!({}),"frames".into(),Some(camera.id())).unwrap();
+        plane.commit(&occupancy,&of(&shot0,0)).unwrap();
+        plane.commit(&camera,&bundle(&schema,&["frames"],1)).unwrap();
+        assert_eq!(shown(&camera,&occupancy),[Ok(0),Ok(0)]);
+        // Ended while its source runs: the camera goes on.
+        plane.seal(&occupancy,json!({"status":"failed"})).unwrap();
+        assert_eq!(shown(&camera,&occupancy),[Ok(1),Ok(0)]);
+        // Bound to a replaced run and still taking that run's queue: the new run goes on.
+        let occupancy=plane.begin_consuming("occupancy",declaration("occupied"),json!({}),"frames".into(),Some(camera.id())).unwrap();
+        plane.seal(&camera,json!({})).unwrap();
+        let camera=plane.begin("camera",declaration("frames"),json!({})).unwrap();
+        let next0=plane.commit(&camera,&bundle(&schema,&["frames"],0)).unwrap();
+        plane.commit(&occupancy,&of(&shot0,0)).unwrap();
+        plane.commit(&camera,&bundle(&schema,&["frames"],1)).unwrap();
+        assert_eq!(shown(&camera,&occupancy),[Ok(1),Ok(0)]);
+        plane.seal(&occupancy,json!({"status":"stopped"})).unwrap();
+        // Of the current run: the picture waits for its judgement, also after the camera
+        // ends; one that ended with its source keeps the final group.
+        let occupancy=plane.begin_consuming("occupancy",declaration("occupied"),json!({}),"frames".into(),Some(camera.id())).unwrap();
+        plane.commit(&occupancy,&of(&next0,0)).unwrap();
+        plane.seal(&camera,json!({})).unwrap();
+        assert_eq!(shown(&camera,&occupancy),[Ok(0),Ok(0)]);
+        let last=plane.read_views(&[(camera.clone(),"frames".into(),None)]).remove(0).unwrap();
+        plane.commit(&occupancy,&Bundle {parents:vec![last.anchor().clone()],..bundle(&schema,&["occupied"],1)}).unwrap();
+        plane.seal(&occupancy,json!({"status":"completed"})).unwrap();
+        assert_eq!(shown(&camera,&occupancy),[Ok(1),Ok(1)]);
+        // Withdrawn (a stopped processor, a removed node): its signals leave.
+        plane.withdraw("occupancy").unwrap();
+        assert!(plane.signals().iter().all(|signal|signal.signal.as_ref()!="occupied"));
+        assert!(matches!(plane.withdraw("occupancy"),Err(RuntimeError::UnknownGeneration)));
+    }
+
+    #[test]
+    fn an_exact_follower_counts_what_each_event_pins_not_its_runs_store() {
+        // v2's follow queue counts each event's own arrays and what its lineage pins:
+        // a finite run's prefix is its store's and a route's recent shots its own, so
+        // a follower that keeps up never fails however long the run.
+        let plane=Runtime::new();let schema=schema();
+        let camera=plane.begin("camera",vec![Declaration {signal:"frames".into(),schema:finite(&schema,300),storage:Storage::Finite}],json!({})).unwrap();
+        let occupancy=plane.begin_consuming("occupancy",vec![Declaration {signal:"occupied".into(),schema:schema.clone(),storage:Storage::Latest}],
+            json!({}),"frames".into(),Some(camera.id())).unwrap();
+        // One event pins 12 bytes; one judgement 24 (itself and its frame).
+        let processor=plane.subscribe(&camera,vec!["frames".into()],DeliveryPolicy::Exact {max_events:4,max_referenced_bytes:12},Start::Next).unwrap();
+        let survival=plane.subscribe(&occupancy,vec!["occupied".into()],DeliveryPolicy::Exact {max_events:4,max_referenced_bytes:24},Start::Next).unwrap();
+        for ordinal in 0..300 {
+            let frame=plane.commit(&camera,&placed(&schema,&["frames"],ordinal)).unwrap();
+            plane.commit(&occupancy,&Bundle {parents:vec![frame.publications[0].clone()],..bundle(&schema,&["occupied"],ordinal)}).unwrap();
+            assert!(processor.next(Duration::ZERO).unwrap().is_some() && survival.next(Duration::ZERO).unwrap().is_some(),"at {ordinal}");
+        }
+        // v2's bounds: 1024 events pending fail the follower, never the producer.
+        let lagging=plane.subscribe(&occupancy,vec!["occupied".into()],DeliveryPolicy::Follow,Start::Next).unwrap();
+        for ordinal in 300..1325 {plane.commit(&occupancy,&bundle(&schema,&["occupied"],ordinal)).unwrap();}
+        assert!(matches!(lagging.next(Duration::ZERO),Err(RuntimeError::SubscriptionOverflow {events:1025,..})));
+    }
+
+    #[test]
+    fn a_follower_joining_a_finite_run_takes_what_it_committed_first() {
+        // v2 replays a live finite run's committed events, in order, to a processor
+        // that starts mid-run, then its live ones: siblings of a commit together.
+        let plane=Runtime::new();let schema=schema();
+        let full=finite(&schema,10);
+        let camera=plane.begin("camera",["a","b"].map(|name|Declaration {signal:name.into(),schema:full.clone(),storage:Storage::Finite}).into(),json!({})).unwrap();
+        for ordinal in 0..5 {plane.commit(&camera,&placed(&schema,&["a","b"],ordinal)).unwrap();}
+        let replay=plane.subscribe(&camera,vec!["a".into(),"b".into()],DeliveryPolicy::Follow,Start::Replay).unwrap();
+        let current=plane.subscribe(&camera,vec!["a".into()],DeliveryPolicy::Follow,Start::Current).unwrap();
+        plane.commit(&camera,&placed(&schema,&["a","b"],5)).unwrap();
+        let taken=|subscription:&Subscription| std::iter::from_fn(||subscription.next(Duration::ZERO).unwrap()).map(|delivery| {
+            assert!(delivery.reads.iter().all(|read|delivery.revision.is_none_or(|revision|read.key().revision==revision)));
+            let AnyBuffer::U16(values)=delivery.publications[0].data().unwrap().values() else {panic!("dtype")};
+            (delivery.publications.len(),delivery.publications[0].key().ordinal.unwrap(),u64::from(values.as_slice()[0]))
+        }).collect::<Vec<_>>();
+        assert_eq!(taken(&replay),(0..6).map(|ordinal|(2,ordinal,ordinal)).collect::<Vec<_>>());
+        assert_eq!(taken(&current),[(1,4,4),(1,5,5)]);
+    }
+
+    #[test]
+    fn a_board_never_goes_back_to_an_older_shot_of_its_source() {
+        // A processor started again mid-run replays its source's committed shots, and a
+        // member that joins late starts at the shot it was asked on: the board keeps what it
+        // showed (v2 leaves the last accepted picture) until the group has caught up.
+        let plane=Runtime::new();let schema=schema();
+        let declaration=|name:&str|vec![Declaration {signal:name.into(),schema:schema.clone(),storage:Storage::Latest}];
+        let camera=plane.begin("camera",declaration("frames"),json!({})).unwrap();
+        let shots:Vec<_>=(0..4).map(|ordinal|plane.commit(&camera,&bundle(&schema,&["frames"],ordinal)).unwrap().publications[0].clone()).collect();
+        let judge=|run:&Generation,ordinal:usize| {plane.commit(run,&Bundle {parents:vec![shots[ordinal].clone()],..bundle(&schema,&["occupied"],ordinal as u64)}).unwrap();};
+        let shown=|board:&mut Front,occupancy:&Generation| plane.read_coherent_views(&[(camera.clone(),"frames".into(),None),
+            (occupancy.clone(),"occupied".into(),None)],board).into_iter().map(|read|read.ok().map(|read|read.key().ordinal.unwrap())).collect::<Vec<_>>();
+        let occupancy=plane.begin_consuming("occupancy",declaration("occupied"),json!({}),"frames".into(),Some(camera.id())).unwrap();
+        judge(&occupancy,3);
+        let mut board=Front::default();
+        assert_eq!(shown(&mut board,&occupancy),[Some(3),Some(3)]);
+        plane.retire(&occupancy).unwrap();
+        let occupancy=plane.begin_consuming("occupancy",declaration("occupied"),json!({}),"frames".into(),Some(camera.id())).unwrap();
+        for ordinal in 0..3 {
+            judge(&occupancy,ordinal);
+            assert_eq!(shown(&mut board,&occupancy),[None,None],"replaying shot {ordinal}");
+        }
+        judge(&occupancy,3);
+        assert_eq!(shown(&mut board,&occupancy),[Some(3),Some(3)]);
+        // A board that never showed shot 3 shows the replay as it comes.
+        let occupancy=plane.begin_consuming("survival",vec![Declaration {signal:"survival".into(),schema:schema.clone(),storage:Storage::Latest}],
+            json!({}),"frames".into(),Some(camera.id())).unwrap();
+        plane.commit(&occupancy,&Bundle {parents:vec![shots[1].clone()],..bundle(&schema,&["survival"],1)}).unwrap();
+        let fresh=plane.read_coherent_views(&[(camera.clone(),"frames".into(),None),(occupancy,"survival".into(),None)],&mut Front::default());
+        assert!(fresh.iter().all(|read|read.as_ref().unwrap().key().ordinal==Some(1)));
     }
 }
 impl Drop for Subscription {

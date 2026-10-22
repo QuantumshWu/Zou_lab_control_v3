@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde_json::json;
 use zlc_core::AnyBuffer;
 use zlc_core::control::{Origin, SafeActions};
-use zlc_core::runtime::Runtime;
+use zlc_core::runtime::{Front, Runtime};
 use zlc_plugin_host::{ErrorKind, HostConfig, HostEvent, Lend, PluginHost, RunRequest};
 
 fn host() -> Option<(PluginHost, Runtime, SafeActions, mpsc::Receiver<HostEvent>)> {
@@ -188,4 +188,77 @@ fn devices_lend_frames_nodes_publish_through_claims_and_a_crash_loses_one_instan
     assert_eq!(host.spi("echo", "made_safe", json!([]), json!({}), Duration::from_secs(5)).unwrap().value, json!(["beam"]));
     host.shutdown();
     assert!(host.instances().is_empty());
+}
+
+#[test]
+fn a_run_follows_only_an_exact_input_and_what_ends_early_leaves_with_its_signals() {
+    let Some((host, runtime, _safe, events)) = host() else { return };
+    let finished = |run: &str| loop {
+        match events.recv_timeout(Duration::from_secs(60)).expect("run events") {
+            HostEvent::RunFinished { run: id, outcome, error, .. } if id == run => break (outcome, error),
+            HostEvent::Failed { reason, .. } => panic!("plugin failed: {reason}"),
+            _ => {}
+        }
+    };
+    let request = |values, source: Option<&str>, output: (&str, &str)| RunRequest { values, devices: Default::default(), origin: Origin::Operator,
+        resources: json!({}), source_signal: source.map(str::to_owned), run_directory: None, outputs: [(output.0.to_owned(), output.1.to_owned())].into() };
+    let published = |signal: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(item) = runtime.signals().into_iter().find(|item| &*item.signal == signal && item.published) { break item; }
+            assert!(std::time::Instant::now() < deadline, "{signal} was not published");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let present = |signal: &str| runtime.signals().iter().any(|item| &*item.signal == signal);
+    let holds_become = |block: &str, holds: usize| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while host.registry().holds(block) != holds && std::time::Instant::now() < deadline { std::thread::sleep(Duration::from_millis(10)); }
+        host.registry().holds(block) == holds
+    };
+
+    // A source that published one frame and runs on.
+    let frames = "@logic/holder/frames";
+    host.open("holder", "holder", json!({}), json!({})).unwrap();
+    let holder = host.start_run("holder", request(json!({}), None, ("frames", frames))).unwrap();
+    let source = published(frames);
+    let lent = block_of(runtime.read_latest(&source.generation, frames).unwrap().data().unwrap().values());
+    let held = host.registry().holds(&lent);
+
+    // Over the 'latest' input its values enable, a run reads its source by name (v2:
+    // no source route): nothing is delivered to it, and its reading, which names no
+    // parent, is no member of the source's shot.
+    host.open("reader", "reader", json!({}), json!({})).unwrap();
+    let reading = "@logic/reader/reading";
+    let run = host.start_run("reader", request(json!({"mode": "latest"}), Some(frames), ("reading", reading))).unwrap();
+    let own = published(reading);
+    let shown = runtime.read_coherent_views(&[(source.generation.clone(), frames.into(), None), (own.generation.clone(), reading.into(), None)],
+        &mut Front::default());
+    assert!(shown.iter().all(Result::is_ok), "{:?}", shown.iter().map(|read| read.as_ref().err()).collect::<Vec<_>>());
+    assert_eq!(host.registry().holds(&lent), held, "no delivery of the frame");
+    assert_eq!(finished(&run).0, "completed");
+
+    // Over its 'exact' input it follows the source; the delivery it never takes is
+    // answered at its end (stale_run) and lets the frame go: nothing waits on a run
+    // that has ended, and how long a run leaves its input says nothing of its process.
+    let run = host.start_run("reader", request(json!({"mode": "exact"}), Some(frames), ("reading", reading))).unwrap();
+    assert!(holds_become(&lent, held + 1), "the frame is delivered");
+    assert_eq!(finished(&run).0, "completed");
+    assert!(holds_become(&lent, held), "the untaken delivery let the frame go");
+
+    // A closed node (removed, or its layout replaced) takes its signals with it (v2 retire).
+    host.close("reader").unwrap();
+    assert!(!present(reading));
+
+    // A processor stopped while its source runs is withdrawn (v2): its signals go.
+    host.open("doubler", "doubler", json!({}), json!({})).unwrap();
+    let doubled = "@logic/doubler/doubled";
+    let run = host.start_run("doubler", request(json!({}), Some(frames), ("doubled", doubled))).unwrap();
+    published(doubled);
+    host.stop_run("doubler", &run).unwrap();
+    assert_eq!(finished(&run).0, "stopped");
+    assert!(!present(doubled) && present(frames));
+    host.stop_run("holder", &holder).unwrap();
+    assert_eq!(finished(&holder).0, "stopped");
+    host.shutdown();
 }
