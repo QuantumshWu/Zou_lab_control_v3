@@ -1,0 +1,312 @@
+/*
+ * ZLC design tokens: the CSS image of zlc_ui.fluent (style.py + fluent.py).
+ *
+ * Every rule in style.css reads these properties and nothing else; no colour
+ * or length is spelled in style.css.  DESIGN.md maps each token to its v2
+ * source.
+ *
+ * Units.  zlc_ui sizes a control in Qt logical px, `scaled_px(v, minimum) =
+ * max(minimum, round(v * fluent))`, and Qt 5 paints a logical px as
+ * round-half-up(Windows scale) device px.  The page's CSS px is devicePixelRatio
+ * device px, so one Qt logical px is `--qt` CSS px.  scale.ts writes the two
+ * runtime inputs (`--qt`, `--fluent`) and the font-derived lengths before the
+ * body is parsed.  Every length below is therefore the v2 length to the device
+ * pixel, and every integer Qt length lands on a device-pixel boundary.
+ */
+:root {
+  /* ---- runtime inputs (src/scale.ts) ------------------------------------ */
+  --qt: 1;                 /* CSS px per Qt logical px */
+  --fluent: 1;             /* zlc_ui.set_fluent_scale(None) on this screen */
+  --cap-lift: 0px;         /* bottom padding that centres capitals on a box */
+  --font-line: 1.33em;    /* one line of the body font: ascent + descent, up to a whole Qt px */
+  --dpx: 1px;              /* one device pixel in CSS px */
+  --number-text: 0px;      /* advance of "-1234567890.12345678" (qt_form._NUMBER_SAMPLE) */
+  --spin-hint-text: 0px;   /* advance of "-123.456e-12" (FluentDoubleSpinBox.sizeHint) */
+  --chip-sample-ink: 0px;  /* ink width of "±0.0001" (_STEP_CHIP_SAMPLE) in the chip's font, up to a whole Qt px */
+  --tab-close-top: 0px;    /* a closable tab's disk: its top, centred on the label's capitals (_tab_cap_centre) */
+  --count-text: 0px;       /* advance of "10000" (pulse/_layout.py COUNT_SAMPLE) */
+  --edit-hint-text: 0px;   /* 17 advances of "x" (QLineEdit.sizeHint) */
+  --control-status-text: 0px; /* advance of "Applying; latest queued" (DeviceControlView status) */
+  --chevron-drop: none;    /* paint_chevron in a combo's drop column, in device px (the column's size) */
+  --chevron-step-up: none; /* ... in a spin box's stepper column, its up cell's */
+  --chevron-step-down: none; /* ... its down cell's */
+  --chevron-disclosure-down: none; /* ... on a control-square button's face */
+  --chevron-disclosure-up: none;
+  --chevron-down: none;    /* the chevron alone (a tree combo row's branch) */
+  --info-chevron-box: 0px; /* InfoTree's branch chevron: an even device-px square */
+  --info-chevron-mask: none;
+  --tick: none;            /* _paint_tick mask */
+
+  /* ---- palette: zlc_ui/fluent/style.py ---------------------------------- */
+  --accent: #77AADD;           /* ACCENT: small indicators only (on switch, tick, focus edge) */
+  --accent-hover: #6DA2D5;     /* ACCENT_HOVER */
+  --accent-tint: #E4EFF9;      /* ACCENT_TINT: hover wash */
+  --selected: #AACAEA;         /* SELECTED: chosen / pressed */
+  --selected-hover: #9DC2E7;   /* SELECTED_HOVER */
+  --button-tint: #D4E5F5;      /* BUTTON_TINT: standard command face */
+  --accent-strong: #2F6FB0;    /* ACCENT_STRONG: the one primary command */
+  --ink-accent: #004578;       /* HOVER: standard command ink */
+  --bg: #F3F3F3;               /* BG: window face, title band, disabled field */
+  --text: #323130;             /* TEXT */
+  --placeholder: #A19F9D;      /* PLACEHOLDER: field edge */
+  --disabled-ink: #8A8886;     /* DISABLED_INK */
+  --muted-ink: #6A6866;        /* MUTED_INK: quiet information */
+  --divider: #E1DFDD;          /* DIVIDER: card edge, disabled face */
+  --neutral-fill: #C8C6C4;     /* NEUTRAL_FILL: unticked box, scroll handle */
+  --green: #7FC2AD;            /* GREEN: running dot */
+  --red: #CD7380;              /* RED: error dot */
+  --red-dark: #9E3B4A;         /* RED_DARK: destructive ink, error line */
+  --red-tint: #F7E3E6;         /* RED_TINT: destructive face */
+  --orange: #D69A6E;           /* ORANGE: warning dot */
+  --orange-dark: #8A4B1F;      /* ORANGE_DARK: warning ink */
+  --orange-tint: #F6E3D4;      /* ORANGE_TINT: a kept grid card, a filter match */
+  --selection-edge: #ACC4DD;   /* SELECTION_EDGE: dashed edge of a derived grid card */
+  --derived-ink: #40688F;      /* DERIVED_INK: name on a derived grid card */
+  --grey: #A2A2A2;             /* GREY: idle dot */
+  --graphite: #808080;         /* GRAPHITE: chevron ink */
+  --surface: #FFFFFF;          /* SURFACE: card and field face */
+  --api-violet: #9B86C9;       /* API_VIOLET: an API-bound field edge */
+  --api-violet-dark: #5A4A8A;  /* API_VIOLET_DARK: its badge and ink */
+  --config-green: #7FC2AD;     /* CONFIG_GREEN: a Config-bound field edge */
+  --config-green-dark: #2F6B58;/* CONFIG_GREEN_DARK: its badge and ink */
+  --config-green-tint: #D1E8E1;/* CONFIG_GREEN_TINT: the file supplies the value */
+  --axis-group-0: #5A4A8A;     /* AXIS_GROUP_COLORS[0] (repeat) */
+  --axis-group-1: #8A4B1F;     /* AXIS_GROUP_COLORS[1] (point) */
+  --axis-group-2: #004578;     /* AXIS_GROUP_COLORS[2] (cell) */
+
+  /* ---- derived faces (fluent.py, computed with QColor/_mixed) ----------- */
+  --button-hover: #BDD6EF;          /* _mixed(BUTTON_TINT, ACCENT, 0.25) */
+  --strong-hover: #2B65A0;          /* QColor(ACCENT_STRONG).darker(110) */
+  --strong-pressed: #275B90;        /* QColor(ACCENT_STRONG).darker(122) */
+  --red-hover: #EFCED3;             /* _mixed(RED_TINT, RED, 0.19) */
+  --red-pressed: #EAC1C7;           /* _mixed(RED_TINT, RED, 0.3) */
+  --red-strong-hover: #8D3542;      /* QColor(RED_DARK).darker(112) */
+  --red-strong-pressed: #7D2F3B;    /* QColor(RED_DARK).darker(126) */
+  --unticked-hover: #A8BBCE;        /* _mixed(NEUTRAL_FILL, ACCENT, 0.4) */
+  --switch-off-hover: #8B8987;      /* _mixed(PLACEHOLDER, TEXT, 0.2) */
+  --derived-hover: #CDE0F3;         /* _mixed(ACCENT_TINT, SELECTED, 0.4): derived grid card under the pointer */
+  --kept-hover: #F0D5C1;            /* _mixed(ORANGE_TINT, ORANGE, 0.19): kept grid card under the pointer */
+
+  /* ---- typography ------------------------------------------------------- */
+  --font-family: "Segoe UI", system-ui, sans-serif;            /* FONT */
+  /* fluent_font_size(): max(8, round(12 * fluent)) pt.  Qt asks the font
+   * engine for a whole pixel size, qRound(pt * 96 / 72) (QFontPrivate::
+   * engineForScript): 10 pt is a 13 px font, not 13.33. */
+  --font-pt: max(8px, round(calc(12px * var(--fluent)), 1px));
+  --font-size: calc(round(calc(var(--font-pt) * 4 / 3), 1px) * var(--qt));
+  --heading-weight: 600;        /* HEADING_CSS_WEIGHT: Semibold (QFont.DemiBold) */
+
+  /* ---- metrics (scaled_px in Qt px, then x --qt) ------------------------ */
+  --q: calc(1px * var(--qt));                                                     /* one Qt logical px */
+  --edge: calc(1px * var(--qt));                                                  /* FIELD_BORDER_PX */
+  --radius: calc(max(1px, round(calc(4px * var(--fluent)), 1px)) * var(--qt));    /* RADIUS */
+  --radius-inner: calc(var(--radius) - var(--edge));                              /* concentric inner corner */
+  --control: calc(max(22px, round(calc(30px * var(--fluent)), 1px)) * var(--qt)); /* control_height() */
+  --row-gap: calc(max(4px, round(calc(6px * var(--fluent)), 1px)) * var(--qt));   /* row_gap() */
+  --window-pad: calc(max(1px, round(calc(14px * var(--fluent)), 1px)) * var(--qt));   /* window_pad(1) = section_gap() */
+  --window-pad-half: calc(max(1px, round(calc(7px * var(--fluent)), 1px)) * var(--qt)); /* window_pad(0.5) */
+  --card-pad: calc(max(1px, round(calc(10px * var(--fluent)), 1px)) * var(--qt)); /* CARD_PAD */
+  --card-title-pad: calc(max(1px, round(calc(4px * var(--fluent)), 1px)) * var(--qt)); /* CARD_TITLE_PAD */
+  --pad-v: calc(max(1px, round(calc(1px * var(--fluent)), 1px)) * var(--qt));     /* PADDING_V */
+  --edit-pad-h: calc(max(1px, round(calc(4px * var(--fluent)), 1px)) * var(--qt)); /* EDIT_PADDING_H */
+  --qline-margin: calc(2px * var(--qt));                                          /* QLineEditPrivate::horizontalMargin */
+  --field-text-inset: calc(var(--edge) + var(--edit-pad-h) + var(--qline-margin)); /* where a field's text starts */
+  --elided-room: calc((round(calc(2px * var(--fluent)), 1px) + 1px) * var(--qt));          /* ElidedLabel.room(): scaled_px(2) + 1 beyond its words */
+  --data-label-min: calc(max(48px, round(calc(68px * var(--fluent)), 1px)) * var(--qt));       /* the data editor's setting_label_width(minimum=68) */
+  --data-label-cap: calc(max(1px, round(calc(224px * var(--fluent)), 1px)) * var(--qt));       /* ... and its cap: past it an axis name elides */
+  --button-pad-h: calc(max(6px, round(calc(10px * var(--fluent)), 1px)) * var(--qt)); /* BUTTON_PADDING_H */
+  --combo-width: calc(max(1px, round(calc(16px * var(--fluent)), 1px)) * var(--qt)); /* COMBO_WIDTH: stepper / drop column */
+  /* A combo's own room around its words: padding, the drop column, its edges. */
+  --combo-chrome: calc(2 * var(--edit-pad-h) + var(--qline-margin) + var(--combo-width) + 3 * var(--edge));
+  --stepper-extent: calc(var(--combo-width) + 2 * var(--edge));                   /* fluent_stepper_extent() */
+  --chevron-half: calc(max(1px, round(calc(8px * var(--fluent)), 1px)) / 2 * var(--qt)); /* COMBO_TRI_SIZE / 2 */
+  --chevron-stroke: calc(max(1px, round(calc(3px * var(--fluent)), 1px) / 2) * var(--qt));
+  --chevron-w: calc(2 * var(--chevron-half) + var(--chevron-stroke));
+  --chevron-h: calc(var(--chevron-half) + var(--chevron-stroke));
+  --switch-w: calc(max(32px, round(calc(40px * var(--fluent)), 1px)) * var(--qt));            /* _switch_track_size() */
+  --switch-h: calc(round(up, max(16px, round(calc(20px * var(--fluent)), 1px)), 2px) * var(--qt));
+  --switch-inset: calc(max(3px, round(calc(4px * var(--fluent)), 1px)) * var(--qt));
+  --switch-label-gap: calc(max(1px, round(calc(8px * var(--fluent)), 1px)) * var(--qt));
+  /* FluentCheckBox indicator: the sheet's width scaled_even_px(16) plus its FIELD_BORDER_PX edge each side */
+  --check-size: calc((round(up, max(2px, round(calc(16px * var(--fluent)), 1px)), 2px) + 2px) * var(--qt));
+  --check-gap: calc(max(1px, round(calc(6px * var(--fluent)), 1px)) * var(--qt));
+  --segment-rim: calc(max(2px, round(calc(2px * var(--fluent)), 1px)) * var(--qt));
+  --segment-pad: calc(max(6px, round(calc(10px * var(--fluent)), 1px)) * var(--qt));
+  --scrollbar: calc(max(10px, round(calc(12px * var(--fluent)), 1px)) * var(--qt));          /* fluent_scrollbar_thickness() */
+  /* set_width_bounded_widget(inset=window_pad): a page that scrolls holds its bar's gutter, bar or
+   * not, and its right inset is the window pad less that gutter -- its rows end a window pad in. */
+  --window-pad-beside-bar: max(0px, calc(var(--window-pad) - var(--scrollbar)));
+  /* The Figure Viewer's right surface (_surface_right_inset): rows end a card pad in, or a bar's width
+   * where that is wider; a page that scrolls there holds the bar in it and keeps the rest beside it. */
+  --surface-right-inset: max(var(--card-pad), var(--scrollbar));
+  --scroll-handle-margin: calc(max(1px, round(calc(2px * var(--fluent)), 1px)) * var(--qt));
+  --scroll-handle-min: calc(max(1px, round(calc(28px * var(--fluent)), 1px)) * var(--qt));
+  --dot: calc(round(up, max(2px, round(calc(12px * var(--fluent)), 1px)), 2px) * var(--qt)); /* FluentStatusDot */
+  --dot-gap: calc(max(1px, round(calc(8px * var(--fluent)), 1px)) * var(--qt));              /* status_dot_gap() */
+  --popup-gap: calc(max(3px, round(calc(4px * var(--fluent)), 1px)) * var(--qt));            /* popup_gap() */
+  --popup-item-pad-v: calc(max(2px, round(calc(3px * var(--fluent)), 1px)) * var(--qt));
+  --popup-item-pad-h: calc(max(4px, round(calc(6px * var(--fluent)), 1px)) * var(--qt));
+  --tree-indent: calc(20px * var(--qt));                                                      /* QTreeView.indentation() */
+  --header-h: calc(max(38px, round(calc(48px * var(--fluent)), 1px)) * var(--qt));           /* TaskConsole header frame */
+  --header-pad-v: calc(max(1px, round(calc(6px * var(--fluent)), 1px)) * var(--qt));
+  --strip-h: calc(max(30px, round(calc(38px * var(--fluent)), 1px)) * var(--qt));            /* FluentStatusStrip */
+  --strip-pad-v: calc(max(1px, round(calc(4px * var(--fluent)), 1px)) * var(--qt));
+  --label-min: calc(max(48px, round(calc(72px * var(--fluent)), 1px)) * var(--qt));          /* setting_label_width minimum */
+  --label-trail: calc(max(1px, round(calc(10px * var(--fluent)), 1px)) * var(--qt));         /* setting_label_width + scaled_px(10) */
+  --kind-combo-w: calc(max(130px, round(calc(170px * var(--fluent)), 1px)) * var(--qt));     /* TaskConsole kind combo */
+  --signal-combo-w: calc(max(130px, round(calc(260px * var(--fluent)), 1px)) * var(--qt));
+  --text-edit-min-w: calc(max(120px, round(calc(160px * var(--fluent)), 1px)) * var(--qt));  /* qt_form _TextHandler minimum */
+  --number-edit-min-w: calc(max(96px, round(calc(120px * var(--fluent)), 1px)) * var(--qt)); /* qt_form _blank_or_number_edit minimum */
+  --edit-hint-w: calc(var(--edit-hint-text) + 2 * var(--field-text-inset));                   /* QLineEdit.sizeHint */
+  --spin-hint-w: calc(var(--spin-hint-text) + 2 * var(--field-text-inset) + var(--stepper-extent)); /* FluentDoubleSpinBox.sizeHint, chip aside */
+  --body-top: calc(max(1px, round(calc(2px * var(--fluent)), 1px)) * var(--qt));             /* card body top inset */
+  --surface-min-h: calc(max(1px, round(calc(240px * var(--fluent)), 1px)) * var(--qt));      /* an empty card's frame */
+  --panel-min-w: calc(max(1px, round(calc(470px * var(--fluent)), 1px)) * var(--qt));
+  --settings-min-w: calc(max(1px, round(calc(340px * var(--fluent)), 1px)) * var(--qt));
+  --settings-min-h: calc(max(260px, round(calc(320px * var(--fluent)), 1px)) * var(--qt));   /* the Setting popup's minimum_height */
+  --exposure-w: calc(max(1px, round(calc(96px * var(--fluent)), 1px)) * var(--qt));
+  --chip-pad: calc(max(4px, round(calc(6px * var(--fluent)), 1px)) * var(--qt));      /* _step_chip_metrics: padding */
+  --step-chip-gap: calc(max(2px, round(calc(3px * var(--fluent)), 1px)) * var(--qt)); /* chip to the stepper's margin column */
+  --chip-text-gap: calc(max(2px, round(calc(4px * var(--fluent)), 1px)) * var(--qt)); /* digits to the chip */
+  /* What a chip takes from the digits besides its text (_step_chip_room). */
+  --chip-chrome: calc(2 * var(--chip-pad) + var(--step-chip-gap) + var(--chip-text-gap) - var(--edge) - var(--edit-pad-h));
+  /* ONE RESERVED ROOM: every number width counts the canonical chip's. */
+  --chip-reserve: max(0px, calc(var(--chip-sample-ink) + var(--chip-chrome)));
+  --number-cap: calc(var(--number-text) + 2 * var(--field-text-inset) + var(--stepper-extent) + var(--chip-reserve)); /* qt_form._number_cap of a decimal box */
+  --spin-hint: calc(var(--spin-hint-text) + 2 * var(--field-text-inset) + var(--stepper-extent) + var(--chip-reserve)); /* FluentDoubleSpinBox.sizeHint: a decimal box laid in a row */
+  --number-cap-plain: calc(var(--number-text) + 2 * var(--field-text-inset) + var(--stepper-extent));               /* ... of a box with no step chip */
+  --count-box-w: calc(var(--count-text) + 2 * var(--q) + 2 * var(--field-text-inset) + var(--stepper-extent)); /* count_box_width(): the digits, 2, the box's chrome */
+  --anim-switch: 150ms;                                                                       /* FluentSwitch animation */
+
+  /* ---- window title bar: FluentWindow on qframelesswindow 0.8 ----------- */
+  --title-bar-h: calc(32px * var(--qt));          /* TitleBarBase.setFixedHeight(32): the bar takes no Fluent scale */
+  --title-button-w: calc(46px * var(--qt));       /* TitleBarButton.setFixedSize(46, 32) */
+  --title-inset: var(--window-pad);               /* TITLE_LEFT_INSET = WINDOW_PAD: the mark on the body's left column */
+  --title-mark: calc(20px * var(--qt));           /* round(32 * TITLE_ICON_RATIO 0.625) */
+  --title-mark-top: calc(6px * var(--qt));        /* (32 - 20) // 2 */
+  --title-mark-gap: calc(max(1px, round(calc(8px * var(--fluent)), 1px)) * var(--qt)); /* TITLE_ICON_GAP */
+  --title-hover: rgba(0, 0, 0, 0.102);            /* TitleBarButton hover face QColor(0, 0, 0, 26) */
+  --title-pressed: rgba(0, 0, 0, 0.2);            /* pressed face QColor(0, 0, 0, 51) */
+  --title-close-hover: #E81123;                   /* CloseButton QColor(232, 17, 35), white glyph */
+  --title-close-pressed: #F1707A;                 /* QColor(241, 112, 122) */
+  --title-close-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 15.875 10.583' preserveAspectRatio='none'%3E%3Cg fill='none' stroke='%23000' stroke-width='.17639'%3E%3Cpath d='m6.1295 3.6601 3.2632 3.2632z'/%3E%3Cpath d='m9.3927 3.6601-3.2632 3.2632z'/%3E%3C/g%3E%3C/svg%3E"); /* qframelesswindow close.svg, stretched to the button */
+
+  /* ---- component metrics (fluent.py) ------------------------------------ */
+  --section-gap: var(--window-pad);                                                           /* section_gap() */
+  --rule-gap: var(--window-pad-half);                                                         /* device_manager _rule_gap() */
+  --tab-pad-h: calc(max(12px, round(calc(16px * var(--fluent)), 1px)) * var(--qt));          /* _tab_padding_h */
+  --tab-margin-h: calc(max(1px, round(calc(3px * var(--fluent)), 1px)) * var(--qt));         /* _tab_margin_h */
+  --tab-label-h: calc(max(26px, round(calc(32px * var(--fluent)), 1px)) * var(--qt));        /* _tab_label_height */
+  --tab-underline: calc(max(2px, round(calc(2px * var(--fluent)), 1px)) * var(--qt));        /* _tab_underline */
+  --tab-close: calc(round(up, max(14px, round(calc(18px * var(--fluent)), 1px)), 2px) * var(--qt)); /* close disk, scaled_even_px(18) */
+  --tab-floor: calc(max(28px, round(calc(34px * var(--fluent)), 1px)) * var(--qt));          /* overflow cap floor */
+  --tab-overflow: calc(max(20px, round(calc(26px * var(--fluent)), 1px)) * var(--qt));       /* the corner ⋯ */
+  --tab-overflow-margin: calc(max(4px, round(calc(6px * var(--fluent)), 1px)) * var(--qt));
+  --grid-cell-min: calc(max(1px, round(calc(52px * var(--fluent)), 1px)) * var(--qt));       /* FluentSelectionGrid._CELL_WIDTH */
+  --grid-cell-pad: calc(max(6px, round(calc(10px * var(--fluent)), 1px)) * var(--qt));       /* label air inside a cell */
+  --grid-gutter: calc(max(1px, round(calc(2px * var(--fluent)), 1px)) * var(--qt));          /* _grid_gutter */
+  /* _grid_row_insets: a row's gap shared above and below its cards in whole Qt px, the odd one below */
+  --grid-above: round(down, calc(var(--row-gap) / 2 + var(--q) / 4), var(--q));
+  --grid-below: calc(var(--row-gap) - var(--grid-above));
+  --grid-header-pad: calc(max(4px, round(calc(6px * var(--fluent)), 1px)) * var(--qt));
+  --grid-header-h: calc(var(--font-line) + 8 * var(--q));                                    /* a QHeaderView section: its font's height, PM_HeaderMargin (4) above and below */
+  --grid-label-lead: calc(max(5px, round(calc(8px * var(--fluent)), 1px)) * var(--qt));      /* right-aligned row label's left inset */
+  --grid-action: calc(var(--control) + 2 * var(--grid-gutter));                             /* action_width() */
+  --dialog-pad: calc(max(10px, round(calc(16px * var(--fluent)), 1px)) * var(--qt));         /* _FluentMessageDialog margins */
+  --dialog-gap: calc(max(6px, round(calc(10px * var(--fluent)), 1px)) * var(--qt));
+  --dialog-body-w: calc(max(240px, round(calc(360px * var(--fluent)), 1px)) * var(--qt));
+  --review-side-min: calc(max(240px, round(calc(300px * var(--fluent)), 1px)) * var(--qt)); /* PointReviewView side: scaled_px(300, 240) */
+  --review-side-max: calc(max(300px, round(calc(390px * var(--fluent)), 1px)) * var(--qt)); /* scaled_px(390, 300) */
+  --dialog-body-max-h: calc(max(180px, round(calc(320px * var(--fluent)), 1px)) * var(--qt));
+  --menu-pad: calc(max(3px, round(calc(4px * var(--fluent)), 1px)) * var(--qt));             /* _FluentRoundedMenu */
+  --menu-item-pad-v: calc(max(4px, round(calc(5px * var(--fluent)), 1px)) * var(--qt));
+  --menu-item-pad-h: calc(max(10px, round(calc(14px * var(--fluent)), 1px)) * var(--qt));
+  --menu-item-margin: calc(max(2px, round(calc(2px * var(--fluent)), 1px)) * var(--qt));
+  --chip-h: calc(var(--font-line) + max(3px, round(calc(4px * var(--fluent)), 1px)) * var(--qt)); /* PublishedItemsLegend chip */
+  --chip-pad-x: calc(max(6px, round(calc(8px * var(--fluent)), 1px)) * var(--qt));
+  --chip-gap: calc(max(4px, round(calc(6px * var(--fluent)), 1px)) * var(--qt));
+  --info-indent: calc(max(14px, round(calc(18px * var(--fluent)), 1px)) * var(--qt));        /* InfoTree indentation */
+  --info-pad: calc(max(3px, round(calc(5px * var(--fluent)), 1px)) * var(--qt));            /* InfoTree item padding */
+  --item-view-extra: calc(2px * var(--qt));   /* QWindowsVistaStyle CT_ItemViewItem: every item view row 2 px taller */
+  --install-state-w: calc(max(96px, round(calc(120px * var(--fluent)), 1px)) * var(--qt)); /* Installation@: a component's state column */
+  --info-pane-extra: calc(max(220px, round(calc(280px * var(--fluent)), 1px)) * var(--qt));  /* label column + this = pane width */
+  --path-min: calc(max(72px, round(calc(96px * var(--fluent)), 1px)) * var(--qt));          /* FluentPathEdit field floor */
+  --logic-name-w: calc(max(150px, round(calc(200px * var(--fluent)), 1px)) * var(--qt));    /* LogicRowView name column */
+  --nav-h: calc(var(--tab-label-h) + var(--tab-underline));                                 /* the shell's view strip */
+  --control-current-w: calc(max(1px, round(calc(112px * var(--fluent)), 1px)) * var(--qt)); /* DeviceControlView Current column, window_pad(8) */
+  --control-column-gap: calc(max(1px, round(calc(5px * var(--fluent)), 1px)) * var(--qt));  /* window_pad(0.35) */
+  --control-status-min: calc(var(--dot) + var(--dot-gap) + var(--control-status-text));      /* dot, gap, "Applying; latest queued" */
+  --document-name-max: calc(max(1px, round(calc(336px * var(--fluent)), 1px)) * var(--qt));  /* window_pad(24) */
+  --gallery-info-h: calc(14 * var(--control));                                              /* gallery only */
+
+  /* ---- PulseEditor (zlc_ui/pulse/_layout.py) ---------------------------- */
+  --pulse-row-gap: calc(max(3px, round(calc(4px * var(--fluent)), 1px)) * var(--qt));       /* row_spacing(): the port-row pitch */
+  --pulse-period-w: calc(max(112px, round(calc(160px * var(--fluent)), 1px)) * var(--qt));  /* PERIOD_CARD_WIDTH */
+  --pulse-spacer-w: calc(max(68px, round(calc(94px * var(--fluent)), 1px)) * var(--qt));   /* SPACER_CARD_WIDTH */
+  /* BracketPost: count_box_width of its count box (a FluentScanLineEdit inside: the badge's room) and the card pad */
+  /* ... and the badge's room in it (FluentScanLineEdit._place_button): from where the digits may end to a
+   * text gap before the badge column, which stands a gap before the chevrons' ink (on a device px, out to a Qt px) */
+  --pulse-badge-room: calc(round(up, calc(round(calc(var(--edge) + var(--combo-width) / 2 + var(--chevron-half) + var(--chevron-stroke) / 2 + var(--pulse-badge-gap)), var(--dpx)) + var(--pulse-badge) - var(--q) / 1000), var(--q))
+    - var(--edge) - var(--edit-pad-h) - var(--stepper-extent) - var(--qline-margin) + var(--chip-text-gap));
+  --pulse-badge-gap: calc(max(3px, round(calc(4px * var(--fluent)), 1px)) * var(--qt)); /* _BindingButton.gap() */
+  --pulse-post-count-w: calc(var(--count-box-w) + var(--pulse-badge-room));
+  --pulse-post-w: calc(var(--pulse-post-count-w) + 2 * var(--card-pad));
+  --pulse-label-w: calc(max(84px, round(calc(100px * var(--fluent)), 1px)) * var(--qt));   /* CHANNEL_LABEL_WIDTH */
+  --pulse-name-w: calc(max(88px, round(calc(108px * var(--fluent)), 1px)) * var(--qt));    /* channel_name_edit_width() */
+  --pulse-unit-w: calc(max(62px, round(calc(60px * var(--fluent)), 1px)) * var(--qt));     /* time_unit_width() */
+  --pulse-delay-w: calc(max(60px, round(calc(70px * var(--fluent)), 1px)) * var(--qt));    /* ChannelPanel._delay_width() */
+  --pulse-connection-w: calc(max(212px, round(calc(252px * var(--fluent)), 1px)) * var(--qt));
+  --pulse-ports-w: calc(max(246px, round(calc(286px * var(--fluent)), 1px)) * var(--qt));
+  --pulse-command-min-w: calc(max(62px, round(calc(74px * var(--fluent)), 1px)) * var(--qt));
+  --pulse-config-name-w: calc(max(180px, round(calc(240px * var(--fluent)), 1px)) * var(--qt)); /* config_name_width() */
+  --pulse-config-value-w: calc(max(90px, round(calc(110px * var(--fluent)), 1px)) * var(--qt)); /* config_view Default / Config value */
+  --pulse-default-indent: calc(var(--section-gap) - var(--row-gap));                         /* config_view _default_indent() */
+  --pulse-badge: calc(round(up, max(12px, round(calc(16px * var(--fluent)), 1px)), 2px) * var(--qt)); /* _BindingButton.diameter() */
+  /* FluentGroupBox's painted title strip, scaled_px(CARD_TITLE_PX): the title centred in it, the body a card pad under it */
+  --card-title-strip: calc(max(1px, round(calc(32px * var(--fluent)), 1px)) * var(--qt));
+  /* label_column_width(): setting_label_width(labels, minimum=0) floors at an unscaled 48 */
+  --pulse-label-min: calc(48px * var(--qt));
+  /* _port_toggle_button: a ring about half the control's face, of the face's parity */
+  --pulse-ring-face: max(22px, round(calc(30px * var(--fluent)), 1px));
+  --pulse-ring-half: round(down, calc(var(--pulse-ring-face) / 2), 1px);
+  --pulse-ring: calc(max(8px + mod(var(--pulse-ring-face), 2px), var(--pulse-ring-half) - mod(var(--pulse-ring-face) - var(--pulse-ring-half), 2px)) * var(--qt));
+  --pulse-ring-stroke: calc(var(--pulse-ring) / 9);                                           /* _PortToggleIcon: side / 9 */
+  --pulse-source-h: calc(2 * var(--control));                                                /* the scan program box shrinks with the window, as a QPlainTextEdit does */
+  --pulse-bar-gap: calc(max(6px, round(calc(10px * var(--fluent)), 1px)) * var(--qt));     /* preview controls row spacing scaled_px(10, minimum=6) */
+  --pulse-size-w: calc(max(66px, round(calc(80px * var(--fluent)), 1px)) * var(--qt));      /* preview Size combo */
+  --pulse-context-min-w: calc(max(1px, round(calc(150px * var(--fluent)), 1px)) * var(--qt)); /* component_view context combo minimum */
+  --pulse-hidden-min-w: calc(max(1px, round(calc(100px * var(--fluent)), 1px)) * var(--qt));  /* embedded toolbar's hidden-ports combo */
+  --pulse-hidden-max-w: calc(max(1px, round(calc(170px * var(--fluent)), 1px)) * var(--qt));
+  --pulse-bound-label-max: calc(max(1px, round(calc(320px * var(--fluent)), 1px)) * var(--qt)); /* bound_field_width() cap */
+  /* FluentTableView: item padding scaled 6 + the style's text margin; rows scaled_px(28, 22) + the hairline;
+     the header's section margin around its words (QHeaderView: 2 x PM_HeaderMargin + 3) */
+  --table-cell-pad: calc((max(4px, round(calc(6px * var(--fluent)), 1px)) + 3px) * var(--qt));
+  --table-row-h: calc((max(22px, round(calc(28px * var(--fluent)), 1px)) + 1px) * var(--qt));
+  --table-header-h: calc((max(22px, round(calc(28px * var(--fluent)), 1px)) + 8px) * var(--qt));
+  --table-header-margin: calc(11px * var(--qt));
+  --pulse-dac-width-w: calc(max(70px, round(calc(82px * var(--fluent)), 1px)) * var(--qt));   /* target_view Width box: scaled_px(82, 70) */
+  --pulse-target-bar-h: calc(max(48px, round(calc(58px * var(--fluent)), 1px)) * var(--qt)); /* Target header frame */
+
+  /* ---- SLM Editor (zlc_atom devices/slm/editor.py: raw Qt px layouts; its popups scaled_px) ---- */
+  --slm-page-pad-v: calc(8px * var(--qt));                 /* the Pattern page: contents margins 16, 8, spacing 6 */
+  --slm-page-pad-h: calc(16px * var(--qt));
+  --slm-page-gap: calc(6px * var(--qt));
+  --slm-frame-pad: calc(9px * var(--qt));                  /* a child box layout's default margins and spacing, from the outer edge */
+  --slm-frame-gap: calc(6px * var(--qt));
+  --slm-layers-pad-v: calc(5px * var(--qt));               /* the layer grid: margins 8, 5; spacing 8, 4 */
+  --slm-layers-pad-h: calc(8px * var(--qt));
+  --slm-layers-gap-h: calc(8px * var(--qt));
+  --slm-layers-gap-v: calc(4px * var(--qt));
+  --slm-size-min-w: calc(76px * var(--qt));                /* the Size combo's minimum width */
+  --slm-wave-pad: calc(8px * var(--qt));                   /* the Wavefront page: margins 8, spacing 8 */
+  --slm-wave-grid-pad: calc(12px * var(--qt));             /* its parameter grid: margins 12, spacing 8, 6, at least 440 wide */
+  --slm-wave-gap-h: calc(8px * var(--qt));
+  --slm-wave-gap-v: calc(6px * var(--qt));
+  --slm-wave-min-w: calc(440px * var(--qt));
+  --slm-popup-pad: calc(20px * var(--qt));                 /* a popup's margins and its form's (10 + 10) */
+  --slm-preset-min-w: calc(round(calc(470px * var(--fluent)), 1px) * var(--qt));
+  /* show_fluent_popup_for_anchor: a popup is at least scaled_px(minimum_height, minimum=260) tall. */
+  --slm-preset-min-h: calc(max(260px, round(calc(360px * var(--fluent)), 1px)) * var(--qt));
+  --slm-pupil-min-w: calc(round(calc(430px * var(--fluent)), 1px) * var(--qt));
+  --slm-pupil-min-h: calc(max(260px, round(calc(270px * var(--fluent)), 1px)) * var(--qt));
+}

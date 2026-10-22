@@ -1,0 +1,16 @@
+[package]
+name = "zlc-figure"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+zlc-agg = { path = "../zlc-agg" }
+zlc-mathtext = { path = "../zlc-mathtext" }
+zlc-text = { path = "../zlc-text" }
+
+[dev-dependencies]
+serde_json = "1"
+sha2 = "0.10"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

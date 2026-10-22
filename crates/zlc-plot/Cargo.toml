@@ -1,0 +1,28 @@
+[package]
+name = "zlc-plot"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+# Commands and recorded values carry floats Python parses exactly.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+rayon = "1.12"
+zlc-core = { path = "../zlc-core" }
+zlc-figure = { path = "../zlc-figure" }
+zlc-mathtext = { path = "../zlc-mathtext" }
+zlc-text = { path = "../zlc-text" }
+zlc-render = { path = "../zlc-render" }
+png = "0.18"
+zlc-archive = { path = "../zlc-archive" }
+# Vector export: the path stages, compressed streams, embedded images.
+zlc-agg = { path = "../zlc-agg" }
+flate2 = "1.1"
+base64 = "0.22"
+
+[dev-dependencies]
+# The golden cases are Python dicts whose insertion order is semantic.
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+png = "0.18"

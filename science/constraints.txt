@@ -1,0 +1,32 @@
+# v2's pins (Zou_lab_control_v2\constraints.txt and pyproject.toml), and only
+# v2's: every package of pyproject.toml's closure that v2 pins, at v2's exact
+# version. What v2 leaves unpinned stays unpinned here (pip picks it, as for
+# v2: CuPy's CUDA runtime and nvidia-* wheels, cuda-pathfinder,
+# importlib-resources), so a machine v2 runs on already satisfies this file.
+# Packages v2 does not install (pypylon) are not pinned at all.
+# bin\install_requirements.bat installs through it.
+# Runtime
+numpy==2.4.2
+scipy==1.17.1
+Pillow==12.1.1
+# devices
+pyserial==3.5
+PyVISA==1.16.1
+PyVISA-py==0.8.1
+pyusb==1.3.1
+libusb-package==1.0.30.0
+typing-extensions==4.16.0
+# oracle (development machines)
+numba==0.67.0
+llvmlite==0.49.0
+matplotlib==3.10.8
+cycler==0.12.1
+contourpy==1.3.3
+fonttools==4.63.0
+kiwisolver==1.5.0
+packaging==26.3
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+six==1.17.0
+# The editable install's build backend
+setuptools==81.0.0

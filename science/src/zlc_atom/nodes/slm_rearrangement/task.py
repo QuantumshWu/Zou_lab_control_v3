@@ -1,0 +1,1103 @@
+"""One operator-authored Pulse per shot: photograph, rearrange, photograph and verify."""
+from __future__ import annotations
+
+import json
+from math import sqrt
+from pathlib import Path
+from time import perf_counter, monotonic, time_ns
+import sys
+from dataclasses import replace
+from contextlib import ExitStack
+
+import numpy as np
+from zlc_data import (AxisId, AxisSpec, COMPONENT, SCAN_POINT, SPATIAL_Y, SPATIAL_X,
+                      DatasetSchema, DomainSpec, ValueSchema, ValidityContract, owned_snapshot_from_arrays)
+from zlc_durable import atomic_write_file, atomic_write_text, write_readable_json
+from zlc_data.point_overlay import (
+    IMAGE_POINT_OVERLAY_CONTRACT,
+    IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
+    image_point_overlay_geometry,
+)
+from zlc_plugin.figures import (
+    AxisRef,
+    CurvePlot,
+    ImageFrame,
+    ImagePlot,
+    PlotLabels,
+)
+from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput
+
+from zlc_atom.data import snapshot_from_array
+from zlc_atom.devices.camera.contract import CameraFrameRecord
+from zlc_atom.devices.slm.solver import (
+    acquire_rearrangement, plan_rearrangement,
+    rearrangement_diagnostics, sample_rearrangement, rearrangement_is_noop,
+)
+from zlc_atom.nodes.slm.rearrangement import compact_target, run_rearrangement
+from zlc_atom.nodes.calibration import TrapCalibration
+from zlc_atom.nodes.calibration.calibration import reads_photoelectrons, registration_order as _registration_order
+from zlc_atom.nodes._framework.pulse import STATUS_DONE, PulseBoard, check_cancelled, pulse_description
+from zlc_atom.nodes.camera.measurement import (
+    CameraMeasurementNode, CameraMeasurementRequest, frames_snapshot)
+from zlc_atom.nodes.slm import plain_json as _plain_json
+
+REARRANGEMENT_ARTIFACT_CONTRACT = "zlc.slm.rearrangement"
+BEFORE_FRAME_OUTPUT = DatasetOutputDeclaration("before_frame", "slm-rearrangement.before-frame")
+AFTER_FRAME_OUTPUT = DatasetOutputDeclaration("after_frame", "slm-rearrangement.after-frame")
+BEFORE_OCCUPIED_OUTPUT = DatasetOutputDeclaration("before_occupied", IMAGE_POINT_OVERLAY_CONTRACT)
+AFTER_OCCUPIED_OUTPUT = DatasetOutputDeclaration("after_occupied", IMAGE_POINT_OVERLAY_CONTRACT)
+PHASE_OUTPUT = DatasetOutputDeclaration("phase", "slm-rearrangement.phase")
+TRAJECTORY_OUTPUT = DatasetOutputDeclaration("trajectory", "slm-rearrangement.trajectory")
+QUALITY_OUTPUT = DatasetOutputDeclaration("intensity_ratio", "slm-rearrangement.intensity-ratio")
+OUTPUTS = (BEFORE_FRAME_OUTPUT, BEFORE_OCCUPIED_OUTPUT, AFTER_FRAME_OUTPUT,
+           AFTER_OCCUPIED_OUTPUT, PHASE_OUTPUT, TRAJECTORY_OUTPUT, QUALITY_OUTPUT)
+
+
+def rearrangement_outputs(frame_mode):
+    """Unknown auto-N diagnostics stay typed artifacts, not guessed live axes."""
+    return OUTPUTS[:5] if frame_mode == "camera_step" else OUTPUTS
+
+
+def pulse_timing(timing, before_period, after_period):
+    """Selected Periods in the actual compiled, Config-filled one-shot program.
+
+    ``timing`` is the board's account of the program it played (the
+    ``pulse_run`` receipt's ``timing``, _framework.pulse): every Period's
+    starts in one run with each loop body replayed at most twice, so a Period
+    inside a loop shows two starts without its loop being expanded, and every
+    digital lane's rising edges the same way.
+    """
+    periods = {period["period_id"]: period for period in timing["periods"]}
+    if before_period not in periods or after_period not in periods:
+        raise ValueError("The imaging Period is absent from the applied Pulse")
+    clock = float(timing["clock_hz"])
+    result = {}
+    for key, identity in (("before", before_period), ("after", after_period)):
+        period = periods[identity]
+        starts = period["starts"]
+        if len(starts) != 1:
+            raise ValueError(f"{key.title()} imaging Period must play exactly once")
+        result[key + "_start_seconds"] = starts[0] / clock
+        result[key + "_end_seconds"] = (starts[0] + period["duration_ticks"]) / clock
+        result[key + "_period"] = {"id": identity, "name": period["label"]}
+    if result["before_end_seconds"] > result["after_start_seconds"]:
+        raise ValueError("Before imaging must finish before after imaging begins")
+    # The operator identifies the imaging Period, not an SDK camera pin. A
+    # negative lane delay can move an edge earlier; use the earliest possible
+    # digital edge shift rather than silently assuming zero delay.
+    result["earliest_lane_delay_seconds"] = timing["earliest_lane_delay_ticks"] / clock
+    result["available_gap_seconds"] = result["after_start_seconds"] - result["before_end_seconds"]
+    result["program_digest"] = timing["digest"]
+    result["pulse_duration_seconds"] = timing["duration_ticks"] / clock
+    candidates = []
+    for channel, edges in timing["rising_edges"].items():
+        rising = np.asarray(edges, dtype=float) / clock
+        if (len(rising) == 2 and result["before_start_seconds"] <= rising[0] < result["before_end_seconds"]
+                and result["after_start_seconds"] <= rising[1] < result["after_end_seconds"]):
+            candidates.append({"channel": channel, "rising_seconds": rising.tolist()})
+    if not candidates:
+        raise ValueError("No digital lane has exactly two rising edges in the selected imaging Periods; inspect the camera trigger Pulse")
+    result["imaging_trigger_candidates"] = candidates
+    result["timing_basis"] = "Operator-selected Periods; earliest possible lane delay; not hardware camera-trigger timestamps"
+    return result
+
+
+def _error_text(error):
+    return "\n".join((str(error), *getattr(error, "__notes__", ())))
+
+
+class SlmRearrangementTask:
+    """The concrete experiment owner; devices retain acquisition and playback."""
+    instance_id = "slm_rearrangement"
+
+    def __init__(self, *, camera, camera_key, slm, slm_key,
+                 calibration, calibration_path, science_context,
+                 science_context_path, target_rows=3, target_columns=3,
+                 target_intensity=None, target_path=None,
+                 pulse, before_period, after_period,
+                 exposure_seconds=None, motion_frames=16, frame_rate_hz=60.,
+                 frame_mode="fixed", max_camera_step=1.,
+                 minimum_separation=15., intensity_tolerance=1.01, motion_intensity_tolerance=1.10,
+                 save_phase_sequence=True, save_figure_artifact=None,
+                 shots=1):
+        self.camera, self.slm = camera, slm
+        # The pulse board is the core's, driven through its catalogue commands.
+        self.camera_key, self.sequencer_key, self.slm_key = camera_key, "sequencer", slm_key
+        self.calibration, self.science_context = calibration, science_context
+        self.context_path, self.calibration_path = Path(science_context_path).resolve(), Path(calibration_path).resolve()
+        self.target_rows, self.target_columns = int(target_rows), int(target_columns)
+        self.target_path = None if target_path is None else str(Path(target_path).resolve())
+        self.pulse = pulse_description(pulse)
+        self.pulse_path = Path(str(self.pulse["path"])).resolve()
+        self.before_period, self.after_period = str(before_period), str(after_period)
+        self.exposure_seconds = None if exposure_seconds is None else float(exposure_seconds)
+        self.motion_frames = int(motion_frames)
+        self.frame_mode = str(frame_mode)
+        self.max_camera_step = float(max_camera_step)
+        if self.frame_mode not in {"fixed", "camera_step"}:
+            raise ValueError("Unknown frame policy")
+        if not np.isfinite(self.max_camera_step) or self.max_camera_step <= 0:
+            raise ValueError("Maximum camera displacement must be finite and positive")
+        self._frame_count = self.motion_frames
+        self._gpu_reused = False
+        self._camera_maximum_step = None
+        self.shots = int(shots)
+        if self.shots < 1:
+            raise ValueError("A rearrangement fires at least one shot")
+        self._shot, self._shot_reports = 1, []
+        self.frame_rate_hz = float(frame_rate_hz)
+        self.minimum_separation = float(minimum_separation)
+        self.intensity_tolerance = float(intensity_tolerance)
+        self.motion_intensity_tolerance = float(motion_intensity_tolerance)
+        self.save_phase_sequence = bool(save_phase_sequence)
+        self._save_figure_artifact = save_figure_artifact
+        if not isinstance(calibration, TrapCalibration) or science_context.get("objective_kind") != "spots":
+            raise ValueError("Rearrangement requires a calibrated spots Science Context")
+        if tuple(np.asarray(science_context["phase"]).shape) != tuple(slm.shape_yx):
+            raise ValueError("Science Context shape differs from the selected SLM")
+        if not all(callable(getattr(slm, method, None)) for method in (
+                "prepare_phase_sequence", "submit_phase_frame", "play_phase_sequence",
+                "cancel_phase_sequence", "release_phase_sequence")):
+            raise ValueError("The selected SLM does not offer phase-sequence playback")
+        source, weights, order, self._target_to_calibration_xy = _registration_order(
+            calibration, science_context, self.context_path)
+        if target_intensity is None:
+            self.target_intensity, self.target_indices = compact_target(science_context['target_intensity'], self.target_rows, self.target_columns)
+        else:
+            self.target_intensity = np.asarray(target_intensity)
+            if self.target_intensity.shape != tuple(slm.shape_yx):
+                raise ValueError("End Target shape differs from the selected SLM")
+            source_indices = {tuple(point): i for i, point in enumerate(source)}
+            target_points = np.column_stack(np.nonzero(self.target_intensity > 0))
+            self.target_indices = np.asarray([source_indices.get(tuple(point), -1) for point in target_points], dtype=np.intp)
+        destination = np.column_stack(np.nonzero(self.target_intensity > 0)).astype(np.int32)
+        self.points = (source, destination)
+        self.weights = (weights, self.target_intensity[tuple(destination.T)])
+        self.readout_order = order
+        contract = calibration.frame_contract
+        self.roi = contract.roi_xywh
+        self._revision = 0
+        self._snapshots, self._records, self._detections = {}, [], []
+        self._deferred_photo = None
+        self._timings, self._playback, self._result, self._plan = {}, None, None, None
+        self._device_snapshots = {}
+        self._available_outputs, self._capture_evidence = set(), {}
+        self._overlay_geometry = None
+        self._camera_site_indices = self._camera_path_affine = None
+
+    @property
+    def dataset_output_declarations(self):
+        return rearrangement_outputs(self.frame_mode)
+
+    def _record(self):
+        return {"named_devices": {"camera": self.camera_key, "sequencer": self.sequencer_key, "slm": self.slm_key},
+                "pulse": {"path": str(self.pulse_path), "name": self.pulse_path.name},
+                "science_context_path": str(self.context_path), "calibration_path": str(self.calibration_path),
+                "end_target_path": self.target_path,
+                "target_rows": self.target_rows, "target_columns": self.target_columns,
+                "target_source_indices": self.target_indices.tolist(),
+                "before_period": self.before_period, "after_period": self.after_period,
+                "exposure_seconds": self.exposure_seconds,
+                "motion_frames": self.motion_frames if self.frame_mode == "fixed" else None,
+                "frame_mode": self.frame_mode,
+                "shots": self.shots,
+                "requested_motion_frames": self.motion_frames,
+                "max_camera_step": self.max_camera_step, "camera_step_unit": "sensor pixel",
+                "gpu_preparation_reused": self._gpu_reused,
+                "frame_rate_hz": self.frame_rate_hz,
+                "minimum_separation": self.minimum_separation,
+                "intensity_tolerance": self.intensity_tolerance,
+                "motion_intensity_tolerance": self.motion_intensity_tolerance,
+                "target_registration": {
+                    "affine_target_xy_to_calibration_image_xy": self._target_to_calibration_xy.tolist(),
+                    "basis": "Geometric registration; camera/SLM handedness is not independently measured",
+                }}
+
+    def _snapshot(self, context, declaration, values, **axes):
+        return snapshot_from_array(values, producer=self.instance_id, signal=declaration.name,
+            generation=str(getattr(context.generation, "value", context.generation)),
+            revision=self._revision, **axes)
+
+    def _publish(self, context, snapshots):
+        """Commit these new results; an output not shown yet is committed
+        with them, so every panel mounts its frozen geometry at the first
+        publication (its invalid placeholder until the result exists)."""
+        event = {"capture_events": {
+            name: {**capture, "device_snapshots": {"slm": capture["device_snapshots"]["slm"]}}
+            for name, capture in self._capture_evidence.items()}, "device_snapshots": {**self._device_snapshots, "slm": {
+            "identity": str(self.slm.identity), "shape_yx": list(self.slm.shape_yx),
+            "command_revision": int(self.slm.command_revision), "mapping_revision": int(self.slm.mapping_revision),
+            "command_receipt": dict(self.slm.last_command_receipt)}}}
+        updates = {decl.name: value for decl,value in snapshots}
+        self._available_outputs.update(updates)
+        self._snapshots.update(updates)
+        if self._overlay_geometry is not None:
+            event[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD] = self._overlay_geometry
+        committed = [decl for decl in self.dataset_output_declarations
+                     if decl.name in updates or decl.name not in self._committed]
+        if not committed:
+            return  # results this frame policy keeps as artifacts only (rearrangement_outputs)
+        context.commit_live({decl.name: LiveDatasetOutput(decl, self._snapshots[decl.name], event_record=event)
+                             for decl in committed})
+        self._committed.update(decl.name for decl in committed)
+
+    def _prepare_outputs(self, context, node):
+        """One frozen output vocabulary; future results have real invalidity."""
+        point = node.actual_working_point
+        shape = point.frame_shape_yx
+        record = CameraFrameRecord(np.zeros(shape, np.float32 if node.reads_photoelectrons else point.dtype), 0)
+        image = frames_snapshot(((record,),), producer=self.instance_id,
+            generation=str(getattr(context.generation, "value", context.generation)),
+            revision=self._revision, working_point=point, value_unit=node.frame_value_unit)
+        image = owned_snapshot_from_arrays(image.block.schema, image.block.values, image.block.revision,
+            validity=np.zeros((1,1), bool), stream_generation=image.ref.stream_generation)
+        n = len(self.points[0])
+        self._status_axis = AxisSpec(AxisId('slm_rearrangement.site'),'site',COMPONENT,n,tuple(float(i+1) for i in range(n)))
+        for index,(frame,occ) in enumerate(((BEFORE_FRAME_OUTPUT,BEFORE_OCCUPIED_OUTPUT),(AFTER_FRAME_OUTPUT,AFTER_OCCUPIED_OUTPUT))):
+            site = self._status_axis
+            schema = DatasetSchema(image.block.schema.repeat_domain, image.block.schema.point_domain,
+                DomainSpec((n,), (site,)), ValueSchema(ValidityContract.components(site.axis_id), np.dtype('?'), '1', name='occupied'))
+            self._snapshots[frame.name] = image
+            self._snapshots[occ.name] = owned_snapshot_from_arrays(schema, np.zeros((1,1,n),bool), image.block.revision,
+                validity=np.zeros((1,1,n),bool), stream_generation=image.ref.stream_generation)
+        roi = (*tuple(point.roi_origin_yx)[::-1], *tuple(point.roi_shape_yx)[::-1])
+        cal = self.calibration.rebased(roi, point.binning_yx, shape)
+        centers=cal.site_map.centers_xy[self.readout_order]
+        self._camera_site_indices = centers
+        self._camera_path_affine = self._target_to_calibration_xy.copy()
+        # Calibration owns the crop translation. Reuse its actual displacement
+        # for the same registered paths, rather than reimplementing ROI/binning.
+        self._camera_path_affine[2] += centers[0] - self.calibration.site_map.centers_xy[self.readout_order[0]]
+        ids=tuple(f'site_{i:04d}' for i in range(n))
+        labels=tuple(str(i+1) for i in range(n))
+        self._overlay_geometry = image_point_overlay_geometry(image,centers,ids,
+            status_axis=self._status_axis,labels=labels,coordinates_are_indices=True)
+        if self.frame_mode == "fixed":
+            self._prepare_motion_outputs(context)
+        self._snapshots[PHASE_OUTPUT.name] = self._snapshot(context,PHASE_OUTPUT,np.zeros((1,*self.slm.shape_yx),np.float32),
+            cell_axes=(SPATIAL_Y,SPATIAL_X),value_unit='rad')
+        # Camera/phase geometry is complete before mounting the first image.
+        context.set_run_record({**self._record(), IMAGE_POINT_OVERLAY_GEOMETRY_RECORD:self._overlay_geometry,
+                                "device_snapshots":dict(self._device_snapshots)})
+
+    def _prepare_motion_outputs(self, context):
+        n = self._frame_count+1
+        frame = AxisSpec(AxisId('slm_rearrangement.frame'),'frame',SCAN_POINT,n,tuple(float(i) for i in range(n)))
+        site = AxisSpec(AxisId('slm_rearrangement.source_site'),'site',COMPONENT,len(self.points[0]),
+                        tuple(float(i+1) for i in range(len(self.points[0]))))
+        self._snapshots[TRAJECTORY_OUTPUT.name] = self._snapshot(context,TRAJECTORY_OUTPUT,
+            np.zeros((1,n,len(self.points[0]),2)),point_axes=(frame,),
+            cell_axes=(site,AxisSpec(AxisId('slm_rearrangement.coordinate'),'coordinate',COMPONENT,2,(0.,1.),coordinate_labels=('x','y'))),
+            validity=np.zeros((1,n,len(self.points[0]),2),bool),value_unit='1')
+        n = self._frame_count
+        if not n:
+            return
+        frame = AxisSpec(AxisId('slm_rearrangement.output_frame'),'frame',SCAN_POINT,n,tuple(float(i) for i in range(n)))
+        self._snapshots[QUALITY_OUTPUT.name] = self._snapshot(context,QUALITY_OUTPUT,np.zeros((1,n)),
+            point_axes=(frame,),validity=np.zeros((1,n),bool))
+
+    def _camera_paths(self, motion, indices):
+        """Use the report's same registered sensor coordinates for step sizing."""
+        paths = np.repeat(self._camera_site_indices[:, None, :], len(motion), axis=1)
+        paths[indices] = (motion[..., ::-1] @ self._camera_path_affine[:2]
+                          + self._camera_path_affine[2]).transpose(1, 0, 2)
+        geometry = image_point_overlay_geometry(self._snapshots[BEFORE_FRAME_OUTPUT.name],
+            self._camera_site_indices, self._overlay_geometry["point_ids"], status_axis=self._status_axis,
+            labels=self._overlay_geometry["labels"], coordinates_are_indices=True, paths_xy=paths)
+        return np.asarray(geometry["paths_xy"]).transpose(1, 0, 2)
+
+    def _publish_phase(self, context, phase):
+        self._revision += 1
+        snap = self._snapshot(context, PHASE_OUTPUT, np.asarray(phase)[None],
+                              cell_axes=(SPATIAL_Y, SPATIAL_X), value_unit="rad")
+        self._capture_evidence[PHASE_OUTPUT.name] = {"device_snapshots": {
+            **self._device_snapshots, "slm": {
+                "identity": str(self.slm.identity), "shape_yx": list(self.slm.shape_yx),
+                "command_revision": self.slm.command_revision,
+                "mapping_revision": self.slm.mapping_revision,
+                "command_receipt": dict(self.slm.last_command_receipt)}}}
+        self._publish(context, ((PHASE_OUTPUT, snap),))
+
+    def _read_photo(self, context, node, cycle, index, *, publish=True):
+        label = ("before", "after")[index]
+        snapshot_started = perf_counter()
+        self._revision += 1
+        snap = frames_snapshot((cycle,), producer=self.instance_id,
+            generation=str(getattr(context.generation, "value", context.generation)),
+            revision=self._revision, working_point=node.actual_working_point, value_unit=node.frame_value_unit)
+        self._timings[label+"_image_snapshot"] = (perf_counter()-snapshot_started)*1000
+        classification_started = perf_counter()
+        point = node.actual_working_point
+        roi = (*tuple(point.roi_origin_yx)[::-1], *tuple(point.roi_shape_yx)[::-1])
+        cal = self.calibration.rebased(roi, point.binning_yx, point.frame_shape_yx)
+        wanted = reads_photoelectrons(cal)
+        if wanted is not None and wanted != node.reads_photoelectrons:
+            raise ValueError("Camera counts/photoelectron unit differs from the selected Calibration")
+        model = cal.select_model()
+        detection = cal.detect(snap.block.values[0, 0])
+        order = self.readout_order
+        valid = (cal.site_map.valid_sites & model.usable_sites & np.isfinite(detection.counts)
+                 & np.isfinite(detection.thresholds))[order]
+        occupied = detection.occupied[order] & valid
+        self._timings[label+"_classification"] = (perf_counter()-classification_started)*1000
+        site = self._status_axis
+        frame_decl, occ_decl = ((BEFORE_FRAME_OUTPUT, BEFORE_OCCUPIED_OUTPUT),
+                               (AFTER_FRAME_OUTPUT, AFTER_OCCUPIED_OUTPUT))[index]
+        status_schema = DatasetSchema(snap.block.schema.repeat_domain, snap.block.schema.point_domain,
+            DomainSpec((site.size,), (site,)), ValueSchema(ValidityContract.components(site.axis_id), np.dtype('?'), '1', name='occupied'))
+        status = owned_snapshot_from_arrays(status_schema, occupied[None,None], snap.block.revision,
+            validity=valid[None,None], stream_generation=snap.ref.stream_generation)
+        self._capture_evidence[frame_decl.name] = {"device_snapshots": {**self._device_snapshots, "slm": {
+            "identity":str(self.slm.identity),"shape_yx":list(self.slm.shape_yx),
+            "command_revision":self.slm.command_revision,"mapping_revision":self.slm.mapping_revision,
+            "command_receipt":dict(self.slm.last_command_receipt)}},"source_ordinal":cycle[0].source_ordinal}
+        outputs = ((frame_decl, snap), (occ_decl, status))
+        if publish:
+            publication_started = perf_counter()
+            self._publish(context, outputs)
+            self._timings[label+"_publication"] = (perf_counter()-publication_started)*1000
+        else:
+            self._deferred_photo = outputs
+        self._detections.append({"counts": detection.counts[order], "occupied": occupied,
+                                  "valid": valid, "thresholds": detection.thresholds[order]})
+        self._records.append(cycle[0])
+        return occupied, valid
+
+    def _publish_deferred_photo(self, context):
+        """Show the before photograph once the SLM has stopped moving.
+
+        Published on arrival, it woke every live panel of the window in this
+        process while the plan and the first maps were being computed: in a
+        batch, whose panels are already open from the first shot, that took
+        the plan from 1-14 ms to 23-58 ms and the playback's end to within
+        0-20 ms of the verification image, where the moved atoms were lost.
+        """
+
+        outputs, self._deferred_photo = self._deferred_photo, None
+        if outputs is not None:
+            started = perf_counter()
+            self._publish(context, outputs)
+            self._timings["before_publication"] = (perf_counter()-started)*1000
+
+    def _save(self, context, status, error=None):
+        started = perf_counter()
+        self._publish_deferred_photo(context)
+        directory = context.run_directory
+        data, figures = directory / "data", directory / "figures"
+        data.mkdir(parents=True, exist_ok=True); figures.mkdir(parents=True, exist_ok=True)
+        arrays = {"source_yx": self.points[0], "target_yx": self.points[1]}
+        # Report overlays use the live snapshots, but are not acquisition work.
+        from zlc_plugin.figures import image_point_overlay_from_signal
+        overlays = {
+            frame.name: image_point_overlay_from_signal(
+                self._overlay_geometry, self._snapshots[occupied.name],
+                self._snapshots[frame.name], revision=self._revision)
+            for frame, occupied in ((BEFORE_FRAME_OUTPUT, BEFORE_OCCUPIED_OUTPUT),
+                                    (AFTER_FRAME_OUTPUT, AFTER_OCCUPIED_OUTPUT))
+            if frame.name in self._available_outputs
+        }
+        # The core writes each figure's archive and draws it (run.figure).
+        writer = self._save_figure_artifact or context.save_figure
+        path_overlay = None
+        # Whole-SLM arrays are the same every shot (or only diagnostic): only the
+        # shots up to the first completed one keep them.  A completed shot's
+        # final phase is the last frame of its saved sequence, so it is kept
+        # only when that sequence is not.
+        keep_whole = self._keep_whole
+        confirmed_phase = self.slm.last_commanded_phase
+        if confirmed_phase is not None and keep_whole and (
+                status != "completed" or not self.save_phase_sequence or self._result is None):
+            arrays["last_confirmed_phase"] = confirmed_phase
+        for index, value in enumerate(self._detections):
+            prefix = ("before", "after")[index]
+            arrays.update({prefix + "_" + name: item for name, item in value.items()})
+            arrays[prefix + "_image"] = self._records[index].image
+        if self._result is not None:
+            for key in ("motion_yx", "fraction", "support_intensity_ratios", "sites_yx",
+                        "brightness_minimum_to_initial", "brightness_maximum_to_initial",
+                        "brightness_mean_to_initial", "phase_change_from_initial_rms_rad", "phase_step_max_rad",
+                        "pupil_phase_step_rms_rad", "discard_intensity_ratios", "surplus_site_intensity_ratios",
+                        "stray_intensity_ratios", "iterations", "correction_updates", "watched_stray_peaks",
+                        "gate_misses", "frame_solve_ms", "frame_ready_ms",
+                        "center_sample_power_proxy", "background_intensity_ratios", "desired_amplitudes",
+                        "background_peak_yx", "background_peak_intensity",
+                        "target_peak_yx", "target_peak_intensity", "source_site_intensities",
+                        "source_site_intensity_ratios", "source_site_is_active",
+                        "actual_fields", "active_sites", "movement_fraction", "phase_center_yx",
+                        "endpoint_field",
+                        "source_field", "target_field", "target_requested_intensities", "synthesis_coefficients",
+                        "retained_intensity_ratios"):
+                if self._result.get(key) is not None:
+                    arrays[key] = self._result[key]
+            if self.save_phase_sequence and keep_whole:
+                arrays["phase_codes"] = np.asarray(self._result["phase_codes"], dtype=np.uint8).reshape(
+                    (self._result["motion_frames"], *self.slm.shape_yx))
+            if BEFORE_FRAME_OUTPUT.name in overlays:
+                before = self._snapshots[BEFORE_FRAME_OUTPUT.name]
+                motion = self._result["motion_yx"]
+                indices = self._plan["source_indices"]
+                paths = self._camera_paths(motion, indices)
+                path_overlay = replace(overlays[BEFORE_FRAME_OUTPUT.name],
+                    revision=self._revision, paths_xy=paths.transpose(1, 0, 2))
+                arrays["motion_camera_xy"] = path_overlay.paths_xy[indices].transpose(1, 0, 2)
+        if self._plan is not None:
+            for key in ("assigned_source_indices", "assigned_target_indices", "removed_source_indices",
+                        "source_indices", "target_indices", "target_filled"):
+                if key in self._plan:
+                    arrays["planned_target_filled" if key == "target_filled" else key] = np.asarray(self._plan[key])
+            if "motion_yx" in self._plan:
+                arrays["planned_motion_yx"] = self._plan["motion_yx"]
+        summary = {**self._record(), "shot": self._shot, "status": status, "error": None if error is None else _error_text(error),
+                   "actual_motion_frames": None if self._result is None else self._result["motion_frames"],
+                   "planned_motion_frames": self._frame_count if self._plan is not None else None,
+                   "actual_maximum_camera_step": self._camera_maximum_step,
+                   "timing_ms": self._timings, "gpu": getattr(self, "_gpu_info", None),
+                   "pulse_timing": getattr(self, "_pulse_timing", None), "playback": self._playback,
+                   "device_snapshots": {**self._device_snapshots, "slm": {
+                       "identity": str(self.slm.identity), "shape_yx": list(self.slm.shape_yx),
+                       "command_revision": int(self.slm.command_revision), "mapping_revision": int(self.slm.mapping_revision),
+                       "command_receipt": dict(self.slm.last_command_receipt)}},
+                   "capture_events": self._capture_evidence,
+                   "frame_records": [{"source_ordinal": r.source_ordinal, "host_received_at_ns": r.host_received_at_ns,
+                     "timestamp_seconds": r.timestamp_seconds, "timestamp_microseconds": r.timestamp_microseconds}
+                     for r in self._records]}
+        # Inputs are frozen values already read before Start. References alone
+        # would become ambiguous when an operator overwrites a Calibration or
+        # Context file for the next run. Numeric pupil arrays are reconstructed
+        # from these same semantic Context facts rather than saved twice.
+        if keep_whole:
+            summary["calibration"] = self.calibration.to_dict()
+            summary["science_context"] = {key:self.science_context[key] for key in (
+                "objective_kind", "pupil", "operator_metadata", "system_correction", "pattern_metadata", "command_receipt")}
+            arrays['source_pattern_phase']=self.science_context['pattern_phase']
+            # The target images are a few lit pixels on the whole SLM plane:
+            # saved as those pixels, (y, x) and value, not as 5 MB each.
+            for name, image in (('source_target_intensity', self.science_context['target_intensity']),
+                                ('generated_target_intensity', self.target_intensity)):
+                image = np.asarray(image)
+                lit = np.nonzero(image)
+                arrays[name+'_yx'] = np.stack(lit, axis=-1).astype(np.int32)
+                arrays[name+'_values'] = image[lit]
+        if self._detections:
+            summary["before_occupied"] = int(self._detections[0]["occupied"].sum())
+        verification_accepted = status == "completed" and len(self._detections) == 2
+        if len(self._detections) == 2:
+            after = self._target_detection()
+            arrays.update({"after_target_" + key: value for key, value in after.items()})
+            summary.update(target_sites=len(after["occupied"]), judged_target_sites=int(after["valid"].sum()),
+                           filled_target_sites=int(after["occupied"].sum()),
+                           verification_accepted=verification_accepted,
+                           verification_complete=verification_accepted and bool(after["valid"].all()),
+                           target_filling_fraction=(float(after["occupied"].mean())
+                               if verification_accepted and after["valid"].all() else None),
+                           judged_target_filling_fraction=(float(after["occupied"][after["valid"]].mean())
+                               if verification_accepted and after["valid"].any() else None),
+                           missing_target_indices=np.flatnonzero(after["valid"] & ~after["occupied"]).tolist(),
+                           invalid_target_indices=np.flatnonzero(~after["valid"]).tolist())
+        if self._plan is not None:
+            summary["assigned_atoms"] = len(self._plan["assigned_source_indices"])
+            summary["removed_atoms"] = len(self._plan["removed_source_indices"])
+            summary["planning"] = {key:self._plan[key] for key in
+                ("maximum_path_length", "maximum_path_lower_bound", "optimality_gap",
+                 "parallel_travel_distance", "search_budget_exhausted", "shortcut_vertices_removed", "total_distance",
+                 "assignment_candidates", "routing") if key in self._plan}
+            summary["unfilled_target_indices"] = np.setdiff1d(
+                np.arange(len(self.points[1])), self._plan["assigned_target_indices"]).tolist()
+        if self._result is not None:
+            summary["motion_diagnostics"] = {key: self._result[key] for key in
+                ("maximum_step", "recommended_motion_frames", "clearance", "fade_clearance",
+                 "surplus_stationary_clearance", "surplus_site_limit", "stray_intensity_limits",
+                 "discard_converged", "focal_plane_accepted", "converged",
+                 "noop", "fade_frames", "emitted_frame_count", "quality_evaluated",
+                 "quality_scope", "quality_accepted", "phase_trajectory", "field_phase_reference",
+                 "destination_phase_offset_rad", "endpoint_support_intensity_ratio") if key in self._result}
+            if "background_scope" in self._result:
+                summary["focal_background_diagnostics"] = {
+                    key: self._result[key] for key in ("background_scope", "peak_position_basis", "peak_assignment")}
+                peaks = np.asarray(self._result["background_intensity_ratios"])
+                if len(peaks):
+                    summary["focal_background_diagnostics"].update(
+                        maximum_intermediate_peak_to_weakest_target_ratio=float(np.max(peaks[:-1], initial=0.)),
+                        final_peak_yx=(np.asarray(self._result["background_peak_yx"])[-1].tolist()
+                                       if self._result["background_peak_intensity"][-1] > 0 else None),
+                        final_peak_to_weakest_target_ratio=float(peaks[-1]))
+            minimum = np.asarray(self._result["brightness_minimum_to_initial"])
+            maximum = np.asarray(self._result["brightness_maximum_to_initial"])
+            if len(minimum):
+                site_phase = np.asarray(self._result["phase_step_max_rad"])
+                pupil_phase = np.asarray(self._result.get("pupil_phase_step_rms_rad", ()))
+                summary["computed_field_diagnostics"] = {
+                    "basis": "Computed encoded maps, not measured optical response or confirmed playback; power is relative to each selected source trap",
+                    "minimum_power_ratio": float(minimum.min()),
+                    "maximum_power_ratio": float(maximum.max()),
+                    "final_minimum_power_ratio": float(minimum[-1]),
+                    "final_mean_power_ratio": float(self._result["brightness_mean_to_initial"][-1]),
+                    "final_maximum_power_ratio": float(maximum[-1]),
+                    "maximum_site_phase_step_rad": float(np.max(site_phase)) if site_phase.size else None,
+                    "maximum_pupil_phase_step_rms_rad": float(np.max(pupil_phase)) if pupil_phase.size else None,
+                }
+            if path_overlay is not None:
+                summary["camera_path_coordinate_frame"] = self._overlay_geometry["coordinate_frame"]
+                indices = np.asarray(self._plan["source_indices"], dtype=np.intp)
+                targets = np.asarray(self._plan["target_indices"], dtype=np.intp)
+                moving = np.any(self._result["motion_yx"][1:] != self._result["motion_yx"][:1], axis=(0, 2))
+                accepted = verification_accepted
+                after = self._target_detection()
+                outcomes = {"basis": "Registered destination occupancy, not individual-atom identity tracking",
+                            "verification_accepted": accepted, "assignments": []}
+                for name, selected in (("moving", moving), ("stationary", ~moving)):
+                    judged = after["valid"][targets[selected]]
+                    occupied = after["occupied"][targets[selected]] & judged
+                    outcomes[name] = {"assigned": int(selected.sum()),
+                        "judged": int(judged.sum()) if accepted else None,
+                        "occupied": int(occupied.sum()) if accepted else None}
+                labels = self._overlay_geometry["labels"]
+                for source, target, moved in zip(indices, targets, moving, strict=True):
+                    target_source = int(self.target_indices[target])
+                    judged = bool(after["valid"][target]) if accepted else None
+                    outcomes["assignments"].append({"source_index": int(source), "source_label": labels[source],
+                        "target_index": int(target), "target_source_index": target_source if target_source >= 0 else None,
+                        "target_label": labels[target_source] if target_source >= 0 else None,
+                        "moving": bool(moved), "after_valid": judged,
+                        "after_occupied": bool(after["occupied"][target]) if judged else None})
+                summary["transport_outcomes"] = outcomes
+        playback = self._playback or {}
+        cadence = {"requested_interval_ms": 1000. / self.frame_rate_hz,
+                   "logical_steps": playback.get("played_frames"),
+                   "new_presentations": playback.get("newly_presented_frames"),
+                   "held_steps": playback.get("held_frames"),
+                   "online_ms": self._timings.get("online_rearrangement"),
+                   "camera_frame_to_playback_return_ms": self._timings.get("camera_frame_to_sequence_return"),
+                   "playback_ms": self._timings.get("sequence_play")}
+        for key, output in (("actual_step_intervals_ms", "command_interval_median_ms"),
+                            ("actual_frame_intervals_ms", "new_phase_interval_median_ms")):
+            values = playback.get(key) or ()
+            cadence[output] = float(np.median(values)) if len(values) else None
+        if self._result is not None:
+            moving_steps = np.flatnonzero(np.any(np.diff(self._result["motion_yx"], axis=0) != 0, axis=(1, 2)))
+            if len(moving_steps):
+                first_motion = int(moving_steps[0])
+                cadence["first_motion_map_number"] = first_motion + 1
+                ready = self._result.get("frame_ready_ms", ())
+                compute_origin = self._timings.get("compute_started_after_before_frame")
+                if compute_origin is not None and first_motion < len(ready):
+                    cadence["first_motion_ready_after_before_frame_ms"] = compute_origin + float(ready[first_motion])
+                confirmed = playback.get("confirmed_ms") or ()
+                call_origin = self._timings.get("sequence_call_after_before_frame")
+                if call_origin is not None and first_motion < len(confirmed):
+                    # Server-relative ACK time: local call precedes the server's
+                    # playback origin. This is a lower bound, never optical time.
+                    cadence["first_motion_ack_earliest_after_before_frame_ms"] = call_origin + float(confirmed[first_motion])
+        if len(self._records) == 2:
+            first, last = self._records
+            cadence["photo_receive_interval_ms"] = (last.host_received_at_ns-first.host_received_at_ns)/1e6
+            if first.timestamp_seconds is not None and last.timestamp_seconds is not None:
+                cadence["photo_camera_interval_ms"] = ((last.timestamp_seconds-first.timestamp_seconds)*1000.
+                    + (last.timestamp_microseconds-first.timestamp_microseconds)/1000.)
+        summary["observed_timing"] = cadence
+        encoded = json.dumps(_plain_json(summary), allow_nan=False, separators=(",", ":"))
+        arrays["metadata"] = np.asarray(encoded)
+        if self.shots == 1:
+            archive = atomic_write_file(data / "rearrangement.npz", lambda f: np.savez(f, **arrays))
+            context.register_artifact("artifact_path" if status == "completed" else "partial_data", archive,
+                role="final" if status == "completed" else "checkpoint", contract_id=REARRANGEMENT_ARTIFACT_CONTRACT)
+        else:
+            # Registered last, once its figures are written: a shot whose save fails is never a final artifact.
+            archive = atomic_write_file(data / f"shot_{self._shot:03d}.npz", lambda f: np.savez(f, **arrays))
+        # File rendering starts only after the second image or an actual failure; later shots render none.
+        for name, snap in (self._snapshots.items() if keep_whole else ()):
+            if name not in self._available_outputs: continue
+            if name in {BEFORE_OCCUPIED_OUTPUT.name, AFTER_OCCUPIED_OUTPUT.name}: continue
+            if name == TRAJECTORY_OUTPUT.name:
+                if path_overlay is None:
+                    continue
+                before = self._snapshots[BEFORE_FRAME_OUTPUT.name]
+                axes = before.block.schema.cell_domain.axes
+                elapsed = self._timings.get("online_rearrangement")
+                title = "Commanded trap paths" + (f" · {elapsed / 1000.:.3g} s" if elapsed is not None else "")
+                spec = ImagePlot(x=AxisRef.cell_data(str(axes[1].axis_id)),
+                                 y=AxisRef.cell_data(str(axes[0].axis_id)),
+                                 labels=PlotLabels(title=title))
+                png, npz = writer(figures / "trajectory_2d.png", plot_input=ImageFrame(before, path_overlay), spec=spec,
+                    parameters={},
+                    size="4x4", source={"task":self.instance_id, "report":"trajectory_2d", "run_record":{
+                        **self._record(), "device_snapshots":self._capture_evidence[BEFORE_FRAME_OUTPUT.name]["device_snapshots"]}})
+                context.register_artifact("trajectory_2d_figure",npz,role="figure",contract_id="zlc.figure")
+                if png is not None:
+                    context.register_artifact("trajectory_2d_preview",png,role="preview")
+                continue
+            image = name in {BEFORE_FRAME_OUTPUT.name, AFTER_FRAME_OUTPUT.name, PHASE_OUTPUT.name}
+            plot_input = ImageFrame(snap, overlays[name]) if name in overlays else snap
+            spec = (ImagePlot(x=AxisRef.cell_data(str(snap.block.schema.cell_domain.axes[1].axis_id)),
+                              y=AxisRef.cell_data(str(snap.block.schema.cell_domain.axes[0].axis_id)),
+                              labels=PlotLabels(title=name.replace('_', ' '))) if image else
+                    CurvePlot(x=AxisRef.point(str(snap.block.schema.point_domain.axes[0].axis_id)),
+                              labels=PlotLabels(title=name.replace('_', ' '))))
+            png, npz = writer(figures / f"{name}.png", plot_input=plot_input, spec=spec,
+                parameters={}, size="4x4", source={"task": self.instance_id, "report": name, "run_record": {**self._record(),
+                    "device_snapshots": self._capture_evidence.get(name, {}).get("device_snapshots",summary["device_snapshots"])}})
+            context.register_artifact(name + "_figure", npz, role="figure", contract_id="zlc.figure")
+            if png is not None:
+                context.register_artifact(name + "_preview", png, role="preview")
+        self._timings["save_and_render"] = (perf_counter()-started)*1000
+        summary["timing_ms"] = dict(self._timings)
+        if self.shots > 1:
+            context.register_artifact(f"shot_{self._shot:03d}", archive,
+                role="final" if status == "completed" else "checkpoint", contract_id=REARRANGEMENT_ARTIFACT_CONTRACT)
+            return archive, summary
+        context.register_artifact("summary", write_readable_json(directory/"summary.json", _plain_json(summary)), role="summary")
+        lines = ["SLM Rearrangement", f"Status: {status}", f"Pulse: {self.pulse_path}",
+                 f"Frame policy: {self.frame_mode}",
+                 f"Weighted intensity ratio limits: motion {self.motion_intensity_tolerance:g}; final {self.intensity_tolerance:g}",
+                 f"Computed maps: {summary['actual_motion_frames']}; nominal rate: {self.frame_rate_hz:g} Hz",
+                 f"Maximum camera displacement: {self._camera_maximum_step} sensor pixel per frame",
+                 f"GPU preparation reused: {self._gpu_reused}"]
+        if "available_gap_seconds" in getattr(self, "_pulse_timing", {}):
+            lines.append(f"Available between imaging Periods: {self._pulse_timing['available_gap_seconds']:.6f} s")
+        lines.extend(f"{name.replace('_',' ')}: {value:.3f} ms" for name,value in self._timings.items())
+        for key in ("before_occupied", "filled_target_sites", "judged_target_sites", "target_sites", "target_filling_fraction"):
+            if key in summary: lines.append(f"{key.replace('_',' ')}: {summary[key]}")
+        for key, value in summary.get("motion_diagnostics", {}).items():
+            lines.append(f"{key.replace('_', ' ')}: {value}")
+        for key, value in summary.get("computed_field_diagnostics", {}).items():
+            lines.append(f"Computed field {key.replace('_', ' ')}: {value}")
+        for name, values in summary.get("transport_outcomes", {}).items():
+            if name in {"moving", "stationary"}:
+                observed = (f"{values['occupied']}/{values['judged']} judged destinations occupied"
+                            if values["judged"] is not None else "verification not accepted")
+                lines.append(f"{name.title()}: {values['assigned']} assigned; {observed}")
+        for name, value in cadence.items():
+            lines.append(f"Observed {name.replace('_', ' ')}: {value if value is not None else 'not recorded'}")
+        lines.extend(["Playback acknowledgments are transport facts, not optical vblank measurements.",
+                      "Target filling is not individual-atom identity tracking.",
+                      "compute/feed and device playback overlap inside online_rearrangement; do not add overlapping windows.",
+                      "compute_callback is bounded queue/backpressure time, not numerical solving."])
+        if error is not None: lines.append(f"Error: {error}")
+        context.register_artifact("summary_text", atomic_write_text(directory/"summary.txt", '\n'.join(lines)+'\n'), role="summary")
+        return archive, summary
+
+    def _target_detection(self):
+        """Read known destination sites without inventing a new calibration."""
+        n = len(self.points[1])
+        result = {"counts": np.full(n, np.nan), "thresholds": np.full(n, np.nan),
+                  "occupied": np.zeros(n, bool), "valid": np.zeros(n, bool)}
+        if len(self._detections) < 2:
+            return result
+        known = self.target_indices >= 0
+        for key in result:
+            result[key][known] = self._detections[1][key][self.target_indices[known]]
+        return result
+
+    def _start_shot(self):
+        """Forget the previous shot's photographs, plan, maps and timings; the run's outputs stay."""
+        self._timings = {}
+        self._records, self._detections = [], []
+        self._capture_evidence = {}
+        self._deferred_photo = None
+        self._playback, self._result, self._plan = None, None, None
+        self._frame_count = self.motion_frames
+        self._camera_maximum_step = None
+        self._shot_saved = False
+        self.__dict__.pop("_pulse_timing", None)
+        self._device_snapshots.pop("camera", None)
+        self._device_snapshots.pop("sequencer", None)
+        # The phase sequence, optical diagnostics, figures and frozen inputs belong
+        # to the first completed shot (and to any unfinished shot before it).
+        self._keep_whole = not any(report["status"] == "completed" for _archive, report in self._shot_reports)
+
+    def _save_batch(self, context, status, error=None):
+        """The run's summary of its shots: destination occupancy summed over the
+        shots whose verification was accepted, timing spreads, and the failures."""
+        directory = context.run_directory
+        reports = [summary for _archive, summary in self._shot_reports]
+        timing = next((report["pulse_timing"] for report in reports if report.get("pulse_timing")), {})
+        interval = (timing["after_start_seconds"] - timing["before_start_seconds"]
+                    if "after_start_seconds" in timing else None)
+        accepted = [report["transport_outcomes"] for report in reports
+                    if (report.get("transport_outcomes") or {}).get("verification_accepted")]
+        occupancy = {"basis": "Registered destination occupancy summed over the shots whose verification was accepted, "
+                              "not individual-atom identity tracking",
+                     "accepted_shots": len(accepted), "interval_basis": "1 sigma Wilson score interval"}
+        for name, kinds in (("moving", ("moving",)), ("stationary", ("stationary",)), ("all", ("moving", "stationary"))):
+            judged = sum(outcome[kind]["judged"] for outcome in accepted for kind in kinds)
+            occupied = sum(outcome[kind]["occupied"] for outcome in accepted for kind in kinds)
+            entry = {"judged": judged, "occupied": occupied, "fraction": None, "fraction_1sigma": None}
+            if judged:
+                fraction = occupied / judged
+                centre = (fraction + 1 / (2 * judged)) / (1 + 1 / judged)
+                half = sqrt(fraction * (1 - fraction) / judged + 1 / (4 * judged * judged)) / (1 + 1 / judged)
+                entry.update(fraction=fraction, fraction_1sigma=[centre - half, centre + half])
+            occupancy[name] = entry
+        completed = [report for report in reports if report["status"] == "completed"]
+        timings = {}
+        for key in ("before_frame_available_after_fire", "matching", "first_frame_ready_for_playback",
+                    "online_rearrangement", "sequence_play", "camera_frame_to_sequence_return",
+                    "verification_deadline_margin"):
+            values = [report["timing_ms"][key] for report in completed if key in report.get("timing_ms", {})]
+            if values:
+                timings[key] = {"median": float(np.median(values)), "min": float(min(values)), "max": float(max(values))}
+        per_shot = []
+        for archive, report in self._shot_reports:
+            outcomes = report.get("transport_outcomes") or {}
+            report_timings = report.get("timing_ms", {})
+            per_shot.append({"shot": report["shot"], "status": report["status"], "error": report.get("error"),
+                "file": None if archive is None else Path(archive).relative_to(Path(directory).resolve()).as_posix(),
+                "before_occupied": report.get("before_occupied"),
+                "filled_target_sites": report.get("filled_target_sites"),
+                "judged_target_sites": report.get("judged_target_sites"),
+                "verification_accepted": outcomes.get("verification_accepted"),
+                "moving": outcomes.get("moving"), "stationary": outcomes.get("stationary"),
+                "online_ms": report_timings.get("online_rearrangement"),
+                "verification_deadline_margin_ms": report_timings.get("verification_deadline_margin")})
+        failed = [row["shot"] for row in per_shot if row["status"] != "completed"]
+        summary = {**self._record(), "status": status, "error": None if error is None else _error_text(error),
+                   "completed_shots": len(completed), "not_completed_shots": failed,
+                   "image_interval_seconds": interval,
+                   "destination_occupancy": occupancy, "timing_ms": timings, "per_shot": per_shot,
+                   "gpu": getattr(self, "_gpu_info", None)}
+        context.register_artifact("summary", write_readable_json(directory/"summary.json", _plain_json(summary)), role="summary")
+        lines = ["SLM Rearrangement", f"Status: {status}", f"Pulse: {self.pulse_path}",
+                 f"Shots: {len(completed)} of {self.shots} completed" + (f"; not completed: {failed}" if failed else ""),
+                 f"Frame policy: {self.frame_mode}; nominal rate: {self.frame_rate_hz:g} Hz",
+                 f"GPU preparation reused: {self._gpu_reused}"]
+        if interval is not None:
+            lines.append(f"Images {interval:.6f} s apart")
+        for name in ("moving", "stationary", "all"):
+            entry = occupancy[name]
+            text = f"{entry['occupied']}/{entry['judged']} judged destinations occupied"
+            if entry["fraction"] is not None:
+                low, high = entry["fraction_1sigma"]
+                text += f" = {entry['fraction']:.3f} (1 sigma {low:.3f}-{high:.3f})"
+            lines.append(f"{name.title()}: {text}")
+        for key, value in timings.items():
+            lines.append(f"{key.replace('_', ' ')}: median {value['median']:.3f} ms (min {value['min']:.3f}, max {value['max']:.3f})")
+        for row in per_shot:
+            moving, stationary = row["moving"] or {}, row["stationary"] or {}
+            line = f"Shot {row['shot']}: {row['status']}"
+            if row["verification_accepted"]:
+                line += (f"; moving {moving.get('occupied')}/{moving.get('judged')}, "
+                         f"stationary {stationary.get('occupied')}/{stationary.get('judged')} occupied")
+            if row["online_ms"] is not None:
+                line += f"; online {row['online_ms']:.1f} ms"
+            if row["verification_deadline_margin_ms"] is not None:
+                line += f"; deadline margin {row['verification_deadline_margin_ms']:.1f} ms"
+            if row["error"]:
+                line += f"; {row['error']}"
+            lines.append(line)
+        lines.extend(["Target filling is not individual-atom identity tracking.",
+                      "Shots after the first completed one keep atom-by-atom data only: no phase sequence, optical diagnostics or figures."])
+        if error is not None: lines.append(f"Error: {error}")
+        context.register_artifact("summary_text", atomic_write_text(directory/"summary.txt", '\n'.join(lines)+'\n'), role="summary")
+        first = next((archive for archive, report in self._shot_reports if report["status"] == "completed"), None)
+        if status == "completed":
+            context.register_artifact("artifact_path", first, role="final", contract_id=REARRANGEMENT_ARTIFACT_CONTRACT)
+        return {"artifact_path": None if first is None else str(first), "shots": self.shots,
+                "completed_shots": len(completed), "target_filling_fraction": occupancy["all"]["fraction"]}
+
+    def execute(self, context):
+        self.instance_id = context.instance_id
+        board = PulseBoard(context)
+        prepared = capture = None
+        self._snapshots, self._available_outputs, self._committed = {}, set(), set()
+        self._device_snapshots, self._overlay_geometry = {}, None
+        self._camera_site_indices = self._camera_path_affine = None
+        self._shot, self._shot_reports = 1, []
+        self._start_shot()
+        sequence_prepared = sealed = False
+        workpoint = ExitStack()
+        run_started = perf_counter()
+        try:
+            check_cancelled(context)
+            context.report_progress("Acquiring the GPU optical working point")
+            start = perf_counter()
+            prepared, self._gpu_reused = workpoint.enter_context(acquire_rearrangement(shape_yx=self.slm.shape_yx,
+                    source_yx=self.points[0], target_yx=self.points[1],
+                    pupil_amplitude=self.science_context["pupil_amplitude"],
+                    pupil_phase=-np.asarray(self.science_context["operator_wavefront"]),
+                    phase_center_yx=tuple(self.science_context["pupil"]["center_xy"])[::-1],
+                    source_intensities=self.weights[0], target_intensities=self.weights[1],
+                    minimum_separation=self.minimum_separation,
+                    endpoint_data={"source_phase": self.science_context["phase"]},
+                    stop_requested=context.cancel_requested))
+            self._timings["gpu_prepare"] = (perf_counter()-start)*1000
+            self._gpu_info = prepared["gpu_info"]
+            self._frame_interval = 1/self.frame_rate_hz
+
+            def prepare_sequence():
+                nonlocal sequence_prepared
+                check_cancelled(context)
+                began = perf_counter()
+                sequence_prepared = True  # Failed binding may already own a server token.
+                try:
+                    self.slm.prepare_phase_sequence(None, self._frame_interval, frame_count=self._frame_count)
+                finally:
+                    self._timings["sequence_prepare"] = (perf_counter()-began)*1000
+                check_cancelled(context)
+
+            photoelectron = reads_photoelectrons(self.calibration)
+            # Each shot fires the Pulse once and takes its two photographs from a
+            # fresh source phase, Pulse load, sequence and camera arm; the GPU
+            # working point serves the whole run.
+            for self._shot in range(1, self.shots + 1):
+                if self._shot > 1:
+                    check_cancelled(context)  # a Stop between shots fires no further Pulse
+                    self._start_shot()
+                    run_started = perf_counter()
+                shot = f"Shot {self._shot}/{self.shots}: " if self.shots > 1 else ""
+                photo = 2*(self._shot-1)
+                try:
+                    context.report_progress(shot + f"GPU ready: {self._gpu_info.get('device_name','CUDA')}; establishing source phase")
+                    start = perf_counter()
+                    applied_source = self.slm.apply_phase(prepared["initial_phase"])
+                    if not np.array_equal(applied_source, prepared["initial_phase"]):
+                        raise RuntimeError("SLM did not apply the prepared source phase")
+                    if self.slm.last_command_receipt.get("outcome") != "known-new":
+                        raise RuntimeError("SLM source-phase outcome was not confirmed")
+                    self._timings["source_apply"] = (perf_counter()-start)*1000
+                    nominal = self._frame_count*self._frame_interval
+                    if self.frame_mode == "fixed":
+                        self._timings["estimated_nominal_playback"] = nominal*1000
+
+                    node = CameraMeasurementNode(camera=self.camera,
+                        request=CameraMeasurementRequest(camera_key=self.camera_key, exposure_seconds=self.exposure_seconds,
+                            roi_xywh=self.roi, repeat=2, frames_per_cycle=1, photoelectrons=bool(photoelectron)),
+                        producer=f"{self.instance_id}/camera")
+                    start = perf_counter(); capture = node.prepare(should_stop=context.cancel_requested)
+                    self._timings["camera_arm"] = (perf_counter()-start)*1000
+                    self._device_snapshots["camera"] = dict(node.run_record["device_snapshots"]["camera"])
+                    if self._overlay_geometry is None:
+                        self._prepare_outputs(context, node)
+                    self._publish_phase(context, applied_source)
+                    if self.frame_mode == "fixed":
+                        prepare_sequence()
+                    check_cancelled(context)
+                    context.report_progress(shot + "Acquiring before photograph from the authored Pulse",
+                                            current=photo, total=2*self.shots)
+                    firing_started = monotonic()
+                    fire_wall = time_ns()
+                    # The board resolves, compiles, loads and fires the document; the
+                    # deadline below counts from before that whole request, so it
+                    # can only be earlier than the true one, never later.
+                    start = perf_counter(); receipt = board.run(self.pulse_path, run_repeats=1, scan_repeats=1)
+                    self._timings["pulse_run_request"] = (perf_counter()-start)*1000
+                    self._pulse_timing = pulse_timing(receipt["timing"], self.before_period, self.after_period)
+                    self._device_snapshots["sequencer"] = dict(receipt["applied"])
+                    deadline = firing_started + self._pulse_timing["after_start_seconds"] + self._pulse_timing["earliest_lane_delay_seconds"]
+                    camera_timeout = capture.timeout
+                    capture.timeout = max(camera_timeout, firing_started+self._pulse_timing['before_end_seconds']-monotonic()+camera_timeout)
+                    playback_finished_wall = None
+                    playback_finished_at = None
+
+                    def photograph(cycle, index):
+                        nonlocal playback_finished_wall, playback_finished_at, nominal
+                        # Camera receive is independent: callback dispatch time is not
+                        # the exposure timestamp of a queued second photograph.
+                        if index == 0:
+                            self._timings["before_callback_after_frame"] = (time_ns()-cycle[0].host_received_at_ns)/1e6
+                        start = perf_counter()
+                        # Nothing is shown between the before photograph and the end of
+                        # playback: see _publish_deferred_photo.
+                        mask, valid = self._read_photo(context, node, cycle, index, publish=index == 1)
+                        self._timings[("before", "after")[index]+"_readout"] = (perf_counter()-start)*1000
+                        if index == 1:
+                            self._timings["after_frame_available_after_fire"] = (cycle[0].host_received_at_ns-fire_wall)/1e6
+                            if playback_finished_wall is None or cycle[0].host_received_at_ns < playback_finished_wall:
+                                raise RuntimeError("The verification frame reached the camera queue before SLM playback completed")
+                            return
+                        self._timings["before_frame_available_after_fire"] = (cycle[0].host_received_at_ns-fire_wall)/1e6
+                        start = perf_counter()
+                        plan = self._plan = plan_rearrangement(prepared, np.flatnonzero(mask & valid))
+                        self._timings['matching']=(perf_counter()-start)*1000
+                        online_started = start
+                        sampled = None
+                        if self.frame_mode == "camera_step":
+                            if rearrangement_is_noop(prepared, plan):
+                                self._frame_count = 0
+                            else:
+                                indices = np.asarray(plan["source_indices"], np.intp)
+                                camera_path = self._camera_paths(np.asarray(plan["motion_yx"]), indices)[:, indices]
+                                sampled = sample_rearrangement(prepared, plan,
+                                    maximum_step=self.max_camera_step, step_path=camera_path)
+                                self._frame_count = sampled["motion_frames"]
+                            self._prepare_motion_outputs(context)
+                            if self._frame_count:
+                                prepare_sequence()
+                        nominal = self._frame_count*self._frame_interval
+                        self._timings["estimated_nominal_playback"] = nominal*1000
+                        context.report_progress(shot + f"Computing {self._frame_count} maps")
+                        def before_play():
+                            remaining = deadline-monotonic()
+                            if remaining < nominal:
+                                raise RuntimeError(f"Only {remaining:.6g}s remain before verification; nominal playback needs {nominal:.6g}s. Edit the Pulse gap.")
+                        outcome = {}
+                        solving_started = perf_counter()
+                        try:
+                            run_rearrangement(prepared, plan, slm=self.slm,
+                                motion_frames=self._frame_count, frame_interval=self._frame_interval, sampled=sampled,
+                                support_tolerance=self.intensity_tolerance, motion_support_tolerance=self.motion_intensity_tolerance,
+                                stop_requested=context.cancel_requested, before_play=before_play, timings=self._timings,
+                                received_at_ns=cycle[0].host_received_at_ns, outcome=outcome,
+                                retain_phase_sequence=True)
+                        finally:
+                            self._publish_deferred_photo(context)
+                            self._result, self._playback = outcome.get("result"), outcome.get("playback")
+                            playback_finished_wall, playback_finished_at = outcome.get("finished_wall_ns"), outcome.get("finished_at")
+                            self._timings["online_rearrangement"] = (perf_counter()-online_started)*1000
+                            if "first_frame_ready_for_playback" in self._timings:
+                                self._timings["first_frame_ready_for_playback"] += (solving_started-online_started)*1000
+                        camera_path = self._camera_paths(self._result["motion_yx"], plan["source_indices"])
+                        self._camera_maximum_step = float(np.max(np.linalg.norm(np.diff(camera_path,axis=0),axis=-1),initial=0.))
+                        rounding = 32*np.finfo(float).eps*max(1.,float(np.max(abs(camera_path))))
+                        if self.frame_mode == "camera_step" and self._camera_maximum_step > self.max_camera_step+rounding:
+                            raise RuntimeError("Emitted trajectory exceeded the requested camera-pixel step")
+                        if not self._result["motion_frames"]:
+                            context.report_progress(shot + "SLM target held; acquiring verification photograph",
+                                                    current=photo+1, total=2*self.shots)
+                            capture.timeout = max(camera_timeout,
+                                firing_started+self._pulse_timing['after_end_seconds']-monotonic()+camera_timeout)
+                            return
+                        self._timings["verification_deadline_margin"] = (deadline-playback_finished_at)*1000
+                        if playback_finished_at > deadline:
+                            raise RuntimeError("SLM playback missed the conservative after-imaging deadline; verification is not accepted")
+                        context.report_progress(shot + "SLM target held; acquiring verification photograph",
+                                                current=photo+1, total=2*self.shots)
+                        # This Task knows the next trigger is intentionally later in
+                        # the same authored Pulse. Retain the camera's timeout AFTER
+                        # that scheduled window rather than timing out inside the gap.
+                        capture.timeout = max(camera_timeout,
+                            firing_started+self._pulse_timing['after_end_seconds']-monotonic()+camera_timeout)
+
+                    terminal = capture.read_cycles(photograph)
+                    report = board.wait_report(receipt["command_id"], context.cancel_requested)
+                    if report["status"] != STATUS_DONE:
+                        raise RuntimeError(f"Pulse did not complete successfully: {report.get('fault') or report['status']}")
+                    if not terminal.no_more_frames or capture.completed_cycles != 2:
+                        raise RuntimeError("The camera did not deliver the requested photographs")
+                    self._timings["pulse_elapsed"] = float(report["elapsed_seconds"])*1000
+                    self._timings["experiment_before_save"] = (perf_counter()-run_started)*1000
+                    if self._keep_whole:
+                        # Only one shot's maps are measured on the full focal plane (and saved).
+                        diagnostics = rearrangement_diagnostics(prepared, self._result, stop_requested=context.cancel_requested)
+                        self._timings["optical_diagnostics"] = float(diagnostics.pop("diagnostics_ms"))
+                        self._result.update(diagnostics)
+                    self._revision += 1
+                    path = self._result["motion_yx"]
+                    full_path = np.zeros((self._frame_count+1, len(self.points[0]), 2), dtype=np.float64)
+                    valid_path = np.zeros(full_path.shape[:-1], bool)
+                    if len(self._plan["source_indices"]):
+                        full_path[:len(path), self._plan["source_indices"]] = path
+                        valid_path[:len(path), self._plan["source_indices"]] = True
+                    path = full_path
+                    frame_axis = AxisSpec(AxisId("slm_rearrangement.frame"), "frame", SCAN_POINT,
+                                         len(path), tuple(float(i) for i in range(len(path))))
+                    site_axis = AxisSpec(AxisId("slm_rearrangement.source_site"), "site", COMPONENT,
+                                        path.shape[1], tuple(float(i+1) for i in range(path.shape[1])))
+                    coordinate_axis = AxisSpec(AxisId('slm_rearrangement.coordinate'),'coordinate',COMPONENT,2,(0.,1.),coordinate_labels=('x','y'))
+                    trajectory = self._snapshot(context, TRAJECTORY_OUTPUT, path[None,:,:,::-1],
+                                                 point_axes=(frame_axis,), cell_axes=(site_axis,coordinate_axis),
+                                                 validity=np.repeat(valid_path[None,...,None],2,axis=-1),value_unit="1")
+                    ratio = self._result.get("retained_intensity_ratios", self._result["support_intensity_ratios"])
+                    ratio_valid = np.ones(self._frame_count, bool) if len(ratio) else np.zeros(self._frame_count, bool)
+                    if not len(ratio): ratio = np.zeros(self._frame_count)
+                    if self._frame_count:
+                        quality = self._snapshot(context, QUALITY_OUTPUT, ratio[None],
+                            point_axes=(AxisSpec(AxisId("slm_rearrangement.output_frame"), "frame", SCAN_POINT,
+                             self._frame_count, tuple(float(i) for i in range(self._frame_count))),), validity=ratio_valid[None])
+                        self._publish(context, ((TRAJECTORY_OUTPUT, trajectory), (QUALITY_OUTPUT, quality)))
+                    else:
+                        self._publish(context, ((TRAJECTORY_OUTPUT, trajectory),))
+                    confirmed = self.slm.last_commanded_phase
+                    if self.slm.last_command_receipt.get("outcome") != "known-new" or confirmed is None:
+                        raise RuntimeError("The SLM did not confirm the final target phase")
+                    self._publish_phase(context, confirmed)
+                    if self._shot == self.shots:
+                        context.seal_terminal()
+                        sealed = True
+                    context.report_progress(shot + "Saving photographs, phase sequence, verification and timing report")
+                    self._shot_reports.append(self._save(context, "completed"))
+                    self._shot_saved = True
+                except Exception as error:
+                    if self.shots == 1 or context.cancel_requested() or isinstance(error, InterruptedError):
+                        raise
+                    # One shot of a batch failed: make the board safe, keep what it
+                    # recorded and fire the next one -- unless the board could not be
+                    # made safe, which ends the batch.
+                    unsafe = False
+                    try:
+                        board.stop()
+                    except BaseException as cleanup:
+                        error.add_note(f"Pulse SAFE also failed: {cleanup}")
+                        unsafe = True
+                    try:
+                        self._shot_reports.append(self._save(context, "failed", error))
+                    except BaseException as cleanup:
+                        error.add_note(f"Shot report also failed: {cleanup}")
+                        self._shot_reports.append((None, {"shot": self._shot, "status": "failed", "error": _error_text(error)}))
+                    self._shot_saved = True
+                    if unsafe:
+                        raise
+                if self.shots > 1:
+                    # The next shot arms its own capture and prepares its own sequence.
+                    try:
+                        if capture is not None and not capture.closed:
+                            capture.stopped = True
+                            capture.close()
+                        capture = None
+                        if sequence_prepared:
+                            sequence_prepared = False
+                            self.slm.release_phase_sequence()
+                    except BaseException as cleanup:
+                        cleanup.add_note(f"Shot {self._shot}: its camera capture or SLM sequence was not released; no further shot fires")
+                        raise
+            if self.shots == 1:
+                verification = self._target_detection()
+                return {"artifact_path": str(self._shot_reports[0][0]), "target_filling_fraction":
+                        float(verification["occupied"].mean()) if verification["valid"].all() else None}
+            if not any(report["status"] == "completed" for _archive, report in self._shot_reports):
+                raise RuntimeError(f"None of the {self.shots} shots completed; the last failed with: {self._shot_reports[-1][1]['error']}")
+            if not sealed:
+                context.seal_terminal()
+            context.report_progress("Writing the summary of the shots")
+            return self._save_batch(context, "completed")
+        except BaseException as error:
+            try:
+                board.stop()
+            except BaseException as cleanup: error.add_note(f"Pulse SAFE also failed: {cleanup}")
+            status = "stopped" if context.cancel_requested() else "failed"
+            try:
+                if self.shots == 1:
+                    self._save(context, status, error)
+                else:
+                    if not self._shot_saved:
+                        self._shot_reports.append(self._save(context, status, error))
+                    self._save_batch(context, status, error)
+            except BaseException as cleanup: error.add_note(f"Partial report also failed: {cleanup}")
+            raise
+        finally:
+            active_error = sys.exception()
+            cleanup_errors = []
+            if capture is not None:
+                if not capture.closed:
+                    capture.stopped = True
+                    try: capture.close()
+                    except BaseException as cleanup: cleanup_errors.append(cleanup)
+            for cleanup in ((self.slm.release_phase_sequence,) if sequence_prepared else ()):
+                if cleanup is not None:
+                    try: cleanup()
+                    except BaseException as error: cleanup_errors.append(error)
+            # The durable archive and preview snapshots now own the results;
+            # a stopped/completed node must not retain a whole pinned movie.
+            self._result = None
+            try:
+                workpoint.__exit__(type(active_error) if active_error is not None else None,
+                                   active_error, None if active_error is None else active_error.__traceback__)
+            except BaseException as cleanup:
+                cleanup_errors.append(cleanup)
+            if active_error is not None:
+                for error in cleanup_errors: active_error.add_note(f"Cleanup also failed: {error}")
+            elif cleanup_errors:
+                first, *rest = cleanup_errors
+                for error in rest: first.add_note(f"Cleanup also failed: {error}")
+                raise first
+
+__all__ = ["SlmRearrangementTask", "pulse_timing", "rearrangement_outputs"]

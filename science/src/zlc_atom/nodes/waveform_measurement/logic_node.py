@@ -1,0 +1,70 @@
+"""Discoverable waveform measurement: one node for every waveform source."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+
+from zlc_plugin import DeviceRequirement, NodeKind, NodeType
+
+from .measurement import (
+    WAVEFORM_MEASUREMENT_SCHEMA,
+    WaveformMeasurementNode,
+    WaveformMeasurementRequest,
+    waveform_outputs,
+    waveform_preview,
+)
+
+
+def _outputs(values: Mapping[str, object], devices: Mapping[str, object] | None = None) -> tuple:
+    """One signal per quantity the bound source carries; nothing until one is bound."""
+
+    del values
+    source = (devices or {}).get("sampler")
+    return () if source is None else waveform_outputs(source.outputs)
+
+
+def _previews(values: Mapping[str, object], devices: Mapping[str, object] | None = None) -> tuple:
+    del values
+    source = (devices or {}).get("sampler")
+    return () if source is None else (waveform_preview(source),)
+
+
+def _build(
+    *,
+    sampler: object,
+    sampler_key: str,
+    **values: object,
+) -> WaveformMeasurementNode:
+    authored = WAVEFORM_MEASUREMENT_SCHEMA.project_values(values)
+    return WaveformMeasurementNode(
+        sampler=sampler,  # type: ignore[arg-type]
+        request=WaveformMeasurementRequest(
+            sampler_key=sampler_key,
+            repeat=int(authored["repeat"]),
+        ),
+        producer="waveform_measurement",
+    )
+
+
+LOGIC_NODE = NodeType(
+    "waveform_measurement",
+    NodeKind.MEASUREMENT,
+    WAVEFORM_MEASUREMENT_SCHEMA,
+    description=(
+        "Acquire every buffered record from a waveform source, retaining its samples "
+        "and declared time coordinates for Rolling/Curve plots and fitting. Outputs "
+        "are dynamic: one signal per quantity declared by the selected source "
+        "(for example scope voltage or IMU acceleration), not a fixed output list."
+    ),
+    reports_ready=True,
+    # What it publishes is what its instrument carries: four quantities off
+    # an IMU packet, one voltage off a scope.  The run freezes every knob
+    # the instrument has, because a capture takes the instrument as it
+    # stands.
+    declare_outputs=_outputs,
+    declare_previews=_previews,
+    device_requirements=(DeviceRequirement("waveform.source", "sampler", None),),
+    build=_build,
+)
+
+__all__ = ["LOGIC_NODE"]

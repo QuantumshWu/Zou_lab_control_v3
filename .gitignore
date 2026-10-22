@@ -1,0 +1,32 @@
+/target/
+**/target/
+/node_modules/
+/.tools/
+# The Python the science environment was made from (installation.exe, as v2's install_requirements.bat).
+/.zlc_python_path
+__pycache__/
+*.pyc
+# A workspace is somebody's experiment, not part of the product (v2 .gitignore).
+/workspace/
+# Development-only material stays on the development machine, out of the product:
+# research prototypes and reports, the Python oracle the native engine was
+# matched against, golden corpora, and the oracle's Python binding.
+/research/
+/science/ORIGIN.md
+/science/src/zlc_plot/
+/science/src/zlc_science/
+/science/src/*.egg-info/
+/crates/*/tests/data/
+/crates/*/tests/gen/
+/crates/*/tests/golden/
+/crates/zlc-python/
+# What a running program writes (WebView2 profile, MCP records, Vivado state, plugin caches).
+/.local/
+# The engine and zlc-mcp are not in git: bin/release.json names the release, tools/fetch_engine.ps1
+# downloads it (beside the live one until it is swapped in).
+/bin/engine/
+/bin/ai/
+/bin/engine.next/
+/bin/engine.next.partial/
+/bin/engine.old/
+/bin/ai.old/

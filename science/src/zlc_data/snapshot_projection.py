@@ -1,0 +1,903 @@
+"""Materialize derived Dataset snapshots without losing physical axes."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+import operator
+
+import numpy as np
+
+from ._arrays import immutable_array
+from .axis import (
+    PRIMARY_INDEX,
+    SHOT_TIME,
+    SAMPLE_TIME,
+    AxisId,
+    AxisRoleId,
+    AxisSpec,
+    LATEST_COORDINATE,
+    canonical_coordinate_scalar,
+)
+from .schema import DatasetSchema, DomainSpec
+from .selection import (
+    EmptySelection,
+    IndexSelection,
+    Selection,
+    resolve_selection_indices,
+    take_indices,
+)
+from .validity import (
+    CellValidity,
+    DatasetComponentValidity,
+    Invalid,
+    Valid,
+)
+from .value import (
+    IndexedWindow,
+    DataBlock,
+    DatasetRevisionRef,
+    OwnedSnapshot,
+    compact_dataset_validity,
+    dataset_validity_storage,
+)
+
+__all__ = [
+    "IndexedHistoryLayout",
+    "axis_catalog",
+    "indexed_history_layout",
+    "indexed_schemas_compatible",
+    "materialize_derived_dataset",
+    "restrict_snapshot",
+    "restricted_schema",
+    "restricted_values",
+    "schemas_continue",
+    "selection_indices",
+    "value_selection",
+]
+
+
+_NOT_INDEXED = object()
+
+
+@dataclass(frozen=True, eq=False)
+class IndexedHistoryLayout:
+    """The one reading of a Runtime indexed history's Point domain.
+
+    Its primary-index column holds each
+    shot's relative offset (oldest first; the latest shot the source holds is
+    0, and a restriction that keeps only earlier shots keeps their negative
+    offsets) repeated once per retained event row. Ordinary regions may keep
+    different numbers of rows from different records. That structure is read ONCE
+    per schema and read by every consumer: the plot's window mask and shot
+    codes, the compatibility gate that lets a sliding window keep its host,
+    and the title's shot count.  None of them walks the rows again -- the
+    walk that was done four times, twice per shot in Python, over a hundred
+    thousand rows.
+    """
+
+    #: Each shot's relative offset, oldest first; none is above 0.  Holes are
+    #: legal: a shot the history never received is simply absent.
+    cells: np.ndarray
+    #: Borrow the one mapping owner; cropped records need not have equal lengths.
+    point_domain: DomainSpec
+    #: Actual identities resolved once from their unique semantic roles.
+    primary_axis_id: AxisId
+    #: Uniform rows per shot, already determined by the layout parser.
+    inner_count: int | None
+    #: What does not change as the window slides -- the Repeat, Cell and
+    #: value contracts plus the event's Point geometry -- and so
+    #: what two windows of one history must share.
+    event: tuple[object, ...]
+    #: When each shot was taken, seconds from the run's first shot, oldest
+    #: first -- or None for a history whose shots were not stamped.
+    times: np.ndarray | None = None
+    time_axis_id: AxisId | None = None
+
+    def __post_init__(self) -> None:
+        source = np.asarray(self.cells, dtype=np.int64)
+        cells = immutable_array(
+            source,
+            dtype=np.dtype("<i8"),
+            shape=source.shape,
+        )
+        object.__setattr__(self, "cells", cells)
+        if self.times is not None:
+            times = np.asarray(self.times, dtype=np.float64)
+            if times.shape != cells.shape:
+                raise ValueError("an indexed history stamps every shot or none")
+            object.__setattr__(
+                self, "times", immutable_array(times, dtype=np.dtype("<f8"), shape=times.shape)
+            )
+
+    @property
+    def shot_count(self) -> int:
+        return int(self.cells.size)
+
+    @property
+    def row_count(self) -> int:
+        return self.point_domain.size
+
+    def coordinate_role(self, axis_id: AxisId) -> AxisRoleId | None:
+        """The validated record coordinate named by this actual source identity."""
+        if axis_id == self.primary_axis_id:
+            return PRIMARY_INDEX
+        if self.time_axis_id is not None and axis_id == self.time_axis_id:
+            return SHOT_TIME
+        return None
+
+    def codes(self, rows: np.ndarray | None = None) -> np.ndarray:
+        """Each requested point row's shot position, oldest shot first."""
+
+        return self.point_domain.codes(self.primary_axis_id, rows)
+
+    def window_rows(self, window: int) -> slice:
+        """The last ``window`` shots as a suffix of the physical Point rows."""
+        keep = min(max(int(window), 1), int(self.cells.size))
+        first = self.shot_count - keep
+        base, inner, _outer = self.point_domain.code_mapping(self.primary_axis_id)
+        start = first if isinstance(base, range) else int(np.searchsorted(base, first))
+        return slice(start * inner, self.row_count)
+
+
+def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None:
+    """The indexed-history layout of ``schema``, or None without a shot index.
+
+    A schema that names the primary index but breaks its contract -- a
+    non-integer or unordered offset or an offset above 0 (an absolute ordinal,
+    never a relative coordinate) -- is a producer error and is
+    refused, not read leniently.  A last offset BELOW 0 is not a broken
+    index: Runtime materializes the latest shot as 0, and a restriction of
+    that Dataset to past shots -- a Scope on the source index, like a Scope
+    on any other axis -- keeps their coordinates, so what reaches this reader
+    is the same history over fewer shots.
+    """
+
+    if not isinstance(schema, DatasetSchema):
+        raise TypeError("indexed history layout requires DatasetSchema")
+    cached = schema._indexed_layout
+    if cached is not None:
+        return None if cached is _NOT_INDEXED else cached
+    point_domain = schema.point_domain
+    primaries = tuple(axis for axis in point_domain.axes if axis.role == PRIMARY_INDEX)
+    if not primaries:
+        object.__setattr__(schema, "_indexed_layout", _NOT_INDEXED)
+        return None
+    if len(primaries) != 1:
+        raise ValueError("an indexed history requires exactly one primary-index coordinate")
+    primary = primaries[0]
+    if primary.coordinate_of is not None:
+        raise ValueError("the primary-index coordinate must own its record axis")
+    offsets = np.asarray(primary.coordinate_values())
+    if (
+        offsets.ndim != 1
+        or offsets.size == 0
+        or not issubclass(offsets.dtype.type, np.integer)
+    ):
+        raise ValueError("primary-index coordinates must be integer relative offsets")
+    if np.any(offsets > 0):
+        raise ValueError("relative primary-index coordinates are at most the latest offset 0")
+    offsets = offsets.astype(np.int64, copy=False)
+    if np.any(offsets[1:] <= offsets[:-1]):
+        raise ValueError("primary-index offsets must form ordered cells")
+    cells = offsets
+    shots = int(cells.size)
+    # The shot-time axis is the shot index's twin: one coordinate per
+    # shot, on the same rows, and no part of the event's own domain.
+    time_axes = tuple(axis for axis in point_domain.axes if axis.role == SHOT_TIME)
+    if len(time_axes) > 1:
+        raise ValueError("an indexed history has at most one shot-time coordinate")
+    time_axis = None if not time_axes else time_axes[0]
+    if time_axis is not None and time_axis.coordinate_of not in (None, primary.axis_id):
+        raise ValueError("the shot-time coordinate must correspond to the primary-index axis")
+    counts = None
+    for axis in (primary,) if time_axis is None else (primary, time_axis):
+        if axis is not primary:
+            if axis.coordinate_of == primary.axis_id:
+                # DomainSpec already requires and shares this exact mapping.
+                continue
+        base, inner, outer = point_domain.code_mapping(axis.axis_id)
+        ordered = (int(base[0]) == 0 and int(base[-1]) == shots - 1
+                   and (outer == 1 or shots == 1))
+        if isinstance(base, range):
+            ordered = ordered and (len(base) == 1 or base.step == 1)
+            row_counts = np.full(shots, point_domain.size if shots == 1 else inner, dtype=np.int64)
+        else:
+            code_steps = np.diff(base)
+            ordered = ordered and not bool(np.any((code_steps != 0) & (code_steps != 1)))
+            starts = np.concatenate(([0], np.flatnonzero(code_steps > 0) + 1, [len(base)]))
+            row_counts = np.diff(starts) * inner * outer
+        if not ordered or (axis is not primary and not np.array_equal(row_counts, counts)):
+            raise ValueError(
+                "primary-index rows must form ordered contiguous cells" if axis is primary else
+                "shot time is one coordinate per shot, on the primary index's rows"
+            )
+        if axis is primary:
+            counts = row_counts
+    assert counts is not None
+    inner_count = int(counts[0])
+    uniform = bool(np.all(counts == inner_count))
+    times = None
+    if time_axis is not None:
+        times = np.asarray(
+            time_axis.coordinate_values(),
+            dtype=np.float64,
+        )
+    event_axes = tuple(
+        axis for axis in point_domain.axes
+        if axis is not primary and axis is not time_axis and axis.role != SAMPLE_TIME
+    )
+    sample_axes = tuple(
+        (axis.axis_id, axis.name, axis.role, axis.unit, axis.coordinate_frame)
+        for axis in point_domain.axes if axis.role == SAMPLE_TIME
+    )
+    repeated = uniform
+    for axis in event_axes:
+        if not repeated or shots == 1:
+            break
+        base, inner, _outer = point_domain.code_mapping(axis.axis_id)
+        if inner_count % inner:
+            # A nonconstant mapping changes only at multiples of inner;
+            # shifting by one shot must preserve those boundaries.
+            repeated = (len(base) == 1 if isinstance(base, range) else
+                        bool(np.all(base == base[0])))
+        else:
+            shift = (inner_count // inner) % len(base)
+            if shift:
+                # The complete mapping is a tiled base. Its per-shot
+                # repetition is exactly invariance under this cyclic shift.
+                repeated = not isinstance(base, range) and (
+                    np.array_equal(base[:-shift], base[shift:])
+                    and np.array_equal(base[-shift:], base[:shift])
+                )
+    rows = np.arange(inner_count, dtype=np.int64) if repeated and shots > 1 and event_axes else None
+    event_domain = (
+        (inner_count if repeated else point_domain.size,), event_axes,
+        tuple(
+            tuple(point_domain.codes(axis.axis_id, rows).tolist())
+            for axis in event_axes
+        ),
+    )
+    layout = IndexedHistoryLayout(
+        cells=cells,
+        point_domain=point_domain,
+        primary_axis_id=primary.axis_id,
+        inner_count=inner_count if uniform else None,
+        event=(
+            primary.axis_id,
+            None if time_axis is None else time_axis.axis_id,
+            schema.repeat_domain,
+            schema.cell_domain,
+            schema.value_schema,
+            event_domain,
+            sample_axes,
+        ),
+        times=times,
+        time_axis_id=None if time_axis is None else time_axis.axis_id,
+    )
+    object.__setattr__(schema, "_indexed_layout", layout)
+    return layout
+
+
+def indexed_schemas_compatible(
+    left: DatasetSchema,
+    right: DatasetSchema,
+) -> bool:
+    """Whether only an indexed Dataset's retained coordinate window changed."""
+
+    if not isinstance(left, DatasetSchema) or not isinstance(right, DatasetSchema):
+        raise TypeError("indexed schema compatibility requires DatasetSchema values")
+    left_layout = indexed_history_layout(left)
+    right_layout = indexed_history_layout(right)
+    return (
+        left_layout is not None
+        and right_layout is not None
+        and left_layout.inner_count == right_layout.inner_count
+        and left_layout.event == right_layout.event
+    )
+
+
+def schemas_continue(previous: DatasetSchema, following: DatasetSchema) -> bool:
+    """Whether a picture of ``previous`` takes ``following`` as new data.
+
+    The same schema, or an indexed history whose retained window moved: the
+    plot host's rule for new data, asked by the host itself and by every
+    owner that decides to keep a host or replace it before handing it data.
+    """
+
+    return previous == following or indexed_schemas_compatible(previous, following)
+
+
+def _derived_reference(
+    source_ref: DatasetRevisionRef,
+    schema: DatasetSchema,
+    reference_for: Callable[[DatasetSchema], DatasetRevisionRef],
+) -> DatasetRevisionRef:
+    if not isinstance(source_ref, DatasetRevisionRef):
+        raise TypeError("derived dataset source_ref must be DatasetRevisionRef")
+    if not callable(reference_for):
+        raise TypeError("derived dataset reference_for must be callable")
+    ref = reference_for(schema)
+    if not isinstance(ref, DatasetRevisionRef):
+        raise TypeError("reference_for must return DatasetRevisionRef")
+    if ref.block_id == source_ref.block_id:
+        raise ValueError("a derived dataset cannot reuse its source BlockId")
+    if ref.revision != source_ref.revision:
+        raise ValueError("a derived dataset must retain its source revision")
+    if ref.schema_fingerprint != schema.fingerprint:
+        raise ValueError("derived reference schema differs from derived data")
+    return ref
+
+
+def materialize_derived_dataset(
+    source_ref: DatasetRevisionRef,
+    values: object,
+    *,
+    schema: DatasetSchema,
+    validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
+    sigma: object | None = None,
+    reference_for: Callable[[DatasetSchema], DatasetRevisionRef],
+    window: IndexedWindow | None = None,
+) -> OwnedSnapshot:
+    """Materialize one typed derived Dataset without interpreting its domain.
+
+    ``sigma`` rides with the values because it belongs to them: a sample's
+    own uncertainty survives every scope the operator can choose, which is
+    exactly why it is not recomputed downstream the way a reduction's is.
+    ``window`` rides for the same reason: which shots a block holds is a
+    fact of the source, and a restriction that keeps the shot structure
+    keeps their numbers.
+    """
+
+    if not isinstance(schema, DatasetSchema):
+        raise TypeError("derived dataset schema must be DatasetSchema")
+    ref = _derived_reference(source_ref, schema, reference_for)
+    return OwnedSnapshot(
+        ref,
+        DataBlock(
+            ref.block_id,
+            ref.revision,
+            np.asarray(values),
+            validity,
+            schema,
+            None if sigma is None else np.asarray(sigma),
+            window,
+        ),
+    )
+
+
+def axis_catalog(
+    schema: DatasetSchema,
+) -> tuple[tuple[str, AxisId, AxisSpec, str], ...]:
+    """Every axis a selection may name, under every label it answers to.
+
+    Four columns: the label, the axis id, the axis, and which of the three
+    physical dimensions the label restricts -- ``"repeat"``, ``"point"`` or
+    ``"cell_data"``.  Both the human name and the id text are listed, because a
+    selection is authored against whichever the operator had in front of them.
+
+    Repeat and Point axes already own their logical coordinate domains. Their
+    physical-row mapping remains in the corresponding ``DomainSpec`` codes.
+    """
+
+    cached = schema._axis_catalog
+    if cached is not None:
+        return cached
+    catalog: list[tuple[str, AxisId, AxisSpec, str]] = []
+    for axis in schema.repeat_domain.axes:
+        catalog.extend(
+            (
+                (axis.name, axis.axis_id, axis, "repeat"),
+                (axis.axis_id.value, axis.axis_id, axis, "repeat"),
+            )
+        )
+    for axis in schema.point_domain.axes:
+        catalog.extend(
+            (
+                (axis.name, axis.axis_id, axis, "point"),
+                (axis.axis_id.value, axis.axis_id, axis, "point"),
+            )
+        )
+    for axis in schema.cell_domain.axes:
+        catalog.extend(
+            (
+                (axis.name, axis.axis_id, axis, "cell_data"),
+                (axis.axis_id.value, axis.axis_id, axis, "cell_data"),
+            )
+        )
+    # ONCE PER SCHEMA: the axes and their physical codes cannot change.
+    answer = tuple(catalog)
+    object.__setattr__(schema, "_axis_catalog", answer)
+    return answer
+
+
+def selection_indices(
+    schema: DatasetSchema,
+    selection: Selection | None,
+) -> tuple[
+    range | tuple[int, ...],
+    range | tuple[int, ...],
+    dict[AxisId, range | tuple[int, ...]],
+]:
+    """Which repeats, point rows and data indices one selection keeps.
+
+    Ranges wherever the surviving run is contiguous, which is every axis
+    nobody selected on: a range indexes as a slice, and a tuple would make the
+    axis a gather -- and a gather of one axis copies the whole frame behind it.
+    A 512x512 box on a 1200x1920 frame costs 7.3 ms of pure copying that way
+    where the slice costs 0.09.
+    """
+
+    catalog = {
+        axis_id: (axis, kind) for _label, axis_id, axis, kind in axis_catalog(schema)
+    }
+    terms = {} if selection is None else {term.axis_id: term for term in selection.terms}
+    for axis_id in terms:
+        if axis_id not in catalog:
+            raise ValueError(f"selection axis {axis_id} is absent from source schema")
+
+    def logical_indices(axis_id: AxisId) -> range | tuple[int, ...]:
+        selected = terms.get(axis_id)
+        axis, _kind = catalog[axis_id]
+        if selected is None:
+            return range(axis.size)
+        resolved, _removes_axis = resolve_selection_indices(axis, selected)
+        return resolved
+
+    def physical_rows(domain: DomainSpec) -> range | tuple[int, ...]:
+        selected_axes = tuple(axis for axis in domain.axes if axis.axis_id in terms)
+        if not selected_axes:
+            return range(domain.size)
+        if len(selected_axes) == 1 and domain.axis_codes is not None:
+            # A contiguous run of one axis whose rows repeat each code of an
+            # ascending base in turn -- the shots of a history window, each
+            # its event's rows -- is a contiguous run of rows, answered by
+            # arithmetic.  Expanding the code of every row to compare it
+            # cost a history window per shot what its rows number.
+            (axis,) = selected_axes
+            logical = logical_indices(axis.axis_id)
+            base, inner, outer = domain.code_mapping(domain.coordinate_axis(axis.axis_id).axis_id)
+            if (isinstance(logical, range) and logical.step == 1 and isinstance(base, range)
+                    and base.step == 1 and outer == 1):
+                first = max(logical.start - base.start, 0)
+                stop = min(logical.stop - base.start, len(base))
+                if stop <= first:
+                    raise EmptySelection(
+                        "selection names coordinates no source domain row holds together"
+                    )
+                return range(first * inner, stop * inner)
+        keep = np.ones(domain.size, dtype=np.bool_)
+        for axis in selected_axes:
+            logical = logical_indices(axis.axis_id)
+            codes = domain.codes(axis.axis_id)
+            if isinstance(logical, range) and logical.step == 1:
+                keep &= (codes >= logical.start) & (codes < logical.stop)
+            else:
+                keep &= np.isin(codes, np.asarray(logical, dtype=np.int64))
+        rows = np.flatnonzero(keep)
+        if rows.size == 0:
+            # Each axis named a coordinate it has, and no row holds them all:
+            # a sparse Point mapping carries only the pairs that were taken.
+            # That is the same fact as a box beside the picture -- the region
+            # holds no sample -- and it is told the same way, so the consumer
+            # that clears its region for one clears it for the other.
+            raise EmptySelection(
+                "selection names coordinates no source domain row holds together"
+            )
+        start = int(rows[0])
+        stop = int(rows[-1]) + 1
+        if stop - start == rows.size:
+            return range(start, stop)
+        return tuple(int(row) for row in rows)
+
+    repeat = physical_rows(schema.repeat_domain)
+    points = physical_rows(schema.point_domain)
+    data: dict[AxisId, range | tuple[int, ...]] = {}
+    for axis in schema.cell_domain.axes:
+        data[axis.axis_id] = logical_indices(axis.axis_id)
+    return repeat, points, data
+
+
+def _subset_axis(axis: AxisSpec, indices: range | tuple[int, ...]) -> AxisSpec:
+    if _keeps_everything(indices, axis.size):
+        return axis
+    labels = (
+        None
+        if axis.coordinate_labels is None
+        else tuple(axis.coordinate_labels[index] for index in indices)
+    )
+    if isinstance(indices, range) and axis.coordinates is None:
+        # An implicit axis cropped to a contiguous run is still implicit: it
+        # starts later.  Writing the coordinates out here undid, one layer
+        # down, the very thing the producer stopped doing -- build a tuple,
+        # validate every element, and digest all of it per frame.
+        return replace(
+            axis,
+            size=len(indices),
+            index_origin=axis.index_origin + indices.start,
+            coordinate_labels=labels,
+        )
+    if (axis.coordinate_origins is not None and isinstance(indices, range)
+            and indices.start % len(axis.coordinates) == 0
+            and indices.stop % len(axis.coordinates) == 0):
+        width = len(axis.coordinates)
+        return replace(axis, size=len(indices),
+                       coordinate_origins=axis.coordinate_origins[indices.start // width:indices.stop // width],
+                       coordinate_labels=labels)
+    coordinates = (axis[indices.start:indices.stop] if isinstance(indices, range)
+                   else take_indices(np.asarray(axis), indices, axis=0))
+    return AxisSpec(
+        axis.axis_id,
+        axis.name,
+        axis.role,
+        len(indices),
+        coordinates,
+        axis.unit,
+        axis.coordinate_frame,
+        coordinate_labels=labels,
+        coordinate_of=axis.coordinate_of,
+    )
+
+
+def _subset_mapped_domain(
+    domain: DomainSpec,
+    indices: range | tuple[int, ...],
+) -> DomainSpec:
+    if domain.axis_codes is None:
+        raise ValueError("physical-row restriction requires an explicitly mapped domain")
+    if _keeps_everything(indices, domain.size):
+        return domain
+    axes: list[AxisSpec] = []
+    axis_codes: list[np.ndarray | range] = []
+    axis_repeats: list[tuple[int, int]] = []
+    contiguous = isinstance(indices, range) and indices.step == 1
+    selected_rows = indices if isinstance(indices, range) else np.asarray(indices, dtype=np.int64)
+    for axis in domain.axes:
+        # A contiguous cut of a declared regular mapping stays regular: a run
+        # of whole base entries (a window of shots) or whole repetitions of a
+        # tiled base (the events of those shots).  Expanding it to one code
+        # per row made a history window cost a sort and a digest of every row.
+        base, inner, outer = domain.code_mapping(axis.axis_id)
+        period = len(base) * inner
+        if contiguous and outer == 1 and indices.start % inner == 0 and indices.stop % inner == 0:
+            kept, tile = base[indices.start // inner:indices.stop // inner], 1
+        elif contiguous and indices.start % period == 0 and indices.stop % period == 0:
+            kept, tile = base, len(indices) // period
+        else:
+            kept, inner, tile = domain.codes(axis.axis_id, selected_rows), 1, 1
+        if isinstance(kept, range) and kept.step > 0:
+            # Distinct and ascending already: row i keeps the i-th code, and
+            # sorting a history window's every sample to learn so was the
+            # cost of the cut.
+            used, inverse = kept, range(len(kept))
+        else:
+            used, inverse = np.unique(np.asarray(kept), return_inverse=True)
+        if len(used) == axis.size:
+            axes.append(axis)
+        else:
+            axis_indices = (range(int(used[0]), int(used[-1]) + 1)
+                            if len(used) and int(used[-1]) - int(used[0]) + 1 == len(used)
+                            else tuple(int(code) for code in used))
+            axes.append(_subset_axis(axis, axis_indices))
+        axis_codes.append(inverse if isinstance(inverse, range)
+                          else range(inverse.size) if np.array_equal(inverse, np.arange(inverse.size))
+                          else inverse)
+        axis_repeats.append((inner, tile))
+    return DomainSpec((len(indices),), tuple(axes), tuple(axis_codes), tuple(axis_repeats))
+
+
+def _keeps_everything(indices: range | tuple[int, ...], size: int) -> bool:
+    if isinstance(indices, range):
+        return indices == range(size)
+    return len(indices) == size and all(
+        position == index for position, index in enumerate(indices)
+    )
+
+
+def restricted_schema(
+    schema: DatasetSchema,
+    repeat_indices: range | tuple[int, ...],
+    point_indices: range | tuple[int, ...],
+    data_indices: Mapping[AxisId, range | tuple[int, ...]],
+) -> DatasetSchema:
+    """The schema of what survives -- the source's axes, cropped, not dropped."""
+
+    repeat_domain = _subset_mapped_domain(schema.repeat_domain, repeat_indices)
+    point_domain = _subset_mapped_domain(schema.point_domain, point_indices)
+    cell_axes = tuple(
+        _subset_axis(axis, data_indices[axis.axis_id])
+        for axis in schema.cell_domain.axes
+    )
+    cell_domain = (
+        schema.cell_domain
+        if all(left is right for left, right in zip(cell_axes, schema.cell_domain.axes))
+        else DomainSpec(tuple(axis.size for axis in cell_axes), cell_axes)
+    )
+    if (
+        repeat_domain is schema.repeat_domain
+        and point_domain is schema.point_domain
+        and cell_domain is schema.cell_domain
+    ):
+        return schema
+    return DatasetSchema(
+        repeat_domain,
+        point_domain,
+        cell_domain,
+        schema.value_schema,
+    )
+
+
+def restricted_values(
+    values: np.ndarray,
+    schema: DatasetSchema,
+    repeat_indices: range | tuple[int, ...],
+    point_indices: range | tuple[int, ...],
+    data_indices: Mapping[AxisId, range | tuple[int, ...]],
+) -> np.ndarray:
+    """The values that survive, as a view wherever the selection is contiguous."""
+
+    result = take_indices(values, repeat_indices, axis=0)
+    result = take_indices(result, point_indices, axis=1)
+    for position, axis in enumerate(schema.cell_domain.axes):
+        result = take_indices(result, data_indices[axis.axis_id], axis=2 + position)
+    return result
+
+
+def value_selection(
+    schema: DatasetSchema,
+    terms: Mapping[str | AxisId, object],
+) -> Selection:
+    """Keep one named coordinate on each named axis.
+
+    The one translation from "this axis, that value" -- a facet cell, a scope
+    row, a site number typed into a panel -- into the Selection vocabulary.
+    An axis that spells its coordinates out is selected BY coordinate; an
+    implicit one is selected by index, because its coordinate is its index and
+    a range over floats would only be a longer way to say so.
+    """
+
+    catalog = list(axis_catalog(schema))
+    resolved: list[object] = []
+    for label, value in terms.items():
+        if not isinstance(label, (str, AxisId)):
+            raise TypeError("selection axis reference must be text or AxisId")
+        matches = (
+            [entry for entry in catalog if entry[1] == label]
+            if isinstance(label, AxisId)
+            else [entry for entry in catalog if entry[0] == label]
+        )
+        axis_ids = {entry[1] for entry in matches}
+        if not matches:
+            raise ValueError(f"selection axis {label!r} is absent from source schema")
+        if len(axis_ids) != 1:
+            raise ValueError(
+                f"selection axis {label!r} is not uniquely present in the source schema"
+            )
+        axis = matches[0][2]
+        coordinate = (
+            axis.coordinate_at(axis.size - 1)
+            if value is LATEST_COORDINATE
+            else canonical_coordinate_scalar(value, f"axis {axis.axis_id} coordinate")
+        )
+        if axis.coordinates is None:
+            if not isinstance(coordinate, int):
+                raise TypeError(
+                    f"implicit axis {axis.axis_id} requires an integer coordinate"
+                )
+            index = coordinate - axis.index_origin
+            if not 0 <= index < axis.size:
+                raise ValueError(
+                    f"axis {label!r} has no index {value!r}: it runs "
+                    f"{axis.index_origin}..{axis.index_origin + axis.size - 1}"
+                )
+            resolved.append(IndexSelection(axis.axis_id, index))
+        else:
+            resolved.append(
+                Selection.coordinate_range(
+                    axis.axis_id,
+                    coordinate,
+                    coordinate,
+                    coordinate_frame=axis.coordinate_frame,
+                ).terms[0]
+            )
+    return Selection(tuple(resolved))
+
+
+#: The ``slice_memo`` entry holding the last segmented cut as a whole: the
+#: source segments it covered, its choice, and what it made of them.
+_PREFIX_MEMO = "prefix"
+
+
+def restrict_snapshot(
+    snapshot: OwnedSnapshot,
+    selection: Selection | None = None,
+    *,
+    reference_for: Callable[[DatasetSchema], DatasetRevisionRef],
+    repeat_rows: range | None = None,
+    slice_memo: dict[tuple[object, ...], tuple[tuple, tuple]] | None = None,
+) -> OwnedSnapshot:
+    """One selection applied to one snapshot: the same axes, over less of them.
+
+    The single cutter.  Restriction is arithmetic on a schema, its values and
+    its validity, so it lives with the data, and everyone who restricts -- the
+    selection bridge deriving a signal, a panel scoped to one site -- asks
+    here.  Two cutters is how a box drawn on a scoped panel came to cut from
+    the whole signal instead: they agreed about the intent and disagreed about
+    the domain it applied to.
+
+    ``repeat_rows`` restricts the physical Repeat carrier, not one logical
+    axis in it. Its existing coordinates and axis_codes remain authoritative.
+    An optional caller-owned candidate memo reuses immutable slices, and the
+    last segmented cut whole: a block that begins with the segments that cut
+    covered (a growing finite prefix) walks only its new tail. Only this
+    call's consumed entries replace it, after construction succeeds.
+    """
+
+    if not isinstance(snapshot, OwnedSnapshot):
+        raise TypeError("restrict_snapshot requires an OwnedSnapshot")
+    schema = snapshot.block.schema
+    repeat_indices, point_indices, data_indices = selection_indices(schema, selection)
+    if repeat_rows is not None:
+        if (not isinstance(repeat_rows, range) or repeat_rows.step != 1
+                or not 0 <= repeat_rows.start < repeat_rows.stop <= schema.repeat_domain.size):
+            raise ValueError("repeat_rows must be a nonempty contiguous range within the Repeat carrier")
+        if isinstance(repeat_indices, range):
+            repeat_indices = range(max(repeat_indices.start, repeat_rows.start),
+                                   min(repeat_indices.stop, repeat_rows.stop))
+        else:
+            repeat_indices = tuple(index for index in repeat_indices if index in repeat_rows)
+        if not repeat_indices:
+            raise EmptySelection("selected Repeat rows do not intersect repeat_rows")
+    derived = restricted_schema(schema, repeat_indices, point_indices, data_indices)
+    if snapshot.block.values is None:
+        def overlap(selected, start, size):
+            if isinstance(selected, range):
+                low, high = max(selected.start, start), min(selected.stop, start + size)
+                return range(low - start, max(low, high) - start), low - selected.start
+            left, right = np.searchsorted(selected, (start, start + size))
+            if left == right:
+                return range(0), int(left)
+            low, high = int(selected[left] - start), int(selected[right - 1] - start)
+            if high - low + 1 == right - left:
+                return range(low, high + 1), int(left)
+            return tuple(int(value - start) for value in selected[left:right]), int(left)
+
+        # Non-contiguous global choices are shared by every source block.
+        # Rebuilding this array inside overlap made a fixed frame Scope O(W²).
+        repeat_search = repeat_indices if isinstance(repeat_indices, range) else np.asarray(repeat_indices)
+        point_search = point_indices if isinstance(point_indices, range) else np.asarray(point_indices)
+        cell_choice = (schema.value_schema.validity_contract.component_axis_ids,
+                       tuple((axis.axis_id, data_indices[axis.axis_id]) for axis in schema.cell_domain.axes))
+        block = snapshot.block
+        source_segments = block.segments
+        choice = (repeat_indices, point_indices, cell_choice)
+        # A finite run's prefix only grows: when this block begins with the
+        # very segments the memo's last cut covered, under the same choice,
+        # that cut is this one's head and only the appended tail is walked.
+        # Walking every committed segment again made a region on a live
+        # finite run O(run) Python per shot.
+        head = None if slice_memo is None else slice_memo.get(_PREFIX_MEMO)
+        start = 0
+        segments, origins, sizes = [], [], []
+        head_origins = head_sizes = np.empty((0, 2), dtype=np.int64)
+        if head is not None:
+            covered, covered_origins, head_choice, head_segments, cut_origins, cut_sizes = head
+            count = len(covered)
+            if (head_choice == choice and count <= len(source_segments)
+                    and all(map(operator.is_, source_segments[:count], covered))
+                    and np.array_equal(block.segment_origins[:count], covered_origins)):
+                start = count
+                segments = list(head_segments)
+                head_origins, head_sizes = cut_origins, cut_sizes
+
+        def touching(selected, first, extent):
+            if isinstance(selected, range):
+                return (first < selected.stop) & (first + extent > selected.start)
+            return np.searchsorted(selected, first + extent) > np.searchsorted(selected, first)
+
+        # Which segments the choice reaches at all, decided for every one at
+        # once: a window narrower than the history walks only its own shots.
+        tail_origins = block.segment_origins[start:]
+        tail_shapes = block.segment_shapes[start:]
+        reached = start + np.flatnonzero(
+            touching(repeat_search, tail_origins[:, 0], tail_shapes[:, 0])
+            & touching(point_search, tail_origins[:, 1], tail_shapes[:, 1])
+        )
+        consumed = {}
+        for index in reached.tolist():
+            origin, extent, planes = block.segment_origins[index], block.segment_shapes[index], source_segments[index]
+            repeats, repeat_origin = overlap(repeat_search, origin[0], extent[0])
+            points, point_origin = overlap(point_search, origin[1], extent[1])
+            if not repeats or not points:
+                continue
+            if (_keeps_everything(repeats, extent[0])
+                    and _keeps_everything(points, extent[1])
+                    and all(_keeps_everything(data_indices[axis.axis_id], axis.size)
+                            for axis in schema.cell_domain.axes)):
+                selected = planes
+            else:
+                cached = None
+                if slice_memo is not None:
+                    key = (id(planes), repeats, points, cell_choice)
+                    cached = consumed.get(key)
+                    if cached is None:
+                        cached = slice_memo.get(key)
+                if cached is not None:
+                    # The memo value holds planes alive, so its identity
+                    # cannot be recycled while a prior slice is being reused.
+                    selected = cached[1]
+                else:
+                    values, mask, sigma = planes
+                    values = restricted_values(values, schema, repeats, points, data_indices)
+                    values = immutable_array(values, dtype=schema.value_schema.dtype, shape=values.shape)
+                    if not isinstance(mask, bool):
+                        mask = take_indices(take_indices(mask, repeats, axis=0), points, axis=1)
+                        for position, axis_id in enumerate(schema.value_schema.validity_contract.component_axis_ids):
+                            mask = take_indices(mask, data_indices[axis_id], axis=2 + position)
+                        mask = immutable_array(mask, dtype=np.dtype(bool), shape=mask.shape)
+                    if sigma is not None:
+                        sigma = restricted_values(sigma, schema, repeats, points, data_indices)
+                        sigma = immutable_array(sigma, dtype=np.dtype("<f8"), shape=sigma.shape)
+                    selected = values, mask, sigma
+                if slice_memo is not None:
+                    consumed[key] = cached if cached is not None else (planes, selected)
+            segments.append(selected)
+            origins.append((repeat_origin, point_origin))
+            sizes.append((len(repeats), len(points)))
+        reference = reference_for(derived)
+        result = OwnedSnapshot(reference, DataBlock._from_owned_segments(
+            reference.block_id, reference.revision, derived,
+            window=block.window, segments=tuple(segments),
+            origins=np.concatenate((head_origins, np.asarray(origins, dtype=np.int64).reshape(-1, 2))),
+            shapes=np.concatenate((head_sizes, np.asarray(sizes, dtype=np.int64).reshape(-1, 2)))))
+        if slice_memo is not None:
+            if not start:
+                # Only this call's entries: a slice nothing reads any more
+                # must not keep its planes alive.  A reused head keeps its
+                # own, which this call consumed by reusing them.
+                slice_memo.clear()
+            slice_memo.update(consumed)
+            # The whole cut is remembered when it cut something and covered
+            # more than the head it reused; a cut that kept everything
+            # leaves the memo as empty as its slices.
+            if start < len(source_segments) and (consumed or start):
+                slice_memo[_PREFIX_MEMO] = (
+                    source_segments, block.segment_origins, choice, result.block.segments,
+                    result.block.segment_origins, result.block.segment_shapes,
+                )
+        return result
+    values = restricted_values(
+        snapshot.block.values, schema, repeat_indices, point_indices, data_indices
+    )
+    mask = dataset_validity_storage(snapshot.block.validity, schema)
+    mask = take_indices(mask, repeat_indices, axis=0)
+    mask = take_indices(mask, point_indices, axis=1)
+    for position, axis_id in enumerate(schema.value_schema.validity_contract.component_axis_ids):
+        mask = take_indices(mask, data_indices[axis_id], axis=2 + position)
+    # Every plane of a sample is cut by the same indices, because a
+    # restriction is about WHICH SAMPLES survive and says nothing about
+    # what is known of each.  Cutting the values alone is how a fitted
+    # parameter arrived at a scoped panel with its error removed.
+    sigma = (
+        None
+        if snapshot.block.sigma is None
+        else restricted_values(
+            snapshot.block.sigma,
+            schema,
+            repeat_indices,
+            point_indices,
+            data_indices,
+        )
+    )
+    result = materialize_derived_dataset(
+        snapshot.ref,
+        values,
+        schema=derived,
+        validity=compact_dataset_validity(mask, derived),
+        sigma=sigma,
+        reference_for=reference_for,
+        window=snapshot.block.window,
+    )
+    if slice_memo is not None:
+        slice_memo.clear()
+    return result

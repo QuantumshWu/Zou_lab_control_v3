@@ -1,0 +1,17 @@
+[package]
+name = "zlc-launch"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# The four programs at a checkout's root (experiment, figure_viewer, pulse_editor,
+# installation) are this one launcher under four names (src/main.rs).
+[[bin]]
+name = "zlc-launch"
+path = "src/main.rs"
+
+[dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+zlc-resources = { path = "../zlc-resources" }

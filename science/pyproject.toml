@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools==81.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zlc-science"
+version = "0.1.0"
+description = "ZLC's Python plugins: the atom device and logic-node packages, their SDK, data and file codecs"
+requires-python = ">=3.13"
+# What the plugin processes import (zlc_atom, zlc_plugin, zlc_data, zlc_durable).
+# Exact versions (v2's); constraints.txt pins the rest of each closure that v2 pins.
+dependencies = [
+    "numpy==2.4.2",
+    "scipy==1.17.1",
+    "Pillow==12.1.1",
+]
+
+[project.optional-dependencies]
+# Instrument links of zlc_atom's device plugins, at v2's versions: serial (N100),
+# VISA over USB/LAN without a vendor VISA (Rigol, Tek), and CuPy for the SLM's GPU
+# solver. Basler's pypylon v2 neither installs nor pins (a vendor runtime, the
+# experiment machine's prerequisite): an option here, and any version counts.
+devices = [
+    "pyserial==3.5",
+    "PyVISA==1.16.1",
+    "PyVISA-py==0.8.1",
+    "pyusb==1.3.1",
+    "libusb-package==1.0.30.0",
+]
+pylon = [
+    "pypylon",
+]
+slm-gpu = [
+    "cupy-cuda12x[ctk]==14.2.0",
+    "cuda-bindings==12.9.9",
+]
+# Development machines only: the Python plotting oracle (zlc_plot, zlc_science,
+# kept out of the repository) the native engine is compared against. No plugin
+# imports these.
+oracle = [
+    "numba==0.67.0",
+    "llvmlite==0.49.0",
+    "matplotlib==3.10.8",
+    "cycler==0.12.1",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["zlc_data*", "zlc_durable*", "zlc_atom*", "zlc_plugin*"]
+namespaces = false

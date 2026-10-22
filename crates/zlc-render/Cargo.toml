@@ -1,0 +1,11 @@
+[package]
+name = "zlc-render"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+rayon = "1"
+
+[dev-dependencies]
+serde_json = "1"

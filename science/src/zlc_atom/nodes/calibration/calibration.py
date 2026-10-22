@@ -1,0 +1,2984 @@
+"""Headless calibration values and the single box/PSF dispatch point."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from enum import Enum
+from functools import cached_property, lru_cache
+from math import isfinite, sqrt
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Callable, ClassVar
+
+import numpy as np
+
+from zlc_data import SITE, AxisId, AxisSpec
+from zlc_durable import strict_json_loads, write_readable_json
+
+from zlc_atom.authoring import AuthoringChoice
+
+from .bimodal import (
+    fit_bimodal, gaussian_fidelity, optimal_gaussian_threshold, per_site_fidelity,
+)
+from .psf import extract_psf_window, gaussian_psf_kernel
+
+
+def validate_target_registration(
+    site_map: SiteMap,
+    *,
+    frame_shape: tuple[int, int],
+) -> tuple[np.ndarray, Mapping[str, Any]]:
+    """Validate and return one registered Target roster in stable site order."""
+
+    if not isinstance(site_map, SiteMap) or not isinstance(site_map.topology, Mapping):
+        raise ValueError("Calibration SiteMap has no registered Target topology")
+    topology = site_map.topology
+    if set(topology) != {
+        "kind", "target_support_yx", "target_site_intensity",
+        "observed_sites", "affine_target_xy_to_image_xy", "provenance",
+    } or topology.get("kind") != "slm_target_registration":
+        raise ValueError("Calibration SiteMap has invalid registered Target topology")
+    support = np.asarray(topology["target_support_yx"])
+    intensity = np.asarray(topology["target_site_intensity"])
+    observed = np.asarray(topology["observed_sites"])
+    affine = np.asarray(topology["affine_target_xy_to_image_xy"])
+    centers = np.asarray(site_map.centers_xy)
+    provenance = topology["provenance"]
+    shape = tuple(int(value) for value in frame_shape)
+    if (
+        support.ndim != 2
+        or support.shape[1:] != (2,)
+        or not len(support)
+        or support.dtype.kind not in "iu"
+        or np.any(support < 0)
+        or len({tuple(value) for value in support.tolist()}) != len(support)
+        or intensity.shape != (len(support),)
+        or intensity.dtype.kind not in "iuf"
+        or not np.all(np.isfinite(intensity))
+        or np.any(intensity <= 0.0)
+        or observed.shape != (len(support),)
+        or observed.dtype != np.dtype(bool)
+        or not np.any(observed)
+        or not np.array_equal(observed, site_map.valid_sites)
+        or site_map.site_ids
+        != tuple(f"site_{index:04d}" for index in range(len(support)))
+        or affine.shape != (3, 2)
+        or affine.dtype.kind not in "iuf"
+        or not np.all(np.isfinite(affine))
+        or centers.shape != (len(support), 2)
+        or centers.dtype.kind not in "iuf"
+        or not np.all(np.isfinite(centers))
+        or len(shape) != 2
+        or any(value <= 0 for value in shape)
+    ):
+        raise ValueError("Calibration target registration fields are invalid")
+    if not isinstance(provenance, Mapping) or set(provenance) != {
+        "science_context_path", "command_receipt",
+    }:
+        raise ValueError("Calibration target registration provenance is invalid")
+    if (
+        not isinstance(provenance["science_context_path"], str)
+        or not provenance["science_context_path"]
+        or not isinstance(provenance["command_receipt"], Mapping)
+    ):
+        raise ValueError("Calibration target registration provenance is invalid")
+
+    target_xy = support[:, ::-1].astype(float, copy=False)
+    design = np.column_stack((target_xy, np.ones(len(support), dtype=float)))
+    predicted = design @ np.asarray(affine, dtype=float)
+    if not np.allclose(
+        centers[~observed], predicted[~observed], rtol=1e-12, atol=1e-9
+    ):
+        raise ValueError("unobserved SiteMap centers differ from registered prediction")
+    target_rank = int(
+        np.linalg.matrix_rank(target_xy - np.mean(target_xy, axis=0))
+    )
+    if int(np.sum(observed)) < target_rank + 1:
+        raise ValueError("too few observed sites span the registered Target geometry")
+    measured = centers[observed]
+    residuals = np.linalg.norm(predicted[observed] - measured, axis=1)
+    if len(measured) > 1:
+        separations = np.linalg.norm(
+            measured[:, np.newaxis, :] - measured[np.newaxis, :, :], axis=2
+        )
+        separations[np.diag_indices_from(separations)] = np.inf
+        spacing = float(np.min(separations))
+        if not np.isfinite(spacing) or spacing <= 0.0:
+            raise ValueError("Calibration SiteMap geometry is ambiguous")
+        if float(np.max(residuals)) > 0.25 * spacing:
+            raise ValueError("Calibration sites do not fit the authored Target geometry")
+        predicted_separation = np.linalg.norm(
+            predicted[:, np.newaxis, :] - predicted[np.newaxis, :, :], axis=2
+        )
+        predicted_separation[np.diag_indices_from(predicted_separation)] = np.inf
+        if float(np.min(predicted_separation)) + 1e-9 * spacing < 0.5 * spacing:
+            raise ValueError("predicted Target site separation is ambiguous")
+
+    target_spans = np.ptp(target_xy, axis=0)
+    measured_spans = np.ptp(measured, axis=0)
+    if target_spans[0] > 0.0 and target_spans[1] == 0.0:
+        tilted = measured_spans[1] / measured_spans[0] > 0.25
+    elif target_spans[0] == 0.0 and target_spans[1] > 0.0:
+        tilted = measured_spans[0] / measured_spans[1] > 0.25
+    else:
+        tilted = False
+    if tilted:
+        raise ValueError("Calibration differs from the trusted apparatus orientation")
+    normalized_target = np.zeros_like(target_xy)
+    normalized_measured = np.zeros_like(measured)
+    for axis in range(2):
+        if target_spans[axis] > 0.0:
+            measured_span = measured_spans[axis]
+            if measured_span == 0.0:
+                raise ValueError("Calibration geometry cannot register Target support")
+            normalized_target[:, axis] = (
+                target_xy[:, axis] - float(np.min(target_xy[:, axis]))
+            ) / target_spans[axis]
+            normalized_measured[:, axis] = (
+                measured[:, axis] - float(np.min(measured[:, axis]))
+            ) / measured_span
+    if target_rank == 2:
+        normalized_design = np.column_stack(
+            (normalized_target[observed], np.ones(int(np.sum(observed))))
+        )
+        normalized_affine, *_unused = np.linalg.lstsq(
+            normalized_design, normalized_measured, rcond=None
+        )
+        linear = normalized_affine[:2]
+        if (
+            float(np.linalg.det(linear)) <= 0.0
+            or float(np.linalg.cond(linear)) > 3.0
+            or float(np.max(np.abs(linear - np.eye(2)))) > 0.25
+            or float(np.linalg.cond(affine[:2])) > 1.75
+        ):
+            raise ValueError(
+                "Calibration differs from the trusted apparatus orientation"
+            )
+    for axis in range(2):
+        authored = target_xy[observed, axis]
+        if float(np.ptp(authored)) > 0.0 and float(
+            np.sum(
+                (authored - np.mean(authored))
+                * (measured[:, axis] - np.mean(measured[:, axis]))
+            )
+        ) <= 0.0:
+            raise ValueError("Calibration differs from the trusted Target orientation")
+    if any(not box_fits(tuple(center), 0, shape) for center in centers):
+        raise ValueError("a registered Target center lies outside the camera frame")
+    frozen = np.array(support, dtype="<i8", copy=True)
+    frozen.setflags(write=False)
+    return frozen, provenance
+
+
+def _target_site_assignment(
+    detected: SiteMap,
+    target_intensity: object,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """The one geometric assignment, including each Target site's source index."""
+
+    # Reached from inside for the same reason as ``_bonferroni_z``: this
+    # file is imported to read a descriptor, and the assignment is solved
+    # only when a Target is actually registered against detected sites.
+    from scipy.optimize import linear_sum_assignment  # noqa: PLC0415
+
+    target = np.asarray(target_intensity, dtype=np.float32)
+    if (
+        target.ndim != 2
+        or min(target.shape) < 2
+        or not np.all(np.isfinite(target))
+        or np.any(target < 0.0)
+    ):
+        raise ValueError("registration Target must be finite non-negative intensity")
+    rows, columns = np.nonzero(target > 0.0)
+    roster_count = len(rows)
+    measured_count = detected.n_sites
+    if not roster_count:
+        raise ValueError("registration Target support is empty")
+    if measured_count > roster_count:
+        raise ValueError("Calibration detected more sites than the authored Target roster")
+    target_xy = np.column_stack((columns, rows)).astype(float, copy=False)
+    measured_xy = np.asarray(detected.centers_xy, dtype=float)
+    target_rank = int(
+        np.linalg.matrix_rank(target_xy - np.mean(target_xy, axis=0))
+    )
+    if measured_count < target_rank + 1:
+        raise ValueError("too few detected sites to register the authored Target roster")
+    if roster_count == measured_count == 1:
+        predicted = np.array(measured_xy, copy=True)
+        target_indices = calibration_indices = np.asarray([0], dtype=np.intp)
+        affine = np.zeros((3, 2), dtype=float)
+        affine[2] = measured_xy[0]
+    else:
+        normalized_target = np.zeros_like(target_xy)
+        normalized_measured = np.zeros_like(measured_xy)
+        for axis in range(2):
+            target_span = float(np.ptp(target_xy[:, axis]))
+            measured_span = float(np.ptp(measured_xy[:, axis]))
+            if target_span > 0.0:
+                if measured_span == 0.0:
+                    raise ValueError("Calibration geometry cannot register Target support")
+                normalized_target[:, axis] = (
+                    target_xy[:, axis] - float(np.min(target_xy[:, axis]))
+                ) / target_span
+                normalized_measured[:, axis] = (
+                    measured_xy[:, axis] - float(np.min(measured_xy[:, axis]))
+                ) / measured_span
+        cost = np.sum(
+            (
+                normalized_target[:, np.newaxis, :]
+                - normalized_measured[np.newaxis, :, :]
+            )
+            ** 2,
+            axis=2,
+        )
+        target_indices, calibration_indices = linear_sum_assignment(cost)
+        full_design = np.column_stack(
+            (target_xy, np.ones(roster_count, dtype=float))
+        )
+        for _iteration in range(6):
+            matched_design = full_design[target_indices]
+            if np.linalg.matrix_rank(matched_design) < target_rank + 1:
+                raise ValueError("detected sites do not span the authored Target geometry")
+            affine, *_unused = np.linalg.lstsq(
+                matched_design,
+                measured_xy[calibration_indices],
+                rcond=None,
+            )
+            predicted = full_design @ affine
+            cost = np.sum(
+                (predicted[:, np.newaxis, :] - measured_xy[np.newaxis, :, :])
+                ** 2,
+                axis=2,
+            )
+            updated_target, updated_calibration = linear_sum_assignment(cost)
+            if np.array_equal(updated_target, target_indices) and np.array_equal(
+                updated_calibration, calibration_indices
+            ):
+                break
+            target_indices, calibration_indices = (
+                updated_target,
+                updated_calibration,
+            )
+        matched_design = full_design[target_indices]
+        affine, *_unused = np.linalg.lstsq(
+            matched_design,
+            measured_xy[calibration_indices],
+            rcond=None,
+        )
+        predicted = full_design @ affine
+
+    source_indices = np.full(roster_count, -1, dtype=int)
+    source_indices[target_indices] = calibration_indices
+    return rows, columns, source_indices, predicted, affine
+
+
+def register_target_sites(
+    detected: SiteMap,
+    target_intensity: object,
+    provenance: Mapping[str, Any] | None,
+    *,
+    frame_shape: tuple[int, int],
+) -> SiteMap:
+    """Fit the authored SLM roster to camera sites, retaining unobserved gaps."""
+    if not isinstance(provenance, Mapping):
+        raise TypeError("registration provenance must be a mapping")
+    target = np.asarray(target_intensity, dtype=np.float32)
+    rows, columns, source_indices, predicted, affine = _target_site_assignment(detected, target)
+    roster_count = len(rows)
+    measured_xy = np.asarray(detected.centers_xy, dtype=float)
+    observed = source_indices >= 0
+    centers = np.array(predicted, dtype="<f8", copy=True)
+    centers[observed] = measured_xy[source_indices[observed]]
+    valid = np.zeros(roster_count, dtype=bool)
+    valid[observed] = detected.valid_sites[source_indices[observed]]
+    quality = np.full(roster_count, np.nan, dtype="<f8")
+    quality[observed] = detected.quality[source_indices[observed]]
+    topology = {
+        "kind": "slm_target_registration",
+        "target_support_yx": np.column_stack((rows, columns)).astype(int).tolist(),
+        "target_site_intensity": target[rows, columns].astype(float).tolist(),
+        "observed_sites": observed.tolist(),
+        "affine_target_xy_to_image_xy": affine.astype(float).tolist(),
+        "provenance": dict(provenance),
+    }
+    result = SiteMap(
+        tuple(f"site_{index:04d}" for index in range(roster_count)),
+        centers,
+        valid,
+        quality,
+        detected.coordinate_frame,
+        topology,
+    )
+    validate_target_registration(
+        result,
+        frame_shape=frame_shape,
+    )
+    return result
+
+
+def registration_order(calibration, context, context_path):
+    target = np.asarray(context["target_intensity"])
+    points = np.column_stack(np.nonzero(target > 0)).astype(np.int32)
+    if len(points) != calibration.n_sites:
+        raise ValueError("Rearrangement needs one calibrated readout per authored source/target site")
+    registered = register_target_sites(
+        calibration.site_map, target,
+        {"science_context_path": str(context_path), "command_receipt": dict(context["command_receipt"])},
+        frame_shape=calibration.frame_contract.image_shape)
+    # Registration retains the measured coordinates verbatim when every site
+    # is observed. Convert that existing result to a readout permutation only.
+    original = {tuple(center): i for i, center in enumerate(calibration.site_map.centers_xy)}
+    order = np.asarray([original[tuple(center)] for center in registered.centers_xy], dtype=np.intp)
+    if len(set(order)) != len(points):
+        raise ValueError("The calibrated readout does not map one-to-one to SLM sites")
+    affine = np.asarray(registered.topology["affine_target_xy_to_image_xy"], dtype=float)
+    return points, target[points[:, 0], points[:, 1]], order, affine
+
+
+class ReadoutModelKind(str, Enum):
+    """The closed set of readout feature models stored by a calibration."""
+
+    BOX = "box"
+    PER_SITE_PSF = "psf"
+    UNIFORM_PSF = "uniform_psf"
+
+
+DEFAULT_READOUT_MODEL_CHOICE = "default"
+
+#: What a node may ask a calibration for, as a form offers it: the artifact's
+#: own default, then each model by name.  Said here, beside the kinds and the
+#: resolver, because a form offering a choice this mapping cannot resolve is a
+#: form that fails at build time.  The labels sit side by side on one line, so
+#: the first is just "Default": it stands under "Readout model", beside the
+#: model names, where it can only mean the calibration's own.
+READOUT_MODEL_CHOICES = (
+    AuthoringChoice(DEFAULT_READOUT_MODEL_CHOICE, "Default"),
+    AuthoringChoice(ReadoutModelKind.BOX.value, "Box"),
+    AuthoringChoice(ReadoutModelKind.PER_SITE_PSF.value, "Per-site PSF"),
+    AuthoringChoice(ReadoutModelKind.UNIFORM_PSF.value, "Uniform PSF"),
+)
+
+
+def _exact_fields(
+    value: object,
+    name: str,
+    fields: frozenset[str],
+) -> Mapping[str, Any]:
+    if type(value) is not dict:
+        raise TypeError(f"{name} must be an object")
+    unknown = set(value) - fields
+    missing = fields - set(value)
+    if unknown:
+        raise ValueError(f"unknown {name} fields: {sorted(unknown, key=str)}")
+    if missing:
+        raise ValueError(f"missing {name} fields: {sorted(missing)}")
+    return value
+
+
+_JSON_TYPE_NAME = {
+    bool: "boolean",
+    int: "integer",
+    float: "number",
+    str: "string",
+    list: "array",
+    dict: "object",
+    type(None): "null",
+}
+
+
+def _canonical_mismatch(expected: object, observed: object, path: str) -> str | None:
+    if type(expected) is not type(observed):
+        return (
+            f"{path} must be {_JSON_TYPE_NAME.get(type(expected), type(expected).__name__)}, "
+            f"got {_JSON_TYPE_NAME.get(type(observed), type(observed).__name__)}"
+        )
+    if type(expected) is dict:
+        expected_mapping = expected
+        observed_mapping = observed
+        if set(expected_mapping) != set(observed_mapping):
+            return f"{path} fields changed while decoding"
+        for key in expected_mapping:
+            mismatch = _canonical_mismatch(
+                expected_mapping[key], observed_mapping[key], f"{path}.{key}"
+            )
+            if mismatch is not None:
+                return mismatch
+        return None
+    if type(expected) is list:
+        expected_items = expected
+        observed_items = observed
+        if len(expected_items) != len(observed_items):
+            return f"{path} array length changed while decoding"
+        for index, (wanted, actual) in enumerate(
+            zip(expected_items, observed_items, strict=True)
+        ):
+            mismatch = _canonical_mismatch(wanted, actual, f"{path}[{index}]")
+            if mismatch is not None:
+                return mismatch
+        return None
+    return None if expected == observed else f"{path} changed while decoding"
+
+
+def _require_canonical(expected: object, observed: object, name: str) -> None:
+    mismatch = _canonical_mismatch(expected, observed, name)
+    if mismatch is not None:
+        raise TypeError(f"non-canonical {name} document: {mismatch}")
+
+
+def _plain_json_value(value: object, name: str) -> Any:
+    """Project an owned domain value into the exact JSON value vocabulary."""
+
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float:
+        if not isfinite(value):
+            raise ValueError(f"{name} must be finite")
+        return value
+    if isinstance(value, np.generic):
+        return _plain_json_value(value.item(), name)
+    if isinstance(value, np.ndarray):
+        return _plain_json_value(value.tolist(), name)
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError(f"{name} keys must be strings")
+            result[key] = _plain_json_value(item, f"{name}.{key}")
+        return result
+    if isinstance(value, (list, tuple)):
+        return [
+            _plain_json_value(item, f"{name}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    raise TypeError(f"{name} is not JSON-serializable domain data")
+
+
+def _freeze_json_value(value: object) -> object:
+    """Recursively own one already-plain JSON value as immutable truth."""
+
+    if type(value) is dict:
+        return MappingProxyType(
+            {key: _freeze_json_value(item) for key, item in value.items()}
+        )
+    if type(value) is list:
+        return tuple(_freeze_json_value(item) for item in value)
+    return value
+
+
+def _immutable_json_value(value: object, name: str) -> object:
+    return _freeze_json_value(_plain_json_value(value, name))
+
+
+def readout_model_kind_from_choice(
+    value: object,
+) -> ReadoutModelKind | None:
+    """Resolve the authored request for the artifact-selected default."""
+
+    if value == DEFAULT_READOUT_MODEL_CHOICE:
+        return None
+    try:
+        return ReadoutModelKind(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"unknown readout model choice {value!r}") from exc
+
+
+def _shape(value: object, field_name: str) -> tuple[int, int]:
+    try:
+        result = tuple(int(item) for item in value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{field_name} must be a two-integer tuple") from exc
+    if len(result) != 2 or any(item <= 0 for item in result):
+        raise ValueError(f"{field_name} must contain two positive integers")
+    return result
+
+
+def reads_photoelectrons(calibration: "TrapCalibration") -> bool | None:
+    """Whether this calibration's thresholds are numbers of photoelectrons.
+
+    Read from the run it was fitted on; None when its report records no run
+    (one built by hand), which says nothing either way.  Every node that
+    classifies frames against a calibration has to take its own frames in the
+    SAME numbers -- the conversion is affine, so a mismatch does not read a
+    little wrong, it reads every site the same way -- and asking here is how
+    they agree without each keeping its own switch.
+    """
+
+    record = calibration.report.get("run_record")
+    if not isinstance(record, Mapping):
+        return None
+    return bool((record.get("request") or {}).get("photoelectrons", False))
+
+
+@dataclass(frozen=True)
+class FrameContract:
+    """Physical image facts on which a calibration is valid."""
+
+    image_shape: tuple[int, int]
+    sensor_shape: tuple[int, int] | None = None
+    roi_xywh: tuple[int, int, int, int] | None = None
+    binning_yx: tuple[int, int] = (1, 1)
+    exposure_seconds: float | None = None
+    camera_id: str | None = None
+    readout_mode: str | None = None
+
+    def __post_init__(self) -> None:
+        image = _shape(self.image_shape, "image_shape")
+        object.__setattr__(self, "image_shape", image)
+        binning = _shape(self.binning_yx, "binning_yx")
+        object.__setattr__(self, "binning_yx", binning)
+        if self.sensor_shape is not None:
+            sensor = _shape(self.sensor_shape, "sensor_shape")
+            object.__setattr__(self, "sensor_shape", sensor)
+            if sensor[0] < image[0] * binning[0] or sensor[1] < image[1] * binning[1]:
+                raise ValueError("sensor_shape cannot be smaller than image_shape")
+        if self.roi_xywh is not None:
+            roi = tuple(int(item) for item in self.roi_xywh)
+            if len(roi) != 4 or roi[0] < 0 or roi[1] < 0 or roi[2] <= 0 or roi[3] <= 0:
+                raise ValueError("roi_xywh must be (x, y, width, height) with positive size")
+            if roi[2:] != (image[1] * binning[1], image[0] * binning[0]):
+                raise ValueError("roi_xywh size and binning must match image_shape")
+            if self.sensor_shape is not None and (roi[0] + roi[2] > self.sensor_shape[1] or roi[1] + roi[3] > self.sensor_shape[0]):
+                raise ValueError("roi_xywh lies outside sensor_shape")
+            object.__setattr__(self, "roi_xywh", roi)
+        if self.exposure_seconds is not None:
+            exposure = float(self.exposure_seconds)
+            if not np.isfinite(exposure) or exposure <= 0:
+                raise ValueError("exposure_seconds must be finite and positive")
+            object.__setattr__(self, "exposure_seconds", exposure)
+        for name in ("camera_id", "readout_mode"):
+            value = getattr(self, name)
+            if value is not None:
+                if type(value) is not str:
+                    raise TypeError(f"{name} must be a string or None")
+                if not value.strip():
+                    raise ValueError(f"{name} cannot be blank")
+
+    def assert_image(self, image: object) -> np.ndarray:
+        payload = image.values if hasattr(image, "values") else image.image if hasattr(image, "image") else image
+        array = np.asarray(payload)
+        if array.shape != self.image_shape:
+            raise ValueError(f"image shape {array.shape} differs from calibration {self.image_shape}")
+        return array
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "image_shape": list(self.image_shape),
+            "sensor_shape": None if self.sensor_shape is None else list(self.sensor_shape),
+            "roi_xywh": None if self.roi_xywh is None else list(self.roi_xywh),
+            "binning_yx": list(self.binning_yx),
+            "exposure_seconds": self.exposure_seconds,
+            "camera_id": self.camera_id,
+            "readout_mode": self.readout_mode,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "FrameContract":
+        values = _exact_fields(
+            payload,
+            "FrameContract",
+            frozenset(
+                {
+                    "image_shape",
+                    "sensor_shape",
+                    "roi_xywh",
+                    "binning_yx",
+                    "exposure_seconds",
+                    "camera_id",
+                    "readout_mode",
+                }
+            ),
+        )
+        result = cls(**dict(values))
+        _require_canonical(result.to_dict(), dict(values), "FrameContract")
+        return result
+
+
+@dataclass(frozen=True)
+class AtomDetection:
+    """Named result returned by :meth:`TrapCalibration.detect`."""
+
+    counts: np.ndarray
+    occupied: np.ndarray
+    occupied_indices: tuple[int, ...]
+    thresholds: np.ndarray
+
+    def __post_init__(self) -> None:
+        counts = np.asarray(self.counts, dtype="<f8")
+        occupied = np.asarray(self.occupied, dtype=bool)
+        thresholds = np.asarray(self.thresholds, dtype="<f8")
+        if counts.shape != occupied.shape or thresholds.shape != counts.shape:
+            raise ValueError("detection arrays must share one site shape")
+        object.__setattr__(self, "counts", counts)
+        object.__setattr__(self, "occupied", occupied)
+        object.__setattr__(self, "thresholds", thresholds)
+        object.__setattr__(self, "occupied_indices", tuple(int(item) for item in self.occupied_indices))
+
+    def __array__(self, dtype: object | None = None) -> np.ndarray:
+        return np.asarray(self.occupied, dtype=dtype)
+
+    @property
+    def judged(self) -> np.ndarray:
+        """Sites this image has a verdict for: a finite count read against a finite threshold.
+
+        ``occupied`` is False everywhere else, so a reader that publishes an
+        empty site must also publish this as its validity: an unjudgeable site
+        is not an empty one.
+        """
+
+        return np.isfinite(self.counts) & np.isfinite(self.thresholds)
+
+
+def classify_threshold(counts: object, thresholds: object) -> np.ndarray:
+    values = np.asarray(counts, dtype=float)
+    boundary = np.asarray(thresholds, dtype=float)
+    if boundary.ndim == 1 and values.ndim >= 1 and values.shape[-1] == boundary.size:
+        boundary = np.broadcast_to(boundary, values.shape)
+    elif values.shape != boundary.shape:
+        raise ValueError("counts and thresholds must have the same shape or site-axis broadcasting")
+    return np.isfinite(values) & np.isfinite(boundary) & (values > boundary)
+
+
+def _immutable_array(value: object, dtype: str, shape: tuple[int, ...] | None = None) -> np.ndarray:
+    array = np.asarray(value, dtype=dtype)
+    if shape is not None and array.shape != shape:
+        raise ValueError(f"array shape {array.shape} differs from expected {shape}")
+    result = np.array(array, copy=True, order="C")
+    result.setflags(write=False)
+    return result
+
+
+def box_fits(
+    center: tuple[float, float],
+    radius: int,
+    image_shape: tuple[int, int],
+) -> bool:
+    """Whether a box of this radius round this centre is wholly in the picture.
+
+    THE rule, asked by the detector before it publishes a centre and by the
+    extractor before it reads one.  Two copies of it is how a run died at the
+    readout for a site the detector had been happy to report.
+    """
+
+    x, y = (int(round(float(center[0]))), int(round(float(center[1]))))
+    radius = int(radius)
+    return (
+        x - radius >= 0
+        and y - radius >= 0
+        and x + radius < int(image_shape[1])
+        and y + radius < int(image_shape[0])
+    )
+
+
+def _box_bounds(center: tuple[float, float], radius: int, image_shape: tuple[int, int]) -> tuple[int, int, int, int]:
+    if not box_fits(center, radius, image_shape):
+        raise ValueError(f"site center {center!r} with radius {radius} lies outside image")
+    x, y = (int(round(float(center[0]))), int(round(float(center[1]))))
+    width, height = 2 * int(radius) + 1, 2 * int(radius) + 1
+    return x - int(radius), y - int(radius), width, height
+
+
+@lru_cache(maxsize=16)
+def _window_pixels(corners_xy: bytes, size: int, width: int, hole: int = 0) -> np.ndarray:
+    """Every pixel of every ``size`` square whose top-left corners are
+    ``corners_xy`` (int64 x, y pairs), as flat indices into a frame ``width``
+    wide: window by window, each row by row -- the order ``frame[y, x]``
+    indexing reads them in.  ``hole`` leaves out the centred square of that
+    side (an annulus).  Kept per geometry: a run reads the same boxes every shot.
+    """
+
+    corners = np.frombuffer(corners_xy, dtype=np.int64).reshape(-1, 2)
+    keep = np.ones((size, size), dtype=bool)
+    edge = (size - hole) // 2
+    keep[edge : edge + hole, edge : edge + hole] = False
+    rows, columns = np.nonzero(keep)
+    pixels = (corners[:, 1, None] + rows) * width + corners[:, 0, None] + columns
+    pixels = pixels.reshape(-1)
+    pixels.setflags(write=False)
+    return pixels
+
+
+def _gather(frames: np.ndarray, pixels: np.ndarray, frame_indices: np.ndarray | None) -> np.ndarray:
+    """``frames[f].ravel()[pixels]`` for every frame read, ``(frames read, pixels)``,
+    without copying a whole frame."""
+
+    planes = frames.reshape(frames.shape[0], -1)
+    if frame_indices is None:
+        return np.take(planes, pixels, axis=1)
+    gathered = np.empty((len(frame_indices), pixels.size), dtype=frames.dtype)
+    for row, index in enumerate(frame_indices):
+        np.take(planes[index], pixels, out=gathered[row])
+    return gathered
+
+
+def extract_box_signals(
+    image: object, centers_xy: object, *, radius: int = 1,
+    frame_indices: np.ndarray | None = None,
+) -> np.ndarray:
+    """The TOTAL of each site's box, in the frame's own counts.
+
+    The box statistic is the sum of the pixels inside it -- how much the
+    site's footprint collected, whatever unit the frame arrives in; this
+    layer neither knows nor asks.  A mean is the same number rescaled by
+    the arbitrary box size, and the reducer knob that once offered
+    mean/median/max answered a question nobody should be asking a
+    readout: there is one physical quantity here.  The PSF extractors
+    answer in the same currency (see _measure_readout_weights), so every
+    readout model's signal, threshold and histogram share a meaning.
+
+    ``image`` is one ``(H, W)`` frame, answered as ``(N,)``, or a stack
+    ``(F, H, W)`` of frames, answered as ``(F, N)``.  Every window of every
+    frame is gathered in one indexing and summed in one call: an occupancy
+    reads a 42-frame cycle without 42 Python round trips, and a stack
+    answers exactly what the frames answer one at a time -- each window is
+    summed over its own contiguous pixels either way.  A window holding any
+    pixel that is not finite has no total -- the PSF readout's rule too -- so
+    a masked site is read as no number at all, never as a valid, dim one.
+    """
+
+    array = np.asarray(image.values if hasattr(image, "values") else image)
+    if array.ndim not in (2, 3):
+        raise ValueError("image must be two-dimensional, or a stack of two-dimensional frames")
+    stacked = array.ndim == 3
+    frames = array if stacked else array[None]
+    frame_count = frames.shape[0] if frame_indices is None else len(frame_indices)
+    radius = int(radius)
+    if radius < 0:
+        raise ValueError("radius must be non-negative")
+    centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
+    size = 2 * radius + 1
+    output = np.full((frame_count, len(centers)), np.nan, dtype="<f8")
+    if len(centers):
+        # The one placement rule (box_fits): a rounded centre, radius each
+        # way, wholly inside the picture -- for every site at once.
+        rounded = np.rint(centers).astype(int)
+        x0 = rounded[:, 0] - radius
+        y0 = rounded[:, 1] - radius
+        fits = (
+            (x0 >= 0) & (y0 >= 0)
+            & (x0 + size <= frames.shape[2]) & (y0 + size <= frames.shape[1])
+        )
+        if not np.all(fits):
+            outside = tuple(centers[int(np.flatnonzero(~fits)[0])])
+            raise ValueError(f"site center {outside!r} with radius {radius} lies outside image")
+        pixels = _window_pixels(np.column_stack((x0, y0)).astype(np.int64).tobytes(), size, frames.shape[2])
+        windows = _gather(frames, pixels, frame_indices).reshape(frame_count, len(centers), size * size)
+        if frame_indices is None and frame_count > 1:
+            # Pixel by pixel in box order: the order a whole stack's sum has
+            # always taken, so a stack keeps its last bits.
+            sums = np.zeros((frame_count, len(centers)), dtype=np.float64)
+            for pixel in range(size * size):
+                sums += windows[:, :, pixel]
+        else:
+            sums = windows.sum(axis=2, dtype=np.float64)
+        if frames.dtype.kind in "biu":
+            output[:] = sums
+        else:
+            finite = np.isfinite(windows).all(axis=2)
+            output[finite] = sums[finite]
+    return output if stacked else output[0]
+
+
+def extract_psf_signals(
+    image: object,
+    centers_xy: object,
+    *,
+    kernels: np.ndarray | None = None,
+    boxes_xywh: np.ndarray | None = None,
+    background: str = "annulus",
+    radius: int = 2,
+    padding: int = 3,
+    frame_indices: np.ndarray | None = None,
+) -> np.ndarray:
+    """Extract one calibrated linear PSF statistic per site.
+
+    ``image`` is one ``(H, W)`` frame, answered as ``(N,)``, or a stack
+    ``(F, H, W)``, answered as ``(F, N)``: the windows and annuli of every
+    frame are gathered in one indexing.  The signed-kernel reduction of each
+    window runs over that window's own contiguous pixels, so a stack answers
+    exactly what the frames answer one at a time.
+    """
+
+    array = np.asarray(image.values if hasattr(image, "values") else image)
+    if array.ndim not in (2, 3):
+        raise ValueError("image must be two-dimensional, or a stack of two-dimensional frames")
+    stacked = array.ndim == 3
+    frames = array if stacked else array[None]
+    frame_count = frames.shape[0] if frame_indices is None else len(frame_indices)
+    image_shape = frames.shape[1:]
+    centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
+    size = 2 * int(radius) + 1
+    if kernels is None:
+        shape = gaussian_psf_kernel(1.0, radius)
+        kernels = np.broadcast_to(
+            shape / np.sum(shape ** 2),
+            (len(centers), size, size),
+        )
+    kernels = np.asarray(kernels, dtype=float)
+    if kernels.shape != (len(centers), size, size):
+        raise ValueError("kernels must have shape (N, 2*radius+1, 2*radius+1)")
+    if boxes_xywh is None:
+        boxes = np.asarray([_box_bounds(tuple(center), int(radius), image_shape) for center in centers], dtype=int)
+    else:
+        boxes = np.asarray(boxes_xywh, dtype=int)
+    if boxes.shape != (len(centers), 4):
+        raise ValueError("boxes_xywh must have shape (N, 4)")
+    output = np.full((frame_count, len(centers)), np.nan, dtype="<f8")
+
+    # The normal calibrated path has equal, complete PSF boxes and complete
+    # annuli.  Gather those windows once, for every frame, instead of
+    # rebuilding 35 slices and annulus masks for every frame and site.  The
+    # kernel reduction of each window is a sum over that window's
+    # contiguous products, the same summation the scalar path performs.
+    pad = int(padding)
+    heights = boxes[:, 3]
+    widths = boxes[:, 2]
+    complete_boxes = bool(
+        len(boxes)
+        and np.all(widths == size)
+        and np.all(heights == size)
+        and np.all(boxes[:, 0] >= 0)
+        and np.all(boxes[:, 1] >= 0)
+        and np.all(boxes[:, 0] + widths <= image_shape[1])
+        and np.all(boxes[:, 1] + heights <= image_shape[0])
+    )
+    complete_annuli = bool(
+        background == "annulus"
+        and pad >= 0
+        and complete_boxes
+        and np.all(boxes[:, 0] >= pad)
+        and np.all(boxes[:, 1] >= pad)
+        and np.all(boxes[:, 0] + widths + pad <= image_shape[1])
+        and np.all(boxes[:, 1] + heights + pad <= image_shape[0])
+    )
+    if (background == "none" and complete_boxes) or complete_annuli:
+        corners = np.ascontiguousarray(boxes[:, :2], dtype=np.int64)
+        cuts = _gather(frames, _window_pixels(corners.tobytes(), size, image_shape[1]), frame_indices)
+        cuts = cuts.reshape(frame_count, len(boxes), size * size)
+        finite_cuts = np.isfinite(cuts).all(axis=2)
+        weights = kernels.reshape(len(boxes), size * size)[None]
+        if complete_annuli and pad:
+            # The ring is the padded window without the box, row by row.
+            rings = _gather(frames, _window_pixels((corners - pad).tobytes(), size + 2 * pad, image_shape[1], size),
+                            frame_indices)
+            rings = np.asarray(rings, dtype=float).reshape(frame_count, len(boxes), -1)
+            offsets = np.zeros((frame_count, len(boxes)), dtype="<f8")
+            finite_rings = np.isfinite(rings).any(axis=2)
+            if np.any(finite_rings):
+                offsets[finite_rings] = np.nanmedian(rings[finite_rings], axis=1)
+            products = weights * (cuts - offsets[:, :, None])
+        else:
+            # Products in double precision, as the frames' values: a float64
+            # weight times any narrower pixel is exactly the widened product.
+            products = weights * cuts
+        sums = products.sum(axis=2)
+        output[finite_cuts] = sums[finite_cuts]
+        return output if stacked else output[0]
+
+    frame_rows = range(frames.shape[0]) if frame_indices is None else frame_indices
+    for frame_index, source_index in enumerate(frame_rows):
+        frame = frames[source_index]
+        for index, (box, kernel) in enumerate(zip(boxes, kernels, strict=True)):
+            x, y, width, height = (int(value) for value in box)
+            if kernel.shape != (height, width):
+                raise ValueError("PSF kernel shape differs from box")
+            cut = frame[y : y + height, x : x + width]
+            if cut.shape != kernel.shape or not np.isfinite(cut).all():
+                continue
+            output[frame_index, index] = extract_psf_window(
+                frame, (x, y, width, height), kernel, background=background, padding=int(padding),
+            )
+    return output if stacked else output[0]
+
+def _site_ids(value: object) -> tuple[str, ...]:
+    result = tuple(str(item) for item in value)  # type: ignore[arg-type]
+    if not result or any(not item.strip() for item in result):
+        raise ValueError("site_ids must contain non-empty strings")
+    if len(set(result)) != len(result):
+        raise ValueError("site_ids must be unique")
+    return result
+
+
+def _nullable_floats(value: object) -> list[float | None]:
+    return [float(item) if np.isfinite(item) else None for item in np.asarray(value, dtype=float).reshape(-1)]
+
+
+def _floats_from_json(value: object) -> np.ndarray:
+    return np.asarray([np.nan if item is None else float(item) for item in value], dtype="<f8")  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
+class SiteMap:
+    """Measured site identities and image-pixel positions."""
+
+    site_ids: tuple[str, ...]
+    centers_xy: np.ndarray
+    valid_sites: np.ndarray
+    quality: np.ndarray
+    coordinate_frame: str = "image_pixel_xy"
+    topology: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        site_ids = _site_ids(self.site_ids)
+        centers = _immutable_array(self.centers_xy, "<f8", (len(site_ids), 2))
+        if not np.isfinite(centers).all():
+            raise ValueError("site centers must be finite")
+        valid = _immutable_array(self.valid_sites, "?", (len(site_ids),))
+        quality = _immutable_array(self.quality, "<f8", (len(site_ids),))
+        frame = str(self.coordinate_frame).strip()
+        if not frame:
+            raise ValueError("coordinate_frame must be non-empty")
+        if self.topology is not None and not isinstance(self.topology, Mapping):
+            raise TypeError("topology must be a mapping or None")
+        object.__setattr__(self, "site_ids", site_ids)
+        object.__setattr__(self, "centers_xy", centers)
+        object.__setattr__(self, "valid_sites", valid)
+        object.__setattr__(self, "quality", quality)
+        object.__setattr__(self, "coordinate_frame", frame)
+        object.__setattr__(
+            self,
+            "topology",
+            (
+                None
+                if self.topology is None
+                else _immutable_json_value(self.topology, "topology")
+            ),
+        )
+
+    @property
+    def n_sites(self) -> int:
+        return len(self.site_ids)
+
+    @cached_property
+    def site_axis(self) -> AxisSpec:
+        """THE declaration of site identity, built where the fact lives.
+
+        Every site-axed signal in the tree -- occupancy's counts, the
+        calibration report's fidelity, samples and PSF kernels -- names its
+        sites through this one object, so two of them cannot disagree about
+        which site is which.
+
+        A site array is CELL data: it is one image resampled onto the trap
+        lattice, and nobody scanned over sites. So it belongs to Cell-data.
+
+        The coordinates are the ordinals 1..n.  Every projection in zlc_plot
+        plots a coordinate as a number, so a text coordinate is refused at
+        build time -- which is exactly why every site-axed signal used to
+        raise ``DataViewError`` the moment anyone tried to draw it, and why a
+        parallel "site ordinal" axis had to be invented to dodge the wall.
+
+        The site ids are NOT the labels of this axis.  An id is how a record
+        names a site to another record; a label is what a person reads on a
+        picture.  Handing the id over as the label printed "Site=site_0001"
+        across every facet title -- the same fact as the coordinate beside it,
+        spelled in the form nobody can read and in the width nothing has room
+        for.  The ids stay where identity belongs: in the site map, and in
+        what it saves.
+        """
+
+        return AxisSpec(
+            AxisId("calibration.site"),
+            "Site",
+            SITE,
+            self.n_sites,
+            coordinates=tuple(range(1, self.n_sites + 1)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "site_ids": list(self.site_ids),
+            "centers_xy": self.centers_xy.tolist(),
+            "valid_sites": self.valid_sites.tolist(),
+            "quality": _nullable_floats(self.quality),
+            "coordinate_frame": self.coordinate_frame,
+            "topology": _plain_json_value(self.topology, "topology"),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "SiteMap":
+        values = _exact_fields(
+            payload,
+            "SiteMap",
+            frozenset(
+                {
+                    "site_ids",
+                    "centers_xy",
+                    "valid_sites",
+                    "quality",
+                    "coordinate_frame",
+                    "topology",
+                }
+            ),
+        )
+        result = cls(
+            tuple(values["site_ids"]),
+            np.asarray(values["centers_xy"]),
+            np.asarray(values["valid_sites"]),
+            _floats_from_json(values["quality"]),
+            values["coordinate_frame"],
+            values["topology"],
+        )
+        _require_canonical(result.to_dict(), dict(values), "SiteMap")
+        return result
+
+
+@dataclass(frozen=True)
+class ReadoutModel:
+    """Per-site integration features, response levels, and classification."""
+
+    site_ids: tuple[str, ...]
+    thresholds: np.ndarray
+    dark_mean: np.ndarray
+    bright_mean: np.ndarray
+    usable_sites: np.ndarray
+    quality: np.ndarray
+    dark_sample_count: np.ndarray | None = None
+    dark_sample_variance: np.ndarray | None = None
+    kind: ReadoutModelKind = ReadoutModelKind.BOX
+    integration_half_width: int = 1
+    threshold_method: str = "gaussian"
+    psf_weights: np.ndarray | None = None
+    psf_boxes: np.ndarray | None = None
+    background: str | None = None
+    psf_padding: int | None = None
+
+    def __post_init__(self) -> None:
+        site_ids = _site_ids(self.site_ids)
+        thresholds = np.asarray(self.thresholds, dtype="<f8")
+        if thresholds.ndim == 0:
+            thresholds = np.full(len(site_ids), float(thresholds), dtype="<f8")
+        thresholds = _immutable_array(thresholds.reshape(-1), "<f8", (len(site_ids),))
+        dark_mean = _immutable_array(self.dark_mean, "<f8", (len(site_ids),))
+        bright_mean = _immutable_array(self.bright_mean, "<f8", (len(site_ids),))
+        usable = _immutable_array(self.usable_sites, "?", (len(site_ids),))
+        quality = _immutable_array(self.quality, "<f8", (len(site_ids),))
+        if self.dark_sample_count is None and self.dark_sample_variance is None:
+            dark_count = _immutable_array(
+                np.zeros(len(site_ids), dtype="<i8"), "<i8"
+            )
+            dark_variance = _immutable_array(
+                np.full(len(site_ids), np.nan), "<f8"
+            )
+        else:
+            raw_count = np.asarray(self.dark_sample_count)
+            if (
+                self.dark_sample_count is None
+                or self.dark_sample_variance is None
+                or raw_count.shape != (len(site_ids),)
+                or raw_count.dtype.kind not in "iu"
+                or np.any(raw_count < 0)
+                or np.any(raw_count > np.iinfo(np.int64).max)
+            ):
+                raise ValueError("dark sample statistics have invalid counts")
+            dark_count = _immutable_array(raw_count, "<i8")
+            dark_variance = _immutable_array(
+                self.dark_sample_variance, "<f8", (len(site_ids),)
+            )
+            known = dark_count >= 2
+            if np.any(
+                (known & (~np.isfinite(dark_variance) | (dark_variance < 0.0)))
+                | (~known & np.isfinite(dark_variance))
+            ):
+                raise ValueError("dark sample variance must match its effective count")
+        with np.errstate(invalid="ignore", over="ignore"):
+            response = bright_mean - dark_mean
+        finite_response = (
+            np.isfinite(dark_mean)
+            & np.isfinite(bright_mean)
+            & np.isfinite(response)
+            & (response > 0.0)
+        )
+        if np.any(usable & ~finite_response):
+            raise ValueError(
+                "usable sites require finite bright_mean > dark_mean"
+            )
+        if not isinstance(self.kind, ReadoutModelKind):
+            raise TypeError("kind must be ReadoutModelKind")
+        half_width = int(self.integration_half_width)
+        if half_width < 0:
+            raise ValueError("integration_half_width must be non-negative")
+        threshold_method = str(self.threshold_method).lower()
+        if threshold_method not in {"empirical", "gaussian"}:
+            raise ValueError("threshold_method must be 'empirical' or 'gaussian'")
+        background: str | None
+        padding: int | None
+        weights = boxes = None
+        if self.kind is ReadoutModelKind.BOX:
+            if self.psf_weights is not None or self.psf_boxes is not None:
+                raise ValueError("box model cannot carry PSF features")
+            if self.background is not None or self.psf_padding is not None:
+                raise ValueError("box model cannot carry PSF background parameters")
+            background = None
+            padding = None
+        else:
+            if self.psf_weights is None or self.psf_boxes is None:
+                raise ValueError("PSF calibration requires psf_weights and psf_boxes")
+            weights = _immutable_array(self.psf_weights, "<f8")
+            boxes = _immutable_array(self.psf_boxes, "<i8")
+            if weights.ndim != 3 or weights.shape[0] != len(site_ids) or boxes.shape != (len(site_ids), 4):
+                raise ValueError("PSF arrays have incompatible shapes")
+            background = str(self.background).lower()
+            if background not in {"none", "annulus"}:
+                raise ValueError("PSF background must be 'none' or 'annulus'")
+            if self.psf_padding is None:
+                raise ValueError("PSF model requires psf_padding")
+            padding = int(self.psf_padding)
+            if padding <= 0:
+                raise ValueError("psf_padding must be positive")
+        object.__setattr__(self, "site_ids", site_ids)
+        object.__setattr__(self, "thresholds", thresholds)
+        object.__setattr__(self, "dark_mean", dark_mean)
+        object.__setattr__(self, "bright_mean", bright_mean)
+        object.__setattr__(self, "usable_sites", usable)
+        object.__setattr__(self, "quality", quality)
+        object.__setattr__(self, "dark_sample_count", dark_count)
+        object.__setattr__(self, "dark_sample_variance", dark_variance)
+        object.__setattr__(self, "integration_half_width", half_width)
+        object.__setattr__(self, "threshold_method", threshold_method)
+        object.__setattr__(self, "psf_weights", weights)
+        object.__setattr__(self, "psf_boxes", boxes)
+        object.__setattr__(self, "background", background)
+        object.__setattr__(self, "psf_padding", padding)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind.value,
+            "site_ids": list(self.site_ids),
+            "thresholds": _nullable_floats(self.thresholds),
+            "dark_mean": _nullable_floats(self.dark_mean),
+            "bright_mean": _nullable_floats(self.bright_mean),
+            "usable_sites": self.usable_sites.tolist(),
+            "quality": _nullable_floats(self.quality),
+            "dark_statistics": {
+                "sample_count": self.dark_sample_count.tolist(),
+                "sample_variance": _nullable_floats(self.dark_sample_variance),
+            },
+            "threshold_method": self.threshold_method,
+            "integration": {
+                "half_width": self.integration_half_width,
+                "psf_weights": None if self.psf_weights is None else self.psf_weights.tolist(),
+                "psf_boxes": None if self.psf_boxes is None else self.psf_boxes.tolist(),
+                "background": self.background,
+                "padding": self.psf_padding,
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "ReadoutModel":
+        fields = frozenset(
+            {
+                "kind", "site_ids", "thresholds", "dark_mean", "bright_mean",
+                "usable_sites", "quality", "dark_statistics", "threshold_method",
+                "integration",
+            }
+        )
+        values = _exact_fields(
+            payload,
+            "ReadoutModel",
+            fields,
+        )
+        dark_statistics = _exact_fields(
+            values["dark_statistics"],
+            "ReadoutModel.dark_statistics",
+            frozenset({"sample_count", "sample_variance"}),
+        )
+        integration = _exact_fields(
+            values["integration"],
+            "ReadoutModel.integration",
+            frozenset(
+                {
+                    "half_width",
+                    "psf_weights",
+                    "psf_boxes",
+                    "background",
+                    "padding",
+                }
+            ),
+        )
+        result = cls(
+            tuple(values["site_ids"]),
+            _floats_from_json(values["thresholds"]),
+            _floats_from_json(values["dark_mean"]),
+            _floats_from_json(values["bright_mean"]),
+            np.asarray(values["usable_sites"]),
+            _floats_from_json(values["quality"]),
+            dark_sample_count=np.asarray(dark_statistics["sample_count"]),
+            dark_sample_variance=_floats_from_json(
+                dark_statistics["sample_variance"]
+            ),
+            kind=ReadoutModelKind(values["kind"]),
+            integration_half_width=integration["half_width"],
+            threshold_method=values["threshold_method"],
+            psf_weights=None if integration["psf_weights"] is None else np.asarray(integration["psf_weights"]),
+            psf_boxes=None if integration["psf_boxes"] is None else np.asarray(integration["psf_boxes"]),
+            background=integration["background"],
+            psf_padding=integration["padding"],
+        )
+        _require_canonical(result.to_dict(), dict(values), "ReadoutModel")
+        return result
+
+
+@dataclass(frozen=True)
+class TrapCalibration:
+    """One SiteMap and the aligned readout models trained from one capture."""
+
+    FORMAT: ClassVar[str] = "zlc.calibration.readout"
+    CONTRACT_ID: ClassVar[str] = "calibration.readout"
+
+    site_map: SiteMap
+    models: tuple[ReadoutModel, ...]
+    default_model_kind: ReadoutModelKind
+    frame_contract: FrameContract
+    report: Mapping[str, Any] = field(default_factory=dict)
+    #: The last crop this calibration was read against, and the reading it
+    #: produced.  Rebasing is a pure function of (crop, binning, shape) and
+    #: those are fixed for a run, but it is asked once per camera cycle --
+    #: see ``rebased``.
+    _rebased: tuple[tuple, "TrapCalibration"] | None = field(
+        init=False, repr=False, compare=False, default=None
+    )
+
+    def rebased(
+        self,
+        roi_xywh: tuple[int, int, int, int] | None,
+        binning_yx: tuple[int, int],
+        image_shape: tuple[int, int],
+    ) -> "TrapCalibration":
+        """This calibration, read against a different crop of the same sensor.
+
+        Where a trap is, is a fact about the SENSOR; where it appears in an
+        array is a fact about the crop the camera happened to take.  A run
+        that moves the ROI therefore does not invalidate a calibration -- it
+        just numbers the same places differently, and the translation is
+        arithmetic this class can do because it knows both crops.
+
+        Binning is not translatable: it changes what one pixel means, so the
+        integration boxes and PSF kernels measured under it would be measuring
+        something else.  A site the new crop does not cover is refused by
+        name, because reading a box that runs off the edge would return a
+        number that looks like a measurement.
+        """
+
+        # ASKED EVERY CAMERA CYCLE, for a run whose crop never moves.  The
+        # occupancy processor validates the camera snapshot on each published
+        # cycle, and a run that crops differently from the calibration takes
+        # the rebuilding branch below every time: three ReadoutModels copying
+        # their PSF weights and boxes, a SiteMap deep-freezing its topology,
+        # and the whole saved report frozen again through _immutable_json_value
+        # -- measured at 1.0 ms per cycle for 100 sites and a 200-shot report,
+        # for an answer that cannot change while the run lasts.
+        key = (
+            None if roi_xywh is None else tuple(int(v) for v in roi_xywh),
+            tuple(int(v) for v in binning_yx),
+            tuple(int(v) for v in image_shape),
+        )
+        remembered = self._rebased
+        if remembered is not None and remembered[0] == key:
+            return remembered[1]
+
+        contract = self.frame_contract
+        binning = tuple(int(value) for value in binning_yx)
+        if binning != tuple(contract.binning_yx):
+            raise ValueError(
+                f"binning {binning} differs from the calibration's "
+                f"{tuple(contract.binning_yx)}: one pixel does not mean the "
+                "same thing, so its thresholds do not either"
+            )
+        shape = tuple(int(value) for value in image_shape)
+        if contract.roi_xywh is None or roi_xywh is None:
+            if shape != tuple(contract.image_shape):
+                raise ValueError(
+                    f"frame shape {shape} differs from calibration "
+                    f"{tuple(contract.image_shape)} and neither run records "
+                    "the crop it came from, so the sites cannot be placed"
+                )
+            object.__setattr__(self, "_rebased", (key, self))
+            return self
+        old_x, old_y, _old_w, _old_h = (int(value) for value in contract.roi_xywh)
+        new_x, new_y, new_w, new_h = (int(value) for value in roi_xywh)
+        if (new_h // binning[0], new_w // binning[1]) != shape:
+            raise ValueError(
+                f"frame shape {shape} does not match the crop {roi_xywh} it "
+                "is said to come from"
+            )
+        shift_x = (old_x - new_x) / float(binning[1])
+        shift_y = (old_y - new_y) / float(binning[0])
+        if shift_x == 0.0 and shift_y == 0.0 and shape == tuple(contract.image_shape):
+            object.__setattr__(self, "_rebased", (key, self))
+            return self
+        centers = np.asarray(self.site_map.centers_xy, dtype=float) + (shift_x, shift_y)
+        radius = max(model.integration_half_width for model in self.models)
+        # THE rule again, not a second one: the readout rounds a centre to
+        # its pixel before it reads the box, so whether the crop covers a
+        # site is whether that pixel box is wholly inside it.  A continuous
+        # bound refused a site at x=0.8 with radius 1 whose 3x3 box (x=0..2)
+        # the readout reads in full.
+        outside = [
+            self.site_map.site_ids[index]
+            for index, (x, y) in enumerate(centers)
+            if not box_fits((float(x), float(y)), radius, shape)
+        ]
+        if outside:
+            raise ValueError(
+                f"this crop does not cover {len(outside)} calibrated site(s) "
+                f"({', '.join(outside[:4])}{'...' if len(outside) > 4 else ''}): "
+                "move the ROI back over them or calibrate again"
+            )
+        moved_models = []
+        for model in self.models:
+            boxes = model.psf_boxes
+            if boxes is not None:
+                boxes = np.asarray(boxes, dtype=int) + (
+                    int(round(shift_x)),
+                    int(round(shift_y)),
+                    0,
+                    0,
+                )
+            moved_models.append(replace(model, psf_boxes=boxes))
+        moved = replace(
+            self,
+            site_map=replace(self.site_map, centers_xy=centers),
+            models=tuple(moved_models),
+            frame_contract=replace(
+                contract,
+                image_shape=shape,
+                roi_xywh=(new_x, new_y, new_w, new_h),
+            ),
+        )
+        object.__setattr__(self, "_rebased", (key, moved))
+        return moved
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.site_map, SiteMap):
+            raise TypeError("site_map must be SiteMap")
+        models = tuple(self.models)
+        if not models or any(not isinstance(model, ReadoutModel) for model in models):
+            raise TypeError("models must contain at least one ReadoutModel")
+        if not isinstance(self.frame_contract, FrameContract):
+            raise TypeError("frame_contract must be FrameContract")
+        kinds = tuple(model.kind for model in models)
+        if len(set(kinds)) != len(kinds):
+            raise ValueError("models must contain at most one model of each kind")
+        if kinds != tuple(kind for kind in ReadoutModelKind if kind in kinds):
+            raise ValueError("models must follow ReadoutModelKind order")
+        if not isinstance(self.default_model_kind, ReadoutModelKind):
+            raise TypeError("default_model_kind must be ReadoutModelKind")
+        if self.default_model_kind not in kinds:
+            raise ValueError("default_model_kind must name a stored model")
+        if any(self.site_map.site_ids != model.site_ids for model in models):
+            raise ValueError("SiteMap and every ReadoutModel site_ids must align")
+        if not isinstance(self.report, Mapping):
+            raise TypeError("report must be a mapping")
+        object.__setattr__(self, "models", models)
+        object.__setattr__(
+            self,
+            "report",
+            _immutable_json_value(self.report, "report"),
+        )
+        object.__setattr__(self, "_rebased", None)
+
+    @property
+    def n_sites(self) -> int:
+        return self.site_map.n_sites
+
+    def select_model(
+        self, kind: ReadoutModelKind | None = None
+    ) -> ReadoutModel:
+        selected = self.default_model_kind if kind is None else kind
+        if not isinstance(selected, ReadoutModelKind):
+            raise TypeError("kind must be ReadoutModelKind or None")
+        for model in self.models:
+            if model.kind is selected:
+                return model
+        raise KeyError(selected)
+
+    def signals(
+        self,
+        image: object,
+        *,
+        model_kind: ReadoutModelKind | None = None,
+    ) -> np.ndarray:
+        array = self.frame_contract.assert_image(image)
+        return self.signals_of_frames(array[None], model_kind=model_kind)[0]
+
+    def signals_of_frames(
+        self,
+        frames: object,
+        *,
+        model_kind: ReadoutModelKind | None = None,
+        frame_indices: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Every frame's site signals at once: ``(frames, sites)``.
+
+        The same numbers :meth:`signals` gives frame by frame, from one
+        gather over the stack. Optional frame indices select only the windows
+        that this calibration reads, without copying their complete images.
+        """
+
+        array = np.asarray(frames)
+        if array.ndim != 3 or tuple(array.shape[1:]) != tuple(self.frame_contract.image_shape):
+            raise ValueError(
+                f"frames must be a stack shaped (frames, {self.frame_contract.image_shape[0]}, "
+                f"{self.frame_contract.image_shape[1]}), got {array.shape}"
+            )
+        model = self.select_model(model_kind)
+        if model.kind is ReadoutModelKind.BOX:
+            values = extract_box_signals(
+                array,
+                self.site_map.centers_xy,
+                radius=model.integration_half_width,
+                frame_indices=frame_indices,
+            )
+        else:
+            values = extract_psf_signals(
+                array,
+                self.site_map.centers_xy,
+                kernels=model.psf_weights,
+                boxes_xywh=model.psf_boxes,
+                background=model.background,
+                radius=model.integration_half_width,
+                padding=model.psf_padding,
+                frame_indices=frame_indices,
+            )
+        usable = self.site_map.valid_sites & model.usable_sites
+        return np.where(usable[None, :], values, np.nan)
+
+    def judged_sites(self, model_kind: ReadoutModelKind | None = None) -> np.ndarray:
+        """Sites a verdict can be read for with this model: readable and with a finite threshold."""
+
+        model = self.select_model(model_kind)
+        return self.site_map.valid_sites & model.usable_sites & np.isfinite(model.thresholds)
+
+    def detect(
+        self,
+        image: object,
+        *,
+        model_kind: ReadoutModelKind | None = None,
+    ) -> AtomDetection:
+        model = self.select_model(model_kind)
+        values = self.signals(image, model_kind=model.kind)
+        thresholds = model.thresholds
+        occupied = classify_threshold(values, thresholds)
+        return AtomDetection(values, occupied, tuple(np.flatnonzero(occupied)), thresholds)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format": self.FORMAT,
+            "site_map": self.site_map.to_dict(),
+            "models": [model.to_dict() for model in self.models],
+            "default_model_kind": self.default_model_kind.value,
+            "frame_contract": self.frame_contract.to_dict(),
+            "report": _plain_json_value(self.report, "report"),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "TrapCalibration":
+        fields = frozenset(
+            {
+                "format", "site_map", "models",
+                "default_model_kind", "frame_contract", "report",
+            }
+        )
+        values = dict(_exact_fields(payload, "TrapCalibration", fields))
+        if values["format"] != cls.FORMAT:
+            raise ValueError(
+                f"unsupported Calibration format {values['format']!r}"
+            )
+
+        models = values["models"]
+        if type(models) is not list:
+            raise TypeError("models must be an array")
+        report = values["report"]
+        if type(report) is not dict:
+            raise TypeError("report must be an object")
+        result = cls(
+            SiteMap.from_dict(values["site_map"]),
+            tuple(ReadoutModel.from_dict(model) for model in models),
+            ReadoutModelKind(values["default_model_kind"]),
+            FrameContract.from_dict(values["frame_contract"]),
+            report,
+        )
+        _require_canonical(result.to_dict(), dict(values), "TrapCalibration")
+        return result
+
+    def save(self, path: str | Path) -> Path:
+        return write_readable_json(path, self.to_dict())
+
+    @classmethod
+    def load(cls, path: str | Path) -> "TrapCalibration":
+        return cls.from_dict(
+            strict_json_loads(Path(path).read_text(encoding="utf-8"), "calibration JSON")
+        )
+
+
+@dataclass(frozen=True)
+class CalibrationResult:
+    calibration: TrapCalibration
+    report: Mapping[str, Any]
+
+
+def _gaussian_2d(coords: object, offset: float, amplitude: float, x0: float, y0: float, sigma_x: float, sigma_y: float) -> np.ndarray:
+    x, y = coords
+    return (
+        float(offset)
+        + float(amplitude)
+        * np.exp(-0.5 * (((x - float(x0)) / float(sigma_x)) ** 2 + ((y - float(y0)) / float(sigma_y)) ** 2))
+    ).ravel()
+
+
+def _fit_gaussian_spot_2d(
+    data: np.ndarray,
+    yy: np.ndarray,
+    xx: np.ndarray,
+    *,
+    x0: float,
+    y0: float,
+    offset0: float,
+    amplitude: float,
+    sigma0: float = 0.9,
+) -> tuple[float, float, float, float, bool]:
+    from scipy.optimize import curve_fit
+
+    amplitude = float(amplitude)
+    try:
+        initial = [float(offset0), max(amplitude, 1e-6), float(x0), float(y0), sigma0, sigma0]
+        lower = [float(np.nanmin(data)) - abs(amplitude) - 1, 0.0, float(xx.min()) - 0.5, float(yy.min()) - 0.5, 0.2, 0.2]
+        upper = [float(np.nanmax(data)) + abs(amplitude) + 1, max(amplitude * 5, 1.0), float(xx.max()) + 0.5, float(yy.max()) + 0.5, 4.0, 4.0]
+        fitted, _ = curve_fit(
+            _gaussian_2d,
+            (xx.ravel(), yy.ravel()),
+            data.ravel(),
+            p0=initial,
+            bounds=(lower, upper),
+            maxfev=5000,
+        )
+        _offset, _amplitude, x_fit, y_fit, sigma_x, sigma_y = fitted
+        return float(x_fit), float(y_fit), float(abs(sigma_x)), float(abs(sigma_y)), True
+    except Exception:
+        values = np.clip(data - np.nanpercentile(data, 20), 0, None)
+        total = float(np.sum(values))
+        if total <= 0:
+            return float(x0), float(y0), float(sigma0), float(sigma0), False
+        return (
+            float(np.sum(xx * values) / total),
+            float(np.sum(yy * values) / total),
+            float(sigma0),
+            float(sigma0),
+            False,
+        )
+
+
+def _background_scatter(
+    image: np.ndarray,
+    exclusion: int,
+) -> tuple[float, float, np.ndarray]:
+    """The level and the scatter of an image's BACKGROUND.
+
+    Measured where the sources are not.  A robust spread over the whole
+    picture is not the background's: an array of traps contributes its own
+    peaks to the upper half and, once the picture has been band-passed, the
+    dark rings around them to the lower half, so the spread grows with how
+    many traps there are and how bright they got.  On a real run that read
+    fourteen times the true scatter and buried every dim trap; estimated over
+    the whole picture there is no threshold that is right for both a sparse
+    array and a dense one.
+
+    So the sources are found provisionally -- anything standing clear of the
+    picture's own median -- and set aside with a spot's width around them.
+    What is left is background, and its median and MAD are what a candidate is
+    judged against.  If a picture is nothing but sources the estimate falls
+    back to the whole of it rather than to nothing at all.
+    """
+
+    from scipy import ndimage
+
+    finite = np.asarray(image, dtype=float)
+    median = float(np.median(finite))
+    quartile = float(np.quantile(finite, 0.25))
+    provisional = max(1.4826 * (median - quartile), np.finfo(float).tiny)
+    # Three sigma of the provisional estimate: generous, because the point is
+    # to REMOVE sources rather than to detect them, and an over-generous mask
+    # only costs background pixels there are plenty of.
+    sources = finite >= median + 3.0 * provisional
+    if sources.any():
+        # Dilated by the BAND-PASS's reach, not by the spot's: a source in a
+        # band-passed picture is a peak with a dark ring around it, and the
+        # ring is as fixed as the peak.
+        sources = ndimage.binary_dilation(
+            sources, structure=np.ones((int(exclusion), int(exclusion)), dtype=bool)
+        )
+    background = finite[~sources]
+    if background.size < max(16, finite.size // 20):
+        background = finite.reshape(-1)
+    level = float(np.median(background))
+    # The LOWER half of what is left: masking the sources truncates the upper
+    # tail, and a two-sided spread of a truncated sample understates the
+    # scatter.  The lower half is untouched by sources and by masking alike.
+    scatter = 1.4826 * (level - float(np.quantile(background, 0.25)))
+    return (
+        level,
+        max(
+            scatter,
+            float(np.finfo(float).eps * max(1.0, float(np.max(np.abs(finite))))),
+        ),
+        sources,
+    )
+
+
+def _refine_center_subpixel(
+    image: np.ndarray, peaks_xy: np.ndarray, index: int, spot_sigma: float,
+) -> tuple[tuple[float, float], tuple[float, float] | None]:
+    """Fit a centre and the local PSF widths on raw photon data.
+
+    The band-pass locates candidates, not Gaussian centres: its neighbouring
+    positive lobes and negative rings are not the camera PSF. Neighbours here
+    are measured candidates, never an inferred lattice. Only this site's
+    centre is returned; local nuisance fits do not replace other identities.
+    Widths are measurements only when the fit succeeds away from their bounds.
+    """
+    from scipy.optimize import least_squares
+    from scipy.special import erf
+
+    height, width = image.shape
+    x_int, y_int = map(int, peaks_xy[index])
+    half = max(4, int(np.ceil(4.0 * spot_sigma)))
+    x0, x1 = max(0, x_int - half), min(width, x_int + half + 1)
+    y0, y1 = max(0, y_int - half), min(height, y_int + half + 1)
+    cut = np.asarray(image[y0:y1, x0:x1], dtype=float)
+    local = np.flatnonzero(np.all(abs(peaks_xy - peaks_xy[index]) <= half + 2 * spot_sigma, axis=1))
+    anchors = peaks_xy[local].astype(float)
+    count = len(local)
+    if cut.size <= 3 * count + 3 or not np.isfinite(cut).all():
+        return _core_centroid(image, x_int, y_int), None
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    background = float(np.median(cut))
+    sigma = float(np.clip(spot_sigma, .2, 4.))
+    amplitudes = np.maximum(image[anchors[:, 1].astype(int), anchors[:, 0].astype(int)] - background, 1e-6)
+    initial = np.r_[background, sigma, sigma, amplitudes * (2 * np.pi * sigma ** 2), anchors[:, 0], anchors[:, 1]]
+    lower = np.r_[-np.inf, .2, .2, np.zeros(count), anchors[:, 0] - 1, anchors[:, 1] - 1]
+    upper = np.r_[np.inf, 4., 4., np.full(count, np.inf), anchors[:, 0] + 1, anchors[:, 1] + 1]
+
+    def model(parameters):
+        offset, sx, sy = parameters[:3]
+        amplitude, cx, cy = np.split(parameters[3:], 3)
+        lx = (xx[None] - .5 - cx[:, None, None]) / sx
+        ux = lx + 1 / sx
+        ly = (yy[None] - .5 - cy[:, None, None]) / sy
+        uy = ly + 1 / sy
+        qx = .5 * (erf(ux / np.sqrt(2)) - erf(lx / np.sqrt(2)))
+        qy = .5 * (erf(uy / np.sqrt(2)) - erf(ly / np.sqrt(2)))
+        exl, exu = np.exp(-.5 * lx * lx) / np.sqrt(2 * np.pi), np.exp(-.5 * ux * ux) / np.sqrt(2 * np.pi)
+        eyl, eyu = np.exp(-.5 * ly * ly) / np.sqrt(2 * np.pi), np.exp(-.5 * uy * uy) / np.sqrt(2 * np.pi)
+        weighted = amplitude[:, None, None]
+        shape = qx * qy
+        jacobian = np.column_stack((np.ones(cut.size),
+            np.sum(weighted * qy * (lx * exl - ux * exu) / sx, axis=0).ravel(),
+            np.sum(weighted * qx * (ly * eyl - uy * eyu) / sy, axis=0).ravel(),
+            shape.reshape(count, -1).T,
+            (weighted * qy * (exl - exu) / sx).reshape(count, -1).T,
+            (weighted * qx * (eyl - eyu) / sy).reshape(count, -1).T))
+        return (offset + np.sum(weighted * shape, axis=0) - cut).ravel(), jacobian
+
+    measured_sigma = None
+    try:
+        fit = least_squares(lambda p: model(p)[0], initial, jac=lambda p: model(p)[1],
+                            bounds=(lower, upper), x_scale="jac", max_nfev=100)
+        if (fit.success and np.all(np.isfinite(fit.x[1:3]))
+                and not np.any(fit.active_mask[1:3])):
+            # A duplicate's centre can hit its anchor bound while the shared
+            # local PSF is still measured well; do not discard that width.
+            measured_sigma = (float(fit.x[1]), float(fit.x[2]))
+        own = int(np.flatnonzero(local == index)[0])
+        columns = np.asarray((3 + count + own, 3 + 2 * count + own))
+        centre = fit.x[columns]
+        if (fit.success and np.all(np.isfinite(centre))
+                and not fit.active_mask[3 + own] and not np.any(fit.active_mask[columns])):
+            return (float(centre[0]), float(centre[1])), measured_sigma
+    except (ValueError, RuntimeError, np.linalg.LinAlgError):
+        pass
+    return _core_centroid(image, x_int, y_int), measured_sigma
+
+
+def _core_centroid(image: np.ndarray, x_int: int, y_int: int) -> tuple[float, float]:
+    """The spot's centre of light over its own core, used when a fit will not.
+
+    A rejected fit does not make the integer peak the best answer available --
+    it only makes the FIT unavailable.  The first moment of the three pixels
+    round the peak, with the patch's own floor taken off, is unbiased for a
+    symmetric spot and costs nothing; measured against it, the integer peak it
+    replaces was up to half a pixel out on a tenth of a real array's sites.
+
+    Bounded to the peak's own pixel for the same reason the fit is: the centre
+    of THIS spot is inside it, and anything further is another spot's light.
+    """
+
+    height, width = image.shape
+    y0, y1 = max(0, y_int - 1), min(height, y_int + 2)
+    x0, x1 = max(0, x_int - 1), min(width, x_int + 2)
+    patch = np.asarray(image[y0:y1, x0:x1], dtype=float)
+    if patch.size < 4 or not np.isfinite(patch).all():
+        return float(x_int), float(y_int)
+    weights = patch - float(np.min(patch))
+    total = float(np.sum(weights))
+    if total <= 0.0:
+        return float(x_int), float(y_int)
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    x_centre = float(np.sum(weights * xx) / total)
+    y_centre = float(np.sum(weights * yy) / total)
+    if abs(x_centre - x_int) > 1.0 or abs(y_centre - y_int) > 1.0:
+        return float(x_int), float(y_int)
+    return x_centre, y_centre
+
+
+def _stable_site_order(centers_xy: np.ndarray, row_tolerance: float) -> np.ndarray:
+    """Order measured sites top-to-bottom, then left-to-right within a row."""
+
+    rows: list[list[int]] = []
+    for index in np.argsort(centers_xy[:, 1], kind="stable"):
+        if not rows or centers_xy[index, 1] - float(np.mean(centers_xy[rows[-1], 1])) > row_tolerance:
+            rows.append([int(index)])
+        else:
+            rows[-1].append(int(index))
+    return np.asarray(
+        [index for row in rows for index in sorted(row, key=lambda item: centers_xy[item, 0])],
+        dtype=int,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RunEvidence:
+    """Everything one pass over the frames can say, before it means anything."""
+
+    #: Only spatial peaks observed in an individual transition count here.
+    change_hits: np.ndarray
+    max_change_z: np.ndarray
+    total_response: np.ndarray
+    total_image: np.ndarray
+    transitions: int
+    background_sigma: float
+
+
+def _accumulate_run(
+    stack: np.ndarray,
+    *,
+    spot_sigma: float,
+    detection_sigma: float,
+    electrons_per_count: float | None = None,
+) -> _RunEvidence:
+    """Read the run once, keeping every quantity a later step could want.
+
+    One pass, because it is one pass: a run of two thousand large frames is
+    not walked again for the sake of tidiness.  What it keeps is where two
+    neighbouring frames changed, how large those changes were, and the light
+    on every frame for the independent average-image path.
+    """
+
+    from scipy import ndimage
+
+
+    background_sigma = max(4.0 * spot_sigma, spot_sigma + 2.0)
+    change_hits = np.zeros(stack.shape[1:], dtype=np.int64)
+    max_change_z = np.zeros(stack.shape[1:], dtype=float)
+    # Same optical FWHM ring as before, now evaluated at each actual event.
+    change_window = max(3, 2 * int(np.ceil(1.1775 * spot_sigma)) + 1)
+    outer, inner = change_window ** 2, (change_window - 2) ** 2
+    #: Every frame added up: a highly loaded site may hardly change between
+    #: neighbours, but it remains bright in the complete average.
+    total_response = np.zeros(stack.shape[1:], dtype=float)
+    total_image = np.zeros(stack.shape[1:], dtype=float)
+    transitions = 0
+    previous_smoothed: np.ndarray | None = None
+    previous_source_variance: np.ndarray | None = None
+    if electrons_per_count is not None:
+        # Exactly the finite Gaussian used by gaussian_filter, squared rather
+        # than renormalised: Var(sum(w * photons)) = sum(w**2 * photons).
+        radius = int(4.0 * spot_sigma + 0.5)
+        offsets = np.arange(-radius, radius + 1, dtype=float)
+        kernel = np.exp(-0.5 * (offsets / spot_sigma) ** 2)
+        kernel /= np.sum(kernel)
+        variance_kernel = kernel ** 2
+    # Frames are filtered many at a time, in blocks sized by memory rather than
+    # by frame count: one SciPy call over a block costs a fraction of one call
+    # per frame, and filtering makes two more copies of whatever it is given,
+    # which for a run of 2048-square frames must not be the whole run.
+    per_frame_bytes = max(1, int(np.prod(stack.shape[1:]))) * 8
+    block = max(1, min(int(stack.shape[0]), int(64_000_000 // per_frame_bytes)))
+    for start in range(0, int(stack.shape[0]), block):
+        frames = np.asarray(stack[start : start + block], dtype=float)
+        total_image += np.sum(frames, axis=0)
+        smoothed = ndimage.gaussian_filter(
+            frames, sigma=(0.0, spot_sigma, spot_sigma)
+        )
+        source_variance = None
+        if electrons_per_count is not None:
+            # Background/read noise is already measured below. Add only the
+            # source's excess photon noise, in the INPUT's units; a raw ADU is
+            # not one electron. Do not infer gain from signal dtype or offset.
+            excess = np.maximum(
+                frames - np.median(frames, axis=(1, 2), keepdims=True), 0.0
+            ) / electrons_per_count
+            variance = ndimage.correlate1d(excess, variance_kernel, axis=1)
+            del excess
+            variance = ndimage.correlate1d(variance, variance_kernel, axis=2)
+            source_variance = variance[1:] + variance[:-1]
+            if previous_source_variance is not None:
+                source_variance = np.concatenate((
+                    variance[:1] + previous_source_variance[np.newaxis, ...],
+                    source_variance,
+                ), axis=0)
+            previous_source_variance = np.array(variance[-1], copy=True)
+            del variance
+        response = smoothed - ndimage.gaussian_filter(
+            frames, sigma=(0.0, background_sigma, background_sigma)
+        )
+        baseline = np.median(response, axis=(1, 2), keepdims=True)
+        response = response - baseline
+        total_response += np.sum(response, axis=0)
+        del response
+
+        # Temporal subtraction removes fixed background. Use the smoothed
+        # photon images here: abs(band-pass difference) would turn its negative
+        # annular skirts into positive, changing false spots. A transition's
+        # median removes common background drift without creating those rings.
+        # Keep the previous block's last image across filtering blocks.
+        changes = np.diff(smoothed, axis=0)
+        if previous_smoothed is not None:
+            changes = np.concatenate(
+                (smoothed[:1] - previous_smoothed[np.newaxis, ...], changes),
+                axis=0,
+            )
+        previous_smoothed = np.array(smoothed[-1], copy=True)
+        del smoothed
+        if not changes.shape[0]:
+            continue
+        change_baseline = np.median(changes, axis=(1, 2), keepdims=True)
+        magnitude = np.abs(changes - change_baseline)
+        del changes
+        noise = 1.4826 * np.median(magnitude, axis=(1, 2), keepdims=True)
+        noise = np.maximum(
+            noise,
+            np.finfo(float).eps
+            * np.maximum(1.0, np.max(magnitude, axis=(1, 2), keepdims=True)),
+        )
+        if source_variance is not None:
+            noise = np.sqrt(noise ** 2 + source_variance)
+            del source_variance
+        # Preserve identity BEFORE combining transitions. A rare site's peak
+        # can disappear in a sum (or maximum) of images from different times.
+        # The ring belongs to the same transition as its local peak, never a
+        # later average that lets more frequent neighbours erase the event.
+        ring = (
+            outer * ndimage.uniform_filter(magnitude, size=(1, change_window, change_window), mode="nearest")
+            - inner * ndimage.uniform_filter(magnitude, size=(1, change_window - 2, change_window - 2), mode="nearest")
+        ) / float(outer - inner)
+        # Score the localized change, not a bright neighbour's broad skirt.
+        # Keep the pre-contrast local scatter as the conservative scale;
+        # this is not an exact per-pixel photon-noise probability.
+        standardized = (magnitude - ring) / noise
+        del ring
+        peaks = magnitude == ndimage.maximum_filter(magnitude, size=(1, 3, 3), mode="nearest")
+        changed = peaks & (standardized >= detection_sigma)
+        change_hits += np.count_nonzero(changed, axis=0)
+        max_change_z = np.maximum(
+            max_change_z,
+            np.max(np.where(peaks, standardized, 0.0), axis=0),
+        )
+        transitions += int(magnitude.shape[0])
+    return _RunEvidence(
+        change_hits,
+        max_change_z,
+        total_response,
+        total_image,
+        transitions,
+        background_sigma,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _Admission:
+    """How high a place must stand, in each of the two statistics."""
+
+    average: np.ndarray
+    required: int
+    single_change_cut: float
+    average_z: np.ndarray
+    average_cut: float
+
+
+def _admission_thresholds(
+    stack: np.ndarray,
+    evidence: _RunEvidence,
+    *,
+    detection_sigma: float,
+) -> _Admission:
+    """The bars, measured on this run's own background rather than assumed.
+
+    A band-passed picture breaks assumed distributions in the direction that
+    invents traps, so what noise reaches here is counted where the sources
+    are not.
+    """
+
+    from scipy.special import erfc, erfcinv
+    from scipy.stats import binom
+
+    hits = evidence.change_hits
+    total_response = evidence.total_response
+    background_sigma = evidence.background_sigma
+
+    frames = int(stack.shape[0])
+    transitions = int(evidence.transitions)
+    pixels = int(hits.size)
+
+    # The second admission: the run's average, judged the same way.  Its
+    # noise is read the same robust way, and the significance a place must
+    # reach is set by the same rule the change count uses -- an image of
+    # pure background must not be expected to produce even half a site
+    # anywhere in it.  Averaging is what makes this sensitive to a trap whose
+    # individual frames are unremarkable: N frames of a persistent signal add
+    # up as N while their noise adds up as sqrt(N).
+    average = total_response / float(frames)
+    # The average's noise, measured on the average itself.  Photon noise over
+    # the root of the frame count is what a perfect sensor would leave; fixed
+    # pattern, warm pixels and background structure survive averaging
+    # unchanged, and they are what a real picture's scatter is made of.
+    # A source's footprint in a band-passed picture is the background kernel's
+    # reach, peak and dark ring together.  Every background estimate in this
+    # function excludes that much, or it is measuring the sources.
+    source_footprint = 2 * int(np.ceil(background_sigma)) + 1
+    average_baseline, average_noise, sources = _background_scatter(
+        average, source_footprint
+    )
+    background = ~sources
+
+    # How often noise alone clears the neighbouring-frame change cut, counted
+    # where the sources are not.  A band-passed difference's pixels are
+    # correlated, so its robust scatter and a Gaussian tail alone can both
+    # understate the observed rate; the larger measured/theoretical value is
+    # the floor, so a quiet stretch cannot license an easier count bar.
+    background_pixels = int(np.count_nonzero(background))
+    observed_rate = (
+        float(np.sum(hits[background]))
+        / float(transitions * background_pixels)
+        if transitions and background_pixels
+        else 0.0
+    )
+    false_rate = max(
+        observed_rate,
+        # Frame differences are judged by absolute magnitude, so the Gaussian
+        # floor is the corresponding two-sided tail.
+        float(erfc(detection_sigma / sqrt(2.0))),
+        1e-12,
+    )
+    expected_false_sites = 0.5
+    required = 1
+    for count in range(1, transitions + 1):
+        if (
+            pixels * float(binom.sf(count - 1, transitions, false_rate))
+            < expected_false_sites
+        ):
+            required = count
+            break
+    else:
+        required = max(1, transitions)
+    single_change_cut = (
+        float("inf")
+        if not transitions
+        else max(
+            detection_sigma,
+            float(
+                sqrt(2.0)
+                * erfcinv(expected_false_sites / float(pixels * transitions))
+            ),
+        )
+    )
+
+    average_z = (average - average_baseline) / average_noise
+    # How high a place must stand in the average: never below the operator's
+    # authored detection sigma, and raised further when this image's number of
+    # pixels requires a stricter family-wise Gaussian bar.  This prevents the
+    # average path from silently admitting ~4-sigma weak ghosts when the
+    # operator authored detection_sigma=6.  Candidate admission still requires
+    # a spatial local maximum.
+    average_cut = max(
+        detection_sigma,
+        float(sqrt(2.0) * erfcinv(1.0 / pixels)),
+    )
+    return _Admission(
+        average,
+        required,
+        single_change_cut,
+        average_z,
+        average_cut,
+    )
+
+
+def _candidate_peaks(
+    evidence: _RunEvidence,
+    admission: _Admission,
+    *,
+    spot_sigma: float,
+    measurement_radius: int,
+) -> tuple[list, np.ndarray]:
+    """Every place admitted by frame-change or average-image evidence.
+
+    Returns the candidates strongest first, and the temporal-change
+    significance the published quality is read from.
+    """
+
+    from scipy import ndimage
+
+    hits = evidence.change_hits
+    max_change_z = evidence.max_change_z
+    average = admission.average
+    average_z = admission.average_z
+    average_cut = admission.average_cut
+    required = admission.required
+    single_change_cut = admission.single_change_cut
+
+    # A site has to be a place the picture actually shows, and a place that
+    # can be MEASURED: within a spot's reach of the border there is no
+    # background to compare against -- the filters invent one by extending the
+    # edge, which biases every frame the same way -- and within the readout's
+    # own box of the border there is no room to read it.  ``measurement_radius``
+    # is that box, told by whoever will read it; the two reaches are the same
+    # kind of fact and take the larger.
+    margin = max(2, int(np.ceil(2.0 * spot_sigma)), int(measurement_radius))
+    inside = np.zeros(hits.shape, dtype=bool)
+    if 2 * margin < min(hits.shape):
+        inside[margin:-margin, margin:-margin] = True
+    # A place gets in either way.  Repeated moderate changes use the measured
+    # binomial bar; a site visible in only one frame uses the family-wise
+    # single-change bar over every pixel and transition.  The average path has
+    # its authored/global sigma bar for steady or highly loaded sites.
+    # Temporal identity was established at the actual transition. Do not ask
+    # any run-summary image to contain that peak again or borrow nearby hits.
+    persistent = average == ndimage.maximum_filter(average, size=3, mode="nearest")
+    changed = (hits >= required) | (max_change_z >= single_change_cut)
+    averaged = persistent & (average_z >= average_cut)
+    candidates = np.argwhere((changed | averaged) & inside)
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            -max(
+                float(max_change_z[tuple(item)]),
+                float(average_z[tuple(item)]),
+            ),
+            int(item[0]),
+            int(item[1]),
+        ),
+    )
+    return ranked, max_change_z
+
+
+def _place_candidates(
+    ranked: list,
+    *,
+    image: np.ndarray,
+    frame_shape: tuple,
+    spot_sigma: float,
+    measurement_radius: int,
+) -> tuple[list, list]:
+    """Where each admitted place is, and one answer per trap.
+
+    First merge one-pixel raster offsets. Then compare refined centres in
+    the measured PSF core of each stronger retained representative. A core
+    is the one-sigma ellipse, not a circular readout box or the full FWHM.
+    Refit after duplicates leave the neighbour roster, before review/readout.
+    """
+
+
+    # A pixel within one of a kept peak is that peak: the pixels the kept
+    # peaks cover, looked up rather than compared with every peak.
+    peaks, covered = [], set()
+    for row, column in ranked:
+        peak = (int(row), int(column))
+        if peak not in covered:
+            peaks.append(peak)
+            covered.update((peak[0] + dy, peak[1] + dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1))
+    while peaks:
+        peaks_xy = np.asarray(peaks).reshape(-1, 2)[:, ::-1]
+        fitted = [_refine_center_subpixel(image, peaks_xy, index, spot_sigma)
+                  for index in range(len(peaks))]
+        kept = []
+        # The kept representatives whose core was measured, as rows.
+        cores, core_widths, measured = np.empty((len(fitted), 2)), np.empty((len(fitted), 2)), 0
+        for index, (centre, widths) in enumerate(fitted):
+            # Compare with representatives, never with an already suppressed
+            # neighbour: proximity must not chain across distinct spots.
+            if measured and np.any(
+                np.sum(((np.asarray(centre) - cores[:measured]) / core_widths[:measured]) ** 2, axis=1) < 1.0
+            ):
+                continue
+            kept.append(index)
+            if widths is not None:
+                cores[measured], core_widths[measured] = centre, widths
+                measured += 1
+        if len(kept) == len(peaks):
+            break
+        peaks = [peaks[index] for index in kept]
+    selected: list[tuple[int, int]] = []
+    centers_list: list[np.ndarray] = []
+    dropped_at_border = 0
+    for index, (row, column) in enumerate(peaks):
+        centre, _widths = fitted[index]
+        # Checked on the PUBLISHED centre: refinement moves it by up to a
+        # pixel, so the margin its integer peak passed is not the margin it
+        # keeps.  What cannot be measured is not a site.
+        if measurement_radius and not box_fits(
+            (float(centre[0]), float(centre[1])), int(measurement_radius), frame_shape
+        ):
+            dropped_at_border += 1
+            continue
+        peak = (int(row), int(column))
+        selected.append(peak)
+        centers_list.append(centre)
+    if not selected:
+        raise ValueError(
+            "calibration frames contain no detectable sites"
+            + (
+                f" ({dropped_at_border} candidate(s) were too close to the "
+                "border to be measured)"
+                if dropped_at_border
+                else ""
+            )
+        )
+    return selected, centers_list
+
+
+def detect_sites(
+    frames: object,
+    *,
+    spot_sigma: float = 1.0,
+    detection_sigma: float = 6.0,
+    measurement_radius: int = 0,
+    electrons_per_count: float | None = None,
+) -> SiteMap:
+    """Find the traps in a run of frames, and say where each one is.
+
+    A trap announces itself in two independent ways, and a lattice contains
+    both kinds at once, so the detector admits either:
+
+    * BETWEEN NEIGHBOURING FRAMES.  Loading or unloading makes one spatially
+      shaped difference peak.  A site that loaded on only one frame therefore
+      remains a possible site even when its complete average is weak.  The
+      Its noise includes the measured background and the source's photon
+      variance when the input's electron conversion is known.
+      A difference has no direction -- that is the point of it: a weak trap
+      in its bright neighbours' band-pass dark ring is never bright on any
+      one frame, and it is still a trap.
+    * IN THE AVERAGE.  A site whose changes remain below threshold, or a highly
+      loaded site that hardly changes between neighbours, can still be plain
+      in the complete average.
+
+    Neither alone is enough: an average-only cut loses rare loading events;
+    a difference-only cut loses sites whose state barely changes.  Both paths
+    use thresholds measured from this run rather than an arbitrary frame
+    partition or an assumed fixed noise level.
+
+    ``spot_sigma`` is the optics: how wide one trap's image is.
+    ``detection_sigma`` is how sure one neighbouring-frame change must be.
+    ``measurement_radius`` is the box the readout will later ask for round
+    each site, which a published site must be able to carry.
+    ``electrons_per_count`` describes these input numbers: 1 for electrons,
+    the camera's conversion for raw counts, None for an unknown conversion.
+    Unknown units do not license assuming one count is one photon.
+    """
+
+    # The frames' own dtype: the run is filtered in blocks, each widened to
+    # float as it is read, so the whole run is never held as float64.
+    stack = np.asarray(frames.values if hasattr(frames, "values") else frames)
+    if stack.ndim == 2:
+        stack = stack[np.newaxis, ...]
+    if (
+        stack.ndim != 3
+        or 0 in stack.shape
+        or (stack.dtype.kind in "fc" and not np.isfinite(stack).all())
+    ):
+        raise ValueError("frames must be a non-empty finite stack of 2D images")
+    spot_sigma = float(spot_sigma)
+    detection_sigma = float(detection_sigma)
+    if spot_sigma <= 0 or not np.isfinite(spot_sigma):
+        raise ValueError("spot_sigma must be positive and finite")
+    if detection_sigma <= 0 or not np.isfinite(detection_sigma):
+        raise ValueError("detection_sigma must be positive and finite")
+    if electrons_per_count is not None:
+        electrons_per_count = float(electrons_per_count)
+        if electrons_per_count <= 0 or not np.isfinite(electrons_per_count):
+            raise ValueError("electrons_per_count must be positive and finite")
+    # How near in y two sites must be to be READ as one row of the array.
+    # Ordering only: it decides the order site ids are handed out in, never
+    # which places are sites.
+    row_tolerance = max(2.0, float(spot_sigma))
+
+    evidence = _accumulate_run(
+        stack, spot_sigma=spot_sigma, detection_sigma=detection_sigma,
+        electrons_per_count=electrons_per_count,
+    )
+    admission = _admission_thresholds(
+        stack, evidence, detection_sigma=detection_sigma
+    )
+    ranked, change_z = _candidate_peaks(
+        evidence,
+        admission,
+        spot_sigma=spot_sigma,
+        measurement_radius=int(measurement_radius),
+    )
+    selected, centers_list = _place_candidates(
+        ranked,
+        image=evidence.total_image / float(stack.shape[0]),
+        frame_shape=evidence.change_hits.shape,
+        spot_sigma=spot_sigma,
+        measurement_radius=int(measurement_radius),
+    )
+    average_z = admission.average_z
+
+    centers = np.asarray(centers_list, dtype="<f8")
+    # How far a site stands out of the noise, in its own sigmas -- by whichever
+    # evidence admitted it.  Reporting only temporal change would call a trap
+    # that is certain in the average a marginal one.
+    quality = np.asarray(
+        [
+            max(float(change_z[row, column]), float(average_z[row, column]))
+            for row, column in selected
+        ],
+        dtype="<f8",
+    )
+    order = _stable_site_order(centers, row_tolerance)
+    centers = centers[order]
+    quality = quality[order]
+    site_ids = tuple(f"site_{index:04d}" for index in range(len(centers)))
+    return SiteMap(
+        site_ids,
+        centers,
+        np.ones(len(centers), dtype=bool),
+        quality,
+        "image_pixel_xy",
+        None,
+    )
+
+
+@dataclass(frozen=True)
+class _MeasuredSpots:
+    """What an atom does to the picture, per site, and what follows from it."""
+
+    #: The weighting each site's readout applies, over its own box.
+    weights: np.ndarray
+    #: Site-specific demixing weights built from one shared measured shape.
+    uniform: np.ndarray
+    uniform_shape: np.ndarray
+    boxes: np.ndarray
+    #: The difference an atom makes, over the box AND the ring around it.
+    templates: np.ndarray
+    #: Of all the light an atom adds, the share that lands inside the box.
+    box_light_fraction: np.ndarray
+    fit_centers: np.ndarray
+    fit_sigmas: np.ndarray
+    fit_ok: np.ndarray
+    template_valid: np.ndarray
+    template_rank: np.ndarray
+    template_condition: np.ndarray
+    readout_condition: np.ndarray
+    noise_gain: np.ndarray
+
+
+def _measure_readout_weights(
+    references: np.ndarray,
+    centers_xy: np.ndarray,
+    labels_occupied: np.ndarray,
+    labels_valid: np.ndarray,
+    *,
+    radius: int,
+    padding: int,
+) -> _MeasuredSpots:
+    """Learn each atom's pixel response jointly, then separate overlapping PSFs.
+
+    Conditional bright-minus-dark averages contain neighbors whenever loading
+    is correlated. Regress each template's actual pixels against occupancies
+    whose spatial supports intersect that window and a constant. The readout is the
+    minimum-norm signed filter with unit own response and zero response to
+    measured overlapping neighbors. It still reads the same pixels at runtime.
+    """
+
+    radius = int(radius)
+    padding = int(padding)
+    if radius < 0 or padding <= 0:
+        raise ValueError("PSF radius must be non-negative and padding must be positive")
+    centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
+    frames = references.reshape(-1, *references.shape[2:])
+    picked = np.asarray(labels_valid, dtype=bool).reshape(-1, len(centers))
+    occupied = np.asarray(labels_occupied, dtype=bool).reshape(-1, len(centers))
+
+    outer = radius + padding
+    size = 2 * radius + 1
+    core = slice(padding, padding + size)
+    boxes = np.asarray([_box_bounds(tuple(center), radius, frames.shape[-2:]) for center in centers], dtype=np.int64)
+    outer_boxes = np.asarray([_box_bounds(tuple(center), outer, frames.shape[-2:]) for center in centers], dtype=np.int64)
+    complete = np.all(outer_boxes[:, 2:] == 2 * outer + 1, axis=1)
+    eligible = complete & ((picked & occupied).sum(axis=0) >= 2) & ((picked & ~occupied).sum(axis=0) >= 2)
+    template_stack = np.zeros((len(centers), 2 * outer + 1, 2 * outer + 1))
+    usable = np.zeros(len(centers), bool)
+    rank = np.zeros(len(centers), dtype=np.int64)
+    condition = np.full(len(centers), np.inf)
+    regressions = [None] * len(centers)
+    # Correlated loading is only ambiguous where the measured spatial
+    # supports overlap. Disjoint supports have independent pixel evidence
+    # and must not discard each other's valid training frames.
+    lower = outer_boxes[:, :2]
+    upper = lower + outer_boxes[:, 2:]
+    overlap = (np.all(lower[:, None] < upper[None], axis=-1)
+               & np.all(lower[None] < upper[:, None], axis=-1))
+    for site in np.flatnonzero(eligible):
+        selected = np.flatnonzero(eligible & overlap[site])
+        own_column = int(np.flatnonzero(selected == site)[0])
+        x, y, width, height = outer_boxes[site]
+        cuts = np.asarray(frames[:, y:y+height, x:x+width], dtype=float).reshape(len(frames), -1)
+        valid_rows = picked[:, selected].all(axis=1) & np.isfinite(cuts).all(axis=1)
+        design = occupied[valid_rows][:, selected].astype(float)
+        if len(design):
+            # Centering removes the constant pixel pedestal before asking
+            # which changing occupancy combinations the run actually observed.
+            design -= design.mean(axis=0)
+            observed = cuts[valid_rows]
+            observed -= observed.mean(axis=0)
+            u, singular, vt = np.linalg.svd(design, full_matrices=False)
+            tolerance = np.finfo(float).eps * max(design.shape)
+            changing_rank = int(np.sum(singular > tolerance * singular[0]))
+            rank[site] = changing_rank + 1  # Include this window's pedestal.
+            condition[site] = float(singular[0] / singular[-1]) if changing_rank == design.shape[1] else float("inf")
+            basis = vt[:changing_rank]
+            # A rank-deficient design may still identify some unrelated sites.
+            # Never turn an arbitrary pseudoinverse split into an observed PSF.
+            identifiable = np.linalg.norm(np.eye(design.shape[1]) - basis.T @ basis, axis=0) <= 8 * tolerance
+            coefficients = (basis.T / singular[:changing_rank]) @ (u[:, :changing_rank].T @ observed)
+            if identifiable[own_column]:
+                responses = coefficients.reshape(len(selected), height, width)
+                template_stack[site] = responses[own_column]
+                usable[site] = True
+                # Neighbors are nuisance rows for THIS window, not independently
+                # calibrated PSFs. Only retain the core that this readout uses.
+                regressions[site] = (selected, np.ascontiguousarray(responses[:, core, core]), identifiable)
+    totals = template_stack[:, core, core].sum(axis=(1, 2))
+    usable &= np.isfinite(totals) & (totals > 0)
+    profiles = np.zeros_like(template_stack)
+    profiles[usable] = template_stack[usable] / totals[usable, None, None]
+    uniform_shape = profiles[usable].mean(axis=0) if np.any(usable) else np.zeros(template_stack.shape[1:])
+    readout_weights = np.zeros((2, len(centers), size, size))
+    readout_condition = np.full((2, len(centers)), np.inf)
+    noise_gain = np.full((2, len(centers)), np.nan)
+    for mode in (0, 1):
+        for site in np.flatnonzero(usable):
+            neighbors, responses, identifiable = regressions[site]
+            matrix = responses.reshape(len(neighbors), -1).T.copy()
+            x = boxes[site, 0] + np.arange(size)[None, :]
+            y = boxes[site, 1] + np.arange(size)[:, None]
+            # An unidentifiable pair still has an observable SUM (or contrast).
+            # Preserve that actual response in both models. Only identifiable
+            # columns can be replaced by the uniform model's shared shape.
+            if mode:
+                for column in np.flatnonzero(identifiable):
+                    neighbor = neighbors[column]
+                    local_x = np.broadcast_to(x - outer_boxes[neighbor, 0], (size, size))
+                    local_y = np.broadcast_to(y - outer_boxes[neighbor, 1], (size, size))
+                    inside = ((local_x >= 0) & (local_x < 2 * outer + 1) &
+                              (local_y >= 0) & (local_y < 2 * outer + 1))
+                    matrix[:, column] = 0
+                    matrix[inside.ravel(), column] = uniform_shape[local_y[inside], local_x[inside]]
+            column_norm = np.linalg.norm(matrix, axis=0)
+            nonzero = column_norm > 0
+            matrix[:, nonzero] /= column_norm[nonzero]
+            u, singular, vt = np.linalg.svd(matrix, full_matrices=False)
+            tolerance = np.finfo(float).eps * max(matrix.shape)
+            retained = singular > tolerance * singular[0]
+            target = np.zeros(len(neighbors))
+            own_column = int(np.flatnonzero(neighbors == site)[0])
+            target[own_column] = (1.0 if mode else totals[site]) / column_norm[own_column]
+            basis = vt[retained]
+            if np.linalg.norm(target - basis.T @ (basis @ target)) > 8 * tolerance:
+                continue
+            weights = u[:, retained] @ ((basis @ target) / singular[retained])
+            readout_weights[mode, site] = weights.reshape(size, size)
+            readout_condition[mode, site] = float(singular[0] / singular[retained][-1])
+            own = uniform_shape[core, core] if mode else profiles[site, core, core]
+            noise_gain[mode, site] = float(np.sum(weights ** 2) * np.sum(own ** 2))
+    normalised, uniform = readout_weights
+
+    window_light = template_stack.sum(axis=(1, 2))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        fraction = np.where(window_light > 0.0, totals / window_light, np.nan)
+
+    fit_centers: list[tuple[float, float]] = []
+    fit_sigmas: list[tuple[float, float]] = []
+    fit_ok: list[bool] = []
+    for index, center in enumerate(centers):
+        template = template_stack[index]
+        if not usable[index]:
+            fit_centers.append((float(center[0]), float(center[1])))
+            fit_sigmas.append((float("nan"), float("nan")))
+            fit_ok.append(False)
+            continue
+        half = (template.shape[0] - 1) // 2
+        anchor_x = int(round(float(center[0]))) - half
+        anchor_y = int(round(float(center[1]))) - half
+        yy, xx = np.mgrid[
+            anchor_y : anchor_y + template.shape[0],
+            anchor_x : anchor_x + template.shape[1],
+        ]
+        x_fit, y_fit, sigma_x, sigma_y, ok = _fit_gaussian_spot_2d(
+            template,
+            yy,
+            xx,
+            x0=float(center[0]),
+            y0=float(center[1]),
+            offset0=0.0,
+            amplitude=float(np.nanmax(template)),
+        )
+        fit_centers.append((x_fit, y_fit))
+        fit_sigmas.append((sigma_x, sigma_y))
+        fit_ok.append(bool(ok))
+
+    return _MeasuredSpots(
+        np.ascontiguousarray(normalised, dtype="<f8"),
+        np.ascontiguousarray(uniform, dtype="<f8"),
+        np.ascontiguousarray(uniform_shape, dtype="<f8"),
+        np.asarray(boxes, dtype="<i8"),
+        np.ascontiguousarray(template_stack, dtype="<f8"),
+        np.asarray(fraction, dtype="<f8"),
+        np.asarray(fit_centers, dtype="<f8"),
+        np.asarray(fit_sigmas, dtype="<f8"),
+        np.asarray(fit_ok, dtype=bool),
+        usable, rank, condition, readout_condition, noise_gain,
+    )
+
+
+# Both stacks keep the frames' own dtype.  A run of large frames widened to
+# float64 up front was the whole run held twice or more at once; every step
+# that needs floats widens the block or the windows it is working on.
+def _coerce_reference_stack(reference_frames: object, frame_contract: FrameContract) -> np.ndarray:
+    if isinstance(reference_frames, np.ndarray):
+        raw = np.asarray(reference_frames)
+        if raw.ndim == 4:
+            return np.asarray(
+                [[frame_contract.assert_image(frame) for frame in group] for group in raw]
+            )
+        if raw.ndim == 3:
+            return np.asarray([[frame_contract.assert_image(frame)] for frame in raw])
+        if raw.ndim == 2:
+            return np.asarray([[frame_contract.assert_image(raw)]])
+        raise ValueError("reference frames must have shape (groups, shots, y, x)")
+    groups = list(reference_frames)  # type: ignore[arg-type]
+    if not groups:
+        raise ValueError("calibration requires non-empty reference frames")
+    nested = isinstance(groups[0], (tuple, list))
+    grouped = groups if nested else [[item] for item in groups]
+    return np.asarray(
+        [[frame_contract.assert_image(frame) for frame in group] for group in grouped]
+    )
+
+
+def _coerce_short_stack(short_frames: object, frame_contract: FrameContract) -> np.ndarray:
+    if isinstance(short_frames, np.ndarray):
+        raw = np.asarray(short_frames)
+        if raw.ndim != 3:
+            raise ValueError("short frames must have shape (groups, y, x)")
+        return np.asarray([frame_contract.assert_image(frame) for frame in raw])
+    frames = list(short_frames)  # type: ignore[arg-type]
+    if not frames:
+        raise ValueError("calibration requires non-empty short frames")
+    return np.asarray([frame_contract.assert_image(frame) for frame in frames])
+
+
+def _empirical_threshold(dark: object, bright: object) -> float:
+    """The cut that classifies THIS run's labelled shots best.
+
+    The labels come from the long frames, where an atom is unmistakable; the
+    values are the short ones a runtime readout will actually see.  So the
+    best cut is a fact about the data in hand, found by trying every place a
+    cut can go -- between one observed value and the next -- and keeping the
+    one that classifies the labelled shots best.  If several cuts are equally
+    good, the widest empty interval wins; any remaining tie is resolved towards
+    the midpoint of the empirical dark and bright medians.
+
+    Every place a cut can go, rather than every histogram bin edge: a cut is
+    not a bin, and rounding it to the display's binning moved the operating
+    point of the readout by up to half a bin for no reason but the picture.
+    """
+
+    dark_values = np.asarray(dark, dtype=float).reshape(-1)
+    bright_values = np.asarray(bright, dtype=float).reshape(-1)
+    dark_values = dark_values[np.isfinite(dark_values)]
+    bright_values = bright_values[np.isfinite(bright_values)]
+    if not dark_values.size or not bright_values.size:
+        return float("nan")
+    values = np.unique(np.concatenate([dark_values, bright_values]))
+    if values.size == 1:
+        return float(values[0])
+    # A cut sits between two observed values, plus one outside each end.
+    cuts = np.concatenate(
+        [
+            [values[0] - 0.5 * float(values[1] - values[0])],
+            0.5 * (values[:-1] + values[1:]),
+            [values[-1] + 0.5 * float(values[-1] - values[-2])],
+        ]
+    )
+    dark_below = np.searchsorted(np.sort(dark_values), cuts, side="left")
+    bright_below = np.searchsorted(np.sort(bright_values), cuts, side="left")
+    total = dark_values.size + bright_values.size
+    fidelity = (dark_below + bright_values.size - bright_below) / total
+    best_value = float(np.max(fidelity))
+    best = np.flatnonzero(np.isclose(fidelity, best_value, rtol=0.0, atol=1e-12))
+    margin = np.zeros(cuts.shape, dtype=float)
+    margin[1:-1] = 0.5 * (values[1:] - values[:-1])
+    widest = float(np.max(margin[best]))
+    robust = best[np.isclose(margin[best], widest, rtol=0.0, atol=1e-12)]
+    center = 0.5 * (
+        float(np.median(dark_values)) + float(np.median(bright_values))
+    )
+    index = int(robust[np.argmin(np.abs(cuts[robust] - center))])
+    return float(cuts[index])
+
+
+def _fit_readout_model(
+    *,
+    kind: ReadoutModelKind,
+    site_map: SiteMap,
+    short_signals: np.ndarray,
+    labels_occupied: np.ndarray,
+    labels_valid: np.ndarray,
+    threshold_method: str,
+    model_parameters: Mapping[str, Any],
+    diagnostics: Mapping[str, Any] | None = None,
+) -> tuple[ReadoutModel, dict[str, Any]]:
+    """Fit each reference-labelled population and evaluate its threshold.
+
+    For a known state, the Gaussian maximum-likelihood solution is its sample
+    mean and population standard deviation. The short frame cannot relabel
+    its own overlapping populations; only agreeing long references label it.
+    """
+
+    centers = site_map.centers_xy
+    thresholds = np.full(len(centers), np.nan, dtype=float)
+    predictions = np.zeros_like(short_signals, dtype=bool)
+    site_gaussian_fidelity = np.full(len(centers), np.nan, dtype=float)
+    gaussian_thresholds = np.full(len(centers), np.nan, dtype=float)
+    gaussian_dark_means = np.full(len(centers), np.nan, dtype=float)
+    gaussian_dark_sigmas = np.full(len(centers), np.nan, dtype=float)
+    gaussian_bright_means = np.full(len(centers), np.nan, dtype=float)
+    gaussian_bright_sigmas = np.full(len(centers), np.nan, dtype=float)
+    gaussian_dark_weights = np.full(len(centers), np.nan, dtype=float)
+    gaussian_bright_weights = np.full(len(centers), np.nan, dtype=float)
+    dark_means = np.full(len(centers), np.nan, dtype=float)
+    bright_means = np.full(len(centers), np.nan, dtype=float)
+    dark_sample_count = np.zeros(len(centers), dtype=np.int64)
+    dark_sample_variance = np.full(len(centers), np.nan, dtype=float)
+    n_dark = np.zeros(len(centers), dtype=int)
+    n_bright = np.zeros(len(centers), dtype=int)
+    for site in range(len(centers)):
+        finite = np.isfinite(short_signals[:, site])
+        measured = labels_valid[:, site] & finite
+        dark = short_signals[measured & ~labels_occupied[:, site], site]
+        bright_values = short_signals[measured & labels_occupied[:, site], site]
+        n_dark[site], n_bright[site] = dark.size, bright_values.size
+        # A registered-but-never-bright site still owns a real camera box.
+        # With no occupied label, every finite sample is a conservative dark
+        # reference: any undetected fluorescence can only raise this baseline
+        # and make later visibility harder, never manufacture a response.
+        dark_reference = dark if dark.size >= 2 else short_signals[finite, site]
+        if dark_reference.size >= 2:
+            dark_sample_count[site] = dark_reference.size
+            dark_sample_variance[site] = float(np.var(dark_reference, ddof=1))
+        gaussian_threshold = float("nan")
+        if (dark.size >= 2 and bright_values.size >= 2
+                and np.ptp(dark) > 0.0 and np.ptp(bright_values) > 0.0):
+            dark_mean, bright_mean = float(np.mean(dark)), float(np.mean(bright_values))
+            dark_sigma, bright_sigma = float(np.std(dark)), float(np.std(bright_values))
+            total = dark.size + bright_values.size
+            dark_weight, bright_weight = dark.size / total, bright_values.size / total
+            gaussian_threshold = optimal_gaussian_threshold(
+                dark_mean, dark_sigma, bright_mean, bright_sigma,
+                dark_weight, bright_weight,
+            )
+            if np.isfinite(gaussian_threshold):
+                gaussian_thresholds[site] = gaussian_threshold
+                gaussian_dark_means[site] = dark_mean
+                gaussian_dark_sigmas[site] = dark_sigma
+                gaussian_bright_means[site] = bright_mean
+                gaussian_bright_sigmas[site] = bright_sigma
+                gaussian_dark_weights[site] = dark_weight
+                gaussian_bright_weights[site] = bright_weight
+                site_gaussian_fidelity[site] = gaussian_fidelity(
+                    dark_mean, dark_sigma, bright_mean, bright_sigma,
+                    gaussian_threshold, dark_weight, bright_weight,
+                )[2]
+        threshold = gaussian_threshold
+        if threshold_method == "empirical" or not np.isfinite(gaussian_threshold):
+            threshold = (
+                _empirical_threshold(dark, bright_values)
+                if dark.size and bright_values.size else float("nan")
+            )
+        if np.isfinite(threshold):
+            thresholds[site] = threshold
+            if np.isfinite(gaussian_threshold) and threshold_method == "gaussian":
+                dark_means[site] = gaussian_dark_means[site]
+                bright_means[site] = gaussian_bright_means[site]
+            elif dark.size and bright_values.size:
+                dark_means[site] = float(np.mean(dark))
+                bright_means[site] = float(np.mean(bright_values))
+            short_values = short_signals[:, site]
+            predictions[:, site] = classify_threshold(
+                short_values,
+                np.full(short_values.shape, threshold, dtype=float),
+            )
+    # This is the observed agreement on the calibration samples, not held-out
+    # validation: the same reference labels also trained the two populations.
+    confusion = per_site_fidelity(
+        short_signals,
+        labels_occupied,
+        thresholds,
+        valid_mask=labels_valid,
+    )
+    site_fidelity = confusion.overall
+    usable_sites = (
+        site_map.valid_sites
+        & np.isfinite(thresholds)
+        & np.isfinite(dark_means)
+        & np.isfinite(bright_means)
+        & (bright_means > dark_means)
+    )
+    readout_model = ReadoutModel(
+        site_map.site_ids,
+        thresholds,
+        dark_means,
+        bright_means,
+        usable_sites,
+        site_fidelity,
+        dark_sample_count=dark_sample_count,
+        dark_sample_variance=dark_sample_variance,
+        kind=kind,
+        threshold_method=threshold_method,
+        **dict(model_parameters),
+    )
+    report = {
+        "kind": kind.value,
+        "short_signals": short_signals,
+        "thresholds": thresholds,
+        "gaussian_thresholds": gaussian_thresholds,
+        "gaussian_dark_mean": gaussian_dark_means,
+        "gaussian_dark_sigma": gaussian_dark_sigmas,
+        "gaussian_bright_mean": gaussian_bright_means,
+        "gaussian_bright_sigma": gaussian_bright_sigmas,
+        "gaussian_dark_weight": gaussian_dark_weights,
+        "gaussian_bright_weight": gaussian_bright_weights,
+        "predictions": predictions,
+        "site_usable": usable_sites,
+        "site_fidelity": site_fidelity,
+        "site_fidelity_dark": confusion.dark,
+        "site_fidelity_bright": confusion.bright,
+        "site_gaussian_fidelity": site_gaussian_fidelity,
+        "threshold_fallback": (
+            (threshold_method == "gaussian")
+            & np.isfinite(thresholds)
+            & ~np.isfinite(gaussian_thresholds)
+        ),
+        "site_n_actual": confusion.evaluated,
+        "site_n_dark": n_dark,
+        "site_n_bright": n_bright,
+    }
+    report.update(dict(diagnostics or {}))
+    return readout_model, report
+
+
+def calibrate(
+    reference_frames: object,
+    short_frames: object,
+    *,
+    frame_contract: FrameContract,
+    default_model_kind: ReadoutModelKind = ReadoutModelKind.BOX,
+    threshold_method: str = "gaussian",
+    box_half_width: int = 1,
+    psf_half_width: int = 3,
+    psf_padding: int = 3,
+    detection_spot_sigma: float = 1.0,
+    detection_sigma: float = 6.0,
+    electrons_per_count: float | None = None,
+    site_map_filter: Callable[[SiteMap, np.ndarray], SiteMap] | None = None,
+) -> CalibrationResult:
+    """Discover sites and fit all readout models from one complete capture."""
+
+    if not isinstance(default_model_kind, ReadoutModelKind):
+        raise TypeError("default_model_kind must be ReadoutModelKind")
+    threshold_method = str(threshold_method).lower()
+    if threshold_method not in {"empirical", "gaussian"}:
+        raise ValueError("threshold_method must be 'empirical' or 'gaussian'")
+    box_half_width = int(box_half_width)
+    psf_half_width = int(psf_half_width)
+    psf_padding = int(psf_padding)
+    if box_half_width < 0 or psf_half_width < 0:
+        raise ValueError("integration half-widths must be non-negative")
+    if psf_padding <= 0:
+        raise ValueError("psf_padding must be positive")
+    if site_map_filter is not None and not callable(site_map_filter):
+        raise TypeError("site_map_filter must be callable or None")
+
+    references = _coerce_reference_stack(reference_frames, frame_contract)
+    shorts = _coerce_short_stack(short_frames, frame_contract)
+    if references.shape[0] != shorts.shape[0] or not references.shape[0] or not references.shape[1]:
+        raise ValueError("reference and short frames must share non-empty group counts")
+    # detect_sites refuses a stack that is not finite, so a plain mean is the
+    # mean of finite frames here.
+    reference_average = references.mean(axis=(0, 1), dtype=np.float64)
+    # Sites are found from every reference frame of the run, one at a time:
+    # what makes a place a site is being seen there repeatedly, and no summary
+    # of the run keeps that -- an average or a quantile mixes "how bright when
+    # loaded" with "how often loaded", and traps differ in the second.
+    measurement_radius = max(box_half_width, psf_half_width + psf_padding)
+    site_map = detect_sites(
+        references.reshape(-1, *references.shape[2:]),
+        spot_sigma=detection_spot_sigma,
+        detection_sigma=detection_sigma,
+        electrons_per_count=electrons_per_count,
+        # Every box this calibration will read out of a site: the integration
+        # box, and the PSF box with the background ring round it.  A place that
+        # cannot carry all of them is not a site THIS calibration can use.
+        measurement_radius=measurement_radius,
+    )
+    if site_map_filter is not None:
+        candidate_count = site_map.n_sites
+        site_map = site_map_filter(site_map, reference_average)
+        if not isinstance(site_map, SiteMap) or not site_map.n_sites:
+            raise ValueError("site_map_filter must retain a non-empty SiteMap")
+        if site_map.n_sites < candidate_count:
+            # Rejected candidates must no longer act as fitted neighbours of
+            # the retained sites. Reuse the same raw-image localisation once.
+            anchors = np.rint(site_map.centers_xy)
+            centers = np.array(site_map.centers_xy, copy=True)
+            for index in range(site_map.n_sites):
+                center, _widths = _refine_center_subpixel(
+                    reference_average, anchors, index, detection_spot_sigma
+                )
+                if box_fits(center, measurement_radius, reference_average.shape):
+                    centers[index] = center
+            site_map = replace(site_map, centers_xy=centers)
+    centers = site_map.centers_xy
+
+    box_extractor: Callable[[np.ndarray], np.ndarray] = lambda frame: extract_box_signals(
+        frame,
+        centers,
+        radius=box_half_width,
+    )
+    reference_label_signals = box_extractor(
+        references.reshape(-1, *references.shape[2:])
+    ).reshape(*references.shape[:2], -1)
+    reference_valid = np.isfinite(reference_label_signals)
+    fits = tuple(
+        fit_bimodal(
+            reference_label_signals[:, :, site][reference_valid[:, :, site]]
+        )
+        for site in range(len(centers))
+    )
+    bright = np.zeros_like(reference_label_signals, dtype=bool)
+    fit_ok = np.zeros(len(centers), dtype=bool)
+    for site, fit in enumerate(fits):
+        # A label rests on two populations that are decisively there: a site
+        # that never loaded has its one Gaussian split in two like any other
+        # sample, and must not label its shots by the crossing.
+        if fit.decisive and np.isfinite(fit.threshold):
+            reference_values = reference_label_signals[:, :, site]
+            bright[:, :, site] = classify_threshold(
+                reference_values,
+                np.full(reference_values.shape, fit.threshold, dtype=float),
+            )
+            fit_ok[site] = True
+    every_reference_valid = np.all(reference_valid, axis=1)
+    all_bright = np.all(bright, axis=1)
+    all_dark = np.all(~bright, axis=1)
+    labels_valid = (
+        every_reference_valid
+        & (all_bright | all_dark)
+        & fit_ok[np.newaxis, :]
+    )
+    labels_occupied = all_bright & labels_valid
+    labels_dark = all_dark & labels_valid
+
+    spots = _measure_readout_weights(
+        references,
+        centers,
+        bright,
+        reference_valid & fit_ok[None, None, :],
+        radius=psf_half_width,
+        padding=psf_padding,
+    )
+    per_site_weights = spots.weights
+    psf_boxes = spots.boxes
+    psf_fit_centers = spots.fit_centers
+    psf_fit_sigmas = spots.fit_sigmas
+    psf_fit_ok = spots.fit_ok
+    uniform_weights = spots.uniform
+
+    def psf_extractor(weights: np.ndarray, valid: np.ndarray) -> Callable[[np.ndarray], np.ndarray]:
+        def extract(frame):
+            values = extract_psf_signals(
+                frame, centers, kernels=weights, boxes_xywh=psf_boxes,
+                background="none", radius=psf_half_width, padding=psf_padding)
+            values[..., ~valid] = np.nan
+            return values
+        return extract
+
+    feature_specs: tuple[
+        tuple[
+            ReadoutModelKind,
+            Callable[[np.ndarray], np.ndarray],
+            Mapping[str, Any],
+            Mapping[str, Any],
+        ],
+        ...,
+    ] = (
+        (
+            ReadoutModelKind.BOX,
+            box_extractor,
+            {
+                "integration_half_width": box_half_width,
+            },
+            {},
+        ),
+        (
+            ReadoutModelKind.PER_SITE_PSF,
+            psf_extractor(per_site_weights, np.isfinite(spots.readout_condition[0])),
+            {
+                "integration_half_width": psf_half_width,
+                "psf_weights": per_site_weights,
+                "psf_boxes": psf_boxes,
+                "background": "none",
+                "psf_padding": psf_padding,
+            },
+            {
+                "psf_fit_centers_xy": psf_fit_centers,
+                "psf_fit_sigma_xy": psf_fit_sigmas,
+                "psf_fit_ok": psf_fit_ok,
+                "psf_boxes_xywh": psf_boxes,
+                "psf_kernels": per_site_weights,
+                "psf_templates": spots.templates,
+                "psf_box_light_fraction": spots.box_light_fraction,
+                "psf_template_identifiable": spots.template_valid,
+                "psf_template_rank": spots.template_rank,
+                "psf_template_condition": spots.template_condition,
+                "psf_demixing_condition": spots.readout_condition[0],
+                "psf_noise_gain": spots.noise_gain[0],
+            },
+        ),
+        (
+            ReadoutModelKind.UNIFORM_PSF,
+            psf_extractor(uniform_weights, np.isfinite(spots.readout_condition[1])),
+            {
+                "integration_half_width": psf_half_width,
+                "psf_weights": uniform_weights,
+                "psf_boxes": psf_boxes,
+                "background": "none",
+                "psf_padding": psf_padding,
+            },
+            {
+                "psf_fit_centers_xy": psf_fit_centers,
+                "psf_fit_sigma_xy": psf_fit_sigmas,
+                "psf_fit_ok": psf_fit_ok,
+                "psf_boxes_xywh": psf_boxes,
+                "uniform_psf_shape": spots.uniform_shape,
+                "psf_kernels": uniform_weights,
+                "psf_templates": spots.templates,
+                "psf_box_light_fraction": spots.box_light_fraction,
+                "psf_template_identifiable": spots.template_valid,
+                "psf_template_rank": spots.template_rank,
+                "psf_template_condition": spots.template_condition,
+                "psf_demixing_condition": spots.readout_condition[1],
+                "psf_noise_gain": spots.noise_gain[1],
+            },
+        ),
+    )
+    models: list[ReadoutModel] = []
+    model_reports: dict[str, dict[str, Any]] = {}
+    for kind, extractor, parameters, diagnostics in feature_specs:
+        short_signals = extractor(shorts)
+        model, model_report = _fit_readout_model(
+            kind=kind,
+            site_map=site_map,
+            short_signals=short_signals,
+            labels_occupied=labels_occupied,
+            labels_valid=labels_valid,
+            threshold_method=threshold_method,
+            model_parameters=parameters,
+            diagnostics=diagnostics,
+        )
+        models.append(model)
+        model_reports[kind.value] = model_report
+
+    calibration_report = {
+        "models": {
+            model.kind.value: {
+                "site_n_actual": [
+                    int(value)
+                    for value in model_reports[model.kind.value]["site_n_actual"]
+                ],
+                "site_n_dark": [
+                    int(value)
+                    for value in model_reports[model.kind.value]["site_n_dark"]
+                ],
+                "site_n_bright": [
+                    int(value)
+                    for value in model_reports[model.kind.value]["site_n_bright"]
+                ],
+                **({
+                    "psf_template_identifiable": spots.template_valid.tolist(),
+                    "psf_template_rank": spots.template_rank.tolist(),
+                    "psf_template_condition": _nullable_floats(spots.template_condition),
+                    "psf_demixing_condition": _nullable_floats(model_reports[model.kind.value]["psf_demixing_condition"]),
+                    "psf_noise_gain": _nullable_floats(model_reports[model.kind.value]["psf_noise_gain"]),
+                } if model.kind is not ReadoutModelKind.BOX else {}),
+            }
+            for model in models
+        },
+    }
+    calibration = TrapCalibration(
+        site_map,
+        tuple(models),
+        default_model_kind,
+        frame_contract,
+        calibration_report,
+    )
+    report = {
+        "site_ids": site_map.site_ids,
+        "site_centers_xy": site_map.centers_xy,
+        "site_valid": site_map.valid_sites,
+        "reference_average": reference_average,
+        "reference_label_model_kind": ReadoutModelKind.BOX.value,
+        "reference_label_signals": reference_label_signals,
+        "labels_occupied": labels_occupied,
+        "labels_dark": labels_dark,
+        "labels_valid": labels_valid,
+        "fits": fits,
+        "reference_fit_threshold": np.asarray([fit.threshold for fit in fits]),
+        "reference_fit_fidelity": np.asarray([fit.fidelity for fit in fits]),
+        "reference_fit_dark_mean": np.asarray([fit.dark_mean for fit in fits]),
+        "reference_fit_dark_sigma": np.asarray([fit.dark_sigma for fit in fits]),
+        "reference_fit_bright_mean": np.asarray([fit.bright_mean for fit in fits]),
+        "reference_fit_bright_sigma": np.asarray([fit.bright_sigma for fit in fits]),
+        "reference_fit_ok": np.asarray([fit.ok for fit in fits]),
+        "models": model_reports,
+    }
+    return CalibrationResult(calibration, report)
+
+
+__all__ = [
+    "AtomDetection",
+    "CalibrationResult",
+    "DEFAULT_READOUT_MODEL_CHOICE",
+    "classify_threshold",
+    "detect_sites",
+    "FrameContract",
+    "READOUT_MODEL_CHOICES",
+    "ReadoutModel",
+    "ReadoutModelKind",
+    "SiteMap",
+    "TrapCalibration",
+    "calibrate",
+    "extract_box_signals",
+    "extract_psf_signals",
+    "readout_model_kind_from_choice",
+]

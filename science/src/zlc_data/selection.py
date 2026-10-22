@@ -1,0 +1,313 @@
+"""Serializable, axis-named selection semantics with no presentation state."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from math import ceil, floor
+from numbers import Real
+
+import numpy as np
+
+from .validation import (
+    integer,
+    nonnegative_integer,
+)
+from .axis import (
+    AxisId,
+    AxisSpec,
+    CoordinateFrameId,
+    CoordinateScalar,
+    canonical_coordinate_scalar,
+)
+
+
+class SelectionChange(str, Enum):
+    """What happened to a selection.
+
+    Here because it is the vocabulary of an event that crosses packages: a
+    plotting surface raises it, a runtime bridge consumes it, and neither of
+    those two depends on the other.  Both used to declare their own copy, which
+    agreed only because a str enum compares equal to its own value -- so the
+    day one of them gained a fifth member, the other would have gone on
+    silently matching four.
+    """
+
+    ADDED = "added"
+    UPDATED = "updated"
+    COMMITTED = "committed"
+    REMOVED = "removed"
+
+
+@dataclass(frozen=True)
+class IndexSelection:
+    """Select one logical index and remove its named axis."""
+
+    axis_id: AxisId
+    index: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.axis_id, AxisId):
+            raise TypeError("axis_id must be AxisId")
+        object.__setattr__(
+            self,
+            "index",
+            nonnegative_integer(self.index, "selection index"),
+        )
+
+
+@dataclass(frozen=True)
+class IndexRangeSelection:
+    """Retain the half-open logical index interval ``[start, stop)``."""
+
+    axis_id: AxisId
+    start: int
+    stop: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.axis_id, AxisId):
+            raise TypeError("axis_id must be AxisId")
+        for name, value in (("start", self.start), ("stop", self.stop)):
+            normalized = integer(value, f"selection {name}")
+            assert normalized is not None
+            object.__setattr__(self, name, normalized)
+        if self.start < 0 or self.stop <= self.start:
+            raise ValueError("index range must be a non-empty half-open interval")
+
+
+@dataclass(frozen=True)
+class CoordinateRangeSelection:
+    """Retain a numeric closed interval, or one exact coordinate of any type.
+
+    Equal numeric bounds name one coordinate exactly, the way a text or null
+    bound does; only unequal bounds ask for an ORDER, which exists solely on
+    an axis that is numeric throughout.
+    """
+
+    axis_id: AxisId
+    lower: CoordinateScalar
+    upper: CoordinateScalar
+    coordinate_frame: CoordinateFrameId | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.axis_id, AxisId):
+            raise TypeError("axis_id must be AxisId")
+        for name, value in (("lower", self.lower), ("upper", self.upper)):
+            normalized = canonical_coordinate_scalar(value, f"coordinate {name}")
+            object.__setattr__(
+                self,
+                name,
+                normalized,
+            )
+        numeric = isinstance(self.lower, (int, float)) and isinstance(
+            self.upper, (int, float)
+        )
+        if numeric and self.lower > self.upper:
+            raise ValueError("coordinate range lower bound cannot exceed upper bound")
+        if not numeric and self.lower != self.upper:
+            raise ValueError(
+                "text or null coordinate selection must name one exact value"
+            )
+        if self.coordinate_frame is not None and not isinstance(
+            self.coordinate_frame, CoordinateFrameId
+        ):
+            raise TypeError("coordinate_frame must be CoordinateFrameId or None")
+
+
+SelectionTerm = IndexSelection | IndexRangeSelection | CoordinateRangeSelection
+
+
+@dataclass(frozen=True)
+class Selection:
+    """One immutable selection snapshot over one or more named axes.
+
+    A rectangle is exactly two coordinate-range terms.  Facet scope, widget
+    identity and processor bindings deliberately live in their respective
+    adapters rather than in this value.
+    """
+
+    terms: tuple[SelectionTerm, ...]
+
+    def __post_init__(self) -> None:
+        terms = tuple(self.terms)
+        if not terms:
+            raise ValueError("Selection requires at least one term")
+        if any(
+            not isinstance(term, (IndexSelection, IndexRangeSelection, CoordinateRangeSelection))
+            for term in terms
+        ):
+            raise TypeError("Selection contains an unsupported term")
+        axis_ids = tuple(term.axis_id for term in terms)
+        if len(set(axis_ids)) != len(axis_ids):
+            raise ValueError("Selection may name each AxisId only once")
+        object.__setattr__(self, "terms", tuple(sorted(terms, key=lambda term: term.axis_id.value)))
+
+    @classmethod
+    def index_range(
+        cls,
+        axis_id: AxisId,
+        start: int,
+        stop: int,
+    ) -> "Selection":
+        return cls((IndexRangeSelection(axis_id, start, stop),))
+
+    @classmethod
+    def coordinate_range(
+        cls,
+        axis_id: AxisId,
+        lower: CoordinateScalar,
+        upper: CoordinateScalar,
+        *,
+        coordinate_frame: CoordinateFrameId | None,
+    ) -> "Selection":
+        return cls(
+            (CoordinateRangeSelection(axis_id, lower, upper, coordinate_frame),),
+        )
+
+
+def take_indices(
+    array: np.ndarray,
+    indices: range | tuple[int, ...],
+    *,
+    axis: int,
+    drop: bool = False,
+) -> np.ndarray:
+    """Index one axis while retaining a view for a contiguous selection."""
+
+    if isinstance(indices, range) and indices.step != 1:
+        raise ValueError("selection range step must be 1")
+    if drop:
+        return np.take(array, indices[0], axis=axis)
+    if isinstance(indices, range):
+        selection = [slice(None)] * array.ndim
+        selection[axis] = slice(indices.start, indices.stop)
+        return array[tuple(selection)]
+    return np.take(array, indices, axis=axis)
+
+
+class EmptySelection(ValueError):
+    """A selection that names no coordinate of the axis it speaks about.
+
+    It is a fact about where the region was drawn, not a fault: a box in
+    the letterbox band beside a picture selects nothing, and a caller that
+    can say so to the operator needs to tell this apart from a genuine
+    programming error.  Unnamed, it escaped a worker thread as a bare
+    ValueError and the panel silently kept the region it had.
+    """
+
+
+def resolve_selection_indices(
+    axis: AxisSpec,
+    term: SelectionTerm,
+) -> tuple[range | tuple[int, ...], bool]:
+    """Resolve one named term without expanding a contiguous logical range."""
+
+    if not isinstance(axis, AxisSpec):
+        raise TypeError("axis must be AxisSpec")
+    if not isinstance(term, (IndexSelection, IndexRangeSelection, CoordinateRangeSelection)):
+        raise TypeError(f"unsupported selection term {type(term).__name__}")
+    if term.axis_id != axis.axis_id:
+        raise ValueError("selection term axis does not match AxisSpec")
+    if isinstance(term, IndexSelection):
+        if term.index >= axis.size:
+            raise IndexError(
+                f"selection index {term.index} is outside axis {axis.axis_id}"
+            )
+        return range(term.index, term.index + 1), True
+    if isinstance(term, IndexRangeSelection):
+        if term.stop > axis.size:
+            raise IndexError(
+                f"selection range stop {term.stop} is outside axis {axis.axis_id}"
+            )
+        return range(term.start, term.stop), False
+    if axis.coordinate_frame != term.coordinate_frame:
+        raise ValueError(f"coordinate frame mismatch for axis {axis.axis_id}")
+    if axis.coordinates is None:
+        # An implicit axis HAS coordinates -- index_origin + i -- and says so
+        # through AxisSpec.coordinate().  Refusing a coordinate selection on it
+        # meant a box drawn on a camera frame only worked because the producer
+        # had written out the very tuple this axis exists to avoid.  They are
+        # increasing, so the answer is arithmetic rather than a scan.
+        if not isinstance(term.lower, (int, float)) or not isinstance(
+            term.upper, (int, float)
+        ):
+            raise TypeError(
+                f"implicit axis {axis.axis_id} accepts only numeric coordinates"
+            )
+        lower = max(0, ceil(term.lower - axis.index_origin))
+        upper = min(axis.size - 1, floor(term.upper - axis.index_origin))
+        if upper < lower:
+            raise EmptySelection(
+                f"coordinate selection is empty on axis {axis.axis_id}"
+            )
+        return range(lower, upper + 1), False
+    if (
+        isinstance(term.lower, (int, float))
+        and isinstance(term.upper, (int, float))
+        and term.lower != term.upper
+    ):
+        # An interval asks which coordinates lie BETWEEN two numbers, and
+        # that order exists only on an axis that is numeric throughout.
+        coordinates = axis.coordinate_values()
+        if isinstance(coordinates, np.ndarray):
+            # AxisSpec already normalized this entire numeric vector. Keep
+            # the scalar comparison's short circuit for unrepresentable upper
+            # bounds when the lower bound selects nothing.
+            lower = term.lower
+            if coordinates.dtype.kind == "f" and type(lower) is int:
+                # An integer bound can lie between two float64 coordinates.
+                # Round inward so NumPy cannot include a value outside it.
+                lower = float(lower)
+                if lower < term.lower:
+                    lower = np.nextafter(lower, np.inf)
+            selected = coordinates >= lower
+            if bool(np.any(selected)):
+                upper = term.upper
+                if coordinates.dtype.kind == "f" and type(upper) is int:
+                    upper = float(upper)
+                    if upper > term.upper:
+                        upper = np.nextafter(upper, -np.inf)
+                selected &= coordinates <= upper
+            indices = np.flatnonzero(selected)
+        else:
+            # Mixed coordinates and integers beyond ndarray precision retain
+            # their exact Python comparison semantics.
+            if any(
+                value is not None
+                and (isinstance(value, (bool, str)) or not isinstance(value, Real))
+                for value in coordinates
+            ):
+                raise TypeError(f"axis {axis.axis_id} coordinates are not entirely numeric")
+            indices = [
+                index
+                for index, value in enumerate(coordinates)
+                if value is not None and term.lower <= value <= term.upper
+            ]
+    else:
+        # One exact coordinate -- a number, a text or null -- is an equality
+        # question every axis answers, whatever else it holds: an axis whose
+        # cells are ``0`` and ``"bright"`` can be scoped to either.  The
+        # axis's own coordinate index answers it; a Dataset axis holds each
+        # coordinate once, so the answer is one position.
+        position = axis.coordinate_position(term.lower)
+        indices = () if position is None else (position,)
+    if len(indices) == 0:
+        raise EmptySelection(
+            f"coordinate selection is empty on axis {axis.axis_id}"
+        )
+    if indices[-1] - indices[0] + 1 == len(indices):
+        return range(int(indices[0]), int(indices[-1]) + 1), False
+    return tuple(indices.tolist() if isinstance(indices, np.ndarray) else indices), False
+
+
+__all__ = [
+    "CoordinateRangeSelection",
+    "EmptySelection",
+    "SelectionChange",
+    "IndexRangeSelection",
+    "IndexSelection",
+    "Selection",
+    "SelectionTerm",
+    "resolve_selection_indices",
+    "take_indices",
+]

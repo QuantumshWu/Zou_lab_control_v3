@@ -1,0 +1,11 @@
+[package]
+name = "zlc-fabric"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+zlc-core = { path = "../zlc-core" }
+zlc-plugin-host = { path = "../zlc-plugin-host" }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }

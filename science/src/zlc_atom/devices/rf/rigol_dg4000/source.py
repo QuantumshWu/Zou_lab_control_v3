@@ -1,0 +1,776 @@
+"""Rigol DG4000-series function generator as an RF source, over SCPI.
+
+The instrument speaks SCPI text over VISA (USB-TMC or LAN), and the driver
+is written against a three-verb link so the transport is the ONLY thing a
+test or a virtual bench has to stand in for -- the SCPI vocabulary, the
+read-back discipline and the bound checks are all exercised as shipped.
+
+Carrier and FSK hop frequencies are written and read in hertz; power's
+canonical unit is dBm. Connecting and explicit Refresh read the channel's
+unit, load, waveform, limits and values. Apply uses those bounded session
+facts, writes the selected quantity, and returns the instrument's actual
+readback. External front-panel changes are adopted by Refresh, not by probing
+the whole instrument before every scan point.
+
+Explicit selected-unit Apply uses ``tune_in_unit``: it selects the channel's
+native amplitude unit only when needed and writes volts directly. A raw
+``read_tunable_in_unit`` snapshot lets Scan restore both number and unit.
+
+Frequency-dependent amplitude limits and current become unknown after a
+frequency write. They are read again when amplitude is next needed; the
+driver does not undo a requested frequency to counter the instrument's own
+amplitude limiting.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, replace
+
+from zlc_atom.devices.rf.contract import (
+    FREQUENCY_FIELD,
+    POWER_FIELD,
+    WINDOW_FIELDS,
+    RfSourceBase,
+    TuneRefused,
+    channel_field,
+)
+from zlc_atom.devices import visa
+from zlc_atom.devices.visa import (
+    PROBE_TIMEOUT_SECONDS,
+    ScpiLink,
+    VisaResources,
+    VisaScpiLink,
+    identity_fields,
+)
+from zlc_atom.authoring import AuthoringField, TunableField
+from zlc_data.units import DEFAULT_UNITS
+
+
+@dataclass(frozen=True)
+class RigolDg4000Config:
+    """Where the instrument is and any policy window this bench imposes.
+
+    Every edge is optional.  ``None`` delegates only to the instrument's own
+    physical limits; setting an edge adds a bench policy limit and also gives
+    the scan authoring surface that side of its finite range.  The channel
+    count is a fact about the SERIES -- every DG4000 has two -- so it is not
+    authored at all: one instrument is one installed instance, its channels
+    are its own knobs.
+    """
+
+    resource: str
+    frequency_low_hz: float | None = None
+    frequency_high_hz: float | None = None
+    power_low_dbm: float | None = None
+    power_high_dbm: float | None = None
+    timeout_seconds: float = 5.0
+
+
+#: ch1 -> :SOURce1/:OUTPut1.  The channel NAMES are field-name prefixes
+#: (ch1_frequency), the numbers are SCPI's.
+_CHANNELS = ("ch1", "ch2")
+#: DG4000-specific output frequency used while ordinary FSK is active.  It is
+#: not part of the generic RF contract: a Lab Brick has no such register.
+_FSK_HOP_FREQUENCY_FIELD = "fsk_hop_frequency"
+#: The three amplitude units a DG4000 channel can be displaying.
+_DBM = "DBM"
+_VRMS = "VRMS"
+_VPP = "VPP"
+#: One milliwatt, the reference the "dB" in dBm is measured from.
+_MILLIWATT = 1e-3
+#: The one waveform whose peak-to-peak/RMS ratio (2*sqrt(2)) this driver
+#: knows; ``:FUNCtion?`` answers it as SIN (or its long form).
+_SINE = "SIN"
+_SINE_VPP_PER_VRMS = 2.0 * math.sqrt(2.0)
+#: The instrument spells high-Z as this out-of-range ohm count.
+_HIGH_Z_OHMS = 1e6
+
+#: ``*IDN?`` answers ``manufacturer,model,serial,firmware``.  The driver is
+#: written for the DG4000 series -- two channels, this SCPI vocabulary -- so
+#: that is what it may claim to have found.
+_IDENTITY_VENDOR = "RIGOL"
+_IDENTITY_MODEL_PREFIX = "DG4"
+
+
+def is_dg4000(identity: str) -> bool:
+    """Whether this ``*IDN?`` answer is an instrument this driver can drive."""
+
+    fields = identity_fields(identity)
+    if len(fields) < 2:
+        return False
+    return (
+        _IDENTITY_VENDOR in fields[0].upper()
+        and fields[1].upper().startswith(_IDENTITY_MODEL_PREFIX)
+    )
+
+
+def _identity_serial(identity: str) -> str:
+    fields = identity_fields(identity)
+    return fields[2] if len(fields) > 2 else ""
+
+
+@dataclass(frozen=True)
+class Dg4000Sighting:
+    """One instrument that answered, said what it was, and was let go."""
+
+    resource: str
+    identity: str
+
+    @property
+    def serial(self) -> str:
+        return _identity_serial(self.identity)
+
+    @property
+    def model(self) -> str:
+        fields = identity_fields(self.identity)
+        return fields[1] if len(fields) > 1 else ""
+
+
+def discover_dg4000(
+    resources: VisaResources | None = None,
+    *,
+    timeout_seconds: float = PROBE_TIMEOUT_SECONDS,
+) -> tuple[Dg4000Sighting, ...]:
+    """Every DG4000 attached to this machine, found by asking ``*IDN?``.
+
+    A Lab Brick can be counted without being opened; a SCPI instrument
+    cannot, so this opens and asks every listed resource in turn.
+    """
+
+    return tuple(
+        Dg4000Sighting(name, identity)
+        for name, identity in visa.identify_resources(
+            resources, timeout_seconds=timeout_seconds
+        )
+        if is_dg4000(identity)
+    )
+
+
+class RigolDg4000RfSource(RfSourceBase):
+    def __init__(self, config: RigolDg4000Config, *, link: ScpiLink | None = None) -> None:
+        self.config = config
+        # The authored half first, with nothing open: a window that cannot
+        # be honoured is refused before a VISA session exists to leak.
+        super().__init__(
+            channels=_CHANNELS,
+            frequency_low_hz=config.frequency_low_hz,
+            frequency_high_hz=config.frequency_high_hz,
+            power_low_dbm=config.power_low_dbm,
+            power_high_dbm=config.power_high_dbm,
+        )
+        self._fsk_hop_limits: dict[
+            str, tuple[float, float] | None
+        ] = {channel: None for channel in self._channels}
+        for channel in self._channels:
+            self._routing[channel_field(channel, _FSK_HOP_FREQUENCY_FIELD)] = (
+                channel,
+                _FSK_HOP_FREQUENCY_FIELD,
+            )
+        self._link = link if link is not None else VisaScpiLink(
+            config.resource, timeout_seconds=config.timeout_seconds
+        )
+        self._amplitudes: dict[str, dict[str, object]] = {}
+        # From here on the session is this object's to close: a failure
+        # before the constructor returns has no other owner to hand it to.
+        try:
+            identity = self._link.query("*IDN?").strip()
+            if not identity:
+                raise RuntimeError("the instrument answered *IDN? with nothing")
+            self._attach(identity)
+            self._refresh_fsk_hop_values()
+        except BaseException as error:
+            try:
+                self._link.close()
+            except BaseException as close_error:
+                error.add_note(
+                    "closing the VISA session also reported: "
+                    f"{type(close_error).__name__}: {close_error}"
+                )
+            raise
+
+    @staticmethod
+    def _source(channel: str) -> str:
+        return f":SOURce{channel[2:]}"
+
+    @staticmethod
+    def _output(channel: str) -> str:
+        return f":OUTPut{channel[2:]}"
+
+    # ------------------------------------------------------- transport verbs
+    def _invalidate_amplitude_after_frequency_change(self, channel: str) -> None:
+        """A carrier or hop change can make the standing amplitude untrue."""
+
+        self._current_values.pop(channel_field(channel, POWER_FIELD), None)
+        if channel in self._amplitudes:
+            self._amplitudes[channel].update(
+                current=None,
+                minimum=None,
+                maximum=None,
+            )
+        self._device_limits[channel] = (self._device_limits[channel][0], None)
+
+    def _write_frequency(self, channel: str, value_hz: float) -> float:
+        """Set and read the requested field, without unrelated queries."""
+        source = self._source(channel)
+        self._invalidate_amplitude_after_frequency_change(channel)
+        self._link.write(f"{source}:FREQuency {value_hz:.17g}")
+        return self._read_frequency(channel)
+
+    def _write_fsk_hop_frequency(
+        self, channel: str, value_hz: float
+    ) -> float:
+        """Set and read the FSK hop register without changing modulation mode."""
+
+        source = self._source(channel)
+        self._invalidate_amplitude_after_frequency_change(channel)
+        self._link.write(
+            f"{source}:MOD:FSKey:FREQuency {value_hz:.17g}"
+        )
+        return self._read_fsk_hop_frequency(channel)
+
+    def _write_power(self, channel: str, value_dbm: float) -> float:
+        held = self._amplitude_state(channel)
+        unit = held["unit"]
+        if unit is None:
+            unit = held["unit"] = self._amplitude_unit(channel)
+        target = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}[unit]
+        amplitude = self._convert_amplitude(channel, value_dbm, "dBm", target)
+        actual = self._write_power_in_unit(channel, amplitude, target)
+        return self._convert_amplitude(channel, actual, target, "dBm")
+
+    def _amplitude_state(self, channel: str) -> dict[str, object]:
+        """The one bounded set of channel facts, refreshed only when needed."""
+
+        held = self._amplitudes.get(channel)
+        if held is None:
+            source = self._source(channel)
+            held = {
+                "unit": self._amplitude_unit(channel),
+                "load": self._load_ohms(channel),
+                "waveform": self._link.query(f"{source}:FUNCtion?").strip().upper(),
+                "current": float(self._link.query(f"{source}:VOLTage?")),
+                "minimum": float(self._link.query(f"{source}:VOLTage? MINimum")),
+                "maximum": float(self._link.query(f"{source}:VOLTage? MAXimum")),
+            }
+            self._amplitudes[channel] = held
+        return held
+
+    def tunable_values(self) -> dict[str, object]:
+        with self._condition:
+            self._amplitudes.clear()
+            values = super().tunable_values()
+            for channel in self._channels:
+                frequency_limits, _power_limits = self._device_limits[channel]
+                self._device_limits[channel] = (frequency_limits, self._read_power_limits(channel))
+            values.update(self._refresh_fsk_hop_values())
+            return values
+
+    def _fsk_hop_range(
+        self, channel: str
+    ) -> tuple[float, float] | None:
+        limits = self._fsk_hop_limits[channel]
+        if limits is None:
+            return None
+        return self._effective_range(
+            self._frequency_bounds,
+            limits,
+            name=channel_field(channel, _FSK_HOP_FREQUENCY_FIELD),
+            unit="Hz",
+        )
+
+    def _invalidate_fsk_hop_state(self) -> None:
+        for channel in self._channels:
+            self._current_values.pop(
+                channel_field(channel, _FSK_HOP_FREQUENCY_FIELD), None
+            )
+            self._fsk_hop_limits[channel] = None
+
+    def _read_fsk_hop_state(
+        self,
+        window: tuple[float | None, float | None],
+    ) -> tuple[dict[str, tuple[float, float]], dict[str, float]]:
+        """Read a complete two-channel answer before accepting any of it."""
+
+        limits_by_channel: dict[str, tuple[float, float]] = {}
+        values: dict[str, float] = {}
+        try:
+            for channel in self._channels:
+                name = channel_field(channel, _FSK_HOP_FREQUENCY_FIELD)
+                limits = self._instrument_limits(
+                    self._read_fsk_hop_frequency_limits(channel),
+                    name=name,
+                    unit="Hz",
+                )
+                self._effective_range(
+                    window,
+                    limits,
+                    name=name,
+                    unit="Hz",
+                )
+                limits_by_channel[channel] = limits
+                values[name] = self._read_fsk_hop_frequency(channel)
+        except BaseException:
+            self._invalidate_fsk_hop_state()
+            raise
+        return limits_by_channel, values
+
+    def _refresh_fsk_hop_values(self) -> dict[str, float]:
+        """Read the two DG4000 hop registers and their waveform-dependent limits."""
+
+        limits, values = self._read_fsk_hop_state(self._frequency_bounds)
+        self._fsk_hop_limits.update(limits)
+        self._current_values.update(values)
+        return values
+
+    def tunable_fields(self) -> tuple[TunableField, ...]:
+        """The common RF fields plus each channel's DG4000 FSK hop register."""
+
+        with self._condition:
+            fields = []
+            by_carrier = {
+                channel_field(channel, FREQUENCY_FIELD): channel
+                for channel in self._channels
+            }
+            for field in super().tunable_fields():
+                fields.append(field)
+                channel = by_carrier.get(field.metadata.name)
+                if channel is None:
+                    continue
+                name = channel_field(channel, _FSK_HOP_FREQUENCY_FIELD)
+                effective_range = self._fsk_hop_range(channel)
+                low, high = (
+                    (None, None)
+                    if effective_range is None
+                    else effective_range
+                )
+                fields.append(
+                    TunableField(
+                        metadata=AuthoringField(
+                            name,
+                            "float",
+                            f"{self._channel_label(channel)}FSK hop frequency",
+                            None,
+                            minimum=low,
+                            maximum=high,
+                            unit="Hz",
+                            description=(
+                                "The alternate output frequency used by FSK; "
+                                "setting it does not select or enable FSK."
+                            ),
+                        ),
+                        current=self._current_values.get(name),
+                        live_write=True,
+                        dependency_group=(name,),
+                        device_limits=self._fsk_hop_limits[channel],
+                    )
+                )
+            return tuple(fields)
+
+    def _tune_window(self, selected: str, value: object) -> float | None:
+        """The common frequency safety window also fences every FSK hop."""
+
+        if selected not in ("frequency_low", "frequency_high"):
+            return super()._tune_window(selected, value)
+        requested = self._optional_edge(value, name=selected)
+        with self._condition:
+            current_low, current_high = self._frequency_bounds
+            low, high = (
+                (requested, current_high)
+                if selected == "frequency_low"
+                else (current_low, requested)
+            )
+            if low is not None and high is not None and low >= high:
+                raise ValueError(
+                    f"{selected}={requested!r} would leave an empty window "
+                    f"[{low!r}, {high!r}]"
+                )
+            limits, values = self._read_fsk_hop_state((low, high))
+            for channel in self._channels:
+                name = channel_field(channel, _FSK_HOP_FREQUENCY_FIELD)
+                current = values[name]
+                if (low is not None and current < low) or (
+                    high is not None and current > high
+                ):
+                    self._fsk_hop_limits.update(limits)
+                    self._current_values.update(values)
+                    raise ValueError(
+                        f"{selected}={requested!r} would strand {name} at "
+                        f"{current:g}; move the knob inside the new window first"
+                    )
+            self._fsk_hop_limits.update(limits)
+            self._current_values.update(values)
+            return super()._tune_window(selected, requested)
+
+    def _resolve_tune(
+        self, name: str, value: object, *, unit: str = ""
+    ) -> object:
+        selected = str(name)
+        routed = self._routing.get(selected)
+        if routed is None or routed[1] != _FSK_HOP_FREQUENCY_FIELD:
+            return super()._resolve_tune(selected, value, unit=unit)
+        channel = routed[0]
+        requested = float(value)
+        with self._condition:
+            effective_range = self._fsk_hop_range(channel)
+            if effective_range is None:
+                try:
+                    limits = self._instrument_limits(
+                        self._read_fsk_hop_frequency_limits(channel),
+                        name=selected,
+                        unit="Hz",
+                    )
+                    effective_range = self._effective_range(
+                        self._frequency_bounds,
+                        limits,
+                        name=selected,
+                        unit="Hz",
+                    )
+                except BaseException:
+                    self._current_values.pop(selected, None)
+                    self._fsk_hop_limits[channel] = None
+                    raise
+                self._fsk_hop_limits[channel] = limits
+            low, high = effective_range
+            if not low <= requested <= high:
+                raise ValueError(
+                    f"{selected} must lie in [{low!r}, {high!r}] Hz"
+                )
+            before = self._current_values.get(selected)
+            held = selected in self._current_values
+            self._current_values.pop(selected, None)
+            try:
+                effective = float(
+                    self._write_fsk_hop_frequency(channel, requested)
+                )
+            except TuneRefused:
+                if held:
+                    self._current_values[selected] = before
+                raise
+            self._current_values[selected] = effective
+            if effective != before:
+                self._settings_epoch += 1
+                self._condition.notify_all()
+            return effective
+
+    @staticmethod
+    def _amplitude_unit_parts(unit: str) -> tuple[str | None, float]:
+        family, prefix = DEFAULT_UNITS.family_and_prefix(unit)
+        native = {"dBm": _DBM, "Vpp": _VPP, "Vrms": _VRMS}.get(family.symbol)
+        return native, 10.0 ** prefix.exponent
+
+    def _check_policy_units(self, name: str, *units: str) -> None:
+        policy_unit = next((unit for field, _label, unit, _config_name in WINDOW_FIELDS if field == name), None)
+        if policy_unit is None or DEFAULT_UNITS.resolve(policy_unit).dimension != "power":
+            return
+        if any(unit and self._amplitude_unit_parts(unit)[0] in (_VPP, _VRMS) for unit in units):
+            raise ValueError(
+                f"{name}: shared power policy has no single channel load; use dBm or W/mW, not voltage units"
+            )
+
+    def _convert_amplitude(self, channel: str, value: float, source: str, target: str) -> float:
+        """Convert with the channel's load/waveform; prefixes never visit dBm."""
+        source_native, source_scale = self._amplitude_unit_parts(source)
+        target_native, target_scale = self._amplitude_unit_parts(target)
+        if source == target:
+            return float(value)
+        if source_native is None:
+            dbm = float(DEFAULT_UNITS.convert(value, source, "dBm"))
+            return self._convert_amplitude(channel, dbm, "dBm", target)
+        if target_native is None:
+            dbm = self._convert_amplitude(channel, value, source, "dBm")
+            return float(DEFAULT_UNITS.convert(dbm, "dBm", target))
+        raw = float(value) * source_scale
+        if source_native == target_native:
+            return raw / target_scale
+        if source_native == _DBM:
+            raw = self._volts_from_dbm(channel, raw, target_native)
+        elif target_native == _DBM:
+            raw = self._dbm_from_volts(channel, raw, source_native)
+        elif source_native == _VPP:
+            raw /= self._vpp_per_vrms(channel)
+        else:
+            raw *= self._vpp_per_vrms(channel)
+        return raw / target_scale
+
+    def convert_tunable_value(
+        self, name: str, value: float | tuple | list, source_unit: str, target_unit: str
+    ) -> float | tuple[float, ...]:
+        """Read-only conversion through the same channel facts used by Apply."""
+        routed = self._routing.get(str(name))
+        if routed is None and str(name) not in {field[0] for field in WINDOW_FIELDS}:
+            raise ValueError(f"device has no tunable field {name!r}")
+        self._check_policy_units(str(name), source_unit, target_unit)
+        with self._condition:
+            def converted(item):
+                if routed is not None and routed[1] == POWER_FIELD:
+                    return self._convert_amplitude(routed[0], float(item), source_unit, target_unit)
+                return float(DEFAULT_UNITS.convert(item, source_unit, target_unit))
+            return tuple(converted(item) for item in value) if isinstance(value, (tuple, list)) else converted(value)
+
+    def read_tunable_in_unit(self, name: str, unit: str = "") -> TunableField:
+        """Read a selected-unit view, retaining raw standing-unit readback."""
+        routed = self._routing.get(str(name))
+        self._check_policy_units(str(name), unit)
+        with self._condition:
+            if routed is None or routed[1] != POWER_FIELD:
+                field = next((item for item in self.tunable_fields() if item.metadata.name == name), None)
+                if field is None:
+                    raise ValueError(f"device has no tunable field {name!r}")
+                source = field.metadata.unit or "1"
+                target = unit or source
+                if source == target:
+                    return field
+                def converted(value):
+                    return None if value is None else float(DEFAULT_UNITS.convert(value, source, target))
+                return replace(field, metadata=replace(field.metadata, unit=target,
+                    default=converted(field.metadata.default), minimum=converted(field.metadata.minimum),
+                    maximum=converted(field.metadata.maximum)), current=converted(field.current),
+                    device_limits=None if field.device_limits is None else tuple(converted(v) for v in field.device_limits))
+            channel = routed[0]
+            held = self._amplitude_state(channel)
+            native = held["unit"]
+            standing_unit = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}.get(native, "dBm")
+            target = unit or standing_unit
+            raw = held["current"]
+            current = (raw if raw is None or target == standing_unit
+                       else self._convert_amplitude(channel, raw, standing_unit, target))
+            limits = None if held["minimum"] is None else self._instrument_limits(tuple(
+                self._convert_amplitude(channel, float(held[edge]), standing_unit, target)
+                for edge in ("minimum", "maximum")
+            ), name=str(name), unit=target)
+            policy = tuple(None if edge is None else self._convert_amplitude(channel, edge, "dBm", target)
+                           for edge in self._power_bounds)
+            low, high = (policy if limits is None else
+                         self._effective_range(policy, limits, name=str(name), unit=target))
+            if raw is not None:
+                self._current_values[str(name)] = self._convert_amplitude(channel, raw, standing_unit, "dBm")
+            return TunableField(
+                AuthoringField(str(name), "float", f"{self._channel_label(channel)}Power", None,
+                               minimum=low, maximum=high, unit=target),
+                current, True, (str(name),), device_limits=limits,
+            )
+
+    def tune_in_unit(self, name: str, value: float, unit: str) -> float:
+        routed = self._routing.get(str(name))
+        if not unit or value is None:
+            return self.tune(name, value)
+        self._check_policy_units(str(name), unit)
+        if routed is not None and routed[1] == POWER_FIELD:
+            return self._tune_logged(name, value, unit=unit)
+        field = self.read_tunable_in_unit(name)
+        native = field.metadata.unit or "1"
+        if unit == native:
+            return self.tune(name, value)
+        requested = float(DEFAULT_UNITS.convert(value, unit, native))
+        actual = self.tune(name, requested)
+        return float(DEFAULT_UNITS.convert(actual, native, unit))
+
+    def _write_power_in_unit(self, channel: str, value: float, unit: str) -> float:
+        native, scale = self._amplitude_unit_parts(unit)
+        if native is None:
+            # W/mW have no DG4000 display mode. Keep its mode and use the
+            # existing canonical boundary, with this driver's load conversion.
+            actual = self._write_power(channel, float(DEFAULT_UNITS.convert(value, unit, "dBm")))
+            return float(DEFAULT_UNITS.convert(actual, "dBm", unit))
+        source = self._source(channel)
+        held = self._amplitude_state(channel)
+        old_unit = held["unit"]
+        old_value = held["current"]
+        try:
+            if native != old_unit:
+                self._link.write(f"{source}:VOLTage:UNIT {native}")
+            self._link.write(f"{source}:VOLTage {float(value) * scale:.17g}{native}")
+            actual = float(self._link.query(f"{source}:VOLTage?"))
+            old_symbol = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}.get(old_unit, "dBm")
+            new_symbol = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}[native]
+            for edge in ("minimum", "maximum"):
+                if held[edge] is not None:
+                    held[edge] = self._convert_amplitude(channel, float(held[edge]), old_symbol, new_symbol)
+            held.update(unit=native, current=actual)
+            return actual / scale
+        except BaseException as error:
+            # Control Apply also owns a complete command: a failed write
+            # must not leave its temporary unit behind. Restore raw numbers,
+            # never a dBm round trip, and preserve both failures if it cannot.
+            commands = ([f"{source}:VOLTage:UNIT {old_unit}"]
+                        if old_unit is not None and native != old_unit else [])
+            if old_value is not None:
+                commands.append(f"{source}:VOLTage {old_value:.17g}{old_unit}")
+            for command in commands:
+                try:
+                    self._link.write(command)
+                except BaseException as restore_error:
+                    error.add_note(f"restoring channel {channel} also failed: {restore_error}")
+            held.update(unit=None, current=None, minimum=None, maximum=None)
+            self._device_limits[channel] = (self._device_limits[channel][0], None)
+            self._current_values.pop(channel_field(channel, POWER_FIELD), None)
+            raise
+
+    def _write_output(self, channel: str, enabled: bool) -> bool:
+        self._link.write(
+            f"{self._output(channel)} {'ON' if enabled else 'OFF'}"
+        )
+        return self._read_output(channel)
+
+    def _read_frequency(self, channel: str) -> float:
+        return float(self._link.query(f"{self._source(channel)}:FREQuency?"))
+
+    def _read_fsk_hop_frequency(self, channel: str) -> float:
+        return float(
+            self._link.query(
+                f"{self._source(channel)}:MOD:FSKey:FREQuency?"
+            )
+        )
+
+    def _read_fsk_hop_frequency_limits(
+        self, channel: str
+    ) -> tuple[float, float]:
+        source = self._source(channel)
+        return (
+            float(
+                self._link.query(
+                    f"{source}:MOD:FSKey:FREQuency? MINimum"
+                )
+            ),
+            float(
+                self._link.query(
+                    f"{source}:MOD:FSKey:FREQuency? MAXimum"
+                )
+            ),
+        )
+
+    def _read_frequency_limits(self, channel: str) -> tuple[float, float]:
+        """The instrument's own range, asked of it: a DG4062 stops at 60 MHz
+        and a DG4162 at 160 MHz, and the model knows which it is."""
+
+        source = self._source(channel)
+        return (
+            float(self._link.query(f"{source}:FREQuency? MINimum")),
+            float(self._link.query(f"{source}:FREQuency? MAXimum")),
+        )
+
+    def _read_power_limits(self, channel: str) -> tuple[float, float]:
+        """The instrument's amplitude range, in dBm through the channel's own
+        unit and load -- the same arithmetic every power read goes through."""
+
+        held = self._amplitude_state(channel)
+        unit = held["unit"]
+        edges = []
+        for extreme in ("minimum", "maximum"):
+            amplitude = float(held[extreme])
+            edges.append(
+                amplitude if unit == _DBM else self._dbm_from_volts(channel, amplitude, unit)
+            )
+        return min(edges), max(edges)
+
+    def _read_power(self, channel: str) -> float:
+        held = self._amplitude_state(channel)
+        if held["current"] is None:
+            self._amplitudes.pop(channel)
+            held = self._amplitude_state(channel)
+            self._device_limits[channel] = (self._device_limits[channel][0], self._read_power_limits(channel))
+        unit = held["unit"]
+        amplitude = float(held["current"])
+        if unit == _DBM:
+            return amplitude
+        return self._dbm_from_volts(channel, amplitude, unit)
+
+    # ---------------------------------------------- the channel's own units
+    def _amplitude_unit(self, channel: str) -> str:
+        """Read the unit while refreshing this channel's session facts."""
+
+        answer = self._link.query(
+            f"{self._source(channel)}:VOLTage:UNIT?"
+        ).strip().upper()
+        for unit in (_DBM, _VRMS, _VPP):
+            if answer.startswith(unit):
+                return unit
+        raise RuntimeError(
+            f"channel {channel} answered its amplitude unit as {answer!r}, "
+            f"which is none of {_DBM}, {_VRMS} or {_VPP}"
+        )
+
+    def _load_ohms(self, channel: str) -> float:
+        """The load this channel is set to drive, in ohms (inf for high-Z)."""
+
+        answer = self._link.query(
+            f"{self._output(channel)}:IMPedance?"
+        ).strip().upper()
+        if answer.startswith("INF"):
+            return math.inf
+        ohms = float(answer)
+        # The instrument spells high-Z as its own out-of-range number.
+        if not math.isfinite(ohms) or ohms >= _HIGH_Z_OHMS:
+            return math.inf
+        if ohms <= 0.0:
+            raise RuntimeError(
+                f"channel {channel} reports a load of {ohms!r} ohms"
+            )
+        return ohms
+
+    def _delivering_load(self, channel: str, unit: str) -> float:
+        load = float(self._amplitude_state(channel)["load"])
+        if math.isinf(load):
+            raise RuntimeError(
+                f"channel {channel} states its amplitude in {unit} into a "
+                "high-Z load, where delivered power is not defined; set the "
+                "channel's output load, or its amplitude unit to dBm"
+            )
+        return load
+
+    def _vpp_per_vrms(self, channel: str) -> float:
+        """The channel's peak-to-peak/RMS ratio, which is its waveform's.
+
+        Refreshed with the unit/load: only a sine's ratio is known here; a square wave's
+        depends on its duty cycle, a ramp's on its symmetry, and reading
+        either through the sine ratio would state a power the channel is
+        not delivering (3 dB off for a symmetric square wave).
+        """
+
+        answer = str(self._amplitude_state(channel)["waveform"])
+        if answer.startswith(_SINE):
+            return _SINE_VPP_PER_VRMS
+        raise RuntimeError(
+            f"channel {channel} states its amplitude in {_VPP} while playing "
+            f"a {answer or 'unknown'} waveform, whose peak-to-peak/RMS ratio "
+            "this driver does not know; set the channel's amplitude unit to "
+            f"{_VRMS} or {_DBM}, or its waveform to sine"
+        )
+
+    def _rms_from_volts(self, channel: str, amplitude: float, unit: str) -> float:
+        return amplitude if unit == _VRMS else amplitude / self._vpp_per_vrms(channel)
+
+    def _dbm_from_volts(self, channel: str, amplitude: float, unit: str) -> float:
+        load = self._delivering_load(channel, unit)
+        rms = self._rms_from_volts(channel, amplitude, unit)
+        watts = rms * rms / load
+        if watts <= 0.0:
+            raise RuntimeError(
+                f"channel {channel} reports an amplitude of {amplitude!r} "
+                f"{unit}, which delivers no power to state in dBm"
+            )
+        return 10.0 * math.log10(watts / _MILLIWATT)
+
+    def _volts_from_dbm(self, channel: str, value_dbm: float, unit: str) -> float:
+        load = self._delivering_load(channel, unit)
+        watts = _MILLIWATT * 10.0 ** (value_dbm / 10.0)
+        rms = math.sqrt(watts * load)
+        return rms if unit == _VRMS else rms * self._vpp_per_vrms(channel)
+
+    def _read_output(self, channel: str) -> bool:
+        answer = self._link.query(f"{self._output(channel)}?").strip().upper()
+        return answer in ("ON", "1")
+
+    def close(self) -> None:
+        self._link.close()
+
+
+__all__ = [
+    "Dg4000Sighting",
+    "PROBE_TIMEOUT_SECONDS",
+    "RigolDg4000Config",
+    "RigolDg4000RfSource",
+    "discover_dg4000",
+    "is_dg4000",
+]

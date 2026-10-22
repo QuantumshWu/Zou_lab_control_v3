@@ -1,0 +1,111 @@
+/* The nodes' own editors (src/views/node_editors), laid out from fluent.css
+ * controls on the Edit page's one label column (--label-width, set by
+ * shareLabelColumn on the page body).  Every value is a token. */
+:root {
+  /* ScanPlanEditor._API_LABEL_ROOM: the label column an API value's name gets */
+  --api-label-room: calc(max(1px, round(calc(180px * var(--fluent)), 1px)) * var(--qt));
+  /* A Range bank's boxes, as wide as the numbers they hold: an end a dozen
+   * digits, the count six (FluentSpinBox 1..100000). */
+  --range-end-w: calc(12ch + 2 * var(--field-text-inset) + var(--stepper-extent));
+  --range-count-w: calc(6ch + 2 * var(--field-text-inset) + var(--stepper-extent));
+  /* DeriveEditor _NAME_WIDTH / _OPERAND_WIDTH (design px): the least room a
+   * variable's name gets, and the operand column, pinned. */
+  --derive-name-w: calc(max(1px, round(calc(150px * var(--fluent)), 1px)) * var(--qt));
+  --derive-operand-w: calc(max(1px, round(calc(140px * var(--fluent)), 1px)) * var(--qt));
+  /* CalibrationsEditor _FILE_NAME_ROOM: the label column a calibration file's name gets */
+  --file-name-room: calc(max(1px, round(calc(150px * var(--fluent)), 1px)) * var(--qt));
+}
+
+/* A contribution stands a section below the form above it (v2 _space_sections). */
+.node-editor { display: flex; flex-direction: column; gap: var(--row-gap); margin-top: var(--section-gap); min-width: 0; }
+.node-editor .note.warning, .node-editor .field-error.warning { color: var(--orange-dark); }
+.node-editor [hidden] { display: none !important; }
+
+/* card_title_row: the title in the label column, the section's own control
+ * after it, its summary at the right end. */
+.editor-title .heading { flex: none; width: var(--label-width, var(--label-min)); }
+.editor-title .summary-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- ScanPlanEditor: every axis a line of one column set ---------- */
+.scan-axes {
+  display: grid; align-items: center; column-gap: var(--row-gap); row-gap: var(--row-gap);
+  grid-template-columns: var(--label-width, var(--label-min)) minmax(0, 1fr) auto auto auto auto;
+}
+.scan-axes:empty { display: none; }
+/* "By hand" in the label column; nothing before a port's row. */
+.axis-kind { grid-column: 1; }
+.scan-axes > .axis-port, .scan-axes > .axis-name { grid-column: 2; min-width: 0; width: 100%; }
+.axis-values { grid-column: 3; display: flex; min-width: 0; }
+.axis-values > .axis-list { flex: 1; min-width: 0; }
+.range-bank { display: flex; align-items: center; gap: var(--row-gap); }
+.range-bank > .spin { flex: none; width: var(--range-end-w); }
+.range-bank > .spin:last-child { width: var(--range-count-w); }
+.range-bank > .spin > input { width: 100%; }
+.bank-word { padding-bottom: var(--cap-lift); }
+/* The axis's unit: a picker as wide as the column, or -- with no other
+ * spellings -- a word where a picker's text would start. */
+.axis-unit { grid-column: 4; display: flex; align-items: center; min-width: 0; }
+.axis-unit > .unit-picker { width: 100%; }
+.unit-word { padding: 0 0 var(--cap-lift) var(--field-text-inset); white-space: nowrap; }
+.scan-axes > .segmented { grid-column: 5; }
+.scan-axes > button.glyph { grid-column: 6; }
+/* What a row's values are, and what is wrong with them, under the row from the axis's text. */
+.axis-notes { grid-column: 2 / -1; display: flex; flex-direction: column; padding-left: var(--field-text-inset); margin-top: calc(-1 * var(--row-gap) / 2); }
+.axis-notes:not(:has(> :not([hidden]))) { display: none; }
+
+/* The API values: a section of its own, its names in the label column's room. */
+.scan-plan > .section-title:not(:first-child) { margin-top: calc(var(--section-gap) - var(--row-gap)); }
+.api-values { --label-width: inherit; }
+.api-values .field-label { max-width: var(--label-width, var(--api-label-room)); }
+.parked-line { display: flex; align-items: flex-start; gap: var(--row-gap); }
+.parked-line > p { flex: 1; min-width: 0; padding-top: calc((var(--control) - var(--font-line)) / 2); }
+
+/* ---------- PairMatrixEditor ------------------------------------------- */
+.pair-matrix > .selection-grid { align-self: flex-start; }
+.logic-editor-body > .editor-error { margin-top: var(--section-gap); }
+
+/* ---------- DeriveVariablesEditor -------------------------------------- */
+.derive-inputs { display: grid; grid-template-columns: max-content max-content 1fr; column-gap: var(--section-gap); row-gap: var(--row-gap);
+  padding-left: var(--field-text-inset); align-items: center; }
+.derive-inputs > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-bottom: var(--cap-lift); }
+.derive-inputs-form .field-label { align-self: start; }
+.derive-cards { display: flex; flex-direction: column; gap: var(--row-gap); }
+.derive-card { padding: calc(var(--card-pad) - var(--edge)); display: flex; flex-direction: column; gap: calc(var(--row-gap) / 2); }
+/* Every line of every card on one column set; the operand column starts on
+ * the page's control column (the lead takes what the label column leaves). */
+.derive-lines {
+  display: grid; align-items: center; column-gap: var(--row-gap); row-gap: var(--row-gap);
+  grid-template-columns: calc(var(--label-width, var(--label-min)) - var(--card-pad)) var(--derive-operand-w) auto auto minmax(0, 1fr) auto auto;
+}
+.derive-lead { grid-column: 1; display: flex; align-items: center; justify-content: flex-end; gap: var(--row-gap); min-width: 0; }
+.derive-lead > .derive-name { flex: 1; min-width: 0; }
+.derive-eq { padding-bottom: var(--cap-lift); }
+.derive-eq.hold { visibility: hidden; }
+.derive-probe { position: absolute; visibility: hidden; width: max-content; }
+.derive-stat-lead { justify-content: flex-end; }
+.derive-lines > .derive-operand { grid-column: 2; min-width: 0; }
+.derive-at { grid-column: 3; display: flex; align-items: center; gap: var(--row-gap); min-width: 0; }
+/* A pick's axis and labels as wide as what they hold (v2 "fit" columns). */
+.derive-at > select { width: auto; min-width: var(--range-count-w); }
+.derive-number { width: var(--derive-operand-w); }
+.derive-labels-cell { grid-column: 4; display: flex; align-items: center; min-width: 0; }
+.derive-labels { width: auto; min-width: var(--range-count-w); max-width: calc(3 * var(--derive-operand-w)); }
+.derive-unit { padding-bottom: var(--cap-lift); }
+.derive-tail { grid-column: 5; }
+.derive-lines > .derive-publish { grid-column: 6; }
+.derive-lines > .derive-remove { grid-column: 7; }
+.derive-word { padding-bottom: var(--cap-lift); white-space: nowrap; }
+.derive-error { grid-column: 2 / -1; padding-left: var(--field-text-inset); margin-top: calc(-1 * var(--row-gap) / 2); }
+.derive-error.muted { color: var(--muted-ink); }
+.derive-reduce { grid-column: 2 / 7; display: flex; flex-wrap: wrap; align-items: center; gap: var(--row-gap); min-width: 0; }
+.derive-over { width: auto; min-width: var(--derive-operand-w); }
+.derive-adds { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: var(--row-gap); }
+.derive-preview { grid-column: 2 / -1; padding-left: var(--field-text-inset); margin-top: calc(-1 * var(--row-gap) / 2); }
+
+/* ---------- FrameClaimsEditor / PostSelectionEditor -------------------- */
+.frame-claims > .selection-grid { align-self: flex-start; }
+.frame-claims .grid-row-label { min-width: 0; overflow: hidden; }
+.frame-claims-lines { display: flex; flex-direction: column; gap: calc(var(--row-gap) / 2); }
+.post-condition { display: flex; align-items: center; gap: var(--row-gap); flex-wrap: wrap; }
+.post-slot { display: flex; align-items: center; gap: calc(var(--row-gap) / 2); }
+.post-slot > select { flex: none; }

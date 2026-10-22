@@ -1,0 +1,31 @@
+[package]
+name = "zlc-desktop"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+zlc-core = { path = "../zlc-core" }
+zlc-plot = { path = "../zlc-plot" }
+zlc-archive = { path = "../zlc-archive" }
+rayon = "1.12"
+# Device plugins (the Virtual MOT camera) run in plugin host processes; see acquisition.rs.
+zlc-plugin-host = { path = "../zlc-plugin-host" }
+zlc-fabric = { path = "../zlc-fabric" }
+serde_json = "1"
+zlc-bus = { path = "../zlc-bus" }
+zlc-workbench = { path = "../zlc-workbench" }
+zlc-pulse = { path = "../zlc-pulse" }
+zlc-pulse-editor = { path = "../zlc-pulse-editor" }
+png = "0.18"
+uuid = { version = "1", features = ["v4"] }
+tao = "=0.37.1"
+wry = { version = "=0.57.0", features = ["devtools"] }
+webview2-com = "=0.39.1"
+windows-core = "=0.62.2"
+# The file and folder dialogs: the Common Item Dialog (COM), as Qt's QFileDialog.
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_JobObjects", "Win32_Security", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Globalization"] }
+
+[build-dependencies]
+zlc-resources = { path = "../zlc-resources" }

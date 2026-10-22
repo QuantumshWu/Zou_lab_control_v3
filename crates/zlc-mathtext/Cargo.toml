@@ -1,0 +1,11 @@
+[package]
+name = "zlc-mathtext"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+zlc-text = { path = "../zlc-text" }
+
+[dev-dependencies]
+serde_json = "1"

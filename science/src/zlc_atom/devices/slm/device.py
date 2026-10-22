@@ -1,0 +1,199 @@
+"""The phase-only SLM contract: the device surface every SLM adapter implements."""
+
+from __future__ import annotations
+
+from typing import Callable, Mapping, Protocol, runtime_checkable
+
+import numpy as np
+
+from .phase import _TWO_PI, _shape, canonical_phase
+
+#: The bench's panel, a Hamamatsu X15213: its active area (rows, columns).
+#: The simulated world's virtual SLM is the same panel.
+X15213_SHAPE_YX = (1024, 1272)
+
+
+def phase_from_codes(codes: object, shape_yx: tuple[int, int]) -> np.ndarray:
+    """Decode digital phase, not vendor gray: orientation and LUT stay downstream."""
+    shape = _shape(shape_yx)
+    source = np.asarray(codes)
+    if source.shape != shape or source.dtype != np.uint8:
+        raise ValueError("SLM phase codes must be a uint8 matrix matching the full device shape")
+    radians = np.multiply(source, np.float32(_TWO_PI / 256), dtype=np.float32)
+    return np.frombuffer(radians.tobytes(), dtype=np.float32).reshape(shape)
+
+
+def _same_phase_codes(left: np.ndarray, right: np.ndarray) -> bool:
+    """Compare validated uint8 snapshots exactly without a byte-sized mask."""
+    if left is right and not left.flags.writeable:
+        return True
+    if left.flags.c_contiguous and right.flags.c_contiguous:
+        first, second = left.reshape(-1), right.reshape(-1)
+        words = first.size // 8 * 8
+        if words and first[:8].view(np.uint64)[0] != second[:8].view(np.uint64)[0]:
+            return False
+        return (np.array_equal(first[:words].view(np.uint64), second[:words].view(np.uint64))
+                and np.array_equal(first[words:], second[words:]))
+    return np.array_equal(left, right)
+
+
+def phase_sequence_codes(
+    codes: object, shape_yx: tuple[int, int], frame_interval_seconds: object,
+    *, frame_count: int | None = None,
+) -> tuple[np.ndarray | None, np.ndarray]:
+    """Validate a caller-owned movie or declared bounded-stream frame count."""
+    shape = _shape(shape_yx)
+    source = None if codes is None else np.asarray(codes)
+    if source is None:
+        if type(frame_count) is not int or frame_count <= 0:
+            raise ValueError("Streaming SLM sequence needs a positive declared frame_count")
+        count = frame_count
+    else:
+        if source.dtype != np.uint8 or source.ndim != 3 or source.shape[1:] != shape or not len(source):
+            raise ValueError("SLM phase sequence must be nonempty uint8 frames matching the full device shape")
+        count = len(source)
+        if frame_count is not None and frame_count != count:
+            raise ValueError("SLM frame_count differs from its phase sequence")
+    intervals = np.asarray(frame_interval_seconds, dtype=np.float64)
+    if intervals.ndim == 0:
+        intervals = np.full(count, intervals.item(), dtype=np.float64)
+    if intervals.shape != (count,) or not np.all(np.isfinite(intervals)) or np.any(intervals <= 0):
+        raise ValueError("SLM frame intervals must be finite positive seconds, one per frame")
+    frames = None if source is None else source.view()
+    if frames is not None:
+        frames.flags.writeable = False
+    return frames, np.frombuffer(intervals.tobytes(), dtype=np.float64)
+
+
+@runtime_checkable
+class SlmAdapter(Protocol):
+    """The complete device-independent surface of one phase-only SLM."""
+
+    @property
+    def identity(self) -> str: ...
+
+    @property
+    def shape_yx(self) -> tuple[int, int]: ...
+
+    def apply_phase(self, radians: object) -> np.ndarray: ...
+
+    @property
+    def last_commanded_phase(self) -> np.ndarray | None: ...
+
+    @property
+    def command_revision(self) -> int: ...
+
+    @property
+    def mapping_revision(self) -> int: ...
+
+    @property
+    def last_command_receipt(self) -> Mapping[str, object]: ...
+
+    # A movie of phase frames played at stated intervals: prepared (whole, or
+    # declared and streamed frame by frame), played, cancelled, released.
+    def prepare_phase_sequence(self, codes: object, frame_interval_seconds: object, *,
+                               frame_count: int | None = None) -> dict[str, object]: ...
+
+    def submit_phase_frame(self, index: int, codes: object) -> None: ...
+
+    def play_phase_sequence(self, stop_requested: Callable[[], bool] | None = None) -> dict[str, object]: ...
+
+    def cancel_phase_sequence(self) -> None: ...
+
+    def release_phase_sequence(self) -> None: ...
+
+    def close(self) -> None: ...
+
+
+def _validated_state(
+    identity: object,
+    shape_yx: object,
+    phase: object,
+    command_revision: object,
+    mapping_revision: object,
+    receipt: object,
+    *,
+    commanded_phase: np.ndarray | None = None,
+    commanded_codes: np.ndarray | None = None,
+) -> tuple[str, tuple[int, int], np.ndarray | None, int, int, dict[str, object]]:
+    if (
+        not isinstance(identity, str)
+        or not identity.strip()
+        or identity != identity.strip()
+    ):
+        raise ValueError("SLM identity must be non-empty text without surrounding space")
+    shape = _shape(tuple(shape_yx))
+    if type(command_revision) is not int or command_revision < 0:
+        raise ValueError("SLM command_revision must be a non-negative integer")
+    if type(mapping_revision) is not int or mapping_revision < 0:
+        raise ValueError("SLM mapping_revision must be a non-negative integer")
+    if not isinstance(receipt, Mapping):
+        raise TypeError("SLM command receipt must be a mapping")
+    frozen_receipt = dict(receipt)
+    if frozen_receipt.get("outcome") not in {"known-old", "known-new", "unknown"}:
+        raise ValueError("SLM command receipt has an invalid outcome")
+    if frozen_receipt.get("identity") != identity:
+        raise ValueError("SLM command receipt identity differs from device truth")
+    if (
+        type(frozen_receipt.get("command_revision")) is not int
+        or frozen_receipt["command_revision"] != command_revision
+    ):
+        raise ValueError("SLM command receipt revision differs from device truth")
+    # A receipt records the mapping the LAST EXECUTED command was built
+    # with.  Changing the correction afterwards advances the device's
+    # mapping without re-sending a phase, so a receipt older than the
+    # current mapping is the truthful state of a device whose picture
+    # predates its configuration; a receipt AHEAD of the device is what
+    # cannot be.
+    if (
+        type(frozen_receipt.get("mapping_revision")) is not int
+        or frozen_receipt["mapping_revision"] < 0
+        or frozen_receipt["mapping_revision"] > mapping_revision
+    ):
+        raise ValueError("SLM command receipt mapping is newer than device truth")
+    if commanded_codes is not None:
+        # Internal confirmed codes are a distinct representation, not radians.
+        if (phase is not commanded_codes or commanded_phase is not None
+                or not isinstance(phase, np.ndarray) or phase.dtype != np.uint8
+                or phase.shape != shape or phase.flags.writeable):
+            raise ValueError("SLM confirmed phase codes must be a readonly uint8 matrix matching the full device shape")
+        snapshot = phase
+    else:
+        # A successful ACK returns metadata, not new phase pixels. Its local
+        # commanded snapshot was already canonicalized at the input boundary.
+        known_command = commanded_phase is not None and phase is commanded_phase
+        snapshot = phase if known_command else None if phase is None else canonical_phase(phase, shape)
+        if phase is not None and not known_command and (
+            np.asarray(phase).flags.writeable or not np.array_equal(phase, snapshot)
+        ):
+            raise ValueError("SLM last_commanded_phase must be an immutable canonical snapshot")
+    if (snapshot is None) != (frozen_receipt["outcome"] == "unknown"):
+        raise ValueError("SLM phase knowledge differs from its command receipt")
+    return identity, shape, snapshot, command_revision, mapping_revision, frozen_receipt
+
+
+def opened_slm(slm: SlmAdapter) -> SlmAdapter:
+    """An opened adapter whose stated state is consistent, or closed and refused."""
+
+    try:
+        _validated_state(
+            slm.identity,
+            slm.shape_yx,
+            slm.last_commanded_phase,
+            slm.command_revision,
+            slm.mapping_revision,
+            slm.last_command_receipt,
+        )
+    except BaseException:
+        slm.close()
+        raise
+    return slm
+
+
+#: What a caller may ask of an SLM while its movie plays (play_phase_sequence
+#: holds the device until the last frame): stream the next frame, or stop.
+CONCURRENT_SLM_METHODS = ("submit_phase_frame", "cancel_phase_sequence")
+
+
+__all__ = ["CONCURRENT_SLM_METHODS", "SlmAdapter", "canonical_phase", "opened_slm", "phase_from_codes",
+           "phase_sequence_codes"]

@@ -1,0 +1,68 @@
+"""Discoverable camera measurement descriptor."""
+
+from __future__ import annotations
+
+from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS
+from zlc_atom.devices.camera.photoelectrons import (
+    PHOTOELECTRONS,
+    resolve_photoelectron_availability,
+)
+from zlc_atom.nodes._framework.descriptor import NodePreviewSpec
+from zlc_atom.nodes.camera.authoring import CAMERA_MEASUREMENT_SCHEMA, IMAGE_AREA_TO_ROI, ROI_FIELD_NAMES
+from zlc_atom.nodes.camera.measurement import (
+    CAMERA_FRAMES_OUTPUT,
+    CameraMeasurementNode,
+    CameraMeasurementRequest,
+    describe_camera_frames,
+)
+from zlc_plugin import DeviceRequirement, NodeKind, NodeType
+
+
+def _build(
+    *,
+    camera: object,
+    camera_key: str,
+    **values: object,
+) -> CameraMeasurementNode:
+    authored = CAMERA_MEASUREMENT_SCHEMA.project_values(values)
+    return CameraMeasurementNode(
+        camera=camera,  # type: ignore[arg-type]
+        request=CameraMeasurementRequest(
+            camera_key=camera_key,
+            exposure_seconds=authored["exposure_seconds"],
+            roi_xywh=tuple(authored[name] for name in ROI_FIELD_NAMES),
+            repeat=int(authored["repeat"]),
+            frames_per_cycle=int(authored["frames_per_cycle"]),
+            photoelectrons=bool(authored[PHOTOELECTRONS]),
+        ),
+    )
+
+
+LOGIC_NODE = NodeType(
+    "camera_measurement",
+    NodeKind.MEASUREMENT,
+    CAMERA_MEASUREMENT_SCHEMA,
+    description=(
+        "Acquire complete camera cycles and publish frames with repeat, frame and "
+        "pixel coordinates for Image/Facet plots or Occupancy. Start arms the camera "
+        "and reports ready; the external trigger source or experiment owner supplies "
+        "the triggers, not this measurement."
+    ),
+    reports_ready=True,
+    # One output whatever the cycle size: the frames live on the dataset's
+    # READOUT_EVENT axis, so the signal vocabulary does not change with the
+    # acquisition configuration.
+    outputs=(CAMERA_FRAMES_OUTPUT,),
+    describe_output_frames=describe_camera_frames,
+    node_previews=(NodePreviewSpec(CAMERA_FRAMES_OUTPUT, "facet_grid"),),
+    device_requirements=(
+        DeviceRequirement("camera.adapter", "camera", CAMERA_PROTECTED_FIELDS),
+    ),
+    build=_build,
+    selection_mappings=(IMAGE_AREA_TO_ROI,),
+    # Whether this camera can be read that way is the camera's answer, not
+    # this node's: the conversion is configured on the device.
+    resolve_field_availability=resolve_photoelectron_availability,
+)
+
+__all__ = ["LOGIC_NODE"]

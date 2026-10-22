@@ -1,0 +1,14 @@
+[workspace]
+members = ["crates/zlc-core", "crates/zlc-pulse", "crates/zlc-pulse-editor", "crates/zlc-archive", "crates/zlc-render", "crates/zlc-agg", "crates/zlc-text", "crates/zlc-mathtext", "crates/zlc-plot", "crates/zlc-figure", "crates/zlc-bus", "crates/zlc-workbench", "crates/zlc-plugin-host", "crates/zlc-fabric", "crates/zlc-desktop", "crates/zlc-resources", "crates/zlc-launch"]
+resolver = "3"
+exclude = ["tools/toolchain"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "thin"

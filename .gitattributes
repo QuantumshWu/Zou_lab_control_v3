@@ -1,0 +1,4 @@
+# cmd.exe resolves `goto`/`call :label` by seeking through the file; with bare LF
+# line endings a label it plainly contains is reported missing. Whatever a
+# clone's core.autocrlf, a .bat is checked out with CRLF.
+*.bat text eol=crlf

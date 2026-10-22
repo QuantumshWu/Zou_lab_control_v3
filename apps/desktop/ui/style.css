@@ -1,0 +1,739 @@
+/* ZLC desktop: the shell and the views, laid out from fluent.css controls.
+ * Every value is a token of tokens.css; this file spells no colour and no
+ * length.  Section comments name the v2 view each block reproduces. */
+@import url("fluent.css");
+@import url("node_editors.css");
+
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body { display: flex; flex-direction: column; }
+
+/* ---------- the window's title bar: FluentWindow's StandardTitleBar ------ */
+/* The host's caption window over the band takes the pointer (frame.rs); the
+ * buttons show what it says. Glyphs at TitleBarButton's own coordinates, a
+ * cosmetic one-device-pixel pen. */
+.title-bar { flex: none; position: relative; height: var(--title-bar-h); background: var(--bg); -webkit-user-select: none; user-select: none; }
+.title-bar-mark { position: absolute; left: var(--title-inset); top: var(--title-mark-top); width: var(--title-mark); height: var(--title-mark); }
+.title-bar-title {
+  position: absolute; top: 0; bottom: 0; display: flex; align-items: center; white-space: nowrap; overflow: hidden; color: var(--text);
+  left: calc(var(--title-inset) + var(--title-mark) + var(--title-mark-gap)); right: calc(3 * var(--title-button-w) + var(--title-mark-gap));
+}
+.title-bar-button { position: absolute; top: 0; width: var(--title-button-w); height: var(--title-bar-h); color: #000; }
+.title-bar-button.minimize { left: calc(var(--frame-w, 100%) - 3 * var(--title-button-w)); }
+.title-bar-button.maximize { left: calc(var(--frame-w, 100%) - 2 * var(--title-button-w)); }
+.title-bar-button.close { left: calc(var(--frame-w, 100%) - var(--title-button-w)); }
+.title-bar-button.hover { background: var(--title-hover); }
+.title-bar-button.pressed { background: var(--title-pressed); }
+.title-bar-button.close.hover { background: var(--title-close-hover); color: #fff; }
+.title-bar-button.close.pressed { background: var(--title-close-pressed); color: #fff; }
+.title-bar-button .glyph { position: absolute; box-sizing: border-box; }
+/* drawLine(18, 16, 28, 16) */
+.minimize .glyph { left: calc(18px * var(--qt)); top: calc(16px * var(--qt)); width: calc(10px * var(--qt) + var(--dpx)); height: var(--dpx); background: currentColor; }
+/* drawRect(18, 11, 10, 10); maximized: drawRect(18, 13, 8, 8) and the window behind it */
+.maximize .glyph { left: calc(18px * var(--qt)); top: calc(11px * var(--qt)); width: calc(10px * var(--qt) + var(--dpx)); height: calc(10px * var(--qt) + var(--dpx)); border: var(--dpx) solid currentColor; }
+.maximized .maximize .glyph { top: calc(13px * var(--qt)); width: calc(8px * var(--qt) + var(--dpx)); height: calc(8px * var(--qt) + var(--dpx)); }
+.maximized .maximize .glyph::before, .maximized .maximize .glyph::after { content: ""; position: absolute; border-color: currentColor; border-style: solid; border-width: 0; }
+.maximized .maximize .glyph::before {
+  left: calc(2px * var(--qt) - var(--dpx)); top: calc(-2px * var(--qt) - var(--dpx)); width: calc(8px * var(--qt) + var(--dpx)); height: calc(8px * var(--qt) + var(--dpx));
+  border-top-width: var(--dpx); border-right-width: var(--dpx); box-sizing: border-box;
+}
+.maximized .maximize .glyph::after { left: calc(2px * var(--qt) - var(--dpx)); top: calc(-2px * var(--qt) - var(--dpx)); width: var(--dpx); height: calc(2px * var(--qt)); background: currentColor; }
+.maximize .stub { display: none; position: absolute; left: calc(8px * var(--qt) - var(--dpx)); top: calc(6px * var(--qt) - var(--dpx)); width: calc(2px * var(--qt) + var(--dpx)); height: var(--dpx); background: currentColor; }
+.maximized .maximize .stub { display: block; }
+.close .glyph { inset: 0; background: currentColor; -webkit-mask: var(--title-close-glyph) 0 0 / 100% 100% no-repeat; mask: var(--title-close-glyph) 0 0 / 100% 100% no-repeat; }
+
+/* ---------- window body: FluentWindow page, cards a half window pad apart -- */
+.window {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  padding: var(--window-pad); gap: var(--window-pad-half);
+}
+
+/* ---------- TaskConsole header row ------------------------------------- */
+.header {
+  flex: none; display: flex; align-items: center; gap: var(--row-gap);
+  height: var(--header-h); padding: var(--header-pad-v) var(--window-pad);
+}
+.identity { display: flex; align-items: center; gap: var(--dot-gap); flex: none; min-width: 0; }
+.identity .name { flex: none; }
+/* The header's telemetry: the one flexible cell, on the row's line. */
+.summary { flex: 1; min-width: 0; color: var(--muted-ink); }
+.header > .summary { height: var(--control); align-content: center; padding-bottom: var(--cap-lift); }
+.command-group { display: flex; align-items: center; gap: var(--row-gap); flex: none; }
+/* add_row_switch / a group of its own: a second row gap before a group. */
+.command-group + .command-group, .command-group + button { margin-left: var(--row-gap); }
+#camera-exposure-spin { flex: none; width: var(--exposure-w); }
+
+/* ---------- the board: a Monitor page, cards a card pad apart ---------- */
+.board-card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* The Figure Viewer's board commands (v2 board_actions): a card pad under the tabs and in from the left, the
+ * surface's right inset (a card pad, or the bar's gutter where that is wider) from the right. */
+.board-row {
+  flex: none; display: flex; align-items: center; gap: var(--row-gap);
+  padding: var(--card-pad) max(var(--card-pad), var(--scrollbar)) 0 var(--card-pad);
+}
+.board-row #add-signal { width: var(--signal-combo-w); flex: 0 1 auto; }
+.board-row #add-kind { width: auto; flex: none; }
+.board-row .note { flex: 1; min-width: 0; padding-bottom: var(--cap-lift); }
+/* ConsoleBoardView: cards packed in reading order a card pad apart, each as
+ * big as its picture (an empty card is its preset frame). */
+.panel-board {
+  flex: 1; min-height: 0; overflow: auto; scrollbar-gutter: stable;
+  display: flex; flex-wrap: wrap; align-items: flex-start; align-content: flex-start; gap: var(--card-pad);
+  /* BoardMetrics(gap=card_pad()): the first card a card pad below and in from the board's corner (the host
+   * adds its own lead); on the right a card may run up to the bar's gutter, as v2's full-width cards do. */
+  padding: var(--card-pad) var(--window-pad-beside-bar) var(--window-pad) var(--card-pad);
+  position: relative;
+}
+.panel-board:empty { display: none; }
+.empty { flex: 1; padding: var(--card-pad) var(--window-pad); }
+.empty .note { white-space: normal; padding-left: var(--card-pad); line-height: calc(var(--font-line)); }
+
+/* ---------- PanelCardView ---------------------------------------------- */
+.panel {
+  position: relative; flex: none; min-width: min(var(--panel-min-w), 100%); max-width: 100%; background: var(--surface);
+  border: var(--edge) solid var(--divider); border-radius: var(--radius);
+}
+/* The title strip: a BG band inside the edge, two lines and its commands. */
+.panel-header {
+  --band: calc(max(2 * var(--title-line), var(--control)) + 2 * var(--card-title-pad));
+  --title-line: var(--font-line);
+  display: flex; align-items: center; gap: var(--card-pad); height: var(--band);
+  /* (band - commands) // 2 in whole Qt px: a whole number of --q, read past float error (8 Qt px read as 7.9999). */
+  padding: var(--card-title-pad) max(var(--card-title-pad), round(down, calc((var(--band) - var(--control)) / 2 + var(--q) / 1000), var(--q))) var(--card-title-pad) calc(var(--card-pad) - var(--edge));
+  background: var(--bg); border-radius: var(--radius-inner) var(--radius-inner) 0 0;
+  contain: inline-size; /* a strip never decides how wide its card is: it elides */
+}
+.panel-name { flex: 1; min-width: 0; }
+.panel-name .line { display: block; line-height: var(--title-line); height: var(--title-line); }
+.panel-name .panel-id { color: var(--muted-ink); }
+.panel-name .vacancy { color: var(--muted-ink); }
+:is(.panel-name, .data-structure) .domain-repeat { color: var(--axis-group-0); }
+:is(.panel-name, .data-structure) .domain-point { color: var(--axis-group-1); }
+:is(.panel-name, .data-structure) .domain-cell { color: var(--axis-group-2); }
+.panel-commands { display: flex; align-items: center; gap: var(--row-gap); flex: none; }
+/* The body is CARD_PAD round the surface counted from the card's OUTER edge
+ * (the painted edge lies inside that pad), with a 2 px top under the band. */
+.panel-body { padding: var(--body-top) calc(var(--card-pad) - var(--edge)) calc(var(--card-pad) - var(--edge)); }
+.surface {
+  position: relative; display: flex; justify-content: center; align-items: center;
+  min-height: var(--surface-min-h); background: var(--surface); overflow: hidden;
+}
+canvas { display: block; max-width: 100%; height: auto; touch-action: none; user-select: none; }
+.surface-placeholder { position: absolute; padding: var(--window-pad); color: var(--muted-ink); text-align: center; pointer-events: none; white-space: normal; }
+
+/* ---------- the Setting frame: FluentOverlayFrame over the board ------- */
+.settings {
+  position: absolute; z-index: 10; display: flex; flex-direction: column; gap: var(--card-pad);
+  /* The frame's margins count from its outer edge, the painted edge inside them. */
+  padding: calc(var(--card-pad) - var(--edge)) 0 calc(var(--card-pad) - var(--edge)) calc(var(--card-pad) - var(--edge));
+  background: var(--surface); border: var(--edge) solid var(--divider); border-radius: var(--radius);
+  min-width: var(--settings-min-w);
+}
+/* The close x ends where the fields end: past the body's scroll gutter. */
+.settings-header { display: flex; align-items: center; gap: var(--row-gap); padding-right: calc(var(--card-pad) - var(--edge) + var(--scrollbar)); flex: none; }
+.settings-header .row-label { flex: 1; min-width: 0; }
+.drag-handle { cursor: move; touch-action: none; }
+.settings-body { overflow-y: auto; min-height: 0; padding-right: calc(var(--card-pad) - var(--edge)); scrollbar-gutter: stable; }
+.settings-status { white-space: normal; padding-bottom: var(--row-gap); color: var(--text); }
+/* A message wraps in the width the rows give the frame: it never decides that width. */
+.settings :is(.settings-status, .field-error, .fit-error) { contain: inline-size; }
+.settings-status.error { color: var(--red-dark); }
+
+/* A panel's Edit page (v2 PanelEditorView): the panel's settings in place, its
+ * frozen picture with what it holds, its direct producer. */
+.panel-edit .logic-editor-body { display: flex; flex-direction: column; gap: var(--row-gap); padding-bottom: var(--window-pad); }
+.panel-edit .logic-editor-header { padding: var(--window-pad) 0 calc(var(--section-gap) - var(--row-gap)); }
+/* Its title is v2's FluentSectionLabel: as tall as a control and as wide as its words, the kind beside it on its line. */
+.panel-edit .logic-editor-title > :is(.heading, .note) { display: block; align-content: center; height: var(--control); padding: 0 0 var(--cap-lift); line-height: normal; }
+.panel-edit-card { flex: none; padding: calc(var(--card-pad) - var(--edge)); display: flex; flex-direction: column; gap: var(--row-gap); }
+/* The panel's own sections are cards of the page, as the others are. */
+.panel-edit-forms, .panel-edit-forms > .settings.inline, .settings.inline > .settings-body { display: contents; }
+.panel-edit-surface { display: flex; }
+/* v2's Frozen snapshot holds the plot surface alone: no card edge, strip or body pad around it. */
+.panel-edit-surface > .panel { border: none; min-width: 0; }
+.panel-edit-surface > .panel > .panel-header { display: none; }
+.panel-edit-surface > .panel > .panel-body { padding: 0; }
+.panel-edit-held { white-space: normal; }
+.panel-edit-held.warning { color: var(--orange-dark); }
+.settings.inline { position: static; z-index: auto; border: none; padding: 0; min-width: 0; background: none; }
+.settings.inline .settings-header { display: none; }
+.settings.inline .settings-body { overflow: visible; padding-right: 0; }
+
+/* ---------- the shell: the page's one view; a shared browser says it watches -- */
+.shared-mark { flex: none; padding: var(--window-pad-half) var(--window-pad) 0; }
+.shell-views { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.shell-views > .window { flex: 1; min-height: 0; }
+
+/* ---------- TaskConsole -------------------------------------------------- */
+/* v2's fixed kind slot: a longer kind's words end in an ellipsis, whole in the list. */
+.task-console .header .kind-combo { flex: none; width: var(--kind-combo-w); min-width: var(--kind-combo-w); }
+.console-tabs { flex: 1; --tab-inset: var(--window-pad); }
+.monitor-page { display: flex; flex-direction: column; min-height: 0; }
+/* v2 monitor_layout margins (lead, lead, 0, 0): the board, whose own card-pad gap makes up the rest, a page lead in. */
+.task-console .monitor-page { padding: calc(var(--window-pad) - var(--card-pad)) 0 0 calc(var(--window-pad) - var(--card-pad)); }
+/* The hint's words start where the first card's title will, its top a card's top (v2 monitor_hint margins: board text_left). */
+.monitor-page > .note { padding: var(--card-pad) calc(2 * var(--card-pad)) 0; }
+.logic-page { display: flex; flex-direction: column; gap: var(--row-gap); padding: var(--window-pad) var(--window-pad-beside-bar) var(--window-pad) var(--window-pad);
+  overflow-y: auto; scrollbar-gutter: stable; min-height: 0; }
+.logic-list { display: flex; flex-direction: column; gap: var(--row-gap); }
+.logic-list:empty { display: none; }
+/* LogicRowView: a card's one padding all round, the commands a row gap apart. */
+.logic-row { display: flex; flex-direction: column; gap: var(--row-gap); padding: calc(var(--card-pad) - var(--edge)); }
+.logic-top { display: flex; align-items: center; gap: var(--row-gap); min-width: 0; }
+.logic-top .dot { margin-right: calc(var(--dot-gap) - var(--row-gap)); }
+.logic-name { flex: none; width: var(--logic-name-w); }
+.kind-column {
+  flex: none; display: inline-grid; align-items: center; height: var(--control); min-width: var(--label-min);
+  padding: 0 var(--label-trail) var(--cap-lift) 0; color: var(--muted-ink); white-space: nowrap;
+}
+.kind-column > span { grid-area: 1 / 1; visibility: hidden; }
+.kind-column > span.current { visibility: visible; }
+.logic-status { flex: 1; min-width: 0; }
+/* Air after Plot, so it does not read as part of Start (add_row_switch lead=False). */
+.logic-top .row-switch { margin-left: 0; }
+/* LogicEditorView: three bands, only the rows scroll. */
+.logic-editor { display: flex; flex-direction: column; min-height: 0; }
+/* LogicEditorView header: two label lines a row gap apart and a section gap
+ * above the rows (labels as tall as their line, not a control). */
+.logic-editor-header { flex: none; display: flex; flex-direction: column; gap: var(--row-gap); padding: var(--window-pad) var(--window-pad) var(--section-gap); }
+.logic-editor-title > :is(.heading, .note) { height: var(--font-line); padding-bottom: 0; line-height: var(--font-line); }
+.logic-editor-title { display: flex; align-items: center; gap: var(--row-gap); min-width: 0; }
+/* v2 ElidedLabel: as wide as its words and its room (ElidedLabel.room()), the kind a row gap after it. */
+.logic-editor-title .heading { flex: 0 1 var(--whole-width, auto); padding-right: var(--elided-room); font-weight: var(--heading-weight); }
+.status-line:has(.wrap) { align-items: flex-start; }
+.status-line .status-text.wrap { white-space: normal; height: auto; line-height: var(--font-line); padding-bottom: 0; }
+.status-line:has(.wrap) .dot { margin-top: calc((var(--font-line) - var(--dot)) / 2 - var(--cap-lift) / 2); }
+.logic-editor-body { flex: 1; min-height: 0; overflow-y: auto; padding: 0 var(--window-pad-beside-bar) 0 var(--window-pad); scrollbar-gutter: stable; }
+.logic-editor-actions { flex: none; display: flex; align-items: center; gap: var(--row-gap); padding: var(--section-gap) var(--window-pad) var(--window-pad); }
+
+/* ---------- DeviceManager ------------------------------------------------ */
+.device-manager .tabs { flex: 1; }
+.config-page { display: flex; flex-direction: column; min-height: 0; padding: var(--window-pad) var(--window-pad-beside-bar) var(--window-pad) var(--window-pad); }
+.config-header { flex: none; padding-right: var(--scrollbar); }
+.config-header .dot { margin-right: calc(var(--dot-gap) - var(--row-gap)); }
+.document-name { max-width: var(--document-name-max); padding-bottom: var(--cap-lift); }
+/* Two columns a section gap apart; each keeps its scroll gutter, which is part of the gap. */
+.config-columns {
+  flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  column-gap: max(0px, calc(var(--section-gap) - var(--scrollbar))); margin-top: var(--window-pad);
+}
+.config-column { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: var(--row-gap); }
+.config-column > * { flex: none; }
+.config-actions { flex: none; display: flex; align-items: center; gap: var(--row-gap); margin-top: var(--window-pad); padding-right: var(--scrollbar); }
+.config-page > .strip { margin-top: var(--window-pad-half); padding-left: 0; padding-right: var(--scrollbar); }
+.device-card { display: flex; flex-direction: column; gap: var(--row-gap); min-width: 0; }
+.device-header input { flex: 2 1 0; max-width: var(--number-cap); }
+.device-header select { flex: 1 1 0; }
+.device-state.error { color: var(--red-dark); }
+/* The disclosure: a quiet chevron pointing where the parameters will go. */
+.disclosure { position: relative; }
+.disclosure::after {
+  content: ""; position: absolute; inset: 0; background: currentColor;
+  -webkit-mask: var(--chevron-disclosure-down) 0 0 / 100% 100% no-repeat; mask: var(--chevron-disclosure-down) 0 0 / 100% 100% no-repeat;
+}
+.disclosure.open::after { -webkit-mask-image: var(--chevron-disclosure-up); mask-image: var(--chevron-disclosure-up); }
+button.quiet.disclosure { color: var(--text); }
+.list-row { display: flex; align-items: center; gap: var(--row-gap); min-width: 0; }
+.list-identity { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.list-title, .list-detail { line-height: var(--font-line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.list-row > .list-detail { flex: 1; min-width: 0; padding-bottom: var(--cap-lift); }
+.list-detail.error { color: var(--red-dark); }
+/* DeviceControlView: one column budget for the headings and every row. */
+.device-control { display: flex; flex-direction: column; gap: var(--row-gap); padding: var(--window-pad); min-height: 0; overflow: auto; }
+.device-control > .note { margin-bottom: calc(var(--window-pad) - var(--row-gap)); }
+.device-control > .strip, .device-log > .strip { padding-left: 0; padding-right: 0; }
+.device-control > .strip { margin-top: auto; }
+.control-table {
+  display: grid; align-items: center; row-gap: var(--row-gap); column-gap: var(--control-column-gap);
+  grid-template-columns: max-content var(--control-current-w) minmax(max-content, 1fr) max-content max-content max-content minmax(var(--control-status-min), max-content);
+}
+/* v2 _align_headings: Desired is as wide as its widest editor's size hint and alone takes what the window has more. */
+.control-table .field-control > input.number { width: var(--edit-hint-w); max-width: none; }
+/* Its rows have cells after the box (row_cells): no capped row's stretch. */
+.control-table .field-control.capped > input.number, .control-table .field-control.capped > .spin { flex: 1 1 auto; }
+.control-table .field-control.capped::after { content: none; }
+.control-table .spin { flex: 1 1 auto; width: var(--spin-hint-w); max-width: none; }
+.control-table .spin.decimal { width: calc(var(--spin-hint-w) + var(--chip-reserve)); }
+.column-heading { display: flex; align-items: center; color: var(--muted-ink); white-space: nowrap; padding-bottom: var(--cap-lift); }
+.column-heading.right { justify-content: flex-end; }
+.column-heading.centre { justify-content: center; }
+/* ElidedLabel(align right): a reading longer than its column ends in an ellipsis. */
+.control-current { height: var(--control); align-content: center; padding-bottom: var(--cap-lift); text-align: right;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.control-limits { padding-bottom: var(--cap-lift); }
+.control-live { display: flex; justify-content: center; }
+.control-status { display: flex; align-items: center; gap: var(--dot-gap); min-width: 0; }
+.control-status .status-text { min-width: 0; }
+/* v2 _ServerLogView: the window is one white plain-text page, its text a frame and a document margin in. */
+.device-log { display: flex; flex-direction: column; min-height: 0; padding: 0; background: var(--surface); }
+/* A device's own window: its control or its log fills it; measured at its own height once. */
+.window.device-window { display: flex; flex-direction: column; min-height: 0; padding: 0; }
+.device-window > * { flex: 1; }
+.shell-views > .window.device-window.measuring, .device-window.measuring > * { flex: none; }
+/* Measured before the window has its width: a scroll bar the narrow window would need is not content. */
+.device-window.measuring > * { overflow: visible; }
+.log-text { flex: 1; min-height: 0; overflow: auto; line-height: var(--font-line); }
+.device-log > .log-text { padding: calc(5px * var(--qt)); }
+
+/* ---------- Installation (installation.exe) ----------------------------- */
+/* Devices@'s page: component cards on the left, the step's log filling the right. */
+.installation .tabs { flex: 1; }
+/* A row without a check box keeps its words where a box's would start (box, its gap, its empty words). */
+.check-slot { flex: none; width: calc(var(--check-size) + var(--check-gap)); }
+.install-row > .status-line { flex: none; width: var(--install-state-w); }
+.install-actions { flex-wrap: wrap; }
+.installation .config-column.right { overflow: hidden; }
+.config-column > .install-log { flex: 1 1 auto; min-height: 0; }
+.install-log > .group-body { flex: 1; min-height: 0; }
+.install-log .log-text { flex: 1; }
+
+/* ---------- FigureViewer ------------------------------------------------- */
+.window.figure-viewer { flex-direction: row; gap: var(--window-pad); }
+/* InfoPane._apply_pane_width (info_pane.ts paneWidth): its label column and scaled 280, or its tab bar, less its margins. */
+.figure-info { flex: none; width: var(--info-pane-w); }
+/* v2 FigureViewerView holder: one white surface, the data bar a band as tall as the left pane's path band and
+ * the tabs the pane's own gap under it (the two first rows on one line, the two tab strips on one top), a card
+ * pad of the surface under the tabs. */
+.figure-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--window-pad-half); padding-bottom: var(--card-pad); }
+/* v2 FigureViewerView's right surface: every row starts one card pad in and ends at its right inset. */
+.figure-data { padding-left: var(--card-pad); padding-right: var(--surface-right-inset); }
+.figure-data select { flex: 1; }
+.figure-main .tabs { flex: 1; --tab-inset: var(--card-pad); }
+.add-note { flex: 1; min-width: 0; padding-bottom: var(--cap-lift); }
+
+/* A data working copy (v2 _DataEditorView): a card pad in from the surface's left and top, the
+ * page choice heading it where the Monitor page has its commands, the cards a row gap apart, the
+ * copy's commands a section gap under them and on the surface's bottom; the body holds its bar's
+ * gutter, so cards and commands end at the surface's right inset.  Each page's value table is what
+ * scrolls: its card ends under its last row, or the table takes the room the page leaves. */
+.data-editor { display: flex; flex-direction: column; min-height: 0;
+  padding: var(--card-pad) calc(var(--surface-right-inset) - var(--scrollbar)) 0 var(--card-pad); }
+.data-editor > .segmented { flex: none; align-self: flex-start; margin-bottom: var(--card-pad); }
+.data-editor-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--row-gap); overflow: hidden auto; scrollbar-gutter: stable; }
+.data-editor-body > .group { flex: none; }
+.data-editor-body > .group:has(.data-table) { flex: 0 1 auto; min-height: 0; }
+.data-editor-body > .group:has(.data-table) > .group-body { flex: 0 1 auto; min-height: 0; }
+/* Only the table gives up room; every line above it keeps its own. */
+.data-editor-body .group-body > :not(.data-table, .data-axis-values) { flex: none; }
+.data-editor .title-row { height: var(--control); }
+/* Two equal columns of setting rows, a section gap apart, on the editor's one label column. */
+.data-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: var(--section-gap); row-gap: var(--row-gap); }
+.data-row { display: flex; align-items: center; gap: var(--row-gap); min-width: 0; min-height: var(--control); }
+.data-row > .data-label { flex: none; width: var(--label-width); padding-right: var(--label-trail); box-sizing: border-box; padding-bottom: var(--cap-lift); }
+.data-row > :not(.data-label, button, .segmented) { flex: 1; min-width: 0; }
+.data-row > :is(button, .segmented) { flex: none; }
+.data-row > .data-length { display: flex; max-width: none; }
+.data-length > input { flex: 1; min-width: 0; }
+.data-shows { display: flex; align-items: center; gap: var(--row-gap); }
+.data-shows > .segmented { flex: none; }
+/* The values are a block of their own under a heading, a section gap below the fields, as wide as the grid's first column. */
+.data-axis-values { display: flex; flex-direction: column; gap: var(--row-gap); margin-top: calc(var(--section-gap) - var(--row-gap)); min-height: 0; flex: 0 1 auto; }
+.data-axis-values > .section-title { flex: none; height: var(--control); align-items: center; }
+.data-axis-values > .data-table { width: calc((100% - var(--section-gap)) / 2); }
+.data-structure .line { line-height: var(--font-line); }
+.data-foot { flex: none; display: flex; flex-direction: column; gap: var(--row-gap); padding: var(--section-gap) var(--scrollbar) 0 0; }
+.data-foot > .note[data-state=error] { color: var(--red-dark); }
+.data-foot > .note[data-state=warning] { color: var(--orange-dark); }
+.data-foot > .note[data-state=idle] { color: var(--text); }
+.data-actions { display: flex; align-items: center; gap: var(--row-gap); }
+
+/* FluentTableView over a host-held slice: a frozen header row and row-number column,
+ * values set right at the item padding, a hairline under every row.  One scrolled
+ * body (DataTable): the header row sticky at its top, the row numbers at its left. */
+.data-table { flex: 0 1 var(--dt-height, auto); height: var(--dt-height, auto); max-height: var(--dt-height, none);
+  min-height: min(var(--dt-height, 0px), calc(var(--table-header-h) + 3 * var(--table-row-h) + 2 * var(--edge))); min-width: 0;
+  display: flex; flex-direction: column;
+  border: var(--edge) solid var(--divider); border-radius: var(--radius); background: var(--surface); overflow: hidden; outline: none; }
+.data-table.disabled { color: var(--disabled-ink); }
+.dt-columns { position: sticky; top: 0; z-index: 2; height: var(--table-header-h); border-bottom: var(--edge) solid var(--divider); background: var(--surface); }
+.dt-corner { position: sticky; left: 0; z-index: 1; width: var(--dt-row-head, 0px); height: 100%; border-right: var(--edge) solid var(--divider); background: var(--surface); }
+.dt-columns-inner { position: absolute; top: 0; bottom: 0; left: var(--dt-row-head, 0px); right: 0; }
+/* As wide as its rows, so the row numbers stick the whole way across. */
+.dt-body { display: flex; width: max-content; }
+.dt-rows { flex: none; position: sticky; left: 0; z-index: 1; width: var(--dt-row-head, 0px); border-right: var(--edge) solid var(--divider); background: var(--surface); }
+.dt-head { position: absolute; display: flex; align-items: center; justify-content: flex-end; white-space: nowrap; overflow: hidden; box-sizing: border-box;
+  padding: 0 var(--table-cell-pad) var(--cap-lift) calc(var(--table-cell-pad) + var(--table-header-margin)); color: var(--muted-ink); }
+.dt-columns .dt-head { top: 0; bottom: 0; font-weight: var(--heading-weight); }
+.dt-rows .dt-head { left: 0; right: 0; border-bottom: var(--edge) solid var(--divider); }
+.dt-viewport { flex: 1; overflow: auto; min-height: 0; }
+.dt-sizer { flex: none; position: relative; }
+.dt-cell { position: absolute; display: flex; align-items: center; justify-content: flex-end; white-space: nowrap; overflow: hidden; box-sizing: border-box;
+  padding: 0 var(--table-cell-pad) var(--cap-lift); border-bottom: var(--edge) solid var(--divider); cursor: default; }
+.dt-cell.current { background: var(--selected); }
+.dt-cell.pending { background: var(--orange-tint); }
+.dt-cell.editing { padding: 0; }
+.dt-cell.editing > input { width: 100%; height: 100%; min-width: 0; text-align: right; }
+
+/* ---------- PulseEditor slot, gallery ------------------------------------ */
+.placeholder-card { display: flex; flex-direction: column; gap: var(--row-gap); padding: var(--card-pad) var(--window-pad); }
+.placeholder-card .heading { font-weight: var(--heading-weight); }
+.gallery-page { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: var(--row-gap); }
+.gallery-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--window-pad); }
+.gallery-item { display: flex; flex-direction: column; align-items: flex-start; }
+.gallery-name { line-height: var(--font-line); }
+.gallery-elide { display: block; width: var(--kind-combo-w); }
+.gallery-info { width: calc(var(--label-min) + var(--info-pane-extra)); height: var(--gallery-info-h); }
+.gallery-tabs { width: calc(2 * var(--signal-combo-w)); }
+.gallery-tabs .note { padding: var(--card-pad) var(--window-pad); }
+.gallery-row > .form { min-width: calc(2 * var(--signal-combo-w)); }
+/* ConsoleBoardView carrying: the title band is the grip (an open hand), the
+ * carried card follows the pointer, its slot an ACCENT_TINT card with a dashed edge. */
+.panel-board.can-carry .panel-header { cursor: grab; }
+.panel-commands { cursor: default; }
+.panel.carried { position: fixed; z-index: 30; pointer-events: none; }
+body.carrying, body.carrying * { cursor: grabbing !important; }
+.drop-slot { flex: none; border: var(--edge) dashed var(--selection-edge); border-radius: var(--radius); background: var(--accent-tint); }
+/* A panel publisher row keeps the node columns: the cells it has no use for keep their place. */
+.logic-top > .kept-place, .logic-top > .kept-place * { visibility: hidden !important; }
+.publisher-body { padding-bottom: var(--window-pad); }
+/* PointReviewView in its own window (v2: window_pad(1) margins, 0.75 between
+ * parts): the message, the review image in a card at its own resolution (it
+ * scrolls if the window is smaller), the filter and the list in a side card
+ * as tall as it (the list scrolls, adding no height of its own), the counts,
+ * then the commands. */
+.review-window { display: flex; flex-direction: column; min-height: 0; padding: var(--window-pad); background: var(--surface); }
+.review-window > .note { padding: 0; }
+.point-review { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: calc(0.75 * var(--window-pad)); }
+.point-review-message { line-height: var(--font-line); }
+.point-review-body { display: flex; flex: 1; gap: calc(0.75 * var(--window-pad)); min-height: 0; }
+.point-review-plot { flex: 1; min-width: 0; min-height: 0; overflow: auto; display: flex; padding: calc(0.5 * var(--window-pad)); }
+.point-review-surface { position: relative; margin: auto; }
+/* The host's picture alone: no title strip, no Setting. */
+.point-review-surface > .panel { margin: 0; border: none; }
+.point-review-surface .panel-header, .point-review-surface .settings { display: none; }
+/* The box a drag draws (QRubberBand). */
+.point-review-band { position: absolute; border: var(--edge) solid var(--accent); background: color-mix(in srgb, var(--accent-tint) 60%, transparent); pointer-events: none; }
+/* v2: the side's hint (its rows and its margins) clamped to its minimum and maximum width. */
+.point-review-side { display: flex; flex-direction: column; gap: calc(0.5 * var(--window-pad)); padding: calc(0.75 * var(--window-pad));
+  width: clamp(var(--review-side-min), calc(var(--review-side-rows, 0px) + 1.5 * var(--window-pad)), var(--review-side-max)); flex: none; }
+/* "1  ·  (63.37, 29.59)": the spaces as v2 wrote them (the words, whose own nowrap collapsed them). */
+.point-review .point-list .check .words { white-space: pre; }
+.point-review .point-list { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; contain: size; }
+/* A request that names no points: the list alone. */
+.point-review.listed .point-review-plot { display: none; }
+.point-review.listed .point-review-side { flex: 1; width: auto; }
+.point-review .strip.flush { padding-left: 0; padding-right: 0; }
+.point-review-actions { display: flex; gap: calc(0.5 * var(--window-pad)); }
+
+/* ---------- PulseEditor -------------------------------------------------- */
+.pulse-editor .tabs { flex: 1; --tab-inset: var(--window-pad); }
+.pulse-heading { flex: none; font-weight: var(--heading-weight); white-space: nowrap; padding-bottom: var(--cap-lift); }
+.pulse-summary { flex: 1; min-width: 0; color: var(--text); padding-bottom: var(--cap-lift); }
+/* Every page: a section gap from the tab's edges and between its parts. */
+.pulse-edit, .pulse-preview, .pulse-scan, .pulse-config, .pulse-subpulse, .pulse-target {
+  display: flex; flex-direction: column; gap: var(--section-gap); min-height: 0; padding: var(--window-pad);
+}
+.pulse-scan, .pulse-config { overflow-y: auto; }
+.pulse-config { padding-right: var(--window-pad-beside-bar); scrollbar-gutter: stable; }
+.pulse-edit > *, .pulse-scan > *, .pulse-config > *, .pulse-target > * { flex: none; }
+.pulse-edit > .pulse-strip { flex: 1; }
+.pulse-inline { display: flex; align-items: center; gap: var(--row-gap); min-width: 0; }
+.pulse-equal > * { flex: 1 1 0; min-width: 0; }
+.pulse-label { flex: none; display: flex; align-items: center; height: var(--control); padding-bottom: var(--cap-lift); white-space: nowrap; }
+.pulse-value-text { flex: 1; min-width: 0; padding: 0 0 var(--cap-lift) var(--field-text-inset); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pulse-status-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-bottom: var(--cap-lift); }
+.pulse-editor section.card.bordered { padding: calc(var(--card-pad) - var(--edge)); display: flex; flex-direction: column; gap: var(--row-gap); }
+/* FluentGroupBox: the title painted centred in a CARD_TITLE_PX strip from the
+ * card's outer top, the body a card pad under that strip. */
+.pulse-editor section.card > .heading, .pulse-editor section.pulse-card > .pulse-row:first-child {
+  flex: none; height: var(--card-title-strip); min-height: 0; margin: calc(-1 * var(--card-pad)) 0 calc(var(--card-pad) - var(--row-gap));
+}
+.pulse-editor section.card > .heading { font-weight: var(--heading-weight); padding-bottom: 0; }
+
+/* The strip (LinkedScrollPanes): the side panels and the cards are ONE
+ * scrolled body (.pulse-timeline), so they move down as one in every frame;
+ * the side panels stand sticky at its left, the cards alone move sideways
+ * under them, the sideways bar's track starts after them (under the cards),
+ * the shared vertical bar in the page's right inset.  Its view ends above
+ * the sideways bar for both (v2 _equalise_reach). */
+.pulse-strip { min-height: 0; display: flex; margin-right: calc(-1 * var(--window-pad)); }
+.pulse-timeline { flex: 1; min-width: 0; overflow: auto; scrollbar-gutter: stable;
+  display: grid; grid-template-columns: max-content max-content; align-content: start; justify-content: start; align-items: start; }
+.pulse-timeline::-webkit-scrollbar-track:horizontal { margin-left: var(--pulse-side-w, 0px); }
+/* Down the whole body, so no card shows under or below them. */
+.pulse-side { align-self: stretch; display: flex; align-items: flex-start; gap: var(--row-gap); position: sticky; left: 0; z-index: 3; background: var(--surface); }
+/* The strip's first gap stands outside the scrolled view, so a card scrolled
+ * left is cut a row gap after the side panels (v2 _clip_scrolled_gutter).
+ * Every item is as tall as the tallest (the cards' Expanding height). */
+.pulse-items { position: relative; display: flex; align-items: stretch; gap: var(--row-gap); width: max-content; outline: none; padding: 0 var(--row-gap) 0 0; }
+.pulse-gutter { flex: none; position: sticky; left: var(--pulse-side-w, 0px); z-index: 1; width: var(--row-gap); margin-right: calc(-1 * var(--row-gap)); background: var(--surface); pointer-events: none; }
+.pulse-card { flex: none; }
+.pulse-editor section.pulse-card { gap: var(--row-gap); }
+.pulse-row { display: flex; align-items: center; gap: var(--row-gap); height: var(--control); min-width: 0; }
+.pulse-row > .pulse-label { width: var(--pulse-label-w); }
+.pulse-row > input, .pulse-row > select, .pulse-row > .pulse-value { flex: 1; min-width: 0; }
+.pulse-title { flex: 0 1 auto; min-width: 0; height: 100%; font-weight: var(--heading-weight); padding-bottom: 0; }
+.pulse-ports { display: flex; flex-direction: column; gap: var(--pulse-row-gap); margin-top: calc(var(--section-gap) - var(--row-gap)); }
+/* The side panels (ChannelNamesPanel, ChannelPanel): ONE label column for the
+ * labels shown (label_column_width: widest + 10, at least 48, at most
+ * CHANNEL_LABEL_WIDTH) and fixed field columns, so a panel is as wide as v2's
+ * whether or not it has port rows. */
+.pulse-editor section.card.pulse-catalog, .pulse-editor section.card.pulse-delays { display: grid; column-gap: var(--row-gap); align-content: start; }
+.pulse-catalog { grid-template-columns: fit-content(var(--pulse-label-w)) var(--pulse-name-w); }
+.pulse-delays { grid-template-columns: fit-content(var(--pulse-label-w)) var(--pulse-delay-w) var(--pulse-unit-w) var(--control) var(--control); }
+.pulse-catalog > *, .pulse-delays > *, .pulse-catalog .pulse-ports > *, .pulse-delays .pulse-ports > * { grid-column: 1 / -1; }
+.pulse-catalog > .pulse-row:not(:first-child), .pulse-delays > .pulse-row:not(:first-child),
+.pulse-catalog .pulse-ports, .pulse-delays .pulse-ports, .pulse-catalog .pulse-ports > .pulse-row, .pulse-delays .pulse-ports > .pulse-row {
+  display: grid; grid-template-columns: subgrid; align-items: center;
+}
+.pulse-catalog .pulse-label, .pulse-delays .pulse-label { width: auto; min-width: var(--pulse-label-min); padding-right: var(--label-trail); overflow: hidden; }
+.pulse-delays > .pulse-row:not(:first-child) > :nth-child(2) { grid-column: 2 / -1; }
+.pulse-catalog .pulse-row > input, .pulse-delays .pulse-ports .pulse-value, .pulse-delays .pulse-ports select { width: auto; }
+/* A count box (count_box_width): COUNT_SAMPLE's digits whole, with the box's chrome. */
+.pulse-repeats { width: var(--count-box-w); flex: none !important; }
+.pulse-repeats > input { flex: 1; min-width: 0; }
+.pulse-delays .pulse-repeats { justify-self: start; }
+.pulse-config-mode { display: flex; align-items: center; justify-content: space-between; min-width: 0; }
+.pulse-period { width: var(--pulse-period-w); }
+/* A long strip's card scrolled out of the timeline's view is not laid out,
+ * painted or hit tested (500 periods cost what the cards on screen cost); it
+ * keeps the size it was last drawn at, and every card has a set width. Only a
+ * long strip (Strip.update): a card's overflow (a long port label) then no
+ * longer widens the timeline's scroll range by a few pixels. */
+.pulse-items.long > .pulse-period, .pulse-items.long > .pulse-component { content-visibility: auto; contain-intrinsic-size: auto none; }
+/* A spacer: the page's grey, a dashed edge, a muted title. */
+.pulse-period.spacer { width: var(--pulse-spacer-w); background: var(--bg); border-style: dashed; }
+.pulse-period.spacer .pulse-title { color: var(--muted-ink); }
+.pulse-dac.held > select { flex: 1; width: auto; }
+.pulse-period.readonly { background: var(--bg); }
+.pulse-dac > select { flex: none; width: calc(var(--pulse-unit-w) + var(--row-gap)); }
+.pulse-post { width: var(--pulse-post-w); border-color: var(--bracket-ink, var(--divider)) !important; }
+/* The end post's count: a count box with its stepper, the source badge inside its edit. */
+.pulse-count { flex: none !important; width: var(--pulse-post-count-w); max-width: none; }
+.pulse-count > input { padding-right: calc(var(--combo-width) + var(--edge) + var(--pulse-badge) + 2 * var(--edit-pad-h)); }
+/* field_room_end of a spin box: the chevrons' ink, the badge a gap before it, on a device px. */
+.pulse-count > .pulse-badge { right: round(calc(var(--edge) + var(--combo-width) / 2 + var(--chevron-half) + var(--chevron-stroke) / 2 + var(--edit-pad-h)), var(--dpx)); }
+/* A Subpulse: white with the selection edge and a derived-ink title; green while Config supplies it. */
+.pulse-component { width: var(--pulse-period-w); border-color: var(--selection-edge) !important; }
+.pulse-component.framing { width: var(--pulse-spacer-w); }
+.pulse-component .pulse-title { color: var(--derived-ink); }
+.pulse-component.config { background: var(--config-green-tint); border-color: var(--config-green) !important; }
+.pulse-component.config .pulse-title { color: var(--config-green-dark); }
+/* _value_line: a read value at a field's text inset, its badge where a field seats one. */
+.pulse-value-line { flex: none; display: flex; align-items: center; gap: var(--edit-pad-h); height: var(--control); min-width: 0;
+  padding: 0 calc(var(--edge) + var(--edit-pad-h)) var(--cap-lift) var(--field-text-inset); }
+.pulse-value-line > .elided { flex: 1; }
+/* stand_alone: the column a field's inner rect would give it, on the line. */
+.pulse-value-line > .pulse-badge { position: static; flex: none; align-self: stretch; margin: var(--edge) 0 calc(var(--edge) - var(--cap-lift)); }
+.pulse-component .pulse-ports > button { width: 100%; }
+.pulse-items > .selected { background: var(--accent-tint); border-color: var(--selected) !important; }
+/* v2 _show_indicator_at_gap: the caret a pixel clear of each neighbour (Strip.showIndicator sets its left and width), rounded, the cards' height. */
+.pulse-gap-mark { position: absolute; top: 0; bottom: 0; border-radius: 999px; background: var(--accent); pointer-events: none; z-index: 2; }
+.pulse-gap-mark[hidden] { display: none; }
+
+/* A port row's every-period on/off commands (_port_toggle_button): standard
+ * command faces with one ring in the command's ink (_PortToggleIcon: the
+ * glyph side, a side/9 stroke), a dot of half the ring's radius in it for "on". */
+.pulse-fill, .pulse-clear { width: var(--control); padding: 0; position: relative; }
+.pulse-fill::before, .pulse-fill::after, .pulse-clear::after { content: ""; position: absolute; box-sizing: border-box; border-radius: 50%; }
+.pulse-fill::after, .pulse-clear::after {
+  left: calc(50% - var(--pulse-ring) / 2); top: calc(50% - var(--pulse-ring) / 2); width: var(--pulse-ring); height: var(--pulse-ring);
+  border: var(--pulse-ring-stroke) solid currentColor;
+}
+.pulse-fill::before {
+  --pulse-dot: calc((var(--pulse-ring) - var(--pulse-ring-stroke)) / 2);
+  left: calc(50% - var(--pulse-dot) / 2); top: calc(50% - var(--pulse-dot) / 2); width: var(--pulse-dot); height: var(--pulse-dot); background: currentColor;
+}
+
+/* A value box with its badge column inside, on the right (v2 _BindingButton):
+ * one gap from the frame's inner edge, as tall as its inner rect; the badges
+ * are drawn in it in device pixels (widgets.ts drawBadges).  The field wears
+ * its binding's colours. */
+.pulse-value { position: relative; display: flex; min-width: 0; }
+.pulse-value > input { flex: 1; min-width: 0; padding-right: calc(var(--pulse-badge) + 2 * var(--edit-pad-h)); }
+.pulse-badge {
+  position: absolute; right: calc(var(--edge) + var(--edit-pad-h)); top: var(--edge); bottom: var(--edge);
+  width: var(--pulse-badge); height: auto; min-height: 0; min-width: 0; padding: 0; border: none; border-radius: 0;
+  display: block; background: transparent; cursor: pointer;
+}
+.pulse-badge:hover, .pulse-badge:active, .pulse-badge:disabled, .pulse-badge:disabled:hover { background: transparent; border: none; }
+.pulse-badge:disabled { cursor: default; }
+.pulse-badge > svg { display: block; }
+.pulse-badge circle { --badge-fill: var(--placeholder); fill: var(--badge-fill); }
+.pulse-badge circle[data-source="scan"] { --badge-fill: var(--orange-dark); }
+.pulse-badge circle[data-source="api"] { --badge-fill: var(--api-violet-dark); }
+.pulse-badge circle[data-source="config"] { --badge-fill: var(--config-green-dark); }
+/* Under the pointer each badge is its colour darker(120). */
+.pulse-badge:hover:not(:disabled) circle { fill: color-mix(in srgb, var(--badge-fill) 83.333%, black); }
+.pulse-badge text { fill: var(--surface); }
+.pulse-value[data-tone="scan"] > input { border-color: var(--orange); color: var(--orange-dark); }
+.pulse-value[data-tone="api"] > input { border-color: var(--api-violet); color: var(--api-violet-dark); }
+.pulse-value[data-tone="api-applied"] > input { border-color: var(--api-violet); background: var(--api-violet-dark); color: var(--surface); }
+.pulse-value[data-tone="config"] > input { border-color: var(--config-green); color: var(--config-green-dark); }
+.pulse-value[data-tone="config-applied"] > input { border-color: var(--config-green); background: var(--config-green-tint); color: var(--config-green-dark); }
+.pulse-source-popup { position: fixed; margin: 0; padding: calc(var(--card-pad) - var(--edge)); display: flex; flex-direction: column; gap: var(--row-gap); }
+/* v2 binding popup: one label column, five rows a control tall, then a two-line note across both columns. */
+.pulse-binding:not(.pulse-source-popup) {
+  position: fixed; margin: 0; padding: calc(var(--card-pad) - var(--edge)); display: grid; gap: var(--row-gap);
+  grid-template-columns: max-content minmax(round(calc(230px * var(--fluent) * var(--qt)), 1px), max-content);
+  grid-auto-rows: var(--control); align-items: center; justify-items: start;
+}
+.pulse-binding > .pulse-label { width: auto; padding-right: var(--label-trail); }
+.pulse-binding > .edit-combo, .pulse-binding > .pulse-binding-value { justify-self: stretch; }
+.pulse-binding-value { display: block; padding-left: calc(var(--edit-pad-h) + var(--qline-margin)); padding-bottom: var(--cap-lift); }
+.pulse-binding-note { grid-column: 1 / -1; align-self: start; height: calc(2 * var(--font-line)); margin: 0; justify-self: stretch;
+  width: 0; min-width: 100%; white-space: normal; overflow: hidden; }
+.pulse-binding:has(.pulse-binding-note) { grid-template-rows: repeat(5, var(--control)) auto; }
+.pulse-binding-row { display: flex; align-items: center; gap: var(--row-gap); }
+.pulse-binding-row select { flex: 1; min-width: 0; }
+
+/* Control, Connection, Ports: one row under the strip. */
+.pulse-bottom { display: flex; align-items: stretch; gap: var(--row-gap); }
+.pulse-control { flex: 1; min-width: 0; }
+.pulse-control-grid { display: grid; grid-template-columns: repeat(4, minmax(var(--pulse-command-min-w), 1fr)); gap: var(--row-gap); }
+.pulse-control-grid > :first-child { grid-column: span 2; }
+.pulse-control-pair { display: flex; gap: var(--row-gap); min-width: 0; }
+.pulse-control-pair > * { flex: 1 1 0; min-width: 0; }
+.pulse-connection { flex: none; width: var(--pulse-connection-w); }
+.pulse-connection .pulse-inline input { flex: 1; min-width: 0; }
+.pulse-port-card { flex: none; width: var(--pulse-ports-w); }
+.pulse-port-commands > * { flex: 1 1 0; min-width: 0; }
+
+/* Preview: the bar, then the drawing at its own size. */
+.pulse-bar { flex: none; display: flex; align-items: center; gap: var(--row-gap); padding: calc(var(--card-pad) - var(--edge)) calc(var(--card-pad) - var(--edge)); min-width: 0; }
+/* PulsePreviewView: the controls row's own spacing, each switch a group of its own (add_row_switch: a second gap after its label). */
+.pulse-preview-bar { gap: var(--pulse-bar-gap); }
+.pulse-preview-bar > .switch { margin-right: var(--pulse-bar-gap); }
+.pulse-preview-bar select { width: var(--pulse-size-w); min-width: 0; flex: none; }
+.pulse-preview-bar .pulse-status-text { flex: 0 1 auto; }
+.pulse-preview-surface { flex: 1; min-height: 0; overflow: auto; position: relative; display: flex; align-items: flex-start; justify-content: flex-start; }
+.pulse-preview-surface .surface-placeholder { position: static; }
+
+/* Scan */
+/* The list's intro and each bound field: rows of one pitch (a control tall, no gap). */
+.pulse-bindings { display: flex; flex-direction: column; }
+.pulse-bindings > .note { color: var(--muted-ink); }
+.pulse-scan .playback > .status-text { flex: 1; }
+.pulse-scan button.step { font-family: var(--font-family), "MS Gothic"; }
+.pulse-scan section.card > .pulse-slots { margin-bottom: calc(-1 * var(--row-gap)); }
+.pulse-scan-lower { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--row-gap); flex: 1 1 0 !important; min-height: 0; }
+.pulse-source { flex: 1; min-height: var(--pulse-source-h); resize: none; font-family: Consolas, "Cascadia Mono", monospace; }
+.pulse-table-body { flex: 1; min-height: 0; overflow: auto; border: var(--edge) solid var(--placeholder); border-radius: var(--radius); padding: calc(var(--field-text-inset) - var(--edge)); }
+.pulse-table { margin: 0; font-family: Consolas, "Cascadia Mono", monospace; white-space: pre; }
+
+/* Value Config */
+/* v2 config_view: each column as wide as what it holds -- the field column its
+ * widest label, the Config name and the two values fixed, the status the rest;
+ * the rows share the columns (subgrid). Default's words stand a section gap
+ * after the name boxes; the Config name header over its boxes' text. */
+.pulse-config-bindings { display: grid; gap: var(--row-gap); align-items: center;
+  grid-template-columns: fit-content(var(--pulse-bound-label-max)) var(--pulse-config-name-w) calc(var(--pulse-config-value-w) + var(--pulse-default-indent)) var(--pulse-config-value-w) minmax(0, 1fr); }
+.pulse-config-bindings > p { grid-column: 1 / -1; }
+/* No binding yet: only the headings, each as wide as its words (v2's grid had no boxes to size it). */
+.pulse-config-bindings:not(:has(> .pulse-config-binding:not(.head))) { grid-template-columns: repeat(4, max-content) minmax(0, 1fr); }
+.pulse-config-binding { display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; align-items: center; min-height: var(--control); }
+.pulse-config-binding > :nth-child(3) { padding-left: var(--pulse-default-indent); }
+/* bound_field_width: the field column is its widest label and the air after it, up to its cap; a longer label elides. */
+.pulse-config-binding > :first-child { padding-right: var(--label-trail); }
+.pulse-config-binding > span { padding-bottom: var(--cap-lift); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* column_header_label: semibold MUTED_INK on its row's line. (Not `.header`, the Task Console's header row.) */
+.pulse-config-binding.head > span { font-weight: var(--heading-weight); color: var(--muted-ink); }
+.pulse-config-binding.head > :nth-child(2) { padding-left: var(--field-text-inset); }
+.pulse-config-binding.parked > :first-child, .pulse-config-binding.parked > :last-child { color: var(--muted-ink); }
+/* The value file: Name and Value as wide as they hold, the number set right; Unit closes the row. */
+.pulse-config-table { padding: 0 !important; gap: 0 !important; display: grid !important; grid-template-columns: max-content max-content minmax(0, 1fr); }
+.pulse-config-rows { display: contents; }
+/* FluentTableView rows: text cells at the item padding, a hairline under each
+ * row, the header a section taller with its own margin after its words. */
+.pulse-config-row { display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; align-items: center; height: var(--table-row-h); }
+.pulse-config-row:not(:last-child) { border-bottom: var(--edge) solid var(--divider); }
+.pulse-config-row > * { padding: 0 var(--table-cell-pad) var(--cap-lift); min-width: 0; }
+.pulse-config-row > input { height: 100%; padding-bottom: 0; }
+.pulse-config-row > :nth-child(2) { text-align: right; }
+.pulse-config-row.head { height: var(--table-header-h); font-weight: var(--heading-weight); color: var(--muted-ink); }
+.pulse-config-row.head > :nth-child(odd) { padding-right: calc(var(--table-cell-pad) + var(--table-header-margin)); }
+.pulse-config-row.head > :nth-child(2) { padding-left: calc(var(--table-cell-pad) + var(--table-header-margin)); }
+.pulse-config-row:not(.head):hover { background: var(--accent-tint); }
+.pulse-config-row.selected { background: var(--selected); }
+.pulse-active { margin: 0; }
+
+/* Subpulse Config */
+/* setting_label_width(("Subpulse", "Subpulse file")): the column fits the longer of the two. */
+/* PulseComponentView: the header card and the schedule's commands stand still;
+ * under them (a row gap) the schedule, as tall as its rows, and the bindings
+ * scroll as one, the bar at the tab's edge. */
+.pulse-subpulse.open { padding-bottom: 0; }
+.pulse-subpulse-head { flex: none; display: flex; flex-direction: column; gap: var(--row-gap); padding: calc(var(--card-pad) - var(--edge)); }
+.pulse-subpulse-row > .pulse-label { display: grid; padding-right: var(--label-trail); min-width: var(--pulse-label-min); }
+.pulse-subpulse-row > .pulse-label > * { grid-area: 1 / 1; }
+.pulse-subpulse-row > .pulse-label > .sizer { visibility: hidden; height: 0; }
+.pulse-subpulse-row > select { flex: 1; min-width: var(--pulse-context-min-w); }
+.pulse-subpulse-row > input { flex: 1; min-width: 0; }
+.pulse-subpulse-head .pulse-inline > .row-line { flex: 1; min-width: 0; }
+.pulse-subpulse-toolbar { flex: none; }
+.pulse-subpulse-toolbar > select { flex: none; width: auto; min-width: var(--pulse-hidden-min-w); max-width: var(--pulse-hidden-max-w); }
+.pulse-subpulse-body { flex: 1; min-height: 0; overflow: hidden auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: var(--section-gap);
+  margin: calc(var(--row-gap) - var(--section-gap)) calc(-1 * var(--window-pad)) 0 0; padding-right: var(--window-pad-beside-bar); }
+.pulse-subpulse-body > * { flex: none; }
+.pulse-subpulse-body > .pulse-strip { margin-right: 0; }
+.pulse-subpulse-body .pulse-timeline { overflow: auto hidden; scrollbar-gutter: auto; }
+.pulse-subpulse-binding-grid { display: grid; grid-template-columns: fit-content(var(--pulse-bound-label-max)) var(--pulse-config-name-w) minmax(0, 1fr); gap: var(--row-gap); align-items: center; }
+.pulse-subpulse-binding-grid > .pulse-label { grid-column: 1; min-width: var(--pulse-label-min); padding-right: var(--label-trail); overflow: hidden; text-overflow: ellipsis; display: block; line-height: calc(var(--control) - var(--cap-lift)); }
+.pulse-subpulse-binding-grid > select, .pulse-subpulse-binding-grid > .edit-combo { grid-column: 2; min-width: 0; }
+.pulse-placeholder { flex: 1; display: flex; align-items: center; justify-content: center; }
+.pulse-placeholder[hidden] { display: none; }
+
+/* Target */
+/* PulseTargetView: the header stands still at a fixed height; the cards scroll under it, their bar in the page's right inset. */
+.pulse-target-bar { height: var(--pulse-target-bar-h); }
+.pulse-target > .pulse-target-lists { flex: 1; min-height: 0; overflow: hidden auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: var(--section-gap);
+  margin-right: calc(-1 * var(--window-pad)); padding-right: var(--window-pad-beside-bar); }
+.pulse-target-lists > * { flex: none; }
+.pulse-target-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) var(--control); gap: var(--row-gap); align-items: center; }
+/* v2 dac_layout: name 1, Width a fixed box, data endpoints 2, latch 1, the remover. */
+.pulse-target-row.dac { grid-template-columns: minmax(0, 1fr) var(--pulse-dac-width-w) minmax(0, 2fr) minmax(0, 1fr) var(--control); }
+.pulse-dac-width { display: flex; min-width: 0; }
+.pulse-dac-width > input { flex: 1; min-width: 0; }
+.pulse-target-row.head > span { color: var(--muted-ink); font-weight: var(--heading-weight); padding-left: var(--field-text-inset); padding-bottom: var(--cap-lift); }
+.pulse-target-row.head { min-height: var(--control); }
+
+/* ---------- SLM Editor (zlc_atom devices/slm/editor.py SlmEditorControl) ---------- */
+/* The window is its tab widget: Pattern and Wavefront on one white card. */
+.window.slm-editor { padding: 0; gap: 0; }
+.slm-tabs { flex: 1; }
+.slm-page { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--slm-page-gap); padding: var(--slm-page-pad-v) var(--slm-page-pad-h); }
+.slm-row { flex: none; display: flex; align-items: center; gap: var(--slm-frame-gap); padding: calc(var(--slm-frame-pad) - var(--edge)); min-width: 0; }
+.slm-row .spin { flex: none; width: var(--spin-hint); max-width: none; }
+.slm-size { flex: none; width: var(--slm-size-min-w); }
+.slm-layers {
+  flex: none; display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; align-items: center;
+  column-gap: var(--slm-layers-gap-h); row-gap: var(--slm-layers-gap-v); padding: calc(var(--slm-layers-pad-v) - var(--edge)) calc(var(--slm-layers-pad-h) - var(--edge));
+}
+.layer-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-bottom: var(--cap-lift); }
+/* The plots: bare surfaces side by side (no card, no title strip), scrolling when bigger than the page. */
+.slm-plot-scroll { flex: 1; min-height: 0; min-width: 0; overflow: auto; }
+.slm-plots { display: flex; align-items: flex-start; gap: var(--slm-frame-gap); width: max-content; }
+.slm-plots > .panel { margin: 0; border: none; min-width: 0; border-radius: 0; }
+.slm-plots .panel-header, .slm-plots .settings { display: none; }
+.slm-plots .panel-body { padding: 0; }
+.slm-status { flex: none; line-height: var(--font-line); }
+.slm-wavefront { flex: 1; min-height: 0; display: flex; gap: var(--slm-wave-pad); padding: var(--slm-wave-pad); }
+.slm-wavefront-parameters {
+  flex: none; min-width: var(--slm-wave-min-w); overflow: auto; padding: var(--slm-wave-grid-pad);
+  display: flex; flex-direction: column; gap: var(--slm-wave-gap-v);
+}
+/* The note wraps at the grid's width; it never widens the page. */
+.slm-note { line-height: var(--font-line); white-space: normal; contain: inline-size; }
+.slm-operator-grid {
+  display: grid; grid-template-columns: max-content var(--spin-hint) max-content var(--spin-hint); align-items: center;
+  column-gap: var(--slm-wave-gap-h); row-gap: var(--slm-wave-gap-v);
+}
+.slm-operator-grid .spin { max-width: none; }
+.slm-reset { display: flex; }
+/* A popup form: two equal columns whose rows share the popup's height (its grid stretched to the popup's minimum, as Qt's is). */
+.slm-popup-form {
+  flex: 1; grid-template-columns: minmax(max-content, 1fr) minmax(0, 1fr); grid-auto-rows: 1fr; align-items: center;
+  column-gap: var(--slm-frame-gap); row-gap: var(--slm-frame-gap); padding: var(--slm-popup-pad);
+}
+.slm-popup-form .spin { max-width: none; }
+.slm-popup-form .form-actions { margin-top: 0; }
+/* v2 left_panel_stub: where the hidden side panels stood, what they hold and Show under it. */
+.pulse-editor section.card.pulse-side-stub { width: calc(max(68px, round(calc(82px * var(--fluent)), 1px)) * var(--qt)); display: flex; flex-direction: column; align-items: stretch; gap: var(--row-gap); }
+.pulse-stub-label { white-space: pre-line; text-align: center; }
+/* QDrag's pixmap: the grabbed card under the pointer while it is dragged. */
+.pulse-drag-ghost { position: fixed; margin: 0; z-index: 1000; pointer-events: none; box-sizing: border-box; }
+.pulse-config-bindings > .section-title { grid-column: 1 / -1; }
+.pulse-config-table.disabled { color: var(--disabled-ink); pointer-events: none; }
+.pulse-config-table:focus { outline: none; }
+.pulse-config-row > span > input { width: 100%; height: calc(var(--table-row-h) - 2 * var(--edge)); padding-top: 0; padding-bottom: var(--cap-lift); }
+.pulse-popup-label { display: grid; width: auto; padding-right: var(--label-trail); }
+.pulse-popup-label > .sizer { visibility: hidden; height: 0; }

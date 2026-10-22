@@ -1,0 +1,16 @@
+[package]
+name = "zlc-pulse"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+zlc-core = { path = "../zlc-core" }
+crc32fast = "1.5"
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Devices_Communication", "Win32_System_IO", "Win32_System_Threading", "Win32_Security", "Win32_System_Registry", "Win32_System_Console", "Win32_System_JobObjects"] }
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+zlc-resources = { path = "../zlc-resources" }

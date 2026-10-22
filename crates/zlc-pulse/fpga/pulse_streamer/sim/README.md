@@ -1,0 +1,88 @@
+# Current xsim checks
+
+These optional Vivado `xsim` benches exercise the checked-in frozen RTL. They
+are hardware-development evidence, not part of normal experiment startup and
+not permission to rebuild or program a board.
+
+A bench passes only on its exact success marker with no
+`Fatal`/`FAIL`/`BAD`/`LATE` text in its transcript: Vivado 2019.1 may still
+return process code zero after `$fatal`.
+
+The maintained benches are self-contained except where explicitly noted:
+
+- `tb_1tick.v`, `tb_gapsweep.v`, and `tb_loop.v` cover
+  exact 1/2-row finite one-shots, a FIRE after LOAD/SAFE at each of the 64
+  phases of the arm period (the top's `arm` strobe), dense one-tick rows around
+  a prefetch bubble, gap-dependent complete-Pulse Run repeats, and a non-zero-start
+  finite nested bracket (outer x3 with an inner x2) with distinct
+  preamble/body/tail on TTL and DAC, then one-tick rows through four nested
+  brackets that share start rows and end rows (every tick's mask against the
+  hand-expanded play order).
+- `tb_scan_wrap.v` covers a whole-timeline bracket, per-row Run repeats, finite
+  Scan repeats, a streamed three-chunk table refilled by the host's protocol
+  (banks stay armed; a bank's words first, its chunk register last), cumulative
+  row cursor, and the cyclic two-bank wrap through the scan-point prefetcher.
+- `tb_delay_sched.v`, `tb_delay_compact.v`, `tb_evt_depth.v`, and
+  `tb_bus_delay.v` cover the current 32-bit TTL event and DAC action delay
+  schedulers.
+- `tb_ramp_scan.v` and `tb_da_ttl_align.v` cover slot-targeted DAC ramps
+  (gentle and steep Bresenham), a late bank (armed, its chunk register not yet
+  written) held with UNDERFLOW and resumed,
+  and TTL/DAC alignment.
+- `tb_real_engine.v` uses the generated row BRAM simulation model.
+- `../tb_uart_pipeline.v` and `../tb_uart_read_tap.v` require exact write
+  commit counts/address order while covering pipelining, watchdog/bounds,
+  last-word delivery, readback, and the layout identifier.
+- `tb_t_ff.v` is the retained full-top consecutive-FIRE regression. Its
+  committed `replay_t.vh` and `replay_t_frame.vh` are a literal current-layout
+  host image (the 9-period, 116-tick Pulse described in the bench header,
+  packed by `zlc_pulse::wire::pack_program` and written as one `wr(...)` line
+  per sparse word; regenerate them the same way after any layout change); the
+  bench checks that repeated runs produce identical first frames through the
+  CTRL decoder, loop/delay registers, engine, and output mapping.
+
+The engine benches other than `tb_real_engine.v` model the row and scan BRAMs
+behaviorally (a registered address plus three pipeline stages, the RD_LAT+2
+issue-to-data latency of the generated IP), so they run without a build.
+
+## Running a bench
+
+Build artifacts for Xilinx IP simulation models are required. A build is only
+performed inside the separately approved evidence-driven hardware workflow.
+With those artifacts already available, invoke `xvlog`, `xelab`, and `xsim`
+from this directory, from the release that generated the IP models: the folder
+of `ZLC_PS_VIVADO_BIN` when it is set, else the newest release under
+`C:` or `D:` `/Xilinx/Vivado` or `/AMD/Vivado` -- the rule the build and the
+JTAG session keep, which `zlc-pulse-server fpga --vivado` prints.  For example:
+
+```sh
+VIV=$(dirname "$(zlc-pulse-server fpga --vivado)")
+IPR=../../build/ps/ps.srcs/sources_1/ip
+"$VIV/xvlog" -i .. ../zlc_period_streamer.v   "$IPR/blk_mem_gen_rows/sim/blk_mem_gen_rows.v"   "$IPR/blk_mem_gen_rows/simulation/blk_mem_gen_v8_4.v"   tb_real_engine.v
+"$VIV/xelab" work.tb_real_engine -s sreal
+"$VIV/xsim" sreal -runall
+```
+
+Every bench `include`s `../zlc_geometry.vh`, so `xvlog` needs `-i ..` (the
+directory of the RTL) whatever the working directory is.  The full-top bench
+uses `$isunknown` and therefore compiles in SystemVerilog mode; with the
+generated IP models it replays the frozen host image through the real BRAMs,
+and with `-d ZLC_IVERILOG` its IP-free `tb_safe_gate` proves the SAFE pin gate:
+
+```sh
+"$VIV/xvlog" -sv -i .. ../zlc_uart_bridge.v ../zlc_period_streamer.v ../zlc_pulse_streamer_top.v   "$IPR/blk_mem_gen_rows/simulation/blk_mem_gen_v8_4.v" "$IPR/blk_mem_gen_rows/sim/blk_mem_gen_rows.v"   "$IPR/blk_mem_gen_scan/sim/blk_mem_gen_scan.v" tb_t_ff.v
+"$VIV/xelab" work.tb_t_ff -s stff && "$VIV/xsim" stff -runall      # T-FF-OK, RESIDENT-REPLAY-SAFE-INTERRUPT-DEDUP-OK
+"$VIV/xvlog" -sv -d ZLC_IVERILOG -i .. ../zlc_uart_bridge.v ../zlc_period_streamer.v ../zlc_pulse_streamer_top.v tb_t_ff.v
+"$VIV/xelab" work.tb_safe_gate -s sgate && "$VIV/xsim" sgate -runall  # TOP-SAFE-PIN-GATE-OK
+```
+
+This particular `tb_real_engine.v` example prints seven diagnostic emCCD pulse
+widths (each exactly 2000 ticks) and a final `DONE` note but has no self-checking
+PASS marker. Its transcript must be inspected against those widths; it is not a
+stand-alone pass oracle. For self-checking benches, absence of the exact success
+marker or any failure token is failure even when `xsim` itself exits successfully.
+
+The real-IP/full-top benches use the frozen deployment geometry.  Focused
+behavioral benches may instantiate a deliberately narrower geometry to isolate
+one scheduler or scan rule; they are semantic unit oracles, not resource or
+deployment-timing evidence.

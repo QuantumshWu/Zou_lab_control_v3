@@ -1,0 +1,322 @@
+"""Narrow camera SPI shared by hardware and virtual adapters."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Protocol, Sequence, runtime_checkable
+import time
+
+import numpy as np
+from zlc_data import integer, is_intrinsically_immutable_array, positive_integer
+
+from .photoelectrons import stated_conversion
+
+
+def _pair(value: object, field: str, *, positive: bool) -> tuple[int, int]:
+    try:
+        result = tuple(int(item) for item in value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{field} must be a two-integer tuple") from exc
+    if len(result) != 2 or any(item <= 0 if positive else item < 0 for item in result):
+        raise ValueError(f"{field} must contain two {'positive' if positive else 'non-negative'} integers")
+    return result
+
+
+def roi_request(
+    value: tuple[int, int, int, int] | None,
+) -> tuple[int, int, int, int] | None:
+    """A requested ``(x, y, width, height)``, or None for the camera's current ROI.
+
+    One reading for every camera -- a four-integer tuple, its origin
+    non-negative and its size positive -- so an ROI the virtual camera
+    takes is one the qCMOS takes too.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, tuple) or len(value) != 4:
+        raise TypeError("roi_xywh must be a four-item tuple or None")
+    return tuple(
+        integer(item, f"roi_xywh[{index}]", minimum=0 if index < 2 else 1)
+        for index, item in enumerate(value)
+    )
+
+
+def arm_groups(
+    frames: int | None,
+    source_group_sizes: tuple[int, ...] | None,
+) -> tuple[int | None, tuple[int, ...] | None]:
+    """What an ``arm`` call asks for: its frame target and trigger groups.
+
+    One reading for every camera, so a request the virtual camera accepts is
+    one the hardware accepts too.
+    """
+
+    if frames is None:
+        groups = tuple(int(value) for value in (source_group_sizes or ()))
+        if groups and (len(groups) != 1 or groups[0] <= 0):
+            raise ValueError(
+                "continuous external capture requires one positive source group"
+            )
+        return None, groups or None
+    expected = positive_integer(frames, "frames")
+    if not isinstance(source_group_sizes, tuple):
+        raise TypeError("finite arm requires tuple source_group_sizes")
+    groups = tuple(
+        positive_integer(value, "source_group_sizes item")
+        for value in source_group_sizes
+    )
+    if not groups or sum(groups) != expected:
+        raise ValueError("source_group_sizes must exactly cover frames")
+    return expected, groups
+
+
+class CameraAcquisitionMode(str, Enum):
+    EXTERNAL_TRIGGERED = "EXTERNAL_TRIGGERED"
+    FREE_RUNNING = "FREE_RUNNING"
+
+
+@dataclass(frozen=True)
+class CameraWorkingPoint:
+    acquisition_mode: str
+    frame_shape_yx: tuple[int, int]
+    sensor_shape_yx: tuple[int, int]
+    roi_origin_yx: tuple[int, int]
+    roi_shape_yx: tuple[int, int]
+    binning_yx: tuple[int, int]
+    dtype: np.dtype
+    count_unit: str
+    exposure_seconds: float
+    required_external_trigger_interval_seconds: float | None
+    external_trigger_integration_start_offset_seconds: float | None
+    gain: float
+    readout_mode: str
+    #: What one count is worth in photoelectrons, and where zero of them
+    #: sits: photoelectrons = (count - offset_counts) * electrons_per_count.
+    #: The camera's own two numbers, as its configuration states them -- a
+    #: virtual sensor knows them exactly, a real one is told what its
+    #: datasheet says -- so ``None`` means this sensor does not say, and
+    #: nothing downstream may invent it.  Both or neither.
+    offset_counts: float | None = None
+    electrons_per_count: float | None = None
+
+    def __post_init__(self) -> None:
+        # Stored as the plain mode name whichever spelling the adapter used,
+        # so no reader has to normalise it again.
+        mode = CameraAcquisitionMode(
+            str(getattr(self.acquisition_mode, "value", self.acquisition_mode))
+        )
+        object.__setattr__(self, "acquisition_mode", mode.value)
+        for name, positive in (
+            ("frame_shape_yx", True),
+            ("sensor_shape_yx", True),
+            ("roi_shape_yx", True),
+            ("binning_yx", True),
+            ("roi_origin_yx", False),
+        ):
+            object.__setattr__(self, name, _pair(getattr(self, name), name, positive=positive))
+        if any(origin + extent > sensor for origin, extent, sensor in zip(self.roi_origin_yx, self.roi_shape_yx, self.sensor_shape_yx)):
+            raise ValueError("ROI lies outside sensor geometry")
+        expected_shape = tuple(extent // factor for extent, factor in zip(self.roi_shape_yx, self.binning_yx))
+        if expected_shape != self.frame_shape_yx:
+            raise ValueError("frame shape differs from ROI/binning geometry")
+        dtype = np.dtype(self.dtype)
+        if dtype.kind not in "iuf" or dtype.hasobject or dtype.fields is not None:
+            raise TypeError("camera dtype must be a real numeric dtype")
+        object.__setattr__(self, "dtype", dtype.newbyteorder("<"))
+        if float(self.exposure_seconds) <= 0 or not np.isfinite(self.exposure_seconds):
+            raise ValueError("exposure_seconds must be finite and positive")
+        if self.required_external_trigger_interval_seconds is not None and float(self.required_external_trigger_interval_seconds) <= 0:
+            raise ValueError("external trigger interval must be positive")
+        if self.external_trigger_integration_start_offset_seconds is not None and float(self.external_trigger_integration_start_offset_seconds) < 0:
+            raise ValueError("integration start offset cannot be negative")
+        if float(self.gain) < 0:
+            raise ValueError("camera gain cannot be negative")
+        conversion = stated_conversion(
+            self.offset_counts, self.electrons_per_count, camera="camera working point"
+        )
+        if conversion is not None:
+            object.__setattr__(self, "offset_counts", conversion[0])
+            object.__setattr__(self, "electrons_per_count", conversion[1])
+
+
+@dataclass(frozen=True, eq=False)
+class CameraFrameRecord:
+    """Adapter-owned copy of one frame and its physical metadata."""
+
+    image: np.ndarray
+    source_ordinal: int
+    produced_count: int | None = None
+    frame_stamp: int | None = None
+    camera_stamp: int | None = None
+    timestamp_seconds: int | None = None
+    timestamp_microseconds: int | None = None
+    host_received_at_ns: int = 0
+    driver_buffer_index: int | None = None
+    settings_session_id: str | None = None
+    settings_epochs: tuple[int, ...] = ()
+    __hash__ = None
+
+    def __post_init__(self) -> None:
+        ordinal = int(self.source_ordinal)
+        if ordinal < 0:
+            raise ValueError("source_ordinal must be non-negative")
+        object.__setattr__(self, "source_ordinal", ordinal)
+        for name in ("produced_count", "timestamp_seconds", "timestamp_microseconds", "driver_buffer_index"):
+            value = getattr(self, name)
+            if value is not None and int(value) < 0:
+                raise ValueError(f"{name} must be non-negative")
+            if value is not None:
+                object.__setattr__(self, name, int(value))
+        if self.timestamp_microseconds is not None and self.timestamp_microseconds >= 1_000_000:
+            raise ValueError("timestamp_microseconds must be less than 1_000_000")
+        if (self.timestamp_seconds is None) != (self.timestamp_microseconds is None):
+            raise ValueError("timestamp seconds and microseconds must appear together")
+        session_id = (
+            None
+            if self.settings_session_id is None
+            else str(self.settings_session_id).strip()
+        )
+        epochs = tuple(int(value) for value in self.settings_epochs)
+        if (session_id is None) != (not epochs):
+            raise ValueError(
+                "camera frame settings need both a device session and epochs"
+            )
+        if session_id == "" or any(value < 0 for value in epochs):
+            raise ValueError("camera frame settings provenance is invalid")
+        if len(set(epochs)) != len(epochs):
+            raise ValueError("camera frame settings epochs must be unique")
+        object.__setattr__(self, "settings_session_id", session_id)
+        object.__setattr__(self, "settings_epochs", epochs)
+        host = int(self.host_received_at_ns or time.time_ns())
+        if host <= 0:
+            raise ValueError("host_received_at_ns must be positive")
+        object.__setattr__(self, "host_received_at_ns", host)
+        # Owned as BYTES, not as a read-only ndarray.  Both spellings cost the
+        # same single copy here, but a read-only view over an owning array can
+        # be made writable again, so every downstream boundary copied the whole
+        # frame a second time to be sure of it.  A view whose base chain ends in
+        # bytes cannot acquire a writable buffer, and zlc_data recognises that
+        # and keeps the view -- one copy per frame instead of two.  An image
+        # that already is such a contiguous view is kept as it is: copying it
+        # again bought nothing.
+        array = np.asarray(self.image)
+        little = array.dtype.newbyteorder("<")
+        if not (
+            array.dtype == little
+            and array.flags.c_contiguous
+            and is_intrinsically_immutable_array(array)
+        ):
+            array = np.frombuffer(
+                array.astype(little, copy=False).tobytes(order="C"), dtype=little
+            ).reshape(array.shape)
+        object.__setattr__(self, "image", array)
+
+
+@dataclass(frozen=True)
+class CameraCaptureTerminalRecord:
+    produced_count: int
+    source_stopped: bool
+    no_more_frames: bool
+    joined: bool
+
+    def __post_init__(self) -> None:
+        if int(self.produced_count) < 0:
+            raise ValueError("produced_count must be non-negative")
+        object.__setattr__(self, "produced_count", int(self.produced_count))
+        if any(type(getattr(self, name)) is not bool for name in ("source_stopped", "no_more_frames", "joined")):
+            raise TypeError("terminal proof flags must be bool")
+
+
+@runtime_checkable
+class CameraAdapter(Protocol):
+    @property
+    def timeout(self) -> float: ...
+
+    #: ``(offset_counts, electrons_per_count)`` or None when this sensor
+    #: states no conversion.  Answered from the device's own configuration,
+    #: so it can be asked of a camera that is not open -- which is what lets
+    #: a form offer the unit before anything has been armed.
+    @property
+    def photoelectron_conversion(self) -> tuple[float, float] | None: ...
+
+    # A camera has a state: how long it integrates, and which part of the
+    # sensor it reads.  The two are set separately: one call that demanded
+    # both is what let a task replace a tuned ROI with the full sensor because
+    # it only meant to state an exposure, and left an exposure so long that
+    # the third trigger of a cycle arrived while the sensor was still busy.
+    #
+    # Nothing here is named after a measurement.  A camera is a shared piece
+    # of hardware in a state, not an accessory of whoever last called it.
+    #
+    # ``None`` leaves that setting as the camera has it now -- not the whole
+    # sensor, and not the value it was opened with.  A run that states no ROI
+    # reads the window the bench is already set to; a stated value stays on
+    # the camera until something states another.
+
+    def set_exposure_seconds(self, seconds: float | None) -> CameraWorkingPoint: ...
+
+    def set_roi(
+        self, roi_xywh: tuple[int, int, int, int] | None
+    ) -> CameraWorkingPoint: ...
+
+    def working_point(self) -> CameraWorkingPoint: ...
+
+    def arm(self, frames: int | None, *, source_group_sizes: tuple[int, ...] | None, buffer_frame_count: int, timeout: float) -> None:
+        """Start autonomous ordered intake; capacity is independent of target.
+
+        The SDK ring and accepted FIFO each hold at most buffer_frame_count
+        raw frames. Overflow or an observed sequence gap fails this capture;
+        neither scientific mode silently replaces an older frame.
+        """
+        ...
+
+    def read_frame_records(self, n: int, *, timeout: float, exact: bool) -> Sequence[CameraFrameRecord]: ...
+
+    def finish_record_capture(self) -> CameraCaptureTerminalRecord:
+        """Stop intake, preserving accepted frames for reads until the next arm.
+
+        Failures remain observable before queued data, including after Stop.
+        no_more_frames says whether the accepted FIFO is already empty.
+        """
+        ...
+
+    def capture_state(self) -> bool: ...
+
+
+#: The camera settings a node takes over for the length of its run: while it
+#: owns them, the device form may not drive them.  Said once, because every
+#: node that points a camera points the SAME camera -- four copies of this
+#: list is four chances for one of them to drift.
+CAMERA_PROTECTED_FIELDS = (
+    "exposure",
+    "roi_x",
+    "roi_y",
+    "roi_width",
+    "roi_height",
+    "trigger_source",
+    "readout_speed",
+    "offset_counts",
+    "electrons_per_count",
+)
+
+
+#: One notch of a camera's exposure box: a millisecond.  Exposures here are
+#: tens of milliseconds, and the box's own step of 1 turned 0.02 s into
+#: 1.02 s in one notch; a millisecond is a useful move at every one of them,
+#: and its grid stops above the 1 ns floor (a notch never lands off it).
+EXPOSURE_STEP_SECONDS = 1e-3
+
+
+__all__ = [
+    "CAMERA_PROTECTED_FIELDS",
+    "EXPOSURE_STEP_SECONDS",
+    "CameraAcquisitionMode",
+    "CameraAdapter",
+    "CameraCaptureTerminalRecord",
+    "CameraFrameRecord",
+    "CameraWorkingPoint",
+    "arm_groups",
+    "roi_request",
+]

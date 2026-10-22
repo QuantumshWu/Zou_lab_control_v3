@@ -1,0 +1,455 @@
+"""Calibration image presentation and its live camera preview."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING
+
+import numpy as np
+from zlc_data import (
+    AxisId,
+    AxisSpec,
+    CoordinateFrameId,
+    READOUT_EVENT,
+    SPATIAL_X,
+    SPATIAL_Y,
+    DatasetComponentValidity,
+    DatasetSchema,
+    OwnedSnapshot,
+    ValidityContract,
+    ValueSchema,
+    owning_bytes,
+)
+from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput
+
+from zlc_atom.data import snapshot_from_array
+from zlc_atom.devices.camera.contract import CameraFrameRecord
+from zlc_atom.nodes._framework.frames import FRAME_AXIS_NAME
+
+if TYPE_CHECKING:
+    from zlc_data.point_overlay import PointStatus
+    from zlc_plugin.figures import ImagePointOverlay
+
+    from .calibration import SiteMap
+
+CAPTURE_PREVIEW_DECLARATION = DatasetOutputDeclaration(
+    "capture_preview", "calibration.capture-preview"
+)
+SITE_REVIEW_DECLARATION = DatasetOutputDeclaration(
+    "site_review", "calibration.site-review"
+)
+
+#: One calibration acquisition fires three camera windows -- long, readout,
+#: long -- and they are three POINTS of the cycle, not three looks at the same
+#: thing: each is exposed at a different place in the pulse, so their physics
+#: differs.  The preview used to keep ``images[-1]`` and drop the other two,
+#: which threw away the readout frame the whole calibration is about.
+_PREVIEW_FRAMES = 3
+
+
+def _image_axes(
+    frame_shape: tuple[int, int],
+    coordinate_frame: str | CoordinateFrameId,
+    *,
+    origin_yx: tuple[int, int] = (0, 0),
+    binning_yx: tuple[int, int] = (1, 1),
+) -> tuple[AxisSpec, AxisSpec]:
+    """One image schema for Calibration live and FINAL publications.
+
+    The pictures a calibration shows are crops of the same sensor the camera
+    panel shows, so they are labelled the same way: in the sensor's own
+    pixels.  Indexed from zero instead, the same trap read as two different
+    places depending on which ROI the run happened to use, and two pictures of
+    one lattice side by side disagreed about where it was.
+    """
+
+    height, width = (int(value) for value in frame_shape)
+    origin_y, origin_x = (int(value) for value in origin_yx)
+    step_y, step_x = (max(1, int(value)) for value in binning_yx)
+    frame = (
+        coordinate_frame
+        if isinstance(coordinate_frame, CoordinateFrameId)
+        else CoordinateFrameId(str(coordinate_frame))
+    )
+    return (
+        AxisSpec(
+            AxisId("calibration.image.y"),
+            "y",
+            SPATIAL_Y,
+            height,
+            coordinates=tuple(origin_y + step_y * index for index in range(height)),
+            unit="pixel",
+            coordinate_frame=frame,
+        ),
+        AxisSpec(
+            AxisId("calibration.image.x"),
+            "x",
+            SPATIAL_X,
+            width,
+            coordinates=tuple(origin_x + step_x * index for index in range(width)),
+            unit="pixel",
+            coordinate_frame=frame,
+        ),
+    )
+
+
+def site_map_image_overlay(
+    image: OwnedSnapshot,
+    site_map: SiteMap,
+    *,
+    revision: int,
+    static_statuses: Sequence[PointStatus] | None = None,
+) -> ImagePointOverlay:
+    """Place one SiteMap's stable identities on an image's canonical axes.
+
+    SiteMap centers are positions in the image array's own pixel indices.  The
+    image Dataset owns where those indices lie on the sensor, including ROI
+    origin and binning, so the neutral Plot geometry helper performs that one
+    coordinate transform.  Calibration reports and Feedback figures can then
+    share the same IDs, 1-based labels and ImagePointOverlay representation.
+    """
+
+    from zlc_data.point_overlay import image_point_overlay_geometry
+    from zlc_plugin.figures import ImagePointOverlay
+
+    from .calibration import SiteMap
+
+    if not isinstance(site_map, SiteMap):
+        raise TypeError("site_map must be SiteMap")
+    site_axis = site_map.site_axis
+    labels = tuple(
+        str(site_axis.coordinate_at(index)) for index in range(site_map.n_sites)
+    )
+    geometry = image_point_overlay_geometry(
+        image,
+        site_map.centers_xy,
+        site_map.site_ids,
+        status_axis=site_axis,
+        labels=labels,
+        coordinates_are_indices=True,
+    )
+    return ImagePointOverlay(
+        revision=revision,
+        coordinates=geometry["coordinates_xy"],
+        point_ids=tuple(geometry["point_ids"]),
+        labels=tuple(geometry["labels"]),
+        static_statuses=(
+            None if static_statuses is None else tuple(static_statuses)
+        ),
+    )
+
+
+def _generation_text(value: object) -> str:
+    text = str(getattr(value, "value", value)).strip()
+    if not text or text == "None":
+        raise ValueError("calibration Dataset generation must be available")
+    return text
+
+
+def _frame_point_axis(frames: int) -> AxisSpec:
+    """The frame axis one calibration cycle publishes in its Point domain."""
+
+    return AxisSpec(
+        AxisId("calibration.capture_preview.frame"),
+        FRAME_AXIS_NAME,
+        READOUT_EVENT,
+        int(frames),
+        tuple(range(int(frames))),
+    )
+
+
+def _with_component_validity(
+    snapshot: OwnedSnapshot,
+    axis_ids: tuple[AxisId, ...],
+    mask: object,
+) -> OwnedSnapshot:
+    """Restate one snapshot's validity over named CELL axes.
+
+    Whether a site is usable is a per-site fact.  Once SITE is a cell data
+    axis, ``CellValidity`` cannot carry it: that mask is one flag per
+    ``(repeat, point)`` cell, i.e. one flag covering every site at once.  The
+    dataset already has the contract for this; it only has to be declared.
+    """
+
+    source = snapshot.block
+    value_schema = source.schema.value_schema
+    schema = DatasetSchema(
+        source.schema.repeat_domain,
+        source.schema.point_domain,
+        source.schema.cell_domain,
+        ValueSchema(
+            ValidityContract.components(*axis_ids),
+            value_schema.dtype,
+            value_schema.value_unit,
+            name=value_schema.name,
+        ),
+    )
+    block = source.replacing(
+        validity=DatasetComponentValidity(axis_ids, np.asarray(mask, dtype=bool)),
+        schema=schema,
+    )
+    return OwnedSnapshot(block.ref(snapshot.ref.stream_generation), block)
+
+
+def _snapshot(
+    values: object,
+    *,
+    signal: str,
+    generation: object,
+    revision: int,
+    validity_axis_ids: tuple[AxisId, ...] | None = None,
+    validity_mask: object | None = None,
+    point_axes: Sequence[AxisSpec] = (),
+    cell_axes: Sequence[AxisSpec] = (),
+    value_unit: str | None = None,
+) -> OwnedSnapshot:
+    snapshot = snapshot_from_array(
+        values,
+        producer="calibration",
+        signal=signal,
+        point_axes=point_axes,
+        cell_axes=cell_axes,
+        value_unit=value_unit,
+        generation=_generation_text(generation),
+        revision=revision,
+    )
+    if (validity_axis_ids is None) != (validity_mask is None):
+        raise ValueError("component validity needs both its axes and its mask")
+    if validity_axis_ids is not None:
+        snapshot = _with_component_validity(
+            snapshot, validity_axis_ids, validity_mask
+        )
+    return snapshot
+
+
+def _cycle_array(
+    cycle: Sequence[CameraFrameRecord],
+    frame_shape: tuple[int, int],
+) -> np.ndarray:
+    """Three frames as one array, in whatever the frames themselves are.
+
+    It used to be cast to the WORKING POINT's dtype, which is the sensor's
+    pixel format -- true of what the camera reads out, and false of what this
+    node was handed the moment a run asked for photoelectrons: 0.535 e- came
+    back as 0, and a pixel below the sensor's offset came back as 65535.  A
+    frame's dtype is the frame's own fact.
+    """
+
+    records = tuple(cycle)
+    if len(records) != _PREVIEW_FRAMES or any(
+        not isinstance(record, CameraFrameRecord) for record in records
+    ):
+        raise ValueError("calibration preview cycle must contain three frame records")
+    images = [np.asarray(record.image) for record in records]
+    first = images[0]
+    if all(image.shape == tuple(frame_shape) and image.dtype == first.dtype and image.flags.c_contiguous
+           for image in images):
+        # The frames' own bytes joined once (camera.measurement.frames_snapshot):
+        # the Dataset keeps that one copy as it is.
+        joined = b"".join([image if (owner := owning_bytes(image)) is None else owner for image in images])
+        return np.frombuffer(joined, dtype=first.dtype).reshape(_PREVIEW_FRAMES, *first.shape)
+    images = np.stack(images, axis=0)
+    if images.shape != (_PREVIEW_FRAMES, *frame_shape):
+        raise ValueError("calibration preview frame shape changed during capture")
+    return images
+
+
+def _cycle_settings_record(
+    cycle: Sequence[CameraFrameRecord],
+) -> dict[str, object] | None:
+    """The settings these three frames were frozen with, as the event record
+    Runtime merges.
+
+    A frame carries the device session and epochs it was taken under, sealed
+    at the adapter's boundary; a cycle that straddles a live tune therefore
+    names two epochs, and only the frames can say so.  The publication used
+    to carry none of it, so a Figure's lineage could not tell which settings
+    the preview it showed was taken at.  A cycle whose frames are all
+    settings-unaware is an honest absence; one that mixes the two, or two
+    sessions, is a cycle nobody can account for.
+    """
+
+    references = tuple(
+        (record.settings_session_id, record.settings_epochs)
+        for record in cycle
+        if record.settings_session_id is not None
+    )
+    if not references:
+        return None
+    if len(references) != len(cycle):
+        raise ValueError(
+            "one calibration cycle mixed settings-aware and unaware frames"
+        )
+    sessions = {str(session_id) for session_id, _epochs in references}
+    if len(sessions) != 1:
+        raise ValueError("camera device session changed inside one calibration cycle")
+    epochs = sorted({epoch for _session_id, values in references for epoch in values})
+    ranges: list[list[int]] = []
+    for epoch in epochs:
+        if ranges and epoch == ranges[-1][1] + 1:
+            ranges[-1][1] = epoch
+        else:
+            ranges.append([epoch, epoch])
+    return {
+        "device_settings": {
+            "camera": {
+                "device_session_id": sessions.pop(),
+                "epoch_ranges": ranges,
+                "mixed": len(epochs) > 1,
+            }
+        }
+    }
+
+
+def cycle_snapshot(
+    cycle: Sequence[CameraFrameRecord],
+    *,
+    frame_shape: tuple[int, int],
+    origin_yx: tuple[int, int],
+    binning_yx: tuple[int, int],
+    generation: object,
+    revision: int,
+    value_unit: str | None,
+) -> OwnedSnapshot:
+    """One acquired cycle, as the dataset it is.
+
+    THE translation, for the live preview and for the frames written to disk
+    as they arrive.  Two of them would be two datasets of the same three
+    frames: the picture an operator watched and the picture they reopened
+    would agree about the numbers and disagree about the axes.
+
+    The three frames are POINT ROWS of one publication -- one moment of the
+    pulse each -- and the pixel axes carry the sensor pixels the crop covers,
+    so a reopened file is placed on the sensor exactly as the live panel was.
+    """
+
+    return _snapshot(
+        _cycle_array(cycle, frame_shape)[None, ...],
+        signal=CAPTURE_PREVIEW_DECLARATION.name,
+        point_axes=(_frame_point_axis(_PREVIEW_FRAMES),),
+        cell_axes=_image_axes(
+            frame_shape,
+            "sensor_pixel_xy",
+            origin_yx=origin_yx,
+            binning_yx=binning_yx,
+        ),
+        value_unit=value_unit,
+        generation=generation,
+        revision=revision,
+    )
+
+
+def capture_preview_output(
+    cycle: Sequence[CameraFrameRecord],
+    *,
+    frame_shape: tuple[int, int],
+    origin_yx: tuple[int, int],
+    binning_yx: tuple[int, int],
+    generation: object,
+    revision: int,
+    value_unit: str | None,
+) -> LiveDatasetOutput:
+    """Translate one complete long/readout/long cycle into its live event.
+
+    Calibration keeps no mutable preview history.  The acquisition thread
+    commits this immutable three-frame event directly; Runtime owns its
+    publication identity and the Monitor keeps only the newest complete
+    cycle.
+    """
+
+    snapshot = cycle_snapshot(
+        cycle,
+        frame_shape=frame_shape,
+        origin_yx=origin_yx,
+        binning_yx=binning_yx,
+        generation=generation,
+        revision=revision,
+        value_unit=value_unit,
+    )
+    return LiveDatasetOutput(
+        CAPTURE_PREVIEW_DECLARATION,
+        snapshot,
+        event_record=_cycle_settings_record(tuple(cycle)),
+    )
+
+
+def site_review_output(
+    image: object,
+    site_map: "SiteMap",
+    *,
+    origin_yx: tuple[int, int],
+    binning_yx: tuple[int, int],
+    generation: object,
+    revision: int,
+    run_record: Mapping[str, object],
+    value_unit: str | None,
+) -> tuple[Mapping[str, object], LiveDatasetOutput]:
+    """Publish one detected candidate SiteMap over its reference average."""
+
+    values = np.asarray(image)
+    if values.ndim != 2:
+        raise ValueError("site review image must be two-dimensional")
+    snapshot = _snapshot(
+        values[np.newaxis, ...],
+        signal=SITE_REVIEW_DECLARATION.name,
+        cell_axes=_image_axes(
+            tuple(values.shape),
+            "sensor_pixel_xy",
+            origin_yx=origin_yx,
+            binning_yx=binning_yx,
+        ),
+        value_unit=value_unit,
+        generation=generation,
+        revision=revision,
+    )
+    from zlc_data.point_overlay import IMAGE_POINT_OVERLAY_GEOMETRY_RECORD, image_point_overlay_geometry
+
+    site_axis = site_map.site_axis
+    labels = tuple(
+        str(site_axis.coordinate_at(index)) for index in range(site_map.n_sites)
+    )
+    geometry = image_point_overlay_geometry(
+        snapshot,
+        site_map.centers_xy,
+        site_map.site_ids,
+        status_axis=site_axis,
+        labels=labels,
+        coordinates_are_indices=True,
+    )
+    return (
+        {
+            **dict(run_record),
+            IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: geometry,
+        },
+        LiveDatasetOutput(SITE_REVIEW_DECLARATION, snapshot),
+    )
+
+
+def site_review_schema(
+    frame_shape: tuple[int, int],
+    *,
+    origin_yx: tuple[int, int],
+    binning_yx: tuple[int, int],
+    value_unit: str | None,
+) -> DatasetSchema:
+    """The schema :func:`site_review_output` publishes for this crop, known before the image is."""
+
+    return _snapshot(
+        np.zeros((1, *frame_shape), dtype=np.float64),
+        signal=SITE_REVIEW_DECLARATION.name,
+        cell_axes=_image_axes(tuple(frame_shape), "sensor_pixel_xy", origin_yx=origin_yx, binning_yx=binning_yx),
+        value_unit=value_unit,
+        generation="schema",
+        revision=0,
+    ).block.schema
+
+
+__all__ = [
+    "CAPTURE_PREVIEW_DECLARATION",
+    "SITE_REVIEW_DECLARATION",
+    "capture_preview_output",
+    "cycle_snapshot",
+    "site_review_output",
+    "site_review_schema",
+    "site_map_image_overlay",
+]

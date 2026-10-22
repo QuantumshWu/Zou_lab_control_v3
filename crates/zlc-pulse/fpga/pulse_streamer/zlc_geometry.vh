@@ -1,0 +1,34 @@
+// ==========================================================================
+// zlc_geometry.vh -- AUTO-GENERATED from fpga/board_config/streamer_config.json by
+//   zlc fpga --emit-geometry-vh <path>
+// DO NOT EDIT.  Every RTL geometry parameter (+ the LAYOUT_FINGERPRINT the host connect-
+// check verifies) defaults to a macro here, so editing the config + rebuilding propagates
+// to the bitstream and testbenches with no hand-carried literal.  Regenerated from the
+// active config by the frozen build flow; the deployment copy is pinned by the geometry
+// anchor test.
+// ==========================================================================
+`ifndef ZLC_GEOMETRY_VH
+`define ZLC_GEOMETRY_VH
+`define ZLC_CHANNEL_COUNT       69
+`define ZLC_NUM_SLOTS           4
+`define ZLC_SLOT_SEL_WIDTH      3
+`define ZLC_TICK_WIDTH          32
+`define ZLC_ROW_ADDR_WIDTH      9
+`define ZLC_ROW_BITS            120
+`define ZLC_ROW_WORDS           4
+`define ZLC_BANK_SIZE           2048
+`define ZLC_SCAN_ADDR_WIDTH     12
+`define ZLC_BUS_COUNT           4
+`define ZLC_BUS_INDEX_WIDTH     2
+`define ZLC_BUS_WIDTH           10
+`define ZLC_MAX_LOOPS           8
+`define ZLC_LOOP_INDEX_WIDTH    3
+`define ZLC_LOOP_DEPTH          4
+`define ZLC_EVT_FIFO_DEPTH      32
+`define ZLC_BUS_EVT_FIFO_DEPTH  64
+`define ZLC_NUM_DELAY_CH        25
+`define ZLC_DELAY_CH_IDX_W      5
+`define ZLC_DELAY_REG_WORDS     128
+`define ZLC_UART_BAUD           460800
+`define ZLC_LAYOUT_FINGERPRINT  32'h5AD5A6A0
+`endif // ZLC_GEOMETRY_VH

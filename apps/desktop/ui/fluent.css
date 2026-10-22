@@ -1,0 +1,677 @@
+/* zlc_ui.fluent in CSS: the one control family every view is built from.
+ * Every value is a token of tokens.css; this file spells no colour and no
+ * length.  Section comments name the zlc_ui class each block reproduces;
+ * DESIGN.md maps the tokens to their v2 source. */
+@import url("tokens.css");
+
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+/* fluent_widget_stylesheet: TEXT ink and the body font everywhere, BG on the window. */
+body {
+  color: var(--text); background: var(--bg);
+  font-family: var(--font-family); font-size: var(--font-size); font-weight: 400;
+  -webkit-user-select: none; user-select: none; cursor: default;
+}
+button, input, select, option, textarea { font: inherit; color: inherit; }
+/* Focus paints nothing (no focus ring anybody asked for); a field shows
+ * focus with its ACCENT edge only. */
+:focus, :focus-visible { outline: none; }
+[hidden] { display: none !important; }
+p { margin: 0; }
+
+/* FluentFrame: a white rounded region; bordered = the DIVIDER edge. */
+.card { background: var(--surface); border-radius: var(--radius); }
+.card.bordered { border: var(--edge) solid var(--divider); }
+
+/* ---------- FluentLabel: one plain line, capitals centred in a control's height -- */
+.line, .row-label, .field-label, .section-title, .identity, .summary, .readout, .strip-text, .note, .elided, .heading, .status-text {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* One line of words a control high, its capitals on the control's centre.  A
+ * block whose line is centred as a flex box centres it (align-content), not a
+ * flex box: a flex box's text is an anonymous item the ellipsis never reaches,
+ * so a long label was cut mid-letter instead of ending in "…". */
+.row-label, .field-label, .readout, .heading, .status-text {
+  display: block; align-content: center; height: var(--control); padding-bottom: var(--cap-lift);
+}
+/* A title or an identity with commands or a dot beside its words: a row. */
+.section-title, .identity {
+  display: flex; align-items: center; height: var(--control); padding-bottom: var(--cap-lift);
+}
+.row-label { flex: none; }
+.summary, .strip-text { display: block; }
+.note { color: var(--muted-ink); }
+.note.wrap { white-space: normal; line-height: var(--font-line); }
+.readout { color: var(--muted-ink); font-variant-numeric: tabular-nums; }
+.readout.error { color: var(--red-dark); }
+.elided { min-width: 0; }
+/* A FluentLabel that is a row of its card (min height control_height(), its
+ * first line where a control centres its text): a long one wraps below. */
+.row-line { min-height: var(--control); padding-top: calc((var(--control) - var(--cap-lift) - var(--font-line)) / 2); line-height: var(--font-line); }
+.row-line.elided { height: var(--control); }
+
+/* ---------- FluentStatusDot + STATUS_CUES ------------------------------ */
+.dot { flex: none; width: var(--dot); height: var(--dot); border-radius: 50%; background: var(--grey); }
+.dot[data-state="running"] { background: var(--green); }
+.dot[data-state="task"] { background: var(--accent); }
+.dot[data-state="warning"] { background: var(--orange); }
+.dot[data-state="error"] { background: var(--red); }
+/* set_status_ink: the words beside a dot in its word's ink. */
+.ink[data-state="idle"] { color: var(--muted-ink); }
+.ink[data-state="running"], .ink[data-state="task"] { color: var(--text); }
+.ink[data-state="warning"] { color: var(--orange-dark); }
+.ink[data-state="error"] { color: var(--red-dark); }
+.status-line { display: flex; align-items: center; gap: var(--dot-gap); min-width: 0; }
+.status-text { min-width: 0; }
+
+/* ---------- FluentStatusStrip ------------------------------------------ */
+.strip {
+  flex: none; display: flex; align-items: center; gap: var(--dot-gap);
+  height: var(--strip-h); padding: var(--strip-pad-v) var(--window-pad);
+}
+.strip-text { flex: 1; min-width: 0; padding-bottom: var(--cap-lift); color: var(--muted-ink); }
+.strip[data-state="task"] .strip-text, .strip[data-state="running"] .strip-text { color: var(--text); }
+.strip[data-state="warning"] .strip-text { color: var(--orange-dark); }
+.strip[data-state="error"] .strip-text { color: var(--red-dark); }
+.strip-trailing { flex: none; display: flex; align-items: center; gap: var(--row-gap); }
+.strip-trailing:empty { display: none; }
+.strip .count { flex: none; color: var(--muted-ink); padding-bottom: var(--cap-lift); white-space: nowrap; }
+
+/* ---------- FluentButton (BUTTON_ROLES) -------------------------------- */
+button {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  height: var(--control); min-height: var(--control); margin: 0;
+  padding: 0 var(--button-pad-h) var(--cap-lift);
+  border: var(--edge) solid var(--button-tint); border-radius: var(--radius);
+  background: var(--button-tint); color: var(--ink-accent);
+  font-weight: 400; white-space: nowrap; cursor: default;
+}
+button:hover { background: var(--button-hover); border-color: var(--button-hover); }
+button:active { background: var(--selected); border-color: var(--selected); }
+button.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--surface); }
+button.primary:hover { background: var(--strong-hover); border-color: var(--strong-hover); }
+button.primary:active { background: var(--strong-pressed); border-color: var(--strong-pressed); }
+button.destructive { background: var(--red-tint); border-color: var(--red-tint); color: var(--red-dark); }
+button.destructive:hover { background: var(--red-hover); border-color: var(--red-hover); }
+button.destructive:active { background: var(--red-pressed); border-color: var(--red-pressed); }
+button.quiet { background: transparent; border-color: transparent; color: var(--muted-ink); }
+button.quiet:hover { background: var(--accent-tint); border-color: var(--accent-tint); color: var(--text); }
+button.quiet:active { background: var(--selected); border-color: var(--selected); color: var(--text); }
+/* A one-symbol label (×, ⋯): a control-square face, the symbol centred on its INK (fluent/ink.ts). */
+button.glyph, button.square { width: var(--control); padding-left: 0; padding-right: 0; }
+button.glyph { position: relative; }
+/* paint_centred_ink's surface: an SVG on its face inside the edge, one device px a user unit, in the face's ink. */
+svg.ink { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+svg.ink text { fill: currentColor; }
+/* A one-glyph remover: a quiet ghost that turns red only under the pointer. */
+button.destructive.glyph { background: transparent; border-color: transparent; color: var(--muted-ink); }
+button.destructive.glyph:hover { background: var(--red-tint); border-color: var(--red-tint); color: var(--red-dark); }
+button.destructive.glyph:active { background: var(--red-pressed); border-color: var(--red-pressed); color: var(--red-dark); }
+/* Armed (confirm_twice) and destructive_primary: the one white-on-red fill. */
+button.armed, button.destructive.glyph.armed, button.destructive-primary { background: var(--red-dark); border-color: var(--red-dark); color: var(--surface); }
+button.armed:hover, button.destructive.glyph.armed:hover, button.destructive-primary:hover { background: var(--red-strong-hover); border-color: var(--red-strong-hover); color: var(--surface); }
+button.armed:active, button.destructive.glyph.armed:active, button.destructive-primary:active { background: var(--red-strong-pressed); border-color: var(--red-strong-pressed); color: var(--surface); }
+/* Active (set_active): the SELECTED face a toggle command keeps while on. */
+button.active { background: var(--selected); border-color: var(--selected); color: var(--ink-accent); }
+button.active:hover, button.active:active { background: var(--selected-hover); border-color: var(--selected-hover); }
+button.quiet.active { color: var(--text); }
+button:disabled, button:disabled:hover, button:disabled:active {
+  background: var(--divider); border-color: var(--divider); color: var(--disabled-ink);
+}
+button.quiet:disabled, button.destructive.glyph:disabled { background: transparent; border-color: transparent; color: var(--disabled-ink); }
+/* fit_button_words: every word a command can say in one cell; the slot is the widest. */
+button .words { display: inline-grid; }
+button .words > span { grid-area: 1 / 1; visibility: hidden; text-align: center; }
+button .words > span.current { visibility: visible; }
+
+/* ---------- FluentLineEdit --------------------------------------------- */
+input {
+  width: 100%; min-width: 0; height: var(--control); margin: 0;
+  border: var(--edge) solid var(--placeholder); border-radius: var(--radius);
+  background: var(--surface); color: var(--text);
+  padding: var(--pad-v) calc(var(--edit-pad-h) + var(--qline-margin)) calc(var(--pad-v) + var(--cap-lift));
+  -webkit-user-select: text; user-select: text; cursor: text;
+}
+input:focus { border-color: var(--accent); }
+input:disabled { background: var(--bg); color: var(--disabled-ink); cursor: default; }
+input::placeholder { color: var(--muted-ink); opacity: 1; }
+input:disabled::placeholder { color: var(--disabled-ink); }
+/* set_placeholder_prompt: a field's own name repeated inside it, the text ink at half strength. */
+input.prompt::placeholder { color: color-mix(in srgb, var(--text) 50%, transparent); }
+input.prompt:disabled::placeholder { color: var(--disabled-ink); }
+input.invalid { border-color: var(--red); }
+/* set_display_elide(ElideRight): a name longer than the box reads from its head, cut with an ellipsis, while it is not being edited. */
+input.elide-right { text-overflow: ellipsis; }
+/* Selected text, in a field or a readout: one SELECTED wash in TEXT ink (never the browser's deep blue). */
+::selection { background: var(--selected); color: var(--text); }
+
+/* ---------- FluentComboBox (customizable select) ----------------------- */
+select, ::picker(select) { appearance: base-select; }
+select {
+  position: relative; display: flex; align-items: center;
+  /* --combo-min: FluentComboBox.sizeHint, its widest choice (combo.ts hintWidest). */
+  width: 100%; min-width: var(--combo-min, 0px); height: var(--control); margin: 0;
+  border: var(--edge) solid var(--placeholder); border-radius: var(--radius);
+  background: var(--surface); color: var(--text);
+  padding: 0 calc(var(--combo-width) + var(--edge) + var(--edit-pad-h)) var(--cap-lift) calc(var(--edit-pad-h) + var(--qline-margin));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: default;
+}
+/* The field says its states as an edit does: the accent edge under the
+ * pointer or while open (a tree combo's list: .open); no fill change, and
+ * nothing for focus alone (v2 paints no focus). */
+select:hover, select:open, select.open { border-color: var(--accent); }
+select:disabled { background: var(--bg); color: var(--disabled-ink); border-color: var(--placeholder); }
+select.blank { color: var(--muted-ink); }
+select.blank:disabled { color: var(--disabled-ink); }
+/* An active cycle choice takes the SELECTED fill; its edge stays the field's. */
+select.cycle-active { background: var(--selected); }
+select > button.combo-face { all: unset; display: block; flex: 1; min-width: 0; overflow: hidden; }
+selectedcontent { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The one chevron, drawn in the drop column inside the edge -- the stepper
+ * column a spin box below would use (scale.ts --chevron-drop). */
+select::picker-icon {
+  content: ""; position: absolute; top: 0; bottom: 0; right: 0;
+  width: var(--combo-width); height: auto; margin: 0;
+  background: var(--graphite); -webkit-mask: var(--chevron-drop) 0 0 / 100% 100% no-repeat; mask: var(--chevron-drop) 0 0 / 100% 100% no-repeat;
+  transition: none; rotate: none;
+}
+select:open::picker-icon { rotate: none; }
+select.cycle-active::picker-icon { background: var(--text); }
+select:disabled::picker-icon { background: var(--placeholder); }
+/* FluentPopup + _combo_popup_stylesheet: a white card, DIVIDER edge, the
+ * picked row SELECTED, the row under the pointer ACCENT_TINT. */
+::picker(select) {
+  border: var(--edge) solid var(--divider); border-radius: var(--radius);
+  background: var(--surface); padding: var(--popup-gap); margin: var(--popup-gap) 0;
+  box-shadow: none; color: var(--text);
+  max-height: calc(12 * (var(--font-line) + 2 * var(--popup-item-pad-v) + 2 * var(--edge)) + 2 * var(--popup-gap) + 2 * var(--edge));
+  overflow-y: auto;
+}
+/* A choice row of a popup (a select's option, an editable combo's, a tree's
+ * item, a check list's): its face drawn one device pixel inside the row, so the
+ * picked and the hovered rows' faces stand apart as v2's item views draw them,
+ * and its words after the item view's text margin (PM_FocusFrameHMargin + 1). */
+option, .edit-combo-row, .tree-item {
+  padding: calc(var(--popup-item-pad-v) + var(--edge) - var(--dpx)) calc(var(--popup-item-pad-h) + var(--edge) - var(--dpx) + 2px * var(--qt))
+    calc(var(--popup-item-pad-v) + var(--edge) - var(--dpx) + var(--cap-lift));
+  border: var(--dpx) solid transparent; border-radius: var(--radius); background-clip: padding-box;
+}
+option {
+  display: block; min-height: 0;
+  background-color: transparent; color: var(--text); white-space: nowrap; cursor: default;
+}
+/* A choice wider than its popup (bounded by the window) ends in an ellipsis, as an item view elides its rows. */
+option, .edit-combo-row, .tree-item { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+::picker(select), .edit-combo-list { max-width: 100vw; }
+option::checkmark { display: none; }
+option:hover, option:focus, option:focus-visible { background-color: var(--accent-tint); outline: none; }
+option:checked { background-color: var(--selected); font-weight: 400; }
+/* Opening focuses the picked row; it is SELECTED until the pointer is over it (Qt's popup). */
+option:checked:hover { background-color: var(--selected-hover); }
+option:disabled { color: var(--disabled-ink); background-color: transparent; }
+/* A family of choices (a unit's prefixes, a device domain) under its own
+ * muted heading; its rows are not indented (FluentTreeComboBox reads as one list). */
+optgroup { display: block; }
+optgroup::label, optgroup legend {
+  display: block; color: var(--muted-ink); font-weight: 400;
+  padding: var(--popup-item-pad-v) var(--popup-item-pad-h) calc(var(--popup-item-pad-v) + var(--cap-lift));
+}
+/* An editable FluentComboBox: its field, the chevron in the same stepper column, its list the combo popup. */
+.edit-combo { position: relative; width: 100%; min-width: 0; }
+.edit-combo input { padding-right: calc(var(--combo-width) + var(--edge) + var(--edit-pad-h)); }
+.edit-combo:hover input:not(:disabled), .edit-combo:has(> .edit-combo-list:popover-open) input:not(:disabled) { border-color: var(--accent); }
+/* Its chevron cell is part of the field, never a command face (a button's hover and press fills lose to the unset). */
+.edit-combo > .edit-combo-open { all: unset; position: absolute; top: 0; right: 0; bottom: 0; width: calc(var(--combo-width) + var(--edge)); cursor: default; }
+.edit-combo-open::after {
+  content: ""; position: absolute; top: var(--edge); bottom: var(--edge); right: var(--edge); width: var(--combo-width);
+  background: var(--graphite); -webkit-mask: var(--chevron-drop) 0 0 / 100% 100% no-repeat; mask: var(--chevron-drop) 0 0 / 100% 100% no-repeat;
+}
+.edit-combo.disabled .edit-combo-open { pointer-events: none; }
+.edit-combo.disabled .edit-combo-open::after { background: var(--placeholder); }
+.edit-combo-list {
+  position: fixed; inset: auto; margin: var(--popup-gap) 0; box-sizing: border-box;
+  border: var(--edge) solid var(--divider); border-radius: var(--radius); background: var(--surface); padding: var(--popup-gap); color: var(--text);
+  max-height: calc(12 * (var(--font-line) + 2 * var(--popup-item-pad-v) + 2 * var(--edge)) + 2 * var(--popup-gap) + 2 * var(--edge)); overflow-y: auto;
+}
+.edit-combo-row { white-space: nowrap; cursor: default; }
+.edit-combo-row:hover { background-color: var(--accent-tint); }
+.edit-combo-row.picked { background-color: var(--selected); }
+.edit-combo-row.picked:hover { background-color: var(--selected-hover); }
+/* FluentTreeComboBox's drop-down (tree_combo.ts): the combo popup's card; each
+ * row its branch columns (a QTreeView indentation each, a heading's chevron in
+ * its own) then its item box, which takes the hover and SELECTED faces.  A
+ * heading reads bold; it opens and closes, it is never picked. */
+.tree-combo-list {
+  position: fixed; inset: auto; margin: var(--popup-gap) 0 0; box-sizing: border-box; width: max-content;
+  border: var(--edge) solid var(--divider); border-radius: var(--radius); background: var(--surface);
+  padding: calc(2 * var(--popup-gap)) var(--popup-gap) var(--popup-gap); color: var(--text); overflow-y: auto;
+}
+.tree-row { display: flex; align-items: stretch; white-space: nowrap; cursor: default; padding-left: var(--tree-indent); }
+.tree-row.leaf { padding-left: calc(2 * var(--tree-indent)); }
+.tree-branch {
+  width: var(--tree-indent); margin-left: calc(-1 * var(--tree-indent)); flex: none;
+  background: var(--graphite); -webkit-mask: var(--chevron-down) center / var(--chevron-w) var(--chevron-h) no-repeat; mask: var(--chevron-down) center / var(--chevron-w) var(--chevron-h) no-repeat;
+  rotate: -90deg;
+}
+.tree-row.open > .tree-branch { rotate: none; background: var(--text); }
+.tree-item { flex: 1; }
+.tree-row.heading > .tree-item { font-weight: 700; }
+.tree-item:hover { background-color: var(--accent-tint); }
+.tree-row.current:not(.heading) > .tree-item { background-color: var(--selected); }
+.tree-row.current:not(.heading) > .tree-item:hover { background-color: var(--selected-hover); }
+.tree-row.current.heading > .tree-item { background-color: var(--accent-tint); }
+/* FluentUnitPicker: as wide as its widest spelling, after its number box. */
+select.unit-picker { flex: none; width: auto; field-sizing: content; }
+
+/* ---------- FluentSwitch ----------------------------------------------- */
+.switch {
+  position: relative; justify-content: flex-start; gap: var(--switch-label-gap);
+  height: var(--control); min-width: var(--switch-w); padding: 0 0 var(--cap-lift);
+  border: 0; background: transparent; color: var(--text); cursor: pointer;
+}
+.switch:hover, .switch:active, .switch:disabled, .switch:disabled:hover { background: transparent; border: 0; }
+.switch .track {
+  position: relative; flex: none; width: var(--switch-w); height: var(--switch-h);
+  border-radius: calc(var(--switch-h) / 2); background: var(--placeholder);
+  margin-bottom: calc(0px - var(--cap-lift));
+}
+.switch .track::after {
+  content: ""; position: absolute; top: var(--switch-inset); left: var(--switch-inset);
+  width: calc(var(--switch-h) - 2 * var(--switch-inset)); height: calc(var(--switch-h) - 2 * var(--switch-inset));
+  border-radius: 50%; background: var(--surface); transition: left var(--anim-switch);
+}
+.switch:hover .track { background: var(--switch-off-hover); }
+.switch[aria-checked="true"] .track { background: var(--accent); }
+.switch[aria-checked="true"]:hover .track { background: var(--accent-hover); }
+.switch[aria-checked="true"] .track::after { left: calc(var(--switch-w) - var(--switch-h) + var(--switch-inset)); }
+.switch:disabled { color: var(--disabled-ink); cursor: default; }
+.switch:disabled .track, .switch:disabled:hover .track { background: var(--divider); }
+.switch:disabled .track::after { background: var(--bg); }
+/* A switch whose words say its state is as wide as its widest word. */
+.switch-words { display: inline-grid; }
+.switch-words > span { grid-area: 1 / 1; }
+.switch[aria-checked="true"] .switch-words .off, .switch[aria-checked="false"] .switch-words .on { visibility: hidden; }
+/* add_row_switch: a setting among commands is a group of its own -- a
+ * second gap on each side that has a neighbour. */
+.row-switch { margin-left: var(--row-gap); margin-right: var(--row-gap); }
+.row-switch:first-child { margin-left: 0; }
+.row-switch:last-child { margin-right: 0; }
+
+/* ---------- FluentCheckBox --------------------------------------------- */
+/* Qt's CE_CheckBox centres the label's line box (not its capitals) beside the centred box. */
+.check {
+  justify-content: flex-start; gap: var(--check-gap); padding: 0;
+  border: 0; background: transparent; color: var(--text);
+  /* Narrower than its words where its row is (v2 minimumSizeHint: the box and
+   * one letter): the words end in an ellipsis instead of running on. */
+  flex: 0 1 auto; min-width: 0; max-width: 100%;
+}
+.check .words { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.check:hover, .check:active, .check:disabled, .check:disabled:hover { background: transparent; border: 0; }
+.check .box {
+  position: relative; flex: none; width: var(--check-size); height: var(--check-size);
+  border-radius: var(--radius); background: var(--neutral-fill);
+}
+.check:hover .box { background: var(--unticked-hover); }
+.check[aria-checked="true"] .box { background: var(--accent); }
+.check[aria-checked="true"]:hover .box { background: var(--accent-hover); }
+.check[aria-checked="true"] .box::after {
+  content: ""; position: absolute; inset: 0; background: var(--surface);
+  -webkit-mask: var(--tick) center / 100% 100% no-repeat; mask: var(--tick) center / 100% 100% no-repeat;
+}
+.check:disabled { color: var(--disabled-ink); }
+.check:disabled .box { background: var(--neutral-fill); }
+.check[aria-checked="true"]:disabled .box { background: var(--disabled-ink); }
+.checks { display: flex; flex-wrap: wrap; column-gap: var(--row-gap); }
+
+/* ---------- FluentSegmentedButtons ------------------------------------- */
+.segmented {
+  display: inline-flex; flex: none; padding: var(--segment-rim); gap: 0;
+  background: var(--divider); border-radius: calc(var(--radius) + var(--segment-rim));
+}
+/* Each segment's hover and SELECTED face is a tile of its own, drawn a device pixel inside the segment as
+ * a popup's choice rows are (option, .tree-item): neighbours' faces stand apart by the same small gap. */
+.segmented button {
+  height: calc(var(--control) - 2 * var(--segment-rim)); min-height: 0;
+  /* setMinimumWidth(text + 2 pad + 2): a Qt px more each side than its padding gives. */
+  padding: 0 calc(var(--segment-pad) - var(--dpx) + var(--q)) var(--cap-lift);
+  border: var(--dpx) solid transparent; background-clip: padding-box; background-color: transparent; color: var(--text); cursor: pointer;
+}
+.segmented button:hover { background-color: var(--accent-tint); }
+.segmented button:active, .segmented button[aria-checked="true"] { background-color: var(--selected); }
+.segmented button[aria-checked="true"]:is(:hover, :active) { background-color: var(--selected-hover); }
+.segmented button:disabled { border-color: transparent; background: transparent padding-box; color: var(--disabled-ink); cursor: default; }
+.segmented button[aria-checked="true"]:disabled { background-color: var(--divider); }
+.segmented.disabled { background: var(--bg); }
+
+/* ---------- FluentDoubleSpinBox: a field with a two-cell stepper ------- */
+.spin { position: relative; display: flex; flex: 1; min-width: 0; max-width: var(--number-cap); }
+/* A blank-or-number edit ends on the same number edge as a spin box. */
+.field-control > input.number { max-width: var(--number-cap); }
+/* qt_form's capped row ends in a stretch of the box's own factor: the box takes half
+ * the room the row's other cells leave, at least its minimum, at most the number edge. */
+.field-control.capped > input.number, .field-control.capped > .spin { flex: 1 1 0; }
+.field-control.capped::after { content: ""; flex: 1 1 0; margin-left: calc(-1 * var(--row-gap)); }
+/* An edit's frame and padding are its flex floor: the stretch has the same, so the halves are even. */
+.field-control.capped:has(> input.number)::after { padding-left: calc(2 * (var(--edge) + var(--edit-pad-h) + var(--qline-margin))); }
+/* A form's number edge is its widest box's (share_label_column number_edge_hint):
+ * only a form with a decimal box reserves the step chip's room. */
+:is(.config-column, .logic-editor-body, .settings-body):not(:has(.spin.decimal)) { --number-cap: var(--number-cap-plain); }
+.spin input { padding-right: calc(var(--combo-width) + var(--edge) + var(--qline-margin)); font-variant-numeric: tabular-nums; }
+.spin .step {
+  position: absolute; right: var(--edge); width: var(--combo-width); min-height: 0; height: auto;
+  padding: 0; border: 0; border-radius: 0; background: transparent; cursor: default;
+}
+.spin .step.up { top: var(--edge); bottom: 50%; border-top-right-radius: var(--radius-inner); }
+.spin .step.down { top: 50%; bottom: var(--edge); border-bottom-right-radius: var(--radius-inner); }
+/* Each cell's chevron is drawn on the whole stepper column of the inner rect (scale.ts). */
+.spin .step::after {
+  content: ""; position: absolute; left: 0; width: 100%; height: calc(var(--control) - 2 * var(--edge));
+  background: var(--graphite); pointer-events: none;
+}
+.spin .step.up::after { top: 0; -webkit-mask: var(--chevron-step-up) 0 0 / 100% 100% no-repeat; mask: var(--chevron-step-up) 0 0 / 100% 100% no-repeat; }
+.spin .step.down::after { bottom: 0; -webkit-mask: var(--chevron-step-down) 0 0 / 100% 100% no-repeat; mask: var(--chevron-step-down) 0 0 / 100% 100% no-repeat; }
+.spin .step:hover { background: var(--accent-tint); }
+.spin .step:active { background: var(--selected); }
+.spin .step:disabled, .spin .step:disabled:hover { background: transparent; }
+.spin .step:disabled::after { background: var(--placeholder); }
+.spin.wide { max-width: none; }
+/* _StepChip: the step one notch moves by, left of the stepper -- a quiet
+ * ghost in the chip's smaller font; under the pointer an ACCENT_TINT pill in
+ * TEXT ink, SELECTED held down; disabled with its box.  The digits end the
+ * chip's room before it, or take that room when they need it (chip-yields). */
+.spin.decimal input { padding-right: calc(var(--combo-width) + var(--edge) + var(--qline-margin) + max(0px, var(--chip-text-w, 0px) + var(--chip-chrome))); }
+.spin.decimal.chip-yields input { padding-right: calc(var(--combo-width) + var(--edge) + var(--qline-margin)); }
+.spin .step-chip {
+  position: absolute; top: var(--edge); bottom: var(--edge); right: calc(2 * var(--edge) + var(--combo-width) + var(--step-chip-gap));
+  height: auto; min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent;
+  color: var(--muted-ink); cursor: pointer;
+}
+.spin .step-chip:hover, .spin .step-chip:active, .spin .step-chip:disabled { background: transparent; border: 0; }
+/* The pill: its size the chip's ink and padding (fluent/ink.ts), its ends round. */
+.spin .step-chip > span { position: relative; display: block; border-radius: 9999px; }
+.spin .step-chip:hover > span { background: var(--accent-tint); color: var(--text); }
+.spin .step-chip:active > span { background: var(--selected); color: var(--text); }
+.spin .step-chip:disabled { color: var(--disabled-ink); cursor: default; }
+.spin .step-chip:disabled > span { background: transparent; color: var(--disabled-ink); }
+.spin.chip-yields .step-chip { display: none; }
+
+/* ---------- FluentScrollArea scrollbars -------------------------------- */
+::-webkit-scrollbar { width: var(--scrollbar); height: var(--scrollbar); background: transparent; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+::-webkit-scrollbar-thumb {
+  background: var(--neutral-fill); background-clip: padding-box;
+  border: var(--scroll-handle-margin) solid transparent;
+  border-radius: calc(var(--radius) + var(--scroll-handle-margin));
+  min-height: var(--scroll-handle-min); min-width: var(--scroll-handle-min);
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--accent); }
+
+/* ---------- FluentParameterForm: one label column, rows a row gap apart -- */
+.form {
+  display: grid; grid-template-columns: var(--label-width, minmax(var(--label-min), max-content)) minmax(0, 1fr);
+  column-gap: var(--row-gap); row-gap: var(--row-gap); align-items: center;
+}
+/* FluentSectionLabel: the semibold title, a control high, its commands at its end. */
+.section-title { font-weight: var(--heading-weight); display: flex; gap: var(--row-gap); padding-bottom: 0; overflow: visible; }
+.form .section-title { grid-column: 1 / -1; }
+.section-title > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-bottom: var(--cap-lift); }
+.form .section-title:not(:first-child) { margin-top: calc(var(--section-gap) - var(--row-gap)); }
+.field { display: contents; }
+.field-label { min-width: 0; padding-right: var(--label-trail); }
+.field-control { min-width: 0; display: flex; gap: var(--row-gap); align-items: center; }
+.field-control > select:not(.unit-picker) { flex: 1; }
+/* qt_form: a text box is at least 160 (scaled) wide, a blank-or-number box 120; the column widens them. */
+.field-control > input { flex: 1 1 auto; width: var(--text-edit-min-w); min-width: var(--text-edit-min-w); }
+.field-control > input.number { width: var(--number-edit-min-w); min-width: var(--number-edit-min-w); }
+.field-error, .fit-error { grid-column: 1 / -1; margin: 0; color: var(--red-dark); white-space: normal; overflow-wrap: anywhere; }
+/* A field's own problem: one sentence under its line, in the control column. */
+.field > .field-error { grid-column: 2 / -1; }
+.form-note { grid-column: 1 / -1; margin: 0; }
+.form-actions { grid-column: 1 / -1; display: flex; gap: var(--row-gap); margin-top: calc(var(--section-gap) - var(--row-gap)); }
+.spacer { flex: 1; }
+
+/* ---------- card_title_row + FluentGroupBox ----------------------------- */
+.title-row { display: flex; align-items: center; gap: var(--row-gap); min-width: 0; }
+.title-row .heading { flex: 0 1 auto; font-weight: var(--heading-weight); }
+.title-row .summary-text { flex: 1; text-align: right; color: var(--muted-ink); padding-bottom: var(--cap-lift); }
+/* The card's margins count from its outer edge, the painted edge inside them. */
+.group { display: flex; flex-direction: column; gap: var(--row-gap); padding: calc(var(--card-pad) - var(--edge)); min-width: 0; }
+.group.selected { background: var(--accent-tint); }
+.group-body { display: flex; flex-direction: column; gap: var(--row-gap); min-width: 0; }
+.group-body:empty { display: none; }
+/* An empty sub-layout takes no spacing in Qt: a body that is only an empty list adds no row gap. */
+.group-body:has(> .ruled:only-child:empty) { display: none; }
+/* A ruled list: a hairline in the middle of a half-section break between
+ * items, never under the last. */
+.ruled { display: flex; flex-direction: column; gap: var(--rule-gap); min-width: 0; }
+.ruled:empty { display: none; }
+.ruled > :not(:nth-last-child(1 of :not([hidden]))) { padding-bottom: var(--rule-gap); border-bottom: var(--edge) solid var(--divider); }
+
+/* ---------- FluentTabWidget: pivot tabs on a white card ---------------- */
+.tabs { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--surface); border-radius: var(--radius); }
+.tab-bar { flex: none; display: flex; align-items: flex-start; min-width: 0; }
+.tab-strip { flex: 1; min-width: 0; display: flex; overflow: hidden; }
+.tab {
+  flex: none; display: flex; align-items: center; min-width: 0;
+  height: calc(var(--tab-label-h) + var(--tab-underline));
+  /* QTabBar centres the label's LINE (not its capitals) on the band above the underline. */
+  padding: 0 var(--tab-pad-h); margin: 0 var(--tab-margin-h);
+  border-bottom: var(--tab-underline) solid transparent; color: var(--muted-ink); white-space: nowrap;
+}
+.tab:first-child { margin-left: var(--tab-inset, var(--section-gap)); }
+.tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.tab:not([aria-selected="true"]):hover { color: var(--text); }
+.tab-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* A closable tab's quiet round x on the label's line (closing a view takes nothing away). */
+.tab-close {
+  position: relative; flex: none; align-self: flex-start; width: var(--tab-close); height: var(--tab-close); min-height: 0; padding: 0;
+  /* QTabBar sets the button Qt's 4 px after the title's padding, its seat 2 px in (unscaled). */
+  margin: var(--tab-close-top) calc(var(--tab-close) * -0.25) 0 calc(var(--tab-pad-h) + 2 * var(--q));
+  border: 0; border-radius: 50%; background: transparent; color: var(--muted-ink);
+}
+.tab-close:hover { background: var(--accent-tint); color: var(--text); }
+.tab-close:active { background: var(--selected); color: var(--text); }
+.tab-overflow {
+  position: relative; width: var(--tab-overflow); height: var(--tab-overflow); min-height: 0; padding: 0;
+  margin: calc((var(--tab-label-h) - var(--tab-overflow)) / 2) var(--tab-overflow-margin) 0 0;
+}
+.tab-pages { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.tab-page { flex: 1; min-height: 0; }
+
+/* ---------- _FluentRoundedMenu ----------------------------------------- */
+.menu {
+  /* The card's edge is painted inside the menu's padding (_paint_fluent_card under QMenu). */
+  position: fixed; inset: auto; margin: 0; padding: calc(var(--menu-pad) - var(--edge));
+  border: var(--edge) solid var(--divider); border-radius: var(--radius);
+  background: var(--surface); color: var(--text); box-shadow: none;
+  display: none; flex-direction: column; overflow: visible;
+}
+.menu:popover-open { display: flex; }
+.menu-item {
+  /* QMenu::item centres its line box (no capital lift): the item is the line plus its padding. */
+  justify-content: flex-start; height: auto; min-height: 0;
+  padding: var(--menu-item-pad-v) var(--menu-item-pad-h);
+  margin: 0 var(--menu-item-margin); border: none; background: transparent; color: var(--text);
+}
+.menu-item:hover, .menu-item:active { background: var(--accent-tint); }
+.menu-item:disabled, .menu-item:disabled:hover { background: transparent; border-color: transparent; color: var(--disabled-ink); }
+.menu-separator { height: var(--edge); background: var(--divider); margin: var(--menu-pad) var(--menu-item-margin); }
+
+/* ---------- FluentCardDialog ------------------------------------------- */
+dialog.dialog {
+  margin: auto; padding: calc(var(--dialog-pad) - var(--edge));
+  border: var(--edge) solid var(--divider); border-radius: var(--radius);
+  background: var(--surface); color: var(--text); box-shadow: none;
+  flex-direction: column; gap: var(--dialog-gap); max-width: calc(100vw - 2 * var(--window-pad));
+}
+dialog.dialog[open] { display: flex; }
+dialog.dialog::backdrop { background: transparent; }
+.dialog-title { font-weight: var(--heading-weight); display: flex; align-items: center; height: var(--control); padding-bottom: var(--cap-lift); white-space: nowrap; }
+.dialog-content { display: flex; flex-direction: column; gap: var(--row-gap); min-width: 0; }
+.dialog-text { width: var(--dialog-body-w); max-height: var(--dialog-body-max-h); overflow: auto; line-height: var(--font-line); }
+.dialog-field { display: flex; align-items: center; gap: var(--row-gap); width: var(--dialog-body-w); }
+.dialog-field input { flex: 1; }
+/* The buttons' row inherits the card layout's spacing (Qt: a sub-layout's spacing is its parent's). */
+.dialog-actions { display: flex; justify-content: flex-end; gap: var(--dialog-gap); }
+
+/* ---------- FluentReadoutEdit / FluentReadoutMultiline ------------------ */
+.readout-edit {
+  display: flex; align-items: center; min-width: 0; height: var(--control);
+  padding: 0 var(--field-text-inset) var(--cap-lift); overflow: hidden; white-space: nowrap;
+  color: var(--text); -webkit-user-select: text; user-select: text; cursor: text;
+}
+.readout-edit.flush { padding-left: 0; }
+/* FluentReadoutMultiline: its document margin (PADDING_V) above and below the lines. */
+.readout-text { white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; cursor: text; padding: var(--q) 0; }
+
+/* ---------- PublishedItemsLegend --------------------------------------- */
+.legend { display: flex; flex-wrap: wrap; gap: var(--chip-gap); min-height: var(--chip-h); min-width: 0; }
+.chip {
+  display: inline-flex; align-items: center; gap: 0.5em; height: var(--chip-h);
+  padding: 0 var(--chip-pad-x) var(--cap-lift); border-radius: var(--radius); background: var(--bg); white-space: nowrap;
+}
+.chip-shape { color: var(--muted-ink); }
+.legend-empty { display: flex; align-items: center; height: var(--chip-h); padding: 0 var(--chip-pad-x) var(--cap-lift); color: var(--muted-ink); }
+
+/* ---------- FluentSelectionGrid ---------------------------------------- */
+.selection-grid {
+  display: inline-grid; width: max-content; grid-auto-rows: calc(var(--control) + var(--row-gap));
+  grid-template-rows: var(--grid-header-h); align-items: stretch;
+  /* The grid ends where its last cards end. */
+  margin-bottom: calc(0px - var(--grid-below));
+}
+/* A column's name centred in its header's height, as a QHeaderView section draws it. */
+.grid-header {
+  display: flex; align-items: center; justify-content: center; padding: 0 var(--grid-header-pad) var(--cap-lift);
+  color: var(--muted-ink); white-space: nowrap;
+}
+.selection-grid:not(.toggle) .grid-header:hover { color: var(--text); }
+.grid-row-label {
+  display: flex; align-items: center; justify-content: flex-end; white-space: nowrap; color: var(--muted-ink);
+  margin: var(--grid-above) 0 var(--grid-below);
+  padding: 0 calc(var(--row-gap) - var(--grid-gutter)) var(--cap-lift) var(--grid-label-lead); border-radius: var(--radius);
+}
+.selection-grid.labels-left .grid-row-label { justify-content: flex-start; padding-left: 0; }
+.grid-row-label:hover { color: var(--text); }
+.grid-row-label.action { color: var(--text); cursor: pointer; }
+.grid-row-label.action.muted { color: var(--muted-ink); }
+.grid-row-label.action:hover { background: var(--accent-tint); color: var(--text); }
+.grid-cell { position: relative; min-width: 0; }
+.card-face {
+  position: absolute; inset: var(--grid-above) var(--grid-gutter) var(--grid-below);
+  border-radius: var(--radius); background: var(--bg);
+}
+.card-name {
+  position: relative; display: flex; align-items: center; justify-content: center; height: 100%;
+  padding: 0 var(--grid-cell-pad) var(--cap-lift); white-space: nowrap; visibility: hidden; color: var(--muted-ink);
+}
+.grid-cell:hover .card-face { background: var(--accent-tint); }
+.grid-cell:hover .card-name { visibility: visible; }
+.grid-cell.selected .card-face { background: var(--selected); }
+.grid-cell.selected:hover .card-face { background: var(--selected-hover); }
+.grid-cell.selected .card-name { visibility: visible; color: var(--text); }
+.grid-cell[data-state="derived"] .card-face { background: var(--accent-tint); border: var(--edge) dashed var(--selection-edge); }
+.grid-cell[data-state="derived"]:hover .card-face { background: var(--derived-hover); }
+.grid-cell[data-state="derived"] .card-name { visibility: visible; color: var(--derived-ink); }
+.grid-cell[data-state="error"] .card-face { background: var(--red-tint); }
+.grid-cell[data-state="error"]:hover .card-face { background: var(--red-hover); }
+.grid-cell[data-state="error"] .card-name { visibility: visible; color: var(--red-dark); }
+.grid-cell[data-state="kept"] .card-face { background: var(--orange-tint); }
+.grid-cell[data-state="kept"]:hover .card-face { background: var(--kept-hover); }
+.grid-cell[data-state="kept"] .card-name { visibility: visible; color: var(--orange-dark); }
+.grid-cell[data-state="missing"]:not(.selected) .card-face { border: var(--edge) dashed var(--red); }
+.selection-grid.disabled .grid-cell .card-face { background: var(--bg); border-color: transparent; }
+.selection-grid.disabled .grid-cell .card-name { visibility: hidden; }
+.selection-grid.disabled .grid-cell.selected .card-name { visibility: visible; color: var(--disabled-ink); }
+.selection-grid.disabled .grid-row-label, .selection-grid.disabled .grid-header { color: var(--disabled-ink); }
+.selection-grid.disabled .grid-cell, .selection-grid.disabled .grid-row-label { pointer-events: none; }
+/* A row action's face is a card of its row: on the cards' band. */
+.grid-action { align-self: start; justify-self: center; margin-top: var(--grid-above); }
+
+/* ---------- InfoTree / InfoPane ---------------------------------------- */
+.info-pane { display: flex; flex-direction: column; gap: var(--window-pad-half); min-height: 0; }
+.info-header { flex: none; display: flex; align-items: center; gap: var(--row-gap); height: var(--header-h); padding: var(--header-pad-v) var(--card-pad); }
+.info-tabs { flex: 1; --tab-inset: var(--card-pad); }
+.info-tab { display: flex; flex-direction: column; gap: var(--row-gap); padding: var(--card-pad) var(--card-pad) var(--row-gap); }
+.info-tab > input { flex: none; }
+/* The Flow tab (v2 _FlowView): the graph on SURFACE under a DIVIDER rule, scrolled both ways. */
+.flow-graph { flex: 1; min-height: 0; overflow: auto; background: var(--surface); border-top: var(--edge) solid var(--divider); }
+.flow-graph > svg { display: block; }
+.flow-card.opens { cursor: pointer; }
+.flow-empty { color: var(--muted-ink); padding: calc(18 * var(--fluent) * var(--qt)); }
+.info-tree {
+  flex: 1; min-height: 0; overflow: auto; display: grid; align-content: start;
+  /* v2 _fit_name_column: the names as wide as the widest at its depth, up to six tenths of the view
+   * (never below the declared label column); the values follow and the tree scrolls sideways. */
+  grid-template-columns: max(var(--info-label-w, var(--label-min)), var(--info-name-w, 0px)) minmax(max-content, 1fr);
+  border: var(--edge) solid var(--divider); border-radius: var(--radius); background: var(--surface);
+}
+.info-tree.decorated { --root: 1; }
+.info-row {
+  position: relative; grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; align-items: center;
+  min-height: calc(var(--font-line) + 2 * var(--info-pad) + var(--item-view-extra)); margin: 0 var(--grid-gutter); border-radius: var(--radius);
+}
+.info-row:hover { background: var(--accent-tint); }
+.info-row.selected { background: var(--selected); }
+.info-row.selected:hover { background: var(--selected-hover); }
+.info-name, .info-value { white-space: nowrap; padding: var(--info-pad) var(--info-pad) calc(var(--info-pad) + var(--cap-lift)); align-self: stretch; display: flex; align-items: center; }
+.info-name {
+  min-width: 0; overflow: hidden;
+  padding-left: calc((var(--depth) + var(--root, 0)) * var(--info-indent) + var(--field-text-inset) - var(--edge) - var(--grid-gutter));
+}
+.info-value { -webkit-user-select: text; user-select: text; }
+/* A branch's count ("4 fields") is a count of what follows, not a value: MUTED_INK. */
+.info-row.branch > .info-value { color: var(--muted-ink); }
+.info-value > button { height: auto; min-height: 0; padding-top: var(--info-pad); padding-bottom: calc(var(--info-pad) + var(--cap-lift)); }
+.info-name.match, .info-value.match { background: var(--orange-tint); }
+.info-guide {
+  position: absolute; top: 0; bottom: 0; width: var(--edge); background: var(--divider);
+  left: round(calc(var(--level) * var(--info-indent) + var(--info-indent) / 2 - var(--edge) / 2 - var(--grid-gutter)), var(--dpx));
+}
+/* InfoTree.drawBranches: the chevron's centre on a device px of its branch
+ * column (a half pixel to the right, as device_snap, past float error) and of the row's middle. */
+.info-chevron {
+  position: absolute; display: none; width: var(--info-chevron-box); height: var(--info-chevron-box);
+  left: calc(round(calc(var(--depth) * var(--info-indent) + var(--info-indent) / 2 + var(--dpx) / 1000), var(--dpx)) - var(--grid-gutter) - var(--info-chevron-box) / 2);
+  top: calc(50% - var(--info-chevron-box) / 2);
+  background: var(--grey); -webkit-mask: var(--info-chevron-mask) 0 0 / 100% 100% no-repeat; mask: var(--info-chevron-mask) 0 0 / 100% 100% no-repeat;
+  rotate: -90deg;
+}
+.info-row.branch .info-chevron { display: block; }
+.info-row.branch.open .info-chevron { rotate: none; }
+
+/* ---------- FluentPathEdit --------------------------------------------- */
+.path-edit { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--row-gap); }
+.path-edit input { flex: 1; min-width: var(--path-min); }
+.readout-edit.plain { -webkit-user-select: none; user-select: none; cursor: default; }
+
+/* ---------- FluentComboBox set_checkable: a combo that ticks several ---- */
+.check-combo {
+  position: relative; justify-content: flex-start; width: 100%; min-width: 0; height: var(--control);
+  border: var(--edge) solid var(--placeholder); border-radius: var(--radius); background: var(--surface); color: var(--text);
+  padding: 0 calc(var(--combo-width) + var(--edge) + var(--edit-pad-h)) var(--cap-lift) calc(var(--edit-pad-h) + var(--qline-margin));
+}
+.check-combo:hover, .check-combo:active, .check-combo.open { background: var(--surface); border-color: var(--accent); }
+.check-combo:disabled { background: var(--bg); color: var(--disabled-ink); border-color: var(--placeholder); }
+.check-combo.blank { color: var(--muted-ink); }
+.check-combo-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.check-combo::after {
+  content: ""; position: absolute; top: 0; bottom: 0; right: 0; width: var(--combo-width);
+  background: var(--graphite); -webkit-mask: var(--chevron-drop) 0 0 / 100% 100% no-repeat; mask: var(--chevron-drop) 0 0 / 100% 100% no-repeat;
+}
+.check-combo:disabled::after { background: var(--placeholder); }
+.check-menu { padding: var(--popup-gap); gap: 0; max-height: calc(12 * (var(--control)) + 2 * var(--popup-gap)); overflow-y: auto; }
+.check-menu-item, .check-menu-header {
+  height: auto; border: var(--dpx) solid transparent; border-radius: var(--radius); background-clip: padding-box;
+  padding: calc(var(--popup-item-pad-v) + var(--edge) - var(--dpx)) calc(var(--popup-item-pad-h) + var(--edge) - var(--dpx)) calc(var(--popup-item-pad-v) + var(--edge) - var(--dpx) + var(--cap-lift));
+}
+.check-menu-item:hover { background-color: var(--accent-tint); border-color: transparent; }
+.check-menu-header { justify-content: flex-start; font-weight: var(--heading-weight); background-color: transparent; color: var(--text); }
+.check-menu-header:disabled { color: inherit; background-color: transparent; border-color: transparent; }
+.check-menu-header.selects:hover { background-color: var(--accent-tint); border-color: transparent; }
+
+/* ---------- FluentPopup beside its FluentSettingsPopupAnchor ----------- */
+.popup { position: fixed; inset: auto; margin: 0; padding: 0; color: var(--text); box-shadow: none; overflow: auto; }
+.popup:popover-open { display: flex; flex-direction: column; }

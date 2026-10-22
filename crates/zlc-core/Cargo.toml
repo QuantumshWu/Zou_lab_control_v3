@@ -1,0 +1,12 @@
+[package]
+name = "zlc-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+uuid = { version = "1", features = ["v4", "v5"] }
+serde_json = "1"
+
+[lib]
+path = "src/lib.rs"

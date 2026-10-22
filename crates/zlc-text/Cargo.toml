@@ -1,0 +1,9 @@
+[package]
+name = "zlc-text"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+links = "freetype"
+build = "build.rs"
+
+[dependencies]

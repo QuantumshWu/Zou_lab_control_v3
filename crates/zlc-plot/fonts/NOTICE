@@ -1,0 +1,13 @@
+The fonts the native renderer draws with, shipped next to the executable.
+
+DejaVuSans*.ttf: from matplotlib 3.10.8 mpl-data/fonts/ttf. Bitstream Vera /
+DejaVu licence (free to copy and redistribute), see LICENSE_DEJAVU.
+STIX*.ttf: from matplotlib 3.10.8 mpl-data/fonts/ttf. STIX Fonts licence
+(redistributable with software, not sold by themselves), see LICENSE_STIX.
+cm*.ttf: BaKoMa Computer Modern, from matplotlib 3.10.8 mpl-data/fonts/ttf.
+Free to copy and distribute with this notice, see LICENSE_BAKOMA.
+helvetica-light-587ebe5a59211.ttf: the Figure style's face, the same file
+science/src/zlc_plot/assets ships (v2's package-owned asset); its licence is
+the asset's own and is not restated here.
+
+Arial is the operating system's font (C:\Windows\Fonts) and is not shipped.

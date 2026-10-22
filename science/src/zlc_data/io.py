@@ -1,0 +1,262 @@
+"""The strict, pickle-free NPZ manifest grammar for role-axis data snapshots."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+import numpy as np
+
+from .codec import (
+    dataset_revision_ref_from_tree,
+    dataset_revision_ref_to_tree,
+    dataset_schema_from_tree,
+    dataset_schema_to_tree,
+)
+from .value import (
+    DataBlock,
+    OwnedSnapshot,
+)
+from .validity import (
+    INVALID,
+    VALID,
+    CellValidity,
+    DatasetComponentValidity,
+    Invalid,
+    Valid,
+)
+
+
+_FORMAT = "zlc.dataset"
+_VALUES = "values"
+_VALIDITY = "validity"
+_SIGMA = "sigma"
+
+
+class NPZFormatError(ValueError):
+    """Raised when an NPZ payload is missing or violates the data contract."""
+
+
+def exact_keys(mapping: Mapping[str, Any], expected: set[str], path: str) -> None:
+    """Admit exactly the named keys, naming what is missing and what is extra.
+
+    This module owns the NPZ grammar, the figure archive's included.  A second
+    copy of the rule beside the figure reader is a second answer to what a
+    strict archive is, and the two answers were already spelled differently.
+    """
+
+    actual = set(mapping)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise NPZFormatError(
+            f"{path} keys mismatch; missing={missing}, extra={extra}"
+        )
+
+
+def _manifest_validity(
+    validity: object,
+    arrays: dict[str, np.ndarray],
+    validity_key: str,
+) -> dict[str, Any]:
+    if isinstance(validity, Valid):
+        return {"kind": "valid"}
+    if isinstance(validity, Invalid):
+        return {"kind": "invalid"}
+    if isinstance(validity, CellValidity):
+        arrays[validity_key] = validity.mask
+        return {"kind": "cell", "mask_key": validity_key}
+    if isinstance(validity, DatasetComponentValidity):
+        arrays[validity_key] = validity.mask
+        return {
+            "kind": "dataset_component",
+            "axis_ids": [axis_id.value for axis_id in validity.axis_ids],
+            "mask_key": validity_key,
+        }
+    raise TypeError(f"unsupported DataBlock validity {type(validity).__name__}")
+
+
+def _array(
+    arrays: Mapping[str, Any],
+    key: Any,
+    expected_keys: set[str],
+    path: str,
+) -> np.ndarray:
+    if not isinstance(key, str) or not key:
+        raise NPZFormatError(f"{path} must be a non-empty array key")
+    if key in expected_keys:
+        raise NPZFormatError(f"{path} contains duplicate array reference {key!r}")
+    expected_keys.add(key)
+    if key not in arrays:
+        raise NPZFormatError(f"missing array {key!r}")
+    try:
+        return np.asarray(arrays[key])
+    except (TypeError, ValueError) as exc:
+        raise NPZFormatError(f"cannot read array {key!r}: {exc}") from exc
+
+
+def snapshot_manifest(
+    snapshot: OwnedSnapshot,
+    arrays: dict[str, np.ndarray],
+    *,
+    values_key: str = _VALUES,
+    validity_key: str = _VALIDITY,
+    sigma_key: str = _SIGMA,
+) -> dict[str, Any]:
+    """One snapshot's identity as plain data, putting its arrays in ``arrays``.
+
+    A file holds SEVERAL datasets and carries each one's identity without
+    re-deriving what identity means.  A saved figure needs exactly that:
+    without it the arrays survive but their axes, units and revision do not,
+    and what comes back is numbers nobody can plot the way they were plotted.
+
+    The array keys are parameters for the same reason -- one file, many
+    datasets, no collisions.
+    """
+
+    if not isinstance(snapshot, OwnedSnapshot):
+        raise TypeError("snapshot must be OwnedSnapshot")
+    placed = snapshot.block if snapshot.block.values is None else None
+    snapshot = snapshot.materialize()
+    if len({values_key, validity_key, sigma_key}) != 3:
+        raise ValueError("values, validity and sigma need distinct array keys")
+    arrays[values_key] = snapshot.block.values
+    # The schema travels whole beside the ref, so its digest is derived on
+    # reading rather than repeated here.
+    ref = dataset_revision_ref_to_tree(snapshot.ref)
+    del ref["schema_fingerprint"]
+    manifest = {
+        "format": _FORMAT,
+        "schema": dataset_schema_to_tree(snapshot.block.schema),
+        "ref": ref,
+        "values_key": values_key,
+        "validity": _manifest_validity(
+            snapshot.block.validity, arrays, validity_key
+        ),
+    }
+    # Present only when the block states one.  A missing key reads as "no
+    # uncertainty stated", which is what it is; writing zeros instead
+    # would turn silence into a claim of certainty.
+    if snapshot.block.sigma is not None:
+        arrays[sigma_key] = snapshot.block.sigma
+        manifest["sigma_key"] = sigma_key
+    if placed is not None:
+        # The complete planes retain holes, but cannot distinguish a row not
+        # yet started from an acquired invalid row. Persist its actual layout.
+        snapshot.block.with_placements(placed.segment_origins, placed.segment_shapes)
+        acquired = sum(int(repeats) * int(points) for repeats, points in placed.segment_shapes)
+        repeats, points = placed.schema.physical_shape[:2]
+        if acquired != repeats * points:
+            # A complete partition has no unstarted cells; its storage chunk
+            # boundaries are not an extra scientific fact in a static file.
+            manifest["placements"] = {
+                "origins": placed.segment_origins.tolist(),
+                "shapes": placed.segment_shapes.tolist(),
+            }
+    return manifest
+
+
+def manifest_array_keys(manifest: Mapping[str, Any]) -> tuple[str, ...]:
+    """Which arrays one manifest refers to, in the order it names them."""
+
+    keys = [manifest["values_key"]]
+    validity = manifest.get("validity")
+    if isinstance(validity, Mapping) and isinstance(validity.get("mask_key"), str):
+        keys.append(validity["mask_key"])
+    if isinstance(manifest.get("sigma_key"), str):
+        keys.append(manifest["sigma_key"])
+    return tuple(keys)
+
+
+def snapshot_from_manifest(
+    manifest: Mapping[str, Any],
+    arrays: Mapping[str, Any],
+) -> OwnedSnapshot:
+    """Rebuild one snapshot from its manifest and the arrays it names."""
+
+    if not isinstance(manifest, Mapping):
+        raise NPZFormatError("manifest root must be an object")
+    expected = {"format", "schema", "ref", "values_key", "validity"}
+    if "sigma_key" in manifest:
+        expected.add("sigma_key")
+    if "placements" in manifest:
+        expected.add("placements")
+    exact_keys(manifest, expected, "manifest")
+    if manifest["format"] != _FORMAT:
+        raise NPZFormatError(f"unsupported data format {manifest['format']!r}")
+    referenced: set[str] = set()
+    schema = dataset_schema_from_tree(manifest["schema"])
+    if not isinstance(manifest["ref"], Mapping):
+        raise NPZFormatError("manifest.ref must be an object")
+    ref_tree = dict(manifest["ref"])
+    if "schema_fingerprint" in ref_tree:
+        raise NPZFormatError("manifest ref must not repeat schema_fingerprint")
+    ref_tree["schema_fingerprint"] = schema.fingerprint
+    ref = dataset_revision_ref_from_tree(ref_tree)
+    values = _array(arrays, manifest["values_key"], referenced, "manifest.values_key")
+    validity = _validity_from_manifest(manifest["validity"], arrays, referenced)
+    # The writer omits sigma_key when there is no sigma plane and names a
+    # member when there is one; a present-but-null key is neither.
+    sigma_key = manifest.get("sigma_key")
+    if "sigma_key" in manifest and (not isinstance(sigma_key, str) or not sigma_key):
+        raise NPZFormatError("manifest.sigma_key must be a non-empty string")
+    sigma = (
+        None
+        if sigma_key is None
+        else _array(arrays, sigma_key, referenced, "manifest.sigma_key")
+    )
+    block = DataBlock(ref.block_id, ref.revision, values, validity, schema, sigma)
+    if "placements" in manifest:
+        placements = manifest["placements"]
+        if not isinstance(placements, Mapping):
+            raise NPZFormatError("manifest.placements must be an object")
+        exact_keys(placements, {"origins", "shapes"}, "manifest.placements")
+        try:
+            block = block.with_placements(placements["origins"], placements["shapes"])
+        except (TypeError, ValueError, OverflowError) as error:
+            raise NPZFormatError(f"invalid manifest.placements: {error}") from error
+    return OwnedSnapshot(ref, block)
+
+
+def _validity_from_manifest(
+    raw: Any,
+    arrays: Mapping[str, Any],
+    expected_keys: set[str],
+) -> Valid | Invalid | CellValidity | DatasetComponentValidity:
+    if not isinstance(raw, dict) or not isinstance(raw.get("kind"), str):
+        raise NPZFormatError("manifest.validity must be a tagged object")
+    kind = raw["kind"]
+    if kind == "valid":
+        exact_keys(raw, {"kind"}, "manifest.validity")
+        return VALID
+    if kind == "invalid":
+        exact_keys(raw, {"kind"}, "manifest.validity")
+        return INVALID
+    if kind == "cell":
+        exact_keys(raw, {"kind", "mask_key"}, "manifest.validity")
+        return CellValidity(_array(arrays, raw["mask_key"], expected_keys, "validity.mask_key"))
+    if kind == "dataset_component":
+        exact_keys(
+            raw,
+            {"kind", "axis_ids", "mask_key"},
+            "manifest.validity",
+        )
+        axis_ids = raw["axis_ids"]
+        if not isinstance(axis_ids, list) or any(not isinstance(item, str) for item in axis_ids):
+            raise NPZFormatError("manifest.validity.axis_ids must be a string list")
+        from .axis import AxisId
+
+        return DatasetComponentValidity(
+            tuple(AxisId(item) for item in axis_ids),
+            _array(arrays, raw["mask_key"], expected_keys, "validity.mask_key"),
+        )
+    raise NPZFormatError(f"invalid validity kind {kind!r}")
+
+
+__all__ = [
+    "NPZFormatError",
+    "exact_keys",
+    "manifest_array_keys",
+    "snapshot_from_manifest",
+    "snapshot_manifest",
+]

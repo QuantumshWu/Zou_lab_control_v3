@@ -1,0 +1,212 @@
+`timescale 1ns/1ps
+`include "zlc_geometry.vh"
+// Proof that the bridge handles PIPELINED writes: 4 WRITE frames sent BACK-TO-BACK on uart_rx with NO
+// inter-frame gap and WITHOUT reading each ACK first (what host-side batching does -- concatenate all
+// frames into one serial write).  The host optimisation relies on: (a) the decoder committing each
+// frame while the next streams in, and (b) the reply serializer not LOSING an ACK when a later frame's
+// rpl_go fires (the 9-byte ACK finishes well before the next >=16-byte frame completes, so the
+// serializer is idle in time).  Verifies all 4 ACKs come back AND all 4 words committed (read back).
+// Compile: xvlog zlc_uart_bridge.v tb_uart_pipeline.v ; xelab tb_uart_pipeline -s t ; xsim t -R
+module tb_uart_pipeline;
+    real BITT = 1.0e9 / `ZLC_UART_BAUD;
+    reg clk = 1'b0; always #10 clk = ~clk;
+    reg rst = 1'b1, uart_rx = 1'b1; wire uart_tx;
+    wire [29:0] u_word_addr; wire [31:0] u_wdata; wire u_we, u_active, u_error;
+    wire [5:0] u_rd_word; reg [31:0] u_rd_data; reg [31:0] ctrl_reg [0:63];
+    integer commits = 0; integer error_pulses = 0;
+    wire command_valid, command_reply_ready;
+    wire [3:0] command_code;
+    wire [7:0] command_seq;
+    wire [31:0] command_id, command_runs, command_scans;
+    reg command_reply_valid=0, load_pending=0;
+    reg [7:0] command_reply_seq=0;
+    reg [31:0] command_reply_id=0, command_reply_status=0;
+    integer commands=0;
+    always @(posedge clk) begin
+        if (command_reply_valid && command_reply_ready) command_reply_valid<=0;
+        if (command_valid) begin
+            commands=commands+1;
+            if (command_code==1) load_pending<=1;
+            else if (command_code==8) begin
+                if (!load_pending) $fatal(1,"SAFE command did not follow pending LOAD");
+                load_pending<=0;
+                command_reply_seq<=command_seq; command_reply_id<=command_id;
+                command_reply_status<=0; command_reply_valid<=1;
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (u_active && u_we) begin ctrl_reg[u_word_addr[5:0]] <= u_wdata; commits = commits + 1; end
+        if (u_error) error_pulses = error_pulses + 1;
+    end
+    always @(*) u_rd_data = ctrl_reg[u_rd_word];
+
+    zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(`ZLC_UART_BAUD),
+                      .ADDRESS_WORDS(64), .FRAME_TIMEOUT_CYCLES(2000)) dut (
+        .clk(clk), .rst(rst), .uart_rx(uart_rx), .uart_tx(uart_tx),
+        .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active), .u_error(u_error),
+        .u_rd_word(u_rd_word), .u_rd_data(u_rd_data),
+        .u_cmd_valid(command_valid), .u_cmd_code(command_code), .u_cmd_seq(command_seq),
+        .u_cmd_id(command_id), .u_cmd_runs(command_runs), .u_cmd_scans(command_scans),
+        .u_cmd_reply_valid(command_reply_valid), .u_cmd_reply_ready(command_reply_ready),
+        .u_cmd_reply_seq(command_reply_seq), .u_cmd_reply_id(command_reply_id),
+        .u_cmd_reply_status(command_reply_status), .u_cmd_reply_cursor(32'd0));
+
+    task send_byte(input [7:0] b); integer i; begin
+        uart_rx=1'b0; #(BITT);
+        for (i=0;i<8;i=i+1) begin uart_rx=b[i]; #(BITT); end
+        uart_rx=1'b1; #(BITT); end
+    endtask
+    task recv_byte(output [7:0] b); integer i; begin
+        @(negedge uart_tx); #(BITT*1.5);
+        for (i=0;i<8;i=i+1) begin b[i]=uart_tx; #(BITT); end end
+    endtask
+    task send_command(input [7:0] seq, input [31:0] code, input [31:0] id);
+        reg [15:0] crc; reg [7:0] value; integer i;
+        begin
+            send_byte(8'h5a); send_byte(8'ha5); crc=16'hffff;
+            for (i=0;i<20;i=i+1) begin
+                if (i==0) value=3;
+                else if (i==1) value=seq;
+                else if (i<6) value=code >> ((i-2)*8);
+                else if (i==6) value=3;
+                else if (i==7) value=0;
+                else if (i<12) value=id >> ((i-8)*8);
+                else value=(i==12 || i==16) ? 1 : 0;
+                crc=dut.crc_byte(crc,value); send_byte(value);
+            end
+            send_byte(crc[7:0]); send_byte(crc[15:8]);
+        end
+    endtask
+
+    task send_status_read;
+        reg [15:0] crc; reg [7:0] value; integer i;
+        begin
+            send_byte(8'h5a); send_byte(8'ha5); crc=16'hffff;
+            for (i=0;i<8;i=i+1) begin
+                case(i) 0:value=2; 1:value=8'h33; 2:value=2; 6:value=14; default:value=0; endcase
+                crc=dut.crc_byte(crc,value); send_byte(value);
+            end
+            send_byte(crc[7:0]); send_byte(crc[15:8]);
+        end
+    endtask
+
+    reg [7:0] wr [0:63];    // 4 WRITE frames (16 B each) = 64 B, sent back-to-back
+    reg [7:0] rd [0:47];    // 4 READ  frames (12 B each) = 48 B
+    reg [7:0] rb [0:191];
+    integer k, j, fails; integer nrx; integer bad_base; integer commits_before_faults;
+    reg [15:0] reply_crc;
+    reg [31:0] reply_word;
+
+    initial begin : collector
+        nrx = 0; forever begin recv_byte(rb[nrx]); nrx = nrx + 1; end
+    end
+
+    // W40..W43 = encode_write(40..43,[0x11111111,0x22222222,0x33333333,0x44444444],seq=1..4)
+    initial begin
+        {wr[0],wr[1],wr[2],wr[3],wr[4],wr[5],wr[6],wr[7]}   = 64'h5aa50101_28000000;
+        {wr[8],wr[9],wr[10],wr[11],wr[12],wr[13],wr[14],wr[15]} = 64'h01001111_11113142;
+        {wr[16],wr[17],wr[18],wr[19],wr[20],wr[21],wr[22],wr[23]} = 64'h5aa50102_29000000;
+        {wr[24],wr[25],wr[26],wr[27],wr[28],wr[29],wr[30],wr[31]} = 64'h01002222_2222b828;
+        {wr[32],wr[33],wr[34],wr[35],wr[36],wr[37],wr[38],wr[39]} = 64'h5aa50103_2a000000;
+        {wr[40],wr[41],wr[42],wr[43],wr[44],wr[45],wr[46],wr[47]} = 64'h01003333_33332c6a;
+        {wr[48],wr[49],wr[50],wr[51],wr[52],wr[53],wr[54],wr[55]} = 64'h5aa50104_2b000000;
+        {wr[56],wr[57],wr[58],wr[59],wr[60],wr[61],wr[62],wr[63]} = 64'h01004444_4444aafd;
+        // R40..R43 = encode_read(40..43,1,seq=5..8)
+        {rd[0],rd[1],rd[2],rd[3],rd[4],rd[5]}   = 48'h5aa50205_2800; {rd[6],rd[7],rd[8],rd[9],rd[10],rd[11]}  = 48'h00000100_44cc;
+        {rd[12],rd[13],rd[14],rd[15],rd[16],rd[17]} = 48'h5aa50206_2900; {rd[18],rd[19],rd[20],rd[21],rd[22],rd[23]} = 48'h00000100_6651;
+        {rd[24],rd[25],rd[26],rd[27],rd[28],rd[29]} = 48'h5aa50207_2a00; {rd[30],rd[31],rd[32],rd[33],rd[34],rd[35]} = 48'h00000100_e727;
+        {rd[36],rd[37],rd[38],rd[39],rd[40],rd[41]} = 48'h5aa50208_2b00; {rd[42],rd[43],rd[44],rd[45],rd[46],rd[47]} = 48'h00000100_aee8;
+        for (k=0;k<64;k=k+1) ctrl_reg[k] = 32'hDEAD0000 + k;
+        fails = 0;
+        #200 rst = 1'b0; #4000;
+
+        for (k=0;k<64;k=k+1) send_byte(wr[k]);        // 4 WRITE frames BACK-TO-BACK, no ACK read between
+        wait (nrx >= 36);                              // collect 4 ACKs (9 B each)
+        for (k=0;k<4;k=k+1) begin
+            if (!(rb[k*9]==8'h5a && rb[k*9+1]==8'ha5 && rb[k*9+2]==8'h81 &&
+                  rb[k*9+3]==k+1 && rb[k*9+4]==8'h00)) begin
+                fails=fails+1; $display("TB: ACK %0d malformed/lost: %02x %02x %02x seq=%02x st=%02x", k, rb[k*9],rb[k*9+1],rb[k*9+2],rb[k*9+3],rb[k*9+4]);
+            end
+        end
+        $display("TB: 4 back-to-back WRITE frames -> %0d/4 well-formed ACKs collected", 4-fails);
+        if (commits != 4) begin
+            fails=fails+1; $display("TB: 4 one-word WRITE frames produced %0d commits", commits);
+        end
+
+        // READ back ONE AT A TIME (reads are synchronous, never pipelined: a 13-byte read reply is
+        // LONGER than the 12-byte read request, so back-to-back reads CAN drop a reply -- unlike the
+        // 9-byte WRITE ack that always fits before the next >=16-byte write frame).
+        for (k=0;k<4;k=k+1) begin : chk
+            reg [31:0] pw; integer b;
+            for (j=0;j<12;j=j+1) send_byte(rd[k*12+j]);
+            wait (nrx >= 36 + (k+1)*13);
+            b = 36 + k*13; pw = {rb[b+10],rb[b+9],rb[b+8],rb[b+7]};
+            $display("TB: read w%0d = 0x%08X (expect 0x%08X)", 40+k, pw, 32'h11111111*(k+1) & 32'hFFFFFFFF);
+            if (pw !== (32'h11111111*(k+1) & 32'hFFFFFFFF)) fails=fails+1;
+        end
+        commits_before_faults = commits;
+
+        // Truncate a WRITE after sequence/address begins.  The bounded watchdog
+        // must release arbitration, pulse protocol error and return CRC_FAIL.
+        bad_base = nrx;
+        send_byte(8'h5a); send_byte(8'ha5); send_byte(8'h01); send_byte(8'h21); send_byte(8'h00);
+        wait (!u_active);
+        wait (nrx >= bad_base + 9);
+        if (!(rb[bad_base+3] == 8'h21 && rb[bad_base+4] == 8'h01)) begin
+            fails=fails+1; $display("TB: truncated-frame reply missing/wrong");
+        end
+
+        // COUNT=257 exceeds FRAME_WORDS before any payload can commit.  Bounds
+        // rejection is explicit (ADDR_RANGE) and arbitration is released.
+        bad_base = nrx;
+        send_byte(8'h5a); send_byte(8'ha5); send_byte(8'h01); send_byte(8'h22);
+        send_byte(8'h00); send_byte(8'h00); send_byte(8'h00); send_byte(8'h00);
+        send_byte(8'h01); send_byte(8'h01);
+        wait (!u_active);
+        wait (nrx >= bad_base + 9);
+        if (!(rb[bad_base+3] == 8'h22 && rb[bad_base+4] == 8'h03)) begin
+            fails=fails+1; $display("TB: oversize-count reply missing/wrong");
+        end
+        if (commits != commits_before_faults) begin
+            fails=fails+1; $display("TB: malformed frame committed data");
+        end
+        if (error_pulses < 2) begin
+            fails=fails+1; $display("TB: protocol error pulse was not raised for both faults");
+        end
+
+        bad_base=nrx;
+        send_command(8'h31,32'd1,32'h01020304);
+        repeat(100) @(posedge clk);
+        if (nrx!=bad_base || !load_pending || u_active)
+            $fatal(1,"LOAD was acknowledged before completion or blocked decoder");
+        send_command(8'h32,32'd8,32'h01020305);
+        wait(nrx>=bad_base+21);
+        if (commands!=2 || load_pending || rb[bad_base+3]!=8'h32 || rb[bad_base+5]!=3
+            || {rb[bad_base+10],rb[bad_base+9],rb[bad_base+8],rb[bad_base+7]}!==32'h01020305
+            || {rb[bad_base+14],rb[bad_base+13],rb[bad_base+12],rb[bad_base+11]}!==0)
+            $fatal(1,"completion command reply payload or SAFE interruption failed");
+        $display("UART-COMMAND-COMPLETION-INTERRUPT-OK");
+
+        bad_base=nrx;
+        send_status_read();
+        wait(nrx>=bad_base+65);
+        if(rb[bad_base+3]!==8'h33 || rb[bad_base+4]!==0 || rb[bad_base+5]!==14 || rb[bad_base+6]!==0)
+            $fatal(1,"14-word reply header differs");
+        for(k=0;k<14;k=k+1) begin
+            j=bad_base+7+4*k;
+            reply_word={rb[j+3],rb[j+2],rb[j+1],rb[j]};
+            if(reply_word!==(32'hDEAD0000+k+2)) $fatal(1,"14-word reply payload differs at %0d",k);
+        end
+        reply_crc=16'hffff;
+        for(k=2;k<63;k=k+1) reply_crc=dut.crc_byte(reply_crc,rb[bad_base+k]);
+        if({rb[bad_base+64],rb[bad_base+63]}!==reply_crc) $fatal(1,"65-byte reply CRC differs");
+        $display("UART-14-WORD-65-BYTE-CRC-OK baud=%0d",`ZLC_UART_BAUD);
+
+        if (fails!=0) $fatal(1, "UART pipeline/watchdog/bounds had %0d error(s) (nrx=%0d)", fails, nrx);
+        $display("UART-PIPELINE-WATCHDOG-BOUNDS-OK");
+        $finish;
+    end
+    initial begin #(12000 * BITT) $fatal(1, "UART pipeline test timeout"); end
+endmodule

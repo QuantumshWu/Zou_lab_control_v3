@@ -1,0 +1,15 @@
+[package]
+name = "zlc-pulse-editor"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+zlc-core = { path = "../zlc-core" }
+zlc-pulse = { path = "../zlc-pulse" }
+zlc-plot = { path = "../zlc-plot" }
+zlc-archive = { path = "../zlc-archive" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }

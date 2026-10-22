@@ -1,0 +1,112 @@
+"""The virtual RF source: the Vaunix driver over an in-memory library.
+
+Per the bench's one virtualization rule, the fake is the LOWEST layer only:
+this is the real ``VaunixLmsRfSource`` -- its unit conversions, its grid
+refusals, its read-back discipline, its epochs -- driven over a library
+that keeps the registers in a dict instead of a USB brick.  A detuning scan
+rehearsed against this device exercises every line the real one will run.
+"""
+
+from __future__ import annotations
+
+from zlc_atom.devices.rf.vaunix_lms import (
+    VaunixLmsConfig,
+    VaunixLmsRfSource,
+)
+
+
+class InMemoryLmsLibrary:
+    """The vendor DLL's slice, holding its integers in memory.
+
+    A brick REMEMBERS.  Its registers survive being closed and opened
+    again, because the instrument on the bench is still emitting whatever
+    it was emitting when the software let go of it -- and a simulation
+    that forgets on open cannot express the one state that matters here:
+    an instrument already set up, which connecting must not disturb.  They
+    survive for as long as this LIBRARY does: the virtual bench builds one
+    per Init (``virtual_rf_source``), so a device initialized again finds
+    its brick at power-up, as if it had been unplugged in between; a test
+    that means an instrument left set up opens a second source on the same
+    library.
+
+    It powers up standing INSIDE its own range -- at the bottom of it, RF
+    off -- as a real brick does: a synthesizer cannot stand at 0 Hz, and a
+    scan that promises to hand every knob back where it found it refuses a
+    knob it could never command back there.
+    """
+
+    def __init__(self, serials: tuple[int, ...] = (1001,)) -> None:
+        self._serials = tuple(int(serial) for serial in serials)
+        self._registers_by_serial: dict[int, dict[str, int | bool]] = {
+            serial: {
+                "frequency": self.FREQUENCY_LIMIT_UNITS[0],
+                "power": 0,
+                "rf_on": False,
+            }
+            for serial in self._serials
+        }
+        self._open: set[int] = set()
+
+    def device_serials(self) -> tuple[int, ...]:
+        return self._serials
+
+    def open_device(self, serial: int) -> int:
+        if int(serial) not in self._serials:
+            raise LookupError(f"no Vaunix LMS with serial {serial} is attached")
+        handle = int(serial)
+        self._open.add(handle)
+        return handle
+
+    def _registers(self, handle: int) -> dict:
+        key = int(handle)
+        if key not in self._open:
+            raise RuntimeError("virtual LMS handle is not open")
+        return self._registers_by_serial[key]
+
+    def close_device(self, handle: int) -> None:
+        self._open.discard(int(handle))
+
+    def set_frequency(self, handle: int, frequency_units: int) -> None:
+        self._registers(handle)["frequency"] = int(frequency_units)
+
+    def get_frequency(self, handle: int) -> int:
+        return int(self._registers(handle)["frequency"])
+
+    def set_power(self, handle: int, power_units: int) -> None:
+        self._registers(handle)["power"] = int(power_units)
+
+    def get_power(self, handle: int) -> int:
+        return int(self._registers(handle)["power"])
+
+    def set_rf_on(self, handle: int, enabled: bool) -> None:
+        self._registers(handle)["rf_on"] = bool(enabled)
+
+    def get_rf_on(self, handle: int) -> bool:
+        return bool(self._registers(handle)["rf_on"])
+
+    #: The virtual brick's own range, in the brick's units (10 Hz, 0.25 dB):
+    #: 500 MHz to 8 GHz, -40 dBm to +10 dBm.  A real brick answers its
+    #: limits from its firmware; the virtual one answers the range every
+    #: window the virtual bench authors lies inside, so a window narrows
+    #: the range and never empties it.
+    FREQUENCY_LIMIT_UNITS = (50_000_000, 800_000_000)
+    POWER_LIMIT_UNITS = (-160, 40)
+
+    def get_frequency_limits(self, handle: int) -> tuple[int, int]:
+        self._registers(handle)
+        return self.FREQUENCY_LIMIT_UNITS
+
+    def get_power_limits(self, handle: int) -> tuple[int, int]:
+        self._registers(handle)
+        return self.POWER_LIMIT_UNITS
+
+
+def virtual_rf_source(config: VaunixLmsConfig) -> VaunixLmsRfSource:
+    """The production driver, with only its USB layer replaced."""
+
+    return VaunixLmsRfSource(
+        config, library=InMemoryLmsLibrary((int(config.serial),))
+    )
+
+
+__all__ = ["InMemoryLmsLibrary", "virtual_rf_source"]
