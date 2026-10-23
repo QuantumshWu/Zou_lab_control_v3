@@ -159,7 +159,6 @@ function Get-ZlcToolchainGaps {
                         @('FreeType 2.6.1', (Join-Path $paths.FreeType 'freetype.lib')))) {
         if (-not (Test-Path -LiteralPath $item[1])) { $gaps += $item[0] }
     }
-    if (-not (Get-ZlcNpm)) { $gaps += 'Node.js' }
     $gaps
 }
 
@@ -173,10 +172,10 @@ function Get-ZlcNpm {
 }
 
 # The sources a desktop build is made of: crates\ (not their tests and
-# examples, nor the FPGA tree, which no executable compiles in), the UI page,
+# examples, nor the FPGA tree, which no executable compiles in),
 # Cargo.toml/Cargo.lock and the build's own flags (dev.ps1, this file) -- the
-# Python plugins are not among them.
-$ZlcSourceSpec = @('crates', 'apps/desktop/ui', 'Cargo.toml', 'Cargo.lock', 'tools/dev.ps1', 'tools/tools_root.ps1',
+# Python plugins and the independently compiled UI are not among them.
+$ZlcSourceSpec = @('crates', 'Cargo.toml', 'Cargo.lock', 'tools/dev.ps1', 'tools/tools_root.ps1',
                    ':(exclude,glob)crates/*/tests/**', ':(exclude,glob)crates/*/examples/**', ':(exclude)crates/zlc-pulse/fpga')
 
 # Those sources as one hash of git's blob id of every file (line endings
@@ -230,26 +229,12 @@ function Test-ZlcProducts([string]$Folder) {
     $true
 }
 
-# Build the UI and the executables into target\ and stamp them.
+# Build the Rust executables into target\ and stamp them.
 function Invoke-ZlcBuild([string]$Stamp) {
     $gaps = @(Get-ZlcToolchainGaps)
     if ($gaps.Count) { throw "This machine cannot build the desktop: missing $($gaps -join ', '). Run tools\dev_setup.ps1." }
     $root = Get-ZlcCheckout
-    $ui = Join-Path $root 'apps\desktop\ui'
-    $npm = Get-ZlcNpm
-    Write-Host "Building the UI and zlc-desktop from $root (a few minutes, once per source change) ..."
-    $savedPath = $env:PATH
-    try {
-        $env:PATH = "$(Split-Path -Parent $npm);$env:PATH"
-        # Shown, not returned: this function's output is the products folder.
-        if (-not (Test-Path -LiteralPath (Join-Path $ui 'node_modules\typescript'))) {
-            Invoke-Program { & $npm --prefix $ui ci --ignore-scripts } | Out-Host
-            if ($LASTEXITCODE -ne 0) { throw 'npm ci failed for apps\desktop\ui.' }
-        }
-        Invoke-Program { & $npm --prefix $ui run build } | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw 'The UI build (tsc) failed.' }
-    }
-    finally { $env:PATH = $savedPath }
+    Write-Host "Building the Rust engine from $root ..."
     & (Join-Path $PSScriptRoot 'dev.ps1') build -Package zlc-desktop, zlc-pulse, zlc-bus, zlc-launch -Offline | Out-Host
     $folder = Get-ZlcDevProducts
     if ($Stamp) { Set-Content -LiteralPath (Join-Path $folder 'SOURCE') -Value "source $Stamp" -Encoding ascii }

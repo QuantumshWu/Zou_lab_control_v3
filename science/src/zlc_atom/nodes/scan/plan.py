@@ -339,7 +339,8 @@ def scan_ports_for_devices(
                     float(field.maximum),
                 )
             )
-    return label_device_scan_ports(ports, device_labels)
+    return label_device_scan_ports(ports, device_labels if device_labels is not None else
+                                   {key: getattr(device, "role", "") or key for key, device in dict(tunables or {}).items()})
 
 
 class DeviceKnob:
@@ -355,6 +356,7 @@ class DeviceKnob:
 
     def __init__(self, device: object) -> None:
         self._device = device
+        self.role = getattr(device, "role", "")
         native = getattr(device, "tune_in_unit", None)
         if callable(native):
             self.tune_in_unit = native

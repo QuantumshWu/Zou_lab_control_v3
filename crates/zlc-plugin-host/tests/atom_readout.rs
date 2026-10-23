@@ -29,7 +29,7 @@ fn occupancy_and_frame_survival_follow_a_finite_site_frame_run() {
         packages: vec!["zlc_atom".into(), "zlc_atom_fixtures".into()], memory_limit_mib: Some(4096) },
         runtime.clone(), safe, move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
     let request = |values: serde_json::Value, resources: serde_json::Value, source: Option<&str>, outputs: &[(&str, &str)]| {
-        RunRequest { values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator, resources,
+        RunRequest { device_labels: Default::default(), values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator, resources,
             source_signal: source.map(str::to_owned), run_directory: None,
             outputs: outputs.iter().map(|(output, signal)| (output.to_string(), signal.to_string())).collect() }
     };

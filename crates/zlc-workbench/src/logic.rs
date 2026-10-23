@@ -509,7 +509,7 @@ impl Workbench {
         // `reads`: the read-only methods the device implements (its own unit conversions).
         Value::Object(keys.iter().filter_map(|(argument, key)| self.devices.get(key).map(|live| {
             let kind = self.live_type(live);
-            (argument.clone(), json!({"instance": key, "type_id": kind.map_or(live.entry.type_id.as_str(), |item| item.type_id.as_str()),
+            (argument.clone(), json!({"instance": key, "role": self.device_role(key), "type_id": kind.map_or(live.entry.type_id.as_str(), |item| item.type_id.as_str()),
                 "capabilities": kind.map(|item| item.capabilities.clone()).unwrap_or_default(),
                 "tunable": live.working_point["tunable"] == true, "reads": live.working_point["reads"].clone()}))
         })).collect())
@@ -1065,6 +1065,7 @@ impl Workbench {
             (signal, generation)
         }).collect();
         let spec = RunSpec { run: run_id.clone(), node_id: id.to_owned(), instance: node_instance(id), type_id: node.type_id.clone(), values, source_signal: draft.source_signal.clone(),
+            device_labels: devices.values().map(|key| (key.clone(), self.device_role(key).to_owned())).collect(),
             devices, shared, artifacts, resources, directory: directory.clone(), outputs, origin: pending.origin.clone() };
         let follow_generation = self.source_published(&signals, &draft.source_signal).map(|signal| signal.generation.clone());
         self.runs.push(Run { id: run_id.clone(), node: id.to_owned(), state: "starting".into(), ready: false,
@@ -1475,12 +1476,15 @@ impl Workbench {
         };
         if edited { status.push_str(" · edited"); }
         let device_choices: Map<String, Value> = descriptor.map(|item| Self::active_requirements(item, &node.draft.values).into_iter()
-            .map(|requirement| (requirement.argument.clone(), Value::Array(self.device_options(&requirement.capability).into_iter()
-                .map(|(id, role)| json!([id, role])).collect()))).collect()).unwrap_or_default();
-        let acquisition_choices = descriptor.and_then(|item| item.node().acquisition_input.as_ref()).map(|_| {
-            self.nodes.iter().filter(|other| other.id != node.id && self.catalog.get(&other.type_id).is_some_and(|item| item.node().node_kind == "measurement"))
-                .map(|other| json!([other.id, other.name])).collect::<Vec<_>>()
-        });
+            .map(|requirement| {
+                let mut choices: Vec<Value> = self.device_options(&requirement.capability).into_iter().map(|(id, role)| json!([id, role])).collect();
+                if let Some(held) = node.draft.device_keys.get(&requirement.argument).filter(|key| !key.is_empty()) {
+                    if !choices.iter().any(|choice| choice[0] == held.as_str()) {
+                        choices.push(json!([held, format!("{} (unavailable)", self.device_role(held))]));
+                    }
+                }
+                (requirement.argument.clone(), Value::Array(choices))
+            }).collect()).unwrap_or_default();
         let problems: Vec<(String, String)> = descriptor.map(|item| item.parameters.iter().filter_map(|field| {
             let value = node.draft.values.get(&field.name).cloned().unwrap_or(Value::Null);
             fields::project(field, &value, true).err().map(|error| (field.name.clone(), error))
@@ -1506,6 +1510,23 @@ impl Workbench {
                     choices.push(json!([held.clone(), format!("{} (unavailable)", held.as_str().map(str::to_owned).unwrap_or_else(|| held.to_string()))]));
                 }
                 control["kind"] = json!("choice");
+                control["choices"] = Value::Array(choices);
+            }
+            if let Some(control) = item.node().acquisition_input.as_ref()
+                .and_then(|name| controls.iter_mut().find(|control| control["name"] == name.as_str())) {
+                let terminal = item.node().acquisition_completion.as_deref() == Some("terminal");
+                let mut choices = vec![json!(["", "None"])];
+                choices.extend(self.nodes.iter().filter(|other| other.id != node.id
+                    && self.catalog.get(&other.type_id).is_some_and(|descriptor| descriptor.node().node_kind == "measurement"
+                        && (terminal || descriptor.node().reports_ready)))
+                    .map(|other| json!([other.id, other.name])));
+                let held = control["value"].as_str().unwrap_or("");
+                if !held.is_empty() && !choices.iter().any(|choice| choice[0] == held) {
+                    let label = self.node(held).map(|node| node.name.as_str()).unwrap_or(held);
+                    choices.push(json!([held, format!("{label} (unavailable)")]));
+                }
+                control["kind"] = json!("choice");
+                control["allow_none"] = json!(false); // None is the declared empty string, not a second null option.
                 control["choices"] = Value::Array(choices);
             }
             // A path field (v2 FluentPathEdit) names a file of its resource's collection folder, offered
@@ -1550,7 +1571,6 @@ impl Workbench {
             "artifact_inputs": node.draft.artifact_inputs,
             "artifact_specs": descriptor.map(|item| item.node().artifact_inputs.iter().map(|spec| json!({"name": spec.name, "label": spec.label,
                 "file_filter": spec.file_filter, "required": spec.required.unwrap_or(true), "frame_claims": spec.frame_claims})).collect::<Vec<_>>()).unwrap_or_default(),
-            "acquisition_choices": acquisition_choices,
             "auto_preview": node.auto_preview,
             "device_labels": descriptor.map(|item| item.node().devices.iter().map(|requirement| (requirement.argument.clone(), json!(words(&requirement.argument))))
                 .collect::<Map<String, Value>>()).unwrap_or_default(),

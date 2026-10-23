@@ -106,7 +106,7 @@ fn a_published_device_serves_another_core_through_its_blocks_claims_and_safe_act
     // A node of this core runs on it: frames out, a frame back in, published here without another copy.
     b.host.open("counter", "counter", json!({}), json!({})).unwrap();
     let signal = "@logic/counter/frames";
-    let run = b.host.start_run("counter", RunRequest { values: json!({"count": 3, "size": 128}), devices: [("echo".to_owned(), "remote_echo".to_owned())].into(),
+    let run = b.host.start_run("counter", RunRequest { device_labels: Default::default(), values: json!({"count": 3, "size": 128}), devices: [("echo".to_owned(), "remote_echo".to_owned())].into(),
         shared: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: None, run_directory: None, outputs: [("frames".to_owned(), signal.to_owned())].into() }).unwrap();
     let (outcome, result, error) = loop {
         match b.events.recv_timeout(Duration::from_secs(60)).expect("run events") {

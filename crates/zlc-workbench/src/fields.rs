@@ -27,6 +27,7 @@ pub struct Field {
     pub derived: bool,
     /// The form section the field stands in; the form titles each change of it.
     pub group: Option<String>,
+    pub file_filter: String,
     pub columns: Vec<Field>,
 }
 
@@ -251,6 +252,7 @@ pub fn controls(fields: &[Field], values: &Map<String, Value>, section: &str, pr
             "rows" => "rows", "pair" => "pair", "resource" | "folder" => "path", _ => "text",
         };
         let kind = if !field.choices.is_empty() && kind != "rows" { "choice" } else { kind };
+        let kind = if !field.file_filter.is_empty() { "path" } else { kind };
         let mut control = json!({"section": section, "name": field.name, "label": field.label(), "kind": kind,
             "value": effective[&field.name], "enabled": enabled(field, &effective), "required": field.required});
         if !field.choices.is_empty() {
@@ -270,6 +272,7 @@ pub fn controls(fields: &[Field], values: &Map<String, Value>, section: &str, pr
         if let Some(group) = field.group.as_ref().filter(|group| !group.is_empty()) { control["group"] = json!(group); }
         if field.segmented { control["segmented"] = json!(true); }
         if field.kind == "folder" { control["mode"] = json!("dir"); }
+        if !field.file_filter.is_empty() { control["filter"] = json!(field.file_filter); }
         if field.derived { control["derived"] = json!(true); }
         if !field.columns.is_empty() {
             control["columns"] = Value::Array(controls(&field.columns, &Map::new(), section, &[]));
@@ -310,5 +313,11 @@ mod tests {
         assert_eq!(draft(json!({"pairs": [1]})).unwrap_err(), "Pairs row 1 must be a mapping of its columns");
         let saved = json!({"mode": "b", "gone": 1, "pairs": [{"start": "1", "old": 2}]});
         assert_eq!(Value::Object(current_values(&fields, saved.as_object().unwrap())), json!({"mode": "b", "pairs": [{"start": "1"}]}));
+        let file = field(json!({"name": "config_file", "type": "str", "default": "", "file_filter": "Pulse Config (*.json)"}));
+        let controls = controls(std::slice::from_ref(&file), &Map::new(), "parameter", &[]);
+        assert_eq!(controls[0]["kind"], "path");
+        assert_eq!(controls[0]["filter"], "Pulse Config (*.json)");
+        assert_eq!(project(&file, &Value::Null, false).unwrap(), "");
+        assert_eq!(project(&file, &json!("C:/config.json"), false).unwrap(), "C:/config.json");
     }
 }

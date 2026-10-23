@@ -140,7 +140,8 @@ def _port(port: ScanPort, spellings: _Spellings) -> dict:
     limits = spellings.limits(port)
     ladder = _ladder(port.unit) or ([[port.unit, 0]] if limits else [])
     units = [*ladder, *([symbol, None] for symbol in limits)]
-    return {**asdict(port), "group": port_group(port.port), "leaf": port_leaf(port.port),
+    group = port.label.removesuffix(f".{port_leaf(port.port)}") if port.port.startswith(DEVICE_PARAM_FAMILY) else port_group(port.port)
+    return {**asdict(port), "group": group, "leaf": port_leaf(port.port),
             "units": units, "families": _families(symbol for symbol, _decade in units), "limits": limits}
 
 

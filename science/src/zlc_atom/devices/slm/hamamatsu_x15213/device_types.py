@@ -131,7 +131,7 @@ X15213_SERVER_SCHEMA = AuthoringSchema(
             852.0,
             minimum=1.0,
         ),
-        AuthoringField("correction_path", "str", "Vendor correction BMP", ""),
+        AuthoringField("correction_path", "str", "Vendor correction BMP", "", file_filter="Vendor correction (*.bmp)"),
         AuthoringField("flip_x", "bool", "Flip X", False),
         AuthoringField("flip_y", "bool", "Flip Y", False),
     ),

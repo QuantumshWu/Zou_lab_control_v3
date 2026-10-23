@@ -95,12 +95,13 @@ A type descriptor (JSON, the only form the core sees):
 
 `Field` is v2's `AuthoringField` as data: `{name, type, label, default, required,
 minimum, maximum, step, unit, choices: [{value, label}], segmented, blank_label,
-description, enabled_when: [field, [values]] | null, derived, group, columns}` with
+description, enabled_when: [field, [values]] | null, derived, group, columns, file_filter}` with
 `type` in `int | float | bool | str | text | pair | choice | rows | resource`. Choices
 are `(value, label)` pairs stated by the declaring plugin; no layer transforms a value
 into a label. Units are the field's own unit string (zlc_data unit grammar). `group`
 names the form section the field stands in ("Imaging"); the form titles each change
-of it.
+of it. A nonempty `file_filter` (for example `Pulse Config (*.json)`) presents a
+string field as a file path with Browse; its stored value and validation stay text.
 
 Draft-dependent declarations stay functions of the plugin, answered by the node
 instance's own process through `query` (section 5): `declare_outputs`,
@@ -177,6 +178,10 @@ parallel; the core admits opened instances in the operator's order (v2's
 `_build_together`). A failed open reports its error and the instance is gone;
 nothing half-open is admitted. The core ends a process with `exit` (or by
 closing stdin); it waits at most 5 s, then terminates it.
+
+Device metadata in draft queries and `run.start` includes `instance` (stable ID)
+and `role` (the accepted operator name). Proxies expose `role` for display;
+commands, scan port keys and claims continue to use `instance`.
 
 A run ends with event `run.finished {run, outcome: completed|stopped|failed,
 result, error}`. The core seals the run's Runtime generation with that outcome

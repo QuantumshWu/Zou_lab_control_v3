@@ -31,8 +31,8 @@ in. An engine still running is never replaced: the download waits in
 - `bin\release.json` (in git): the release, written by `build_release.bat`.
 - `bin\engine\` (downloaded, not in git): the engine -- `zlc-desktop.exe` (every window, and
   installation.exe's as `zlc-desktop --installer`), `zlc-pulse-server.exe` (the
-  board on this computer, also the FPGA build's `fpga` command) and the UI page
-  they serve (`ui\`).
+  board on this computer, also the FPGA build's `fpga` command). The UI is served
+  from `apps\desktop\ui`, whose compiled `dist\` is tracked in git.
 - `bin\ai\zlc-mcp.exe` (downloaded with the engine): for AI clients only (MCP over stdio,
   `zlc-mcp --client-config claude`).
 - `bin\scripts\*.bat`: every step for scripting and automation, the same
@@ -49,6 +49,7 @@ in. An engine still running is never replaced: the download waits in
 | `experiment.bat`, `figure_viewer.bat`, `pulse_editor.bat` | On a development machine: the three apps through `tools\desktop.ps1`, from a build current for the sources (below). |
 | `build_release.bat [--no-commit \| --publish [--dry-run]]` | On a development machine: builds the release into `bin\engine` and `bin\ai` and its archive (`target\engine-releases\zlc-engine-<version>.zip`), and commits `bin\release.json` with the four programs; `--publish`, once that commit is pushed, makes its GitHub release with the archive (`gh`). |
 | `dev_setup.bat [--dry-run]` | On a development machine: installs the toolchain into `.tools`. |
+| `build_ui.bat` | Compiles TypeScript into `apps\desktop\ui\dist`. Commit it with the sources; no Rust build or engine release. |
 
 ## Where things live
 
@@ -71,11 +72,13 @@ An executable finds the UI, `science\src`, the FPGA tree, fonts and recipes from
 where it sits in the checkout, so a release built on one machine runs from any
 clone. The four programs always run the release in `bin\engine`. On a development
 machine `tools\desktop.ps1` (and `bin\scripts\experiment.bat`) starts the
-development build when it was built from the current Rust/TS sources, else the
+development build when it was built from the current Rust sources, else the
 release when that was, else builds when this machine has the toolchain, else
 runs the release as it is; installation.exe then reads "Built here". The sources are `crates\`
-(without tests and the FPGA tree), the UI page and `Cargo.toml`/`Cargo.lock`,
-hashed by git's blob ids; a change to the Python plugins never rebuilds anything.
+(without tests and the FPGA tree), `Cargo.toml`/`Cargo.lock` and the Rust build
+scripts, hashed by git's blob ids. Python and UI edits never rebuild the engine.
+The development launchers compile TypeScript when Node is available. Lab PCs use
+the committed JS, HTML and CSS directly after a pull and restart.
 
 ## A lab PC
 

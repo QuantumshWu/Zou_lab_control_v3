@@ -338,9 +338,12 @@ fn window_setup() -> Result<(WebContext, windows::Setup), Box<dyn std::error::Er
         let (x, y) = text.split_once(',')?;
         Some(tao::dpi::PhysicalPosition::new(x.trim().parse::<i32>().ok()?, y.trim().parse::<i32>().ok()?))
     });
-    // The page: a release's own copy beside it (bin\engine\ui, built with it), else the checkout's.
-    let beside = std::env::current_exe()?.with_file_name("ui");
-    let ui_root = if beside.join("index.html").is_file() { beside } else { zlc_core::checkout::path("apps/desktop/ui") }.canonicalize()?;
+    // The compiled interface travels with the checkout, independently of the engine release.
+    let ui_root = zlc_core::checkout::path("apps/desktop/ui").canonicalize()?;
+    if !ui_root.join("dist/main.js").is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound,
+            "The compiled UI is missing. Restore apps/desktop/ui/dist from git, or run bin/scripts/build_ui.bat.").into());
+    }
     let debug_port = std::env::var("ZLC_V3_DEBUG_PORT").ok();
     // wry's own defaults, plus an sRGB output: the page's colours (the zlc_ui
     // tokens and every finished plot pixel) reach the screen as their values,

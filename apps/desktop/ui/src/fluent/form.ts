@@ -341,6 +341,10 @@ export class Field {
   private updateChoices(): void {
     const choices: [Value, string][] = this.spec.kind === "boolean" ? [[false, "Off"], [true, "On"]] : [...(this.spec.choices || [])];
     if (this.spec.allow_none && !this.automatic && !choices.some(([value]) => value === null)) choices.unshift([null, this.spec.placeholder || "(none)"]);
+    const held = this.spec.value;
+    if (held !== null && held !== "" && !choices.some(([value]) => encode(value) === encode(held))) {
+      choices.push([held, `${String(held)} (unavailable)`]);
+    }
     const signature = JSON.stringify([choices, Boolean(this.spec.cycle)]);
     if (signature === this.options) return;
     this.options = signature;

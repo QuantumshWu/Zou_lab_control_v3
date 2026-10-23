@@ -28,7 +28,7 @@ fn the_virtual_mot_camera_and_camera_measurement_run_through_the_host() {
     if catalog.find("camera_measurement").is_none() { eprintln!("this science tree has no camera_measurement: skipped"); return; }
     host.open("mot", "camera.virtual_mot", json!({"exposure_seconds": 0.02}), json!({"seed": 0})).unwrap();
     host.open("camera_measurement1", "camera_measurement", json!({}), json!({})).unwrap();
-    let start = |values: serde_json::Value| host.start_run("camera_measurement1", RunRequest { values,
+    let start = |values: serde_json::Value| host.start_run("camera_measurement1", RunRequest { device_labels: Default::default(), values,
         devices: [("camera".to_owned(), "mot".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None,
         outputs: [("frames".to_owned(), "@logic/camera_measurement1/frames".to_owned())].into() }).unwrap();
@@ -85,7 +85,7 @@ fn the_virtual_mot_camera_and_camera_measurement_run_through_the_host() {
     };
     host.open("derive1", "derive", json!({}), json!({})).unwrap();
     let variables = json!([{"name": "doubled", "terms": [{"of": "frames"}, {"op": "*", "number": 2}]}]);
-    let derive = host.start_run("derive1", RunRequest { values: json!({"variables": variables}), devices: Default::default(),
+    let derive = host.start_run("derive1", RunRequest { device_labels: Default::default(), values: json!({"variables": variables}), devices: Default::default(),
         shared: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: Some(frames.to_owned()), run_directory: None,
         outputs: [("doubled".to_owned(), "@logic/derive1/doubled".to_owned())].into() }).unwrap();
     std::thread::sleep(Duration::from_secs(2));

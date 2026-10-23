@@ -18,6 +18,7 @@ param(
 $ErrorActionPreference = 'Stop'
 trap { Write-Host "ERROR: $($_.Exception.Message)"; exit 1 }
 . (Join-Path $PSScriptRoot 'tools_root.ps1')
+if (Get-ZlcNpm) { & (Join-Path $PSScriptRoot 'ui.ps1') }
 $executable = Join-Path (Get-ZlcProducts -Build:$Build) 'zlc-desktop.exe'
 $savedPort = $env:ZLC_V3_DEBUG_PORT
 try {

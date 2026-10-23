@@ -154,7 +154,6 @@ commands and capabilities are that type's).
  "editor_facts": {...} | null, "editor_facts_error": "..." | null,  // the node's editor_facts answer for this draft
                                                       // (the bench's tunable devices offered as tunable:<key>)
  "artifact_inputs": {"calibrations": [{"path": "...", "frames": ["rest"]}]},
- "acquisition_choices": [["camera_measurement", "Camera measurement"]] | null,
  "auto_preview": true,
  "device_labels": {"camera": "Camera"},             // each device argument in words
  "outputs": [{"signal": "@logic/occupancy/occupied", "contract": "occupancy.occupied", "label": "Occupancy/occupied",
@@ -168,6 +167,10 @@ commands and capabilities are that type's).
  "phase": "idle" | "following" | "waiting" | "starting" | "running" | "stopping" | "removing",
  "run": RunRow | null}                                // current, else last run
 ```
+The acquisition field is a `choice` in `controls`: labels are node names, values
+are node IDs, `None` is the empty string, and unavailable held references remain visible.
+Candidates match the consumer's ready/terminal requirement.
+
 v2 status texts are kept: `not started`, `Draft: …`, `following X (waiting for the
 signal)`, `following X (source stopped)`, `failed; restarts with the source's next
 run: …`, `waiting for A, B`, `restart queued: …`, suffix ` · edited`.

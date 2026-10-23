@@ -279,6 +279,7 @@ pub struct RunRequest {
     pub values: Value,
     /// Device instance per requirement argument.
     pub devices: BTreeMap<String, String>,
+    pub device_labels: BTreeMap<String, String>,
     /// The arguments whose device the run shares (a scan's device axis); it takes every other one exclusively.
     pub shared: std::collections::BTreeSet<String>,
     pub origin: Origin,
@@ -710,7 +711,7 @@ impl PluginHost {
                     return Err(CallError::new(ErrorKind::Refused, format!("{device} is claimed by run {owner}")));
                 }
                 if target.published.is_some() { return Err(published_refusal(device)); }
-                devices.insert(argument.clone(), json!({"instance": device, "type_id": target.descriptor.type_id,
+                devices.insert(argument.clone(), json!({"instance": device, "role": request.device_labels.get(device).unwrap_or(device), "type_id": target.descriptor.type_id,
                     "capabilities": target.descriptor.capabilities, "tunable": target.tunable}));
             }
             for (argument, device) in &request.devices {

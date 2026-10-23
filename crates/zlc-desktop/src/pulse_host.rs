@@ -354,6 +354,7 @@ pub const ANNOUNCED_AS: &str = "sequencer.hardware";
 /// The native device types as the workbench reads descriptors.
 pub fn device_descriptors() -> Vec<Value> {
     let config_file = json!({"name": "config_file", "type": "str", "label": "Config file (optional)", "default": "",
+                             "file_filter": "Pulse Config (*.json)",
                              "description": "a zlc.pulse.config_values file the board compiles Config fields against"});
     let output = json!([{"name": "sequence"}]);
     // One sequencer family, as v2's Device Manager offered it; the virtual board shares the

@@ -12,13 +12,20 @@ The canvas only copies a finished, opaque backend RGBA image with `putImageData`
 ## Build
 
 ```powershell
-npm --prefix apps/desktop/ui ci --ignore-scripts
-npm --prefix apps/desktop/ui run build
+bin\scripts\build_ui.bat
 ```
 
 The native `zlc://app` protocol serves this directory. `index.html` loads
 `dist/main.js`; no web development server or remote asset is required. TypeScript
-is a build-time dependency only. `dist/` and `node_modules/` are not source.
+is a build-time dependency only. Commit `dist/` with each TypeScript change;
+lab PCs use these compiled files after a pull, without Node or an engine release.
+`bin/scripts/build_ui.bat` builds only the interface. CSS and HTML need no build.
+Restart the app to load updated assets. `node_modules/` stays out of git.
+
+Root executables also serve this checkout's interface. UI-only changes do not
+change the engine source stamp or `bin/release.json`. A new Rust command or state
+field needs its corresponding engine release; the manifest makes the launcher
+request that engine before opening the interface.
 
 ## Layout of the source
 

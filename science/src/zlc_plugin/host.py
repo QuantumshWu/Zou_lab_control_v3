@@ -747,6 +747,7 @@ class _DeviceProxy:
         self._run = run
         self._argument = argument
         self._info = info
+        self.role = str(info.get("role") or info.get("instance") or "")
 
     def _call(self, method: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         timeout = kwargs.get("timeout")

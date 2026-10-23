@@ -344,10 +344,10 @@ export class DeviceManagerView implements View {
       const control = command("Control", () => this.openControl(device.instance_id));
       const log = command("Log", () => this.openLog(device.instance_id));
       // Close ends hardware: the destructive face, never the light blue of Control.
-      const close = command("Close", () => this.ctx.transport.send({ action: "close_device", device: device.instance_id }, `closing ${device.instance_id}`), { role: "destructive" });
+      const close = command("Close", () => this.ctx.transport.send({ action: "close_device", device: device.instance_id }, `closing ${device.role}`), { role: "destructive" });
       // Remote: a switch, a state; it shows the bench's answer, never the click (v2 _remote_clicked).
       const remote = switchButton(on => this.ctx.transport.send({ action: "publish_device", device: device.instance_id, published: on },
-        `${device.instance_id}: ${on ? "publishing on" : "withdrawing from"} the bench fabric`), "Remote");
+        `${device.role}: ${on ? "publishing on" : "withdrawing from"} the bench fabric`), "Remote");
       setChecked(remote, Boolean(device.published));
       for (const button of [control, log, close]) button.disabled = busy;
       // A device another computer publishes is published there, not here (publish_device refuses it).

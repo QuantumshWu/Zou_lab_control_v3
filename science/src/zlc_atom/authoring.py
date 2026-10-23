@@ -94,6 +94,8 @@ class AuthoringField:
     #: "Movement"): a form puts the title where the section changes.  Empty
     #: for a field that needs none.
     group: str = ""
+    #: A file path edited with Browse; the stored value remains a string.
+    file_filter: str = ""
 
     def __post_init__(self) -> None:
         if not self.name or not self.value_type or not self.label:

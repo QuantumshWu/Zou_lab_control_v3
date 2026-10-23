@@ -56,6 +56,10 @@ engine left git is re-synced once, with git or GitHub Desktop, as
   node one folder under `nodes/` (see [the plugin protocol](docs/PLUGIN_PROTOCOL.md)).
   Changing a plugin needs no build: it takes effect when its process restarts
   (re-open the device, restart the node); a new type appears when the app starts.
+- **Interface.** After a TypeScript edit, run `bin\scripts\build_ui.bat` and commit
+  `apps\desktop\ui\dist` with the sources. HTML/CSS need no build. Root programs
+  read this interface from the checkout; pull and restart to update it without
+  rebuilding or downloading an exe.
 - **AI clients.** Every window action is a command on one bus, also served to MCP
   clients on loopback with a token. `--mcp-read-only` limits them to reading. The
   `bin\ai\zlc-mcp.exe` entry point lists the experiments running on this machine and connects
@@ -70,9 +74,10 @@ engine left git is re-synced once, with git or GitHub Desktop, as
 `installation.exe`'s Advanced card (or `bin\scripts\dev_setup.bat`) installs the
 build tools into `.tools\` (Rust toolchain, MSVC libraries, FreeType,
 Node/TypeScript). `tools\desktop.ps1` and `bin\scripts\experiment.bat`,
-`figure_viewer.bat` and `pulse_editor.bat` then build `target\` whenever the Rust
-or interface sources changed (plugin-only changes never trigger a build); the four
-programs at the root always run the release in `bin\engine`.
+`figure_viewer.bat` and `pulse_editor.bat` compile the interface when Node is
+available and build `target\` when Rust sources or build dependencies changed.
+The four root programs run the engine release in `bin\engine`, with the interface
+in `apps\desktop\ui`. Python and interface edits need no engine release.
 `bin\scripts\build_release.bat` builds the release into `bin\engine` and `bin\ai`
 and its archive, and commits `bin\release.json` (which names it) with the four
 programs; `build_release.bat --publish`, once that commit is pushed, makes the

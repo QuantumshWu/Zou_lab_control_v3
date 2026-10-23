@@ -6,8 +6,8 @@ param(
     [switch]$Publish,
     [switch]$DryRun
 )
-# The release a lab PC runs without a toolchain: build the UI and the executables from the
-# committed sources; place the engine and the page it serves in bin\engine and zlc-mcp in bin\ai
+# The engine release a lab PC runs without a toolchain: build executables from the
+# committed Rust sources; place the engine in bin\engine and zlc-mcp in bin\ai
 # (neither is in git) and pack both into target\engine-releases\zlc-engine-<version>.zip; write
 # bin\release.json, which names that release (version yyyy.M.d.N, its tag, the source stamp and
 # commit it was built from, the archive's name, size and sha256); commit that file with the four
@@ -68,18 +68,12 @@ foreach ($name in $ZlcProductNames) {
 }
 
 # What the release holds after this run, as checkout-relative path -> source file: the four
-# programs at the root (one launcher, named for its mode), the engine and its page in
+# programs at the root (one launcher, named for its mode), the engine in
 # bin\engine, zlc-mcp in bin\ai.
-$page = Join-Path $root 'apps\desktop\ui'
 $files = [ordered]@{}
 foreach ($program in $ZlcPrograms) { $files["$program.exe"] = Join-Path $built 'zlc-launch.exe' }
 foreach ($name in $ZlcEngineNames) { $files["bin\engine\$name"] = Join-Path $built $name }
 $files['bin\ai\zlc-mcp.exe'] = Join-Path $built 'zlc-mcp.exe'
-foreach ($item in @(Get-Item -LiteralPath (Join-Path $page 'index.html')) + @(Get-ChildItem -LiteralPath $page -Filter '*.css' -File)) {
-    $files["bin\engine\ui\$($item.Name)"] = $item.FullName
-}
-$dist = Join-Path $page 'dist'
-foreach ($item in Get-ChildItem -LiteralPath $dist -Recurse -File) { $files["bin\engine\ui\dist\$($item.FullName.Substring($dist.Length + 1))"] = $item.FullName }
 # Files a previous release had that this one does not (a renamed module) go.
 foreach ($folder in 'bin\engine', 'bin\ai') {
     $full = Join-Path $root $folder

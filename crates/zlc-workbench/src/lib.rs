@@ -84,6 +84,7 @@ pub struct RunSpec {
     pub source_signal: String,
     /// Requirement argument -> device instance id.
     pub devices: BTreeMap<String, String>,
+    pub device_labels: BTreeMap<String, String>,
     /// The arguments whose device the run shares (a scan's device axis: its fields protected, not the device).
     pub shared: std::collections::BTreeSet<String>,
     pub artifacts: Map<String, Value>,

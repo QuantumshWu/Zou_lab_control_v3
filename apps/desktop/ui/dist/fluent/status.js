@@ -1,0 +1,75 @@
+import { command } from "./button.js";
+import { element, setText, setTitle } from "./dom.js";
+/** One status word -> its dot and ink. */
+export function setState(node, word) {
+    if (node.dataset.state !== word)
+        node.dataset.state = word;
+}
+/** FluentStatusDot: a round severity or state mark. */
+export function statusDot(word = "idle", title = "") {
+    const dot = element("span", "dot");
+    dot.setAttribute("aria-hidden", "true");
+    setState(dot, word);
+    if (title)
+        dot.title = title;
+    return dot;
+}
+/** A dot and its words, a status gap apart, the words in the word's ink. */
+export class StatusLine {
+    root = element("div", "status-line");
+    dot = statusDot();
+    text = element("span", "status-text ink");
+    constructor(text = "", word = "idle") {
+        this.root.append(this.dot, this.text);
+        this.show(text, word);
+    }
+    show(text, word) {
+        setState(this.dot, word);
+        setState(this.text, word);
+        setText(this.text, text);
+        setTitle(this.text, text);
+    }
+}
+/** FluentStatusStrip: the persistent one-line status surface, mounted once
+ * and fed forever -- a dot, one eliding line (all of it in the tooltip) and
+ * an optional destructive action at its end (the console's Stop task).  The
+ * newest message is the true one; an empty one falls back to the last idle
+ * line rather than bringing an older error back (StatusStrip.show_status). */
+export class StatusStrip {
+    root = element("div", "card strip");
+    dot = statusDot();
+    text = element("span", "strip-text");
+    trailing = element("div", "strip-trailing");
+    action = null;
+    idleText = "";
+    constructor(options = {}) {
+        this.root.role = "status";
+        this.root.setAttribute("aria-live", "polite");
+        this.root.append(this.dot, this.text, this.trailing);
+        if (options.action) {
+            this.action = command(options.action[0], options.action[1], { role: "destructive" });
+            this.action.hidden = true;
+            this.trailing.append(this.action.root);
+        }
+        this.show("", "idle");
+    }
+    show(text, word) {
+        if (!text) {
+            word = "idle";
+            text = this.idleText;
+        }
+        else if (word === "idle")
+            this.idleText = text;
+        setState(this.root, word);
+        setState(this.dot, word);
+        // Something under way, or failed: said by class too (the live-chain
+        // acceptance waits on #status.busy clearing).
+        this.root.classList.toggle("busy", word === "task");
+        this.root.classList.toggle("error", word === "error");
+        // One eliding line, the whole message in its tooltip.
+        setText(this.text, text.replace(/\s*\n\s*/g, " · "));
+        setTitle(this.root, text);
+    }
+    setActionVisible(visible) { if (this.action)
+        this.action.hidden = !visible; }
+}

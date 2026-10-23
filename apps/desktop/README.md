@@ -11,8 +11,8 @@ Double-click `experiment.exe` at the checkout's root, as v2's experiment.bat:
 Devices@Zou lab opens, and Init opens the Task Console; it runs the committed
 release in `bin\engine`. On a development machine `tools\desktop.ps1 [-Open
 figure.npz] [-Build]` (or `bin\scripts\experiment.bat`) does the same with a build
-in `target\` current for the Rust/TS sources (made when they change, a few
-minutes); see [bin/README.md](../../bin/README.md).
+in `target\` current for the Rust sources. TypeScript compiles separately; UI-only
+edits do not rebuild the engine. See [bin/README.md](../../bin/README.md).
 
 It needs the checkout's science environment in `.tools` (`installation.exe`,
 [science/README.md](../../science/README.md)); a development machine also keeps
@@ -39,8 +39,9 @@ display Window. Figure files retain their own ordinary scientific controls.
 `-DebugPort 9234` explicitly enables
 local CDP diagnostics for development; normal launch has no debugging port.
 The executable reads its page, `science\src`, fonts (`crates/zlc-plot/fonts`,
-licences in its NOTICE) and the FPGA tree from the checkout it sits in (a release
-carries its own page in `bin\engine\ui`), so it runs from any clone.
+licences in its NOTICE) and the FPGA tree from the checkout it sits in. Every
+engine serves `apps/desktop/ui`, including its committed `dist` files, so UI
+updates arrive with git and do not require a new exe.
 
 ## Ownership and execution
 

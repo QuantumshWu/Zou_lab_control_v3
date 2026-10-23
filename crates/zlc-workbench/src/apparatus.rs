@@ -61,18 +61,6 @@ pub enum LiveState { Opening, Open, Closing, Failed }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Settling { Init, Apply, Close(String), Shutdown }
 
-impl Settling {
-    /// v2 DeviceManagerPresenter's word while the device worker runs.
-    fn busy(&self) -> String {
-        match self {
-            Settling::Init => "initializing devices".into(),
-            Settling::Apply => "applying device changes".into(),
-            Settling::Close(id) => format!("closing {id}"),
-            Settling::Shutdown => "shutting down devices".into(),
-        }
-    }
-}
-
 /// A hardware scan in flight: who asked, the types still to answer, what came back.
 pub struct Scan { request: u64, asked: Vec<String>, pending: Vec<String>, found: Vec<Entry>, reasons: Vec<(String, Vec<String>)> }
 
@@ -565,15 +553,15 @@ impl Workbench {
         let live = self.devices.get(id).filter(|live| live.state == LiveState::Open && !live.close_pending)
             .ok_or_else(|| format!("no loaded device '{id}'"))?;
         if published {
-            if live.published { return Err(format!("{id} is already published")); }
-            if live.descriptor.is_some() { return Err(format!("{id}: this device already comes from the bench fabric -- publish it on the machine that owns it")); }
+            if live.published { return Err(format!("{} is already published", live.entry.role)); }
+            if live.descriptor.is_some() { return Err(format!("{}: this device already comes from the bench fabric -- publish it on the machine that owns it", live.entry.role)); }
             // v2: publication is a command claim, refused while any run or outside driver uses the device.
             let users = self.device_use(id).users();
-            if !users.is_empty() { return Err(format!("{id}: not published -- {}", in_use(&users))); }
+            if !users.is_empty() { return Err(format!("{}: not published -- {}", live.entry.role, in_use(&users))); }
         } else if !live.published { return Err(format!("{} is not published", live.entry.role)); }
         let role = live.entry.role.clone();
         let ticket = self.ticket(Ticket::Publish { device: id.to_owned(), published, request });
-        if !published { self.report = (format!("{id}: withdrawing from the bench fabric"), "task"); }
+        if !published { self.report = (format!("{role}: withdrawing from the bench fabric"), "task"); }
         self.plugins.publish(ticket, id, &role, published);
         Ok(())
     }
@@ -587,8 +575,9 @@ impl Workbench {
                 live.risk = None;
             }
             // v2 toggle_remote's lines.
-            self.report = (if published { format!("{id}: published on the bench fabric (port {})", answer["port"]) }
-                           else { format!("{id}: withdrawn from the bench fabric") }, "task");
+            let role = self.device_role(id);
+            self.report = (if published { format!("{role}: published on the bench fabric (port {})", answer["port"]) }
+                           else { format!("{role}: withdrawn from the bench fabric") }, "task");
         }
         self.replies.push((request, result.map(|answer| json!({"device": id, "published": published, "fabric": answer}))));
     }
@@ -753,14 +742,14 @@ impl Workbench {
         ordered.extend(self.devices.values().filter(|live| !self.apparatus.draft.iter().any(|entry| entry.instance_id == live.entry.instance_id)));
         let open: Vec<&str> = ordered.iter().filter(|live| live.state == LiveState::Open).map(|live| live.entry.role.as_str()).collect();
         let failed: Vec<String> = ordered.iter().filter(|live| live.state == LiveState::Failed)
-            .map(|live| format!("{}: {}", live.entry.instance_id, live.error.as_deref().unwrap_or("did not start"))).collect();
+            .map(|live| format!("{}: {}", live.entry.role, live.error.as_deref().unwrap_or("did not start"))).collect();
         let loaded = counted(open.len(), "device");
         let mut text = match &kind {
             Settling::Shutdown => { self.report = ("devices shut down".into(), "task"); return; }
             Settling::Init if open.is_empty() => format!("{loaded} initialized"),
             Settling::Init => format!("{loaded} initialized: {}", open.join(", ")),
             Settling::Apply => format!("device changes applied · {loaded} loaded"),
-            Settling::Close(id) => format!("{id} closed · {loaded} loaded"),
+            Settling::Close(id) => format!("{} closed · {loaded} loaded", self.device_role(id)),
         };
         // v2 _outcome: each failure's reason on the line.
         if !failed.is_empty() { text += &format!(" · {} failed -- {}", failed.len(), failed.join("; ")); }
@@ -986,7 +975,12 @@ impl Workbench {
             // v2's busy words: the scan, else the device change under way.
             "busy": if self.scan.is_some() { Some("scanning hardware".to_owned()) }
                     else if self.plugins.discovering() { Some("discovering device types".to_owned()) }
-                    else { self.settling.as_ref().map(Settling::busy).or_else(|| (busy > 0).then(|| "applying device changes".to_owned())) },
+                    else { self.settling.as_ref().map(|state| match state {
+                        Settling::Init => "initializing devices".to_owned(),
+                        Settling::Apply => "applying device changes".to_owned(),
+                        Settling::Close(id) => format!("closing {}", self.device_role(id)),
+                        Settling::Shutdown => "shutting down devices".to_owned(),
+                    }).or_else(|| (busy > 0).then(|| "applying device changes".to_owned())) },
         })
     }
 

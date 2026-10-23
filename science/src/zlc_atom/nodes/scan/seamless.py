@@ -284,9 +284,9 @@ class SeamlessScanMeasurement:
 
         for port, value, index, points in changed:
             check_cancelled(context)
-            context.report_progress(f"Setting {port_label(port)} ({figure_padded(index + 1, points)}/{points})")
             axis = next(axis for axis in self.outer_axes if axis.port == port)
             bound = next(bound for bound in self.ports if bound.port == port)
+            context.report_progress(f"Setting {bound.label} ({figure_padded(index + 1, points)}/{points})")
             knobs.move(port, value, axis.unit or bound.unit)
 
     def _ask_for_setting(self, context: object, *, changed: Sequence[tuple[str, float, int, int]]) -> None:

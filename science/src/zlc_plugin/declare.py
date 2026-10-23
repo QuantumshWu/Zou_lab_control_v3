@@ -40,6 +40,7 @@ def field_json(item: object) -> dict[str, Any]:
         "choices": [{"value": plain(choice.value), "label": str(choice.label)} for choice in getattr(item, "choices", ())],
         "segmented": bool(getattr(item, "segmented", False)),
         "blank_label": str(getattr(item, "blank_label", "")),
+        "file_filter": str(getattr(item, "file_filter", "")),
         "description": str(getattr(item, "description", "")),
         "enabled_when": None if enabled is None else [str(enabled[0]), plain(list(enabled[1]))],
         "derived": bool(getattr(item, "derived", False)),

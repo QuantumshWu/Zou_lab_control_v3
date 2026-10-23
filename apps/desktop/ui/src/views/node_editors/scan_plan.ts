@@ -358,7 +358,7 @@ export class ScanPlanEditor implements NodeEditor {
   portTree(current: string) {
     const entries = this.ports.map(port => ({ key: port.port, group: port.group, label: port.port.startsWith(this.families.device) ? port.leaf : port.label }));
     const lost = this.facts?.unoffered[current];
-    if (lost) entries.push({ key: current, group: lost.group, label: `${lost.leaf} (${current in this.facts!.withheld ? "its bracket is empty" : "not in this pulse"})` });
+    if (lost) entries.push({ key: current, group: lost.group, label: `${lost.leaf} (${current in this.facts!.withheld ? "its bracket is empty" : current.startsWith(this.families.device) ? "unavailable" : "not in this pulse"})` });
     return choiceTree(entries, current, "ports");
   }
 

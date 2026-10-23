@@ -1,0 +1,97 @@
+import { command } from "./button.js";
+import { element } from "./dom.js";
+/** FluentCardDialog: THE chrome every modal wears -- a white rounded card
+ * with the DIVIDER edge, no platform frame, centred on the window and kept
+ * on it, dragged by its own body.  The page behind is not dimmed (Qt's
+ * modal dims nothing); it only stops taking clicks. */
+export class Dialog {
+    root = element("dialog", "dialog");
+    content = element("div", "dialog-content");
+    actions = element("div", "dialog-actions");
+    answer = () => { };
+    constructor(title) {
+        const heading = element("div", "dialog-title", title);
+        this.root.append(heading, this.content, this.actions);
+        this.root.addEventListener("cancel", event => { event.preventDefault(); this.close("cancel"); });
+        this.root.addEventListener("pointerdown", event => this.drag(event));
+    }
+    /** A command at the row's end; its click closes the dialog with `value`. */
+    addAction(text, value, role = "standard") {
+        const action = command(text, () => this.close(value), { role });
+        this.actions.append(action.root);
+        return action.root;
+    }
+    open() {
+        document.body.append(this.root);
+        this.root.showModal();
+        return new Promise(resolve => { this.answer = resolve; });
+    }
+    close(value) {
+        if (!this.root.open)
+            return;
+        this.root.close();
+        this.root.remove();
+        this.answer(value);
+    }
+    /** The card is its own title bar: a press nothing inside wanted drags it. */
+    drag(event) {
+        if (event.button !== 0 || event.target.closest("button, input, select, textarea, .readout-text"))
+            return;
+        const rect = this.root.getBoundingClientRect();
+        const origin = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+        this.root.setPointerCapture(event.pointerId);
+        const move = (moved) => {
+            const left = Math.max(0, Math.min(innerWidth - rect.width, moved.clientX - origin.x));
+            const top = Math.max(0, Math.min(innerHeight - rect.height, moved.clientY - origin.y));
+            this.root.style.margin = "0";
+            this.root.style.left = `${left}px`;
+            this.root.style.top = `${top}px`;
+        };
+        // The capture lost without a release (the window losing the mouse) ends the drag too.
+        const end = () => { this.root.removeEventListener("pointermove", move); this.root.removeEventListener("pointerup", end); this.root.removeEventListener("lostpointercapture", end); };
+        this.root.addEventListener("pointermove", move);
+        this.root.addEventListener("pointerup", end);
+        this.root.addEventListener("lostpointercapture", end);
+    }
+}
+function body(text) {
+    // A wrap-anywhere selectable block: a path or a traceback breaks inside a
+    // token instead of running past the card; past its cap it scrolls.
+    return element("div", "readout-text dialog-text", text);
+}
+/** fluent_message: a title, the message and one OK (acknowledging destroys nothing). */
+export async function message(title, text) {
+    const dialog = new Dialog(title);
+    dialog.content.append(body(text));
+    dialog.addAction("OK", "ok", "primary");
+    await dialog.open();
+}
+/** fluent_confirm: one modal yes/no question.  A warning confirms something
+ * that cannot be taken back, so its confirm is the one white-on-red fill. */
+export async function confirm(title, text, options = {}) {
+    const dialog = new Dialog(title);
+    dialog.content.append(body(text));
+    dialog.addAction(options.cancelText ?? "Cancel", "cancel", options.cancelRole ?? "standard");
+    dialog.addAction(options.confirmText ?? "Confirm", "confirm", (options.kind ?? "warning") === "warning" ? "destructive-primary" : "primary");
+    return await dialog.open() === "confirm";
+}
+/** FluentInputDialog: one line of text, OK commits it, Cancel or Escape gives null. */
+export async function prompt(title, label, value = "") {
+    const dialog = new Dialog(title);
+    const edit = element("input");
+    edit.type = "text";
+    edit.spellcheck = false;
+    edit.value = value;
+    const words = element("label", "field-label", label);
+    const line = element("div", "dialog-field");
+    line.append(words, edit);
+    dialog.content.append(line);
+    dialog.addAction("Cancel", "cancel");
+    const ok = dialog.addAction("OK", "ok", "primary");
+    edit.addEventListener("keydown", event => { if (event.key === "Enter")
+        ok.click(); });
+    const answer = dialog.open();
+    edit.focus();
+    edit.select();
+    return await answer === "ok" ? edit.value : null;
+}

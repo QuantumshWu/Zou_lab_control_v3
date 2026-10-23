@@ -150,6 +150,54 @@ mod tests {
     }
 
     #[test]
+    fn acquisition_controls_offer_names_and_keep_unavailable_references() {
+        let root = scratch("acquisition-form");
+        let mut catalog = catalog();
+        let types = catalog["types"].as_array_mut().unwrap();
+        let mut finite = types[2].clone();
+        finite["type_id"] = json!("finite");
+        finite["node"]["reports_ready"] = json!(false);
+        types.push(finite);
+        let mut feedback = types[4].clone();
+        feedback["type_id"] = json!("feedback");
+        feedback["node"]["acquisition_completion"] = json!("terminal");
+        feedback["parameters"][0]["required"] = json!(true);
+        feedback["parameters"][0]["enabled_when"] = json!(["mode", ["external"]]);
+        feedback["parameters"].as_array_mut().unwrap().push(json!({"name": "mode", "type": "str", "default": "external"}));
+        types.push(feedback);
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: Rc::default(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        for type_id in ["camera_measurement", "finite", "occupancy", "seamless_scan", "feedback"] {
+            apply(&mut workbench, &mut host, "add_node", json!({"type_id": type_id})).unwrap();
+        }
+        let control = |workbench: &Workbench, id: &str| {
+            workbench.node_row(workbench.node(id).unwrap(), &[])["controls"][0].clone()
+        };
+        let scan = control(&workbench, "seamless_scan");
+        assert_eq!(scan["kind"], "choice");
+        assert_eq!(scan["allow_none"], false);
+        assert_eq!(scan["choices"], json!([["", "None"], ["camera_measurement", "camera_measurement"]]));
+        assert_eq!(control(&workbench, "feedback")["choices"].as_array().unwrap().len(), 3);
+        assert_eq!(control(&workbench, "feedback")["required"], true);
+        apply(&mut workbench, &mut host, "edit_node", json!({"node": "seamless_scan", "values": {"acquisition_logic": "camera_measurement"}})).unwrap();
+        workbench.rename_node("camera_measurement", "Imaging camera").unwrap();
+        let scan = control(&workbench, "seamless_scan");
+        assert_eq!(scan["value"], "camera_measurement");
+        assert_eq!(scan["choices"][1], json!(["camera_measurement", "Imaging camera"]));
+        for selected in ["finite", "occupancy", "seamless_scan", "removed_camera"] {
+            apply(&mut workbench, &mut host, "edit_node", json!({"node": "seamless_scan", "values": {"acquisition_logic": selected}})).unwrap();
+            let scan = control(&workbench, "seamless_scan");
+            assert_eq!(scan["value"], selected);
+            assert_eq!(scan["choices"][2], json!([selected, format!("{selected} (unavailable)")]));
+            assert!(workbench.node_row(workbench.node("seamless_scan").unwrap(), &[])["issues"].as_array().unwrap()
+                .iter().any(|issue| issue.as_str().unwrap().contains("reports ready")));
+        }
+        apply(&mut workbench, &mut host, "edit_node", json!({"node": "feedback", "values": {"mode": "camera", "acquisition_logic": "removed_camera"}})).unwrap();
+        assert_eq!(control(&workbench, "feedback")["enabled"], false);
+        assert_eq!(control(&workbench, "feedback")["value"], "removed_camera");
+    }
+
+    #[test]
     fn an_apparatus_runs_a_task_through_its_measurement() {
         let root = scratch("run");
         std::fs::write(root.join("apparatus.json"), r#"{"format": "zlc.installation",
@@ -244,12 +292,14 @@ mod tests {
         let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
         let mut host = FakeHost::default();
         apply(&mut workbench, &mut host, "add_device", json!({"type_id": "rf.virtual", "instance_id": "rf"})).unwrap();
+        apply(&mut workbench, &mut host, "edit_device", json!({"device": "rf", "role": "Trap RF"})).unwrap();
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
         workbench.on_event(Event::Opened { instance: "rf".into(), working_point: json!({"state": "open", "tunable": true}) }, &mut host);
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "device_scan", "values": {"plan": "device:rf:frequency"}})).unwrap();
         workbench.on_event(Event::Opened { instance: node_instance("device_scan"), working_point: Value::Null }, &mut host);
         let asked = |name: &str| calls.borrow().2.iter().rev().find(|(query, ..)| query == name).cloned().unwrap();
         let (_, ticket, args) = asked("editor_facts");
+        assert_eq!(args["devices"]["tunable:rf"]["role"], "Trap RF");
         assert_eq!(args["devices"]["tunable:rf"]["instance"], "rf", "the editor is offered every tunable device");
         assert!(asked("resolve_device_claims").2["devices"].get("tunable:rf").is_none());
         workbench.on_event(Event::Answered { ticket, result: Ok(json!({"ports": [{"port": "device:rf:frequency"}]})) }, &mut host);
@@ -263,6 +313,7 @@ mod tests {
         assert_eq!(calls.borrow().1.last().unwrap().devices["tunable:rf"], "rf");
         let refused = apply(&mut workbench, &mut host, "tune_device", json!({"device": "rf", "field": "frequency", "value": 1.0}));
         assert_eq!(refused.unwrap_err(), "frequency: Protected by device_scan");
+        assert_eq!(calls.borrow().1.last().unwrap().device_labels["rf"], "Trap RF");
         let refused = apply(&mut workbench, &mut host, "tune_device", json!({"device": "rf", "field": "amplitude", "value": 1.0}));
         assert!(refused.unwrap_err().starts_with("amplitude: Stop the active Logic"), "an unnamed field is claimed, not protected");
     }

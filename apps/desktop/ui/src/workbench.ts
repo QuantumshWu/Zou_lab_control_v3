@@ -123,7 +123,6 @@ export type LogicRow = {
   artifact_inputs: Record<string, ArtifactValue>;
   /** The node's file inputs as it declares them (label, its codec's dialog filter, frame claims). */
   artifact_specs?: { name: string; label: string; file_filter: string; required: boolean; frame_claims: boolean }[];
-  acquisition_choices: [string, string][] | null;
   auto_preview: boolean;
   outputs: { signal: string; contract: string; label: string; shape: string | null }[];
   issues: string[];
