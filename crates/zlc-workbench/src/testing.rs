@@ -180,7 +180,13 @@ mod tests {
         assert_eq!(control(&workbench, "feedback")["choices"].as_array().unwrap().len(), 3);
         assert_eq!(control(&workbench, "feedback")["required"], true);
         apply(&mut workbench, &mut host, "edit_node", json!({"node": "seamless_scan", "values": {"acquisition_logic": "camera_measurement"}})).unwrap();
-        workbench.rename_node("camera_measurement", "Imaging camera").unwrap();
+        workbench.rename_node("camera_measurement", "Imaging camera", &[]).unwrap();
+        workbench.rename_node("camera_measurement", "  ", &[]).unwrap();
+        assert_eq!(workbench.node("camera_measurement").unwrap().name, "camera_measurement");
+        assert!(workbench.rename_node("camera_measurement", "Signals", &[]).is_err());
+        let external = SignalInfo { name: "@logic/notebook/value".into(), owner: "notebook".into(), generation: "g".into(), published: true, sealed: false, shape: "".into() };
+        assert!(workbench.rename_node("camera_measurement", "Notebook", &[external]).is_err());
+        workbench.rename_node("camera_measurement", "Imaging camera", &[]).unwrap();
         let scan = control(&workbench, "seamless_scan");
         assert_eq!(scan["value"], "camera_measurement");
         assert_eq!(scan["choices"][1], json!(["camera_measurement", "Imaging camera"]));
@@ -791,6 +797,18 @@ mod tests {
         workbench.device_users().lock().unwrap().clear();
         apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
         assert_eq!(calls.borrow().1.len(), 1, "launched once the device is free");
+        workbench.on_event(Event::RunStarted { run: "camera_measurement#1".into() }, &mut host);
+        apply(&mut workbench, &mut host, "edit_node", json!({"node": "camera_measurement", "device_keys": {"camera": "gone"}})).unwrap();
+        assert!(apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).is_err());
+        let row = workbench.node_row(workbench.node("camera_measurement").unwrap(), &[]);
+        assert_eq!(row["state"], "warning");
+        assert!(row["status"].as_str().unwrap().contains("Restart refused:"));
+        assert_eq!(row["run"]["state"], "running", "the refused restart leaves the old run running");
+        assert_eq!(calls.borrow().1.len(), 1);
+        apply(&mut workbench, &mut host, "revert_node", json!({"node": "camera_measurement"})).unwrap();
+        let row = workbench.node_row(workbench.node("camera_measurement").unwrap(), &[]);
+        assert_eq!(row["state"], "running");
+        assert!(!row["status"].as_str().unwrap().contains("Restart refused:"));
     }
 
     /// v2 _replace_board: Clear or Open while a node runs stops it, says so, and replaces the

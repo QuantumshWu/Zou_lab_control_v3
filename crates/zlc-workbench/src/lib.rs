@@ -35,6 +35,7 @@ pub trait Plugins {
     /// A standard device op (`fields`, `values`, `tune`) on an open instance.
     fn call(&mut self, instance: &str, ticket: u64, op: &str, params: &Value);
     fn start(&mut self, run: &RunSpec);
+    fn rename(&mut self, _instance: &str, _name: &str) {}
     /// A processor follows its source (None: no longer): the run started on each new
     /// generation of it reads that generation from its first commit.
     fn follow(&mut self, _instance: &str, _signal: Option<&str>) {}
@@ -74,6 +75,7 @@ pub enum Event {
 /// What a node run is started with.
 #[derive(Clone, Debug)]
 pub struct RunSpec {
+    pub node_name: String,
     pub run: String,
     pub node_id: String,
     /// The node's plugin instance (`zlc_core::control::node_instance`).
@@ -354,7 +356,7 @@ impl Workbench {
             "accept_device_risk" => self.accept_device_risk(text(params, "device")?, params["accepted"].as_bool().unwrap_or(false)).map(Some),
             "publish_device" => self.publish_device(text(params, "device")?, params["published"].as_bool().ok_or("published is required")?, request).map(|()| None),
             "add_node" => self.add_node(params, host).map(Some),
-            "rename_node" => self.rename_node(text(params, "node")?, text(params, "name")?).map(Some),
+            "rename_node" => self.rename_node(text(params, "node")?, text(params, "name")?, &host.signals()).map(Some),
             "edit_node" => self.edit_node(params, host).map(Some),
             "check_node" => self.check_node(text(params, "node")?, host).map(Some),
             "revert_node" => self.revert_node(text(params, "node")?, host).map(Some),

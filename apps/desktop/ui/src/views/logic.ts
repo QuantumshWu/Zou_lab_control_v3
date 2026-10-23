@@ -224,7 +224,7 @@ export class LogicEditorView {
     const kind = kindWords(projection.kind);
     if (this.kind.textContent !== kind) this.kind.textContent = kind;
     this.statusLine.show(projection.status, STATE_WORDS[projection.state]);
-    const locked = takeover.active && !takeover.owns ? "A running task owns the console" : "";
+    const locked = takeover.active ? "A running task owns the console" : "";
     const specs: { key: string; group?: string; spec: FieldSpec; commit(value: Value): number }[] = [];
     // THE NAME: what the node is called on its row, this page and its tab.
     specs.push({ key: "name", spec: { name: "name", label: "Name", kind: "text", value: row.name, required: false, allow_none: true,
@@ -368,7 +368,7 @@ export class LogicEditorView {
       }, () => this.intents.check(row.node_id), true);
       path.value = typeof value === "string" ? value : "";
       path.input.placeholder = spec.required ? "No file chosen" : "None";
-      path.input.disabled = path.browse.disabled = Boolean(locked);
+      path.input.disabled = path.browse.disabled = path.refresh.disabled = Boolean(locked);
       return formRow(`${label}${spec.required ? " *" : ""}`, path.root);
     });
     return this.artifacts = rows;

@@ -466,6 +466,8 @@ def _spi(instance: Instance, params: dict[str, Any]) -> Any:
     if method == "read_tunable_in_unit":
         # One knob read in a unit, by the device's own conversion: a row as well.
         return _row(instance.adapter.read_tunable_in_unit(*params.get("args", ()), **params.get("kwargs", {})))
+    if method == "tune_in_unit":
+        return tunable.tune_in_unit(instance.adapter, *params.get("args", ()), **params.get("kwargs", {}))
     target = getattr(instance.adapter, method)
     return target(*params.get("args", ()), **params.get("kwargs", {}))
 
@@ -777,6 +779,8 @@ def _proxy_class(tokens: tuple[str, ...], tunable: bool, reads: tuple[str, ...] 
         # The quartet when the device is tunable, and every read it implements.
         for name in (*(capabilities.TUNABLE if tunable else ()), *reads):
             namespace.setdefault(name, lambda self, *args, name=name, **kwargs: self._call(name, args, kwargs))
+        if tunable:
+            namespace["tune_in_unit"] = lambda self, *args, **kwargs: self._call("tune_in_unit", args, kwargs)
         _PROXY_CLASSES[key] = type("DeviceProxy", (_DeviceProxy,), namespace)
     return _PROXY_CLASSES[key]
 

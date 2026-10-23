@@ -159,7 +159,7 @@ pub(crate) fn in_use(users: &[String]) -> String { format!("device is in use by 
 /// v2 `logic_name_text`: words one space apart.
 pub(crate) fn name_text(text: &str) -> String { text.split_whitespace().collect::<Vec<_>>().join(" ") }
 
-fn name_key(text: &str) -> String { name_text(text).to_lowercase() }
+pub(crate) fn name_key(text: &str) -> String { name_text(text).to_lowercase() }
 
 /// v2 `logic_name_problem`: None when `text` may name `node` on a board of `others` (id, name).
 pub(crate) fn name_problem<'a>(text: &str, node: &str, others: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<String> {
@@ -168,6 +168,7 @@ pub(crate) fn name_problem<'a>(text: &str, node: &str, others: impl IntoIterator
     }
     if text.is_empty() { return Some("A node needs a name.".into()); }
     let key = name_key(text);
+    if key == "signals" { return Some("“signals” is a signal group; choose another name.".into()); }
     if names_a_panel(&key) { return Some(format!("“{text}” is how a panel is named; choose another name.")); }
     for (id, name) in others.into_iter().filter(|(id, _)| *id != node) {
         if name_key(name) == key { return Some(format!("Another node is already called “{name}”.")); }
@@ -311,13 +312,17 @@ impl Workbench {
     }
 
     /// v2 `logic_name_problem`: None when `text` may name `node` on this board.
-    fn name_problem(&self, text: &str, node: &str) -> Option<String> {
+    fn name_problem(&self, text: &str, node: &str, signals: &[SignalInfo]) -> Option<String> {
+        if signals.iter().map(|signal| split_signal(&signal.name).map_or(signal.owner.as_str(), |(owner, _)| owner))
+            .any(|owner| self.node(owner).is_none() && name_key(owner) == name_key(text)) {
+            return Some(format!("“{text}” is a signal producer; choose another name."));
+        }
         name_problem(text, node, self.nodes.iter().map(|other| (other.id.as_str(), other.name.as_str())))
     }
 
-    fn free_node_id(&self, type_id: &str) -> String {
+    fn free_node_id(&self, type_id: &str, signals: &[SignalInfo]) -> String {
         (1..).map(|n: u32| if n == 1 { type_id.to_owned() } else { format!("{type_id}{n}") })
-            .find(|id| self.node(id).is_none() && self.name_problem(id, id).is_none()).unwrap()
+            .find(|id| self.node(id).is_none() && self.name_problem(id, id, signals).is_none()).unwrap()
     }
 
     fn active_requirements<'a>(descriptor: &'a TypeDescriptor, values: &Map<String, Value>) -> Vec<&'a crate::types::DeviceRequirement> {
@@ -554,17 +559,19 @@ impl Workbench {
         self.task_gate("adding a node")?;
         let type_id = text(params, "type_id")?;
         let descriptor = self.node_type(type_id)?;
+        let signals = host.signals();
         let id = match params["node_id"].as_str() {
             Some(id) => {
                 let id = id.trim().to_owned();
                 if let Some(node) = self.node(&id) { return Err(format!("{id} is already used by node {}", node.name)); }
-                if let Some(problem) = self.name_problem(&id, &id) { return Err(problem); }
+                if let Some(problem) = self.name_problem(&id, &id, &signals) { return Err(problem); }
                 id
             }
-            None => self.free_node_id(type_id),
+            None => self.free_node_id(type_id, &signals),
         };
         let name = name_text(params["name"].as_str().unwrap_or(&id));
-        if let Some(problem) = self.name_problem(&name, &id) { return Err(problem); }
+        let name = if name.is_empty() { id.clone() } else { name };
+        if let Some(problem) = self.name_problem(&name, &id, &signals) { return Err(problem); }
         let supplied = params["values"].as_object().cloned().unwrap_or_default();
         let (values, _) = fields::project_values(&descriptor.parameters, &supplied, false)?;
         let mut device_keys: BTreeMap<String, String> = params["device_keys"].as_object().map(|keys| keys.iter()
@@ -584,11 +591,13 @@ impl Workbench {
         Ok(json!({"node": id}))
     }
 
-    pub(crate) fn rename_node(&mut self, id: &str, name: &str) -> Result<Value, String> {
+    pub(crate) fn rename_node(&mut self, id: &str, name: &str, signals: &[SignalInfo]) -> Result<Value, String> {
         let name = name_text(name);
+        let name = if name.is_empty() { id.to_owned() } else { name };
         self.node(id).ok_or_else(|| format!("No logic node {id:?}"))?;
-        if let Some(problem) = self.name_problem(&name, id) { return Err(problem); }
+        if let Some(problem) = self.name_problem(&name, id, signals) { return Err(problem); }
         self.node_mut(id)?.name = name.clone();
+        self.plugins.rename(&node_instance(id), &name);
         self.board.dirty = true;
         Ok(json!({"node": id, "name": name}))
     }
@@ -1064,7 +1073,7 @@ impl Workbench {
             let generation = signals.iter().find(|item| item.name == signal).map(|item| item.generation.clone());
             (signal, generation)
         }).collect();
-        let spec = RunSpec { run: run_id.clone(), node_id: id.to_owned(), instance: node_instance(id), type_id: node.type_id.clone(), values, source_signal: draft.source_signal.clone(),
+        let spec = RunSpec { node_name: node.name.clone(), run: run_id.clone(), node_id: id.to_owned(), instance: node_instance(id), type_id: node.type_id.clone(), values, source_signal: draft.source_signal.clone(),
             device_labels: devices.values().map(|key| (key.clone(), self.device_role(key).to_owned())).collect(),
             devices, shared, artifacts, resources, directory: directory.clone(), outputs, origin: pending.origin.clone() };
         let follow_generation = self.source_published(&signals, &draft.source_signal).map(|signal| signal.generation.clone());
@@ -1446,7 +1455,7 @@ impl Workbench {
         let editor_facts = node.answers.get(EDITOR_FACTS).map(|(_, answer)| answer);
         let sources = self.source_choices(node, signals);
         let bundle = descriptor.and_then(|item| item.node().inputs.first()).is_some_and(|input| input.select_bundle);
-        let (phase, state, mut status) = if node.removing {
+        let (phase, mut state, mut status) = if node.removing {
             ("removing", "running", "removing: stopping first".to_owned())
         } else if let Some(run) = active {
             let text = match (&run.request, &run.progress, run.state.as_str()) {
@@ -1475,6 +1484,12 @@ impl Workbench {
             ("idle", "idle", run.map(|run| run.state.clone()).unwrap_or_else(|| "not started".to_owned()))
         };
         if edited { status.push_str(" · edited"); }
+        if active.is_some() {
+            if let Some(error) = &node.error {
+                state = "warning";
+                status.push_str(&format!("; Restart refused: {error}"));
+            }
+        }
         let device_choices: Map<String, Value> = descriptor.map(|item| Self::active_requirements(item, &node.draft.values).into_iter()
             .map(|requirement| {
                 let mut choices: Vec<Value> = self.device_options(&requirement.capability).into_iter().map(|(id, role)| json!([id, role])).collect();

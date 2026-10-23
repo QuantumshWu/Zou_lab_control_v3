@@ -38,7 +38,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
 
     // A device lends a frame; the core borrows it, and releasing lets the plugin reuse the block.
     let opened = host.open("echo", "test.echo", json!({"gain": 2.0}), json!({})).unwrap();
-    assert_eq!(opened["reads"], json!(["convert_tunable_value"]), "the reads it implements");
+    assert_eq!(opened["reads"], json!(["tunable_fields", "tunable_values", "settings_provenance", "convert_tunable_value"]), "the reads it implements");
     let pid = host.instances().into_iter().find(|(name, ..)| name == "echo").unwrap().2;
     let reply = host.spi("echo", "frame", json!([256, 7]), json!({}), Duration::from_secs(10)).unwrap();
     let frame = reply.array(&reply.value).unwrap();
@@ -79,6 +79,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     // A node run claims its device, calls it through a proxy and publishes into Runtime
     // under the signal name its request gives; it asks the application through `core`.
     let frames_signal = "@logic/counter/frames";
+    host.set_node_name("counter", "Imaging camera");
     let run = host.start_run("counter", RunRequest { device_labels: Default::default(), values: json!({"count": 3, "size": 128}),
         devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into() }).unwrap();
@@ -117,6 +118,13 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     assert_eq!(host.registry().owner_of(&block_of(data.values())).unwrap(), pid);
     assert_eq!(runtime.outcome(&signal.generation).unwrap().unwrap()["status"], "completed");
     assert_eq!(latest.run().metadata["count"], 3, "the run record is the node's own");
+    assert_eq!(latest.run().metadata["node"], "counter");
+    assert_eq!(latest.run().metadata["node_name"], "Imaging camera");
+    host.set_node_name("counter", "Next camera name");
+    assert_eq!(latest.run().metadata["node_name"], "Imaging camera", "an archived record keeps the name at declaration");
+    assert_eq!(latest.run().metadata["converted"], json!([2.0, 4.0]));
+    assert!((latest.run().metadata["tuned_dbm"].as_f64().unwrap() - 0.969100130080564).abs() < 1e-10);
+    assert_eq!(latest.run().metadata["restored_dbm"], 0.0);
     host.spi("echo", "frame", json!([2, 1]), json!({}), Duration::from_secs(5)).expect("claim released at the end of the run");
 
     // A processor follows a source: on a sealed one it evaluates the current event,
@@ -132,7 +140,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     let derived = runtime.read_latest(&doubled.generation, doubled_signal).unwrap();
     assert_eq!(derived.key().ordinal, Some(2));
     assert_eq!(derived.event().parents.iter().map(|parent| parent.key.clone()).collect::<Vec<_>>(), [latest.key().clone()]);
-    assert_eq!(derived.run().metadata, json!({"source": frames_signal, "source_count": 3}));
+    assert_eq!(derived.run().metadata, json!({"source": frames_signal, "source_count": 3, "node": "doubler", "node_name": "doubler"}));
     assert_eq!(derived.event().metadata, json!({"records": {"doubled": {"from": {"index": 2}}}}));
     let AnyBuffer::U32(values) = derived.data().unwrap().values() else { panic!("dtype") };
     assert!(values.as_slice().iter().all(|value| *value == 6));

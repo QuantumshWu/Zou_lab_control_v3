@@ -172,8 +172,10 @@ impl Workbench {
         let fresh = host.reserve_panel_ids(kept.len());
         let renamed: BTreeMap<String, String> = kept.iter().map(|(saved, _)| saved.clone()).zip(fresh.iter().cloned()).collect();
         let mut nodes: Vec<LoadedNode> = Vec::new();
+        let reserved: Vec<String> = host.signals().iter().map(|signal| split_signal(&signal.name)
+            .map_or(signal.owner.as_str(), |(owner, _)| owner)).filter(|owner| self.node(owner).is_none()).map(str::to_owned).collect();
         for (index, entry) in logic.iter().enumerate() {
-            match self.logic_entry(entry, &nodes, &renamed, &mut notes) {
+            match self.logic_entry(entry, &nodes, &renamed, &reserved, &mut notes) {
                 Ok(node) => nodes.push(node),
                 Err(reason) => notes.push(format!("logic entry {}: {reason}; it is left out", index + 1)),
             }
@@ -237,11 +239,14 @@ impl Workbench {
     /// One saved logic row as v2 `_logic_from_tree` + `resolve_layout` read it, onto the
     /// rows `loaded` before it; Err says why it is left out.
     fn logic_entry(&self, entry: &Value, loaded: &[LoadedNode], renamed: &BTreeMap<String, String>,
-                   notes: &mut Vec<String>) -> Result<LoadedNode, String> {
+                   reserved: &[String], notes: &mut Vec<String>) -> Result<LoadedNode, String> {
         let entry = object(entry, "it")?;
         let saved_id = string(entry.get("node_id"), "", "its node_id")?.trim().to_owned();
         let type_id = string(entry.get("api_name"), "", "its api_name")?.trim().to_owned();
         if saved_id.is_empty() || type_id.is_empty() { return Err("logic entries require node_id and api_name".into()); }
+        if reserved.iter().any(|owner| crate::logic::name_key(owner) == crate::logic::name_key(&saved_id)) {
+            return Err(format!("{saved_id} is already a signal producer"));
+        }
         if loaded.iter().any(|node| node.id == saved_id || renamed.get(&saved_id) == Some(&node.id)) { return Err(format!("another logic entry is also {saved_id}")); }
         let board = || loaded.iter().map(|node| (node.id.as_str(), node.name.as_str()));
         if let Some(problem) = name_problem(&saved_id, &saved_id, board()) { return Err(problem); }
@@ -253,6 +258,10 @@ impl Workbench {
         let type_id = descriptor.type_id.clone();
         let mut name = name_text(&string(entry.get("name"), "", "its name")?);
         if name.is_empty() { name = saved_id.clone(); }
+        if name != saved_id && reserved.iter().any(|owner| crate::logic::name_key(owner) == crate::logic::name_key(&name)) {
+            notes.push(format!("logic {saved_id} is called by its internal ID: {name} is a signal producer"));
+            name = saved_id.clone();
+        }
         if let Some(clash) = (name != saved_id).then(|| name_problem(&name, &saved_id, board())).flatten() {
             notes.push(format!("logic {saved_id} is called by its internal ID: {clash}"));
             name = saved_id.clone();

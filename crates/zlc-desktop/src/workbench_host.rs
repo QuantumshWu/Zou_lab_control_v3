@@ -637,6 +637,7 @@ impl Plugins for Builtin {
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error) }); }
     }
     fn start(&mut self, run: &RunSpec) {
+        self.rename(&run.instance, &run.node_name);
         let runs = self.0.borrow().runs.clone();
         runs.lock().unwrap().starting.insert(run.run.clone(), false);
         {
@@ -676,6 +677,9 @@ impl Plugins for Builtin {
             self.0.borrow_mut().events.push(Event::RunFinished { run: run.run.clone(), outcome: "failed".into(),
                 error: Some(json!({"type": "StartError", "message": error})), generation: None });
         }
+    }
+    fn rename(&mut self, instance: &str, name: &str) {
+        if let Some(host) = &self.0.borrow().host { host.set_node_name(instance, name); }
     }
     fn follow(&mut self, instance: &str, signal: Option<&str>) {
         // At once, not on a lane: it must be in place before the source's next run.begin.

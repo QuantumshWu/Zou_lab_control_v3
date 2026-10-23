@@ -1,10 +1,11 @@
 """A device for the host's own tests: lends frames, receives arrays, can crash or hang."""
 
 import os
+import math
 import time
 from pathlib import Path
 
-from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringField, AuthoringSchema, TunableField
 from zlc_plugin import Command, DeviceType, FileParam, Opened, PhysicalOutput, allocate, notifier
 
 SCHEMA = AuthoringSchema((AuthoringField("gain", "float", "Gain", 1.0, minimum=0.0),))
@@ -17,6 +18,29 @@ class EchoDevice:
     def __init__(self, values):
         self.opened_with = dict(values)
         self.safe = []
+        self.amplitude = 0.0
+
+    def tunable_fields(self):
+        return (TunableField(AuthoringField("amplitude", "float", "Amplitude", 0.0, unit="dBm", minimum=-30.0, maximum=20.0),
+                             self.amplitude, True, ("amplitude",)),)
+
+    def tune(self, name, value):
+        assert name == "amplitude"
+        self.amplitude = float(value)
+        return self.amplitude
+
+    def tune_in_unit(self, name, value, unit):
+        if unit == "dBm":
+            return self.tune(name, value)
+        assert unit == "Vpp"
+        self.tune(name, 10 * math.log10((float(value) / (2 * math.sqrt(2))) ** 2 / 100 * 1000))
+        return float(value)
+
+    def tunable_values(self):
+        return {"amplitude": self.amplitude}
+
+    def settings_provenance(self):
+        return {"load": 100}
 
     def frame(self, size, value):
         array = allocate((size, size), "<u2")

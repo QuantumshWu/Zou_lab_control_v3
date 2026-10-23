@@ -182,6 +182,12 @@ closing stdin); it waits at most 5 s, then terminates it.
 Device metadata in draft queries and `run.start` includes `instance` (stable ID)
 and `role` (the accepted operator name). Proxies expose `role` for display;
 commands, scan port keys and claims continue to use `instance`.
+Draft and run proxies receive the same declared `reads`. Every tunable proxy
+also offers `tune_in_unit`; the device-side SDK applies its native conversion
+when available, with the same rules as Device Control. Draft queries cannot tune.
+At `run.begin` the host stamps `node` with the instance ID and `node_name` with
+the current operator name, overriding plugin-supplied identity. Later renames
+do not change this historical record.
 
 A run ends with event `run.finished {run, outcome: completed|stopped|failed,
 result, error}`. The core seals the run's Runtime generation with that outcome

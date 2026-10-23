@@ -307,6 +307,7 @@ struct RunState {
 }
 
 struct Instance {
+    display_name: String,
     descriptor: Arc<TypeDescriptor>,
     serving: Serving,
     tunable: bool,
@@ -660,6 +661,11 @@ impl PluginHost {
         }
     }
 
+    /// The current operator name; run.begin freezes it into that run's record.
+    pub fn set_node_name(&self, instance: &str, name: &str) {
+        if let Some(entry) = self.inner.state.lock().unwrap().instances.get_mut(instance) { entry.display_name = name.to_owned(); }
+    }
+
     /// Start a run of a node instance, claiming its devices; returns the run id.
     pub fn start_run(&self, instance: &str, request: RunRequest) -> Result<String, CallError> {
         let inner = &self.inner;
@@ -712,7 +718,7 @@ impl PluginHost {
                 }
                 if target.published.is_some() { return Err(published_refusal(device)); }
                 devices.insert(argument.clone(), json!({"instance": device, "role": request.device_labels.get(device).unwrap_or(device), "type_id": target.descriptor.type_id,
-                    "capabilities": target.descriptor.capabilities, "tunable": target.tunable}));
+                    "capabilities": target.descriptor.capabilities, "tunable": target.tunable, "reads": target.reads}));
             }
             for (argument, device) in &request.devices {
                 state.instances.get_mut(device).unwrap().claims.push((run.clone(), !request.shared.contains(argument)));
@@ -884,7 +890,7 @@ impl Inner {
     /// An opened instance joins the host: its outputs Stop all, its commands the catalogue.
     fn admit(self: &Arc<Self>, instance: &str, descriptor: Arc<TypeDescriptor>, serving: Serving, tunable: bool, reads: Vec<String>) -> Result<(), CallError> {
         self.state.lock().unwrap().instances.insert(instance.to_owned(),
-            Instance { descriptor: descriptor.clone(), serving, tunable, reads, claims: Vec::new(), published: None, run: None });
+            Instance { display_name: public_instance(instance).to_owned(), descriptor: descriptor.clone(), serving, tunable, reads, claims: Vec::new(), published: None, run: None });
         for output in &descriptor.physical_outputs {
             let (weak, name, port) = (Arc::downgrade(self), instance.to_owned(), output.name.clone());
             self.safe.register(&format!("{instance}/{}", output.name), Arc::new(move || {
@@ -1133,6 +1139,7 @@ impl Inner {
             declarations.push((name.to_owned(), schema, finite));
         }
         let mut state = self.state.lock().unwrap();
+        let display_name = state.instances.get(&instance).map(|entry| entry.display_name.clone()).unwrap_or_else(|| public_instance(&instance).to_owned());
         let run = Self::run_of(&mut state, params)?;
         if run.generation.is_some() { return Err(CallError::new(ErrorKind::Refused, "this run already declared its outputs")); }
         let declarations = declarations.into_iter().map(|(name, schema, finite)| {
@@ -1140,8 +1147,10 @@ impl Inner {
             outputs.insert(name, OutputState { signal: signal.clone(), schema: schema.clone(), finite, chunk: None });
             Declaration { signal, schema, storage: if finite { Storage::Finite } else { Storage::Latest } }
         }).collect();
-        // The run record is the node's own; who started the run goes in its seal.
-        let record = if params["record"].is_object() { params["record"].clone() } else { json!({}) };
+        // Scientific facts belong to the plugin; identity and the name at declaration belong to the host.
+        let mut record = if params["record"].is_object() { params["record"].clone() } else { json!({}) };
+        record["node"] = json!(public_instance(&instance));
+        record["node_name"] = json!(display_name);
         // A run consuming a source commits each result with the event it is of: the
         // Runtime selects a picture and its judgement as one shot through this route.
         let generation = match run.route.clone() {

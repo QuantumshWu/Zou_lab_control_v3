@@ -170,6 +170,12 @@ commands and capabilities are that type's).
 The acquisition field is a `choice` in `controls`: labels are node names, values
 are node IDs, `None` is the empty string, and unavailable held references remain visible.
 Candidates match the consumer's ready/terminal requirement.
+Clearing a node's Name restores its ID. Names cannot take the `signals` heading
+or an existing external signal producer's name. While a Task owns the console,
+all logic draft controls (including that Task's) are locked; Name stays editable
+and the owning Task keeps Stop. A refused Restart leaves the current run intact
+and projects a warning with `Restart refused` until the draft changes, is reverted,
+or a Restart is accepted.
 
 v2 status texts are kept: `not started`, `Draft: …`, `following X (waiting for the
 signal)`, `following X (source stopped)`, `failed; restarts with the source's next
