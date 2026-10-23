@@ -44,7 +44,8 @@ fn attach(core: &Core, port: u16, instance: &str, local: &str, bench: Bench) -> 
     assert_eq!(attached.descriptor.type_id, "test.echo");
     let (told, name) = (core.host.clone(), local.to_owned());
     link.on_event(move |op, params, lends| told.remote_event(&name, op, params, lends));
-    core.host.attach(local, attached.descriptor, Arc::new(link.clone()), attached.tunable).unwrap();
+    assert!(attached.reads.iter().any(|name| name == "convert_tunable_value"));
+    core.host.attach(local, attached.descriptor, Arc::new(link.clone()), attached.tunable, attached.reads).unwrap();
     let (lost, name) = (core.host.clone(), local.to_owned());
     link.on_failure(|_| {}, move |reason| lost.lost(&name, reason));
     link
@@ -124,6 +125,9 @@ fn a_published_device_serves_another_core_through_its_blocks_claims_and_safe_act
     assert!(published.as_slice().iter().all(|value| *value == 3));
     assert_eq!(b.host.registry().owner_of(&owner(latest.data().unwrap().values())).unwrap(), std::process::id());
     assert_eq!(latest.run().metadata["opened_with"], json!({"gain": 2.0}));
+    assert_eq!(latest.run().metadata["converted"], json!([2.0, 4.0]));
+    assert!((latest.run().metadata["tuned_dbm"].as_f64().unwrap() - 0.969100130080564).abs() < 1e-10);
+    assert_eq!(latest.run().metadata["restored_dbm"], 0.0);
 
     // Its outputs join this core's Stop all; their SAFE goes through the link.
     assert_eq!(b.safe.outputs(), ["remote_echo/beam"]);

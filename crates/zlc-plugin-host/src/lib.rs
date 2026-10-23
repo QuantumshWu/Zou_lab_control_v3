@@ -490,7 +490,7 @@ impl PluginHost {
     /// Admit a device instance served by `endpoint` (another core's published
     /// device) under `descriptor`, the type it has there: its outputs join this
     /// core's Stop all (made safe through the endpoint), its commands the catalogue.
-    pub fn attach(&self, instance: &str, descriptor: TypeDescriptor, endpoint: Arc<dyn Endpoint>, tunable: bool) -> Result<(), CallError> {
+    pub fn attach(&self, instance: &str, descriptor: TypeDescriptor, endpoint: Arc<dyn Endpoint>, tunable: bool, reads: Vec<String>) -> Result<(), CallError> {
         if !descriptor.is_device() { return Err(CallError::new(ErrorKind::Invalid, format!("{} is not a device type", descriptor.type_id))); }
         named(instance)?;
         {
@@ -498,7 +498,7 @@ impl PluginHost {
             if state.closed { return Err(CallError::lost("the plugin host is closed")); }
             if state.instances.contains_key(instance) { return Err(CallError::new(ErrorKind::Refused, format!("{instance} is already open"))); }
         }
-        self.inner.admit(instance, Arc::new(descriptor), Serving::Remote(endpoint), tunable, Vec::new())
+        self.inner.admit(instance, Arc::new(descriptor), Serving::Remote(endpoint), tunable, reads)
     }
 
     /// The type an open instance has (a remote device's is its publisher's).
@@ -508,6 +508,9 @@ impl PluginHost {
 
     /// Whether an open device speaks the tunable quartet.
     pub fn tunable(&self, instance: &str) -> bool { self.inner.state.lock().unwrap().instances.get(instance).is_some_and(|entry| entry.tunable) }
+    pub fn reads(&self, instance: &str) -> Vec<String> {
+        self.inner.state.lock().unwrap().instances.get(instance).map(|entry| entry.reads.clone()).unwrap_or_default()
+    }
 
     /// A device whose other computer is gone for good (zlc-fabric decides: it withdrew
     /// the device, or fell silent): whether the device is served through the fabric or is

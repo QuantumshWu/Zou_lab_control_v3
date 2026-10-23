@@ -551,8 +551,10 @@ the message `attach`es (`[{name, size}]`); `lent` lists them with the holds'
 multiplicity. The receiver reads each block straight into a block of its own
 core (`Registry::export_with`) and renames the `$array` references, so a frame
 lands where its node and the Runtime read it without another copy. A
-connection opens with `hello` (version 4 and the machine; another version is
+connection opens with `hello` (version 5 and the machine; another version is
 refused by name); both sides beat every 2 s and a peer silent for 6 s is gone.
+The device attach reply carries its declared `reads` alongside `tunable`;
+the receiving core preserves both for draft and run proxies.
 As v2's fabric there is no key: a core accepts other machines only while
 something is published (Remote on). The
 publisher drives an abandoned device's outputs safe (lost user, a user's

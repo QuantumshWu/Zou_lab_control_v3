@@ -276,7 +276,7 @@ impl Shared {
         if takeover { self.make_safe(instance, &descriptor, "its user reconnected"); }
         self.note(instance, &format!("FABRIC ATTACH device={instance} client={client}"));
         Ok(json!({"descriptor": serde_json::to_value(&*descriptor).unwrap_or(Value::Null), "role": role,
-                  "tunable": self.host.tunable(instance), "publisher": self.bench.name}))
+                  "tunable": self.host.tunable(instance), "reads": self.host.reads(instance), "publisher": self.bench.name}))
     }
 
     #[allow(clippy::too_many_arguments)]

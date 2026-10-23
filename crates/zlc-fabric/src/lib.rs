@@ -38,7 +38,7 @@ pub use server::Publisher;
 
 /// The wire vocabulary; either side refuses a peer of another version by name.
 /// (v2's fabric spoke 2: a v2 announcer is reported, not listed; 3 was a keyed handshake.)
-pub const FABRIC_VERSION: u64 = 4;
+pub const FABRIC_VERSION: u64 = 5;
 pub const DEFAULT_PORT: u16 = 18859;
 pub const PROBE: &[u8] = b"zlc-device-fabric?";
 /// The using core's type for a device another core publishes.

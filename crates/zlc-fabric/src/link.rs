@@ -24,7 +24,7 @@ const ANSWER_GRACE: Duration = Duration::from_secs(5);
 const LOG_LINES: usize = 400;
 
 /// What the publisher says the device is.
-pub struct Attached { pub descriptor: TypeDescriptor, pub role: String, pub tunable: bool, pub publisher: String }
+pub struct Attached { pub descriptor: TypeDescriptor, pub role: String, pub tunable: bool, pub reads: Vec<String>, pub publisher: String }
 
 type Answer = Result<(Value, Vec<Arc<Lend>>), CallError>;
 type Hook = Box<dyn Fn(&str) + Send + Sync>;
@@ -89,6 +89,7 @@ impl Link {
         let attached = link.connect().and_then(|value| {
             let descriptor: TypeDescriptor = serde_json::from_value(value["descriptor"].clone()).map_err(|error| format!("the publisher's descriptor: {error}"))?;
             Ok(Attached { descriptor, role: value["role"].as_str().unwrap_or("").to_owned(), tunable: value["tunable"] == true,
+                          reads: serde_json::from_value(value["reads"].clone()).map_err(|error| format!("the publisher's reads: {error}"))?,
                           publisher: value["publisher"].as_str().unwrap_or("").to_owned() })
         });
         match attached {
