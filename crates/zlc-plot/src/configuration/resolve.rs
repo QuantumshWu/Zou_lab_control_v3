@@ -169,6 +169,8 @@ pub struct ResolvedConfiguration {
     pub unit_registry: Option<Arc<UnitRegistry>>,
     pub ignored_interaction: Vec<String>,
     pub semantics: SemanticDescription,
+    /// User choices, distinct from the defaults resolved for one dataset.
+    pub authored_semantics: ValueMap,
     pub metadata: ConfigurationMetadata,
     pub signature: Signature,
     pub science_changed: bool,
@@ -209,7 +211,11 @@ impl ResolvedConfiguration {
         let mut recipe = encode_plot_recipe(&self.spec, &self.display_state.values, self.size, &parts)?;
         recipe.remove("spec");
         recipe.remove("overlay");
-        let mut target = ValueMap::from_pairs([("semantic", Value::Map(self.semantics.values()))]);
+        // Saving a resolved Auto axis as authored would pin it after reload.
+        let automatic = self.semantics.values().get("cell_kind").and_then(Value::as_str) == Some("");
+        let mut semantic = if automatic { self.authored_semantics.clone() } else { self.semantics.values() };
+        semantic.insert("kind", Value::text(self.spec.kind().value()));
+        let mut target = ValueMap::from_pairs([("semantic", Value::Map(semantic))]);
         target.update(&recipe);
         Ok(target)
     }
@@ -386,6 +392,7 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
         document.update(&wire_without_semantic());
         decoded = Some(decode_plot_recipe(&Value::Map(document))?);
     }
+    let explicit_spec = spec.is_some() || decoded.is_some();
     let mut seed = spec.or_else(|| decoded.as_ref().map(|decoded| decoded.spec.clone())).or_else(|| base.map(|base| base.spec.clone()));
     let mut semantic_values = match (&semantic_updates, &typed.semantic, wire.get("semantic")) {
         (Some(values), _, _) => values.clone(),
@@ -394,6 +401,9 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
         (None, None, Some(Value::None) | None) => ValueMap::new(),
         (None, None, Some(other)) => return Err(PlotError::type_error(format!("'{}' object is not a mapping", other.type_name()))),
     };
+    let role_edit = semantic_values.keys().any(|name| name.starts_with("fate:") || name.starts_with("coordinate:"));
+    let mut authored_semantics = base.map(|base| base.authored_semantics.clone()).unwrap_or_default();
+    authored_semantics.update(&semantic_values);
     // v2's panel cell kind "" ("automatic (from data)"): a grid whose cell the
     // data decides, again on every resolution, until a cell kind is named.
     // A resolution that names none keeps what its base was.
@@ -419,12 +429,18 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
         },
     };
     if let (Some(base), false, Some(schema)) = (base, continuing, schema_ref) {
-        let carried = describe_semantics(base.schema.as_deref(), &seed, &defaults.layout)?.values();
+        // Rebase the previous intent first. A new explicit edit still passes
+        // through strict composition on the new schema; never silently drop it.
+        let mut carried = if automatic_cell { base.authored_semantics.clone() }
+            else { describe_semantics(base.schema.as_deref(), &seed, &defaults.layout)?.values() };
+        if automatic_cell { carried.remove("cell_kind"); }
         seed = rebased_spec(schema, seed.kind(), &carried)?;
+        let resolved = describe_semantics(Some(schema), &seed, &defaults.layout)?.values();
         if semantic_updates.is_none() && typed.semantic.is_none() {
-            let names: BTreeSet<String> = describe_semantics(Some(schema), &seed, &defaults.layout)?.fields.into_iter().map(|field| field.name).collect();
-            semantic_values.retain(|name, value| !(carried.get(name).is_some_and(|carried| carried == value) && !names.contains(name)));
+            let previous = base.semantics.values();
+            semantic_values.retain(|name, value| !(previous.get(name) == Some(value) && !resolved.contains_key(name)));
         }
+        authored_semantics.retain(|name, _| name == "cell_kind" || resolved.contains_key(name));
     }
     if automatic_cell && seed.is_facet_grid() {
         // The densest cell this data admits, reached as a cell-kind edit (its scope and roles carried).
@@ -437,6 +453,10 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
     }
     let selected_spec = composed_spec(schema_ref, &seed, &semantic_values)?;
     let mut semantics = describe_semantics(schema_ref, &selected_spec, &defaults.layout)?;
+    if role_edit || explicit_spec {
+        authored_semantics = semantics.values();
+        if automatic_cell { authored_semantics.insert("cell_kind", Value::text("")); }
+    }
     if automatic_cell {
         if let Some(field) = semantics.fields.iter_mut().find(|field| field.name == "cell_kind") {
             field.value = Value::text("");
@@ -610,7 +630,7 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
     Ok(Arc::new(ResolvedConfiguration {
         schema, spec: selected_spec, parameter_schema: parameters, display_state: state, size: selected_size, selectors, viewport,
         facet_focus, focused_facet_index: focused, classifier_thresholds: thresholds, fit_target, fit_live, interaction, presentation,
-        defaults, fit: engine, unit_registry: registry, ignored_interaction: ignored, semantics, metadata, signature, science_changed,
+        defaults, fit: engine, unit_registry: registry, ignored_interaction: ignored, semantics, authored_semantics, metadata, signature, science_changed,
         cancellation, same_source, image_overlay, discard_unmatched_classifier, fit_request: resolution.request,
         expression_failure: resolution.expression_failure,
     }))

@@ -333,7 +333,12 @@ impl<R: DocumentRead> FigureDocument<R> {
         if status.authoring_pending == Some(true) { if let Some(target) = target { row["target"] = target.clone(); } }
         let structure = self.inputs.get(&key.to_owned()).map(|read| {
             let schema = PlotSchema::new(read.source().schema.clone());
-            Json::Array(schema_structure(&schema).iter().map(|group| Json::Array(group.iter().map(|(name, size)| json!([name, size])).collect())).collect())
+            let mut structure = schema_structure(&schema);
+            if let Some(counts) = &read.source().repeat_counts {
+                structure[0] = read.source().schema.domain(zlc_core::schema::DomainRole::Repeat).axes().iter().zip(counts)
+                    .filter(|(axis, _)| axis.coordinate_of().is_none()).map(|(axis, count)| (axis.name().to_owned(), *count)).collect();
+            }
+            Json::Array(structure.iter().map(|group| Json::Array(group.iter().map(|(name, size)| json!([name, size])).collect())).collect())
         });
         let source = self.panel_sources.get(&key.to_owned());
         let object = row.as_object_mut().expect("panel row");

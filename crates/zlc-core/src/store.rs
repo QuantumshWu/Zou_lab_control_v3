@@ -58,6 +58,7 @@ pub struct Snapshot {
     written_cells: usize,
     total_cells: usize,
     payload_bytes: usize,
+    repeat_counts: Arc<[usize]>,
 }
 
 impl Snapshot {
@@ -82,6 +83,8 @@ impl Snapshot {
     pub fn holes(&self) -> usize { self.total_cells - self.written_cells }
     /// Distinct DataBlock owners in this immutable prefix, including all planes.
     pub fn payload_bytes(&self) -> usize { self.payload_bytes }
+    /// Counts at the last committed Point coordinate, frozen with this prefix.
+    pub fn repeat_counts(&self) -> &[usize] { &self.repeat_counts }
 
     /// Commit-order segments borrow their original immutable data planes.
     pub fn segments(&self) -> impl Iterator<Item = &Placement> {
@@ -105,7 +108,8 @@ pub struct DatasetStore {
 impl DatasetStore {
     pub fn new(schema: Arc<DatasetSchema>) -> Self {
         let total_cells = schema.domain(DomainRole::Repeat).size() * schema.domain(DomainRole::Point).size();
-        Self { current: Snapshot { schema, window:None, tail: None, segment_count: 0, written_cells: 0, total_cells, payload_bytes: 0 },
+        let repeat_counts = vec![0; schema.domain(DomainRole::Repeat).axes().len()].into();
+        Self { current: Snapshot { schema, window:None, tail: None, segment_count: 0, written_cells: 0, total_cells, payload_bytes: 0, repeat_counts },
             occupied: BTreeMap::new(), owners: HashSet::new() }
     }
 
@@ -162,6 +166,14 @@ impl DatasetStore {
             self.current.segment_count += 1;
         }
         self.current.written_cells = written;
+        if let Some(last) = self.current.tail.as_ref().and_then(|page| page.entries.last()) {
+            let repeat = self.current.schema.domain(DomainRole::Repeat);
+            let point = self.current.schema.domain(DomainRole::Point);
+            let current = [last.origin[0] + last.extent[0] - 1, last.origin[1] + last.extent[1] - 1];
+            let points = point.coordinate_rows(current[1]);
+            let rows = (0..repeat.size()).filter(|row| points.iter().any(|point| overlaps(&self.occupied, *row, *point, point + 1)));
+            self.current.repeat_counts = repeat.coordinate_counts(current[0], rows).into();
+        }
         Ok(self.snapshot())
     }
 }
@@ -192,6 +204,34 @@ mod tests {
     use crate::{DType, OwnedBuffer};
     use crate::dataset::Validity;
     use crate::schema::{Axis, CodeBase, CodeMapping, Coordinates, Domain, ValidityContract, ValueSchema};
+
+    #[test]
+    fn repeat_counts_track_written_coordinates_and_remain_frozen() {
+        let axis = |id: &str, len, alias: Option<&str>| Axis::new(id.into(), id.into(), "generic".into(),
+            Coordinates::Index { origin: 0, len }, None, None, None, alias.map(Into::into)).unwrap();
+        let a = CodeMapping::new(CodeBase::Range { start: 0, step: 1, len: 2 }, 3, 1).unwrap();
+        let b = CodeMapping::new(CodeBase::Range { start: 0, step: 1, len: 3 }, 1, 2).unwrap();
+        let repeat = Domain::new(vec![6], vec![axis("a", 2, None), axis("b", 3, None), axis("a-time", 2, Some("a"))], vec![a.clone(), b, a]).unwrap();
+        let point = Domain::new(vec![3], vec![axis("p", 2, None)], vec![CodeMapping::new(CodeBase::Explicit(OwnedBuffer::from_vec(vec![0, 1, 0])), 1, 1).unwrap()]).unwrap();
+        let scalar = Domain::new(vec![1], vec![], vec![]).unwrap();
+        let value = ValueSchema::new(DType::F64, None, None, ValidityContract::Value).unwrap();
+        let full = DatasetSchema::new(repeat.clone(), point, scalar.clone(), value.clone()).unwrap();
+        let chunk = DatasetSchema::new(scalar.clone(), scalar.clone(), scalar, value).unwrap();
+        // Invalid samples are still acquired cells; they must count.
+        let block = DataBlock::new(chunk, OwnedBuffer::from_vec(vec![0.0]).into(), Validity::Uniform(false), None).unwrap();
+        let mut store = DatasetStore::new(full);
+        let empty = store.snapshot();
+        let mut saved = vec![];
+        for (origin, expected) in [([0,0], vec![1,1,1]), ([0,1], vec![1,1,1]), ([1,2], vec![1,2,1]),
+            ([3,0], vec![2,1,2]), ([4,0], vec![2,2,2]), ([2,1], vec![1,2,1])] {
+            let snapshot = store.commit(vec![Placement::new(origin, [1,1], block.clone()).unwrap()]).unwrap();
+            assert_eq!(snapshot.repeat_counts(), expected);
+            saved.push((snapshot, expected));
+        }
+        assert_eq!(empty.repeat_counts(), [0,0,0]);
+        for (snapshot, expected) in saved { assert_eq!(snapshot.repeat_counts(), expected); }
+        assert_eq!(repeat.coordinate_counts(5, 0..6), [2,3,2]);
+    }
 
     #[test]
     fn mapped_finite_placement_is_atomic_shared_and_snapshot_stable() {

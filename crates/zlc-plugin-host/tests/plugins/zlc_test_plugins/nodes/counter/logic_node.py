@@ -14,6 +14,8 @@ SCHEMA = AuthoringSchema((AuthoringField("count", "int", "Count", 3, minimum=1),
 
 class Counter:
     def __init__(self, count, size, echo):
+        if size == 13:
+            raise ValueError("unsupported test frame shape")
         self.count, self.size, self.echo = count, size, echo
 
     def execute(self, context):

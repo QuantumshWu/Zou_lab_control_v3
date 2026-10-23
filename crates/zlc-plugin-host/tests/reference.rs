@@ -26,12 +26,15 @@ fn the_virtual_mot_camera_and_camera_measurement_run_through_the_host() {
         runtime.clone(), safe, move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
     let catalog = host.catalog().unwrap();
     if catalog.find("camera_measurement").is_none() { eprintln!("this science tree has no camera_measurement: skipped"); return; }
-    host.open("mot", "camera.virtual_mot", json!({"exposure_seconds": 0.02}), json!({"seed": 0})).unwrap();
+    let opened = host.open("mot", "camera.virtual_mot", json!({"exposure_seconds": 0.02}), json!({"seed": 0})).unwrap();
     host.open("camera_measurement1", "camera_measurement", json!({}), json!({})).unwrap();
-    let start = |values: serde_json::Value| host.start_run("camera_measurement1", RunRequest { device_labels: Default::default(), values,
+    let start = |values: serde_json::Value| {
+        let token = host.call("camera_measurement1", "query", json!({"name":"prepare_run","values":values,"resources":{},
+            "devices":{"camera":{"instance":"mot","role":"mot","type_id":"camera.virtual_mot","capabilities":["camera.adapter"],"tunable":true,"reads":opened["reads"]}}}), Duration::from_secs(30)).unwrap().value["prepared"].as_str().unwrap().to_owned();
+        host.start_run("camera_measurement1", RunRequest { prepared: Some(token), device_labels: Default::default(), values,
         devices: [("camera".to_owned(), "mot".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None,
-        outputs: [("frames".to_owned(), "@logic/camera_measurement1/frames".to_owned())].into() }).unwrap();
+        outputs: [("frames".to_owned(), "@logic/camera_measurement1/frames".to_owned())].into() }).unwrap() };
     let wait = |run: &str, stop_after: Option<u64>| loop {
         match events.recv_timeout(Duration::from_secs(120)).expect("run events") {
             HostEvent::RunProgress { run: id, current, .. } if id == run && current.is_some() => {}
@@ -85,7 +88,9 @@ fn the_virtual_mot_camera_and_camera_measurement_run_through_the_host() {
     };
     host.open("derive1", "derive", json!({}), json!({})).unwrap();
     let variables = json!([{"name": "doubled", "terms": [{"of": "frames"}, {"op": "*", "number": 2}]}]);
-    let derive = host.start_run("derive1", RunRequest { device_labels: Default::default(), values: json!({"variables": variables}), devices: Default::default(),
+    let token = host.call("derive1", "query", json!({"name":"prepare_run","values":{"variables":variables},"resources":{},"devices":{},"source_signal":frames}),
+        Duration::from_secs(30)).unwrap().value["prepared"].as_str().unwrap().to_owned();
+    let derive = host.start_run("derive1", RunRequest { prepared: Some(token), device_labels: Default::default(), values: json!({"variables": variables}), devices: Default::default(),
         shared: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: Some(frames.to_owned()), run_directory: None,
         outputs: [("doubled".to_owned(), "@logic/derive1/doubled".to_owned())].into() }).unwrap();
     std::thread::sleep(Duration::from_secs(2));

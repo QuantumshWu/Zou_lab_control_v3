@@ -276,6 +276,7 @@ pub struct PluginCommand {
 
 /// What a node run is given at Start.
 pub struct RunRequest {
+    pub prepared: Option<String>,
     pub values: Value,
     /// Device instance per requirement argument.
     pub devices: BTreeMap<String, String>,
@@ -733,7 +734,7 @@ impl PluginHost {
             (process, devices, source, following)
         };
         let started = process.request("run.start", json!({"instance": instance, "run": run, "values": request.values,
-            "devices": devices, "resources": request.resources, "source_signal": request.source_signal,
+            "devices": devices, "resources": request.resources, "source_signal": request.source_signal, "prepared": request.prepared,
             "run_directory": request.run_directory, "origin": request.origin.to_string()}), CALL_DEADLINE);
         if let Err(error) = started {
             inner.end_run(instance, &run, "failed", &json!({"error": error.message}));

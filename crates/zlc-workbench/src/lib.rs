@@ -57,6 +57,9 @@ pub trait Plugins {
 /// Facts the plugin host reports.
 #[derive(Clone, Debug)]
 pub enum Event {
+    /// Lifecycle work is ordered by its host, but its reply can already be in
+    /// the UI queue when a newer Open/Close supersedes it. Check at consumption.
+    Lifecycle { current: std::sync::Arc<std::sync::atomic::AtomicU64>, revision: u64, event: Box<Event> },
     Opened { instance: String, working_point: Value },
     Failed { instance: String, error: String },
     Closed { instance: String, error: Option<String> },
@@ -75,6 +78,7 @@ pub enum Event {
 /// What a node run is started with.
 #[derive(Clone, Debug)]
 pub struct RunSpec {
+    pub prepared: Option<String>,
     pub node_name: String,
     pub run: String,
     pub node_id: String,
@@ -127,6 +131,8 @@ pub trait Host {
 /// What an answered ticket was for.
 #[derive(Clone, Debug)]
 pub(crate) enum Ticket {
+    Prepare { node: String, frozen: logic::Frozen, origin: String, acquisition: Option<(String, u64, String)> },
+    Discard,
     Query { node: String, revision: u64, name: String },
     Estimate { request: u64 },
     Fields { device: String, request: Option<u64> },
@@ -146,6 +152,8 @@ pub struct Workbench {
     pub(crate) devices: BTreeMap<String, apparatus::Live>,
     pub(crate) nodes: Vec<logic::Node>,
     pub(crate) runs: Vec<logic::Run>,
+    /// Run identities outlive node removal and board replacement.
+    pub(crate) run_sequences: BTreeMap<String, u64>,
     pub(crate) board: layout::Board,
     pub(crate) notes: Vec<String>,
     /// The Device Manager's one line of what just happened (v2 DeviceManagerPresenter._report):
@@ -211,7 +219,7 @@ impl Workbench {
         let workspace = Workspace::new(root)?;
         let catalog = plugins.catalog();
         let mut workbench = Self { plugins, catalog, apparatus: apparatus::Apparatus::empty(workspace.apparatus()), workspace,
-            devices: BTreeMap::new(), nodes: Vec::new(), runs: Vec::new(), board: layout::Board::default(), notes: Vec::new(),
+            devices: BTreeMap::new(), nodes: Vec::new(), runs: Vec::new(), run_sequences: BTreeMap::new(), board: layout::Board::default(), notes: Vec::new(),
             report: (String::new(), "idle"), settling: None, settling_since: None,
             // v2 set_deriving(False) when the console is built.
             console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None,
@@ -392,6 +400,10 @@ impl Workbench {
             Event::Failed { instance, error } => self.instance_failed(&instance, error, host),
             Event::Closed { instance, error } => self.instance_closed(&instance, error, host),
             Event::Answered { ticket, result } => self.answered(ticket, result, host),
+            Event::Lifecycle { current, revision, event } => {
+                if current.load(std::sync::atomic::Ordering::Acquire) == revision { self.on_event(*event, host); }
+                return;
+            }
             Event::Log { instance, line } => {
                 let log = self.logs.entry(instance).or_default();
                 if log.len() >= 2000 { log.pop_front(); }
@@ -414,9 +426,15 @@ impl Workbench {
     fn answered(&mut self, ticket: u64, result: Result<Value, String>, host: &mut dyn Host) {
         let Some(purpose) = self.tickets.remove(&ticket) else { return };
         match purpose {
+            Ticket::Prepare { node, frozen, origin, acquisition } => self.prepared(&node, ticket, frozen, origin, acquisition, result, host),
+            Ticket::Discard => {},
             Ticket::Query { node, revision, name } => self.query_answered(&node, revision, &name, result, host),
             Ticket::Estimate { request } => self.replies.push((request, result.or_else(|error| Ok(json!({"status": "unknown", "reason": error}))))),
             Ticket::Fields { device, request } => {
+                if self.devices.get(&device).is_none_or(|live| live.fields_ticket != Some(ticket)) {
+                    if let Some(request) = request { self.replies.push((request, Err("This device reading was superseded; read the current device again.".into()))); }
+                    return;
+                }
                 if let (Some(live), Ok(fields)) = (self.devices.get_mut(&device), &result) { live.fields = Some(fields.clone()); }
                 // The reply is the rows the state shows (TunableField), not the plugin's raw read.
                 let rows = self.devices.get(&device).and_then(|live| live.fields.as_ref().map(|read| self.tunable_rows(&device, live, read)));

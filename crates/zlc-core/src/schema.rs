@@ -391,6 +391,42 @@ impl Domain {
     pub fn axes(&self) -> &[Arc<Axis>] { &self.axes }
     pub fn axis(&self, id: &str) -> Option<&Arc<Axis>> { self.by_id.get(id).map(|index| &self.axes[*index]) }
     pub fn mapping(&self, id: &str) -> Option<&Arc<CodeMapping>> { self.by_id.get(id).map(|index| &self.mappings[*index]) }
+
+    /// Count distinct coordinates among present carrier rows, fixing every
+    /// other primary axis at the current row. Alternative coordinates move
+    /// with their primary; scientific validity is deliberately not an input.
+    pub fn coordinate_counts(&self, current: usize, rows: impl IntoIterator<Item = usize>) -> Vec<usize> {
+        let mut counts: Vec<HashSet<usize>> = self.axes.iter().map(|_| HashSet::new()).collect();
+        for row in rows {
+            for (target, axis) in self.axes.iter().enumerate() {
+                let primary = axis.coordinate_of().unwrap_or(axis.id());
+                if self.axes.iter().enumerate().all(|(index, other)|
+                    other.coordinate_of().unwrap_or(other.id()) == primary || self.mappings[index].code(row) == self.mappings[index].code(current)) {
+                    if let Some(code) = self.mappings[target].code(row) { counts[target].insert(code); }
+                }
+            }
+        }
+        counts.into_iter().map(|codes| codes.len()).collect()
+    }
+
+    pub fn same_coordinate(&self, left: usize, right: usize) -> bool {
+        self.axes.iter().zip(&self.mappings).filter(|(axis, _)| axis.coordinate_of().is_none())
+            .all(|(_, mapping)| mapping.code(left) == mapping.code(right))
+    }
+
+    /// Candidate rows come from one factored mapping, so regular scans never
+    /// scan their entire Point carrier on each acquired point.
+    pub fn coordinate_rows(&self, current: usize) -> Vec<usize> {
+        let Some(mapping) = self.mappings.iter().max_by_key(|mapping| mapping.base_len) else { return vec![0] };
+        let code = mapping.code(current).expect("current row is in the carrier");
+        let positions: Vec<usize> = match &mapping.base {
+            CodeBase::Range { .. } => vec![(current / mapping.inner) % mapping.base_len],
+            CodeBase::Explicit(values) => values.as_slice().iter().enumerate().filter_map(|(index, value)| (*value as usize == code).then_some(index)).collect(),
+        };
+        (0..mapping.outer).flat_map(|outer| positions.iter().flat_map(move |position|
+            (0..mapping.inner).map(move |inner| (outer * mapping.base_len + position) * mapping.inner + inner)))
+            .filter(|row| self.same_coordinate(*row, current)).collect()
+    }
 }
 
 impl PartialEq for Domain {

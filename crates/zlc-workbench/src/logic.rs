@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde_json::{Map, Value, json};
+use unicode_normalization::UnicodeNormalization;
+use caseless::Caseless;
 
 use zlc_core::control::{NODE_INSTANCE, node_instance};
 
@@ -24,7 +26,7 @@ pub enum Instance { Opening, Open, Failed(String) }
 
 /// A start that waits for the runs holding its devices (or its own last run) to end.
 #[derive(Clone, Debug)]
-pub struct PendingStart { pub origin: String, pub acquisition: Option<(String, u64, String)> }
+pub struct PendingStart { pub origin: String, pub acquisition: Option<(String, u64, String)>, pub prepared: Option<String> }
 
 pub struct Node {
     pub id: String,
@@ -39,13 +41,13 @@ pub struct Node {
     pub frozen: Option<Frozen>,
     /// The current, else the last, run.
     pub run: Option<String>,
-    pub starts: u64,
     /// A refused Start or a failed run; cleared by the next draft change.
     pub error: Option<String>,
     /// A processor started on a source that comes and goes keeps following it.
     pub follow: bool,
     pub follow_attempted: Option<String>,
     pub pending: Option<PendingStart>,
+    pub preparing: Option<u64>,
     pub removing: bool,
     pub instance: Instance,
     /// Plugin query answers, the newest of each: name -> (draft revision, answer). What the
@@ -69,8 +71,8 @@ impl Node {
     /// catalogue's) until its own process answers its draft.
     pub(crate) fn new(id: String, name: String, type_id: String, draft: Draft, auto_preview: bool, descriptor: Option<&TypeDescriptor>) -> Self {
         let answers = descriptor.map(|item| item.node().answers.iter().map(|(query, answer)| (query.clone(), (0, Ok(answer.clone())))).collect()).unwrap_or_default();
-        Node { id, name, type_id, draft, auto_preview, revision: 1, running: None, frozen: None, run: None, starts: 0, error: None, follow: false, follow_attempted: None,
-               pending: None, removing: false, instance: Instance::Opening, answers, checked: BTreeSet::new(), resources: Map::new(), resource_issues: Vec::new(),
+        Node { id, name, type_id, draft, auto_preview, revision: 1, running: None, frozen: None, run: None, error: None, follow: false, follow_attempted: None,
+               pending: None, preparing: None, removing: false, instance: Instance::Opening, answers, checked: BTreeSet::new(), resources: Map::new(), resource_issues: Vec::new(),
                start_after_check: None }
     }
 
@@ -91,7 +93,7 @@ pub struct Claim { pub argument: String, pub device: String, pub protected: Opti
 /// and the devices it names. A restart from that configuration (queued, follow,
 /// acquisition) uses them after the draft has moved on.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Frozen { pub draft: Draft, pub values: Map<String, Value>, pub named: Vec<Claim> }
+pub struct Frozen { pub draft: Draft, pub values: Map<String, Value>, pub named: Vec<Claim>, pub resolved: Map<String, Value>, pub outputs: BTreeMap<String, String>, pub previews: Vec<crate::types::Preview> }
 
 pub struct Run {
     pub id: String,
@@ -109,6 +111,7 @@ pub struct Run {
     pub stop_reason: Option<String>,
     pub error: Option<Value>,
     pub claims: Vec<Claim>,
+    pub frozen: Frozen,
     pub start_record: Option<Value>,
     /// Preview signals already shown, and the generation each had at Start.
     pub previewed: BTreeSet<String>,
@@ -117,7 +120,7 @@ pub struct Run {
     pub preview_panels: Vec<String>,
     /// (parent run, ticket, completion) when a parent asked for this run.
     pub acquisition: Option<(String, u64, String)>,
-    /// Acquisition children this run started (node ids).
+    /// Acquisition run IDs started by this run.
     pub children: Vec<String>,
 }
 
@@ -159,11 +162,15 @@ pub(crate) fn in_use(users: &[String]) -> String { format!("device is in use by 
 /// v2 `logic_name_text`: words one space apart.
 pub(crate) fn name_text(text: &str) -> String { text.split_whitespace().collect::<Vec<_>>().join(" ") }
 
-pub(crate) fn name_key(text: &str) -> String { name_text(text).to_lowercase() }
+pub(crate) fn name_key(text: &str) -> String { name_text(text).nfkc().default_case_fold().collect() }
 
 /// v2 `logic_name_problem`: None when `text` may name `node` on a board of `others` (id, name).
 pub(crate) fn name_problem<'a>(text: &str, node: &str, others: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<String> {
-    if text.contains('/') || text.chars().any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}') {
+    if text.contains('/') || text.chars().any(|c| matches!(unicode_general_category::get_general_category(c),
+        unicode_general_category::GeneralCategory::Control | unicode_general_category::GeneralCategory::Format
+        | unicode_general_category::GeneralCategory::PrivateUse | unicode_general_category::GeneralCategory::Unassigned
+        | unicode_general_category::GeneralCategory::Surrogate | unicode_general_category::GeneralCategory::LineSeparator
+        | unicode_general_category::GeneralCategory::ParagraphSeparator)) {
         return Some("A name is one line of text without “/”.".into());
     }
     if text.is_empty() { return Some("A node needs a name.".into()); }
@@ -227,7 +234,7 @@ impl Workbench {
 
     /// The Task that has the board (v2 task takeover): running, or accepted and waiting to start.
     pub(crate) fn active_task(&self) -> Option<&Node> {
-        self.nodes.iter().find(|node| (self.active_run(node).is_some() || node.pending.is_some() || node.start_after_check.is_some())
+        self.nodes.iter().find(|node| (self.active_run(node).is_some() || node.pending.is_some() || node.start_after_check.is_some() || node.preparing.is_some())
             && self.catalog.get(&node.type_id).is_some_and(|item| item.node().node_kind == "task"))
     }
 
@@ -238,13 +245,14 @@ impl Workbench {
         while let Some(id) = pending.pop() {
             let Some(node) = self.node(&id).filter(|_| allowed.insert(id.clone())) else { continue };
             let Some(descriptor) = self.catalog.get(&node.type_id) else { continue };
-            let effective = fields::effective(&descriptor.parameters, &node.draft.values);
+            let draft = node.running.as_ref().unwrap_or(&node.draft);
+            let effective = fields::effective(&descriptor.parameters, &draft.values);
             let acquisition = descriptor.node().acquisition_input.as_ref().filter(|field| descriptor.parameters.iter()
                 .find(|item| &item.name == *field).is_none_or(|item| fields::enabled(item, &effective)));
-            if let Some(chosen) = acquisition.and_then(|field| node.draft.values.get(field)).and_then(Value::as_str).filter(|chosen| !chosen.trim().is_empty()) {
+            if let Some(chosen) = acquisition.and_then(|field| draft.values.get(field)).and_then(Value::as_str).filter(|chosen| !chosen.trim().is_empty()) {
                 pending.push(chosen.to_owned());
             }
-            let producer = split_signal(&node.draft.source_signal).map(|(producer, _)| producer.split('/').next().unwrap_or(producer));
+            let producer = split_signal(&draft.source_signal).map(|(producer, _)| producer.split('/').next().unwrap_or(producer));
             if let Some(producer) = producer.filter(|producer| self.node(producer).and_then(|other| self.catalog.get(&other.type_id))
                 .is_some_and(|other| other.node().node_kind == "processor")) {
                 pending.push(producer.to_owned());
@@ -369,11 +377,13 @@ impl Workbench {
         } else { Vec::new() };
         for name in names {
             if (name == ADMIT_SOURCE && !complete) || only.is_some_and(|only| only != name) { continue; }
+            self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Query { node, name: query, .. } if node == id && query == &name));
             let ticket = self.ticket(Ticket::Query { node: id.to_owned(), revision, name: name.clone() });
             let facts = match name.as_str() { EDITOR_FACTS => &editor, ADMIT_SOURCE => &admit, ADMIT => &admitted, _ => &args };
             self.plugins.query(&node_instance(id), ticket, &name, facts);
         }
         for output in frames.into_iter().filter(|_| only.is_none()) {
+            self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Query { node, name, .. } if node == id && name == &format!("{FRAMES_QUERY}:{output}")));
             let ticket = self.ticket(Ticket::Query { node: id.to_owned(), revision, name: format!("{FRAMES_QUERY}:{output}") });
             self.plugins.query(&node_instance(id), ticket, FRAMES_QUERY, &json!({"values": args["values"], "output_name": output, "source": source}));
         }
@@ -446,7 +456,7 @@ impl Workbench {
     }
 
     /// The bench's devices changed: editors that offer them ask again.
-    fn refresh_editors(&mut self) {
+    pub(crate) fn refresh_editors(&mut self) {
         let editors: Vec<String> = self.nodes.iter().filter(|node| self.catalog.get(&node.type_id)
             .is_some_and(|item| item.node().queries.iter().any(|name| name == "editor_facts"))).map(|node| node.id.clone()).collect();
         for id in editors { self.send_queries(&id); }
@@ -665,7 +675,10 @@ impl Workbench {
             node.recheck();
         }
         let revision = node.revision;
-        if changed { self.send_queries(id); }
+        if changed {
+            self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Selection { node, .. } if node == id));
+            self.send_queries(id);
+        }
         if changed || auto_preview.is_some() { self.board.dirty = true; }
         Ok(json!({"node": id, "draft_revision": revision}))
     }
@@ -689,6 +702,7 @@ impl Workbench {
             .any(|mapping| (mapping.plot_kind.as_str(), mapping.selector_kind.as_str()) == kinds));
         if !mapped { return false; }
         let (id, args) = (node.id.clone(), json!({"selection": selection, "draft": Value::Object(node.draft.values.clone()), "context": context}));
+        self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Selection { node, .. } if node == &id));
         let ticket = self.ticket(Ticket::Selection { node: id.clone(), panel: panel.to_owned(), selection: selection.clone() });
         self.plugins.query(&node_instance(&id), ticket, "selection_patch", &args);
         false
@@ -750,6 +764,7 @@ impl Workbench {
             node.revision += 1;
             node.recheck();
             node.error = None;
+            self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Selection { node, .. } if node == id));
             self.send_queries(id);
         }
         Ok(json!({"node": id}))
@@ -891,19 +906,6 @@ impl Workbench {
         DeviceUse { runs: self.claims_on(device), outside }
     }
 
-    /// The devices a start of `node` with `draft` would claim. A draft other than the node's
-    /// own (a queued, follow or acquisition restart) names the devices it was started with.
-    fn wanted_claims(&self, node: &Node, draft: &Draft) -> Vec<Claim> {
-        let Some(descriptor) = self.catalog.get(&node.type_id) else { return Vec::new() };
-        let mut claims: Vec<Claim> = Self::active_requirements(descriptor, &draft.values).into_iter().filter_map(|requirement| {
-            draft.device_keys.get(&requirement.argument).filter(|key| !key.is_empty())
-                .map(|key| Claim { argument: requirement.argument.clone(), device: key.clone(), protected: requirement.protected_fields.clone(), exclusive: true })
-        }).collect();
-        if *draft == node.draft { claims.extend(Self::named_claims(node)); }
-        else if let Some(frozen) = node.frozen.as_ref().filter(|frozen| frozen.draft == *draft) { claims.extend(frozen.named.iter().cloned()); }
-        claims
-    }
-
     /// v2 DeviceUseBusy: a claimed device driven outside the workbench refuses the start.
     fn outside_use(&self, claims: &[Claim]) -> Option<String> {
         let mut users: Vec<String> = Vec::new();
@@ -935,6 +937,7 @@ impl Workbench {
             let issues = self.issues(node, &signals);
             // The plugin has not answered for this draft yet: Start once it has.
             if !issues.is_empty() && issues.iter().all(|issue| waiting(issue)) {
+                self.cancel_start(id, "superseded by another Start");
                 self.node_mut(id)?.start_after_check = Some((origin.to_owned(), acquisition));
                 return Ok(json!({"node": id, "phase": "checking"}));
             }
@@ -944,47 +947,113 @@ impl Workbench {
                 return Err(error);
             }
         }
-        self.node_mut(id)?.start_after_check = None;
         let node = self.node(id).unwrap();
-        let descriptor = self.node_type(&node.type_id)?;
-        // A Start from the draft freezes what its answers say of it (v2 LogicCandidate); a
-        // restart of the running configuration keeps what that one was started with.
-        let frozen = running.is_none().then(|| Frozen { draft: node.draft.clone(), values: self.draft_values(node), named: Self::named_claims(node) });
-        let draft = running.unwrap_or_else(|| node.draft.clone());
-        if let Some(error) = self.outside_use(&self.wanted_claims(node, &draft)) {
-            self.node_mut(id)?.error = Some(error.clone());
-            return Err(error);
+        let frozen = if let Some(draft) = running {
+            node.frozen.as_ref().filter(|frozen| frozen.draft == draft).cloned().ok_or("the running configuration is missing")?
+        } else {
+            let values = self.draft_values(node);
+            let (resolved, issues) = self.read_resources(&node.type_id, &values);
+            if let Some(issue) = issues.first() { self.node_mut(id)?.error = Some(issue.clone()); return Err(issue.clone()); }
+            Frozen { draft: node.draft.clone(), values, named: Self::named_claims(node), resolved,
+                outputs: self.node_outputs(node).into_iter().filter_map(|(signal, _)| split_signal(&signal).map(|(_, output)| (output.to_owned(), signal.clone()))).collect(),
+                previews: self.node_previews(node) }
+        };
+        let claims = self.frozen_claims(&node.type_id, &frozen);
+        if let Some(error) = self.outside_use(&claims) { self.node_mut(id)?.error = Some(error.clone()); return Err(error); }
+        self.prepare_start(id, frozen, origin.to_owned(), acquisition)?;
+        Ok(json!({"node": id, "phase": "preparing"}))
+    }
+
+    fn prepare_start(&mut self, id: &str, frozen: Frozen, origin: String, acquisition: Option<(String, u64, String)>) -> Result<(), String> {
+        let spec = self.run_spec(id, &frozen, &origin)?;
+        self.cancel_start(id, "superseded by another Start");
+        let mut resources: Map<String, Value> = spec.artifacts.iter().chain(&spec.resources).map(|(key, value)| (key.clone(), value.clone())).collect();
+        resources.extend(spec.devices.iter().map(|(argument, key)| (format!("{argument}_key"), json!(key))));
+        let params = json!({"values": spec.values, "devices": self.device_infos(&spec.devices), "resources": resources,
+            "source_signal": (!spec.source_signal.is_empty()).then_some(spec.source_signal)});
+        let ticket = self.ticket(Ticket::Prepare { node: id.to_owned(), frozen, origin, acquisition });
+        self.node_mut(id)?.preparing = Some(ticket);
+        self.plugins.query(&node_instance(id), ticket, "prepare_run", &params);
+        Ok(())
+    }
+
+    pub(crate) fn prepared(&mut self, id: &str, ticket: u64, frozen: Frozen, origin: String, acquisition: Option<(String, u64, String)>, result: Result<Value, String>, host: &mut dyn Host) {
+        let token = result.as_ref().ok().and_then(|result| result["prepared"].as_str()).map(str::to_owned);
+        let current = self.node(id).is_some_and(|node| node.preparing == Some(ticket));
+        let owner_active = acquisition.as_ref().is_none_or(|(parent, _, _)| self.run(parent).is_some_and(|run| !run.terminal() && run.state != "stopping"));
+        if !current || !owner_active {
+            if let Some(token) = token { self.discard_prepared(id, &token); }
+            if current { self.node_mut(id).unwrap().preparing = None; }
+            if let Some((parent, reply, _)) = acquisition { self.plugins.acquired(&parent, reply, Err("the acquisition start was cancelled".into())); }
+            return;
         }
-        let processor = descriptor.node().node_kind == "processor";
-        let source_absent = processor && self.source_published(&signals, &draft.source_signal).is_none();
-        if processor { self.plugins.follow(&node_instance(id), Some(&draft.source_signal)); }
-        let node = self.node_mut(id)?;
-        node.error = None;
-        node.running = Some(draft.clone());
-        if frozen.is_some() { node.frozen = frozen; }
-        node.follow = processor;
-        if processor { node.follow_attempted = None; }
-        if source_absent && acquisition.is_none() {
-            // A processor waits for its source; it starts when the source publishes.
-            let name = node.name.clone();
-            self.console_report = (format!("{name} following {} (waiting for the signal)", self.signal_label(&draft.source_signal)), "task");
-            return Ok(json!({"node": id, "phase": "following"}));
+        self.node_mut(id).unwrap().preparing = None;
+        let token = match result.and_then(|_| token.ok_or_else(|| "the plugin did not return a prepared run".into())) {
+            Ok(token) => token,
+            Err(error) => { self.node_mut(id).unwrap().error = Some(error.clone()); if let Some((parent, reply, _)) = acquisition { self.plugins.acquired(&parent, reply, Err(error)); } return; }
+        };
+        let claims = self.frozen_claims(&self.node(id).unwrap().type_id, &frozen);
+        if let Some(error) = self.outside_use(&claims) {
+            self.discard_prepared(id, &token); self.node_mut(id).unwrap().error = Some(error.clone());
+            if let Some((parent, reply, _)) = acquisition { self.plugins.acquired(&parent, reply, Err(error)); } return;
         }
-        node.pending = Some(PendingStart { origin: origin.to_owned(), acquisition });
-        let claims = self.wanted_claims(self.node(id).unwrap(), &draft);
+        self.cancel_start(id, "superseded by another Start");
+        let processor = self.catalog.get(&self.node(id).unwrap().type_id).is_some_and(|descriptor| descriptor.node().node_kind == "processor");
+        if processor { self.plugins.follow(&node_instance(id), Some(&frozen.draft.source_signal)); }
+        let node = self.node_mut(id).unwrap();
+        node.error = None; node.running = Some(frozen.draft.clone()); node.frozen = Some(frozen);
+        node.follow = processor; node.follow_attempted = None;
+        node.pending = Some(PendingStart { origin, acquisition, prepared: Some(token) });
         let mut holders = self.conflicting_nodes(&claims);
-        if self.node(id).and_then(|node| self.active_run(node)).is_some() { holders.insert(id.to_owned()); }
-        for holder in &holders { self.stop_run_of(holder, "another start needs its devices"); }
+        if self.active_run(self.node(id).unwrap()).is_some() { holders.insert(id.to_owned()); }
+        for holder in holders { self.stop_run_of(&holder, "another start needs its devices"); }
         self.launch_pending(host);
-        let node = self.node(id).unwrap();
-        let phase = if node.pending.is_some() { "waiting" } else { "starting" };
-        // v2: a start behind other nodes' runs says so; one behind its own last run waits quietly.
-        let mut blockers: Vec<&str> = holders.iter().filter(|holder| *holder != id).filter_map(|holder| self.node(holder)).map(|node| node.name.as_str()).collect();
-        if node.pending.is_some() && !blockers.is_empty() {
-            blockers.sort_unstable();
-            self.console_report = (format!("{} queued while {} stops", node.name, blockers.join(", ")), "task");
+    }
+
+    fn discard_prepared(&mut self, id: &str, prepared: &str) {
+        let ticket = self.ticket(Ticket::Discard);
+        self.plugins.call(&node_instance(id), ticket, "run.discard", &json!({"prepared": prepared}));
+    }
+
+    pub(crate) fn cancel_device_starts(&mut self, id: &str, reason: &str) {
+        let candidates: Vec<String> = self.nodes.iter().filter(|node| {
+            let frozen = node.preparing.and_then(|ticket| self.tickets.get(&ticket)).and_then(|ticket| match ticket {
+                Ticket::Prepare { frozen, .. } => Some(frozen), _ => None,
+            }).or_else(|| node.pending.as_ref().and(node.frozen.as_ref()));
+            frozen.is_some_and(|frozen| frozen.draft.device_keys.values().any(|key| key == id) || frozen.named.iter().any(|claim| claim.device == id))
+                || (node.start_after_check.is_some() && node.draft.device_keys.values().any(|key| key == id))
+        }).map(|node| node.id.clone()).collect();
+        for node in candidates { self.cancel_start(&node, reason); }
+    }
+
+    pub(crate) fn cancel_start(&mut self, id: &str, reason: &str) {
+        let Ok(node) = self.node_mut(id) else { return };
+        let checking = node.start_after_check.take().and_then(|(_, acquisition)| acquisition);
+        let preparing = node.preparing.take(); let pending = node.pending.take();
+        let preparing = preparing.and_then(|ticket| match self.tickets.get_mut(&ticket) { Some(Ticket::Prepare { acquisition, .. }) => acquisition.take(), _ => None });
+        for (parent, ticket, _) in checking.into_iter().chain(preparing).chain(pending.as_ref().and_then(|pending| pending.acquisition.clone())) {
+            self.plugins.acquired(&parent, ticket, Err(reason.to_owned()));
         }
-        Ok(json!({"node": id, "phase": phase, "waiting_for": holders}))
+        if let Some(token) = pending.and_then(|pending| pending.prepared) { self.discard_prepared(id, &token); }
+        let active = self.node(id).and_then(|node| self.active_run(node)).map(|run| run.frozen.clone());
+        if let Ok(node) = self.node_mut(id) {
+            if let Some(frozen) = active { node.running = Some(frozen.draft.clone()); node.frozen = Some(frozen); }
+            else if !node.follow { node.running = None; node.frozen = None; }
+        }
+    }
+
+    fn stop_acquisitions(&mut self, parent: &str, reason: &str) {
+        let pending: Vec<String> = self.nodes.iter().filter(|node|
+            node.start_after_check.as_ref().and_then(|(_, a)| a.as_ref()).is_some_and(|(owner, ..)| owner == parent)
+            || node.pending.as_ref().and_then(|p| p.acquisition.as_ref()).is_some_and(|(owner, ..)| owner == parent)
+            || node.preparing.and_then(|ticket| self.tickets.get(&ticket)).is_some_and(|ticket| matches!(ticket, Ticket::Prepare { acquisition: Some((owner, ..)), .. } if owner == parent)))
+            .map(|node| node.id.clone()).collect();
+        for id in pending { self.cancel_start(&id, reason); }
+        let children = self.run(parent).map(|run| run.children.clone()).unwrap_or_default();
+        for child in children {
+            let node = self.run(&child).filter(|run| !run.terminal()).map(|run| run.node.clone());
+            if let Some(node) = node.filter(|node| self.node(node).and_then(|node| node.run.as_deref()) == Some(child.as_str())) { self.stop_run_of(&node, reason); }
+        }
     }
 
     /// Start every pending node whose devices and own last run are free.
@@ -993,47 +1062,47 @@ impl Workbench {
         for id in waiting {
             let node = self.node(id.as_str()).unwrap();
             if self.active_run(node).is_some() { continue; }
+            if node.pending.as_ref().and_then(|p| p.acquisition.as_ref()).is_some_and(|(parent, ..)| self.run(parent).is_none_or(|run| run.terminal() || run.state == "stopping")) {
+                self.cancel_start(&id, "the acquisition parent ended"); continue;
+            }
             let draft = node.running.clone().unwrap_or_else(|| node.draft.clone());
-            let claims = self.wanted_claims(node, &draft);
+            if node.follow && self.source_published(&host.signals(), &draft.source_signal).is_none() { continue; }
+            let claims = node.frozen.as_ref().map(|frozen| self.frozen_claims(&node.type_id, frozen)).unwrap_or_default();
             if let Some(error) = self.outside_use(&claims) {
-                let pending = self.node_mut(&id).unwrap().pending.take();
-                if let Some((parent, ticket, _)) = pending.and_then(|pending| pending.acquisition) { self.plugins.acquired(&parent, ticket, Err(error.clone())); }
+                self.cancel_start(&id, &error);
                 self.node_mut(&id).unwrap().error = Some(error);
                 continue;
             }
             if !self.conflicting_nodes(&claims).is_empty() || claims.iter().any(|claim| !self.device_open(&claim.device)) {
                 if claims.iter().any(|claim| !self.device_open(&claim.device) && self.claiming_nodes(&claim.device).is_empty()) {
-                    let pending = self.node_mut(&id).unwrap().pending.take();
                     let missing: Vec<&str> = claims.iter().filter(|claim| !self.device_open(&claim.device)).map(|claim| claim.device.as_str()).collect();
                     let error = format!("{} is not open", missing.join(", "));
-                    if let Some((parent, ticket, _)) = pending.and_then(|pending| pending.acquisition) { self.plugins.acquired(&parent, ticket, Err(error.clone())); }
+                    self.cancel_start(&id, &error);
                     self.node_mut(&id).unwrap().error = Some(error);
                 }
                 continue;
             }
             let pending = self.node_mut(&id).unwrap().pending.take().unwrap();
             let parent = pending.acquisition.clone();
+            let token = pending.prepared.clone();
             if let Err(error) = self.launch(&id, draft, claims, pending, host) {
+                if let Some(token) = token { self.discard_prepared(&id, &token); }
                 if let Some((parent, ticket, _)) = parent { self.plugins.acquired(&parent, ticket, Err(error.clone())); }
                 self.node_mut(&id).unwrap().error = Some(error);
             }
         }
     }
 
-    fn launch(&mut self, id: &str, draft: Draft, claims: Vec<Claim>, pending: PendingStart, host: &mut dyn Host) -> Result<(), String> {
-        let node = self.node(id).unwrap();
+    fn run_spec(&self, id: &str, frozen: &Frozen, origin: &str) -> Result<RunSpec, String> {
+        let node = self.node(id).ok_or("the node was removed")?;
         let descriptor = self.node_type(&node.type_id)?;
-        let task = descriptor.node().node_kind == "task";
-        let run_id = format!("{id}#{}", node.starts + 1);
-        // The node's own defaults apply to the draft they were answered for.
-        let authored = if draft == node.draft { self.draft_values(node) }
-            else if let Some(frozen) = node.frozen.as_ref().filter(|frozen| frozen.draft == draft) { frozen.values.clone() }
-            else { draft.values.clone() };
+        let draft = &frozen.draft;
+        let authored = frozen.values.clone();
+        let claims = self.frozen_claims(&node.type_id, frozen);
         let effective: Map<String, Value> = descriptor.parameters.iter()
             .map(|field| (field.name.clone(), authored.get(&field.name).cloned().unwrap_or_else(|| field.default.clone()))).collect();
         // Start is a boundary at which named files are read again.
-        let (resolved, resource_issues) = self.read_resources(&node.type_id, &authored);
-        if let Some(issue) = resource_issues.into_iter().next() { return Err(issue); }
+        let resolved = frozen.resolved.clone();
         let resources: Map<String, Value> = descriptor.node().workspace_resources.iter().filter_map(|spec| resolved.get(&spec.field)
             .map(|value| (if spec.argument.is_empty() { spec.field.clone() } else { spec.argument.clone() }, value.clone()))).collect();
         // A folder named relatively is under the workspace (v2 projects it as root/<text>).
@@ -1051,8 +1120,33 @@ impl Workbench {
                     "frames": claim["frames"]})).collect()),
                 other => other.clone(),
             }))).collect();
-        let outputs: BTreeMap<String, String> = self.node_outputs(node).into_iter()
-            .filter_map(|(signal, _)| split_signal(&signal).map(|(_, output)| (output.to_owned(), signal.clone()))).collect();
+        let outputs = frozen.outputs.clone();
+        Ok(RunSpec { node_name: node.name.clone(), run: String::new(), node_id: id.to_owned(), instance: node_instance(id), type_id: node.type_id.clone(),
+            values, source_signal: draft.source_signal.clone(), device_labels: devices.values().map(|key| (key.clone(), self.device_role(key).to_owned())).collect(),
+            devices, shared, artifacts, resources, directory: None, outputs, origin: origin.to_owned(), prepared: None })
+    }
+
+    fn frozen_claims(&self, type_id: &str, frozen: &Frozen) -> Vec<Claim> {
+        let Some(descriptor) = self.catalog.get(type_id) else { return Vec::new() };
+        let mut claims: Vec<Claim> = Self::active_requirements(descriptor, &frozen.values).into_iter().filter_map(|requirement| {
+            frozen.draft.device_keys.get(&requirement.argument).filter(|key| !key.is_empty())
+                .map(|key| Claim { argument: requirement.argument.clone(), device: key.clone(), protected: requirement.protected_fields.clone(), exclusive: true })
+        }).collect();
+        claims.extend(frozen.named.clone());
+        claims
+    }
+
+    fn launch(&mut self, id: &str, draft: Draft, claims: Vec<Claim>, pending: PendingStart, host: &mut dyn Host) -> Result<(), String> {
+        let node = self.node(id).unwrap();
+        let descriptor = self.node_type(&node.type_id)?;
+        let task = descriptor.node().node_kind == "task";
+        let sequence = self.run_sequences.get(id).copied().unwrap_or(0).checked_add(1).ok_or("run sequence exhausted")?;
+        let run_id = format!("{id}#{sequence}");
+        let frozen = node.frozen.as_ref().filter(|frozen| frozen.draft == draft).ok_or("the accepted configuration is missing")?.clone();
+        let mut spec = self.run_spec(id, &frozen, &pending.origin)?;
+        let values = spec.values.clone();
+        let artifacts = spec.artifacts.clone();
+        let resolved = frozen.resolved.clone();
         let started_at = workspace::utc_now();
         let input = json!({"authored": values, "source_signal": draft.source_signal,
             "devices": claims.iter().map(|claim| (claim.argument.clone(), json!({"instance_id": claim.device,
@@ -1068,25 +1162,26 @@ impl Workbench {
             (Some(directory), Some(record))
         } else { (None, None) };
         let signals = host.signals();
-        let preview_baseline = self.node_previews(node).iter().map(|preview| {
+        let preview_baseline = frozen.previews.iter().map(|preview| {
             let signal = self.preview_signal(node, preview);
             let generation = signals.iter().find(|item| item.name == signal).map(|item| item.generation.clone());
             (signal, generation)
         }).collect();
-        let spec = RunSpec { node_name: node.name.clone(), run: run_id.clone(), node_id: id.to_owned(), instance: node_instance(id), type_id: node.type_id.clone(), values, source_signal: draft.source_signal.clone(),
-            device_labels: devices.values().map(|key| (key.clone(), self.device_role(key).to_owned())).collect(),
-            devices, shared, artifacts, resources, directory: directory.clone(), outputs, origin: pending.origin.clone() };
+        spec.run = run_id.clone();
+        spec.directory = directory.clone();
+        spec.prepared = pending.prepared.clone();
+        if let Some((parent, _, _)) = &pending.acquisition { if let Some(parent) = self.run_mut(parent) { parent.children.push(run_id.clone()); } }
         let follow_generation = self.source_published(&signals, &draft.source_signal).map(|signal| signal.generation.clone());
+        self.run_sequences.insert(id.to_owned(), sequence);
         self.runs.push(Run { id: run_id.clone(), node: id.to_owned(), state: "starting".into(), ready: false,
             started_at, ended_at: None, progress: None, request: None, directory, artifacts: Vec::new(), generation: None, stop_reason: None,
-            error: None, claims, start_record, previewed: BTreeSet::new(), preview_baseline, preview_panels: Vec::new(),
+            error: None, claims, frozen: frozen.clone(), start_record, previewed: BTreeSet::new(), preview_baseline, preview_panels: Vec::new(),
             acquisition: pending.acquisition.clone(), children: Vec::new() });
         self.trim_runs();
         // v2 _activate_candidate: what a run starts with is its producer's own; a region that
         // wrote it no longer gives it back.
         self.selection_restore.retain(|(node, _), _| node != id);
         let node = self.node_mut(id)?;
-        node.starts += 1;
         node.run = Some(run_id);
         node.running = Some(draft);
         if node.follow { node.follow_attempted = follow_generation; }
@@ -1111,12 +1206,15 @@ impl Workbench {
         let run = self.run_mut(&run).unwrap();
         run.state = "stopping".into();
         run.stop_reason.get_or_insert_with(|| reason.to_owned());
+        let acquisition = run.acquisition.take();
         let id = run.id.clone();
         // The operator's request it waits on is cancelled with it (v2: Stop wakes the wait).
         let request = run.request.take().and_then(|request| request["request"].as_str().map(str::to_owned));
         // Every Stop is sent (v2 cancelled the host each time): one asked again is never a no-op.
         self.plugins.stop(&id);
+        if let Some((parent, ticket, _)) = acquisition { self.plugins.acquired(&parent, ticket, Err("the acquisition was stopped".into())); }
         if let Some(request) = request { self.plugins.answer(&id, &request, None); }
+        self.stop_acquisitions(&id, reason);
     }
 
     /// A run asks the operator. One asked after its Stop is answered as stopped and never
@@ -1131,15 +1229,8 @@ impl Workbench {
     pub(crate) fn stop_node(&mut self, id: &str, _host: &mut dyn Host) -> Result<Value, String> {
         let node = self.node_mut(id)?;
         if std::mem::take(&mut node.follow) { self.plugins.follow(&node_instance(id), None); }
-        let node = self.node_mut(id)?;
-        node.start_after_check = None;
-        let pending = node.pending.take();
-        if let Some((parent, ticket, _)) = pending.and_then(|pending| pending.acquisition) {
-            self.plugins.acquired(&parent, ticket, Err("the operator pressed Stop".into()));
-        }
-        let children = self.node(id).and_then(|node| self.active_run(node)).map(|run| run.children.clone()).unwrap_or_default();
+        self.cancel_start(id, "the operator pressed Stop");
         self.stop_run_of(id, "the operator pressed Stop");
-        for child in children { self.stop_run_of(&child, "its parent run stopped"); }
         let active = self.node(id).and_then(|node| self.active_run(node)).is_some();
         if !active { let node = self.node_mut(id)?; node.running = None; node.frozen = None; }
         Ok(json!({"node": id, "stopping": active}))
@@ -1158,6 +1249,7 @@ impl Workbench {
     }
 
     fn retire_node(&mut self, id: &str) {
+        self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Query { node, .. } | Ticket::Selection { node, .. } if node == id));
         if let Some(node) = self.node(id) { self.console_report = (format!("removed {}", node.name), "task"); }
         self.nodes.retain(|node| node.id != id);
         self.selection_restore.retain(|(node, _), _| node != id);
@@ -1240,6 +1332,7 @@ impl Workbench {
     pub(crate) fn instance_failed(&mut self, instance: &str, error: String, host: &mut dyn Host) {
         let Some(id) = instance.strip_prefix(NODE_INSTANCE) else {
             if self.device_failed(instance, error) {
+                self.cancel_device_starts(instance, "a required device failed");
                 for node in self.claiming_nodes(instance) { self.stop_run_of(&node, "its device failed"); }
                 self.close_released();
                 // A Start that waited for this device now says why it cannot.
@@ -1248,6 +1341,7 @@ impl Workbench {
             }
             return;
         };
+        self.cancel_start(id, &error);
         if let Ok(node) = self.node_mut(id) { node.instance = Instance::Failed(error.clone()); }
         // A lost node process ends its run with that reason.
         if let Some(run) = self.node(id).and_then(|node| self.active_run(node)).map(|run| run.id.clone()) {
@@ -1278,6 +1372,7 @@ impl Workbench {
 
     pub(crate) fn run_ready(&mut self, id: &str) {
         let Some(run) = self.run_mut(id) else { return };
+        if run.terminal() || run.state == "stopping" { return; }
         run.ready = true;
         if run.state == "starting" { run.state = "running".into(); }
         if let Some((parent, ticket, completion)) = run.acquisition.clone().filter(|(_, _, completion)| completion == "ready") {
@@ -1294,13 +1389,40 @@ impl Workbench {
         let Some(parent_node) = self.run(parent).filter(|run| !run.terminal()).map(|run| run.node.clone()) else { return refuse(self, "the asking run has ended".into()) };
         // v2 _restart_acquisition: a run asked to stop starts nothing more.
         if self.run(parent).is_some_and(|run| run.state == "stopping") { return refuse(self, "stopped before acquisition restart".into()); }
+        let caller = self.run(parent).unwrap();
+        let Some(descriptor) = self.node(&parent_node).and_then(|node| self.catalog.get(&node.type_id)) else { return refuse(self, "the caller is unavailable".into()) };
+        let spec = descriptor.node();
+        let selected = spec.acquisition_input.as_ref().filter(|name| descriptor.parameters.iter().any(|field| &field.name == *name && fields::enabled(field, &caller.frozen.values)))
+            .and_then(|field| caller.frozen.values.get(field)).and_then(Value::as_str);
+        if !matches!(completion, "ready" | "terminal") || completion != spec.acquisition_completion.as_deref().unwrap_or("ready") || selected != Some(child) {
+            return refuse(self, "acquisition must match this run's declared selection and completion".into());
+        }
+        let available = self.node(child).and_then(|node| self.catalog.get(&node.type_id)).is_some_and(|descriptor|
+            descriptor.node().node_kind == "measurement" && (completion == "terminal" || descriptor.node().reports_ready));
+        if !available { return refuse(self, "the selected acquisition is not an available Measurement".into()); }
+        if completion == "terminal" && !caller.frozen.draft.source_signal.is_empty() && !self.source_derives_from(&caller.frozen.draft.source_signal, child, host) {
+            return refuse(self, "the source does not derive from the selected acquisition".into());
+        }
         let Some(node) = self.node(child) else { return refuse(self, format!("No logic node {child:?}")) };
         if node.id == parent_node { return refuse(self, "A run cannot acquire itself".into()); }
         let request = Some((parent.to_owned(), ticket, completion.to_owned()));
         match self.start_node(child, None, parent, request, host) {
-            Ok(_) => { if let Some(run) = self.run_mut(parent) { run.children.push(child.to_owned()); } }
+            Ok(_) => {}
             Err(error) => refuse(self, error),
         }
+    }
+
+    fn source_derives_from(&self, source: &str, producer: &str, host: &dyn Host) -> bool {
+        let panels = host.panels(); let mut signal = source.to_owned(); let mut seen = BTreeSet::new();
+        while seen.insert(signal.clone()) {
+            let Some((owner, _)) = split_signal(&signal) else { return false };
+            let owner = owner.split('/').next().unwrap_or(owner);
+            if owner == producer { return true; }
+            signal = if let Some(node) = self.node(owner) { node.running.as_ref().unwrap_or(&node.draft).source_signal.clone() }
+                else if let Some(panel) = panels.iter().find(|panel| panel.panel == owner) { panel.signal.clone() }
+                else { return false };
+        }
+        false
     }
 
     pub(crate) fn run_finished(&mut self, id: &str, outcome: &str, error: Option<Value>, generation: Option<String>, host: &mut dyn Host) {
@@ -1311,7 +1433,7 @@ impl Workbench {
         run.request = None;
         if generation.is_some() { run.generation = generation; }
         run.error = error.clone();
-        let (node_id, acquisition, children, preview_panels) = (run.node.clone(), run.acquisition.take(), run.children.clone(), std::mem::take(&mut run.preview_panels));
+        let (node_id, acquisition, preview_panels) = (run.node.clone(), run.acquisition.take(), std::mem::take(&mut run.preview_panels));
         let record = run.start_record.as_ref().map(|start| json!({"schema": "zlc.task-run", "run_id": start["run_id"], "task": start["task"],
             "input": start["input"], "status": {"state": run.state, "started_at": run.started_at, "ended_at": run.ended_at,
             "progress": run.progress, "stop_reason": run.stop_reason}, "artifacts": run.artifacts, "error": run.error}));
@@ -1322,11 +1444,11 @@ impl Workbench {
                 self.notes.push(format!("{id}: the run record could not be written: {failure}"));
             }
         }
-        if let Some((parent, ticket, _)) = acquisition {
-            let reply = if outcome == "completed" { Ok(row) } else { Err(format!("{node_id} ended {outcome} before it was ready")) };
+        if let Some((parent, ticket, completion)) = acquisition {
+            let reply = if outcome == "completed" && completion == "terminal" { Ok(row) } else { Err(format!("the acquisition ended {outcome} before the requested {completion}")) };
             self.plugins.acquired(&parent, ticket, reply);
         }
-        for child in children { self.stop_run_of(&child, "its parent run ended"); }
+        self.stop_acquisitions(id, "its parent run ended");
         for panel in preview_panels { host.close_panel(&panel); self.board.remove(&panel); }
         let message = error.as_ref().map(|error| error["message"].as_str().map(str::to_owned).unwrap_or_else(|| error.to_string()));
         if let Ok(node) = self.node_mut(&node_id) {
@@ -1348,7 +1470,7 @@ impl Workbench {
         // v2 _follow_processor_sources: while a Task has the board, only its own chain restarts.
         let allowed = self.active_task().map(|task| self.task_acquisition_nodes(task));
         let ready: Vec<(String, String)> = self.nodes.iter()
-            .filter(|node| node.follow && node.pending.is_none() && self.active_run(node).is_none() && !node.removing)
+            .filter(|node| node.follow && node.pending.is_none() && node.preparing.is_none() && self.active_run(node).is_none() && !node.removing)
             .filter(|node| allowed.as_ref().is_none_or(|allowed| allowed.contains(&node.id)))
             .filter_map(|node| {
                 let source = node.running.as_ref().map(|draft| draft.source_signal.as_str()).unwrap_or(&node.draft.source_signal);
@@ -1356,9 +1478,11 @@ impl Workbench {
                     .map(|signal| (node.id.clone(), signal.generation.clone()))
             }).collect();
         for (id, generation) in ready {
+            if self.reopen_failed(&id) || self.node(&id).is_none_or(|node| node.instance != Instance::Open) { continue; }
             let node = self.node_mut(&id).unwrap();
             node.follow_attempted = Some(generation);
-            node.pending = Some(PendingStart { origin: "operator".into(), acquisition: None });
+            let frozen = node.frozen.clone();
+            if let Some(frozen) = frozen { if let Err(error) = self.prepare_start(&id, frozen, "operator".into(), None) { self.node_mut(&id).unwrap().error = Some(error); } }
         }
         self.launch_pending(host);
     }
@@ -1369,9 +1493,9 @@ impl Workbench {
         let shown: BTreeSet<String> = host.panels().into_iter().map(|panel| panel.signal).collect();
         let mut wanted = Vec::new();
         for node in self.nodes.iter().filter(|node| node.auto_preview) {
-            let Some(run) = self.active_run(node) else { continue };
+            let Some(run) = node.run.as_deref().and_then(|id| self.run(id)) else { continue };
             let Some(descriptor) = self.catalog.get(&node.type_id) else { continue };
-            for preview in &self.node_previews(node) {
+            for preview in &run.frozen.previews {
                 let signal = self.preview_signal(node, preview);
                 if run.previewed.contains(&signal) { continue; }
                 let Some(published) = self.source_published(&signals, &signal) else { continue };
@@ -1466,12 +1590,14 @@ impl Workbench {
                 _ => if run.ready || descriptor.is_some_and(|item| !item.node().reports_ready) { "running".to_owned() } else { "preparing".to_owned() },
             };
             (if run.state == "stopping" { "stopping" } else if run.state == "starting" { "starting" } else { "running" }, "running", text)
+        } else if node.preparing.is_some() {
+            ("waiting", "running", "building the candidate run".to_owned())
         } else if node.start_after_check.is_some() {
             ("waiting", "running", "starting once the draft is checked".to_owned())
         } else if node.pending.is_some() {
-            let holders: BTreeSet<String> = self.conflicting_nodes(&node.running.as_ref().map(|draft| self.wanted_claims(node, draft)).unwrap_or_default())
+            let holders: BTreeSet<String> = self.conflicting_nodes(&node.frozen.as_ref().map(|frozen| self.frozen_claims(&node.type_id, frozen)).unwrap_or_default())
                 .into_iter().filter(|holder| *holder != node.id).filter_map(|holder| self.node(&holder).map(|other| other.name.clone())).collect();
-            ("waiting", "running", if holders.is_empty() { "restart queued".to_owned() } else { format!("waiting for {}", holders.into_iter().collect::<Vec<_>>().join(", ")) })
+            ("waiting", "running", if holders.is_empty() { if node.follow && self.source_published(signals, &source).is_none() { format!("following {} (waiting for the signal)", self.signal_label(&source)) } else { "restart queued".to_owned() } } else { format!("waiting for {}", holders.into_iter().collect::<Vec<_>>().join(", ")) })
         } else if node.follow {
             let sealed = signals.iter().any(|signal| signal.name == source && signal.sealed);
             ("following", if node.error.is_some() { "warning" } else { "running" },

@@ -477,6 +477,7 @@ pub struct Snapshot {
 /// What a native read is: the zlc-core boundary of the projection.
 pub struct Source {
     pub schema: Arc<DatasetSchema>,
+    pub repeat_counts: Option<Vec<usize>>,
     pub data: SourceData,
     pub block_id: Arc<str>,
     pub generation: Arc<str>,
@@ -526,7 +527,7 @@ impl Source {
             None => SourceData::Dense(event_block(read).clone()),
             Some(placed) => SourceData::Segments(placed.into_iter().map(|(origin, block)| (origin, block.clone())).collect()),
         };
-        Ok(Source { schema: read.schema().clone(), data, block_id: block_id.into(), generation: key.generation.as_uuid().to_string().into(),
+        Ok(Source { schema: read.schema().clone(), repeat_counts: Some(read.repeat_counts()), data, block_id: block_id.into(), generation: key.generation.as_uuid().to_string().into(),
             revision: key.revision, window: window.map(|w| (w.start, w.latest)) })
     }
     /// A figure archive's dataset under its recorded identity, dense or
@@ -538,7 +539,7 @@ impl Source {
             zlc_core::restrict::Source::Placed { segments, .. } => SourceData::Segments(segments),
         };
         Source {
-            schema: snapshot.schema().clone(), data,
+            schema: snapshot.schema().clone(), repeat_counts: Some(snapshot.repeat_counts().to_vec()), data,
             block_id: reference.block_id.as_str().into(), generation: reference.stream_generation.as_str().into(), revision: reference.revision,
             window: snapshot.window().map(|(start, latest)| (start, i128::from(latest))),
         }

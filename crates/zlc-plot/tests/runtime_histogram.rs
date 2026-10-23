@@ -147,3 +147,45 @@ fn panel_bins_carry_across_a_camera_restart() {
         runtime.seal(&generation, json!({})).unwrap();
     }
 }
+
+
+#[test]
+fn panel_header_tracks_the_accepted_finite_repeat_counts() {
+    use zlc_core::schema::DomainRole;
+    use zlc_plot::{configuration::resolve::Defaults, fit::FitEngine, interaction::gesture::InteractionDefaults,
+        render::panel::NativeRendererFactory, session::{EngineFitLayer, SessionServices}};
+    let services = SessionServices { renderers: Arc::new(NativeRendererFactory), fit: Arc::new(EngineFitLayer::new(Arc::new(FitEngine::default()))),
+        defaults: Arc::new(Defaults::default()), registry: None, interaction: InteractionDefaults::default() };
+    let mut document = FigureDocument::<HostRead>::new(services, None);
+    document.execute(r#"{"action":"ready","dpr":1.0,"id":1,"targets":{},"target_requests":{}}"#, BTreeMap::new(), None, None).unwrap();
+    document.finish_presentation(&BTreeSet::new(), &BTreeSet::new());
+    let chunk = camera_schema([2,3], zlc_core::DType::U8);
+    let repeat = Domain::dense(vec![3],vec![Axis::new("camera.repeat".into(),"repeat".into(),"repeat".into(),Coordinates::Index{origin:0,len:3},None,None,None,None).unwrap()]).unwrap();
+    let full = DatasetSchema::new(repeat,chunk.domain(DomainRole::Point).clone(),chunk.domain(DomainRole::Cell).clone(),chunk.value().clone()).unwrap();
+    let runtime=Runtime::new();
+    let generation=runtime.begin("camera",vec![Declaration{signal:"frames".into(),schema:full,storage:Storage::Finite}],json!({})).unwrap();
+    let mut reads=vec![];
+    let mut target=json!(null);
+    for index in 0..3 {
+        let block=DataBlock::new(chunk.clone(),OwnedBuffer::from_vec(vec![index as u8;6]).into(),Validity::Uniform(false),None).unwrap();
+        let delivery=runtime.commit(&generation,&Bundle{inputs:vec![Input::Event{signal:"frames".into(),ordinal:index as u64,data:block,origin:Some([index,0])}],metadata:json!({}),parents:vec![]}).unwrap();
+        let read=HostRead{source:Arc::new(Source::from_read(&Read::from_canonical(delivery.publications[0].clone())).unwrap())};
+        reads.push(read);
+    }
+    runtime.seal(&generation,json!({})).unwrap();
+    // Present old snapshots after the producer ends. Their own counts must
+    // survive newer publications; no independent latest lookup is allowed.
+    for (step,index) in [0usize,1,2].into_iter().enumerate() {
+        assert_eq!(reads[index].source.repeat_counts,Some(vec![index+1]));
+        let command=json!({"action":"sync_panels","id":2,"panel":"p","kind":"facet_grid","signal":"frames","reset_document":step==0,
+            "inputs":[{"panel":"p","signal":"frames","kind":"facet_grid","window":1,"epoch":1,"waiting":false,"reason":null}],
+            "target_requests":{"p":2},"targets":if target.is_null(){json!({})}else{json!({"p":target})}});
+        let result=document.execute(&command.to_string(),[("p".to_owned(),reads[index].clone())].into(),None,None).unwrap();
+        document.finish_presentation(&BTreeSet::from(["p".to_owned()]),&BTreeSet::from(["p".to_owned()]));
+        let panel=&result.state["panels"][0];
+        assert_eq!(panel["structure"][0],json!([["repeat",index+1]]), "step {step}: {panel}");
+        assert_eq!(panel["structure"][1],json!([["readout-event",1]]));
+        assert_eq!(panel["structure"][2],json!([["spatial-y",2],["spatial-x",3]]));
+        target=panel["target"].clone();
+    }
+}

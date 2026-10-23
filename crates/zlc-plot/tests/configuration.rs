@@ -598,7 +598,7 @@ fn check_sequences(golden: &Golden, report: &mut Report) {
         let mut configs: Vec<Option<Arc<ResolvedConfiguration>>> = Vec::new();
         let mut signatures = Vec::new();
         for (index, step) in sequence["steps"].as_array().unwrap().iter().enumerate() {
-            let reference = |key: &str| step[key].as_u64().map(|i| configs[i as usize].clone().expect("successful step"));
+            let reference = |key: &str| step[key].as_u64().map(|i| configs[i as usize].clone().unwrap_or_else(|| panic!("{name} step {index}: {key} step {i} failed; {:?}", report.failures.last())));
             let (base, presented) = (reference("base"), reference("presented"));
             let target = step["target"].as_object().map(|_| dec_map(&step["target"]));
             let interaction = step["interaction_updates"].as_object().map(|doc| {

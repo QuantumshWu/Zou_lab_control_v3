@@ -1,7 +1,7 @@
 // The Task Console's Logic rows and Edit pages (v2 LogicRowView,
 // LogicEditorView).  Both draw one node's projection and send its intents;
 // admission, follow intent, restarts and claims are the workbench's.
-import { Field, Legend, Readout, StatusLine, assign, command, element, fieldKind, form, row as formRow, sectionTitle, setChecked, setState, setTitle, PathEdit, shareLabelColumn, switchButton, } from "../fluent/index.js";
+import { Field, Legend, Readout, StatusLine, assign, command, element, fieldKind, form, row as formRow, sectionTitle, setChecked, setState, setTitle, shareLabelColumn, switchButton, } from "../fluent/index.js";
 import { nodeEditor } from "./node_editors/index.js";
 /** Every word the Start slot can say, on the row and on its Edit page. */
 export const START_LABELS = ["Start", "Restart", "Starting…"];
@@ -129,8 +129,7 @@ export class LogicEditorView {
     editors = [];
     /** Why the node's editor model could not be had for this draft (`editor_facts_error`). */
     editorError = element("p", "field-error editor-error");
-    artifacts = [];
-    artifactSignature = "";
+    artifactFields = new Map();
     constructor(id, intents) {
         this.id = id;
         this.intents = intents;
@@ -231,7 +230,7 @@ export class LogicEditorView {
         const titles = new Set();
         let group;
         // The files the node reads stand after its devices, before its fields (v2 artifact_form).
-        const artifacts = this.artifactRows(row, managedFiles, locked);
+        const artifacts = this.artifactRows(row, managedFiles, locked, request, failed);
         let filed = false;
         for (const item of specs) {
             if (!filed && item.key.startsWith("value:")) {
@@ -310,7 +309,7 @@ export class LogicEditorView {
         this.revert.disabled = !projection.edited || !free;
         this.remove.disabled = !free;
     }
-    complete(request, failed = false) { for (const field of this.fields.values())
+    complete(request, failed = false) { for (const field of [...this.fields.values(), ...this.artifactFields.values()])
         field.complete(request, failed); }
     /** The node's editors brought to its models: one per model, kept while its kind stays. */
     reconcileEditors(node, models) {
@@ -345,34 +344,36 @@ export class LogicEditorView {
      * own label, a path with Browse... (the window's file dialog) -- or, for one
      * that claims frames and no editor draws, what it claims -- then Refresh
      * files to re-read them after they were written elsewhere (check_node). */
-    artifactRows(row, managed, locked) {
+    artifactRows(row, managed, locked, request, failed = false) {
         const declared = row.artifact_specs ?? Object.keys(row.artifact_inputs).map(name => ({ name, label: name, file_filter: "", required: true, frame_claims: false }));
         const specs = declared.filter(spec => !managed.has(spec.name));
-        const signature = JSON.stringify([specs, specs.map(spec => row.artifact_inputs[spec.name] ?? null), Boolean(locked)]);
-        if (signature === this.artifactSignature)
-            return this.artifacts;
-        this.artifactSignature = signature;
-        if (!specs.length)
-            return this.artifacts = [];
-        const claims = (value) => Array.isArray(value)
-            ? value.map(file => file.frames?.length ? `${file.path} (${file.frames.join(", ")})` : file.path).join("; ") : "";
-        const rows = specs.map(spec => {
+        const alive = new Set(specs.filter(spec => !spec.frame_claims).map(spec => spec.name));
+        for (const [name, field] of this.artifactFields)
+            if (!alive.has(name)) {
+                field.root.remove();
+                this.artifactFields.delete(name);
+            }
+        return specs.map(spec => {
             const label = spec.label || spec.name;
             const value = row.artifact_inputs[spec.name];
-            if (spec.frame_claims)
-                return formRow(label, new Readout(claims(value) || "No files chosen").root);
-            const edit = (path) => this.intents.editDraft(row.node_id, { artifact_inputs: { [spec.name]: path } }, label);
-            // v2 FluentPathEdit: Browse… and its own Refresh (re-read this file, check the draft again).
-            const path = new PathEdit(chosen => { edit(chosen); }, () => {
-                void this.intents.choose({ title: `Choose ${label}`, filter: spec.file_filter, start: path.value }).then(chosen => { if (chosen)
-                    edit(chosen); });
-            }, () => this.intents.check(row.node_id), true);
-            path.value = typeof value === "string" ? value : "";
-            path.input.placeholder = spec.required ? "No file chosen" : "None";
-            path.input.disabled = path.browse.disabled = path.refresh.disabled = Boolean(locked);
-            return formRow(`${label}${spec.required ? " *" : ""}`, path.root);
+            if (spec.frame_claims) {
+                const claims = Array.isArray(value) ? value.map(file => file.frames?.length ? `${file.path} (${file.frames.join(", ")})` : file.path).join("; ") : "";
+                return formRow(label, new Readout(claims || "No files chosen").root);
+            }
+            const control = { name: spec.name, label, kind: "path", value: typeof value === "string" ? value : "",
+                required: spec.required, filter: spec.file_filter, refreshable: true, unavailable_reason: locked };
+            let field = this.artifactFields.get(spec.name);
+            if (!field) {
+                field = new Field(`${row.node_id}-artifact`, control, {
+                    commit: value => this.intents.editDraft(row.node_id, { artifact_inputs: { [spec.name]: String(value ?? "") } }, label),
+                    browse: ask => this.intents.choose(ask), refresh: () => this.intents.check(row.node_id),
+                });
+                this.artifactFields.set(spec.name, field);
+            }
+            else
+                field.update(control, request, failed);
+            return field.root;
         });
-        return this.artifacts = rows;
     }
     get name() { return this.projection?.name ?? this.id; }
     get edited() { return Boolean(this.row?.edited); }

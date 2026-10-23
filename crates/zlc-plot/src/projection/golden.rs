@@ -145,7 +145,7 @@ pub fn source(suite: &Suite, document: &Value) -> Source {
     };
     let reference = &document["ref"];
     Source {
-        schema, data, block_id: reference["block_id"].as_str().unwrap().into(), generation: reference["generation"].as_str().unwrap().into(),
+        repeat_counts: None, schema, data, block_id: reference["block_id"].as_str().unwrap().into(), generation: reference["generation"].as_str().unwrap().into(),
         revision: reference["revision"].as_u64().unwrap(),
         window: document["window"].as_array().map(|w| (w[0].as_i64().unwrap() as i128, w[1].as_i64().unwrap() as i128)),
     }

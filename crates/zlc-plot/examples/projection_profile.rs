@@ -37,7 +37,7 @@ fn main() {
         Domain::dense(vec![1], vec![axis("sp", "g", Coordinates::Index { origin: 0, len: 1 })]).unwrap(), cell, value).unwrap();
     let segments = (0..shots).map(|s| ([0usize, s], DataBlock::new(segment_schema.clone(),
         OwnedBuffer::from_vec((0..height * width).map(|i| ((i * 7 + s * 13) % 251) as u8).collect::<Vec<u8>>()).into(), Validity::Uniform(true), None).unwrap())).collect();
-    let source = Source { schema, data: SourceData::Segments(segments), block_id: "w".into(), generation: "g".into(), revision: 1, window: Some((0, 39)) };
+    let source = Source { repeat_counts: None, schema, data: SourceData::Segments(segments), block_id: "w".into(), generation: "g".into(), revision: 1, window: Some((0, 39)) };
     let x = AxisRef::cell_data("x").unwrap();
     let facet = AxisRef::point("h").unwrap();
     let plan = ProjectionPlan {

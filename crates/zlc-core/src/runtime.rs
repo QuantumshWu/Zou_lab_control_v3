@@ -202,6 +202,11 @@ impl Read {
     pub fn key(&self) -> &PublicationKey {
         self.anchor().key()
     }
+    pub fn repeat_counts(&self) -> Vec<usize> {
+        if let ReadKind::Canonical(event) = &self.kind { return event.canonical().unwrap().repeat_counts().to_vec(); }
+        let domain = self.schema().domain(DomainRole::Repeat);
+        domain.coordinate_counts(domain.size() - 1, 0..domain.size())
+    }
     pub fn same_read(&self, other: &Self) -> bool {
         match (&self.kind,&other.kind) {
             (ReadKind::Event(left),ReadKind::Event(right)) | (ReadKind::Canonical(left),ReadKind::Canonical(right)) => Arc::ptr_eq(left,right),

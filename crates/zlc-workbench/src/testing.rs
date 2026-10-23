@@ -124,7 +124,22 @@ mod tests {
 
     fn apply(workbench: &mut Workbench, host: &mut FakeHost, name: &str, params: Value) -> Result<Value, String> {
         workbench.apply(name, &params, &Origin::Operator, 1, host);
-        workbench.take_replies().pop().unwrap().1
+        let result = workbench.take_replies().pop().unwrap().1;
+        settle_preparations(workbench, host);
+        result
+    }
+
+    fn settle_preparations(workbench: &mut Workbench, host: &mut FakeHost) {
+        loop {
+            let tickets: Vec<u64> = workbench.tickets.iter().filter_map(|(ticket, value)| matches!(value, crate::Ticket::Prepare { .. }).then_some(*ticket)).collect();
+            if tickets.is_empty() { break; }
+            for ticket in tickets { workbench.on_event(Event::Answered { ticket, result: Ok(json!({"prepared": format!("test-{ticket}")})) }, host); }
+        }
+    }
+
+    fn event(workbench: &mut Workbench, event: Event, host: &mut FakeHost) {
+        workbench.on_event(event, host);
+        settle_preparations(workbench, host);
     }
 
     #[test]
@@ -218,13 +233,13 @@ mod tests {
         assert_eq!(applied["opening"], json!(["mot_camera", "sequencer", "basler"]));
         assert_eq!(workbench.device_rows()[2]["state"], "failed", "an unknown type fails with its reason");
         for device in ["mot_camera", "sequencer"] {
-            workbench.on_event(Event::Opened { instance: device.into(), working_point: json!({}) }, &mut host);
+            event(&mut workbench,Event::Opened { instance: device.into(), working_point: json!({}) }, &mut host);
         }
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "seamless_scan", "values": {"acquisition_logic": "camera_measurement"},
             "source_signal": "@logic/camera_measurement/frames"})).unwrap();
         for node in ["camera_measurement", "seamless_scan"] {
-            workbench.on_event(Event::Opened { instance: node_instance(node), working_point: Value::Null }, &mut host);
+            event(&mut workbench,Event::Opened { instance: node_instance(node), working_point: Value::Null }, &mut host);
         }
         assert_eq!(workbench.node("camera_measurement").unwrap().draft.device_keys["camera"], "mot_camera");
         apply(&mut workbench, &mut host, "start_node", json!({"node": "seamless_scan"})).unwrap();
@@ -239,8 +254,8 @@ mod tests {
         // While the task runs, the board is frozen and only its acquisition starts.
         assert!(apply(&mut workbench, &mut host, "add_node", json!({"type_id": "occupancy"})).unwrap_err().contains("stop the task"));
         assert!(apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap_err().contains("stop the task"));
-        workbench.on_event(Event::RunStarted { run: "seamless_scan#1".into() }, &mut host);
-        workbench.on_event(Event::RunAcquire { run: "seamless_scan#1".into(), ticket: 7, node: "camera_measurement".into(), completion: "ready".into() }, &mut host);
+        event(&mut workbench,Event::RunStarted { run: "seamless_scan#1".into() }, &mut host);
+        event(&mut workbench,Event::RunAcquire { run: "seamless_scan#1".into(), ticket: 7, node: "camera_measurement".into(), completion: "ready".into() }, &mut host);
         assert_eq!(calls.borrow().1.last().unwrap().run, "camera_measurement#1");
         let refused = apply(&mut workbench, &mut host, "tune_device", json!({"device": "mot_camera", "field": "exposure_seconds", "value": 0.2}));
         assert!(refused.unwrap_err().contains("exposure_seconds: Protected by camera_measurement"));
@@ -251,20 +266,20 @@ mod tests {
         let (op, _, params) = calls.borrow().2.last().cloned().unwrap();
         assert_eq!((op.as_str(), params["name"].as_str()), ("command", Some("editor_save")));
         assert_eq!(params["params"]["path"], json!(root.join("data/draft.json").display().to_string()));
-        workbench.on_event(Event::RunReady { run: "camera_measurement#1".into() }, &mut host);
+        event(&mut workbench,Event::RunReady { run: "camera_measurement#1".into() }, &mut host);
         assert!(calls.borrow().0.contains(&"acquired seamless_scan#1 7 true".to_owned()));
         // The console's line (v2 _report): a run says "started" when it starts; the Task's status
         // is said when it changes, never again for the same status.
         assert_eq!(workbench.console_report.0, "camera_measurement started");
         let progress = |current| Event::RunProgress { run: "seamless_scan#1".into(), message: "point".into(), current: Some(current), total: Some(3) };
-        workbench.on_event(progress(1), &mut host);
+        event(&mut workbench,progress(1), &mut host);
         assert_eq!(workbench.console_report.0, "seamless_scan: point 1/3");
         workbench.console_note("another line".into());
-        workbench.on_event(progress(1), &mut host);
+        event(&mut workbench,progress(1), &mut host);
         assert_eq!(workbench.console_report.0, "another line");
-        workbench.on_event(progress(2), &mut host);
+        event(&mut workbench,progress(2), &mut host);
         assert_eq!(workbench.console_report.0, "seamless_scan: point 2/3");
-        workbench.on_event(Event::RunRequest { run: "seamless_scan#1".into(), request: json!({"request": "seamless_scan#1:1", "kind": "manual-axis", "title": "Move the knob"}) }, &mut host);
+        event(&mut workbench,Event::RunRequest { run: "seamless_scan#1".into(), request: json!({"request": "seamless_scan#1:1", "kind": "manual-axis", "title": "Move the knob"}) }, &mut host);
         assert_eq!(workbench.wait_reached("seamless_scan", "request").unwrap()["request"]["kind"], "manual-axis");
         assert!(apply(&mut workbench, &mut host, "answer_request", json!({"node": "seamless_scan", "request": "old", "response": {}})).is_err());
         apply(&mut workbench, &mut host, "answer_request", json!({"node": "seamless_scan", "request": "seamless_scan#1:1", "response": {}})).unwrap();
@@ -272,8 +287,8 @@ mod tests {
         assert!(calls.borrow().0.ends_with(&["stop seamless_scan#1".to_owned(), "stop camera_measurement#1".to_owned()]));
         apply(&mut workbench, &mut host, "close_device", json!({"device": "sequencer"})).unwrap();
         assert!(!calls.borrow().0.contains(&"close sequencer".to_owned()), "a claimed device closes after its run");
-        workbench.on_event(Event::RunFinished { run: "camera_measurement#1".into(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
-        workbench.on_event(Event::RunFinished { run: "seamless_scan#1".into(), outcome: "stopped".into(), error: None, generation: Some("g".into()) }, &mut host);
+        event(&mut workbench,Event::RunFinished { run: "camera_measurement#1".into(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
+        event(&mut workbench,Event::RunFinished { run: "seamless_scan#1".into(), outcome: "stopped".into(), error: None, generation: Some("g".into()) }, &mut host);
         assert!(calls.borrow().0.contains(&"close sequencer".to_owned()));
         let record = workspace::read_strict(&directory.join("run.json"), "run").unwrap();
         assert_eq!((record["schema"].as_str(), record["status"]["state"].as_str()), (Some("zlc.task-run"), Some("stopped")));
@@ -300,19 +315,19 @@ mod tests {
         apply(&mut workbench, &mut host, "add_device", json!({"type_id": "rf.virtual", "instance_id": "rf"})).unwrap();
         apply(&mut workbench, &mut host, "edit_device", json!({"device": "rf", "role": "Trap RF"})).unwrap();
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
-        workbench.on_event(Event::Opened { instance: "rf".into(), working_point: json!({"state": "open", "tunable": true}) }, &mut host);
+        event(&mut workbench,Event::Opened { instance: "rf".into(), working_point: json!({"state": "open", "tunable": true}) }, &mut host);
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "device_scan", "values": {"plan": "device:rf:frequency"}})).unwrap();
-        workbench.on_event(Event::Opened { instance: node_instance("device_scan"), working_point: Value::Null }, &mut host);
+        event(&mut workbench,Event::Opened { instance: node_instance("device_scan"), working_point: Value::Null }, &mut host);
         let asked = |name: &str| calls.borrow().2.iter().rev().find(|(query, ..)| query == name).cloned().unwrap();
         let (_, ticket, args) = asked("editor_facts");
         assert_eq!(args["devices"]["tunable:rf"]["role"], "Trap RF");
         assert_eq!(args["devices"]["tunable:rf"]["instance"], "rf", "the editor is offered every tunable device");
         assert!(asked("resolve_device_claims").2["devices"].get("tunable:rf").is_none());
-        workbench.on_event(Event::Answered { ticket, result: Ok(json!({"ports": [{"port": "device:rf:frequency"}]})) }, &mut host);
+        event(&mut workbench,Event::Answered { ticket, result: Ok(json!({"ports": [{"port": "device:rf:frequency"}]})) }, &mut host);
         let state = workbench.state(&host);
         assert_eq!(state["logic"][0]["status"], "Draft: Checking the draft…");
         let (_, ticket, _) = asked("resolve_device_claims");
-        workbench.on_event(Event::Answered { ticket, result: Ok(json!({"tunable:rf": {"instance": "rf", "fields": ["frequency"]}})) }, &mut host);
+        event(&mut workbench,Event::Answered { ticket, result: Ok(json!({"tunable:rf": {"instance": "rf", "fields": ["frequency"]}})) }, &mut host);
         let state = workbench.state(&host);
         assert_eq!((&state["logic"][0]["editor_facts"]["ports"][0]["port"], &state["logic"][0]["can_start"]), (&json!("device:rf:frequency"), &json!(true)));
         apply(&mut workbench, &mut host, "start_node", json!({"node": "device_scan"})).unwrap();
@@ -347,15 +362,15 @@ mod tests {
             let row = &state["logic"][0];
             (row["controls"][1].clone(), row["status"].clone(), row["can_start"].clone())
         };
-        let answer = |workbench: &mut Workbench, host: &mut FakeHost| for (name, result) in [("resolve_defaults", json!({"window": "short"})),
+        let answer = |mut workbench: &mut Workbench, host: &mut FakeHost| for (name, result) in [("resolve_defaults", json!({"window": "short"})),
             ("resolve_field_choices", choices.clone())] {
             let ticket = calls.borrow().2.iter().rev().find(|(query, ..)| query == name).unwrap().1;
-            workbench.on_event(Event::Answered { ticket, result: Ok(result) }, host);
+            event(&mut workbench,Event::Answered { ticket, result: Ok(result) }, host);
         };
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "windows"})).unwrap();
         let first = drawn(&workbench, &host);
         assert_eq!((&first.0["kind"], &first.0["value"], &first.1), (&json!("choice"), &json!("short"), &json!("not started")));
-        workbench.on_event(Event::Opened { instance: node_instance("windows"), working_point: Value::Null }, &mut host);
+        event(&mut workbench,Event::Opened { instance: node_instance("windows"), working_point: Value::Null }, &mut host);
         answer(&mut workbench, &mut host);
         assert_eq!(drawn(&workbench, &host), first, "its own answers change nothing its type's had drawn");
         apply(&mut workbench, &mut host, "edit_node", json!({"node": "windows", "values": {"samples": 250}})).unwrap();
@@ -381,12 +396,12 @@ mod tests {
         let mut host = FakeHost::default();
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "survival", "source_signal": "@logic/camera_measurement/frames"})).unwrap();
-        for node in ["camera_measurement", "survival"] { workbench.on_event(Event::Opened { instance: node_instance(node), working_point: Value::Null }, &mut host); }
+        for node in ["camera_measurement", "survival"] { event(&mut workbench,Event::Opened { instance: node_instance(node), working_point: Value::Null }, &mut host); }
         let asked = |name: &str| calls.borrow().2.iter().rev().find(|(query, ..)| query == name).cloned().unwrap();
         assert_eq!(asked("editor_facts").2["source"], Value::Null, "nothing answered yet");
         let (_, ticket, args) = asked("describe_output_frames");
         assert_eq!((&args["output_name"], &args["source"]), (&json!("frames"), &Value::Null));
-        workbench.on_event(Event::Answered { ticket, result: Ok(json!(["frame", ["0", "1", "2"]])) }, &mut host);
+        event(&mut workbench,Event::Answered { ticket, result: Ok(json!(["frame", ["0", "1", "2"]])) }, &mut host);
         assert_eq!(asked("editor_facts").2["source"], json!(["frame", ["0", "1", "2"]]));
     }
 
@@ -405,13 +420,13 @@ mod tests {
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "derive", "source_signal": "@logic/camera_measurement/frames"})).unwrap();
         workbench.on_runtime(&mut host);
-        workbench.on_event(Event::Opened { instance: node_instance("derive"), working_point: Value::Null }, &mut host);
+        event(&mut workbench,Event::Opened { instance: node_instance("derive"), working_point: Value::Null }, &mut host);
         let asked = |name: &str| calls.borrow().2.iter().rev().find(|(query, ..)| query == name).cloned();
         assert_eq!(asked("editor_facts").unwrap().2["bundle"], json!([{"name": "frames", "schema": null, "event_schema": null}]));
         assert!(asked("admit_source").is_none(), "nothing to admit before the members publish");
         let issues = |workbench: &Workbench, host: &FakeHost| workbench.state(host)["logic"][1]["issues"].clone();
         let (_, ticket, _) = asked("editor_facts").unwrap();
-        workbench.on_event(Event::Answered { ticket, result: Ok(json!({"editor": "derive_variables", "manages": ["variables"]})) }, &mut host);
+        event(&mut workbench,Event::Answered { ticket, result: Ok(json!({"editor": "derive_variables", "manages": ["variables"]})) }, &mut host);
         assert_eq!(issues(&workbench, &host), json!([]), "the unasked check holds nothing");
         host.signals.push(SignalInfo { name: "@logic/camera_measurement/frames".into(), generation: "g1".into(), owner: "camera_measurement".into(), published: true, sealed: false, shape: String::new() });
         host.schemas.insert("@logic/camera_measurement/frames".into(), (json!({"tree": "run"}), json!({"tree": "event"})));
@@ -420,7 +435,7 @@ mod tests {
         assert_eq!(asked("editor_facts").unwrap().2["bundle"], expected);
         let (_, ticket, args) = asked("admit_source").unwrap();
         assert_eq!(args["bundle"], expected);
-        workbench.on_event(Event::Answered { ticket, result: Ok(json!(["bad · term 2: and needs booleans"])) }, &mut host);
+        event(&mut workbench,Event::Answered { ticket, result: Ok(json!(["bad · term 2: and needs booleans"])) }, &mut host);
         assert!(issues(&workbench, &host).as_array().unwrap().iter().any(|issue| issue == "bad · term 2: and needs booleans"));
     }
 
@@ -463,7 +478,7 @@ mod tests {
         let mut host = FakeHost { next: 10, ..Default::default() };
         apply(&mut workbench, &mut host, "add_device", json!({"type_id": "camera.virtual_mot", "instance_id": "mot_camera"})).unwrap();
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
-        workbench.on_event(Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
+        event(&mut workbench,Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
         let layout = json!({"format": "zlc.console-board",
             "panels": [
                 {"panel_id": "panel-1", "signal": "@logic/camera_measurement/frames", "title": "@logic/camera_measurement/frames", "kind": "facet_grid",
@@ -535,9 +550,9 @@ mod tests {
         assert_eq!(asked.iter().map(|(_, type_id)| type_id.as_str()).collect::<Vec<_>>(), ["camera.virtual_mot", "sequencer.virtual"]);
         assert_eq!(workbench.apparatus_state()["busy"], "scanning hardware");
         assert!(apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap_err().starts_with("hardware scan still running"));
-        workbench.on_event(Event::Answered { ticket: asked[0].0, result: Ok(json!({"found": [{"instance_id": "cam_1", "role": "cam_1",
+        event(&mut workbench,Event::Answered { ticket: asked[0].0, result: Ok(json!({"found": [{"instance_id": "cam_1", "role": "cam_1",
             "parameters": {"exposure_seconds": 0.05}}], "notes": ["VISA lists nothing"]})) }, &mut host);
-        workbench.on_event(Event::Answered { ticket: asked[1].0, result: Err("VISA lists nothing".into()) }, &mut host);
+        event(&mut workbench,Event::Answered { ticket: asked[1].0, result: Err("VISA lists nothing".into()) }, &mut host);
         let (request, reply) = workbench.take_replies().pop().unwrap();
         assert_eq!(request, 7);
         assert_eq!(reply.unwrap()["message"], "discovered 1 device; camera.virtual_mot, sequencer.virtual: VISA lists nothing; camera: No module named pypylon");
@@ -547,7 +562,7 @@ mod tests {
         assert_eq!(workbench.device_rows()[0]["pending"], "add");
         // Loaded, then left out by another apparatus: its Remove is no refusal, and the scan's Add brings it back as itself.
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
-        workbench.on_event(Event::Opened { instance: "cam_1".into(), working_point: json!({}) }, &mut host);
+        event(&mut workbench,Event::Opened { instance: "cam_1".into(), working_point: json!({}) }, &mut host);
         std::fs::write(root.join("other.json"), r#"{"format": "zlc.installation", "devices": []}"#).unwrap();
         apply(&mut workbench, &mut host, "load_apparatus", json!({"path": "other.json"})).unwrap();
         assert_eq!(workbench.device_rows()[0]["pending"], "remove");
@@ -555,10 +570,10 @@ mod tests {
         apply(&mut workbench, &mut host, "add_discovered", json!({"instance_id": "cam_1"})).unwrap();
         // (other.json's simulation is the defaults: the simulated camera is reopened, not opened twice.)
         assert_eq!(apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap()["opening"], json!([]));
-        workbench.on_event(Event::Closed { instance: "cam_1".into(), error: None }, &mut host);
-        workbench.on_event(Event::Opened { instance: "cam_1".into(), working_point: json!({}) }, &mut host);
+        event(&mut workbench,Event::Closed { instance: "cam_1".into(), error: None }, &mut host);
+        event(&mut workbench,Event::Opened { instance: "cam_1".into(), working_point: json!({}) }, &mut host);
         // Lost while open (the computer that publishes it went away): said at once.
-        workbench.on_event(Event::Failed { instance: "cam_1".into(), error: "pc2 withdrew it".into() }, &mut host);
+        event(&mut workbench,Event::Failed { instance: "cam_1".into(), error: "pc2 withdrew it".into() }, &mut host);
         assert_eq!(workbench.apparatus_state()["report"]["text"], "cam_1 lost: pc2 withdrew it");
     }
 
@@ -574,9 +589,9 @@ mod tests {
         apply(&mut workbench, &mut host, "add_device", json!({"type_id": "camera.virtual_mot", "instance_id": "mot_camera"})).unwrap();
         apply(&mut workbench, &mut host, "add_device", json!({"type_id": "remote.device", "instance_id": "remote_cam", "parameters": {"host": "pc2", "instance_id": "cam"}})).unwrap();
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
-        workbench.on_event(Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
+        event(&mut workbench,Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
         // Open, a remote row is the type its publisher has: a camera the nodes here can choose.
-        workbench.on_event(Event::Opened { instance: "remote_cam".into(), working_point: json!({"remote": {"publisher": "pc2"},
+        event(&mut workbench,Event::Opened { instance: "remote_cam".into(), working_point: json!({"remote": {"publisher": "pc2"},
             "descriptor": {"type_id": "camera.dcam", "kind": "device", "family": "camera", "label": "Hamamatsu camera", "capabilities": ["camera.adapter"]}}) }, &mut host);
         let rows = workbench.device_rows();
         assert_eq!((rows[1]["family"].as_str(), rows[1]["label"].as_str(), rows[1]["publishable"].as_bool()), (Some("camera"), Some("Hamamatsu camera"), Some(false)));
@@ -586,7 +601,7 @@ mod tests {
         // Remote on: answered by the fabric, then nothing here uses it.
         workbench.apply("publish_device", &json!({"device": "mot_camera", "published": true}), &Origin::Operator, 9, &mut host);
         let ticket: u64 = calls.borrow().0.iter().rev().find_map(|call| call.strip_prefix("publish ")?.split(' ').next()?.parse().ok()).unwrap();
-        workbench.on_event(Event::Answered { ticket, result: Ok(json!({"port": 18859})) }, &mut host);
+        event(&mut workbench,Event::Answered { ticket, result: Ok(json!({"port": 18859})) }, &mut host);
         assert_eq!(workbench.take_replies().pop().unwrap(), (9, Ok(json!({"device": "mot_camera", "published": true, "fabric": {"port": 18859}}))));
         assert_eq!(workbench.device_rows()[0]["published"], true);
         for (command, params) in [("tune_device", json!({"device": "mot_camera", "field": "exposure_seconds", "value": 0.2})),
@@ -599,7 +614,7 @@ mod tests {
         // Remote off: back here.
         workbench.apply("publish_device", &json!({"device": "mot_camera", "published": false}), &Origin::Operator, 10, &mut host);
         let ticket: u64 = calls.borrow().0.iter().rev().find_map(|call| call.strip_prefix("publish ")?.split(' ').next()?.parse().ok()).unwrap();
-        workbench.on_event(Event::Answered { ticket, result: Ok(json!({})) }, &mut host);
+        event(&mut workbench,Event::Answered { ticket, result: Ok(json!({})) }, &mut host);
         assert_eq!(workbench.device_rows()[0]["published"], false);
         apply(&mut workbench, &mut host, "close_device", json!({"device": "mot_camera"})).unwrap();
     }
@@ -653,7 +668,7 @@ mod tests {
         assert_eq!(workbench.apparatus.simulation["seed"], 3);
         // Open, each command has an MCP tool name; the windows' `<id>__<command>` with the id as written reaches it too.
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
-        for device in ["n100_COM3", "pump laser #2", "sequencer"] { workbench.on_event(Event::Opened { instance: device.into(), working_point: json!({}) }, &mut host); }
+        for device in ["n100_COM3", "pump laser #2", "sequencer"] { event(&mut workbench,Event::Opened { instance: device.into(), working_point: json!({}) }, &mut host); }
         let pump = zlc_core::control::tool_word("pump laser #2");
         assert!(pump.starts_with("pump_laser_2-"), "{pump}");
         let tools: Vec<String> = workbench.plugin_tools().iter().map(|tool| tool["name"].as_str().unwrap().to_owned()).collect();
@@ -788,16 +803,16 @@ mod tests {
         let mut host = FakeHost::default();
         apply(&mut workbench, &mut host, "add_device", json!({"type_id": "camera.virtual_mot", "instance_id": "mot_camera"})).unwrap();
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
-        workbench.on_event(Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
+        event(&mut workbench,Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
-        workbench.on_event(Event::Opened { instance: node_instance("camera_measurement"), working_point: Value::Null }, &mut host);
+        event(&mut workbench,Event::Opened { instance: node_instance("camera_measurement"), working_point: Value::Null }, &mut host);
         workbench.device_users().lock().unwrap().insert("mot_camera".into(), "PulseGUI".into());
         assert_eq!(apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap_err(), "device is in use by PulseGUI");
         assert!(calls.borrow().1.is_empty(), "nothing was launched");
         workbench.device_users().lock().unwrap().clear();
         apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
         assert_eq!(calls.borrow().1.len(), 1, "launched once the device is free");
-        workbench.on_event(Event::RunStarted { run: "camera_measurement#1".into() }, &mut host);
+        event(&mut workbench,Event::RunStarted { run: "camera_measurement#1".into() }, &mut host);
         apply(&mut workbench, &mut host, "edit_node", json!({"node": "camera_measurement", "device_keys": {"camera": "gone"}})).unwrap();
         assert!(apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).is_err());
         let row = workbench.node_row(workbench.node("camera_measurement").unwrap(), &[]);
@@ -820,9 +835,9 @@ mod tests {
         let mut host = FakeHost::default();
         apply(&mut workbench, &mut host, "add_device", json!({"type_id": "camera.virtual_mot", "instance_id": "mot_camera"})).unwrap();
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
-        workbench.on_event(Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
+        event(&mut workbench,Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
         apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
-        workbench.on_event(Event::Opened { instance: node_instance("camera_measurement"), working_point: Value::Null }, &mut host);
+        event(&mut workbench,Event::Opened { instance: node_instance("camera_measurement"), working_point: Value::Null }, &mut host);
         apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
         workspace::write_readable(&root.join("board.json"), &json!({"format": "zlc.console-board", "panels": [],
             "logic": [{"node_id": "occupancy", "api_name": "occupancy", "auto_preview": "yes"}]})).unwrap();
@@ -837,7 +852,7 @@ mod tests {
         assert_eq!(apply(&mut workbench, &mut host, "load_layout", json!({"path": "board.json", "stop_running": true})).unwrap()["replaced"], false);
         assert!(workbench.console_report.0.contains("auto_preview \"yes\" cannot be read"), "{:?}", workbench.console_report);
         assert!(workbench.node("camera_measurement").is_some(), "the board waits for the run");
-        workbench.on_event(Event::RunFinished { run: "camera_measurement#1".into(), outcome: "failed".into(), error: None, generation: None }, &mut host);
+        event(&mut workbench,Event::RunFinished { run: "camera_measurement#1".into(), outcome: "failed".into(), error: None, generation: None }, &mut host);
         assert_eq!(workbench.console_report, ("layout loaded".into(), "task"));
         assert_eq!(workbench.nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(), ["occupancy"]);
     }
@@ -857,14 +872,14 @@ mod tests {
         let mut host = FakeHost::default();
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
         for device in ["mot_camera", "sequencer"] {
-            workbench.on_event(Event::Opened { instance: device.into(), working_point: json!({"tunable": true}) }, &mut host);
+            event(&mut workbench,Event::Opened { instance: device.into(), working_point: json!({"tunable": true}) }, &mut host);
         }
         (root, workbench, calls, host)
     }
 
-    fn add_open_node(workbench: &mut Workbench, host: &mut FakeHost, params: Value) {
+    fn add_open_node(mut workbench: &mut Workbench, host: &mut FakeHost, params: Value) {
         let node = apply(workbench, host, "add_node", params).unwrap()["node"].as_str().unwrap().to_owned();
-        workbench.on_event(Event::Opened { instance: node_instance(&node), working_point: Value::Null }, host);
+        event(&mut workbench,Event::Opened { instance: node_instance(&node), working_point: Value::Null }, host);
     }
 
     fn count(calls: &Rc<RefCell<Calls>>, line: &str) -> usize { calls.borrow().0.iter().filter(|call| call.as_str() == line).count() }
@@ -875,11 +890,11 @@ mod tests {
     #[test]
     fn a_failed_device_and_changed_simulation_are_applied() {
         let (_root, mut workbench, calls, mut host) = rig("audit-apply", catalog());
-        workbench.on_event(Event::Failed { instance: "mot_camera".into(), error: "the plugin process exited".into() }, &mut host);
+        event(&mut workbench,Event::Failed { instance: "mot_camera".into(), error: "the plugin process exited".into() }, &mut host);
         assert_eq!(workbench.apparatus_state()["action"], "apply");
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
         assert_eq!(count(&calls, "open mot_camera camera.virtual_mot"), 2, "Apply opens it again");
-        workbench.on_event(Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
+        event(&mut workbench,Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
         assert_eq!(workbench.apparatus_state()["action"], "shut_down");
         apply(&mut workbench, &mut host, "edit_simulation", json!({"values": {"seed": 5}})).unwrap();
         assert_eq!(workbench.apparatus_state()["action"], "apply");
@@ -953,10 +968,10 @@ mod tests {
     fn a_node_whose_plugin_was_lost_opens_again() {
         let (_root, mut workbench, calls, mut host) = rig("audit-reopen", catalog());
         add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
-        workbench.on_event(Event::Failed { instance: node_instance("camera_measurement"), error: "the plugin process exited".into() }, &mut host);
+        event(&mut workbench,Event::Failed { instance: node_instance("camera_measurement"), error: "the plugin process exited".into() }, &mut host);
         let started = apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
         assert_eq!((started["phase"].as_str(), count(&calls, "open node/camera_measurement camera_measurement")), (Some("checking"), 2));
-        workbench.on_event(Event::Opened { instance: node_instance("camera_measurement"), working_point: Value::Null }, &mut host);
+        event(&mut workbench,Event::Opened { instance: node_instance("camera_measurement"), working_point: Value::Null }, &mut host);
         assert_eq!(calls.borrow().1.last().unwrap().run, "camera_measurement#1", "the Start goes once it is open");
     }
 
@@ -970,8 +985,8 @@ mod tests {
         let (_root, mut workbench, calls, mut host) = rig("audit-admit", catalog);
         add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
         assert_eq!(apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap()["phase"], "checking");
-        workbench.on_event(Event::Answered { ticket: asked(&calls, "admit"), result: Ok(json!(["Frames per cycle exceeds the pulse's frames"])) }, &mut host);
-        workbench.on_event(Event::Answered { ticket: asked(&calls, "declare_outputs"), result: Err("boom".into()) }, &mut host);
+        event(&mut workbench,Event::Answered { ticket: asked(&calls, "admit"), result: Ok(json!(["Frames per cycle exceeds the pulse's frames"])) }, &mut host);
+        event(&mut workbench,Event::Answered { ticket: asked(&calls, "declare_outputs"), result: Err("boom".into()) }, &mut host);
         let issues = workbench.state(&host)["logic"][0]["issues"].clone();
         assert_eq!(issues, json!(["Frames per cycle exceeds the pulse's frames", "declare_outputs: boom"]));
         assert!(calls.borrow().1.is_empty(), "the Start that waited is refused, not run");
@@ -992,16 +1007,16 @@ mod tests {
         let mut host = FakeHost::default();
         apply(&mut workbench, &mut host, "add_device", json!({"type_id": "rf.virtual", "instance_id": "rf"})).unwrap();
         apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
-        workbench.on_event(Event::Opened { instance: "rf".into(), working_point: json!({"tunable": true}) }, &mut host);
+        event(&mut workbench,Event::Opened { instance: "rf".into(), working_point: json!({"tunable": true}) }, &mut host);
         add_open_node(&mut workbench, &mut host, json!({"type_id": "device_scan", "values": {"plan": "device:rf:frequency"}}));
         let named = |field: &str| json!({"tunable:rf": {"instance": "rf", "fields": [field]}});
-        workbench.on_event(Event::Answered { ticket: asked(&calls, "resolve_device_claims"), result: Ok(named("frequency")) }, &mut host);
+        event(&mut workbench,Event::Answered { ticket: asked(&calls, "resolve_device_claims"), result: Ok(named("frequency")) }, &mut host);
         apply(&mut workbench, &mut host, "start_node", json!({"node": "device_scan"})).unwrap();
         // A Restart waits for its own run: queued, edited meanwhile, then started with what it was started with.
-        assert_eq!(apply(&mut workbench, &mut host, "start_node", json!({"node": "device_scan"})).unwrap()["phase"], "waiting");
+        assert_eq!(apply(&mut workbench, &mut host, "start_node", json!({"node": "device_scan"})).unwrap()["phase"], "preparing");
         apply(&mut workbench, &mut host, "edit_node", json!({"node": "device_scan", "values": {"plan": "device:rf:amplitude"}})).unwrap();
-        workbench.on_event(Event::Answered { ticket: asked(&calls, "resolve_device_claims"), result: Ok(named("amplitude")) }, &mut host);
-        workbench.on_event(Event::RunFinished { run: "device_scan#1".into(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
+        event(&mut workbench,Event::Answered { ticket: asked(&calls, "resolve_device_claims"), result: Ok(named("amplitude")) }, &mut host);
+        event(&mut workbench,Event::RunFinished { run: "device_scan#1".into(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
         let spec = calls.borrow().1.last().cloned().unwrap();
         assert_eq!((spec.run.as_str(), spec.values["plan"].as_str(), spec.devices.get("tunable:rf").map(String::as_str)),
                    ("device_scan#2", Some("device:rf:frequency"), Some("rf")));
@@ -1021,19 +1036,19 @@ mod tests {
         add_open_node(&mut workbench, &mut host, json!({"type_id": "occupancy"}));
         add_open_node(&mut workbench, &mut host, json!({"type_id": "seamless_scan", "values": {"acquisition_logic": "camera_measurement"},
             "source_signal": "@logic/camera_measurement/frames"}));
-        workbench.on_event(Event::Answered { ticket: asked(&calls, "resolve_device_claims"),
+        event(&mut workbench,Event::Answered { ticket: asked(&calls, "resolve_device_claims"),
             result: Ok(json!({"tunable:mot_camera": {"instance": "mot_camera", "fields": ["exposure_seconds"]}})) }, &mut host);
         apply(&mut workbench, &mut host, "start_node", json!({"node": "seamless_scan"})).unwrap();
-        workbench.on_event(Event::RunStarted { run: "seamless_scan#1".into() }, &mut host);
-        workbench.on_event(Event::RunAcquire { run: "seamless_scan#1".into(), ticket: 7, node: "camera_measurement".into(), completion: "ready".into() }, &mut host);
+        event(&mut workbench,Event::RunStarted { run: "seamless_scan#1".into() }, &mut host);
+        event(&mut workbench,Event::RunAcquire { run: "seamless_scan#1".into(), ticket: 7, node: "camera_measurement".into(), completion: "ready".into() }, &mut host);
         assert_eq!(workbench.run("seamless_scan#1").unwrap().state, "running");
         assert_eq!(calls.borrow().1.last().unwrap().run, "camera_measurement#1");
         // While the Task runs, only its own acquisition chain starts.
-        workbench.on_event(Event::RunAcquire { run: "seamless_scan#1".into(), ticket: 8, node: "occupancy".into(), completion: "ready".into() }, &mut host);
+        event(&mut workbench,Event::RunAcquire { run: "seamless_scan#1".into(), ticket: 8, node: "occupancy".into(), completion: "ready".into() }, &mut host);
         assert_eq!(count(&calls, "acquired seamless_scan#1 8 false"), 1);
         // A run asked to stop starts nothing more.
         apply(&mut workbench, &mut host, "stop_node", json!({"node": "seamless_scan"})).unwrap();
-        workbench.on_event(Event::RunAcquire { run: "seamless_scan#1".into(), ticket: 9, node: "camera_measurement".into(), completion: "ready".into() }, &mut host);
+        event(&mut workbench,Event::RunAcquire { run: "seamless_scan#1".into(), ticket: 9, node: "camera_measurement".into(), completion: "ready".into() }, &mut host);
         assert_eq!(count(&calls, "acquired seamless_scan#1 9 false"), 1);
     }
 
@@ -1046,7 +1061,7 @@ mod tests {
         apply(&mut workbench, &mut host, "stop_node", json!({"node": "camera_measurement"})).unwrap();
         apply(&mut workbench, &mut host, "stop_node", json!({"node": "camera_measurement"})).unwrap();
         assert_eq!(count(&calls, "stop camera_measurement#1"), 2);
-        workbench.on_event(Event::RunRequest { run: "camera_measurement#1".into(), request: json!({"request": "camera_measurement#1:4", "kind": "point-selection"}) }, &mut host);
+        event(&mut workbench,Event::RunRequest { run: "camera_measurement#1".into(), request: json!({"request": "camera_measurement#1:4", "kind": "point-selection"}) }, &mut host);
         assert_eq!(count(&calls, "answer camera_measurement#1 camera_measurement#1:4 false"), 1);
         assert!(workbench.run("camera_measurement#1").unwrap().request.is_none());
     }
@@ -1057,7 +1072,7 @@ mod tests {
         let (_root, mut workbench, _calls, mut host) = rig("audit-manual", catalog());
         add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
         apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
-        workbench.on_event(Event::RunRequest { run: "camera_measurement#1".into(), request: json!({"request": "r1", "kind": "manual-axis"}) }, &mut host);
+        event(&mut workbench,Event::RunRequest { run: "camera_measurement#1".into(), request: json!({"request": "r1", "kind": "manual-axis"}) }, &mut host);
         let answer = json!({"node": "camera_measurement", "request": "r1", "response": {}});
         workbench.apply("answer_request", &answer, &Origin::Remote("ai".into()), 1, &mut host);
         assert!(workbench.take_replies().pop().unwrap().1.unwrap_err().starts_with("Physical manual-axis requests cannot be answered here"));
@@ -1073,7 +1088,7 @@ mod tests {
         workbench.apply("read_device", &json!({"device": "mot_camera"}), &Origin::Operator, 2, &mut host);
         let row = |name: &str, group: [&str; 2]| json!({"field": {"name": name, "type": "float", "label": name, "default": 0.0}, "current": 1.0,
             "live_write": true, "dependency_group": group});
-        workbench.on_event(Event::Answered { ticket: asked(&calls, "fields"),
+        event(&mut workbench,Event::Answered { ticket: asked(&calls, "fields"),
             result: Ok(json!([row("exposure_seconds", ["exposure_seconds", "gain"]), row("gain", ["gain", "exposure_seconds"])])) }, &mut host);
         assert_eq!(apply(&mut workbench, &mut host, "tune_device", json!({"device": "mot_camera", "field": "gain", "value": 2.0})).unwrap_err(),
                    "gain: Protected by camera_measurement");
@@ -1124,7 +1139,7 @@ mod tests {
         let panel = host.add_panel("", "@logic/camera_measurement/frames", "image", 1, json!({})).unwrap();
         workbench.panel_added(&panel);
         workbench.panel_selection(&panel, "@logic/camera_measurement/frames", Some(&json!({"plot_kind": "image", "selector_kind": "area"})), &json!({}));
-        workbench.on_event(Event::Answered { ticket: asked(&calls, "selection_patch"), result: Ok(json!({"frames_per_cycle": 3})) }, &mut host);
+        event(&mut workbench,Event::Answered { ticket: asked(&calls, "selection_patch"), result: Ok(json!({"frames_per_cycle": 3})) }, &mut host);
         apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
         workbench.panel_closed(&panel);
         assert_eq!(workbench.node("camera_measurement").unwrap().draft.values["frames_per_cycle"], 3);
@@ -1146,4 +1161,267 @@ mod tests {
         assert_eq!(apply(&mut workbench, &mut host, "run_recipe", json!({"name": "trap_lifetime", "parameters": parameters})).unwrap_err(),
                    "Recipe followers must be standing processors, not device executions");
     }
+    fn acquisition_pair(checking: bool) -> (Workbench, Rc<RefCell<Calls>>, FakeHost) {
+        let mut catalog = catalog();
+        if checking { catalog["types"][2]["node"]["queries"] = json!(["admit"]); }
+        let (_root, mut wb, calls, mut host) = rig("audit-isolated", catalog);
+        add_open_node(&mut wb, &mut host, json!({"type_id":"camera_measurement"}));
+        add_open_node(&mut wb, &mut host, json!({"type_id":"seamless_scan", "values":{"acquisition_logic":"camera_measurement"},"source_signal":"@logic/camera_measurement/frames"}));
+        apply(&mut wb,&mut host,"start_node",json!({"node":"seamless_scan"})).unwrap();
+        event(&mut wb,Event::RunStarted{run:"seamless_scan#1".into()},&mut host);
+        event(&mut wb,Event::RunAcquire{run:"seamless_scan#1".into(),ticket:55,node:"camera_measurement".into(),completion:"ready".into()},&mut host);
+        (wb,calls,host)
+    }
+    #[test]
+    fn parent_stop_and_checking_acquisition() {
+        let (mut wb,calls,mut host)=acquisition_pair(true);
+        assert!(wb.node("camera_measurement").unwrap().start_after_check.is_some());
+        apply(&mut wb,&mut host,"stop_node",json!({"node":"seamless_scan"})).unwrap();
+        event(&mut wb,Event::RunFinished{run:"seamless_scan#1".into(),outcome:"stopped".into(),error:None,generation:None},&mut host);
+        let ticket=asked(&calls,"admit");
+        event(&mut wb,Event::Answered{ticket,result:Ok(json!([]))},&mut host);
+        assert!(!calls.borrow().1.iter().any(|run|run.node_id=="camera_measurement"));
+    }
+    #[test]
+    fn child_stop_during_checking() {
+        let (mut wb,calls,mut host)=acquisition_pair(true);
+        apply(&mut wb,&mut host,"stop_node",json!({"node":"camera_measurement"})).unwrap();
+        assert_eq!(count(&calls,"acquired seamless_scan#1 55 false"),1);
+    }
+    #[test]
+    fn ready_is_not_terminal() {
+        let (mut wb,calls,mut host)=acquisition_pair(false);
+        event(&mut wb,Event::RunFinished{run:"camera_measurement#1".into(),outcome:"completed".into(),error:None,generation:None},&mut host);
+        assert_eq!(count(&calls,"acquired seamless_scan#1 55 true"),0); assert_eq!(count(&calls,"acquired seamless_scan#1 55 false"),1);
+    }
+    #[test]
+    fn acquisition_completion_contract() {
+        let (mut wb,calls,mut host)=acquisition_pair(false);
+        event(&mut wb,Event::RunAcquire{run:"seamless_scan#1".into(),ticket:56,node:"camera_measurement".into(),completion:"banana".into()},&mut host);
+        assert_eq!(count(&calls,"acquired seamless_scan#1 56 false"),1); assert!(wb.node("camera_measurement").unwrap().pending.is_none());
+    }
+    #[test]
+    fn unicode_names() {
+        assert_eq!(crate::logic::name_key("Ა"), crate::logic::name_key("ა"));
+        assert_eq!(crate::logic::name_key("Straße"), crate::logic::name_key("STRASSE"));
+        assert!(crate::logic::name_problem("Ｃamera","new",[("old","Camera")]).is_some()); assert!(crate::logic::name_problem("Cam\u{200b}era","new",[]).is_some()); assert!(crate::logic::name_problem("Ｓｉｇｎａｌｓ","new",[]).is_some());
+    }
+
+    #[test]
+    fn role_apply_refreshes_editor() {
+        let mut catalog=catalog();
+        catalog["types"][4]["node"]["queries"]=json!(["editor_facts"]);
+        let (_root,mut wb,calls,mut host)=rig("audit-role",catalog);
+        add_open_node(&mut wb,&mut host,json!({"type_id":"seamless_scan"}));
+        let before=calls.borrow().2.iter().filter(|(name, ..)|name=="editor_facts").count();
+        apply(&mut wb,&mut host,"edit_device",json!({"device":"mot_camera","role":"Imaging camera"})).unwrap();
+        apply(&mut wb,&mut host,"apply_devices",json!({})).unwrap();
+        let after=calls.borrow().2.iter().filter(|(name, ..)|name=="editor_facts").count();
+        assert_eq!(wb.device_role("mot_camera"),"Imaging camera"); assert!(after>before);
+    }
+    #[test]
+    fn frozen_outputs() {
+        let mut catalog=catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id":"dynamic","kind":"node","parameters":[{"name":"output","type":"str","default":"old"}],
+            "node":{"node_kind":"processor","inputs":[{"name":"signal","delivery":"exact"}],"outputs":[],"queries":["declare_outputs"]}}));
+        let (_root,mut wb,calls,mut host)=rig("audit-frozen-outputs",catalog);
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        host.signals.push(SignalInfo{name:"@logic/camera_measurement/frames".into(),owner:"camera_measurement".into(),generation:"g1".into(),published:true,sealed:false,shape:"".into()});
+        add_open_node(&mut wb,&mut host,json!({"type_id":"dynamic","source_signal":"@logic/camera_measurement/frames"}));
+        event(&mut wb,Event::Answered{ticket:asked(&calls,"declare_outputs"),result:Ok(json!([{"name":"old"}]))},&mut host);
+        apply(&mut wb,&mut host,"start_node",json!({"node":"dynamic"})).unwrap();
+        event(&mut wb,Event::RunStarted{run:"dynamic#1".into()},&mut host);
+        apply(&mut wb,&mut host,"edit_node",json!({"node":"dynamic","values":{"output":"new"}})).unwrap();
+        event(&mut wb,Event::Answered{ticket:asked(&calls,"declare_outputs"),result:Ok(json!([{"name":"new"}]))},&mut host);
+        event(&mut wb,Event::RunFinished{run:"dynamic#1".into(),outcome:"completed".into(),error:None,generation:None},&mut host);
+        host.signals[0].generation="g2".into(); wb.follow_sources(&mut host); settle_preparations(&mut wb, &mut host);
+        let spec=calls.borrow().1.last().unwrap().clone();
+        assert_eq!(spec.values["output"],"old"); assert_eq!(spec.outputs.keys().collect::<Vec<_>>(),["old"]);
+    }
+
+    #[test]
+    fn late_ready_after_stop() {
+        let (mut wb,calls,mut host)=acquisition_pair(false);
+        apply(&mut wb,&mut host,"stop_node",json!({"node":"camera_measurement"})).unwrap();
+        event(&mut wb,Event::RunReady{run:"camera_measurement#1".into()},&mut host);
+        assert_eq!(wb.run("camera_measurement#1").unwrap().state,"stopping"); assert_eq!(count(&calls,"acquired seamless_scan#1 55 true"),0);
+    }
+    #[test]
+    fn parent_stops_only_its_child_run() {
+        let mut catalog=catalog();catalog["types"][4]["node"]["node_kind"]=json!("measurement");
+        let (_root,mut wb,_calls,mut host)=rig("audit-owned-child",catalog);
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        add_open_node(&mut wb,&mut host,json!({"type_id":"seamless_scan","values":{"acquisition_logic":"camera_measurement"},"source_signal":"@logic/camera_measurement/frames"}));
+        apply(&mut wb,&mut host,"start_node",json!({"node":"seamless_scan"})).unwrap();
+        event(&mut wb,Event::RunStarted{run:"seamless_scan#1".into()},&mut host);
+        event(&mut wb,Event::RunAcquire{run:"seamless_scan#1".into(),ticket:77,node:"camera_measurement".into(),completion:"ready".into()},&mut host);
+        event(&mut wb,Event::RunReady{run:"camera_measurement#1".into()},&mut host);
+        apply(&mut wb,&mut host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+        event(&mut wb,Event::RunFinished{run:"camera_measurement#1".into(),outcome:"stopped".into(),error:None,generation:None},&mut host);
+        event(&mut wb,Event::RunStarted{run:"camera_measurement#2".into()},&mut host);
+        event(&mut wb,Event::RunFinished{run:"seamless_scan#1".into(),outcome:"completed".into(),error:None,generation:None},&mut host);
+        assert_eq!(wb.run("camera_measurement#2").unwrap().state,"running");
+    }
+
+    #[test]
+    fn old_reply_cannot_replace_new_refresh() {
+        let mut catalog=catalog();catalog["types"][4]["node"]["queries"]=json!(["editor_facts"]);
+        let (_root,mut wb,calls,mut host)=rig("audit-refresh-reply",catalog);
+        add_open_node(&mut wb,&mut host,json!({"type_id":"seamless_scan"}));
+        let old=asked(&calls,"editor_facts");
+        apply(&mut wb,&mut host,"check_node",json!({"node":"seamless_scan"})).unwrap();
+        let fresh=asked(&calls,"editor_facts");assert_ne!(old,fresh);
+        event(&mut wb,Event::Answered{ticket:fresh,result:Ok(json!({"marker":"fresh"}))},&mut host);
+        event(&mut wb,Event::Answered{ticket:old,result:Ok(json!({"marker":"old"}))},&mut host);
+        assert_eq!(wb.node_row(wb.node("seamless_scan").unwrap(),&[])["editor_facts"]["marker"],"fresh");
+    }
+    #[test]
+    fn old_reply_cannot_touch_recreated_node() {
+        let mut catalog=catalog();catalog["types"][4]["node"]["queries"]=json!(["editor_facts"]);
+        let (_root,mut wb,calls,mut host)=rig("audit-recreate-reply",catalog);
+        add_open_node(&mut wb,&mut host,json!({"type_id":"seamless_scan"}));
+        let old=asked(&calls,"editor_facts");
+        apply(&mut wb,&mut host,"remove_node",json!({"node":"seamless_scan"})).unwrap();
+        add_open_node(&mut wb,&mut host,json!({"type_id":"seamless_scan"}));
+        let fresh=asked(&calls,"editor_facts");
+        event(&mut wb,Event::Answered{ticket:fresh,result:Ok(json!({"marker":"fresh"}))},&mut host);
+        event(&mut wb,Event::Answered{ticket:old,result:Ok(json!({"marker":"old"}))},&mut host);
+        assert_eq!(wb.node_row(wb.node("seamless_scan").unwrap(),&[])["editor_facts"]["marker"],"fresh");
+    }
+
+    #[test]
+    fn completed_run_still_opens_first_preview() {
+        let (_root,mut wb,_calls,mut host)=rig("audit-short-preview",catalog());
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        apply(&mut wb,&mut host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+        host.signals.push(SignalInfo{name:"@logic/camera_measurement/frames".into(),owner:"camera_measurement".into(),generation:"g1".into(),published:true,sealed:true,shape:"(1,1,1)".into()});
+        event(&mut wb,Event::RunFinished{run:"camera_measurement#1".into(),outcome:"completed".into(),error:None,generation:Some("g1".into())},&mut host);
+        wb.open_previews(&mut host);
+        assert_eq!(host.panels.len(),1);
+    }
+    #[test]
+    fn a_failed_preparation_preserves_the_active_run() {
+        let (_root,mut wb,calls,mut host)=rig("prepare-failure",catalog());
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        apply(&mut wb,&mut host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+        event(&mut wb,Event::RunStarted{run:"camera_measurement#1".into()},&mut host);
+        wb.apply("start_node",&json!({"node":"camera_measurement"}),&Origin::Operator,2,&mut host);
+        let ticket=wb.node("camera_measurement").unwrap().preparing.unwrap();
+        assert_eq!(wb.run("camera_measurement#1").unwrap().state,"running");
+        wb.on_event(Event::Answered{ticket,result:Err("build failed".into())},&mut host);
+        assert_eq!(wb.run("camera_measurement#1").unwrap().state,"running");
+        assert_eq!(count(&calls,"stop camera_measurement#1"),0);
+        assert_eq!(wb.node_row(wb.node("camera_measurement").unwrap(),&[])["state"],"warning");
+    }
+    #[test]
+    fn restart_to_an_unpublished_source_stops_the_previous_run() {
+        let mut catalog=catalog(); catalog["types"][3]["node"]["artifact_inputs"]=json!([]);
+        let (_root,mut wb,calls,mut host)=rig("restart-waiting",catalog);
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement", "node_id":"next_camera"}));
+        host.signals.push(SignalInfo{name:"@logic/camera_measurement/frames".into(),owner:"camera_measurement".into(),generation:"g1".into(),published:true,sealed:false,shape:"".into()});
+        add_open_node(&mut wb,&mut host,json!({"type_id":"occupancy","source_signal":"@logic/camera_measurement/frames"}));
+        apply(&mut wb,&mut host,"start_node",json!({"node":"occupancy"})).unwrap();
+        event(&mut wb,Event::RunStarted{run:"occupancy#1".into()},&mut host);
+        apply(&mut wb,&mut host,"edit_node",json!({"node":"occupancy","source_signal":"@logic/next_camera/frames"})).unwrap();
+        apply(&mut wb,&mut host,"start_node",json!({"node":"occupancy"})).unwrap();
+        assert_eq!(wb.run("occupancy#1").unwrap().state,"stopping");
+        event(&mut wb,Event::RunFinished{run:"occupancy#1".into(),outcome:"stopped".into(),error:None,generation:None},&mut host);
+        assert_eq!(calls.borrow().1.iter().filter(|run|run.node_id=="occupancy").count(),1);
+        host.signals.push(SignalInfo{name:"@logic/next_camera/frames".into(),owner:"next_camera".into(),generation:"g2".into(),published:true,sealed:false,shape:"".into()});
+        wb.follow_sources(&mut host); settle_preparations(&mut wb,&mut host);
+        assert_eq!(calls.borrow().1.last().unwrap().source_signal,"@logic/next_camera/frames");
+    }
+
+    #[test]
+    fn stopped_or_superseded_preparations_are_discarded() {
+        let (_root,mut wb,calls,mut host)=rig("prepare-cancel",catalog());
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        wb.apply("start_node",&json!({"node":"camera_measurement"}),&Origin::Operator,2,&mut host);
+        let first=wb.node("camera_measurement").unwrap().preparing.unwrap();
+        wb.apply("start_node",&json!({"node":"camera_measurement"}),&Origin::Operator,3,&mut host);
+        let second=wb.node("camera_measurement").unwrap().preparing.unwrap();
+        wb.on_event(Event::Answered{ticket:first,result:Ok(json!({"prepared":"old"}))},&mut host);
+        wb.apply("stop_node",&json!({"node":"camera_measurement"}),&Origin::Operator,4,&mut host);
+        wb.on_event(Event::Answered{ticket:second,result:Ok(json!({"prepared":"stopped"}))},&mut host);
+        assert!(calls.borrow().1.is_empty());
+        let disposed:Vec<Value>=calls.borrow().2.iter().filter(|(op,..)|op=="run.discard").map(|(_,_,params)|params["prepared"].clone()).collect();
+        assert_eq!(disposed,vec![json!("old"),json!("stopped")]);
+    }
+
+    #[test]
+    fn replacing_a_device_cancels_its_unstarted_candidate() {
+        let (_root,mut wb,calls,mut host)=rig("device-prepare-cancel",catalog());
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        wb.apply("start_node",&json!({"node":"camera_measurement"}),&Origin::Operator,2,&mut host);
+        let ticket=wb.node("camera_measurement").unwrap().preparing.unwrap();
+        wb.close_device("mot_camera",&mut host).unwrap();
+        wb.on_event(Event::Answered{ticket,result:Ok(json!({"prepared":"closed-device"}))},&mut host);
+        assert!(calls.borrow().1.is_empty());
+        assert!(calls.borrow().2.iter().any(|(op,_,params)|op=="run.discard" && params["prepared"]=="closed-device"));
+    }
+
+    #[test]
+    fn only_the_latest_device_read_can_replace_its_fields() {
+        let (_root,mut wb,calls,mut host)=rig("device-read-order",catalog());
+        wb.read_device("mot_camera",None,None).unwrap(); let old=asked(&calls,"fields");
+        wb.read_device("mot_camera",None,None).unwrap(); let fresh=asked(&calls,"fields");
+        wb.on_event(Event::Answered{ticket:fresh,result:Ok(json!({"marker":"fresh"}))},&mut host);
+        wb.on_event(Event::Answered{ticket:old,result:Ok(json!({"marker":"old"}))},&mut host);
+        assert_eq!(wb.devices["mot_camera"].fields.as_ref().unwrap()["marker"],"fresh");
+    }
+
+    #[test]
+    fn a_selection_changed_away_and_back_still_rejects_its_old_reply() {
+        let mut catalog=catalog();
+        catalog["types"][2]["node"]["selection_mappings"]=json!([{"plot_kind":"image","selector_kind":"area","draft_fields":["frames_per_cycle"]}]);
+        let (_root,mut wb,calls,mut host)=rig("selection-order",catalog);
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        let select=|wb:&mut Workbench, coordinate|{wb.panel_selection("p","@logic/camera_measurement/frames",Some(&json!({"plot_kind":"image","selector_kind":"area","coordinate":coordinate})),&json!({}));};
+        select(&mut wb,1);let old=asked(&calls,"selection_patch");
+        select(&mut wb,2);select(&mut wb,1);let fresh=asked(&calls,"selection_patch");
+        wb.on_event(Event::Answered{ticket:old,result:Ok(json!({"frames_per_cycle":2}))},&mut host);
+        assert_eq!(wb.node("camera_measurement").unwrap().draft.values["frames_per_cycle"],1);
+        wb.on_event(Event::Answered{ticket:fresh,result:Ok(json!({"frames_per_cycle":3}))},&mut host);
+        assert_eq!(wb.node("camera_measurement").unwrap().draft.values["frames_per_cycle"],3);
+    }
+
+    #[test]
+    fn restarting_a_parent_cancels_its_child_before_the_parent_finishes() {
+        let (mut wb,calls,mut host)=acquisition_pair(false);
+        apply(&mut wb,&mut host,"start_node",json!({"node":"seamless_scan"})).unwrap();
+        assert_eq!(wb.run("seamless_scan#1").unwrap().state,"stopping");
+        assert_eq!(wb.run("camera_measurement#1").unwrap().state,"stopping");
+        assert_eq!(count(&calls,"acquired seamless_scan#1 55 false"),1);
+    }
+
+    #[test]
+    fn recreating_a_node_never_reuses_a_previous_run_identity() {
+        let (_root,mut wb,calls,mut host)=rig("run-identity",catalog());
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        apply(&mut wb,&mut host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+        event(&mut wb,Event::RunFinished{run:"camera_measurement#1".into(),outcome:"completed".into(),error:None,generation:None},&mut host);
+        apply(&mut wb,&mut host,"remove_node",json!({"node":"camera_measurement"})).unwrap();
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        apply(&mut wb,&mut host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+        assert_eq!(calls.borrow().1.last().unwrap().run,"camera_measurement#2");
+        event(&mut wb,Event::RunStarted{run:"camera_measurement#2".into()},&mut host);
+        event(&mut wb,Event::RunReady{run:"camera_measurement#1".into()},&mut host);
+        assert_eq!(wb.run("camera_measurement#2").unwrap().state,"running");
+        assert!(!wb.run("camera_measurement#2").unwrap().ready);
+    }
+
+    #[test]
+    fn queued_lifecycle_replies_cannot_open_or_fail_a_replacement() {
+        let (_root,mut wb,_calls,mut host)=rig("lifecycle-reply",catalog());
+        apply(&mut wb,&mut host,"add_node",json!({"type_id":"camera_measurement"})).unwrap();
+        let current=std::sync::Arc::new(std::sync::atomic::AtomicU64::new(2));
+        let opened=||Event::Opened{instance:node_instance("camera_measurement"),working_point:Value::Null};
+        wb.on_event(Event::Lifecycle{current:current.clone(),revision:1,event:Box::new(opened())},&mut host);
+        assert_eq!(wb.node("camera_measurement").unwrap().instance,crate::logic::Instance::Opening);
+        wb.on_event(Event::Lifecycle{current:current.clone(),revision:2,event:Box::new(opened())},&mut host);
+        wb.on_event(Event::Lifecycle{current,revision:1,event:Box::new(Event::Failed{instance:node_instance("camera_measurement"),error:"old open failed".into()})},&mut host);
+        assert_eq!(wb.node("camera_measurement").unwrap().instance,crate::logic::Instance::Open);
+    }
+
 }

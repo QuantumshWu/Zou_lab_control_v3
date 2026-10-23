@@ -56,6 +56,7 @@ $version = "$today.$(if ($previous -match "^$([regex]::Escape($today))\.(\d+)$")
 $built = Get-ZlcDevProducts
 $complete = -not @($ZlcProductNames | Where-Object { -not (Test-Path -LiteralPath (Join-Path $built $_)) }).Count
 if (-not ($complete -and (Get-ZlcProductsStamp $built) -eq $stamp)) { $built = Invoke-ZlcBuild $stamp }
+if ((Get-ZlcSourceStamp) -ne $stamp) { throw 'Rust sources changed during the build. Commit the intended sources and build again before publishing.' }
 # A release names no folder of the machine it was built on (dev.ps1 remaps every source path).
 $machine = @((Get-ZlcCheckout), $env:USERPROFILE, (Get-ZlcToolsRoot)) | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
 foreach ($name in $ZlcProductNames) {
@@ -74,6 +75,7 @@ $files = [ordered]@{}
 foreach ($program in $ZlcPrograms) { $files["$program.exe"] = Join-Path $built 'zlc-launch.exe' }
 foreach ($name in $ZlcEngineNames) { $files["bin\engine\$name"] = Join-Path $built $name }
 $files['bin\ai\zlc-mcp.exe'] = Join-Path $built 'zlc-mcp.exe'
+if ((Get-ZlcSourceStamp) -ne $stamp) { throw 'Rust sources changed before staging the release.' }
 # Files a previous release had that this one does not (a renamed module) go.
 foreach ($folder in 'bin\engine', 'bin\ai') {
     $full = Join-Path $root $folder
@@ -107,6 +109,7 @@ try {
     }
 }
 finally { $archive.Dispose() }
+if ((Get-ZlcSourceStamp) -ne $stamp) { throw 'Rust sources changed before recording the release.' }
 $release = [ordered]@{ version = $version; tag = "v$version"; source = $stamp; commit = $commit
                        asset = [ordered]@{ name = $asset; size = (Get-Item -LiteralPath $zip).Length; sha256 = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() } }
 Set-Content -LiteralPath $record -Value ($release | ConvertTo-Json -Depth 3) -Encoding ascii

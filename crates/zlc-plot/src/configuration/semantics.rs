@@ -382,7 +382,16 @@ pub fn rebased_spec(schema: &PlotSchema, kind: PlotKind, values: &ValueMap) -> R
     let vocabulary: ValueMap = ["kind", "cell_kind"].into_iter().filter_map(|name| values.get(name).map(|value| (name, value.clone()))).collect();
     let candidate = if vocabulary.is_empty() { candidate } else { composed_spec(Some(schema), &candidate, &vocabulary)? };
     let names: HashSet<String> = describe_semantics(Some(schema), &candidate, &DEFAULT_LAYOUT)?.fields.into_iter().map(|field| field.name).collect();
-    let carried: ValueMap = values.iter().filter(|(name, _)| names.contains(*name)).map(|(name, value)| (name, value.clone())).collect();
+    let rows = fate_row_axes(schema, &candidate, None, None)?;
+    let mut carried = ValueMap::new();
+    for (name, value) in values.iter().filter(|(name, _)| names.contains(*name)) {
+        if is_scope_fate(value) {
+            let admitted = rows.iter().find(|axis| fate_field_name(axis) == name)
+                .map(|axis| axis_admits_scope(schema, axis, value)).transpose()?.unwrap_or(false);
+            if !admitted { continue; }
+        }
+        carried.insert(name, value.clone());
+    }
     composed_spec(Some(schema), &candidate, &carried)
 }
 

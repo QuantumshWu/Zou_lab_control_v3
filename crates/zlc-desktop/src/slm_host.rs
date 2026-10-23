@@ -86,7 +86,7 @@ impl SlmHost {
         let mut changed = false;
         for (plot, given) in value["plots"].as_object().into_iter().flatten() {
             let dataset = lent.dataset(&given["dataset"])?;
-            let source = Source { schema: dataset.block.schema().clone(), data: SourceData::Dense(dataset.block),
+            let source = Source { repeat_counts: None, schema: dataset.block.schema().clone(), data: SourceData::Dense(dataset.block),
                                   block_id: dataset.block_id.into(), generation: dataset.generation.into(), revision: dataset.revision, window: None };
             editor.reads.insert(plot.clone(), EditorRead { source: Arc::new(source) });
             let text = |name: &str| given[name].as_str().unwrap_or("").to_owned();

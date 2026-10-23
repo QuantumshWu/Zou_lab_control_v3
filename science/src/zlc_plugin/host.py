@@ -294,6 +294,7 @@ class Instance:
         #: ``device=<identity>``: how this device's own log lines end (v2 identity_token).
         self.log_token: str | None = None
         self.runs: dict[str, Run] = {}
+        self.prepared: dict[str, tuple[object, dict[str, Any]]] = {}
         self.lane: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._thread = threading.Thread(target=self._serve, name=f"zlc-lane-{name}", daemon=True)
         self._thread.start()
@@ -607,6 +608,8 @@ def _make_safe(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
 
 def _query(instance: Instance, params: dict[str, Any]) -> Any:
     name = str(params["name"])
+    if name == "prepare_run":
+        return _prepare_run(instance, params)
     declared = instance.declared
     if isinstance(declared, NodeType):
         if name == "selection_patch":
@@ -723,12 +726,45 @@ def declared_selection_patch(declared: NodeType, params: dict[str, Any]) -> Any:
     return None
 
 
+def _prepare_run(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
+    import uuid
+    declared = instance.node()
+    devices = Run.proxies(instance, dict(params.get("devices") or {}), run=None)
+    arguments = dict(_projected(declared.project, params.get("values")))
+    arguments.update(devices)
+    arguments.update({f"{key}_key": info.get("instance") for key, info in (params.get("devices") or {}).items()})
+    arguments.update(params.get("resources") or {})
+    if params.get("source_signal") is not None:
+        arguments["source_signal"] = params["source_signal"]
+    _QUERYING.instance = instance
+    try:
+        node = declared if declared.build is None else declared.build(**arguments)
+    finally:
+        _QUERYING.instance = None
+    token = uuid.uuid4().hex
+    instance.prepared[token] = (node, devices)
+    return {"prepared": token}
+
+
+def _discard_run(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
+    instance.prepared.pop(str(params["prepared"]), None)
+    return {}
+
+
 def _run_start(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
     declared = instance.node()
     run_id = str(params["run"])
     if any(run.thread.is_alive() for run in instance.runs.values()):
         raise PluginError("refused", f"{instance.name} is already running")
+    prepared = None
+    if params.get("prepared"):
+        prepared = instance.prepared.pop(str(params["prepared"]), None)
+        if prepared is None:
+            raise PluginError("invalid", "the prepared run was discarded or already started")
+        for device in prepared[1].values():
+            device._run = run_id
     run = Run(instance, declared, run_id, params)
+    run.prepared_node = None if prepared is None else prepared[0]
     instance.runs[run_id] = run
     run.thread.start()
     return {"run": run_id}
@@ -737,7 +773,7 @@ def _run_start(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
 _HANDLERS: dict[str, Callable[[Instance, dict[str, Any]], Any]] = {
     "open": _open, "configure": _configure, "close": _close, "spi": _spi, "command": _command,
     "fields": _fields, "tune": _tune, "values": _values, "make_safe": _make_safe, "query": _query, "publish": _publish,
-    "run.start": _run_start,
+    "run.start": _run_start, "run.discard": _discard_run,
 }
 
 
@@ -794,6 +830,7 @@ class Run:
         self.instance = instance
         self.declared = declared
         self.run_id = run_id
+        self.prepared_node = None
         self.params = params
         self.cancel = threading.Event()
         #: seal_terminal's facts: sealed runs ignore a later Stop.
@@ -897,15 +934,17 @@ class Run:
         process = self.instance.process
         outcome, result, error = "completed", None, None
         try:
-            values = _projected(self.declared.project, self.params.get("values"))
-            devices = self.params.get("devices", {})
-            arguments: dict[str, Any] = dict(values)
-            arguments.update(self.proxies(self.instance, devices, run=self.run_id))
-            arguments.update({f"{argument}_key": info.get("instance") for argument, info in devices.items()})
-            arguments.update(self.params.get("resources", {}))
-            if self.params.get("source_signal") is not None:
-                arguments["source_signal"] = self.params["source_signal"]
-            node = self.declared if self.declared.build is None else self.declared.build(**arguments)
+            node = self.prepared_node
+            if node is None:
+                values = _projected(self.declared.project, self.params.get("values"))
+                devices = self.params.get("devices", {})
+                arguments: dict[str, Any] = dict(values)
+                arguments.update(self.proxies(self.instance, devices, run=self.run_id))
+                arguments.update({f"{argument}_key": info.get("instance") for argument, info in devices.items()})
+                arguments.update(self.params.get("resources", {}))
+                if self.params.get("source_signal") is not None:
+                    arguments["source_signal"] = self.params["source_signal"]
+                node = self.declared if self.declared.build is None else self.declared.build(**arguments)
             result = self._process(node) if self.declared.kind is NodeKind.PROCESSOR else node.execute(self.context)
             if self.stop_accepted or self.cancel.is_set():
                 outcome = "stopped"

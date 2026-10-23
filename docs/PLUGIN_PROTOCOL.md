@@ -159,7 +159,9 @@ spawned -> ready -> open -> (idle <-> running) -> closing -> closed
 | handshake (process) | `hello {protocol, session}` | creates its block arena | `{protocol, pid, python, sdk}` |
 | open | `open {instance, type_id, module, parameters, simulation}` | imports the type's module; device: `factory(instance, projected parameters)` builds and opens the adapter; node: keeps the draft | `{state, tunable, reads}` |
 | configure | `configure {instance, parameters}` | device: `adapter.reconfigure(values)` or refuses | `{state}` |
-| start (node) | `run.start {instance, run, values, devices, resources, source_signal, run_directory, origin}` | builds the node (`build(**values, **devices, **{arg_key: instance})`), runs `execute(ctx)` on its run thread | `{run}` immediately; terminal via `run.finished` event |
+| prepare (node) | `query {instance, name: "prepare_run", values, devices, resources, source_signal}` | projects and builds a candidate with read-only device proxies; the active run is untouched | `{prepared: token}` |
+| discard (node) | `run.discard {instance, prepared}` | releases an unstarted candidate; idempotent | `{}` |
+| start (node) | `run.start {instance, run, prepared?, values, devices, resources, source_signal, run_directory, origin}` | consumes the prepared candidate and binds its proxies to the acquired run; without a token, builds on the run thread for direct SDK clients | `{run}` immediately; terminal via `run.finished` event |
 | stop (node) | event `run.stop {instance, run}` | sets the run's cancel flag | none |
 | health | `ping` | answered by the reader thread (proves the interpreter and GIL are alive) | `{}` |
 | catalogue (process) | `describe {packages}` | imports every leaf module on a thread of its own | the descriptor document (section 2) |

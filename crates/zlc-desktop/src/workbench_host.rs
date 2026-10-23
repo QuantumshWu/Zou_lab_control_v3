@@ -178,9 +178,12 @@ impl Runs {
 /// One instance's open/close turns: a board replaced by one with the same node closes it and
 /// opens it again at once, and the open must not reach the host before the close has.
 #[derive(Default)]
-struct Gate { done: Mutex<u64>, ready: std::sync::Condvar }
+struct Gate { done: Mutex<u64>, ready: std::sync::Condvar, current: Arc<std::sync::atomic::AtomicU64> }
 
 impl Gate {
+    fn event(&self, turn: u64, event: Event) -> Event {
+        Event::Lifecycle { current: self.current.clone(), revision: turn + 1, event: Box::new(event) }
+    }
     /// Run `work` once every earlier turn has run (an earlier turn that failed still counts as run).
     fn run<T>(&self, turn: u64, work: impl FnOnce() -> T) -> T {
         struct Next<'a>(&'a Gate, u64);
@@ -258,7 +261,7 @@ fn save_figure(params: &Value, lent: &Lent, directory: Option<std::path::PathBuf
     let path = run_path(directory.as_ref(), &params["path"])?;
     let source = |dataset: &Value| -> Result<Source, String> {
         let dataset = lent.dataset(dataset)?;
-        Ok(Source { schema: dataset.block.schema().clone(), data: SourceData::Dense(dataset.block), block_id: dataset.block_id.into(),
+        Ok(Source { repeat_counts: None, schema: dataset.block.schema().clone(), data: SourceData::Dense(dataset.block), block_id: dataset.block_id.into(),
                     generation: dataset.generation.into(), revision: dataset.revision, window: None })
     };
     let array = |reference: &Value| -> Result<Option<OverlayArray>, String> {
@@ -526,6 +529,7 @@ impl Builtin {
         let mut stand = self.0.borrow_mut();
         let entry = stand.lifecycles.entry(instance.to_owned()).or_insert_with(|| (0, Arc::new(Gate::default())));
         entry.0 += 1;
+        entry.1.current.store(entry.0, std::sync::atomic::Ordering::Release);
         (entry.0 - 1, entry.1.clone())
     }
 
@@ -585,10 +589,10 @@ impl Plugins for Builtin {
         let group = if group.is_object() { group } else { json!({}) };
         let bench = self.bench().filter(|_| type_id == zlc_fabric::REMOTE_TYPE);
         let (turn, gate) = self.turn(instance);
-        let started = self.spawn("open", move |host| gate.run(turn, || match match &bench { Some(bench) => bench.open(host, &name, &parameters), None => host.open(&name, &kind, parameters, group) } {
+        let started = self.spawn("open", move |host| gate.event(turn, gate.run(turn, || match match &bench { Some(bench) => bench.open(host, &name, &parameters), None => host.open(&name, &kind, parameters, group) } {
             Ok(point) => Event::Opened { instance: name, working_point: point },
             Err(error) => Event::Failed { instance: name, error: error.to_string() },
-        }));
+        })));
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Failed { instance: instance.into(), error }); }
     }
     fn close(&mut self, instance: &str) {
@@ -606,11 +610,11 @@ impl Plugins for Builtin {
         }
         let (name, bench) = (instance.to_owned(), self.bench());
         let (turn, gate) = self.turn(instance);
-        let started = self.spawn("close", move |host| gate.run(turn, || {
+        let started = self.spawn("close", move |host| gate.event(turn, gate.run(turn, || {
             // A published device is taken back from the bench first (Shut down withdraws, as v2's did).
             if let Some(bench) = &bench { bench.withdraw_if_published(&name); }
             Event::Closed { error: host.close(&name).err().map(|error| error.to_string()), instance: name }
-        }));
+        })));
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Closed { instance: instance.into(), error: Some(error) }); }
     }
     fn query(&mut self, instance: &str, ticket: u64, name: &str, args: &Value) {
@@ -656,10 +660,11 @@ impl Plugins for Builtin {
         let (devices, native): (Vec<_>, Vec<_>) = { let stand = self.0.borrow(); run.devices.iter()
             .map(|(argument, instance)| (argument.clone(), instance.clone())).partition(|(_, instance)| !stand.native_instances.contains_key(instance)) };
         let keys = native.into_iter().map(|(argument, instance)| (format!("{argument}_key"), json!(instance)));
-        let request = RunRequest { values: Value::Object(run.values.clone()), devices: devices.into_iter().collect(), device_labels: run.device_labels.clone(), shared: run.shared.clone(), origin: origin(&run.origin),
+        let request = RunRequest { prepared: run.prepared.clone(), values: Value::Object(run.values.clone()), devices: devices.into_iter().collect(), device_labels: run.device_labels.clone(), shared: run.shared.clone(), origin: origin(&run.origin),
             // Build arguments beside the values: chosen artifacts and resolved workspace resources.
             resources: Value::Object(run.artifacts.iter().chain(&run.resources).map(|(key, value)| (key.clone(), value.clone())).chain(keys).collect()), source_signal: (!run.source_signal.is_empty()).then(|| run.source_signal.clone()),
             run_directory: run.directory.clone(), outputs: run.outputs.clone() };
+        let prepared = run.prepared.clone();
         let started = self.spawn("start", move |host| match host.start_run(&node, request) {
             Ok(hosted) => {
                 // Mapped, and a Stop asked while it was starting goes now: no Stop is lost.
@@ -668,6 +673,7 @@ impl Plugins for Builtin {
                 Event::RunStarted { run: ours }
             }
             Err(error) => {
+                if let Some(token) = prepared { let _ = host.call(&node, "run.discard", json!({"prepared": token}), CALL); }
                 runs.lock().unwrap().starting.remove(&ours);
                 Event::RunFinished { run: ours, outcome: "failed".into(), error: Some(json!({"type": error.kind.name(), "message": error.message})), generation: None }
             }

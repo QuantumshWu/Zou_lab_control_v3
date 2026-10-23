@@ -114,7 +114,7 @@ pub struct ArtifactInput {
     pub frame_claims: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Preview {
     pub output: String,

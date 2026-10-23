@@ -360,6 +360,7 @@ impl Workbench {
         let said = loaded.notes.clone();
         for panel in std::mem::take(&mut self.board.panels) { host.close_panel(&panel.panel); }
         for node in std::mem::take(&mut self.nodes) { self.plugins.close(&node_instance(&node.id)); }
+        self.tickets.retain(|_, ticket| !matches!(ticket, crate::Ticket::Query { .. } | crate::Ticket::Selection { .. }));
         // What the old board's regions set and read goes with it.
         self.selection_restore.clear();
         self.routed_selections.clear();

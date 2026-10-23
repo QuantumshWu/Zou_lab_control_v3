@@ -177,6 +177,44 @@ and the owning Task keeps Stop. A refused Restart leaves the current run intact
 and projects a warning with `Restart refused` until the draft changes, is reverted,
 or a Restart is accepted.
 
+Start freezes the accepted values, resources, outputs, previews and claims, then
+builds a candidate before stopping the previous run. Its command reply can be
+`{node, phase: "preparing"}`; construction errors appear as a refused Restart.
+A successful processor Restart stops its old run even if its new source has not
+published yet, and waits for that source. Stop cancels checking, construction,
+and queued starts. Acquisition ownership names a concrete child run; it cannot
+stop a later replacement run. Run sequence numbers survive node removal and
+board replacement, so late events cannot address a new run with an old ID. `ready` requires a ready event, whereas `terminal`
+requires successful completion and a source derived from the selected child.
+
+Plot Auto choices are stored as authored intent, separate from the roles resolved
+for one schema. A new scan schema recomputes defaults; valid manual roles and
+Scope coordinates survive, while a missing Scope coordinate returns to its new
+default. Saved targets omit automatically resolved fates so reopening a layout
+does not turn Auto into a fixed choice. Older explicit targets retain their
+recorded roles.
+
+The Plot header's Repeat counts come from the accepted immutable dataset prefix.
+For each Repeat axis, the other Repeat axes and the last written Point coordinate
+are held fixed. Counts measure acquired positions, even when the samples are
+scientifically invalid. Point and Cell dimensions remain their declared sizes;
+Scope, Facet and reductions do not change this summary. Stopped and Frozen
+panels keep the counts of their own snapshots.
+
+The parity regression coverage for these boundaries is kept with their owners:
+
+| Boundary | Root correction | Regression coverage |
+| --- | --- | --- |
+| Restart and follow | Prepare before replacing; stop the previous run even when the next source is unpublished | Workbench candidate failure, unpublished source and frozen output tests; real plugin construction failure |
+| Acquisition | Own concrete run IDs; cancel every pending phase; validate declared ready/terminal and source lineage | Parent/child Stop, parent Restart, replacement child, premature completion and late Ready tests |
+| Draft and device replies | Apply only current tickets, including remove/recreate and selection changes away and back | Refresh, selection, lifecycle replies, device read and role Apply tests |
+| File controls | Reconcile each normal Field independently | Browser check keeps another dirty path and its focus |
+| Names and previews | Unicode NFKC/casefold uniqueness; first preview may come from the latest completed run | Unicode names and short-run preview tests |
+| Plot configuration | Carry authored intent; resolve automatic roles against the new schema; reject new invalid edits | `restart_configuration.rs` and the v2 configuration corpus |
+| Repeat summary | Store acquired coordinate counts with immutable prefixes, independently of validity | Core mapped-coordinate coverage and Plot document header tests |
+| Engine release | Recheck the Rust source fingerprint after build and before staging/recording | Release script source-stamp guard; Python/UI stay outside that fingerprint |
+
+
 v2 status texts are kept: `not started`, `Draft: …`, `following X (waiting for the
 signal)`, `following X (source stopped)`, `failed; restarts with the source's next
 run: …`, `waiting for A, B`, `restart queued: …`, suffix ` · edited`.

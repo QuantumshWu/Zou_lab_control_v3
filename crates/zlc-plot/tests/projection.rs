@@ -457,7 +457,7 @@ fn growing_run_histograms_count_only_the_shots_they_brought() {
             let read = runtime.read_views(&[(generation.clone(), Arc::from(*name), None)]).pop().unwrap().unwrap();
             let source = Source::from_read(&read).unwrap();
             let one_block = DataBlock::new(schema(index + 1, *dtype), block(history, *dtype), validity(&history.2), None).unwrap();
-            let whole = Source { schema: source.schema.clone(), data: SourceData::Segments(vec![([0, 0], one_block)]), block_id: source.block_id.clone(),
+            let whole = Source { repeat_counts: None, schema: source.schema.clone(), data: SourceData::Segments(vec![([0, 0], one_block)]), block_id: source.block_id.clone(),
                 generation: source.generation.clone(), revision: source.revision, window: source.window };
             for (position, (plan, live)) in plans.iter().zip(owners.iter_mut()).enumerate() {
                 // The run as one block, with nothing carried but the retained edges.

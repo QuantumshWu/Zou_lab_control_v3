@@ -71,6 +71,7 @@ pub struct Live {
     pub error: Option<String>,
     pub working_point: Value,
     pub fields: Option<Value>,
+    pub fields_ticket: Option<u64>,
     /// Close once no run holds it; then open this entry, if any.
     pub close_pending: bool,
     pub reopen: Option<Entry>,
@@ -528,7 +529,7 @@ impl Workbench {
         };
         let state = if failure.is_some() { LiveState::Failed } else { LiveState::Opening };
         if failure.is_none() { self.plugins.open(&id, &entry.type_id, &Value::Object(entry.parameters.clone()), &context); }
-        self.devices.insert(id, Live { entry, state, error: failure, working_point: Value::Null, fields: None, close_pending: false, reopen: None,
+        self.devices.insert(id, Live { entry, state, error: failure, working_point: Value::Null, fields: None, fields_ticket: None, close_pending: false, reopen: None,
             risk: None, units: BTreeMap::new(), descriptor: None, published: false, identity });
     }
 
@@ -641,6 +642,7 @@ impl Workbench {
         self.settling = Some(kind);
         self.settling_since = Some(std::time::Instant::now());
         self.settle();
+        self.refresh_editors();
         Ok(json!({"opening": opened, "closing": closing.iter().map(|(id, _)| id).collect::<Vec<_>>(), "stopping": stopped}))
     }
 
@@ -667,6 +669,7 @@ impl Workbench {
     fn close_instances(&mut self, closing: Vec<(String, Option<Entry>)>, host: &mut dyn Host) -> Vec<String> {
         let mut stopped = BTreeSet::new();
         for (id, reopen) in closing {
+            self.cancel_device_starts(&id, "a required device is being changed");
             for node in self.claiming_nodes(&id) { stopped.insert(node); }
             if let Some(live) = self.devices.get_mut(&id) { live.close_pending = true; live.reopen = reopen; }
         }
@@ -789,6 +792,7 @@ impl Workbench {
         }
         let call = json!({"units": live.units});
         let ticket = self.ticket(Ticket::Fields { device: id.to_owned(), request });
+        self.devices.get_mut(id).unwrap().fields_ticket = Some(ticket);
         self.plugins.call(id, ticket, "fields", &call);
         Ok(())
     }

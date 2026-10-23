@@ -32,6 +32,17 @@ computed on what it shows, once per shown frame. ROI outputs follow the board's
 `zlc-render`) reproduces v2's Matplotlib figures on the CPU and writes PNG, PDF and
 SVG from the same drawing; the window only receives finished pixels.
 
+The finite store freezes conditional Repeat coordinate counts with each snapshot,
+using its acquired coverage rather than scientific validity. Plot titles consume
+those exact-read counts. Plot configurations keep authored choices separately
+from resolved defaults, so Auto follows schema changes and survives layout saves.
+
+Workbench Start builds a read-only candidate before replacing a run. Its frozen
+configuration owns values, resources, output names, previews and device claims;
+all cancellation paths discard pending candidates and answer acquisition callers.
+Async editor and device replies apply only to the request that is still current.
+
+
 ## Commands
 
 Every window action is a schema-described command on one bus (`crates/zlc-bus`),

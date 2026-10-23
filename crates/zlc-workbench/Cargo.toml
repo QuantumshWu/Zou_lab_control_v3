@@ -9,6 +9,9 @@ zlc-core = { path = "../zlc-core" }
 zlc-archive = { path = "../zlc-archive" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+unicode-normalization = "0.1"
+caseless = "0.2"
+unicode-general-category = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_SystemInformation"] }
