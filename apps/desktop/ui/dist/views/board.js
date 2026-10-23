@@ -569,6 +569,11 @@ export class PanelView {
         return Math.ceil(width * devicePixelRatio - 1e-3) / devicePixelRatio;
     }
     update(panel, request, failed = false) {
+        if (this.drawnSequence < 0 && !panel.frame && panel.display_size) {
+            const scale = Number(document.documentElement.dataset.frameScale) || devicePixelRatio;
+            this.fit({ width: Math.round(panel.display_size.width * scale), height: Math.round(panel.display_size.height * scale) });
+            this.canvas.style.visibility = "hidden";
+        }
         this.state = { ...panel, controls: panel.controls ?? this.state?.controls, fit: panel.fit ?? this.state?.fit,
             axes: panel.axes ?? this.state?.axes, structure: panel.structure ?? this.state?.structure,
             source_signal: panel.source_signal ?? this.state?.source_signal };

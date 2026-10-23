@@ -189,3 +189,40 @@ fn panel_header_tracks_the_accepted_finite_repeat_counts() {
         target=panel["target"].clone();
     }
 }
+
+
+#[test]
+fn a_loaded_empty_panel_reserves_its_authored_size_before_start() {
+    use zlc_plot::{configuration::resolve::Defaults, fit::FitEngine, interaction::gesture::InteractionDefaults,
+        render::panel::NativeRendererFactory, session::{EngineFitLayer, SessionServices}};
+    let services = SessionServices { renderers: Arc::new(NativeRendererFactory), fit: Arc::new(EngineFitLayer::new(Arc::new(FitEngine::default()))),
+        defaults: Arc::new(Defaults::default()), registry: None, interaction: InteractionDefaults::default() };
+    let mut document = FigureDocument::<HostRead>::new(services, None);
+    document.execute(r#"{"action":"ready","dpr":1.0,"id":1,"targets":{},"target_requests":{}}"#, BTreeMap::new(), None, None).unwrap();
+    document.finish_presentation(&BTreeSet::new(), &BTreeSet::new());
+    let panels=BTreeSet::from(["p".to_owned()]);
+    let binding=json!([{"panel":"p","signal":"frames","kind":"facet_grid","window":1,"epoch":1,"waiting":true,"reason":"No data yet"}]);
+    for (index,size) in ["1x2","4x8"].into_iter().enumerate() {
+        let command=if index==0 {json!({"action":"sync_panels","id":2,"reset_document":true,"inputs":binding,"targets":{"p":{"size":size}},"target_requests":{"p":2}})}
+            else {json!({"action":"configure","id":3,"panel":"p","size":size,"inputs":binding,"targets":{"p":{"size":"1x2"}},"target_requests":{"p":3}})};
+        let result=document.execute(&command.to_string(),BTreeMap::new(),None,None).unwrap();
+        let row=&result.state["panels"][0];
+        let (width,height)=zlc_plot::layout::LayoutConfig::default().logical_size(size,zlc_plot::layout::Kind::FacetGrid).unwrap();
+        assert_eq!(row["size"],size);
+        assert_eq!(row["target"]["size"],size, "saving before Start must keep the authored size");
+        assert_eq!(row["display_size"],json!({"width":width,"height":height}));
+        assert_eq!(row["size_choices"].as_array().unwrap().len(),9);
+        assert!(result.fronts.is_empty());
+        document.finish_presentation(&panels,&BTreeSet::new());
+    }
+    let runtime=Runtime::new();let generation=begin(&runtime,camera_schema([2,3],zlc_core::DType::U8));
+    let read=HostRead{source:Arc::new(Source::from_read(&publish(&runtime,&generation,[2,3],OwnedBuffer::from_vec(vec![1u8;6]).into())).unwrap())};
+    let mut binding=binding;binding[0]["waiting"]=json!(false);binding[0]["reason"]=json!(null);
+    let result=document.execute(&json!({"action":"sync_panels","id":4,"inputs":binding,"targets":{"p":{"size":"1x2"}},"target_requests":{"p":3}}).to_string(),
+        [("p".to_owned(),read)].into(),None,None).unwrap();
+    assert_eq!(result.state["panels"][0]["size"],"4x8");
+    let front=&result.fronts["p"];
+    let expected=zlc_plot::layout::LayoutConfig::default().logical_size("4x8",zlc_plot::layout::Kind::FacetGrid).unwrap();
+    assert_eq!((front.width,front.height),expected);
+    document.finish_presentation(&panels,&panels);
+}

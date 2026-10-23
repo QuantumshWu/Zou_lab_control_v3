@@ -29,6 +29,8 @@ export type Panel = {
   authoring_pending?: boolean;
   target_request?: number | null;
   frame?: { width: number; height: number; sequence: number };
+  /** Authored logical dimensions for an empty panel, before a raster exists. */
+  display_size?: { width: number; height: number };
   /** The size preset the panel draws at, and the presets it offers (zlc_plot PANEL_PRESETS). */
   size?: string | null;
   size_choices?: string[];

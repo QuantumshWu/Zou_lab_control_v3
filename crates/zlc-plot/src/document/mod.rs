@@ -364,12 +364,26 @@ impl<R: DocumentRead> FigureDocument<R> {
     fn placeholder(&self, key: &str, target: Option<&Json>) -> Result<Json> {
         let status = self.panel_status.get(&key.to_owned()).cloned().unwrap_or_default();
         let binding = status.binding.as_ref().ok_or_else(|| json_key_error("binding"))?;
+        let layout = &self.services.defaults.layout;
+        let mut size = target.and_then(|target| target["size"].as_str()).unwrap_or(layout.default_preset).to_owned();
+        if let Some(queue) = &status.queue {
+            for edit in queue.start.iter().chain(&queue.edits) {
+                if let Some(value) = edit.target.get("size").and_then(Value::as_str) { size = value.to_owned(); }
+            }
+        }
+        let size = layout.validate_preset(&size).map_err(PlotError::value)?;
+        let kind = crate::layout::Kind::parse(binding.kind().unwrap_or("curve")).unwrap_or(crate::layout::Kind::Curve);
+        let (width, height) = layout.logical_size(size, kind).map_err(PlotError::value)?;
+        let mut authored = target.cloned().unwrap_or_else(|| json!({}));
+        if !authored.is_object() { authored = json!({}); }
+        authored["size"] = json!(size);
         Ok(json!({
             "id": key, "title": key.rsplit('/').next().unwrap_or(key), "kind": binding.raw.get("kind").cloned().unwrap_or(Json::Null),
-            "controls": [], "axes": [], "target": target.cloned().unwrap_or(Json::Null), "focus": null,
+            "controls": [], "axes": [], "target": authored, "focus": null,
             "authoring_pending": status.authoring_pending.unwrap_or(false), "target_request": status.target_request.clone().unwrap_or(Json::Null),
             "fit": {"models": [], "selected": "", "configuration": {}, "computed": {}, "expression": "", "error": ""},
-            "size": null, "size_choices": [], "structure": null, "source_signal": null,
+            "size": size, "size_choices": crate::layout::PANEL_PRESETS.iter().map(|preset| preset.0).collect::<Vec<_>>(),
+            "display_size": {"width": width, "height": height}, "structure": null, "source_signal": null,
             "data_binding_epoch": self.panel_sources.get(&key.to_owned()).map_or(Json::Null, |source| json!(source.epoch)),
             "error": status.error.clone().map_or(Json::Null, Json::String), "message": status.message.clone().map_or(Json::Null, Json::String),
         }))

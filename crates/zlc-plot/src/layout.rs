@@ -87,6 +87,12 @@ impl LayoutConfig {
         PANEL_PRESETS.iter().find(|item| item.0 == canonical).map(|item| item.0)
             .ok_or_else(|| format!("unknown panel preset {preset:?}"))
     }
+    /// Outer card geometry is authored before any dataset or facet topology exists.
+    pub fn logical_size(&self, preset: &str, kind: Kind) -> Result<(u32, u32), String> {
+        let (width, height, margins) = panel_design_geometry(self.preset(preset)?, kind, self);
+        Ok((round_pixel((margins.left + width + margins.right) as f64 * self.display_scale),
+            round_pixel((margins.top + height + margins.bottom) as f64 * self.display_scale)))
+    }
     fn preset(&self, name: &str) -> Result<(&'static str, u32, u32), String> {
         let canonical = self.validate_preset(name)?;
         Ok(*PANEL_PRESETS.iter().find(|item| item.0 == canonical).unwrap())
@@ -358,8 +364,7 @@ pub fn resolve_surface(preset: Option<&str>, kind: Kind, options: &SurfaceOption
     let (data_width, data_height, margins) = panel_design_geometry(selected, kind, layout);
     let figure_design_width = margins.left + data_width + margins.right;
     let figure_design_height = margins.top + data_height + margins.bottom;
-    let logical_size = (round_pixel(figure_design_width as f64 * layout.display_scale),
-                        round_pixel(figure_design_height as f64 * layout.display_scale));
+    let logical_size = layout.logical_size(selected.0, kind)?;
     let dpr = options.device_pixel_ratio.unwrap_or(1.0);
     if !(dpr.is_finite() && dpr > 0.0) { return Err("device_pixel_ratio must be positive and finite".into()); }
     let physical_export_scale = options.export_scale.unwrap_or(1.0);

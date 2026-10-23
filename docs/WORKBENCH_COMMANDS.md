@@ -194,6 +194,11 @@ default. Saved targets omit automatically resolved fates so reopening a layout
 does not turn Auto into a fixed choice. Older explicit targets retain their
 recorded roles.
 
+An empty panel loaded from a layout already carries its saved size, available size
+presets and logical display dimensions. These come from the same layout geometry
+as rendered frames. Resizing and saving before Start preserve that authored size;
+the first frame fills the reserved area without changing the card's dimensions.
+
 The Plot header's Repeat counts come from the accepted immutable dataset prefix.
 For each Repeat axis, the other Repeat axes and the last written Point coordinate
 are held fixed. Counts measure acquired positions, even when the samples are
