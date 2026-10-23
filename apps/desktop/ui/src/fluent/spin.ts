@@ -61,14 +61,14 @@ function stepText(step: number): string {
 export type SpinOptions = { step(): number; bounds(): [number | null, number | null]; commit(value: number): void;
   /** QSpinBox specialValueText: this value is shown as these words (Repeats 0 = ∞). */
   special?: { value: number; text: string };
-  /** A decimal box (offers_step_edit): its step is shown in a chip that asks for another. */
+  /** A decimal box permits editing its step; every box displays the step. */
   decimal?: boolean };
 
 /** FluentDoubleSpinBox: a field with a two-cell stepper painted from its frame.
  * The wheel changes the value only once the box has the focus (otherwise the
- * page scrolls), one notch per step on the step's grid.  A decimal box shows
+ * page scrolls), one notch per step on the step's grid. Every box shows
  * its step left of the stepper (_StepChip) -- an operator who cannot see the
- * step cannot know what the arrows do -- and a click on it asks for another;
+ * step cannot know what the arrows do. Decimal steps can be edited;
  * the chip yields to digits that would not fit beside it.  A decimal longer
  * than its box is shown rounded to the box's width (v2 _visible_value); the
  * value stays the one the owner wrote (`text`), and focusing the box puts
@@ -77,7 +77,7 @@ export class SpinBox {
   readonly up = button("", () => this.stepBy(1), "step up");
   readonly down = button("", () => this.stepBy(-1), "step down");
   private wheel = 0;
-  private chip: HTMLButtonElement | null = null;
+  private chip: HTMLElement | null = null;
   /** The step the operator chose on the chip, over the owner's (setSingleStep from Edit step). */
   private chosen: number | null = null;
   /** The room the chip takes from the digits now (0 while it yields), and what it was fitted to. */
@@ -94,19 +94,20 @@ export class SpinBox {
     this.down.setAttribute("aria-label", "Decrease");
     for (const cell of [this.up, this.down]) cell.addEventListener("mousedown", event => { event.preventDefault(); input.focus(); });
     root.append(this.up, this.down);
-    if (options.decimal) {
-      // Hidden until it is fitted: the digits never start under it.
-      root.classList.add("decimal", "chip-yields");
-      const chip = this.chip = element("button", "step-chip");
+    // Every stepper explains its arrows, including fixed integer steps.
+    root.classList.add("step-hint", "chip-yields");
+    if (options.decimal) root.classList.add("decimal");
+    const chip = this.chip = options.decimal ? element("button", "step-chip") : element("span", "step-chip fixed-step");
+    chip.append(element("span"));
+    if (chip instanceof HTMLButtonElement) {
       chip.type = "button";
       chip.tabIndex = -1;
-      chip.append(element("span"));
       chip.addEventListener("mousedown", event => event.preventDefault());
       chip.addEventListener("click", () => void this.editStep());
-      root.append(chip);
-      SpinBox.owners.set(root, this);
-      SpinBox.resized.observe(root);
     }
+    root.append(chip);
+    SpinBox.owners.set(root, this);
+    SpinBox.resized.observe(root);
     input.addEventListener("wheel", event => {
       if (document.activeElement !== input || input.disabled || event.deltaY === 0) return;
       event.preventDefault();
@@ -132,7 +133,7 @@ export class SpinBox {
       this.full = null;
       if (all) input.select();
     });
-    input.addEventListener("blur", () => { this.wheel = 0; if (this.options.decimal) SpinBox.queue(this); });
+    input.addEventListener("blur", () => { this.wheel = 0; SpinBox.queue(this); });
   }
   /** What the box holds: the owner's text, whatever rounding it is shown with. */
   get text(): string { return this.full !== null && this.input.value === this.shown ? this.full : this.input.value; }
@@ -168,8 +169,9 @@ export class SpinBox {
     if (!this.chip) return;
     const text = stepText(this.step());
     setGlyph(this.chip.firstElementChild as HTMLElement, text, "chip");
-    assign(this.chip, "disabled", this.input.disabled);
-    const tip = live ? `Step ${text.slice(1)} · click to change` : `Step ${text.slice(1)}`;
+    if (this.chip instanceof HTMLButtonElement) assign(this.chip, "disabled", !live);
+    this.chip.classList.toggle("disabled", this.input.disabled);
+    const tip = live && this.options.decimal ? `Step ${text.slice(1)} · click to change` : `Step ${text.slice(1)}`;
     if (this.chip.title !== tip) this.chip.title = tip;
     if (this.fitted !== `${text} ${this.input.value}`) SpinBox.queue(this);
   }
@@ -226,7 +228,7 @@ export class SpinBox {
       const editing = document.activeElement === input;
       const full = editing || input.value !== spin.shown ? input.value : spin.full ?? input.value;
       const [low, high] = spin.options.bounds();
-      const text = editing ? full : fittedDecimal(full, digits, measured, low, high);
+      const text = editing || !spin.options.decimal ? full : fittedDecimal(full, digits, measured, low, high);
       return { width, room, text, full, editing, shown: measured(text) <= digits - room, key: `${label} ${text}` };
     });
     spins.forEach((spin, index) => {

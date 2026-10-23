@@ -252,7 +252,7 @@ button.quiet.disclosure { color: var(--text); }
 .control-table .field-control.capped > input.number, .control-table .field-control.capped > .spin { flex: 1 1 auto; }
 .control-table .field-control.capped::after { content: none; }
 .control-table .spin { flex: 1 1 auto; width: var(--spin-hint-w); max-width: none; }
-.control-table .spin.decimal { width: calc(var(--spin-hint-w) + var(--chip-reserve)); }
+.control-table .spin.step-hint { width: calc(var(--spin-hint-w) + var(--chip-reserve)); }
 .column-heading { display: flex; align-items: center; color: var(--muted-ink); white-space: nowrap; padding-bottom: var(--cap-lift); }
 .column-heading.right { justify-content: flex-end; }
 .column-heading.centre { justify-content: center; }

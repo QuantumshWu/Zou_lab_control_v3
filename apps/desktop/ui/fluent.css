@@ -355,8 +355,8 @@ select.unit-picker { flex: none; width: auto; field-sizing: content; }
 /* An edit's frame and padding are its flex floor: the stretch has the same, so the halves are even. */
 .field-control.capped:has(> input.number)::after { padding-left: calc(2 * var(--field-text-inset)); }
 /* A form's number edge is its widest box's (share_label_column number_edge_hint):
- * only a form with a decimal box reserves the step chip's room. */
-:is(.config-column, .logic-editor-body, .settings-body):not(:has(.spin.decimal)) { --number-cap: var(--number-cap-plain); }
+ * a form with a spin box reserves the step chip's room. */
+:is(.config-column, .logic-editor-body, .settings-body):not(:has(.spin.step-hint)) { --number-cap: var(--number-cap-plain); }
 .spin input { padding-right: calc(var(--combo-width) + var(--edge) + var(--qline-margin)); font-variant-numeric: tabular-nums; }
 .spin .step {
   position: absolute; right: var(--edge); width: var(--combo-width); min-height: 0; height: auto;
@@ -380,20 +380,23 @@ select.unit-picker { flex: none; width: auto; field-sizing: content; }
  * ghost in the chip's smaller font; under the pointer an ACCENT_TINT pill in
  * TEXT ink, SELECTED held down; disabled with its box.  The digits end the
  * chip's room before it, or take that room when they need it (chip-yields). */
-.spin.decimal input { padding-right: calc(var(--combo-width) + var(--edge) + var(--qline-margin) + max(0px, var(--chip-text-w, 0px) + var(--chip-chrome))); }
-.spin.decimal.chip-yields input { padding-right: calc(var(--combo-width) + var(--edge) + var(--qline-margin)); }
+.spin.step-hint input { padding-right: calc(var(--combo-width) + var(--edge) + var(--qline-margin) + max(0px, var(--chip-text-w, 0px) + var(--chip-chrome))); }
+.spin.step-hint.chip-yields input { padding-right: calc(var(--combo-width) + var(--edge) + var(--qline-margin)); }
 .spin .step-chip {
+  display: flex; align-items: center; justify-content: center;
   position: absolute; top: var(--edge); bottom: var(--edge); right: calc(2 * var(--edge) + var(--combo-width) + var(--step-chip-gap));
   height: auto; min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent;
   color: var(--muted-ink); cursor: pointer;
 }
-.spin .step-chip:hover, .spin .step-chip:active, .spin .step-chip:disabled { background: transparent; border: 0; }
+.spin .step-chip:hover, .spin .step-chip:active, .spin .step-chip.fixed-step { cursor: default; }
+.spin .step-chip.disabled, .spin .step-chip:disabled { background: transparent; border: 0; }
 /* The pill: its size the chip's ink and padding (fluent/ink.ts), its ends round. */
 .spin .step-chip > span { position: relative; display: block; border-radius: 9999px; }
-.spin .step-chip:hover > span { background: var(--accent-tint); color: var(--text); }
-.spin .step-chip:active > span { background: var(--selected); color: var(--text); }
-.spin .step-chip:disabled { color: var(--disabled-ink); cursor: default; }
-.spin .step-chip:disabled > span { background: transparent; color: var(--disabled-ink); }
+.spin button.step-chip:hover > span { background: var(--accent-tint); color: var(--text); }
+.spin button.step-chip:active > span { background: var(--selected); color: var(--text); }
+.spin .step-chip.fixed-step { cursor: default; }
+.spin .step-chip.disabled, .spin .step-chip:disabled { color: var(--disabled-ink); cursor: default; }
+.spin .step-chip.disabled > span, .spin .step-chip:disabled > span { background: transparent; color: var(--disabled-ink); }
 .spin.chip-yields .step-chip { display: none; }
 
 /* ---------- FluentScrollArea scrollbars -------------------------------- */

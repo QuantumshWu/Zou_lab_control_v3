@@ -64,9 +64,9 @@ function stepText(step) {
 }
 /** FluentDoubleSpinBox: a field with a two-cell stepper painted from its frame.
  * The wheel changes the value only once the box has the focus (otherwise the
- * page scrolls), one notch per step on the step's grid.  A decimal box shows
+ * page scrolls), one notch per step on the step's grid. Every box shows
  * its step left of the stepper (_StepChip) -- an operator who cannot see the
- * step cannot know what the arrows do -- and a click on it asks for another;
+ * step cannot know what the arrows do. Decimal steps can be edited;
  * the chip yields to digits that would not fit beside it.  A decimal longer
  * than its box is shown rounded to the box's width (v2 _visible_value); the
  * value stays the one the owner wrote (`text`), and focusing the box puts
@@ -98,19 +98,21 @@ export class SpinBox {
         for (const cell of [this.up, this.down])
             cell.addEventListener("mousedown", event => { event.preventDefault(); input.focus(); });
         root.append(this.up, this.down);
-        if (options.decimal) {
-            // Hidden until it is fitted: the digits never start under it.
-            root.classList.add("decimal", "chip-yields");
-            const chip = this.chip = element("button", "step-chip");
+        // Every stepper explains its arrows, including fixed integer steps.
+        root.classList.add("step-hint", "chip-yields");
+        if (options.decimal)
+            root.classList.add("decimal");
+        const chip = this.chip = options.decimal ? element("button", "step-chip") : element("span", "step-chip fixed-step");
+        chip.append(element("span"));
+        if (chip instanceof HTMLButtonElement) {
             chip.type = "button";
             chip.tabIndex = -1;
-            chip.append(element("span"));
             chip.addEventListener("mousedown", event => event.preventDefault());
             chip.addEventListener("click", () => void this.editStep());
-            root.append(chip);
-            SpinBox.owners.set(root, this);
-            SpinBox.resized.observe(root);
         }
+        root.append(chip);
+        SpinBox.owners.set(root, this);
+        SpinBox.resized.observe(root);
         input.addEventListener("wheel", event => {
             if (document.activeElement !== input || input.disabled || event.deltaY === 0)
                 return;
@@ -143,8 +145,7 @@ export class SpinBox {
             if (all)
                 input.select();
         });
-        input.addEventListener("blur", () => { this.wheel = 0; if (this.options.decimal)
-            SpinBox.queue(this); });
+        input.addEventListener("blur", () => { this.wheel = 0; SpinBox.queue(this); });
     }
     /** What the box holds: the owner's text, whatever rounding it is shown with. */
     get text() { return this.full !== null && this.input.value === this.shown ? this.full : this.input.value; }
@@ -185,8 +186,10 @@ export class SpinBox {
             return;
         const text = stepText(this.step());
         setGlyph(this.chip.firstElementChild, text, "chip");
-        assign(this.chip, "disabled", this.input.disabled);
-        const tip = live ? `Step ${text.slice(1)} · click to change` : `Step ${text.slice(1)}`;
+        if (this.chip instanceof HTMLButtonElement)
+            assign(this.chip, "disabled", !live);
+        this.chip.classList.toggle("disabled", this.input.disabled);
+        const tip = live && this.options.decimal ? `Step ${text.slice(1)} · click to change` : `Step ${text.slice(1)}`;
         if (this.chip.title !== tip)
             this.chip.title = tip;
         if (this.fitted !== `${text} ${this.input.value}`)
@@ -251,7 +254,7 @@ export class SpinBox {
             const editing = document.activeElement === input;
             const full = editing || input.value !== spin.shown ? input.value : spin.full ?? input.value;
             const [low, high] = spin.options.bounds();
-            const text = editing ? full : fittedDecimal(full, digits, measured, low, high);
+            const text = editing || !spin.options.decimal ? full : fittedDecimal(full, digits, measured, low, high);
             return { width, room, text, full, editing, shown: measured(text) <= digits - room, key: `${label} ${text}` };
         });
         spins.forEach((spin, index) => {
