@@ -20,6 +20,14 @@ class EchoDevice:
         self.safe = []
         self.amplitude = 0.0
 
+    def fail_close_once(self):
+        self._fail_close = True
+
+    def close(self):
+        if getattr(self, "_fail_close", False):
+            self._fail_close = False
+            raise RuntimeError("test device handle is still held")
+
     def tunable_fields(self):
         return (TunableField(AuthoringField("amplitude", "float", "Amplitude", 0.0, unit="dBm", minimum=-30.0, maximum=20.0),
                              self.amplitude, True, ("amplitude",)),)
@@ -85,7 +93,24 @@ def _served(key, values):
     return Opened(device, lambda: None, admit_peers=device.admitted.append)
 
 
+class FailedInitDevice:
+    def __init__(self, path):
+        self.path = path
+        self.close_calls = 0
+
+    @property
+    def identity(self):
+        raise RuntimeError("initialization verification failed")
+
+    def close(self):
+        self.close_calls += 1
+        if self.close_calls == 1:
+            raise RuntimeError("initial cleanup failed; handle retained")
+        Path(self.path).write_text("released", encoding="utf-8")
+
+
 DEVICE_TYPES = (
+    DeviceType("test.failed_init", "test", FILE, ("test.echo",), factory=lambda key, values: FailedInitDevice(values["path"])),
     DeviceType("test.served", "test", SERVED, ("test.echo",), factory=_served,
                announce=("test.echo", lambda values: {"port": int(values["port"])})),
     DeviceType("test.echo", "test", SCHEMA, ("test.echo",), factory=lambda key, values: EchoDevice(values),

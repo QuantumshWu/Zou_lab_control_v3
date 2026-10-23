@@ -64,6 +64,7 @@ export type DeviceRow = {
   parameters?: Record<string, unknown>;
   controls: WorkbenchControl[];
   state: "draft" | "opening" | "open" | "closing" | "failed";
+  close_failed?: boolean;
   pending: "add" | "change" | "remove" | null;
   error: string | null;
   claimed_by: { node_id: string; run: string; protected_fields: string[] }[];

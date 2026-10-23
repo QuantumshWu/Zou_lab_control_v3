@@ -196,7 +196,13 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     assert_eq!(overran.kind, ErrorKind::Timeout, "{overran}");
     assert_eq!(failure().0, ["slow"]);
     host.spi("echo", "frame", json!([2, 1]), json!({}), Duration::from_secs(5)).unwrap();
-    host.open("slow", "test.echo", json!({}), json!({})).unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match host.open("slow", "test.echo", json!({}), json!({})) {
+            Ok(_) => break,
+            Err(error) => { assert!(error.message.contains("still releasing"), "{error}"); assert!(std::time::Instant::now() < until); std::thread::sleep(Duration::from_millis(50)); }
+        }
+    }
     host.spi("slow", "frame", json!([2, 1]), json!({}), Duration::from_secs(5)).unwrap();
     // A crash ends the process: every instance in it fails (v2: the device's error
     // state), and each opens again in a new one.
@@ -289,5 +295,51 @@ fn a_run_follows_only_an_exact_input_and_what_ends_early_leaves_with_its_signals
     assert!(!present(doubled) && present(frames));
     host.stop_run("holder", &holder).unwrap();
     assert_eq!(finished(&holder).0, "stopped");
+    host.shutdown();
+}
+
+
+#[test]
+fn sdk_lifecycle_acknowledgements_and_cleanup_keep_exclusive_ownership() {
+    let Some(python) = std::env::var_os("ZLC_PLUGIN_PYTHON") else { return };
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/python_lifecycle.py");
+    let output = std::process::Command::new(python).arg(script).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+
+#[test]
+fn a_failed_device_close_retains_ownership_until_cleanup_succeeds() {
+    let Some((host, _runtime, _safe, _events)) = host() else { return };
+    host.open("keeper", "test.echo", json!({}), json!({})).unwrap();
+    for name in ["n100_com3", "pylon_camera"] {
+        host.open(name, "test.echo", json!({}), json!({})).unwrap();
+        host.spi(name, "fail_close_once", json!([]), json!({}), Duration::from_secs(5)).unwrap();
+        assert!(host.close(name).unwrap_err().message.contains("still held"));
+        assert!(host.instances().iter().any(|entry| entry.0 == name));
+        assert_eq!(host.open(name, "test.echo", json!({}), json!({})).unwrap_err().kind, ErrorKind::Refused);
+        host.close(name).unwrap();
+        for _ in 0..20 {
+            host.open(name, "test.echo", json!({}), json!({})).unwrap();
+            host.close(name).unwrap();
+        }
+    }
+    host.shutdown();
+}
+
+
+#[test]
+fn close_releases_a_handle_left_by_a_failed_init_before_host_admission() {
+    let Some((host, _runtime, _safe, _events)) = host() else { return };
+    host.open("keeper", "test.echo", json!({}), json!({})).unwrap();
+    let marker = std::env::temp_dir().join(format!("zlc-init-cleanup-{}.txt",uuid::Uuid::new_v4()));
+    let error=host.open("bad", "test.failed_init", json!({"path":marker}), json!({})).unwrap_err();
+    assert!(error.message.contains("verification failed"));
+    assert!(!marker.exists());
+    assert!(!host.instances().iter().any(|entry|entry.0=="bad"));
+    host.close("bad").unwrap();
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(),"released");
+    std::fs::remove_file(marker).unwrap();
+    host.open("bad", "test.echo", json!({}), json!({})).unwrap();
     host.shutdown();
 }

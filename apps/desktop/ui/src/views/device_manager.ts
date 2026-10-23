@@ -332,15 +332,15 @@ export class DeviceManagerView implements View {
   /** v2 set_loaded_devices: a row per device the session holds, its role and type; Control, Log, Close
    * and the Remote switch, all of them disabled while a device change runs (v2 _refresh_controls). */
   private updateLoaded(devices: DeviceRow[], busy: boolean): void {
-    const loaded = devices.filter(device => LOADED.has(device.state));
-    const signature = JSON.stringify([loaded.map(device => [device.instance_id, device.role, device.type_id, device.published, device.publishable]), busy]);
+    const loaded = devices.filter(device => LOADED.has(device.state) || device.close_failed);
+    const signature = JSON.stringify([loaded.map(device => [device.instance_id, device.role, device.type_id, device.state, device.close_failed, device.error, device.published, device.publishable]), busy]);
     if (this.loadedList.dataset.signature === signature) return;
     this.loadedList.dataset.signature = signature;
     this.loadedList.replaceChildren(...loaded.map(device => {
       const line = element("div", "list-row");
       const identity = element("div", "list-identity");
-      identity.append(elided(device.role, "list-title"), element("span", "note list-detail", device.type_id));
-      line.title = `Internal ID: ${device.instance_id}`;
+      identity.append(elided(device.role, "list-title"), element("span", "note list-detail", `${device.type_id}${device.close_failed ? " · Close failed" : ""}`));
+      line.title = `Internal ID: ${device.instance_id}${device.error ? `\n${device.error}` : ""}`;
       const control = command("Control", () => this.openControl(device.instance_id));
       const log = command("Log", () => this.openLog(device.instance_id));
       // Close ends hardware: the destructive face, never the light blue of Control.
@@ -350,8 +350,9 @@ export class DeviceManagerView implements View {
         `${device.role}: ${on ? "publishing on" : "withdrawing from"} the bench fabric`), "Remote");
       setChecked(remote, Boolean(device.published));
       for (const button of [control, log, close]) button.disabled = busy;
+      control.disabled = busy || device.state !== "open";
       // A device another computer publishes is published there, not here (publish_device refuses it).
-      remote.disabled = busy || (!device.publishable && !device.published);
+      remote.disabled = busy || device.state !== "open" || (!device.publishable && !device.published);
       if (device.remote) remote.title = `Published by ${device.remote.publisher}`;
       line.append(identity, control.root, log.root, close.root, remote);
       return line;

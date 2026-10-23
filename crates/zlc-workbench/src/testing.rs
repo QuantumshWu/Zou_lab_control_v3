@@ -1424,4 +1424,31 @@ mod tests {
         assert_eq!(wb.node("camera_measurement").unwrap().instance,crate::logic::Instance::Open);
     }
 
+    #[test]
+    fn a_failed_device_close_is_visible_and_apply_retries_close_before_open() {
+        let (_root,mut wb,calls,mut host)=rig("failed-close",catalog());
+        wb.close_device("mot_camera",&mut host).unwrap();
+        event(&mut wb,Event::Closed{instance:"mot_camera".into(),error:Some("handle still held".into())},&mut host);
+        assert!(wb.devices["mot_camera"].close_failed);
+        assert_eq!(wb.device_rows().iter().find(|row| row["instance_id"]=="mot_camera").unwrap()["close_failed"],true);
+        assert!(wb.devices["mot_camera"].error.as_ref().unwrap().contains("handle still held"));
+        let opened=count(&calls,"open mot_camera camera.virtual_mot");
+        apply(&mut wb,&mut host,"apply_devices",json!({})).unwrap();
+        assert_eq!(count(&calls,"open mot_camera camera.virtual_mot"),opened);
+        assert_eq!(count(&calls,"close mot_camera"),2);
+        event(&mut wb,Event::Closed{instance:"mot_camera".into(),error:None},&mut host);
+        assert_eq!(count(&calls,"open mot_camera camera.virtual_mot"),opened+1);
+        assert!(!wb.devices["mot_camera"].close_failed);
+    }
+
+    #[test]
+    fn shutdown_never_reports_success_while_a_device_close_failed() {
+        let (_root,mut wb,_calls,mut host)=rig("shutdown-refusal",catalog());
+        apply(&mut wb,&mut host,"shut_down_devices",json!({})).unwrap();
+        event(&mut wb,Event::Closed{instance:"mot_camera".into(),error:Some("handle still held".into())},&mut host);
+        event(&mut wb,Event::Closed{instance:"sequencer".into(),error:None},&mut host);
+        assert!(wb.apparatus_state()["report"]["text"].as_str().unwrap().contains("did not shut down"));
+        assert!(wb.devices["mot_camera"].close_failed);
+    }
+
 }

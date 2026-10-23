@@ -596,22 +596,31 @@ impl PluginHost {
 
     fn close_within(&self, instance: &str, deadline: Duration) -> Result<(), CallError> {
         let inner = &self.inner;
-        let (serving, descriptor) = {
+        let serving = {
             let state = inner.state.lock().unwrap();
-            let entry = state.instances.get(instance).ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not open")))?;
-            (entry.serving.clone(), entry.descriptor.clone())
+            state.instances.get(instance).map(|entry| (entry.serving.clone(), entry.descriptor.clone()))
+        };
+        let Some((serving, descriptor)) = serving else {
+            // Init can fail after acquiring a handle but before admission. Its
+            // SDK lane owns that cleanup even though no live host entry exists.
+            let processes: Vec<_> = inner.processes.lock().unwrap().values()
+                .filter(|process| process.alive.load(Ordering::Acquire) && !process.retiring.load(Ordering::Acquire)).cloned().collect();
+            for process in processes { process.request("close", json!({"instance": instance}), deadline)?; }
+            return Ok(());
         };
         let process = match serving {
             Serving::Process(process) => process,
             Serving::Remote(endpoint) => { inner.forget(instance, &descriptor); endpoint.close(); return Ok(()); }
         };
-        let closed = process.request("close", json!({"instance": instance}), deadline);
+        // A refused/failed close still owns its handle. Keep the host entry so
+        // another Init cannot open over it; a later Close retries that owner.
+        process.request("close", json!({"instance": instance}), deadline)?;
         inner.forget(instance, &descriptor);
         // A node closed (removed, or its layout replaced) takes its signals with it (v2 retire).
         if !descriptor.is_device() { let _ = inner.runtime.withdraw(public_instance(instance)); }
         process.instances.lock().unwrap().remove(instance);
         inner.release_process(&process);
-        closed.map(|_| ())
+        Ok(())
     }
 
     /// Refused while a run claims `instance` or another core holds it.

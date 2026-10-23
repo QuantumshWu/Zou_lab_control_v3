@@ -202,8 +202,8 @@ class Process:
                 instance.stop_run(str(params.get("run")))
         elif op == "abandon":
             # The core gave up on an instance whose call overran its deadline (§7): it
-            # leaves now, so it can be opened again; its lane ends when that call returns.
-            instance = self.instances.pop(str(params.get("instance")), None)
+            # rejects new opens until its lane returns and releases its device.
+            instance = self.instances.get(str(params.get("instance")))
             if instance is not None:
                 instance.abandon()
 
@@ -254,11 +254,17 @@ class Process:
         name = str(params.get("instance", ""))
         instance = self.instances.get(name)
         if instance is None:
+            if op == "close":
+                self.reply(identity, {"state": "closed"})
+                return None
             if op != "open":
                 self.reply(identity, error=PluginError("invalid", f"no open instance {name!r}"))
                 return None
             instance = Instance(self, name)
             self.instances[name] = instance
+        if instance.abandoned:
+            self.reply(identity, error=PluginError("refused", f"{name} is still releasing its previous operation; retry after cleanup completes"))
+            return None
         if op == "spi" and instance.concurrent(str(params.get("method", ""))):
             # A call the device declared it answers beside its lane (a cancel
             # while a playback holds the lane): on a thread of its own.
@@ -302,11 +308,23 @@ class Instance:
     def _serve(self) -> None:
         while True:
             message = self.lane.get()
-            if message is None or not self._handle(message):
-                break
-        if self.abandoned:
-            # Its overrunning call has returned: what the device holds is let go.
-            self.shutdown()
+            if message is not None:
+                if self.abandoned:
+                    self.process.reply(int(message["id"]), error=PluginError("cancelled", "the instance is releasing an overdue operation"))
+                    continue
+                if self._handle(message):
+                    continue
+            if self.abandoned:
+                # An overrun owns its handle until it actually returns. If
+                # cleanup fails, keep this lane available for a cleanup retry.
+                try:
+                    self.close_device()
+                except BaseException as error:
+                    print(f"{self.name}: cleanup after timeout failed: {error}", file=sys.stderr)
+                    self.abandoned = False
+                    continue
+                self._detach()
+            return
 
     def abandon(self) -> None:
         self.abandoned = True
@@ -338,30 +356,42 @@ class Instance:
                 self.process.reply(identity, error=PluginError("unknown_op", f"unknown operation {op!r}"))
                 return True
             result = handler(self, params)
-        except _Invalid as error:
-            self.process.reply(identity, error=error.cause, kind="invalid")
-            return True
-        except BaseException as error:  # noqa: BLE001 -- every failure is reported, not raised
-            self.process.reply(identity, error=error)
-            if op in ("open", "close"):
-                # Nothing half-open is kept; a failed close is still closed here.
-                self.process.instances.pop(self.name, None)
-                return False
-            return True
-        self.process.reply(identity, result, plain=bool((message.get("p") or {}).get("plain")))
+        except BaseException as error:  # noqa: BLE001 -- report the failure and keep cleanup ownership
+            cause = error.cause if isinstance(error, _Invalid) else error
+            keep = True
+            if op == "open":
+                try:
+                    self.close_device()
+                except BaseException as cleanup:
+                    cause.add_note(f"cleanup after failed Init also failed: {cleanup}")
+                else:
+                    self._detach()
+                    keep = False
+            # A failed Close keeps its adapter, closer and lane. A subsequent
+            # Close or Init can finish cleanup instead of opening it twice.
+            self.process.reply(identity, error=cause, kind="invalid" if isinstance(error, _Invalid) else None)
+            return keep
         if op == "close":
-            self.process.instances.pop(self.name, None)
-            return False
-        return True
+            # An acknowledgement is a lifecycle barrier: its recipient may
+            # immediately Open this name on the channel's other thread.
+            self._detach()
+        self.process.reply(identity, result, plain=bool((message.get("p") or {}).get("plain")))
+        return op != "close"
+
+    def _detach(self) -> None:
+        # A late abandoned lane must never remove a replacement with this name.
+        if self.process.instances.get(self.name) is self:
+            self.process.instances.pop(self.name)
 
     def concurrent(self, method: str) -> bool:
         declared = self.declared
         return isinstance(declared, DeviceType) and self.adapter is not None and method in declared.concurrent
 
     def close_device(self) -> None:
-        closer, self.closer, self.adapter = self.closer, None, None
-        if callable(closer):
-            closer()
+        if callable(self.closer):
+            self.closer()
+        self.closer, self.adapter = None, None
+        self.admit_peers, self.log_token = None, None
 
     def shutdown(self) -> None:
         for run in list(self.runs.values()):
@@ -408,6 +438,9 @@ def _tunable(adapter: object) -> bool:
 
 
 def _open(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
+    # A prior Close/Init may have failed with its handle still owned here.
+    # Release that exact handle before constructing another device.
+    instance.close_device()
     declared = find(str(params["type_id"]), str(params["module"]))
     instance.declared = declared
     if isinstance(declared, DeviceType):

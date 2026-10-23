@@ -604,7 +604,10 @@ impl Plugins for Builtin {
             handler(NativeRequest::Close { instance: instance.to_owned() });
             return;
         }
-        if self.0.borrow_mut().instances.remove(instance).is_none() {
+        // A previous Close may have failed after it left the requested set.
+        // Ask the actual host again; its Close is idempotent when already gone.
+        self.0.borrow_mut().instances.remove(instance);
+        if self.0.borrow().host.is_none() {
             self.0.borrow_mut().events.push(Event::Closed { instance: instance.into(), error: None });
             return;
         }

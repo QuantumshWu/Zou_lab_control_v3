@@ -167,7 +167,7 @@ spawned -> ready -> open -> (idle <-> running) -> closing -> closed
 | catalogue (process) | `describe {packages}` | imports every leaf module on a thread of its own | the descriptor document (section 2) |
 | hardware scan (process) | `discover {type_id, module}` (no instance; in the process its instances open in, so a vendor runtime that is a process singleton -- DCAM -- is the one its devices use) | the type's `discover()` on a thread of its own | `{found: [{instance_id, role, parameters}], notes}`; the core stops waiting at its deadline (20 s, v2) and drops a late answer |
 | close | `close {instance}` | device: its closer (stop capture, release SDK); node: stop run | `{state}`; a process left with nothing to serve ends |
-| abandon | event `abandon {instance}` | the instance leaves the process at once; its lane closes it when its overrunning call returns | none |
+| abandon | event `abandon {instance}` | stop accepting work for the instance; keep its name reserved until the overrunning call returns and cleanup succeeds | none |
 | exit (process) | `exit` | closes what is left | `{}`, then exits 0 |
 
 `simulation` is the installation's simulation mapping, given to a device type
@@ -180,6 +180,13 @@ parallel; the core admits opened instances in the operator's order (v2's
 `_build_together`). A failed open reports its error and the instance is gone;
 nothing half-open is admitted. The core ends a process with `exit` (or by
 closing stdin); it waits at most 5 s, then terminates it.
+
+A successful Close removes the Python instance from the dispatch registry **before**
+its acknowledgement is sent. Immediate re-Init therefore reaches a fresh lane.
+An Open error also completes cleanup and retirement before it is reported. If cleanup
+or Close fails, its adapter and closer remain owned and retryable; the Rust host and
+Device Manager retain the failed-close state. Apply retries Close before opening a
+replacement. A failed Close must never be shown as a successfully released device.
 
 Device metadata in draft queries and `run.start` includes `instance` (stable ID)
 and `role` (the accepted operator name). Proxies expose `role` for display;
@@ -420,7 +427,8 @@ The callee is not interrupted (a running operation stops cooperatively, through
 its bounded timeouts or the run's `run.stop`). An instance that leaves a request
 unanswered for deadline + 5 s is **unresponsive**: the core marks it failed, seals
 its running generation as failed with that reason and tells the process `abandon`;
-the process and its other instances carry on, and the instance can be opened again.
+the process and its other instances carry on. A new Open is explicitly refused while
+the previous operation still owns its device; it may retry after cleanup completes.
 A process whose reader thread misses 60 consecutive `ping`s (1 s period, sent
 whatever its lanes are doing; a Numba compilation holds the GIL for seconds) is
 stuck as a whole: the core terminates it. Process exit (stdout EOF) is detected

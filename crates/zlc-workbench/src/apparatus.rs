@@ -74,6 +74,7 @@ pub struct Live {
     pub fields_ticket: Option<u64>,
     /// Close once no run holds it; then open this entry, if any.
     pub close_pending: bool,
+    pub close_failed: bool,
     pub reopen: Option<Entry>,
     /// The run whose claim the operator accepted tuning risk for.
     pub risk: Option<String>,
@@ -516,7 +517,7 @@ impl Workbench {
         // a loaded device holds is refused before it is opened (opening takes it).
         let bound = identity.as_ref().and_then(|identity| self.devices.values()
             .find(|other| other.entry.instance_id != id && other.identity.as_ref() == Some(identity)
-                && matches!(other.state, LiveState::Opening | LiveState::Open | LiveState::Closing)).map(|other| (identity.clone(), other.entry.role.clone())));
+                && (other.close_failed || matches!(other.state, LiveState::Opening | LiveState::Open | LiveState::Closing))).map(|other| (identity.clone(), other.entry.role.clone())));
         let failure = match (self.catalog.get(&entry.type_id), complete) {
             (None, _) => Some({
                 let words = format!("{} is not installed", entry.type_id);
@@ -529,7 +530,7 @@ impl Workbench {
         };
         let state = if failure.is_some() { LiveState::Failed } else { LiveState::Opening };
         if failure.is_none() { self.plugins.open(&id, &entry.type_id, &Value::Object(entry.parameters.clone()), &context); }
-        self.devices.insert(id, Live { entry, state, error: failure, working_point: Value::Null, fields: None, fields_ticket: None, close_pending: false, reopen: None,
+        self.devices.insert(id, Live { entry, state, error: failure, working_point: Value::Null, fields: None, fields_ticket: None, close_pending: false, close_failed: false, reopen: None,
             risk: None, units: BTreeMap::new(), descriptor: None, published: false, identity });
     }
 
@@ -613,9 +614,9 @@ impl Workbench {
             if live.published && changes { return Err(format!("{}: {PUBLISHED}", live.entry.role)); }
             match wanted {
                 None => closing.push((live_id.clone(), None)),
-                Some(_) if live.state == LiveState::Failed => reopened.push(live_id.clone()),
+                Some(_) if live.state == LiveState::Failed && !live.close_failed => reopened.push(live_id.clone()),
                 Some(entry) if entry.type_id != live.entry.type_id || entry.parameters != live.entry.parameters
-                    || (simulation_changed && self.simulated(&entry.type_id)) => closing.push((live_id.clone(), Some(entry))),
+                    || live.close_failed || (simulation_changed && self.simulated(&entry.type_id)) => closing.push((live_id.clone(), Some(entry))),
                 Some(_) => {}
             }
         }
@@ -686,14 +687,8 @@ impl Workbench {
         for id in ready {
             let live = self.devices.get_mut(&id).unwrap();
             live.close_pending = false;
-            if live.state == LiveState::Failed {
-                let reopen = live.reopen.take();
-                self.devices.remove(&id);
-                if let Some(entry) = reopen { self.open_entry(entry); }
-            } else {
-                live.state = LiveState::Closing;
-                self.plugins.close(&id);
-            }
+            live.state = LiveState::Closing;
+            self.plugins.close(&id);
         }
     }
 
@@ -748,10 +743,15 @@ impl Workbench {
             .map(|live| format!("{}: {}", live.entry.role, live.error.as_deref().unwrap_or("did not start"))).collect();
         let loaded = counted(open.len(), "device");
         let mut text = match &kind {
-            Settling::Shutdown => { self.report = ("devices shut down".into(), "task"); return; }
+            Settling::Shutdown => {
+                self.report = if failed.is_empty() { ("devices shut down".into(), "task") }
+                    else { (format!("devices did not shut down: {}", failed.join("; ")), "error") };
+                return;
+            }
             Settling::Init if open.is_empty() => format!("{loaded} initialized"),
             Settling::Init => format!("{loaded} initialized: {}", open.join(", ")),
             Settling::Apply => format!("device changes applied · {loaded} loaded"),
+            Settling::Close(id) if self.devices.get(id).is_some_and(|live| live.close_failed) => format!("{} could not be closed", self.device_role(id)),
             Settling::Close(id) => format!("{} closed · {loaded} loaded", self.device_role(id)),
         };
         // v2 _outcome: each failure's reason on the line.
@@ -773,8 +773,16 @@ impl Workbench {
     }
 
     pub(crate) fn device_closed(&mut self, id: &str, error: Option<String>) -> bool {
+        if let Some(error) = error {
+            let Some(live) = self.devices.get_mut(id) else { return false };
+            live.state = LiveState::Failed;
+            live.close_failed = true;
+            live.error = Some(format!("Close failed; device may still be held: {error}"));
+            live.close_pending = false;
+            self.settle();
+            return true;
+        }
         let Some(live) = self.devices.remove(id) else { return false };
-        if let Some(error) = error { self.notes.push(format!("{}: {error}", live.entry.role)); }
         if let Some(entry) = live.reopen { self.open_entry(entry); }
         self.settle();
         true
@@ -1017,6 +1025,7 @@ impl Workbench {
                 "parameters": entry.parameters,
                 "controls": descriptor.map(|item| fields::controls(&item.parameters, &entry.parameters, "device", &[])).unwrap_or_default(),
                 "state": state, "pending": pending, "error": live.and_then(|live| live.error.clone()),
+                "close_failed": live.is_some_and(|live| live.close_failed),
                 "working_point": live.map(|live| live.working_point.clone()).unwrap_or(Value::Null),
                 "claimed_by": claims,
                 "physical_outputs": kind.map(|item| item.physical_outputs.iter().map(|output| json!({"name": output.name})).collect::<Vec<_>>()).unwrap_or_default(),
