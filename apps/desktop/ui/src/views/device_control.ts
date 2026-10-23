@@ -28,10 +28,15 @@ type Row = {
   liveOn: boolean;
   timer: number;
   tuning: number | null;
+  revision: number;
+  valid: boolean;
+  unitRequest: number | null;
   /** The last Apply's outcome until the next edit: "" or v2's Applied / the refusal. */
   applied: string;
   error: string;
 };
+
+type Tune = { row: Row; value: Value; unit: string; revision: number; live: boolean };
 
 export class DeviceControlView {
   readonly root = element("section", "device-control");
@@ -44,6 +49,9 @@ export class DeviceControlView {
   private strip = new StatusStrip();
   private device: DeviceRow | null = null;
   private localRequest = -1;
+  /** v2's tune worker: one write at a time, with only the latest waiting value per field. */
+  private active: (Tune & { request: number }) | null = null;
+  private queued = new Map<string, Tune>();
   /** The strip's last word of its own (v2 show_status): "applied <field>" until the next read. */
   private note: string | null = null;
 
@@ -60,8 +68,10 @@ export class DeviceControlView {
 
   private read(): void { this.note = null; this.ctx.transport.send({ action: "read_device", device: this.id }, "refreshing device settings"); }
 
-  update(device: DeviceRow, request?: number, failed = false): void {
+  update(device: DeviceRow, request?: number, failed = false, result?: unknown): void {
     this.device = device;
+    const completed = this.active?.request === request ? this.active : null;
+    if (completed) { this.active = null; completed.row.tuning = null; }
     // The owners by the names the console calls them; the policy's reason under them.
     const control = device.control;
     this.owner.textContent = `Owner: ${control?.owners.length ? control.owners.join(", ") : "none"}`;
@@ -75,13 +85,29 @@ export class DeviceControlView {
       let row = this.rows.get(spec.name);
       if (!row) { row = this.makeRow(spec); this.rows.set(spec.name, row); }
       // A field read in another spelling is a new number: the draft in the old one goes.
-      if (row.spec.unit !== spec.unit) { row.draft = undefined; row.applied = ""; }
+      if (row.spec.unit !== spec.unit) {
+        this.cancelLive(row); this.queued.delete(spec.name);
+        row.revision++; row.draft = undefined; row.valid = true; row.applied = "";
+        row.field.acceptEdit();
+      }
       row.spec = spec;
-      if (row.tuning !== null && row.tuning === request) {
-        row.tuning = null;
-        row.applied = failed ? "" : "Applied";
-        row.error = failed ? this.ctx.transport.lastError : "";
-        if (!failed) { row.draft = undefined; this.note = `applied ${spec.name}`; }
+      if (row.unitRequest !== null && row.unitRequest === request) {
+        row.unitRequest = null;
+        if (!failed) { row.revision++; row.draft = undefined; row.valid = true; row.field.acceptEdit(); }
+      }
+      if (!spec.editable || device.state !== "open") { this.cancelLive(row); this.queued.delete(spec.name); }
+      else if (!spec.live_write) this.cancelLive(row);
+      if (completed?.row === row) {
+        if (!failed) this.note = `applied ${spec.name}`;
+        if (row.revision === completed.revision && (spec.unit ?? "") === completed.unit && row.unitRequest === null) {
+          row.applied = failed ? "" : "Applied";
+          row.error = failed ? this.ctx.transport.lastError : "";
+          if (!failed) {
+            const reply = result as { device?: string; readback?: Value } | undefined;
+            row.draft = reply?.device === this.id && reply.readback !== undefined ? reply.readback : completed.value;
+            row.field.acceptEdit();
+          }
+        }
       }
       row.field.update(this.desiredSpec(row), request, failed);
       setElided(row.current, spec.current_text);
@@ -89,10 +115,13 @@ export class DeviceControlView {
       // Absent, not disabled: a field with no live write leaves its cell empty.
       row.live.hidden = !spec.live_write;
       setChecked(row.live, row.liveOn);
-      row.live.disabled = !spec.editable;
+      row.live.disabled = !spec.editable || row.unitRequest !== null;
       // Apply has something to do only while Desired differs from the reading.
-      row.apply.disabled = !spec.editable || row.tuning !== null || row.draft === undefined || row.draft === spec.current;
-      const [words, word] = row.tuning !== null ? ["Applying", "task"] as const
+      row.apply.disabled = !spec.editable || !row.valid || row.unitRequest !== null || row.tuning !== null || row.draft === undefined || row.draft === spec.current;
+      const waiting = this.queued.has(spec.name);
+      const [words, word] = row.unitRequest !== null ? ["Reading unit", "task"] as const
+        : row.tuning !== null ? [waiting ? "Applying; latest queued" : "Applying", "task"] as const
+        : waiting ? ["Queued latest", "task"] as const
         : row.error ? [row.error, "error"] as const
         : row.applied && spec.editable ? [row.applied, "idle"] as const
         : [spec.status, spec.severity] as const;
@@ -105,6 +134,7 @@ export class DeviceControlView {
     // One picker width, so every number box has the same right edge (v2 _align_headings).
     requestAnimationFrame(() => alignUnitPickers(this.table));
     this.status();
+    this.drain();
   }
 
   status(): void {
@@ -116,7 +146,7 @@ export class DeviceControlView {
 
   private desiredSpec(row: Row): FieldSpec {
     const spec = row.spec;
-    return { ...spec, value: row.draft !== undefined ? row.draft : spec.desired, unavailable_reason: spec.editable ? "" : spec.reason || "Read only", spin: true };
+    return { ...spec, value: row.draft !== undefined ? row.draft : spec.desired, unavailable_reason: row.unitRequest !== null ? "Reading the new unit" : spec.editable ? "" : spec.reason || "Read only", spin: true };
   }
 
   private makeRow(spec: TunableField): Row {
@@ -126,21 +156,27 @@ export class DeviceControlView {
     row.liveOn = false;
     row.timer = 0;
     row.tuning = null;
+    row.revision = 0; row.valid = true; row.unitRequest = null;
     row.applied = "";
     row.error = "";
     row.field = new Field(`control-${this.id}`, { ...spec, value: spec.desired, spin: true }, {
       // Another spelling is the device's to read (an RF level depends on its
       // load): the row is re-read in it, reading, bounds and limits together.
       unit: unit => {
-        window.clearTimeout(row.timer);
-        return this.ctx.transport.send({ action: "read_device", device: this.id, units: { [row.spec.name]: unit } }, `Reading ${row.spec.label} in ${unit}…`);
+        this.cancelLive(row); this.queued.delete(row.spec.name); row.revision++;
+        row.unitRequest = this.ctx.transport.send({ action: "read_device", device: this.id, units: { [row.spec.name]: unit } }, `Reading ${row.spec.label} in ${unit}…`);
+        queueMicrotask(() => { if (this.device) this.update(this.device); });
+        return row.unitRequest;
+      },
+      edited: value => { this.edit(row, value); queueMicrotask(() => { if (this.device) this.update(this.device); }); },
+      cancel: () => {
+        this.cancelLive(row); this.queued.delete(row.spec.name);
+        row.revision++; row.draft = undefined; row.valid = true; row.error = ""; row.applied = "";
+        if (this.device) this.update(this.device);
       },
       commit: value => {
-        row.draft = value;
-        row.applied = "";
-        row.error = "";
-        if (row.liveOn) { window.clearTimeout(row.timer); row.timer = window.setTimeout(() => this.tune(row), LIVE_DELAY_MS); }
-        // The draft is the page's until Apply: the field completes at once.
+        this.edit(row, value);
+        // An explicit value/step completes the local Field, not the device write.
         const local = this.localRequest--;
         queueMicrotask(() => { if (this.device) this.update(this.device, local); });
         return local;
@@ -150,9 +186,9 @@ export class DeviceControlView {
     row.limits = element("span", "note control-limits");
     row.limits.title = "The instrument's own range for this field; the editable window is the tighter of it and the bench policy";
     row.liveCell = element("span", "control-live");
-    row.live = switchButton(on => { row.liveOn = on; if (!on) window.clearTimeout(row.timer); if (this.device) this.update(this.device); });
+    row.live = switchButton(on => { row.liveOn = on; if (!on) this.cancelLive(row); if (this.device) this.update(this.device); });
     row.liveCell.append(row.live);
-    row.apply = command("Apply", () => this.tune(row)).root;
+    row.apply = command("Apply", () => this.tune(row, false)).root;
     const statusCell = element("span", "control-status");
     row.dot = statusDot();
     row.status = element("span", "status-text ink");
@@ -168,16 +204,49 @@ export class DeviceControlView {
     return row;
   }
 
-  private tune(row: Row): void {
-    window.clearTimeout(row.timer);
+  private edit(row: Row, value: Value | undefined): void {
+    const valid = value !== undefined;
+    if (row.valid === valid && (!valid || Object.is(row.draft, value))) return;
+    row.revision++; row.valid = valid; row.applied = ""; row.error = "";
+    if (valid) row.draft = value;
+    this.cancelLive(row);
+    if (valid && row.liveOn && row.spec.live_write && row.spec.editable && row.unitRequest === null) {
+      row.timer = window.setTimeout(() => { row.timer = 0; this.tune(row, true); }, LIVE_DELAY_MS);
+    }
+  }
+
+  private cancelLive(row: Row): void {
+    window.clearTimeout(row.timer); row.timer = 0;
+    if (this.queued.get(row.spec.name)?.live) this.queued.delete(row.spec.name);
+  }
+
+  private tune(row: Row, live: boolean): void {
+    window.clearTimeout(row.timer); row.timer = 0;
+    if (!row.valid || !row.spec.editable || row.unitRequest !== null || this.device?.state !== "open"
+        || (live && (!row.liveOn || !row.spec.live_write))) return;
     const value = row.draft !== undefined ? row.draft : row.spec.desired;
-    row.tuning = this.ctx.transport.send({ action: "tune_device", device: this.id, field: row.spec.name, value, ...(row.spec.unit ? { unit: row.spec.unit } : {}) },
-      `applying ${row.spec.name}`);
+    this.queued.set(row.spec.name, { row, value, unit: row.spec.unit ?? "", revision: row.revision, live });
     row.error = "";
     if (this.device) this.update(this.device);
   }
 
-  private dropRow(row: Row): void { window.clearTimeout(row.timer); row.field.root.remove(); }
+  private drain(): void {
+    if (this.active) return;
+    for (const [name, next] of this.queued) {
+      this.queued.delete(name);
+      const row = this.rows.get(name);
+      if (row !== next.row || !row.spec.editable || row.unitRequest !== null || (row.spec.unit ?? "") !== next.unit
+          || this.device?.state !== "open" || (next.live && (!row.liveOn || !row.spec.live_write || !row.valid || row.revision !== next.revision))) continue;
+      const request = this.ctx.transport.send({ action: "tune_device", device: this.id, field: name, value: next.value,
+        ...(next.unit ? { unit: next.unit } : {}) }, `applying ${name}`);
+      this.active = { ...next, request }; row.tuning = request;
+      if (this.device) this.update(this.device);
+      return;
+    }
+  }
+
+  private dropRow(row: Row): void { this.cancelLive(row); this.queued.delete(row.spec.name); row.field.root.remove(); }
+
 }
 
 /** The device's own console (its stderr ring), read while the page is on

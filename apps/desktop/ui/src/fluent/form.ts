@@ -86,6 +86,10 @@ export function firstStep(spec: FieldSpec): number {
 export type FieldHandlers = {
   /** Send the edit; returns the request id its accepted state will carry. */
   commit(value: Value, spec: FieldSpec): number;
+  /** A local edit, without normalization or submission. Undefined is incomplete/invalid. */
+  edited?(value: Value | undefined, spec: FieldSpec): void;
+  /** Escape discarded the local edit. */
+  cancel?(): void;
   /** FluentCycleComboBox wheel steps (the Scope coordinate). */
   scope?(steps: number, spec: FieldSpec): number;
   /** The operator picked another spelling of the unit: the request id the
@@ -190,11 +194,15 @@ export class Field {
       if (spec.kind === "integer" || spec.kind === "number") edit.inputMode = spec.kind === "integer" ? "numeric" : "decimal";
       // A number (or a pair of them) is a number's width, never the row's (qt_form _CAPPED_KINDS).
       if (spec.kind === "integer" || spec.kind === "number" || spec.kind === "pair") { edit.classList.add("number"); this.cell.classList.add("capped"); }
-      edit.addEventListener("input", () => { this.version++; this.dirty = true; edit.classList.remove("invalid"); edit.setCustomValidity(""); });
+      edit.addEventListener("input", event => {
+        this.version++; this.dirty = true; edit.classList.remove("invalid"); edit.setCustomValidity("");
+        this.handlers.edited?.((event instanceof InputEvent && event.isComposing) ? undefined : this.editedValue(edit), this.spec);
+      });
+      edit.addEventListener("compositionend", () => this.handlers.edited?.(this.editedValue(edit), this.spec));
       edit.addEventListener("change", () => this.commitText(edit));
       edit.addEventListener("keydown", event => {
         if (event.key === "Enter") { this.commitText(edit); edit.blur(); }
-        if (event.key === "Escape") { this.dirty = false; this.pending = null; edit.classList.remove("invalid"); edit.setCustomValidity(""); this.showValue(); edit.blur(); event.stopPropagation(); }
+        if (event.key === "Escape") { this.dirty = false; this.pending = null; edit.classList.remove("invalid"); edit.setCustomValidity(""); this.showValue(); this.handlers.cancel?.(); edit.blur(); event.stopPropagation(); }
       });
       this.input = edit;
       if ((spec.kind === "integer" || spec.kind === "number") && (!spec.allow_none || spec.spin) && !spec.lossless) {
@@ -438,6 +446,23 @@ export class Field {
       .then(chosen => { if (chosen !== null) { this.path!.value = chosen; this.submit(chosen); } });
   }
 
+  /** The owner has accepted this exact draft, or replaced its unit. */
+  acceptEdit(): void { this.dirty = false; this.pending = null; this.root.classList.remove("pending"); }
+
+  private editedValue(input: HTMLInputElement): Value | undefined {
+    if (input.disabled || input.readOnly) return undefined;
+    const raw = input.value.trim();
+    if (this.spec.kind !== "integer" && this.spec.kind !== "number") return raw;
+    // A trailing dot/exponent/sign is still being typed. Never clamp it into
+    // a hardware command; the existing commit path owns leave-time clamping.
+    const syntax = this.spec.kind === "integer" ? /^[+-]?\d+$/ : /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+    if (!syntax.test(raw)) return undefined;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || (this.spec.kind === "integer" && !Number.isInteger(value))
+        || (this.spec.minimum != null && value < this.spec.minimum) || (this.spec.maximum != null && value > this.spec.maximum)) return undefined;
+    return value;
+  }
+
   private commitText(input: HTMLInputElement): void {
     if (!this.dirty || this.pending?.version === this.version) return;
     const raw = input.value.trim();
@@ -461,7 +486,7 @@ export class Field {
   }
 
   private submit(value: Value): void {
-    if (Object.is(value, this.spec.value) && !this.pending) { this.dirty = false; this.showValue(); return; }
+    if (Object.is(value, this.spec.value) && !this.pending) { this.dirty = false; this.showValue(); this.handlers.edited?.(value, this.spec); return; }
     this.dirty = true;
     this.authoredValue = value;
     if (this.input instanceof HTMLButtonElement) setChecked(this.input, Boolean(value));

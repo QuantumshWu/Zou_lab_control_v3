@@ -30,7 +30,7 @@ class DeviceControlWindow implements View {
   update(state: State): void {
     const device = row(this.ctx, this.device);
     if (!device) return;
-    this.view.update(device, state.request, Boolean(state.error));
+    this.view.update(device, state.request, Boolean(state.error), state.result);
     const title = `${device.role} control`;
     if (title !== this.named) { this.named = title; document.title = title; }
     // v2: the window is built from the fields the device declares, so it opens once they are read, as tall as they are.

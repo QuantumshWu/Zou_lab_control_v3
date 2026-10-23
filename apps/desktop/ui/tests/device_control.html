@@ -1,0 +1,87 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Device Control Live regression tests</title>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. No native transport is used: every device command is recorded here.
+import {DeviceControlView} from '../dist/views/device_control.js';
+import {Field} from '../dist/fluent/form.js';
+import {deviceControl} from '../dist/views/device_windows.js';
+const wait = (ms=100) => new Promise(resolve=>setTimeout(resolve,ms));
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+const check=async(name,test)=>{await test();results.push(name)};
+function setup({live=true,fields=[{}]}={}) {
+  const calls=[];
+  const ctx={latest:{type:'state'},transport:{send:cmd=>{calls.push({id:calls.length+1,...cmd});return calls.length},busyText:()=>'',lastError:'refused'}};
+  let device={instance_id:'audit',role:'audit',type_id:'test',state:'open',control:{owners:[],risk_enabled:false},fields:fields.map((f,i)=>({name:i?'power':'frequency',label:i?'Power':'Frequency',kind:'number',allow_none:true,step:1,minimum:0,maximum:1000,current:1,desired:1,current_text:'1',limits_text:'0–1000',live_write:true,editable:true,status:'Ready',severity:'idle',unit:'',...f}))};
+  const view=new DeviceControlView('audit',ctx);document.body.append(view.root);view.update(device);
+  const row=(i=0)=>view.root.querySelectorAll('.control-table > div.field')[i];
+  const input=(i=0)=>row(i).querySelector('input.number');
+  const toggle=(i=0)=>row(i).querySelector('.control-live button').click();
+  if(live) fields.forEach((_,i)=>toggle(i));
+  const type=(value,i=0,event)=>{input(i).value=value;input(i).dispatchEvent(event??new Event('input',{bubbles:true}))};
+  const project=(patch={},request,failed=false,readback)=>{
+    device={...device,fields:device.fields.map(f=>({...f,...(patch[f.name]??{})}))};
+    ctx.latest={type:'state',devices:[device]};
+    view.update(device,request,failed,{device:'audit',readback});
+  };
+  const ack=(id,value,failed=false)=>{const name=calls.find(c=>c.id===id).field;project({[name]:{current:value,desired:value,current_text:String(value)}},id,failed,value)};
+  const writes=()=>calls.filter(c=>c.action==='tune_device');
+  const replace=fields=>{device={...device,fields};view.update(device)};
+  const apply=(i=0)=>[...row(i).querySelectorAll('button')].find(b=>b.textContent==='Apply');
+  return {view,ctx,calls,row,input,toggle,type,project,ack,writes,apply,replace};
+}
+try {
+ await check('typing sends a valid value without Enter',async()=>{const t=setup();t.type('2');await wait();equal(t.writes().map(c=>c.value),[2],'typing');t.ack(1,2);t.input().dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}));await wait();equal(t.writes().length,1,'Enter repeated the live write')});
+ await check('Live off edits only the draft until Apply',async()=>{const t=setup({live:false});t.type('3');await wait();equal(t.writes().length,0,'Live off');assert(!t.apply().disabled,'Apply never enabled');t.apply().click();equal(t.writes().map(c=>c.value),[3],'Apply')});
+ await check('debounce coalesces rapid typing',async()=>{const t=setup();t.type('2');await wait(30);t.type('3');await wait();equal(t.writes().map(c=>c.value),[3],'debounce')});
+ await check('latest queued value survives an older reply',async()=>{const t=setup();t.type('2');await wait();t.type('3');await wait();t.type('4');await wait();equal(t.writes().map(c=>c.value),[2],'concurrent writes');assert(t.row().textContent.includes('latest queued'),'queued status absent');t.ack(1,2);equal(t.input().value,'4','old reply replaced draft');equal(t.writes().map(c=>c.value),[2,4],'latest value lost');t.ack(2,4)});
+ await check('old reply before debounce expiry does not lose the next value',async()=>{const t=setup();t.type('2');await wait();t.type('3');await Promise.resolve();t.ack(1,2);await wait();equal(t.writes().map(c=>c.value),[2,3],'early reply')});
+ await check('incomplete and out-of-range text never writes or clamps',async()=>{for(const text of ['','-','1e','1.','1001','0x10']){const t=setup();t.type('2');t.type(text);await wait();equal(t.writes().length,0,`invalid ${text}`);equal(t.input().value,text,'typing was normalized');assert(t.apply().disabled,'invalid Apply enabled')}});
+ await check('invalid text survives an in-flight acknowledgement',async()=>{const t=setup();t.type('2');await wait();t.type('1e');t.ack(1,2);await wait();equal(t.input().value,'1e','invalid text replaced');equal(t.writes().map(c=>c.value),[2],'stale valid draft was sent')});
+ await check('turning Live off cancels the queued write',async()=>{const t=setup();t.type('2');await wait();t.type('3');await wait();t.toggle();t.ack(1,2);await wait();equal(t.writes().map(c=>c.value),[2],'Live-off queue');equal(t.input().value,'3','Live-off draft')});
+ await check('locking a field cancels pending Live work',async()=>{const t=setup();t.type('2');t.project({frequency:{editable:false,reason:'Protected'}});await wait();equal(t.writes().length,0,'locked write')});
+ await check('removing Live capability cancels pending work',async()=>{const t=setup();t.type('2');t.project({frequency:{live_write:false}});await wait();equal(t.writes().length,0,'unsupported Live write')});
+ await check('a unit change discards queued values in the old unit',async()=>{const t=setup({fields:[{unit:'Hz'}]});t.type('2');await wait();t.type('3');await wait();t.project({frequency:{unit:'kHz',current:.001,desired:.001}});t.ack(1,.002);await wait();equal(t.writes().map(c=>[c.value,c.unit]),[[2,'Hz']],'old-unit queue');assert(t.input().value!=='3','old-unit text retained')});
+ await check('IME composition waits for the completed value',async()=>{const t=setup();t.type('2',0,new InputEvent('input',{bubbles:true,isComposing:true}));await wait();equal(t.writes().length,0,'composition write');t.input().dispatchEvent(new CompositionEvent('compositionend'));await wait();equal(t.writes().map(c=>c.value),[2],'composition end')});
+ await check('Escape discards pending Live edits',async()=>{const t=setup();t.type('2');await Promise.resolve();t.input().dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));await wait();equal(t.writes().length,0,'Escape write');equal(t.input().value,'1','Escape value')});
+ await check('step buttons retain Live behavior',async()=>{const t=setup();t.row().querySelector('[aria-label="Increase"]').click();await wait();equal(t.writes().map(c=>c.value),[2],'step')});
+ await check('writes to different fields are serialized',async()=>{const t=setup({fields:[{},{}]});t.type('2');await wait();t.type('5',1);await wait();equal(t.writes().length,1,'second field overlapped');t.ack(1,2);equal(t.writes().map(c=>[c.field,c.value]),[['frequency',2],['power',5]],'field queue')});
+ await check('a refusal does not erase a newer queued value',async()=>{const t=setup();t.type('2');await wait();t.type('3');await wait();t.ack(1,1,true);equal(t.writes().map(c=>c.value),[2,3],'refused older write');equal(t.input().value,'3','refusal replaced newer draft')});
+ await check('readback does not jump to a stale fields snapshot',async()=>{const t=setup();t.type('2');await wait();t.project({},1,false,1.9);equal(t.input().value,'1.9','device readback ignored')});
+ await check('unit picker blocks writes until its new projection arrives',async()=>{
+   const t=setup({fields:[{unit:'Hz',units:[{value:'Hz',label:'Hz'},{value:'kHz',label:'kHz'}]}]});
+   t.type('2');
+   const picker=t.row().querySelector('.unit-picker');
+   for(const key of ['Enter','End','Enter']) picker.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));
+   await Promise.resolve();
+   assert(t.input().disabled,'unit request left the old-unit editor enabled');
+   await wait();equal(t.writes().length,0,'old-unit debounce fired');
+   const read=t.calls.find(c=>c.action==='read_device');assert(read?.units.frequency==='kHz','unit request missing');
+   t.project({frequency:{unit:'kHz',current:.001,desired:.001}},read.id);
+   assert(!t.input().disabled,'unit reply left editor disabled');equal(t.input().value,'0.001','new-unit reading');
+   t.type('3');await wait();equal(t.writes().map(c=>[c.value,c.unit]),[[3,'kHz']],'new-unit write');
+ });
+ await check('removing and recreating a field cancels its previous queued edits',async()=>{
+   const t=setup();t.type('2');await wait();t.type('3');await wait();
+   t.project();const spec=t.ctx.latest.devices[0].fields[0];t.replace([]);t.replace([{...spec,current:9,desired:9}]);
+   t.project({},1,false,2);await wait();equal(t.writes().map(c=>c.value),[2],'removed row wrote');equal(t.input().value,'9','old reply touched recreated row');
+ });
+ await check('a failed write keeps the draft and does not retry automatically',async()=>{const t=setup();t.type('2');await wait();t.ack(1,1,true);await wait();equal(t.writes().length,1,'automatic retry');equal(t.input().value,'2','failed draft');assert(!t.apply().disabled,'manual retry disabled')});
+ await check('integer fields also respond to typing',async()=>{const t=setup({fields:[{kind:'integer',allow_none:false}]});t.type('2.5');await wait();equal(t.writes().length,0,'fraction sent to integer');t.type('3');await wait();equal(t.writes().map(c=>c.value),[3],'integer typing')});
+ await check('the actual control window forwards acknowledgement readback',async()=>{
+   const calls=[];
+   const device={instance_id:'window',role:'RF',state:'open',fields:[{name:'frequency',label:'Frequency',kind:'number',current:1,desired:1,editable:true,live_write:true,current_text:'1'}]};
+   const ctx={latest:{type:'state',devices:[device]},transport:{send:c=>{calls.push(c);return calls.length},post:()=>{},busyText:()=>'',lastError:''}};
+   const windowView=deviceControl('window')(ctx);document.body.append(windowView.root);windowView.update({type:'state'});
+   windowView.root.querySelector('.control-live button').click();
+   const input=windowView.root.querySelector('input.number');input.value='2';input.dispatchEvent(new Event('input'));await wait();
+   windowView.update({type:'state',request:2,result:{device:'window',readback:1.9}});
+   equal(input.value,'1.9','window dropped readback');equal(calls.filter(c=>c.action==='tune_device').length,1,'window write');
+ });
+ await check('ordinary forms still commit only on Enter/change',async()=>{const calls=[];const field=new Field('normal',{name:'x',kind:'number',label:'x',value:1},{commit:v=>{calls.push(v);return 1}});document.body.append(field.root);field.input.value='2';field.input.dispatchEvent(new Event('input'));await wait();equal(calls,[],'ordinary form live mutation');field.input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}));equal(calls,[2],'ordinary Enter')});
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+</script>

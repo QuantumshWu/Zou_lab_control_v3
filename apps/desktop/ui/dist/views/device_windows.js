@@ -28,7 +28,7 @@ class DeviceControlWindow {
         const device = row(this.ctx, this.device);
         if (!device)
             return;
-        this.view.update(device, state.request, Boolean(state.error));
+        this.view.update(device, state.request, Boolean(state.error), state.result);
         const title = `${device.role} control`;
         if (title !== this.named) {
             this.named = title;

@@ -118,7 +118,14 @@ export class Field {
                 edit.classList.add("number");
                 this.cell.classList.add("capped");
             }
-            edit.addEventListener("input", () => { this.version++; this.dirty = true; edit.classList.remove("invalid"); edit.setCustomValidity(""); });
+            edit.addEventListener("input", event => {
+                this.version++;
+                this.dirty = true;
+                edit.classList.remove("invalid");
+                edit.setCustomValidity("");
+                this.handlers.edited?.((event instanceof InputEvent && event.isComposing) ? undefined : this.editedValue(edit), this.spec);
+            });
+            edit.addEventListener("compositionend", () => this.handlers.edited?.(this.editedValue(edit), this.spec));
             edit.addEventListener("change", () => this.commitText(edit));
             edit.addEventListener("keydown", event => {
                 if (event.key === "Enter") {
@@ -131,6 +138,7 @@ export class Field {
                     edit.classList.remove("invalid");
                     edit.setCustomValidity("");
                     this.showValue();
+                    this.handlers.cancel?.();
                     edit.blur();
                     event.stopPropagation();
                 }
@@ -418,6 +426,25 @@ export class Field {
             this.submit(chosen);
         } });
     }
+    /** The owner has accepted this exact draft, or replaced its unit. */
+    acceptEdit() { this.dirty = false; this.pending = null; this.root.classList.remove("pending"); }
+    editedValue(input) {
+        if (input.disabled || input.readOnly)
+            return undefined;
+        const raw = input.value.trim();
+        if (this.spec.kind !== "integer" && this.spec.kind !== "number")
+            return raw;
+        // A trailing dot/exponent/sign is still being typed. Never clamp it into
+        // a hardware command; the existing commit path owns leave-time clamping.
+        const syntax = this.spec.kind === "integer" ? /^[+-]?\d+$/ : /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+        if (!syntax.test(raw))
+            return undefined;
+        const value = Number(raw);
+        if (!Number.isFinite(value) || (this.spec.kind === "integer" && !Number.isInteger(value))
+            || (this.spec.minimum != null && value < this.spec.minimum) || (this.spec.maximum != null && value > this.spec.maximum))
+            return undefined;
+        return value;
+    }
     commitText(input) {
         if (!this.dirty || this.pending?.version === this.version)
             return;
@@ -447,6 +474,7 @@ export class Field {
         if (Object.is(value, this.spec.value) && !this.pending) {
             this.dirty = false;
             this.showValue();
+            this.handlers.edited?.(value, this.spec);
             return;
         }
         this.dirty = true;
