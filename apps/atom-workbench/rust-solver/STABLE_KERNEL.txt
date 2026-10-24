@@ -9,6 +9,8 @@ Only these overlays are included:
 - A public entry for the same-source embedded worker and its build manifest.
 - Default output samples=200, including Options::default.
 - The validated exact declared-MHz period clock, with no phase snapping.
+- Append-only projected-operator reuse and direct transpose-left GEMM.
+- Enable the existing complete structured outer A*Q product in desktop defaults.
 
 The clock source matches the six-test v24 validation snapshot and its native
 population/F-group comparison with the frozen reference (below7.4e-13).
@@ -17,8 +19,9 @@ but this exact stable tree still requires a fresh build and targeted validation.
 
 V24 research routes (phase lifting, finite Magnus/Strang, shifted-core/star,
 mean-shift reuse, axis caps, refinement diagnostics, modified short-time shift
-and automatic finite-only routing) are NOT included. Existing v23 diagnostic
-switches are unchanged; shipping desktop defaults keep them disabled.
+and automatic finite-only routing) are NOT included. Other existing v23
+diagnostic switches are unchanged. Only the two computation-reuse switches
+listed above are newly enabled in shipping desktop defaults.
 
 Eight literal compile-time test fixtures are present (535736 bytes total).
 Normal compilation and production numerical paths do not require Python or
@@ -28,7 +31,19 @@ not copied, run, or presented as fresh-checkout regression tests. Static linking
 inputs and the embedded worker build script come from the desktop build project;
 the dynamic development worker still needs its selected numerical DLLs.
 
-This task performed source/hash/fixture auditing only, not compilation or tests.
+The original restoration performed source/hash/fixture auditing only.
+The 2026-10-24 projection overlay passed three targeted tests and paired
+research-worker checks: beat100-long 4.067 -> 3.799 s (population difference
+4.73e-11), user-long 3.020 -> 2.776 s (5.77e-9); means were unchanged.
+A reverse-order repeat without profiling measured beat100 off/on
+4.269/3.957 s and user-long 2.378/2.518 s. The latter reversed direction,
+so overall timings are variable; no general or two-case speedup is claimed.
+The short full32 QuTiP comparison remained 2.54e-6. In the long two-axis K1
+stage, A*Q took 3.163 -> 0.463 s and Gram projection 0.964 -> 0.103 s.
+These are measured cases/stages, not a general performance guarantee. The
+complete two-axis 20 us request still timed out at 25 s. This primary source
+transplant awaits root-coordinated build and verification; it imports no
+GCRO, CVODE, Filon, unitary-kick or other unvalidated research solver.
 See baseline-source-manifest.json and stable-kernel-manifest.json for provenance.
 Source tree digest (ordered file-name NUL sha256 LF records):
-2e4941384af74542772f7f49b7d06e197722be5ea0bd6b67794bae9a26ee4982
+cb382ae5308e3e1db9ba7f68280701c6c32b19b097298d1ebb472d24725eea61

@@ -763,6 +763,35 @@ impl Lapack {
         unsafe{(self.gemm)(&no,&no,&mi,&ni,&ki,&1.,a.as_ptr(),&mi,b.as_ptr(),&ki,&0.,out.as_mut_ptr(),&mi);}
         Ok(())
     }
+    /// Column-major C = A^T B, without materializing a transposed A.
+    /// A/B have `rows` physical rows and respectively `left_columns` and
+    /// `right_columns` columns. Each slice must cover EXACTLY the addressed
+    /// span: (columns-1)*leading_dimension + logical_rows, or zero for an
+    /// empty matrix. This permits column slices and strided output subblocks.
+    /// Padding is untouched. Validation is O(1); the caller owns finite-data
+    /// validation. beta=0 overwrites every logical output entry.
+    pub fn multiply_transpose_left_into(
+        &self, a:&[f64], b:&[f64], out:&mut[f64],
+        rows:usize, left_columns:usize, right_columns:usize,
+        lda:usize, ldb:usize, ldc:usize,
+    )->Result<(),String>{
+        let span=|r:usize,c:usize,ld:usize|->Option<usize>{
+            if r==0||c==0{Some(0)}else{(c-1).checked_mul(ld)?.checked_add(r)}
+        };
+        if [rows,left_columns,right_columns,lda,ldb,ldc].iter().any(|&v|v>i32::MAX as usize)
+            ||lda<rows.max(1)||ldb<rows.max(1)||ldc<left_columns.max(1)
+            ||span(rows,left_columns,lda)!=Some(a.len())
+            ||span(rows,right_columns,ldb)!=Some(b.len())
+            ||span(left_columns,right_columns,ldc)!=Some(out.len()){
+            return Err("Invalid transpose-left real BLAS matrix dimensions".into());
+        }
+        if left_columns==0||right_columns==0{return Ok(());}
+        if rows==0{for j in 0..right_columns{out[j*ldc..j*ldc+left_columns].fill(0.);}return Ok(());}
+        let trans=b'T' as c_char;let no=b'N' as c_char;
+        let(m,n,k,la,lb,lc)=(left_columns as i32,right_columns as i32,rows as i32,lda as i32,ldb as i32,ldc as i32);
+        unsafe{(self.gemm)(&trans,&no,&m,&n,&k,&1.,a.as_ptr(),&la,b.as_ptr(),&lb,&0.,out.as_mut_ptr(),&lc);}
+        Ok(())
+    }
     pub fn multiply_complex(
         &self,
         a: &[Complex64],

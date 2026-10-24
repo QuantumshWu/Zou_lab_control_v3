@@ -3173,6 +3173,8 @@ fn trajectory_reference_attempt(
     let minimum_basis = std::env::var("ATOM_KRYLOV_MIN_BASIS").ok().and_then(|s|s.parse::<usize>().ok()).filter(|n|*n>=16).unwrap_or(default_minimum);
     let instability_floor=if poles.len()>1{128}else{32};
     let mut basis_products = Vec::new();
+    let incremental_projection=std::env::var("ATOM_INCREMENTAL_PROJECTED").is_ok_and(|v|v=="1");
+    let mut projected_prefix=crate::incremental_projection::Projection::new();
     let append = |basis: &mut Vec<Vec<f64>>, frontier: &mut Option<KrylovFrontier>, additions: Vec<Vec<f64>>| {
         for vector in additions.into_iter().take(limit-basis.len()) {
             let index=basis.len();basis.push(vector);
@@ -3355,10 +3357,14 @@ fn trajectory_reference_attempt(
                     } else {basis_products.extend(sparse_product(&a,&basis[index]));}
                 } else {basis_products.extend(sparse_product(&a,&basis[index]));}
             }
-            let transpose: Vec<f64> = (0..r)
-                .flat_map(|k| basis.iter().map(move |v| v[k]))
-                .collect();
-            let projected = lap.multiply(&transpose, &basis_products, size, size, r);
+            // Q and A are immutable within this trajectory; retain the old
+            // projected block and compute only newly appended rows/columns.
+            let projected=if incremental_projection{
+                projected_prefix.update(lap,&columns,&basis_products,r,size)?
+            }else{
+                let transpose:Vec<f64>=(0..r).flat_map(|k|basis.iter().map(move|v|v[k])).collect();
+                lap.multiply(&transpose,&basis_products,size,size,r)
+            };
             if closed_frontier&&zero_resolvent.as_ref().is_some_and(|gauge|!gauge.closed_space_is_invariant(&basis,&basis_products,&projected)){
                 return Err("Zero-pole numerical stagnation: the closed inverse space is not invariant under the complete generator".into());
             }

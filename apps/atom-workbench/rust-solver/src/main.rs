@@ -18,6 +18,7 @@ mod cptp_period;
 mod defect_bound;
 mod dense_expm;
 mod effective_krylov;
+mod incremental_projection;
 mod fast_multitone;
 mod fast_periodic;
 mod fixed_etd;

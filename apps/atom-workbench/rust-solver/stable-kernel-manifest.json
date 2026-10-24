@@ -1,6 +1,6 @@
 {
   "schema": "atom-stable-kernel-source/1",
-  "sourceTreeSha256": "2e4941384af74542772f7f49b7d06e197722be5ea0bd6b67794bae9a26ee4982",
+  "sourceTreeSha256": "cb382ae5308e3e1db9ba7f68280701c6c32b19b097298d1ebb472d24725eea61",
   "baselineBinarySha256": "56a26af78dae3d0cbc32b330d0082f3a75443b4cf07472bc5ca447f024c483f6",
   "baselineAll40Verified": true,
   "overlays": [
@@ -9,7 +9,9 @@
     "native_superlu.rs",
     "main.rs",
     "full_period.rs",
-    "period_clock.rs"
+    "period_clock.rs",
+    "floquet.rs",
+    "incremental_projection.rs"
   ],
   "files": [
     {
@@ -98,10 +100,10 @@
     },
     {
       "file": "floquet.rs",
-      "sha256": "21f760b6eea12b40dba6ae6ca05e5fdd001215ef8e3585e2ccf47fabc1e45101",
-      "bytes": 253803,
+      "sha256": "3247e0c37373872efe8e9b52a14777dc70b87f1ec9eeb0096afd261e004b3150",
+      "bytes": 254250,
       "baselineSha256": "21f760b6eea12b40dba6ae6ca05e5fdd001215ef8e3585e2ccf47fabc1e45101",
-      "reason": "Exact v23 numerical source, unchanged."
+      "reason": "Retain the full stable Fourier equation and all convergence gates; opt-in append-only Q^T A Q block reuse scoped to one immutable trajectory. The existing complete structured A*Q path is enabled by desktop defaults."
     },
     {
       "file": "full_period.rs",
@@ -134,13 +136,20 @@
       "reason": "Exact v23 numerical source, unchanged."
     },
     {
+      "file": "incremental_projection.rs",
+      "baselineSha256": null,
+      "sha256": "e374cd64dec4a879c354d7f90f53be8f50d10f85a5270dd2ce00ee8812a6b1b6",
+      "bytes": 6946,
+      "reason": "New append-only projected-operator helper and three targeted tests. Stores only a small numerical projection within one fixed-operator solve; no physical-result cache or model approximation."
+    },
+    {
       "file": "lapack.rs",
-      "sha256": "8e25608ebb9563d20d281a5a46f860c15c4e7b8436af24faee835babd4ef961c",
-      "bytes": 35054,
+      "sha256": "3d34946c7ecdc2a90f888cad8417de8f19306a848952dfe7b66cd9e875f78821",
+      "bytes": 36880,
       "baselineSha256": "220c134947813a9da4586775765361511fa36e45d9193a63107705bd6b664ea7",
-      "reason": "Add compile-time static LP64 loader; all existing numerical LAPACK methods remain byte-equivalent after removing these conditional entry declarations.",
+      "reason": "Retain the static LP64 overlay; add only a strictly shape-checked transpose-left real GEMM for append-only projection, without materializing Q transpose.",
       "source": "rust-solver/src/lapack.rs",
-      "sourceSha256": "8e25608ebb9563d20d281a5a46f860c15c4e7b8436af24faee835babd4ef961c"
+      "sourceSha256": "3d34946c7ecdc2a90f888cad8417de8f19306a848952dfe7b66cd9e875f78821"
     },
     {
       "file": "lapack_static.rs",
@@ -153,10 +162,10 @@
     },
     {
       "file": "main.rs",
-      "sha256": "dd7a46618eca297d640b28eb14e9e12a3af1b7a8eaf8fe26d7f2fccca22d7dd4",
-      "bytes": 123927,
+      "sha256": "148c2c8c357947ff6c33c43ed7902f1c78e85824e3f329627ca78a9f2862613a",
+      "bytes": 123956,
       "baselineSha256": "a81f21b6c9f701a8b7576daabc9d7607dc5bfa1ea9151a11a6f73779ad15ceb9",
-      "reason": "Only change default samples to200, expose the existing JSONL entry for same-source rlib use, and export the static build manifest; all dispatcher and mathematical code is v23."
+      "reason": "Retain default samples=200, same-source embedded JSONL entry and static build manifest; add only the incremental_projection module declaration."
     },
     {
       "file": "matrix_probe.rs",
@@ -398,7 +407,57 @@
     "restoration": "40/40 exact SHA256 before overlays",
     "clockEvidence": "artifacts/v24/period-clock-native/validation.json",
     "staticAbi": "Requires final static-host versus DLL comparison on this exact stable kernel",
-    "build": "Not compiled in this task; only source/hash/fixture audit"
+    "build": "Not compiled in this task; only source/hash/fixture audit",
+    "projectionReuse": {
+      "status": "Research targeted tests and complete paired cases passed; this primary transplant awaits root-coordinated build/verification.",
+      "date": "2026-10-24",
+      "testFilter": "incremental_projection::tests::incremental_projection_",
+      "testsPassed": 3,
+      "scope": "Complete original equation, unchanged solver tolerances, no trajectory result cache; only append-only projection reuse and the existing structured outer product.",
+      "completePairs": [
+        {
+          "case": "beat100-long",
+          "beforeSeconds": 4.067,
+          "afterSeconds": 3.799,
+          "maximumPopulationDifference": 4.73e-11,
+          "meanDifference": 0
+        },
+        {
+          "case": "user-long",
+          "beforeSeconds": 3.02,
+          "afterSeconds": 2.776,
+          "maximumPopulationDifference": 5.77e-9,
+          "meanDifference": 0
+        }
+      ],
+      "shortFull32": {
+        "maximumPopulationErrorVersusQuTiP": 0.00000254,
+        "errorUnchanged": true
+      },
+      "longTwoAxisK1Stages": {
+        "aqBeforeSeconds": 3.163,
+        "aqAfterSeconds": 0.463,
+        "gramBeforeSeconds": 0.964,
+        "gramAfterSeconds": 0.103
+      },
+      "unresolved": "Complete two-axis 20 us request still timed out at 25 seconds. Stage timings are not complete solve timings; no 1-2 second claim.",
+      "reverseOrderRecheck": {
+        "profiling": false,
+        "pairs": [
+          {
+            "case": "beat100-long",
+            "offSeconds": 4.269,
+            "onSeconds": 3.957
+          },
+          {
+            "case": "user-long",
+            "offSeconds": 2.378,
+            "onSeconds": 2.518
+          }
+        ],
+        "interpretation": "Complete solve timings vary: beat100 improved in both pairs; user-long reversed in the repeat. No general or two-case speedup claim. The confirmed benefits are eliminated projection work and lower measured A*Q/Gram stage cost, with complete-result population difference <=5.77e-9."
+      }
+    }
   },
   "excludedV24Experiments": [
     "phase_lift_initial",
@@ -410,5 +469,7 @@
     "monodromy_defect",
     "shifted principal core/star changes",
     "uncapped short-time Krylov shift and auto finite-only routing"
-  ]
+  ],
+  "previousSourceTreeSha256": "2e4941384af74542772f7f49b7d06e197722be5ea0bd6b67794bae9a26ee4982",
+  "sourceTreeHashEncoding": "Sorted UTF-8 records: file name + NUL + lowercase SHA256 + LF"
 }
