@@ -120,6 +120,8 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); margin-lef
 .direction-relative, .polarization-presets { width: 100%; }
 
 .polarization-presets { margin-top: var(--row-gap); }
+.polarization-presets.preset-actions { display: flex; gap: var(--row-gap); }
+.polarization-presets.preset-actions > button { flex: 1; min-width: 0; }
 .polarization-bars { display: flex; flex-wrap: wrap; gap: var(--row-gap); margin-top: var(--row-gap); }
 .pol-row { display: grid; grid-template-columns: 1fr auto; gap: 3px; flex: 1; min-width: 0; font-size: calc(var(--font-size) * .875); }
 .pol-row > span { color: var(--muted-ink); }
@@ -328,7 +330,7 @@ details[open] > summary::before { rotate: none; }
 
 .scene-chevron { display: block; width: var(--info-chevron-box); height: var(--info-chevron-box); margin: auto; background: var(--graphite); mask: var(--info-chevron-mask) center / 100% 100% no-repeat; -webkit-mask: var(--info-chevron-mask) center / 100% 100% no-repeat; rotate: 90deg; }
 
-.direction-presets.segmented > button, .direction-relative.segmented > button, .polarization-presets.segmented > button { flex: 1; }
+.direction-presets.segmented > button, .direction-relative.segmented > button { flex: 1; }
 
 .monitor-tree { display: grid; gap: var(--row-gap); margin-top: var(--row-gap); }
 .monitor-f-row { display: grid; grid-template-columns: max-content minmax(0,1fr); gap: var(--row-gap); align-items: start; padding: var(--row-gap) 0 var(--row-gap) calc(var(--info-chevron-box) + var(--row-gap)); }

@@ -12,7 +12,7 @@ import {alignLevelReadouts} from './readout-alignment.js';
 import {drawBadges} from '../../desktop/ui/src/pulse/widgets.js';
 import { Segmented, setChecked, switchButton, checkBox } from '../../desktop/ui/src/fluent/toggles.js';
 import { DETUNING_UNIT_MHZ, detuningInUnit, laserDetuningMHz, laserReferenceTransition, normalizeLaserFrequency, setLaserDetuningUnit, setLaserDetuningValue, setLaserFrequencyMode, setLaserTransitionReference, setLaserWavelengthNm, zeroFieldTransitionOptions } from './laser-frequency.js';
-import { absoluteEnergyMHz, analyze, dipoleBetweenStates, laserFrequencyMHz, laserIntensityMWcm2, laserDirectionAxis, setLaserDirectionAxis, relativeDirectionAxis, setPolarizationPreset, composeMagneticField } from './physics.js';
+import { absoluteEnergyMHz, analyze, dipoleBetweenStates, laserFrequencyMHz, laserIntensityMWcm2, laserDirectionAxis, setLaserDirectionAxis, relativeDirectionAxis, setPolarizationPreset, composeMagneticField, type PolarizationPreset } from './physics.js';
 import {normalizeLaserIntensity,setLaserIntensityMode,setLaserLocalIntensity,setLaserPowerMW,setLaserWaistUm} from './laser-intensity.js';
 import {dynamicsCacheKey} from './dynamics-cache-key.js';
 import {CurrentDynamicsResults} from './current-dynamics-results.js';
@@ -49,7 +49,7 @@ try{const saved=JSON.parse(localStorage.getItem(`${STORAGE}-solver-failures`)??'
 function rememberSolverFailure(record:SolverFailureRecord):void{failureRecords=[...failureRecords.slice(-4),record];try{localStorage.setItem(`${STORAGE}-solver-failures`,JSON.stringify(failureRecords));}catch{}}
 const solver=new DynamicsClient({debounceMs:0,onFailure:rememberSolverFailure}),analysisCache=new Map<string,Analysis>();
 const treeOwners=new WeakMap<HTMLSelectElement,TreeCombo>();
-let initialTree:TreeCombo|undefined,shapeSegments:Segmented|undefined,atomicSegments:Segmented|undefined;
+let initialTree:TreeCombo|undefined;
 const directionSegments: Array<{control:Segmented;kind:'axes'|'relative'}>=[];
 const monitorModeSegments=new Map<HTMLElement,Segmented>();
 const projectedPopulationCache=new WeakMap<Analysis,WeakMap<object,Record<string,number>|null>>();
@@ -149,13 +149,26 @@ function segmentedControl(parent:HTMLElement,label:string,value:string,options:[
 function sectionChoice(parent:HTMLElement,label:string,value:string,options:[string,string][],changed:(value:string)=>void):HTMLElement{
   const control=new Segmented(next=>{try{changed(String(next));control.setCurrent(next);}catch(error){toast(error instanceof Error?error.message:String(error));}});control.setChoices(options);control.setCurrent(value);control.root.setAttribute('aria-label',label);control.root.classList.add('section-choice');parent.querySelector('.section-title')!.append(control.root);return control.root;
 }
+/** Presets are commands, not modes. Rendering never selects or re-applies one. */
+function polarizationButtons(laser:Laser,choices:readonly (readonly [PolarizationPreset,string])[],label:string):HTMLElement{
+  const actions=document.createElement('div');actions.className='polarization-presets preset-actions full-form-row';actions.role='group';actions.setAttribute('aria-label',label);
+  for(const [preset,text]of choices){
+    const action=command(text,()=>{
+      setPolarizationPreset(laser,scene.fields,preset);
+      for(const [key,value]of [['laser-theta',laser.thetaDeg],['laser-phi',laser.phiDeg],['polarization',laser.polarizationAngleDeg],['ellipticity',laser.ellipticityDeg]] as const)numericControls.get(key)?.setValue(value);
+      renderObjects();update();
+    });
+    action.root.dataset.polarizationAction=preset;actions.append(action.root);
+  }
+  return actions;
+}
 function directionButtons(parent:HTMLElement,apply:(theta:number,phi:number,exact?:AxisAngles)=>void,relative=false):void{
   const axes:[string,string][]=[['90,0','+x'],['90,180','−x'],['90,90','+y'],['90,-90','−y'],['0,0','+z'],['180,0','−z']];
   const control=new Segmented(key=>{const [theta,phi]=String(key).split(',').map(Number);apply(theta!,phi!);});control.setChoices(axes);control.root.classList.add('direction-presets','full-form-row');control.root.setAttribute('aria-label','坐标轴方向');parent.append(control.root);directionSegments.push({control,kind:'axes'});
   if(relative){const control=new Segmented(key=>{const axis=relativeDirectionAxis(composeMagneticField(scene.fields).fieldAxis,String(key) as 'parallel'|'anti'|'perpendicular');apply(axis.thetaDeg,axis.phiDeg,axis);});control.setChoices([['parallel','∥ B'],['anti','−B'],['perpendicular','⊥ B']]);control.root.classList.add('direction-relative','full-form-row');control.root.setAttribute('aria-label','相对磁场方向');parent.append(control.root);directionSegments.push({control,kind:'relative'});}
 }
 function renderInspector():void{
-  renameObject.root.hidden=!(selection.kind==='laser'?scene.lasers.some(l=>l.id===selection.id):scene.fields.some(f=>f.id===selection.id));const host=$('inspector-controls');const scroll=$('inspector-title').closest<HTMLElement>('.inspector-panel')!.scrollTop;disposeTrees(host);host.replaceChildren();numericControls.clear();directionSegments.length=0;shapeSegments=undefined;atomicSegments=undefined;setText('inspector-title','参数');setText('inspector-subtitle','');
+  renameObject.root.hidden=!(selection.kind==='laser'?scene.lasers.some(l=>l.id===selection.id):scene.fields.some(f=>f.id===selection.id));const host=$('inspector-controls');const scroll=$('inspector-title').closest<HTMLElement>('.inspector-panel')!.scrollTop;disposeTrees(host);host.replaceChildren();numericControls.clear();directionSegments.length=0;setText('inspector-title','参数');setText('inspector-subtitle','');
   if(selection.kind==='none'){setText('inspector-title','总场');const empty=document.createElement('p');empty.className='selection-empty inspector-empty';empty.textContent='选择光束或磁场查看参数';host.append(empty);return;}
   if(selection.kind==='field'){
     const field=scene.fields.find(f=>f.id===selection.id);if(!field)return;setText('inspector-title',field.name);const g=group('磁场');numeric(g,'大小','magnitude',field.magnitudeG,0,20,.01,'G',n=>field.magnitudeG=n);numeric(g,'极角 θ','field-theta',field.thetaDeg,0,180,1,'°',n=>field.thetaDeg=n);numeric(g,'方位 φ','field-phi',field.phiDeg,-180,180,1,'°',n=>field.phiDeg=n);directionButtons(g,(theta,phi)=>{field.thetaDeg=theta;field.phiDeg=phi;numericControls.get('field-theta')?.setValue(theta);numericControls.get('field-phi')?.setValue(phi);renderObjects();update();});
@@ -174,8 +187,8 @@ function renderInspector():void{
     if(l.intensityMode==='power'){numeric(strength,'功率 P','power',l.powerMW??4,0,Number.MAX_VALUE,.01,'mW',n=>setLaserPowerMW(l,n));numeric(strength,'束腰 w₀','waist',l.waistUm??1.2,Number.MIN_VALUE,Number.MAX_VALUE,.01,'μm',n=>setLaserWaistUm(l,n));}else numeric(strength,'强度 I','intensity',l.intensityMWcm2,0,Number.MAX_VALUE,.01,'mW/cm²',n=>setLaserLocalIntensity(l,n));
     const d=group('传播方向');numeric(d,'极角 θ','laser-theta',l.thetaDeg,0,180,1,'°',n=>setLaserDirectionAxis(l,{thetaDeg:n,phiDeg:l.phiDeg}));numeric(d,'方位 φ','laser-phi',l.phiDeg,-180,180,1,'°',n=>setLaserDirectionAxis(l,{thetaDeg:l.thetaDeg,phiDeg:n}));directionButtons(d,(theta,phi,exact)=>{setLaserDirectionAxis(l,exact??{thetaDeg:theta,phiDeg:phi},Boolean(exact));numericControls.get('laser-theta')?.setValue(theta);numericControls.get('laser-phi')?.setValue(phi);renderObjects();update();},true);
     const p=group('光束偏振');numeric(p,'主轴 ψ','polarization',l.polarizationAngleDeg,-90,90,1,'°',n=>l.polarizationAngleDeg=n);numeric(p,'椭圆率 χ','ellipticity',l.ellipticityDeg,-45,45,1,'°',n=>l.ellipticityDeg=n);
-    shapeSegments=new Segmented(value=>{setPolarizationPreset(l,scene.fields,String(value) as 'linear'|'circular-minus'|'circular-plus');numericControls.get('ellipticity')?.setValue(l.ellipticityDeg);update();});shapeSegments.setChoices([['circular-minus','圆−'],['linear','线偏振'],['circular-plus','圆+']]);shapeSegments.root.classList.add('polarization-presets','full-form-row');shapeSegments.root.setAttribute('aria-label','光束偏振形状');shapeSegments.root.title='光束自身的偏振形状；保持传播方向，π/σ 分量由相对磁场方向决定。';p.append(shapeSegments.root);
-    atomicSegments=new Segmented(value=>{setPolarizationPreset(l,scene.fields,String(value) as 'pi'|'sigma-minus'|'sigma-plus');renderInspector();renderObjects();update();});atomicSegments.setChoices([['sigma-minus','σ−'],['pi','π'],['sigma-plus','σ+']]);atomicSegments.root.classList.add('polarization-presets','full-form-row');atomicSegments.root.setAttribute('aria-label','原子偏振快捷设置');atomicSegments.root.title='设置纯 π 时同时令 k ⟂ B；设置纯 σ 时同时令 k ∥ B。';p.append(fieldRow('纯偏振',atomicSegments.root));
+    const shapeActions=polarizationButtons(l,[['circular-minus','圆−'],['linear','线偏振'],['circular-plus','圆+']],'一次性设置光束偏振形状');shapeActions.title='只设置一次椭圆率，保持当前传播方向和主轴。';p.append(shapeActions);
+    const atomicActions=polarizationButtons(l,[['sigma-minus','σ−'],['pi','π'],['sigma-plus','σ+']],'按当前磁场一次性设置纯偏振');atomicActions.title='按当前 B 设置一次（B=0 时按 z）：π 令 k ⟂ B，σ 令 k ∥ B；之后各参数独立。';p.append(fieldRow('纯偏振',atomicActions));
     const pol=document.createElement('div');pol.id='inspector-polarization';pol.className='polarization-bars full-form-row';p.append(pol);
     const more=document.createElement('details');more.className='advanced-controls';more.innerHTML='<summary>相位</summary>';host.append(more);const phase=form();more.append(phase);numeric(phase,'初相位 φ','laser-phase',l.phaseDeg??0,-180,180,1,'°',n=>l.phaseDeg=n);
   }
@@ -446,8 +459,6 @@ function refreshDirectionStates(a:Analysis):void {
   const sameDirection=(theta:number,phi:number)=>sameAxis({thetaDeg:theta,phiDeg:phi});
   const axis=a.fieldAxis;
   for(const {control,kind}of directionSegments){if(kind==='axes'){const found=['90,0','90,180','90,90','90,-90','0,0','180,0'].find(value=>{const [theta,phi]=value.split(',').map(Number);return sameDirection(theta!,phi!);});control.setCurrent(found??null);}else{const modes=['parallel','anti','perpendicular']as const;for(const mode of modes)control.setWithheld(mode,a.fieldMagnitudeG===0);control.setCurrent(a.fieldMagnitudeG>0?modes.find(mode=>sameAxis(relativeDirectionAxis(axis,mode)))??null:null);}}
-  const laser=selection.kind==='laser'?current as Laser:undefined;
-  if(laser){shapeSegments?.setCurrent(laser.ellipticityDeg===0?'linear':laser.ellipticityDeg===45?'circular-plus':laser.ellipticityDeg===-45?'circular-minus':null);const p=a.polarizations[laser.id];atomicSegments?.setCurrent(p?.pi!>1-1e-10?'pi':sameAxis(axis)&&p?.plus!>1-1e-10?'sigma-plus':sameAxis(axis)&&p?.minus!>1-1e-10?'sigma-minus':null);}
 
 }
 
@@ -464,7 +475,6 @@ function renderResults(allowSolve=true):void{
   if(view!=='space'&&spaceMount.isConnected)spaceMount.remove();
   if(view!=='dynamics'&&unbindPopulation){unbindPopulation();unbindPopulation=undefined;}populationScaleControl.root.hidden=view!=='dynamics';
   root.dataset.view=view;
-  if(atomicSegments){const axis=a.fieldMagnitudeG===0?'z':'B';atomicSegments.setChoices([['sigma-minus',`σ−∥${axis}`],['pi',`π⊥${axis}`],['sigma-plus',`σ+∥${axis}`]]);atomicSegments.root.title=`纯 π 同时设置 k ⟂ ${axis}；纯 σ 同时设置 k ∥ ${axis}。`;const p=selection.kind==='laser'?a.polarizations[selection.id]:undefined;atomicSegments.setCurrent(p&&p.pi>1-1e-10?'pi':p&&p.plus>1-1e-10?'sigma-plus':p&&p.minus>1-1e-10?'sigma-minus':null);}
   if($('inspector-polarization'))$('inspector-polarization').innerHTML=polarizationBars(a,selection.kind==='laser'?scene.lasers.find(l=>l.id===selection.id):laser);
   if($('laser-absolute-frequency')){const l=scene.lasers.find(l=>l.id===selection.id);if(l)setText('laser-absolute-frequency',`${number(laserFrequencyMHz(l)/1e6,12)} THz`);}
   if(view==='levels'){

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
-import {composeMagneticField,polarization,laserDirectionAxis,setLaserDirectionAxis,relativeDirectionAxis,setPolarizationPreset,direction} from '../dist/js/atom-workbench/src/physics.js';
+import {composeMagneticField,polarization,laserDirectionAxis,setLaserDirectionAxis,relativeDirectionAxis,setPolarizationPreset,direction,analyze} from '../dist/js/atom-workbench/src/physics.js';
+import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {spectroscopyAnalysis} from '../dist/js/atom-workbench/src/spectroscopy.js';
 import {buildEffectiveMasterModel} from '../dist/js/atom-workbench/src/effective-master-model.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
@@ -34,6 +35,38 @@ test('shape presets retain k and main axis; perpendicular linear orientations se
  for(const shape of ['linear','circular-plus','circular-minus']){const before=laserDirectionAxis(l);setPolarizationPreset(l,s.fields,shape);assert.deepEqual(laserDirectionAxis(l),before);assert.equal(l.polarizationAngleDeg,27);}
  setLaserDirectionAxis(l,{thetaDeg:90,phiDeg:0});setPolarizationPreset(l,s.fields,'linear');
  for(const [psi,pi] of [[0,1],[45,.5],[90,0]]){l.polarizationAngleDeg=psi;const p=polarization(l,f.fieldVector,f.fieldAxis);near(p.pi,pi);near(p.minus,(1-pi)/2);near(p.plus,(1-pi)/2);}
+});
+
+test('one sigma command leaves later B, propagation and Jones edits independent',()=>{
+ const s=defaultScene(),l=s.lasers[0];Object.assign(s.fields[0],{thetaDeg:37,phiDeg:17});
+ setPolarizationPreset(l,s.fields,'sigma-plus');
+ const geometry=()=>({axis:laserDirectionAxis(l),psi:l.polarizationAngleDeg,chi:l.ellipticityDeg});
+ const clicked=structuredClone(geometry());
+ Object.assign(s.fields[0],{thetaDeg:61,phiDeg:-23});analyze(s);spectroscopyAnalysis(s,'probe');buildFullMasterModel(s);
+ assert.deepEqual(geometry(),clicked);
+ let field=composeMagneticField(s.fields),p=polarization(l,field.fieldVector,field.fieldAxis);
+ assert.ok(p.plus<.99);assert.ok(p.pi>0);
+ setLaserDirectionAxis(l,{thetaDeg:74,phiDeg:31});const moved=structuredClone(geometry());
+ analyze(s);buildFullMasterModel(s);assert.deepEqual(geometry(),moved);assert.equal(l.directionAnchor,undefined);
+ l.polarizationAngleDeg=21;l.ellipticityDeg=9;const edited=structuredClone(geometry());
+ analyze(s);spectroscopyAnalysis(s,'probe');buildFullMasterModel(s);assert.deepEqual(geometry(),edited);
+ p=polarization(l,field.fieldVector,field.fieldAxis);near(dot(p.k,p.u),0);near(dot(p.k,p.v),0);
+ const reloaded=validateScene(JSON.parse(JSON.stringify(s)));Object.assign(reloaded.fields[0],{thetaDeg:12,phiDeg:85});analyze(reloaded);
+ assert.deepEqual({axis:laserDirectionAxis(reloaded.lasers[0]),psi:reloaded.lasers[0].polarizationAngleDeg,chi:reloaded.lasers[0].ellipticityDeg},edited);
+});
+
+test('legacy preset and follow labels are ignored on import and never reactivate a constraint',()=>{
+ for(const preset of ['pi','sigma-minus','sigma-plus']){
+  const raw=defaultScene(),laser=raw.lasers[0];
+  Object.assign(laser,{thetaDeg:53,phiDeg:19,polarizationAngleDeg:27,ellipticityDeg:8,
+   polarizationPreset:preset,polarizationMode:'relative-to-B',followMagneticField:true});
+  const loaded=validateScene(JSON.parse(JSON.stringify(raw))),l=loaded.lasers[0];
+  for(const key of ['polarizationPreset','polarizationMode','followMagneticField'])assert.equal(Object.hasOwn(l,key),false);
+  Object.assign(loaded.fields[0],{thetaDeg:116,phiDeg:-41});analyze(loaded);
+  assert.deepEqual([l.thetaDeg,l.phiDeg,l.polarizationAngleDeg,l.ellipticityDeg],[53,19,27,8]);
+  const reloaded=validateScene(JSON.parse(JSON.stringify(loaded)));reloaded.fields[0].thetaDeg=4;analyze(reloaded);
+  assert.deepEqual([reloaded.lasers[0].thetaDeg,reloaded.lasers[0].phiDeg,reloaded.lasers[0].polarizationAngleDeg,reloaded.lasers[0].ellipticityDeg],[53,19,27,8]);
+ }
 });
 
 test('oblique weights match direct lab-vector projection independently of spherical-coordinate formulas',()=>{

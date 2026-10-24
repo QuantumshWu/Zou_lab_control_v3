@@ -17,6 +17,9 @@ export function validateScene(input:unknown):Scene {
   const ids=new Set<string>(),id=(o:Record<string,unknown>)=>{const v=string(o,'id');if(!/^[A-Za-z0-9_-]+$/.test(v)||['__proto__','constructor','prototype'].includes(v)||ids.has(v))throw new Error('对象 ID 非法或重复');ids.add(v);return v;};
   const fields:MagneticField[]=s.fields.map(v=>{const f=obj(v);return {id:id(f),name:string(f,'name'),enabled:enabled(f),magnitudeG:val(f,'magnitudeG',0,20),thetaDeg:val(f,'thetaDeg',0,180),phiDeg:val(f,'phiDeg',-180,180)};});
   const lasers:Laser[]=s.lasers.map(v=>{const l=obj(v);if(l.line!=='D1'&&l.line!=='D2')throw new Error('光谱线必须为 D1 或 D2');
+    // Only authored lab geometry and Jones parameters are restored. Legacy
+    // preset/follow labels are intentionally outside this whitelist: shortcuts
+    // are one-time commands and loading a scene must never apply one again.
     const result:Laser={id:id(l),name:string(l,'name'),enabled:enabled(l),line:l.line,detuningMHz:val(l,'detuningMHz',-5e9,5e9),intensityMWcm2:val(l,'intensityMWcm2',0,Number.MAX_VALUE),thetaDeg:val(l,'thetaDeg',0,180),phiDeg:val(l,'phiDeg',-180,180),polarizationAngleDeg:val(l,'polarizationAngleDeg',-90,90),ellipticityDeg:val(l,'ellipticityDeg',-45,45),phaseDeg:l.phaseDeg===undefined?0:val(l,'phaseDeg',-180,180)};
     if(l.frequencyAnchor!==undefined){const anchor=obj(l.frequencyAnchor);if(anchor.line!=='D1'&&anchor.line!=='D2')throw new Error('频率锚点 D 线无效');result.frequencyAnchor={line:anchor.line,offsetMHz:val(anchor,'offsetMHz',-Number.MAX_VALUE,Number.MAX_VALUE),viewKey:string(anchor,'viewKey',2048)};}
     if(l.intensityAnchor!==undefined){const anchor=obj(l.intensityAnchor);result.intensityAnchor={intensityMWcm2:val(anchor,'intensityMWcm2',0,Number.MAX_VALUE),viewKey:string(anchor,'viewKey',2048)};}
