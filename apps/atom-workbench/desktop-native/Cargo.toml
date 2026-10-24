@@ -1,0 +1,28 @@
+[package]
+name = "atom-workbench-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+embedded-solver = ["dep:atom-lindblad-embedded"]
+
+[dependencies]
+tao = "=0.37.1"
+wry = "=0.57.0"
+serde_json = "1"
+percent-encoding = "2"
+sha2 = "=0.10.9"
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_UI_WindowsAndMessaging"] }
+atom-lindblad-embedded = { path = "solver", optional = true }
+
+[build-dependencies]
+zlc-resources = { path = "../../../crates/zlc-resources" }
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "thin"

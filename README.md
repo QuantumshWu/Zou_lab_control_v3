@@ -36,8 +36,9 @@ On a Windows PC with this repository checked out and the Python v2 runs with
 | `experiment.exe` | Devices@Zou lab; Init opens the Task Console (the experiment) |
 | `figure_viewer.exe` | FigureViewer@Zou lab alone; drop a figure archive on it to open it |
 | `pulse_editor.exe` | PulseGUI@Zou lab alone (Offline, Virtual or a remote board) |
+| `atom_workbench.exe` | Standalone Rb87 levels, couplings and population dynamics (separate build) |
 
-They run the release in `bin\engine`, so a lab PC needs no compiler. After a pull
+The experiment, figure and pulse launchers run the release in `bin\engine`, so a lab PC needs no compiler. After a pull
 that brings a new release, each of them opens `installation.exe` instead, where
 the program reads *Update*.
 Experiment data lives in `workspace\` inside the checkout (apparatus, layouts,
@@ -49,6 +50,12 @@ Every step of `installation.exe` is also a `.bat` in `bin\scripts` for scripting
 entry are described in [bin/README.md](bin/README.md). A checkout cloned before the
 engine left git is re-synced once, with git or GitHub Desktop, as
 [that page says](bin/README.md#once-a-checkout-from-before-the-engine-left-git).
+
+**Atom Workbench** shares this repository's Fluent controls but is packaged
+independently. `bin\scripts\build_atom_workbench.bat` builds its current sources
+and shared UI into the root `atom_workbench.exe`. That same single EXE can be
+copied to another PC with WebView2; it embeds its solver and interface. The
+generated EXE is not tracked in Git. See [its source and build guide](apps/atom-workbench/README.md).
 
 ## Working with it
 

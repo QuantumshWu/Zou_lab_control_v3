@@ -1,0 +1,22 @@
+{
+  "name": "zlc-atom-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepare:native": "node scripts/prepare-native-deps.mjs",
+    "package:single-exe": "node scripts/release-single-exe.mjs",
+    "test": "npm run build && node --test tests/physics.test.mjs tests/polarization-presets.test.mjs tests/laser-frequency.test.mjs tests/full-master-model.test.mjs tests/input-semantics.test.mjs tests/duration.test.mjs tests/scene-file.test.mjs tests/choice-trees.test.mjs tests/current-dynamics-results.test.mjs tests/population-selection.test.mjs tests/space-geometry.test.mjs tests/space-arrow.test.mjs tests/ui-defaults-layout.test.mjs tests/ui-review.test.mjs tests/solver-client.test.mjs tests/desktop-native-fetch.test.mjs tests/desktop-native-worker-lane.test.mjs tests/desktop-solver-settings.test.mjs tests/native-dependencies.test.mjs tests/memory-exe-format.test.mjs",
+    "test:build": "node --test tests/native-dependencies.test.mjs tests/memory-exe-format.test.mjs",
+    "test:ui": "npm run build && node --test tests/choice-trees.test.mjs tests/duration.test.mjs tests/scene-file.test.mjs tests/population-selection.test.mjs tests/space-geometry.test.mjs tests/space-arrow.test.mjs tests/ui-defaults-layout.test.mjs tests/ui-review.test.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "katex": "0.19.0"
+  },
+  "description": "Standalone Rb87 workbench sharing the current v3 Fluent UI and native build resources."
+}

@@ -30,3 +30,5 @@ __pycache__/
 /bin/engine.next.partial/
 /bin/engine.old/
 /bin/ai.old/
+# Atom Workbench is a standalone release artifact; its sources live in apps/.
+/atom_workbench.exe

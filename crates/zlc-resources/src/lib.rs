@@ -12,6 +12,12 @@ const ICON: &[u8] = include_bytes!("../../zlc-desktop/assets/zlc.ico");
 /// Gives every binary of the calling package the product icon and, when given,
 /// `manifest` (RT_MANIFEST 1). Called from a build script; nothing for a non-MSVC target.
 pub fn embed(manifest: Option<&[u8]>) {
+    embed_icon(ICON,manifest);
+}
+
+/// Share the Windows resource writer with independently packaged v3 tools.
+/// The existing entry keeps the normal v3 product icon.
+pub fn embed_icon(icon:&[u8],manifest:Option<&[u8]>) {
     println!("cargo:rerun-if-changed=build.rs");
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
         return;
@@ -20,7 +26,7 @@ pub fn embed(manifest: Option<&[u8]>) {
     if let Some(manifest) = manifest {
         resources.entry(24, 1, 0x1030, 0x0409, manifest);
     }
-    resources.icon(ICON);
+    resources.icon(icon);
     let path = PathBuf::from(std::env::var("OUT_DIR").expect("a build script's OUT_DIR")).join("resources.res");
     std::fs::write(&path, &resources.0).expect("resources.res");
     println!("cargo:rustc-link-arg-bins={}", path.display());

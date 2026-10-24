@@ -1,0 +1,25 @@
+[package]
+name = "atom-lindblad-embedded"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+# Compile the existing solver crate root directly as an rlib. There is no
+# second numerical source tree and no generated/translated physics copy.
+[lib]
+path = "../../rust-solver/src/main.rs"
+
+[features]
+default = ["static-numerics"]
+static-numerics = []
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg", "rayon"] }
+rayon = "1.12"
+
+[build-dependencies]
+sha2 = "=0.10.9"
+serde_json = "1.0"

@@ -1,0 +1,4 @@
+# Preserve bytes covered by the native-input lock and stable-kernel provenance.
+native/** -text
+rust-solver/src/*.rs -text
+rust-solver/tests/fixtures/** -text

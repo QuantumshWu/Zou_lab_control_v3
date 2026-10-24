@@ -1,0 +1,34 @@
+Atom Workbench stable kernel source staging
+
+The numerical base is the exact 40-file v23 source snapshot for native binary
+56a26af78dae3d0cbc32b330d0082f3a75443b4cf07472bc5ca447f024c483f6.
+All 40 original hashes were verified before any overlay.
+
+Only these overlays are included:
+- Static native LP64 OpenBLAS/SuperLU ABI selection; dynamic loader remains available.
+- A public entry for the same-source embedded worker and its build manifest.
+- Default output samples=200, including Options::default.
+- The validated exact declared-MHz period clock, with no phase snapping.
+
+The clock source matches the six-test v24 validation snapshot and its native
+population/F-group comparison with the frozen reference (below7.4e-13).
+Static ABI files come from the successfully linked native platform candidate,
+but this exact stable tree still requires a fresh build and targeted validation.
+
+V24 research routes (phase lifting, finite Magnus/Strang, shifted-core/star,
+mean-shift reuse, axis caps, refinement diagnostics, modified short-time shift
+and automatic finite-only routing) are NOT included. Existing v23 diagnostic
+switches are unchanged; shipping desktop defaults keep them disabled.
+
+Eight literal compile-time test fixtures are present (535736 bytes total).
+Normal compilation and production numerical paths do not require Python or
+external research artifacts. Some original v23 ignored performance-audit tests
+still read/write historical artifacts/v4 datasets; those optional audits were
+not copied, run, or presented as fresh-checkout regression tests. Static linking
+inputs and the embedded worker build script come from the desktop build project;
+the dynamic development worker still needs its selected numerical DLLs.
+
+This task performed source/hash/fixture auditing only, not compilation or tests.
+See baseline-source-manifest.json and stable-kernel-manifest.json for provenance.
+Source tree digest (ordered file-name NUL sha256 LF records):
+2e4941384af74542772f7f49b7d06e197722be5ea0bd6b67794bae9a26ee4982

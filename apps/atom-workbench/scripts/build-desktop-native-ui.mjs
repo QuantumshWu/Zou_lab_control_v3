@@ -1,0 +1,13 @@
+import {build} from 'esbuild';
+import {mkdir} from 'node:fs/promises';
+import {resolve,join} from 'node:path';
+import {verifyUiSourceManifest,appendNativeUiOutputs} from './ui-source.mjs';
+const app=resolve(import.meta.dirname,'..');
+const argument=process.argv.find(v=>v.startsWith('--out='));
+const output=resolve(argument?.slice(6)??join(app,'dist'));
+await mkdir(output,{recursive:true});
+verifyUiSourceManifest(output,{allowPackaging:false});
+await build({entryPoints:[join(app,'desktop-native/ui/entry.mjs')],bundle:true,format:'iife',target:'es2022',outfile:join(output,'desktop-bridge.js'),legalComments:'inline'});
+await build({entryPoints:[join(app,'desktop-native/ui/model-worker.mjs')],bundle:true,format:'esm',target:'es2022',outfile:join(output,'desktop-model-worker.js'),legalComments:'inline'});
+appendNativeUiOutputs(output);
+console.log(JSON.stringify({output,transport:'native-ipc',nodeRuntime:false}));

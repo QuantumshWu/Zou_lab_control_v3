@@ -246,8 +246,8 @@ optgroup::label, optgroup legend {
   border: var(--edge) solid var(--divider); border-radius: var(--radius); background: var(--surface);
   padding: calc(2 * var(--popup-gap)) var(--popup-gap) var(--popup-gap); color: var(--text); overflow-y: auto;
 }
-.tree-row { display: flex; align-items: stretch; white-space: nowrap; cursor: default; padding-left: var(--tree-indent); }
-.tree-row.leaf { padding-left: calc(2 * var(--tree-indent)); }
+.tree-row { display: flex; align-items: stretch; white-space: nowrap; cursor: default; padding-left: calc((1 + var(--tree-depth, 0)) * var(--tree-indent)); }
+.tree-row.leaf { padding-left: calc((1 + var(--tree-depth, 1)) * var(--tree-indent)); }
 .tree-branch {
   width: var(--tree-indent); margin-left: calc(-1 * var(--tree-indent)); flex: none;
   background: var(--graphite); -webkit-mask: var(--chevron-down) center / var(--chevron-w) var(--chevron-h) no-repeat; mask: var(--chevron-down) center / var(--chevron-w) var(--chevron-h) no-repeat;

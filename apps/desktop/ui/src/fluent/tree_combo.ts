@@ -1,11 +1,11 @@
 import { comboFace, hintWidest } from "./combo.js";
 import { assign, element } from "./dom.js";
+import { flattenTree, type FlatTreeGroup, type TreeGroup, type TreeLeaf } from "./tree_model.js";
+export type { TreeGroup, TreeLeaf } from "./tree_model.js";
 
 /** One keyed choice: its opaque key, its row's words, and what the closed box
  * says when it is picked (v2 choice_tree_groups' `full_label`). */
-export type TreeLeaf = { key: string; label: string; text: string };
 /** One heading of the tree and the choices under it (a producer's signals, a device's knobs, a unit's family). */
-export type TreeGroup = { heading: string; leaves: TreeLeaf[] };
 /** A choice as its owner offers it: `group` is the heading it is filed under. */
 export type TreeEntry = { key: string; label?: string; group?: string; text?: string };
 
@@ -53,7 +53,7 @@ export class TreeCombo {
   /** The box's empty value: the none row's words, else the placeholder. */
   private blank = new Option("", "");
   private list = element("div", "tree-combo-list");
-  private groups: TreeGroup[] = [];
+  private groups: FlatTreeGroup[] = [];
   private none: string | null = null;
   private current = "";
   private signature = "";
@@ -102,7 +102,7 @@ export class TreeCombo {
     const signature = JSON.stringify([groups, none, this.placeholder]);
     if (signature !== this.signature) {
       this.signature = signature;
-      this.groups = groups.map(group => ({ heading: group.heading, leaves: [...group.leaves] }));
+      this.groups = flattenTree(groups);
       this.none = none;
       // Every choice is an option of the box, never listed by it: the closed box says
       // the picked one's text and is as wide as the widest it may say (v2 _collapsed_text_candidates).
@@ -129,6 +129,10 @@ export class TreeCombo {
   }
   set disabled(disabled: boolean) { assign(this.root, "disabled", disabled); if (disabled && this.open) this.list.hidePopover(); }
   set title(text: string) { if (this.root.title !== text) this.root.title = text; }
+  dispose(): void { if (this.open) this.list.hidePopover(); this.list.remove(); }
+  private openPath(index: number): void {
+    for (let at: number | null = index; at !== null; at = this.groups[at]!.parent) this.expanded.add(this.groups[at]!.path);
+  }
 
   private leaf(key: string): TreeLeaf | undefined {
     for (const group of this.groups) for (const leaf of group.leaves) if (leaf.key === key) return leaf;
@@ -139,7 +143,7 @@ export class TreeCombo {
   private show(): void {
     if (this.root.disabled) return;
     const at = this.groups.findIndex(group => group.leaves.some(leaf => leaf.key === this.current));
-    if (at >= 0) this.expanded.add(this.groups[at]!.heading);
+    if (at >= 0) this.openPath(at);
     if (!this.list.isConnected) document.body.append(this.list);
     this.list.showPopover();
     this.cursor = -1;
@@ -158,16 +162,19 @@ export class TreeCombo {
     const rows: Row[] = [];
     if (this.none !== null) rows.push({ kind: "none" });
     this.groups.forEach((group, index) => {
+      for (let parent = group.parent; parent !== null; parent = this.groups[parent]!.parent) if (!this.expanded.has(this.groups[parent]!.path)) return;
       rows.push({ kind: "heading", group: index });
-      if (this.expanded.has(group.heading)) for (const leaf of group.leaves) rows.push({ kind: "leaf", group: index, leaf });
+      if (this.expanded.has(group.path)) for (const leaf of group.leaves) rows.push({ kind: "leaf", group: index, leaf });
     });
     this.rows = rows;
     this.list.replaceChildren(...rows.map((row, index) => {
       const node = element("div", `tree-row ${row.kind}`);
       node.dataset.index = String(index);
+      const depth = row.kind === "none" ? 0 : this.groups[row.group]!.depth + (row.kind === "leaf" ? 1 : 0);
+      node.style.setProperty("--tree-depth", String(depth)); node.setAttribute("aria-level", String(depth + 1));
       const item = element("span", "tree-item");
       if (row.kind === "heading") {
-        const open = this.expanded.has(this.groups[row.group]!.heading);
+        const open = this.expanded.has(this.groups[row.group]!.path);
         node.classList.toggle("open", open);
         node.setAttribute("role", "treeitem");
         node.setAttribute("aria-expanded", String(open));
@@ -176,6 +183,7 @@ export class TreeCombo {
       } else {
         node.setAttribute("role", "treeitem");
         item.textContent = row.kind === "leaf" ? row.leaf.label : this.none!;
+        node.setAttribute("aria-selected", String(row.kind === "leaf" ? row.leaf.key === this.current : this.current === ""));
       }
       node.append(item);
       return node;
@@ -214,7 +222,6 @@ export class TreeCombo {
     const row = this.rows[index];
     if (!row) return;
     if (row.kind === "heading") {
-      if (!pointer) return;
       this.toggle(row.group);
       return;
     }
@@ -225,8 +232,8 @@ export class TreeCombo {
     if (changed) this.changed(key);
   }
 
-  private toggle(group: number, open = !this.expanded.has(this.groups[group]!.heading)): void {
-    const heading = this.groups[group]!.heading;
+  private toggle(group: number, open = !this.expanded.has(this.groups[group]!.path)): void {
+    const heading = this.groups[group]!.path;
     if (open === this.expanded.has(heading)) return;
     if (open) this.expanded.add(heading); else this.expanded.delete(heading);
     const at = this.identity(this.rows[this.cursor]);
@@ -251,12 +258,15 @@ export class TreeCombo {
       case "End": this.move(last); break;
       case "ArrowRight":
         if (row?.kind === "heading") {
-          if (!this.expanded.has(this.groups[row.group]!.heading)) this.toggle(row.group, true);
-          else if (this.rows[this.cursor + 1]?.kind === "leaf") this.move(this.cursor + 1);
+          if (!this.expanded.has(this.groups[row.group]!.path)) this.toggle(row.group, true);
+          else if (this.rows[this.cursor + 1]) this.move(this.cursor + 1);
         }
         break;
       case "ArrowLeft":
-        if (row?.kind === "heading") this.toggle(row.group, false);
+        if (row?.kind === "heading") {
+          if (this.expanded.has(this.groups[row.group]!.path)) this.toggle(row.group, false);
+          else { const parent = this.groups[row.group]!.parent; if (parent !== null) this.move(this.rows.findIndex(item => item.kind === "heading" && item.group === parent)); }
+        }
         else if (row?.kind === "leaf") this.move(this.rows.findIndex(item => item.kind === "heading" && item.group === row.group));
         break;
       case "Enter": if (row) this.activate(this.cursor, false); break;
