@@ -72,7 +72,8 @@ foreach ($name in $ZlcProductNames) {
 # programs at the root (one launcher, named for its mode), the engine in
 # bin\engine, zlc-mcp in bin\ai.
 $files = [ordered]@{}
-foreach ($program in $ZlcPrograms) { $files["$program.exe"] = Join-Path $built 'zlc-launch.exe' }
+# Existing root launchers remain unchanged. Release binaries are distributed
+# as GitHub assets, never added to this source commit.
 foreach ($name in $ZlcEngineNames) { $files["bin\engine\$name"] = Join-Path $built $name }
 $files['bin\ai\zlc-mcp.exe'] = Join-Path $built 'zlc-mcp.exe'
 $atom = Join-Path $root 'atom_workbench.exe'
@@ -120,8 +121,8 @@ $release = [ordered]@{ version = $version; tag = "v$version"; source = $stamp; c
 Set-Content -LiteralPath $record -Value ($release | ConvertTo-Json -Depth 3) -Encoding ascii
 Write-Host "Release v${version}: $($files.Count) files from $commit (sources $stamp), $zip ($([math]::Round($release.asset.size / 1MB, 1)) MB)."
 
-$paths = @('bin/release.json') + @($ZlcPrograms | ForEach-Object { "$_.exe" })
-$message = "Release v${version}: the engine and zlc-mcp from $($commit.Substring(0, 12)) (bin\release.json), the four programs"
+$paths = @('bin/release.json')
+$message = "Release v${version}: installer assets from $($commit.Substring(0, 12)) (bin\release.json)"
 if ($NoCommit) {
     Write-Host 'Not committed (-NoCommit). The commit would be:'
     Write-Host "  git add -- $($paths -join ' ')"
