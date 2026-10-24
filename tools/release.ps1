@@ -31,7 +31,7 @@ if ($Publish) {
     $at = "$(& git -C $root log -1 --format=%H -- bin/release.json)".Trim()
     if (-not $at) { throw 'bin\release.json is not committed.' }
     if (-not @(& git -C $root branch -r --contains $at).Count) { throw "Push $at (the release commit) first." }
-    $arguments = @('release', 'create', $release.tag, $zip, '--repo', $ZlcRepository, '--target', $at, '--title', "v$($release.version)",
+    $arguments = @('release', 'create', $release.tag, $zip, '--repo', $ZlcRepository, '--target', $at, '--title', "v$($release.version)", '--latest',
                    '--notes', "The engine built from commit $($release.commit); installation.exe downloads it.")
     Write-Host "gh $($arguments -join ' ')"
     if ($DryRun) { Write-Host 'Dry run: nothing was published.'; return }
@@ -75,6 +75,11 @@ $files = [ordered]@{}
 foreach ($program in $ZlcPrograms) { $files["$program.exe"] = Join-Path $built 'zlc-launch.exe' }
 foreach ($name in $ZlcEngineNames) { $files["bin\engine\$name"] = Join-Path $built $name }
 $files['bin\ai\zlc-mcp.exe'] = Join-Path $built 'zlc-mcp.exe'
+$atom = Join-Path $root 'atom_workbench.exe'
+if (Test-Path -LiteralPath (Join-Path $root 'apps\atom-workbench\package.json')) {
+    if (-not (Test-Path -LiteralPath $atom)) { throw 'Build Atom Workbench first: bin\scripts\build_atom_workbench.bat' }
+    $files['bin\engine\atom_workbench.exe'] = $atom
+}
 if ((Get-ZlcSourceStamp) -ne $stamp) { throw 'Rust sources changed before staging the release.' }
 # Files a previous release had that this one does not (a renamed module) go.
 foreach ($folder in 'bin\engine', 'bin\ai') {

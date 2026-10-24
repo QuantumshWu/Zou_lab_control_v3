@@ -55,14 +55,34 @@ $expected = if (Test-Path -LiteralPath $record) { Get-Content -LiteralPath $reco
 $installed = if (Test-ZlcProducts $engine) { Read-Source (Join-Path $engine 'SOURCE') } else { $null }
 # What bin\engine.next holds: its SOURCE is the release's (copied there when it was staged).
 $staged = Read-Source (Join-Path $next 'SOURCE')
-$current = { param($facts) $facts -and $expected -and $facts.source -eq $expected.source }
+$current = { param($facts) $facts -and $expected -and $facts.source -eq $expected.source -and $facts.version -eq $expected.version }
+
+# Keep the independently runnable tool at the checkout root after an engine
+# update. Older engine archives do not contain it and keep their old behavior.
+function Sync-AtomWorkbench {
+    $source = Join-Path $engine 'atom_workbench.exe'
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return $true }
+    $destination = Join-Path $root 'atom_workbench.exe'
+    if ((Test-Path -LiteralPath $destination -PathType Leaf) -and
+        (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash) { return $true }
+    $temporary = Join-Path $bin 'atom_workbench.next.exe'
+    Copy-Item -LiteralPath $source -Destination $temporary -Force
+    try {
+        if (Test-Path -LiteralPath $destination) { [IO.File]::Replace($temporary, $destination, $null) }
+        else { [IO.File]::Move($temporary, $destination) }
+        return $true
+    } catch {
+        Write-Host 'Atom Workbench is still running: close it and start installation.exe again to finish its update.'
+        return $false
+    }
+}
 
 # Put bin\engine.next in place, folder by folder: the live one renamed aside, the new one renamed
 # in, so each folder is always whole. A folder in use waits up to $Seconds, then stays as it is
 # with its replacement left in bin\engine.next; one downloaded for another release is dropped.
 # True when nothing is left to put in place.
 function Invoke-Swap([int]$Seconds) {
-    if (-not (Test-Path -LiteralPath $next)) { return $true }
+    if (-not (Test-Path -LiteralPath $next)) { return (Sync-AtomWorkbench) }
     if (-not (& $current $staged)) { Remove-Folder $next; return $true }
     foreach ($part in $parts) {
         $new = Join-Path $next $part
@@ -80,7 +100,7 @@ function Invoke-Swap([int]$Seconds) {
     }
     if (@(Get-ChildItem -LiteralPath $next -Directory).Count) { return $false }
     Remove-Folder $next
-    $true
+    Sync-AtomWorkbench
 }
 
 if ($Swap -ge 0) {
