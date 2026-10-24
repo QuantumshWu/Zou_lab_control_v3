@@ -10,6 +10,9 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; min-width: 360px; background: var(--bg); }
 body { font: var(--font-size)/1.43 var(--font-family); color: var(--text); }
+body.atom-native-window { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+body.atom-native-window > #app { height: calc(100vh - var(--title-bar-h)); min-height: 0; flex: 1; }
+body.atom-native-window > #app > .workbench { height: 100%; min-height: 0; }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; }

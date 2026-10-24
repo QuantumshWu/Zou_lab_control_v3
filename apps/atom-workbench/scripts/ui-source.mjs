@@ -15,7 +15,7 @@ export function resolveUiSource(){
   const common=git(workbenchRoot,['rev-parse','--path-format=absolute','--git-common-dir']);
   if(!process.env.ZLC_V3_UI_ROOT&&!common)throw Error('Cannot locate primary v3 UI; set ZLC_V3_UI_ROOT');
   const uiRoot=fs.realpathSync(path.resolve(process.env.ZLC_V3_UI_ROOT??path.join(path.dirname(common),'apps/desktop/ui')));
-  for(const name of ['src/fluent/spin.ts','src/fluent/tree_combo.ts','src/scale.ts','tokens.css','fluent.css'])if(!fs.existsSync(path.join(uiRoot,name)))throw Error(`v3 UI source missing ${name}; set ZLC_V3_UI_ROOT to its complete apps/desktop/ui directory`);
+  for(const name of ['src/fluent/spin.ts','src/fluent/tree_combo.ts','src/scale.ts','src/title_bar.ts','tokens.css','fluent.css','title_bar.css'])if(!fs.existsSync(path.join(uiRoot,name)))throw Error(`v3 UI source missing ${name}; set ZLC_V3_UI_ROOT to its complete apps/desktop/ui directory`);
   const repositoryRoot=git(uiRoot,['rev-parse','--show-toplevel']);
   const iconPath=path.join(repositoryRoot??path.resolve(workbenchRoot,'../..'),'crates/zlc-desktop/assets/zlc.ico');
   if(!fs.existsSync(iconPath))throw Error(`v3 icon is missing: ${iconPath}`);
@@ -27,7 +27,7 @@ function filesUnder(root){
 }
 const identify=(root,files)=>files.sort().map(file=>({path:slash(path.relative(root,file)),sha256:sha(file)}));
 export function captureUiInputs(source=resolveUiSource()){
-  const shared=identify(source.uiRoot,[...filesUnder(path.join(source.uiRoot,'src')),path.join(source.uiRoot,'tokens.css'),path.join(source.uiRoot,'fluent.css')]);
+  const shared=identify(source.uiRoot,[...filesUnder(path.join(source.uiRoot,'src')),path.join(source.uiRoot,'tokens.css'),path.join(source.uiRoot,'fluent.css'),path.join(source.uiRoot,'title_bar.css')]);
   const local=identify(workbenchRoot,[...filesUnder(path.join(workbenchRoot,'src')),...filesUnder(path.join(workbenchRoot,'desktop-native/ui')),
     ...['index.html','style.css','tsconfig.json','scripts/build.mjs','scripts/ui-source.mjs','scripts/build-desktop-native-ui.mjs','scripts/native-service-core.mjs','scripts/native-protocol.mjs','scripts/fresh-mean.mjs','scripts/mean-frame.mjs'].map(p=>path.join(workbenchRoot,p))]);
   return {source:{...source,files:shared,iconSha256:sha(source.iconPath)},workbench:{root:workbenchRoot,files:local}};

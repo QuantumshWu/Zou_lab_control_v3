@@ -26,7 +26,7 @@ if(!prepared||process.argv.includes('--rebuild-numerics')){
  run(powershell,[...psArgs,'-File','scripts/build-static-numerics.ps1','-Action',validOpenblas&&!process.argv.includes('--rebuild-numerics')?'superlu':'build']);
 }
 const uiSource=JSON.parse(await readFile(join(app,'dist/ui-source-manifest.json'),'utf8'));
-execFileSync(powershell,[...psArgs,'-File','scripts/build-desktop-native.ps1','-EmbeddedSolver','-RestoreDependencies'],{cwd:app,stdio:'inherit',windowsHide:true,env:{...process.env,ATOM_V3_ICON_SOURCE:join(uiSource.source.repositoryRoot,'crates/zlc-desktop/assets/zlc.ico')}});
+execFileSync(powershell,[...psArgs,'-File','scripts/build-desktop-native.ps1','-EmbeddedSolver','-RestoreDependencies'],{cwd:app,stdio:'inherit',windowsHide:true,env:{...process.env,ATOM_V3_SOURCE_ROOT:uiSource.source.repositoryRoot,ATOM_V3_ICON_SOURCE:join(uiSource.source.repositoryRoot,'crates/zlc-desktop/assets/zlc.ico')}});
 // Re-read actual shared sources after all builds. Concurrent upstream edits
 // invalidate the release instead of quietly shipping an old widget bundle.
 verifyUiSourceManifest(join(app,'dist'));

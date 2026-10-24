@@ -32,6 +32,9 @@ import {POPULATION_GROUPS,recommendedPopulationStates,populationDisplayIds,withP
 import {durationUnit,durationValue,setDurationUnit,setDurationValue,durationText,DURATION_UNITS} from './duration.js';
 import type {DurationUnit} from './types.js';
 import {patchLevelPopulations} from './level-population-dom.js';
+import {installWindowChrome} from './window-chrome.js';
+
+installWindowChrome();
 
 type View='levels'|'dynamics'|'space';
 type Selection={kind:'field'|'laser'|'none';id:string};

@@ -1,0 +1,34 @@
+/* ---------- the window's title bar: FluentWindow's StandardTitleBar ------ */
+/* The host's caption window over the band takes the pointer (frame.rs); the
+ * buttons show what it says. Glyphs at TitleBarButton's own coordinates, a
+ * cosmetic one-device-pixel pen. */
+.title-bar { flex: none; position: relative; height: var(--title-bar-h); background: var(--bg); -webkit-user-select: none; user-select: none; }
+.title-bar-mark { position: absolute; left: var(--title-inset); top: var(--title-mark-top); width: var(--title-mark); height: var(--title-mark); }
+.title-bar-title {
+  position: absolute; top: 0; bottom: 0; display: flex; align-items: center; white-space: nowrap; overflow: hidden; color: var(--text);
+  left: calc(var(--title-inset) + var(--title-mark) + var(--title-mark-gap)); right: calc(3 * var(--title-button-w) + var(--title-mark-gap));
+}
+.title-bar-button { position: absolute; top: 0; width: var(--title-button-w); height: var(--title-bar-h); color: #000; }
+.title-bar-button.minimize { left: calc(var(--frame-w, 100%) - 3 * var(--title-button-w)); }
+.title-bar-button.maximize { left: calc(var(--frame-w, 100%) - 2 * var(--title-button-w)); }
+.title-bar-button.close { left: calc(var(--frame-w, 100%) - var(--title-button-w)); }
+.title-bar-button.hover { background: var(--title-hover); }
+.title-bar-button.pressed { background: var(--title-pressed); }
+.title-bar-button.close.hover { background: var(--title-close-hover); color: #fff; }
+.title-bar-button.close.pressed { background: var(--title-close-pressed); color: #fff; }
+.title-bar-button .glyph { position: absolute; box-sizing: border-box; }
+/* drawLine(18, 16, 28, 16) */
+.minimize .glyph { left: calc(18px * var(--qt)); top: calc(16px * var(--qt)); width: calc(10px * var(--qt) + var(--dpx)); height: var(--dpx); background: currentColor; }
+/* drawRect(18, 11, 10, 10); maximized: drawRect(18, 13, 8, 8) and the window behind it */
+.maximize .glyph { left: calc(18px * var(--qt)); top: calc(11px * var(--qt)); width: calc(10px * var(--qt) + var(--dpx)); height: calc(10px * var(--qt) + var(--dpx)); border: var(--dpx) solid currentColor; }
+.maximized .maximize .glyph { top: calc(13px * var(--qt)); width: calc(8px * var(--qt) + var(--dpx)); height: calc(8px * var(--qt) + var(--dpx)); }
+.maximized .maximize .glyph::before, .maximized .maximize .glyph::after { content: ""; position: absolute; border-color: currentColor; border-style: solid; border-width: 0; }
+.maximized .maximize .glyph::before {
+  left: calc(2px * var(--qt) - var(--dpx)); top: calc(-2px * var(--qt) - var(--dpx)); width: calc(8px * var(--qt) + var(--dpx)); height: calc(8px * var(--qt) + var(--dpx));
+  border-top-width: var(--dpx); border-right-width: var(--dpx); box-sizing: border-box;
+}
+.maximized .maximize .glyph::after { left: calc(2px * var(--qt) - var(--dpx)); top: calc(-2px * var(--qt) - var(--dpx)); width: var(--dpx); height: calc(2px * var(--qt)); background: currentColor; }
+.maximize .stub { display: none; position: absolute; left: calc(8px * var(--qt) - var(--dpx)); top: calc(6px * var(--qt) - var(--dpx)); width: calc(2px * var(--qt) + var(--dpx)); height: var(--dpx); background: currentColor; }
+.maximized .maximize .stub { display: block; }
+.close .glyph { inset: 0; background: currentColor; -webkit-mask: var(--title-close-glyph) 0 0 / 100% 100% no-repeat; mask: var(--title-close-glyph) 0 0 / 100% 100% no-repeat; }
+

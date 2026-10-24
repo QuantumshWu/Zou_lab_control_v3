@@ -6,7 +6,7 @@ use windows_sys::Win32::{Foundation::{CloseHandle,HANDLE},System::JobObjects::{A
 use wry::{WebViewBuilder,WebContext,WebViewBuilderExtWindows};
 use tao::platform::windows::WindowBuilderExtWindows;
 
-#[derive(Clone)]enum UiEvent{Native(Value),Report(Value)}
+#[derive(Clone)]enum UiEvent{Native(Value),Caption(Value),CaptionReady,ChromeProbe,Title(String),Report(Value)}
 enum HostMessage{Ipc(Value),Line{lane:String,instance:u64,line:String},Eof{lane:String,instance:u64,error:Option<String>},Stop}
 #[derive(Default)]struct Sessions{current:Option<String>,next_instance:u64}
 impl Sessions{
@@ -134,7 +134,8 @@ fn runtime(root:Option<&Path>)->Result<(bool,Option<String>),String>{
 }
 fn run()->Result<(),String>{
     let args:Vec<_>=std::env::args().collect();let argument=|name:&str|args.iter().position(|a|a==name).and_then(|i|args.get(i+1));
-    let report=argument("--self-test").map(PathBuf::from);let test_mode=report.is_some();
+    let chrome_test=argument("--chrome-test").is_some();
+    let report=argument("--self-test").or_else(||argument("--chrome-test")).map(PathBuf::from);let test_mode=report.is_some();
     if test_mode&&argument("--data-dir").is_none(){return Err("Headless validation requires an isolated --data-dir; saved user scenes will not be modified.".into());}
     let data=argument("--data-dir").map(PathBuf::from).or_else(||std::env::var_os("LOCALAPPDATA").map(|p|PathBuf::from(p).join("AtomWorkbench"))).ok_or("LOCALAPPDATA is missing")?;fs::create_dir_all(&data).map_err(|e|e.to_string())?;
     let executable=std::env::current_exe().map_err(|e|e.to_string())?;
@@ -152,7 +153,9 @@ fn run()->Result<(),String>{
     if manifest["webview"]=="bundled-fixed"&&!root.as_ref().is_some_and(|path|path.join("runtime/webview2/msedgewebview2.exe").is_file()){return Err("The bundled rendering runtime is missing.".into());}
     let(bundled,version)=runtime(root.as_deref())?;
     let mut init=String::new();
-    if test_mode{
+    if chrome_test{
+        init="window.__atomChromeTest=true;localStorage.clear();window.requestAnimationFrame=callback=>setTimeout(()=>callback(performance.now()),16);window.cancelAnimationFrame=clearTimeout;".into();
+    }else if test_mode{
         let request=argument("--test-request").ok_or("Headless full-app validation requires --test-request <JSON>")?;
         let value:Value=serde_json::from_slice(&fs::read(request).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
         let config=json!({"request":value,"runtimeVersion":version,"bundledWebView":bundled,"hiddenRafShim":true});
@@ -162,25 +165,43 @@ fn run()->Result<(),String>{
         else{let folder=root.as_ref().unwrap().join("solver");Backend{executable:folder.join("atom-lindblad.exe"),working:folder,manifest,build_hash:format!("{:x}",Sha256::digest(&manifest_bytes)),embedded:false}};
     let event_loop=EventLoopBuilder::<UiEvent>::with_user_event().build();let proxy=event_loop.create_proxy();let(tx,rx)=mpsc::channel();let actor_sender=tx.clone();let actor_data=data.clone();
     let mut actor=Some(std::thread::spawn(move||supervisor(backend,actor_data,test_mode,proxy,rx,actor_sender)));
-    let window=WindowBuilder::new().with_title("Rb87 实验工作台 · Atom Workbench").with_window_icon(crate::app_icon::icon()).with_taskbar_icon(crate::app_icon::icon()).with_inner_size(LogicalSize::new(1600.,1000.)).with_maximized(!test_mode).with_visible(!test_mode).build(&event_loop).map_err(|e|e.to_string())?;
+    let window=WindowBuilder::new().with_title("Rb87 实验工作台 · Atom Workbench").with_window_icon(crate::chrome::icon()).with_taskbar_icon(crate::chrome::icon()).with_inner_size(LogicalSize::new(1600.,1000.)).with_visible(false).build(&event_loop).map_err(|e|e.to_string())?;
+    let caption_proxy=event_loop.create_proxy();
+    crate::frame::install(&window,move|caption|{let _=caption_proxy.send_event(UiEvent::Caption(caption));})?;
+    // Preserve Atom Workbench's large-screen startup policy. The shared frame
+    // handles the caption/edges; it does not rescale the application content.
+    if !test_mode{window.set_maximized(true);}
+    let caption=crate::frame::caption(&window).unwrap_or_else(||json!({"hover":null,"pressed":null,"maximized":false}));
+    init.push_str(&format!("window.__atomWindowChrome=true;window.__atomCaption={caption};window.__atomCaptionReceive=value=>{{window.__atomCaption=value;window.dispatchEvent(new CustomEvent('atom-caption',{{detail:value}}));}};"));
     let native_icons=crate::app_icon::window_icons_available(&window);let embedded_report=embedded.as_ref().map(|bundle|bundle.report());
     let mut context=WebContext::new(Some(data.join("WebView2")));let files=root.as_ref().map(|root|root.join("app/dist").canonicalize()).transpose().map_err(|e|e.to_string())?;let ipc=tx.clone();
+    let chrome_proxy=event_loop.create_proxy();let title_proxy=event_loop.create_proxy();
     let webview=WebViewBuilder::new_with_web_context(&mut context).with_custom_protocol("atom".into(),move|_,request|if let Some(assets)=&embedded{serve_memory(assets,&request)}else{serve(files.as_ref().unwrap(),&request)})
-        .with_ipc_handler(move|request|{if request.body().len()<=64*1024*1024{if let Ok(value)=serde_json::from_str(request.body()){let _=ipc.send(HostMessage::Ipc(value));}}})
+        .with_ipc_handler(move|request|{if request.body().len()<=64*1024*1024{if let Ok(value)=serde_json::from_str::<Value>(request.body()){
+            if value["op"]=="caption-ready"{let _=chrome_proxy.send_event(UiEvent::CaptionReady);}
+            else if chrome_test&&value["op"]=="chrome-probe"{let _=chrome_proxy.send_event(UiEvent::ChromeProbe);}
+            else{let _=ipc.send(HostMessage::Ipc(value));}
+        }}})
+        .with_document_title_changed_handler(move|title|{let _=title_proxy.send_event(UiEvent::Title(title));})
         .with_navigation_handler(|url|url.starts_with("atom://localhost/")||url.starts_with("http://atom.localhost/")||url.starts_with("blob:http://atom.localhost/"))
         .with_new_window_req_handler(|_,_|wry::NewWindowResponse::Deny)
         .with_additional_browser_args("--force-color-profile=srgb --disable-features=msWebOOUI,msPdfOOUI,DeferRendererTasksAfterInput")
         .with_browser_accelerator_keys(false).with_devtools(false).with_clipboard(true)
         .with_initialization_script(&init).with_url("atom://localhost/index.html").build(&window).map_err(|e|e.to_string())?;
+    crate::frame::raise(&window);window.set_visible(!test_mode);
     if test_mode{let timeout=event_loop.create_proxy();std::thread::spawn(move||{std::thread::sleep(std::time::Duration::from_secs(45));let _=timeout.send_event(UiEvent::Report(json!({"ok":false,"error":"Hidden full-app test timed out"})));});}
     event_loop.run(move|event,_,flow|{*flow=ControlFlow::Wait;match event{
         Event::UserEvent(UiEvent::Native(value))=>{let _=webview.evaluate_script(&format!("window.__atomNativeReceive&&window.__atomNativeReceive({});",value));},
+        Event::UserEvent(UiEvent::Caption(value))=>{let _=webview.evaluate_script(&format!("window.__atomCaptionReceive&&window.__atomCaptionReceive({value});"));},
+        Event::UserEvent(UiEvent::CaptionReady)=>{crate::frame::raise(&window);if let Some(value)=crate::frame::caption(&window){let _=webview.evaluate_script(&format!("window.__atomCaptionReceive&&window.__atomCaptionReceive({value});"));}},
+        Event::UserEvent(UiEvent::ChromeProbe)=>{let value=crate::chrome_probe::inspect(&window);let _=webview.evaluate_script(&format!("window.__atomChromeProbeReceive&&window.__atomChromeProbeReceive({value});"));},
+        Event::UserEvent(UiEvent::Title(title))=>window.set_title(&title),
         Event::UserEvent(UiEvent::Report(mut value))=>{let _=tx.send(HostMessage::Stop);if let Some(actor)=actor.take(){let _=actor.join();}value["nativeIcons"]=json!({"large":native_icons.0,"small":native_icons.1});value["embeddedResources"]=json!(embedded_report);if let Some(path)=&report{let _=fs::write(path,serde_json::to_vec_pretty(&value).unwrap());}*flow=ControlFlow::Exit;},
         Event::WindowEvent{event:WindowEvent::CloseRequested,..}=>{let _=tx.send(HostMessage::Stop);if let Some(actor)=actor.take(){let _=actor.join();}*flow=ControlFlow::Exit;},
         Event::LoopDestroyed=>{let _=tx.send(HostMessage::Stop);if let Some(actor)=actor.take(){let _=actor.join();}},_=>{}
     }});
 }
-pub fn main(){if let Err(error)=run(){let args:Vec<_>=std::env::args().collect();if let Some(i)=args.iter().position(|a|a=="--self-test"||a=="--bundle-check"||a=="--resource-check"){if let Some(file)=args.get(i+1){let _=fs::write(file,json!({"ok":false,"error":error}).to_string());}}else{let text:Vec<_>=error.encode_utf16().chain(Some(0)).collect();let title:Vec<_>="Atom Workbench".encode_utf16().chain(Some(0)).collect();unsafe{MessageBoxW(std::ptr::null_mut(),text.as_ptr(),title.as_ptr(),MB_OK|MB_ICONERROR);}}std::process::exit(1);}}
+pub fn main(){if let Err(error)=run(){let args:Vec<_>=std::env::args().collect();if let Some(i)=args.iter().position(|a|a=="--self-test"||a=="--chrome-test"||a=="--bundle-check"||a=="--resource-check"){if let Some(file)=args.get(i+1){let _=fs::write(file,json!({"ok":false,"error":error}).to_string());}}else{let text:Vec<_>=error.encode_utf16().chain(Some(0)).collect();let title:Vec<_>="Atom Workbench".encode_utf16().chain(Some(0)).collect();unsafe{MessageBoxW(std::ptr::null_mut(),text.as_ptr(),title.as_ptr(),MB_OK|MB_ICONERROR);}}std::process::exit(1);}}
 
 #[cfg(test)]mod tests{
     use super::*;

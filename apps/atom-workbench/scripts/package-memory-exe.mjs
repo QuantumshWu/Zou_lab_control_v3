@@ -31,6 +31,8 @@ files.set('app/dist/index.html',Buffer.from(nativeIndex));source.packaging={kind
 const indexOutput=source.outputs.find(file=>file.path==='index.html');indexOutput.sha256=sha(nativeIndex);indexOutput.bytes=Buffer.byteLength(nativeIndex);
 files.set('app/dist/ui-source-manifest.json',Buffer.from(JSON.stringify(source,null,2)+'\n'));
 const icon=await readFile(join(source.source.repositoryRoot,'crates/zlc-desktop/assets/zlc.ico'));
+if(backend.windowChromeSource?.schema!=='zlc-shared-window-chrome/1')throw Error('The native host lacks the shared v3 window frame; rebuild it.');
+for(const file of backend.windowChromeSource.files)if(sha(await readFile(join(source.source.repositoryRoot,file.path)))!==file.sha256)throw Error('Compiled v3 native frame is stale: '+file.path);
 if(!files.get('app/dist/zlc.ico').equals(icon))throw Error('Application icon differs from current v3.');
 if(backend.v3IconSha256!==sha(icon))throw Error('Compiled native icon is stale; rebuild against the current v3 icon.');
 const add=async(name,path)=>files.set(name,await readFile(path));
@@ -50,7 +52,7 @@ for(const pkg of metadata.packages)if(pkg.source?.startsWith('registry+')&&used.
 }
 files.set('licenses/Rust-dependencies.txt',Buffer.from(notices.sort().join('\n')+'\n'));
 files.set('numeric-source-manifest.json',Buffer.from(JSON.stringify(backend.numericSource,null,2)+'\n'));
-const build={name:'Atom Workbench',transport:'native-ipc',node:null,webview:'installed-runtime-required',distribution:'single-exe-memory',numericBackend:'same-executable-static',solverDefaults:DESKTOP_SOLVER_DEFAULTS,v3IconSha256:sha(icon),numericSourceSha256:sha(JSON.stringify(backend.numericSource))};
+const build={name:'Atom Workbench',transport:'native-ipc',node:null,webview:'installed-runtime-required',distribution:'single-exe-memory',numericBackend:'same-executable-static',solverDefaults:DESKTOP_SOLVER_DEFAULTS,v3IconSha256:sha(icon),windowChromeSource:backend.windowChromeSource,numericSourceSha256:sha(JSON.stringify(backend.numericSource))};
 files.set('build.json',Buffer.from(JSON.stringify(build,null,2)+'\n'));
 const entries=[...files].map(([path,data])=>({path,bytes:data.length,sha256:sha(data)}));
 if(entries.some(file=>/\.(dll|exe)$/i.test(file.path)))throw Error('Program binaries must be statically linked, not resource sidecars.');
