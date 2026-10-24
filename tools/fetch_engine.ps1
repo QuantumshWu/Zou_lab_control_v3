@@ -77,6 +77,14 @@ function Sync-AtomWorkbench {
     }
 }
 
+function Test-AtomWorkbenchCurrent {
+    $source = Join-Path $engine 'atom_workbench.exe'
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return $true }
+    $destination = Join-Path $root 'atom_workbench.exe'
+    (Test-Path -LiteralPath $destination -PathType Leaf) -and
+        (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+}
+
 # Put bin\engine.next in place, folder by folder: the live one renamed aside, the new one renamed
 # in, so each folder is always whole. A folder in use waits up to $Seconds, then stays as it is
 # with its replacement left in bin\engine.next; one downloaded for another release is dropped.
@@ -99,8 +107,9 @@ function Invoke-Swap([int]$Seconds) {
         Remove-Folder $old
     }
     if (@(Get-ChildItem -LiteralPath $next -Directory).Count) { return $false }
+    if (-not (Sync-AtomWorkbench)) { return $false }
     Remove-Folder $next
-    Sync-AtomWorkbench
+    $true
 }
 
 if ($Swap -ge 0) {
@@ -116,8 +125,9 @@ if ($Status) {
         $built = @($engine, (Get-ZlcDevProducts)) | Where-Object { $stamp -and (Test-ZlcProducts $_) -and (Get-ZlcProductsStamp $_) -eq $stamp } | Select-Object -First 1
     }
     $relation = if (-not $expected) { 'unreleased' }
-        elseif (& $current $installed) { 'match' }
+        elseif ((& $current $installed) -and (Test-AtomWorkbenchCurrent)) { 'match' }
         elseif (& $current $staged) { 'staged' }
+        elseif (& $current $installed) { 'other' }
         elseif ($built) { 'built' }
         elseif (-not $installed) { 'missing' }
         else {
