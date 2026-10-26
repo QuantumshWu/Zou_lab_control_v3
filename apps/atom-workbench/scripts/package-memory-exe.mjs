@@ -1,4 +1,4 @@
-// True single EXE: native static solver/BLAS/SuperLU plus in-memory UI assets.
+// True single EXE: native static solver/BLAS plus in-memory UI assets.
 // No application resource is expanded to disk by the resulting executable.
 import {readFile,writeFile,readdir,mkdir,stat,rename} from 'node:fs/promises';
 import {resolve,join,dirname,basename} from 'node:path';
@@ -40,7 +40,6 @@ const add=async(name,path)=>files.set(name,await readFile(path));
 async function addTree(name,path){for(const file of await readdir(path,{withFileTypes:true})){if(file.isDirectory())await addTree(name+'/'+file.name,join(path,file.name));else if(file.isFile())await add(name+'/'+file.name,join(path,file.name));}}
 await add('licenses/OpenBLAS.txt',native.licenses.openblas);
 await add('licenses/LAPACK.txt',native.licenses.lapack);
-for(const [name,file]of [['SUPERLU-LICENSE.txt',native.licenses.superlu],['COLAMD-BSD-LICENSE.txt',native.licenses.colamd],['SuiteSparse-config-README.txt',native.licenses.suiteSparseConfig]])await add('licenses/'+name,file);
 await add('licenses/KaTeX.txt',join(app,'node_modules/katex/LICENSE'));
 await add('licenses/Microsoft-WebView2.html',native.licenses.webview2);
 const common=execFileSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{cwd:app,encoding:'utf8'}).trim(),tools=process.env.ZLC_V3_TOOLS??join(dirname(common),'.tools'),rust=join(tools,'rust-1.99.1-x86_64-pc-windows-gnu/bin');

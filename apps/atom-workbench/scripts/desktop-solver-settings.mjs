@@ -14,6 +14,5 @@ export function configureDesktopSolver(executable,env){
   for(const [name,value]of Object.entries(DESKTOP_SOLVER_DEFAULTS))if(env[name]===undefined)env[name]=value;
   const folder=dirname(executable);
   env.ATOM_OPENBLAS_DLL=resolve(folder,'libscipy_openblas.dll');
-  env.ATOM_SUPERLU_DLL=resolve(folder,'atom_superlu.dll');
   return env;
 }
