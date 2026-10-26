@@ -57,16 +57,25 @@ pub struct RuntimeCore{
     initial:InitialCoordinates,
     observer:Arc<PopulationObservation>,
     p0:RequestP0,
+    timing:[f64;6],
 }
 
 impl RuntimeCore{
     pub fn from_owned(owned:OwnedPrepared,initial:InitialView<'_>,p0_policy:P0Policy)->Result<Self,String>{
         let physical=owned.physical_coordinates();
+        let clock=Instant::now();
         let initial=physical.initial(initial)?;
+        let initial_ms=clock.elapsed().as_secs_f64()*1000.;let clock=Instant::now();
         let observer=Arc::new(physical.population_observation()?);
+        let observer_ms=clock.elapsed().as_secs_f64()*1000.;let clock=Instant::now();
         let p0=owned.prepare_p0(p0_policy)?;
-        Ok(Self{owned,physical,initial,observer,p0})
+        let p0_ms=clock.elapsed().as_secs_f64()*1000.;
+        let [gauge,primitives,library]=owned.timing;
+        Ok(Self{owned,physical,initial,observer,p0,timing:[gauge,primitives,library,initial_ms,observer_ms,p0_ms]})
     }
+    /// Milliseconds: gauge/source, S/K primitives, operator library, initial
+    /// point, readout duals, P0 factor.
+    pub fn preparation_timing(&self)->[f64;6]{self.timing}
     pub fn prepare(model:&ModelView<'_>,initial:InitialView<'_>,phases:PhaseBasis,gauge:GaugePolicy<'_>,kernel:KernelPolicy,p0:P0Policy)->Result<Self,String>{
         Self::from_owned(OwnedPrepared::prepare(model,phases,gauge,kernel)?,initial,p0)
     }

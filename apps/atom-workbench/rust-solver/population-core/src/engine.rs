@@ -29,11 +29,11 @@ pub struct RequestedGroup {
 pub struct FiniteOptions {
     /// Absolute population tolerance on the probability scale.
     pub population_tolerance: f64,
-    /// Rational poles (1/us), geometric between `slow_pole_factor / duration`
-    /// and `fast_pole`, at most `maximum_poles`; independent of the sampling.
+    /// Rational poles (1/us): `fast_pole`, plus `slow_pole_factor / duration`
+    /// when the horizon is long enough for it to be a separate time scale.
+    /// Both are independent of the number of output samples.
     pub slow_pole_factor: f64,
     pub fast_pole: f64,
-    pub maximum_poles: usize,
     /// Development only: explicit pole list overriding the rule above.
     pub poles: Option<Vec<f64>>,
     pub first_columns: usize,
@@ -55,14 +55,13 @@ impl Default for FiniteOptions {
             population_tolerance: 0.005,
             slow_pole_factor: 200.,
             fast_pole: 20.,
-            maximum_poles: 2,
             poles: None,
             first_columns: 16,
             block_columns: 8,
             maximum_columns: 400,
             maximum_order: 6,
             wall_seconds: 120.,
-            inner: InnerSolve { maximum_steps: 12, relative_residual: 1e-3 },
+            inner: InnerSolve { maximum_steps: 24, relative_residual: 1e-5 },
             safety_factor: 1.5,
             fixed: None,
         }
@@ -193,20 +192,19 @@ fn population_change(a: &[f64], b: &[f64], n: usize, groups: &[RequestedGroup]) 
     maximum
 }
 
-/// Rational poles for a time horizon: geometric between the slowest scale
-/// that matters on `[0, duration]` and the fast optical/decay scale.
+/// Rational poles for a time horizon. The fast pole resolves the optical and
+/// Rabi transients (rates ~20-100 /us); a slow pole ~200/T is added only when
+/// it is a separate scale (T > ~40 us), e.g. for millisecond pumping dynamics.
 pub fn rational_poles(duration: f64, options: &FiniteOptions) -> Vec<f64> {
     if let Some(poles) = &options.poles {
         return poles.clone();
     }
     let slow = options.slow_pole_factor / duration;
-    let fast = options.fast_pole;
-    if slow >= fast / 2. {
-        return vec![slow];
+    if slow < options.fast_pole / 4. {
+        vec![options.fast_pole, slow]
+    } else {
+        vec![options.fast_pole]
     }
-    let count = (((fast / slow).ln() / 4f64.ln()).ceil() as usize + 1).clamp(2, options.maximum_poles.max(2));
-    let ratio = (fast / slow).powf(1. / (count - 1) as f64);
-    (0..count).map(|i| fast / ratio.powi(i as i32)).collect()
 }
 
 /// Parallel shift-invert chains, one per rational pole: each column spawns
@@ -412,7 +410,7 @@ impl Run {
             }
             _ => default,
         };
-        block.clamp(poles, 4 * default).div_ceil(poles) * poles
+        block.clamp(poles, 2 * default).div_ceil(poles) * poles
     }
 
     /// Signed halo modes (both members of each pair) to add: the largest
@@ -442,7 +440,9 @@ impl Run {
     fn estimated(mut self, dual: SlowDual) -> Result<FiniteSolution, String> {
         let kappa = self.options.safety_factor;
         let epsilon = self.epsilon;
-        let target = 0.5 * BASIS_SHARE * epsilon / kappa;
+        // Aim a little below the halo threshold: basis estimates are cheap, so
+        // a few more checkpoints cost less than overshooting the basis.
+        let target = 0.8 * BASIS_SHARE * epsilon / kappa;
         let groups: Vec<PopulationGroup> =
             self.groups.iter().map(|g| PopulationGroup { name: g.name.clone(), indices: g.indices.clone() }).collect();
         let mut history: Vec<(usize, f64)> = Vec::new();

@@ -57,6 +57,8 @@ pub struct OwnedPrepared {
     preparation_lapack:Arc<Lapack>,
     prepared_reality:Arc<runtime_core::PreparedRealityBudget>,
     coefficient_bytes:usize,
+    /// Milliseconds: gauge/source, S/K primitives, operator library.
+    pub timing:[f64;3],
 }
 
 #[derive(Clone,Debug)]
@@ -122,9 +124,14 @@ impl OwnedPrepared {
         // separate output-mode pool. Do not inherit the legacy period's8.
         let setting=std::env::var("ATOM_POPULATION_BLAS_THREADS").ok();
         let lap=Arc::new(Lapack::load_with_threads(population_thread_policy(setting.as_deref())?)?);
+        let clock=Instant::now();
         let source=GaugedSource::prepare_with_lapack(model,phases,gauge,&lap)?;
+        let gauge_ms=clock.elapsed().as_secs_f64()*1000.;let clock=Instant::now();
         let primitives=primitives::prepare(&lap,source)?;
-        Self::from_primitives(primitives,policy,lap)
+        let primitives_ms=clock.elapsed().as_secs_f64()*1000.;let clock=Instant::now();
+        let mut prepared=Self::from_primitives(primitives,policy,lap)?;
+        prepared.timing=[gauge_ms,primitives_ms,clock.elapsed().as_secs_f64()*1000.];
+        Ok(prepared)
     }
     fn from_primitives(primitives:PrimitivePreparation,policy:KernelPolicy,lap:Arc<Lapack>)->Result<Self,String>{
         let prepared_reality=Arc::new(runtime_core::PreparedRealityBudget::prepare(&primitives)?);
@@ -152,7 +159,7 @@ impl OwnedPrepared {
         let bytes=library.bytes();
         Ok(Self{primitives:Arc::new(primitives),library:Arc::new(library),families,
             lapack:if matches!(policy,KernelPolicy::HybridBlas){Some(Arc::clone(&lap))}else{None},
-            preparation_lapack:lap,prepared_reality,coefficient_bytes:bytes})
+            preparation_lapack:lap,prepared_reality,coefficient_bytes:bytes,timing:[0.;3]})
     }
     pub fn primitives(&self)->&PrimitivePreparation{&self.primitives}
     pub fn same_request(&self,other:&Self)->bool{Arc::ptr_eq(&self.primitives,&other.primitives)}

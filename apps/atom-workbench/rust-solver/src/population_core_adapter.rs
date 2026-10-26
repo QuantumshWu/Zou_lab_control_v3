@@ -72,11 +72,11 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
     let mut finite=FiniteOptions{population_tolerance:options.population_tolerance,..Default::default()};
     if let Some(c)=knob("ATOM_EXP_SLOW_POLE"){finite.slow_pole_factor=c;}
     if let Some(c)=knob("ATOM_EXP_FAST_POLE"){finite.fast_pole=c;}
-    if let Some(c)=knob("ATOM_EXP_MAX_POLES"){finite.maximum_poles=c as usize;}
     if let Ok(v)=std::env::var("ATOM_EXP_POLES"){finite.poles=Some(v.split(',').filter_map(|x|x.parse::<f64>().ok()).collect());}
     if let Some(s)=knob("ATOM_EXP_INNER_STEPS"){finite.inner.maximum_steps=s as usize;}
     if let Some(t)=knob("ATOM_EXP_INNER_TOL"){finite.inner.relative_residual=t;}
     if let Ok(v)=std::env::var("ATOM_EXP_FIXED"){let mut it=v.split(':').map(|x|x.parse::<usize>().unwrap_or(0));finite.fixed=Some((it.next().unwrap_or(1),it.next().unwrap_or(16)));}
+    let preparation=core.preparation_timing();
     let solution=engine::solve(core,&times,requested_groups,finite)?;
     let d=&solution.diagnostics;
     let populations:Vec<_>=solution.populations.chunks_exact(32).map(|p|p.to_vec()).collect();
@@ -101,7 +101,7 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
             "populationProjectionCharge":d.projection_charge,"originalHamiltonianAndCollapseRetained":true,
             "errorControl":d.error_control,"rawPopulationEstimate":d.raw_estimate,"finalModes":d.final_modes,"finalBasis":d.final_columns,
             "imageColumns":d.image_columns,"innerOperatorApplications":d.operator_applications,
-            "peakTrialBytes":d.peak_trial_bytes,"timingMs":{"directions":t.directions,"orthogonalize":t.orthogonalize,"images":t.images,"projections":t.projections,"readoutAppend":t.readout_append,"transfer":t.transfer,"reduced":t.reduced,"readoutEvaluate":t.readout_evaluate,"dualPrepare":t.dual_prepare,"basisEstimate":t.basis_estimate,"haloEstimate":t.halo_estimate},"maximumImaginaryPopulation":d.maximum_imaginary_population,
+            "peakTrialBytes":d.peak_trial_bytes,"preparationMs":{"gauge":preparation[0],"primitives":preparation[1],"library":preparation[2],"initial":preparation[3],"readoutDuals":preparation[4],"p0":preparation[5]},"timingMs":{"directions":t.directions,"orthogonalize":t.orthogonalize,"images":t.images,"projections":t.projections,"readoutAppend":t.readout_append,"transfer":t.transfer,"reduced":t.reduced,"readoutEvaluate":t.readout_evaluate,"dualPrepare":t.dual_prepare,"basisEstimate":t.basis_estimate,"haloEstimate":t.halo_estimate},"maximumImaginaryPopulation":d.maximum_imaginary_population,
             "historicalAnswerUsed":false,"cached":false,
             "frequencyCoordinateSource":"declared-carrier-coordinates",
             "carrierSourceToBasis":identity,"finiteCarrierSourceToBasis":identity,"populationCheckpoints":checkpoints,
