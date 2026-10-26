@@ -136,7 +136,8 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 .population-time-value { color: var(--muted-ink); font-variant-numeric: tabular-nums; }
 .population-scale { display: inline-flex; align-items: center; gap: var(--row-gap); color: var(--muted-ink); padding-bottom: var(--cap-lift); }
 .scale-bar { width: calc(2 * var(--control)); height: calc(var(--control) / 5); border-radius: var(--radius); background: linear-gradient(to right, var(--population-0), var(--population-1)); }
-.population-data { flex: 1; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: var(--row-gap) var(--section-gap); }
+/* The F totals keep together: with the horizon beside the mode they move to their own row when narrow. */
+.population-data { flex: 1 0 auto; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: var(--row-gap) var(--section-gap); }
 .population-total { white-space: nowrap; color: var(--muted-ink); padding-bottom: var(--cap-lift); }
 .population-total b, .compact-readout b { font-weight: 400; color: var(--text); font-variant-numeric: tabular-nums; }
 input[type=range] { flex: 1 1 calc(3 * var(--control)); max-width: calc(5 * var(--control)); min-width: var(--control); height: var(--control); padding: 0; border: 0; background: transparent; cursor: pointer; appearance: none; }
