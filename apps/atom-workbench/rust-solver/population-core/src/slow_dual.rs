@@ -667,6 +667,37 @@ impl SylvesterFactor {
             return Ok(Dense::zeros(p, r));
         }
         let yt = self.left.uh.multiply(y, lap)?.multiply(&self.right.u, lap)?;
+        let x = self.triangular(z, &yt)?;
+        let out = self.left.u.multiply(&x, lap)?.multiply(&self.right.uh, lap)?;
+        if !out.is_finite() {
+            return Err("Nonfinite Sylvester solution".into());
+        }
+        Ok(out)
+    }
+
+    /// `solve` for many square right-hand sides (p = r), with the Schur-basis
+    /// changes of all of them in two products each way.
+    pub fn solve_all(&self, z: C, ys: &[&Dense], lap: &Lapack) -> Result<Vec<Dense>, String> {
+        if ys.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.left.dimension() != self.right.dimension() || ys.iter().any(|y| y.rows != self.left.dimension() || y.cols != self.right.dimension()) {
+            return Err("Batched Sylvester solves need square right-hand sides".into());
+        }
+        let transformed = sandwich_all(&self.left.uh, &self.right.u, ys, lap)?;
+        let solved: Vec<Dense> = transformed.iter().map(|yt| self.triangular(z, yt)).collect::<Result<_, _>>()?;
+        let refs: Vec<&Dense> = solved.iter().collect();
+        let out = sandwich_all(&self.left.u, &self.right.uh, &refs, lap)?;
+        if out.iter().any(|x| !x.is_finite()) {
+            return Err("Nonfinite Sylvester solution".into());
+        }
+        Ok(out)
+    }
+
+    /// The triangular core in Schur coordinates.
+    fn triangular(&self, z: C, yt: &Dense) -> Result<Dense, String> {
+        let p = self.left.dimension();
+        let r = self.right.dimension();
         let tl = &self.left.t;
         let tr = &self.right.t;
         let mut x = Dense::zeros(p, r);
@@ -693,11 +724,7 @@ impl SylvesterFactor {
                 x.set(i, j, cdiv(v, denominator));
             }
         }
-        let out = self.left.u.multiply(&x, lap)?.multiply(&self.right.uh, lap)?;
-        if !out.is_finite() {
-            return Err("Nonfinite Sylvester solution".into());
-        }
-        Ok(out)
+        Ok(x)
     }
 }
 
@@ -968,9 +995,9 @@ impl FrameLiouvillian {
 struct FullBlockSolver {
     z: C,
     sylvester: Arc<SylvesterFactor>,
-    /// `W[:, ab] = (z - N)^{-1} E_ab`, one n x n matrix per ground entry.
-    ground_images: Vec<Dense>,
-    /// LU of `K = I - V_R W` (g^2 x g^2).
+    /// LU of `K = I - V_R (z - N)^{-1} U` (g^2 x g^2), `U` the ground-entry
+    /// embedding: `(z - L_0)^{-1} y = S^{-1} (y + U K^{-1} V_R S^{-1} y)` with
+    /// `S = z - N`, two Sylvester solves and no stored images.
     woodbury: Option<LuFactor>,
     minimum_denominator: f64,
     woodbury_condition: f64,
@@ -1166,16 +1193,19 @@ impl FullBlockSolver {
         let minimum_denominator = sylvester.minimum_denominator(z);
         let zero = frame.zero_charge();
         let recycling = frame.term(&zero).map(|t| t.recycling.clone()).unwrap_or_default();
-        let mut ground_images = Vec::new();
         let mut woodbury = None;
         let mut woodbury_condition = 1.;
         if !recycling.is_empty() {
             let rank = g * g;
-            for ab in 0..rank {
-                let mut unit = Dense::zeros(n, n);
-                unit.set(ab / g, ab % g, ONE);
-                ground_images.push(sylvester.solve(z, &unit, lap)?);
-            }
+            let units: Vec<Dense> = (0..rank)
+                .map(|ab| {
+                    let mut unit = Dense::zeros(n, n);
+                    unit.set(ab / g, ab % g, ONE);
+                    unit
+                })
+                .collect();
+            let refs: Vec<&Dense> = units.iter().collect();
+            let ground_images = sylvester.solve_all(z, &refs, lap)?;
             // K = I - V_R W with V_R X = recycling functional of X_EE.
             let mut k = Dense::identity(rank);
             for (column, image) in ground_images.iter().enumerate() {
@@ -1189,26 +1219,35 @@ impl FullBlockSolver {
             woodbury_condition = one_norm(&k) * one_norm(&inverse);
             woodbury = Some(factor);
         }
-        Ok(Self { z, sylvester, ground_images, woodbury, minimum_denominator, woodbury_condition })
+        Ok(Self { z, sylvester, woodbury, minimum_denominator, woodbury_condition })
     }
 
     fn solve(&self, y: &Dense, frame: &FrameLiouvillian, lap: &Lapack) -> Result<Dense, String> {
-        let mut x = self.sylvester.solve(self.z, y, lap)?;
-        if let Some(factor) = &self.woodbury {
-            let zero = frame.zero_charge();
-            let recycling = &frame.term(&zero).expect("charge-0 term").recycling;
-            let v = recycle_ground(frame, recycling, &x);
-            let amount = factor.solve(&v, lap)?;
-            for (image, coefficient) in self.ground_images.iter().zip(&amount) {
-                for k in 0..x.data.len() {
-                    x.data[k] = cadd(x.data[k], cmul(image.data[k], *coefficient));
-                }
+        Ok(self.solve_all(&[y], frame, lap)?.pop().expect("one solution"))
+    }
+
+    /// `(z - L_0)^{-1} y` for many right-hand sides.
+    fn solve_all(&self, ys: &[&Dense], frame: &FrameLiouvillian, lap: &Lapack) -> Result<Vec<Dense>, String> {
+        let first = self.sylvester.solve_all(self.z, ys, lap)?;
+        let Some(factor) = &self.woodbury else { return Ok(first) };
+        let g = frame.g;
+        let zero = frame.zero_charge();
+        let recycling = &frame.term(&zero).expect("charge-0 term").recycling;
+        let mut corrected: Vec<Dense> = Vec::with_capacity(ys.len());
+        for (y, x) in ys.iter().zip(&first) {
+            let amount = factor.solve(&recycle_ground(frame, recycling, x), lap)?;
+            let mut y2 = (*y).clone();
+            for (ab, a) in amount.iter().enumerate() {
+                y2.add_at(ab / g, ab % g, *a);
             }
+            corrected.push(y2);
         }
-        if !x.is_finite() {
+        let refs: Vec<&Dense> = corrected.iter().collect();
+        let out = self.sylvester.solve_all(self.z, &refs, lap)?;
+        if out.iter().any(|x| !x.is_finite()) {
             return Err("Nonfinite full charge-block solve".into());
         }
-        Ok(x)
+        Ok(out)
     }
 }
 
@@ -1710,64 +1749,104 @@ impl SlowDual {
     /// slow slots, `s_c = P L_{c-k} x`. The ground block of `y` is ignored here
     /// (the caller feeds it to the central slot with its physical phase).
     /// `field` holds frame entries (row a*n+b) in columns; the result lists
-    /// `(slot, g^2 x columns)` blocks. Charges without a prepared block (no
-    /// hop into a slow slot) return nothing.
+    /// `(slot, g^2 x columns)` blocks.
     pub(crate) fn slaved_returns(&self, k: &[i32], field: &Dense) -> Result<Vec<(usize, Dense)>, String> {
-        let k: Charge = k.to_vec();
-        let returns = self.frame.terms.iter().any(|term| add_charge(&k, &term.charge, false).is_ok_and(|c| self.slot_of(&c).is_some()));
-        if !returns || self.slot_of(&k).is_some() {
-            return Ok(Vec::new());
-        }
-        let solver = self.fast_charge_solver(&k)?;
+        self.slaved_returns_all(&[(k.to_vec(), field)], field.cols)
+    }
+
+    /// `slaved_returns` for several fast charges at once: the eliminations of
+    /// one charge run as one batch, and the non-ground parts that reach a slow
+    /// charge are summed over all charges before their (second-hop)
+    /// elimination there, which is linear and shared.
+    pub(crate) fn slaved_returns_all(&self, fields: &[(Charge, &Dense)], columns: usize) -> Result<Vec<(usize, Dense)>, String> {
         let (n, g) = (self.n, self.g);
         let g2 = g * g;
+        let lap = &self.lapack;
         let mut out: BTreeMap<usize, Dense> = BTreeMap::new();
-        for column in 0..field.cols {
-            let mut y = Dense::zeros(n, n);
-            let mut any = false;
-            for entry in 0..n * n {
-                let (a, b) = (entry / n, entry % n);
-                if a < g && b < g {
-                    continue;
-                }
-                let v = field.at(entry, column);
-                if v.re != 0. || v.im != 0. {
-                    any = true;
-                }
-                y.set(a, b, v);
-            }
-            if !any {
+        let mut second: BTreeMap<usize, Vec<Option<Dense>>> = BTreeMap::new();
+        for (k, field) in fields {
+            if field.cols != columns || self.slot_of(k).is_some() {
                 continue;
             }
-            let x = solver.solve(&y, &self.frame, &self.lapack)?;
-            for term in &self.frame.terms {
-                let c = add_charge(&k, &term.charge, false)?;
-                let Some(slot) = self.slot_of(&c) else { continue };
-                let image = self.frame.apply(term, &x, &self.lapack)?;
-                let block = out.entry(slot).or_insert_with(|| Dense::zeros(g2, field.cols));
-                for a in 0..g {
-                    for b in 0..g {
-                        block.add_at(a * g + b, column, image.at(a, b));
+            let landing: Vec<(&ChargeTerm, usize, Charge)> = self
+                .frame
+                .terms
+                .iter()
+                .filter_map(|term| {
+                    let c = add_charge(k, &term.charge, false).ok()?;
+                    self.slot_of(&c).map(|slot| (term, slot, c))
+                })
+                .collect();
+            if landing.is_empty() {
+                continue;
+            }
+            let mut ys: Vec<Dense> = Vec::new();
+            let mut index: Vec<usize> = Vec::new();
+            for column in 0..columns {
+                let mut y = Dense::zeros(n, n);
+                let mut any = false;
+                for entry in 0..n * n {
+                    let (a, b) = (entry / n, entry % n);
+                    if a < g && b < g {
+                        continue;
+                    }
+                    let v = field.at(entry, column);
+                    if v.re != 0. || v.im != 0. {
+                        any = true;
+                        y.set(a, b, v);
                     }
                 }
-                // Second hop: the non-ground part arriving at the slow charge
-                // relaxes there (static elimination of a slow envelope) and
-                // returns its ground block, as in J_eff.
-                let mut w = image;
-                for a in 0..g {
-                    for b in 0..g {
-                        w.set(a, b, ZERO);
+                if any {
+                    ys.push(y);
+                    index.push(column);
+                }
+            }
+            if ys.is_empty() {
+                continue;
+            }
+            let refs: Vec<&Dense> = ys.iter().collect();
+            let xs = match self.fast_charge_solver(k)?.as_ref() {
+                BlockSolver::Full(solver) => solver.solve_all(&refs, &self.frame, lap)?,
+                other => refs.iter().map(|y| other.solve(y, &self.frame, lap)).collect::<Result<_, _>>()?,
+            };
+            drop(ys);
+            let x_refs: Vec<&Dense> = xs.iter().collect();
+            for (term, slot, _) in &landing {
+                let images = self.frame.apply_all(term, &x_refs, lap)?;
+                let block = out.entry(*slot).or_insert_with(|| Dense::zeros(g2, columns));
+                let pending = second.entry(*slot).or_insert_with(|| vec![None; columns]);
+                for (image, &column) in images.iter().zip(&index) {
+                    let w = pending[column].get_or_insert_with(|| Dense::zeros(n, n));
+                    for b in 0..n {
+                        for a in 0..n {
+                            let v = image.at(a, b);
+                            if a < g && b < g {
+                                block.add_at(a * g + b, column, v);
+                            } else {
+                                w.add_at(a, b, v);
+                            }
+                        }
                     }
                 }
+            }
+        }
+        // Second hop: the non-ground part arriving at a slow charge relaxes
+        // there (static elimination of a slow envelope) and returns its
+        // ground block, as in J_eff.
+        for (slot, pending) in second {
+            let c = &self.slots[slot];
+            let solver = self.slow_charge_solver(slot)?;
+            for (column, w) in pending.into_iter().enumerate() {
+                let Some(w) = w else { continue };
                 if w.frobenius() == 0. {
                     continue;
                 }
-                let x2 = self.slow_charge_solver(slot)?.solve(&w, &self.frame, &self.lapack)?;
-                for term2 in &self.frame.terms {
-                    let c2 = add_charge(&c, &term2.charge, false)?;
+                let x2 = solver.solve(&w, &self.frame, lap)?;
+                for term in &self.frame.terms {
+                    let c2 = add_charge(c, &term.charge, false)?;
                     if let Some(slot2) = self.slot_of(&c2) {
-                        let ground = self.frame.apply_ground_output(term2, &x2);
-                        let block = out.entry(slot2).or_insert_with(|| Dense::zeros(g2, field.cols));
+                        let ground = self.frame.apply_ground_output(term, &x2);
+                        let block = out.entry(slot2).or_insert_with(|| Dense::zeros(g2, columns));
                         for (row, v) in ground.iter().enumerate() {
                             block.add_at(row, column, *v);
                         }

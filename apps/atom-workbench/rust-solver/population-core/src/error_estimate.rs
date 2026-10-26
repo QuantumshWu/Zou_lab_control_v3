@@ -183,13 +183,17 @@ pub struct BasisOptions {
     /// Integrate the non-ground residual at every retained charge exactly
     /// through the dressed no-jump dynamics (early fast transients).
     pub fast_response: bool,
-    /// Additionally Markov-slave the non-ground residual at fast retained
-    /// charges and return it one drive hop into the slow slots.
+    /// Markov-slave the non-ground residual at fast retained charges and
+    /// return it one drive hop into the slow slots (with the second-hop
+    /// relaxation there). The dressed fast response stays at its own charge;
+    /// this is the drive-mediated path back to the ground block, which carries
+    /// the late-time error of strongly driven candidates (without it the
+    /// estimate fell to 0.6x the true error on threeNearStrong).
     pub slave_fast_charges: bool,
 }
 
 impl Default for BasisOptions {
-    fn default() -> Self { Self { fast_response: true, slave_fast_charges: false } }
+    fn default() -> Self { Self { fast_response: true, slave_fast_charges: true } }
 }
 
 /// Modal columns per block of the basis estimate (bounds its memory).
@@ -587,6 +591,8 @@ impl SlowDual {
                 }
             }
             let signed = push_modal(view.map, &[(view.fq, &block), (view.eq, &scaled)], rows, m, lap)?;
+            // Non-ground residuals at fast charges, slaved together.
+            let mut slaving: Vec<(Charge, Dense)> = Vec::new();
             for (mode, charge) in view.map.modes().iter().enumerate() {
                 let slow_slot = self.slot_of(charge);
                 let nu = phases.frequency(charge).map(|f| f.hi + f.lo)?;
@@ -610,21 +616,17 @@ impl SlowDual {
                     // Non-ground part: exact dressed fast response at this charge.
                     self.add_fast_response(&mut series, (slot, shift), nu, start, &field)?;
                 }
-                if options.slave_fast_charges && slow_slot.is_none() {
-                    let mut full = field.clone();
-                    for a in 0..g {
-                        for b in 0..g {
-                            for k in 0..width {
-                                full.set(a * n + b, k, ground.at(a * g + b, k));
-                            }
-                        }
-                    }
-                    for (target_slot, returned) in self.slaved_returns(charge, &full)? {
-                        series.add_slow(0., start, &self.to_modal(target_slot, &returned)?);
-                    }
+                if options.slave_fast_charges && slow_slot.is_none() && field.frobenius() > 0. {
+                    slaving.push((charge.clone(), field));
                 }
                 if ground.frobenius() > 0. {
                     series.add_slow(shift, start, &self.to_modal(slot, &ground)?);
+                }
+            }
+            if !slaving.is_empty() {
+                let fields: Vec<(Charge, &Dense)> = slaving.iter().map(|(k, f)| (k.clone(), f)).collect();
+                for (target_slot, returned) in self.slaved_returns_all(&fields, width)? {
+                    series.add_slow(0., start, &self.to_modal(target_slot, &returned)?);
                 }
             }
             start += width;
