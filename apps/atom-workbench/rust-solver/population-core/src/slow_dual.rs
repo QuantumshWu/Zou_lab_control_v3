@@ -442,11 +442,13 @@ const EIGEN_RESIDUAL_LAST: f64 = 1e-7;
 /// Hessenberg QR. Every attempt is an exact transformation of the same
 /// problem, so the first one whose residual qualifies is used:
 ///
-/// 1. `zgeev` of `A`;
-/// 2. `zgeev` of `A + i s I` (a purely imaginary shift, `s ~ ||A||`): the
+/// 1. `zgeev` of `A + i s I` (a purely imaginary shift, `s ~ ||A||`): the
 ///    eigenvectors are unchanged and the eigenvalues move by exactly `i s`,
 ///    but the iteration no longer runs on a real matrix stored as complex,
-///    whose conjugate-pair stagnation is what fails in practice;
+///    whose conjugate-pair stagnation is what fails in practice. It comes
+///    first because a failing plain `zgeev` is slow (seconds on m = 40: it
+///    exhausts its iteration limit) while the shifted one converges at once;
+/// 2. `zgeev` of `A`;
 /// 3. `dgeev` of `A` when `A` is real (real double-shift QR);
 /// 4. `zgeev` of `Q A Q^T` with a fixed pseudo-random orthogonal `Q` (a
 ///    different Hessenberg form), mapped back with `V = Q^T V'`;
@@ -467,8 +469,8 @@ pub(crate) fn robust_eigen_from(a: &Dense, real: Option<&[f64]>, lap: &Lapack, f
     let mut failures: Vec<String> = Vec::new();
     for attempt in first..5 {
         let raw: Result<(Vec<C>, Dense, &'static str), String> = match attempt {
-            0 => lap.complex_eigen_right(&a.data, n).map(|(w, v)| (w, Dense { rows: n, cols: n, data: v }, "zgeev")),
-            1 => {
+            1 => lap.complex_eigen_right(&a.data, n).map(|(w, v)| (w, Dense { rows: n, cols: n, data: v }, "zgeev")),
+            0 => {
                 let shift = 0.318_309_886 * norm;
                 let mut shifted = a.clone();
                 for i in 0..n {
