@@ -5,13 +5,13 @@ import test from 'node:test';
 import {setTimeout as pause} from 'node:timers/promises';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
-import {buildMasterModel} from '../dist/js/atom-workbench/src/master-model.js';
-import {EFFECTIVE_MODEL_SCHEMA as ATOMIC_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
+import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 
 function fixture(scene=defaultScene(),settings=scene.dynamics){
-  const states=buildMasterModel(scene,settings).states,initial=states.findIndex(s=>s.id===settings.initialStateId);
+  const states=buildFullMasterModel(scene,settings).states,initial=states.findIndex(s=>s.id===settings.initialStateId);
   const row=Array.from({length:32},(_,i)=>i===initial?1:0);
-  return {modelSchema:ATOMIC_MODEL_SCHEMA,protocol:NATIVE_PROTOCOL,service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[ATOMIC_MODEL_SCHEMA]},
+  return {modelSchema:FULL_MODEL_SCHEMA,protocol:NATIVE_PROTOCOL,service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]},
     states,timesUs:[0,settings.durationUs/2,settings.durationUs],populations:[row.slice(),row.slice(),row.slice()],
     asymptoticPopulations:row.slice(),asymptoticStatus:'stationary',diagnostics:{traceError:0,positivityError:0,elapsedMs:1}};
 }

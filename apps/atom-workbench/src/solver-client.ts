@@ -3,7 +3,7 @@ import {readPopulationAccuracy} from './solver-types.js';
 import type {DynamicsSettings,Scene,Level} from './types.js';
 import {resolvePopulationTolerance} from './types.js';
 import {laserIntensityMWcm2} from './physics.js';
-import {EFFECTIVE_MODEL_SCHEMA as ATOMIC_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from './solver-protocol.js';
+import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from './solver-protocol.js';
 import {readMeanDensity} from './mean-density.js';
 
 export interface SolverFailureRecord {time:string;request:{clientId:string;sequence:number};scene:Scene;options:object;attempt:number;willRetry:boolean;error:string;status?:number;code?:string;response?:unknown;page?:string;}
@@ -39,7 +39,7 @@ export class DynamicsClient {
     if(this.current!==job||job.controller.signal.aborted)return;
     job.attempt++;let evidence:unknown;
     try{
-      const response=await this.transport(this.base+'/api/solve',{method:'POST',signal:job.controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({modelSchema:ATOMIC_MODEL_SCHEMA,stream:!!job.onProgress,request:{clientId:this.clientId,sequence:job.id},scene:job.scene,options:{
+      const response=await this.transport(this.base+'/api/solve',{method:'POST',signal:job.controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({modelSchema:FULL_MODEL_SCHEMA,stream:!!job.onProgress,request:{clientId:this.clientId,sequence:job.id},scene:job.scene,options:{
         initialStateId:job.settings.initialStateId,durationUs:job.settings.durationUs,samples:job.settings.samples,
         populationTolerance:resolvePopulationTolerance(job.settings.populationTolerance),
         includeAsymptotic:true,steadyOnly:job.steadyOnly,
@@ -49,7 +49,7 @@ export class DynamicsClient {
       evidence={protocol:data.protocol,modelSchema:data.modelSchema,service:data.service,diagnostics:data.diagnostics,asymptoticStatus:data.asymptoticStatus};if(data.error)throw new Error(data.error);
       if(this.current!==job||job.controller.signal.aborted)return;
       if(data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||
-        !Array.isArray(data.service?.capabilities)||!data.service.capabilities.includes(ATOMIC_MODEL_SCHEMA))throw new Error('本机求解服务版本不兼容：需要 rb87-full/2 辐射模型，旧模型结果未显示。');
+        !Array.isArray(data.service?.capabilities)||!data.service.capabilities.includes(FULL_MODEL_SCHEMA))throw new Error('本机求解服务版本不兼容：需要 rb87-full/2 辐射模型，旧模型结果未显示。');
       if(!data.request||data.request.clientId!==this.clientId||data.request.sequence!==job.id)throw new Error('求解响应与当前请求不匹配。');
       const result=normalizeDynamicsResult(data,job.scene,job.settings.initialStateId);
       this.checkAccuracyRequest(result,job);
@@ -79,7 +79,7 @@ export class DynamicsClient {
       if(event.type!=='asymptotic')throw new Error('未知求解进度。');
       if(this.current!==job||job.controller.signal.aborted)return;
       const data=event.data;
-      if(data?.request?.clientId!==this.clientId||data.request.sequence!==job.id||data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||!data.service?.capabilities?.includes(ATOMIC_MODEL_SCHEMA))throw new Error('稳态进度与当前请求不匹配。');
+      if(data?.request?.clientId!==this.clientId||data.request.sequence!==job.id||data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||!data.service?.capabilities?.includes(FULL_MODEL_SCHEMA))throw new Error('稳态进度与当前请求不匹配。');
       const mean=normalizeDynamicsResult(data,job.scene,job.settings.initialStateId);
       this.checkAccuracyRequest(mean,job);
       if(mean.timesUs.length!==1||mean.timesUs[0]!==0||!mean.steady.converged)throw new Error('稳态进度缺少已验证的长期布居。');
@@ -105,7 +105,7 @@ export class DynamicsClient {
 export function normalizeDynamicsResult(data:any,scene:Scene,initialStateId=scene.dynamics?.initialStateId??`ground-${scene.initialF}-${scene.initialM}`):DynamicsResult{
   const invalid=(detail:string):never=>{throw new Error(`求解结果不完整或无效：${detail}；未绘制替代数据。`);};
   if(!data||typeof data!=='object'||Array.isArray(data))invalid('响应对象');
-  if(data.modelSchema!==ATOMIC_MODEL_SCHEMA||data.protocol!==NATIVE_PROTOCOL)invalid('辐射模型版本不兼容，需要 rb87-full/2');
+  if(data.modelSchema!==FULL_MODEL_SCHEMA||data.protocol!==NATIVE_PROTOCOL)invalid('辐射模型版本不兼容，需要 rb87-full/2');
   const states=data.states as Level[],timesUs=data.timesUs as number[];
   if(!Array.isArray(states)||states.length!==32||new Set(states.map(s=>s?.id)).size!==32||states.some(s=>typeof s?.id!=='string'||!['ground','D1','D2'].includes(s.manifold)||!Number.isFinite(s.energyMHz)||!Number.isInteger(s.F)||!Number.isInteger(s.m)||s.m < -s.F||s.m>s.F||!(s.manifold==='D2'?[0,1,2,3]:[1,2]).includes(s.F)||s.id!==`${s.manifold}-${s.F}-${s.m}`))invalid('32 态元数据');
   if(!Array.isArray(timesUs)||timesUs.length===0||timesUs.some((t,i)=>!Number.isFinite(t)||t<0||(i>0&&t<=timesUs[i-1]!)))invalid('时间采样');

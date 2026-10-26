@@ -2,17 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
-import {buildMasterModel} from '../dist/js/atom-workbench/src/master-model.js';
+import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {POPULATION_GROUPS} from '../dist/js/atom-workbench/src/population-selection.js';
-import {EFFECTIVE_MODEL_SCHEMA as SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 
 function fixture(){
   const scene=defaultScene();scene.dynamics.samples=3;scene.dynamics.durationUs=.2;
-  const states=buildMasterModel(scene,scene.dynamics).states,index=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
+  const states=buildFullMasterModel(scene,scene.dynamics).states,index=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
   const row=Array(32).fill(0);row[index]=1;
-  const data={modelSchema:SCHEMA,protocol:NATIVE_PROTOCOL,states,timesUs:[0,.1,.2],populations:[row.slice(),row.slice(),row.slice()],
+  const data={modelSchema:FULL_MODEL_SCHEMA,protocol:NATIVE_PROTOCOL,states,timesUs:[0,.1,.2],populations:[row.slice(),row.slice(),row.slice()],
     asymptoticPopulations:null,asymptoticStatus:'not-requested',
-    service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[SCHEMA],binarySha256:'binary',buildSha256:'build'},
+    service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA],binarySha256:'binary',buildSha256:'build'},
     diagnostics:{validationKind:'population',traceError:0,initialStateError:0,elapsedMs:1},
     populationAccuracy:{status:'estimated-converged',requestedTolerance:.005,estimatedMaximumError:.003,
       projectionCharge:.0001,includesProjectionCharge:true,scope:{states:32,samples:3,groups:POPULATION_GROUPS.map(g=>g.id)}}};

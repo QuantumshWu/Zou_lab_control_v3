@@ -6,7 +6,7 @@ import { analyze, atomicSystem, couplingBetweenStates, laserCarrierOffsetMHz, la
 import { DETUNING_UNITS, detuningInUnit, laserDetuningMHz, normalizeLaserFrequency,
   setLaserDetuningUnit, setLaserDetuningValue, setLaserFrequencyMode, setLaserTransitionReference,
   setLaserWavelengthNm, zeroFieldTransitionOptions } from '../dist/js/atom-workbench/src/laser-frequency.js';
-import { buildMasterModel } from '../dist/js/atom-workbench/src/master-model.js';
+import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 
 const near=(actual,expected,tol=1e-8)=>assert.ok(Math.abs(actual-expected)<=tol,`${actual} != ${expected} (tol ${tol})`);
 const laser=()=>({...defaultScene().lasers[0]});
@@ -151,7 +151,7 @@ test('100 cross-line reference, wavelength and serialization round trips preserv
       assert.equal(laserCarrierOffsetMHz(converted,'D2'),offset);
       assert.equal(laserFrequencyMHz(converted),absolute);
       const scene=defaultScene();scene.lasers=[original,{...converted,id:'converted',phaseDeg:180}];
-      const model=buildMasterModel(scene);
+      const model=buildFullMasterModel(scene);
       assert.equal(model.drives.length,0,`iteration ${i} generated a fictitious beat`);
       for(let e=8;e<32;e++)for(let g=0;g<8;g++) {
         assert.equal(model.hReal[e*32+g],0);assert.equal(model.hImag[e*32+g],0);
@@ -166,7 +166,7 @@ test('explicit frequency inputs rebuild the anchor, direct legacy edits invalida
   const edited=structuredClone(beam);edited.detuningMHz+=.125e-6;
   near(laserCarrierOffsetMHz(edited,'D2')-original,.125e-6,3e-13);
   const scene=defaultScene();scene.lasers=[beam,{...edited,id:'real-beat'}];
-  const model=buildMasterModel(scene);
+  const model=buildFullMasterModel(scene);
   assert.equal(model.drives.length,1);assert.ok(model.drives[0].omega>0);
   near(model.drives[0].omega/(2*Math.PI),.125e-6,3e-13);
   setLaserFrequencyMode(edited,'wavelength');const prior=laserFrequencyMHz(edited);

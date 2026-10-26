@@ -12,7 +12,7 @@ import {nativeChildEnvironment} from './native-child-env.mjs';
 import {defaultScene,resolvePopulationTolerance} from '../dist/js/atom-workbench/src/types.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
-import {EFFECTIVE_MODEL_SCHEMA as SCHEMA} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {FULL_MODEL_SCHEMA} from '../dist/js/atom-workbench/src/solver-protocol.js';
 
 const option=name=>{const i=process.argv.indexOf(name);return i<0?undefined:process.argv[i+1];};
 if(process.argv.includes('--help')){
@@ -82,7 +82,7 @@ function request(kind,options){
   return new Promise((resolveReply,reject)=>{
     const timer=setTimeout(()=>{void worker.receive({kind:'cancel',channel});pending.delete(channel);reject(Error(`${kind} smoke request timed out; no retry started`));},timeout);
     pending.set(channel,{resolve:data=>{clearTimeout(timer);pending.delete(channel);resolveReply(data);},reject:error=>{clearTimeout(timer);pending.delete(channel);reject(error);}});
-    void worker.receive({kind:'solve',channel,request:{scene,modelSchema:SCHEMA,request:token,options,stream:false}});
+    void worker.receive({kind:'solve',channel,request:{scene,modelSchema:FULL_MODEL_SCHEMA,request:token,options,stream:false}});
   });
 }
 const began=performance.now();

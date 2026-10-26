@@ -1,13 +1,48 @@
-import type {Scene,DynamicsSettings,Level,Laser} from './types.js';
-import {fieldModel,type MasterMatrix,type MasterDrive} from './master-model.js';
+import type {Scene,DynamicsSettings,Laser} from './types.js';
 import {spectroscopyAnalysis} from './spectroscopy.js';
 import {classifyLasers} from './laser-regime.js';
-import {complexPolarization,laserFrequencyDifferenceMHz,laserIntensityMWcm2,laserCarrierOffsetMHz,captureLaserFrequencyAnchor,RB87,sinCosDegrees,accurateSum} from './physics.js';
+import {atomicSystem,complexPolarization,laserFrequencyDifferenceMHz,laserIntensityMWcm2,laserCarrierOffsetMHz,captureLaserFrequencyAnchor,RB87,sinCosDegrees,accurateSum} from './physics.js';
 import {FULL_MODEL_SCHEMA} from './solver-protocol.js';
-export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSettings>,frame:'common'|'resonant'='resonant'){
- return {...constructFullMasterModel(scene,settings,frame),buildCacheHit:false};
-}
+
+/** The rb87-full/2 model sent to the Rust worker: 32 states, complex row-major
+ * matrices, H in rad/us, collapse amplitudes in 1/sqrt(us), and
+ * H(t) = H0 + sum [cos(omega t) Hcos + sin(omega t) Hsin] with omega in rad/us. */
+interface MasterMatrix {real:number[];imag:number[]}
+interface MasterDrive {omega:number;cos:MasterMatrix;sin:MasterMatrix;laserIds:string[]}
 const N=32,TAU=2*Math.PI,zeros=()=>Array(1024).fill(0),matrix=():MasterMatrix=>({real:zeros(),imag:zeros()});
+
+type AtomicSystem=ReturnType<typeof atomicSystem>;
+interface BareFieldModel {systems:Record<'D1'|'D2',AtomicSystem>;collapse:MasterMatrix[]}
+// Both D lines together (physics.atomicSystem caches one line). Independent of
+// optical power, detuning, polarization and initial state.
+const bareCache=new Map<number,BareFieldModel>();
+/** Field-dressed D-line systems and their free-atom emission operators: one
+ * operator per line and spherical component q, NOT one jump per transition, so
+ * C_q rho C_q^dagger keeps radiative coherence transfer. */
+function bareFieldModel(magnitude:number):BareFieldModel {
+ const cached=bareCache.get(magnitude);if(cached)return cached;
+ const systems={D1:atomicSystem('D1',magnitude),D2:atomicSystem('D2',magnitude)},collapse:MasterMatrix[]=[];
+ for(const line of ['D1','D2'] as const){
+  const system=systems[line],data=RB87[line],start=line==='D1'?8:16,operators=[matrix(),matrix(),matrix()];
+  for(let e=0;e<system.excited.length;e++)for(let g=0;g<system.ground.length;g++){
+   const excited=system.excited[e]!,ground=system.ground[g]!,q=excited.m-ground.m;
+   if(q!==-1&&q!==0&&q!==1)continue;
+   // At B=0 this is an exact symmetry rule, not a numerical cutoff.
+   if(magnitude===0&&Math.abs(excited.F-ground.F)>1)continue;
+   // atomicSystem uses the D2 stretched dipole as its common unit. Undo the
+   // D1/D2 radial ratio here: Gamma already contains it.
+   const amplitude=system.dipoles[e*8+g]!*RB87.D2.dipole/data.dipole;
+   const frequencyHz=data.frequencyHz+1e6*(excited.energyMHz-ground.energyMHz);
+   if(!(frequencyHz>0))throw new Error('Magnetic field exceeds the positive optical-frequency domain of this D-line model.');
+   operators[q+1]!.real[g*N+start+e]=Math.sqrt(data.gammaHz*1e-6)*amplitude*(frequencyHz/data.frequencyHz)**1.5;
+  }
+  collapse.push(...operators);
+ }
+ const result={systems,collapse};
+ if(bareCache.size>=16)bareCache.delete(bareCache.keys().next().value!);
+ bareCache.set(magnitude,result);
+ return result;
+}
 /** Laser phases, built from their carrier provenance BEFORE multiplying by
  * TAU. A minimum-distance spanning tree keeps a small true beat between two
  * nearby carriers as its own small axis, even when both lie far from the
@@ -39,16 +74,16 @@ function laserPhaseCoordinates(lasers:readonly Laser[]):{frequencies:number[];fr
  return {frequencies,frequenciesMHz,laserIndices};
 }
 /** U† A U, with columns U being the DC background eigenstates in the bare-B basis. */
-export function transformOperator(a:MasterMatrix,u:MasterMatrix):MasterMatrix {
+function transformOperator(a:MasterMatrix,u:MasterMatrix):MasterMatrix {
  const tmp=matrix(),out=matrix();
  for(let i=0;i<N;i++)for(let k=0;k<N;k++){const ar=a.real[i*N+k]!,ai=a.imag[i*N+k]!;if(ar===0&&ai===0)continue;for(let j=0;j<N;j++){const br=u.real[k*N+j]!,bi=u.imag[k*N+j]!;tmp.real[i*N+j]+=ar*br-ai*bi;tmp.imag[i*N+j]+=ar*bi+ai*br;}}
  for(let i=0;i<N;i++)for(let k=0;k<N;k++){const ar=u.real[k*N+i]!,ai=-u.imag[k*N+i]!;if(ar===0&&ai===0)continue;for(let j=0;j<N;j++){const br=tmp.real[k*N+j]!,bi=tmp.imag[k*N+j]!;out.real[i*N+j]+=ar*br-ai*bi;out.imag[i*N+j]+=ar*bi+ai*br;}}return out;
 }
-function constructFullMasterModel(scene:Scene,settings?:Partial<DynamicsSettings>,frame:'common'|'resonant'='resonant'){
+export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSettings>,frame:'common'|'resonant'='resonant'){
  const classification=classifyLasers(scene),invalid=classification.find(c=>!c.valid);if(invalid)throw new Error(invalid.message);
  const a=spectroscopyAnalysis(scene,undefined,false),states=[...a.ground,...a.D1,...a.D2];
  if(a.spectroscopy?.status==='unresolved')throw new Error(a.spectroscopy.warnings?.[0]??'远失谐背景不满足色散条件');
- const bare=fieldModel(a.fieldMagnitudeG),u=matrix();states.forEach((s,j)=>{for(let i=0;i<N;i++){u.real[i*N+j]=s.backgroundState?.real[i]??(i===j?1:0);u.imag[i*N+j]=s.backgroundState?.imag[i]??0;}});
+ const bare=bareFieldModel(a.fieldMagnitudeG),u=matrix();states.forEach((s,j)=>{for(let i=0;i<N;i++){u.real[i*N+j]=s.backgroundState?.real[i]??(i===j?1:0);u.imag[i*N+j]=s.backgroundState?.imag[i]??0;}});
  const near=scene.lasers.filter(l=>l.enabled&&(l.regime??'near')==='near'&&laserIntensityMWcm2(l)>0);
  // One optical reference; a single carrier keeps every coupling static.
  // With multiple carriers, optional ground-coordinate phases improve conditioning.
@@ -60,7 +95,6 @@ function constructFullMasterModel(scene:Scene,settings?:Partial<DynamicsSettings
  const groundFrames=new Map<number,number>([[1,0],[2,0]]),assigned=new Set<number>();
  const groundPhaseIndices=new Map<number,number[]>([[1,frequencies.map(()=>0)],[2,frequencies.map(()=>0)]]);
  if(frame==='resonant'&&reference)for(const [laserIndex,l] of near.entries()){const F=classification.find(c=>c.id===l.id)!.groundF;if(!assigned.has(F)){groundFrames.set(F,-laserFrequencyDifferenceMHz(l,reference));groundPhaseIndices.set(F,laserIndices[laserIndex]!.map(value=>-value));assigned.add(F);}}
- const carriers=new Map<string,number>([['g1',groundFrames.get(1)!],['g2',groundFrames.get(2)!],['D1',offsets.D1],['D2',offsets.D2]]);
  const h=matrix(),groundReference=states.find(s=>s.id==='ground-2-0')!.energyMHz;
  states.forEach((s,i)=>h.real[i*N+i]=TAU*(s.energyMHz-groundReference-(s.manifold==='ground'?groundFrames.get(s.F)!:offsets[s.manifold])));
  const drives:MasterDrive[]=[],driveIndices:number[][]=[],phaseDrives=new Map<string,MasterDrive>(),terms=new Map<number[],Map<number,number[]>>(),put=(m:number[],i:number,v:number)=>{let entries=terms.get(m);if(!entries){entries=new Map();terms.set(m,entries);}let values=entries.get(i);if(!values){values=[];entries.set(i,values);}values.push(v);};
@@ -85,12 +119,11 @@ function constructFullMasterModel(scene:Scene,settings?:Partial<DynamicsSettings
  const collapse:MasterMatrix[]=[];
  for(const c of bare.collapse){const transformed=transformOperator(c,u);for(const F of [1,2]){const channel=matrix();for(let g=0;g<8;g++)if(states[g]!.F===F)for(let e=8;e<N;e++){channel.real[g*N+e]=transformed.real[g*N+e]!;channel.imag[g*N+e]=transformed.imag[g*N+e]!;}if(channel.real.some(v=>v!==0)||channel.imag.some(v=>v!==0))collapse.push(channel);}}
  const initialId=settings?.initialStateId??scene.dynamics?.initialStateId??`ground-${scene.initialF}-${scene.initialM}`,initialIndex=states.findIndex(s=>s.id===initialId);if(initialIndex<0)throw new Error('动力学初态必须是真实原子态');
- const decayChannels=states.slice(8).flatMap((e,ei)=>{const rates=states.slice(0,8).map((g,gi)=>({groundId:g.id,ratePerUs:collapse.reduce((sum,c)=>sum+c.real[gi*N+ei+8]!**2+c.imag[gi*N+ei+8]!**2,0)})),total=rates.reduce((sum,r)=>sum+r.ratePerUs,0);return rates.filter(r=>r.ratePerUs>0).map(r=>({...r,excitedId:e.id,branchingFraction:r.ratePerUs/total}));});
- return {modelSchema:FULL_MODEL_SCHEMA,radiation:undefined,dimension:32,states,hReal:h.real,hImag:h.imag,collapse,initialIndex,timeDependent:drives.length>0,drives,
+ return {modelSchema:FULL_MODEL_SCHEMA,dimension:32,states,hReal:h.real,hImag:h.imag,collapse,initialIndex,drives,
  // MHz coordinates are authoritative carrier differences. Angular values
  // are redundant representations; multiplication by TAU must not decide
  // whether an integer relation exists between the original carrier phases.
  frequencyCoordinates:{frequenciesMHz,frequencies,driveIndices,frameIndices:states.map(s=>s.manifold==='ground'?groundPhaseIndices.get(s.F)!.slice():frequencies.map(()=>0)),frameSectors:states.map(s=>s.manifold==='ground'?0:1)},
- fieldVector:a.fieldVector,fieldMagnitudeG:a.fieldMagnitudeG,laserCount:near.length,carriersMHz:Object.fromEntries(carriers),rotatingCarrierOffsetMHz:0,decayChannels,frameFrequenciesMHz:states.map(s=>s.manifold==='ground'?groundFrames.get(s.F)!:opticalFrameMHz),
+ fieldVector:a.fieldVector,fieldMagnitudeG:a.fieldMagnitudeG,laserCount:near.length,frameFrequenciesMHz:states.map(s=>s.manifold==='ground'?groundFrames.get(s.F)!:opticalFrameMHz),
  assumptions:['远失谐光仅贡献背景 Stark Hamiltonian；不包含远失谐光散射。','统一光学旋转系；每束近共振光显式保留两个基态 F 与 D1、D2 全部允许电偶极耦合。','仅去除光学反旋转项，不按失谐或流形删除驱动矩阵元。','不同光频的真实拍频显式进入 Lindblad 方程。','衰变算符变换到相同的背景本征基；不同基态超精细发射频率采用 secular 分辨。','初态及返回布居定义在远失谐背景本征基；参考能级不进入动力学。']};
 }
