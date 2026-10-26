@@ -18,11 +18,12 @@
 //! `k` is slow, otherwise to the central slot with its physical phase
 //! `exp(i nu_k t)` (the frame representation is redundant: a ground field at
 //! charge `k` with envelope `f(t)` equals one at charge 0 with envelope
-//! `exp(i nu_k t) f(t)`). The non-ground residual at a slow charge `k` is
-//! integrated exactly by the dressed charge-0 no-jump dynamics
+//! `exp(i nu_k t) f(t)`). The non-ground residual at every retained charge
+//! `k` is integrated exactly by the dressed charge-0 no-jump dynamics
 //! `eta' = (N - i nu_k) eta + r_Q`, `eta(0) = 0` (diagonal in the eigenvectors
-//! of `A_L`, `A_R`); its populations are read out directly and its recycling
-//! `R_0 eta_EE` is a slow source. Diagonalizing the reduced generator
+//! of `A_L`, `A_R`); its populations are read out directly (phase
+//! `exp(i nu_k t)`) and its recycling `R_0 eta_EE` is a slow source, routed
+//! like a ground field at `k`. Diagonalizing the reduced generator
 //! `G = V diag(beta) V^-1` turns every source into a sum of exponentials, and
 //! `int_0^t exp(alpha (t-s)) exp(mu s) ds = (exp(mu t) - exp(alpha t))/(mu - alpha)`
 //! is evaluated exactly (entire-function branch when `|mu - alpha| t <= 1`).
@@ -147,12 +148,14 @@ pub struct HaloOptions {
     pub resonance_floor: Option<f64>,
     /// Evaluate every halo mode, including those that cannot return into the
     /// retained domain in one Liouvillian hop (they then contribute only their
-    /// own oscillating populations and initial boundary).
+    /// own oscillating populations, their initial boundary and their
+    /// same-charge recycling, which reaches the slow error with a fast phase).
     pub all_halo_modes: bool,
-    /// Markov-slave the non-ground returns that land on fast retained charges
-    /// and return them one more hop into the slow slots. Off by default:
-    /// measured below 0.1% of the halo estimate on the benchmarks while
-    /// costing about 2-3x the pencil (one exact charge-block solve per column).
+    /// Additionally Markov-slave the non-ground returns that land on fast
+    /// retained charges and return them one more drive hop into the slow
+    /// slots. Off by default: it never changed a halo estimate that mattered
+    /// on the benchmarks while costing about 2-3x the pencil (one exact
+    /// charge-block solve per column).
     pub slave_fast_returns: bool,
 }
 
@@ -295,11 +298,11 @@ fn finish_estimate(
 
 #[derive(Clone, Copy, Debug)]
 pub struct BasisOptions {
-    /// Integrate the non-slow residual at slow charges exactly through the
-    /// dressed charge-0 no-jump dynamics (early fast transients).
+    /// Integrate the non-ground residual at every retained charge exactly
+    /// through the dressed no-jump dynamics (early fast transients).
     pub fast_response: bool,
-    /// Markov-slave the non-slow residual at fast retained charges and return
-    /// it one hop into the slow slots.
+    /// Additionally Markov-slave the non-ground residual at fast retained
+    /// charges and return it one drive hop into the slow slots.
     pub slave_fast_charges: bool,
 }
 
@@ -313,18 +316,20 @@ impl SlowDual {
         self.basis_estimate_with(view, groups, BasisOptions::default())
     }
 
-    /// Fast response at one slow charge `q` (envelope slot `slot`):
+    /// Fast response at one charge `q`:
     /// `eta' = (N - i nu_q) eta + Rq_hat a(t)`, `eta(0) = 0`, where `Rq_hat`
-    /// is the retained residual at `q` without its slow ground block. In the
-    /// dressed eigen-coordinates every entry is
+    /// is the residual (or returned field) at `q` without its ground block. In
+    /// the dressed eigen-coordinates every entry is
     /// `sum_j c_ikj (exp(beta_j t) - exp(lambda_ik t)) / (beta_j - lambda_ik)`,
     /// `lambda_ik = a_i + b_k - i nu_q`. The populations of `eta` are read out
-    /// directly; its recycling `R_0 eta_EE` (the only part of `L - N` at the
-    /// same charge) is a slow-slot source for `J_eff`.
+    /// directly (phase `exp(i nu_q t)`); its recycling `R_0 eta_EE` (the only
+    /// part of `L_0 - N` at the same charge) is a `J_eff` source for
+    /// `target = (slot, shift)`: the slot of `q` with shift 0 when `q` is slow,
+    /// otherwise the central slot with the physical phase (`shift = nu_q`).
     #[allow(clippy::too_many_arguments)]
     fn add_fast_response(
         &self,
-        slot: usize,
+        target: (usize, f64),
         nu: f64,
         exponents: &[C],
         coefficients: &Dense,
@@ -413,11 +418,13 @@ impl SlowDual {
                 direct[it * n + s] = cadd(direct[it * n + s], cmul(phase, v));
             }
         }
-        // Recycling return into the slow slot of this charge.
+        // Recycling return into the target slot (with the routing phase).
+        let (slot, shift) = target;
+        let rotate = |z: C| cadd(z, complex(0., shift));
         let modal = &dressed.modal_recycling[slot];
         let forced_modal = modal.multiply(&forced, lap)?;
         for j in 0..m {
-            sources.add_exponential(exponents[j], forced_modal.data[j * forced_modal.rows..(j + 1) * forced_modal.rows].to_vec());
+            sources.add_exponential(rotate(exponents[j]), forced_modal.data[j * forced_modal.rows..(j + 1) * forced_modal.rows].to_vec());
         }
         let dim = modal.rows;
         for ik in 0..n2 {
@@ -429,12 +436,12 @@ impl SlowDual {
             if column.iter().all(|z| z.re == 0. && z.im == 0.) {
                 continue;
             }
-            sources.add_exponential(lambda[ik], column);
+            sources.add_exponential(rotate(lambda[ik]), column);
         }
         for &(ik, j, c) in &near {
             let column: Vec<C> = (0..dim).map(|r| cmul(modal.at(r, ik), c)).collect();
             if column.iter().any(|z| z.re != 0. || z.im != 0.) {
-                sources.add_pair(exponents[j], lambda[ik], column);
+                sources.add_pair(rotate(exponents[j]), rotate(lambda[ik]), column);
             }
         }
         Ok(())
@@ -547,8 +554,10 @@ impl SlowDual {
         let mut direct = vec![ZERO; view.times.len() * n];
         for (mode, charge) in view.map.modes().iter().enumerate() {
             let slow_slot = self.slot_of(charge);
-            if options.fast_response && slow_slot.is_some() && self.dressed.is_some() {
-                // Non-slow part of the residual at a slow charge: exact fast response.
+            if options.fast_response && self.dressed.is_some() {
+                // Non-ground part of the residual: exact dressed fast response
+                // at this charge; its recycling feeds the slot of the charge
+                // (slow) or the central slot with the physical phase (fast).
                 let mut field = Dense::zeros(d, m);
                 for entry in 0..d {
                     let (a, b) = (entry / n, entry % n);
@@ -562,7 +571,8 @@ impl SlowDual {
                 if field.frobenius() > 0. {
                     let coefficients = small.modal_columns(&field, lap)?;
                     let nu = phases.frequency(charge).map(|f| f.hi + f.lo)?;
-                    self.add_fast_response(slow_slot.unwrap(), nu, &small.exponents, &coefficients, view.times, &mut sources, &mut direct)?;
+                    let target = slow_slot.map_or((0, nu), |s| (s, 0.));
+                    self.add_fast_response(target, nu, &small.exponents, &coefficients, view.times, &mut sources, &mut direct)?;
                 }
             }
             if options.slave_fast_charges && slow_slot.is_none() {
@@ -685,7 +695,7 @@ impl SlowDual {
         let mut near_resonant_terms = 0;
         let mut unrouted_resonant_returns = 0;
         // Non-ground returns into slow charges, summed per (pair, slot).
-        let mut fast_fields: BTreeMap<(usize, usize), (f64, Dense)> = BTreeMap::new();
+        let mut fast_fields: BTreeMap<(usize, Charge), ((usize, f64), f64, Dense)> = BTreeMap::new();
         let mut pencil_ms = 0.;
 
         let rhs_max = options.maximum_rhs.min(m);
@@ -860,23 +870,23 @@ impl SlowDual {
                             }
                         }
                         if !same_charge {
-                            if let Some(own) = self.slot_of(&k) {
-                                let mut fast = field.clone();
-                                for a in 0..g {
-                                    for b in 0..g {
-                                        for j in 0..m {
-                                            fast.set(a * n + b, j, ZERO);
-                                        }
+                            // Exact dressed fast response of the non-ground block at k.
+                            // Linear in the field: accumulate per (pair, k) and
+                            // integrate once after the loop.
+                            let mut fast = field.clone();
+                            for a in 0..g {
+                                for b in 0..g {
+                                    for j in 0..m {
+                                        fast.set(a * n + b, j, ZERO);
                                     }
                                 }
-                                // Linear in the field: accumulate per (pair, slot) and
-                                // integrate once after the loop.
-                                let nu_k = frequency(&k)?;
-                                let entry = fast_fields.entry((pair, own)).or_insert_with(|| (nu_k, Dense::zeros(d, m)));
-                                for (acc, v) in entry.1.data.iter_mut().zip(&fast.data) {
-                                    *acc = cadd(*acc, *v);
-                                }
-                            } else if options.slave_fast_returns {
+                            }
+                            let nu_k = frequency(&k)?;
+                            let entry = fast_fields.entry((pair, k.clone())).or_insert_with(|| ((slot, shift), nu_k, Dense::zeros(d, m)));
+                            for (acc, v) in entry.2.data.iter_mut().zip(&fast.data) {
+                                *acc = cadd(*acc, *v);
+                            }
+                            if self.slot_of(&k).is_none() && options.slave_fast_returns {
                                 for (target_slot, returned) in self.slaved_returns(&k, &field)? {
                                     let modal = self.to_modal(target_slot, &returned)?;
                                     for j in 0..m {
@@ -945,8 +955,10 @@ impl SlowDual {
         }
 
         // --- Exact dressed fast response of the returns into slow charges ---
-        for ((pair, slot), (nu_k, field)) in &fast_fields {
-            self.add_fast_response(*slot, *nu_k, &small.exponents, field, view.times, &mut pair_sources[*pair], &mut pair_direct[*pair])?;
+        for ((pair, _), (target, nu_k, field)) in &fast_fields {
+            if field.frobenius() > 0. {
+                self.add_fast_response(*target, *nu_k, &small.exponents, field, view.times, &mut pair_sources[*pair], &mut pair_direct[*pair])?;
+            }
         }
 
         // --- Initial boundaries: slow part plus exact fast initial layer -----
@@ -1453,6 +1465,36 @@ mod tests {
             let scale = exact.iter().map(|x| x.abs()).fold(0_f64, f64::max);
             assert!(trace_defect < 0.05 * scale, "slot trace defect {trace_defect:e} vs scale {scale:e}");
         }
+    }
+
+    #[test]
+    fn error_estimate_optical_residual_at_a_fast_charge() {
+        // An optical residual at the fast charges +-1 (nu = 12/us, not slow):
+        // its early transient and populations come from the dressed fast
+        // response at that charge, its recycling reaches the central slot with
+        // the physical phase.
+        let model = test_model();
+        let owned = prepare(&model, &[12.]);
+        let basis = owned.primitives().hilbert.basis_column_major.clone();
+        let mut r = zero4();
+        r[0][2] = complex(0.03, 0.01);
+        r[2][0] = complex(0.01, -0.02);
+        r[3][3] = complex(0.01, 0.);
+        r[1][1] = complex(-0.01, 0.);
+        let l = dagger4(&r);
+        let times: Vec<f64> = (0..81).map(|i| 0.05 * i as f64).collect();
+        let modes = vec![vec![0], vec![1], vec![-1]];
+        let exact = exact_error(&model, &basis, &[(12., r), (-12., l)], &times);
+        // The ground part alone (phase-routed to the central slot) misses the
+        // optical and excited response.
+        let mut ground_only = zero4();
+        ground_only[1][1] = r[1][1];
+        let ground_estimate = estimate(&owned, &modes, &[(vec![1], ground_only), (vec![-1], dagger4(&ground_only))], &times, true);
+        let est = estimate(&owned, &modes, &[(vec![1], r), (vec![-1], l)], &times, true);
+        let error = worst_relative(&est.state_error, &exact);
+        let ground_error = worst_relative(&ground_estimate.state_error, &exact);
+        assert!(error < 0.05, "fast-charge optical residual relative misfit {error:e}");
+        assert!(ground_error > 0.3, "ground routing alone unexpectedly matched ({ground_error:e})");
     }
 
     #[test]
