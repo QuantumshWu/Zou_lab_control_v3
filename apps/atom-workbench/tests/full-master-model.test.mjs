@@ -126,16 +126,31 @@ test('no laser regime is invalid: a far-labelled resonant beam is an ordinary ex
  assert.deepEqual(relabelled.hReal,model.hReal);assert.deepEqual(relabelled.drives,model.drives);
 });
 
-test('emission: one operator per D line and photon polarization with both ground-F channels, static in the frame',()=>{
- const s=defaultScene(),model=buildFullMasterModel(s),states=model.states;assert.equal(model.collapse.length,6);
+test('emission: one operator per photon polarization with both D lines and both ground-F channels, static in the frame',()=>{
+ const s=defaultScene(),model=buildFullMasterModel(s),states=model.states;assert.equal(model.collapse.length,3);
  for(const c of model.collapse){const rows=new Set(),lines=new Set();
   for(let g=0;g<8;g++)for(let e=8;e<N;e++)if(c.real[g*N+e]!==0||c.imag[g*N+e]!==0){rows.add(states[g].F);lines.add(states[e].manifold);}
-  assert.deepEqual([...rows].sort(),[1,2]);assert.equal(lines.size,1);
+  assert.deepEqual([...rows].sort(),[1,2]);assert.deepEqual([...lines].sort(),['D1','D2']);
   for(let i=0;i<N;i++)for(let j=0;j<N;j++)if(!(i<8&&j>=8))assert.equal(c.real[i*N+j],0);
  }
  // Total decay rate of every excited state equals its line width.
  for(let e=8;e<N;e++){const rate=model.collapse.reduce((sum,c)=>sum+Array.from({length:8},(_,g)=>c.real[g*N+e]**2+c.imag[g*N+e]**2).reduce((a,b)=>a+b,0),0);
   const gamma=(states[e].manifold==='D1'?36.129:38.117);assert.ok(Math.abs(rate/gamma-1)<1e-3,`${states[e].id} ${rate}`);}
+});
+
+test('far-detuned spin-flip Raman scattering keeps the D1/D2 interference of the emission amplitudes',()=>{
+ // 852 nm tweezer, pi-polarized, out of ground-2-0: adiabatic excited amplitude
+ // a_e = H_eg / (E_g - E_e) (static co-rotating coupling in its own frame).
+ const s=defaultScene();s.lasers=s.lasers.slice(1);Object.assign(s.lasers[0],{thetaDeg:90,phiDeg:0,ellipticityDeg:0,polarizationAngleDeg:0});
+ const m=buildFullMasterModel(s),g=m.states.findIndex(x=>x.id==='ground-2-0'),E=i=>m.hReal[i*N+i],a=[];
+ for(let e=0;e<N;e++)a.push(e<8?{re:0,im:0}:{re:m.hReal[e*N+g]/(E(g)-E(e)),im:m.hImag[e*N+g]/(E(g)-E(e))});
+ const rates=ops=>Array.from({length:8},(_,f)=>ops.reduce((sum,c)=>{let re=0,im=0;for(let e=8;e<N;e++){const cr=c.real[f*N+e],ci=c.imag[f*N+e];re+=cr*a[e].re-ci*a[e].im;im+=cr*a[e].im+ci*a[e].re;}return sum+re*re+im*im;},0)*1e6);
+ const combined=rates(m.collapse),total=combined.reduce((x,y)=>x+y,0),raman=total-combined[g];
+ // Separate D1 and D2 operators (a secular approximation across 7 THz) lose the cancellation.
+ const split=[];for(const c of m.collapse)for(const line of ['D1','D2'])split.push({real:c.real.map((v,k)=>m.states[k%N].manifold===line?v:0),imag:c.imag.map((v,k)=>m.states[k%N].manifold===line?v:0)});
+ const separate=rates(split),ramanSeparate=separate.reduce((x,y)=>x+y,0)-separate[g];
+ assert.ok(total>15&&total<30,`total scattering ${total}/s`);
+ assert.ok(raman>0.2&&raman<0.3,`spin-flip Raman ${raman}/s`);assert.ok(ramanSeparate/raman>30,`separate lines ${ramanSeparate}/s`);
 });
 
 test('the static H0 keeps only states outside the model and the Rb+ core; the D-line light shift is dynamical',()=>{

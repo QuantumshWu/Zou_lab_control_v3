@@ -25,15 +25,17 @@ interface BareFieldModel {systems:Record<'D1'|'D2',AtomicSystem>;collapse:Master
 // optical power, detuning, polarization and initial state.
 const bareCache=new Map<number,BareFieldModel>();
 /** Field-dressed D-line systems and their free-atom emission operators: one
- * operator per line and spherical component q, NOT one jump per transition,
- * and with both ground-F channels in the same operator (no secular
- * approximation): C_q rho C_q^dagger keeps radiative coherence transfer
- * between and within the ground hyperfine manifolds. */
+ * operator per spherical component q of the emitted photon, NOT one jump per
+ * transition, line or ground manifold. Each C_q contains both D lines and both
+ * ground-F channels with amplitude d_eg sqrt(K omega_eg^3) (the Born-Markov
+ * form, no secular approximation), so C_q rho C_q^dagger keeps radiative
+ * coherence transfer, and far-detuned Raman scattering keeps the D1/D2
+ * interference that suppresses spin flips. */
 function bareFieldModel(magnitude:number):BareFieldModel {
  const cached=bareCache.get(magnitude);if(cached)return cached;
- const systems={D1:atomicSystem('D1',magnitude),D2:atomicSystem('D2',magnitude)},collapse:MasterMatrix[]=[];
+ const systems={D1:atomicSystem('D1',magnitude),D2:atomicSystem('D2',magnitude)},collapse=[matrix(),matrix(),matrix()];
  for(const line of ['D1','D2'] as const){
-  const system=systems[line],data=RB87[line],start=line==='D1'?8:16,operators=[matrix(),matrix(),matrix()];
+  const system=systems[line],data=RB87[line],start=line==='D1'?8:16;
   for(let e=0;e<system.excited.length;e++)for(let g=0;g<system.ground.length;g++){
    const excited=system.excited[e]!,ground=system.ground[g]!,q=excited.m-ground.m;
    if(q!==-1&&q!==0&&q!==1)continue;
@@ -44,9 +46,8 @@ function bareFieldModel(magnitude:number):BareFieldModel {
    const amplitude=system.dipoles[e*8+g]!*RB87.D2.dipole/data.dipole;
    const frequencyHz=data.frequencyHz+1e6*(excited.energyMHz-ground.energyMHz);
    if(!(frequencyHz>0))throw new Error('Magnetic field exceeds the positive optical-frequency domain of this D-line model.');
-   operators[q+1]!.real[g*N+start+e]=Math.sqrt(data.gammaHz*1e-6)*amplitude*(frequencyHz/data.frequencyHz)**1.5;
+   collapse[q+1]!.real[g*N+start+e]=Math.sqrt(data.gammaHz*1e-6)*amplitude*(frequencyHz/data.frequencyHz)**1.5;
   }
-  collapse.push(...operators);
  }
  const result={systems,collapse};
  if(bareCache.size>=16)bareCache.delete(bareCache.keys().next().value!);
@@ -203,7 +204,7 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  assumptions:[
   `每束开启且强度非零的激光（${lasers.length} 束）都是 32 态主方程中的显式光学驱动：保留 D1、D2 全部允许电偶极耦合，旋转项与反旋转项都保留（不作 RWA），不按近/远失谐区分。`,
   `统一光学旋转系：激发态以参考光${reference?`「${reference.name}」`:''}的载频旋转，基态不旋转；激光间拍频和反旋转项（频率 ω_L+ω_ref，参考载频是独立频率轴）都以精确整数相位坐标进入。`,
-  '自发辐射：每条 D 线、每个球分量 q 一个塌缩算符，同时包含两个基态 F 通道（Born–Markov 形式，无 secular 近似），按跃迁频率保留 ω³ 因子。',
+  '自发辐射：每个光子球分量 q 一个塌缩算符，同时包含 D1、D2 两条线和两个基态 F 通道（Born–Markov 形式，无 secular 近似，按跃迁频率保留 ω³ 因子）；远失谐 Raman 散射因此保留 D1/D2 干涉。',
   '32 态以外的能级（5S 的 6–9P；5P 的 6–10S、4–9D）和 Rb+ 芯极化（Arora & Sahoo 2012：α_c = 9.1 au，5S 另加 α_vc = −0.26 au）只作为二阶静态（van Vleck）光移进入 H0，并检查耦合/失谐比 ≤ 0.01、失谐 ≥ 10 GHz；不含这些能级的跨载频项和散射、更高价态尾项与连续谱。',
   '基矢：H0 静态部分（磁场 + 上述 32 态外静态光移）的本征基，初态与返回布居都在此基中；态标签 F、mF 指与之重叠最大的磁场本征态。D 线光学缀饰不进入基矢，而由动力学显式给出。',
   initialText(initialState),
