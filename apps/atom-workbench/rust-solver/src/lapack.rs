@@ -120,6 +120,13 @@ type ZGeEs = unsafe extern "C" fn(
     *const i32, *mut Complex64, *const i32, *mut i32, *mut Complex64,
     *mut Complex64, *const i32, *mut Complex64, *const i32, *mut f64, *mut i32, *mut i32,
 );
+type ZGeEv = unsafe extern "C" fn(
+    *const c_char,*const c_char,*const i32,*mut Complex64,*const i32,*mut Complex64,
+    *mut Complex64,*const i32,*mut Complex64,*const i32,*mut Complex64,*const i32,*mut f64,*mut i32,
+);
+#[cfg(feature="static-numerics")]
+extern "C"{fn zgeev_(jobvl:*const c_char,jobvr:*const c_char,n:*const i32,a:*mut Complex64,lda:*const i32,
+    w:*mut Complex64,vl:*mut Complex64,ldvl:*const i32,vr:*mut Complex64,ldvr:*const i32,work:*mut Complex64,lwork:*const i32,rwork:*mut f64,info:*mut i32);}
 type ZTrSyl = unsafe extern "C" fn(
     *const c_char, *const c_char, *const i32, *const i32, *const i32,
     *const Complex64, *const i32, *const Complex64, *const i32,
@@ -140,6 +147,7 @@ extern "system" {
 pub struct Lapack {
     _library: *mut c_void,
     blas_threads: usize,
+    set_threads: SetThreads,
     geev: GeEv,
     gesv: GeSv,
     getrf: GetRf,
@@ -171,15 +179,31 @@ pub struct SylvesterKernel<'a> {
 }
 impl SylvesterKernel<'_> {
     pub fn complex_sylvester(&self, a: &[Complex64], b: &[Complex64], rhs: &[Complex64], n: usize) -> Result<Vec<Complex64>, String> {
-        if n == 0 || n > i32::MAX as usize || a.len() != n*n || b.len() != n*n || rhs.len() != n*n {
+        self.complex_sylvester_rect(a,b,rhs,n,n)
+    }
+    /// Rectangular A X - X B^H = rhs. The same mature ztrsyl kernel and scale
+    /// handling as the square entry; no padding or second decomposition.
+    pub fn complex_sylvester_rect(&self,a:&[Complex64],b:&[Complex64],rhs:&[Complex64],m:usize,n:usize)->Result<Vec<Complex64>,String>{
+        self.complex_sylvester_rect_side(a,b,rhs,m,n,false)
+    }
+    /// Rectangular A^H X - X B = rhs, using the SAME upper-triangular A/B.
+    /// This is the HS adjoint of the forward Sylvester operator; do not also
+    /// conjugate a frequency already contained in A before calling it.
+    pub fn complex_sylvester_rect_adjoint(&self,a:&[Complex64],b:&[Complex64],rhs:&[Complex64],m:usize,n:usize)->Result<Vec<Complex64>,String>{
+        self.complex_sylvester_rect_side(a,b,rhs,m,n,true)
+    }
+    fn complex_sylvester_rect_side(&self,a:&[Complex64],b:&[Complex64],rhs:&[Complex64],m:usize,n:usize,adjoint:bool)->Result<Vec<Complex64>,String>{
+        if m == 0 || n == 0 || m > i32::MAX as usize || n > i32::MAX as usize || a.len() != m*m || b.len() != n*n || rhs.len() != m*n {
             return Err("Invalid complex Sylvester dimensions".into());
         }
+        let mi = m as i32;
         let ni = n as i32;
         let mut x = rhs.to_vec();
         let mut scale = 1.;
         let mut info = 0;
-        unsafe { (self.ztrsyl)(&(b'N' as c_char), &(b'C' as c_char), &-1,
-            &ni, &ni, a.as_ptr(), &ni, b.as_ptr(), &ni, x.as_mut_ptr(), &ni, &mut scale, &mut info); }
+        let ta=(if adjoint{b'C'}else{b'N'}) as c_char;let tb=(if adjoint{b'N'}else{b'C'}) as c_char;
+        unsafe { (self.ztrsyl)(&ta, &tb, &-1,
+            &mi, &ni, a.as_ptr(), &mi, b.as_ptr(), &ni, x.as_mut_ptr(), &mi, &mut scale, &mut info); }
         if info != 0 || !scale.is_finite() || scale <= 0. {
             return Err(format!("LAPACK ztrsyl unresolved: info={info}, scale={scale}"));
         }
@@ -251,16 +275,36 @@ impl SylvesterKernel<'_> {
     }
 }
 impl Lapack {
+    /// Load-time preference for this owner, not a query of OpenBLAS's shared
+    /// process setting. Another request-local owner may temporarily change it.
     pub fn configured_blas_threads(&self) -> usize { self.blas_threads }
+    fn checked_thread_count(threads:usize)->Result<i32,String>{
+        if !(1..=32).contains(&threads){return Err("Explicit OpenBLAS thread count must be in1..32".into());}Ok(threads as i32)
+    }
+    /// Change the process setting through THIS loaded library's same entry.
+    /// Call only between numerical operations, not concurrently with BLAS work.
+    /// This intentionally leaves the owner's load-time preference unchanged.
+    pub fn set_process_blas_threads(&self,threads:usize)->Result<(),String>{
+        let threads=Self::checked_thread_count(threads)?;unsafe{(self.set_threads)(threads);}Ok(())
+    }
+    pub fn restore_configured_threads(&self)->Result<(),String>{self.set_process_blas_threads(self.blas_threads)}
     pub fn sylvester_kernel(&self) -> SylvesterKernel<'_> {
         SylvesterKernel { zgemm:self.zgemm, ztrsyl:self.ztrsyl, zgetrs:self.zgetrs,
             _owner:std::marker::PhantomData }
     }
 
-    #[cfg(feature="static-numerics")]
-    pub fn load()->Result<Self,String>{static_api::load()}
-    #[cfg(not(feature="static-numerics"))]
     pub fn load() -> Result<Self, String> {
+        // Preserve the legacy environment/default/clamping semantics exactly.
+        let threads=std::env::var("ATOM_BLAS_THREADS").ok().and_then(|s|s.parse::<i32>().ok()).unwrap_or(1).clamp(1,32);
+        Self::load_with_threads(threads as usize)
+    }
+    #[cfg(feature="static-numerics")]
+    pub fn load_with_threads(threads:usize)->Result<Self,String>{
+        Self::checked_thread_count(threads)?;static_api::load(threads)
+    }
+    #[cfg(not(feature="static-numerics"))]
+    pub fn load_with_threads(threads:usize)->Result<Self,String>{
+        let threads=Self::checked_thread_count(threads)?;
         let path = std::env::var_os("ATOM_OPENBLAS_DLL")
             .map(PathBuf::from)
             .or_else(|| {
@@ -293,15 +337,11 @@ impl Lapack {
         }
         unsafe {
             let set_threads: SetThreads = symbol(library, b"scipy_openblas_set_num_threads\0")?;
-            let threads = std::env::var("ATOM_BLAS_THREADS")
-                .ok()
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(1)
-                .clamp(1, 32);
             set_threads(threads);
             Ok(Self {
                 _library: library,
                 blas_threads: threads as usize,
+                set_threads,
                 geev: symbol(library, b"scipy_dgeev_\0")?,
                 gesv: symbol(library, b"scipy_dgesv_\0")?,
                 getrf: symbol(library, b"scipy_dgetrf_\0")?,
@@ -348,6 +388,33 @@ impl Lapack {
             real_work.as_mut_ptr(), bool_work.as_mut_ptr(), &mut info); }
         if info != 0 { return Err(format!("LAPACK zgees failed: {info}")); }
         Ok((t, q))
+    }
+    /// General complex right eigenvectors, COLUMN-MAJOR. Optional research
+    /// callers must validate conditioning/backward error; this never replaces
+    /// the mature Schur API. Resolve the extra symbol only when requested.
+    pub fn complex_eigen_right(&self,a:&[Complex64],n:usize)->Result<(Vec<Complex64>,Vec<Complex64>),String>{
+        if n==0||n>i32::MAX as usize/2||n.checked_mul(n)!=Some(a.len())||a.iter().any(|z|!z.re.is_finite()||!z.im.is_finite()){
+            return Err("Invalid general complex eigensystem input".into());
+        }
+        #[cfg(feature="static-numerics")]
+        let function:ZGeEv=zgeev_;
+        #[cfg(not(feature="static-numerics"))]
+        let function:ZGeEv=unsafe{
+            let address=GetProcAddress(self._library,b"scipy_zgeev_\0".as_ptr().cast());
+            if address.is_null(){return Err("Optional complex eigenframe requires LAPACK scipy_zgeev_".into());}
+            std::mem::transmute_copy(&address)
+        };
+        let ni=n as i32;let no=b'N' as c_char;let yes=b'V' as c_char;let mut input=a.to_vec();
+        let mut eigen=vec![Complex64::default();n];let mut right=vec![Complex64::default();n*n];let mut left=[Complex64::default()];
+        let mut real_work=vec![0.;2*n];let mut query=[Complex64::default()];let mut info=0;
+        unsafe{function(&no,&yes,&ni,input.as_mut_ptr(),&ni,eigen.as_mut_ptr(),left.as_mut_ptr(),&1,right.as_mut_ptr(),&ni,
+            query.as_mut_ptr(),&-1,real_work.as_mut_ptr(),&mut info);}
+        if info!=0||!query[0].re.is_finite()||query[0].re>i32::MAX as f64{return Err(format!("LAPACK zgeev workspace query failed: {info}"));}
+        let length=(query[0].re as i32).max(2*ni);let mut work=vec![Complex64::default();length as usize];input.copy_from_slice(a);
+        unsafe{function(&no,&yes,&ni,input.as_mut_ptr(),&ni,eigen.as_mut_ptr(),left.as_mut_ptr(),&1,right.as_mut_ptr(),&ni,
+            work.as_mut_ptr(),&length,real_work.as_mut_ptr(),&mut info);}
+        if info!=0||eigen.iter().chain(&right).any(|z|!z.re.is_finite()||!z.im.is_finite()){return Err(format!("LAPACK zgeev unresolved: {info}"));}
+        Ok((eigen,right))
     }
     /// Solve A X - X B^H = rhs for upper-triangular A and B.
     /// LAPACK's overflow scale is undone, never silently left in the solution.

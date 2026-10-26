@@ -47,6 +47,8 @@ mod structured_floquet;
 mod sylvester_recycling;
 mod stationary_sylvester;
 mod unitary_monodromy;
+#[cfg(feature="population-core")]
+mod population_core_adapter;
 use lapack::Lapack;
 const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/2";
 const ATOMIC_MODEL_SCHEMA: &str = "rb87-dipole/2";
@@ -151,6 +153,9 @@ struct Options {
     duration_us: f64,
     #[serde(default = "default_samples")]
     samples: usize,
+    /// Absolute population error on the probability (0..1) scale.
+    #[serde(default = "default_population_tolerance")]
+    population_tolerance: f64,
     #[serde(default = "default_true")]
     include_asymptotic: bool,
     #[serde(default)]
@@ -164,6 +169,9 @@ fn default_duration() -> f64 {
 fn default_samples() -> usize {
     200
 }
+fn default_population_tolerance() -> f64 {
+    0.005
+}
 fn default_true() -> bool {
     true
 }
@@ -172,9 +180,38 @@ impl Default for Options {
         Self {
             duration_us: 5.,
             samples: default_samples(),
+            population_tolerance: default_population_tolerance(),
             include_asymptotic: true,
             steady_only: false,
             return_density: false,
+        }
+    }
+}
+impl Options {
+    fn validate_population_tolerance(&self) -> Result<(), String> {
+        if !self.population_tolerance.is_finite()
+            || self.population_tolerance <= 0.
+            || self.population_tolerance > 0.02
+        {
+            return Err("populationTolerance must be finite and in (0,0.02] on the probability scale".into());
+        }
+        Ok(())
+    }
+}
+#[cfg(test)]
+mod population_option_tests {
+    use super::*;
+    #[test]
+    fn population_options_keep_legacy_default_and_requested_probability_scale() {
+        let legacy:Options=serde_json::from_value(json!({})).unwrap();
+        assert_eq!(legacy.population_tolerance,0.005);
+        for value in [0.001,0.005,0.02,0.003] {
+            let parsed:Options=serde_json::from_value(json!({"populationTolerance":value})).unwrap();
+            assert_eq!(parsed.population_tolerance,value);
+            assert!(parsed.validate_population_tolerance().is_ok());
+        }
+        for value in [0.,-0.001,0.020001,f64::INFINITY,f64::NAN] {
+            assert!(Options{population_tolerance:value,..Default::default()}.validate_population_tolerance().is_err());
         }
     }
 }
@@ -990,6 +1027,7 @@ impl Solver {
     }
     fn solve(&mut self, model: &Model, options: &Options) -> Result<Value, String> {
         let started = Instant::now();
+        options.validate_population_tolerance()?;
         if !options.duration_us.is_finite()
             || options.duration_us <= 0.
         {
@@ -1750,6 +1788,7 @@ fn fixed_etd_result(lap:&Lapack,model:&Model,options:&Options)->Result<Value,Str
 }
 
 fn full_model_solve(solver:&mut Solver,input:&Model,options:&Options,declared_schema:bool)->Result<Value,String>{
+    options.validate_population_tolerance()?;
     let declared_basis=if declared_schema{
         if input.frequency_coordinates.is_none(){return Err("rb87-full/2 requires authoritative frequencyCoordinates metadata".into());}
         Some(harmonics::model_frequency_basis(input,16)?)
@@ -1763,6 +1802,14 @@ fn full_model_solve(solver:&mut Solver,input:&Model,options:&Options,declared_sc
     // newer metadata field is present. Only /2 declares those phase relations.
     let legacy=if !declared_schema&&input.frequency_coordinates.is_some(){let mut model=input.clone();model.frequency_coordinates=None;Some(model)}else{None};
     let model=legacy.as_ref().unwrap_or(input);
+    #[cfg(feature="population-core")]
+    if population_core_adapter::supports(model,options,declared_schema)
+        && !full_period_requested(model,options)
+        && std::env::var_os("ATOM_FIXED_ETD").is_none()
+        && std::env::var_os("ATOM_MONODROMY").is_none()
+    {
+        return population_core_adapter::solve(solver,model,options);
+    }
     let mut result=if !model.drives.is_empty(){
         if !options.steady_only&&(std::env::var_os("ATOM_FIXED_ETD").is_some()
             ||(std::env::var_os("ATOM_MONODROMY").is_some()&&monodromy::supports(model))||full_period_requested(model,options)){
@@ -1784,7 +1831,8 @@ fn full_model_solve(solver:&mut Solver,input:&Model,options:&Options,declared_sc
 #[cfg(feature="static-numerics")]
 pub fn embedded_source_manifest()->&'static str{include_str!(env!("ATOM_NUMERIC_MANIFEST"))}
 
-/// Shared JSONL entry used by the ordinary solver and the same-EXE worker.
+/// Shared JSONL entry used by the ordinary solver executable and the native
+/// desktop executable's isolated --worker process. Numerical code is shared.
 pub fn main() {
     let mut solver = match Solver::new() {
         Ok(s) => s,
@@ -1813,6 +1861,8 @@ pub fn main() {
                 } else {
                     let result = if request.op.is_some() {
                         Err("Unknown native operation".into())
+                    } else if let Err(error) = request.options.validate_population_tolerance() {
+                        Err(error)
                     } else if let Some(model) = request.model.as_ref() {
                         // Each protocol request performs a fresh numerical calculation.
                         solver.cache.clear();

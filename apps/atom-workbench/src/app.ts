@@ -18,7 +18,7 @@ import {dynamicsCacheKey} from './dynamics-cache-key.js';
 import {CurrentDynamicsResults} from './current-dynamics-results.js';
 import { referenceEnergyMHz } from './reference-energy.js';
 import {spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
-import { defaultDynamics, defaultScene, DEFAULT_TWEEZER_WAVELENGTH_NM } from './types.js';
+import { defaultDynamics, defaultScene, DEFAULT_TWEEZER_WAVELENGTH_NM,MAX_POPULATION_TOLERANCE,resolvePopulationTolerance } from './types.js';
 import type { Analysis, AxisAngles, DynamicsSettings, DetuningUnit, Laser, Level, MagneticField, Scene, SpectralLine, Transition } from './types.js';
 import type { DynamicsResult } from './solver-types.js';
 import { DynamicsClient, type SolverFailureRecord } from './solver-client.js';
@@ -92,7 +92,7 @@ function stateHTML(id:string):string {const l=getLevel(id);return l?`<span class
 function absolute(id:string):number|undefined {const l=getLevel(id);if(l)return absoluteEnergyMHz(l);const r=scene.references?.find(r=>r.id===id);return r?referenceEnergyMHz(r,allLevels()):undefined;}
 function activeLaser(_line?:SpectralLine):Laser|undefined {return selection.kind==='laser'?scene.lasers.find(l=>l.id===selection.id):undefined;}
 function referenceStateId(laser=activeLaser()):string{return laserReferenceStateId(scene,laser);}
-function dynamics():DynamicsSettings{return scene.dynamics??(scene.dynamics=defaultDynamics());}
+function dynamics():DynamicsSettings{const d=scene.dynamics??(scene.dynamics=defaultDynamics());d.populationTolerance=resolvePopulationTolerance(d.populationTolerance);return d;}
 function saveSceneNow():void{clearTimeout(saveTimer);try{if(unreadableScene!==null){localStorage.setItem(`${STORAGE}-unreadable`,unreadableScene);unreadableScene=null;}localStorage.setItem(STORAGE,JSON.stringify(scene));localStorage.setItem(`${STORAGE}-selected-states`,JSON.stringify(selectedStates));localStorage.setItem(`${STORAGE}-comparison-source`,comparisonSource??'');saveState='saved';saveFailure='';}catch(error){saveState='failed';saveFailure=error instanceof Error?error.message:String(error);}refreshStatus();}
 function persist():void{saveState='pending';clearTimeout(saveTimer);saveTimer=window.setTimeout(saveSceneNow,200);}
 function refreshStatus():void{setText('status-text',saveState==='failed'?'本地保存失败，请导出场景':loadFailure?'原本地场景无法载入 · 可下载原文件':currentSolverError()?'布居计算失败':currentSolverBusy()?(solverQueued?'布居待计算':'布居计算中'):saveState==='pending'?'正在保存…':'场景已保存');$('status-text').title=saveFailure||loadFailure;root.querySelector('.live-dot')?.classList.toggle('save-failed',saveState==='failed'||Boolean(loadFailure));}
@@ -364,6 +364,7 @@ function renderDynamicsControls(a:Analysis):void{
   selectControl(config,'初态',d.initialStateId,states.map(l=>[l.id,stateText(l)]),id=>setInitialState(id));
   monitorModeSegments.set(parent,segmentedControl(config,'显示态',d.monitorMode??'auto',[['auto','初末各 3 态'],['manual','手动选择']],value=>{d.monitorMode=value as 'auto'|'manual';if(value==='auto')d.monitoredGroupIds=[];else parent.querySelector<HTMLDetailsElement>('.monitor-controls')!.open=true;update();}));
   const duration=form('duration-control');parent.append(duration);numeric(duration,'时长','duration',durationValue(d),Number.MIN_VALUE,Number.MAX_VALUE,.02,durationUnit(d),n=>setDurationValue(d,n),{max:8},{choices:DURATION_UNITS,change:unit=>setDurationUnit(d,unit as DurationUnit)});numeric(duration,'data_points','data-points',d.samples,2,2001,1,'',n=>{if(!Number.isInteger(n))throw new Error('数据点数必须为整数');d.samples=n;},{max:4});
+  numeric(duration,'布居误差目标','population-tolerance',d.populationTolerance*100,Number.MIN_VALUE,MAX_POPULATION_TOLERANCE*100,.1,'%',n=>{d.populationTolerance=resolvePopulationTolerance(n/100);});
   const actions=document.createElement('div');actions.className='dynamics-actions';actions.innerHTML='<button id="run-dynamics" class="button button-primary">计算</button>';parent.append(actions);$('run-dynamics').onclick=()=>{requestSolve(true);};
   const monitors=document.createElement('details');monitors.className='monitor-controls';monitors.open=monitorsWereOpen;monitors.innerHTML=`<summary>观察曲线 <span>${populationDisplayIds(d).length} 条</span></summary><div class="monitor-actions"><button class="button quiet" id="monitor-all" ${d.monitoredStateIds.length===states.length?'disabled':''}>全部 m_F</button><button class="button quiet" id="monitor-none" ${populationDisplayIds(d).length===0?'disabled':''}>清空</button></div><div class="monitor-tree"></div>`;parent.append(monitors);
   $('monitor-all').onclick=()=>{d.monitorMode='manual';d.monitoredStateIds=states.map(state=>state.id);update();};$('monitor-none').onclick=()=>{d.monitorMode='manual';d.monitoredStateIds=[];d.monitoredGroupIds=[];update();};

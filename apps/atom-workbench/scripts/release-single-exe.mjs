@@ -8,12 +8,16 @@ import {createHash} from 'node:crypto';
 import {verifyUiSourceManifest} from './ui-source.mjs';
 import {prepareNativeDependencies} from './prepare-native-deps.mjs';
 import {powershellExecutable} from './build-tools.mjs';
+import {collectNumericSourceInputs} from './numeric-source-manifest.mjs';
 const app=resolve(dirname(fileURLToPath(import.meta.url)),'..'),arg=name=>{const i=process.argv.indexOf(name);return i<0?undefined:process.argv[i+1];};
 const stamp=new Date().toISOString().replace(/[-:.TZ]/g,''),output=resolve(arg('--out')??join(app,'../../atom_workbench.exe'));
 const evidence=resolve(arg('--evidence')??join(app,'artifacts/single-exe-release-'+stamp));await mkdir(evidence,{recursive:true});
 const run=(program,args)=>execFileSync(program,args,{cwd:app,stdio:'inherit',windowsHide:true});
 const node=script=>run(process.execPath,[join(app,'scripts',script)]);
 const powershell=powershellExecutable(),psArgs=['-NoProfile','-ExecutionPolicy','Bypass'];
+// Validate the same canonical numeric input policy used by build.rs/packer
+// before paying for any build. The packer verifies the compiled hashes later.
+collectNumericSourceInputs(app);
 // This is the sole fresh frontend build. The lower-level packer verifies,
 // but never asks the operator to manually rebuild a second UI snapshot.
 node('build.mjs');node('build-desktop-native-ui.mjs');verifyUiSourceManifest(join(app,'dist'));

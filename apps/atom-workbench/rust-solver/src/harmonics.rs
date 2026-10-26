@@ -442,6 +442,24 @@ pub fn model_drive_frequency_parts(model:&crate::Model)->Result<Vec<(f64,f64)>,S
     Ok(declared.drive_indices.iter().map(|index|scaled_parts(dot_parts(index,source),unit)).collect())
 }
 
+/// Phase rows in the ORIGINAL declared axes, with their authoritative unit
+/// conversion. State gauges may contain zero or negative integer entries.
+pub fn model_phase_frequency_parts(model:&crate::Model,rows:&[Vec<i32>])->Result<Vec<(f64,f64)>,String>{
+    model_frequency_basis(model,16)?;
+    let legacy:Vec<_>=model.drives.iter().map(|drive|drive.omega).collect();
+    let(source,unit)=if let Some(declared)=&model.frequency_coordinates{
+        declared.frequencies_mhz.as_ref().map(|values|(values.as_slice(),std::f64::consts::TAU))
+            .unwrap_or((declared.frequencies.as_slice(),1.))
+    }else{(legacy.as_slice(),1.)};
+    if source.iter().any(|value|!value.is_finite()||*value<=0.)||rows.iter().any(|row|row.len()!=source.len()){
+        return Err("Numerical phase rows do not match the finite original source axes".into());
+    }
+    rows.iter().map(|row|{
+        let parts=scaled_parts(dot_parts(row,source),unit);
+        if !parts.0.is_finite()||!parts.1.is_finite(){Err("Numerical phase frequency overflow".into())}else{Ok(parts)}
+    }).collect()
+}
+
 #[cfg(test)]
 mod declared_coordinate_tests{
     use super::*;

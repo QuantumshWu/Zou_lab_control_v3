@@ -1,0 +1,23 @@
+{
+  "schema": "atom-numeric-source-inputs/1",
+  "trees": [
+    { "path": "rust-solver/src", "extensions": ["rs"], "required": true },
+    { "path": "rust-solver/population-core/src", "extensions": ["rs"], "required": false }
+  ],
+  "files": [
+    { "path": "native/numeric-source-inputs.json", "required": true },
+    { "path": "native/dependencies.lock.json", "required": true },
+    { "path": "scripts/numeric-source-manifest.mjs", "required": true },
+    { "path": "rust-solver/Cargo.toml", "required": true },
+    { "path": "rust-solver/Cargo.lock", "required": true },
+    { "path": "rust-solver/build.rs", "required": false },
+    { "path": "rust-solver/population-core/Cargo.toml", "required": false },
+    { "path": "rust-solver/population-core/Cargo.lock", "required": false },
+    { "path": "rust-solver/population-core/build.rs", "required": false },
+    { "path": "desktop-native/Cargo.toml", "required": true },
+    { "path": "desktop-native/Cargo.lock", "required": true },
+    { "path": "desktop-native/build.rs", "required": true },
+    { "path": "desktop-native/solver/Cargo.toml", "required": true },
+    { "path": "desktop-native/solver/build.rs", "required": true }
+  ]
+}

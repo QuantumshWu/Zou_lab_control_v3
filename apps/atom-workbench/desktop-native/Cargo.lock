@@ -44,11 +44,19 @@ dependencies = [
 name = "atom-lindblad-embedded"
 version = "0.1.0"
 dependencies = [
+ "atom-population-core",
  "faer",
  "rayon",
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "atom-population-core"
+version = "0.1.0"
+dependencies = [
+ "rayon",
 ]
 
 [[package]]

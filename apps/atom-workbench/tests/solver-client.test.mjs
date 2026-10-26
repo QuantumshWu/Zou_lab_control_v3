@@ -74,6 +74,21 @@ function transport(){const calls=[];return {calls,fetch:async(url,init)=>new Pro
 const reply=(call,data)=>call.resolve(new Response(JSON.stringify({...data,request:call.body.request}),{status:200,headers:{'Content-Type':'application/json'}}));
 async function waitCalls(mock,count){for(let i=0;i<100&&mock.calls.length<count;i++)await pause(2);assert.equal(mock.calls.length,count);}
 
+test('population tolerance POST preserves custom units, supplies legacy default and rejects invalid input before transport',async t=>{
+ const mock=transport(),client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'population-tolerance'});t.after(()=>client.dispose());
+ for(const [index,epsilon]of [.003731,undefined].entries()){
+  const scene=scenario();if(epsilon===undefined)delete scene.dynamics.populationTolerance;else scene.dynamics.populationTolerance=epsilon;
+  const pending=client.solve(scene,scene.dynamics);await waitCalls(mock,index+1);
+  assert.equal(mock.calls[index].body.options.populationTolerance,epsilon??.005);
+  reply(mock.calls[index],fixture(scene));await pending;
+ }
+ for(const invalid of [0,-.001,.0200001,NaN,Infinity,null,'0.005']){
+  const scene=scenario();scene.dynamics.populationTolerance=invalid;
+  await assert.rejects(client.solve(scene,scene.dynamics),/populationTolerance/);
+  assert.equal(mock.calls.length,2);
+ }
+});
+
 test('malformed native payloads never become fabricated populations',()=>{
   const scene=scenario(),valid=fixture(scene);
   const changes=[

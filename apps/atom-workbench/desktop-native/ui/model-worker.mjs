@@ -1,5 +1,5 @@
 import {buildFullMasterModel} from '../../dist/js/atom-workbench/src/full-master-model.js';
-import {DEFAULT_DYNAMICS_SAMPLES} from '../../dist/js/atom-workbench/src/types.js';
+import {DEFAULT_DYNAMICS_SAMPLES,resolvePopulationTolerance} from '../../dist/js/atom-workbench/src/types.js';
 import {EFFECTIVE_MODEL_SCHEMA as ATOMIC_MODEL_SCHEMA} from '../../dist/js/atom-workbench/src/solver-protocol.js';
 import {createNativeServiceClass,parallelMeanSettings} from '../../scripts/native-service-core.mjs';
 import {IpcNativeLane} from './ipc-lane.mjs';
@@ -21,9 +21,9 @@ export function createModelWorker(post){
       token=input.request;
       if(!token||typeof token.clientId!=='string'||!/^[-\w]{1,96}$/.test(token.clientId)||!Number.isSafeInteger(token.sequence)||token.sequence<1)throw Error('Invalid request identity');
       if(input.stream!==undefined&&typeof input.stream!=='boolean')throw Error('Invalid stream option');
-      const settings={...input.scene.dynamics,...input.options};const modelStarted=performance.now();
+      const settings={...input.scene.dynamics,...input.options};const populationTolerance=resolvePopulationTolerance(settings.populationTolerance);const modelStarted=performance.now();
       const model=buildFullMasterModel(input.scene,settings),modelBuildMs=performance.now()-modelStarted;
-      const options={durationUs:settings.durationUs??5,samples:settings.samples??DEFAULT_DYNAMICS_SAMPLES,includeAsymptotic:input.options?.includeAsymptotic??true,steadyOnly:input.options?.steadyOnly??false};
+      const options={durationUs:settings.durationUs??5,samples:settings.samples??DEFAULT_DYNAMICS_SAMPLES,populationTolerance,includeAsymptotic:input.options?.includeAsymptotic??true,steadyOnly:input.options?.steadyOnly??false};
       if(typeof options.steadyOnly!=='boolean'||typeof options.includeAsymptotic!=='boolean')throw Error('Invalid solver options');
       const payload={modelSchema:model.modelSchema,radiation:model.radiation,model:{dimension:model.dimension,hReal:model.hReal,hImag:model.hImag,collapse:model.collapse,initialIndex:model.initialIndex,timeDependent:model.timeDependent,drives:model.drives,frameFrequenciesMHz:model.frameFrequenciesMHz,frequencyCoordinates:model.frequencyCoordinates,states:model.states.map(state=>state.id)},options};
       const decorate=result=>({...result,request:token,states:model.states,service:{...result.service,modelBuildMs,modelCacheHit:model.buildCacheHit},engine:'Rust master equation',assumptions:model.assumptions,decayChannels:model.decayChannels});

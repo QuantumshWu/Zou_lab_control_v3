@@ -1,7 +1,29 @@
 import {readMeanDensity} from '../dist/js/atom-workbench/src/mean-density.js';
+import {readPopulationAccuracy} from '../dist/js/atom-workbench/src/solver-types.js';
 
 const verified=new Set(['stationary','population-stationary','periodic-mean','initial-dependent-mean','nonunique-initial-dependent']);
 const finite=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0;
+function validatePopulationTrajectory(result,model){
+  const n=model.dimension,d=result.diagnostics,times=result.timesUs,rows=result.populations;
+  if(n!==32||!Array.isArray(times)||times.length<2||times[0]!==0||times.some((t,i)=>!Number.isFinite(t)||t<0||(i>0&&t<=times[i-1]))||
+    !Array.isArray(rows)||rows.length!==times.length||rows.some(row=>!Array.isArray(row)||row.length!==n||row.some(p=>!Number.isFinite(p)||p<0||p>1)||Math.abs(row.reduce((a,b)=>a+b,0)-1)>5e-6)||
+    Object.hasOwn(result,'densityReal')||Object.hasOwn(result,'densityImag')||
+    !finite(d?.traceError)||d.traceError>5e-6||!finite(d?.elapsedMs)||!finite(d?.initialStateError)||d.initialStateError>1e-10){
+    throw Error('Finite population-only result failed its explicit validation contract.');
+  }
+  readPopulationAccuracy(result.populationAccuracy,times.length);
+  let initial;
+  if(model.initialReal!=null){
+    if(!Array.isArray(model.initialReal)||model.initialReal.length!==n*n||model.initialReal.some(value=>!Number.isFinite(value)))throw Error('Invalid original initial density.');
+    initial=Array.from({length:n},(_,i)=>model.initialReal[i*n+i]);
+  }else{
+    const index=model.initialIndex??0;
+    if(!Number.isInteger(index)||index<0||index>=n)throw Error('Invalid original initial state.');
+    initial=Array.from({length:n},(_,i)=>+(i===index));
+  }
+  const error=Math.max(...rows[0].map((p,i)=>Math.abs(p-initial[i])));
+  if(error>1e-10||error>d.initialStateError+64*Number.EPSILON)throw Error('Finite population-only result has the wrong initial population.');
+}
 export function hasVerifiedFreshMean(result,model){
   if(!verified.has(result?.asymptoticStatus))return false;
   const row=result.asymptoticPopulations,d=result.diagnostics,n=model.dimension;
@@ -31,15 +53,23 @@ export function mergeFreshMean(trajectory,mean,model,{elapsedMs,meanTiming,traje
     if(Object.hasOwn(mean,key))fields[key]=structuredClone(mean[key]);
   }
   const source=mean.diagnostics??{},diagnostics={...trajectory.diagnostics};
+  const populationOnly=diagnostics.validationKind==='population';
+  if(populationOnly)validatePopulationTrajectory(trajectory,model);
   for(const key of ['asymptoticStatus','asymptoticReason','densityLimitExists','initialDependent','uniquenessScope','globalUniquenessEstablished','initialDependenceScope','meanDensityFrame']){
     if(Object.hasOwn(source,key))diagnostics[key]=structuredClone(source[key]);
   }
   for(const key of ['residual','populationResidual','harmonicOrder','harmonicConvergenceError','boundaryForcingMax','frameConvergenceError','frameUnitarityBound','frameSchrodingerResidual','traceError','positivityError','hermiticityError']){
     if(Object.hasOwn(source,key))diagnostics[`asymptotic${key[0].toUpperCase()}${key.slice(1)}`]=structuredClone(source[key]);
   }
-  for(const key of ['traceError','positivityError']){
-    if(!finite(diagnostics[key]))throw Error('Finite trajectory validation is missing.');
-    if(finite(source[key]))diagnostics[key]=Math.max(diagnostics[key],source[key]);
+  if(populationOnly){
+    // Mean PSD was independently checked above. The finite population output
+    // has no repaired density, and must not receive a fabricated PSD value.
+    if(finite(source.traceError))diagnostics.traceError=Math.max(diagnostics.traceError,source.traceError);
+  }else{
+    for(const key of ['traceError','positivityError']){
+      if(!finite(diagnostics[key]))throw Error('Finite trajectory validation is missing.');
+      if(finite(source[key]))diagnostics[key]=Math.max(diagnostics[key],source[key]);
+    }
   }
   diagnostics.steadyMethod=source.steadyMethod??source.method;
   diagnostics.asymptoticDiagnostics=structuredClone(source);

@@ -2,7 +2,7 @@ import type {Scene,Laser,MagneticField} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
 import {DURATION_UNITS} from './duration.js';
 import type {DurationUnit} from './types.js';
-import {defaultDynamics} from './types.js';
+import {defaultDynamics,resolvePopulationTolerance} from './types.js';
 import {analyze} from './physics.js';
 import {normalizeLaserFrequency} from './laser-frequency.js';
 import {normalizeLaserIntensity} from './laser-intensity.js';
@@ -52,7 +52,7 @@ export function validateScene(input:unknown):Scene {
     if(d.durationUnit!==undefined&&!DURATION_UNITS.includes(d.durationUnit as DurationUnit))throw new Error('时间单位无效');
     if(d.monitorMode!==undefined&&d.monitorMode!=='auto'&&d.monitorMode!=='manual')throw new Error('观察态选择模式无效');
     const groups=d.monitoredGroupIds??[];if(!Array.isArray(groups)||groups.length>POPULATION_GROUPS.length||new Set(groups).size!==groups.length||groups.some(id=>!POPULATION_GROUPS.some(g=>g.id===id)))throw new Error('F 布居分组无效');
-    next.dynamics={laserId,initialStateId,monitorMode:d.monitorMode==='manual'?'manual':'auto',monitoredGroupIds:[...groups] as string[],monitoredStateIds:[...d.monitoredStateIds] as string[],durationUs:val(d,'durationUs',Number.MIN_VALUE,Number.MAX_VALUE),...(d.durationUnit!==undefined?{durationUnit:d.durationUnit as DurationUnit}:{}),samples,...(d.quality==='verified'||d.quality==='preview'?{quality:d.quality}:{}),autoRun:d.autoRun!==false};
+    next.dynamics={laserId,initialStateId,monitorMode:d.monitorMode==='manual'?'manual':'auto',monitoredGroupIds:[...groups] as string[],monitoredStateIds:[...d.monitoredStateIds] as string[],durationUs:val(d,'durationUs',Number.MIN_VALUE,Number.MAX_VALUE),...(d.durationUnit!==undefined?{durationUnit:d.durationUnit as DurationUnit}:{}),samples,populationTolerance:resolvePopulationTolerance(d.populationTolerance),...(d.quality==='verified'||d.quality==='preview'?{quality:d.quality}:{}),autoRun:d.autoRun!==false};
   }
   const initial=[...validatedAnalysis.ground,...validatedAnalysis.D1,...validatedAnalysis.D2].find(l=>l.id===next.dynamics?.initialStateId);if(initial?.manifold==='ground'){next.initialF=initial.F as 1|2;next.initialM=initial.m;}
   return next;

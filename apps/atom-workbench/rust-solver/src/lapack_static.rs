@@ -23,9 +23,9 @@ unsafe extern "C" fn atom_static_dgetrs_(a0: *const c_char, a1: *const i32, a2: 
 unsafe extern "C" fn atom_static_zgetrf_(a0: *const i32, a1: *const i32, a2: *mut Complex64, a3: *const i32, a4: *mut i32, a5: *mut i32) { let _ = zgetrf_(a0, a1, a2, a3, a4, a5); }
 unsafe extern "C" fn atom_static_zgetrs_(a0: *const c_char, a1: *const i32, a2: *const i32, a3: *const Complex64, a4: *const i32, a5: *const i32, a6: *mut Complex64, a7: *const i32, a8: *mut i32) { let _ = zgetrs_(a0, a1, a2, a3, a4, a5, a6, a7, a8); }
 extern "C" {fn gotoblas_init();fn openblas_set_num_threads(threads:i32);}
-pub(super) fn load()->Result<Lapack,String>{
- let threads=std::env::var("ATOM_BLAS_THREADS").ok().and_then(|s|s.parse::<i32>().ok()).unwrap_or(1).clamp(1,32);
+pub(super) fn load(threads:usize)->Result<Lapack,String>{
+ let threads=Lapack::checked_thread_count(threads)?;
  unsafe{gotoblas_init();openblas_set_num_threads(threads);}
- Ok(Lapack{_library:std::ptr::null_mut(),blas_threads:threads as usize,
+ Ok(Lapack{_library:std::ptr::null_mut(),blas_threads:threads as usize,set_threads:openblas_set_num_threads,
  geev:dgeev_,gesv:atom_static_dgesv_,getrf:atom_static_dgetrf_,getrs:atom_static_dgetrs_,gecon:dgecon_,syev:dsyev_,heev:zheev_,gemm:dgemm_,zgemm:zgemm_,gees:dgees_,laqtr:dlaqtr_,zgees:zgees_,ztrsyl:ztrsyl_,zgetrf:atom_static_zgetrf_,zgetrs:atom_static_zgetrs_,})
 }

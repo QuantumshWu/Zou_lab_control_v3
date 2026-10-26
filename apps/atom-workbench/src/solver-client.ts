@@ -1,5 +1,7 @@
-import type {DynamicsResult,SteadyStatus} from './solver-types.js';
+import type {DynamicsResult,SteadyStatus,PopulationAccuracy} from './solver-types.js';
+import {readPopulationAccuracy} from './solver-types.js';
 import type {DynamicsSettings,Scene,Level} from './types.js';
+import {resolvePopulationTolerance} from './types.js';
 import {laserIntensityMWcm2} from './physics.js';
 import {EFFECTIVE_MODEL_SCHEMA as ATOMIC_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from './solver-protocol.js';
 import {readMeanDensity} from './mean-density.js';
@@ -39,6 +41,7 @@ export class DynamicsClient {
     try{
       const response=await this.transport(this.base+'/api/solve',{method:'POST',signal:job.controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({modelSchema:ATOMIC_MODEL_SCHEMA,stream:!!job.onProgress,request:{clientId:this.clientId,sequence:job.id},scene:job.scene,options:{
         initialStateId:job.settings.initialStateId,durationUs:job.settings.durationUs,samples:job.settings.samples,
+        populationTolerance:resolvePopulationTolerance(job.settings.populationTolerance),
         includeAsymptotic:true,steadyOnly:job.steadyOnly,
       }})}).catch(error=>{if(error instanceof TypeError)throw new RequestFailure('本机 Rust 求解服务连接暂时失败。',0,'network-error',true);throw error;});
       if(!response.ok){const detail=await response.json().catch(()=>({error:''}));evidence=detail;throw new RequestFailure(detail.error||`Local solver: ${response.status}`,response.status,detail.code??'',(response.status===502||response.status===503)&&!/invalid|incompatible|numerical/.test(detail.code??''));}
@@ -48,7 +51,8 @@ export class DynamicsClient {
       if(data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||
         !Array.isArray(data.service?.capabilities)||!data.service.capabilities.includes(ATOMIC_MODEL_SCHEMA))throw new Error('本机求解服务版本不兼容：需要 rb87-full/2 辐射模型，旧模型结果未显示。');
       if(!data.request||data.request.clientId!==this.clientId||data.request.sequence!==job.id)throw new Error('求解响应与当前请求不匹配。');
-      const result=normalizeDynamicsResult(data,job.scene);
+      const result=normalizeDynamicsResult(data,job.scene,job.settings.initialStateId);
+      this.checkAccuracyRequest(result,job);
       const expected=job.steadyOnly?1:job.settings.samples;
       if(result.timesUs.length!==expected||result.timesUs[0]!==0||(!job.steadyOnly&&Math.abs(result.timesUs.at(-1)!-job.settings.durationUs)>1e-10*Math.max(1,job.settings.durationUs)))throw new Error('求解响应的采样与请求不匹配。');
       if(!result.steady?.converged)this.recordFailure(job,new Error(result.steady?.reason??'长期布居未解析'),false,evidence);
@@ -76,7 +80,8 @@ export class DynamicsClient {
       if(this.current!==job||job.controller.signal.aborted)return;
       const data=event.data;
       if(data?.request?.clientId!==this.clientId||data.request.sequence!==job.id||data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||!data.service?.capabilities?.includes(ATOMIC_MODEL_SCHEMA))throw new Error('稳态进度与当前请求不匹配。');
-      const mean=normalizeDynamicsResult(data,job.scene);
+      const mean=normalizeDynamicsResult(data,job.scene,job.settings.initialStateId);
+      this.checkAccuracyRequest(mean,job);
       if(mean.timesUs.length!==1||mean.timesUs[0]!==0||!mean.steady.converged)throw new Error('稳态进度缺少已验证的长期布居。');
       job.onProgress?.(mean);
     };
@@ -87,6 +92,9 @@ export class DynamicsClient {
   private recordFailure(job:Job,error:unknown,willRetry:boolean,response:unknown):void{
     try{this.onFailure?.({time:new Date().toISOString(),request:{clientId:this.clientId,sequence:job.id},scene:structuredClone(job.scene),options:{...job.settings,steadyOnly:job.steadyOnly,includeAsymptotic:true},attempt:job.attempt,willRetry,error:error instanceof Error?error.message:String(error),...(error instanceof RequestFailure?{status:error.status,code:error.code}:{}),response,page:globalThis.location?.href});}catch{/* Diagnostics cannot block or replace a physics result. */}
   }
+  private checkAccuracyRequest(result:DynamicsResult,job:Job):void{
+    if(result.populationAccuracy&&result.populationAccuracy.requestedTolerance!==resolvePopulationTolerance(job.settings.populationTolerance))throw new Error('求解响应的布居误差目标与本次请求不匹配。');
+  }
   private abortCurrent(reason:string):void{
     const job=this.current;if(!job)return;this.current=null;clearTimeout(job.timer);job.controller.abort();job.reject(new DOMException(reason,'AbortError'));
   }
@@ -94,7 +102,7 @@ export class DynamicsClient {
   dispose():void{this.disposed=true;this.cancel();}
 }
 
-export function normalizeDynamicsResult(data:any,scene:Scene):DynamicsResult{
+export function normalizeDynamicsResult(data:any,scene:Scene,initialStateId=scene.dynamics?.initialStateId??`ground-${scene.initialF}-${scene.initialM}`):DynamicsResult{
   const invalid=(detail:string):never=>{throw new Error(`求解结果不完整或无效：${detail}；未绘制替代数据。`);};
   if(!data||typeof data!=='object'||Array.isArray(data))invalid('响应对象');
   if(data.modelSchema!==ATOMIC_MODEL_SCHEMA||data.protocol!==NATIVE_PROTOCOL)invalid('辐射模型版本不兼容，需要 rb87-full/2');
@@ -118,9 +126,25 @@ export function normalizeDynamicsResult(data:any,scene:Scene):DynamicsResult{
   let meanDensity;
   try{meanDensity=readMeanDensity(data,states.length,data.asymptoticPopulations??[]);}catch{invalid('长期复密度矩阵');}
   const status=(data.asymptoticStatus??'not-converged') as SteadyStatus,d=data.diagnostics??{};
+  const populationOnly=d.validationKind==='population';let populationAccuracy:PopulationAccuracy|undefined;
+  if(Object.hasOwn(data,'populationAccuracy')){
+    try{populationAccuracy=readPopulationAccuracy(data.populationAccuracy,timesUs.length);}catch{invalid('布居精度元数据');}
+  }
   const warnings=data.warnings??data.assumptions??[];
   if(typeof status!=='string'||!Array.isArray(warnings)||warnings.some((warning:unknown)=>typeof warning!=='string'))invalid('结果说明');
-  if(!Number.isFinite(d.traceError)||d.traceError<0||d.traceError>5e-6||!Number.isFinite(d.positivityError)||d.positivityError<0||d.positivityError>1e-4||!Number.isFinite(d.elapsedMs)||d.elapsedMs<0)invalid('数值验证信息');
+  if(populationOnly){
+    if(!populationAccuracy||timesUs.length<2||timesUs[0]!==0||Object.hasOwn(data,'densityReal')||Object.hasOwn(data,'densityImag'))invalid('population-only 结果契约');
+    if(!Number.isFinite(d.traceError)||d.traceError<0||d.traceError>5e-6||!Number.isFinite(d.elapsedMs)||d.elapsedMs<0||!Number.isFinite(d.initialStateError)||d.initialStateError<0||d.initialStateError>1e-10)invalid('布居数值验证信息');
+    if(data.populations.some((row:number[])=>row.some(p=>p<0||p>1)))invalid('投影后的布居范围');
+    const initialIndex=states.findIndex(state=>state.id===initialStateId);
+    if(initialIndex<0)invalid('请求初态');
+    const actualInitialError=Math.max(...data.populations[0].map((p:number,i:number)=>Math.abs(p-(i===initialIndex?1:0))));
+    if(actualInitialError>1e-10||actualInitialError>d.initialStateError+64*Number.EPSILON)invalid('布居初态');
+    // A finite population qualification cannot validate the separate mean.
+    if(steadyPop&&(!Number.isFinite(d.asymptoticTraceError)||d.asymptoticTraceError<0||d.asymptoticTraceError>5e-6||!Number.isFinite(d.asymptoticPositivityError)||d.asymptoticPositivityError<0||d.asymptoticPositivityError>1e-4))invalid('长期密度数值验证信息');
+  }else{
+    if(!Number.isFinite(d.traceError)||d.traceError<0||d.traceError>5e-6||!Number.isFinite(d.positivityError)||d.positivityError<0||d.positivityError>1e-4||!Number.isFinite(d.elapsedMs)||d.elapsedMs<0)invalid('数值验证信息');
+  }
   for(const key of ['constructionMs','buildMs','spectralMs','propagateMs','populationResidual','residual','asymptoticPopulationResidual','asymptoticResidual','harmonicConvergenceError','asymptoticHarmonicConvergenceError',
     'integrationRefinementError','frameConvergenceError','asymptoticFrameConvergenceError','frameUnitarityBound','asymptoticFrameUnitarityBound','frameSchrodingerResidual','asymptoticFrameSchrodingerResidual'])if(d[key]!=null&&(!Number.isFinite(d[key])||d[key]<0))invalid('数值诊断');
   const convergenceErrors=[d.integrationRefinementError,d.harmonicConvergenceError,d.asymptoticHarmonicConvergenceError,d.frameConvergenceError,d.asymptoticFrameConvergenceError].filter((value:unknown)=>typeof value==='number');
@@ -130,6 +154,7 @@ export function normalizeDynamicsResult(data:any,scene:Scene):DynamicsResult{
     line:'both',activeLaserIds:active.map(l=>l.id),
     steady:{converged:!!steadyPop&&['stationary','population-stationary','periodic-mean','initial-dependent-mean','nonunique-initial-dependent'].includes(status),status,populations:steadyPop,density:meanDensity,residual:d.asymptoticPopulationResidual??d.asymptoticResidual??d.populationResidual??d.residual??null,method:d.steadyMethod??d.method??'Rust master equation',reason:d.asymptoticReason??data.asymptoticReason,initialDependent:status==='nonunique-initial-dependent'||status==='initial-dependent-mean'},
     metrics:{buildMs:d.constructionMs??d.buildMs??0,propagateMs:d.spectralMs??d.propagateMs??d.elapsedMs??0,totalMs:d.elapsedMs??0,dimension:32,fullDimension:32,steps:0,cached:d.eigensystemCached??d.cached??false,kernel:data.engine??'Rust master equation'},
-    validation:{maxTraceError:d.traceError??0,minPopulation:Math.min(...Object.values(populations).flat()),convergenceMaxDelta:convergenceErrors.length?Math.max(...convergenceErrors):null,positivityError:d.positivityError??0},
+    validation:{maxTraceError:d.traceError??0,minPopulation:Math.min(...Object.values(populations).flat()),convergenceMaxDelta:convergenceErrors.length?Math.max(...convergenceErrors):null,...(populationOnly?{}:{positivityError:d.positivityError??0})},
+    ...(populationAccuracy?{populationAccuracy}:{}),
     warnings,method:d.method??'Rust full master equation'};
 }

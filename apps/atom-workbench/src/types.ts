@@ -73,6 +73,8 @@ export interface DynamicsSettings {
   monitorMode?:'auto'|'manual';
   monitoredGroupIds?:string[];
   durationUs: number; samples: number; autoRun: boolean;
+  /** Absolute population error target in probability units, not percent. */
+  populationTolerance: number;
   /** Display unit only; physical duration and request identity remain in μs. */
   durationUnit?:DurationUnit;
   /** @deprecated Legacy scene-file metadata only. No UI control, numerical
@@ -82,9 +84,17 @@ export interface DynamicsSettings {
 export type DurationUnit='ns'|'μs'|'ms'|'s';
 export const DEFAULT_DYNAMICS_SAMPLES=200;
 export const DEFAULT_TWEEZER_WAVELENGTH_NM=852;
+export const DEFAULT_POPULATION_TOLERANCE=.005;
+export const MAX_POPULATION_TOLERANCE=.02;
+/** Missing legacy settings use the default; supplied invalid values fail. */
+export function resolvePopulationTolerance(value:unknown):number {
+  if(value===undefined)return DEFAULT_POPULATION_TOLERANCE;
+  if(typeof value!=='number'||!Number.isFinite(value)||value<=0||value>MAX_POPULATION_TOLERANCE)throw new Error('populationTolerance 必须满足 0 < ε ≤ 0.02');
+  return value;
+}
 export function defaultDynamics(): DynamicsSettings {
   return {laserId:'probe',initialStateId:'ground-2-0',monitoredStateIds:['ground-2-0','ground-1--1','ground-1-0','ground-1-1'],
-    durationUs:20,samples:DEFAULT_DYNAMICS_SAMPLES,autoRun:true,monitorMode:'auto',monitoredGroupIds:[]};
+    durationUs:20,samples:DEFAULT_DYNAMICS_SAMPLES,populationTolerance:DEFAULT_POPULATION_TOLERANCE,autoRun:true,monitorMode:'auto',monitoredGroupIds:[]};
 }
 export interface Level {
   id: string; manifold: 'ground' | 'D1' | 'D2'; F: number; m: number;
