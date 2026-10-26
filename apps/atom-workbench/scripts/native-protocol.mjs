@@ -20,7 +20,9 @@ export function prepareNativeSolve(input){
   const populationTolerance=resolvePopulationTolerance(settings.populationTolerance);
   const started=performance.now(),model=buildFullMasterModel(input.scene,settings),modelBuildMs=performance.now()-started;
   const options={durationUs:settings.durationUs??5,samples:settings.samples??DEFAULT_DYNAMICS_SAMPLES,populationTolerance,
-    includeAsymptotic:input.options?.includeAsymptotic??true,steadyOnly:input.options?.steadyOnly??false};
+    includeAsymptotic:input.options?.includeAsymptotic??true,steadyOnly:input.options?.steadyOnly??false,
+    // The mean's observation horizon (us; null: t -> infinity), for a solver that reads it.
+    ...(input.options&&Object.hasOwn(input.options,'meanHorizonUs')?{meanHorizonUs:input.options.meanHorizonUs}:{})};
   if(typeof options.steadyOnly!=='boolean'||typeof options.includeAsymptotic!=='boolean')throw requestError('Invalid solver options','invalid-options');
   const payload={modelSchema:model.modelSchema,options,model:{dimension:model.dimension,states:model.states.map(state=>state.id),
     hReal:model.hReal,hImag:model.hImag,collapse:model.collapse,initialIndex:model.initialIndex,initialReal:model.initialReal,initialImag:model.initialImag,

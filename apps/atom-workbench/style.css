@@ -74,7 +74,26 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 .object-toggle, .remove-object { flex: none; }
 .scene-initial-shortcut { display: none; }
 .state-selector { margin-top: var(--section-gap); padding-top: var(--row-gap); border-top: var(--edge) solid var(--divider); }
-#initial-state-tree select { width: 100%; min-width: 0; }
+/* 初态: its kind, then what that kind needs (ui-design.md §3). */
+.initial-controls { display: flex; flex-direction: column; gap: var(--row-gap); min-width: 0; }
+.mean-horizon { flex: none; }
+.initial-controls > select { width: 100%; min-width: 0; }
+.initial-controls > .form { min-width: 0; --label-width: max-content; }
+/* The panel is narrow: the temperature box takes the row, not half of it. */
+.initial-controls .field-control.capped > .spin { flex: 1 1 auto; }
+.initial-controls .field-control.capped::after { content: none; }
+.solver-readouts > .horizon-note { grid-column: 1 / -1; margin: 0; color: var(--orange-dark); }
+.initial-summary { color: var(--muted-ink); overflow-wrap: anywhere; }
+.initial-note { margin: 0; }
+.initial-controls > button { align-self: flex-start; }
+/* 自定义初态: one weight per state on an F × m grid, its normalized share under it. */
+.weights-grid { display: grid; grid-template-columns: max-content repeat(7, calc(2.5 * var(--control))); gap: var(--row-gap); align-items: start; margin: var(--row-gap) 0; }
+.weights-corner, .weights-head { color: var(--muted-ink); text-align: center; }
+.weights-row { color: var(--muted-ink); white-space: nowrap; align-self: center; padding-right: var(--row-gap); }
+.weights-cell { display: flex; flex-direction: column; gap: var(--q); min-width: 0; }
+.weights-cell input { width: 100%; min-width: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.weights-fraction { min-height: 1lh; color: var(--muted-ink); font-variant-numeric: tabular-nums; text-align: right; }
+.weights-total { margin: 0; }
 
 /* The collapsed rail: each object its symbol and place (λ₁, λ₂ …), its name in the tooltip. */
 .scene-compact .scene-panel { padding-left: var(--card-inset); padding-right: var(--card-inset); }
@@ -261,6 +280,8 @@ button.legend-item.selected { background: var(--selected); border-color: var(--s
 .pair-frequency > .unit-picker { flex: none; width: calc(var(--combo-chrome) + 3em); min-width: calc(var(--combo-chrome) + 3em); }
 .pair-frequency > .frequency-base-label { margin-left: var(--section-gap); }
 .pair-frequency > select.frequency-base { flex: 0 1 auto; width: auto; min-width: 0; }
+/* The display model's small parameter, beside the light-shift switch (a hint only). */
+.mixing-warning { grid-column: 1 / -1; margin: 0; color: var(--orange-dark); }
 /* The level diagram's one line saying what its labels are (ui-design.md §1.5). */
 .levels-legend { flex: none; margin: 0; }
 

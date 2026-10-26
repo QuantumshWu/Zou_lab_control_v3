@@ -43,6 +43,9 @@ export interface SteadyResult {
   /** Conserved quantities (trace included) found by the slow generator; more
    * than one makes the mean initial-dependent (null: not reported). */
   conservedQuantities?:number|null;
+  /** The horizon T of p̄(T) the solver echoes (us; null: t → ∞). Undefined: a solver that
+   * does not echo one returns t → ∞. */
+  horizonUs?:number|null;
 }
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];

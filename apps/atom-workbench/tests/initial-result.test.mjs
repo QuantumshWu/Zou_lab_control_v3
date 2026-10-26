@@ -5,6 +5,9 @@ import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
 import {nativeResult} from './native-result.mjs';
+import {initialAnchor,initialSpec,initialSummary,setInitialSpec,startingSpec} from '../dist/js/atom-workbench/src/initial-state.js';
+import {analyze} from '../dist/js/atom-workbench/src/physics.js';
+import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 
 // A mixed initial state's first row is its diagonal, not a one-hot vector at initialStateId.
 function mixed(spec){
@@ -40,4 +43,31 @@ test('the solver\'s formatted failure reasons read in Chinese',()=>{
   assert.equal(solverText('Nonfinite population error series'),'布居误差级数出现非有限值。');
   assert.equal(solverText('Initial-dependent long-time mean did not reach the tolerance; the tolerance was not relaxed'),'依赖初态的长期平均未达到误差目标；误差目标未放宽。');
   assert.equal(solverText('an unknown sentence'),'an unknown sentence');
+});
+
+test('one initial-state description: a single state clears a mixture, a mixture keeps its anchor',()=>{
+  const scene=defaultScene(),a=analyze(scene),levels=[...a.ground,...a.D1,...a.D2];
+  setInitialSpec(scene,{kind:'unpolarized',manifold:'F1'},levels);
+  assert.deepEqual(initialSpec(scene),{kind:'unpolarized',manifold:'F1'});
+  assert.match(scene.dynamics.initialStateId,/^ground-1-/,'the anchor is a state of the mixture');
+  // A single state chosen afterwards is the initial state: no loaded mixture overrides it.
+  setInitialSpec(scene,{kind:'state',id:'ground-2-1'},levels);
+  assert.deepEqual(initialSpec(scene),{kind:'state',id:'ground-2-1'});assert.equal(scene.dynamics.initialState,undefined);
+  assert.equal(scene.initialF,2);assert.equal(scene.initialM,1);
+  assert.equal(initialAnchor({kind:'weights',weights:{'ground-2-0':1,'D2-3-0':3}},levels),'D2-3-0');
+  assert.deepEqual(startingSpec('weights',{kind:'state',id:'ground-2-1'},levels),{kind:'weights',weights:{'ground-2-1':1}});
+  assert.deepEqual(startingSpec('state',{kind:'weights',weights:{'ground-1-0':1,'ground-2-2':2}},levels),{kind:'state',id:'ground-2-2'});
+  assert.equal(initialSummary({kind:'thermal',temperatureK:2.5e-4}),'热分布 · T = 250 μK');
+  assert.equal(initialSummary({kind:'unpolarized',manifold:'ground'}),'未极化 · 全部基态');
+  assert.throws(()=>setInitialSpec(scene,{kind:'thermal',temperatureK:0},levels));
+  assert.deepEqual(initialSpec(scene),{kind:'state',id:'ground-2-1'},'a refused description leaves the old one');
+});
+
+test('a mixed initial state survives the scene file; a single one is stored as initialStateId',()=>{
+  const scene=defaultScene(),a=analyze(scene),levels=[...a.ground,...a.D1,...a.D2];
+  setInitialSpec(scene,{kind:'thermal',temperatureK:3e-4},levels);
+  assert.deepEqual(initialSpec(validateScene(JSON.parse(JSON.stringify(scene)))),{kind:'thermal',temperatureK:3e-4});
+  setInitialSpec(scene,{kind:'state',id:'ground-1-1'},levels);
+  const back=validateScene(JSON.parse(JSON.stringify(scene)));
+  assert.equal(back.dynamics.initialState,undefined);assert.equal(back.dynamics.initialStateId,'ground-1-1');
 });

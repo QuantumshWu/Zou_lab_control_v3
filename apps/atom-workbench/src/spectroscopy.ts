@@ -49,6 +49,8 @@ function amplitude(d:number[],field:Z[]):Z{return {re:accurateSum(d.map((v,q)=>v
 function centroid(manifold:Level['manifold']):number{return manifold==='ground'?0:RB87[manifold].frequencyHz/1e6;}
 
 interface Correction {matrix:Matrix;maximumMixingRatio:number}
+/** The display checks measured instead of enforced: did every gap keep its minimum? */
+type Measure={withinGap:boolean};
 const correctionCache=new Map<string,Correction>();
 type VirtualRow={indices:number[];dipoles:number[][];energyMHz:number;name:string};
 const virtualRowsCache=new Map<number,VirtualRow[]>();
@@ -71,13 +73,16 @@ function virtualRows(states:Eigenstate[],fieldG:number):VirtualRow[]{
 /** Symmetric second-order (van Vleck) Hamiltonian. Each virtual row retains all
  * represented amplitudes. The safety guard controls the expansion, not a
  * dipole/level cutoff. Resonant nonzero couplings are an explicit failure. */
-function addVirtual(matrix:Matrix,indices:number[],values:Z[],denominators:number[],minimumGap:number,label:string):number{
+function addVirtual(matrix:Matrix,indices:number[],values:Z[],denominators:number[],minimumGap:number,label:string,measure?:Measure):number{
   const magnitudes=values.map(norm),active=magnitudes.flatMap((value,i)=>value!==0?[i]:[]);let ratio2=0;
   for(const a of active){
-    const gap=Math.abs(denominators[a]!);if(!(gap>=minimumGap))throw new Error(`${label}：虚跃迁失谐小于 ${minimumGap} MHz，超出静态色散光移模型。`);
+    const gap=Math.abs(denominators[a]!);if(!(gap>=minimumGap)){if(!measure)throw new Error(`${label}：虚跃迁失谐小于 ${minimumGap} MHz，超出静态色散光移模型。`);measure.withinGap=false;if(gap===0){ratio2=Infinity;continue;}}
     ratio2+=(magnitudes[a]!/gap)**2;
   }
-  const ratio=Math.sqrt(ratio2);if(!(ratio<=.01))throw new Error(`${label}：光耦合/失谐比 ${ratio.toPrecision(3)} 超过二阶色散模型范围。`);
+  const ratio=Math.sqrt(ratio2);
+  // Measured only: the same ratio, nothing added and nothing refused.
+  if(measure)return ratio;
+  if(!(ratio<=.01))throw new Error(`${label}：光耦合/失谐比 ${ratio.toPrecision(3)} 超过二阶色散模型范围。`);
   for(let ai=0;ai<active.length;ai++)for(let bi=ai;bi<active.length;bi++){
     const a=active[ai]!,b=active[bi]!;
     const ab=mul(conj(values[a]!),values[b]!),factor=.5*(1/denominators[a]!+1/denominators[b]!),i=indices[a]!,j=indices[b]!,k=i*N+j;
@@ -91,11 +96,11 @@ function addVirtual(matrix:Matrix,indices:number[],values:Z[],denominators:numbe
  * the D-line rotating and counter-rotating terms (levels-chart display only);
  * states outside the 32-state model and the Rb+ core are always included. The
  * master model calls this with dLines=false: its D-line couplings are explicit. */
-function correction(states:Eigenstate[],analysis:Analysis,beams:Group[],dLines:boolean):Correction{
+function correction(states:Eigenstate[],analysis:Analysis,beams:Group[],dLines:boolean,measure?:Measure):Correction{
   // Cache physical inputs only: selecting another displayed state/reference
   // cannot alter the correction or retrigger the virtual-state summation.
   const key=JSON.stringify([analysis.fieldMagnitudeG,dLines,beams.map(g=>[laserCarrierOffsetMHz(g.beams[0]!,'D1'),laserCarrierOffsetMHz(g.beams[0]!,'D2'),g.field])]);
-  const cached=correctionCache.get(key);if(cached)return cached;
+  const cached=measure?undefined:correctionCache.get(key);if(cached)return cached;
   const matrix=zero(N);let maximumMixingRatio=0;
   for(const group of beams){
     const reverse=reversedField(group.field);
@@ -106,11 +111,11 @@ function correction(states:Eigenstate[],analysis:Analysis,beams:Group[],dLines:b
         const field=counter?reverse:group.field,up:Z[][]=excited.map((e,ei)=>system.ground.map((g,gi)=>{const q=e.m-g.m,d=[0,0,0];if(q===-1||q===0||q===1)d[q+1]=system.dipoles[ei*8+gi]!*RB87.D2.dipole;return amplitude(d,field);}));
         for(let e=0;e<excited.length;e++){
           const delta=system.ground.map(g=>counter?g.energyMHz-excited[e]!.energyMHz-centroid(line)-group.frequency:laserCarrierOffsetMHz(group.beams[0]!,line)+g.energyMHz-excited[e]!.energyMHz);
-          maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,[0,1,2,3,4,5,6,7],up[e]!,delta,100,`${line} / ${group.beams.map(b=>b.name).join(' + ')}`));
+          maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,[0,1,2,3,4,5,6,7],up[e]!,delta,100,`${line} / ${group.beams.map(b=>b.name).join(' + ')}`,measure));
         }
         for(let g=0;g<8;g++){
           const delta=excited.map(e=>counter?centroid(line)+e.energyMHz-system.ground[g]!.energyMHz+group.frequency:e.energyMHz-system.ground[g]!.energyMHz-laserCarrierOffsetMHz(group.beams[0]!,line));
-          maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,excited.map((_,i)=>offset+i),up.map(row=>conj(row[g]!)),delta,100,`${line} / ${group.beams.map(b=>b.name).join(' + ')}`));
+          maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,excited.map((_,i)=>offset+i),up.map(row=>conj(row[g]!)),delta,100,`${line} / ${group.beams.map(b=>b.name).join(' + ')}`,measure));
         }
       }
     }
@@ -118,7 +123,7 @@ function correction(states:Eigenstate[],analysis:Analysis,beams:Group[],dLines:b
       for(const counter of [false,true]){
         const values=row.dipoles.map(d=>amplitude(d,counter?reverse:group.field));
         const delta=row.indices.map(i=>centroid(states[i]!.manifold)+states[i]!.energyMHz-row.energyMHz+(counter?-group.frequency:group.frequency));
-        maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,row.indices,values,delta,10000,`${row.name} 高态 / ${group.beams.map(b=>b.name).join(' + ')}`));
+        maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,row.indices,values,delta,10000,`${row.name} 高态 / ${group.beams.map(b=>b.name).join(' + ')}`,measure));
       }
     }
     // Rb+ core: the scalar shift -alpha |E|^2 / 4 of every state of a manifold
@@ -126,7 +131,7 @@ function correction(states:Eigenstate[],analysis:Analysis,beams:Group[],dLines:b
     const squared=accurateSum(group.field.flatMap(q=>[q.re*q.re,q.im*q.im]));
     states.forEach((state,i)=>{matrix.real[i*N+i]!+=-CORE_POLARIZABILITY_AU[state.manifold]*POLARIZABILITY_AU*squared/(4*H*1e6);});
   }
-  const result={matrix,maximumMixingRatio};correctionCache.set(key,result);if(correctionCache.size>12)correctionCache.delete(correctionCache.keys().next().value!);return result;
+  const result={matrix,maximumMixingRatio};if(measure)return result;correctionCache.set(key,result);if(correctionCache.size>12)correctionCache.delete(correctionCache.keys().next().value!);return result;
 }
 
 
@@ -195,6 +200,15 @@ export function staticModelBackground(scene:Scene):{analysis:Analysis;levels:Lev
   return {analysis,levels:[...saved.ground,...saved.D1,...saved.D2].map(copyLevel),maximumMixingRatio:result.maximumMixingRatio,laserIds:beams.flatMap(g=>g.beams.map(b=>b.id))};
 }
 
+/** A laser's largest mixing amplitude |Ω/2Δ| in the levels chart's display model -- the
+ * ratio that model refuses above 1% when the laser's light shift is shown -- and whether
+ * each of its virtual transitions keeps that model's minimum detuning. A hint for the
+ * operator; it changes nothing. */
+export function displayMixing(scene:Scene,laserId:string):{ratio:number;withinGap:boolean}{
+  const laser=scene.lasers.find(l=>l.id===laserId);if(!laser||laserIntensityMWcm2(laser)===0)return {ratio:0,withinGap:true};
+  const analysis=analyze(scene),beams=groups({...scene,lasers:[{...laser,enabled:true}]},analysis),measure:Measure={withinGap:true};
+  return {ratio:correction(basis(analysis),analysis,beams,true,measure).maximumMixingRatio,withinGap:measure.withinGap};
+}
 export function spectroscopyAnalysis(scene:Scene,excludedLaserId?:string,includeTransitions=true):Analysis{
   const start=performance.now(),analysis=analyze(scene),states=basis(analysis),beams=groups({...scene,lasers:scene.lasers.filter(l=>l.regime==='far')},analysis,excludedLaserId);
   let result:Correction|undefined,failure='';

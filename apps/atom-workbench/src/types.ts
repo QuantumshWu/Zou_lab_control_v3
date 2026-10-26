@@ -89,6 +89,9 @@ export interface DynamicsSettings {
    * state is {kind:'state', id: initialStateId}. Scene loading folds a
    * 'state' spec into initialStateId, so this holds only mixed kinds. */
   initialState?: InitialStateSpec;
+  /** The observation horizon T of the long-time population p̄(T), in us: 1e5 (100 ms),
+   * 1e6 (1 s) or null (t → ∞). Absent reads as the 1 s default (resolveMeanHorizon). */
+  meanHorizonUs?: number|null;
   monitorMode?:'auto'|'manual';
   monitoredGroupIds?:string[];
   durationUs: number; samples: number; autoRun: boolean;
@@ -112,6 +115,11 @@ export function canonicalInitialState(spec:InitialStateSpec):InitialStateSpec {
   if(spec.kind==='weights')return {kind:'weights',weights:Object.fromEntries(Object.entries(spec.weights).sort(([a],[b])=>a<b?-1:a>b?1:0))};
   return spec.kind==='state'?{kind:'state',id:spec.id}:spec.kind==='thermal'?{kind:'thermal',temperatureK:spec.temperatureK}:{kind:'unpolarized',manifold:spec.manifold};
 }
+/** p̄(T): processes faster than T relaxed and fast oscillations averaged out; ∞ is the
+ * t → ∞ state, which slow scattering can make forget the initial state. */
+export const MEAN_HORIZONS_US:readonly (number|null)[]=[1e5,1e6,null];
+export const DEFAULT_MEAN_HORIZON_US=1e6;
+export function resolveMeanHorizon(settings?:{meanHorizonUs?:number|null}):number|null{const h=settings?.meanHorizonUs;return h===undefined?DEFAULT_MEAN_HORIZON_US:h;}
 export const DEFAULT_DYNAMICS_SAMPLES=1000;
 export const DEFAULT_TWEEZER_WAVELENGTH_NM=852;
 export const DEFAULT_POPULATION_TOLERANCE=.005;
@@ -124,7 +132,7 @@ export function resolvePopulationTolerance(value:unknown):number {
 }
 export function defaultDynamics(): DynamicsSettings {
   return {laserId:'probe',initialStateId:'ground-2-0',monitoredStateIds:['ground-2-0','ground-1--1','ground-1-0','ground-1-1'],
-    durationUs:20,samples:DEFAULT_DYNAMICS_SAMPLES,populationTolerance:DEFAULT_POPULATION_TOLERANCE,autoRun:true,monitorMode:'auto',monitoredGroupIds:[]};
+    durationUs:20,samples:DEFAULT_DYNAMICS_SAMPLES,populationTolerance:DEFAULT_POPULATION_TOLERANCE,meanHorizonUs:DEFAULT_MEAN_HORIZON_US,autoRun:true,monitorMode:'auto',monitoredGroupIds:[]};
 }
 export interface Level {
   id: string; manifold: 'ground' | 'D1' | 'D2'; F: number; m: number;

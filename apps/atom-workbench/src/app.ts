@@ -25,9 +25,10 @@ import {analyze,dipoleBetweenStates,laserIntensityMWcm2,laserDirectionAxis,setLa
 import {normalizeLaserIntensity,setLaserIntensityMode,setLaserLocalIntensity,setLaserPowerMW,setLaserWaistUm} from './laser-intensity.js';
 import {dynamicsCacheKey} from './dynamics-cache-key.js';
 import {CurrentDynamicsResults} from './current-dynamics-results.js';
-import {spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
-import {defaultDynamics,defaultScene,DEFAULT_TWEEZER_WAVELENGTH_NM,MAX_POPULATION_TOLERANCE,resolvePopulationTolerance} from './types.js';
-import type {Analysis,AxisAngles,DynamicsSettings,DetuningUnit,Laser,Level,Scene,SpectralLine,Transition} from './types.js';
+import {displayMixing,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
+import {Readout} from '../../desktop/ui/src/fluent/readout.js';
+import {defaultDynamics,defaultScene,DEFAULT_TWEEZER_WAVELENGTH_NM,MAX_POPULATION_TOLERANCE,resolveMeanHorizon,resolvePopulationTolerance} from './types.js';
+import type {Analysis,AxisAngles,DynamicsSettings,DetuningUnit,InitialStateSpec,Laser,Level,Scene,SpectralLine,Transition} from './types.js';
 import {isTimeAverage,type DynamicsResult} from './solver-types.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
 import {validateScene} from './scene-file.js';
@@ -40,11 +41,13 @@ import {POPULATION_GROUPS,recommendedPopulationStates,populationDisplayIds,withP
 import {durationUnit,durationValue,setDurationUnit,setDurationValue,durationText,timeDisplayUnit,DURATION_UNITS} from './duration.js';
 import type {DurationUnit} from './types.js';
 import {patchLevelPopulations} from './level-population-dom.js';
+import {idMappingError} from './population-basis.js';
 import {installWindowChrome} from './window-chrome.js';
-import {formatElapsed,formatNumber,labelStateIds,stateLabel,subscript,withUnit} from './format.js';
+import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,signedInteger,stateLabel,subscript,withUnit} from './format.js';
 import {solverText,steadyStatusText} from './solver-words.js';
 import {modelNotes,type ModelSection} from './model-notes.js';
 import {EXAMPLES,exampleScene} from './examples.js';
+import {INITIAL_KINDS,TEMPERATURE_K,UNPOLARIZED,initialSpec,initialSummary,naturalTemperatureUnit,setInitialSpec,startingSpec,type InitialKind,type TemperatureUnit,type UnpolarizedManifold} from './initial-state.js';
 
 installWindowChrome();
 
@@ -60,6 +63,7 @@ let saveState:'saved'|'pending'|'failed'='saved',saveFailure='',loadFailure='',u
 let comparisonSource:string|undefined;let selectedStates:string[]=[],dirty=false,saveTimer=0,renderCount=0;
 let latestAnalysis:Analysis,analysisError='',solverError='',solverBusy=false,solverQueued=false,solverRevision=0,requestedKey='',solverTimer=0,solverWallMs=0,controlsKey='',renderedPopulationKey='';
 let requestedPhysicalKey='',requestedSteadyOnly=false,stoppedKey='';
+let requestedHorizon:number|null|undefined;
 let notice:{text:string;word:StatusWord;until:number}|undefined;
 let failureRecords:SolverFailureRecord[]=[];
 try{const saved=JSON.parse(localStorage.getItem(`${STORAGE}-solver-failures`)??'[]');if(Array.isArray(saved))failureRecords=saved.slice(-5);}catch{}
@@ -67,10 +71,12 @@ function rememberSolverFailure(record:SolverFailureRecord):void{failureRecords=[
 const solver=new DynamicsClient({debounceMs:0,onFailure:rememberSolverFailure}),analysisCache=new Map<string,Analysis>();
 const treeOwners=new WeakMap<HTMLSelectElement,TreeCombo>();
 let initialTree:TreeCombo|undefined;
+let initialBody='';
 const directionCommands:{command:Command;kind:'axes'|'relative';key:string}[]=[];
 const projectedPopulationCache=new WeakMap<Analysis,WeakMap<object,Record<string,number>|null>>();
 let spectrumBuildCount=0,populationPaintCount=0;
-type SolvedRecord={result:DynamicsResult;wallMs:number};const displayedResults=new CurrentDynamicsResults<SolvedRecord>();
+/** A solve's result and the mean horizon it was asked for. */
+type SolvedRecord={result:DynamicsResult;wallMs:number;horizon:number|null};const displayedResults=new CurrentDynamicsResults<SolvedRecord>();
 const $=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T;
 const message=(error:unknown)=>error instanceof Error?error.message:String(error);
 
@@ -90,7 +96,7 @@ root.innerHTML=`<div class="workbench">
  <div class="title-row object-heading"><span class="heading">激光</span><span class="object-count" id="laser-count"></span><span class="spacer"></span><span id="add-laser-slot"></span></div>
  <div id="laser-list" class="scene-list"></div>
  <span id="initial-shortcut-slot"></span>
- <div class="state-selector"><div class="title-row object-heading"><span class="heading">初态</span></div><div id="initial-state-tree"></div></div>
+ <div class="state-selector"><div class="title-row object-heading"><span class="heading">初态</span></div><div id="initial-state-controls" class="initial-controls"></div></div>
 </aside>
 <aside class="card inspector-panel" aria-label="参数">
  <div class="title-row inspector-heading"><span class="heading" id="inspector-title"></span><span class="spacer"></span><span id="inspector-commands"></span></div>
@@ -177,6 +183,8 @@ $('inspector-commands').replaceWith(renameObject.root,closeInspector.root);
 function setText(id:string,value:string):void{const node=$(id);if(node.textContent!==value)node.textContent=value;}
 function populationPercent(p:number|undefined):string{return p===undefined?'—':populationValue(p);}
 function initialId():string{return scene.dynamics?.initialStateId??`ground-${scene.initialF}-${scene.initialM}`;}
+/** The initial state's card or curve, when it is one state. */
+function singleInitialId():string{const spec=initialSpec(scene);return spec.kind==='state'?spec.id:'';}
 function allLevels(a=latestAnalysis):Level[]{return [...a.ground,...a.D1,...a.D2];}
 function getLevel(id:string,a=latestAnalysis):Level|undefined{return allLevels(a).find(l=>l.id===id);}
 function stateText(l:Level):string{return stateLabel(l);}
@@ -194,7 +202,7 @@ let baseline:string|null=null;
 try{baseline=localStorage.getItem(`${STORAGE}-baseline`);}catch{}
 function editKey(value:Scene=scene):string{
   // The display unit, derived anchors and the automatic curve choice are not edits.
-  const d=value.dynamics,settings=d?{initialStateId:d.initialStateId,durationUs:d.durationUs,samples:d.samples,populationTolerance:d.populationTolerance,
+  const d=value.dynamics,settings=d?{initialStateId:d.initialStateId,initialState:d.initialState,durationUs:d.durationUs,samples:d.samples,populationTolerance:d.populationTolerance,
     curves:d.monitorMode==='manual'?[d.monitoredStateIds,d.monitoredGroupIds??[]]:'auto'}:null;
   return JSON.stringify({...value,dynamics:settings},(key,item)=>key.endsWith('Anchor')?undefined:item);
 }
@@ -211,7 +219,7 @@ function solverStatus():[string,StatusWord]{
   const result=currentResult(),error=currentSolverError();
   if(error)return [result?.steady.converged?`时间演化失败（长期布居已就绪）：${labelStateIds(solverText(error))}`:`布居计算失败：${labelStateIds(solverText(error))}`,'error'];
   if(currentSolverBusy())return [result?.steady.converged?'长期布居已就绪 · 时间演化计算中…':solverQueued?'布居待计算':'布居计算中…','task'];
-  const stopped=stoppedKey!==''&&stoppedKey===dynamicsKey();
+  const stopped=stoppedKey!==''&&stoppedKey===solveKey();
   if(view==='space')return ['方向与偏振实时显示','idle'];
   if(!result)return stopped?['计算已停止；按“计算”重新开始','warning']:['布居待计算','idle'];
   const elapsed=formatElapsed(currentRecord()?.wallMs??solverWallMs);
@@ -362,6 +370,8 @@ function renderInspector():void{
     const l=scene.lasers.find(l=>l.id===selection.id);if(!l)return;normalizeLaserFrequency(l);normalizeLaserIntensity(l);setText('inspector-title',l.name);
     // ui-design.md §4: every laser drives the dynamics; this only chooses the levels chart's background.
     const chart=group('能级图');bindField(fields,chart,'inspector',()=>({name:'show-light-shift',label:'显示光移',kind:'boolean',value:l.regime==='far',description:'开：未选中对象时，能级图的背景包含这束光的二阶光移（仅显示，不影响动力学）'}),v=>{l.regime=v===true?'far':'near';});
+    // A hint beside the switch, never acting on it: the display model's own |Ω/2Δ| (it holds to 1%).
+    chart.append(fieldRow('|Ω/2Δ| 最大',mixingReadout.root),mixingWarning);refreshMixing(l);
     const f=group('频率');
     frequencySection(f,l);
     const originPicker=selectControl(f,'参考态',l.referenceStateId??'',[['','跟随动力学初态'],...allLevels().map(state=>[state.id,stateText(state)] as [string,string]),...(scene.references??[]).map(ref=>[ref.id,ref.name+' · 参考能级'] as [string,string])],id=>{setLaserReferenceState(scene,l,id||undefined);persist();renderInspector();renderResults(false);});originPicker.id='laser-reference-state';originPicker.setAttribute('aria-label','参考出发态');originPicker.title='只改变这束光的箭头起点和矩元参考；不改变动力学初态或任何驱动。';
@@ -395,6 +405,19 @@ const readoutPrefs=new ReadoutPreferences(`${STORAGE}-readouts`);
 const laserReadout=new FrequencyReadout('laser-frequency',readoutPrefs,{
   bases:()=>frequencyBaseTree({absolute:'光频',absoluteText:'绝对',lasers:scene.lasers.filter(other=>other.id!==selection.id)}),defaultBase:'absolute',changed:()=>{},
 });
+const mixingReadout=new Readout(''),mixingWarning=element('p','note wrap mixing-warning','离共振太近，二阶光移不能代表它的作用');
+mixingReadout.root.classList.add('frequency-reading');
+/** The levels chart's second-order model holds while a laser's |Ω/2Δ| stays within 1% and its
+ * detunings keep the model's minimum (spectroscopy.ts displayMixing): too close otherwise. */
+function mixingOf(l:Laser):{ratio:number;tooClose:boolean}|undefined{
+  try{const m=displayMixing(scene,l.id);return {ratio:m.ratio,tooClose:!(m.ratio<=.01)||!m.withinGap};}catch{return undefined;}
+}
+function refreshMixing(l:Laser):void{
+  const m=mixingOf(l);
+  mixingReadout.text=!m?'—':Number.isFinite(m.ratio)?`${formatNumber(m.ratio*100,{digits:2})} %`:'∞';
+  mixingReadout.root.title='这束光各跃迁 |Ω/2Δ| 的最大值；能级图的二阶光移模型要求它不超过 1%';
+  mixingWarning.hidden=!m?.tooClose;
+}
 function frequencySection(f:HTMLElement,l:Laser):void{
   const fields=inspectorFields,absolute=l.frequencyMode==='wavelength';
   bindField(fields,f,'inspector',()=>({name:'frequency-base',label:'相对',kind:'choice',tree:frequencyBaseTree({absolute:'真空波长'}),
@@ -410,13 +433,73 @@ function frequencySection(f:HTMLElement,l:Laser):void{
   f.append(fieldRow('频率 ν',laserReadout.readout.root),fieldRow('读数相对',laserReadout.base.root,laserReadout.unit.root));
   laserReadout.show(laserValue(l),scene);
 }
+/** 初态 (ui-design.md §3): one description, edited here only -- a kind, then what that kind needs. */
+// Four kinds do not fit the scene panel side by side: a combo box.
+const initialKind={root:element('select','initial-kind'),setCurrent(kind:string){if(this.root.value!==kind)this.root.value=kind;}};
+initialKind.root.append(comboFace(),...INITIAL_KINDS.map(([kind,words])=>new Option(words,kind)));initialKind.root.setAttribute('aria-label','初态类型');
+initialKind.root.onchange=()=>{const kind=initialKind.root.value as InitialKind,levels=allLevels();applyInitial(startingSpec(kind,initialSpec(scene),levels));if(kind==='weights')void editInitialWeights();};
+const unpolarizedChoice=new Segmented(manifold=>applyInitial({kind:'unpolarized',manifold:manifold as UnpolarizedManifold}));
+unpolarizedChoice.setChoices(UNPOLARIZED);unpolarizedChoice.root.setAttribute('aria-label','未极化的流形');
+const initialFields=new Map<string,BoundField>();
+let temperatureUnit:TemperatureUnit|undefined;
+const weightsSummary=element('span','initial-summary'),editWeights=command('编辑权重…',()=>void editInitialWeights(),{role:'quiet'});
 function renderInitial():void{
-  const current=getLevel(initialId())??getLevel(`ground-${scene.initialF}-${scene.initialM}`)!;if(!current)return;
-  initialTree??=new TreeCombo(id=>setInitialState(id));initialTree.root.id='initial-state-picker';initialTree.root.setAttribute('aria-label','初态');initialTree.setTree(stateTree(allLevels()),current.id);
-  if(!initialTree.root.isConnected)$('initial-state-tree').replaceChildren(initialTree.root);
-  initialShortcut.title=`初态：${stateText(current)}`;
+  const levels=allLevels(),spec=initialSpec(scene),host=$('initial-state-controls');
+  initialKind.setCurrent(spec.kind);
+  if(initialBody!==spec.kind||!host.contains(initialKind.root)){
+    initialBody=spec.kind;disposeTrees(host);initialFields.clear();host.replaceChildren(initialKind.root);
+    if(spec.kind==='state'){
+      initialTree??=new TreeCombo(id=>setInitialState(id));initialTree.root.id='initial-state-picker';initialTree.root.setAttribute('aria-label','初态');host.append(initialTree.root);
+    }else if(spec.kind==='unpolarized')host.append(unpolarizedChoice.root);
+    else if(spec.kind==='thermal'){
+      const rows=form('initial-form');host.append(rows);
+      bindField(initialFields,rows,'initial',()=>{const now=initialSpec(scene),kelvin=now.kind==='thermal'?now.temperatureK:0,unit=temperatureUnit??naturalTemperatureUnit(kelvin);
+        return {...numberSpec('temperature','温度 T',kelvin/TEMPERATURE_K[unit],unit,{spin:true,inexact:true,description:'静态哈密顿量 H0 的 8 个基态本征态上的 Boltzmann 分布'}),units:(Object.keys(TEMPERATURE_K) as TemperatureUnit[]).map(u=>({value:u,label:u,group:'温度'}))};},
+        v=>{const kelvin=Number(v)*TEMPERATURE_K[temperatureUnit??naturalTemperatureUnit((initialSpec(scene) as {temperatureK:number}).temperatureK)];if(!Number.isFinite(kelvin)||!(kelvin>0))throw new Error('温度必须是有限正数');setInitialSpec(scene,{kind:'thermal',temperatureK:kelvin},allLevels());},
+        {unit:u=>{temperatureUnit=u as TemperatureUnit;},after:()=>{renderInitial();update();}});
+      host.append(element('p','note wrap initial-note','按静态哈密顿量 H0 的基态本征能量取 Boltzmann 分布。'));
+    }else host.append(weightsSummary,editWeights.root);
+  }
+  if(spec.kind==='state')initialTree!.setTree(stateTree(levels),spec.id);
+  else if(spec.kind==='unpolarized')unpolarizedChoice.setCurrent(spec.manifold);
+  else if(spec.kind==='thermal')refreshFields(initialFields);
+  else weightsSummary.textContent=initialSummary(spec);
+  initialShortcut.title=`初态：${initialSummary(spec)}`;
 }
-function setInitialState(id:string):void{const state=getLevel(id);if(!state)return;dynamics().initialStateId=id;if(state.manifold==='ground'){scene.initialF=state.F as 1|2;scene.initialM=state.m;}else spectral=state.manifold;renderInitial();update();}
+function applyInitial(spec:InitialStateSpec):void{
+  try{setInitialSpec(scene,spec,allLevels());}catch(error){note(message(error),'error');return;}
+  if(spec.kind!=='thermal')temperatureUnit=undefined;
+  renderInitial();update();
+}
+function setInitialState(id:string):void{const state=getLevel(id);if(!state)return;if(state.manifold!=='ground')spectral=state.manifold;applyInitial({kind:'state',id});}
+/** 自定义: a weight for any of the 32 states, in an F × m grid; shown normalized. */
+async function editInitialWeights():Promise<void>{
+  const levels=allLevels(),start=initialSpec(scene),weights=start.kind==='weights'?start.weights:(startingSpec('weights',start,levels) as {weights:Record<string,number>}).weights;
+  const dialog=new Dialog('自定义初态'),grid=element('div','weights-grid'),inputs=new Map<string,HTMLInputElement>(),fractions=new Map<string,HTMLElement>();
+  grid.append(element('span','weights-corner','m'),...[-3,-2,-1,0,1,2,3].map(m=>element('span','weights-head',signedInteger(m))));
+  for(const [manifold,F] of [['ground',1],['ground',2],['D1',1],['D1',2],['D2',0],['D2',1],['D2',2],['D2',3]] as const){
+    grid.append(element('span','weights-row',hyperfineLabel(manifold,F)));
+    for(let m=-3;m<=3;m++){
+      const cell=element('span','weights-cell');grid.append(cell);if(Math.abs(m)>F)continue;
+      const id=`${manifold}-${F}-${m}`,input=element('input');input.type='text';input.inputMode='decimal';input.spellcheck=false;input.setAttribute('aria-label',`${idLabel(id)} 的权重`);
+      input.value=weights[id]?String(Number(weights[id]!.toPrecision(12))):'';
+      const share=element('span','weights-fraction');cell.append(input,share);inputs.set(id,input);fractions.set(id,share);
+    }
+  }
+  const total=element('p','note wrap weights-total');
+  dialog.content.append(element('p','note wrap','填写非负权重，按总和归一化；空白为 0。'),grid,total);
+  dialog.addAction('取消','cancel');const ok=dialog.addAction('确定','ok','primary');
+  const read=():Record<string,number>|undefined=>{let bad=false;const out:Record<string,number>={};
+    for(const [id,input] of inputs){const text=input.value.trim(),value=text===''?0:Number(text),valid=Number.isFinite(value)&&value>=0;input.toggleAttribute('aria-invalid',!valid);if(!valid){bad=true;continue;}if(value>0)out[id]=value;}
+    return bad?undefined:out;};
+  const refresh=():void=>{const w=read(),sum=w?Object.values(w).reduce((s,v)=>s+v,0):0;
+    for(const [id,share] of fractions)share.textContent=w&&sum>0&&w[id]?`${formatNumber(w[id]!/sum*100,{digits:3})}%`:'';
+    ok.disabled=!w||!(sum>0);total.textContent=!w?'权重必须是非负数。':sum>0?`${Object.keys(w).length} 个态`:'至少一个态的权重为正。';};
+  grid.addEventListener('input',refresh);refresh();
+  const answer=dialog.open();inputs.values().next().value?.focus();
+  if(await answer!=='ok')return;
+  const chosen=read();if(chosen&&Object.keys(chosen).length)applyInitial({kind:'weights',weights:chosen});
+}
 
 function polarizationBars(a:Analysis,l:Laser|undefined):string{const p=l?a.polarizations[l.id]:undefined;if(!p)return '<p class="note">启用激光后显示球基分量。</p>';return `<span class="polarization-axis-label">${a.fieldMagnitudeG===0?'相对 z（B = 0）':'相对 B'}</span>`+[[math('\\sigma^-'),p.minus],[math('\\pi'),p.pi],[math('\\sigma^+'),p.plus]].map(([label,v])=>`<div class="pol-row"><span>${label}</span><div class="bar-track"><span class="bar-fill" style="width:${Math.max(0,Math.min(100,Number(v)*100))}%"></span></div><strong>${esc(populationPercent(Number(v)))}</strong></div>`).join('');}
 
@@ -520,6 +603,13 @@ function bindReferences():void{
 
 // ---------------------------------------------------------------- solver
 function dynamicsKey(steadyOnly=view==='levels'&&populationMode==='steady'):string{return dynamicsCacheKey(scene,dynamics(),steadyOnly);}
+/** What a trajectory depends on: everything but the mean's horizon (the displayed results' key). */
+function trajectoryKey():string{return dynamicsCacheKey(scene,dynamics(),false,false);}
+/** A solve for these inputs asks only for the mean: in the levels' long-time mode, or when a
+ * trajectory is here whose mean was solved at another horizon. Its key is the request's. */
+function meanOnly():boolean{const t=displayedResults.get(trajectoryKey(),'trajectory');return view==='levels'&&populationMode==='steady'||(!!t&&t.horizon!==resolveMeanHorizon(dynamics()));}
+function solveKey():string{return dynamicsKey(meanOnly());}
+function meanRecord(key=trajectoryKey()):SolvedRecord|undefined{const record=displayedResults.get(key,'mean');return record&&record.horizon===resolveMeanHorizon(dynamics())?record:undefined;}
 function cachedAnalysis():Analysis{
   const key=JSON.stringify({kind:view==='levels'?'spectrum':'bare',fields:scene.fields,lasers:scene.lasers,initial:initialId(),excluded:view==='levels'?activeLaser()?.id:undefined});
   const cached=analysisCache.get(key);if(cached)return cached;
@@ -529,10 +619,11 @@ function cachedAnalysis():Analysis{
 }
 function invalidateObsoletePopulation():void{
   // Retain the displayed calculation only; revisiting earlier parameters must solve again.
-  const physicalKey=dynamicsKey(false);displayedResults.activate(physicalKey);
-  const key=dynamicsKey();if(requestedPhysicalKey&&requestedPhysicalKey!==physicalKey)cancelObsoleteSolve();
+  const physicalKey=trajectoryKey();displayedResults.activate(physicalKey);
+  // A request for other inputs or another horizon is obsolete; opening another view is not.
+  const key=dynamicsKey();if(requestedPhysicalKey&&(requestedPhysicalKey!==physicalKey||requestedHorizon!==resolveMeanHorizon(dynamics())))cancelObsoleteSolve();
   if(renderedPopulationKey&&renderedPopulationKey!==key){
-    if(view==='levels')patchLevelPopulations($('levels-chart'),{label:'布居待计算',mean:false,selectedLaser:!!activeLaser(),initialId:initialId()});
+    if(view==='levels')patchLevelPopulations($('levels-chart'),{label:'布居待计算',steadyLabel:meanSymbol(undefined),selectedLaser:!!activeLaser(),initialId:singleInitialId()});
     const oldReadout=$('selection-readout').querySelector<HTMLElement>('[data-current-population]');if(oldReadout){oldReadout.hidden=true;const value=oldReadout.querySelector('b');if(value)value.textContent='—';}
     root.dataset.populationFresh='false';if(latestAnalysis&&view==='levels')populationToolbar();
   }
@@ -541,7 +632,7 @@ function refreshPopulationOnly():void{
   if(analysisError){refreshStatus();return;}
   if(view==='levels'){
     const snapshot=populationSnapshot(),steady=steadyPopulationsInView();populationToolbar();
-    patchLevelPopulations($('levels-chart'),{populations:snapshot.populations,steady,label:snapshot.label,mean:isDisplayedMean(),selectedLaser:!!activeLaser(),initialId:initialId()});
+    patchLevelPopulations($('levels-chart'),{populations:snapshot.populations,steady,label:snapshot.label,steadyLabel:meanSymbol(),selectedLaser:!!activeLaser(),initialId:singleInitialId()});
     alignLevelReadouts($('levels-chart'));
     // The readout editor and its focusable state chips remain mounted.
     const p=$('selection-readout').querySelector<HTMLElement>('[data-current-population]'),value=selectedStates.length?snapshot.populations?.[selectedStates.at(-1)!]:undefined;
@@ -551,24 +642,26 @@ function refreshPopulationOnly():void{
   renderedPopulationKey=dynamicsKey();root.dataset.populationFresh=String(!!currentResult());root.dataset.populationPaintCount=String(++populationPaintCount);refreshStatus();
 }
 function requestSolve(force=false):void{
-  const key=dynamicsKey(),physicalKey=dynamicsKey(false),steadyOnly=view==='levels'&&populationMode==='steady';
+  // A trajectory already here for these inputs needs only its mean at the new horizon.
+  const physicalKey=trajectoryKey(),trajectory=displayedResults.get(physicalKey,'trajectory'),steadyOnly=meanOnly()&&!(force&&view==='dynamics');
+  const key=dynamicsKey(steadyOnly),horizon=resolveMeanHorizon(dynamics());
   if(force)stoppedKey='';else if(key===stoppedKey)return;
   displayedResults.activate(physicalKey);
-  const completed=displayedResults.get(physicalKey,steadyOnly?'mean':'trajectory');
+  const completed=steadyOnly?meanRecord(physicalKey):trajectory;
   if(!force&&completed)return;
   if(!force&&key===requestedKey)return;
   // A current full solve already supplies its own mean. Merely opening the
   // level view must not cancel/restart it or submit a duplicate mean request.
-  if(!force&&solverBusy&&requestedPhysicalKey===physicalKey&&(!requestedSteadyOnly||steadyOnly))return;
+  if(!force&&solverBusy&&requestedPhysicalKey===physicalKey&&requestedHorizon===horizon&&(!requestedSteadyOnly||steadyOnly))return;
   if(force)displayedResults.clear();
   const epoch=displayedResults.activate(physicalKey);
-  solver.cancel();requestedKey=key;requestedPhysicalKey=physicalKey;requestedSteadyOnly=steadyOnly;
+  solver.cancel();requestedKey=key;requestedPhysicalKey=physicalKey;requestedSteadyOnly=steadyOnly;requestedHorizon=horizon;
   const revision=++solverRevision;clearTimeout(solverTimer);solverBusy=true;solverQueued=!force;solverError='';
   const submittedScene=structuredClone(scene),submittedSettings=structuredClone(dynamics()),submittedAt=performance.now();
-  const stillCurrent=()=>revision===solverRevision&&physicalKey===dynamicsKey(false);
+  const stillCurrent=()=>revision===solverRevision&&physicalKey===trajectoryKey()&&horizon===resolveMeanHorizon(dynamics());
   const submittedOptions={steadyOnly,onProgress:(result:DynamicsResult)=>{
     if(!stillCurrent())return;
-    const record={result,wallMs:performance.now()-submittedAt};
+    const record={result,wallMs:performance.now()-submittedAt,horizon};
     displayedResults.set(physicalKey,epoch,'mean',record);displayedResults.set(physicalKey,epoch,'progress',record);
     refreshPopulationOnly();
   }};
@@ -576,7 +669,7 @@ function requestSolve(force=false):void{
     if(!stillCurrent())return;solverQueued=false;refreshPopulationOnly();const begin=performance.now();
     try{
       const result=await solver.solve(submittedScene,submittedSettings,submittedOptions);if(!stillCurrent())return;
-      solverWallMs=performance.now()-begin;const record={result,wallMs:solverWallMs};
+      solverWallMs=performance.now()-begin;const record={result,wallMs:solverWallMs,horizon};
       displayedResults.set(physicalKey,epoch,steadyOnly?'mean':'trajectory',record);
       if(result.steady.converged)displayedResults.set(physicalKey,epoch,'mean',record);
       solverBusy=false;refreshPopulationOnly();
@@ -588,18 +681,27 @@ function cancelObsoleteSolve():void{solver.cancel();solverRevision++;clearTimeou
 /** 停止: the running solve ends here; a mean it already delivered stays. Editing the scene, or 计算, starts again. */
 function stopSolve():void{
   if(!currentSolverBusy())return;
-  const key=dynamicsKey();cancelObsoleteSolve();stoppedKey=key;requestedKey=key;
+  const key=solveKey();cancelObsoleteSolve();stoppedKey=key;requestedKey=key;
   if(view==='dynamics')renderDynamics(latestAnalysis,false);else refreshPopulationOnly();
   refreshStatus();
 }
 function currentRecord():SolvedRecord|undefined{
-  const key=dynamicsKey(false);
-  if(view==='levels'&&populationMode==='steady')return displayedResults.get(key,'mean');
-  return displayedResults.get(key,'trajectory')??displayedResults.get(key,'progress');
+  const key=trajectoryKey();
+  if(view==='levels'&&populationMode==='steady')return meanRecord(key);
+  const trajectory=displayedResults.get(key,'trajectory')??displayedResults.get(key,'progress');
+  if(!trajectory||trajectory.horizon===resolveMeanHorizon(dynamics()))return trajectory;
+  // The trajectory stays; its long-time part is the mean at the current horizon, or pending.
+  const mean=meanRecord(key);return withMean(trajectory,mean);
+}
+const mergedRecords=new WeakMap<SolvedRecord,{mean:SolvedRecord|undefined;record:SolvedRecord}>();
+function withMean(trajectory:SolvedRecord,mean:SolvedRecord|undefined):SolvedRecord{
+  const saved=mergedRecords.get(trajectory);if(saved&&saved.mean===mean)return saved.record;
+  const steady=mean?.result.steady??{converged:false,status:'not-requested' as const,populations:null,residual:null,initialDependent:false};
+  const record={...trajectory,result:{...trajectory.result,steady},horizon:resolveMeanHorizon(dynamics())};mergedRecords.set(trajectory,{mean,record});return record;
 }
 function currentResult():DynamicsResult|undefined{return currentRecord()?.result;}
-function currentSolverError():string{return requestedKey===dynamicsKey()?solverError:'';}
-function currentSolverBusy():boolean{return solverBusy&&requestedPhysicalKey===dynamicsKey(false)&&(!requestedSteadyOnly||(view==='levels'&&populationMode==='steady'));}
+function currentSolverError():string{return requestedKey===dynamicsKey(requestedSteadyOnly)?solverError:'';}
+function currentSolverBusy():boolean{return solverBusy&&requestedPhysicalKey===trajectoryKey()&&requestedHorizon===resolveMeanHorizon(dynamics())&&(!requestedSteadyOnly||(view==='levels'&&populationMode==='steady')||!!displayedResults.get(trajectoryKey(),'trajectory'));}
 function isDisplayedMean(result=currentResult(),a=latestAnalysis):boolean{return isTimeAverage(result?.steady?.status)||(view==='levels'&&a.spectroscopy?.requiresDensityProjection===true&&result?.steady?.status==='population-stationary');}
 function steadyPopulationsInView(a=latestAnalysis):Record<string,number>|undefined{
   const result=currentResult(),steady=result?.steady;if(!result||!steady?.converged||!steady.populations)return undefined;
@@ -610,10 +712,24 @@ function steadyPopulationsInView(a=latestAnalysis):Record<string,number>|undefin
 function populationSnapshot():{populations?:Record<string,number>;label:string;timeUs?:number}{
   const result=currentResult();
   if(!result)return {label:currentSolverBusy()?'计算中':'待计算'};
-  if(populationMode==='steady'){const populations=steadyPopulationsInView();return result.steady?.converged&&result.steady.populations?{populations,label:populations?(isDisplayedMean(result)?'长期平均布居':'稳态布居'):'当前背景布居未定义'}:{label:'长期布居未解析'};}
+  if(populationMode==='steady'){const populations=steadyPopulationsInView();return result.steady?.converged&&result.steady.populations?{populations,label:populations?meanSymbol(result):'当前背景布居未定义'}:{label:'长期布居未解析'};}
   const index=populationTimeIndex<0?result.timesUs.length-1:Math.min(populationTimeIndex,result.timesUs.length-1),timeUs=result.timesUs[index]??0;
-  if(view==='levels'&&latestAnalysis.spectroscopy?.status==='dispersive'&&latestAnalysis.spectroscopy.requiresDensityProjection)return {label:'该基底的 p(t) 需要完整瞬态密度矩阵',timeUs};
-  return {populations:Object.fromEntries(Object.entries(result.populations).map(([id,values])=>[id,values[index]??0])),label:`p(${formatNumber(timeUs,{digits:4})} μs)`,timeUs};
+  // p(t) is in the model basis; on the chart's states it reads by id only while the bases'
+  // difference stays within the population error target (population-basis.ts).
+  const basisError=view==='levels'?timeBasisError(result):0;
+  if(!(basisError<=resolvePopulationTolerance(dynamics().populationTolerance)))return {label:'p(t) 在模型基中，与能级图的基相差过大，未着色',timeUs};
+  return {populations:Object.fromEntries(Object.entries(result.populations).map(([id,values])=>[id,values[index]??0])),label:`p(${formatNumber(timeUs,{digits:4})} μs)${basisError>1e-6?` · 基差 ≤ ${formatNumber(basisError,{digits:2})}`:''}`,timeUs};
+}
+/** How much carrying the result's p(t) over to the chart's states by id can change them. */
+const basisErrors=new WeakMap<object,{analysis:Analysis;error:number}>();
+function timeBasisError(result:DynamicsResult,a=latestAnalysis):number{
+  const saved=basisErrors.get(result);if(saved?.analysis===a)return saved.error;
+  const error=idMappingError(result.states,allLevels(a));basisErrors.set(result,{analysis:a,error});return error;
+}
+/** Under 最慢弛豫时间: a relaxation slower than the chosen horizon has not reached t → ∞ by then. */
+function unreachedLine(result:DynamicsResult):string{
+  const horizon=resolveMeanHorizon(dynamics()),slowest=result.steady?.slowestRelaxationUs;if(slowest==null||horizon===null||!(slowest>horizon))return '';
+  const unit=timeDisplayUnit(slowest);return `最慢弛豫约 ${withUnit(slowest*unit.factor,unit.name,{digits:2})}，长于 ${horizonText(horizon)}：尚未到达 t→∞ 的稳态`;
 }
 function solverDetails():string{
   const result=currentResult(),error=currentSolverError();
@@ -626,7 +742,7 @@ function solverDetails():string{
     readout('概率守恒误差',small(result.validation.maxTraceError)),readout('最小布居',small(result.validation.minPopulation)),
     readout('长期解',`${steadyStatusText(result.steady?.status)}${result.steady?.residual==null?'':` · 残差 ${small(result.steady.residual)}`}`),
     // The limit is reached after a few of these; more than one conserved quantity makes it initial-dependent.
-    ...(result.steady?.slowestRelaxationUs!=null?[readout('最慢弛豫时间',(()=>{const unit=timeDisplayUnit(result.steady.slowestRelaxationUs!);return withUnit(result.steady.slowestRelaxationUs!*unit.factor,unit.name,{digits:3});})())]:[]),
+    ...(result.steady?.slowestRelaxationUs!=null?[readout('最慢弛豫时间',(()=>{const unit=timeDisplayUnit(result.steady.slowestRelaxationUs!);return withUnit(result.steady.slowestRelaxationUs!*unit.factor,unit.name,{digits:3});})()),...(unreachedLine(result)?[`<p class="horizon-note">${esc(unreachedLine(result))}</p>`]:[])]:[]),
     ...(result.steady?.conservedQuantities!=null?[readout('守恒量个数',`${result.steady.conservedQuantities}（含迹）`)]:[]),
   ].join(''):'';
   const notes=result?[...(result.method?[`时间演化：${solverText(result.method)}`]:[]),...(result.steady.method?[`长期解：${solverText(result.steady.method)}`]:[]),...(result.steady.reason?[solverText(result.steady.reason)]:[]),...result.assumptions]:[];
@@ -639,7 +755,14 @@ function showSolverDetails():void{
 
 // The levels page's population row: what the cards are coloured by, the scale, the F totals and 计算.
 const populationMode$=element('select');populationMode$.id='population-mode';populationMode$.setAttribute('aria-label','能级布居着色');
-const populationModeFace=comboFace();populationMode$.append(populationModeFace,new Option('稳态布居','steady'),new Option('指定时刻 p(t)','time'));
+const populationModeFace=comboFace();populationMode$.append(populationModeFace,new Option('长期布居 p̄','steady'),new Option('指定时刻 p(t)','time'));
+/** p̄(T)'s horizon: ∞ · 1 s · 100 ms (in the toolbar beside the mode). Changing it re-solves the mean only. */
+const HORIZONS:[string,number|null][]=[['inf',null],['1e6',1e6],['1e5',1e5]];
+const meanHorizon=new Segmented(value=>{dynamics().meanHorizonUs=HORIZONS.find(([key])=>key===value)![1];meanHorizon.setCurrent(value);update();});
+meanHorizon.setChoices(HORIZONS.map(([key,us])=>[key,horizonText(us)]));meanHorizon.root.setAttribute('aria-label','长期布居的观察时长');meanHorizon.root.classList.add('mean-horizon');
+function horizonText(us:number|null|undefined):string{return us==null?'∞':us===1e6?'1 s':us===1e5?'100 ms':durationText(us);}
+/** The name of the long-time population a result holds: p̄ at the horizon it was solved at. */
+function meanSymbol(result=currentResult()):string{return `p̄(${horizonText(result?.steady?.horizonUs)})`;}
 populationMode$.onchange=()=>{populationMode=populationMode$.value as 'steady'|'time';update();};
 const populationTime=element('input');populationTime.type='range';populationTime.id='population-time';populationTime.setAttribute('aria-label','布居时间');
 populationTime.oninput=()=>{populationTimeIndex=Number(populationTime.value);update();};
@@ -648,13 +771,11 @@ const populationLegend=element('span','population-scale');populationLegend.setAt
 populationLegend.append(element('span','scale-end','0'),element('span','scale-bar'),element('span','scale-end','100%'));
 const populationTotals=element('span','population-data');populationTotals.id='population-data';
 const runLevels=command('计算',()=>requestSolve(true));runLevels.root.dataset.runDynamics='';
-$('population-toolbar').append(populationMode$,populationTime,populationTimeValue,populationLegend,populationTotals,runLevels.root);
+$('population-toolbar').append(populationMode$,meanHorizon.root,populationTime,populationTimeValue,populationLegend,populationTotals,runLevels.root);
 function populationToolbar():void{
   const snap=populationSnapshot(),result=currentResult(),p=snap.populations;
-  // A base-select shows the picked option as it was picked: a renamed choice is a new option.
-  const steadyWords=isDisplayedMean(result)?'长期平均布居':'稳态布居';
-  if(populationMode$.options[0]!.text!==steadyWords){populationMode$.replaceChildren(populationModeFace,new Option(steadyWords,'steady'),new Option('指定时刻 p(t)','time'));populationMode$.value=populationMode;}
-  else if(populationMode$.value!==populationMode)populationMode$.value=populationMode;
+  if(populationMode$.value!==populationMode)populationMode$.value=populationMode;
+  meanHorizon.setCurrent(HORIZONS.find(([,us])=>us===resolveMeanHorizon(dynamics()))![0]);
   const timed=populationMode==='time'&&!!result;populationTime.hidden=!timed;populationTimeValue.hidden=!timed;
   if(timed){const max=String(result.timesUs.length-1),value=String(populationTimeIndex<0?result.timesUs.length-1:Math.min(populationTimeIndex,result.timesUs.length-1));if(populationTime.max!==max)populationTime.max=max;if(populationTime.value!==value)populationTime.value=value;populationTimeValue.textContent=durationText(snap.timeUs??0,durationUnit(dynamics()));}
   const sum=(filter:(id:string)=>boolean)=>p?Object.entries(p).reduce((total,[id,value])=>total+(filter(id)?value:0),0):undefined;
@@ -709,12 +830,12 @@ function renderDynamics(a:Analysis,_allowSolve=true):void{
   renderDynamicsControls(a);const ids=populationDisplayIds(d),result=raw?withPopulationGroups(raw,d.monitoredGroupIds??[]):undefined;
   const labels=Object.fromEntries([...allLevels(a).map(l=>[l.id,stateText(l)]),...POPULATION_GROUPS.map(g=>[g.id,g.label])]);
   unbindPopulation?.();unbindPopulation=undefined;
-  const host=$('population-chart'),plotOptions={showTotalExcited:false,timeUnit:durationUnit(d),scale:populationScale,viewportWidth:host.clientWidth,initialId:d.initialStateId};
-  const stopped=stoppedKey&&stoppedKey===dynamicsKey();
+  const host=$('population-chart'),plotOptions={showTotalExcited:false,timeUnit:durationUnit(d),scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId()};
+  const stopped=stoppedKey&&stoppedKey===solveKey();
   host.innerHTML=result&&result.timesUs.length>1?populationChart(result,ids,labels,plotOptions):result?.steady.converged?`<div class="empty-state"><div><p>长期布居</p><div class="form solver-readouts">${ids.map(id=>`<span class="field-label">${esc(labels[id]??id)}</span><span class="readout-edit">${populationValue(result.steady.populations?.[id]??0)}</span>`).join('')}</div><p class="note">${currentSolverError()?'时间演化未完成，原因见状态栏。':stopped?'时间演化已停止。':'时间演化计算中…'}</p></div></div>`:`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):currentSolverBusy()?'正在求解当前场景…':stopped?'计算已停止；按“计算”重新开始。':'按“计算”开始求解。'}</div>`;
   if(result&&result.timesUs.length>1)unbindPopulation=bindPopulationChart(host,result,ids,labels,plotOptions);
-  const legend=ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===d.initialStateId?'<span class="initial-tag">初态</span>':''}</span>`).join('');
-  $('population-caption').innerHTML=legend+(result&&result.timesUs.length>1?`<span class="sampling-note">${esc(populationSamplingInfo(result))}</span>`:'');
+  const legend=ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
+  $('population-caption').innerHTML=legend+(result&&result.timesUs.length>1?`<span class="sampling-note">${esc(populationSamplingInfo(result))}</span><span class="sampling-note">模型基：静态 H0 的本征态（标签为重叠最大的磁场本征态）。</span>`:'');
   renderDetails('dynamics-details',solverDetails());
 }
 
@@ -730,7 +851,8 @@ function refreshDirectionStates(a:Analysis):void{
 
 /** The level diagram's one-line definition of its labels (ui-design.md §1.5). */
 function levelsLegend(a:Analysis,laser:Laser|undefined):string{
-  const background=[...(a.fieldMagnitudeG>0?['B']:[]),...(a.spectroscopy?.backgroundLaserIds??[]).map(id=>scene.lasers.find(l=>l.id===id)?.name??id)].join(' + ')||'无';
+  const beam=(id:string)=>{const l=scene.lasers.find(l=>l.id===id);return !l?id:mixingOf(l)?.tooClose?`${l.name}（离共振太近）`:l.name;};
+  const background=[...(a.fieldMagnitudeG>0?['B']:[]),...(a.spectroscopy?.backgroundLaserIds??[]).map(beam)].join(' + ')||'无';
   if(a.spectroscopy?.status==='unresolved')return `标注：裸态能级，背景光移未确定；背景：${background}`;
   // Every card is how far its state lies above its anchor (levelReadoutMHz): + is higher.
   if(laser&&laserEmits(scene,laser,allLevels(a)))return `标注：激发态 (E − E参考)/h，基态为高出光子终点 E参考 − hν(${laser.name}) 的量；正值表示更高；背景：${background}`;
@@ -780,7 +902,7 @@ function renderResults(allowSolve=true):void{
   if(view!=='space'&&spaceMount.isConnected)spaceMount.remove();
   if(view!=='dynamics'&&unbindPopulation){unbindPopulation();unbindPopulation=undefined;}
   if($('inspector-polarization'))$('inspector-polarization').innerHTML=polarizationBars(a,selection.kind==='laser'?scene.lasers.find(l=>l.id===selection.id):laser);
-  if(selection.kind==='laser'){const l=scene.lasers.find(l=>l.id===selection.id);if(l&&laserReadout.readout.root.isConnected){try{laserReadout.show(laserValue(l),scene);}catch{laserReadout.show(undefined,scene);}}}
+  if(selection.kind==='laser'){const l=scene.lasers.find(l=>l.id===selection.id);if(l&&laserReadout.readout.root.isConnected){try{laserReadout.show(laserValue(l),scene);}catch{laserReadout.show(undefined,scene);}}if(l&&mixingReadout.root.isConnected)refreshMixing(l);}
   const field=withUnit(a.fieldMagnitudeG,'G',{digits:4});
   if(view==='levels'){
     $('selection-readout').hidden=false;$('population-toolbar').hidden=false;
@@ -791,9 +913,9 @@ function renderResults(allowSolve=true):void{
     setText('levels-heading',a.spectroscopy?.status==='unresolved'?'裸态能级':laser?'背景能级':'总场能级');
     setText('levels-legend',levelsLegend(a,laser));
     beamChip.hidden=!laser;if(laser)setMiddle(beamChipName,laser.name,'cut');
-    setText('levels-badge',a.spectroscopy?.status==='unresolved'?(laser?'裸态失谐 · 背景光移未确定':'静态光移未定义'):populationMode==='time'&&a.spectroscopy?.requiresDensityProjection?'当前基底 p(t) 未提供':laser&&!laser.enabled?'已停用':'');
+    setText('levels-badge',a.spectroscopy?.status==='unresolved'?(laser?'裸态失谐 · 背景光移未确定':'静态光移未定义'):populationMode==='time'&&currentResult()&&!(timeBasisError(currentResult()!)<=resolvePopulationTolerance(dynamics().populationTolerance))?'p(t) 在模型基中':laser&&!laser.enabled?'已停用':'');
     renderSelection(a,laser);
-    levelsChart$.innerHTML=levelsChart(scene,a,laser,{line:spectral,selectedIds:markedComparison(laser),initialId:dynamics().initialStateId,populations:snapshot.populations,steadyPopulations:steadyPopulationsInView(a),steadyPopulationLabel:isDisplayedMean(currentResult(),a)?'mean':'limit',populationLabel:snapshot.label,viewportWidth:levelsChart$.clientWidth});
+    levelsChart$.innerHTML=levelsChart(scene,a,laser,{line:spectral,selectedIds:markedComparison(laser),initialId:singleInitialId(),populations:snapshot.populations,steadyPopulations:steadyPopulationsInView(a),steadyPopulationLabel:meanSymbol(),populationLabel:snapshot.label,viewportWidth:levelsChart$.clientWidth});
     const table=transitionTable(transitions);
     renderDetails('levels-details',`<details class="transition-disclosure"><summary>跃迁矩元 <span>${laser?esc(laser.name):spectral}</span></summary><div class="table-scroll"><table class="transition-table"><thead><tr><th>参考态 → 末态</th><th>分量</th><th>${esc(table.heading)}</th><th>Ω/2π / MHz</th><th title="相对 D2 stretched cycling 跃迁的偶极强度，并乘当前偏振权重">耦合强度</th></tr></thead><tbody>${table.rows}</tbody></table></div></details>${referenceEditor()}${solverDetails()}`);bindReferences();
   }else if(view==='dynamics'){setText('summary',`B ${field} · 32 态 Lindblad 主方程`);renderDynamics(a,allowSolve);}

@@ -19,7 +19,8 @@ export interface LevelChartOptions {
   populations?:Record<string,number>; populationLabel?:string;
   /** Only a verified long-time result; never reuse a finite-time population. */
   steadyPopulations?:Record<string,number>|null;
-  steadyPopulationLabel?:'mean'|'limit';
+  /** The long-time population's name at the ground manifold, p̄(T). */
+  steadyPopulationLabel?:string;
   /** Actual SVG viewport width, preserving readable text in narrow panels. */
   viewportWidth?:number;
 }

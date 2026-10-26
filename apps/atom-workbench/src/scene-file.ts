@@ -2,7 +2,7 @@ import type {Scene,Laser,MagneticField} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
 import {DURATION_UNITS} from './duration.js';
 import type {DurationUnit,InitialStateSpec} from './types.js';
-import {defaultDynamics,resolvePopulationTolerance} from './types.js';
+import {DEFAULT_MEAN_HORIZON_US,MEAN_HORIZONS_US,defaultDynamics,resolvePopulationTolerance} from './types.js';
 import {analyze} from './physics.js';
 import {normalizeLaserFrequency} from './laser-frequency.js';
 import {normalizeLaserIntensity} from './laser-intensity.js';
@@ -70,10 +70,12 @@ export function validateScene(input:unknown):Scene {
     const spec=d.initialState===undefined?undefined:initialStateSpec(d.initialState,physicalIds),initialStateId=spec?.kind==='state'?spec.id:string(d,'initialStateId');
     if(!physicalIds.has(initialStateId)||!Array.isArray(d.monitoredStateIds)||d.monitoredStateIds.length>32||new Set(d.monitoredStateIds).size!==d.monitoredStateIds.length||d.monitoredStateIds.some(v=>typeof v!=='string'||!physicalIds.has(v)))throw new Error('动力学态选择无效：最多 32 个不重复的物理态');
     const samples=val(d,'samples',2,2001);if(!Number.isInteger(samples))throw new Error('samples 必须为整数');
+    // Scenes from before the horizon read at the 1 s default.
+    const meanHorizonUs=d.meanHorizonUs===undefined?DEFAULT_MEAN_HORIZON_US:d.meanHorizonUs;if(!MEAN_HORIZONS_US.includes(meanHorizonUs as number|null))throw new Error('长期布居的观察时长无效');
     if(d.durationUnit!==undefined&&!DURATION_UNITS.includes(d.durationUnit as DurationUnit))throw new Error('时间单位无效');
     if(d.monitorMode!==undefined&&d.monitorMode!=='auto'&&d.monitorMode!=='manual')throw new Error('观察态选择模式无效');
     const groups=d.monitoredGroupIds??[];if(!Array.isArray(groups)||groups.length>POPULATION_GROUPS.length||new Set(groups).size!==groups.length||groups.some(id=>!POPULATION_GROUPS.some(g=>g.id===id)))throw new Error('F 布居分组无效');
-    next.dynamics={laserId,initialStateId,...(spec&&spec.kind!=='state'?{initialState:spec}:{}),monitorMode:d.monitorMode==='manual'?'manual':'auto',monitoredGroupIds:[...groups] as string[],monitoredStateIds:[...d.monitoredStateIds] as string[],durationUs:val(d,'durationUs',Number.MIN_VALUE,Number.MAX_VALUE),...(d.durationUnit!==undefined?{durationUnit:d.durationUnit as DurationUnit}:{}),samples,populationTolerance:resolvePopulationTolerance(d.populationTolerance),...(d.quality==='verified'||d.quality==='preview'?{quality:d.quality}:{}),autoRun:d.autoRun!==false};
+    next.dynamics={laserId,initialStateId,...(spec&&spec.kind!=='state'?{initialState:spec}:{}),monitorMode:d.monitorMode==='manual'?'manual':'auto',monitoredGroupIds:[...groups] as string[],monitoredStateIds:[...d.monitoredStateIds] as string[],durationUs:val(d,'durationUs',Number.MIN_VALUE,Number.MAX_VALUE),...(d.durationUnit!==undefined?{durationUnit:d.durationUnit as DurationUnit}:{}),samples,populationTolerance:resolvePopulationTolerance(d.populationTolerance),meanHorizonUs:meanHorizonUs as number|null,...(d.quality==='verified'||d.quality==='preview'?{quality:d.quality}:{}),autoRun:d.autoRun!==false};
   }
   const initial=[...validatedAnalysis.ground,...validatedAnalysis.D1,...validatedAnalysis.D2].find(l=>l.id===next.dynamics?.initialStateId);if(initial?.manifold==='ground'){next.initialF=initial.F as 1|2;next.initialM=initial.m;}
   return next;
