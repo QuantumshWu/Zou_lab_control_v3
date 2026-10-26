@@ -4,7 +4,6 @@ import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {composeMagneticField,polarization,laserDirectionAxis,setLaserDirectionAxis,relativeDirectionAxis,setPolarizationPreset,direction,analyze} from '../dist/js/atom-workbench/src/physics.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {spectroscopyAnalysis} from '../dist/js/atom-workbench/src/spectroscopy.js';
-import {buildEffectiveMasterModel} from '../dist/js/atom-workbench/src/effective-master-model.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 const near=(a,b)=>assert.ok(Math.abs(a-b)<2e-13,`${a} != ${b}`);
 const dot=(a,b)=>a.reduce((v,x,i)=>v+x*b[i],0);
@@ -80,7 +79,7 @@ test('oblique weights match direct lab-vector projection independently of spheri
 test('true pi has exactly zero nonzero-delta-m drive in default background and in the effective Hamiltonian',()=>{
  const s=defaultScene();setPolarizationPreset(s.lasers[0],s.fields,'pi');
  for(const trap of [true,false]){s.lasers[1].enabled=trap;const a=spectroscopyAnalysis(s,'probe');for(const t of a.transitions.filter(t=>t.laserId==='probe'&&t.me!==t.mg))assert.equal(t.rabiMHz,0);
-  const model=buildEffectiveMasterModel(s);model.states.forEach((g,i)=>model.states.forEach((e,j)=>{if(g.manifold==='ground'&&e.manifold!=='ground'&&g.m!==e.m){assert.equal(model.hReal[i*32+j],0);assert.equal(model.hImag[i*32+j],0);}}));
+  const model=buildFullMasterModel(s);model.states.forEach((g,i)=>model.states.forEach((e,j)=>{if(g.manifold==='ground'&&e.manifold!=='ground'&&g.m!==e.m){assert.equal(model.hReal[i*32+j],0);assert.equal(model.hImag[i*32+j],0);}}));
  }
 });
 

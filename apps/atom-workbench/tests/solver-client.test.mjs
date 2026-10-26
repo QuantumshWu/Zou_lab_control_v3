@@ -4,21 +4,22 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {setTimeout as pause} from 'node:timers/promises';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
-import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
-import {buildMasterModel} from '../dist/js/atom-workbench/src/master-model.js';
-import {EFFECTIVE_MODEL_SCHEMA as ATOMIC_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {defaultScene,resolvePopulationTolerance} from '../dist/js/atom-workbench/src/types.js';
+import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
+import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {nativeResult} from './native-result.mjs';
 
-function fixture(scene=defaultScene(),settings=scene.dynamics){
-  const states=buildMasterModel(scene,settings).states,initial=states.findIndex(s=>s.id===settings.initialStateId);
-  const row=Array.from({length:32},(_,i)=>i===initial?1:0);
-  return {modelSchema:ATOMIC_MODEL_SCHEMA,protocol:NATIVE_PROTOCOL,service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[ATOMIC_MODEL_SCHEMA]},
-    states,timesUs:[0,settings.durationUs/2,settings.durationUs],populations:[row.slice(),row.slice(),row.slice()],
-    asymptoticPopulations:row.slice(),asymptoticStatus:'stationary',diagnostics:{traceError:0,positivityError:0,elapsedMs:1}};
+/** The HTTP response for this scene: a native result plus transport metadata. */
+function fixture(scene=defaultScene(),settings=scene.dynamics,timesUs=[0,settings.durationUs/2,settings.durationUs]){
+  const states=buildFullMasterModel(scene,settings).states,initialIndex=states.findIndex(s=>s.id===settings.initialStateId);
+  return {...nativeResult({states,initialIndex,timesUs,tolerance:resolvePopulationTolerance(settings.populationTolerance)}),assumptions:['test assumption'],
+    service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]}};
 }
+const noMean=data=>{for(const key of ['asymptoticPopulations','asymptoticDensityReal','asymptoticDensityImag'])delete data[key];return data;};
 function scenario(){const s=defaultScene();s.dynamics.samples=3;s.dynamics.durationUs=.2;return s;}
 
 function streamReply(call){let controller;const body=new ReadableStream({start(c){controller=c;}});call.resolve(new Response(body,{headers:{'Content-Type':'application/x-ndjson'}}));const encoder=new TextEncoder();return {send:event=>controller.enqueue(encoder.encode(JSON.stringify(event)+'\n')),close:()=>controller.close()};}
-function meanFixture(scene,request){const result=fixture(scene);return {...result,request,timesUs:[0],populations:[result.populations[0]]};}
+function meanFixture(scene,request){return {...fixture(scene,scene.dynamics,[0]),request};}
 test('verified mean arrives before the trajectory and remains available when evolution fails',async t=>{
  const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'partial-mean'});t.after(()=>client.dispose());
  const scene=scenario();let finished=false;const pending=client.solve(scene,scene.dynamics,{onProgress:value=>progress.push(value)});const rejected=assert.rejects(pending,/unstable evolution/).then(()=>finished=true);
@@ -67,8 +68,8 @@ test('numerical failures and unresolved means are recorded without blind retries
  const scene=scenario(),pending=client.solve(scene,scene.dynamics),rejected=assert.rejects(pending,/numerical failure/);await waitCalls(mock,1);
  mock.calls[0].resolve(new Response(JSON.stringify({error:'numerical failure',code:'numerical-failure',service:{binarySha256:'test-binary'}}),{status:422}));await rejected;
  assert.equal(records[0].willRetry,false);assert.equal(records[0].response.service.binarySha256,'test-binary');
- const next=client.solve(scene,scene.dynamics);await waitCalls(mock,2);const data=fixture(scene);data.asymptoticStatus='unresolved-slow-modes';data.asymptoticPopulations=null;reply(mock.calls[1],data);
- assert.equal((await next).steady.converged,false);assert.equal(records[1].response.asymptoticStatus,'unresolved-slow-modes');await pause(230);assert.equal(mock.calls.length,2);
+ const next=client.solve(scene,scene.dynamics);await waitCalls(mock,2);const data=noMean(fixture(scene));Object.assign(data,{asymptoticStatus:'not-converged',asymptoticReason:'slow modes unresolved'});reply(mock.calls[1],data);
+ assert.equal((await next).steady.converged,false);assert.equal(records[1].response.asymptoticStatus,'not-converged');await pause(230);assert.equal(mock.calls.length,2);
 });
 function transport(){const calls=[];return {calls,fetch:async(url,init)=>new Promise((resolve,reject)=>calls.push({url,init,resolve,reject,body:JSON.parse(init.body)}))};}
 const reply=(call,data)=>call.resolve(new Response(JSON.stringify({...data,request:call.body.request}),{status:200,headers:{'Content-Type':'application/json'}}));
@@ -98,16 +99,20 @@ test('malformed native payloads never become fabricated populations',()=>{
     data=>{data.states[0].id='arbitrary-reference';},data=>{data.states[0].F=99;},
     data=>{data.timesUs[1]=data.timesUs[0];},data=>{data.asymptoticPopulations.pop();},
     data=>{data.asymptoticPopulations[0]=Infinity;},data=>{data.asymptoticPopulations.fill(0);},
-    data=>{data.asymptoticPopulations=null;},data=>{data.diagnostics.traceError=NaN;},data=>{delete data.diagnostics.positivityError;},
-    data=>{data.diagnostics.positivityError=.1;},data=>{data.diagnostics.residual=NaN;},data=>{data.warnings={text:'not an array'};},
+    data=>{data.asymptoticPopulations=null;},data=>{delete data.asymptoticDensityReal;},
+    data=>{data.asymptoticStatus='not-converged';},data=>{data.asymptoticStatus='periodic-mean';},data=>{data.asymptoticReason=7;},
+    data=>{data.diagnostics.traceError=NaN;},data=>{delete data.diagnostics.asymptoticPositivityError;},data=>{data.diagnostics.asymptoticPositivityError=.1;},
+    data=>{data.diagnostics.asymptoticTraceError=6e-6;},data=>{data.diagnostics.residual=NaN;},data=>{delete data.diagnostics.asymptoticMethod;},
+    data=>{delete data.diagnostics.method;},data=>{delete data.populationAccuracy;},data=>{delete data.diagnostics.elapsedMs;},
+    data=>{data.assumptions={text:'not an array'};},data=>{delete data.assumptions;},
   ];
   for(const change of changes){const data=structuredClone(valid);change(data);assert.throws(()=>normalizeDynamicsResult(data,scene),/不完整或无效/);}
   for(const data of [null,undefined,[],{}])assert.throws(()=>normalizeDynamicsResult(data,scene),/不完整或无效/);
 });
 
 test('initial-dependent mean is converged, retains its reason and is marked initial dependent',()=>{
-  const scene=scenario(),data=fixture(scene);data.asymptoticStatus='initial-dependent-mean';data.diagnostics.asymptoticReason='Specified initial mixture retained.';
-  const result=normalizeDynamicsResult(data,scene);assert.equal(result.steady.converged,true);assert.equal(result.steady.initialDependent,true);assert.equal(result.steady.reason,data.diagnostics.asymptoticReason);
+  const scene=scenario(),data=fixture(scene);data.asymptoticStatus='initial-dependent-mean';data.asymptoticReason='Specified initial mixture retained.';
+  const result=normalizeDynamicsResult(data,scene);assert.equal(result.steady.converged,true);assert.equal(result.steady.initialDependent,true);assert.equal(result.steady.reason,data.asymptoticReason);
 });
 
 test('old atomic models and unnegotiated or missing service capabilities are rejected',async t=>{
@@ -121,23 +126,17 @@ test('old atomic models and unnegotiated or missing service capabilities are rej
   }
 });
 
-test('normalization reports the larger finite-time or separately cached mean convergence error',()=>{
-  const scene=scenario(),data=fixture(scene);data.diagnostics.harmonicConvergenceError=8e-9;data.diagnostics.asymptoticHarmonicConvergenceError=1e-10;
-  assert.equal(normalizeDynamicsResult(data,scene).validation.convergenceMaxDelta,8e-9);
-  data.diagnostics.harmonicConvergenceError=1e-12;assert.equal(normalizeDynamicsResult(data,scene).validation.convergenceMaxDelta,1e-10);
-  data.diagnostics.asymptoticFrameConvergenceError=9e-9;assert.equal(normalizeDynamicsResult(data,scene).validation.convergenceMaxDelta,9e-9);
-  data.diagnostics.frameUnitarityBound=Infinity;assert.throws(()=>normalizeDynamicsResult(data,scene),/数值诊断/);
-});
-
-test('steady residual uses the mean proof without reporting an unrelated finite-trajectory residual',()=>{
-  const scene=scenario(),data=fixture(scene);Object.assign(data.diagnostics,{residual:8e-8,populationResidual:9e-9,asymptoticResidual:3e-13,asymptoticPopulationResidual:2e-13});
-  assert.equal(normalizeDynamicsResult(data,scene).steady.residual,2e-13);
-  data.diagnostics.asymptoticPopulationResidual=null;assert.equal(normalizeDynamicsResult(data,scene).steady.residual,3e-13);
-  data.diagnostics.asymptoticResidual=null;assert.equal(normalizeDynamicsResult(data,scene).steady.residual,9e-9);
-  data.diagnostics.populationResidual=null;assert.equal(normalizeDynamicsResult(data,scene).steady.residual,8e-8);
-  data.diagnostics.asymptoticPopulationResidual=0;assert.equal(normalizeDynamicsResult(data,scene).steady.residual,0);
-  data.diagnostics.asymptoticPopulationResidual=NaN;assert.throws(()=>normalizeDynamicsResult(data,scene),/数值诊断/);
-  data.diagnostics.asymptoticPopulationResidual=null;data.diagnostics.asymptoticResidual=Infinity;assert.throws(()=>normalizeDynamicsResult(data,scene),/数值诊断/);
+test('the mean residual and both methods each come from one contract key',()=>{
+  const scene=scenario(),data=fixture(scene);data.diagnostics.residual=2e-13;
+  const result=normalizeDynamicsResult(data,scene);
+  assert.equal(result.steady.residual,2e-13);assert.equal(result.method,'test trajectory');assert.equal(result.steady.method,'test mean');
+  const mean=normalizeDynamicsResult(meanFixture(scene),scene);assert.equal(mean.method,undefined);assert.equal(mean.steady.method,'test mean');
+  const none=noMean(fixture(scene));none.asymptoticStatus='not-requested';delete none.asymptoticReason;
+  const finiteOnly=normalizeDynamicsResult(none,scene);assert.equal(finiteOnly.steady.residual,null);assert.equal(finiteOnly.steady.converged,false);
+  data.diagnostics.residual=null;assert.equal(normalizeDynamicsResult(data,scene).steady.residual,null,'a mean without a residual-measured solve');
+  for(const residual of [undefined,-1,NaN,Infinity]){
+    const bad=fixture(scene);bad.diagnostics.residual=residual;assert.throws(()=>normalizeDynamicsResult(bad,scene),/长期密度数值验证信息/);
+  }
 });
 
 test('rapid edits debounce to only the last immutable scene snapshot',async t=>{
@@ -175,7 +174,7 @@ test('mismatched transport identity and missing requested samples are rejected',
   const first=client.solve(scene,scene.dynamics);const rejected=assert.rejects(first,/请求不匹配/);await waitCalls(mock,1);
   mock.calls[0].resolve(new Response(JSON.stringify({...fixture(scene),request:{clientId:'wrong',sequence:1}})));await rejected;
   const second=client.solve(scene,scene.dynamics);const missing=assert.rejects(second,/采样与请求不匹配/);await waitCalls(mock,2);
-  const data=fixture(scene);data.timesUs=[0];data.populations=[data.populations[0]];reply(mock.calls[1],data);await missing;
+  reply(mock.calls[1],fixture(scene,scene.dynamics,[0]));await missing;
   const third=client.solve(scene,scene.dynamics),noIdentity=assert.rejects(third,/请求不匹配/);await waitCalls(mock,3);
   mock.calls[2].resolve(new Response(JSON.stringify(fixture(scene))));await noIdentity;
 });

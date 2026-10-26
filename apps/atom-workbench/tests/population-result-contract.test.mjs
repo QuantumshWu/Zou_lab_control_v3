@@ -2,42 +2,37 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
-import {buildMasterModel} from '../dist/js/atom-workbench/src/master-model.js';
+import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {POPULATION_GROUPS} from '../dist/js/atom-workbench/src/population-selection.js';
-import {EFFECTIVE_MODEL_SCHEMA as SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {nativeResult} from './native-result.mjs';
 
+const response=data=>({...data,assumptions:['test assumption'],
+  service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA],binarySha256:'binary',buildSha256:'build'}});
 function fixture(){
   const scene=defaultScene();scene.dynamics.samples=3;scene.dynamics.durationUs=.2;
-  const states=buildMasterModel(scene,scene.dynamics).states,index=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
-  const row=Array(32).fill(0);row[index]=1;
-  const data={modelSchema:SCHEMA,protocol:NATIVE_PROTOCOL,states,timesUs:[0,.1,.2],populations:[row.slice(),row.slice(),row.slice()],
-    asymptoticPopulations:null,asymptoticStatus:'not-requested',
-    service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[SCHEMA],binarySha256:'binary',buildSha256:'build'},
-    diagnostics:{validationKind:'population',traceError:0,initialStateError:0,elapsedMs:1},
-    populationAccuracy:{status:'estimated-converged',requestedTolerance:.005,estimatedMaximumError:.003,
-      projectionCharge:.0001,includesProjectionCharge:true,scope:{states:32,samples:3,groups:POPULATION_GROUPS.map(g=>g.id)}}};
+  const states=buildFullMasterModel(scene,scene.dynamics).states,index=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
+  const data=response(nativeResult({states,initialIndex:index,timesUs:[0,.1,.2],error:.003,charge:.0001,mean:false}));
   return {scene,data,index,states};
 }
 function meanFixture(f){
-  const mean=structuredClone(f.data);delete mean.populationAccuracy;
-  mean.timesUs=[0];mean.populations=[mean.populations[0]];mean.asymptoticPopulations=mean.populations[0].slice();mean.asymptoticStatus='stationary';
-  mean.asymptoticDensityReal=Array(32*32).fill(0);mean.asymptoticDensityReal[f.index*32+f.index]=1;mean.asymptoticDensityImag=Array(32*32).fill(0);
-  mean.diagnostics={traceError:2e-7,positivityError:1e-5,elapsedMs:1,method:'mean test'};
+  const mean=response(nativeResult({states:f.states,initialIndex:f.index,timesUs:[0]}));
+  Object.assign(mean.diagnostics,{asymptoticTraceError:2e-7,asymptoticPositivityError:1e-5});
   return mean;
 }
 
-test('population-only result accepts complete all-group accuracy without claiming density PSD',()=>{
+test('a finite result accepts complete all-group accuracy without claiming a density',()=>{
   const f=fixture();f.data.diagnostics.rawDensityPositivityError=.2;
   const result=normalizeDynamicsResult(f.data,f.scene);
   assert.equal(result.populationAccuracy.requestedTolerance,.005);
   assert.equal(result.populationAccuracy.includesProjectionCharge,true);
   assert.equal(result.populationAccuracy.scope.groups.length,POPULATION_GROUPS.length);
-  assert.equal(Object.hasOwn(result.validation,'positivityError'),false);
+  assert.equal(result.steady.density,undefined);
   f.data.populationAccuracy.scope.groups.pop();
   assert.equal(result.populationAccuracy.scope.groups.length,POPULATION_GROUPS.length);
 });
 
-test('population marker cannot bypass complete accuracy and projection-charge qualification',()=>{
+test('a finite trajectory cannot bypass complete accuracy and projection-charge qualification',()=>{
   const f=fixture();
   for(const change of [
     d=>delete d.populationAccuracy,d=>d.populationAccuracy=null,
@@ -55,7 +50,7 @@ test('population marker cannot bypass complete accuracy and projection-charge qu
   }
 });
 
-test('population-only result retains finite, probability, trace, initial and no-density gates',()=>{
+test('a finite result retains finite, probability, trace, initial and no-density gates',()=>{
   const f=fixture();
   for(const change of [
     d=>d.densityReal=null,d=>d.densityImag=[],d=>d.populations[1][0]=NaN,
@@ -70,16 +65,17 @@ test('population-only result retains finite, probability, trace, initial and no-
   }
 });
 
-test('legacy PSD and separate mean-density validation remain required',()=>{
+test('mean trace, positivity and complex-density gates hold in mean and finite results alike',()=>{
   const f=fixture(),mean=meanFixture(f);
-  assert.equal(normalizeDynamicsResult(mean,f.scene).validation.positivityError,1e-5);
-  for(const positivity of [undefined,.0002,NaN]){
-    const bad=structuredClone(mean);bad.diagnostics.positivityError=positivity;
-    assert.throws(()=>normalizeDynamicsResult(bad,f.scene),/数值验证信息/);
+  assert.equal(normalizeDynamicsResult(mean,f.scene).steady.converged,true);
+  for(const [key,value] of [['asymptoticPositivityError',undefined],['asymptoticPositivityError',.0002],['asymptoticPositivityError',NaN],['asymptoticTraceError',6e-6]]){
+    const bad=structuredClone(mean);bad.diagnostics[key]=value;
+    assert.throws(()=>normalizeDynamicsResult(bad,f.scene),/长期密度数值验证信息/);
   }
-  const combined={...f.data,asymptoticStatus:mean.asymptoticStatus,asymptoticPopulations:mean.asymptoticPopulations,
+  // As the writer merges: the mean's asymptotic fields; finite diagnostics win.
+  const combined={...f.data,asymptoticStatus:mean.asymptoticStatus,asymptoticReason:mean.asymptoticReason,asymptoticPopulations:mean.asymptoticPopulations,
     asymptoticDensityReal:mean.asymptoticDensityReal,asymptoticDensityImag:mean.asymptoticDensityImag,
-    diagnostics:{...f.data.diagnostics,asymptoticTraceError:2e-7,asymptoticPositivityError:1e-5}};
+    diagnostics:{...mean.diagnostics,...f.data.diagnostics}};
   assert.equal(normalizeDynamicsResult(combined,f.scene).steady.converged,true);
   const missing=structuredClone(combined);delete missing.diagnostics.asymptoticPositivityError;
   assert.throws(()=>normalizeDynamicsResult(missing,f.scene),/长期密度/);

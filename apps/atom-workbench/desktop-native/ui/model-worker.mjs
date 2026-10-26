@@ -1,6 +1,4 @@
-import {buildFullMasterModel} from '../../dist/js/atom-workbench/src/full-master-model.js';
-import {DEFAULT_DYNAMICS_SAMPLES,resolvePopulationTolerance} from '../../dist/js/atom-workbench/src/types.js';
-import {EFFECTIVE_MODEL_SCHEMA as ATOMIC_MODEL_SCHEMA} from '../../dist/js/atom-workbench/src/solver-protocol.js';
+import {prepareNativeSolve} from '../../scripts/native-protocol.mjs';
 import {createNativeServiceClass} from '../../scripts/native-service-core.mjs';
 import {IpcNativeLane} from './ipc-lane.mjs';
 const NativeService=createNativeServiceClass(IpcNativeLane);
@@ -17,20 +15,14 @@ export function createModelWorker(post){
     const event=(type,data,status)=>{streaming=true;post({kind:'stream',channel,event:{type,data,...(status===undefined?{}:{status})},done:type!=='asymptotic'});};
     try{
       if(!input?.scene||typeof input.scene!=='object')throw Error('Scene required');
-      if(input.modelSchema!==undefined&&input.modelSchema!==ATOMIC_MODEL_SCHEMA)throw Error('Unsupported atomic model schema.');
       token=input.request;
       if(!token||typeof token.clientId!=='string'||!/^[-\w]{1,96}$/.test(token.clientId)||!Number.isSafeInteger(token.sequence)||token.sequence<1)throw Error('Invalid request identity');
       if(input.stream!==undefined&&typeof input.stream!=='boolean')throw Error('Invalid stream option');
-      const settings={...input.scene.dynamics,...input.options};const populationTolerance=resolvePopulationTolerance(settings.populationTolerance);const modelStarted=performance.now();
-      const model=buildFullMasterModel(input.scene,settings),modelBuildMs=performance.now()-modelStarted;
-      const options={durationUs:settings.durationUs??5,samples:settings.samples??DEFAULT_DYNAMICS_SAMPLES,populationTolerance,includeAsymptotic:input.options?.includeAsymptotic??true,steadyOnly:input.options?.steadyOnly??false};
-      if(typeof options.steadyOnly!=='boolean'||typeof options.includeAsymptotic!=='boolean')throw Error('Invalid solver options');
-      const payload={modelSchema:model.modelSchema,radiation:model.radiation,model:{dimension:model.dimension,hReal:model.hReal,hImag:model.hImag,collapse:model.collapse,initialIndex:model.initialIndex,timeDependent:model.timeDependent,drives:model.drives,frequencyCoordinates:model.frequencyCoordinates,states:model.states.map(state=>state.id)},options};
-      const decorate=result=>({...result,request:token,states:model.states,service:{...result.service,modelBuildMs,modelCacheHit:model.buildCacheHit},engine:'Rust master equation',assumptions:model.assumptions,decayChannels:model.decayChannels});
-      task=service.submit(payload,token,input.stream?result=>event('asymptotic',decorate(result)):undefined);active.set(channel,task);
+      const native=prepareNativeSolve(input);
+      task=service.submit(native.payload,token,input.stream?result=>event('asymptotic',native.respond(result,token)):undefined);active.set(channel,task);
       const result=await task.promise;
       if(active.get(channel)!==task)return;
-      const data=decorate(result);if(input.stream)event('result',data);else finish(channel,200,data);
+      const data=native.respond(result,token);if(input.stream)event('result',data);else finish(channel,200,data);
     }catch(error){
       if(task&&active.get(channel)!==task)return;
       const status=error.status??400,data={error:error.message,code:error.code??'invalid-request',request:token};

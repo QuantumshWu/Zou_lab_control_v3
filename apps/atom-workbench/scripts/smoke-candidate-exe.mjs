@@ -12,7 +12,7 @@ import {nativeChildEnvironment} from './native-child-env.mjs';
 import {defaultScene,resolvePopulationTolerance} from '../dist/js/atom-workbench/src/types.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
-import {EFFECTIVE_MODEL_SCHEMA as SCHEMA} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {FULL_MODEL_SCHEMA} from '../dist/js/atom-workbench/src/solver-protocol.js';
 
 const option=name=>{const i=process.argv.indexOf(name);return i<0?undefined:process.argv[i+1];};
 if(process.argv.includes('--help')){
@@ -82,7 +82,7 @@ function request(kind,options){
   return new Promise((resolveReply,reject)=>{
     const timer=setTimeout(()=>{void worker.receive({kind:'cancel',channel});pending.delete(channel);reject(Error(`${kind} smoke request timed out; no retry started`));},timeout);
     pending.set(channel,{resolve:data=>{clearTimeout(timer);pending.delete(channel);resolveReply(data);},reject:error=>{clearTimeout(timer);pending.delete(channel);reject(error);}});
-    void worker.receive({kind:'solve',channel,request:{scene,modelSchema:SCHEMA,request:token,options,stream:false}});
+    void worker.receive({kind:'solve',channel,request:{scene,modelSchema:FULL_MODEL_SCHEMA,request:token,options,stream:false}});
   });
 }
 const began=performance.now();
@@ -101,11 +101,9 @@ try{
     buildSha256:sha(JSON.stringify(report.backendInfo.numericSource)),defaults:DESKTOP_SOLVER_DEFAULTS}});
   const finite=await request('finite',{...settings,steadyOnly:false,includeAsymptotic:true});
   const parsed=normalizeDynamicsResult(finite,scene,settings.initialStateId);
-  assert.equal(finite.diagnostics.validationKind,'population');
   assert.equal(parsed.populationAccuracy.requestedTolerance,settings.populationTolerance);
   assert.equal(parsed.timesUs.length,settings.samples);assert.equal(parsed.timesUs.at(-1),settings.durationUs);
   assert.equal(parsed.steady.converged,true,'The finite request carries its qualified inline mean');
-  assert.equal(Object.hasOwn(parsed.validation,'positivityError'),false,'Population output must not fabricate a density PSD guarantee');
   const mean=await request('mean',{...settings,steadyOnly:true,includeAsymptotic:true});
   const meanParsed=normalizeDynamicsResult(mean,scene,settings.initialStateId);
   assert.equal(meanParsed.steady.converged,true,'Smoke mean must be qualified, never the finite endpoint');

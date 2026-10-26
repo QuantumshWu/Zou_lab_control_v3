@@ -1,6 +1,6 @@
 import {timeDisplayUnit} from './duration.js';
 import type {DurationUnit} from './types.js';
-import type {SteadyResult} from './solver-types.js';
+import {isTimeAverage,type SteadyResult} from './solver-types.js';
 
 export interface PopulationPlot {timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];steady?:SteadyResult;}
 export interface PopulationChartOptions {scale?:'linear'|'log';viewportWidth?:number;initialId?:string;timeUnit?:DurationUnit;showTotalExcited?:boolean;}
@@ -86,7 +86,7 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     cursor.replaceChildren(element('line',{x1:String(xx),x2:String(xx),y1:String(g.top),y2:String(g.bottom),stroke:'#a19f9d','stroke-width':'1'}));
     for(const id of ids){const p=result.populations[id]![index]!;cursor.append(element('circle',{cx:String(xx),cy:String(g.y(p)),r:'3',fill:options.scale==='log'&&p<=g.floor?'white':populationColor(id),stroke:'white','stroke-width':'1.5'}));}
     cursor.style.display='';
-    const steady=result.steady?.converged&&result.steady.populations?result.steady:undefined,mean=steady?.status==='periodic-mean'||steady?.status==='initial-dependent-mean';
+    const steady=result.steady?.converged&&result.steady.populations?result.steady:undefined,mean=isTimeAverage(steady?.status);
     const head=steady?`<div style="display:grid;grid-template-columns:minmax(100px,1fr) 80px 80px;gap:10px;color:#6a6866;font-size:11px;margin:0 0 5px"><span></span><span style="text-align:right">p(t)</span><span style="text-align:right">${mean?'〈p〉∞':'p∞'}</span></div>`:'';
     const asymptotic=(id:string)=>{if(id!=='__excited__')return steady?.populations?.[id]??NaN;const excited=Object.entries(steady?.populations??{}).filter(([state])=>/^(D1|D2)-/.test(state));return excited.length?excited.reduce((sum,[,p])=>sum+p,0):NaN;};
     const row=(id:string,name:string,p:number,color:string)=>`<div data-population-readout="${esc(id)}" style="display:grid;grid-template-columns:minmax(100px,1fr) 80px${steady?' 80px':''};gap:10px;align-items:center;margin:4px 0"><span title="${esc(name)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;color:${color}">${esc(name)}${id===options.initialId?' · ψ₀':''}</span><span style="text-align:right;font-variant-numeric:tabular-nums">${esc(populationValue(p))}</span>${steady?`<span style="text-align:right;color:#6a6866;font-variant-numeric:tabular-nums">${esc(populationValue(asymptotic(id)))}</span>`:''}</div>`;
