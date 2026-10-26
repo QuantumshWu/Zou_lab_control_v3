@@ -11,18 +11,11 @@ use crate::preparation::{Charge,FourierMatrices,GaugedSource,GaugePolicy,ModelVi
 use crate::preparation::primitives::{self,PrimitivePreparation};
 
 type Modes=BTreeSet<Charge>;
-fn population_thread_policy(value:Option<&str>)->Result<usize,String>{
-    let threads=value.map(str::parse::<usize>).transpose().map_err(|_|"ATOM_POPULATION_BLAS_THREADS must be an integer in1..32")?.unwrap_or(1);
-    if !(1..=32).contains(&threads){return Err("ATOM_POPULATION_BLAS_THREADS must be in1..32".into());}Ok(threads)
-}
-fn configured_lapack()->Result<Lapack,String>{
-    Lapack::load_with_threads(population_thread_policy(std::env::var("ATOM_POPULATION_BLAS_THREADS").ok().as_deref())?)
-}
-/// Worker start-up check: loads LAPACK under the population thread policy
-/// and verifies one Hermitian eigensystem, [[2,1-i],[1+i,3]] -> {1,4}.
+/// Worker start-up check: loads LAPACK and verifies one Hermitian
+/// eigensystem, [[2,1-i],[1+i,3]] -> {1,4}.
 pub fn self_check()->Result<(),String>{
     let a=[C{re:2.,im:0.},C{re:1.,im:1.},C{re:1.,im:-1.},C{re:3.,im:0.}];
-    let(values,_)=configured_lapack()?.hermitian_eigen(&a,2)?;
+    let(values,_)=Lapack::load()?.hermitian_eigen(&a,2)?;
     if (values[0]-1.).abs()>1e-12||(values[1]-4.).abs()>1e-12{return Err("LAPACK numerical self-check failed".into());}Ok(())
 }
 #[path="physical_coordinates.rs"]
@@ -132,9 +125,7 @@ impl OwnedPrepared {
     /// Model matrices. Intermediate mutable primitive structs cannot silently
     /// inject another model or a stale incomplete radiation family.
     pub fn prepare(model:&ModelView<'_>,phases:PhaseBasis,gauge:GaugePolicy<'_>,policy:KernelPolicy)->Result<Self,String>{
-        // Population kernels were validated with one BLAS thread and a
-        // separate output-mode pool. Do not inherit the legacy period's8.
-        let lap=Arc::new(configured_lapack()?);
+        let lap=Arc::new(Lapack::load()?);
         let clock=Instant::now();
         let source=GaugedSource::prepare_with_lapack(model,phases,gauge,&lap)?;
         let gauge_ms=clock.elapsed().as_secs_f64()*1000.;let clock=Instant::now();
@@ -175,7 +166,6 @@ impl OwnedPrepared {
     pub fn primitives(&self)->&PrimitivePreparation{&self.primitives}
     pub fn same_request(&self,other:&Self)->bool{Arc::ptr_eq(&self.primitives,&other.primitives)}
     pub fn shared_coefficient_bytes(&self)->usize{self.coefficient_bytes}
-    pub fn configured_population_blas_threads(&self)->usize{self.preparation_lapack.configured_blas_threads()}
     pub fn physical_coordinates(&self)->coordinates::PhysicalCoordinates{
         coordinates::PhysicalCoordinates::new(Arc::clone(&self.primitives),Arc::clone(&self.preparation_lapack))
     }
@@ -268,32 +258,6 @@ impl OwnedPencil {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn preparation_thread_policy_population_is_explicit_and_legacy_restore_is_stable(){
-        // OpenBLAS settings are process-global. Run the mutating portion in
-        // an isolated test process so this remains safe in a parallel suite.
-        if std::env::var("ATOM_THREAD_POLICY_TEST_CHILD").as_deref()!=Ok("1"){
-            let mut command=std::process::Command::new(std::env::current_exe().unwrap());
-            command.args(["--exact","owned_prepared::tests::preparation_thread_policy_population_is_explicit_and_legacy_restore_is_stable","--nocapture"])
-                .env("ATOM_THREAD_POLICY_TEST_CHILD","1").env("ATOM_BLAS_THREADS","8").env_remove("ATOM_POPULATION_BLAS_THREADS");
-            #[cfg(windows)]{use std::os::windows::process::CommandExt;command.creation_flags(0x08000000);}
-            assert!(command.status().unwrap().success());return;
-        }
-        assert_eq!(population_thread_policy(None).unwrap(),1);
-        assert_eq!(population_thread_policy(Some("4")).unwrap(),4);
-        for bad in["0","33","no"]{assert!(population_thread_policy(Some(bad)).is_err());}
-        let parent=Lapack::load().unwrap();assert_eq!(parent.configured_blas_threads(),8);
-        let core=fixture();assert_eq!(core.configured_population_blas_threads(),1);
-        // Explicit process switching does not overwrite either owner's
-        // configured preference; parent can restore its original8 afterwards.
-        core.preparation_lapack.set_process_blas_threads(2).unwrap();
-        assert_eq!(core.configured_population_blas_threads(),1);assert_eq!(parent.configured_blas_threads(),8);
-        parent.restore_configured_threads().unwrap();
-        assert!(parent.set_process_blas_threads(0).is_err());assert!(Lapack::load_with_threads(33).is_err());
-        std::env::set_var("ATOM_POPULATION_BLAS_THREADS","4");let overridden=fixture();assert_eq!(overridden.configured_population_blas_threads(),4);
-        parent.restore_configured_threads().unwrap();
-        assert_eq!(parent.multiply(&[2.],&[3.],1,1,1),vec![6.]);
-    }
     use crate::preparation::MatrixView;
     fn add(a:&mut C,b:C){a.re+=b.re;a.im+=b.im;}
     fn mul(a:C,b:C)->C{C{re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re}}

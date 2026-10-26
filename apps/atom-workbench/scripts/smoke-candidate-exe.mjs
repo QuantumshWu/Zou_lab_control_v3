@@ -50,7 +50,7 @@ const forward=(command,event)=>Promise.resolve(worker.receive({kind:'native',eve
 function host(command){
   const key=`${command.lane}:${command.generation}`;
   if(command.op==='open'){
-    const child=spawn(exe,['--worker'],{windowsHide:true,stdio:['pipe','pipe','pipe'],env:nativeChildEnvironment(command.lane,baseEnv)});
+    const child=spawn(exe,['--worker'],{windowsHide:true,stdio:['pipe','pipe','pipe'],env:nativeChildEnvironment(baseEnv)});
     const record={lane:command.lane,generation:command.generation,pid:child.pid,args:['--worker'],stderr:'',exitCode:null};
     report.processes.push(record);children.set(key,child);let buffer='';
     child.once('spawn',()=>void forward(command,{kind:'opened',pid:child.pid,binarySha256}));

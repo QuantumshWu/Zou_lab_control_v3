@@ -4,7 +4,7 @@
 //! (a few per worker, balanced by work stealing); each task owns its packing
 //! scratch and calls BLAS
 //! single-threaded (the population core loads OpenBLAS with one thread, see
-//! ATOM_POPULATION_BLAS_THREADS), so BLAS and the pool never oversubscribe.
+//! ATOM_BLAS_THREADS), so BLAS and the pool never oversubscribe.
 //! Every output entry is accumulated by exactly one task. Small stages run
 //! serially on the calling thread.
 //!

@@ -53,7 +53,7 @@ class NativeLane {
     try{
       w.identity=await fileIdentity(this.owner.executable);
       if(this.closed||w.retiring||this.worker!==w){this.worker=null;return;}
-      const child=spawn(this.owner.executable,[],{cwd:app,windowsHide:true,stdio:['pipe','pipe','pipe'],env:nativeChildEnvironment(this.name,process.env)});
+      const child=spawn(this.owner.executable,[],{cwd:app,windowsHide:true,stdio:['pipe','pipe','pipe'],env:nativeChildEnvironment(process.env)});
       w.child=child;w.exit=new Promise(accept=>child.once('close',accept));
       child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
       child.stdout.on('data',data=>this.receive(w,data));

@@ -26,6 +26,6 @@ extern "C" {fn gotoblas_init();fn openblas_set_num_threads(threads:i32);}
 pub(super) fn load(threads:usize)->Result<Lapack,String>{
  let threads=Lapack::checked_thread_count(threads)?;
  unsafe{gotoblas_init();openblas_set_num_threads(threads);}
- Ok(Lapack{_library:std::ptr::null_mut(),blas_threads:threads as usize,set_threads:openblas_set_num_threads,
+ Ok(Lapack{_library:std::ptr::null_mut(),
  geev:dgeev_,gesv:atom_static_dgesv_,getrf:atom_static_dgetrf_,getrs:atom_static_dgetrs_,gecon:dgecon_,syev:dsyev_,heev:zheev_,gemm:dgemm_,zgemm:zgemm_,gees:dgees_,laqtr:dlaqtr_,zgees:zgees_,ztrsyl:ztrsyl_,zgetrf:atom_static_zgetrf_,zgetrs:atom_static_zgetrs_,})
 }

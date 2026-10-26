@@ -33,12 +33,12 @@ fn close_lane(lanes:&mut BTreeMap<String,NativeChild>,lane:&str,proxy:&EventLoop
     if let Some(mut native)=lanes.remove(lane){native.stop();emit(proxy,&native.session,json!({"kind":"closed","lane":lane,"generation":native.generation}));}
 }
 fn close_all(lanes:&mut BTreeMap<String,NativeChild>,proxy:&EventLoopProxy<UiEvent>){let names:Vec<_>=lanes.keys().cloned().collect();for name in names{close_lane(lanes,&name,proxy);}}
-fn configure_blas_environment(command:&mut Command,defaults:&BTreeMap<String,String>,lane:&str)->String{
-    let key=if lane=="steady"{"ATOM_STEADY_BLAS_THREADS"}else{"ATOM_TRAJECTORY_BLAS_THREADS"};
-    let raw=defaults.get(key).filter(|v|!v.is_empty()).or_else(||defaults.get("ATOM_BLAS_THREADS").filter(|v|!v.is_empty())).map(String::as_str).unwrap_or("1");
-    let threads=raw.parse::<i32>().unwrap_or(1).clamp(1,32).to_string();
-    // Private child only. OpenBLAS initializes in DllMain, before Rust's
-    // lapack::load setter; supplying the same final count avoids idle pools.
+fn configure_blas_environment(command:&mut Command,defaults:&BTreeMap<String,String>)->String{
+    let raw=defaults.get("ATOM_BLAS_THREADS").filter(|v|!v.is_empty()).map(String::as_str).unwrap_or("1");
+    let threads=raw.parse::<u32>().ok().filter(|t|(1..=32).contains(t)).unwrap_or(1).to_string();
+    // Private child only. OpenBLAS sizes its pool when it initializes, before
+    // Rust's lapack::load applies ATOM_BLAS_THREADS; the same count avoids an
+    // idle pool. An invalid ATOM_BLAS_THREADS reaches the worker, which rejects it.
     command.env("ATOM_BLAS_THREADS",raw).env("OPENBLAS_NUM_THREADS",&threads);threads
 }
 
@@ -90,7 +90,7 @@ fn supervisor(backend:Backend,data:PathBuf,test_mode:bool,proxy:EventLoopProxy<U
                     let instance=sessions.next()?;
                     let mut command=Command::new(&exe);command.current_dir(&backend.working).envs(&defaults).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(0x08000000);
                     if backend.embedded{command.arg("--worker").env_remove("ATOM_OPENBLAS_DLL");}
-                    let blas_threads=configure_blas_environment(&mut command,&defaults,&lane);
+                    let blas_threads=configure_blas_environment(&mut command,&defaults);
                     let mut child=command.spawn().map_err(|e|e.to_string())?;let spawned=Instant::now();let job=match Job::contain(&child){Ok(j)=>j,Err(e)=>{let _=child.kill();let _=child.wait();return Err(e);}};
                     let stdout=child.stdout.take().unwrap();let stderr=child.stderr.take().unwrap();let tx=sender.clone();let name=lane.clone();
                     std::thread::spawn(move||{let mut reader=BufReader::new(stdout);let mut error=None;loop{let mut line=String::new();match reader.read_line(&mut line){Ok(0)=>break,Ok(_)=>{if line.len()>64*1024*1024{error=Some("Native response exceeded 64 MiB".into());break;}if tx.send(HostMessage::Line{lane:name.clone(),instance,line}).is_err(){return;}},Err(e)=>{error=Some(e.to_string());break;}}}let _=tx.send(HostMessage::Eof{lane:name,instance,error});});

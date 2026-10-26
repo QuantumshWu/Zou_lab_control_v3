@@ -50,7 +50,7 @@ test('Worker sends the identical complete model, finite jobs to the trajectory l
   };
   worker=createModelWorker(message=>{events.push(message);if(message.kind==='native')host(message.command);});
   await worker.receive({kind:'solve',channel:'invalid',request:{}});
-  await worker.receive({kind:'native',event:{kind:'configuration',binarySha256:'binary',buildSha256:'build',defaults:{ATOM_STEADY_BLAS_THREADS:'1',ATOM_TRAJECTORY_BLAS_THREADS:'8'}}});
+  await worker.receive({kind:'native',event:{kind:'configuration',binarySha256:'binary',buildSha256:'build',defaults:{ATOM_BLAS_THREADS:'1',ATOM_PENCIL_THREADS:'8'}}});
   await tick();assert.equal(events.find(e=>e.channel==='invalid').status,400);
   const scene=defaultScene();scene.lasers[1].enabled=false;scene.lasers.push({...scene.lasers[0],id:'second',detuningMHz:100});
   const options={durationUs:0.1,samples:3,populationTolerance:.003731,steadyOnly:false,includeAsymptotic:true};const request={scene,modelSchema:SCHEMA,stream:true,request:{clientId:'worker-test',sequence:1},options};

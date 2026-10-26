@@ -144,10 +144,15 @@ extern "system" {
     fn LoadLibraryW(name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
 }
+fn blas_threads(setting:Result<String,std::env::VarError>)->Result<usize,String>{
+    match setting{
+        Ok(value)=>value.parse::<usize>().ok().filter(|t|(1..=32).contains(t)).ok_or_else(||"ATOM_BLAS_THREADS must be an integer in 1..32".into()),
+        Err(std::env::VarError::NotPresent)=>Ok(1),
+        Err(_)=>Err("Invalid ATOM_BLAS_THREADS environment value".into()),
+    }
+}
 pub struct Lapack {
     _library: *mut c_void,
-    blas_threads: usize,
-    set_threads: SetThreads,
     geev: GeEv,
     gesv: GeSv,
     getrf: GetRf,
@@ -326,19 +331,9 @@ impl SylvesterKernel<'_> {
     }
 }
 impl Lapack {
-    /// Load-time preference for this owner, not a query of OpenBLAS's shared
-    /// process setting. Another request-local owner may temporarily change it.
-    pub fn configured_blas_threads(&self) -> usize { self.blas_threads }
     fn checked_thread_count(threads:usize)->Result<i32,String>{
         if !(1..=32).contains(&threads){return Err("Explicit OpenBLAS thread count must be in1..32".into());}Ok(threads as i32)
     }
-    /// Change the process setting through THIS loaded library's same entry.
-    /// Call only between numerical operations, not concurrently with BLAS work.
-    /// This intentionally leaves the owner's load-time preference unchanged.
-    pub fn set_process_blas_threads(&self,threads:usize)->Result<(),String>{
-        let threads=Self::checked_thread_count(threads)?;unsafe{(self.set_threads)(threads);}Ok(())
-    }
-    pub fn restore_configured_threads(&self)->Result<(),String>{self.set_process_blas_threads(self.blas_threads)}
     pub fn sylvester_kernel(&self) -> SylvesterKernel<'_> {
         SylvesterKernel { zgemm:self.zgemm, ztrsyl:self.ztrsyl, zgetrs:self.zgetrs,
             _owner:std::marker::PhantomData }
@@ -348,10 +343,11 @@ impl Lapack {
         ComplexGemm { zgemm: self.zgemm, _owner: std::marker::PhantomData }
     }
 
+    /// The worker's BLAS threads, `ATOM_BLAS_THREADS` in 1..=32 (default 1).
+    /// The population kernels parallelize over output modes instead
+    /// (`ATOM_PENCIL_THREADS`), so BLAS itself normally runs single-threaded.
     pub fn load() -> Result<Self, String> {
-        // Preserve the legacy environment/default/clamping semantics exactly.
-        let threads=std::env::var("ATOM_BLAS_THREADS").ok().and_then(|s|s.parse::<i32>().ok()).unwrap_or(1).clamp(1,32);
-        Self::load_with_threads(threads as usize)
+        Self::load_with_threads(blas_threads(std::env::var("ATOM_BLAS_THREADS"))?)
     }
     #[cfg(feature="static-numerics")]
     pub fn load_with_threads(threads:usize)->Result<Self,String>{
@@ -395,8 +391,6 @@ impl Lapack {
             set_threads(threads);
             Ok(Self {
                 _library: library,
-                blas_threads: threads as usize,
-                set_threads,
                 geev: symbol(library, b"scipy_dgeev_\0")?,
                 gesv: symbol(library, b"scipy_dgesv_\0")?,
                 getrf: symbol(library, b"scipy_dgetrf_\0")?,
@@ -1022,6 +1016,15 @@ impl Lapack {
 #[cfg(test)]
 mod added_wrapper_tests {
     use super::*;
+    #[test]
+    fn blas_thread_setting_is_one_by_default_and_strict() {
+        use std::env::VarError;
+        assert_eq!(blas_threads(Err(VarError::NotPresent)), Ok(1));
+        assert_eq!(blas_threads(Ok("4".into())), Ok(4));
+        for bad in ["0", "33", "no", ""] {
+            assert!(blas_threads(Ok(bad.into())).is_err());
+        }
+    }
     #[test]
     fn complex_hermitian_vectors_and_values_are_column_major() {
         let lap = Lapack::load().unwrap();
