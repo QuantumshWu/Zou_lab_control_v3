@@ -5,6 +5,10 @@ use super::*;
 use crate::parallel::Execution;
 use crate::pencil::{Commutator, Gemm, Scratch};
 
+/// States pulled back together through the shear layers (see
+/// `PopulationObservation::prepare`).
+const STATE_CHUNK:usize=4;
+
 /// Matches the existing production Model protocol exactly. `index` is the
 /// GLOBAL state index, not an index into the ground-state subset. Both full
 /// row-major real/imaginary arrays must be present together or both absent.
@@ -234,11 +238,11 @@ impl DualCommutator{
     }
 }
 impl PopulationObservation{
-    /// Readout duals D = J2(S_0)^T ... J2(S_last)^T (I + K^T) O, with
-    /// J2(S)^T = I + ad_S^T + (ad_S^T)^2/2 per shear layer and O_s the
-    /// population functional of state s in the Hilbert frame. States
+    /// Readout duals D = T_0^T ... T_last^T (I + K^T) O, with
+    /// T^T = I + sum_c (ad_{S_c}^T + (ad_{S_c}^T)^2/2) per shear layer and
+    /// O_s the population functional of state s in the Hilbert frame. States
     /// whose (I + K^T) O_s are nonzero on the same charges are pulled back
-    /// together (Rb87: excited-state functionals live on charge 0 only).
+    /// together, `STATE_CHUNK` at a time.
     fn prepare(coordinates:&PhysicalCoordinates)->Result<Self,String>{
         let p=&coordinates.primitives;let n=p.hilbert.source.n;let g=p.hilbert.source.ground.len();let e=n-g;
         let basis=&p.hilbert.basis_column_major;let zero=vec![0;p.hilbert.source.phases.axes.len()];
@@ -266,56 +270,45 @@ impl PopulationObservation{
         let mut patterns=BTreeMap::<Vec<usize>,Vec<usize>>::new();
         for state in 0..n{let key:Vec<usize>=(0..before.charges.len()).filter(|&m|nonzero(m,state)).collect();
             if !key.is_empty(){patterns.entry(key).or_default().push(state);}}
-        // Pulled back through the shear layers, outermost first:
-        // D <- D + ad^T D + (ad^T)^2 D / 2 per layer.
-        let mut commutators=p.layers.iter().rev().map(|layer|layer.iter().map(|class|DualCommutator::new(class,n,g,Arc::clone(&coordinates.lapack))).collect::<Result<Vec<_>,_>>()).collect::<Result<Vec<_>,_>>()?;
-        let mut groups=Vec::new();
-        for(key,states)in patterns{let r=states.len();
-            let mut own=Duals::zeros(key.iter().map(|&m|before.charges[m].clone()).collect(),n,r);
-            for(local_charge,&m)in key.iter().enumerate(){for(local,&state)in states.iter().enumerate(){for i in 0..n{for j in 0..n{
-                own.values[local_charge*n*n*r+dual_at(n,r,local,i,j)]=before.values[m*size+at(state,i,j)];
-            }}}}
-            for layer in &mut commutators{let mut parts=Vec::with_capacity(2*layer.len()+1);
-                for commutator in layer.iter_mut(){let once=commutator.apply(&own,1.,true)?;let twice=commutator.apply(&once,0.5,true)?;parts.push(once);parts.push(twice);}
-                let mut all:Vec<&Duals>=vec![&own];all.extend(parts.iter());own=Duals::sum(&all,n);
-            }
-            groups.push((states,[own]));
-        }
-        let charges:Vec<Charge>=groups.iter().flat_map(|(_,parts)|parts.iter().flat_map(|d|d.charges.iter().cloned())).collect::<Modes>().into_iter().collect();
-        let charge_index:BTreeMap<&Charge,usize>=charges.iter().enumerate().map(|(i,q)|(q,i)).collect();
-        // blocks[group][charge]: the complete dual block at that charge.
-        let mut blocks:Vec<Vec<Vec<&[C]>>>=vec![vec![Vec::new();charges.len()];groups.len()];
-        for(group,(_,parts))in groups.iter().enumerate(){for part in parts{for(m,q)in part.charges.iter().enumerate(){
-            blocks[group][charge_index[q]].push(part.block(n,m));}}}
-        let mut owner=vec![None;n];
-        for(group,(states,_))in groups.iter().enumerate(){for(local,&state)in states.iter().enumerate(){owner[state]=Some((group,local,states.len()));}}
-        let complete=|charge:usize,state:usize,i:usize,j:usize|->C{owner[state].map_or(C::default(),|(group,local,r)|{
-            let at=dual_at(n,r,local,i,j);blocks[group][charge].iter().fold(C::default(),|mut sum,block|{add(&mut sum,block[at]);sum})})};
+        // Entries below 1e-15 of the largest functional entry are accumulated
+        // roundoff of the S/K pull-back (which changes entries by O(|S|)
+        // relative). Dropping them changes a population by at most
+        // 1e-15*max|O|*(number of dropped entries)*|x|, far below any
+        // requested tolerance, and removes most of the readout work.
         let magnitude=|z:C|z.re*z.re+z.im*z.im;
-        let execution=Execution::new()?;let execution=&execution;let minimum=crate::parallel::MINIMUM_WORK_PER_TASK;let work=charges.len()*size*16;
-        let mut largest=vec![0_f64;charges.len()];
-        execution.for_mode_chunks(&mut largest,1,work,minimum,&mut Vec::<()>::new(),|first,chunk,_|{
-            for(k,value)in chunk.iter_mut().enumerate(){
-                *value=(0..n).flat_map(|s|(0..n).flat_map(move|i|(0..n).map(move|j|(s,i,j)))).map(|(s,i,j)|magnitude(complete(first+k,s,i,j))).fold(0_f64,f64::max);
-            }Ok(())
-        })?;
-        // Entries below 1e-15 of the largest dual entry are accumulated
-        // roundoff of the S/K pull-back. Dropping them changes a population
-        // by at most 1e-15*max|D|*(number of dropped entries)*|x|, far below
-        // any requested tolerance, and removes ~3/4 of the readout work.
-        let largest=largest.into_iter().fold(0_f64,f64::max).sqrt();
+        let largest=before.values.iter().map(|&z|magnitude(z)).fold(0_f64,f64::max).sqrt();
         let floor=1e-15*largest;let floor_squared=floor*floor;
         if largest>0.&&!floor_squared.is_normal(){return Err("Readout dual magnitudes outside the normal floating-point range".into());}
-        let mut rows=vec![Vec::new();charges.len()];
-        execution.for_mode_chunks(&mut rows,1,work,minimum,&mut Vec::<()>::new(),|first,chunk,_|{
-            for(k,entries)in chunk.iter_mut().enumerate(){
-                for state in 0..n{for i in 0..n{for j in 0..n{let z=complete(first+k,state,i,j);
-                    if magnitude(z)>floor_squared{entries.push((state,i*n+j,z));}
-                }}}
-            }Ok(())
-        })?;
-        drop(blocks);
-        let(charges,rows):(Vec<_>,Vec<_>)=charges.into_iter().zip(rows).filter(|(_,entries)|!entries.is_empty()).unzip();
+        // Pulled back through the shear layers, outermost first:
+        // D <- D + ad^T D + (ad^T)^2 D / 2 per layer. The states go through
+        // STATE_CHUNK at a time and each chunk keeps only its entries above
+        // the floor: with a strong far laser the layers reach thousands of
+        // charges, where dense duals of all states would take ~1 GB while
+        // under 1 % of their entries are nonzero.
+        let mut commutators=p.layers.iter().rev().map(|layer|layer.iter().map(|class|DualCommutator::new(class,n,g,Arc::clone(&coordinates.lapack))).collect::<Result<Vec<_>,_>>()).collect::<Result<Vec<_>,_>>()?;
+        let execution=Execution::new()?;let execution=&execution;let minimum=crate::parallel::MINIMUM_WORK_PER_TASK;
+        let mut collected=BTreeMap::<Charge,Vec<(usize,usize,C)>>::new();
+        for(key,states)in patterns{for chunk in states.chunks(STATE_CHUNK){let r=chunk.len();
+            let mut own=Duals::zeros(key.iter().map(|&m|before.charges[m].clone()).collect(),n,r);
+            for(local_charge,&m)in key.iter().enumerate(){for(local,&state)in chunk.iter().enumerate(){for i in 0..n{for j in 0..n{
+                own.values[local_charge*n*n*r+dual_at(n,r,local,i,j)]=before.values[m*size+at(state,i,j)];
+            }}}}
+            for layer in &mut commutators{let mut total:Option<Duals>=None;
+                for commutator in layer.iter_mut(){let once=commutator.apply(&own,1.,true)?;let twice=commutator.apply(&once,0.5,true)?;
+                    total=Some(Duals::sum(&[total.as_ref().unwrap_or(&own),&once,&twice],n));}
+                if let Some(total)=total{own=total;}
+            }
+            let mut rows=vec![Vec::new();own.charges.len()];let work=own.charges.len()*n*n*r*4;
+            execution.for_mode_chunks(&mut rows,1,work,minimum,&mut Vec::<()>::new(),|first,part,_|{
+                for(k,entries)in part.iter_mut().enumerate(){let block=own.block(n,first+k);
+                    for(local,&state)in chunk.iter().enumerate(){for i in 0..n{for j in 0..n{let z=block[dual_at(n,r,local,i,j)];
+                        if magnitude(z)>floor_squared{entries.push((state,i*n+j,z));}
+                    }}}
+                }Ok(())
+            })?;
+            for(q,entries)in own.charges.iter().zip(rows){if !entries.is_empty(){collected.entry(q.clone()).or_default().extend(entries);}}
+        }}
+        let(charges,rows):(Vec<_>,Vec<_>)=collected.into_iter().map(|(q,mut entries)|{entries.sort_by_key(|&(state,at,_)|(state,at));(q,entries)}).unzip();
         Ok(Self{owner:Arc::clone(p),charges,rows})
     }
     /// Output modes reached by the readout from the given domain modes.
