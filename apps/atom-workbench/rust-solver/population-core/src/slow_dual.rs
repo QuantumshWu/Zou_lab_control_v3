@@ -1431,6 +1431,14 @@ pub struct SlowDual {
     /// fields at fast charges (None only for synthetic test duals).
     elimination: Option<Elimination>,
     pub(crate) diagnostics: SlowDualDiagnostics,
+    /// Ground "energies" `eps_a` (rad/us) of the slot criterion.
+    pub(crate) ground_energy: Vec<f64>,
+}
+
+/// The slot criterion: some ground coherence at envelope frequency `nu` has
+/// `|nu + eps_a - eps_b| < cutoff`.
+fn slow_ground_coherence(nu: f64, ground_energy: &[f64], cutoff: f64) -> bool {
+    ground_energy.iter().any(|a| ground_energy.iter().any(|b| (nu + a - b).abs() < cutoff))
 }
 
 /// Factored no-jump structure plus a cache of fast charge-block inverses
@@ -1514,10 +1522,7 @@ impl SlowDual {
             }
             Ok(out)
         };
-        let is_slow = |c: &Charge| -> Result<bool, String> {
-            let nu = frequency(c)?;
-            Ok(*c != zero && (0..g).any(|a| (0..g).any(|b| (nu + ground_energy[a] - ground_energy[b]).abs() < cutoff)))
-        };
+        let is_slow = |c: &Charge| -> Result<bool, String> { Ok(*c != zero && slow_ground_coherence(frequency(c)?, &ground_energy, cutoff)) };
         let strong: Vec<&Charge> = frame.terms.iter().filter(|t| t.significant).map(|t| &t.charge).collect();
         let all: Vec<&Charge> = frame.terms.iter().map(|t| &t.charge).collect();
         let candidates = two_hops(&strong)?;
@@ -1841,6 +1846,7 @@ impl SlowDual {
             slaved_central,
             elimination: Some(Elimination { blocks: Arc::clone(&blocks), sylvester: full_sylvester, cache: Default::default(), slow_cache: Default::default() }),
             diagnostics,
+            ground_energy,
         })
     }
 
@@ -1849,6 +1855,10 @@ impl SlowDual {
     pub fn dimension(&self) -> usize { self.generator.rows }
     pub(crate) fn ground_entries(&self) -> usize { self.g * self.g }
     pub(crate) fn slot_of(&self, charge: &[i32]) -> Option<usize> { self.slots.iter().position(|s| s == charge) }
+    /// Whether a charge at envelope frequency `nu` carries a slow ground
+    /// coherence (the slot criterion; slots are the slow charges two
+    /// significant couplings reach).
+    pub(crate) fn is_slow(&self, nu: f64) -> bool { slow_ground_coherence(nu, &self.ground_energy, self.diagnostics.slow_frequency_cutoff) }
 
     /// Non-ground inverse of a slow charge for a field with a slow envelope,
     /// `(i nu_c - L_0)_{QQ}^{-1}` (cached).
@@ -2088,9 +2098,6 @@ impl DressedFrame {
 
     /// `V_L^-1 X V_R` for an n x n frame matrix.
     pub fn to_eigen(&self, x: &Dense, lap: &Lapack) -> Result<Dense, String> { self.left_inverse.multiply(x, lap)?.multiply(&self.right, lap) }
-
-    /// `V_L Xhat V_R^-1`: back to frame coordinates.
-    pub fn from_eigen(&self, x: &Dense, lap: &Lapack) -> Result<Dense, String> { self.left.multiply(x, lap)?.multiply(&self.right_inverse, lap) }
 }
 
 /// Output times evaluated together in the family products (bounds memory).
@@ -2181,8 +2188,9 @@ pub(crate) struct Series {
     /// Dressed recycling sources into slot `s`:
     /// `h_ik M_s[:, ik] exp((a_i + b_k + i o) t)` per offset `o`.
     pub(crate) dressed_slow: BTreeMap<(usize, i64), (f64, Vec<C>)>,
-    /// Single exponential sources `v exp(mu t)` (split resonant pairs).
-    pub(crate) slow_points: Vec<(C, Vec<C>)>,
+    /// Single exponential sources `v exp(mu t)` (split resonant pairs),
+    /// summed per exponent (`exponent_key`).
+    pub(crate) slow_points: BTreeMap<(u64, u64), (C, Vec<C>)>,
     /// Clustered pair sources `v e_t[mu1, mu2]`.
     pub(crate) slow_pairs: Vec<(C, C, Vec<C>)>,
     /// Initial slow error (J eigen-coordinates).
@@ -2194,6 +2202,21 @@ pub(crate) struct Series {
     pub(crate) dressed_direct: Option<Vec<C>>,
     /// Direct near-resonant populations `p e_t[x, y]`.
     pub(crate) direct_near: Vec<(Vec<C>, C, C)>,
+    /// Direct single exponentials `p exp(mu t)` (split near-resonant
+    /// populations), summed per exponent.
+    pub(crate) direct_points: BTreeMap<(u64, u64), (C, Vec<C>)>,
+}
+
+/// Exact key of an exponent: split pair nodes computed from the same inputs
+/// share it, so their terms merge into one exponential.
+fn exponent_key(mu: C) -> (u64, u64) { (mu.re.to_bits(), mu.im.to_bits()) }
+
+/// `points[mu] += scale * v`.
+fn add_point(points: &mut BTreeMap<(u64, u64), (C, Vec<C>)>, mu: C, scale: C, v: &[C]) {
+    let entry = points.entry(exponent_key(mu)).or_insert_with(|| (mu, vec![ZERO; v.len()]));
+    for (a, b) in entry.1.iter_mut().zip(v) {
+        *a = cadd(*a, cmul(scale, *b));
+    }
 }
 
 fn accumulate(target: &mut Dense, values: &Dense) {
@@ -2218,12 +2241,13 @@ impl Series {
             t_max,
             slow: BTreeMap::new(),
             dressed_slow: BTreeMap::new(),
-            slow_points: Vec::new(),
+            slow_points: BTreeMap::new(),
             slow_pairs: Vec::new(),
             initial: None,
             direct: BTreeMap::new(),
             dressed_direct: None,
             direct_near: Vec::new(),
+            direct_points: BTreeMap::new(),
         }
     }
 
@@ -2268,11 +2292,25 @@ impl Series {
         let delta = csub(first, second);
         if cabs(delta) * self.t_max > 1. {
             let scale = cdiv(ONE, delta);
-            let minus: Vec<C> = v.iter().map(|x| csub(ZERO, cmul(*x, scale))).collect();
-            self.slow_points.push((first, v.iter().map(|x| cmul(*x, scale)).collect()));
-            self.slow_points.push((second, minus));
+            add_point(&mut self.slow_points, first, scale, &v);
+            add_point(&mut self.slow_points, second, csub(ZERO, scale), &v);
         } else {
             self.slow_pairs.push((first, second, v));
+        }
+    }
+
+    /// Direct populations `p e_t[first, second]`, split like `add_pair`: a
+    /// slow halo mode has one such term per candidate column and resonant
+    /// coherence, and the split ones merge into one exponential per column
+    /// and per coherence.
+    pub(crate) fn add_direct_pair(&mut self, first: C, second: C, p: Vec<C>) {
+        let delta = csub(first, second);
+        if cabs(delta) * self.t_max > 1. {
+            let scale = cdiv(ONE, delta);
+            add_point(&mut self.direct_points, first, scale, &p);
+            add_point(&mut self.direct_points, second, csub(ZERO, scale), &p);
+        } else {
+            self.direct_near.push((p, first, second));
         }
     }
 }
@@ -2379,7 +2417,7 @@ impl SlowDual {
             return Err("Dressed sources without a dressed frame".into());
         }
         // 3. Single exponential sources: particular amplitudes per readout group.
-        for (mu, v) in &series.slow_points {
+        for (mu, v) in series.slow_points.values() {
             let mut c = Dense::zeros(dim, 1);
             for k in 0..dim {
                 if v[k].re != 0. || v[k].im != 0. {
@@ -2508,6 +2546,9 @@ impl SlowDual {
             self.add_homogeneous(&mut out, &homogeneous, grid);
         }
         // 8. Direct near-resonant populations.
+        for (mu, p) in series.direct_points.values() {
+            add_natural(&mut out, n, &Dense { rows: n, cols: 1, data: p.clone() }, &[*mu], grid);
+        }
         for (p, x, y) in &series.direct_near {
             for (it, &t) in grid.times.iter().enumerate() {
                 let value = exp_divided_2(*x, *y, t);
@@ -3159,6 +3200,7 @@ mod tests {
                 dressed_condition: None,
                 preparation_ms: 0.,
             },
+            ground_energy: vec![],
         };
         // Families with beta = {0, -0.1}: resonant with alpha[0] (secular
         // growth), separated, a fast-phase family, a clustered and a separable
@@ -3182,6 +3224,11 @@ mod tests {
         let separable = (complex(-1.0, 2.0), complex(0.3, -0.5), vec![complex(0.1, 0.), ZERO, complex(0.05, -0.02)]);
         let initial = [complex(0.2, 0.), complex(0., 0.1), complex(-0.1, 0.)];
         let near = (vec![complex(0.01, 0.), complex(0., 0.02), ZERO], complex(-0.2, 1.), complex(-0.2001, 1.));
+        // Separated direct pairs sharing their second node (split and merged).
+        let split = [
+            (vec![complex(0.02, 0.), complex(0., -0.01), complex(0.03, 0.01)], complex(-0.3, 2.), complex(-1., -1.5)),
+            (vec![complex(-0.01, 0.02), ZERO, complex(0.01, 0.)], complex(0.05, -0.7), complex(-1., -1.5)),
+        ];
         let uniform: Vec<f64> = (0..9).map(|i| 0.5 * i as f64).collect();
         for times in [vec![0., 0.5, 1.7, 4.0], uniform] {
             let grid = TimeGrid::new(&times);
@@ -3193,6 +3240,10 @@ mod tests {
             series.add_initial(&initial);
             series.add_direct(2., 0, &direct);
             series.direct_near.push(near.clone());
+            for (p, first, second) in &split {
+                series.add_direct_pair(*first, *second, p.clone());
+            }
+            assert_eq!(series.direct_points.len(), 3, "the shared node merges");
             let values = dual.evaluate(&series, &grid).unwrap();
             // Reference: integrate x' = alpha x + s(t) with RK4 on a fine grid.
             let source = |s: f64| -> Vec<C> {
@@ -3235,6 +3286,9 @@ mod tests {
                         expected = cadd(expected, cmul(direct.at(k, j), cexp(cscale(cadd(beta[j], complex(0., 2.)), t_end))));
                     }
                     expected = cadd(expected, cmul(near.0[k], exp_divided_2(near.1, near.2, t_end)));
+                    for (p, first, second) in &split {
+                        expected = cadd(expected, cmul(p[k], exp_divided_2(*first, *second, t_end)));
+                    }
                     let error = cabs(csub(values[it * dim + k], expected));
                     assert!(error < 1e-8, "time {t_end} mode {k}: {error:e}");
                 }
