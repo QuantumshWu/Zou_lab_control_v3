@@ -76,18 +76,8 @@ fn lift_real(old:&[f64],old_map:&RealFourierMap,new_map:&RealFourierMap,columns:
 }
 
 fn scratch_upper_per_rhs(shell:&OwnedPencil,old_rows:usize,new_rows:usize,shell_rows:usize)->Result<usize,String>{
-    let p=&shell.plan;
-    // Exact core workspace element counts; packed BLAS buffers can retain
-    // at most their growth slack (two times each largest request plus8).
-    let base=sum_size(&[product(&[p.ni,p.d])?,product(&[p.nd,p.d])?,product(&[p.nj,p.d])?,
-        product(&[p.nj,p.e,p.e])?,product(&[p.nz,p.rank])?,product(&[2,p.no,p.d])?])?;
-    let(mut packed,mut result)=(0,0);
-    if p.lapack.is_some(){for stage in &p.stages[4..]{for link in stage{
-        let coefficient=&p.coefficients[link.coefficient];
-        if !coefficient.dense.is_empty(){packed=packed.max(product(&[coefficient.cols,link.source.len()])?);
-            result=result.max(product(&[coefficient.rows,link.source.len()])?);}
-    }}}
-    let internal=product(&[sum_size(&[base,product(&[2,packed])?,product(&[2,result])?,16])?,24])?;
+    // Kernel-owned bound of the pencil workspace per right-hand side.
+    let internal=shell.workspace_bytes_per_rhs();
     let external=sum_size(&[product(&[old_rows,24])?,product(&[shell_rows,48])?,product(&[new_rows,48])?])?;
     sum_size(&[internal,external])
 }

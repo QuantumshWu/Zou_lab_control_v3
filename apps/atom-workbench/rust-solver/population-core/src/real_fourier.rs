@@ -75,15 +75,6 @@ impl RealFourierMap{
             add(&mut output[column*rhs+b],mul(conj(e.value),input[e.row*rhs+b]));
         }}}if output.iter().any(|z|!z.finite()){return Err("Complex Fourier pull overflow".into());}Ok(())
     }
-    /// |T^dagger| times the complete native arithmetic envelope. It is used
-    /// only for the same entered-basis reality guard, not population accuracy.
-    pub fn pull_envelope_into(&self,input:&[f64],rhs:usize,output:&mut[f64])->Result<(),String>{
-        self.shape(input.len(),output.len(),rhs)?;
-        if input.iter().any(|x|!x.is_finite()||*x<0.){return Err("Invalid nonnegative Fourier operation envelope".into());}
-        output.fill(0.);for column in 0..self.dimension(){for e in &self.entries[self.offsets[column]..self.offsets[column+1]]{let weight=e.value.re.hypot(e.value.im);
-            for b in 0..rhs{output[column*rhs+b]+=weight*input[e.row*rhs+b];}}}
-        if output.iter().any(|x|!x.is_finite()){return Err("Fourier operation envelope overflow".into());}Ok(())
-    }
     /// Explicit P0/proposal convention Re(T^dagger P T x). This is not an
     /// accepted physical action and must never replace its complex residual.
     pub fn pull_real_proposal_into(&self,input:&[C],rhs:usize,output:&mut[f64])->Result<ProposalProjectionDiagnostics,String>{

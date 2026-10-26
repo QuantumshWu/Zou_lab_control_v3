@@ -57,28 +57,6 @@ impl PreparedRealityBudget{
         Ok(Self{e_norm,e_defect,f_base_defect,s_defect:ds,k_defect:dk,nojump_defect:dn,recycling_defect:dr,gg_action_defect:dl})
     }
 }
-#[derive(Clone,Debug)]
-pub(super) struct RealGuardReport{pub passed:bool,pub maximum_ratio:f64,pub maximum_arithmetic_ratio:f64,pub failed_index:usize,pub excess_hs:f64,pub preparation_allowance_hs:f64}
-/// The distance from Imag(output) to the ORIGINAL componentwise arithmetic
-/// box must fit one preparation HS ball per RHS. A full HS budget is not
-/// independently spent on every component. No coefficient is altered.
-pub(super) fn check_real_image(value:&[C],envelope:&[f64],rhs:usize,input_hs:&[f64],terms:f64,defect:f64)->Result<RealGuardReport,String>{
-    if rhs==0||value.len()!=envelope.len()||value.len()%rhs!=0||input_hs.len()!=rhs||!defect.is_finite()||defect<0.||!terms.is_finite()||terms<0.
-        ||value.iter().any(|z|!z.finite())||envelope.iter().any(|x|!x.is_finite()||*x<0.)||input_hs.iter().any(|x|!x.is_finite()||*x<0.){
-        return Err("Invalid complete REAL image/preparation budget".into());}
-    let rows=value.len()/rhs;let mut report=RealGuardReport{passed:true,maximum_ratio:0.,maximum_arithmetic_ratio:0.,failed_index:0,excess_hs:0.,preparation_allowance_hs:0.};
-    for column in 0..rhs{let preparation=0.5*defect*input_hs[column];let mut excess_hs=0_f64;let mut largest=0_f64;let mut at=column;
-        if !preparation.is_finite(){return Err("Prepared REAL image allowance overflow".into());}
-        for i in 0..rows{let index=i*rhs+column;let imaginary=value[index].im.abs();let arithmetic=256.*f64::EPSILON*terms*envelope[index];let excess=(imaginary-arithmetic).max(0.);
-            excess_hs=excess_hs.hypot(excess);if excess>largest{largest=excess;at=index;}
-            let raw=if arithmetic==0.{if imaginary==0.{0.}else{f64::INFINITY}}else{imaginary/arithmetic};report.maximum_arithmetic_ratio=report.maximum_arithmetic_ratio.max(raw);
-            let allowance=arithmetic+preparation;let ratio=if allowance==0.{if imaginary==0.{0.}else{f64::INFINITY}}else{imaginary/allowance};report.maximum_ratio=report.maximum_ratio.max(ratio);
-        }
-        let ratio=if preparation==0.{if excess_hs==0.{0.}else{f64::INFINITY}}else{excess_hs/preparation};report.maximum_ratio=report.maximum_ratio.max(ratio);
-        if excess_hs>preparation{report.passed=false;report.failed_index=at;report.excess_hs=excess_hs;report.preparation_allowance_hs=preparation;return Ok(report);}
-    }Ok(report)
-}
-
 pub struct RuntimeCore{
     owned:OwnedPrepared,physical:PhysicalCoordinates,initial:InitialCoordinates,
     observer:Arc<PopulationObservation>,p0:RequestP0,preparation_profile:RuntimePreparationProfile,
@@ -289,41 +267,6 @@ impl Candidate{
 #[cfg(test)]
 mod tests{
     use super::*;
-    #[test]
-    fn preparation_real_budget_covers_known_coefficient_defect_without_changing_physics(){
-        let owner=super::super::tests::fixture();let lap=Arc::clone(&owner.preparation_lapack);
-        let mut primitive=match Arc::try_unwrap(owner.primitives){Ok(p)=>p,Err(_)=>panic!("fixture owner was unexpectedly shared")};
-        let h=primitive.hilbert.source.hamiltonian.clone();let channels=primitive.hilbert.source.collapse.clone();
-        let g=primitive.hilbert.source.ground.len();let e=primitive.hilbert.source.excited.len();let n=g+e;
-        let key=primitive.k_hat.keys().find(|q|q.iter().copied().find(|&x|x!=0).is_some_and(|x|x>0)).unwrap().clone();
-        // Known numerical preparation perturbation in ONE signed auxiliary
-        // coefficient. Keep GG trace and every original physical H/C unchanged.
-        let delta=1e-11;for(row,amount)in[(0,delta),(g*g-1,-delta)]{
-            primitive.k_hat.get_mut(&key).unwrap()[row*e*e].re+=amount;
-            let selected=primitive.gg_rows.iter().position(|&r|r==row).unwrap();primitive.selected_k.get_mut(&key).unwrap()[selected*e*e].re+=amount;
-        }
-        let prepared=OwnedPrepared::from_primitives(primitive,KernelPolicy::Csr,lap).unwrap();
-        for(q,a)in &h{for(x,y)in a.iter().zip(&prepared.primitives().hilbert.source.hamiltonian[q]){assert_eq!(x.re.to_bits(),y.re.to_bits());assert_eq!(x.im.to_bits(),y.im.to_bits());}}
-        for(a,b)in channels.iter().zip(&prepared.primitives().hilbert.source.collapse){for(q,values)in a{for(x,y)in values.iter().zip(&b[q]){assert_eq!(x.re.to_bits(),y.re.to_bits());assert_eq!(x.im.to_bits(),y.im.to_bits());}}}
-        let opposite=key.iter().map(|&k|-k).collect();let modes=[vec![0;key.len()],key,opposite];let map=prepared.real_fourier_map(&modes).unwrap();let rows=map.dimension();
-        let mut plan=prepared.pencil(&modes,&modes,1).unwrap();let mut input=vec![0.;rows];input[g]=1.;
-        let mut signed=vec![C::default();rows];map.push_into(&input,1,&mut signed).unwrap();let mut mass=signed.clone();let mut pencil=signed.clone();plan.apply_into(&signed,1,&mut mass,&mut pencil).unwrap();
-        let(mut eb,mut fb,mut bound)=(vec![0.;rows],vec![0.;rows],vec![0.;rows]);plan.action_magnitudes_into(&signed,1,&mut eb,&mut fb).unwrap();map.pull_envelope_into(&eb,1,&mut bound).unwrap();
-        let mut actual=vec![C::default();rows];map.pull_complex_into(&mass,1,&mut actual).unwrap();let terms=plan.diagnostics().roundoff_terms as f64;let input_hs=[complex_norm(&signed)];
-        let old=check_real_image(&actual,&bound,1,&input_hs,terms,0.).unwrap();assert!(!old.passed);
-        let budget=plan.real_preparation_defects().0;assert!(budget>0.);let qualified=check_real_image(&actual,&bound,1,&input_hs,terms,budget).unwrap();
-        assert!(qualified.passed);assert!(qualified.maximum_ratio<=1.);assert!(qualified.maximum_arithmetic_ratio>1.);
-        actual[old.failed_index].im+=1e-4;assert!(!check_real_image(&actual,&bound,1,&input_hs,terms,budget).unwrap().passed);
-    }
-    #[test]
-    fn preparation_real_budget_is_one_hs_budget_and_rejects_extra_error(){
-        let value=[C{re:0.,im:0.8},C{re:0.,im:0.8}];
-        // Each component individually fits1, but their HS excess does not:
-        // the same preparation budget must not be spent twice.
-        let report=check_real_image(&value,&[0.,0.],1,&[1.],32.,2.).unwrap();assert!(!report.passed);assert!(report.excess_hs>report.preparation_allowance_hs);
-        assert!(!check_real_image(&value,&[0.,0.],1,&[0.],32.,2.).unwrap().passed);
-        let good=[C{re:1.,im:0.}];assert!(check_real_image(&good,&[1.],1,&[1.],32.,0.).unwrap().passed);
-    }
     #[test]
     fn preparation_runtime_cold_vertical_slice_keeps_original_images_and_unqualified_status(){
         let owned=super::super::tests::fixture();let mut runtime=RuntimeCore::from_owned(owned,InitialView{index:0,real:None,imag:None},P0Policy::EigenPreferred).unwrap();
