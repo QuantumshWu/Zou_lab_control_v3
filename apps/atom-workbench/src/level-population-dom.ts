@@ -17,5 +17,5 @@ export function patchLevelPopulations(host:HTMLElement,options:{populations?:Rec
     const label=base+(p===undefined?'':`; ${options.label} = ${populationValue(p)}`)+(id.startsWith('ground-')?`; ${options.mean?'长期平均布居':'长期布居极限'} ${steady===undefined?'未知':populationValue(steady)}`:'');
     if(title)title.textContent=label;node.setAttribute('aria-label',label);
   }
-  const symbol=host.querySelector<SVGTextElement>('.steady-population-symbol');if(symbol?.firstChild?.nodeType===Node.TEXT_NODE)symbol.firstChild.textContent=options.mean?'p̄':'p';
+  const symbol=host.querySelector<SVGTextElement>('.steady-population-symbol');if(symbol?.firstChild?.nodeType===Node.TEXT_NODE)symbol.firstChild.textContent=options.mean?'长期平均':'长期布居';
 }
