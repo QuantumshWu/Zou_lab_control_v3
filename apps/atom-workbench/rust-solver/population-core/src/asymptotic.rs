@@ -48,7 +48,12 @@
 //! 3. Fourier truncation (halo): the residual of `w` on the neighbouring modes
 //!    is condensed through the mode-diagonal P0 inverse, fed back into the
 //!    domain and propagated by one more correction solve. Per-mode halo
-//!    indicators select the modes added when the halo dominates.
+//!    indicators select the modes added when the halo dominates. Every
+//!    decision here is made by magnitude, never by exact zeros: the starting
+//!    domain follows the steps whose mixing amplitude `|H_q| / |omega_q|` is
+//!    significant, the halo covers every step, and halo modes with negligible
+//!    transport amplitude are condensed by the transport inverse and charged
+//!    twice (a P0 shift factor per mode is the dominant halo cost).
 //! 4. The corrected laboratory mean is projected onto the trace-one positive
 //!    cone (Frobenius-nearest density matrix, which cannot increase the
 //!    Frobenius error) and that change is charged to the budget.
@@ -92,6 +97,15 @@ const PROBE_TOLERANCE_PER_EPSILON: f64 = 1e-2;
 const RESOLVENT_TOLERANCE: f64 = 1e-9;
 /// Halo modes are added until they cover this fraction of the halo weight.
 const HALO_COVERAGE: f64 = 0.9;
+/// Fourier steps whose first-order mixing amplitude `|H_q| / |omega_q|` is
+/// below this fraction of the largest one do not shape the starting domain or
+/// the domain growth of the degenerate path (cost only: the halo of the
+/// one-dimensional path still covers every step).
+const DOMAIN_STEP_AMPLITUDE: f64 = 1e-3;
+/// Halo modes whose transport amplitude `|h_q| / |s + i omega_q|` is below
+/// this fraction of the largest one are condensed with the transport inverse
+/// instead of the exact mode-diagonal inverse (one P0 shift factor per mode).
+const FAR_HALO_AMPLITUDE: f64 = 1e-3;
 
 /// Laboratory-frame metadata of the original states, in the SAME reduced
 /// frequency basis as the prepared phases.
@@ -138,6 +152,9 @@ pub struct MeanCheckpoint {
     pub pole: f64,
     pub basis_estimate: f64,
     pub halo_estimate: Option<f64>,
+    /// Halo modes condensed with the exact mode-diagonal inverse and with the
+    /// transport inverse.
+    pub halo_modes: (usize, usize),
     /// Relative residual reached by the correction solve.
     pub inner_residual: f64,
     pub action: &'static str,
@@ -195,6 +212,16 @@ fn charge_minus(a: &[i32], b: &[i32]) -> Charge {
 }
 fn euclid(values: &[f64]) -> f64 {
     values.iter().map(|x| x * x).sum::<f64>().sqrt()
+}
+fn euclid_complex(values: &[C]) -> f64 {
+    values.iter().map(|z| z.re * z.re + z.im * z.im).sum::<f64>().sqrt()
+}
+fn complex_product(a: C, b: C) -> C {
+    C { re: a.re * b.re - a.im * b.im, im: a.re * b.im + a.im * b.re }
+}
+fn reciprocal(z: C) -> C {
+    let norm = z.re * z.re + z.im * z.im;
+    C { re: z.re / norm, im: -z.im / norm }
 }
 fn ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.
@@ -514,15 +541,26 @@ fn shell_modes(modes: &[Charge], steps: &[Charge]) -> Vec<Charge> {
 struct Halo {
     /// Density correction (laboratory frame) from the condensed halo.
     density: Vec<C>,
-    estimate: f64,
+    /// The part of `density` produced by the transport-condensed modes.
+    far_density: Option<Vec<C>>,
     reliable: bool,
     /// Frobenius weight of the condensed field on every halo mode.
     indicators: Vec<(Charge, f64)>,
+    /// Modes condensed exactly and by transport.
+    counts: (usize, usize),
 }
 
-/// Condensed halo: `x_S = P0_S F_SM w` (approximate shell solution), its
-/// feedback `F_MS x_S` corrected inside the domain, and the direct readout of
-/// `x_S`. Returns the laboratory density correction.
+/// Condensed halo: `x_S = (s E - F)_SS^-1 F_SM w` approximated mode-diagonally
+/// (approximate shell solution), its feedback `F_MS x_S` corrected inside the
+/// domain, and the direct readout of `x_S`. Returns the laboratory density
+/// correction.
+///
+/// The mode-diagonal inverse is the exact P0 on the modes that carry the halo
+/// and the transport inverse `1 / (s + i omega_q)` on the far modes whose
+/// transport amplitude is below `FAR_HALO_AMPLITUDE` of the largest (a P0
+/// shift factor costs a dense factorisation per mode, the transport inverse
+/// nothing). The far contribution is computed separately so that it can be
+/// charged in full to the estimate.
 #[allow(clippy::too_many_arguments)]
 fn halo(core: &mut RuntimeCore, op: &mut DomainOperator, frame: &Frame, readout: &mut TargetReadout,
     shell: &[Charge], null: &[f64], pole: f64, applications: &mut usize) -> Result<Halo, String> {
@@ -535,34 +573,67 @@ fn halo(core: &mut RuntimeCore, op: &mut DomainOperator, frame: &Frame, readout:
     let mut e_shell = vec![C::default(); shell.len() * d];
     let mut f_shell = vec![C::default(); shell.len() * d];
     outward.apply_into(&signed, 1, &mut e_shell, &mut f_shell)?;
-    // Condense: x_S = (pole E - F)_SS^-1 F_SM w, approximated mode-diagonally by P0.
-    let frequencies = {
+    let shifts: Vec<C> = {
         let phases = &core.prepared().primitives().hilbert.source.phases;
-        shell.iter().map(|q| phases.frequency(q).map(|f| f.hi + f.lo)).collect::<Result<Vec<_>, _>>()?
+        shell.iter().map(|q| phases.frequency(q).map(|f| C { re: pole, im: f.hi + f.lo })).collect::<Result<_, _>>()?
     };
-    let shifts: Vec<C> = frequencies.iter().map(|&w| C { re: pole, im: w }).collect();
-    let mut p0 = core.p0_mut().prepare_batch(&shifts, 1)?;
-    let mut condensed = vec![C::default(); shell.len() * d];
-    p0.apply_into(&f_shell, 1, &mut condensed)?;
-    let indicators: Vec<(Charge, f64)> = shell.iter().enumerate()
-        .map(|(k, q)| (q.clone(), condensed[k * d..(k + 1) * d].iter().map(|z| z.re * z.re + z.im * z.im).sum::<f64>().sqrt()))
+    let transport: Vec<f64> = (0..shell.len()).map(|k| euclid_complex(&f_shell[k * d..(k + 1) * d]) / shifts[k].re.hypot(shifts[k].im))
         .collect();
-    // Feedback of the condensed halo on the domain, corrected inside it.
+    let largest = transport.iter().copied().fold(0_f64, f64::max);
+    let (near, far): (Vec<usize>, Vec<usize>) = (0..shell.len()).partition(|&k| transport[k] > FAR_HALO_AMPLITUDE * largest);
+    let mut condensed = vec![C::default(); shell.len() * d];
+    if !near.is_empty() {
+        let mut gathered = Vec::with_capacity(near.len() * d);
+        for &k in &near {
+            gathered.extend_from_slice(&f_shell[k * d..(k + 1) * d]);
+        }
+        let near_shifts: Vec<C> = near.iter().map(|&k| shifts[k]).collect();
+        let mut p0 = core.p0_mut().prepare_batch(&near_shifts, 1)?;
+        let mut solved = vec![C::default(); gathered.len()];
+        p0.apply_into(&gathered, 1, &mut solved)?;
+        for (slot, &k) in near.iter().enumerate() {
+            condensed[k * d..(k + 1) * d].copy_from_slice(&solved[slot * d..(slot + 1) * d]);
+        }
+    }
+    for &k in &far {
+        let inverse = reciprocal(shifts[k]);
+        for (x, h) in condensed[k * d..(k + 1) * d].iter_mut().zip(&f_shell[k * d..(k + 1) * d]) {
+            *x = complex_product(*h, inverse);
+        }
+    }
+    let indicators: Vec<(Charge, f64)> = shell.iter().enumerate()
+        .map(|(k, q)| (q.clone(), euclid_complex(&condensed[k * d..(k + 1) * d])))
+        .collect();
     let mut inward = core.prepared().pencil(shell, &modes, 1)?;
-    let mut e_back = vec![C::default(); modes.len() * d];
-    let mut f_back = vec![C::default(); modes.len() * d];
-    inward.apply_into(&condensed, 1, &mut e_back, &mut f_back)?;
-    let mut pulled = vec![C::default(); op.rows()];
-    op.map().pull_complex_into(&f_back, 1, &mut pulled)?;
-    let feedback: Vec<f64> = pulled.iter().map(|z| z.re).collect();
-    let (inner, relative) = correction(op, &feedback, null, n, applications)?;
-    let inner_signed = op.signed_block(&inner, 1)?;
-    let physical = core.physical();
-    let mut density = readout.density(physical, frame, &inner_signed)?;
-    // Direct readout of the halo field itself.
     let mut direct = TargetReadout::new(core, shell, frame)?;
-    add_into(&mut density, &direct.density(core.physical(), frame, &condensed)?);
-    Ok(Halo { density, estimate: 0., reliable: relative <= ESTIMATE_RESIDUAL_LIMIT, indicators })
+    let mut response = |core: &RuntimeCore, field: &[C], applications: &mut usize| -> Result<(Vec<C>, f64), String> {
+        // Feedback of the condensed halo on the domain, corrected inside it.
+        let mut e_back = vec![C::default(); modes.len() * d];
+        let mut f_back = vec![C::default(); modes.len() * d];
+        inward.apply_into(field, 1, &mut e_back, &mut f_back)?;
+        let mut pulled = vec![C::default(); op.rows()];
+        op.map().pull_complex_into(&f_back, 1, &mut pulled)?;
+        let feedback: Vec<f64> = pulled.iter().map(|z| z.re).collect();
+        let (inner, relative) = correction(op, &feedback, null, n, applications)?;
+        let inner_signed = op.signed_block(&inner, 1)?;
+        let mut density = readout.density(core.physical(), frame, &inner_signed)?;
+        // Direct readout of the halo field itself.
+        add_into(&mut density, &direct.density(core.physical(), frame, field)?);
+        Ok((density, relative))
+    };
+    let (density, relative) = response(core, &condensed, applications)?;
+    let (far_density, far_relative) = if far.is_empty() {
+        (None, 0.)
+    } else {
+        let mut far_field = vec![C::default(); condensed.len()];
+        for &k in &far {
+            far_field[k * d..(k + 1) * d].copy_from_slice(&condensed[k * d..(k + 1) * d]);
+        }
+        let (value, relative) = response(core, &far_field, applications)?;
+        (Some(value), relative)
+    };
+    Ok(Halo { density, far_density, reliable: relative.max(far_relative) <= ESTIMATE_RESIDUAL_LIMIT, indicators,
+        counts: (near.len(), far.len()) })
 }
 
 /// Halo modes with the largest indicators covering `HALO_COVERAGE` of the
@@ -594,7 +665,12 @@ fn select_halo_modes(indicators: &[(Charge, f64)]) -> Vec<Charge> {
 struct Context {
     n: usize,
     axes: usize,
+    /// Every Fourier step: the nonzero charges of the gauged Hamiltonian
+    /// (the same steps as the finite engine).
     steps: Vec<Charge>,
+    /// Steps whose first-order mixing amplitude is at least
+    /// `DOMAIN_STEP_AMPLITUDE` of the largest.
+    domain_steps: Vec<Charge>,
     frame: Frame,
     lapack: Arc<Lapack>,
 }
@@ -603,10 +679,23 @@ impl Context {
     fn new(core: &RuntimeCore, options: &MeanOptions) -> Result<Self, String> {
         let source = &core.prepared().primitives().hilbert.source;
         let axes = source.phases.axes.len();
-        // The same Fourier steps as the finite engine: the charges of the
-        // gauged Hamiltonian.
-        let steps: Vec<Charge> = source.hamiltonian.keys().filter(|q| q.iter().any(|&k| k != 0)).cloned().collect();
-        Ok(Self { n: source.n, axes, steps, frame: Frame::new(&source.gauges, &options.lab)?, lapack: Arc::clone(core.lapack()) })
+        let mut steps = Vec::new();
+        let mut amplitudes = Vec::new();
+        for (q, matrix) in &source.hamiltonian {
+            if q.iter().all(|&k| k == 0) {
+                continue;
+            }
+            let coupling = matrix.iter().map(|z| z.re.hypot(z.im)).fold(0_f64, f64::max);
+            let frequency = source.phases.frequency(q).map(|f| (f.hi + f.lo).abs())?;
+            amplitudes.push(if frequency > 0. { coupling / frequency } else { f64::INFINITY });
+            steps.push(q.clone());
+        }
+        let largest = amplitudes.iter().copied().fold(0_f64, f64::max);
+        let domain_steps = steps.iter().zip(&amplitudes)
+            .filter(|&(_, &amplitude)| amplitude >= DOMAIN_STEP_AMPLITUDE * largest)
+            .map(|(q, _)| q.clone()).collect();
+        Ok(Self { n: source.n, axes, steps, domain_steps, frame: Frame::new(&source.gauges, &options.lab)?,
+            lapack: Arc::clone(core.lapack()) })
     }
     fn metric(&self, delta: &[C], groups: &[RequestedGroup]) -> Result<f64, String> {
         error_metric(&self.lapack, delta, self.n, groups)
@@ -727,7 +816,7 @@ fn finish(context: &Context, options: &MeanOptions, candidate: Candidate, kind: 
 /// Defect-corrected null vector of the pencil with basis and halo control.
 fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, work: &mut Work) -> Result<Outcome, String> {
     let epsilon = options.population_tolerance;
-    let mut modes = support_domain(context.axes, &context.steps, 1)?;
+    let mut modes = support_domain(context.axes, &context.domain_steps, 1)?;
     let pole = POLE;
     let clock = Instant::now();
     let mut space = TrialSpace::new(core, &modes, &[pole])?;
@@ -783,36 +872,40 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
         // checked against the change it predicted (or the space is invariant).
         let basis_reliable = inner <= ESTIMATE_RESIDUAL_LIMIT && (calibrated || invariant);
         let mut checkpoint = MeanCheckpoint { columns: space.columns(), modes: modes.len(), pole, basis_estimate,
-            halo_estimate: None, inner_residual: inner, action: "" };
+            halo_estimate: None, halo_modes: (0, 0), inner_residual: inner, action: "" };
         if basis_reliable && SAFETY * basis_estimate <= 0.5 * epsilon {
             let shell = shell_modes(&modes, &context.steps);
             let halo = if shell.is_empty() {
                 None
             } else {
                 let clock = Instant::now();
-                let mut value = halo(core, &mut space.op, &context.frame, &mut readout, &shell, &null, pole, &mut work.applications)?;
+                let value = halo(core, &mut space.op, &context.frame, &mut readout, &shell, &null, pole, &mut work.applications)?;
                 work.timing[2] += ms(clock);
-                value.estimate = context.metric(&value.density, &options.groups)? * bias;
-                Some(value)
+                // The correction itself, plus the transport part once more: the
+                // transport inverse may be off by its own size near a resonance.
+                let far = value.far_density.as_ref().map_or(Ok(0.), |far| context.metric(far, &options.groups))?;
+                let estimate = (context.metric(&value.density, &options.groups)? + far) * bias;
+                checkpoint.halo_modes = value.counts;
+                Some((value, estimate))
             };
-            let halo_estimate = halo.as_ref().map_or(0., |h| h.estimate);
-            checkpoint.halo_estimate = halo.as_ref().map(|h| h.estimate);
+            let halo_estimate = halo.as_ref().map_or(0., |h| h.1);
+            checkpoint.halo_estimate = halo.as_ref().map(|h| h.1);
             let mut corrected = raw_mean.clone();
             add_into(&mut corrected, &basis_density);
-            if let Some(h) = &halo {
+            if let Some((h, _)) = &halo {
                 add_into(&mut corrected, &h.density);
             }
             let projected = project_density(&context.lapack, &corrected, context.n)?;
             let charge = context.metric(&difference(&projected.density, &corrected), &options.groups)?;
             let estimate = SAFETY * (basis_estimate + halo_estimate) + charge;
-            if estimate <= epsilon && halo.as_ref().map_or(true, |h| h.reliable) {
+            if estimate <= epsilon && halo.as_ref().map_or(true, |h| h.0.reliable) {
                 checkpoint.action = "accept";
                 work.checkpoints.push(checkpoint);
                 let candidate = Candidate { raw_mean, corrected, discarded_optical_coherence, basis_estimate, halo_estimate,
                     relative_residual, slowest_rate: spectrum.slowest_rate(), zero_modes, modes, pole, columns: space.columns() };
                 return Ok(Outcome::Null(candidate, NullState { space, readout }));
             }
-            if let Some(h) = halo.filter(|h| h.estimate >= basis_estimate) {
+            if let Some((h, _)) = halo.filter(|h| h.1 >= basis_estimate) {
                 if modes.len() >= options.maximum_modes {
                     return Err(format!("Long-time mean needs more than {} Fourier modes; the tolerance was not relaxed", options.maximum_modes));
                 }
@@ -913,19 +1006,39 @@ fn resolvent_mean(core: &RuntimeCore, context: &Context, op: &mut DomainOperator
 
 /// Compares the corrected null-vector mean with `Pi0` of the second probe.
 /// A one-dimensional null space gives the same density up to the estimated
-/// error of the candidate and the pole bias (at most 1% of the slow
-/// components); a degenerate null space changes the mean by the difference
-/// between conserved states.
+/// error of the candidate; a degenerate null space changes the mean by the
+/// difference between conserved states. The resolvent at pole `s` is biased
+/// by `s/gamma` times the probe's component on a slow mode of rate `gamma`
+/// (rates down to 1e-6/us occur and the mixed or delta probes excite them
+/// strongly), so a failed first comparison is repeated with the first-order
+/// Richardson extrapolation of the poles `s` and `2s`.
 fn degeneracy_probe(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, candidate: &Candidate, state: &mut NullState,
     work: &mut Work) -> Result<Probe, String> {
     let (probe, central_only) = probe_matrix(core, context);
+    let tolerance = (PROBE_TOLERANCE_PER_EPSILON * options.population_tolerance).max(RESOLVENT_TOLERANCE);
     let threshold = 0.25 * options.population_tolerance + SAFETY * (candidate.basis_estimate + candidate.halo_estimate);
-    let resolvent = resolvent_mean(core, context, &mut state.space.op, &mut state.readout, &probe, central_only,
-        (PROBE_TOLERANCE_PER_EPSILON * options.population_tolerance).max(RESOLVENT_TOLERANCE), &mut work.applications)?;
-    let gap = context.metric(&difference(&resolvent, &candidate.corrected), &options.groups)?;
+    let first = resolvent_mean(core, context, &mut state.space.op, &mut state.readout, &probe, central_only, tolerance,
+        &mut work.applications)?;
+    let gap = context.metric(&difference(&first, &candidate.corrected), &options.groups)?;
     work.checkpoints.push(MeanCheckpoint { columns: candidate.columns, modes: candidate.modes.len(), pole: candidate.pole,
-        basis_estimate: gap, halo_estimate: None, inner_residual: f64::NAN, action: "degeneracy-probe" });
+        basis_estimate: gap, halo_estimate: None, halo_modes: (0, 0), inner_residual: f64::NAN, action: "degeneracy-probe" });
     if gap <= threshold {
+        return Ok(Probe::Unique);
+    }
+    let mut doubled = DomainOperator::new(core, &candidate.modes, &[2. * candidate.pole])?;
+    let second = resolvent_mean(core, context, &mut doubled, &mut state.readout, &probe, central_only, tolerance,
+        &mut work.applications)?;
+    let first_order = difference(&first, &second);
+    let mut extrapolated = first;
+    add_into(&mut extrapolated, &first_order);
+    // The remaining second-order term is below a tenth of the first-order one
+    // whenever the pole is below a tenth of the slow rate.
+    let allowance = 0.1 * context.metric(&first_order, &options.groups)?;
+    let extrapolated_gap = context.metric(&difference(&extrapolated, &candidate.corrected), &options.groups)?;
+    work.checkpoints.push(MeanCheckpoint { columns: candidate.columns, modes: candidate.modes.len(), pole: 2. * candidate.pole,
+        basis_estimate: extrapolated_gap, halo_estimate: Some(allowance), halo_modes: (0, 0), inner_residual: f64::NAN,
+        action: "degeneracy-probe-extrapolated" });
+    if extrapolated_gap <= threshold + allowance {
         return Ok(Probe::Unique);
     }
     Ok(if context.axes == 0 { Probe::StaticDegenerate } else { Probe::Degenerate })
@@ -934,8 +1047,8 @@ fn degeneracy_probe(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
 /// `Pi0` of the initial state (`X0` for driven models, the central initial
 /// vector for static ones) by the resolvent at the poles `s` and `2s` with
 /// first-order Richardson extrapolation; Fourier convergence by the change
-/// when every neighbouring mode is added. A static model is then classified
-/// by `Pi0` of the maximally mixed state.
+/// when every neighbouring mode along the domain steps is added. A static
+/// model is then classified by `Pi0` of the maximally mixed state.
 fn degenerate(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, mut modes: Vec<Charge>, zero_modes: usize,
     slowest_rate: Option<f64>, work: &mut Work) -> Result<MeanSolution, String> {
     let pole = POLE;
@@ -956,7 +1069,7 @@ fn degenerate(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, 
     let clock = Instant::now();
     let (mut mean, mut extrapolation, mut discarded) = evaluate(core, &modes, &initial, work)?;
     loop {
-        let shell = shell_modes(&modes, &context.steps);
+        let shell = shell_modes(&modes, &context.domain_steps);
         let mut larger: Vec<Charge> = modes.iter().cloned().chain(shell.iter().cloned()).collect();
         larger.sort();
         let (halo_estimate, next) = if shell.is_empty() {
@@ -966,7 +1079,7 @@ fn degenerate(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, 
             (context.metric(&difference(&value, &mean), &options.groups)?, Some((value, next_extrapolation, next_discarded)))
         };
         work.checkpoints.push(MeanCheckpoint { columns: 0, modes: modes.len(), pole, basis_estimate: extrapolation,
-            halo_estimate: Some(halo_estimate), inner_residual: f64::NAN, action: "degenerate-resolvent" });
+            halo_estimate: Some(halo_estimate), halo_modes: (shell.len(), 0), inner_residual: f64::NAN, action: "degenerate-resolvent" });
         let projected = project_density(&context.lapack, &mean, context.n)?;
         let charge = context.metric(&difference(&projected.density, &mean), &options.groups)?;
         if SAFETY * (extrapolation + halo_estimate) + charge <= options.population_tolerance {
@@ -1281,6 +1394,36 @@ mod tests {
         assert!(matches!(mean.kind, MeanKind::InitialDependent { .. }), "{:?}", mean.kind);
         assert!((mean.populations[0] - 0.81 / 1.3).abs() < 1e-4 && (mean.populations[1] - 0.49 / 1.3).abs() < 1e-4,
             "{:?}", mean.populations);
+    }
+
+    #[test]
+    fn slow_unique_pumping_is_resolved_and_not_mistaken_for_degeneracy() {
+        // A third ground state couples to the excited state 1000 times more
+        // weakly: it is pumped at about 1e-5/us, so the stationary state is
+        // unique but a resolvent probe at the near-zero pole is biased by
+        // pole/rate on that slow mode.
+        let n = 4;
+        let mut h0 = vec![C::default(); 16];
+        h0[5] = c(0.4);
+        h0[10] = c(0.2);
+        couple(&mut h0, n, 0, 3, 0.6);
+        couple(&mut h0, n, 1, 3, 0.3);
+        couple(&mut h0, n, 2, 3, 0.003);
+        let mut decays = Vec::new();
+        for (ground, amplitude) in [(0, 0.9), (1, 0.7), (2, 0.4)] {
+            let mut l = vec![C::default(); 16];
+            l[ground * n + 3] = c(amplitude);
+            decays.push(l);
+        }
+        let toy = Toy { n, ground: vec![true, true, true, false], h0, drives: vec![], collapse: decays, initial: 2, nu: 1.,
+            frame: vec![0; 4] };
+        let reference = dense_mean(&toy, 0);
+        for tolerance in [1e-3, 1e-4] {
+            let mean = solve_mean(&toy, tolerance);
+            assert_eq!(mean.kind, MeanKind::Unique, "tolerance {tolerance}");
+            let error = largest_difference(&mean.density, &reference);
+            assert!(error <= tolerance, "tolerance {tolerance}: error {error:e}");
+        }
     }
 
     /// Every exactly-zero forbidden element (E->G collapse, G-E Hamiltonian

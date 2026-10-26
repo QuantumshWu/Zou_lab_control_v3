@@ -86,7 +86,8 @@ fn mean_result(solver:&Solver,model:&Model,options:&Options,request:&mut Request
     let(status,reason)=classify(model,&mean);
     let d=&mean.diagnostics;
     let checkpoints:Vec<_>=d.checkpoints.iter().map(|c|json!({"basis":c.columns,"modes":c.modes,"pole":c.pole,
-        "basisEstimate":c.basis_estimate,"haloEstimate":c.halo_estimate,"innerResidual":c.inner_residual,"action":c.action})).collect();
+        "basisEstimate":c.basis_estimate,"haloEstimate":c.halo_estimate,"haloModes":c.halo_modes.0,"transportHaloModes":c.halo_modes.1,
+        "innerResidual":c.inner_residual,"action":c.action})).collect();
     Ok(json!({"timesUs":[0.],"states":model.states,"populations":[request.initial_populations],
         "asymptoticPopulations":mean.populations,
         "asymptoticDensityReal":mean.density.iter().map(|z|z.re).collect::<Vec<_>>(),
