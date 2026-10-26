@@ -5,9 +5,12 @@
 //! estimate of the basis error is checked at every checkpoint; once it fits
 //! the budget, the halo estimate of the Fourier truncation is added and the
 //! candidate is accepted when `kappa * |basis + halo| + projection <= eps`.
-//! Halo indicators select the few Fourier modes worth adding. If the slow
-//! dual cannot be prepared, `successive` compares successive candidates and
-//! Fourier orders instead (conservative fallback).
+//! Halo indicators select the few Fourier modes worth adding (they partition
+//! the halo estimate), and the candidate restarts on the enlarged domain. An
+//! estimate that stops decreasing ends the run with an explanation (part of
+//! the estimate, the modes it points at) instead of running to the work
+//! limit. If the slow dual cannot be prepared, `successive` compares
+//! successive candidates and Fourier orders instead (conservative fallback).
 
 use super::*;
 use super::directions::{shift_invert, InnerSolve};
@@ -45,6 +48,9 @@ pub struct FiniteOptions {
     /// Multiplies the error estimate before comparing it with the tolerance;
     /// calibrated estimate/true ratios on the benchmarks are 0.75-1.37.
     pub safety_factor: f64,
+    /// Return the accepted candidate's envelope at the last time
+    /// (`FiniteSolution::end_state`).
+    pub keep_end_state: bool,
 }
 
 impl Default for FiniteOptions {
@@ -60,6 +66,7 @@ impl Default for FiniteOptions {
             wall_seconds: 120.,
             inner: InnerSolve { maximum_steps: 24, relative_residual: 1e-5 },
             safety_factor: 1.5,
+            keep_end_state: false,
         }
     }
 }
@@ -117,6 +124,9 @@ pub struct FiniteDiagnostics {
     pub image_columns: usize,
     pub operator_applications: usize,
     pub peak_trial_bytes: usize,
+    /// Growing eigenvalues of the returned candidate's reduced generator that
+    /// were reflected (`reduced.rs`).
+    pub reflected_ritz_modes: usize,
     pub maximum_imaginary_population: f64,
     pub elapsed_ms: f64,
     pub timing: EngineTiming,
@@ -127,6 +137,10 @@ pub struct FiniteSolution {
     /// Probability populations, row-major `[time, state]`.
     pub populations: Vec<f64>,
     pub diagnostics: FiniteDiagnostics,
+    /// With `FiniteOptions::keep_end_state`: the retained modes and the
+    /// accepted candidate's envelope at the last time (signed complex field
+    /// on those modes).
+    pub end_state: Option<(Vec<Charge>, Vec<C>)>,
 }
 
 /// Graph ball of the declared drive charges (both signs) of radius `order`.
@@ -226,6 +240,11 @@ impl Chain {
         Self { frontier: (0..poles).map(|p| (0, p)).collect(), operator_applications: 0, directions_ms: 0. }
     }
 
+    /// Restarts every pole from the first column (a new trial space).
+    fn restart(&mut self, poles: usize) {
+        self.frontier = (0..poles).map(|p| (0, p)).collect();
+    }
+
     fn grow(&mut self, space: &mut TrialSpace, count: usize, inner: InnerSolve) -> Result<usize, String> {
         let rows = space.rows();
         let poles = space.op.poles().len();
@@ -279,6 +298,8 @@ struct Run {
     checkpoints: Vec<Checkpoint>,
     timing: EngineTiming,
     peak_bytes: usize,
+    /// Reflected reduced eigenvalues of the latest candidate.
+    reflected: usize,
 }
 
 /// The kappa-scaled basis estimate must fit this share of the tolerance
@@ -289,6 +310,12 @@ const BASIS_SHARE: f64 = 0.6;
 const HALO_REMAINDER_SHARE: f64 = 0.25;
 /// Signed mode pairs added per domain step at most.
 const MAXIMUM_PAIRS_PER_STEP: usize = 24;
+/// Refinements of one domain after which the limiting estimate must have
+/// fallen below `STALL_FACTOR` times its best value, or the run ends with an
+/// explanation (Krylov convergence can pause for a block or two; four blocks
+/// without a 10% gain are a stall).
+const STALL_REFINEMENTS: usize = 4;
+const STALL_FACTOR: f64 = 0.9;
 // The screening basis estimate (`SlowDual::basis_estimate_screened`) is the
 // full one without the drive-hop slaving of fast charges, at 25-55% of its
 // cost. Measured screen/full ratios are 0.97-1.00 far from acceptance and
@@ -364,6 +391,69 @@ impl Run {
         Ok(())
     }
 
+    /// Restarts the candidate on a larger domain: a new trial space from the
+    /// initial state and the first chain columns. The old columns are not
+    /// carried over: they are zero on the added modes, and where those modes
+    /// are strongly coupled and far off resonance (the carrier-axis shell of
+    /// counter-rotating terms) the Galerkin projection keeps the coupling
+    /// they leave uncancelled; measured on threeNearStrong with a tweezer,
+    /// the transferred space stalled at a basis estimate of 2.8e-3 for 40
+    /// more columns, while the same domain from scratch converged in 55.
+    fn rebuild(&mut self, modes: &[Charge]) -> Result<(), String> {
+        let old = self.space.take().expect("trial space");
+        let poles = old.op.poles().to_vec();
+        let timing = old.timing.clone();
+        drop(old);
+        let mut space = TrialSpace::new(&mut self.core, modes, &poles)?;
+        space.timing.absorb(&timing);
+        self.chain.restart(poles.len());
+        self.chain.grow(&mut space, self.options.first_columns.saturating_sub(1), self.options.inner)?;
+        self.peak_bytes = self.peak_bytes.max(space.bytes());
+        self.space = Some(space);
+        Ok(())
+    }
+
+    /// The candidate's envelope at the last time: the retained modes and the
+    /// signed complex field `Q a(T)`.
+    fn end_state(&mut self, model: &ReducedModel) -> Result<(Vec<Charge>, Vec<C>), String> {
+        let end = *self.times.last().expect("time grid");
+        let trajectory = model.trajectory(&self.lapack, &[0., end])?;
+        let space = self.space.as_mut().expect("trial space");
+        let (rows, m) = (space.rows(), space.columns());
+        let mut x = vec![0.; rows];
+        self.lapack.gemm(false, false, rows, 1, m, 1., space.q(), rows, &trajectory[m..2 * m], m, 0., &mut x, rows)?;
+        let signed = space.op.signed_block(&x, 1)?;
+        Ok((space.modes().to_vec(), signed))
+    }
+
+    /// Retained charges with the largest residual of the candidate at the
+    /// end of the horizon (`R a(T)`, Frobenius norm per charge), largest
+    /// first, with their norms.
+    fn residual_charges(&self, model: &ReducedModel, count: usize) -> Result<Vec<(Charge, f64)>, String> {
+        let space = self.space();
+        let rows = space.rows();
+        let m = space.columns();
+        let end = *self.times.last().expect("time grid");
+        let trajectory = model.trajectory(&self.lapack, &[0., end])?;
+        let residual = space.residual(&model.generator)?;
+        let mut r = vec![0.; rows];
+        self.lapack.gemm(false, false, rows, 1, m, 1., &residual, rows, &trajectory[m..2 * m], m, 0., &mut r, rows)?;
+        let d = self.n * self.n;
+        let mut out: Vec<(Charge, f64)> = space
+            .op
+            .map()
+            .harmonics()
+            .iter()
+            .map(|b| {
+                let width = if b.has_imaginary_block { 2 * d } else { d };
+                (b.index.clone(), r[b.offset..b.offset + width].iter().map(|x| x * x).sum::<f64>().sqrt())
+            })
+            .collect();
+        out.sort_by(|a, b| b.1.total_cmp(&a.1));
+        out.truncate(count);
+        Ok(out)
+    }
+
     fn populations(&mut self, model: &ReducedModel) -> Result<super::readout::Populations, String> {
         let clock = Instant::now();
         let trajectory = model.trajectory(&self.lapack, &self.times)?;
@@ -389,6 +479,7 @@ impl Run {
         self.timing.readout_append = measured.readout_ms;
         self.timing.transfer = measured.transfer_ms;
         FiniteSolution {
+            end_state: None,
             populations,
             diagnostics: FiniteDiagnostics {
                 estimated_error: scaled + charge,
@@ -402,6 +493,7 @@ impl Run {
                 image_columns: space.image_columns(),
                 operator_applications: self.chain.operator_applications,
                 peak_trial_bytes: self.peak_bytes,
+                reflected_ritz_modes: self.reflected,
                 maximum_imaginary_population: maximum_imaginary,
                 elapsed_ms: ms(self.started),
                 timing: self.timing,
@@ -424,6 +516,22 @@ impl Run {
             _ => default,
         };
         block.clamp(poles, 2 * default).div_ceil(poles) * poles
+    }
+
+    /// Records the limiting estimate of a refinement; true when it has not
+    /// fallen below `STALL_FACTOR` times its best for `STALL_REFINEMENTS`
+    /// refinements (a nonfinite estimate counts as no progress).
+    fn stalled(best: &mut f64, since_best: &mut usize, estimate: f64) -> bool {
+        if estimate.is_finite() && estimate < STALL_FACTOR * *best {
+            *best = estimate;
+            *since_best = 0;
+        } else {
+            if estimate.is_finite() {
+                *best = best.min(estimate);
+            }
+            *since_best += 1;
+        }
+        *since_best >= STALL_REFINEMENTS
     }
 
     /// Signed halo modes (both members of each pair) to add: the largest
@@ -459,10 +567,15 @@ impl Run {
         let groups: Vec<PopulationGroup> =
             self.groups.iter().map(|g| PopulationGroup { name: g.name.clone(), indices: g.indices.clone() }).collect();
         let mut history: Vec<(usize, f64)> = Vec::new();
+        // Best limiting estimate on this domain and refinements since it last
+        // fell below STALL_FACTOR of its previous best.
+        let mut best = f64::INFINITY;
+        let mut since_best = 0;
         loop {
             self.deadline()?;
             let clock = Instant::now();
-            let model = ReducedModel::build(self.space())?;
+            let model = ReducedModel::build(self.space(), *self.times.last().expect("time grid"))?;
+            self.reflected = model.reflected;
             self.timing.reduced += ms(clock);
             // Err: the basis gate failed, with the screen (or full) estimate.
             let estimates = {
@@ -498,6 +611,16 @@ impl Run {
                 Err(basis) => {
                     history.push((self.space().columns(), basis));
                     self.checkpoint(Some(basis), None, "refine-basis");
+                    if Self::stalled(&mut best, &mut since_best, basis) {
+                        let charges = self.residual_charges(&model, 4)?;
+                        return Err(format!(
+                            "The basis error estimate stopped decreasing: {best:.2e} at best over the last {STALL_REFINEMENTS} refinements ({} columns on {} Fourier modes; acceptance needs at most {:.2e}). The candidate's residual at the end of the horizon is largest at the retained charges {}; the tolerance was not relaxed",
+                            self.space().columns(),
+                            self.space().modes().len(),
+                            BASIS_SHARE * epsilon / kappa,
+                            charges.iter().map(|(q, r)| format!("{q:?} ({r:.1e})")).collect::<Vec<_>>().join(", ")
+                        ));
+                    }
                     let block = self.predicted_block(&history, target);
                     self.grow(block, &model)?;
                     continue;
@@ -510,6 +633,7 @@ impl Run {
                 let (projected, charge) = constrain_populations(&candidate.values, self.n, &self.groups)?;
                 if kappa * total.maximum + charge <= epsilon {
                     self.checkpoint(Some(basis.maximum), Some(halo.estimate.maximum), "accept");
+                    let end_state = if self.options.keep_end_state { Some(self.end_state(&model)?) } else { None };
                     let scaled = kappa * total.maximum;
                     return Ok(self.finish(
                         projected,
@@ -519,7 +643,8 @@ impl Run {
                         charge,
                         (total.margin, halo.unrouted_resonant_returns),
                         "dual-weighted-residual",
-                    ));
+                    )
+                    .with_end_state(end_state));
                 }
             }
             if kappa * halo.estimate.maximum > 0.5 * epsilon && halo.estimate.maximum >= basis.maximum {
@@ -529,13 +654,38 @@ impl Run {
                     let mut modes = self.space().modes().to_vec();
                     modes.extend(added);
                     modes.sort();
-                    self.transfer(&modes)?;
+                    self.rebuild(&modes)?;
                     history.clear();
-                    self.grow(self.options.block_columns, &model)?;
+                    best = f64::INFINITY;
+                    since_best = 0;
                     continue;
                 }
             }
             self.checkpoint(Some(basis.maximum), Some(halo.estimate.maximum), "refine-basis");
+            if Self::stalled(&mut best, &mut since_best, total.maximum) {
+                let (part, value) = if halo.estimate.maximum >= basis.maximum { ("Fourier-truncation (halo)", halo.estimate.maximum) } else { ("basis", basis.maximum) };
+                let pointers = if halo.estimate.maximum >= basis.maximum {
+                    let attributed: f64 = halo.modes.iter().map(|m| m.indicator).sum();
+                    format!(
+                        "its largest halo indicators are {} (they sum to {attributed:.2e}; none can be added below the per-step limit)",
+                        halo.modes.iter().take(4).map(|m| format!("{:?} ({:.1e})", m.charge, m.indicator)).collect::<Vec<_>>().join(", ")
+                    )
+                } else {
+                    let charges = self.residual_charges(&model, 4)?;
+                    format!(
+                        "the candidate's residual at the end of the horizon is largest at the retained charges {}",
+                        charges.iter().map(|(q, r)| format!("{q:?} ({r:.1e})")).collect::<Vec<_>>().join(", ")
+                    )
+                };
+                return Err(format!(
+                    "The {part} error estimate stopped decreasing: {value:.2e} (basis {:.2e}, halo {:.2e}; acceptance needs their sum at most {:.2e}) over the last {STALL_REFINEMENTS} refinements with {} columns on {} Fourier modes; {pointers}; the tolerance was not relaxed",
+                    basis.maximum,
+                    halo.estimate.maximum,
+                    epsilon / kappa,
+                    self.space().columns(),
+                    self.space().modes().len()
+                ));
+            }
             let block = self.predicted_block(&history, target);
             self.grow(block, &model)?;
         }
@@ -551,7 +701,8 @@ impl Run {
         let mut invariant = false;
         loop {
             self.deadline()?;
-            let model = ReducedModel::build(self.space())?;
+            let model = ReducedModel::build(self.space(), *self.times.last().expect("time grid"))?;
+            self.reflected = model.reflected;
             let candidate = self.populations(&model)?;
             let populations = candidate.values;
             let basis_change = if invariant {
@@ -568,7 +719,8 @@ impl Run {
                     let (projected, charge) = constrain_populations(&populations, self.n, &self.groups)?;
                     if b + d + charge <= epsilon {
                         self.checkpoint(basis_change, domain_change, "accept");
-                        return Ok(self.finish(projected, candidate.maximum_imaginary, b + d, b + d, charge, (0., 0), "successive-change"));
+                        let end_state = if self.options.keep_end_state { Some(self.end_state(&model)?) } else { None };
+                        return Ok(self.finish(projected, candidate.maximum_imaginary, b + d, b + d, charge, (0., 0), "successive-change").with_end_state(end_state));
                     }
                 }
                 if !exact_domain && order < self.options.maximum_order {
@@ -586,6 +738,13 @@ impl Run {
             previous = Some(populations);
             invariant = !self.grow(self.options.block_columns, &model)?;
         }
+    }
+}
+
+impl FiniteSolution {
+    fn with_end_state(mut self, end_state: Option<(Vec<Charge>, Vec<C>)>) -> Self {
+        self.end_state = end_state;
+        self
     }
 }
 
@@ -666,6 +825,7 @@ pub fn solve_with(
         checkpoints: Vec::new(),
         timing: EngineTiming::default(),
         peak_bytes,
+        reflected: 0,
     };
     run.timing.dual_prepare = dual_ms;
     run.timing.dual_wait = wait_ms;

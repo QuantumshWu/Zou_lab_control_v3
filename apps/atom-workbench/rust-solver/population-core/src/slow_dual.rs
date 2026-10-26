@@ -2400,6 +2400,17 @@ impl Series {
         }
     }
 
+    /// Moves the dressed amplitudes of `other` (they do not depend on its
+    /// exponents) into this series.
+    pub(crate) fn take_dressed(&mut self, other: &mut Series) {
+        if let Some(amplitudes) = other.dressed_direct.take() {
+            self.add_dressed_direct(&amplitudes);
+        }
+        for ((slot, _), (offset, amplitudes)) in std::mem::take(&mut other.dressed_slow) {
+            self.add_dressed_slow(slot, offset, &amplitudes);
+        }
+    }
+
     pub(crate) fn add_initial(&mut self, modal: &[C]) {
         let target = self.initial.get_or_insert_with(|| vec![ZERO; modal.len()]);
         for (a, b) in target.iter_mut().zip(modal) {

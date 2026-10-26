@@ -914,7 +914,7 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
             return Err(format!("Long-time mean work limit reached with {} columns on {} Fourier modes; the tolerance was not relaxed",
                 space.columns(), modes.len()));
         }
-        let model = ReducedModel::build(&space)?;
+        let model = ReducedModel::build(&space, 0.)?;
         let spectrum = ReducedSpectrum::of(&model, &context.lapack)?;
         // With the slow generator unique, near-zero reduced eigenvalues are
         // slow relaxations (its conserved count is the zero-mode count).
