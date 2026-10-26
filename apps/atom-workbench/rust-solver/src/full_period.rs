@@ -6,13 +6,20 @@
 //! M and 3M+1 grids are compared at every actual requested output time.
 use crate::{build_generator,expand_density,positivity,Lapack,Model,Options};
 use crate::cptp_period::Action;
-use crate::fixed_etd::Report;
 use serde_json::json;
 use std::{collections::BTreeMap,time::Instant};
 
 #[path="period_clock.rs"]
 mod period_clock;
 use period_clock::Clock;
+
+/// Finite-time samples in original real Hermitian density coordinates,
+/// including all coherences.
+pub struct Report {
+    pub times: Vec<f64>,
+    pub states: Vec<Vec<f64>>,
+    pub diagnostics: serde_json::Value,
+}
 
 const POPULATION_TOLERANCE:f64=2e-4;
 /// Experimental allocation within the requested 1e-3 population budget.
@@ -222,7 +229,7 @@ pub fn solve(lap:&Lapack,model:&Model,options:&Options)->Result<Report,String>{
                 "periodTraceDefect":coarse.trace_defect.max(fine.trace_defect),"attempts":attempts,
                 "refinementGrids":if nested{"Consecutive coprime M,2M+1 grids; each completed grid evaluated once within this request"}else{"Independent M,3M+1 grids"},
                 "errorScope":"Complete density coordinates and all requested times; independent period/phase discretization comparison, exact TP-row preservation, trace and PSD checks. No eigenvalue clipping, physical averaging, or inferred infinite-time mixture."});
-            return Ok(Report{times,states:fine.states,diagnostics,trace_error,positivity_error});
+            return Ok(Report{times,states:fine.states,diagnostics});
         }
         reason=format!("population={population_difference:e}, Fgroup={group_difference:e}, trace={trace_error:e}, positivity={positivity_error:e}");
         if nested{retained=Some(fine);steps=fine_steps;}else{steps*=2;}

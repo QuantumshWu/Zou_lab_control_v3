@@ -95,12 +95,6 @@ fn bounded_groups(a:&Sparse,central:&[usize],threshold:f64,maximum:usize,adaptiv
     if adaptive{let ceiling=a.iter().flatten().map(|(_,v)|v.abs()).fold(0.,f64::max);while groups.iter().any(|g|g.len()>maximum)&&cutoff<ceiling{cutoff=(cutoff*2.).max(1e-12).min(ceiling);groups=groups_at(a,central,cutoff);}}
     if groups.iter().any(|g|g.len()>maximum){return Err("Preconditioner block is too large".into());}Ok((groups,cutoff))
 }
-/// Keep slow central coordinates together; fast coherences use their own
-/// blocks. This partitions ONLY the preconditioner, never the equation.
-pub(super) fn slow_central(a: &Sparse, central: &[usize], omega: f64) -> Vec<usize> {
-    let cutoff = (0.25 * omega).max(100.);
-    central.iter().copied().filter(|&j| a[j].iter().all(|(_,v)|v.abs()<=cutoff)).collect()
-}
 struct Block {
     indices: Vec<usize>,
     lu: Vec<f64>,
@@ -138,7 +132,6 @@ pub(super) struct Prepared {
     norm_one:f64,
     norm_infty:f64,
     blocks: Vec<Block>,
-    schur:Option<crate::schur_shift::Partition>,
     sweep:bool,
     membership:Vec<usize>,
     transpose_matrix:Sparse,
@@ -183,7 +176,7 @@ impl Prepared {
             match native_factor(&matrix){
                 Ok(factor)=>{
                     if std::env::var_os("ATOM_GMRES_PROFILE").is_some(){eprintln!("Native ILUTP prepared {}",serde_json::to_string(&factor.diagnostics()).unwrap_or_default());}
-                    return Ok(Self{matrix,scales,norm_one:cached_one,norm_infty:cached_infty,blocks:Vec::new(),schur:None,sweep:false,membership:Vec::new(),transpose_matrix:Vec::new(),custom:None,custom_transpose:None,
+                    return Ok(Self{matrix,scales,norm_one:cached_one,norm_infty:cached_infty,blocks:Vec::new(),sweep:false,membership:Vec::new(),transpose_matrix:Vec::new(),custom:None,custom_transpose:None,
                         native_ilu:Some(factor),extension:None,extension_retired:Cell::new(false),fresh_native:RefCell::new(None),raw_product:None,raw_transpose:None,probe_identity:crate::matrix_probe::new_identity(),corrections:RefCell::new(CorrectionSpaces::default())});
                 },
                 Err(error)=>{if std::env::var_os("ATOM_SOLVER_DEBUG").is_some(){eprintln!("Native ILUTP unavailable; original block preconditioner retained: {error}");}},
@@ -267,35 +260,23 @@ impl Prepared {
             scales,
             norm_one:cached_one,norm_infty:cached_infty,
             blocks,
-            schur:None,
+            
             sweep,membership,transpose_matrix,custom:None,custom_transpose:None,native_ilu:None,extension:None,extension_retired:Cell::new(false),fresh_native:RefCell::new(None),raw_product:None,raw_transpose:None,probe_identity:crate::matrix_probe::new_identity(),
             corrections:RefCell::new(CorrectionSpaces::default()),
         })
-    }
-    pub fn new_schur(lap:&Lapack,a:&Sparse,shared:std::rc::Rc<crate::schur_shift::Shared>,omega:f64,shift:f64,weighted:bool)->Result<Self,String>{
-        let schur=crate::schur_shift::Partition::new(lap,a,shared,omega,shift,weighted)?;
-        let mut scales=vec![0_f64;a.len()];for col in a{for &(i,v)in col{scales[i]=scales[i].max(v.abs());}}
-        if scales.iter().any(|s|*s==0.){return Err("Zero Schur preconditioner row".into());}
-        let matrix=a.iter().map(|col|col.iter().map(|&(i,v)|(i,v/scales[i])).collect()).collect();
-        let(cached_one,cached_infty)=operator_norms(&matrix);
-        Ok(Self{matrix,scales,norm_one:cached_one,norm_infty:cached_infty,blocks:Vec::new(),schur:Some(schur),sweep:false,membership:Vec::new(),transpose_matrix:Vec::new(),custom:None,custom_transpose:None,native_ilu:None,extension:None,extension_retired:Cell::new(false),fresh_native:RefCell::new(None),raw_product:None,raw_transpose:None,probe_identity:crate::matrix_probe::new_identity(),corrections:RefCell::new(CorrectionSpaces::default())})
     }
     pub fn with_custom(a:&Sparse,custom:CustomApply)->Result<Self,String>{
         let mut scales=vec![0_f64;a.len()];for col in a{for &(i,v)in col{scales[i]=scales[i].max(v.abs());}}
         if scales.iter().any(|s|*s==0.){return Err("Zero custom-preconditioner row".into());}
         let matrix=a.iter().map(|col|col.iter().map(|&(i,v)|(i,v/scales[i])).collect()).collect();
         let(cached_one,cached_infty)=operator_norms(&matrix);
-        Ok(Self{matrix,scales,norm_one:cached_one,norm_infty:cached_infty,blocks:Vec::new(),schur:None,sweep:false,membership:Vec::new(),transpose_matrix:Vec::new(),custom:Some(custom),custom_transpose:None,native_ilu:None,extension:None,extension_retired:Cell::new(false),fresh_native:RefCell::new(None),raw_product:None,raw_transpose:None,probe_identity:crate::matrix_probe::new_identity(),corrections:RefCell::new(CorrectionSpaces::default())})
+        Ok(Self{matrix,scales,norm_one:cached_one,norm_infty:cached_infty,blocks:Vec::new(),sweep:false,membership:Vec::new(),transpose_matrix:Vec::new(),custom:Some(custom),custom_transpose:None,native_ilu:None,extension:None,extension_retired:Cell::new(false),fresh_native:RefCell::new(None),raw_product:None,raw_transpose:None,probe_identity:crate::matrix_probe::new_identity(),corrections:RefCell::new(CorrectionSpaces::default())})
     }
     /// Transpose of an ORIGINAL-coordinate custom inverse. For A_bal=S^-1 A,
     /// the corresponding inverse transpose is S P_raw^T; scaling is applied
     /// after the callback, not to its input.
     pub fn with_custom_transpose(mut self,apply:CustomApply)->Self{self.custom_transpose=Some(apply);self}
     pub fn operator_norm(&self,transpose:bool)->f64{if transpose{self.norm_infty}else{self.norm_one}}
-    pub fn matches_original(&self,a:&Sparse)->bool{
-        a.len()==self.matrix.len()&&a.iter().zip(&self.matrix).all(|(raw,scaled)|raw.len()==scaled.len()
-            &&raw.iter().zip(scaled).all(|(&(i,value),&(j,balanced))|i==j&&i<self.scales.len()&&value/self.scales[i]==balanced))
-    }
     pub fn raw_preconditioner(&self)->Option<Rc<RawPreconditioner>>{
         let factor=self.fresh_native.borrow().clone().or_else(||self.native_ilu.clone());
         if let Some(factor)=factor{
@@ -390,7 +371,6 @@ impl Prepared {
             }
             let rhs:Vec<_>=b.iter().zip(&self.scales).map(|(b,s)|b*s).collect();return custom(lap,&rhs);
         }
-        if let Some(schur)=&self.schur{return schur.apply(lap,b,&self.scales,transpose);}
         let mut x = vec![0.; b.len()];
         let mut working=if self.sweep{b.to_vec()}else{Vec::new()};
         for ordinal in 0..self.blocks.len() {

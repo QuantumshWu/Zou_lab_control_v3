@@ -785,7 +785,7 @@ impl Action {
 
 #[cfg(test)]
 mod tests{
-    use super::*;use crate::{Operator,Drive,Options};
+    use super::*;use crate::{Operator,Drive};
     fn damping_model()->Model{
         Model{ frequency_coordinates:None,dimension:3,states:vec![],h_real:vec![0.;9],h_imag:vec![0.;9],
             collapse:vec![Operator{real:vec![0.,1.,0.4,0.,0.,0.,0.,0.,0.],imag:vec![0.,0.,0.2,0.,0.,0.,0.,0.,0.]}],
@@ -809,14 +809,31 @@ mod tests{
                 cos:Operator{real:vec![0.,0.2,0.2,0.],imag:vec![0.;4]},
                 sin:Operator{real:vec![0.;4],imag:vec![0.,0.1,-0.1,0.]}}]}
     }
+    /// Independent oracle: classical RK4 on the complete time-dependent
+    /// generator L(t)=L0+cos(wt)Lc+sin(wt)Ls in Hermitian coordinates.
+    fn rk4_reference(model:&Model,initial:&[f64],duration:f64,steps:usize)->Vec<f64>{
+        let dense=|m:&Model|{let g=build_generator(m).unwrap();let d=g.n*g.n;let mut a=vec![0.;d*d];
+            for(j,col)in g.matrix.iter().enumerate(){for &(i,v)in col{a[i+j*d]+=v;}}a};
+        let l0=dense(&Model{drives:vec![],time_dependent:false,..model.clone()});
+        let part=|op:&Operator|dense(&Model{h_real:op.real.clone(),h_imag:op.imag.clone(),collapse:vec![],drives:vec![],time_dependent:false,..model.clone()});
+        let drive=&model.drives[0];let(lc,ls)=(part(&drive.cos),part(&drive.sin));let omega=drive.omega;let d=initial.len();
+        let f=|t:f64,x:&[f64]|->Vec<f64>{let(s,c)=(omega*t).sin_cos();(0..d).map(|i|(0..d).map(|j|(l0[i+j*d]+c*lc[i+j*d]+s*ls[i+j*d])*x[j]).sum()).collect()};
+        let h=duration/steps as f64;let mut x=initial.to_vec();
+        for k in 0..steps{let t=k as f64*h;
+            let k1=f(t,&x);let x2:Vec<_>=x.iter().zip(&k1).map(|(a,b)|a+0.5*h*b).collect();
+            let k2=f(t+0.5*h,&x2);let x3:Vec<_>=x.iter().zip(&k2).map(|(a,b)|a+0.5*h*b).collect();
+            let k3=f(t+0.5*h,&x3);let x4:Vec<_>=x.iter().zip(&k3).map(|(a,b)|a+h*b).collect();
+            let k4=f(t+h,&x4);for i in 0..d{x[i]+=h/6.*(k1[i]+2.*k2[i]+2.*k3[i]+k4[i]);}
+        }
+        x
+    }
     #[test]
     fn cptp_midpoint_converges_to_full_time_dependent_density(){
         let lap=Lapack::load().unwrap();let model=driven();let period=std::f64::consts::TAU/3.7;
         let action=Action::new(&lap,&model,period,256).unwrap();let initial=vec![1.,0.,0.,0.];
         let actual=action.apply(&lap,&initial).unwrap();
-        let options=Options{duration_us:period,samples:2,include_asymptotic:false,..Options::default()};
-        let reference=crate::floquet::solve(&lap,&model,&options).unwrap();
-        for i in 0..2{assert!((actual[i]-reference["populations"][1][i].as_f64().unwrap()).abs()<2e-5);}
+        let reference=rk4_reference(&model,&initial,period,4096);
+        for i in 0..2{assert!((actual[i]-reference[i]).abs()<2e-5);}
         let partial=action.partial(&lap,&initial,0.371*period).unwrap();
         for row in [&actual,&partial]{assert!((row[..2].iter().sum::<f64>()-1.).abs()<2e-12);
             assert!(crate::positivity(&lap,&expand_density(&coordinates(2),row,2),2).unwrap()<2e-12);}
@@ -866,11 +883,7 @@ mod tests{
     #[test]
     fn symmetric_fourth_order_converges_on_complete_time_dependent_density(){
         let lap=Lapack::load().unwrap();let model=driven();let duration=0.7;
-        let options=Options{duration_us:duration,samples:2,include_asymptotic:false,return_density:true,..Options::default()};
-        let reference=crate::floquet::solve(&lap,&model,&options).unwrap();
-        let re=reference["densityReal"][1].as_array().unwrap();let im=reference["densityImag"][1].as_array().unwrap();
-        let expected=vec![re[0].as_f64().unwrap(),re[3].as_f64().unwrap(),re[1].as_f64().unwrap(),im[1].as_f64().unwrap()];
-        let initial=vec![1.,0.,0.,0.];let mut errors=Vec::new();
+        let initial=vec![1.,0.,0.,0.];let expected=rk4_reference(&model,&initial,duration,4096);let mut errors=Vec::new();
         for steps in [4,8]{let action=Action::new_symmetric_fourth_order(&lap,&model,duration,steps).unwrap();
             assert!(!action.is_cptp());assert_eq!(action.order(),4);assert!(action.name().contains("not finite-grid CPTP"));
             let actual=action.apply(&lap,&initial).unwrap();

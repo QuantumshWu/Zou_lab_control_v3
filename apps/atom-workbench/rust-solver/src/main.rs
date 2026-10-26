@@ -10,28 +10,19 @@ use std::time::Instant;
 
 mod bath_frame;
 mod block_solve;
-mod coarse_preconditioner;
-mod schur_shift;
 mod cluster_action;
 mod cptp_period;
 mod defect_bound;
 mod dense_expm;
-mod effective_krylov;
-mod incremental_projection;
-mod fixed_etd;
 mod full_period;
-mod monodromy;
 mod floquet;
 mod harmonics;
 mod lapack;
 mod matrix_probe;
 mod native_superlu;
-mod optical_schur;
 mod stationary_structure;
 mod structured_lindblad;
 mod structured_floquet;
-mod sylvester_recycling;
-mod stationary_sylvester;
 #[cfg(feature="population-core")]
 mod population_core_adapter;
 use lapack::Lapack;
@@ -1021,7 +1012,7 @@ impl Solver {
             return Err("samples must be in [2,2001]".into());
         }
         if !model.drives.is_empty() {
-            return floquet::solve(&self.lap, model, options);
+            return Err("Driven generators are solved through modelSchema rb87-full/2; generic-lindblad/1 accepts static generators only".into());
         }
         if model.time_dependent {
             return Err("Time-dependent input needs explicit harmonic drives; no unsupported term may be silently omitted.".into());
@@ -1056,7 +1047,7 @@ impl Solver {
         // proves a unique stationary density in the reachable subspace.
         // Singular/nonunique cases continue to initial-state mode projection.
         let unique_stationary = if options.include_asymptotic {
-            self.stationary_only(model, &g, &a, &inds, started, construction_ms)?
+            self.stationary_only(model, &g, started, construction_ms)?
         } else {
             None
         };
@@ -1554,8 +1545,6 @@ impl Solver {
         &mut self,
         model: &Model,
         g: &Generator,
-        _a: &[f64],
-        _inds: &[usize],
         started: Instant,
         construction_ms: f64,
     ) -> Result<Option<Value>, String> {
@@ -1752,14 +1741,14 @@ mod period_routing_tests{
         assert_eq!(static_zero["diagnostics"]["carrierSourceToBasis"],json!([]));
     }
 }
-fn fixed_etd_result(lap:&Lapack,model:&Model,options:&Options)->Result<Value,String>{
+fn full_period_result(lap:&Lapack,model:&Model,options:&Options)->Result<Value,String>{
     let started=Instant::now();
     let mut result=if options.include_asymptotic{
         let value=floquet::solve_full(lap,model,&Options{steady_only:true,..*options})?;
         publish_mean(value.clone());value
     }else{json!({"asymptoticPopulations":null,"asymptoticStatus":"not-requested"})};
     let mean_ms=started.elapsed().as_secs_f64()*1000.;
-    let report=if full_period_requested(model,options){full_period::solve(lap,model,options)?}else if std::env::var_os("ATOM_MONODROMY").is_some(){monodromy::solve(lap,model,options)?}else if std::env::var("ATOM_FIXED_ETD").is_ok_and(|mode|mode=="ab4"){fixed_etd::solve_ab4(lap,model,options)?}else{fixed_etd::solve(lap,model,options)?};
+    let report=full_period::solve(lap,model,options)?;
     let g=build_generator(model)?;
     let densities:Vec<_>=report.states.iter().map(|state|expand_density(&g.coords,state,model.dimension)).collect();
     result["timesUs"]=json!(report.times);result["states"]=json!(model.states);
@@ -1771,30 +1760,36 @@ fn fixed_etd_result(lap:&Lapack,model:&Model,options:&Options)->Result<Value,Str
     result["diagnostics"]["elapsedMs"]=json!(started.elapsed().as_secs_f64()*1000.);Ok(result)
 }
 
+/// Static rb87-full/2 mean: the verified trace-constrained full-density
+/// stationary solve. Initial-dependent cases fall back to Solver::solve.
+fn static_stationary(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
+    if model.time_dependent||!model.drives.is_empty(){return Err("Nonstatic effective Hamiltonian".into());}
+    if !options.steady_only{return Err("Static finite-time trajectories are solved by the population core".into());}
+    let started=Instant::now();
+    let g=build_generator(model)?;
+    let construction=started.elapsed().as_secs_f64()*1000.;
+    solver.stationary_only(model,&g,started,construction)?.ok_or_else(||"Initial-dependent steady state needs spectral projection".into())
+}
+
 fn full_model_solve(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
     options.validate_population_tolerance()?;
     if model.frequency_coordinates.is_none(){return Err("rb87-full/2 requires authoritative frequencyCoordinates metadata".into());}
     let basis=harmonics::model_frequency_basis(model,16)?;
     // Request-local phase metadata must precede EVERY possible progress path,
-    // including effective_krylov's static mean without Fourier coefficients.
+    // including the static mean without Fourier coefficients.
     PROGRESS_REQUEST.with(|context|{
         if let Some((_,schema,mapping))=context.borrow_mut().as_mut(){if schema==FULL_MODEL_SCHEMA{*mapping=basis.source_to_basis.clone();}}
     });
     #[cfg(feature="population-core")]
-    if population_core_adapter::supports(model,options)
-        && !full_period_requested(model,options)
-        && std::env::var_os("ATOM_FIXED_ETD").is_none()
-        && std::env::var_os("ATOM_MONODROMY").is_none()
-    {
+    if population_core_adapter::supports(model,options)&&!full_period_requested(model,options){
         return population_core_adapter::solve(solver,model,options);
     }
     let mut result=if !model.drives.is_empty(){
-        if !options.steady_only&&(std::env::var_os("ATOM_FIXED_ETD").is_some()
-            ||(std::env::var_os("ATOM_MONODROMY").is_some()&&monodromy::supports(model))||full_period_requested(model,options)){
-            fixed_etd_result(&solver.lap,model,options)
-        }else{floquet::solve_full(&solver.lap,model,options)}
+        if options.steady_only{floquet::solve_full(&solver.lap,model,options)}
+        else if full_period_requested(model,options){full_period_result(&solver.lap,model,options)}
+        else{Err("Finite-time driven trajectories are solved by the population core or the complete-period lane".into())}
     }else{
-        let start=Instant::now();match effective_krylov::solve(solver,model,options){Ok(v)=>Ok(v),Err(reason)=>solver.solve(model,options).map(|mut v|{
+        let start=Instant::now();match static_stationary(solver,model,options){Ok(v)=>Ok(v),Err(reason)=>solver.solve(model,options).map(|mut v|{
             v["diagnostics"]["fastPathFallback"]=json!(reason);v["diagnostics"]["elapsedMs"]=json!(start.elapsed().as_secs_f64()*1000.);v
         })}
     }?;
