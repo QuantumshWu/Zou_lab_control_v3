@@ -8,8 +8,7 @@ use std::time::Instant;
 use atom_population_core::preparation::{ModelView,MatrixView,DriveView,PhaseBasis,FrequencyParts,GaugePolicy};
 use atom_population_core::owned_prepared::{KernelPolicy,coordinates::InitialView,b0_inverse::P0Policy};
 use atom_population_core::owned_prepared::runtime_core::RuntimeCore;
-use atom_population_core::owned_prepared::population_control::RequestedGroup;
-use atom_population_core::owned_prepared::finite_driver::{self,FiniteOptions};
+use atom_population_core::owned_prepared::engine::{self,FiniteOptions,RequestedGroup};
 
 pub fn supports(model:&Model,options:&Options,declared:bool)->bool {
     declared&&!options.steady_only&&!options.return_density&&model.dimension==32
@@ -70,18 +69,25 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
     let preparation_ms=started.elapsed().as_secs_f64()*1000.;
     let initial_populations:Vec<_>=(0..32).map(|i|core.initial().original()[i*32+i].re).collect();
     let times:Vec<_>=(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect();
-    let solution=finite_driver::solve(core,&times,requested_groups,FiniteOptions{
-        population_tolerance:options.population_tolerance,..Default::default()})?;
+    // TEMPORARY development knobs (removed before delivery).
+    let knob=|name:&str|std::env::var(name).ok().and_then(|v|v.parse::<f64>().ok());
+    let mut finite=FiniteOptions{population_tolerance:options.population_tolerance,..Default::default()};
+    if let Some(c)=knob("ATOM_EXP_SLOW_POLE"){finite.slow_pole_factor=c;}
+    if let Some(c)=knob("ATOM_EXP_FAST_POLE"){finite.fast_pole=c;}
+    if let Some(c)=knob("ATOM_EXP_MAX_POLES"){finite.maximum_poles=c as usize;}
+    if let Ok(v)=std::env::var("ATOM_EXP_POLES"){finite.poles=Some(v.split(',').filter_map(|x|x.parse::<f64>().ok()).collect());}
+    if let Some(s)=knob("ATOM_EXP_INNER_STEPS"){finite.inner.maximum_steps=s as usize;}
+    if let Some(t)=knob("ATOM_EXP_INNER_TOL"){finite.inner.relative_residual=t;}
+    if let Ok(v)=std::env::var("ATOM_EXP_FIXED"){let mut it=v.split(':').map(|x|x.parse::<usize>().unwrap_or(0));finite.fixed=Some((it.next().unwrap_or(1),it.next().unwrap_or(16)));}
+    let solution=engine::solve(core,&times,requested_groups,finite)?;
     let d=&solution.diagnostics;
     let populations:Vec<_>=solution.populations.chunks_exact(32).map(|p|p.to_vec()).collect();
     let trace=populations.iter().map(|p|(p.iter().sum::<f64>()-1.).abs()).fold(0_f64,f64::max);
     let initial_error=populations[0].iter().zip(initial_populations).map(|(a,b)|(a-b).abs()).fold(0_f64,f64::max);
     if trace>1e-7||initial_error>1e-10{return Err("Returned population probabilities failed fixed trace/initial checks".into());}
     let checkpoints:Vec<_>=d.checkpoints.iter().map(|c|json!({
-        "order":c.domain_order,"modes":c.modes,"basis":c.columns,"generation":c.generation,
-        "zeroLiftOnly":c.zero_lift_only,"action":c.decision.action.as_str(),"reason":c.decision.reason,
-        "basisIndicator":c.decision.basis_indicator,"domainIndicator":c.decision.domain_indicator,
-        "jointIndicator":c.decision.joint_indicator,"workMs":c.work_ms,"checkMs":c.check_ms,"elapsedMs":c.elapsed_ms
+        "order":c.order,"modes":c.modes,"basis":c.columns,"action":c.action,
+        "basisChange":c.basis_change,"domainChange":c.domain_change,"elapsedMs":c.elapsed_ms
     })).collect();
     let mut result=json!({"states":model.states,"timesUs":times,"populations":populations,
         "asymptoticPopulations":null,"asymptoticStatus":"not-requested",
@@ -92,11 +98,12 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
             "validationKind":"population","traceError":trace,"initialStateError":initial_error,
             "elapsedMs":started.elapsed().as_secs_f64()*1000.,"constructionMs":preparation_ms,
             "propagateMs":d.elapsed_ms,"populationTolerance":options.population_tolerance,
-            "harmonicConvergenceError":d.estimated_error,"populationConvergenceEstimate":d.estimated_error,
-            "errorBoundCertified":false,"rawDensityPositivityValidated":false,
+            "populationConvergenceEstimate":d.estimated_error,"errorBoundCertified":false,
             "populationProjectionCharge":d.projection_charge,"originalHamiltonianAndCollapseRetained":true,
-            "finalDomainOrder":d.final_domain_order,"finalBasis":d.final_basis,"fastPairColumns":d.fast_pair_columns,
-            "exactZeroFourierSupport":d.exact_zero_fourier,"historicalAnswerUsed":false,"cached":false,
+            "finalDomainOrder":d.final_order,"finalModes":d.final_modes,"finalBasis":d.final_columns,
+            "imageColumns":d.image_columns,"innerOperatorApplications":d.operator_applications,
+            "peakTrialBytes":d.peak_trial_bytes,"maximumImaginaryPopulation":d.maximum_imaginary_population,
+            "historicalAnswerUsed":false,"cached":false,
             "frequencyCoordinateSource":"declared-carrier-coordinates",
             "carrierSourceToBasis":identity,"finiteCarrierSourceToBasis":identity,"populationCheckpoints":checkpoints,
             "asymptoticStatus":"not-requested"}});

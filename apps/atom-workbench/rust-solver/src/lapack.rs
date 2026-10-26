@@ -859,6 +859,37 @@ impl Lapack {
         unsafe{(self.gemm)(&trans,&no,&m,&n,&k,&1.,a.as_ptr(),&la,b.as_ptr(),&lb,&0.,out.as_mut_ptr(),&lc);}
         Ok(())
     }
+    /// General column-major `C = alpha op(A) op(B) + beta C` with explicit
+    /// leading dimensions; `op(X)` is `X^T` when the flag is set. Shapes and
+    /// spans are validated in O(1); data finiteness is the caller's concern.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gemm(
+        &self, transpose_a: bool, transpose_b: bool, m: usize, n: usize, k: usize,
+        alpha: f64, a: &[f64], lda: usize, b: &[f64], ldb: usize,
+        beta: f64, c: &mut [f64], ldc: usize,
+    ) -> Result<(), String> {
+        let span = |rows: usize, cols: usize, ld: usize| -> Option<usize> {
+            if rows == 0 || cols == 0 { Some(0) } else { (cols - 1).checked_mul(ld)?.checked_add(rows) }
+        };
+        let (a_rows, a_cols) = if transpose_a { (k, m) } else { (m, k) };
+        let (b_rows, b_cols) = if transpose_b { (n, k) } else { (k, n) };
+        if [m, n, k, lda, ldb, ldc].iter().any(|&v| v > i32::MAX as usize)
+            || lda < a_rows.max(1) || ldb < b_rows.max(1) || ldc < m.max(1)
+            || span(a_rows, a_cols, lda).is_none_or(|s| s > a.len())
+            || span(b_rows, b_cols, ldb).is_none_or(|s| s > b.len())
+            || span(m, n, ldc).is_none_or(|s| s > c.len())
+        {
+            return Err("Invalid general real BLAS matrix dimensions".into());
+        }
+        if m == 0 || n == 0 { return Ok(()); }
+        let ta = if transpose_a { b'T' } else { b'N' } as c_char;
+        let tb = if transpose_b { b'T' } else { b'N' } as c_char;
+        let (mi, ni, ki, la, lb, lc) = (m as i32, n as i32, k as i32, lda as i32, ldb as i32, ldc as i32);
+        unsafe {
+            (self.gemm)(&ta, &tb, &mi, &ni, &ki, &alpha, a.as_ptr(), &la, b.as_ptr(), &lb, &beta, c.as_mut_ptr(), &lc);
+        }
+        Ok(())
+    }
     pub fn multiply_complex(
         &self,
         a: &[Complex64],

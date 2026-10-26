@@ -198,6 +198,13 @@ impl PopulationObservation{
         Ok(Self{owner:Arc::clone(p),duals})
     }
     pub fn coefficient_modes(&self)->usize{self.duals.len()}
+    /// Output modes reached by the readout from the given domain modes.
+    pub fn output_modes(&self,input_modes:&[Charge])->Result<Vec<Charge>,String>{
+        let inputs=mode_set(input_modes,self.owner.hilbert.source.phases.axes.len())?;
+        let support:Modes=self.duals.keys().cloned().collect();
+        Ok(combinations(&support,&inputs,false)?.into_iter().collect())
+    }
+    pub fn frequency(&self,q:&[i32])->Result<crate::preparation::FrequencyParts,String>{self.owner.hilbert.source.phases.frequency(q)}
     pub fn prepare_phase_plan(&self,input_modes:&[Charge],times:&[f64])->Result<PopulationPhasePlan,String>{
         let inputs=mode_set(input_modes,self.owner.hilbert.source.phases.axes.len())?;
         let support:Modes=self.duals.keys().cloned().collect();let modes:Vec<_>=combinations(&support,&inputs,false)?.into_iter().collect();
@@ -223,6 +230,8 @@ impl PopulationObservation{
 }
 impl PopulationBasis{
     pub fn modes(&self)->&[Charge]{&self.modes}
+    /// Row-major `[(mode*n+state), column]` complex coefficients.
+    pub fn coefficients(&self)->&[C]{&self.coefficients}
     pub fn columns(&self)->usize{self.columns}
     pub fn at_times(&self,times:&[f64])->Result<PopulationRows,String>{
         self.at_phase_plan(&PopulationPhasePlan::prepare(Arc::clone(&self.owner),self.modes.clone(),times)?)

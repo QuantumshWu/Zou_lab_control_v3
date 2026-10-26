@@ -23,22 +23,18 @@ pub mod b0_factor;
 pub mod b0_inverse;
 #[path="real_fourier.rs"]
 pub mod real_fourier;
-#[path="reduced_system.rs"]
-pub mod reduced_system;
 #[path="runtime_core.rs"]
 pub mod runtime_core;
-#[path="adaptive_direction.rs"]
-pub mod adaptive_direction;
-#[path="domain_transfer.rs"]
-pub mod domain_transfer;
-#[path="continuous_source_gram.rs"]
-pub mod continuous_source_gram;
-#[path="residual_proposal.rs"]
-pub mod residual_proposal;
-#[path="population_control.rs"]
-pub mod population_control;
-#[path="finite_driver.rs"]
-pub mod finite_driver;
+#[path="trial.rs"]
+pub(crate) mod trial;
+#[path="readout.rs"]
+pub(crate) mod readout;
+#[path="reduced.rs"]
+pub(crate) mod reduced;
+#[path="directions.rs"]
+pub mod directions;
+#[path="engine.rs"]
+pub mod engine;
 
 #[derive(Clone,Copy,Debug)]
 pub enum KernelPolicy { Csr, HybridBlas }
