@@ -17,9 +17,12 @@ export function transitionTree():TreeGroup[]{
 /** The bases a frequency can be read or defined relative to (ui-design.md §1.3–1.4):
  * 绝对 (with its words, and what the closed box says for it), the zero-field transitions,
  * and other lasers when offered. */
-export function frequencyBaseTree(options:{absolute:string;absoluteText?:string;lasers?:readonly {id:string;name:string}[]}):TreeGroup[]{
+export function frequencyBaseTree(options:{absolute:string;absoluteText?:string;lasers?:readonly {id:string;name:string}[];references?:readonly {id:string;name:string}[];follow?:boolean}):TreeGroup[]{
  const groups:TreeGroup[]=[{heading:'绝对',leaves:[{key:'absolute',label:options.absolute,text:options.absoluteText??`绝对（${options.absolute}）`}]}];
  for(const group of transitionTree())groups.push({heading:group.heading,leaves:[],children:group.children!.map(child=>({heading:child.heading,leaves:child.leaves.map(leaf=>{const [from,line,Fg,Fe]=leaf.key.split('-');return {...leaf,key:transitionKey({...(from==='D1'?{fromManifold:'D1' as const}:{}),line:line as 'D1'|'D2',Fg:Number(Fg) as 1|2,Fe:Number(Fe)})};})}))});
- if(options.lasers?.length)groups.push({heading:'激光',leaves:options.lasers.map(l=>({key:`laser:${l.id}`,label:l.name,text:`激光 ${l.name}`}))});
+ // A definition follows them (an offset lock); a readout is read against them.
+ const named=(kind:string,word:string)=>(o:{id:string;name:string})=>({key:`${kind}:${o.id}`,label:o.name,text:options.follow?`跟随 ${o.name}`:`${word} ${o.name}`});
+ if(options.references?.length)groups.push({heading:'参考频率',leaves:options.references.map(named('reference','参考频率'))});
+ if(options.lasers?.length)groups.push({heading:'激光',leaves:options.lasers.map(named('laser','激光'))});
  return groups;
 }

@@ -10,12 +10,11 @@ import {FREQUENCY_UNITS,WAVELENGTH_UNITS,baseName,baseValue,difference,inUnit,is
 import {naturalDetuningUnit} from './laser-frequency.js';
 
 export type ReadoutPreference={unit?:FrequencyUnit;base?:string};
-/** Where readout preferences are kept (this machine until scenes carry display preferences). */
+/** Where readout preferences are kept: the scene's display preferences (`store`), saved with it. */
 export class ReadoutPreferences{
-  private prefs:Record<string,ReadoutPreference>={};
-  constructor(private storageKey:string){try{const saved=JSON.parse(localStorage.getItem(storageKey)??'{}');if(saved&&typeof saved==='object')this.prefs=saved;}catch{}}
-  get(key:string):ReadoutPreference{return {...this.prefs[key]};}
-  set(key:string,pref:ReadoutPreference):void{this.prefs[key]=pref;try{localStorage.setItem(this.storageKey,JSON.stringify(this.prefs));}catch{}}
+  constructor(private store:()=>Record<string,ReadoutPreference>,private saved:()=>void=()=>{}){}
+  get(key:string):ReadoutPreference{return {...this.store()[key]};}
+  set(key:string,pref:ReadoutPreference):void{const prefs=this.store();if(pref.unit===undefined&&pref.base===undefined)delete prefs[key];else prefs[key]=pref;this.saved();}
 }
 
 export function unitTree(absolute:boolean):TreeGroup[]{
@@ -42,7 +41,7 @@ export class FrequencyReadout{
   readonly unit:TreeCombo;
   readonly base:TreeCombo;
   readonly baseLabel=element('span','frequency-base-label','相对');
-  private last:{value:FrequencyValue|undefined;scene:Pick<Scene,'lasers'>}|undefined;
+  private last:{value:FrequencyValue|undefined;scene:Pick<Scene,'lasers'|'referenceFrequencies'>}|undefined;
   private automaticWords:string|null=null;
   constructor(readonly key:string,private prefs:ReadoutPreferences,private options:ReadoutOptions){
     this.readout.root.classList.add('frequency-reading');
@@ -57,7 +56,7 @@ export class FrequencyReadout{
   chosenUnit():FrequencyUnit|undefined{return this.prefs.get(this.key).unit;}
   /** The base in effect: the operator's, else "自动"'s, else the readout's default, else absolute. */
   baseKey():string{return this.chosenBase()??this.options.automatic?.()??this.options.defaultBase??'absolute';}
-  resolvedBase(scene:Pick<Scene,'lasers'>):FrequencyBase{const base=parseBase(this.baseKey());return base&&baseValue(base,scene)?base:{kind:'absolute'};}
+  resolvedBase(scene:Pick<Scene,'lasers'|'referenceFrequencies'>):FrequencyBase{const base=parseBase(this.baseKey());return base&&baseValue(base,scene)?base:{kind:'absolute'};}
   /** The unit in effect: the operator's when the base allows it, else the reading's natural one. */
   unitFor(reading:number,absolute:boolean):FrequencyUnit{
     const chosen=this.prefs.get(this.key).unit;
@@ -65,12 +64,12 @@ export class FrequencyReadout{
     return Number.isFinite(reading)?naturalDetuningUnit(reading):'MHz';
   }
   /** ν − ν(base) in MHz, or NaN. */
-  relative(value:FrequencyValue|undefined,scene:Pick<Scene,'lasers'>):number{
+  relative(value:FrequencyValue|undefined,scene:Pick<Scene,'lasers'|'referenceFrequencies'>):number{
     const base=baseValue(this.resolvedBase(scene),scene);return value&&base?difference(value,base):NaN;
   }
-  show(value:FrequencyValue|undefined,scene:Pick<Scene,'lasers'>):void{this.last={value,scene};this.refresh();}
+  show(value:FrequencyValue|undefined,scene:Pick<Scene,'lasers'|'referenceFrequencies'>):void{this.last={value,scene};this.refresh();}
   /** The column heading a table reading this base and unit says: "ν − ν(探测光) / MHz". */
-  heading(scene:Pick<Scene,'lasers'>,unit:FrequencyUnit):string{return readingHeading(this.resolvedBase(scene),scene,unit);}
+  heading(scene:Pick<Scene,'lasers'|'referenceFrequencies'>,unit:FrequencyUnit):string{return readingHeading(this.resolvedBase(scene),scene,unit);}
   private refresh():void{
     if(!this.last)return;
     const {value,scene}=this.last,base=this.resolvedBase(scene),absolute=base.kind==='absolute';

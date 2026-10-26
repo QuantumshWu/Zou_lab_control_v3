@@ -3,6 +3,21 @@ export interface AxisAngles { thetaDeg:number; phiDeg:number; thetaResidualDeg?:
 export type SpectralLine = 'D1' | 'D2';
 export type DetuningUnit = 'Hz' | 'kHz' | 'MHz' | 'GHz' | 'THz';
 export interface ZeroFieldTransition { fromManifold?:'ground'|'D1'; line: SpectralLine; Fg: 1 | 2; Fe: number }
+/** What a defined frequency is relative to (ui-design.md §1.2): nothing (an absolute
+ * frequency), a zero-field transition, a reference frequency or another laser (an offset lock). */
+export type FrequencyBaseSpec={kind:'absolute'}|({kind:'transition'}&ZeroFieldTransition)|{kind:'reference';id:string}|{kind:'laser';id:string};
+/** The one form of a defined frequency: a base and the offset from it (MHz, canonical), or
+ * a vacuum wavelength exactly as written. */
+export type FrequencyExpr={base:FrequencyBaseSpec;offsetMHz:number}|{wavelengthNm:number};
+/** The unit a definition's value is read in (a wavelength unit only for a wavelength). */
+export type FrequencyDisplayUnit=DetuningUnit|'nm'|'μm';
+/** A frequency with no intensity, polarization or direction ("冷却光锁频点"): it can be
+ * selected (the chart shows detunings from it) and be a base of other frequencies. */
+export interface ReferenceFrequency {
+  id: string; name: string; frequency: FrequencyExpr; frequencyUnit?: FrequencyDisplayUnit;
+  /** Derived: the resolved frequency (resolveSceneFrequencies). */
+  frequencyAnchor?: LaserFrequencyAnchor;
+}
 export interface LaserFrequencyAnchor {
   /** A fixed fine-structure centroid plus an offset defines the physical beam.
    * Changing the displayed transition reference must not re-round this value. */
@@ -25,7 +40,11 @@ export interface MagneticField {
   magnitudeG: number; thetaDeg: number; phiDeg: number;
 }
 export interface Laser {
+  /** `line` is derived from the frequency (the nearer D line of its carrier). */
   id: string; name: string; enabled: boolean; line: SpectralLine;
+  /** The laser's frequency (ui-design.md §1.2). Scenes are migrated to it on load; the legacy
+   * fields below are read only from older scenes and fixtures that never were. */
+  frequency?: FrequencyExpr; frequencyUnit?: FrequencyDisplayUnit;
   /** Spectroscopy/diagram origin only. Omitted follows the actual initial state;
    * this does not restrict drive couplings or alter the density initial state. */
   referenceStateId?: string;
@@ -34,10 +53,9 @@ export interface Laser {
    * of nonzero intensity is an explicit drive of the master equation. */
   regime?: 'near' | 'far';
   referenceProcess?: 'absorption' | 'emission';
-  /** Detuning from referenceTransition, in MHz, independent of the display unit.
-   * Authoritative in transition mode; wavelength mode derives it from lambda.
-   * Legacy scenes without a reference use F=2 → F'=3 (D2) or F'=2 (D1). */
-  detuningMHz: number; intensityMWcm2: number;
+  /** Legacy: detuning from referenceTransition, in MHz (transition mode). Legacy scenes
+   * without a reference use F=2 → F'=3 (D2) or F'=2 (D1). */
+  detuningMHz?: number; intensityMWcm2: number;
   referenceTransition?: ZeroFieldTransition;
   frequencyMode?: 'transition' | 'wavelength';
   /** Vacuum wavelength. Authoritative only in wavelength mode. */
@@ -62,6 +80,9 @@ export interface Scene {
   /** Optional fields allow first-demo scene files to remain readable. */
   marks?: Record<string,string>;
   references?: ReferenceLevel[];
+  referenceFrequencies?: ReferenceFrequency[];
+  /** Display preferences: never physics, never part of a request or a cache key. */
+  display?: {readouts?: Record<string,{unit?:string;base?:string}>};
   dynamics?: DynamicsSettings;
 }
 export interface ReferenceLevel {
@@ -70,6 +91,9 @@ export interface ReferenceLevel {
   anchorId: string; offsetMHz: number;
   /** Follow the instantaneous anchor, or hold its zero-field energy fixed. */
   anchorMode?: 'follow' | 'zero-field';
+  /** A linked photon (ui-design.md §1.6): E = E(anchor) ± hν(source) + h·offset, following
+   * the laser or reference frequency when it changes. */
+  photon?: {source:{kind:'laser'|'reference';id:string};direction:'absorb'|'emit'};
 }
 /** Initial density of the dynamics, diagonal in the master-model basis (the
  * eigenbasis of the static H0). State ids are those 32 eigenstates.

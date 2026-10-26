@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultScene } from '../dist/js/atom-workbench/src/types.js';
 import { analyze, laserFrequencyMHz, zeroFieldTransitionFrequencyMHz } from '../dist/js/atom-workbench/src/physics.js';
-import { setLaserDetuningUnit, setLaserDetuningValue, setLaserFrequencyBase, setLaserTransitionReference,
+import { setLaserDetuningUnit, setLaserDetuningValue, setLaserTransitionReference,
   zeroFieldTransitionOptions } from '../dist/js/atom-workbench/src/laser-frequency.js';
 import { C_NM_MHZ, baseKey, baseValue, difference, gap, inUnit, laserValue, levelValue, nearestTransition, parseBase, photon, readingHeading,
   readoutText, total, transitionKey, transitionValue, value } from '../dist/js/atom-workbench/src/frequency-value.js';
@@ -61,14 +61,6 @@ test('a transition read from its upper state is the same photon',()=>{
   assert.deepEqual(photon(gap(excited,ground)),gap(ground,excited));
 });
 
-test('the definition base changes the representation, never the optical frequency',()=>{
-  const laser=structuredClone(defaultScene().lasers[0]);setLaserTransitionReference(laser,{line:'D2',Fg:2,Fe:3});setLaserDetuningValue(laser,-12.5);
-  const before=laserFrequencyMHz(laser);
-  setLaserFrequencyBase(laser,{kind:'transition',line:'D2',Fg:1,Fe:2});near(laserFrequencyMHz(laser),before,1e-6);assert.equal(laser.frequencyMode,'transition');
-  setLaserFrequencyBase(laser,{kind:'absolute'});near(laserFrequencyMHz(laser),before,1e-6);assert.equal(laser.frequencyMode,'wavelength');
-  setLaserFrequencyBase(laser,{kind:'transition',fromManifold:'D1',line:'D2',Fg:2,Fe:3});near(laserFrequencyMHz(laser),before,1e-6);assert.equal(laser.frequencyMode,'transition');
-  assert.equal(laser.referenceTransition.fromManifold,'D1');
-});
 
 test('the photon direction belongs to a reference level and is cleared with it',()=>{
   const scene=defaultScene(),laser=scene.lasers[0],states=[{id:'ground-2-0',manifold:'ground'},{id:'D2-3-0',manifold:'D2'}];

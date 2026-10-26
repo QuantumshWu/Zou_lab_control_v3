@@ -2,7 +2,7 @@
 // asks first when the current scene holds edits.
 import {defaultDynamics,defaultScene} from './types.js';
 import type {Scene,SpectralLine} from './types.js';
-import {normalizeLaserFrequency} from './laser-frequency.js';
+import {migrateSceneFrequencies,normalizeLaserFrequency} from './laser-frequency.js';
 
 export type ExampleView='levels'|'dynamics'|'space';
 export const EXAMPLES:readonly {key:string;label:string}[]=[
@@ -57,6 +57,6 @@ export function exampleScene(key:string):{scene:Scene;view:ExampleView;line:Spec
     view='dynamics';
   }
   if(key==='tilted'){Object.assign(next.fields[0]!,{thetaDeg:67,phiDeg:35});probe.ellipticityDeg=28;next.initialM=0;view='space';}
-  next.lasers.forEach(l=>normalizeLaserFrequency(l));
+  next.lasers.forEach(l=>normalizeLaserFrequency(l));migrateSceneFrequencies(next);
   return {scene:next,view,line};
 }

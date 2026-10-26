@@ -2,7 +2,7 @@
 // frequency is kept as a large fixed part (a fine-structure centroid, or 0)
 // plus a small offset, so a difference of two frequencies subtracts the large
 // parts first and keeps Hz-level offsets on a ~380 THz carrier.
-import type {DetuningUnit,Laser,Level,ReferenceLevel,Scene,SpectralLine,ZeroFieldTransition} from './types.js';
+import type {DetuningUnit,FrequencyBaseSpec,Laser,LaserFrequencyAnchor,Level,ReferenceLevel,Scene,SpectralLine,ZeroFieldTransition} from './types.js';
 import {RB87,captureLaserFrequencyAnchor,transitionReferenceMHz} from './physics.js';
 import {referenceEnergyMHz} from './reference-energy.js';
 import {formatNumber,TERMS,fSymbol} from './format.js';
@@ -25,32 +25,37 @@ export function total(v:FrequencyValue):number{return v.centroidMHz+v.offsetMHz;
 export function difference(a:FrequencyValue,b:FrequencyValue):number{return (a.centroidMHz-b.centroidMHz)+(a.offsetMHz-b.offsetMHz);}
 export function gap(from:FrequencyValue,to:FrequencyValue):FrequencyValue{return value(to.centroidMHz-from.centroidMHz,to.offsetMHz-from.offsetMHz);}
 
-export function laserValue(laser:Laser):FrequencyValue{const anchor=captureLaserFrequencyAnchor(laser);return value(centroid(anchor.line),anchor.offsetMHz);}
+export function laserValue(laser:Laser):FrequencyValue{return anchorValue(captureLaserFrequencyAnchor(laser));}
+/** A resolved carrier (a laser's or a reference frequency's) as a value. */
+export function anchorValue(anchor:Pick<LaserFrequencyAnchor,'line'|'offsetMHz'>):FrequencyValue{return value(centroid(anchor.line),anchor.offsetMHz);}
 export function transitionValue(t:ZeroFieldTransition):FrequencyValue{
   const fromD1=t.fromManifold==='D1';
   return value(centroid(t.line)-(fromD1?centroid('D1'):0),transitionReferenceMHz(t.line,t.Fg,t.Fe,t.fromManifold)+(fromD1?centroid('D1'):0));
 }
 export function levelValue(level:Pick<Level,'manifold'|'energyMHz'>):FrequencyValue{return value(level.manifold==='ground'?0:centroid(level.manifold),level.energyMHz);}
-export function referenceLevelValue(reference:ReferenceLevel,levels:readonly Level[]):FrequencyValue|undefined{
-  const energy=referenceEnergyMHz(reference,levels),anchor=levels.find(l=>l.id===reference.anchorId);
+export function referenceLevelValue(reference:ReferenceLevel,levels:readonly Level[],scene?:FrequencyScene):FrequencyValue|undefined{
+  const energy=referenceEnergyMHz(reference,levels,scene),anchor=levels.find(l=>l.id===reference.anchorId);
   if(energy===undefined||!anchor)return undefined;
   const base=anchor.manifold==='ground'?0:centroid(anchor.manifold);return value(base,energy-base);
 }
 
 // ------------------------------------------------------------ bases
 /** What a frequency is read relative to: nothing (the absolute frequency), a zero-field transition, a laser. */
-export type FrequencyBase={kind:'absolute'}|({kind:'transition'}&ZeroFieldTransition)|{kind:'laser';id:string};
+export type FrequencyBase=FrequencyBaseSpec;
+type FrequencyScene=Pick<Scene,'lasers'|'referenceFrequencies'>;
 export function transitionKey(t:ZeroFieldTransition):string{return `transition:${t.fromManifold??'ground'}-${t.line}-${t.Fg}-${t.Fe}`;}
-export function baseKey(base:FrequencyBase):string{return base.kind==='absolute'?'absolute':base.kind==='laser'?`laser:${base.id}`:transitionKey(base);}
+export function baseKey(base:FrequencyBase):string{return base.kind==='absolute'?'absolute':base.kind==='laser'||base.kind==='reference'?`${base.kind}:${base.id}`:transitionKey(base);}
 export function parseBase(key:string):FrequencyBase|undefined{
   if(key==='absolute')return {kind:'absolute'};
   const laser=/^laser:(.+)$/.exec(key);if(laser)return {kind:'laser',id:laser[1]!};
+  const reference=/^reference:(.+)$/.exec(key);if(reference)return {kind:'reference',id:reference[1]!};
   const t=/^transition:(ground|D1)-(D1|D2)-([12])-(\d)$/.exec(key);
   return t?{kind:'transition',...(t[1]==='D1'?{fromManifold:'D1' as const}:{}),line:t[2] as SpectralLine,Fg:Number(t[3]) as 1|2,Fe:Number(t[4])}:undefined;
 }
-export function baseValue(base:FrequencyBase,scene:Pick<Scene,'lasers'>):FrequencyValue|undefined{
+export function baseValue(base:FrequencyBase,scene:FrequencyScene):FrequencyValue|undefined{
   if(base.kind==='absolute')return value(0,0);
   if(base.kind==='transition')return transitionValue(base);
+  if(base.kind==='reference'){const r=scene.referenceFrequencies?.find(r=>r.id===base.id);return r?.frequencyAnchor?anchorValue(r.frequencyAnchor):undefined;}
   const laser=scene.lasers.find(l=>l.id===base.id);return laser?laserValue(laser):undefined;
 }
 export function transitionName(t:ZeroFieldTransition):string{
@@ -59,11 +64,11 @@ export function transitionName(t:ZeroFieldTransition):string{
 /** A transition's photon frequency |ν| (an emission's gap read the other way). */
 export function photon(v:FrequencyValue):FrequencyValue{return total(v)<0?value(-v.centroidMHz,-v.offsetMHz):v;}
 /** What a column reading this base and unit says it is: "ν − ν(探测光) / MHz". */
-export function readingHeading(base:FrequencyBase,scene:Pick<Scene,'lasers'>,unit:FrequencyUnit):string{
+export function readingHeading(base:FrequencyBase,scene:FrequencyScene,unit:FrequencyUnit):string{
   return base.kind==='absolute'?`ν / ${unit}`:`ν − ν(${baseName(base,scene)}) / ${unit}`;
 }
-export function baseName(base:FrequencyBase,scene:Pick<Scene,'lasers'>):string{
-  return base.kind==='absolute'?'绝对':base.kind==='transition'?transitionName(base):scene.lasers.find(l=>l.id===base.id)?.name??base.id;
+export function baseName(base:FrequencyBase,scene:FrequencyScene):string{
+  return base.kind==='absolute'?'绝对':base.kind==='transition'?transitionName(base):base.kind==='reference'?scene.referenceFrequencies?.find(r=>r.id===base.id)?.name??base.id:scene.lasers.find(l=>l.id===base.id)?.name??base.id;
 }
 
 // ------------------------------------------------------------ reading

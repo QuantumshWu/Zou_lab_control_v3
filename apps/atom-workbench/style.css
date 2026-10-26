@@ -73,6 +73,10 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 .scene-object.disabled .object-detail, .scene-object.disabled .object-symbol { color: var(--disabled-ink); }
 .object-toggle, .remove-object { flex: none; }
 .scene-initial-shortcut { display: none; }
+/* A reference has no on/off switch: its place in the row stays. */
+.object-toggle-gap { width: var(--switch-width, 0); }
+.object-symbol.reference { font-style: italic; }
+.object-symbol.level { color: var(--muted-ink); }
 .state-selector { margin-top: var(--section-gap); padding-top: var(--row-gap); border-top: var(--edge) solid var(--divider); }
 /* 初态: its kind, then what that kind needs (ui-design.md §3). */
 .initial-controls { display: flex; flex-direction: column; gap: var(--row-gap); min-width: 0; }

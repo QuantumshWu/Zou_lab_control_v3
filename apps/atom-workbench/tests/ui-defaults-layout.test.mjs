@@ -19,7 +19,7 @@ test('loading an existing scene preserves its sample count and 850 nm carrier',(
   const loaded=validateScene(JSON.parse(JSON.stringify(old)));
   assert.equal(loaded.dynamics.samples,161);
   const tweezer=loaded.lasers.find(x=>x.id==='tweezer');
-  assert.equal(tweezer.wavelengthNm,850);
+  assert.equal(tweezer.frequency.wavelengthNm,850,'migrated to the wavelength as written');
   assert.ok(Math.abs(laserFrequencyMHz(tweezer)-299792458000/850)<1e-7);
 });
 
