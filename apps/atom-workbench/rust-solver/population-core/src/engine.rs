@@ -11,7 +11,7 @@
 
 use super::*;
 use super::directions::{shift_invert, InnerSolve};
-use super::error_estimate::{combined_estimate, BasisOptions, CandidateView, HaloModeIndicator, HaloOptions, PopulationGroup};
+use super::error_estimate::{combined_estimate, CandidateView, HaloModeIndicator, HaloOptions, PopulationGroup};
 use super::reduced::ReducedModel;
 use super::runtime_core::RuntimeCore;
 use super::slow_dual::{SlowDual, SlowDualOptions};
@@ -285,12 +285,13 @@ const BASIS_SHARE: f64 = 0.6;
 const HALO_REMAINDER_SHARE: f64 = 0.25;
 /// Signed mode pairs added per domain step at most.
 const MAXIMUM_PAIRS_PER_STEP: usize = 24;
-/// The screening basis estimate: the full one without the drive-hop slaving
-/// of fast charges, at 25-55% of its cost. Measured screen/full ratios are
-/// 0.97-1.00 far from acceptance and 0.76-0.98 near it, never above 1.001, so
-/// a screen that fails the basis gate is followed by more columns without the
-/// full estimate; acceptance always uses the full estimate.
-const SCREEN: BasisOptions = BasisOptions { fast_response: true, slave_fast_charges: false };
+// The screening basis estimate (`SlowDual::basis_estimate_screened`) is the
+// full one without the drive-hop slaving of fast charges, at 25-55% of its
+// cost. Measured screen/full ratios are 0.97-1.00 far from acceptance and
+// 0.76-0.98 near it, never above 1.001, so a screen that fails the basis gate
+// is followed by more columns without the full estimate; when it passes, the
+// full estimate adds the slaving to the screen's series. Acceptance always
+// uses the full estimate.
 
 fn ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.
@@ -473,8 +474,9 @@ impl Run {
                     times: &self.times,
                 };
                 let clock = Instant::now();
-                let screen = dual.basis_estimate_with(&view, &groups, SCREEN)?.maximum;
-                let basis = if kappa * screen > BASIS_SHARE * epsilon { Err(screen) } else { Ok(dual.basis_estimate(&view, &groups)?) };
+                // The screen gates the full estimate, which reuses its series.
+                let (screen, full) = dual.basis_estimate_screened(&view, &groups, |screen| kappa * screen <= BASIS_SHARE * epsilon)?;
+                let basis = full.ok_or(screen);
                 self.timing.basis_estimate += ms(clock);
                 match basis {
                     Ok(basis) if kappa * basis.maximum <= BASIS_SHARE * epsilon => {

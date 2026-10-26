@@ -209,6 +209,22 @@ impl Default for BasisOptions {
 
 /// Modal columns per block of the basis estimate (bounds its memory).
 const BASIS_BLOCK: usize = 8;
+
+/// A basis-estimate series, its output grid and the slaving fields of every
+/// block when they were deferred `(start, width, fields per fast charge)`.
+struct BasisSeries<'v> {
+    series: Series,
+    grid: TimeGrid<'v>,
+    deferred: Vec<(usize, usize, Vec<(Charge, Dense)>)>,
+}
+
+impl BasisSeries<'_> {
+    fn estimate(&mut self, dual: &SlowDual, times: &[f64], groups: &[PopulationGroup], began: Instant) -> Result<PopulationErrorEstimate, String> {
+        let populations = dual.evaluate(&self.series, &self.grid)?;
+        let margin = dual.unrepresented_margin(&self.series, &self.grid)?;
+        finish_estimate(dual, &populations, margin, times, groups, began)
+    }
+}
 /// Samples used for the per-pair halo indicators (a uniform subset of the
 /// output times, always including the last one).
 const INDICATOR_TIMES: usize = 64;
@@ -706,6 +722,53 @@ impl SlowDual {
     /// Basis estimate with explicit options (calibration and diagnostics).
     pub fn basis_estimate_with(&self, view: &CandidateView<'_>, groups: &[PopulationGroup], options: BasisOptions) -> Result<PopulationErrorEstimate, String> {
         let began = Instant::now();
+        let mut basis = match self.basis_series(view, options, false)? {
+            Ok(basis) => basis,
+            Err(reason) => return Ok(unresolved_estimate(self, view.times, groups, reason, began)),
+        };
+        basis.estimate(self, view.times, groups, began)
+    }
+
+    /// The screen (`basis_estimate_with` without the Markov-slaved drive-hop
+    /// returns) and, when `accept` takes its maximum, the full basis estimate
+    /// from the same series: the slaved returns are added to the screen's
+    /// series and it is evaluated once more, so a checkpoint whose screen
+    /// passes pays for the slaving and one evaluation, not for a second
+    /// modal residual and its fast responses. Returns the screen's maximum
+    /// and the full estimate (bitwise the series of `basis_estimate` up to
+    /// the order of its sums).
+    pub fn basis_estimate_screened(
+        &self,
+        view: &CandidateView<'_>,
+        groups: &[PopulationGroup],
+        accept: impl Fn(f64) -> bool,
+    ) -> Result<(f64, Option<PopulationErrorEstimate>), String> {
+        let began = Instant::now();
+        let mut basis = match self.basis_series(view, BasisOptions::default(), true)? {
+            Ok(basis) => basis,
+            Err(reason) => {
+                let estimate = unresolved_estimate(self, view.times, groups, reason, began);
+                return Ok((estimate.maximum, accept(estimate.maximum).then_some(estimate)));
+            }
+        };
+        let screen = basis.estimate(self, view.times, groups, began)?;
+        if !accept(screen.maximum) {
+            return Ok((screen.maximum, None));
+        }
+        for (start, width, fields) in std::mem::take(&mut basis.deferred) {
+            let refs: Vec<(Charge, &Dense)> = fields.iter().map(|(k, f)| (k.clone(), f)).collect();
+            for (target_slot, returned) in self.slaved_returns_all(&refs, width)? {
+                basis.series.add_slow(0., start, &self.to_modal(target_slot, &returned)?);
+            }
+        }
+        let full = basis.estimate(self, view.times, groups, began)?;
+        Ok((screen.maximum, Some(full)))
+    }
+
+    /// The series of the basis estimate; with `defer` the slaved returns'
+    /// fields are kept per block (`deferred`) instead of being added.
+    /// `Err(reason)`: the reduced candidate is unresolved.
+    fn basis_series<'a>(&self, view: &CandidateView<'a>, options: BasisOptions, defer: bool) -> Result<Result<BasisSeries<'a>, String>, String> {
         let (rows, m) = validate(view)?;
         let lap = &self.lapack;
         let n = self.n;
@@ -715,12 +778,13 @@ impl SlowDual {
         }
         let small = match SmallSource::new(lap, view.generator, view.initial, m) {
             Ok(small) => small,
-            Err(reason) => return Ok(unresolved_estimate(self, view.times, groups, reason, began)),
+            Err(reason) => return Ok(Err(reason)),
         };
         let grid = TimeGrid::new(view.times);
         let phases = &self.owner.hilbert.source.phases;
         let d = n * n;
         let mut series = Series::new(&small.exponents, grid.maximum);
+        let mut deferred = Vec::new();
         let weights = modal_weights(&small);
         // Modal residual columns, one block at a time: the residual is linear
         // in the candidate columns and (F Q - E Q G) V diag(w) =
@@ -770,7 +834,9 @@ impl SlowDual {
                     series.add_slow(shift, start, &self.to_modal(slot, &ground)?);
                 }
             }
-            if !slaving.is_empty() {
+            if defer {
+                deferred.push((start, width, slaving));
+            } else if !slaving.is_empty() {
                 let fields: Vec<(Charge, &Dense)> = slaving.iter().map(|(k, f)| (k.clone(), f)).collect();
                 for (target_slot, returned) in self.slaved_returns_all(&fields, width)? {
                     series.add_slow(0., start, &self.to_modal(target_slot, &returned)?);
@@ -778,9 +844,7 @@ impl SlowDual {
             }
             start += width;
         }
-        let populations = self.evaluate(&series, &grid)?;
-        let margin = self.unrepresented_margin(&series, &grid)?;
-        finish_estimate(self, &populations, margin, view.times, groups, began)
+        Ok(Ok(BasisSeries { series, grid, deferred }))
     }
 
     /// Halo modes of a retained domain: output modes reached from `input` by
@@ -2003,6 +2067,14 @@ mod tests {
             times: &times,
         };
         let basis = dual.basis_estimate(&view, &[]).unwrap();
+        // The screened pair: the screen alone, and the full estimate from the
+        // screen's series with the slaved returns added.
+        let (screen, full) = dual.basis_estimate_screened(&view, &[], |_| true).unwrap();
+        let alone = dual.basis_estimate_with(&view, &[], BasisOptions { slave_fast_charges: false, ..Default::default() }).unwrap();
+        assert!((screen - alone.maximum).abs() <= 1e-12 * alone.maximum, "screen {screen:e} vs {:e}", alone.maximum);
+        let full = full.expect("an accepted screen gives the full estimate");
+        assert!((full.maximum - basis.maximum).abs() <= 1e-10 * basis.maximum, "full {:e} vs {:e}", full.maximum, basis.maximum);
+        assert!(dual.basis_estimate_screened(&view, &[], |_| false).unwrap().1.is_none());
         let halo = dual.halo_estimate(owned, &view, &[], HaloOptions::default()).unwrap();
         (dual.diagnostics().clone(), basis.maximum, halo.estimate.maximum, basis.margin)
     }
