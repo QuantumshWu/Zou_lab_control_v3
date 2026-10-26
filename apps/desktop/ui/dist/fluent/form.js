@@ -155,6 +155,7 @@ export class Field {
                     bounds: () => [this.spec.minimum ?? null, this.spec.maximum ?? null],
                     commit: value => { this.version++; this.submit(value); },
                     decimal: spec.kind === "number",
+                    approximate: () => this.spec.inexact ? { unit: this.spec.unit ?? "", step: this.spec.step ?? null } : null,
                 });
                 this.cell.append(holder);
             }

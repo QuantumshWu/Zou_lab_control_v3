@@ -579,6 +579,45 @@ pub fn format_quantity(value: Number, unit: &Unit, prefix: Option<&'static Prefi
     Ok(format!("{} {symbol}", plain_digits(&shifted)).trim().to_owned())
 }
 
+/// A reading as Device Control shows it: `format_quantity` of what the ≈ rule
+/// leaves of it (`approximate`), after "≈ " when that is a rounding.
+pub fn format_reading(value: Number, unit: &Unit, prefix: Option<&'static Prefix>, step: Option<f64>) -> Result<String, UnitError> {
+    let Number::Float(number) = value else { return format_quantity(value, unit, prefix) };
+    // dB and dBm: a level is read to 0.01 dB whatever it was converted from.
+    let logarithmic = matches!(DEFAULT_UNITS.family_of(unit)?.conversion, Conversion::Decibel { .. }) || unit.dimension == "log_gain";
+    let (shown, rounded) = approximate(number, logarithmic, step);
+    let text = format_quantity(Number::Float(shown), unit, prefix)?;
+    Ok(if rounded { format!("\u{2248} {text}") } else { text })
+}
+
+/// The ≈ rule (twin of `approximateText` in apps/desktop/ui/src/fluent/spin.ts):
+/// a number whose shortest spelling has at most 12 significant digits is shown
+/// as it is; a longer one that reads the same at 12 and 14 significant digits
+/// is float dust (0.30000000000000004), shown at 12; any other is an inexact
+/// conversion's result (a logarithm, √2, a load) and is rounded -- to 0.01 in a
+/// logarithmic unit, else to 4 significant digits, or to the last digit of the
+/// field's own `step` where that is coarser -- and said to be (`true`). Only
+/// what is shown is rounded, never the value held.
+pub fn approximate(value: f64, logarithmic: bool, step: Option<f64>) -> (f64, bool) {
+    // The shortest round-trip digits' count and the leading digit's exponent.
+    let digits = |number: f64| {
+        let text = format!("{:e}", number.abs());
+        let (mantissa, exponent) = text.split_once('e').expect("exponent form");
+        (mantissa.replace('.', "").len() as i64, exponent.parse::<i64>().expect("exponent"))
+    };
+    if !value.is_finite() { return (value, false); }
+    let (significant, exponent) = digits(value);
+    if significant <= 12 { return (value, false); }
+    let at = |places: usize| format!("{value:.places$e}").parse::<f64>().expect("float");
+    if at(11) == at(13) { return (at(11), false); }
+    let mut last = if logarithmic { -2 } else { exponent - 3 };
+    if let Some((count, top)) = step.filter(|step| step.is_finite() && *step > 0.0).map(digits) { last = last.max(top - count + 1); }
+    let places = (-last).max(0) as usize;
+    let shown = if last <= 0 { format!("{value:.places$}").parse::<f64>().expect("float") } else { (value / ten_to(last)).round() * ten_to(last) };
+    // A level rounded to nothing is 0, never -0.
+    (if shown == 0.0 { 0.0 } else { shown }, true)
+}
+
 /// Split `text` into the number and unit spellings `_QUANTITY` matches.
 fn split_quantity(text: &str) -> Option<(&str, &str)> {
     let body = text.trim_start();
@@ -640,4 +679,41 @@ pub fn parse_quantity(text: &str, unit: &Unit, registry: Option<&UnitRegistry>) 
         return Ok(decimal.scaleb((spelled_prefix.exponent - carried.exponent) as i64).to_f64());
     }
     spelled.convert_value_to(number.parse().expect("matched number"), unit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reading(value: f64, unit: &str, step: Option<f64>) -> String {
+        format_reading(Number::Float(value), &DEFAULT_UNITS.resolve(unit).unwrap(), None, step).unwrap()
+    }
+
+    #[test]
+    fn inexact_conversions_are_shown_rounded_and_said_to_be() {
+        // Exact: as format_quantity has it, prefix shifts included.
+        assert_eq!(reading(0.04, "Vpp", None), "40 mVpp");
+        assert_eq!(reading(812.5e6, "Hz", None), "812.5 MHz");
+        assert_eq!(reading(-3.02, "dBm", None), "-3.02 dBm");
+        assert_eq!(reading(123456.789012, "Hz", None), "123.456789012 kHz");
+        // Float dust: its twelve digits, no ≈.
+        assert_eq!(reading(0.1 + 0.2, "V", None), "300 mV");
+        assert_eq!(reading(812.4999999999999, "Hz", None), "812.5 Hz");
+        // 40 mVpp read in dBm: to 0.01 dB; a field's coarser step wins, a finer one does not.
+        let level = DEFAULT_UNITS.convert(0.04, "Vpp", "dBm").unwrap();
+        assert_eq!(reading(level, "dBm", None), "≈ -23.98 dBm");
+        assert_eq!(reading(level, "dBm", Some(0.1)), "≈ -24 dBm");
+        assert_eq!(reading(level, "dBm", Some(0.001)), "≈ -23.98 dBm");
+        assert_eq!(reading(-0.0012345678901234, "dB", None), "≈ 0 dB");
+        // Elsewhere four significant digits, in the prefix shown.
+        let amplitude = DEFAULT_UNITS.convert(0.0, "dBm", "Vpp").unwrap();
+        assert_eq!(reading(amplitude, "Vpp", None), "≈ 632.5 mVpp");
+        assert_eq!(reading(126491.10640673517, "Hz", None), "≈ 126.5 kHz");
+        assert_eq!(reading(126491.10640673517, "Hz", Some(1000.0)), "≈ 126 kHz");
+        assert_eq!(format_reading(Number::Int(7), &DEFAULT_UNITS.resolve("count").unwrap(), None, None).unwrap(), "7 count");
+        // Only what is shown is rounded.
+        assert_eq!(approximate(level, true, None), (-23.98, true));
+        assert_eq!(approximate(0.30000000000000004, false, None), (0.3, false));
+        assert!(!approximate(f64::NAN, false, None).1);
+    }
 }

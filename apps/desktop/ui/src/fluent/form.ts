@@ -65,6 +65,9 @@ export type FieldSpec = {
   /** A device's number (Device Manager, Device Control): a spin box even when it
    * may stand blank, its first step from `firstStep`. */
   spin?: boolean;
+  /** A number that may be an inexact conversion's result (a reading in another
+   * unit): its spin box shows it by the ≈ rule while it is not edited (`approximateText`). */
+  inexact?: boolean;
 };
 
 /** Units set in fixed notches, by spelling: the notch. */
@@ -215,6 +218,7 @@ export class Field {
           bounds: () => [this.spec.minimum ?? null, this.spec.maximum ?? null],
           commit: value => { this.version++; this.submit(value); },
           decimal: spec.kind === "number",
+          approximate: () => this.spec.inexact ? { unit: this.spec.unit ?? "", step: this.spec.step ?? null } : null,
         });
         this.cell.append(holder);
       } else this.cell.append(edit);

@@ -129,8 +129,12 @@ Each `types` row also has `family_label` (the family in words, for card titles).
 measurement", "Stop the active Logic; this field is not live-writable", "Accept risk
 to edit this unclaimed live-safe field"), `current_text`/`limits_text` (v2
 format_quantity: the readable prefix of its unit, or exactly the spelling the operator
-picked), `units` (the spellings a number may be read in, `[{value, label, group}]`
-grouped by unit family; `read_device {units}` re-reads the row in one) and
+picked; an inexact conversion's number -- 40 mVpp read in dBm -- rounded after "≈ " by
+the ≈ rule of `zlc_core::units::approximate`: "≈ -23.98 dBm") and
+`current_exact`/`limits_exact` (the same with every digit), `units` (the spellings a
+number may be read in, `[{value, label, group}]` grouped by unit family; `read_device
+{units}` re-reads the row in one: the reading is converted, a Desired draft not yet
+applied keeps its digits, read in the new unit, and is never tuned by the change) and
 `status`/`severity` (v2's words at rest: Ready, Protected, Stands outside its bounds).
 Once read, the row also has `control: {owners (node names), reason, risk_enabled}`.
 

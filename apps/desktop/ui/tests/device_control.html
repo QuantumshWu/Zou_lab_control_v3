@@ -6,8 +6,11 @@
 // Run with tools/test_ui.ps1. No native transport is used: every device command is recorded here.
 import {DeviceControlView} from '../dist/views/device_control.js';
 import {Field} from '../dist/fluent/form.js';
+import {SpinBox} from '../dist/fluent/spin.js';
 import {deviceControl} from '../dist/views/device_windows.js';
 const wait = (ms=100) => new Promise(resolve=>setTimeout(resolve,ms));
+// Headless virtual time draws no frame once the page settles: the number boxes are fitted as their next frame would.
+const fitted = async () => { await wait(); SpinBox.fit(); };
 const assert = (condition, message) => { if (!condition) throw Error(message); };
 const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
 const results=[];
@@ -44,7 +47,7 @@ try {
  await check('turning Live off cancels the queued write',async()=>{const t=setup();t.type('2');await wait();t.type('3');await wait();t.toggle();t.ack(1,2);await wait();equal(t.writes().map(c=>c.value),[2],'Live-off queue');equal(t.input().value,'3','Live-off draft')});
  await check('locking a field cancels pending Live work',async()=>{const t=setup();t.type('2');t.project({frequency:{editable:false,reason:'Protected'}});await wait();equal(t.writes().length,0,'locked write')});
  await check('removing Live capability cancels pending work',async()=>{const t=setup();t.type('2');t.project({frequency:{live_write:false}});await wait();equal(t.writes().length,0,'unsupported Live write')});
- await check('a unit change discards queued values in the old unit',async()=>{const t=setup({fields:[{unit:'Hz'}]});t.type('2');await wait();t.type('3');await wait();t.project({frequency:{unit:'kHz',current:.001,desired:.001}});t.ack(1,.002);await wait();equal(t.writes().map(c=>[c.value,c.unit]),[[2,'Hz']],'old-unit queue');assert(t.input().value!=='3','old-unit text retained')});
+ await check('a unit change discards queued values in the old unit and keeps the draft digits',async()=>{const t=setup({fields:[{unit:'Hz'}]});t.type('2');await wait();t.type('3');await wait();t.project({frequency:{unit:'kHz',current:.001,desired:.001}});t.ack(1,.002);await wait();equal(t.writes().map(c=>[c.value,c.unit]),[[2,'Hz']],'old-unit queue');equal(t.input().value,'3','draft digits')});
  await check('IME composition waits for the completed value',async()=>{const t=setup();t.type('2',0,new InputEvent('input',{bubbles:true,isComposing:true}));await wait();equal(t.writes().length,0,'composition write');t.input().dispatchEvent(new CompositionEvent('compositionend'));await wait();equal(t.writes().map(c=>c.value),[2],'composition end')});
  await check('Escape discards pending Live edits',async()=>{const t=setup();t.type('2');await Promise.resolve();t.input().dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));await wait();equal(t.writes().length,0,'Escape write');equal(t.input().value,'1','Escape value')});
  await check('step buttons retain Live behavior',async()=>{const t=setup();t.row().querySelector('[aria-label="Increase"]').click();await wait();equal(t.writes().map(c=>c.value),[2],'step')});
@@ -61,8 +64,57 @@ try {
    await wait();equal(t.writes().length,0,'old-unit debounce fired');
    const read=t.calls.find(c=>c.action==='read_device');assert(read?.units.frequency==='kHz','unit request missing');
    t.project({frequency:{unit:'kHz',current:.001,desired:.001}},read.id);
-   assert(!t.input().disabled,'unit reply left editor disabled');equal(t.input().value,'0.001','new-unit reading');
+   assert(!t.input().disabled,'unit reply left editor disabled');equal(t.input().value,'2','draft digits');
+   await wait();equal(t.writes().length,0,'the unit change tuned the kept draft');
    t.type('3');await wait();equal(t.writes().map(c=>[c.value,c.unit]),[[3,'kHz']],'new-unit write');
+ });
+ // An RF level: 40 mVpp is -23.97940008672037 dBm into 50 ohm.
+ const level={unit:'mVpp',units:[{value:'mVpp',label:'mVpp'},{value:'dBm',label:'dBm'}],current:40,desired:40,current_text:'40 mVpp',limits_text:'0 mVpp to 1000 mVpp',minimum:0,maximum:1000};
+ const inDbm=(more={})=>({frequency:{unit:'dBm',current:-23.97940008672037,desired:-23.97940008672037,step:null,minimum:-40,maximum:13,
+   current_text:'≈ -23.98 dBm',current_exact:'-23.97940008672037 dBm',limits_text:'≈ -40 dBm to ≈ 13.01 dBm',limits_exact:'-40 dBm to 13.010299956639813 dBm',...more}});
+ const pick=t=>{const picker=t.row().querySelector('.unit-picker');for(const key of ['Enter','End','Enter']) picker.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));return t.calls.findLast(c=>c.action==='read_device')};
+ await check('a unit change with no draft shows the reading converted, rounded with ≈',async()=>{
+   const t=setup({fields:[level]});
+   const read=pick(t);assert(read?.units.frequency==='dBm','unit request missing');
+   t.project(inDbm(),read.id);await fitted();
+   equal(t.input().value,'≈ -23.98','rounded reading in Desired');
+   const current=t.row().querySelector('.control-current'),limits=t.row().querySelector('.control-limits');
+   equal([current.textContent,current.title],['≈ -23.98 dBm','-23.97940008672037 dBm'],'readback and its tooltip');
+   assert(limits.title.startsWith('-40 dBm to 13.010299956639813 dBm\n'),'limits tooltip lacks every digit');
+   assert(t.apply().disabled,'Apply enabled on the reading');
+   t.input().focus();equal(t.input().value,'-23.97940008672037','focus did not put the whole value back');
+   assert(t.apply().disabled,'Apply enabled by a focus');
+   t.input().dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await wait();
+   equal(t.writes().length,0,'Enter on the unchanged reading wrote');
+   t.input().blur();await fitted();equal(t.input().value,'≈ -23.98','blur did not round again');
+   t.input().focus();t.input().dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true,cancelable:true}));
+   equal(t.input().value,'-23.9','a step left the 0.1 dB grid');
+   await wait();equal(t.writes().map(c=>[c.value,c.unit]),[[-23.9,'dBm']],'stepped Live write');
+ });
+ await check('a draft keeps its digits through a unit change, is never tuned by it, and Apply sends the new unit',async()=>{
+   const t=setup({fields:[level]});
+   t.type('50');const read=pick(t);await wait();
+   t.project(inDbm({maximum:60}),read.id);await wait(200);SpinBox.fit();
+   equal(t.input().value,'50','draft digits');
+   equal(t.writes().length,0,'the unit change tuned the draft');
+   assert(!t.apply().disabled,'Apply disabled for a kept draft inside its bounds');
+   t.apply().click();equal(t.writes().map(c=>[c.value,c.unit]),[[50,'dBm']],'Apply in the new unit');
+ });
+ await check('a kept draft outside the new unit\'s bounds is invalid until edited',async()=>{
+   const t=setup({live:false,fields:[level]});
+   t.type('50');const read=pick(t);await wait();
+   t.project(inDbm(),read.id);await fitted();
+   equal(t.input().value,'50','draft digits');
+   assert(t.input().classList.contains('invalid'),'kept draft not shown invalid');
+   assert(t.apply().disabled,'Apply enabled for a draft outside its bounds');
+   assert(t.row().textContent.includes('outside its bounds'),'status says nothing');
+   t.type('10');await wait();
+   assert(!t.input().classList.contains('invalid'),'an edit left the box invalid');
+   t.apply().click();equal(t.writes().map(c=>[c.value,c.unit]),[[10,'dBm']],'Apply after the edit');
+ });
+ await check('float dust is shown clean, without ≈',async()=>{
+   const t=setup({live:false,fields:[{unit:'V',current:.1+.2,desired:.1+.2}]});await fitted();
+   equal(t.input().value,'0.3','dust');t.input().focus();equal(t.input().value,'0.30000000000000004','focus');
  });
  await check('removing and recreating a field cancels its previous queued edits',async()=>{
    const t=setup();t.type('2');await wait();t.type('3');await wait();

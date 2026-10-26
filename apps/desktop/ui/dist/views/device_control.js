@@ -4,10 +4,15 @@
 // own limits -- and tunes one field per Apply (tune_device).  Who may tune
 // what (claims, protected fields, accepted risk) is the workbench's answer,
 // shown as each row's reason; the page never decides it.
-import { Field, StatusStrip, alignUnitPickers, command, element, readoutText, setChecked, setElided, setState, statusDot, switchButton, titleRow, } from "../fluent/index.js";
+import { Field, StatusStrip, alignUnitPickers, command, element, readoutText, setChecked, setElided, setState, setTitle, statusDot, switchButton, titleRow, } from "../fluent/index.js";
 import { queueStatus } from "../shell.js";
 /** How long a live field waits after an edit before it tunes (v2: 75 ms). */
 const LIVE_DELAY_MS = 75;
+/** Device limits' tooltip: what the column is. */
+const LIMITS_TIP = "The instrument's own range for this field; the editable window is the tighter of it and the bench policy";
+/** A draft the field's bounds admit (a whole number for an integer field). */
+const within = (value, spec) => typeof value === "number"
+    && (spec.minimum == null || value >= spec.minimum) && (spec.maximum == null || value <= spec.maximum) && (spec.kind !== "integer" || Number.isInteger(value));
 export class DeviceControlView {
     id;
     ctx;
@@ -65,26 +70,28 @@ export class DeviceControlView {
                 row = this.makeRow(spec);
                 this.rows.set(spec.name, row);
             }
-            // A field read in another spelling is a new number: the draft in the old one goes.
-            if (row.spec.unit !== spec.unit) {
+            // A field read in another spelling: a displayed quantity is converted, a number the
+            // operator wrote keeps its digits.  The reading, and a Desired that only mirrors it
+            // (no draft, or the one just applied), are the device's re-read; a draft not yet
+            // applied is now read in the new unit, checked against its bounds there, and waits
+            // for the next edit or Apply -- a unit change never tunes by itself.
+            const read = row.unitRequest !== null && row.unitRequest === request;
+            if (read)
+                row.unitRequest = null;
+            if (row.spec.unit !== spec.unit || (read && !failed)) {
+                const kept = row.draft !== undefined && row.draft !== row.spec.current && !row.applied;
                 this.cancelLive(row);
                 this.queued.delete(spec.name);
                 row.revision++;
-                row.draft = undefined;
-                row.valid = true;
                 row.applied = "";
+                row.error = "";
+                if (!kept)
+                    row.draft = undefined;
+                row.valid = !kept || within(row.draft, spec);
+                row.outside = !row.valid;
                 row.field.acceptEdit();
             }
             row.spec = spec;
-            if (row.unitRequest !== null && row.unitRequest === request) {
-                row.unitRequest = null;
-                if (!failed) {
-                    row.revision++;
-                    row.draft = undefined;
-                    row.valid = true;
-                    row.field.acceptEdit();
-                }
-            }
             if (!spec.editable || device.state !== "open") {
                 this.cancelLive(row);
                 this.queued.delete(spec.name);
@@ -105,8 +112,12 @@ export class DeviceControlView {
                 }
             }
             row.field.update(this.desiredSpec(row), request, failed);
-            setElided(row.current, spec.current_text);
+            if (row.outside && row.field.input instanceof HTMLInputElement)
+                row.field.input.classList.add("invalid");
+            // A reading shown rounded ("≈ -23.98 dBm") says every digit in its tooltip.
+            setElided(row.current, spec.current_text, spec.current_exact ?? spec.current_text);
             row.limits.textContent = spec.limits_text;
+            setTitle(row.limits, spec.limits_exact && spec.limits_exact !== spec.limits_text ? `${spec.limits_exact}\n${LIMITS_TIP}` : LIMITS_TIP);
             // Absent, not disabled: a field with no live write leaves its cell empty.
             row.live.hidden = !spec.live_write;
             setChecked(row.live, row.liveOn);
@@ -117,9 +128,10 @@ export class DeviceControlView {
             const [words, word] = row.unitRequest !== null ? ["Reading unit", "task"]
                 : row.tuning !== null ? [waiting ? "Applying; latest queued" : "Applying", "task"]
                     : waiting ? ["Queued latest", "task"]
-                        : row.error ? [row.error, "error"]
-                            : row.applied && spec.editable ? [row.applied, "idle"]
-                                : [spec.status, spec.severity];
+                        : row.outside ? ["Desired is outside its bounds", "error"]
+                            : row.error ? [row.error, "error"]
+                                : row.applied && spec.editable ? [row.applied, "idle"]
+                                    : [spec.status, spec.severity];
             setState(row.dot, word);
             setState(row.status, word);
             row.status.textContent = words;
@@ -140,7 +152,7 @@ export class DeviceControlView {
     }
     desiredSpec(row) {
         const spec = row.spec;
-        return { ...spec, value: row.draft !== undefined ? row.draft : spec.desired, unavailable_reason: row.unitRequest !== null ? "Reading the new unit" : spec.editable ? "" : spec.reason || "Read only", spin: true };
+        return { ...spec, value: row.draft !== undefined ? row.draft : spec.desired, unavailable_reason: row.unitRequest !== null ? "Reading the new unit" : spec.editable ? "" : spec.reason || "Read only", spin: true, inexact: true };
     }
     makeRow(spec) {
         const row = {};
@@ -154,9 +166,11 @@ export class DeviceControlView {
         row.unitRequest = null;
         row.applied = "";
         row.error = "";
+        row.outside = false;
         row.field = new Field(`control-${this.id}`, { ...spec, value: spec.desired, spin: true }, {
             // Another spelling is the device's to read (an RF level depends on its
-            // load): the row is re-read in it, reading, bounds and limits together.
+            // load): the row is re-read in it, reading, bounds and limits together
+            // (a draft keeps its digits: update).
             unit: unit => {
                 this.cancelLive(row);
                 this.queued.delete(row.spec.name);
@@ -176,6 +190,7 @@ export class DeviceControlView {
                 row.valid = true;
                 row.error = "";
                 row.applied = "";
+                row.outside = false;
                 if (this.device)
                     this.update(this.device);
             },
@@ -190,7 +205,6 @@ export class DeviceControlView {
         });
         row.current = element("span", "control-current");
         row.limits = element("span", "note control-limits");
-        row.limits.title = "The instrument's own range for this field; the editable window is the tighter of it and the bench policy";
         row.liveCell = element("span", "control-live");
         row.live = switchButton(on => { row.liveOn = on; if (!on)
             this.cancelLive(row); if (this.device)
@@ -212,6 +226,7 @@ export class DeviceControlView {
         return row;
     }
     edit(row, value) {
+        row.outside = false;
         const valid = value !== undefined;
         if (row.valid === valid && (!valid || Object.is(row.draft, value)))
             return;

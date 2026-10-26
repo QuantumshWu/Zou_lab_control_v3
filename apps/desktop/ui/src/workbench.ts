@@ -49,9 +49,12 @@ export type TunableField = WorkbenchControl & {
   desired: Value;
   live_write: boolean;
   device_limits: [number, number] | null;
-  /** The reading and the device's own range in words (v2 format_quantity, in the row's spelling). */
+  /** The reading and the device's own range in words (v2 format_quantity, in the row's spelling;
+   * an inexact conversion rounded after "≈ "), and with every digit (their tooltips). */
   current_text: string;
   limits_text: string;
+  current_exact?: string;
+  limits_exact?: string;
   editable: boolean;
   reason?: string;
   /** The row at rest: Ready, Protected, Stands outside its bounds. */

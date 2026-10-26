@@ -453,7 +453,7 @@ answers only reads of an open device, claiming nothing (v2's `declare_outputs`
 read `source.outputs`): `get:<name>` properties, `tunable_fields`, and the reads
 the device's `open` reply lists (`reads`: of `tunable_values`, `settings_provenance`,
 `convert_tunable_value`, `read_tunable_in_unit` the ones it implements -- a scan
-editor converts a knob's values through the device's own law, an RF amplitude
+editor converts a knob's limits through the device's own law, an RF amplitude
 into its channel's load). Anything that changes the device is refused.
 
 ## 8. Commands in the catalogue

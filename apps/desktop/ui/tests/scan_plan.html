@@ -1,0 +1,61 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Scan plan unit regression tests</title>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. No model runs: the editor's facts are written here and every draft edit is recorded.
+import {ScanPlanEditor} from '../dist/views/node_editors/scan_plan.js';
+const wait = (ms=100) => new Promise(resolve=>setTimeout(resolve,ms));
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+const check=async(name,test)=>{await test();results.push(name)};
+// One family heading, so the keyboard reaches every spelling: Home is the heading, each ArrowDown a spelling.
+const choose=(picker,index)=>{for(const key of ['Enter','Home',...Array(index+1).fill('ArrowDown'),'Enter']) picker.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}))};
+const port={port:'device:rf:level',label:'rf.level',unit:'mVpp',lo:0,hi:1000,seed_lo:10,seed_hi:50,group:'rf',leaf:'level',
+  units:[['mVpp',0],['Vpp',3],['dBm',null]],limits:{dBm:[-40,13.010299956639813]},families:{mVpp:'Vpp',Vpp:'Vpp',dBm:'Vpp'}};
+const delay=(value,overrides=[])=>({fields:[{name:'delay',label:'Delay',kind:'number',unit:'s',units:[['s',0],['ms',-3]],families:{s:'s',ms:'s'},
+  description:'delay',minimum:0,maximum:1,authored:0.001,value,unavailable_reason:''}],overrides,parked:[],note:'',tidy:null});
+function setup(axes,api=null) {
+  const edits=[];
+  const editor=new ScanPlanEditor(values=>{edits.push(values);return edits.length});
+  document.body.append(editor.root);
+  const facts={editor:'scan_plan',manages:['plan','api_values'],families:{pulse:'pulse:param:',api:'api:',device:'device:',manual:'manual:'},
+    host_advanced:['api:','device:','manual:'],ports:[port],withheld:{},unoffered:{},summary:'',problem:'',api};
+  editor.update({node_id:'scan',values:{plan:JSON.stringify({axes}),api_values:''}},facts,'');
+  const plan=()=>JSON.parse(edits.filter(edit=>'plan' in edit).at(-1).plan).axes;
+  return {editor,edits,plan};
+}
+try {
+ await check('an axis keeps its digits in another spelling, decimal or not',async()=>{
+   const t=setup([{port:port.port,unit:'mVpp',values:[10,20,30],mode:'range',value_text:'5, 7'}]);
+   const picker=t.editor.root.querySelector('.axis-unit .unit-picker');
+   choose(picker,1);equal(t.plan().map(axis=>[axis.unit,axis.values,axis.value_text]),[['Vpp',[10,20,30],'5, 7']],'Vpp');
+   choose(picker,2);equal(t.plan().map(axis=>[axis.unit,axis.values,axis.value_text]),[['dBm',[10,20,30],'5, 7']],'dBm');
+   const spins=[...t.editor.root.querySelectorAll('.range-bank input')].map(input=>input.value);
+   equal(spins,['10','30','3'],'from, to, points');
+ });
+ await check('an added axis keeps its seeded sweep in another spelling',async()=>{
+   const t=setup([]);
+   [...t.editor.root.querySelectorAll('button')].find(item=>item.textContent==='Add axis').click();
+   equal(t.plan().map(axis=>[axis.unit,axis.values]),[['mVpp',[10,20,30,40,50]]],'seeded');
+   choose(t.editor.root.querySelector('.axis-unit .unit-picker'),2);
+   equal(t.plan().map(axis=>[axis.unit,axis.values]),[['dBm',[10,20,30,40,50]]],'seed digits');
+ });
+ await check('an API box at the pulse\'s own number is re-read in the picked spelling',async()=>{
+   const t=setup([],delay(0.001));
+   const input=t.editor.root.querySelector('.api-values input');equal(input.value,'0.001','seconds');
+   choose(t.editor.root.querySelector('.api-values .unit-picker'),1);
+   equal(input.value,'1','milliseconds');
+   equal(t.edits.filter(edit=>'api_values' in edit),[],'no override was written');
+ });
+ await check('an API override keeps its digits and sets the value they now say',async()=>{
+   const t=setup([],delay(0.002,[['delay',0.002]]));
+   const input=t.editor.root.querySelector('.api-values input');equal(input.value,'0.002','seconds');
+   choose(t.editor.root.querySelector('.api-values .unit-picker'),1);
+   equal(input.value,'0.002','override digits');
+   equal(t.edits.filter(edit=>'api_values' in edit).at(-1),{api_values:'delay = 0.000002'},'override in the pulse\'s unit');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+</script>

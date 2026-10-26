@@ -52,6 +52,33 @@ function fittedDecimal(text: string, room: number, width: (text: string) => numb
   return shown;
 }
 
+/** The ≈ rule (twin of zlc_core::units::approximate, by which Device Control's
+ * reading and limits are written): a number whose shortest spelling has at most
+ * 12 significant digits is shown as written; a longer one that reads the same at
+ * 12 and 14 significant digits is float dust (0.30000000000000004), shown at 12;
+ * any other is an inexact conversion's result (a logarithm, √2, a load), shown
+ * "≈ " and rounded -- to 0.01 in a logarithmic unit (dB, dBm), else to 4
+ * significant digits, or to the last digit of the field's own `step` where that
+ * is coarser.  Only the text is rounded: the box still holds the number whole. */
+export function approximateText(text: string, unit: string, step: number | null): string {
+  const value = Number(text);
+  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(text.trim()) || !Number.isFinite(value)) return text;
+  // The shortest round-trip digits' count and the leading digit's exponent.
+  const digits = (number: number): [number, number] => {
+    const [mantissa = "", exponent = "0"] = Math.abs(number).toExponential().split("e");
+    return [mantissa.replace(".", "").length, Number(exponent)];
+  };
+  const [significant, exponent] = digits(value);
+  if (significant <= 12) return text;
+  const twelve = Number(value.toPrecision(12));
+  if (twelve === Number(value.toPrecision(14))) return String(twelve);
+  let last = /^dB/.test(unit) ? -2 : exponent - 3;
+  if (step !== null && step > 0 && Number.isFinite(step)) { const [count, top] = digits(step); last = Math.max(last, top - count + 1); }
+  const shown = last <= 0 ? Number(value.toFixed(Math.min(100, -last))) : Math.round(value / 10 ** last) * 10 ** last;
+  // String(-0) is "0": a level rounded to nothing is never -0.
+  return `≈ ${String(shown)}`;
+}
+
 /** _step_chip_text: the step as a decimal, or %g past a millionth or a million. */
 function stepText(step: number): string {
   const exponent = Math.floor(Math.log10(step));
@@ -62,7 +89,10 @@ export type SpinOptions = { step(): number; bounds(): [number | null, number | n
   /** QSpinBox specialValueText: this value is shown as these words (Repeats 0 = ∞). */
   special?: { value: number; text: string };
   /** A decimal box permits editing its step; every box displays the step. */
-  decimal?: boolean };
+  decimal?: boolean;
+  /** A number that may be an inexact conversion's result is shown by the ≈ rule
+   * (`approximateText`) in this unit and declared step; null: as written. */
+  approximate?(): { unit: string; step: number | null } | null };
 
 /** FluentDoubleSpinBox: a field with a two-cell stepper painted from its frame.
  * The wheel changes the value only once the box has the focus (otherwise the
@@ -72,7 +102,8 @@ export type SpinOptions = { step(): number; bounds(): [number | null, number | n
  * the chip yields to digits that would not fit beside it.  A decimal longer
  * than its box is shown rounded to the box's width (v2 _visible_value); the
  * value stays the one the owner wrote (`text`), and focusing the box puts
- * it back whole for editing. */
+ * it back whole for editing; so does a number an inexact conversion gave,
+ * shown "≈ -23.98" by the ≈ rule (`approximate`). */
 export class SpinBox {
   readonly up = button("", () => this.stepBy(1), "step up");
   readonly down = button("", () => this.stepBy(-1), "step down");
@@ -228,7 +259,10 @@ export class SpinBox {
       const editing = document.activeElement === input;
       const full = editing || input.value !== spin.shown ? input.value : spin.full ?? input.value;
       const [low, high] = spin.options.bounds();
-      const text = editing || !spin.options.decimal ? full : fittedDecimal(full, digits, measured, low, high);
+      // An inexact conversion's number shows its ≈ rounding (never fitted further), float dust its 12 digits.
+      const approximate = editing ? null : spin.options.approximate?.();
+      const plain = approximate ? approximateText(full, approximate.unit, approximate.step) : full;
+      const text = editing || !spin.options.decimal || plain.startsWith("≈") ? plain : fittedDecimal(plain, digits, measured, low, high);
       return { width, room, text, full, editing, shown: measured(text) <= digits - room, key: `${label} ${text}` };
     });
     spins.forEach((spin, index) => {

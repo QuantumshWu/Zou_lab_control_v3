@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
-use zlc_core::units::{DEFAULT_UNITS, NO_PREFIX, Number, format_quantity};
+use zlc_core::units::{DEFAULT_UNITS, NO_PREFIX, Number, format_quantity, format_reading};
 
 use crate::logic::in_use;
 use crate::{Host, Ticket, Workbench, fields, text, workspace};
@@ -91,20 +91,25 @@ pub struct Live {
 
 const PUBLISHED: &str = "published on the bench fabric -- withdraw Remote to control it here";
 
-/// One device reading in words (zlc_ui `_readable_value`): a number in the
-/// spelling the operator picked for its row exactly as it stands, else in the
-/// readable prefix of its own unit; anything else as itself.
-fn reading_text(value: &Value, unit: &str, picked: bool) -> String {
+/// One device reading in words (zlc_ui `_readable_value`), as shown and exactly:
+/// a number in the spelling the operator picked for its row as it stands, else
+/// in the readable prefix of its own unit -- shown by the ≈ rule with the
+/// field's own `step` (units::format_reading: an inexact conversion rounded,
+/// "≈ -23.98 dBm"), and exactly with every digit it has (the text's tooltip);
+/// anything else as itself, both ways.
+fn reading_text(value: &Value, unit: &str, picked: bool, step: Option<f64>) -> (String, String) {
     let number = match value {
-        Value::Null => return "\u{2014}".into(),
-        Value::Bool(flag) => return if *flag { "True" } else { "False" }.into(),
-        Value::String(text) => return text.clone(),
+        Value::Null => return ("\u{2014}".into(), "\u{2014}".into()),
+        Value::Bool(flag) => { let text = if *flag { "True" } else { "False" }; return (text.into(), text.into()) }
+        Value::String(text) => return (text.clone(), text.clone()),
         Value::Number(number) => match number.as_i64() { Some(integer) => Number::Int(integer.into()), None => Number::Float(number.as_f64().unwrap_or(f64::NAN)) },
-        other => return other.to_string(),
+        other => return (other.to_string(), other.to_string()),
     };
     let unit = if unit.trim().is_empty() { "1" } else { unit.trim() };
-    DEFAULT_UNITS.resolve(unit).and_then(|resolved| format_quantity(number, &resolved, picked.then_some(NO_PREFIX)))
-        .unwrap_or_else(|_| number.text())
+    let prefix = picked.then_some(NO_PREFIX);
+    let Ok(resolved) = DEFAULT_UNITS.resolve(unit) else { return (number.text(), number.text()) };
+    (format_reading(number, &resolved, prefix, step).unwrap_or_else(|_| number.text()),
+     format_quantity(number, &resolved, prefix).unwrap_or_else(|_| number.text()))
 }
 
 /// The spellings a numeric field may be read in, for its unit picker (`[]`: none).
@@ -856,7 +861,8 @@ impl Workbench {
     /// plugin read (`{field, current, live_write, device_limits, dependency_group}`) as a
     /// Control with its readback and whether it can be tuned now.
     /// Its readback and the device's own range are written as v2 wrote them
-    /// (`current_text`, `limits_text`: format_quantity in the row's spelling), a
+    /// (`current_text`, `limits_text`: format_quantity in the row's spelling, an
+    /// inexact conversion rounded after "≈ "; `current_exact`, `limits_exact`: every digit), a
     /// number with more than one spelling offers them (`units`, re-read by
     /// `read_device {units}`), and `status` is v2's word for the row at rest.
     pub(crate) fn tunable_rows(&self, id: &str, live: &Live, read: &Value) -> Value {
@@ -869,14 +875,17 @@ impl Workbench {
             let policy = self.tune_policy(id, &field.name, live_write, live.risk.as_deref());
             let unit = field.unit.as_deref().unwrap_or("");
             let picked = live.units.contains_key(&field.name);
-            let limits = item["device_limits"].as_array().filter(|pair| pair.len() == 2)
-                .map(|pair| format!("{} to {}", reading_text(&pair[0], unit, picked), reading_text(&pair[1], unit, picked))).unwrap_or_default();
+            let (current_text, current_exact) = reading_text(current, unit, picked, field.step);
+            let (limits_text, limits_exact) = item["device_limits"].as_array().filter(|pair| pair.len() == 2)
+                .map(|pair| [&pair[0], &pair[1]].map(|bound| reading_text(bound, unit, picked, field.step)))
+                .map(|[low, high]| (format!("{} to {}", low.0, high.0), format!("{} to {}", low.1, high.1))).unwrap_or_default();
             let outside = current.as_f64().is_some_and(|value| field.minimum.is_some_and(|low| value < low) || field.maximum.is_some_and(|high| value > high));
             let (status, severity) = if policy.is_err() { ("Protected", "warning") } else if outside { ("Stands outside its bounds", "warning") } else { ("Ready", "idle") };
             let numeric = matches!(field.kind.as_str(), "float" | "int") && field.choices.is_empty();
             for (key, value) in [("current", current.clone()), ("desired", current.clone()), ("live_write", json!(live_write)),
                 ("device_limits", item["device_limits"].clone()), ("dependency_group", item["dependency_group"].clone()),
-                ("current_text", json!(reading_text(current, unit, picked))), ("limits_text", json!(limits)),
+                ("current_text", json!(current_text)), ("current_exact", json!(current_exact)),
+                ("limits_text", json!(limits_text)), ("limits_exact", json!(limits_exact)),
                 ("units", json!(if numeric { unit_choices(unit) } else { Vec::new() })),
                 ("status", json!(status)), ("severity", json!(severity)),
                 ("editable", json!(policy.is_ok())), ("reason", json!(policy.err().unwrap_or_default()))] { row[key] = value; }
@@ -1077,13 +1086,18 @@ mod tests {
 
     #[test]
     fn readings_read_as_v2_wrote_them_and_spellings_group_by_family() {
-        assert_eq!(reading_text(&json!(120000000.0), "Hz", false), "120 MHz");
-        assert_eq!(reading_text(&json!(120000000.0), "Hz", true), "120000000 Hz");
-        assert_eq!(reading_text(&json!(0.0001), "s", false), "100 µs");
-        assert_eq!(reading_text(&json!(-3.02), "dBm", false), "-3.02 dBm");
-        assert_eq!(reading_text(&json!(7), "", false), "7");
-        assert_eq!(reading_text(&json!("idle"), "Hz", false), "idle");
-        assert_eq!(reading_text(&Value::Null, "Hz", false), "\u{2014}");
+        let shown = |value: Value, unit: &str, picked: bool| reading_text(&value, unit, picked, None).0;
+        assert_eq!(shown(json!(120000000.0), "Hz", false), "120 MHz");
+        assert_eq!(shown(json!(120000000.0), "Hz", true), "120000000 Hz");
+        assert_eq!(shown(json!(0.0001), "s", false), "100 µs");
+        assert_eq!(shown(json!(-3.02), "dBm", false), "-3.02 dBm");
+        assert_eq!(shown(json!(7), "", false), "7");
+        assert_eq!(shown(json!("idle"), "Hz", false), "idle");
+        assert_eq!(shown(Value::Null, "Hz", false), "\u{2014}");
+        // 40 mVpp read in dBm: rounded and said to be, every digit kept for the tooltip; float dust cleaned.
+        assert_eq!(reading_text(&json!(-23.97940008672037), "dBm", true, None), ("\u{2248} -23.98 dBm".into(), "-23.97940008672037 dBm".into()));
+        assert_eq!(reading_text(&json!(-23.97940008672037), "dBm", true, Some(0.1)).0, "\u{2248} -24 dBm");
+        assert_eq!(reading_text(&json!(0.30000000000000004), "V", false, None), ("300 mV".into(), "300.00000000000004 mV".into()));
         let hertz: Vec<String> = unit_choices("Hz").iter().map(|choice| choice["value"].as_str().unwrap().to_owned()).collect();
         assert_eq!(hertz, ["GHz", "MHz", "kHz", "Hz"]);
         let power = DEFAULT_UNITS.choice_tree("dBm");

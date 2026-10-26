@@ -31,7 +31,6 @@ from .plan import (
     device_port_parts,
     hardware_scan_ports_for,
     host_advanced_port,
-    parse_scan_values,
     plan_input_rows,
     port_group,
     port_leaf,
@@ -90,11 +89,12 @@ def _rounded(value: float) -> float:
 
 
 class _Spellings:
-    """A device knob's spellings past its unit's decimal shifts (v2 converted
-    a device axis's unit: dBm and mW, Vpp, Vrms), converted through the
-    device's own law when it has one -- an RF amplitude into its channel's
-    load -- else by the quantity's own; one conversion a unit family, its
-    prefix rungs shifted from it.  A slot or an API parameter has none."""
+    """A device knob's spellings past its unit's decimal shifts (dBm and mW,
+    Vpp, Vrms), its limits in each converted through the device's own law
+    when it has one -- an RF amplitude into its channel's load -- else by the
+    quantity's own; one conversion a unit family, its prefix rungs shifted
+    from it.  An axis's values are never converted: a unit picked keeps the
+    digits the operator wrote, read in it.  A slot or an API parameter has none."""
 
     def __init__(self, tunables: Mapping[str, object] | None) -> None:
         self._tunables = dict(tunables or {})
@@ -143,33 +143,6 @@ def _port(port: ScanPort, spellings: _Spellings) -> dict:
     group = port.label.removesuffix(f".{port_leaf(port.port)}") if port.port.startswith(DEVICE_PARAM_FAMILY) else port_group(port.port)
     return {**asdict(port), "group": group, "leaf": port_leaf(port.port),
             "units": units, "families": _families(symbol for symbol, _decade in units), "limits": limits}
-
-
-def _conversions(rows: Sequence[Mapping], ports: Sequence[ScanPort], spellings: _Spellings) -> dict:
-    """Each device axis's values in every other spelling its knob offers past
-    the decimal shifts, by port (v2 ``_show_converted``): both banks, the
-    Values list kept inside the knob's limits in that spelling."""
-
-    by_port = {port.port: port for port in ports}
-    converted: dict[str, dict] = {}
-    for row in rows:
-        port = by_port.get(row["port"])
-        limits = {} if port is None else spellings.limits(port)
-        if not limits:
-            continue
-        try:
-            listed = parse_scan_values(row["value_text"]) if str(row["value_text"]).strip() else ()
-            table = {}
-            for symbol in [*(symbol for symbol, _decade in _ladder(port.unit) or [[port.unit, 0]]), *limits]:
-                if symbol == row["unit"]:
-                    continue
-                low, high = limits.get(symbol) or sorted(spellings.convert(port, (port.lo, port.hi), port.unit, symbol))
-                table[symbol] = {"values": spellings.convert(port, row["values"], row["unit"], symbol),
-                                 "explicit": [min(high, max(low, value)) for value in spellings.convert(port, listed, row["unit"], symbol)] if listed else []}
-        except Exception:  # noqa: BLE001 -- the row's own problem is said under it; a refused conversion offers nothing
-            continue
-        converted[row["port"]] = table
-    return converted
 
 
 def _rows(plan: object) -> tuple[dict, ...]:
@@ -301,7 +274,7 @@ def scan_editor_facts(values: Mapping[str, object], pulse: Mapping[str, object] 
     slots and API parameters, then the devices' scannable fields), the API
     parameters the pulse withholds and why, what the plan amounts to, and the
     API values section (None until a pulse is chosen).  ``tunables`` are the lent
-    devices: a knob's other spellings are converted through them."""
+    devices: a knob's limits in its other spellings are converted through them."""
 
     spellings = _Spellings(tunables)
     ports = [*hardware_scan_ports_for(pulse), *api_scan_ports_for(pulse)] if pulse is not None else []
@@ -326,7 +299,6 @@ def scan_editor_facts(values: Mapping[str, object], pulse: Mapping[str, object] 
         # The families the HOST walks between fires: their rows stand outside the board's.
         "host_advanced": [prefix for prefix in _FAMILIES.values() if host_advanced_port(prefix + "x")],
         "ports": [_port(port, spellings) for port in ports],
-        "conversions": _conversions(_rows(values.get("plan")), ports, spellings),
         "withheld": {} if pulse is None else unscannable_api_ports(pulse),
         "unoffered": unoffered,
         "summary": summary,

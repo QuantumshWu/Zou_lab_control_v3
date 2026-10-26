@@ -9,21 +9,22 @@
 // amounts to and words the API values; this editor writes `plan` (the axes
 // as the JSON document) and `api_values` (only what differs from the pulse,
 // in the pulse's units whatever spelling a box is read in; re-read against
-// the pulse when the model says that changes it).
+// the pulse when the model says that changes it).  A unit picked converts a
+// displayed quantity and keeps a number the operator wrote: an axis's values
+// and an API override keep their digits, read in the new unit; an API box
+// still at the pulse's own number is that number re-read in it.
 import { Field, Segmented, SpinBox, TreeCombo, alignUnitPickers, button, choiceTree, element, sectionTitle, setText, token, unitTree, type FieldSpec, type Value } from "../../fluent/index.js";
 import type { EditorFacts, LogicRow } from "../../workbench.js";
 import type { DraftEdit, NodeEditor } from "./index.js";
 
 /** `units`: the spellings an axis on the port may be authored in, each with
  * its decade against the port's unit, or null where no decimal shift reaches
- * it (a device knob's dBm and mW) -- `limits` are the port's in those
- * (empty: only its own). */
+ * it (a device knob's dBm and mW) -- `limits` are the port's in those, as the
+ * device converts them (empty: only its own). */
 type Port = { port: string; label: string; unit: string; lo: number; hi: number; seed_lo: number; seed_hi: number; group: string; leaf: string;
   units: [symbol: string, decade: number | null][]; limits: Record<string, [number, number]>;
   /** The family each spelling belongs to (its unit picker's trunks). */
   families: Record<string, string> };
-/** A device axis's banks in another spelling, as the model converted the draft's. */
-type Converted = { values: number[]; explicit: number[] };
 type ApiField = { name: string; label: string; kind: "integer" | "number"; unit: string; units: [symbol: string, decade: number][]; families: Record<string, string>;
   description: string; minimum: number | null; maximum: number | null; authored: number; value: number; unavailable_reason: string };
 type Facts = EditorFacts & {
@@ -35,8 +36,6 @@ type Facts = EditorFacts & {
   unoffered: Record<string, { group: string; leaf: string }>;
   summary: string;
   problem: string;
-  /** By port, each device axis's banks in every spelling past the decimal shifts. */
-  conversions: Record<string, Record<string, Converted>>;
   api: { fields: ApiField[]; overrides: [string, number][]; parked: { name: string; text: string; problem: boolean }[]; note: string;
     /** The api_values text re-read against this pulse, when that changes it. */
     tidy: string | null } | null;
@@ -113,7 +112,6 @@ class AxisRowView {
   readonly remove = button("×", () => this.owner.removeRow(this), "destructive glyph square");
   readonly notes = element("div", "axis-notes");
   private custom = element("p", "note");
-  private error = element("p", "field-error");
   private combo: TreeCombo | null = null;
   private name: HTMLInputElement | null = null;
   private start: SpinBox;
@@ -166,8 +164,8 @@ class AxisRowView {
     this.mode.setChoices([["range", "Range"], ["values", "Values"]]);
     this.mode.root.title = "Scan a from/to/points range, or the values written";
     this.remove.title = "Remove this axis";
-    this.error.hidden = this.custom.hidden = true;
-    this.notes.append(this.custom, this.error);
+    this.custom.hidden = true;
+    this.notes.append(this.custom);
   }
 
   get cells(): HTMLElement[] { return [this.kind, this.axis, this.values, this.unit, this.mode.root, this.remove, this.notes]; }
@@ -206,41 +204,13 @@ class AxisRowView {
     return from == null || to == null ? null : from - to;
   }
 
-  /** Both banks converted to the picked spelling; an empty Values list stays empty. */
+  /** Another spelling for the axis: its values are the operator's and keep their
+   * digits (the default sweep too), now read in it, against the port's limits there. */
   private unitPicked(symbol: string): void {
-    const places = this.places(this.entry.unit, symbol);
-    if (places === null) { this.converted(symbol); return; }
-    const text = this.entry.value_text.trim();
-    const listed = text ? text.split(",").map(item => Number(item.trim())) : [];
-    if (listed.some(value => !Number.isFinite(value))) {
-      this.showError(`cannot convert unit: Values is not a list of numbers`);
-      this.unitPicker.value = this.entry.unit;
-      return;
-    }
-    this.entry = { ...this.entry, unit: symbol, values: this.entry.values.map(value => shifted(value, places)),
-      value_text: text ? listed.map(value => String(shifted(value, places))).join(", ") : this.entry.value_text };
+    if (symbol === this.entry.unit) return;
+    this.entry = { ...this.entry, unit: symbol };
     this.show(this.entry);
     this.owner.emitPlan();
-  }
-
-  /** A spelling no decimal shift reaches: the banks as the model converted the
-   * draft's, while this row is still what the draft says. */
-  private converted(symbol: string): void {
-    const converted = this.owner.conversion(this.entry, symbol);
-    if (!converted) {
-      this.showError("cannot convert unit: the row changed since it was read; pick the unit again");
-      this.unitPicker.value = this.entry.unit;
-      return;
-    }
-    this.entry = { ...this.entry, unit: symbol, values: converted.values,
-      value_text: this.entry.value_text.trim() ? converted.explicit.map(String).join(", ") : this.entry.value_text };
-    this.show(this.entry);
-    this.owner.emitPlan();
-  }
-
-  private showError(text: string): void {
-    setText(this.error, text);
-    this.error.hidden = !text;
   }
 
   private showMode(): void {
@@ -269,7 +239,6 @@ class AxisRowView {
   private portChanged(port: string): void {
     const offered = this.owner.ports.find(item => item.port === port);
     this.customValues = null;
-    this.showError("");
     const count = Number(this.points.text) || 5;
     this.entry = { ...this.entry, port, unit: offered?.unit ?? this.entry.unit,
       values: offered ? linspace(offered.seed_lo, offered.seed_hi, count) : this.entry.values };
@@ -343,13 +312,6 @@ export class ScanPlanEditor implements NodeEditor {
     setText(this.summary, facts.problem ? "" : facts.summary);
     this.summary.hidden = !this.summary.textContent;
     this.updateApi(row, facts);
-  }
-
-  /** `axis` in `symbol` as the model converted it, if `axis` is the draft's row on its port. */
-  conversion(axis: Axis, symbol: string): Converted | null {
-    const drafted = readPlan(this.planText).find(row => row.port === axis.port);
-    const same = drafted && drafted.unit === axis.unit && drafted.value_text === axis.value_text && JSON.stringify(drafted.values) === JSON.stringify(axis.values);
-    return same ? this.facts?.conversions[axis.port]?.[symbol] ?? null : null;
   }
 
   /** Every knob under the thing that owns it (v2 _fill_ports); an authored port the bench
@@ -433,18 +395,23 @@ export class ScanPlanEditor implements NodeEditor {
       const spec: FieldSpec = { name: item.name, label: item.label, kind: item.kind, value: shown(item.value), required: false, allow_none: false,
         unit: symbol, units: item.units.map(([value]) => ({ value, label: value, group: item.families[value] })),
         minimum: shown(item.minimum), maximum: shown(item.maximum), description: item.description,
-        unavailable_reason: item.unavailable_reason || this.locked };
+        unavailable_reason: item.unavailable_reason || this.locked, inexact: true };
       let field = this.apiFields.get(item.name);
       if (!field) {
         field = new Field(`${row.node_id}-api`, spec, {
           commit: value => this.emitValues({ [item.name]: this.inPulseUnit(item.name, Number(value)) }),
           unit: picked => {
-            // What the box holds now -- an edit still on its way included -- re-read in the picked spelling.
-            const box = this.apiFields.get(item.name)!, held = this.inPulseUnit(item.name, Number(box.value));
+            // What the box holds now (an edit still on its way included): the pulse's own number is
+            // re-read in the picked spelling; an override keeps its digits, read in it, so the value
+            // it sets in the pulse's unit is the one the box now says.
+            const box = this.apiFields.get(item.name)!, written = Number(box.value), held = this.inPulseUnit(item.name, written);
+            const own = held === this.facts?.api?.fields.find(field => field.name === item.name)?.authored;
             this.shownUnits.set(item.name, picked);
             if (this.facts) this.updateApi(row, this.facts);
             const shownNow = this.facts?.api?.fields.find(field => field.name === item.name);
-            if (shownNow) box.respell(shifted(held, this.apiPlaces(shownNow)));
+            if (!shownNow) return;
+            box.respell(own ? shifted(held, this.apiPlaces(shownNow)) : written);
+            if (!own) this.emitValues({ [item.name]: this.inPulseUnit(item.name, written) });
           },
         }, false);
         this.apiFields.set(item.name, field);
