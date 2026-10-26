@@ -55,7 +55,7 @@ CPU 是所有线程累积时间；峰值内存为 Windows peak working set，MB 
 
 ## 交付边界与后续事项
 
-canonical `rust-solver/population-core` 已由桌面 worker 静态链接，复用同一 OpenBLAS/SuperLU 与 v3 widgets。候选单 EXE 为 **15,177,418 B（约 15.18 MB）**，运行使用系统 WebView2，不依赖 Python/QuTiP 或研究 DLL；验收用的 Python 标准库脚本仅是外部测试工具。递归源码/依赖 SHA 随打包校验，无历史模拟答案缓存。本报告不把构建成功等同于全部性能目标完成。
+canonical `rust-solver/population-core` 已由桌面 worker 静态链接，复用同一 OpenBLAS 与 v3 widgets。候选单 EXE 为 **15,177,418 B（约 15.18 MB）**，运行使用系统 WebView2，不依赖 Python/QuTiP 或研究 DLL；验收用的 Python 标准库脚本仅是外部测试工具。递归源码/依赖 SHA 随打包校验，无历史模拟答案缓存。本报告不把构建成功等同于全部性能目标完成。
 
 短期确定工程项：后续补齐未测稳态和五光，保留失败/取消提示；将已通过输入纳入回归；核对 UI 层级组布居与精度 scope。四光长时的时间和内存成本是明确待办，不能承诺修复时长。
 

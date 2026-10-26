@@ -1,20 +1,16 @@
-//! Frequency coordinates and verification utilities for Fourier Lindblad work.
+//! Frequency coordinates of a Model: declared carrier axes, exact integer
+//! relations between them, and the phase axes used for Fourier work.
 //!
 //! A discovered floating-point integer relation is not proof of physical phase
 //! locking. Exact round trips and ULP-compatible relations are distinguished;
 //! the latter must remain visible in finite-time error budgets and infinity
 //! claims. No detuning-, rate-, or amplitude-based physical cutoff is used.
-use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
 pub struct FrequencyBasis {
     pub frequencies: Vec<f64>,
     /// Original input order; omega_j ~= sum_k index[j][k] * frequencies[k].
     pub drive_indices: Vec<Vec<i32>>,
-    pub reconstructed_frequencies: Vec<f64>,
-    /// Compensated reconstructed frequency minus redundant/input omega,
-    /// including sub-ULP terms and declared-unit conversion roundoff.
-    pub reconstruction_errors: Vec<f64>,
     pub exact_relations: usize,
     pub rounded_relations: usize,
     /// For inferred numeric input: every compensated frequency residual is
@@ -26,9 +22,6 @@ pub struct FrequencyBasis {
     /// source_to_basis[source carrier axis][final Fourier basis axis]. Only
     /// exact integer source-frequency reductions may change this mapping.
     pub source_to_basis:Option<Vec<Vec<i32>>>,
-}
-impl FrequencyBasis{
-    pub fn source(&self)->&'static str{if self.source_to_basis.is_some(){"declared-carrier-coordinates"}else{"inferred-numeric"}}
 }
 
 fn half_ulp_up(x: f64) -> f64 {
@@ -321,11 +314,7 @@ pub fn frequency_basis(input: &[f64], max_integer: i32) -> Result<FrequencyBasis
         }
         processed.push(current);
     }
-    let reconstructed: Vec<_> = mapping
-        .iter()
-        .map(|index| reconstruction(index, &basis))
-        .collect();
-    if reconstructed.iter().any(|x| !x.is_finite()) {
+    if mapping.iter().any(|index| !reconstruction(index, &basis).is_finite()) {
         return Err("Frequency reconstruction overflowed".into());
     }
     let errors: Vec<_> = mapping
@@ -343,8 +332,6 @@ pub fn frequency_basis(input: &[f64], max_integer: i32) -> Result<FrequencyBasis
     Ok(FrequencyBasis {
         frequencies: basis,
         drive_indices: mapping,
-        reconstructed_frequencies: reconstructed,
-        reconstruction_errors: errors,
         exact_relations,
         rounded_relations,
         exact,
@@ -423,12 +410,45 @@ pub fn model_frequency_basis(model:&crate::Model,max_integer:i32)->Result<Freque
     let drive_indices=compose_indices(&declared.drive_indices,&mapping,frequencies.len())?;
     // Validate frame composition too, including static/no-drive models.
     compose_indices(&declared.frame_indices,&mapping,frequencies.len())?;
-    let reconstructed_frequencies:Vec<_>=drive_indices.iter().map(|row|{let(hi,lo)=scaled_parts(dot_parts(row,&source_basis),unit);hi+lo}).collect();
-    let reconstruction_errors=drive_indices.iter().zip(&model.drives).map(|(row,drive)|{
-        let(hi,lo)=scaled_parts(dot_parts(row,&source_basis),unit);(hi-drive.omega)+lo
-    }).collect();
-    Ok(FrequencyBasis{frequencies,drive_indices,reconstructed_frequencies,reconstruction_errors,
+    Ok(FrequencyBasis{frequencies,drive_indices,
         exact_relations,rounded_relations:0,exact:true,search_exhausted:reduction.search_exhausted,source_to_basis:Some(mapping)})
+}
+/// Phase axes of a declared-coordinate Model for Fourier work. Without an
+/// exact integer relation between the declared source axes these ARE the
+/// source axes (identity mapping, unchanged order). With one (equally spaced
+/// carriers, for example) the exact reduced basis is used, so that a Fourier
+/// charge has zero frequency only when it is zero; otherwise the envelope
+/// null space would be degenerate and a long-time mean ill-defined.
+pub struct PhaseAxes{
+    /// Compensated angular frequency (hi, lo) of every axis.
+    pub parts:Vec<(f64,f64)>,
+    pub drive_indices:Vec<Vec<i32>>,
+    /// Laboratory frame index of every state in these axes.
+    pub frame_indices:Vec<Vec<i32>>,
+    pub frame_sectors:Vec<i32>,
+    /// source_to_basis[source axis][phase axis].
+    pub source_to_basis:Vec<Vec<i32>>,
+}
+pub fn model_phase_axes(model:&crate::Model)->Result<PhaseAxes,String>{
+    let basis=model_frequency_basis(model,16)?;
+    let declared=model.frequency_coordinates.as_ref().ok_or("Phase axes require declared frequencyCoordinates")?;
+    let axes=declared.frequencies.len();
+    if basis.exact_relations==0{
+        let identity=identity_indices(axes);
+        return Ok(PhaseAxes{parts:model_phase_frequency_parts(model,&identity)?,drive_indices:declared.drive_indices.clone(),
+            frame_indices:declared.frame_indices.clone(),frame_sectors:declared.frame_sectors.clone(),source_to_basis:identity});
+    }
+    let(source,unit)=declared.frequencies_mhz.as_ref().map(|values|(values.as_slice(),std::f64::consts::TAU))
+        .unwrap_or((declared.frequencies.as_slice(),1.));
+    // The same deterministic reduction model_frequency_basis accepted above.
+    let reduction=frequency_basis(source,16)?;
+    let mapping=basis.source_to_basis.clone().ok_or("Declared reduction lost its source mapping")?;
+    let parts:Vec<_>=reduction.frequencies.iter().map(|&value|scaled_parts((value,0.),unit)).collect();
+    if parts.len()!=basis.frequencies.len()||parts.iter().zip(&basis.frequencies).any(|(p,&f)|!(p.0+p.1).is_finite()||(p.0+p.1-f).abs()>4.*ulp_spacing(f)){
+        return Err("Reduced phase axes disagree with the reduced frequency basis".into());
+    }
+    let frame_indices=compose_indices(&declared.frame_indices,&mapping,parts.len())?;
+    Ok(PhaseAxes{parts,drive_indices:basis.drive_indices,frame_indices,frame_sectors:declared.frame_sectors.clone(),source_to_basis:mapping})
 }
 /// Phase rows in the ORIGINAL declared axes, with their authoritative unit
 /// conversion. State gauges may contain zero or negative integer entries.
@@ -467,11 +487,11 @@ mod declared_coordinate_tests{
         let basis=model_frequency_basis(&model,16).unwrap();
         assert_eq!(basis.frequencies.len(),2);assert_eq!(basis.drive_indices,[vec![0,1],vec![1,1],vec![1,0]]);
         assert_eq!(basis.source_to_basis,Some(vec![vec![1,0],vec![0,1]]));
-        assert_eq!(basis.source(),"declared-carrier-coordinates");assert!(basis.exact);assert_eq!(basis.rounded_relations,0);
-        assert_ne!(basis.reconstruction_errors[1],0.); // declared phase identity, not a zero literal residual
+        assert!(basis.exact);assert_eq!(basis.rounded_relations,0);
+        // Declared phase identity, not a zero literal residual.
         let rows=model.frequency_coordinates.as_ref().unwrap().drive_indices.clone();let parts=model_phase_frequency_parts(&model,&rows).unwrap();assert_ne!(parts[1].1,0.);
         let mut legacy=model;legacy.frequency_coordinates=None;
-        let old=model_frequency_basis(&legacy,16).unwrap();assert!(old.source_to_basis.is_none());assert_eq!(old.source(),"inferred-numeric");
+        let old=model_frequency_basis(&legacy,16).unwrap();assert!(old.source_to_basis.is_none());
         assert!(!old.exact||old.frequencies.len()==3);
     }
     #[test]
@@ -533,237 +553,16 @@ mod declared_coordinate_tests{
     }
 }
 
-/// One coefficient for each conjugate pair, first nonzero index positive.
-/// Real physical coordinates follow x(theta)=x0+2 Re sum_n z_n exp(i n.theta).
-#[derive(Clone, Debug)]
-pub struct FourierCoefficient {
-    pub index: Vec<i32>,
-    pub real: Vec<f64>,
-    pub imag: Vec<f64>,
-}
-#[derive(Clone, Debug)]
-pub struct UniformBound {
-    pub per_coordinate: Vec<f64>,
-    pub max_coordinate: f64,
-    pub l2: f64,
-}
-pub type RealSparse = Vec<Vec<(usize, f64)>>;
-#[derive(Clone, Debug)]
-pub struct FourierDrive {
-    pub index: Vec<i32>,
-    pub cos: RealSparse,
-    pub sin: RealSparse,
-}
-#[derive(Clone, Debug)]
-pub struct BoundaryForcing {
-    pub coefficients: Vec<FourierCoefficient>,
-    pub bound: UniformBound,
-}
-
-fn sign(index: &[i32]) -> i32 {
-    index
-        .iter()
-        .find(|&&n| n != 0)
-        .map(|&n| if n > 0 { 1 } else { -1 })
-        .unwrap_or(1)
-}
-fn canonical(index: &[i32]) -> Result<Vec<i32>, String> {
-    let s = sign(index);
-    index
-        .iter()
-        .map(|&n| {
-            n.checked_mul(s)
-                .ok_or_else(|| "Harmonic index overflow".into())
-        })
-        .collect()
-}
-fn coefficient_map<'a>(
-    input: &'a [FourierCoefficient],
-    dimensions: usize,
-    size: usize,
-) -> Result<BTreeMap<Vec<i32>, &'a FourierCoefficient>, String> {
-    let mut result = BTreeMap::new();
-    for value in input {
-        if value.index.len() != dimensions || value.real.len() != size || value.imag.len() != size {
-            return Err("Inconsistent Fourier coefficient dimensions".into());
-        }
-        if sign(&value.index) < 0 {
-            return Err("Fourier coefficients must use canonical +/- index representatives".into());
-        }
-        if value.real.iter().chain(&value.imag).any(|x| !x.is_finite()) {
-            return Err("Non-finite Fourier coefficient".into());
-        }
-        if value.index.iter().all(|&n| n == 0) && value.imag.iter().any(|&x| x != 0.) {
-            return Err("The central Hermitian-coordinate coefficient must be real".into());
-        }
-        if result.insert(value.index.clone(), value).is_some() {
-            return Err("Duplicate canonical Fourier coefficient".into());
-        }
-    }
-    Ok(result)
-}
-
-/// Uniform, all-phase triangle bound, with absent harmonics interpreted as zero.
-/// This is a bound on coordinate differences, not a sampled-grid estimate.
-pub fn uniform_difference(
-    a: &[FourierCoefficient],
-    b: &[FourierCoefficient],
-) -> Result<UniformBound, String> {
-    let exemplar = a.first().or_else(|| b.first());
-    let Some(exemplar) = exemplar else {
-        return Ok(UniformBound {
-            per_coordinate: vec![],
-            max_coordinate: 0.,
-            l2: 0.,
-        });
-    };
-    let size = exemplar.real.len();
-    let dimensions = exemplar.index.len();
-    let left = coefficient_map(a, dimensions, size)?;
-    let right = coefficient_map(b, dimensions, size)?;
-    let indices: BTreeSet<_> = left.keys().chain(right.keys()).cloned().collect();
-    let mut bound = vec![0.; size];
-    for index in indices {
-        let central = index.iter().all(|&n| n == 0);
-        for i in 0..size {
-            let ar = left.get(&index).map_or(0., |v| v.real[i]);
-            let ai = left.get(&index).map_or(0., |v| v.imag[i]);
-            let br = right.get(&index).map_or(0., |v| v.real[i]);
-            let bi = right.get(&index).map_or(0., |v| v.imag[i]);
-            bound[i] += if central {
-                (ar - br).abs()
-            } else {
-                2. * (ar - br).hypot(ai - bi)
-            };
-        }
-    }
-    if bound.iter().any(|x| !x.is_finite()) {
-        return Err("Uniform Fourier bound overflowed".into());
-    }
-    let l2 = bound.iter().fold(0_f64, |norm, &value| norm.hypot(value));
-    if !l2.is_finite() {
-        return Err("Uniform Fourier norm overflowed".into());
-    }
-    Ok(UniformBound {
-        max_coordinate: bound.iter().copied().fold(0., f64::max),
-        l2,
-        per_coordinate: bound,
-    })
-}
-
-fn check_operator(operator: &RealSparse, size: usize) -> Result<(), String> {
-    if operator.len() != size
-        || operator
-            .iter()
-            .any(|col| col.iter().any(|&(row, v)| row >= size || !v.is_finite()))
-    {
-        return Err("Invalid sparse Fourier generator coefficient".into());
-    }
-    Ok(())
-}
-
-/// Exact omitted Fourier forcing of the original differential equation.
-/// Retained indices may be canonical or signed; conjugate counterparts are
-/// implicit. Sum all paths to each omitted index before taking a norm, so exact
-/// destructive interference remains exact. Constant-generator terms cannot
-/// create an outside harmonic and are intentionally absent from this routine.
-pub fn boundary_forcing(
-    drives: &[FourierDrive],
-    coefficients: &[FourierCoefficient],
-    retained_indices: &[Vec<i32>],
-) -> Result<BoundaryForcing, String> {
-    let exemplar = coefficients
-        .first()
-        .ok_or("Boundary forcing requires coefficient dimensions")?;
-    let dimensions = exemplar.index.len();
-    let size = exemplar.real.len();
-    coefficient_map(coefficients, dimensions, size)?;
-    let mut retained = BTreeSet::new();
-    for index in retained_indices {
-        if index.len() != dimensions {
-            return Err("Inconsistent retained Fourier index dimensions".into());
-        }
-        retained.insert(canonical(index)?);
-    }
-    for drive in drives {
-        if drive.index.len() != dimensions || drive.index.iter().all(|&n| n == 0) {
-            return Err("Invalid nonzero Fourier drive index".into());
-        }
-        check_operator(&drive.cos, size)?;
-        check_operator(&drive.sin, size)?;
-    }
-    let mut outside: BTreeMap<Vec<i32>, (Vec<f64>, Vec<f64>)> = BTreeMap::new();
-    for coefficient in coefficients {
-        if !retained.contains(&coefficient.index) {
-            return Err("Coefficient lies outside the retained Fourier lattice".into());
-        }
-        let central = coefficient.index.iter().all(|&n| n == 0);
-        for source_sign in if central { vec![1] } else { vec![1, -1] } {
-            let source: Vec<_> = coefficient.index.iter().map(|&n| n * source_sign).collect();
-            for drive in drives {
-                for step in [1, -1] {
-                    let target: Vec<i32> = source
-                        .iter()
-                        .zip(&drive.index)
-                        .map(|(&n, &shift)| {
-                            shift
-                                .checked_mul(step)
-                                .and_then(|s| n.checked_add(s))
-                                .ok_or_else(|| "Boundary Fourier index overflow".to_string())
-                        })
-                        .collect::<Result<_, _>>()?;
-                    if retained.contains(&canonical(&target)?) {
-                        continue;
-                    }
-                    let (real, imag) = outside
-                        .entry(target)
-                        .or_insert_with(|| (vec![0.; size], vec![0.; size]));
-                    // exp(+i n theta): L_+=(Ac-i As)/2, L_-=(Ac+i As)/2.
-                    for (col, entries) in drive.cos.iter().enumerate() {
-                        for &(row, v) in entries {
-                            real[row] += 0.5 * v * coefficient.real[col];
-                            imag[row] += 0.5 * v * coefficient.imag[col] * source_sign as f64;
-                        }
-                    }
-                    for (col, entries) in drive.sin.iter().enumerate() {
-                        for &(row, v) in entries {
-                            real[row] +=
-                                0.5 * step as f64 * v * coefficient.imag[col] * source_sign as f64;
-                            imag[row] -= 0.5 * step as f64 * v * coefficient.real[col];
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let coefficients: Vec<_> = outside
-        .into_iter()
-        .filter(|(index, _)| sign(index) > 0)
-        .map(|(index, (real, imag))| FourierCoefficient { index, real, imag })
-        .collect();
-    let bound = uniform_difference(&coefficients, &[])?;
-    Ok(BoundaryForcing {
-        coefficients,
-        bound,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn coefficient(index: &[i32], re: &[f64], im: &[f64]) -> FourierCoefficient {
-        FourierCoefficient {
-            index: index.to_vec(),
-            real: re.to_vec(),
-            imag: im.to_vec(),
-        }
-    }
     #[test]
     fn exact_integer_and_rational_relations_reduce_axes() {
         let a = frequency_basis(&[4.6, 2.3, 6.9], 16).unwrap();
         assert_eq!(a.frequencies.len(), 1);
         assert!(a.exact || a.rounded_relations > 0);
-        for (actual, expected) in a.reconstructed_frequencies.iter().zip([4.6, 2.3, 6.9]) {
+        for (index, expected) in a.drive_indices.iter().zip([4.6, 2.3, 6.9]) {
+            let actual = reconstruction(index, &a.frequencies);
             assert!((actual - expected).abs() <= 2. * half_ulp(expected));
         }
         let rational = frequency_basis(&[6., 10., 15.], 16).unwrap();
@@ -790,7 +589,10 @@ mod tests {
         let basis = frequency_basis(&[0.1, original], 16).unwrap();
         assert!(!basis.exact);
         assert!(basis.rounded_relations > 0);
-        assert!(basis.reconstruction_errors.iter().any(|&value| value != 0.));
+        assert!(basis.drive_indices.iter().zip([0.1, original]).any(|(index, input)| {
+            let (hi, lo) = dot_parts(index, &basis.frequencies);
+            (hi - input) + lo != 0.
+        }));
         let sum = frequency_basis(&[1., 2_f64.sqrt(), 1. + 2_f64.sqrt()], 16).unwrap();
         assert!(!sum.exact);
         assert!(sum.rounded_relations > 0);
@@ -811,56 +613,8 @@ mod tests {
         assert_eq!(a.frequencies.len(), 2);
     }
     #[test]
-    fn uniform_bound_exposes_aliasing_of_a_one_dimensional_phase_grid() {
-        // 1-cos(3 theta1-theta2) vanishes at theta2=3 theta1, but peaks at 2.
-        let a = vec![
-            coefficient(&[0, 0], &[1.], &[0.]),
-            coefficient(&[3, -1], &[-0.5], &[0.]),
-        ];
-        assert_eq!(uniform_difference(&a, &[]).unwrap().max_coordinate, 2.);
-        assert_eq!(uniform_difference(&a, &a).unwrap().max_coordinate, 0.);
-    }
-    #[test]
-    fn uniform_complex_harmonic_bound_is_tight_for_one_mode() {
-        let a = vec![coefficient(&[1], &[3.], &[4.])];
-        assert_eq!(uniform_difference(&a, &[]).unwrap().max_coordinate, 10.);
-    }
-    #[test]
-    fn boundary_forcing_uses_true_generator_and_preserves_interference() {
-        let drive = FourierDrive {
-            index: vec![1],
-            cos: vec![vec![(0, 2.)]],
-            sin: vec![vec![(0, 4.)]],
-        };
-        let values = vec![
-            coefficient(&[0], &[1.], &[0.]),
-            coefficient(&[1], &[3.], &[5.]),
-        ];
-        let report = boundary_forcing(&[drive.clone()], &values, &[vec![0], vec![1]]).unwrap();
-        assert_eq!(report.coefficients.len(), 1);
-        assert_eq!(report.coefficients[0].index, vec![2]);
-        // (1-2i)*(3+5i)=13-i.
-        assert_eq!(report.coefficients[0].real, vec![13.]);
-        assert_eq!(report.coefficients[0].imag, vec![-1.]);
-        assert_eq!(report.bound.max_coordinate, 2. * 13_f64.hypot(1.));
-        let opposite = FourierDrive {
-            index: vec![1],
-            cos: vec![vec![(0, -2.)]],
-            sin: vec![vec![(0, -4.)]],
-        };
-        assert_eq!(
-            boundary_forcing(&[drive, opposite], &values, &[vec![0], vec![1]])
-                .unwrap()
-                .bound
-                .max_coordinate,
-            0.
-        );
-    }
-    #[test]
     fn malformed_and_nonfinite_inputs_are_rejected() {
         assert!(frequency_basis(&[0.], 16).is_err());
         assert!(frequency_basis(&[f64::NAN], 16).is_err());
-        assert!(uniform_difference(&[coefficient(&[-1], &[1.], &[0.])], &[]).is_err());
-        assert!(uniform_difference(&[coefficient(&[0], &[1.], &[1.])], &[]).is_err());
     }
 }

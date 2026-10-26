@@ -50,8 +50,8 @@ fn supervisor(backend:Backend,data:PathBuf,test_mode:bool,proxy:EventLoopProxy<U
     let build_hash=backend.build_hash;
     let mut defaults:BTreeMap<String,String>=manifest["solverDefaults"].as_object().into_iter().flat_map(|m|m.iter()).filter_map(|(k,v)|v.as_str().map(|v|(k.clone(),v.to_owned()))).collect();
     for (key,value)in std::env::vars(){if key.starts_with("ATOM_"){defaults.insert(key,value);}}
-    if backend.embedded{defaults.remove("ATOM_OPENBLAS_DLL");defaults.remove("ATOM_SUPERLU_DLL");}
-    else{defaults.insert("ATOM_OPENBLAS_DLL".into(),backend.working.join("libscipy_openblas.dll").to_string_lossy().into());defaults.insert("ATOM_SUPERLU_DLL".into(),backend.working.join("atom_superlu.dll").to_string_lossy().into());}
+    if backend.embedded{defaults.remove("ATOM_OPENBLAS_DLL");}
+    else{defaults.insert("ATOM_OPENBLAS_DLL".into(),backend.working.join("libscipy_openblas.dll").to_string_lossy().into());}
     let mut lanes=BTreeMap::<String,NativeChild>::new();let mut sessions=Sessions::default();let mut process_ids=Vec::new();let mut captures=Vec::new();
     while let Ok(command)=receiver.recv(){match command{
         HostMessage::Stop=>break,
@@ -89,7 +89,7 @@ fn supervisor(backend:Backend,data:PathBuf,test_mode:bool,proxy:EventLoopProxy<U
                     if hash(&exe)?!=binary_hash{return Err("Native executable changed after configuration".into());}
                     let instance=sessions.next()?;
                     let mut command=Command::new(&exe);command.current_dir(&backend.working).envs(&defaults).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(0x08000000);
-                    if backend.embedded{command.arg("--worker").env_remove("ATOM_OPENBLAS_DLL").env_remove("ATOM_SUPERLU_DLL");}
+                    if backend.embedded{command.arg("--worker").env_remove("ATOM_OPENBLAS_DLL");}
                     let blas_threads=configure_blas_environment(&mut command,&defaults,&lane);
                     let mut child=command.spawn().map_err(|e|e.to_string())?;let spawned=Instant::now();let job=match Job::contain(&child){Ok(j)=>j,Err(e)=>{let _=child.kill();let _=child.wait();return Err(e);}};
                     let stdout=child.stdout.take().unwrap();let stderr=child.stderr.take().unwrap();let tx=sender.clone();let name=lane.clone();

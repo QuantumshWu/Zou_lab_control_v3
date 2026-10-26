@@ -1,7 +1,12 @@
 //! Production protocol bridge to the single population-core source tree.
 //! The TS Model remains the only owner of atomic physics. This adapter only
 //! borrows its numerical H/C, exact phase coordinates and state metadata.
-use crate::{Model,Options,Solver,full_model_solve,publish_mean,harmonics};
+//!
+//! One prepared core serves both outputs of a request: the long-time mean is
+//! computed FIRST (and published as `asymptotic` progress), then the core is
+//! handed to the finite-time engine. A steadyOnly request runs only the mean,
+//! through the same function, so inline and steadyOnly means are identical.
+use crate::{Model,Options,Solver,publish_mean,harmonics};
 use serde_json::{json,Value};
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -9,10 +14,13 @@ use atom_population_core::preparation::{ModelView,MatrixView,DriveView,PhaseBasi
 use atom_population_core::owned_prepared::{KernelPolicy,coordinates::InitialView,b0_inverse::P0Policy};
 use atom_population_core::owned_prepared::runtime_core::RuntimeCore;
 use atom_population_core::owned_prepared::engine::{self,FiniteOptions,RequestedGroup};
+use atom_population_core::owned_prepared::asymptotic::{self,LabFrame,MeanKind,MeanOptions,MeanSolution};
 
-pub fn supports(model:&Model,options:&Options)->bool {
-    !options.steady_only&&model.dimension==32
-        &&model.states.len()==32&&model.frequency_coordinates.is_some()
+const MEAN_METHOD:&str="Full32 Cesàro mean of the gauge pencil: defect-corrected null vector with a near-zero pole, halo-condensed Fourier truncation";
+const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
+
+pub fn supports(model:&Model,_options:&Options)->bool {
+    model.dimension==32&&model.states.len()==32&&model.frequency_coordinates.is_some()
 }
 
 fn groups(model:&Model)->Result<(Vec<bool>,Vec<RequestedGroup>),String>{
@@ -31,25 +39,23 @@ fn groups(model:&Model)->Result<(Vec<bool>,Vec<RequestedGroup>),String>{
     Ok((ground,grouped.into_iter().map(|(name,indices)|RequestedGroup{name,indices}).collect()))
 }
 
-pub fn solve(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
-    let result=solve_inner(solver,model,options);
-    // Worker requests are serial; the core's single-threaded small BLAS
-    // must not change the preferred policy of a later periodic/steady job.
-    solver.lap.restore_configured_threads()?;
-    result
+/// Everything a request needs from the Model, prepared once.
+struct Request{
+    core:RuntimeCore,
+    groups:Vec<RequestedGroup>,
+    axes:harmonics::PhaseAxes,
+    initial_populations:Vec<f64>,
+    preparation_ms:f64,
 }
 
-fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
-    let started=Instant::now();options.validate_population_tolerance()?;
-    if !options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples){return Err("Invalid finite population grid".into());}
-    let(ground,requested_groups)=groups(model)?;
-    let names:Vec<_>=requested_groups.iter().map(|g|g.name.clone()).collect();
-    let declared=model.frequency_coordinates.as_ref().ok_or("Population core requires declared phase coordinates")?;
-    let axes=declared.frequencies.len();
-    let identity:Vec<_>=(0..axes).map(|i|(0..axes).map(|j|if i==j{1}else{0}).collect::<Vec<i32>>()).collect();
-    let parts=harmonics::model_phase_frequency_parts(model,&identity)?;
-    let parts:Vec<_>=parts.into_iter().map(|(hi,lo)|FrequencyParts{hi,lo}).collect();
-    let phases=PhaseBasis::from_parts(&parts,&declared.drive_indices)?;
+fn prepare(solver:&Solver,model:&Model)->Result<Request,String>{
+    let started=Instant::now();
+    let(ground,groups)=groups(model)?;
+    // One phase-axis construction for the mean AND the finite engine: the
+    // declared axes, or the exact reduced basis when integer relations exist.
+    let axes=harmonics::model_phase_axes(model)?;
+    let parts:Vec<_>=axes.parts.iter().map(|&(hi,lo)|FrequencyParts{hi,lo}).collect();
+    let phases=PhaseBasis::from_parts(&parts,&axes.drive_indices)?;
     let collapse:Vec<_>=model.collapse.iter().map(|x|MatrixView{real:&x.real,imag:&x.imag}).collect();
     let drives:Vec<_>=model.drives.iter().map(|x|DriveView{omega:x.omega,
         cosine:MatrixView{real:&x.cos.real,imag:&x.cos.imag},sine:MatrixView{real:&x.sin.real,imag:&x.sin.imag}}).collect();
@@ -64,8 +70,90 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
         let initial:Vec<_>=core.initial().original().iter().map(|z|crate::C{re:z.re,im:z.im}).collect();
         if crate::positivity(&solver.lap,&initial,32)?>1e-10{return Err("Initial density is not positive semidefinite".into());}
     }
-    let preparation_ms=started.elapsed().as_secs_f64()*1000.;
-    let initial_populations:Vec<_>=(0..32).map(|i|core.initial().original()[i*32+i].re).collect();
+    let initial_populations=(0..32).map(|i|core.initial().original()[i*32+i].re).collect();
+    Ok(Request{core,groups,axes,initial_populations,preparation_ms:started.elapsed().as_secs_f64()*1000.})
+}
+
+/// The long-time mean in the steadyOnly result shape. Inline (combined) and
+/// steadyOnly requests both call exactly this function.
+fn mean_result(solver:&Solver,model:&Model,options:&Options,request:&mut Request,started:Instant)->Result<Value,String>{
+    let lab=LabFrame{frame_indices:request.axes.frame_indices.clone(),
+        sectors:request.axes.frame_sectors.iter().map(|&s|if s==0{0}else{1}).collect()};
+    let mean=asymptotic::solve(&mut request.core,&MeanOptions::new(options.population_tolerance,request.groups.clone(),lab))?;
+    let density:Vec<_>=mean.density.iter().map(|z|crate::C{re:z.re,im:z.im}).collect();
+    let positivity=crate::positivity(&solver.lap,&density,32)?;
+    let trace_error=(mean.populations.iter().sum::<f64>()-1.).abs();
+    let(status,reason)=classify(model,&mean);
+    let d=&mean.diagnostics;
+    let checkpoints:Vec<_>=d.checkpoints.iter().map(|c|json!({"basis":c.columns,"modes":c.modes,"pole":c.pole,
+        "basisEstimate":c.basis_estimate,"haloEstimate":c.halo_estimate,"haloModes":c.halo_modes.0,"transportHaloModes":c.halo_modes.1,
+        "innerResidual":c.inner_residual,"action":c.action})).collect();
+    Ok(json!({"timesUs":[0.],"states":model.states,"populations":[request.initial_populations],
+        "asymptoticPopulations":mean.populations,
+        "asymptoticDensityReal":mean.density.iter().map(|z|z.re).collect::<Vec<_>>(),
+        "asymptoticDensityImag":mean.density.iter().map(|z|z.im).collect::<Vec<_>>(),
+        "asymptoticStatus":status,"asymptoticReason":reason,
+        "diagnostics":{"engine":"rust-population-core","method":MEAN_METHOD,"steadyMethod":MEAN_METHOD,
+            "asymptoticStatus":status,"asymptoticReason":reason,"meanDensityFrame":MEAN_FRAME,
+            "densityLimitExists":model.drives.is_empty()&&mean.kind==MeanKind::Unique&&mean.discarded_optical_coherence<=1e-8,
+            "initialDependent":!model.drives.is_empty()||mean.kind!=MeanKind::Unique,
+            "uniquenessScope":match mean.kind{MeanKind::Unique=>"one-dimensional null space within the resolved rates",
+                MeanKind::InitialDependent{..}=>"several conserved quantities: mean of the specified initial density"},
+            "traceError":trace_error,"positivityError":positivity,"hermiticityError":0.,
+            "residual":d.relative_residual,
+            "asymptoticAccuracy":{"requestedTolerance":options.population_tolerance,"estimatedMaximumError":d.estimated_error,
+                "basisEstimate":d.basis_estimate,"haloEstimate":d.halo_estimate,"projectionCharge":d.projection_charge,
+                "minimumEigenvalueBeforeProjection":d.minimum_eigenvalue_before_projection,
+                "traceErrorBeforeProjection":d.trace_error_before_projection,"hermiticityErrorBeforeProjection":d.hermiticity_error,
+                "metric":"max over states, requested F groups and the spectral norm of the density error"},
+            "zeroModeCount":d.zero_modes,"slowestRatePerUs":d.slowest_rate,"nearZeroPolePerUs":d.pole,
+            "meanBasis":d.columns,"meanModes":d.modes,"innerOperatorApplications":d.operator_applications,
+            "meanCheckpoints":checkpoints,"discardedOpticalCoherence":mean.discarded_optical_coherence,
+            "meanTimingMs":{"operators":d.timing[0],"corrections":d.timing[1],"halo":d.timing[2],"degeneracyProbe":d.timing[3]},
+            "uncorrectedPopulations":d.uncorrected_populations,
+            "elapsedMs":started.elapsed().as_secs_f64()*1000.,"constructionMs":request.preparation_ms,
+            "meanMs":d.elapsed_ms,"stationaryOnly":options.steady_only,
+            "frequencyCoordinateSource":"declared-carrier-coordinates","carrierSourceToBasis":request.axes.source_to_basis}}))
+}
+
+/// Status names consumed by the UI. A driven model keeps the long-time
+/// phase-average label; a static model distinguishes a stationary density,
+/// converging populations with a persistent optical coherence (the lab-frame
+/// time average then drops that coherence) and initial-state dependence.
+fn classify(model:&Model,mean:&MeanSolution)->(&'static str,&'static str){
+    if !model.drives.is_empty(){
+        return("initial-dependent-mean",match mean.kind{
+            MeanKind::Unique=>"Converged long-time phase average of the full driven Lindblad equation (one-dimensional null space); populations are a time average, not a time-independent density.",
+            MeanKind::InitialDependent{..}=>"Converged long-time phase average of the specified initial density; several conserved quantities make it initial-state dependent.",
+        });
+    }
+    match mean.kind{
+        MeanKind::Unique if mean.discarded_optical_coherence>1e-8=>("population-stationary","Populations converge in the background basis; exported density is the laboratory-frame time average."),
+        MeanKind::Unique=>("stationary","Unique full-density Lindblad stationary solution within the resolved rates."),
+        MeanKind::InitialDependent{..}=>("nonunique-initial-dependent","Full Lindblad stationary projection from the specified initial density."),
+    }
+}
+
+pub fn solve(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
+    let result=solve_inner(solver,model,options);
+    // Worker requests are serial; the core's single-threaded small BLAS
+    // must not change the preferred policy of a later periodic/steady job.
+    solver.lap.restore_configured_threads()?;
+    result
+}
+
+fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
+    let started=Instant::now();options.validate_population_tolerance()?;
+    if !options.steady_only&&(!options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples)){return Err("Invalid finite population grid".into());}
+    let mut request=prepare(solver,model)?;
+    if options.steady_only{return mean_result(solver,model,options,&mut request,started);}
+    let mean=if options.include_asymptotic{
+        let value=mean_result(solver,model,options,&mut request,started);
+        if let Ok(value)=&value{publish_mean(value.clone());}
+        Some(value)
+    }else{None};
+    let finite_started=Instant::now();
+    let names:Vec<_>=request.groups.iter().map(|g|g.name.clone()).collect();
     let times:Vec<_>=(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect();
     // TEMPORARY development knobs (removed before delivery).
     let knob=|name:&str|std::env::var(name).ok().and_then(|v|v.parse::<f64>().ok());
@@ -76,12 +164,12 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
     if let Some(s)=knob("ATOM_EXP_INNER_STEPS"){finite.inner.maximum_steps=s as usize;}
     if let Some(t)=knob("ATOM_EXP_INNER_TOL"){finite.inner.relative_residual=t;}
     if let Ok(v)=std::env::var("ATOM_EXP_FIXED"){let mut it=v.split(':').map(|x|x.parse::<usize>().unwrap_or(0));finite.fixed=Some((it.next().unwrap_or(1),it.next().unwrap_or(16)));}
-    let preparation=core.preparation_timing();
-    let solution=engine::solve(core,&times,requested_groups,finite)?;
+    let preparation=request.core.preparation_timing();
+    let solution=engine::solve(request.core,&times,request.groups,finite)?;
     let d=&solution.diagnostics;
     let populations:Vec<_>=solution.populations.chunks_exact(32).map(|p|p.to_vec()).collect();
     let trace=populations.iter().map(|p|(p.iter().sum::<f64>()-1.).abs()).fold(0_f64,f64::max);
-    let initial_error=populations[0].iter().zip(initial_populations).map(|(a,b)|(a-b).abs()).fold(0_f64,f64::max);
+    let initial_error=populations[0].iter().zip(&request.initial_populations).map(|(a,b)|(a-b).abs()).fold(0_f64,f64::max);
     if trace>1e-7||initial_error>1e-10{return Err("Returned population probabilities failed fixed trace/initial checks".into());}
     let checkpoints:Vec<_>=d.checkpoints.iter().map(|c|json!({
         "modes":c.modes,"basis":c.columns,"action":c.action,
@@ -95,8 +183,8 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
             "includesProjectionCharge":true,"scope":{"states":32,"samples":options.samples,"groups":names}},
         "diagnostics":{"engine":"rust-population-core","method":"Full32 density-matrix Lindblad evolution with adaptive population refinement",
             "validationKind":"population","traceError":trace,"initialStateError":initial_error,
-            "elapsedMs":started.elapsed().as_secs_f64()*1000.,"constructionMs":preparation_ms,
-            "propagateMs":d.elapsed_ms,"populationTolerance":options.population_tolerance,
+            "elapsedMs":started.elapsed().as_secs_f64()*1000.,"constructionMs":request.preparation_ms,
+            "propagateMs":d.elapsed_ms,"finiteMs":finite_started.elapsed().as_secs_f64()*1000.,"populationTolerance":options.population_tolerance,
             "populationConvergenceEstimate":d.estimated_error,"errorBoundCertified":false,
             "populationProjectionCharge":d.projection_charge,"originalHamiltonianAndCollapseRetained":true,
             "errorControl":d.error_control,"rawPopulationEstimate":d.raw_estimate,"finalModes":d.final_modes,"finalBasis":d.final_columns,
@@ -104,36 +192,29 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
             "peakTrialBytes":d.peak_trial_bytes,"preparationMs":{"gauge":preparation[0],"primitives":preparation[1],"library":preparation[2],"initial":preparation[3],"readoutDuals":preparation[4],"p0":preparation[5]},"timingMs":{"directions":t.directions,"orthogonalize":t.orthogonalize,"images":t.images,"projections":t.projections,"readoutAppend":t.readout_append,"transfer":t.transfer,"reduced":t.reduced,"readoutEvaluate":t.readout_evaluate,"dualPrepare":t.dual_prepare,"basisEstimate":t.basis_estimate,"haloEstimate":t.halo_estimate},"maximumImaginaryPopulation":d.maximum_imaginary_population,
             "historicalAnswerUsed":false,"cached":false,
             "frequencyCoordinateSource":"declared-carrier-coordinates",
-            "carrierSourceToBasis":identity,"finiteCarrierSourceToBasis":identity,"populationCheckpoints":checkpoints,
+            "carrierSourceToBasis":request.axes.source_to_basis,"finiteCarrierSourceToBasis":request.axes.source_to_basis,"populationCheckpoints":checkpoints,
             "asymptoticStatus":"not-requested"}});
-    // Existing stationary/periodic/quasiperiodic qualification remains owned
-    // by the mature steady solver. The normal UI dispatches this in its
-    // independent native lane; this path serves direct combined JSON calls.
-    if options.include_asymptotic {
-        solver.lap.restore_configured_threads()?;
-        let mean_options=Options{steady_only:true,..*options};
-        match full_model_solve(solver,model,&mean_options){
-            Ok(mean)=>{
-                publish_mean(mean.clone());
-                if let Some(fields)=mean.as_object(){
-                    for(key,value)in fields{if key.starts_with("asymptotic"){result[key]=value.clone();}}
-                }
-                let md=&mean["diagnostics"];
-                result["diagnostics"]["stationaryDiagnostics"]=md.clone();
-                for key in ["asymptoticStatus","asymptoticReason","steadyMethod","populationResidual","residual",
-                    "carrierSourceToBasis","frequencyCoordinateSource","frequencyReconstructionErrors","meanDensityFrame","densityLimitExists"]{
-                    if let Some(value)=md.get(key){result["diagnostics"][key]=value.clone();}
-                }
-                result["diagnostics"]["asymptoticTraceError"]=md["traceError"].clone();
-                result["diagnostics"]["asymptoticPositivityError"]=md["positivityError"].clone();
+    match mean{
+        None=>{}
+        Some(Ok(mean))=>{
+            if let Some(fields)=mean.as_object(){
+                for(key,value)in fields{if key.starts_with("asymptotic"){result[key]=value.clone();}}
             }
-            Err(reason)=>{
-                result["asymptoticStatus"]=json!("not-converged");result["asymptoticReason"]=json!(reason);
-                result["diagnostics"]["asymptoticStatus"]=json!("not-converged");
-                result["diagnostics"]["asymptoticReason"]=result["asymptoticReason"].clone();
+            let md=&mean["diagnostics"];
+            result["diagnostics"]["stationaryDiagnostics"]=md.clone();
+            for key in ["asymptoticStatus","asymptoticReason","steadyMethod","residual","asymptoticAccuracy",
+                "meanDensityFrame","densityLimitExists","initialDependent","uniquenessScope"]{
+                if let Some(value)=md.get(key){result["diagnostics"][key]=value.clone();}
             }
+            result["diagnostics"]["asymptoticTraceError"]=md["traceError"].clone();
+            result["diagnostics"]["asymptoticPositivityError"]=md["positivityError"].clone();
+            result["diagnostics"]["stationarySolveMs"]=md["meanMs"].clone();
         }
-        result["diagnostics"]["elapsedMs"]=json!(started.elapsed().as_secs_f64()*1000.);
+        Some(Err(reason))=>{
+            result["asymptoticStatus"]=json!("not-converged");result["asymptoticReason"]=json!(reason);
+            result["diagnostics"]["asymptoticStatus"]=json!("not-converged");
+            result["diagnostics"]["asymptoticReason"]=result["asymptoticReason"].clone();
+        }
     }
     Ok(result)
 }

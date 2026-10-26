@@ -124,6 +124,14 @@ impl PhysicalCoordinates{
         for i in 0..n{for j in 0..n{physical[i*n+j]=mul(mul(state_phases[i],physical[i*n+j]),conj(state_phases[j]));}}
         if physical.iter().any(|z|!z.finite()){return Err("Nonfinite physical reconstruction".into());}Ok(physical)
     }
+    /// One Fourier coefficient of `E x` (row-major, Hilbert frame) in the
+    /// original state basis: the `restore_hilbert` step of `from_envelope_at`,
+    /// without the time-dependent state-gauge phases.
+    pub fn hilbert_to_states(&self,matrix:&[C])->Result<Vec<C>,String>{
+        let n=self.dimension();
+        if matrix.len()!=n*n||matrix.iter().any(|z|!z.finite()){return Err("Expected a finite complete Hilbert-frame matrix".into());}
+        restore_hilbert(&self.lapack,&self.primitives.hilbert.basis_column_major,matrix,n)
+    }
     pub fn field_at(&self,modes:&[Charge],field:&[C],time:f64)->Result<Vec<C>,String>{
         let n=self.dimension();let phases=&self.primitives.hilbert.source.phases;
         mode_set(modes,phases.axes.len())?;if field.len()!=product(&[modes.len(),n,n])?||field.iter().any(|z|!z.finite()){

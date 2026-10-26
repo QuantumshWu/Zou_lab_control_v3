@@ -24,10 +24,9 @@ node('build.mjs');node('build-desktop-native-ui.mjs');verifyUiSourceManifest(joi
 const native=await prepareNativeDependencies();
 const hash=async file=>createHash('sha256').update(await readFile(file)).digest('hex');
 let prepared=false,validOpenblas=false;
-try{const proof=JSON.parse((await readFile(join(native.libDir,'build-provenance.json'),'utf8')).replace(/^\uFEFF/,''));validOpenblas=proof.schema==='atom-native-static-build/1'&&proof.dependencyLockSha256===native.lockSha256&&proof.openblasSha256===await hash(join(native.libDir,'openblas.lib'));prepared=validOpenblas&&proof.superluSha256===await hash(join(native.libDir,'atom_superlu.lib'))
- &&proof.superluSourceManifestSha256===await hash(join(native.superluSource,'source-manifest.json'))&&proof.hooksSha256===await hash(join(native.superluSource,'atom_hooks_static.h'));}catch{}
+try{const proof=JSON.parse((await readFile(join(native.libDir,'build-provenance.json'),'utf8')).replace(/^\uFEFF/,''));validOpenblas=proof.schema==='atom-native-static-build/1'&&proof.dependencyLockSha256===native.lockSha256&&proof.openblasSha256===await hash(join(native.libDir,'openblas.lib'));prepared=validOpenblas;}catch{}
 if(!prepared||process.argv.includes('--rebuild-numerics')){
- run(powershell,[...psArgs,'-File','scripts/build-static-numerics.ps1','-Action',validOpenblas&&!process.argv.includes('--rebuild-numerics')?'superlu':'build']);
+ run(powershell,[...psArgs,'-File','scripts/build-static-numerics.ps1','-Action','build']);
 }
 const uiSource=JSON.parse(await readFile(join(app,'dist/ui-source-manifest.json'),'utf8'));
 execFileSync(powershell,[...psArgs,'-File','scripts/build-desktop-native.ps1','-EmbeddedSolver','-RestoreDependencies'],{cwd:app,stdio:'inherit',windowsHide:true,env:{...process.env,ATOM_V3_SOURCE_ROOT:uiSource.source.repositoryRoot,ATOM_V3_ICON_SOURCE:join(uiSource.source.repositoryRoot,'crates/zlc-desktop/assets/zlc.ico')}});

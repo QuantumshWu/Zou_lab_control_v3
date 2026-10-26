@@ -39,6 +39,8 @@ pub mod engine;
 pub mod slow_dual;
 #[path="error_estimate.rs"]
 pub mod error_estimate;
+#[path="asymptotic.rs"]
+pub mod asymptotic;
 
 /// Arithmetic backend of the pencil kernels. `HybridBlas` multiplies the
 /// coefficient blocks with OpenBLAS ZGEMM; `Csr` runs the same blocked

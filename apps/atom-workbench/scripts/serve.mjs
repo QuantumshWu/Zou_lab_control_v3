@@ -1,6 +1,5 @@
 import {createServer} from 'node:http';
 import {failureRecorder} from './solver-failure-log.mjs';
-import {physicalMeanDensity} from './mean-frame.mjs';
 import {createNativeServiceClass} from './native-service-core.mjs';
 import {readFile,stat} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
@@ -27,7 +26,6 @@ async function buildIdentity(){
   const entries=await Promise.all(files.map(async name=>({name,sha256:hash(await readFile(resolve(root,'js/atom-workbench/src',name)))})));
   entries.push({name:'scripts/serve.mjs',sha256:hash(await readFile(fileURLToPath(import.meta.url)))});
   entries.push({name:'scripts/solver-failure-log.mjs',sha256:hash(await readFile(resolve(app,'scripts/solver-failure-log.mjs')))});
-  entries.push({name:'scripts/mean-frame.mjs',sha256:hash(await readFile(resolve(app,'scripts/mean-frame.mjs')))});
   entries.push({name:'scripts/native-protocol.mjs',sha256:hash(await readFile(resolve(app,'scripts/native-protocol.mjs')))});
   entries.push({name:'scripts/native-service-core.mjs',sha256:hash(await readFile(resolve(app,'scripts/native-service-core.mjs')))});
   entries.push({name:'scripts/native-child-env.mjs',sha256:hash(await readFile(resolve(app,'scripts/native-child-env.mjs')))});
@@ -104,7 +102,7 @@ class NativeLane {
       if(message.progress!==undefined){
         try{
           if(message.progress!=='asymptotic'||!job.onProgress)throw Error('Unexpected native progress message.');
-          const result=physicalMeanDensity(message.result,job.payload.model.frameFrequenciesMHz,job.payload.model.dimension,job.payload.model.frequencyCoordinates);validateAtomicResult(result,job.payload);
+          const result=message.result;validateAtomicResult(result,job.payload);
           job.onProgress({...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:w.identity.sha256,buildSha256:this.owner.build.sha256,asymptoticCacheHit:false}});
         }catch(error){this.failWorker(w,failure(error.message,502,'invalid-native-response'));return;}
         continue;
@@ -114,8 +112,7 @@ class NativeLane {
       else if(!message.result||typeof message.result!=='object')this.owner.finish(job,failure('Missing native result.',502,'invalid-native-response'));
       else {
         try{
-          let result=message.result;
-          result=physicalMeanDensity(result,job.payload.model.frameFrequenciesMHz,job.payload.model.dimension,job.payload.model.frequencyCoordinates);
+          const result=message.result;
           validateAtomicResult(result,job.payload);
           this.owner.finish(job,null,{...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:w.identity.sha256,buildSha256:this.owner.build.sha256,
             asymptoticCacheHit:false}});
@@ -220,7 +217,7 @@ export async function createAtomServer(options={}){
         // Atomic metadata is top-level in the native protocol. Keeping it only
         // inside model would let older serde readers silently ignore the bath.
         const {modelSchema,radiation}=model;
-        const genericModel={dimension:model.dimension,hReal:model.hReal,hImag:model.hImag,collapse:model.collapse,initialIndex:model.initialIndex,timeDependent:model.timeDependent,drives:model.drives,frameFrequenciesMHz:model.frameFrequenciesMHz,frequencyCoordinates:model.frequencyCoordinates};
+        const genericModel={dimension:model.dimension,hReal:model.hReal,hImag:model.hImag,collapse:model.collapse,initialIndex:model.initialIndex,timeDependent:model.timeDependent,drives:model.drives,frequencyCoordinates:model.frequencyCoordinates};
         task=service.submit({model:{...genericModel,states:model.states.map(state=>state.id)},modelSchema,radiation,options:nativeOptions},token,streaming?result=>streamEvent({type:'asymptotic',data:{...result,service:{...result.service,modelBuildMs,modelCacheHit:model.buildCacheHit},request:token,states:model.states,engine:'Rust master equation',assumptions:model.assumptions,decayChannels:model.decayChannels}}):undefined);
         const result=await task.promise;
         if(nativeOptions.includeAsymptotic&&!result.asymptoticPopulations)await recordFailure({time:new Date().toISOString(),request:token,scene:payload.scene,options:nativeOptions,buildSha256:build.sha256,binarySha256:result.service?.binarySha256??configuredBinary.sha256,status:result.asymptoticStatus,diagnostics:result.diagnostics}).catch(()=>{});

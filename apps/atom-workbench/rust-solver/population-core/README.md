@@ -15,7 +15,7 @@ explicitly charged to the same target and do not repair the raw density.
 
 The production worker and embedded standalone application depend on this
 source directory. `static-numerics` must be forwarded by the parent build;
-the existing OpenBLAS/SuperLU archives are linked into the single EXE. Python
+the existing OpenBLAS archive is linked into the single EXE. Python
 and the former research driver are not runtime dependencies.
 
 Unit tests are self-contained. Full32 fixture/performance tests are ignored

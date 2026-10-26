@@ -64,7 +64,9 @@ test('Worker sends the identical complete model, finite jobs to the trajectory l
   for(const sent of requests){
     assert.equal(sent.options.populationTolerance,.003731);
     assert.deepEqual(sent.radiation,model.radiation);assert.equal(sent.modelSchema,model.modelSchema);
-    for(const key of ['dimension','hReal','hImag','collapse','initialIndex','timeDependent','drives','frameFrequenciesMHz','frequencyCoordinates'])assert.deepEqual(sent.model[key],model[key],key);
+    for(const key of ['dimension','hReal','hImag','collapse','initialIndex','timeDependent','drives','frequencyCoordinates'])assert.deepEqual(sent.model[key],model[key],key);
+    // The native solver returns the laboratory-frame mean itself.
+    assert.equal(Object.hasOwn(sent.model,'frameFrequenciesMHz'),false);
     assert.deepEqual(sent.model.states,model.states.map(s=>s.id));
   }
   assert.equal(messages.at(-1).event.data.service.lane,'trajectory');
