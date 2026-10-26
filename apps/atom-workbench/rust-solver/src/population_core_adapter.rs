@@ -16,6 +16,8 @@
 //! - `states` (32 ids), `timesUs`, `populations` (one row per time). A mean
 //!   result has the single t = 0 row, the initial populations; a finite result
 //!   has >= 2 rows and `populationAccuracy`, their estimated error.
+//! - `horizonUs`: the echo of the request's `meanHorizonUs` (us, or null for
+//!   the t -> infinity mean), on every result that carries a mean.
 //! - `asymptoticStatus`. A converged mean (`stationary`, `population-stationary`
 //!   and `initial-dependent` for static models; `time-average` and
 //!   `initial-dependent-time-average` for driven ones) comes with
@@ -122,7 +124,9 @@ fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
 fn mean_result(model:&Model,options:&Options,core:&mut RuntimeCore,request:&Request,dual:Option<&SlowDual>,dual_ms:f64,started:Instant)->Result<Value,String>{
     let lab=LabFrame{frame_indices:request.axes.frame_indices.clone(),
         sectors:request.axes.frame_sectors.iter().map(|&s|if s==0{0}else{1}).collect()};
-    let mean=asymptotic::solve_with(core,&MeanOptions::new(options.population_tolerance,request.groups.clone(),lab),dual)?;
+    let mut mean_options=MeanOptions::new(options.population_tolerance,request.groups.clone(),lab);
+    mean_options.horizon_us=options.mean_horizon_us;
+    let mean=asymptotic::solve_with(core,&mean_options,dual)?;
     let positivity=positivity(core,&mean.density)?;
     let trace_error=(mean.populations.iter().sum::<f64>()-1.).abs();
     let(status,reason)=classify(model,&mean);
@@ -132,7 +136,8 @@ fn mean_result(model:&Model,options:&Options,core:&mut RuntimeCore,request:&Requ
     let checkpoints:Vec<_>=d.checkpoints.iter().map(|c|json!({"basis":c.columns,"modes":c.modes,"pole":c.pole,
         "basisEstimate":c.basis_estimate,"haloEstimate":c.halo_estimate,"haloModes":c.halo_modes.0,"transportHaloModes":c.halo_modes.1,
         "innerResidual":c.inner_residual,"action":c.action})).collect();
-    Ok(json!({"timesUs":[0.],"states":model.states,"populations":rows,
+    let horizon=d.horizon.as_ref();
+    let mut result=json!({"timesUs":[0.],"states":model.states,"populations":rows,"horizonUs":options.mean_horizon_us,
         "asymptoticStatus":status,"asymptoticReason":reason,"asymptoticPopulations":mean.populations,
         "asymptoticDensityReal":mean.density.iter().map(|z|z.re).collect::<Vec<_>>(),
         "asymptoticDensityImag":mean.density.iter().map(|z|z.im).collect::<Vec<_>>(),
@@ -154,7 +159,13 @@ fn mean_result(model:&Model,options:&Options,core:&mut RuntimeCore,request:&Requ
             "discardedOpticalCoherence":mean.discarded_optical_coherence,
             "meanTimingMs":{"operators":d.timing[0],"corrections":d.timing[1],"halo":d.timing[2],"degeneracyProbe":d.timing[3],"slowDual":dual_ms},
             "slowestRelaxationUs":d.slowest_relaxation_us,"conservedQuantities":d.conserved_quantities,
-            "meanMs":d.elapsed_ms,"uncorrectedPopulations":d.uncorrected_populations}}))
+
+            "meanMs":d.elapsed_ms,"uncorrectedPopulations":d.uncorrected_populations}});
+    let extra=json!({"horizonMethod":horizon.map(|h|h.method),"horizonRelaxingBound":horizon.map(|h|h.decaying),
+        "horizonPropagationEstimate":horizon.map(|h|h.propagation_estimate),"horizonProjectionCharge":horizon.map(|h|h.projection_charge),
+        "meanProbeStalled":d.probe_stalled,"limitNote":d.limit_note});
+    if let(Value::Object(target),Value::Object(extra))=(&mut result["diagnostics"],extra){target.extend(extra);}
+    Ok(result)
 }
 
 /// A finite result carries its mean: the `asymptotic*` fields, and every mean
@@ -166,7 +177,7 @@ fn merge_mean(result:&mut Value,mean:Value){
             if let(Value::Object(finite),Value::Object(mean))=(&mut result["diagnostics"],value){
                 for(key,value)in mean{finite.entry(key).or_insert(value);}
             }
-        }else if key.starts_with("asymptotic"){result[key.as_str()]=value;}
+        }else if key.starts_with("asymptotic")||key=="horizonUs"{result[key.as_str()]=value;}
     }
 }
 
@@ -175,7 +186,10 @@ fn merge_mean(result:&mut Value,mean:Value){
 /// converging populations with a persistent optical coherence (the lab-frame
 /// time average then drops that coherence) and initial-state dependence.
 fn classify(model:&Model,mean:&MeanSolution)->(&'static str,&'static str){
+    let horizon=mean.diagnostics.horizon.is_some();
     match(model.drives.is_empty(),&mean.kind){
+        (false,MeanKind::InitialDependent{..}) if horizon=>("initial-dependent-time-average","Long-time phase average at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent."),
+        (true,MeanKind::InitialDependent{..}) if horizon=>("initial-dependent","Lindblad mean at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent."),
         (false,MeanKind::Unique)=>("time-average","Converged long-time phase average of the full driven Lindblad equation (unique limit: only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time); populations are a time average, not a time-independent density."),
         (false,MeanKind::InitialDependent{..})=>("initial-dependent-time-average","Converged long-time phase average of the specified initial density; several conserved quantities make it initial-state dependent."),
         (true,MeanKind::Unique) if mean.discarded_optical_coherence>1e-8=>("population-stationary","Populations converge in the background basis; exported density is the laboratory-frame time average."),
@@ -200,6 +214,7 @@ impl Drop for SetOnExit<'_>{
 pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))->Result<Value,String>{
     let started=Instant::now();options.validate_population_tolerance()?;
     if !options.steady_only&&(!options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples)){return Err("Invalid finite population grid".into());}
+    if options.mean_horizon_us.is_some_and(|h|!(h.is_finite()&&h>0.)){return Err("meanHorizonUs must be a finite positive time in us, or null".into());}
     let(mut core,request)=prepare(model)?;
     if options.steady_only{
         let clock=Instant::now();
@@ -252,14 +267,14 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
             "method":FINITE_METHOD,"propagateMs":d.elapsed_ms,
             "errorControl":d.error_control,"rawPopulationEstimate":d.raw_estimate,
             "estimateMargin":d.estimate_margin,"boundedResonantComponents":d.bounded_resonant_components,"finalModes":d.final_modes,"finalBasis":d.final_columns,
-            "imageColumns":d.image_columns,"peakTrialBytes":d.peak_trial_bytes,
+            "imageColumns":d.image_columns,"peakTrialBytes":d.peak_trial_bytes,"reflectedRitzModes":d.reflected_ritz_modes,
             "preparationMs":{"gauge":preparation[0],"primitives":preparation[1],"library":preparation[2],"initial":preparation[3],"readoutDuals":preparation[4],"p0":preparation[5]},
             "timingMs":{"directions":t.directions,"orthogonalize":t.orthogonalize,"images":t.images,"projections":t.projections,"readoutAppend":t.readout_append,"transfer":t.transfer,"reduced":t.reduced,"readoutEvaluate":t.readout_evaluate,"dualPrepare":dual_ms.unwrap_or(t.dual_prepare),"dualWait":t.dual_wait,"basisEstimate":t.basis_estimate,"haloEstimate":t.halo_estimate},
             "maximumImaginaryPopulation":d.maximum_imaginary_population,"populationCheckpoints":checkpoints}});
     match mean{
         None=>{}
         Some(Ok(mean))=>merge_mean(&mut result,mean),
-        Some(Err(reason))=>{result["asymptoticStatus"]=json!("not-converged");result["asymptoticReason"]=json!(reason);}
+        Some(Err(reason))=>{result["asymptoticStatus"]=json!("not-converged");result["asymptoticReason"]=json!(reason);result["horizonUs"]=json!(options.mean_horizon_us);}
     }
     Ok(result)
 }

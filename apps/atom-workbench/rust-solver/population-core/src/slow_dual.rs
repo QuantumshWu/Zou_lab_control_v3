@@ -1972,6 +1972,47 @@ impl SlowDual {
         }
         SlowSpectrum { conserved, slowest_rate: slowest, floor }
     }
+    /// Bound per state on the population an initial central ground block
+    /// `ground` (frame entries, g x g) still carries at the horizon `T` (us)
+    /// in the slow generator's non-conserved modes: the sum over modes `k`
+    /// and readout groups `nu` of `|(R V)_k c_k| exp(f Re(alpha_k + i nu) T)`
+    /// with every decay rate taken at the fraction `f` (a margin for the
+    /// reduction), over the terms that do not average out
+    /// (`|Im(alpha_k) + nu| T <= 1`), divided by the trace the readout gives
+    /// the initial block (its slaved part adds to it).
+    pub(crate) fn horizon_bound(&self, ground: &Dense, horizon: f64, fraction: f64) -> Result<Vec<f64>, String> {
+        if !(horizon.is_finite() && horizon > 0.) {
+            return Err("The observation horizon must be a finite positive time".into());
+        }
+        let modal = self.to_modal(0, ground)?;
+        let floor = self.slow_spectrum().floor;
+        let n = self.n;
+        let mut bound = vec![0.; n];
+        let mut trace = 0.;
+        for (nu, readout) in &self.readout {
+            for (k, &alpha) in self.eigenvalues.iter().enumerate() {
+                let c = modal.data[k];
+                if cabs(c) == 0. {
+                    continue;
+                }
+                let total = cadd(alpha, complex(0., *nu));
+                for s in 0..readout.rows.min(n) {
+                    trace += cmul(readout.at(s, k), c).re;
+                }
+                if cabs(total) <= floor || total.im.abs() * horizon > 1. {
+                    continue;
+                }
+                let weight = (fraction * total.re * horizon).exp();
+                for (s, entry) in bound.iter_mut().enumerate().take(readout.rows.min(n)) {
+                    *entry += cabs(cmul(readout.at(s, k), c)) * weight;
+                }
+            }
+        }
+        if !(trace.is_finite() && trace > 0.5) || bound.iter().any(|x| !x.is_finite()) {
+            return Err(format!("The slow generator reads the initial state with trace {trace:e}; the tolerance was not relaxed"));
+        }
+        Ok(bound.into_iter().map(|x| x / trace).collect())
+    }
     pub fn belongs_to(&self, prepared: &OwnedPrepared) -> bool { Arc::ptr_eq(&self.owner, &prepared.primitives) }
     pub fn dimension(&self) -> usize { self.generator.rows }
     pub(crate) fn ground_entries(&self) -> usize { self.g * self.g }
