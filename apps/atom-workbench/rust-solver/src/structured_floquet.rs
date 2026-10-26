@@ -101,7 +101,6 @@ impl Prepared{
         Ok(Self{physical,layout,dimension,chunks,rotations,neighbors,needs,transpose_needs,workspace:RefCell::new(workspace)})
     }
     pub fn selected_dimension(&self)->usize{self.layout.indices.len()}
-    pub fn extended_dimension(&self)->usize{self.layout.weights.len()}
 
     fn shifted_side(&self,x:&[f64],out:&mut[f64],shift:f64)->Result<(),String>{
         let d=self.dimension;let mut workspace=self.workspace.borrow_mut();
@@ -191,10 +190,7 @@ impl Prepared{
     /// which the GMRES and mandatory explicit-original residual gates reject;
     /// no incomplete or reduced physical product is substituted on failure.
     pub fn product_shifted(&self,x:&[f64],shift:f64,external_frequency:Option<f64>)->Vec<f64>{
-        self.try_product_shifted(x,shift,external_frequency).unwrap_or_else(|error|{
-            if std::env::var_os("ATOM_SOLVER_DEBUG").is_some(){eprintln!("Structured Fourier product rejected: {error}");}
-            vec![f64::NAN;x.len()]
-        })
+        self.try_product_shifted(x,shift,external_frequency).unwrap_or_else(|_|vec![f64::NAN;x.len()])
     }
 
     /// Euclidean transpose of the SAME original weighted shifted operator.
@@ -216,9 +212,6 @@ impl Prepared{
     /// Transpose callback adapter with the same explicit-residual fallback
     /// contract as product_shifted; no forward substitute is used on error.
     pub fn product_shifted_transpose(&self,x:&[f64],shift:f64,external_frequency:Option<f64>)->Vec<f64>{
-        self.try_product_shifted_transpose(x,shift,external_frequency).unwrap_or_else(|error|{
-            if std::env::var_os("ATOM_SOLVER_DEBUG").is_some(){eprintln!("Structured Fourier transpose product rejected: {error}");}
-            vec![f64::NAN;x.len()]
-        })
+        self.try_product_shifted_transpose(x,shift,external_frequency).unwrap_or_else(|_|vec![f64::NAN;x.len()])
     }
 }

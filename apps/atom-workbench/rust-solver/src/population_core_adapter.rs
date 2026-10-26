@@ -12,9 +12,8 @@ use atom_population_core::owned_prepared::population_control::RequestedGroup;
 use atom_population_core::owned_prepared::finite_driver::{self,FiniteOptions};
 
 pub fn supports(model:&Model,options:&Options)->bool {
-    !options.steady_only&&!options.return_density&&model.dimension==32
+    !options.steady_only&&model.dimension==32
         &&model.states.len()==32&&model.frequency_coordinates.is_some()
-        &&std::env::var("ATOM_POPULATION_CORE").as_deref()!=Ok("0")
 }
 
 fn groups(model:&Model)->Result<(Vec<bool>,Vec<RequestedGroup>),String>{
@@ -43,7 +42,6 @@ pub fn solve(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,Str
 
 fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
     let started=Instant::now();options.validate_population_tolerance()?;
-    if options.return_density{return Err("Population-only output must not be paired with an unqualified raw density".into());}
     if !options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples){return Err("Invalid finite population grid".into());}
     let(ground,requested_groups)=groups(model)?;
     let names:Vec<_>=requested_groups.iter().map(|g|g.name.clone()).collect();
@@ -105,7 +103,7 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
     // independent native lane; this path serves direct combined JSON calls.
     if options.include_asymptotic {
         solver.lap.restore_configured_threads()?;
-        let mean_options=Options{steady_only:true,return_density:false,..*options};
+        let mean_options=Options{steady_only:true,..*options};
         match full_model_solve(solver,model,&mean_options){
             Ok(mean)=>{
                 publish_mean(mean.clone());

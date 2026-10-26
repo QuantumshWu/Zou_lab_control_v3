@@ -39,7 +39,7 @@ settings.populationTolerance=resolvePopulationTolerance(settings.populationToler
 const baseEnv={...process.env};
 // Use the release defaults, not inherited research experiment switches.
 for(const key of Object.keys(baseEnv))if(key.toUpperCase().startsWith('ATOM_'))delete baseEnv[key];
-Object.assign(baseEnv,DESKTOP_SOLVER_DEFAULTS,{ATOM_POPULATION_CORE:'1'});
+Object.assign(baseEnv,DESKTOP_SOLVER_DEFAULTS);
 const report={status:'starting',executable:exe,binarySha256,bytes:binary.length,windowOpened:false,
   scope:'Candidate EXE/backend-info plus normal Worker/IPC/JSONL and current-model mean merge; no independent physics oracle',
   requestSource:option('--request')?resolve(option('--request')):'Generated single-near-laser smoke fixture',
@@ -100,12 +100,12 @@ try{
   });
   await worker.receive({kind:'native',event:{kind:'configuration',binarySha256,
     buildSha256:sha(JSON.stringify(report.backendInfo.numericSource)),defaults:DESKTOP_SOLVER_DEFAULTS}});
-  const finite=await request('finite',{...settings,steadyOnly:false,includeAsymptotic:false,returnDensity:false});
+  const finite=await request('finite',{...settings,steadyOnly:false,includeAsymptotic:false});
   const finiteParsed=normalizeDynamicsResult(finite,scene,settings.initialStateId);
   assert.equal(finite.diagnostics.validationKind,'population');
   assert.equal(finiteParsed.populationAccuracy.requestedTolerance,settings.populationTolerance);
   assert.equal(finiteParsed.timesUs.length,settings.samples);assert.equal(finiteParsed.timesUs.at(-1),settings.durationUs);
-  const mean=await request('mean',{...settings,steadyOnly:true,includeAsymptotic:true,returnDensity:false});
+  const mean=await request('mean',{...settings,steadyOnly:true,includeAsymptotic:true});
   const meanParsed=normalizeDynamicsResult(mean,scene,settings.initialStateId);
   assert.equal(meanParsed.steady.converged,true,'Smoke mean must be qualified, never the finite endpoint');
   assert.equal(report.workerRequests.length,2);

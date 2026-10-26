@@ -2,14 +2,13 @@
 //! real sparse operator. This adapter performs no further scaling, truncation,
 //! or iterative refinement. The caller retains its original operator and must
 //! validate every accepted linear solve with that operator's residual.
-use std::{cell::Cell,ffi::{c_char,c_void},path::{Path,PathBuf},ptr::NonNull,time::Instant};
+use std::{cell::Cell,ffi::{c_char,c_void},path::{Path,PathBuf},ptr::NonNull};
 
 const ABI_VERSION:i32=1;
 const ERROR_CAPACITY:usize=2048;
 const PIVOT_THRESHOLD:f64=0.1; // Same as the measured SciPy spilu pilot.
 type Create=unsafe extern "C" fn(i32,i32,*const i32,*const i32,*const f64,f64,f64,f64,*mut *mut c_void,*mut c_char,usize)->i32;
 type Solve=unsafe extern "C" fn(*mut c_void,i32,i32,*mut f64,i32,*mut c_char,usize)->i32;
-type FactorNnz=unsafe extern "C" fn(*const c_void)->u64;
 type Destroy=unsafe extern "C" fn(*mut c_void);
 type AbiVersion=unsafe extern "C" fn()->i32;
 
@@ -66,17 +65,16 @@ impl Drop for Library{
 extern "C"{
     fn atom_superlu_factor(n:i32,nnz:i32,colptr:*const i32,rowind:*const i32,values:*const f64,drop:f64,fill:f64,pivot:f64,out:*mut *mut c_void,error:*mut c_char,capacity:usize)->i32;
     fn atom_superlu_solve(handle:*mut c_void,transpose:i32,nrhs:i32,b:*mut f64,ld:i32,error:*mut c_char,capacity:usize)->i32;
-    fn atom_superlu_factor_nnz(handle:*const c_void)->u64;
     fn atom_superlu_destroy(handle:*mut c_void);
     fn atom_superlu_abi_version()->i32;
 }
-struct Api{_library:Option<Library>,create:Create,solve:Solve,nnz:FactorNnz,destroy:Destroy}
+struct Api{_library:Option<Library>,create:Create,solve:Solve,destroy:Destroy}
 impl Api{
     #[cfg(feature="static-numerics")]
     fn load(_path:&Path)->Result<Self,String>{
         let actual=unsafe{atom_superlu_abi_version()};
         if actual!=ABI_VERSION{return Err(format!("Static SuperLU ABI mismatch: expected {ABI_VERSION}, received {actual}"));}
-        Ok(Self{_library:None,create:atom_superlu_factor,solve:atom_superlu_solve,nnz:atom_superlu_factor_nnz,destroy:atom_superlu_destroy})
+        Ok(Self{_library:None,create:atom_superlu_factor,solve:atom_superlu_solve,destroy:atom_superlu_destroy})
     }
     #[cfg(not(feature="static-numerics"))]
     fn load(path:&Path)->Result<Self,String>{
@@ -87,9 +85,8 @@ impl Api{
             if actual!=ABI_VERSION{return Err(format!("Native SuperLU ABI mismatch: expected {ABI_VERSION}, received {actual}"));}
             let create=library.symbol(b"atom_superlu_factor\0")?;
             let solve=library.symbol(b"atom_superlu_solve\0")?;
-            let nnz=library.symbol(b"atom_superlu_factor_nnz\0")?;
             let destroy=library.symbol(b"atom_superlu_destroy\0")?;
-            Ok(Self{_library:Some(library),create,solve,nnz,destroy})
+            Ok(Self{_library:Some(library),create,solve,destroy})
         }
     }
 }
@@ -123,29 +120,17 @@ fn bridge_error(operation:&str,status:i32,buffer:&[u8])->String{
     let detail=String::from_utf8_lossy(&buffer[..length]);
     if detail.is_empty(){format!("Native SuperLU {operation} failed with status {status}")}else{format!("Native SuperLU {operation} failed with status {status}: {detail}")}
 }
-fn millis(start:Instant)->f64{start.elapsed().as_secs_f64()*1000.}
 
-#[derive(Clone,Debug,serde::Serialize)]
-#[serde(rename_all="camelCase")]
-pub struct Diagnostics{
-    pub dimension:usize,pub matrix_nnz:usize,pub factor_nnz:u64,
-    pub drop_tolerance:f64,pub fill_factor:f64,pub pivot_threshold:f64,
-    pub setup_ms:f64,pub csc_ms:f64,pub load_ms:f64,pub factor_ms:f64,
-    pub solve_ms:f64,pub solve_calls:u64,pub transpose_solve_calls:u64,pub solve_failures:u64,
-    pub dll_path:String,
-}
 pub struct Factor{
-    api:Api,handle:NonNull<c_void>,n:usize,valid:Cell<bool>,base:Diagnostics,
-    solve_ms:Cell<f64>,solve_calls:Cell<u64>,transpose_solve_calls:Cell<u64>,solve_failures:Cell<u64>,
+    api:Api,handle:NonNull<c_void>,n:usize,valid:Cell<bool>,
 }
 impl Factor{
     /// Input is the caller's ALREADY row-equilibrated real CSC matrix. All
     /// supplied entries are passed unchanged; this wrapper neither rebalances
     /// the matrix nor scales RHS/solutions a second time.
     pub fn new(matrix:&[Vec<(usize,f64)>],drop_tolerance:f64,fill_factor:f64)->Result<Self,String>{
-        let setup_started=Instant::now();
         if !drop_tolerance.is_finite()||drop_tolerance<0.||!fill_factor.is_finite()||fill_factor<1.{return Err("Invalid native SuperLU drop tolerance or fill factor".into());}
-        let started=Instant::now();let sparse=csc(matrix)?;let csc_ms=millis(started);
+        let sparse=csc(matrix)?;
         #[cfg(feature="static-numerics")]
         let path=PathBuf::from("static-linked-superlu");
         #[cfg(not(feature="static-numerics"))]
@@ -154,11 +139,9 @@ impl Factor{
             Some(_)=>return Err("ATOM_SUPERLU_DLL must not be empty".into()),
             None=>std::env::current_exe().map_err(|e|format!("Cannot locate native SuperLU beside executable: {e}"))?.with_file_name("atom_superlu.dll"),
         };
-        let started=Instant::now();let api=Api::load(&path)?;let load_ms=millis(started);
+        let api=Api::load(&path)?;
         let mut handle=std::ptr::null_mut();let mut error=[0u8;ERROR_CAPACITY];
-        let started=Instant::now();
         let status=unsafe{(api.create)(sparse.n,sparse.nnz,sparse.pointers.as_ptr(),sparse.rows.as_ptr(),sparse.values.as_ptr(),drop_tolerance,fill_factor,PIVOT_THRESHOLD,&mut handle,error.as_mut_ptr().cast(),error.len())};
-        let factor_ms=millis(started);
         if status!=0{
             // ABI promises NULL on failure; release a defensive non-NULL
             // result too, while the owning DLL is still loaded.
@@ -166,10 +149,7 @@ impl Factor{
             return Err(bridge_error("factorization",status,&error));
         }
         let handle=NonNull::new(handle).ok_or("Native SuperLU returned success with a null factor")?;
-        let factor_nnz=unsafe{(api.nnz)(handle.as_ptr())};
-        let base=Diagnostics{dimension:matrix.len(),matrix_nnz:sparse.nnz as usize,factor_nnz,drop_tolerance,fill_factor,pivot_threshold:PIVOT_THRESHOLD,
-            setup_ms:millis(setup_started),csc_ms,load_ms,factor_ms,solve_ms:0.,solve_calls:0,transpose_solve_calls:0,solve_failures:0,dll_path:path.to_string_lossy().into_owned()};
-        Ok(Self{api,handle,n:matrix.len(),valid:Cell::new(true),base,solve_ms:Cell::new(0.),solve_calls:Cell::new(0),transpose_solve_calls:Cell::new(0),solve_failures:Cell::new(0)})
+        Ok(Self{api,handle,n:matrix.len(),valid:Cell::new(true)})
     }
     /// Apply the ILUTP factors or their exact transpose. This is only a
     /// preconditioner application; accuracy is decided by the outer solver's
@@ -177,20 +157,14 @@ impl Factor{
     pub fn solve(&self,rhs:&[f64],transpose:bool)->Result<Vec<f64>,String>{
         if !self.valid.get(){return Err("Native SuperLU factor was invalidated by an earlier native solve failure".into());}
         if rhs.len()!=self.n||rhs.iter().any(|v|!v.is_finite()){return Err("Invalid native SuperLU RHS dimension or value".into());}
-        let started=Instant::now();let mut result=reserve(self.n)?;result.extend_from_slice(rhs);
+        let mut result=reserve(self.n)?;result.extend_from_slice(rhs);
         let mut error=[0u8;ERROR_CAPACITY];
         let status=unsafe{(self.api.solve)(self.handle.as_ptr(),i32::from(transpose),1,result.as_mut_ptr(),self.n as i32,error.as_mut_ptr().cast(),error.len())};
-        self.solve_ms.set(self.solve_ms.get()+millis(started));self.solve_calls.set(self.solve_calls.get()+1);
-        if transpose{self.transpose_solve_calls.set(self.transpose_solve_calls.get()+1);}
         if status!=0||result.iter().any(|v|!v.is_finite()){
-            self.valid.set(false);self.solve_failures.set(self.solve_failures.get()+1);
+            self.valid.set(false);
             return Err(if status!=0{bridge_error("transpose/forward triangular solve",status,&error)}else{"Native SuperLU solve produced a non-finite result".into()});
         }
         Ok(result)
-    }
-    pub fn diagnostics(&self)->Diagnostics{
-        let mut result=self.base.clone();result.solve_ms=self.solve_ms.get();result.solve_calls=self.solve_calls.get();
-        result.transpose_solve_calls=self.transpose_solve_calls.get();result.solve_failures=self.solve_failures.get();result
     }
 }
 impl Drop for Factor{
@@ -218,7 +192,6 @@ mod tests{
                 let expected=lap.solve(&operator,&rhs,3).unwrap();
                 assert!(actual.iter().zip(expected).all(|(a,b)|(a-b).abs()<2e-12));
             }}
-            let report=factor.diagnostics();assert_eq!(report.solve_calls,4);assert_eq!(report.transpose_solve_calls,2);
         }
     }
     #[test]

@@ -908,7 +908,7 @@ fn block_stationary_solve(
     omega: f64,
     require_condition: bool,
     products:Option<(crate::block_solve::RawProduct,crate::block_solve::RawProduct)>,
-    reuse_layout:Option<RefinementLayout>,
+    layout:RefinementLayout,
 ) -> Result<StationaryLinearSolution, String> {
     let started = Instant::now();
     let mut a = vec![Vec::new(); n];
@@ -916,19 +916,19 @@ fn block_stationary_solve(
         a[j].push((i, v));
     }
     compress(&mut a);
-    let extended=reuse_layout.as_ref().and_then(|layout|MEAN_REFINEMENT_PRECONDITIONER.with(|cache|{
+    let extended=MEAN_REFINEMENT_PRECONDITIONER.with(|cache|{
         let entry=cache.borrow();let previous=entry.as_ref()?;
         let attempt=(||{
             if layout.coordinates.get(trace)!=Some(&previous.trace){return Err("Stationary normalization row changed".into());}
-            let embedding=refinement_embedding(&previous.layout,layout)?;
+            let embedding=refinement_embedding(&previous.layout,&layout)?;
             let factor=previous.prepared.raw_preconditioner().ok_or("Previous stationary factor is unavailable or retired")?;
             crate::block_solve::Prepared::extend_raw(lap,&a,&previous.matrix,factor,&embedding,0.02*omega)
         })();
         match attempt{
-            Ok(prepared)=>{if std::env::var_os("ATOM_SOLVER_DEBUG").is_some(){eprintln!("Stationary ILUTP extension {} -> {n} coordinates (same normalization row)",previous.matrix.len());}Some(prepared)},
-            Err(error)=>{if std::env::var_os("ATOM_SOLVER_DEBUG").is_some(){eprintln!("Stationary ILUTP extension unavailable: {error}");}None},
+            Ok(prepared)=>Some(prepared),
+            Err(_)=>None,
         }
-    }));
+    });
     let prepared=if let Some(prepared)=extended{prepared}else{crate::block_solve::Prepared::new(lap, &a, central, 0.02 * omega)?};
     let prepared=std::rc::Rc::new(if let Some((forward,transpose))=products{
         prepared.with_raw_product(forward).with_raw_transpose(transpose)
@@ -941,12 +941,12 @@ fn block_stationary_solve(
     let mut rhs = vec![0.; n];
     rhs[trace] = 1.;
     let values = prepared.solve(lap, &rhs)?;
-    if let Some(layout)=reuse_layout{if prepared.raw_preconditioner().is_some(){
+    if prepared.raw_preconditioner().is_some(){
         let trace=layout.coordinates.get(trace).ok_or("Stationary normalization coordinate is missing")?.clone();
         MEAN_REFINEMENT_PRECONDITIONER.with(|cache|*cache.borrow_mut()=Some(ReusableStationary{
             layout,trace,matrix:a,prepared:std::rc::Rc::clone(&prepared),
         }));
-    }}
+    }
     Ok(StationaryLinearSolution {
         values,
         condition,
@@ -1257,17 +1257,10 @@ fn stationary_candidate(
                 .copied()
                 .fold(f64::INFINITY, f64::min),
             require_condition,
-            if std::env::var("ATOM_STRUCTURED_MEAN_PRODUCT").is_ok_and(|value|value=="1"){
-                match structured_stationary_products(model,&extended,&inds,trace){
-                    Ok(products)=>Some(products),
-                    Err(error)=>{if std::env::var_os("ATOM_SOLVER_DEBUG").is_some(){eprintln!("Structured stationary products unavailable: {error}");}None},
-                }
-            }else{None},
-            if std::env::var("ATOM_REUSE_MEAN_ILUTP").is_ok_and(|value|value=="1"){
-                Some(refinement_layout(&extended,&inds,&vec![1.;extended.matrix.len()])?)
-            }else{None},
+            structured_stationary_products(model,&extended,&inds,trace).ok(),
+            refinement_layout(&extended,&inds,&vec![1.;extended.matrix.len()])?,
         )
-        .map_err(|error| {if std::env::var_os("ATOM_SOLVER_DEBUG").is_some(){eprintln!("Stationary K={order} block fallback: {error}");}error}).ok();
+        .ok();
     let (linear, symbolic_cached) = if let Some(result) = quick {
         timings.insert("blockIterative".into(), json!(true));
         (result, false)
@@ -1529,19 +1522,17 @@ fn refine_stationary_candidate(lap:&Lapack,model:&Model,g:&Generator,current:&mu
         let central:Vec<_>=indices.iter().enumerate().filter_map(|(i,&global)|(global<current.extended.physical_dimension).then_some(i)).collect();
         let omega=current.extended.frequency_basis.frequencies.iter().copied().fold(f64::INFINITY,f64::min);
         let prepared=crate::block_solve::Prepared::new(lap,&a,&central,0.02*omega)?;
-        let prepared=if std::env::var("ATOM_STRUCTURED_MEAN_PRODUCT").is_ok_and(|value|value=="1"){
-            let(forward,transpose)=structured_stationary_products(model,&current.extended,&indices,trace)?;
-            prepared.with_raw_product(forward).with_raw_transpose(transpose)
-        }else{prepared};
+        let(forward,transpose)=structured_stationary_products(model,&current.extended,&indices,trace)?;
+        let prepared=prepared.with_raw_product(forward).with_raw_transpose(transpose);
         std::rc::Rc::new(prepared)
     };
     let mut rhs=vec![0.;n];rhs[trace]=1.;let mut values:Vec<_>=indices.iter().map(|&i|current.coefficients[i]).collect();
     current.pending_condition=Some(std::rc::Rc::clone(&prepared));current.prepared=Some(std::rc::Rc::clone(&prepared));current.condition=f64::NAN;current.proof_cached=false;
     for round in 0..2{
         if round==1&&prepared.is_harmonic_extension()&&!prepared.has_fresh_native(){
-            if let Err(error)=prepared.refresh_native_for_refinement(){
-                if std::env::var_os("ATOM_SOLVER_DEBUG").is_some(){eprintln!("Stationary K={order} fresh refinement factor unavailable; retry original equation with existing factor: {error}");}
-            }
+            // An unavailable fresh factor retries the original equation with
+            // the existing factor.
+            let _=prepared.refresh_native_for_refinement();
         }
         let(before,after)=stationary_raw_correction(lap,&prepared,&a,&rhs,&mut values)
             .map_err(|error|format!("Stationary K={order} same-order residual correction {} failed: {error}",round+1))?;
@@ -1549,7 +1540,6 @@ fn refine_stationary_candidate(lap:&Lapack,model:&Model,g:&Generator,current:&mu
         refresh_stationary_checks(lap,model,g,current)?;
         records.push(json!({"round":round+1,"normalizedRawBefore":before,"normalizedRawAfter":after,"physicalRawResidual":current.residual,
             "traceError":current.trace_error,"positivityError":current.positivity_error,"boundaryForcingMax":current.boundary_residual,"freshNative":prepared.has_fresh_native()}));
-        if std::env::var_os("ATOM_SOLVER_DEBUG").is_some(){eprintln!("Stationary K={order} residual correction {}: normalized {before:e}->{after:e}, raw={:e}, trace={:e}, PSD={:e}, boundary={:e}",round+1,current.residual,current.trace_error,current.positivity_error,current.boundary_residual);}
         // A finite Fourier truncation need not be positive. Once raw/trace
         // accuracy passes, a PSD-only failure belongs to harmonic refinement,
         // not another linear correction or a new factorization.
