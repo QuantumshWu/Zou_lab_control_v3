@@ -22,12 +22,15 @@ const DOMAIN_STEP_FLOOR:f64=1e-4;
 /// modes the transformed pencil couples significantly to it (`domain`).
 pub struct FourierSteps{pub axes:usize,pub all:Vec<Charge>,pub domain:Vec<Charge>}
 
+/// The prepared operators, initial point and readout duals are immutable and
+/// shared by every `fork`; the P0 factor caches its shift factors per core.
 pub struct RuntimeCore{
-    owned:OwnedPrepared,
+    owned:Arc<OwnedPrepared>,
     physical:PhysicalCoordinates,
-    initial:InitialCoordinates,
+    initial:Arc<InitialCoordinates>,
     observer:Arc<PopulationObservation>,
     p0:RequestP0,
+    p0_policy:P0Policy,
     timing:[f64;6],
 }
 
@@ -42,7 +45,19 @@ impl RuntimeCore{
         let p0=owned.prepare_p0(p0_policy)?;
         let p0_ms=clock.elapsed().as_secs_f64()*1000.;
         let [gauge,primitives,library]=owned.timing;
-        Ok(Self{owned,physical,initial,observer,p0,timing:[gauge,primitives,library,initial_ms,observer_ms,p0_ms]})
+        Ok(Self{owned:Arc::new(owned),physical,initial:Arc::new(initial),observer,p0,p0_policy,
+            timing:[gauge,primitives,library,initial_ms,observer_ms,p0_ms]})
+    }
+    /// A second core of the same request: it shares the prepared operators,
+    /// the initial point and the readout duals, and has its own P0 factor
+    /// (trial spaces add shift factors to it), so two solves of one request
+    /// can run concurrently. Costs one P0 preparation.
+    pub fn fork(&self)->Result<Self,String>{
+        let clock=Instant::now();
+        let p0=self.owned.prepare_p0(self.p0_policy)?;
+        let mut timing=self.timing;timing[5]=clock.elapsed().as_secs_f64()*1000.;
+        Ok(Self{owned:Arc::clone(&self.owned),physical:self.owned.physical_coordinates(),initial:Arc::clone(&self.initial),
+            observer:Arc::clone(&self.observer),p0,p0_policy:self.p0_policy,timing})
     }
     /// Milliseconds: gauge/source, S/K primitives, operator library, initial
     /// point, readout duals, P0 factor.

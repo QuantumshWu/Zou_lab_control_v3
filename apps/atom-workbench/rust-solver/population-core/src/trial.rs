@@ -251,6 +251,17 @@ fn ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.
 }
 
+impl SpaceTiming {
+    /// Adds the times of an earlier (retired) space.
+    pub fn absorb(&mut self, earlier: &SpaceTiming) {
+        self.orthogonalize_ms += earlier.orthogonalize_ms;
+        self.images_ms += earlier.images_ms;
+        self.projections_ms += earlier.projections_ms;
+        self.readout_ms += earlier.readout_ms;
+        self.transfer_ms += earlier.transfer_ms;
+    }
+}
+
 impl TrialSpace {
     /// New trial space on `modes` whose first column is the initial state.
     pub fn new(core: &mut RuntimeCore, modes: &[Charge], poles: &[f64]) -> Result<Self, String> {

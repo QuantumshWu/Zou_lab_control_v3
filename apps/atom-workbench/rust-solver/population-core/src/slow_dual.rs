@@ -1395,6 +1395,9 @@ pub struct SlowDualDiagnostics {
     /// Which eigen-decomposition attempt resolved `J_eff` (see `robust_eigen`).
     pub generator_eigen_method: &'static str,
     pub generator_spectral_abscissa: f64,
+    /// Norm of the central-trace row `l J_eff` removed to keep the trace
+    /// exactly conserved (rad/us; roundoff with one slot).
+    pub trace_leak: f64,
     /// Eigenvector condition of the dressed no-jump frame (None: unavailable).
     pub dressed_condition: Option<f64>,
     pub preparation_ms: f64,
@@ -1800,6 +1803,33 @@ impl SlowDual {
         if !generator.is_finite() {
             return Err("Nonfinite slow generator".into());
         }
+        // Exact trace conservation. The central ground trace `l` is a left
+        // null vector of the Schur complement with one slot (measured 3e-9 of
+        // ||J||); with several slots the per-column expansion points leave a
+        // row `r = l J` (measured 0.04 rad/us from the central columns and
+        // 0.67 from the hyperfine slots with a tweezer and three lasers),
+        // which made the trace decay and every slower mode count as
+        // conserved. `r` is removed by the rank-one update `J - u r` with
+        // `u` the uniform central ground population (`l u = 1`); the removed
+        // size is reported (`trace_leak`).
+        let trace_leak = {
+            let mut row = vec![ZERO; dim];
+            for (j, entry) in row.iter_mut().enumerate() {
+                for a in 0..g {
+                    *entry = cadd(*entry, generator.at(a * g + a, j));
+                }
+            }
+            let leak = row.iter().fold(0_f64, |s, z| s.hypot(cabs(*z)));
+            if leak > 1e3 * f64::EPSILON * generator.frobenius() {
+                let share = 1. / g as f64;
+                for (j, &value) in row.iter().enumerate() {
+                    for a in 0..g {
+                        generator.add_at(a * g + a, j, cscale(value, -share));
+                    }
+                }
+            }
+            leak
+        };
         let unrepresented_rate = unrepresented_coupling.values().map(|k| k.frobenius().powi(2)).sum::<f64>().sqrt();
         if !unrepresented_rate.is_finite() {
             return Err("Nonfinite coupling into the unrepresented slow charges".into());
@@ -1879,6 +1909,7 @@ impl SlowDual {
             generator_reconstruction_relative: reconstruction,
             generator_eigen_method,
             generator_spectral_abscissa: spectral_abscissa,
+            trace_leak,
             dressed_condition: dressed.as_ref().map(|d| d.condition),
             preparation_ms: began.elapsed().as_secs_f64() * 1000.,
         };
@@ -1971,6 +2002,47 @@ impl SlowDual {
             }
         }
         SlowSpectrum { conserved, slowest_rate: slowest, floor }
+    }
+    /// Bound per state on the population an initial central ground block
+    /// `ground` (frame entries, g x g) still carries at the horizon `T` (us)
+    /// in the slow generator's non-conserved modes: the sum over modes `k`
+    /// and readout groups `nu` of `|(R V)_k c_k| exp(f Re(alpha_k + i nu) T)`
+    /// with every decay rate taken at the fraction `f` (a margin for the
+    /// reduction), over the terms that do not average out
+    /// (`|Im(alpha_k) + nu| T <= 1`), divided by the trace the readout gives
+    /// the initial block (its slaved part adds to it).
+    pub(crate) fn horizon_bound(&self, ground: &Dense, horizon: f64, fraction: f64) -> Result<Vec<f64>, String> {
+        if !(horizon.is_finite() && horizon > 0.) {
+            return Err("The observation horizon must be a finite positive time".into());
+        }
+        let modal = self.to_modal(0, ground)?;
+        let floor = self.slow_spectrum().floor;
+        let n = self.n;
+        let mut bound = vec![0.; n];
+        let mut trace = 0.;
+        for (nu, readout) in &self.readout {
+            for (k, &alpha) in self.eigenvalues.iter().enumerate() {
+                let c = modal.data[k];
+                if cabs(c) == 0. {
+                    continue;
+                }
+                let total = cadd(alpha, complex(0., *nu));
+                for s in 0..readout.rows.min(n) {
+                    trace += cmul(readout.at(s, k), c).re;
+                }
+                if cabs(total) <= floor || total.im.abs() * horizon > 1. {
+                    continue;
+                }
+                let weight = (fraction * total.re * horizon).exp();
+                for (s, entry) in bound.iter_mut().enumerate().take(readout.rows.min(n)) {
+                    *entry += cabs(cmul(readout.at(s, k), c)) * weight;
+                }
+            }
+        }
+        if !(trace.is_finite() && trace > 0.5) || bound.iter().any(|x| !x.is_finite()) {
+            return Err(format!("The slow generator reads the initial state with trace {trace:e}; the tolerance was not relaxed"));
+        }
+        Ok(bound.into_iter().map(|x| x / trace).collect())
     }
     pub fn belongs_to(&self, prepared: &OwnedPrepared) -> bool { Arc::ptr_eq(&self.owner, &prepared.primitives) }
     pub fn dimension(&self) -> usize { self.generator.rows }
@@ -2397,6 +2469,17 @@ impl Series {
         let target = self.dressed_direct.get_or_insert_with(|| vec![ZERO; amplitudes.len()]);
         for (a, b) in target.iter_mut().zip(amplitudes) {
             *a = cadd(*a, *b);
+        }
+    }
+
+    /// Moves the dressed amplitudes of `other` (they do not depend on its
+    /// exponents) into this series.
+    pub(crate) fn take_dressed(&mut self, other: &mut Series) {
+        if let Some(amplitudes) = other.dressed_direct.take() {
+            self.add_dressed_direct(&amplitudes);
+        }
+        for ((slot, _), (offset, amplitudes)) in std::mem::take(&mut other.dressed_slow) {
+            self.add_dressed_slow(slot, offset, &amplitudes);
         }
     }
 
@@ -3281,7 +3364,25 @@ mod tests {
             if cutoff.is_some() {
                 assert!(dual.slots.len() > 1, "large cutoff must create Raman slots");
             }
-            let expected = dense_generator(&owner, &dual);
+            let mut expected = dense_generator(&owner, &dual);
+            // The same exact trace restoration (`trace_leak`): the multi-slot
+            // Schur complement leaves a central-trace row of that size.
+            let g = dual.g;
+            let mut row = vec![ZERO; expected.cols];
+            for (j, entry) in row.iter_mut().enumerate() {
+                for a in 0..g {
+                    *entry = cadd(*entry, expected.at(a * g + a, j));
+                }
+            }
+            let leak = row.iter().fold(0_f64, |s, z| s.hypot(cabs(*z)));
+            assert!((leak - dual.diagnostics.trace_leak).abs() <= 1e-9 * leak.max(1.), "trace leak {leak:e} vs {:e}", dual.diagnostics.trace_leak);
+            if leak > 1e3 * f64::EPSILON * expected.frobenius() {
+                for (j, &value) in row.iter().enumerate() {
+                    for a in 0..g {
+                        expected.add_at(a * g + a, j, cscale(value, -1. / g as f64));
+                    }
+                }
+            }
             let scale = expected.frobenius();
             let mut difference = 0_f64;
             for k in 0..expected.data.len() {
@@ -3373,6 +3474,7 @@ mod tests {
                 generator_reconstruction_relative: 0.,
                 generator_eigen_method: "test",
                 generator_spectral_abscissa: 0.,
+                trace_leak: 0.,
                 dressed_condition: None,
                 preparation_ms: 0.,
             },
