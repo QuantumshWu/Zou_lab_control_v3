@@ -988,10 +988,10 @@ fn placed(op: &DomainOperator, matrix: &[C], central_only: bool) -> Result<Vec<f
     Ok(pulled.iter().map(|z| z.re).collect())
 }
 
-/// Laboratory mean of `s (sE - F)^-1 E probe` for the single pole `s` of
-/// `op`; it tends to `Pi0 probe` as `s -> 0`.
+/// Laboratory mean of `v = s (sE - F)^-1 E probe` for the single pole `s` of
+/// `op`, and `v` itself (REAL coordinates); it tends to `Pi0 probe` as `s -> 0`.
 fn resolvent_mean(core: &RuntimeCore, context: &Context, op: &mut DomainOperator, readout: &mut TargetReadout, probe: &[C],
-    central_only: bool, tolerance: f64, applications: &mut usize) -> Result<Vec<C>, String> {
+    central_only: bool, tolerance: f64, applications: &mut usize) -> Result<(Vec<C>, Vec<f64>), String> {
     let pole = *op.poles().first().ok_or("Resolvent operator without a pole")?;
     let x = placed(op, probe, central_only)?;
     let rows = op.rows();
@@ -1001,7 +1001,17 @@ fn resolvent_mean(core: &RuntimeCore, context: &Context, op: &mut DomainOperator
     let (v, _) = solve_shifted(op, &ex, settings, 12, applications)?;
     let scaled: Vec<f64> = v.iter().map(|value| pole * value).collect();
     let signed = op.signed_block(&scaled, 1)?;
-    readout.density(core.physical(), &context.frame, &signed)
+    Ok((readout.density(core.physical(), &context.frame, &signed)?, scaled))
+}
+
+/// `|F x| / |E x|` in REAL coordinates: the relative residual of a null-vector
+/// candidate `x` of the pencil.
+fn relative_null_residual(op: &mut DomainOperator, x: &[f64], applications: &mut usize) -> Result<f64, String> {
+    let rows = op.rows();
+    let (mut ex, mut fx) = (vec![0.; rows], vec![0.; rows]);
+    op.images(x, 1, &mut ex, &mut fx)?;
+    *applications += 1;
+    Ok(euclid(&fx) / euclid(&ex).max(f64::MIN_POSITIVE))
 }
 
 /// Compares the corrected null-vector mean with `Pi0` of the second probe.
@@ -1017,7 +1027,7 @@ fn degeneracy_probe(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
     let (probe, central_only) = probe_matrix(core, context);
     let tolerance = (PROBE_TOLERANCE_PER_EPSILON * options.population_tolerance).max(RESOLVENT_TOLERANCE);
     let threshold = 0.25 * options.population_tolerance + SAFETY * (candidate.basis_estimate + candidate.halo_estimate);
-    let first = resolvent_mean(core, context, &mut state.space.op, &mut state.readout, &probe, central_only, tolerance,
+    let (first, _) = resolvent_mean(core, context, &mut state.space.op, &mut state.readout, &probe, central_only, tolerance,
         &mut work.applications)?;
     let gap = context.metric(&difference(&first, &candidate.corrected), &options.groups)?;
     work.checkpoints.push(MeanCheckpoint { columns: candidate.columns, modes: candidate.modes.len(), pole: candidate.pole,
@@ -1026,7 +1036,7 @@ fn degeneracy_probe(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
         return Ok(Probe::Unique);
     }
     let mut doubled = DomainOperator::new(core, &candidate.modes, &[2. * candidate.pole])?;
-    let second = resolvent_mean(core, context, &mut doubled, &mut state.readout, &probe, central_only, tolerance,
+    let (second, _) = resolvent_mean(core, context, &mut doubled, &mut state.readout, &probe, central_only, tolerance,
         &mut work.applications)?;
     let first_order = difference(&first, &second);
     let mut extrapolated = first;
@@ -1054,20 +1064,24 @@ fn degenerate(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, 
     let pole = POLE;
     let initial = core.initial().point().to_vec();
     let central_only = context.axes == 0;
-    let evaluate = |core: &mut RuntimeCore, modes: &[Charge], matrix: &[C], work: &mut Work| -> Result<(Vec<C>, f64, f64), String> {
+    // Extrapolated mean, first-order term, discarded optical coherence and the
+    // relative residual of the extrapolated vector 2a - b.
+    let evaluate = |core: &mut RuntimeCore, modes: &[Charge], matrix: &[C], work: &mut Work| -> Result<(Vec<C>, f64, f64, f64), String> {
         let mut readout = TargetReadout::new(core, modes, &context.frame)?;
         let mut op = DomainOperator::new(core, modes, &[pole])?;
-        let a = resolvent_mean(core, context, &mut op, &mut readout, matrix, central_only, RESOLVENT_TOLERANCE, &mut work.applications)?;
+        let (a, va) = resolvent_mean(core, context, &mut op, &mut readout, matrix, central_only, RESOLVENT_TOLERANCE, &mut work.applications)?;
         let discarded = readout.discarded(core.physical(), &context.frame)?;
         let mut op = DomainOperator::new(core, modes, &[2. * pole])?;
-        let b = resolvent_mean(core, context, &mut op, &mut readout, matrix, central_only, RESOLVENT_TOLERANCE, &mut work.applications)?;
+        let (b, vb) = resolvent_mean(core, context, &mut op, &mut readout, matrix, central_only, RESOLVENT_TOLERANCE, &mut work.applications)?;
         let first_order = difference(&a, &b);
         let mut extrapolated = a;
         add_into(&mut extrapolated, &first_order);
-        Ok((extrapolated, context.metric(&first_order, &options.groups)?, discarded))
+        let vector: Vec<f64> = va.iter().zip(&vb).map(|(a, b)| 2. * a - b).collect();
+        let residual = relative_null_residual(&mut op, &vector, &mut work.applications)?;
+        Ok((extrapolated, context.metric(&first_order, &options.groups)?, discarded, residual))
     };
     let clock = Instant::now();
-    let (mut mean, mut extrapolation, mut discarded) = evaluate(core, &modes, &initial, work)?;
+    let (mut mean, mut extrapolation, mut discarded, mut residual) = evaluate(core, &modes, &initial, work)?;
     loop {
         let shell = shell_modes(&modes, &context.domain_steps);
         let mut larger: Vec<Charge> = modes.iter().cloned().chain(shell.iter().cloned()).collect();
@@ -1075,8 +1089,8 @@ fn degenerate(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, 
         let (halo_estimate, next) = if shell.is_empty() {
             (0., None)
         } else {
-            let (value, next_extrapolation, next_discarded) = evaluate(core, &larger, &initial, work)?;
-            (context.metric(&difference(&value, &mean), &options.groups)?, Some((value, next_extrapolation, next_discarded)))
+            let (value, next_extrapolation, next_discarded, next_residual) = evaluate(core, &larger, &initial, work)?;
+            (context.metric(&difference(&value, &mean), &options.groups)?, Some((value, next_extrapolation, next_discarded, next_residual)))
         };
         work.checkpoints.push(MeanCheckpoint { columns: 0, modes: modes.len(), pole, basis_estimate: extrapolation,
             halo_estimate: Some(halo_estimate), halo_modes: (shell.len(), 0), inner_residual: f64::NAN, action: "degenerate-resolvent" });
@@ -1088,7 +1102,7 @@ fn degenerate(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, 
             // a unique stationary density: compare with Pi0 of the mixed state.
             let kind = if central_only {
                 let (mixed, _) = probe_matrix(core, context);
-                let (other, _, _) = evaluate(core, &modes, &mixed, work)?;
+                let (other, _, _, _) = evaluate(core, &modes, &mixed, work)?;
                 if context.metric(&difference(&other, &mean), &options.groups)? <= 0.25 * options.population_tolerance {
                     MeanKind::Unique
                 } else {
@@ -1098,16 +1112,17 @@ fn degenerate(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, 
                 MeanKind::InitialDependent { zero_modes }
             };
             let candidate = Candidate { raw_mean: mean.clone(), corrected: mean, discarded_optical_coherence: discarded,
-                basis_estimate: extrapolation, halo_estimate, relative_residual: f64::NAN, slowest_rate, zero_modes,
+                basis_estimate: extrapolation, halo_estimate, relative_residual: residual, slowest_rate, zero_modes,
                 modes, pole, columns: 0 };
             return finish(context, options, candidate, kind, work);
         }
         match next {
-            Some((value, next_extrapolation, next_discarded)) if larger.len() <= options.maximum_modes && work.within_budget(options) => {
+            Some((value, next_extrapolation, next_discarded, next_residual)) if larger.len() <= options.maximum_modes && work.within_budget(options) => {
                 modes = larger;
                 mean = value;
                 extrapolation = next_extrapolation;
                 discarded = next_discarded;
+                residual = next_residual;
             }
             _ => return Err("Initial-dependent long-time mean did not reach the tolerance; the tolerance was not relaxed".into()),
         }
@@ -1377,6 +1392,8 @@ mod tests {
             assert!((p - e).abs() < 1e-4, "{p} vs {e}");
         }
         assert!(largest_difference(&mean.density, &dense_mean(&toy, 14)) < 1e-4);
+        let residual = mean.diagnostics.relative_residual;
+        assert!(residual.is_finite() && residual < 1e-3, "{residual:e}");
     }
 
     #[test]
