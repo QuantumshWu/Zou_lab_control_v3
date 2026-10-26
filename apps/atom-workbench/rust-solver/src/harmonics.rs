@@ -430,6 +430,43 @@ pub fn model_frequency_basis(model:&crate::Model,max_integer:i32)->Result<Freque
     Ok(FrequencyBasis{frequencies,drive_indices,reconstructed_frequencies,reconstruction_errors,
         exact_relations,rounded_relations:0,exact:true,search_exhausted:reduction.search_exhausted,source_to_basis:Some(mapping)})
 }
+/// Phase axes of a declared-coordinate Model for Fourier work. Without an
+/// exact integer relation between the declared source axes these ARE the
+/// source axes (identity mapping, unchanged order). With one (equally spaced
+/// carriers, for example) the exact reduced basis is used, so that a Fourier
+/// charge has zero frequency only when it is zero; otherwise the envelope
+/// null space would be degenerate and a long-time mean ill-defined.
+pub struct PhaseAxes{
+    /// Compensated angular frequency (hi, lo) of every axis.
+    pub parts:Vec<(f64,f64)>,
+    pub drive_indices:Vec<Vec<i32>>,
+    /// Laboratory frame index of every state in these axes.
+    pub frame_indices:Vec<Vec<i32>>,
+    pub frame_sectors:Vec<i32>,
+    /// source_to_basis[source axis][phase axis].
+    pub source_to_basis:Vec<Vec<i32>>,
+}
+pub fn model_phase_axes(model:&crate::Model)->Result<PhaseAxes,String>{
+    let basis=model_frequency_basis(model,16)?;
+    let declared=model.frequency_coordinates.as_ref().ok_or("Phase axes require declared frequencyCoordinates")?;
+    let axes=declared.frequencies.len();
+    if basis.exact_relations==0{
+        let identity=identity_indices(axes);
+        return Ok(PhaseAxes{parts:model_phase_frequency_parts(model,&identity)?,drive_indices:declared.drive_indices.clone(),
+            frame_indices:declared.frame_indices.clone(),frame_sectors:declared.frame_sectors.clone(),source_to_basis:identity});
+    }
+    let(source,unit)=declared.frequencies_mhz.as_ref().map(|values|(values.as_slice(),std::f64::consts::TAU))
+        .unwrap_or((declared.frequencies.as_slice(),1.));
+    // The same deterministic reduction model_frequency_basis accepted above.
+    let reduction=frequency_basis(source,16)?;
+    let mapping=basis.source_to_basis.clone().ok_or("Declared reduction lost its source mapping")?;
+    let parts:Vec<_>=reduction.frequencies.iter().map(|&value|scaled_parts((value,0.),unit)).collect();
+    if parts.len()!=basis.frequencies.len()||parts.iter().zip(&basis.frequencies).any(|(p,&f)|!(p.0+p.1).is_finite()||(p.0+p.1-f).abs()>4.*ulp_spacing(f)){
+        return Err("Reduced phase axes disagree with the reduced frequency basis".into());
+    }
+    let frame_indices=compose_indices(&declared.frame_indices,&mapping,parts.len())?;
+    Ok(PhaseAxes{parts,drive_indices:basis.drive_indices,frame_indices,frame_sectors:declared.frame_sectors.clone(),source_to_basis:mapping})
+}
 /// Phase rows in the ORIGINAL declared axes, with their authoritative unit
 /// conversion. State gauges may contain zero or negative integer entries.
 pub fn model_phase_frequency_parts(model:&crate::Model,rows:&[Vec<i32>])->Result<Vec<(f64,f64)>,String>{

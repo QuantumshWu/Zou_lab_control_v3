@@ -1683,43 +1683,22 @@ mod progress_tests{
     }
 }
 
-/// Static rb87-full/2 mean: the verified trace-constrained full-density
-/// stationary solve. Initial-dependent cases fall back to Solver::solve.
-fn static_stationary(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
-    if model.time_dependent||!model.drives.is_empty(){return Err("Nonstatic effective Hamiltonian".into());}
-    if !options.steady_only{return Err("Static finite-time trajectories are solved by the population core".into());}
-    let started=Instant::now();
-    let g=build_generator(model)?;
-    let construction=started.elapsed().as_secs_f64()*1000.;
-    solver.stationary_only(model,&g,started,construction)?.ok_or_else(||"Initial-dependent steady state needs spectral projection".into())
-}
-
+/// rb87-full/2: every finite-time trajectory and every long-time mean
+/// (static or driven) is solved by the population core.
 fn full_model_solve(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
     options.validate_population_tolerance()?;
     if model.frequency_coordinates.is_none(){return Err("rb87-full/2 requires authoritative frequencyCoordinates metadata".into());}
-    let basis=harmonics::model_frequency_basis(model,16)?;
-    // Request-local phase metadata must precede EVERY possible progress path,
-    // including the static mean without Fourier coefficients.
+    let axes=harmonics::model_phase_axes(model)?;
+    // Request-local phase metadata must precede EVERY possible progress path.
     PROGRESS_REQUEST.with(|context|{
-        if let Some((_,schema,mapping))=context.borrow_mut().as_mut(){if schema==FULL_MODEL_SCHEMA{*mapping=basis.source_to_basis.clone();}}
+        if let Some((_,schema,mapping))=context.borrow_mut().as_mut(){if schema==FULL_MODEL_SCHEMA{*mapping=Some(axes.source_to_basis.clone());}}
     });
-    // Every finite-time rb87-full/2 trajectory is solved by the population core.
     #[cfg(feature="population-core")]
     if population_core_adapter::supports(model,options){
         return population_core_adapter::solve(solver,model,options);
     }
-    let mut result=if !model.drives.is_empty(){
-        if options.steady_only{floquet::solve_full(&solver.lap,model,options)}
-        else{Err("Finite-time driven trajectories are solved by the population core".into())}
-    }else{
-        let start=Instant::now();match static_stationary(solver,model,options){Ok(v)=>Ok(v),Err(reason)=>solver.solve(model,options).map(|mut v|{
-            v["diagnostics"]["fastPathFallback"]=json!(reason);v["diagnostics"]["elapsedMs"]=json!(start.elapsed().as_secs_f64()*1000.);v
-        })}
-    }?;
-    result["diagnostics"]["frequencyCoordinateSource"]=json!(basis.source());
-    result["diagnostics"]["carrierSourceToBasis"]=json!(basis.source_to_basis);
-    result["diagnostics"]["frequencyReconstructionErrors"]=json!(basis.reconstruction_errors);
-    Ok(result)
+    let _=solver;
+    Err("rb87-full/2 requires the complete 32-state Rb87 model and the population core".into())
 }
 
 #[cfg(feature="static-numerics")]

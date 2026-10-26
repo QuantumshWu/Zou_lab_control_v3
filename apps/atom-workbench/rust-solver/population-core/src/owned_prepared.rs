@@ -35,6 +35,8 @@ pub(crate) mod reduced;
 pub mod directions;
 #[path="engine.rs"]
 pub mod engine;
+#[path="asymptotic.rs"]
+pub mod asymptotic;
 
 #[derive(Clone,Copy,Debug)]
 pub enum KernelPolicy { Csr, HybridBlas }
