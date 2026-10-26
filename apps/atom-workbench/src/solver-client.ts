@@ -149,7 +149,9 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initialStateId=scen
   return {states,timesUs,populations,totalExcited:timesUs.map((_,i)=>states.filter(s=>s.manifold!=='ground').reduce((sum,s)=>sum+populations[s.id]![i]!,0)),
     activeLaserIds:active.map(l=>l.id),
     steady:{converged,status,populations:steadyPopulations,density,residual:converged?d.residual:null,method:converged?d.asymptoticMethod:undefined,reason,
-      initialDependent:isInitialDependent(status)},
+      initialDependent:isInitialDependent(status),
+      slowestRelaxationUs:converged&&typeof d.slowestRelaxationUs==='number'&&Number.isFinite(d.slowestRelaxationUs)&&d.slowestRelaxationUs>0?d.slowestRelaxationUs:null,
+      conservedQuantities:converged&&Number.isSafeInteger(d.conservedQuantities)&&d.conservedQuantities>0?d.conservedQuantities:null},
     metrics:{totalMs:d.elapsedMs},validation:{maxTraceError:d.traceError,minPopulation:Math.min(...rows.flat())},
     ...(populationAccuracy?{populationAccuracy,method:d.method}:{}),assumptions};
 }

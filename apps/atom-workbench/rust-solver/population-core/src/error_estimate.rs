@@ -48,8 +48,8 @@
 //! slot of `q` as a direct `J_eff` source and only the non-ground rest gets
 //! the response above. A slow halo charge that is not a slot (reached only
 //! through three or more hops) keeps its ground block in the response, where
-//! its near-resonant coherences take the entire form and accumulate. The exact identity
-//! `e = eta + U(e0 - eta(0)) + int U (r - eta' + L eta)` then gives the halo
+//! its near-resonant coherences take the entire form and accumulate. The
+//! exact identity `e = eta + U(e0 - eta(0)) + int U (r - eta' + L eta)` then gives the halo
 //! contribution: `eta(t)` (read out directly), the initial boundary `-eta(0)`
 //! (slow part into the central slot, the rest as an exact dressed fast layer),
 //! and one Liouvillian hop `L eta` back into the retained domain:
@@ -57,8 +57,9 @@
 //! * same charge (`p = 0`): the ground block of `(L_0 - N) eta = R_0 eta_EE`;
 //! * `p != 0` into a retained or slow charge `k`: the ground block of
 //!   `L_p eta` is a slow source; its non-ground block gets the exact dressed
-//!   fast response when `k` is slow, and (optionally) Markov slaving plus one
-//!   hop when `k` is fast.
+//!   fast response at `k` (for a near-resonant component the response to its
+//!   pair source, `add_fast_response_pairs`), and (optionally) Markov slaving
+//!   plus one hop when `k` is fast.
 //!
 //! Evaluated are the halo charges that return into the retained domain or a
 //! slot through a significant coupling in one hop, and every slow halo charge
@@ -140,8 +141,11 @@ pub struct HaloEstimate {
     pub modes: Vec<HaloModeIndicator>,
     pub halo_modes: usize,
     pub near_resonant_terms: usize,
-    /// Near-resonant non-ground returns into a slow charge that were not
-    /// integrated (would need a pair-source fast response).
+    /// Components of near-resonant non-ground returns whose three nodes (the
+    /// candidate exponent, the halo eigenvalue and the return charge's
+    /// dressed eigenvalue) lie within about `1/T` of each other: bounded and
+    /// charged to `estimate.margin` instead of integrated. Every other
+    /// component is integrated exactly (`add_fast_response_pair`).
     pub unrouted_resonant_returns: usize,
     pub pencil_ms: f64,
     /// Modal columns per pencil application.
@@ -330,20 +334,33 @@ fn maxima(values: &[C], n: usize, groups: &[PopulationGroup]) -> (f64, f64) {
     (state, group)
 }
 
-/// Charge for the slow charges that only weak couplings reach (module docs of
-/// `slow_dual.rs`): over the horizon `T` their ground blocks gain at most
-/// `T ||K||_F ||e_P||` from the slow error `e_P`, and a population read from
-/// them is at most that norm (the readout weights `B_ia conj(B_ib)` have unit
-/// norm). The slow error's norm is taken as `g` times the largest population
-/// error (ground coherences of the populations' size). The charge vanishes
-/// with the weak couplings, so the estimate is continuous in them.
-fn unrepresented_charge(dual: &SlowDual, horizon: f64, maximum_state: f64) -> f64 {
-    horizon * dual.diagnostics.unrepresented_rate * dual.g as f64 * maximum_state
+impl SlowDual {
+    /// Charge for the slow charges that only weak couplings reach (module docs
+    /// of `slow_dual.rs`): their ground blocks are driven by `K e_P(t)` from
+    /// the slow error state `e_P` of the series, so over the horizon `T` they
+    /// gain at most `T max_t ||K e_P(t)||`, and a population read from them
+    /// is at most that norm (the readout weights `B_ia conj(B_ib)` have unit
+    /// norm). `||K e_P||` is evaluated exactly through the compressed readout
+    /// `unrepresented_readout` (the complex series bounds its real part); the
+    /// charge vanishes with the weak couplings.
+    fn unrepresented_margin(&self, series: &Series, grid: &TimeGrid) -> Result<f64, String> {
+        let Some((_, readout)) = self.unrepresented_readout.first() else { return Ok(0.) };
+        let rows = readout.rows;
+        let values = self.evaluate_with(series, grid, &self.unrepresented_readout, false, None)?;
+        let largest = values.chunks_exact(rows.max(1)).map(|row| row.iter().map(|z| z.re * z.re + z.im * z.im).sum::<f64>().sqrt()).fold(0_f64, f64::max);
+        if !largest.is_finite() {
+            return Err("Nonfinite coupling into the unrepresented slow charges".into());
+        }
+        Ok(grid.maximum * largest)
+    }
 }
 
+/// The estimate of evaluated populations `values` plus the unsigned `margin`
+/// (charges for what the dual leaves out by magnitude).
 fn finish_estimate(
     dual: &SlowDual,
     values: &[C],
+    margin: f64,
     times: &[f64],
     groups: &[PopulationGroup],
     began: Instant,
@@ -371,8 +388,6 @@ fn finish_estimate(
     if !maximum_state.is_finite() || !maximum_group.is_finite() {
         return Err("Nonfinite population error estimate".into());
     }
-    let horizon = times.iter().copied().fold(0_f64, f64::max);
-    let margin = unrepresented_charge(dual, horizon, maximum_state);
     Ok(PopulationErrorEstimate {
         times: times.to_vec(),
         states: n,
@@ -497,6 +512,145 @@ impl SlowDual {
             }
         }
         Ok(())
+    }
+
+    /// Exact dressed fast responses at charge `q` (as `add_fast_response`) to
+    /// zero-initial pair sources `X e_t[a, b]` (envelope nodes `a`, `b`; the
+    /// near-resonant halo components returned to `q`; the ground block of
+    /// each field `X` is ignored). Component `ik` of a source is
+    /// `c e_t[a, b, lambda_ik]`, expanded by the divided-difference identities
+    /// into exponentials and two-node pairs, which the series integrates
+    /// exactly: `e_t[a, b, l] = (e_t[a, l] - e_t[b, l]) / (a - b)` when `a`
+    /// and `b` separate on the horizon (`|a - b| T > 1`), otherwise
+    /// `(e_t[a, b] - e_t[b, l]) / (a - l)` or `(e_t[a, b] - e_t[a, l]) / (b - l)`
+    /// when `l` separates from `a` or `b`; every `e_t[x, l]` with `x` and `l`
+    /// separated is `(exp(x t) - exp(l t)) / (x - l)`. The weights are summed
+    /// per exponential node, per shared pair and in the dressed homogeneous
+    /// part before their populations and recycling are read out in two
+    /// products. Only a component with all three nodes within about `1/T`
+    /// has no such form; it is bounded by `|e_t[a, b, l]| <= T^2/2` times the
+    /// largest exponential on the horizon (direct populations, and the slow
+    /// response of its recycling over `T`), and the returned charge is that
+    /// bound, with the number of such components.
+    fn add_fast_response_pairs(&self, series: &mut Series, target: (usize, f64), nu: f64, sources: &[(C, C, &Dense)]) -> Result<(f64, usize), String> {
+        let dressed = match &self.dressed {
+            Some(d) => d,
+            None => return Ok((0., 0)),
+        };
+        if sources.is_empty() {
+            return Ok((0., 0));
+        }
+        let lap = &self.lapack;
+        let (n, g) = (self.n, self.g);
+        let n2 = n * n;
+        let t_max = series.t_max;
+        let (slot, shift) = target;
+        let recycling = &dressed.modal_recycling[slot];
+        let blocks: Vec<Dense> = sources
+            .iter()
+            .map(|(_, _, x)| {
+                let mut y = (*x).clone();
+                for a in 0..g {
+                    for b in 0..g {
+                        y.set(a, b, ZERO);
+                    }
+                }
+                y
+            })
+            .collect();
+        let refs: Vec<&Dense> = blocks.iter().collect();
+        let eigen = sandwich_all(&dressed.left_inverse, &dressed.right, &refs, lap)?;
+        let lambda: Vec<C> = (0..n2).map(|ik| csub(cadd(dressed.left_values[ik / n], dressed.right_values[ik % n]), complex(0., nu))).collect();
+        let separated = |x: C, y: C| cabs(csub(x, y)) * t_max > 1.;
+        // Eigen-coordinate weights of the exponential nodes, of the shared
+        // pairs e_t[a, b] (one per source), of the homogeneous part, and the
+        // components whose node is near their eigenvalue (pairs e_t[x, l]).
+        let mut node_index: BTreeMap<(u64, u64), usize> = BTreeMap::new();
+        let mut nodes: Vec<(C, Vec<C>)> = Vec::new();
+        let mut pairs: Vec<(C, C, Vec<C>)> = Vec::new();
+        let mut near: Vec<(C, usize, C)> = Vec::new();
+        let mut homogeneous = vec![ZERO; n2];
+        let mut charge = 0_f64;
+        let mut bounded = 0;
+        // coef e_t[x, lambda_ik].
+        let mut to_lambda = |x: C, coef: C, ik: usize, nodes: &mut Vec<(C, Vec<C>)>, homogeneous: &mut Vec<C>, near: &mut Vec<(C, usize, C)>| {
+            if separated(x, lambda[ik]) {
+                let w = cdiv(coef, csub(x, lambda[ik]));
+                let next = nodes.len();
+                let index = *node_index.entry((x.re.to_bits(), x.im.to_bits())).or_insert(next);
+                if index == next {
+                    nodes.push((x, vec![ZERO; n2]));
+                }
+                nodes[index].1[ik] = cadd(nodes[index].1[ik], w);
+                homogeneous[ik] = csub(homogeneous[ik], w);
+            } else {
+                near.push((x, ik, coef));
+            }
+        };
+        for ((a, b, _), xh) in sources.iter().zip(&eigen) {
+            let (a, b) = (*a, *b);
+            let mut shared: Option<Vec<C>> = None;
+            for ik in 0..n2 {
+                let c = xh.at(ik / n, ik % n);
+                if c.re == 0. && c.im == 0. {
+                    continue;
+                }
+                let l = lambda[ik];
+                if separated(a, b) {
+                    let scale = cdiv(c, csub(a, b));
+                    to_lambda(a, scale, ik, &mut nodes, &mut homogeneous, &mut near);
+                    to_lambda(b, csub(ZERO, scale), ik, &mut nodes, &mut homogeneous, &mut near);
+                } else if separated(a, l) || separated(b, l) {
+                    let (via, other) = if separated(a, l) { (a, b) } else { (b, a) };
+                    let scale = cdiv(c, csub(via, l));
+                    let w = shared.get_or_insert_with(|| vec![ZERO; n2]);
+                    w[ik] = cadd(w[ik], scale);
+                    to_lambda(other, csub(ZERO, scale), ik, &mut nodes, &mut homogeneous, &mut near);
+                } else {
+                    let growth = [a.re, b.re, l.re, 0.].iter().fold(0_f64, |g, &r| g.max(r * t_max)).exp();
+                    let direct = (0..dressed.readout.rows).map(|s| cabs(dressed.readout.at(s, ik))).fold(0_f64, f64::max);
+                    let slow = self
+                        .readout
+                        .iter()
+                        .map(|(_, r)| (0..r.rows).map(|s| (0..r.cols).map(|j| cabs(r.at(s, j)) * cabs(recycling.at(j, ik))).sum::<f64>()).fold(0_f64, f64::max))
+                        .sum::<f64>();
+                    charge += cabs(c) * growth * 0.5 * t_max * t_max * (direct + slow * t_max);
+                    bounded += 1;
+                }
+            }
+            if let Some(w) = shared {
+                pairs.push((a, b, w));
+            }
+        }
+        // Populations and recycling of every weight vector, in two products.
+        let count = nodes.len() + pairs.len();
+        if count > 0 {
+            let mut weights = Dense::zeros(n2, count);
+            for (column, w) in nodes.iter().map(|(_, w)| w).chain(pairs.iter().map(|(_, _, w)| w)).enumerate() {
+                weights.data[column * n2..(column + 1) * n2].copy_from_slice(w);
+            }
+            let direct = dressed.readout.multiply(&weights, lap)?;
+            let slow = recycling.multiply(&weights, lap)?;
+            let column = |m: &Dense, j: usize| m.data[j * m.rows..(j + 1) * m.rows].to_vec();
+            for (j, (x, _)) in nodes.iter().enumerate() {
+                series.add_direct_point(cadd(*x, complex(0., nu)), &column(&direct, j));
+                series.add_slow_point(cadd(*x, complex(0., shift)), &column(&slow, j));
+            }
+            for (j, (a, b, _)) in pairs.iter().enumerate() {
+                let j = nodes.len() + j;
+                series.add_direct_pair(cadd(*a, complex(0., nu)), cadd(*b, complex(0., nu)), column(&direct, j));
+                series.add_pair(cadd(*a, complex(0., shift)), cadd(*b, complex(0., shift)), column(&slow, j));
+            }
+        }
+        for &(x, ik, coef) in &near {
+            let rho: Vec<C> = (0..dressed.readout.rows).map(|s| cmul(dressed.readout.at(s, ik), coef)).collect();
+            let m: Vec<C> = (0..recycling.rows).map(|r| cmul(recycling.at(r, ik), coef)).collect();
+            series.add_direct_pair(cadd(x, complex(0., nu)), cadd(lambda[ik], complex(0., nu)), rho);
+            series.add_pair(cadd(x, complex(0., shift)), cadd(lambda[ik], complex(0., shift)), m);
+        }
+        series.add_dressed_direct(&homogeneous);
+        series.add_dressed_slow(slot, shift - nu, &homogeneous);
+        Ok((charge, bounded))
     }
 
     /// Slow part of a physical initial error `X0` (central charge): its ground
@@ -625,7 +779,8 @@ impl SlowDual {
             start += width;
         }
         let populations = self.evaluate(&series, &grid)?;
-        finish_estimate(self, &populations, view.times, groups, began)
+        let margin = self.unrepresented_margin(&series, &grid)?;
+        finish_estimate(self, &populations, margin, view.times, groups, began)
     }
 
     /// Halo modes of a retained domain: output modes reached from `input` by
@@ -749,6 +904,7 @@ impl SlowDual {
         let mut boundary_total = Dense::zeros(n, n);
         let mut near_resonant_terms = 0;
         let mut unrouted_resonant_returns = 0;
+        let mut resonant_charge = 0_f64;
         let mut pencil_ms = 0.;
         let halo_frequency: Vec<f64> = halo.iter().map(|q| frequency(q)).collect::<Result<_, _>>()?;
 
@@ -956,6 +1112,9 @@ impl SlowDual {
                     } else {
                         self.frame.apply_all(term, &units, lap)?
                     };
+                    // Non-ground parts of the returns at k: their exact dressed
+                    // fast response, like the particular part's (total only).
+                    let mut sources: Vec<(C, C, &Dense)> = Vec::new();
                     for (resonant_term, image) in resonant.iter().zip(&images) {
                         let column = resonant_term.column;
                         let first_node = cadd(beta[column], complex(0., shift));
@@ -976,6 +1135,10 @@ impl SlowDual {
                         if same_charge {
                             continue;
                         }
+                        sources.push((beta[column], resonant_term.second, image));
+                        if self.slot_of(&k).is_some() || !options.slave_fast_returns {
+                            continue;
+                        }
                         let mut rest = Dense::zeros(d, 1);
                         for ea in 0..n {
                             for eb in 0..n {
@@ -984,16 +1147,6 @@ impl SlowDual {
                                 }
                             }
                         }
-                        if rest.frobenius() == 0. {
-                            continue;
-                        }
-                        if self.slot_of(&k).is_some() {
-                            unrouted_resonant_returns += 1;
-                            continue;
-                        }
-                        if !options.slave_fast_returns {
-                            continue;
-                        }
                         for (target_slot, returned) in self.slaved_returns(&k, &rest)? {
                             let modal = self.to_modal(target_slot, &returned)?;
                             total.add_pair(beta[column], resonant_term.second, modal.data.clone());
@@ -1001,6 +1154,12 @@ impl SlowDual {
                                 series.add_pair(beta[column], resonant_term.second, modal.data);
                             }
                         }
+                    }
+                    if !sources.is_empty() {
+                        let nu_k = fast.map(|index| fast_targets[index].2).ok_or("A resonant return without its target charge")?;
+                        let (charge, bounded) = self.add_fast_response_pairs(&mut total, (slot, shift), nu_k, &sources)?;
+                        resonant_charge += charge;
+                        unrouted_resonant_returns += bounded;
                     }
                 }
             }
@@ -1059,7 +1218,8 @@ impl SlowDual {
             self.add_fast_initial(&mut total, &layer)?;
         }
         let values = self.evaluate(&total, &grid)?;
-        let estimate = finish_estimate(self, &values, view.times, groups, began)?;
+        let margin = self.unrepresented_margin(&total, &grid)? + resonant_charge;
+        let estimate = finish_estimate(self, &values, margin, view.times, groups, began)?;
         Ok(HaloEstimate { estimate, modes, halo_modes: halo.len(), near_resonant_terms, unrouted_resonant_returns, pencil_ms, block_columns: width_max })
     }
 
@@ -1569,6 +1729,46 @@ mod tests {
     }
 
     #[test]
+    fn error_estimate_pair_source_fast_response_matches_its_exponential_split() {
+        // The exact fast response to a near-resonant return `field e_t[a, b]`
+        // equals the responses to its two exponentials `field (e^at - e^bt) /
+        // (a - b)`, for separated nodes and for nodes 1e-3 apart (where the
+        // split cancels by 1e3 and only the divided-difference form is
+        // usable on its own).
+        let model = test_model();
+        let owned = prepare(&model, &[12.]);
+        let dual = SlowDual::prepare(&owned, Default::default()).unwrap();
+        let n = dual.n;
+        let d = n * n;
+        let times: Vec<f64> = (0..41).map(|i| 0.25 * i as f64).collect();
+        let grid = TimeGrid::new(&times);
+        let mut field = Dense::zeros(d, 1);
+        for (entry, v) in [(2, complex(0.3, -0.1)), (2 * n, complex(0.2, 0.1)), (2 * n + 3, complex(0.05, 0.02)), (3 * n + 3, complex(-0.04, 0.))] {
+            field.set(entry, 0, v);
+        }
+        let a = complex(-0.2, 1.3);
+        for b in [complex(-1., -0.4), complex(-0.2 + 1e-3, 1.3)] {
+            let mut pair = Series::new(&[], grid.maximum);
+            let matrix = column_blocks(&field, n).remove(0);
+            let (charge, bounded) = dual.add_fast_response_pairs(&mut pair, (0, 12.), 12., &[(a, b, &matrix)]).unwrap();
+            assert_eq!((charge, bounded), (0., 0), "every component has an exact form");
+            let mut split = Series::new(&[a, b], grid.maximum);
+            let scale = cdiv(complex(1., 0.), csub(a, b));
+            let mut columns = Dense::zeros(d, 2);
+            for r in 0..d {
+                columns.set(r, 0, cmul(field.at(r, 0), scale));
+                columns.set(r, 1, csub(ZERO, cmul(field.at(r, 0), scale)));
+            }
+            dual.add_fast_response(&mut split, (0, 12.), 12., 0, &columns).unwrap();
+            let x = dual.evaluate(&pair, &grid).unwrap();
+            let y = dual.evaluate(&split, &grid).unwrap();
+            let size = y.iter().map(|z| cabs(*z)).fold(0_f64, f64::max);
+            let misfit = x.iter().zip(&y).map(|(p, q)| cabs(csub(*p, *q))).fold(0_f64, f64::max);
+            assert!(size > 1e-6 && misfit <= 1e-7 * size, "b = {b:?}: misfit {misfit:e} of {size:e}");
+        }
+    }
+
+    #[test]
     fn error_estimate_fast_phase_population_source_averages_out() {
         // A population residual oscillating at 50/us produces only an O(a/nu)
         // error; the central slot receives it with its physical phase.
@@ -1742,7 +1942,7 @@ mod tests {
     /// Basis and halo estimates of the driven model of the halo test, plus
     /// (with `weak > 0`) a second drive at 7/us on the forbidden pair 0-3 at
     /// `weak` times the first drive: (dual diagnostics, basis, halo maxima).
-    fn driven_estimates(weak: f64) -> (super::super::slow_dual::SlowDualDiagnostics, f64, f64) {
+    fn driven_estimates(weak: f64) -> (super::super::slow_dual::SlowDualDiagnostics, f64, f64, f64) {
         use super::super::b0_inverse::P0Policy;
         use super::super::coordinates::InitialView;
         use super::super::directions::{shift_invert, InnerSolve};
@@ -1804,7 +2004,7 @@ mod tests {
         };
         let basis = dual.basis_estimate(&view, &[]).unwrap();
         let halo = dual.halo_estimate(owned, &view, &[], HaloOptions::default()).unwrap();
-        (dual.diagnostics().clone(), basis.maximum, halo.estimate.maximum)
+        (dual.diagnostics().clone(), basis.maximum, halo.estimate.maximum, basis.margin)
     }
 
     #[test]
@@ -1815,14 +2015,16 @@ mod tests {
         // slots, and the estimates must move by about the coupling, not by the
         // structure: the slow charges and halo modes they reach are charged
         // or returned at their strength.
-        let (plain, basis, halo) = driven_estimates(0.);
-        let (perturbed, basis_p, halo_p) = driven_estimates(1e-7);
+        let (plain, basis, halo, margin) = driven_estimates(0.);
+        let (perturbed, basis_p, halo_p, margin_p) = driven_estimates(1e-7);
         println!("basis {basis:e} -> {basis_p:e}, halo {halo:e} -> {halo_p:e}, unrepresented {} at {:e}", perturbed.unrepresented_slow_charges, perturbed.unrepresented_rate);
         assert_eq!(plain.weak_operator_charges, 0);
         assert_eq!(perturbed.weak_operator_charges, 2);
         assert_eq!(perturbed.slow_charges.len(), plain.slow_charges.len(), "weak couplings shape no slots");
         assert!(perturbed.unrepresented_slow_charges > 0, "the weak drive reaches slow charges");
         assert!(perturbed.unrepresented_rate < 1e-5, "coupling into them {:e}", perturbed.unrepresented_rate);
+        assert!(margin_p > 0. && margin_p < 1e-6 * basis_p, "charged from the slow error state's norm: {margin_p:e}");
+        assert_eq!(margin, 0., "nothing to charge without weak couplings");
         assert!((basis_p - basis).abs() < 1e-4 * basis, "basis {basis:e} -> {basis_p:e}");
         assert!((halo_p - halo).abs() < 1e-4 * halo, "halo {halo:e} -> {halo_p:e}");
     }
