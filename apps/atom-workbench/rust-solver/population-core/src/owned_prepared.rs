@@ -5,7 +5,7 @@
 //! each mutable plan owns its own scratch. Input/output mode order is explicit,
 //! and reverse dependencies retain every path that returns to the output.
 use std::{collections::{BTreeMap,BTreeSet},sync::Arc,time::Instant};
-use crate::{AwbStats,C,Coefficient,Execution,Lapack,Link,Map,Number,Plan,Workspace,execute,ns,product};
+use crate::{AwbStats,C,Coefficient,Execution,Lapack,Link,Map,Number,Plan,StageProfile,Workspace,execute,ns,product};
 use crate::preparation::{Charge,FourierMatrices,GaugedSource,GaugePolicy,ModelView,PhaseBasis};
 use crate::preparation::primitives::{self,PrimitivePreparation};
 
@@ -73,7 +73,7 @@ pub struct OwnedPencil {
     // Keeps the coordinate metadata alive even if its factory is dropped.
     primitives:Arc<PrimitivePreparation>,
     input_modes:Vec<Charge>,output_modes:Vec<Charge>,
-    plan:Plan,complex:Workspace<C>,absolute:Workspace<f64>,stats:AwbStats,
+    plan:Plan,complex:Workspace<C>,absolute:Workspace<f64>,stats:AwbStats,profile:StageProfile,
     diagnostics:DomainDiagnostics,
 }
 
@@ -217,7 +217,7 @@ impl OwnedPrepared {
             complete_reverse_dependencies:true,arbitrary_complex_action:true,roundoff_terms,
             prepared_e_conjugacy_defect_bound:e_defect,prepared_f_conjugacy_defect_bound:f_defect,preparation_budget_is_population_error_bound:false};
         Ok(OwnedPencil{primitives:Arc::clone(&self.primitives),input_modes:input_modes.to_vec(),output_modes:output_modes.to_vec(),plan,
-            complex:Workspace::default(),absolute:Workspace::default(),stats:AwbStats{prepared_bytes:bytes as u64,preparation_ns:ns(began),..AwbStats::default()},diagnostics})
+            complex:Workspace::default(),absolute:Workspace::default(),stats:AwbStats{prepared_bytes:bytes as u64,preparation_ns:ns(began),..AwbStats::default()},profile:StageProfile::default(),diagnostics})
     }
 }
 
@@ -230,6 +230,9 @@ impl OwnedPencil {
     pub(super) fn real_preparation_defects(&self)->(f64,f64){(self.diagnostics.prepared_e_conjugacy_defect_bound,self.diagnostics.prepared_f_conjugacy_defect_bound)}
     pub fn primitives(&self)->&PrimitivePreparation{&self.primitives}
     pub fn workspace_bytes(&self)->usize{self.complex.bytes()+self.absolute.bytes()}
+    /// Per-stage wall time of apply_into/apply_shifted_into (diagnostic).
+    pub fn stage_profile(&self)->&StageProfile{&self.profile}
+    pub fn reset_stage_profile(&mut self){self.profile=StageProfile::default();}
     fn validate(&self,input:&[C],rhs:usize,lengths:&[usize])->Result<(),String>{
         if rhs==0||rhs>self.plan.max_rhs{return Err("RHS count exceeds this owned plan; caller must chunk complete columns".into());}
         let ni=product(&[self.input_dimension(),rhs])?;let no=product(&[self.output_dimension(),rhs])?;
@@ -239,7 +242,7 @@ impl OwnedPencil {
     pub fn apply_into(&mut self,input:&[C],rhs:usize,mass:&mut[C],pencil:&mut[C])->Result<(),String>{
         self.validate(input,rhs,&[mass.len(),pencil.len()])?;let began=Instant::now();
         self.complex.prepare(&self.plan,rhs)?;self.complex.x.copy_from_slice(input);
-        execute(&self.plan,&mut self.complex,rhs,&mut self.stats)?;
+        execute(&self.plan,&mut self.complex,rhs,&mut self.stats,&mut self.profile)?;
         mass.copy_from_slice(&self.complex.mass);pencil.copy_from_slice(&self.complex.pencil);
         self.stats.apply_calls+=1;self.stats.columns+=rhs as u64;self.stats.apply_ns+=ns(began);Ok(())
     }
@@ -247,14 +250,14 @@ impl OwnedPencil {
     pub fn action_magnitudes_into(&mut self,input:&[C],rhs:usize,mass:&mut[f64],pencil:&mut[f64])->Result<(),String>{
         self.validate(input,rhs,&[mass.len(),pencil.len()])?;let began=Instant::now();
         self.absolute.prepare(&self.plan,rhs)?;for(x,z)in self.absolute.x.iter_mut().zip(input){*x=z.re.hypot(z.im);}
-        execute(&self.plan,&mut self.absolute,rhs,&mut self.stats)?;
+        execute(&self.plan,&mut self.absolute,rhs,&mut self.stats,&mut StageProfile::default())?;
         mass.copy_from_slice(&self.absolute.mass);pencil.copy_from_slice(&self.absolute.pencil);
         self.stats.absolute_calls+=1;self.stats.absolute_ns+=ns(began);Ok(())
     }
     pub fn apply_shifted_into(&mut self,input:&[C],rhs:usize,shift:C,output:&mut[C])->Result<(),String>{
         self.validate(input,rhs,&[output.len()])?;if !shift.finite(){return Err("Nonfinite owned pencil shift".into());}
         let began=Instant::now();self.complex.prepare(&self.plan,rhs)?;self.complex.x.copy_from_slice(input);
-        execute(&self.plan,&mut self.complex,rhs,&mut self.stats)?;
+        execute(&self.plan,&mut self.complex,rhs,&mut self.stats,&mut self.profile)?;
         for(f,e)in self.complex.pencil.iter_mut().zip(&self.complex.mass){
             *f=C{re:shift.re*e.re-shift.im*e.im-f.re,im:shift.re*e.im+shift.im*e.re-f.im};
             if !f.finite(){return Err("Nonfinite owned complete shifted action".into());}

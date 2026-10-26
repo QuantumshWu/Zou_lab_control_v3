@@ -231,20 +231,35 @@ fn thin<T:Number>(p:&Plan,stage:usize,input:&[T],out:&mut[T],input_width:usize,o
         }
     }Ok(())
 }
-fn execute<T:Number>(p:&Plan,w:&mut Workspace<T>,rhs:usize,stats:&mut AwbStats)->Result<(),String>{
-    hilbert(p,0,&w.x,&mut w.dx,rhs,1.,true,false,stats);
+/// Wall-clock time spent in each pencil stage, summed over applications.
+/// Diagnostic only; it never influences arithmetic or scheduling.
+#[derive(Clone,Debug,Default)]
+pub struct StageProfile{pub applications:u64,pub nanos:[u64;STAGE_COUNT]}
+pub const STAGE_COUNT:usize=9;
+pub const STAGE_NAMES:[&str;STAGE_COUNT]=["dx=[S,x]","J=x+dx+[S,dx]/2","z=K vec(J_EE)","E assembly","F left NL*J","F right J*NR","F recycling","F LGG+LOG","transport+check"];
+struct StageClock{last:Instant}
+impl StageClock{
+    fn start()->Self{Self{last:Instant::now()}}
+    fn mark(&mut self,profile:&mut StageProfile,stage:usize){let now=Instant::now();profile.nanos[stage]+=(now-self.last).as_nanos()as u64;self.last=now;}
+}
+fn execute<T:Number>(p:&Plan,w:&mut Workspace<T>,rhs:usize,stats:&mut AwbStats,profile:&mut StageProfile)->Result<(),String>{
+    let mut clock=StageClock::start();
+    hilbert(p,0,&w.x,&mut w.dx,rhs,1.,true,false,stats);clock.mark(profile,0);
     embed(&p.maps[0],&w.x,&mut w.j,p.d,rhs);embed(&p.maps[1],&w.dx,&mut w.j,p.d,rhs);
-    hilbert(p,1,&w.dx,&mut w.j,rhs,0.5,true,false,stats);
+    hilbert(p,1,&w.dx,&mut w.j,rhs,0.5,true,false,stats);clock.mark(profile,1);
     for m in 0..p.nj{for i in 0..p.e{for j in 0..p.e{for b in 0..rhs{w.ee[((m*p.e+i)*p.e+j)*rhs+b]=w.j[(m*p.d+(p.g+i)*p.n+p.g+j)*rhs+b];}}}}
-    thin(p,4,&w.ee,&mut w.z,p.e*p.e,p.rank,None,rhs,&mut w.packed,&mut w.product,stats)?;
+    thin(p,4,&w.ee,&mut w.z,p.e*p.e,p.rank,None,rhs,&mut w.packed,&mut w.product,stats)?;clock.mark(profile,2);
     embed(&p.maps[2],&w.j,&mut w.mass,p.d,rhs);
     for(&s,&t)in p.maps[3].source.iter().zip(&p.maps[3].target){for(row,&rr)in p.gg.iter().enumerate(){for b in 0..rhs{T::add(&mut w.mass[(t*p.d+rr)*rhs+b],w.z[(s*p.rank+row)*rhs+b]);}}}
-    hilbert(p,2,&w.j,&mut w.pencil,rhs,1.,false,false,stats);hilbert(p,3,&w.j,&mut w.pencil,rhs,1.,false,true,stats);
-    thin(p,5,&w.ee,&mut w.pencil,p.e*p.e,p.d,Some(&p.gg),rhs,&mut w.packed,&mut w.product,stats)?;
+    clock.mark(profile,3);
+    hilbert(p,2,&w.j,&mut w.pencil,rhs,1.,false,false,stats);clock.mark(profile,4);
+    hilbert(p,3,&w.j,&mut w.pencil,rhs,1.,false,true,stats);clock.mark(profile,5);
+    thin(p,5,&w.ee,&mut w.pencil,p.e*p.e,p.d,Some(&p.gg),rhs,&mut w.packed,&mut w.product,stats)?;clock.mark(profile,6);
     thin(p,6,&w.z,&mut w.pencil,p.rank,p.d,Some(&p.gg),rhs,&mut w.packed,&mut w.product,stats)?;
-    thin(p,7,&w.z,&mut w.pencil,p.rank,p.d,Some(&p.optical),rhs,&mut w.packed,&mut w.product,stats)?;
+    thin(p,7,&w.z,&mut w.pencil,p.rank,p.d,Some(&p.optical),rhs,&mut w.packed,&mut w.product,stats)?;clock.mark(profile,7);
     for m in 0..p.no{for i in 0..p.d*rhs{let at=m*p.d*rhs+i;T::transport(&mut w.pencil[at],p.frequency[m],w.mass[at]);}}
-    if w.mass.iter().chain(&w.pencil).any(|x|!x.finite()){return Err("Nonfinite complete native E/F result".into());}Ok(())
+    if w.mass.iter().chain(&w.pencil).any(|x|!x.finite()){return Err("Nonfinite complete native E/F result".into());}
+    clock.mark(profile,8);profile.applications+=1;Ok(())
 }
 
 struct Layout {rows:usize,cols:usize,rs:usize,cs:usize,span:usize,begin:usize,end:usize}
@@ -301,7 +316,7 @@ fn guarded(error:*mut u8,capacity:u64,action:impl FnOnce()->Result<(),String>)->
         let el=buffer(mass.data,mass.length,mass.row_stride,mass.column_stride,p.no*p.d,rhs)?;
         let fl=buffer(pencil.data,pencil.length,pencil.row_stride,pencil.column_stride,p.no*p.d,rhs)?;
         if overlap(&il,&el)||overlap(&il,&fl)||overlap(&el,&fl){return Err("Input/E/F buffers must not overlap".into());}
-        let start=Instant::now();h.complex.prepare(p,rhs)?;load(input,&il,&mut h.complex)?;execute(p,&mut h.complex,rhs,&mut h.stats)?;
+        let start=Instant::now();h.complex.prepare(p,rhs)?;load(input,&il,&mut h.complex)?;execute(p,&mut h.complex,rhs,&mut h.stats,&mut StageProfile::default())?;
         store_output(mass.data,&el,&h.complex.mass);store_output(pencil.data,&fl,&h.complex.pencil);
         h.stats.apply_calls+=1;h.stats.columns+=rhs as u64;h.stats.apply_ns+=ns(start);h.stats.workspace_bytes=(h.complex.bytes()+h.real.bytes())as u64;Ok(())})
 }
@@ -313,7 +328,7 @@ fn guarded(error:*mut u8,capacity:u64,action:impl FnOnce()->Result<(),String>)->
         let el=buffer(mass.data,mass.length,mass.row_stride,mass.column_stride,p.no*p.d,rhs)?;
         let fl=buffer(pencil.data,pencil.length,pencil.row_stride,pencil.column_stride,p.no*p.d,rhs)?;
         if overlap(&il,&el)||overlap(&il,&fl)||overlap(&el,&fl){return Err("Input and envelope buffers must not overlap".into());}
-        let start=Instant::now();h.real.prepare(p,rhs)?;load(input,&il,&mut h.real)?;execute(p,&mut h.real,rhs,&mut h.stats)?;
+        let start=Instant::now();h.real.prepare(p,rhs)?;load(input,&il,&mut h.real)?;execute(p,&mut h.real,rhs,&mut h.stats,&mut StageProfile::default())?;
         store_output(mass.data,&el,&h.real.mass);store_output(pencil.data,&fl,&h.real.pencil);
         h.stats.absolute_calls+=1;h.stats.absolute_ns+=ns(start);h.stats.workspace_bytes=(h.complex.bytes()+h.real.bytes())as u64;Ok(())})
 }
@@ -332,7 +347,7 @@ fn guarded(error:*mut u8,capacity:u64,action:impl FnOnce()->Result<(),String>)->
         // Keep exactly the original full E/F arithmetic. This extension
         // only fuses their final linear combination and single boundary
         // write; it does not fold, truncate, or substitute an inner solve.
-        execute(p,&mut h.complex,rhs,&mut h.stats)?;
+        execute(p,&mut h.complex,rhs,&mut h.stats,&mut StageProfile::default())?;
         for (f,e) in h.complex.pencil.iter_mut().zip(&h.complex.mass){
             let combined=C{re:shift.re*e.re-shift.im*e.im-f.re,
                            im:shift.re*e.im+shift.im*e.re-f.im};

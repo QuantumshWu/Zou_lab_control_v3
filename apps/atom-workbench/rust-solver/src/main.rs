@@ -49,6 +49,8 @@ mod stationary_sylvester;
 mod unitary_monodromy;
 #[cfg(feature="population-core")]
 mod population_core_adapter;
+#[cfg(all(test,feature="population-core"))]
+mod kernel_bench;
 use lapack::Lapack;
 const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/2";
 const ATOMIC_MODEL_SCHEMA: &str = "rb87-dipole/2";
