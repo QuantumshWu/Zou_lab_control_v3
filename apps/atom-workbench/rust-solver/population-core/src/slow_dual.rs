@@ -79,7 +79,25 @@
 //! Populations are read out through the Hilbert basis `B`
 //! (`p_i = sum_ab B_ia X_ab conj(B_ib)`; the diagonal gauge cancels). Excited
 //! populations are read out from the adiabatically slaved excited block.
+//!
+//! # Weak couplings
+//!
+//! An operator charge whose couplings are all below `STRUCTURAL_COUPLING_FLOOR`
+//! of the largest coupling of their family (Hamiltonian, damping, recycling)
+//! is weak. Exactly as in the preparation, a weak coupling never shapes the
+//! structure: the slots are the slow charges two *significant* couplings
+//! reach, so a forbidden transition perturbed to 1e-7 of the drive does not
+//! triple the slow dimension. Weak couplings still act exactly in every
+//! elimination, slaving, return and residual (a halo mode that returns only
+//! through weak couplings contributes just those returns, see
+//! `error_estimate.rs`). The slow charges that only a
+//! path through a weak coupling reaches stay unrepresented: their ground
+//! block is held out of the eliminations (it is slow, not fast), and the
+//! couplings `K` from the slow columns into it are collected while `J_eff` is
+//! assembled. Over a horizon `T` such a charge gains at most `T ||K|| ||e_P||`
+//! from the slow error, which every estimate charges (`error_estimate.rs`).
 use super::*;
+use crate::preparation::STRUCTURAL_COUPLING_FLOOR;
 
 // ---------------------------------------------------------------------------
 // Small complex helpers
@@ -741,10 +759,19 @@ pub(crate) struct ChargeTerm {
     pub gamma: Option<Dense>,
     /// Recycling `R_p`: (ground entry a*g+b, excited entry i*e+j, coefficient).
     pub recycling: Vec<(usize, usize, C)>,
+    /// `R_p` as a dense `g^2 x e^2` matrix (rows a*g+b, columns i*e+j) when
+    /// at least a third of it is stored: a perturbed Hilbert basis fills every
+    /// entry, and one matrix product then costs what the entries of the
+    /// unperturbed (sparse) map cost one by one.
+    pub recycling_matrix: Option<Dense>,
     /// Stored entries `(row, column, value)` of `H_p` and `Gamma_p` when they
     /// are sparse enough for entrywise products (dipole couplings are).
     pub hamiltonian_entries: Option<Vec<(usize, usize, C)>>,
     pub gamma_entries: Option<Vec<(usize, usize, C)>>,
+    /// False for a weak term (module docs): every coupling below
+    /// `STRUCTURAL_COUPLING_FLOOR` of the largest of its family. The central
+    /// term is always significant.
+    pub significant: bool,
 }
 
 /// Stored entries of a matrix that is sparse enough (under a third of its
@@ -760,6 +787,28 @@ fn sparse_entries(a: &Dense) -> Option<Vec<(usize, usize, C)>> {
         }
     }
     (3 * entries.len() < a.rows * a.cols).then_some(entries)
+}
+
+/// Largest entry of a frame term in each family: Hamiltonian, damping,
+/// recycling. At the central charge the Hamiltonian diagonal (the energies)
+/// is not a coupling and is left out, as in the preparation's
+/// `largest_coupling`.
+fn coupling_sizes(term: &ChargeTerm, central: bool) -> [f64; 3] {
+    let largest = |m: &Option<Dense>, skip_diagonal: bool| -> f64 {
+        m.as_ref().map_or(0., |m| {
+            let mut x = 0_f64;
+            for j in 0..m.cols {
+                for i in 0..m.rows {
+                    if !(skip_diagonal && i == j) {
+                        x = x.max(cabs(m.at(i, j)));
+                    }
+                }
+            }
+            x
+        })
+    };
+    let recycling = term.recycling.iter().map(|&(_, _, z)| cabs(z)).fold(0_f64, f64::max);
+    [largest(&term.hamiltonian, central), largest(&term.gamma, false), recycling]
 }
 
 pub(crate) struct FrameLiouvillian {
@@ -809,9 +858,22 @@ impl FrameLiouvillian {
                     }
                 }
             }
+            let recycling_matrix = (!recycling.is_empty() && 3 * recycling.len() >= g * g * e * e).then(|| {
+                let mut r = Dense::zeros(g * g, e * e);
+                for &(ab, ij, v) in &recycling {
+                    r.set(ab, ij, v);
+                }
+                r
+            });
             let hamiltonian_entries = hamiltonian.as_ref().and_then(sparse_entries);
             let gamma_entries = gamma.as_ref().and_then(sparse_entries);
-            terms.push(ChargeTerm { charge, hamiltonian, gamma, recycling, hamiltonian_entries, gamma_entries });
+            terms.push(ChargeTerm { charge, hamiltonian, gamma, recycling, recycling_matrix, hamiltonian_entries, gamma_entries, significant: true });
+        }
+        let sizes: Vec<[f64; 3]> = terms.iter().map(|t| coupling_sizes(t, t.charge.iter().all(|&v| v == 0))).collect();
+        let reference: Vec<f64> = (0..3).map(|k| sizes.iter().map(|s| s[k]).fold(0_f64, f64::max)).collect();
+        for (term, size) in terms.iter_mut().zip(&sizes) {
+            let central = term.charge.iter().all(|&v| v == 0);
+            term.significant = central || (0..3).any(|k| reference[k] > 0. && size[k] >= STRUCTURAL_COUPLING_FLOOR * reference[k]);
         }
         Ok(Self { n, g, e, terms, axes })
     }
@@ -856,9 +918,7 @@ impl FrameLiouvillian {
             if let Some(entries) = &term.gamma_entries {
                 sparse(entries, complex(-0.5, 0.), complex(-0.5, 0.), &mut out);
             }
-            for (x, o) in xs.iter().zip(out.iter_mut()) {
-                self.add_recycling(term, x, o);
-            }
+            self.add_recycling(term, xs, &mut out, lap)?;
             return Ok(out);
         }
         let side = side_by_side(xs, n);
@@ -883,9 +943,7 @@ impl FrameLiouvillian {
         if let Some(gm) = &term.gamma {
             both(gm, &|l, r| cscale(cadd(l, r), -0.5), &mut out)?;
         }
-        for (x, o) in xs.iter().zip(out.iter_mut()) {
-            self.add_recycling(term, x, o);
-        }
+        self.add_recycling(term, xs, &mut out, lap)?;
         Ok(out)
     }
 
@@ -907,23 +965,56 @@ impl FrameLiouvillian {
                 out.data[k] = csub(out.data[k], cscale(cadd(gx.data[k], xg.data[k]), 0.5));
             }
         }
-        self.add_recycling(term, x, &mut out);
+        let mut outs = vec![out];
+        self.add_recycling(term, &[x], &mut outs, lap)?;
+        Ok(outs.pop().expect("one block"))
+    }
+
+    /// Recycled ground blocks `R_p(X_EE)` of many blocks: `g^2 x m`, row
+    /// `a*g+b`, one column per block. A dense map is one matrix product.
+    pub fn recycled(&self, term: &ChargeTerm, xs: &[&Dense], lap: &Lapack) -> Result<Dense, String> {
+        let (g, e) = (self.g, self.e);
+        let m = xs.len();
+        if let Some(r) = &term.recycling_matrix {
+            let mut excited = Dense::zeros(e * e, m);
+            for (column, x) in xs.iter().enumerate() {
+                for j in 0..e {
+                    for i in 0..e {
+                        excited.set(i * e + j, column, x.at(g + i, g + j));
+                    }
+                }
+            }
+            return r.multiply(&excited, lap);
+        }
+        let mut out = Dense::zeros(g * g, m);
+        for (column, x) in xs.iter().enumerate() {
+            for &(ab, ij, v) in &term.recycling {
+                out.add_at(ab, column, cmul(v, x.at(g + ij / e, g + ij % e)));
+            }
+        }
         Ok(out)
     }
 
-    fn add_recycling(&self, term: &ChargeTerm, x: &Dense, out: &mut Dense) {
-        let (g, e) = (self.g, self.e);
-        for &(ab, ij, v) in &term.recycling {
-            let (a, b) = (ab / g, ab % g);
-            let (i, j) = (ij / e, ij % e);
-            out.add_at(a, b, cmul(v, x.at(g + i, g + j)));
+    fn add_recycling(&self, term: &ChargeTerm, xs: &[&Dense], out: &mut [Dense], lap: &Lapack) -> Result<(), String> {
+        if term.recycling.is_empty() {
+            return Ok(());
         }
+        let g = self.g;
+        let recycled = self.recycled(term, xs, lap)?;
+        for (column, o) in out.iter_mut().enumerate() {
+            for a in 0..g {
+                for b in 0..g {
+                    o.add_at(a, b, recycled.at(a * g + b, column));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Ground block of `L_p X` only (row-major g x g). `Gamma` acts on the
     /// excited block and cannot reach it; the commutator and recycling can.
-    pub fn apply_ground_output(&self, term: &ChargeTerm, x: &Dense) -> Vec<C> {
-        let (n, g, e) = (self.n, self.g, self.e);
+    pub fn apply_ground_output(&self, term: &ChargeTerm, x: &Dense, lap: &Lapack) -> Result<Vec<C>, String> {
+        let (n, g) = (self.n, self.g);
         let mut out = vec![ZERO; g * g];
         if let Some(h) = &term.hamiltonian {
             for a in 0..g {
@@ -937,11 +1028,12 @@ impl FrameLiouvillian {
                 }
             }
         }
-        for &(ab, ij, v) in &term.recycling {
-            let (i, j) = (ij / e, ij % e);
-            out[ab] = cadd(out[ab], cmul(v, x.at(g + i, g + j)));
+        if !term.recycling.is_empty() {
+            for (ab, v) in self.recycled(term, &[x], lap)?.data.iter().enumerate() {
+                out[ab] = cadd(out[ab], *v);
+            }
         }
-        out
+        Ok(out)
     }
 
     /// `L_p E_ab` for the ground unit matrix `E_ab`: only the commutator acts
@@ -1192,10 +1284,9 @@ impl FullBlockSolver {
         let (n, g) = (frame.n, frame.g);
         let minimum_denominator = sylvester.minimum_denominator(z);
         let zero = frame.zero_charge();
-        let recycling = frame.term(&zero).map(|t| t.recycling.clone()).unwrap_or_default();
         let mut woodbury = None;
         let mut woodbury_condition = 1.;
-        if !recycling.is_empty() {
+        if let Some(term) = frame.term(&zero).filter(|t| !t.recycling.is_empty()) {
             let rank = g * g;
             let units: Vec<Dense> = (0..rank)
                 .map(|ab| {
@@ -1207,12 +1298,11 @@ impl FullBlockSolver {
             let refs: Vec<&Dense> = units.iter().collect();
             let ground_images = sylvester.solve_all(z, &refs, lap)?;
             // K = I - V_R W with V_R X = recycling functional of X_EE.
+            let images: Vec<&Dense> = ground_images.iter().collect();
+            let recycled = frame.recycled(term, &images, lap)?;
             let mut k = Dense::identity(rank);
-            for (column, image) in ground_images.iter().enumerate() {
-                let values = recycle_ground(frame, &recycling, image);
-                for (row, v) in values.iter().enumerate() {
-                    k.add_at(row, column, csub(ZERO, *v));
-                }
+            for (entry, v) in k.data.iter_mut().zip(&recycled.data) {
+                *entry = csub(*entry, *v);
             }
             let factor = LuFactor::new(&k, lap)?;
             let inverse = factor.inverse(lap)?;
@@ -1232,13 +1322,14 @@ impl FullBlockSolver {
         let Some(factor) = &self.woodbury else { return Ok(first) };
         let g = frame.g;
         let zero = frame.zero_charge();
-        let recycling = &frame.term(&zero).expect("charge-0 term").recycling;
+        let term = frame.term(&zero).expect("charge-0 term");
+        let refs: Vec<&Dense> = first.iter().collect();
+        let amounts = factor.solve_matrix(&frame.recycled(term, &refs, lap)?, lap)?;
         let mut corrected: Vec<Dense> = Vec::with_capacity(ys.len());
-        for (y, x) in ys.iter().zip(&first) {
-            let amount = factor.solve(&recycle_ground(frame, recycling, x), lap)?;
+        for (column, y) in ys.iter().enumerate() {
             let mut y2 = (*y).clone();
-            for (ab, a) in amount.iter().enumerate() {
-                y2.add_at(ab / g, ab % g, *a);
+            for ab in 0..g * g {
+                y2.add_at(ab / g, ab % g, amounts.at(ab, column));
             }
             corrected.push(y2);
         }
@@ -1249,16 +1340,6 @@ impl FullBlockSolver {
         }
         Ok(out)
     }
-}
-
-/// `V_R X`: the recycled ground-block amplitudes (row-major g x g vector).
-pub(crate) fn recycle_ground(frame: &FrameLiouvillian, recycling: &[(usize, usize, C)], x: &Dense) -> Vec<C> {
-    let (g, e) = (frame.g, frame.e);
-    let mut out = vec![ZERO; g * g];
-    for &(ab, ij, v) in recycling {
-        out[ab] = cadd(out[ab], cmul(v, x.at(g + ij / e, g + ij % e)));
-    }
-    out
 }
 
 impl BlockSolver {
@@ -1291,6 +1372,14 @@ pub struct SlowDualDiagnostics {
     pub slow_charges: Vec<Charge>,
     pub slow_dimension: usize,
     pub operator_charges: usize,
+    /// Operator charges whose couplings are all below
+    /// `STRUCTURAL_COUPLING_FLOOR` of the largest of their family.
+    pub weak_operator_charges: usize,
+    /// Slow charges that only paths through a weak coupling reach (not
+    /// slots) and that the slow columns actually couple into.
+    pub unrepresented_slow_charges: usize,
+    /// Frobenius norm of those couplings (rad/us); charged to every estimate.
+    pub unrepresented_rate: f64,
     pub eliminated_charge_blocks: usize,
     /// Expansion point `r_c` of every slot (`s_c = -i r_c`, rad/us).
     pub slot_rotation: Vec<f64>,
@@ -1412,22 +1501,36 @@ impl SlowDual {
         let ground_energy: Vec<f64> = (0..g).map(|a| -blocks.ge.left.t.at(a, a).im).collect();
 
         // --- Slow charges -------------------------------------------------
-        let operator_charges: Vec<Charge> = frame.terms.iter().map(|t| t.charge.clone()).collect();
-        let mut candidates: BTreeSet<Charge> = BTreeSet::new();
-        for p1 in operator_charges.iter().chain(std::iter::once(&zero)) {
-            for p2 in operator_charges.iter().chain(std::iter::once(&zero)) {
-                candidates.insert(add_charge(p1, p2, false)?);
+        // Slots are the slow charges two significant couplings reach from the
+        // central charge (module docs, "Weak couplings"). The slow charges
+        // that only paths through a weak coupling reach stay unrepresented:
+        // the couplings into them are collected below and charged.
+        let two_hops = |charges: &[&Charge]| -> Result<BTreeSet<Charge>, String> {
+            let mut out = BTreeSet::new();
+            for &p1 in charges.iter().chain(std::iter::once(&&zero)) {
+                for &p2 in charges.iter().chain(std::iter::once(&&zero)) {
+                    out.insert(add_charge(p1, p2, false)?);
+                }
+            }
+            Ok(out)
+        };
+        let is_slow = |c: &Charge| -> Result<bool, String> {
+            let nu = frequency(c)?;
+            Ok(*c != zero && (0..g).any(|a| (0..g).any(|b| (nu + ground_energy[a] - ground_energy[b]).abs() < cutoff)))
+        };
+        let strong: Vec<&Charge> = frame.terms.iter().filter(|t| t.significant).map(|t| &t.charge).collect();
+        let all: Vec<&Charge> = frame.terms.iter().map(|t| &t.charge).collect();
+        let candidates = two_hops(&strong)?;
+        let mut slots = vec![zero.clone()];
+        for c in &candidates {
+            if is_slow(c)? {
+                slots.push(c.clone());
             }
         }
-        let mut slots = vec![zero.clone()];
-        for c in candidates {
-            if c == zero {
-                continue;
-            }
-            let nu = frequency(&c)?;
-            let slow = (0..g).any(|a| (0..g).any(|b| (nu + ground_energy[a] - ground_energy[b]).abs() < cutoff));
-            if slow {
-                slots.push(c);
+        let mut unrepresented: BTreeSet<Charge> = BTreeSet::new();
+        for c in two_hops(&all)? {
+            if !candidates.contains(&c) && is_slow(&c)? {
+                unrepresented.insert(c);
             }
         }
         let slot_frequency: Vec<f64> = slots.iter().map(|c| frequency(c)).collect::<Result<_, _>>()?;
@@ -1471,7 +1574,8 @@ impl SlowDual {
         let mut build_solver = |c: &Charge, z_im: f64| -> Result<BlockSolver, String> {
             built.insert(shift_key(c, z_im));
             let z = complex(0., z_im);
-            let solver = if slot_of(c).is_some() {
+            // A slow charge keeps its ground block: only the rest is eliminated.
+            let solver = if slot_of(c).is_some() || unrepresented.contains(c) {
                 let s = NonGroundSolver::new(z, Arc::clone(&blocks), &lap)?;
                 minimum_denominator = minimum_denominator.min(s.minimum_denominator);
                 schur_condition = schur_condition.max(s.condition_estimate);
@@ -1521,6 +1625,17 @@ impl SlowDual {
                 slaved_population[s2].add_at(i, column, cmul(w, x.at(a, b)));
             }
         };
+        // Ground rows of the couplings into every unrepresented slow charge
+        // (`g^2 x dim` per charge; their Frobenius norm is charged).
+        let mut unrepresented_coupling: BTreeMap<Charge, Dense> = BTreeMap::new();
+        let mut couple_unrepresented = |c: &Charge, column: usize, ground: &dyn Fn(usize, usize) -> C| {
+            let k = unrepresented_coupling.entry(c.clone()).or_insert_with(|| Dense::zeros(g2, dim));
+            for a in 0..g {
+                for b in 0..g {
+                    k.add_at(a * g + b, column, ground(a, b));
+                }
+            }
+        };
         for (s, c) in slots.iter().enumerate() {
             for ab in 0..g2 {
                 let column = s * g2 + ab;
@@ -1532,15 +1647,26 @@ impl SlowDual {
             for term in &frame.terms {
                 let c2 = add_charge(c, &term.charge, false)?;
                 let target_slot = slot_of(&c2);
+                let held = target_slot.is_some() || unrepresented.contains(&c2);
                 let mut solver: Option<BlockSolver> = None;
                 for ab in 0..g2 {
                     let column = s * g2 + ab;
                     let mut y = frame.apply_to_ground_unit(term, ab / g, ab % g);
-                    if let Some(s2) = target_slot {
-                        // Direct P -> P coupling, then eliminate only the rest.
+                    if held {
+                        // Direct P -> P coupling (or into an unrepresented slow
+                        // charge), then eliminate only the rest.
+                        match target_slot {
+                            Some(s2) => {
+                                for a2 in 0..g {
+                                    for b2 in 0..g {
+                                        generator.add_at(s2 * g2 + a2 * g + b2, column, y.at(a2, b2));
+                                    }
+                                }
+                            }
+                            None => couple_unrepresented(&c2, column, &|a2, b2| y.at(a2, b2)),
+                        }
                         for a2 in 0..g {
                             for b2 in 0..g {
-                                generator.add_at(s2 * g2 + a2 * g + b2, column, y.at(a2, b2));
                                 y.set(a2, b2, ZERO);
                             }
                         }
@@ -1557,14 +1683,20 @@ impl SlowDual {
                     }
                     for term2 in &frame.terms {
                         let c3 = add_charge(&c2, &term2.charge, false)?;
-                        let Some(s3) = slot_of(&c3) else { continue };
+                        let Some(s3) = slot_of(&c3) else {
+                            if unrepresented.contains(&c3) {
+                                let image = frame.apply(term2, &x, &lap)?;
+                                couple_unrepresented(&c3, column, &|a, b| image.at(a, b));
+                            }
+                            continue;
+                        };
                         let image = frame.apply(term2, &x, &lap)?;
                         for a in 0..g {
                             for b in 0..g {
                                 generator.add_at(s3 * g2 + a * g + b, column, image.at(a, b));
                             }
                         }
-                        if target_slot.is_none() {
+                        if !held {
                             // Second hop from a fast charge into a slow one.
                             let w = second_hop.entry((ab, s3)).or_insert_with(|| Dense::zeros(n, n));
                             for a in 0..n {
@@ -1595,10 +1727,13 @@ impl SlowDual {
                     for term3 in &frame.terms {
                         let c4 = add_charge(c3, &term3.charge, false)?;
                         if let Some(s4) = slot_of(&c4) {
-                            let ground = frame.apply_ground_output(term3, &x2);
+                            let ground = frame.apply_ground_output(term3, &x2, &lap)?;
                             for (k, v) in ground.iter().enumerate() {
                                 generator.add_at(s4 * g2 + k, column, *v);
                             }
+                        } else if unrepresented.contains(&c4) {
+                            let ground = frame.apply_ground_output(term3, &x2, &lap)?;
+                            couple_unrepresented(&c4, column, &|a, b| ground[a * g + b]);
                         }
                     }
                 }
@@ -1606,6 +1741,10 @@ impl SlowDual {
         }
         if !generator.is_finite() {
             return Err("Nonfinite slow generator".into());
+        }
+        let unrepresented_rate = unrepresented_coupling.values().map(|k| k.frobenius().powi(2)).sum::<f64>().sqrt();
+        if !unrepresented_rate.is_finite() {
+            return Err("Nonfinite coupling into the unrepresented slow charges".into());
         }
 
         // --- Eigenbasis of J_eff -------------------------------------------
@@ -1667,6 +1806,9 @@ impl SlowDual {
             slow_charges: slots.clone(),
             slow_dimension: dim,
             operator_charges: frame.terms.len(),
+            weak_operator_charges: frame.terms.iter().filter(|t| !t.significant).count(),
+            unrepresented_slow_charges: unrepresented_coupling.len(),
+            unrepresented_rate,
             eliminated_charge_blocks: built.len(),
             slot_rotation: slot_rotation.clone(),
             optical_decay_floor,
@@ -1838,7 +1980,7 @@ impl SlowDual {
                 for term in &self.frame.terms {
                     let c2 = add_charge(c, &term.charge, false)?;
                     if let Some(slot2) = self.slot_of(&c2) {
-                        let ground = self.frame.apply_ground_output(term, &x2);
+                        let ground = self.frame.apply_ground_output(term, &x2, &self.lapack)?;
                         let block = out.entry(slot2).or_insert_with(|| Dense::zeros(g2, columns));
                         for (row, v) in ground.iter().enumerate() {
                             block.add_at(row, column, *v);
@@ -1902,18 +2044,40 @@ impl DressedFrame {
             }
         }
         // recycling[ab, i*n+k] = sum_{i'j'} R0[ab, i'j'] V_L[g+i', i] V_R^-1[k, g+j']
-        let mut recycling = Dense::zeros(g * g, n2);
-        for &(ab, ij, v) in recycling0 {
-            let (ip, jp) = (ij / e, ij % e);
+        //                     = (V_L,E^T R0_ab V_R^-1_E^T)[i, k] with the e x e
+        // block R0_ab: two products for all ab, whatever the map's sparsity.
+        let g2 = g * g;
+        let mut left_e = Dense::zeros(n, e);
+        let mut right_e = Dense::zeros(e, n);
+        for j in 0..e {
             for i in 0..n {
-                let li = cmul(v, left_vectors.at(g + ip, i));
+                left_e.set(i, j, left_vectors.at(g + j, i));
+                right_e.set(j, i, right_inverse.at(i, g + j));
+            }
+        }
+        let mut blocks = Dense::zeros(e, g2 * e);
+        for &(ab, ij, v) in recycling0 {
+            blocks.set(ij / e, ab * e + ij % e, v);
+        }
+        let product = left_e.multiply(&blocks, lap)?;
+        let mut stack = Dense::zeros(g2 * n, e);
+        for ab in 0..g2 {
+            for j in 0..e {
+                for i in 0..n {
+                    stack.set(ab * n + i, j, product.at(i, ab * e + j));
+                }
+            }
+        }
+        let sandwiched = stack.multiply(&right_e, lap)?;
+        let mut recycling = Dense::zeros(g2, n2);
+        for ab in 0..g2 {
+            for i in 0..n {
                 for k in 0..n {
-                    recycling.add_at(ab, i * n + k, cmul(li, right_inverse.at(k, g + jp)));
+                    recycling.set(ab, i * n + k, sandwiched.at(ab * n + i, k));
                 }
             }
         }
         let dim = slow_inverse_vectors.rows;
-        let g2 = g * g;
         let mut modal_recycling = Vec::with_capacity(slots);
         for s in 0..slots {
             let block = slow_inverse_vectors.block(0..dim, s * g2..(s + 1) * g2);
@@ -2481,7 +2645,33 @@ mod tests {
             for k in 0..n * n {
                 assert!(cabs(csub(actual[k], expected[k])) < 1e-12, "charge {:?} entry {k}", term.charge);
             }
-            let ground = frame.apply_ground_output(term, &x);
+            let ground = frame.apply_ground_output(term, &x, &lap).unwrap();
+            // The dense recycling representation (perturbed bases) agrees
+            // with the entry list.
+            if !term.recycling.is_empty() {
+                let (g, e) = (frame.g, frame.e);
+                let mut matrix = Dense::zeros(g * g, e * e);
+                for &(ab, ij, v) in &term.recycling {
+                    matrix.set(ab, ij, v);
+                }
+                let only_recycling = |recycling_matrix: Option<Dense>| ChargeTerm {
+                    charge: term.charge.clone(),
+                    hamiltonian: None,
+                    gamma: None,
+                    recycling: term.recycling.clone(),
+                    recycling_matrix,
+                    hamiltonian_entries: None,
+                    gamma_entries: None,
+                    significant: true,
+                };
+                let ys = [random_dense(n, n, 12), random_dense(n, n, 13)];
+                let refs: Vec<&Dense> = ys.iter().collect();
+                let listed = frame.recycled(&only_recycling(None), &refs, &lap).unwrap();
+                let product = frame.recycled(&only_recycling(Some(matrix)), &refs, &lap).unwrap();
+                for (a, b) in listed.data.iter().zip(&product.data) {
+                    assert!(cabs(csub(*a, *b)) < 1e-12);
+                }
+            }
             for a in 0..frame.g {
                 for b in 0..frame.g {
                     assert!(cabs(csub(ground[a * frame.g + b], expected[a * n + b])) < 1e-12);
@@ -2952,6 +3142,9 @@ mod tests {
                 slow_charges: vec![],
                 slow_dimension: dim,
                 operator_charges: 0,
+                weak_operator_charges: 0,
+                unrepresented_slow_charges: 0,
+                unrepresented_rate: 0.,
                 eliminated_charge_blocks: 0,
                 slot_rotation: vec![0.],
                 optical_decay_floor: 1.,

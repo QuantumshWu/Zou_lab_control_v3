@@ -62,7 +62,7 @@
 //! the domain-selection indicator.
 use super::*;
 use super::real_fourier::RealFourierMap;
-use super::slow_dual::{cabs, cadd, cdiv, cmul, complex, csub, frequency_key, recycle_ground, robust_eigen, sandwich_all, Dense, LuFactor, Series, SlowDual, TimeGrid, ZERO};
+use super::slow_dual::{cabs, cadd, cdiv, cmul, complex, csub, frequency_key, robust_eigen, sandwich_all, Dense, LuFactor, Series, SlowDual, TimeGrid, ZERO};
 #[cfg(test)]
 use super::slow_dual::{cexp, cscale};
 
@@ -103,8 +103,10 @@ pub struct PopulationErrorEstimate {
     pub maximum_group: f64,
     /// `max(maximum_state, maximum_group) + margin`.
     pub maximum: f64,
-    /// Unsigned allowance included in `maximum`: zero for a resolved
-    /// estimate, 1 (no information on the probability scale) when the
+    /// Unsigned allowance included in `maximum`: for a resolved estimate the
+    /// charge for what the dual leaves out by magnitude (the slow charges only
+    /// weak couplings reach, see `unrepresented_charge`), zero when nothing
+    /// is left out; 1 (no information on the probability scale) when the
     /// candidate could not be resolved (see `unresolved`).
     pub margin: f64,
     /// Why the estimate is only the trivial conservative bound.
@@ -323,6 +325,17 @@ fn maxima(values: &[C], n: usize, groups: &[PopulationGroup]) -> (f64, f64) {
     (state, group)
 }
 
+/// Charge for the slow charges that only weak couplings reach (module docs of
+/// `slow_dual.rs`): over the horizon `T` their ground blocks gain at most
+/// `T ||K||_F ||e_P||` from the slow error `e_P`, and a population read from
+/// them is at most that norm (the readout weights `B_ia conj(B_ib)` have unit
+/// norm). The slow error's norm is taken as `g` times the largest population
+/// error (ground coherences of the populations' size). The charge vanishes
+/// with the weak couplings, so the estimate is continuous in them.
+fn unrepresented_charge(dual: &SlowDual, horizon: f64, maximum_state: f64) -> f64 {
+    horizon * dual.diagnostics.unrepresented_rate * dual.g as f64 * maximum_state
+}
+
 fn finish_estimate(
     dual: &SlowDual,
     values: &[C],
@@ -353,6 +366,8 @@ fn finish_estimate(
     if !maximum_state.is_finite() || !maximum_group.is_finite() {
         return Err("Nonfinite population error estimate".into());
     }
+    let horizon = times.iter().copied().fold(0_f64, f64::max);
+    let margin = unrepresented_charge(dual, horizon, maximum_state);
     Ok(PopulationErrorEstimate {
         times: times.to_vec(),
         states: n,
@@ -361,8 +376,8 @@ fn finish_estimate(
         group_error,
         maximum_state,
         maximum_group,
-        maximum: maximum_state.max(maximum_group),
-        margin: 0.,
+        maximum: maximum_state.max(maximum_group) + margin,
+        margin,
         unresolved: None,
         maximum_imaginary,
         elapsed_ms: began.elapsed().as_secs_f64() * 1000.,
@@ -683,22 +698,28 @@ impl SlowDual {
         let retained: Vec<Charge> = view.map.modes().to_vec();
         let retained_set: Modes = retained.iter().cloned().collect();
         let mut halo = Self::halo_modes(prepared, &retained)?;
+        // Keep the halo modes that return into the retained domain (or a slow
+        // slot) in one Liouvillian hop: only they feed the slow error. A mode
+        // whose returns are all weak couplings (module docs of `slow_dual.rs`)
+        // feeds it only at their strength: its returns are evaluated exactly,
+        // while its own populations, boundary and same-charge recycling are
+        // left out, as for a mode that does not return at all, so that the
+        // estimate is continuous as the weak couplings vanish.
+        let returns = |q: &Charge, significant: bool| -> bool {
+            self.frame.terms.iter().filter(|term| term.significant == significant).any(|term| {
+                add_charge(q, &term.charge, false).is_ok_and(|k| retained_set.contains(&k) || self.slot_of(&k).is_some())
+            })
+        };
         if !options.all_halo_modes {
-            // Keep the halo modes that return into the retained domain (or a
-            // slow slot) in one Liouvillian hop: only they feed the slow error.
-            let returns = |q: &Charge| -> bool {
-                self.frame.terms.iter().any(|term| {
-                    add_charge(q, &term.charge, false).is_ok_and(|k| retained_set.contains(&k) || self.slot_of(&k).is_some())
-                })
-            };
-            halo.retain(|q| returns(q));
+            halo.retain(|q| returns(q, true) || returns(q, false));
         }
+        let weak_only: Vec<bool> = halo.iter().map(|q| !options.all_halo_modes && !returns(q, true)).collect();
         let canonical = |q: &Charge| -> Charge {
             let negative: Charge = q.iter().map(|x| -x).collect();
             if q.iter().copied().find(|&v| v != 0).is_none_or(|v| v > 0) { q.clone() } else { negative }
         };
         let mut pair_index: BTreeMap<Charge, usize> = BTreeMap::new();
-        for q in &halo {
+        for (q, _) in halo.iter().zip(&weak_only).filter(|(_, &weak)| !weak) {
             let next = pair_index.len();
             pair_index.entry(canonical(q)).or_insert(next);
         }
@@ -724,12 +745,12 @@ impl SlowDual {
         let mut fast_targets: Vec<(Charge, (usize, f64), f64)> = Vec::new();
         let mut fast_index: BTreeMap<Charge, usize> = BTreeMap::new();
         let mut routes: Vec<Vec<(usize, (usize, f64), Option<usize>)>> = Vec::with_capacity(halo.len());
-        for q in &halo {
+        for (q, &weak) in halo.iter().zip(&weak_only) {
             let mut list = Vec::new();
             for (t, term) in self.frame.terms.iter().enumerate() {
                 let same_charge = term.charge.iter().all(|&v| v == 0);
                 let k = add_charge(q, &term.charge, false)?;
-                if !same_charge && !retained_set.contains(&k) && self.slot_of(&k).is_none() {
+                if (same_charge && weak) || (!same_charge && !retained_set.contains(&k) && self.slot_of(&k).is_none()) {
                     continue;
                 }
                 let target = self.target(&k, &frequency)?;
@@ -766,10 +787,11 @@ impl SlowDual {
             let mut fast_fields: Vec<Option<Dense>> = vec![None; fast_targets.len()];
             // This block's contribution of every pair (block columns only).
             let mut pair_series: BTreeMap<usize, Series> = BTreeMap::new();
-            let mut ground_returns: BTreeMap<(usize, usize, i64), (f64, Dense)> = BTreeMap::new();
+            // Keyed by (pair, slot, shift); no pair for weakly returning modes.
+            let mut ground_returns: BTreeMap<(Option<usize>, usize, i64), (f64, Dense)> = BTreeMap::new();
 
             for (local, q) in halo.iter().enumerate() {
-                let pair = pair_index[&canonical(q)];
+                let pair = (!weak_only[local]).then(|| pair_index[&canonical(q)]);
                 let nu_q = halo_frequency[local];
                 // Modal residual columns R_q[:, k] = F w_k - beta_k E w_k.
                 let mut residual = Dense::zeros(d, width);
@@ -783,12 +805,17 @@ impl SlowDual {
                 if norm == 0. {
                     continue;
                 }
-                pair_residual[pair] = pair_residual[pair].hypot(norm);
-                let series = pair_series.entry(pair).or_insert_with(|| Series::new(beta, grid.maximum));
+                // The pair's part of this block (indicators); weakly returning
+                // modes enter the total only.
+                let mut series = pair.map(|pair| {
+                    pair_residual[pair] = pair_residual[pair].hypot(norm);
+                    pair_series.entry(pair).or_insert_with(|| Series::new(beta, grid.maximum))
+                });
                 // A halo charge that is itself a slow slot: its ground block is
                 // slow content, a direct J_eff source (as in the basis estimate);
-                // only the non-ground rest gets the fast halo response below.
-                if let Some(own) = self.slot_of(q) {
+                // only the non-ground rest gets the fast halo response below. A
+                // slot returns through the central term, so it has a pair.
+                if let (Some(own), Some(series)) = (self.slot_of(q), series.as_mut()) {
                     let mut block = Dense::zeros(g * g, width);
                     for a in 0..g {
                         for b in 0..g {
@@ -809,28 +836,30 @@ impl SlowDual {
                 let (particular, resonant) = self.halo_response(&residual, beta, nu_q, floor)?;
                 near_resonant_terms += resonant.len();
 
-                // --- Direct populations of eta (physical phase exp(i nu_q t)) --
-                let mut populations = Dense::zeros(n, width);
-                for (k, x) in particular.iter().enumerate() {
-                    for (s, v) in self.frame_populations(x).into_iter().enumerate() {
-                        populations.set(s, k, v);
+                if let (Some(pair), Some(series)) = (pair, series.as_mut()) {
+                    // --- Direct populations of eta (physical phase exp(i nu_q t))
+                    let mut populations = Dense::zeros(n, width);
+                    for (k, x) in particular.iter().enumerate() {
+                        for (s, v) in self.frame_populations(x).into_iter().enumerate() {
+                            populations.set(s, k, v);
+                        }
                     }
-                }
-                total.add_direct(nu_q, start, &populations);
-                series.add_direct(nu_q, 0, &populations);
-                for term in &resonant {
-                    let p = self.frame_populations(&term.unit);
-                    let first = cadd(beta[term.column], complex(0., nu_q));
-                    let second = cadd(term.second, complex(0., nu_q));
-                    total.direct_near.push((p.clone(), first, second));
-                    series.direct_near.push((p, first, second));
-                }
+                    total.add_direct(nu_q, start, &populations);
+                    series.add_direct(nu_q, 0, &populations);
+                    for term in &resonant {
+                        let p = self.frame_populations(&term.unit);
+                        let first = cadd(beta[term.column], complex(0., nu_q));
+                        let second = cadd(term.second, complex(0., nu_q));
+                        total.direct_near.push((p.clone(), first, second));
+                        series.direct_near.push((p, first, second));
+                    }
 
-                // --- Initial boundary -eta(0) (physical matrix at t = 0) ------
-                for x in &particular {
-                    for k in 0..d {
-                        boundary_total.data[k] = csub(boundary_total.data[k], x.data[k]);
-                        pair_boundary[pair].data[k] = csub(pair_boundary[pair].data[k], x.data[k]);
+                    // --- Initial boundary -eta(0) (physical matrix at t = 0) --
+                    for x in &particular {
+                        for k in 0..d {
+                            boundary_total.data[k] = csub(boundary_total.data[k], x.data[k]);
+                            pair_boundary[pair].data[k] = csub(pair_boundary[pair].data[k], x.data[k]);
+                        }
                     }
                 }
 
@@ -878,14 +907,15 @@ impl SlowDual {
                             for (target_slot, returned) in self.slaved_returns(&k, &field)? {
                                 let modal = self.to_modal(target_slot, &returned)?;
                                 total.add_slow(0., start, &modal);
-                                series.add_slow(0., 0, &modal);
+                                if let Some(series) = series.as_mut() {
+                                    series.add_slow(0., 0, &modal);
+                                }
                             }
                         }
                     } else {
-                        for (column, x) in particular.iter().enumerate() {
-                            for (row, v) in self.same_charge_ground_return(x).into_iter().enumerate() {
-                                ground.add_at(row, column, v);
-                            }
+                        let returned = self.same_charge_ground_returns(&refs)?;
+                        for (entry, v) in ground.data.iter_mut().zip(&returned.data) {
+                            *entry = cadd(*entry, *v);
                         }
                     }
                     // Near-resonant terms: zero-initial pair sources. Their
@@ -897,7 +927,7 @@ impl SlowDual {
                         let column = resonant_term.column;
                         let image = if same_charge {
                             let mut out = Dense::zeros(n, n);
-                            for (row, v) in self.same_charge_ground_return(&resonant_term.unit).iter().enumerate() {
+                            for (row, v) in self.same_charge_ground_returns(&[&resonant_term.unit])?.data.iter().enumerate() {
                                 out.set(row / g, row % g, *v);
                             }
                             out
@@ -915,7 +945,9 @@ impl SlowDual {
                         if ground.frobenius() > 0. {
                             let modal = self.to_modal(slot, &ground)?;
                             total.add_pair(first_node, second_node, modal.data.clone());
-                            series.add_pair(first_node, second_node, modal.data);
+                            if let Some(series) = series.as_mut() {
+                                series.add_pair(first_node, second_node, modal.data);
+                            }
                         }
                         if same_charge {
                             continue;
@@ -941,7 +973,9 @@ impl SlowDual {
                         for (target_slot, returned) in self.slaved_returns(&k, &rest)? {
                             let modal = self.to_modal(target_slot, &returned)?;
                             total.add_pair(beta[column], resonant_term.second, modal.data.clone());
-                            series.add_pair(beta[column], resonant_term.second, modal.data);
+                            if let Some(series) = series.as_mut() {
+                                series.add_pair(beta[column], resonant_term.second, modal.data);
+                            }
                         }
                     }
                 }
@@ -951,7 +985,9 @@ impl SlowDual {
                 if ground.frobenius() > 0. {
                     let modal = self.to_modal(*slot, ground)?;
                     total.add_slow(*shift, start, &modal);
-                    pair_series.entry(*pair).or_insert_with(|| Series::new(beta, grid.maximum)).add_slow(*shift, 0, &modal);
+                    if let Some(pair) = pair {
+                        pair_series.entry(*pair).or_insert_with(|| Series::new(beta, grid.maximum)).add_slow(*shift, 0, &modal);
+                    }
                 }
             }
             // --- Exact dressed fast responses of this block's returns -------
@@ -1069,26 +1105,29 @@ impl SlowDual {
         }
     }
 
-    /// Ground block (row-major g x g) of what the halo reference left out at
-    /// the same charge: the recycling `R_0 X_EE` for the dressed no-jump
-    /// reference, or `(L_0 - D) X` for the diagonal one.
-    fn same_charge_ground_return(&self, x: &Dense) -> Vec<C> {
+    /// Ground blocks (`g^2 x m`, row `a*g+b`) of what the halo reference left
+    /// out at the same charge: the recycling `R_0 X_EE` for the dressed
+    /// no-jump reference, or `(L_0 - D) X` for the diagonal one.
+    fn same_charge_ground_returns(&self, xs: &[&Dense]) -> Result<Dense, String> {
         let (n, g) = (self.n, self.g);
         let zero = self.frame.zero_charge();
         let term = match self.frame.term(&zero) {
             Some(t) => t,
-            None => return vec![ZERO; g * g],
+            None => return Ok(Dense::zeros(g * g, xs.len())),
         };
         if self.dressed.is_some() {
-            return recycle_ground(&self.frame, &term.recycling, x);
+            return self.frame.recycled(term, xs, &self.lapack);
         }
-        let mut out = self.frame.apply_ground_output(term, x);
-        for a in 0..g {
-            for b in 0..g {
-                out[a * g + b] = csub(out[a * g + b], cmul(self.diagonal_reference[a * n + b], x.at(a, b)));
+        let mut out = Dense::zeros(g * g, xs.len());
+        for (column, x) in xs.iter().enumerate() {
+            let ground = self.frame.apply_ground_output(term, x, &self.lapack)?;
+            for a in 0..g {
+                for b in 0..g {
+                    out.set(a * g + b, column, csub(ground[a * g + b], cmul(self.diagonal_reference[a * n + b], x.at(a, b))));
+                }
             }
         }
-        out
+        Ok(out)
     }
 
     /// Physical populations `p_i = sum_ab B_ia X_ab conj(B_ib)` of a frame matrix.
@@ -1660,5 +1699,93 @@ mod tests {
             assert!(cosine > 0.9, "halo shape similarity {cosine}");
             assert_eq!(halo.modes[0].charge, vec![2], "the nearest shell carries the truncation error");
         }
+    }
+
+    /// Basis and halo estimates of the driven model of the halo test, plus
+    /// (with `weak > 0`) a second drive at 7/us on the forbidden pair 0-3 at
+    /// `weak` times the first drive: (dual diagnostics, basis, halo maxima).
+    fn driven_estimates(weak: f64) -> (super::super::slow_dual::SlowDualDiagnostics, f64, f64) {
+        use super::super::b0_inverse::P0Policy;
+        use super::super::coordinates::InitialView;
+        use super::super::directions::{shift_invert, InnerSolve};
+        use super::super::reduced::ReducedModel;
+        use super::super::runtime_core::RuntimeCore;
+        use super::super::trial::TrialSpace;
+        let model = test_model();
+        let zero = vec![0.; 16];
+        let mut cosine = vec![0.; 16];
+        cosine[2] = 1.2;
+        cosine[8] = 1.2;
+        let mut forbidden = vec![0.; 16];
+        forbidden[3] = 1.2 * weak;
+        forbidden[12] = 1.2 * weak;
+        let channels: Vec<_> = model.collapse.iter().map(|c| MatrixView { real: c, imag: &zero }).collect();
+        let blank = [0.; 16];
+        let strong = DriveView { omega: 6., cosine: MatrixView { real: &cosine, imag: &blank }, sine: MatrixView { real: &blank, imag: &blank } };
+        let forbidden = DriveView { omega: 7., cosine: MatrixView { real: &forbidden, imag: &blank }, sine: MatrixView { real: &blank, imag: &blank } };
+        let (drives, phases, modes) = if weak > 0. {
+            let phases = PhaseBasis::from_declared(&[6., 7.], None, &[vec![1, 0], vec![0, 1]]).unwrap();
+            (vec![strong, forbidden], phases, (-1..=1).map(|k| vec![k, 0]).collect::<Vec<Charge>>())
+        } else {
+            (vec![strong], PhaseBasis::from_declared(&[6.], None, &[vec![1]]).unwrap(), (-1..=1).map(|k| vec![k]).collect())
+        };
+        let view = ModelView {
+            dimension: 4,
+            hamiltonian: MatrixView { real: &model.h, imag: &zero },
+            collapse: &channels,
+            drives: &drives,
+            ground: &[true, true, false, false],
+            initial_index: 0,
+        };
+        let owned = OwnedPrepared::prepare(&view, phases, GaugePolicy::Identity, KernelPolicy::Csr).unwrap();
+        let mut core = RuntimeCore::from_owned(owned, InitialView { index: 0, real: None, imag: None }, P0Policy::EigenPreferred).unwrap();
+        let times: Vec<f64> = (0..101).map(|i| 0.1 * i as f64).collect();
+        let mut space = TrialSpace::new(&mut core, &modes, &[2.]).unwrap();
+        let inner = InnerSolve { maximum_steps: 12, relative_residual: 1e-3 };
+        while space.columns() < 30 {
+            let rows = space.rows();
+            let newest = space.columns() - 1;
+            let rhs = space.eq()[newest * rows..(newest + 1) * rows].to_vec();
+            let (direction, _) = shift_invert(&mut space.op, &rhs, 1, &[0], inner).unwrap();
+            if space.append(direction, 1).unwrap().is_empty() {
+                break;
+            }
+        }
+        let reduced = ReducedModel::build(&space).unwrap();
+        let owned = core.prepared();
+        let dual = SlowDual::prepare(owned, Default::default()).unwrap();
+        let view = CandidateView {
+            map: space.op.map(),
+            q: space.q(),
+            eq: space.eq(),
+            fq: space.fq(),
+            columns: space.columns(),
+            generator: &reduced.generator,
+            initial: &reduced.initial,
+            times: &times,
+        };
+        let basis = dual.basis_estimate(&view, &[]).unwrap();
+        let halo = dual.halo_estimate(owned, &view, &[], HaloOptions::default()).unwrap();
+        (dual.diagnostics().clone(), basis.maximum, halo.estimate.maximum)
+    }
+
+    #[test]
+    fn error_estimate_is_continuous_in_weak_couplings() {
+        // A forbidden transition switched on at 1e-7 of the drive adds weak
+        // operator charges and slow charges that only they reach (7, 13, 14,
+        // -1 rad/us are all below the cutoff here). They must not become
+        // slots, and the estimates must move by about the coupling, not by the
+        // structure: the slow charges and halo modes they reach are charged
+        // or returned at their strength.
+        let (plain, basis, halo) = driven_estimates(0.);
+        let (perturbed, basis_p, halo_p) = driven_estimates(1e-7);
+        println!("basis {basis:e} -> {basis_p:e}, halo {halo:e} -> {halo_p:e}, unrepresented {} at {:e}", perturbed.unrepresented_slow_charges, perturbed.unrepresented_rate);
+        assert_eq!(plain.weak_operator_charges, 0);
+        assert_eq!(perturbed.weak_operator_charges, 2);
+        assert_eq!(perturbed.slow_charges.len(), plain.slow_charges.len(), "weak couplings shape no slots");
+        assert!(perturbed.unrepresented_slow_charges > 0, "the weak drive reaches slow charges");
+        assert!(perturbed.unrepresented_rate < 1e-5, "coupling into them {:e}", perturbed.unrepresented_rate);
+        assert!((basis_p - basis).abs() < 1e-4 * basis, "basis {basis:e} -> {basis_p:e}");
+        assert!((halo_p - halo).abs() < 1e-4 * halo, "halo {halo:e} -> {halo_p:e}");
     }
 }
