@@ -63,12 +63,25 @@
 //!
 //! Evaluated are the halo charges that return into the retained domain or a
 //! slot through a significant coupling in one hop, and every slow halo charge
-//! (its own populations accumulate even without such a return). Each halo
-//! charge pair `{q, -q}` yields its own signed contribution, which is the
-//! domain-selection indicator.
+//! (its own populations accumulate even without such a return).
+//!
+//! # Indicators partition the halo estimate
+//!
+//! Every term of the halo series is linear in the residual of one halo charge
+//! `q`, so it is attributed to the pair `{q, -q}`: its own response, initial
+//! boundary (slow part and fast layer), ground returns, the exact dressed fast
+//! responses of its non-ground returns at every target charge, and its share
+//! of the margin. The pair's indicator is the maximum over the indicator
+//! samples of its signed contribution plus its margin, so the indicators sum
+//! to at least the halo estimate on those samples (when the samples miss the
+//! maximum of the full grid, the difference is spread over the indicators in
+//! proportion): a domain that keeps the pairs whose indicators exceed a
+//! remainder leaves at most that remainder (the engine's domain selection
+//! relies on this).
 use super::*;
 use super::real_fourier::RealFourierMap;
 use super::slow_dual::{cabs, cadd, cdiv, cmul, complex, csub, frequency_key, robust_eigen, sandwich_all, Dense, LuFactor, Series, SlowDual, TimeGrid, ZERO};
+use crate::parallel::Execution;
 #[cfg(test)]
 use super::slow_dual::{cexp, cscale};
 
@@ -127,8 +140,10 @@ pub struct HaloModeIndicator {
     /// Canonical member of the signed pair `{charge, -charge}`.
     pub charge: Charge,
     /// Max over time, states and groups of the pair's signed contribution
-    /// (its residual response, returns and slow boundary; the shared fast
-    /// responses enter the total only), on at most `INDICATOR_TIMES` samples.
+    /// (everything its halo residual drives: response, boundary, returns and
+    /// their fast responses) on at most `INDICATOR_TIMES` samples, plus its
+    /// share of the margin. The indicators of all pairs sum to at least the
+    /// halo estimate on those samples.
     pub indicator: f64,
     /// Frobenius norm of the pair's halo residual coefficients (diagnostic).
     pub residual_norm: f64,
@@ -209,6 +224,22 @@ impl Default for BasisOptions {
 
 /// Modal columns per block of the basis estimate (bounds its memory).
 const BASIS_BLOCK: usize = 8;
+
+/// A basis-estimate series, its output grid and the slaving fields of every
+/// block when they were deferred `(start, width, fields per fast charge)`.
+struct BasisSeries<'v> {
+    series: Series,
+    grid: TimeGrid<'v>,
+    deferred: Vec<(usize, usize, Vec<(Charge, Dense)>)>,
+}
+
+impl BasisSeries<'_> {
+    fn estimate(&mut self, dual: &SlowDual, times: &[f64], groups: &[PopulationGroup], began: Instant) -> Result<PopulationErrorEstimate, String> {
+        let populations = dual.evaluate(&self.series, &self.grid)?;
+        let margin = dual.unrepresented_margin(&self.series, &self.grid)?;
+        finish_estimate(dual, &populations, margin, times, groups, began)
+    }
+}
 /// Samples used for the per-pair halo indicators (a uniform subset of the
 /// output times, always including the last one).
 const INDICATOR_TIMES: usize = 64;
@@ -706,6 +737,53 @@ impl SlowDual {
     /// Basis estimate with explicit options (calibration and diagnostics).
     pub fn basis_estimate_with(&self, view: &CandidateView<'_>, groups: &[PopulationGroup], options: BasisOptions) -> Result<PopulationErrorEstimate, String> {
         let began = Instant::now();
+        let mut basis = match self.basis_series(view, options, false)? {
+            Ok(basis) => basis,
+            Err(reason) => return Ok(unresolved_estimate(self, view.times, groups, reason, began)),
+        };
+        basis.estimate(self, view.times, groups, began)
+    }
+
+    /// The screen (`basis_estimate_with` without the Markov-slaved drive-hop
+    /// returns) and, when `accept` takes its maximum, the full basis estimate
+    /// from the same series: the slaved returns are added to the screen's
+    /// series and it is evaluated once more, so a checkpoint whose screen
+    /// passes pays for the slaving and one evaluation, not for a second
+    /// modal residual and its fast responses. Returns the screen's maximum
+    /// and the full estimate (bitwise the series of `basis_estimate` up to
+    /// the order of its sums).
+    pub fn basis_estimate_screened(
+        &self,
+        view: &CandidateView<'_>,
+        groups: &[PopulationGroup],
+        accept: impl Fn(f64) -> bool,
+    ) -> Result<(f64, Option<PopulationErrorEstimate>), String> {
+        let began = Instant::now();
+        let mut basis = match self.basis_series(view, BasisOptions::default(), true)? {
+            Ok(basis) => basis,
+            Err(reason) => {
+                let estimate = unresolved_estimate(self, view.times, groups, reason, began);
+                return Ok((estimate.maximum, accept(estimate.maximum).then_some(estimate)));
+            }
+        };
+        let screen = basis.estimate(self, view.times, groups, began)?;
+        if !accept(screen.maximum) {
+            return Ok((screen.maximum, None));
+        }
+        for (start, width, fields) in std::mem::take(&mut basis.deferred) {
+            let refs: Vec<(Charge, &Dense)> = fields.iter().map(|(k, f)| (k.clone(), f)).collect();
+            for (target_slot, returned) in self.slaved_returns_all(&refs, width)? {
+                basis.series.add_slow(0., start, &self.to_modal(target_slot, &returned)?);
+            }
+        }
+        let full = basis.estimate(self, view.times, groups, began)?;
+        Ok((screen.maximum, Some(full)))
+    }
+
+    /// The series of the basis estimate; with `defer` the slaved returns'
+    /// fields are kept per block (`deferred`) instead of being added.
+    /// `Err(reason)`: the reduced candidate is unresolved.
+    fn basis_series<'a>(&self, view: &CandidateView<'a>, options: BasisOptions, defer: bool) -> Result<Result<BasisSeries<'a>, String>, String> {
         let (rows, m) = validate(view)?;
         let lap = &self.lapack;
         let n = self.n;
@@ -715,12 +793,13 @@ impl SlowDual {
         }
         let small = match SmallSource::new(lap, view.generator, view.initial, m) {
             Ok(small) => small,
-            Err(reason) => return Ok(unresolved_estimate(self, view.times, groups, reason, began)),
+            Err(reason) => return Ok(Err(reason)),
         };
         let grid = TimeGrid::new(view.times);
         let phases = &self.owner.hilbert.source.phases;
         let d = n * n;
         let mut series = Series::new(&small.exponents, grid.maximum);
+        let mut deferred = Vec::new();
         let weights = modal_weights(&small);
         // Modal residual columns, one block at a time: the residual is linear
         // in the candidate columns and (F Q - E Q G) V diag(w) =
@@ -770,7 +849,9 @@ impl SlowDual {
                     series.add_slow(shift, start, &self.to_modal(slot, &ground)?);
                 }
             }
-            if !slaving.is_empty() {
+            if defer {
+                deferred.push((start, width, slaving));
+            } else if !slaving.is_empty() {
                 let fields: Vec<(Charge, &Dense)> = slaving.iter().map(|(k, f)| (k.clone(), f)).collect();
                 for (target_slot, returned) in self.slaved_returns_all(&fields, width)? {
                     series.add_slow(0., start, &self.to_modal(target_slot, &returned)?);
@@ -778,9 +859,7 @@ impl SlowDual {
             }
             start += width;
         }
-        let populations = self.evaluate(&series, &grid)?;
-        let margin = self.unrepresented_margin(&series, &grid)?;
-        finish_estimate(self, &populations, margin, view.times, groups, began)
+        Ok(Ok(BasisSeries { series, grid, deferred }))
     }
 
     /// Halo modes of a retained domain: output modes reached from `input` by
@@ -888,18 +967,28 @@ impl SlowDual {
             let negative: Charge = q.iter().map(|x| -x).collect();
             if q.iter().copied().find(|&v| v != 0).is_none_or(|v| v > 0) { q.clone() } else { negative }
         };
+        // Every evaluated halo mode has a pair (a weakly returning one too:
+        // adding it removes its returns).
         let mut pair_index: BTreeMap<Charge, usize> = BTreeMap::new();
-        for (q, _) in halo.iter().zip(&weak_only).filter(|(_, &weak)| !weak) {
+        for q in &halo {
             let next = pair_index.len();
             pair_index.entry(canonical(q)).or_insert(next);
         }
         let pairs = pair_index.len();
-        // Indicators: each pair's block contributions on the indicator grid
-        // and its homogeneous slow amplitudes (the common exp(J t) part).
+        // Indicators: each pair's block contributions on the indicator grid,
+        // its homogeneous slow amplitudes (the common exp(J t) part) and the
+        // norm readout of the unrepresented coupling (its margin).
+        let unrepresented_rows = self.unrepresented_readout.first().map_or(0, |(_, r)| r.rows);
         let mut pair_values: Vec<Vec<C>> = vec![vec![ZERO; indicator_times.len() * n]; pairs];
+        let mut pair_unrepresented: Vec<Vec<C>> = vec![vec![ZERO; indicator_times.len() * unrepresented_rows]; pairs];
         let mut pair_homogeneous: Vec<Vec<C>> = vec![vec![ZERO; self.dimension()]; pairs];
         let mut pair_boundary: Vec<Dense> = vec![Dense::zeros(n, n); pairs];
         let mut pair_residual: Vec<f64> = vec![0.; pairs];
+        let mut pair_margin: Vec<f64> = vec![0.; pairs];
+        // The dressed parts of each pair's fast responses do not depend on the
+        // block's exponents: summed over the blocks, evaluated once.
+        let mut pair_dressed: Vec<Series> = (0..pairs).map(|_| Series::new(&[], grid.maximum)).collect();
+        let execution = Execution::new()?;
         let mut total = Series::new(&small.exponents, grid.maximum);
         let mut boundary_total = Dense::zeros(n, n);
         let mut near_resonant_terms = 0;
@@ -956,13 +1045,17 @@ impl SlowDual {
             // ground returns summed per (pair, slot, shift) before their
             // transformation to J_eff coordinates.
             let mut fast_fields: Vec<Option<Dense>> = vec![None; fast_targets.len()];
-            // This block's contribution of every pair (block columns only).
+            // This block's contribution of every pair (block columns only),
+            // and the non-ground returns of every pair per target charge.
             let mut pair_series: BTreeMap<usize, Series> = BTreeMap::new();
-            // Keyed by (pair, slot, shift); no pair for weakly returning modes.
-            let mut ground_returns: BTreeMap<(Option<usize>, usize, i64), (f64, Dense)> = BTreeMap::new();
+            let mut pair_fast: BTreeMap<(usize, usize), Dense> = BTreeMap::new();
+            // Keyed by (pair, slot, shift).
+            let mut ground_returns: BTreeMap<(usize, usize, i64), (f64, Dense)> = BTreeMap::new();
 
             for (local, q) in halo.iter().enumerate() {
-                let pair = (!weak_only[local]).then(|| pair_index[&canonical(q)]);
+                let pair = pair_index[&canonical(q)];
+                // A weakly returning mode contributes its returns only.
+                let complete = !weak_only[local];
                 let nu_q = halo_frequency[local];
                 // Modal residual columns R_q[:, k] = F w_k - beta_k E w_k.
                 let mut residual = Dense::zeros(d, width);
@@ -976,17 +1069,14 @@ impl SlowDual {
                 if norm == 0. {
                     continue;
                 }
-                // The pair's part of this block (indicators); weakly returning
-                // modes enter the total only.
-                let mut series = pair.map(|pair| {
-                    pair_residual[pair] = pair_residual[pair].hypot(norm);
-                    pair_series.entry(pair).or_insert_with(|| Series::new(beta, grid.maximum))
-                });
+                // The pair's part of this block (indicators).
+                pair_residual[pair] = pair_residual[pair].hypot(norm);
+                let series = pair_series.entry(pair).or_insert_with(|| Series::new(beta, grid.maximum));
                 // A halo charge that is itself a slow slot: its ground block is
                 // slow content, a direct J_eff source (as in the basis estimate);
                 // only the non-ground rest gets the fast halo response below. A
-                // slot returns through the central term, so it has a pair.
-                if let (Some(own), Some(series)) = (self.slot_of(q), series.as_mut()) {
+                // slot returns through the central term, so it is complete.
+                if let (Some(own), true) = (self.slot_of(q), complete) {
                     let mut block = Dense::zeros(g * g, width);
                     for a in 0..g {
                         for b in 0..g {
@@ -1007,7 +1097,7 @@ impl SlowDual {
                 let (particular, resonant) = self.halo_response(&residual, beta, nu_q, floor)?;
                 near_resonant_terms += resonant.len();
 
-                if let (Some(pair), Some(series)) = (pair, series.as_mut()) {
+                if complete {
                     // --- Direct populations of eta (physical phase exp(i nu_q t))
                     let mut populations = Dense::zeros(n, width);
                     for (k, x) in particular.iter().enumerate() {
@@ -1054,6 +1144,7 @@ impl SlowDual {
                     if let Some(index) = fast {
                         let images = self.frame.apply_all(term, &refs, lap)?;
                         let field = fast_fields[index].get_or_insert_with(|| Dense::zeros(d, width));
+                        let own = pair_fast.entry((pair, index)).or_insert_with(|| Dense::zeros(d, width));
                         for (column, image) in images.iter().enumerate() {
                             for b in 0..n {
                                 for a in 0..n {
@@ -1062,6 +1153,7 @@ impl SlowDual {
                                         ground.add_at(a * g + b, column, v);
                                     } else {
                                         field.add_at(a * n + b, column, v);
+                                        own.add_at(a * n + b, column, v);
                                     }
                                 }
                             }
@@ -1078,9 +1170,7 @@ impl SlowDual {
                             for (target_slot, returned) in self.slaved_returns(&k, &field)? {
                                 let modal = self.to_modal(target_slot, &returned)?;
                                 total.add_slow(0., start, &modal);
-                                if let Some(series) = series.as_mut() {
-                                    series.add_slow(0., 0, &modal);
-                                }
+                                series.add_slow(0., 0, &modal);
                             }
                         }
                     } else {
@@ -1128,9 +1218,7 @@ impl SlowDual {
                         if ground.frobenius() > 0. {
                             let modal = self.to_modal(slot, &ground)?;
                             total.add_pair(first_node, second_node, modal.data.clone());
-                            if let Some(series) = series.as_mut() {
-                                series.add_pair(first_node, second_node, modal.data);
-                            }
+                            series.add_pair(first_node, second_node, modal.data);
                         }
                         if same_charge {
                             continue;
@@ -1150,9 +1238,7 @@ impl SlowDual {
                         for (target_slot, returned) in self.slaved_returns(&k, &rest)? {
                             let modal = self.to_modal(target_slot, &returned)?;
                             total.add_pair(beta[column], resonant_term.second, modal.data.clone());
-                            if let Some(series) = series.as_mut() {
-                                series.add_pair(beta[column], resonant_term.second, modal.data);
-                            }
+                            series.add_pair(beta[column], resonant_term.second, modal.data);
                         }
                     }
                     if !sources.is_empty() {
@@ -1160,6 +1246,8 @@ impl SlowDual {
                         let (charge, bounded) = self.add_fast_response_pairs(&mut total, (slot, shift), nu_k, &sources)?;
                         resonant_charge += charge;
                         unrouted_resonant_returns += bounded;
+                        let (own_charge, _) = self.add_fast_response_pairs(series, (slot, shift), nu_k, &sources)?;
+                        pair_margin[pair] += own_charge;
                     }
                 }
             }
@@ -1168,21 +1256,52 @@ impl SlowDual {
                 if ground.frobenius() > 0. {
                     let modal = self.to_modal(*slot, ground)?;
                     total.add_slow(*shift, start, &modal);
-                    if let Some(pair) = pair {
-                        pair_series.entry(*pair).or_insert_with(|| Series::new(beta, grid.maximum)).add_slow(*shift, 0, &modal);
-                    }
+                    pair_series.entry(*pair).or_insert_with(|| Series::new(beta, grid.maximum)).add_slow(*shift, 0, &modal);
                 }
             }
             // --- Exact dressed fast responses of this block's returns -------
+            // The total sums the fields per target charge; each pair gets the
+            // response of its own fields (the same linear map).
             for (field, (_, target, nu_k)) in fast_fields.iter().zip(&fast_targets) {
                 if let Some(field) = field {
                     self.add_fast_response(&mut total, *target, *nu_k, start, field)?;
                 }
             }
-            for (pair, series) in pair_series {
-                let values = self.evaluate_parts(&series, &indicator_grid, Some(&mut pair_homogeneous[pair]))?;
-                for (a, b) in pair_values[pair].iter_mut().zip(&values) {
-                    *a = cadd(*a, *b);
+            // Each pair's part of this block, in parallel over the pairs: the
+            // fast responses of its own fields and its values on the indicator
+            // samples. Its dressed amplitudes do not depend on the block's
+            // exponents and are summed over the blocks instead.
+            let mut work: BTreeMap<usize, (Series, Vec<(usize, Dense)>)> = pair_series.into_iter().map(|(pair, series)| (pair, (series, Vec::new()))).collect();
+            for ((pair, index), field) in pair_fast {
+                work.entry(pair).or_insert_with(|| (Series::new(beta, grid.maximum), Vec::new())).1.push((index, field));
+            }
+            let fast_targets = &fast_targets;
+            let indicator_grid = &indicator_grid;
+            let parts = execution.map(work.into_iter().collect(), |(pair, (mut series, fields))| -> Result<_, String> {
+                for (index, field) in &fields {
+                    let (_, target, nu_k) = &fast_targets[*index];
+                    self.add_fast_response(&mut series, *target, *nu_k, 0, field)?;
+                }
+                let mut dressed = Series::new(&[], grid.maximum);
+                dressed.take_dressed(&mut series);
+                let mut homogeneous = vec![ZERO; self.dimension()];
+                let values = self.evaluate_parts(&series, indicator_grid, Some(&mut homogeneous))?;
+                // The same homogeneous amplitudes are read out at the end.
+                let unrepresented = if unrepresented_rows > 0 {
+                    let mut discarded = vec![ZERO; self.dimension()];
+                    self.evaluate_with(&series, indicator_grid, &self.unrepresented_readout, false, Some(&mut discarded))?
+                } else {
+                    Vec::new()
+                };
+                Ok((pair, dressed, homogeneous, values, unrepresented))
+            });
+            for part in parts {
+                let (pair, mut dressed, homogeneous, values, unrepresented) = part?;
+                pair_dressed[pair].take_dressed(&mut dressed);
+                for (target, add) in [(&mut pair_homogeneous[pair], &homogeneous), (&mut pair_values[pair], &values), (&mut pair_unrepresented[pair], &unrepresented)] {
+                    for (a, b) in target.iter_mut().zip(add) {
+                        *a = cadd(*a, *b);
+                    }
                 }
             }
             start += width;
@@ -1191,24 +1310,43 @@ impl SlowDual {
         drop(e_out);
         drop(f_out);
 
-        // --- Indicators: each pair's response, returns and slow boundary ----
+        // --- Indicators: each pair's part of the total ---------------------
         let mut charges: Vec<Charge> = vec![Vec::new(); pairs];
         for (charge, &index) in &pair_index {
             charges[index] = charge.clone();
         }
-        let mut modes = Vec::with_capacity(pairs);
-        for pair in 0..pairs {
-            let mut series = Series::new(&small.exponents, grid.maximum);
+        // Each pair's dressed amplitudes, homogeneous slow amplitudes and
+        // boundary are evaluated once (in parallel over the pairs) and added
+        // to its block values.
+        let indicators = execution.map(pair_dressed.into_iter().enumerate().collect(), |(pair, mut series)| -> Result<f64, String> {
             series.add_initial(&pair_homogeneous[pair]);
             if pair_boundary[pair].frobenius() > 0. {
-                self.add_slow_initial(&mut series, &pair_boundary[pair])?;
+                let layer = self.add_slow_initial(&mut series, &pair_boundary[pair])?;
+                self.add_fast_initial(&mut series, &layer)?;
             }
             let mut values = self.evaluate(&series, &indicator_grid)?;
             for (a, b) in values.iter_mut().zip(&pair_values[pair]) {
                 *a = cadd(*a, *b);
             }
             let (state, group) = maxima(&values, n, groups);
-            modes.push(HaloModeIndicator { charge: charges[pair].clone(), indicator: state.max(group), residual_norm: pair_residual[pair] });
+            let mut margin = pair_margin[pair];
+            if unrepresented_rows > 0 {
+                let mut values = self.evaluate_with(&series, &indicator_grid, &self.unrepresented_readout, false, None)?;
+                for (a, b) in values.iter_mut().zip(&pair_unrepresented[pair]) {
+                    *a = cadd(*a, *b);
+                }
+                let largest = values.chunks_exact(unrepresented_rows).map(|row| row.iter().map(|z| z.re * z.re + z.im * z.im).sum::<f64>().sqrt()).fold(0_f64, f64::max);
+                margin += grid.maximum * largest;
+            }
+            Ok(state.max(group) + margin)
+        });
+        let mut modes = Vec::with_capacity(pairs);
+        for (pair, indicator) in indicators.into_iter().enumerate() {
+            let indicator = indicator?;
+            if !indicator.is_finite() {
+                return Err(format!("Nonfinite halo indicator for the Fourier pair {:?}", charges[pair]));
+            }
+            modes.push(HaloModeIndicator { charge: charges[pair].clone(), indicator, residual_norm: pair_residual[pair] });
         }
         modes.sort_by(|a, b| b.indicator.total_cmp(&a.indicator));
 
@@ -1220,6 +1358,16 @@ impl SlowDual {
         let values = self.evaluate(&total, &grid)?;
         let margin = self.unrepresented_margin(&total, &grid)? + resonant_charge;
         let estimate = finish_estimate(self, &values, margin, view.times, groups, began)?;
+        // The indicators bound the estimate on their samples; a maximum the
+        // samples miss is spread over them in proportion, so that they always
+        // sum to at least the estimate.
+        let attributed: f64 = modes.iter().map(|m| m.indicator).sum();
+        if attributed > 0. && attributed < estimate.maximum {
+            let scale = estimate.maximum / attributed;
+            for mode in &mut modes {
+                mode.indicator *= scale;
+            }
+        }
         Ok(HaloEstimate { estimate, modes, halo_modes: halo.len(), near_resonant_terms, unrouted_resonant_returns, pencil_ms, block_columns: width_max })
     }
 
@@ -1901,7 +2049,7 @@ mod tests {
                 break;
             }
         }
-        let reduced = ReducedModel::build(&space).unwrap();
+        let reduced = ReducedModel::build(&space, 0.).unwrap();
         let lapack = Arc::clone(core.lapack());
         let trajectory = reduced.trajectory(&lapack, &times).unwrap();
         let candidate = space.readout().evaluate(&lapack, &trajectory, &times).unwrap();
@@ -1936,6 +2084,14 @@ mod tests {
             assert!((0.7..1.4).contains(&ratio), "halo effectivity {ratio}");
             assert!(cosine > 0.9, "halo shape similarity {cosine}");
             assert_eq!(halo.modes[0].charge, vec![2], "the nearest shell carries the truncation error");
+            // The indicators partition the estimate: on at most INDICATOR_TIMES
+            // outputs (all of them indicator samples) they sum to at least it
+            // without any rescaling.
+            let short = CandidateView { times: &times[..61], ..view };
+            let halo = dual.halo_estimate(owned, &short, &[], HaloOptions { all_halo_modes, ..Default::default() }).unwrap();
+            let attributed: f64 = halo.modes.iter().map(|m| m.indicator).sum();
+            println!("indicators sum {attributed:e} for a halo estimate {:e}", halo.estimate.maximum);
+            assert!(attributed >= halo.estimate.maximum * (1. - 1e-12), "indicators {attributed:e} < halo {:e}", halo.estimate.maximum);
         }
     }
 
@@ -1989,7 +2145,7 @@ mod tests {
                 break;
             }
         }
-        let reduced = ReducedModel::build(&space).unwrap();
+        let reduced = ReducedModel::build(&space, 0.).unwrap();
         let owned = core.prepared();
         let dual = SlowDual::prepare(owned, Default::default()).unwrap();
         let view = CandidateView {
@@ -2003,6 +2159,14 @@ mod tests {
             times: &times,
         };
         let basis = dual.basis_estimate(&view, &[]).unwrap();
+        // The screened pair: the screen alone, and the full estimate from the
+        // screen's series with the slaved returns added.
+        let (screen, full) = dual.basis_estimate_screened(&view, &[], |_| true).unwrap();
+        let alone = dual.basis_estimate_with(&view, &[], BasisOptions { slave_fast_charges: false, ..Default::default() }).unwrap();
+        assert!((screen - alone.maximum).abs() <= 1e-12 * alone.maximum, "screen {screen:e} vs {:e}", alone.maximum);
+        let full = full.expect("an accepted screen gives the full estimate");
+        assert!((full.maximum - basis.maximum).abs() <= 1e-10 * basis.maximum, "full {:e} vs {:e}", full.maximum, basis.maximum);
+        assert!(dual.basis_estimate_screened(&view, &[], |_| false).unwrap().1.is_none());
         let halo = dual.halo_estimate(owned, &view, &[], HaloOptions::default()).unwrap();
         (dual.diagnostics().clone(), basis.maximum, halo.estimate.maximum, basis.margin)
     }

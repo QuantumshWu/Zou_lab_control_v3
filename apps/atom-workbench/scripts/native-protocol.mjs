@@ -23,9 +23,11 @@ export function prepareNativeSolve(input){
     includeAsymptotic:input.options?.includeAsymptotic??true,steadyOnly:input.options?.steadyOnly??false};
   if(typeof options.steadyOnly!=='boolean'||typeof options.includeAsymptotic!=='boolean')throw requestError('Invalid solver options','invalid-options');
   const payload={modelSchema:model.modelSchema,options,model:{dimension:model.dimension,states:model.states.map(state=>state.id),
-    hReal:model.hReal,hImag:model.hImag,collapse:model.collapse,initialIndex:model.initialIndex,drives:model.drives,frequencyCoordinates:model.frequencyCoordinates}};
-  // The response carries the full level metadata in place of the native state ids.
-  const respond=(result,request)=>({...result,request,states:model.states,assumptions:model.assumptions,service:{...result.service,modelBuildMs}});
+    hReal:model.hReal,hImag:model.hImag,collapse:model.collapse,initialIndex:model.initialIndex,initialReal:model.initialReal,initialImag:model.initialImag,
+    drives:model.drives,frequencyCoordinates:model.frequencyCoordinates}};
+  // The response carries the full level metadata in place of the native state
+  // ids, and the requested initial state with its populations (the first row).
+  const respond=(result,request)=>({...result,request,states:model.states,assumptions:model.assumptions,initialState:model.initialState,initialPopulations:model.initialPopulations,service:{...result.service,modelBuildMs}});
   return {payload,respond};
 }
 

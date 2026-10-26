@@ -67,6 +67,10 @@ struct Options {
     /// Only the long-time mean (no finite-time trajectory).
     #[serde(default)]
     steady_only: bool,
+    /// Observation horizon of the long-time mean (us); absent or null is the
+    /// t -> infinity mean.
+    #[serde(default)]
+    mean_horizon_us: Option<f64>,
 }
 fn default_duration() -> f64 {
     5.
@@ -88,6 +92,7 @@ impl Default for Options {
             population_tolerance: default_population_tolerance(),
             include_asymptotic: true,
             steady_only: false,
+            mean_horizon_us: None,
         }
     }
 }

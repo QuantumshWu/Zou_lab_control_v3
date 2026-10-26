@@ -1,8 +1,10 @@
 //! Complete E/F pencil action on a finite Fourier domain.
 //!
 //! For a signed Fourier field x (modes q, one n x n matrix per mode and
-//! right-hand side) the pencil computes
-//!   J   = x + [S, x] + [S, [S, x]] / 2,      z = K vec(J_EE),
+//! right-hand side) the pencil computes, shear layer by layer (inner first),
+//! each layer a sum over its classes c,
+//!   J_k = J_{k-1} + sum_c ([S_c, J_{k-1}] + [S_c, [S_c, J_{k-1}]] / 2),
+//!   J_0 = x,  J = J_last,      z = K vec(J_EE),
 //!   E x = J + embed_GG(z),
 //!   F x = NL * J + J * NR + R vec(J_EE) + L_GG z + L_OG z - i omega E x,
 //! where `*` is the convolution over charges, (A * X)_q = sum_p A_p X_{q-p}.
@@ -25,9 +27,9 @@
 //! `Kernel::Blas` (also the fallback) instead concatenates, per ground or
 //! excited output part, the nonzero blocks of all incoming coefficients and
 //! stacks the matching source rows/columns for one ZGEMM.
-//! Thin stages (K, R, L_GG, L_OG) multiply the block of their used rows and
-//! columns with one dense GEMM per charge, or run a CSR pass over the used
-//! rows when that block is mostly zero.
+//! Thin stages (K, R, L_GG, L_OG) multiply the block of their active rows
+//! and columns with one dense GEMM per charge, or run a CSR pass over the
+//! active rows when that block is mostly zero.
 //!
 //! Field layout ("mode blocks"): mode m stores the matrices of all rhs
 //! columns as one column-major n x (rhs*n) block whose column index is
@@ -82,6 +84,7 @@ impl Kernel {
         if kernel::available() { Kernel::Sparse } else { Kernel::Blas }
     }
 }
+
 
 /// Column-major C = alpha*A*B + beta*C. `Reference` is a plain triple loop
 /// used by small validation fixtures that run without BLAS.
@@ -268,12 +271,15 @@ pub(crate) struct ThinCoefficient {
     rows: usize,
     cols: usize,
     sparse: Coefficient,
-    /// Rows and columns that hold a nonzero entry.
-    used_rows: Vec<usize>,
-    used_cols: Vec<usize>,
-    /// Column-major copy of the used rows x used columns block, when at
-    /// least a quarter of that block is nonzero.
+    /// Column-major copy of the block of rows and columns that hold a
+    /// stored entry (`active_rows` x `active_cols`), when at least 15% of
+    /// that block is nonzero. Every stored entry is in the block, so the
+    /// product is the complete one; rows and columns outside it are empty
+    /// (the non-secular recycling of one charge feeds only the F=1/F=2
+    /// coherences, 15 of 64 ground rows).
     dense: Option<Vec<C>>,
+    active_rows: Vec<usize>,
+    active_cols: Vec<usize>,
 }
 
 impl ThinCoefficient {
@@ -298,29 +304,29 @@ impl ThinCoefficient {
             }
             sparse.row.push(sparse.value.len());
         }
-        let used_rows: Vec<usize> = (0..rows).filter(|&r| sparse.row[r + 1] > sparse.row[r]).collect();
-        let mut used = vec![false; cols];
-        for &c in &sparse.col {
-            used[c] = true;
-        }
-        let used_cols: Vec<usize> = (0..cols).filter(|&c| used[c]).collect();
-        let (ur, uc) = (used_rows.len(), used_cols.len());
-        let dense = (ur * uc >= 64 && sparse.value.len() as f64 >= 0.25 * (ur * uc) as f64).then(|| {
-            let mut dense = vec![ZERO; ur * uc];
-            for (i, &r) in used_rows.iter().enumerate() {
-                for (k, &c) in used_cols.iter().enumerate() {
-                    dense[i + ur * k] = permuted[r * cols + c];
+        let stored = |r: usize, c: usize| {
+            let z = permuted[r * cols + c];
+            z.re != 0. || z.im != 0.
+        };
+        let active_rows: Vec<usize> = (0..rows).filter(|&r| (0..cols).any(|c| stored(r, c))).collect();
+        let active_cols: Vec<usize> = (0..cols).filter(|&c| (0..rows).any(|r| stored(r, c))).collect();
+        let (m, k) = (active_rows.len(), active_cols.len());
+        let dense = (m.min(k) >= 8 && sparse.value.len() as f64 >= 0.15 * (m * k) as f64).then(|| {
+            let mut dense = vec![ZERO; m * k];
+            for (i, &r) in active_rows.iter().enumerate() {
+                for (j, &c) in active_cols.iter().enumerate() {
+                    dense[i + m * j] = permuted[r * cols + c];
                 }
             }
             dense
         });
-        Self { rows, cols, sparse, used_rows, used_cols, dense }
+        Self { rows, cols, sparse, dense, active_rows, active_cols }
     }
 
     fn bytes(&self) -> usize {
-        (self.sparse.row.len() + self.sparse.col.len() + self.used_rows.len() + self.used_cols.len())
-            * std::mem::size_of::<usize>()
+        (self.sparse.row.len() + self.sparse.col.len()) * std::mem::size_of::<usize>()
             + (self.sparse.value.len() + self.dense.as_ref().map_or(0, Vec::len)) * std::mem::size_of::<C>()
+            + (self.active_rows.len() + self.active_cols.len()) * std::mem::size_of::<usize>()
     }
 }
 
@@ -526,12 +532,20 @@ fn embedding(input: &ModeOrder, output: &ModeOrder) -> Vec<(usize, usize)> {
 // Plan
 // ---------------------------------------------------------------------------
 
+/// One shear layer: per class its S family and [S, .] modes, and the
+/// layer's output modes.
+pub(crate) struct LayerInput<'a> {
+    pub classes: Vec<(&'a Family, &'a [Charge])>,
+    pub output: &'a [Charge],
+}
+
 /// Families and index sets for one rectangular domain (input -> output).
 pub(crate) struct PlanInput<'a> {
     pub n: usize,
     pub ground: usize,
     pub library: Arc<Library>,
-    pub commutator: &'a Family,
+    /// Shear layers, inner first; the last layer's output modes are `j`.
+    pub layers: Vec<LayerInput<'a>>,
     pub left: &'a Family,
     pub right: &'a Family,
     pub selected_k: &'a Family,
@@ -539,7 +553,6 @@ pub(crate) struct PlanInput<'a> {
     pub ground_hamiltonian: &'a Family,
     pub optical_hamiltonian: &'a Family,
     pub input: &'a [Charge],
-    pub first: &'a [Charge],
     pub j: &'a [Charge],
     pub z: &'a [Charge],
     pub output: &'a [Charge],
@@ -553,26 +566,39 @@ pub(crate) struct PlanInput<'a> {
     pub blas: Option<Arc<Lapack>>,
 }
 
+/// One compiled shear class: input -> first = [S_c, input] -> output.
+struct LayerClass {
+    first: ModeOrder,
+    first_commutator: Adjacency,
+    second_commutator: Adjacency,
+    first_to_output: Vec<(usize, usize)>,
+}
+
+/// One compiled shear layer: output = input + sum_c (first_c + [S_c, first_c] / 2).
+struct Layer {
+    classes: Vec<LayerClass>,
+    output: ModeOrder,
+    input_to_output: Vec<(usize, usize)>,
+}
+
 pub(crate) struct Plan {
     n: usize,
     ground: usize,
     rank: usize,
     max_rhs: usize,
     input: ModeOrder,
-    first: ModeOrder,
+    layers: Vec<Layer>,
     j: ModeOrder,
     z: ModeOrder,
     output: ModeOrder,
-    first_commutator: Adjacency,
-    second_commutator: Adjacency,
     left_no_jump: Adjacency,
     right_no_jump: Adjacency,
     selected_k: Vec<Link>,
     recycling: Vec<Link>,
     ground_hamiltonian: Vec<Link>,
     optical_hamiltonian: Vec<Link>,
+    /// Without layers J is the input itself.
     input_to_j: Vec<(usize, usize)>,
-    first_to_j: Vec<(usize, usize)>,
     j_to_output: Vec<(usize, usize)>,
     z_to_output: Vec<(usize, usize)>,
     gg: Vec<(usize, usize)>,
@@ -591,15 +617,34 @@ pub(crate) struct Plan {
 impl Plan {
     pub(crate) fn new(spec: PlanInput<'_>) -> Result<Self, String> {
         let input = ModeOrder::new(spec.input);
-        let first = ModeOrder::new(spec.first);
         let j = ModeOrder::new(spec.j);
+        let mut layers = Vec::with_capacity(spec.layers.len());
+        let mut previous = input.clone();
+        for layer in &spec.layers {
+            let output = ModeOrder::new(layer.output);
+            let mut classes = Vec::with_capacity(layer.classes.len());
+            for &(family, first) in &layer.classes {
+                let first = ModeOrder::new(first);
+                classes.push(LayerClass {
+                    first_commutator: Adjacency::new(&links(family, &previous, &first)?, first.len()),
+                    second_commutator: Adjacency::new(&links(family, &first, &output)?, output.len()),
+                    first_to_output: embedding(&first, &output),
+                    first,
+                });
+            }
+            layers.push(Layer { classes, input_to_output: embedding(&previous, &output), output: output.clone() });
+            previous = output;
+        }
+        if spec.layers.last().is_some_and(|last| last.output != spec.j) {
+            return Err("The last shear layer must produce the J modes".into());
+        }
         let z = ModeOrder::new(spec.z);
         let output = ModeOrder::new(spec.output);
         let gg_position: BTreeMap<(usize, usize), usize> = spec.gg.iter().enumerate().map(|(k, &p)| (p, k)).collect();
         let gg_transpose: Option<Vec<usize>> =
             spec.gg.iter().map(|&(a, b)| gg_position.get(&(b, a)).copied()).collect();
+        let layer_families: Vec<&Family> = spec.layers.iter().flat_map(|l| l.classes.iter().map(|c| c.0)).collect();
         let families_closed = [
-            spec.commutator,
             spec.left,
             spec.right,
             spec.selected_k,
@@ -608,18 +653,18 @@ impl Plan {
             spec.optical_hamiltonian,
         ]
         .iter()
+        .chain(&layer_families)
         .all(|family| family.keys().all(|q| negate(q).is_some_and(|p| family.contains_key(&p))));
         let half_capable = families_closed
             && gg_transpose.is_some()
-            && [&input, &first, &j, &z, &output].iter().all(|order| order.pairing.is_some());
+            && [&input, &j, &z, &output].iter().all(|order| order.pairing.is_some())
+            && layers.iter().all(|l| l.output.pairing.is_some() && l.classes.iter().all(|c| c.first.pairing.is_some()));
         let frequency = (0..output.len()).map(|t| spec.frequency[output.external[t]]).collect();
         Ok(Self {
             n: spec.n,
             ground: spec.ground,
             rank: spec.gg.len(),
             max_rhs: spec.max_rhs,
-            first_commutator: Adjacency::new(&links(spec.commutator, &input, &first)?, first.len()),
-            second_commutator: Adjacency::new(&links(spec.commutator, &first, &j)?, j.len()),
             left_no_jump: Adjacency::new(&links(spec.left, &j, &output)?, output.len()),
             right_no_jump: Adjacency::new(&links(spec.right, &j, &output)?, output.len()),
             selected_k: links(spec.selected_k, &j, &z)?,
@@ -627,7 +672,6 @@ impl Plan {
             ground_hamiltonian: links(spec.ground_hamiltonian, &z, &output)?,
             optical_hamiltonian: links(spec.optical_hamiltonian, &z, &output)?,
             input_to_j: embedding(&input, &j),
-            first_to_j: embedding(&first, &j),
             j_to_output: embedding(&j, &output),
             z_to_output: embedding(&z, &output),
             gg: spec.gg,
@@ -640,12 +684,13 @@ impl Plan {
             execution: Execution::new()?,
             kernel: Kernel::best(),
             input,
-            first,
+            layers,
             j,
             z,
             output,
         })
     }
+
 
     pub(crate) fn input_modes(&self) -> usize {
         self.input.len()
@@ -655,8 +700,11 @@ impl Plan {
         self.output.len()
     }
 
+    /// (all [S, .] modes, all layer outputs, z modes).
     pub(crate) fn intermediate_modes(&self) -> (usize, usize, usize) {
-        (self.first.len(), self.j.len(), self.z.len())
+        let first = self.layers.iter().flat_map(|l| l.classes.iter().map(|c| c.first.len())).sum();
+        let outputs = self.layers.iter().map(|l| l.output.len()).sum::<usize>().max(self.j.len());
+        (first, outputs, self.z.len())
     }
 
     pub(crate) fn max_rhs(&self) -> usize {
@@ -675,13 +723,22 @@ impl Plan {
     /// Bytes of the index tables owned by this plan (coefficients excluded).
     pub(crate) fn index_bytes(&self) -> usize {
         let word = std::mem::size_of::<usize>();
-        let hilbert = [&self.first_commutator, &self.second_commutator, &self.left_no_jump, &self.right_no_jump];
+        let hilbert: Vec<&Adjacency> = self
+            .layers
+            .iter()
+            .flat_map(|l| l.classes.iter().flat_map(|c| [&c.first_commutator, &c.second_commutator]))
+            .chain([&self.left_no_jump, &self.right_no_jump])
+            .collect();
         let thin = [&self.selected_k, &self.recycling, &self.ground_hamiltonian, &self.optical_hamiltonian];
         let edges: usize = hilbert.iter().map(|s| s.offsets.len() + 2 * s.source.len()).sum::<usize>()
             + thin.iter().flat_map(|s| s.iter()).map(|l| 2 * l.sources.len()).sum::<usize>();
-        let maps = self.input_to_j.len() + self.first_to_j.len() + self.j_to_output.len() + self.z_to_output.len();
-        let orders = [&self.input, &self.first, &self.j, &self.z, &self.output]
-            .iter()
+        let maps = self.input_to_j.len()
+            + self.layers.iter().map(|l| l.input_to_output.len() + l.classes.iter().map(|c| c.first_to_output.len()).sum::<usize>()).sum::<usize>()
+            + self.j_to_output.len()
+            + self.z_to_output.len();
+        let orders = [&self.input, &self.j, &self.z, &self.output]
+            .into_iter()
+            .chain(self.layers.iter().flat_map(|l| l.classes.iter().map(|c| &c.first).chain([&l.output])))
             .map(|o| 2 * o.len() + o.charges.iter().map(Vec::len).sum::<usize>() / 2)
             .sum::<usize>();
         (edges + 2 * maps + orders + 2 * (self.gg.len() + self.optical.len())) * word + self.frequency.len() * 8
@@ -691,15 +748,21 @@ impl Plan {
     pub(crate) fn workspace_bytes_per_rhs(&self) -> usize {
         let d = self.n * self.n;
         let e = self.n - self.ground;
+        let layers: usize = self.layers.iter().map(|l| l.classes.iter().map(|c| c.first.len()).sum::<usize>() + l.output.len()).sum();
         // Fields, plus the conjugated copy of a stage source (largest: J)
         // that the sparse kernel makes outside half mode.
-        let fields = (self.input.len() + self.first.len() + 2 * self.j.len() + 2 * self.output.len()) * d
+        let fields = (self.input.len() + layers + 2 * self.j.len() + 2 * self.output.len()) * d
             + self.j.len() * e * e
             + self.z.len() * self.rank;
         // Hilbert tasks stack at most all sources and coefficient blocks of
         // one target; thin tasks pack one coefficient's edges.
-        let hilbert = [&self.first_commutator, &self.second_commutator, &self.left_no_jump, &self.right_no_jump];
-        let widest = hilbert.iter().map(|s| s.widest()).max().unwrap_or(0);
+        let widest = self
+            .layers
+            .iter()
+            .flat_map(|l| l.classes.iter().flat_map(|c| [c.first_commutator.widest(), c.second_commutator.widest()]))
+            .chain([self.left_no_jump.widest(), self.right_no_jump.widest()])
+            .max()
+            .unwrap_or(0);
         let thin = [&self.selected_k, &self.recycling, &self.ground_hamiltonian, &self.optical_hamiltonian];
         let thin_widest = thin
             .iter()
@@ -733,32 +796,67 @@ impl Plan {
         // Input in mode-block layout; detect exact Hermitian symmetry.
         let half = self.load_input(input, rhs, w)?;
 
-        // dx = [S, x].
-        let first_count = self.first.computed(half);
-        ensure(&mut w.dx, self.first.len() * block);
-        w.dx[..first_count * block].fill(ZERO);
-        let dx = &mut w.dx[..first_count * block];
-        let sources = Sources { field: &w.x, conjugate: self.conjugate(&self.input, half) };
-        self.hilbert_stage(gemm, &self.first_commutator, sources, dx, rhs, Some(1.), Some(-1.), &mut w.scratch, &mut w.conjugated)?;
-        if half {
-            mirror(&self.execution, &mut w.dx, &self.first, n, rhs)?;
-        }
-
-        // J = x + dx + [S, dx] / 2.
-        let j_count = self.j.computed(half);
-        ensure(&mut w.j, self.j.len() * block);
-        let j_field = &mut w.j[..j_count * block];
-        j_field.fill(ZERO);
-        for map in [(&self.input_to_j, &w.x), (&self.first_to_j, &w.dx)] {
-            for &(s, t) in map.0.iter().take_while(|p| p.1 < j_count) {
-                add_slice(&mut j_field[t * block..(t + 1) * block], &map.1[s * block..(s + 1) * block]);
+        // Shear layers, inner first: dx = [S_k, y], y <- y + dx + [S_k, dx] / 2.
+        // The last layer writes J; without layers J is the input itself.
+        let count = self.layers.len();
+        w.layer_dx.resize_with(count, Vec::new);
+        w.layer_out.resize_with(count, Vec::new);
+        if count == 0 {
+            let j_count = self.j.computed(half);
+            ensure(&mut w.j, self.j.len() * block);
+            let j_field = &mut w.j[..j_count * block];
+            j_field.fill(ZERO);
+            for &(s, t) in self.input_to_j.iter().take_while(|p| p.1 < j_count) {
+                j_field[t * block..(t + 1) * block].copy_from_slice(&w.x[s * block..(s + 1) * block]);
+            }
+            if half {
+                mirror(&self.execution, &mut w.j, &self.j, n, rhs)?;
             }
         }
-        let sources = Sources { field: &w.dx, conjugate: self.conjugate(&self.first, half) };
-        let (scratch, conjugated) = (&mut w.scratch, &mut w.conjugated);
-        self.hilbert_stage(gemm, &self.second_commutator, sources, j_field, rhs, Some(0.5), Some(-0.5), scratch, conjugated)?;
-        if half {
-            mirror(&self.execution, &mut w.j, &self.j, n, rhs)?;
+        for (k, layer) in self.layers.iter().enumerate() {
+            let last = k + 1 == count;
+            let mut dx = std::mem::take(&mut w.layer_dx[k]);
+            let mut out = if last { std::mem::take(&mut w.j) } else { std::mem::take(&mut w.layer_out[k]) };
+            {
+                let source: &[C] = if k == 0 { &w.x } else { &w.layer_out[k - 1] };
+                let source_order = if k == 0 { &self.input } else { &self.layers[k - 1].output };
+                let sources = Sources { field: source, conjugate: self.conjugate(source_order, half) };
+                let out_count = layer.output.computed(half);
+                ensure(&mut out, layer.output.len() * block);
+                out[..out_count * block].fill(ZERO);
+                for &(s, t) in layer.input_to_output.iter().take_while(|p| p.1 < out_count) {
+                    add_slice(&mut out[t * block..(t + 1) * block], &source[s * block..(s + 1) * block]);
+                }
+                for class in &layer.classes {
+                    let first_count = class.first.computed(half);
+                    ensure(&mut dx, class.first.len() * block);
+                    dx[..first_count * block].fill(ZERO);
+                    let commutator = &class.first_commutator;
+                    let (scratch, conjugated) = (&mut w.scratch, &mut w.conjugated);
+                    let dx_field = &mut dx[..first_count * block];
+                    self.hilbert_stage(gemm, commutator, sources, dx_field, rhs, Some(1.), Some(-1.), scratch, conjugated)?;
+                    if half {
+                        mirror(&self.execution, &mut dx, &class.first, n, rhs)?;
+                    }
+                    let field = &mut out[..out_count * block];
+                    for &(s, t) in class.first_to_output.iter().take_while(|p| p.1 < out_count) {
+                        add_slice(&mut field[t * block..(t + 1) * block], &dx[s * block..(s + 1) * block]);
+                    }
+                    let commutator = &class.second_commutator;
+                    let dx_sources = Sources { field: &dx, conjugate: self.conjugate(&class.first, half) };
+                    let (scratch, conjugated) = (&mut w.scratch, &mut w.conjugated);
+                    self.hilbert_stage(gemm, commutator, dx_sources, field, rhs, Some(0.5), Some(-0.5), scratch, conjugated)?;
+                }
+                if half {
+                    mirror(&self.execution, &mut out, &layer.output, n, rhs)?;
+                }
+            }
+            w.layer_dx[k] = dx;
+            if last {
+                w.j = out;
+            } else {
+                w.layer_out[k] = out;
+            }
         }
 
         // z = K vec(J_EE) on the selected ground coordinates.
@@ -969,6 +1067,8 @@ impl Plan {
         }
     }
 
+
+
     #[allow(clippy::too_many_arguments)]
     fn thin_stage(
         &self,
@@ -992,11 +1092,7 @@ impl Plan {
             .iter()
             .map(|link| {
                 let a = &library[link.coefficient];
-                let per_edge = if a.dense.is_some() {
-                    a.used_rows.len() * a.used_cols.len()
-                } else {
-                    CSR_WORK * a.sparse.value.len()
-                };
+                let per_edge = if a.dense.is_some() { a.active_rows.len() * a.active_cols.len() } else { CSR_WORK * a.sparse.value.len() };
                 link.within(&modes).len() * per_edge * rhs
             })
             .sum();
@@ -1018,38 +1114,38 @@ impl Plan {
                 let width = a.cols * rhs;
                 match &a.dense {
                     Some(dense) => {
-                        // Only the used rows x used columns block is multiplied.
                         let columns = sources.len() * rhs;
-                        let (ur, uc) = (a.used_rows.len(), a.used_cols.len());
+                        let (m, k) = (a.active_rows.len(), a.active_cols.len());
                         let Scratch { packed, product, .. } = scratch;
-                        let input: &[C] = if uc == a.cols && consecutive(sources) {
-                            &source[sources[0] * width..(sources[0] + sources.len()) * width]
-                        } else if uc == a.cols {
-                            ensure(packed, sources.len() * width);
-                            for (k, &s) in sources.iter().enumerate() {
-                                packed[k * width..(k + 1) * width].copy_from_slice(&source[s * width..(s + 1) * width]);
-                            }
-                            &packed[..sources.len() * width]
-                        } else {
-                            ensure(packed, columns * uc);
-                            for (k, &s) in sources.iter().enumerate() {
+                        let input: &[C] = if k < a.cols {
+                            // Gather the active input coordinates of every column.
+                            ensure(packed, columns * k);
+                            for (index, &s) in sources.iter().enumerate() {
+                                let x = &source[s * width..(s + 1) * width];
                                 for b in 0..rhs {
-                                    let from = &source[s * width + a.cols * b..s * width + a.cols * (b + 1)];
-                                    let to = &mut packed[uc * (k * rhs + b)..uc * (k * rhs + b + 1)];
-                                    for (value, &c) in to.iter_mut().zip(&a.used_cols) {
-                                        *value = from[c];
+                                    let to = &mut packed[(index * rhs + b) * k..(index * rhs + b + 1) * k];
+                                    for (slot, &c) in to.iter_mut().zip(&a.active_cols) {
+                                        *slot = x[a.cols * b + c];
                                     }
                                 }
                             }
-                            &packed[..columns * uc]
+                            &packed[..columns * k]
+                        } else if consecutive(sources) {
+                            &source[sources[0] * width..(sources[0] + sources.len()) * width]
+                        } else {
+                            ensure(packed, sources.len() * width);
+                            for (index, &s) in sources.iter().enumerate() {
+                                packed[index * width..(index + 1) * width].copy_from_slice(&source[s * width..(s + 1) * width]);
+                            }
+                            &packed[..sources.len() * width]
                         };
-                        ensure(product, ur * columns);
-                        gemm.multiply(ur, columns, uc, ONE, dense, ur, input, uc, ZERO, product, ur)?;
-                        for (k, &t) in destinations.iter().enumerate() {
+                        ensure(product, m * columns);
+                        gemm.multiply(m, columns, k, ONE, dense, m, input, k, ZERO, product, m)?;
+                        for (index, &t) in destinations.iter().enumerate() {
                             let out = &mut chunk[(t - first) * target_width..(t - first + 1) * target_width];
                             for b in 0..rhs {
-                                let column = &product[ur * (k * rhs + b)..ur * (k * rhs + b + 1)];
-                                for (&row, &value) in a.used_rows.iter().zip(column) {
+                                let column = &product[m * (index * rhs + b)..m * (index * rhs + b + 1)];
+                                for (&row, &value) in a.active_rows.iter().zip(column) {
                                     let at = position(row, b);
                                     out[at] = add(out[at], value);
                                 }
@@ -1057,14 +1153,13 @@ impl Plan {
                         }
                     }
                     _ => {
-                        // CSR over the used rows only.
                         let csr = &a.sparse;
                         for (&s, &t) in sources.iter().zip(destinations) {
                             let x = &source[s * width..(s + 1) * width];
                             let out = &mut chunk[(t - first) * target_width..(t - first + 1) * target_width];
                             for b in 0..rhs {
                                 let x = &x[a.cols * b..a.cols * (b + 1)];
-                                for &row in &a.used_rows {
+                                for &row in &a.active_rows {
                                     let mut sum = ZERO;
                                     for at in csr.row[row]..csr.row[row + 1] {
                                         sum = add(sum, mul(csr.value[at], x[csr.col[at]]));
@@ -1398,7 +1493,9 @@ pub(crate) struct Scratch {
 #[derive(Default)]
 pub(crate) struct Workspace {
     x: Vec<C>,
-    dx: Vec<C>,
+    /// [S_k, .] and output field of every shear layer (the last output is j).
+    layer_dx: Vec<Vec<C>>,
+    layer_out: Vec<Vec<C>>,
     j: Vec<C>,
     ee: Vec<C>,
     z: Vec<C>,
@@ -1532,11 +1629,12 @@ mod tests {
         let empty = Family::new();
         let library = Arc::new(Library { hilbert, thin: Vec::new() });
         let frequency = output.iter().map(|q| 0.3 * q[0] as f64).collect();
+        let (first, j) = (charges(-4..=4), charges(-6..=6));
         let mut plan = Plan::new(PlanInput {
             n,
             ground,
             library,
-            commutator: &s,
+            layers: vec![LayerInput { classes: vec![(&s, &first[..])], output: &j }],
             left: &left,
             right: &right,
             selected_k: &empty,
@@ -1544,8 +1642,7 @@ mod tests {
             ground_hamiltonian: &empty,
             optical_hamiltonian: &empty,
             input: &charges(-2..=2),
-            first: &charges(-4..=4),
-            j: &charges(-6..=6),
+            j: &j,
             z: &[],
             output,
             gg: vec![(0, 0)],

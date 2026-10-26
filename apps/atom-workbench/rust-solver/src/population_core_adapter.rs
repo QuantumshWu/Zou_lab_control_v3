@@ -2,10 +2,13 @@
 //! The TS Model remains the only owner of atomic physics. This adapter only
 //! borrows its numerical H/C, exact phase coordinates and state metadata.
 //!
-//! One prepared core serves both outputs of a request: the long-time mean is
-//! computed FIRST (and published as `asymptotic` progress), then the core is
-//! handed to the finite-time engine. A steadyOnly request runs only the mean,
-//! through the same function, so inline and steadyOnly means are identical.
+//! One prepared core serves both outputs of a request: with
+//! `includeAsymptotic` the finite-time engine and the long-time mean run
+//! concurrently on two forks of it (shared operators, readout duals and slow
+//! dual; separate P0 factors and trial spaces), and the mean is published as
+//! `asymptotic` progress as soon as it is ready. A steadyOnly request runs
+//! only the mean, through the same function, so inline and steadyOnly means
+//! are identical.
 //!
 //! # Result contract
 //! The one result shape, read by `normalizeDynamicsResult` in
@@ -13,6 +16,8 @@
 //! - `states` (32 ids), `timesUs`, `populations` (one row per time). A mean
 //!   result has the single t = 0 row, the initial populations; a finite result
 //!   has >= 2 rows and `populationAccuracy`, their estimated error.
+//! - `horizonUs`: the echo of the request's `meanHorizonUs` (us, or null for
+//!   the t -> infinity mean), on every result that carries a mean.
 //! - `asymptoticStatus`. A converged mean (`stationary`, `population-stationary`
 //!   and `initial-dependent` for static models; `time-average` and
 //!   `initial-dependent-time-average` for driven ones) comes with
@@ -29,12 +34,13 @@
 use crate::{Model,Options,harmonics};
 use serde_json::{json,Value};
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use std::time::Instant;
 use atom_population_core::preparation::{ModelView,MatrixView,DriveView,PhaseBasis,FrequencyParts,GaugePolicy};
 use atom_population_core::Complex64;
 use atom_population_core::owned_prepared::{self,KernelPolicy,coordinates::InitialView,b0_inverse::P0Policy};
 use atom_population_core::owned_prepared::runtime_core::RuntimeCore;
-use atom_population_core::owned_prepared::engine::{self,FiniteOptions,RequestedGroup};
+use atom_population_core::owned_prepared::engine::{self,DualSource,FiniteOptions,RequestedGroup};
 use atom_population_core::owned_prepared::asymptotic::{self,LabFrame,MeanKind,MeanOptions,MeanSolution};
 use atom_population_core::owned_prepared::slow_dual::{SlowDual,SlowDualOptions};
 
@@ -69,16 +75,15 @@ fn groups(model:&Model)->Result<(Vec<bool>,Vec<RequestedGroup>),String>{
     Ok((ground,grouped.into_iter().map(|(name,indices)|RequestedGroup{name,indices}).collect()))
 }
 
-/// Everything a request needs from the Model, prepared once.
+/// Everything a request needs from the Model besides its core, prepared once.
 struct Request{
-    core:RuntimeCore,
     groups:Vec<RequestedGroup>,
     axes:harmonics::PhaseAxes,
     initial_populations:Vec<f64>,
     preparation_ms:f64,
 }
 
-fn prepare(model:&Model)->Result<Request,String>{
+fn prepare(model:&Model)->Result<(RuntimeCore,Request),String>{
     let started=Instant::now();
     if model.dimension!=32||model.states.len()!=32{return Err("rb87-full/2 requires the complete 32-state Rb87 model".into());}
     if model.frequency_coordinates.is_none(){return Err("rb87-full/2 requires authoritative frequencyCoordinates metadata".into());}
@@ -102,7 +107,7 @@ fn prepare(model:&Model)->Result<Request,String>{
         return Err("Initial density is not positive semidefinite".into());
     }
     let initial_populations=(0..32).map(|i|core.initial().original()[i*32+i].re).collect();
-    Ok(Request{core,groups,axes,initial_populations,preparation_ms:started.elapsed().as_secs_f64()*1000.})
+    Ok((core,Request{groups,axes,initial_populations,preparation_ms:started.elapsed().as_secs_f64()*1000.}))
 }
 
 /// The row gates every result reports: the largest |row sum - 1| and the
@@ -116,11 +121,13 @@ fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
 
 /// The long-time mean result. Inline (combined) and steadyOnly requests both
 /// call exactly this function.
-fn mean_result(model:&Model,options:&Options,request:&mut Request,dual:Option<&SlowDual>,dual_ms:f64,started:Instant)->Result<Value,String>{
+fn mean_result(model:&Model,options:&Options,core:&mut RuntimeCore,request:&Request,dual:Option<&SlowDual>,dual_ms:f64,started:Instant)->Result<Value,String>{
     let lab=LabFrame{frame_indices:request.axes.frame_indices.clone(),
         sectors:request.axes.frame_sectors.iter().map(|&s|if s==0{0}else{1}).collect()};
-    let mean=asymptotic::solve_with(&mut request.core,&MeanOptions::new(options.population_tolerance,request.groups.clone(),lab),dual)?;
-    let positivity=positivity(&request.core,&mean.density)?;
+    let mut mean_options=MeanOptions::new(options.population_tolerance,request.groups.clone(),lab);
+    mean_options.horizon_us=options.mean_horizon_us;
+    let mean=asymptotic::solve_with(core,&mean_options,dual)?;
+    let positivity=positivity(core,&mean.density)?;
     let trace_error=(mean.populations.iter().sum::<f64>()-1.).abs();
     let(status,reason)=classify(model,&mean);
     let rows=vec![request.initial_populations.clone()];
@@ -129,7 +136,8 @@ fn mean_result(model:&Model,options:&Options,request:&mut Request,dual:Option<&S
     let checkpoints:Vec<_>=d.checkpoints.iter().map(|c|json!({"basis":c.columns,"modes":c.modes,"pole":c.pole,
         "basisEstimate":c.basis_estimate,"haloEstimate":c.halo_estimate,"haloModes":c.halo_modes.0,"transportHaloModes":c.halo_modes.1,
         "innerResidual":c.inner_residual,"action":c.action})).collect();
-    Ok(json!({"timesUs":[0.],"states":model.states,"populations":rows,
+    let horizon=d.horizon.as_ref();
+    let mut result=json!({"timesUs":[0.],"states":model.states,"populations":rows,"horizonUs":options.mean_horizon_us,
         "asymptoticStatus":status,"asymptoticReason":reason,"asymptoticPopulations":mean.populations,
         "asymptoticDensityReal":mean.density.iter().map(|z|z.re).collect::<Vec<_>>(),
         "asymptoticDensityImag":mean.density.iter().map(|z|z.im).collect::<Vec<_>>(),
@@ -151,7 +159,13 @@ fn mean_result(model:&Model,options:&Options,request:&mut Request,dual:Option<&S
             "discardedOpticalCoherence":mean.discarded_optical_coherence,
             "meanTimingMs":{"operators":d.timing[0],"corrections":d.timing[1],"halo":d.timing[2],"degeneracyProbe":d.timing[3],"slowDual":dual_ms},
             "slowestRelaxationUs":d.slowest_relaxation_us,"conservedQuantities":d.conserved_quantities,
-            "meanMs":d.elapsed_ms,"uncorrectedPopulations":d.uncorrected_populations}}))
+
+            "meanMs":d.elapsed_ms,"uncorrectedPopulations":d.uncorrected_populations}});
+    let extra=json!({"horizonMethod":horizon.map(|h|h.method),"horizonRelaxingBound":horizon.map(|h|h.decaying),
+        "horizonPropagationEstimate":horizon.map(|h|h.propagation_estimate),"horizonProjectionCharge":horizon.map(|h|h.projection_charge),
+        "meanProbeStalled":d.probe_stalled,"limitNote":d.limit_note});
+    if let(Value::Object(target),Value::Object(extra))=(&mut result["diagnostics"],extra){target.extend(extra);}
+    Ok(result)
 }
 
 /// A finite result carries its mean: the `asymptotic*` fields, and every mean
@@ -163,7 +177,7 @@ fn merge_mean(result:&mut Value,mean:Value){
             if let(Value::Object(finite),Value::Object(mean))=(&mut result["diagnostics"],value){
                 for(key,value)in mean{finite.entry(key).or_insert(value);}
             }
-        }else if key.starts_with("asymptotic"){result[key.as_str()]=value;}
+        }else if key.starts_with("asymptotic")||key=="horizonUs"{result[key.as_str()]=value;}
     }
 }
 
@@ -172,7 +186,10 @@ fn merge_mean(result:&mut Value,mean:Value){
 /// converging populations with a persistent optical coherence (the lab-frame
 /// time average then drops that coherence) and initial-state dependence.
 fn classify(model:&Model,mean:&MeanSolution)->(&'static str,&'static str){
+    let horizon=mean.diagnostics.horizon.is_some();
     match(model.drives.is_empty(),&mean.kind){
+        (false,MeanKind::InitialDependent{..}) if horizon=>("initial-dependent-time-average","Long-time phase average at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent."),
+        (true,MeanKind::InitialDependent{..}) if horizon=>("initial-dependent","Lindblad mean at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent."),
         (false,MeanKind::Unique)=>("time-average","Converged long-time phase average of the full driven Lindblad equation (unique limit: only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time); populations are a time average, not a time-independent density."),
         (false,MeanKind::InitialDependent{..})=>("initial-dependent-time-average","Converged long-time phase average of the specified initial density; several conserved quantities make it initial-state dependent."),
         (true,MeanKind::Unique) if mean.discarded_optical_coherence>1e-8=>("population-stationary","Populations converge in the background basis; exported density is the laboratory-frame time average."),
@@ -181,30 +198,56 @@ fn classify(model:&Model,mean:&MeanSolution)->(&'static str,&'static str){
     }
 }
 
-/// One rb87-full/2 request. With `includeAsymptotic` the mean is solved
-/// first and handed to `publish_mean` before the finite-time engine runs.
+/// Sets the slow-dual cell on every path out of the mean side (an error or a
+/// panic before it was prepared), so the finite engine never waits forever.
+struct SetOnExit<'a>(&'a OnceLock<Result<SlowDual,String>>);
+impl Drop for SetOnExit<'_>{
+    fn drop(&mut self){let _=self.0.set(Err("The slow dual was not prepared".into()));}
+}
+
+/// One rb87-full/2 request. With `includeAsymptotic` the finite-time engine
+/// runs on its own thread while this one prepares the slow dual (the engine
+/// computes its first chain columns meanwhile), solves the mean on a fork of
+/// the core and hands it to `publish_mean` as soon as it is ready; the finite
+/// result follows. The two solves share the pool workers; the mean's trial
+/// space and P0 factor are dropped before the engine is awaited.
 pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))->Result<Value,String>{
     let started=Instant::now();options.validate_population_tolerance()?;
     if !options.steady_only&&(!options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples)){return Err("Invalid finite population grid".into());}
-    let mut request=prepare(model)?;
-    // The slow dual serves the mean (its relaxation spectrum) and then the
-    // finite engine; a finite-only request prepares it inside the engine.
-    let clock=Instant::now();
-    let dual=(options.steady_only||options.include_asymptotic).then(||SlowDual::prepare(request.core.prepared(),SlowDualOptions::default()));
-    let dual_ms=clock.elapsed().as_secs_f64()*1000.;
-    if options.steady_only{return mean_result(model,options,&mut request,dual.as_ref().and_then(|d|d.as_ref().ok()),dual_ms,started);}
-    let mean=if options.include_asymptotic{
-        let value=mean_result(model,options,&mut request,dual.as_ref().and_then(|d|d.as_ref().ok()),dual_ms,started);
-        if let Ok(value)=&value{publish_mean(value);}
-        Some(value)
-    }else{None};
+    if options.mean_horizon_us.is_some_and(|h|!(h.is_finite()&&h>0.)){return Err("meanHorizonUs must be a finite positive time in us, or null".into());}
+    let(mut core,request)=prepare(model)?;
+    if options.steady_only{
+        let clock=Instant::now();
+        let dual=SlowDual::prepare(core.prepared(),SlowDualOptions::default());
+        let dual_ms=clock.elapsed().as_secs_f64()*1000.;
+        return mean_result(model,options,&mut core,&request,dual.as_ref().ok(),dual_ms,started);
+    }
     let names:Vec<_>=request.groups.iter().map(|g|g.name.clone()).collect();
     let times:Vec<_>=(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect();
     let finite=FiniteOptions{population_tolerance:options.population_tolerance,..Default::default()};
-    let preparation=request.core.preparation_timing();
-    // A dual shared with the mean was prepared before it (its time is reported here).
-    let shared_dual=dual.is_some();
-    let solution=engine::solve_with(request.core,&times,request.groups,finite,dual)?;
+    let preparation=core.preparation_timing();
+    let(mean,solution,dual_ms)=if options.include_asymptotic{
+        // The slow dual serves the mean (its relaxation spectrum) and the engine.
+        let mut mean_core=core.fork()?;
+        let cell=OnceLock::new();
+        let groups=request.groups.clone();
+        std::thread::scope(|scope|{
+            let engine=scope.spawn(||engine::solve_with(core,&times,groups,finite,DualSource::Shared(&cell)));
+            let exit=SetOnExit(&cell);
+            let clock=Instant::now();
+            let dual=cell.get_or_init(||SlowDual::prepare(mean_core.prepared(),SlowDualOptions::default()));
+            let dual_ms=clock.elapsed().as_secs_f64()*1000.;
+            let mean=mean_result(model,options,&mut mean_core,&request,dual.as_ref().ok(),dual_ms,started);
+            drop(mean_core);
+            if let Ok(value)=&mean{publish_mean(value);}
+            drop(exit);
+            let solution=engine.join().unwrap_or_else(|panic|std::panic::resume_unwind(panic));
+            (Some(mean),solution,Some(dual_ms))
+        })
+    }else{
+        (None,engine::solve_with(core,&times,request.groups.clone(),finite,DualSource::Prepare),None)
+    };
+    let solution=solution?;
     let d=&solution.diagnostics;
     let populations:Vec<_>=solution.populations.chunks_exact(32).map(|p|p.to_vec()).collect();
     let(trace,initial_error)=row_errors(&populations,&request.initial_populations)?;
@@ -224,14 +267,14 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
             "method":FINITE_METHOD,"propagateMs":d.elapsed_ms,
             "errorControl":d.error_control,"rawPopulationEstimate":d.raw_estimate,
             "estimateMargin":d.estimate_margin,"boundedResonantComponents":d.bounded_resonant_components,"finalModes":d.final_modes,"finalBasis":d.final_columns,
-            "imageColumns":d.image_columns,"peakTrialBytes":d.peak_trial_bytes,
+            "imageColumns":d.image_columns,"peakTrialBytes":d.peak_trial_bytes,"reflectedRitzModes":d.reflected_ritz_modes,
             "preparationMs":{"gauge":preparation[0],"primitives":preparation[1],"library":preparation[2],"initial":preparation[3],"readoutDuals":preparation[4],"p0":preparation[5]},
-            "timingMs":{"directions":t.directions,"orthogonalize":t.orthogonalize,"images":t.images,"projections":t.projections,"readoutAppend":t.readout_append,"transfer":t.transfer,"reduced":t.reduced,"readoutEvaluate":t.readout_evaluate,"dualPrepare":if shared_dual{dual_ms}else{t.dual_prepare},"basisEstimate":t.basis_estimate,"haloEstimate":t.halo_estimate},
+            "timingMs":{"directions":t.directions,"orthogonalize":t.orthogonalize,"images":t.images,"projections":t.projections,"readoutAppend":t.readout_append,"transfer":t.transfer,"reduced":t.reduced,"readoutEvaluate":t.readout_evaluate,"dualPrepare":dual_ms.unwrap_or(t.dual_prepare),"dualWait":t.dual_wait,"basisEstimate":t.basis_estimate,"haloEstimate":t.halo_estimate},
             "maximumImaginaryPopulation":d.maximum_imaginary_population,"populationCheckpoints":checkpoints}});
     match mean{
         None=>{}
         Some(Ok(mean))=>merge_mean(&mut result,mean),
-        Some(Err(reason))=>{result["asymptoticStatus"]=json!("not-converged");result["asymptoticReason"]=json!(reason);}
+        Some(Err(reason))=>{result["asymptoticStatus"]=json!("not-converged");result["asymptoticReason"]=json!(reason);result["horizonUs"]=json!(options.mean_horizon_us);}
     }
     Ok(result)
 }
