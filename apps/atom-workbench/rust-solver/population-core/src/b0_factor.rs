@@ -2,6 +2,8 @@
 //! It is NOT the physical generator and NOT E0^{-1}F0. Complete original
 //! E/F remains the independent physical action. No feedback rank is dropped.
 use super::*;
+/// Relative size below which a B0 feedback column is left out (see prepare).
+const FEEDBACK_COLUMN_FLOOR:f64=1e-6;
 use crate::lapack::SylvesterKernel;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
@@ -137,14 +139,22 @@ impl B0Factor{
                 }
             }}if group_added{groups+=1;}
         }
-        let all_rank=rank+extra_u.len();let mut u=vec![C::default();product(&[d,all_rank])?];let mut v=vec![C::default();product(&[all_rank,d])?];
-        for(row,&ab)in p.gg_rows.iter().enumerate(){u[((ab/g)*n+ab%g)*all_rank+row].re=1.;
-            for i in 0..e{for j in 0..e{v[row*d+(g+i)*n+g+j]=gg_ee[row*e2+i*e+j];}}
-            for(i,&index)in p.optical_rows.iter().enumerate(){v[row*d+index]=gg_optical[row*optical+i];}
+        // P0 is a preconditioner: feedback columns u v^T whose size |u||v| is
+        // below FEEDBACK_COLUMN_FLOOR of the largest one are left out of B0,
+        // so negligible couplings cannot inflate its rank. E/F stay exact.
+        let ground_sizes:Vec<f64>=(0..rank).map(|row|norm(&gg_ee[row*e2..(row+1)*e2]).hypot(norm(&gg_optical[row*optical..(row+1)*optical]))).collect();
+        let extra_sizes:Vec<f64>=extra_u.iter().zip(&extra_v).map(|(a,b)|norm(a)*norm(b)).collect();
+        let floor=FEEDBACK_COLUMN_FLOOR*ground_sizes.iter().chain(&extra_sizes).copied().fold(0_f64,f64::max);
+        let ground_kept:Vec<usize>=(0..rank).filter(|&row|ground_sizes[row]>=floor).collect();
+        let extra_kept:Vec<usize>=(0..extra_u.len()).filter(|&j|extra_sizes[j]>=floor).collect();
+        let all_rank=ground_kept.len()+extra_kept.len();let mut u=vec![C::default();product(&[d,all_rank])?];let mut v=vec![C::default();product(&[all_rank,d])?];
+        for(column,&row)in ground_kept.iter().enumerate(){let ab=p.gg_rows[row];u[((ab/g)*n+ab%g)*all_rank+column].re=1.;
+            for i in 0..e{for j in 0..e{v[column*d+(g+i)*n+g+j]=gg_ee[row*e2+i*e+j];}}
+            for(i,&index)in p.optical_rows.iter().enumerate(){v[column*d+index]=gg_optical[row*optical+i];}
         }
-        for(j,(a,b))in extra_u.into_iter().zip(extra_v).enumerate(){for i in 0..d{u[i*all_rank+rank+j]=a[i];v[(rank+j)*d+i]=b[i];}}
+        for(offset,&j)in extra_kept.iter().enumerate(){let column=ground_kept.len()+offset;for i in 0..d{u[i*all_rank+column]=extra_u[j][i];v[column*d+i]=extra_v[j][i];}}
         let difference:Vec<_>=(0..d).map(|i|{let a=conj(left[(i%n)*n+i/n]);C{re:right[i].re-a.re,im:right[i].im-a.im}}).collect();
-        let diagnostics=B0Diagnostics{hilbert_dimension:n,ground_feedback_columns:rank,feedback_columns:all_rank,
+        let diagnostics=B0Diagnostics{hilbert_dimension:n,ground_feedback_columns:ground_kept.len(),feedback_columns:all_rank,
             optical_feedback_groups:groups,feedback_modes:p.selected_k.len(),oscillating_gamma_feedback_hs:gamma_size,
             left_right_adjoint_difference_hs:norm(&difference),original_physical_generator_changed:false};
         Ok(Self{owner,left,right,u:coefficient(&u,d,all_rank,KernelPolicy::Csr)?,v:coefficient(&v,all_rank,d,KernelPolicy::Csr)?,diagnostics})

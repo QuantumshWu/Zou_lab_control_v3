@@ -2,7 +2,7 @@
 //! This defines numerical coordinates only. Unsafe S/K choices leave the
 //! original H/C and full recycling in the source, never a rate equation.
 use std::collections::BTreeSet;
-use super::{Complex64 as C,FourierMatrices,GaugedSource,Sum,add,mul,conj,nonzero,opposite,keep_exact_nonzero};
+use super::{Complex64 as C,FourierMatrices,GaugedSource,Sum,add,mul,conj,nonzero,opposite,keep_exact_nonzero,largest_coupling,STRUCTURAL_COUPLING_FLOOR};
 use super::hilbert::{HilbertPrepared,transform_matrix};
 use crate::lapack::Lapack;
 
@@ -43,6 +43,9 @@ pub fn select_optical_s(lap:&Lapack,source:&GaugedSource)->Result<(FourierMatric
     let n=source.n;let zero=vec![0;source.phases.axes.len()];let h0=&source.hamiltonian[&zero];
     let ground:BTreeSet<_>=source.ground.iter().copied().collect();let max_energy=(0..n).map(|i|h0[i*n+i].re.abs()).fold(0_f64,f64::max);
     let mut output=FourierMatrices::new();let(mut selected,mut unsafe_entries)=(0,0);
+    // A charge enters S with ALL its optical entries when its largest one is
+    // significant; otherwise its couplings stay (exactly) in H only.
+    let significant=STRUCTURAL_COUPLING_FLOOR*largest_coupling(&source.hamiltonian,n);
     for(q,h)in &source.hamiltonian{
         if q.iter().copied().find(|&v|v!=0).is_none_or(|v|v<0){continue;}
         let w=source.phases.frequency(q)?;let floor=(4.*spectral_norm(lap,h,n)?).max(256.*f64::EPSILON*(2.*max_energy+(w.hi+w.lo).abs()));
@@ -51,7 +54,8 @@ pub fn select_optical_s(lap:&Lapack,source:&GaugedSource)->Result<(FourierMatric
             let mut denominator=Sum::default();for value in[h0[i*n+i].re,-h0[j*n+j].re,w.hi,w.lo]{denominator.add(value);}let d=denominator.value();
             if d.abs()>floor{let value=scaled(h[i*n+j],-1./d);if !value.re.is_finite()||!value.im.is_finite(){return Err("Nonfinite optical auxiliary coordinate".into());}s[i*n+j]=value;selected+=1;}else{unsafe_entries+=1;}
         }}
-        if s.iter().any(nonzero){let partner=(0..n*n).map(|k|scaled(conj(s[(k%n)*n+k/n]),-1.)).collect();output.insert(q.clone(),s);output.insert(opposite(q)?,partner);}
+        let strongest=(0..n*n).filter(|&k|nonzero(&s[k])).map(|k|h[k].re.hypot(h[k].im)).fold(0_f64,f64::max);
+        if strongest>=significant{let partner=(0..n*n).map(|k|scaled(conj(s[(k%n)*n+k/n]),-1.)).collect();output.insert(q.clone(),s);output.insert(opposite(q)?,partner);}
     }
     let diagnostics=OpticalCoordinateDiagnostics{selected_entries:selected,unsafe_optical_entries:unsafe_entries,charges:output.len()};Ok((output,diagnostics))
 }
@@ -63,7 +67,10 @@ fn prepare_k(lap:&Lapack,h:&HilbertPrepared)->Result<(FourierMatrices,ShearDiagn
     if h.diagnostics.minimum_mean_radiative_eigenvalue<=0.{diagnostic.fallback_reason=Some("No resolved positive EE mean damping; K coordinate disabled, complete R remains".into());return Ok((FourierMatrices::new(),diagnostic));}
     let execution=crate::parallel::Execution::new()?;
     let t=&h.excited_nojump_schur;let tr=column_to_row(t,e);let mut output=FourierMatrices::new();let mut residual_squared=0.;let mut trace_change_squared=0.;let mut trace_squared=0.;
-    for(q,r)in &h.radiation.recycling{if q.iter().all(|&v|v==0){continue;}
+    // Khat is formed only for recycling charges that are significant relative
+    // to the largest one; smaller recycling stays (exactly) in R only.
+    let significant=STRUCTURAL_COUPLING_FLOOR*h.radiation.recycling.values().map(|r|norm(r)).fold(0_f64,f64::max);
+    for(q,r)in &h.radiation.recycling{if q.iter().all(|&v|v==0)||norm(r)<significant{continue;}
         let w=h.source.phases.frequency(q)?;let mut k=vec![C::default();g*g*e2];
         // The g*g rows (a,b) are independent Sylvester solves, run on the
         // worker pool; each returns its K row and residual sum of squares.
