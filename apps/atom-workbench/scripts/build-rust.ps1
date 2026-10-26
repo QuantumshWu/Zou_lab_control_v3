@@ -1,4 +1,4 @@
-param([ValidateSet('build','test')][string]$Action='build',[string]$TestFilter='', [switch]$IncludeIgnored,[ValidateSet('release','iterate')][string]$Profile='release',[switch]$CvodeResearch,[switch]$FilonResearch,[switch]$EeResearch)
+param([ValidateSet('build','test')][string]$Action='build',[string]$TestFilter='', [switch]$IncludeIgnored,[ValidateSet('release','iterate')][string]$Profile='release')
 $ErrorActionPreference='Stop'
 $taskApp=Split-Path -Parent $PSScriptRoot
 $taskRepository=Split-Path -Parent (Split-Path -Parent $taskApp)
@@ -17,9 +17,6 @@ try {
   $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=Join-Path $taskTools 'lld-link-1.99.1\lld-link.exe'
   $env:LIB=(@('crt\lib\x86_64','sdk\lib\um\x86_64','sdk\lib\ucrt\x86_64') | ForEach-Object {Join-Path (Join-Path $taskTools 'msvc-sdk') $_}) -join ';'
   $taskArgs=@($Action,'--manifest-path',(Join-Path $taskApp 'rust-solver\Cargo.toml'),'--target','x86_64-pc-windows-msvc','--profile',$Profile,'--offline')
-  if($CvodeResearch){$taskArgs+=@('--features','cvode-research')}
-  if($FilonResearch){$taskArgs+=@('--features','filon-research')}
-  if($EeResearch){$taskArgs+=@('--features','ee-research')}
   if($Action -eq 'test' -and $TestFilter){$taskArgs+=$TestFilter}
   if($Action -eq 'test' -and $IncludeIgnored){$taskArgs+=@('--','--ignored','--nocapture')}
   & (Join-Path $taskRust 'bin\cargo.exe') @taskArgs

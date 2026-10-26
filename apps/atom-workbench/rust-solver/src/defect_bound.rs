@@ -644,10 +644,6 @@ impl Prepared {
             comparison_roundoff,
         })
     }
-    pub fn bound(&self, lap: &Lapack, initial: &[f64], time: f64) -> Result<Bound, String> {
-        let c = self.coefficients(initial)?;
-        self.bound_with_coefficients(lap, initial, &c, time)
-    }
     pub fn apply(&self, lap: &Lapack, initial: &[f64], times: &[f64]) -> Result<Action, String> {
         let started = Instant::now();
         finite(times, "times")?;
