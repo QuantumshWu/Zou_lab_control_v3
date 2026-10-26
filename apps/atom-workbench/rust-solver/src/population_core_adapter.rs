@@ -13,8 +13,9 @@
 //! - `states` (32 ids), `timesUs`, `populations` (one row per time). A mean
 //!   result has the single t = 0 row, the initial populations; a finite result
 //!   has >= 2 rows and `populationAccuracy`, their estimated error.
-//! - `asymptoticStatus`. A converged mean (`stationary`, `population-stationary`,
-//!   `initial-dependent-mean`, `nonunique-initial-dependent`) comes with
+//! - `asymptoticStatus`. A converged mean (`stationary`, `population-stationary`
+//!   and `initial-dependent` for static models; `time-average` and
+//!   `initial-dependent-time-average` for driven ones) comes with
 //!   `asymptoticReason`, `asymptoticPopulations` and `asymptoticDensityReal/Imag`;
 //!   otherwise the status is `not-converged` (with its `asymptoticReason`) or
 //!   `not-requested`.
@@ -169,16 +170,12 @@ fn merge_mean(result:&mut Value,mean:Value){
 /// converging populations with a persistent optical coherence (the lab-frame
 /// time average then drops that coherence) and initial-state dependence.
 fn classify(model:&Model,mean:&MeanSolution)->(&'static str,&'static str){
-    if !model.drives.is_empty(){
-        return("initial-dependent-mean",match mean.kind{
-            MeanKind::Unique=>"Converged long-time phase average of the full driven Lindblad equation (one-dimensional null space); populations are a time average, not a time-independent density.",
-            MeanKind::InitialDependent{..}=>"Converged long-time phase average of the specified initial density; several conserved quantities make it initial-state dependent.",
-        });
-    }
-    match mean.kind{
-        MeanKind::Unique if mean.discarded_optical_coherence>1e-8=>("population-stationary","Populations converge in the background basis; exported density is the laboratory-frame time average."),
-        MeanKind::Unique=>("stationary","Unique full-density Lindblad stationary solution within the resolved rates."),
-        MeanKind::InitialDependent{..}=>("nonunique-initial-dependent","Full Lindblad stationary projection from the specified initial density."),
+    match(model.drives.is_empty(),&mean.kind){
+        (false,MeanKind::Unique)=>("time-average","Converged long-time phase average of the full driven Lindblad equation (one-dimensional null space); populations are a time average, not a time-independent density."),
+        (false,MeanKind::InitialDependent{..})=>("initial-dependent-time-average","Converged long-time phase average of the specified initial density; several conserved quantities make it initial-state dependent."),
+        (true,MeanKind::Unique) if mean.discarded_optical_coherence>1e-8=>("population-stationary","Populations converge in the background basis; exported density is the laboratory-frame time average."),
+        (true,MeanKind::Unique)=>("stationary","Unique full-density Lindblad stationary solution within the resolved rates."),
+        (true,MeanKind::InitialDependent{..})=>("initial-dependent","Full Lindblad stationary projection from the specified initial density."),
     }
 }
 

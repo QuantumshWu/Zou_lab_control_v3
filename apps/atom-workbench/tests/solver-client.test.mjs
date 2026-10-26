@@ -8,6 +8,7 @@ import {defaultScene,resolvePopulationTolerance} from '../dist/js/atom-workbench
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {nativeResult} from './native-result.mjs';
+import {isTimeAverage} from '../dist/js/atom-workbench/src/solver-types.js';
 
 /** The HTTP response for this scene: a native result plus transport metadata. */
 function fixture(scene=defaultScene(),settings=scene.dynamics,timesUs=[0,settings.durationUs/2,settings.durationUs]){
@@ -110,9 +111,18 @@ test('malformed native payloads never become fabricated populations',()=>{
   for(const data of [null,undefined,[],{}])assert.throws(()=>normalizeDynamicsResult(data,scene),/不完整或无效/);
 });
 
-test('initial-dependent mean is converged, retains its reason and is marked initial dependent',()=>{
-  const scene=scenario(),data=fixture(scene);data.asymptoticStatus='initial-dependent-mean';data.asymptoticReason='Specified initial mixture retained.';
-  const result=normalizeDynamicsResult(data,scene);assert.equal(result.steady.converged,true);assert.equal(result.steady.initialDependent,true);assert.equal(result.steady.reason,data.asymptoticReason);
+test('time averages and initial dependence are separate properties of a converged mean',()=>{
+  const scene=scenario();
+  for(const [status,timeAverage,initialDependent] of [['stationary',false,false],['population-stationary',false,false],['initial-dependent',false,true],
+    ['time-average',true,false],['initial-dependent-time-average',true,true]]){
+    const data=fixture(scene);data.asymptoticStatus=status;data.asymptoticReason='reason of '+status;
+    const result=normalizeDynamicsResult(data,scene);
+    assert.equal(result.steady.converged,true,status);assert.equal(result.steady.initialDependent,initialDependent,status);
+    assert.equal(isTimeAverage(result.steady.status),timeAverage,status);assert.equal(result.steady.reason,data.asymptoticReason);
+  }
+  for(const status of ['initial-dependent-mean','nonunique-initial-dependent','periodic-mean']){
+    const data=fixture(scene);data.asymptoticStatus=status;assert.throws(()=>normalizeDynamicsResult(data,scene),/不完整或无效/,status);
+  }
 });
 
 test('old atomic models and unnegotiated or missing service capabilities are rejected',async t=>{

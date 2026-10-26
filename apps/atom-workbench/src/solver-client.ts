@@ -1,5 +1,5 @@
 import type {DynamicsResult,SteadyStatus,PopulationAccuracy} from './solver-types.js';
-import {CONVERGED_MEAN_STATUSES,STEADY_STATUSES,readPopulationAccuracy} from './solver-types.js';
+import {CONVERGED_MEAN_STATUSES,STEADY_STATUSES,isInitialDependent,readPopulationAccuracy} from './solver-types.js';
 import type {DynamicsSettings,Scene,Level} from './types.js';
 import {resolvePopulationTolerance} from './types.js';
 import {laserIntensityMWcm2} from './physics.js';
@@ -149,7 +149,7 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initialStateId=scen
   return {states,timesUs,populations,totalExcited:timesUs.map((_,i)=>states.filter(s=>s.manifold!=='ground').reduce((sum,s)=>sum+populations[s.id]![i]!,0)),
     activeLaserIds:active.map(l=>l.id),
     steady:{converged,status,populations:steadyPopulations,density,residual:converged?d.residual:null,method:converged?d.asymptoticMethod:undefined,reason,
-      initialDependent:status==='initial-dependent-mean'||status==='nonunique-initial-dependent'},
+      initialDependent:isInitialDependent(status)},
     metrics:{totalMs:d.elapsedMs},validation:{maxTraceError:d.traceError,minPopulation:Math.min(...rows.flat())},
     ...(populationAccuracy?{populationAccuracy,method:d.method}:{}),assumptions};
 }
