@@ -261,9 +261,6 @@ impl RequestP0{
     pub fn belongs_to(&self,prepared:&OwnedPrepared)->bool{Arc::ptr_eq(&self.factor.owner,&prepared.primitives)}
     pub fn prepared_shift_count(&self)->usize{self.entries.len()}
     pub fn preparation_profile(&self)->&RequestPreparationProfile{&self.profile}
-    pub(super) fn left_selector_frame(&self)->Option<(Vec<C>,Vec<C>,Vec<C>)>{
-        self.eigen.as_ref().and_then(|frame|if let FrameKind::Eigen{a,..}=&frame.kind{Some((a.clone(),frame.left_out.clone(),frame.left_in.clone()))}else{None})
-    }
     pub fn eigen_frame_diagnostics(&self)->Option<&FrameDiagnostics>{self.eigen.as_ref().map(|x|&x.diagnostics)}
     pub fn schur_frame_diagnostics(&self)->Option<&FrameDiagnostics>{self.schur.as_ref().map(|x|&x.diagnostics)}
     pub fn prepare_batch(&mut self,shifts:&[C],max_rhs:usize)->Result<P0Batch,String>{

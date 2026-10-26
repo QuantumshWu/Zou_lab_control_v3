@@ -2,7 +2,7 @@
 //! This defines numerical coordinates only. Unsafe S/K choices leave the
 //! original H/C and full recycling in the source, never a rate equation.
 use std::collections::BTreeSet;
-use super::{Complex64 as C,FourierMatrices,GaugedSource,Sum,add,mul,conj,nonzero,opposite,keep_exact_nonzero};
+use super::{Complex64 as C,FourierMatrices,GaugedSource,Sum,add,mul,conj,nonzero,opposite,keep_exact_nonzero,largest_coupling,STRUCTURAL_COUPLING_FLOOR};
 use super::hilbert::{HilbertPrepared,transform_matrix};
 use crate::lapack::Lapack;
 
@@ -43,6 +43,9 @@ pub fn select_optical_s(lap:&Lapack,source:&GaugedSource)->Result<(FourierMatric
     let n=source.n;let zero=vec![0;source.phases.axes.len()];let h0=&source.hamiltonian[&zero];
     let ground:BTreeSet<_>=source.ground.iter().copied().collect();let max_energy=(0..n).map(|i|h0[i*n+i].re.abs()).fold(0_f64,f64::max);
     let mut output=FourierMatrices::new();let(mut selected,mut unsafe_entries)=(0,0);
+    // A charge enters S with ALL its optical entries when its largest one is
+    // significant; otherwise its couplings stay (exactly) in H only.
+    let significant=STRUCTURAL_COUPLING_FLOOR*largest_coupling(&source.hamiltonian,n);
     for(q,h)in &source.hamiltonian{
         if q.iter().copied().find(|&v|v!=0).is_none_or(|v|v<0){continue;}
         let w=source.phases.frequency(q)?;let floor=(4.*spectral_norm(lap,h,n)?).max(256.*f64::EPSILON*(2.*max_energy+(w.hi+w.lo).abs()));
@@ -51,7 +54,8 @@ pub fn select_optical_s(lap:&Lapack,source:&GaugedSource)->Result<(FourierMatric
             let mut denominator=Sum::default();for value in[h0[i*n+i].re,-h0[j*n+j].re,w.hi,w.lo]{denominator.add(value);}let d=denominator.value();
             if d.abs()>floor{let value=scaled(h[i*n+j],-1./d);if !value.re.is_finite()||!value.im.is_finite(){return Err("Nonfinite optical auxiliary coordinate".into());}s[i*n+j]=value;selected+=1;}else{unsafe_entries+=1;}
         }}
-        if s.iter().any(nonzero){let partner=(0..n*n).map(|k|scaled(conj(s[(k%n)*n+k/n]),-1.)).collect();output.insert(q.clone(),s);output.insert(opposite(q)?,partner);}
+        let strongest=(0..n*n).filter(|&k|nonzero(&s[k])).map(|k|h[k].re.hypot(h[k].im)).fold(0_f64,f64::max);
+        if strongest>=significant{let partner=(0..n*n).map(|k|scaled(conj(s[(k%n)*n+k/n]),-1.)).collect();output.insert(q.clone(),s);output.insert(opposite(q)?,partner);}
     }
     let diagnostics=OpticalCoordinateDiagnostics{selected_entries:selected,unsafe_optical_entries:unsafe_entries,charges:output.len()};Ok((output,diagnostics))
 }
@@ -61,29 +65,39 @@ fn prepare_k(lap:&Lapack,h:&HilbertPrepared)->Result<(FourierMatrices,ShearDiagn
     let mut diagnostic=ShearDiagnostics{enabled:false,fallback_reason:None,sylvester_rows:0,
         unprojected_homological_residual_hs:0.,trace_projection_change_hs:0.,final_trace_functional_hs:0.,uniform_frobenius_upper:0.};
     if h.diagnostics.minimum_mean_radiative_eigenvalue<=0.{diagnostic.fallback_reason=Some("No resolved positive EE mean damping; K coordinate disabled, complete R remains".into());return Ok((FourierMatrices::new(),diagnostic));}
+    let execution=crate::parallel::Execution::new()?;
     let t=&h.excited_nojump_schur;let tr=column_to_row(t,e);let mut output=FourierMatrices::new();let mut residual_squared=0.;let mut trace_change_squared=0.;let mut trace_squared=0.;
-    for(q,r)in &h.radiation.recycling{if q.iter().all(|&v|v==0){continue;}
+    // Khat is formed only for recycling charges that are significant relative
+    // to the largest one; smaller recycling stays (exactly) in R only.
+    let significant=STRUCTURAL_COUPLING_FLOOR*h.radiation.recycling.values().map(|r|norm(r)).fold(0_f64,f64::max);
+    for(q,r)in &h.radiation.recycling{if q.iter().all(|&v|v==0)||norm(r)<significant{continue;}
         let w=h.source.phases.frequency(q)?;let mut k=vec![C::default();g*g*e2];
-        for a in 0..g{for b in 0..g{
-            let mut frequency=Sum::default();for v in[h.ground_reference_energies[a],-h.ground_reference_energies[b],w.hi,w.lo]{frequency.add(v);}
-            let mu=C{re:0.,im:-frequency.value()};
-            // A^H Y-Y T=-Rrow^T with A=conj(mu)I-T. A/T remain
-            // triangular; existing ztrsyl C/N scaling handling is reused.
-            let mut aa:Vec<_>=t.iter().map(|&z|scaled(z,-1.)).collect();for i in 0..e{add(&mut aa[i+i*e],conj(mu));}
-            let offset=(a*g+b)*e2;
-            // Row-major vec(Rrow), interpreted column-major, is Rrow^T.
-            // Likewise vec_F(Y) equals vec_row(Y^T): no extra transpose.
-            let rhs:Vec<_>=r[offset..offset+e2].iter().map(|&z|scaled(z,-1.)).collect();
-            let solved=match lap.sylvester_kernel().complex_sylvester_rect_adjoint(&aa,t,&rhs,e,e){
-                Ok(value)=>value,Err(reason)=>{diagnostic.fallback_reason=Some(format!("K coordinate disabled after Sylvester failure; original R retained: {reason}"));return Ok((FourierMatrices::new(),diagnostic));}
-            };
-            k[offset..offset+e2].copy_from_slice(&solved);diagnostic.sylvester_rows+=1;
-            // Independent row-functional residual mu*K - T^T*K - K*conj(T)+R.
-            for i in 0..e{for j in 0..e{let mut value=mul(mu,solved[i*e+j]);add(&mut value,r[offset+i*e+j]);
-                for l in 0..e{add(&mut value,scaled(mul(tr[l*e+i],solved[l*e+j]),-1.));add(&mut value,scaled(mul(solved[i*e+l],conj(tr[l*e+j])),-1.));}
-                residual_squared+=value.re*value.re+value.im*value.im;
-            }}
-        }}
+        // The g*g rows (a,b) are independent Sylvester solves, run on the
+        // worker pool; each returns its K row and residual sum of squares.
+        let kernel=lap.sylvester_kernel();let mut rows=vec![(Vec::new(),0_f64);g*g];
+        let solved=execution.for_mode_chunks(&mut rows,1,g*g*4*e*e2,crate::parallel::MINIMUM_WORK_PER_TASK,&mut Vec::<()>::new(),|first,chunk,_|{
+            for(offset_row,(row_values,residual))in chunk.iter_mut().enumerate(){let row=first+offset_row;let(a,b)=(row/g,row%g);
+                let mut frequency=Sum::default();for v in[h.ground_reference_energies[a],-h.ground_reference_energies[b],w.hi,w.lo]{frequency.add(v);}
+                let mu=C{re:0.,im:-frequency.value()};
+                // A^H Y-Y T=-Rrow^T with A=conj(mu)I-T. A/T remain
+                // triangular; existing ztrsyl C/N scaling handling is reused.
+                let mut aa:Vec<_>=t.iter().map(|&z|scaled(z,-1.)).collect();for i in 0..e{add(&mut aa[i+i*e],conj(mu));}
+                let offset=row*e2;
+                // Row-major vec(Rrow), interpreted column-major, is Rrow^T.
+                // Likewise vec_F(Y) equals vec_row(Y^T): no extra transpose.
+                let rhs:Vec<_>=r[offset..offset+e2].iter().map(|&z|scaled(z,-1.)).collect();
+                let solved=kernel.complex_sylvester_rect_adjoint(&aa,t,&rhs,e,e)?;
+                // Independent row-functional residual mu*K - T^T*K - K*conj(T)+R.
+                let mut squared=0.;
+                for i in 0..e{for j in 0..e{let mut value=mul(mu,solved[i*e+j]);add(&mut value,r[offset+i*e+j]);
+                    for l in 0..e{add(&mut value,scaled(mul(tr[l*e+i],solved[l*e+j]),-1.));add(&mut value,scaled(mul(solved[i*e+l],conj(tr[l*e+j])),-1.));}
+                    squared+=value.re*value.re+value.im*value.im;
+                }}
+                *row_values=solved;*residual=squared;
+            }Ok(())
+        });
+        if let Err(reason)=solved{diagnostic.fallback_reason=Some(format!("K coordinate disabled after Sylvester failure; original R retained: {reason}"));return Ok((FourierMatrices::new(),diagnostic));}
+        for(row,(values,residual))in rows.into_iter().enumerate(){k[row*e2..(row+1)*e2].copy_from_slice(&values);residual_squared+=residual;diagnostic.sylvester_rows+=1;}
         // Khat is a NEW numerical coordinate. Its trace projection is not
         // applied to the original R/H/C and is never called an exact solve
         // of the unprojected homological equation.

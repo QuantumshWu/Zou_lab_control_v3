@@ -33,7 +33,7 @@ use std::time::Instant;
 
 use crate::lapack::{ComplexGemm, Lapack};
 use crate::parallel::{Execution, MINIMUM_WORK_PER_TASK};
-use crate::preparation::Charge;
+use crate::preparation::{Charge, FourierMatrices};
 use crate::{Coefficient, Finite, C};
 
 const ZERO: C = C { re: 0., im: 0. };
@@ -351,6 +351,12 @@ impl ModeOrder {
         Self { charges: modes.to_vec(), external, internal, pairing }
     }
 
+    /// The modes in the caller's order, without Hermitian pairing.
+    pub(crate) fn given(modes: &[Charge]) -> Self {
+        let identity: Vec<usize> = (0..modes.len()).collect();
+        Self { charges: modes.to_vec(), external: identity.clone(), internal: identity, pairing: None }
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.charges.len()
     }
@@ -453,10 +459,6 @@ impl Adjacency {
     fn edges(&self, target: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
         let range = self.offsets[target]..self.offsets[target + 1];
         self.coefficient[range.clone()].iter().copied().zip(self.source[range].iter().copied())
-    }
-
-    fn targets(&self) -> usize {
-        self.offsets.len() - 1
     }
 
     fn widest(&self) -> usize {
@@ -616,6 +618,7 @@ impl Plan {
         self.half_capable
     }
 
+    #[cfg(test)]
     pub(crate) fn library(&self) -> &Arc<Library> {
         &self.library
     }
@@ -891,8 +894,6 @@ impl Plan {
         })
     }
 
-    /// target_t += left * sum A_p X_{t-p} + right * sum X_{t-p} A_p over the
-    /// stage edges, one task per contiguous chunk of target modes.
     #[allow(clippy::too_many_arguments)]
     fn hilbert_stage(
         &self,
@@ -905,28 +906,8 @@ impl Plan {
         right: Option<f64>,
         scratch: &mut Vec<Scratch>,
     ) -> Result<(), String> {
-        let block = self.n * self.n * rhs;
-        let library = &self.library.hilbert;
-        let work: usize = (0..target.len() / block)
-            .flat_map(|t| stage.edges(t))
-            .map(|(c, _)| (left.map_or(0, |_| library[c].left_macs) + right.map_or(0, |_| library[c].right_macs)) * rhs)
-            .sum();
-        let n = self.n;
-        let parts = [0..self.ground, self.ground..n];
-        self.execution.for_mode_chunks(target, block, work, MINIMUM_WORK_PER_TASK, scratch, |first, chunk, scratch| {
-            for (k, y) in chunk.chunks_exact_mut(block).enumerate() {
-                let products = TargetProducts { gemm, n, rhs, library, source, stage, target: first + k };
-                for output in &parts {
-                    if let Some(alpha) = left {
-                        products.left(alpha, output, y, scratch)?;
-                    }
-                    if let Some(alpha) = right {
-                        products.right(alpha, output, y, scratch)?;
-                    }
-                }
-            }
-            Ok(())
-        })
+        let products = StageProducts { gemm, library: &self.library.hilbert, n: self.n, ground: self.ground, stage, rhs };
+        products.apply(&self.execution, source, target, left, right, scratch)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1031,6 +1012,95 @@ enum Rows<'a> {
     Vector,
     /// Row r of rhs b at matrix entry at[r] of the mode block.
     Matrix(&'a [(usize, usize)]),
+}
+
+/// One Hilbert stage on explicit data: for every target mode t,
+/// target_t += left * sum A_p X_{t-p} + right * sum X_{t-p} A_p over the
+/// stage edges, one task per contiguous chunk of target modes.
+struct StageProducts<'a> {
+    gemm: Gemm<'a>,
+    library: &'a [HilbertCoefficient],
+    n: usize,
+    ground: usize,
+    stage: &'a Adjacency,
+    rhs: usize,
+}
+
+impl StageProducts<'_> {
+    fn apply(
+        &self,
+        execution: &Execution,
+        source: &[C],
+        target: &mut [C],
+        left: Option<f64>,
+        right: Option<f64>,
+        scratch: &mut Vec<Scratch>,
+    ) -> Result<(), String> {
+        let (gemm, library, n, stage, rhs) = (self.gemm, self.library, self.n, self.stage, self.rhs);
+        let block = n * n * rhs;
+        let work: usize = (0..target.len() / block)
+            .flat_map(|t| stage.edges(t))
+            .map(|(c, _)| (left.map_or(0, |_| library[c].left_macs) + right.map_or(0, |_| library[c].right_macs)) * rhs)
+            .sum();
+        let parts = [0..self.ground, self.ground..n];
+        execution.for_mode_chunks(target, block, work, MINIMUM_WORK_PER_TASK, scratch, |first, chunk, scratch| {
+            for (k, y) in chunk.chunks_exact_mut(block).enumerate() {
+                let products = TargetProducts { gemm, n, rhs, library, source, stage, target: first + k };
+                for output in &parts {
+                    if let Some(alpha) = left {
+                        products.left(alpha, output, y, scratch)?;
+                    }
+                    if let Some(alpha) = right {
+                        products.right(alpha, output, y, scratch)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Commutator convolution between two mode sets given in the caller's order:
+/// target_t += alpha * sum_p (A_p X_{t-p} - X_{t-p} A_p), with the fields in
+/// mode-block layout. It runs on the same blocked kernel as the pencil's
+/// Hilbert stages (zero ground/excited blocks of A_p are skipped).
+pub(crate) struct Commutator {
+    n: usize,
+    ground: usize,
+    library: Vec<HilbertCoefficient>,
+    stage: Adjacency,
+}
+
+impl Commutator {
+    /// `family` maps charge p to A_p (row-major n x n).
+    pub(crate) fn new(family: &FourierMatrices, input: &[Charge], output: &[Charge], n: usize, ground: usize) -> Result<Self, String> {
+        let mut library = Vec::new();
+        let mut charges = Family::new();
+        for (p, a) in family {
+            if a.len() != n * n {
+                return Err("Commutator coefficient is not n x n".into());
+            }
+            charges.insert(p.clone(), library.len());
+            library.push(HilbertCoefficient::new(a, n, ground));
+        }
+        let links = links(&charges, &ModeOrder::given(input), &ModeOrder::given(output))?;
+        Ok(Self { n, ground, library, stage: Adjacency::new(&links, output.len()) })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply(
+        &self,
+        execution: &Execution,
+        gemm: Gemm<'_>,
+        input: &[C],
+        output: &mut [C],
+        rhs: usize,
+        alpha: f64,
+        scratch: &mut Vec<Scratch>,
+    ) -> Result<(), String> {
+        let products = StageProducts { gemm, library: &self.library, n: self.n, ground: self.ground, stage: &self.stage, rhs };
+        products.apply(execution, input, output, Some(alpha), Some(-alpha), scratch)
+    }
 }
 
 /// All Hilbert products landing in one target mode. For each output part
