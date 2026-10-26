@@ -11,7 +11,7 @@
 
 use super::*;
 use super::directions::{shift_invert, InnerSolve};
-use super::error_estimate::{combined_estimate, CandidateView, HaloModeIndicator, HaloOptions, PopulationGroup};
+use super::error_estimate::{combined_estimate, BasisOptions, CandidateView, HaloModeIndicator, HaloOptions, PopulationGroup};
 use super::reduced::ReducedModel;
 use super::runtime_core::RuntimeCore;
 use super::slow_dual::{SlowDual, SlowDualOptions};
@@ -277,6 +277,12 @@ const BASIS_SHARE: f64 = 0.6;
 const HALO_REMAINDER_SHARE: f64 = 0.25;
 /// Signed mode pairs added per domain step at most.
 const MAXIMUM_PAIRS_PER_STEP: usize = 24;
+/// The screening basis estimate: the full one without the drive-hop slaving
+/// of fast charges, at 25-55% of its cost. Measured screen/full ratios are
+/// 0.97-1.00 far from acceptance and 0.76-0.98 near it, never above 1.001, so
+/// a screen that fails the basis gate is followed by more columns without the
+/// full estimate; acceptance always uses the full estimate.
+const SCREEN: BasisOptions = BasisOptions { fast_response: true, slave_fast_charges: false };
 
 fn ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.
@@ -442,7 +448,8 @@ impl Run {
             let clock = Instant::now();
             let model = ReducedModel::build(self.space())?;
             self.timing.reduced += ms(clock);
-            let (basis, halo) = {
+            // Err: the basis gate failed, with the screen (or full) estimate.
+            let estimates = {
                 let space = self.space.as_ref().expect("trial space");
                 let view = CandidateView {
                     map: space.op.map(),
@@ -455,25 +462,31 @@ impl Run {
                     times: &self.times,
                 };
                 let clock = Instant::now();
-                let basis = dual.basis_estimate(&view, &groups)?;
+                let screen = dual.basis_estimate_with(&view, &groups, SCREEN)?.maximum;
+                let basis = if kappa * screen > BASIS_SHARE * epsilon { Err(screen) } else { Ok(dual.basis_estimate(&view, &groups)?) };
                 self.timing.basis_estimate += ms(clock);
-                let halo = if kappa * basis.maximum <= BASIS_SHARE * epsilon {
-                    let clock = Instant::now();
-                    let halo = dual.halo_estimate(self.core.prepared(), &view, &groups, HaloOptions::default())?;
-                    self.timing.halo_estimate += ms(clock);
-                    Some(halo)
-                } else {
-                    None
-                };
-                (basis, halo)
+                match basis {
+                    Ok(basis) if kappa * basis.maximum <= BASIS_SHARE * epsilon => {
+                        let clock = Instant::now();
+                        let halo = dual.halo_estimate(self.core.prepared(), &view, &groups, HaloOptions::default())?;
+                        self.timing.halo_estimate += ms(clock);
+                        Ok((basis, halo))
+                    }
+                    Ok(basis) => Err(basis.maximum),
+                    Err(screen) => Err(screen),
+                }
+            };
+            let (basis, halo) = match estimates {
+                Ok(pair) => pair,
+                Err(basis) => {
+                    history.push((self.space().columns(), basis));
+                    self.checkpoint(Some(basis), None, "refine-basis");
+                    let block = self.predicted_block(&history, target);
+                    self.grow(block, &model)?;
+                    continue;
+                }
             };
             history.push((self.space().columns(), basis.maximum));
-            let Some(halo) = halo else {
-                self.checkpoint(Some(basis.maximum), None, "refine-basis");
-                let block = self.predicted_block(&history, target);
-                self.grow(block, &model)?;
-                continue;
-            };
             let total = combined_estimate(&basis, &halo.estimate)?;
             if kappa * total.maximum <= epsilon {
                 let candidate = self.populations(&model)?;
