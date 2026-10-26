@@ -5,7 +5,6 @@ import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildMasterModel} from '../dist/js/atom-workbench/src/master-model.js';
 import {POPULATION_GROUPS} from '../dist/js/atom-workbench/src/population-selection.js';
 import {EFFECTIVE_MODEL_SCHEMA as SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
-import {mergeFreshMean} from '../scripts/fresh-mean.mjs';
 
 function fixture(){
   const scene=defaultScene();scene.dynamics.samples=3;scene.dynamics.durationUs=.2;
@@ -101,20 +100,4 @@ test('transport binds population accuracy to the actual requested tolerance and 
   const other=f.states.find(state=>state.id!==f.scene.dynamics.initialStateId).id;
   await assert.rejects(client.solve(f.scene,{...f.scene.dynamics,initialStateId:other}),/布居初态/);
   assert.equal(calls,3);
-});
-
-test('fresh mean merge validates population finite separately and never fabricates its PSD',()=>{
-  const f=fixture(),mean=meanFixture(f),model={dimension:32,states:f.states.map(s=>s.id),initialIndex:f.index};
-  const trajectory={...f.data,states:model.states};mean.states=model.states;
-  const merged=mergeFreshMean(trajectory,mean,model,{elapsedMs:3,meanTiming:{},trajectoryTiming:{}});
-  assert.equal(Object.hasOwn(merged.diagnostics,'positivityError'),false);
-  assert.equal(merged.diagnostics.asymptoticPositivityError,1e-5);
-  assert.equal(merged.diagnostics.asymptoticTraceError,2e-7);
-  assert.equal(merged.populationAccuracy.estimatedMaximumError,.003);
-  const invalid=structuredClone(trajectory);invalid.populationAccuracy.projectionCharge=.004;
-  assert.throws(()=>mergeFreshMean(invalid,mean,model,{elapsedMs:3}),/populationAccuracy/);
-  const badMean=structuredClone(mean);badMean.diagnostics.positivityError=.0002;
-  assert.throws(()=>mergeFreshMean(trajectory,badMean,model,{elapsedMs:3}),/density validation/);
-  const legacy=structuredClone(trajectory);delete legacy.populationAccuracy;delete legacy.diagnostics.validationKind;legacy.diagnostics.positivityError=0;
-  assert.equal(mergeFreshMean(legacy,mean,model,{elapsedMs:3}).diagnostics.positivityError,1e-5);
 });

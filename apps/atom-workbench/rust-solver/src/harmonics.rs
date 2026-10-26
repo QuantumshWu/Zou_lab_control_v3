@@ -430,18 +430,6 @@ pub fn model_frequency_basis(model:&crate::Model,max_integer:i32)->Result<Freque
     Ok(FrequencyBasis{frequencies,drive_indices,reconstructed_frequencies,reconstruction_errors,
         exact_relations,rounded_relations:0,exact:true,search_exhausted:reduction.search_exhausted,source_to_basis:Some(mapping)})
 }
-/// Preparation-time phase frequencies. Keeping the low part prevents a
-/// declared integer identity from turning back into independent rounded
-/// omega literals inside a finite-time Hamiltonian evaluation.
-pub fn model_drive_frequency_parts(model:&crate::Model)->Result<Vec<(f64,f64)>,String>{
-    if model.frequency_coordinates.is_none(){return Ok(model.drives.iter().map(|drive|(drive.omega,0.)).collect());}
-    model_frequency_basis(model,16)?;
-    let declared=model.frequency_coordinates.as_ref().unwrap();
-    let(source,unit)=declared.frequencies_mhz.as_ref().map(|mhz|(mhz.as_slice(),std::f64::consts::TAU))
-        .unwrap_or((declared.frequencies.as_slice(),1.));
-    Ok(declared.drive_indices.iter().map(|index|scaled_parts(dot_parts(index,source),unit)).collect())
-}
-
 /// Phase rows in the ORIGINAL declared axes, with their authoritative unit
 /// conversion. State gauges may contain zero or negative integer entries.
 pub fn model_phase_frequency_parts(model:&crate::Model,rows:&[Vec<i32>])->Result<Vec<(f64,f64)>,String>{
@@ -481,7 +469,7 @@ mod declared_coordinate_tests{
         assert_eq!(basis.source_to_basis,Some(vec![vec![1,0],vec![0,1]]));
         assert_eq!(basis.source(),"declared-carrier-coordinates");assert!(basis.exact);assert_eq!(basis.rounded_relations,0);
         assert_ne!(basis.reconstruction_errors[1],0.); // declared phase identity, not a zero literal residual
-        let parts=model_drive_frequency_parts(&model).unwrap();assert_ne!(parts[1].1,0.);
+        let rows=model.frequency_coordinates.as_ref().unwrap().drive_indices.clone();let parts=model_phase_frequency_parts(&model,&rows).unwrap();assert_ne!(parts[1].1,0.);
         let mut legacy=model;legacy.frequency_coordinates=None;
         let old=model_frequency_basis(&legacy,16).unwrap();assert!(old.source_to_basis.is_none());assert_eq!(old.source(),"inferred-numeric");
         assert!(!old.exact||old.frequencies.len()==3);
@@ -516,7 +504,7 @@ mod declared_coordinate_tests{
         let basis=model_frequency_basis(&model,16).unwrap();
         assert_eq!(basis.frequencies,[100.*tau]);assert_eq!(basis.source_to_basis,Some(vec![vec![1],vec![3]]));
         assert_eq!(basis.drive_indices,[vec![1],vec![4],vec![3]]);assert!(basis.exact);
-        let parts=model_drive_frequency_parts(&model).unwrap();
+        let rows=model.frequency_coordinates.as_ref().unwrap().drive_indices.clone();let parts=model_phase_frequency_parts(&model,&rows).unwrap();
         assert_eq!(parts[1],scaled_parts((400.,0.),tau));assert_ne!(parts[1].1,0.);
         // The optional authority changes the unit in which exactness is
         // established; it does not relax the old angular-only numeric test.

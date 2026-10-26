@@ -590,15 +590,6 @@ impl Prepared {
     }
 }
 
-pub fn action(
-    lap: &Lapack,
-    a: &Sparse,
-    initial: &[f64],
-    times: &[f64],
-    imaginary_partition_limit: f64,
-) -> Result<ActionResult, String> {
-    prepare(lap, a, imaginary_partition_limit)?.apply(lap, initial, times)
-}
 
 #[cfg(test)]
 mod tests {

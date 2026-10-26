@@ -1,8 +1,7 @@
 import {createServer} from 'node:http';
 import {failureRecorder} from './solver-failure-log.mjs';
 import {physicalMeanDensity} from './mean-frame.mjs';
-import {createNativeServiceClass,parallelMeanSettings} from './native-service-core.mjs';
-export {parallelMeanSettings,shortPeriodAutoEligible} from './native-service-core.mjs';
+import {createNativeServiceClass} from './native-service-core.mjs';
 import {readFile,stat} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
@@ -30,7 +29,6 @@ async function buildIdentity(){
   entries.push({name:'scripts/solver-failure-log.mjs',sha256:hash(await readFile(resolve(app,'scripts/solver-failure-log.mjs')))});
   entries.push({name:'scripts/mean-frame.mjs',sha256:hash(await readFile(resolve(app,'scripts/mean-frame.mjs')))});
   entries.push({name:'scripts/native-protocol.mjs',sha256:hash(await readFile(resolve(app,'scripts/native-protocol.mjs')))});
-  entries.push({name:'scripts/fresh-mean.mjs',sha256:hash(await readFile(resolve(app,'scripts/fresh-mean.mjs')))});
   entries.push({name:'scripts/native-service-core.mjs',sha256:hash(await readFile(resolve(app,'scripts/native-service-core.mjs')))});
   entries.push({name:'scripts/native-child-env.mjs',sha256:hash(await readFile(resolve(app,'scripts/native-child-env.mjs')))});
   return {sha256:hash(JSON.stringify(entries)),files:entries,node:process.version};
@@ -175,7 +173,7 @@ export async function createAtomServer(options={}){
   const executable=resolve(options.executable??process.env.ZLC_ATOM_SOLVER??resolve(app,'rust-solver/target/x86_64-pc-windows-msvc/release/atom-lindblad.exe'));
   const [build,configuredBinary]=await Promise.all([buildIdentity(),fileIdentity(executable)]);
   buildMasterModel(defaultScene()); // Initialize atomic tables before accepting UI requests.
-  const service=new NativeService({executable,build,...parallelMeanSettings(process.env),
+  const service=new NativeService({executable,build,
     solveTimeoutMs:setting(options.solveTimeoutMs??process.env.ZLC_ATOM_SOLVE_TIMEOUT_MS,120000,10,600000),
     startupTimeoutMs:setting(options.startupTimeoutMs??process.env.ZLC_ATOM_STARTUP_TIMEOUT_MS,10000,100,120000),
     workerIdleMs:setting(options.workerIdleMs??process.env.ZLC_ATOM_WORKER_IDLE_MS,60000,20,600000),
@@ -225,11 +223,6 @@ export async function createAtomServer(options={}){
         const genericModel={dimension:model.dimension,hReal:model.hReal,hImag:model.hImag,collapse:model.collapse,initialIndex:model.initialIndex,timeDependent:model.timeDependent,drives:model.drives,frameFrequenciesMHz:model.frameFrequenciesMHz,frequencyCoordinates:model.frequencyCoordinates};
         task=service.submit({model:{...genericModel,states:model.states.map(state=>state.id)},modelSchema,radiation,options:nativeOptions},token,streaming?result=>streamEvent({type:'asymptotic',data:{...result,service:{...result.service,modelBuildMs,modelCacheHit:model.buildCacheHit},request:token,states:model.states,engine:'Rust master equation',assumptions:model.assumptions,decayChannels:model.decayChannels}}):undefined);
         const result=await task.promise;
-        if(result.service?.executionMode==='parallel-independent-mean'){
-          result.service.endToEndMs=performance.now()-modelStarted;
-          result.diagnostics.elapsedMs=result.service.endToEndMs;
-          result.diagnostics.elapsedScope='service wall time including one model construction, queueing and concurrent native solves';
-        }
         if(nativeOptions.includeAsymptotic&&!result.asymptoticPopulations)await recordFailure({time:new Date().toISOString(),request:token,scene:payload.scene,options:nativeOptions,buildSha256:build.sha256,binarySha256:result.service?.binarySha256??configuredBinary.sha256,status:result.asymptoticStatus,diagnostics:result.diagnostics}).catch(()=>{});
         send(200,{...result,service:{...result.service,modelBuildMs,modelCacheHit:model.buildCacheHit},request:token,states:model.states,engine:result.diagnostics?.engine==='rust-floquet'?'Rust / Floquet':'Rust master equation',assumptions:model.assumptions,decayChannels:model.decayChannels});
       }catch(error){const evidence={time:new Date().toISOString(),request:submitted?.request,scene:submitted?.scene,options:submitted?.options,buildSha256:build.sha256,binarySha256:configuredBinary.sha256,error:error.message,code:error.code??'invalid-request',httpStatus:error.status??400};if(submitted?.scene&&error.code!=='superseded')await recordFailure(evidence).catch(()=>{});send(error.status??400,{error:error.message,code:error.code??'invalid-request',service:{buildSha256:build.sha256,binarySha256:configuredBinary.sha256}});}

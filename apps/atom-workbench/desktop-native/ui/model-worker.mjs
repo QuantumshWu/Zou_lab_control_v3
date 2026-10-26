@@ -1,7 +1,7 @@
 import {buildFullMasterModel} from '../../dist/js/atom-workbench/src/full-master-model.js';
 import {DEFAULT_DYNAMICS_SAMPLES,resolvePopulationTolerance} from '../../dist/js/atom-workbench/src/types.js';
 import {EFFECTIVE_MODEL_SCHEMA as ATOMIC_MODEL_SCHEMA} from '../../dist/js/atom-workbench/src/solver-protocol.js';
-import {createNativeServiceClass,parallelMeanSettings} from '../../scripts/native-service-core.mjs';
+import {createNativeServiceClass} from '../../scripts/native-service-core.mjs';
 import {IpcNativeLane} from './ipc-lane.mjs';
 const NativeService=createNativeServiceClass(IpcNativeLane);
 
@@ -30,10 +30,6 @@ export function createModelWorker(post){
       task=service.submit(payload,token,input.stream?result=>event('asymptotic',decorate(result)):undefined);active.set(channel,task);
       const result=await task.promise;
       if(active.get(channel)!==task)return;
-      if(result.service?.executionMode==='parallel-independent-mean'){
-        result.service.endToEndMs=performance.now()-modelStarted;result.diagnostics.elapsedMs=result.service.endToEndMs;
-        result.diagnostics.elapsedScope='browser Worker wall time including one model construction and concurrent native solves';
-      }
       const data=decorate(result);if(input.stream)event('result',data);else finish(channel,200,data);
     }catch(error){
       if(task&&active.get(channel)!==task)return;
@@ -51,7 +47,7 @@ export function createModelWorker(post){
       }
       if(event.kind==='configuration'){
         if(service)return;
-        service=new NativeService({binarySha256:event.binarySha256,build:{sha256:event.buildSha256},...parallelMeanSettings(event.defaults),solveTimeoutMs:120000,startupTimeoutMs:15000,workerIdleMs:60000,sendNative});
+        service=new NativeService({binarySha256:event.binarySha256,build:{sha256:event.buildSha256},solveTimeoutMs:120000,startupTimeoutMs:15000,workerIdleMs:60000,sendNative});
         // Match createAtomServer: initialize both native lanes independently
         // of the first user solve, without blocking UI/static spectroscopy.
         for(const lane of Object.values(service.lanes))void lane.start();

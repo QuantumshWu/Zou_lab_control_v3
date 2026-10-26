@@ -118,7 +118,6 @@ impl Prepared {
     }
     pub fn dimension(&self)->usize{self.n*self.n}
     pub fn drive_count(&self)->usize{self.drives.len()}
-    pub fn dissipative_nonzeros(&self)->usize{self.dissipative.iter().map(Vec::len).sum()}
     pub fn workspace(&self)->Workspace{Workspace{n:self.n,density:vec![C::default();self.dimension()],product:vec![C::default();self.dimension()],metric_input:vec![0.;self.dimension()]}}
     fn validate(&self,x:&[f64],out:&[f64],workspace:&Workspace)->Result<(),String>{
         if x.len()!=self.dimension()||out.len()!=self.dimension()||workspace.n!=self.n
@@ -165,17 +164,16 @@ impl Prepared {
         self.validate(x,out,workspace)?;let drive=self.drives.get(index).ok_or("Structured sine drive index is out of range")?;
         drive.sin.apply_transpose_into(x,out,workspace);Self::finite(out)
     }
+}
+/// Allocating test helpers for the workspace products.
+#[cfg(test)]
+impl Prepared {
     pub fn apply_static(&self,x:&[f64])->Result<Vec<f64>,String>{
         let mut out=vec![0.;self.dimension()];let mut workspace=self.workspace();self.apply_static_into(x,&mut out,&mut workspace)?;Ok(out)
     }
     pub fn apply_cos(&self,index:usize,x:&[f64])->Result<Vec<f64>,String>{
         let mut out=vec![0.;self.dimension()];let mut workspace=self.workspace();self.apply_cos_into(index,x,&mut out,&mut workspace)?;Ok(out)
     }
-    pub fn apply_sin(&self,index:usize,x:&[f64])->Result<Vec<f64>,String>{
-        let mut out=vec![0.;self.dimension()];let mut workspace=self.workspace();self.apply_sin_into(index,x,&mut out,&mut workspace)?;Ok(out)
-    }
-    pub fn apply(&self,x:&[f64])->Result<Vec<f64>,String>{self.apply_static(x)}
-    pub fn apply_into(&self,x:&[f64],out:&mut[f64],workspace:&mut Workspace)->Result<(),String>{self.apply_static_into(x,out,workspace)}
 }
 
 #[cfg(test)]

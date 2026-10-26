@@ -47,15 +47,18 @@ control application does not require building this tool. The repository-level
 entry is `tools/atom_workbench.ps1`; the independent package entry is
 `npm run package:single-exe`.
 
-## Stable code and research
+## Numerical scope
 
-The stable numerical source is recorded against its validated baseline and
-explicit overlays. New numerical experiments stay in the research worktree
-until they pass independent accuracy and performance comparisons. Reference
+The Rust solver has one dispatch. Finite-time 32-state trajectories use the
+population core; long-time (steadyOnly) means use the full-density Fourier
+harmonic solver for driven models and the trace-constrained stationary solve
+for static ones. Outside the population core, the solver reads only thread
+counts and native-library locations from the environment. Reference
 calculations using QuTiP/Python are development evidence, not shipped runtime
 components.
 
-The accuracy target is an absolute population error of `1e-3`. The configured
+Each request carries an absolute population error target `populationTolerance`
+on the probability scale, `0 < ε ≤ 0.02`, default `0.005`. The configured
 32-state Hamiltonian and collapse operators are retained. Near-resonant lasers
 participate in the master equation; user-designated far-detuned lasers contribute
 the existing Stark model. Long-time results may be a phase average and may

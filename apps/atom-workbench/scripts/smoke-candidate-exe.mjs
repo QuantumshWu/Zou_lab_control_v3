@@ -9,7 +9,6 @@ import {resolve,dirname} from 'node:path';
 import {createModelWorker} from '../desktop-native/ui/model-worker.mjs';
 import {DESKTOP_SOLVER_DEFAULTS} from './desktop-solver-settings.mjs';
 import {nativeChildEnvironment} from './native-child-env.mjs';
-import {mergeFreshMean} from './fresh-mean.mjs';
 import {defaultScene,resolvePopulationTolerance} from '../dist/js/atom-workbench/src/types.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
@@ -39,9 +38,9 @@ settings.populationTolerance=resolvePopulationTolerance(settings.populationToler
 const baseEnv={...process.env};
 // Use the release defaults, not inherited research experiment switches.
 for(const key of Object.keys(baseEnv))if(key.toUpperCase().startsWith('ATOM_'))delete baseEnv[key];
-Object.assign(baseEnv,DESKTOP_SOLVER_DEFAULTS,{ATOM_POPULATION_CORE:'1'});
+Object.assign(baseEnv,DESKTOP_SOLVER_DEFAULTS);
 const report={status:'starting',executable:exe,binarySha256,bytes:binary.length,windowOpened:false,
-  scope:'Candidate EXE/backend-info plus normal Worker/IPC/JSONL and current-model mean merge; no independent physics oracle',
+  scope:'Candidate EXE/backend-info plus normal Worker/IPC/JSONL finite and mean requests; no independent physics oracle',
   requestSource:option('--request')?resolve(option('--request')):'Generated single-near-laser smoke fixture',
   requestSha256:sha(JSON.stringify({scene,settings})),options:settings,processes:[],workerRequests:[],historicalAnswerRead:false};
 const children=new Map(),pending=new Map();let worker,sequence=0;
@@ -100,24 +99,22 @@ try{
   });
   await worker.receive({kind:'native',event:{kind:'configuration',binarySha256,
     buildSha256:sha(JSON.stringify(report.backendInfo.numericSource)),defaults:DESKTOP_SOLVER_DEFAULTS}});
-  const finite=await request('finite',{...settings,steadyOnly:false,includeAsymptotic:false,returnDensity:false});
-  const finiteParsed=normalizeDynamicsResult(finite,scene,settings.initialStateId);
+  const finite=await request('finite',{...settings,steadyOnly:false,includeAsymptotic:true});
+  const parsed=normalizeDynamicsResult(finite,scene,settings.initialStateId);
   assert.equal(finite.diagnostics.validationKind,'population');
-  assert.equal(finiteParsed.populationAccuracy.requestedTolerance,settings.populationTolerance);
-  assert.equal(finiteParsed.timesUs.length,settings.samples);assert.equal(finiteParsed.timesUs.at(-1),settings.durationUs);
-  const mean=await request('mean',{...settings,steadyOnly:true,includeAsymptotic:true,returnDensity:false});
+  assert.equal(parsed.populationAccuracy.requestedTolerance,settings.populationTolerance);
+  assert.equal(parsed.timesUs.length,settings.samples);assert.equal(parsed.timesUs.at(-1),settings.durationUs);
+  assert.equal(parsed.steady.converged,true,'The finite request carries its qualified inline mean');
+  assert.equal(Object.hasOwn(parsed.validation,'positivityError'),false,'Population output must not fabricate a density PSD guarantee');
+  const mean=await request('mean',{...settings,steadyOnly:true,includeAsymptotic:true});
   const meanParsed=normalizeDynamicsResult(mean,scene,settings.initialStateId);
   assert.equal(meanParsed.steady.converged,true,'Smoke mean must be qualified, never the finite endpoint');
-  assert.equal(report.workerRequests.length,2);
+  assert.equal(report.workerRequests.length,2);assert.deepEqual(report.workerRequests.map(r=>r.lane),['trajectory','steady']);
   assert.equal(report.workerRequests[0].modelSha256,report.workerRequests[1].modelSha256,'Both fresh results must use the identical current Model');
-  const model=report.workerRequests[0].model;
-  const merged=mergeFreshMean({...finite,states:model.states},{...mean,states:model.states},model,
-    {elapsedMs:finite.diagnostics.elapsedMs+mean.diagnostics.elapsedMs,meanTiming:{},trajectoryTiming:{}});
-  const parsed=normalizeDynamicsResult({...merged,states:finite.states},scene,settings.initialStateId);
-  assert.equal(parsed.steady.converged,true);assert.ok(parsed.populationAccuracy);
-  assert.equal(Object.hasOwn(parsed.validation,'positivityError'),false,'Population output must not fabricate a density PSD guarantee');
+  const meanDelta=Math.max(...finite.asymptoticPopulations.map((p,i)=>Math.abs(p-mean.asymptoticPopulations[i])));
+  assert.ok(meanDelta<1e-9,`Inline and steadyOnly means solve the same equation (difference ${meanDelta})`);
   report.status='passed';report.validation={backendStatic:true,normalIpcAndJsonl:true,finitePopulationAccuracy:parsed.populationAccuracy,
-    freshMeanStatus:parsed.steady.status,separateCurrentModelMeanMerge:true,finiteNativeMs:finite.diagnostics.elapsedMs,meanNativeMs:mean.diagnostics.elapsedMs};
+    meanStatus:meanParsed.steady.status,finiteNativeMs:finite.diagnostics.elapsedMs,meanNativeMs:mean.diagnostics.elapsedMs};
 }catch(error){report.status='failed';report.error=error.stack??error.message;process.exitCode=1;}
 finally{
   await worker?.receive({kind:'shutdown'});

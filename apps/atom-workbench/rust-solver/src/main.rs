@@ -8,50 +8,23 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
-mod adaptive_periodic;
-mod bath_frame;
 mod block_solve;
-mod coarse_preconditioner;
-mod schur_shift;
 mod cluster_action;
-mod cptp_period;
 mod defect_bound;
 mod dense_expm;
-mod effective_krylov;
-mod incremental_projection;
-mod fast_multitone;
-mod fast_periodic;
-mod fixed_etd;
-mod full_period;
-mod monodromy;
 mod floquet;
-mod generator_mean;
 mod harmonics;
-mod hilbert_floquet;
 mod lapack;
-mod matrix_probe;
 mod native_superlu;
-mod optical_schur;
-mod modal_defect;
-mod multitone_action;
-mod multitone_frame;
-mod periodic_action;
-mod radiative_bath;
-mod radiative_boundary;
-mod radiative_solve;
-mod small_periodic;
-mod small_periodic_mean;
 mod stationary_structure;
 mod structured_lindblad;
 mod structured_floquet;
-mod sylvester_recycling;
-mod stationary_sylvester;
-mod unitary_monodromy;
 #[cfg(feature="population-core")]
 mod population_core_adapter;
 use lapack::Lapack;
 const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/2";
-const ATOMIC_MODEL_SCHEMA: &str = "rb87-dipole/2";
+const FULL_MODEL_SCHEMA: &str = "rb87-full/2";
+const GENERIC_MODEL_SCHEMA: &str = "generic-lindblad/1";
 
 #[derive(Clone, Copy, Default, Debug)]
 struct C {
@@ -160,8 +133,6 @@ struct Options {
     include_asymptotic: bool,
     #[serde(default)]
     steady_only: bool,
-    #[serde(default)]
-    return_density: bool,
 }
 fn default_duration() -> f64 {
     5.
@@ -183,7 +154,6 @@ impl Default for Options {
             population_tolerance: default_population_tolerance(),
             include_asymptotic: true,
             steady_only: false,
-            return_density: false,
         }
     }
 }
@@ -227,8 +197,6 @@ struct Request {
     #[serde(default)]
     model_schema: Option<String>,
     #[serde(default)]
-    radiation: Option<radiative_bath::Radiation>,
-    #[serde(default)]
     options: Options,
     #[serde(default)]
     progress: bool,
@@ -236,7 +204,7 @@ struct Request {
 
 thread_local! {static PROGRESS_REQUEST:std::cell::RefCell<Option<(Value,String,Option<Vec<Vec<i32>>>)>>=const{std::cell::RefCell::new(None)};}
 fn stamp_progress_coordinates(result:&mut Value,schema:&str,mapping:Option<&Vec<Vec<i32>>>)->bool{
-    if schema!="rb87-full/2"{return true;}
+    if schema!=FULL_MODEL_SCHEMA{return true;}
     let Some(mapping)=mapping else{return false;};
     result["diagnostics"]["carrierSourceToBasis"]=json!(mapping);
     result["diagnostics"]["frequencyCoordinateSource"]=json!("declared-carrier-coordinates");true
@@ -964,8 +932,6 @@ impl Solver {
         let support = hilbert_support(model)?;
         let mut populations = Vec::new();
         let mut scattering = Vec::new();
-        let mut density_real = Vec::new();
-        let mut density_imag = Vec::new();
         let mut trace = 0_f64;
         let mut psd = 0_f64;
         let mut initial_error = 0_f64;
@@ -993,10 +959,6 @@ impl Solver {
             psd = psd.max(positivity(&self.lap, &block, support.len())?);
             scattering.push(scatter_rate(&g.scattering, &rho, g.n));
             populations.push(x[..g.n].to_vec());
-            if options.return_density {
-                density_real.push(rho.iter().map(|z| z.re).collect::<Vec<_>>());
-                density_imag.push(rho.iter().map(|z| z.im).collect::<Vec<_>>());
-            }
         }
         if trace.max(psd).max(initial_error) > 5e-6 {
             return Err(format!("Dense Pade density verification failed: trace {trace:e}, positivity {psd:e}, initial {initial_error:e}"));
@@ -1015,7 +977,6 @@ impl Solver {
         };
         Ok(
             json!({"states":states,"timesUs":times,"populations":populations,"scatteringRatePerUs":scattering,
-            "densityReal":if options.return_density{Some(density_real)}else{None},"densityImag":if options.return_density{Some(density_imag)}else{None},
             "asymptoticPopulations":stationary.as_ref().map(|v|v["asymptoticPopulations"].clone()),"asymptoticScatteringRatePerUs":stationary.as_ref().map(|v|v["asymptoticScatteringRatePerUs"].clone()),"asymptoticStatus":status,
             "asymptoticDensityReal":stationary.as_ref().map(|v|v["asymptoticDensityReal"].clone()),"asymptoticDensityImag":stationary.as_ref().map(|v|v["asymptoticDensityImag"].clone()),
             "diagnostics":{"engine":"rust-lapack","method":"Full-density scaling-and-squaring Pade [13/13] exponential","fallbackReason":reason,
@@ -1037,7 +998,7 @@ impl Solver {
             return Err("samples must be in [2,2001]".into());
         }
         if !model.drives.is_empty() {
-            return floquet::solve(&self.lap, model, options);
+            return Err("Driven generators are solved through modelSchema rb87-full/2; generic-lindblad/1 accepts static generators only".into());
         }
         if model.time_dependent {
             return Err("Time-dependent input needs explicit harmonic drives; no unsupported term may be silently omitted.".into());
@@ -1072,20 +1033,13 @@ impl Solver {
         // proves a unique stationary density in the reachable subspace.
         // Singular/nonunique cases continue to initial-state mode projection.
         let unique_stationary = if options.include_asymptotic {
-            self.stationary_only(model, &g, &a, &inds, started, construction_ms)?
+            self.stationary_only(model, &g, started, construction_ms)?
         } else {
             None
         };
         if options.steady_only {
             if let Some(result) = &unique_stationary {
-                let mut result = result.clone();
-                if options.return_density {
-                    result["densityReal"] =
-                        json!([initial_rho.iter().map(|z| z.re).collect::<Vec<_>>()]);
-                    result["densityImag"] =
-                        json!([initial_rho.iter().map(|z| z.im).collect::<Vec<_>>()]);
-                }
-                return Ok(result);
+                return Ok(result.clone());
             }
         }
         let key = self.cache.iter().position(|c| {
@@ -1297,8 +1251,6 @@ impl Solver {
         let spectral_ms = started.elapsed().as_secs_f64() * 1000. - construction_ms;
         let mut populations = Vec::with_capacity(times.len());
         let mut scattering = Vec::with_capacity(times.len());
-        let mut density_real = Vec::new();
-        let mut density_imag = Vec::new();
         let mut trace_error: f64 = 0.;
         let mut positivity_error: f64 = 0.;
         let mut initial_error: f64 = 0.;
@@ -1346,10 +1298,6 @@ impl Solver {
                 positivity(&self.lap, &rho, g.n)?
             };
             positivity_error = positivity_error.max(psd);
-            if options.return_density {
-                density_real.push(rho.iter().map(|z| z.re).collect::<Vec<_>>());
-                density_imag.push(rho.iter().map(|z| z.im).collect::<Vec<_>>());
-            }
             scattering.push(scatter_rate(&g.scattering, &rho, g.n));
             populations.push(x[..g.n].to_vec());
         }
@@ -1561,7 +1509,6 @@ impl Solver {
             .extend(stationary_diagnostics.as_object().unwrap().clone());
         Ok(
             json!({"timesUs":times,"states":states,"populations":populations,"scatteringRatePerUs":scattering,
-            "densityReal":if options.return_density{Some(density_real)}else{None},"densityImag":if options.return_density{Some(density_imag)}else{None},
             "asymptoticPopulations":asym,"asymptoticScatteringRatePerUs":asym_scatter,"asymptoticStatus":status,
             "asymptoticDensityReal":asym_density_real,"asymptoticDensityImag":asym_density_imag,"diagnostics":diagnostics}),
         )
@@ -1570,8 +1517,6 @@ impl Solver {
         &mut self,
         model: &Model,
         g: &Generator,
-        _a: &[f64],
-        _inds: &[usize],
         started: Instant,
         construction_ms: f64,
     ) -> Result<Option<Value>, String> {
@@ -1720,40 +1665,9 @@ impl Solver {
     }
 }
 
-/// Numerical method selection only: both routes retain the same complete
-/// Hamiltonian and collapse operators and enforce their own convergence gates.
-/// Very long trajectories avoid repeatedly refining a period discretization
-/// over millions of cycles. No laser or density coordinate is discarded.
-fn prefer_full_period(dimension:usize,frequencies:&[f64],duration_us:f64,steady_only:bool)->bool{
-    if steady_only||dimension!=32||frequencies.len()!=1||!frequencies[0].is_finite()||frequencies[0]<=0.
-        ||!duration_us.is_finite()||duration_us<=0.{return false;}
-    let period=std::f64::consts::TAU/frequencies[0];
-    // A GHz repump can execute many periods during a short physical interval.
-    // Its period count alone is not a reason to reject this numerical route.
-    period<=0.02&&duration_us<=100.
-}
-fn full_period_requested(model:&Model,options:&Options)->bool{
-    match std::env::var("ATOM_FULL_PERIOD").as_deref(){
-        Ok("1")=>crate::full_period::supports(model),
-        Ok("auto")=>harmonics::model_frequency_basis(model,16).is_ok_and(|basis|basis.exact&&basis.rounded_relations==0&&prefer_full_period(model.dimension,&basis.frequencies,options.duration_us,options.steady_only)),
-        _=>false,
-    }
-}
 #[cfg(test)]
-mod period_routing_tests{
+mod progress_tests{
     use super::*;
-    #[test]
-    fn method_selection_retains_long_lowbeat_and_multifrequency_fallbacks(){
-        let beat=std::f64::consts::TAU*100.;
-        assert!(prefer_full_period(32,&[beat],20.,false));
-        assert!(prefer_full_period(32,&[std::f64::consts::TAU*6568.],20.,false));
-        assert!(!prefer_full_period(32,&[beat],100.01,false));
-        assert!(!prefer_full_period(32,&[beat],100000.,false));
-        assert!(!prefer_full_period(32,&[std::f64::consts::TAU*1.25],20.,false));
-        assert!(!prefer_full_period(32,&[beat,beat*1.7],20.,false));
-        assert!(!prefer_full_period(32,&[beat],20.,true));
-        assert!(!prefer_full_period(32,&[f64::NAN],20.,false));
-    }
     #[test]
     fn declared_static_progress_carries_mapping_and_legacy_progress_omits_it(){
         let mut declared=json!({"diagnostics":{},"asymptoticPopulations":[1.,0.]});
@@ -1762,69 +1676,49 @@ mod period_routing_tests{
         let mapping=vec![vec![1],vec![3]];
         assert!(stamp_progress_coordinates(&mut declared,"rb87-full/2",Some(&mapping)));
         assert_eq!(declared["diagnostics"]["carrierSourceToBasis"],json!(mapping));
-        let mut legacy=json!({"diagnostics":{}});assert!(stamp_progress_coordinates(&mut legacy,"rb87-full/1",None));
+        let mut legacy=json!({"diagnostics":{}});assert!(stamp_progress_coordinates(&mut legacy,GENERIC_MODEL_SCHEMA,None));
         assert!(legacy["diagnostics"].get("carrierSourceToBasis").is_none());
         let mut static_zero=json!({"diagnostics":{}});assert!(stamp_progress_coordinates(&mut static_zero,"rb87-full/2",Some(&vec![])));
         assert_eq!(static_zero["diagnostics"]["carrierSourceToBasis"],json!([]));
     }
 }
-fn fixed_etd_result(lap:&Lapack,model:&Model,options:&Options)->Result<Value,String>{
+
+/// Static rb87-full/2 mean: the verified trace-constrained full-density
+/// stationary solve. Initial-dependent cases fall back to Solver::solve.
+fn static_stationary(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
+    if model.time_dependent||!model.drives.is_empty(){return Err("Nonstatic effective Hamiltonian".into());}
+    if !options.steady_only{return Err("Static finite-time trajectories are solved by the population core".into());}
     let started=Instant::now();
-    let mut result=if options.include_asymptotic{
-        let value=floquet::solve_full(lap,model,&Options{steady_only:true,..*options})?;
-        publish_mean(value.clone());value
-    }else{json!({"asymptoticPopulations":null,"asymptoticStatus":"not-requested"})};
-    let mean_ms=started.elapsed().as_secs_f64()*1000.;
-    let report=if full_period_requested(model,options){full_period::solve(lap,model,options)?}else if std::env::var_os("ATOM_MONODROMY").is_some(){monodromy::solve(lap,model,options)?}else if std::env::var("ATOM_FIXED_ETD").is_ok_and(|mode|mode=="ab4"){fixed_etd::solve_ab4(lap,model,options)?}else{fixed_etd::solve(lap,model,options)?};
     let g=build_generator(model)?;
-    let densities:Vec<_>=report.states.iter().map(|state|expand_density(&g.coords,state,model.dimension)).collect();
-    result["timesUs"]=json!(report.times);result["states"]=json!(model.states);
-    result["populations"]=json!(report.states.iter().map(|x|x[..model.dimension].to_vec()).collect::<Vec<_>>());
-    result["scatteringRatePerUs"]=json!(densities.iter().map(|rho|scatter_rate(&g.scattering,rho,model.dimension)).collect::<Vec<_>>());
-    if options.return_density{result["densityReal"]=json!(densities.iter().map(|rho|rho.iter().map(|c|c.re).collect::<Vec<_>>()).collect::<Vec<_>>());result["densityImag"]=json!(densities.iter().map(|rho|rho.iter().map(|c|c.im).collect::<Vec<_>>()).collect::<Vec<_>>());}
-    let previous=result["diagnostics"].clone();result["diagnostics"]=report.diagnostics;result["diagnostics"]["stationaryDiagnostics"]=previous;
-    result["diagnostics"]["stationarySolveMs"]=json!(mean_ms);result["diagnostics"]["stationaryOnly"]=json!(false);
-    result["diagnostics"]["elapsedMs"]=json!(started.elapsed().as_secs_f64()*1000.);Ok(result)
+    let construction=started.elapsed().as_secs_f64()*1000.;
+    solver.stationary_only(model,&g,started,construction)?.ok_or_else(||"Initial-dependent steady state needs spectral projection".into())
 }
 
-fn full_model_solve(solver:&mut Solver,input:&Model,options:&Options,declared_schema:bool)->Result<Value,String>{
+fn full_model_solve(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
     options.validate_population_tolerance()?;
-    let declared_basis=if declared_schema{
-        if input.frequency_coordinates.is_none(){return Err("rb87-full/2 requires authoritative frequencyCoordinates metadata".into());}
-        Some(harmonics::model_frequency_basis(input,16)?)
-    }else{None};
+    if model.frequency_coordinates.is_none(){return Err("rb87-full/2 requires authoritative frequencyCoordinates metadata".into());}
+    let basis=harmonics::model_frequency_basis(model,16)?;
     // Request-local phase metadata must precede EVERY possible progress path,
-    // including effective_krylov's static mean without Fourier coefficients.
-    if let Some(basis)=&declared_basis{PROGRESS_REQUEST.with(|context|{
-        if let Some((_,schema,mapping))=context.borrow_mut().as_mut(){if schema=="rb87-full/2"{*mapping=basis.source_to_basis.clone();}}
-    });}
-    // /1 retains its original omega-literal semantics even if an unexpected
-    // newer metadata field is present. Only /2 declares those phase relations.
-    let legacy=if !declared_schema&&input.frequency_coordinates.is_some(){let mut model=input.clone();model.frequency_coordinates=None;Some(model)}else{None};
-    let model=legacy.as_ref().unwrap_or(input);
+    // including the static mean without Fourier coefficients.
+    PROGRESS_REQUEST.with(|context|{
+        if let Some((_,schema,mapping))=context.borrow_mut().as_mut(){if schema==FULL_MODEL_SCHEMA{*mapping=basis.source_to_basis.clone();}}
+    });
+    // Every finite-time rb87-full/2 trajectory is solved by the population core.
     #[cfg(feature="population-core")]
-    if population_core_adapter::supports(model,options,declared_schema)
-        && !full_period_requested(model,options)
-        && std::env::var_os("ATOM_FIXED_ETD").is_none()
-        && std::env::var_os("ATOM_MONODROMY").is_none()
-    {
+    if population_core_adapter::supports(model,options){
         return population_core_adapter::solve(solver,model,options);
     }
     let mut result=if !model.drives.is_empty(){
-        if !options.steady_only&&(std::env::var_os("ATOM_FIXED_ETD").is_some()
-            ||(std::env::var_os("ATOM_MONODROMY").is_some()&&monodromy::supports(model))||full_period_requested(model,options)){
-            fixed_etd_result(&solver.lap,model,options)
-        }else{floquet::solve_full(&solver.lap,model,options)}
+        if options.steady_only{floquet::solve_full(&solver.lap,model,options)}
+        else{Err("Finite-time driven trajectories are solved by the population core".into())}
     }else{
-        let start=Instant::now();match effective_krylov::solve(solver,model,options){Ok(v)=>Ok(v),Err(reason)=>solver.solve(model,options).map(|mut v|{
+        let start=Instant::now();match static_stationary(solver,model,options){Ok(v)=>Ok(v),Err(reason)=>solver.solve(model,options).map(|mut v|{
             v["diagnostics"]["fastPathFallback"]=json!(reason);v["diagnostics"]["elapsedMs"]=json!(start.elapsed().as_secs_f64()*1000.);v
         })}
     }?;
-    if let Some(basis)=declared_basis{
-        result["diagnostics"]["frequencyCoordinateSource"]=json!(basis.source());
-        result["diagnostics"]["carrierSourceToBasis"]=json!(basis.source_to_basis);
-        result["diagnostics"]["frequencyReconstructionErrors"]=json!(basis.reconstruction_errors);
-    }
+    result["diagnostics"]["frequencyCoordinateSource"]=json!(basis.source());
+    result["diagnostics"]["carrierSourceToBasis"]=json!(basis.source_to_basis);
+    result["diagnostics"]["frequencyReconstructionErrors"]=json!(basis.reconstruction_errors);
     Ok(result)
 }
 
@@ -1855,9 +1749,9 @@ pub fn main() {
         }
         let output = match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
-                PROGRESS_REQUEST.with(|p|*p.borrow_mut()=if request.progress{Some((request.id.clone(),request.model_schema.clone().unwrap_or("generic-lindblad/1".into()),None))}else{None});
+                PROGRESS_REQUEST.with(|p|*p.borrow_mut()=if request.progress{Some((request.id.clone(),request.model_schema.clone().unwrap_or(GENERIC_MODEL_SCHEMA.into()),None))}else{None});
                 if request.op.as_deref() == Some("capabilities") {
-                    json!({"id":request.id,"protocol":NATIVE_PROTOCOL,"capabilities":[ATOMIC_MODEL_SCHEMA,"rb87-effective/1","rb87-full/1","rb87-full/2","generic-lindblad/1"]})
+                    json!({"id":request.id,"protocol":NATIVE_PROTOCOL,"capabilities":[FULL_MODEL_SCHEMA,GENERIC_MODEL_SCHEMA]})
                 } else {
                     let result = if request.op.is_some() {
                         Err("Unknown native operation".into())
@@ -1868,14 +1762,10 @@ pub fn main() {
                         solver.cache.clear();
                         solver.stationary_cache.clear();
                         floquet::clear_request_results();
-                        match(request.model_schema.as_deref(),request.radiation.as_ref()){
-                            (Some("rb87-full/1"),_)=>full_model_solve(&mut solver,model,&request.options,false),
-                            (Some("rb87-full/2"),_)=>full_model_solve(&mut solver,model,&request.options,true),
-                            (Some("rb87-effective/1"),_)=>{let start=Instant::now();match effective_krylov::solve(&mut solver,model,&request.options){Ok(v)=>Ok(v),Err(reason)=>solver.solve(model,&request.options).map(|mut v|{v["diagnostics"]["fastPathFallback"]=json!(reason);v["diagnostics"]["elapsedMs"]=json!(start.elapsed().as_secs_f64()*1000.);v})}},
-                            (Some(ATOMIC_MODEL_SCHEMA),Some(radiation))=>radiative_solve::solve(&mut solver,model,radiation,&request.options),
-                            (Some(ATOMIC_MODEL_SCHEMA),None)=>Err("rb87-dipole/2 requires its common-vacuum radiation metadata; no legacy decay fallback is permitted".into()),
-                            (None,None)|(Some("generic-lindblad/1"),None)=>solver.solve(model,&request.options),
-                            _=>Err("Unsupported or incomplete native model schema/radiation metadata".into()),
+                        match request.model_schema.as_deref(){
+                            Some(FULL_MODEL_SCHEMA)=>full_model_solve(&mut solver,model,&request.options),
+                            None|Some(GENERIC_MODEL_SCHEMA)=>solver.solve(model,&request.options),
+                            _=>Err("Unsupported native model schema".into()),
                         }
                     } else {
                         Err("A solve request requires a model".into())
@@ -1886,7 +1776,7 @@ pub fn main() {
                             result["modelSchema"] = json!(request
                                 .model_schema
                                 .as_deref()
-                                .unwrap_or("generic-lindblad/1"));
+                                .unwrap_or(GENERIC_MODEL_SCHEMA));
                             json!({"id":request.id,"protocol":NATIVE_PROTOCOL,"result":result})
                         }
                         Err(error) => {
@@ -1976,9 +1866,6 @@ mod tests {
             .map(|x| x.abs())
             .sum::<f64>()
             * 0.5
-    }
-    fn bound_json(b: &defect_bound::Bound) -> Value {
-        json!({"timeUs":b.time,"total":b.total,"accepted":b.total.is_finite()&&b.total<=5e-6,"initial":b.initial_reconstruction,"firstOrder":b.first_order,"higherOrder":b.higher_order,"globalHigherOrder":b.global_higher_order,"comparisonThreshold":b.comparison_threshold,"comparisonRoundoff":b.comparison_roundoff,"inverseAndProductUncertainty":b.inverse_and_product_uncertainty,"floating":b.floating_evaluation,"coefficientNorm":b.coefficient_weighted_norm})
     }
     #[test]
     fn coherent_rabi_and_no_stationary_claim() {
@@ -2288,32 +2175,6 @@ mod tests {
         );
     }
     #[test]
-    fn constant_kernel_returns_full_density_with_correct_coherence_phase() {
-        let mut solver = Solver::new().unwrap();
-        let m = model(2, vec![0., 1., 1., 0.], vec![], 0);
-        let out = solver
-            .solve(
-                &m,
-                &Options {
-                    duration_us: 1.,
-                    samples: 21,
-                    return_density: true,
-                    ..Options::default()
-                },
-            )
-            .unwrap();
-        for i in 0..21 {
-            let t = i as f64 / 20.;
-            assert!((out["densityReal"][i][0].as_f64().unwrap() - t.cos().powi(2)).abs() < 1e-11);
-            assert!(
-                (out["densityImag"][i][1].as_f64().unwrap() - 0.5 * (2. * t).sin()).abs() < 1e-11
-            );
-            assert!(
-                (out["densityImag"][i][2].as_f64().unwrap() + 0.5 * (2. * t).sin()).abs() < 1e-11
-            );
-        }
-    }
-    #[test]
     fn stationary_cache_preserves_current_initial_and_scattering_observable() {
         let mut solver = Solver::new().unwrap();
         let mut m = model(
@@ -2327,7 +2188,6 @@ mod tests {
         );
         let options = Options {
             steady_only: true,
-            return_density: true,
             ..Options::default()
         };
         let first = solver.solve(&m, &options).unwrap();
@@ -2341,7 +2201,6 @@ mod tests {
         assert_eq!(second["diagnostics"]["stationaryProofCached"], true);
         assert_eq!(second["states"], json!(["g", "e"]));
         assert_eq!(second["populations"], json!([[0., 1.]]));
-        assert_eq!(second["densityReal"], json!([[0., 0., 0., 1.]]));
         assert_eq!(
             first["asymptoticPopulations"],
             second["asymptoticPopulations"]
@@ -2387,7 +2246,6 @@ mod tests {
                 &Options {
                     duration_us: 3.,
                     samples: 61,
-                    return_density: true,
                     ..Options::default()
                 },
             )
@@ -2399,9 +2257,7 @@ mod tests {
         for i in 0..61 {
             let t = i as f64 / 20.;
             let excited = 1. / 18. - (-3. * t).exp() * (1. / 18. + t / 6.);
-            let imaginary = 2. / 9. - (-3. * t).exp() * (2. / 9. + t / 6.);
             assert!((out["populations"][i][1].as_f64().unwrap() - excited).abs() < 2e-12);
-            assert!((out["densityImag"][i][1].as_f64().unwrap() - imaginary).abs() < 2e-12);
         }
         assert!((out["asymptoticPopulations"][1].as_f64().unwrap() - 1. / 18.).abs() < 1e-12);
     }
@@ -2442,7 +2298,6 @@ mod tests {
         m.initial_real = Some(initial);
         m.initial_imag = Some(vec![0.; 16]);
         let (g, inds, initial, certificate) = modal_defect_case(&lap, &m);
-        let mut records = Vec::new();
         for end in [20., 200., 2000., 1e6] {
             let mut times = vec![0., 0.013, 0.5, 1.07, 5., 20.];
             times.push(end);
@@ -2482,385 +2337,6 @@ mod tests {
                 "T={end}: conservative envelope {} is not yet useful",
                 result.bound.total
             );
-            records.push(json!({"bound":bound_json(&result.bound),"trueTraceNormError":worst}));
         }
-        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../artifacts/v4/native-constant");
-        std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(folder.join("analytic-defect-bound.json"),serde_json::to_string_pretty(&json!({"cases":records,"defectNorm":certificate.diagnostics.defect_norm_upper,"inverseResidualBound":certificate.diagnostics.inverse_residual_bound})).unwrap()).unwrap();
-    }
-    #[test]
-    #[ignore = "Generated full Rb87 constant-H fixture and performance audit"]
-    fn constant_rb32_stationary_and_transient_consistency_audit() {
-        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../artifacts/v4/native-constant");
-        let cases: Value =
-            serde_json::from_str(&std::fs::read_to_string(folder.join("cases.json")).unwrap())
-                .unwrap();
-        let mut report = Vec::new();
-        let mut failures = Vec::new();
-        let mut solver = Solver::new().unwrap();
-        for case in cases.as_array().unwrap() {
-            let name = case["name"].as_str().unwrap();
-            let m: Model = serde_json::from_value(case["model"].clone()).unwrap();
-            let duration = case["durationUs"].as_f64().unwrap();
-            let only = solver.solve(
-                &m,
-                &Options {
-                    steady_only: true,
-                    ..Options::default()
-                },
-            );
-            let full = solver.solve(
-                &m,
-                &Options {
-                    duration_us: duration,
-                    samples: 161,
-                    ..Options::default()
-                },
-            );
-            let mut delta = 0_f64;
-            if let (Ok(a), Ok(b)) = (&only, &full) {
-                if a["asymptoticStatus"] != b["asymptoticStatus"] {
-                    failures.push(format!("{name}: steady status differs"));
-                }
-                if let (Some(x), Some(y)) = (
-                    a["asymptoticPopulations"].as_array(),
-                    b["asymptoticPopulations"].as_array(),
-                ) {
-                    for (x, y) in x.iter().zip(y) {
-                        delta = delta.max((x.as_f64().unwrap() - y.as_f64().unwrap()).abs());
-                    }
-                    if delta > 1e-10 {
-                        failures.push(format!("{name}: stationary delta {delta:e}"));
-                    }
-                }
-                if name == "cycling-F2m2-F3m3" {
-                    for row in b["populations"].as_array().unwrap() {
-                        for (i, p) in row.as_array().unwrap().iter().enumerate() {
-                            if !matches!(m.states[i].as_str(), "ground-2-2" | "D2-3-3")
-                                && p.as_f64().unwrap().abs() > 1e-11
-                            {
-                                failures.push(format!(
-                                    "{name}: cycling support leaked into {}",
-                                    m.states[i]
-                                ));
-                            }
-                        }
-                    }
-                }
-                if name == "lights-off-D2-stretched" {
-                    let e = m.initial_index;
-                    let gamma = m
-                        .collapse
-                        .iter()
-                        .map(|op| {
-                            (0..m.dimension)
-                                .map(|row| {
-                                    op.real[row * m.dimension + e].powi(2)
-                                        + op.imag[row * m.dimension + e].powi(2)
-                                })
-                                .sum::<f64>()
-                        })
-                        .sum::<f64>();
-                    for (i, t) in b["timesUs"].as_array().unwrap().iter().enumerate() {
-                        if (b["populations"][i][e].as_f64().unwrap()
-                            - (-gamma * t.as_f64().unwrap()).exp())
-                        .abs()
-                            > 1e-11
-                        {
-                            failures.push(format!("{name}: analytic decay differs"));
-                        }
-                    }
-                }
-                if matches!(name, "open-F2-F2" | "F2-F3-linear") {
-                    let f1 = m
-                        .states
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, id)| id.starts_with("ground-1-"))
-                        .map(|(i, _)| b["asymptoticPopulations"][i].as_f64().unwrap())
-                        .sum::<f64>();
-                    if f1 < 0.99 {
-                        failures.push(format!("{name}: expected predominant F1 pumping, got {f1}"));
-                    }
-                }
-            } else {
-                failures.push(format!(
-                    "{name}: {}",
-                    full.as_ref().err().or_else(|| only.as_ref().err()).unwrap()
-                ));
-            }
-            let warm = solver.solve(
-                &m,
-                &Options {
-                    duration_us: duration,
-                    samples: 161,
-                    ..Options::default()
-                },
-            );
-            if let (Ok(cold), Ok(warm)) = (&full, &warm) {
-                assert_eq!(cold["populations"], warm["populations"]);
-            }
-            report.push(json!({"name":name,"steadyOnly":only.unwrap_or_else(|e|json!({"error":e})),"trajectory":full.unwrap_or_else(|e|json!({"error":e})),"warmDiagnostics":warm.map(|v|v["diagnostics"].clone()).unwrap_or_else(|e|json!({"error":e})),"stationaryMaxDifference":delta}));
-        }
-        std::fs::write(
-            folder.join("audit.json"),
-            serde_json::to_string_pretty(&json!({"cases":report,"failures":failures})).unwrap(),
-        )
-        .unwrap();
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
-    }
-    #[test]
-    #[ignore = "Independent basis-phase audit of every full-density component on stiff Rb87 generators"]
-    fn constant_rb32_phase_gauge_density_audit() {
-        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../artifacts/v4/native-constant");
-        let cases: Value =
-            serde_json::from_str(&std::fs::read_to_string(folder.join("cases.json")).unwrap())
-                .unwrap();
-        let mut records = Vec::new();
-        let mut failures = Vec::new();
-        let mut solver = Solver::new().unwrap();
-        for case in cases.as_array().unwrap().iter().filter(|c| {
-            matches!(
-                c["name"].as_str(),
-                Some("open-F2-F2" | "tilted-B-general-polarization")
-            )
-        }) {
-            let m: Model = serde_json::from_value(case["model"].clone()).unwrap();
-            let n = m.dimension;
-            let angles: Vec<_> = (0..n)
-                .map(|i| ((i * i + 3 * i) % 17) as f64 * 0.13 + ((i + 5) % 4) as f64 * 0.07)
-                .collect();
-            let rotate = |re: &[f64], im: &[f64]| -> (Vec<f64>, Vec<f64>) {
-                let mut real = Vec::new();
-                let mut imag = Vec::new();
-                for i in 0..n {
-                    for j in 0..n {
-                        let (s, c) = (angles[i] - angles[j]).sin_cos();
-                        let z = C::new(re[i * n + j], im[i * n + j]) * C::new(c, s);
-                        real.push(z.re);
-                        imag.push(z.im);
-                    }
-                }
-                (real, imag)
-            };
-            let mut gauged = m.clone();
-            (gauged.h_real, gauged.h_imag) = rotate(&m.h_real, &m.h_imag);
-            for (op, original) in gauged.collapse.iter_mut().zip(&m.collapse) {
-                (op.real, op.imag) = rotate(&original.real, &original.imag);
-            }
-            let options = Options {
-                duration_us: 1.,
-                samples: 21,
-                return_density: true,
-                ..Options::default()
-            };
-            let original = solver.solve(&m, &options).unwrap();
-            let changed = solver.solve(&gauged, &options).unwrap();
-            let mut density_delta = 0_f64;
-            let mut population_delta = 0_f64;
-            for t in 0..21 {
-                for i in 0..n {
-                    for j in 0..n {
-                        let (s, c) = (angles[i] - angles[j]).sin_cos();
-                        let expected = C::new(
-                            original["densityReal"][t][i * n + j].as_f64().unwrap(),
-                            original["densityImag"][t][i * n + j].as_f64().unwrap(),
-                        ) * C::new(c, s);
-                        let actual = C::new(
-                            changed["densityReal"][t][i * n + j].as_f64().unwrap(),
-                            changed["densityImag"][t][i * n + j].as_f64().unwrap(),
-                        );
-                        density_delta = density_delta.max((expected - actual).abs());
-                        if i == j {
-                            population_delta =
-                                population_delta.max((expected.re - actual.re).abs());
-                        }
-                    }
-                }
-            }
-            let mut stationary_delta = 0_f64;
-            if let (Some(a), Some(b)) = (
-                original["asymptoticPopulations"].as_array(),
-                changed["asymptoticPopulations"].as_array(),
-            ) {
-                for (x, y) in a.iter().zip(b) {
-                    stationary_delta =
-                        stationary_delta.max((x.as_f64().unwrap() - y.as_f64().unwrap()).abs());
-                }
-            }
-            if density_delta > 1e-8 || stationary_delta > 1e-8 {
-                failures.push(format!(
-                    "{}: full density {density_delta:e}, stationary {stationary_delta:e}",
-                    case["name"]
-                ));
-            }
-            records.push(json!({"name":case["name"],"durationUs":1.,"samples":21,"maxDensityDifference":density_delta,"maxPopulationDifference":population_delta,"stationaryDifference":stationary_delta,"originalDiagnostics":original["diagnostics"],"gaugeDiagnostics":changed["diagnostics"]}));
-        }
-        std::fs::write(
-            folder.join("phase-gauge-audit.json"),
-            serde_json::to_string_pretty(&json!({"cases":records,"failures":failures})).unwrap(),
-        )
-        .unwrap();
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
-    }
-    #[test]
-    #[ignore = "Frequency-aware defect envelope across 20, 200, 2000 and one million microseconds for seven full Rb87 cases"]
-    fn constant_rb32_frequency_aware_defect_audit() {
-        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../artifacts/v4/native-constant");
-        let cases: Value =
-            serde_json::from_str(&std::fs::read_to_string(folder.join("cases.json")).unwrap())
-                .unwrap();
-        let lap = Lapack::load().unwrap();
-        let mut records = Vec::new();
-        for case in cases.as_array().unwrap() {
-            let name = case["name"].as_str().unwrap();
-            let model: Model = serde_json::from_value(case["model"].clone()).unwrap();
-            let (g, inds, initial, certificate) = modal_defect_case(&lap, &model);
-            let mut rows = Vec::new();
-            for end in [20., 200., 2000., 1e6] {
-                let result = certificate
-                    .apply(&lap, &initial, &[0., end * 0.37, end])
-                    .unwrap();
-                let mut trace = 0_f64;
-                let mut psd = 0_f64;
-                let mut analytic_error: Option<f64> = None;
-                for (state, &t) in result.states.iter().zip(&[0., end * 0.37, end]) {
-                    let mut x = vec![0.; g.n * g.n];
-                    for (i, &global) in inds.iter().enumerate() {
-                        x[global] = state[i];
-                    }
-                    let rho = expand_density(&g.coords, &x, g.n);
-                    trace = trace.max((x[..g.n].iter().sum::<f64>() - 1.).abs());
-                    psd = psd.max(positivity(&lap, &rho, g.n).unwrap());
-                    if name == "no-light-ground-state" {
-                        let expected = expand_density(&g.coords, &g.initial, g.n);
-                        analytic_error = Some(
-                            analytic_error
-                                .unwrap_or(0.)
-                                .max(difference_trace_norm(&lap, &rho, &expected, g.n)),
-                        );
-                    }
-                    if name == "lights-off-D2-stretched" {
-                        let e = model.initial_index;
-                        let ground = model.states.iter().position(|s| s == "ground-2-2").unwrap();
-                        let gamma = model
-                            .collapse
-                            .iter()
-                            .map(|c| {
-                                (0..g.n)
-                                    .map(|i| {
-                                        c.real[i * g.n + e].powi(2) + c.imag[i * g.n + e].powi(2)
-                                    })
-                                    .sum::<f64>()
-                            })
-                            .sum::<f64>();
-                        let p = (-gamma * t).exp();
-                        let mut expected = vec![C::default(); g.n * g.n];
-                        expected[e * g.n + e].re = p;
-                        expected[ground * g.n + ground].re = 1. - p;
-                        analytic_error = Some(
-                            analytic_error
-                                .unwrap_or(0.)
-                                .max(difference_trace_norm(&lap, &rho, &expected, g.n)),
-                        );
-                    }
-                    if name == "cycling-F2m2-F3m3" && t >= 1. {
-                        let ground = model.states.iter().position(|s| s == "ground-2-2").unwrap();
-                        let excited = model.states.iter().position(|s| s == "D2-3-3").unwrap();
-                        let h = C::new(
-                            model.h_real[ground * g.n + excited],
-                            model.h_imag[ground * g.n + excited],
-                        );
-                        let delta = model.h_real[excited * g.n + excited]
-                            - model.h_real[ground * g.n + ground];
-                        let gamma = model
-                            .collapse
-                            .iter()
-                            .map(|c| {
-                                (0..g.n)
-                                    .map(|i| {
-                                        c.real[i * g.n + excited].powi(2)
-                                            + c.imag[i * g.n + excited].powi(2)
-                                    })
-                                    .sum::<f64>()
-                            })
-                            .sum::<f64>();
-                        let omega2 = 4. * h.abs().powi(2);
-                        let p = omega2 / (gamma * gamma + 2. * omega2 + 4. * delta * delta);
-                        let z = 2. * p - 1.;
-                        let off = C::new(-h.im * z, h.re * z)
-                            * C::new(-gamma * 0.5, -delta)
-                            * (1. / (gamma * gamma * 0.25 + delta * delta));
-                        let mut expected = vec![C::default(); g.n * g.n];
-                        expected[ground * g.n + ground].re = 1. - p;
-                        expected[excited * g.n + excited].re = p;
-                        expected[ground * g.n + excited] = off;
-                        expected[excited * g.n + ground] = off.conj();
-                        analytic_error = Some(analytic_error.unwrap_or(0.).max(
-                            difference_trace_norm(&lap, &rho, &expected, g.n)
-                                + 2. * (-gamma * t * 0.5).exp(),
-                        ));
-                    }
-                }
-                if let Some(error) = analytic_error {
-                    assert!(
-                        error <= result.bound.total,
-                        "{name} T={end}: analytic error {error:e} > envelope {}",
-                        result.bound.total
-                    );
-                }
-                rows.push(json!({"bound":bound_json(&result.bound),"analyticErrorUpperBound":analytic_error,"traceError":trace,"positivityError":psd,"applicationMs":result.elapsed_ms}));
-            }
-            records.push(json!({"name":name,"defectNorm":certificate.diagnostics.defect_norm_upper,"defectProductRoundoff":certificate.diagnostics.defect_product_roundoff,"inverseResidualBound":certificate.diagnostics.inverse_residual_bound,"preparationMs":certificate.diagnostics.preparation_ms,"windows":rows}));
-        }
-        std::fs::write(folder.join("frequency-aware-defect-audit.json"),serde_json::to_string_pretty(&json!({"cases":records,"scope":"Analytic truth is checked only for cycling (Bloch stationary solution plus rigorous exponential tail), free decay, and no-light invariance. Other Rb87 entries report an error envelope and numerical diagnostics, not an independently known true error."})).unwrap()).unwrap();
-    }
-    #[test]
-    #[ignore = "Production acceptance and cached timing across four duration windows for seven full Rb87 generators"]
-    fn constant_rb32_production_duration_audit() {
-        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../artifacts/v4/native-constant");
-        let cases: Value =
-            serde_json::from_str(&std::fs::read_to_string(folder.join("cases.json")).unwrap())
-                .unwrap();
-        let mut solver = Solver::new().unwrap();
-        let mut records = Vec::new();
-        let mut failures = Vec::new();
-        for case in cases.as_array().unwrap() {
-            let name = case["name"].as_str().unwrap();
-            let model: Model = serde_json::from_value(case["model"].clone()).unwrap();
-            let mut rows = Vec::new();
-            for duration in [20., 200., 2000., 1e6] {
-                match solver.solve(
-                    &model,
-                    &Options {
-                        duration_us: duration,
-                        samples: 161,
-                        ..Options::default()
-                    },
-                ) {
-                    Ok(value) => {
-                        let bound = value["diagnostics"]["trajectoryErrorEstimate"]
-                            .as_f64()
-                            .unwrap();
-                        assert!(bound.is_finite() && bound <= 5e-6);
-                        rows.push(json!({"durationUs":duration,"accepted":true,"diagnostics":value["diagnostics"],"finalPopulations":value["populations"].as_array().unwrap().last(),"asymptoticStatus":value["asymptoticStatus"]}));
-                    }
-                    Err(error) => {
-                        if duration <= 2000. {
-                            failures.push(format!("{name} at {duration} us: {error}"));
-                        }
-                        rows.push(json!({"durationUs":duration,"accepted":false,"reason":error}));
-                    }
-                }
-            }
-            records.push(json!({"name":name,"windows":rows}));
-        }
-        std::fs::write(folder.join("production-duration-audit.json"),serde_json::to_string_pretty(&json!({"cases":records,"failures":failures,"scope":"Unchanged production acceptance threshold of 5e-6; the million-microsecond window may explicitly reject if no conservative certificate is available."})).unwrap()).unwrap();
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
