@@ -612,6 +612,41 @@ impl Run {
                     history.push((self.space().columns(), basis));
                     self.checkpoint(Some(basis), None, "refine-basis");
                     if Self::stalled(&mut best, &mut since_best, basis) {
+                        // A basis estimate that stalls above its gate can be
+                        // the Fourier truncation showing through (fast
+                        // responses of strongly coupled, far-detuned shell
+                        // modes): the halo indicators decide before the run
+                        // ends.
+                        let clock = Instant::now();
+                        let halo = {
+                            let space = self.space.as_ref().expect("trial space");
+                            let view = CandidateView {
+                                map: space.op.map(),
+                                q: space.q(),
+                                eq: space.eq(),
+                                fq: space.fq(),
+                                columns: space.columns(),
+                                generator: &model.generator,
+                                initial: &model.initial,
+                                times: &self.times,
+                            };
+                            dual.halo_estimate(self.core.prepared(), &view, &groups, HaloOptions::default())?
+                        };
+                        self.timing.halo_estimate += ms(clock);
+                        if kappa * halo.estimate.maximum > 0.5 * BASIS_SHARE * epsilon {
+                            let added = self.halo_modes(&halo.modes, HALO_REMAINDER_SHARE * epsilon / kappa);
+                            if !added.is_empty() {
+                                self.checkpoint(Some(basis), Some(halo.estimate.maximum), "add-modes");
+                                let mut modes = self.space().modes().to_vec();
+                                modes.extend(added);
+                                modes.sort();
+                                self.rebuild(&modes)?;
+                                history.clear();
+                                best = f64::INFINITY;
+                                since_best = 0;
+                                continue;
+                            }
+                        }
                         let charges = self.residual_charges(&model, 4)?;
                         return Err(format!(
                             "The basis error estimate stopped decreasing: {best:.2e} at best over the last {STALL_REFINEMENTS} refinements ({} columns on {} Fourier modes; acceptance needs at most {:.2e}). The candidate's residual at the end of the horizon is largest at the retained charges {}; the tolerance was not relaxed",

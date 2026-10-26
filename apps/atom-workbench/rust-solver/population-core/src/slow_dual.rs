@@ -1395,6 +1395,9 @@ pub struct SlowDualDiagnostics {
     /// Which eigen-decomposition attempt resolved `J_eff` (see `robust_eigen`).
     pub generator_eigen_method: &'static str,
     pub generator_spectral_abscissa: f64,
+    /// Norm of the central-trace row `l J_eff` removed to keep the trace
+    /// exactly conserved (rad/us; roundoff with one slot).
+    pub trace_leak: f64,
     /// Eigenvector condition of the dressed no-jump frame (None: unavailable).
     pub dressed_condition: Option<f64>,
     pub preparation_ms: f64,
@@ -1800,6 +1803,33 @@ impl SlowDual {
         if !generator.is_finite() {
             return Err("Nonfinite slow generator".into());
         }
+        // Exact trace conservation. The central ground trace `l` is a left
+        // null vector of the Schur complement with one slot (measured 3e-9 of
+        // ||J||); with several slots the per-column expansion points leave a
+        // row `r = l J` (measured 0.04 rad/us from the central columns and
+        // 0.67 from the hyperfine slots with a tweezer and three lasers),
+        // which made the trace decay and every slower mode count as
+        // conserved. `r` is removed by the rank-one update `J - u r` with
+        // `u` the uniform central ground population (`l u = 1`); the removed
+        // size is reported (`trace_leak`).
+        let trace_leak = {
+            let mut row = vec![ZERO; dim];
+            for (j, entry) in row.iter_mut().enumerate() {
+                for a in 0..g {
+                    *entry = cadd(*entry, generator.at(a * g + a, j));
+                }
+            }
+            let leak = row.iter().fold(0_f64, |s, z| s.hypot(cabs(*z)));
+            if leak > 1e3 * f64::EPSILON * generator.frobenius() {
+                let share = 1. / g as f64;
+                for (j, &value) in row.iter().enumerate() {
+                    for a in 0..g {
+                        generator.add_at(a * g + a, j, cscale(value, -share));
+                    }
+                }
+            }
+            leak
+        };
         let unrepresented_rate = unrepresented_coupling.values().map(|k| k.frobenius().powi(2)).sum::<f64>().sqrt();
         if !unrepresented_rate.is_finite() {
             return Err("Nonfinite coupling into the unrepresented slow charges".into());
@@ -1879,6 +1909,7 @@ impl SlowDual {
             generator_reconstruction_relative: reconstruction,
             generator_eigen_method,
             generator_spectral_abscissa: spectral_abscissa,
+            trace_leak,
             dressed_condition: dressed.as_ref().map(|d| d.condition),
             preparation_ms: began.elapsed().as_secs_f64() * 1000.,
         };
@@ -3333,7 +3364,25 @@ mod tests {
             if cutoff.is_some() {
                 assert!(dual.slots.len() > 1, "large cutoff must create Raman slots");
             }
-            let expected = dense_generator(&owner, &dual);
+            let mut expected = dense_generator(&owner, &dual);
+            // The same exact trace restoration (`trace_leak`): the multi-slot
+            // Schur complement leaves a central-trace row of that size.
+            let g = dual.g;
+            let mut row = vec![ZERO; expected.cols];
+            for (j, entry) in row.iter_mut().enumerate() {
+                for a in 0..g {
+                    *entry = cadd(*entry, expected.at(a * g + a, j));
+                }
+            }
+            let leak = row.iter().fold(0_f64, |s, z| s.hypot(cabs(*z)));
+            assert!((leak - dual.diagnostics.trace_leak).abs() <= 1e-9 * leak.max(1.), "trace leak {leak:e} vs {:e}", dual.diagnostics.trace_leak);
+            if leak > 1e3 * f64::EPSILON * expected.frobenius() {
+                for (j, &value) in row.iter().enumerate() {
+                    for a in 0..g {
+                        expected.add_at(a * g + a, j, cscale(value, -1. / g as f64));
+                    }
+                }
+            }
             let scale = expected.frobenius();
             let mut difference = 0_f64;
             for k in 0..expected.data.len() {
@@ -3425,6 +3474,7 @@ mod tests {
                 generator_reconstruction_relative: 0.,
                 generator_eigen_method: "test",
                 generator_spectral_abscissa: 0.,
+                trace_leak: 0.,
                 dressed_condition: None,
                 preparation_ms: 0.,
             },
