@@ -3,7 +3,8 @@
  * https://arxiv.org/pdf/1209.0613 . The optimized 4D values are used.
  * Energies are the NIST values distributed by ARC (eV above 5S):
  * https://github.com/nikolasibalic/ARC-Alkali-Rydberg-Calculator/blob/master/arc/data/rb_NIST_level_data.ascii
- * These are a finite valence sum, not a complete/core polarizability model.
+ * These are a finite valence sum; the Rb+ core is CORE_POLARIZABILITY_AU below.
+ * Tails above these states and the continuum are not included.
  * Higher-state hyperfine/isotope shifts are not resolved in this dataset. */
 export interface VirtualManifold { name:string; J:number; L:number; energyEV:number; reducedEA0:number }
 export const VIRTUAL_MANIFOLDS:Record<'ground'|'D1'|'D2',readonly VirtualManifold[]> = {
@@ -23,4 +24,15 @@ export const VIRTUAL_MANIFOLDS:Record<'ground'|'D1'|'D2',readonly VirtualManifol
     ['4D5/2',2.5,2,2.3997393,10.89],['5D5/2',2.5,2,3.1868276,1.76],['6D5/2',2.5,2,3.5570310,1.42],['7D5/2',2.5,2,3.7544424,1.06],['8D5/2',2.5,2,3.8710908,.81],['9D5/2',2.5,2,3.9454934,.593],
   ].map(row=>({name:row[0] as string,J:row[1] as number,L:row[2] as number,energyEV:row[3] as number,reducedEA0:row[4] as number})),
 };
+/** Scalar polarizability of the Rb+ core seen by each 32-state manifold, in
+ * atomic units (e^2 a0^2 / Eh): core alpha_c plus core-valence alpha_vc.
+ * Arora & Sahoo, PRA 86, 033416 (2012), Tables II, IV and V (static values;
+ * the same work and dataset as the matrix elements above):
+ *   5s: alpha_c = 9.1(5), alpha_vc = -0.26(2);  5p1/2, 5p3/2: alpha_c = 9.1(5), alpha_vc ~ 0.0.
+ * Their 770 nm and 1064 nm tables give alpha_c = 9.2-9.3(5): below 3 eV the
+ * frequency dependence is within the stated uncertainty, so the static value
+ * is used for every laser. The core has no vector or tensor part. The same
+ * work lists static valence tails of 0.11 (5s), 12.6 (5p1/2) and 13.4 (5p3/2)
+ * that are NOT included (they are strongly frequency dependent for 5p). */
+export const CORE_POLARIZABILITY_AU:Record<'ground'|'D1'|'D2',number>={ground:9.1-0.26,D1:9.1,D2:9.1};
 export const SPECTROSCOPY_SOURCES = ['https://steck.us/alkalidata/rubidium87numbers.pdf','https://arxiv.org/abs/1209.0613','https://github.com/nikolasibalic/ARC-Alkali-Rydberg-Calculator/blob/master/arc/data/rb_NIST_level_data.ascii'];
