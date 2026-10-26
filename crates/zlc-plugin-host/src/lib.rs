@@ -290,6 +290,10 @@ pub struct RunRequest {
     pub run_directory: Option<PathBuf>,
     /// Runtime signal name per output; an output not named here is `<instance>/<output>`.
     pub outputs: BTreeMap<String, String>,
+    /// The bench at Start (each open device's settings, the pulse board), the core's fact:
+    /// run.begin writes it into the run record as `apparatus`. None for a processor (its
+    /// sources' records reach it through lineage).
+    pub apparatus: Option<Value>,
 }
 
 struct OutputState { signal: Arc<str>, schema: Arc<DatasetSchema>, finite: bool, chunk: Option<Arc<DatasetSchema>> }
@@ -305,6 +309,7 @@ struct RunState {
     route: Option<(Arc<str>, Option<GenerationId>)>,
     outputs: HashMap<String, OutputState>,
     histories: Vec<HistoryLease>,
+    apparatus: Option<Value>,
 }
 
 struct Instance {
@@ -644,6 +649,24 @@ impl PluginHost {
         self.inner.call(instance, op, params, deadline)
     }
 
+    /// The bench at a Start (`snapshot`, §5): an open device's settings as plain JSON, null when it
+    /// does not report them. A device busy in another run's call may miss `deadline`, which says
+    /// nothing of its health (untracked: the late answer is dropped). One another core serves or
+    /// holds is not asked.
+    pub fn snapshot(&self, instance: &str, deadline: Duration) -> Result<Value, CallError> {
+        let serving = {
+            let state = self.inner.state.lock().unwrap();
+            let entry = state.instances.get(instance).filter(|entry| entry.descriptor.is_device())
+                .ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not an open device")))?;
+            if entry.published.is_some() { return Err(published_refusal(instance)); }
+            entry.serving.clone()
+        };
+        let Serving::Process(process) = serving else {
+            return Err(CallError::new(ErrorKind::Refused, format!("{instance} is served by another computer; the bench fabric does not carry its snapshot")));
+        };
+        process.request_untracked("snapshot", json!({"instance": instance, "plain": true}), deadline).map(|reply| reply.message["ok"].clone())
+    }
+
     /// The catalogue entries of every open instance's commands.
     pub fn commands(&self) -> Vec<PluginCommand> {
         let state = self.inner.state.lock().unwrap();
@@ -738,7 +761,7 @@ impl PluginHost {
             }
             state.instances.get_mut(instance).unwrap().run = Some(RunState { id: run.clone(), origin: request.origin.clone(),
                 devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, route, outputs: HashMap::new(),
-                histories: Vec::new() });
+                histories: Vec::new(), apparatus: request.apparatus.clone() });
             let following = following.map(|(follower, received)| { state.followers.push(follower); received });
             (process, devices, source, following)
         };
@@ -1160,10 +1183,15 @@ impl Inner {
             outputs.insert(name, OutputState { signal: signal.clone(), schema: schema.clone(), finite, chunk: None });
             Declaration { signal, schema, storage: if finite { Storage::Finite } else { Storage::Latest } }
         }).collect();
-        // Scientific facts belong to the plugin; identity and the name at declaration belong to the host.
+        // Scientific facts belong to the plugin; identity and the name at declaration belong to the host,
+        // and the bench at Start to the core: a plugin's own `apparatus` is dropped, never shown as the core's.
         let mut record = if params["record"].is_object() { params["record"].clone() } else { json!({}) };
         record["node"] = json!(public_instance(&instance));
         record["node_name"] = json!(display_name);
+        match &run.apparatus {
+            Some(bench) => record["apparatus"] = bench.clone(),
+            None => if let Some(fields) = record.as_object_mut() { fields.remove("apparatus"); },
+        }
         // A run consuming a source commits each result with the event it is of: the
         // Runtime selects a picture and its judgement as one shot through this route.
         let generation = match run.route.clone() {

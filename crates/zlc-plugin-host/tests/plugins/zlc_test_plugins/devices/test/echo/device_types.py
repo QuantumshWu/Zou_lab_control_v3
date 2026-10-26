@@ -83,6 +83,20 @@ class EchoDevice:
         time.sleep(seconds)
 
 
+class PlainDevice:
+    """No tunable quartet and no snapshot of its own: it does not report its settings."""
+
+    def close(self):
+        pass
+
+
+class PatternDevice(EchoDevice):
+    """A device whose state is more than its knobs (an SLM's pattern) answers its own snapshot."""
+
+    def snapshot(self):
+        return {"pattern": "flat", "amplitude": self.amplitude}
+
+
 SERVED = AuthoringSchema((AuthoringField("port", "int", "Serve on port", 18990, minimum=1, maximum=65535),))
 
 
@@ -110,6 +124,8 @@ class FailedInitDevice:
 
 
 DEVICE_TYPES = (
+    DeviceType("test.plain", "test", SCHEMA, ("test.echo",), factory=lambda key, values: PlainDevice()),
+    DeviceType("test.pattern", "test", SCHEMA, ("test.echo",), factory=lambda key, values: PatternDevice(values)),
     DeviceType("test.failed_init", "test", FILE, ("test.echo",), factory=lambda key, values: FailedInitDevice(values["path"])),
     DeviceType("test.served", "test", SERVED, ("test.echo",), factory=_served,
                announce=("test.echo", lambda values: {"port": int(values["port"])})),

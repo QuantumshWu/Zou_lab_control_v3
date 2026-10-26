@@ -7,6 +7,8 @@ native adapter owns conversions that depend on its state (an RF amplitude
 into the channel's load), every other one goes through the shared registry,
 an exact decimal shift within a unit family.  The SDK's ``fields`` and
 ``tune`` ops serve these; the plugin package re-exports them for its own use.
+The ``snapshot`` op (the bench at a Start) answers through the same rule: the
+adapter's own answer when it has one, else its quartet's reads.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ import math
 from typing import Any
 
 from zlc_data.units import DEFAULT_UNITS
+
+from .capabilities import TUNABLE
 
 
 def _converted(value: Any, source: str, target: str) -> float:
@@ -106,4 +110,24 @@ def convert_tunable_value(device: Any, name: str, value: Any, source_unit: str, 
     return _converted(value, source_unit or "1", target_unit or "1")
 
 
-__all__ = ["convert_tunable_value", "read_tunable_in_unit", "refresh_tunable_fields", "tune_in_unit"]
+def reports_settings(device: Any) -> bool:
+    """Whether ``snapshot`` can answer for ``device`` (its open answer says so)."""
+    return callable(getattr(device, "snapshot", None)) or all(callable(getattr(device, name, None)) for name in TUNABLE)
+
+
+def snapshot(device: Any) -> Any:
+    """The device's settings as a Start records them (PROTOCOL §5), never a device command.
+
+    A device whose state is more than its knobs answers for itself (its own
+    ``snapshot()``); a tunable one answers what the ``values`` op does, its
+    quartet's reads; any other does not report its settings (None).
+    """
+    native = getattr(device, "snapshot", None)
+    if callable(native):
+        return native()
+    if all(callable(getattr(device, name, None)) for name in TUNABLE):
+        return {"values": dict(device.tunable_values()), "provenance": dict(device.settings_provenance())}
+    return None
+
+
+__all__ = ["convert_tunable_value", "read_tunable_in_unit", "refresh_tunable_fields", "reports_settings", "snapshot", "tune_in_unit"]

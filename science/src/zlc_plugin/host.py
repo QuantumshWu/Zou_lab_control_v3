@@ -462,8 +462,9 @@ def _open(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
         instance.process.device_log.listen(_LOG_SOURCES + declared.log_channels)
         # What a draft query may call on it: the core refuses every other method then.
         # `narrates`: whether anything is its device log (v2 says so when not).
+        # `snapshot`: whether it reports its settings for the bench a Start records.
         return {"state": "open", "tunable": _tunable(instance.adapter), "reads": list(capabilities.reads(instance.adapter)),
-                "narrates": bool(declared.log_channels or instance.log_token)}
+                "narrates": bool(declared.log_channels or instance.log_token), "snapshot": tunable.reports_settings(instance.adapter)}
     instance.values = dict(params.get("parameters") or {})
     return {"state": "open"}
 
@@ -616,6 +617,12 @@ def _values(instance: Instance, params: dict[str, Any]) -> Any:
     instance.device()
     adapter: Any = instance.adapter
     return {"values": plain(dict(adapter.tunable_values())), "provenance": plain(dict(adapter.settings_provenance()))}
+
+
+def _snapshot(instance: Instance, params: dict[str, Any]) -> Any:
+    """The bench at a Start: the device's settings as plain JSON, or None when it does not report them."""
+    instance.device()
+    return plain(tunable.snapshot(instance.adapter))
 
 
 def _publish(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
@@ -805,7 +812,7 @@ def _run_start(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
 
 _HANDLERS: dict[str, Callable[[Instance, dict[str, Any]], Any]] = {
     "open": _open, "configure": _configure, "close": _close, "spi": _spi, "command": _command,
-    "fields": _fields, "tune": _tune, "values": _values, "make_safe": _make_safe, "query": _query, "publish": _publish,
+    "fields": _fields, "tune": _tune, "values": _values, "snapshot": _snapshot, "make_safe": _make_safe, "query": _query, "publish": _publish,
     "run.start": _run_start, "run.discard": _discard_run,
 }
 

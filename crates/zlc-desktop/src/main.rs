@@ -1833,6 +1833,15 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 Event::UserEvent(AppEvent::Native(request)) => match request {
                     workbench_host::NativeRequest::Open { instance, type_id, parameters, context } => pulse.open_device(&instance, &type_id, &parameters, &context),
                     workbench_host::NativeRequest::Close { instance } => pulse.close_device(&instance),
+                    // The board for the bench a Start records: read off the turn, within the bound.
+                    workbench_host::NativeRequest::Call { ticket, op } if op == "snapshot" => {
+                        let (read, proxy) = (pulse.bench_snapshot(zlc_workbench::SNAPSHOT_WAIT), self_proxy.clone());
+                        let spawned = std::thread::Builder::new().name("zlc-pulse-bench-wait".into())
+                            .spawn(move || { let _ = proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Answered { ticket, result: read() })); });
+                        if let Err(error) = spawned {
+                            let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Answered { ticket, result: Err(error.to_string()) }));
+                        }
+                    }
                     workbench_host::NativeRequest::Call { ticket, op } => {
                         let answer = if op == "fields" { json!([]) } else { json!({}) };
                         let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Answered { ticket, result: Ok(answer) }));

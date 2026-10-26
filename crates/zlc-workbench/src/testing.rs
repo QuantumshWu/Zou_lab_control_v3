@@ -1451,4 +1451,92 @@ mod tests {
         assert!(wb.devices["mot_camera"].close_failed);
     }
 
+    /// The bench at a Start: a measurement asks every open device that reports its settings,
+    /// all at once, and launches once each has answered; a device that answers late, has failed
+    /// or reports nothing is entered with why. The pulse board's entry says who drives it -- the
+    /// Pulse Editor's On Pulse, or the run that claims it. A processor takes no bench.
+    #[test]
+    fn a_start_records_the_bench_it_starts_on() {
+        let root = scratch("bench");
+        let mut catalog = catalog();
+        catalog["types"][3]["node"]["artifact_inputs"] = json!([]);
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "rf.virtual", "kind": "device", "family": "rf", "label": "Virtual RF",
+            "capabilities": ["rf.source"], "parameters": []}));
+        std::fs::write(root.join("apparatus.json"), r#"{"format": "zlc.installation",
+            "simulation": {"image_shape_yx": [96, 128], "grid_shape_yx": [5, 7], "seed": 0, "world_profile": ""},
+            "devices": [{"instance_id": "mot_camera", "role": "mot_camera", "type_id": "camera.virtual_mot", "parameters": {}},
+                        {"instance_id": "rf", "role": "Trap RF", "type_id": "rf.virtual", "parameters": {}},
+                        {"instance_id": "spare", "role": "spare", "type_id": "camera.virtual_mot", "parameters": {}},
+                        {"instance_id": "sequencer", "role": "sequencer", "type_id": "sequencer.virtual", "parameters": {}},
+                        {"instance_id": "basler", "role": "basler", "type_id": "camera.pylon", "parameters": {}}]}"#).unwrap();
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+        for (device, reports) in [("mot_camera", true), ("rf", true), ("spare", false), ("sequencer", true)] {
+            event(&mut workbench, Event::Opened { instance: device.into(), working_point: json!({"state": "open", "snapshot": reports}) }, &mut host);
+        }
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "occupancy", "source_signal": "@logic/camera_measurement/frames"}));
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "seamless_scan", "values": {"acquisition_logic": "camera_measurement"},
+            "source_signal": "@logic/camera_measurement/frames"}));
+        // The Pulse Editor plays its own pulse (On Pulse) while the camera measurement starts.
+        workbench.device_users().lock().unwrap().insert("sequencer".into(), "PulseGUI".into());
+        let snapshots = |calls: &Rc<RefCell<Calls>>| -> Vec<(String, u64)> { calls.borrow().0.iter().filter_map(|call| {
+            let words: Vec<&str> = call.split(' ').collect();
+            (words.len() == 4 && words[0] == "call" && words[3] == "snapshot").then(|| (words[1].to_owned(), words[2].parse().unwrap()))
+        }).collect() };
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
+        let asked: Vec<String> = snapshots(&calls).into_iter().map(|(device, _)| device).collect();
+        assert_eq!(asked, ["mot_camera", "rf", "sequencer"], "each device that reports, at once");
+        assert!(calls.borrow().1.is_empty(), "the run waits for the bench");
+        assert_eq!(workbench.state(&host)["logic"][0]["status"], "reading the bench's settings");
+        let answer = |workbench: &mut Workbench, host: &mut FakeHost, device: &str, result: Result<Value, String>| {
+            let ticket = snapshots(&calls).iter().rev().find(|(asked, _)| asked == device).unwrap().1;
+            event(workbench, Event::Answered { ticket, result }, host);
+        };
+        answer(&mut workbench, &mut host, "mot_camera", Ok(json!({"values": {"exposure": 0.02}, "provenance": {"settings_epoch": 3}, "role": "not the core's"})));
+        answer(&mut workbench, &mut host, "rf", Err("timeout: snapshot did not answer within 2.0 s".into()));
+        assert!(calls.borrow().1.is_empty());
+        let board = json!({"loaded": true, "firing": true, "digest": "5f0c", "snapshot": {"program": {"digest": "5f0c"}, "pulse": {"name": "imaging"}}});
+        answer(&mut workbench, &mut host, "sequencer", Ok(board.clone()));
+        let spec = calls.borrow().1.last().cloned().expect("launched once every answer is in");
+        assert_eq!(spec.run, "camera_measurement#1");
+        let bench = spec.apparatus.unwrap();
+        assert!(bench["taken_at"].as_str().unwrap().ends_with("+00:00"));
+        assert_eq!(bench["devices"], json!({
+            "basler": {"type_id": "camera.pylon", "role": "basler", "unavailable": format!("failed: {}", workbench.devices["basler"].error.clone().unwrap())},
+            "mot_camera": {"type_id": "camera.virtual_mot", "role": "mot_camera", "values": {"exposure": 0.02}, "provenance": {"settings_epoch": 3}},
+            "rf": {"type_id": "rf.virtual", "role": "Trap RF", "unavailable": "timeout: snapshot did not answer within 2.0 s"},
+            "spare": {"type_id": "camera.virtual_mot", "role": "spare", "unavailable": "does not report its settings"}}));
+        let mut sequencer = board.clone();
+        sequencer["type_id"] = json!("sequencer.virtual");
+        sequencer["role"] = json!("sequencer");
+        sequencer["driver"] = json!({"outside": "PulseGUI"});
+        assert_eq!(bench["sequencer"], json!({"sequencer": sequencer}));
+        event(&mut workbench, Event::RunStarted { run: "camera_measurement#1".into() }, &mut host);
+
+        // A late answer to a start that has launched changes nothing; a processor takes no bench.
+        answer(&mut workbench, &mut host, "rf", Ok(json!({"values": {}})));
+        let before = snapshots(&calls).len();
+        host.signals.push(SignalInfo { name: "@logic/camera_measurement/frames".into(), generation: "g1".into(), owner: "camera_measurement".into(),
+            published: true, sealed: false, shape: String::new() });
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "occupancy"})).unwrap();
+        assert_eq!(calls.borrow().1.last().unwrap().run, "occupancy#1");
+        assert!(calls.borrow().1.last().unwrap().apparatus.is_none());
+        assert_eq!(snapshots(&calls).len(), before);
+
+        // The board a run claims, driven by nobody at its Start, is driven by that run.
+        for run in ["camera_measurement#1", "occupancy#1"] {
+            event(&mut workbench, Event::RunFinished { run: run.into(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
+        }
+        apply(&mut workbench, &mut host, "stop_node", json!({"node": "occupancy"})).unwrap();
+        workbench.device_users().lock().unwrap().clear();
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "seamless_scan"})).unwrap();
+        for (device, _) in snapshots(&calls).into_iter().skip(before) { answer(&mut workbench, &mut host, &device, Ok(json!({}))); }
+        let spec = calls.borrow().1.last().cloned().unwrap();
+        assert_eq!(spec.run, "seamless_scan#1");
+        assert_eq!(spec.apparatus.unwrap()["sequencer"]["sequencer"]["driver"], json!({"run": "seamless_scan#1", "node": "seamless_scan"}));
+    }
+
 }
