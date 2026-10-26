@@ -583,8 +583,15 @@ impl Run {
     }
 }
 
-pub fn solve(
-    mut core: RuntimeCore, times: &[f64], groups: Vec<RequestedGroup>, options: FiniteOptions,
+pub fn solve(core: RuntimeCore, times: &[f64], groups: Vec<RequestedGroup>, options: FiniteOptions) -> Result<FiniteSolution, String> {
+    solve_with(core, times, groups, options, None)
+}
+
+/// `solve` with the request's slow dual already prepared (`Some(Ok)`), or
+/// its preparation already failed (`Some(Err)`); `None` prepares it here,
+/// while the first chain columns are computed.
+pub fn solve_with(
+    mut core: RuntimeCore, times: &[f64], groups: Vec<RequestedGroup>, options: FiniteOptions, given: Option<Result<SlowDual, String>>,
 ) -> Result<FiniteSolution, String> {
     let started = Instant::now();
     let epsilon = options.population_tolerance;
@@ -605,15 +612,24 @@ pub fn solve(
     let mut chain = Chain::new(poles.len());
     // The slow dual depends only on the model: prepare it while the first
     // chain columns are computed.
-    let prepared = core.prepared();
-    let ((dual, dual_ms), grown) = Execution::new()?.join(
-        || {
-            let clock = Instant::now();
-            (SlowDual::prepare(prepared, SlowDualOptions::default()), ms(clock))
-        },
-        || chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner),
-    );
-    grown?;
+    let (dual, dual_ms) = match given {
+        Some(dual) => {
+            chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner)?;
+            (dual, 0.)
+        }
+        None => {
+            let prepared = core.prepared();
+            let ((dual, dual_ms), grown) = Execution::new()?.join(
+                || {
+                    let clock = Instant::now();
+                    (SlowDual::prepare(prepared, SlowDualOptions::default()), ms(clock))
+                },
+                || chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner),
+            );
+            grown?;
+            (dual, dual_ms)
+        }
+    };
     let peak_bytes = space.bytes();
     let mut run = Run {
         core,

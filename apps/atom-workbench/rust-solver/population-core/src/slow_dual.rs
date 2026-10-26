@@ -1483,6 +1483,17 @@ fn slow_ground_coherence(nu: f64, ground_energy: &[f64], cutoff: f64) -> bool {
     ground_energy.iter().any(|a| ground_energy.iter().any(|b| (nu + a - b).abs() < cutoff))
 }
 
+/// Relaxation spectrum of `J_eff` (`SlowDual::slow_spectrum`).
+#[derive(Clone, Copy, Debug)]
+pub struct SlowSpectrum {
+    /// Conserved quantities: the trace and any other mode at zero.
+    pub conserved: usize,
+    /// Slowest relaxation rate of the decaying modes (1/us).
+    pub slowest_rate: Option<f64>,
+    /// Rates at or below this are numerically zero (1/us).
+    pub floor: f64,
+}
+
 /// Factored no-jump structure plus a cache of fast charge-block inverses
 /// `(i nu_k - L_0)^{-1}` keyed by charge.
 struct Elimination {
@@ -1895,6 +1906,72 @@ impl SlowDual {
     }
 
     pub fn diagnostics(&self) -> &SlowDualDiagnostics { &self.diagnostics }
+
+    /// The modes of `J_eff` that are conserved or relax slower than `rate`
+    /// (1/us), as frame matrices per slot: the right eigenvector's ground
+    /// block at its slot, plus at the central slot the adiabatically slaved
+    /// non-ground block of every slow column (`slaved_central`). They span
+    /// the slow manifold a pole cannot resolve (see `asymptotic.rs`).
+    pub(crate) fn slow_modes(&self, rate: f64) -> Result<Vec<Vec<(usize, Dense)>>, String> {
+        let spectrum = self.slow_spectrum();
+        let lap = &self.lapack;
+        let vectors = LuFactor::new(&self.inverse_vectors, lap)?.inverse(lap)?;
+        let (n, g) = (self.n, self.g);
+        let g2 = g * g;
+        let mut out = Vec::new();
+        for (k, &alpha) in self.eigenvalues.iter().enumerate() {
+            let conserved = self.slot_frequency.iter().any(|&nu| cabs(cadd(alpha, complex(0., nu))) <= spectrum.floor);
+            if !conserved && -alpha.re >= rate {
+                continue;
+            }
+            let mut blocks = Vec::with_capacity(self.slots.len());
+            for s in 0..self.slots.len() {
+                let mut x = Dense::zeros(n, n);
+                for a in 0..g {
+                    for b in 0..g {
+                        x.set(a, b, vectors.at(s * g2 + a * g + b, k));
+                    }
+                }
+                if s == 0 {
+                    for (column, slaved) in self.slaved_central.iter().enumerate() {
+                        let c = vectors.at(column, k);
+                        for (entry, value) in x.data.iter_mut().zip(&slaved.data) {
+                            *entry = cadd(*entry, cmul(c, *value));
+                        }
+                    }
+                }
+                blocks.push((s, x));
+            }
+            out.push(blocks);
+        }
+        Ok(out)
+    }
+
+    /// Relaxation spectrum of `J_eff` for the long-time limit. Its
+    /// eigenvalues resolve arbitrarily small rates (a dense eigenproblem of
+    /// dimension `slots * g^2`, no pole). A mode is conserved when
+    /// `|alpha + i nu_s| <= floor` for some slot `s` (it then has a zero
+    /// member in its Fourier family and enters the mean); `floor` is 1000
+    /// times the numerical size of the exactly conserved trace mode (the
+    /// smallest `|alpha|`, at least `eps ||J_eff||_F`), the resolution of the
+    /// eigenvalues near zero. Every other mode with `-Re alpha > floor`
+    /// relaxes; the slowest such rate sets `slowest_rate`. Undamped modes at
+    /// other frequencies average out of the mean and are neither.
+    pub fn slow_spectrum(&self) -> SlowSpectrum {
+        let size = |z: C| cabs(z);
+        let trace = self.eigenvalues.iter().map(|z| size(*z)).fold(f64::INFINITY, f64::min);
+        let floor = 1e3 * trace.max(f64::EPSILON * self.generator.frobenius());
+        let mut conserved = 0;
+        let mut slowest: Option<f64> = None;
+        for &alpha in &self.eigenvalues {
+            if self.slot_frequency.iter().any(|&nu| size(cadd(alpha, complex(0., nu))) <= floor) {
+                conserved += 1;
+            } else if -alpha.re > floor {
+                slowest = Some(slowest.map_or(-alpha.re, |r: f64| r.min(-alpha.re)));
+            }
+        }
+        SlowSpectrum { conserved, slowest_rate: slowest, floor }
+    }
     pub fn belongs_to(&self, prepared: &OwnedPrepared) -> bool { Arc::ptr_eq(&self.owner, &prepared.primitives) }
     pub fn dimension(&self) -> usize { self.generator.rows }
     pub(crate) fn ground_entries(&self) -> usize { self.g * self.g }

@@ -48,8 +48,8 @@
 //! slot of `q` as a direct `J_eff` source and only the non-ground rest gets
 //! the response above. A slow halo charge that is not a slot (reached only
 //! through three or more hops) keeps its ground block in the response, where
-//! its near-resonant coherences take the entire form and accumulate. The exact identity
-//! `e = eta + U(e0 - eta(0)) + int U (r - eta' + L eta)` then gives the halo
+//! its near-resonant coherences take the entire form and accumulate. The
+//! exact identity `e = eta + U(e0 - eta(0)) + int U (r - eta' + L eta)` then gives the halo
 //! contribution: `eta(t)` (read out directly), the initial boundary `-eta(0)`
 //! (slow part into the central slot, the rest as an exact dressed fast layer),
 //! and one Liouvillian hop `L eta` back into the retained domain:
@@ -57,8 +57,9 @@
 //! * same charge (`p = 0`): the ground block of `(L_0 - N) eta = R_0 eta_EE`;
 //! * `p != 0` into a retained or slow charge `k`: the ground block of
 //!   `L_p eta` is a slow source; its non-ground block gets the exact dressed
-//!   fast response when `k` is slow, and (optionally) Markov slaving plus one
-//!   hop when `k` is fast.
+//!   fast response at `k` (for a near-resonant component the response to its
+//!   pair source, `add_fast_response_pairs`), and (optionally) Markov slaving
+//!   plus one hop when `k` is fast.
 //!
 //! Evaluated are the halo charges that return into the retained domain or a
 //! slot through a significant coupling in one hop, and every slow halo charge
@@ -513,94 +514,140 @@ impl SlowDual {
         Ok(())
     }
 
-    /// Exact dressed fast response at charge `q` (as `add_fast_response`) to
-    /// the zero-initial pair source `field e_t[a, b]` (envelope nodes `a`,
-    /// `b`; a near-resonant halo component returned to `q`). Component `ik`
-    /// is `c e_t[a, b, lambda_ik]`, expanded by the divided-difference
-    /// identities into exponentials and two-node pairs, which the series
-    /// integrates exactly:
-    /// `e_t[a, b, l] = (e_t[a, l] - e_t[b, l]) / (a - b)` when `a` and `b`
-    /// separate on the horizon (`|a - b| T > 1`), otherwise
-    /// `(e_t[a, b] - e_t[b, l]) / (a - l)` or `(e_t[a, b] - e_t[a, l]) /
-    /// (b - l)` when `l` separates from `a` or `b`. Only a component with all
-    /// three nodes within about `1/T` has no such form; it is bounded by
-    /// `|e_t[a, b, l]| <= T^2/2` times the largest exponential on the horizon
-    /// (direct populations, and the slow response of its recycling over `T`),
-    /// and the returned charge is that bound (zero otherwise).
-    fn add_fast_response_pair(&self, series: &mut Series, target: (usize, f64), nu: f64, a: C, b: C, field: &Dense) -> Result<(f64, usize), String> {
+    /// Exact dressed fast responses at charge `q` (as `add_fast_response`) to
+    /// zero-initial pair sources `X e_t[a, b]` (envelope nodes `a`, `b`; the
+    /// near-resonant halo components returned to `q`; the ground block of
+    /// each field `X` is ignored). Component `ik` of a source is
+    /// `c e_t[a, b, lambda_ik]`, expanded by the divided-difference identities
+    /// into exponentials and two-node pairs, which the series integrates
+    /// exactly: `e_t[a, b, l] = (e_t[a, l] - e_t[b, l]) / (a - b)` when `a`
+    /// and `b` separate on the horizon (`|a - b| T > 1`), otherwise
+    /// `(e_t[a, b] - e_t[b, l]) / (a - l)` or `(e_t[a, b] - e_t[a, l]) / (b - l)`
+    /// when `l` separates from `a` or `b`; every `e_t[x, l]` with `x` and `l`
+    /// separated is `(exp(x t) - exp(l t)) / (x - l)`. The weights are summed
+    /// per exponential node, per shared pair and in the dressed homogeneous
+    /// part before their populations and recycling are read out in two
+    /// products. Only a component with all three nodes within about `1/T`
+    /// has no such form; it is bounded by `|e_t[a, b, l]| <= T^2/2` times the
+    /// largest exponential on the horizon (direct populations, and the slow
+    /// response of its recycling over `T`), and the returned charge is that
+    /// bound, with the number of such components.
+    fn add_fast_response_pairs(&self, series: &mut Series, target: (usize, f64), nu: f64, sources: &[(C, C, &Dense)]) -> Result<(f64, usize), String> {
         let dressed = match &self.dressed {
             Some(d) => d,
             None => return Ok((0., 0)),
         };
+        if sources.is_empty() {
+            return Ok((0., 0));
+        }
         let lap = &self.lapack;
-        let n = self.n;
+        let (n, g) = (self.n, self.g);
+        let n2 = n * n;
         let t_max = series.t_max;
         let (slot, shift) = target;
         let recycling = &dressed.modal_recycling[slot];
-        let block = column_blocks(field, n);
-        let eigen = sandwich_all(&dressed.left_inverse, &dressed.right, &[&block[0]], lap)?;
+        let blocks: Vec<Dense> = sources
+            .iter()
+            .map(|(_, _, x)| {
+                let mut y = (*x).clone();
+                for a in 0..g {
+                    for b in 0..g {
+                        y.set(a, b, ZERO);
+                    }
+                }
+                y
+            })
+            .collect();
+        let refs: Vec<&Dense> = blocks.iter().collect();
+        let eigen = sandwich_all(&dressed.left_inverse, &dressed.right, &refs, lap)?;
+        let lambda: Vec<C> = (0..n2).map(|ik| csub(cadd(dressed.left_values[ik / n], dressed.right_values[ik % n]), complex(0., nu))).collect();
         let separated = |x: C, y: C| cabs(csub(x, y)) * t_max > 1.;
-        let at_phase = |x: C, f: f64| cadd(x, complex(0., f));
-        let states = dressed.readout.rows;
-        let mut homogeneous = vec![ZERO; n * n];
-        // Weights of the shared pair e_t[a, b] (direct and slow).
-        let mut pair_direct = vec![ZERO; states];
-        let mut pair_slow = vec![ZERO; recycling.rows];
+        // Eigen-coordinate weights of the exponential nodes, of the shared
+        // pairs e_t[a, b] (one per source), of the homogeneous part, and the
+        // components whose node is near their eigenvalue (pairs e_t[x, l]).
+        let mut node_index: BTreeMap<(u64, u64), usize> = BTreeMap::new();
+        let mut nodes: Vec<(C, Vec<C>)> = Vec::new();
+        let mut pairs: Vec<(C, C, Vec<C>)> = Vec::new();
+        let mut near: Vec<(C, usize, C)> = Vec::new();
+        let mut homogeneous = vec![ZERO; n2];
         let mut charge = 0_f64;
         let mut bounded = 0;
-        for i in 0..n {
-            for k in 0..n {
-                let ik = i * n + k;
-                let c = eigen[0].at(i, k);
+        // coef e_t[x, lambda_ik].
+        let mut to_lambda = |x: C, coef: C, ik: usize, nodes: &mut Vec<(C, Vec<C>)>, homogeneous: &mut Vec<C>, near: &mut Vec<(C, usize, C)>| {
+            if separated(x, lambda[ik]) {
+                let w = cdiv(coef, csub(x, lambda[ik]));
+                let next = nodes.len();
+                let index = *node_index.entry((x.re.to_bits(), x.im.to_bits())).or_insert(next);
+                if index == next {
+                    nodes.push((x, vec![ZERO; n2]));
+                }
+                nodes[index].1[ik] = cadd(nodes[index].1[ik], w);
+                homogeneous[ik] = csub(homogeneous[ik], w);
+            } else {
+                near.push((x, ik, coef));
+            }
+        };
+        for ((a, b, _), xh) in sources.iter().zip(&eigen) {
+            let (a, b) = (*a, *b);
+            let mut shared: Option<Vec<C>> = None;
+            for ik in 0..n2 {
+                let c = xh.at(ik / n, ik % n);
                 if c.re == 0. && c.im == 0. {
                     continue;
                 }
-                let lambda = csub(cadd(dressed.left_values[i], dressed.right_values[k]), complex(0., nu));
-                let rho: Vec<C> = (0..states).map(|s| dressed.readout.at(s, ik)).collect();
-                let m: Vec<C> = (0..recycling.rows).map(|r| recycling.at(r, ik)).collect();
-                // coef e_t[x, lambda] of this component.
-                let mut lambda_pair = |series: &mut Series, x: C, coef: C| {
-                    if separated(x, lambda) {
-                        let point = cdiv(coef, csub(x, lambda));
-                        series.add_direct_point(at_phase(x, nu), &rho.iter().map(|z| cmul(*z, point)).collect::<Vec<_>>());
-                        series.add_slow_point(at_phase(x, shift), &m.iter().map(|z| cmul(*z, point)).collect::<Vec<_>>());
-                        homogeneous[ik] = csub(homogeneous[ik], point);
-                    } else {
-                        series.add_direct_pair(at_phase(x, nu), at_phase(lambda, nu), rho.iter().map(|z| cmul(*z, coef)).collect());
-                        series.add_pair(at_phase(x, shift), at_phase(lambda, shift), m.iter().map(|z| cmul(*z, coef)).collect());
-                    }
-                };
-                let mut shared_pair = |coef: C| {
-                    for (w, z) in pair_direct.iter_mut().zip(&rho) {
-                        *w = cadd(*w, cmul(*z, coef));
-                    }
-                    for (w, z) in pair_slow.iter_mut().zip(&m) {
-                        *w = cadd(*w, cmul(*z, coef));
-                    }
-                };
+                let l = lambda[ik];
                 if separated(a, b) {
                     let scale = cdiv(c, csub(a, b));
-                    lambda_pair(series, a, scale);
-                    lambda_pair(series, b, csub(ZERO, scale));
-                } else if separated(a, lambda) {
-                    let scale = cdiv(c, csub(a, lambda));
-                    shared_pair(scale);
-                    lambda_pair(series, b, csub(ZERO, scale));
-                } else if separated(b, lambda) {
-                    let scale = cdiv(c, csub(b, lambda));
-                    shared_pair(scale);
-                    lambda_pair(series, a, csub(ZERO, scale));
+                    to_lambda(a, scale, ik, &mut nodes, &mut homogeneous, &mut near);
+                    to_lambda(b, csub(ZERO, scale), ik, &mut nodes, &mut homogeneous, &mut near);
+                } else if separated(a, l) || separated(b, l) {
+                    let (via, other) = if separated(a, l) { (a, b) } else { (b, a) };
+                    let scale = cdiv(c, csub(via, l));
+                    let w = shared.get_or_insert_with(|| vec![ZERO; n2]);
+                    w[ik] = cadd(w[ik], scale);
+                    to_lambda(other, csub(ZERO, scale), ik, &mut nodes, &mut homogeneous, &mut near);
                 } else {
-                    let growth = [a.re, b.re, lambda.re, 0.].iter().fold(0_f64, |g, &r| g.max(r * t_max)).exp();
-                    let direct = rho.iter().map(|z| cabs(*z)).fold(0_f64, f64::max);
-                    let slow = self.readout.iter().map(|(_, r)| (0..r.rows).map(|s| (0..r.cols).map(|j| cabs(r.at(s, j)) * cabs(m[j])).sum::<f64>()).fold(0_f64, f64::max)).sum::<f64>();
+                    let growth = [a.re, b.re, l.re, 0.].iter().fold(0_f64, |g, &r| g.max(r * t_max)).exp();
+                    let direct = (0..dressed.readout.rows).map(|s| cabs(dressed.readout.at(s, ik))).fold(0_f64, f64::max);
+                    let slow = self
+                        .readout
+                        .iter()
+                        .map(|(_, r)| (0..r.rows).map(|s| (0..r.cols).map(|j| cabs(r.at(s, j)) * cabs(recycling.at(j, ik))).sum::<f64>()).fold(0_f64, f64::max))
+                        .sum::<f64>();
                     charge += cabs(c) * growth * 0.5 * t_max * t_max * (direct + slow * t_max);
                     bounded += 1;
                 }
             }
+            if let Some(w) = shared {
+                pairs.push((a, b, w));
+            }
         }
-        series.add_direct_pair(at_phase(a, nu), at_phase(b, nu), pair_direct);
-        series.add_pair(at_phase(a, shift), at_phase(b, shift), pair_slow);
+        // Populations and recycling of every weight vector, in two products.
+        let count = nodes.len() + pairs.len();
+        if count > 0 {
+            let mut weights = Dense::zeros(n2, count);
+            for (column, w) in nodes.iter().map(|(_, w)| w).chain(pairs.iter().map(|(_, _, w)| w)).enumerate() {
+                weights.data[column * n2..(column + 1) * n2].copy_from_slice(w);
+            }
+            let direct = dressed.readout.multiply(&weights, lap)?;
+            let slow = recycling.multiply(&weights, lap)?;
+            let column = |m: &Dense, j: usize| m.data[j * m.rows..(j + 1) * m.rows].to_vec();
+            for (j, (x, _)) in nodes.iter().enumerate() {
+                series.add_direct_point(cadd(*x, complex(0., nu)), &column(&direct, j));
+                series.add_slow_point(cadd(*x, complex(0., shift)), &column(&slow, j));
+            }
+            for (j, (a, b, _)) in pairs.iter().enumerate() {
+                let j = nodes.len() + j;
+                series.add_direct_pair(cadd(*a, complex(0., nu)), cadd(*b, complex(0., nu)), column(&direct, j));
+                series.add_pair(cadd(*a, complex(0., shift)), cadd(*b, complex(0., shift)), column(&slow, j));
+            }
+        }
+        for &(x, ik, coef) in &near {
+            let rho: Vec<C> = (0..dressed.readout.rows).map(|s| cmul(dressed.readout.at(s, ik), coef)).collect();
+            let m: Vec<C> = (0..recycling.rows).map(|r| cmul(recycling.at(r, ik), coef)).collect();
+            series.add_direct_pair(cadd(x, complex(0., nu)), cadd(lambda[ik], complex(0., nu)), rho);
+            series.add_pair(cadd(x, complex(0., shift)), cadd(lambda[ik], complex(0., shift)), m);
+        }
         series.add_dressed_direct(&homogeneous);
         series.add_dressed_slow(slot, shift - nu, &homogeneous);
         Ok((charge, bounded))
@@ -1065,6 +1112,9 @@ impl SlowDual {
                     } else {
                         self.frame.apply_all(term, &units, lap)?
                     };
+                    // Non-ground parts of the returns at k: their exact dressed
+                    // fast response, like the particular part's (total only).
+                    let mut sources: Vec<(C, C, &Dense)> = Vec::new();
                     for (resonant_term, image) in resonant.iter().zip(&images) {
                         let column = resonant_term.column;
                         let first_node = cadd(beta[column], complex(0., shift));
@@ -1085,6 +1135,10 @@ impl SlowDual {
                         if same_charge {
                             continue;
                         }
+                        sources.push((beta[column], resonant_term.second, image));
+                        if self.slot_of(&k).is_some() || !options.slave_fast_returns {
+                            continue;
+                        }
                         let mut rest = Dense::zeros(d, 1);
                         for ea in 0..n {
                             for eb in 0..n {
@@ -1093,18 +1147,6 @@ impl SlowDual {
                                 }
                             }
                         }
-                        if rest.frobenius() == 0. {
-                            continue;
-                        }
-                        // Its exact dressed fast response at k, like the
-                        // particular part's (total only).
-                        let nu_k = fast.map(|index| fast_targets[index].2).ok_or("A resonant return without its target charge")?;
-                        let (charge, bounded) = self.add_fast_response_pair(&mut total, (slot, shift), nu_k, beta[column], resonant_term.second, &rest)?;
-                        resonant_charge += charge;
-                        unrouted_resonant_returns += bounded;
-                        if self.slot_of(&k).is_some() || !options.slave_fast_returns {
-                            continue;
-                        }
                         for (target_slot, returned) in self.slaved_returns(&k, &rest)? {
                             let modal = self.to_modal(target_slot, &returned)?;
                             total.add_pair(beta[column], resonant_term.second, modal.data.clone());
@@ -1112,6 +1154,12 @@ impl SlowDual {
                                 series.add_pair(beta[column], resonant_term.second, modal.data);
                             }
                         }
+                    }
+                    if !sources.is_empty() {
+                        let nu_k = fast.map(|index| fast_targets[index].2).ok_or("A resonant return without its target charge")?;
+                        let (charge, bounded) = self.add_fast_response_pairs(&mut total, (slot, shift), nu_k, &sources)?;
+                        resonant_charge += charge;
+                        unrouted_resonant_returns += bounded;
                     }
                 }
             }
@@ -1701,7 +1749,8 @@ mod tests {
         let a = complex(-0.2, 1.3);
         for b in [complex(-1., -0.4), complex(-0.2 + 1e-3, 1.3)] {
             let mut pair = Series::new(&[], grid.maximum);
-            let (charge, bounded) = dual.add_fast_response_pair(&mut pair, (0, 12.), 12., a, b, &field).unwrap();
+            let matrix = column_blocks(&field, n).remove(0);
+            let (charge, bounded) = dual.add_fast_response_pairs(&mut pair, (0, 12.), 12., &[(a, b, &matrix)]).unwrap();
             assert_eq!((charge, bounded), (0., 0), "every component has an exact form");
             let mut split = Series::new(&[a, b], grid.maximum);
             let scale = cdiv(complex(1., 0.), csub(a, b));

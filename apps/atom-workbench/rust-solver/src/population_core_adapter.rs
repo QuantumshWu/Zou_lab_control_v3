@@ -36,10 +36,11 @@ use atom_population_core::owned_prepared::{self,KernelPolicy,coordinates::Initia
 use atom_population_core::owned_prepared::runtime_core::RuntimeCore;
 use atom_population_core::owned_prepared::engine::{self,FiniteOptions,RequestedGroup};
 use atom_population_core::owned_prepared::asymptotic::{self,LabFrame,MeanKind,MeanOptions,MeanSolution};
+use atom_population_core::owned_prepared::slow_dual::{SlowDual,SlowDualOptions};
 
 const ENGINE:&str="rust-population-core";
 const FINITE_METHOD:&str="Full32 density-matrix Lindblad evolution with adaptive population refinement";
-const MEAN_METHOD:&str="Full32 Cesàro mean of the gauge pencil: defect-corrected null vector with a near-zero pole, halo-condensed Fourier truncation";
+const MEAN_METHOD:&str="Full32 Cesàro mean of the gauge pencil: defect-corrected null vector with a near-zero pole below the slowest relaxation of the slow generator, halo-condensed Fourier truncation";
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
 
 /// The worker start-up check: the LAPACK runtime every solve uses.
@@ -115,10 +116,10 @@ fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
 
 /// The long-time mean result. Inline (combined) and steadyOnly requests both
 /// call exactly this function.
-fn mean_result(model:&Model,options:&Options,request:&mut Request,started:Instant)->Result<Value,String>{
+fn mean_result(model:&Model,options:&Options,request:&mut Request,dual:Option<&SlowDual>,dual_ms:f64,started:Instant)->Result<Value,String>{
     let lab=LabFrame{frame_indices:request.axes.frame_indices.clone(),
         sectors:request.axes.frame_sectors.iter().map(|&s|if s==0{0}else{1}).collect()};
-    let mean=asymptotic::solve(&mut request.core,&MeanOptions::new(options.population_tolerance,request.groups.clone(),lab))?;
+    let mean=asymptotic::solve_with(&mut request.core,&MeanOptions::new(options.population_tolerance,request.groups.clone(),lab),dual)?;
     let positivity=positivity(&request.core,&mean.density)?;
     let trace_error=(mean.populations.iter().sum::<f64>()-1.).abs();
     let(status,reason)=classify(model,&mean);
@@ -136,7 +137,7 @@ fn mean_result(model:&Model,options:&Options,request:&mut Request,started:Instan
             "elapsedMs":started.elapsed().as_secs_f64()*1000.,"constructionMs":request.preparation_ms,
             "carrierSourceToBasis":request.axes.source_to_basis,"innerOperatorApplications":d.operator_applications,
             "asymptoticMethod":MEAN_METHOD,"meanDensityFrame":MEAN_FRAME,
-            "uniquenessScope":match mean.kind{MeanKind::Unique=>"one-dimensional null space within the resolved rates",
+            "uniquenessScope":match mean.kind{MeanKind::Unique=>"unique limit: every mode but the trace relaxes, however slowly (slowestRelaxationUs)",
                 MeanKind::InitialDependent{..}=>"several conserved quantities: mean of the specified initial density"},
             "asymptoticTraceError":trace_error,"asymptoticPositivityError":positivity,
             "residual":d.relative_residual,
@@ -148,7 +149,8 @@ fn mean_result(model:&Model,options:&Options,request:&mut Request,started:Instan
             "zeroModeCount":d.zero_modes,"slowestRatePerUs":d.slowest_rate,"nearZeroPolePerUs":d.pole,
             "meanBasis":d.columns,"meanModes":d.modes,"meanCheckpoints":checkpoints,
             "discardedOpticalCoherence":mean.discarded_optical_coherence,
-            "meanTimingMs":{"operators":d.timing[0],"corrections":d.timing[1],"halo":d.timing[2],"degeneracyProbe":d.timing[3]},
+            "meanTimingMs":{"operators":d.timing[0],"corrections":d.timing[1],"halo":d.timing[2],"degeneracyProbe":d.timing[3],"slowDual":dual_ms},
+            "slowestRelaxationUs":d.slowest_relaxation_us,"conservedQuantities":d.conserved_quantities,
             "meanMs":d.elapsed_ms,"uncorrectedPopulations":d.uncorrected_populations}}))
 }
 
@@ -171,10 +173,10 @@ fn merge_mean(result:&mut Value,mean:Value){
 /// time average then drops that coherence) and initial-state dependence.
 fn classify(model:&Model,mean:&MeanSolution)->(&'static str,&'static str){
     match(model.drives.is_empty(),&mean.kind){
-        (false,MeanKind::Unique)=>("time-average","Converged long-time phase average of the full driven Lindblad equation (one-dimensional null space); populations are a time average, not a time-independent density."),
+        (false,MeanKind::Unique)=>("time-average","Converged long-time phase average of the full driven Lindblad equation (unique limit: only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time); populations are a time average, not a time-independent density."),
         (false,MeanKind::InitialDependent{..})=>("initial-dependent-time-average","Converged long-time phase average of the specified initial density; several conserved quantities make it initial-state dependent."),
         (true,MeanKind::Unique) if mean.discarded_optical_coherence>1e-8=>("population-stationary","Populations converge in the background basis; exported density is the laboratory-frame time average."),
-        (true,MeanKind::Unique)=>("stationary","Unique full-density Lindblad stationary solution within the resolved rates."),
+        (true,MeanKind::Unique)=>("stationary","Unique full-density Lindblad stationary solution (only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time)."),
         (true,MeanKind::InitialDependent{..})=>("initial-dependent","Full Lindblad stationary projection from the specified initial density."),
     }
 }
@@ -185,9 +187,14 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
     let started=Instant::now();options.validate_population_tolerance()?;
     if !options.steady_only&&(!options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples)){return Err("Invalid finite population grid".into());}
     let mut request=prepare(model)?;
-    if options.steady_only{return mean_result(model,options,&mut request,started);}
+    // The slow dual serves the mean (its relaxation spectrum) and then the
+    // finite engine; a finite-only request prepares it inside the engine.
+    let clock=Instant::now();
+    let dual=(options.steady_only||options.include_asymptotic).then(||SlowDual::prepare(request.core.prepared(),SlowDualOptions::default()));
+    let dual_ms=clock.elapsed().as_secs_f64()*1000.;
+    if options.steady_only{return mean_result(model,options,&mut request,dual.as_ref().and_then(|d|d.as_ref().ok()),dual_ms,started);}
     let mean=if options.include_asymptotic{
-        let value=mean_result(model,options,&mut request,started);
+        let value=mean_result(model,options,&mut request,dual.as_ref().and_then(|d|d.as_ref().ok()),dual_ms,started);
         if let Ok(value)=&value{publish_mean(value);}
         Some(value)
     }else{None};
@@ -195,7 +202,9 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
     let times:Vec<_>=(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect();
     let finite=FiniteOptions{population_tolerance:options.population_tolerance,..Default::default()};
     let preparation=request.core.preparation_timing();
-    let solution=engine::solve(request.core,&times,request.groups,finite)?;
+    // A dual shared with the mean was prepared before it (its time is reported here).
+    let shared_dual=dual.is_some();
+    let solution=engine::solve_with(request.core,&times,request.groups,finite,dual)?;
     let d=&solution.diagnostics;
     let populations:Vec<_>=solution.populations.chunks_exact(32).map(|p|p.to_vec()).collect();
     let(trace,initial_error)=row_errors(&populations,&request.initial_populations)?;
@@ -217,7 +226,7 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
             "estimateMargin":d.estimate_margin,"boundedResonantComponents":d.bounded_resonant_components,"finalModes":d.final_modes,"finalBasis":d.final_columns,
             "imageColumns":d.image_columns,"peakTrialBytes":d.peak_trial_bytes,
             "preparationMs":{"gauge":preparation[0],"primitives":preparation[1],"library":preparation[2],"initial":preparation[3],"readoutDuals":preparation[4],"p0":preparation[5]},
-            "timingMs":{"directions":t.directions,"orthogonalize":t.orthogonalize,"images":t.images,"projections":t.projections,"readoutAppend":t.readout_append,"transfer":t.transfer,"reduced":t.reduced,"readoutEvaluate":t.readout_evaluate,"dualPrepare":t.dual_prepare,"basisEstimate":t.basis_estimate,"haloEstimate":t.halo_estimate},
+            "timingMs":{"directions":t.directions,"orthogonalize":t.orthogonalize,"images":t.images,"projections":t.projections,"readoutAppend":t.readout_append,"transfer":t.transfer,"reduced":t.reduced,"readoutEvaluate":t.readout_evaluate,"dualPrepare":if shared_dual{dual_ms}else{t.dual_prepare},"basisEstimate":t.basis_estimate,"haloEstimate":t.halo_estimate},
             "maximumImaginaryPopulation":d.maximum_imaginary_population,"populationCheckpoints":checkpoints}});
     match mean{
         None=>{}
