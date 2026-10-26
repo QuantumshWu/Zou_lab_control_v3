@@ -63,8 +63,8 @@ test('Worker sends the identical complete model, finite jobs to the trajectory l
     // Exactly the fields the worker reads; e.g. no frameFrequenciesMHz: the
     // native solver returns the laboratory-frame mean itself.
     assert.deepEqual(Object.keys(sent).filter(key=>key!=='lane').sort(),['id','model','modelSchema','options','progress']);
-    assert.deepEqual(Object.keys(sent.model).sort(),['collapse','dimension','drives','frequencyCoordinates','hImag','hReal','initialIndex','states']);
-    for(const key of ['dimension','hReal','hImag','collapse','initialIndex','drives','frequencyCoordinates'])assert.deepEqual(sent.model[key],model[key],key);
+    assert.deepEqual(Object.keys(sent.model).sort(),['collapse','dimension','drives','frequencyCoordinates','hImag','hReal','initialImag','initialIndex','initialReal','states']);
+    for(const key of ['dimension','hReal','hImag','collapse','initialIndex','initialReal','initialImag','drives','frequencyCoordinates'])assert.deepEqual(sent.model[key],model[key],key);
     assert.deepEqual(sent.model.states,model.states.map(s=>s.id));
   }
   assert.equal(messages.at(-1).event.data.service.lane,'trajectory');
