@@ -1,7 +1,7 @@
 import { assign, element, labelColumnWidth, setText, setTitle, token, type Value } from "./dom.js";
 import { fontOf, measurer, setMiddle, wholeText } from "./elide.js";
 import { comboFace, hintWidest } from "./combo.js";
-import { SpinBox, decimals } from "./spin.js";
+import { SpinBox, approximateText, decimals } from "./spin.js";
 import { TreeCombo, type TreeGroup } from "./tree_combo.js";
 import { Segmented, setChecked, switchButton } from "./toggles.js";
 import { PathEdit } from "./info_pane.js";
@@ -74,16 +74,19 @@ export type FieldSpec = {
 const NATURAL_STEPS: Record<string, number> = { dB: 0.1, dBm: 0.1, count: 1 };
 
 /** A device number's first step: its field's own step, else its unit's natural
- * notch in the spelling shown, else the last significant digit of its value
- * (812.5 MHz: 0.1 MHz), else 1. The operator changes it on the step chip. */
+ * notch in the spelling shown, else the last significant digit of its value as
+ * shown (812.5 MHz: 0.1 MHz; "≈ 632.5" mVpp: 0.1), else 1. The operator changes
+ * it on the step chip. */
 export function firstStep(spec: FieldSpec): number {
   if (spec.step) return spec.step;
   if (spec.kind === "integer") return 1;
   const natural = NATURAL_STEPS[spec.unit ?? ""];
   if (natural) return natural;
-  // Twelve significant digits: a reading converted between units carries no float dust into its step.
-  const value = typeof spec.value === "number" ? Number(spec.value.toPrecision(12)) : NaN;
-  return Number.isFinite(value) && value !== 0 ? 10 ** -decimals(value) : 1;
+  // Twelve significant digits: a reading converted between units carries no float dust into its step;
+  // an inexact conversion's carries the digits its ≈ rounding shows, not the ones it hides.
+  const shown = typeof spec.value !== "number" ? NaN : spec.inexact ? Number(approximateText(String(spec.value), spec.unit ?? "", null).replace(/^≈ /, ""))
+    : Number(spec.value.toPrecision(12));
+  return Number.isFinite(shown) && shown !== 0 ? 10 ** -decimals(shown) : 1;
 }
 
 export type FieldHandlers = {

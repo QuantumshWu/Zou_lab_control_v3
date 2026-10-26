@@ -4,7 +4,7 @@
 // own limits -- and tunes one field per Apply (tune_device).  Who may tune
 // what (claims, protected fields, accepted risk) is the workbench's answer,
 // shown as each row's reason; the page never decides it.
-import { Field, StatusStrip, alignUnitPickers, command, element, readoutText, setChecked, setElided, setState, setTitle, statusDot, switchButton, titleRow, } from "../fluent/index.js";
+import { Field, StatusStrip, alignUnitPickers, command, element, readoutText, setChecked, setElided, setState, statusDot, switchButton, titleRow, } from "../fluent/index.js";
 import { queueStatus } from "../shell.js";
 /** How long a live field waits after an edit before it tunes (v2: 75 ms). */
 const LIVE_DELAY_MS = 75;
@@ -116,8 +116,8 @@ export class DeviceControlView {
                 row.field.input.classList.add("invalid");
             // A reading shown rounded ("≈ -23.98 dBm") says every digit in its tooltip.
             setElided(row.current, spec.current_text, spec.current_exact ?? spec.current_text);
-            row.limits.textContent = spec.limits_text;
-            setTitle(row.limits, spec.limits_exact && spec.limits_exact !== spec.limits_text ? `${spec.limits_exact}\n${LIMITS_TIP}` : LIMITS_TIP);
+            // The range gives way before the window scrolls (ends in an ellipsis): its tooltip says it whole, every digit.
+            setElided(row.limits, spec.limits_text, spec.limits_text ? `${spec.limits_exact ?? spec.limits_text}\n${LIMITS_TIP}` : LIMITS_TIP);
             // Absent, not disabled: a field with no live write leaves its cell empty.
             row.live.hidden = !spec.live_write;
             setChecked(row.live, row.liveOn);
@@ -128,7 +128,7 @@ export class DeviceControlView {
             const [words, word] = row.unitRequest !== null ? ["Reading unit", "task"]
                 : row.tuning !== null ? [waiting ? "Applying; latest queued" : "Applying", "task"]
                     : waiting ? ["Queued latest", "task"]
-                        : row.outside ? ["Desired is outside its bounds", "error"]
+                        : row.outside ? ["Outside its bounds", "error"]
                             : row.error ? [row.error, "error"]
                                 : row.applied && spec.editable ? [row.applied, "idle"]
                                     : [spec.status, spec.severity];
@@ -167,7 +167,7 @@ export class DeviceControlView {
         row.applied = "";
         row.error = "";
         row.outside = false;
-        row.field = new Field(`control-${this.id}`, { ...spec, value: spec.desired, spin: true }, {
+        row.field = new Field(`control-${this.id}`, { ...spec, value: spec.desired, spin: true, inexact: true }, {
             // Another spelling is the device's to read (an RF level depends on its
             // load): the row is re-read in it, reading, bounds and limits together
             // (a draft keeps its digits: update).

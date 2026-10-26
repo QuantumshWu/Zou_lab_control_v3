@@ -107,7 +107,7 @@ try {
    equal(t.input().value,'50','draft digits');
    assert(t.input().classList.contains('invalid'),'kept draft not shown invalid');
    assert(t.apply().disabled,'Apply enabled for a draft outside its bounds');
-   assert(t.row().textContent.includes('outside its bounds'),'status says nothing');
+   assert(t.row().textContent.includes('Outside its bounds'),'status says nothing');
    t.type('10');await wait();
    assert(!t.input().classList.contains('invalid'),'an edit left the box invalid');
    t.apply().click();equal(t.writes().map(c=>[c.value,c.unit]),[[10,'dBm']],'Apply after the edit');

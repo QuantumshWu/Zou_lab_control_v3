@@ -30,8 +30,13 @@ try {
  await check('an axis keeps its digits in another spelling, decimal or not',async()=>{
    const t=setup([{port:port.port,unit:'mVpp',values:[10,20,30],mode:'range',value_text:'5, 7'}]);
    const picker=t.editor.root.querySelector('.axis-unit .unit-picker');
+   const invalid=()=>[...t.editor.root.querySelectorAll('.range-bank input, .axis-list')].map(input=>input.classList.contains('invalid'));
    choose(picker,1);equal(t.plan().map(axis=>[axis.unit,axis.values,axis.value_text]),[['Vpp',[10,20,30],'5, 7']],'Vpp');
+   // 10..30 Vpp and 5, 7 Vpp lie past the port's 0..1 Vpp: the kept digits say so.
+   equal(invalid(),[true,true,false,true],'kept digits outside the limits');
+   assert(t.editor.root.querySelector('.range-bank input').title.startsWith('Outside the limits: 0 to 1 Vpp'),'limits tooltip');
    choose(picker,2);equal(t.plan().map(axis=>[axis.unit,axis.values,axis.value_text]),[['dBm',[10,20,30],'5, 7']],'dBm');
+   equal(invalid(),[false,true,false,false],'only 30 dBm lies past 13.01 dBm');
    const spins=[...t.editor.root.querySelectorAll('.range-bank input')].map(input=>input.value);
    equal(spins,['10','30','3'],'from, to, points');
  });

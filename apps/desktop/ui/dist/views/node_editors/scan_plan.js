@@ -71,6 +71,8 @@ function rangeSpin(label, step, bounds, commit, decimal = true) {
     });
     return spin;
 }
+/** The Values list's tooltip: what it is. */
+const LIST_TIP = "Scan these values in the written order";
 class AxisRowView {
     owner;
     manual;
@@ -113,13 +115,7 @@ class AxisRowView {
             this.combo.root.classList.add("axis-port");
             this.axis = this.combo.root;
         }
-        // The port's limits, read in the unit the axis is authored in.
-        const bounds = () => {
-            const port = this.port(), places = port && this.places(port.unit, this.entry.unit);
-            if (port && places !== null && places !== undefined)
-                return [shifted(port.lo, places), shifted(port.hi, places)];
-            return port?.limits[this.entry.unit] ?? [null, null];
-        };
+        const bounds = () => this.bounds();
         this.start = rangeSpin("from", () => 1, bounds, () => this.spinsEdited());
         this.stop = rangeSpin("to", () => 1, bounds, () => this.spinsEdited());
         this.points = rangeSpin("points", () => 1, () => [1, 100_000], () => this.spinsEdited(), false);
@@ -128,7 +124,7 @@ class AxisRowView {
         this.list.type = "text";
         this.list.spellcheck = false;
         this.list.placeholder = "1, 3, 5, 6, 11";
-        this.list.title = "Scan these values in the written order";
+        this.list.title = LIST_TIP;
         this.list.addEventListener("change", () => { this.entry = { ...this.entry, value_text: this.list.value }; owner.emitPlan(); });
         this.values.append(this.bank, this.list);
         // ONE picker for both ends: from and to are two ends of one sweep.
@@ -143,6 +139,21 @@ class AxisRowView {
     }
     get cells() { return [this.kind, this.axis, this.values, this.unit, this.mode.root, this.remove, this.notes]; }
     port() { return this.owner.ports.find(port => port.port === this.entry.port); }
+    /** The port's limits, read in the unit the axis is authored in. */
+    bounds() {
+        const port = this.port(), places = port && this.places(port.unit, this.entry.unit);
+        if (port && places !== null && places !== undefined)
+            return [shifted(port.lo, places), shifted(port.hi, places)];
+        return port?.limits[this.entry.unit] ?? [null, null];
+    }
+    /** A box holding a number the limits refuse says so (red, its tooltip the limits): a unit
+     * picked keeps the digits written, which the new unit's limits may not admit. */
+    flag(input, values, tip = "") {
+        const [low, high] = this.bounds();
+        const outside = values.some(value => (low !== null && value < low) || (high !== null && value > high));
+        input.classList.toggle("invalid", outside);
+        input.title = outside ? `Outside the limits: ${low ?? "-∞"} to ${high ?? "∞"} ${this.entry.unit}`.trim() : tip;
+    }
     /** Bring the row to its authored axis; the box under the operator's cursor
      * keeps what they are typing. */
     show(entry) {
@@ -160,8 +171,13 @@ class AxisRowView {
             }
             spin.refresh();
         }
+        if (entry.values.length) {
+            this.flag(this.start.input, [values[0]]);
+            this.flag(this.stop.input, [values[values.length - 1]]);
+        }
         if (document.activeElement !== this.list)
             this.list.value = entry.value_text;
+        this.flag(this.list, entry.value_text.trim() ? entry.value_text.split(",").map(item => Number(item.trim())).filter(Number.isFinite) : [], LIST_TIP);
         // A unit with other spellings is a picker; one without is a word.
         const port = this.port();
         const offered = port?.units.some(([symbol]) => symbol === entry.unit) ? port.units : [];
