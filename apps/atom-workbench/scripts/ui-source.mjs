@@ -29,7 +29,7 @@ const identify=(root,files)=>files.sort().map(file=>({path:slash(path.relative(r
 export function captureUiInputs(source=resolveUiSource()){
   const shared=identify(source.uiRoot,[...filesUnder(path.join(source.uiRoot,'src')),path.join(source.uiRoot,'tokens.css'),path.join(source.uiRoot,'fluent.css'),path.join(source.uiRoot,'title_bar.css')]);
   const local=identify(workbenchRoot,[...filesUnder(path.join(workbenchRoot,'src')),...filesUnder(path.join(workbenchRoot,'desktop-native/ui')),
-    ...['index.html','style.css','tsconfig.json','scripts/build.mjs','scripts/ui-source.mjs','scripts/build-desktop-native-ui.mjs','scripts/native-service-core.mjs','scripts/native-protocol.mjs','scripts/fresh-mean.mjs','scripts/mean-frame.mjs'].map(p=>path.join(workbenchRoot,p))]);
+    ...['index.html','style.css','tsconfig.json','scripts/build.mjs','scripts/ui-source.mjs','scripts/build-desktop-native-ui.mjs','scripts/native-service-core.mjs','scripts/native-protocol.mjs','scripts/mean-frame.mjs'].map(p=>path.join(workbenchRoot,p))]);
   return {source:{...source,files:shared,iconSha256:sha(source.iconPath)},workbench:{root:workbenchRoot,files:local}};
 }
 export function assertUiInputs(snapshot){

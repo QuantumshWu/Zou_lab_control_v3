@@ -35,7 +35,7 @@ function fakeResult(request){
     ...(options.includeAsymptotic?{asymptoticDensityReal:real,asymptoticDensityImag:Array(n*n).fill(0)}:{}),diagnostics:{elapsedMs:1,traceError:0,positivityError:0,method:'transport test stub',carrierSourceToBasis:Array.from({length:f},(_,i)=>Array.from({length:f},(_,j)=>+(i===j)))}};
 }
 
-test('Worker sends the identical complete model and joins two fresh native lanes',async()=>{
+test('Worker sends the identical complete model, finite jobs to the trajectory lane and means to the steady lane',async()=>{
   const events=[],requests=[];let worker;
   const host=command=>{
     const event=message=>queueMicrotask(()=>void worker.receive({kind:'native',event:{lane:command.lane,generation:command.generation,...message}}));
@@ -50,14 +50,16 @@ test('Worker sends the identical complete model and joins two fresh native lanes
   };
   worker=createModelWorker(message=>{events.push(message);if(message.kind==='native')host(message.command);});
   await worker.receive({kind:'solve',channel:'invalid',request:{}});
-  await worker.receive({kind:'native',event:{kind:'configuration',binarySha256:'binary',buildSha256:'build',defaults:{ATOM_FULL_PERIOD:'auto',ATOM_PARALLEL_MEAN:'1'}}});
+  await worker.receive({kind:'native',event:{kind:'configuration',binarySha256:'binary',buildSha256:'build',defaults:{ATOM_STEADY_BLAS_THREADS:'1',ATOM_TRAJECTORY_BLAS_THREADS:'8'}}});
   await tick();assert.equal(events.find(e=>e.channel==='invalid').status,400);
   const scene=defaultScene();scene.lasers[1].enabled=false;scene.lasers.push({...scene.lasers[0],id:'second',detuningMHz:100});
   const options={durationUs:0.1,samples:3,populationTolerance:.003731,steadyOnly:false,includeAsymptotic:true};const request={scene,modelSchema:SCHEMA,stream:true,request:{clientId:'worker-test',sequence:1},options};
   await worker.receive({kind:'solve',channel:'valid',request});
   for(let i=0;i<50&&!events.some(e=>e.channel==='valid'&&e.event?.type==='result');i++)await tick();
-  const messages=events.filter(e=>e.channel==='valid');assert.deepEqual(messages.map(e=>e.event?.type),['asymptotic','result']);
-  assert.equal(requests.length,2);assert.deepEqual(requests.map(r=>r.lane),['steady','trajectory']);
+  const messages=events.filter(e=>e.channel==='valid');assert.deepEqual(messages.map(e=>e.event?.type),['result']);
+  // One native job: the finite trajectory carries its own inline mean.
+  assert.equal(requests.length,1);assert.deepEqual(requests.map(r=>r.lane),['trajectory']);
+  assert.equal(requests[0].options.includeAsymptotic,true);assert.equal(requests[0].progress,true);
   const model=buildFullMasterModel(scene,{...scene.dynamics,...options});
   for(const sent of requests){
     assert.equal(sent.options.populationTolerance,.003731);
@@ -65,13 +67,13 @@ test('Worker sends the identical complete model and joins two fresh native lanes
     for(const key of ['dimension','hReal','hImag','collapse','initialIndex','timeDependent','drives','frameFrequenciesMHz','frequencyCoordinates'])assert.deepEqual(sent.model[key],model[key],key);
     assert.deepEqual(sent.model.states,model.states.map(s=>s.id));
   }
-  assert.equal(messages.at(-1).event.data.service.executionMode,'parallel-independent-mean');
+  assert.equal(messages.at(-1).event.data.service.lane,'trajectory');
   assert.equal(messages.at(-1).event.data.service.asymptoticCacheHit,false);
   const legacy=structuredClone(scene);delete legacy.dynamics.populationTolerance;
   await worker.receive({kind:'solve',channel:'legacy',request:{scene:legacy,modelSchema:SCHEMA,
     request:{clientId:'worker-test',sequence:2},options:{durationUs:.1,samples:3,steadyOnly:true,includeAsymptotic:true}}});
   for(let i=0;i<50&&!events.some(e=>e.channel==='legacy'&&e.kind==='response');i++)await tick();
-  assert.equal(requests.at(-1).options.populationTolerance,.005);
+  assert.equal(requests.at(-1).options.populationTolerance,.005);assert.equal(requests.at(-1).lane,'steady');
   const count=requests.length;
   await worker.receive({kind:'solve',channel:'invalid-tolerance',request:{scene,modelSchema:SCHEMA,
     request:{clientId:'worker-test',sequence:3},options:{populationTolerance:.021}}});

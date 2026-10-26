@@ -8,13 +8,10 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
-mod bath_frame;
 mod block_solve;
 mod cluster_action;
-mod cptp_period;
 mod defect_bound;
 mod dense_expm;
-mod full_period;
 mod floquet;
 mod harmonics;
 mod lapack;
@@ -1668,40 +1665,9 @@ impl Solver {
     }
 }
 
-/// Numerical method selection only: both routes retain the same complete
-/// Hamiltonian and collapse operators and enforce their own convergence gates.
-/// Very long trajectories avoid repeatedly refining a period discretization
-/// over millions of cycles. No laser or density coordinate is discarded.
-fn prefer_full_period(dimension:usize,frequencies:&[f64],duration_us:f64,steady_only:bool)->bool{
-    if steady_only||dimension!=32||frequencies.len()!=1||!frequencies[0].is_finite()||frequencies[0]<=0.
-        ||!duration_us.is_finite()||duration_us<=0.{return false;}
-    let period=std::f64::consts::TAU/frequencies[0];
-    // A GHz repump can execute many periods during a short physical interval.
-    // Its period count alone is not a reason to reject this numerical route.
-    period<=0.02&&duration_us<=100.
-}
-fn full_period_requested(model:&Model,options:&Options)->bool{
-    match std::env::var("ATOM_FULL_PERIOD").as_deref(){
-        Ok("1")=>crate::full_period::supports(model),
-        Ok("auto")=>harmonics::model_frequency_basis(model,16).is_ok_and(|basis|basis.exact&&basis.rounded_relations==0&&prefer_full_period(model.dimension,&basis.frequencies,options.duration_us,options.steady_only)),
-        _=>false,
-    }
-}
 #[cfg(test)]
-mod period_routing_tests{
+mod progress_tests{
     use super::*;
-    #[test]
-    fn method_selection_retains_long_lowbeat_and_multifrequency_fallbacks(){
-        let beat=std::f64::consts::TAU*100.;
-        assert!(prefer_full_period(32,&[beat],20.,false));
-        assert!(prefer_full_period(32,&[std::f64::consts::TAU*6568.],20.,false));
-        assert!(!prefer_full_period(32,&[beat],100.01,false));
-        assert!(!prefer_full_period(32,&[beat],100000.,false));
-        assert!(!prefer_full_period(32,&[std::f64::consts::TAU*1.25],20.,false));
-        assert!(!prefer_full_period(32,&[beat,beat*1.7],20.,false));
-        assert!(!prefer_full_period(32,&[beat],20.,true));
-        assert!(!prefer_full_period(32,&[f64::NAN],20.,false));
-    }
     #[test]
     fn declared_static_progress_carries_mapping_and_legacy_progress_omits_it(){
         let mut declared=json!({"diagnostics":{},"asymptoticPopulations":[1.,0.]});
@@ -1715,23 +1681,6 @@ mod period_routing_tests{
         let mut static_zero=json!({"diagnostics":{}});assert!(stamp_progress_coordinates(&mut static_zero,"rb87-full/2",Some(&vec![])));
         assert_eq!(static_zero["diagnostics"]["carrierSourceToBasis"],json!([]));
     }
-}
-fn full_period_result(lap:&Lapack,model:&Model,options:&Options)->Result<Value,String>{
-    let started=Instant::now();
-    let mut result=if options.include_asymptotic{
-        let value=floquet::solve_full(lap,model,&Options{steady_only:true,..*options})?;
-        publish_mean(value.clone());value
-    }else{json!({"asymptoticPopulations":null,"asymptoticStatus":"not-requested"})};
-    let mean_ms=started.elapsed().as_secs_f64()*1000.;
-    let report=full_period::solve(lap,model,options)?;
-    let g=build_generator(model)?;
-    let densities:Vec<_>=report.states.iter().map(|state|expand_density(&g.coords,state,model.dimension)).collect();
-    result["timesUs"]=json!(report.times);result["states"]=json!(model.states);
-    result["populations"]=json!(report.states.iter().map(|x|x[..model.dimension].to_vec()).collect::<Vec<_>>());
-    result["scatteringRatePerUs"]=json!(densities.iter().map(|rho|scatter_rate(&g.scattering,rho,model.dimension)).collect::<Vec<_>>());
-    let previous=result["diagnostics"].clone();result["diagnostics"]=report.diagnostics;result["diagnostics"]["stationaryDiagnostics"]=previous;
-    result["diagnostics"]["stationarySolveMs"]=json!(mean_ms);result["diagnostics"]["stationaryOnly"]=json!(false);
-    result["diagnostics"]["elapsedMs"]=json!(started.elapsed().as_secs_f64()*1000.);Ok(result)
 }
 
 /// Static rb87-full/2 mean: the verified trace-constrained full-density
@@ -1754,14 +1703,14 @@ fn full_model_solve(solver:&mut Solver,model:&Model,options:&Options)->Result<Va
     PROGRESS_REQUEST.with(|context|{
         if let Some((_,schema,mapping))=context.borrow_mut().as_mut(){if schema==FULL_MODEL_SCHEMA{*mapping=basis.source_to_basis.clone();}}
     });
+    // Every finite-time rb87-full/2 trajectory is solved by the population core.
     #[cfg(feature="population-core")]
-    if population_core_adapter::supports(model,options)&&!full_period_requested(model,options){
+    if population_core_adapter::supports(model,options){
         return population_core_adapter::solve(solver,model,options);
     }
     let mut result=if !model.drives.is_empty(){
         if options.steady_only{floquet::solve_full(&solver.lap,model,options)}
-        else if full_period_requested(model,options){full_period_result(&solver.lap,model,options)}
-        else{Err("Finite-time driven trajectories are solved by the population core or the complete-period lane".into())}
+        else{Err("Finite-time driven trajectories are solved by the population core".into())}
     }else{
         let start=Instant::now();match static_stationary(solver,model,options){Ok(v)=>Ok(v),Err(reason)=>solver.solve(model,options).map(|mut v|{
             v["diagnostics"]["fastPathFallback"]=json!(reason);v["diagnostics"]["elapsedMs"]=json!(start.elapsed().as_secs_f64()*1000.);v
