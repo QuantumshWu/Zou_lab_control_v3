@@ -196,8 +196,15 @@ pub(crate) struct ThinCoefficient {
     rows: usize,
     cols: usize,
     sparse: Coefficient,
-    /// Column-major copy when at least 15% of the entries are nonzero.
+    /// Column-major copy of the block of rows and columns that hold a
+    /// stored entry (`active_rows` x `active_cols`), when at least 15% of
+    /// that block is nonzero. Every stored entry is in the block, so the
+    /// product is the complete one; rows and columns outside it are empty
+    /// (the non-secular recycling of one charge feeds only the F=1/F=2
+    /// coherences, 15 of 64 ground rows).
     dense: Option<Vec<C>>,
+    active_rows: Vec<usize>,
+    active_cols: Vec<usize>,
 }
 
 impl ThinCoefficient {
@@ -222,21 +229,29 @@ impl ThinCoefficient {
             }
             sparse.row.push(sparse.value.len());
         }
-        let dense = (rows.min(cols) >= 8 && sparse.value.len() as f64 >= 0.15 * (rows * cols) as f64).then(|| {
-            let mut dense = vec![ZERO; rows * cols];
-            for r in 0..rows {
-                for c in 0..cols {
-                    dense[r + rows * c] = permuted[r * cols + c];
+        let stored = |r: usize, c: usize| {
+            let z = permuted[r * cols + c];
+            z.re != 0. || z.im != 0.
+        };
+        let active_rows: Vec<usize> = (0..rows).filter(|&r| (0..cols).any(|c| stored(r, c))).collect();
+        let active_cols: Vec<usize> = (0..cols).filter(|&c| (0..rows).any(|r| stored(r, c))).collect();
+        let (m, k) = (active_rows.len(), active_cols.len());
+        let dense = (m.min(k) >= 8 && sparse.value.len() as f64 >= 0.15 * (m * k) as f64).then(|| {
+            let mut dense = vec![ZERO; m * k];
+            for (i, &r) in active_rows.iter().enumerate() {
+                for (j, &c) in active_cols.iter().enumerate() {
+                    dense[i + m * j] = permuted[r * cols + c];
                 }
             }
             dense
         });
-        Self { rows, cols, sparse, dense }
+        Self { rows, cols, sparse, dense, active_rows, active_cols }
     }
 
     fn bytes(&self) -> usize {
         (self.sparse.row.len() + self.sparse.col.len()) * std::mem::size_of::<usize>()
             + (self.sparse.value.len() + self.dense.as_ref().map_or(0, Vec::len)) * std::mem::size_of::<C>()
+            + (self.active_rows.len() + self.active_cols.len()) * std::mem::size_of::<usize>()
     }
 }
 
@@ -595,6 +610,7 @@ impl Plan {
             output,
         })
     }
+
 
     pub(crate) fn input_modes(&self) -> usize {
         self.input.len()
@@ -971,7 +987,7 @@ impl Plan {
             .iter()
             .map(|link| {
                 let a = &library[link.coefficient];
-                let per_edge = if a.dense.is_some() { a.rows * a.cols } else { CSR_WORK * a.sparse.value.len() };
+                let per_edge = if a.dense.is_some() { a.active_rows.len() * a.active_cols.len() } else { CSR_WORK * a.sparse.value.len() };
                 link.within(&modes).len() * per_edge * rhs
             })
             .sum();
@@ -994,24 +1010,37 @@ impl Plan {
                 match &a.dense {
                     Some(dense) if sources.len() * rhs >= 8 => {
                         let columns = sources.len() * rhs;
+                        let (m, k) = (a.active_rows.len(), a.active_cols.len());
                         let Scratch { packed, product, .. } = scratch;
-                        let input: &[C] = if consecutive(sources) {
+                        let input: &[C] = if k < a.cols {
+                            // Gather the active input coordinates of every column.
+                            ensure(packed, columns * k);
+                            for (index, &s) in sources.iter().enumerate() {
+                                let x = &source[s * width..(s + 1) * width];
+                                for b in 0..rhs {
+                                    let to = &mut packed[(index * rhs + b) * k..(index * rhs + b + 1) * k];
+                                    for (slot, &c) in to.iter_mut().zip(&a.active_cols) {
+                                        *slot = x[a.cols * b + c];
+                                    }
+                                }
+                            }
+                            &packed[..columns * k]
+                        } else if consecutive(sources) {
                             &source[sources[0] * width..(sources[0] + sources.len()) * width]
                         } else {
                             ensure(packed, sources.len() * width);
-                            for (k, &s) in sources.iter().enumerate() {
-                                packed[k * width..(k + 1) * width].copy_from_slice(&source[s * width..(s + 1) * width]);
+                            for (index, &s) in sources.iter().enumerate() {
+                                packed[index * width..(index + 1) * width].copy_from_slice(&source[s * width..(s + 1) * width]);
                             }
                             &packed[..sources.len() * width]
                         };
-                        ensure(product, a.rows * columns);
-                        let (rows, cols) = (a.rows, a.cols);
-                        gemm.multiply(rows, columns, cols, ONE, dense, rows, input, cols, ZERO, product, rows)?;
-                        for (k, &t) in destinations.iter().enumerate() {
+                        ensure(product, m * columns);
+                        gemm.multiply(m, columns, k, ONE, dense, m, input, k, ZERO, product, m)?;
+                        for (index, &t) in destinations.iter().enumerate() {
                             let out = &mut chunk[(t - first) * target_width..(t - first + 1) * target_width];
                             for b in 0..rhs {
-                                let column = &product[a.rows * (k * rhs + b)..a.rows * (k * rhs + b + 1)];
-                                for (row, &value) in column.iter().enumerate() {
+                                let column = &product[m * (index * rhs + b)..m * (index * rhs + b + 1)];
+                                for (&row, &value) in a.active_rows.iter().zip(column) {
                                     let at = position(row, b);
                                     out[at] = add(out[at], value);
                                 }
