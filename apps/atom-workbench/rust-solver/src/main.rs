@@ -21,6 +21,8 @@ mod structured_lindblad;
 mod structured_floquet;
 #[cfg(feature="population-core")]
 mod population_core_adapter;
+#[cfg(all(test,feature="population-core"))]
+mod kernel_bench;
 use lapack::Lapack;
 const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/2";
 const FULL_MODEL_SCHEMA: &str = "rb87-full/2";

@@ -76,6 +76,8 @@ impl RuntimeCore{
     pub fn observer(&self)->&Arc<PopulationObservation>{&self.observer}
     pub fn lapack(&self)->&Arc<Lapack>{&self.owned.preparation_lapack}
     pub(crate) fn p0_mut(&mut self)->&mut RequestP0{&mut self.p0}
+    /// Operator library and P0 factory together, for benchmarks and tools.
+    pub fn operator_context(&mut self)->(&OwnedPrepared,&mut RequestP0){(&self.owned,&mut self.p0)}
     /// REAL coordinates of the constant initial envelope on `modes`: the
     /// initial point sits on the central mode, all other modes are zero.
     pub fn initial_real(&self,map:&RealFourierMap,modes:&[Charge])->Result<Vec<f64>,String>{

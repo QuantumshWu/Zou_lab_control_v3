@@ -53,45 +53,122 @@ impl RealFourierMap{
     fn shape(&self,source:usize,target:usize,rhs:usize)->Result<(),String>{
         if rhs==0||source!=product(&[self.dimension(),rhs])?||target!=source{return Err("REAL map requires complete [coordinate,rhs] buffers".into());}Ok(())
     }
-    pub fn push_into(&self,input:&[f64],rhs:usize,output:&mut[C])->Result<(),String>{
-        self.shape(input.len(),output.len(),rhs)?;if input.iter().any(|x|!x.is_finite()){return Err("Nonfinite REAL Fourier input".into());}
-        output.fill(C::default());for column in 0..self.dimension(){for e in &self.entries[self.offsets[column]..self.offsets[column+1]]{for b in 0..rhs{
-            let value=input[column*rhs+b];add(&mut output[e.row*rhs+b],C{re:e.value.re*value,im:e.value.im*value});
-        }}}if output.iter().any(|z|!z.finite()){return Err("REAL Fourier push overflow".into());}Ok(())
+    fn column(&self, column: usize) -> &[Entry] {
+        &self.entries[self.offsets[column]..self.offsets[column + 1]]
+    }
+    /// Real coordinates -> signed field. A nonfinite input shows up as a
+    /// nonfinite output, so one final scan validates both.
+    pub fn push_into(&self, input: &[f64], rhs: usize, output: &mut [C]) -> Result<(), String> {
+        self.shape(input.len(), output.len(), rhs)?;
+        output.fill(C::default());
+        for column in 0..self.dimension() {
+            let x = &input[column * rhs..(column + 1) * rhs];
+            for e in self.column(column) {
+                for (y, &x) in output[e.row * rhs..(e.row + 1) * rhs].iter_mut().zip(x) {
+                    y.re += e.value.re * x;
+                    y.im += e.value.im * x;
+                }
+            }
+        }
+        finite_field(output, "Nonfinite REAL Fourier input or push overflow")
     }
     /// Complex-linear extension of the same isometry, used by small-system
     /// algebra. Complex input here is not declared a Hermitian density.
-    pub fn push_complex_into(&self,input:&[C],rhs:usize,output:&mut[C])->Result<(),String>{
-        self.shape(input.len(),output.len(),rhs)?;if input.iter().any(|x|!x.finite()){return Err("Nonfinite complex Fourier coordinates".into());}
-        output.fill(C::default());for column in 0..self.dimension(){for e in &self.entries[self.offsets[column]..self.offsets[column+1]]{for b in 0..rhs{
-            add(&mut output[e.row*rhs+b],mul(e.value,input[column*rhs+b]));
-        }}}if output.iter().any(|z|!z.finite()){return Err("Complex Fourier push overflow".into());}Ok(())
+    pub fn push_complex_into(&self, input: &[C], rhs: usize, output: &mut [C]) -> Result<(), String> {
+        self.shape(input.len(), output.len(), rhs)?;
+        output.fill(C::default());
+        for column in 0..self.dimension() {
+            let x = &input[column * rhs..(column + 1) * rhs];
+            for e in self.column(column) {
+                for (y, &x) in output[e.row * rhs..(e.row + 1) * rhs].iter_mut().zip(x) {
+                    add(y, mul(e.value, x));
+                }
+            }
+        }
+        finite_field(output, "Nonfinite complex Fourier coordinates or push overflow")
     }
     /// Full T^dagger result. Imaginary parts are intentionally retained so an
     /// original physical E/F/M guard can detect wrong or unresolved actions.
-    pub fn pull_complex_into(&self,input:&[C],rhs:usize,output:&mut[C])->Result<(),String>{
-        self.shape(input.len(),output.len(),rhs)?;if input.iter().any(|x|!x.finite()){return Err("Nonfinite complete signed Fourier field".into());}
-        output.fill(C::default());for column in 0..self.dimension(){for e in &self.entries[self.offsets[column]..self.offsets[column+1]]{for b in 0..rhs{
-            add(&mut output[column*rhs+b],mul(conj(e.value),input[e.row*rhs+b]));
-        }}}if output.iter().any(|z|!z.finite()){return Err("Complex Fourier pull overflow".into());}Ok(())
-    }
-    /// |T^dagger| times the complete native arithmetic envelope. It is used
-    /// only for the same entered-basis reality guard, not population accuracy.
-    pub fn pull_envelope_into(&self,input:&[f64],rhs:usize,output:&mut[f64])->Result<(),String>{
-        self.shape(input.len(),output.len(),rhs)?;
-        if input.iter().any(|x|!x.is_finite()||*x<0.){return Err("Invalid nonnegative Fourier operation envelope".into());}
-        output.fill(0.);for column in 0..self.dimension(){for e in &self.entries[self.offsets[column]..self.offsets[column+1]]{let weight=e.value.re.hypot(e.value.im);
-            for b in 0..rhs{output[column*rhs+b]+=weight*input[e.row*rhs+b];}}}
-        if output.iter().any(|x|!x.is_finite()){return Err("Fourier operation envelope overflow".into());}Ok(())
+    pub fn pull_complex_into(&self, input: &[C], rhs: usize, output: &mut [C]) -> Result<(), String> {
+        self.shape(input.len(), output.len(), rhs)?;
+        for column in 0..self.dimension() {
+            let y = &mut output[column * rhs..(column + 1) * rhs];
+            y.fill(C::default());
+            for e in self.column(column) {
+                for (y, &x) in y.iter_mut().zip(&input[e.row * rhs..(e.row + 1) * rhs]) {
+                    add(y, mul(conj(e.value), x));
+                }
+            }
+        }
+        finite_field(output, "Nonfinite complete signed Fourier field or pull overflow")
     }
     /// Explicit P0/proposal convention Re(T^dagger P T x). This is not an
     /// accepted physical action and must never replace its complex residual.
-    pub fn pull_real_proposal_into(&self,input:&[C],rhs:usize,output:&mut[f64])->Result<ProposalProjectionDiagnostics,String>{
-        self.shape(input.len(),output.len(),rhs)?;let mut full=vec![C::default();output.len()];self.pull_complex_into(input,rhs,&mut full)?;
-        let mut imaginary=vec![0_f64;rhs];let mut source=vec![0_f64;rhs];for i in 0..self.dimension(){for b in 0..rhs{
-            let at=i*rhs+b;output[at]=full[at].re;imaginary[b]=imaginary[b].hypot(full[at].im);source[b]=source[b].hypot(input[at].re.hypot(input[at].im));
-        }}Ok(ProposalProjectionDiagnostics{imaginary_hs_by_column:imaginary,input_hs_by_column:source,real_part_defines_numerical_proposal_only:true})
+    pub fn pull_real_proposal_into(
+        &self,
+        input: &[C],
+        rhs: usize,
+        output: &mut [f64],
+    ) -> Result<ProposalProjectionDiagnostics, String> {
+        self.shape(input.len(), output.len(), rhs)?;
+        let mut imaginary = vec![Norm::default(); rhs];
+        for column in 0..self.dimension() {
+            for b in 0..rhs {
+                let mut sum = C::default();
+                for e in self.column(column) {
+                    add(&mut sum, mul(conj(e.value), input[e.row * rhs + b]));
+                }
+                output[column * rhs + b] = sum.re;
+                imaginary[b].add(sum.im);
+            }
+        }
+        if !output.iter().all(|x| x.is_finite()) {
+            return Err("Nonfinite complete signed Fourier field or pull overflow".into());
+        }
+        let mut source = vec![Norm::default(); rhs];
+        for row in input.chunks_exact(rhs) {
+            for (norm, z) in source.iter_mut().zip(row) {
+                norm.add(z.re);
+                norm.add(z.im);
+            }
+        }
+        let imaginary = imaginary.into_iter().map(Norm::value).collect();
+        let source = source.into_iter().map(Norm::value).collect();
+        Ok(ProposalProjectionDiagnostics {
+            imaginary_hs_by_column: imaginary,
+            input_hs_by_column: source,
+            real_part_defines_numerical_proposal_only: true,
+        })
     }
+}
+/// Overflow-safe Frobenius norm accumulator (scaled sum of squares, as in
+/// LAPACK lassq): norm = scale * sqrt(sum).
+#[derive(Clone, Copy, Default)]
+struct Norm {
+    scale: f64,
+    sum: f64,
+}
+impl Norm {
+    fn add(&mut self, x: f64) {
+        let a = x.abs();
+        if a == 0. {
+            return;
+        }
+        if self.scale < a {
+            let ratio = self.scale / a;
+            self.sum = 1. + self.sum * ratio * ratio;
+            self.scale = a;
+        } else {
+            let ratio = a / self.scale;
+            self.sum += ratio * ratio;
+        }
+    }
+    fn value(self) -> f64 {
+        self.scale * self.sum.sqrt()
+    }
+}
+fn finite_field(values: &[C], message: &str) -> Result<(), String> {
+    if values.iter().all(|z| z.re.is_finite() && z.im.is_finite()) { Ok(()) } else { Err(message.into()) }
 }
 impl OwnedPrepared{
     pub fn real_fourier_map(&self,modes:&[Charge])->Result<RealFourierMap,String>{
