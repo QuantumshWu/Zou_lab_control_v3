@@ -8,11 +8,8 @@ publish = false
 crate-type = ["rlib"]
 
 [features]
-default = ["preparation", "parallel"]
-preparation = []
-parallel = ["dep:rayon"]
 static-numerics = []
 
 [dependencies]
-rayon = { version = "=1.12.0", optional = true }
+rayon = "=1.12.0"
 

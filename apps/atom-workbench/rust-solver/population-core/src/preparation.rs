@@ -5,8 +5,8 @@
 //! introduces Rb87 constants, CG coefficients, channel regrouping, detuning
 //! cutoffs, frequency fitting, state elimination or a time-evolution answer.
 //!
-//! Existing native integration should pass authoritative phase high/low parts
-//! from harmonics::model_phase_frequency_parts. The standalone validation
+//! The worker passes the authoritative phase high/low parts of
+//! harmonics::model_phase_axes. The standalone validation
 //! constructor below implements the same FMA compensated unit conversion,
 //! without importing the old crate's private Model or integer-relation search.
 //! The validated maximum-score-gap forest is available here. Additional
@@ -95,6 +95,17 @@ impl Sum{
 #[inline]fn mul(a:C,b:C)->C{C{re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re}}
 #[inline]fn conj(a:C)->C{C{re:a.re,im:-a.im}}
 #[inline]fn nonzero(a:&C)->bool{a.re!=0.||a.im!=0.}
+/// Coordinate choices (integer gauges, the optical shear S and the recycling
+/// shear Khat) are exact transformations: any choice leaves the operator
+/// unchanged. They are therefore made from couplings that are significant
+/// relative to the largest one, so that couplings below this fraction never
+/// change the structure (charges, ranks, domains) and its cost. Such small
+/// couplings still act exactly in H, C, R and every pencil coefficient.
+pub(crate) const STRUCTURAL_COUPLING_FLOOR:f64=1e-5;
+/// Largest off-diagonal entry over a family of n x n matrices.
+pub(crate) fn largest_coupling(family:&FourierMatrices,n:usize)->f64{
+    family.values().flat_map(|h|(0..n*n).filter(move|&k|k/n!=k%n).map(move|k|h[k].re.hypot(h[k].im))).fold(0_f64,f64::max)
+}
 fn opposite(q:&[i32])->Result<Charge,String>{q.iter().map(|&x|x.checked_neg().ok_or_else(||"Charge negation overflow".into())).collect()}
 fn difference(a:&[i32],b:&[i32])->Result<Charge,String>{
     if a.len()!=b.len(){return Err("Charge dimensions differ".into());}
@@ -155,8 +166,9 @@ impl PhaseBasis{
 struct Edge{score:f64,i:usize,j:usize,q:Charge}
 fn forest(original:&FourierMatrices,phases:&PhaseBasis,n:usize,initial:usize)->Result<(Vec<Charge>,usize,usize),String>{
     let zero=vec![0;phases.axes.len()];let h0=&original[&zero];let mut edges=Vec::new();
+    let floor=STRUCTURAL_COUPLING_FLOOR*largest_coupling(original,n);
     for(q,h)in original{let omega=phases.frequency(q)?;for i in 0..n{for j in i+1..n{
-        let amplitude=h[i*n+j].re.hypot(h[i*n+j].im);if amplitude==0.{continue;}
+        let amplitude=h[i*n+j].re.hypot(h[i*n+j].im);if amplitude==0.||amplitude<floor{continue;}
         let mut delta=Sum::default();for x in[h0[i*n+i].re,-h0[j*n+j].re,omega.hi,omega.lo]{delta.add(x);}
         let score=amplitude/(1.+delta.value().abs());
         if !score.is_finite(){return Err("Coordinate edge score overflow".into());}
@@ -281,6 +293,27 @@ mod tests{
         let radiation=result.radiation().unwrap();assert_eq!(radiation.coefficient_pairs,4);
         assert!((radiation.recycling[&vec![1]][1].re-0.14).abs()<2.*f64::EPSILON);
         assert!((radiation.recycling[&vec![-1]][2].re-0.14).abs()<2.*f64::EPSILON);
+    }
+    #[test]
+    fn preparation_gauges_ignore_negligible_couplings(){
+        // State 1 couples to the excited state 2 only through a resonant 1e-9
+        // relative second-laser coupling, and state 2 decays to it only
+        // through a 1e-9 relative channel entry. Neither may choose its gauge
+        // (the choice is exact either way), and both stay exactly in H and C.
+        let n=3;let h0=vec![0.,0.,0.,0.,0.5,0.,0.,0.,7.];let zeros=vec![0.;9];let lap=crate::lapack::Lapack::load().unwrap();
+        let gauges=|tiny:f64,policy:GaugePolicy<'_>|{
+            let strong=vec![0.,0.,1.,0.,0.,0.,1.,0.,0.];let weak=vec![0.,0.,0.,0.,0.,tiny,0.,tiny,0.];
+            let drives=[DriveView{omega:7.,cosine:mv(&strong,&zeros),sine:mv(&zeros,&zeros)},DriveView{omega:6.5,cosine:mv(&weak,&zeros),sine:mv(&zeros,&zeros)}];
+            let cr=vec![0.,0.,1.,0.,0.,tiny,0.,0.,0.];let c=[mv(&cr,&zeros)];
+            let model=ModelView{dimension:n,hamiltonian:mv(&h0,&zeros),collapse:&c,drives:&drives,ground:&[true,true,false],initial_index:0};
+            let phases=PhaseBasis::from_declared(&[7.,6.5],None,&[vec![1,0],vec![0,1]]).unwrap();
+            let source=GaugedSource::prepare_with_lapack(&model,phases,policy,&lap).unwrap();
+            let kept=source.hamiltonian.values().any(|h|h[n+2].re.hypot(h[n+2].im)>0.);
+            assert_eq!(kept,tiny>0.,"a small coupling must stay in H exactly");
+            source.gauges
+        };
+        assert_eq!(gauges(1e-9,GaugePolicy::MaximumScoreGapForest),gauges(0.,GaugePolicy::MaximumScoreGapForest));
+        assert_eq!(gauges(1e-9,GaugePolicy::UnsafeComponentAligned),gauges(0.,GaugePolicy::UnsafeComponentAligned));
     }
     #[test]
     fn preparation_authoritative_phase_low_part_and_no_axis_merging(){

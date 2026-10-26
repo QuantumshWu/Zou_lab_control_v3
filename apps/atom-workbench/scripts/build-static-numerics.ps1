@@ -1,4 +1,4 @@
-param([ValidateSet('configure','build','superlu')][string]$Action='build',[ValidateRange(1,8)][int]$Jobs=2)
+param([ValidateSet('configure','build')][string]$Action='build',[ValidateRange(1,8)][int]$Jobs=2)
 $ErrorActionPreference='Stop'
 $taskApp=Split-Path -Parent $PSScriptRoot
 $taskPathsFile=Join-Path $taskApp '.cache/native/paths.json'
@@ -13,7 +13,6 @@ if(-not $taskPaths -or $taskPaths.lockSha256 -ne $taskLockHash -or [IO.Path]::Ge
 }
 $taskRoot=$taskPaths.buildRoot
 $taskLibRoot=$taskPaths.libDir
-$taskSuperlu=$taskPaths.superluSource
 $taskZig=$taskPaths.tools.zig
 $taskCmake=$taskPaths.tools.cmake
 $taskNinja=$taskPaths.tools.ninja
@@ -52,37 +51,16 @@ $taskSaved=@{};foreach($taskName in @('ZIG_LIBC','ZIG_GLOBAL_CACHE_DIR','LIB')){
 try{
  $env:ZIG_LIBC=$taskLibc;$env:ZIG_GLOBAL_CACHE_DIR=Join-Path $taskRoot 'zig-cache'
  $env:LIB=(@('crt/lib/x86_64','sdk/lib/ucrt/x86_64','sdk/lib/um/x86_64')|ForEach-Object {Join-Path $taskSdk $_})-join ';'
- if($Action -ne 'superlu'){
-  & $taskCmake -S $taskSource -B (Join-Path $taskRoot 'openblas-build') -G Ninja "-DCMAKE_MAKE_PROGRAM=$taskNinja" "-DCMAKE_TOOLCHAIN_FILE=$taskToolchain" @($taskLockedInputs.build.openblasCmakeOptions)
-  if($LASTEXITCODE){throw 'Native static OpenBLAS configuration failed'}
-  if($Action -eq 'configure'){return}
-  & $taskCmake --build (Join-Path $taskRoot 'openblas-build') --target openblas_static --parallel $Jobs
-  if($LASTEXITCODE){throw 'Native static OpenBLAS build failed'}
-  $taskLibraries=@(Get-ChildItem -LiteralPath (Join-Path $taskRoot 'openblas-build/lib') -File | Where-Object {$_.Name -match 'openblas.*\.(a|lib)$'})
-  if($taskLibraries.Count -ne 1){throw 'Expected exactly one native static OpenBLAS archive'}
-  Copy-Item -LiteralPath $taskLibraries[0].FullName -Destination (Join-Path $taskLibRoot 'openblas.lib')
- }
- # Same audited SuperLU factor/solve closure, with the author's pinned BSD
- # COLAMD2.9.6 sources. Original old-LGPL files are never relabeled or edited.
- $taskSource=$taskPaths.superluSource
- $taskManifest=Get-Content -LiteralPath (Join-Path $taskSource 'source-manifest.json') -Raw | ConvertFrom-Json
- foreach($taskRecord in $taskManifest.files){if((Get-FileHash -LiteralPath (Join-Path $taskSource $taskRecord.name) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $taskRecord.sha256){throw "Static SuperLU source changed: $($taskRecord.name)"}}
- $taskObjects=Join-Path $taskRoot 'superlu-objects';New-Item -ItemType Directory -Force $taskObjects | Out-Null
- $taskHooks=Join-Path $taskSource 'atom_hooks_static.h'
- $taskBuilt=@()
- foreach($taskName in @($taskManifest.buildSources)){
-  $taskInput=Join-Path $taskSource $taskName
-  $taskObject=Join-Path $taskObjects ([IO.Path]::GetFileNameWithoutExtension($taskName)+'.obj')
-  & $taskZig cc -target $taskLockedInputs.build.target -fms-runtime-lib=static @($taskLockedInputs.build.superluCFlags) -c $taskInput -o $taskObject -I $taskSource -include $taskHooks -isystem "$taskSdk/crt/include" -isystem "$taskSdk/sdk/include/ucrt" -isystem "$taskSdk/sdk/include/um" -isystem "$taskSdk/sdk/include/shared"
-  if($LASTEXITCODE){throw "Native static SuperLU build failed: $taskName"};$taskBuilt+=$taskObject
- }
- & $taskZig ar rcs (Join-Path $taskLibRoot 'atom_superlu.lib') @taskBuilt
- if($LASTEXITCODE){throw 'Static SuperLU archive failed'}
+ & $taskCmake -S $taskSource -B (Join-Path $taskRoot 'openblas-build') -G Ninja "-DCMAKE_MAKE_PROGRAM=$taskNinja" "-DCMAKE_TOOLCHAIN_FILE=$taskToolchain" @($taskLockedInputs.build.openblasCmakeOptions)
+ if($LASTEXITCODE){throw 'Native static OpenBLAS configuration failed'}
+ if($Action -eq 'configure'){return}
+ & $taskCmake --build (Join-Path $taskRoot 'openblas-build') --target openblas_static --parallel $Jobs
+ if($LASTEXITCODE){throw 'Native static OpenBLAS build failed'}
+ $taskLibraries=@(Get-ChildItem -LiteralPath (Join-Path $taskRoot 'openblas-build/lib') -File | Where-Object {$_.Name -match 'openblas.*\.(a|lib)$'})
+ if($taskLibraries.Count -ne 1){throw 'Expected exactly one native static OpenBLAS archive'}
+ Copy-Item -LiteralPath $taskLibraries[0].FullName -Destination (Join-Path $taskLibRoot 'openblas.lib')
  $taskProof=@{schema='atom-native-static-build/1';dependencyLockSha256=$taskLockHash;openblasVersion='0.3.33';cpuKernels=@('PRESCOTT','HASWELL','ZEN');threads=$true;staticCrt=$true;
-  openblasSha256=(Get-FileHash -LiteralPath (Join-Path $taskLibRoot 'openblas.lib') -Algorithm SHA256).Hash.ToLowerInvariant();
-  superluSha256=(Get-FileHash -LiteralPath (Join-Path $taskLibRoot 'atom_superlu.lib') -Algorithm SHA256).Hash.ToLowerInvariant();
-  superluSourceManifestSha256=(Get-FileHash -LiteralPath (Join-Path $taskSource 'source-manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant();
-  hooksSha256=(Get-FileHash -LiteralPath $taskHooks -Algorithm SHA256).Hash.ToLowerInvariant()}
+  openblasSha256=(Get-FileHash -LiteralPath (Join-Path $taskLibRoot 'openblas.lib') -Algorithm SHA256).Hash.ToLowerInvariant()}
  $taskProof | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $taskLibRoot 'build-provenance.json') -Encoding utf8
  Get-ChildItem -LiteralPath $taskLibRoot -File | Select-Object Name,Length
 }finally{foreach($taskName in $taskSaved.Keys){[Environment]::SetEnvironmentVariable($taskName,$taskSaved[$taskName],'Process')}}

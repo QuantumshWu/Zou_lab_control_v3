@@ -88,20 +88,11 @@ export async function prepareNativeDependencies({cacheRoot=join(appRoot,'.cache/
     const archive=await archiveFor(pkg,downloads,seedDirectories.map(p=>resolve(p)),offline);
     packages[pkg.id]=await unpack(pkg,archive,cache);
   }
-  const superluSource=join(cache,'superlu-source');await fs.mkdir(superluSource,{recursive:true});
-  for(const file of lock.superluInputs){
-    if(basename(file.name)!==file.name)throw Error('Invalid curated SuperLU file name');
-    const input=file.local?safe(appRoot,file.local):file.path?safe(packages[file.package],file.path):packages[file.package];
-    const bytes=await fs.readFile(input);if(digest(bytes)!==file.sha256)throw Error('Curated SuperLU source checksum differs: '+file.name);
-    const output=join(superluSource,file.name);if(!await exists(output)||await hashFile(output)!==file.sha256)await fs.writeFile(output,bytes);
-  }
-  for(const name of ['source-manifest.json','atom_hooks_static.h'])await fs.copyFile(join(appRoot,'native/superlu',name),join(superluSource,name));
   const lockSha256=digest(lockBytes);
   const paths={schema:'atom-native-paths/1',appRoot,cacheRoot:cache,lockSha256,packages,
-    buildRoot:join(cache,'build'),libDir:join(cache,'lib'),superluSource,openblasSource:packages.openblas,
+    buildRoot:join(cache,'build'),libDir:join(cache,'lib'),openblasSource:packages.openblas,
     tools:{zig:join(packages.zig,'zig.exe'),cmake:join(packages.cmake,'bin/cmake.exe'),ninja:join(packages.ninja,'ninja.exe')},
-    licenses:{openblas:join(packages.openblas,'LICENSE'),lapack:join(packages.openblas,'lapack-netlib/LICENSE'),superlu:join(packages.superlu,'License.txt'),
-      colamd:packages['suitesparse-colamd-bsd-license-txt'],suiteSparseConfig:packages['suitesparse-suitesparse-config-readme-txt'],webview2:join(appRoot,'native/licenses/Microsoft-WebView2.html')}};
+    licenses:{openblas:join(packages.openblas,'LICENSE'),lapack:join(packages.openblas,'lapack-netlib/LICENSE'),webview2:join(appRoot,'native/licenses/Microsoft-WebView2.html')}};
   for(const directory of [paths.buildRoot,paths.libDir])await fs.mkdir(directory,{recursive:true});
   await writeJson(join(cache,'paths.json'),paths);return paths;
 }

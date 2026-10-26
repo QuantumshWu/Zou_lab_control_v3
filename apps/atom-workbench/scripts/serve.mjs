@@ -1,36 +1,31 @@
 import {createServer} from 'node:http';
 import {failureRecorder} from './solver-failure-log.mjs';
-import {physicalMeanDensity} from './mean-frame.mjs';
-import {createNativeServiceClass,parallelMeanSettings} from './native-service-core.mjs';
-export {parallelMeanSettings,shortPeriodAutoEligible} from './native-service-core.mjs';
+import {createNativeServiceClass} from './native-service-core.mjs';
 import {readFile,stat} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {dirname,resolve,extname,sep} from 'node:path';
 import {spawn} from 'node:child_process';
-import {buildFullMasterModel as buildMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
-import {defaultScene,DEFAULT_DYNAMICS_SAMPLES,resolvePopulationTolerance} from '../dist/js/atom-workbench/src/types.js';
-import {nativeCapabilities,validateAtomicResult} from './native-protocol.mjs';
+import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
+import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
+import {nativeCapabilities,prepareNativeSolve,validateAtomicResult} from './native-protocol.mjs';
 import {nativeChildEnvironment} from './native-child-env.mjs';
-import {EFFECTIVE_MODEL_SCHEMA as ATOMIC_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 
 const app=resolve(dirname(fileURLToPath(import.meta.url)),'..'),root=resolve(app,'dist');
 const defaultFailureRecorder=failureRecorder(resolve(app,'artifacts/diagnostics/solver-failures.json'));
 export {HTTP_PROTOCOL,NATIVE_PROTOCOL};
 const hash=data=>createHash('sha256').update(data).digest('hex');
 const failure=(message,status=503,code='solver-unavailable')=>Object.assign(new Error(message),{status,code});
-const cancelled=()=>failure('已取消被更新参数替代的求解。',409,'superseded');
 const setting=(value,fallback,min,max)=>{const result=Number(value??fallback);if(!Number.isFinite(result)||result<min||result>max)throw new Error('Invalid solver service setting.');return result;};
 
 async function fileIdentity(path){const [data,info]=await Promise.all([readFile(path),stat(path)]);return {path,sha256:hash(data),size:info.size,modifiedAt:info.mtime.toISOString()};}
 async function buildIdentity(){
-  const files=['master-model.js','physics.js','laser-frequency.js','laser-intensity.js','types.js','solver-protocol.js','mean-density.js','spectroscopy.js','spectroscopy-data.js','effective-master-model.js','full-master-model.js','dynamics-cache-key.js','laser-regime.js'];
+  const files=['physics.js','laser-frequency.js','laser-intensity.js','types.js','solver-protocol.js','mean-density.js','spectroscopy.js','spectroscopy-data.js','full-master-model.js','dynamics-cache-key.js','laser-regime.js'];
   const entries=await Promise.all(files.map(async name=>({name,sha256:hash(await readFile(resolve(root,'js/atom-workbench/src',name)))})));
   entries.push({name:'scripts/serve.mjs',sha256:hash(await readFile(fileURLToPath(import.meta.url)))});
   entries.push({name:'scripts/solver-failure-log.mjs',sha256:hash(await readFile(resolve(app,'scripts/solver-failure-log.mjs')))});
-  entries.push({name:'scripts/mean-frame.mjs',sha256:hash(await readFile(resolve(app,'scripts/mean-frame.mjs')))});
   entries.push({name:'scripts/native-protocol.mjs',sha256:hash(await readFile(resolve(app,'scripts/native-protocol.mjs')))});
-  entries.push({name:'scripts/fresh-mean.mjs',sha256:hash(await readFile(resolve(app,'scripts/fresh-mean.mjs')))});
   entries.push({name:'scripts/native-service-core.mjs',sha256:hash(await readFile(resolve(app,'scripts/native-service-core.mjs')))});
   entries.push({name:'scripts/native-child-env.mjs',sha256:hash(await readFile(resolve(app,'scripts/native-child-env.mjs')))});
   return {sha256:hash(JSON.stringify(entries)),files:entries,node:process.version};
@@ -57,7 +52,7 @@ class NativeLane {
     try{
       w.identity=await fileIdentity(this.owner.executable);
       if(this.closed||w.retiring||this.worker!==w){this.worker=null;return;}
-      const child=spawn(this.owner.executable,[],{cwd:app,windowsHide:true,stdio:['pipe','pipe','pipe'],env:nativeChildEnvironment(this.name,process.env)});
+      const child=spawn(this.owner.executable,[],{cwd:app,windowsHide:true,stdio:['pipe','pipe','pipe'],env:nativeChildEnvironment(process.env)});
       w.child=child;w.exit=new Promise(accept=>child.once('close',accept));
       child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
       child.stdout.on('data',data=>this.receive(w,data));
@@ -84,14 +79,13 @@ class NativeLane {
       if(!w.ready){
         if(!w.capabilities){
           try{w.capabilities=nativeCapabilities(message);}catch(error){this.failWorker(w,failure(error.message,503,'incompatible-native-protocol'));return;}
-          // Capability negotiation comes first. A tiny generic density solve
-          // then checks the numerical runtime as well as warming the worker.
-          w.child.stdin.write(JSON.stringify({id:-1,model:{dimension:1,states:['startup'],hReal:[0],hImag:[0],collapse:[],initialIndex:0},options:{steadyOnly:true}})+'\n');
+          // Capability negotiation comes first. The warmup operation then
+          // checks the numerical runtime (a LAPACK self-check).
+          w.child.stdin.write(JSON.stringify({id:-1,op:'warmup'})+'\n');
           continue;
         }
-        if(message.id!==-1||message.error||message.result?.protocol!==NATIVE_PROTOCOL||message.result?.modelSchema!=='generic-lindblad/1'||
-          message.result?.populations?.length!==1||message.result.populations[0]?.length!==1||message.result.populations[0][0]!==1){
-          this.failWorker(w,failure('Native numerical startup check failed: '+(message.error??'invalid generic density response'),503,'invalid-native-startup'));return;
+        if(message.id!==-1||message.error||message.protocol!==NATIVE_PROTOCOL||message.ready!==true){
+          this.failWorker(w,failure('Native numerical startup check failed: '+(message.error??'invalid warmup response'),503,'invalid-native-startup'));return;
         }
         // Pair the handshake with the executable that was actually opened.
         // If a build replaced the path during startup, do not mislabel its PID.
@@ -106,7 +100,7 @@ class NativeLane {
       if(message.progress!==undefined){
         try{
           if(message.progress!=='asymptotic'||!job.onProgress)throw Error('Unexpected native progress message.');
-          const result=physicalMeanDensity(message.result,job.payload.model.frameFrequenciesMHz,job.payload.model.dimension,job.payload.model.frequencyCoordinates);validateAtomicResult(result,job.payload);
+          const result=message.result;validateAtomicResult(result,job.payload);
           job.onProgress({...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:w.identity.sha256,buildSha256:this.owner.build.sha256,asymptoticCacheHit:false}});
         }catch(error){this.failWorker(w,failure(error.message,502,'invalid-native-response'));return;}
         continue;
@@ -116,8 +110,7 @@ class NativeLane {
       else if(!message.result||typeof message.result!=='object')this.owner.finish(job,failure('Missing native result.',502,'invalid-native-response'));
       else {
         try{
-          let result=message.result;
-          result=physicalMeanDensity(result,job.payload.model.frameFrequenciesMHz,job.payload.model.dimension,job.payload.model.frequencyCoordinates);
+          const result=message.result;
           validateAtomicResult(result,job.payload);
           this.owner.finish(job,null,{...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:w.identity.sha256,buildSha256:this.owner.build.sha256,
             asymptoticCacheHit:false}});
@@ -174,8 +167,8 @@ export async function createAtomServer(options={}){
   const recordFailure=options.failureLogPath===false?async()=>{}:options.failureLogPath?failureRecorder(options.failureLogPath):defaultFailureRecorder;
   const executable=resolve(options.executable??process.env.ZLC_ATOM_SOLVER??resolve(app,'rust-solver/target/x86_64-pc-windows-msvc/release/atom-lindblad.exe'));
   const [build,configuredBinary]=await Promise.all([buildIdentity(),fileIdentity(executable)]);
-  buildMasterModel(defaultScene()); // Initialize atomic tables before accepting UI requests.
-  const service=new NativeService({executable,build,...parallelMeanSettings(process.env),
+  buildFullMasterModel(defaultScene()); // Initialize atomic tables before accepting UI requests.
+  const service=new NativeService({executable,build,
     solveTimeoutMs:setting(options.solveTimeoutMs??process.env.ZLC_ATOM_SOLVE_TIMEOUT_MS,120000,10,600000),
     startupTimeoutMs:setting(options.startupTimeoutMs??process.env.ZLC_ATOM_STARTUP_TIMEOUT_MS,10000,100,120000),
     workerIdleMs:setting(options.workerIdleMs??process.env.ZLC_ATOM_WORKER_IDLE_MS,60000,20,600000),
@@ -196,7 +189,7 @@ export async function createAtomServer(options={}){
       const negotiated=workers.find(worker=>worker.status==='ready'||worker.status==='busy');
       send(ready?200:503,{ready,accepting:!service.closed,engine:'Rust master equation',protocol:HTTP_PROTOCOL,
         nativeProtocol:negotiated?.nativeProtocol??null,capabilities:negotiated?.capabilities??[],requiredNativeProtocol:NATIVE_PROTOCOL,
-        modelSchema:ATOMIC_MODEL_SCHEMA,configuredBinary,build,workers,pending:service.current.size,asymptoticCache:{enabled:false,size:0}});return;
+        modelSchema:FULL_MODEL_SCHEMA,configuredBinary,build,workers,pending:service.current.size,asymptoticCache:{enabled:false,size:0}});return;
     }
     if(pathname==='/api/solve'&&request.method==='POST'){
       if(!request.headers['content-type']?.startsWith('application/json')){send(415,{error:'JSON required'});return;}
@@ -208,30 +201,14 @@ export async function createAtomServer(options={}){
         submitted=payload;
         if(payload.stream!==undefined&&typeof payload.stream!=='boolean')throw failure('Invalid stream option',400,'invalid-options');
         streaming=payload.stream===true;
-        if(payload.modelSchema!==undefined&&payload.modelSchema!==ATOMIC_MODEL_SCHEMA)throw failure('Unsupported atomic model schema.',400,'incompatible-model-schema');
         let token=payload.request;
         if(token!==undefined&&(!token||typeof token.clientId!=='string'||!/^[-\w]{1,96}$/.test(token.clientId)||!Number.isSafeInteger(token.sequence)||token.sequence<1))throw failure('Invalid request identity',400,'invalid-request');
         token=token?{clientId:token.clientId,sequence:token.sequence}:{clientId:`legacy-${++legacySequence}`,sequence:1};
-        const settings={...payload.scene.dynamics,...payload.options};
-        const populationTolerance=resolvePopulationTolerance(settings.populationTolerance);
-        const modelStarted=performance.now();
-        const model=buildMasterModel(payload.scene,settings);
-        const modelBuildMs=performance.now()-modelStarted;
-        const nativeOptions={durationUs:settings.durationUs??5,samples:settings.samples??DEFAULT_DYNAMICS_SAMPLES,populationTolerance,includeAsymptotic:payload.options?.includeAsymptotic??true,steadyOnly:payload.options?.steadyOnly??false};
-        if(typeof nativeOptions.steadyOnly!=='boolean'||typeof nativeOptions.includeAsymptotic!=='boolean')throw failure('Invalid solver options',400,'invalid-options');
-        // Atomic metadata is top-level in the native protocol. Keeping it only
-        // inside model would let older serde readers silently ignore the bath.
-        const {modelSchema,radiation}=model;
-        const genericModel={dimension:model.dimension,hReal:model.hReal,hImag:model.hImag,collapse:model.collapse,initialIndex:model.initialIndex,timeDependent:model.timeDependent,drives:model.drives,frameFrequenciesMHz:model.frameFrequenciesMHz,frequencyCoordinates:model.frequencyCoordinates};
-        task=service.submit({model:{...genericModel,states:model.states.map(state=>state.id)},modelSchema,radiation,options:nativeOptions},token,streaming?result=>streamEvent({type:'asymptotic',data:{...result,service:{...result.service,modelBuildMs,modelCacheHit:model.buildCacheHit},request:token,states:model.states,engine:'Rust master equation',assumptions:model.assumptions,decayChannels:model.decayChannels}}):undefined);
+        const native=prepareNativeSolve(payload),options=native.payload.options;
+        task=service.submit(native.payload,token,streaming?result=>streamEvent({type:'asymptotic',data:native.respond(result,token)}):undefined);
         const result=await task.promise;
-        if(result.service?.executionMode==='parallel-independent-mean'){
-          result.service.endToEndMs=performance.now()-modelStarted;
-          result.diagnostics.elapsedMs=result.service.endToEndMs;
-          result.diagnostics.elapsedScope='service wall time including one model construction, queueing and concurrent native solves';
-        }
-        if(nativeOptions.includeAsymptotic&&!result.asymptoticPopulations)await recordFailure({time:new Date().toISOString(),request:token,scene:payload.scene,options:nativeOptions,buildSha256:build.sha256,binarySha256:result.service?.binarySha256??configuredBinary.sha256,status:result.asymptoticStatus,diagnostics:result.diagnostics}).catch(()=>{});
-        send(200,{...result,service:{...result.service,modelBuildMs,modelCacheHit:model.buildCacheHit},request:token,states:model.states,engine:result.diagnostics?.engine==='rust-floquet'?'Rust / Floquet':'Rust master equation',assumptions:model.assumptions,decayChannels:model.decayChannels});
+        if(options.includeAsymptotic&&!result.asymptoticPopulations)await recordFailure({time:new Date().toISOString(),request:token,scene:payload.scene,options,buildSha256:build.sha256,binarySha256:result.service?.binarySha256??configuredBinary.sha256,status:result.asymptoticStatus,diagnostics:result.diagnostics}).catch(()=>{});
+        send(200,native.respond(result,token));
       }catch(error){const evidence={time:new Date().toISOString(),request:submitted?.request,scene:submitted?.scene,options:submitted?.options,buildSha256:build.sha256,binarySha256:configuredBinary.sha256,error:error.message,code:error.code??'invalid-request',httpStatus:error.status??400};if(submitted?.scene&&error.code!=='superseded')await recordFailure(evidence).catch(()=>{});send(error.status??400,{error:error.message,code:error.code??'invalid-request',service:{buildSha256:build.sha256,binarySha256:configuredBinary.sha256}});}
       finally{response.removeListener('close',disconnected);}return;
     }

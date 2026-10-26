@@ -1,5 +1,4 @@
 import {nativeCapabilities,validateAtomicResult} from '../../scripts/native-protocol.mjs';
-import {physicalMeanDensity} from '../../scripts/mean-frame.mjs';
 import {HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../../dist/js/atom-workbench/src/solver-protocol.js';
 
 const failure=(message,status=503,code='solver-unavailable')=>Object.assign(new Error(message),{status,code});
@@ -29,7 +28,7 @@ export class IpcNativeLane {
     if(event.kind==='error'){this.failWorker(w,failure(event.error??'Native process communication failed.'));return;}
     if(event.kind==='opened'){
       if(event.binarySha256!==this.owner.binarySha256){this.failWorker(w,failure('Native executable changed.'));return;}
-      w.pid=event.pid;w.startup.openRoundTripMs=performance.now()-w.openSentAt;w.startup.hostSpawnMs=event.hostSpawnMs;w.startup.openblasThreads=event.openblasThreads;
+      w.pid=event.pid;w.startup.openRoundTripMs=performance.now()-w.openSentAt;w.startup.hostSpawnMs=event.hostSpawnMs;
       w.capabilitySentAt=performance.now();this.write(w,{op:'capabilities',id:0});return;
     }
     if(event.kind!=='message'){this.failWorker(w,failure('Unexpected native transport event.'));return;}
@@ -39,9 +38,9 @@ export class IpcNativeLane {
         w.startup.capabilitiesRoundTripMs=performance.now()-w.capabilitySentAt;w.startup.capabilitiesNativeIoMs=event.transport?.nativeIoMs;
         try{w.capabilities=nativeCapabilities(message);}catch(error){this.failWorker(w,failure(error.message,503,'incompatible-native-protocol'));return;}
         w.warmSentAt=performance.now();
-        this.write(w,{id:-1,model:{dimension:1,states:['startup'],hReal:[0],hImag:[0],collapse:[],initialIndex:0},options:{steadyOnly:true}});return;
+        this.write(w,{id:-1,op:'warmup'});return;
       }
-      if(message.id!==-1||message.error||message.result?.protocol!==NATIVE_PROTOCOL||message.result?.modelSchema!=='generic-lindblad/1'||message.result?.populations?.length!==1||message.result?.populations?.[0]?.length!==1||message.result?.populations?.[0]?.[0]!==1){
+      if(message.id!==-1||message.error||message.protocol!==NATIVE_PROTOCOL||message.ready!==true){
         this.failWorker(w,failure('Native numerical startup check failed.'));return;
       }
       w.startup.numericalReadyRoundTripMs=performance.now()-w.warmSentAt;w.startup.numericalReadyNativeIoMs=event.transport?.nativeIoMs;w.startup.workerStartupMs=performance.now()-w.openSentAt;
@@ -49,7 +48,7 @@ export class IpcNativeLane {
     }
     const job=this.active;if(!job||message.id!==job.nativeId){this.failWorker(w,failure('Native response identity mismatch.',502,'invalid-native-response'));return;}
     const convert=()=>{
-      const result=physicalMeanDensity(message.result,job.payload.model.frameFrequenciesMHz,job.payload.model.dimension,job.payload.model.frequencyCoordinates);
+      const result=message.result;
       validateAtomicResult(result,job.payload);
       return {...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:this.owner.binarySha256,buildSha256:this.owner.build.sha256,asymptoticCacheHit:false,startup:{...w.startup}}};
     };

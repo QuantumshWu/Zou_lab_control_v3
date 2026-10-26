@@ -1,23 +1,26 @@
 # Atom population core
 
-One Rust implementation of the fixed-manifold density-matrix evolution used
-by Atom Workbench. The existing TypeScript builder supplies all states,
-Hamiltonians, collapse channels and exact frequency coordinates. This crate
-does not rebuild atomic constants or remove physical couplings.
+The one Rust implementation of the Rb87 full-density Lindblad solver used by
+Atom Workbench. The TypeScript builder supplies all states, Hamiltonians,
+collapse channels and exact frequency coordinates; this crate does not rebuild
+atomic constants or remove physical couplings.
 
-`owned_prepared` owns request-local coefficients. `runtime_core::workspace`
-extends trial spaces without repeating old operator products; `domain_transfer`
-computes only newly required output rows. `finite_driver` combines this with
-`population_control`. The default absolute population target is `0.005`;
-the control supports `0 < epsilon <= 0.02` and reports empirical convergence,
-not a certified universal error bound. Probability-output adjustments are
-explicitly charged to the same target and do not repair the raw density.
+- `preparation*`: exact changes of variables (gauge phases, block Hilbert
+  basis, optical shear S, recycling shear K) giving the pencil `E x' = F x` on
+  Fourier envelope modes. Choices among exact alternatives are made by coupling
+  magnitude, never by exact zeros.
+- `owned_prepared` / `pencil`: the request-local operator library and the
+  blocked E/F kernels; `b0_*`: the mode-diagonal P0 preconditioner.
+- `runtime_core`: one prepared request (library, initial state, population
+  readout duals, P0 factory, Fourier steps).
+- `trial`, `directions`, `reduced`, `readout`, `engine`: the finite-time
+  engine (rational Krylov trial space, inner GMRES, Galerkin model, readout,
+  error-controlled growth of columns and Fourier modes).
+- `slow_dual`, `error_estimate`: the dual-weighted residual estimates of the
+  basis and Fourier-truncation (halo) errors.
+- `asymptotic`: the long-time mean on the same pencil.
 
-The production worker and embedded standalone application depend on this
-source directory. `static-numerics` must be forwarded by the parent build;
-the existing OpenBLAS/SuperLU archives are linked into the single EXE. Python
-and the former research driver are not runtime dependencies.
-
-Unit tests are self-contained. Full32 fixture/performance tests are ignored
-by default and require an explicit `ATOM_PREPARATION_FIXTURE` and report path.
-No test or solver loads a saved trajectory as an initial guess or answer.
+The parent build forwards `static-numerics` to link the OpenBLAS archive into
+the single EXE; otherwise `ATOM_OPENBLAS_DLL` names a SciPy OpenBLAS DLL. BLAS
+runs single-threaded; `ATOM_PENCIL_THREADS` sizes the worker pool. No test or
+solve loads a saved trajectory as an initial guess or answer.

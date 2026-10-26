@@ -2,7 +2,7 @@
 //! This changes only integer coordinates. Every original coefficient and
 //! original channel interference survives in GaugedSource::prepare_internal.
 use std::collections::{BTreeMap,BTreeSet};
-use super::{Charge,Complex64 as C,FourierMatrices,ModelView,PhaseBasis,Sum,plus,difference,nonzero,matrix,forest};
+use super::{Charge,Complex64 as C,FourierMatrices,ModelView,PhaseBasis,Sum,plus,difference,nonzero,matrix,forest,largest_coupling,STRUCTURAL_COUPLING_FLOOR};
 use crate::lapack::Lapack;
 
 type Charges=BTreeSet<Charge>;
@@ -70,11 +70,13 @@ impl Pattern{
 pub fn select(lap:&Lapack,model:&ModelView<'_>,original:&FourierMatrices,phases:&PhaseBasis,align:bool)->Result<GaugeSelection,String>{
     let n=model.dimension;let axes=phases.axes.len();let zero=vec![0;axes];let h0=&original[&zero];
     let max_energy=(0..n).map(|i|h0[i*n+i].re.abs()).fold(0_f64,f64::max);
+    // Only significant couplings choose gauges (see STRUCTURAL_COUPLING_FLOOR).
+    let significant=STRUCTURAL_COUPLING_FLOOR*largest_coupling(original,n);
     let mut unsafe_edges=Vec::new();let mut safe_edges=Vec::new();let mut flags=BTreeMap::new();let mut all=0;
     for(q,h)in original{let mut off=h.clone();for i in 0..n{off[i*n+i]=C::default();}
         let source_norm=super::primitives::spectral_norm(lap,&off,n)?;let frequency=phases.frequency(q)?;
         let floor=(4.*source_norm).max(256.*f64::EPSILON*(2.*max_energy+(frequency.hi+frequency.lo).abs()));
-        for i in 0..n{for j in i+1..n{let amplitude=h[i*n+j].re.hypot(h[i*n+j].im);if amplitude==0.{continue;}
+        for i in 0..n{for j in i+1..n{let amplitude=h[i*n+j].re.hypot(h[i*n+j].im);if amplitude==0.||amplitude<significant{continue;}
             let mut delta=Sum::default();for x in[h0[i*n+i].re,-h0[j*n+j].re,frequency.hi,frequency.lo]{delta.add(x);}
             let detuning=delta.value().abs();let safe=detuning>floor;let score=amplitude/(1.+detuning);
             if !score.is_finite(){return Err("Unsafe coordinate edge score overflow".into());}
@@ -99,11 +101,14 @@ pub fn select(lap:&Lapack,model:&ModelView<'_>,original:&FourierMatrices,phases:
         unsafe_component_differences_preserved:true,physical_terms_removed:false};
     if !align{return Ok(GaugeSelection{gauges:base,diagnostics});}
     let anchor=groups[model.initial_index];let(legacy,_,_)=forest(original,phases,n,model.initial_index)?;
-    let mut entries=Vec::new();for(q,h)in original{for i in 0..n{for j in 0..n{if nonzero(&h[i*n+j]){
+    let mut entries=Vec::new();for(q,h)in original{for i in 0..n{for j in 0..n{
+        if nonzero(&h[i*n+j])&&(i==j||h[i*n+j].re.hypot(h[i*n+j].im)>=significant){
         entries.push(Entry{q:q.clone(),i,j,safe:*flags.get(&(q.clone(),i,j)).unwrap_or(&false)});
     }}}}
+    let channels=model.collapse.iter().map(|&channel|matrix(channel,n,"alignment original C")).collect::<Result<Vec<_>,_>>()?;
+    let collapse_floor=STRUCTURAL_COUPLING_FLOOR*channels.iter().flatten().map(|z|z.re.hypot(z.im)).fold(0_f64,f64::max);
     let mut collapse=Vec::new();let mut gg_rows=BTreeSet::new();
-    for &channel in model.collapse{let c=matrix(channel,n,"alignment original C")?;let positions:Vec<_>=(0..n*n).filter(|&i|nonzero(&c[i])).map(|i|(i/n,i%n)).collect();
+    for c in &channels{let positions:Vec<_>=(0..n*n).filter(|&i|nonzero(&c[i])&&c[i].re.hypot(c[i].im)>=collapse_floor).map(|i|(i/n,i%n)).collect();
         let outputs:BTreeSet<_>=positions.iter().map(|p|p.0).collect();for &i in &outputs{for &j in &outputs{gg_rows.insert((i,j));}}collapse.push(positions);}
     let mut pattern=Pattern{g:model.ground.iter().filter(|&&g|g).count(),e:model.ground.iter().filter(|&&g|!g).count(),ground:model.ground.to_vec(),entries,collapse,gg_rank:gg_rows.len()as u64,zero:zero.clone(),cache:BTreeMap::new()};
     let mut legacy_start=base.clone();

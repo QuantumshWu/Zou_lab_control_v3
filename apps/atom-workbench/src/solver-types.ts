@@ -1,4 +1,4 @@
-import type {Level, SpectralLine} from './types.js';
+import type {Level} from './types.js';
 import {resolvePopulationTolerance} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
 export interface PopulationAccuracy {
@@ -22,19 +22,29 @@ export function readPopulationAccuracy(value:unknown,samples:number):PopulationA
     projectionCharge:charge as number,includesProjectionCharge:true,
     scope:{states:32,samples,groups:[...(groups as string[])]}};
 }
-export type SteadyStatus='stationary'|'population-stationary'|'periodic-mean'|'initial-dependent-mean'|'nonunique-initial-dependent'|'time-dependent'|'not-converged'|'oscillatory'|'nonstationary-limit'|'unresolved-slow-modes';
+/** The native `asymptoticStatus` values: a converged long-time mean (static:
+ * stationary / population-stationary / initial-dependent; driven:
+ * time-average / initial-dependent-time-average), or none. */
+export const CONVERGED_MEAN_STATUSES=['stationary','population-stationary','initial-dependent','time-average','initial-dependent-time-average'] as const;
+export type SteadyStatus=typeof CONVERGED_MEAN_STATUSES[number]|'not-converged'|'not-requested';
+export const STEADY_STATUSES:readonly SteadyStatus[]=[...CONVERGED_MEAN_STATUSES,'not-converged','not-requested'];
+/** A driven model's mean is a long-time phase average, not a time-independent state. */
+export function isTimeAverage(status:SteadyStatus|undefined):boolean{return status==='time-average'||status==='initial-dependent-time-average';}
+/** A degenerate null space: the mean depends on the specified initial state. */
+export function isInitialDependent(status:SteadyStatus|undefined):boolean{return status==='initial-dependent'||status==='initial-dependent-time-average';}
 export interface SteadyResult {
   converged:boolean;status:SteadyStatus;populations:Record<string,number>|null;
   /** Native full complex long-time mean, row-major in DynamicsResult.states. */
   density?:{real:number[];imag:number[]};
-  residual:number|null;method:string;reason?:string;initialDependent?:boolean;
+  residual:number|null;method?:string;reason?:string;initialDependent:boolean;
 }
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];
-  line:SpectralLine|'both';activeLaserIds:string[];steady:SteadyResult;
-  metrics:{buildMs:number;propagateMs:number;totalMs:number;dimension:number;fullDimension:number;steps:number;cached:boolean;kernel:string};
-  validation:{maxTraceError:number;minPopulation:number;convergenceMaxDelta:number|null;positivityError?:number};
+  activeLaserIds:string[];steady:SteadyResult;
+  metrics:{totalMs:number};
+  validation:{maxTraceError:number;minPopulation:number};
   /** Estimated error of returned populations and all declared groups only. */
   populationAccuracy?:PopulationAccuracy;
-  warnings:string[];method:string;
+  /** The finite trajectory's method; a mean-only result has none. */
+  method?:string;assumptions:string[];
 }

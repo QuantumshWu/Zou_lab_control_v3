@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {analyze} from '../dist/js/atom-workbench/src/physics.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
-import {buildMasterModel} from '../dist/js/atom-workbench/src/master-model.js';
+import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {laserReferenceStateId} from '../dist/js/atom-workbench/src/transition-view.js';
 
@@ -39,8 +39,8 @@ test('legacy F/m-only files set and monitor their actual initial state; old qual
 });
 
 test('independent per-laser reference states roundtrip without changing rho0, Hamiltonian or physical cache identity',()=>{
-  const s=roundtrip(defaultScene()),initial=s.dynamics.initialStateId,before=buildMasterModel(s),key=dynamicsCacheKey(s,s.dynamics,true);
-  for(const id of ids){s.lasers[0].referenceStateId=id;const loaded=roundtrip(s);assert.equal(loaded.lasers[0].referenceStateId,id);assert.equal(laserReferenceStateId(loaded,loaded.lasers[0]),id);assert.equal(laserReferenceStateId(loaded,loaded.lasers[1]),initial);assert.equal(loaded.dynamics.initialStateId,initial);assert.equal(dynamicsCacheKey(loaded,loaded.dynamics,true),key);const after=buildMasterModel(loaded);assert.deepEqual(after.hReal,before.hReal);assert.deepEqual(after.hImag,before.hImag);assert.deepEqual(after.drives,before.drives);assert.equal(after.initialIndex,before.initialIndex);}
+  const s=roundtrip(defaultScene()),initial=s.dynamics.initialStateId,before=buildFullMasterModel(s),key=dynamicsCacheKey(s,s.dynamics,true);
+  for(const id of ids){s.lasers[0].referenceStateId=id;const loaded=roundtrip(s);assert.equal(loaded.lasers[0].referenceStateId,id);assert.equal(laserReferenceStateId(loaded,loaded.lasers[0]),id);assert.equal(laserReferenceStateId(loaded,loaded.lasers[1]),initial);assert.equal(loaded.dynamics.initialStateId,initial);assert.equal(dynamicsCacheKey(loaded,loaded.dynamics,true),key);const after=buildFullMasterModel(loaded);assert.deepEqual(after.hReal,before.hReal);assert.deepEqual(after.hImag,before.hImag);assert.deepEqual(after.drives,before.drives);assert.equal(after.initialIndex,before.initialIndex);}
   delete s.lasers[0].referenceStateId;assert.equal(laserReferenceStateId(roundtrip(s),s.lasers[0]),initial);
   for(const invalid of ['reference-1','',42]){s.lasers[0].referenceStateId=invalid;assert.throws(()=>roundtrip(s));}
 });

@@ -20,7 +20,7 @@ import { referenceEnergyMHz } from './reference-energy.js';
 import {spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
 import { defaultDynamics, defaultScene, DEFAULT_TWEEZER_WAVELENGTH_NM,MAX_POPULATION_TOLERANCE,resolvePopulationTolerance } from './types.js';
 import type { Analysis, AxisAngles, DynamicsSettings, DetuningUnit, Laser, Level, MagneticField, Scene, SpectralLine, Transition } from './types.js';
-import type { DynamicsResult } from './solver-types.js';
+import { isTimeAverage, type DynamicsResult } from './solver-types.js';
 import { DynamicsClient, type SolverFailureRecord } from './solver-client.js';
 import { validateScene } from './scene-file.js';
 import { incidentTransitions, laserReferenceStateId, photonEndpoint, transitionEndpoints } from './transition-view.js';
@@ -388,8 +388,7 @@ function currentRecord():SolvedRecord|undefined{
 function currentResult():DynamicsResult|undefined{return currentRecord()?.result;}
 function currentSolverError():string{return requestedKey===dynamicsKey()?solverError:'';}
 function currentSolverBusy():boolean{return solverBusy&&requestedPhysicalKey===dynamicsKey(false)&&(!requestedSteadyOnly||(view==='levels'&&populationMode==='steady'));}
-function isMeanStatus(status:string|undefined):boolean{return status==='periodic-mean'||status==='initial-dependent-mean';}
-function isDisplayedMean(result=currentResult(),a=latestAnalysis):boolean{return isMeanStatus(result?.steady?.status)||(view==='levels'&&a.spectroscopy?.requiresDensityProjection===true&&result?.steady?.status==='population-stationary');}
+function isDisplayedMean(result=currentResult(),a=latestAnalysis):boolean{return isTimeAverage(result?.steady?.status)||(view==='levels'&&a.spectroscopy?.requiresDensityProjection===true&&result?.steady?.status==='population-stationary');}
 function steadyPopulationsInView(a=latestAnalysis):Record<string,number>|undefined {
   const result=currentResult(),steady=result?.steady;if(!result||!steady?.converged||!steady.populations)return undefined;
   if(view!=='levels')return steady.populations;
@@ -414,7 +413,7 @@ function solverStatus():string{
 }
 function solverDetails():string{
   const result=currentResult(),error=currentSolverError();
-  return `<details class="solver-details"><summary>计算详情</summary>${error?`<p class="solver-error">${esc(error)}</p>`:''}${result?`<div class="solver-readouts"><span>32 态 · ${esc(result.metrics.kernel)}<b>${number(result.metrics.totalMs,1)} ms</b></span><span>含通信<b>${number(currentRecord()?.wallMs??solverWallMs,1)} ms</b></span><span>概率守恒误差<b>${result.validation.maxTraceError.toExponential(2)}</b></span><span>最小布居<b>${result.validation.minPopulation.toExponential(2)}</b></span><span>稳态残差<b>${result.steady?.residual==null?'—':result.steady.residual.toExponential(2)}</b></span><span>状态<b>${esc(result.steady?.status??'not-converged')}</b></span></div><p class="helper-text">${esc(result.method)}</p><p class="helper-text">${esc(result.steady?.method??'')}</p>${result.steady?.reason?`<p class="helper-text">${esc(result.steady.reason)}</p>`:''}${result.warnings.map(w=>`<p class="helper-text">${esc(w)}</p>`).join('')}`:'<p class="helper-text">没有当前参数的求解结果。</p>'}${failureRecords.length?'<button class="button" data-export-solver-failures>导出失败记录</button>':''}</details>`;
+  return `<details class="solver-details"><summary>计算详情</summary>${error?`<p class="solver-error">${esc(error)}</p>`:''}${result?`<div class="solver-readouts"><span>32 态 · Rust master equation<b>${number(result.metrics.totalMs,1)} ms</b></span><span>含通信<b>${number(currentRecord()?.wallMs??solverWallMs,1)} ms</b></span><span>概率守恒误差<b>${result.validation.maxTraceError.toExponential(2)}</b></span><span>最小布居<b>${result.validation.minPopulation.toExponential(2)}</b></span><span>稳态残差<b>${result.steady?.residual==null?'—':result.steady.residual.toExponential(2)}</b></span><span>状态<b>${esc(result.steady?.status??'not-converged')}</b></span></div>${[result.method,result.steady.method].filter(Boolean).map(text=>`<p class="helper-text">${esc(text)}</p>`).join('')}${result.steady?.reason?`<p class="helper-text">${esc(result.steady.reason)}</p>`:''}${result.assumptions.map(w=>`<p class="helper-text">${esc(w)}</p>`).join('')}`:'<p class="helper-text">没有当前参数的求解结果。</p>'}${failureRecords.length?'<button class="button" data-export-solver-failures>导出失败记录</button>':''}</details>`;
 }
 function populationToolbar():void{
   const target=$('population-toolbar'),snap=populationSnapshot(),result=currentResult(),p=snap.populations;

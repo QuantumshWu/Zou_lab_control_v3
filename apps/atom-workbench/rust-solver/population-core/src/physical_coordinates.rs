@@ -2,6 +2,8 @@
 //! SAME current-request coordinates T(theta)=(I+Khat(theta)) J2(S(theta)).
 //! No population is clipped, normalized, made real, or fed back into evolution.
 use super::*;
+use crate::parallel::Execution;
+use crate::pencil::{Commutator, Gemm, Scratch};
 
 /// Matches the existing production Model protocol exactly. `index` is the
 /// GLOBAL state index, not an index into the ground-state subset. Both full
@@ -124,6 +126,14 @@ impl PhysicalCoordinates{
         for i in 0..n{for j in 0..n{physical[i*n+j]=mul(mul(state_phases[i],physical[i*n+j]),conj(state_phases[j]));}}
         if physical.iter().any(|z|!z.finite()){return Err("Nonfinite physical reconstruction".into());}Ok(physical)
     }
+    /// One Fourier coefficient of `E x` (row-major, Hilbert frame) in the
+    /// original state basis: the `restore_hilbert` step of `from_envelope_at`,
+    /// without the time-dependent state-gauge phases.
+    pub fn hilbert_to_states(&self,matrix:&[C])->Result<Vec<C>,String>{
+        let n=self.dimension();
+        if matrix.len()!=n*n||matrix.iter().any(|z|!z.finite()){return Err("Expected a finite complete Hilbert-frame matrix".into());}
+        restore_hilbert(&self.lapack,&self.primitives.hilbert.basis_column_major,matrix,n)
+    }
     pub fn field_at(&self,modes:&[Charge],field:&[C],time:f64)->Result<Vec<C>,String>{
         let n=self.dimension();let phases=&self.primitives.hilbert.source.phases;
         mode_set(modes,phases.axes.len())?;if field.len()!=product(&[modes.len(),n,n])?||field.iter().any(|z|!z.finite()){
@@ -136,158 +146,185 @@ impl PhysicalCoordinates{
 }
 
 /// Complex-linear bilinear rows O_ab X_ab; X is NEVER conjugated.
-pub struct PopulationObservation{owner:Arc<PrimitivePreparation>,duals:BTreeMap<Charge,Coefficient>}
-pub struct PopulationBasis{owner:Arc<PrimitivePreparation>,modes:Vec<Charge>,columns:usize,coefficients:Vec<C>}
-/// Fixed current-domain/actual-time operator table, never trajectory values.
-pub struct PopulationPhasePlan{owner:Arc<PrimitivePreparation>,modes:Vec<Charge>,times:Arc<[f64]>,phases:Vec<C>}
-#[derive(Clone)]
-pub struct PopulationRows{owner:Arc<PrimitivePreparation>,times:Arc<[f64]>,states:usize,columns:usize,values:Arc<[C]>}
-/// Append-only operator-row blocks. Old projected columns are shared without
-/// copying or reapplying T; snapshot compacts them only when publishing one
-/// immutable Candidate. No propagated population is an input.
-#[derive(Clone)]
-pub struct PopulationRowBlocks{chunks:Vec<PopulationRows>,columns:usize}
-
-fn add_dual(family:&mut FourierMatrices,q:Charge,value:&[C],scale:f64){
-    let out=family.entry(q).or_insert_with(||vec![C::default();value.len()]);for(a,&b)in out.iter_mut().zip(value){add(a,scaled(b,scale));}}
-struct DualCommutator{
-    n:usize,coefficients:Vec<(Charge,Vec<C>,Vec<C>)>,
-    packed:Vec<C>,transposed:Vec<C>,left:Vec<C>,right:Vec<C>,
+pub struct PopulationObservation{
+    owner:Arc<PrimitivePreparation>,
+    /// Dual charges and, per charge, the sparse rows (state, coordinate, value).
+    charges:Vec<Charge>,rows:Vec<Vec<(usize,usize,C)>>,
 }
+pub struct PopulationBasis{modes:Vec<Charge>,columns:usize,coefficients:Vec<C>}
+/// Readout duals of `states` state functionals over an ordered list of
+/// charges. Each charge holds them as one mode block with the states as
+/// right-hand sides: entry (i, j) of local state s sits at i + n*(s + states*j).
+struct Duals{charges:Vec<Charge>,states:usize,values:Vec<C>}
+impl Duals{
+    fn zeros(charges:Vec<Charge>,n:usize,states:usize)->Self{let length=charges.len()*n*n*states;Self{charges,states,values:vec![C::default();length]}}
+    fn block(&self,n:usize,index:usize)->&[C]{let size=n*n*self.states;&self.values[index*size..(index+1)*size]}
+}
+fn dual_at(n:usize,states:usize,s:usize,i:usize,j:usize)->usize{i+n*(s+states*j)}
+/// Hermitian pairing of a charge set closed under q -> -q: [zero, positive q
+/// (sorted), -q in the same order] and the number of leading canonical
+/// charges. None when the set is not closed.
+fn paired_order(set:&Modes)->Option<(Vec<Charge>,usize)>{
+    let negate=|q:&Charge|->Option<Charge>{q.iter().map(|&x|x.checked_neg()).collect()};
+    if !set.iter().all(|q|negate(q).is_some_and(|m|set.contains(&m))){return None;}
+    let positive=|q:&Charge|q.iter().copied().find(|&x|x!=0).is_some_and(|x|x>0);
+    let central:Vec<Charge>=set.iter().filter(|q|q.iter().all(|&x|x==0)).cloned().collect();
+    let positives:Vec<Charge>=set.iter().filter(|q|positive(q)).cloned().collect();
+    let negatives:Vec<Charge>=positives.iter().map(|q|negate(q).unwrap()).collect();
+    let canonical=central.len()+positives.len();
+    Some(([central,positives,negatives].concat(),canonical))
+}
+/// Pull-back through ad_S: Q -> S^T Q - Q S^T is the bilinear adjoint of
+/// X -> [S, X], and a dual at charge q reaches charge q+p through S_p. Runs on
+/// the pencil's blocked commutator kernel (S has only GE/EG blocks).
+struct DualCommutator{n:usize,ground:usize,transposed:FourierMatrices,lapack:Arc<Lapack>,execution:Execution,scratch:Vec<Scratch>}
 impl DualCommutator{
-    fn new(s:&FourierMatrices,n:usize)->Self{
-        // S(row-major) is S^T in column-major. For the right action,
-        // (Q S^T)^T=S Q^T, so its shared factor is S(column-major).
-        let coefficients=s.iter().map(|(q,a)|(q.clone(),a.clone(),row_to_column(a,n))).collect();let length=n*n*n;
-        Self{n,coefficients,packed:vec![C::default();length],transposed:vec![C::default();length],left:vec![C::default();length],right:vec![C::default();length]}
+    fn new(s:&FourierMatrices,n:usize,ground:usize,lapack:Arc<Lapack>)->Result<Self,String>{
+        // row_to_column of a row-major matrix is its transpose (row-major).
+        let transposed=s.iter().map(|(q,a)|(q.clone(),row_to_column(a,n))).collect();
+        Ok(Self{n,ground,transposed,lapack,execution:Execution::new()?,scratch:Vec::new()})
     }
-    fn apply(&mut self,dual:&FourierMatrices,lap:&Lapack)->Result<FourierMatrices,String>{
-        let n=self.n;let d=n*n;let mut out=FourierMatrices::new();
-        for(q,values)in dual{if values.len()!=n*d{return Err("Complete observable-row shape differs".into());}
-            // Pack ALL goals once for this q, reuse for every S charge.
-            for goal in 0..n{for i in 0..n{for j in 0..n{let value=values[goal*d+i*n+j];
-                self.packed[i+(goal*n+j)*n]=value;self.transposed[j+(goal*n+i)*n]=value;
-            }}}
-            for(p,st,s)in &self.coefficients{
-                lap.multiply_complex_into(st,&self.packed,&mut self.left,n,n*n,n)?;
-                lap.multiply_complex_into(s,&self.transposed,&mut self.right,n,n*n,n)?;
-                let target=out.entry(add_charge(q,p,false)?).or_insert_with(||vec![C::default();n*d]);
-                for goal in 0..n{for i in 0..n{for j in 0..n{let a=self.left[i+(goal*n+j)*n];let b=self.right[j+(goal*n+i)*n];
-                    add(&mut target[goal*d+i*n+j],C{re:a.re-b.re,im:a.im-b.im});
-                }}}
-            }
-        }Ok(out)
+    /// alpha * ad_S^T(input), on every charge input+p it reaches. With
+    /// `paired` the input is Hermitian-paired, D_{-q}[s] = D_q[s]^dagger (the
+    /// readout duals are: O_s is Hermitian, S_{-p} = -S_p^dagger and K pairs
+    /// the same way), so only canonical charges are computed and their
+    /// partners mirrored.
+    fn apply(&mut self,input:&Duals,alpha:f64,paired:bool)->Result<Duals,String>{
+        let(n,states)=(self.n,input.states);let size=n*n*states;
+        let sources:Modes=input.charges.iter().cloned().collect();let steps:Modes=self.transposed.keys().cloned().collect();
+        let reached=combinations(&sources,&steps,false)?;
+        let(charges,canonical)=match paired.then(||paired_order(&reached)).flatten(){
+            Some(order)=>order,None=>{let length=reached.len();(reached.into_iter().collect(),length)}};
+        let mut output=Duals::zeros(charges,n,states);
+        let stage=Commutator::new(&self.transposed,&input.charges,&output.charges[..canonical],n,self.ground)?;
+        let gemm=Gemm::Blas(self.lapack.complex_gemm());
+        stage.apply(&self.execution,gemm,&input.values,&mut output.values[..canonical*size],states,alpha,&mut self.scratch)?;
+        let pairs=output.charges.len()-canonical;let central=canonical-pairs;
+        let(computed,mirrored)=output.values.split_at_mut(canonical*size);
+        for(k,target)in mirrored.chunks_exact_mut(size).enumerate(){let source=&computed[(central+k)*size..(central+k+1)*size];
+            for state in 0..states{for j in 0..n{for i in 0..n{target[dual_at(n,states,state,i,j)]=conj(source[dual_at(n,states,state,j,i)]);}}}}
+        Ok(output)
     }
 }
 impl PopulationObservation{
+    /// Readout duals D = (I + ad_S^T + (ad_S^T)^2/2)(I + K^T) O, where O_s is
+    /// the population functional of state s in the Hilbert frame. States
+    /// whose (I + K^T) O_s are nonzero on the same charges are pulled back
+    /// together (Rb87: excited-state functionals live on charge 0 only).
     fn prepare(coordinates:&PhysicalCoordinates)->Result<Self,String>{
-        let p=&coordinates.primitives;let n=p.hilbert.source.n;let d=n*n;let g=p.hilbert.source.ground.len();let e=n-g;
-        let basis=&p.hilbert.basis_column_major;let zero=vec![0;p.hilbert.source.phases.axes.len()];let mut observable=vec![C::default();n*d];
-        for state in 0..n{for a in 0..n{for b in 0..n{observable[state*d+a*n+b]=mul(basis[state+a*n],conj(basis[state+b*n]));}}}
-        let mut before=FourierMatrices::from([(zero,observable.clone())]);
-        for(q,k)in &p.k_hat{let mut contribution=vec![C::default();n*d];
-            for state in 0..n{for i in 0..e{for j in 0..e{for a in 0..g{for b in 0..g{
-                add(&mut contribution[state*d+(g+i)*n+g+j],mul(observable[state*d+a*n+b],k[(a*g+b)*e*e+i*e+j]));
-            }}}}}add_dual(&mut before,q.clone(),&contribution,1.);
+        let p=&coordinates.primitives;let n=p.hilbert.source.n;let g=p.hilbert.source.ground.len();let e=n-g;
+        let basis=&p.hilbert.basis_column_major;let zero=vec![0;p.hilbert.source.phases.axes.len()];
+        let at=|s:usize,i:usize,j:usize|dual_at(n,n,s,i,j);
+        // O at charge 0 and its K^T pull-back (EE entries) at every K charge.
+        let mut first:Modes=p.k_hat.keys().cloned().collect();first.insert(zero.clone());
+        let mut before=Duals::zeros(first.into_iter().collect(),n,n);let size=n*n*n;
+        let index:BTreeMap<Charge,usize>=before.charges.iter().cloned().enumerate().map(|(i,q)|(q,i)).collect();
+        let central=index[&zero];
+        for state in 0..n{for a in 0..n{for b in 0..n{
+            before.values[central*size+at(state,a,b)]=mul(basis[state+a*n],conj(basis[state+b*n]));
+        }}}
+        // D_q[s]_EE(i,j) += sum_{a,b<g} O_s[a,b] K_q[(a,b),(i,j)]: K_q row-major
+        // (g*g x e*e) is column-major (e*e x g*g), so one GEMM per charge.
+        let mut ground=vec![C::default();g*g*n];
+        for state in 0..n{for a in 0..g{for b in 0..g{ground[a*g+b+g*g*state]=before.values[central*size+at(state,a,b)];}}}
+        let gemm=coordinates.lapack.complex_gemm();let mut pulled=vec![C::default();e*e*n];
+        for(q,k)in &p.k_hat{
+            gemm.multiply(e*e,n,g*g,C{re:1.,im:0.},k,e*e,&ground,g*g,C::default(),&mut pulled,e*e)?;
+            let target=index[q]*size;
+            for state in 0..n{for i in 0..e{for j in 0..e{add(&mut before.values[target+at(state,g+i,g+j)],pulled[i*e+j+e*e*state]);}}}
         }
-        let mut commutator=DualCommutator::new(&p.s,n);
-        let once=commutator.apply(&before,&coordinates.lapack)?;let twice=commutator.apply(&once,&coordinates.lapack)?;
-        let mut complete=before;for(q,a)in once{add_dual(&mut complete,q,&a,1.);}for(q,a)in twice{add_dual(&mut complete,q,&a,0.5);}
-        let mut duals=BTreeMap::new();for(q,a)in complete{if a.iter().any(|z|z.re!=0.||z.im!=0.){
-            duals.insert(q,coefficient(&a,n,d,KernelPolicy::Csr)?);}}
-        Ok(Self{owner:Arc::clone(p),duals})
+        // Group states by the charges on which their functional is nonzero.
+        let nonzero=|m:usize,state:usize|(0..n).any(|i|(0..n).any(|j|{let z=before.values[m*size+at(state,i,j)];z.re!=0.||z.im!=0.}));
+        let mut patterns=BTreeMap::<Vec<usize>,Vec<usize>>::new();
+        for state in 0..n{let key:Vec<usize>=(0..before.charges.len()).filter(|&m|nonzero(m,state)).collect();
+            if !key.is_empty(){patterns.entry(key).or_default().push(state);}}
+        let mut commutator=DualCommutator::new(&p.s,n,g,Arc::clone(&coordinates.lapack))?;
+        let mut groups=Vec::new();
+        for(key,states)in patterns{let r=states.len();
+            let mut own=Duals::zeros(key.iter().map(|&m|before.charges[m].clone()).collect(),n,r);
+            for(local_charge,&m)in key.iter().enumerate(){for(local,&state)in states.iter().enumerate(){for i in 0..n{for j in 0..n{
+                own.values[local_charge*n*n*r+dual_at(n,r,local,i,j)]=before.values[m*size+at(state,i,j)];
+            }}}}
+            let once=commutator.apply(&own,1.,true)?;let twice=commutator.apply(&once,0.5,true)?;
+            groups.push((states,[own,once,twice]));
+        }
+        // complete = before + once + twice/2 per charge (sorted) and state.
+        let charges:Vec<Charge>=groups.iter().flat_map(|(_,parts)|parts.iter().flat_map(|d|d.charges.iter().cloned())).collect::<Modes>().into_iter().collect();
+        let charge_index:BTreeMap<&Charge,usize>=charges.iter().enumerate().map(|(i,q)|(q,i)).collect();
+        // blocks[group][charge]: the blocks of before/once/twice at that charge.
+        let mut blocks:Vec<Vec<Vec<&[C]>>>=vec![vec![Vec::new();charges.len()];groups.len()];
+        for(group,(_,parts))in groups.iter().enumerate(){for part in parts{for(m,q)in part.charges.iter().enumerate(){
+            blocks[group][charge_index[q]].push(part.block(n,m));}}}
+        let mut owner=vec![None;n];
+        for(group,(states,_))in groups.iter().enumerate(){for(local,&state)in states.iter().enumerate(){owner[state]=Some((group,local,states.len()));}}
+        let complete=|charge:usize,state:usize,i:usize,j:usize|->C{owner[state].map_or(C::default(),|(group,local,r)|{
+            let at=dual_at(n,r,local,i,j);blocks[group][charge].iter().fold(C::default(),|mut sum,block|{add(&mut sum,block[at]);sum})})};
+        let magnitude=|z:C|z.re*z.re+z.im*z.im;
+        let execution=&commutator.execution;let minimum=crate::parallel::MINIMUM_WORK_PER_TASK;let work=charges.len()*size*16;
+        let mut largest=vec![0_f64;charges.len()];
+        execution.for_mode_chunks(&mut largest,1,work,minimum,&mut Vec::<()>::new(),|first,chunk,_|{
+            for(k,value)in chunk.iter_mut().enumerate(){
+                *value=(0..n).flat_map(|s|(0..n).flat_map(move|i|(0..n).map(move|j|(s,i,j)))).map(|(s,i,j)|magnitude(complete(first+k,s,i,j))).fold(0_f64,f64::max);
+            }Ok(())
+        })?;
+        // Entries below 1e-15 of the largest dual entry are accumulated
+        // roundoff of the S/K pull-back. Dropping them changes a population
+        // by at most 1e-15*max|D|*(number of dropped entries)*|x|, far below
+        // any requested tolerance, and removes ~3/4 of the readout work.
+        let largest=largest.into_iter().fold(0_f64,f64::max).sqrt();
+        let floor=1e-15*largest;let floor_squared=floor*floor;
+        if largest>0.&&!floor_squared.is_normal(){return Err("Readout dual magnitudes outside the normal floating-point range".into());}
+        let mut rows=vec![Vec::new();charges.len()];
+        execution.for_mode_chunks(&mut rows,1,work,minimum,&mut Vec::<()>::new(),|first,chunk,_|{
+            for(k,entries)in chunk.iter_mut().enumerate(){
+                for state in 0..n{for i in 0..n{for j in 0..n{let z=complete(first+k,state,i,j);
+                    if magnitude(z)>floor_squared{entries.push((state,i*n+j,z));}
+                }}}
+            }Ok(())
+        })?;
+        drop(blocks);
+        let(charges,rows):(Vec<_>,Vec<_>)=charges.into_iter().zip(rows).filter(|(_,entries)|!entries.is_empty()).unzip();
+        Ok(Self{owner:Arc::clone(p),charges,rows})
     }
-    pub fn coefficient_modes(&self)->usize{self.duals.len()}
-    pub fn prepare_phase_plan(&self,input_modes:&[Charge],times:&[f64])->Result<PopulationPhasePlan,String>{
+    /// Output modes reached by the readout from the given domain modes.
+    pub fn output_modes(&self,input_modes:&[Charge])->Result<Vec<Charge>,String>{
         let inputs=mode_set(input_modes,self.owner.hilbert.source.phases.axes.len())?;
-        let support:Modes=self.duals.keys().cloned().collect();let modes:Vec<_>=combinations(&support,&inputs,false)?.into_iter().collect();
-        PopulationPhasePlan::prepare(Arc::clone(&self.owner),modes,times)
+        let support:Modes=self.charges.iter().cloned().collect();
+        Ok(combinations(&support,&inputs,false)?.into_iter().collect())
     }
-    /// Only new trial columns need projection; no previous state/time solution
-    /// is an input. The output union is never clipped to the solve domain.
+    pub fn frequency(&self,q:&[i32])->Result<crate::preparation::FrequencyParts,String>{self.owner.hilbert.source.phases.frequency(q)}
+    /// Readout coefficients of `columns` signed trial columns `[row, columns]`:
+    /// coefficient[(mode*n+state)*columns+j] = sum over dual charges q and
+    /// input modes i with q+i = mode of D_q[state,:] . x_i[:,j].
+    /// One ZGEMM per input mode applies every dual charge at once.
     pub fn project(&self,input_modes:&[Charge],basis:&[C],columns:usize)->Result<PopulationBasis,String>{
         let n=self.owner.hilbert.source.n;let d=n*n;let phases=&self.owner.hilbert.source.phases;
         let inputs=mode_set(input_modes,phases.axes.len())?;
-        if columns==0||basis.len()!=product(&[input_modes.len(),d,columns])?||basis.iter().any(|z|!z.finite()){
+        if columns==0||basis.len()!=product(&[input_modes.len(),d,columns])?{
             return Err("Expected complete signed Fourier trial columns [mode*n*n,columns]".into());}
-        let support:Modes=self.duals.keys().cloned().collect();let modes:Vec<_>=combinations(&support,&inputs,false)?.into_iter().collect();
-        let at:BTreeMap<_,_>=modes.iter().enumerate().map(|(i,q)|(q,i)).collect();let mut coefficients=vec![C::default();product(&[modes.len(),n,columns])?];
-        for(q,dual)in &self.duals{for(i,input)in input_modes.iter().enumerate(){let target=at[&add_charge(q,input,false)?];
-            for state in 0..n{for k in dual.row[state]..dual.row[state+1]{let source=(i*d+dual.col[k])*columns;let output=(target*n+state)*columns;
-                for j in 0..columns{add(&mut coefficients[output+j],mul(dual.value[k],basis[source+j]));}
-            }}
-        }}
+        let support:Modes=self.charges.iter().cloned().collect();let modes:Vec<_>=combinations(&support,&inputs,false)?.into_iter().collect();
+        let at:BTreeMap<_,_>=modes.iter().enumerate().map(|(i,q)|(q,i)).collect();
+        let block=n*columns;let mut coefficients=vec![C::default();product(&[modes.len(),block])?];
+        for(i,input)in input_modes.iter().enumerate(){
+            let x=&basis[i*d*columns..(i+1)*d*columns];
+            if x.iter().all(|z|z.re==0.&&z.im==0.){continue;}
+            for(q,entries)in self.charges.iter().zip(&self.rows){
+                let target=at[&add_charge(q,input,false)?];let out=&mut coefficients[target*block..(target+1)*block];
+                for &(state,c,value)in entries{
+                    let source=&x[c*columns..(c+1)*columns];let output=&mut out[state*columns..(state+1)*columns];
+                    for(o,&z)in output.iter_mut().zip(source){add(o,mul(value,z));}
+                }
+            }
+        }
         if coefficients.iter().any(|z|!z.finite()){return Err("Nonfinite complete population projection".into());}
-        Ok(PopulationBasis{owner:Arc::clone(&self.owner),modes,columns,coefficients})
+        Ok(PopulationBasis{modes,columns,coefficients})
     }
 }
 impl PopulationBasis{
     pub fn modes(&self)->&[Charge]{&self.modes}
     pub fn columns(&self)->usize{self.columns}
-    pub fn at_times(&self,times:&[f64])->Result<PopulationRows,String>{
-        self.at_phase_plan(&PopulationPhasePlan::prepare(Arc::clone(&self.owner),self.modes.clone(),times)?)
-    }
-    pub fn at_phase_plan(&self,plan:&PopulationPhasePlan)->Result<PopulationRows,String>{
-        if !Arc::ptr_eq(&self.owner,&plan.owner)||self.modes!=plan.modes{return Err("Population phase plan belongs to another Model or output-mode union".into());}
-        let times=&plan.times;
-        if times.is_empty()||times.iter().any(|t|!t.is_finite()){return Err("Expected a nonempty finite actual time grid".into());}
-        let n=self.owner.hilbert.source.n;let width=n*self.columns;
-        let mut values=vec![C::default();product(&[times.len(),width])?];
-        for it in 0..times.len(){for m in 0..self.modes.len(){let phase=plan.phases[it*self.modes.len()+m];
-            for k in 0..width{add(&mut values[it*width+k],mul(phase,self.coefficients[m*width+k]));}
-        }}
-        if values.iter().any(|z|!z.finite()){return Err("Nonfinite current-basis population rows".into());}
-        Ok(PopulationRows{owner:Arc::clone(&self.owner),times:Arc::clone(&plan.times),states:n,columns:self.columns,values:values.into()})
-    }
-}
-impl PopulationPhasePlan{
-    fn prepare(owner:Arc<PrimitivePreparation>,modes:Vec<Charge>,times:&[f64])->Result<Self,String>{
-        if times.is_empty()||times.iter().any(|t|!t.is_finite()){return Err("Expected a nonempty finite actual phase grid".into());}
-        let mut phases=vec![C::default();product(&[modes.len(),times.len()])?];
-        for(m,q)in modes.iter().enumerate(){let frequency=owner.hilbert.source.phases.frequency(q)?;
-            for(it,&time)in times.iter().enumerate(){phases[it*modes.len()+m]=frequency.phase(time)?;}}
-        Ok(Self{owner,modes,times:times.to_vec().into(),phases})
-    }
-    pub fn times(&self)->&[f64]{&self.times}
-    pub fn modes(&self)->&[Charge]{&self.modes}
-    pub fn phase_evaluations(&self)->usize{self.phases.len()}
-}
-impl PopulationRows{
-    pub fn belongs_to(&self,prepared:&OwnedPrepared)->bool{Arc::ptr_eq(&self.owner,&prepared.primitives)}
-    pub fn times(&self)->&[f64]{&self.times}
-    pub fn columns(&self)->usize{self.columns}
-    /// Exact current-basis observation coefficients [time,state,column], not
-    /// populations or a cache of a previously propagated solution.
-    pub fn coefficients(&self)->&[C]{&self.values}
-    /// small is row-major [column,time]; output is [time,state] COMPLEX.
-    pub fn evaluate_into(&self,small:&[C],output:&mut[C])->Result<(),String>{
-        let nt=self.times.len();if small.len()!=product(&[self.columns,nt])?||output.len()!=product(&[nt,self.states])?
-            ||small.iter().any(|z|!z.finite()){return Err("Population small coefficients/output dimensions or finite check failed".into());}
-        output.fill(C::default());for t in 0..nt{for state in 0..self.states{for j in 0..self.columns{
-            add(&mut output[t*self.states+state],mul(self.values[(t*self.states+state)*self.columns+j],small[j*nt+t]));
-        }}}
-        if output.iter().any(|z|!z.finite()){return Err("Nonfinite complex population output".into());}Ok(())
-    }
-}
-
-impl PopulationRowBlocks{
-    pub fn new(first:PopulationRows)->Self{let columns=first.columns;Self{chunks:vec![first],columns}}
-    pub fn columns(&self)->usize{self.columns}
-    pub fn chunk_count(&self)->usize{self.chunks.len()}
-    pub fn append(&mut self,rows:PopulationRows)->Result<(),String>{
-        let first=&self.chunks[0];
-        if !Arc::ptr_eq(&first.owner,&rows.owner)||first.states!=rows.states||first.times.len()!=rows.times.len()
-            ||!first.times.iter().zip(rows.times.iter()).all(|(a,b)|a.to_bits()==b.to_bits()){
-            return Err("Observation-row append requires the same current Model and exact time grid".into());}
-        self.columns=self.columns.checked_add(rows.columns).ok_or("Observation column count overflow")?;self.chunks.push(rows);Ok(())
-    }
-    pub fn snapshot(&self)->Result<PopulationRows,String>{
-        let first=&self.chunks[0];if self.chunks.len()==1{return Ok(first.clone());}
-        let rows=product(&[first.times.len(),first.states])?;let mut values=vec![C::default();product(&[rows,self.columns])?];let mut offset=0;
-        for chunk in &self.chunks{for i in 0..rows{values[i*self.columns+offset..i*self.columns+offset+chunk.columns]
-            .copy_from_slice(&chunk.values[i*chunk.columns..(i+1)*chunk.columns]);}offset+=chunk.columns;}
-        Ok(PopulationRows{owner:Arc::clone(&first.owner),times:Arc::clone(&first.times),states:first.states,columns:self.columns,values:values.into()})
-    }
+    /// Row-major `[(mode*n+state), column]` complex coefficients.
+    pub fn coefficients(&self)->&[C]{&self.coefficients}
 }
 
 #[cfg(test)]
@@ -297,20 +334,52 @@ mod tests{
     fn preparation_observation_batched_dual_and_fixed_phase_plan_keep_complete_oracle(){
         let owner=super::super::tests::fixture();let coordinates=owner.physical_coordinates();let n=coordinates.dimension();let d=n*n;let p=owner.primitives();let lap=&owner.preparation_lapack;
         let raw:FourierMatrices=[vec![0],vec![2]].into_iter().enumerate().map(|(m,q)|(q,(0..n*d).map(|i|C{re:((i*13+m*7)%31)as f64/37.,im:((i*7+m*11)%29)as f64/-41.}).collect())).collect();
+        let add_dual=|family:&mut FourierMatrices,q:Charge,value:&[C]|{
+            let out=family.entry(q).or_insert_with(||vec![C::default();value.len()]);for(a,&b)in out.iter_mut().zip(value){add(a,b);}};
         let oracle=|input:&FourierMatrices|{let mut out=FourierMatrices::new();for(q,values)in input{for(r,s)in &p.s{
             let st:Vec<_>=(0..d).map(|i|s[(i%n)*n+i/n]).collect();let mut result=vec![C::default();n*d];
             for state in 0..n{result[state*d..(state+1)*d].copy_from_slice(&commutator(lap,&st,&values[state*d..(state+1)*d],n).unwrap());}
-            add_dual(&mut out,add_charge(q,r,false).unwrap(),&result,1.);
+            add_dual(&mut out,add_charge(q,r,false).unwrap(),&result);
         }}out};
-        let mut plan=DualCommutator::new(&p.s,n);let first=plan.apply(&raw,lap).unwrap();let old=oracle(&raw);let second=plan.apply(&first,lap).unwrap();let old_second=oracle(&old);
+        // Row-major per-state duals <-> mode-block layout with states as rhs.
+        let at=|s:usize,i:usize,j:usize|i+n*(s+n*j);
+        let to_duals=|f:&FourierMatrices|{let mut duals=Duals::zeros(f.keys().cloned().collect(),n,n);
+            for(m,values)in f.values().enumerate(){for s in 0..n{for i in 0..n{for j in 0..n{duals.values[m*n*d+at(s,i,j)]=values[s*d+i*n+j];}}}}duals};
+        let from_duals=|duals:&Duals|->FourierMatrices{duals.charges.iter().enumerate().map(|(m,q)|(q.clone(),
+            (0..n*d).map(|k|duals.block(n,m)[at(k/d,(k%d)/n,k%n)]).collect())).collect()};
+        let g=p.hilbert.source.ground.len();let mut plan=DualCommutator::new(&p.s,n,g,Arc::clone(lap)).unwrap();
+        let first=plan.apply(&to_duals(&raw),1.,false).unwrap();let second=plan.apply(&first,1.,false).unwrap();
+        let(first,second)=(from_duals(&first),from_duals(&second));let old=oracle(&raw);let old_second=oracle(&old);
         for(actual,expected)in[(&first,&old),(&second,&old_second)]{assert_eq!(actual.len(),expected.len());for(q,a)in actual{let b=&expected[q];for(x,y)in a.iter().zip(b){assert!((x.re-y.re).hypot(x.im-y.im)<5e-13*(1.+y.re.hypot(y.im)));}}}
-        let observer=coordinates.population_observation().unwrap();let inputs=[vec![1],vec![0],vec![-1]];let times=[0.,0.137,1e6+0.123456789];
-        let phases=observer.prepare_phase_plan(&inputs,&times).unwrap();let fields:Vec<_>=(0..inputs.len()*d*2).map(|i|C{re:(i as f64*0.17).sin(),im:(i as f64*0.13).cos()}).collect();
-        let basis=observer.project(&inputs,&fields,2).unwrap();let cached=basis.at_phase_plan(&phases).unwrap();let direct=basis.at_times(&times).unwrap();
-        assert_eq!(phases.phase_evaluations(),phases.modes().len()*times.len());
-        for(a,b)in cached.coefficients().iter().zip(direct.coefficients()){assert_eq!(a.re.to_bits(),b.re.to_bits());assert_eq!(a.im.to_bits(),b.im.to_bits());}
-        let other=super::super::tests::fixture();let foreign=other.physical_coordinates().population_observation().unwrap().prepare_phase_plan(&inputs,&times).unwrap();
-        assert!(basis.at_phase_plan(&foreign).is_err());
+        // Hermitian-paired duals over a symmetric charge set: the mirrored
+        // partners must equal the full oracle as well.
+        let one:Vec<C>=(0..n*d).map(|i|C{re:((i*5+3)%17)as f64/19.,im:((i*3+1)%13)as f64/-23.}).collect();
+        let adjoint=|a:&[C]|->Vec<C>{(0..n*d).map(|k|{let(st,i,j)=(k/d,(k%d)/n,k%n);conj(a[st*d+j*n+i])}).collect()};
+        let hermitian:Vec<C>=one.iter().zip(adjoint(&one)).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
+        let paired_raw:FourierMatrices=[(vec![-1],adjoint(&one)),(vec![0],hermitian),(vec![1],one.clone())].into_iter().collect();
+        let mirrored=from_duals(&plan.apply(&to_duals(&paired_raw),1.,true).unwrap());let expected=oracle(&paired_raw);
+        assert_eq!(mirrored.len(),expected.len());
+        for(q,a)in &mirrored{let b=&expected[q];for(x,y)in a.iter().zip(b){assert!((x.re-y.re).hypot(x.im-y.im)<5e-13*(1.+y.re.hypot(y.im)));}}
+        // Readout coefficients reproduce the diagonal of the complete physical
+        // reconstruction T(theta) at arbitrary times, for arbitrary complex fields.
+        let observer=coordinates.population_observation().unwrap();let inputs=[vec![1],vec![0],vec![-1]];
+        let fields:Vec<_>=(0..inputs.len()*d*2).map(|i|C{re:(i as f64*0.17).sin(),im:(i as f64*0.13).cos()}).collect();
+        let basis=observer.project(&inputs,&fields,2).unwrap();let block=n*2;
+        for time in[0.,0.137,1e3+0.123456789]{
+            for j in 0..2{
+                let column:Vec<_>=(0..inputs.len()*d).map(|i|fields[i*2+j]).collect();
+                let physical=coordinates.field_at(&inputs,&column,time).unwrap();
+                for state in 0..n{
+                    let mut value=C::default();
+                    for(mode,q)in basis.modes().iter().enumerate(){
+                        let phase=p.hilbert.source.phases.phase(q,time).unwrap();
+                        add(&mut value,mul(phase,basis.coefficients()[mode*block+state*2+j]));
+                    }
+                    let expected=physical[state*n+state];
+                    assert!((value.re-expected.re).hypot(value.im-expected.im)<1e-11*(1.+expected.re.hypot(expected.im)));
+                }
+            }
+        }
     }
     #[test]
     fn preparation_coordinates_initial_preserves_global_index_and_full_density(){
@@ -333,18 +402,23 @@ mod tests{
         let observer=coordinates.population_observation().unwrap();let modes=[vec![2],vec![-1],vec![0]];let columns=2;
         let basis:Vec<_>=(0..modes.len()*d*columns).map(|i|C{re:((i*13+3)%37)as f64/43.,im:((i*17+7)%41)as f64/-47.}).collect();
         let projected=observer.project(&modes,&basis,columns).unwrap();assert!(projected.modes().len()>modes.len());
-        let times=[0.,0.137,1e6+0.123456789];let rows=projected.at_times(&times).unwrap();let nt=times.len();
-        let small:Vec<_>=(0..columns*nt).map(|i|C{re:0.2+i as f64*0.07,im:-0.3+i as f64*0.11}).collect();let mut population=vec![C::default();nt*n];rows.evaluate_into(&small,&mut population).unwrap();
+        let times=[0.,0.137,1e6+0.123456789];let nt=times.len();let block=n*columns;
+        let small:Vec<_>=(0..columns*nt).map(|i|C{re:0.2+i as f64*0.07,im:-0.3+i as f64*0.11}).collect();
         for(t,&time)in times.iter().enumerate(){let mut field=vec![C::default();modes.len()*d];
             for i in 0..field.len(){for j in 0..columns{add(&mut field[i],mul(basis[i*columns+j],small[j*nt+t]));}}
             let physical=coordinates.field_at(&modes,&field,time).unwrap();
-            for state in 0..n{let(a,b)=(population[t*n+state],physical[state*n+state]);assert!((a.re-b.re).hypot(a.im-b.im)<3e-12*(1.+b.re.hypot(b.im)));}
+            for state in 0..n{
+                let mut value=C::default();
+                for(mode,q)in projected.modes().iter().enumerate(){let phase=owner.primitives().hilbert.source.phases.phase(q,time).unwrap();
+                    for j in 0..columns{add(&mut value,mul(phase,mul(projected.coefficients()[mode*block+state*columns+j],small[j*nt+t])));}}
+                let b=physical[state*n+state];assert!((value.re-b.re).hypot(value.im-b.im)<3e-12*(1.+b.re.hypot(b.im)));
+            }
         }
-        assert!(population.iter().any(|z|z.im.abs()>0.01)); // no hidden real projection
         // Per-column incremental projection is identical to projecting a block.
         for j in 0..columns{let column:Vec<_>=(0..modes.len()*d).map(|i|basis[i*columns+j]).collect();
-            let single=observer.project(&modes,&column,1).unwrap().at_times(&times).unwrap();
-            for t in 0..nt{for state in 0..n{let(a,b)=(single.coefficients()[t*n+state],rows.coefficients()[(t*n+state)*columns+j]);assert_eq!(a.re.to_bits(),b.re.to_bits());assert_eq!(a.im.to_bits(),b.im.to_bits());}}
+            let single=observer.project(&modes,&column,1).unwrap();
+            for row in 0..projected.modes().len()*n{let(a,b)=(single.coefficients()[row],projected.coefficients()[row*columns+j]);
+                assert_eq!(a.re.to_bits(),b.re.to_bits());assert_eq!(a.im.to_bits(),b.im.to_bits());}
         }
         assert!(observer.project(&[vec![0],vec![0]],&basis,columns).is_err());
     }
