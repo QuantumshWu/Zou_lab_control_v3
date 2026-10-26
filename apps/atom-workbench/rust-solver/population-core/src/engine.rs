@@ -98,6 +98,13 @@ pub struct FiniteDiagnostics {
     pub estimated_error: f64,
     /// The unscaled population error estimate of the returned candidate.
     pub raw_estimate: f64,
+    /// The unsigned part of `raw_estimate` that charges what the estimate
+    /// bounds instead of integrating (slow charges only weak couplings reach,
+    /// fully clustered near-resonant halo returns).
+    pub estimate_margin: f64,
+    /// Near-resonant halo return components of the accepted estimate that
+    /// were bounded and charged instead of integrated.
+    pub bounded_resonant_components: usize,
     pub projection_charge: f64,
     /// "dual-weighted-residual" or "successive-change".
     pub error_control: &'static str,
@@ -363,9 +370,10 @@ impl Run {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn finish(
         mut self, populations: Vec<f64>, maximum_imaginary: f64, raw_estimate: f64, scaled: f64, charge: f64,
-        error_control: &'static str,
+        (estimate_margin, bounded_resonant_components): (f64, usize), error_control: &'static str,
     ) -> FiniteSolution {
         let space = self.space.take().expect("trial space");
         let measured = &space.timing;
@@ -380,6 +388,8 @@ impl Run {
             diagnostics: FiniteDiagnostics {
                 estimated_error: scaled + charge,
                 raw_estimate,
+                estimate_margin,
+                bounded_resonant_components,
                 projection_charge: charge,
                 error_control,
                 final_modes: space.modes().len(),
@@ -501,6 +511,7 @@ impl Run {
                         total.maximum,
                         scaled,
                         charge,
+                        (total.margin, halo.unrouted_resonant_returns),
                         "dual-weighted-residual",
                     ));
                 }
@@ -551,7 +562,7 @@ impl Run {
                     let (projected, charge) = constrain_populations(&populations, self.n, &self.groups)?;
                     if b + d + charge <= epsilon {
                         self.checkpoint(basis_change, domain_change, "accept");
-                        return Ok(self.finish(projected, candidate.maximum_imaginary, b + d, b + d, charge, "successive-change"));
+                        return Ok(self.finish(projected, candidate.maximum_imaginary, b + d, b + d, charge, (0., 0), "successive-change"));
                     }
                 }
                 if !exact_domain && order < self.options.maximum_order {
@@ -572,8 +583,15 @@ impl Run {
     }
 }
 
-pub fn solve(
-    mut core: RuntimeCore, times: &[f64], groups: Vec<RequestedGroup>, options: FiniteOptions,
+pub fn solve(core: RuntimeCore, times: &[f64], groups: Vec<RequestedGroup>, options: FiniteOptions) -> Result<FiniteSolution, String> {
+    solve_with(core, times, groups, options, None)
+}
+
+/// `solve` with the request's slow dual already prepared (`Some(Ok)`), or
+/// its preparation already failed (`Some(Err)`); `None` prepares it here,
+/// while the first chain columns are computed.
+pub fn solve_with(
+    mut core: RuntimeCore, times: &[f64], groups: Vec<RequestedGroup>, options: FiniteOptions, given: Option<Result<SlowDual, String>>,
 ) -> Result<FiniteSolution, String> {
     let started = Instant::now();
     let epsilon = options.population_tolerance;
@@ -594,15 +612,24 @@ pub fn solve(
     let mut chain = Chain::new(poles.len());
     // The slow dual depends only on the model: prepare it while the first
     // chain columns are computed.
-    let prepared = core.prepared();
-    let ((dual, dual_ms), grown) = Execution::new()?.join(
-        || {
-            let clock = Instant::now();
-            (SlowDual::prepare(prepared, SlowDualOptions::default()), ms(clock))
-        },
-        || chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner),
-    );
-    grown?;
+    let (dual, dual_ms) = match given {
+        Some(dual) => {
+            chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner)?;
+            (dual, 0.)
+        }
+        None => {
+            let prepared = core.prepared();
+            let ((dual, dual_ms), grown) = Execution::new()?.join(
+                || {
+                    let clock = Instant::now();
+                    (SlowDual::prepare(prepared, SlowDualOptions::default()), ms(clock))
+                },
+                || chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner),
+            );
+            grown?;
+            (dual, dual_ms)
+        }
+    };
     let peak_bytes = space.bytes();
     let mut run = Run {
         core,
