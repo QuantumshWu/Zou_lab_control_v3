@@ -6,9 +6,9 @@ import {laserFrequencyMHz} from '../dist/js/atom-workbench/src/physics.js';
 import {spectroscopyAnalysis} from '../dist/js/atom-workbench/src/spectroscopy.js';
 import {combinedLevelsChart} from '../dist/js/atom-workbench/src/combined-level-chart.js';
 
-test('new/reset scenes use 200 points and a physically specified 852 nm tweezer',()=>{
-  assert.equal(defaultDynamics().samples,200);
-  assert.equal(defaultScene().dynamics.samples,200);
+test('new/reset scenes use 1000 points and a physically specified 852 nm tweezer',()=>{
+  assert.equal(defaultDynamics().samples,1000);
+  assert.equal(defaultScene().dynamics.samples,1000);
   assert.equal(defaultTweezer().wavelengthNm,852);
   assert.ok(Math.abs(laserFrequencyMHz(defaultTweezer())-299792458000/852)<1e-7);
   assert.match(defaultScene().name,/852 nm/);

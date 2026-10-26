@@ -82,7 +82,7 @@ export interface DynamicsSettings {
   quality?: 'preview' | 'verified';
 }
 export type DurationUnit='ns'|'μs'|'ms'|'s';
-export const DEFAULT_DYNAMICS_SAMPLES=200;
+export const DEFAULT_DYNAMICS_SAMPLES=1000;
 export const DEFAULT_TWEEZER_WAVELENGTH_NM=852;
 export const DEFAULT_POPULATION_TOLERANCE=.005;
 export const MAX_POPULATION_TOLERANCE=.02;
