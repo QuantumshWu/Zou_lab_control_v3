@@ -8,7 +8,6 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
-mod adaptive_periodic;
 mod bath_frame;
 mod block_solve;
 mod coarse_preconditioner;
@@ -19,39 +18,26 @@ mod defect_bound;
 mod dense_expm;
 mod effective_krylov;
 mod incremental_projection;
-mod fast_multitone;
-mod fast_periodic;
 mod fixed_etd;
 mod full_period;
 mod monodromy;
 mod floquet;
-mod generator_mean;
 mod harmonics;
-mod hilbert_floquet;
 mod lapack;
 mod matrix_probe;
 mod native_superlu;
 mod optical_schur;
-mod modal_defect;
-mod multitone_action;
-mod multitone_frame;
-mod periodic_action;
-mod radiative_bath;
-mod radiative_boundary;
-mod radiative_solve;
-mod small_periodic;
-mod small_periodic_mean;
 mod stationary_structure;
 mod structured_lindblad;
 mod structured_floquet;
 mod sylvester_recycling;
 mod stationary_sylvester;
-mod unitary_monodromy;
 #[cfg(feature="population-core")]
 mod population_core_adapter;
 use lapack::Lapack;
 const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/2";
-const ATOMIC_MODEL_SCHEMA: &str = "rb87-dipole/2";
+const FULL_MODEL_SCHEMA: &str = "rb87-full/2";
+const GENERIC_MODEL_SCHEMA: &str = "generic-lindblad/1";
 
 #[derive(Clone, Copy, Default, Debug)]
 struct C {
@@ -227,8 +213,6 @@ struct Request {
     #[serde(default)]
     model_schema: Option<String>,
     #[serde(default)]
-    radiation: Option<radiative_bath::Radiation>,
-    #[serde(default)]
     options: Options,
     #[serde(default)]
     progress: bool,
@@ -236,7 +220,7 @@ struct Request {
 
 thread_local! {static PROGRESS_REQUEST:std::cell::RefCell<Option<(Value,String,Option<Vec<Vec<i32>>>)>>=const{std::cell::RefCell::new(None)};}
 fn stamp_progress_coordinates(result:&mut Value,schema:&str,mapping:Option<&Vec<Vec<i32>>>)->bool{
-    if schema!="rb87-full/2"{return true;}
+    if schema!=FULL_MODEL_SCHEMA{return true;}
     let Some(mapping)=mapping else{return false;};
     result["diagnostics"]["carrierSourceToBasis"]=json!(mapping);
     result["diagnostics"]["frequencyCoordinateSource"]=json!("declared-carrier-coordinates");true
@@ -1762,7 +1746,7 @@ mod period_routing_tests{
         let mapping=vec![vec![1],vec![3]];
         assert!(stamp_progress_coordinates(&mut declared,"rb87-full/2",Some(&mapping)));
         assert_eq!(declared["diagnostics"]["carrierSourceToBasis"],json!(mapping));
-        let mut legacy=json!({"diagnostics":{}});assert!(stamp_progress_coordinates(&mut legacy,"rb87-full/1",None));
+        let mut legacy=json!({"diagnostics":{}});assert!(stamp_progress_coordinates(&mut legacy,GENERIC_MODEL_SCHEMA,None));
         assert!(legacy["diagnostics"].get("carrierSourceToBasis").is_none());
         let mut static_zero=json!({"diagnostics":{}});assert!(stamp_progress_coordinates(&mut static_zero,"rb87-full/2",Some(&vec![])));
         assert_eq!(static_zero["diagnostics"]["carrierSourceToBasis"],json!([]));
@@ -1787,23 +1771,17 @@ fn fixed_etd_result(lap:&Lapack,model:&Model,options:&Options)->Result<Value,Str
     result["diagnostics"]["elapsedMs"]=json!(started.elapsed().as_secs_f64()*1000.);Ok(result)
 }
 
-fn full_model_solve(solver:&mut Solver,input:&Model,options:&Options,declared_schema:bool)->Result<Value,String>{
+fn full_model_solve(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
     options.validate_population_tolerance()?;
-    let declared_basis=if declared_schema{
-        if input.frequency_coordinates.is_none(){return Err("rb87-full/2 requires authoritative frequencyCoordinates metadata".into());}
-        Some(harmonics::model_frequency_basis(input,16)?)
-    }else{None};
+    if model.frequency_coordinates.is_none(){return Err("rb87-full/2 requires authoritative frequencyCoordinates metadata".into());}
+    let basis=harmonics::model_frequency_basis(model,16)?;
     // Request-local phase metadata must precede EVERY possible progress path,
     // including effective_krylov's static mean without Fourier coefficients.
-    if let Some(basis)=&declared_basis{PROGRESS_REQUEST.with(|context|{
-        if let Some((_,schema,mapping))=context.borrow_mut().as_mut(){if schema=="rb87-full/2"{*mapping=basis.source_to_basis.clone();}}
-    });}
-    // /1 retains its original omega-literal semantics even if an unexpected
-    // newer metadata field is present. Only /2 declares those phase relations.
-    let legacy=if !declared_schema&&input.frequency_coordinates.is_some(){let mut model=input.clone();model.frequency_coordinates=None;Some(model)}else{None};
-    let model=legacy.as_ref().unwrap_or(input);
+    PROGRESS_REQUEST.with(|context|{
+        if let Some((_,schema,mapping))=context.borrow_mut().as_mut(){if schema==FULL_MODEL_SCHEMA{*mapping=basis.source_to_basis.clone();}}
+    });
     #[cfg(feature="population-core")]
-    if population_core_adapter::supports(model,options,declared_schema)
+    if population_core_adapter::supports(model,options)
         && !full_period_requested(model,options)
         && std::env::var_os("ATOM_FIXED_ETD").is_none()
         && std::env::var_os("ATOM_MONODROMY").is_none()
@@ -1820,11 +1798,9 @@ fn full_model_solve(solver:&mut Solver,input:&Model,options:&Options,declared_sc
             v["diagnostics"]["fastPathFallback"]=json!(reason);v["diagnostics"]["elapsedMs"]=json!(start.elapsed().as_secs_f64()*1000.);v
         })}
     }?;
-    if let Some(basis)=declared_basis{
-        result["diagnostics"]["frequencyCoordinateSource"]=json!(basis.source());
-        result["diagnostics"]["carrierSourceToBasis"]=json!(basis.source_to_basis);
-        result["diagnostics"]["frequencyReconstructionErrors"]=json!(basis.reconstruction_errors);
-    }
+    result["diagnostics"]["frequencyCoordinateSource"]=json!(basis.source());
+    result["diagnostics"]["carrierSourceToBasis"]=json!(basis.source_to_basis);
+    result["diagnostics"]["frequencyReconstructionErrors"]=json!(basis.reconstruction_errors);
     Ok(result)
 }
 
@@ -1855,9 +1831,9 @@ pub fn main() {
         }
         let output = match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
-                PROGRESS_REQUEST.with(|p|*p.borrow_mut()=if request.progress{Some((request.id.clone(),request.model_schema.clone().unwrap_or("generic-lindblad/1".into()),None))}else{None});
+                PROGRESS_REQUEST.with(|p|*p.borrow_mut()=if request.progress{Some((request.id.clone(),request.model_schema.clone().unwrap_or(GENERIC_MODEL_SCHEMA.into()),None))}else{None});
                 if request.op.as_deref() == Some("capabilities") {
-                    json!({"id":request.id,"protocol":NATIVE_PROTOCOL,"capabilities":[ATOMIC_MODEL_SCHEMA,"rb87-effective/1","rb87-full/1","rb87-full/2","generic-lindblad/1"]})
+                    json!({"id":request.id,"protocol":NATIVE_PROTOCOL,"capabilities":[FULL_MODEL_SCHEMA,GENERIC_MODEL_SCHEMA]})
                 } else {
                     let result = if request.op.is_some() {
                         Err("Unknown native operation".into())
@@ -1868,14 +1844,10 @@ pub fn main() {
                         solver.cache.clear();
                         solver.stationary_cache.clear();
                         floquet::clear_request_results();
-                        match(request.model_schema.as_deref(),request.radiation.as_ref()){
-                            (Some("rb87-full/1"),_)=>full_model_solve(&mut solver,model,&request.options,false),
-                            (Some("rb87-full/2"),_)=>full_model_solve(&mut solver,model,&request.options,true),
-                            (Some("rb87-effective/1"),_)=>{let start=Instant::now();match effective_krylov::solve(&mut solver,model,&request.options){Ok(v)=>Ok(v),Err(reason)=>solver.solve(model,&request.options).map(|mut v|{v["diagnostics"]["fastPathFallback"]=json!(reason);v["diagnostics"]["elapsedMs"]=json!(start.elapsed().as_secs_f64()*1000.);v})}},
-                            (Some(ATOMIC_MODEL_SCHEMA),Some(radiation))=>radiative_solve::solve(&mut solver,model,radiation,&request.options),
-                            (Some(ATOMIC_MODEL_SCHEMA),None)=>Err("rb87-dipole/2 requires its common-vacuum radiation metadata; no legacy decay fallback is permitted".into()),
-                            (None,None)|(Some("generic-lindblad/1"),None)=>solver.solve(model,&request.options),
-                            _=>Err("Unsupported or incomplete native model schema/radiation metadata".into()),
+                        match request.model_schema.as_deref(){
+                            Some(FULL_MODEL_SCHEMA)=>full_model_solve(&mut solver,model,&request.options),
+                            None|Some(GENERIC_MODEL_SCHEMA)=>solver.solve(model,&request.options),
+                            _=>Err("Unsupported native model schema".into()),
                         }
                     } else {
                         Err("A solve request requires a model".into())
@@ -1886,7 +1858,7 @@ pub fn main() {
                             result["modelSchema"] = json!(request
                                 .model_schema
                                 .as_deref()
-                                .unwrap_or("generic-lindblad/1"));
+                                .unwrap_or(GENERIC_MODEL_SCHEMA));
                             json!({"id":request.id,"protocol":NATIVE_PROTOCOL,"result":result})
                         }
                         Err(error) => {

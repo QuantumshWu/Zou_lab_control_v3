@@ -11,8 +11,8 @@ use atom_population_core::owned_prepared::runtime_core::RuntimeCore;
 use atom_population_core::owned_prepared::population_control::RequestedGroup;
 use atom_population_core::owned_prepared::finite_driver::{self,FiniteOptions};
 
-pub fn supports(model:&Model,options:&Options,declared:bool)->bool {
-    declared&&!options.steady_only&&!options.return_density&&model.dimension==32
+pub fn supports(model:&Model,options:&Options)->bool {
+    !options.steady_only&&!options.return_density&&model.dimension==32
         &&model.states.len()==32&&model.frequency_coordinates.is_some()
         &&std::env::var("ATOM_POPULATION_CORE").as_deref()!=Ok("0")
 }
@@ -106,7 +106,7 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
     if options.include_asymptotic {
         solver.lap.restore_configured_threads()?;
         let mean_options=Options{steady_only:true,return_density:false,..*options};
-        match full_model_solve(solver,model,&mean_options,true){
+        match full_model_solve(solver,model,&mean_options){
             Ok(mean)=>{
                 publish_mean(mean.clone());
                 if let Some(fields)=mean.as_object(){
