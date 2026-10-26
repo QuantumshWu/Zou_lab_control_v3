@@ -46,3 +46,27 @@ export function targetDetuningMHz(initial:Level,target:Level,laser:Laser):number
   if(initial.manifold!=='ground'&&target.manifold==='ground')return laserCarrierOffsetMHz(laser,initial.manifold)-(initial.energyMHz-target.energyMHz);
   return undefined;
 }
+
+/** Whether a laser's photon is drawn downward: stimulated emission from an excited
+ * reference state; for a reference level only when the laser says so. A flag left
+ * from an earlier reference level never applies to a real state. */
+export function laserEmits(scene:Scene,laser:Laser,states:readonly Pick<Level,'id'|'manifold'>[]):boolean{
+  const id=laserReferenceStateId(scene,laser);
+  if(scene.references?.some(r=>r.id===id))return laser.referenceProcess==='emission';
+  const state=states.find(s=>s.id===id);return state!==undefined&&state.manifold!=='ground';
+}
+/** The laser's diagram origin; the photon direction belongs to a reference level and goes with it. */
+export function setLaserReferenceState(scene:Scene,laser:Laser,id:string|undefined):void{
+  if(id)laser.referenceStateId=id;else delete laser.referenceStateId;
+  if(!id||!scene.references?.some(r=>r.id===id))delete laser.referenceProcess;
+}
+/** A reference level's card, read by the rule of the manifold its energy lies in, as a
+ * state there is (levelReadoutMHz): on the ground side the energy relative to the laser's
+ * reference state, (E_ref − E)/h, on an excited side the detuning from the photon's end. */
+export function referenceReadoutMHz(o:{sourceEnergyMHz:number|undefined;sourceManifold?:Level['manifold'];emission:boolean;photonEnergyMHz:number|undefined},energyMHz:number,manifold:Level['manifold']):number|undefined{
+  const {sourceEnergyMHz:source,photonEnergyMHz:photon}=o;
+  if(source===undefined)return undefined;
+  if(!o.emission)return manifold==='ground'?source-energyMHz:photon===undefined?undefined:photon-energyMHz;
+  if(manifold==='ground')return photon===undefined?undefined:energyMHz-photon;
+  return o.sourceManifold===manifold?source-energyMHz:undefined;
+}

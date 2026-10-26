@@ -247,15 +247,23 @@ button.legend-item.selected { background: var(--selected); border-color: var(--s
 .advanced-controls { margin-top: var(--section-gap); border-top: var(--edge) solid var(--divider); }
 .advanced-controls > .form { margin-top: var(--row-gap); }
 .laser-regime-status { grid-column: 1 / -1; margin: 0; color: var(--red-dark); white-space: normal; }
-/* The laser's frequency rows (their own unit column until the frequency inputs move to v3 Field). */
-.section-choice.segmented { margin-left: auto; font-weight: 400; }
+/* The reference editor's number box and its unit column. */
 .number-field { flex: 1 1 0; min-width: 0; }
 .number-field input { font-variant-numeric: tabular-nums; }
 .field-control > .unit, .field-control > .unit-picker { flex: none; width: calc(var(--combo-chrome) + 3em); min-width: calc(var(--combo-chrome) + 3em); }
 .field-control > .unit { padding-left: var(--field-text-inset); color: var(--muted-ink); white-space: nowrap; }
-.field-readout { display: block; min-width: 0; height: var(--control); align-content: center; padding: 0 0 var(--cap-lift) var(--field-text-inset); overflow: hidden; text-overflow: ellipsis; color: var(--muted-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .field-control > .segmented { min-width: 0; }
 .field-control > select.tree-combo:not(.unit-picker) { width: 100%; min-width: 0; }
+/* The frequency readout (ui-design.md §1.4): the reading, its unit, its base -- display only. */
+.frequency-reading { flex: 1 1 auto; min-width: 0; font-variant-numeric: tabular-nums; }
+.pair-frequency { display: flex; flex-wrap: wrap; align-items: center; gap: var(--row-gap); min-width: 0; }
+.pair-frequency > .pair-label, .pair-frequency > .frequency-base-label { flex: none; color: var(--muted-ink); padding-bottom: var(--cap-lift); }
+.pair-frequency > .frequency-reading { flex: 0 1 auto; padding-left: 0; }
+.pair-frequency > .unit-picker { flex: none; width: calc(var(--combo-chrome) + 3em); min-width: calc(var(--combo-chrome) + 3em); }
+.pair-frequency > .frequency-base-label { margin-left: var(--section-gap); }
+.pair-frequency > select.frequency-base { flex: 0 1 auto; width: auto; min-width: 0; }
+/* The level diagram's one line saying what its labels are (ui-design.md §1.5). */
+.levels-legend { flex: none; margin: 0; }
 
 /* ---------- 模型说明 ------------------------------------------------------ */
 /* Centred on the window, it never reaches into the title bar band above it. */

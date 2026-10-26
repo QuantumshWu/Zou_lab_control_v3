@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { defaultScene, defaultTweezer } from '../dist/js/atom-workbench/src/types.js';
 import { analyze, atomicSystem, couplingBetweenStates, laserCarrierOffsetMHz, laserFrequencyDifferenceMHz, laserFrequencyMHz,
   laserIntensityMWcm2, RB87, transitionReferenceMHz, zeroFieldTransitionFrequencyMHz } from '../dist/js/atom-workbench/src/physics.js';
-import { DETUNING_UNITS, detuningInUnit, laserDetuningMHz, normalizeLaserFrequency,
+import { DETUNING_UNITS, detuningInUnit, laserDetuningMHz, naturalDetuningUnit, normalizeLaserFrequency,
   setLaserDetuningUnit, setLaserDetuningValue, setLaserFrequencyMode, setLaserTransitionReference,
   setLaserWavelengthNm, zeroFieldTransitionOptions } from '../dist/js/atom-workbench/src/laser-frequency.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
@@ -33,18 +33,18 @@ test('legacy scene migration preserves original absolute laser frequencies',()=>
     normalizeLaserFrequency(beam);
     near(laserFrequencyMHz(beam),expected,1e-7);
     assert.deepEqual(beam.referenceTransition,{line,Fg:2,Fe:line==='D1'?2:3});
-    assert.ok(Math.abs(detuningInUnit(beam))<=5000);
+    assert.equal(beam.detuningUnit,naturalDetuningUnit(delta),'a legacy beam without a unit is read in its natural unit');
   }
 });
 
-test('reference and unit changes preserve actual frequency; oversized values escalate without clamping',()=>{
+test('reference and unit changes preserve actual frequency and keep the operator unit',()=>{
   const beam=laser();beam.detuningMHz=13.781234;
   const initial=laserFrequencyMHz(beam),carrier=laserCarrierOffsetMHz(beam);
   for(const ref of zeroFieldTransitionOptions('D2')) {
     setLaserTransitionReference(beam,ref);
     near(laserCarrierOffsetMHz(beam),carrier,2e-12);
     near(laserFrequencyMHz(beam),initial,1e-7);
-    assert.ok(Math.abs(detuningInUnit(beam))<=5000);
+    assert.equal(beam.detuningUnit,'MHz');
   }
   for(const ref of zeroFieldTransitionOptions()) {
     setLaserTransitionReference(beam,ref);
@@ -53,25 +53,26 @@ test('reference and unit changes preserve actual frequency; oversized values esc
       const delta=beam.detuningMHz;
       setLaserDetuningUnit(beam,unit);
       assert.equal(beam.detuningMHz,delta);
-      assert.ok(Math.abs(detuningInUnit(beam))<=5000);
+      assert.equal(beam.detuningUnit,unit);
       near(laserFrequencyMHz(beam),initial,1e-7);
     }
   }
 });
 
-test('±5000 input accepts current units, preserves Hz precision, and rejects nonpositive optical frequency',()=>{
+test('a detuning has no per-unit range: any finite value with a positive optical frequency, Hz precision kept',()=>{
   const beam=laser();
   for(const unit of ['Hz','kHz','MHz','GHz']) {
     beam.detuningMHz=0;setLaserDetuningUnit(beam,unit);
-    for(const value of [-5000,5000]) {setLaserDetuningValue(beam,value);near(detuningInUnit(beam),value);}
+    for(const value of [-5000,5000,-12345.678,98765.4321]) {setLaserDetuningValue(beam,value);near(detuningInUnit(beam),value,Math.abs(value)*1e-15);assert.equal(beam.detuningUnit,unit);}
   }
   beam.detuningMHz=0;setLaserDetuningUnit(beam,'Hz');setLaserDetuningValue(beam,.125);
   assert.equal(beam.detuningMHz,.125e-6);
   setLaserDetuningUnit(beam,'THz');const before=structuredClone(beam);
   assert.throws(()=>setLaserDetuningValue(beam,-5000),/大于零/);
   assert.deepEqual(beam,before);
-  assert.throws(()=>setLaserDetuningValue(beam,5001),/输入范围/);
-  assert.throws(()=>setLaserDetuningValue(beam,NaN),/输入范围/);
+  assert.throws(()=>setLaserDetuningValue(beam,5001),/±5000 THz/,'the scene file bound, not a unit range');
+  assert.throws(()=>setLaserDetuningValue(beam,NaN),/有限/);
+  setLaserDetuningValue(beam,1.5);near(laserDetuningMHz(beam),1.5e6,1e-6);
 });
 
 test('852 nm tweezer is present, enabled and physically specified as ordinary power-mode laser',()=>{

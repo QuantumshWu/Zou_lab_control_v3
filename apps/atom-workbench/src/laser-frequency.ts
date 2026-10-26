@@ -7,7 +7,8 @@ export const DETUNING_UNITS: readonly DetuningUnit[] = ['Hz','kHz','MHz','GHz','
 export const DETUNING_UNIT_MHZ: Readonly<Record<DetuningUnit,number>> = {
   Hz: 1e-6, kHz: 1e-3, MHz: 1, GHz: 1e3, THz: 1e6,
 };
-export const MAX_DETUNING_VALUE = 5000;
+/** The scene file's bound on a detuning (±5000 THz); the unit is only how it is read. */
+export const MAX_DETUNING_MHZ = 5e9;
 const C_NM_MHZ = 299792458000;
 
 /** All existing zero-field hyperfine energy differences across D-line manifolds. The transition
@@ -44,17 +45,19 @@ export function detuningInUnit(laser:Laser,unit:DetuningUnit=laser.detuningUnit?
   return laserDetuningMHz(laser)/DETUNING_UNIT_MHZ[unit];
 }
 
-/** Prefer the chosen unit, escalating only if ±5000 cannot represent the
- * physical detuning. Never clamp or silently change an optical frequency. */
-export function suitableDetuningUnit(detuningMHz:number,preferred:DetuningUnit='MHz'):DetuningUnit {
+/** The unit a detuning reads naturally in: the largest whose reading is at least 1. */
+export function naturalDetuningUnit(detuningMHz:number):DetuningUnit {
   if(!Number.isFinite(detuningMHz))throw new Error('失谐必须是有限数值。');
-  const index=DETUNING_UNITS.indexOf(preferred);
-  if(index<0)throw new Error('未知的失谐单位。');
-  for(let i=index;i<DETUNING_UNITS.length;i++) {
-    const unit=DETUNING_UNITS[i];
-    if(Math.abs(detuningMHz)<=MAX_DETUNING_VALUE*DETUNING_UNIT_MHZ[unit])return unit;
-  }
-  throw new Error('当前失谐超出 ±5000 THz。');
+  const magnitude=Math.abs(detuningMHz);
+  return magnitude>=1e6?'THz':magnitude>=1e3?'GHz':magnitude>=1||magnitude===0?'MHz':magnitude>=1e-3?'kHz':'Hz';
+}
+/** The operator's unit when there is one (a unit only changes how the value is read,
+ * ui-design.md §0.4), else the natural one. Never clamps an optical frequency. */
+export function suitableDetuningUnit(detuningMHz:number,preferred?:DetuningUnit):DetuningUnit {
+  if(!Number.isFinite(detuningMHz))throw new Error('失谐必须是有限数值。');
+  if(preferred===undefined)return naturalDetuningUnit(detuningMHz);
+  if(!DETUNING_UNITS.includes(preferred))throw new Error('未知的失谐单位。');
+  return preferred;
 }
 
 export function setLaserDetuningUnit(laser:Laser,unit:DetuningUnit):DetuningUnit {
@@ -62,8 +65,9 @@ export function setLaserDetuningUnit(laser:Laser,unit:DetuningUnit):DetuningUnit
 }
 
 export function setLaserDetuningValue(laser:Laser,value:number):void {
-  if(!Number.isFinite(value)||Math.abs(value)>MAX_DETUNING_VALUE)throw new Error('失谐输入范围为 −5000 至 +5000（当前单位）。');
+  if(!Number.isFinite(value))throw new Error('失谐必须是有限数值。');
   const unit=laser.detuningUnit??'MHz',delta=value*DETUNING_UNIT_MHZ[unit],ref=laserReferenceTransition(laser);
+  if(Math.abs(delta)>MAX_DETUNING_MHZ)throw new Error('失谐超出 ±5000 THz。');
   checkReference(ref);
   if(!(zeroFieldTransitionFrequencyMHz(ref.line,ref.Fg,ref.Fe,ref.fromManifold)+delta>0))throw new Error('失谐后的光学频率必须大于零。');
   // Entering a detuning explicitly selects the transition parametrization.
@@ -87,7 +91,7 @@ export function setLaserTransitionReference(laser:Laser,reference:ZeroFieldTrans
   checkReference(reference);
   const anchor=captureLaserFrequencyAnchor(laser);
   const delta=laserCarrierOffsetMHz(laser,reference.line)-transitionReferenceMHz(reference.line,reference.Fg,reference.Fe,reference.fromManifold);
-  const unit=suitableDetuningUnit(delta,laser.detuningUnit??'MHz');
+  const unit=suitableDetuningUnit(delta,laser.detuningUnit);
   if(!(zeroFieldTransitionFrequencyMHz(reference.line,reference.Fg,reference.Fe,reference.fromManifold)+delta>0))throw new Error('光学频率必须大于零。');
   laser.line=reference.line;laser.referenceTransition={...reference};laser.detuningMHz=delta;laser.detuningUnit=unit;
   laser.frequencyAnchor={...anchor,viewKey:laserFrequencyViewKey(laser)};
@@ -99,11 +103,22 @@ export function setLaserFrequencyMode(laser:Laser,mode:'transition'|'wavelength'
   if(!Number.isFinite(frequency)||!(frequency>0))throw new Error('光学频率必须是正的有限数值。');
   if(mode==='wavelength')laser.wavelengthNm=C_NM_MHZ/frequency;
   else {
-    const delta=laserDetuningMHz(laser),unit=suitableDetuningUnit(delta,laser.detuningUnit??'MHz');
+    const delta=laserDetuningMHz(laser),unit=suitableDetuningUnit(delta,laser.detuningUnit);
     laser.detuningMHz=delta;laser.detuningUnit=unit;
   }
   laser.frequencyMode=mode;
   laser.frequencyAnchor={...anchor,viewKey:laserFrequencyViewKey(laser)};
+}
+
+/** The base a beam's frequency is written against (ui-design.md §1.3): absolute (a vacuum
+ * wavelength) or a zero-field transition. Changing it never changes the optical frequency. */
+export function setLaserFrequencyBase(laser:Laser,base:{kind:'absolute'}|({kind:'transition'}&ZeroFieldTransition)):void {
+  if(base.kind==='absolute'){if(laser.frequencyMode!=='wavelength')setLaserFrequencyMode(laser,'wavelength');return;}
+  const {kind:_kind,...reference}=base;
+  const next:Laser=structuredClone(laser);
+  if(next.frequencyMode==='wavelength')setLaserFrequencyMode(next,'transition');
+  setLaserTransitionReference(next,reference);
+  Object.assign(laser,next);
 }
 
 /** Upgrade a legacy beam explicitly: a missing reference always means its
@@ -115,7 +130,7 @@ export function normalizeLaserFrequency(laser:Laser):Laser {
   if(laser.frequencyMode!==undefined&&laser.frequencyMode!=='transition'&&laser.frequencyMode!=='wavelength')throw new Error('未知的频率输入模式。');
   const frequency=laserFrequencyMHz(laser);
   if(!Number.isFinite(frequency)||!(frequency>0))throw new Error('光学频率必须是正的有限数值。');
-  const delta=laserDetuningMHz(laser),unit=suitableDetuningUnit(delta,laser.detuningUnit??'MHz');
+  const delta=laserDetuningMHz(laser),unit=suitableDetuningUnit(delta,laser.detuningUnit);
   const anchor=captureLaserFrequencyAnchor(laser);
   laser.referenceTransition=ref;laser.frequencyMode??='transition';laser.detuningMHz=delta;laser.detuningUnit=unit;
   laser.frequencyAnchor={...anchor,viewKey:laserFrequencyViewKey(laser)};

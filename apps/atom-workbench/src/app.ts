@@ -16,21 +16,22 @@ import {drawBadges} from '../../desktop/ui/src/pulse/widgets.js';
 import {Segmented,setChecked,switchButton,checkBox} from '../../desktop/ui/src/fluent/toggles.js';
 import {comparisonPair,chooseComparisonFrom,chooseComparisonTo,swapComparison,clickComparison,type ComparisonChoice} from './transition-choice.js';
 import {referenceFromLaser} from './reference-draft.js';
-import {stateTree,transitionTree} from './choice-trees.js';
+import {frequencyBaseTree,stateTree} from './choice-trees.js';
 import {alignLevelReadouts} from './readout-alignment.js';
-import {DETUNING_UNIT_MHZ,detuningInUnit,laserDetuningMHz,laserReferenceTransition,normalizeLaserFrequency,setLaserDetuningUnit,setLaserDetuningValue,setLaserFrequencyMode,setLaserTransitionReference,setLaserWavelengthNm,zeroFieldTransitionOptions} from './laser-frequency.js';
-import {absoluteEnergyMHz,analyze,dipoleBetweenStates,laserFrequencyMHz,laserIntensityMWcm2,laserDirectionAxis,setLaserDirectionAxis,relativeDirectionAxis,setPolarizationPreset,composeMagneticField,type PolarizationPreset} from './physics.js';
+import {DETUNING_UNIT_MHZ,detuningInUnit,laserReferenceTransition,naturalDetuningUnit,normalizeLaserFrequency,setLaserDetuningUnit,setLaserDetuningValue,setLaserFrequencyBase,setLaserWavelengthNm,zeroFieldTransitionOptions} from './laser-frequency.js';
+import {FREQUENCY_UNITS,WAVELENGTH_UNITS,UNIT_NM,baseValue,difference,gap,inUnit,isWavelengthUnit,laserValue,levelValue,nearestTransition,parseBase,photon,readingHeading,readoutText,referenceLevelValue,transitionKey,type FrequencyValue,type WavelengthUnit} from './frequency-value.js';
+import {FrequencyReadout,ReadoutPreferences} from './frequency-controls.js';
+import {analyze,dipoleBetweenStates,laserIntensityMWcm2,laserDirectionAxis,setLaserDirectionAxis,relativeDirectionAxis,setPolarizationPreset,composeMagneticField,type PolarizationPreset} from './physics.js';
 import {normalizeLaserIntensity,setLaserIntensityMode,setLaserLocalIntensity,setLaserPowerMW,setLaserWaistUm} from './laser-intensity.js';
 import {dynamicsCacheKey} from './dynamics-cache-key.js';
 import {CurrentDynamicsResults} from './current-dynamics-results.js';
-import {referenceEnergyMHz} from './reference-energy.js';
 import {spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
 import {defaultDynamics,defaultScene,DEFAULT_TWEEZER_WAVELENGTH_NM,MAX_POPULATION_TOLERANCE,resolvePopulationTolerance} from './types.js';
 import type {Analysis,AxisAngles,DynamicsSettings,DetuningUnit,Laser,Level,Scene,SpectralLine,Transition} from './types.js';
 import {isTimeAverage,type DynamicsResult} from './solver-types.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
 import {validateScene} from './scene-file.js';
-import {incidentTransitions,laserReferenceStateId,transitionEndpoints} from './transition-view.js';
+import {incidentTransitions,laserReferenceStateId,setLaserReferenceState,transitionEndpoints} from './transition-view.js';
 import {escapeHtml as esc,levelsChart,number,populationChart,bindPopulationChart,populationColor,populationValue,populationSamplingInfo} from './charts.js';
 import {math} from './math.js';
 import {renderSpace3D,type SpaceSelection,type SpaceViewName} from './space3d.js';
@@ -124,7 +125,7 @@ workbench.prepend(header,strip.root);
 const tabs=new TabWidget();tabs.root.classList.add('main-tabs');
 const page=(key:View,markup:string)=>{const node=element('div',`atom-page ${key}-page`);node.innerHTML=markup;return node;};
 const levelsPage=page('levels',`<div class="title-row page-title"><span class="heading" id="levels-heading"></span><span id="beam-chip-slot"></span><span class="summary" id="levels-badge"></span><span id="levels-commands"></span></div>
-<div class="population-toolbar" id="population-toolbar"></div><div class="chart-surface" id="levels-chart"></div>
+<p class="note wrap levels-legend" id="levels-legend"></p><div class="population-toolbar" id="population-toolbar"></div><div class="chart-surface" id="levels-chart"></div>
 <div id="selection-readout" class="state-selection-panel"></div><section class="details-card" id="levels-details"></section>`);
 const dynamicsPage=page('dynamics',`<div class="title-row page-title"><span class="summary" id="dynamics-beams"></span><span id="dynamics-commands"></span></div>
 <div id="dynamics-controls" class="dynamics-controls"></div><div class="chart-surface" id="population-chart"></div><div class="chart-caption" id="population-caption"></div>
@@ -181,10 +182,9 @@ function allLevels(a=latestAnalysis):Level[]{return [...a.ground,...a.D1,...a.D2
 function getLevel(id:string,a=latestAnalysis):Level|undefined{return allLevels(a).find(l=>l.id===id);}
 function stateText(l:Level):string{return stateLabel(l);}
 function measuredNumber(value:number,places=4):string{if(value!==0&&Number.isFinite(value)&&Math.abs(value)<10**(-places))return formatNumber(value,{digits:3});return number(value,places);}
-function frequencyText(valueMHz:number):string{if(!Number.isFinite(valueMHz))return '—';const magnitude=Math.abs(valueMHz),scale=magnitude>=1e6?1e6:magnitude>=1e3?1e3:magnitude>=1?1:magnitude>=.001?.001:.000001,unit=scale===1e6?'THz':scale===1e3?'GHz':scale===1?'MHz':scale===.001?'kHz':'Hz';return `${number(valueMHz/scale,scale===1e6?12:scale===1e3?9:6)} ${unit}`;}
+function frequencyText(valueMHz:number):string{if(!Number.isFinite(valueMHz))return '—';const unit=naturalDetuningUnit(valueMHz);return `${readoutText(inUnit(valueMHz,unit),false)} ${unit}`;}
 function stateCell(id:string):string{return `<span class="state-label">${esc(idText(id))}</span>`;}
 function idText(id:string):string{const l=getLevel(id);return l?stateText(l):scene.references?.find(r=>r.id===id)?.name??id;}
-function absolute(id:string):number|undefined{const l=getLevel(id);if(l)return absoluteEnergyMHz(l);const r=scene.references?.find(r=>r.id===id);return r?referenceEnergyMHz(r,allLevels()):undefined;}
 function activeLaser(_line?:SpectralLine):Laser|undefined{return selection.kind==='laser'?scene.lasers.find(l=>l.id===selection.id):undefined;}
 function referenceStateId(laser=activeLaser()):string{return laserReferenceStateId(scene,laser);}
 function dynamics():DynamicsSettings{const d=scene.dynamics??(scene.dynamics=defaultDynamics());d.populationTolerance=resolvePopulationTolerance(d.populationTolerance);return d;}
@@ -320,27 +320,10 @@ function bindField(registry:Map<string,BoundField>,parent:HTMLElement,prefix:str
 function refreshFields(registry:Map<string,BoundField>):void{for(const {field,spec} of registry.values())field.update(spec());}
 const numberSpec=(name:string,label:string,value:number,unit:string,extra:Partial<FieldSpec>={}):FieldSpec=>({name,label,kind:'number',value,unit,...extra});
 
-type NumericControl={input:HTMLInputElement;setValue:(value:number)=>void;setUnit:(unit:string)=>void};
-const numericControls=new Map<string,NumericControl>();
 function group(title:string,parent=$('inspector-controls')):HTMLElement{const section=element('section','control-section');const g=form();g.append(sectionTitle(title));section.append(g);parent.append(section);return g;}
-/** The laser's frequency inputs (their unit picker and bounds are redesigned separately). */
-function numeric(parent:HTMLElement,label:string,key:string,value:number,min:number,max:number,step:number,unit:string,onChange:(value:number)=>void,unitOptions?:{choices:string[];change:(unit:string)=>number;enabled?:(unit:string)=>boolean}):NumericControl{
-  const holder=element('div','number-field');const input=element('input');input.type='text';input.inputMode='decimal';input.id=`number-${key}`;input.value=String(value);input.spellcheck=false;input.setAttribute('aria-label',label);holder.append(input);
-  const unitEl=unitOptions?element('select'):element('span');unitEl.className=unitOptions?'unit-picker':'unit';
-  if(unitEl instanceof HTMLSelectElement){unitEl.setAttribute('aria-label',`${label}单位`);unitEl.append(comboFace(),...unitOptions!.choices.map(u=>new Option(u,u)));unitEl.value=unit;}else unitEl.textContent=unit;
-  const refreshUnits=()=>{if(unitEl instanceof HTMLSelectElement&&unitOptions?.enabled){let disabled=false;for(const option of unitEl.options){option.disabled=!unitOptions.enabled(option.value);option.title=option.disabled?`当前数值超出 ±5000 ${option.value}`:'';disabled||=option.disabled;}unitEl.title=disabled?'灰色单位无法在 ±5000 内表示当前失谐':'';}};refreshUnits();
-  const labelEl=element('label','',label);labelEl.htmlFor=input.id;const wrapper=fieldRow(labelEl,holder,unitEl);wrapper.classList.add('numeric-field');parent.append(wrapper);let current=value;
-  const commit=(next:number,source:string)=>{if(!Number.isFinite(next)||next<min||next>max){input.setAttribute('aria-invalid','true');return;}try{onChange(next);}catch(error){input.setAttribute('aria-invalid','true');input.title=message(error);return;}current=next;input.removeAttribute('aria-invalid');input.title='';if(source!=='number')input.value=String(next);spin.refresh();refreshUnits();update();renderObjects();};
-  const spin=new SpinBox(holder,input,{step:()=>step,bounds:()=>[min,max],commit:n=>commit(n,'spin'),decimal:!Number.isInteger(step)});spin.refresh();
-  input.oninput=()=>{const raw=input.value.trim();if(raw!==''&&Number.isFinite(Number(raw)))commit(Number(raw),'number');};input.onchange=()=>{if(!input.value.trim()||!Number.isFinite(Number(input.value))||Number(input.value)<min||Number(input.value)>max){input.value=String(current);input.removeAttribute('aria-invalid');spin.refresh();}};
-  const control={input,setValue:(n:number)=>{current=Number(n.toPrecision(15));input.value=String(current);spin.refresh();},setUnit:(u:string)=>{if(unitEl instanceof HTMLSelectElement)unitEl.value=u;else unitEl.textContent=u;refreshUnits();}};
-  if(unitEl instanceof HTMLSelectElement)unitEl.onchange=()=>{try{control.setValue(unitOptions!.change(unitEl.value));control.setUnit(unitEl.value);update();renderObjects();}catch(error){unitEl.value=unit;note(message(error),'error');}};
-  numericControls.set(key,control);return control;
-}
 function selectControl(parent:HTMLElement,label:string,value:string,options:[string,string][],changed:(value:string)=>void):HTMLSelectElement{
-  if(label==='零场参考'||label==='参考态'){
-    const groups=label==='零场参考'?transitionTree():stateTree(allLevels(),scene.references);
-    const tree=new TreeCombo(changed);tree.setTree(groups,value,label==='参考态'?'跟随动力学初态':null);tree.root.setAttribute('aria-label',label);treeOwners.set(tree.root,tree);const r=fieldRow(label,tree.root);r.classList.add('choice-field');parent.append(r);return tree.root;
+  if(label==='参考态'){
+    const tree=new TreeCombo(changed);tree.setTree(stateTree(allLevels(),scene.references),value,'跟随动力学初态');tree.root.setAttribute('aria-label',label);treeOwners.set(tree.root,tree);const r=fieldRow(label,tree.root);r.classList.add('choice-field');parent.append(r);return tree.root;
   }
   const el=element('select');el.setAttribute('aria-label',label);el.append(comboFace(),...options.map(([v,t])=>new Option(t,v)));el.value=value;el.onchange=()=>changed(el.value);const r=fieldRow(label,el);r.classList.add('choice-field');parent.append(r);return el;
 }
@@ -348,9 +331,6 @@ function setChoiceValue(control:HTMLSelectElement,value:string):void{const tree=
 function disposeTrees(host:HTMLElement):void{host.querySelectorAll<HTMLSelectElement>('select.tree-combo').forEach(node=>treeOwners.get(node)?.dispose());}
 function segmentedControl(parent:HTMLElement,label:string,value:string,options:[string,string][],changed:(value:string)=>void):Segmented{
   const control=new Segmented(next=>{try{changed(String(next));control.setCurrent(next);}catch(error){note(message(error),'error');}});control.setChoices(options);control.setCurrent(value);control.root.setAttribute('aria-label',label);parent.append(fieldRow(label,control.root));return control;
-}
-function sectionChoice(parent:HTMLElement,label:string,value:string,options:[string,string][],changed:(value:string)=>void):HTMLElement{
-  const control=new Segmented(next=>{try{changed(String(next));control.setCurrent(next);}catch(error){note(message(error),'error');}});control.setChoices(options);control.setCurrent(value);control.root.setAttribute('aria-label',label);control.root.classList.add('section-choice');parent.querySelector('.section-title')!.append(control.root);return control.root;
 }
 /** Presets are commands, not modes. Rendering never selects or re-applies one. */
 function polarizationButtons(laser:Laser,choices:readonly (readonly [PolarizationPreset,string])[],label:string):HTMLElement{
@@ -374,7 +354,7 @@ function directionButtons(parent:HTMLElement,apply:(theta:number,phi:number,exac
 }
 function renderInspector():void{
   const host=$('inspector-controls');const panel=host.closest<HTMLElement>('.inspector-panel')!,scroll=panel.scrollTop;
-  disposeTrees(host);host.replaceChildren();numericControls.clear();inspectorFields.clear();directionCommands.length=0;
+  disposeTrees(host);host.replaceChildren();inspectorFields.clear();directionCommands.length=0;
   renameObject.hidden=!(selection.kind==='laser'?scene.lasers.some(l=>l.id===selection.id):scene.fields.some(f=>f.id===selection.id));
   if(selection.kind==='none'){setText('inspector-title','总场');host.append(element('p','note wrap inspector-empty','选择磁场或激光以编辑其参数。'));return;}
   const fields=inspectorFields;
@@ -389,12 +369,9 @@ function renderInspector():void{
     const l=scene.lasers.find(l=>l.id===selection.id);if(!l)return;normalizeLaserFrequency(l);normalizeLaserIntensity(l);setText('inspector-title',l.name);
     const mode=group('激光类型');segmentedControl(mode,'处理方式',l.regime??'near',[['near','近共振'],['far','远失谐']],value=>{l.regime=value as 'near'|'far';update();});
     const validation=element('p','laser-regime-status');validation.id='laser-regime-status';mode.append(validation);
-    const f=group('频率');sectionChoice(f,'频率指定方式',l.frequencyMode??'transition',[['transition','跃迁失谐'],['wavelength','真空波长']],v=>{setLaserFrequencyMode(l,v as 'transition'|'wavelength');renderInspector();renderObjects();update();});
-    const ref=laserReferenceTransition(l),refs=zeroFieldTransitionOptions();const referencePicker=selectControl(f,'零场参考',`${ref.fromManifold??'ground'}-${ref.line}-${ref.Fg}-${ref.Fe}`,refs.map(r=>[`${r.fromManifold??'ground'}-${r.line}-${r.Fg}-${r.Fe}`,r.label]),v=>{const next=refs.find(r=>`${r.fromManifold??'ground'}-${r.line}-${r.Fg}-${r.Fe}`===v)!;setLaserTransitionReference(l,next);numericControls.get('detuning')?.setValue(detuningInUnit(l));numericControls.get('detuning')?.setUnit(l.detuningUnit??'MHz');renderObjects();update();});referencePicker.title='改变失谐参考保持光频率不变；输入 Δ=0 可设为该零场跃迁共振。';
-    const originPicker=selectControl(f,'参考态',l.referenceStateId??'',[['','跟随动力学初态'],...allLevels().map(state=>[state.id,stateText(state)] as [string,string]),...(scene.references??[]).map(ref=>[ref.id,ref.name+' · 参考能级'] as [string,string])],id=>{if(id==='')delete l.referenceStateId;else l.referenceStateId=id;persist();renderInspector();renderResults(false);});originPicker.id='laser-reference-state';originPicker.setAttribute('aria-label','参考出发态');originPicker.title='只改变这束光的箭头起点和矩元参考；不改变动力学初态或任何驱动。';
-    if(l.frequencyMode==='wavelength')numeric(f,'波长 λ','wavelength',l.wavelengthNm??DEFAULT_TWEEZER_WAVELENGTH_NM,Number.MIN_VALUE,Number.MAX_VALUE,.01,'nm',n=>setLaserWavelengthNm(l,n));
-    else numeric(f,'失谐 Δ','detuning',detuningInUnit(l),-5000,5000,.01,l.detuningUnit??'MHz',n=>setLaserDetuningValue(l,n),{choices:['Hz','kHz','MHz','GHz','THz'],enabled:u=>Math.abs(laserDetuningMHz(l))<=5000*DETUNING_UNIT_MHZ[u as DetuningUnit],change:u=>{const actual=setLaserDetuningUnit(l,u as NonNullable<Laser['detuningUnit']>);queueMicrotask(()=>numericControls.get('detuning')?.setUnit(actual));return detuningInUnit(l);}});
-    const freq=element('span','field-readout');freq.id='laser-absolute-frequency';f.append(fieldRow('频率 ν',freq));
+    const f=group('频率');
+    frequencySection(f,l);
+    const originPicker=selectControl(f,'参考态',l.referenceStateId??'',[['','跟随动力学初态'],...allLevels().map(state=>[state.id,stateText(state)] as [string,string]),...(scene.references??[]).map(ref=>[ref.id,ref.name+' · 参考能级'] as [string,string])],id=>{setLaserReferenceState(scene,l,id||undefined);persist();renderInspector();renderResults(false);});originPicker.id='laser-reference-state';originPicker.setAttribute('aria-label','参考出发态');originPicker.title='只改变这束光的箭头起点和矩元参考；不改变动力学初态或任何驱动。';
     if(scene.references?.some(r=>r.id===l.referenceStateId))selectControl(f,'光子方向',l.referenceProcess??'absorption',[['absorption','吸收 ↑'],['emission','受激辐射 ↓']],v=>{l.referenceProcess=v as 'absorption'|'emission';update();});
     const strength=group('强度');
     bindField(fields,strength,'inspector',()=>({name:'intensity-mode',label:'指定方式',kind:'choice',segmented:true,choices:[['intensity','局域强度'],['power','功率与束腰']],value:l.intensityMode??'intensity'}),v=>{setLaserIntensityMode(l,v as 'intensity'|'power');},{after:()=>{renderInspector();update();}});
@@ -417,6 +394,29 @@ function renderInspector():void{
   }
   requestAnimationFrame(()=>{shareLabelColumn(host);panel.scrollTop=scroll;});
 }
+/** 频率 (ui-design.md §1.3–1.4): the definition -- "相对" a base and the value against it, a
+ * wavelength when the base is absolute -- then the frequency's readout, which reads it in any
+ * unit against any base without changing it. */
+const wavelengthUnits=new Map<string,WavelengthUnit>();
+const readoutPrefs=new ReadoutPreferences(`${STORAGE}-readouts`);
+const laserReadout=new FrequencyReadout('laser-frequency',readoutPrefs,{
+  bases:()=>frequencyBaseTree({absolute:'光频',absoluteText:'绝对',lasers:scene.lasers.filter(other=>other.id!==selection.id)}),defaultBase:'absolute',changed:()=>{},
+});
+function frequencySection(f:HTMLElement,l:Laser):void{
+  const fields=inspectorFields,absolute=l.frequencyMode==='wavelength';
+  bindField(fields,f,'inspector',()=>({name:'frequency-base',label:'相对',kind:'choice',tree:frequencyBaseTree({absolute:'真空波长'}),
+    value:l.frequencyMode==='wavelength'?'absolute':transitionKey(laserReferenceTransition(l)),description:'换基准不改变光频'}),
+    v=>{const base=parseBase(String(v));if(!base||base.kind==='laser')throw new Error('未知的频率基准');setLaserFrequencyBase(l,base);},{after:()=>{renderInspector();renderObjects();update();}});
+  if(absolute){
+    const unit=()=>wavelengthUnits.get(l.id)??'nm';
+    bindField(fields,f,'inspector',()=>({...numberSpec('wavelength','波长 λ',(l.wavelengthNm??DEFAULT_TWEEZER_WAVELENGTH_NM)/UNIT_NM[unit()],unit(),{spin:true,inexact:true}),units:WAVELENGTH_UNITS.map(u=>({value:u,label:u,group:'波长'}))}),
+      v=>setLaserWavelengthNm(l,Number(v)*UNIT_NM[unit()]),{unit:u=>{if(isWavelengthUnit(u))wavelengthUnits.set(l.id,u);}});
+  }else bindField(fields,f,'inspector',()=>({...numberSpec('detuning','失谐 Δ',detuningInUnit(l),l.detuningUnit??'MHz',{spin:true,inexact:true}),units:FREQUENCY_UNITS.map(u=>({value:u,label:u,group:'频率'}))}),
+    v=>setLaserDetuningValue(l,Number(v)),{unit:u=>{setLaserDetuningUnit(l,u as DetuningUnit);}});
+  // The reading has the row to itself (twelve digits need it); how it is read sits under it.
+  f.append(fieldRow('频率 ν',laserReadout.readout.root),fieldRow('读数相对',laserReadout.base.root,laserReadout.unit.root));
+  laserReadout.show(laserValue(l),scene);
+}
 function renderInitial():void{
   const current=getLevel(initialId())??getLevel(`ground-${scene.initialF}-${scene.initialM}`)!;if(!current)return;
   initialTree??=new TreeCombo(id=>setInitialState(id));initialTree.root.id='initial-state-picker';initialTree.root.setAttribute('aria-label','初态');initialTree.setTree(stateTree(allLevels()),current.id);
@@ -432,22 +432,44 @@ function paintStateBadges():void{
   document.querySelectorAll<HTMLElement>('.selection-index[data-badge-number]').forEach(host=>drawBadges(host,[[host.dataset.badgeNumber!,'scan']]));
   $('levels-chart').querySelectorAll<SVGGElement>('.state-selection-number').forEach(group=>{const holder=document.createElement('span');drawBadges(holder,[[group.dataset.badgeNumber!,'scan']]);const svg=holder.firstElementChild!;svg.setAttribute('x',group.dataset.badgeX!);svg.setAttribute('y',group.dataset.badgeY!);group.replaceChildren(svg);});
 }
+/** A state's energy as a frequency, E/h; undefined where the background spectrum is. */
+function stateValue(id:string):FrequencyValue|undefined{const l=getLevel(id);if(l)return levelValue(l);const r=scene.references?.find(r=>r.id===id);return r?referenceLevelValue(r,allLevels()):undefined;}
+/** A transition's photon frequency ν₁₂ = |E₂ − E₁|/h (the pickers say absorption or emission). */
+function photonValue(fromId:string,toId:string):FrequencyValue|undefined{const a=stateValue(fromId),b=stateValue(toId);return a&&b?photon(gap(a,b)):undefined;}
+/** "自动" (ui-design.md §1.4): a transition inside one manifold reads absolutely; an optical one
+ * relative to the selected laser (its detuning), else to the nearest zero-field transition. */
+function automaticBase(v:FrequencyValue|undefined):string|undefined{
+  if(!v||v.centroidMHz===0)return 'absolute';
+  const laser=activeLaser();if(laser)return `laser:${laser.id}`;
+  const t=nearestTransition(v,zeroFieldTransitionOptions());return t?transitionKey(t):undefined;
+}
+let pairValue:FrequencyValue|undefined;
+const pairReadout=new FrequencyReadout('pair',readoutPrefs,{
+  bases:()=>frequencyBaseTree({absolute:'光频',absoluteText:'绝对',lasers:scene.lasers}),
+  automatic:()=>automaticBase(pairValue),
+  changed:()=>renderResults(false),
+});
+const pairRow=element('div','pair-frequency'),pairLabel=element('span','pair-label','ν₁₂');pairLabel.title='跃迁频率 |E(终点) − E(起点)|/h';pairRow.append(pairLabel,pairReadout.readout.root,pairReadout.unit.root,pairReadout.baseLabel,pairReadout.base.root);
 function selectionReadout(a:Analysis,l:Laser|undefined):string{
   const origin=referenceStateId(l),pair=comparisonPair(comparisonChoice(),origin),from=pair.from,to=pair.to;
   const pickers=`<div class="selection-top"><div class="selection-pair"><div class="selection-endpoint"><label><span class="selection-index" data-badge-number="1">1</span>起点</label><div id="comparison-from"></div></div><div id="comparison-swap"></div><div class="selection-endpoint"><label><span class="selection-index" data-badge-number="2">2</span>终点</label><div id="comparison-to"></div></div></div><button class="quiet" id="clear-selection">清除</button></div>`;
+  pairValue=undefined;
   if(!to)return pickers+'<div class="selection-empty">点选能级或选择终点。</div>';
-  const ea=absolute(from),eb=absolute(to),defined=a.spectroscopy?.status!=='unresolved',gap=!defined||ea===undefined||eb===undefined?NaN:eb-ea;
+  const defined=a.spectroscopy?.status!=='unresolved';
+  pairValue=defined?photonValue(from,to):undefined;
   const first=getLevel(from),second=getLevel(to);let coupling='';
-  if(first&&second){const referenceLaser=l??scene.lasers[0],transition=defined&&referenceLaser?spectroscopyCoupling(a,referenceLaser,first.id,second.id):undefined;coupling=!defined?'<span>背景矩元未定义</span>':transition?(transition.allowed?`<span title="与所示背景能级使用同一基底的电偶极矩元">|d| <b>${measuredNumber(Math.abs(transition.amplitudeCM)/1e-29,4)} × 10⁻²⁹ C·m</b></span>${l?`<span>${l.enabled?'Ω/2π':'Ω/2π（停用预览）'} <b>${measuredNumber(transition.rabiMHz,4)} MHz</b></span><span title="${esc(l.name)} · ΔL = νL − |Ee − Eg|/h；背景包含其余启用光束，排除所选激光。">Δ<sub>L</sub> <b>${frequencyText(transition.detuningMHz)}</b></span>`:''}`:'<span>E1 禁戒</span>'):'';}
+  if(first&&second){const referenceLaser=l??scene.lasers[0],transition=defined&&referenceLaser?spectroscopyCoupling(a,referenceLaser,first.id,second.id):undefined;coupling=!defined?'<span>背景矩元未定义</span>':transition?(transition.allowed?`<span title="与所示背景能级使用同一基底的电偶极矩元">|d| <b>${measuredNumber(Math.abs(transition.amplitudeCM)/1e-29,4)} × 10⁻²⁹ C·m</b></span>${l?`<span>${l.enabled?'Ω/2π':'Ω/2π（停用预览）'} <b>${measuredNumber(transition.rabiMHz,4)} MHz</b></span>`:''}`:'<span>E1 禁戒</span>'):'';}
   else coupling='<span>参考能级</span>';
   if(first&&second&&defined&&!scene.lasers.length){const bare=dipoleBetweenStates(first.id,second.id,a.fieldMagnitudeG);coupling=bare.allowed?`<span title="无光背景的磁场本征态偶极矩元">|d| <b>${measuredNumber(Math.abs(bare.amplitudeCM)/1e-29,4)} × 10⁻²⁹ C·m</b></span>`:'<span>E1 禁戒</span>';}
   const pop=populationSnapshot().populations?.[to];
-  return `${pickers}<div class="compact-readout"><span title="终点能量 − 起点能量">ΔE/h <b>${defined?frequencyText(gap):'未定义'}</b></span>${coupling}<span data-current-population ${pop===undefined?'hidden':''}>p <b>${pop===undefined?'—':populationValue(pop)}</b></span></div><div class="selection-actions"><button class="quiet" id="use-as-initial" ${second?'':'disabled'}>末态设为初态</button><button class="quiet" id="monitor-selected" ${second?'':'disabled'}>观察布居</button><div class="mark-editor"><input id="mark-text" maxlength="32" aria-label="能级标记" placeholder="末态标记" value="${esc(scene.marks?.[to]??'')}" ${second?'':'disabled'}><button id="save-mark" ${second?'':'disabled'}>标记</button></div></div>`;
+  return `${pickers}<div id="pair-frequency-slot"></div><div class="compact-readout">${coupling}<span data-current-population ${pop===undefined?'hidden':''}>p <b>${pop===undefined?'—':populationValue(pop)}</b></span></div><div class="selection-actions"><button class="quiet" id="use-as-initial" ${second?'':'disabled'}>末态设为初态</button><button class="quiet" id="monitor-selected" ${second?'':'disabled'}>观察布居</button><div class="mark-editor"><input id="mark-text" maxlength="32" aria-label="能级标记" placeholder="末态标记" value="${esc(scene.marks?.[to]??'')}" ${second?'':'disabled'}><button id="save-mark" ${second?'':'disabled'}>标记</button></div></div>`;
 }
 /** Solver responses update scientific readouts without unmounting an operator's editor. */
 function renderSelection(a:Analysis,l:Laser|undefined):void{
   const host=$('selection-readout'),key=JSON.stringify([selectedStates,comparisonSource,referenceStateId(l),l?.id,scene.references?.map(r=>[r.id,r.name])]),next=element('div');next.innerHTML=selectionReadout(a,l);
-  if(host.dataset.selectionKey!==key){disposeTrees(host);host.innerHTML=next.innerHTML;host.dataset.selectionKey=key;bindSelection();return;}
+  if(host.dataset.selectionKey!==key){disposeTrees(host);host.innerHTML=next.innerHTML;host.dataset.selectionKey=key;bindSelection();$('pair-frequency-slot')?.replaceWith(pairRow);pairReadout.show(pairValue,scene);return;}
+  if(!pairRow.isConnected)$('pair-frequency-slot')?.replaceWith(pairRow);
+  pairReadout.show(pairValue,scene);
   const readout=host.querySelector('.compact-readout'),updated=next.querySelector('.compact-readout');if(readout&&updated&&readout.innerHTML!==updated.innerHTML)readout.innerHTML=updated.innerHTML;
 }
 function renderDetails(hostId:string,markup:string):void{
@@ -472,10 +494,17 @@ function bindSelection():void{
   if($('save-mark'))$('save-mark').onclick=()=>{const id=selectedStates.at(-1);if(id){const v=$<HTMLInputElement>('mark-text').value.trim();if(v)scene.marks![id]=v;else delete scene.marks![id];update();}};
   if($('monitor-selected'))$('monitor-selected').onclick=()=>{const ids=[...new Set(markedComparison(activeLaser()))].filter(id=>getLevel(id));const chosen=getLevel(ids.at(-1)??'');const matching=chosen?.manifold==='D1'||chosen?.manifold==='D2'?scene.lasers.find(l=>l.enabled&&l.line===chosen.manifold):activeLaser();if(matching)dynamics().laserId=matching.id;dynamics().monitoredStateIds=[...new Set([...dynamics().monitoredStateIds,...ids])];dynamics().monitorMode='manual';view='dynamics';controlsKey='';update();};
 }
-function transitionRows(transitions:Transition[]):string{return transitions.map(t=>{
-  const endpoints=transitionEndpoints(t,referenceStateId(scene.lasers.find(l=>l.id===t.laserId)))!,mixed=t.mixedPolarization===true;
-  return `<tr data-transition="${esc(t.id)}" data-from-state="${endpoints.fromId}" data-to-state="${endpoints.toId}" tabindex="0"><td title="${endpoints.emission?'受激辐射':'吸收'}">${stateCell(endpoints.fromId)} → ${stateCell(endpoints.toId)}</td><td title="${mixed?'混合背景态：多个球分量相干耦合':t.mLabelApproximate?`光场 q=${t.q}；mF 是混合本征态的主成分标签，标签之差不是严格的 ΔmF`:`光场 q=${t.q}；原子 Δm=${endpoints.deltaM}`}" aria-label="${mixed?'混合分量':t.q===-1?'sigma minus':t.q===0?'pi':'sigma plus'}">${mixed?'混合':math(t.q===-1?'\\sigma^-':t.q===0?'\\pi':'\\sigma^+')}</td><td>${measuredNumber(t.offsetMHz,3)}</td><td>${measuredNumber(t.detuningMHz,3)}</td><td>${measuredNumber(t.rabiMHz,4)}</td><td><div class="strength-cell"><span style="width:${Math.min(100,t.strength*t.weight*100)}%"></span><small>${measuredNumber(t.strength*t.weight,4)}</small></div></td></tr>`;
-}).join('');}
+/** The table reads the two-state readout's base and unit (ui-design.md §1.8); its "自动" is the
+ * same rule applied to the table's strongest row. Only components with Ω ≠ 0 are listed. */
+function transitionTable(transitions:Transition[]):{heading:string;rows:string}{
+  const listed=transitions.filter(t=>t.rabiMHz>0),ends=(t:Transition)=>transitionEndpoints(t,referenceStateId(scene.lasers.find(l=>l.id===t.laserId)))!;
+  const strongest=listed[0]&&ends(listed[0]),key=pairReadout.chosenBase()??automaticBase(strongest&&photonValue(strongest.fromId,strongest.toId));
+  const chosen=parseBase(key??'absolute'),base=chosen&&baseValue(chosen,scene)?chosen:{kind:'absolute' as const},origin=baseValue(base,scene)!,relative=base.kind!=='absolute';
+  const pref=pairReadout.chosenUnit(),unit:DetuningUnit=pref&&!isWavelengthUnit(pref)?pref:relative?'MHz':'THz';
+  return {heading:readingHeading(base,scene,unit),rows:listed.map(t=>{
+  const endpoints=ends(t),mixed=t.mixedPolarization===true,ν=photonValue(endpoints.fromId,endpoints.toId);
+  return `<tr data-transition="${esc(t.id)}" data-from-state="${endpoints.fromId}" data-to-state="${endpoints.toId}" tabindex="0"><td title="${endpoints.emission?'受激辐射':'吸收'}">${stateCell(endpoints.fromId)} → ${stateCell(endpoints.toId)}</td><td title="${mixed?'混合背景态：多个球分量相干耦合':t.mLabelApproximate?`光场 q=${t.q}；mF 是混合本征态的主成分标签，标签之差不是严格的 ΔmF`:`光场 q=${t.q}；原子 Δm=${endpoints.deltaM}`}" aria-label="${mixed?'混合分量':t.q===-1?'sigma minus':t.q===0?'pi':'sigma plus'}">${mixed?'混合':math(t.q===-1?'\\sigma^-':t.q===0?'\\pi':'\\sigma^+')}</td><td>${ν?formatNumber(inUnit(difference(ν,origin),unit),{digits:relative?9:12,signed:relative}):'—'}</td><td>${measuredNumber(t.rabiMHz,4)}</td><td><div class="strength-cell"><span style="width:${Math.min(100,t.strength*t.weight*100)}%"></span><small>${measuredNumber(t.strength*t.weight,4)}</small></div></td></tr>`;
+}).join('')};}
 function referenceAnchorDefault():string{return [...selectedStates].reverse().find(id=>getLevel(id))??(comparisonSource&&getLevel(comparisonSource)?comparisonSource:initialId());}
 function referenceEditor():string{
   const anchor=referenceAnchorDefault();return `<details class="reference-editor"><summary>参考能级 <span>${scene.references?.length??0}</span></summary><div class="reference-form-caption" id="reference-form-caption">新建参考能级</div><div class="reference-form form"><label class="field-label" for="reference-name">名称</label><div class="field-control"><input id="reference-name" maxlength="32" value="虚拟中间态" aria-label="参考能级名称"></div><label class="field-label" for="reference-anchor">锚点</label><div class="field-control"><select id="reference-anchor" aria-label="参考能级锚点">${allLevels().map(l=>`<option value="${l.id}" ${l.id===anchor?'selected':''}>${esc(stateText(l))}</option>`).join('')}</select></div><label class="field-label" for="reference-anchor-mode">能量定义</label><div class="field-control"><div id="reference-anchor-mode" data-value="follow"></div></div><label class="field-label" for="reference-offset">频率偏移</label><div class="field-control"><div class="number-field" id="reference-number"><input id="reference-offset" type="text" inputmode="decimal" value="${100/DETUNING_UNIT_MHZ[referenceUnit]}" aria-label="参考能级频率偏移"></div><select id="reference-unit" class="unit-picker" aria-label="参考能级频率单位">${Object.keys(DETUNING_UNIT_MHZ).map(unit=>`<option value="${unit}" ${unit===referenceUnit?'selected':''}>${unit}</option>`).join('')}</select><button class="quiet reference-laser-copy" id="reference-from-laser" aria-label="用当前激光建立参考能级">取激光终点</button></div><div class="reference-definition full-form-row" id="reference-definition"></div><div class="form-actions"><button id="add-reference">添加参考能级</button><button class="quiet" id="cancel-reference-edit" hidden>取消编辑</button></div></div><div class="reference-list">${scene.references!.map(r=>`<div class="reference-row"><button class="state-chip" data-state="${r.id}">${esc(r.name)}</button><span title="${r.anchorMode==='zero-field'?'使用零磁场锚点，随当前磁场保持固定':'跟随当前磁场下的锚点能量'}">${stateCell(r.anchorId)} ${r.anchorMode==='zero-field'?'· B=0':''} ${r.offsetMHz<0?'−':'+'} ${frequencyText(Math.abs(r.offsetMHz))}</span><button class="quiet" data-edit-reference="${r.id}" aria-label="编辑参考能级 ${esc(r.name)}">编辑</button><button class="icon-button" data-remove-reference="${r.id}" aria-label="删除参考能级 ${esc(r.name)}">×</button></div>`).join('')}</div></details>`;
@@ -705,6 +734,13 @@ function refreshDirectionStates(a:Analysis):void{
   }
 }
 
+/** The level diagram's one-line definition of its labels (ui-design.md §1.5). */
+function levelsLegend(a:Analysis,laser:Laser|undefined):string{
+  const background=[...(a.fieldMagnitudeG>0?['B']:[]),...(a.spectroscopy?.backgroundLaserIds??[]).map(id=>scene.lasers.find(l=>l.id===id)?.name??id)].join(' + ')||'无';
+  if(a.spectroscopy?.status==='unresolved')return `标注：裸态能级，背景光移未确定；背景：${background}`;
+  if(laser)return `标注：激发态 Δ = ν(${laser.name}) − ν(参考态→e)，基态 (E(参考态) − E)/h；背景：${background}`;
+  return `标注：总能移（相对零外场）；背景：${background}`;
+}
 /** What the level diagram is showing now, for its ⓘ. */
 function levelScope():{title:string;lines:string[]}|undefined{
   const a=latestAnalysis;if(!a)return undefined;
@@ -719,11 +755,11 @@ function renderSpaceLegend(a:Analysis):void{
   const fields=scene.fields.filter(f=>f.enabled&&f.magnitudeG>0),zero=a.fieldMagnitudeG===0;
   const swatch=(colour:string,thick=false)=>`<span class="legend-swatch${thick?' thick':''}" style="background:${colour}"></span>`;
   const isSelected=(kind:'field'|'laser',id:string)=>selection.kind===kind&&selection.id===id;
-  const items=[`<span class="legend-item total">${swatch('var(--field-ink)',true)}${fields.length>1?'合成 B':'B'}：<b>${zero?'0（参考轴 +z）':withUnit(a.fieldMagnitudeG,'G',{digits:4})}</b></span>`];
-  if(fields.length>1)for(const f of fields)items.push(`<button class="quiet legend-item${isSelected('field',f.id)?' selected':''}" data-field-id="${esc(f.id)}">${swatch('var(--field-ink)')}${esc(f.name)}：<b>${withUnit(f.magnitudeG,'G',{digits:4})}</b></button>`);
+  const items=[`<span class="legend-item total">${swatch('var(--field-ink)',true)}<span>${fields.length>1?'合成 B':'B'}：<b>${zero?'0（参考轴 +z）':withUnit(a.fieldMagnitudeG,'G',{digits:4})}</b></span></span>`];
+  if(fields.length>1)for(const f of fields)items.push(`<button class="quiet legend-item${isSelected('field',f.id)?' selected':''}" data-field-id="${esc(f.id)}">${swatch('var(--field-ink)')}<span>${esc(f.name)}：<b>${withUnit(f.magnitudeG,'G',{digits:4})}</b></span></button>`);
   for(const l of scene.lasers.filter(l=>l.enabled)){
     const p=a.polarizations[l.id],chosen=isSelected('laser',l.id),detail=chosen&&p?` · ∠(k, ${zero?'z':'B'}) <b>${formatNumber(p.angleToBDeg,{places:1})}°</b> · σ⁻ <b>${populationPercent(p.minus)}</b> · π <b>${populationPercent(p.pi)}</b> · σ⁺ <b>${populationPercent(p.plus)}</b>`:'';
-    items.push(`<button class="quiet legend-item${chosen?' selected':''}" data-laser-id="${esc(l.id)}">${swatch(laserColour(scene,l.id))}${esc(l.name)}${detail}</button>`);
+    items.push(`<button class="quiet legend-item${chosen?' selected':''}" data-laser-id="${esc(l.id)}">${swatch(laserColour(scene,l.id))}<span>${esc(l.name)}${detail}</span></button>`);
   }
   const markup=items.join('');if($('space-legend').innerHTML!==markup)$('space-legend').innerHTML=markup;
 }
@@ -750,7 +786,7 @@ function renderResults(allowSolve=true):void{
   if(view!=='space'&&spaceMount.isConnected)spaceMount.remove();
   if(view!=='dynamics'&&unbindPopulation){unbindPopulation();unbindPopulation=undefined;}
   if($('inspector-polarization'))$('inspector-polarization').innerHTML=polarizationBars(a,selection.kind==='laser'?scene.lasers.find(l=>l.id===selection.id):laser);
-  if($('laser-absolute-frequency')){const l=scene.lasers.find(l=>l.id===selection.id);if(l)setText('laser-absolute-frequency',`${number(laserFrequencyMHz(l)/1e6,12)} THz`);}
+  if(selection.kind==='laser'){const l=scene.lasers.find(l=>l.id===selection.id);if(l&&laserReadout.readout.root.isConnected){try{laserReadout.show(laserValue(l),scene);}catch{laserReadout.show(undefined,scene);}}}
   const field=withUnit(a.fieldMagnitudeG,'G',{digits:4});
   if(view==='levels'){
     $('selection-readout').hidden=false;$('population-toolbar').hidden=false;
@@ -759,11 +795,13 @@ function renderResults(allowSolve=true):void{
     const clockGap=a.spectroscopy?.status==='unresolved'?NaN:(a.ground.find(state=>state.id==='ground-2-0')!.energyMHz-a.ground.find(state=>state.id==='ground-1-0')!.energyMHz);
     setText('summary',`B ${field} · 钟跃迁 ${Number.isFinite(clockGap)?withUnit(clockGap/1000,'GHz',{places:6}):'未定义'} · 32 态 Lindblad 主方程`);
     setText('levels-heading',a.spectroscopy?.status==='unresolved'?'裸态能级':laser?'背景能级':'总场能级');
+    setText('levels-legend',levelsLegend(a,laser));
     beamChip.hidden=!laser;if(laser)setMiddle(beamChipName,laser.name,'cut');
     setText('levels-badge',regimeErrors.length?'激光类型与失谐不匹配':a.spectroscopy?.status==='unresolved'?(laser?'裸态失谐 · 背景光移未确定':'静态光移未定义'):populationMode==='time'&&a.spectroscopy?.requiresDensityProjection?'当前基底 p(t) 未提供':laser&&!laser.enabled?'已停用':'');
     renderSelection(a,laser);
     levelsChart$.innerHTML=levelsChart(scene,a,laser,{line:spectral,selectedIds:markedComparison(laser),initialId:dynamics().initialStateId,populations:snapshot.populations,steadyPopulations:steadyPopulationsInView(a),steadyPopulationLabel:isDisplayedMean(currentResult(),a)?'mean':'limit',populationLabel:snapshot.label,viewportWidth:levelsChart$.clientWidth});
-    renderDetails('levels-details',`<details class="transition-disclosure"><summary>跃迁矩元 <span>${laser?esc(laser.name):spectral}</span></summary><div class="table-scroll"><table class="transition-table"><thead><tr><th>参考态 → 末态</th><th>分量</th><th>(ν − νref) / MHz</th><th>Δ / MHz</th><th>Ω/2π / MHz</th><th title="相对 D2 stretched cycling 跃迁的偶极强度，并乘当前偏振权重">耦合强度</th></tr></thead><tbody>${transitionRows(transitions)}</tbody></table></div></details>${referenceEditor()}${solverDetails()}`);bindReferences();
+    const table=transitionTable(transitions);
+    renderDetails('levels-details',`<details class="transition-disclosure"><summary>跃迁矩元 <span>${laser?esc(laser.name):spectral}</span></summary><div class="table-scroll"><table class="transition-table"><thead><tr><th>参考态 → 末态</th><th>分量</th><th>${esc(table.heading)}</th><th>Ω/2π / MHz</th><th title="相对 D2 stretched cycling 跃迁的偶极强度，并乘当前偏振权重">耦合强度</th></tr></thead><tbody>${table.rows}</tbody></table></div></details>${referenceEditor()}${solverDetails()}`);bindReferences();
   }else if(view==='dynamics'){setText('summary',`B ${field} · 32 态 Lindblad 主方程`);renderDynamics(a,allowSolve);}
   else{
     setText('summary',`B ${field}`);
