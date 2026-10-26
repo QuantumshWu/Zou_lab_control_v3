@@ -80,7 +80,7 @@
 //! relies on this).
 use super::*;
 use super::real_fourier::RealFourierMap;
-use super::slow_dual::{cabs, cadd, cdiv, cmul, complex, csub, frequency_key, robust_eigen, sandwich_all, Dense, LuFactor, Series, SlowDual, TimeGrid, ZERO};
+use super::slow_dual::{cabs, cadd, cconj, cdiv, cmul, complex, csub, frequency_key, robust_eigen, sandwich_all, Dense, LuFactor, Series, SlowDual, TimeGrid, ZERO};
 use crate::parallel::Execution;
 #[cfg(test)]
 use super::slow_dual::{cexp, cscale};
@@ -178,10 +178,6 @@ struct ResonantTerm {
 
 #[derive(Clone, Copy, Debug)]
 pub struct HaloOptions {
-    /// Modal columns per pencil application. One plan covers every halo mode
-    /// (its intermediate modes are computed once per block); the plan and the
-    /// halo rows held at a time grow with this width.
-    pub maximum_rhs: usize,
     /// Response components with `|beta + i nu - d| < floor` use the
     /// zero-initial entire form. `None` selects the optical decay floor.
     pub resonance_floor: Option<f64>,
@@ -200,7 +196,7 @@ pub struct HaloOptions {
 
 impl Default for HaloOptions {
     fn default() -> Self {
-        Self { maximum_rhs: 2, resonance_floor: None, all_halo_modes: false, slave_fast_returns: false }
+        Self { resonance_floor: None, all_halo_modes: false, slave_fast_returns: false }
     }
 }
 
@@ -333,6 +329,97 @@ fn push_modal(map: &RealFourierMap, terms: &[(&[f64], &Dense)], rows: usize, m: 
             *o = if imaginary { cadd(*o, complex(-v.im, v.re)) } else { cadd(*o, *v) };
         }
     }
+    Ok(out)
+}
+
+/// How a run of modal columns enters the halo pencil.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ModalUnit {
+    /// One real column (real exponent and weights): one real input.
+    Real,
+    /// A conjugate pair (`c_{j+1} = conj(c_j)`): the real inputs `Re c_j` and
+    /// `Im c_j` give both, `F c_j = F Re + i F Im`, `F c_{j+1} = F Re - i F Im`.
+    Pair,
+    /// Any other column: one complex input.
+    Complex,
+}
+
+/// Relative size below which an imaginary part, or the difference of two
+/// conjugate candidates, counts as roundoff of the reduced eigenproblem.
+const CONJUGATE_TOLERANCE: f64 = 1e-10;
+
+/// Reorders the modal columns so that every conjugate pair is adjacent and
+/// returns the runs `(start, width, unit)`. Real inputs evaluate on the
+/// pencil's Hermitian half (the halo set is closed under `q -> -q`), and a
+/// pair costs two real inputs instead of two complex ones.
+fn modal_units(small: &mut SmallSource) -> Vec<(usize, usize, ModalUnit)> {
+    let m = small.exponents.len();
+    let column = |small: &SmallSource, j: usize| -> Vec<C> { (0..m).map(|i| cmul(small.vectors.at(i, j), small.weights[j])).collect() };
+    let size = |v: &[C]| v.iter().fold(0_f64, |s, z| s.hypot(cabs(*z)));
+    let mut order = Vec::with_capacity(m);
+    let mut units = Vec::new();
+    let mut used = vec![false; m];
+    for j in 0..m {
+        if used[j] {
+            continue;
+        }
+        used[j] = true;
+        let beta = small.exponents[j];
+        let cj = column(small, j);
+        let scale = size(&cj).max(f64::MIN_POSITIVE);
+        let imaginary = cj.iter().fold(0_f64, |s, z| s.hypot(z.im));
+        if beta.im.abs() <= CONJUGATE_TOLERANCE * cabs(beta).max(f64::MIN_POSITIVE) && imaginary <= CONJUGATE_TOLERANCE * scale {
+            units.push((order.len(), 1, ModalUnit::Real));
+            order.push(j);
+            continue;
+        }
+        let partner = (j + 1..m).find(|&k| {
+            !used[k]
+                && cabs(csub(small.exponents[k], cconj(beta))) <= CONJUGATE_TOLERANCE * cabs(beta).max(f64::MIN_POSITIVE)
+                && {
+                    let ck = column(small, k);
+                    let gap = ck.iter().zip(&cj).fold(0_f64, |s, (a, b)| s.hypot(cabs(csub(*a, cconj(*b)))));
+                    gap <= CONJUGATE_TOLERANCE * scale
+                }
+        });
+        match partner {
+            Some(k) => {
+                used[k] = true;
+                units.push((order.len(), 2, ModalUnit::Pair));
+                order.push(j);
+                order.push(k);
+            }
+            None => {
+                units.push((order.len(), 1, ModalUnit::Complex));
+                order.push(j);
+            }
+        }
+    }
+    let exponents: Vec<C> = order.iter().map(|&j| small.exponents[j]).collect();
+    let weights: Vec<C> = order.iter().map(|&j| small.weights[j]).collect();
+    let mut vectors = Dense::zeros(m, m);
+    for (to, &from) in order.iter().enumerate() {
+        for i in 0..m {
+            vectors.set(i, to, small.vectors.at(i, from));
+        }
+    }
+    small.exponents = exponents;
+    small.weights = weights;
+    small.vectors = vectors;
+    units
+}
+
+/// Signed complex form of the real REAL columns `Q x_k` (`x` real, m x k).
+fn push_real(map: &RealFourierMap, q: &[f64], x: &[f64], rows: usize, m: usize, k: usize, lap: &Lapack) -> Result<Vec<C>, String> {
+    let product = lap.multiply(q, x, rows, k, m);
+    let mut row_major = vec![0.; rows * k];
+    for c in 0..k {
+        for i in 0..rows {
+            row_major[i * k + c] = product[i + c * rows];
+        }
+    }
+    let mut out = vec![ZERO; rows * k];
+    map.push_into(&row_major, k, &mut out)?;
     Ok(out)
 }
 
@@ -910,22 +997,21 @@ impl SlowDual {
             return Err("Slow dual belongs to another request".into());
         }
         let (rows, m) = validate(view)?;
-        if options.maximum_rhs == 0 {
-            return Err("Halo block width must be positive".into());
-        }
         let lap = &self.lapack;
         let (n, g) = (self.n, self.g);
         let d = n * n;
         let floor = options.resonance_floor.unwrap_or(self.diagnostics.optical_decay_floor);
         let phases = &self.owner.hilbert.source.phases;
         let frequency = |q: &[i32]| -> Result<f64, String> { phases.frequency(q).map(|f| f.hi + f.lo) };
-        let small = match SmallSource::new(lap, view.generator, view.initial, m) {
+        let mut small = match SmallSource::new(lap, view.generator, view.initial, m) {
             Ok(small) => small,
             Err(reason) => {
                 let estimate = unresolved_estimate(self, view.times, groups, reason, began);
                 return Ok(HaloEstimate { estimate, modes: Vec::new(), halo_modes: 0, near_resonant_terms: 0, unrouted_resonant_returns: 0, pencil_ms: 0., block_columns: 0 });
             }
         };
+        // Conjugate pairs adjacent: they enter the pencil as real columns.
+        let units = modal_units(&mut small);
         let grid = TimeGrid::new(view.times);
         // Indicator samples: a uniform subset of the output times.
         let stride = view.times.len().div_ceil(INDICATOR_TIMES).max(1);
@@ -1028,18 +1114,45 @@ impl SlowDual {
             }
             routes.push(list);
         }
-        let width_max = options.maximum_rhs.min(m);
+        // Runs of modal columns: a real column, a conjugate pair, or one
+        // complex column (width at most 2).
+        let width_max = 2.min(m);
         let out_rows = halo.len() * d;
         let mut plan = if halo.is_empty() { None } else { Some(prepared.pencil(&retained, &halo, width_max)?) };
         let mut e_out = vec![ZERO; out_rows * width_max];
         let mut f_out = vec![ZERO; out_rows * width_max];
-        let mut start = 0;
-        while start < m && plan.is_some() {
-            let width = width_max.min(m - start);
+        let runs: &[(usize, usize, ModalUnit)] = if plan.is_some() { &units } else { &[] };
+        for &(start, width, unit) in runs {
             let beta = &small.exponents[start..start + width];
-            let input = push_modal(view.map, &[(view.q, &weights.block(0..m, start..start + width))], rows, m, lap)?;
+            let input = match unit {
+                ModalUnit::Complex => push_modal(view.map, &[(view.q, &weights.block(0..m, start..start + width))], rows, m, lap)?,
+                ModalUnit::Real => {
+                    let x: Vec<f64> = (0..m).map(|i| weights.at(i, start).re).collect();
+                    push_real(view.map, view.q, &x, rows, m, 1, lap)?
+                }
+                ModalUnit::Pair => {
+                    let mut x = vec![0.; 2 * m];
+                    for i in 0..m {
+                        let z = weights.at(i, start);
+                        x[i] = z.re;
+                        x[m + i] = z.im;
+                    }
+                    push_real(view.map, view.q, &x, rows, m, 2, lap)?
+                }
+            };
             let pencil_began = Instant::now();
             plan.as_mut().expect("plan").apply_into(&input, width, &mut e_out[..out_rows * width], &mut f_out[..out_rows * width])?;
+            if unit == ModalUnit::Pair {
+                // Images of Re c and Im c -> images of c and conj(c).
+                for out in [&mut e_out, &mut f_out] {
+                    for row in out[..out_rows * 2].chunks_exact_mut(2) {
+                        let (a, b) = (row[0], row[1]);
+                        let ib = complex(-b.im, b.re);
+                        row[0] = cadd(a, ib);
+                        row[1] = csub(a, ib);
+                    }
+                }
+            }
             pencil_ms += pencil_began.elapsed().as_secs_f64() * 1000.;
             // Non-ground returns of this block, summed per target charge, and
             // ground returns summed per (pair, slot, shift) before their
@@ -1304,7 +1417,6 @@ impl SlowDual {
                     }
                 }
             }
-            start += width;
         }
         drop(plan);
         drop(e_out);
