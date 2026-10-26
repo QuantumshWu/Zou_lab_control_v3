@@ -1,7 +1,8 @@
 //! Persistent worker pool for the population kernels.
 //!
-//! Threading policy: work is split by output modes into contiguous chunks,
-//! one task per worker; each task owns its packing scratch and calls BLAS
+//! Threading policy: work is split by output modes into contiguous chunks
+//! (a few per worker, balanced by work stealing); each task owns its packing
+//! scratch and calls BLAS
 //! single-threaded (the population core loads OpenBLAS with one thread, see
 //! ATOM_POPULATION_BLAS_THREADS), so BLAS and the pool never oversubscribe.
 //! Every output entry is accumulated by exactly one task. Small stages run
@@ -20,6 +21,9 @@ use std::{
 /// Below this many complex multiply-adds per task a stage stays serial.
 /// Scheduling threshold only; it never changes which arithmetic is done.
 const MINIMUM_WORK_PER_TASK: usize = 262_144;
+/// Tasks per worker, so work stealing evens out uneven chunks and workers
+/// that are preempted or run on slower cores.
+const TASKS_PER_THREAD: usize = 4;
 const DEFAULT_THREAD_CAP: usize = 8;
 
 pub struct Execution {
@@ -62,7 +66,10 @@ impl Execution {
     /// Number of tasks for `items` independent output items and `work`
     /// complex multiply-adds.
     pub fn tasks(&self, items: usize, work: usize) -> usize {
-        self.threads.min(items).min(work / MINIMUM_WORK_PER_TASK).max(1)
+        if self.threads == 1 {
+            return 1;
+        }
+        (self.threads * TASKS_PER_THREAD).min(items).min(work / MINIMUM_WORK_PER_TASK).max(1)
     }
 
     /// Split `out` into contiguous chunks of whole modes (`width` entries per
