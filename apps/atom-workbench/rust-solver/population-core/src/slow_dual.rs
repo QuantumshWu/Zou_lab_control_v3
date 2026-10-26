@@ -119,6 +119,8 @@ pub(crate) fn cexp(a: C) -> C {
 #[inline]
 pub(crate) fn complex(re: f64, im: f64) -> C { C { re, im } }
 pub(crate) const ZERO: C = C { re: 0., im: 0. };
+/// `exp(x)` with `x` below this is negligible (< 1e-18) next to O(1) terms.
+pub(crate) const NEGLIGIBLE_EXPONENT: f64 = -41.4;
 pub(crate) const ONE: C = C { re: 1., im: 0. };
 #[inline]
 fn minus_i(a: C) -> C { C { re: a.im, im: -a.re } }
@@ -1596,14 +1598,38 @@ impl SlowDual {
             }
         }
         if count > 0 {
-            let mut phases = Dense::zeros(count, nt);
-            for (it, &t) in times.iter().enumerate() {
-                for j in 0..count {
-                    phases.set(j, it, cexp(cscale(exponents[j], t)));
+            // Persistent exponents go through one product; short-lived ones
+            // (negligible before t_max) are added only at the times where they
+            // are not, which keeps many fast recycling sources cheap.
+            let persistent: Vec<usize> = (0..count).filter(|&j| exponents[j].re * t_max >= NEGLIGIBLE_EXPONENT).collect();
+            if !persistent.is_empty() {
+                let mut columns = Dense::zeros(dim, persistent.len());
+                let mut phases = Dense::zeros(persistent.len(), nt);
+                for (local, &j) in persistent.iter().enumerate() {
+                    columns.data[local * dim..(local + 1) * dim].copy_from_slice(&particular.data[j * dim..(j + 1) * dim]);
+                    for (it, &t) in times.iter().enumerate() {
+                        phases.set(local, it, cexp(cscale(exponents[j], t)));
+                    }
+                }
+                let values = columns.multiply(&phases, &self.lapack)?;
+                out.copy_from_slice(&values.data);
+            }
+            for j in 0..count {
+                let mu = exponents[j];
+                if mu.re * t_max >= NEGLIGIBLE_EXPONENT {
+                    continue;
+                }
+                let column = &particular.data[j * dim..(j + 1) * dim];
+                for (it, &t) in times.iter().enumerate() {
+                    if mu.re * t < NEGLIGIBLE_EXPONENT {
+                        continue;
+                    }
+                    let e = cexp(cscale(mu, t));
+                    for (o, c) in out[it * dim..(it + 1) * dim].iter_mut().zip(column) {
+                        *o = cadd(*o, cmul(*c, e));
+                    }
                 }
             }
-            let values = particular.multiply(&phases, &self.lapack)?;
-            out.copy_from_slice(&values.data);
         }
         let mut exp_alpha = vec![ZERO; dim];
         for (it, &t) in times.iter().enumerate() {

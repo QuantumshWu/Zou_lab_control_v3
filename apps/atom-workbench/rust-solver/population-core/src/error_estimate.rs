@@ -62,7 +62,7 @@
 //! the domain-selection indicator.
 use super::*;
 use super::real_fourier::RealFourierMap;
-use super::slow_dual::{cabs, cadd, cdiv, cexp, cmul, complex, cscale, csub, exp_divided_2, recycle_ground, Dense, LuFactor, ModalSources, SlowDual, ZERO};
+use super::slow_dual::{cabs, cadd, cdiv, cexp, cmul, complex, cscale, csub, exp_divided_2, recycle_ground, Dense, LuFactor, ModalSources, SlowDual, NEGLIGIBLE_EXPONENT, ZERO};
 
 /// A requested signed population sum (for example one F manifold).
 #[derive(Clone, Debug)]
@@ -252,6 +252,32 @@ fn ground_block(signed: &[C], mode: usize, n: usize, g: usize, m: usize) -> Dens
     block
 }
 
+/// `sum_ik W[s, ik] exp(lambda_ik t)` for every output time, skipping the
+/// (mode, time) pairs where `exp(Re lambda t)` is below `exp(-41.4) ~ 1e-18`:
+/// fast dressed modes decay within a few optical lifetimes, so they touch only
+/// the earliest samples while the slow (ground-like) modes cover all of them.
+fn natural_readout(weights: &Dense, lambda: &[C], times: &[f64]) -> Dense {
+    let states = weights.rows;
+    let mut values = Dense::zeros(states, times.len());
+    for (ik, &l) in lambda.iter().enumerate() {
+        let column = &weights.data[ik * states..(ik + 1) * states];
+        if column.iter().all(|z| z.re == 0. && z.im == 0.) {
+            continue;
+        }
+        for (it, &t) in times.iter().enumerate() {
+            if l.re * t < NEGLIGIBLE_EXPONENT {
+                continue;
+            }
+            let e = cexp(cscale(l, t));
+            let out = &mut values.data[it * states..(it + 1) * states];
+            for (o, w) in out.iter_mut().zip(column) {
+                *o = cadd(*o, cmul(*w, e));
+            }
+        }
+    }
+    values
+}
+
 fn finish_estimate(
     dual: &SlowDual,
     values: &[C],
@@ -394,17 +420,13 @@ impl SlowDual {
             }
         }
         let mut forced_phases = Dense::zeros(m, nt);
-        let mut natural_phases = Dense::zeros(n2, nt);
         for (it, &t) in times.iter().enumerate() {
             for j in 0..m {
                 forced_phases.set(j, it, cexp(cscale(exponents[j], t)));
             }
-            for ik in 0..n2 {
-                natural_phases.set(ik, it, cexp(cscale(lambda[ik], t)));
-            }
         }
         let values_forced = readout_forced.multiply(&forced_phases, lap)?;
-        let values_natural = readout_homogeneous.multiply(&natural_phases, lap)?;
+        let values_natural = natural_readout(&readout_homogeneous, &lambda, times);
         for (it, &t) in times.iter().enumerate() {
             let phase = if nu == 0. { complex(1., 0.) } else { cexp(complex(0., nu * t)) };
             for s in 0..states.min(n) {
@@ -504,13 +526,7 @@ impl SlowDual {
                 weighted.set(s, ik, cmul(v, x));
             }
         }
-        let mut natural = Dense::zeros(n2, nt);
-        for (it, &t) in times.iter().enumerate() {
-            for ik in 0..n2 {
-                natural.set(ik, it, cexp(cscale(lambda[ik], t)));
-            }
-        }
-        let values = weighted.multiply(&natural, lap)?;
+        let values = natural_readout(&weighted, &lambda, times);
         for it in 0..nt {
             for s in 0..states.min(n) {
                 direct[it * n + s] = cadd(direct[it * n + s], values.at(s, it));
