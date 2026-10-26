@@ -105,7 +105,7 @@ function mixing(l:Laser,bare:BareFieldModel,fieldVector:Vec3,fieldAxis:AxisAngle
  return best;
 }
 /** Diagonal initial populations in the model basis (see InitialStateSpec). */
-function initialPopulations(spec:InitialStateSpec,states:Level[]):number[] {
+export function initialPopulations(spec:InitialStateSpec,states:Level[]):number[] {
  let weights:number[];
  if(spec.kind==='state'){const index=states.findIndex(s=>s.id===spec.id);if(index<0)throw new Error('动力学初态必须是真实原子态');weights=states.map((_,i)=>+(i===index));}
  else if(spec.kind==='unpolarized')weights=states.map(s=>+(s.manifold==='ground'&&(spec.manifold==='ground'||s.F===(spec.manifold==='F1'?1:2))));

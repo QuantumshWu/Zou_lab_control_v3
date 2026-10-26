@@ -38,7 +38,7 @@ import {renderSpace3D,type SpaceSelection,type SpaceViewName} from './space3d.js
 import {laserColour} from './identity.js';
 import {classifyLasers} from './laser-regime.js';
 import {POPULATION_GROUPS,recommendedPopulationStates,populationDisplayIds,withPopulationGroups} from './population-selection.js';
-import {durationUnit,durationValue,setDurationUnit,setDurationValue,durationText,DURATION_UNITS} from './duration.js';
+import {durationUnit,durationValue,setDurationUnit,setDurationValue,durationText,timeDisplayUnit,DURATION_UNITS} from './duration.js';
 import type {DurationUnit} from './types.js';
 import {patchLevelPopulations} from './level-population-dom.js';
 import {installWindowChrome} from './window-chrome.js';
@@ -634,6 +634,9 @@ function solverDetails():string{
     ...(accuracy?[readout('布居误差估计',`≤ ${small(accuracy.estimatedMaximumError)}（目标 ${small(accuracy.requestedTolerance)}）`)]:[]),
     readout('概率守恒误差',small(result.validation.maxTraceError)),readout('最小布居',small(result.validation.minPopulation)),
     readout('长期解',`${steadyStatusText(result.steady?.status)}${result.steady?.residual==null?'':` · 残差 ${small(result.steady.residual)}`}`),
+    // The limit is reached after a few of these; more than one conserved quantity makes it initial-dependent.
+    ...(result.steady?.slowestRelaxationUs!=null?[readout('最慢弛豫时间',(()=>{const unit=timeDisplayUnit(result.steady.slowestRelaxationUs!);return withUnit(result.steady.slowestRelaxationUs!*unit.factor,unit.name,{digits:3});})())]:[]),
+    ...(result.steady?.conservedQuantities!=null?[readout('守恒量个数',`${result.steady.conservedQuantities}（含迹）`)]:[]),
   ].join(''):'';
   const notes=result?[...(result.method?[`时间演化：${solverText(result.method)}`]:[]),...(result.steady.method?[`长期解：${solverText(result.steady.method)}`]:[]),...(result.steady.reason?[solverText(result.steady.reason)]:[]),...result.assumptions]:[];
   return `<details class="solver-details"><summary>计算详情</summary>${error?`<p class="solver-error">${esc(solverText(error))}</p>`:''}${result?`<div class="form solver-readouts">${rows}</div>${notes.map(text=>`<p class="note wrap">${esc(text)}</p>`).join('')}`:'<p class="note">没有当前参数的求解结果。</p>'}${failureRecords.length?'<button data-export-solver-failures>导出失败记录</button>':''}</details>`;
