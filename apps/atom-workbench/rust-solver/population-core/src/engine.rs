@@ -1,14 +1,20 @@
 //! Finite-time population engine: grows the trial space and the Fourier
 //! domain until the population error estimate meets the requested tolerance.
 //!
-//! INTERIM CONTROL POLICY: until the dual-weighted residual estimator is
-//! integrated, stopping uses successive-candidate population changes (basis)
-//! and the change against the previous Fourier order (domain).
+//! Error control (`estimated`): the slow-manifold dual-weighted residual
+//! estimate of the basis error is checked at every checkpoint; once it fits
+//! the budget, the halo estimate of the Fourier truncation is added and the
+//! candidate is accepted when `kappa * |basis + halo| + projection <= eps`.
+//! Halo indicators select the few Fourier modes worth adding. If the slow
+//! dual cannot be prepared, `successive` compares successive candidates and
+//! Fourier orders instead (conservative fallback).
 
 use super::*;
 use super::directions::{shift_invert, InnerSolve};
+use super::error_estimate::{combined_estimate, CandidateView, HaloModeIndicator, HaloOptions, PopulationGroup};
 use super::reduced::ReducedModel;
 use super::runtime_core::RuntimeCore;
+use super::slow_dual::{SlowDual, SlowDualOptions};
 use super::trial::TrialSpace;
 use std::collections::VecDeque;
 
@@ -36,6 +42,9 @@ pub struct FiniteOptions {
     pub maximum_order: usize,
     pub wall_seconds: f64,
     pub inner: InnerSolve,
+    /// Multiplies the error estimate before comparing it with the tolerance;
+    /// calibrated estimate/true ratios on the benchmarks are 0.75-1.37.
+    pub safety_factor: f64,
     /// Development only: build exactly (order, columns) and return.
     pub fixed: Option<(usize, usize)>,
 }
@@ -54,6 +63,7 @@ impl Default for FiniteOptions {
             maximum_order: 6,
             wall_seconds: 120.,
             inner: InnerSolve { maximum_steps: 12, relative_residual: 1e-3 },
+            safety_factor: 1.5,
             fixed: None,
         }
     }
@@ -61,20 +71,42 @@ impl Default for FiniteOptions {
 
 #[derive(Clone, Debug)]
 pub struct Checkpoint {
-    pub order: usize,
     pub modes: usize,
     pub columns: usize,
-    pub basis_change: Option<f64>,
-    pub domain_change: Option<f64>,
+    /// Basis error estimate (or successive change in the fallback).
+    pub basis_estimate: Option<f64>,
+    /// Fourier-truncation estimate (or change against the previous order).
+    pub halo_estimate: Option<f64>,
     pub action: &'static str,
     pub elapsed_ms: f64,
 }
 
+/// Wall time per engine stage, in milliseconds.
+#[derive(Clone, Debug, Default)]
+pub struct EngineTiming {
+    pub directions: f64,
+    pub orthogonalize: f64,
+    pub images: f64,
+    pub projections: f64,
+    pub readout_append: f64,
+    pub transfer: f64,
+    pub reduced: f64,
+    pub readout_evaluate: f64,
+    pub dual_prepare: f64,
+    pub basis_estimate: f64,
+    pub halo_estimate: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct FiniteDiagnostics {
+    /// `kappa * estimate + projection_charge`, the quantity compared with the
+    /// tolerance (the fallback reports its successive changes instead).
     pub estimated_error: f64,
+    /// The unscaled population error estimate of the returned candidate.
+    pub raw_estimate: f64,
     pub projection_charge: f64,
-    pub final_order: usize,
+    /// "dual-weighted-residual", "successive-change" or "fixed".
+    pub error_control: &'static str,
     pub final_modes: usize,
     pub final_columns: usize,
     pub image_columns: usize,
@@ -82,9 +114,7 @@ pub struct FiniteDiagnostics {
     pub peak_trial_bytes: usize,
     pub maximum_imaginary_population: f64,
     pub elapsed_ms: f64,
-    /// Milliseconds: inner directions, orthogonalization, images, projections,
-    /// readout append, transfers, reduced model, readout evaluation.
-    pub timing: [f64; 8],
+    pub timing: EngineTiming,
     pub checkpoints: Vec<Checkpoint>,
 }
 
@@ -231,6 +261,331 @@ impl Chain {
     }
 }
 
+/// Bookkeeping shared by the error-control policies.
+struct Run {
+    core: RuntimeCore,
+    times: Vec<f64>,
+    groups: Vec<RequestedGroup>,
+    options: FiniteOptions,
+    epsilon: f64,
+    n: usize,
+    axes: usize,
+    steps: Vec<Charge>,
+    lapack: Arc<Lapack>,
+    space: Option<TrialSpace>,
+    chain: Chain,
+    started: Instant,
+    checkpoints: Vec<Checkpoint>,
+    timing: EngineTiming,
+    peak_bytes: usize,
+}
+
+/// The kappa-scaled basis estimate must fit this share of the tolerance
+/// before the (more expensive) halo estimate is evaluated.
+const BASIS_SHARE: f64 = 0.6;
+/// After adding halo modes, the excluded indicators may still sum to this
+/// share of the tolerance (divided by kappa).
+const HALO_REMAINDER_SHARE: f64 = 0.25;
+/// Signed mode pairs added per domain step at most.
+const MAXIMUM_PAIRS_PER_STEP: usize = 24;
+
+fn ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.
+}
+
+impl Run {
+    fn space(&self) -> &TrialSpace {
+        self.space.as_ref().expect("trial space is present between steps")
+    }
+
+    fn deadline(&self) -> Result<(), String> {
+        if self.started.elapsed().as_secs_f64() > self.options.wall_seconds {
+            return Err(format!(
+                "Population work limit reached after {:.1} s with {} Fourier modes and {} columns; the tolerance was not relaxed",
+                self.started.elapsed().as_secs_f64(),
+                self.space().modes().len(),
+                self.space().columns()
+            ));
+        }
+        Ok(())
+    }
+
+    fn checkpoint(&mut self, basis: Option<f64>, halo: Option<f64>, action: &'static str) {
+        let (modes, columns) = (self.space().modes().len(), self.space().columns());
+        self.checkpoints.push(Checkpoint {
+            modes,
+            columns,
+            basis_estimate: basis,
+            halo_estimate: halo,
+            action,
+            elapsed_ms: ms(self.started),
+        });
+    }
+
+    /// Adds `count` chain columns. Returns false when no independent direction
+    /// is left; that is accepted only when the space is numerically invariant
+    /// (vanishing reduced residual).
+    fn grow(&mut self, count: usize, model: &ReducedModel) -> Result<bool, String> {
+        let space = self.space.as_mut().expect("trial space");
+        if space.columns() + count > self.options.maximum_columns {
+            return Err(format!(
+                "Trial space limit of {} columns reached with {} Fourier modes; the tolerance was not relaxed",
+                self.options.maximum_columns,
+                space.modes().len()
+            ));
+        }
+        let added = self.chain.grow(space, count, self.options.inner)?;
+        self.peak_bytes = self.peak_bytes.max(space.bytes());
+        if added > 0 {
+            return Ok(true);
+        }
+        let residual = space.residual(&model.generator)?;
+        let scale = space.fq().iter().map(|x| x * x).sum::<f64>().sqrt().max(f64::MIN_POSITIVE);
+        let size = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if size > 1e-9 * scale {
+            return Err("The trial space cannot be extended further".into());
+        }
+        Ok(false)
+    }
+
+    fn transfer(&mut self, modes: &[Charge]) -> Result<(), String> {
+        let space = self.space.take().expect("trial space");
+        let moved = space.transfer(&mut self.core, modes)?;
+        self.peak_bytes = self.peak_bytes.max(moved.bytes());
+        self.space = Some(moved);
+        Ok(())
+    }
+
+    fn populations(&mut self, model: &ReducedModel) -> Result<super::readout::Populations, String> {
+        let clock = Instant::now();
+        let trajectory = model.trajectory(&self.lapack, &self.times)?;
+        self.timing.reduced += ms(clock);
+        let clock = Instant::now();
+        let populations = self.space().readout().evaluate(&self.lapack, &trajectory, &self.times)?;
+        self.timing.readout_evaluate += ms(clock);
+        Ok(populations)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        mut self, populations: Vec<f64>, maximum_imaginary: f64, raw_estimate: f64, scaled: f64, charge: f64,
+        error_control: &'static str,
+    ) -> FiniteSolution {
+        let space = self.space.take().expect("trial space");
+        let measured = &space.timing;
+        self.timing.directions = self.chain.directions_ms;
+        self.timing.orthogonalize = measured.orthogonalize_ms;
+        self.timing.images = measured.images_ms;
+        self.timing.projections = measured.projections_ms;
+        self.timing.readout_append = measured.readout_ms;
+        self.timing.transfer = measured.transfer_ms;
+        FiniteSolution {
+            populations,
+            diagnostics: FiniteDiagnostics {
+                estimated_error: scaled + charge,
+                raw_estimate,
+                projection_charge: charge,
+                error_control,
+                final_modes: space.modes().len(),
+                final_columns: space.columns(),
+                image_columns: space.image_columns(),
+                operator_applications: self.chain.operator_applications,
+                peak_trial_bytes: self.peak_bytes,
+                maximum_imaginary_population: maximum_imaginary,
+                elapsed_ms: ms(self.started),
+                timing: self.timing,
+                checkpoints: self.checkpoints,
+            },
+        }
+    }
+
+    /// Columns to add so that the basis estimate is predicted to reach
+    /// `target`, from its geometric decay between the last two checkpoints.
+    fn predicted_block(&self, history: &[(usize, f64)], target: f64) -> usize {
+        let poles = self.space().op.poles().len().max(1);
+        let default = self.options.block_columns;
+        let block = match history {
+            [.., (m0, e0), (m1, e1)] if m1 > m0 && *e1 < *e0 && *e1 > 0. => {
+                let rate = (e1 / e0).ln() / (m1 - m0) as f64;
+                let needed = (target / e1).ln() / rate;
+                if needed.is_finite() && needed > 0. { needed.ceil() as usize } else { default }
+            }
+            _ => default,
+        };
+        block.clamp(poles, 4 * default).div_ceil(poles) * poles
+    }
+
+    /// Signed halo modes (both members of each pair) to add: the largest
+    /// indicators until the excluded ones sum to at most `remainder`.
+    fn halo_modes(&self, indicators: &[HaloModeIndicator], remainder: f64) -> Vec<Charge> {
+        let mut excluded: f64 = indicators.iter().map(|m| m.indicator).sum();
+        let retained = self.space().modes();
+        let mut out = Vec::new();
+        for mode in indicators.iter().take(MAXIMUM_PAIRS_PER_STEP) {
+            if excluded <= remainder {
+                break;
+            }
+            excluded -= mode.indicator;
+            if retained.contains(&mode.charge) {
+                continue;
+            }
+            let negative: Charge = mode.charge.iter().map(|x| -x).collect();
+            out.push(mode.charge.clone());
+            if negative != mode.charge {
+                out.push(negative);
+            }
+        }
+        out
+    }
+
+    /// Error control by the slow-manifold dual-weighted residual estimate.
+    fn estimated(mut self, dual: SlowDual) -> Result<FiniteSolution, String> {
+        let kappa = self.options.safety_factor;
+        let epsilon = self.epsilon;
+        let target = 0.5 * BASIS_SHARE * epsilon / kappa;
+        let groups: Vec<PopulationGroup> =
+            self.groups.iter().map(|g| PopulationGroup { name: g.name.clone(), indices: g.indices.clone() }).collect();
+        let mut history: Vec<(usize, f64)> = Vec::new();
+        loop {
+            self.deadline()?;
+            let clock = Instant::now();
+            let model = ReducedModel::build(self.space())?;
+            self.timing.reduced += ms(clock);
+            let (basis, halo) = {
+                let space = self.space.as_ref().expect("trial space");
+                let view = CandidateView {
+                    map: space.op.map(),
+                    q: space.q(),
+                    eq: space.eq(),
+                    fq: space.fq(),
+                    columns: space.columns(),
+                    generator: &model.generator,
+                    initial: &model.initial,
+                    times: &self.times,
+                };
+                let clock = Instant::now();
+                let basis = dual.basis_estimate(&view, &groups)?;
+                self.timing.basis_estimate += ms(clock);
+                let halo = if kappa * basis.maximum <= BASIS_SHARE * epsilon {
+                    let clock = Instant::now();
+                    let halo = dual.halo_estimate(self.core.prepared(), &view, &groups, HaloOptions::default())?;
+                    self.timing.halo_estimate += ms(clock);
+                    Some(halo)
+                } else {
+                    None
+                };
+                (basis, halo)
+            };
+            history.push((self.space().columns(), basis.maximum));
+            let Some(halo) = halo else {
+                self.checkpoint(Some(basis.maximum), None, "refine-basis");
+                let block = self.predicted_block(&history, target);
+                self.grow(block, &model)?;
+                continue;
+            };
+            let total = combined_estimate(&basis, &halo.estimate)?;
+            if kappa * total.maximum <= epsilon {
+                let candidate = self.populations(&model)?;
+                let (projected, charge) = constrain_populations(&candidate.values, self.n, &self.groups)?;
+                if kappa * total.maximum + charge <= epsilon {
+                    self.checkpoint(Some(basis.maximum), Some(halo.estimate.maximum), "accept");
+                    let scaled = kappa * total.maximum;
+                    return Ok(self.finish(
+                        projected,
+                        candidate.maximum_imaginary,
+                        total.maximum,
+                        scaled,
+                        charge,
+                        "dual-weighted-residual",
+                    ));
+                }
+            }
+            if kappa * halo.estimate.maximum > 0.5 * epsilon && halo.estimate.maximum >= basis.maximum {
+                let added = self.halo_modes(&halo.modes, HALO_REMAINDER_SHARE * epsilon / kappa);
+                if !added.is_empty() {
+                    self.checkpoint(Some(basis.maximum), Some(halo.estimate.maximum), "add-modes");
+                    let mut modes = self.space().modes().to_vec();
+                    modes.extend(added);
+                    modes.sort();
+                    self.transfer(&modes)?;
+                    history.clear();
+                    self.grow(self.options.block_columns, &model)?;
+                    continue;
+                }
+            }
+            self.checkpoint(Some(basis.maximum), Some(halo.estimate.maximum), "refine-basis");
+            let block = self.predicted_block(&history, target);
+            self.grow(block, &model)?;
+        }
+    }
+
+    /// Fallback without the slow dual: successive candidate changes (basis)
+    /// and the change against the previous graph-ball order (domain).
+    fn successive(mut self) -> Result<FiniteSolution, String> {
+        let epsilon = self.epsilon;
+        let mut order = 1;
+        let mut previous: Option<Vec<f64>> = None;
+        let mut previous_domain: Option<Vec<f64>> = None;
+        let mut invariant = false;
+        loop {
+            self.deadline()?;
+            let model = ReducedModel::build(self.space())?;
+            let candidate = self.populations(&model)?;
+            let populations = candidate.values;
+            let basis_change = if invariant {
+                Some(0.)
+            } else {
+                previous.as_ref().map(|p| population_change(p, &populations, self.n, &self.groups))
+            };
+            let domain_change = previous_domain.as_ref().map(|p| population_change(p, &populations, self.n, &self.groups));
+            let next = support_domain(self.axes, &self.steps, order + 1)?;
+            let exact_domain = next.len() == self.space().modes().len();
+            if let Some(b) = basis_change.filter(|&b| b <= 0.25 * epsilon) {
+                let domain_error = if exact_domain { Some(0.) } else { domain_change };
+                if let Some(d) = domain_error.filter(|&d| b + d <= 0.9 * epsilon) {
+                    let (projected, charge) = constrain_populations(&populations, self.n, &self.groups)?;
+                    if b + d + charge <= epsilon {
+                        self.checkpoint(basis_change, domain_change, "accept");
+                        return Ok(self.finish(projected, candidate.maximum_imaginary, b + d, b + d, charge, "successive-change"));
+                    }
+                }
+                if !exact_domain && order < self.options.maximum_order {
+                    self.checkpoint(basis_change, domain_change, "expand-domain");
+                    order += 1;
+                    invariant = false;
+                    previous_domain = Some(populations.clone());
+                    previous = Some(populations);
+                    self.transfer(&next)?;
+                    self.grow(self.options.block_columns, &model)?;
+                    continue;
+                }
+            }
+            self.checkpoint(basis_change, domain_change, "refine-basis");
+            previous = Some(populations);
+            invariant = !self.grow(self.options.block_columns, &model)?;
+        }
+    }
+
+    /// Development only: exactly the requested graph-ball order and columns.
+    fn fixed(mut self, order: usize, columns: usize) -> Result<FiniteSolution, String> {
+        let modes = support_domain(self.axes, &self.steps, order)?;
+        self.transfer(&modes)?;
+        loop {
+            let space = self.space.as_mut().expect("trial space");
+            if space.columns() >= columns {
+                break;
+            }
+            let want = columns - space.columns();
+            if self.chain.grow(space, want, self.options.inner)? == 0 {
+                break;
+            }
+        }
+        let model = ReducedModel::build(self.space())?;
+        let candidate = self.populations(&model)?;
+        Ok(self.finish(candidate.values, candidate.maximum_imaginary, 0., 0., 0., "fixed"))
+    }
+}
+
 pub fn solve(
     mut core: RuntimeCore, times: &[f64], groups: Vec<RequestedGroup>, options: FiniteOptions,
 ) -> Result<FiniteSolution, String> {
@@ -249,177 +604,41 @@ pub fn solve(
     // single coherent coupling reaches from the central mode.
     let (axes, steps) = {
         let source = &core.prepared().primitives().hilbert.source;
-        let mut steps: Vec<Charge> = source.hamiltonian.keys().filter(|q| q.iter().any(|&k| k != 0)).cloned().collect();
-        if std::env::var_os("ATOM_EXP_UNGAUGED_BALL").is_some() {
-            steps = source.phases.drive_indices.clone();
-        }
+        let steps: Vec<Charge> = source.hamiltonian.keys().filter(|q| q.iter().any(|&k| k != 0)).cloned().collect();
         (source.phases.axes.len(), steps)
     };
     let lapack = Arc::clone(core.lapack());
-    if std::env::var_os("ATOM_EXP_CHARGES").is_some() {
-        let p = core.prepared().primitives();
-        let keys = |f: &crate::preparation::FourierMatrices| f.keys().cloned().collect::<Vec<_>>();
-        eprintln!("drive indices {:?}", steps);
-        eprintln!("gauges {:?}", p.hilbert.source.gauges);
-        eprintln!("H charges {:?}", keys(&p.hilbert.source.hamiltonian));
-        eprintln!("S charges {:?}", keys(&p.s));
-        eprintln!("K charges {:?}", keys(&p.k_hat));
-        eprintln!("NL charges {:?}", keys(&p.no_jump_left));
-        eprintln!("ball1 {:?}", support_domain(axes, &steps, 1)?);
-    }
-    let mut order = 1;
-    let mut space = TrialSpace::new(&mut core, &support_domain(axes, &steps, order)?, &poles)?;
+    let mut space = TrialSpace::new(&mut core, &support_domain(axes, &steps, 1)?, &poles)?;
     let mut chain = Chain::new(poles.len());
     chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner)?;
-    if let Some((fixed_order, columns)) = options.fixed {
-        while order < fixed_order {
-            order += 1;
-            space = space.transfer(&mut core, &support_domain(axes, &steps, order)?)?;
-        }
-        while space.columns() < columns {
-            let want = columns - space.columns();
-            if chain.grow(&mut space, want, options.inner)? == 0 {
-                break;
-            }
-        }
-        let model = ReducedModel::build(&space)?;
-        if std::env::var_os("ATOM_EXP_SPECTRUM").is_some() {
-            let (re, im, _) = lapack.eigen(&model.generator, model.m)?;
-            let mut pairs: Vec<(f64, f64)> = re.into_iter().zip(im).collect();
-            pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
-            eprintln!("reduced spectrum m={} top: {:?}", model.m, &pairs[..pairs.len().min(8)]);
-        }
-        let trajectory = model.trajectory(&lapack, times)?;
-        let candidate = space.readout().evaluate(&lapack, &trajectory, times)?;
-        return Ok(FiniteSolution {
-            populations: candidate.values,
-            diagnostics: FiniteDiagnostics {
-                estimated_error: 0.,
-                projection_charge: 0.,
-                final_order: order,
-                final_modes: space.modes().len(),
-                final_columns: space.columns(),
-                image_columns: space.image_columns(),
-                operator_applications: chain.operator_applications,
-                peak_trial_bytes: space.bytes(),
-                maximum_imaginary_population: candidate.maximum_imaginary,
-                elapsed_ms: started.elapsed().as_secs_f64() * 1000.,
-                timing: [chain.directions_ms, space.timing.orthogonalize_ms, space.timing.images_ms,
-                    space.timing.projections_ms, space.timing.readout_ms, space.timing.transfer_ms, 0., 0.],
-                checkpoints: vec![],
-            },
-        });
+    let peak_bytes = space.bytes();
+    let fixed = options.fixed;
+    let mut run = Run {
+        core,
+        times: times.to_vec(),
+        groups,
+        options,
+        epsilon,
+        n,
+        axes,
+        steps,
+        lapack,
+        space: Some(space),
+        chain,
+        started,
+        checkpoints: Vec::new(),
+        timing: EngineTiming::default(),
+        peak_bytes,
+    };
+    if let Some((order, columns)) = fixed {
+        return run.fixed(order, columns);
     }
-    let mut checkpoints = Vec::new();
-    let (mut reduced_ms, mut evaluate_ms) = (0., 0.);
-    let mut previous: Option<Vec<f64>> = None;
-    let mut previous_domain: Option<Vec<f64>> = None;
-    let mut peak_bytes = space.bytes();
-    // Set when the trial space is numerically invariant on the current domain.
-    let mut invariant = false;
-    loop {
-        if started.elapsed().as_secs_f64() > options.wall_seconds {
-            return Err(format!(
-                "Population work limit reached after {:.1} s at Fourier order {order} with {} columns; the tolerance was not relaxed",
-                started.elapsed().as_secs_f64(),
-                space.columns()
-            ));
-        }
-        let clock = Instant::now();
-        let model = ReducedModel::build(&space)?;
-        let trajectory = model.trajectory(&lapack, times)?;
-        reduced_ms += clock.elapsed().as_secs_f64() * 1000.;
-        let clock = Instant::now();
-        let candidate = space.readout().evaluate(&lapack, &trajectory, times)?;
-        evaluate_ms += clock.elapsed().as_secs_f64() * 1000.;
-        let populations = candidate.values;
-        let basis_change = if invariant {
-            Some(0.)
-        } else {
-            previous.as_ref().map(|p| population_change(p, &populations, n, &groups))
-        };
-        let domain_change = previous_domain.as_ref().map(|p| population_change(p, &populations, n, &groups));
-        let exact_domain = support_domain(axes, &steps, order + 1)?.len() == space.modes().len();
-        let mut checkpoint = Checkpoint {
-            order,
-            modes: space.modes().len(),
-            columns: space.columns(),
-            basis_change,
-            domain_change,
-            action: "",
-            elapsed_ms: started.elapsed().as_secs_f64() * 1000.,
-        };
-        let basis_resolved = basis_change.is_some_and(|b| b <= 0.25 * epsilon);
-        if basis_resolved {
-            let b = basis_change.unwrap_or(0.);
-            let domain_error = if exact_domain { Some(0.) } else { domain_change };
-            if let Some(d) = domain_error.filter(|&d| b + d <= 0.9 * epsilon) {
-                let (projected, charge) = constrain_populations(&populations, n, &groups)?;
-                if b + d + charge <= epsilon {
-                    checkpoint.action = "accept";
-                    checkpoints.push(checkpoint);
-                    return Ok(FiniteSolution {
-                        populations: projected,
-                        diagnostics: FiniteDiagnostics {
-                            estimated_error: b + d + charge,
-                            projection_charge: charge,
-                            final_order: order,
-                            final_modes: space.modes().len(),
-                            final_columns: space.columns(),
-                            image_columns: space.image_columns(),
-                            operator_applications: chain.operator_applications,
-                            peak_trial_bytes: peak_bytes,
-                            maximum_imaginary_population: candidate.maximum_imaginary,
-                            elapsed_ms: started.elapsed().as_secs_f64() * 1000.,
-                            timing: [
-                                chain.directions_ms,
-                                space.timing.orthogonalize_ms,
-                                space.timing.images_ms,
-                                space.timing.projections_ms,
-                                space.timing.readout_ms,
-                                space.timing.transfer_ms,
-                                reduced_ms,
-                                evaluate_ms,
-                            ],
-                            checkpoints,
-                        },
-                    });
-                }
-            }
-            if !exact_domain && order < options.maximum_order {
-                checkpoint.action = "expand-domain";
-                checkpoints.push(checkpoint);
-                order += 1;
-                invariant = false;
-                previous_domain = Some(populations.clone());
-                previous = Some(populations);
-                space = space.transfer(&mut core, &support_domain(axes, &steps, order)?)?;
-                chain.grow(&mut space, options.block_columns, options.inner)?;
-                peak_bytes = peak_bytes.max(space.bytes());
-                continue;
-            }
-        }
-        if space.columns() + options.block_columns > options.maximum_columns {
-            return Err(format!(
-                "Trial space limit of {} columns reached at Fourier order {order}; the tolerance was not relaxed",
-                options.maximum_columns
-            ));
-        }
-        checkpoint.action = "refine-basis";
-        checkpoints.push(checkpoint);
-        previous = Some(populations);
-        if chain.grow(&mut space, options.block_columns, options.inner)? == 0 {
-            // No independent direction is left: accept only if the space is
-            // numerically invariant, i.e. the reduced residual vanishes.
-            let residual = space.residual(&model.generator)?;
-            let scale = space.fq().iter().map(|x| x * x).sum::<f64>().sqrt().max(f64::MIN_POSITIVE);
-            let size = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
-            if size > 1e-9 * scale {
-                return Err("The trial space cannot be extended further".into());
-            }
-            invariant = true;
-        }
-        peak_bytes = peak_bytes.max(space.bytes());
+    let clock = Instant::now();
+    let dual = SlowDual::prepare(run.core.prepared(), SlowDualOptions::default());
+    run.timing.dual_prepare = ms(clock);
+    match dual {
+        Ok(dual) => run.estimated(dual),
+        Err(_) => run.successive(),
     }
 }
 

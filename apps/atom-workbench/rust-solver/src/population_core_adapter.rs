@@ -84,9 +84,10 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
     let initial_error=populations[0].iter().zip(initial_populations).map(|(a,b)|(a-b).abs()).fold(0_f64,f64::max);
     if trace>1e-7||initial_error>1e-10{return Err("Returned population probabilities failed fixed trace/initial checks".into());}
     let checkpoints:Vec<_>=d.checkpoints.iter().map(|c|json!({
-        "order":c.order,"modes":c.modes,"basis":c.columns,"action":c.action,
-        "basisChange":c.basis_change,"domainChange":c.domain_change,"elapsedMs":c.elapsed_ms
+        "modes":c.modes,"basis":c.columns,"action":c.action,
+        "basisEstimate":c.basis_estimate,"haloEstimate":c.halo_estimate,"elapsedMs":c.elapsed_ms
     })).collect();
+    let t=&d.timing;
     let mut result=json!({"states":model.states,"timesUs":times,"populations":populations,
         "asymptoticPopulations":null,"asymptoticStatus":"not-requested",
         "populationAccuracy":{"status":"estimated-converged","requestedTolerance":options.population_tolerance,
@@ -98,9 +99,9 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
             "propagateMs":d.elapsed_ms,"populationTolerance":options.population_tolerance,
             "populationConvergenceEstimate":d.estimated_error,"errorBoundCertified":false,
             "populationProjectionCharge":d.projection_charge,"originalHamiltonianAndCollapseRetained":true,
-            "finalDomainOrder":d.final_order,"finalModes":d.final_modes,"finalBasis":d.final_columns,
+            "errorControl":d.error_control,"rawPopulationEstimate":d.raw_estimate,"finalModes":d.final_modes,"finalBasis":d.final_columns,
             "imageColumns":d.image_columns,"innerOperatorApplications":d.operator_applications,
-            "peakTrialBytes":d.peak_trial_bytes,"timingMs":{"directions":d.timing[0],"orthogonalize":d.timing[1],"images":d.timing[2],"projections":d.timing[3],"readoutAppend":d.timing[4],"transfer":d.timing[5],"reduced":d.timing[6],"readoutEvaluate":d.timing[7]},"maximumImaginaryPopulation":d.maximum_imaginary_population,
+            "peakTrialBytes":d.peak_trial_bytes,"timingMs":{"directions":t.directions,"orthogonalize":t.orthogonalize,"images":t.images,"projections":t.projections,"readoutAppend":t.readout_append,"transfer":t.transfer,"reduced":t.reduced,"readoutEvaluate":t.readout_evaluate,"dualPrepare":t.dual_prepare,"basisEstimate":t.basis_estimate,"haloEstimate":t.halo_estimate},"maximumImaginaryPopulation":d.maximum_imaginary_population,
             "historicalAnswerUsed":false,"cached":false,
             "frequencyCoordinateSource":"declared-carrier-coordinates",
             "carrierSourceToBasis":identity,"finiteCarrierSourceToBasis":identity,"populationCheckpoints":checkpoints,
