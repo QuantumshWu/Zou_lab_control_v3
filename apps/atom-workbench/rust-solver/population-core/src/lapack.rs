@@ -43,28 +43,6 @@ type GetRs = unsafe extern "C" fn(
     *const i32,
     *mut i32,
 );
-type GeCon = unsafe extern "C" fn(
-    *const c_char,
-    *const i32,
-    *const f64,
-    *const i32,
-    *const f64,
-    *mut f64,
-    *mut f64,
-    *mut i32,
-    *mut i32,
-);
-type SyEv = unsafe extern "C" fn(
-    *const c_char,
-    *const c_char,
-    *const i32,
-    *mut f64,
-    *const i32,
-    *mut f64,
-    *mut f64,
-    *const i32,
-    *mut i32,
-);
 type Gemm = unsafe extern "C" fn(
     *const c_char,
     *const c_char,
@@ -81,8 +59,6 @@ type Gemm = unsafe extern "C" fn(
     *const i32,
 );
 type SetThreads = unsafe extern "C" fn(i32);
-type GeEs = unsafe extern "C" fn(*const c_char,*const c_char,Option<unsafe extern "C" fn(*const f64,*const f64)->i32>,*const i32,*mut f64,*const i32,*mut i32,*mut f64,*mut f64,*mut f64,*const i32,*mut f64,*const i32,*mut i32,*mut i32);
-type LaQtr = unsafe extern "C" fn(*const i32,*const i32,*const i32,*const f64,*const i32,*const f64,*const f64,*mut f64,*mut f64,*mut f64,*mut i32);
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Complex64 {
@@ -151,13 +127,9 @@ pub struct Lapack {
     gesv: GeSv,
     getrf: GetRf,
     getrs: GetRs,
-    gecon: GeCon,
-    syev: SyEv,
     heev: HeEv,
     gemm: Gemm,
     zgemm: ZGemm,
-    gees: GeEs,
-    laqtr: LaQtr,
     zgees: ZGeEs,
     ztrsyl: ZTrSyl,
     zgetrf: ZGetRf,
@@ -381,13 +353,9 @@ impl Lapack {
                 gesv: symbol(library, b"scipy_dgesv_\0")?,
                 getrf: symbol(library, b"scipy_dgetrf_\0")?,
                 getrs: symbol(library, b"scipy_dgetrs_\0")?,
-                gecon: symbol(library, b"scipy_dgecon_\0")?,
-                syev: symbol(library, b"scipy_dsyev_\0")?,
                 heev: symbol(library, b"scipy_zheev_\0")?,
                 gemm: symbol(library, b"scipy_dgemm_\0")?,
                 zgemm: symbol(library, b"scipy_zgemm_\0")?,
-                gees: symbol(library, b"scipy_dgees_\0")?,
-                laqtr: symbol(library, b"scipy_dlaqtr_\0")?,
                 zgees: symbol(library, b"scipy_zgees_\0")?,
                 ztrsyl: symbol(library, b"scipy_ztrsyl_\0")?,
                 zgetrf: symbol(library, b"scipy_zgetrf_\0")?,
@@ -469,24 +437,6 @@ impl Lapack {
     pub fn complex_solve_factored(&self, lu: &[Complex64], pivots: &[i32], rhs: &[Complex64], n: usize) -> Result<Vec<Complex64>, String> {
         self.sylvester_kernel().complex_solve_factored(lu, pivots, rhs, n)
     }
-    pub fn real_schur(&self,a:&[f64],n:usize)->Result<(Vec<f64>,Vec<f64>),String>{
-        if a.len()!=n*n||n==0{return Err("Invalid Schur dimensions".into());}
-        let ni=n as i32;let mut t=a.to_vec();let mut q=vec![0.;n*n];let mut wr=vec![0.;n];let mut wi=vec![0.;n];let mut selected=0;let mut info=0;let mut bwork=vec![0;n];let mut query=[0.];let yes=b'V' as c_char;let no=b'N' as c_char;
-        unsafe{(self.gees)(&yes,&no,None,&ni,t.as_mut_ptr(),&ni,&mut selected,wr.as_mut_ptr(),wi.as_mut_ptr(),q.as_mut_ptr(),&ni,query.as_mut_ptr(),&-1,bwork.as_mut_ptr(),&mut info);}
-        if info!=0{return Err(format!("Schur workspace query {info}"));}
-        let lwork=(query[0] as i32).max(3*ni);let mut work=vec![0.;lwork as usize];
-        unsafe{(self.gees)(&yes,&no,None,&ni,t.as_mut_ptr(),&ni,&mut selected,wr.as_mut_ptr(),wi.as_mut_ptr(),q.as_mut_ptr(),&ni,work.as_mut_ptr(),&lwork,bwork.as_mut_ptr(),&mut info);}
-        if info!=0{return Err(format!("Schur decomposition {info}"));}Ok((t,q))
-    }
-    /// Padded real Schur matrix, with an isolated leading 1x1 dummy block as
-    /// required by DLAQTR's complex system. transpose means conjugate transpose.
-    pub fn schur_shifted_solve(&self,t:&[f64],rhs:&[f64],n:usize,omega:f64,transpose:bool)->Result<Vec<f64>,String>{
-        let ni=n as i32;let mut b=vec![0.;n];b[0]=omega;let mut x=rhs.to_vec();let mut work=vec![0.;n];let mut scale=1.;let mut info=0;
-        if t.len()!=n*n||rhs.len()!=2*n{return Err("Invalid Schur shifted solve".into());}
-        unsafe{(self.laqtr)(&(transpose as i32),&0,&ni,t.as_ptr(),&ni,b.as_ptr(),&omega,&mut scale,x.as_mut_ptr(),work.as_mut_ptr(),&mut info);}
-        if info!=0||!scale.is_finite()||scale<=0.{return Err(format!("Schur triangular solve info={info}, scale={scale}"));}
-        for value in &mut x{*value/=scale;}Ok(x)
-    }
     pub fn eigen(&self, a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), String> {
         let ni = n as i32;
         let mut input = a.to_vec();
@@ -567,75 +517,6 @@ impl Lapack {
         }
         Ok(rhs)
     }
-    /// Real nonsymmetric eigensystem with both left and right columns, using
-    /// LAPACK's adjacent Re/Im encoding for each positive-imaginary pair.
-    pub fn eigen_both(
-        &self,
-        a: &[f64],
-        n: usize,
-    ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>), String> {
-        if n == 0
-            || n > i32::MAX as usize
-            || n.checked_mul(n) != Some(a.len())
-            || a.iter().any(|x| !x.is_finite())
-        {
-            return Err("Invalid real eigensystem input".into());
-        }
-        let ni = n as i32;
-        let mut input = a.to_vec();
-        let mut wr = vec![0.; n];
-        let mut wi = vec![0.; n];
-        let mut left = vec![0.; n * n];
-        let mut right = vec![0.; n * n];
-        let mut query = [0.];
-        let mut info = 0;
-        let yes = b'V' as c_char;
-        unsafe {
-            (self.geev)(
-                &yes,
-                &yes,
-                &ni,
-                input.as_mut_ptr(),
-                &ni,
-                wr.as_mut_ptr(),
-                wi.as_mut_ptr(),
-                left.as_mut_ptr(),
-                &ni,
-                right.as_mut_ptr(),
-                &ni,
-                query.as_mut_ptr(),
-                &-1,
-                &mut info,
-            );
-        }
-        if info != 0 {
-            return Err(format!("LAPACK dgeev left/right query failed: {info}"));
-        }
-        let length = (query[0] as i32).max(4 * ni);
-        let mut work = vec![0.; length as usize];
-        unsafe {
-            (self.geev)(
-                &yes,
-                &yes,
-                &ni,
-                input.as_mut_ptr(),
-                &ni,
-                wr.as_mut_ptr(),
-                wi.as_mut_ptr(),
-                left.as_mut_ptr(),
-                &ni,
-                right.as_mut_ptr(),
-                &ni,
-                work.as_mut_ptr(),
-                &length,
-                &mut info,
-            );
-        }
-        if info != 0 {
-            return Err(format!("LAPACK dgeev left/right failed: {info}"));
-        }
-        Ok((wr, wi, left, right))
-    }
     /// Hermitian complex eigensystem (zheev), column-major input/output.
     pub fn hermitian_eigen(
         &self,
@@ -715,41 +596,6 @@ impl Lapack {
         }
         Ok((matrix, piv))
     }
-    pub fn solve_factored(
-        &self,
-        a: &[f64],
-        pivots: &[i32],
-        b: &[f64],
-        n: usize,
-    ) -> Result<Vec<f64>, String> {
-        self.solve_factored_op(a,pivots,b,n,false)
-    }
-    pub fn solve_factored_transpose(&self,a:&[f64],pivots:&[i32],b:&[f64],n:usize)->Result<Vec<f64>,String>{
-        self.solve_factored_op(a,pivots,b,n,true)
-    }
-    fn solve_factored_op(&self,a:&[f64],pivots:&[i32],b:&[f64],n:usize,transpose:bool)->Result<Vec<f64>,String>{
-        let ni = n as i32;
-        let mut rhs = b.to_vec();
-        let mut info = 0;
-        let no = if transpose{b'T'}else{b'N'} as c_char;
-        unsafe {
-            (self.getrs)(
-                &no,
-                &ni,
-                &1,
-                a.as_ptr(),
-                &ni,
-                pivots.as_ptr(),
-                rhs.as_mut_ptr(),
-                &ni,
-                &mut info,
-            );
-        }
-        if info != 0 {
-            return Err(format!("LAPACK dgetrs failed: {info}"));
-        }
-        Ok(rhs)
-    }
     /// Solve all column-major RHS columns with one factorization/call.
     pub fn solve_matrix_factored(
         &self,
@@ -793,35 +639,6 @@ impl Lapack {
         }
         Ok(rhs)
     }
-    pub fn condition(&self, a: &[f64], n: usize, norm: f64) -> Result<f64, String> {
-        let ni = n as i32;
-        let mut reciprocal = 0.;
-        let mut work = vec![0.; 4 * n];
-        let mut iw = vec![0; n];
-        let mut info = 0;
-        let one = b'1' as c_char;
-        unsafe {
-            (self.gecon)(
-                &one,
-                &ni,
-                a.as_ptr(),
-                &ni,
-                &norm,
-                &mut reciprocal,
-                work.as_mut_ptr(),
-                iw.as_mut_ptr(),
-                &mut info,
-            );
-        }
-        if info != 0 {
-            return Err(format!("LAPACK dgecon failed: {info}"));
-        }
-        Ok(if reciprocal > 0. {
-            1. / reciprocal
-        } else {
-            f64::INFINITY
-        })
-    }
     pub fn multiply(&self, a: &[f64], b: &[f64], m: usize, n: usize, k: usize) -> Vec<f64> {
         let mut out = vec![0.; m * n];
         let no = b'N' as c_char;
@@ -846,53 +663,6 @@ impl Lapack {
             );
         }
         out
-    }
-    /// Allocation-free column-major C = A B for trusted internal dense loops.
-    /// Shapes and integer/length overflow are checked in O(1). No input/output
-    /// finiteness scan is performed: the caller must validate finite data at
-    /// its numerical-operation boundary before exposing a result. Existing C
-    /// is overwritten (BLAS beta=0), including when its old entries are NaN.
-    pub fn multiply_into(
-        &self,a:&[f64],b:&[f64],out:&mut[f64],m:usize,n:usize,k:usize,
-    )->Result<(),String>{
-        if m>i32::MAX as usize||n>i32::MAX as usize||k>i32::MAX as usize||
-            m.checked_mul(k)!=Some(a.len())||k.checked_mul(n)!=Some(b.len())||m.checked_mul(n)!=Some(out.len()){
-            return Err("Invalid trusted real BLAS matrix dimensions".into());
-        }
-        if m==0||n==0{return Ok(());}
-        if k==0{out.fill(0.);return Ok(());}
-        let no=b'N' as c_char;let(mi,ni,ki)=(m as i32,n as i32,k as i32);
-        unsafe{(self.gemm)(&no,&no,&mi,&ni,&ki,&1.,a.as_ptr(),&mi,b.as_ptr(),&ki,&0.,out.as_mut_ptr(),&mi);}
-        Ok(())
-    }
-    /// Column-major C = A^T B, without materializing a transposed A.
-    /// A/B have `rows` physical rows and respectively `left_columns` and
-    /// `right_columns` columns. Each slice must cover EXACTLY the addressed
-    /// span: (columns-1)*leading_dimension + logical_rows, or zero for an
-    /// empty matrix. This permits column slices and strided output subblocks.
-    /// Padding is untouched. Validation is O(1); the caller owns finite-data
-    /// validation. beta=0 overwrites every logical output entry.
-    pub fn multiply_transpose_left_into(
-        &self, a:&[f64], b:&[f64], out:&mut[f64],
-        rows:usize, left_columns:usize, right_columns:usize,
-        lda:usize, ldb:usize, ldc:usize,
-    )->Result<(),String>{
-        let span=|r:usize,c:usize,ld:usize|->Option<usize>{
-            if r==0||c==0{Some(0)}else{(c-1).checked_mul(ld)?.checked_add(r)}
-        };
-        if [rows,left_columns,right_columns,lda,ldb,ldc].iter().any(|&v|v>i32::MAX as usize)
-            ||lda<rows.max(1)||ldb<rows.max(1)||ldc<left_columns.max(1)
-            ||span(rows,left_columns,lda)!=Some(a.len())
-            ||span(rows,right_columns,ldb)!=Some(b.len())
-            ||span(left_columns,right_columns,ldc)!=Some(out.len()){
-            return Err("Invalid transpose-left real BLAS matrix dimensions".into());
-        }
-        if left_columns==0||right_columns==0{return Ok(());}
-        if rows==0{for j in 0..right_columns{out[j*ldc..j*ldc+left_columns].fill(0.);}return Ok(());}
-        let trans=b'T' as c_char;let no=b'N' as c_char;
-        let(m,n,k,la,lb,lc)=(left_columns as i32,right_columns as i32,rows as i32,lda as i32,ldb as i32,ldc as i32);
-        unsafe{(self.gemm)(&trans,&no,&m,&n,&k,&1.,a.as_ptr(),&la,b.as_ptr(),&lb,&0.,out.as_mut_ptr(),&lc);}
-        Ok(())
     }
     /// General column-major `C = alpha op(A) op(B) + beta C` with explicit
     /// leading dimensions; `op(X)` is `X^T` when the flag is set. Shapes and
@@ -953,50 +723,6 @@ impl Lapack {
         unsafe{(self.zgemm)(&no,&no,&mi,&ni,&ki,&one,a.as_ptr(),&mi,b.as_ptr(),&ki,&zero,out.as_mut_ptr(),&mi);}
         Ok(())
     }
-    pub fn symmetric_eigenvalues(&self, a: &[f64], n: usize) -> Result<Vec<f64>, String> {
-        let ni = n as i32;
-        let mut matrix = a.to_vec();
-        let mut vals = vec![0.; n];
-        let mut query = [0.];
-        let mut info = 0;
-        let no = b'N' as c_char;
-        let upper = b'U' as c_char;
-        unsafe {
-            (self.syev)(
-                &no,
-                &upper,
-                &ni,
-                matrix.as_mut_ptr(),
-                &ni,
-                vals.as_mut_ptr(),
-                query.as_mut_ptr(),
-                &-1,
-                &mut info,
-            );
-        }
-        if info != 0 {
-            return Err(format!("LAPACK dsyev workspace query failed: {info}"));
-        }
-        let len = (query[0] as i32).max(3 * ni);
-        let mut work = vec![0.; len as usize];
-        unsafe {
-            (self.syev)(
-                &no,
-                &upper,
-                &ni,
-                matrix.as_mut_ptr(),
-                &ni,
-                vals.as_mut_ptr(),
-                work.as_mut_ptr(),
-                &len,
-                &mut info,
-            );
-        }
-        if info != 0 {
-            return Err(format!("LAPACK dsyev failed: {info}"));
-        }
-        Ok(vals)
-    }
 }
 
 #[cfg(test)]
@@ -1035,23 +761,6 @@ mod added_wrapper_tests {
         }
     }
     #[test]
-    fn left_right_real_eigenvector_convention_is_verified() {
-        let lap = Lapack::load().unwrap();
-        let a = [-1., -3., 2., -4.];
-        let (wr, wi, left, right) = lap.eigen_both(&a, 2).unwrap();
-        assert!(wi[0] > 0.);
-        for row in 0..2 {
-            let ar = a[row] * right[0] + a[row + 2] * right[1];
-            let ai = a[row] * right[2] + a[row + 2] * right[3];
-            assert!((ar - wr[0] * right[row] + wi[0] * right[row + 2]).abs() < 1e-13);
-            assert!((ai - wr[0] * right[row + 2] - wi[0] * right[row]).abs() < 1e-13);
-            let ar = a[row * 2] * left[0] + a[1 + row * 2] * left[1];
-            let ai = a[row * 2] * left[2] + a[1 + row * 2] * left[3];
-            assert!((ar - wr[0] * left[row] - wi[0] * left[row + 2]).abs() < 1e-13);
-            assert!((ai - wr[0] * left[row + 2] + wi[0] * left[row]).abs() < 1e-13);
-        }
-    }
-    #[test]
     fn factored_solve_solves_all_right_hand_side_columns() {
         let lap = Lapack::load().unwrap();
         let (lu, pivots) = lap.factor(&[2., 0., 1., 3.], 2).unwrap();
@@ -1075,22 +784,5 @@ mod added_wrapper_tests {
         let mut reused=[Complex64{re:f64::NAN,im:f64::NAN};2];
         lap.multiply_complex_into(&a,&b,&mut reused,2,1,1).unwrap();
         for(actual,expected)in reused.iter().zip(product){assert_eq!(actual.re,expected.re);assert_eq!(actual.im,expected.im);}
-    }
-    #[test]
-    fn trusted_gemm_into_reuses_buffers_and_checks_rectangular_zero_and_invalid_shapes(){
-        let lap=Lapack::load().unwrap();
-        let a=[1.,2.,3.,4.,5.,6.];let b=[7.,8.,9.,10.,11.,12.];let mut reused=[f64::NAN;4];
-        lap.multiply_into(&a,&b,&mut reused,2,2,3).unwrap();
-        assert_eq!(reused,[76.,100.,103.,136.]);assert_eq!(reused.to_vec(),lap.multiply(&a,&b,2,2,3));
-        lap.multiply_into(&[],&[],&mut reused,2,2,0).unwrap();assert_eq!(reused,[0.;4]);
-        let mut complex=[Complex64{re:f64::NAN,im:f64::NAN};4];
-        lap.multiply_complex_into(&[],&[],&mut complex,2,2,0).unwrap();
-        assert!(complex.iter().all(|z|z.re==0.&&z.im==0.));
-        lap.multiply_into(&[],&[],&mut[],0,3,0).unwrap();
-        lap.multiply_complex_into(&[],&[],&mut[],0,3,0).unwrap();
-        assert!(lap.multiply_into(&a,&b,&mut reused,2,2,2).is_err());
-        assert!(lap.multiply_complex_into(&[],&[],&mut complex,2,2,1).is_err());
-        assert!(lap.multiply_into(&[],&[],&mut[],usize::MAX,2,0).is_err());
-        assert!(lap.multiply_complex_into(&[],&[],&mut[],usize::MAX,2,0).is_err());
     }
 }
