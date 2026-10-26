@@ -58,8 +58,14 @@
 //! * `p != 0` into a retained or slow charge `k`: the ground block of
 //!   `L_p eta` is a slow source; its non-ground block gets the exact dressed
 //!   fast response at `k` (for a near-resonant component the response to its
-//!   pair source, `add_fast_response_pairs`), and (optionally) Markov slaving
-//!   plus one hop when `k` is fast.
+//!   pair source, `add_fast_response_pairs`) and, when `k` is fast, Markov
+//!   slaving plus one more hop into the slots (`slaved_returns_all`, as in
+//!   the basis estimate and in `J_eff` itself). That second hop is the path
+//!   through a near-resonant optical coherence at a retained charge back to
+//!   the ground block: without it the halo of threeNearStrong over 10 ms saw
+//!   7e-7 for the pair [2, 1] whose truncation moved the populations by
+//!   1.8e-4 (with it, 1.7e-4). Slaving is linear, so it acts on the returns
+//!   summed per target charge (and per pair for the indicators).
 //!
 //! Evaluated are the halo charges that return into the retained domain or a
 //! slot through a significant coupling in one hop, and every slow halo charge
@@ -230,8 +236,6 @@ struct RoutePart {
     /// Non-ground rest of a return to another charge (`n^2 x columns`, zero
     /// on the ground block).
     field: Option<Dense>,
-    /// Slaved returns (modal), added at frequency 0.
-    slaved: Vec<Dense>,
     /// Zero-initial pair sources `v e_t[first, second]` (modal), in order.
     pairs: Vec<(C, C, Vec<C>)>,
     /// Near-resonant images at the target charge, for their exact fast
@@ -291,17 +295,11 @@ pub struct HaloOptions {
     /// own oscillating populations, their initial boundary and their
     /// same-charge recycling, which reaches the slow error with a fast phase).
     pub all_halo_modes: bool,
-    /// Additionally Markov-slave the non-ground returns that land on fast
-    /// retained charges and return them one more drive hop into the slow
-    /// slots. Off by default: it never changed a halo estimate that mattered
-    /// on the benchmarks while costing about 2-3x the pencil (one exact
-    /// charge-block solve per column).
-    pub slave_fast_returns: bool,
 }
 
 impl Default for HaloOptions {
     fn default() -> Self {
-        Self { resonance_floor: None, all_halo_modes: false, slave_fast_returns: false }
+        Self { resonance_floor: None, all_halo_modes: false }
     }
 }
 
@@ -1363,10 +1361,9 @@ impl SlowDual {
                         let term = &self.frame.terms[t];
                         let same_charge = fast.is_none();
                         let k = add_charge(q, &term.charge, false)?;
-                        let slave = !same_charge && self.slot_of(&k).is_none() && options.slave_fast_returns;
+                        let slave = !same_charge && self.slot_of(&k).is_none();
                         let mut ground = Dense::zeros(g * g, width);
                         let mut field = None;
-                        let mut slaved = Vec::new();
                         if same_charge {
                             ground = self.same_charge_ground_returns(&refs)?;
                         } else {
@@ -1384,27 +1381,15 @@ impl SlowDual {
                                     }
                                 }
                             }
-                            if slave {
-                                let mut full = Dense::zeros(d, width);
-                                for (column, image) in images.iter().enumerate() {
-                                    for b in 0..n {
-                                        for a in 0..n {
-                                            full.set(a * n + b, column, image.at(a, b));
-                                        }
-                                    }
-                                }
-                                for (target_slot, returned) in self.slaved_returns(&k, &full)? {
-                                    slaved.push(self.to_modal(target_slot, &returned)?);
-                                }
-                            }
+                            // Its slaving acts on the sum over the halo.
                             field = Some(rest);
                         }
                         // Near-resonant terms: zero-initial pair sources. Their
-                        // ground block returns exactly; a non-ground return is
-                        // slaved when k is fast (optional) and otherwise counted
-                        // (it needs a pair-source fast response; rare: resonance
-                        // requires a strongly damped candidate mode). Their
-                        // images are formed in one batch per route.
+                        // ground block returns exactly; a non-ground return gets
+                        // its pair-source fast response and, when k is fast, is
+                        // slaved (rare: resonance requires a strongly damped
+                        // candidate mode). Their images are formed in one batch
+                        // per route.
                         let units: Vec<&Dense> = resonant.iter().map(|r| &r.unit).collect();
                         let images: Vec<Dense> = if units.is_empty() {
                             Vec::new()
@@ -1455,7 +1440,7 @@ impl SlowDual {
                             }
                             sources.push((beta[column], resonant_term.second, image));
                         }
-                        route_parts.push(RoutePart { slot, shift, fast, ground, field, slaved, pairs, sources });
+                        route_parts.push(RoutePart { slot, shift, fast, ground, field, pairs, sources });
                     }
                 }
                 let near_resonant = resonant.len();
@@ -1509,10 +1494,6 @@ impl SlowDual {
                                 *a = cadd(*a, *b);
                             }
                         }
-                        for modal in &route.slaved {
-                            total.add_slow(0., start, modal);
-                            series.add_slow(0., 0, modal);
-                        }
                         for (first, second, v) in route.pairs {
                             total.add_pair(first, second, v.clone());
                             series.add_pair(first, second, v);
@@ -1552,6 +1533,13 @@ impl SlowDual {
                     response.add_to(&mut total, start);
                 }
             }
+            // --- Second hop: the returns at fast charges, Markov-slaved and
+            // returned into the slots (slot targets are skipped there).
+            let slaving: Vec<(Charge, &Dense)> =
+                fast_fields.iter().zip(&fast_targets).filter_map(|(field, (k, _, _))| field.as_ref().map(|field| (k.clone(), field))).collect();
+            for (slot, returned) in self.slaved_returns_all(&slaving, width)? {
+                total.add_slow(0., start, &self.to_modal(slot, &returned)?);
+            }
             // Each pair's part of this block, in parallel over the pairs: the
             // fast responses of its own fields and its values on the indicator
             // samples. Its dressed amplitudes do not depend on the block's
@@ -1566,6 +1554,10 @@ impl SlowDual {
                 for (index, field) in &fields {
                     let (_, target, nu_k) = &fast_targets[*index];
                     self.add_fast_response(&mut series, *target, *nu_k, 0, field)?;
+                }
+                let slaving: Vec<(Charge, &Dense)> = fields.iter().map(|(index, field)| (fast_targets[*index].0.clone(), field)).collect();
+                for (slot, returned) in self.slaved_returns_all(&slaving, width)? {
+                    series.add_slow(0., 0, &self.to_modal(slot, &returned)?);
                 }
                 let mut dressed = Series::new(&[], grid.maximum);
                 dressed.take_dressed(&mut series);
