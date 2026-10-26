@@ -51,6 +51,21 @@ impl Execution {
         self.threads
     }
 
+    /// Runs `a` and `b` concurrently on the pool (serially without one). Both
+    /// stay on pool workers, which already own their BLAS buffers.
+    pub fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+    where
+        A: FnOnce() -> RA + Send,
+        B: FnOnce() -> RB + Send,
+        RA: Send,
+        RB: Send,
+    {
+        match &self.pool {
+            Some(pool) => pool.install(|| rayon::join(a, b)),
+            None => (a(), b()),
+        }
+    }
+
     /// Number of tasks for `items` independent output items, `work` complex
     /// multiply-adds in total and at least `minimum_work` per task.
     pub fn tasks(&self, items: usize, work: usize, minimum_work: usize) -> usize {

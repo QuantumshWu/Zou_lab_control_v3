@@ -12,8 +12,9 @@ use super::coordinates::PopulationObservation;
 use crate::parallel::{Execution, MINIMUM_WORK_PER_TASK};
 use crate::preparation::FrequencyParts;
 
-/// Output times evaluated per GEMM batch.
-const TIME_CHUNK: usize = 256;
+/// Output times evaluated per GEMM batch. Every running task holds two
+/// `[rows, TIME_CHUNK]` buffers, so this stays small.
+const TIME_CHUNK: usize = 32;
 
 pub(crate) struct Readout {
     observer: Arc<PopulationObservation>,

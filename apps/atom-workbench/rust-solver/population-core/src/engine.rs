@@ -16,6 +16,7 @@ use super::reduced::ReducedModel;
 use super::runtime_core::RuntimeCore;
 use super::slow_dual::{SlowDual, SlowDualOptions};
 use super::trial::TrialSpace;
+use crate::parallel::Execution;
 use std::collections::VecDeque;
 
 /// A named set of state indices whose summed population is also checked.
@@ -593,15 +594,15 @@ pub fn solve(
     let mut chain = Chain::new(poles.len());
     // The slow dual depends only on the model: prepare it while the first
     // chain columns are computed.
-    let (dual, dual_ms) = std::thread::scope(|scope| -> Result<_, String> {
-        let prepared = core.prepared();
-        let dual = scope.spawn(move || {
+    let prepared = core.prepared();
+    let ((dual, dual_ms), grown) = Execution::new()?.join(
+        || {
             let clock = Instant::now();
             (SlowDual::prepare(prepared, SlowDualOptions::default()), ms(clock))
-        });
-        chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner)?;
-        dual.join().map_err(|_| "Slow dual preparation panicked".to_string())
-    })?;
+        },
+        || chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner),
+    );
+    grown?;
     let peak_bytes = space.bytes();
     let mut run = Run {
         core,
