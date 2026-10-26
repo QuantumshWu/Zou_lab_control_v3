@@ -163,7 +163,7 @@ fn mean_result(model:&Model,options:&Options,core:&mut RuntimeCore,request:&Requ
             "meanMs":d.elapsed_ms,"uncorrectedPopulations":d.uncorrected_populations}});
     let extra=json!({"horizonMethod":horizon.map(|h|h.method),"horizonRelaxingBound":horizon.map(|h|h.decaying),
         "horizonPropagationEstimate":horizon.map(|h|h.propagation_estimate),"horizonProjectionCharge":horizon.map(|h|h.projection_charge),
-        "meanProbeStalled":d.probe_stalled,"limitNote":d.limit_note});
+        "meanProbeStalled":d.probe_stalled});
     if let(Value::Object(target),Value::Object(extra))=(&mut result["diagnostics"],extra){target.extend(extra);}
     Ok(result)
 }

@@ -77,22 +77,16 @@
 //! what has decayed by `T` is gone, oscillations faster than the drives'
 //! beats average out exactly as above (the laboratory time average of the
 //! state at `T`), and the slow modes are propagated over `T` from the
-//! initial state. Decided by size, never by a guessed rate:
-//! * the slow generator bounds what is still relaxing at `T`: every
-//!   non-conserved mode with its population weight `|R_k c_k|` (initial
-//!   central ground block `y0`) and its decay `exp(Re(alpha_k + i nu) T)`
-//!   at a twentieth of its rate (`SlowDual::horizon_bound`; the reduction's
-//!   rates are off by up to 11x with a tweezer, see `HORIZON_RATE_MARGIN`).
-//!   Below `HORIZON_NEGLIGIBLE`
-//!   of the tolerance the result is the limit and the bound is charged;
-//! * otherwise the state at `T` comes from the finite-time engine on the
-//!   window (its estimate covers the whole window), read with the
-//!   laboratory time average; a conserved quantity or a rate of 1e-12 are
-//!   then propagated alike, so the result is continuous in the rates and
-//!   tends to the limit as `T` grows.
-//! Propagating with `exp(J_eff T)` alone was measured 4e-3 off on a toy
-//! whose slow rate the reduction gets 12% high, which is why the generator
-//! only decides and bounds here.
+//! initial state. The state at `T` comes from the finite-time engine on the
+//! window, whose estimate covers the whole window; a conserved quantity and
+//! a rate of 1e-12 are propagated alike, so the result is continuous in the
+//! rates and tends to the limit as `T` grows. No result relies on a bound
+//! of what still relaxes after a time: the slow generator's rates are a
+//! reduction (11x off with a tweezer before the far dressing, still up to 2x
+//! after it), and a limit taken from a propagation it declared converged was
+//! 1.95e-2 off on two lasers + tweezer while estimating 1.4e-3. The slow
+//! generator only labels the status (initial-dependent while it indicates
+//! part of the tolerance still relaxing).
 //!
 //! Degenerate null space: a second conserved mode of the slow generator, or
 //! (without it, or when every relaxation is resolvable) a second reduced
@@ -219,15 +213,13 @@ impl MeanOptions {
 #[derive(Clone, Debug)]
 pub struct HorizonPart {
     pub horizon_us: f64,
-    /// "limit": the slow part still relaxing at the horizon is negligible
-    /// (its bound is charged); "propagation": the state at the horizon by
-    /// the finite-time engine; "propagated-limit": the limit itself by
-    /// propagation (the pole method failed).
+    /// "propagation": the state at the horizon by the finite-time engine.
     pub method: &'static str,
-    /// Bound (from the slow generator, decay rates halved) on the largest
-    /// population or group still relaxing at the horizon.
+    /// What the slow generator indicates (rates at `HORIZON_RATE_MARGIN`)
+    /// as still relaxing at the horizon: the status label only, not part of
+    /// the estimate.
     pub decaying: f64,
-    /// Estimate of the propagation (0 for "limit").
+    /// Estimate of the propagation.
     pub propagation_estimate: f64,
     /// Charge for projecting the averaged density onto the density cone.
     pub projection_charge: f64,
@@ -298,8 +290,6 @@ pub struct MeanDiagnostics {
     /// The degeneracy probe's resolvent solve stalled and the slow
     /// generator, which found only the trace conserved, decided uniqueness.
     pub probe_stalled: bool,
-    /// For a limit by propagation: why the pole method failed.
-    pub limit_note: Option<String>,
 }
 
 pub struct MeanSolution {
@@ -890,13 +880,7 @@ pub fn solve(core: &mut RuntimeCore, options: &MeanOptions) -> Result<MeanSoluti
 pub fn solve_with(core: &mut RuntimeCore, options: &MeanOptions, slow: Option<&SlowDual>) -> Result<MeanSolution, String> {
     match options.horizon_us {
         Some(horizon) => horizon_mean(core, options, slow, horizon),
-        None => match (limit_mean(core, options, slow), slow) {
-            // The pole method failed (its early-failure tests included): the
-            // limit by propagation, whose remaining relaxation the slow
-            // generator bounds with its rates taken 20x slower.
-            (Err(reason), Some(dual)) => propagated_limit(core, options, dual, reason),
-            (limit, _) => limit,
-        },
+        None => limit_mean(core, options, slow),
     }
 }
 
@@ -906,14 +890,13 @@ const HORIZON_SAMPLES: usize = 65;
 /// Share of the tolerance the propagation may use (the rest covers the
 /// projection of the averaged density onto the density cone).
 const HORIZON_PROPAGATION_SHARE: f64 = 0.9;
-/// The slow part is negligible at the horizon when its bound is below this
-/// fraction of the tolerance.
+/// Status only: a horizon mean is labelled initial-dependent when the slow
+/// generator indicates more than this fraction of the tolerance still
+/// relaxing at the horizon (its rates taken at `HORIZON_RATE_MARGIN`).
 const HORIZON_NEGLIGIBLE: f64 = 0.05;
-/// The bound takes every decay rate of the slow generator at this fraction.
-/// Its rates are a reduction: within 1% of the exact Floquet spectrum without
-/// a tweezer, but with one the tweezer's dressing of the eliminated optical
-/// blocks is missing and the slowest rate came out 11x too fast (two lasers
-/// + tweezer: 1.36e-2 against 1.21e-3/us), so the bound covers a factor 20.
+/// The slow generator's rates are a reduction (within 2x of the exact
+/// Floquet spectrum on the tweezer scenes checked, 11x off before the far
+/// dressing), so they only label the status; no result relies on them.
 const HORIZON_RATE_MARGIN: f64 = 0.05;
 
 /// Central ground block (g x g) of the initial frame density `E y0`.
@@ -939,11 +922,9 @@ fn bound_size(values: &[f64], groups: &[RequestedGroup]) -> f64 {
     state.max(group)
 }
 
-/// The mean at the observation horizon `T` (module docs): the limit when the
-/// slow generator bounds what is still relaxing at `T` below
-/// `HORIZON_NEGLIGIBLE * epsilon` (that bound is charged), otherwise the
-/// state at `T` by the finite-time engine (error-controlled over the whole
-/// window), read with the laboratory time average.
+/// The mean at the observation horizon `T` (module docs): the state at `T`
+/// by the finite-time engine (error-controlled over the whole window), read
+/// with the laboratory time average.
 fn horizon_mean(core: &mut RuntimeCore, options: &MeanOptions, slow: Option<&SlowDual>, horizon: f64) -> Result<MeanSolution, String> {
     let epsilon = options.population_tolerance;
     if !(horizon.is_finite() && horizon > 0.) {
@@ -951,60 +932,16 @@ fn horizon_mean(core: &mut RuntimeCore, options: &MeanOptions, slow: Option<&Slo
     }
     let dual = slow.ok_or("A mean at a finite horizon needs the slow generator, which could not be prepared for this model; the tolerance was not relaxed")?;
     let ground = initial_ground(core, dual)?;
+    // The status label: what the slow generator indicates as still relaxing.
     let remaining = bound_size(&dual.horizon_bound(&ground, horizon, HORIZON_RATE_MARGIN)?, &options.groups);
-    if remaining <= HORIZON_NEGLIGIBLE * epsilon {
-        let limit = solve_with(core, &MeanOptions { horizon_us: None, ..options.clone() }, slow)?;
-        let mut solution = limit;
-        let estimate = solution.diagnostics.estimated_error + remaining;
-        if estimate > epsilon {
-            return Err(format!("The mean at the {horizon:e} us horizon is estimated at {estimate:e} (limit {:e}, still relaxing at most {remaining:e}); the tolerance was not relaxed", solution.diagnostics.estimated_error));
-        }
-        solution.diagnostics.estimated_error = estimate;
-        solution.diagnostics.horizon = Some(HorizonPart { horizon_us: horizon, method: "limit", decaying: remaining, propagation_estimate: 0., projection_charge: 0. });
-        return Ok(solution);
-    }
-    let kind = MeanKind::InitialDependent { zero_modes: dual.slow_spectrum().conserved.max(1) };
+    let conserved = dual.slow_spectrum().conserved.max(1);
+    let kind = if remaining <= HORIZON_NEGLIGIBLE * epsilon && conserved == 1 {
+        MeanKind::Unique
+    } else {
+        MeanKind::InitialDependent { zero_modes: conserved }
+    };
     let mut solution = propagate(core, options, dual, horizon, kind)?;
     solution.diagnostics.horizon.as_mut().expect("propagation part").decaying = remaining;
-    Ok(solution)
-}
-
-/// The limit by propagation, when the pole method failed with `reason`: to
-/// the first doubling of `10 / rate` (slowest relaxation of the slow
-/// generator) at which the bound on what still relaxes (rates at
-/// `HORIZON_RATE_MARGIN` of the generator's) is below
-/// `HORIZON_NEGLIGIBLE * epsilon`; that bound is charged. The window is
-/// error-controlled; the remainder relies on the generator's rates within
-/// the margin (with the far dressing they are within 2x of the exact
-/// Floquet spectrum on the tweezer scenes checked).
-fn propagated_limit(core: &mut RuntimeCore, options: &MeanOptions, dual: &SlowDual, reason: String) -> Result<MeanSolution, String> {
-    let epsilon = options.population_tolerance;
-    let spectrum = dual.slow_spectrum();
-    let ground = initial_ground(core, dual)?;
-    let mut horizon = 10. / spectrum.slowest_rate.unwrap_or(1.).max(f64::MIN_POSITIVE);
-    let mut remaining = bound_size(&dual.horizon_bound(&ground, horizon, HORIZON_RATE_MARGIN)?, &options.groups);
-    for _ in 0..60 {
-        if remaining <= HORIZON_NEGLIGIBLE * epsilon {
-            break;
-        }
-        horizon *= 2.;
-        remaining = bound_size(&dual.horizon_bound(&ground, horizon, HORIZON_RATE_MARGIN)?, &options.groups);
-    }
-    let failed = |error: String| format!("{reason}; the limit by propagation failed too: {error}");
-    if remaining > HORIZON_NEGLIGIBLE * epsilon {
-        return Err(failed(format!("the slow generator still bounds {remaining:e} relaxing at {horizon:e} us")));
-    }
-    let kind = if spectrum.conserved > 1 { MeanKind::InitialDependent { zero_modes: spectrum.conserved } } else { MeanKind::Unique };
-    let mut solution = propagate(core, options, dual, horizon, kind).map_err(failed)?;
-    let estimate = solution.diagnostics.estimated_error + remaining;
-    if estimate > epsilon {
-        return Err(failed(format!("estimate {estimate:e} with {remaining:e} still relaxing at {horizon:e} us")));
-    }
-    solution.diagnostics.estimated_error = estimate;
-    let part = solution.diagnostics.horizon.as_mut().expect("propagation part");
-    part.method = "propagated-limit";
-    part.decaying = remaining;
-    solution.diagnostics.limit_note = Some(reason);
     Ok(solution)
 }
 
@@ -1075,7 +1012,6 @@ fn propagate(core: &mut RuntimeCore, options: &MeanOptions, dual: &SlowDual, hor
             checkpoints,
             horizon: Some(HorizonPart { horizon_us: horizon, method: "propagation", decaying: 0., propagation_estimate, projection_charge }),
             probe_stalled: false,
-            limit_note: None,
         },
     })
 }
@@ -1177,7 +1113,6 @@ fn finish(context: &Context, options: &MeanOptions, candidate: Candidate, kind: 
             checkpoints: std::mem::take(&mut work.checkpoints),
             horizon: None,
             probe_stalled: work.probe_stalled,
-            limit_note: None,
         },
     })
 }
@@ -2059,7 +1994,9 @@ mod tests {
         let toy = Toy { n, ground: vec![true, true, true, false], h0, drives: vec![], collapse: decays, initial: 0, nu: 1.,
             frame: vec![0; 4] };
         let limit = solve_mean(&toy, 1e-4);
-        for horizon in [1e7, 3e8, 2e9, 1e13] {
+        // (Beyond ~1e11 us the roundoff residual integrated over the window
+        // alone exceeds this tolerance, and the engine says so.)
+        for horizon in [1e7, 3e8, 2e9, 3e10] {
             let (mut core, mut options) = toy_core(&toy, 1e-4, None);
             options.horizon_us = Some(horizon);
             let mean = solve(&mut core, &options).unwrap();
@@ -2076,10 +2013,10 @@ mod tests {
                 assert!(part.decaying > 1e-2, "the slow state is still filling at {horizon:e}");
                 assert!(matches!(mean.kind, MeanKind::InitialDependent { .. }));
             } else {
-                assert_eq!(part.method, "limit");
-                assert_eq!(mean.kind, MeanKind::Unique);
+                assert_eq!(part.method, "propagation");
                 let gap = mean.populations.iter().zip(&limit.populations).map(|(a, b)| (a - b).abs()).fold(0_f64, f64::max);
-                assert!(gap <= 1e-6, "far horizon against the limit {gap:e}");
+                let allowed = mean.diagnostics.estimated_error + limit.diagnostics.estimated_error;
+                assert!(gap <= allowed, "far horizon against the limit {gap:e} (estimates {allowed:e})");
             }
         }
     }
