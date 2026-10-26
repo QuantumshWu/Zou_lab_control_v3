@@ -51,6 +51,17 @@ impl PreparedRealityBudget{
         Ok(Self{e_norm,e_defect,f_base_defect,s_defect:ds,k_defect:dk,nojump_defect:dn,recycling_defect:dr,gg_action_defect:dl})
     }
 }
+/// Fourier steps whose first-order mixing amplitude `|H_q| / |omega_q|` is
+/// below this fraction of the largest one do not shape starting domains. This
+/// is a cost choice only: the halo estimates cover every step, and a mode
+/// reached through a weak step is added when its indicator asks for it.
+const DOMAIN_STEP_AMPLITUDE:f64=1e-3;
+
+/// The Fourier steps of the gauged Hamiltonian: every nonzero charge (`all`,
+/// the modes one coherent coupling reaches from the central mode) and those
+/// with a significant mixing amplitude (`domain`).
+pub struct FourierSteps{pub axes:usize,pub all:Vec<Charge>,pub domain:Vec<Charge>}
+
 pub struct RuntimeCore{
     owned:OwnedPrepared,
     physical:PhysicalCoordinates,
@@ -80,6 +91,20 @@ impl RuntimeCore{
         Self::from_owned(OwnedPrepared::prepare(model,phases,gauge,kernel)?,initial,p0)
     }
     pub fn prepared(&self)->&OwnedPrepared{&self.owned}
+    pub fn fourier_steps(&self)->Result<FourierSteps,String>{
+        let source=&self.owned.primitives().hilbert.source;
+        let(mut all,mut amplitudes)=(Vec::new(),Vec::new());
+        for(q,matrix)in &source.hamiltonian{
+            if q.iter().all(|&k|k==0){continue;}
+            let coupling=matrix.iter().map(|z|z.re.hypot(z.im)).fold(0_f64,f64::max);
+            let frequency=source.phases.frequency(q).map(|f|(f.hi+f.lo).abs())?;
+            amplitudes.push(if frequency>0.{coupling/frequency}else{f64::INFINITY});
+            all.push(q.clone());
+        }
+        let largest=amplitudes.iter().copied().fold(0_f64,f64::max);
+        let domain=all.iter().zip(&amplitudes).filter(|&(_,&a)|a>=DOMAIN_STEP_AMPLITUDE*largest).map(|(q,_)|q.clone()).collect();
+        Ok(FourierSteps{axes:source.phases.axes.len(),all,domain})
+    }
     pub fn initial(&self)->&InitialCoordinates{&self.initial}
     pub fn physical(&self)->&PhysicalCoordinates{&self.physical}
     pub fn observer(&self)->&Arc<PopulationObservation>{&self.observer}

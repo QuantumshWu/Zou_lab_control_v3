@@ -572,15 +572,11 @@ pub fn solve(
     let duration = times[times.len() - 1];
     let poles = rational_poles(duration, &options);
     let n = core.prepared().primitives().hilbert.source.n;
-    // Fourier steps: the charges of the gauged Hamiltonian, i.e. the modes a
-    // single coherent coupling reaches from the central mode.
-    let (axes, steps) = {
-        let source = &core.prepared().primitives().hilbert.source;
-        let steps: Vec<Charge> = source.hamiltonian.keys().filter(|q| q.iter().any(|&k| k != 0)).cloned().collect();
-        (source.phases.axes.len(), steps)
-    };
+    // Start on the significant Fourier steps; the halo estimate covers all of
+    // them and adds the modes its indicators ask for.
+    let steps = core.fourier_steps()?;
     let lapack = Arc::clone(core.lapack());
-    let mut space = TrialSpace::new(&mut core, &support_domain(axes, &steps, 1)?, &poles)?;
+    let mut space = TrialSpace::new(&mut core, &support_domain(steps.axes, &steps.domain, 1)?, &poles)?;
     let mut chain = Chain::new(poles.len());
     // The slow dual depends only on the model: prepare it while the first
     // chain columns are computed.
@@ -601,8 +597,8 @@ pub fn solve(
         options,
         epsilon,
         n,
-        axes,
-        steps,
+        axes: steps.axes,
+        steps: steps.all,
         lapack,
         space: Some(space),
         chain,

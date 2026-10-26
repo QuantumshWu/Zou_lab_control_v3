@@ -97,11 +97,6 @@ const PROBE_TOLERANCE_PER_EPSILON: f64 = 1e-2;
 const RESOLVENT_TOLERANCE: f64 = 1e-9;
 /// Halo modes are added until they cover this fraction of the halo weight.
 const HALO_COVERAGE: f64 = 0.9;
-/// Fourier steps whose first-order mixing amplitude `|H_q| / |omega_q|` is
-/// below this fraction of the largest one do not shape the starting domain or
-/// the domain growth of the degenerate path (cost only: the halo of the
-/// one-dimensional path still covers every step).
-const DOMAIN_STEP_AMPLITUDE: f64 = 1e-3;
 /// Halo modes whose transport amplitude `|h_q| / |s + i omega_q|` is below
 /// this fraction of the largest one are condensed with the transport inverse
 /// instead of the exact mode-diagonal inverse (one P0 shift factor per mode).
@@ -665,11 +660,10 @@ fn select_halo_modes(indicators: &[(Charge, f64)]) -> Vec<Charge> {
 struct Context {
     n: usize,
     axes: usize,
-    /// Every Fourier step: the nonzero charges of the gauged Hamiltonian
-    /// (the same steps as the finite engine).
+    /// Every Fourier step (the halo covers all of them).
     steps: Vec<Charge>,
-    /// Steps whose first-order mixing amplitude is at least
-    /// `DOMAIN_STEP_AMPLITUDE` of the largest.
+    /// Steps with a significant mixing amplitude: the starting domain and the
+    /// domain growth of the degenerate path.
     domain_steps: Vec<Charge>,
     frame: Frame,
     lapack: Arc<Lapack>,
@@ -678,24 +672,9 @@ struct Context {
 impl Context {
     fn new(core: &RuntimeCore, options: &MeanOptions) -> Result<Self, String> {
         let source = &core.prepared().primitives().hilbert.source;
-        let axes = source.phases.axes.len();
-        let mut steps = Vec::new();
-        let mut amplitudes = Vec::new();
-        for (q, matrix) in &source.hamiltonian {
-            if q.iter().all(|&k| k == 0) {
-                continue;
-            }
-            let coupling = matrix.iter().map(|z| z.re.hypot(z.im)).fold(0_f64, f64::max);
-            let frequency = source.phases.frequency(q).map(|f| (f.hi + f.lo).abs())?;
-            amplitudes.push(if frequency > 0. { coupling / frequency } else { f64::INFINITY });
-            steps.push(q.clone());
-        }
-        let largest = amplitudes.iter().copied().fold(0_f64, f64::max);
-        let domain_steps = steps.iter().zip(&amplitudes)
-            .filter(|&(_, &amplitude)| amplitude >= DOMAIN_STEP_AMPLITUDE * largest)
-            .map(|(q, _)| q.clone()).collect();
-        Ok(Self { n: source.n, axes, steps, domain_steps, frame: Frame::new(&source.gauges, &options.lab)?,
-            lapack: Arc::clone(core.lapack()) })
+        let steps = core.fourier_steps()?;
+        Ok(Self { n: source.n, axes: steps.axes, steps: steps.all, domain_steps: steps.domain,
+            frame: Frame::new(&source.gauges, &options.lab)?, lapack: Arc::clone(core.lapack()) })
     }
     fn metric(&self, delta: &[C], groups: &[RequestedGroup]) -> Result<f64, String> {
         error_metric(&self.lapack, delta, self.n, groups)
