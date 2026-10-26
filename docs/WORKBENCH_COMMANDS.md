@@ -184,6 +184,10 @@ or a Restart is accepted.
 Start freezes the accepted values, resources, outputs, previews and claims, then
 builds a candidate before stopping the previous run. Its command reply can be
 `{node, phase: "preparing"}`; construction errors appear as a refused Restart.
+A measurement or task, once it may launch, records the bench it starts on
+(PLUGIN_PROTOCOL §5): every open device that reports its settings is asked at
+once and the run launches when each has answered (status `reading the bench's
+settings`, at most 2 s); `RunSpec.apparatus` is its run record's `apparatus`.
 A successful processor Restart stops its old run even if its new source has not
 published yet, and waits for that source. Stop cancels checking, construction,
 and queued starts. Acquisition ownership names a concrete child run; it cannot
@@ -331,7 +335,7 @@ plugin event changes `state` again (use `wait`).
 | `edit_node` | `node`, `values?` (partial), `source_signal?`, `device_keys?` (partial), `artifact_inputs?` (partial), `auto_preview?`, `expected_draft_revision?` | control | Edit fields / connect a source / pick devices / choose files / auto-preview. Each value is checked against its field first (unknown field or invalid value: refused); completeness and cross-field admission become `issues`. Allowed while running: the run keeps its configuration, the row shows `edited`. |
 | `check_node` | `node` | control | Validate / Refresh files: re-reads the chosen files and re-runs admission. |
 | `revert_node` | `node` | control | Revert: the draft becomes the running configuration again. |
-| `start_node` | `node`, `expected_draft_revision?` | control | Start, or Restart when running: admission (`issues` empty, devices open and unclaimed by other kinds of lease); claims; a Task gets its run directory and `start.json`; `run.start` to the instance. A processor whose source is not published follows it (starts when it publishes, restarts on its next run). With `auto_preview`, declared previews get panels when their signals first publish. |
+| `start_node` | `node`, `expected_draft_revision?` | control | Start, or Restart when running: admission (`issues` empty, devices open and unclaimed by other kinds of lease); claims; a Task gets its run directory and `start.json`; `run.start` to the instance, a measurement's or task's carrying the bench at Start (`apparatus`). A processor whose source is not published follows it (starts when it publishes, restarts on its next run). With `auto_preview`, declared previews get panels when their signals first publish. |
 | `stop_node` | `node` | control | Stop: cancels a following processor, a waiting start and an operator request; the run drains, seals, writes `run.json`; claims release at terminal. Never refused. |
 | `remove_node` | `node` | control | Remove: a running node is stopped and removed at its terminal (`phase: removing`). |
 | `answer_request` | `node`, `request`, `response` (object, or null to cancel = Stop) | control | Operator input (`point-selection`, `manual-axis`, any kind a type declares): refused unless `request` is current; a `manual-axis` (a hand moves the knob) is answered only at the window, a client may only cancel it (v2). A request made after Stop is answered as the Stop and never shown. A `point-selection` payload names `output_name` (the image), `points` (`[id, label, x, y]`, x/y on the image's axes) and `confirm_label`; its answer is `{excluded_point_ids}`. The window reviews it in its own window (`review:<node>`, titled with the request, the other windows waiting) on `review-<node>`, an Image panel held on the image's read with the candidates drawn as the review marks them (window commands `open_point_review {node, request}`, `point_review_state {panel, excluded, selected}`, `close_point_review {node}`; closing the window answers null). |
@@ -408,7 +412,7 @@ pub trait Plugins {
                                                                                     // context.simulation = group parameters
     fn close(&mut self, instance: &str);
     fn query(&mut self, instance: &str, ticket: u64, name: &str, args: &Value);    // declare_outputs, resolve_field_availability
-    fn call(&mut self, instance: &str, ticket: u64, op: &str, params: &Value);     // fields, values, tune, command
+    fn call(&mut self, instance: &str, ticket: u64, op: &str, params: &Value);     // fields, values, tune, command, snapshot
     fn start(&mut self, run: &RunSpec);
     fn stop(&mut self, run: &str);
     fn answer(&mut self, run: &str, request: &str, response: Option<&Value>);     // operator input (None cancels)
@@ -425,7 +429,9 @@ names the devices that run holds. Device instances open when the
 apparatus is applied and stay open across runs; a run claims them by `RunSpec.devices`.
 `RunSpec`: `run`, `node_id`, `type_id`, `values` (enabled fields), `source_signal`,
 `devices` (argument → instance_id), `artifacts` (name → path or frame claims),
-`resources`, `directory` (tasks), `outputs` (output name → signal name), `origin`.
+`resources`, `directory` (tasks), `outputs` (output name → signal name), `origin`,
+`apparatus` (a measurement's or task's bench at Start; `snapshot` is answered within
+`SNAPSHOT_WAIT`, a device busy past it as not answering).
 Events into the workbench: `Opened{instance, working_point}`, `Failed{instance,
 error}`, `Closed{instance, error}`, `Answered{ticket, result}`, `RunReady{run}`,
 `RunProgress{run, message, current, total}`, `RunRequest{run, request}`,

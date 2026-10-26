@@ -3,13 +3,16 @@
 //! file holds (Plot), the Logic that made it (Logic), the devices it used
 //! (Devices), the document itself (Raw) -- and the Flow graph of its exact
 //! saved lineage. Device truth has one owner, the Devices tab; Logic rows
-//! carry everything else of their run records.
+//! carry everything else of their run records. A run record's `apparatus` (the
+//! bench at its Start, the core's fact) adds each device as it stood, used or not.
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
 const PREFIX: &str = "@logic/";
-const DEVICE_RECORD_FIELDS: [&str; 4] = ["named_devices", "device_snapshots", "actual_devices", "device_settings"];
+const DEVICE_RECORD_FIELDS: [&str; 5] = ["named_devices", "device_snapshots", "actual_devices", "device_settings", "apparatus"];
+/// The scope a bench entry is listed under on the Devices tab.
+const BENCH: &str = "bench at Start";
 const SEPARATOR: &str = " · ";
 
 /// One recorded pulse a run of the archive played, offered on the Devices tab.
@@ -161,7 +164,21 @@ fn device_tab_snapshot(snapshot: &Value) -> Value {
     shown
 }
 
-fn played_pulses(nodes: &[Node], source: &Value) -> Vec<(PlayedPulse, String, Option<Value>)> {
+/// The bench a run record says its run started on (`apparatus`): (device, entry), its devices then its pulse board.
+fn bench_devices(record: &Value) -> Vec<(String, Value)> {
+    ["devices", "sequencer"].into_iter().flat_map(|part| record.get("apparatus").and_then(|bench| bench.get(part)).and_then(Value::as_object).into_iter().flatten())
+        .map(|(device, entry)| (device.clone(), entry.clone())).collect()
+}
+
+/// Whether the record's own device snapshots keep the program a board entry names (a scan's
+/// `device_snapshots.sequencer`): the bench then says only how the board stood.
+fn recorded_program(record: &Value, device: &str, entry: &Value) -> bool {
+    !entry["digest"].is_null() && record_devices(record, &named_devices(record)).iter()
+        .any(|(_, key, snapshot)| key == device && snapshot["program"]["digest"] == entry["digest"])
+}
+
+/// (pulse, device, sequence, on the board at Start rather than played by the run).
+fn played_pulses(nodes: &[Node], source: &Value) -> Vec<(PlayedPulse, String, Option<Value>, bool)> {
     let mut records: Vec<(String, Option<Value>, String, Value)> = nodes.iter()
         .map(|node| (logic_name(node), node.event.get("sequence").cloned(), text(&node.event, "generation").to_owned(), node.record.clone())).collect();
     if let Some((task, _, record)) = source_run_record(source, nodes) { records.push((task, None, String::new(), record)); }
@@ -173,13 +190,19 @@ fn played_pulses(nodes: &[Node], source: &Value) -> Vec<(PlayedPulse, String, Op
             let name = record.get("pulse").and_then(|file| file.get("name")).and_then(Value::as_str).filter(|name| !name.is_empty()).map(str::to_owned)
                 .or_else(|| document.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).map(str::to_owned)).unwrap_or(role);
             let key = match &sequence { None => format!("saved-source:{logic}:{device}"), Some(sequence) => format!("{logic}:{sequence}:{generation}:{device}") };
-            found.push((PlayedPulse { key, name, tree: document.clone() }, device, sequence.clone()));
+            found.push((PlayedPulse { key, name, tree: document.clone() }, device, sequence.clone(), false));
+        }
+        for (device, entry) in bench_devices(&record) {
+            let Some(document) = entry["snapshot"].get("pulse").filter(|document| document.is_object() && !recorded_program(&record, &device, &entry)) else { continue };
+            let name = document.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or(&device).to_owned();
+            let key = match &sequence { None => format!("saved-source:{logic}:bench:{device}"), Some(sequence) => format!("{logic}:{sequence}:{generation}:bench:{device}") };
+            found.push((PlayedPulse { key, name, tree: document.clone() }, device, sequence.clone(), true));
         }
     }
     found
 }
 
-fn device_rows(lineage: &Value, nodes: &[Node], source: &Value, played: &[(PlayedPulse, String, Option<Value>)]) -> Rows {
+fn device_rows(lineage: &Value, nodes: &[Node], source: &Value, played: &[(PlayedPulse, String, Option<Value>, bool)]) -> Rows {
     let mut devices: Vec<(String, Value)> = Vec::new();
     fn entry<'a>(devices: &'a mut Vec<(String, Value)>, key: &str) -> &'a mut Value {
         if let Some(index) = devices.iter().position(|(existing, _)| existing == key) { return &mut devices[index].1; }
@@ -212,6 +235,19 @@ fn device_rows(lineage: &Value, nodes: &[Node], source: &Value, played: &[(Playe
             push_unique(&mut facts["snapshots"], candidate);
         }
     }
+    // The bench each run started on: every device as it stood, used by it or not; a board's program
+    // summarized as a played one is, or left to the run's own snapshot when that keeps the same one.
+    for (logic, sequence, _, record, _) in &records {
+        for (key, stood) in bench_devices(record) {
+            let mut shown = stood.clone();
+            if recorded_program(record, &key, &stood) { if let Some(fields) = shown.as_object_mut() { fields.remove("snapshot"); } }
+            else if stood["snapshot"].is_object() { shown["snapshot"] = device_tab_snapshot(&stood["snapshot"]); }
+            let mut candidate = json!({"logic": logic, "scope": BENCH});
+            if let Some(sequence) = sequence { candidate["sequence"] = sequence.clone(); }
+            candidate["snapshot"] = shown;
+            push_unique(&mut entry(&mut devices, &key)["snapshots"], candidate);
+        }
+    }
     for item in lineage.get("device_settings").and_then(Value::as_array).into_iter().flatten() {
         let key = text(item, "device_key");
         if key.is_empty() { continue; }
@@ -221,8 +257,9 @@ fn device_rows(lineage: &Value, nodes: &[Node], source: &Value, played: &[(Playe
     let mut rows: Rows = devices.into_iter().map(|(key, facts)| (key, fields(["roles", "used_by", "snapshots", "settings_epochs"].into_iter()
         .map(|name| (name.to_owned(), facts[name].clone())).collect()))).collect();
     // The pulse a run played is offered, not printed: it opens in the Pulse Editor.
-    for (pulse, device, sequence) in played {
-        let label = match sequence { None => format!("{device} pulse"), Some(sequence) => format!("{device} pulse {sequence}") };
+    for (pulse, device, sequence, at_start) in played {
+        let what = if *at_start { "pulse at Start" } else { "pulse" };
+        let label = match sequence { None => format!("{device} {what}"), Some(sequence) => format!("{device} {what} {sequence}") };
         rows.push((label, json!({"text": pulse.name, "action": format!("pulse:{}", pulse.key)})));
     }
     rows
@@ -397,5 +434,39 @@ mod tests {
         assert_eq!(record.flow["nodes"][0]["subtitle"], "frames");
         assert_eq!(record.flow["edges"], json!([{"source": "device:camera", "target": "logic:event-1", "kind": "device", "label": "camera"}]));
         assert_eq!(record.tabs[4][1][3][0], "source");
+    }
+
+    /// A run record's `apparatus`: every device as it stood at Start on the Devices tab (not on
+    /// the Logic tab), the board's pulse offered once -- not again when the run's own record
+    /// keeps the same program.
+    #[test]
+    fn the_bench_at_start_reads_on_the_devices_tab() {
+        let pulse = json!({"name": "imaging", "periods": [{}, {}]});
+        let board = json!({"type_id": "sequencer.virtual", "role": "sequencer", "driver": {"outside": "PulseGUI"}, "loaded": true, "firing": true,
+            "digest": "5f0c", "snapshot": {"program": {"digest": "5f0c", "rows": [[1], [2], [3]]}, "pulse": pulse}});
+        let bench = json!({"taken_at": "2026-10-25T12:00:00.000+00:00", "sequencer": {"sequencer": board},
+            "devices": {"rf": {"type_id": "rf.virtual", "role": "Trap RF", "values": {"ch1_frequency": 8.0e7}, "provenance": {"settings_epoch": 2}}}});
+        let info = |record: Value| json!({"members": {}, "sections": {"dataset": {}, "plot": {}, "source": {"signal": "@logic/camera_measurement/frames"},
+            "lineage": {"root": "event-1", "device_settings": [], "nodes": [{"id": "event-1", "parents": [], "event_record": {},
+                "event": {"generation": "2c3491d0f54c", "sequence": 7, "stream": "camera_measurement"}, "record": record,
+                "signals": ["@logic/camera_measurement/frames"]}]}}});
+        let record = describe(&info(json!({"node": "camera_measurement", "named_devices": {"camera": "mot_camera"}, "apparatus": bench})));
+        assert_eq!(record.tabs[1][1], json!([["camera_measurement", {"$fields": [["outputs", ["frames"]]]}]]), "device truth is the Devices tab's");
+        let rows = record.tabs[2][1].as_array().unwrap();
+        let labels: Vec<&str> = rows.iter().map(|row| row[0].as_str().unwrap()).collect();
+        assert_eq!(labels, ["mot_camera", "rf", "sequencer", "sequencer pulse at Start 7"]);
+        assert_eq!(rows[1][1]["$fields"][2][1], json!([{"logic": "camera_measurement", "scope": "bench at Start", "sequence": 7,
+            "snapshot": {"type_id": "rf.virtual", "role": "Trap RF", "values": {"ch1_frequency": 8.0e7}, "provenance": {"settings_epoch": 2}}}]));
+        assert_eq!(rows[2][1]["$fields"][2][1][0]["snapshot"]["snapshot"], json!({"program": {"digest": "5f0c", "rows": 3}, "pulse": {"name": "imaging", "periods": 2}}));
+        assert_eq!(rows[3][1], json!({"text": "imaging", "action": "pulse:camera_measurement:7:2c3491d0f54c:bench:sequencer"}));
+        assert_eq!(record.pulses[0].tree, pulse);
+        // A scan's record keeps the program it played: the same one on the board is not offered twice.
+        let record = describe(&info(json!({"node": "seamless_scan", "named_devices": {"sequencer": "sequencer"}, "apparatus": bench,
+            "device_snapshots": {"sequencer": {"program": {"digest": "5f0c"}, "pulse": pulse}}})));
+        let rows = record.tabs[2][1].as_array().unwrap();
+        assert_eq!(rows.iter().map(|row| row[0].as_str().unwrap()).collect::<Vec<_>>(), ["sequencer", "rf", "sequencer pulse 7"]);
+        let shown = &rows[0][1]["$fields"][2][1];
+        assert_eq!((shown[1]["scope"].as_str(), shown[1]["snapshot"].get("snapshot"), &shown[1]["snapshot"]["digest"]), (Some("bench at Start"), None, &json!("5f0c")));
+        assert_eq!(record.pulses.len(), 1);
     }
 }

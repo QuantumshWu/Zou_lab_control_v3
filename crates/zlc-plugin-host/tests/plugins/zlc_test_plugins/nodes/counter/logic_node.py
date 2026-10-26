@@ -28,7 +28,7 @@ class Counter:
         context.set_run_record({"count": self.count, "opened_with": self.echo.opened_with,
                                 "converted": list(self.echo.convert_tunable_value("gain", [1.0, 2.0], "1", "1")),
                                 "tuned_dbm": tuned, "restored_dbm": self.echo.tunable_values()["amplitude"],
-                                "node": "wrong-plugin-id", "node_name": "wrong-plugin-name"})
+                                "node": "wrong-plugin-id", "node_name": "wrong-plugin-name", "apparatus": "wrong-plugin-bench"})
         context.report_ready()
         cells = DomainSpec((self.size, self.size), (AxisSpec(AxisId("test.y"), "y", SPATIAL_Y, self.size),
                                                     AxisSpec(AxisId("test.x"), "x", SPATIAL_X, self.size)))

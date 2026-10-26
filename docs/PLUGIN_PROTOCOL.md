@@ -157,7 +157,7 @@ spawned -> ready -> open -> (idle <-> running) -> closing -> closed
 | Step | Core sends | Plugin does | Reply |
 |---|---|---|---|
 | handshake (process) | `hello {protocol, session}` | creates its block arena | `{protocol, pid, python, sdk}` |
-| open | `open {instance, type_id, module, parameters, simulation}` | imports the type's module; device: `factory(instance, projected parameters)` builds and opens the adapter; node: keeps the draft | `{state, tunable, reads}` |
+| open | `open {instance, type_id, module, parameters, simulation}` | imports the type's module; device: `factory(instance, projected parameters)` builds and opens the adapter; node: keeps the draft | `{state, tunable, reads, narrates, snapshot}` |
 | configure | `configure {instance, parameters}` | device: `adapter.reconfigure(values)` or refuses | `{state}` |
 | prepare (node) | `query {instance, name: "prepare_run", values, devices, resources, source_signal}` | projects and builds a candidate with read-only device proxies; the active run is untouched | `{prepared: token}` |
 | discard (node) | `run.discard {instance, prepared}` | releases an unstarted candidate; idempotent | `{}` |
@@ -196,7 +196,9 @@ also offers `tune_in_unit`; the device-side SDK applies its native conversion
 when available, with the same rules as Device Control. Draft queries cannot tune.
 At `run.begin` the host stamps `node` with the instance ID and `node_name` with
 the current operator name, overriding plugin-supplied identity. Later renames
-do not change this historical record.
+do not change this historical record. It also writes `apparatus`, the bench at
+Start the core took (`RunRequest.apparatus`, section 5); a plugin's own key of
+that name is dropped, given or not.
 
 A run ends with event `run.finished {run, outcome: completed|stopped|failed,
 result, error}`. The core seals the run's Runtime generation with that outcome
@@ -247,7 +249,8 @@ processes, so the caller cancels instead.
 Core -> plugin requests (each names its `instance`): `hello`, `open`, `configure`,
 `close`, `exit`, `ping`, `spi {method, args, kwargs}` (call the open device's
 adapter; `get:<name>` reads a property), `command {name, params}` (section 8),
-`fields {units?}` / `tune {field, value, unit?}` / `values` (the tunable quartet), `make_safe
+`fields {units?}` / `tune {field, value, unit?}` / `values` (the tunable quartet), `snapshot`
+(the device's settings for the bench a Start records, below), `make_safe
 {output}`, `publish {published}` (Remote of a type that `announces`: section 10), `query {name, values?, devices?, resources?, source?, output_name?,
 installation?}` (the facts by name; the SDK calls the v2 callable with them in v2's
 positional order, `zlc_plugin.declare.QUERY_PARAMETERS`; `devices` become proxies), `run.start`. Events: `release
@@ -255,6 +258,38 @@ positional order, `zlc_plugin.declare.QUERY_PARAMETERS`; `devices` become proxie
 plain JSON (dataclasses as objects, tuples as lists, dtypes and enums as their
 values, arrays still as references); the core always asks for that, while a
 plugin-to-plugin call keeps the tagged types of section 6.
+
+**The bench at Start.** A measurement or task run records the apparatus it
+started on as the core's fact, whatever its node writes in its own record (a
+camera measurement claims only its camera; a scan records only the RF it
+scans). When its start may launch, the workbench asks `snapshot` of every open
+device whose `open` answer said `snapshot: true`, all at once, and launches the
+run once each has answered; the pulse board (native) answers whether it is
+`loaded` and `firing`, its program's `digest` and `snapshot` (v2
+`sequencer_archive_snapshot`: board facts, state, program, pulse). The SDK
+answers through `zlc_plugin.tunable.snapshot`: the adapter's own `snapshot()`
+when it has one (a device whose state is more than its knobs), else its
+quartet's reads as `values` answers them (`{values, provenance}`), else null
+(it does not report its settings). The core asks with a 2 s bound as an
+untracked request: a device busy in another run's call misses it without being
+taken for unresponsive, and its late answer is dropped. `RunRequest.apparatus`
+carries the result and `run.begin` writes it into the run record:
+
+```json
+{"taken_at": "2026-10-25T13:02:11.512+00:00",
+ "devices": {"trap_rf": {"type_id": "rf.vaunix_lms", "role": "Trap RF", "values": {"frequency": 80000000.0, "power": -3.0, "output_enabled": true}, "provenance": {"device_session_id": "39379c…", "settings_epoch": 4}},
+             "mot_camera": {"type_id": "camera.virtual_mot", "role": "mot_camera", "unavailable": "timeout: snapshot did not answer within 2.0 s"},
+             "spare": {"type_id": "camera.pylon", "role": "spare", "unavailable": "does not report its settings"}},
+ "sequencer": {"sequencer": {"type_id": "sequencer.virtual", "role": "sequencer", "driver": {"outside": "PulseGUI"},
+                             "loaded": true, "firing": true, "digest": "5f0c…", "snapshot": {"description": {}, "config": {}, "state": {}, "program": {}, "pulse": {}}}}}
+```
+
+Every live device has an entry (`type_id`, `role`); one that gave no settings
+says why in `unavailable` (still opening, failed, published, served by another
+computer, timed out, or not reporting). A board's `driver` is the run that
+claims it (`{run, node}`), an outside driver (`{outside: "PulseGUI"}`: On Pulse),
+or null. Values are in each field's own unit, as `values` reads them. A
+processor takes no bench: its sources' records reach it through lineage.
 
 Plugin -> core events: `release {blocks, leases}`, `run.ready`, `run.progress`,
 `run.finished {run, outcome, result, error}`, `device.log {instance, line}` (one line of
@@ -272,7 +307,7 @@ Plugin -> core (only during a run, bound to its run id):
 
 | op | Meaning |
 |---|---|
-| `run.begin {outputs: [{name, schema, storage, index_by_source}], record}` | Declare the run's outputs and run record. `Runtime::begin` under owner `<instance>` with the record as the run's metadata (who started it goes in the seal); a run consuming a source (a processor, or a run following its source signal) begins with `Runtime::begin_consuming`, a same-shot route of that signal, so a result is shown with the source event its `parents` name (v2 `source_name`); signals are the names the run's start gave (`RunRequest.outputs`, e.g. `@logic/<node>/<output>`), else `<instance>/<output>`. Storage `latest | finite`. |
+| `run.begin {outputs: [{name, schema, storage, index_by_source}], record}` | Declare the run's outputs and run record. `Runtime::begin` under owner `<instance>` with the record (plus the host's `node`, `node_name` and `apparatus`, section 3) as the run's metadata (who started it goes in the seal); a run consuming a source (a processor, or a run following its source signal) begins with `Runtime::begin_consuming`, a same-shot route of that signal, so a result is shown with the source event its `parents` name (v2 `source_name`); signals are the names the run's start gave (`RunRequest.outputs`, e.g. `@logic/<node>/<output>`), else `<instance>/<output>`. Storage `latest | finite`. |
 | `run.commit {inputs: [{output, ordinal, origin, data, schema?}], metadata, parents}` | One atomic bundle (`Runtime::commit`): siblings commit together or not at all. `origin` is the finite `(repeat, point)` placement; a finite event carries its chunk `schema` when it differs from the last one sent. `parents` are read leases the node consumed. Metadata is `{records: {output: event_record}, shot_time_seconds: {output: t}}`. Returns each output's publication key. |
 | `run.operator_input {kind, title, message, payload}` | Blocks the run thread until the operator answers or the run stops. |
 | `run.artifact {name, path, role, contract_id}` | Register a completed run-contained artifact. |
@@ -495,7 +530,7 @@ the id as written.
 
 Tunable devices (v2's quartet `tunable_fields`/`tune`/`tunable_values`/
 `settings_provenance`) need no per-device commands: the SDK serves them as the
-standard ops `fields`, `tune {field, value, unit}`, `values`, and the Workbench
+standard ops `fields`, `tune {field, value, unit}`, `values` (and `snapshot`, section 5), and the Workbench
 catalogue exposes them once for every instance. `fields {units: {field: unit}}` reads
 those fields in the operator's spelling, and `tune {unit}` takes the value and answers
 the readback in it (v2 `read_tunable_in_unit`/`tune_in_unit`: the adapter's own

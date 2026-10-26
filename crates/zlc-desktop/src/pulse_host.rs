@@ -351,6 +351,18 @@ fn open_device(type_id: &str, parameters: &Value, narrate: Box<dyn Fn(String) + 
 /// What the board on this computer is announced as (v2 _announce_local): other computers open it there.
 pub const ANNOUNCED_AS: &str = "sequencer.hardware";
 
+/// The board's entry in the bench a Start records (PLUGIN_PROTOCOL §5 `snapshot`): whether it is
+/// loaded and firing, the loaded program's digest, and what an archive keeps of it (v2
+/// `sequencer_archive_snapshot`: the board's facts, its state, the program and its pulse).
+fn bench_entry(board: &Board) -> Result<Value, String> {
+    let state = board.snapshot().map_err(|error| error.message)?;
+    let applied = board.applied().map_err(|error| error.message)?;
+    let kept = applied.as_ref().map(|applied| zlc_pulse::board::archive_snapshot(board, applied)).transpose().map_err(|error| error.message)?;
+    let flag = |key: &str| state.get(key).and_then(Json::as_bool).unwrap_or(false);
+    Ok(json!({"loaded": flag("loaded"), "firing": flag("firing"), "digest": applied.as_ref().map(|applied| applied.program.digest()),
+              "snapshot": kept.as_ref().map(to_value)}))
+}
+
 /// The native device types as the workbench reads descriptors.
 pub fn device_descriptors() -> Vec<Value> {
     let config_file = json!({"name": "config_file", "type": "str", "label": "Config file (optional)", "default": "",
@@ -777,8 +789,22 @@ impl PulseHost {
         self.given = Some(Given { instance: instance.to_owned(), child, world, published: false });
         self.editor.attach_given(board, label);
         self.dispatch();
+        // `snapshot`: it reports its state for the bench a Start records (`bench_snapshot`).
         Ok(json!({"board": self.editor.board().map(|b| b.name().to_owned()), "ports": description.target.ports.len(),
-                  "clock_hz": description.clock_hz}))
+                  "clock_hz": description.clock_hz, "snapshot": true}))
+    }
+
+    /// The apparatus board's `snapshot`, read off the window's turn (a pulse server's client waits
+    /// behind a LOAD) and given up after `wait`: the work to run on a thread of its own.
+    pub fn bench_snapshot(&self, wait: Duration) -> impl FnOnce() -> Result<Value, String> + Send + 'static {
+        let board = self.given.as_ref().and(self.editor.board().cloned());
+        move || {
+            let board = board.ok_or("no pulse board is attached")?;
+            let (sender, answer) = mpsc::channel();
+            std::thread::Builder::new().name("zlc-pulse-bench".into()).spawn(move || { let _ = sender.send(bench_entry(&board)); })
+                .map_err(|error| error.to_string())?;
+            answer.recv_timeout(wait).unwrap_or_else(|_| Err(format!("the pulse board did not answer within {} s", wait.as_secs())))
+        }
     }
 
     pub fn close_device(&mut self, instance: &str) {
