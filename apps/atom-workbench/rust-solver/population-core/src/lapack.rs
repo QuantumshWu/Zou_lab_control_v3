@@ -60,6 +60,7 @@ type Gemm = unsafe extern "C" fn(
     *mut f64,
     *const i32,
 );
+#[cfg(not(feature="static-numerics"))]
 type SetThreads = unsafe extern "C" fn(i32);
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]

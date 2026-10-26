@@ -5,8 +5,8 @@
 //! introduces Rb87 constants, CG coefficients, channel regrouping, detuning
 //! cutoffs, frequency fitting, state elimination or a time-evolution answer.
 //!
-//! Existing native integration should pass authoritative phase high/low parts
-//! from harmonics::model_phase_frequency_parts. The standalone validation
+//! The worker passes the authoritative phase high/low parts of
+//! harmonics::model_phase_axes. The standalone validation
 //! constructor below implements the same FMA compensated unit conversion,
 //! without importing the old crate's private Model or integer-relation search.
 //! The validated maximum-score-gap forest is available here. Additional

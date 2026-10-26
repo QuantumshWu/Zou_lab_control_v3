@@ -137,7 +137,7 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initialStateId=scen
   if(converged){
     const mean=data.asymptoticPopulations;
     if(!probabilities(mean,5e-6))invalid('长期布居矩阵');
-    if(!bounded(d.asymptoticTraceError,5e-6)||!bounded(d.asymptoticPositivityError,1e-4)||(d.residual!==null&&!bounded(d.residual))||typeof d.asymptoticMethod!=='string')invalid('长期密度数值验证信息');
+    if(!bounded(d.asymptoticTraceError,5e-6)||!bounded(d.asymptoticPositivityError,1e-4)||!bounded(d.residual)||typeof d.asymptoticMethod!=='string')invalid('长期密度数值验证信息');
     try{density=readMeanDensity(data,32,mean);}catch{invalid('长期复密度矩阵');}
     if(!density)invalid('长期复密度矩阵');
     steadyPopulations=Object.fromEntries(states.map((state,i)=>[state.id,mean[i]!]));

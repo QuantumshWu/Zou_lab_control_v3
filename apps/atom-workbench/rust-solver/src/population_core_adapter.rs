@@ -21,7 +21,7 @@
 //! - `diagnostics`. The reader gates the rows' `traceError` and
 //!   `initialStateError`, `elapsedMs`, a finite result's `method`, and a mean's
 //!   `asymptoticMethod`, `asymptoticTraceError`, `asymptoticPositivityError` and
-//!   `residual` (null when the mean needed no residual-measured solve); every
+//!   `residual` (relative `|F x|/|E x|` of the mean's null vector); every
 //!   other key is profiling. A finite result carries the mean's diagnostics
 //!   under the same names; keys both report (engine, row gates, timings,
 //!   operator counts) keep the finite value.
@@ -138,7 +138,7 @@ fn mean_result(model:&Model,options:&Options,request:&mut Request,started:Instan
             "uniquenessScope":match mean.kind{MeanKind::Unique=>"one-dimensional null space within the resolved rates",
                 MeanKind::InitialDependent{..}=>"several conserved quantities: mean of the specified initial density"},
             "asymptoticTraceError":trace_error,"asymptoticPositivityError":positivity,
-            "residual":d.relative_residual.is_finite().then_some(d.relative_residual),
+            "residual":d.relative_residual,
             "asymptoticAccuracy":{"requestedTolerance":options.population_tolerance,"estimatedMaximumError":d.estimated_error,
                 "basisEstimate":d.basis_estimate,"haloEstimate":d.halo_estimate,"projectionCharge":d.projection_charge,
                 "minimumEigenvalueBeforeProjection":d.minimum_eigenvalue_before_projection,

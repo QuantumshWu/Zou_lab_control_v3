@@ -133,8 +133,8 @@ test('the mean residual and both methods each come from one contract key',()=>{
   const mean=normalizeDynamicsResult(meanFixture(scene),scene);assert.equal(mean.method,undefined);assert.equal(mean.steady.method,'test mean');
   const none=noMean(fixture(scene));none.asymptoticStatus='not-requested';delete none.asymptoticReason;
   const finiteOnly=normalizeDynamicsResult(none,scene);assert.equal(finiteOnly.steady.residual,null);assert.equal(finiteOnly.steady.converged,false);
-  data.diagnostics.residual=null;assert.equal(normalizeDynamicsResult(data,scene).steady.residual,null,'a mean without a residual-measured solve');
-  for(const residual of [undefined,-1,NaN,Infinity]){
+  // Every converged mean reports the relative residual of its null vector.
+  for(const residual of [undefined,null,-1,NaN,Infinity]){
     const bad=fixture(scene);bad.diagnostics.residual=residual;assert.throws(()=>normalizeDynamicsResult(bad,scene),/长期密度数值验证信息/);
   }
 });
