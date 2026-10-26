@@ -43,11 +43,28 @@
 //! (or optical coherence) back at a slow charge, which relaxes there and is
 //! recycled into the ground block. It is the Neumann term `D_s^-1 O_sf D_f^-1`
 //! of the eliminated-space inverse with the fast->slow-charge couplings
-//! `O_sf` kept; dropping only fast->fast, slow->fast and slow->slow
-//! inter-charge couplings of `Q` keeps the left trace vector of every single
-//! slow charge exact (`l_0 J_eff = 0` with one slot), so the population trace
-//! is conserved by construction instead of leaking at the pumping rate of the
-//! drive-charge couplings.
+//! `O_sf` kept, and with several slots also the slow->slow ones (a slot's
+//! non-ground block handing its excitation to another slot's). Dropping only
+//! the remaining inter-charge couplings of `Q` keeps the left trace vector of
+//! a single slow charge exact (`l_0 J_eff = 0` with one slot); with several
+//! slots the row `l_0 J_eff` left by deeper paths is measured, removed by a
+//! rank-one update and reported (`trace_leak`: 8e-5 rad/us from the central
+//! columns with three lasers + tweezer, where it was 0.04 without the
+//! slow->slow hop and the far dressing below).
+//!
+//! # Far drive harmonics
+//!
+//! A drive harmonic all of whose couplings are detuned by more than
+//! `FAR_DETUNING_RATIO` optical damping rates (the trap laser, the
+//! counter-rotating terms) is reached in one hop like any other charge, which
+//! gives the ground block its light shift and Raman scattering. The
+//! eliminated blocks, however, never meet the far charges again, and their
+//! light shift of the optical coherences and excited states moves near
+//! lasers off resonance: without it, two lasers + tweezer pumped 11x too
+//! fast (slowest rate 1.4e-2 against the exact 1.2e-3/us of the Floquet
+//! spectrum). Every eliminated block therefore uses `H_0 + H2`, `H2` the
+//! far harmonics' second-order (van Vleck) Hamiltonian (`far_dressing`); its
+//! third-order remainder is reported (`far_dressing_remainder`).
 //!
 //! The expansion point `s_c = -i r_c` of column slot `c` is the envelope
 //! frequency its slow content actually carries: `r_c = nu_c` when the
@@ -819,7 +836,82 @@ pub(crate) struct FrameLiouvillian {
     pub axes: usize,
 }
 
+/// A drive harmonic is far when every coupling it carries is detuned by more
+/// than this many slowest optical damping rates.
+const FAR_DETUNING_RATIO: f64 = 1e3;
+
+/// Second-order (van Vleck) static Hamiltonian of the far drive harmonics,
+/// with the size of the next order it leaves out (rad/us).
+pub(crate) struct FarDressing {
+    pub hamiltonian: Dense,
+    pub harmonics: usize,
+    /// `sum_p |V_p|^3 / Delta_p^2` over the far harmonics (spectral norms by
+    /// the Frobenius bound): the third-order remainder per unit time.
+    pub remainder: f64,
+}
+
 impl FrameLiouvillian {
+    /// The far harmonics' second-order Hamiltonian
+    /// `H2_ab = 1/2 sum_c V_ac W_cb (1/(E_a - E_c + nu) + 1/(E_b - E_c + nu))`
+    /// for every far charge `p` (`V = H_p`, `W = H_-p`, `nu = nu_p`, `E` the
+    /// diagonal of `H_0`). A harmonic is far when all its couplings are
+    /// detuned by more than `FAR_DETUNING_RATIO` times `floor`.
+    pub fn far_dressing(&self, frequency: &dyn Fn(&[i32]) -> Result<f64, String>, floor: f64) -> Result<FarDressing, String> {
+        let n = self.n;
+        let zero = self.zero_charge();
+        let energy: Vec<f64> = match self.term(&zero).and_then(|t| t.hamiltonian.as_ref()) {
+            Some(h) => (0..n).map(|a| h.at(a, a).re).collect(),
+            None => vec![0.; n],
+        };
+        let mut hamiltonian = Dense::zeros(n, n);
+        let mut harmonics = 0;
+        let mut remainder = 0.;
+        for term in &self.terms {
+            if term.charge == zero {
+                continue;
+            }
+            let Some(v) = term.hamiltonian.as_ref() else { continue };
+            let negative: Charge = term.charge.iter().map(|x| -x).collect();
+            let Some(w) = self.term(&negative).and_then(|t| t.hamiltonian.as_ref()) else { continue };
+            let nu = frequency(&term.charge)?;
+            let scale = v.data.iter().fold(0_f64, |m, z| m.max(cabs(*z)));
+            if scale == 0. {
+                continue;
+            }
+            let mut nearest = f64::INFINITY;
+            for a in 0..n {
+                for c in 0..n {
+                    if cabs(v.at(a, c)) > 1e-14 * scale {
+                        nearest = nearest.min((energy[a] - energy[c] + nu).abs());
+                    }
+                }
+            }
+            if !(nearest > FAR_DETUNING_RATIO * floor) {
+                continue;
+            }
+            harmonics += 1;
+            remainder += v.frobenius().powi(3) / (nearest * nearest);
+            for a in 0..n {
+                for b in 0..n {
+                    let mut sum = ZERO;
+                    for c in 0..n {
+                        let product = cmul(v.at(a, c), w.at(c, b));
+                        if product.re == 0. && product.im == 0. {
+                            continue;
+                        }
+                        let weight = 0.5 * (1. / (energy[a] - energy[c] + nu) + 1. / (energy[b] - energy[c] + nu));
+                        sum = cadd(sum, cscale(product, weight));
+                    }
+                    hamiltonian.add_at(a, b, sum);
+                }
+            }
+        }
+        if !hamiltonian.is_finite() {
+            return Err("Nonfinite far-harmonic dressing".into());
+        }
+        Ok(FarDressing { hamiltonian, harmonics, remainder })
+    }
+
     pub fn from_primitives(p: &PrimitivePreparation) -> Result<Self, String> {
         let source = &p.hilbert.source;
         let n = source.n;
@@ -1395,6 +1487,10 @@ pub struct SlowDualDiagnostics {
     /// Which eigen-decomposition attempt resolved `J_eff` (see `robust_eigen`).
     pub generator_eigen_method: &'static str,
     pub generator_spectral_abscissa: f64,
+    /// Far drive harmonics whose second-order shift dresses the eliminated
+    /// blocks, and the size of the order left out (rad/us).
+    pub far_harmonics: usize,
+    pub far_dressing_remainder: f64,
     /// Norm of the central-trace row `l J_eff` removed to keep the trace
     /// exactly conserved (rad/us; roundoff with one slot).
     pub trace_leak: f64,
@@ -1542,7 +1638,7 @@ impl SlowDual {
         let zero = frame.zero_charge();
 
         // --- Charge-0 no-jump operators and time scales -------------------
-        let (left, right) = frame.no_jump();
+        let (mut left, mut right) = frame.no_jump();
         let blocks = Arc::new(NoJumpBlocks::new(&left, &right, g, e, &lap)?);
         // Slowest damping of an optical coherence: -Re of the (G,E) Sylvester
         // eigenvalues T_L[G,G] + T_R[E,E].
@@ -1556,6 +1652,26 @@ impl SlowDual {
         if !(optical_decay_floor.is_finite() && optical_decay_floor > 0.) {
             return Err("No damped optical coherences: the slow-manifold dual needs radiative decay".into());
         }
+        // Far drive harmonics (the trap laser, counter-rotating terms) shift
+        // the eliminated optical coherences and excited states by their
+        // second-order light shift. The hops through their charges give the
+        // ground block its shifts and Raman scattering, but the eliminated
+        // blocks never see those far charges again (fast->fast couplings are
+        // dropped): without the shift, two lasers + tweezer pumped 11x too
+        // fast (slowest rate 1.4e-2 against the exact 1.2e-3/us). The
+        // eliminated blocks therefore use H_0 + H2 (`far_dressing`); the next
+        // order is reported (`far_dressing_remainder`).
+        let far = frame.far_dressing(&frequency, optical_decay_floor)?;
+        let (left, right, blocks) = if far.harmonics > 0 && std::env::var("ATOM_EXP_NO_DRESSING").is_err() {
+            for k in 0..n * n {
+                left.data[k] = cadd(left.data[k], minus_i(far.hamiltonian.data[k]));
+                right.data[k] = csub(right.data[k], minus_i(far.hamiltonian.data[k]));
+            }
+            let blocks = Arc::new(NoJumpBlocks::new(&left, &right, g, e, &lap)?);
+            (left, right, blocks)
+        } else {
+            (left, right, blocks)
+        };
         let cutoff = options.slow_frequency_cutoff.unwrap_or(4. * optical_decay_floor);
         if !(cutoff.is_finite() && cutoff > 0.) {
             return Err("Invalid slow-frequency cutoff".into());
@@ -1757,8 +1873,13 @@ impl SlowDual {
                                 generator.add_at(s3 * g2 + a * g + b, column, image.at(a, b));
                             }
                         }
-                        if !held {
-                            // Second hop from a fast charge into a slow one.
+                        if !held || c3 != c2 {
+                            // Second hop from a fast charge into a slow one,
+                            // or from one slow charge's non-ground block into
+                            // another's (with several slots these carry the
+                            // excitation a slot's column hands to another
+                            // slot; without them the central trace leaked at
+                            // 0.04-0.67 rad/us with three lasers + tweezer).
                             let w = second_hop.entry((ab, s3)).or_insert_with(|| Dense::zeros(n, n));
                             for a in 0..n {
                                 for b in 0..n {
@@ -1805,13 +1926,11 @@ impl SlowDual {
         }
         // Exact trace conservation. The central ground trace `l` is a left
         // null vector of the Schur complement with one slot (measured 3e-9 of
-        // ||J||); with several slots the per-column expansion points leave a
-        // row `r = l J` (measured 0.04 rad/us from the central columns and
-        // 0.67 from the hyperfine slots with a tweezer and three lasers),
-        // which made the trace decay and every slower mode count as
-        // conserved. `r` is removed by the rank-one update `J - u r` with
-        // `u` the uniform central ground population (`l u = 1`); the removed
-        // size is reported (`trace_leak`).
+        // ||J||); with several slots the paths beyond the second hop leave a
+        // row `r = l J` (8e-5 rad/us from the central columns and 2.4e-3 from
+        // the hyperfine slots with three lasers + tweezer). `r` is removed by
+        // the rank-one update `J - u r` with `u` the uniform central ground
+        // population (`l u = 1`), and its size is reported (`trace_leak`).
         let trace_leak = {
             let mut row = vec![ZERO; dim];
             for (j, entry) in row.iter_mut().enumerate() {
@@ -1909,6 +2028,8 @@ impl SlowDual {
             generator_reconstruction_relative: reconstruction,
             generator_eigen_method,
             generator_spectral_abscissa: spectral_abscissa,
+            far_harmonics: far.harmonics,
+            far_dressing_remainder: far.remainder,
             trace_leak,
             dressed_condition: dressed.as_ref().map(|d| d.condition),
             preparation_ms: began.elapsed().as_secs_f64() * 1000.,
@@ -3094,7 +3215,7 @@ mod tests {
                             for k in 0..d {
                                 if ground(k) {
                                     out.add_at(s3 * g2 + (k / n) * g + k % n, column, image[k]);
-                                } else if slot2.is_none() {
+                                } else if slot2.is_none() || slot2 != Some(s3) {
                                     let w = second_hop.entry(s3).or_insert_with(|| vec![ZERO; d]);
                                     w[k] = cadd(w[k], image[k]);
                                 }
@@ -3474,6 +3595,8 @@ mod tests {
                 generator_reconstruction_relative: 0.,
                 generator_eigen_method: "test",
                 generator_spectral_abscissa: 0.,
+                far_harmonics: 0,
+                far_dressing_remainder: 0.,
                 trace_leak: 0.,
                 dressed_condition: None,
                 preparation_ms: 0.,
