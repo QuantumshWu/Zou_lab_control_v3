@@ -142,16 +142,6 @@ pub struct PopulationObservation{
     charges:Vec<Charge>,rows:Vec<Vec<(usize,usize,C)>>,
 }
 pub struct PopulationBasis{owner:Arc<PrimitivePreparation>,modes:Vec<Charge>,columns:usize,coefficients:Vec<C>}
-/// Fixed current-domain/actual-time operator table, never trajectory values.
-pub struct PopulationPhasePlan{owner:Arc<PrimitivePreparation>,modes:Vec<Charge>,times:Arc<[f64]>,phases:Vec<C>}
-#[derive(Clone)]
-pub struct PopulationRows{owner:Arc<PrimitivePreparation>,times:Arc<[f64]>,states:usize,columns:usize,values:Arc<[C]>}
-/// Append-only operator-row blocks. Old projected columns are shared without
-/// copying or reapplying T; snapshot compacts them only when publishing one
-/// immutable Candidate. No propagated population is an input.
-#[derive(Clone)]
-pub struct PopulationRowBlocks{chunks:Vec<PopulationRows>,columns:usize}
-
 fn add_dual(family:&mut FourierMatrices,q:Charge,value:&[C],scale:f64){
     let out=family.entry(q).or_insert_with(||vec![C::default();value.len()]);for(a,&b)in out.iter_mut().zip(value){add(a,scaled(b,scale));}}
 struct DualCommutator{
@@ -219,11 +209,6 @@ impl PopulationObservation{
         Ok(combinations(&support,&inputs,false)?.into_iter().collect())
     }
     pub fn frequency(&self,q:&[i32])->Result<crate::preparation::FrequencyParts,String>{self.owner.hilbert.source.phases.frequency(q)}
-    pub fn prepare_phase_plan(&self,input_modes:&[Charge],times:&[f64])->Result<PopulationPhasePlan,String>{
-        let inputs=mode_set(input_modes,self.owner.hilbert.source.phases.axes.len())?;
-        let support:Modes=self.charges.iter().cloned().collect();let modes:Vec<_>=combinations(&support,&inputs,false)?.into_iter().collect();
-        PopulationPhasePlan::prepare(Arc::clone(&self.owner),modes,times)
-    }
     /// Readout coefficients of `columns` signed trial columns `[row, columns]`:
     /// coefficient[(mode*n+state)*columns+j] = sum over dual charges q and
     /// input modes i with q+i = mode of D_q[state,:] . x_i[:,j].
@@ -253,73 +238,9 @@ impl PopulationObservation{
 }
 impl PopulationBasis{
     pub fn modes(&self)->&[Charge]{&self.modes}
+    pub fn columns(&self)->usize{self.columns}
     /// Row-major `[(mode*n+state), column]` complex coefficients.
     pub fn coefficients(&self)->&[C]{&self.coefficients}
-    pub fn columns(&self)->usize{self.columns}
-    pub fn at_times(&self,times:&[f64])->Result<PopulationRows,String>{
-        self.at_phase_plan(&PopulationPhasePlan::prepare(Arc::clone(&self.owner),self.modes.clone(),times)?)
-    }
-    pub fn at_phase_plan(&self,plan:&PopulationPhasePlan)->Result<PopulationRows,String>{
-        if !Arc::ptr_eq(&self.owner,&plan.owner)||self.modes!=plan.modes{return Err("Population phase plan belongs to another Model or output-mode union".into());}
-        let times=&plan.times;
-        if times.is_empty()||times.iter().any(|t|!t.is_finite()){return Err("Expected a nonempty finite actual time grid".into());}
-        let n=self.owner.hilbert.source.n;let width=n*self.columns;
-        let mut values=vec![C::default();product(&[times.len(),width])?];
-        for it in 0..times.len(){for m in 0..self.modes.len(){let phase=plan.phases[it*self.modes.len()+m];
-            for k in 0..width{add(&mut values[it*width+k],mul(phase,self.coefficients[m*width+k]));}
-        }}
-        if values.iter().any(|z|!z.finite()){return Err("Nonfinite current-basis population rows".into());}
-        Ok(PopulationRows{owner:Arc::clone(&self.owner),times:Arc::clone(&plan.times),states:n,columns:self.columns,values:values.into()})
-    }
-}
-impl PopulationPhasePlan{
-    fn prepare(owner:Arc<PrimitivePreparation>,modes:Vec<Charge>,times:&[f64])->Result<Self,String>{
-        if times.is_empty()||times.iter().any(|t|!t.is_finite()){return Err("Expected a nonempty finite actual phase grid".into());}
-        let mut phases=vec![C::default();product(&[modes.len(),times.len()])?];
-        for(m,q)in modes.iter().enumerate(){let frequency=owner.hilbert.source.phases.frequency(q)?;
-            for(it,&time)in times.iter().enumerate(){phases[it*modes.len()+m]=frequency.phase(time)?;}}
-        Ok(Self{owner,modes,times:times.to_vec().into(),phases})
-    }
-    pub fn times(&self)->&[f64]{&self.times}
-    pub fn modes(&self)->&[Charge]{&self.modes}
-    pub fn phase_evaluations(&self)->usize{self.phases.len()}
-}
-impl PopulationRows{
-    pub fn belongs_to(&self,prepared:&OwnedPrepared)->bool{Arc::ptr_eq(&self.owner,&prepared.primitives)}
-    pub fn times(&self)->&[f64]{&self.times}
-    pub fn columns(&self)->usize{self.columns}
-    /// Exact current-basis observation coefficients [time,state,column], not
-    /// populations or a cache of a previously propagated solution.
-    pub fn coefficients(&self)->&[C]{&self.values}
-    /// small is row-major [column,time]; output is [time,state] COMPLEX.
-    pub fn evaluate_into(&self,small:&[C],output:&mut[C])->Result<(),String>{
-        let nt=self.times.len();if small.len()!=product(&[self.columns,nt])?||output.len()!=product(&[nt,self.states])?
-            ||small.iter().any(|z|!z.finite()){return Err("Population small coefficients/output dimensions or finite check failed".into());}
-        output.fill(C::default());for t in 0..nt{for state in 0..self.states{for j in 0..self.columns{
-            add(&mut output[t*self.states+state],mul(self.values[(t*self.states+state)*self.columns+j],small[j*nt+t]));
-        }}}
-        if output.iter().any(|z|!z.finite()){return Err("Nonfinite complex population output".into());}Ok(())
-    }
-}
-
-impl PopulationRowBlocks{
-    pub fn new(first:PopulationRows)->Self{let columns=first.columns;Self{chunks:vec![first],columns}}
-    pub fn columns(&self)->usize{self.columns}
-    pub fn chunk_count(&self)->usize{self.chunks.len()}
-    pub fn append(&mut self,rows:PopulationRows)->Result<(),String>{
-        let first=&self.chunks[0];
-        if !Arc::ptr_eq(&first.owner,&rows.owner)||first.states!=rows.states||first.times.len()!=rows.times.len()
-            ||!first.times.iter().zip(rows.times.iter()).all(|(a,b)|a.to_bits()==b.to_bits()){
-            return Err("Observation-row append requires the same current Model and exact time grid".into());}
-        self.columns=self.columns.checked_add(rows.columns).ok_or("Observation column count overflow")?;self.chunks.push(rows);Ok(())
-    }
-    pub fn snapshot(&self)->Result<PopulationRows,String>{
-        let first=&self.chunks[0];if self.chunks.len()==1{return Ok(first.clone());}
-        let rows=product(&[first.times.len(),first.states])?;let mut values=vec![C::default();product(&[rows,self.columns])?];let mut offset=0;
-        for chunk in &self.chunks{for i in 0..rows{values[i*self.columns+offset..i*self.columns+offset+chunk.columns]
-            .copy_from_slice(&chunk.values[i*chunk.columns..(i+1)*chunk.columns]);}offset+=chunk.columns;}
-        Ok(PopulationRows{owner:Arc::clone(&first.owner),times:Arc::clone(&first.times),states:first.states,columns:self.columns,values:values.into()})
-    }
 }
 
 #[cfg(test)]
@@ -336,13 +257,26 @@ mod tests{
         }}out};
         let mut plan=DualCommutator::new(&p.s,n);let first=plan.apply(&raw,lap).unwrap();let old=oracle(&raw);let second=plan.apply(&first,lap).unwrap();let old_second=oracle(&old);
         for(actual,expected)in[(&first,&old),(&second,&old_second)]{assert_eq!(actual.len(),expected.len());for(q,a)in actual{let b=&expected[q];for(x,y)in a.iter().zip(b){assert!((x.re-y.re).hypot(x.im-y.im)<5e-13*(1.+y.re.hypot(y.im)));}}}
-        let observer=coordinates.population_observation().unwrap();let inputs=[vec![1],vec![0],vec![-1]];let times=[0.,0.137,1e6+0.123456789];
-        let phases=observer.prepare_phase_plan(&inputs,&times).unwrap();let fields:Vec<_>=(0..inputs.len()*d*2).map(|i|C{re:(i as f64*0.17).sin(),im:(i as f64*0.13).cos()}).collect();
-        let basis=observer.project(&inputs,&fields,2).unwrap();let cached=basis.at_phase_plan(&phases).unwrap();let direct=basis.at_times(&times).unwrap();
-        assert_eq!(phases.phase_evaluations(),phases.modes().len()*times.len());
-        for(a,b)in cached.coefficients().iter().zip(direct.coefficients()){assert_eq!(a.re.to_bits(),b.re.to_bits());assert_eq!(a.im.to_bits(),b.im.to_bits());}
-        let other=super::super::tests::fixture();let foreign=other.physical_coordinates().population_observation().unwrap().prepare_phase_plan(&inputs,&times).unwrap();
-        assert!(basis.at_phase_plan(&foreign).is_err());
+        // Readout coefficients reproduce the diagonal of the complete physical
+        // reconstruction T(theta) at arbitrary times, for arbitrary complex fields.
+        let observer=coordinates.population_observation().unwrap();let inputs=[vec![1],vec![0],vec![-1]];
+        let fields:Vec<_>=(0..inputs.len()*d*2).map(|i|C{re:(i as f64*0.17).sin(),im:(i as f64*0.13).cos()}).collect();
+        let basis=observer.project(&inputs,&fields,2).unwrap();let block=n*2;
+        for time in[0.,0.137,1e3+0.123456789]{
+            for j in 0..2{
+                let column:Vec<_>=(0..inputs.len()*d).map(|i|fields[i*2+j]).collect();
+                let physical=coordinates.field_at(&inputs,&column,time).unwrap();
+                for state in 0..n{
+                    let mut value=C::default();
+                    for(mode,q)in basis.modes().iter().enumerate(){
+                        let phase=p.hilbert.source.phases.phase(q,time).unwrap();
+                        add(&mut value,mul(phase,basis.coefficients()[mode*block+state*2+j]));
+                    }
+                    let expected=physical[state*n+state];
+                    assert!((value.re-expected.re).hypot(value.im-expected.im)<1e-11*(1.+expected.re.hypot(expected.im)));
+                }
+            }
+        }
     }
     #[test]
     fn preparation_coordinates_initial_preserves_global_index_and_full_density(){
@@ -365,18 +299,23 @@ mod tests{
         let observer=coordinates.population_observation().unwrap();let modes=[vec![2],vec![-1],vec![0]];let columns=2;
         let basis:Vec<_>=(0..modes.len()*d*columns).map(|i|C{re:((i*13+3)%37)as f64/43.,im:((i*17+7)%41)as f64/-47.}).collect();
         let projected=observer.project(&modes,&basis,columns).unwrap();assert!(projected.modes().len()>modes.len());
-        let times=[0.,0.137,1e6+0.123456789];let rows=projected.at_times(&times).unwrap();let nt=times.len();
-        let small:Vec<_>=(0..columns*nt).map(|i|C{re:0.2+i as f64*0.07,im:-0.3+i as f64*0.11}).collect();let mut population=vec![C::default();nt*n];rows.evaluate_into(&small,&mut population).unwrap();
+        let times=[0.,0.137,1e6+0.123456789];let nt=times.len();let block=n*columns;
+        let small:Vec<_>=(0..columns*nt).map(|i|C{re:0.2+i as f64*0.07,im:-0.3+i as f64*0.11}).collect();
         for(t,&time)in times.iter().enumerate(){let mut field=vec![C::default();modes.len()*d];
             for i in 0..field.len(){for j in 0..columns{add(&mut field[i],mul(basis[i*columns+j],small[j*nt+t]));}}
             let physical=coordinates.field_at(&modes,&field,time).unwrap();
-            for state in 0..n{let(a,b)=(population[t*n+state],physical[state*n+state]);assert!((a.re-b.re).hypot(a.im-b.im)<3e-12*(1.+b.re.hypot(b.im)));}
+            for state in 0..n{
+                let mut value=C::default();
+                for(mode,q)in projected.modes().iter().enumerate(){let phase=owner.primitives().hilbert.source.phases.phase(q,time).unwrap();
+                    for j in 0..columns{add(&mut value,mul(phase,mul(projected.coefficients()[mode*block+state*columns+j],small[j*nt+t])));}}
+                let b=physical[state*n+state];assert!((value.re-b.re).hypot(value.im-b.im)<3e-12*(1.+b.re.hypot(b.im)));
+            }
         }
-        assert!(population.iter().any(|z|z.im.abs()>0.01)); // no hidden real projection
         // Per-column incremental projection is identical to projecting a block.
         for j in 0..columns{let column:Vec<_>=(0..modes.len()*d).map(|i|basis[i*columns+j]).collect();
-            let single=observer.project(&modes,&column,1).unwrap().at_times(&times).unwrap();
-            for t in 0..nt{for state in 0..n{let(a,b)=(single.coefficients()[t*n+state],rows.coefficients()[(t*n+state)*columns+j]);assert_eq!(a.re.to_bits(),b.re.to_bits());assert_eq!(a.im.to_bits(),b.im.to_bits());}}
+            let single=observer.project(&modes,&column,1).unwrap();
+            for row in 0..projected.modes().len()*n{let(a,b)=(single.coefficients()[row],projected.coefficients()[row*columns+j]);
+                assert_eq!(a.re.to_bits(),b.re.to_bits());assert_eq!(a.im.to_bits(),b.im.to_bits());}
         }
         assert!(observer.project(&[vec![0],vec![0]],&basis,columns).is_err());
     }
