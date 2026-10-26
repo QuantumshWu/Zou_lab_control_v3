@@ -9,6 +9,7 @@
 
 use super::*;
 use super::coordinates::PopulationObservation;
+use crate::parallel::{Execution, MINIMUM_WORK_PER_TASK};
 use crate::preparation::FrequencyParts;
 
 /// Output times evaluated per GEMM batch.
@@ -109,7 +110,8 @@ impl Readout {
     }
 
     /// Populations `[time, state]` for reduced coefficients `a` given
-    /// column-major `[m, times]`.
+    /// column-major `[m, times]`. Contiguous time ranges run on the worker
+    /// pool; each evaluates its own GEMM batches.
     pub fn evaluate(&self, lapack: &Lapack, coefficients: &[f64], times: &[f64]) -> Result<Populations, String> {
         let m = self.columns;
         let n = self.n;
@@ -117,36 +119,41 @@ impl Readout {
             return Err("Reduced coefficients do not match the readout".into());
         }
         let rows = self.rows();
-        let mut values = vec![0.; times.len() * n];
-        let mut maximum_imaginary = 0_f64;
-        let mut real_part = vec![0.; rows * TIME_CHUNK];
-        let mut imaginary_part = vec![0.; rows * TIME_CHUNK];
-        for start in (0..times.len()).step_by(TIME_CHUNK) {
-            let count = TIME_CHUNK.min(times.len() - start);
-            let block = &coefficients[start * m..(start + count) * m];
-            lapack.gemm(false, false, rows, count, m, 1., &self.re, rows, block, m, 0., &mut real_part, rows)?;
-            lapack.gemm(false, false, rows, count, m, 1., &self.im, rows, block, m, 0., &mut imaginary_part, rows)?;
-            for t in 0..count {
-                let time = times[start + t];
-                let output = &mut values[(start + t) * n..(start + t + 1) * n];
-                let mut imaginary = vec![0.; n];
-                for (mode, frequency) in self.frequencies.iter().enumerate() {
-                    let phase = frequency.phase(time)?;
-                    let at = t * rows + mode * n;
-                    for s in 0..n {
-                        let (a, b) = (real_part[at + s], imaginary_part[at + s]);
-                        output[s] += phase.re * a - phase.im * b;
-                        imaginary[s] += phase.re * b + phase.im * a;
+        // Real part: the population; imaginary part: the discarded remainder.
+        let mut field = vec![C::default(); times.len() * n];
+        let work = 2 * rows * m * times.len();
+        Execution::new()?.for_mode_chunks(&mut field, n, work, MINIMUM_WORK_PER_TASK, &mut Vec::new(),
+            |first, chunk, scratch: &mut (Vec<f64>, Vec<f64>)| {
+                let (real_part, imaginary_part) = scratch;
+                real_part.resize(rows * TIME_CHUNK, 0.);
+                imaginary_part.resize(rows * TIME_CHUNK, 0.);
+                let count = chunk.len() / n;
+                for start in (0..count).step_by(TIME_CHUNK) {
+                    let width = TIME_CHUNK.min(count - start);
+                    let block = &coefficients[(first + start) * m..(first + start + width) * m];
+                    lapack.gemm(false, false, rows, width, m, 1., &self.re, rows, block, m, 0., real_part, rows)?;
+                    lapack.gemm(false, false, rows, width, m, 1., &self.im, rows, block, m, 0., imaginary_part, rows)?;
+                    for t in 0..width {
+                        let time = times[first + start + t];
+                        let output = &mut chunk[(start + t) * n..(start + t + 1) * n];
+                        for (mode, frequency) in self.frequencies.iter().enumerate() {
+                            let phase = frequency.phase(time)?;
+                            let at = t * rows + mode * n;
+                            for (s, value) in output.iter_mut().enumerate() {
+                                let (a, b) = (real_part[at + s], imaginary_part[at + s]);
+                                value.re += phase.re * a - phase.im * b;
+                                value.im += phase.re * b + phase.im * a;
+                            }
+                        }
                     }
                 }
-                for value in imaginary {
-                    maximum_imaginary = maximum_imaginary.max(value.abs());
-                }
-            }
-        }
+                Ok(())
+            })?;
+        let values: Vec<f64> = field.iter().map(|z| z.re).collect();
         if values.iter().any(|x| !x.is_finite()) {
             return Err("Nonfinite population readout".into());
         }
+        let maximum_imaginary = field.iter().fold(0_f64, |m, z| m.max(z.im.abs()));
         Ok(Populations { values, maximum_imaginary })
     }
 }
