@@ -667,6 +667,37 @@ impl SylvesterFactor {
             return Ok(Dense::zeros(p, r));
         }
         let yt = self.left.uh.multiply(y, lap)?.multiply(&self.right.u, lap)?;
+        let x = self.triangular(z, &yt)?;
+        let out = self.left.u.multiply(&x, lap)?.multiply(&self.right.uh, lap)?;
+        if !out.is_finite() {
+            return Err("Nonfinite Sylvester solution".into());
+        }
+        Ok(out)
+    }
+
+    /// `solve` for many square right-hand sides (p = r), with the Schur-basis
+    /// changes of all of them in two products each way.
+    pub fn solve_all(&self, z: C, ys: &[&Dense], lap: &Lapack) -> Result<Vec<Dense>, String> {
+        if ys.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.left.dimension() != self.right.dimension() || ys.iter().any(|y| y.rows != self.left.dimension() || y.cols != self.right.dimension()) {
+            return Err("Batched Sylvester solves need square right-hand sides".into());
+        }
+        let transformed = sandwich_all(&self.left.uh, &self.right.u, ys, lap)?;
+        let solved: Vec<Dense> = transformed.iter().map(|yt| self.triangular(z, yt)).collect::<Result<_, _>>()?;
+        let refs: Vec<&Dense> = solved.iter().collect();
+        let out = sandwich_all(&self.left.u, &self.right.uh, &refs, lap)?;
+        if out.iter().any(|x| !x.is_finite()) {
+            return Err("Nonfinite Sylvester solution".into());
+        }
+        Ok(out)
+    }
+
+    /// The triangular core in Schur coordinates.
+    fn triangular(&self, z: C, yt: &Dense) -> Result<Dense, String> {
+        let p = self.left.dimension();
+        let r = self.right.dimension();
         let tl = &self.left.t;
         let tr = &self.right.t;
         let mut x = Dense::zeros(p, r);
@@ -693,11 +724,7 @@ impl SylvesterFactor {
                 x.set(i, j, cdiv(v, denominator));
             }
         }
-        let out = self.left.u.multiply(&x, lap)?.multiply(&self.right.uh, lap)?;
-        if !out.is_finite() {
-            return Err("Nonfinite Sylvester solution".into());
-        }
-        Ok(out)
+        Ok(x)
     }
 }
 
@@ -714,6 +741,25 @@ pub(crate) struct ChargeTerm {
     pub gamma: Option<Dense>,
     /// Recycling `R_p`: (ground entry a*g+b, excited entry i*e+j, coefficient).
     pub recycling: Vec<(usize, usize, C)>,
+    /// Stored entries `(row, column, value)` of `H_p` and `Gamma_p` when they
+    /// are sparse enough for entrywise products (dipole couplings are).
+    pub hamiltonian_entries: Option<Vec<(usize, usize, C)>>,
+    pub gamma_entries: Option<Vec<(usize, usize, C)>>,
+}
+
+/// Stored entries of a matrix that is sparse enough (under a third of its
+/// storage) for entrywise products to beat dense ones.
+fn sparse_entries(a: &Dense) -> Option<Vec<(usize, usize, C)>> {
+    let mut entries = Vec::new();
+    for j in 0..a.cols {
+        for i in 0..a.rows {
+            let v = a.at(i, j);
+            if v.re != 0. || v.im != 0. {
+                entries.push((i, j, v));
+            }
+        }
+    }
+    (3 * entries.len() < a.rows * a.cols).then_some(entries)
 }
 
 pub(crate) struct FrameLiouvillian {
@@ -763,7 +809,9 @@ impl FrameLiouvillian {
                     }
                 }
             }
-            terms.push(ChargeTerm { charge, hamiltonian, gamma, recycling });
+            let hamiltonian_entries = hamiltonian.as_ref().and_then(sparse_entries);
+            let gamma_entries = gamma.as_ref().and_then(sparse_entries);
+            terms.push(ChargeTerm { charge, hamiltonian, gamma, recycling, hamiltonian_entries, gamma_entries });
         }
         Ok(Self { n, g, e, terms, axes })
     }
@@ -780,6 +828,37 @@ impl FrameLiouvillian {
         let m = xs.len();
         let mut out: Vec<Dense> = (0..m).map(|_| Dense::zeros(n, n)).collect();
         if m == 0 {
+            return Ok(out);
+        }
+        // Sparse terms: (A X)[r, b] += A[r, k] X[k, b] and (X A)[r, b] +=
+        // X[r, k] A[k, b] entry by entry, scaled by `left` and `right`.
+        let sparse = |entries: &[(usize, usize, C)], left: C, right: C, out: &mut Vec<Dense>| {
+            for (x, o) in xs.iter().zip(out.iter_mut()) {
+                for &(r, k, v) in entries {
+                    let (lv, rv) = (cmul(left, v), cmul(right, v));
+                    for b in 0..n {
+                        // left product: row r of the output, column b
+                        o.data[r + b * n] = cadd(o.data[r + b * n], cmul(lv, x.data[k + b * n]));
+                    }
+                    for a in 0..n {
+                        // right product: X[a, r] A[r, k] lands at (a, k)
+                        o.data[a + k * n] = cadd(o.data[a + k * n], cmul(rv, x.data[a + r * n]));
+                    }
+                }
+            }
+        };
+        let dense_needed = (term.hamiltonian.is_some() && term.hamiltonian_entries.is_none()) || (term.gamma.is_some() && term.gamma_entries.is_none());
+        if !dense_needed {
+            // -i (H X - X H) and -1/2 (Gamma X + X Gamma)
+            if let Some(entries) = &term.hamiltonian_entries {
+                sparse(entries, complex(0., -1.), complex(0., 1.), &mut out);
+            }
+            if let Some(entries) = &term.gamma_entries {
+                sparse(entries, complex(-0.5, 0.), complex(-0.5, 0.), &mut out);
+            }
+            for (x, o) in xs.iter().zip(out.iter_mut()) {
+                self.add_recycling(term, x, o);
+            }
             return Ok(out);
         }
         let side = side_by_side(xs, n);
@@ -916,9 +995,9 @@ impl FrameLiouvillian {
 struct FullBlockSolver {
     z: C,
     sylvester: Arc<SylvesterFactor>,
-    /// `W[:, ab] = (z - N)^{-1} E_ab`, one n x n matrix per ground entry.
-    ground_images: Vec<Dense>,
-    /// LU of `K = I - V_R W` (g^2 x g^2).
+    /// LU of `K = I - V_R (z - N)^{-1} U` (g^2 x g^2), `U` the ground-entry
+    /// embedding: `(z - L_0)^{-1} y = S^{-1} (y + U K^{-1} V_R S^{-1} y)` with
+    /// `S = z - N`, two Sylvester solves and no stored images.
     woodbury: Option<LuFactor>,
     minimum_denominator: f64,
     woodbury_condition: f64,
@@ -1114,16 +1193,19 @@ impl FullBlockSolver {
         let minimum_denominator = sylvester.minimum_denominator(z);
         let zero = frame.zero_charge();
         let recycling = frame.term(&zero).map(|t| t.recycling.clone()).unwrap_or_default();
-        let mut ground_images = Vec::new();
         let mut woodbury = None;
         let mut woodbury_condition = 1.;
         if !recycling.is_empty() {
             let rank = g * g;
-            for ab in 0..rank {
-                let mut unit = Dense::zeros(n, n);
-                unit.set(ab / g, ab % g, ONE);
-                ground_images.push(sylvester.solve(z, &unit, lap)?);
-            }
+            let units: Vec<Dense> = (0..rank)
+                .map(|ab| {
+                    let mut unit = Dense::zeros(n, n);
+                    unit.set(ab / g, ab % g, ONE);
+                    unit
+                })
+                .collect();
+            let refs: Vec<&Dense> = units.iter().collect();
+            let ground_images = sylvester.solve_all(z, &refs, lap)?;
             // K = I - V_R W with V_R X = recycling functional of X_EE.
             let mut k = Dense::identity(rank);
             for (column, image) in ground_images.iter().enumerate() {
@@ -1137,26 +1219,35 @@ impl FullBlockSolver {
             woodbury_condition = one_norm(&k) * one_norm(&inverse);
             woodbury = Some(factor);
         }
-        Ok(Self { z, sylvester, ground_images, woodbury, minimum_denominator, woodbury_condition })
+        Ok(Self { z, sylvester, woodbury, minimum_denominator, woodbury_condition })
     }
 
     fn solve(&self, y: &Dense, frame: &FrameLiouvillian, lap: &Lapack) -> Result<Dense, String> {
-        let mut x = self.sylvester.solve(self.z, y, lap)?;
-        if let Some(factor) = &self.woodbury {
-            let zero = frame.zero_charge();
-            let recycling = &frame.term(&zero).expect("charge-0 term").recycling;
-            let v = recycle_ground(frame, recycling, &x);
-            let amount = factor.solve(&v, lap)?;
-            for (image, coefficient) in self.ground_images.iter().zip(&amount) {
-                for k in 0..x.data.len() {
-                    x.data[k] = cadd(x.data[k], cmul(image.data[k], *coefficient));
-                }
+        Ok(self.solve_all(&[y], frame, lap)?.pop().expect("one solution"))
+    }
+
+    /// `(z - L_0)^{-1} y` for many right-hand sides.
+    fn solve_all(&self, ys: &[&Dense], frame: &FrameLiouvillian, lap: &Lapack) -> Result<Vec<Dense>, String> {
+        let first = self.sylvester.solve_all(self.z, ys, lap)?;
+        let Some(factor) = &self.woodbury else { return Ok(first) };
+        let g = frame.g;
+        let zero = frame.zero_charge();
+        let recycling = &frame.term(&zero).expect("charge-0 term").recycling;
+        let mut corrected: Vec<Dense> = Vec::with_capacity(ys.len());
+        for (y, x) in ys.iter().zip(&first) {
+            let amount = factor.solve(&recycle_ground(frame, recycling, x), lap)?;
+            let mut y2 = (*y).clone();
+            for (ab, a) in amount.iter().enumerate() {
+                y2.add_at(ab / g, ab % g, *a);
             }
+            corrected.push(y2);
         }
-        if !x.is_finite() {
+        let refs: Vec<&Dense> = corrected.iter().collect();
+        let out = self.sylvester.solve_all(self.z, &refs, lap)?;
+        if out.iter().any(|x| !x.is_finite()) {
             return Err("Nonfinite full charge-block solve".into());
         }
-        Ok(x)
+        Ok(out)
     }
 }
 
@@ -1234,7 +1325,6 @@ pub struct SlowDual {
     /// `J_eff`, column-major, dimension `slots.len() * g^2`.
     pub(crate) generator: Dense,
     pub(crate) eigenvalues: Vec<C>,
-    pub(crate) vectors: Dense,
     pub(crate) inverse_vectors: Dense,
     /// Readout groups `(nu, R V)`: physical populations
     /// `p(t) = Re sum_groups exp(i nu t) (R V) xhat(t)`.
@@ -1248,8 +1338,6 @@ pub struct SlowDual {
     pub(crate) dressed: Option<DressedFrame>,
     /// Slaved charge-0 non-ground block per slow column (n x n frame matrices).
     pub(crate) slaved_central: Vec<Dense>,
-    /// Expansion point of every slot: `s_c = -i slot_rotation[c]`.
-    pub(crate) slot_rotation: Vec<f64>,
     /// Exact charge-block inverses, built on demand for Markov slaving of
     /// fields at fast charges (None only for synthetic test duals).
     elimination: Option<Elimination>,
@@ -1284,8 +1372,6 @@ pub(crate) struct DressedFrame {
     pub right_inverse: Dense, // V_R^-1
     /// Population readout `rho[s, i*n+k]` of an eigen-coordinate matrix.
     pub readout: Dense,
-    /// Ground block (row a*g+b) of `R_0` applied to `V_L E_ik V_R^-1`.
-    pub recycling: Dense,
     /// `W[:, slot block] * recycling` for every slot (dim x n^2).
     pub modal_recycling: Vec<Dense>,
     pub condition: f64,
@@ -1375,16 +1461,15 @@ impl SlowDual {
 
         // --- Elimination solvers per intermediate charge -----------------
         let full_sylvester = Arc::new(SylvesterFactor { left: Schur::new(&left, &lap)?, right: Schur::new(&right, &lap)? });
-        // Keyed by (intermediate charge, shift): z = i (nu_{c''} - r_c).
-        let mut solvers: BTreeMap<(Charge, i64), BlockSolver> = BTreeMap::new();
+        // One block inverse at a time (z = i (nu_{c''} - r_c)): built, applied
+        // to every slow column, dropped. Keeping them all would cost about
+        // 1-2.5 MB per intermediate charge.
+        let mut built: BTreeSet<(Charge, i64)> = BTreeSet::new();
         let mut minimum_denominator = f64::INFINITY;
         let mut woodbury_condition = 1_f64;
         let mut schur_condition = 1_f64;
-        let mut ensure_solver = |c: &Charge, z_im: f64, solvers: &mut BTreeMap<(Charge, i64), BlockSolver>| -> Result<(Charge, i64), String> {
-            let key = shift_key(c, z_im);
-            if solvers.contains_key(&key) {
-                return Ok(key);
-            }
+        let mut build_solver = |c: &Charge, z_im: f64| -> Result<BlockSolver, String> {
+            built.insert(shift_key(c, z_im));
             let z = complex(0., z_im);
             let solver = if slot_of(c).is_some() {
                 let s = NonGroundSolver::new(z, Arc::clone(&blocks), &lap)?;
@@ -1397,8 +1482,7 @@ impl SlowDual {
                 woodbury_condition = woodbury_condition.max(s.woodbury_condition);
                 BlockSolver::Full(s)
             };
-            solvers.insert(key.clone(), solver);
-            Ok(key)
+            Ok(solver)
         };
 
         // --- Assemble J_eff ------------------------------------------------
@@ -1441,12 +1525,16 @@ impl SlowDual {
             for ab in 0..g2 {
                 let column = s * g2 + ab;
                 generator.add_at(column, column, complex(0., -slot_frequency[s]));
-                // Non-ground fields arriving at slow charges after the second
-                // hop, accumulated per target slot before their elimination.
-                let mut second_hop: BTreeMap<usize, Dense> = BTreeMap::new();
-                for term in &frame.terms {
-                    let c2 = add_charge(c, &term.charge, false)?;
-                    let target_slot = slot_of(&c2);
+            }
+            // Non-ground fields arriving at slow charges after the second hop,
+            // accumulated per (column, target slot) before their elimination.
+            let mut second_hop: BTreeMap<(usize, usize), Dense> = BTreeMap::new();
+            for term in &frame.terms {
+                let c2 = add_charge(c, &term.charge, false)?;
+                let target_slot = slot_of(&c2);
+                let mut solver: Option<BlockSolver> = None;
+                for ab in 0..g2 {
+                    let column = s * g2 + ab;
                     let mut y = frame.apply_to_ground_unit(term, ab / g, ab % g);
                     if let Some(s2) = target_slot {
                         // Direct P -> P coupling, then eliminate only the rest.
@@ -1460,8 +1548,10 @@ impl SlowDual {
                     if y.frobenius() == 0. {
                         continue;
                     }
-                    let key = ensure_solver(&c2, frequency(&c2)? - slot_rotation[s], &mut solvers)?;
-                    let x = solvers[&key].solve(&y, &frame, &lap)?;
+                    if solver.is_none() {
+                        solver = Some(build_solver(&c2, frequency(&c2)? - slot_rotation[s])?);
+                    }
+                    let x = solver.as_ref().expect("solver").solve(&y, &frame, &lap)?;
                     if let Some(s2) = target_slot {
                         record_slaved(&x, s2, column, &mut slaved_central, &mut slaved_population);
                     }
@@ -1476,7 +1566,7 @@ impl SlowDual {
                         }
                         if target_slot.is_none() {
                             // Second hop from a fast charge into a slow one.
-                            let w = second_hop.entry(s3).or_insert_with(|| Dense::zeros(n, n));
+                            let w = second_hop.entry((ab, s3)).or_insert_with(|| Dense::zeros(n, n));
                             for a in 0..n {
                                 for b in 0..n {
                                     if a >= g || b >= g {
@@ -1487,13 +1577,20 @@ impl SlowDual {
                         }
                     }
                 }
-                for (s3, w) in second_hop {
+            }
+            for s3 in 0..slots.len() {
+                let c3 = &slots[s3];
+                let mut solver: Option<BlockSolver> = None;
+                for ab in 0..g2 {
+                    let Some(w) = second_hop.remove(&(ab, s3)) else { continue };
                     if w.frobenius() == 0. {
                         continue;
                     }
-                    let c3 = &slots[s3];
-                    let key = ensure_solver(c3, slot_frequency[s3] - slot_rotation[s], &mut solvers)?;
-                    let x2 = solvers[&key].solve(&w, &frame, &lap)?;
+                    let column = s * g2 + ab;
+                    if solver.is_none() {
+                        solver = Some(build_solver(c3, slot_frequency[s3] - slot_rotation[s])?);
+                    }
+                    let x2 = solver.as_ref().expect("solver").solve(&w, &frame, &lap)?;
                     record_slaved(&x2, s3, column, &mut slaved_central, &mut slaved_population);
                     for term3 in &frame.terms {
                         let c4 = add_charge(c3, &term3.charge, false)?;
@@ -1570,7 +1667,7 @@ impl SlowDual {
             slow_charges: slots.clone(),
             slow_dimension: dim,
             operator_charges: frame.terms.len(),
-            eliminated_charge_blocks: solvers.len(),
+            eliminated_charge_blocks: built.len(),
             slot_rotation: slot_rotation.clone(),
             optical_decay_floor,
             slow_frequency_cutoff: cutoff,
@@ -1594,14 +1691,12 @@ impl SlowDual {
             slot_frequency,
             generator,
             eigenvalues,
-            vectors,
             inverse_vectors,
             readout,
             diagonal_reference,
             population_readout,
             dressed,
             slaved_central,
-            slot_rotation,
             elimination: Some(Elimination { blocks: Arc::clone(&blocks), sylvester: full_sylvester, cache: Default::default(), slow_cache: Default::default() }),
             diagnostics,
         })
@@ -1647,64 +1742,104 @@ impl SlowDual {
     /// slow slots, `s_c = P L_{c-k} x`. The ground block of `y` is ignored here
     /// (the caller feeds it to the central slot with its physical phase).
     /// `field` holds frame entries (row a*n+b) in columns; the result lists
-    /// `(slot, g^2 x columns)` blocks. Charges without a prepared block (no
-    /// hop into a slow slot) return nothing.
+    /// `(slot, g^2 x columns)` blocks.
     pub(crate) fn slaved_returns(&self, k: &[i32], field: &Dense) -> Result<Vec<(usize, Dense)>, String> {
-        let k: Charge = k.to_vec();
-        let returns = self.frame.terms.iter().any(|term| add_charge(&k, &term.charge, false).is_ok_and(|c| self.slot_of(&c).is_some()));
-        if !returns || self.slot_of(&k).is_some() {
-            return Ok(Vec::new());
-        }
-        let solver = self.fast_charge_solver(&k)?;
+        self.slaved_returns_all(&[(k.to_vec(), field)], field.cols)
+    }
+
+    /// `slaved_returns` for several fast charges at once: the eliminations of
+    /// one charge run as one batch, and the non-ground parts that reach a slow
+    /// charge are summed over all charges before their (second-hop)
+    /// elimination there, which is linear and shared.
+    pub(crate) fn slaved_returns_all(&self, fields: &[(Charge, &Dense)], columns: usize) -> Result<Vec<(usize, Dense)>, String> {
         let (n, g) = (self.n, self.g);
         let g2 = g * g;
+        let lap = &self.lapack;
         let mut out: BTreeMap<usize, Dense> = BTreeMap::new();
-        for column in 0..field.cols {
-            let mut y = Dense::zeros(n, n);
-            let mut any = false;
-            for entry in 0..n * n {
-                let (a, b) = (entry / n, entry % n);
-                if a < g && b < g {
-                    continue;
-                }
-                let v = field.at(entry, column);
-                if v.re != 0. || v.im != 0. {
-                    any = true;
-                }
-                y.set(a, b, v);
-            }
-            if !any {
+        let mut second: BTreeMap<usize, Vec<Option<Dense>>> = BTreeMap::new();
+        for (k, field) in fields {
+            if field.cols != columns || self.slot_of(k).is_some() {
                 continue;
             }
-            let x = solver.solve(&y, &self.frame, &self.lapack)?;
-            for term in &self.frame.terms {
-                let c = add_charge(&k, &term.charge, false)?;
-                let Some(slot) = self.slot_of(&c) else { continue };
-                let image = self.frame.apply(term, &x, &self.lapack)?;
-                let block = out.entry(slot).or_insert_with(|| Dense::zeros(g2, field.cols));
-                for a in 0..g {
-                    for b in 0..g {
-                        block.add_at(a * g + b, column, image.at(a, b));
+            let landing: Vec<(&ChargeTerm, usize, Charge)> = self
+                .frame
+                .terms
+                .iter()
+                .filter_map(|term| {
+                    let c = add_charge(k, &term.charge, false).ok()?;
+                    self.slot_of(&c).map(|slot| (term, slot, c))
+                })
+                .collect();
+            if landing.is_empty() {
+                continue;
+            }
+            let mut ys: Vec<Dense> = Vec::new();
+            let mut index: Vec<usize> = Vec::new();
+            for column in 0..columns {
+                let mut y = Dense::zeros(n, n);
+                let mut any = false;
+                for entry in 0..n * n {
+                    let (a, b) = (entry / n, entry % n);
+                    if a < g && b < g {
+                        continue;
+                    }
+                    let v = field.at(entry, column);
+                    if v.re != 0. || v.im != 0. {
+                        any = true;
+                        y.set(a, b, v);
                     }
                 }
-                // Second hop: the non-ground part arriving at the slow charge
-                // relaxes there (static elimination of a slow envelope) and
-                // returns its ground block, as in J_eff.
-                let mut w = image;
-                for a in 0..g {
-                    for b in 0..g {
-                        w.set(a, b, ZERO);
+                if any {
+                    ys.push(y);
+                    index.push(column);
+                }
+            }
+            if ys.is_empty() {
+                continue;
+            }
+            let refs: Vec<&Dense> = ys.iter().collect();
+            let xs = match self.fast_charge_solver(k)?.as_ref() {
+                BlockSolver::Full(solver) => solver.solve_all(&refs, &self.frame, lap)?,
+                other => refs.iter().map(|y| other.solve(y, &self.frame, lap)).collect::<Result<_, _>>()?,
+            };
+            drop(ys);
+            let x_refs: Vec<&Dense> = xs.iter().collect();
+            for (term, slot, _) in &landing {
+                let images = self.frame.apply_all(term, &x_refs, lap)?;
+                let block = out.entry(*slot).or_insert_with(|| Dense::zeros(g2, columns));
+                let pending = second.entry(*slot).or_insert_with(|| vec![None; columns]);
+                for (image, &column) in images.iter().zip(&index) {
+                    let w = pending[column].get_or_insert_with(|| Dense::zeros(n, n));
+                    for b in 0..n {
+                        for a in 0..n {
+                            let v = image.at(a, b);
+                            if a < g && b < g {
+                                block.add_at(a * g + b, column, v);
+                            } else {
+                                w.add_at(a, b, v);
+                            }
+                        }
                     }
                 }
+            }
+        }
+        // Second hop: the non-ground part arriving at a slow charge relaxes
+        // there (static elimination of a slow envelope) and returns its
+        // ground block, as in J_eff.
+        for (slot, pending) in second {
+            let c = &self.slots[slot];
+            let solver = self.slow_charge_solver(slot)?;
+            for (column, w) in pending.into_iter().enumerate() {
+                let Some(w) = w else { continue };
                 if w.frobenius() == 0. {
                     continue;
                 }
-                let x2 = self.slow_charge_solver(slot)?.solve(&w, &self.frame, &self.lapack)?;
-                for term2 in &self.frame.terms {
-                    let c2 = add_charge(&c, &term2.charge, false)?;
+                let x2 = solver.solve(&w, &self.frame, lap)?;
+                for term in &self.frame.terms {
+                    let c2 = add_charge(c, &term.charge, false)?;
                     if let Some(slot2) = self.slot_of(&c2) {
-                        let ground = self.frame.apply_ground_output(term2, &x2);
-                        let block = out.entry(slot2).or_insert_with(|| Dense::zeros(g2, field.cols));
+                        let ground = self.frame.apply_ground_output(term, &x2);
+                        let block = out.entry(slot2).or_insert_with(|| Dense::zeros(g2, columns));
                         for (row, v) in ground.iter().enumerate() {
                             block.add_at(row, column, *v);
                         }
@@ -1722,8 +1857,11 @@ impl SlowDual {
         if block.rows != g2 {
             return Err("Slot source block must have g^2 rows".into());
         }
-        let columns = self.inverse_vectors.block(0..self.dimension(), slot * g2..(slot + 1) * g2);
-        columns.multiply(block, &self.lapack)
+        // W[:, slot block] read in place (column-major, leading dimension dim).
+        let dim = self.dimension();
+        let mut out = Dense::zeros(dim, block.cols);
+        self.lapack.complex_gemm().multiply(dim, block.cols, g2, ONE, &self.inverse_vectors.data[slot * g2 * dim..], dim, &block.data, g2, ZERO, &mut out.data, dim)?;
+        Ok(out)
     }
 }
 
@@ -1781,7 +1919,7 @@ impl DressedFrame {
             let block = slow_inverse_vectors.block(0..dim, s * g2..(s + 1) * g2);
             modal_recycling.push(block.multiply(&recycling, lap)?);
         }
-        Ok(Self { left_values, right_values, left: left_vectors, left_inverse, right, right_inverse, readout, recycling, modal_recycling, condition })
+        Ok(Self { left_values, right_values, left: left_vectors, left_inverse, right, right_inverse, readout, modal_recycling, condition })
     }
 
     /// `V_L^-1 X V_R` for an n x n frame matrix.
@@ -1791,196 +1929,452 @@ impl DressedFrame {
     pub fn from_eigen(&self, x: &Dense, lap: &Lapack) -> Result<Dense, String> { self.left.multiply(x, lap)?.multiply(&self.right_inverse, lap) }
 }
 
+/// Output times evaluated together in the family products (bounds memory).
+const TIME_BLOCK: usize = 256;
+
 // ---------------------------------------------------------------------------
-// Exact time integration in the eigenbasis of J_eff
+// Exponential series of the population error
 // ---------------------------------------------------------------------------
 
-/// Sources for the slow error equation `xhat' = diag(alpha) xhat + sum ...`,
-/// already expressed in the eigen-coordinates of `J_eff`.
-#[derive(Default)]
-pub(crate) struct ModalSources {
-    /// Exponential sources `v exp(mu s)`: `coefficients` is dim x count.
-    pub exponents: Vec<C>,
-    pub coefficients: Vec<Vec<C>>,
-    /// Clustered-pair sources `v (exp(mu1 s) - exp(mu2 s)) / (mu1 - mu2)`.
-    pub pairs: Vec<(C, C)>,
-    pub pair_coefficients: Vec<Vec<C>>,
-    /// Initial slow error in eigen-coordinates.
-    pub initial: Option<Vec<C>>,
-    /// Exponent (bit pattern) -> position: equal exponents share one column.
-    index: std::collections::HashMap<(u64, u64), usize>,
+/// Frequency key (1e-9 rad/us resolution): equal frequencies share a family.
+pub(crate) fn frequency_key(f: f64) -> i64 { (f * 1e9).round() as i64 }
+
+/// Output times; a uniform grid `t_i = i h` (most requests) is evaluated by
+/// the recurrence `exp(mu t_{i+1}) = exp(mu t_i) exp(mu h)`.
+pub(crate) struct TimeGrid<'a> {
+    pub times: &'a [f64],
+    step: Option<f64>,
+    pub maximum: f64,
 }
 
-impl ModalSources {
-    pub fn add_exponential(&mut self, exponent: C, modal: Vec<C>) {
-        // Normalize -0.0 so that equal exponents always merge.
-        let key = ((exponent.re + 0.).to_bits(), (exponent.im + 0.).to_bits());
-        if let Some(&at) = self.index.get(&key) {
-            for (a, b) in self.coefficients[at].iter_mut().zip(&modal) {
-                *a = cadd(*a, *b);
+impl<'a> TimeGrid<'a> {
+    pub fn new(times: &'a [f64]) -> Self {
+        let maximum = times.iter().copied().fold(0_f64, f64::max);
+        let count = times.len();
+        let step = if count >= 2 && times[0] == 0. {
+            let h = times[count - 1] / (count - 1) as f64;
+            let tolerance = 1e-12 * maximum.max(1.);
+            (h > 0. && times.iter().enumerate().all(|(i, &t)| (t - h * i as f64).abs() <= tolerance)).then_some(h)
+        } else {
+            None
+        };
+        Self { times, step, maximum }
+    }
+
+    /// Calls `visit(i, exp(mu t_i))` for every time where `exp(Re mu t)` is
+    /// not negligible (decaying exponents stop early on a uniform grid).
+    fn for_each(&self, mu: C, mut visit: impl FnMut(usize, C)) {
+        match self.step {
+            Some(h) => {
+                let ratio = cexp(cscale(mu, h));
+                let mut e = ONE;
+                for i in 0..self.times.len() {
+                    if mu.re < 0. && mu.re * self.times[i] < NEGLIGIBLE_EXPONENT {
+                        break;
+                    }
+                    visit(i, e);
+                    e = cmul(e, ratio);
+                }
             }
-            return;
+            None => {
+                for (i, &t) in self.times.iter().enumerate() {
+                    if mu.re * t < NEGLIGIBLE_EXPONENT {
+                        continue;
+                    }
+                    visit(i, cexp(cscale(mu, t)));
+                }
+            }
         }
-        self.index.insert(key, self.exponents.len());
-        self.exponents.push(exponent);
-        self.coefficients.push(modal);
     }
-    pub fn add_pair(&mut self, first: C, second: C, modal: Vec<C>) {
-        self.pairs.push((first, second));
-        self.pair_coefficients.push(modal);
+}
+
+/// `out[t, s] += sum_c W[s, c] exp(mu_c t)`: each exponent touches only the
+/// samples where it is not negligible, so fast dressed modes cost a few early
+/// samples and the cost hardly depends on the number of output times.
+pub(crate) fn add_natural(out: &mut [C], states: usize, weights: &Dense, exponents: &[C], grid: &TimeGrid) {
+    for (c, &mu) in exponents.iter().enumerate() {
+        let column = &weights.data[c * weights.rows..c * weights.rows + states];
+        if column.iter().all(|z| z.re == 0. && z.im == 0.) {
+            continue;
+        }
+        grid.for_each(mu, |i, e| {
+            for (o, w) in out[i * states..(i + 1) * states].iter_mut().zip(column) {
+                *o = cadd(*o, cmul(*w, e));
+            }
+        });
     }
-    pub fn add_initial(&mut self, modal: &[C]) {
-        let initial = self.initial.get_or_insert_with(|| vec![ZERO; modal.len()]);
-        for (a, b) in initial.iter_mut().zip(modal) {
+}
+
+/// The signed population error as exponential families: sources of the slow
+/// error (propagated exactly through `J_eff`) and direct populations of fast
+/// responses, assembled per charge and evaluated once on the output grid.
+pub(crate) struct Series {
+    /// Candidate exponents `beta_j`, shared by every family.
+    pub(crate) beta: Vec<C>,
+    pub(crate) t_max: f64,
+    /// Slow sources `v_j exp((beta_j + i f) t)` per frequency `f` (dim x m).
+    pub(crate) slow: BTreeMap<i64, (f64, Dense)>,
+    /// Dressed recycling sources into slot `s`:
+    /// `h_ik M_s[:, ik] exp((a_i + b_k + i o) t)` per offset `o`.
+    pub(crate) dressed_slow: BTreeMap<(usize, i64), (f64, Vec<C>)>,
+    /// Single exponential sources `v exp(mu t)` (split resonant pairs).
+    pub(crate) slow_points: Vec<(C, Vec<C>)>,
+    /// Clustered pair sources `v e_t[mu1, mu2]`.
+    pub(crate) slow_pairs: Vec<(C, C, Vec<C>)>,
+    /// Initial slow error (J eigen-coordinates).
+    pub(crate) initial: Option<Vec<C>>,
+    /// Direct populations `F[:, j] exp((beta_j + i f) t)` per `f` (n x m).
+    pub(crate) direct: BTreeMap<i64, (f64, Dense)>,
+    /// Direct dressed amplitudes `h_ik` of `exp((a_i + b_k) t)` (the physical
+    /// phase of a charge cancels its envelope shift, so all charges merge).
+    pub(crate) dressed_direct: Option<Vec<C>>,
+    /// Direct near-resonant populations `p e_t[x, y]`.
+    pub(crate) direct_near: Vec<(Vec<C>, C, C)>,
+}
+
+fn accumulate(target: &mut Dense, values: &Dense) {
+    for (a, b) in target.data.iter_mut().zip(&values.data) {
+        *a = cadd(*a, *b);
+    }
+}
+
+/// `target[:, start..start + values.cols] += values` (same row count).
+fn accumulate_columns(target: &mut Dense, start: usize, values: &Dense) {
+    let rows = values.rows;
+    let at = start * rows;
+    for (a, b) in target.data[at..at + values.data.len()].iter_mut().zip(&values.data) {
+        *a = cadd(*a, *b);
+    }
+}
+
+impl Series {
+    pub(crate) fn new(beta: &[C], t_max: f64) -> Self {
+        Self {
+            beta: beta.to_vec(),
+            t_max,
+            slow: BTreeMap::new(),
+            dressed_slow: BTreeMap::new(),
+            slow_points: Vec::new(),
+            slow_pairs: Vec::new(),
+            initial: None,
+            direct: BTreeMap::new(),
+            dressed_direct: None,
+            direct_near: Vec::new(),
+        }
+    }
+
+    /// Slow source columns for candidate exponents `start..start + cols`.
+    pub(crate) fn add_slow(&mut self, frequency: f64, start: usize, columns: &Dense) {
+        let m = self.beta.len();
+        let entry = self.slow.entry(frequency_key(frequency)).or_insert_with(|| (frequency, Dense::zeros(columns.rows, m)));
+        accumulate_columns(&mut entry.1, start, columns);
+    }
+
+    /// Direct population columns for candidate exponents `start..start + cols`.
+    pub(crate) fn add_direct(&mut self, frequency: f64, start: usize, columns: &Dense) {
+        let m = self.beta.len();
+        let entry = self.direct.entry(frequency_key(frequency)).or_insert_with(|| (frequency, Dense::zeros(columns.rows, m)));
+        accumulate_columns(&mut entry.1, start, columns);
+    }
+
+    pub(crate) fn add_dressed_slow(&mut self, slot: usize, offset: f64, amplitudes: &[C]) {
+        let entry = self.dressed_slow.entry((slot, frequency_key(offset))).or_insert_with(|| (offset, vec![ZERO; amplitudes.len()]));
+        for (a, b) in entry.1.iter_mut().zip(amplitudes) {
             *a = cadd(*a, *b);
+        }
+    }
+
+    pub(crate) fn add_dressed_direct(&mut self, amplitudes: &[C]) {
+        let target = self.dressed_direct.get_or_insert_with(|| vec![ZERO; amplitudes.len()]);
+        for (a, b) in target.iter_mut().zip(amplitudes) {
+            *a = cadd(*a, *b);
+        }
+    }
+
+    pub(crate) fn add_initial(&mut self, modal: &[C]) {
+        let target = self.initial.get_or_insert_with(|| vec![ZERO; modal.len()]);
+        for (a, b) in target.iter_mut().zip(modal) {
+            *a = cadd(*a, *b);
+        }
+    }
+
+    /// `v e_t[mu1, mu2]`: two exponentials when the nodes separate on the
+    /// horizon, the divided-difference form otherwise.
+    pub(crate) fn add_pair(&mut self, first: C, second: C, v: Vec<C>) {
+        let delta = csub(first, second);
+        if cabs(delta) * self.t_max > 1. {
+            let scale = cdiv(ONE, delta);
+            let minus: Vec<C> = v.iter().map(|x| csub(ZERO, cmul(*x, scale))).collect();
+            self.slow_points.push((first, v.iter().map(|x| cmul(*x, scale)).collect()));
+            self.slow_points.push((second, minus));
+        } else {
+            self.slow_pairs.push((first, second, v));
         }
     }
 }
 
 impl SlowDual {
-    /// Slow error in eigen-coordinates at every time, `xhat[k + t * dim]`.
-    pub(crate) fn propagate(&self, sources: &ModalSources, times: &[f64]) -> Result<Vec<C>, String> {
+    /// Evaluate a series on the output grid: `[time, state]` complex
+    /// populations (the real part is the estimate).
+    pub(crate) fn evaluate(&self, series: &Series, grid: &TimeGrid) -> Result<Vec<C>, String> {
+        self.evaluate_parts(series, grid, None)
+    }
+
+    /// `evaluate`, optionally returning the homogeneous slow amplitudes
+    /// (added to `homogeneous_out`) instead of evaluating them, so partial
+    /// series can be summed and their common `exp(J t)` part read out once.
+    pub(crate) fn evaluate_parts(&self, series: &Series, grid: &TimeGrid, homogeneous_out: Option<&mut Vec<C>>) -> Result<Vec<C>, String> {
+        let n = self.n;
         let dim = self.dimension();
-        let nt = times.len();
-        let t_max = times.iter().copied().fold(0_f64, f64::max);
+        let nt = grid.times.len();
+        let t_max = grid.maximum;
         let alpha = &self.eigenvalues;
-        let mut out = vec![ZERO; dim * nt];
-        // A pair source with separable nodes is exactly two exponentials:
-        // v (e^{mu1 s} - e^{mu2 s}) / (mu1 - mu2). Only clustered pairs keep
-        // the divided-difference form.
-        let mut exponents: Vec<C> = sources.exponents.clone();
-        let mut coefficients: Vec<&[C]> = sources.coefficients.iter().map(|v| v.as_slice()).collect();
-        let mut split: Vec<Vec<C>> = Vec::new();
-        let mut clustered: Vec<usize> = Vec::new();
-        for (index, ((mu1, mu2), v)) in sources.pairs.iter().zip(&sources.pair_coefficients).enumerate() {
-            let delta = csub(*mu1, *mu2);
-            if cabs(delta) * t_max > 1. {
-                let scale = cdiv(ONE, delta);
-                split.push(v.iter().map(|x| cmul(*x, scale)).collect());
-                split.push(v.iter().map(|x| csub(ZERO, cmul(*x, scale))).collect());
-                exponents.push(*mu1);
-                exponents.push(*mu2);
+        let lap = &self.lapack;
+        let m = series.beta.len();
+        let mut out = vec![ZERO; nt * n];
+        let mut homogeneous = series.initial.clone().unwrap_or_else(|| vec![ZERO; dim]);
+        // Amplitude-level terms v e_t[mu, alpha_k] at slow mode k.
+        let mut near: Vec<(usize, C, C)> = Vec::new();
+        // Particular solution of x' = diag(alpha) x + v exp(mu t):
+        // v / (mu - alpha); the homogeneous part keeps x(0) unchanged.
+        let particular = |v: C, mu: C, k: usize, homogeneous: &mut Vec<C>, near: &mut Vec<(usize, C, C)>| -> C {
+            let delta = csub(mu, alpha[k]);
+            if cabs(delta) * t_max <= 1. {
+                near.push((k, v, mu));
+                ZERO
             } else {
-                clustered.push(index);
+                let y = cdiv(v, delta);
+                homogeneous[k] = csub(homogeneous[k], y);
+                y
+            }
+        };
+        // 1. Slow families -> readout families (n x m per frequency).
+        let mut families: BTreeMap<i64, (f64, Dense)> = series.direct.clone();
+        for (f, v) in series.slow.values() {
+            let mut c = Dense::zeros(dim, m);
+            for j in 0..m {
+                let mu = cadd(series.beta[j], complex(0., *f));
+                for k in 0..dim {
+                    let x = v.at(k, j);
+                    if x.re != 0. || x.im != 0. {
+                        let y = particular(x, mu, k, &mut homogeneous, &mut near);
+                        c.set(k, j, y);
+                    }
+                }
+            }
+            for (omega, readout) in &self.readout {
+                let values = readout.multiply(&c, lap)?;
+                let key = frequency_key(f + omega);
+                let entry = families.entry(key).or_insert_with(|| (f + omega, Dense::zeros(n, m)));
+                accumulate(&mut entry.1, &values);
             }
         }
-        for v in &split {
-            coefficients.push(v.as_slice());
+        // 2. Dressed families (n x n^2 weights per exponent offset).
+        let mut naturals: BTreeMap<i64, (f64, Dense)> = BTreeMap::new();
+        if let Some(dressed) = &self.dressed {
+            let n2 = n * n;
+            let lambda: Vec<C> = (0..n2).map(|ik| cadd(dressed.left_values[ik / n], dressed.right_values[ik % n])).collect();
+            if let Some(h) = &series.dressed_direct {
+                let mut w = dressed.readout.clone();
+                for (ik, &x) in h.iter().enumerate() {
+                    for s in 0..w.rows {
+                        let value = cmul(w.at(s, ik), x);
+                        w.set(s, ik, value);
+                    }
+                }
+                naturals.insert(0, (0., w));
+            }
+            for ((slot, _), (o, h)) in &series.dressed_slow {
+                let recycling = &dressed.modal_recycling[*slot];
+                let mut c = Dense::zeros(dim, n2);
+                for (ik, &x) in h.iter().enumerate() {
+                    if x.re == 0. && x.im == 0. {
+                        continue;
+                    }
+                    let mu = cadd(lambda[ik], complex(0., *o));
+                    for k in 0..dim {
+                        let v = cmul(recycling.at(k, ik), x);
+                        if v.re != 0. || v.im != 0. {
+                            let y = particular(v, mu, k, &mut homogeneous, &mut near);
+                            c.set(k, ik, y);
+                        }
+                    }
+                }
+                for (omega, readout) in &self.readout {
+                    let values = readout.multiply(&c, lap)?;
+                    let key = frequency_key(o + omega);
+                    let entry = naturals.entry(key).or_insert_with(|| (o + omega, Dense::zeros(n, n2)));
+                    accumulate(&mut entry.1, &values);
+                }
+            }
+            for (o, w) in naturals.values() {
+                let exponents: Vec<C> = lambda.iter().map(|l| cadd(*l, complex(0., *o))).collect();
+                add_natural(&mut out, n, w, &exponents, grid);
+            }
+        } else if series.dressed_direct.is_some() || !series.dressed_slow.is_empty() {
+            return Err("Dressed sources without a dressed frame".into());
         }
-        // Homogeneous amplitudes (initial plus the -sum v/(mu - alpha) parts).
-        let mut homogeneous = sources.initial.clone().unwrap_or_else(|| vec![ZERO; dim]);
-        // Particular parts: X = C E with C[k, j] = v_jk / (mu_j - alpha_k).
-        let count = exponents.len();
-        let mut particular = Dense::zeros(dim, count);
-        let mut near: Vec<(usize, usize)> = Vec::new();
-        for (j, (mu, v)) in exponents.iter().zip(&coefficients).enumerate() {
+        // 3. Single exponential sources: particular amplitudes per readout group.
+        for (mu, v) in &series.slow_points {
+            let mut c = Dense::zeros(dim, 1);
+            for k in 0..dim {
+                if v[k].re != 0. || v[k].im != 0. {
+                    let y = particular(v[k], *mu, k, &mut homogeneous, &mut near);
+                    c.set(k, 0, y);
+                }
+            }
+            for (omega, readout) in &self.readout {
+                let values = readout.multiply(&c, lap)?;
+                add_natural(&mut out, n, &values, &[cadd(*mu, complex(0., *omega))], grid);
+            }
+        }
+        // 4. Families: one product per block of times, phases by recurrence.
+        if !families.is_empty() && m > 0 {
+            let list: Vec<&(f64, Dense)> = families.values().collect();
+            let count = list.len();
+            let mut stacked = Dense::zeros(n * count, m);
+            for (q, (_, f)) in list.iter().enumerate() {
+                for j in 0..m {
+                    for s in 0..n {
+                        stacked.set(q * n + s, j, f.at(s, j));
+                    }
+                }
+            }
+            let mut start = 0;
+            while start < nt {
+                let width = TIME_BLOCK.min(nt - start);
+                let mut phases = Dense::zeros(m, width);
+                for j in 0..m {
+                    let mu = series.beta[j];
+                    for i in 0..width {
+                        phases.set(j, i, cexp(cscale(mu, grid.times[start + i])));
+                    }
+                }
+                let values = stacked.multiply(&phases, lap)?;
+                for (q, (f, _)) in list.iter().enumerate() {
+                    for i in 0..width {
+                        let t = grid.times[start + i];
+                        let phase = if *f == 0. { ONE } else { cexp(complex(0., f * t)) };
+                        let row = &mut out[(start + i) * n..(start + i + 1) * n];
+                        for s in 0..n {
+                            row[s] = cadd(row[s], cmul(phase, values.at(q * n + s, i)));
+                        }
+                    }
+                }
+                start += width;
+            }
+        }
+        // 5. Clustered pair sources v e_t[mu1, mu2]. For a slow mode k away
+        // from both nodes, e_t[mu1, mu2, alpha] = (e_t[mu1, mu2] - e_t[mu2,
+        // alpha]) / (mu1 - alpha): a populations term in e_t[mu1, mu2], an
+        // exponential exp(mu2 t) and a homogeneous part. Modes close to the
+        // nodes keep the full divided difference.
+        let mut amplitudes: Option<Dense> = None;
+        let mut pair_terms: Vec<(Vec<C>, C, C)> = Vec::new();
+        for (mu1, mu2, v) in &series.slow_pairs {
+            let mut via_pair = Dense::zeros(dim, 1);
+            let mut point = Dense::zeros(dim, 1);
+            let mut close: Vec<usize> = Vec::new();
             for k in 0..dim {
                 if v[k].re == 0. && v[k].im == 0. {
                     continue;
                 }
-                let delta = csub(*mu, alpha[k]);
-                if cabs(delta) * t_max <= 1. {
-                    near.push((j, k));
-                } else {
-                    let c = cdiv(v[k], delta);
-                    particular.set(k, j, c);
+                let to_mu1 = csub(*mu1, alpha[k]);
+                let to_mu2 = csub(*mu2, alpha[k]);
+                if cabs(to_mu1) * t_max > 1. && cabs(to_mu2) * t_max > 1. {
+                    let a = cdiv(v[k], to_mu1);
+                    let c = csub(ZERO, cdiv(a, to_mu2));
+                    via_pair.set(k, 0, a);
+                    point.set(k, 0, c);
                     homogeneous[k] = csub(homogeneous[k], c);
+                } else {
+                    close.push(k);
                 }
             }
-        }
-        if count > 0 {
-            // Persistent exponents go through one product; short-lived ones
-            // (negligible before t_max) are added only at the times where they
-            // are not, which keeps many fast recycling sources cheap.
-            let persistent: Vec<usize> = (0..count).filter(|&j| exponents[j].re * t_max >= NEGLIGIBLE_EXPONENT).collect();
-            if !persistent.is_empty() {
-                let mut columns = Dense::zeros(dim, persistent.len());
-                let mut phases = Dense::zeros(persistent.len(), nt);
-                for (local, &j) in persistent.iter().enumerate() {
-                    columns.data[local * dim..(local + 1) * dim].copy_from_slice(&particular.data[j * dim..(j + 1) * dim]);
-                    for (it, &t) in times.iter().enumerate() {
-                        phases.set(local, it, cexp(cscale(exponents[j], t)));
-                    }
-                }
-                let values = columns.multiply(&phases, &self.lapack)?;
-                out.copy_from_slice(&values.data);
+            for (omega, readout) in &self.readout {
+                let shift = complex(0., *omega);
+                let p = readout.multiply(&via_pair, lap)?;
+                pair_terms.push((p.data, cadd(*mu1, shift), cadd(*mu2, shift)));
+                let values = readout.multiply(&point, lap)?;
+                add_natural(&mut out, n, &values, &[cadd(*mu2, shift)], grid);
             }
-            for j in 0..count {
-                let mu = exponents[j];
-                if mu.re * t_max >= NEGLIGIBLE_EXPONENT {
-                    continue;
-                }
-                let column = &particular.data[j * dim..(j + 1) * dim];
-                for (it, &t) in times.iter().enumerate() {
-                    if mu.re * t < NEGLIGIBLE_EXPONENT {
-                        continue;
-                    }
-                    let e = cexp(cscale(mu, t));
-                    for (o, c) in out[it * dim..(it + 1) * dim].iter_mut().zip(column) {
-                        *o = cadd(*o, cmul(*c, e));
+            if !close.is_empty() {
+                let a = amplitudes.get_or_insert_with(|| Dense::zeros(dim, nt));
+                for (it, &t) in grid.times.iter().enumerate() {
+                    for &k in &close {
+                        a.add_at(k, it, cmul(v[k], exp_divided_3(*mu1, *mu2, alpha[k], t)));
                     }
                 }
             }
         }
-        let mut exp_alpha = vec![ZERO; dim];
-        for (it, &t) in times.iter().enumerate() {
-            for k in 0..dim {
-                exp_alpha[k] = cexp(cscale(alpha[k], t));
+        // 6. Near-resonant slow terms: amplitude v e_t[mu, alpha_k].
+        if !near.is_empty() {
+            let a = amplitudes.get_or_insert_with(|| Dense::zeros(dim, nt));
+            for (it, &t) in grid.times.iter().enumerate() {
+                for &(k, v, mu) in &near {
+                    a.add_at(k, it, cmul(v, exp_divided_2(mu, alpha[k], t)));
+                }
             }
-            let column = &mut out[it * dim..(it + 1) * dim];
-            for k in 0..dim {
-                column[k] = cadd(column[k], cmul(homogeneous[k], exp_alpha[k]));
-            }
-            for &(j, k) in &near {
-                let v = coefficients[j][k];
-                column[k] = cadd(column[k], cmul(v, exp_divided_2(exponents[j], alpha[k], t)));
-            }
-            for &index in &clustered {
-                let (mu1, mu2) = sources.pairs[index];
-                let v = &sources.pair_coefficients[index];
-                // e[mu1, mu2](t) is shared by every k; when alpha_k is far
-                // from mu2, e[mu1,mu2,alpha] = (e[mu1,mu2] - e[mu2,alpha])/(mu1-alpha).
-                let e12 = exp_divided_2(mu1, mu2, t);
-                let exp_mu2 = cexp(cscale(mu2, t));
-                for k in 0..dim {
-                    if v[k].re == 0. && v[k].im == 0. {
-                        continue;
+        }
+        if let Some(a) = &amplitudes {
+            for (omega, readout) in &self.readout {
+                let values = readout.multiply(a, lap)?;
+                for (it, &t) in grid.times.iter().enumerate() {
+                    let phase = if *omega == 0. { ONE } else { cexp(complex(0., omega * t)) };
+                    for s in 0..n {
+                        out[it * n + s] = cadd(out[it * n + s], cmul(phase, values.at(s, it)));
                     }
-                    let to_mu1 = csub(mu1, alpha[k]);
-                    let to_mu2 = csub(mu2, alpha[k]);
-                    let value = if cabs(to_mu1) * t_max > 1. && cabs(to_mu2) * t_max > 1. {
-                        let e2a = cdiv(csub(exp_mu2, exp_alpha[k]), to_mu2);
-                        cdiv(csub(e12, e2a), to_mu1)
-                    } else {
-                        exp_divided_3(mu1, mu2, alpha[k], t)
-                    };
-                    column[k] = cadd(column[k], cmul(v[k], value));
+                }
+            }
+        }
+        for (p, x, y) in &pair_terms {
+            for (it, &t) in grid.times.iter().enumerate() {
+                let value = exp_divided_2(*x, *y, t);
+                for s in 0..n {
+                    out[it * n + s] = cadd(out[it * n + s], cmul(p[s], value));
+                }
+            }
+        }
+        // 7. Homogeneous slow solution exp(alpha t) x0 through every group.
+        if let Some(target) = homogeneous_out {
+            for (t, h) in target.iter_mut().zip(&homogeneous) {
+                *t = cadd(*t, *h);
+            }
+        } else {
+            self.add_homogeneous(&mut out, &homogeneous, grid);
+        }
+        // 8. Direct near-resonant populations.
+        for (p, x, y) in &series.direct_near {
+            for (it, &t) in grid.times.iter().enumerate() {
+                let value = exp_divided_2(*x, *y, t);
+                for s in 0..n {
+                    out[it * n + s] = cadd(out[it * n + s], cmul(p[s], value));
                 }
             }
         }
         if out.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()) {
-            return Err("Nonfinite slow error propagation".into());
+            return Err("Nonfinite population error series".into());
         }
         Ok(out)
     }
+}
 
-    /// Physical population estimate `[time, state]` from modal amplitudes.
-    pub(crate) fn read_populations(&self, modal: &[C], times: &[f64]) -> Result<Vec<C>, String> {
-        let dim = self.dimension();
-        let nt = times.len();
+impl SlowDual {
+    /// `out[t, s] += sum_groups exp(i omega t) (R V diag(h) exp(alpha t))_s`.
+    pub(crate) fn add_homogeneous(&self, out: &mut [C], homogeneous: &[C], grid: &TimeGrid) {
         let n = self.n;
-        let amplitudes = Dense { rows: dim, cols: nt, data: modal.to_vec() };
-        let mut out = vec![ZERO; nt * n];
-        for (frequency, readout) in &self.readout {
-            let values = readout.multiply(&amplitudes, &self.lapack)?;
-            for (it, &t) in times.iter().enumerate() {
-                let phase = if *frequency == 0. { ONE } else { cexp(complex(0., frequency * t)) };
-                for i in 0..n {
-                    out[it * n + i] = cadd(out[it * n + i], cmul(phase, values.at(i, it)));
+        let alpha = &self.eigenvalues;
+        for (omega, readout) in &self.readout {
+            let mut w = readout.clone();
+            for (k, &h) in homogeneous.iter().enumerate() {
+                for s in 0..n {
+                    let value = cmul(w.at(s, k), h);
+                    w.set(s, k, value);
                 }
             }
+            let exponents: Vec<C> = alpha.iter().map(|a| cadd(*a, complex(0., *omega))).collect();
+            add_natural(out, n, &w, &exponents, grid);
         }
-        Ok(out)
     }
 }
 
@@ -2192,7 +2586,7 @@ mod tests {
                         for (jj, &j) in eliminated.iter().enumerate() {
                             let mut v = csub(ZERO, dense0.at(i, j));
                             if i == j {
-                                v = cadd(v, complex(0., nu(&c2) - dual.slot_rotation[s]));
+                                v = cadd(v, complex(0., nu(&c2) - dual.diagnostics.slot_rotation[s]));
                             }
                             m.set(ii, jj, v);
                         }
@@ -2228,7 +2622,7 @@ mod tests {
                         for (jj, &j) in eliminated.iter().enumerate() {
                             let mut v = csub(ZERO, dense0.at(i, j));
                             if i == j {
-                                v = cadd(v, complex(0., nu(&c3) - dual.slot_rotation[s]));
+                                v = cadd(v, complex(0., nu(&c3) - dual.diagnostics.slot_rotation[s]));
                             }
                             m.set(ii, jj, v);
                         }
@@ -2530,7 +2924,7 @@ mod tests {
     }
 
     #[test]
-    fn slow_dual_propagation_matches_quadrature_for_separated_and_resonant_sources() {
+    fn slow_dual_series_matches_quadrature_for_separated_and_resonant_sources() {
         // A 1-slot fake dual with a diagonal generator is enough to test the
         // modal integration formulas: compare against fine trapezoid quadrature.
         let alpha = vec![complex(0., 0.), complex(-2.0, 3.0), complex(-0.5, -1.0)];
@@ -2547,14 +2941,12 @@ mod tests {
             slot_frequency: vec![0.],
             generator: Dense::zeros(dim, dim),
             eigenvalues: alpha.clone(),
-            vectors: identity.clone(),
             inverse_vectors: identity.clone(),
             readout: vec![(0., identity.clone())],
             diagonal_reference: vec![],
             population_readout: vec![],
             dressed: None,
             slaved_central: vec![],
-            slot_rotation: vec![0.],
             elimination: None,
             diagnostics: SlowDualDiagnostics {
                 slow_charges: vec![],
@@ -2575,60 +2967,85 @@ mod tests {
                 preparation_ms: 0.,
             },
         };
-        let mut sources = ModalSources::default();
-        // Resonant with alpha[0] (secular growth), separated, and a pair.
-        sources.add_exponential(complex(0., 0.), vec![complex(0.3, 0.), complex(0.1, -0.2), ZERO]);
-        sources.add_exponential(complex(-0.1, 40.), vec![complex(1., 0.5), complex(0.2, 0.), complex(-0.4, 0.1)]);
-        sources.add_pair(complex(-0.5, -1.0), complex(-0.5 + 1e-4, -1.0), vec![ZERO, complex(0.3, 0.1), complex(0.7, 0.)]);
-        sources.add_initial(&[complex(0.2, 0.), complex(0., 0.1), complex(-0.1, 0.)]);
-        let times = [0., 0.5, 1.7, 4.0];
-        let modal = dual.propagate(&sources, &times).unwrap();
-        // Reference: integrate x' = alpha x + s(t) with RK4 on a fine grid.
-        for (it, &t_end) in times.iter().enumerate() {
-            let steps = 40000;
-            let h = t_end / steps as f64;
+        // Families with beta = {0, -0.1}: resonant with alpha[0] (secular
+        // growth), separated, a fast-phase family, a clustered and a separable
+        // pair, an initial value, direct populations and a direct near term.
+        let beta = [complex(0., 0.), complex(-0.1, 0.)];
+        let mut slow0 = Dense::zeros(dim, 2);
+        for (k, v) in [complex(0.3, 0.), complex(0.1, -0.2), ZERO].iter().enumerate() {
+            slow0.set(k, 0, *v);
+        }
+        for (k, v) in [complex(1., 0.5), complex(0.2, 0.), complex(-0.4, 0.1)].iter().enumerate() {
+            slow0.set(k, 1, *v);
+        }
+        let mut slow40 = Dense::zeros(dim, 2);
+        for (k, v) in [complex(0.05, 0.), complex(-0.3, 0.2), complex(0.1, 0.1)].iter().enumerate() {
+            slow40.set(k, 1, *v);
+        }
+        let mut direct = Dense::zeros(dim, 2);
+        direct.set(0, 0, complex(0.02, 0.01));
+        direct.set(2, 1, complex(-0.03, 0.));
+        let clustered = (complex(-0.5, -1.0), complex(-0.5 + 1e-4, -1.0), vec![ZERO, complex(0.3, 0.1), complex(0.7, 0.)]);
+        let separable = (complex(-1.0, 2.0), complex(0.3, -0.5), vec![complex(0.1, 0.), ZERO, complex(0.05, -0.02)]);
+        let initial = [complex(0.2, 0.), complex(0., 0.1), complex(-0.1, 0.)];
+        let near = (vec![complex(0.01, 0.), complex(0., 0.02), ZERO], complex(-0.2, 1.), complex(-0.2001, 1.));
+        let uniform: Vec<f64> = (0..9).map(|i| 0.5 * i as f64).collect();
+        for times in [vec![0., 0.5, 1.7, 4.0], uniform] {
+            let grid = TimeGrid::new(&times);
+            let mut series = Series::new(&beta, grid.maximum);
+            series.add_slow(0., 0, &slow0);
+            series.add_slow(40., 0, &slow40);
+            series.add_pair(clustered.0, clustered.1, clustered.2.clone());
+            series.add_pair(separable.0, separable.1, separable.2.clone());
+            series.add_initial(&initial);
+            series.add_direct(2., 0, &direct);
+            series.direct_near.push(near.clone());
+            let values = dual.evaluate(&series, &grid).unwrap();
+            // Reference: integrate x' = alpha x + s(t) with RK4 on a fine grid.
             let source = |s: f64| -> Vec<C> {
                 let mut out = vec![ZERO; dim];
-                for (mu, v) in sources.exponents.iter().zip(&sources.coefficients) {
-                    let e = cexp(cscale(*mu, s));
-                    for k in 0..dim {
-                        out[k] = cadd(out[k], cmul(v[k], e));
+                for k in 0..dim {
+                    for j in 0..2 {
+                        out[k] = cadd(out[k], cmul(slow0.at(k, j), cexp(cscale(beta[j], s))));
+                        out[k] = cadd(out[k], cmul(slow40.at(k, j), cexp(cscale(cadd(beta[j], complex(0., 40.)), s))));
                     }
-                }
-                for ((m1, m2), v) in sources.pairs.iter().zip(&sources.pair_coefficients) {
-                    let e = exp_divided_2(*m1, *m2, s);
-                    for k in 0..dim {
-                        out[k] = cadd(out[k], cmul(v[k], e));
-                    }
+                    out[k] = cadd(out[k], cmul(clustered.2[k], exp_divided_2(clustered.0, clustered.1, s)));
+                    out[k] = cadd(out[k], cmul(separable.2[k], exp_divided_2(separable.0, separable.1, s)));
                 }
                 out
             };
-            let mut x: Vec<C> = sources.initial.clone().unwrap();
-            let derivative = |s: f64, x: &[C]| -> Vec<C> {
-                let src = source(s);
-                (0..dim).map(|k| cadd(cmul(alpha[k], x[k]), src[k])).collect()
-            };
-            for step in 0..steps {
-                let s = step as f64 * h;
-                let k1 = derivative(s, &x);
-                let x2: Vec<C> = (0..dim).map(|k| cadd(x[k], cscale(k1[k], h / 2.))).collect();
-                let k2 = derivative(s + h / 2., &x2);
-                let x3: Vec<C> = (0..dim).map(|k| cadd(x[k], cscale(k2[k], h / 2.))).collect();
-                let k3 = derivative(s + h / 2., &x3);
-                let x4: Vec<C> = (0..dim).map(|k| cadd(x[k], cscale(k3[k], h))).collect();
-                let k4 = derivative(s + h, &x4);
+            for (it, &t_end) in times.iter().enumerate() {
+                let steps = 40000;
+                let h = t_end / steps as f64;
+                let mut x: Vec<C> = initial.to_vec();
+                let derivative = |s: f64, x: &[C]| -> Vec<C> {
+                    let src = source(s);
+                    (0..dim).map(|k| cadd(cmul(alpha[k], x[k]), src[k])).collect()
+                };
+                for step in 0..steps {
+                    let s = step as f64 * h;
+                    let k1 = derivative(s, &x);
+                    let x2: Vec<C> = (0..dim).map(|k| cadd(x[k], cscale(k1[k], h / 2.))).collect();
+                    let k2 = derivative(s + h / 2., &x2);
+                    let x3: Vec<C> = (0..dim).map(|k| cadd(x[k], cscale(k2[k], h / 2.))).collect();
+                    let k3 = derivative(s + h / 2., &x3);
+                    let x4: Vec<C> = (0..dim).map(|k| cadd(x[k], cscale(k3[k], h))).collect();
+                    let k4 = derivative(s + h, &x4);
+                    for k in 0..dim {
+                        let inc = cadd(cadd(k1[k], cscale(k2[k], 2.)), cadd(cscale(k3[k], 2.), k4[k]));
+                        x[k] = cadd(x[k], cscale(inc, h / 6.));
+                    }
+                }
                 for k in 0..dim {
-                    let inc = cadd(cadd(k1[k], cscale(k2[k], 2.)), cadd(cscale(k3[k], 2.), k4[k]));
-                    x[k] = cadd(x[k], cscale(inc, h / 6.));
+                    let mut expected = x[k];
+                    for j in 0..2 {
+                        expected = cadd(expected, cmul(direct.at(k, j), cexp(cscale(cadd(beta[j], complex(0., 2.)), t_end))));
+                    }
+                    expected = cadd(expected, cmul(near.0[k], exp_divided_2(near.1, near.2, t_end)));
+                    let error = cabs(csub(values[it * dim + k], expected));
+                    assert!(error < 1e-8, "time {t_end} mode {k}: {error:e}");
                 }
             }
-            for k in 0..dim {
-                let error = cabs(csub(modal[it * dim + k], x[k]));
-                assert!(error < 1e-8, "time {t_end} mode {k}: {error:e}");
-            }
         }
-        // Readout through the identity frame is the real part of each mode.
-        let populations = dual.read_populations(&modal, &times).unwrap();
-        assert_eq!(populations.len(), times.len() * dim);
     }
 }

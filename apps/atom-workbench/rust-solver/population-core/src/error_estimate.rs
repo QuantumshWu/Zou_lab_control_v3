@@ -62,7 +62,9 @@
 //! the domain-selection indicator.
 use super::*;
 use super::real_fourier::RealFourierMap;
-use super::slow_dual::{cabs, cadd, cdiv, cexp, cmul, complex, cscale, csub, exp_divided_2, recycle_ground, robust_eigen, sandwich_all, Dense, LuFactor, ModalSources, SlowDual, NEGLIGIBLE_EXPONENT, ZERO};
+use super::slow_dual::{cabs, cadd, cdiv, cmul, complex, csub, frequency_key, recycle_ground, robust_eigen, sandwich_all, Dense, LuFactor, Series, SlowDual, TimeGrid, ZERO};
+#[cfg(test)]
+use super::slow_dual::{cexp, cscale};
 
 /// A requested signed population sum (for example one F manifold).
 #[derive(Clone, Debug)]
@@ -83,7 +85,8 @@ pub struct CandidateView<'a> {
     pub generator: &'a [f64],
     /// Reduced initial coefficients `a(0)`.
     pub initial: &'a [f64],
-    /// Output times (us), any order of nonnegative finite values.
+    /// Output times (us), any order of nonnegative finite values. Uniform
+    /// grids starting at zero are evaluated by exponential recurrences.
     pub times: &'a [f64],
 }
 
@@ -115,7 +118,9 @@ pub struct PopulationErrorEstimate {
 pub struct HaloModeIndicator {
     /// Canonical member of the signed pair `{charge, -charge}`.
     pub charge: Charge,
-    /// Max over time, states and groups of the pair's signed contribution.
+    /// Max over time, states and groups of the pair's signed contribution
+    /// (its residual response, returns and slow boundary; the shared fast
+    /// responses enter the total only), on at most `INDICATOR_TIMES` samples.
     pub indicator: f64,
     /// Frobenius norm of the pair's halo residual coefficients (diagnostic).
     pub residual_norm: f64,
@@ -132,6 +137,8 @@ pub struct HaloEstimate {
     /// integrated (would need a pair-source fast response).
     pub unrouted_resonant_returns: usize,
     pub pencil_ms: f64,
+    /// Modal columns per pencil application.
+    pub block_columns: usize,
 }
 
 /// Near-resonant halo response component `unit * e_t[beta_j, second]`.
@@ -145,10 +152,9 @@ struct ResonantTerm {
 
 #[derive(Clone, Copy, Debug)]
 pub struct HaloOptions {
-    /// Halo output modes per pencil application (each application recomputes
-    /// its intermediate modes, so larger chunks are cheaper).
-    pub chunk_modes: usize,
-    /// Columns per pencil application.
+    /// Modal columns per pencil application. One plan covers every halo mode
+    /// (its intermediate modes are computed once per block); the plan and the
+    /// halo rows held at a time grow with this width.
     pub maximum_rhs: usize,
     /// Response components with `|beta + i nu - d| < floor` use the
     /// zero-initial entire form. `None` selects the optical decay floor.
@@ -167,8 +173,38 @@ pub struct HaloOptions {
 }
 
 impl Default for HaloOptions {
-    fn default() -> Self { Self { chunk_modes: 48, maximum_rhs: 8, resonance_floor: None, all_halo_modes: false, slave_fast_returns: false } }
+    fn default() -> Self {
+        Self { maximum_rhs: 2, resonance_floor: None, all_halo_modes: false, slave_fast_returns: false }
+    }
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct BasisOptions {
+    /// Integrate the non-ground residual at every retained charge exactly
+    /// through the dressed no-jump dynamics (early fast transients).
+    pub fast_response: bool,
+    /// Markov-slave the non-ground residual at fast retained charges and
+    /// return it one drive hop into the slow slots (with the second-hop
+    /// relaxation there). The dressed fast response stays at its own charge;
+    /// this is the drive-mediated path back to the ground block, which carries
+    /// the late-time error of strongly driven candidates (without it the
+    /// estimate fell to 0.6x the true error on threeNearStrong).
+    pub slave_fast_charges: bool,
+}
+
+impl Default for BasisOptions {
+    fn default() -> Self { Self { fast_response: true, slave_fast_charges: true } }
+}
+
+/// Modal columns per block of the basis estimate (bounds its memory).
+const BASIS_BLOCK: usize = 8;
+/// Samples used for the per-pair halo indicators (a uniform subset of the
+/// output times, always including the last one).
+const INDICATOR_TIMES: usize = 64;
+
+// ---------------------------------------------------------------------------
+// Reduced candidate dynamics
+// ---------------------------------------------------------------------------
 
 /// Eigen-decomposition of the reduced generator: `a(t) = V exp(beta t) w`.
 struct SmallSource {
@@ -201,19 +237,11 @@ impl SmallSource {
         }
         Ok(Self { exponents, vectors, weights })
     }
-
-    /// `R V diag(w)` for a field block `R` (rows x m): column j then evolves
-    /// as `exp(beta_j t)`.
-    fn modal_columns(&self, block: &Dense, lap: &Lapack) -> Result<Dense, String> {
-        let mut out = block.multiply(&self.vectors, lap)?;
-        for j in 0..out.cols {
-            for i in 0..out.rows {
-                out.data[i + j * out.rows] = cmul(out.data[i + j * out.rows], self.weights[j]);
-            }
-        }
-        Ok(out)
-    }
 }
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
 fn validate(view: &CandidateView<'_>) -> Result<(usize, usize), String> {
     let rows = view.map.dimension();
@@ -230,59 +258,69 @@ fn validate(view: &CandidateView<'_>) -> Result<(usize, usize), String> {
     Ok((rows, m))
 }
 
-/// Push a column-major REAL block `[rows, m]` to the complete signed field
-/// `[mode * d + entry, m]` (row-major in the column index).
-fn push_columns(map: &RealFourierMap, real: &[f64], rows: usize, m: usize) -> Result<Vec<C>, String> {
-    let mut row_major = vec![0.; rows * m];
+/// Modal columns of the candidate in REAL coordinates and pushed to the
+/// complete signed field: `sum_l X[:, l] P[l, k]` for a complex block `P`
+/// (m x width), returned row-major `[mode * d + entry, width]`. Real and
+/// imaginary parts are pushed separately (the map is real-linear), so only
+/// one block of columns is ever held.
+fn push_modal(map: &RealFourierMap, terms: &[(&[f64], &Dense)], rows: usize, m: usize, lap: &Lapack) -> Result<Vec<C>, String> {
+    let width = terms[0].1.cols;
+    let mut re = vec![0.; rows * width];
+    let mut im = vec![0.; rows * width];
+    for (real, block) in terms {
+        let block_re: Vec<f64> = block.data.iter().map(|z| z.re).collect();
+        let block_im: Vec<f64> = block.data.iter().map(|z| z.im).collect();
+        for (target, part) in [(&mut re, &block_re), (&mut im, &block_im)] {
+            let product = lap.multiply(real, part, rows, width, m);
+            for (t, v) in target.iter_mut().zip(&product) {
+                *t += v;
+            }
+        }
+    }
+    let mut out = vec![ZERO; rows * width];
+    let mut part = vec![ZERO; rows * width];
+    for (values, imaginary) in [(&re, false), (&im, true)] {
+        let mut row_major = vec![0.; rows * width];
+        for k in 0..width {
+            for i in 0..rows {
+                row_major[i * width + k] = values[i + k * rows];
+            }
+        }
+        map.push_into(&row_major, width, &mut part)?;
+        for (o, v) in out.iter_mut().zip(&part) {
+            *o = if imaginary { cadd(*o, complex(-v.im, v.re)) } else { cadd(*o, *v) };
+        }
+    }
+    Ok(out)
+}
+
+/// Modal weights `V diag(w)` of the reduced candidate.
+fn modal_weights(small: &SmallSource) -> Dense {
+    let m = small.weights.len();
+    let mut out = small.vectors.clone();
     for j in 0..m {
-        for i in 0..rows {
-            row_major[i * m + j] = real[i + j * rows];
+        for i in 0..m {
+            let value = cmul(out.at(i, j), small.weights[j]);
+            out.set(i, j, value);
         }
     }
-    let mut signed = vec![ZERO; rows * m];
-    map.push_into(&row_major, m, &mut signed)?;
-    Ok(signed)
+    out
 }
 
-/// Ground block (g^2 rows, row-major entry order) of one signed mode.
-fn ground_block(signed: &[C], mode: usize, n: usize, g: usize, m: usize) -> Dense {
-    let d = n * n;
-    let mut block = Dense::zeros(g * g, m);
-    for a in 0..g {
-        for b in 0..g {
-            let row = (mode * d + a * n + b) * m;
-            for j in 0..m {
-                block.set(a * g + b, j, signed[row + j]);
-            }
+/// State and group maxima of complex `[time, state]` populations.
+fn maxima(values: &[C], n: usize, groups: &[PopulationGroup]) -> (f64, f64) {
+    let mut state = 0_f64;
+    let mut group = 0_f64;
+    for row in values.chunks_exact(n) {
+        for z in row {
+            state = state.max(z.re.abs());
+        }
+        for g in groups {
+            let sum: f64 = g.indices.iter().filter(|&&i| i < n).map(|&i| row[i].re).sum();
+            group = group.max(sum.abs());
         }
     }
-    block
-}
-
-/// `sum_ik W[s, ik] exp(lambda_ik t)` for every output time, skipping the
-/// (mode, time) pairs where `exp(Re lambda t)` is below `exp(-41.4) ~ 1e-18`:
-/// fast dressed modes decay within a few optical lifetimes, so they touch only
-/// the earliest samples while the slow (ground-like) modes cover all of them.
-fn natural_readout(weights: &Dense, lambda: &[C], times: &[f64]) -> Dense {
-    let states = weights.rows;
-    let mut values = Dense::zeros(states, times.len());
-    for (ik, &l) in lambda.iter().enumerate() {
-        let column = &weights.data[ik * states..(ik + 1) * states];
-        if column.iter().all(|z| z.re == 0. && z.im == 0.) {
-            continue;
-        }
-        for (it, &t) in times.iter().enumerate() {
-            if l.re * t < NEGLIGIBLE_EXPONENT {
-                continue;
-            }
-            let e = cexp(cscale(l, t));
-            let out = &mut values.data[it * states..(it + 1) * states];
-            for (o, w) in out.iter_mut().zip(column) {
-                *o = cadd(*o, cmul(*w, e));
-            }
-        }
-    }
-    values
+    (state, group)
 }
 
 fn finish_estimate(
@@ -352,18 +390,17 @@ fn unresolved_estimate(dual: &SlowDual, times: &[f64], groups: &[PopulationGroup
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct BasisOptions {
-    /// Integrate the non-ground residual at every retained charge exactly
-    /// through the dressed no-jump dynamics (early fast transients).
-    pub fast_response: bool,
-    /// Additionally Markov-slave the non-ground residual at fast retained
-    /// charges and return it one drive hop into the slow slots.
-    pub slave_fast_charges: bool,
-}
-
-impl Default for BasisOptions {
-    fn default() -> Self { Self { fast_response: true, slave_fast_charges: false } }
+/// Frame-entry columns (row `a*n+b`) as `n x n` blocks.
+fn column_blocks(columns: &Dense, n: usize) -> Vec<Dense> {
+    (0..columns.cols)
+        .map(|j| {
+            let mut x = Dense::zeros(n, n);
+            for entry in 0..n * n {
+                x.set(entry / n, entry % n, columns.at(entry, j));
+            }
+            x
+        })
+        .collect()
 }
 
 impl SlowDual {
@@ -374,25 +411,15 @@ impl SlowDual {
 
     /// Fast response at one charge `q`:
     /// `eta' = (N - i nu_q) eta + Rq_hat a(t)`, `eta(0) = 0`, where `Rq_hat`
-    /// is the residual (or returned field) at `q` without its ground block. In
-    /// the dressed eigen-coordinates every entry is
+    /// is the residual (or returned field) at `q` without its ground block, as
+    /// modal columns. In the dressed eigen-coordinates every entry is
     /// `sum_j c_ikj (exp(beta_j t) - exp(lambda_ik t)) / (beta_j - lambda_ik)`,
     /// `lambda_ik = a_i + b_k - i nu_q`. The populations of `eta` are read out
     /// directly (phase `exp(i nu_q t)`); its recycling `R_0 eta_EE` (the only
     /// part of `L_0 - N` at the same charge) is a `J_eff` source for
     /// `target = (slot, shift)`: the slot of `q` with shift 0 when `q` is slow,
     /// otherwise the central slot with the physical phase (`shift = nu_q`).
-    #[allow(clippy::too_many_arguments)]
-    fn add_fast_response(
-        &self,
-        target: (usize, f64),
-        nu: f64,
-        exponents: &[C],
-        coefficients: &Dense,
-        times: &[f64],
-        sources: &mut ModalSources,
-        direct: &mut [C],
-    ) -> Result<(), String> {
+    fn add_fast_response(&self, series: &mut Series, target: (usize, f64), nu: f64, start: usize, coefficients: &Dense) -> Result<(), String> {
         let dressed = match &self.dressed {
             Some(d) => d,
             None => return Ok(()),
@@ -401,104 +428,52 @@ impl SlowDual {
         let n = self.n;
         let n2 = n * n;
         let m = coefficients.cols;
-        let nt = times.len();
-        let t_max = times.iter().copied().fold(0_f64, f64::max);
-        // Source columns in dressed eigen-coordinates (index i*n+k).
-        let blocks: Vec<Dense> = (0..m)
-            .map(|j| {
-                let mut x = Dense::zeros(n, n);
-                for entry in 0..n2 {
-                    x.set(entry / n, entry % n, coefficients.at(entry, j));
-                }
-                x
-            })
-            .collect();
+        let blocks = column_blocks(coefficients, n);
         let refs: Vec<&Dense> = blocks.iter().collect();
-        let mut source = Dense::zeros(n2, m);
-        for (j, xh) in sandwich_all(&dressed.left_inverse, &dressed.right, &refs, lap)?.iter().enumerate() {
-            for i in 0..n {
-                for k in 0..n {
-                    source.set(i * n + k, j, xh.at(i, k));
-                }
-            }
-        }
+        let eigen = sandwich_all(&dressed.left_inverse, &dressed.right, &refs, lap)?;
         let lambda: Vec<C> = (0..n2)
             .map(|ik| csub(cadd(dressed.left_values[ik / n], dressed.right_values[ik % n]), complex(0., nu)))
             .collect();
         let mut forced = Dense::zeros(n2, m);
         let mut homogeneous = vec![ZERO; n2];
         let mut near: Vec<(usize, usize, C)> = Vec::new();
-        for j in 0..m {
-            for ik in 0..n2 {
-                let c = source.at(ik, j);
-                if c.re == 0. && c.im == 0. {
-                    continue;
-                }
-                let delta = csub(exponents[j], lambda[ik]);
-                if cabs(delta) * t_max > 1. {
-                    let f = cdiv(c, delta);
-                    forced.set(ik, j, f);
-                    homogeneous[ik] = csub(homogeneous[ik], f);
-                } else {
-                    near.push((ik, j, c));
-                }
-            }
-        }
-        // Direct population readout: rho (F e^{beta t} + H e^{lambda t} + near).
-        let states = dressed.readout.rows;
-        let readout_forced = dressed.readout.multiply(&forced, lap)?;
-        let mut readout_homogeneous = dressed.readout.clone();
-        for ik in 0..n2 {
-            for s in 0..states {
-                let v = readout_homogeneous.at(s, ik);
-                readout_homogeneous.set(s, ik, cmul(v, homogeneous[ik]));
-            }
-        }
-        let mut forced_phases = Dense::zeros(m, nt);
-        for (it, &t) in times.iter().enumerate() {
-            for j in 0..m {
-                forced_phases.set(j, it, cexp(cscale(exponents[j], t)));
-            }
-        }
-        let values_forced = readout_forced.multiply(&forced_phases, lap)?;
-        let values_natural = natural_readout(&readout_homogeneous, &lambda, times);
-        for (it, &t) in times.iter().enumerate() {
-            let phase = if nu == 0. { complex(1., 0.) } else { cexp(complex(0., nu * t)) };
-            for s in 0..states.min(n) {
-                let mut v = cadd(values_forced.at(s, it), values_natural.at(s, it));
-                for &(ik, j, c) in &near {
-                    let w = dressed.readout.at(s, ik);
-                    if w.re != 0. || w.im != 0. {
-                        v = cadd(v, cmul(cmul(w, c), exp_divided_2(exponents[j], lambda[ik], t)));
+        for (j, xh) in eigen.iter().enumerate() {
+            let beta = series.beta[start + j];
+            for i in 0..n {
+                for k in 0..n {
+                    let ik = i * n + k;
+                    let c = xh.at(i, k);
+                    if c.re == 0. && c.im == 0. {
+                        continue;
+                    }
+                    let delta = csub(beta, lambda[ik]);
+                    if cabs(delta) * series.t_max > 1. {
+                        let f = cdiv(c, delta);
+                        forced.set(ik, j, f);
+                        homogeneous[ik] = csub(homogeneous[ik], f);
+                    } else {
+                        near.push((ik, j, c));
                     }
                 }
-                direct[it * n + s] = cadd(direct[it * n + s], cmul(phase, v));
             }
         }
-        // Recycling return into the target slot (with the routing phase).
-        let (slot, shift) = target;
-        let rotate = |z: C| cadd(z, complex(0., shift));
-        let modal = &dressed.modal_recycling[slot];
-        let forced_modal = modal.multiply(&forced, lap)?;
-        for j in 0..m {
-            sources.add_exponential(rotate(exponents[j]), forced_modal.data[j * forced_modal.rows..(j + 1) * forced_modal.rows].to_vec());
-        }
-        let dim = modal.rows;
-        for ik in 0..n2 {
-            let h = homogeneous[ik];
-            if h.re == 0. && h.im == 0. {
-                continue;
-            }
-            let column: Vec<C> = (0..dim).map(|r| cmul(modal.at(r, ik), h)).collect();
-            if column.iter().all(|z| z.re == 0. && z.im == 0.) {
-                continue;
-            }
-            sources.add_exponential(rotate(lambda[ik]), column);
-        }
+        // Direct populations: forced families at the physical phase, the
+        // homogeneous part exp((lambda + i nu) t) = exp((a_i + b_k) t).
+        series.add_direct(nu, start, &dressed.readout.multiply(&forced, lap)?);
+        series.add_dressed_direct(&homogeneous);
         for &(ik, j, c) in &near {
-            let column: Vec<C> = (0..dim).map(|r| cmul(modal.at(r, ik), c)).collect();
-            if column.iter().any(|z| z.re != 0. || z.im != 0.) {
-                sources.add_pair(rotate(exponents[j]), rotate(lambda[ik]), column);
+            let p: Vec<C> = (0..dressed.readout.rows).map(|s| cmul(dressed.readout.at(s, ik), c)).collect();
+            series.direct_near.push((p, cadd(series.beta[start + j], complex(0., nu)), cadd(lambda[ik], complex(0., nu))));
+        }
+        // Recycling into the target slot (with the routing phase).
+        let (slot, shift) = target;
+        let recycling = &dressed.modal_recycling[slot];
+        series.add_slow(shift, start, &recycling.multiply(&forced, lap)?);
+        series.add_dressed_slow(slot, shift - nu, &homogeneous);
+        for &(ik, j, c) in &near {
+            let v: Vec<C> = (0..recycling.rows).map(|r| cmul(recycling.at(r, ik), c)).collect();
+            if v.iter().any(|z| z.re != 0. || z.im != 0.) {
+                series.add_pair(cadd(series.beta[start + j], complex(0., shift)), cadd(lambda[ik], complex(0., shift)), v);
             }
         }
         Ok(())
@@ -509,7 +484,7 @@ impl SlowDual {
     /// `X0_Q - S(P X0)`: the non-slow part minus the pattern the Markov readout
     /// would already attribute to the slow part (it must relax, not appear
     /// instantly).
-    fn add_slow_initial(&self, initial: &Dense, sources: &mut ModalSources) -> Result<Dense, String> {
+    fn add_slow_initial(&self, series: &mut Series, initial: &Dense) -> Result<Dense, String> {
         let (n, g) = (self.n, self.g);
         let mut ground = Dense::zeros(g * g, 1);
         for a in 0..g {
@@ -524,7 +499,7 @@ impl SlowDual {
             }
         }
         if ground.frobenius() > 0. {
-            sources.add_initial(&self.to_modal(0, &ground)?.data);
+            series.add_initial(&self.to_modal(0, &ground)?.data);
             for (column, slaved) in self.slaved_central.iter().enumerate().take(g * g) {
                 let amount = ground.data[column];
                 if amount.re == 0. && amount.im == 0. {
@@ -541,44 +516,16 @@ impl SlowDual {
     /// Exact fast initial layer at the central charge: `Xhat(t) = Xhat(0)
     /// exp(lambda t)` in the dressed no-jump eigen-coordinates; populations are
     /// read out directly and the recycling `R_0 X_EE` feeds the central slot.
-    fn add_fast_initial(&self, initial: &Dense, times: &[f64], sources: &mut ModalSources, direct: &mut [C]) -> Result<(), String> {
+    fn add_fast_initial(&self, series: &mut Series, initial: &Dense) -> Result<(), String> {
         let dressed = match &self.dressed {
             Some(d) => d,
             None => return Ok(()),
         };
-        let lap = &self.lapack;
         let n = self.n;
-        let n2 = n * n;
-        let nt = times.len();
-        let xh = dressed.to_eigen(initial, lap)?;
-        let lambda: Vec<C> = (0..n2).map(|ik| cadd(dressed.left_values[ik / n], dressed.right_values[ik % n])).collect();
-        let states = dressed.readout.rows;
-        let mut weighted = dressed.readout.clone();
-        for ik in 0..n2 {
-            let x = xh.at(ik / n, ik % n);
-            for s in 0..states {
-                let v = weighted.at(s, ik);
-                weighted.set(s, ik, cmul(v, x));
-            }
-        }
-        let values = natural_readout(&weighted, &lambda, times);
-        for it in 0..nt {
-            for s in 0..states.min(n) {
-                direct[it * n + s] = cadd(direct[it * n + s], values.at(s, it));
-            }
-        }
-        let modal = &dressed.modal_recycling[0];
-        let dim = modal.rows;
-        for ik in 0..n2 {
-            let x = xh.at(ik / n, ik % n);
-            if x.re == 0. && x.im == 0. {
-                continue;
-            }
-            let column: Vec<C> = (0..dim).map(|r| cmul(modal.at(r, ik), x)).collect();
-            if column.iter().any(|z| z.re != 0. || z.im != 0.) {
-                sources.add_exponential(lambda[ik], column);
-            }
-        }
+        let xh = dressed.to_eigen(initial, &self.lapack)?;
+        let amplitudes: Vec<C> = (0..n * n).map(|ik| xh.at(ik / n, ik % n)).collect();
+        series.add_dressed_direct(&amplitudes);
+        series.add_dressed_slow(0, 0., &amplitudes);
         Ok(())
     }
 
@@ -596,74 +543,68 @@ impl SlowDual {
             Ok(small) => small,
             Err(reason) => return Ok(unresolved_estimate(self, view.times, groups, reason, began)),
         };
-        // Retained residual rows R = F Q - E Q G (REAL coordinates).
-        let mut residual = lap.multiply(view.eq, view.generator, rows, m, m);
-        for (r, f) in residual.iter_mut().zip(view.fq) {
-            *r = f - *r;
-        }
-        let signed = push_columns(view.map, &residual, rows, m)?;
+        let grid = TimeGrid::new(view.times);
         let phases = &self.owner.hilbert.source.phases;
         let d = n * n;
-        let mut sources = ModalSources::default();
-        let mut direct = vec![ZERO; view.times.len() * n];
-        for (mode, charge) in view.map.modes().iter().enumerate() {
-            let slow_slot = self.slot_of(charge);
-            if options.fast_response && self.dressed.is_some() {
-                // Non-ground part of the residual: exact dressed fast response
-                // at this charge; its recycling feeds the slot of the charge
-                // (slow) or the central slot with the physical phase (fast).
-                let mut field = Dense::zeros(d, m);
+        let mut series = Series::new(&small.exponents, grid.maximum);
+        let weights = modal_weights(&small);
+        // Modal residual columns, one block at a time: the residual is linear
+        // in the candidate columns and (F Q - E Q G) V diag(w) =
+        // F Q V diag(w) - E Q V diag(w beta), so column k evolves exactly as
+        // exp(beta_k t) and blocks never mix.
+        let mut start = 0;
+        while start < m {
+            let width = BASIS_BLOCK.min(m - start);
+            let block = weights.block(0..m, start..start + width);
+            let mut scaled = block.clone();
+            for k in 0..width {
+                for l in 0..m {
+                    let value = cmul(scaled.at(l, k), small.exponents[start + k]);
+                    scaled.set(l, k, csub(ZERO, value));
+                }
+            }
+            let signed = push_modal(view.map, &[(view.fq, &block), (view.eq, &scaled)], rows, m, lap)?;
+            // Non-ground residuals at fast charges, slaved together.
+            let mut slaving: Vec<(Charge, Dense)> = Vec::new();
+            for (mode, charge) in view.map.modes().iter().enumerate() {
+                let slow_slot = self.slot_of(charge);
+                let nu = phases.frequency(charge).map(|f| f.hi + f.lo)?;
+                // Ground block: slot of the charge, or central slot with its phase.
+                let (slot, shift) = slow_slot.map_or((0, nu), |s| (s, 0.));
+                let mut ground = Dense::zeros(g * g, width);
+                let mut field = Dense::zeros(d, width);
                 for entry in 0..d {
                     let (a, b) = (entry / n, entry % n);
-                    if a < g && b < g {
-                        continue;
-                    }
-                    for j in 0..m {
-                        field.set(entry, j, signed[(mode * d + entry) * m + j]);
-                    }
-                }
-                if field.frobenius() > 0. {
-                    let coefficients = small.modal_columns(&field, lap)?;
-                    let nu = phases.frequency(charge).map(|f| f.hi + f.lo)?;
-                    let target = slow_slot.map_or((0, nu), |s| (s, 0.));
-                    self.add_fast_response(target, nu, &small.exponents, &coefficients, view.times, &mut sources, &mut direct)?;
-                }
-            }
-            if options.slave_fast_charges && slow_slot.is_none() {
-                let mut field = Dense::zeros(d, m);
-                for entry in 0..d {
-                    for j in 0..m {
-                        field.set(entry, j, signed[(mode * d + entry) * m + j]);
+                    let row = (mode * d + entry) * width;
+                    for k in 0..width {
+                        let v = signed[row + k];
+                        if a < g && b < g {
+                            ground.set(a * g + b, k, v);
+                        } else {
+                            field.set(entry, k, v);
+                        }
                     }
                 }
-                let coefficients = small.modal_columns(&field, lap)?;
-                for (target_slot, returned) in self.slaved_returns(charge, &coefficients)? {
-                    let modal = self.to_modal(target_slot, &returned)?;
-                    for j in 0..m {
-                        sources.add_exponential(small.exponents[j], modal.data[j * modal.rows..(j + 1) * modal.rows].to_vec());
-                    }
+                if options.fast_response && self.dressed.is_some() && field.frobenius() > 0. {
+                    // Non-ground part: exact dressed fast response at this charge.
+                    self.add_fast_response(&mut series, (slot, shift), nu, start, &field)?;
+                }
+                if options.slave_fast_charges && slow_slot.is_none() && field.frobenius() > 0. {
+                    slaving.push((charge.clone(), field));
+                }
+                if ground.frobenius() > 0. {
+                    series.add_slow(shift, start, &self.to_modal(slot, &ground)?);
                 }
             }
-            let block = ground_block(&signed, mode, n, g, m);
-            if block.frobenius() == 0. {
-                continue;
+            if !slaving.is_empty() {
+                let fields: Vec<(Charge, &Dense)> = slaving.iter().map(|(k, f)| (k.clone(), f)).collect();
+                for (target_slot, returned) in self.slaved_returns_all(&fields, width)? {
+                    series.add_slow(0., start, &self.to_modal(target_slot, &returned)?);
+                }
             }
-            let (slot, shift) = match slow_slot {
-                Some(s) => (s, 0.),
-                None => (0, phases.frequency(charge).map(|f| f.hi + f.lo)?),
-            };
-            let columns = small.modal_columns(&block, lap)?;
-            let modal = self.to_modal(slot, &columns)?;
-            for j in 0..m {
-                let exponent = cadd(small.exponents[j], complex(0., shift));
-                sources.add_exponential(exponent, modal.data[j * modal.rows..(j + 1) * modal.rows].to_vec());
-            }
+            start += width;
         }
-        let amplitudes = self.propagate(&sources, view.times)?;
-        let mut populations = self.read_populations(&amplitudes, view.times)?;
-        for (p, x) in populations.iter_mut().zip(&direct) {
-            *p = cadd(*p, *x);
-        }
+        let populations = self.evaluate(&series, &grid)?;
         finish_estimate(self, &populations, view.times, groups, began)
     }
 
@@ -692,6 +633,17 @@ impl SlowDual {
     }
 
     /// Fourier-truncation (halo) estimate and per-halo-pair indicators.
+    ///
+    /// Every quantity of the halo estimate is linear in the candidate's modal
+    /// columns `c_j exp(beta_j t)` and treats them independently, so the halo
+    /// is processed in blocks of modal columns: the pencil is applied once per
+    /// block to the modal inputs `Q V diag(w)` for ALL halo modes (one plan, its
+    /// intermediate modes computed once), giving the modal residual columns
+    /// `F (Q v_j) - beta_j E (Q v_j)` directly, and only one block of halo rows
+    /// is ever held. The total is one series (dressed fast responses of all
+    /// returns summed per target charge and block, one initial layer) evaluated
+    /// once; each pair's indicator uses its own residual response, returns and
+    /// slow boundary on a subsample of the output times.
     pub fn halo_estimate(
         &self,
         prepared: &OwnedPrepared,
@@ -704,13 +656,12 @@ impl SlowDual {
             return Err("Slow dual belongs to another request".into());
         }
         let (rows, m) = validate(view)?;
-        if options.chunk_modes == 0 || options.maximum_rhs == 0 {
-            return Err("Halo chunk sizes must be positive".into());
+        if options.maximum_rhs == 0 {
+            return Err("Halo block width must be positive".into());
         }
         let lap = &self.lapack;
         let (n, g) = (self.n, self.g);
         let d = n * n;
-        let nt = view.times.len();
         let floor = options.resonance_floor.unwrap_or(self.diagnostics.optical_decay_floor);
         let phases = &self.owner.hilbert.source.phases;
         let frequency = |q: &[i32]| -> Result<f64, String> { phases.frequency(q).map(|f| f.hi + f.lo) };
@@ -718,9 +669,17 @@ impl SlowDual {
             Ok(small) => small,
             Err(reason) => {
                 let estimate = unresolved_estimate(self, view.times, groups, reason, began);
-                return Ok(HaloEstimate { estimate, modes: Vec::new(), halo_modes: 0, near_resonant_terms: 0, unrouted_resonant_returns: 0, pencil_ms: 0. });
+                return Ok(HaloEstimate { estimate, modes: Vec::new(), halo_modes: 0, near_resonant_terms: 0, unrouted_resonant_returns: 0, pencil_ms: 0., block_columns: 0 });
             }
         };
+        let grid = TimeGrid::new(view.times);
+        // Indicator samples: a uniform subset of the output times.
+        let stride = view.times.len().div_ceil(INDICATOR_TIMES).max(1);
+        let mut indicator_times: Vec<f64> = view.times.iter().step_by(stride).copied().collect();
+        if (view.times.len() - 1) % stride != 0 {
+            indicator_times.push(view.times[view.times.len() - 1]);
+        }
+        let indicator_grid = TimeGrid::new(&indicator_times);
         let retained: Vec<Charge> = view.map.modes().to_vec();
         let retained_set: Modes = retained.iter().cloned().collect();
         let mut halo = Self::halo_modes(prepared, &retained)?;
@@ -734,81 +693,90 @@ impl SlowDual {
             };
             halo.retain(|q| returns(q));
         }
-        let signed_q = push_columns(view.map, view.q, rows, m)?;
-
-        // Canonical pair index for every halo charge.
         let canonical = |q: &Charge| -> Charge {
             let negative: Charge = q.iter().map(|x| -x).collect();
             if q.iter().copied().find(|&v| v != 0).is_none_or(|v| v > 0) { q.clone() } else { negative }
         };
         let mut pair_index: BTreeMap<Charge, usize> = BTreeMap::new();
         for q in &halo {
-            let key = canonical(q);
             let next = pair_index.len();
-            pair_index.entry(key).or_insert(next);
+            pair_index.entry(canonical(q)).or_insert(next);
         }
         let pairs = pair_index.len();
-        let mut pair_sources: Vec<ModalSources> = (0..pairs).map(|_| ModalSources::default()).collect();
-        let mut pair_direct: Vec<Vec<C>> = vec![vec![ZERO; nt * n]; pairs];
-        let mut pair_residual: Vec<f64> = vec![0.; pairs];
+        // Indicators: each pair's block contributions on the indicator grid
+        // and its homogeneous slow amplitudes (the common exp(J t) part).
+        let mut pair_values: Vec<Vec<C>> = vec![vec![ZERO; indicator_times.len() * n]; pairs];
+        let mut pair_homogeneous: Vec<Vec<C>> = vec![vec![ZERO; self.dimension()]; pairs];
         let mut pair_boundary: Vec<Dense> = vec![Dense::zeros(n, n); pairs];
+        let mut pair_residual: Vec<f64> = vec![0.; pairs];
+        let mut total = Series::new(&small.exponents, grid.maximum);
+        let mut boundary_total = Dense::zeros(n, n);
         let mut near_resonant_terms = 0;
         let mut unrouted_resonant_returns = 0;
-        // Non-ground returns into slow charges, summed per (pair, slot).
-        let mut fast_fields: BTreeMap<(usize, Charge), ((usize, f64), f64, Dense)> = BTreeMap::new();
         let mut pencil_ms = 0.;
+        let halo_frequency: Vec<f64> = halo.iter().map(|q| frequency(q)).collect::<Result<_, _>>()?;
 
-        let rhs_max = options.maximum_rhs.min(m);
-        for chunk in halo.chunks(options.chunk_modes) {
-            // --- Halo residual rows R = F Q - E Q G on this chunk ----------
-            // Accumulated as R^T (m x rows) one column block at a time: the
-            // row-major [row, column] pencil outputs are column-major
-            // [column, row] blocks, so F^T fills rows of R^T and
-            // -G[block, :]^T E_block^T is one product.
-            let pencil_began = Instant::now();
-            let mut plan = prepared.pencil(&retained, chunk, rhs_max)?;
-            let out_rows = chunk.len() * d;
-            let mut residual_t = Dense::zeros(m, out_rows);
-            let mut start = 0;
-            while start < m {
-                let width = rhs_max.min(m - start);
-                let mut input = vec![ZERO; rows * width];
-                for i in 0..rows {
-                    input[i * width..(i + 1) * width].copy_from_slice(&signed_q[i * m + start..i * m + start + width]);
+        // Modal inputs Q V diag(w), one block at a time.
+        let weights = modal_weights(&small);
+        // Returning hops of every halo mode, resolved once: (term, target
+        // slot and shift, index of the target charge's fast field or None for
+        // the same-charge return).
+        let mut fast_targets: Vec<(Charge, (usize, f64), f64)> = Vec::new();
+        let mut fast_index: BTreeMap<Charge, usize> = BTreeMap::new();
+        let mut routes: Vec<Vec<(usize, (usize, f64), Option<usize>)>> = Vec::with_capacity(halo.len());
+        for q in &halo {
+            let mut list = Vec::new();
+            for (t, term) in self.frame.terms.iter().enumerate() {
+                let same_charge = term.charge.iter().all(|&v| v == 0);
+                let k = add_charge(q, &term.charge, false)?;
+                if !same_charge && !retained_set.contains(&k) && self.slot_of(&k).is_none() {
+                    continue;
                 }
-                let mut e_out = vec![ZERO; out_rows * width];
-                let mut f_out = vec![ZERO; out_rows * width];
-                plan.apply_into(&input, width, &mut e_out, &mut f_out)?;
-                let mut generator_block_t = Dense::zeros(m, width);
-                for j in 0..m {
-                    for k in 0..width {
-                        generator_block_t.set(j, k, complex(view.generator[(start + k) + j * m], 0.));
+                let target = self.target(&k, &frequency)?;
+                let fast = if same_charge {
+                    None
+                } else {
+                    let next = fast_targets.len();
+                    let index = *fast_index.entry(k.clone()).or_insert(next);
+                    if index == next {
+                        fast_targets.push((k.clone(), target, frequency(&k)?));
                     }
-                }
-                let mass_block = Dense { rows: width, cols: out_rows, data: e_out };
-                let correction = generator_block_t.multiply(&mass_block, lap)?;
-                for row in 0..out_rows {
-                    for j in 0..m {
-                        let at = j + row * m;
-                        residual_t.data[at] = csub(residual_t.data[at], correction.data[at]);
-                    }
-                    for k in 0..width {
-                        let at = (start + k) + row * m;
-                        residual_t.data[at] = cadd(residual_t.data[at], f_out[row * width + k]);
-                    }
-                }
-                start += width;
+                    Some(index)
+                };
+                list.push((t, target, fast));
             }
+            routes.push(list);
+        }
+        let width_max = options.maximum_rhs.min(m);
+        let out_rows = halo.len() * d;
+        let mut plan = if halo.is_empty() { None } else { Some(prepared.pencil(&retained, &halo, width_max)?) };
+        let mut e_out = vec![ZERO; out_rows * width_max];
+        let mut f_out = vec![ZERO; out_rows * width_max];
+        let mut start = 0;
+        while start < m && plan.is_some() {
+            let width = width_max.min(m - start);
+            let beta = &small.exponents[start..start + width];
+            let input = push_modal(view.map, &[(view.q, &weights.block(0..m, start..start + width))], rows, m, lap)?;
+            let pencil_began = Instant::now();
+            plan.as_mut().expect("plan").apply_into(&input, width, &mut e_out[..out_rows * width], &mut f_out[..out_rows * width])?;
             pencil_ms += pencil_began.elapsed().as_secs_f64() * 1000.;
+            // Non-ground returns of this block, summed per target charge, and
+            // ground returns summed per (pair, slot, shift) before their
+            // transformation to J_eff coordinates.
+            let mut fast_fields: Vec<Option<Dense>> = vec![None; fast_targets.len()];
+            // This block's contribution of every pair (block columns only).
+            let mut pair_series: BTreeMap<usize, Series> = BTreeMap::new();
+            let mut ground_returns: BTreeMap<(usize, usize, i64), (f64, Dense)> = BTreeMap::new();
 
-            for (local, q) in chunk.iter().enumerate() {
+            for (local, q) in halo.iter().enumerate() {
                 let pair = pair_index[&canonical(q)];
-                let nu_q = frequency(q)?;
-                // R_q as a d x m Dense (row = frame entry a*n+b).
-                let mut residual = Dense::zeros(d, m);
+                let nu_q = halo_frequency[local];
+                // Modal residual columns R_q[:, k] = F w_k - beta_k E w_k.
+                let mut residual = Dense::zeros(d, width);
                 for entry in 0..d {
-                    for j in 0..m {
-                        residual.set(entry, j, residual_t.at(j, local * d + entry));
+                    let row = (local * d + entry) * width;
+                    for k in 0..width {
+                        residual.set(entry, k, csub(f_out[row + k], cmul(beta[k], e_out[row + k])));
                     }
                 }
                 let norm = residual.frobenius();
@@ -816,152 +784,117 @@ impl SlowDual {
                     continue;
                 }
                 pair_residual[pair] = pair_residual[pair].hypot(norm);
+                let series = pair_series.entry(pair).or_insert_with(|| Series::new(beta, grid.maximum));
                 // A halo charge that is itself a slow slot: its ground block is
                 // slow content, a direct J_eff source (as in the basis estimate);
                 // only the non-ground rest gets the fast halo response below.
                 if let Some(own) = self.slot_of(q) {
-                    let mut block = Dense::zeros(g * g, m);
+                    let mut block = Dense::zeros(g * g, width);
                     for a in 0..g {
                         for b in 0..g {
-                            for j in 0..m {
-                                block.set(a * g + b, j, residual.at(a * n + b, j));
-                                residual.set(a * n + b, j, ZERO);
+                            for k in 0..width {
+                                block.set(a * g + b, k, residual.at(a * n + b, k));
+                                residual.set(a * n + b, k, ZERO);
                             }
                         }
                     }
                     if block.frobenius() > 0. {
-                        let columns = small.modal_columns(&block, lap)?;
-                        let modal = self.to_modal(own, &columns)?;
-                        for j in 0..m {
-                            pair_sources[pair].add_exponential(small.exponents[j], modal.data[j * modal.rows..(j + 1) * modal.rows].to_vec());
-                        }
+                        let modal = self.to_modal(own, &block)?;
+                        total.add_slow(0., start, &modal);
+                        series.add_slow(0., 0, &modal);
                     }
                 }
-                let coefficients = small.modal_columns(&residual, lap)?;
 
                 // --- Envelope response eta_q ---------------------------------
-                // Particular columns X[:, j] and near-resonant terms.
-                let (particular, resonant) = self.halo_response(&coefficients, &small.exponents, nu_q, floor)?;
+                let (particular, resonant) = self.halo_response(&residual, beta, nu_q, floor)?;
                 near_resonant_terms += resonant.len();
 
-                // --- Direct readout of eta (physical phase exp(i nu_q t)) ----
-                let direct = &mut pair_direct[pair];
-                for j in 0..m {
-                    let exponent = cadd(small.exponents[j], complex(0., nu_q));
-                    let readout = self.frame_populations(&particular[j]);
-                    if readout.iter().all(|z| z.re == 0. && z.im == 0.) {
-                        continue;
-                    }
-                    for (it, &t) in view.times.iter().enumerate() {
-                        let phase = cexp(cscale(exponent, t));
-                        for state in 0..n {
-                            direct[it * n + state] = cadd(direct[it * n + state], cmul(readout[state], phase));
-                        }
+                // --- Direct populations of eta (physical phase exp(i nu_q t)) --
+                let mut populations = Dense::zeros(n, width);
+                for (k, x) in particular.iter().enumerate() {
+                    for (s, v) in self.frame_populations(x).into_iter().enumerate() {
+                        populations.set(s, k, v);
                     }
                 }
+                total.add_direct(nu_q, start, &populations);
+                series.add_direct(nu_q, 0, &populations);
                 for term in &resonant {
-                    let readout = self.frame_populations(&term.unit);
-                    let first = cadd(small.exponents[term.column], complex(0., nu_q));
+                    let p = self.frame_populations(&term.unit);
+                    let first = cadd(beta[term.column], complex(0., nu_q));
                     let second = cadd(term.second, complex(0., nu_q));
-                    for (it, &t) in view.times.iter().enumerate() {
-                        let value = exp_divided_2(first, second, t);
-                        for state in 0..n {
-                            direct[it * n + state] = cadd(direct[it * n + state], cmul(readout[state], value));
-                        }
-                    }
+                    total.direct_near.push((p.clone(), first, second));
+                    series.direct_near.push((p, first, second));
                 }
 
                 // --- Initial boundary -eta(0) (physical matrix at t = 0) ------
-                let boundary = &mut pair_boundary[pair];
                 for x in &particular {
                     for k in 0..d {
-                        boundary.data[k] = csub(boundary.data[k], x.data[k]);
+                        boundary_total.data[k] = csub(boundary_total.data[k], x.data[k]);
+                        pair_boundary[pair].data[k] = csub(pair_boundary[pair].data[k], x.data[k]);
                     }
                 }
 
                 // --- One-hop return ------------------------------------------
-                // p = 0 (same charge): only the ground block of (L_0 - D) eta,
-                // i.e. what the diagonal reference D left out (recycling and
-                // static couplings into the ground block); it feeds slot q or,
-                // for a fast q, the central slot with phase exp(i nu_q t).
+                // p = 0 (same charge): the ground block of (L_0 - N) eta, which
+                // the no-jump reference left out; it feeds slot q or, for a
+                // fast q, the central slot with phase exp(i nu_q t).
                 // p != 0 into a retained or slow charge k: the complete field
                 // L_p eta; its ground block is a slow source, its non-ground
-                // block gets the exact dressed fast response (k slow) or Markov
-                // slaving plus one hop (k fast).
-                for term in &self.frame.terms {
-                    let same_charge = term.charge.iter().all(|&v| v == 0);
+                // block gets the exact dressed fast response at k (summed over
+                // the halo, total only).
+                let refs: Vec<&Dense> = particular.iter().collect();
+                for &(t, (slot, shift), fast) in &routes[local] {
+                    let term = &self.frame.terms[t];
+                    let same_charge = fast.is_none();
                     let k = add_charge(q, &term.charge, false)?;
-                    if !same_charge && !retained_set.contains(&k) && self.slot_of(&k).is_none() {
-                        continue;
-                    }
-                    let (slot, shift) = self.target(&k, &frequency)?;
-                    let mut field = Dense::zeros(d, m);
-                    if same_charge {
-                        for (j, x) in particular.iter().enumerate() {
-                            for (row, v) in self.same_charge_ground_return(x).iter().enumerate() {
-                                field.set((row / g) * n + row % g, j, *v);
+                    let ground = &mut ground_returns
+                        .entry((pair, slot, frequency_key(shift)))
+                        .or_insert_with(|| (shift, Dense::zeros(g * g, width)))
+                        .1;
+                    if let Some(index) = fast {
+                        let images = self.frame.apply_all(term, &refs, lap)?;
+                        let field = fast_fields[index].get_or_insert_with(|| Dense::zeros(d, width));
+                        for (column, image) in images.iter().enumerate() {
+                            for b in 0..n {
+                                for a in 0..n {
+                                    let v = image.at(a, b);
+                                    if a < g && b < g {
+                                        ground.add_at(a * g + b, column, v);
+                                    } else {
+                                        field.add_at(a * n + b, column, v);
+                                    }
+                                }
+                            }
+                        }
+                        if self.slot_of(&k).is_none() && options.slave_fast_returns {
+                            let mut field = Dense::zeros(d, width);
+                            for (column, image) in images.iter().enumerate() {
+                                for b in 0..n {
+                                    for a in 0..n {
+                                        field.set(a * n + b, column, image.at(a, b));
+                                    }
+                                }
+                            }
+                            for (target_slot, returned) in self.slaved_returns(&k, &field)? {
+                                let modal = self.to_modal(target_slot, &returned)?;
+                                total.add_slow(0., start, &modal);
+                                series.add_slow(0., 0, &modal);
                             }
                         }
                     } else {
-                        let refs: Vec<&Dense> = particular.iter().collect();
-                        for (j, image) in self.frame.apply_all(term, &refs, lap)?.iter().enumerate() {
-                            for a in 0..n {
-                                for b in 0..n {
-                                    field.set(a * n + b, j, image.at(a, b));
-                                }
-                            }
-                        }
-                    }
-                    if field.frobenius() > 0. {
-                        let mut block = Dense::zeros(g * g, m);
-                        for a in 0..g {
-                            for b in 0..g {
-                                for j in 0..m {
-                                    block.set(a * g + b, j, field.at(a * n + b, j));
-                                }
-                            }
-                        }
-                        if block.frobenius() > 0. {
-                            let modal = self.to_modal(slot, &block)?;
-                            for j in 0..m {
-                                let exponent = cadd(small.exponents[j], complex(0., shift));
-                                pair_sources[pair].add_exponential(exponent, modal.data[j * modal.rows..(j + 1) * modal.rows].to_vec());
-                            }
-                        }
-                        if !same_charge {
-                            // Exact dressed fast response of the non-ground block at k.
-                            // Linear in the field: accumulate per (pair, k) and
-                            // integrate once after the loop.
-                            let mut fast = field.clone();
-                            for a in 0..g {
-                                for b in 0..g {
-                                    for j in 0..m {
-                                        fast.set(a * n + b, j, ZERO);
-                                    }
-                                }
-                            }
-                            let nu_k = frequency(&k)?;
-                            let entry = fast_fields.entry((pair, k.clone())).or_insert_with(|| ((slot, shift), nu_k, Dense::zeros(d, m)));
-                            for (acc, v) in entry.2.data.iter_mut().zip(&fast.data) {
-                                *acc = cadd(*acc, *v);
-                            }
-                            if self.slot_of(&k).is_none() && options.slave_fast_returns {
-                                for (target_slot, returned) in self.slaved_returns(&k, &field)? {
-                                    let modal = self.to_modal(target_slot, &returned)?;
-                                    for j in 0..m {
-                                        pair_sources[pair].add_exponential(small.exponents[j], modal.data[j * modal.rows..(j + 1) * modal.rows].to_vec());
-                                    }
-                                }
+                        for (column, x) in particular.iter().enumerate() {
+                            for (row, v) in self.same_charge_ground_return(x).into_iter().enumerate() {
+                                ground.add_at(row, column, v);
                             }
                         }
                     }
                     // Near-resonant terms: zero-initial pair sources. Their
                     // ground block returns exactly; a non-ground return is
-                    // slaved when k is fast and otherwise counted (it needs a
-                    // pair-source fast response; rare: resonance requires a
-                    // strongly damped candidate mode).
+                    // slaved when k is fast (optional) and otherwise counted (it
+                    // needs a pair-source fast response; rare: resonance
+                    // requires a strongly damped candidate mode).
                     for resonant_term in &resonant {
-                        let (j, second) = (resonant_term.column, resonant_term.second);
+                        let column = resonant_term.column;
                         let image = if same_charge {
                             let mut out = Dense::zeros(n, n);
                             for (row, v) in self.same_charge_ground_return(&resonant_term.unit).iter().enumerate() {
@@ -971,8 +904,8 @@ impl SlowDual {
                         } else {
                             self.frame.apply(term, &resonant_term.unit, lap)?
                         };
-                        let first_node = cadd(small.exponents[j], complex(0., shift));
-                        let second_node = cadd(second, complex(0., shift));
+                        let first_node = cadd(beta[column], complex(0., shift));
+                        let second_node = cadd(resonant_term.second, complex(0., shift));
                         let mut ground = Dense::zeros(g * g, 1);
                         for ga in 0..g {
                             for gb in 0..g {
@@ -981,7 +914,8 @@ impl SlowDual {
                         }
                         if ground.frobenius() > 0. {
                             let modal = self.to_modal(slot, &ground)?;
-                            pair_sources[pair].add_pair(first_node, second_node, modal.data);
+                            total.add_pair(first_node, second_node, modal.data.clone());
+                            series.add_pair(first_node, second_node, modal.data);
                         }
                         if same_charge {
                             continue;
@@ -1006,81 +940,67 @@ impl SlowDual {
                         }
                         for (target_slot, returned) in self.slaved_returns(&k, &rest)? {
                             let modal = self.to_modal(target_slot, &returned)?;
-                            pair_sources[pair].add_pair(small.exponents[j], second, modal.data);
+                            total.add_pair(beta[column], resonant_term.second, modal.data.clone());
+                            series.add_pair(beta[column], resonant_term.second, modal.data);
                         }
                     }
                 }
             }
-        }
-
-        // --- Exact dressed fast response of the returns into slow charges ---
-        for ((pair, _), (target, nu_k, field)) in &fast_fields {
-            if field.frobenius() > 0. {
-                self.add_fast_response(*target, *nu_k, &small.exponents, field, view.times, &mut pair_sources[*pair], &mut pair_direct[*pair])?;
-            }
-        }
-
-        // --- Initial boundaries: slow part plus exact fast initial layer -----
-        // Pairs whose boundary is negligible share one combined fast layer
-        // that enters the total only.
-        let largest = pair_boundary.iter().map(|b| b.frobenius()).fold(0_f64, f64::max);
-        let mut shared_layer = Dense::zeros(n, n);
-        let mut shared_sources = ModalSources::default();
-        let mut shared_direct = vec![ZERO; nt * n];
-        for pair in 0..pairs {
-            let boundary = &pair_boundary[pair];
-            let norm = boundary.frobenius();
-            if norm == 0. {
-                continue;
-            }
-            let layer = self.add_slow_initial(boundary, &mut pair_sources[pair])?;
-            if norm >= 1e-3 * largest {
-                self.add_fast_initial(&layer, view.times, &mut pair_sources[pair], &mut pair_direct[pair])?;
-            } else {
-                for k in 0..d {
-                    shared_layer.data[k] = cadd(shared_layer.data[k], layer.data[k]);
+            // --- Ground returns into J_eff, per pair -------------------------
+            for ((pair, slot, _), (shift, ground)) in &ground_returns {
+                if ground.frobenius() > 0. {
+                    let modal = self.to_modal(*slot, ground)?;
+                    total.add_slow(*shift, start, &modal);
+                    pair_series.entry(*pair).or_insert_with(|| Series::new(beta, grid.maximum)).add_slow(*shift, 0, &modal);
                 }
             }
-        }
-        if shared_layer.frobenius() > 0. {
-            self.add_fast_initial(&shared_layer, view.times, &mut shared_sources, &mut shared_direct)?;
-        }
-
-        // --- Evaluate every pair and the total ------------------------------
-        let mut total = vec![ZERO; nt * n];
-        if shared_layer.frobenius() > 0. {
-            let amplitudes = self.propagate(&shared_sources, view.times)?;
-            let layer = self.read_populations(&amplitudes, view.times)?;
-            for ((a, b), c) in total.iter_mut().zip(&layer).zip(&shared_direct) {
-                *a = cadd(*a, cadd(*b, *c));
+            // --- Exact dressed fast responses of this block's returns -------
+            for (field, (_, target, nu_k)) in fast_fields.iter().zip(&fast_targets) {
+                if let Some(field) = field {
+                    self.add_fast_response(&mut total, *target, *nu_k, start, field)?;
+                }
             }
+            for (pair, series) in pair_series {
+                let values = self.evaluate_parts(&series, &indicator_grid, Some(&mut pair_homogeneous[pair]))?;
+                for (a, b) in pair_values[pair].iter_mut().zip(&values) {
+                    *a = cadd(*a, *b);
+                }
+            }
+            start += width;
         }
-        let mut modes = Vec::with_capacity(pairs);
+        drop(plan);
+        drop(e_out);
+        drop(f_out);
+
+        // --- Indicators: each pair's response, returns and slow boundary ----
         let mut charges: Vec<Charge> = vec![Vec::new(); pairs];
         for (charge, &index) in &pair_index {
             charges[index] = charge.clone();
         }
+        let mut modes = Vec::with_capacity(pairs);
         for pair in 0..pairs {
-            let amplitudes = self.propagate(&pair_sources[pair], view.times)?;
-            let mut contribution = self.read_populations(&amplitudes, view.times)?;
-            for (a, b) in contribution.iter_mut().zip(&pair_direct[pair]) {
+            let mut series = Series::new(&small.exponents, grid.maximum);
+            series.add_initial(&pair_homogeneous[pair]);
+            if pair_boundary[pair].frobenius() > 0. {
+                self.add_slow_initial(&mut series, &pair_boundary[pair])?;
+            }
+            let mut values = self.evaluate(&series, &indicator_grid)?;
+            for (a, b) in values.iter_mut().zip(&pair_values[pair]) {
                 *a = cadd(*a, *b);
             }
-            let mut indicator = contribution.iter().map(|z| z.re.abs()).fold(0_f64, f64::max);
-            for t in 0..nt {
-                for group in groups {
-                    let sum: f64 = group.indices.iter().filter(|&&i| i < n).map(|&i| contribution[t * n + i].re).sum();
-                    indicator = indicator.max(sum.abs());
-                }
-            }
-            for (a, b) in total.iter_mut().zip(&contribution) {
-                *a = cadd(*a, *b);
-            }
-            modes.push(HaloModeIndicator { charge: charges[pair].clone(), indicator, residual_norm: pair_residual[pair] });
+            let (state, group) = maxima(&values, n, groups);
+            modes.push(HaloModeIndicator { charge: charges[pair].clone(), indicator: state.max(group), residual_norm: pair_residual[pair] });
         }
         modes.sort_by(|a, b| b.indicator.total_cmp(&a.indicator));
-        let estimate = finish_estimate(self, &total, view.times, groups, began)?;
-        Ok(HaloEstimate { estimate, modes, halo_modes: halo.len(), near_resonant_terms, unrouted_resonant_returns, pencil_ms })
+
+        // --- Initial boundary: slow part plus exact fast initial layer ------
+        if boundary_total.frobenius() > 0. {
+            let layer = self.add_slow_initial(&mut total, &boundary_total)?;
+            self.add_fast_initial(&mut total, &layer)?;
+        }
+        let values = self.evaluate(&total, &grid)?;
+        let estimate = finish_estimate(self, &values, view.times, groups, began)?;
+        Ok(HaloEstimate { estimate, modes, halo_modes: halo.len(), near_resonant_terms, unrouted_resonant_returns, pencil_ms, block_columns: width_max })
     }
 
     /// Particular envelope response of one halo charge `q` to the modal source
@@ -1093,18 +1013,9 @@ impl SlowDual {
     /// the diagonal of `N` is the reference.
     fn halo_response(&self, coefficients: &Dense, exponents: &[C], nu_q: f64, floor: f64) -> Result<(Vec<Dense>, Vec<ResonantTerm>), String> {
         let n = self.n;
-        let m = coefficients.cols;
         let lap = &self.lapack;
         let mut resonant = Vec::new();
-        let blocks: Vec<Dense> = (0..m)
-            .map(|j| {
-                let mut x = Dense::zeros(n, n);
-                for entry in 0..n * n {
-                    x.set(entry / n, entry % n, coefficients.at(entry, j));
-                }
-                x
-            })
-            .collect();
+        let blocks = column_blocks(coefficients, n);
         // Componentwise particular response against the reference eigenvalue
         // `lambda` (dressed: a_i + b_k; fallback: the diagonal d_ab); near
         // resonant components are split off as zero-initial terms whose frame
