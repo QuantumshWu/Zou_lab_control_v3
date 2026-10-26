@@ -245,11 +245,28 @@ pub fn solve(
     let duration = times[times.len() - 1];
     let poles = rational_poles(duration, &options);
     let n = core.prepared().primitives().hilbert.source.n;
+    // Fourier steps: the charges of the gauged Hamiltonian, i.e. the modes a
+    // single coherent coupling reaches from the central mode.
     let (axes, steps) = {
-        let phases = &core.prepared().primitives().hilbert.source.phases;
-        (phases.axes.len(), phases.drive_indices.clone())
+        let source = &core.prepared().primitives().hilbert.source;
+        let mut steps: Vec<Charge> = source.hamiltonian.keys().filter(|q| q.iter().any(|&k| k != 0)).cloned().collect();
+        if std::env::var_os("ATOM_EXP_UNGAUGED_BALL").is_some() {
+            steps = source.phases.drive_indices.clone();
+        }
+        (source.phases.axes.len(), steps)
     };
     let lapack = Arc::clone(core.lapack());
+    if std::env::var_os("ATOM_EXP_CHARGES").is_some() {
+        let p = core.prepared().primitives();
+        let keys = |f: &crate::preparation::FourierMatrices| f.keys().cloned().collect::<Vec<_>>();
+        eprintln!("drive indices {:?}", steps);
+        eprintln!("gauges {:?}", p.hilbert.source.gauges);
+        eprintln!("H charges {:?}", keys(&p.hilbert.source.hamiltonian));
+        eprintln!("S charges {:?}", keys(&p.s));
+        eprintln!("K charges {:?}", keys(&p.k_hat));
+        eprintln!("NL charges {:?}", keys(&p.no_jump_left));
+        eprintln!("ball1 {:?}", support_domain(axes, &steps, 1)?);
+    }
     let mut order = 1;
     let mut space = TrialSpace::new(&mut core, &support_domain(axes, &steps, order)?, &poles)?;
     let mut chain = Chain::new(poles.len());
@@ -298,6 +315,8 @@ pub fn solve(
     let mut previous: Option<Vec<f64>> = None;
     let mut previous_domain: Option<Vec<f64>> = None;
     let mut peak_bytes = space.bytes();
+    // Set when the trial space is numerically invariant on the current domain.
+    let mut invariant = false;
     loop {
         if started.elapsed().as_secs_f64() > options.wall_seconds {
             return Err(format!(
@@ -314,7 +333,11 @@ pub fn solve(
         let candidate = space.readout().evaluate(&lapack, &trajectory, times)?;
         evaluate_ms += clock.elapsed().as_secs_f64() * 1000.;
         let populations = candidate.values;
-        let basis_change = previous.as_ref().map(|p| population_change(p, &populations, n, &groups));
+        let basis_change = if invariant {
+            Some(0.)
+        } else {
+            previous.as_ref().map(|p| population_change(p, &populations, n, &groups))
+        };
         let domain_change = previous_domain.as_ref().map(|p| population_change(p, &populations, n, &groups));
         let exact_domain = support_domain(axes, &steps, order + 1)?.len() == space.modes().len();
         let mut checkpoint = Checkpoint {
@@ -367,6 +390,7 @@ pub fn solve(
                 checkpoint.action = "expand-domain";
                 checkpoints.push(checkpoint);
                 order += 1;
+                invariant = false;
                 previous_domain = Some(populations.clone());
                 previous = Some(populations);
                 space = space.transfer(&mut core, &support_domain(axes, &steps, order)?)?;
@@ -385,8 +409,99 @@ pub fn solve(
         checkpoints.push(checkpoint);
         previous = Some(populations);
         if chain.grow(&mut space, options.block_columns, options.inner)? == 0 {
-            return Err("The trial space cannot be extended further".into());
+            // No independent direction is left: accept only if the space is
+            // numerically invariant, i.e. the reduced residual vanishes.
+            let residual = space.residual(&model.generator)?;
+            let scale = space.fq().iter().map(|x| x * x).sum::<f64>().sqrt().max(f64::MIN_POSITIVE);
+            let size = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if size > 1e-9 * scale {
+                return Err("The trial space cannot be extended further".into());
+            }
+            invariant = true;
         }
         peak_bytes = peak_bytes.max(space.bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::b0_inverse::P0Policy;
+    use super::super::coordinates::InitialView;
+
+    /// Exact populations of the static fixture model by a dense exponential of
+    /// the real 2n^2-dimensional Lindblad superoperator.
+    fn exact_populations(times: &[f64]) -> Vec<f64> {
+        let n = 4;
+        let mut h = vec![0.; 16];
+        for (i, v) in [0., 0.6, 3., 4.].iter().enumerate() {
+            h[i * n + i] = *v;
+        }
+        for (i, j, v) in [(0, 2, 0.1), (1, 3, 0.2), (0, 1, 0.02)] {
+            h[i * n + j] = v;
+            h[j * n + i] = v;
+        }
+        let mut c = vec![0.; 16];
+        c[2] = 0.7;
+        c[3] = 0.1;
+        c[6] = 0.2;
+        c[7] = 0.8;
+        let mm = |a: &[f64], b: &[f64]| -> Vec<f64> {
+            let mut out = vec![0.; 16];
+            for i in 0..n {
+                for j in 0..n {
+                    for k in 0..n {
+                        out[i * n + j] += a[i * n + k] * b[k * n + j];
+                    }
+                }
+            }
+            out
+        };
+        let ct: Vec<f64> = (0..16).map(|i| c[(i % n) * n + i / n]).collect();
+        let ctc = mm(&ct, &c);
+        // Real vector: [Re rho (16), Im rho (16)]; L acts linearly (H, C real).
+        let apply = |x: &[f64]| -> Vec<f64> {
+            let (re, im) = (&x[..16], &x[16..]);
+            let mut out = vec![0.; 32];
+            let (hr, rh, hi, ih) = (mm(&h, re), mm(re, &h), mm(&h, im), mm(im, &h));
+            let (cre, cim) = (mm(&mm(&c, re), &ct), mm(&mm(&c, im), &ct));
+            let (ar, ra, ai, ia) = (mm(&ctc, re), mm(re, &ctc), mm(&ctc, im), mm(im, &ctc));
+            for k in 0..16 {
+                // -i[H, rho]: real part = [H, Im rho], imaginary part = -[H, Re rho].
+                out[k] = (hi[k] - ih[k]) + cre[k] - 0.5 * (ar[k] + ra[k]);
+                out[16 + k] = -(hr[k] - rh[k]) + cim[k] - 0.5 * (ai[k] + ia[k]);
+            }
+            out
+        };
+        let mut generator = vec![0.; 32 * 32];
+        for j in 0..32 {
+            let mut e = vec![0.; 32];
+            e[j] = 1.;
+            let column = apply(&e);
+            generator[j * 32..(j + 1) * 32].copy_from_slice(&column);
+        }
+        let lapack = Lapack::load().unwrap();
+        // propagator[row + col*32]: rho0 = |0><0| is real coordinate 0.
+        let mut exact = Vec::new();
+        for &t in times {
+            let (propagator, _) = crate::dense_expm::exponential(&lapack, &generator, 32, t).unwrap();
+            for i in 0..n {
+                exact.push(propagator[i * n + i]);
+            }
+        }
+        exact
+    }
+
+    #[test]
+    fn engine_matches_exact_static_evolution() {
+        let owned = super::super::tests::fixture();
+        let core = RuntimeCore::from_owned(owned, InitialView { index: 0, real: None, imag: None }, P0Policy::EigenPreferred)
+            .unwrap();
+        let times: Vec<f64> = (0..21).map(|i| 4. * i as f64 / 20.).collect();
+        let options = FiniteOptions { population_tolerance: 1e-4, ..FiniteOptions::default() };
+        let solution = solve(core, &times, vec![], options).unwrap();
+        let exact = exact_populations(&times);
+        let error = solution.populations.iter().zip(&exact).map(|(a, b)| (a - b).abs()).fold(0_f64, f64::max);
+        assert!(error < 1e-4, "static fixture population error {error}");
     }
 }
