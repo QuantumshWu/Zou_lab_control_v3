@@ -7,7 +7,7 @@
     "build": "node scripts/build.mjs",
     "prepare:native": "node scripts/prepare-native-deps.mjs",
     "package:single-exe": "node scripts/release-single-exe.mjs",
-    "test": "npm run build && node --test tests/physics.test.mjs tests/polarization-presets.test.mjs tests/laser-frequency.test.mjs tests/full-master-model.test.mjs tests/input-semantics.test.mjs tests/duration.test.mjs tests/scene-file.test.mjs tests/choice-trees.test.mjs tests/current-dynamics-results.test.mjs tests/population-selection.test.mjs tests/space-geometry.test.mjs tests/space-arrow.test.mjs tests/ui-defaults-layout.test.mjs tests/ui-review.test.mjs tests/solver-client.test.mjs tests/desktop-native-fetch.test.mjs tests/desktop-native-worker-lane.test.mjs tests/desktop-solver-settings.test.mjs tests/native-dependencies.test.mjs tests/memory-exe-format.test.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "test:build": "node --test tests/native-dependencies.test.mjs tests/memory-exe-format.test.mjs",
     "test:ui": "npm run build && node --test tests/choice-trees.test.mjs tests/duration.test.mjs tests/scene-file.test.mjs tests/population-selection.test.mjs tests/space-geometry.test.mjs tests/space-arrow.test.mjs tests/ui-defaults-layout.test.mjs tests/ui-review.test.mjs"
   },
