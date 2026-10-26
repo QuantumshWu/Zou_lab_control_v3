@@ -29,6 +29,9 @@ export interface Laser {
   /** Spectroscopy/diagram origin only. Omitted follows the actual initial state;
    * this does not restrict drive couplings or alter the density initial state. */
   referenceStateId?: string;
+  /** Display only: 'far' shows this laser's second-order light shift in the
+   * levels chart. It does not change the dynamics, where every enabled laser
+   * of nonzero intensity is an explicit drive of the master equation. */
   regime?: 'near' | 'far';
   referenceProcess?: 'absorption' | 'emission';
   /** Detuning from referenceTransition, in MHz, independent of the display unit.
@@ -68,8 +71,24 @@ export interface ReferenceLevel {
   /** Follow the instantaneous anchor, or hold its zero-field energy fixed. */
   anchorMode?: 'follow' | 'zero-field';
 }
+/** Initial density of the dynamics, diagonal in the master-model basis (the
+ * eigenbasis of the static H0). State ids are those 32 eigenstates.
+ * - state: one eigenstate;
+ * - unpolarized: equal weights over the 8 ground states, or over F=1 / F=2;
+ * - thermal: Boltzmann weights over the 8 ground eigenstates of the static H0
+ *   at temperatureK > 0 (a large temperature tends to the uniform mixture);
+ * - weights: nonnegative weights (normalized to one) over any of the 32 states. */
+export type InitialStateSpec =
+  | {kind:'state';id:string}
+  | {kind:'unpolarized';manifold:'ground'|'F1'|'F2'}
+  | {kind:'thermal';temperatureK:number}
+  | {kind:'weights';weights:Record<string,number>};
 export interface DynamicsSettings {
   laserId: string; initialStateId: string; monitoredStateIds: string[];
+  /** When present it defines the initial density; otherwise the initial
+   * state is {kind:'state', id: initialStateId}. Scene loading folds a
+   * 'state' spec into initialStateId, so this holds only mixed kinds. */
+  initialState?: InitialStateSpec;
   monitorMode?:'auto'|'manual';
   monitoredGroupIds?:string[];
   durationUs: number; samples: number; autoRun: boolean;
@@ -82,6 +101,17 @@ export interface DynamicsSettings {
   quality?: 'preview' | 'verified';
 }
 export type DurationUnit='ns'|'μs'|'ms'|'s';
+/** The one resolution of the dynamics initial state (see InitialStateSpec). */
+export function resolveInitialState(settings:Partial<DynamicsSettings>|undefined,scene:Scene):InitialStateSpec {
+  if(settings?.initialState)return settings.initialState;
+  if(scene.dynamics?.initialState&&settings?.initialStateId===undefined)return scene.dynamics.initialState;
+  return {kind:'state',id:settings?.initialStateId??scene.dynamics?.initialStateId??`ground-${scene.initialF}-${scene.initialM}`};
+}
+/** Canonical (key-ordered) form for request identity. */
+export function canonicalInitialState(spec:InitialStateSpec):InitialStateSpec {
+  if(spec.kind==='weights')return {kind:'weights',weights:Object.fromEntries(Object.entries(spec.weights).sort(([a],[b])=>a<b?-1:a>b?1:0))};
+  return spec.kind==='state'?{kind:'state',id:spec.id}:spec.kind==='thermal'?{kind:'thermal',temperatureK:spec.temperatureK}:{kind:'unpolarized',manifold:spec.manifold};
+}
 export const DEFAULT_DYNAMICS_SAMPLES=200;
 export const DEFAULT_TWEEZER_WAVELENGTH_NM=852;
 export const DEFAULT_POPULATION_TOLERANCE=.005;
