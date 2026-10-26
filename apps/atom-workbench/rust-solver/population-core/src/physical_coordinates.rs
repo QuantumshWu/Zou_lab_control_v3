@@ -5,6 +5,10 @@ use super::*;
 use crate::parallel::Execution;
 use crate::pencil::{Commutator, Gemm, Scratch};
 
+/// States pulled back together through the shear layers (see
+/// `PopulationObservation::prepare`).
+const STATE_CHUNK:usize=4;
+
 /// Matches the existing production Model protocol exactly. `index` is the
 /// GLOBAL state index, not an index into the ground-state subset. Both full
 /// row-major real/imaginary arrays must be present together or both absent.
@@ -86,24 +90,41 @@ impl PhysicalCoordinates{
         let rho=crate::preparation::hilbert::transform_matrix(&self.lapack,&p.hilbert.basis_column_major,&original,n)?;
         let k=evaluate(&p.k_hat,phases,0.,g*g*e*e)?;let correction=shear_action(&k,&rho,n,g);
         let before:Vec<_>=rho.iter().zip(correction).map(|(a,b)|C{re:a.re-b.re,im:a.im-b.im}).collect();
-        let s=evaluate(&p.s,phases,0.,d)?;let anti:Vec<_>=(0..d).map(|i|{
-            let z=conj(s[(i%n)*n+i/n]);C{re:s[i].re+z.re,im:s[i].im+z.im}}).collect();
-        let anti_error=norm(&anti);let construction_scale=p.s.values().map(|a|norm(a)).sum::<f64>();
-        if anti_error>256.*f64::EPSILON*n as f64*construction_scale.max(f64::MIN_POSITIVE){
-            return Err("Point S is not anti-Hermitian within coefficient accumulation roundoff".into());}
-        // The same lower-Hermitian eigenselector as scipy.linalg.eigh(-i*S).
-        // It is only used for inversion. Forward validation uses UNMODIFIED S.
-        let mut selector:Vec<_>=s.iter().map(|z|C{re:z.im,im:-z.re}).collect();
-        for i in 0..n{selector[i*n+i].im=0.;for j in i+1..n{selector[i*n+j]=conj(selector[j*n+i]);}}
-        let(energies,vectors)=self.lapack.hermitian_eigen(&row_to_column(&selector,n),n)?;
-        let mut transformed=crate::preparation::hilbert::transform_matrix(&self.lapack,&vectors,&before,n)?;
-        let mut minimum=f64::INFINITY;
-        for i in 0..n{for j in 0..n{let delta=energies[i]-energies[j];let denominator=C{re:1.-0.5*delta*delta,im:delta};
-            let modulus=denominator.re.hypot(denominator.im);minimum=minimum.min(modulus);
-            if !modulus.is_finite()||modulus==0.{return Err("Unresolved J2 point inverse denominator".into());}
-            let normalized=scaled(denominator,1./modulus);transformed[i*n+j]=scaled(mul(transformed[i*n+j],conj(normalized)),1./modulus);
-        }}
-        let point=restore_hilbert(&self.lapack,&vectors,&transformed,n)?;
+        // Invert the shear layers at theta = 0, outermost first.
+        let(mut point,mut anti_error,mut minimum)=(before,0_f64,f64::INFINITY);
+        for layer in p.layers.iter().rev(){
+            let points:Vec<Vec<C>>=layer.iter().map(|class|evaluate(class,phases,0.,d)).collect::<Result<_,_>>()?;
+            for(s,class)in points.iter().zip(layer){let anti:Vec<_>=(0..d).map(|i|{
+                let z=conj(s[(i%n)*n+i/n]);C{re:s[i].re+z.re,im:s[i].im+z.im}}).collect();
+                let error=norm(&anti);anti_error=anti_error.max(error);let construction_scale=class.values().map(|a|norm(a)).sum::<f64>();
+                if error>256.*f64::EPSILON*n as f64*construction_scale.max(f64::MIN_POSITIVE){
+                    return Err("Point S is not anti-Hermitian within coefficient accumulation roundoff".into());}}
+            if points.len()!=1{
+                // A sum of class shears: invert I + sum_c D_c by fixed-point
+                // iteration (each D_c is small), checked against the input.
+                let target=point.clone();let scale=maximum(&target).max(f64::MIN_POSITIVE);let mut converged=false;
+                for _ in 0..200{let mut image=point.clone();
+                    for s in &points{let once=commutator(&self.lapack,s,&point,n)?;let twice=commutator(&self.lapack,s,&once,n)?;
+                        for i in 0..d{add(&mut image[i],once[i]);add(&mut image[i],scaled(twice[i],0.5));}}
+                    let mut change=0_f64;for i in 0..d{let r=C{re:target[i].re-image[i].re,im:target[i].im-image[i].im};add(&mut point[i],r);change=change.max(r.re.hypot(r.im));}
+                    if change<=4.*f64::EPSILON*scale{converged=true;break;}}
+                if !converged{return Err("Shear layer point inverse did not converge".into());}
+                continue;
+            }
+            let s=&points[0];
+            // The same lower-Hermitian eigenselector as scipy.linalg.eigh(-i*S).
+            // It is only used for inversion. Forward validation uses UNMODIFIED S.
+            let mut selector:Vec<_>=s.iter().map(|z|C{re:z.im,im:-z.re}).collect();
+            for i in 0..n{selector[i*n+i].im=0.;for j in i+1..n{selector[i*n+j]=conj(selector[j*n+i]);}}
+            let(energies,vectors)=self.lapack.hermitian_eigen(&row_to_column(&selector,n),n)?;
+            let mut transformed=crate::preparation::hilbert::transform_matrix(&self.lapack,&vectors,&point,n)?;
+            for i in 0..n{for j in 0..n{let delta=energies[i]-energies[j];let denominator=C{re:1.-0.5*delta*delta,im:delta};
+                let modulus=denominator.re.hypot(denominator.im);minimum=minimum.min(modulus);
+                if !modulus.is_finite()||modulus==0.{return Err("Unresolved J2 point inverse denominator".into());}
+                let normalized=scaled(denominator,1./modulus);transformed[i*n+j]=scaled(mul(transformed[i*n+j],conj(normalized)),1./modulus);
+            }}
+            point=restore_hilbert(&self.lapack,&vectors,&transformed,n)?;
+        }
         let reconstructed=self.from_envelope_at(&point,0.)?;
         let residual:Vec<_>=reconstructed.iter().zip(&original).map(|(a,b)|C{re:a.re-b.re,im:a.im-b.im}).collect();
         let forward_error=maximum(&residual);
@@ -117,9 +138,10 @@ impl PhysicalCoordinates{
     pub fn from_envelope_at(&self,envelope:&[C],time:f64)->Result<Vec<C>,String>{
         let p=&self.primitives;let n=self.dimension();let d=n*n;let g=p.hilbert.source.ground.len();let e=n-g;
         if envelope.len()!=d||envelope.iter().any(|z|!z.finite()){return Err("Expected a finite complete complex envelope".into());}
-        let phases=&p.hilbert.source.phases;let s=evaluate(&p.s,phases,time,d)?;
-        let once=commutator(&self.lapack,&s,envelope,n)?;let twice=commutator(&self.lapack,&s,&once,n)?;
-        let mut j=envelope.to_vec();for i in 0..d{add(&mut j[i],once[i]);add(&mut j[i],scaled(twice[i],0.5));}
+        let phases=&p.hilbert.source.phases;let mut j=envelope.to_vec();
+        for layer in &p.layers{let mut next=j.clone();for class in layer{let s=evaluate(class,phases,time,d)?;
+            let once=commutator(&self.lapack,&s,&j,n)?;let twice=commutator(&self.lapack,&s,&once,n)?;
+            for i in 0..d{add(&mut next[i],once[i]);add(&mut next[i],scaled(twice[i],0.5));}}j=next;}
         let k=evaluate(&p.k_hat,phases,time,g*g*e*e)?;let z=shear_action(&k,&j,n,g);for(a,b)in j.iter_mut().zip(z){add(a,b);}
         let mut physical=restore_hilbert(&self.lapack,&p.hilbert.basis_column_major,&j,n)?;
         let state_phases=p.hilbert.source.gauges.iter().map(|q|phases.phase(q,time)).collect::<Result<Vec<_>,_>>()?;
@@ -158,6 +180,15 @@ pub struct PopulationBasis{modes:Vec<Charge>,columns:usize,coefficients:Vec<C>}
 struct Duals{charges:Vec<Charge>,states:usize,values:Vec<C>}
 impl Duals{
     fn zeros(charges:Vec<Charge>,n:usize,states:usize)->Self{let length=charges.len()*n*n*states;Self{charges,states,values:vec![C::default();length]}}
+    /// The sum of several dual families over the union of their charges.
+    fn sum(parts:&[&Duals],n:usize)->Self{
+        let charges:Vec<Charge>=parts.iter().flat_map(|d|d.charges.iter().cloned()).collect::<Modes>().into_iter().collect();
+        let index:BTreeMap<&Charge,usize>=charges.iter().enumerate().map(|(i,q)|(q,i)).collect();
+        let states=parts[0].states;let size=n*n*states;let mut out=Self::zeros(charges.clone(),n,states);
+        for part in parts{for(m,q)in part.charges.iter().enumerate(){let target=index[q]*size;
+            for(a,&b)in out.values[target..target+size].iter_mut().zip(part.block(n,m)){add(a,b);}}}
+        out
+    }
     fn block(&self,n:usize,index:usize)->&[C]{let size=n*n*self.states;&self.values[index*size..(index+1)*size]}
 }
 fn dual_at(n:usize,states:usize,s:usize,i:usize,j:usize)->usize{i+n*(s+states*j)}
@@ -176,7 +207,7 @@ fn paired_order(set:&Modes)->Option<(Vec<Charge>,usize)>{
 }
 /// Pull-back through ad_S: Q -> S^T Q - Q S^T is the bilinear adjoint of
 /// X -> [S, X], and a dual at charge q reaches charge q+p through S_p. Runs on
-/// the pencil's blocked commutator kernel (S has only GE/EG blocks).
+/// the pencil's blocked commutator kernel.
 struct DualCommutator{n:usize,ground:usize,transposed:FourierMatrices,lapack:Arc<Lapack>,execution:Execution,scratch:Vec<Scratch>}
 impl DualCommutator{
     fn new(s:&FourierMatrices,n:usize,ground:usize,lapack:Arc<Lapack>)->Result<Self,String>{
@@ -207,10 +238,11 @@ impl DualCommutator{
     }
 }
 impl PopulationObservation{
-    /// Readout duals D = (I + ad_S^T + (ad_S^T)^2/2)(I + K^T) O, where O_s is
-    /// the population functional of state s in the Hilbert frame. States
+    /// Readout duals D = T_0^T ... T_last^T (I + K^T) O, with
+    /// T^T = I + sum_c (ad_{S_c}^T + (ad_{S_c}^T)^2/2) per shear layer and
+    /// O_s the population functional of state s in the Hilbert frame. States
     /// whose (I + K^T) O_s are nonzero on the same charges are pulled back
-    /// together (Rb87: excited-state functionals live on charge 0 only).
+    /// together, `STATE_CHUNK` at a time.
     fn prepare(coordinates:&PhysicalCoordinates)->Result<Self,String>{
         let p=&coordinates.primitives;let n=p.hilbert.source.n;let g=p.hilbert.source.ground.len();let e=n-g;
         let basis=&p.hilbert.basis_column_major;let zero=vec![0;p.hilbert.source.phases.axes.len()];
@@ -238,52 +270,45 @@ impl PopulationObservation{
         let mut patterns=BTreeMap::<Vec<usize>,Vec<usize>>::new();
         for state in 0..n{let key:Vec<usize>=(0..before.charges.len()).filter(|&m|nonzero(m,state)).collect();
             if !key.is_empty(){patterns.entry(key).or_default().push(state);}}
-        let mut commutator=DualCommutator::new(&p.s,n,g,Arc::clone(&coordinates.lapack))?;
-        let mut groups=Vec::new();
-        for(key,states)in patterns{let r=states.len();
-            let mut own=Duals::zeros(key.iter().map(|&m|before.charges[m].clone()).collect(),n,r);
-            for(local_charge,&m)in key.iter().enumerate(){for(local,&state)in states.iter().enumerate(){for i in 0..n{for j in 0..n{
-                own.values[local_charge*n*n*r+dual_at(n,r,local,i,j)]=before.values[m*size+at(state,i,j)];
-            }}}}
-            let once=commutator.apply(&own,1.,true)?;let twice=commutator.apply(&once,0.5,true)?;
-            groups.push((states,[own,once,twice]));
-        }
-        // complete = before + once + twice/2 per charge (sorted) and state.
-        let charges:Vec<Charge>=groups.iter().flat_map(|(_,parts)|parts.iter().flat_map(|d|d.charges.iter().cloned())).collect::<Modes>().into_iter().collect();
-        let charge_index:BTreeMap<&Charge,usize>=charges.iter().enumerate().map(|(i,q)|(q,i)).collect();
-        // blocks[group][charge]: the blocks of before/once/twice at that charge.
-        let mut blocks:Vec<Vec<Vec<&[C]>>>=vec![vec![Vec::new();charges.len()];groups.len()];
-        for(group,(_,parts))in groups.iter().enumerate(){for part in parts{for(m,q)in part.charges.iter().enumerate(){
-            blocks[group][charge_index[q]].push(part.block(n,m));}}}
-        let mut owner=vec![None;n];
-        for(group,(states,_))in groups.iter().enumerate(){for(local,&state)in states.iter().enumerate(){owner[state]=Some((group,local,states.len()));}}
-        let complete=|charge:usize,state:usize,i:usize,j:usize|->C{owner[state].map_or(C::default(),|(group,local,r)|{
-            let at=dual_at(n,r,local,i,j);blocks[group][charge].iter().fold(C::default(),|mut sum,block|{add(&mut sum,block[at]);sum})})};
+        // Entries below 1e-15 of the largest functional entry are accumulated
+        // roundoff of the S/K pull-back (which changes entries by O(|S|)
+        // relative). Dropping them changes a population by at most
+        // 1e-15*max|O|*(number of dropped entries)*|x|, far below any
+        // requested tolerance, and removes most of the readout work.
         let magnitude=|z:C|z.re*z.re+z.im*z.im;
-        let execution=&commutator.execution;let minimum=crate::parallel::MINIMUM_WORK_PER_TASK;let work=charges.len()*size*16;
-        let mut largest=vec![0_f64;charges.len()];
-        execution.for_mode_chunks(&mut largest,1,work,minimum,&mut Vec::<()>::new(),|first,chunk,_|{
-            for(k,value)in chunk.iter_mut().enumerate(){
-                *value=(0..n).flat_map(|s|(0..n).flat_map(move|i|(0..n).map(move|j|(s,i,j)))).map(|(s,i,j)|magnitude(complete(first+k,s,i,j))).fold(0_f64,f64::max);
-            }Ok(())
-        })?;
-        // Entries below 1e-15 of the largest dual entry are accumulated
-        // roundoff of the S/K pull-back. Dropping them changes a population
-        // by at most 1e-15*max|D|*(number of dropped entries)*|x|, far below
-        // any requested tolerance, and removes ~3/4 of the readout work.
-        let largest=largest.into_iter().fold(0_f64,f64::max).sqrt();
+        let largest=before.values.iter().map(|&z|magnitude(z)).fold(0_f64,f64::max).sqrt();
         let floor=1e-15*largest;let floor_squared=floor*floor;
         if largest>0.&&!floor_squared.is_normal(){return Err("Readout dual magnitudes outside the normal floating-point range".into());}
-        let mut rows=vec![Vec::new();charges.len()];
-        execution.for_mode_chunks(&mut rows,1,work,minimum,&mut Vec::<()>::new(),|first,chunk,_|{
-            for(k,entries)in chunk.iter_mut().enumerate(){
-                for state in 0..n{for i in 0..n{for j in 0..n{let z=complete(first+k,state,i,j);
-                    if magnitude(z)>floor_squared{entries.push((state,i*n+j,z));}
-                }}}
-            }Ok(())
-        })?;
-        drop(blocks);
-        let(charges,rows):(Vec<_>,Vec<_>)=charges.into_iter().zip(rows).filter(|(_,entries)|!entries.is_empty()).unzip();
+        // Pulled back through the shear layers, outermost first:
+        // D <- D + ad^T D + (ad^T)^2 D / 2 per layer. The states go through
+        // STATE_CHUNK at a time and each chunk keeps only its entries above
+        // the floor: with a strong far laser the layers reach thousands of
+        // charges, where dense duals of all states would take ~1 GB while
+        // under 1 % of their entries are nonzero.
+        let mut commutators=p.layers.iter().rev().map(|layer|layer.iter().map(|class|DualCommutator::new(class,n,g,Arc::clone(&coordinates.lapack))).collect::<Result<Vec<_>,_>>()).collect::<Result<Vec<_>,_>>()?;
+        let execution=Execution::new()?;let execution=&execution;let minimum=crate::parallel::MINIMUM_WORK_PER_TASK;
+        let mut collected=BTreeMap::<Charge,Vec<(usize,usize,C)>>::new();
+        for(key,states)in patterns{for chunk in states.chunks(STATE_CHUNK){let r=chunk.len();
+            let mut own=Duals::zeros(key.iter().map(|&m|before.charges[m].clone()).collect(),n,r);
+            for(local_charge,&m)in key.iter().enumerate(){for(local,&state)in chunk.iter().enumerate(){for i in 0..n{for j in 0..n{
+                own.values[local_charge*n*n*r+dual_at(n,r,local,i,j)]=before.values[m*size+at(state,i,j)];
+            }}}}
+            for layer in &mut commutators{let mut total:Option<Duals>=None;
+                for commutator in layer.iter_mut(){let once=commutator.apply(&own,1.,true)?;let twice=commutator.apply(&once,0.5,true)?;
+                    total=Some(Duals::sum(&[total.as_ref().unwrap_or(&own),&once,&twice],n));}
+                if let Some(total)=total{own=total;}
+            }
+            let mut rows=vec![Vec::new();own.charges.len()];let work=own.charges.len()*n*n*r*4;
+            execution.for_mode_chunks(&mut rows,1,work,minimum,&mut Vec::<()>::new(),|first,part,_|{
+                for(k,entries)in part.iter_mut().enumerate(){let block=own.block(n,first+k);
+                    for(local,&state)in chunk.iter().enumerate(){for i in 0..n{for j in 0..n{let z=block[dual_at(n,r,local,i,j)];
+                        if magnitude(z)>floor_squared{entries.push((state,i*n+j,z));}
+                    }}}
+                }Ok(())
+            })?;
+            for(q,entries)in own.charges.iter().zip(rows){if !entries.is_empty(){collected.entry(q.clone()).or_default().extend(entries);}}
+        }}
+        let(charges,rows):(Vec<_>,Vec<_>)=collected.into_iter().map(|(q,mut entries)|{entries.sort_by_key(|&(state,at,_)|(state,at));(q,entries)}).unzip();
         Ok(Self{owner:Arc::clone(p),charges,rows})
     }
     /// Output modes reached by the readout from the given domain modes.
