@@ -31,16 +31,28 @@
 //!
 //! # Algorithm and error control
 //!
+//! Conserved quantities and relaxation: the slow-manifold generator `J_eff`
+//! (`slow_dual.rs`, a dense eigenproblem without a pole) gives the number of
+//! conserved quantities (its modes at zero, up to its numerical resolution)
+//! and the slowest relaxation rate of the others, however small. More than
+//! one conserved quantity makes the mean initial-dependent; otherwise the
+//! limit is unique and `slowest_relaxation_us` says when it is reached.
+//!
 //! One-dimensional null space (the common case):
-//! 1. Trial space: the initial vector plus residual-driven correction columns
-//!    `delta = (s E - F)^-1 F w` at a near-zero pole `s`. The reduced null
-//!    vector `w` (Galerkin, exact trace conservation) converges in a handful
-//!    of columns; inner solves only shape the space.
+//! 1. Trial space: the initial vector (and, when a relaxation is slower than
+//!    the pole resolves, the slow generator's conserved and slow modes lifted
+//!    to the domain), plus residual-driven
+//!    correction columns `delta = (s E - F)^-1 F w` at a near-zero pole `s`
+//!    (a thousandth of the slowest relaxation rate, within 1e-10..1e-8/us).
+//!    The reduced null vector `w` (Galerkin, exact trace conservation, no
+//!    pole) converges in a handful of columns; inner solves only shape the
+//!    space.
 //! 2. Basis error: `w + delta` is the Newton update of the null vector, so the
 //!    laboratory readout of `delta` estimates the error of `w`. A slow mode of
-//!    rate `gamma` is resolved by the pole with relative bias `s / gamma`, at
-//!    most 1% for every resolvable rate; the estimate is inflated by
-//!    `1 + s/gamma`. The correction solves are accurate (the unresolved part of
+//!    rate `gamma` is resolved by the pole with relative bias `s / gamma`; the
+//!    estimate is inflated by `1 + s/gamma` with the slowest rate of the slow
+//!    generator (or, without it, of the reduced model above the resolvable
+//!    rate `100 s`). The correction solves are accurate (the unresolved part of
 //!    an inexact solve sits in the slow, most amplified directions), and every
 //!    estimate is checked against the change actually observed after the
 //!    correction enters the space; an under-prediction raises the factor
@@ -59,28 +71,39 @@
 //!    Frobenius error) and that change is charged to the budget.
 //! 5. Accept when `SAFETY * (basis + halo) + projection <= epsilon`.
 //!
-//! Degenerate null space: detected as a second reduced eigenvalue below the
-//! resolvable rate, or by a probe comparing the corrected mean with `Pi0` of a
-//! second vector (`X0` for driven models, the mixed state for static ones).
-//! `Pi0 X0` is then evaluated with the resolvent at two poles and first-order
-//! Richardson extrapolation; Fourier convergence is checked by repeating the
-//! evaluation with every neighbouring mode added.
+//! Degenerate null space: a second conserved mode of the slow generator, or
+//! (without it, or when every relaxation is resolvable) a second reduced
+//! eigenvalue below the resolvable rate or a probe comparing the corrected
+//! mean with `Pi0` of a second vector (`X0` for driven models, the mixed
+//! state for static ones). `Pi0 X0` is then evaluated with the resolvent at
+//! two poles and first-order Richardson extrapolation (refused when a
+//! relaxation is slower than the pole resolves, and when a resolvent solve
+//! stalls); Fourier convergence is checked by repeating the evaluation with
+//! every neighbouring mode along every Fourier step added.
 use super::*;
 use super::directions::{shift_invert, InnerSolve};
 use super::engine::{support_domain, RequestedGroup};
 use super::reduced::ReducedModel;
 use super::runtime_core::RuntimeCore;
+use super::slow_dual::{SlowDual, SlowDualOptions, SlowSpectrum};
 use super::trial::{DomainOperator, TrialSpace};
 
-/// Near-zero pole (1/us). Rb87 optical-pumping spectra contain rates down to
-/// about 1e-6/us (off-resonant pumping between hyperfine levels), invisible
-/// to a small reduced model, so the pole sits at the smallest value at which
-/// P0 and GMRES stay well conditioned.
-const POLE: f64 = 1e-8;
-/// Rates below this cannot be separated from zero by the pole (bias above 1%)
-/// and are treated as conserved: the mean then refers to times much shorter
-/// than the inverse of such a rate (one second at 1e-6/us).
-const RESOLVABLE_RATE: f64 = 100. * POLE;
+/// Largest near-zero pole (1/us). The pole is chosen from the relaxation
+/// spectrum of the slow generator `J_eff` (`SlowDual::slow_spectrum`, which
+/// resolves arbitrarily small rates without a pole): `POLE_RESOLUTION` times
+/// its slowest relaxation rate, within `POLE_FLOOR..=POLE_MAX`.
+const POLE_MAX: f64 = 1e-8;
+/// Smallest pole. Slower relaxations are not resolved by the pole but by the
+/// trial space: it starts with the slow generator's conserved and slow modes
+/// (`seed_slow_modes`), so the Galerkin null vector (no pole) carries them,
+/// and the pole only shapes corrections whose estimate is inflated by the
+/// bias `1 + pole / rate`. (A correction solve at a pole a thousand times
+/// below a 1e-9/us rate was observed to lose the slow direction.)
+const POLE_FLOOR: f64 = 1e-10;
+const POLE_RESOLUTION: f64 = 1e-3;
+/// A reduced eigenvalue below this many poles is not separated from zero by
+/// the pole (bias above 1%).
+const RESOLVABLE_POLES: f64 = 100.;
 /// Safety factor on the summed basis and halo estimates. Measured
 /// effectivities of the correction readout are 0.92..1.00.
 const SAFETY: f64 = 1.25;
@@ -95,6 +118,9 @@ const ESTIMATE_RESIDUAL_LIMIT: f64 = 1e-3;
 /// resolves differences of a quarter tolerance), and of the degenerate path.
 const PROBE_TOLERANCE_PER_EPSILON: f64 = 1e-2;
 const RESOLVENT_TOLERANCE: f64 = 1e-9;
+/// A resolvent solve whose true relative residual stays above this multiple
+/// of the requested one has stalled; its mean is not used.
+const RESOLVENT_STALL: f64 = 10.;
 /// Halo modes are added until they cover this fraction of the halo weight.
 const HALO_COVERAGE: f64 = 0.9;
 /// Halo modes whose transport amplitude `|h_q| / |s + i omega_q|` is below
@@ -135,8 +161,9 @@ impl MeanOptions {
 pub enum MeanKind {
     /// One-dimensional null space: the same mean for every initial density.
     Unique,
-    /// Several conserved quantities (or rates below the resolvable rate): the
-    /// mean depends on the initial density.
+    /// Several conserved quantities (zero modes of the slow generator; without
+    /// it, of the reduced model or the resolvent probe): the mean depends on
+    /// the initial density.
     InitialDependent { zero_modes: usize },
 }
 
@@ -168,6 +195,13 @@ pub struct MeanDiagnostics {
     /// (the corrected one, or the extrapolated resolvent vector).
     pub relative_residual: f64,
     pub slowest_rate: Option<f64>,
+    /// Slowest relaxation time (us) of the decaying modes: `1 / rate` of the
+    /// slowest relaxation of `J_eff`, or of the reduced model when the slow
+    /// generator is unavailable; `None` when no decaying mode is resolved.
+    /// A unique limit is reached after a few such times.
+    pub slowest_relaxation_us: Option<f64>,
+    /// Conserved quantities of `J_eff` (None when unavailable).
+    pub conserved_quantities: Option<usize>,
     pub zero_modes: usize,
     pub pole: f64,
     pub columns: usize,
@@ -175,8 +209,9 @@ pub struct MeanDiagnostics {
     pub operator_applications: usize,
     pub elapsed_ms: f64,
     /// Milliseconds: domain operators (pencil plans, P0 shifts), correction
-    /// solves, halo condensation, degeneracy probe.
-    pub timing: [f64; 4],
+    /// solves, halo condensation, degeneracy probe, slow-dual preparation
+    /// (when `solve` prepares it).
+    pub timing: [f64; 5],
     /// Diagonal of the uncorrected null-vector mean: the quantity whose error
     /// the basis estimate measures (kept for verification of the estimate).
     pub uncorrected_populations: Vec<f64>,
@@ -442,11 +477,11 @@ impl ReducedSpectrum {
         self.magnitudes.get(1).copied()
     }
     /// The structural zero plus every eigenvalue below the resolvable rate.
-    fn zero_modes(&self) -> usize {
-        1 + self.magnitudes.iter().skip(1).filter(|&&x| x < RESOLVABLE_RATE).count()
+    fn zero_modes(&self, resolvable: f64) -> usize {
+        1 + self.magnitudes.iter().skip(1).filter(|&&x| x < resolvable).count()
     }
-    fn slowest_resolved_rate(&self) -> Option<f64> {
-        self.magnitudes.iter().skip(1).copied().find(|&x| x >= RESOLVABLE_RATE)
+    fn slowest_resolved_rate(&self, resolvable: f64) -> Option<f64> {
+        self.magnitudes.iter().skip(1).copied().find(|&x| x >= resolvable)
     }
 }
 
@@ -668,14 +703,28 @@ struct Context {
     domain_steps: Vec<Charge>,
     frame: Frame,
     lapack: Arc<Lapack>,
+    /// Relaxation spectrum of the slow generator (None when it is
+    /// unavailable: then the reduced spectrum and the probe alone decide).
+    slow: Option<SlowSpectrum>,
+    /// The near-zero pole of this attempt.
+    pole: f64,
 }
 
 impl Context {
-    fn new(core: &RuntimeCore, options: &MeanOptions) -> Result<Self, String> {
+    fn new(core: &RuntimeCore, options: &MeanOptions, slow: Option<SlowSpectrum>) -> Result<Self, String> {
         let source = &core.prepared().primitives().hilbert.source;
         let steps = core.fourier_steps()?;
+        let pole = slow.and_then(|s| s.slowest_rate).map_or(POLE_MAX, |rate| (POLE_RESOLUTION * rate).clamp(POLE_FLOOR, POLE_MAX));
         Ok(Self { n: source.n, axes: steps.axes, steps: steps.all, domain_steps: steps.domain,
-            frame: Frame::new(&source.gauges, &options.lab)?, lapack: Arc::clone(core.lapack()) })
+            frame: Frame::new(&source.gauges, &options.lab)?, lapack: Arc::clone(core.lapack()), slow, pole })
+    }
+    /// Rates the current pole separates from zero.
+    fn resolvable_rate(&self) -> f64 {
+        RESOLVABLE_POLES * self.pole
+    }
+    /// The slow generator found only the trace conserved.
+    fn slow_unique(&self) -> bool {
+        self.slow.is_some_and(|s| s.conserved == 1)
     }
     fn metric(&self, delta: &[C], groups: &[RequestedGroup]) -> Result<f64, String> {
         error_metric(&self.lapack, delta, self.n, groups)
@@ -686,7 +735,7 @@ impl Context {
 struct Work {
     started: Instant,
     applications: usize,
-    timing: [f64; 4],
+    timing: [f64; 5],
     checkpoints: Vec<MeanCheckpoint>,
 }
 
@@ -727,15 +776,56 @@ enum Outcome {
     Degenerate { modes: Vec<Charge>, zero_modes: usize, slowest_rate: Option<f64> },
 }
 
+/// The long-time mean, preparing the request's slow dual itself (the mean
+/// proceeds without it if that fails).
 pub fn solve(core: &mut RuntimeCore, options: &MeanOptions) -> Result<MeanSolution, String> {
+    let started = Instant::now();
+    let dual = SlowDual::prepare(core.prepared(), SlowDualOptions::default()).ok();
+    let mut solution = solve_with(core, options, dual.as_ref())?;
+    solution.diagnostics.timing[4] += ms(started) - solution.diagnostics.elapsed_ms;
+    solution.diagnostics.elapsed_ms = ms(started);
+    Ok(solution)
+}
+
+/// `solve` with the request's slow dual (None: unavailable).
+///
+/// Classification by the slow generator: more than one conserved mode of
+/// `J_eff` is a genuinely conserved quantity, and the initial-dependent
+/// projection is computed directly. Otherwise the limit is unique however
+/// slow its relaxation: the pole is set below the slowest rate (down to
+/// `POLE_FLOOR`), the trial space starts with the slow generator's conserved
+/// and unresolved slow modes, the reduced spectrum's near-zero eigenvalues
+/// are relaxations rather than conserved quantities, and the bias of the
+/// estimate uses the slow generator's slowest rate. Without a slow generator
+/// the reduced spectrum and the degeneracy probe decide, as before.
+pub fn solve_with(core: &mut RuntimeCore, options: &MeanOptions, slow: Option<&SlowDual>) -> Result<MeanSolution, String> {
     let epsilon = options.population_tolerance;
     if !(epsilon > 0. && epsilon <= 0.02) {
         return Err("populationTolerance must be in (0, 0.02]".into());
     }
-    let context = Context::new(core, options)?;
-    let mut work = Work { started: Instant::now(), applications: 0, timing: [0.; 4], checkpoints: Vec::new() };
-    match null_vector_mean(core, options, &context, &mut work)? {
+    let started = Instant::now();
+    let slow_dual = slow;
+    let slow = slow.map(|dual| dual.slow_spectrum());
+    let context = Context::new(core, options, slow)?;
+    let mut work = Work { started, applications: 0, timing: [0.; 5], checkpoints: Vec::new() };
+    let unresolved = slow.and_then(|s| s.slowest_rate).filter(|&rate| rate < context.resolvable_rate());
+    if let Some(conserved) = slow.map(|s| s.conserved).filter(|&c| c > 1) {
+        // The resolvent projection keeps a fraction pole / rate of every
+        // decaying mode; it is used only when no relaxation is that slow.
+        if let Some(rate) = unresolved {
+            return Err(format!("{conserved} conserved quantities together with a relaxation of {:e} us cannot be resolved by the near-zero pole; the tolerance was not relaxed", 1. / rate));
+        }
+        let modes = support_domain(context.axes, &context.domain_steps, 1)?;
+        return degenerate(core, options, &context, modes, conserved, None, &mut work);
+    }
+    match null_vector_mean(core, options, &context, slow_dual, &mut work)? {
         Outcome::Null(candidate, mut state) => {
+            // With the slow generator unique and a relaxation the pole cannot
+            // resolve, the probe's resolvent would keep that slow mode and
+            // read it as a degeneracy: the slow generator decides.
+            if context.slow_unique() && unresolved.is_some() {
+                return finish(&context, options, candidate, MeanKind::Unique, &mut work);
+            }
             let clock = Instant::now();
             let probe = degeneracy_probe(core, options, &context, &candidate, &mut state, &mut work)?;
             work.timing[3] += ms(clock);
@@ -780,6 +870,8 @@ fn finish(context: &Context, options: &MeanOptions, candidate: Candidate, kind: 
             hermiticity_error: projected.hermiticity_error,
             relative_residual: candidate.relative_residual,
             slowest_rate: candidate.slowest_rate,
+            slowest_relaxation_us: context.slow.map_or(candidate.slowest_rate, |s| s.slowest_rate).map(|rate| 1. / rate),
+            conserved_quantities: context.slow.map(|s| s.conserved),
             zero_modes: candidate.zero_modes,
             pole: candidate.pole,
             columns: candidate.columns,
@@ -794,13 +886,21 @@ fn finish(context: &Context, options: &MeanOptions, candidate: Candidate, kind: 
 }
 
 /// Defect-corrected null vector of the pencil with basis and halo control.
-fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, work: &mut Work) -> Result<Outcome, String> {
+fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, slow_dual: Option<&SlowDual>, work: &mut Work)
+    -> Result<Outcome, String> {
     let epsilon = options.population_tolerance;
     let mut modes = support_domain(context.axes, &context.domain_steps, 1)?;
-    let pole = POLE;
+    let pole = context.pole;
+    let resolvable = context.resolvable_rate();
     let clock = Instant::now();
     let mut space = TrialSpace::new(core, &modes, &[pole])?;
     let mut readout = TargetReadout::new(core, &modes, &context.frame)?;
+    // Only a relaxation the pole cannot resolve needs the slow modes in the
+    // space from the start (the corrections resolve every other one).
+    let unresolved = context.slow.and_then(|s| s.slowest_rate).is_some_and(|rate| rate < resolvable);
+    if let Some(dual) = slow_dual.filter(|_| context.slow_unique() && unresolved) {
+        seed_slow_modes(&mut space, dual, resolvable)?;
+    }
     work.timing[0] += ms(clock);
     // Set when the correction is already contained in the trial space: the
     // space is invariant and its null vector exact on this domain.
@@ -816,9 +916,11 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
         }
         let model = ReducedModel::build(&space)?;
         let spectrum = ReducedSpectrum::of(&model, &context.lapack)?;
-        let zero_modes = spectrum.zero_modes();
+        // With the slow generator unique, near-zero reduced eigenvalues are
+        // slow relaxations (its conserved count is the zero-mode count).
+        let zero_modes = if context.slow_unique() { 1 } else { spectrum.zero_modes(resolvable) };
         if zero_modes > 1 {
-            return Ok(Outcome::Degenerate { modes, zero_modes, slowest_rate: spectrum.slowest_resolved_rate() });
+            return Ok(Outcome::Degenerate { modes, zero_modes, slowest_rate: spectrum.slowest_resolved_rate(resolvable) });
         }
         let rows = space.rows();
         let null_reduced = reduced_null_vector(&model, space.traces().0, &context.lapack)?;
@@ -841,8 +943,15 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
         work.timing[1] += ms(clock);
         let delta_signed = space.op.signed_block(&delta, 1)?;
         let basis_density = readout.density(core.physical(), &context.frame, &delta_signed)?;
-        // A slow rate gamma is resolved by the pole with relative bias s/gamma.
-        let slowest = spectrum.slowest_rate().unwrap_or(RESOLVABLE_RATE).max(RESOLVABLE_RATE);
+        // A slow rate gamma is resolved by the pole with relative bias s/gamma:
+        // the slow generator's slowest rate (and a slower resolved reduced
+        // one), or without it the reduced spectrum's above the resolvable rate.
+        let slowest = if context.slow_unique() {
+            let rate = context.slow.and_then(|s| s.slowest_rate).unwrap_or(f64::INFINITY);
+            spectrum.slowest_rate().filter(|&r| r >= resolvable).map_or(rate, |r| r.min(rate))
+        } else {
+            spectrum.slowest_rate().unwrap_or(resolvable).max(resolvable)
+        };
         let bias = calibration * (1. + pole / slowest);
         let predicted = context.metric(&basis_density, &options.groups)?;
         let basis_estimate = predicted * bias;
@@ -920,6 +1029,40 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
     }
 }
 
+/// Appends the slow generator's conserved modes and its modes relaxing
+/// slower than `rate` to the trial space (real and imaginary parts of each
+/// lifted frame field on the domain's slot charges). The Galerkin null vector
+/// then carries the slow manifold however slow its relaxation, which no pole
+/// above `rate / 100` resolves in a correction. Returns the columns added.
+fn seed_slow_modes(space: &mut TrialSpace, dual: &SlowDual, rate: f64) -> Result<usize, String> {
+    let modes = space.op.modes().to_vec();
+    let n = space.op.map().physical_dimension();
+    let d = n * n;
+    let rows = space.rows();
+    let mut added = 0;
+    for blocks in dual.slow_modes(rate)? {
+        let mut signed = vec![C::default(); modes.len() * d];
+        for (slot, x) in &blocks {
+            let Some(k) = modes.iter().position(|q| q == &dual.slots[*slot]) else { continue };
+            for a in 0..n {
+                for b in 0..n {
+                    signed[k * d + a * n + b] = x.at(a, b);
+                }
+            }
+        }
+        let mut pulled = vec![C::default(); rows];
+        space.op.map().pull_complex_into(&signed, 1, &mut pulled)?;
+        for part in [pulled.iter().map(|z| z.re).collect::<Vec<f64>>(), pulled.iter().map(|z| z.im).collect()] {
+            let size = euclid(&part);
+            let scale = euclid_complex(&pulled);
+            if size > 1e-8 * scale && size.is_finite() {
+                added += space.append(part, 1)?.len();
+            }
+        }
+    }
+    Ok(added)
+}
+
 // ---------------------------------------------------------------------------
 // Degenerate null space.
 
@@ -971,6 +1114,8 @@ fn placed(op: &DomainOperator, matrix: &[C], central_only: bool) -> Result<Vec<f
 
 /// Laboratory mean of `v = s (sE - F)^-1 E probe` for the single pole `s` of
 /// `op`, and `v` itself (REAL coordinates); it tends to `Pi0 probe` as `s -> 0`.
+/// A solve that stalls above `RESOLVENT_STALL` times the requested relative
+/// residual is an error: its mean is not used.
 fn resolvent_mean(core: &RuntimeCore, context: &Context, op: &mut DomainOperator, readout: &mut TargetReadout, probe: &[C],
     central_only: bool, tolerance: f64, applications: &mut usize) -> Result<(Vec<C>, Vec<f64>), String> {
     let pole = *op.poles().first().ok_or("Resolvent operator without a pole")?;
@@ -979,7 +1124,10 @@ fn resolvent_mean(core: &RuntimeCore, context: &Context, op: &mut DomainOperator
     let (mut ex, mut fx) = (vec![0.; rows], vec![0.; rows]);
     op.images(&x, 1, &mut ex, &mut fx)?;
     let settings = InnerSolve { maximum_steps: 80, relative_residual: tolerance };
-    let (v, _) = solve_shifted(op, &ex, settings, 12, applications)?;
+    let (v, relative) = solve_shifted(op, &ex, settings, 12, applications)?;
+    if !(relative <= RESOLVENT_STALL * tolerance) {
+        return Err(format!("The resolvent solve at pole {pole:e}/us stalled at relative residual {relative:e} (requested {tolerance:e}); the tolerance was not relaxed"));
+    }
     let scaled: Vec<f64> = v.iter().map(|value| pole * value).collect();
     let signed = op.signed_block(&scaled, 1)?;
     Ok((readout.density(core.physical(), &context.frame, &signed)?, scaled))
@@ -1038,11 +1186,13 @@ fn degeneracy_probe(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
 /// `Pi0` of the initial state (`X0` for driven models, the central initial
 /// vector for static ones) by the resolvent at the poles `s` and `2s` with
 /// first-order Richardson extrapolation; Fourier convergence by the change
-/// when every neighbouring mode along the domain steps is added. A static
-/// model is then classified by `Pi0` of the maximally mixed state.
+/// when every neighbouring mode along EVERY Fourier step is added (weak
+/// steps included, as the unique path's halo covers them: a weak leakage
+/// channel can decide which conserved state is reached). A static model is
+/// then classified by `Pi0` of the maximally mixed state.
 fn degenerate(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, mut modes: Vec<Charge>, zero_modes: usize,
     slowest_rate: Option<f64>, work: &mut Work) -> Result<MeanSolution, String> {
-    let pole = POLE;
+    let pole = context.pole;
     let initial = core.initial().point().to_vec();
     let central_only = context.axes == 0;
     // Extrapolated mean, first-order term, discarded optical coherence and the
@@ -1064,7 +1214,7 @@ fn degenerate(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, 
     let clock = Instant::now();
     let (mut mean, mut extrapolation, mut discarded, mut residual) = evaluate(core, &modes, &initial, work)?;
     loop {
-        let shell = shell_modes(&modes, &context.domain_steps);
+        let shell = shell_modes(&modes, &context.steps);
         let mut larger: Vec<Charge> = modes.iter().cloned().chain(shell.iter().cloned()).collect();
         larger.sort();
         let (halo_estimate, next) = if shell.is_empty() {
@@ -1143,27 +1293,42 @@ mod tests {
     fn sub(a: &mut C, b: C) { a.re -= b.re; a.im -= b.im; }
     fn inverse(a: C) -> C { let norm = a.re * a.re + a.im * a.im; C { re: a.re / norm, im: -a.im / norm } }
 
-    fn solve_mean(toy: &Toy, tolerance: f64) -> MeanSolution {
+    /// The prepared core and mean options of a toy, optionally with one more
+    /// drive `(frequency, cosine matrix)` on a second phase axis (laboratory
+    /// frame index 0 along it).
+    fn toy_core(toy: &Toy, tolerance: f64, second: Option<(f64, &[C])>) -> (RuntimeCore, MeanOptions) {
         let n = toy.n;
-        let parts: Vec<_> = toy.drives.iter().map(|(cos, sin)| (real(cos), imag(cos), real(sin), imag(sin))).collect();
-        let drives: Vec<DriveView> = parts.iter().map(|p| DriveView { omega: toy.nu,
-            cosine: MatrixView { real: &p.0, imag: &p.1 }, sine: MatrixView { real: &p.2, imag: &p.3 } }).collect();
+        let zero = vec![C::default(); n * n];
+        let mut parts: Vec<_> = toy.drives.iter().map(|(cos, sin)| (toy.nu, real(cos), imag(cos), real(sin), imag(sin))).collect();
+        if let Some((nu2, cos2)) = second {
+            parts.push((nu2, real(cos2), imag(cos2), real(&zero), imag(&zero)));
+        }
+        let drives: Vec<DriveView> = parts.iter().map(|p| DriveView { omega: p.0,
+            cosine: MatrixView { real: &p.1, imag: &p.2 }, sine: MatrixView { real: &p.3, imag: &p.4 } }).collect();
         let channels: Vec<_> = toy.collapse.iter().map(|x| (real(x), imag(x))).collect();
         let collapse: Vec<MatrixView> = channels.iter().map(|(r, i)| MatrixView { real: r, imag: i }).collect();
         let (hr, hi) = (real(&toy.h0), imag(&toy.h0));
         let view = ModelView { dimension: n, hamiltonian: MatrixView { real: &hr, imag: &hi }, collapse: &collapse,
             drives: &drives, ground: &toy.ground, initial_index: toy.initial };
-        let (phases, frame): (PhaseBasis, Vec<Charge>) = if toy.drives.is_empty() {
+        let (phases, frame): (PhaseBasis, Vec<Charge>) = if parts.is_empty() {
             (PhaseBasis::from_declared(&[], None, &[]).unwrap(), vec![vec![]; n])
+        } else if let Some((nu2, _)) = second {
+            let charges: Vec<Charge> = toy.drives.iter().map(|_| vec![1, 0]).chain([vec![0, 1]]).collect();
+            (PhaseBasis::from_declared(&[toy.nu, nu2], None, &charges).unwrap(), toy.frame.iter().map(|&f| vec![f, 0]).collect())
         } else {
             (PhaseBasis::from_declared(&[toy.nu], None, &vec![vec![1]; toy.drives.len()]).unwrap(),
                 toy.frame.iter().map(|&f| vec![f]).collect())
         };
-        let mut core = RuntimeCore::prepare(&view, InitialView { index: toy.initial, real: None, imag: None }, phases,
+        let core = RuntimeCore::prepare(&view, InitialView { index: toy.initial, real: None, imag: None }, phases,
             GaugePolicy::UnsafeComponentAligned, KernelPolicy::HybridBlas, P0Policy::EigenPreferred).unwrap();
         let lab = LabFrame { frame_indices: frame, sectors: toy.ground.iter().map(|&g| if g { 0 } else { 1 }).collect() };
         let groups = vec![RequestedGroup { name: "excited".into(), indices: (0..n).filter(|&i| !toy.ground[i]).collect() }];
-        solve(&mut core, &MeanOptions::new(tolerance, groups, lab)).unwrap()
+        (core, MeanOptions::new(tolerance, groups, lab))
+    }
+
+    fn solve_mean(toy: &Toy, tolerance: f64) -> MeanSolution {
+        let (mut core, options) = toy_core(toy, tolerance, None);
+        solve(&mut core, &options).unwrap()
     }
 
     /// Dense reference, independent of the gauge pencil: the ungauged
@@ -1171,6 +1336,13 @@ mod tests {
     /// `s (s - K)^-1 X0` with a tiny `s` by complex Gaussian elimination,
     /// which is `Pi0 X0` for ANY null-space dimension. Laboratory mean.
     fn dense_mean(toy: &Toy, order: i32) -> Vec<C> {
+        dense_mean_at(toy, order, 1e-10)
+    }
+
+    /// `dense_mean` with the pole `s`; `s = 0` on a static toy is the exact
+    /// stationary state of a unique null space (one population equation
+    /// replaced by the trace normalisation), free of any pole bias.
+    fn dense_mean_at(toy: &Toy, order: i32, s: f64) -> Vec<C> {
         let n = toy.n;
         let d = n * n;
         let modes = (2 * order + 1) as usize;
@@ -1217,7 +1389,6 @@ mod tests {
             .map(|(a, b)| C { re: 0.5 * (a.re + b.im), im: 0.5 * (a.im - b.re) }).collect()).collect();
         let minus: Vec<Vec<C>> = toy.drives.iter().map(|(cs, sn)| cs.iter().zip(sn)
             .map(|(a, b)| C { re: 0.5 * (a.re - b.im), im: 0.5 * (a.im + b.re) }).collect()).collect();
-        let s = 1e-10;
         // Row-major (s - K).
         let mut matrix = vec![C::default(); size * size];
         for column in 0..size {
@@ -1246,6 +1417,16 @@ mod tests {
         let mut rhs = vec![C::default(); size];
         for q in 0..modes {
             rhs[q * d + toy.initial * n + toy.initial] = c(s);
+        }
+        if s == 0. {
+            assert!(toy.drives.is_empty() && order == 0, "the exact stationary state is for static toys");
+            for j in 0..size {
+                matrix[j] = C::default();
+            }
+            for i in 0..n {
+                matrix[i * n + i] = c(1.);
+            }
+            rhs[0] = c(1.);
         }
         for k in 0..size {
             let magnitude = |z: C| z.re.hypot(z.im);
@@ -1359,6 +1540,9 @@ mod tests {
         assert!(error < 1e-4, "driven error {error:e}");
         assert!(reference[1].re.hypot(reference[1].im) > 1e-3, "the ground coherence is a nonzero model-frame harmonic");
         assert!(mean.diagnostics.estimated_error <= 1e-4);
+        assert_eq!(mean.diagnostics.conserved_quantities, Some(1));
+        let relaxation = mean.diagnostics.slowest_relaxation_us.expect("a decaying mode");
+        assert!(relaxation.is_finite() && relaxation > 1. && relaxation < 100., "slowest relaxation {relaxation} us");
     }
 
     #[test]
@@ -1366,6 +1550,7 @@ mod tests {
         let toy = degenerate_driven();
         let mean = solve_mean(&toy, 1e-4);
         assert!(matches!(mean.kind, MeanKind::InitialDependent { .. }), "{:?}", mean.kind);
+        assert_eq!(mean.diagnostics.conserved_quantities, Some(2), "a conserved quantity besides the trace");
         // Independent Floquet reference (monodromy projector, scratch analysis)
         // and the dense resolvent of the extended generator.
         let expected = [0.673781965169, 0.326218034831, 0.];
@@ -1422,6 +1607,78 @@ mod tests {
             let error = largest_difference(&mean.density, &reference);
             assert!(error <= tolerance, "tolerance {tolerance}: error {error:e}");
         }
+    }
+
+    #[test]
+    fn a_slow_but_finite_relaxation_reaches_its_unique_limit() {
+        // A third ground state is filled through a 1e-4 decay amplitude
+        // (branching 1e-8) and emptied through a 3e-6 coupling: it relaxes at
+        // about 1.4e-9/us, far below the old resolvable rate (1e-6/us, below
+        // which rates were taken as conserved), and the unique limit puts
+        // almost all population there. The slow generator resolves the rate
+        // and sets the pole below it; the mean is the true limit, not an
+        // initial-dependent short-time state.
+        let n = 4;
+        let mut h0 = vec![C::default(); 16];
+        h0[5] = c(0.4);
+        h0[10] = c(0.2);
+        couple(&mut h0, n, 0, 3, 0.6);
+        couple(&mut h0, n, 1, 3, 0.3);
+        couple(&mut h0, n, 2, 3, 3e-6);
+        let mut decays = Vec::new();
+        for (ground, amplitude) in [(0, 0.9), (1, 0.7), (2, 1e-4)] {
+            let mut l = vec![C::default(); 16];
+            l[ground * n + 3] = c(amplitude);
+            decays.push(l);
+        }
+        let toy = Toy { n, ground: vec![true, true, true, false], h0, drives: vec![], collapse: decays, initial: 0, nu: 1.,
+            frame: vec![0; 4] };
+        let reference = dense_mean_at(&toy, 0, 0.);
+        assert!(reference[2 * n + 2].re > 0.5, "the limit fills the slow state ({})", reference[2 * n + 2].re);
+        let mean = solve_mean(&toy, 1e-4);
+        assert_eq!(mean.kind, MeanKind::Unique);
+        assert_eq!(mean.diagnostics.conserved_quantities, Some(1));
+        let relaxation = mean.diagnostics.slowest_relaxation_us.expect("the slow relaxation is resolved");
+        assert!((1e8..1e10).contains(&relaxation), "slowest relaxation {relaxation:e} us");
+        assert!(mean.diagnostics.pole <= 1e-10 * 1.0001, "pole {:e}", mean.diagnostics.pole);
+        let error = largest_difference(&mean.density, &reference);
+        assert!(error <= 1e-4, "error {error:e}");
+    }
+
+    #[test]
+    fn the_degenerate_branch_checks_every_fourier_step() {
+        // The degenerate driven pair plus a weak, far-detuned modulation of
+        // the excited energy on a second axis: its mixing amplitude is below
+        // the domain threshold, so the starting domain ignores that step, but
+        // the Fourier check of the initial-dependent projection must add the
+        // neighbours along it too.
+        let toy = degenerate_driven();
+        let mut modulation = vec![C::default(); 9];
+        modulation[8] = c(0.002);
+        let (mut core, options) = toy_core(&toy, 1e-4, Some((50., &modulation)));
+        let steps = core.fourier_steps().unwrap();
+        assert!(steps.all.len() > steps.domain.len(), "the modulation is a weak step");
+        let mean = solve(&mut core, &options).unwrap();
+        assert!(matches!(mean.kind, MeanKind::InitialDependent { .. }), "{:?}", mean.kind);
+        let first = mean.diagnostics.checkpoints.iter().find(|c| c.action == "degenerate-resolvent").expect("the degenerate branch");
+        let modes = support_domain(steps.axes, &steps.domain, 1).unwrap();
+        assert_eq!(first.halo_modes.0, shell_modes(&modes, &steps.all).len(), "shell over every step");
+        assert!(first.halo_modes.0 > shell_modes(&modes, &steps.domain).len());
+    }
+
+    #[test]
+    fn a_stalled_resolvent_solve_is_not_accepted() {
+        let toy = degenerate_driven();
+        let (mut core, options) = toy_core(&toy, 1e-4, None);
+        let context = Context::new(&core, &options, None).unwrap();
+        let modes = support_domain(context.axes, &context.domain_steps, 1).unwrap();
+        let mut op = DomainOperator::new(&mut core, &modes, &[context.pole]).unwrap();
+        let mut readout = TargetReadout::new(&core, &modes, &context.frame).unwrap();
+        let initial = core.initial().point().to_vec();
+        let mut applications = 0;
+        let unreachable = resolvent_mean(&core, &context, &mut op, &mut readout, &initial, false, 1e-300, &mut applications);
+        assert!(unreachable.as_ref().is_err_and(|e| e.contains("stalled")), "{:?}", unreachable.map(|_| ()));
+        assert!(resolvent_mean(&core, &context, &mut op, &mut readout, &initial, false, 1e-9, &mut applications).is_ok());
     }
 
     /// Every exactly-zero forbidden element (E->G collapse, G-E Hamiltonian
