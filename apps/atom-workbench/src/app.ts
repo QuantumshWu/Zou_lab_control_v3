@@ -36,7 +36,6 @@ import {escapeHtml as esc,levelsChart,number,populationChart,bindPopulationChart
 import {math} from './math.js';
 import {renderSpace3D,type SpaceSelection,type SpaceViewName} from './space3d.js';
 import {laserColour} from './identity.js';
-import {classifyLasers} from './laser-regime.js';
 import {POPULATION_GROUPS,recommendedPopulationStates,populationDisplayIds,withPopulationGroups} from './population-selection.js';
 import {durationUnit,durationValue,setDurationUnit,setDurationValue,durationText,timeDisplayUnit,DURATION_UNITS} from './duration.js';
 import type {DurationUnit} from './types.js';
@@ -208,7 +207,6 @@ function update():void{persist();invalidateObsoletePopulation();if(dirty)return;
 function note(text:string,word:StatusWord='task'):void{notice={text,word,until:performance.now()+6000};refreshStatus();window.setTimeout(refreshStatus,6100);}
 
 // ---------------------------------------------------------------- status
-function regimeProblems():string[]{try{return classifyLasers(scene).filter(c=>!c.valid).map(c=>labelStateIds(c.message));}catch(error){return [message(error)];}}
 function solverStatus():[string,StatusWord]{
   const result=currentResult(),error=currentSolverError();
   if(error)return [result?.steady.converged?`时间演化失败（长期布居已就绪）：${labelStateIds(solverText(error))}`:`布居计算失败：${labelStateIds(solverText(error))}`,'error'];
@@ -224,9 +222,7 @@ function solverStatus():[string,StatusWord]{
 function refreshStatus():void{
   if(notice&&performance.now()>notice.until)notice=undefined;
   let [text,word]=solverStatus();
-  const regime=regimeProblems();
   if(analysisError)[text,word]=[`能级参数无效：${analysisError}`,'error'];
-  else if(regime.length&&word!=='error')[text,word]=[`激光类型与失谐不匹配：${regime.join('；')}`,'warning'];
   if(notice)[text,word]=[notice.text,notice.word];
   if(saveState==='failed')[text,word]=[`本地保存失败：${saveFailure}；请导出场景`,'error'];
   else if(loadFailure&&!notice)[text,word]=[`原本地场景无法载入：${loadFailure}。已显示默认场景，原数据已保留`,'warning'];
@@ -329,9 +325,6 @@ function selectControl(parent:HTMLElement,label:string,value:string,options:[str
 }
 function setChoiceValue(control:HTMLSelectElement,value:string):void{const tree=treeOwners.get(control);if(tree)tree.value=value;else control.value=value;}
 function disposeTrees(host:HTMLElement):void{host.querySelectorAll<HTMLSelectElement>('select.tree-combo').forEach(node=>treeOwners.get(node)?.dispose());}
-function segmentedControl(parent:HTMLElement,label:string,value:string,options:[string,string][],changed:(value:string)=>void):Segmented{
-  const control=new Segmented(next=>{try{changed(String(next));control.setCurrent(next);}catch(error){note(message(error),'error');}});control.setChoices(options);control.setCurrent(value);control.root.setAttribute('aria-label',label);parent.append(fieldRow(label,control.root));return control;
-}
 /** Presets are commands, not modes. Rendering never selects or re-applies one. */
 function polarizationButtons(laser:Laser,choices:readonly (readonly [PolarizationPreset,string])[],label:string):HTMLElement{
   const actions=element('div','preset-actions');actions.role='group';actions.setAttribute('aria-label',label);
@@ -367,8 +360,8 @@ function renderInspector():void{
     directionButtons(g,(theta,phi)=>{field.thetaDeg=theta;field.phiDeg=phi;refreshFields(fields);renderObjects();update();});
   }else{
     const l=scene.lasers.find(l=>l.id===selection.id);if(!l)return;normalizeLaserFrequency(l);normalizeLaserIntensity(l);setText('inspector-title',l.name);
-    const mode=group('激光类型');segmentedControl(mode,'处理方式',l.regime??'near',[['near','近共振'],['far','远失谐']],value=>{l.regime=value as 'near'|'far';update();});
-    const validation=element('p','laser-regime-status');validation.id='laser-regime-status';mode.append(validation);
+    // ui-design.md §4: every laser drives the dynamics; this only chooses the levels chart's background.
+    const chart=group('能级图');bindField(fields,chart,'inspector',()=>({name:'show-light-shift',label:'显示光移',kind:'boolean',value:l.regime==='far',description:'开：未选中对象时，能级图的背景包含这束光的二阶光移（仅显示，不影响动力学）'}),v=>{l.regime=v===true?'far':'near';});
     const f=group('频率');
     frequencySection(f,l);
     const originPicker=selectControl(f,'参考态',l.referenceStateId??'',[['','跟随动力学初态'],...allLevels().map(state=>[state.id,stateText(state)] as [string,string]),...(scene.references??[]).map(ref=>[ref.id,ref.name+' · 参考能级'] as [string,string])],id=>{setLaserReferenceState(scene,l,id||undefined);persist();renderInspector();renderResults(false);});originPicker.id='laser-reference-state';originPicker.setAttribute('aria-label','参考出发态');originPicker.title='只改变这束光的箭头起点和矩元参考；不改变动力学初态或任何驱动。';
@@ -558,8 +551,6 @@ function refreshPopulationOnly():void{
   renderedPopulationKey=dynamicsKey();root.dataset.populationFresh=String(!!currentResult());root.dataset.populationPaintCount=String(++populationPaintCount);refreshStatus();
 }
 function requestSolve(force=false):void{
-  const invalid=classifyLasers(scene).find(c=>!c.valid);
-  if(invalid){cancelObsoleteSolve();solverError=invalid.message;requestedKey=dynamicsKey();refreshPopulationOnly();return;}
   const key=dynamicsKey(),physicalKey=dynamicsKey(false),steadyOnly=view==='levels'&&populationMode==='steady';
   if(force)stoppedKey='';else if(key===stoppedKey)return;
   displayedResults.activate(physicalKey);
@@ -749,7 +740,7 @@ function levelsLegend(a:Analysis,laser:Laser|undefined):string{
 /** What the level diagram is showing now, for its ⓘ. */
 function levelScope():{title:string;lines:string[]}|undefined{
   const a=latestAnalysis;if(!a)return undefined;
-  const lines=[...regimeProblems(),a.spectroscopy?.modelScope,...(a.spectroscopy?.warnings??[])].filter((line):line is string=>Boolean(line)).flatMap(line=>line.split('\n'));
+  const lines=[a.spectroscopy?.modelScope,...(a.spectroscopy?.warnings??[])].filter((line):line is string=>Boolean(line)).flatMap(line=>line.split('\n'));
   return lines.length?{title:'当前能级图',lines}:undefined;
 }
 function samplingScope():{title:string;lines:string[]}|undefined{
@@ -784,8 +775,6 @@ function renderResults(allowSolve=true):void{
   try{a=cachedAnalysis();latestAnalysis=a;analysisError='';selectedStates=selectedStates.filter(id=>allLevels(a).some(state=>state.id===id)||scene.references?.some(ref=>ref.id===id));if(comparisonSource&&!allLevels(a).some(s=>s.id===comparisonSource)&&!scene.references?.some(r=>r.id===comparisonSource))comparisonSource=undefined;}
   catch(error){analysisError=message(error);console.error(error);showAnalysisError(analysisError);setText('summary','—');refreshStatus();return;}
   refreshDirectionStates(a);refreshFields(inspectorFields);
-  const regimeErrors=classifyLasers(scene).filter(c=>!c.valid);
-  const regimeStatus=document.getElementById('laser-regime-status');if(regimeStatus){const selectedCheck=classifyLasers(scene).find(c=>c.id===activeLaser()?.id);regimeStatus.textContent=labelStateIds(selectedCheck?.message??'');regimeStatus.hidden=!selectedCheck?.message;}
   const laser=activeLaser(view==='levels'?spectral:undefined),pol=laser?a.polarizations[laser.id]:undefined;
   manifoldFocus.setCurrent(spectral);root.dataset.view=view;
   if(view!=='space'&&spaceMount.isConnected)spaceMount.remove();
@@ -802,7 +791,7 @@ function renderResults(allowSolve=true):void{
     setText('levels-heading',a.spectroscopy?.status==='unresolved'?'裸态能级':laser?'背景能级':'总场能级');
     setText('levels-legend',levelsLegend(a,laser));
     beamChip.hidden=!laser;if(laser)setMiddle(beamChipName,laser.name,'cut');
-    setText('levels-badge',regimeErrors.length?'激光类型与失谐不匹配':a.spectroscopy?.status==='unresolved'?(laser?'裸态失谐 · 背景光移未确定':'静态光移未定义'):populationMode==='time'&&a.spectroscopy?.requiresDensityProjection?'当前基底 p(t) 未提供':laser&&!laser.enabled?'已停用':'');
+    setText('levels-badge',a.spectroscopy?.status==='unresolved'?(laser?'裸态失谐 · 背景光移未确定':'静态光移未定义'):populationMode==='time'&&a.spectroscopy?.requiresDensityProjection?'当前基底 p(t) 未提供':laser&&!laser.enabled?'已停用':'');
     renderSelection(a,laser);
     levelsChart$.innerHTML=levelsChart(scene,a,laser,{line:spectral,selectedIds:markedComparison(laser),initialId:dynamics().initialStateId,populations:snapshot.populations,steadyPopulations:steadyPopulationsInView(a),steadyPopulationLabel:isDisplayedMean(currentResult(),a)?'mean':'limit',populationLabel:snapshot.label,viewportWidth:levelsChart$.clientWidth});
     const table=transitionTable(transitions);
@@ -817,7 +806,7 @@ function renderResults(allowSolve=true):void{
   }
   paintStateBadges();renderCount++;renderedPopulationKey=dynamicsKey();root.dataset.populationFresh=String(!!currentResult());refreshStatus();root.dataset.renderCount=String(renderCount);root.dataset.energyRenderedAt=String(performance.now());
   if(focusHost&&focusAttribute&&focusValue)focusHost.querySelector<HTMLElement>(`[${focusAttribute}="${CSS.escape(focusValue)}"]`)?.focus({preventScroll:true});
-  if(allowSolve&&!loadFailure&&view!=='space'&&!regimeErrors.length)requestSolve();
+  if(allowSolve&&!loadFailure&&view!=='space')requestSolve();
 }
 
 // ---------------------------------------------------------------- the scene as a document

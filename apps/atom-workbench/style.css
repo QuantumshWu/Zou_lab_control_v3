@@ -246,7 +246,6 @@ button.legend-item.selected { background: var(--selected); border-color: var(--s
 .bar-fill { display: block; height: 100%; background: var(--accent-strong); }
 .advanced-controls { margin-top: var(--section-gap); border-top: var(--edge) solid var(--divider); }
 .advanced-controls > .form { margin-top: var(--row-gap); }
-.laser-regime-status { grid-column: 1 / -1; margin: 0; color: var(--red-dark); white-space: normal; }
 /* The reference editor's number box and its unit column. */
 .number-field { flex: 1 1 0; min-width: 0; }
 .number-field input { font-variant-numeric: tabular-nums; }
