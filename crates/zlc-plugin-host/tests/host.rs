@@ -354,7 +354,7 @@ fn a_start_records_the_bench_its_devices_report_and_a_busy_one_is_not_lost() {
     for (instance, type_id, reports) in [("echo", "test.echo", true), ("pattern", "test.pattern", true), ("plain", "test.plain", false)] {
         assert_eq!(host.open(instance, type_id, json!({}), json!({})).unwrap()["snapshot"], reports, "{instance}");
     }
-    assert_eq!(snapshot("echo", 5000).unwrap(), json!({"values": {"amplitude": 0.0}, "provenance": {"load": 100}}));
+    assert_eq!(snapshot("echo", 5000).unwrap(), json!({"values": {"amplitude": 0.0}, "units": {"amplitude": "dBm"}, "provenance": {"load": 100}}));
     assert_eq!(snapshot("pattern", 5000).unwrap(), json!({"pattern": "flat", "amplitude": 0.0}));
     assert_eq!(snapshot("plain", 5000).unwrap(), json!(null));
     // A device busy in another call misses the bound, which says nothing of its health: it stays

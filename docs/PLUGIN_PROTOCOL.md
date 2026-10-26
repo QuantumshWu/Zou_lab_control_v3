@@ -269,7 +269,8 @@ run once each has answered; the pulse board (native) answers whether it is
 `sequencer_archive_snapshot`: board facts, state, program, pulse). The SDK
 answers through `zlc_plugin.tunable.snapshot`: the adapter's own `snapshot()`
 when it has one (a device whose state is more than its knobs), else its
-quartet's reads as `values` answers them (`{values, provenance}`), else null
+quartet's reads as `values` answers them, with the unit of each its field
+declares (`{values, units, provenance}`: the Viewer's Devices tab reads "80 MHz"), else null
 (it does not report its settings). The core asks with a 2 s bound as an
 untracked request: a device busy in another run's call misses it without being
 taken for unresponsive, and its late answer is dropped. `RunRequest.apparatus`
@@ -277,7 +278,7 @@ carries the result and `run.begin` writes it into the run record:
 
 ```json
 {"taken_at": "2026-10-25T13:02:11.512+00:00",
- "devices": {"trap_rf": {"type_id": "rf.vaunix_lms", "role": "Trap RF", "values": {"frequency": 80000000.0, "power": -3.0, "output_enabled": true}, "provenance": {"device_session_id": "39379c…", "settings_epoch": 4}},
+ "devices": {"trap_rf": {"type_id": "rf.vaunix_lms", "role": "Trap RF", "values": {"frequency": 80000000.0, "power": -3.0, "output_enabled": true}, "units": {"frequency": "Hz", "power": "dBm"}, "provenance": {"device_session_id": "39379c…", "settings_epoch": 4}},
              "mot_camera": {"type_id": "camera.virtual_mot", "role": "mot_camera", "unavailable": "timeout: snapshot did not answer within 2.0 s"},
              "spare": {"type_id": "camera.pylon", "role": "spare", "unavailable": "does not report its settings"}},
  "sequencer": {"sequencer": {"type_id": "sequencer.virtual", "role": "sequencer", "driver": {"outside": "PulseGUI"},

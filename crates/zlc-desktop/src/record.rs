@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
+use zlc_core::units::{DEFAULT_UNITS, Number, format_reading};
 
 const PREFIX: &str = "@logic/";
 const DEVICE_RECORD_FIELDS: [&str; 5] = ["named_devices", "device_snapshots", "actual_devices", "device_settings", "apparatus"];
@@ -164,6 +165,19 @@ fn device_tab_snapshot(snapshot: &Value) -> Value {
     shown
 }
 
+/// A bench entry's settings as Device Control reads them: each number with a `units` entry in words,
+/// in its readable prefix by the ≈ rule ("1.2345 GHz", "≈ -23.98 dBm"); the Raw tab keeps them as recorded.
+fn readable_settings(entry: &mut Value) {
+    let Some(units) = entry.get("units").and_then(Value::as_object).cloned() else { return };
+    let Some(values) = entry.get_mut("values").and_then(Value::as_object_mut) else { return };
+    for (name, value) in values.iter_mut() {
+        let (Some(unit), Some(number)) = (units.get(name).and_then(Value::as_str), value.as_f64()) else { continue };
+        let number = match value.as_i64() { Some(integer) => Number::Int(integer.into()), None => Number::Float(number) };
+        if let Ok(text) = DEFAULT_UNITS.resolve(unit).and_then(|unit| format_reading(number, &unit, None, None)) { *value = json!(text); }
+    }
+    if let Some(fields) = entry.as_object_mut() { fields.remove("units"); }
+}
+
 /// The bench a run record says its run started on (`apparatus`): (device, entry), its devices then its pulse board.
 fn bench_devices(record: &Value) -> Vec<(String, Value)> {
     ["devices", "sequencer"].into_iter().flat_map(|part| record.get("apparatus").and_then(|bench| bench.get(part)).and_then(Value::as_object).into_iter().flatten())
@@ -242,6 +256,7 @@ fn device_rows(lineage: &Value, nodes: &[Node], source: &Value, played: &[(Playe
             let mut shown = stood.clone();
             if recorded_program(record, &key, &stood) { if let Some(fields) = shown.as_object_mut() { fields.remove("snapshot"); } }
             else if stood["snapshot"].is_object() { shown["snapshot"] = device_tab_snapshot(&stood["snapshot"]); }
+            readable_settings(&mut shown);
             let mut candidate = json!({"logic": logic, "scope": BENCH});
             if let Some(sequence) = sequence { candidate["sequence"] = sequence.clone(); }
             candidate["snapshot"] = shown;
@@ -445,7 +460,8 @@ mod tests {
         let board = json!({"type_id": "sequencer.virtual", "role": "sequencer", "driver": {"outside": "PulseGUI"}, "loaded": true, "firing": true,
             "digest": "5f0c", "snapshot": {"program": {"digest": "5f0c", "rows": [[1], [2], [3]]}, "pulse": pulse}});
         let bench = json!({"taken_at": "2026-10-25T12:00:00.000+00:00", "sequencer": {"sequencer": board},
-            "devices": {"rf": {"type_id": "rf.virtual", "role": "Trap RF", "values": {"ch1_frequency": 8.0e7}, "provenance": {"settings_epoch": 2}}}});
+            "devices": {"rf": {"type_id": "rf.virtual", "role": "Trap RF", "values": {"ch1_frequency": 8.0e7, "ch1_power": -23.97940008672037, "ch1_output": true},
+                "units": {"ch1_frequency": "Hz", "ch1_power": "dBm"}, "provenance": {"settings_epoch": 2}}}});
         let info = |record: Value| json!({"members": {}, "sections": {"dataset": {}, "plot": {}, "source": {"signal": "@logic/camera_measurement/frames"},
             "lineage": {"root": "event-1", "device_settings": [], "nodes": [{"id": "event-1", "parents": [], "event_record": {},
                 "event": {"generation": "2c3491d0f54c", "sequence": 7, "stream": "camera_measurement"}, "record": record,
@@ -456,7 +472,8 @@ mod tests {
         let labels: Vec<&str> = rows.iter().map(|row| row[0].as_str().unwrap()).collect();
         assert_eq!(labels, ["mot_camera", "rf", "sequencer", "sequencer pulse at Start 7"]);
         assert_eq!(rows[1][1]["$fields"][2][1], json!([{"logic": "camera_measurement", "scope": "bench at Start", "sequence": 7,
-            "snapshot": {"type_id": "rf.virtual", "role": "Trap RF", "values": {"ch1_frequency": 8.0e7}, "provenance": {"settings_epoch": 2}}}]));
+            "snapshot": {"type_id": "rf.virtual", "role": "Trap RF", "values": {"ch1_frequency": "80 MHz", "ch1_power": "\u{2248} -23.98 dBm", "ch1_output": true},
+                "provenance": {"settings_epoch": 2}}}]), "each number in words, with its unit");
         assert_eq!(rows[2][1]["$fields"][2][1][0]["snapshot"]["snapshot"], json!({"program": {"digest": "5f0c", "rows": 3}, "pulse": {"name": "imaging", "periods": 2}}));
         assert_eq!(rows[3][1], json!({"text": "imaging", "action": "pulse:camera_measurement:7:2c3491d0f54c:bench:sequencer"}));
         assert_eq!(record.pulses[0].tree, pulse);

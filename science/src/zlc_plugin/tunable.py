@@ -120,13 +120,17 @@ def snapshot(device: Any) -> Any:
 
     A device whose state is more than its knobs answers for itself (its own
     ``snapshot()``); a tunable one answers what the ``values`` op does, its
-    quartet's reads; any other does not report its settings (None).
+    quartet's reads, and the unit each is in (a number is never recorded
+    without what it counts); any other does not report its settings (None).
     """
     native = getattr(device, "snapshot", None)
     if callable(native):
         return native()
     if all(callable(getattr(device, name, None)) for name in TUNABLE):
-        return {"values": dict(device.tunable_values()), "provenance": dict(device.settings_provenance())}
+        values = dict(device.tunable_values())
+        units = {field.metadata.name: field.metadata.unit for field in device.tunable_fields()
+                 if field.metadata.name in values and field.metadata.unit not in (None, "", "1")}
+        return {"values": values, "units": units, "provenance": dict(device.settings_provenance())}
     return None
 
 
