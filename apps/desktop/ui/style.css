@@ -211,7 +211,7 @@ button.quiet.disclosure { color: var(--text); }
 .device-control > .strip { margin-top: auto; }
 .control-table {
   display: grid; align-items: center; row-gap: var(--row-gap); column-gap: var(--control-column-gap);
-  grid-template-columns: max-content var(--control-current-w) minmax(max-content, 1fr) minmax(0, max-content) max-content max-content minmax(var(--control-status-min), max-content);
+  grid-template-columns: max-content var(--control-current-w) minmax(max-content, 1fr) minmax(var(--control-limits-text), max-content) max-content max-content minmax(var(--control-status-min), max-content);
 }
 /* v2 _align_headings: Desired is as wide as its widest editor's size hint and alone takes what the window has more. */
 .control-table .field-control > input.number { width: var(--edit-hint-w); max-width: none; }

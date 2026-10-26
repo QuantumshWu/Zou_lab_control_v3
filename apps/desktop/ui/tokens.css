@@ -27,6 +27,7 @@
   --count-text: 0px;       /* advance of "10000" (pulse/_layout.py COUNT_SAMPLE) */
   --edit-hint-text: 0px;   /* 17 advances of "x" (QLineEdit.sizeHint) */
   --control-status-text: 0px; /* advance of "Applying; latest queued" (DeviceControlView status) */
+  --control-limits-text: 0px; /* advance of "Device limits" (DeviceControlView: the least its range column gives way to) */
   --chevron-drop: none;    /* paint_chevron in a combo's drop column, in device px (the column's size) */
   --chevron-step-up: none; /* ... in a spin box's stepper column, its up cell's */
   --chevron-step-down: none; /* ... its down cell's */

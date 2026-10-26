@@ -87,6 +87,8 @@
       root.style.setProperty("--edit-hint-text", `${17 * Math.round(context.measureText("x").width / qt) * qt}px`);
       // DeviceControlView's Status column: its widest word whole.
       root.style.setProperty("--control-status-text", advance("Applying; latest queued"));
+      // Its Device limits column gives way to the window down to its heading, whole.
+      root.style.setProperty("--control-limits-text", advance("Device limits"));
       // _STEP_CHIP_SAMPLE, the chip every number width reserves room for: its
       // ink in the chip's font (0.8 of the field's, in the whole px Qt asks
       // for), up to a whole Qt px (_step_chip_metrics).  fluent/ink.ts draws the chips.
