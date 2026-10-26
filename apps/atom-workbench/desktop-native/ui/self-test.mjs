@@ -8,9 +8,9 @@ export function installSelfTest({adapter,postNative}){
  let finished=false,finalizing=false,firstFetchAt,clickAt,finalResult;
  const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
  const expected=config.request;
- const snapshot=()=>({dynamicsSelected:document.querySelector('.view-tabs button[data-view="dynamics"]')?.getAttribute('aria-selected')==='true',
-  chartSvg:!!document.querySelector('#main-chart svg'),populationFresh:document.querySelector('#app')?.dataset.populationFresh,
-  summary:document.querySelector('#summary')?.textContent?.slice(0,600),chartCaption:document.querySelector('#chart-caption')?.textContent?.slice(0,600),
+ const snapshot=()=>({dynamicsSelected:document.querySelector('.tab[data-view="dynamics"]')?.getAttribute('aria-selected')==='true',
+  chartSvg:!!document.querySelector('#population-chart svg'),populationFresh:document.querySelector('#app')?.dataset.populationFresh,
+  summary:document.querySelector('#summary')?.textContent?.slice(0,600),chartCaption:document.querySelector('#population-caption')?.textContent?.slice(0,600),
   storedScenePresent:localStorage.getItem('rb87-workbench-demo-v4')!==null,storageKeys:Object.keys(localStorage),
   width:innerWidth,height:innerHeight,visibility:document.visibilityState});
  async function finish(ok,error){
@@ -96,7 +96,8 @@ export function installSelfTest({adapter,postNative}){
  }
  async function start(){try{
   if(!expected?.scene)throw Error('Full-app self-test is missing the reference scene.');
-  const tab=await waitFor('.view-tabs button[data-view="dynamics"]');clickAt=performance.now();tab.click();
+  // v3 TabWidget pages turn on the tab's press.
+  const tab=await waitFor('.tab[data-view="dynamics"]');clickAt=performance.now();tab.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0}));
   const run=await waitFor('#run-dynamics');if(run.disabled)throw Error('The actual Population solve button is disabled.');run.click();
  }catch(error){await finish(false,error);}}
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>void start(),{once:true});else queueMicrotask(()=>void start());
