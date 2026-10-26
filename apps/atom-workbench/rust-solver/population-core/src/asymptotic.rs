@@ -164,7 +164,8 @@ pub struct MeanDiagnostics {
     pub minimum_eigenvalue_before_projection: f64,
     pub trace_error_before_projection: f64,
     pub hermiticity_error: f64,
-    /// Euclidean norm of `F w` in REAL coordinates, relative to `|E w|`.
+    /// `|F x| / |E x|` in REAL coordinates for the returned null vector `x`
+    /// (the corrected one, or the extrapolated resolvent vector).
     pub relative_residual: f64,
     pub slowest_rate: Option<f64>,
     pub zero_modes: usize,
@@ -823,8 +824,6 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
         let null_reduced = reduced_null_vector(&model, space.traces().0, &context.lapack)?;
         let null = lift(&context.lapack, space.q(), rows, &null_reduced)?;
         let residual = lift(&context.lapack, space.fq(), rows, &null_reduced)?;
-        let image = lift(&context.lapack, space.eq(), rows, &null_reduced)?;
-        let relative_residual = euclid(&residual) / euclid(&image).max(f64::MIN_POSITIVE);
         let signed = space.op.signed_block(&null, 1)?;
         let raw_mean = readout.density(core.physical(), &context.frame, &signed)?;
         let discarded_optical_coherence = readout.discarded(core.physical(), &context.frame)?;
@@ -880,6 +879,9 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
             if estimate <= epsilon && halo.as_ref().map_or(true, |h| h.0.reliable) {
                 checkpoint.action = "accept";
                 work.checkpoints.push(checkpoint);
+                // The residual of the returned vector: the corrected null vector.
+                let returned: Vec<f64> = null.iter().zip(&delta).map(|(w, d)| w + d).collect();
+                let relative_residual = relative_null_residual(&mut space.op, &returned, &mut work.applications)?;
                 let candidate = Candidate { raw_mean, corrected, discarded_optical_coherence, basis_estimate, halo_estimate,
                     relative_residual, slowest_rate: spectrum.slowest_rate(), zero_modes, modes, pole, columns: space.columns() };
                 return Ok(Outcome::Null(candidate, NullState { space, readout }));
