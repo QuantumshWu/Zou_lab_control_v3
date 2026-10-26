@@ -1,5 +1,6 @@
 import { comboFace, hintWidest } from "./combo.js";
 import { assign, element } from "./dom.js";
+import { flattenTree } from "./tree_model.js";
 /** Python's str order (code points), as v2 sorts its choices. */
 const codepoints = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 /** v2 choice_tree_groups: every choice once, under the first heading that files
@@ -101,7 +102,7 @@ export class TreeCombo {
         const signature = JSON.stringify([groups, none, this.placeholder]);
         if (signature !== this.signature) {
             this.signature = signature;
-            this.groups = groups.map(group => ({ heading: group.heading, leaves: [...group.leaves] }));
+            this.groups = flattenTree(groups);
             this.none = none;
             // Every choice is an option of the box, never listed by it: the closed box says
             // the picked one's text and is as wide as the widest it may say (v2 _collapsed_text_candidates).
@@ -131,6 +132,12 @@ export class TreeCombo {
         this.list.hidePopover(); }
     set title(text) { if (this.root.title !== text)
         this.root.title = text; }
+    dispose() { if (this.open)
+        this.list.hidePopover(); this.list.remove(); }
+    openPath(index) {
+        for (let at = index; at !== null; at = this.groups[at].parent)
+            this.expanded.add(this.groups[at].path);
+    }
     leaf(key) {
         for (const group of this.groups)
             for (const leaf of group.leaves)
@@ -144,7 +151,7 @@ export class TreeCombo {
             return;
         const at = this.groups.findIndex(group => group.leaves.some(leaf => leaf.key === this.current));
         if (at >= 0)
-            this.expanded.add(this.groups[at].heading);
+            this.openPath(at);
         if (!this.list.isConnected)
             document.body.append(this.list);
         this.list.showPopover();
@@ -163,8 +170,11 @@ export class TreeCombo {
         if (this.none !== null)
             rows.push({ kind: "none" });
         this.groups.forEach((group, index) => {
+            for (let parent = group.parent; parent !== null; parent = this.groups[parent].parent)
+                if (!this.expanded.has(this.groups[parent].path))
+                    return;
             rows.push({ kind: "heading", group: index });
-            if (this.expanded.has(group.heading))
+            if (this.expanded.has(group.path))
                 for (const leaf of group.leaves)
                     rows.push({ kind: "leaf", group: index, leaf });
         });
@@ -172,9 +182,12 @@ export class TreeCombo {
         this.list.replaceChildren(...rows.map((row, index) => {
             const node = element("div", `tree-row ${row.kind}`);
             node.dataset.index = String(index);
+            const depth = row.kind === "none" ? 0 : this.groups[row.group].depth + (row.kind === "leaf" ? 1 : 0);
+            node.style.setProperty("--tree-depth", String(depth));
+            node.setAttribute("aria-level", String(depth + 1));
             const item = element("span", "tree-item");
             if (row.kind === "heading") {
-                const open = this.expanded.has(this.groups[row.group].heading);
+                const open = this.expanded.has(this.groups[row.group].path);
                 node.classList.toggle("open", open);
                 node.setAttribute("role", "treeitem");
                 node.setAttribute("aria-expanded", String(open));
@@ -184,6 +197,7 @@ export class TreeCombo {
             else {
                 node.setAttribute("role", "treeitem");
                 item.textContent = row.kind === "leaf" ? row.leaf.label : this.none;
+                node.setAttribute("aria-selected", String(row.kind === "leaf" ? row.leaf.key === this.current : this.current === ""));
             }
             node.append(item);
             return node;
@@ -221,8 +235,6 @@ export class TreeCombo {
         if (!row)
             return;
         if (row.kind === "heading") {
-            if (!pointer)
-                return;
             this.toggle(row.group);
             return;
         }
@@ -233,8 +245,8 @@ export class TreeCombo {
         if (changed)
             this.changed(key);
     }
-    toggle(group, open = !this.expanded.has(this.groups[group].heading)) {
-        const heading = this.groups[group].heading;
+    toggle(group, open = !this.expanded.has(this.groups[group].path)) {
+        const heading = this.groups[group].path;
         if (open === this.expanded.has(heading))
             return;
         if (open)
@@ -274,15 +286,22 @@ export class TreeCombo {
                 break;
             case "ArrowRight":
                 if (row?.kind === "heading") {
-                    if (!this.expanded.has(this.groups[row.group].heading))
+                    if (!this.expanded.has(this.groups[row.group].path))
                         this.toggle(row.group, true);
-                    else if (this.rows[this.cursor + 1]?.kind === "leaf")
+                    else if (this.rows[this.cursor + 1])
                         this.move(this.cursor + 1);
                 }
                 break;
             case "ArrowLeft":
-                if (row?.kind === "heading")
-                    this.toggle(row.group, false);
+                if (row?.kind === "heading") {
+                    if (this.expanded.has(this.groups[row.group].path))
+                        this.toggle(row.group, false);
+                    else {
+                        const parent = this.groups[row.group].parent;
+                        if (parent !== null)
+                            this.move(this.rows.findIndex(item => item.kind === "heading" && item.group === parent));
+                    }
+                }
                 else if (row?.kind === "leaf")
                     this.move(this.rows.findIndex(item => item.kind === "heading" && item.group === row.group));
                 break;
