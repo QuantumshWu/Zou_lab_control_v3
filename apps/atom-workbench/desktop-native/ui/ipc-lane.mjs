@@ -28,7 +28,7 @@ export class IpcNativeLane {
     if(event.kind==='error'){this.failWorker(w,failure(event.error??'Native process communication failed.'));return;}
     if(event.kind==='opened'){
       if(event.binarySha256!==this.owner.binarySha256){this.failWorker(w,failure('Native executable changed.'));return;}
-      w.pid=event.pid;w.startup.openRoundTripMs=performance.now()-w.openSentAt;w.startup.hostSpawnMs=event.hostSpawnMs;w.startup.openblasThreads=event.openblasThreads;
+      w.pid=event.pid;w.startup.openRoundTripMs=performance.now()-w.openSentAt;w.startup.hostSpawnMs=event.hostSpawnMs;
       w.capabilitySentAt=performance.now();this.write(w,{op:'capabilities',id:0});return;
     }
     if(event.kind!=='message'){this.failWorker(w,failure('Unexpected native transport event.'));return;}

@@ -1,10 +1,9 @@
 import {dirname,resolve} from 'node:path';
 
 // Thread settings only: every numerical algorithm choice is fixed in Rust.
-// The population kernels parallelize over output modes (ATOM_PENCIL_THREADS)
-// and call BLAS single-threaded (ATOM_BLAS_THREADS).
+// The population kernels parallelize over output modes; BLAS is always
+// single-threaded inside the worker.
 export const DESKTOP_SOLVER_DEFAULTS=Object.freeze({
-  ATOM_BLAS_THREADS:'1',
   ATOM_PENCIL_THREADS:'8',
 });
 

@@ -1,4 +1,5 @@
 use std::ffi::{c_char, c_void};
+#[cfg(not(feature="static-numerics"))]
 use std::path::PathBuf;
 #[cfg(feature="static-numerics")]
 #[path="lapack_static.rs"]
@@ -143,13 +144,6 @@ type ZGetRs = unsafe extern "C" fn(
 extern "system" {
     fn LoadLibraryW(name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
-}
-fn blas_threads(setting:Result<String,std::env::VarError>)->Result<usize,String>{
-    match setting{
-        Ok(value)=>value.parse::<usize>().ok().filter(|t|(1..=32).contains(t)).ok_or_else(||"ATOM_BLAS_THREADS must be an integer in 1..32".into()),
-        Err(std::env::VarError::NotPresent)=>Ok(1),
-        Err(_)=>Err("Invalid ATOM_BLAS_THREADS environment value".into()),
-    }
 }
 pub struct Lapack {
     _library: *mut c_void,
@@ -331,9 +325,6 @@ impl SylvesterKernel<'_> {
     }
 }
 impl Lapack {
-    fn checked_thread_count(threads:usize)->Result<i32,String>{
-        if !(1..=32).contains(&threads){return Err("Explicit OpenBLAS thread count must be in1..32".into());}Ok(threads as i32)
-    }
     pub fn sylvester_kernel(&self) -> SylvesterKernel<'_> {
         SylvesterKernel { zgemm:self.zgemm, ztrsyl:self.ztrsyl, zgetrs:self.zgetrs,
             _owner:std::marker::PhantomData }
@@ -343,19 +334,14 @@ impl Lapack {
         ComplexGemm { zgemm: self.zgemm, _owner: std::marker::PhantomData }
     }
 
-    /// The worker's BLAS threads, `ATOM_BLAS_THREADS` in 1..=32 (default 1).
-    /// The population kernels parallelize over output modes instead
-    /// (`ATOM_PENCIL_THREADS`), so BLAS itself normally runs single-threaded.
-    pub fn load() -> Result<Self, String> {
-        Self::load_with_threads(blas_threads(std::env::var("ATOM_BLAS_THREADS"))?)
-    }
+    /// BLAS always runs single-threaded: the population kernels parallelize
+    /// over output modes (`ATOM_PENCIL_THREADS`), and threaded level-3 OpenBLAS
+    /// both oversubscribes that pool and keeps per-call job tables on the
+    /// calling thread's stack.
     #[cfg(feature="static-numerics")]
-    pub fn load_with_threads(threads:usize)->Result<Self,String>{
-        Self::checked_thread_count(threads)?;static_api::load(threads)
-    }
+    pub fn load()->Result<Self,String>{static_api::load()}
     #[cfg(not(feature="static-numerics"))]
-    pub fn load_with_threads(threads:usize)->Result<Self,String>{
-        let threads=Self::checked_thread_count(threads)?;
+    pub fn load() -> Result<Self, String> {
         let path = std::env::var_os("ATOM_OPENBLAS_DLL")
             .map(PathBuf::from)
             .or_else(|| {
@@ -388,7 +374,7 @@ impl Lapack {
         }
         unsafe {
             let set_threads: SetThreads = symbol(library, b"scipy_openblas_set_num_threads\0")?;
-            set_threads(threads);
+            set_threads(1);
             Ok(Self {
                 _library: library,
                 geev: symbol(library, b"scipy_dgeev_\0")?,
@@ -1016,15 +1002,6 @@ impl Lapack {
 #[cfg(test)]
 mod added_wrapper_tests {
     use super::*;
-    #[test]
-    fn blas_thread_setting_is_one_by_default_and_strict() {
-        use std::env::VarError;
-        assert_eq!(blas_threads(Err(VarError::NotPresent)), Ok(1));
-        assert_eq!(blas_threads(Ok("4".into())), Ok(4));
-        for bad in ["0", "33", "no", ""] {
-            assert!(blas_threads(Ok(bad.into())).is_err());
-        }
-    }
     #[test]
     fn complex_hermitian_vectors_and_values_are_column_major() {
         let lap = Lapack::load().unwrap();

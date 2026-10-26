@@ -24,7 +24,7 @@ impl Job{
         if unsafe{SetInformationJobObject(handle,JobObjectExtendedLimitInformation,(&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),std::mem::size_of_val(&info)as u32)}==0||unsafe{AssignProcessToJobObject(handle,child.as_raw_handle()as HANDLE)}==0{return Err(std::io::Error::last_os_error().to_string());}Ok(job)
     }
 }
-struct NativeChild{generation:u64,instance:u64,session:String,child:Child,job:Option<Job>,spawned:Instant,spawn_ms:f64,blas_threads:String,capability_sent:Option<Instant>,warm_sent:Option<Instant>}
+struct NativeChild{generation:u64,instance:u64,session:String,child:Child,job:Option<Job>,spawned:Instant,spawn_ms:f64,capability_sent:Option<Instant>,warm_sent:Option<Instant>}
 impl NativeChild{fn stop(&mut self){self.child.stdin.take();let _=self.child.kill();self.job.take();let _=self.child.wait();}}
 impl Drop for NativeChild{fn drop(&mut self){self.stop();}}
 fn hash(path:&Path)->Result<String,String>{Ok(format!("{:x}",Sha256::digest(fs::read(path).map_err(|e|e.to_string())?)))}
@@ -33,14 +33,6 @@ fn close_lane(lanes:&mut BTreeMap<String,NativeChild>,lane:&str,proxy:&EventLoop
     if let Some(mut native)=lanes.remove(lane){native.stop();emit(proxy,&native.session,json!({"kind":"closed","lane":lane,"generation":native.generation}));}
 }
 fn close_all(lanes:&mut BTreeMap<String,NativeChild>,proxy:&EventLoopProxy<UiEvent>){let names:Vec<_>=lanes.keys().cloned().collect();for name in names{close_lane(lanes,&name,proxy);}}
-fn configure_blas_environment(command:&mut Command,defaults:&BTreeMap<String,String>)->String{
-    let raw=defaults.get("ATOM_BLAS_THREADS").filter(|v|!v.is_empty()).map(String::as_str).unwrap_or("1");
-    let threads=raw.parse::<u32>().ok().filter(|t|(1..=32).contains(t)).unwrap_or(1).to_string();
-    // Private child only. OpenBLAS sizes its pool when it initializes, before
-    // Rust's lapack::load applies ATOM_BLAS_THREADS; the same count avoids an
-    // idle pool. An invalid ATOM_BLAS_THREADS reaches the worker, which rejects it.
-    command.env("ATOM_BLAS_THREADS",raw).env("OPENBLAS_NUM_THREADS",&threads);threads
-}
 
 struct Backend{executable:PathBuf,working:PathBuf,manifest:Value,build_hash:String,embedded:bool}
 fn supervisor(backend:Backend,data:PathBuf,test_mode:bool,proxy:EventLoopProxy<UiEvent>,receiver:mpsc::Receiver<HostMessage>,sender:mpsc::Sender<HostMessage>){
@@ -90,14 +82,16 @@ fn supervisor(backend:Backend,data:PathBuf,test_mode:bool,proxy:EventLoopProxy<U
                     let instance=sessions.next()?;
                     let mut command=Command::new(&exe);command.current_dir(&backend.working).envs(&defaults).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(0x08000000);
                     if backend.embedded{command.arg("--worker").env_remove("ATOM_OPENBLAS_DLL");}
-                    let blas_threads=configure_blas_environment(&mut command,&defaults);
+                    // The worker runs OpenBLAS single-threaded; OpenBLAS sizes its pool
+                    // from this variable when it initializes.
+                    command.env("OPENBLAS_NUM_THREADS","1");
                     let mut child=command.spawn().map_err(|e|e.to_string())?;let spawned=Instant::now();let job=match Job::contain(&child){Ok(j)=>j,Err(e)=>{let _=child.kill();let _=child.wait();return Err(e);}};
                     let stdout=child.stdout.take().unwrap();let stderr=child.stderr.take().unwrap();let tx=sender.clone();let name=lane.clone();
                     std::thread::spawn(move||{let mut reader=BufReader::new(stdout);let mut error=None;loop{let mut line=String::new();match reader.read_line(&mut line){Ok(0)=>break,Ok(_)=>{if line.len()>64*1024*1024{error=Some("Native response exceeded 64 MiB".into());break;}if tx.send(HostMessage::Line{lane:name.clone(),instance,line}).is_err(){return;}},Err(e)=>{error=Some(e.to_string());break;}}}let _=tx.send(HostMessage::Eof{lane:name,instance,error});});
                     let log=data.join(format!("{lane}-native.log"));std::thread::spawn(move||{let mut output=fs::OpenOptions::new().create(true).append(true).open(log).ok();for(index,line)in BufReader::new(stderr).lines().enumerate(){if let Ok(line)=line{if index<10000{if let Some(file)=output.as_mut(){let _=writeln!(file,"{}",line.chars().take(4000).collect::<String>());}}}}});
-                    Ok(NativeChild{generation,instance,session:session.clone(),child,job:Some(job),spawned,spawn_ms:started.elapsed().as_secs_f64()*1000.,blas_threads,capability_sent:None,warm_sent:None})
+                    Ok(NativeChild{generation,instance,session:session.clone(),child,job:Some(job),spawned,spawn_ms:started.elapsed().as_secs_f64()*1000.,capability_sent:None,warm_sent:None})
                 })();
-                match spawn{Ok(native)=>{let pid=native.child.id();process_ids.push(pid);let opened=json!({"kind":"opened","lane":lane,"generation":generation,"instanceId":native.instance,"pid":pid,"binarySha256":binary_hash,"hostSpawnMs":native.spawn_ms,"openblasThreads":native.blas_threads});lanes.insert(lane.clone(),native);emit(&proxy,&session,opened);},Err(error)=>emit(&proxy,&session,json!({"kind":"error","lane":lane,"generation":generation,"error":error}))}
+                match spawn{Ok(native)=>{let pid=native.child.id();process_ids.push(pid);let opened=json!({"kind":"opened","lane":lane,"generation":generation,"instanceId":native.instance,"pid":pid,"binarySha256":binary_hash,"hostSpawnMs":native.spawn_ms});lanes.insert(lane.clone(),native);emit(&proxy,&session,opened);},Err(error)=>emit(&proxy,&session,json!({"kind":"error","lane":lane,"generation":generation,"error":error}))}
             }else if op=="write"{
                 let result=(||->Result<(),String>{let native=lanes.get_mut(&lane).filter(|w|w.generation==generation).ok_or("Native generation is unavailable")?;
                     let message=&value["message"];let mut bytes=serde_json::to_vec(message).map_err(|e|e.to_string())?;if bytes.len()>64*1024*1024{return Err("Native request exceeds 64 MiB".into());}
