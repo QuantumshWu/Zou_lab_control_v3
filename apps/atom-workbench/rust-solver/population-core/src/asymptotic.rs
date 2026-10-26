@@ -86,8 +86,9 @@ const CORRECTION_SOLVE: InnerSolve = InnerSolve { maximum_steps: 80, relative_re
 const CORRECTION_RESTARTS: usize = 3;
 /// Inner residual above which an estimate is not trusted for acceptance.
 const ESTIMATE_RESIDUAL_LIMIT: f64 = 1e-3;
-/// Resolvent solves of the degeneracy probe and of the degenerate path.
-const PROBE_TOLERANCE: f64 = 1e-6;
+/// Relative residual of the degeneracy probe per unit of tolerance (the probe
+/// resolves differences of a quarter tolerance), and of the degenerate path.
+const PROBE_TOLERANCE_PER_EPSILON: f64 = 1e-2;
 const RESOLVENT_TOLERANCE: f64 = 1e-9;
 /// Halo modes are added until they cover this fraction of the halo weight.
 const HALO_COVERAGE: f64 = 0.9;
@@ -920,7 +921,7 @@ fn degeneracy_probe(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
     let (probe, central_only) = probe_matrix(core, context);
     let threshold = 0.25 * options.population_tolerance + SAFETY * (candidate.basis_estimate + candidate.halo_estimate);
     let resolvent = resolvent_mean(core, context, &mut state.space.op, &mut state.readout, &probe, central_only,
-        PROBE_TOLERANCE, &mut work.applications)?;
+        (PROBE_TOLERANCE_PER_EPSILON * options.population_tolerance).max(RESOLVENT_TOLERANCE), &mut work.applications)?;
     let gap = context.metric(&difference(&resolvent, &candidate.corrected), &options.groups)?;
     work.checkpoints.push(MeanCheckpoint { columns: candidate.columns, modes: candidate.modes.len(), pole: candidate.pole,
         basis_estimate: gap, halo_estimate: None, inner_residual: f64::NAN, action: "degeneracy-probe" });
