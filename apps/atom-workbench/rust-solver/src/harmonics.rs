@@ -3,25 +3,17 @@
 //!
 //! A discovered floating-point integer relation is not proof of physical phase
 //! locking. Exact round trips and ULP-compatible relations are distinguished;
-//! the latter must remain visible in finite-time error budgets and infinity
-//! claims. No detuning-, rate-, or amplitude-based physical cutoff is used.
+//! only an exact relation between declared source axes changes the phase
+//! basis. No detuning-, rate-, or amplitude-based physical cutoff is used.
 
-#[derive(Clone, Debug)]
-pub struct FrequencyBasis {
-    pub frequencies: Vec<f64>,
-    /// Original input order; omega_j ~= sum_k index[j][k] * frequencies[k].
-    pub drive_indices: Vec<Vec<i32>>,
-    pub exact_relations: usize,
-    pub rounded_relations: usize,
-    /// For inferred numeric input: every compensated frequency residual is
-    /// exactly zero. For declared carrier coordinates: phase relations are
-    /// exact by definition; redundant omega literals may have rounding error.
-    pub exact: bool,
-    /// Low-order combination search stopped at its bounded work budget.
-    pub search_exhausted: bool,
-    /// source_to_basis[source carrier axis][final Fourier basis axis]. Only
-    /// exact integer source-frequency reductions may change this mapping.
-    pub source_to_basis:Option<Vec<Vec<i32>>>,
+struct FrequencyBasis {
+    frequencies: Vec<f64>,
+    /// Original input order; omega_j ~= sum_k indices[j][k] * frequencies[k].
+    indices: Vec<Vec<i32>>,
+    exact_relations: usize,
+    rounded_relations: usize,
+    /// Every compensated frequency residual is exactly zero.
+    exact: bool,
 }
 
 fn half_ulp_up(x: f64) -> f64 {
@@ -103,13 +95,7 @@ fn gcd(mut a: i32, mut b: i32) -> i32 {
     a.abs()
 }
 
-fn search_combination(
-    input: f64,
-    basis: &[f64],
-    bound: i32,
-    rounded: bool,
-    exhausted: &mut bool,
-) -> Option<Vec<i32>> {
+fn search_combination(input: f64, basis: &[f64], bound: i32, rounded: bool) -> Option<Vec<i32>> {
     // Single-axis multiples are cheap even when the requested relation order is
     // high; multi-axis enumeration is by increasing L1 cost, with bounded work.
     for j in 0..basis.len() {
@@ -174,7 +160,6 @@ fn search_combination(
             return Some(found);
         }
         if visits >= 200_000 {
-            *exhausted = true;
             break;
         }
     }
@@ -185,12 +170,12 @@ fn search_combination(
 /// Pair p:q relations may refine a fundamental; small integer sums/differences
 /// may reduce additional axes. Undiscovered relationships retain their original
 /// independent coordinates. All input frequencies must be positive and finite.
-pub fn frequency_basis(input: &[f64], max_integer: i32) -> Result<FrequencyBasis, String> {
+fn frequency_basis(input: &[f64], max_integer: i32) -> Result<FrequencyBasis, String> {
     if !(1..=64).contains(&max_integer) {
         return Err("Integer relationship search bound must be in [1,64]".into());
     }
     if input.iter().any(|&x| !x.is_finite() || x <= 0.) {
-        return Err("Drive frequencies must be positive and finite".into());
+        return Err("Frequencies must be positive and finite".into());
     }
     let mut sequence: Vec<usize> = (0..input.len()).collect();
     sequence.sort_by(|&a, &b| input[a].total_cmp(&input[b]));
@@ -199,7 +184,6 @@ pub fn frequency_basis(input: &[f64], max_integer: i32) -> Result<FrequencyBasis
     let mut processed = Vec::<usize>::new();
     let mut exact_relations = 0;
     let mut rounded_relations = 0;
-    let mut exhausted = false;
     for current in sequence {
         let omega = input[current];
         let mut found = None;
@@ -208,9 +192,7 @@ pub fn frequency_basis(input: &[f64], max_integer: i32) -> Result<FrequencyBasis
             if basis.is_empty() {
                 break;
             }
-            if let Some(index) =
-                search_combination(omega, &basis, max_integer, rounded, &mut exhausted)
-            {
+            if let Some(index) = search_combination(omega, &basis, max_integer, rounded) {
                 found = Some(index);
                 if rounded {
                     rounded_relations += 1;
@@ -331,12 +313,10 @@ pub fn frequency_basis(input: &[f64], max_integer: i32) -> Result<FrequencyBasis
     }
     Ok(FrequencyBasis {
         frequencies: basis,
-        drive_indices: mapping,
+        indices: mapping,
         exact_relations,
         rounded_relations,
         exact,
-        search_exhausted: exhausted,
-        source_to_basis:None,
     })
 }
 
@@ -360,13 +340,27 @@ fn scaled_parts((hi,lo):(f64,f64),scale:f64)->(f64,f64){
     let product=hi*scale;(product,hi.mul_add(scale,-product)+lo*scale)
 }
 fn ulp_spacing(value:f64)->f64{2.*half_ulp_up(value).max(half_ulp_down(value))}
+/// Phase axes of a declared-coordinate Model for Fourier work. Without an
+/// exact integer relation between the declared source axes these ARE the
+/// source axes (identity mapping, unchanged order). With one (equally spaced
+/// carriers, for example) the exact reduced basis is used, so that a Fourier
+/// charge has zero frequency only when it is zero; otherwise the envelope
+/// null space would be degenerate and a long-time mean ill-defined.
+pub struct PhaseAxes{
+    /// Compensated angular frequency (hi, lo) of every axis.
+    pub parts:Vec<(f64,f64)>,
+    pub drive_indices:Vec<Vec<i32>>,
+    /// Laboratory frame index of every state in these axes.
+    pub frame_indices:Vec<Vec<i32>>,
+    pub frame_sectors:Vec<i32>,
+    /// source_to_basis[source axis][phase axis].
+    pub source_to_basis:Vec<Vec<i32>>,
+}
 /// Carrier coordinates are authoritative PHASE provenance, not a tolerance
 /// for discovering relationships among independently entered drive omegas.
 /// A redundant omega is checked only for floating arithmetic consistency.
-pub fn model_frequency_basis(model:&crate::Model,max_integer:i32)->Result<FrequencyBasis,String>{
-    let Some(declared)=&model.frequency_coordinates else{
-        return frequency_basis(&model.drives.iter().map(|drive|drive.omega).collect::<Vec<_>>(),max_integer);
-    };
+pub fn model_phase_axes(model:&crate::Model)->Result<PhaseAxes,String>{
+    let declared=model.frequency_coordinates.as_ref().ok_or("Phase axes require declared frequencyCoordinates")?;
     let axes=declared.frequencies.len();
     if axes>64||declared.frequencies.iter().any(|value|!value.is_finite()||*value<=0.){
         return Err("frequencyCoordinates.frequencies must contain at most 64 positive finite source axes".into());
@@ -398,74 +392,19 @@ pub fn model_frequency_basis(model:&crate::Model,max_integer:i32)->Result<Freque
             .filter(|(&n,_)|n!=0).map(|(&n,&f)|ulp_spacing(n as f64*f*unit)).sum::<f64>());
         if !error.is_finite()||!budget.is_finite()||error.abs()>budget{return Err(format!("Drive omega disagrees with its declared frequencyCoordinates dot product ({error:e}, rounding budget {budget:e})"));}
     }
-    let reduction=frequency_basis(source_frequencies,max_integer)?;
-    // The old numeric finder reports ULP-only relationships separately. Such
-    // relationships cannot change the declared source phases: retain those
-    // source axes independently, in their original order.
-    let(source_basis,mapping,exact_relations)=if reduction.exact&&reduction.rounded_relations==0{
-        (reduction.frequencies,reduction.drive_indices,reduction.exact_relations)
-    }else{(source_frequencies.to_vec(),identity_indices(axes),0)};
-    let frequencies:Vec<_>=source_basis.iter().map(|value|value*unit).collect();
-    if frequencies.iter().any(|value|!value.is_finite()||*value<=0.){return Err("Declared source unit conversion overflowed".into());}
-    let drive_indices=compose_indices(&declared.drive_indices,&mapping,frequencies.len())?;
-    // Validate frame composition too, including static/no-drive models.
-    compose_indices(&declared.frame_indices,&mapping,frequencies.len())?;
-    Ok(FrequencyBasis{frequencies,drive_indices,
-        exact_relations,rounded_relations:0,exact:true,search_exhausted:reduction.search_exhausted,source_to_basis:Some(mapping)})
-}
-/// Phase axes of a declared-coordinate Model for Fourier work. Without an
-/// exact integer relation between the declared source axes these ARE the
-/// source axes (identity mapping, unchanged order). With one (equally spaced
-/// carriers, for example) the exact reduced basis is used, so that a Fourier
-/// charge has zero frequency only when it is zero; otherwise the envelope
-/// null space would be degenerate and a long-time mean ill-defined.
-pub struct PhaseAxes{
-    /// Compensated angular frequency (hi, lo) of every axis.
-    pub parts:Vec<(f64,f64)>,
-    pub drive_indices:Vec<Vec<i32>>,
-    /// Laboratory frame index of every state in these axes.
-    pub frame_indices:Vec<Vec<i32>>,
-    pub frame_sectors:Vec<i32>,
-    /// source_to_basis[source axis][phase axis].
-    pub source_to_basis:Vec<Vec<i32>>,
-}
-pub fn model_phase_axes(model:&crate::Model)->Result<PhaseAxes,String>{
-    let basis=model_frequency_basis(model,16)?;
-    let declared=model.frequency_coordinates.as_ref().ok_or("Phase axes require declared frequencyCoordinates")?;
-    let axes=declared.frequencies.len();
-    if basis.exact_relations==0{
-        let identity=identity_indices(axes);
-        return Ok(PhaseAxes{parts:model_phase_frequency_parts(model,&identity)?,drive_indices:declared.drive_indices.clone(),
-            frame_indices:declared.frame_indices.clone(),frame_sectors:declared.frame_sectors.clone(),source_to_basis:identity});
-    }
-    let(source,unit)=declared.frequencies_mhz.as_ref().map(|values|(values.as_slice(),std::f64::consts::TAU))
-        .unwrap_or((declared.frequencies.as_slice(),1.));
-    // The same deterministic reduction model_frequency_basis accepted above.
-    let reduction=frequency_basis(source,16)?;
-    let mapping=basis.source_to_basis.clone().ok_or("Declared reduction lost its source mapping")?;
-    let parts:Vec<_>=reduction.frequencies.iter().map(|&value|scaled_parts((value,0.),unit)).collect();
-    if parts.len()!=basis.frequencies.len()||parts.iter().zip(&basis.frequencies).any(|(p,&f)|!(p.0+p.1).is_finite()||(p.0+p.1-f).abs()>4.*ulp_spacing(f)){
-        return Err("Reduced phase axes disagree with the reduced frequency basis".into());
-    }
-    let frame_indices=compose_indices(&declared.frame_indices,&mapping,parts.len())?;
-    Ok(PhaseAxes{parts,drive_indices:basis.drive_indices,frame_indices,frame_sectors:declared.frame_sectors.clone(),source_to_basis:mapping})
-}
-/// Phase rows in the ORIGINAL declared axes, with their authoritative unit
-/// conversion. State gauges may contain zero or negative integer entries.
-pub fn model_phase_frequency_parts(model:&crate::Model,rows:&[Vec<i32>])->Result<Vec<(f64,f64)>,String>{
-    model_frequency_basis(model,16)?;
-    let legacy:Vec<_>=model.drives.iter().map(|drive|drive.omega).collect();
-    let(source,unit)=if let Some(declared)=&model.frequency_coordinates{
-        declared.frequencies_mhz.as_ref().map(|values|(values.as_slice(),std::f64::consts::TAU))
-            .unwrap_or((declared.frequencies.as_slice(),1.))
-    }else{(legacy.as_slice(),1.)};
-    if source.iter().any(|value|!value.is_finite()||*value<=0.)||rows.iter().any(|row|row.len()!=source.len()){
-        return Err("Numerical phase rows do not match the finite original source axes".into());
-    }
-    rows.iter().map(|row|{
-        let parts=scaled_parts(dot_parts(row,source),unit);
-        if !parts.0.is_finite()||!parts.1.is_finite(){Err("Numerical phase frequency overflow".into())}else{Ok(parts)}
-    }).collect()
+    let reduction=frequency_basis(source_frequencies,16)?;
+    // A ULP-only relationship cannot change the declared source phases, and
+    // without any relationship there is nothing to reduce: retain the source
+    // axes independently, in their original order.
+    let(basis,source_to_basis)=if reduction.exact&&reduction.rounded_relations==0&&reduction.exact_relations>0{
+        (reduction.frequencies,reduction.indices)
+    }else{(source_frequencies.to_vec(),identity_indices(axes))};
+    let parts:Vec<_>=basis.iter().map(|&value|scaled_parts((value,0.),unit)).collect();
+    if parts.iter().any(|&(hi,_)|!hi.is_finite()||hi<=0.){return Err("Declared source unit conversion overflowed".into());}
+    let drive_indices=compose_indices(&declared.drive_indices,&source_to_basis,parts.len())?;
+    // Frame composition is validated too, including static/no-drive models.
+    let frame_indices=compose_indices(&declared.frame_indices,&source_to_basis,parts.len())?;
+    Ok(PhaseAxes{parts,drive_indices,frame_indices,frame_sectors:declared.frame_sectors.clone(),source_to_basis})
 }
 
 #[cfg(test)]
@@ -482,56 +421,69 @@ mod declared_coordinate_tests{
     }
     #[test]
     fn declared_triangle_uses_two_source_axes_despite_redundant_omega_rounding(){
-        let model=model(vec![1675.4239285300514,41268.1534315396],vec![vec![0,1],vec![1,1],vec![1,0]],
-            vec![41268.1534315396,42943.57736006965,1675.4239285300514]);
-        let basis=model_frequency_basis(&model,16).unwrap();
-        assert_eq!(basis.frequencies.len(),2);assert_eq!(basis.drive_indices,[vec![0,1],vec![1,1],vec![1,0]]);
-        assert_eq!(basis.source_to_basis,Some(vec![vec![1,0],vec![0,1]]));
-        assert!(basis.exact);assert_eq!(basis.rounded_relations,0);
+        let omegas=vec![41268.1534315396,42943.57736006965,1675.4239285300514];
+        let model=model(vec![1675.4239285300514,41268.1534315396],vec![vec![0,1],vec![1,1],vec![1,0]],omegas.clone());
+        let axes=model_phase_axes(&model).unwrap();
+        assert_eq!(axes.parts,[(1675.4239285300514,0.),(41268.1534315396,0.)]);assert_eq!(axes.drive_indices,[vec![0,1],vec![1,1],vec![1,0]]);
+        assert_eq!(axes.source_to_basis,[vec![1,0],vec![0,1]]);
         // Declared phase identity, not a zero literal residual.
-        let rows=model.frequency_coordinates.as_ref().unwrap().drive_indices.clone();let parts=model_phase_frequency_parts(&model,&rows).unwrap();assert_ne!(parts[1].1,0.);
-        let mut legacy=model;legacy.frequency_coordinates=None;
-        let old=model_frequency_basis(&legacy,16).unwrap();assert!(old.source_to_basis.is_none());
-        assert!(!old.exact||old.frequencies.len()==3);
+        assert_ne!(dot_parts(&axes.drive_indices[1],&[axes.parts[0].0,axes.parts[1].0]).1,0.);
+        // The rounded omega literals alone carry no exact two-axis relation.
+        let numeric=frequency_basis(&omegas,16).unwrap();assert!(!numeric.exact||numeric.frequencies.len()==3);
     }
     #[test]
     fn declared_close_and_ulp_only_source_relationships_remain_independent(){
         for frequencies in [vec![1.,1_f64.next_up()],vec![0.1,0.3]]{
             let model=model(frequencies.clone(),vec![vec![1,0],vec![0,1]],frequencies.clone());
-            let basis=model_frequency_basis(&model,16).unwrap();
-            assert_eq!(basis.frequencies,frequencies);assert_eq!(basis.source_to_basis,Some(vec![vec![1,0],vec![0,1]]));
-            assert!(basis.exact);assert_eq!(basis.rounded_relations,0);
+            let axes=model_phase_axes(&model).unwrap();
+            assert_eq!(axes.parts,frequencies.iter().map(|&f|(f,0.)).collect::<Vec<_>>());assert_eq!(axes.source_to_basis,[vec![1,0],vec![0,1]]);
         }
     }
     #[test]
     fn declared_exact_double_frequency_and_static_frame_mapping_are_preserved(){
         let mut driven=model(vec![3.,6.],vec![vec![1,0],vec![0,1],vec![1,1]],vec![3.,6.,9.]);
         driven.frequency_coordinates.as_mut().unwrap().frame_indices=vec![vec![1,-1],vec![0,0]];
-        let basis=model_frequency_basis(&driven,16).unwrap();
-        assert_eq!(basis.frequencies,[3.]);assert_eq!(basis.source_to_basis,Some(vec![vec![1],vec![2]]));
-        assert_eq!(basis.drive_indices,[vec![1],vec![2],vec![3]]);
+        let axes=model_phase_axes(&driven).unwrap();
+        assert_eq!(axes.parts,[(3.,0.)]);assert_eq!(axes.source_to_basis,[vec![1],vec![2]]);
+        assert_eq!(axes.drive_indices,[vec![1],vec![2],vec![3]]);assert_eq!(axes.frame_indices,[vec![-1],vec![0]]);
         driven.drives.clear();driven.frequency_coordinates.as_mut().unwrap().drive_indices.clear();
-        let static_basis=model_frequency_basis(&driven,16).unwrap();
-        assert_eq!(static_basis.source_to_basis,basis.source_to_basis);assert!(static_basis.drive_indices.is_empty());
-        assert_eq!(compose_indices(&driven.frequency_coordinates.as_ref().unwrap().frame_indices,static_basis.source_to_basis.as_ref().unwrap(),1).unwrap(),[vec![-1],vec![0]]);
-        let empty=model(vec![],vec![],vec![]);let basis=model_frequency_basis(&empty,16).unwrap();assert_eq!(basis.source_to_basis,Some(vec![]));
+        let static_axes=model_phase_axes(&driven).unwrap();
+        assert_eq!(static_axes.source_to_basis,axes.source_to_basis);assert!(static_axes.drive_indices.is_empty());
+        assert_eq!(static_axes.frame_indices,axes.frame_indices);
+        let empty=model_phase_axes(&model(vec![],vec![],vec![])).unwrap();assert!(empty.parts.is_empty()&&empty.source_to_basis.is_empty());
     }
     #[test]
     fn declared_mhz_integer_relations_survive_tau_unit_conversion(){
         let tau=std::f64::consts::TAU;
         let mut model=model(vec![100.*tau,300.*tau],vec![vec![1,0],vec![1,1],vec![0,1]],vec![100.*tau,400.*tau,300.*tau]);
         model.frequency_coordinates.as_mut().unwrap().frequencies_mhz=Some(vec![100.,300.]);
-        let basis=model_frequency_basis(&model,16).unwrap();
-        assert_eq!(basis.frequencies,[100.*tau]);assert_eq!(basis.source_to_basis,Some(vec![vec![1],vec![3]]));
-        assert_eq!(basis.drive_indices,[vec![1],vec![4],vec![3]]);assert!(basis.exact);
-        let rows=model.frequency_coordinates.as_ref().unwrap().drive_indices.clone();let parts=model_phase_frequency_parts(&model,&rows).unwrap();
-        assert_eq!(parts[1],scaled_parts((400.,0.),tau));assert_ne!(parts[1].1,0.);
+        let axes=model_phase_axes(&model).unwrap();
+        assert_eq!(axes.parts,[scaled_parts((100.,0.),tau)]);assert_ne!(axes.parts[0].1,0.);
+        assert_eq!(axes.source_to_basis,[vec![1],vec![3]]);assert_eq!(axes.drive_indices,[vec![1],vec![4],vec![3]]);
         // The optional authority changes the unit in which exactness is
-        // established; it does not relax the old angular-only numeric test.
+        // established; it does not relax the angular-only numeric test.
         model.frequency_coordinates.as_mut().unwrap().frequencies_mhz=None;
-        let angular_only=model_frequency_basis(&model,16).unwrap();assert_eq!(angular_only.frequencies.len(),2);
+        assert_eq!(model_phase_axes(&model).unwrap().parts.len(),2);
         model.frequency_coordinates.as_mut().unwrap().frequencies_mhz=Some(vec![100.,301.]);
-        assert!(model_frequency_basis(&model,16).is_err());
+        assert!(model_phase_axes(&model).is_err());
+    }
+    #[test]
+    fn phase_axis_parts_keep_their_recorded_bits(){
+        // Compensated parts are pinned exactly, signed zero low parts included.
+        let tau=std::f64::consts::TAU;
+        let angular=model(vec![100.*tau,300.*tau],vec![vec![1,0],vec![1,1],vec![0,1]],vec![100.*tau,400.*tau,300.*tau]);
+        let mut mhz=angular.clone();mhz.frequency_coordinates.as_mut().unwrap().frequencies_mhz=Some(vec![100.,300.]);
+        for(fixture,expected)in[
+            (model(vec![1675.4239285300514,41268.1534315396],vec![vec![0,1],vec![1,1],vec![1,0]],vec![41268.1534315396,42943.57736006965,1675.4239285300514]),
+                vec![(0x409a2db21a5211a6,0),(0x40e42684e8e94298,0)]),
+            (model(vec![0.1,0.3],vec![vec![1,0],vec![0,1]],vec![0.1,0.3]),vec![(0x3fb999999999999a,0),(0x3fd3333333333333,0)]),
+            (model(vec![3.,6.],vec![vec![1,0],vec![0,1],vec![1,1]],vec![3.,6.,9.]),vec![(0x4008000000000000,0)]),
+            (mhz,vec![(0x4083a28c59d5433b,0xbd20000000000000)]),
+            (angular,vec![(0x4083a28c59d5433b,0),(0x409d73d286bfe4d8,0)]),
+        ]{
+            let bits:Vec<(u64,u64)>=model_phase_axes(&fixture).unwrap().parts.iter().map(|&(hi,lo)|(hi.to_bits(),lo.to_bits())).collect();
+            assert_eq!(bits,expected);
+        }
     }
     #[test]
     fn malformed_declared_metadata_is_rejected_without_guessing_a_replacement(){
@@ -546,7 +498,7 @@ mod declared_coordinate_tests{
         let mut wrong=valid.clone();wrong.frequency_coordinates.as_mut().unwrap().frame_sectors[0]=2;cases.push(wrong);
         let mut wrong=valid.clone();wrong.frequency_coordinates.as_mut().unwrap().frequencies_mhz=Some(vec![]);cases.push(wrong);
         for invalid in [0.,f64::NAN,f64::INFINITY]{let mut wrong=valid.clone();wrong.frequency_coordinates.as_mut().unwrap().frequencies[0]=invalid;cases.push(wrong);}
-        for wrong in cases{assert!(model_frequency_basis(&wrong,16).is_err());}
+        for wrong in cases{assert!(model_phase_axes(&wrong).is_err());}
         for invalid in [serde_json::json!(0.5),serde_json::json!(2_147_483_648_i64)]{
             assert!(serde_json::from_value::<FrequencyCoordinates>(serde_json::json!({"frequencies":[2.],"driveIndices":[[invalid]],"frameIndices":[[0],[0]],"frameSectors":[0,1]})).is_err());
         }
@@ -561,13 +513,13 @@ mod tests {
         let a = frequency_basis(&[4.6, 2.3, 6.9], 16).unwrap();
         assert_eq!(a.frequencies.len(), 1);
         assert!(a.exact || a.rounded_relations > 0);
-        for (index, expected) in a.drive_indices.iter().zip([4.6, 2.3, 6.9]) {
+        for (index, expected) in a.indices.iter().zip([4.6, 2.3, 6.9]) {
             let actual = reconstruction(index, &a.frequencies);
             assert!((actual - expected).abs() <= 2. * half_ulp(expected));
         }
         let rational = frequency_basis(&[6., 10., 15.], 16).unwrap();
         assert_eq!(rational.frequencies, vec![1.]);
-        assert_eq!(rational.drive_indices, vec![vec![6], vec![10], vec![15]]);
+        assert_eq!(rational.indices, vec![vec![6], vec![10], vec![15]]);
         assert!(rational.exact);
     }
     #[test]
@@ -576,7 +528,7 @@ mod tests {
         // exact relation between the actual input binary floating numbers.
         let a = frequency_basis(&[0.5, 2_f64.sqrt(), 0.5 + 2_f64.sqrt()], 16).unwrap();
         assert_eq!(a.frequencies.len(), 2);
-        assert_eq!(a.drive_indices[2], vec![1, 1]);
+        assert_eq!(a.indices[2], vec![1, 1]);
         assert!(a.exact);
     }
     #[test]
@@ -589,7 +541,7 @@ mod tests {
         let basis = frequency_basis(&[0.1, original], 16).unwrap();
         assert!(!basis.exact);
         assert!(basis.rounded_relations > 0);
-        assert!(basis.drive_indices.iter().zip([0.1, original]).any(|(index, input)| {
+        assert!(basis.indices.iter().zip([0.1, original]).any(|(index, input)| {
             let (hi, lo) = dot_parts(index, &basis.frequencies);
             (hi - input) + lo != 0.
         }));
