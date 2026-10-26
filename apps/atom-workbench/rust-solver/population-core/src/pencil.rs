@@ -461,10 +461,6 @@ impl Adjacency {
         self.coefficient[range.clone()].iter().copied().zip(self.source[range].iter().copied())
     }
 
-    fn targets(&self) -> usize {
-        self.offsets.len() - 1
-    }
-
     fn widest(&self) -> usize {
         self.offsets.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(0)
     }
@@ -622,6 +618,7 @@ impl Plan {
         self.half_capable
     }
 
+    #[cfg(test)]
     pub(crate) fn library(&self) -> &Arc<Library> {
         &self.library
     }

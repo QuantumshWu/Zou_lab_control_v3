@@ -151,7 +151,7 @@ pub struct PopulationObservation{
     /// Dual charges and, per charge, the sparse rows (state, coordinate, value).
     charges:Vec<Charge>,rows:Vec<Vec<(usize,usize,C)>>,
 }
-pub struct PopulationBasis{owner:Arc<PrimitivePreparation>,modes:Vec<Charge>,columns:usize,coefficients:Vec<C>}
+pub struct PopulationBasis{modes:Vec<Charge>,columns:usize,coefficients:Vec<C>}
 /// Readout duals of `states` state functionals over an ordered list of
 /// charges. Each charge holds them as one mode block with the states as
 /// right-hand sides: entry (i, j) of local state s sits at i + n*(s + states*j).
@@ -318,7 +318,7 @@ impl PopulationObservation{
             }
         }
         if coefficients.iter().any(|z|!z.finite()){return Err("Nonfinite complete population projection".into());}
-        Ok(PopulationBasis{owner:Arc::clone(&self.owner),modes,columns,coefficients})
+        Ok(PopulationBasis{modes,columns,coefficients})
     }
 }
 impl PopulationBasis{
