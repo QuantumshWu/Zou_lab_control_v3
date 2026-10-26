@@ -35,6 +35,10 @@ pub(crate) mod reduced;
 pub mod directions;
 #[path="engine.rs"]
 pub mod engine;
+#[path="slow_dual.rs"]
+pub mod slow_dual;
+#[path="error_estimate.rs"]
+pub mod error_estimate;
 
 /// Arithmetic backend of the pencil kernels. `HybridBlas` multiplies the
 /// coefficient blocks with OpenBLAS ZGEMM; `Csr` runs the same blocked
