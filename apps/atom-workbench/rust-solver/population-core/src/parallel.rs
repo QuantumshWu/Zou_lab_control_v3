@@ -10,9 +10,7 @@
 //!
 //! ATOM_PENCIL_THREADS sets the pool size (1..=32). When it is unset the
 //! pool uses the available hardware threads, capped at 8.
-#[cfg(feature = "parallel")]
 use rayon::prelude::*;
-#[cfg(feature = "parallel")]
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock},
@@ -28,7 +26,6 @@ const DEFAULT_THREAD_CAP: usize = 8;
 
 pub struct Execution {
     threads: usize,
-    #[cfg(feature = "parallel")]
     pool: Option<Arc<rayon::ThreadPool>>,
 }
 
@@ -46,17 +43,8 @@ impl Execution {
         if !(1..=32).contains(&threads) {
             return Err("ATOM_PENCIL_THREADS must be in 1..32".into());
         }
-        #[cfg(not(feature = "parallel"))]
-        if threads != 1 {
-            return Err("Parallel execution was requested but this build lacks feature parallel".into());
-        }
-        #[cfg(feature = "parallel")]
         let pool = if threads == 1 { None } else { Some(shared_pool(threads)?) };
-        Ok(Self {
-            threads,
-            #[cfg(feature = "parallel")]
-            pool,
-        })
+        Ok(Self { threads, pool })
     }
 
     pub fn threads(&self) -> usize {
@@ -93,7 +81,6 @@ impl Execution {
     {
         let modes = if width == 0 { 0 } else { out.len() / width };
         let tasks = self.tasks(modes, work, minimum_work);
-        #[cfg(feature = "parallel")]
         if let (Some(pool), true) = (&self.pool, tasks > 1) {
             let per_task = modes.div_ceil(tasks);
             let idle = Mutex::new(std::mem::take(scratch));
@@ -124,7 +111,6 @@ fn default_threads() -> usize {
 
 /// Workers are shared by every plan with the same size, not spawned per
 /// apply. The cache holds execution infrastructure only, no numerical data.
-#[cfg(feature = "parallel")]
 fn shared_pool(threads: usize) -> Result<Arc<rayon::ThreadPool>, String> {
     static POOLS: OnceLock<Mutex<HashMap<usize, Arc<rayon::ThreadPool>>>> = OnceLock::new();
     let mut pools = POOLS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_| "Worker pool lock poisoned")?;
@@ -141,7 +127,7 @@ fn shared_pool(threads: usize) -> Result<Arc<rayon::ThreadPool>, String> {
     Ok(pool)
 }
 
-#[cfg(all(test, feature = "parallel"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     const WORK: usize = MINIMUM_WORK_PER_TASK;

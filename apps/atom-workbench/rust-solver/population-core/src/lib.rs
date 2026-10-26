@@ -5,15 +5,10 @@ mod lapack;
 pub use lapack::{Complex64, Lapack};
 use lapack::Complex64 as C;
 mod parallel;
-#[cfg(feature = "preparation")]
 pub mod preparation;
-#[cfg(feature = "preparation")]
 mod pencil;
-#[cfg(feature = "preparation")]
 pub use pencil::{StageProfile, STAGE_COUNT, STAGE_NAMES};
-#[cfg(feature = "preparation")]
 pub mod owned_prepared;
-#[cfg(feature = "preparation")]
 mod dense_expm;
 
 /// Sparse row-major (CSR) complex matrix.
