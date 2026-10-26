@@ -45,7 +45,6 @@ pub struct FrameStep {
     gain:Vec<f64>,
     source_coordinates:Vec<Coordinate>,
     target_coordinates:Vec<Coordinate>,
-    trace_error:f64,
 }
 
 #[derive(Default)]
@@ -150,19 +149,15 @@ impl Frame {
             target_coordinates:target_local.into_iter().map(|coord|mapped(coord,&targets)).collect(),
             source_rates,recycling})
     }
-    pub fn dimension(&self)->usize{self.n*self.n}
-    pub fn gamma(&self)->&[f64]{&self.gamma}
     pub fn into_frame_batch(&self,lap:&Lapack,batch:&[Z])->Result<Vec<Z>,String>{conjugate_batch(lap,&self.adjoint,&self.vectors,batch,self.n)}
     pub fn out_of_frame_batch(&self,lap:&Lapack,batch:&[Z])->Result<Vec<Z>,String>{conjugate_batch(lap,&self.vectors,&self.adjoint,batch,self.n)}
     pub fn rotate_unitary(&self,lap:&Lapack,unitary:&[Z])->Result<Vec<Z>,String>{
         if unitary.len()!=self.n*self.n||!finite(unitary){return Err("Invalid radiation-frame unitary".into());}
         lap.multiply_complex(&lap.multiply_complex(&self.adjoint,unitary,self.n,self.n,self.n)?,&self.vectors,self.n,self.n,self.n)
     }
-    /// Signed finite durations are for explicit high-order composition only.
-    /// Negative-time steps are exact inverses of the dissipative exponential,
-    /// but they are NOT CPTP; no such claim is made or positivity repair used.
+    /// Exact radiation exponential for a nonnegative duration.
     pub fn step(&self,time:f64)->Result<FrameStep,String>{
-        if !time.is_finite(){return Err("Invalid radiation-frame duration".into());}
+        if !time.is_finite()||time<0.{return Err("Invalid radiation-frame duration".into());}
         let n=self.n;let decay:Vec<_>=(0..n*n).map(|i|(-0.5*(self.gamma[i%n]+self.gamma[i/n])*time).exp()).collect();
         let nt=self.target_coordinates.len();let ns=self.source_coordinates.len();let mut gain=self.recycling.clone();
         for (j,&rate) in self.source_rates.iter().enumerate(){
@@ -178,12 +173,11 @@ impl Frame {
         }
         let scale=decay.iter().map(|value|value.abs()).fold(1.,f64::max);
         if trace_error>2e-11*scale{return Err(format!("Radiation eigenframe trace identity unresolved: {trace_error:e}"));}
-        Ok(FrameStep{n,decay,gain,source_coordinates:self.source_coordinates.clone(),target_coordinates:self.target_coordinates.clone(),trace_error})
+        Ok(FrameStep{n,decay,gain,source_coordinates:self.source_coordinates.clone(),target_coordinates:self.target_coordinates.clone()})
     }
 }
 
 impl FrameStep {
-    pub fn trace_error(&self)->f64{self.trace_error}
     pub fn workspace(&self,count:usize)->Result<BatchWorkspace,String>{
         BatchWorkspace::new(self.n,self.source_coordinates.len(),self.target_coordinates.len(),count)
     }
@@ -227,37 +221,29 @@ impl FrameStep {
         profile.scatter_ms=scatter_started.elapsed().as_secs_f64()*1000.;
         profile.total_ms=started.elapsed().as_secs_f64()*1000.;Ok(profile)
     }
-    pub fn apply_batch(&self,lap:&Lapack,batch:&[Z])->Result<Vec<Z>,String>{
-        self.apply_batch_profiled(lap,batch).map(|(result,_)|result)
-    }
-    pub fn apply_batch_profiled(&self,lap:&Lapack,batch:&[Z])->Result<(Vec<Z>,ApplyProfile),String>{
-        let started=Instant::now();let mut profile=ApplyProfile::default();
+}
+#[cfg(test)]
+impl FrameStep {
+    /// Allocating oracle for the trusted workspace application.
+    fn apply_batch(&self,lap:&Lapack,batch:&[Z])->Result<Vec<Z>,String>{
         let n=self.n;let d=n*n;if batch.len()%d!=0||!finite(batch){return Err("Invalid diagonal radiation batch".into());}
         let count=batch.len()/d;let ns=self.source_coordinates.len();let nt=self.target_coordinates.len();
-        let decay_started=Instant::now();
         let mut result=batch.to_vec();for density in result.chunks_exact_mut(d){for (value,&decay) in density.iter_mut().zip(&self.decay){value.re*=decay;value.im*=decay;}}
-        profile.decay_ms=decay_started.elapsed().as_secs_f64()*1000.;
-        if count==0||ns==0||nt==0{profile.total_ms=started.elapsed().as_secs_f64()*1000.;return Ok((result,profile));}
-        let gather_started=Instant::now();
+        if count==0||ns==0||nt==0{return Ok(result);}
         let mut input=vec![0.;ns*count];
         for rhs in 0..count{let offset=rhs*d;for (i,&coordinate) in self.source_coordinates.iter().enumerate(){input[i+rhs*ns]=match coordinate{
             Coordinate::Population(i)=>batch[offset+i+i*n].re,
             Coordinate::Real(i,j)=>batch[offset+i+j*n].re,
             Coordinate::Imag(i,j)=>batch[offset+i+j*n].im,
         };}}
-        profile.gather_ms=gather_started.elapsed().as_secs_f64()*1000.;
-        let gain_started=Instant::now();
         let gain=lap.multiply(&self.gain,&input,nt,count,ns);
-        profile.gain_gemm_ms=gain_started.elapsed().as_secs_f64()*1000.;
-        let scatter_started=Instant::now();
         for rhs in 0..count{let offset=rhs*d;for(i,&coordinate)in self.target_coordinates.iter().enumerate(){let value=gain[i+rhs*nt];match coordinate{
             Coordinate::Population(i)=>result[offset+i+i*n].re+=value,
             Coordinate::Real(i,j)=>{result[offset+i+j*n].re+=value;result[offset+j+i*n].re+=value;},
             Coordinate::Imag(i,j)=>{result[offset+i+j*n].im+=value;result[offset+j+i*n].im-=value;},
         }}}
-        profile.scatter_ms=scatter_started.elapsed().as_secs_f64()*1000.;
         if !finite(&result){return Err("Non-finite diagonal radiation batch result".into());}
-        profile.total_ms=started.elapsed().as_secs_f64()*1000.;Ok((result,profile))
+        Ok(result)
     }
 }
 
@@ -279,8 +265,8 @@ mod tests{
         let lap=Lapack::load().unwrap();let model=model();let n=model.dimension;let d=n*n;let g=build_generator(&model).unwrap();
         let mut dense=vec![0.;d*d];for(j,col)in g.matrix.iter().enumerate(){for &(i,value)in col{dense[i+j*d]+=value;}}
         let frame=Frame::new(&lap,&model).unwrap();let batch=basis_batch(n);let transformed=frame.into_frame_batch(&lap,&batch).unwrap();
-        for time in [0.4,-0.15]{
-            let step=frame.step(time).unwrap();assert!(step.trace_error()<1e-12);
+        for time in [0.4,0.15]{
+            let step=frame.step(time).unwrap();
             let output=frame.out_of_frame_batch(&lap,&step.apply_batch(&lap,&transformed).unwrap()).unwrap();
             for j in 0..d{let mut unit=vec![0.;d];unit[j]=1.;let expected=crate::dense_expm::action(&lap,&dense,&unit,&[time]).unwrap();
                 let rho=expand_density(&g.coords,&expected[0],n);let error=(0..d).map(|i|(c(output[j*d+i])-rho[i/n+(i%n)*n]).abs()).fold(0.,f64::max);
@@ -302,12 +288,12 @@ mod tests{
         assert!(c(output[1*9+1+2*3]).abs()>1e-13);
     }
     #[test]
-    fn reusable_batch_workspace_matches_allocating_oracle_for_positive_and_signed_steps(){
+    fn reusable_batch_workspace_matches_allocating_oracle(){
         let lap=Lapack::load().unwrap();let frame=Frame::new(&lap,&model()).unwrap();
         let input=frame.into_frame_batch(&lap,&basis_batch(3)).unwrap();
         let mut workspace=frame.step(0.1).unwrap().workspace(9).unwrap();let mut output=vec![Z::default();input.len()];
         let source_pointer=workspace.source.as_ptr();let target_pointer=workspace.target.as_ptr();
-        for time in [0.1,-0.17,0.3]{
+        for time in [0.1,0.17,0.3]{
             let step=frame.step(time).unwrap();let expected=step.apply_batch(&lap,&input).unwrap();
             step.apply_batch_into(&lap,&input,&mut output,&mut workspace).unwrap();
             let error=expected.iter().zip(&output).map(|(&a,&b)|(c(a)-c(b)).abs()).fold(0.,f64::max);assert!(error<1e-14);
@@ -321,7 +307,7 @@ mod tests{
         let input=frame.into_frame_batch(&lap,&basis_batch(n)).unwrap();
         let transposed:Vec<_>=input.chunks_exact(d).flat_map(|rho|transpose(rho,n)).collect();
         let mut workspace=frame.step(0.1).unwrap().workspace(d).unwrap();let mut output=vec![Z::default();input.len()];
-        for time in [0.1,-0.17,0.3]{
+        for time in [0.1,0.17,0.3]{
             let step=frame.step(time).unwrap();let expected=step.apply_batch(&lap,&input).unwrap();
             step.apply_batch_layout_into(&lap,&transposed,&mut output,&mut workspace,true).unwrap();
             let restored:Vec<_>=output.chunks_exact(d).flat_map(|rho|transpose(rho,n)).collect();
