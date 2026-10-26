@@ -104,7 +104,12 @@ impl RealFourierMap{
     }
     /// Explicit P0/proposal convention Re(T^dagger P T x). This is not an
     /// accepted physical action and must never replace its complex residual.
-    pub fn pull_real_proposal_into(&self, input: &[C], rhs: usize, output: &mut [f64]) -> Result<ProposalProjectionDiagnostics, String> {
+    pub fn pull_real_proposal_into(
+        &self,
+        input: &[C],
+        rhs: usize,
+        output: &mut [f64],
+    ) -> Result<ProposalProjectionDiagnostics, String> {
         self.shape(input.len(), output.len(), rhs)?;
         let mut imaginary = vec![Norm::default(); rhs];
         for column in 0..self.dimension() {
@@ -129,7 +134,11 @@ impl RealFourierMap{
         }
         let imaginary = imaginary.into_iter().map(Norm::value).collect();
         let source = source.into_iter().map(Norm::value).collect();
-        Ok(ProposalProjectionDiagnostics { imaginary_hs_by_column: imaginary, input_hs_by_column: source, real_part_defines_numerical_proposal_only: true })
+        Ok(ProposalProjectionDiagnostics {
+            imaginary_hs_by_column: imaginary,
+            input_hs_by_column: source,
+            real_part_defines_numerical_proposal_only: true,
+        })
     }
 }
 /// Overflow-safe Frobenius norm accumulator (scaled sum of squares, as in

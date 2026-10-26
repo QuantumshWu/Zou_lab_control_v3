@@ -144,6 +144,7 @@ fn shared_pool(threads: usize) -> Result<Arc<rayon::ThreadPool>, String> {
 #[cfg(all(test, feature = "parallel"))]
 mod tests {
     use super::*;
+    const WORK: usize = MINIMUM_WORK_PER_TASK;
 
     #[test]
     fn mode_chunks_cover_every_mode_once_and_keep_scratch() {
@@ -151,7 +152,7 @@ mod tests {
         let mut scratch: Vec<Vec<usize>> = Vec::new();
         let mut out = vec![0usize; 10 * 3];
         execution
-            .for_mode_chunks(&mut out, 3, 4 * MINIMUM_WORK_PER_TASK, MINIMUM_WORK_PER_TASK, &mut scratch, |first, chunk, seen| {
+            .for_mode_chunks(&mut out, 3, 4 * WORK, WORK, &mut scratch, |first, chunk, seen| {
                 for (k, mode) in chunk.chunks_exact_mut(3).enumerate() {
                     mode.fill(first + k);
                     seen.push(first + k);
@@ -167,7 +168,7 @@ mod tests {
         assert_eq!(all, (0..10).collect::<Vec<_>>());
         // Too little work: one serial task.
         let mut small = vec![0usize; 8];
-        execution.for_mode_chunks(&mut small, 1, 8, MINIMUM_WORK_PER_TASK, &mut scratch, |first, chunk, _| {
+        execution.for_mode_chunks(&mut small, 1, 8, WORK, &mut scratch, |first, chunk, _| {
             assert_eq!((first, chunk.len()), (0, 8));
             Ok(())
         })
@@ -179,7 +180,7 @@ mod tests {
         let execution = Execution::with_threads(3).unwrap();
         let mut scratch: Vec<()> = Vec::new();
         let mut out = vec![0u8; 9];
-        let result = execution.for_mode_chunks(&mut out, 1, 9 * MINIMUM_WORK_PER_TASK, MINIMUM_WORK_PER_TASK, &mut scratch, |first, chunk, _| {
+        let result = execution.for_mode_chunks(&mut out, 1, 9 * WORK, WORK, &mut scratch, |first, chunk, _| {
             if (first..first + chunk.len()).contains(&4) { Err("mode 4".into()) } else { Ok(()) }
         });
         assert_eq!(result, Err("mode 4".to_string()));

@@ -38,6 +38,10 @@ use crate::{Coefficient, Finite, C};
 
 const ZERO: C = C { re: 0., im: 0. };
 const ONE: C = C { re: 1., im: 0. };
+/// Task-sizing weights in complex multiply-add units (scheduling only):
+/// one element of a memory-bound conversion pass, and one scalar CSR term.
+const COPY_WORK: usize = 16;
+const CSR_WORK: usize = 4;
 
 // ---------------------------------------------------------------------------
 // Stage profile
@@ -305,6 +309,8 @@ pub(crate) struct ModeOrder {
     charges: Vec<Charge>,
     /// Caller index of each internal mode.
     external: Vec<usize>,
+    /// Internal index of each caller mode.
+    internal: Vec<usize>,
     pairing: Option<Pairing>,
 }
 
@@ -338,7 +344,11 @@ impl ModeOrder {
         } else {
             ((0..modes.len()).collect(), None)
         };
-        Self { charges: modes.to_vec(), external, pairing }
+        let mut internal = vec![0; modes.len()];
+        for (i, &e) in external.iter().enumerate() {
+            internal[e] = i;
+        }
+        Self { charges: modes.to_vec(), external, internal, pairing }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -669,16 +679,15 @@ impl Plan {
         let mut clock = StageClock::start();
 
         // Input in mode-block layout; detect exact Hermitian symmetry.
-        ensure(&mut w.x, self.input.len() * block);
-        let symmetric = load_field(input, &self.input, n, rhs, &mut w.x, self.half_capable)?;
-        let half = self.half_capable && symmetric;
+        let half = self.load_input(input, rhs, w)?;
         clock.mark(profile, 0);
 
         // dx = [S, x].
         let first_count = self.first.computed(half);
         ensure(&mut w.dx, self.first.len() * block);
         w.dx[..first_count * block].fill(ZERO);
-        self.hilbert_stage(gemm, &self.first_commutator, &w.x, &mut w.dx[..first_count * block], rhs, Some(1.), Some(-1.), &mut w.scratch)?;
+        let dx = &mut w.dx[..first_count * block];
+        self.hilbert_stage(gemm, &self.first_commutator, &w.x, dx, rhs, Some(1.), Some(-1.), &mut w.scratch)?;
         if half {
             mirror(&mut w.dx, &self.first, n, rhs);
         }
@@ -709,7 +718,8 @@ impl Plan {
         let z_count = self.z.computed(half);
         ensure(&mut w.z, self.z.len() * z_width);
         w.z[..z_count * z_width].fill(ZERO);
-        self.thin_stage(gemm, &self.selected_k, &w.ee, &mut w.z[..z_count * z_width], Rows::Vector, rhs, &mut w.scratch)?;
+        let z = &mut w.z[..z_count * z_width];
+        self.thin_stage(gemm, &self.selected_k, &w.ee, z, Rows::Vector, rhs, &mut w.scratch)?;
         if half {
             mirror_ground(&mut w.z, &self.z, self.gg_transpose.as_deref().unwrap_or(&[]), self.rank, rhs);
         }
@@ -743,7 +753,8 @@ impl Plan {
         clock.mark(profile, 6);
         self.thin_stage(gemm, &self.recycling, &w.ee, f_field, Rows::Matrix(&self.gg), rhs, &mut w.scratch)?;
         self.thin_stage(gemm, &self.ground_hamiltonian, &w.z, f_field, Rows::Matrix(&self.gg), rhs, &mut w.scratch)?;
-        self.thin_stage(gemm, &self.optical_hamiltonian, &w.z, f_field, Rows::Matrix(&self.optical), rhs, &mut w.scratch)?;
+        let optical = Rows::Matrix(&self.optical);
+        self.thin_stage(gemm, &self.optical_hamiltonian, &w.z, f_field, optical, rhs, &mut w.scratch)?;
         for t in 0..output_count {
             let omega = self.frequency[t];
             let range = t * block..(t + 1) * block;
@@ -757,19 +768,126 @@ impl Plan {
     }
 
     /// Write E and F in caller layout.
-    pub(crate) fn store(&self, w: &Workspace, half: bool, rhs: usize, mass: &mut [C], pencil: &mut [C]) -> Result<(), String> {
+    pub(crate) fn store(
+        &self,
+        w: &Workspace,
+        half: bool,
+        rhs: usize,
+        mass: &mut [C],
+        pencil: &mut [C],
+    ) -> Result<(), String> {
         let read = |field: &[C], at: usize, mirrored: bool| if mirrored { conj(field[at]) } else { field[at] };
-        store_field(&self.output, half, self.n, rhs, mass, |at, mirrored| read(&w.e, at, mirrored))?;
-        store_field(&self.output, half, self.n, rhs, pencil, |at, mirrored| read(&w.f, at, mirrored))
+        self.store_output(half, rhs, mass, |at, mirrored| read(&w.e, at, mirrored))?;
+        self.store_output(half, rhs, pencil, |at, mirrored| read(&w.f, at, mirrored))
     }
 
     /// Write shift*E - F in caller layout (E and F are mirrored before the
     /// shift is applied, so complex shifts are exact as well).
-    pub(crate) fn store_shifted(&self, w: &Workspace, shift: C, half: bool, rhs: usize, out: &mut [C]) -> Result<(), String> {
-        store_field(&self.output, half, self.n, rhs, out, |at, mirrored| {
+    pub(crate) fn store_shifted(
+        &self,
+        w: &Workspace,
+        shift: C,
+        half: bool,
+        rhs: usize,
+        out: &mut [C],
+    ) -> Result<(), String> {
+        self.store_output(half, rhs, out, |at, mirrored| {
             let (e, f) = if mirrored { (conj(w.e[at]), conj(w.f[at])) } else { (w.e[at], w.f[at]) };
             let value = mul(shift, e);
             C { re: value.re - f.re, im: value.im - f.im }
+        })
+    }
+
+    /// Caller layout [mode][(i*n+j)*rhs+b] -> mode blocks in internal order,
+    /// in parallel over modes. Rejects nonfinite input. Returns whether the
+    /// Hermitian half applies: the plan allows it and x_{-q} = x_q^dagger
+    /// holds exactly for every pair (the central mode is Hermitian).
+    fn load_input(&self, input: &[C], rhs: usize, w: &mut Workspace) -> Result<bool, String> {
+        let (n, order) = (self.n, &self.input);
+        let block = n * n * rhs;
+        ensure(&mut w.x, order.len() * block);
+        let x = &mut w.x[..order.len() * block];
+        let work = x.len() * COPY_WORK;
+        let minimum = MINIMUM_WORK_PER_TASK;
+        self.execution.for_mode_chunks(x, block, work, minimum, &mut Vec::<()>::new(), |first, chunk, _| {
+            for (k, target) in chunk.chunks_exact_mut(block).enumerate() {
+                let external = order.external[first + k];
+                let source = &input[external * block..(external + 1) * block];
+                if !source.iter().all(|z| z.finite()) {
+                    return Err("Nonfinite owned pencil input".into());
+                }
+                for j in 0..n {
+                    for b in 0..rhs {
+                        for i in 0..n {
+                            target[i + n * (b + rhs * j)] = source[(i * n + j) * rhs + b];
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        let Some(pairing) = order.pairing.filter(|_| self.half_capable) else { return Ok(false) };
+        let pairs = pairing.canonical - pairing.central;
+        let Workspace { x, symmetric, .. } = w;
+        let x = &x[..order.len() * block];
+        symmetric.resize(pairing.canonical, false);
+        let work = pairing.canonical * block * COPY_WORK;
+        self.execution.for_mode_chunks(symmetric, 1, work, minimum, &mut Vec::<()>::new(), |first, chunk, _| {
+            for (k, flag) in chunk.iter_mut().enumerate() {
+                let c = first + k;
+                let partner = if c < pairing.central { c } else { c + pairs };
+                let (a, b) = (&x[c * block..(c + 1) * block], &x[partner * block..(partner + 1) * block]);
+                *flag = (0..n).all(|j| {
+                    (0..rhs).all(|r| {
+                        (0..n).all(|i| {
+                            let (u, v) = (a[i + n * (r + rhs * j)], b[j + n * (r + rhs * i)]);
+                            u.re == v.re && u.im == -v.im
+                        })
+                    })
+                });
+            }
+            Ok(())
+        })?;
+        Ok(symmetric.iter().all(|&flag| flag))
+    }
+
+    /// Write every caller-order output mode, in parallel over modes; in half
+    /// mode a mirrored mode is the conjugate transpose of its canonical
+    /// partner. `value(at, mirrored)` reads internal entry `at` (conjugated
+    /// when `mirrored`). Rejects nonfinite results.
+    fn store_output(
+        &self,
+        half: bool,
+        rhs: usize,
+        out: &mut [C],
+        value: impl Fn(usize, bool) -> C + Sync,
+    ) -> Result<(), String> {
+        let (n, order) = (self.n, &self.output);
+        let block = n * n * rhs;
+        let mirrored = order.mirrored().filter(|_| half);
+        let work = out.len() * COPY_WORK;
+        let minimum = MINIMUM_WORK_PER_TASK;
+        self.execution.for_mode_chunks(out, block, work, minimum, &mut Vec::<()>::new(), |first, chunk, _| {
+            let mut finite = true;
+            for (k, target) in chunk.chunks_exact_mut(block).enumerate() {
+                let internal = order.internal[first + k];
+                // A mirrored mode reads its partner's block transposed.
+                let (base, transposed) = match mirrored {
+                    Some((start, offset)) if internal >= start => ((internal - offset) * block, true),
+                    _ => (internal * block, false),
+                };
+                for i in 0..n {
+                    for j in 0..n {
+                        let at = if transposed { base + j + n * rhs * i } else { base + i + n * rhs * j };
+                        for b in 0..rhs {
+                            let z = value(at + n * b, transposed);
+                            finite &= z.finite();
+                            target[(i * n + j) * rhs + b] = z;
+                        }
+                    }
+                }
+            }
+            if finite { Ok(()) } else { Err("Nonfinite complete native E/F result".into()) }
         })
     }
 
@@ -834,11 +952,12 @@ impl Plan {
             .iter()
             .map(|link| {
                 let a = &library[link.coefficient];
-                let per_edge = if a.dense.is_some() { a.rows * a.cols } else { a.sparse.value.len() };
+                let per_edge = if a.dense.is_some() { a.rows * a.cols } else { CSR_WORK * a.sparse.value.len() };
                 link.within(&modes).len() * per_edge * rhs
             })
             .sum();
-        self.execution.for_mode_chunks(target, target_width, work, MINIMUM_WORK_PER_TASK, scratch, |first, chunk, scratch| {
+        let minimum = MINIMUM_WORK_PER_TASK;
+        self.execution.for_mode_chunks(target, target_width, work, minimum, scratch, |first, chunk, scratch| {
             let targets = first..first + chunk.len() / target_width;
             for link in links {
                 let edges = link.within(&targets);
@@ -867,7 +986,8 @@ impl Plan {
                             &packed[..sources.len() * width]
                         };
                         ensure(product, a.rows * columns);
-                        gemm.multiply(a.rows, columns, a.cols, ONE, dense, a.rows, input, a.cols, ZERO, product, a.rows)?;
+                        let (rows, cols) = (a.rows, a.cols);
+                        gemm.multiply(rows, columns, cols, ONE, dense, rows, input, cols, ZERO, product, rows)?;
                         for (k, &t) in destinations.iter().enumerate() {
                             let out = &mut chunk[(t - first) * target_width..(t - first + 1) * target_width];
                             for b in 0..rhs {
@@ -954,7 +1074,8 @@ impl TargetProducts<'_> {
             let Some(block) = a.left.iter().find(|b| b.output == *output) else { continue };
             let input = &block.input;
             for (k, col) in input.clone().enumerate() {
-                stacked[m * (row + k)..m * (row + k + 1)].copy_from_slice(&a.dense[output.start + n * col..output.end + n * col]);
+                let entries = &a.dense[output.start + n * col..output.end + n * col];
+                stacked[m * (row + k)..m * (row + k + 1)].copy_from_slice(entries);
             }
             let x = &self.source[s * n * height..(s + 1) * n * height];
             for column in 0..height {
@@ -984,14 +1105,17 @@ impl TargetProducts<'_> {
             let Some(block) = a.right.iter().find(|b| b.output == *output) else { continue };
             let input = &block.input;
             let x = &self.source[s * n * height..(s + 1) * n * height];
-            packed[height * row..height * (row + input.len())].copy_from_slice(&x[height * input.start..height * input.end]);
+            let columns = &x[height * input.start..height * input.end];
+            packed[height * row..height * (row + input.len())].copy_from_slice(columns);
             for (k, col) in output.clone().enumerate() {
-                stacked[row + depth * k..row + input.len() + depth * k].copy_from_slice(&a.dense[input.start + n * col..input.end + n * col]);
+                let entries = &a.dense[input.start + n * col..input.end + n * col];
+                stacked[row + depth * k..row + input.len() + depth * k].copy_from_slice(entries);
             }
             row += input.len();
         }
         let alpha = C { re: alpha, im: 0. };
-        self.gemm.multiply(height, m, depth, alpha, packed, height, stacked, depth, ONE, &mut y[height * output.start..], height)
+        let target = &mut y[height * output.start..];
+        self.gemm.multiply(height, m, depth, alpha, packed, height, stacked, depth, ONE, target, height)
     }
 }
 
@@ -1017,6 +1141,7 @@ pub(crate) struct Workspace {
     z: Vec<C>,
     pub(crate) e: Vec<C>,
     pub(crate) f: Vec<C>,
+    symmetric: Vec<bool>,
     scratch: Vec<Scratch>,
 }
 
@@ -1026,93 +1151,6 @@ impl Workspace {
         let scratch: usize =
             self.scratch.iter().map(|s| s.packed.capacity() + s.product.capacity() + s.stacked.capacity()).sum();
         (fields.iter().map(|v| v.capacity()).sum::<usize>() + scratch) * std::mem::size_of::<C>()
-    }
-}
-
-/// Caller layout [mode][(i*n+j)*rhs+b] -> mode blocks in internal order.
-/// Rejects nonfinite input. Returns whether x_{-q} = x_q^dagger holds
-/// exactly for every pair (checked only when `check` is set).
-fn load_field(input: &[C], order: &ModeOrder, n: usize, rhs: usize, x: &mut [C], check: bool) -> Result<bool, String> {
-    let block = n * n * rhs;
-    if !input.iter().all(|z| z.finite()) {
-        return Err("Nonfinite owned pencil input".into());
-    }
-    for (internal, &external) in order.external.iter().enumerate() {
-        let source = &input[external * block..(external + 1) * block];
-        let target = &mut x[internal * block..(internal + 1) * block];
-        for i in 0..n {
-            for j in 0..n {
-                for b in 0..rhs {
-                    target[i + n * (b + rhs * j)] = source[(i * n + j) * rhs + b];
-                }
-            }
-        }
-    }
-    let Some(pairing) = order.pairing.filter(|_| check) else { return Ok(false) };
-    let pairs = pairing.canonical - pairing.central;
-    let symmetric = (0..pairing.canonical).all(|c| {
-        let partner = if c < pairing.central { c } else { c + pairs };
-        let (a, b) = (&x[c * block..(c + 1) * block], &x[partner * block..(partner + 1) * block]);
-        (0..n).all(|i| {
-            (0..n).all(|j| {
-                (0..rhs).all(|r| {
-                    let (u, v) = (a[i + n * (r + rhs * j)], b[j + n * (r + rhs * i)]);
-                    u.re == v.re && u.im == -v.im
-                })
-            })
-        })
-    });
-    Ok(symmetric)
-}
-
-/// Write every caller-order output mode; in half mode a mirrored mode is the
-/// conjugate transpose of its canonical partner. `value(at, mirrored)` reads
-/// internal entry `at` and conjugates it when `mirrored`. Rejects nonfinite
-/// results.
-fn store_field(
-    order: &ModeOrder,
-    half: bool,
-    n: usize,
-    rhs: usize,
-    out: &mut [C],
-    value: impl Fn(usize, bool) -> C,
-) -> Result<(), String> {
-    let block = n * n * rhs;
-    let mirrored = order.mirrored().filter(|_| half);
-    let mut finite = true;
-    for (internal, &external) in order.external.iter().enumerate() {
-        let target = &mut out[external * block..(external + 1) * block];
-        match mirrored {
-            Some((start, offset)) if internal >= start => {
-                let base = (internal - offset) * block;
-                for i in 0..n {
-                    for j in 0..n {
-                        for b in 0..rhs {
-                            let z = value(base + j + n * (b + rhs * i), true);
-                            finite &= z.finite();
-                            target[(i * n + j) * rhs + b] = z;
-                        }
-                    }
-                }
-            }
-            _ => {
-                let base = internal * block;
-                for i in 0..n {
-                    for j in 0..n {
-                        for b in 0..rhs {
-                            let z = value(base + i + n * (b + rhs * j), false);
-                            finite &= z.finite();
-                            target[(i * n + j) * rhs + b] = z;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if finite {
-        Ok(())
-    } else {
-        Err("Nonfinite complete native E/F result".into())
     }
 }
 
