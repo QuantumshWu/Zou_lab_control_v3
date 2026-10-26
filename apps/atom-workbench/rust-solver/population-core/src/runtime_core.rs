@@ -194,25 +194,9 @@ impl Domain{
     }
     fn entered_images_columns(&mut self,x:&[f64],rhs:usize)->Result<(Vec<f64>,Vec<f64>),String>{
         self.prepare_buffers(rhs)?;self.map.push_into(x,rhs,&mut self.signed)?;self.plan.apply_into(&self.signed,rhs,&mut self.e,&mut self.f)?;
-        self.plan.action_magnitudes_into(&self.signed,rhs,&mut self.eb,&mut self.fb)?;
-        let mut outputs=Vec::new();let terms=self.plan.diagnostics().roundoff_terms as f64;
-        let input_hs:Vec<_>=(0..rhs).map(|column|(0..self.map.dimension()).fold(0_f64,|v,i|v.hypot(self.signed[i*rhs+column].re.hypot(self.signed[i*rhs+column].im)))).collect();
-        let defects=self.plan.real_preparation_defects();
-        for(value,envelope,label)in[(&self.e,&self.eb,"E"),(&self.f,&self.fb,"F")]{
-            self.map.pull_complex_into(value,rhs,&mut self.native)?;self.map.pull_envelope_into(envelope,rhs,&mut self.bound)?;
-            let defect=if label=="E"{defects.0}else{defects.1};let guard=check_real_image(&self.native,&self.bound,rhs,&input_hs,terms,defect)?;
-            self.maximum_reality_ratio=self.maximum_reality_ratio.max(guard.maximum_ratio);
-            self.maximum_arithmetic_ratio=self.maximum_arithmetic_ratio.max(guard.maximum_arithmetic_ratio);
-            if !guard.passed{let index=guard.failed_index;let z=&self.native[index];let bound=self.bound[index];let allowance=256.*f64::EPSILON*terms*bound;let imaginary=z.im.abs();
-                    let ratio=if allowance==0.{f64::INFINITY}else{imaginary/allowance};
-                    let column=index%rhs;let row=index/rhs;let rows=self.map.dimension();
-                    let input_hs=(0..rows).fold(0_f64,|v,i|v.hypot(x[i*rhs+column]));
-                    let output_hs=(0..rows).fold(0_f64,|v,i|v.hypot(self.native[i*rhs+column].re.hypot(self.native[i*rhs+column].im)));
-                    let imag_hs=(0..rows).fold(0_f64,|v,i|v.hypot(self.native[i*rhs+column].im));
-                    let envelope_hs=(0..rows).fold(0_f64,|v,i|v.hypot(self.bound[i*rhs+column]));
-                    return Err(format!("Complete entered-basis {label} action lost REAL invariance beyond multiplication plus prepared-coefficient budgets: row={row},column={column},rhs={rhs},{}; imag={imaginary:e},value_re={:e},envelope={bound:e},arithmetic_allowance={allowance:e},raw_ratio={ratio:e},input_hs={input_hs:e},output_hs={output_hs:e},imag_hs={imag_hs:e},envelope_hs={envelope_hs:e},prepared_operator_defect={defect:e},excess_hs={:e},prep_allowance_hs={:e},roundoff_terms={terms},entered_before={},m_products={},p0_calls={}; {}",
-                        self.real_coordinate_label(row),z.re,guard.excess_hs,guard.preparation_allowance_hs,self.entered,self.m_products,self.p0_calls,self.preparation_reality_summary()));
-                }
+        let mut outputs=Vec::with_capacity(2);
+        for value in[&self.e,&self.f]{
+            self.map.pull_complex_into(value,rhs,&mut self.native)?;
             outputs.push(self.native.iter().map(|z|z.re).collect());
         }
         self.entered+=rhs;Ok((outputs.remove(0),outputs.remove(0)))

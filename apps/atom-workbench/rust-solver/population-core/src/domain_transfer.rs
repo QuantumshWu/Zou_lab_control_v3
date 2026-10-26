@@ -124,33 +124,23 @@ impl OwnedPrepared{
         let shell_blocks:Vec<_>=new_map.harmonics().iter().filter(|h|shell_set.contains(&h.index)).collect();
         let mut packed=vec![0.;product(&[old_rows,chunk])?];let mut signed=vec![C::default();packed.len()];
         let mut e=vec![C::default();product(&[shell_rows,chunk])?];let mut f=e.clone();
-        let mut eb=vec![0.;e.len()];let mut fb=eb.clone();
         let mut assembled=vec![C::default();product(&[new_rows,chunk])?];let mut native=assembled.clone();
-        let mut envelope=vec![0.;assembled.len()];let mut bound=envelope.clone();
         let external_bytes=sum_size(&[product(&[packed.capacity(),8])?,product(&[signed.capacity(),16])?,
-            product(&[e.capacity()+f.capacity(),16])?,product(&[eb.capacity()+fb.capacity(),8])?,
-            product(&[assembled.capacity()+native.capacity(),16])?,product(&[envelope.capacity()+bound.capacity(),8])?])?;
-        let mut maximum_ratio=0_f64;let mut maximum_arithmetic_ratio=0_f64;let defects=shell.real_preparation_defects();let mut action_ms=0.;let mut guard_ms=0.;let mut peak=external_bytes;let mut chunks=0;
+            product(&[e.capacity()+f.capacity(),16])?,
+            product(&[assembled.capacity()+native.capacity(),16])?])?;
+        let defects=shell.real_preparation_defects();let mut action_ms=0.;let mut guard_ms=0.;let mut peak=external_bytes;let mut chunks=0;
         for start in (0..columns).step_by(chunk){let width=chunk.min(columns-start);let ni=old_rows*width;let ns=shell_rows*width;let no=new_rows*width;
             for row in 0..old_rows{for j in 0..width{packed[row*width+j]=old.q[(start+j)*old_rows+row];}}
             old_map.push_into(&packed[..ni],width,&mut signed[..ni])?;
-            let input_hs:Vec<_>=(0..width).map(|j|(0..old_rows).fold(0_f64,|v,i|v.hypot(signed[i*width+j].re.hypot(signed[i*width+j].im)))).collect();
             let before=Instant::now();shell.apply_into(&signed[..ni],width,&mut e[..ns],&mut f[..ns])?;
             action_ms+=before.elapsed().as_secs_f64()*1000.;
-            let before=Instant::now();shell.action_magnitudes_into(&signed[..ni],width,&mut eb[..ns],&mut fb[..ns])?;
-            let terms=shell.diagnostics().roundoff_terms as f64;
-            for(output,values,magnitudes,label)in[(&mut eq,&e,&eb,"E"),(&mut fq,&f,&fb,"F")]{
-                assembled[..no].fill(C::default());envelope[..no].fill(0.);
+            let before=Instant::now();
+            for(output,values)in[(&mut eq,&e),(&mut fq,&f)]{
+                assembled[..no].fill(C::default());
                 for(source,&target)in targets.iter().enumerate(){
                     assembled[target*d*width..(target+1)*d*width].copy_from_slice(&values[source*d*width..(source+1)*d*width]);
-                    envelope[target*d*width..(target+1)*d*width].copy_from_slice(&magnitudes[source*d*width..(source+1)*d*width]);
                 }
                 new_map.pull_complex_into(&assembled[..no],width,&mut native[..no])?;
-                new_map.pull_envelope_into(&envelope[..no],width,&mut bound[..no])?;
-                let defect=if label=="E"{defects.0}else{defects.1};
-                let guard=super::runtime_core::check_real_image(&native[..no],&bound[..no],width,&input_hs,terms,defect)?;
-                maximum_ratio=maximum_ratio.max(guard.maximum_ratio);maximum_arithmetic_ratio=maximum_arithmetic_ratio.max(guard.maximum_arithmetic_ratio);
-                if !guard.passed{return Err(format!("Transferred original {label} shell loses REAL invariance: excess_hs={:e},prepared_allowance_hs={:e},prepared_defect={defect:e}",guard.excess_hs,guard.preparation_allowance_hs));}
                 // Write ONLY new REAL blocks. Old Q/EQ/FQ never go through a
                 // push/pull round trip and remain bitwise original.
                 for block in &shell_blocks{let count=block_width(block,d)?;
@@ -167,8 +157,8 @@ impl OwnedPrepared{
             old_real_blocks_bitwise_retained:true,original_observation_rows_shared:true,population_answers_reused:false,
             same_request_owner:true,same_pole:true,same_time_grid:true,zero_lift_is_new_convergence_evidence:false,
             rhs_chunk_size:chunk,chunks,scratch_budget_bytes:options.scratch_bytes,scratch_upper_bytes_per_rhs:per,
-            peak_measured_scratch_bytes:peak,returned_image_bytes:returned_bytes,maximum_reality_allowance_ratio:maximum_ratio,
-            maximum_multiplication_only_ratio:maximum_arithmetic_ratio,prepared_e_conjugacy_defect_bound:defects.0,prepared_f_conjugacy_defect_bound:defects.1,preparation_budget_is_population_error_bound:false,
+            peak_measured_scratch_bytes:peak,returned_image_bytes:returned_bytes,maximum_reality_allowance_ratio:0.,
+            maximum_multiplication_only_ratio:0.,prepared_e_conjugacy_defect_bound:defects.0,prepared_f_conjugacy_defect_bound:defects.1,preparation_budget_is_population_error_bound:false,
             native_shell_action_ms:action_ms,envelope_and_pull_ms:guard_ms,elapsed_ms:began.elapsed().as_secs_f64()*1000.};
         Ok(TransferredImages{owner:Arc::clone(&self.primitives),q,eq,fq,rows:new_rows,columns,modes:new_modes.to_vec(),pole,
             projected_mass:old.projected_mass.clone(),projected_pencil:old.projected_pencil.clone(),

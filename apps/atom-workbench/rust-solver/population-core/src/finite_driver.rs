@@ -120,14 +120,17 @@ pub fn solve(mut core:RuntimeCore,times:&[f64],groups:Vec<RequestedGroup>,option
     let control=PopulationControl::new(core.prepared(),ControlOptions{epsilon:options.population_tolerance,..Default::default()},times,&initial,groups)?;
     let source=&core.prepared().primitives().hilbert.source;
     let axes=source.phases.axes.len();let steps=source.phases.drive_indices.clone();
-    let pole=(times.len()-1)as f64/times[times.len()-1];
+    // EXPERIMENT (temporary): pole independent of output sampling.
+    let pole_factor=std::env::var("ATOM_EXP_POLE_C").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or((times.len()-1)as f64);
+    let pole=pole_factor/times[times.len()-1];
+    let pole_times=[0.,times[times.len()-1]/pole_factor];
     let policy=DirectionPolicy::Adaptive(AdaptiveConstruction{construction_budget_scale:options.population_tolerance,
         maximum_inner_steps:12,checkpoint_policy:CheckpointPolicy::Cost});
     let modes=support_domain(axes,&steps,1)?;
     let mut workspace=core.cold_workspace(&modes,times,pole,policy)?;
     let mut fast_columns=0;
     if options.fast_pair {
-        let selection=core.select_fast_pair(times,pole)?;
+        let selection=core.select_fast_pair(&pole_times,pole)?;
         if selection.pole.is_some() {
             let old=workspace.columns();core.add_fast_pair(&mut workspace,&selection)?;
             fast_columns=workspace.columns()-old;
