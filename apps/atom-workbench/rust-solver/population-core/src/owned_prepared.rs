@@ -15,6 +15,16 @@ fn population_thread_policy(value:Option<&str>)->Result<usize,String>{
     let threads=value.map(str::parse::<usize>).transpose().map_err(|_|"ATOM_POPULATION_BLAS_THREADS must be an integer in1..32")?.unwrap_or(1);
     if !(1..=32).contains(&threads){return Err("ATOM_POPULATION_BLAS_THREADS must be in1..32".into());}Ok(threads)
 }
+fn configured_lapack()->Result<Lapack,String>{
+    Lapack::load_with_threads(population_thread_policy(std::env::var("ATOM_POPULATION_BLAS_THREADS").ok().as_deref())?)
+}
+/// Worker start-up check: loads LAPACK under the population thread policy
+/// and verifies one Hermitian eigensystem, [[2,1-i],[1+i,3]] -> {1,4}.
+pub fn self_check()->Result<(),String>{
+    let a=[C{re:2.,im:0.},C{re:1.,im:1.},C{re:1.,im:-1.},C{re:3.,im:0.}];
+    let(values,_)=configured_lapack()?.hermitian_eigen(&a,2)?;
+    if (values[0]-1.).abs()>1e-12||(values[1]-4.).abs()>1e-12{return Err("LAPACK numerical self-check failed".into());}Ok(())
+}
 #[path="physical_coordinates.rs"]
 pub mod coordinates;
 #[path="b0_factor.rs"]
@@ -124,8 +134,7 @@ impl OwnedPrepared {
     pub fn prepare(model:&ModelView<'_>,phases:PhaseBasis,gauge:GaugePolicy<'_>,policy:KernelPolicy)->Result<Self,String>{
         // Population kernels were validated with one BLAS thread and a
         // separate output-mode pool. Do not inherit the legacy period's8.
-        let setting=std::env::var("ATOM_POPULATION_BLAS_THREADS").ok();
-        let lap=Arc::new(Lapack::load_with_threads(population_thread_policy(setting.as_deref())?)?);
+        let lap=Arc::new(configured_lapack()?);
         let clock=Instant::now();
         let source=GaugedSource::prepare_with_lapack(model,phases,gauge,&lap)?;
         let gauge_ms=clock.elapsed().as_secs_f64()*1000.;let clock=Instant::now();

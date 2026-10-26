@@ -475,7 +475,7 @@ mod declared_coordinate_tests{
     fn model(frequencies:Vec<f64>,indices:Vec<Vec<i32>>,omegas:Vec<f64>)->Model{
         let axes=frequencies.len();let zero=Operator{real:vec![0.;4],imag:vec![0.;4]};
         Model{dimension:2,states:vec![],h_real:vec![0.;4],h_imag:vec![0.;4],collapse:vec![],
-            initial_index:0,initial_real:None,initial_imag:None,time_dependent:!omegas.is_empty(),
+            initial_index:0,initial_real:None,initial_imag:None,
             drives:omegas.into_iter().map(|omega|Drive{omega,cos:zero.clone(),sin:zero.clone()}).collect(),
             frequency_coordinates:Some(FrequencyCoordinates{frequencies,frequencies_mhz:None,drive_indices:indices,
                 frame_indices:vec![vec![0;axes];2],frame_sectors:vec![0,1]})}

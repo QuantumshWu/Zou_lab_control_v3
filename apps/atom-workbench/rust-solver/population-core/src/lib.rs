@@ -2,9 +2,9 @@
 //! No physical model is rebuilt; all coefficient entries and mode edges are
 //! copied once from the current prepared plan. No trajectory is retained.
 #![allow(dead_code)]
-#[path = "../../src/lapack.rs"]
 mod lapack;
-use lapack::{Complex64 as C, Lapack};
+pub use lapack::{Complex64, Lapack};
+use lapack::Complex64 as C;
 mod parallel;
 #[cfg(feature = "preparation")]
 pub mod preparation;
@@ -14,10 +14,7 @@ mod pencil;
 pub use pencil::{StageProfile, STAGE_COUNT, STAGE_NAMES};
 #[cfg(feature = "preparation")]
 pub mod owned_prepared;
-// Reuse the production Pade implementation verbatim. This is not another
-// exponential engine or a copy that can diverge from the mature solver.
 #[cfg(feature = "preparation")]
-#[path = "../../src/dense_expm.rs"]
 mod dense_expm;
 
 /// Sparse row-major (CSR) complex matrix.

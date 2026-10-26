@@ -34,8 +34,6 @@ pub struct FiniteOptions {
     /// Both are independent of the number of output samples.
     pub slow_pole_factor: f64,
     pub fast_pole: f64,
-    /// Development only: explicit pole list overriding the rule above.
-    pub poles: Option<Vec<f64>>,
     pub first_columns: usize,
     pub block_columns: usize,
     pub maximum_columns: usize,
@@ -45,8 +43,6 @@ pub struct FiniteOptions {
     /// Multiplies the error estimate before comparing it with the tolerance;
     /// calibrated estimate/true ratios on the benchmarks are 0.75-1.37.
     pub safety_factor: f64,
-    /// Development only: build exactly (order, columns) and return.
-    pub fixed: Option<(usize, usize)>,
 }
 
 impl Default for FiniteOptions {
@@ -55,7 +51,6 @@ impl Default for FiniteOptions {
             population_tolerance: 0.005,
             slow_pole_factor: 200.,
             fast_pole: 20.,
-            poles: None,
             first_columns: 16,
             block_columns: 8,
             maximum_columns: 400,
@@ -63,7 +58,6 @@ impl Default for FiniteOptions {
             wall_seconds: 120.,
             inner: InnerSolve { maximum_steps: 24, relative_residual: 1e-5 },
             safety_factor: 1.5,
-            fixed: None,
         }
     }
 }
@@ -104,7 +98,7 @@ pub struct FiniteDiagnostics {
     /// The unscaled population error estimate of the returned candidate.
     pub raw_estimate: f64,
     pub projection_charge: f64,
-    /// "dual-weighted-residual", "successive-change" or "fixed".
+    /// "dual-weighted-residual" or "successive-change".
     pub error_control: &'static str,
     pub final_modes: usize,
     pub final_columns: usize,
@@ -196,9 +190,6 @@ fn population_change(a: &[f64], b: &[f64], n: usize, groups: &[RequestedGroup]) 
 /// Rabi transients (rates ~20-100 /us); a slow pole ~200/T is added only when
 /// it is a separate scale (T > ~40 us), e.g. for millisecond pumping dynamics.
 pub fn rational_poles(duration: f64, options: &FiniteOptions) -> Vec<f64> {
-    if let Some(poles) = &options.poles {
-        return poles.clone();
-    }
     let slow = options.slow_pole_factor / duration;
     if slow < options.fast_pole / 4. {
         vec![options.fast_pole, slow]
@@ -565,25 +556,6 @@ impl Run {
             invariant = !self.grow(self.options.block_columns, &model)?;
         }
     }
-
-    /// Development only: exactly the requested graph-ball order and columns.
-    fn fixed(mut self, order: usize, columns: usize) -> Result<FiniteSolution, String> {
-        let modes = support_domain(self.axes, &self.steps, order)?;
-        self.transfer(&modes)?;
-        loop {
-            let space = self.space.as_mut().expect("trial space");
-            if space.columns() >= columns {
-                break;
-            }
-            let want = columns - space.columns();
-            if self.chain.grow(space, want, self.options.inner)? == 0 {
-                break;
-            }
-        }
-        let model = ReducedModel::build(self.space())?;
-        let candidate = self.populations(&model)?;
-        Ok(self.finish(candidate.values, candidate.maximum_imaginary, 0., 0., 0., "fixed"))
-    }
 }
 
 pub fn solve(
@@ -612,7 +584,6 @@ pub fn solve(
     let mut chain = Chain::new(poles.len());
     chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner)?;
     let peak_bytes = space.bytes();
-    let fixed = options.fixed;
     let mut run = Run {
         core,
         times: times.to_vec(),
@@ -630,9 +601,6 @@ pub fn solve(
         timing: EngineTiming::default(),
         peak_bytes,
     };
-    if let Some((order, columns)) = fixed {
-        return run.fixed(order, columns);
-    }
     let clock = Instant::now();
     let dual = SlowDual::prepare(run.core.prepared(), SlowDualOptions::default());
     run.timing.dual_prepare = ms(clock);

@@ -7,7 +7,7 @@ import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {EFFECTIVE_MODEL_SCHEMA as SCHEMA,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
 const capabilities={id:0,protocol:NATIVE_PROTOCOL,capabilities:[SCHEMA]};
-const warm={id:-1,result:{protocol:NATIVE_PROTOCOL,modelSchema:'generic-lindblad/1',populations:[[1]]}};
+const warm={id:-1,protocol:NATIVE_PROTOCOL,ready:true};
 
 test('IPC lane preserves handshake, cancellation and stale-generation isolation',async()=>{
   const commands=[],finished=[];const owner={binarySha256:'binary',build:{sha256:'build'},startupTimeoutMs:1000,workerIdleMs:1000,sendNative:c=>commands.push(c),finish:(job,error,value)=>{job.settled=true;finished.push({job,error,value});}};

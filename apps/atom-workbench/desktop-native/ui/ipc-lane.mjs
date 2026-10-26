@@ -38,9 +38,9 @@ export class IpcNativeLane {
         w.startup.capabilitiesRoundTripMs=performance.now()-w.capabilitySentAt;w.startup.capabilitiesNativeIoMs=event.transport?.nativeIoMs;
         try{w.capabilities=nativeCapabilities(message);}catch(error){this.failWorker(w,failure(error.message,503,'incompatible-native-protocol'));return;}
         w.warmSentAt=performance.now();
-        this.write(w,{id:-1,model:{dimension:1,states:['startup'],hReal:[0],hImag:[0],collapse:[],initialIndex:0},options:{steadyOnly:true}});return;
+        this.write(w,{id:-1,op:'warmup'});return;
       }
-      if(message.id!==-1||message.error||message.result?.protocol!==NATIVE_PROTOCOL||message.result?.modelSchema!=='generic-lindblad/1'||message.result?.populations?.length!==1||message.result?.populations?.[0]?.length!==1||message.result?.populations?.[0]?.[0]!==1){
+      if(message.id!==-1||message.error||message.protocol!==NATIVE_PROTOCOL||message.ready!==true){
         this.failWorker(w,failure('Native numerical startup check failed.'));return;
       }
       w.startup.numericalReadyRoundTripMs=performance.now()-w.warmSentAt;w.startup.numericalReadyNativeIoMs=event.transport?.nativeIoMs;w.startup.workerStartupMs=performance.now()-w.openSentAt;

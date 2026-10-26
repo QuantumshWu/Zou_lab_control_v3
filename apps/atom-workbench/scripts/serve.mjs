@@ -80,14 +80,13 @@ class NativeLane {
       if(!w.ready){
         if(!w.capabilities){
           try{w.capabilities=nativeCapabilities(message);}catch(error){this.failWorker(w,failure(error.message,503,'incompatible-native-protocol'));return;}
-          // Capability negotiation comes first. A tiny generic density solve
-          // then checks the numerical runtime as well as warming the worker.
-          w.child.stdin.write(JSON.stringify({id:-1,model:{dimension:1,states:['startup'],hReal:[0],hImag:[0],collapse:[],initialIndex:0},options:{steadyOnly:true}})+'\n');
+          // Capability negotiation comes first. The warmup operation then
+          // checks the numerical runtime (a LAPACK self-check).
+          w.child.stdin.write(JSON.stringify({id:-1,op:'warmup'})+'\n');
           continue;
         }
-        if(message.id!==-1||message.error||message.result?.protocol!==NATIVE_PROTOCOL||message.result?.modelSchema!=='generic-lindblad/1'||
-          message.result?.populations?.length!==1||message.result.populations[0]?.length!==1||message.result.populations[0][0]!==1){
-          this.failWorker(w,failure('Native numerical startup check failed: '+(message.error??'invalid generic density response'),503,'invalid-native-startup'));return;
+        if(message.id!==-1||message.error||message.protocol!==NATIVE_PROTOCOL||message.ready!==true){
+          this.failWorker(w,failure('Native numerical startup check failed: '+(message.error??'invalid warmup response'),503,'invalid-native-startup'));return;
         }
         // Pair the handshake with the executable that was actually opened.
         // If a build replaced the path during startup, do not mislabel its PID.

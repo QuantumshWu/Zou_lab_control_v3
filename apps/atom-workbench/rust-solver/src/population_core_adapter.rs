@@ -6,12 +6,13 @@
 //! computed FIRST (and published as `asymptotic` progress), then the core is
 //! handed to the finite-time engine. A steadyOnly request runs only the mean,
 //! through the same function, so inline and steadyOnly means are identical.
-use crate::{Model,Options,Solver,publish_mean,harmonics};
+use crate::{Model,Options,harmonics};
 use serde_json::{json,Value};
 use std::collections::BTreeMap;
 use std::time::Instant;
 use atom_population_core::preparation::{ModelView,MatrixView,DriveView,PhaseBasis,FrequencyParts,GaugePolicy};
-use atom_population_core::owned_prepared::{KernelPolicy,coordinates::InitialView,b0_inverse::P0Policy};
+use atom_population_core::Complex64;
+use atom_population_core::owned_prepared::{self,KernelPolicy,coordinates::InitialView,b0_inverse::P0Policy};
 use atom_population_core::owned_prepared::runtime_core::RuntimeCore;
 use atom_population_core::owned_prepared::engine::{self,FiniteOptions,RequestedGroup};
 use atom_population_core::owned_prepared::asymptotic::{self,LabFrame,MeanKind,MeanOptions,MeanSolution};
@@ -19,8 +20,14 @@ use atom_population_core::owned_prepared::asymptotic::{self,LabFrame,MeanKind,Me
 const MEAN_METHOD:&str="Full32 Cesàro mean of the gauge pencil: defect-corrected null vector with a near-zero pole, halo-condensed Fourier truncation";
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
 
-pub fn supports(model:&Model,_options:&Options)->bool {
-    model.dimension==32&&model.states.len()==32&&model.frequency_coordinates.is_some()
+/// The worker start-up check: the LAPACK runtime every solve uses.
+pub fn warmup()->Result<(),String>{owned_prepared::self_check()}
+
+/// Most negative eigenvalue (as a nonnegative violation) of a row-major
+/// Hermitian 32x32 density. Read column-major it is the complex conjugate,
+/// which has the same spectrum.
+fn positivity(core:&RuntimeCore,density:&[Complex64])->Result<f64,String>{
+    Ok((-core.lapack().hermitian_eigen(density,32)?.0[0]).max(0.))
 }
 
 fn groups(model:&Model)->Result<(Vec<bool>,Vec<RequestedGroup>),String>{
@@ -48,8 +55,10 @@ struct Request{
     preparation_ms:f64,
 }
 
-fn prepare(solver:&Solver,model:&Model)->Result<Request,String>{
+fn prepare(model:&Model)->Result<Request,String>{
     let started=Instant::now();
+    if model.dimension!=32||model.states.len()!=32{return Err("rb87-full/2 requires the complete 32-state Rb87 model".into());}
+    if model.frequency_coordinates.is_none(){return Err("rb87-full/2 requires authoritative frequencyCoordinates metadata".into());}
     let(ground,groups)=groups(model)?;
     // One phase-axis construction for the mean AND the finite engine: the
     // declared axes, or the exact reduced basis when integer relations exist.
@@ -66,9 +75,8 @@ fn prepare(solver:&Solver,model:&Model)->Result<Request,String>{
         GaugePolicy::UnsafeComponentAligned,KernelPolicy::HybridBlas,P0Policy::EigenPreferred)?;
     // Core initial validation has already checked shape, finite entries,
     // Hermiticity and trace before any Hermitian eigensolver is invoked.
-    if model.initial_real.is_some(){
-        let initial:Vec<_>=core.initial().original().iter().map(|z|crate::C{re:z.re,im:z.im}).collect();
-        if crate::positivity(&solver.lap,&initial,32)?>1e-10{return Err("Initial density is not positive semidefinite".into());}
+    if model.initial_real.is_some()&&positivity(&core,core.initial().original())?>1e-10{
+        return Err("Initial density is not positive semidefinite".into());
     }
     let initial_populations=(0..32).map(|i|core.initial().original()[i*32+i].re).collect();
     Ok(Request{core,groups,axes,initial_populations,preparation_ms:started.elapsed().as_secs_f64()*1000.})
@@ -76,12 +84,11 @@ fn prepare(solver:&Solver,model:&Model)->Result<Request,String>{
 
 /// The long-time mean in the steadyOnly result shape. Inline (combined) and
 /// steadyOnly requests both call exactly this function.
-fn mean_result(solver:&Solver,model:&Model,options:&Options,request:&mut Request,started:Instant)->Result<Value,String>{
+fn mean_result(model:&Model,options:&Options,request:&mut Request,started:Instant)->Result<Value,String>{
     let lab=LabFrame{frame_indices:request.axes.frame_indices.clone(),
         sectors:request.axes.frame_sectors.iter().map(|&s|if s==0{0}else{1}).collect()};
     let mean=asymptotic::solve(&mut request.core,&MeanOptions::new(options.population_tolerance,request.groups.clone(),lab))?;
-    let density:Vec<_>=mean.density.iter().map(|z|crate::C{re:z.re,im:z.im}).collect();
-    let positivity=crate::positivity(&solver.lap,&density,32)?;
+    let positivity=positivity(&request.core,&mean.density)?;
     let trace_error=(mean.populations.iter().sum::<f64>()-1.).abs();
     let(status,reason)=classify(model,&mean);
     let d=&mean.diagnostics;
@@ -134,36 +141,22 @@ fn classify(model:&Model,mean:&MeanSolution)->(&'static str,&'static str){
     }
 }
 
-pub fn solve(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
-    let result=solve_inner(solver,model,options);
-    // Worker requests are serial; the core's single-threaded small BLAS
-    // must not change the preferred policy of a later periodic/steady job.
-    solver.lap.restore_configured_threads()?;
-    result
-}
-
-fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,String>{
+/// One rb87-full/2 request. With `includeAsymptotic` the mean is solved
+/// first and handed to `publish_mean` before the finite-time engine runs.
+pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))->Result<Value,String>{
     let started=Instant::now();options.validate_population_tolerance()?;
     if !options.steady_only&&(!options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples)){return Err("Invalid finite population grid".into());}
-    let mut request=prepare(solver,model)?;
-    if options.steady_only{return mean_result(solver,model,options,&mut request,started);}
+    let mut request=prepare(model)?;
+    if options.steady_only{return mean_result(model,options,&mut request,started);}
     let mean=if options.include_asymptotic{
-        let value=mean_result(solver,model,options,&mut request,started);
-        if let Ok(value)=&value{publish_mean(value.clone());}
+        let value=mean_result(model,options,&mut request,started);
+        if let Ok(value)=&value{publish_mean(value);}
         Some(value)
     }else{None};
     let finite_started=Instant::now();
     let names:Vec<_>=request.groups.iter().map(|g|g.name.clone()).collect();
     let times:Vec<_>=(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect();
-    // TEMPORARY development knobs (removed before delivery).
-    let knob=|name:&str|std::env::var(name).ok().and_then(|v|v.parse::<f64>().ok());
-    let mut finite=FiniteOptions{population_tolerance:options.population_tolerance,..Default::default()};
-    if let Some(c)=knob("ATOM_EXP_SLOW_POLE"){finite.slow_pole_factor=c;}
-    if let Some(c)=knob("ATOM_EXP_FAST_POLE"){finite.fast_pole=c;}
-    if let Ok(v)=std::env::var("ATOM_EXP_POLES"){finite.poles=Some(v.split(',').filter_map(|x|x.parse::<f64>().ok()).collect());}
-    if let Some(s)=knob("ATOM_EXP_INNER_STEPS"){finite.inner.maximum_steps=s as usize;}
-    if let Some(t)=knob("ATOM_EXP_INNER_TOL"){finite.inner.relative_residual=t;}
-    if let Ok(v)=std::env::var("ATOM_EXP_FIXED"){let mut it=v.split(':').map(|x|x.parse::<usize>().unwrap_or(0));finite.fixed=Some((it.next().unwrap_or(1),it.next().unwrap_or(16)));}
+    let finite=FiniteOptions{population_tolerance:options.population_tolerance,..Default::default()};
     let preparation=request.core.preparation_timing();
     let solution=engine::solve(request.core,&times,request.groups,finite)?;
     let d=&solution.diagnostics;
