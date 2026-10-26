@@ -416,6 +416,220 @@ impl Schur {
     pub fn dimension(&self) -> usize { self.t.rows }
 }
 
+// ---------------------------------------------------------------------------
+// Qualified eigen-decompositions that never depend on one QR run
+// ---------------------------------------------------------------------------
+
+/// `A = V diag(values) V^-1`, qualified by its residual.
+pub(crate) struct Eigen {
+    pub values: Vec<C>,
+    pub vectors: Dense,
+    pub inverse: Dense,
+    /// `||V||_1 ||V^-1||_1`.
+    pub condition: f64,
+    /// `||A V - V diag(values)||_F / (||A||_F ||V||_F)`.
+    pub residual: f64,
+    /// Which attempt produced the decomposition (diagnostic).
+    pub method: &'static str,
+}
+
+/// Residual bound accepted without looking further.
+const EIGEN_RESIDUAL: f64 = 1e-10;
+/// Residual bound accepted when no attempt reaches `EIGEN_RESIDUAL`.
+const EIGEN_RESIDUAL_LAST: f64 = 1e-7;
+
+/// Eigen-decomposition of a square matrix that survives a non-converging
+/// Hessenberg QR. Every attempt is an exact transformation of the same
+/// problem, so the first one whose residual qualifies is used:
+///
+/// 1. `zgeev` of `A`;
+/// 2. `zgeev` of `A + i s I` (a purely imaginary shift, `s ~ ||A||`): the
+///    eigenvectors are unchanged and the eigenvalues move by exactly `i s`,
+///    but the iteration no longer runs on a real matrix stored as complex,
+///    whose conjugate-pair stagnation is what fails in practice;
+/// 3. `dgeev` of `A` when `A` is real (real double-shift QR);
+/// 4. `zgeev` of `Q A Q^T` with a fixed pseudo-random orthogonal `Q` (a
+///    different Hessenberg form), mapped back with `V = Q^T V'`;
+/// 5. the complex Schur form `A = U T U^H` with eigenvectors from triangular
+///    back substitution.
+pub(crate) fn robust_eigen(a: &Dense, real: Option<&[f64]>, lap: &Lapack) -> Result<Eigen, String> {
+    robust_eigen_from(a, real, lap, 0)
+}
+
+/// `robust_eigen` starting at attempt `first` (tests exercise each path).
+pub(crate) fn robust_eigen_from(a: &Dense, real: Option<&[f64]>, lap: &Lapack, first: usize) -> Result<Eigen, String> {
+    let n = a.rows;
+    if n == 0 || a.cols != n || !a.is_finite() {
+        return Err("Eigen-decomposition needs a finite nonempty square matrix".into());
+    }
+    let norm = a.frobenius().max(f64::MIN_POSITIVE);
+    let mut best: Option<Eigen> = None;
+    let mut failures: Vec<String> = Vec::new();
+    for attempt in first..5 {
+        let raw: Result<(Vec<C>, Dense, &'static str), String> = match attempt {
+            0 => lap.complex_eigen_right(&a.data, n).map(|(w, v)| (w, Dense { rows: n, cols: n, data: v }, "zgeev")),
+            1 => {
+                let shift = 0.318_309_886 * norm;
+                let mut shifted = a.clone();
+                for i in 0..n {
+                    shifted.add_at(i, i, complex(0., shift));
+                }
+                lap.complex_eigen_right(&shifted.data, n).map(|(w, v)| {
+                    let w = w.into_iter().map(|z| csub(z, complex(0., shift))).collect();
+                    (w, Dense { rows: n, cols: n, data: v }, "zgeev-imaginary-shift")
+                })
+            }
+            2 => match real {
+                Some(values) if values.len() == n * n => real_eigen(values, n, lap).map(|(w, v)| (w, v, "dgeev")),
+                _ => continue,
+            },
+            3 => {
+                let q = pseudo_random_orthogonal(n);
+                let rotated = q.multiply(a, lap).and_then(|qa| qa.multiply(&q.adjoint(), lap));
+                rotated.and_then(|r| lap.complex_eigen_right(&r.data, n)).and_then(|(w, v)| {
+                    let v = q.adjoint().multiply(&Dense { rows: n, cols: n, data: v }, lap)?;
+                    Ok((w, v, "zgeev-similarity"))
+                })
+            }
+            _ => schur_eigen(a, lap).map(|(w, v)| (w, v, "schur")),
+        };
+        let (values, vectors, method) = match raw {
+            Ok(r) => r,
+            Err(e) => {
+                failures.push(e);
+                continue;
+            }
+        };
+        match qualify(a, values, vectors, method, norm, lap) {
+            Ok(eigen) if eigen.residual <= EIGEN_RESIDUAL => return Ok(eigen),
+            Ok(eigen) => {
+                if best.as_ref().is_none_or(|b| eigen.residual < b.residual) {
+                    best = Some(eigen);
+                }
+            }
+            Err(e) => failures.push(e),
+        }
+    }
+    match best {
+        Some(eigen) if eigen.residual <= EIGEN_RESIDUAL_LAST => Ok(eigen),
+        Some(eigen) => Err(format!("Eigen-decomposition unresolved: best residual {:e} ({})", eigen.residual, eigen.method)),
+        None => Err(format!("Eigen-decomposition unresolved: {}", failures.join("; "))),
+    }
+}
+
+fn qualify(a: &Dense, values: Vec<C>, mut vectors: Dense, method: &'static str, norm: f64, lap: &Lapack) -> Result<Eigen, String> {
+    let n = a.rows;
+    if values.len() != n || !vectors.is_finite() || values.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()) {
+        return Err(format!("{method}: nonfinite eigenpairs"));
+    }
+    // Unit columns keep the inverse well scaled.
+    for j in 0..n {
+        let length = (0..n).fold(0_f64, |s, i| s.hypot(cabs(vectors.at(i, j))));
+        if !(length > 0.) {
+            return Err(format!("{method}: zero eigenvector"));
+        }
+        for i in 0..n {
+            vectors.set(i, j, cscale(vectors.at(i, j), 1. / length));
+        }
+    }
+    let inverse = LuFactor::new(&vectors, lap)?.inverse(lap)?;
+    let condition = one_norm(&vectors) * one_norm(&inverse);
+    let image = a.multiply(&vectors, lap)?;
+    let mut defect = 0_f64;
+    for j in 0..n {
+        for i in 0..n {
+            defect = defect.hypot(cabs(csub(image.at(i, j), cmul(vectors.at(i, j), values[j]))));
+        }
+    }
+    let residual = defect / (norm * (n as f64).sqrt());
+    if !(condition.is_finite() && residual.is_finite() && inverse.is_finite()) {
+        return Err(format!("{method}: singular eigenvector basis"));
+    }
+    Ok(Eigen { values, vectors, inverse, condition, residual, method })
+}
+
+/// Real `dgeev`, unpacked to complex pairs (`v_j = vr_j + i vr_{j+1}`).
+fn real_eigen(values: &[f64], n: usize, lap: &Lapack) -> Result<(Vec<C>, Dense), String> {
+    let (wr, wi, vr) = lap.eigen(values, n)?;
+    let mut w = Vec::with_capacity(n);
+    let mut v = Dense::zeros(n, n);
+    let mut j = 0;
+    while j < n {
+        if wi[j] != 0. && j + 1 < n {
+            for i in 0..n {
+                let (re, im) = (vr[i + j * n], vr[i + (j + 1) * n]);
+                v.set(i, j, complex(re, im));
+                v.set(i, j + 1, complex(re, -im));
+            }
+            w.push(complex(wr[j], wi[j]));
+            w.push(complex(wr[j + 1], wi[j + 1]));
+            j += 2;
+        } else {
+            for i in 0..n {
+                v.set(i, j, complex(vr[i + j * n], 0.));
+            }
+            w.push(complex(wr[j], wi[j]));
+            j += 1;
+        }
+    }
+    Ok((w, v))
+}
+
+/// Eigenpairs from the complex Schur form: `T x = t_kk x` by back
+/// substitution (`x_k = 1`), with a relative floor on the denominators so a
+/// repeated eigenvalue yields a finite (ill-conditioned) vector, then `U x`.
+fn schur_eigen(a: &Dense, lap: &Lapack) -> Result<(Vec<C>, Dense), String> {
+    let n = a.rows;
+    let schur = Schur::new(a, lap)?;
+    let t = &schur.t;
+    let small = f64::EPSILON * t.frobenius().max(f64::MIN_POSITIVE);
+    let values: Vec<C> = (0..n).map(|k| t.at(k, k)).collect();
+    let mut x = Dense::zeros(n, n);
+    for k in 0..n {
+        x.set(k, k, ONE);
+        for i in (0..k).rev() {
+            let mut sum = ZERO;
+            for j in i + 1..=k {
+                sum = cadd(sum, cmul(t.at(i, j), x.at(j, k)));
+            }
+            let mut denominator = csub(values[k], t.at(i, i));
+            if cabs(denominator) < small {
+                denominator = complex(small, 0.);
+            }
+            x.set(i, k, cdiv(sum, denominator));
+        }
+    }
+    Ok((values, schur.u.multiply(&x, lap)?))
+}
+
+/// A fixed, well-mixed orthogonal matrix: the product of three Householder
+/// reflectors with pseudo-random (deterministic) vectors.
+fn pseudo_random_orthogonal(n: usize) -> Dense {
+    let mut q = Dense::identity(n);
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    for _ in 0..3 {
+        let v: Vec<f64> = (0..n)
+            .map(|_| {
+                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                ((state >> 11) as f64 / (1u64 << 53) as f64) - 0.5
+            })
+            .collect();
+        let vv: f64 = v.iter().map(|x| x * x).sum();
+        if !(vv > 0.) {
+            continue;
+        }
+        // q <- (I - 2 v v^T / v^T v) q
+        for j in 0..n {
+            let dot = (0..n).fold(ZERO, |s, i| cadd(s, cscale(q.at(i, j), v[i])));
+            for i in 0..n {
+                let value = csub(q.at(i, j), cscale(dot, 2. * v[i] / vv));
+                q.set(i, j, value);
+            }
+        }
+    }
+    q
+}
+
 /// Solver for `z X - A_L X - X A_R = Y` with `X` of shape `p x r`, using the
 /// Schur forms of `A_L` (p x p) and `A_R` (r x r). In Schur coordinates
 /// `X = U_L Xt U_R^H` the equation becomes `z Xt - T_L Xt - Xt T_R = Yt` with
@@ -996,6 +1210,8 @@ pub struct SlowDualDiagnostics {
     pub maximum_optical_schur_condition: f64,
     pub generator_eigenvector_condition: f64,
     pub generator_reconstruction_relative: f64,
+    /// Which eigen-decomposition attempt resolved `J_eff` (see `robust_eigen`).
+    pub generator_eigen_method: &'static str,
     pub generator_spectral_abscissa: f64,
     /// Eigenvector condition of the dressed no-jump frame (None: unavailable).
     pub dressed_condition: Option<f64>,
@@ -1294,23 +1510,11 @@ impl SlowDual {
         }
 
         // --- Eigenbasis of J_eff -------------------------------------------
-        let (eigenvalues, vectors) = lap.complex_eigen_right(&generator.data, dim)?;
-        let vectors = Dense { rows: dim, cols: dim, data: vectors };
-        let factor = LuFactor::new(&vectors, &lap)?;
-        let inverse_vectors = factor.inverse(&lap)?;
-        let eigenvector_condition = one_norm(&vectors) * one_norm(&inverse_vectors);
-        let mut scaled = vectors.clone();
-        for j in 0..dim {
-            for i in 0..dim {
-                scaled.data[i + j * dim] = cmul(scaled.data[i + j * dim], eigenvalues[j]);
-            }
-        }
-        let reconstructed = scaled.multiply(&inverse_vectors, &lap)?;
-        let mut difference = 0_f64;
-        for k in 0..dim * dim {
-            difference = difference.hypot(cabs(csub(reconstructed.data[k], generator.data[k])));
-        }
-        let reconstruction = difference / generator.frobenius().max(f64::MIN_POSITIVE);
+        let eigen = robust_eigen(&generator, None, &lap)?;
+        let (eigenvalues, vectors, inverse_vectors) = (eigen.values, eigen.vectors, eigen.inverse);
+        let eigenvector_condition = eigen.condition;
+        let reconstruction = eigen.residual;
+        let generator_eigen_method = eigen.method;
         if !(eigenvector_condition.is_finite() && eigenvector_condition < 1e10 && reconstruction < 1e-8) {
             return Err(format!(
                 "Slow generator eigenbasis unresolved (condition {eigenvector_condition:e}, reconstruction {reconstruction:e})"
@@ -1355,7 +1559,10 @@ impl SlowDual {
             }
         }
         let recycling0 = frame.term(&zero).map(|t| t.recycling.clone()).unwrap_or_default();
-        let dressed = DressedFrame::new(&left, &right, &population_readout, &recycling0, g, &inverse_vectors, slots.len(), &lap).ok();
+        // Without the dressed frame the fast responses would be lost and the
+        // estimate could underestimate; fail the preparation instead (callers
+        // then use their fallback error control).
+        let dressed = Some(DressedFrame::new(&left, &right, &population_readout, &recycling0, g, &inverse_vectors, slots.len(), &lap)?);
 
         let diagnostics = SlowDualDiagnostics {
             slow_charges: slots.clone(),
@@ -1370,6 +1577,7 @@ impl SlowDual {
             maximum_optical_schur_condition: schur_condition,
             generator_eigenvector_condition: eigenvector_condition,
             generator_reconstruction_relative: reconstruction,
+            generator_eigen_method,
             generator_spectral_abscissa: spectral_abscissa,
             dressed_condition: dressed.as_ref().map(|d| d.condition),
             preparation_ms: began.elapsed().as_secs_f64() * 1000.,
@@ -1532,11 +1740,8 @@ impl DressedFrame {
         let n = left.rows;
         let e = n - g;
         let eigen = |a: &Dense| -> Result<(Vec<C>, Dense, Dense, f64), String> {
-            let (values, vectors) = lap.complex_eigen_right(&a.data, n)?;
-            let vectors = Dense { rows: n, cols: n, data: vectors };
-            let inverse = LuFactor::new(&vectors, lap)?.inverse(lap)?;
-            let condition = one_norm(&vectors) * one_norm(&inverse);
-            Ok((values, vectors, inverse, condition))
+            let e = robust_eigen(a, None, lap)?;
+            Ok((e.values, e.vectors, e.inverse, e.condition))
         };
         let (left_values, left_vectors, left_inverse, left_condition) = eigen(left)?;
         let (right_values, right, right_inverse, right_condition) = eigen(right)?;
@@ -2049,6 +2254,167 @@ mod tests {
         out
     }
 
+    /// Reduced generator (16x16, column-major) and initial coefficients of a
+    /// twoNear 20 us candidate on which the static OpenBLAS zgeev did not
+    /// converge (info = 16).
+    const TWO_NEAR_GENERATOR: [f64; 256] = [
+        0.013389733806765471, 6.2446865262876, -24.29865897709495, 29.3467480158981, -9.325925599681618, 7.908471050681866,
+        -3.4271722666627746, 2.478999701632979, -1.6003858464375926, 1.0930809922930456, -1.294937411825693, 1.3926883683181914,
+        -2.7657990542291597, 5.14161883389553, -7.1816567847628034, 13.61918171987518, -4.985521428958255, -18.72413201014758,
+        150.67921830892342, -181.9830899159343, 57.83130640004982, -49.04148202005681, 21.252353205122475, -15.372609431336183,
+        9.924211137543603, -6.7783483192168275, 8.030087542643942, -8.636254078170264, 17.151099009615734, -31.88387707088485,
+        44.53442835078859, -84.45439316706253, 22.279956450569564, -145.18446007764726, -9.602925358025663, 35.75298505145798,
+        -11.361724565330658, 9.634847293285794, -4.175304411105398, 3.0201506472287267, -1.9497386846105695, 1.3316913953259424,
+        -1.5776129058422343, 1.6967031378653128, -3.369557823270193, 6.26400876763722, -8.749377368306726, 16.59218314599894,
+        -28.59666251603138, 185.38947327452948, -20.002014157672143, -10.289963360766336, 9.625663847325482, -8.16265161365984,
+        3.537321298848041, -2.558673652908122, 1.651818784452211, -1.12820797145012, 1.336553257331971, -1.437446941925895,
+        2.8546913750367047, -5.306873881245496, 7.412480699428328, -14.056913591326412, 12.226219803121724, -58.38411005060801,
+        10.642109782287251, -1.5182535605350431, -2.133320188358361, 18.769259739544662, -8.133744769753072, 5.883436529484436,
+        -3.7982126767875806, 2.5942209246068373, -3.073289703027707, 3.305283402961018, -6.564103481600909, 12.202664638085537,
+        -17.044310686757047, 32.32256452878271, -9.492314188878535, 51.22770649262087, -8.34145981884343, 2.046759213637414,
+        -15.037934873252524, -2.119142893207906, 9.585432017324532, -6.933495280115308, 4.476106806953453, -3.0572299648661243,
+        3.62180167585625, -3.8952009663250546, 7.735645594487002, -14.380560768788364, 20.086329807241743, -38.091402068104614,
+        8.41292582623988, -22.160929356936087, 10.513678821641157, 1.2684924801411386, 3.920638716878097, -4.914277308529898,
+        -4.7131492322934765, 17.875929572112728, -11.540295130991103, 7.88214941713726, -9.337726679940854, 10.042604106549438,
+        -19.944033026062105, 37.07594320106341, -51.786549011165704, 98.20720221746765, -5.333754784886255, 16.23087414208622,
+        -6.522658726226324, 0.009330555362361409, -3.016349696082772, 3.890686264049446, -11.882497631615847, -2.8980687938909426,
+        14.782473947645418, -10.096592889111731, 11.9611063087051, -12.864015117780326, 25.547193530175466, -47.49221549115547,
+        66.33568117187214, -125.7979492632412, 8.01449567702867, -10.292060792022987, 12.488670438851527, 1.7034470744712151,
+        -1.798612500769612, 1.571466527661922, -1.0332303648810546, -4.866514602230568, -10.682903892724427, 20.956761963466548,
+        -24.826796546905, 26.70089854470372, -53.02644806870271, 98.57613142969417, -137.68814037527855, 261.1096379129938,
+        -3.567974449681649, 6.239945469541092, -5.2108923794106605, 0.7341660464045606, -0.5555916231488176, 0.5111161892922792,
+        -2.195490312934039, 3.7855484273635303, -8.592236610187712, -6.529261860243103, 31.4283578505938, -33.80079307460134,
+        67.12643328920933, -124.78799806349369, 174.30007861017876, -330.53994638396586, -2.025954560180662, -7.757198376371546,
+        -2.8325127494257862, -3.5541962222468233, 5.037531138239357, -5.171278655704313, 12.230563816704436, -11.114621898527565,
+        25.11818341903272, -23.326432194028044, -6.406847816129385, 28.400225396461977, -56.40122204947061, 104.84984320862462,
+        -146.4510716183584, 277.7275259553257, -0.539412109137554, 7.978454421181472, -0.8903323052488238, 2.250539592119526,
+        -3.7226917666442456, 4.444619194024183, -10.25075593398157, 11.672553682938574, -23.998912086634157, 27.671919015553552,
+        -20.99879091883935, -3.369358917187592, 46.410213467433564, -86.27656763589236, 120.50848604412504, -228.53041254336537,
+        -6.591344839251049, -16.65228243641197, -10.5584955055227, -7.788468786230066, 12.550689644681981, -14.09001310147175,
+        33.191728868403416, -32.42676721375799, 68.61893463989259, -65.90629235787186, 40.833194714093054, -37.89996940446756,
+        -16.654802940130285, 68.14127835088742, -95.17766809206005, 180.49344790315453, -3.143922508439295, 31.60354455566023,
+        -3.5800288768934516, 5.587385434739409, -14.150680206299631, 15.844385261020069, -40.19530408683001, 50.888561175724114,
+        -103.12215722683847, 125.94766828755796, -101.82304635312873, 82.28227390106821, -58.824604520115294, -5.02361814240608,
+        34.95223527009092, -66.28288143004127, 4.873542466799331, -44.62632505220751, 5.403747484005436, -7.9553369510432175,
+        19.02122039507459, -21.901908341508722, 55.10999986257832, -69.30846349763199, 142.76516545543325, -176.2453718748021,
+        143.4177709511742, -116.86670900830777, 86.05793551027838, -25.450333820735693, -4.809607610487583, 47.048563777993294,
+        -17.910424824964096, 84.68263191721552, -23.238604450514032, 11.067014559887037, -30.9531948143412, 35.29486621646599,
+        -92.26584559192138, 123.58359690959018, -253.97911995839382, 331.8717425004693, -283.3722293995622, 227.5803611944636,
+        -190.6563725419299, 57.19583956911605, -36.46280682381189, -16.549709749858767,
+    ];
+    const TWO_NEAR_INITIAL: [f64; 16] = [
+        0.9999999999999996, -1.2054382705493797e-20, -3.318092855588688e-23, 4.894072255306808e-21, -1.0939592847984502e-21, -3.2754090435112446e-22,
+        3.365293849292495e-21, -2.7388402446028236e-21, 3.1922192308128452e-21, -1.3633138491701512e-20, -4.601302017251321e-21, 1.6021454489386455e-22,
+        -1.0514861452832665e-20, 8.728823413965825e-22, -4.650099211043414e-21, 2.6787694837904278e-21,
+    ];
+
+    /// Real test matrix with the structure of reduced generators built on
+    /// gauged optical coherences: a slow block (rates 1e-3 .. 1/us) plus very
+    /// fast, damped oscillating pairs (frequencies up to 4.5e7 rad/us), weakly
+    /// coupled, mixed by an orthogonal change of basis.
+    fn fast_slow_generator(n_slow: usize, frequencies: &[f64]) -> Vec<f64> {
+        let n = n_slow + 2 * frequencies.len();
+        let mut a = vec![0.; n * n];
+        let mut state: u64 = 12345;
+        let mut next = || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 11) as f64 / (1u64 << 53) as f64) - 0.5
+        };
+        for i in 0..n_slow {
+            a[i + i * n] = -(1e-3_f64).powf(1. - i as f64 / (n_slow - 1).max(1) as f64);
+            for j in 0..n_slow {
+                if i != j {
+                    a[i + j * n] += 0.05 * next();
+                }
+            }
+        }
+        for (k, &w) in frequencies.iter().enumerate() {
+            let (p, q) = (n_slow + 2 * k, n_slow + 2 * k + 1);
+            a[p + p * n] = -18.;
+            a[q + q * n] = -18.;
+            a[p + q * n] = w;
+            a[q + p * n] = -w;
+            for i in 0..n_slow {
+                a[p + i * n] += 1e-3 * next();
+                a[i + q * n] += 1e-3 * next();
+            }
+        }
+        // Mix: A <- H A H with one Householder reflector H.
+        let v: Vec<f64> = (0..n).map(|_| next()).collect();
+        let vv: f64 = v.iter().map(|x| x * x).sum();
+        let h: Vec<f64> = (0..n * n).map(|k| (if k % (n + 1) == 0 { 1. } else { 0. }) - 2. * v[k % n] * v[k / n] / vv).collect();
+        let product = |x: &[f64], y: &[f64]| -> Vec<f64> {
+            let mut out = vec![0.; n * n];
+            for j in 0..n {
+                for k in 0..n {
+                    let b = y[k + j * n];
+                    for i in 0..n {
+                        out[i + j * n] += x[i + k * n] * b;
+                    }
+                }
+            }
+            out
+        };
+        product(&product(&h, &a), &h)
+    }
+
+    #[test]
+    fn slow_dual_robust_eigen_resolves_reduced_generators_on_every_path() {
+        let lap = lap();
+        let fast = fast_slow_generator(10, &[4.48e7, 4.4802e7, 4.4795e7, 2.1e3]);
+        let cases: [(&str, Vec<f64>); 2] = [("twoNear", TWO_NEAR_GENERATOR.to_vec()), ("fast-slow", fast)];
+        for (name, real) in &cases {
+            let n = (real.len() as f64).sqrt() as usize;
+            let a = Dense { rows: n, cols: n, data: real.iter().map(|&x| complex(x, 0.)).collect() };
+            // Every attempt (forced by skipping the earlier ones) must resolve
+            // the matrix on its own.
+            for first in 0..5 {
+                let eigen = robust_eigen_from(&a, Some(real), &lap, first).unwrap_or_else(|e| panic!("{name} from attempt {first}: {e}"));
+                assert!(eigen.residual < 1e-9, "{name} from attempt {first} ({}): residual {:e}", eigen.method, eigen.residual);
+            }
+        }
+    }
+
+    #[test]
+    fn slow_dual_reduced_source_reproduces_the_candidate_trajectory() {
+        // a(t) = V exp(beta t) V^-1 a0 against a scaling-and-squaring Taylor
+        // exponential of the failing twoNear generator.
+        let lap = lap();
+        let n = 16;
+        let a = Dense { rows: n, cols: n, data: TWO_NEAR_GENERATOR.iter().map(|&x| complex(x, 0.)).collect() };
+        let eigen = robust_eigen(&a, Some(&TWO_NEAR_GENERATOR), &lap).unwrap();
+        let weights = LuFactor::new(&eigen.vectors, &lap)
+            .unwrap()
+            .solve(&TWO_NEAR_INITIAL.iter().map(|&x| complex(x, 0.)).collect::<Vec<_>>(), &lap)
+            .unwrap();
+        for &t in &[0.003, 0.05, 0.4] {
+            // Reference: exp(A t) by 2^s squaring of a 30-term Taylor series.
+            let norm = a.frobenius() * t;
+            let s = norm.log2().ceil().max(0.) as i32 + 4;
+            let h = t / 2f64.powi(s);
+            let mut term = Dense::identity(n);
+            let mut sum = Dense::identity(n);
+            for k in 1..30 {
+                term = term.multiply(&a, &lap).unwrap();
+                for z in term.data.iter_mut() {
+                    *z = cscale(*z, h / k as f64);
+                }
+                for (x, y) in sum.data.iter_mut().zip(&term.data) {
+                    *x = cadd(*x, *y);
+                }
+            }
+            for _ in 0..s {
+                sum = sum.multiply(&sum, &lap).unwrap();
+            }
+            let x0 = Dense { rows: n, cols: 1, data: TWO_NEAR_INITIAL.iter().map(|&x| complex(x, 0.)).collect() };
+            let reference = sum.multiply(&x0, &lap).unwrap();
+            let modal: Vec<C> = (0..n).map(|j| cmul(weights[j], cexp(cscale(eigen.values[j], t)))).collect();
+            let value = eigen.vectors.multiply(&Dense { rows: n, cols: 1, data: modal }, &lap).unwrap();
+            let difference = value.data.iter().zip(&reference.data).map(|(x, y)| cabs(csub(*x, *y))).fold(0_f64, f64::max);
+            assert!(difference < 1e-9, "t = {t}: trajectory mismatch {difference:e}");
+        }
+    }
+
     #[test]
     fn slow_dual_batched_products_match_single_ones() {
         let owner = super::super::tests::fixture();
@@ -2201,6 +2567,7 @@ mod tests {
                 maximum_optical_schur_condition: 1.,
                 generator_eigenvector_condition: 1.,
                 generator_reconstruction_relative: 0.,
+                generator_eigen_method: "test",
                 generator_spectral_abscissa: 0.,
                 dressed_condition: None,
                 preparation_ms: 0.,

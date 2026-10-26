@@ -62,7 +62,7 @@
 //! the domain-selection indicator.
 use super::*;
 use super::real_fourier::RealFourierMap;
-use super::slow_dual::{cabs, cadd, cdiv, cexp, cmul, complex, cscale, csub, exp_divided_2, recycle_ground, sandwich_all, Dense, LuFactor, ModalSources, SlowDual, NEGLIGIBLE_EXPONENT, ZERO};
+use super::slow_dual::{cabs, cadd, cdiv, cexp, cmul, complex, cscale, csub, exp_divided_2, recycle_ground, robust_eigen, sandwich_all, Dense, LuFactor, ModalSources, SlowDual, NEGLIGIBLE_EXPONENT, ZERO};
 
 /// A requested signed population sum (for example one F manifold).
 #[derive(Clone, Debug)]
@@ -98,7 +98,14 @@ pub struct PopulationErrorEstimate {
     pub group_error: Vec<f64>,
     pub maximum_state: f64,
     pub maximum_group: f64,
+    /// `max(maximum_state, maximum_group) + margin`.
     pub maximum: f64,
+    /// Unsigned allowance included in `maximum`: zero for a resolved
+    /// estimate, 1 (no information on the probability scale) when the
+    /// candidate could not be resolved (see `unresolved`).
+    pub margin: f64,
+    /// Why the estimate is only the trivial conservative bound.
+    pub unresolved: Option<String>,
     /// Largest imaginary part discarded by the real readout (consistency).
     pub maximum_imaginary: f64,
     pub elapsed_ms: f64,
@@ -178,9 +185,9 @@ impl SmallSource {
         if generator.iter().chain(initial).any(|x| !x.is_finite()) {
             return Err("Nonfinite reduced generator/initial".into());
         }
-        let complex_g: Vec<C> = generator.iter().map(|&x| complex(x, 0.)).collect();
-        let (exponents, vectors) = lap.complex_eigen_right(&complex_g, m)?;
-        let vectors = Dense { rows: m, cols: m, data: vectors };
+        let complex_g = Dense { rows: m, cols: m, data: generator.iter().map(|&x| complex(x, 0.)).collect() };
+        let eigen = robust_eigen(&complex_g, Some(generator), lap)?;
+        let (exponents, vectors) = (eigen.values, eigen.vectors);
         let lu = LuFactor::new(&vectors, lap)?;
         let a0: Vec<C> = initial.iter().map(|&x| complex(x, 0.)).collect();
         let weights = lu.solve(&a0, lap)?;
@@ -317,9 +324,32 @@ fn finish_estimate(
         maximum_state,
         maximum_group,
         maximum: maximum_state.max(maximum_group),
+        margin: 0.,
+        unresolved: None,
         maximum_imaginary,
         elapsed_ms: began.elapsed().as_secs_f64() * 1000.,
     })
+}
+
+/// The trivial conservative estimate (`|error| <= 1` on the probability
+/// scale) for a candidate whose reduced dynamics could not be resolved: the
+/// controller then refines instead of failing.
+fn unresolved_estimate(dual: &SlowDual, times: &[f64], groups: &[PopulationGroup], reason: String, began: Instant) -> PopulationErrorEstimate {
+    let (n, nt) = (dual.n, times.len());
+    PopulationErrorEstimate {
+        times: times.to_vec(),
+        states: n,
+        state_error: vec![0.; nt * n],
+        group_names: groups.iter().map(|g| g.name.clone()).collect(),
+        group_error: vec![0.; nt * groups.len()],
+        maximum_state: 0.,
+        maximum_group: 0.,
+        maximum: 1.,
+        margin: 1.,
+        unresolved: Some(reason),
+        maximum_imaginary: 0.,
+        elapsed_ms: began.elapsed().as_secs_f64() * 1000.,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -562,7 +592,10 @@ impl SlowDual {
         if view.map.physical_dimension() != n {
             return Err("Candidate map dimension differs from the slow dual".into());
         }
-        let small = SmallSource::new(lap, view.generator, view.initial, m)?;
+        let small = match SmallSource::new(lap, view.generator, view.initial, m) {
+            Ok(small) => small,
+            Err(reason) => return Ok(unresolved_estimate(self, view.times, groups, reason, began)),
+        };
         // Retained residual rows R = F Q - E Q G (REAL coordinates).
         let mut residual = lap.multiply(view.eq, view.generator, rows, m, m);
         for (r, f) in residual.iter_mut().zip(view.fq) {
@@ -681,7 +714,13 @@ impl SlowDual {
         let floor = options.resonance_floor.unwrap_or(self.diagnostics.optical_decay_floor);
         let phases = &self.owner.hilbert.source.phases;
         let frequency = |q: &[i32]| -> Result<f64, String> { phases.frequency(q).map(|f| f.hi + f.lo) };
-        let small = SmallSource::new(lap, view.generator, view.initial, m)?;
+        let small = match SmallSource::new(lap, view.generator, view.initial, m) {
+            Ok(small) => small,
+            Err(reason) => {
+                let estimate = unresolved_estimate(self, view.times, groups, reason, began);
+                return Ok(HaloEstimate { estimate, modes: Vec::new(), halo_modes: 0, near_resonant_terms: 0, unrouted_resonant_returns: 0, pencil_ms: 0. });
+            }
+        };
         let retained: Vec<Charge> = view.map.modes().to_vec();
         let retained_set: Modes = retained.iter().cloned().collect();
         let mut halo = Self::halo_modes(prepared, &retained)?;
@@ -1169,6 +1208,7 @@ pub fn combined_estimate(first: &PopulationErrorEstimate, second: &PopulationErr
     let group_error: Vec<f64> = first.group_error.iter().zip(&second.group_error).map(|(a, b)| a + b).collect();
     let maximum_state = state_error.iter().map(|x| x.abs()).fold(0_f64, f64::max);
     let maximum_group = group_error.iter().map(|x| x.abs()).fold(0_f64, f64::max);
+    let margin = first.margin + second.margin;
     Ok(PopulationErrorEstimate {
         times: first.times.clone(),
         states: first.states,
@@ -1177,7 +1217,9 @@ pub fn combined_estimate(first: &PopulationErrorEstimate, second: &PopulationErr
         group_error,
         maximum_state,
         maximum_group,
-        maximum: maximum_state.max(maximum_group),
+        maximum: maximum_state.max(maximum_group) + margin,
+        margin,
+        unresolved: first.unresolved.clone().or_else(|| second.unresolved.clone()),
         maximum_imaginary: first.maximum_imaginary.max(second.maximum_imaginary),
         elapsed_ms: first.elapsed_ms + second.elapsed_ms,
     })
@@ -1397,6 +1439,26 @@ mod tests {
     fn worst_relative(estimate: &[f64], exact: &[f64]) -> f64 {
         let scale = exact.iter().map(|x| x.abs()).fold(0_f64, f64::max);
         estimate.iter().zip(exact).map(|(a, b)| (a - b).abs()).fold(0_f64, f64::max) / scale
+    }
+
+    #[test]
+    fn error_estimate_unresolved_candidate_is_a_conservative_bound_not_an_error() {
+        let model = test_model();
+        let owned = prepare(&model, &[]);
+        let map = owned.real_fourier_map(&[vec![]]).unwrap();
+        let rows = map.dimension();
+        let mut q = vec![0.; rows];
+        q[0] = 1.;
+        let zeros = vec![0.; rows];
+        let dual = SlowDual::prepare(&owned, Default::default()).unwrap();
+        let times = [0., 1., 2.];
+        let view = CandidateView { map: &map, q: &q, eq: &zeros, fq: &zeros, columns: 1, generator: &[f64::NAN], initial: &[1.], times: &times };
+        let basis = dual.basis_estimate(&view, &[]).expect("never an error");
+        assert_eq!(basis.maximum, 1.);
+        assert!(basis.unresolved.is_some());
+        let halo = dual.halo_estimate(&owned, &view, &[], HaloOptions::default()).expect("never an error");
+        let total = combined_estimate(&basis, &halo.estimate).unwrap();
+        assert!(total.maximum >= 1.);
     }
 
     #[test]
