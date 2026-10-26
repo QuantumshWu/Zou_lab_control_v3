@@ -234,6 +234,21 @@ pub(crate) struct TrialSpace {
     readout: Readout,
     m: usize,
     image_columns: usize,
+    pub timing: SpaceTiming,
+}
+
+/// Wall time spent inside trial-space updates, in milliseconds.
+#[derive(Clone, Debug, Default)]
+pub struct SpaceTiming {
+    pub orthogonalize_ms: f64,
+    pub images_ms: f64,
+    pub projections_ms: f64,
+    pub readout_ms: f64,
+    pub transfer_ms: f64,
+}
+
+fn ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.
 }
 
 impl TrialSpace {
@@ -259,6 +274,7 @@ impl TrialSpace {
             readout,
             m: 0,
             image_columns: 0,
+            timing: SpaceTiming::default(),
         };
         if space.append(initial, 1)?.len() != 1 {
             return Err("The initial state has no representable component".into());
@@ -323,6 +339,7 @@ impl TrialSpace {
         if v.iter().any(|x| !x.is_finite()) {
             return Err("Nonfinite trial column".into());
         }
+        let clock = Instant::now();
         let original: Vec<f64> = (0..k).map(|j| norm(&v[j * rows..(j + 1) * rows])).collect();
         for j in 0..k {
             remove_noncentral_traces(self.op.map(), &mut v[j * rows..(j + 1) * rows]);
@@ -367,12 +384,16 @@ impl TrialSpace {
             sources.push(j);
         }
         let added = sources.len();
+        self.timing.orthogonalize_ms += ms(clock);
         if added == 0 {
             return Ok(sources);
         }
+        let clock = Instant::now();
         let mut ek = vec![0.; rows * added];
         let mut fk = vec![0.; rows * added];
         self.op.images(&kept, added, &mut ek, &mut fk)?;
+        self.timing.images_ms += ms(clock);
+        let clock = Instant::now();
         if ek.iter().chain(&fk).any(|x| !x.is_finite()) {
             return Err("Nonfinite E/F image of a trial column".into());
         }
@@ -387,8 +408,11 @@ impl TrialSpace {
             self.trace_e.push(ek[j * rows..j * rows + n].iter().sum());
             self.trace_f.push(fk[j * rows..j * rows + n].iter().sum());
         }
+        self.timing.projections_ms += ms(clock);
+        let clock = Instant::now();
         let signed = self.op.signed_block(&kept, added)?;
         self.readout.append(&signed, added)?;
+        self.timing.readout_ms += ms(clock);
         self.initial_coefficients.extend(coefficients);
         self.mass = mass;
         self.pencil = pencil;
@@ -426,6 +450,7 @@ impl TrialSpace {
         if shell.is_empty() {
             return Ok(self);
         }
+        let clock = Instant::now();
         let poles = self.op.poles().to_vec();
         let op = DomainOperator::new(core, new_modes, &poles)?;
         let new_rows = op.rows();
@@ -498,6 +523,8 @@ impl TrialSpace {
             return Err("Nonfinite transferred shell image".into());
         }
         let readout = self.readout.transferred(new_modes)?;
+        let mut timing = self.timing.clone();
+        timing.transfer_ms += ms(clock);
         Ok(Self {
             op,
             lapack: self.lapack,
@@ -515,6 +542,7 @@ impl TrialSpace {
             readout,
             m,
             image_columns: self.image_columns,
+            timing,
         })
     }
 }

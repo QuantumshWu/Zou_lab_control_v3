@@ -102,7 +102,7 @@ fn solve_inner(solver:&mut Solver,model:&Model,options:&Options)->Result<Value,S
             "populationProjectionCharge":d.projection_charge,"originalHamiltonianAndCollapseRetained":true,
             "finalDomainOrder":d.final_order,"finalModes":d.final_modes,"finalBasis":d.final_columns,
             "imageColumns":d.image_columns,"innerOperatorApplications":d.operator_applications,
-            "peakTrialBytes":d.peak_trial_bytes,"maximumImaginaryPopulation":d.maximum_imaginary_population,
+            "peakTrialBytes":d.peak_trial_bytes,"timingMs":{"directions":d.timing[0],"orthogonalize":d.timing[1],"images":d.timing[2],"projections":d.timing[3],"readoutAppend":d.timing[4],"transfer":d.timing[5],"reduced":d.timing[6],"readoutEvaluate":d.timing[7]},"maximumImaginaryPopulation":d.maximum_imaginary_population,
             "historicalAnswerUsed":false,"cached":false,
             "frequencyCoordinateSource":"declared-carrier-coordinates",
             "carrierSourceToBasis":identity,"finiteCarrierSourceToBasis":identity,"populationCheckpoints":checkpoints,

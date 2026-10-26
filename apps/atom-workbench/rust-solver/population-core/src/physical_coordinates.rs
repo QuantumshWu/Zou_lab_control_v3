@@ -136,7 +136,11 @@ impl PhysicalCoordinates{
 }
 
 /// Complex-linear bilinear rows O_ab X_ab; X is NEVER conjugated.
-pub struct PopulationObservation{owner:Arc<PrimitivePreparation>,duals:BTreeMap<Charge,Coefficient>}
+pub struct PopulationObservation{
+    owner:Arc<PrimitivePreparation>,
+    /// Dual charges and, per charge, the sparse rows (state, coordinate, value).
+    charges:Vec<Charge>,rows:Vec<Vec<(usize,usize,C)>>,
+}
 pub struct PopulationBasis{owner:Arc<PrimitivePreparation>,modes:Vec<Charge>,columns:usize,coefficients:Vec<C>}
 /// Fixed current-domain/actual-time operator table, never trajectory values.
 pub struct PopulationPhasePlan{owner:Arc<PrimitivePreparation>,modes:Vec<Charge>,times:Arc<[f64]>,phases:Vec<C>}
@@ -193,37 +197,56 @@ impl PopulationObservation{
         let mut commutator=DualCommutator::new(&p.s,n);
         let once=commutator.apply(&before,&coordinates.lapack)?;let twice=commutator.apply(&once,&coordinates.lapack)?;
         let mut complete=before;for(q,a)in once{add_dual(&mut complete,q,&a,1.);}for(q,a)in twice{add_dual(&mut complete,q,&a,0.5);}
-        let mut duals=BTreeMap::new();for(q,a)in complete{if a.iter().any(|z|z.re!=0.||z.im!=0.){
-            duals.insert(q,coefficient(&a,n,d,KernelPolicy::Csr)?);}}
-        Ok(Self{owner:Arc::clone(p),duals})
+        // Entries below 1e-15 of the largest dual entry are accumulated
+        // roundoff of the S/K pull-back. Dropping them changes a population
+        // by at most 1e-15*max|D|*(number of dropped entries)*|x|, far below
+        // any requested tolerance, and removes ~3/4 of the readout work.
+        let largest=complete.values().flat_map(|a|a.iter()).map(|z|z.re.hypot(z.im)).fold(0_f64,f64::max);
+        let floor=1e-15*largest;
+        let mut charges=Vec::new();let mut rows=Vec::new();
+        for(q,a)in complete{
+            let entries:Vec<_>=(0..n).flat_map(|s|(0..d).map(move|c|(s,c))).map(|(s,c)|(s,c,a[s*d+c]))
+                .filter(|(_,_,z)|z.re.hypot(z.im)>floor).collect();
+            if !entries.is_empty(){charges.push(q);rows.push(entries);}
+        }
+        Ok(Self{owner:Arc::clone(p),charges,rows})
     }
-    pub fn coefficient_modes(&self)->usize{self.duals.len()}
+    pub fn coefficient_modes(&self)->usize{self.charges.len()}
     /// Output modes reached by the readout from the given domain modes.
     pub fn output_modes(&self,input_modes:&[Charge])->Result<Vec<Charge>,String>{
         let inputs=mode_set(input_modes,self.owner.hilbert.source.phases.axes.len())?;
-        let support:Modes=self.duals.keys().cloned().collect();
+        let support:Modes=self.charges.iter().cloned().collect();
         Ok(combinations(&support,&inputs,false)?.into_iter().collect())
     }
     pub fn frequency(&self,q:&[i32])->Result<crate::preparation::FrequencyParts,String>{self.owner.hilbert.source.phases.frequency(q)}
     pub fn prepare_phase_plan(&self,input_modes:&[Charge],times:&[f64])->Result<PopulationPhasePlan,String>{
         let inputs=mode_set(input_modes,self.owner.hilbert.source.phases.axes.len())?;
-        let support:Modes=self.duals.keys().cloned().collect();let modes:Vec<_>=combinations(&support,&inputs,false)?.into_iter().collect();
+        let support:Modes=self.charges.iter().cloned().collect();let modes:Vec<_>=combinations(&support,&inputs,false)?.into_iter().collect();
         PopulationPhasePlan::prepare(Arc::clone(&self.owner),modes,times)
     }
-    /// Only new trial columns need projection; no previous state/time solution
-    /// is an input. The output union is never clipped to the solve domain.
+    /// Readout coefficients of `columns` signed trial columns `[row, columns]`:
+    /// coefficient[(mode*n+state)*columns+j] = sum over dual charges q and
+    /// input modes i with q+i = mode of D_q[state,:] . x_i[:,j].
+    /// One ZGEMM per input mode applies every dual charge at once.
     pub fn project(&self,input_modes:&[Charge],basis:&[C],columns:usize)->Result<PopulationBasis,String>{
         let n=self.owner.hilbert.source.n;let d=n*n;let phases=&self.owner.hilbert.source.phases;
         let inputs=mode_set(input_modes,phases.axes.len())?;
-        if columns==0||basis.len()!=product(&[input_modes.len(),d,columns])?||basis.iter().any(|z|!z.finite()){
+        if columns==0||basis.len()!=product(&[input_modes.len(),d,columns])?{
             return Err("Expected complete signed Fourier trial columns [mode*n*n,columns]".into());}
-        let support:Modes=self.duals.keys().cloned().collect();let modes:Vec<_>=combinations(&support,&inputs,false)?.into_iter().collect();
-        let at:BTreeMap<_,_>=modes.iter().enumerate().map(|(i,q)|(q,i)).collect();let mut coefficients=vec![C::default();product(&[modes.len(),n,columns])?];
-        for(q,dual)in &self.duals{for(i,input)in input_modes.iter().enumerate(){let target=at[&add_charge(q,input,false)?];
-            for state in 0..n{for k in dual.row[state]..dual.row[state+1]{let source=(i*d+dual.col[k])*columns;let output=(target*n+state)*columns;
-                for j in 0..columns{add(&mut coefficients[output+j],mul(dual.value[k],basis[source+j]));}
-            }}
-        }}
+        let support:Modes=self.charges.iter().cloned().collect();let modes:Vec<_>=combinations(&support,&inputs,false)?.into_iter().collect();
+        let at:BTreeMap<_,_>=modes.iter().enumerate().map(|(i,q)|(q,i)).collect();
+        let block=n*columns;let mut coefficients=vec![C::default();product(&[modes.len(),block])?];
+        for(i,input)in input_modes.iter().enumerate(){
+            let x=&basis[i*d*columns..(i+1)*d*columns];
+            if x.iter().all(|z|z.re==0.&&z.im==0.){continue;}
+            for(q,entries)in self.charges.iter().zip(&self.rows){
+                let target=at[&add_charge(q,input,false)?];let out=&mut coefficients[target*block..(target+1)*block];
+                for &(state,c,value)in entries{
+                    let source=&x[c*columns..(c+1)*columns];let output=&mut out[state*columns..(state+1)*columns];
+                    for(o,&z)in output.iter_mut().zip(source){add(o,mul(value,z));}
+                }
+            }
+        }
         if coefficients.iter().any(|z|!z.finite()){return Err("Nonfinite complete population projection".into());}
         Ok(PopulationBasis{owner:Arc::clone(&self.owner),modes,columns,coefficients})
     }

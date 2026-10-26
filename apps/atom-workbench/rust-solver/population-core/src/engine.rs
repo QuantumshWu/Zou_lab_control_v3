@@ -82,6 +82,9 @@ pub struct FiniteDiagnostics {
     pub peak_trial_bytes: usize,
     pub maximum_imaginary_population: f64,
     pub elapsed_ms: f64,
+    /// Milliseconds: inner directions, orthogonalization, images, projections,
+    /// readout append, transfers, reduced model, readout evaluation.
+    pub timing: [f64; 8],
     pub checkpoints: Vec<Checkpoint>,
 }
 
@@ -182,13 +185,14 @@ pub fn rational_poles(duration: f64, options: &FiniteOptions) -> Vec<f64> {
 struct Chain {
     frontier: VecDeque<(usize, usize)>,
     operator_applications: usize,
+    directions_ms: f64,
 }
 
 const CHAIN_BLOCK: usize = 4;
 
 impl Chain {
     fn new(poles: usize) -> Self {
-        Self { frontier: (0..poles).map(|p| (0, p)).collect(), operator_applications: 0 }
+        Self { frontier: (0..poles).map(|p| (0, p)).collect(), operator_applications: 0, directions_ms: 0. }
     }
 
     fn grow(&mut self, space: &mut TrialSpace, count: usize, inner: InnerSolve) -> Result<usize, String> {
@@ -209,7 +213,9 @@ impl Chain {
                 rhs.extend_from_slice(&space.eq()[j * rows..(j + 1) * rows]);
             }
             let pole: Vec<usize> = sources.iter().map(|&(_, p)| p).collect();
+            let clock = Instant::now();
             let (directions, report) = shift_invert(&mut space.op, &rhs, sources.len(), &pole, inner)?;
+            self.directions_ms += clock.elapsed().as_secs_f64() * 1000.;
             self.operator_applications += report.operator_applications;
             let before = space.columns();
             let kept = space.append(directions, sources.len())?;
@@ -281,11 +287,14 @@ pub fn solve(
                 peak_trial_bytes: space.bytes(),
                 maximum_imaginary_population: candidate.maximum_imaginary,
                 elapsed_ms: started.elapsed().as_secs_f64() * 1000.,
+                timing: [chain.directions_ms, space.timing.orthogonalize_ms, space.timing.images_ms,
+                    space.timing.projections_ms, space.timing.readout_ms, space.timing.transfer_ms, 0., 0.],
                 checkpoints: vec![],
             },
         });
     }
     let mut checkpoints = Vec::new();
+    let (mut reduced_ms, mut evaluate_ms) = (0., 0.);
     let mut previous: Option<Vec<f64>> = None;
     let mut previous_domain: Option<Vec<f64>> = None;
     let mut peak_bytes = space.bytes();
@@ -297,9 +306,13 @@ pub fn solve(
                 space.columns()
             ));
         }
+        let clock = Instant::now();
         let model = ReducedModel::build(&space)?;
         let trajectory = model.trajectory(&lapack, times)?;
+        reduced_ms += clock.elapsed().as_secs_f64() * 1000.;
+        let clock = Instant::now();
         let candidate = space.readout().evaluate(&lapack, &trajectory, times)?;
+        evaluate_ms += clock.elapsed().as_secs_f64() * 1000.;
         let populations = candidate.values;
         let basis_change = previous.as_ref().map(|p| population_change(p, &populations, n, &groups));
         let domain_change = previous_domain.as_ref().map(|p| population_change(p, &populations, n, &groups));
@@ -335,6 +348,16 @@ pub fn solve(
                             peak_trial_bytes: peak_bytes,
                             maximum_imaginary_population: candidate.maximum_imaginary,
                             elapsed_ms: started.elapsed().as_secs_f64() * 1000.,
+                            timing: [
+                                chain.directions_ms,
+                                space.timing.orthogonalize_ms,
+                                space.timing.images_ms,
+                                space.timing.projections_ms,
+                                space.timing.readout_ms,
+                                space.timing.transfer_ms,
+                                reduced_ms,
+                                evaluate_ms,
+                            ],
                             checkpoints,
                         },
                     });
