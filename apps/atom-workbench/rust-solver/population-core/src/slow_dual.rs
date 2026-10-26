@@ -1325,7 +1325,6 @@ pub struct SlowDual {
     /// `J_eff`, column-major, dimension `slots.len() * g^2`.
     pub(crate) generator: Dense,
     pub(crate) eigenvalues: Vec<C>,
-    pub(crate) vectors: Dense,
     pub(crate) inverse_vectors: Dense,
     /// Readout groups `(nu, R V)`: physical populations
     /// `p(t) = Re sum_groups exp(i nu t) (R V) xhat(t)`.
@@ -1339,8 +1338,6 @@ pub struct SlowDual {
     pub(crate) dressed: Option<DressedFrame>,
     /// Slaved charge-0 non-ground block per slow column (n x n frame matrices).
     pub(crate) slaved_central: Vec<Dense>,
-    /// Expansion point of every slot: `s_c = -i slot_rotation[c]`.
-    pub(crate) slot_rotation: Vec<f64>,
     /// Exact charge-block inverses, built on demand for Markov slaving of
     /// fields at fast charges (None only for synthetic test duals).
     elimination: Option<Elimination>,
@@ -1375,8 +1372,6 @@ pub(crate) struct DressedFrame {
     pub right_inverse: Dense, // V_R^-1
     /// Population readout `rho[s, i*n+k]` of an eigen-coordinate matrix.
     pub readout: Dense,
-    /// Ground block (row a*g+b) of `R_0` applied to `V_L E_ik V_R^-1`.
-    pub recycling: Dense,
     /// `W[:, slot block] * recycling` for every slot (dim x n^2).
     pub modal_recycling: Vec<Dense>,
     pub condition: f64,
@@ -1696,14 +1691,12 @@ impl SlowDual {
             slot_frequency,
             generator,
             eigenvalues,
-            vectors,
             inverse_vectors,
             readout,
             diagonal_reference,
             population_readout,
             dressed,
             slaved_central,
-            slot_rotation,
             elimination: Some(Elimination { blocks: Arc::clone(&blocks), sylvester: full_sylvester, cache: Default::default(), slow_cache: Default::default() }),
             diagnostics,
         })
@@ -1926,7 +1919,7 @@ impl DressedFrame {
             let block = slow_inverse_vectors.block(0..dim, s * g2..(s + 1) * g2);
             modal_recycling.push(block.multiply(&recycling, lap)?);
         }
-        Ok(Self { left_values, right_values, left: left_vectors, left_inverse, right, right_inverse, readout, recycling, modal_recycling, condition })
+        Ok(Self { left_values, right_values, left: left_vectors, left_inverse, right, right_inverse, readout, modal_recycling, condition })
     }
 
     /// `V_L^-1 X V_R` for an n x n frame matrix.
@@ -2593,7 +2586,7 @@ mod tests {
                         for (jj, &j) in eliminated.iter().enumerate() {
                             let mut v = csub(ZERO, dense0.at(i, j));
                             if i == j {
-                                v = cadd(v, complex(0., nu(&c2) - dual.slot_rotation[s]));
+                                v = cadd(v, complex(0., nu(&c2) - dual.diagnostics.slot_rotation[s]));
                             }
                             m.set(ii, jj, v);
                         }
@@ -2629,7 +2622,7 @@ mod tests {
                         for (jj, &j) in eliminated.iter().enumerate() {
                             let mut v = csub(ZERO, dense0.at(i, j));
                             if i == j {
-                                v = cadd(v, complex(0., nu(&c3) - dual.slot_rotation[s]));
+                                v = cadd(v, complex(0., nu(&c3) - dual.diagnostics.slot_rotation[s]));
                             }
                             m.set(ii, jj, v);
                         }
@@ -2948,14 +2941,12 @@ mod tests {
             slot_frequency: vec![0.],
             generator: Dense::zeros(dim, dim),
             eigenvalues: alpha.clone(),
-            vectors: identity.clone(),
             inverse_vectors: identity.clone(),
             readout: vec![(0., identity.clone())],
             diagonal_reference: vec![],
             population_readout: vec![],
             dressed: None,
             slaved_central: vec![],
-            slot_rotation: vec![0.],
             elimination: None,
             diagnostics: SlowDualDiagnostics {
                 slow_charges: vec![],

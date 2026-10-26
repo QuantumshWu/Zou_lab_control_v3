@@ -237,18 +237,6 @@ impl SmallSource {
         }
         Ok(Self { exponents, vectors, weights })
     }
-
-    /// `R V diag(w)` for a field block `R` (rows x m): column j then evolves
-    /// as `exp(beta_j t)`.
-    fn modal_columns(&self, block: &Dense, lap: &Lapack) -> Result<Dense, String> {
-        let mut out = block.multiply(&self.vectors, lap)?;
-        for j in 0..out.cols {
-            for i in 0..out.rows {
-                out.data[i + j * out.rows] = cmul(out.data[i + j * out.rows], self.weights[j]);
-            }
-        }
-        Ok(out)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -317,21 +305,6 @@ fn modal_weights(small: &SmallSource) -> Dense {
         }
     }
     out
-}
-
-/// Ground block (g^2 rows, row-major entry order) of one signed mode.
-fn ground_block(signed: &[C], mode: usize, n: usize, g: usize, m: usize) -> Dense {
-    let d = n * n;
-    let mut block = Dense::zeros(g * g, m);
-    for a in 0..g {
-        for b in 0..g {
-            let row = (mode * d + a * n + b) * m;
-            for j in 0..m {
-                block.set(a * g + b, j, signed[row + j]);
-            }
-        }
-    }
-    block
 }
 
 /// State and group maxima of complex `[time, state]` populations.
