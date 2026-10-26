@@ -582,7 +582,17 @@ pub fn solve(
     let lapack = Arc::clone(core.lapack());
     let mut space = TrialSpace::new(&mut core, &support_domain(axes, &steps, 1)?, &poles)?;
     let mut chain = Chain::new(poles.len());
-    chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner)?;
+    // The slow dual depends only on the model: prepare it while the first
+    // chain columns are computed.
+    let (dual, dual_ms) = std::thread::scope(|scope| -> Result<_, String> {
+        let prepared = core.prepared();
+        let dual = scope.spawn(move || {
+            let clock = Instant::now();
+            (SlowDual::prepare(prepared, SlowDualOptions::default()), ms(clock))
+        });
+        chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner)?;
+        dual.join().map_err(|_| "Slow dual preparation panicked".to_string())
+    })?;
     let peak_bytes = space.bytes();
     let mut run = Run {
         core,
@@ -601,9 +611,7 @@ pub fn solve(
         timing: EngineTiming::default(),
         peak_bytes,
     };
-    let clock = Instant::now();
-    let dual = SlowDual::prepare(run.core.prepared(), SlowDualOptions::default());
-    run.timing.dual_prepare = ms(clock);
+    run.timing.dual_prepare = dual_ms;
     match dual {
         Ok(dual) => run.estimated(dual),
         Err(_) => run.successive(),

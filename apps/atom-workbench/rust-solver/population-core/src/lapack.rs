@@ -1,4 +1,6 @@
-use std::ffi::{c_char, c_void};
+use std::ffi::c_char;
+#[cfg(not(feature="static-numerics"))]
+use std::ffi::c_void;
 #[cfg(not(feature="static-numerics"))]
 use std::path::PathBuf;
 #[cfg(feature="static-numerics")]
@@ -101,9 +103,6 @@ type ZGeEv = unsafe extern "C" fn(
     *const c_char,*const c_char,*const i32,*mut Complex64,*const i32,*mut Complex64,
     *mut Complex64,*const i32,*mut Complex64,*const i32,*mut Complex64,*const i32,*mut f64,*mut i32,
 );
-#[cfg(feature="static-numerics")]
-extern "C"{fn zgeev_(jobvl:*const c_char,jobvr:*const c_char,n:*const i32,a:*mut Complex64,lda:*const i32,
-    w:*mut Complex64,vl:*mut Complex64,ldvl:*const i32,vr:*mut Complex64,ldvr:*const i32,work:*mut Complex64,lwork:*const i32,rwork:*mut f64,info:*mut i32);}
 type ZTrSyl = unsafe extern "C" fn(
     *const c_char, *const c_char, *const i32, *const i32, *const i32,
     *const Complex64, *const i32, *const Complex64, *const i32,
@@ -121,8 +120,9 @@ extern "system" {
     fn LoadLibraryW(name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
 }
+/// Resolved LAPACK/BLAS entry points. The library stays loaded for the
+/// process, so only function pointers are kept and the owner is Send + Sync.
 pub struct Lapack {
-    _library: *mut c_void,
     geev: GeEv,
     gesv: GeSv,
     getrf: GetRf,
@@ -131,6 +131,7 @@ pub struct Lapack {
     gemm: Gemm,
     zgemm: ZGemm,
     zgees: ZGeEs,
+    zgeev: ZGeEv,
     ztrsyl: ZTrSyl,
     zgetrf: ZGetRf,
     zgetrs: ZGetRs,
@@ -348,7 +349,6 @@ impl Lapack {
             let set_threads: SetThreads = symbol(library, b"scipy_openblas_set_num_threads\0")?;
             set_threads(1);
             Ok(Self {
-                _library: library,
                 geev: symbol(library, b"scipy_dgeev_\0")?,
                 gesv: symbol(library, b"scipy_dgesv_\0")?,
                 getrf: symbol(library, b"scipy_dgetrf_\0")?,
@@ -357,6 +357,7 @@ impl Lapack {
                 gemm: symbol(library, b"scipy_dgemm_\0")?,
                 zgemm: symbol(library, b"scipy_zgemm_\0")?,
                 zgees: symbol(library, b"scipy_zgees_\0")?,
+                zgeev: symbol(library, b"scipy_zgeev_\0")?,
                 ztrsyl: symbol(library, b"scipy_ztrsyl_\0")?,
                 zgetrf: symbol(library, b"scipy_zgetrf_\0")?,
                 zgetrs: symbol(library, b"scipy_zgetrs_\0")?,
@@ -392,21 +393,13 @@ impl Lapack {
         if info != 0 { return Err(format!("LAPACK zgees failed: {info}")); }
         Ok((t, q))
     }
-    /// General complex right eigenvectors, COLUMN-MAJOR. Optional research
-    /// callers must validate conditioning/backward error; this never replaces
-    /// the mature Schur API. Resolve the extra symbol only when requested.
+    /// General complex right eigenvectors, COLUMN-MAJOR. Callers validate
+    /// conditioning/backward error themselves.
     pub fn complex_eigen_right(&self,a:&[Complex64],n:usize)->Result<(Vec<Complex64>,Vec<Complex64>),String>{
         if n==0||n>i32::MAX as usize/2||n.checked_mul(n)!=Some(a.len())||a.iter().any(|z|!z.re.is_finite()||!z.im.is_finite()){
             return Err("Invalid general complex eigensystem input".into());
         }
-        #[cfg(feature="static-numerics")]
-        let function:ZGeEv=zgeev_;
-        #[cfg(not(feature="static-numerics"))]
-        let function:ZGeEv=unsafe{
-            let address=GetProcAddress(self._library,b"scipy_zgeev_\0".as_ptr().cast());
-            if address.is_null(){return Err("Optional complex eigenframe requires LAPACK scipy_zgeev_".into());}
-            std::mem::transmute_copy(&address)
-        };
+        let function=self.zgeev;
         let ni=n as i32;let no=b'N' as c_char;let yes=b'V' as c_char;let mut input=a.to_vec();
         let mut eigen=vec![Complex64::default();n];let mut right=vec![Complex64::default();n*n];let mut left=[Complex64::default()];
         let mut real_work=vec![0.;2*n];let mut query=[Complex64::default()];let mut info=0;
