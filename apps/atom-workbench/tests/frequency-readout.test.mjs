@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultScene } from '../dist/js/atom-workbench/src/types.js';
-import { laserFrequencyMHz, zeroFieldTransitionFrequencyMHz } from '../dist/js/atom-workbench/src/physics.js';
+import { analyze, laserFrequencyMHz, zeroFieldTransitionFrequencyMHz } from '../dist/js/atom-workbench/src/physics.js';
 import { setLaserDetuningUnit, setLaserDetuningValue, setLaserFrequencyBase, setLaserTransitionReference,
   zeroFieldTransitionOptions } from '../dist/js/atom-workbench/src/laser-frequency.js';
-import { C_NM_MHZ, baseKey, baseValue, difference, gap, inUnit, laserValue, nearestTransition, parseBase, photon, readingHeading,
+import { C_NM_MHZ, baseKey, baseValue, difference, gap, inUnit, laserValue, levelValue, nearestTransition, parseBase, photon, readingHeading,
   readoutText, total, transitionKey, transitionValue, value } from '../dist/js/atom-workbench/src/frequency-value.js';
 import { frequencyBaseTree } from '../dist/js/atom-workbench/src/choice-trees.js';
-import { laserEmits, referenceReadoutMHz, setLaserReferenceState } from '../dist/js/atom-workbench/src/transition-view.js';
+import { laserEmits, levelReadoutMHz, referenceReadoutMHz, setLaserReferenceState } from '../dist/js/atom-workbench/src/transition-view.js';
 
 const near=(actual,expected,tol)=>assert.ok(Math.abs(actual-expected)<=tol,`${actual} != ${expected} (tol ${tol})`);
 const leaves=groups=>groups.flatMap(g=>[...g.leaves,...leaves(g.children??[])]);
@@ -81,13 +81,29 @@ test('the photon direction belongs to a reference level and is cleared with it',
   laser.referenceProcess='emission';setLaserReferenceState(scene,laser,undefined);assert.equal(laser.referenceStateId,undefined);assert.equal(laser.referenceProcess,undefined);
 });
 
+// ui-design.md §1.5: with a laser selected a card says how far its state lies above its
+// anchor (the reference state on its side, the photon's end on the other); +x MHz is higher.
+test('a state card reads its transition frequency minus the laser frequency: + is higher',()=>{
+  const scene=defaultScene(),laser=scene.lasers[0],a=analyze(scene),get=id=>[...a.ground,...a.D1,...a.D2].find(s=>s.id===id);
+  const ref=get('ground-2-0'),lower=get('ground-1-0'),excited=get('D2-3-0');
+  near(levelReadoutMHz(ref,lower,laser),lower.energyMHz-ref.energyMHz,1e-9);
+  assert.ok(levelReadoutMHz(ref,lower,laser)<-6800,'F=1 below the F=2 reference reads about −6.83 GHz');
+  // The excited card is the two-state readout relative to the laser: ν(参考态→e) − ν_L.
+  const card=levelReadoutMHz(ref,excited,laser),readout=difference(photon(gap(levelValue(ref),levelValue(excited))),laserValue(laser));
+  near(card,readout,1e-6);
+  // Stimulated emission from the excited state: the ground card is its height above the photon's end.
+  near(levelReadoutMHz(excited,ref,laser),-levelReadoutMHz(ref,excited,laser),1e-9);
+  near(levelReadoutMHz(excited,get('D2-2-0'),laser),get('D2-2-0').energyMHz-excited.energyMHz,1e-9);
+  assert.equal(levelReadoutMHz(excited,get('D1-2-0'),laser),undefined);
+});
+
 test('a reference level is read by the rule of the manifold its energy lies in',()=>{
   const absorbing={sourceEnergyMHz:-4000,sourceManifold:'ground',emission:false,photonEnergyMHz:384230000};
-  assert.equal(referenceReadoutMHz(absorbing,-4100,'ground'),100,'ground side: (E_ref − E)/h');
-  assert.equal(referenceReadoutMHz(absorbing,384230050,'D2'),-50,'excited side: the photon end minus the level');
+  assert.equal(referenceReadoutMHz(absorbing,-4100,'ground'),-100,'ground side: (E − E_ref)/h');
+  assert.equal(referenceReadoutMHz(absorbing,384230050,'D2'),50,'excited side: the level above the photon end');
   const emitting={sourceEnergyMHz:384230000,sourceManifold:'D2',emission:true,photonEnergyMHz:-4000};
-  assert.equal(referenceReadoutMHz(emitting,-3990,'ground'),10);
-  assert.equal(referenceReadoutMHz(emitting,384229900,'D2'),100);
+  assert.equal(referenceReadoutMHz(emitting,-3990,'ground'),10,'ground side: the level above the photon end');
+  assert.equal(referenceReadoutMHz(emitting,384229900,'D2'),-100,'own side: (E − E_ref)/h');
   assert.equal(referenceReadoutMHz(emitting,377107000,'D1'),undefined);
   assert.equal(referenceReadoutMHz({...absorbing,sourceEnergyMHz:undefined},0,'ground'),undefined);
 });

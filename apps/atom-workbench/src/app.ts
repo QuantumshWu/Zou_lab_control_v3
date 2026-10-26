@@ -31,7 +31,7 @@ import type {Analysis,AxisAngles,DynamicsSettings,DetuningUnit,Laser,Level,Scene
 import {isTimeAverage,type DynamicsResult} from './solver-types.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
 import {validateScene} from './scene-file.js';
-import {incidentTransitions,laserReferenceStateId,setLaserReferenceState,transitionEndpoints} from './transition-view.js';
+import {incidentTransitions,laserEmits,laserReferenceStateId,setLaserReferenceState,transitionEndpoints} from './transition-view.js';
 import {escapeHtml as esc,levelsChart,number,populationChart,bindPopulationChart,populationColor,populationValue,populationSamplingInfo} from './charts.js';
 import {math} from './math.js';
 import {renderSpace3D,type SpaceSelection,type SpaceViewName} from './space3d.js';
@@ -738,7 +738,9 @@ function refreshDirectionStates(a:Analysis):void{
 function levelsLegend(a:Analysis,laser:Laser|undefined):string{
   const background=[...(a.fieldMagnitudeG>0?['B']:[]),...(a.spectroscopy?.backgroundLaserIds??[]).map(id=>scene.lasers.find(l=>l.id===id)?.name??id)].join(' + ')||'无';
   if(a.spectroscopy?.status==='unresolved')return `标注：裸态能级，背景光移未确定；背景：${background}`;
-  if(laser)return `标注：激发态 Δ = ν(${laser.name}) − ν(参考态→e)，基态 (E(参考态) − E)/h；背景：${background}`;
+  // Every card is how far its state lies above its anchor (levelReadoutMHz): + is higher.
+  if(laser&&laserEmits(scene,laser,allLevels(a)))return `标注：激发态 (E − E参考)/h，基态为高出光子终点 E参考 − hν(${laser.name}) 的量；正值表示更高；背景：${background}`;
+  if(laser)return `标注：激发态 ν(参考态→e) − ν(${laser.name})，基态 (E − E参考)/h；正值表示更高；背景：${background}`;
   return `标注：总能移（相对零外场）；背景：${background}`;
 }
 /** What the level diagram is showing now, for its ⓘ. */
