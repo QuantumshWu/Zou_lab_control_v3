@@ -1,8 +1,10 @@
 //! Complete E/F pencil action on a finite Fourier domain.
 //!
 //! For a signed Fourier field x (modes q, one n x n matrix per mode and
-//! right-hand side) the pencil computes
-//!   J   = x + [S, x] + [S, [S, x]] / 2,      z = K vec(J_EE),
+//! right-hand side) the pencil computes, shear layer by layer (inner first),
+//! each layer a sum over its classes c,
+//!   J_k = J_{k-1} + sum_c ([S_c, J_{k-1}] + [S_c, [S_c, J_{k-1}]] / 2),
+//!   J_0 = x,  J = J_last,      z = K vec(J_EE),
 //!   E x = J + embed_GG(z),
 //!   F x = NL * J + J * NR + R vec(J_EE) + L_GG z + L_OG z - i omega E x,
 //! where `*` is the convolution over charges, (A * X)_q = sum_p A_p X_{q-p}.
@@ -437,12 +439,20 @@ fn embedding(input: &ModeOrder, output: &ModeOrder) -> Vec<(usize, usize)> {
 // Plan
 // ---------------------------------------------------------------------------
 
+/// One shear layer: per class its S family and [S, .] modes, and the
+/// layer's output modes.
+pub(crate) struct LayerInput<'a> {
+    pub classes: Vec<(&'a Family, &'a [Charge])>,
+    pub output: &'a [Charge],
+}
+
 /// Families and index sets for one rectangular domain (input -> output).
 pub(crate) struct PlanInput<'a> {
     pub n: usize,
     pub ground: usize,
     pub library: Arc<Library>,
-    pub commutator: &'a Family,
+    /// Shear layers, inner first; the last layer's output modes are `j`.
+    pub layers: Vec<LayerInput<'a>>,
     pub left: &'a Family,
     pub right: &'a Family,
     pub selected_k: &'a Family,
@@ -450,7 +460,6 @@ pub(crate) struct PlanInput<'a> {
     pub ground_hamiltonian: &'a Family,
     pub optical_hamiltonian: &'a Family,
     pub input: &'a [Charge],
-    pub first: &'a [Charge],
     pub j: &'a [Charge],
     pub z: &'a [Charge],
     pub output: &'a [Charge],
@@ -464,26 +473,39 @@ pub(crate) struct PlanInput<'a> {
     pub blas: Option<Arc<Lapack>>,
 }
 
+/// One compiled shear class: input -> first = [S_c, input] -> output.
+struct LayerClass {
+    first: ModeOrder,
+    first_commutator: Adjacency,
+    second_commutator: Adjacency,
+    first_to_output: Vec<(usize, usize)>,
+}
+
+/// One compiled shear layer: output = input + sum_c (first_c + [S_c, first_c] / 2).
+struct Layer {
+    classes: Vec<LayerClass>,
+    output: ModeOrder,
+    input_to_output: Vec<(usize, usize)>,
+}
+
 pub(crate) struct Plan {
     n: usize,
     ground: usize,
     rank: usize,
     max_rhs: usize,
     input: ModeOrder,
-    first: ModeOrder,
+    layers: Vec<Layer>,
     j: ModeOrder,
     z: ModeOrder,
     output: ModeOrder,
-    first_commutator: Adjacency,
-    second_commutator: Adjacency,
     left_no_jump: Adjacency,
     right_no_jump: Adjacency,
     selected_k: Vec<Link>,
     recycling: Vec<Link>,
     ground_hamiltonian: Vec<Link>,
     optical_hamiltonian: Vec<Link>,
+    /// Without layers J is the input itself.
     input_to_j: Vec<(usize, usize)>,
-    first_to_j: Vec<(usize, usize)>,
     j_to_output: Vec<(usize, usize)>,
     z_to_output: Vec<(usize, usize)>,
     gg: Vec<(usize, usize)>,
@@ -501,15 +523,34 @@ pub(crate) struct Plan {
 impl Plan {
     pub(crate) fn new(spec: PlanInput<'_>) -> Result<Self, String> {
         let input = ModeOrder::new(spec.input);
-        let first = ModeOrder::new(spec.first);
         let j = ModeOrder::new(spec.j);
+        let mut layers = Vec::with_capacity(spec.layers.len());
+        let mut previous = input.clone();
+        for layer in &spec.layers {
+            let output = ModeOrder::new(layer.output);
+            let mut classes = Vec::with_capacity(layer.classes.len());
+            for &(family, first) in &layer.classes {
+                let first = ModeOrder::new(first);
+                classes.push(LayerClass {
+                    first_commutator: Adjacency::new(&links(family, &previous, &first)?, first.len()),
+                    second_commutator: Adjacency::new(&links(family, &first, &output)?, output.len()),
+                    first_to_output: embedding(&first, &output),
+                    first,
+                });
+            }
+            layers.push(Layer { classes, input_to_output: embedding(&previous, &output), output: output.clone() });
+            previous = output;
+        }
+        if spec.layers.last().is_some_and(|last| last.output != spec.j) {
+            return Err("The last shear layer must produce the J modes".into());
+        }
         let z = ModeOrder::new(spec.z);
         let output = ModeOrder::new(spec.output);
         let gg_position: BTreeMap<(usize, usize), usize> = spec.gg.iter().enumerate().map(|(k, &p)| (p, k)).collect();
         let gg_transpose: Option<Vec<usize>> =
             spec.gg.iter().map(|&(a, b)| gg_position.get(&(b, a)).copied()).collect();
+        let layer_families: Vec<&Family> = spec.layers.iter().flat_map(|l| l.classes.iter().map(|c| c.0)).collect();
         let families_closed = [
-            spec.commutator,
             spec.left,
             spec.right,
             spec.selected_k,
@@ -518,18 +559,18 @@ impl Plan {
             spec.optical_hamiltonian,
         ]
         .iter()
+        .chain(&layer_families)
         .all(|family| family.keys().all(|q| negate(q).is_some_and(|p| family.contains_key(&p))));
         let half_capable = families_closed
             && gg_transpose.is_some()
-            && [&input, &first, &j, &z, &output].iter().all(|order| order.pairing.is_some());
+            && [&input, &j, &z, &output].iter().all(|order| order.pairing.is_some())
+            && layers.iter().all(|l| l.output.pairing.is_some() && l.classes.iter().all(|c| c.first.pairing.is_some()));
         let frequency = (0..output.len()).map(|t| spec.frequency[output.external[t]]).collect();
         Ok(Self {
             n: spec.n,
             ground: spec.ground,
             rank: spec.gg.len(),
             max_rhs: spec.max_rhs,
-            first_commutator: Adjacency::new(&links(spec.commutator, &input, &first)?, first.len()),
-            second_commutator: Adjacency::new(&links(spec.commutator, &first, &j)?, j.len()),
             left_no_jump: Adjacency::new(&links(spec.left, &j, &output)?, output.len()),
             right_no_jump: Adjacency::new(&links(spec.right, &j, &output)?, output.len()),
             selected_k: links(spec.selected_k, &j, &z)?,
@@ -537,7 +578,6 @@ impl Plan {
             ground_hamiltonian: links(spec.ground_hamiltonian, &z, &output)?,
             optical_hamiltonian: links(spec.optical_hamiltonian, &z, &output)?,
             input_to_j: embedding(&input, &j),
-            first_to_j: embedding(&first, &j),
             j_to_output: embedding(&j, &output),
             z_to_output: embedding(&z, &output),
             gg: spec.gg,
@@ -549,7 +589,7 @@ impl Plan {
             blas: spec.blas,
             execution: Execution::new()?,
             input,
-            first,
+            layers,
             j,
             z,
             output,
@@ -564,8 +604,11 @@ impl Plan {
         self.output.len()
     }
 
+    /// (all [S, .] modes, all layer outputs, z modes).
     pub(crate) fn intermediate_modes(&self) -> (usize, usize, usize) {
-        (self.first.len(), self.j.len(), self.z.len())
+        let first = self.layers.iter().flat_map(|l| l.classes.iter().map(|c| c.first.len())).sum();
+        let outputs = self.layers.iter().map(|l| l.output.len()).sum::<usize>().max(self.j.len());
+        (first, outputs, self.z.len())
     }
 
     pub(crate) fn max_rhs(&self) -> usize {
@@ -584,13 +627,22 @@ impl Plan {
     /// Bytes of the index tables owned by this plan (coefficients excluded).
     pub(crate) fn index_bytes(&self) -> usize {
         let word = std::mem::size_of::<usize>();
-        let hilbert = [&self.first_commutator, &self.second_commutator, &self.left_no_jump, &self.right_no_jump];
+        let hilbert: Vec<&Adjacency> = self
+            .layers
+            .iter()
+            .flat_map(|l| l.classes.iter().flat_map(|c| [&c.first_commutator, &c.second_commutator]))
+            .chain([&self.left_no_jump, &self.right_no_jump])
+            .collect();
         let thin = [&self.selected_k, &self.recycling, &self.ground_hamiltonian, &self.optical_hamiltonian];
         let edges: usize = hilbert.iter().map(|s| s.offsets.len() + 2 * s.source.len()).sum::<usize>()
             + thin.iter().flat_map(|s| s.iter()).map(|l| 2 * l.sources.len()).sum::<usize>();
-        let maps = self.input_to_j.len() + self.first_to_j.len() + self.j_to_output.len() + self.z_to_output.len();
-        let orders = [&self.input, &self.first, &self.j, &self.z, &self.output]
-            .iter()
+        let maps = self.input_to_j.len()
+            + self.layers.iter().map(|l| l.input_to_output.len() + l.classes.iter().map(|c| c.first_to_output.len()).sum::<usize>()).sum::<usize>()
+            + self.j_to_output.len()
+            + self.z_to_output.len();
+        let orders = [&self.input, &self.j, &self.z, &self.output]
+            .into_iter()
+            .chain(self.layers.iter().flat_map(|l| l.classes.iter().map(|c| &c.first).chain([&l.output])))
             .map(|o| 2 * o.len() + o.charges.iter().map(Vec::len).sum::<usize>() / 2)
             .sum::<usize>();
         (edges + 2 * maps + orders + 2 * (self.gg.len() + self.optical.len())) * word + self.frequency.len() * 8
@@ -600,13 +652,19 @@ impl Plan {
     pub(crate) fn workspace_bytes_per_rhs(&self) -> usize {
         let d = self.n * self.n;
         let e = self.n - self.ground;
-        let fields = (self.input.len() + self.first.len() + self.j.len() + 2 * self.output.len()) * d
+        let layers: usize = self.layers.iter().map(|l| l.classes.iter().map(|c| c.first.len()).sum::<usize>() + l.output.len()).sum();
+        let fields = (self.input.len() + layers + self.j.len() + 2 * self.output.len()) * d
             + self.j.len() * e * e
             + self.z.len() * self.rank;
         // Hilbert tasks stack at most all sources and coefficient blocks of
         // one target; thin tasks pack one coefficient's edges.
-        let hilbert = [&self.first_commutator, &self.second_commutator, &self.left_no_jump, &self.right_no_jump];
-        let widest = hilbert.iter().map(|s| s.widest()).max().unwrap_or(0);
+        let widest = self
+            .layers
+            .iter()
+            .flat_map(|l| l.classes.iter().flat_map(|c| [c.first_commutator.widest(), c.second_commutator.widest()]))
+            .chain([self.left_no_jump.widest(), self.right_no_jump.widest()])
+            .max()
+            .unwrap_or(0);
         let thin = [&self.selected_k, &self.recycling, &self.ground_hamiltonian, &self.optical_hamiltonian];
         let thin_widest = thin
             .iter()
@@ -640,29 +698,61 @@ impl Plan {
         // Input in mode-block layout; detect exact Hermitian symmetry.
         let half = self.load_input(input, rhs, w)?;
 
-        // dx = [S, x].
-        let first_count = self.first.computed(half);
-        ensure(&mut w.dx, self.first.len() * block);
-        w.dx[..first_count * block].fill(ZERO);
-        let dx = &mut w.dx[..first_count * block];
-        self.hilbert_stage(gemm, &self.first_commutator, &w.x, dx, rhs, Some(1.), Some(-1.), &mut w.scratch)?;
-        if half {
-            mirror(&mut w.dx, &self.first, n, rhs);
-        }
-
-        // J = x + dx + [S, dx] / 2.
-        let j_count = self.j.computed(half);
-        ensure(&mut w.j, self.j.len() * block);
-        let j_field = &mut w.j[..j_count * block];
-        j_field.fill(ZERO);
-        for map in [(&self.input_to_j, &w.x), (&self.first_to_j, &w.dx)] {
-            for &(s, t) in map.0.iter().take_while(|p| p.1 < j_count) {
-                add_slice(&mut j_field[t * block..(t + 1) * block], &map.1[s * block..(s + 1) * block]);
+        // Shear layers, inner first: dx = [S_k, y], y <- y + dx + [S_k, dx] / 2.
+        // The last layer writes J; without layers J is the input itself.
+        let count = self.layers.len();
+        w.layer_dx.resize_with(count, Vec::new);
+        w.layer_out.resize_with(count, Vec::new);
+        if count == 0 {
+            let j_count = self.j.computed(half);
+            ensure(&mut w.j, self.j.len() * block);
+            let j_field = &mut w.j[..j_count * block];
+            j_field.fill(ZERO);
+            for &(s, t) in self.input_to_j.iter().take_while(|p| p.1 < j_count) {
+                j_field[t * block..(t + 1) * block].copy_from_slice(&w.x[s * block..(s + 1) * block]);
+            }
+            if half {
+                mirror(&mut w.j, &self.j, n, rhs);
             }
         }
-        self.hilbert_stage(gemm, &self.second_commutator, &w.dx, j_field, rhs, Some(0.5), Some(-0.5), &mut w.scratch)?;
-        if half {
-            mirror(&mut w.j, &self.j, n, rhs);
+        for (k, layer) in self.layers.iter().enumerate() {
+            let last = k + 1 == count;
+            let mut dx = std::mem::take(&mut w.layer_dx[k]);
+            let mut out = if last { std::mem::take(&mut w.j) } else { std::mem::take(&mut w.layer_out[k]) };
+            {
+                let source: &[C] = if k == 0 { &w.x } else { &w.layer_out[k - 1] };
+                let out_count = layer.output.computed(half);
+                ensure(&mut out, layer.output.len() * block);
+                out[..out_count * block].fill(ZERO);
+                for &(s, t) in layer.input_to_output.iter().take_while(|p| p.1 < out_count) {
+                    add_slice(&mut out[t * block..(t + 1) * block], &source[s * block..(s + 1) * block]);
+                }
+                for class in &layer.classes {
+                    let first_count = class.first.computed(half);
+                    ensure(&mut dx, class.first.len() * block);
+                    dx[..first_count * block].fill(ZERO);
+                    let commutator = &class.first_commutator;
+                    self.hilbert_stage(gemm, commutator, source, &mut dx[..first_count * block], rhs, Some(1.), Some(-1.), &mut w.scratch)?;
+                    if half {
+                        mirror(&mut dx, &class.first, n, rhs);
+                    }
+                    let field = &mut out[..out_count * block];
+                    for &(s, t) in class.first_to_output.iter().take_while(|p| p.1 < out_count) {
+                        add_slice(&mut field[t * block..(t + 1) * block], &dx[s * block..(s + 1) * block]);
+                    }
+                    let commutator = &class.second_commutator;
+                    self.hilbert_stage(gemm, commutator, &dx, field, rhs, Some(0.5), Some(-0.5), &mut w.scratch)?;
+                }
+                if half {
+                    mirror(&mut out, &layer.output, n, rhs);
+                }
+            }
+            w.layer_dx[k] = dx;
+            if last {
+                w.j = out;
+            } else {
+                w.layer_out[k] = out;
+            }
         }
 
         // z = K vec(J_EE) on the selected ground coordinates.
@@ -1153,7 +1243,9 @@ pub(crate) struct Scratch {
 #[derive(Default)]
 pub(crate) struct Workspace {
     x: Vec<C>,
-    dx: Vec<C>,
+    /// [S_k, .] and output field of every shear layer (the last output is j).
+    layer_dx: Vec<Vec<C>>,
+    layer_out: Vec<Vec<C>>,
     j: Vec<C>,
     ee: Vec<C>,
     z: Vec<C>,

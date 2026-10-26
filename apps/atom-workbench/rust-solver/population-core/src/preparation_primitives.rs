@@ -2,7 +2,7 @@
 //! This defines numerical coordinates only. Unsafe S/K choices leave the
 //! original H/C and full recycling in the source, never a rate equation.
 use std::collections::BTreeSet;
-use super::{Complex64 as C,FourierMatrices,GaugedSource,Sum,add,mul,conj,nonzero,opposite,keep_exact_nonzero,largest_coupling,STRUCTURAL_COUPLING_FLOOR};
+use super::{Charge,Complex64 as C,FourierMatrices,GaugedSource,Sum,add,mul,conj,nonzero,opposite,plus,keep_exact_nonzero,STRUCTURAL_COUPLING_FLOOR};
 use super::hilbert::{HilbertPrepared,transform_matrix};
 use crate::lapack::Lapack;
 
@@ -14,7 +14,11 @@ pub struct ShearDiagnostics{
 }
 pub struct PrimitivePreparation{
     pub hilbert:HilbertPrepared,
+    /// The union of all shear layers (charges are disjoint across layers).
     pub s:FourierMatrices,
+    /// Shear layers, inner first, each a list of classes:
+    /// x -> T_last(...T_0(x)), T_k = I + sum_c (J2(S_c) - I).
+    pub layers:Vec<Vec<FourierMatrices>>,
     /// Complete trace-preserving auxiliary Khat: all GG by all EE.
     pub k_hat:FourierMatrices,
     pub no_jump_left:FourierMatrices,pub no_jump_right:FourierMatrices,
@@ -36,6 +40,22 @@ pub(super) fn spectral_norm(lap:&Lapack,a:&[C],n:usize)->Result<f64,String>{
     let largest=values.iter().copied().fold(0_f64,f64::max);
     if !largest.is_finite(){return Err("Coordinate source norm overflow".into());}Ok(largest.sqrt())
 }
+/// A charge is sheared only when the shear removes something the dynamics
+/// can see: the first-order mixing |H_ij / d_ij| it would move into its own
+/// Fourier mode, or its second-order shift |H_ij|^2 / |d_ij| measured against
+/// the radiative linewidth. A coupling below both stays exactly in H (and in
+/// the pencil); the error estimate judges its mode. The size of a coupling
+/// alone decides nothing: a counter-rotating term is as large as its
+/// co-rotating partner but mixes ~1e-8 and shifts ~1e-7 MHz.
+const SHEAR_MIXING:f64=1e-3;
+const SHEAR_SHIFT:f64=1e-6;
+/// The largest radiative decay rate of a state (rad/us), the scale against
+/// which second-order shifts are measured.
+fn linewidth(source:&GaugedSource)->f64{
+    let n=source.n;let mut rates=vec![0_f64;n];
+    for channel in &source.collapse{for c in channel.values(){for i in 0..n{for j in 0..n{let z=c[i*n+j];rates[j]+=z.re*z.re+z.im*z.im;}}}}
+    rates.into_iter().fold(0_f64,f64::max)
+}
 /// Selection is made in the ORIGINAL gauged basis before Ug/UE, matching
 /// the current diagonal-optical-coordinate algorithm. No physical element
 /// is removed when its homological denominator is unsafe.
@@ -43,9 +63,7 @@ pub fn select_optical_s(lap:&Lapack,source:&GaugedSource)->Result<(FourierMatric
     let n=source.n;let zero=vec![0;source.phases.axes.len()];let h0=&source.hamiltonian[&zero];
     let ground:BTreeSet<_>=source.ground.iter().copied().collect();let max_energy=(0..n).map(|i|h0[i*n+i].re.abs()).fold(0_f64,f64::max);
     let mut output=FourierMatrices::new();let(mut selected,mut unsafe_entries)=(0,0);
-    // A charge enters S with ALL its optical entries when its largest one is
-    // significant; otherwise its couplings stay (exactly) in H only.
-    let significant=STRUCTURAL_COUPLING_FLOOR*largest_coupling(&source.hamiltonian,n);
+    let shift_floor=SHEAR_SHIFT*linewidth(source);
     for(q,h)in &source.hamiltonian{
         if q.iter().copied().find(|&v|v!=0).is_none_or(|v|v<0){continue;}
         let w=source.phases.frequency(q)?;let floor=(4.*spectral_norm(lap,h,n)?).max(256.*f64::EPSILON*(2.*max_energy+(w.hi+w.lo).abs()));
@@ -54,13 +72,33 @@ pub fn select_optical_s(lap:&Lapack,source:&GaugedSource)->Result<(FourierMatric
             let mut denominator=Sum::default();for value in[h0[i*n+i].re,-h0[j*n+j].re,w.hi,w.lo]{denominator.add(value);}let d=denominator.value();
             if d.abs()>floor{let value=scaled(h[i*n+j],-1./d);if !value.re.is_finite()||!value.im.is_finite(){return Err("Nonfinite optical auxiliary coordinate".into());}s[i*n+j]=value;selected+=1;}else{unsafe_entries+=1;}
         }}
-        let strongest=(0..n*n).filter(|&k|nonzero(&s[k])).map(|k|h[k].re.hypot(h[k].im)).fold(0_f64,f64::max);
-        if strongest>=significant{let partner=(0..n*n).map(|k|scaled(conj(s[(k%n)*n+k/n]),-1.)).collect();output.insert(q.clone(),s);output.insert(opposite(q)?,partner);}
+        // Mixing |S_ij| and second-order shift |H_ij| |S_ij| of the shearable entries.
+        let(mixing,shift)=(0..n*n).filter(|&k|nonzero(&s[k])).fold((0_f64,0_f64),|(m,d),k|{let a=s[k].re.hypot(s[k].im);(m.max(a),d.max(a*h[k].re.hypot(h[k].im)))});
+        if mixing>=SHEAR_MIXING||shift>=shift_floor{let partner=(0..n*n).map(|k|scaled(conj(s[(k%n)*n+k/n]),-1.)).collect();output.insert(q.clone(),s);output.insert(opposite(q)?,partner);}
     }
     let diagnostics=OpticalCoordinateDiagnostics{selected_entries:selected,unsafe_optical_entries:unsafe_entries,charges:output.len()};Ok((output,diagnostics))
 }
 
-fn prepare_k(lap:&Lapack,h:&HilbertPrepared)->Result<(FourierMatrices,ShearDiagnostics),String>{
+/// The recycling shear Khat moves the recycled ground coherence of charge k
+/// into new coordinates, removing the recycling coupling R_k at first order
+/// (a second-order effect ~ |R_k| |Khat_k|). T = (I + Khat) J2(S) does not
+/// shear that part, so every sheared coupling V_c acts on it at first order
+/// and creates a coupling |V_c| |Khat_k| at charge c+k, a second-order effect
+/// (|V_c| |Khat_k|)^2 / |omega_{c+k}|. Khat_k is kept only when it removes
+/// more than it creates (at least twice as much): with a strong far-detuned
+/// laser (|V_c| ~ 1e5/us) it does not, and R_k stays exactly in the pencil.
+fn pays(h:&HilbertPrepared,k:&[C],r:&[C],q:&[i32],sheared:&[(Charge,f64)])->Result<bool,String>{
+    let size=k.iter().map(|z|z.re.hypot(z.im)).fold(0_f64,f64::max);
+    let removed=size*r.iter().map(|z|z.re.hypot(z.im)).fold(0_f64,f64::max);let mut created=0_f64;
+    for(c,v)in sheared{let charge=plus(c,q)?;
+        // A coupling created in the central mode is no new mode.
+        if charge.iter().all(|&x|x==0){continue;}
+        let w=h.source.phases.frequency(&charge)?;let omega=(w.hi+w.lo).abs();
+        if !(omega>0.){return Ok(false);}created+=(v*size).powi(2)/omega;}
+    Ok(2.*created<removed)
+}
+
+fn prepare_k(lap:&Lapack,h:&HilbertPrepared,sheared:&[(Charge,f64)])->Result<(FourierMatrices,ShearDiagnostics),String>{
     let(g,e)=(h.source.ground.len(),h.source.excited.len());let e2=e*e;
     let mut diagnostic=ShearDiagnostics{enabled:false,fallback_reason:None,sylvester_rows:0,
         unprojected_homological_residual_hs:0.,trace_projection_change_hs:0.,final_trace_functional_hs:0.,uniform_frobenius_upper:0.};
@@ -106,6 +144,7 @@ fn prepare_k(lap:&Lapack,h:&HilbertPrepared)->Result<(FourierMatrices,ShearDiagn
             for a in 0..g{add(&mut k[(a*g+a)*e2+col],scaled(correction,-1.));}
             let mut after=C::default();for a in 0..g{add(&mut after,k[(a*g+a)*e2+col]);}trace_squared+=after.re*after.re+after.im*after.im;
         }
+        if !pays(h,&k,r,q,sheared)?{continue;}
         diagnostic.uniform_frobenius_upper+=norm(&k);output.insert(q.clone(),k);
     }
     diagnostic.enabled=true;diagnostic.unprojected_homological_residual_hs=residual_squared.sqrt();
@@ -113,11 +152,68 @@ fn prepare_k(lap:&Lapack,h:&HilbertPrepared)->Result<(FourierMatrices,ShearDiagn
     Ok((output,diagnostic))
 }
 
+/// Shears are applied one after the other, far first: the physical density
+/// is T_far(T_near(y)) with T = J2(S_layer) per layer, so the generator seen
+/// by y is the near shear of the far-sheared generator, in which a strong far
+/// coupling V_a is already gone. One combined J2(S_far + S_near) instead
+/// leaves the cross couplings [V_a, S_b] (and their higher orders) at the sum
+/// charges, large when V_a ~ 1e5/us and S_b ~ 3e-2. The sheared charges,
+/// sorted by effective detuning |V|/|S|, are split into layers at every gap
+/// of at least `SEQUENTIAL_RATIO` across which such a cross coupling would
+/// shift by at least the shear floor, (|V_a| |S_b|)^2 / |omega_{a+b}|. Each
+/// layer, and so the composition, is an exact change of variables.
+const SEQUENTIAL_RATIO:f64=10.;
+fn shear_layers(source:&GaugedSource,s:FourierMatrices,floor:f64)->Result<Vec<Vec<FourierMatrices>>,String>{
+    let n=source.n;let maximum=|a:&[C]|a.iter().map(|z|z.re.hypot(z.im)).fold(0_f64,f64::max);
+    // (charge, largest sheared |V|, largest |S|), by effective detuning.
+    let mut items:Vec<(Charge,f64,f64)>=s.iter().map(|(q,a)|{let h=&source.hamiltonian[q];
+        (q.clone(),(0..n*n).filter(|&k|nonzero(&a[k])).map(|k|h[k].re.hypot(h[k].im)).fold(0_f64,f64::max),maximum(a))}).collect();
+    items.sort_by(|a,b|(a.1/a.2).total_cmp(&(b.1/b.2)).then_with(||a.0.cmp(&b.0)));
+    let mut bounds=vec![0];
+    for i in 1..items.len(){
+        if items[i].1/items[i].2<SEQUENTIAL_RATIO*(items[i-1].1/items[i-1].2){continue;}
+        // Cross couplings between the charges above and the current layer
+        // (lower layers are already applied inside it).
+        let mut significant=false;let lower=*bounds.last().unwrap();
+        'pairs:for(a,va,_)in &items[i..]{for(b,_,sb)in &items[lower..i]{
+            let w=source.phases.frequency(&plus(a,b)?)?;let omega=(w.hi+w.lo).abs();let created=va*sb;
+            if !(omega>0.)||created*created/omega>=floor{significant=true;break 'pairs;}}}
+        if significant{bounds.push(i);}
+    }
+    bounds.push(items.len());let mut s=s;
+    // Inside a layer, charges whose mutual cross couplings are negligible
+    // form separate classes: the layer is I + sum_c (J2(S_c) - I), which
+    // leaves out only those negligible second-order pairs (they stay in the
+    // pencil as residual coupling). A charge and its partner share a class.
+    let mut layers=Vec::with_capacity(bounds.len()-1);
+    for w in bounds.windows(2){let members=&items[w[0]..w[1]];let count=members.len();let mut root:Vec<usize>=(0..count).collect();
+        fn find(root:&mut [usize],i:usize)->usize{let mut i=i;while root[i]!=i{root[i]=root[root[i]];i=root[i];}i}
+        for a in 0..count{for b in a+1..count{let sum=plus(&members[a].0,&members[b].0)?;
+            let join=if sum.iter().all(|&k|k==0){true}else{let w=source.phases.frequency(&sum)?;let omega=(w.hi+w.lo).abs();
+                let created=(members[a].1*members[b].2).max(members[b].1*members[a].2);!(omega>0.)||created*created/omega>=floor};
+            if join{let(x,y)=(find(&mut root,a),find(&mut root,b));if x!=y{root[x]=y;}}}}
+        let mut classes:std::collections::BTreeMap<usize,FourierMatrices>=std::collections::BTreeMap::new();
+        for i in 0..count{let r=find(&mut root,i);classes.entry(r).or_default().insert(members[i].0.clone(),s.remove(&members[i].0).unwrap());}
+        layers.push(classes.into_values().collect::<Vec<_>>());}
+    Ok(layers)
+}
+
 pub fn prepare(lap:&Lapack,source:GaugedSource)->Result<PrimitivePreparation,String>{
     let(original_s,optical_diagnostics)=select_optical_s(lap,&source)?;
+    // Each sheared charge with its largest coupling, for the Khat choice.
+    let sheared:Vec<(Charge,f64)>=original_s.iter().map(|(q,a)|{let h=&source.hamiltonian[q];
+        (q.clone(),(0..a.len()).filter(|&k|nonzero(&a[k])).map(|k|h[k].re.hypot(h[k].im)).fold(0_f64,f64::max))}).collect();
+    let floor=SHEAR_SHIFT*linewidth(&source);
+    let original_layers=shear_layers(&source,original_s,floor)?;
     let hilbert=super::hilbert::prepare(lap,source)?;let n=hilbert.source.n;let g=hilbert.source.ground.len();let e=n-g;
-    let mut s=FourierMatrices::new();for(q,value)in original_s{s.insert(q,transform_matrix(lap,&hilbert.basis_column_major,&value,n)?);}
-    let(k_hat,shear_diagnostics)=prepare_k(lap,&hilbert)?;
+    let mut layers=Vec::with_capacity(original_layers.len());
+    for layer in original_layers{let mut classes=Vec::with_capacity(layer.len());for class in layer{let mut out=FourierMatrices::new();
+        for(q,value)in class{out.insert(q,transform_matrix(lap,&hilbert.basis_column_major,&value,n)?);}classes.push(out);}layers.push(classes);}
+    // Their union: the charges every layer can step by (and the second-order
+    // reference of P0, whose charge-0 terms pair each charge with its partner
+    // inside one layer).
+    let mut s=FourierMatrices::new();for layer in &layers{for class in layer{for(q,value)in class{s.insert(q.clone(),value.clone());}}}
+    let(k_hat,shear_diagnostics)=prepare_k(lap,&hilbert,&sheared)?;
     let mut left=FourierMatrices::new();let mut right=FourierMatrices::new();
     let charges:BTreeSet<_>=hilbert.source.hamiltonian.keys().chain(hilbert.radiation.gamma.keys()).cloned().collect();
     for q in charges{let mut f=vec![C::default();n*n];let mut r=f.clone();
@@ -149,7 +245,7 @@ pub fn prepare(lap:&Lapack,source:GaugedSource)->Result<PrimitivePreparation,Str
         }
         if ground.iter().any(nonzero){gg.insert(q.clone(),ground);}if other.iter().any(nonzero){optical.insert(q.clone(),other);}
     }
-    Ok(PrimitivePreparation{hilbert,s,k_hat,no_jump_left:left,no_jump_right:right,gg_rows,optical_rows,
+    Ok(PrimitivePreparation{hilbert,s,layers,k_hat,no_jump_left:left,no_jump_right:right,gg_rows,optical_rows,
         selected_k,selected_recycling,gg_hamiltonian:gg,optical_hamiltonian:optical,optical_diagnostics,shear_diagnostics})
 }
 

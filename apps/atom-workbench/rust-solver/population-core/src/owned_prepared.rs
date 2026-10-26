@@ -6,7 +6,7 @@
 //! and reverse dependencies retain every path that returns to the output.
 use std::{collections::{BTreeMap,BTreeSet},sync::Arc,time::Instant};
 use crate::{C,Coefficient,Finite,Lapack,product};
-use crate::pencil::{Family,HilbertCoefficient,Library,Plan,PlanInput,ThinCoefficient,Workspace};
+use crate::pencil::{Family,HilbertCoefficient,LayerInput,Library,Plan,PlanInput,ThinCoefficient,Workspace};
 use crate::preparation::{Charge,FourierMatrices,GaugedSource,GaugePolicy,ModelView,PhaseBasis};
 use crate::preparation::primitives::{self,PrimitivePreparation};
 
@@ -56,8 +56,11 @@ pub enum KernelPolicy { Csr, HybridBlas }
 pub struct OwnedPrepared {
     primitives:Arc<PrimitivePreparation>,
     library:Arc<Library>,
-    /// S, NL, NR, K, R, L_GG, L_OG. S is shared by both commutators.
+    /// S (the union of all shear layers), NL, NR, K, R, L_GG, L_OG.
     families:[Family;7],
+    /// The shear layers, inner first, each a list of classes; the pencil
+    /// applies the layers in order and sums the classes of one layer.
+    layers:Vec<Vec<Family>>,
     lapack:Option<Arc<Lapack>>,
     preparation_lapack:Arc<Lapack>,
     coefficient_bytes:usize,
@@ -135,8 +138,14 @@ impl OwnedPrepared {
         let thin_families:[(&FourierMatrices,usize,usize,Option<&[usize]>);4]=[
             (&primitives.selected_k,rank,e*e,Some(&excited_order)),(&primitives.selected_recycling,rank,e*e,Some(&excited_order)),
             (&primitives.gg_hamiltonian,rank,rank,None),(&primitives.optical_hamiltonian,optical,rank,None)];
-        let mut library=Library::default();let mut families:[Family;7]=std::array::from_fn(|_|Family::new());
         let valid=|q:&Charge,matrix:&[C],length:usize|q.len()==axes&&matrix.len()==length&&matrix.iter().all(|z|z.finite());
+        let mut library=Library::default();let mut families:[Family;7]=std::array::from_fn(|_|Family::new());
+        let mut layers=Vec::with_capacity(primitives.layers.len());
+        for layer in &primitives.layers{let mut classes=Vec::with_capacity(layer.len());for class in layer{let mut family=Family::new();
+            for(q,matrix)in class{
+                if !valid(q,matrix,n*n){return Err("Invalid owned complete primitive matrix".into());}
+                family.insert(q.clone(),library.hilbert.len());library.hilbert.push(HilbertCoefficient::new(matrix,n,g));
+            }classes.push(family);}layers.push(classes);}
         // Exact zero matrices may remain in a prepared family. Keeping their
         // charge is harmless; their block pattern is empty.
         for(i,family)in hilbert_families.into_iter().enumerate(){for(q,matrix)in family{
@@ -148,11 +157,33 @@ impl OwnedPrepared {
             families[3+i].insert(q.clone(),library.thin.len());library.thin.push(ThinCoefficient::new(matrix,rows,cols,order));
         }}
         let bytes=library.bytes();
-        Ok(Self{primitives:Arc::new(primitives),library:Arc::new(library),families,
+        Ok(Self{primitives:Arc::new(primitives),library:Arc::new(library),families,layers,
             lapack:if matches!(policy,KernelPolicy::HybridBlas){Some(Arc::clone(&lap))}else{None},
             preparation_lapack:lap,coefficient_bytes:bytes,timing:[0.;3]})
     }
     pub fn primitives(&self)->&PrimitivePreparation{&self.primitives}
+    /// Forward modes of every shear layer from `input`: ([S_c, .] modes per
+    /// class, output modes) per layer, and the final J modes.
+    fn forward_layers(&self,input:&Modes)->Result<(Vec<(Vec<Modes>,Modes)>,Modes),String>{
+        let axes=self.primitives.hilbert.source.phases.axes.len();let mut current=input.clone();let mut out=Vec::with_capacity(self.layers.len());
+        for classes in &self.layers{let mut firsts=Vec::with_capacity(classes.len());let mut support=Modes::from([vec![0;axes]]);
+            for family in classes{let keys:Modes=family.keys().cloned().collect();
+                firsts.push(combinations(&current,&keys,false)?);
+                support.extend(keys.iter().cloned());support.extend(combinations(&keys,&keys,false)?);}
+            let next=combinations(&current,&support,false)?;out.push((firsts,next.clone()));current=next;}
+        Ok((out,current))
+    }
+    /// Every output mode one pencil application reaches from `input`. The
+    /// estimate of the Fourier truncation must evaluate exactly these.
+    pub fn reachable(&self,input:&[Charge])->Result<Vec<Charge>,String>{
+        let keys:Vec<Modes>=self.families.iter().map(|f|f.keys().cloned().collect()).collect();
+        let axes=self.primitives.hilbert.source.phases.axes.len();let input=mode_set(input,axes)?;
+        let(_,forward_j)=self.forward_layers(&input)?;let z=combinations(&forward_j,&keys[3],false)?;
+        let mut output=forward_j.clone();output.extend(z.iter().cloned());
+        for family in[&keys[1],&keys[2],&keys[4]]{output.extend(combinations(&forward_j,family,false)?);}
+        for family in[&keys[5],&keys[6]]{output.extend(combinations(&z,family,false)?);}
+        Ok(output.into_iter().collect())
+    }
     pub fn shared_coefficient_bytes(&self)->usize{self.coefficient_bytes}
     pub fn physical_coordinates(&self)->coordinates::PhysicalCoordinates{
         coordinates::PhysicalCoordinates::new(Arc::clone(&self.primitives),Arc::clone(&self.preparation_lapack))
@@ -165,23 +196,35 @@ impl OwnedPrepared {
         // Forward reachability from the input, intersected with every path
         // that returns to the output (reverse dependencies).
         let keys:Vec<Modes>=self.families.iter().map(|f|f.keys().cloned().collect()).collect();
-        let(s,left,right,k,r,lgg,log)=(&keys[0],&keys[1],&keys[2],&keys[3],&keys[4],&keys[5],&keys[6]);
-        let mut j_support=Modes::from([vec![0;axes]]);j_support.extend(s.iter().cloned());j_support.extend(combinations(s,s,false)?);
-        let forward_j=combinations(&input,&j_support,false)?;
+        let(left,right,k,r,lgg,log)=(&keys[1],&keys[2],&keys[3],&keys[4],&keys[5],&keys[6]);
+        let(forward,forward_j)=self.forward_layers(&input)?;
         let mut z_needed=output.clone();z_needed.extend(combinations(&output,lgg,true)?);z_needed.extend(combinations(&output,log,true)?);
         let z_modes:Vec<_>=combinations(&forward_j,k,false)?.intersection(&z_needed).cloned().collect();
         let no_jump:Modes=left.union(right).cloned().collect();
         let mut j_needed=output.clone();j_needed.extend(combinations(&output,&no_jump,true)?);
         j_needed.extend(combinations(&output,r,true)?);j_needed.extend(combinations(&z_modes.iter().cloned().collect(),k,true)?);
         let j_set:Modes=forward_j.intersection(&j_needed).cloned().collect();let j_modes:Vec<_>=j_set.iter().cloned().collect();
-        let mut d_needed=j_set.clone();d_needed.extend(combinations(&j_set,s,true)?);
-        let d_modes:Vec<_>=combinations(&input,s,false)?.intersection(&d_needed).cloned().collect();
+        // Backward through the layers: an output mode needs its input mode
+        // (identity) and first mode (identity and [S, first]); a first mode
+        // needs the input modes [S, .] maps onto it.
+        let mut sets:Vec<(Vec<Vec<Charge>>,Vec<Charge>)>=vec![(Vec::new(),Vec::new());self.layers.len()];let mut needed=j_set.clone();
+        for(l,classes)in self.layers.iter().enumerate().rev(){
+            let(first_forward,out_forward)=&forward[l];
+            let out:Modes=needed.intersection(out_forward).cloned().collect();let mut input_needed=out.clone();let mut firsts=Vec::with_capacity(classes.len());
+            for(family,forward_first)in classes.iter().zip(first_forward){let keys:Modes=family.keys().cloned().collect();
+                let mut first_needed=out.clone();first_needed.extend(combinations(&out,&keys,true)?);
+                let first:Modes=first_needed.intersection(forward_first).cloned().collect();
+                input_needed.extend(combinations(&first,&keys,true)?);firsts.push(first.into_iter().collect());}
+            sets[l]=(firsts,out.into_iter().collect());needed=input_needed;
+        }
+        let layers:Vec<LayerInput<'_>>=self.layers.iter().zip(&sets).map(|(classes,(firsts,output))|LayerInput{
+            classes:classes.iter().zip(firsts).map(|(family,first)|(family,first.as_slice())).collect(),output}).collect();
         let n=source.n;let g=source.ground.len();
         let frequency:Vec<f64>=output_modes.iter().map(|q|source.phases.frequency(q).map(|v|v.hi+v.lo)).collect::<Result<_,_>>()?;
         let plan=Plan::new(PlanInput{n,ground:g,library:Arc::clone(&self.library),
-            commutator:&self.families[0],left:&self.families[1],right:&self.families[2],selected_k:&self.families[3],
+            layers,left:&self.families[1],right:&self.families[2],selected_k:&self.families[3],
             recycling:&self.families[4],ground_hamiltonian:&self.families[5],optical_hamiltonian:&self.families[6],
-            input:input_modes,first:&d_modes,j:&j_modes,z:&z_modes,output:output_modes,
+            input:input_modes,j:&j_modes,z:&z_modes,output:output_modes,
             gg:p.gg_rows.iter().map(|&row|(row/g,row%g)).collect(),optical:p.optical_rows.iter().map(|&at|(at/n,at%n)).collect(),
             frequency:frequency.clone(),max_rhs,blas:self.lapack.clone()})?;
         // A disjoint rectangular operator may have no intermediate modes; its
@@ -253,8 +296,9 @@ mod tests {
     /// K/R/LGG/LOG: form T x, then use original transformed H/C directly.
     fn original_oracle(p:&PrimitivePreparation,x:&FourierMatrices)->(FourierMatrices,FourierMatrices){
         let n=p.hilbert.source.n;let g=p.hilbert.source.ground.len();let e=n-g;
-        let dx=comm(&p.s,x,n);let ddx=comm(&p.s,&dx,n);let mut j=x.clone();
-        for(q,a)in dx{add_field(&mut j,q,&a,1.);}for(q,a)in ddx{add_field(&mut j,q,&a,0.5);}
+        let mut j=x.clone();
+        for layer in &p.layers{let mut next=j.clone();for class in layer{let dx=comm(class,&j,n);let ddx=comm(class,&dx,n);
+            for(q,a)in dx{add_field(&mut next,q,&a,1.);}for(q,a)in ddx{add_field(&mut next,q,&a,0.5);}}j=next;}
         let mut mass=j.clone();for(q,k)in &p.k_hat{for(h,a)in &j{let mut z=vec![C::default();n*n];
             for ab in 0..g*g{for ij in 0..e*e{add(&mut z[(ab/g)*n+ab%g],mul(k[ab*e*e+ij],a[(g+ij/e)*n+g+ij%e]));}}
             add_field(&mut mass,add_charge(q,h,false).unwrap(),&z,1.);
