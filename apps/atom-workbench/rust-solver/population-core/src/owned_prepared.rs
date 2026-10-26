@@ -162,6 +162,11 @@ impl OwnedPrepared {
             preparation_lapack:lap,coefficient_bytes:bytes,timing:[0.;3]})
     }
     pub fn primitives(&self)->&PrimitivePreparation{&self.primitives}
+    /// The generator of the sheared coordinates at `charges`
+    /// (`preparation::effective`).
+    pub fn effective_generator(&self,charges:&[Charge])->Result<crate::preparation::effective::EffectiveGenerator,String>{
+        crate::preparation::effective::EffectiveGenerator::new(&self.primitives,&self.preparation_lapack,charges)
+    }
     /// Forward modes of every shear layer from `input`: ([S_c, .] modes per
     /// class, output modes) per layer, and the final J modes.
     fn forward_layers(&self,input:&Modes)->Result<(Vec<(Vec<Modes>,Modes)>,Modes),String>{
@@ -379,6 +384,55 @@ mod tests {
                 assert!((actual.re-expected.re).hypot(actual.im-expected.im)<1e-12*scale,"mode {q:?} entry {k}");
             }
         }}}
+    }
+    /// The effective generator L'_0 is the charge-0 block of the pencil's
+    /// own generator T^{-1} F (T^{-1} by a Neumann series on a window of
+    /// modes) within its stated bounds, far closer than the bare L_0, and it
+    /// conserves the trace and the Hermitian pairing exactly.
+    #[test]
+    fn preparation_effective_generator_matches_the_pencil_frame(){
+        use crate::preparation::effective::EffectiveGenerator;
+        let owned=two_layer_fixture();let p=owned.primitives();let lap=&owned.preparation_lapack;let n=4;let d=n*n;
+        assert!(p.k_hat.is_empty(),"the fixture's frame must be the shear alone");
+        let zero=vec![0,0];let near=vec![1,0];let far_near=vec![-1,1];
+        let generator=EffectiveGenerator::new(p,lap,&[zero.clone(),near.clone(),vec![-1,0],far_near.clone()]).unwrap();
+        // Hermitian pairing and exact trace conservation.
+        let(i,j)=(generator.position(&near).unwrap(),generator.position(&[-1,0]).unwrap());
+        for a in 0..n{for b in 0..n{for f in[&generator.hamiltonian,&generator.gamma]{
+            let(x,y)=(f[i][a*n+b],f[j][b*n+a]);assert!((x.re-y.re).abs()+(x.im+y.im).abs()<1e-12*(1.+x.re.hypot(x.im)));}}}
+        let x:Vec<C>=(0..d).map(|k|C{re:((k*7+3)%11)as f64/9.-0.5,im:((k*5+1)%13)as f64/17.-0.3}).collect();
+        for q in [&zero,&near,&far_near]{let k=generator.position(q).unwrap();
+            let r=generator.recycle(k,&x,lap).unwrap();let gm=&generator.gamma[k];
+            let(mut tr,mut tg)=(C::default(),C::default());for a in 0..n{add(&mut tr,r[a*n+a]);for b in 0..n{add(&mut tg,mul(gm[a*n+b],x[b*n+a]));}}
+            assert!((tr.re-tg.re).hypot(tr.im-tg.im)<1e-12,"trace at {q:?}");}
+        // The pencil frame: z = T^{-1} (F x) at the central mode.
+        let mut window:Modes=owned.reachable(&[zero.clone()]).unwrap().into_iter().collect();
+        for _ in 0..2{let current:Vec<Charge>=window.iter().cloned().collect();window.extend(owned.reachable(&current).unwrap());}
+        let window:Vec<Charge>=window.into_iter().collect();let m=window.len();let center=window.iter().position(|q|*q==zero).unwrap();
+        let mut once=owned.pencil(&[zero.clone()],&window,1).unwrap();let(mut ex,mut fx)=(vec![C::default();m*d],vec![C::default();m*d]);
+        once.apply_into(&x,1,&mut ex,&mut fx).unwrap();
+        let mut full=owned.pencil(&window,&window,1).unwrap();let mut z=fx.clone();
+        for _ in 0..200{let(mut tz,mut unused)=(vec![C::default();m*d],vec![C::default();m*d]);full.apply_into(&z,1,&mut tz,&mut unused).unwrap();
+            let mut change=0_f64;for k in 0..m*d{let next=C{re:fx[k].re-(tz[k].re-z[k].re),im:fx[k].im-(tz[k].im-z[k].im)};
+                change=change.max((next.re-z[k].re).hypot(next.im-z[k].im));z[k]=next;}
+            if change<1e-14{break;}}
+        let exact=&z[center*d..(center+1)*d];let effective=generator.apply(generator.position(&zero).unwrap(),&x,lap).unwrap();
+        // The bare frame L_0 for comparison.
+        let src=&p.hilbert.source;let(g,e)=(src.ground.len(),n-src.ground.len());let h=&src.hamiltonian[&zero];
+        let mut gm=vec![C::default();d];if let Some(block)=p.hilbert.radiation.gamma.get(&zero){for a in 0..e{for b in 0..e{gm[(g+a)*n+g+b]=block[a*e+b];}}}
+        let mut bare=vec![C::default();d];
+        for a in 0..n{for b in 0..n{let mut v=C::default();for c in 0..n{
+            let commutator=C{re:mul(h[a*n+c],x[c*n+b]).re-mul(x[a*n+c],h[c*n+b]).re,im:mul(h[a*n+c],x[c*n+b]).im-mul(x[a*n+c],h[c*n+b]).im};
+            let anti=C{re:mul(gm[a*n+c],x[c*n+b]).re+mul(x[a*n+c],gm[c*n+b]).re,im:mul(gm[a*n+c],x[c*n+b]).im+mul(x[a*n+c],gm[c*n+b]).im};
+            v.re+=commutator.im-0.5*anti.re;v.im+=-commutator.re-0.5*anti.im;}bare[a*n+b]=v;}}
+        if let Some(r)=p.hilbert.radiation.recycling.get(&zero){for a in 0..g{for b in 0..g{for i in 0..e{for j in 0..e{
+            add(&mut bare[a*n+b],mul(r[(a*g+b)*e*e+i*e+j],x[(g+i)*n+g+j]));}}}}}
+        let distance=|a:&[C],b:&[C]|a.iter().zip(b).fold(0_f64,|s,(x,y)|s.hypot((x.re-y.re).hypot(x.im-y.im)));
+        let size=x.iter().fold(0_f64,|s,z|s.hypot(z.re.hypot(z.im)));
+        let(error,error_bare)=(distance(exact,&effective),distance(exact,&bare));
+        eprintln!("effective error {error:.3e}, bare {error_bare:.3e}, bound {:.3e} + frame {:.3e} (|x| {size:.2})",generator.remainder,generator.frame_difference);
+        assert!(error<=(generator.remainder+generator.frame_difference)*size,"outside the stated bounds");
+        assert!(error<0.2*error_bare,"not closer than the bare generator");
     }
     /// Hermitian-symmetric input on a symmetric domain uses the canonical
     /// half and mirrors it; a perturbed input takes the full path. Both

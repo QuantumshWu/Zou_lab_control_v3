@@ -23,6 +23,8 @@ pub mod hilbert;
 pub mod primitives;
 #[path="preparation_gauge.rs"]
 pub mod gauge;
+#[path="preparation_effective.rs"]
+pub mod effective;
 
 #[derive(Clone,Copy)]
 pub struct MatrixView<'a>{pub real:&'a[f64],pub imag:&'a[f64]}
