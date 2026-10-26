@@ -49,22 +49,27 @@ entry is `tools/atom_workbench.ps1`; the independent package entry is
 
 ## Numerical scope
 
-The Rust solver has one dispatch. Finite-time 32-state trajectories use the
-population core; long-time (steadyOnly) means use the full-density Fourier
-harmonic solver for driven models and the trace-constrained stationary solve
-for static ones. Outside the population core, the solver reads only thread
-counts and native-library locations from the environment. Reference
-calculations using QuTiP/Python are development evidence, not shipped runtime
-components.
+Every request (schema `rb87-full/2`) is solved by the population core in
+`rust-solver/population-core`; the worker in `rust-solver/src` only speaks the
+JSONL protocol. The complete 32-state Hamiltonian, drives and collapse
+operators of the TypeScript model are kept: the core changes variables
+exactly (gauge, Fourier envelope, optical and recycling shears) and never
+drops a coupling because it is small or labelled forbidden.
+
+- Finite-time trajectories: a rational Krylov trial space on the gauge pencil
+  with a Galerkin reduced model, grown until a dual-weighted residual estimate
+  of the population error (trial-space basis plus Fourier truncation) meets the
+  requested tolerance.
+- Long-time means: the null vector of the same pencil (or, when the null space
+  is degenerate, the projection of the initial state), with its own basis and
+  Fourier-truncation estimates. For several lasers with incommensurate
+  frequencies this is the time average of the quasi-periodic long-time state.
 
 Each request carries an absolute population error target `populationTolerance`
-on the probability scale, `0 < ε ≤ 0.02`, default `0.005`. The configured
-32-state Hamiltonian and collapse operators are retained. Near-resonant lasers
-participate in the master equation; user-designated far-detuned lasers contribute
-the existing Stark model. Long-time results may be a phase average and may
-depend on the initial state. A failed convergence check must remain a visible
-failure, not a fabricated population result.
-
-Performance work remains active: some fully coupled multi-frequency cases are
-still slow. Short-window or closed-transition checks do not establish accuracy
-or speed for every long trajectory.
+on the probability scale, `0 < ε ≤ 0.02`, default `0.005`. The estimates are
+calibrated a-posteriori estimates (checked against independent references),
+not certified bounds; a safety factor of 1.5 is applied. A result that does not
+reach the target is reported as a failure, never as a relaxed result.
+Near-resonant lasers participate in the master equation; user-designated
+far-detuned lasers contribute the existing Stark model. Reference calculations
+using QuTiP/Python are development evidence, not shipped runtime components.
