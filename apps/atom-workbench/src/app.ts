@@ -32,8 +32,9 @@ import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
 import {validateScene} from './scene-file.js';
 import {incidentTransitions,laserReferenceStateId,transitionEndpoints} from './transition-view.js';
 import {escapeHtml as esc,levelsChart,number,populationChart,bindPopulationChart,populationColor,populationValue,populationSamplingInfo} from './charts.js';
-import {math,shortKet,term} from './math.js';
-import {renderSpace3D} from './space3d.js';
+import {math} from './math.js';
+import {renderSpace3D,type SpaceSelection,type SpaceViewName} from './space3d.js';
+import {laserColour} from './identity.js';
 import {classifyLasers} from './laser-regime.js';
 import {POPULATION_GROUPS,recommendedPopulationStates,populationDisplayIds,withPopulationGroups} from './population-selection.js';
 import {durationUnit,durationValue,setDurationUnit,setDurationValue,durationText,DURATION_UNITS} from './duration.js';
@@ -128,7 +129,7 @@ const levelsPage=page('levels',`<div class="title-row page-title"><span class="h
 const dynamicsPage=page('dynamics',`<div class="title-row page-title"><span class="summary" id="dynamics-beams"></span><span id="dynamics-commands"></span></div>
 <div id="dynamics-controls" class="dynamics-controls"></div><div class="chart-surface" id="population-chart"></div><div class="chart-caption" id="population-caption"></div>
 <section class="details-card" id="dynamics-details"></section>`);
-const spacePage=page('space',`<div class="title-row page-title"><span class="summary" id="space-summary"></span></div><div class="chart-surface space-surface" id="space-chart"></div>`);
+const spacePage=page('space',`<div class="title-row page-title space-title"><span id="space-commands"></span></div><div class="chart-surface space-surface" id="space-chart"></div><div class="space-legend" id="space-legend"></div>`);
 tabs.addPermanent('levels','能级与跃迁',levelsPage);tabs.addPermanent('dynamics','布居演化',dynamicsPage);tabs.addPermanent('space','方向与偏振',spacePage);
 // TabWidget sizes a label by a canvas measure of its words; for CJK the canvas falls back to a
 // narrower face than the page does, so the labels keep their own width and nothing is cut.
@@ -147,6 +148,15 @@ populationScaleControl.setChoices([['linear','线性'],['log','对数']]);popula
 const runDynamics=command('计算',()=>requestSolve(true));runDynamics.root.id='run-dynamics';
 const dynamicsInfo=command('ⓘ',()=>openModel('population',samplingScope()),{role:'quiet',glyph:true,title:'模型说明'});dynamicsInfo.root.setAttribute('aria-label','布居演化模型说明');
 $('dynamics-commands').replaceWith(populationScaleControl.root,runDynamics.root,dynamicsInfo.root);
+// 方向与偏振: where the camera looks, the field animation, the reference plane and the zoom.
+let spaceView:SpaceViewName='free';
+const spaceViews=new Segmented(value=>{spaceView=value as SpaceViewName;spaceViews.setCurrent(spaceView);spaceRenderer?.setView(spaceView);});
+spaceViews.setChoices([['free','3D'],['x','沿 x'],['y','沿 y'],['z','沿 z'],['B','沿 B'],['k','沿 k']]);spaceViews.setCurrent(spaceView);spaceViews.root.setAttribute('aria-label','观察方向');
+const spaceAnimation=switchButton(on=>{setChecked(spaceAnimation,on);spaceRenderer?.setAnimation(on);},'电场动画');spaceAnimation.classList.add('row-switch');
+const spacePlane=checkBox('xy 参考面',on=>spaceRenderer?.setPlane(on));setChecked(spacePlane,true);
+const zoomOut=command('−',()=>spaceRenderer?.zoomBy(1.14),{role:'quiet',glyph:true,title:'缩小'}),zoomIn=command('＋',()=>spaceRenderer?.zoomBy(.88),{role:'quiet',glyph:true,title:'放大'}),resetView=command('⟲',()=>spaceRenderer?.reset(),{role:'quiet',glyph:true,title:'复位视角'});
+zoomOut.root.setAttribute('aria-label','缩小');zoomIn.root.setAttribute('aria-label','放大');resetView.root.setAttribute('aria-label','复位视角');
+$('space-commands').replaceWith(spaceViews.root,spaceAnimation,spacePlane,element('span','spacer'),zoomOut.root,zoomIn.root,resetView.root);
 // The selected laser of the level diagram, and the one way to clear it.
 const beamChip=element('span','beam-chip'),beamChipName=element('span','beam-chip-name');
 const clearBeam=command('×',()=>clearSourceSelection(),{role:'quiet',glyph:true,title:'取消选择光束'});clearBeam.root.setAttribute('aria-label','取消选择光束');
@@ -172,7 +182,7 @@ function getLevel(id:string,a=latestAnalysis):Level|undefined{return allLevels(a
 function stateText(l:Level):string{return stateLabel(l);}
 function measuredNumber(value:number,places=4):string{if(value!==0&&Number.isFinite(value)&&Math.abs(value)<10**(-places))return formatNumber(value,{digits:3});return number(value,places);}
 function frequencyText(valueMHz:number):string{if(!Number.isFinite(valueMHz))return '—';const magnitude=Math.abs(valueMHz),scale=magnitude>=1e6?1e6:magnitude>=1e3?1e3:magnitude>=1?1:magnitude>=.001?.001:.000001,unit=scale===1e6?'THz':scale===1e3?'GHz':scale===1?'MHz':scale===.001?'kHz':'Hz';return `${number(valueMHz/scale,scale===1e6?12:scale===1e3?9:6)} ${unit}`;}
-function stateHTML(id:string):string{const l=getLevel(id);return l?`<span class="state-math" role="img" aria-label="${esc(stateText(l))}">${term(l.manifold)} ${shortKet(l.F,l.m)}</span>`:esc(scene.references?.find(r=>r.id===id)?.name??id);}
+function stateCell(id:string):string{return `<span class="state-label">${esc(idText(id))}</span>`;}
 function idText(id:string):string{const l=getLevel(id);return l?stateText(l):scene.references?.find(r=>r.id===id)?.name??id;}
 function absolute(id:string):number|undefined{const l=getLevel(id);if(l)return absoluteEnergyMHz(l);const r=scene.references?.find(r=>r.id===id);return r?referenceEnergyMHz(r,allLevels()):undefined;}
 function activeLaser(_line?:SpectralLine):Laser|undefined{return selection.kind==='laser'?scene.lasers.find(l=>l.id===selection.id):undefined;}
@@ -247,7 +257,7 @@ function item(kind:'field'|'laser',id:string,index:number,name:string,sub:string
   const div=element('div',`scene-object${selection.kind===kind&&selection.id===id?' selected':''}${enabled?'':' disabled'}`);
   const button=element('button','object-select');button.type='button';button.dataset.objectId=id;button.dataset.objectKind=kind;
   button.setAttribute('aria-label',`编辑${name}`);button.setAttribute('aria-pressed',String(selection.kind===kind&&selection.id===id));
-  const symbol=element('span',`object-symbol ${kind}`);symbol.append(kind==='field'?'B':'λ',element('span','object-index',subscript(index)));
+  const symbol=element('span',`object-symbol ${kind}`);symbol.append(kind==='field'?'B':'λ',element('span','object-index',subscript(index)));if(kind==='laser')symbol.style.color=laserColour(scene,id);
   const copy=element('span','object-copy'),title=element('span','object-name'),subtitle=element('span','object-detail');
   setMiddle(title,name,'cut');setMiddle(subtitle,sub,'cut');copy.append(title,subtitle);button.append(symbol,copy);
   // In the collapsed rail only the symbol shows: the button says what it stands for.
@@ -464,11 +474,11 @@ function bindSelection():void{
 }
 function transitionRows(transitions:Transition[]):string{return transitions.map(t=>{
   const endpoints=transitionEndpoints(t,referenceStateId(scene.lasers.find(l=>l.id===t.laserId)))!,mixed=t.mixedPolarization===true;
-  return `<tr data-transition="${esc(t.id)}" data-from-state="${endpoints.fromId}" data-to-state="${endpoints.toId}" tabindex="0"><td title="${endpoints.emission?'受激辐射':'吸收'}">${stateHTML(endpoints.fromId)} → ${stateHTML(endpoints.toId)}</td><td title="${mixed?'混合背景态：多个球分量相干耦合':t.mLabelApproximate?`光场 q=${t.q}；mF 是混合本征态的主成分标签，标签之差不是严格的 ΔmF`:`光场 q=${t.q}；原子 Δm=${endpoints.deltaM}`}" aria-label="${mixed?'混合分量':t.q===-1?'sigma minus':t.q===0?'pi':'sigma plus'}">${mixed?'混合':math(t.q===-1?'\\sigma^-':t.q===0?'\\pi':'\\sigma^+')}</td><td>${measuredNumber(t.offsetMHz,3)}</td><td>${measuredNumber(t.detuningMHz,3)}</td><td>${measuredNumber(t.rabiMHz,4)}</td><td><div class="strength-cell"><span style="width:${Math.min(100,t.strength*t.weight*100)}%"></span><small>${measuredNumber(t.strength*t.weight,4)}</small></div></td></tr>`;
+  return `<tr data-transition="${esc(t.id)}" data-from-state="${endpoints.fromId}" data-to-state="${endpoints.toId}" tabindex="0"><td title="${endpoints.emission?'受激辐射':'吸收'}">${stateCell(endpoints.fromId)} → ${stateCell(endpoints.toId)}</td><td title="${mixed?'混合背景态：多个球分量相干耦合':t.mLabelApproximate?`光场 q=${t.q}；mF 是混合本征态的主成分标签，标签之差不是严格的 ΔmF`:`光场 q=${t.q}；原子 Δm=${endpoints.deltaM}`}" aria-label="${mixed?'混合分量':t.q===-1?'sigma minus':t.q===0?'pi':'sigma plus'}">${mixed?'混合':math(t.q===-1?'\\sigma^-':t.q===0?'\\pi':'\\sigma^+')}</td><td>${measuredNumber(t.offsetMHz,3)}</td><td>${measuredNumber(t.detuningMHz,3)}</td><td>${measuredNumber(t.rabiMHz,4)}</td><td><div class="strength-cell"><span style="width:${Math.min(100,t.strength*t.weight*100)}%"></span><small>${measuredNumber(t.strength*t.weight,4)}</small></div></td></tr>`;
 }).join('');}
 function referenceAnchorDefault():string{return [...selectedStates].reverse().find(id=>getLevel(id))??(comparisonSource&&getLevel(comparisonSource)?comparisonSource:initialId());}
 function referenceEditor():string{
-  const anchor=referenceAnchorDefault();return `<details class="reference-editor"><summary>参考能级 <span>${scene.references?.length??0}</span></summary><div class="reference-form-caption" id="reference-form-caption">新建参考能级</div><div class="reference-form form"><label class="field-label" for="reference-name">名称</label><div class="field-control"><input id="reference-name" maxlength="32" value="虚拟中间态" aria-label="参考能级名称"></div><label class="field-label" for="reference-anchor">锚点</label><div class="field-control"><select id="reference-anchor" aria-label="参考能级锚点">${allLevels().map(l=>`<option value="${l.id}" ${l.id===anchor?'selected':''}>${esc(stateText(l))}</option>`).join('')}</select></div><label class="field-label" for="reference-anchor-mode">能量定义</label><div class="field-control"><div id="reference-anchor-mode" data-value="follow"></div></div><label class="field-label" for="reference-offset">频率偏移</label><div class="field-control"><div class="number-field" id="reference-number"><input id="reference-offset" type="text" inputmode="decimal" value="${100/DETUNING_UNIT_MHZ[referenceUnit]}" aria-label="参考能级频率偏移"></div><select id="reference-unit" class="unit-picker" aria-label="参考能级频率单位">${Object.keys(DETUNING_UNIT_MHZ).map(unit=>`<option value="${unit}" ${unit===referenceUnit?'selected':''}>${unit}</option>`).join('')}</select><button class="quiet reference-laser-copy" id="reference-from-laser" aria-label="用当前激光建立参考能级">取激光终点</button></div><div class="reference-definition full-form-row" id="reference-definition"></div><div class="form-actions"><button id="add-reference">添加参考能级</button><button class="quiet" id="cancel-reference-edit" hidden>取消编辑</button></div></div><div class="reference-list">${scene.references!.map(r=>`<div class="reference-row"><button class="state-chip" data-state="${r.id}">${esc(r.name)}</button><span title="${r.anchorMode==='zero-field'?'使用零磁场锚点，随当前磁场保持固定':'跟随当前磁场下的锚点能量'}">${stateHTML(r.anchorId)} ${r.anchorMode==='zero-field'?'· B=0':''} ${r.offsetMHz<0?'−':'+'} ${frequencyText(Math.abs(r.offsetMHz))}</span><button class="quiet" data-edit-reference="${r.id}" aria-label="编辑参考能级 ${esc(r.name)}">编辑</button><button class="icon-button" data-remove-reference="${r.id}" aria-label="删除参考能级 ${esc(r.name)}">×</button></div>`).join('')}</div></details>`;
+  const anchor=referenceAnchorDefault();return `<details class="reference-editor"><summary>参考能级 <span>${scene.references?.length??0}</span></summary><div class="reference-form-caption" id="reference-form-caption">新建参考能级</div><div class="reference-form form"><label class="field-label" for="reference-name">名称</label><div class="field-control"><input id="reference-name" maxlength="32" value="虚拟中间态" aria-label="参考能级名称"></div><label class="field-label" for="reference-anchor">锚点</label><div class="field-control"><select id="reference-anchor" aria-label="参考能级锚点">${allLevels().map(l=>`<option value="${l.id}" ${l.id===anchor?'selected':''}>${esc(stateText(l))}</option>`).join('')}</select></div><label class="field-label" for="reference-anchor-mode">能量定义</label><div class="field-control"><div id="reference-anchor-mode" data-value="follow"></div></div><label class="field-label" for="reference-offset">频率偏移</label><div class="field-control"><div class="number-field" id="reference-number"><input id="reference-offset" type="text" inputmode="decimal" value="${100/DETUNING_UNIT_MHZ[referenceUnit]}" aria-label="参考能级频率偏移"></div><select id="reference-unit" class="unit-picker" aria-label="参考能级频率单位">${Object.keys(DETUNING_UNIT_MHZ).map(unit=>`<option value="${unit}" ${unit===referenceUnit?'selected':''}>${unit}</option>`).join('')}</select><button class="quiet reference-laser-copy" id="reference-from-laser" aria-label="用当前激光建立参考能级">取激光终点</button></div><div class="reference-definition full-form-row" id="reference-definition"></div><div class="form-actions"><button id="add-reference">添加参考能级</button><button class="quiet" id="cancel-reference-edit" hidden>取消编辑</button></div></div><div class="reference-list">${scene.references!.map(r=>`<div class="reference-row"><button class="state-chip" data-state="${r.id}">${esc(r.name)}</button><span title="${r.anchorMode==='zero-field'?'使用零磁场锚点，随当前磁场保持固定':'跟随当前磁场下的锚点能量'}">${stateCell(r.anchorId)} ${r.anchorMode==='zero-field'?'· B=0':''} ${r.offsetMHz<0?'−':'+'} ${frequencyText(Math.abs(r.offsetMHz))}</span><button class="quiet" data-edit-reference="${r.id}" aria-label="编辑参考能级 ${esc(r.name)}">编辑</button><button class="icon-button" data-remove-reference="${r.id}" aria-label="删除参考能级 ${esc(r.name)}">×</button></div>`).join('')}</div></details>`;
 }
 function bindReferences():void{
   const editor=$('levels-details').querySelector<HTMLElement>('.reference-editor');if(!editor)return;
@@ -704,6 +714,19 @@ function levelScope():{title:string;lines:string[]}|undefined{
 function samplingScope():{title:string;lines:string[]}|undefined{
   const result=currentResult();return result&&result.timesUs.length>1?{title:'当前采样',lines:[populationSamplingInfo(result)]}:undefined;
 }
+/** 方向与偏振's legend: |B| and each field, every beam in its colour; the selected beam's ∠(k, B) and σ⁻/π/σ⁺ (as in the inspector). */
+function renderSpaceLegend(a:Analysis):void{
+  const fields=scene.fields.filter(f=>f.enabled&&f.magnitudeG>0),zero=a.fieldMagnitudeG===0;
+  const swatch=(colour:string,thick=false)=>`<span class="legend-swatch${thick?' thick':''}" style="background:${colour}"></span>`;
+  const isSelected=(kind:'field'|'laser',id:string)=>selection.kind===kind&&selection.id===id;
+  const items=[`<span class="legend-item total">${swatch('var(--field-ink)',true)}${fields.length>1?'合成 B':'B'}：<b>${zero?'0（参考轴 +z）':withUnit(a.fieldMagnitudeG,'G',{digits:4})}</b></span>`];
+  if(fields.length>1)for(const f of fields)items.push(`<button class="quiet legend-item${isSelected('field',f.id)?' selected':''}" data-field-id="${esc(f.id)}">${swatch('var(--field-ink)')}${esc(f.name)}：<b>${withUnit(f.magnitudeG,'G',{digits:4})}</b></button>`);
+  for(const l of scene.lasers.filter(l=>l.enabled)){
+    const p=a.polarizations[l.id],chosen=isSelected('laser',l.id),detail=chosen&&p?` · ∠(k, ${zero?'z':'B'}) <b>${formatNumber(p.angleToBDeg,{places:1})}°</b> · σ⁻ <b>${populationPercent(p.minus)}</b> · π <b>${populationPercent(p.pi)}</b> · σ⁺ <b>${populationPercent(p.plus)}</b>`:'';
+    items.push(`<button class="quiet legend-item${chosen?' selected':''}" data-laser-id="${esc(l.id)}">${swatch(laserColour(scene,l.id))}${esc(l.name)}${detail}</button>`);
+  }
+  const markup=items.join('');if($('space-legend').innerHTML!==markup)$('space-legend').innerHTML=markup;
+}
 function showAnalysisError(text:string):void{
   const markup=`<div class="empty-state error" role="alert">能级参数无效：${esc(text)}</div>`;
   if(view==='levels'){$('levels-chart').innerHTML=markup;$('selection-readout').hidden=true;$('population-toolbar').hidden=true;$('levels-details').replaceChildren();referenceEditorNode=undefined;}
@@ -744,8 +767,10 @@ function renderResults(allowSolve=true):void{
   }else if(view==='dynamics'){setText('summary',`B ${field} · 32 态 Lindblad 主方程`);renderDynamics(a,allowSolve);}
   else{
     setText('summary',`B ${field}`);
-    setText('space-summary',`${laser?`${laser.name} · `:''}∠(k, ${a.fieldMagnitudeG>0?'B':'z'}) ${pol?`${formatNumber(pol.angleToBDeg,{places:1})}°`:'—'}`);
-    const host=$('space-chart');if(!spaceMount.isConnected)host.replaceChildren(spaceMount);if(!spaceRenderer)spaceRenderer=renderSpace3D(spaceMount,scene,a,laser?.id??'');else spaceRenderer.update(scene,a,laser?.id??'');
+    spaceViews.setWithheld('k',!laser||!pol);
+    const spaceSelection:SpaceSelection=selection.kind==='none'?{kind:'none',id:''}:selection;
+    const host=$('space-chart');if(!spaceMount.isConnected)host.replaceChildren(spaceMount);if(!spaceRenderer)spaceRenderer=renderSpace3D(spaceMount,scene,a,spaceSelection,{onViewChange:name=>{spaceView=name;spaceViews.setCurrent(name);}});else spaceRenderer.update(scene,a,spaceSelection);
+    renderSpaceLegend(a);
   }
   paintStateBadges();renderCount++;renderedPopulationKey=dynamicsKey();root.dataset.populationFresh=String(!!currentResult());refreshStatus();root.dataset.renderCount=String(renderCount);root.dataset.energyRenderedAt=String(performance.now());
   if(focusHost&&focusAttribute&&focusValue)focusHost.querySelector<HTMLElement>(`[${focusAttribute}="${CSS.escape(focusValue)}"]`)?.focus({preventScroll:true});
@@ -826,13 +851,14 @@ function toggleScenePanel(open?:boolean):void{
 function toggleInspector():void{root.classList.toggle('inspector-open');syncLayout();}
 
 // ---------------------------------------------------------------- events
-root.addEventListener('atom-select-laser',event=>{const id=(event as CustomEvent<{id:string}>).detail?.id;if(scene.lasers.some(l=>l.id===id))select({kind:'laser',id});});root.addEventListener('atom-clear-selection',clearSourceSelection);
+root.addEventListener('atom-select-laser',event=>{const id=(event as CustomEvent<{id:string}>).detail?.id;if(scene.lasers.some(l=>l.id===id))select({kind:'laser',id});});root.addEventListener('atom-select-field',event=>{const id=(event as CustomEvent<{id:string}>).detail?.id;if(scene.fields.some(f=>f.id===id))select({kind:'field',id});});
 root.addEventListener('click',event=>{
   const target=event.target as Element;
   if(target.closest('[data-export-solver-failures]')){download(JSON.stringify(failureRecords,null,2),'rb87-solver-failures.json');return;}
   if(root.classList.contains('scene-open')&&!target.closest('.scene-panel')){root.classList.remove('scene-open');syncLayout();}
   if(target.closest('[data-show-solver-details]')){showSolverDetails();return;}
   const beam=target.closest<HTMLElement>('[data-laser-id]');if(beam){select({kind:'laser',id:beam.dataset.laserId!});return;}
+  const fieldItem=target.closest<HTMLElement>('[data-field-id]');if(fieldItem){select({kind:'field',id:fieldItem.dataset.fieldId!});return;}
   const state=target.closest<HTMLElement>('[data-state]');if(state){selectState(state.dataset.state!);return;}
   const tr=target.closest<HTMLElement>('[data-transition]');if(tr){const t=latestAnalysis.transitions.find(t=>t.id===tr.dataset.transition);if(t){const endpoints=transitionEndpoints(t,referenceStateId(scene.lasers.find(l=>l.id===t.laserId)));if(endpoints){comparisonSource=undefined;selectedStates=[endpoints.fromId,endpoints.toId];persist();renderResults(false);}}}
 });

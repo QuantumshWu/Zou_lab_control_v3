@@ -9,6 +9,13 @@
   /* The level diagram's fixed probability scale (charts.ts populationAppearance) at p = 0 and p = 1. */
   --population-0: rgb(247 249 251);
   --population-1: rgb(134 179 216);
+  /* Object identity colours (ui-design.md §0.2): one per laser, by its place in the list
+   * (identity.ts), from the zlc-plot series palette (crates/zlc-plot/src/style.rs) without its
+   * green, which is the magnetic field's; the 3D lab axes keep their own three. */
+  --identity-0: #517FA6; --identity-1: #B17D4B; --identity-2: #99719B; --identity-3: #B36F72;
+  --identity-4: #558F9C; --identity-5: #7E7CA5; --identity-6: #92924F; --identity-7: #8A4B1F;
+  --field-ink: var(--config-green-dark);
+  --axis-x: #865B59; --axis-y: #58795D; --axis-z: #4E6D92;
   /* One source for the layout: the page reads this word (app.ts layoutMode). */
   --atom-layout: wide;
 }
@@ -167,6 +174,7 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .reference-row > span { min-width: 0; color: var(--muted-ink); }
 .state-chip { justify-content: flex-start; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; padding: 0 var(--field-text-inset) var(--cap-lift); border: 0; background: var(--accent-tint); color: var(--ink-accent); }
 .state-chip .katex { font-size: 1em; }
+.state-label { white-space: nowrap; }
 .solver-readouts.form { margin: var(--row-gap) 0; }
 .solver-error { margin: var(--row-gap) 0; color: var(--red-dark); white-space: normal; overflow-wrap: anywhere; }
 .solver-details .note { margin: var(--row-gap) 0 0; }
@@ -204,11 +212,20 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .readout-head, .readout-steady { color: var(--muted-ink); }
 
 /* ---------- 方向与偏振 ---------------------------------------------------- */
+.space-title { flex-wrap: wrap; height: auto; }
 .space-surface { overflow: visible; }
-.space-beam-picker .dimmed { opacity: .48; }
-.space-beam-picker .dimmed:hover, .space-beam-picker .dimmed:focus-visible { opacity: 1; }
-.space-toolbar { position: absolute; inset: var(--card-inset) var(--card-inset) auto; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--row-gap) var(--section-gap); align-items: start; z-index: 2; pointer-events: none; }
-.space-viewbar { grid-column: 1 / -1; display: flex; align-items: center; gap: var(--section-gap); pointer-events: auto; }
+.atom-space3d { position: relative; min-width: 0; min-height: calc(14 * var(--control)); height: clamp(calc(14 * var(--control)), 58vh, calc(21 * var(--control))); overflow: hidden; background: var(--surface); border-radius: var(--radius); isolation: isolate; }
+.atom-space3d > canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.space-depth-canvas { pointer-events: none; }
+.space-canvas { touch-action: none; cursor: grab; outline: none; }
+.space-hint { position: absolute; left: var(--card-pad); bottom: var(--card-pad); color: var(--muted-ink); pointer-events: none; }
+.space-legend { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--edge) var(--row-gap); }
+.legend-item { display: inline-flex; align-items: center; gap: var(--row-gap); color: var(--text); white-space: nowrap; padding-bottom: var(--cap-lift); }
+button.legend-item { padding: 0 var(--field-text-inset) var(--cap-lift); color: var(--text); }
+button.legend-item.selected { background: var(--selected); border-color: var(--selected); }
+.legend-item b { font-weight: 400; font-variant-numeric: tabular-nums; }
+.legend-swatch { flex: none; width: calc(1.2 * var(--chip-pad-x)); height: var(--segment-rim); border-radius: var(--radius); }
+.legend-swatch.thick { height: calc(2 * var(--segment-rim)); }
 
 /* ---------- inspector -------------------------------------------------- */
 .inspector-heading { min-height: var(--control); margin-bottom: var(--row-gap); }
