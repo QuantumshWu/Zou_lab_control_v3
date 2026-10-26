@@ -191,9 +191,12 @@ impl OwnedPrepared{
 #[cfg(test)]
 mod tests{
     use super::*;use crate::preparation::MatrixView;
+    /// Weak optical couplings: the recycling shear Khat creates no
+    /// significant coupling with them, so it is kept and B0 carries its
+    /// complete feedback.
     pub(super) fn fixture()->OwnedPrepared{
         let n=4;let mut h=vec![0.;16];let zero=vec![0.;16];for(i,v)in[0.,0.6,3.,4.].iter().enumerate(){h[i*n+i]=*v;}
-        for(i,j,v)in[(0,2,0.1),(1,3,0.2),(0,1,0.02)]{h[i*n+j]=v;h[j*n+i]=v;}
+        for(i,j,v)in[(0,2,0.001),(1,3,0.002),(0,1,0.0002)]{h[i*n+j]=v;h[j*n+i]=v;}
         let mut c=vec![0.;16];c[2]=0.7;c[3]=0.1;c[6]=0.2;c[7]=0.8;
         let channels=[MatrixView{real:&c,imag:&zero}];let model=ModelView{dimension:n,hamiltonian:MatrixView{real:&h,imag:&zero},
             collapse:&channels,drives:&[],ground:&[true,true,false,false],initial_index:0};

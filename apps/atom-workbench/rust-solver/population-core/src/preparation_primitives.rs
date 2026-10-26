@@ -81,21 +81,27 @@ pub fn select_optical_s(lap:&Lapack,source:&GaugedSource)->Result<(FourierMatric
 
 /// The recycling shear Khat moves the recycled ground coherence of charge k
 /// into new coordinates, removing the recycling coupling R_k at first order
-/// (a second-order effect ~ |R_k| |Khat_k|). T = (I + Khat) J2(S) does not
-/// shear that part, so every sheared coupling V_c acts on it at first order
-/// and creates a coupling |V_c| |Khat_k| at charge c+k, a second-order effect
-/// (|V_c| |Khat_k|)^2 / |omega_{c+k}|. Khat_k is kept only when it removes
-/// more than it creates (at least twice as much): with a strong far-detuned
-/// laser (|V_c| ~ 1e5/us) it does not, and R_k stays exactly in the pencil.
+/// (mixing |Khat_k|, a second-order effect |R_k| |Khat_k|). T = (I + Khat)
+/// J2(S) does not shear that part, so every sheared coupling V_c acts on it
+/// and creates a coupling |V_c| |Khat_k| at charge c+k. Khat_k is kept only
+/// when what it removes is worth a shear and every coupling it creates is
+/// not (the thresholds of `select_optical_s`: mixing 1e-3, shift 1e-6 of the
+/// linewidth). Next to a strong far-detuned laser (|V_c| ~ 1e5/us) it is not
+/// kept: |V_c| |Khat_k| ~ 2e3/us would need new Fourier modes, while R_k
+/// couples to a mode the domain holds anyway. R_k then stays exactly in the
+/// pencil.
 fn pays(h:&HilbertPrepared,k:&[C],r:&[C],q:&[i32],sheared:&[(Charge,f64)])->Result<bool,String>{
     let size=k.iter().map(|z|z.re.hypot(z.im)).fold(0_f64,f64::max);
-    let removed=size*r.iter().map(|z|z.re.hypot(z.im)).fold(0_f64,f64::max);let mut created=0_f64;
+    let removed=size*r.iter().map(|z|z.re.hypot(z.im)).fold(0_f64,f64::max);
+    let floor=SHEAR_SHIFT*linewidth(&h.source);
+    if size<SHEAR_MIXING&&removed<floor{return Ok(false);}
     for(c,v)in sheared{let charge=plus(c,q)?;
         // A coupling created in the central mode is no new mode.
         if charge.iter().all(|&x|x==0){continue;}
-        let w=h.source.phases.frequency(&charge)?;let omega=(w.hi+w.lo).abs();
-        if !(omega>0.){return Ok(false);}created+=(v*size).powi(2)/omega;}
-    Ok(2.*created<removed)
+        let w=h.source.phases.frequency(&charge)?;let omega=(w.hi+w.lo).abs();let created=v*size;
+        if !(omega>0.)||created>=SHEAR_MIXING*omega||created*created>=floor*omega{return Ok(false);}
+    }
+    Ok(true)
 }
 
 fn prepare_k(lap:&Lapack,h:&HilbertPrepared,sheared:&[(Charge,f64)])->Result<(FourierMatrices,ShearDiagnostics),String>{
