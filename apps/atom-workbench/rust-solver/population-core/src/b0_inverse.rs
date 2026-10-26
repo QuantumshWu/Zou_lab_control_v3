@@ -215,12 +215,27 @@ impl ShiftFactor{
             FrameKind::Schur{ta,..}=>{let mut left:Vec<_>=ta.iter().map(|z|C{re:-z.re,im:-z.im}).collect();for i in 0..n{add(&mut left[i+i*n],shift);}
                 if left.iter().any(|z|!z.finite()){return Err("Complete shifted Schur matrix overflow".into());}ShiftSolve::Schur{left}},
         };
-        let mut reduced=frame.uhat.clone();solve_reduced(&frame,&solve,lap,n,rank,&mut reduced)?;let mut w=P0Workspace::default();let mut ru_rows=Vec::new();
-        transform(lap,n,&frame.left_out,&frame.right_out_t,&reduced,rank,&mut ru_rows,&mut w.pack_a,&mut w.pack_b,&mut w.middle,&mut w.last)?;
-        let ru=column(&ru_rows,d,rank);let mut small=identity(rank);
-        for i in 0..rank{for at in factor.v.row[i]..factor.v.row[i+1]{for j in 0..rank{
-            let value=mul(factor.v.value[at],ru[factor.v.col[at]+j*d]);small[i+j*rank].re-=value.re;small[i+j*rank].im-=value.im;
-        }}}
+        // small = I - V (s - L - R)^{-1} U, column-major rank x rank.
+        let mut small=identity(rank);
+        match &solve{
+            // Reduced-frame factors: V (s-L-R)^{-1} U = vhat diag(1/(s-a_i-b_j)) uhat.
+            ShiftSolve::Eigen{reciprocal}=>{
+                let mut scaled=vec![C::default();d*rank];
+                for i in 0..n{for j in 0..n{let r=reciprocal[i+n*j];for k in 0..rank{
+                    scaled[i+n*j+d*k]=mul(r,frame.uhat[(i*n+j)*rank+k]);
+                }}}
+                let minus_one=C{re:-1.,im:0.};
+                lap.complex_gemm().multiply(rank,rank,d,minus_one,&frame.vhat,rank,&scaled,d,C{re:1.,im:0.},&mut small,rank)?;
+            }
+            ShiftSolve::Schur{..}=>{
+                let mut reduced=frame.uhat.clone();solve_reduced(&frame,&solve,lap,n,rank,&mut reduced)?;let mut w=P0Workspace::default();let mut ru_rows=Vec::new();
+                transform(lap,n,&frame.left_out,&frame.right_out_t,&reduced,rank,&mut ru_rows,&mut w.pack_a,&mut w.pack_b,&mut w.middle,&mut w.last)?;
+                let ru=column(&ru_rows,d,rank);
+                for i in 0..rank{for at in factor.v.row[i]..factor.v.row[i+1]{for j in 0..rank{
+                    let value=mul(factor.v.value[at],ru[factor.v.col[at]+j*d]);small[i+j*rank].re-=value.re;small[i+j*rank].im-=value.im;
+                }}}
+            }
+        }
         if small.iter().any(|z|!z.finite()){return Err("Nonfinite complete Woodbury feedback before factorization".into());}
         let(mut condition,mut residual)=(None,None);
         let feedback=if rank==0{Feedback::Empty}else if matches!(solve,ShiftSolve::Eigen{..}){
@@ -288,7 +303,9 @@ impl P0Batch{
         let gemm=self.lapack.complex_gemm();
         let sylvester=self.lapack.sylvester_kernel();
         let entries=&self.entries;
-        self.execution.for_mode_chunks(output,width,work,&mut self.scratch,|first,chunk,scratch|{
+        // Each task pays ~4+2n+modes GEMM calls regardless of its size, so
+        // tasks get about 4M multiply-adds (a few modes) at least.
+        self.execution.for_mode_chunks(output,width,work,P0_MINIMUM_TASK_WORK,&mut self.scratch,|first,chunk,scratch|{
             let modes=chunk.len()/width;
             let mut start=0;
             while start<modes{
@@ -302,6 +319,8 @@ impl P0Batch{
         })
     }
 }
+
+const P0_MINIMUM_TASK_WORK:usize=4_000_000;
 
 /// Per-task buffers of the batched application.
 #[derive(Default)]

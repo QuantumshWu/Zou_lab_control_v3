@@ -106,9 +106,10 @@ fn complex(re: f64, im: f64) -> Complex64 {
     Complex64 { re, im }
 }
 
-/// Median wall time in milliseconds of `action`, repeated for at least
-/// `seconds` (and at least three times) after one warm-up call.
-fn time_ms(seconds: f64, mut action: impl FnMut()) -> f64 {
+/// (median, minimum) wall time in milliseconds of `action`, repeated for at
+/// least `seconds` (and at least three times) after one warm-up call. The
+/// minimum is the robust figure on a machine shared with other jobs.
+fn time_ms(seconds: f64, mut action: impl FnMut()) -> (f64, f64) {
     action();
     let mut samples = Vec::new();
     let began = Instant::now();
@@ -118,7 +119,7 @@ fn time_ms(seconds: f64, mut action: impl FnMut()) -> f64 {
         samples.push(start.elapsed().as_secs_f64() * 1e3);
     }
     samples.sort_by(f64::total_cmp);
-    samples[samples.len() / 2]
+    (samples[samples.len() / 2], samples[0])
 }
 
 fn as_f64(values: &[Complex64]) -> Vec<f64> {
@@ -267,7 +268,8 @@ fn run_case(name: &str, inputs: &Path, orders: &[usize], rhs_list: &[usize], sec
             let calls = profile.applications.max(1) as f64;
             let stages: Vec<f64> = profile.nanos.iter().map(|&ns| ns as f64 / calls / 1e6).collect();
             println!(
-                "[{tag}] ms: push {push_ms:.3} apply {apply_ms:.3} shifted {shifted_ms:.3} P0 {p0_ms:.3} pull {pull_ms:.3} proposal {proposal_ms:.3}"
+                "[{tag}] ms (median/min): push {:.3}/{:.3} apply {:.3}/{:.3} shifted {:.3}/{:.3} P0 {:.3}/{:.3} pull {:.3}/{:.3} proposal {:.3}/{:.3}",
+                push_ms.0, push_ms.1, apply_ms.0, apply_ms.1, shifted_ms.0, shifted_ms.1, p0_ms.0, p0_ms.1, pull_ms.0, pull_ms.1, proposal_ms.0, proposal_ms.1
             );
             let stage_text: Vec<String> =
                 (0..STAGE_COUNT).map(|i| format!("{}={:.3}", STAGE_NAMES[i], stages[i])).collect();
@@ -276,8 +278,10 @@ fn run_case(name: &str, inputs: &Path, orders: &[usize], rhs_list: &[usize], sec
                 let record = json!({
                     "case": name, "order": order, "rhs": rhs, "modes": modes.len(),
                     "threads": std::env::var("ATOM_PENCIL_THREADS").unwrap_or_default(),
-                    "pushMs": push_ms, "applyMs": apply_ms, "shiftedMs": shifted_ms, "p0Ms": p0_ms,
-                    "pullMs": pull_ms, "proposalMs": proposal_ms,
+                    "pushMs": push_ms.0, "applyMs": apply_ms.0, "shiftedMs": shifted_ms.0, "p0Ms": p0_ms.0,
+                    "pullMs": pull_ms.0, "proposalMs": proposal_ms.0,
+                    "pushMin": push_ms.1, "applyMin": apply_ms.1, "shiftedMin": shifted_ms.1, "p0Min": p0_ms.1,
+                    "pullMin": pull_ms.1, "proposalMin": proposal_ms.1,
                     "stageNames": STAGE_NAMES, "stageMs": stages, "differences": differences,
                     "pencilSetupMs": pencil_ms, "p0SetupMs": p0_setup_ms,
                 });

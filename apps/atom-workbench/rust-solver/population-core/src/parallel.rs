@@ -18,9 +18,9 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-/// Below this many complex multiply-adds per task a stage stays serial.
-/// Scheduling threshold only; it never changes which arithmetic is done.
-const MINIMUM_WORK_PER_TASK: usize = 262_144;
+/// Default minimum complex multiply-adds per task; below it a stage stays
+/// serial. Scheduling threshold only; it never changes the arithmetic.
+pub const MINIMUM_WORK_PER_TASK: usize = 262_144;
 /// Tasks per worker, so work stealing evens out uneven chunks and workers
 /// that are preempted or run on slower cores.
 const TASKS_PER_THREAD: usize = 4;
@@ -63,65 +63,58 @@ impl Execution {
         self.threads
     }
 
-    /// Number of tasks for `items` independent output items and `work`
-    /// complex multiply-adds.
-    pub fn tasks(&self, items: usize, work: usize) -> usize {
+    /// Number of tasks for `items` independent output items, `work` complex
+    /// multiply-adds in total and at least `minimum_work` per task.
+    pub fn tasks(&self, items: usize, work: usize, minimum_work: usize) -> usize {
         if self.threads == 1 {
             return 1;
         }
-        (self.threads * TASKS_PER_THREAD).min(items).min(work / MINIMUM_WORK_PER_TASK).max(1)
+        (self.threads * TASKS_PER_THREAD).min(items).min(work / minimum_work.max(1)).max(1)
     }
 
     /// Split `out` into contiguous chunks of whole modes (`width` entries per
     /// mode) and run `action(first_mode, chunk, scratch)` on each, in parallel
-    /// when `work` justifies it. `scratch` keeps one private buffer per task
-    /// across calls. Returns the first error of any task.
-    pub fn for_mode_chunks<T, S, F>(&self, out: &mut [T], width: usize, work: usize, scratch: &mut Vec<S>, action: F) -> Result<(), String>
+    /// when `work` allows tasks of at least `minimum_work`. Scratch buffers are kept in `scratch` across
+    /// calls; a running task borrows one, so at most one exists per worker.
+    /// Returns the first error of any task.
+    pub fn for_mode_chunks<T, S, F>(
+        &self,
+        out: &mut [T],
+        width: usize,
+        work: usize,
+        minimum_work: usize,
+        scratch: &mut Vec<S>,
+        action: F,
+    ) -> Result<(), String>
     where
         T: Send,
         S: Default + Send,
         F: Fn(usize, &mut [T], &mut S) -> Result<(), String> + Sync,
     {
         let modes = if width == 0 { 0 } else { out.len() / width };
-        let tasks = self.tasks(modes, work);
-        if scratch.len() < tasks {
-            scratch.resize_with(tasks, S::default);
-        }
+        let tasks = self.tasks(modes, work, minimum_work);
         #[cfg(feature = "parallel")]
         if let (Some(pool), true) = (&self.pool, tasks > 1) {
             let per_task = modes.div_ceil(tasks);
-            return pool.install(|| {
-                out.par_chunks_mut(per_task * width)
-                    .zip(scratch[..tasks].par_iter_mut())
-                    .enumerate()
-                    .try_for_each(|(task, (chunk, scratch))| action(task * per_task, chunk, scratch))
-            });
-        }
-        action(0, out, &mut scratch[0])
-    }
-
-    /// Run `action(item, scratch)` for `items` independent items, in parallel
-    /// when `work` justifies it; items are split into contiguous ranges.
-    pub fn for_ranges<S, F>(&self, items: usize, work: usize, scratch: &mut Vec<S>, action: F) -> Result<(), String>
-    where
-        S: Default + Send,
-        F: Fn(std::ops::Range<usize>, &mut S) -> Result<(), String> + Sync,
-    {
-        let tasks = self.tasks(items, work);
-        if scratch.len() < tasks {
-            scratch.resize_with(tasks, S::default);
-        }
-        #[cfg(feature = "parallel")]
-        if let (Some(pool), true) = (&self.pool, tasks > 1) {
-            let per_task = items.div_ceil(tasks);
-            return pool.install(|| {
-                scratch[..tasks].par_iter_mut().enumerate().try_for_each(|(task, scratch)| {
-                    let start = (task * per_task).min(items);
-                    action(start..(start + per_task).min(items), scratch)
+            let idle = Mutex::new(std::mem::take(scratch));
+            let borrow = || idle.lock().ok().and_then(|mut idle| idle.pop()).unwrap_or_default();
+            let result = pool.install(|| {
+                out.par_chunks_mut(per_task * width).enumerate().try_for_each(|(task, chunk)| {
+                    let mut own = borrow();
+                    let result = action(task * per_task, chunk, &mut own);
+                    if let Ok(mut idle) = idle.lock() {
+                        idle.push(own);
+                    }
+                    result
                 })
             });
+            *scratch = idle.into_inner().unwrap_or_default();
+            return result;
         }
-        action(0..items, &mut scratch[0])
+        if scratch.is_empty() {
+            scratch.push(S::default());
+        }
+        action(0, out, &mut scratch[0])
     }
 }
 
@@ -158,7 +151,7 @@ mod tests {
         let mut scratch: Vec<Vec<usize>> = Vec::new();
         let mut out = vec![0usize; 10 * 3];
         execution
-            .for_mode_chunks(&mut out, 3, 4 * MINIMUM_WORK_PER_TASK, &mut scratch, |first, chunk, seen| {
+            .for_mode_chunks(&mut out, 3, 4 * MINIMUM_WORK_PER_TASK, MINIMUM_WORK_PER_TASK, &mut scratch, |first, chunk, seen| {
                 for (k, mode) in chunk.chunks_exact_mut(3).enumerate() {
                     mode.fill(first + k);
                     seen.push(first + k);
@@ -168,13 +161,13 @@ mod tests {
             .unwrap();
         let expected: Vec<usize> = (0..10).flat_map(|m| [m; 3]).collect();
         assert_eq!(out, expected);
-        assert_eq!(scratch.len(), 4);
+        assert!(!scratch.is_empty() && scratch.len() <= 4);
         let mut all: Vec<usize> = scratch.concat();
         all.sort_unstable();
         assert_eq!(all, (0..10).collect::<Vec<_>>());
         // Too little work: one serial task.
         let mut small = vec![0usize; 8];
-        execution.for_mode_chunks(&mut small, 1, 8, &mut scratch, |first, chunk, _| {
+        execution.for_mode_chunks(&mut small, 1, 8, MINIMUM_WORK_PER_TASK, &mut scratch, |first, chunk, _| {
             assert_eq!((first, chunk.len()), (0, 8));
             Ok(())
         })
@@ -182,12 +175,13 @@ mod tests {
     }
 
     #[test]
-    fn ranges_report_errors() {
+    fn mode_chunks_report_errors() {
         let execution = Execution::with_threads(3).unwrap();
         let mut scratch: Vec<()> = Vec::new();
-        let result = execution.for_ranges(9, 3 * MINIMUM_WORK_PER_TASK, &mut scratch, |range, _| {
-            if range.contains(&4) { Err("item 4".into()) } else { Ok(()) }
+        let mut out = vec![0u8; 9];
+        let result = execution.for_mode_chunks(&mut out, 1, 9 * MINIMUM_WORK_PER_TASK, MINIMUM_WORK_PER_TASK, &mut scratch, |first, chunk, _| {
+            if (first..first + chunk.len()).contains(&4) { Err("mode 4".into()) } else { Ok(()) }
         });
-        assert_eq!(result, Err("item 4".to_string()));
+        assert_eq!(result, Err("mode 4".to_string()));
     }
 }

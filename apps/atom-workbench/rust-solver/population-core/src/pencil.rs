@@ -7,8 +7,11 @@
 //!   F x = NL * J + J * NR + R vec(J_EE) + L_GG z + L_OG z - i omega E x,
 //! where `*` is the convolution over charges, (A * X)_q = sum_p A_p X_{q-p}.
 //! The charge pairs (source mode, target mode) of every coefficient are its
-//! edges. Each Hilbert-space product is one ZGEMM over all edges of a
-//! coefficient charge, restricted to its nonzero ground/excited blocks.
+//! edges. Hilbert stages are evaluated per target mode: for each ground or
+//! excited output part, the nonzero blocks of all incoming coefficients are
+//! concatenated along the contraction and the matching source rows/columns
+//! stacked, so one ZGEMM accumulates the whole convolution into the target.
+//! Thin stages (K, R, L_GG, L_OG) use one dense GEMM or a CSR pass per charge.
 //!
 //! Field layout ("mode blocks"): mode m stores the matrices of all rhs
 //! columns as one column-major n x (rhs*n) block whose column index is
@@ -29,7 +32,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::lapack::{ComplexGemm, Lapack};
-use crate::parallel::Execution;
+use crate::parallel::{Execution, MINIMUM_WORK_PER_TASK};
 use crate::preparation::Charge;
 use crate::{Coefficient, Finite, C};
 
@@ -183,8 +186,6 @@ pub(crate) struct HilbertCoefficient {
     right: Vec<Block>,
     left_macs: usize,
     right_macs: usize,
-    pub(crate) max_row_entries: usize,
-    pub(crate) max_column_entries: usize,
 }
 
 impl HilbertCoefficient {
@@ -222,17 +223,7 @@ impl HilbertCoefficient {
             }
         }
         let macs = |blocks: &[Block]| blocks.iter().map(|b| b.output.len() * b.input.len() * n).sum();
-        let max_row_entries = (0..n).map(|i| (0..n).filter(|&j| nonzero(&matrix[i * n + j])).count()).max().unwrap_or(0);
-        let max_column_entries = (0..n).map(|j| (0..n).filter(|&i| nonzero(&matrix[i * n + j])).count()).max().unwrap_or(0);
-        Self {
-            dense,
-            left_macs: macs(&left),
-            right_macs: macs(&right),
-            left,
-            right,
-            max_row_entries,
-            max_column_entries,
-        }
+        Self { dense, left_macs: macs(&left), right_macs: macs(&right), left, right }
     }
 }
 
@@ -279,18 +270,6 @@ impl ThinCoefficient {
         Self { rows, cols, sparse, dense }
     }
 
-    pub(crate) fn max_row_entries(&self) -> usize {
-        self.sparse.row.windows(2).map(|r| r[1] - r[0]).max().unwrap_or(0)
-    }
-
-    pub(crate) fn max_column_entries(&self) -> usize {
-        let mut counts = vec![0usize; self.cols];
-        for &c in &self.sparse.col {
-            counts[c] += 1;
-        }
-        counts.into_iter().max().unwrap_or(0)
-    }
-
     fn bytes(&self) -> usize {
         (self.sparse.row.len() + self.sparse.col.len()) * std::mem::size_of::<usize>()
             + (self.sparse.value.len() + self.dense.as_ref().map_or(0, Vec::len)) * std::mem::size_of::<C>()
@@ -324,8 +303,6 @@ pub(crate) type Family = BTreeMap<Charge, usize>;
 #[derive(Clone, Debug)]
 pub(crate) struct ModeOrder {
     charges: Vec<Charge>,
-    /// Internal index of each mode in the caller's order.
-    internal: Vec<usize>,
     /// Caller index of each internal mode.
     external: Vec<usize>,
     pairing: Option<Pairing>,
@@ -361,11 +338,7 @@ impl ModeOrder {
         } else {
             ((0..modes.len()).collect(), None)
         };
-        let mut internal = vec![0; modes.len()];
-        for (i, &e) in external.iter().enumerate() {
-            internal[e] = i;
-        }
-        Self { charges: modes.to_vec(), internal, external, pairing }
+        Self { charges: modes.to_vec(), external, pairing }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -652,50 +625,6 @@ impl Plan {
         (edges + 2 * maps + orders + 2 * (self.gg.len() + self.optical.len())) * word + self.frequency.len() * 8
     }
 
-    /// Largest number of scalar terms summed into one output entry by any
-    /// single stage (same count as the former CSR guard).
-    pub(crate) fn roundoff_terms(&self) -> usize {
-        let library = &self.library;
-        let hilbert = |stage: &Adjacency| {
-            (0..stage.targets())
-                .map(|t| {
-                    let (mut rows, mut columns) = (0, 0);
-                    for (c, _) in stage.edges(t) {
-                        rows += library.hilbert[c].max_row_entries;
-                        columns += library.hilbert[c].max_column_entries;
-                    }
-                    rows.max(columns)
-                })
-                .max()
-                .unwrap_or(0)
-        };
-        let thin = |stage: &[Link]| {
-            let mut rows = BTreeMap::<usize, usize>::new();
-            let mut columns = BTreeMap::<usize, usize>::new();
-            for link in stage {
-                let a = &library.thin[link.coefficient];
-                for &t in &link.targets {
-                    *rows.entry(t).or_default() += a.max_row_entries();
-                    *columns.entry(t).or_default() += a.max_column_entries();
-                }
-            }
-            rows.values().chain(columns.values()).copied().max().unwrap_or(0)
-        };
-        [
-            hilbert(&self.first_commutator),
-            hilbert(&self.second_commutator),
-            hilbert(&self.left_no_jump),
-            hilbert(&self.right_no_jump),
-            thin(&self.selected_k),
-            thin(&self.recycling),
-            thin(&self.ground_hamiltonian),
-            thin(&self.optical_hamiltonian),
-        ]
-        .into_iter()
-        .max()
-        .unwrap_or(0)
-    }
-
     /// Upper bound of the workspace bytes needed per right-hand side.
     pub(crate) fn workspace_bytes_per_rhs(&self) -> usize {
         let d = self.n * self.n;
@@ -866,7 +795,7 @@ impl Plan {
             .sum();
         let n = self.n;
         let parts = [0..self.ground, self.ground..n];
-        self.execution.for_mode_chunks(target, block, work, scratch, |first, chunk, scratch| {
+        self.execution.for_mode_chunks(target, block, work, MINIMUM_WORK_PER_TASK, scratch, |first, chunk, scratch| {
             for (k, y) in chunk.chunks_exact_mut(block).enumerate() {
                 let products = TargetProducts { gemm, n, rhs, library, source, stage, target: first + k };
                 for output in &parts {
@@ -909,7 +838,7 @@ impl Plan {
                 link.within(&modes).len() * per_edge * rhs
             })
             .sum();
-        self.execution.for_mode_chunks(target, target_width, work, scratch, |first, chunk, scratch| {
+        self.execution.for_mode_chunks(target, target_width, work, MINIMUM_WORK_PER_TASK, scratch, |first, chunk, scratch| {
             let targets = first..first + chunk.len() / target_width;
             for link in links {
                 let edges = link.within(&targets);

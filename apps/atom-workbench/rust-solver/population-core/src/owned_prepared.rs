@@ -68,7 +68,6 @@ pub struct DomainDiagnostics {
     pub domain_index_bytes:usize,
     pub complete_reverse_dependencies:bool,
     pub arbitrary_complex_action:bool,
-    pub roundoff_terms:usize,
     pub prepared_e_conjugacy_defect_bound:f64,pub prepared_f_conjugacy_defect_bound:f64,
     pub preparation_budget_is_population_error_bound:bool,
     /// Exactly Hermitian-symmetric inputs are evaluated on the canonical half
@@ -191,7 +190,6 @@ impl OwnedPrepared {
             frequency:frequency.clone(),max_rhs,blas:self.lapack.clone()})?;
         // A disjoint rectangular operator may have no intermediate modes; its
         // exact action is zero.
-        let roundoff_terms=plan.roundoff_terms()+n+16;
         let maximum_frequency=frequency.iter().map(|w|w.abs()).fold(0_f64,f64::max);let mut frequency_defect=0_f64;
         for(q,&w)in output_modes.iter().zip(&frequency){let opposite=q.iter().map(|&k|k.checked_neg().ok_or("REAL transport partner overflow")).collect::<Result<Charge,_>>()?;
             let other=source.phases.frequency(&opposite)?;frequency_defect=frequency_defect.max((w+(other.hi+other.lo)).abs());}
@@ -202,7 +200,7 @@ impl OwnedPrepared {
         let diagnostics=DomainDiagnostics{input_modes:plan.input_modes(),output_modes:plan.output_modes(),
             first_intermediate_modes:first,j_intermediate_modes:j,z_intermediate_modes:z,
             shared_coefficient_bytes:self.coefficient_bytes,domain_index_bytes:plan.index_bytes(),
-            complete_reverse_dependencies:true,arbitrary_complex_action:true,roundoff_terms,
+            complete_reverse_dependencies:true,arbitrary_complex_action:true,
             prepared_e_conjugacy_defect_bound:e_defect,prepared_f_conjugacy_defect_bound:f_defect,preparation_budget_is_population_error_bound:false,
             hermitian_half_capable:plan.hermitian_half_capable()};
         Ok(OwnedPencil{primitives:Arc::clone(&self.primitives),input_modes:input_modes.to_vec(),output_modes:output_modes.to_vec(),plan,
