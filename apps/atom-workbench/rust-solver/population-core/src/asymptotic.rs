@@ -1545,6 +1545,32 @@ mod tests {
         assert!(relaxation.is_finite() && relaxation > 1. && relaxation < 100., "slowest relaxation {relaxation} us");
     }
 
+    /// The adapter's combined request: the finite engine on one fork of the
+    /// core waits for the slow dual that the mean, on another fork, prepares,
+    /// and both run concurrently. Each result equals the same solve alone.
+    #[test]
+    fn a_mean_and_the_finite_engine_run_concurrently_on_forks_of_one_core() {
+        use super::super::engine::{self, DualSource, FiniteOptions};
+        let toy = lambda(true);
+        let (core, options) = toy_core(&toy, 1e-4, None);
+        let times: Vec<f64> = (0..21).map(|i| 4. * i as f64 / 20.).collect();
+        let finite = FiniteOptions { population_tolerance: 1e-3, ..FiniteOptions::default() };
+        let alone_mean = solve(&mut core.fork().unwrap(), &options).unwrap();
+        let alone_finite = engine::solve(core.fork().unwrap(), &times, options.groups.clone(), finite.clone()).unwrap();
+        let mut mean_core = core.fork().unwrap();
+        let cell = std::sync::OnceLock::new();
+        let (mean, concurrent) = std::thread::scope(|scope| {
+            let finite = scope.spawn(|| engine::solve_with(core, &times, options.groups.clone(), finite, DualSource::Shared(&cell)));
+            let dual = cell.get_or_init(|| SlowDual::prepare(mean_core.prepared(), SlowDualOptions::default()));
+            let mean = solve_with(&mut mean_core, &options, dual.as_ref().ok()).unwrap();
+            (mean, finite.join().unwrap().unwrap())
+        });
+        let parts = |m: &MeanSolution| m.density.iter().map(|z| (z.re, z.im)).collect::<Vec<_>>();
+        assert_eq!(parts(&mean), parts(&alone_mean));
+        assert_eq!(concurrent.populations, alone_finite.populations);
+        assert_eq!(concurrent.diagnostics.error_control, "dual-weighted-residual");
+    }
+
     #[test]
     fn degenerate_driven_mean_is_the_theta_zero_projection_not_the_phase_average() {
         let toy = degenerate_driven();

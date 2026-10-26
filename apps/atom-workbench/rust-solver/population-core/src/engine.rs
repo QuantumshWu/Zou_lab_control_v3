@@ -18,6 +18,7 @@ use super::slow_dual::{SlowDual, SlowDualOptions};
 use super::trial::TrialSpace;
 use crate::parallel::Execution;
 use std::collections::VecDeque;
+use std::sync::OnceLock;
 
 /// A named set of state indices whose summed population is also checked.
 #[derive(Clone, Debug)]
@@ -87,6 +88,9 @@ pub struct EngineTiming {
     pub reduced: f64,
     pub readout_evaluate: f64,
     pub dual_prepare: f64,
+    /// Waiting for a slow dual prepared by the caller (`DualSource::Shared`)
+    /// after the first chain columns.
+    pub dual_wait: f64,
     pub basis_estimate: f64,
     pub halo_estimate: f64,
 }
@@ -446,7 +450,7 @@ impl Run {
     }
 
     /// Error control by the slow-manifold dual-weighted residual estimate.
-    fn estimated(mut self, dual: SlowDual) -> Result<FiniteSolution, String> {
+    fn estimated(mut self, dual: &SlowDual) -> Result<FiniteSolution, String> {
         let kappa = self.options.safety_factor;
         let epsilon = self.epsilon;
         // Aim a little below the halo threshold: basis estimates are cheap, so
@@ -586,14 +590,23 @@ impl Run {
 }
 
 pub fn solve(core: RuntimeCore, times: &[f64], groups: Vec<RequestedGroup>, options: FiniteOptions) -> Result<FiniteSolution, String> {
-    solve_with(core, times, groups, options, None)
+    solve_with(core, times, groups, options, DualSource::Prepare)
 }
 
-/// `solve` with the request's slow dual already prepared (`Some(Ok)`), or
-/// its preparation already failed (`Some(Err)`); `None` prepares it here,
-/// while the first chain columns are computed.
+/// Where the finite engine takes the request's slow dual from.
+pub enum DualSource<'a> {
+    /// Prepared here, while the first chain columns are computed.
+    Prepare,
+    /// Prepared (or failed) by the caller, which may share it with a
+    /// concurrent mean solve: the engine computes its first chain columns,
+    /// then waits until the cell is set. The caller must set it on every
+    /// path, or the engine waits forever.
+    Shared(&'a OnceLock<Result<SlowDual, String>>),
+}
+
+/// `solve` with the slow dual from `source`.
 pub fn solve_with(
-    mut core: RuntimeCore, times: &[f64], groups: Vec<RequestedGroup>, options: FiniteOptions, given: Option<Result<SlowDual, String>>,
+    mut core: RuntimeCore, times: &[f64], groups: Vec<RequestedGroup>, options: FiniteOptions, source: DualSource<'_>,
 ) -> Result<FiniteSolution, String> {
     let started = Instant::now();
     let epsilon = options.population_tolerance;
@@ -612,14 +625,17 @@ pub fn solve_with(
     let lapack = Arc::clone(core.lapack());
     let mut space = TrialSpace::new(&mut core, &support_domain(steps.axes, &steps.domain, 1)?, &poles)?;
     let mut chain = Chain::new(poles.len());
-    // The slow dual depends only on the model: prepare it while the first
-    // chain columns are computed.
-    let (dual, dual_ms) = match given {
-        Some(dual) => {
+    // The slow dual depends only on the model: it is prepared while the
+    // first chain columns are computed.
+    let own;
+    let (dual, dual_ms, wait_ms) = match source {
+        DualSource::Shared(cell) => {
             chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner)?;
-            (dual, 0.)
+            let clock = Instant::now();
+            let dual = cell.wait().as_ref().map_err(Clone::clone);
+            (dual, 0., ms(clock))
         }
-        None => {
+        DualSource::Prepare => {
             let prepared = core.prepared();
             let ((dual, dual_ms), grown) = Execution::new()?.join(
                 || {
@@ -629,7 +645,8 @@ pub fn solve_with(
                 || chain.grow(&mut space, options.first_columns.saturating_sub(1), options.inner),
             );
             grown?;
-            (dual, dual_ms)
+            own = dual;
+            (own.as_ref().map_err(Clone::clone), dual_ms, 0.)
         }
     };
     let peak_bytes = space.bytes();
@@ -651,6 +668,7 @@ pub fn solve_with(
         peak_bytes,
     };
     run.timing.dual_prepare = dual_ms;
+    run.timing.dual_wait = wait_ms;
     match dual {
         Ok(dual) => run.estimated(dual),
         Err(_) => run.successive(),
