@@ -12,14 +12,6 @@ pub struct InnerSolve {
     pub relative_residual: f64,
 }
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct InnerReport {
-    pub columns: usize,
-    pub operator_applications: usize,
-    pub maximum_steps_used: usize,
-    pub worst_relative_residual: f64,
-}
-
 struct Column {
     beta: f64,
     basis: Vec<Vec<f64>>,
@@ -40,9 +32,10 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 
 /// Approximate solutions of `(pole_j E - F) v_j = b_j` for the `k` columns of
 /// `rhs` (column-major `[rows, k]`); `pole[j]` indexes the operator's poles.
+/// Also returns the number of single-column operator applications.
 pub(crate) fn shift_invert(
     op: &mut DomainOperator, rhs: &[f64], k: usize, pole: &[usize], settings: InnerSolve,
-) -> Result<(Vec<f64>, InnerReport), String> {
+) -> Result<(Vec<f64>, usize), String> {
     let rows = op.rows();
     if rhs.len() != rows * k || pole.len() != k || settings.maximum_steps == 0 {
         return Err("Invalid shift-invert right-hand sides".into());
@@ -67,7 +60,7 @@ pub(crate) fn shift_invert(
             }
         })
         .collect();
-    let mut report = InnerReport { columns: k, ..InnerReport::default() };
+    let mut applications = 0;
     for step in 0..settings.maximum_steps {
         let active: Vec<usize> = (0..k).filter(|&j| columns[j].active).collect();
         if active.is_empty() {
@@ -83,8 +76,7 @@ pub(crate) fn shift_invert(
         op.precondition(&block, count, &poles, &mut z)?;
         let mut w = vec![0.; rows * count];
         op.shifted(&z, count, &poles, &mut w)?;
-        report.operator_applications += count;
-        report.maximum_steps_used = step + 1;
+        applications += count;
         for (slot, &j) in active.iter().enumerate() {
             let column = &mut columns[j];
             let mut vector = w[slot * rows..(slot + 1) * rows].to_vec();
@@ -156,11 +148,9 @@ pub(crate) fn shift_invert(
                 *x += y[i] * v;
             }
         }
-        let relative = column.rotated[steps].abs() / column.beta.max(f64::MIN_POSITIVE);
-        report.worst_relative_residual = report.worst_relative_residual.max(relative);
     }
     if out.iter().any(|x| !x.is_finite()) {
         return Err("Nonfinite shift-invert direction".into());
     }
-    Ok((out, report))
+    Ok((out, applications))
 }

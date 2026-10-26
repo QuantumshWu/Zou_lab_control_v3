@@ -1,7 +1,6 @@
 //! Fixed-manifold full-density population engine and complete E/F kernels.
 //! No physical model is rebuilt; all coefficient entries and mode edges are
 //! copied once from the current prepared plan. No trajectory is retained.
-#![allow(dead_code)]
 mod lapack;
 pub use lapack::{Complex64, Lapack};
 use lapack::Complex64 as C;

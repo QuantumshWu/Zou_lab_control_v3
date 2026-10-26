@@ -66,7 +66,7 @@
 //! Richardson extrapolation; Fourier convergence is checked by repeating the
 //! evaluation with every neighbouring mode added.
 use super::*;
-use super::directions::{shift_invert, InnerReport, InnerSolve};
+use super::directions::{shift_invert, InnerSolve};
 use super::engine::{support_domain, RequestedGroup};
 use super::reduced::ReducedModel;
 use super::runtime_core::RuntimeCore;
@@ -485,8 +485,8 @@ fn solve_shifted(op: &mut DomainOperator, rhs: &[f64], settings: InnerSolve, res
     let mut applied = vec![0.; rows];
     let mut relative = 1.;
     for attempt in 0..=restarts {
-        let (dx, report): (Vec<f64>, InnerReport) = shift_invert(op, &residual, 1, &[0], settings)?;
-        *applications += report.operator_applications;
+        let (dx, used) = shift_invert(op, &residual, 1, &[0], settings)?;
+        *applications += used;
         for (a, b) in x.iter_mut().zip(dx) {
             *a += b;
         }

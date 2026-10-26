@@ -233,9 +233,9 @@ impl Chain {
             }
             let pole: Vec<usize> = sources.iter().map(|&(_, p)| p).collect();
             let clock = Instant::now();
-            let (directions, report) = shift_invert(&mut space.op, &rhs, sources.len(), &pole, inner)?;
+            let (directions, applications) = shift_invert(&mut space.op, &rhs, sources.len(), &pole, inner)?;
             self.directions_ms += clock.elapsed().as_secs_f64() * 1000.;
-            self.operator_applications += report.operator_applications;
+            self.operator_applications += applications;
             let before = space.columns();
             let kept = space.append(directions, sources.len())?;
             for (offset, &source) in kept.iter().enumerate() {
@@ -671,7 +671,7 @@ mod tests {
         // propagator[row + col*32]: rho0 = |0><0| is real coordinate 0.
         let mut exact = Vec::new();
         for &t in times {
-            let (propagator, _) = crate::dense_expm::exponential(&lapack, &generator, 32, t).unwrap();
+            let propagator = crate::dense_expm::exponential(&lapack, &generator, 32, t).unwrap();
             for i in 0..n {
                 exact.push(propagator[i * n + i]);
             }

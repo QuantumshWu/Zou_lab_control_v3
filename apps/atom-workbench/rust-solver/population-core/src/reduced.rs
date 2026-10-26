@@ -95,7 +95,7 @@ impl ReducedModel {
         if times.iter().enumerate().any(|(i, &t)| (t - step * i as f64).abs() > tolerance) {
             return Err("Output times must be uniformly spaced".into());
         }
-        let (propagator, _) = crate::dense_expm::exponential(lapack, &self.generator, m, step)?;
+        let propagator = crate::dense_expm::exponential(lapack, &self.generator, m, step)?;
         for i in 1..count {
             let (done, rest) = out.split_at_mut(i * m);
             lapack.gemm(false, false, m, 1, m, 1., &propagator, m, &done[(i - 1) * m..], m, 0., &mut rest[..m], m)?;
