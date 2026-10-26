@@ -471,9 +471,10 @@ function mixingOf(l:Laser):{ratio:number;tooClose:boolean}|undefined{
 }
 function refreshMixing(l:Laser):void{
   const m=mixingOf(l);
-  mixingReadout.text=!m?'—':Number.isFinite(m.ratio)?`${formatNumber(m.ratio*100,{digits:2})} %`:'∞';
+  mixingReadout.text=!m?'—':Number.isFinite(m.ratio)?populationValue(m.ratio):'∞';
   mixingReadout.root.title='这束光各跃迁 |Ω/2Δ| 的最大值；能级图的二阶光移模型要求它不超过 1%';
-  mixingWarning.hidden=!m?.tooClose;
+  // The warning concerns a displayed shift only: with the switch off the value is just a reading.
+  mixingWarning.hidden=!(l.regime==='far'&&m?.tooClose);
 }
 const referenceReadout=new FrequencyReadout('reference-frequency',readoutPrefs,{
   bases:()=>frequencyBaseTree({absolute:'光频',absoluteText:'绝对',lasers:scene.lasers,references:(scene.referenceFrequencies??[]).filter(other=>other.id!==selection.id)}),defaultBase:'absolute',changed:()=>{},
@@ -907,7 +908,7 @@ function refreshDirectionStates(a:Analysis):void{
 
 /** The level diagram's one-line definition of its labels (ui-design.md §1.5). */
 function levelsLegend(a:Analysis,laser:Laser|undefined):string{
-  const beam=(id:string)=>{const l=scene.lasers.find(l=>l.id===id);return !l?id:mixingOf(l)?.tooClose?`${l.name}（离共振太近）`:l.name;};
+  const beam=(id:string)=>{const l=scene.lasers.find(l=>l.id===id);return !l?id:l.regime==='far'&&mixingOf(l)?.tooClose?`${l.name}（离共振太近）`:l.name;};
   const background=[...(a.fieldMagnitudeG>0?['B']:[]),...(a.spectroscopy?.backgroundLaserIds??[]).map(beam)].join(' + ')||'无';
   if(a.spectroscopy?.status==='unresolved')return `标注：裸态能级，背景光移未确定；背景：${background}`;
   // Every card is how far its state lies above its anchor (levelReadoutMHz): + is higher.
