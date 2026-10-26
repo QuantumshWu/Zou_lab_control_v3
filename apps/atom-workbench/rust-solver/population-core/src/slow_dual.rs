@@ -1433,6 +1433,48 @@ pub struct SlowDual {
     pub(crate) diagnostics: SlowDualDiagnostics,
     /// Ground "energies" `eps_a` (rad/us) of the slot criterion.
     pub(crate) ground_energy: Vec<f64>,
+    /// `[(0, R)]` with `||R xhat|| = ||K V xhat||` for the couplings `K` into
+    /// the unrepresented slow charges (compressed to their range; empty when
+    /// there are none): the readout of the norm every estimate charges.
+    pub(crate) unrepresented_readout: Vec<(f64, Dense)>,
+}
+
+/// Rows `R` with `||R xhat|| = ||K V xhat||` for the stacked couplings `K`
+/// (`g^2 x dim` per unrepresented charge) and the `J_eff` eigenvectors `V`:
+/// `R = diag(sqrt(mu)) W^H` from the Gram matrix `(K V)^H K V = W diag(mu)
+/// W^H`, keeping the eigenvalues above 1e-24 of the largest (1e-12 in the
+/// norm), so the readout has at most `dim` rows.
+fn unrepresented_norm_readout(coupling: &BTreeMap<Charge, Dense>, vectors: &Dense, dim: usize, lap: &Lapack) -> Result<Vec<(f64, Dense)>, String> {
+    if coupling.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut gram = Dense::zeros(dim, dim);
+    for k in coupling.values() {
+        let kv = k.multiply(vectors, lap)?;
+        for j in 0..dim {
+            for i in 0..dim {
+                let mut sum = ZERO;
+                for r in 0..kv.rows {
+                    sum = cadd(sum, cmul(cconj(kv.at(r, i)), kv.at(r, j)));
+                }
+                gram.add_at(i, j, sum);
+            }
+        }
+    }
+    let (values, w) = lap.hermitian_eigen(&gram.data, dim)?;
+    let largest = values.iter().copied().fold(0_f64, f64::max);
+    if !(largest > 0.) {
+        return Ok(Vec::new());
+    }
+    let kept: Vec<usize> = (0..dim).filter(|&k| values[k] > 1e-24 * largest).collect();
+    let mut rows = Dense::zeros(kept.len(), dim);
+    for (row, &k) in kept.iter().enumerate() {
+        let scale = values[k].sqrt();
+        for j in 0..dim {
+            rows.set(row, j, cscale(cconj(w[k * dim + j]), scale));
+        }
+    }
+    Ok(vec![(0., rows)])
 }
 
 /// The slot criterion: some ground coherence at envelope frequency `nu` has
@@ -1764,6 +1806,7 @@ impl SlowDual {
             ));
         }
         let spectral_abscissa = eigenvalues.iter().map(|z| z.re).fold(f64::NEG_INFINITY, f64::max);
+        let unrepresented_readout = unrepresented_norm_readout(&unrepresented_coupling, &vectors, dim, &lap)?;
 
         // --- Population readout ---------------------------------------------
         let basis = &p.hilbert.basis_column_major; // B[i + a n]
@@ -1847,6 +1890,7 @@ impl SlowDual {
             elimination: Some(Elimination { blocks: Arc::clone(&blocks), sylvester: full_sylvester, cache: Default::default(), slow_cache: Default::default() }),
             diagnostics,
             ground_energy,
+            unrepresented_readout,
         })
     }
 
@@ -2299,6 +2343,16 @@ impl Series {
         }
     }
 
+    /// Single exponential slow source `v exp(mu t)` (merged per exponent).
+    pub(crate) fn add_slow_point(&mut self, mu: C, v: &[C]) {
+        add_point(&mut self.slow_points, mu, ONE, v);
+    }
+
+    /// Direct populations `p exp(mu t)` (merged per exponent).
+    pub(crate) fn add_direct_point(&mut self, mu: C, p: &[C]) {
+        add_point(&mut self.direct_points, mu, ONE, p);
+    }
+
     /// Direct populations `p e_t[first, second]`, split like `add_pair`: a
     /// slow halo mode has one such term per candidate column and resonant
     /// coherence, and the split ones merge into one exponential per column
@@ -2326,14 +2380,33 @@ impl SlowDual {
     /// (added to `homogeneous_out`) instead of evaluating them, so partial
     /// series can be summed and their common `exp(J t)` part read out once.
     pub(crate) fn evaluate_parts(&self, series: &Series, grid: &TimeGrid, homogeneous_out: Option<&mut Vec<C>>) -> Result<Vec<C>, String> {
+        self.evaluate_with(series, grid, &self.readout, true, homogeneous_out)
+    }
+
+    /// `evaluate_parts` through other readout groups of the slow state
+    /// (`rows x dim` each, at the slots' phases; `rows` columns per time in
+    /// the output), with or without the direct populations of the fast
+    /// responses (which only the population readout has).
+    pub(crate) fn evaluate_with(
+        &self,
+        series: &Series,
+        grid: &TimeGrid,
+        readout_groups: &[(f64, Dense)],
+        direct: bool,
+        homogeneous_out: Option<&mut Vec<C>>,
+    ) -> Result<Vec<C>, String> {
         let n = self.n;
+        let rows = readout_groups.first().map_or(n, |(_, r)| r.rows);
+        if direct && rows != n {
+            return Err("Direct populations need the population readout".into());
+        }
         let dim = self.dimension();
         let nt = grid.times.len();
         let t_max = grid.maximum;
         let alpha = &self.eigenvalues;
         let lap = &self.lapack;
         let m = series.beta.len();
-        let mut out = vec![ZERO; nt * n];
+        let mut out = vec![ZERO; nt * rows];
         let mut homogeneous = series.initial.clone().unwrap_or_else(|| vec![ZERO; dim]);
         // Amplitude-level terms v e_t[mu, alpha_k] at slow mode k.
         let mut near: Vec<(usize, C, C)> = Vec::new();
@@ -2351,7 +2424,7 @@ impl SlowDual {
             }
         };
         // 1. Slow families -> readout families (n x m per frequency).
-        let mut families: BTreeMap<i64, (f64, Dense)> = series.direct.clone();
+        let mut families: BTreeMap<i64, (f64, Dense)> = if direct { series.direct.clone() } else { BTreeMap::new() };
         for (f, v) in series.slow.values() {
             let mut c = Dense::zeros(dim, m);
             for j in 0..m {
@@ -2364,10 +2437,10 @@ impl SlowDual {
                     }
                 }
             }
-            for (omega, readout) in &self.readout {
+            for (omega, readout) in readout_groups {
                 let values = readout.multiply(&c, lap)?;
                 let key = frequency_key(f + omega);
-                let entry = families.entry(key).or_insert_with(|| (f + omega, Dense::zeros(n, m)));
+                let entry = families.entry(key).or_insert_with(|| (f + omega, Dense::zeros(rows, m)));
                 accumulate(&mut entry.1, &values);
             }
         }
@@ -2376,7 +2449,7 @@ impl SlowDual {
         if let Some(dressed) = &self.dressed {
             let n2 = n * n;
             let lambda: Vec<C> = (0..n2).map(|ik| cadd(dressed.left_values[ik / n], dressed.right_values[ik % n])).collect();
-            if let Some(h) = &series.dressed_direct {
+            if let Some(h) = series.dressed_direct.as_ref().filter(|_| direct) {
                 let mut w = dressed.readout.clone();
                 for (ik, &x) in h.iter().enumerate() {
                     for s in 0..w.rows {
@@ -2402,16 +2475,16 @@ impl SlowDual {
                         }
                     }
                 }
-                for (omega, readout) in &self.readout {
+                for (omega, readout) in readout_groups {
                     let values = readout.multiply(&c, lap)?;
                     let key = frequency_key(o + omega);
-                    let entry = naturals.entry(key).or_insert_with(|| (o + omega, Dense::zeros(n, n2)));
+                    let entry = naturals.entry(key).or_insert_with(|| (o + omega, Dense::zeros(rows, n2)));
                     accumulate(&mut entry.1, &values);
                 }
             }
             for (o, w) in naturals.values() {
                 let exponents: Vec<C> = lambda.iter().map(|l| cadd(*l, complex(0., *o))).collect();
-                add_natural(&mut out, n, w, &exponents, grid);
+                add_natural(&mut out, rows, w, &exponents, grid);
             }
         } else if series.dressed_direct.is_some() || !series.dressed_slow.is_empty() {
             return Err("Dressed sources without a dressed frame".into());
@@ -2425,20 +2498,20 @@ impl SlowDual {
                     c.set(k, 0, y);
                 }
             }
-            for (omega, readout) in &self.readout {
+            for (omega, readout) in readout_groups {
                 let values = readout.multiply(&c, lap)?;
-                add_natural(&mut out, n, &values, &[cadd(*mu, complex(0., *omega))], grid);
+                add_natural(&mut out, rows, &values, &[cadd(*mu, complex(0., *omega))], grid);
             }
         }
         // 4. Families: one product per block of times, phases by recurrence.
         if !families.is_empty() && m > 0 {
             let list: Vec<&(f64, Dense)> = families.values().collect();
             let count = list.len();
-            let mut stacked = Dense::zeros(n * count, m);
+            let mut stacked = Dense::zeros(rows * count, m);
             for (q, (_, f)) in list.iter().enumerate() {
                 for j in 0..m {
-                    for s in 0..n {
-                        stacked.set(q * n + s, j, f.at(s, j));
+                    for s in 0..rows {
+                        stacked.set(q * rows + s, j, f.at(s, j));
                     }
                 }
             }
@@ -2457,9 +2530,9 @@ impl SlowDual {
                     for i in 0..width {
                         let t = grid.times[start + i];
                         let phase = if *f == 0. { ONE } else { cexp(complex(0., f * t)) };
-                        let row = &mut out[(start + i) * n..(start + i + 1) * n];
-                        for s in 0..n {
-                            row[s] = cadd(row[s], cmul(phase, values.at(q * n + s, i)));
+                        let row = &mut out[(start + i) * rows..(start + i + 1) * rows];
+                        for s in 0..rows {
+                            row[s] = cadd(row[s], cmul(phase, values.at(q * rows + s, i)));
                         }
                     }
                 }
@@ -2493,12 +2566,12 @@ impl SlowDual {
                     close.push(k);
                 }
             }
-            for (omega, readout) in &self.readout {
+            for (omega, readout) in readout_groups {
                 let shift = complex(0., *omega);
                 let p = readout.multiply(&via_pair, lap)?;
                 pair_terms.push((p.data, cadd(*mu1, shift), cadd(*mu2, shift)));
                 let values = readout.multiply(&point, lap)?;
-                add_natural(&mut out, n, &values, &[cadd(*mu2, shift)], grid);
+                add_natural(&mut out, rows, &values, &[cadd(*mu2, shift)], grid);
             }
             if !close.is_empty() {
                 let a = amplitudes.get_or_insert_with(|| Dense::zeros(dim, nt));
@@ -2519,12 +2592,12 @@ impl SlowDual {
             }
         }
         if let Some(a) = &amplitudes {
-            for (omega, readout) in &self.readout {
+            for (omega, readout) in readout_groups {
                 let values = readout.multiply(a, lap)?;
                 for (it, &t) in grid.times.iter().enumerate() {
                     let phase = if *omega == 0. { ONE } else { cexp(complex(0., omega * t)) };
-                    for s in 0..n {
-                        out[it * n + s] = cadd(out[it * n + s], cmul(phase, values.at(s, it)));
+                    for s in 0..rows {
+                        out[it * rows + s] = cadd(out[it * rows + s], cmul(phase, values.at(s, it)));
                     }
                 }
             }
@@ -2532,8 +2605,8 @@ impl SlowDual {
         for (p, x, y) in &pair_terms {
             for (it, &t) in grid.times.iter().enumerate() {
                 let value = exp_divided_2(*x, *y, t);
-                for s in 0..n {
-                    out[it * n + s] = cadd(out[it * n + s], cmul(p[s], value));
+                for s in 0..rows {
+                    out[it * rows + s] = cadd(out[it * rows + s], cmul(p[s], value));
                 }
             }
         }
@@ -2543,13 +2616,14 @@ impl SlowDual {
                 *t = cadd(*t, *h);
             }
         } else {
-            self.add_homogeneous(&mut out, &homogeneous, grid);
+            self.add_homogeneous(&mut out, &homogeneous, grid, readout_groups);
         }
         // 8. Direct near-resonant populations.
-        for (mu, p) in series.direct_points.values() {
+        let (direct_points, direct_near) = if direct { (&series.direct_points, &series.direct_near[..]) } else { (&BTreeMap::new(), &[][..]) };
+        for (mu, p) in direct_points.values() {
             add_natural(&mut out, n, &Dense { rows: n, cols: 1, data: p.clone() }, &[*mu], grid);
         }
-        for (p, x, y) in &series.direct_near {
+        for (p, x, y) in direct_near {
             for (it, &t) in grid.times.iter().enumerate() {
                 let value = exp_divided_2(*x, *y, t);
                 for s in 0..n {
@@ -2566,19 +2640,19 @@ impl SlowDual {
 
 impl SlowDual {
     /// `out[t, s] += sum_groups exp(i omega t) (R V diag(h) exp(alpha t))_s`.
-    pub(crate) fn add_homogeneous(&self, out: &mut [C], homogeneous: &[C], grid: &TimeGrid) {
-        let n = self.n;
+    pub(crate) fn add_homogeneous(&self, out: &mut [C], homogeneous: &[C], grid: &TimeGrid, readout_groups: &[(f64, Dense)]) {
         let alpha = &self.eigenvalues;
-        for (omega, readout) in &self.readout {
+        for (omega, readout) in readout_groups {
+            let rows = readout.rows;
             let mut w = readout.clone();
             for (k, &h) in homogeneous.iter().enumerate() {
-                for s in 0..n {
+                for s in 0..rows {
                     let value = cmul(w.at(s, k), h);
                     w.set(s, k, value);
                 }
             }
             let exponents: Vec<C> = alpha.iter().map(|a| cadd(*a, complex(0., *omega))).collect();
-            add_natural(out, n, &w, &exponents, grid);
+            add_natural(out, rows, &w, &exponents, grid);
         }
     }
 }
@@ -2670,6 +2744,31 @@ mod tests {
     }
     fn dense_apply(op: &Dense, v: &[C]) -> Vec<C> {
         (0..op.rows).map(|i| (0..op.cols).fold(ZERO, |s, j| cadd(s, cmul(op.at(i, j), v[j])))).collect()
+    }
+
+    #[test]
+    fn slow_dual_unrepresented_readout_reads_the_coupling_norm() {
+        // ||R xhat|| = ||K V xhat|| for couplings into two charges whose
+        // stacked rows outnumber the slow dimension.
+        let lap = lap();
+        let dim = 5;
+        let mut coupling = BTreeMap::new();
+        coupling.insert(vec![1], random_dense(4, dim, 21));
+        coupling.insert(vec![2], random_dense(4, dim, 22));
+        let vectors = random_dense(dim, dim, 23);
+        let readout = unrepresented_norm_readout(&coupling, &vectors, dim, &lap).unwrap();
+        let rows = &readout[0].1;
+        assert!(rows.rows <= dim);
+        for seed in [24, 25] {
+            let x = random_dense(dim, 1, seed);
+            let mut expected = 0_f64;
+            for k in coupling.values() {
+                expected += k.multiply(&vectors, &lap).unwrap().multiply(&x, &lap).unwrap().frobenius().powi(2);
+            }
+            let actual = rows.multiply(&x, &lap).unwrap().frobenius();
+            assert!((actual - expected.sqrt()).abs() < 1e-10 * expected.sqrt(), "{actual} vs {}", expected.sqrt());
+        }
+        assert!(unrepresented_norm_readout(&BTreeMap::new(), &vectors, dim, &lap).unwrap().is_empty());
     }
 
     #[test]
@@ -3201,6 +3300,7 @@ mod tests {
                 preparation_ms: 0.,
             },
             ground_energy: vec![],
+            unrepresented_readout: vec![],
         };
         // Families with beta = {0, -0.1}: resonant with alpha[0] (secular
         // growth), separated, a fast-phase family, a clustered and a separable
