@@ -306,6 +306,52 @@ impl Dense {
     pub fn is_finite(&self) -> bool { self.data.iter().all(|z| z.re.is_finite() && z.im.is_finite()) }
 }
 
+/// `[X_1 | X_2 | ...]`: square column-major blocks side by side are just their
+/// concatenated storage.
+fn side_by_side(xs: &[&Dense], n: usize) -> Dense {
+    let mut out = Dense::zeros(n, n * xs.len());
+    for (j, x) in xs.iter().enumerate() {
+        out.data[j * n * n..(j + 1) * n * n].copy_from_slice(&x.data);
+    }
+    out
+}
+
+/// `[X_1; X_2; ...]` from side-by-side blocks (element `(j n + a, b)`).
+fn stacked(side: &Dense, n: usize, m: usize) -> Dense {
+    let mut out = Dense::zeros(n * m, n);
+    for j in 0..m {
+        for b in 0..n {
+            for a in 0..n {
+                out.data[j * n + a + b * n * m] = side.data[j * n * n + a + b * n];
+            }
+        }
+    }
+    out
+}
+
+/// Block `j` of a stacked `[Y_1; Y_2; ...]`.
+fn stacked_block(stack: &Dense, n: usize, m: usize, j: usize) -> Dense {
+    let mut out = Dense::zeros(n, n);
+    for b in 0..n {
+        for a in 0..n {
+            out.data[a + b * n] = stack.data[j * n + a + b * n * m];
+        }
+    }
+    out
+}
+
+/// `L X_j R` for every block with two products instead of `2 m`.
+pub(crate) fn sandwich_all(left: &Dense, right: &Dense, xs: &[&Dense], lap: &Lapack) -> Result<Vec<Dense>, String> {
+    let n = left.rows;
+    let m = xs.len();
+    if m == 0 {
+        return Ok(Vec::new());
+    }
+    let product = left.multiply(&side_by_side(xs, n), lap)?;
+    let result = stacked(&product, n, m).multiply(right, lap)?;
+    Ok((0..m).map(|j| stacked_block(&result, n, m, j)).collect())
+}
+
 /// LU factorization of a square complex matrix with an inexpensive
 /// reciprocal-condition diagnostic (1-norm of A times 1-norm of A^{-1}
 /// estimated on a few probe vectors).
@@ -509,6 +555,44 @@ impl FrameLiouvillian {
     pub fn zero_charge(&self) -> Charge { vec![0; self.axes] }
 
     pub fn term(&self, charge: &[i32]) -> Option<&ChargeTerm> { self.terms.iter().find(|t| t.charge == charge) }
+
+    /// Complete `L_p X_j` for many blocks: the left products `H X_j` share one
+    /// product with the side-by-side blocks, the right products `X_j H` one
+    /// with the stacked blocks.
+    pub fn apply_all(&self, term: &ChargeTerm, xs: &[&Dense], lap: &Lapack) -> Result<Vec<Dense>, String> {
+        let n = self.n;
+        let m = xs.len();
+        let mut out: Vec<Dense> = (0..m).map(|_| Dense::zeros(n, n)).collect();
+        if m == 0 {
+            return Ok(out);
+        }
+        let side = side_by_side(xs, n);
+        let stack = stacked(&side, n, m);
+        let both = |a: &Dense, f: &dyn Fn(C, C) -> C, out: &mut Vec<Dense>| -> Result<(), String> {
+            let left = a.multiply(&side, lap)?;
+            let right = stack.multiply(a, lap)?;
+            for (j, o) in out.iter_mut().enumerate() {
+                for b in 0..n {
+                    for r in 0..n {
+                        let l = left.data[j * n * n + r + b * n];
+                        let q = right.data[j * n + r + b * n * m];
+                        o.data[r + b * n] = cadd(o.data[r + b * n], f(l, q));
+                    }
+                }
+            }
+            Ok(())
+        };
+        if let Some(h) = &term.hamiltonian {
+            both(h, &|l, r| minus_i(csub(l, r)), &mut out)?;
+        }
+        if let Some(gm) = &term.gamma {
+            both(gm, &|l, r| cscale(cadd(l, r), -0.5), &mut out)?;
+        }
+        for (x, o) in xs.iter().zip(out.iter_mut()) {
+            self.add_recycling(term, x, o);
+        }
+        Ok(out)
+    }
 
     /// Complete `L_p X` for one charge term.
     pub fn apply(&self, term: &ChargeTerm, x: &Dense, lap: &Lapack) -> Result<Dense, String> {
@@ -1963,6 +2047,38 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn slow_dual_batched_products_match_single_ones() {
+        let owner = super::super::tests::fixture();
+        let dual = SlowDual::prepare(&owner, SlowDualOptions::default()).unwrap();
+        let (n, lap) = (dual.n, &dual.lapack);
+        let blocks: Vec<Dense> = (0..3)
+            .map(|j| {
+                let mut x = Dense::zeros(n, n);
+                for k in 0..n * n {
+                    x.data[k] = complex(((k * 7 + j * 3) % 11) as f64 - 5., ((k * 5 + j) % 7) as f64 - 3.);
+                }
+                x
+            })
+            .collect();
+        let refs: Vec<&Dense> = blocks.iter().collect();
+        for term in &dual.frame.terms {
+            let batched = dual.frame.apply_all(term, &refs, lap).unwrap();
+            for (x, y) in blocks.iter().zip(&batched) {
+                let single = dual.frame.apply(term, x, lap).unwrap();
+                let difference = single.data.iter().zip(&y.data).map(|(a, b)| cabs(csub(*a, *b))).fold(0_f64, f64::max);
+                assert!(difference < 1e-12 * single.frobenius().max(1.), "apply_all mismatch {difference:e}");
+            }
+        }
+        let dressed = dual.dressed.as_ref().expect("fixture has a dressed frame");
+        let batched = sandwich_all(&dressed.left_inverse, &dressed.right, &refs, lap).unwrap();
+        for (x, y) in blocks.iter().zip(&batched) {
+            let single = dressed.to_eigen(x, lap).unwrap();
+            let difference = single.data.iter().zip(&y.data).map(|(a, b)| cabs(csub(*a, *b))).fold(0_f64, f64::max);
+            assert!(difference < 1e-12 * single.frobenius().max(1.), "sandwich_all mismatch {difference:e}");
+        }
     }
 
     #[test]

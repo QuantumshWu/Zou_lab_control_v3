@@ -62,7 +62,7 @@
 //! the domain-selection indicator.
 use super::*;
 use super::real_fourier::RealFourierMap;
-use super::slow_dual::{cabs, cadd, cdiv, cexp, cmul, complex, cscale, csub, exp_divided_2, recycle_ground, Dense, LuFactor, ModalSources, SlowDual, NEGLIGIBLE_EXPONENT, ZERO};
+use super::slow_dual::{cabs, cadd, cdiv, cexp, cmul, complex, cscale, csub, exp_divided_2, recycle_ground, sandwich_all, Dense, LuFactor, ModalSources, SlowDual, NEGLIGIBLE_EXPONENT, ZERO};
 
 /// A requested signed population sum (for example one F manifold).
 #[derive(Clone, Debug)]
@@ -374,13 +374,18 @@ impl SlowDual {
         let nt = times.len();
         let t_max = times.iter().copied().fold(0_f64, f64::max);
         // Source columns in dressed eigen-coordinates (index i*n+k).
+        let blocks: Vec<Dense> = (0..m)
+            .map(|j| {
+                let mut x = Dense::zeros(n, n);
+                for entry in 0..n2 {
+                    x.set(entry / n, entry % n, coefficients.at(entry, j));
+                }
+                x
+            })
+            .collect();
+        let refs: Vec<&Dense> = blocks.iter().collect();
         let mut source = Dense::zeros(n2, m);
-        for j in 0..m {
-            let mut x = Dense::zeros(n, n);
-            for entry in 0..n2 {
-                x.set(entry / n, entry % n, coefficients.at(entry, j));
-            }
-            let xh = dressed.to_eigen(&x, lap)?;
+        for (j, xh) in sandwich_all(&dressed.left_inverse, &dressed.right, &refs, lap)?.iter().enumerate() {
             for i in 0..n {
                 for k in 0..n {
                     source.set(i * n + k, j, xh.at(i, k));
@@ -852,20 +857,19 @@ impl SlowDual {
                     }
                     let (slot, shift) = self.target(&k, &frequency)?;
                     let mut field = Dense::zeros(d, m);
-                    for (j, x) in particular.iter().enumerate() {
-                        if x.frobenius() == 0. {
-                            continue;
-                        }
-                        if same_charge {
+                    if same_charge {
+                        for (j, x) in particular.iter().enumerate() {
                             for (row, v) in self.same_charge_ground_return(x).iter().enumerate() {
                                 field.set((row / g) * n + row % g, j, *v);
                             }
-                            continue;
                         }
-                        let image = self.frame.apply(term, x, lap)?;
-                        for a in 0..n {
-                            for b in 0..n {
-                                field.set(a * n + b, j, image.at(a, b));
+                    } else {
+                        let refs: Vec<&Dense> = particular.iter().collect();
+                        for (j, image) in self.frame.apply_all(term, &refs, lap)?.iter().enumerate() {
+                            for a in 0..n {
+                                for b in 0..n {
+                                    field.set(a * n + b, j, image.at(a, b));
+                                }
                             }
                         }
                     }
@@ -1052,66 +1056,67 @@ impl SlowDual {
         let n = self.n;
         let m = coefficients.cols;
         let lap = &self.lapack;
-        let mut particular = Vec::with_capacity(m);
         let mut resonant = Vec::new();
-        for j in 0..m {
+        let blocks: Vec<Dense> = (0..m)
+            .map(|j| {
+                let mut x = Dense::zeros(n, n);
+                for entry in 0..n * n {
+                    x.set(entry / n, entry % n, coefficients.at(entry, j));
+                }
+                x
+            })
+            .collect();
+        // Componentwise particular response against the reference eigenvalue
+        // `lambda` (dressed: a_i + b_k; fallback: the diagonal d_ab); near
+        // resonant components are split off as zero-initial terms whose frame
+        // matrix `unit` is produced by `to_frame`.
+        let mut solve = |j: usize, x: &mut Dense, lambda: &dyn Fn(usize, usize) -> C, to_frame: &dyn Fn(Dense) -> Result<Dense, String>| -> Result<(), String> {
             let shift = cadd(exponents[j], complex(0., nu_q));
-            let mut x = Dense::zeros(n, n);
-            for entry in 0..n * n {
-                x.set(entry / n, entry % n, coefficients.at(entry, j));
-            }
-            if x.frobenius() == 0. {
-                particular.push(x);
-                continue;
-            }
-            match &self.dressed {
-                Some(dressed) => {
-                    let mut xh = dressed.to_eigen(&x, lap)?;
-                    for i in 0..n {
-                        for k in 0..n {
-                            let c = xh.at(i, k);
-                            if c.re == 0. && c.im == 0. {
-                                continue;
-                            }
-                            let lambda = cadd(dressed.left_values[i], dressed.right_values[k]);
-                            let denominator = csub(shift, lambda);
-                            if cabs(denominator) >= floor {
-                                xh.set(i, k, cdiv(c, denominator));
-                            } else {
-                                let mut unit = Dense::zeros(n, n);
-                                unit.set(i, k, c);
-                                let unit = dressed.from_eigen(&unit, lap)?;
-                                resonant.push(ResonantTerm { column: j, unit, second: csub(lambda, complex(0., nu_q)) });
-                                xh.set(i, k, ZERO);
-                            }
-                        }
+            for b in 0..n {
+                for a in 0..n {
+                    let c = x.at(a, b);
+                    if c.re == 0. && c.im == 0. {
+                        continue;
                     }
-                    particular.push(dressed.from_eigen(&xh, lap)?);
-                }
-                None => {
-                    for a in 0..n {
-                        for b in 0..n {
-                            let c = x.at(a, b);
-                            if c.re == 0. && c.im == 0. {
-                                continue;
-                            }
-                            let lambda = self.diagonal_reference[a * n + b];
-                            let denominator = csub(shift, lambda);
-                            if cabs(denominator) >= floor {
-                                x.set(a, b, cdiv(c, denominator));
-                            } else {
-                                let mut unit = Dense::zeros(n, n);
-                                unit.set(a, b, c);
-                                resonant.push(ResonantTerm { column: j, unit, second: csub(lambda, complex(0., nu_q)) });
-                                x.set(a, b, ZERO);
-                            }
-                        }
+                    let l = lambda(a, b);
+                    let denominator = csub(shift, l);
+                    if cabs(denominator) >= floor {
+                        x.set(a, b, cdiv(c, denominator));
+                    } else {
+                        let mut unit = Dense::zeros(n, n);
+                        unit.set(a, b, c);
+                        resonant.push(ResonantTerm { column: j, unit: to_frame(unit)?, second: csub(l, complex(0., nu_q)) });
+                        x.set(a, b, ZERO);
                     }
-                    particular.push(x);
                 }
+            }
+            Ok(())
+        };
+        match &self.dressed {
+            Some(dressed) => {
+                // Every column moves to the dressed eigen-coordinates and back
+                // with two products each way.
+                let refs: Vec<&Dense> = blocks.iter().collect();
+                let mut eigen = sandwich_all(&dressed.left_inverse, &dressed.right, &refs, lap)?;
+                let lambda = |i: usize, k: usize| cadd(dressed.left_values[i], dressed.right_values[k]);
+                let to_frame = |unit: Dense| dressed.from_eigen(&unit, lap);
+                for (j, xh) in eigen.iter_mut().enumerate() {
+                    solve(j, xh, &lambda, &to_frame)?;
+                }
+                let refs: Vec<&Dense> = eigen.iter().collect();
+                let particular = sandwich_all(&dressed.left, &dressed.right_inverse, &refs, lap)?;
+                Ok((particular, resonant))
+            }
+            None => {
+                let lambda = |a: usize, b: usize| self.diagonal_reference[a * n + b];
+                let to_frame = |unit: Dense| Ok(unit);
+                let mut particular = blocks;
+                for (j, x) in particular.iter_mut().enumerate() {
+                    solve(j, x, &lambda, &to_frame)?;
+                }
+                Ok((particular, resonant))
             }
         }
-        Ok((particular, resonant))
     }
 
     /// Ground block (row-major g x g) of what the halo reference left out at
