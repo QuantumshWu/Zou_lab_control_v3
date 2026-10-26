@@ -9,6 +9,9 @@ use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
 mod harmonics;
+// Shared with population-core, which uses the eigen and Sylvester kernels
+// this worker no longer needs.
+#[allow(dead_code)]
 mod lapack;
 #[cfg(feature="population-core")]
 mod population_core_adapter;

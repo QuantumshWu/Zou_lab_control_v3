@@ -11,10 +11,6 @@ pub struct FrequencyBasis {
     pub frequencies: Vec<f64>,
     /// Original input order; omega_j ~= sum_k index[j][k] * frequencies[k].
     pub drive_indices: Vec<Vec<i32>>,
-    pub reconstructed_frequencies: Vec<f64>,
-    /// Compensated reconstructed frequency minus redundant/input omega,
-    /// including sub-ULP terms and declared-unit conversion roundoff.
-    pub reconstruction_errors: Vec<f64>,
     pub exact_relations: usize,
     pub rounded_relations: usize,
     /// For inferred numeric input: every compensated frequency residual is
@@ -26,9 +22,6 @@ pub struct FrequencyBasis {
     /// source_to_basis[source carrier axis][final Fourier basis axis]. Only
     /// exact integer source-frequency reductions may change this mapping.
     pub source_to_basis:Option<Vec<Vec<i32>>>,
-}
-impl FrequencyBasis{
-    pub fn source(&self)->&'static str{if self.source_to_basis.is_some(){"declared-carrier-coordinates"}else{"inferred-numeric"}}
 }
 
 fn half_ulp_up(x: f64) -> f64 {
@@ -321,11 +314,7 @@ pub fn frequency_basis(input: &[f64], max_integer: i32) -> Result<FrequencyBasis
         }
         processed.push(current);
     }
-    let reconstructed: Vec<_> = mapping
-        .iter()
-        .map(|index| reconstruction(index, &basis))
-        .collect();
-    if reconstructed.iter().any(|x| !x.is_finite()) {
+    if mapping.iter().any(|index| !reconstruction(index, &basis).is_finite()) {
         return Err("Frequency reconstruction overflowed".into());
     }
     let errors: Vec<_> = mapping
@@ -343,8 +332,6 @@ pub fn frequency_basis(input: &[f64], max_integer: i32) -> Result<FrequencyBasis
     Ok(FrequencyBasis {
         frequencies: basis,
         drive_indices: mapping,
-        reconstructed_frequencies: reconstructed,
-        reconstruction_errors: errors,
         exact_relations,
         rounded_relations,
         exact,
@@ -423,11 +410,7 @@ pub fn model_frequency_basis(model:&crate::Model,max_integer:i32)->Result<Freque
     let drive_indices=compose_indices(&declared.drive_indices,&mapping,frequencies.len())?;
     // Validate frame composition too, including static/no-drive models.
     compose_indices(&declared.frame_indices,&mapping,frequencies.len())?;
-    let reconstructed_frequencies:Vec<_>=drive_indices.iter().map(|row|{let(hi,lo)=scaled_parts(dot_parts(row,&source_basis),unit);hi+lo}).collect();
-    let reconstruction_errors=drive_indices.iter().zip(&model.drives).map(|(row,drive)|{
-        let(hi,lo)=scaled_parts(dot_parts(row,&source_basis),unit);(hi-drive.omega)+lo
-    }).collect();
-    Ok(FrequencyBasis{frequencies,drive_indices,reconstructed_frequencies,reconstruction_errors,
+    Ok(FrequencyBasis{frequencies,drive_indices,
         exact_relations,rounded_relations:0,exact:true,search_exhausted:reduction.search_exhausted,source_to_basis:Some(mapping)})
 }
 /// Phase axes of a declared-coordinate Model for Fourier work. Without an
@@ -504,11 +487,11 @@ mod declared_coordinate_tests{
         let basis=model_frequency_basis(&model,16).unwrap();
         assert_eq!(basis.frequencies.len(),2);assert_eq!(basis.drive_indices,[vec![0,1],vec![1,1],vec![1,0]]);
         assert_eq!(basis.source_to_basis,Some(vec![vec![1,0],vec![0,1]]));
-        assert_eq!(basis.source(),"declared-carrier-coordinates");assert!(basis.exact);assert_eq!(basis.rounded_relations,0);
-        assert_ne!(basis.reconstruction_errors[1],0.); // declared phase identity, not a zero literal residual
+        assert!(basis.exact);assert_eq!(basis.rounded_relations,0);
+        // Declared phase identity, not a zero literal residual.
         let rows=model.frequency_coordinates.as_ref().unwrap().drive_indices.clone();let parts=model_phase_frequency_parts(&model,&rows).unwrap();assert_ne!(parts[1].1,0.);
         let mut legacy=model;legacy.frequency_coordinates=None;
-        let old=model_frequency_basis(&legacy,16).unwrap();assert!(old.source_to_basis.is_none());assert_eq!(old.source(),"inferred-numeric");
+        let old=model_frequency_basis(&legacy,16).unwrap();assert!(old.source_to_basis.is_none());
         assert!(!old.exact||old.frequencies.len()==3);
     }
     #[test]
@@ -578,7 +561,8 @@ mod tests {
         let a = frequency_basis(&[4.6, 2.3, 6.9], 16).unwrap();
         assert_eq!(a.frequencies.len(), 1);
         assert!(a.exact || a.rounded_relations > 0);
-        for (actual, expected) in a.reconstructed_frequencies.iter().zip([4.6, 2.3, 6.9]) {
+        for (index, expected) in a.drive_indices.iter().zip([4.6, 2.3, 6.9]) {
+            let actual = reconstruction(index, &a.frequencies);
             assert!((actual - expected).abs() <= 2. * half_ulp(expected));
         }
         let rational = frequency_basis(&[6., 10., 15.], 16).unwrap();
@@ -605,7 +589,10 @@ mod tests {
         let basis = frequency_basis(&[0.1, original], 16).unwrap();
         assert!(!basis.exact);
         assert!(basis.rounded_relations > 0);
-        assert!(basis.reconstruction_errors.iter().any(|&value| value != 0.));
+        assert!(basis.drive_indices.iter().zip([0.1, original]).any(|(index, input)| {
+            let (hi, lo) = dot_parts(index, &basis.frequencies);
+            (hi - input) + lo != 0.
+        }));
         let sum = frequency_basis(&[1., 2_f64.sqrt(), 1. + 2_f64.sqrt()], 16).unwrap();
         assert!(!sum.exact);
         assert!(sum.rounded_relations > 0);
