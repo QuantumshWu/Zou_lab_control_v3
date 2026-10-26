@@ -606,7 +606,7 @@ function showSolverDetails():void{
 
 // The levels page's population row: what the cards are coloured by, the scale, the F totals and 计算.
 const populationMode$=element('select');populationMode$.id='population-mode';populationMode$.setAttribute('aria-label','能级布居着色');
-populationMode$.append(comboFace(),new Option('稳态布居','steady'),new Option('指定时刻 p(t)','time'));
+const populationModeFace=comboFace();populationMode$.append(populationModeFace,new Option('稳态布居','steady'),new Option('指定时刻 p(t)','time'));
 populationMode$.onchange=()=>{populationMode=populationMode$.value as 'steady'|'time';update();};
 const populationTime=element('input');populationTime.type='range';populationTime.id='population-time';populationTime.setAttribute('aria-label','布居时间');
 populationTime.oninput=()=>{populationTimeIndex=Number(populationTime.value);update();};
@@ -618,8 +618,10 @@ const runLevels=command('计算',()=>requestSolve(true));runLevels.root.dataset.
 $('population-toolbar').append(populationMode$,populationTime,populationTimeValue,populationLegend,populationTotals,runLevels.root);
 function populationToolbar():void{
   const snap=populationSnapshot(),result=currentResult(),p=snap.populations;
-  const steadyWords=isDisplayedMean(result)?'长期平均布居':'稳态布居';if(populationMode$.options[0]!.text!==steadyWords)populationMode$.options[0]!.text=steadyWords;
-  if(populationMode$.value!==populationMode)populationMode$.value=populationMode;
+  // A base-select shows the picked option as it was picked: a renamed choice is a new option.
+  const steadyWords=isDisplayedMean(result)?'长期平均布居':'稳态布居';
+  if(populationMode$.options[0]!.text!==steadyWords){populationMode$.replaceChildren(populationModeFace,new Option(steadyWords,'steady'),new Option('指定时刻 p(t)','time'));populationMode$.value=populationMode;}
+  else if(populationMode$.value!==populationMode)populationMode$.value=populationMode;
   const timed=populationMode==='time'&&!!result;populationTime.hidden=!timed;populationTimeValue.hidden=!timed;
   if(timed){const max=String(result.timesUs.length-1),value=String(populationTimeIndex<0?result.timesUs.length-1:Math.min(populationTimeIndex,result.timesUs.length-1));if(populationTime.max!==max)populationTime.max=max;if(populationTime.value!==value)populationTime.value=value;populationTimeValue.textContent=durationText(snap.timeUs??0,durationUnit(dynamics()));}
   const sum=(filter:(id:string)=>boolean)=>p?Object.entries(p).reduce((total,[id,value])=>total+(filter(id)?value:0),0):undefined;
