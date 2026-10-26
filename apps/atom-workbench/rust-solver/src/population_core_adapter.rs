@@ -6,6 +6,25 @@
 //! computed FIRST (and published as `asymptotic` progress), then the core is
 //! handed to the finite-time engine. A steadyOnly request runs only the mean,
 //! through the same function, so inline and steadyOnly means are identical.
+//!
+//! # Result contract
+//! The one result shape, read by `normalizeDynamicsResult` in
+//! src/solver-client.ts; main.rs adds `protocol` and `modelSchema`.
+//! - `states` (32 ids), `timesUs`, `populations` (one row per time). A mean
+//!   result has the single t = 0 row, the initial populations; a finite result
+//!   has >= 2 rows and `populationAccuracy`, their estimated error.
+//! - `asymptoticStatus`. A converged mean (`stationary`, `population-stationary`,
+//!   `initial-dependent-mean`, `nonunique-initial-dependent`) comes with
+//!   `asymptoticReason`, `asymptoticPopulations` and `asymptoticDensityReal/Imag`;
+//!   otherwise the status is `not-converged` (with its `asymptoticReason`) or
+//!   `not-requested`.
+//! - `diagnostics`. The reader gates the rows' `traceError` and
+//!   `initialStateError`, `elapsedMs`, a finite result's `method`, and a mean's
+//!   `asymptoticMethod`, `asymptoticTraceError`, `asymptoticPositivityError` and
+//!   `residual` (null when the mean needed no residual-measured solve); every
+//!   other key is profiling. A finite result carries the mean's diagnostics
+//!   under the same names; keys both report (engine, row gates, timings,
+//!   operator counts) keep the finite value.
 use crate::{Model,Options,harmonics};
 use serde_json::{json,Value};
 use std::collections::BTreeMap;
@@ -17,6 +36,8 @@ use atom_population_core::owned_prepared::runtime_core::RuntimeCore;
 use atom_population_core::owned_prepared::engine::{self,FiniteOptions,RequestedGroup};
 use atom_population_core::owned_prepared::asymptotic::{self,LabFrame,MeanKind,MeanOptions,MeanSolution};
 
+const ENGINE:&str="rust-population-core";
+const FINITE_METHOD:&str="Full32 density-matrix Lindblad evolution with adaptive population refinement";
 const MEAN_METHOD:&str="Full32 Cesàro mean of the gauge pencil: defect-corrected null vector with a near-zero pole, halo-condensed Fourier truncation";
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
 
@@ -82,8 +103,17 @@ fn prepare(model:&Model)->Result<Request,String>{
     Ok(Request{core,groups,axes,initial_populations,preparation_ms:started.elapsed().as_secs_f64()*1000.})
 }
 
-/// The long-time mean in the steadyOnly result shape. Inline (combined) and
-/// steadyOnly requests both call exactly this function.
+/// The row gates every result reports: the largest |row sum - 1| and the
+/// first row's largest deviation from the prepared initial populations.
+fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
+    let trace=rows.iter().map(|p|(p.iter().sum::<f64>()-1.).abs()).fold(0_f64,f64::max);
+    let initial_error=rows[0].iter().zip(initial).map(|(a,b)|(a-b).abs()).fold(0_f64,f64::max);
+    if trace>1e-7||initial_error>1e-10{return Err("Returned population probabilities failed fixed trace/initial checks".into());}
+    Ok((trace,initial_error))
+}
+
+/// The long-time mean result. Inline (combined) and steadyOnly requests both
+/// call exactly this function.
 fn mean_result(model:&Model,options:&Options,request:&mut Request,started:Instant)->Result<Value,String>{
     let lab=LabFrame{frame_indices:request.axes.frame_indices.clone(),
         sectors:request.axes.frame_sectors.iter().map(|&s|if s==0{0}else{1}).collect()};
@@ -91,36 +121,47 @@ fn mean_result(model:&Model,options:&Options,request:&mut Request,started:Instan
     let positivity=positivity(&request.core,&mean.density)?;
     let trace_error=(mean.populations.iter().sum::<f64>()-1.).abs();
     let(status,reason)=classify(model,&mean);
+    let rows=vec![request.initial_populations.clone()];
+    let(row_trace,initial_error)=row_errors(&rows,&request.initial_populations)?;
     let d=&mean.diagnostics;
     let checkpoints:Vec<_>=d.checkpoints.iter().map(|c|json!({"basis":c.columns,"modes":c.modes,"pole":c.pole,
         "basisEstimate":c.basis_estimate,"haloEstimate":c.halo_estimate,"haloModes":c.halo_modes.0,"transportHaloModes":c.halo_modes.1,
         "innerResidual":c.inner_residual,"action":c.action})).collect();
-    Ok(json!({"timesUs":[0.],"states":model.states,"populations":[request.initial_populations],
-        "asymptoticPopulations":mean.populations,
+    Ok(json!({"timesUs":[0.],"states":model.states,"populations":rows,
+        "asymptoticStatus":status,"asymptoticReason":reason,"asymptoticPopulations":mean.populations,
         "asymptoticDensityReal":mean.density.iter().map(|z|z.re).collect::<Vec<_>>(),
         "asymptoticDensityImag":mean.density.iter().map(|z|z.im).collect::<Vec<_>>(),
-        "asymptoticStatus":status,"asymptoticReason":reason,
-        "diagnostics":{"engine":"rust-population-core","method":MEAN_METHOD,"steadyMethod":MEAN_METHOD,
-            "asymptoticStatus":status,"asymptoticReason":reason,"meanDensityFrame":MEAN_FRAME,
-            "densityLimitExists":model.drives.is_empty()&&mean.kind==MeanKind::Unique&&mean.discarded_optical_coherence<=1e-8,
-            "initialDependent":!model.drives.is_empty()||mean.kind!=MeanKind::Unique,
+        "diagnostics":{"engine":ENGINE,"traceError":row_trace,"initialStateError":initial_error,
+            "elapsedMs":started.elapsed().as_secs_f64()*1000.,"constructionMs":request.preparation_ms,
+            "carrierSourceToBasis":request.axes.source_to_basis,"innerOperatorApplications":d.operator_applications,
+            "asymptoticMethod":MEAN_METHOD,"meanDensityFrame":MEAN_FRAME,
             "uniquenessScope":match mean.kind{MeanKind::Unique=>"one-dimensional null space within the resolved rates",
                 MeanKind::InitialDependent{..}=>"several conserved quantities: mean of the specified initial density"},
-            "traceError":trace_error,"positivityError":positivity,"hermiticityError":0.,
-            "residual":d.relative_residual,
+            "asymptoticTraceError":trace_error,"asymptoticPositivityError":positivity,
+            "residual":d.relative_residual.is_finite().then_some(d.relative_residual),
             "asymptoticAccuracy":{"requestedTolerance":options.population_tolerance,"estimatedMaximumError":d.estimated_error,
                 "basisEstimate":d.basis_estimate,"haloEstimate":d.halo_estimate,"projectionCharge":d.projection_charge,
                 "minimumEigenvalueBeforeProjection":d.minimum_eigenvalue_before_projection,
                 "traceErrorBeforeProjection":d.trace_error_before_projection,"hermiticityErrorBeforeProjection":d.hermiticity_error,
                 "metric":"max over states, requested F groups and the spectral norm of the density error"},
             "zeroModeCount":d.zero_modes,"slowestRatePerUs":d.slowest_rate,"nearZeroPolePerUs":d.pole,
-            "meanBasis":d.columns,"meanModes":d.modes,"innerOperatorApplications":d.operator_applications,
-            "meanCheckpoints":checkpoints,"discardedOpticalCoherence":mean.discarded_optical_coherence,
+            "meanBasis":d.columns,"meanModes":d.modes,"meanCheckpoints":checkpoints,
+            "discardedOpticalCoherence":mean.discarded_optical_coherence,
             "meanTimingMs":{"operators":d.timing[0],"corrections":d.timing[1],"halo":d.timing[2],"degeneracyProbe":d.timing[3]},
-            "uncorrectedPopulations":d.uncorrected_populations,
-            "elapsedMs":started.elapsed().as_secs_f64()*1000.,"constructionMs":request.preparation_ms,
-            "meanMs":d.elapsed_ms,"stationaryOnly":options.steady_only,
-            "frequencyCoordinateSource":"declared-carrier-coordinates","carrierSourceToBasis":request.axes.source_to_basis}}))
+            "meanMs":d.elapsed_ms,"uncorrectedPopulations":d.uncorrected_populations}}))
+}
+
+/// A finite result carries its mean: the `asymptotic*` fields, and every mean
+/// diagnostic the finite result does not report itself.
+fn merge_mean(result:&mut Value,mean:Value){
+    let Value::Object(mean)=mean else{unreachable!("mean_result builds an object")};
+    for(key,value)in mean{
+        if key=="diagnostics"{
+            if let(Value::Object(finite),Value::Object(mean))=(&mut result["diagnostics"],value){
+                for(key,value)in mean{finite.entry(key).or_insert(value);}
+            }
+        }else if key.starts_with("asymptotic"){result[key.as_str()]=value;}
+    }
 }
 
 /// Status names consumed by the UI. A driven model keeps the long-time
@@ -153,7 +194,6 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
         if let Ok(value)=&value{publish_mean(value);}
         Some(value)
     }else{None};
-    let finite_started=Instant::now();
     let names:Vec<_>=request.groups.iter().map(|g|g.name.clone()).collect();
     let times:Vec<_>=(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect();
     let finite=FiniteOptions{population_tolerance:options.population_tolerance,..Default::default()};
@@ -161,53 +201,53 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
     let solution=engine::solve(request.core,&times,request.groups,finite)?;
     let d=&solution.diagnostics;
     let populations:Vec<_>=solution.populations.chunks_exact(32).map(|p|p.to_vec()).collect();
-    let trace=populations.iter().map(|p|(p.iter().sum::<f64>()-1.).abs()).fold(0_f64,f64::max);
-    let initial_error=populations[0].iter().zip(&request.initial_populations).map(|(a,b)|(a-b).abs()).fold(0_f64,f64::max);
-    if trace>1e-7||initial_error>1e-10{return Err("Returned population probabilities failed fixed trace/initial checks".into());}
+    let(trace,initial_error)=row_errors(&populations,&request.initial_populations)?;
     let checkpoints:Vec<_>=d.checkpoints.iter().map(|c|json!({
         "modes":c.modes,"basis":c.columns,"action":c.action,
         "basisEstimate":c.basis_estimate,"haloEstimate":c.halo_estimate,"elapsedMs":c.elapsed_ms
     })).collect();
     let t=&d.timing;
     let mut result=json!({"states":model.states,"timesUs":times,"populations":populations,
-        "asymptoticPopulations":null,"asymptoticStatus":"not-requested",
+        "asymptoticStatus":"not-requested",
         "populationAccuracy":{"status":"estimated-converged","requestedTolerance":options.population_tolerance,
             "estimatedMaximumError":d.estimated_error,"projectionCharge":d.projection_charge,
             "includesProjectionCharge":true,"scope":{"states":32,"samples":options.samples,"groups":names}},
-        "diagnostics":{"engine":"rust-population-core","method":"Full32 density-matrix Lindblad evolution with adaptive population refinement",
-            "validationKind":"population","traceError":trace,"initialStateError":initial_error,
+        "diagnostics":{"engine":ENGINE,"traceError":trace,"initialStateError":initial_error,
             "elapsedMs":started.elapsed().as_secs_f64()*1000.,"constructionMs":request.preparation_ms,
-            "propagateMs":d.elapsed_ms,"finiteMs":finite_started.elapsed().as_secs_f64()*1000.,"populationTolerance":options.population_tolerance,
-            "populationConvergenceEstimate":d.estimated_error,"errorBoundCertified":false,
-            "populationProjectionCharge":d.projection_charge,"originalHamiltonianAndCollapseRetained":true,
+            "carrierSourceToBasis":request.axes.source_to_basis,"innerOperatorApplications":d.operator_applications,
+            "method":FINITE_METHOD,"propagateMs":d.elapsed_ms,
             "errorControl":d.error_control,"rawPopulationEstimate":d.raw_estimate,"finalModes":d.final_modes,"finalBasis":d.final_columns,
-            "imageColumns":d.image_columns,"innerOperatorApplications":d.operator_applications,
-            "peakTrialBytes":d.peak_trial_bytes,"preparationMs":{"gauge":preparation[0],"primitives":preparation[1],"library":preparation[2],"initial":preparation[3],"readoutDuals":preparation[4],"p0":preparation[5]},"timingMs":{"directions":t.directions,"orthogonalize":t.orthogonalize,"images":t.images,"projections":t.projections,"readoutAppend":t.readout_append,"transfer":t.transfer,"reduced":t.reduced,"readoutEvaluate":t.readout_evaluate,"dualPrepare":t.dual_prepare,"basisEstimate":t.basis_estimate,"haloEstimate":t.halo_estimate},"maximumImaginaryPopulation":d.maximum_imaginary_population,
-            "historicalAnswerUsed":false,"cached":false,
-            "frequencyCoordinateSource":"declared-carrier-coordinates",
-            "carrierSourceToBasis":request.axes.source_to_basis,"finiteCarrierSourceToBasis":request.axes.source_to_basis,"populationCheckpoints":checkpoints,
-            "asymptoticStatus":"not-requested"}});
+            "imageColumns":d.image_columns,"peakTrialBytes":d.peak_trial_bytes,
+            "preparationMs":{"gauge":preparation[0],"primitives":preparation[1],"library":preparation[2],"initial":preparation[3],"readoutDuals":preparation[4],"p0":preparation[5]},
+            "timingMs":{"directions":t.directions,"orthogonalize":t.orthogonalize,"images":t.images,"projections":t.projections,"readoutAppend":t.readout_append,"transfer":t.transfer,"reduced":t.reduced,"readoutEvaluate":t.readout_evaluate,"dualPrepare":t.dual_prepare,"basisEstimate":t.basis_estimate,"haloEstimate":t.halo_estimate},
+            "maximumImaginaryPopulation":d.maximum_imaginary_population,"populationCheckpoints":checkpoints}});
     match mean{
         None=>{}
-        Some(Ok(mean))=>{
-            if let Some(fields)=mean.as_object(){
-                for(key,value)in fields{if key.starts_with("asymptotic"){result[key]=value.clone();}}
-            }
-            let md=&mean["diagnostics"];
-            result["diagnostics"]["stationaryDiagnostics"]=md.clone();
-            for key in ["asymptoticStatus","asymptoticReason","steadyMethod","residual","asymptoticAccuracy",
-                "meanDensityFrame","densityLimitExists","initialDependent","uniquenessScope"]{
-                if let Some(value)=md.get(key){result["diagnostics"][key]=value.clone();}
-            }
-            result["diagnostics"]["asymptoticTraceError"]=md["traceError"].clone();
-            result["diagnostics"]["asymptoticPositivityError"]=md["positivityError"].clone();
-            result["diagnostics"]["stationarySolveMs"]=md["meanMs"].clone();
-        }
-        Some(Err(reason))=>{
-            result["asymptoticStatus"]=json!("not-converged");result["asymptoticReason"]=json!(reason);
-            result["diagnostics"]["asymptoticStatus"]=json!("not-converged");
-            result["diagnostics"]["asymptoticReason"]=result["asymptoticReason"].clone();
-        }
+        Some(Ok(mean))=>merge_mean(&mut result,mean),
+        Some(Err(reason))=>{result["asymptoticStatus"]=json!("not-converged");result["asymptoticReason"]=json!(reason);}
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    #[test]
+    fn a_finite_result_carries_its_mean_and_keeps_its_own_diagnostics(){
+        let mut finite=json!({"timesUs":[0.,1.],"populations":[[1.],[1.]],"asymptoticStatus":"not-requested",
+            "diagnostics":{"engine":ENGINE,"traceError":1e-12,"elapsedMs":9.,"innerOperatorApplications":5,"method":FINITE_METHOD}});
+        let mean=json!({"timesUs":[0.],"populations":[[0.5]],"asymptoticStatus":"stationary","asymptoticReason":"unique",
+            "asymptoticPopulations":[1.],"asymptoticDensityReal":[1.],"asymptoticDensityImag":[0.],
+            "diagnostics":{"engine":ENGINE,"traceError":0.,"elapsedMs":2.,"innerOperatorApplications":3,
+                "asymptoticMethod":MEAN_METHOD,"residual":1e-9,"meanMs":1.}});
+        merge_mean(&mut finite,mean);
+        assert_eq!(finite["asymptoticStatus"],"stationary");
+        assert_eq!(finite["asymptoticReason"],"unique");
+        assert_eq!((&finite["asymptoticPopulations"],&finite["asymptoticDensityReal"],&finite["asymptoticDensityImag"]),(&json!([1.]),&json!([1.]),&json!([0.])));
+        assert_eq!((&finite["timesUs"],&finite["populations"]),(&json!([0.,1.]),&json!([[1.],[1.]])));
+        let d=&finite["diagnostics"];
+        assert_eq!((d["traceError"].as_f64(),d["elapsedMs"].as_f64(),d["innerOperatorApplications"].as_i64(),d["method"].as_str()),
+            (Some(1e-12),Some(9.),Some(5),Some(FINITE_METHOD)));
+        assert_eq!((d["asymptoticMethod"].as_str(),d["residual"].as_f64(),d["meanMs"].as_f64()),(Some(MEAN_METHOD),Some(1e-9),Some(1.)));
+    }
 }

@@ -5,6 +5,8 @@ import {IpcNativeLane} from '../desktop-native/ui/ipc-lane.mjs';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {FULL_MODEL_SCHEMA,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
+import {nativeResult} from './native-result.mjs';
 const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
 const capabilities={id:0,protocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]};
 const warm={id:-1,protocol:NATIVE_PROTOCOL,ready:true};
@@ -26,14 +28,8 @@ test('IPC lane preserves handshake, cancellation and stale-generation isolation'
   lane.receive({kind:'closed',generation:2});await lane.close();
 });
 
-function fakeResult(request){
-  const {model,options}=request,n=model.dimension,row=Array(n).fill(0);row[model.initialIndex]=1;
-  const times=options.steadyOnly?[0]:Array.from({length:options.samples},(_,i)=>options.durationUs*i/(options.samples-1));
-  const real=Array(n*n).fill(0);real[model.initialIndex*n+model.initialIndex]=1;
-  const f=model.frequencyCoordinates?.frequencies?.length??0;
-  return {protocol:NATIVE_PROTOCOL,modelSchema:FULL_MODEL_SCHEMA,states:model.states,timesUs:times,populations:times.map(()=>row.slice()),scatteringRatePerUs:times.map(()=>0),asymptoticPopulations:options.includeAsymptotic?row:null,asymptoticStatus:options.includeAsymptotic?'stationary':'not-requested',
-    ...(options.includeAsymptotic?{asymptoticDensityReal:real,asymptoticDensityImag:Array(n*n).fill(0)}:{}),diagnostics:{elapsedMs:1,traceError:0,positivityError:0,method:'transport test stub',carrierSourceToBasis:Array.from({length:f},(_,i)=>Array.from({length:f},(_,j)=>+(i===j)))}};
-}
+const fakeResult=({model,options})=>nativeResult({states:model.states,initialIndex:model.initialIndex,tolerance:options.populationTolerance,mean:options.includeAsymptotic,
+  timesUs:options.steadyOnly?[0]:Array.from({length:options.samples},(_,i)=>options.durationUs*i/(options.samples-1))});
 
 test('Worker sends the identical complete model, finite jobs to the trajectory lane and means to the steady lane',async()=>{
   const events=[],requests=[];let worker;
@@ -73,11 +69,16 @@ test('Worker sends the identical complete model, finite jobs to the trajectory l
   }
   assert.equal(messages.at(-1).event.data.service.lane,'trajectory');
   assert.equal(messages.at(-1).event.data.service.asymptoticCacheHit,false);
+  // The Worker's response is exactly what the UI reader accepts.
+  const finite=normalizeDynamicsResult(messages.at(-1).event.data,scene);
+  assert.equal(finite.timesUs.length,3);assert.equal(finite.steady.converged,true);assert.deepEqual(finite.assumptions,model.assumptions);
   const legacy=structuredClone(scene);delete legacy.dynamics.populationTolerance;
   await worker.receive({kind:'solve',channel:'legacy',request:{scene:legacy,modelSchema:FULL_MODEL_SCHEMA,
     request:{clientId:'worker-test',sequence:2},options:{durationUs:.1,samples:3,steadyOnly:true,includeAsymptotic:true}}});
   for(let i=0;i<50&&!events.some(e=>e.channel==='legacy'&&e.kind==='response');i++)await tick();
   assert.equal(requests.at(-1).options.populationTolerance,.005);assert.equal(requests.at(-1).lane,'steady');
+  const mean=normalizeDynamicsResult(events.find(e=>e.channel==='legacy'&&e.kind==='response').data,legacy);
+  assert.equal(mean.timesUs.length,1);assert.equal(mean.steady.converged,true);
   const count=requests.length;
   await worker.receive({kind:'solve',channel:'invalid-tolerance',request:{scene,modelSchema:FULL_MODEL_SCHEMA,
     request:{clientId:'worker-test',sequence:3},options:{populationTolerance:.021}}});

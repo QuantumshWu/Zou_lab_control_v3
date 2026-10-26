@@ -101,11 +101,9 @@ try{
     buildSha256:sha(JSON.stringify(report.backendInfo.numericSource)),defaults:DESKTOP_SOLVER_DEFAULTS}});
   const finite=await request('finite',{...settings,steadyOnly:false,includeAsymptotic:true});
   const parsed=normalizeDynamicsResult(finite,scene,settings.initialStateId);
-  assert.equal(finite.diagnostics.validationKind,'population');
   assert.equal(parsed.populationAccuracy.requestedTolerance,settings.populationTolerance);
   assert.equal(parsed.timesUs.length,settings.samples);assert.equal(parsed.timesUs.at(-1),settings.durationUs);
   assert.equal(parsed.steady.converged,true,'The finite request carries its qualified inline mean');
-  assert.equal(Object.hasOwn(parsed.validation,'positivityError'),false,'Population output must not fabricate a density PSD guarantee');
   const mean=await request('mean',{...settings,steadyOnly:true,includeAsymptotic:true});
   const meanParsed=normalizeDynamicsResult(mean,scene,settings.initialStateId);
   assert.equal(meanParsed.steady.converged,true,'Smoke mean must be qualified, never the finite endpoint');
