@@ -81,8 +81,9 @@
 //! * the slow generator bounds what is still relaxing at `T`: every
 //!   non-conserved mode with its population weight `|R_k c_k|` (initial
 //!   central ground block `y0`) and its decay `exp(Re(alpha_k + i nu) T)`
-//!   at half its rate (`SlowDual::horizon_bound`; the reduction's rates are
-//!   measured within 12% of the exact ones). Below `HORIZON_NEGLIGIBLE`
+//!   at a twentieth of its rate (`SlowDual::horizon_bound`; the reduction's
+//!   rates are off by up to 11x with a tweezer, see `HORIZON_RATE_MARGIN`).
+//!   Below `HORIZON_NEGLIGIBLE`
 //!   of the tolerance the result is the limit and the bound is charged;
 //! * otherwise the state at `T` comes from the finite-time engine on the
 //!   window (its estimate covers the whole window), read with the
@@ -129,11 +130,41 @@ const RESOLVABLE_POLES: f64 = 100.;
 /// Safety factor on the summed basis and halo estimates. Measured
 /// effectivities of the correction readout are 0.92..1.00.
 const SAFETY: f64 = 1.25;
-/// Correction directions: accurate enough to resolve the slow manifold,
-/// which carries the amplified part of the error.
+/// Correction directions: at most this relative residual, and tighter when
+/// the tolerance needs it (`SolveTarget`).
 const CORRECTION_SOLVE: InnerSolve = InnerSolve { maximum_steps: 80, relative_residual: 1e-4 };
-/// Restarts of the correction solve when its residual stays large.
-const CORRECTION_RESTARTS: usize = 3;
+/// Restarts of the correction solve while each still halves its residual.
+const CORRECTION_RESTARTS: usize = 10;
+/// Share of the tolerance the remaining residual of a correction solve may
+/// cost after its amplification `1 / (s + gamma)`.
+const SOLVE_SHARE: f64 = 0.05;
+
+/// Accuracy of a correction solve `(s E - F) delta = b`. The error of an
+/// inexact solution is `(s E - F)^-1 rho`, which the slowest relaxation
+/// `gamma` amplifies by `1 / (s + gamma)`: a relative residual that looks
+/// small (1e-4 of the fast-dominated `b`) can leave a slow error far above
+/// the tolerance. Measured on probe + 852 nm tweezer (gamma 5e-7/us,
+/// s 5e-10/us): at 1e-4 the mean was 5.4e-3 off while its correction
+/// predicted 8.7e-4; at 1e-8 it is 5e-6 off. The solve aims at
+/// `|rho| <= SOLVE_SHARE * epsilon * (s + gamma)` and the reached
+/// `|rho| / (s + gamma)` is charged to the estimate.
+#[derive(Clone, Copy)]
+struct SolveTarget {
+    /// Pole plus the slowest relaxation rate (1/us).
+    amplification_rate: f64,
+    epsilon: f64,
+}
+
+impl SolveTarget {
+    fn relative(&self, rhs: &[f64]) -> f64 {
+        let norm = euclid(rhs).max(f64::MIN_POSITIVE);
+        CORRECTION_SOLVE.relative_residual.min(SOLVE_SHARE * self.epsilon * self.amplification_rate / norm)
+    }
+    /// Charge for a reached relative residual on the right-hand side `rhs`.
+    fn charge(&self, rhs: &[f64], relative: f64) -> f64 {
+        relative * euclid(rhs) / self.amplification_rate
+    }
+}
 /// Inner residual above which an estimate is not trusted for acceptance.
 const ESTIMATE_RESIDUAL_LIMIT: f64 = 1e-3;
 /// Relative residual of the degeneracy probe per unit of tolerance (the probe
@@ -145,6 +176,10 @@ const RESOLVENT_TOLERANCE: f64 = 1e-9;
 const RESOLVENT_STALL: f64 = 10.;
 /// Halo modes are added until they cover this fraction of the halo weight.
 const HALO_COVERAGE: f64 = 0.9;
+/// Domain expansions in a row that may leave the halo estimate above 0.9 of
+/// its best before the pole method stops (measured: one success came on the
+/// third expansion; failures kept the halo flat for many more).
+const HALO_STALL_EXPANSIONS: usize = 3;
 /// Halo modes whose transport amplitude `|h_q| / |s + i omega_q|` is below
 /// this fraction of the largest one are condensed with the transport inverse
 /// instead of the exact mode-diagonal inverse (one P0 shift factor per mode).
@@ -187,7 +222,7 @@ pub struct HorizonPart {
     /// "limit": the slow part still relaxing at the horizon is negligible
     /// (its bound is charged); "propagation": the state at the horizon by
     /// the finite-time engine; "propagated-limit": the limit itself by
-    /// propagation (the pole-based solve was not reliable).
+    /// propagation (the pole method failed).
     pub method: &'static str,
     /// Bound (from the slow generator, decay rates halved) on the largest
     /// population or group still relaxing at the horizon.
@@ -263,8 +298,7 @@ pub struct MeanDiagnostics {
     /// The degeneracy probe's resolvent solve stalled and the slow
     /// generator, which found only the trace conserved, decided uniqueness.
     pub probe_stalled: bool,
-    /// For a limit obtained by propagation: why the pole-based solve was not
-    /// used (its error, or how far its mean was from the propagated one).
+    /// For a limit by propagation: why the pole method failed.
     pub limit_note: Option<String>,
 }
 
@@ -587,17 +621,19 @@ fn solve_shifted(op: &mut DomainOperator, rhs: &[f64], settings: InnerSolve, res
     Ok((x, relative))
 }
 
-/// Correction `delta` with `(pole E - F) delta = rhs`, with its component
-/// along the null vector removed (that component is the amplified trace
-/// error of the inexact solve and carries no information).
-fn correction(op: &mut DomainOperator, rhs: &[f64], null: &[f64], n: usize, applications: &mut usize)
-    -> Result<(Vec<f64>, f64), String> {
-    let (mut delta, relative) = solve_shifted(op, rhs, CORRECTION_SOLVE, CORRECTION_RESTARTS, applications)?;
+/// Correction `delta` with `(pole E - F) delta = rhs` to the accuracy
+/// `target` asks, with its component along the null vector removed (that
+/// component is the amplified trace error of the inexact solve and carries
+/// no information). Returns the reached relative residual and its charge.
+fn correction(op: &mut DomainOperator, rhs: &[f64], null: &[f64], n: usize, target: SolveTarget, applications: &mut usize)
+    -> Result<(Vec<f64>, f64, f64), String> {
+    let settings = InnerSolve { relative_residual: target.relative(rhs), ..CORRECTION_SOLVE };
+    let (mut delta, relative) = solve_shifted(op, rhs, settings, CORRECTION_RESTARTS, applications)?;
     let trace = central_trace(&delta, n);
     for (d, w) in delta.iter_mut().zip(null) {
         *d -= trace * w;
     }
-    Ok((delta, relative))
+    Ok((delta, relative, target.charge(rhs, relative)))
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +665,8 @@ struct Halo {
     indicators: Vec<(Charge, f64)>,
     /// Modes condensed exactly and by transport.
     counts: (usize, usize),
+    /// Charge for the remaining residual of its correction solves.
+    solve_charge: f64,
 }
 
 /// Condensed halo: `x_S = (s E - F)_SS^-1 F_SM w` approximated mode-diagonally
@@ -644,7 +682,7 @@ struct Halo {
 /// charged in full to the estimate.
 #[allow(clippy::too_many_arguments)]
 fn halo(core: &mut RuntimeCore, op: &mut DomainOperator, frame: &Frame, readout: &mut TargetReadout,
-    shell: &[Charge], null: &[f64], pole: f64, applications: &mut usize) -> Result<Halo, String> {
+    shell: &[Charge], null: &[f64], pole: f64, target: SolveTarget, applications: &mut usize) -> Result<Halo, String> {
     let n = frame.n;
     let d = n * n;
     let modes = op.modes().to_vec();
@@ -687,7 +725,7 @@ fn halo(core: &mut RuntimeCore, op: &mut DomainOperator, frame: &Frame, readout:
         .collect();
     let mut inward = core.prepared().pencil(shell, &modes, 1)?;
     let mut direct = TargetReadout::new(core, shell, frame)?;
-    let mut response = |core: &RuntimeCore, field: &[C], applications: &mut usize| -> Result<(Vec<C>, f64), String> {
+    let mut response = |core: &RuntimeCore, field: &[C], applications: &mut usize| -> Result<(Vec<C>, f64, f64), String> {
         // Feedback of the condensed halo on the domain, corrected inside it.
         let mut e_back = vec![C::default(); modes.len() * d];
         let mut f_back = vec![C::default(); modes.len() * d];
@@ -695,26 +733,26 @@ fn halo(core: &mut RuntimeCore, op: &mut DomainOperator, frame: &Frame, readout:
         let mut pulled = vec![C::default(); op.rows()];
         op.map().pull_complex_into(&f_back, 1, &mut pulled)?;
         let feedback: Vec<f64> = pulled.iter().map(|z| z.re).collect();
-        let (inner, relative) = correction(op, &feedback, null, n, applications)?;
+        let (inner, relative, charge) = correction(op, &feedback, null, n, target, applications)?;
         let inner_signed = op.signed_block(&inner, 1)?;
         let mut density = readout.density(core.physical(), frame, &inner_signed)?;
         // Direct readout of the halo field itself.
         add_into(&mut density, &direct.density(core.physical(), frame, field)?);
-        Ok((density, relative))
+        Ok((density, relative, charge))
     };
-    let (density, relative) = response(core, &condensed, applications)?;
-    let (far_density, far_relative) = if far.is_empty() {
-        (None, 0.)
+    let (density, relative, charge) = response(core, &condensed, applications)?;
+    let (far_density, far_relative, far_charge) = if far.is_empty() {
+        (None, 0., 0.)
     } else {
         let mut far_field = vec![C::default(); condensed.len()];
         for &k in &far {
             far_field[k * d..(k + 1) * d].copy_from_slice(&condensed[k * d..(k + 1) * d]);
         }
-        let (value, relative) = response(core, &far_field, applications)?;
-        (Some(value), relative)
+        let (value, relative, charge) = response(core, &far_field, applications)?;
+        (Some(value), relative, charge)
     };
     Ok(Halo { density, far_density, reliable: relative.max(far_relative) <= ESTIMATE_RESIDUAL_LIMIT, indicators,
-        counts: (near.len(), far.len()) })
+        counts: (near.len(), far.len()), solve_charge: charge + far_charge })
 }
 
 /// Halo modes with the largest indicators covering `HALO_COVERAGE` of the
@@ -852,18 +890,13 @@ pub fn solve(core: &mut RuntimeCore, options: &MeanOptions) -> Result<MeanSoluti
 pub fn solve_with(core: &mut RuntimeCore, options: &MeanOptions, slow: Option<&SlowDual>) -> Result<MeanSolution, String> {
     match options.horizon_us {
         Some(horizon) => horizon_mean(core, options, slow, horizon),
-        None => {
-            let limit = limit_mean(core, options, slow);
-            // A stalled degeneracy probe means the near-zero pole is beyond
-            // what the inner solves resolve; the null vector's corrections
-            // used the same pole (measured 6x beyond their estimate on the
-            // probe + tweezer scene). The limit then comes from propagation.
-            let reliable = limit.as_ref().is_ok_and(|solution| !solution.diagnostics.probe_stalled);
-            match slow {
-                Some(dual) if !reliable => propagated_limit(core, options, dual, limit),
-                _ => limit,
-            }
-        }
+        None => match (limit_mean(core, options, slow), slow) {
+            // The pole method failed (its early-failure tests included): the
+            // limit by propagation, whose remaining relaxation the slow
+            // generator bounds with its rates taken 20x slower.
+            (Err(reason), Some(dual)) => propagated_limit(core, options, dual, reason),
+            (limit, _) => limit,
+        },
     }
 }
 
@@ -876,9 +909,12 @@ const HORIZON_PROPAGATION_SHARE: f64 = 0.9;
 /// The slow part is negligible at the horizon when its bound is below this
 /// fraction of the tolerance.
 const HORIZON_NEGLIGIBLE: f64 = 0.05;
-/// The bound takes every decay rate of the slow generator at this fraction
-/// (its rates are a reduction: measured 4-12% from the exact ones on a toy).
-const HORIZON_RATE_MARGIN: f64 = 0.5;
+/// The bound takes every decay rate of the slow generator at this fraction.
+/// Its rates are a reduction: within 1% of the exact Floquet spectrum without
+/// a tweezer, but with one the tweezer's dressing of the eliminated optical
+/// blocks is missing and the slowest rate came out 11x too fast (two lasers
+/// + tweezer: 1.36e-2 against 1.21e-3/us), so the bound covers a factor 20.
+const HORIZON_RATE_MARGIN: f64 = 0.05;
 
 /// Central ground block (g x g) of the initial frame density `E y0`.
 fn initial_ground(core: &RuntimeCore, dual: &SlowDual) -> Result<Dense, String> {
@@ -924,8 +960,7 @@ fn horizon_mean(core: &mut RuntimeCore, options: &MeanOptions, slow: Option<&Slo
             return Err(format!("The mean at the {horizon:e} us horizon is estimated at {estimate:e} (limit {:e}, still relaxing at most {remaining:e}); the tolerance was not relaxed", solution.diagnostics.estimated_error));
         }
         solution.diagnostics.estimated_error = estimate;
-        let method = if solution.diagnostics.horizon.is_some() { "propagated-limit" } else { "limit" };
-        solution.diagnostics.horizon = Some(HorizonPart { horizon_us: horizon, method, decaying: remaining, propagation_estimate: 0., projection_charge: 0. });
+        solution.diagnostics.horizon = Some(HorizonPart { horizon_us: horizon, method: "limit", decaying: remaining, propagation_estimate: 0., projection_charge: 0. });
         return Ok(solution);
     }
     let kind = MeanKind::InitialDependent { zero_modes: dual.slow_spectrum().conserved.max(1) };
@@ -934,11 +969,15 @@ fn horizon_mean(core: &mut RuntimeCore, options: &MeanOptions, slow: Option<&Slo
     Ok(solution)
 }
 
-/// The limit by propagation: to the first doubling of `10 / rate` (slowest
-/// relaxation of the slow generator) at which the bound on what still relaxes
-/// is below `HORIZON_NEGLIGIBLE * epsilon`; that bound is charged. `limit` is
-/// the pole-based attempt (its diagnostics are kept when it converged).
-fn propagated_limit(core: &mut RuntimeCore, options: &MeanOptions, dual: &SlowDual, limit: Result<MeanSolution, String>) -> Result<MeanSolution, String> {
+/// The limit by propagation, when the pole method failed with `reason`: to
+/// the first doubling of `10 / rate` (slowest relaxation of the slow
+/// generator) at which the bound on what still relaxes (rates at
+/// `HORIZON_RATE_MARGIN` of the generator's) is below
+/// `HORIZON_NEGLIGIBLE * epsilon`; that bound is charged. The window is
+/// error-controlled; the remainder relies on the generator's rates within
+/// the margin (with the far dressing they are within 2x of the exact
+/// Floquet spectrum on the tweezer scenes checked).
+fn propagated_limit(core: &mut RuntimeCore, options: &MeanOptions, dual: &SlowDual, reason: String) -> Result<MeanSolution, String> {
     let epsilon = options.population_tolerance;
     let spectrum = dual.slow_spectrum();
     let ground = initial_ground(core, dual)?;
@@ -951,39 +990,22 @@ fn propagated_limit(core: &mut RuntimeCore, options: &MeanOptions, dual: &SlowDu
         horizon *= 2.;
         remaining = bound_size(&dual.horizon_bound(&ground, horizon, HORIZON_RATE_MARGIN)?, &options.groups);
     }
-    let reason = |error: String| match &limit {
-        Ok(_) => error,
-        Err(first) => format!("{first}; the limit by propagation failed too: {error}"),
-    };
+    let failed = |error: String| format!("{reason}; the limit by propagation failed too: {error}");
     if remaining > HORIZON_NEGLIGIBLE * epsilon {
-        return Err(reason(format!("the slow generator still bounds {remaining:e} relaxing at {horizon:e} us")));
+        return Err(failed(format!("the slow generator still bounds {remaining:e} relaxing at {horizon:e} us")));
     }
     let kind = if spectrum.conserved > 1 { MeanKind::InitialDependent { zero_modes: spectrum.conserved } } else { MeanKind::Unique };
-    let mut solution = propagate(core, options, dual, horizon, kind).map_err(reason)?;
+    let mut solution = propagate(core, options, dual, horizon, kind).map_err(failed)?;
     let estimate = solution.diagnostics.estimated_error + remaining;
     if estimate > epsilon {
-        return Err(reason(format!("estimate {estimate:e} with {remaining:e} still relaxing at {horizon:e} us")));
+        return Err(failed(format!("estimate {estimate:e} with {remaining:e} still relaxing at {horizon:e} us")));
     }
     solution.diagnostics.estimated_error = estimate;
     let part = solution.diagnostics.horizon.as_mut().expect("propagation part");
     part.method = "propagated-limit";
     part.decaying = remaining;
-    match limit {
-        Ok(pole) => {
-            solution.diagnostics.relative_residual = pole.diagnostics.relative_residual;
-            solution.diagnostics.probe_stalled = pole.diagnostics.probe_stalled;
-            solution.diagnostics.limit_note = Some(format!(
-                "the near-zero pole was not resolved (its degeneracy probe stalled); its mean differed by {:e}",
-                context_metric(core, options, &pole.density, &solution.density)?
-            ));
-        }
-        Err(first) => solution.diagnostics.limit_note = Some(first),
-    }
+    solution.diagnostics.limit_note = Some(reason);
     Ok(solution)
-}
-
-fn context_metric(core: &RuntimeCore, options: &MeanOptions, a: &[C], b: &[C]) -> Result<f64, String> {
-    error_metric(core.lapack(), &difference(a, b), core.prepared().primitives().hilbert.source.n, &options.groups)
 }
 
 /// The laboratory-averaged state at `horizon` by the finite-time engine on a
@@ -1037,8 +1059,7 @@ fn propagate(core: &mut RuntimeCore, options: &MeanOptions, dual: &SlowDual, hor
             minimum_eigenvalue_before_projection: projected.minimum_eigenvalue,
             trace_error_before_projection: projected.trace_error,
             hermiticity_error: projected.hermiticity_error,
-            // The window has no null-vector residual; a converged pole-based
-            // limit replaces it (`propagated_limit`).
+            // The window has no null-vector residual.
             relative_residual: 0.,
             slowest_rate: spectrum.slowest_rate,
             slowest_relaxation_us: spectrum.slowest_rate.map(|rate| 1. / rate),
@@ -1091,7 +1112,9 @@ fn limit_mean(core: &mut RuntimeCore, options: &MeanOptions, slow: Option<&SlowD
             let clock = Instant::now();
             // A stalled probe is a numerical failure, not evidence of a second
             // conserved quantity: the slow generator, which found only the
-            // trace conserved, decides then.
+            // trace conserved, decides then (its conserved count matched the
+            // exact Floquet spectrum on every tweezer scene checked, its rates
+            // did not; see HORIZON_RATE_MARGIN).
             let probe = match degeneracy_probe(core, options, &context, &candidate, &mut state, &mut work) {
                 Err(reason) if context.slow_unique() && reason.contains("stalled") => {
                     work.probe_stalled = true;
@@ -1183,6 +1206,9 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
     let mut previous: Option<(Vec<C>, f64)> = None;
     let mut calibration = 1_f64;
     let mut calibrated = false;
+    // Best halo estimate and the expansions since it last fell by 10%.
+    let mut best_halo = f64::INFINITY;
+    let mut flat_expansions = 0;
     loop {
         if !work.within_budget(options) {
             return Err(format!("Long-time mean work limit reached with {} columns on {} Fourier modes; the tolerance was not relaxed",
@@ -1211,12 +1237,6 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
                 calibrated = true;
             }
         }
-        // Newton correction of the null vector and its laboratory readout.
-        let clock = Instant::now();
-        let (delta, inner) = correction(&mut space.op, &residual, &null, context.n, &mut work.applications)?;
-        work.timing[1] += ms(clock);
-        let delta_signed = space.op.signed_block(&delta, 1)?;
-        let basis_density = readout.density(core.physical(), &context.frame, &delta_signed)?;
         // A slow rate gamma is resolved by the pole with relative bias s/gamma:
         // the slow generator's slowest rate (and a slower resolved reduced
         // one), or without it the reduced spectrum's above the resolvable rate.
@@ -1226,9 +1246,19 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
         } else {
             spectrum.slowest_rate().unwrap_or(resolvable).max(resolvable)
         };
+        // The amplification of a solve residual: by the slowest rate of the
+        // slow generator or of the reduced model, whichever is slower.
+        let amplifying = spectrum.slowest_rate().map_or(slowest, |r| r.min(slowest));
+        let target = SolveTarget { amplification_rate: pole + amplifying.min(1e300), epsilon };
+        // Newton correction of the null vector and its laboratory readout.
+        let clock = Instant::now();
+        let (delta, inner, solve_charge) = correction(&mut space.op, &residual, &null, context.n, target, &mut work.applications)?;
+        work.timing[1] += ms(clock);
+        let delta_signed = space.op.signed_block(&delta, 1)?;
+        let basis_density = readout.density(core.physical(), &context.frame, &delta_signed)?;
         let bias = calibration * (1. + pole / slowest);
         let predicted = context.metric(&basis_density, &options.groups)?;
-        let basis_estimate = predicted * bias;
+        let basis_estimate = predicted * bias + solve_charge;
         // An estimate is used for acceptance only after one estimate has been
         // checked against the change it predicted (or the space is invariant).
         let basis_reliable = inner <= ESTIMATE_RESIDUAL_LIMIT && (calibrated || invariant);
@@ -1240,12 +1270,12 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
                 None
             } else {
                 let clock = Instant::now();
-                let value = halo(core, &mut space.op, &context.frame, &mut readout, &shell, &null, pole, &mut work.applications)?;
+                let value = halo(core, &mut space.op, &context.frame, &mut readout, &shell, &null, pole, target, &mut work.applications)?;
                 work.timing[2] += ms(clock);
                 // The correction itself, plus the transport part once more: the
                 // transport inverse may be off by its own size near a resonance.
                 let far = value.far_density.as_ref().map_or(Ok(0.), |far| context.metric(far, &options.groups))?;
-                let estimate = (context.metric(&value.density, &options.groups)? + far) * bias;
+                let estimate = (context.metric(&value.density, &options.groups)? + far) * bias + value.solve_charge;
                 checkpoint.halo_modes = value.counts;
                 Some((value, estimate))
             };
@@ -1269,9 +1299,21 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
                     relative_residual, slowest_rate: spectrum.slowest_rate(), zero_modes, modes, pole, columns: space.columns() };
                 return Ok(Outcome::Null(candidate, NullState { space, readout }));
             }
-            if let Some((h, _)) = halo.filter(|h| h.1 >= basis_estimate) {
+            if let Some((h, value)) = halo.filter(|h| h.1 >= basis_estimate) {
                 if modes.len() >= options.maximum_modes {
                     return Err(format!("Long-time mean needs more than {} Fourier modes; the tolerance was not relaxed", options.maximum_modes));
+                }
+                if value < 0.9 * best_halo {
+                    best_halo = value;
+                    flat_expansions = 0;
+                } else {
+                    flat_expansions += 1;
+                    if flat_expansions >= HALO_STALL_EXPANSIONS {
+                        return Err(format!(
+                            "The long-time mean's halo estimate stayed at {value:.2e} (best {best_halo:.2e}) over {HALO_STALL_EXPANSIONS} domain expansions ({} Fourier modes); the tolerance was not relaxed",
+                            modes.len()
+                        ));
+                    }
                 }
                 let mut grown: BTreeSet<Charge> = modes.iter().cloned().collect();
                 grown.extend(select_halo_modes(&h.indicators));
