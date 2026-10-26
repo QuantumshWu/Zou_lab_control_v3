@@ -23,13 +23,12 @@
 //! Hermitian half: when every mode set is closed under q -> -q and the input
 //! satisfies x_{-q} = x_q^dagger exactly, only the canonical modes (central
 //! mode and one of each +-q pair) of every intermediate and of the output are
-//! computed; their partners are mirrored. The prepared coefficients preserve
-//! this symmetry up to the bounded preparation defect (see DomainDiagnostics),
-//! so the mirrored modes agree with a full evaluation to that defect.
+//! computed; their partners are mirrored. The prepared coefficients carry
+//! the same conjugacy symmetry, so the mirrored modes agree with a full
+//! evaluation to rounding.
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::lapack::{ComplexGemm, Lapack};
 use crate::parallel::{Execution, MINIMUM_WORK_PER_TASK};
@@ -42,47 +41,6 @@ const ONE: C = C { re: 1., im: 0. };
 /// one element of a memory-bound conversion pass, and one scalar CSR term.
 const COPY_WORK: usize = 16;
 const CSR_WORK: usize = 4;
-
-// ---------------------------------------------------------------------------
-// Stage profile
-// ---------------------------------------------------------------------------
-
-pub const STAGE_COUNT: usize = 9;
-pub const STAGE_NAMES: [&str; STAGE_COUNT] = [
-    "input",
-    "dx=[S,x]",
-    "J=x+dx+[S,dx]/2",
-    "z=K vec(J_EE)",
-    "E assembly",
-    "F left NL*J",
-    "F right J*NR",
-    "F thin+transport",
-    "output",
-];
-
-/// Wall-clock time spent in each pencil stage, summed over applications.
-/// Diagnostic only; it never influences arithmetic or scheduling.
-#[derive(Clone, Debug, Default)]
-pub struct StageProfile {
-    pub applications: u64,
-    pub nanos: [u64; STAGE_COUNT],
-}
-
-pub(crate) struct StageClock {
-    last: Instant,
-}
-
-impl StageClock {
-    pub(crate) fn start() -> Self {
-        Self { last: Instant::now() }
-    }
-
-    pub(crate) fn mark(&mut self, profile: &mut StageProfile, stage: usize) {
-        let now = Instant::now();
-        profile.nanos[stage] += (now - self.last).as_nanos() as u64;
-        self.last = now;
-    }
-}
 
 // ---------------------------------------------------------------------------
 // GEMM backend
@@ -251,7 +209,7 @@ impl ThinCoefficient {
                 permuted[r * cols + to] = matrix[r * cols + c];
             }
         }
-        let mut sparse = Coefficient { rows, cols, row: vec![0], col: Vec::new(), value: Vec::new() };
+        let mut sparse = Coefficient { rows, row: vec![0], col: Vec::new(), value: Vec::new() };
         for r in 0..rows {
             for c in 0..cols {
                 let z = permuted[r * cols + c];
@@ -674,16 +632,13 @@ impl Plan {
         w: &mut Workspace,
         input: &[C],
         rhs: usize,
-        profile: &mut StageProfile,
     ) -> Result<bool, String> {
         let n = self.n;
         let block = n * n * rhs;
         let gemm = self.gemm();
-        let mut clock = StageClock::start();
 
         // Input in mode-block layout; detect exact Hermitian symmetry.
         let half = self.load_input(input, rhs, w)?;
-        clock.mark(profile, 0);
 
         // dx = [S, x].
         let first_count = self.first.computed(half);
@@ -694,7 +649,6 @@ impl Plan {
         if half {
             mirror(&mut w.dx, &self.first, n, rhs);
         }
-        clock.mark(profile, 1);
 
         // J = x + dx + [S, dx] / 2.
         let j_count = self.j.computed(half);
@@ -710,7 +664,6 @@ impl Plan {
         if half {
             mirror(&mut w.j, &self.j, n, rhs);
         }
-        clock.mark(profile, 2);
 
         // z = K vec(J_EE) on the selected ground coordinates.
         let e = n - self.ground;
@@ -726,7 +679,6 @@ impl Plan {
         if half {
             mirror_ground(&mut w.z, &self.z, self.gg_transpose.as_deref().unwrap_or(&[]), self.rank, rhs);
         }
-        clock.mark(profile, 3);
 
         // E = J + embed_GG(z).
         let output_count = self.output.computed(half);
@@ -744,16 +696,13 @@ impl Plan {
                 }
             }
         }
-        clock.mark(profile, 4);
 
         // F = NL * J + J * NR + R vec(J_EE) + L_GG z + L_OG z - i omega E.
         ensure(&mut w.f, self.output.len() * block);
         let f_field = &mut w.f[..output_count * block];
         f_field.fill(ZERO);
         self.hilbert_stage(gemm, &self.left_no_jump, &w.j, f_field, rhs, Some(1.), None, &mut w.scratch)?;
-        clock.mark(profile, 5);
         self.hilbert_stage(gemm, &self.right_no_jump, &w.j, f_field, rhs, None, Some(1.), &mut w.scratch)?;
-        clock.mark(profile, 6);
         self.thin_stage(gemm, &self.recycling, &w.ee, f_field, Rows::Matrix(&self.gg), rhs, &mut w.scratch)?;
         self.thin_stage(gemm, &self.ground_hamiltonian, &w.z, f_field, Rows::Matrix(&self.gg), rhs, &mut w.scratch)?;
         let optical = Rows::Matrix(&self.optical);
@@ -766,7 +715,6 @@ impl Plan {
                 f.im -= omega * e.re;
             }
         }
-        clock.mark(profile, 7);
         Ok(half)
     }
 
@@ -1213,15 +1161,6 @@ pub(crate) struct Workspace {
     pub(crate) f: Vec<C>,
     symmetric: Vec<bool>,
     scratch: Vec<Scratch>,
-}
-
-impl Workspace {
-    pub(crate) fn bytes(&self) -> usize {
-        let fields = [&self.x, &self.dx, &self.j, &self.ee, &self.z, &self.e, &self.f];
-        let scratch: usize =
-            self.scratch.iter().map(|s| s.packed.capacity() + s.product.capacity() + s.stacked.capacity()).sum();
-        (fields.iter().map(|v| v.capacity()).sum::<usize>() + scratch) * std::mem::size_of::<C>()
-    }
 }
 
 /// Fill the non-canonical modes of a mode-block field from their partners.

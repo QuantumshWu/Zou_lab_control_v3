@@ -7,14 +7,12 @@ use lapack::Complex64 as C;
 mod parallel;
 pub mod preparation;
 mod pencil;
-pub use pencil::{StageProfile, STAGE_COUNT, STAGE_NAMES};
 pub mod owned_prepared;
 mod dense_expm;
 
 /// Sparse row-major (CSR) complex matrix.
 pub(crate) struct Coefficient {
     pub(crate) rows: usize,
-    pub(crate) cols: usize,
     pub(crate) row: Vec<usize>,
     pub(crate) col: Vec<usize>,
     pub(crate) value: Vec<C>,

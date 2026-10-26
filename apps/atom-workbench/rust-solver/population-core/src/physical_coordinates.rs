@@ -286,7 +286,6 @@ impl PopulationObservation{
         let(charges,rows):(Vec<_>,Vec<_>)=charges.into_iter().zip(rows).filter(|(_,entries)|!entries.is_empty()).unzip();
         Ok(Self{owner:Arc::clone(p),charges,rows})
     }
-    pub fn coefficient_modes(&self)->usize{self.charges.len()}
     /// Output modes reached by the readout from the given domain modes.
     pub fn output_modes(&self,input_modes:&[Charge])->Result<Vec<Charge>,String>{
         let inputs=mode_set(input_modes,self.owner.hilbert.source.phases.axes.len())?;

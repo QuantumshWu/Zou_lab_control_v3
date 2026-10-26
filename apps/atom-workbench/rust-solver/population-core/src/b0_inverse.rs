@@ -30,11 +30,6 @@ pub struct ShiftDiagnostics{
     pub feedback_condition_upper:Option<f64>,pub feedback_inverse_residual_inf:Option<f64>,
     pub all_feedback_columns:usize,
 }
-#[derive(Clone,Debug,Default)]
-pub struct RequestPreparationProfile{
-    pub factor_ms:f64,pub initial_frame_ms:f64,pub lazy_schur_frame_ms:f64,
-    pub shift_factors_ms:f64,pub shift_cache_hits:usize,pub unique_shifts:usize,pub feedback_columns:usize,
-}
 enum FrameKind{Eigen{a:Vec<C>,b:Vec<C>},Schur{ta:Vec<C>,tb:Vec<C>}}
 /// Tin(X) = left_in X right_in and Tout(Y) = left_out Y right_out, every
 /// matrix column-major n x n (`*_t` are the transposes used by `transform`).
@@ -57,7 +52,7 @@ struct ShiftFactor{frame:Arc<Frame>,solve:ShiftSolve,feedback:Feedback,diagnosti
 
 pub struct RequestP0{
     factor:Arc<B0Factor>,lapack:Arc<Lapack>,eigen:Option<Arc<Frame>>,schur:Option<Arc<Frame>>,
-    eigen_failure:Option<String>,entries:BTreeMap<(u64,u64),Arc<ShiftFactor>>,profile:RequestPreparationProfile,
+    eigen_failure:Option<String>,entries:BTreeMap<(u64,u64),Arc<ShiftFactor>>,
 }
 pub struct P0Batch{
     factor:Arc<B0Factor>,lapack:Arc<Lapack>,entries:Vec<Arc<ShiftFactor>>,max_rhs:usize,
@@ -250,17 +245,15 @@ impl ShiftFactor{
 }
 impl RequestP0{
     fn new(factor:Arc<B0Factor>,lapack:Arc<Lapack>,policy:P0Policy)->Result<Self,String>{
-        let began=Instant::now();let rank=factor.rank();
         let(eigen,eigen_failure)=if policy==P0Policy::EigenPreferred{match Frame::eigen(&factor,&lapack){Ok(frame)=>(Some(Arc::new(frame)),None),Err(reason)=>(None,Some(reason))}}
             else{(None,Some("Explicit complete-Schur policy".into()))};
-        let mut result=Self{factor,lapack,eigen,schur:None,eigen_failure,entries:BTreeMap::new(),profile:RequestPreparationProfile{feedback_columns:rank,..RequestPreparationProfile::default()}};
+        let mut result=Self{factor,lapack,eigen,schur:None,eigen_failure,entries:BTreeMap::new()};
         if result.eigen.is_none(){result.schur=Some(Arc::new(Frame::schur(&result.factor,&result.lapack)?));}
-        result.profile.initial_frame_ms=began.elapsed().as_secs_f64()*1000.;Ok(result)
+        Ok(result)
     }
     pub fn factor(&self)->&B0Factor{&self.factor}
     pub fn belongs_to(&self,prepared:&OwnedPrepared)->bool{Arc::ptr_eq(&self.factor.owner,&prepared.primitives)}
     pub fn prepared_shift_count(&self)->usize{self.entries.len()}
-    pub fn preparation_profile(&self)->&RequestPreparationProfile{&self.profile}
     pub fn eigen_frame_diagnostics(&self)->Option<&FrameDiagnostics>{self.eigen.as_ref().map(|x|&x.diagnostics)}
     pub fn schur_frame_diagnostics(&self)->Option<&FrameDiagnostics>{self.schur.as_ref().map(|x|&x.diagnostics)}
     pub fn prepare_batch(&mut self,shifts:&[C],max_rhs:usize)->Result<P0Batch,String>{
@@ -268,17 +261,14 @@ impl RequestP0{
         let mut entries=Vec::with_capacity(shifts.len());
         for &shift in shifts{let key=(shift.re.to_bits(),shift.im.to_bits());
             if !self.entries.contains_key(&key){
-                let began=Instant::now();let mut extra_frame_ms=0.;
                 let candidate=if let Some(frame)=&self.eigen{ShiftFactor::prepare(Arc::clone(frame),&self.factor,&self.lapack,shift,None)}
                     else{Err(self.eigen_failure.clone().unwrap_or_else(||"Eigenframe not selected".into()))};
                 let value=match candidate{Ok(value)=>value,Err(reason)=>{
-                    if self.schur.is_none(){let frame_begin=Instant::now();self.schur=Some(Arc::new(Frame::schur(&self.factor,&self.lapack)?));
-                        extra_frame_ms=frame_begin.elapsed().as_secs_f64()*1000.;self.profile.lazy_schur_frame_ms+=extra_frame_ms;}
+                    if self.schur.is_none(){self.schur=Some(Arc::new(Frame::schur(&self.factor,&self.lapack)?));}
                     ShiftFactor::prepare(Arc::clone(self.schur.as_ref().unwrap()),&self.factor,&self.lapack,shift,Some(reason))?
                 }};
                 self.entries.insert(key,Arc::new(value));
-                self.profile.shift_factors_ms+=(began.elapsed().as_secs_f64()*1000.-extra_frame_ms).max(0.);self.profile.unique_shifts=self.entries.len();
-            }else{self.profile.shift_cache_hits+=1;}
+            }
             entries.push(Arc::clone(&self.entries[&key]));
         }
         Ok(P0Batch{factor:Arc::clone(&self.factor),lapack:Arc::clone(&self.lapack),entries,max_rhs,execution:Execution::new()?,scratch:Vec::new()})
@@ -462,8 +452,7 @@ impl FrameGroup<'_>{
 }
 impl OwnedPrepared{
     pub fn prepare_p0(&self,policy:P0Policy)->Result<RequestP0,String>{
-        let began=Instant::now();let factor=Arc::new(self.prepare_b0_factor()?);let factor_ms=began.elapsed().as_secs_f64()*1000.;
-        let mut request=RequestP0::new(factor,Arc::clone(&self.preparation_lapack),policy)?;request.profile.factor_ms=factor_ms;Ok(request)
+        RequestP0::new(Arc::new(self.prepare_b0_factor()?),Arc::clone(&self.preparation_lapack),policy)
     }
 }
 

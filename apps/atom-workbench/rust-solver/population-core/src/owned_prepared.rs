@@ -5,8 +5,8 @@
 //! each mutable plan owns its own scratch. Input/output mode order is explicit,
 //! and reverse dependencies retain every path that returns to the output.
 use std::{collections::{BTreeMap,BTreeSet},sync::Arc,time::Instant};
-use crate::{C,Coefficient,Finite,Lapack,StageProfile,product};
-use crate::pencil::{self,Family,HilbertCoefficient,Library,Plan,PlanInput,StageClock,ThinCoefficient,Workspace};
+use crate::{C,Coefficient,Finite,Lapack,product};
+use crate::pencil::{Family,HilbertCoefficient,Library,Plan,PlanInput,ThinCoefficient,Workspace};
 use crate::preparation::{Charge,FourierMatrices,GaugedSource,GaugePolicy,ModelView,PhaseBasis};
 use crate::preparation::primitives::{self,PrimitivePreparation};
 
@@ -60,7 +60,6 @@ pub struct OwnedPrepared {
     families:[Family;7],
     lapack:Option<Arc<Lapack>>,
     preparation_lapack:Arc<Lapack>,
-    prepared_reality:Arc<runtime_core::PreparedRealityBudget>,
     coefficient_bytes:usize,
     /// Milliseconds: gauge/source, S/K primitives, operator library.
     pub timing:[f64;3],
@@ -73,13 +72,8 @@ pub struct DomainDiagnostics {
     /// Shared allocation size, not an additional allocation for this domain.
     pub shared_coefficient_bytes:usize,
     pub domain_index_bytes:usize,
-    pub complete_reverse_dependencies:bool,
-    pub arbitrary_complex_action:bool,
-    pub prepared_e_conjugacy_defect_bound:f64,pub prepared_f_conjugacy_defect_bound:f64,
-    pub preparation_budget_is_population_error_bound:bool,
     /// Exactly Hermitian-symmetric inputs are evaluated on the canonical half
-    /// of every mode set and mirrored; this agrees with a full evaluation to
-    /// roundoff plus the prepared conjugacy defect bounds above.
+    /// of every mode set and mirrored.
     pub hermitian_half_capable:bool,
 }
 
@@ -89,13 +83,9 @@ pub struct OwnedPencil {
     input_modes:Vec<Charge>,output_modes:Vec<Charge>,
     plan:Plan,
     workspace:Workspace,
-    profile:StageProfile,
     diagnostics:DomainDiagnostics,
 }
 
-#[cfg(test)]
-#[path="preparation_model_fixture.rs"]
-mod model_fixture;
 
 fn add_charge(a:&[i32],b:&[i32],subtract:bool)->Result<Charge,String>{
     if a.len()!=b.len(){return Err("Native mode dimensions differ".into());}
@@ -117,7 +107,7 @@ fn coefficient(matrix:&[C],rows:usize,cols:usize,_policy:KernelPolicy)->Result<C
         return Err("Invalid owned complete primitive matrix".into());}
     let mut row=vec![0];let mut col=Vec::new();let mut value=Vec::new();
     for i in 0..rows{for j in 0..cols{let z=matrix[i*cols+j];if z.re!=0.||z.im!=0.{col.push(j);value.push(z);}}row.push(value.len());}
-    Ok(Coefficient{rows,cols,row,col,value})
+    Ok(Coefficient{rows,row,col,value})
 }
 
 impl OwnedPrepared {
@@ -136,7 +126,6 @@ impl OwnedPrepared {
         Ok(prepared)
     }
     fn from_primitives(primitives:PrimitivePreparation,policy:KernelPolicy,lap:Arc<Lapack>)->Result<Self,String>{
-        let prepared_reality=Arc::new(runtime_core::PreparedRealityBudget::prepare(&primitives)?);
         let n=primitives.hilbert.source.n;let g=primitives.hilbert.source.ground.len();let e=primitives.hilbert.source.excited.len();
         let rank=primitives.gg_rows.len();let optical=primitives.optical_rows.len();let axes=primitives.hilbert.source.phases.axes.len();
         if n==0||g==0||e==0||g+e!=n{return Err("Invalid owned Hilbert partition".into());}
@@ -161,10 +150,9 @@ impl OwnedPrepared {
         let bytes=library.bytes();
         Ok(Self{primitives:Arc::new(primitives),library:Arc::new(library),families,
             lapack:if matches!(policy,KernelPolicy::HybridBlas){Some(Arc::clone(&lap))}else{None},
-            preparation_lapack:lap,prepared_reality,coefficient_bytes:bytes,timing:[0.;3]})
+            preparation_lapack:lap,coefficient_bytes:bytes,timing:[0.;3]})
     }
     pub fn primitives(&self)->&PrimitivePreparation{&self.primitives}
-    pub fn same_request(&self,other:&Self)->bool{Arc::ptr_eq(&self.primitives,&other.primitives)}
     pub fn shared_coefficient_bytes(&self)->usize{self.coefficient_bytes}
     pub fn physical_coordinates(&self)->coordinates::PhysicalCoordinates{
         coordinates::PhysicalCoordinates::new(Arc::clone(&self.primitives),Arc::clone(&self.preparation_lapack))
@@ -198,21 +186,13 @@ impl OwnedPrepared {
             frequency:frequency.clone(),max_rhs,blas:self.lapack.clone()})?;
         // A disjoint rectangular operator may have no intermediate modes; its
         // exact action is zero.
-        let maximum_frequency=frequency.iter().map(|w|w.abs()).fold(0_f64,f64::max);let mut frequency_defect=0_f64;
-        for(q,&w)in output_modes.iter().zip(&frequency){let opposite=q.iter().map(|&k|k.checked_neg().ok_or("REAL transport partner overflow")).collect::<Result<Charge,_>>()?;
-            let other=source.phases.frequency(&opposite)?;frequency_defect=frequency_defect.max((w+(other.hi+other.lo)).abs());}
-        let e_defect=self.prepared_reality.e_defect;
-        let f_defect=self.prepared_reality.f_base_defect+maximum_frequency*e_defect+frequency_defect*self.prepared_reality.e_norm;
-        if !f_defect.is_finite(){return Err("Prepared finite-domain REAL-defect budget overflow".into());}
         let(first,j,z)=plan.intermediate_modes();
         let diagnostics=DomainDiagnostics{input_modes:plan.input_modes(),output_modes:plan.output_modes(),
             first_intermediate_modes:first,j_intermediate_modes:j,z_intermediate_modes:z,
             shared_coefficient_bytes:self.coefficient_bytes,domain_index_bytes:plan.index_bytes(),
-            complete_reverse_dependencies:true,arbitrary_complex_action:true,
-            prepared_e_conjugacy_defect_bound:e_defect,prepared_f_conjugacy_defect_bound:f_defect,preparation_budget_is_population_error_bound:false,
             hermitian_half_capable:plan.hermitian_half_capable()};
         Ok(OwnedPencil{primitives:Arc::clone(&self.primitives),input_modes:input_modes.to_vec(),output_modes:output_modes.to_vec(),plan,
-            workspace:Workspace::default(),profile:StageProfile::default(),diagnostics})
+            workspace:Workspace::default(),diagnostics})
     }
 }
 
@@ -223,14 +203,9 @@ impl OwnedPencil {
     pub fn output_dimension(&self)->usize{self.output_modes.len()*self.dimension()}
     fn dimension(&self)->usize{let n=self.primitives.hilbert.source.n;n*n}
     pub fn diagnostics(&self)->&DomainDiagnostics{&self.diagnostics}
-    pub(super) fn real_preparation_defects(&self)->(f64,f64){(self.diagnostics.prepared_e_conjugacy_defect_bound,self.diagnostics.prepared_f_conjugacy_defect_bound)}
     pub fn primitives(&self)->&PrimitivePreparation{&self.primitives}
-    pub fn workspace_bytes(&self)->usize{self.workspace.bytes()}
     /// Upper bound of the scratch bytes one right-hand side needs.
     pub fn workspace_bytes_per_rhs(&self)->usize{self.plan.workspace_bytes_per_rhs()}
-    /// Per-stage wall time of apply_into/apply_shifted_into (diagnostic).
-    pub fn stage_profile(&self)->&StageProfile{&self.profile}
-    pub fn reset_stage_profile(&mut self){self.profile=StageProfile::default();}
     fn validate(&self,input:&[C],rhs:usize,lengths:&[usize])->Result<(),String>{
         if rhs==0||rhs>self.plan.max_rhs(){return Err("RHS count exceeds this owned plan; caller must chunk complete columns".into());}
         let ni=product(&[self.input_dimension(),rhs])?;let no=product(&[self.output_dimension(),rhs])?;
@@ -240,18 +215,14 @@ impl OwnedPencil {
     /// E x and F x of a signed field with layout [mode][(i*n+j)*rhs+b].
     pub fn apply_into(&mut self,input:&[C],rhs:usize,mass:&mut[C],pencil:&mut[C])->Result<(),String>{
         self.validate(input,rhs,&[mass.len(),pencil.len()])?;
-        let half=self.plan.apply(&mut self.workspace,input,rhs,&mut self.profile)?;
-        let mut clock=StageClock::start();
-        self.plan.store(&self.workspace,half,rhs,mass,pencil)?;
-        clock.mark(&mut self.profile,pencil::STAGE_COUNT-1);self.profile.applications+=1;Ok(())
+        let half=self.plan.apply(&mut self.workspace,input,rhs)?;
+        self.plan.store(&self.workspace,half,rhs,mass,pencil)
     }
     /// shift * E x - F x.
     pub fn apply_shifted_into(&mut self,input:&[C],rhs:usize,shift:C,output:&mut[C])->Result<(),String>{
         self.validate(input,rhs,&[output.len()])?;if !shift.finite(){return Err("Nonfinite owned pencil shift".into());}
-        let half=self.plan.apply(&mut self.workspace,input,rhs,&mut self.profile)?;
-        let mut clock=StageClock::start();
-        self.plan.store_shifted(&self.workspace,shift,half,rhs,output)?;
-        clock.mark(&mut self.profile,pencil::STAGE_COUNT-1);self.profile.applications+=1;Ok(())
+        let half=self.plan.apply(&mut self.workspace,input,rhs)?;
+        self.plan.store_shifted(&self.workspace,shift,half,rhs,output)
     }
 }
 
