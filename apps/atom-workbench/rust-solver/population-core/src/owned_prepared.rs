@@ -272,7 +272,7 @@ impl OwnedPencil {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preparation::MatrixView;
+    use crate::preparation::{DriveView,MatrixView};
     fn add(a:&mut C,b:C){a.re+=b.re;a.im+=b.im;}
     fn mul(a:C,b:C)->C{C{re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re}}
     fn scale(a:C,s:f64)->C{C{re:a.re*s,im:a.im*s}}
@@ -291,6 +291,20 @@ mod tests {
             collapse:&channels,drives:&[],ground:&[true,true,false,false],initial_index:0};
         let phases=PhaseBasis::from_declared(&[7.],None,&[]).unwrap();let gauge=[vec![0],vec![1],vec![0],vec![0]];
         OwnedPrepared::prepare(&model,phases,GaugePolicy::Explicit(&gauge),policy).unwrap()
+    }
+    /// A near drive (detuning 0.1) and a strong far drive (detuning ~17)
+    /// whose cross couplings are significant: the shear has two layers.
+    fn two_layer_fixture()->OwnedPrepared{
+        let n=4;let mut h=vec![0.;16];let zero=vec![0.;16];for(i,v)in[0.,0.6,3.,4.].iter().enumerate(){h[i*n+i]=*v;}
+        let mut near=vec![0.;16];near[2]=0.01;near[2*n]=0.01;
+        let mut far=vec![0.;16];for(i,j,v)in[(0,2,2.),(1,3,1.5),(0,3,0.7)]{far[i*n+j]=v;far[j*n+i]=v;}
+        let drives=[DriveView{omega:2.9,cosine:MatrixView{real:&near,imag:&zero},sine:MatrixView{real:&zero,imag:&zero}},
+            DriveView{omega:20.,cosine:MatrixView{real:&far,imag:&zero},sine:MatrixView{real:&zero,imag:&zero}}];
+        let mut c=vec![0.;16];c[2]=0.7;c[3]=0.1;c[6]=0.2;c[7]=0.8;
+        let channels=[MatrixView{real:&c,imag:&zero}];let model=ModelView{dimension:n,hamiltonian:MatrixView{real:&h,imag:&zero},
+            collapse:&channels,drives:&drives,ground:&[true,true,false,false],initial_index:0};
+        let phases=PhaseBasis::from_declared(&[2.9,20.],None,&[vec![1,0],vec![0,1]]).unwrap();
+        OwnedPrepared::prepare(&model,phases,GaugePolicy::MaximumScoreGapForest,KernelPolicy::Csr).unwrap()
     }
     /// Full convolution independent of the staged return graph and compact
     /// K/R/LGG/LOG: form T x, then use original transformed H/C directly.
@@ -342,6 +356,29 @@ mod tests {
         let shift=C{re:8.,im:-2.};let mut shifted=vec![C::default();count];part.apply_shifted_into(&x,rhs,shift,&mut shifted).unwrap();
         for i in 0..count{let expected=mul(shift,ep[i]);assert_eq!(shifted[i].re,expected.re-fp[i].re);assert_eq!(shifted[i].im,expected.im-fp[i].im);}
         let previous=fp.clone();part.apply_into(&vec![C::default();x.len()],rhs,&mut ep,&mut fp).unwrap();assert!(fp.iter().chain(&ep).all(|z|z.re==0.&&z.im==0.));assert!(previous.iter().any(|z|z.re!=0.));
+    }
+    /// Layered shears: the pencil applies T_far(T_near(x)) exactly, and
+    /// `reachable` names every mode it reaches.
+    #[test]
+    fn preparation_owned_layered_shears_match_oracle(){
+        let owned=two_layer_fixture();let p=owned.primitives();
+        assert!(p.layers.len()>=2,"expected separate near and far layers, got {}",p.layers.len());
+        let input_modes=[vec![0,0],vec![1,0],vec![0,-1]];let n=4;let d=n*n;let rhs=2;
+        let x:Vec<_>=(0..input_modes.len()*d*rhs).map(|i|C{re:((i*17+3)%41)as f64/47.,im:((i*11+7)%29)as f64/-31.}).collect();
+        let mut oracles=Vec::new();let mut targets=Modes::new();
+        for b in 0..rhs{let input:FourierMatrices=input_modes.iter().enumerate().map(|(i,q)|(q.clone(),(0..d).map(|k|x[(i*d+k)*rhs+b]).collect())).collect();
+            let oracle=original_oracle(p,&input);targets.extend(oracle.0.keys().chain(oracle.1.keys()).cloned());oracles.push(oracle);}
+        let reach:Modes=owned.reachable(&input_modes).unwrap().into_iter().collect();
+        assert!(targets.iter().all(|q|reach.contains(q)),"reachable misses an oracle output mode");
+        let outputs:Vec<_>=targets.into_iter().collect();let mut plan=owned.pencil(&input_modes,&outputs,rhs).unwrap();
+        let count=outputs.len()*d*rhs;let(mut e,mut f)=(vec![C::default();count],vec![C::default();count]);plan.apply_into(&x,rhs,&mut e,&mut f).unwrap();
+        let scale=oracles.iter().flat_map(|(a,b)|a.values().chain(b.values())).flatten().map(|z|z.re.hypot(z.im)).fold(0_f64,f64::max);
+        for(m,q)in outputs.iter().enumerate(){for k in 0..d{for b in 0..rhs{let at=(m*d+k)*rhs+b;
+            for(actual,family)in[(e[at],&oracles[b].0),(f[at],&oracles[b].1)]{
+                let expected=family.get(q).map_or(C::default(),|a|a[k]);
+                assert!((actual.re-expected.re).hypot(actual.im-expected.im)<1e-12*scale,"mode {q:?} entry {k}");
+            }
+        }}}
     }
     /// Hermitian-symmetric input on a symmetric domain uses the canonical
     /// half and mirrors it; a perturbed input takes the full path. Both
