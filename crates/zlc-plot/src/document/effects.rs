@@ -271,20 +271,26 @@ impl<R: DocumentRead> FigureDocument<R> {
     }
 
     /// The `save` action: the figure archive and its image, the files written. A file
-    /// already there is written over only when the command says `overwrite`; else
-    /// nothing is written and the answer is `{"exists": [those files]}`.
+    /// already there is written over only when the command's `overwrite` says so: true
+    /// for any, a list for the files it names (those the operator already agreed to);
+    /// else nothing is written and the answer is `{"exists": [those files]}`.
     pub(crate) fn save(&mut self, key: &str, command: &Json) -> Result<Json> {
         let handle = self.sessions.get(&key.to_owned()).cloned().ok_or_else(|| PlotError::value("There is no completed figure to save yet"))?;
         let saver = self.saver.clone().ok_or_else(|| PlotError::runtime("this document cannot save figures"))?;
         let read = self.inputs.get(&key.to_owned()).cloned().ok_or_else(|| PlotError::key(format!("'{key}'")))?;
         let path = command.get("path").and_then(Json::as_str).ok_or_else(|| PlotError::key("'path'"))?;
-        let overwrite = command.get("overwrite").and_then(Json::as_bool).unwrap_or(false);
+        let overwrite = command.get("overwrite");
         let write = saver.prepare(&SaveRequest { path, read: &read, overlay: lock(&handle).image_overlay() })?;
         let mut export = lock(&handle).export_session(&self.services)?;
         let recipe = export.figure_recipe()?;
         // Looked for as the files are written, not when the save was asked for: one made since is not written over either.
-        if !overwrite {
-            let existing: Vec<Json> = write.files().into_iter().filter(|file| file.exists()).map(|file| Json::String(file.display().to_string())).collect();
+        if overwrite.and_then(Json::as_bool) != Some(true) {
+            // An agreed file is the one written, however its path was spelled.
+            let agreed: Vec<std::path::PathBuf> = overwrite.and_then(Json::as_array).into_iter().flatten().filter_map(Json::as_str)
+                .filter_map(|file| zlc_archive::durable::resolve(std::path::Path::new(file)).ok()).collect();
+            let existing: Vec<Json> = write.files().into_iter()
+                .filter(|file| file.exists() && !zlc_archive::durable::resolve(file).is_ok_and(|file| agreed.contains(&file)))
+                .map(|file| Json::String(file.display().to_string())).collect();
             if !existing.is_empty() { return Ok(json!({"exists": existing})); }
         }
         let saved = write.write(recipe, &mut |format| export.save_image(format))?;

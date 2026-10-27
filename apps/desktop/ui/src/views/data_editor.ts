@@ -3,7 +3,8 @@
 // axis's values, and the Data card with the value table -- and the copy's
 // own commands under both.  Every Dataset rule is the host's (manual.rs):
 // this page shows its projection and sends the operator's intents.
-import { ComboBox, Field, GroupBox, Segmented, SpinBox, command, element, fontOf, labelColumnWidth, measurer, note, setText, summary, switchButton, setChecked, token, wholeText, type Value } from "../fluent/index.js";
+import { ComboBox, Field, GroupBox, Segmented, SpinBox, command, confirmOverwrite, element, fontOf, labelColumnWidth, measurer, note, setText, summary, switchButton, setChecked, token, wholeText, type Value } from "../fluent/index.js";
+import type { Transport } from "../transport.js";
 
 type Axis = { id: string; name: string; size: number; unit: string; domain: string; domain_label: string };
 type AxisRow = { axis_id: string; name: string; size: number; unit: string; mode: "rows" | "columns" | "scope"; index: number; scope_label: string };
@@ -19,6 +20,23 @@ export type DataProjection = {
   dirty: boolean; modified: boolean; can_apply: boolean; can_save: boolean; save_suggested: string; message: string; message_severity: string;
 };
 export type Intent = { op: string; [key: string]: unknown };
+
+/** Save as… of one working copy (`intent` its save_as). The host asks where with the Save dialog,
+ * which asks before replacing the archive chosen, and writes over no other file unasked: the
+ * picture beside that archive already there comes back named (the viewer's `saved`: {exists,
+ * path}), and Overwrite saves that archive again, told to; Cancel writes nothing. */
+export async function saveDataAs(transport: Pick<Transport, "request" | "note">, editor: string, intent: Intent): Promise<void> {
+  let saved: unknown;
+  try {
+    saved = await transport.request({ action: "data_editor", editor, intent }, "Editing the data…",
+      (_state, sections) => (sections.viewer as { saved?: unknown } | undefined)?.saved);
+  } catch { return; }
+  const refused = saved as { exists?: unknown; path?: unknown } | null;
+  const existing = refused?.exists;
+  if (Array.isArray(existing) && await confirmOverwrite(existing.map(String), transport)) {
+    await saveDataAs(transport, editor, { ...intent, path: refused!.path, overwrite: true });
+  }
+}
 
 /** The editor's fixed row labels (v2 _STATIC_LABELS): its one label column is the widest of these and the axis rows'. */
 const STATIC_LABELS = ["Name", "Type", "Value unit", "Note", "Editing", "Length", "Unit", "Domain", "Table shows"];

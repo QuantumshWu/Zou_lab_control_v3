@@ -83,6 +83,18 @@ export async function confirm(title: string, text: string, options: { confirmTex
   return await dialog.open() === "confirm";
 }
 
+/** A save's files already there (full paths, in one folder), as the host refused them: one name a
+ * line and their folder once, then Cancel or the red Overwrite. Cancel is told to `status`: nothing
+ * was saved and those files are kept. */
+export async function confirmOverwrite(files: readonly string[], status: { note(text: string): void }): Promise<boolean> {
+  const names = files.map(file => file.split(/[\\/]/).pop() ?? file), one = files.length === 1;
+  const folder = files[0]!.slice(0, -names[0]!.length - 1);
+  if (await confirm(one ? "File already exists" : "Files already exist", `${names.join("\n")}\n${one ? "is" : "are"} already in ${folder}\n\nOverwrite ${one ? "it" : "them"}?`,
+                    { confirmText: "Overwrite" })) return true;
+  status.note(`nothing was saved; ${names.join(" and ")} kept`);
+  return false;
+}
+
 /** FluentInputDialog: one line of text, OK commits it, Cancel or Escape gives null. */
 export async function prompt(title: string, label: string, value = ""): Promise<string | null> {
   const dialog = new Dialog(title);

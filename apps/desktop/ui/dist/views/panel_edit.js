@@ -6,7 +6,7 @@
 // newest data; Direct producer opens the node that makes the signal; Save
 // figure writes the held picture and its archive (v2's inline group), and
 // asks before writing over either file.
-import { checked, command, confirm, element, Field, form, note, PathEdit, Readout, row as settingRow, sectionTitle, Segmented, setChecked, shareLabelColumn, switchButton, wholeText } from "../fluent/index.js";
+import { checked, command, confirmOverwrite, element, Field, form, note, PathEdit, Readout, row as settingRow, sectionTitle, Segmented, setChecked, shareLabelColumn, switchButton, wholeText } from "../fluent/index.js";
 /** v2 _IMAGE_FORMATS. */
 const FORMATS = ["png", "pdf", "svg"];
 /** The moment a file is written, as v2 stamps it (%Y%m%d_%H%M%S). */
@@ -155,14 +155,8 @@ export class PanelEditView {
         }
         const existing = saved?.exists;
         if (Array.isArray(existing)) {
-            // One name a line; the archive is the image's name beside it, so their folder is said once.
-            const files = existing.map(String), names = files.map(baseName), one = files.length === 1;
-            const folder = files[0].slice(0, -names[0].length - 1);
-            if (await confirm(one ? "File already exists" : "Files already exist", `${names.join("\n")}\n${one ? "is" : "are"} already in ${folder}\n\nOverwrite ${one ? "it" : "them"}?`, { confirmText: "Overwrite" })) {
+            if (await confirmOverwrite(existing.map(String), this.transport))
                 await this.write(path, name, true);
-            }
-            else
-                this.transport.note(`nothing was saved; ${names.join(" and ")} kept`);
             return;
         }
         const files = Array.isArray(saved) ? saved.map(String) : [];

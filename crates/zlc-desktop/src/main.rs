@@ -1026,22 +1026,19 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             manual::Effect::Discarded { panel, signal } => close.extend(discard_data(&runtime, viewer, panel, &signal)),
-                            manual::Effect::Save { editor, panel, path, suggested } => {
-                                let path = match path { Some(path) => Some(path), None => {
+                            manual::Effect::Save { editor, panel, path, overwrite, suggested } => {
+                                // A named archive, or the one the Save dialog chose (asking, as it was chosen, before replacing it).
+                                let chosen = match path { Some(path) => Some((path, false)), None => {
                                     // Beside its source Figure, else in today's folder (as the viewer opens).
                                     let home = viewer_folder(workbench.workspace());
                                     let start = if std::path::Path::new(&suggested).parent().is_some_and(|folder| !folder.as_os_str().is_empty()) { PathBuf::from(&suggested) }
                                                 else { home.join(&suggested) };
-                                    dialog::file(windows.hwnd(from.as_ref()), "Save edited figure", "Saved figure archives (*.npz)", true, &start, &home)?
+                                    dialog::file(windows.hwnd(from.as_ref()), "Save edited figure", "Saved figure archives (*.npz)", true, &start, &home)?.map(|path| (path, true))
                                 } };
-                                if let Some(path) = path {
-                                    // A Save as… of an archive name writes its picture beside it (v2 `with_suffix(".png")`);
-                                    // a name's own dots ("scan_1.5us") stay in it.
-                                    let image = match path.strip_suffix(".npz").or_else(|| path.strip_suffix(".NPZ")) { Some(stem) => format!("{stem}.png"), None => format!("{path}.png") };
+                                if let Some((path, asked)) = chosen {
                                     let applies = viewer.drafts.get_mut(&editor).map_or(0, |draft| draft.applies);
-                                    viewer.drafts.saving = Some((command["id"].as_u64().unwrap_or(0), editor, applies));
-                                    // Written over as before: the window's Save dialog asked about the name, a remote client named the file.
-                                    queue.push_back(json!({"id": command["id"], "action": "save", "panel": panel, "path": image, "document": document, "overwrite": true}));
+                                    queue.push_back(manual::save_command(&command["id"], &panel, document, &path, asked, overwrite));
+                                    viewer.drafts.saving = Some((command["id"].as_u64().unwrap_or(0), editor, applies, path));
                                     viewer.state["data"] = viewer.drafts.state();
                                     return Ok(());
                                 }
@@ -1053,6 +1050,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         viewer.state["data_focus"] = json!(focus);
                         viewer.state["request"] = command["id"].clone();
                         viewer.state["error"] = Value::Null;
+                        // This answer saved nothing (a Save as whose dialog was cancelled too), whatever an earlier save did.
+                        viewer.state["saved"] = Value::Null;
                         viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(document), message))?;
                         viewer.state["data_focus"] = Value::Null;
                         return Ok(());
@@ -1533,12 +1532,14 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 // A preview's document now holds the recipe it started from.
                                 targets.retain(|panel, _| !ids.contains(panel));
-                                if let Some((request, editor, applies)) = drafts.saving.clone().filter(|(request, ..)| *request == completion.request) {
-                                    drafts.saving = None;
+                                if let Some((_, editor, applies, path)) = drafts.saving.take_if(|(request, ..)| *request == completion.request) {
+                                    if state["saved"]["exists"].is_array() {
+                                        // Nothing written: the window names those files and asks, and Overwrite saves this archive again, told to.
+                                        state["saved"]["path"] = json!(path);
+                                    }
                                     let archive_name = state["saved"].as_array().into_iter().flatten().filter_map(Value::as_str).find(|path| path.to_ascii_lowercase().ends_with(".npz"))
                                         .map(|path| std::path::Path::new(path).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default());
                                     if let (Some(draft), Some(name)) = (drafts.get_mut(&editor), archive_name) { let current = draft.applies == applies; draft.saved(&name, current); }
-                                    let _ = request;
                                 }
                                 drafts.settle(&state["panels"]);
                                 state["data"] = drafts.state();
@@ -1557,8 +1558,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         Err(error) => {
                             let error = if superseded { superseded_error.to_owned() } else { error };
                             if let Some((drafts, _, _)) = viewer_data.as_mut() {
-                                if let Some((_, editor, _)) = drafts.saving.clone().filter(|(request, ..)| *request == completion.request) {
-                                    drafts.saving = None;
+                                if let Some((_, editor, ..)) = drafts.saving.take_if(|(request, ..)| *request == completion.request) {
                                     if let Some(draft) = drafts.get_mut(&editor) { let name = draft.name().to_owned(); draft.refused(format!("cannot save {name}: {error}")); }
                                     accepted["data"] = drafts.state();
                                 }
