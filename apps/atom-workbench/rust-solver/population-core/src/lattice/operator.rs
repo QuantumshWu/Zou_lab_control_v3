@@ -41,11 +41,18 @@ pub enum Parts{
     /// The fold alone: sum_t (K_t^(0) + i nu_p K_t^(1)) x_p on every fold edge.
     Fold,
 }
+/// A restriction of an application: which modes are read (the others are
+/// taken as zero) and which are computed (the others come out zero).
+#[derive(Clone,Copy,Debug)]
+pub struct Mask<'m>{pub targets:&'m[bool],pub sources:&'m[bool]}
 #[derive(Default)]
 pub struct OperatorScratch{small:Vec<C>,left:Vec<C>,right:Vec<C>}
 /// One stored fold rest on all of its lattice edges (source, target);
 /// sources are scaled by i nu_source for K^(1).
-struct Term<'a>{rest:&'a Rest,edges:Vec<(usize,usize)>,frequency:bool,diagonal:bool,offset:usize}
+struct Term<'a>{rest:&'a Rest,edges:Vec<(usize,usize)>,frequency:bool,diagonal:bool}
+/// A rest term on the edges one application selects, with its offset in the
+/// gathered sources.
+struct Selected<'a>{rest:&'a Rest,edges:Vec<(usize,usize)>,frequency:bool,offset:usize}
 pub struct LatticeOperator<'a>{
     pub prepared:&'a LatticePrepared,
     pub n:usize,pub modes:Vec<Charge>,pub nu:Vec<f64>,pub centre:usize,
@@ -110,8 +117,8 @@ impl<'a> LatticeOperator<'a>{
         let k1=|t:&'a StoredFold|if dropped_k1_rest>0.{&t.population_rest[1]}else{&t.rest[1]};
         let mut terms=Vec::new();
         if let Some(t)=diagonal{let own:Vec<(usize,usize)>=targets.iter().map(|&q|(q,q)).collect();
-            terms.push(Term{rest:&t.rest[0],edges:own.clone(),frequency:false,diagonal:true,offset:0});
-            terms.push(Term{rest:k1(t),edges:own,frequency:true,diagonal:true,offset:0});}
+            terms.push(Term{rest:&t.rest[0],edges:own.clone(),frequency:false,diagonal:true});
+            terms.push(Term{rest:k1(t),edges:own,frequency:true,diagonal:true});}
         let mut fold_edges=vec![Vec::new();prepared.fold.targets.len()];
         for &target in &targets{let q=&modes[target];
             for(e,s)in explicit_steps.iter().enumerate(){
@@ -124,10 +131,10 @@ impl<'a> LatticeOperator<'a>{
             }
         }
         for(t,list)in fold_edges.into_iter().enumerate(){if list.is_empty(){continue;}let data=&prepared.fold.targets[t];
-            terms.push(Term{rest:&data.rest[0],edges:list.clone(),frequency:false,diagonal:false,offset:0});
-            terms.push(Term{rest:k1(data),edges:list,frequency:true,diagonal:false,offset:0});}
+            terms.push(Term{rest:&data.rest[0],edges:list.clone(),frequency:false,diagonal:false});
+            terms.push(Term{rest:k1(data),edges:list,frequency:true,diagonal:false});}
         terms.retain(|t|t.rest.stored()>0);
-        let mut offset=0;for t in &mut terms{t.offset=offset;offset+=d*t.edges.len();}
+        let offset:usize=terms.iter().map(|t|d*t.edges.len()).sum();
         let rest_work:usize=terms.iter().map(|t|t.rest.stored()*t.edges.len()).sum();
         Ok(Self{prepared,n,modes:modes.to_vec(),nu,centre,index,mirror,canonical,left,right,fold_left,fold_right,recycling,explicit,edges,terms,
             gathered:vec![ZERO;offset],interleaved:vec![ZERO;d*modes.len()],execution:Execution::new()?,scratch:Vec::new(),
@@ -142,21 +149,33 @@ impl<'a> LatticeOperator<'a>{
     /// y = A x for a Hermitian-symmetric field x (x_-q = x_q^dagger).
     pub fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{self.apply_parts(x,y,Parts::Full)}
     /// y = (selected parts of A) x for a Hermitian-symmetric field x.
-    pub fn apply_parts(&mut self,x:&[C],y:&mut[C],parts:Parts)->Result<(),String>{
+    pub fn apply_parts(&mut self,x:&[C],y:&mut[C],parts:Parts)->Result<(),String>{self.apply_masked(x,y,parts,None)}
+    /// y = (selected parts of A) x restricted by a mask: the sources outside
+    /// `mask.sources` are read as zero and skipped, only the targets in
+    /// `mask.targets` (with their mirrors) are computed, the others are zero.
+    pub fn apply_masked(&mut self,x:&[C],y:&mut[C],parts:Parts,mask:Option<Mask<'_>>)->Result<(),String>{
         let n=self.n;let d=n*n;let modes=self.modes.len();
         if x.len()!=self.dimension()||y.len()!=x.len(){return Err("Lattice operator field dimensions differ".into());}
+        if mask.is_some_and(|m|m.targets.len()!=modes||m.sources.len()!=modes){return Err("Lattice operator mask dimensions differ".into());}
         let Self{prepared,left,right,fold_left,fold_right,recycling,explicit,edges,terms,gathered,interleaved,execution,scratch,block_work,rest_work,nu,canonical,mirror,..}=self;
-        let gemm=prepared.lapack.complex_gemm();let fold=&prepared.fold.targets;let canonical=&*canonical;
+        let gemm=prepared.lapack.complex_gemm();let fold=&prepared.fold.targets;let canonical=&*canonical;let mirror=&*mirror;
+        let computed=|q:usize|canonical[q]&&mask.is_none_or(|m|m.targets[q]||m.targets[mirror[q]]);
+        let reads=|p:usize|mask.is_none_or(|m|m.sources[p]);
         execution.for_mode_chunks(y,d,*block_work,MINIMUM_WORK_PER_TASK,scratch,|first,chunk,scratch|{
             for(m,yq)in chunk.chunks_exact_mut(d).enumerate(){
-                let q=first+m;if !canonical[q]{continue;}let xq=&x[q*d..(q+1)*d];
-                // Column-major views are transposes: y^T = X^T NL^T + NR^T X^T.
-                let(l,r)=if parts==Parts::Fold{(&fold_left[q],&fold_right[q])}else{(&left[q],&right[q])};
-                gemm.multiply(n,n,n,ONE,xq,n,l,n,ZERO,yq,n)?;
-                gemm.multiply(n,n,n,ONE,r,n,xq,n,ONE,yq,n)?;
-                if parts!=Parts::Fold{recycling.apply_into(n,ONE,xq,yq,&mut scratch.small);}
+                let q=first+m;if !canonical[q]{continue;}
+                if !computed(q){yq.fill(ZERO);continue;}
+                if reads(q){
+                    let xq=&x[q*d..(q+1)*d];
+                    // Column-major views are transposes: y^T = X^T NL^T + NR^T X^T.
+                    let(l,r)=if parts==Parts::Fold{(&fold_left[q],&fold_right[q])}else{(&left[q],&right[q])};
+                    gemm.multiply(n,n,n,ONE,xq,n,l,n,ZERO,yq,n)?;
+                    gemm.multiply(n,n,n,ONE,r,n,xq,n,ONE,yq,n)?;
+                    if parts!=Parts::Fold{recycling.apply_into(n,ONE,xq,yq,&mut scratch.small);}
+                }else{yq.fill(ZERO);}
                 if parts==Parts::Diagonal{continue;}
                 for &(p,edge)in &edges[q]{
+                    if !reads(p){continue;}
                     let xp=&x[p*d..(p+1)*d];
                     match edge{
                         Edge::Explicit(e)=>if parts==Parts::Full{explicit[e].apply_into(n,ONE,xp,yq,&mut scratch.small)},
@@ -173,9 +192,16 @@ impl<'a> LatticeOperator<'a>{
             }
             Ok(())
         })?;
-        let active:Vec<&Term>=terms.iter().filter(|t|parts!=Parts::Diagonal||t.diagonal).collect();
+        // The rest terms on the edges the application selects, gathered at
+        // local offsets.
+        let mut active:Vec<Selected<'_>>=Vec::new();let mut offset=0;
+        for t in terms.iter().filter(|t|parts!=Parts::Diagonal||t.diagonal){
+            let chosen:Vec<(usize,usize)>=t.edges.iter().copied().filter(|&(p,q)|reads(p)&&computed(q)).collect();
+            if chosen.is_empty(){continue;}
+            let count=chosen.len();active.push(Selected{rest:t.rest,edges:chosen,frequency:t.frequency,offset});offset+=d*count;
+        }
         if !active.is_empty(){
-            interleaved.fill(ZERO);
+            interleaved.fill(ZERO);grow(gathered,offset);
             // Dense sector blocks: gather each block's sources, GEMM by row chunks.
             let mut items=Vec::new();let mut sources=Vec::new();
             for(k,term)in active.iter().enumerate(){let count=term.edges.len();
@@ -188,10 +214,10 @@ impl<'a> LatticeOperator<'a>{
                 }
             }
             let parts_out=execution.map(items.clone(),|(k,b,s,start,end)|->Result<Vec<C>,String>{
-                let(term,block)=(active[k],&active[k].rest.blocks[b]);let count=term.edges.len();let(h,w)=(end-start,block.cols.len());
+                let(term,block)=(&active[k],&active[k].rest.blocks[b]);let count=term.edges.len();let(h,w)=(end-start,block.cols.len());
                 let mut out=vec![ZERO;h*count];
                 gemm.multiply(h,count,w,ONE,&block.values[start..],block.rows.len(),&sources[s],w,ZERO,&mut out,h)?;Ok(out)});
-            for(&(k,b,_,start,end),out)in items.iter().zip(parts_out){let out=out?;let(term,block)=(active[k],&active[k].rest.blocks[b]);let h=end-start;
+            for(&(k,b,_,start,end),out)in items.iter().zip(parts_out){let out=out?;let(term,block)=(&active[k],&active[k].rest.blocks[b]);let h=end-start;
                 for(e,&(_,q))in term.edges.iter().enumerate(){for i in 0..h{add(&mut interleaved[block.rows[start+i]as usize*modes+q],out[i+h*e]);}}}
             // Sparse remainders, by rows.
             for term in &active{let count=term.edges.len();
@@ -207,7 +233,7 @@ impl<'a> LatticeOperator<'a>{
                 }
                 Ok(())
             })?;
-            for r in 0..d{for q in 0..modes{if canonical[q]{add(&mut y[q*d+r],interleaved[r*modes+q]);}}}
+            for r in 0..d{for q in 0..modes{if computed(q){add(&mut y[q*d+r],interleaved[r*modes+q]);}}}
         }
         // y_-q = y_q^dagger, the centre Hermitian.
         mirror_field(y,n,canonical,mirror);
@@ -280,5 +306,24 @@ mod tests{
             for r in 0..d{let mut v=ZERO;for c in 0..d{mul_add(&mut v,dense[(q*d+r)*size+q*d+c],z[q*d+c]);}blocks[q*d+r]=v;}}
         let error=diagonal.iter().zip(&blocks).map(|(a,b)|magnitude(C{re:a.re-b.re,im:a.im-b.im})).fold(0.,f64::max);
         assert!(error<=1e-13*scale,"diagonal part {error:e} of {scale:e}");
+    }
+    #[test]
+    fn lattice_operator_masks_restrict_sources_and_targets(){
+        // A masked application equals the full one on the field restricted to
+        // the sources, read on the targets (both closed under q -> -q).
+        let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
+        let mut op=LatticeOperator::new(&p,&modes).unwrap();let size=op.dimension();let d=16;
+        let x=symmetric_field(&op,3);let count=modes.len();
+        let inner:Vec<bool>=modes.iter().map(|q|q.iter().map(|k|k.unsigned_abs()).sum::<u32>()<=1).collect();
+        let outer:Vec<bool>=inner.iter().map(|&b|!b).collect();
+        for parts in[Parts::Full,Parts::Diagonal]{for(targets,sources)in[(&outer,&inner),(&inner,&outer),(&outer,&outer)]{
+            let mut restricted=x.clone();for q in 0..count{if !sources[q]{restricted[q*d..(q+1)*d].fill(ZERO);}}
+            let mut full=vec![ZERO;size];op.apply_parts(&restricted,&mut full,parts).unwrap();
+            for q in 0..count{if !targets[q]{full[q*d..(q+1)*d].fill(ZERO);}}
+            let mut masked=vec![ZERO;size];op.apply_masked(&x,&mut masked,parts,Some(Mask{targets,sources})).unwrap();
+            let scale=full.iter().map(|z|magnitude(*z)).fold(1e-300,f64::max);
+            let error=full.iter().zip(&masked).map(|(a,b)|magnitude(C{re:a.re-b.re,im:a.im-b.im})).fold(0.,f64::max);
+            assert!(error<=1e-13*scale,"{parts:?}: {error:e} of {scale:e}");
+        }}
     }
 }

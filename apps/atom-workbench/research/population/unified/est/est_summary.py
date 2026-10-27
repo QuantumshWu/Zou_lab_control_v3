@@ -29,9 +29,11 @@ for case, h in heads.items():
         if r.get('horizons') and r.get('horizonActual'):
             ha = [r['horizonActual'][k] for k in sorted(r['horizonActual'], key=float)]
             hz = ' | h ' + ' '.join(f'{e:.1e}/{a:.1e}' for e, a in zip(r['horizons'], ha))
+        g = r.get('gate')
+        gs = '' if g is None else (' | gate ' + ('first' if g['change'] is None else f"{g['change']:.1e}") + (' open' if g['open'] else ' closed'))
         w = r['work']
         cols = max(w['columns'], 1)
         c = r.get('count', [0] * 5)
         print(f"  {r['solves']:3d} k {r['k']:4d} act {r.get('actualMax', float('nan')):.2e} ratio {(r.get('ratio') or float('nan')):.2f} "
-              f"[{q[0]:.2f} {q[1]:.2f} {q[2]:.2f}] min {q[3]:.2f}{pys}{st}{hz} | per col: op {w['blockOperations'] / cols:.0f} solve {w['blockSolves'] / cols:.0f} "
+              f"[{q[0]:.2f} {q[1]:.2f} {q[2]:.2f}] min {q[3]:.2f}{pys}{st}{hz}{gs} | per col: op {w['blockOperations'] / cols:.0f} solve {w['blockSolves'] / cols:.0f} "
               f"frame {w['frameBlocks'] / cols:.0f} ({r['columnMs'] / cols:.0f} ms) eval {r['evaluateMs']:.0f} ms steady {r['steadyMs']:.0f} ms")

@@ -32,20 +32,23 @@
 //! Work: every basis column once (`lattice::ErrorLattice::add_columns`:
 //! the ring's couplings and block solves, the coordinate changes); per
 //! checkpoint the reduced products with the Ritz data, the time GEMMs and
-//! the steady GCRO's few steps.
+//! the steady GCRO's few steps. A gate (`gate`) skips the estimate while
+//! the outputs still move by more than 4 eps between checkpoints.
 use super::*;
 use super::estimate_api::{EstimateSetup,Estimator,ErrorEstimate,EstimateWork,ReducedView,SteadySolves};
-use super::ledger::metric;
+use super::ledger::{self,metric};
 
 pub mod kernels;
 pub mod blocks;
 pub mod lattice;
 pub mod propagate;
 pub mod steady;
+pub mod gate;
 pub use kernels::KernelRule;
 pub use lattice::{Classes,ErrorLattice};
 pub use propagate::{Readout,RitzSources};
 pub use steady::SteadyRecycler;
+pub use gate::OutputGate;
 
 /// Kernel support: the first-order entry floor (R2: 5e-3 keeps 0.3% of the
 /// beat kernel's entries and reproduces the full kernels; 5e-2 does not)
@@ -73,6 +76,7 @@ pub struct UnifiedEstimate<'a>{
     setup:EstimateSetup<'a>,
     pub lattice:ErrorLattice<'a>,
     pub steady:Option<SteadyRecycler<'a>>,
+    pub gate:OutputGate,
 }
 
 /// The estimator of a request (`estimate_api::Construct`).
@@ -83,7 +87,8 @@ pub fn construct(setup:EstimateSetup<'_>)->Result<Box<dyn Estimator+'_>,String>{
     let rule=KernelRule{entry:KERNEL_ENTRY,horizon_rate:KERNEL_HORIZON_RATE,horizon,cap:KERNEL_CAP};
     let lattice=ErrorLattice::new(setup.prepared,&modes,rule,CLASSES)?;
     let steady=if setup.outputs.steady{Some(SteadyRecycler::new(setup.prepared,&modes)?)}else{None};
-    Ok(Box::new(UnifiedEstimate{setup,lattice,steady}))
+    let gate=OutputGate::new(lattice.n,lattice.nu.clone(),lattice.centre);
+    Ok(Box::new(UnifiedEstimate{setup,lattice,steady,gate}))
 }
 
 /// The reduced model's slowest relaxation time: 1 / |theta| over the modes
@@ -96,39 +101,53 @@ impl Estimator for UnifiedEstimate<'_>{
     fn estimate(&mut self,reduced:&ReducedView<'_>,steady:&mut dyn SteadySolves)->Result<ErrorEstimate,String>{
         let clock=Instant::now();
         let(k,r)=(reduced.basis.len(),reduced.r);
-        let groups=self.setup.outputs.groups;
-        self.lattice.add_columns(reduced.basis,reduced.images)?;
-        // Ritz vectors over the basis: B = X S (column-major k x r).
+        let groups=self.setup.outputs.groups;let outputs=self.setup.outputs;
+        // Ritz vectors over the basis: B = X S (column-major k x r), and the
+        // reduced steady state's coordinates c = X u_inf, h = X G u_inf.
         let mut vectors=vec![ZERO;k*r];
         for m in 0..r{for i in 0..k{let mut v=ZERO;for l in 0..r{let x=reduced.x[i*r+l];let s=reduced.vectors[l*r+m];v.re+=x*s.re;v.im+=x*s.im;}vectors[i+k*m]=v;}}
+        let coordinates=reduced.steady.map(|u|{
+            let gu:Vec<f64>=(0..r).map(|i|(0..r).map(|l|reduced.g[i*r+l]*u[l]).sum()).collect();
+            let over=|v:&[f64]|->Vec<C>{(0..k).map(|i|C{re:(0..r).map(|l|reduced.x[i*r+l]*v[l]).sum(),im:0.}).collect()};
+            (over(u),over(&gu))});
+        // The gate: the outputs' change since the previous checkpoint.
+        self.gate.add_columns(reduced.basis);
+        let current=self.gate.outputs(&self.setup.prepared.lapack,&vectors,reduced.used_theta,reduced.used_coefficients,outputs.times,outputs.horizons,
+            if outputs.steady{coordinates.as_ref().map(|c|&c.0[..])}else{None})?;
+        let change=self.gate.change(current,groups);
+        let limit=gate::GATE_FACTOR*ledger::POPULATION_TOLERANCE;
+        if let Some(change)=change.filter(|&c|c>limit&&self.gate.last_estimate.is_none_or(|e|e>limit)){
+            return Ok(ErrorEstimate{trajectory:vec![change;outputs.times.len()],horizons:vec![change;outputs.horizons.len()],
+                steady:outputs.steady.then_some(change),work:EstimateWork{milliseconds:clock.elapsed().as_secs_f64()*1e3,..Default::default()}});
+        }
+        let before=(self.lattice.work.clone(),self.steady.as_ref().map(|x|x.work.clone()).unwrap_or_default());
+        self.lattice.add_columns(reduced.basis,reduced.images)?;
         let ritz=RitzSources{vectors:&vectors,values:reduced.used_theta,coefficients:reduced.used_coefficients};
         let zero=vec![0.;self.lattice.n];
         let delta=self.setup.ledger.total();
         let tau=relaxation_time(reduced.used_theta,reduced.used_coefficients,reduced.kernel);
         let fold=|t:f64|delta*t.min(tau);
-        let outputs=self.setup.outputs;
         let trajectory=self.lattice.populations(&ritz,outputs.times,Readout::Laboratory)?.iter().zip(outputs.times)
             .map(|(p,&t)|metric(p,&zero,groups)+fold(t)).collect();
         let horizons=self.lattice.populations(&ritz,outputs.horizons,Readout::Centre)?.iter().zip(outputs.horizons)
             .map(|(p,&t)|metric(p,&zero,groups)+fold(t)).collect();
-        let steady_error=if !outputs.steady{None}else if let(Some(u),Some(recycler))=(reduced.steady,self.steady.as_mut()){
-            // f = A W c - W h + B y(W c), c = X u_inf, h = X G u_inf.
-            let c:Vec<f64>=(0..k).map(|i|(0..r).map(|l|reduced.x[i*r+l]*u[l]).sum()).collect();
-            let gu:Vec<f64>=(0..r).map(|i|(0..r).map(|l|reduced.g[i*r+l]*u[l]).sum()).collect();
-            let h:Vec<f64>=(0..k).map(|i|(0..r).map(|l|reduced.x[i*r+l]*gu[l]).sum()).collect();
-            let f=steady_source(&mut self.lattice,reduced.basis,reduced.images,&c.iter().map(|&v|C{re:v,im:0.}).collect::<Vec<_>>(),
-                &h.iter().map(|&v|C{re:v,im:0.}).collect::<Vec<_>>())?;
+        let steady_error=if !outputs.steady{None}else if let(Some((c,h)),Some(recycler))=(coordinates.as_ref(),self.steady.as_mut()){
+            let f=steady_source(&mut self.lattice,reduced.basis,reduced.images,c,h)?;
             let e=recycler.error(reduced.basis,reduced.images,&f,steady)?;
             Some(metric(&e,&zero,groups)+delta*tau)
         }else{
             let p=self.lattice.populations(&ritz,&[SEVERAL_KERNELS_HORIZON],Readout::Centre)?;
             Some(metric(&p[0],&zero,groups)+delta*tau)
         };
-        let w=&self.lattice.work;let s=self.steady.as_ref().map(|x|x.work.clone()).unwrap_or_default();
+        let(w,s)=(&self.lattice.work,self.steady.as_ref().map(|x|x.work.clone()).unwrap_or_default());
         let blocks=self.lattice.modes.len();
-        Ok(ErrorEstimate{trajectory,horizons,steady:steady_error,work:EstimateWork{
-            block_operations:w.block_operations+w.frame_blocks+(s.applications+s.preconditions)*blocks,block_solves:w.block_solves,
-            inner_steps:s.inner_steps,milliseconds:clock.elapsed().as_secs_f64()*1e3}})
+        let work=EstimateWork{
+            block_operations:w.block_operations-before.0.block_operations+w.frame_blocks-before.0.frame_blocks
+                +(s.applications-before.1.applications+s.preconditions-before.1.preconditions)*blocks,
+            block_solves:w.block_solves-before.0.block_solves,inner_steps:s.inner_steps-before.1.inner_steps,milliseconds:clock.elapsed().as_secs_f64()*1e3};
+        let estimate=ErrorEstimate{trajectory,horizons,steady:steady_error,work};
+        self.gate.last_estimate=Some(estimate.largest());
+        Ok(estimate)
     }
 }
 

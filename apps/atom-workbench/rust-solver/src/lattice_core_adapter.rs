@@ -557,7 +557,7 @@ mod tests{
     #[test]
     #[ignore]
     fn lattice_estimator_against_r2_fixtures(){
-        use atom_population_core::lattice::estimator::{self,Classes,ErrorLattice,KernelRule,Readout,RitzSources,SteadyRecycler};
+        use atom_population_core::lattice::estimator::{self,Classes,ErrorLattice,KernelRule,OutputGate,Readout,RitzSources,SteadyRecycler};
         use atom_population_core::lattice::estimate_api::SteadySolves;
         use atom_population_core::lattice::operator::LatticeOperator;
         use atom_population_core::lattice::preconditioner::{Preconditioning,Shift};
@@ -609,6 +609,9 @@ mod tests{
                 "kernelEntries":lattice.kernels.diagnostics.entries,"smallParameter":lattice.kernels.diagnostics.largest,
                 "classCondition":lattice.classes.iter().map(|c|c.condition).collect::<Vec<_>>()}));
             let mut recycler=SteadyRecycler::new(&p,&modes).unwrap();
+            // The gate as the estimator runs it: open at the first checkpoint, when the
+            // outputs moved by at most 4 eps, or after an open estimate within 4 eps.
+            let mut gate=OutputGate::new(p.generator.n,lattice.nu.clone(),lattice.centre);let limit=estimator::gate::GATE_FACTOR*POPULATION_TOLERANCE;
             let mut solver=Bordered{prepared:&p,modes:modes.clone(),groups:fixture_groups.clone()};
             let zero=vec![0.;p.generator.n];
             for cp in index["checkpoints"].as_array().unwrap(){
@@ -630,12 +633,17 @@ mod tests{
                 let f=estimator::steady_source(&mut lattice,&basis[..k],&images[..k],&c,&h).unwrap();
                 let e=recycler.error(&basis[..k],&images[..k],&f,&mut solver).unwrap();
                 let steady_est=ledger::metric(&e,&zero,&fixture_groups);let steady_ms=clock.elapsed().as_secs_f64()*1e3;
+                gate.add_columns(&basis[..k]);let clock=Instant::now();
+                let outputs=gate.outputs(&p.lapack,&b,&th_e,&a_e,&times,&horizons,Some(&c)).unwrap();let gate_ms=clock.elapsed().as_secs_f64()*1e3;
+                let change=gate.change(outputs,&fixture_groups);
+                let open=change.is_none_or(|v|v<=limit)||gate.last_estimate.is_some_and(|v|v<=limit);
+                let largest=series.iter().chain(&hz).fold(steady_est,|a,&b|a.max(b));if open{gate.last_estimate=Some(largest);}
                 let mut row=json!({"case":case,"solves":solves,"k":k,"columnMs":column_ms,"evaluateMs":evaluate_ms,"steadyMs":steady_ms,
-                    "estMax":series.iter().fold(0_f64,|a,&b|a.max(b)),"steadyEst":steady_est,"horizons":hz,
+                    "estMax":series.iter().fold(0_f64,|a,&b|a.max(b)),"steadyEst":steady_est,"horizons":hz,"gate":{"change":change,"open":open,"ms":gate_ms},
                     "work":{"blockOperations":lattice.work.block_operations-before.block_operations,"blockSolves":lattice.work.block_solves-before.block_solves,
                         "frameBlocks":lattice.work.frame_blocks-before.frame_blocks,"columns":lattice.work.columns-before.columns,
                         "steady":{"applications":recycler.work.applications,"preconditions":recycler.work.preconditions,"pipelineSolves":recycler.work.pipeline_solves,
-                            "innerSteps":recycler.work.inner_steps,"steps":recycler.work.steps}},
+                            "innerSteps":recycler.work.inner_steps,"steps":recycler.work.steps,"pushMs":recycler.work.push_ms,"stepMs":recycler.work.step_ms}},
                     "count":cp["count"].clone()});
                 if let Some(actual)=cp["actual"].as_array(){
                     let actual:Vec<f64>=actual.iter().map(|v|v.as_f64().unwrap()).collect();

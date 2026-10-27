@@ -16,16 +16,18 @@
 //! of the mode's class and the readout (`propagate`).
 use super::super::*;
 use super::super::eigenbasis::BlockEigenbasis;
-use super::super::operator::{LatticeOperator,Parts};
+use super::super::operator::{LatticeOperator,Mask,Parts};
 use super::blocks::BlockSystem;
 use super::kernels::{KernelRule,SwKernels};
 use crate::parallel::Execution;
 
 /// Refinement passes of the ring's block solves for the diagonal fold's
 /// frequency term i nu_r K^(1) (left out of the eigenbasis), and their
-/// relative residual target.
+/// relative residual target: the slaved field enters the sources linearly,
+/// so a few digits beyond the estimate's own are enough (the term is about
+/// 1e-4 of the block, one refinement reaches it).
 const RING_REFINEMENTS:usize=12;
-const RING_RESIDUAL:f64=1e-12;
+const RING_RESIDUAL:f64=1e-8;
 /// Blocks per task of the coordinate changes.
 const BLOCKS_PER_TASK:usize=4;
 
@@ -55,8 +57,11 @@ pub struct ErrorLattice<'p>{
     pub(super) index:BTreeMap<Charge,usize>,pub(super) mirror:Vec<usize>,
     /// The omitted ring R = ring(P u Q).
     pub ring:Vec<Charge>,pub(super) ring_nu:Vec<f64>,
-    /// The lattice operator on P u Q u R (the ring's couplings).
-    outer:LatticeOperator<'p>,
+    /// The lattice operator on P u Q u R (the ring's couplings, applied with
+    /// masks: P u Q -> R for the outflow, R -> R for the ring's diagonal
+    /// blocks, R -> P u Q for the feedback), the masks, and the modes of
+    /// P u Q with a ring neighbour.
+    outer:LatticeOperator<'p>,inner_mask:Vec<bool>,ring_mask:Vec<bool>,edge_modes:usize,
     pub kernels:SwKernels,
     /// (target, source, step): target = source + step, both in P u Q.
     pub(super) pairs:Vec<(usize,usize,usize)>,
@@ -84,6 +89,9 @@ impl<'p> ErrorLattice<'p>{
         let ring_nu=ring.iter().map(|q|prepared.nu(q)).collect::<Result<Vec<_>,_>>()?;
         let all:Vec<Charge>=modes.iter().chain(&ring).cloned().collect();
         let outer=LatticeOperator::new(prepared,&all)?;
+        let inner_mask:Vec<bool>=(0..all.len()).map(|q|q<modes.len()).collect();let ring_mask:Vec<bool>=inner_mask.iter().map(|&b|!b).collect();
+        let steps=prepared.plan.structural_steps();
+        let edge_modes=modes.iter().filter(|q|ring.iter().any(|r|charge_minus(r,q).is_ok_and(|s|steps.contains(&s)))).count();
         let clock=Instant::now();
         let kernels=SwKernels::new(prepared,basis,rule)?;
         let kernel_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
@@ -103,7 +111,7 @@ impl<'p> ErrorLattice<'p>{
         let classes=built.into_iter().collect::<Result<Vec<_>,_>>()?;
         let class_ms=clock.elapsed().as_secs_f64()*1e3;
         let count=modes.len();
-        Ok(Self{prepared,basis,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,kernels,pairs,classes,class_of,
+        Ok(Self{prepared,basis,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,kernels,pairs,classes,class_of,
             basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],ring_populations:Vec::new(),columns:0,
             work:ErrorWork::default(),build_ms:[kernel_ms,class_ms]})
     }
@@ -136,13 +144,13 @@ impl<'p> ErrorLattice<'p>{
         if count==0{return Ok(Vec::new());}
         let mut field=vec![ZERO;(inner+count)*d];field[..inner*d].copy_from_slice(x);
         let mut out=vec![ZERO;field.len()];
-        self.outer.apply(&field,&mut out)?;self.work.block_operations+=inner+count;
+        self.outer.apply_masked(&field,&mut out,Parts::Full,Some(Mask{targets:&self.ring_mask,sources:&self.inner_mask}))?;self.work.block_operations+=count;
         let source=out[inner*d..].to_vec();let size=norm(&source);
         let mut y=source.clone();self.basis.solve_blocks(&self.ring_nu,ZERO,&mut y)?;self.work.block_solves+=count;
         for _ in 0..RING_REFINEMENTS{
             if size==0.{break;}
             field.fill(ZERO);field[inner*d..].copy_from_slice(&y);
-            self.outer.apply_parts(&field,&mut out,Parts::Diagonal)?;self.work.block_operations+=inner+count;
+            self.outer.apply_masked(&field,&mut out,Parts::Diagonal,Some(Mask{targets:&self.ring_mask,sources:&self.ring_mask}))?;self.work.block_operations+=count;
             let mut r:Vec<C>=source.iter().zip(&out[inner*d..]).map(|(a,b)|C{re:a.re-b.re,im:a.im-b.im}).collect();
             if norm(&r)<=RING_RESIDUAL*size{break;}
             self.basis.solve_blocks(&self.ring_nu,ZERO,&mut r)?;self.work.block_solves+=count;
@@ -157,7 +165,7 @@ impl<'p> ErrorLattice<'p>{
         if y.is_empty(){return Ok(vec![ZERO;inner*d]);}
         let mut field=vec![ZERO;(inner+self.ring.len())*d];field[inner*d..].copy_from_slice(y);
         let mut out=vec![ZERO;field.len()];
-        self.outer.apply(&field,&mut out)?;self.work.block_operations+=inner+self.ring.len();
+        self.outer.apply_masked(&field,&mut out,Parts::Full,Some(Mask{targets:&self.inner_mask,sources:&self.ring_mask}))?;self.work.block_operations+=self.edge_modes;
         out.truncate(inner*d);Ok(out)
     }
     /// Class coordinates V_c^-1 E^-1 (I - S) v of a field on P u Q, per mode.
