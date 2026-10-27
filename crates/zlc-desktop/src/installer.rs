@@ -24,7 +24,8 @@ use crate::{AppEvent, frame, job};
 
 /// What the background work tells the window's turn.
 pub enum Report {
-    /// A check's JSON line, or why there is none (Online: the newest release on GitHub).
+    /// A check's JSON line, or why there is none (Online: how this checkout stands against GitHub,
+    /// GitHub's own count first, marked fetching, then git's).
     Checked(Check, Result<Value, String>),
     /// A line the running step wrote.
     Line(String),
@@ -32,8 +33,8 @@ pub enum Report {
     Ended(Option<i32>),
 }
 
-/// The checks: each one script's status mode, nothing changed. Online asks GitHub (a short
-/// timeout) and holds nothing back: it is not one of ALL, the checks a step waits for.
+/// The checks: each one script's status mode, nothing changed. Online asks GitHub: it is not one of
+/// ALL, the checks every step waits for; the program's steps wait for it (they follow its answer).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Check { Program, Science, Fpga, Tools, Online }
 
@@ -120,21 +121,30 @@ fn decode_in(bytes: &[u8], page: u32) -> String {
     String::from_utf16_lossy(&wide[..size.max(0) as usize])
 }
 
-/// A check's answer: the last JSON line it printed, else why it printed none.
-fn check(which: Check) -> Result<Value, String> {
+/// A check's answer: the last JSON line it printed (unless it failed after it), else why it printed
+/// none. `heard` is told each JSON line as it comes.
+fn check(which: Check, heard: impl Fn(&Value)) -> Result<Value, String> {
     let (script, arguments) = which.script();
     let arguments: Vec<String> = arguments.iter().map(|text| (*text).to_owned()).collect();
-    let child = powershell(script, &arguments).spawn().map_err(|error| format!("Cannot run tools\\{script}: {error}"))?;
+    let mut child = powershell(script, &arguments).spawn().map_err(|error| format!("Cannot run tools\\{script}: {error}"))?;
     let _job = job::limit(&child, None);
-    let output = child.wait_with_output().map_err(|error| error.to_string())?;
-    let text = decode(&output.stdout);
-    if let Some(answer) = text.lines().rev().map(str::trim).find(|line| line.starts_with('{') || line.starts_with('[')) {
-        if let Ok(value) = serde_json::from_str(answer) { return Ok(value); }
+    let errors = child.stderr.take().map(|mut stream| std::thread::spawn(move || { let mut bytes = Vec::new(); let _ = std::io::Read::read_to_end(&mut stream, &mut bytes); bytes }));
+    // The lines since the last JSON one: an ERROR: among them is how it failed.
+    let (mut answer, mut lines) = (None, Vec::<String>::new());
+    for line in child.stdout.take().into_iter().flat_map(|out| std::io::BufReader::new(out).split(b'\n').map_while(Result::ok)) {
+        let text = decode(&line).trim().to_owned();
+        match serde_json::from_str::<Value>(&text) {
+            Ok(value) if text.starts_with('{') || text.starts_with('[') => { heard(&value); answer = Some(value); lines.clear(); }
+            _ if !text.is_empty() => lines.push(text),
+            _ => {}
+        }
     }
-    let errors = decode(&output.stderr);
-    let lines: Vec<&str> = text.lines().chain(errors.lines()).map(str::trim).filter(|line| !line.is_empty()).collect();
-    Err(lines.iter().rev().find(|line| line.starts_with("ERROR:")).or(lines.last()).map(|line| line.trim_start_matches("ERROR:").trim().to_owned())
-        .unwrap_or_else(|| format!("tools\\{script} answered nothing (code {:?})", output.status.code())))
+    let code = child.wait().ok().and_then(|status| status.code());
+    let failed = |lines: &[String]| lines.iter().rev().find(|line| line.starts_with("ERROR:")).map(|line| line.trim_start_matches("ERROR:").trim().to_owned());
+    if let Some(value) = answer { return failed(&lines).map_or(Ok(value), Err); }
+    let errors = errors.and_then(|reader| reader.join().ok()).unwrap_or_default();
+    lines.extend(decode(&errors).lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned));
+    Err(failed(&lines).or_else(|| lines.last().cloned()).unwrap_or_else(|| format!("tools\\{script} answered nothing (code {code:?})")))
 }
 
 /// The components a check box installs: the rows its step completes (its own first), and whether
@@ -153,40 +163,47 @@ fn needed(rows: &[Value], id: &str) -> bool {
 
 /// The Program row against GitHub (`fetch_engine.ps1 -Latest`, `have` the installed program in words).
 /// GitHub ahead of this checkout: Update pulls it (a fast-forward) and then installs the release it
-/// names; when it cannot pull, the words say why and the pull is the operator's. A check that could
-/// not ask GitHub -- no git, a fetch that failed, the check itself refused -- says so: it never reads
-/// as up to date. Still checking: the row as the checkout's own status has it.
-fn against_github(state: &'static str, words: &'static str, mut detail: String, have: &str, online: Option<&Result<Value, String>>)
+/// names, as installation.exe does by itself (Installer::update_due); when it cannot fast-forward the
+/// row says why, and Update fails saying it. Still asking: the row says so, with GitHub's own count
+/// once it has it. A check that could not learn how far behind -- no git, a fetch that failed, the
+/// check itself refused -- says so: it never reads as up to date.
+fn against_github(state: &'static str, words: &'static str, detail: String, have: &str, online: Option<&Result<Value, String>>)
     -> (&'static str, &'static str, String) {
-    let unchecked = |mut detail: String, why: &str| {
-        detail.push_str(&format!(" · GitHub was not checked for newer commits: {why}"));
-        (state, if state == "ok" { "Not checked online" } else { words }, detail)
+    // A note after the checkout's own detail; its words too when that reads up to date.
+    let noted = |mut detail: String, ok_words: &'static str, note: String| {
+        detail.push_str(&format!(" · {note}"));
+        match state { "ok" if ok_words == "Checking online…" => ("checking", ok_words, detail), "ok" => (state, ok_words, detail), _ => (state, words, detail) }
     };
     let latest = match online {
-        None => return (state, words, detail),
-        Some(Err(error)) => return unchecked(detail, error),
+        None => return noted(detail, "Checking online…", "checking GitHub for newer commits…".into()),
+        Some(Err(error)) => return noted(detail, "Not checked online", format!("GitHub was not checked for newer commits: {error}")),
         Some(Ok(latest)) => latest,
     };
-    let (pull, release) = (&latest["pull"], latest["tag"].as_str().filter(|_| latest["newer"] == true));
-    let behind = pull["behind"].as_u64().unwrap_or(0);
-    let release = release.map(|tag| format!(", release {tag}")).unwrap_or_default();
-    if pull["pullable"] == true {
-        return ("missing", "Update", format!("{have} · GitHub has {behind} newer commit(s){release}: Update pulls them and installs the program they name"));
+    let (pull, tag) = (&latest["pull"], latest["tag"].as_str().filter(|_| latest["newer"] == true));
+    let (behind, why, release) = (pull["behind"].as_u64(), pull["why"].as_str().unwrap_or(""), tag.map(|tag| format!(", release {tag}")).unwrap_or_default());
+    match behind {
+        Some(behind) if pull["fetching"] == true && behind > 0 => noted(detail, "Checking online…", format!("GitHub has {behind} newer commit(s){release}: fetching them…")),
+        _ if pull["fetching"] == true => noted(detail, "Checking online…", "checking GitHub for newer commits…".into()),
+        Some(behind) if pull["pullable"] == true =>
+            ("missing", "Update", format!("{have} · GitHub has {behind} newer commit(s){release}: Update pulls them and installs the program they name")),
+        Some(0) => match tag { Some(tag) => noted(detail, "Newer online", format!("GitHub has release {tag}, newer than this checkout's, on no commit this branch lacks")), None => (state, words, detail) },
+        Some(behind) => ("missing", "Cannot pull", format!("{have} · GitHub has {behind} newer commit(s){release}, not pulled: {why}")),
+        None => noted(detail, "Not checked online", format!("GitHub was not checked for newer commits: {why}")),
     }
-    if behind > 0 || !release.is_empty() {
-        let why = pull["why"].as_str().unwrap_or("pull the repository to get it");
-        detail.push_str(&format!(" · GitHub is ahead{release}: {why}"));
-        return (state, if state == "ok" { "Newer online" } else { words }, detail);
-    }
-    // Nothing behind, yet a reason: how far behind could not be learned at all.
-    match pull["why"].as_str() { Some(why) => unchecked(detail, why), None => (state, words, detail) }
 }
+
+/// Whether GitHub is known to have no commit this checkout lacks: else the program's steps pull first.
+fn level(online: Option<&Result<Value, String>>) -> bool { matches!(online, Some(Ok(latest)) if latest["pull"]["behind"] == 0) }
 
 pub struct Installer {
     proxy: EventLoopProxy<AppEvent>,
     checks: [Option<Result<Value, String>>; 4],
     checking: usize,
     online: Option<Result<Value, String>>,
+    /// The online check is under way: GitHub's own count may be in, git's answer is not.
+    asking: bool,
+    /// installation.exe started the update by itself (once a window).
+    updated: bool,
     /// The check boxes the operator changed since a step of theirs last ended well: the others follow the status.
     picked: BTreeMap<&'static str, bool>,
     /// The components whose last step failed, with its end line: broken whatever their package
@@ -207,8 +224,9 @@ pub struct Installer {
     /// Counts the closes asked while a step runs: the page asks the operator each time.
     close_asked: u64,
     log_file: Option<String>,
-    /// The operator's steps include the program: once they all end well and the check finds the
-    /// new engine waiting (this window runs from bin\engine), the window starts again by itself.
+    /// The steps under way (the operator's or the update's own) include the program: once they all
+    /// end well and the check finds the new engine waiting (this window runs from bin\engine), the
+    /// window starts again by itself.
     restart_after: bool,
 }
 
@@ -217,11 +235,22 @@ const LOG_LINES: usize = 20_000;
 
 impl Installer {
     fn new(proxy: EventLoopProxy<AppEvent>, log_file: Option<String>) -> Installer {
-        Installer { proxy, checks: [None, None, None, None], checking: 0, online: None, picked: BTreeMap::new(), failed: BTreeMap::new(), plan_only: false, force_build: false, queue: VecDeque::new(),
-                    running: None, stopped: false, last: None, log: Vec::new(), sent: 0, flush_at: None, close_asked: 0, log_file, restart_after: false }
+        Installer { proxy, checks: [None, None, None, None], checking: 0, online: None, asking: false, updated: false, picked: BTreeMap::new(), failed: BTreeMap::new(), plan_only: false,
+                    force_build: false, queue: VecDeque::new(), running: None, stopped: false, last: None, log: Vec::new(), sent: 0, flush_at: None, close_asked: 0, log_file, restart_after: false }
     }
 
-    /// Whether the window should start again now: the operator's program update ended well, every
+    /// Whether installation.exe should update by itself now, and by how many commits: GitHub has
+    /// commits this checkout can fast-forward to, every check has answered and nothing runs -- once
+    /// a window. Update's program steps then run as the operator's would.
+    fn update_due(&mut self) -> Option<u64> {
+        let Some(Ok(latest)) = &self.online else { return None };
+        let idle = self.running.is_none() && self.queue.is_empty() && self.checking == 0 && self.checks.iter().all(Option::is_some);
+        if self.updated || !idle || latest["pull"]["pullable"] != true { return None; }
+        self.updated = true;
+        Some(latest["pull"]["behind"].as_u64().unwrap_or(0))
+    }
+
+    /// Whether the window should start again now: a program update ended well, every
     /// check has answered, and the new engine waits in bin\engine.next for this one to end.
     fn restart_due(&mut self) -> bool {
         let staged = matches!(self.answer(Check::Program), Some(Ok(program)) if program["relation"] == "staged");
@@ -231,12 +260,20 @@ impl Installer {
         staged && self.last.as_ref().is_some_and(|(_, ok)| *ok)
     }
 
+    /// Every check again; the online one unless it is still under way (one git fetch at a time).
     fn check_all(&mut self) {
         if self.checking > 0 || self.running.is_some() { return; }
-        for which in Check::ALL.into_iter().chain([Check::Online]) {
+        let online = !self.asking;
+        if online { self.asking = true; self.online = None; }
+        for which in Check::ALL.into_iter().chain(online.then_some(Check::Online)) {
             if which != Check::Online { self.checking += 1; }
             let proxy = self.proxy.clone();
-            std::thread::spawn(move || { let _ = proxy.send_event(AppEvent::Installer(Report::Checked(which, check(which)))); });
+            std::thread::spawn(move || {
+                let tell = |answer| { let _ = proxy.send_event(AppEvent::Installer(Report::Checked(which, answer))); };
+                // Online's lines go as they come: GitHub's own count, then git's answer.
+                let answer = check(which, |value| if which == Check::Online { tell(Ok(value.clone())) });
+                if which != Check::Online || answer.is_err() { tell(answer); }
+            });
         }
     }
 
@@ -402,45 +439,50 @@ impl Installer {
         rows
     }
 
+    /// A component's install step, as the plan-only option has it (a dry run).
+    fn step(&self, component: &'static str, title: &str, script: &'static str, arguments: &[&str]) -> Step {
+        let title = if self.plan_only { format!("{title} (plan only)") } else { title.to_owned() };
+        let arguments = arguments.iter().map(|text| (*text).to_owned()).chain(self.plan_only.then(|| "-DryRun".to_owned())).collect();
+        Step { title, script, arguments, outcome: Outcome::Install, component: Some(component) }
+    }
+
+    /// The program's steps: unless GitHub is known to have no newer commit, this checkout is brought
+    /// up first -- a fast-forward, else the step fails saying why, so a run never ends well with
+    /// GitHub ahead and nothing pulled -- then the release the checkout names is put in place.
+    fn program(&self) -> Vec<Step> {
+        let pull = (!level(self.online.as_ref())).then(|| self.step("program", "Pull this checkout from GitHub", "fetch_engine.ps1", &["-Pull"]));
+        pull.into_iter().chain([self.step("program", "Program (this checkout's release)", "fetch_engine.ps1", &[])]).collect()
+    }
+
     /// Install selected (or, `missing_only`, what is missing or broken), in the order they build on.
     fn plan(&self, missing_only: bool) -> Vec<Step> {
         let rows = self.components();
         let wanted = |id: &str| if missing_only { needed(&rows, id) } else { rows.iter().any(|row| row["id"] == id && row["selected"] == true) };
-        let dry = |arguments: &[&str]| -> Vec<String> { arguments.iter().map(|text| (*text).to_owned()).chain(self.plan_only.then(|| "-DryRun".to_owned())).collect() };
-        let named = |title: &str| if self.plan_only { format!("{title} (plan only)") } else { title.to_owned() };
-        let step = |component: &'static str, title: &str, script: &'static str, arguments: &[&str]|
-            Step { title: named(title), script, arguments: dry(arguments), outcome: Outcome::Install, component: Some(component) };
-        let mut steps = Vec::new();
-        if wanted("program") {
-            // A checkout behind GitHub is brought up first: the program step then reads the release it names.
-            if matches!(&self.online, Some(Ok(latest)) if latest["pull"]["pullable"] == true) {
-                steps.push(step("program", "Pull this checkout from GitHub", "fetch_engine.ps1", &["-Pull"]));
-            }
-            steps.push(step("program", "Program (this checkout's release)", "fetch_engine.ps1", &[]));
-        }
+        let mut steps = if wanted("program") { self.program() } else { Vec::new() };
         // Pylon and the GPU install into the environment (a venv, using the base's packages when it
         // can): one whose base lacks numpy, scipy or Pillow is made first.
         let usable = matches!(self.answer(Check::Science), Some(Ok(science)) if science["exists"] == true || science["inherit"] == true);
         if wanted("environment") || (!usable && (wanted("pylon") || wanted("slm_gpu"))) {
-            steps.push(step("environment", "Science environment", "install_science.ps1", &["-Group", "runtime"]));
+            steps.push(self.step("environment", "Science environment", "install_science.ps1", &["-Group", "runtime"]));
         }
-        if wanted("pylon") { steps.push(step("pylon", "Basler pylon", "install_science.ps1", &["-Group", "pylon"])); }
+        if wanted("pylon") { steps.push(self.step("pylon", "Basler pylon", "install_science.ps1", &["-Group", "pylon"])); }
         if wanted("slm_gpu") {
             // Installed but not yet warmed: the warmup alone (the install warms after installing).
             let installed = rows.iter().any(|row| row["id"] == "slm_gpu" && row["state"] == "ok");
             steps.push(if missing_only && installed { Step { component: Some("slm_gpu"), ..Step::new("SLM GPU warmup", "warm_slm_gpu.ps1", &[], Outcome::Warm) } }
-                       else { step("slm_gpu", "SLM GPU (CuPy and CUDA, then warmed)", "install_science.ps1", &["-Group", "slm-gpu"]) });
+                       else { self.step("slm_gpu", "SLM GPU (CuPy and CUDA, then warmed)", "install_science.ps1", &["-Group", "slm-gpu"]) });
         }
-        if wanted("tools") { steps.push(step("tools", "Development toolchain", "dev_setup.ps1", &[])); }
+        if wanted("tools") { steps.push(self.step("tools", "Development toolchain", "dev_setup.ps1", &[])); }
         steps
     }
 
     fn state(&self) -> Value {
         let running = self.running.as_ref().map(|(step, _)| json!({"title": step.title, "stopping": self.stopped}));
         json!({"type": "state", "installation": {
-            "components": self.components(), "checking": self.checking > 0, "running": running,
-            // The engine this window runs from was replaced: it starts again to run the new one.
-            "restart": matches!(self.answer(Check::Program), Some(Ok(program)) if program["relation"] == "staged"),
+            "components": self.components(), "checking": self.checking > 0, "asking": self.asking, "running": running,
+            // The engine this window runs from was replaced: it starts again to run the new one -- by
+            // itself after a program update of its own (restart_due), else when the operator says.
+            "restart": !self.restart_after && matches!(self.answer(Check::Program), Some(Ok(program)) if program["relation"] == "staged"),
             "queue": self.queue.iter().map(|step| step.title.clone()).collect::<Vec<_>>(),
             "plan_only": self.plan_only, "force_build": self.force_build, "close_asked": self.close_asked, "log_file": self.log_file,
             "last": self.last.as_ref().map(|(text, ok)| json!({"text": text, "ok": ok})),
@@ -503,6 +545,8 @@ impl Installer {
         if self.running.is_some() { return Err("A step is under way: wait for it or stop it".into()); }
         // What to do, and what a step's end is checked against, is the status: a check under way decides it.
         if self.checking > 0 { return Err("Checking this PC: wait for the check to finish".into()); }
+        // The program's steps follow GitHub's answer (whether the checkout is pulled first).
+        if self.asking && steps.iter().any(|step| step.component == Some("program")) { return Err("Checking GitHub for newer commits: wait for it to finish".into()); }
         self.restart_after = !self.plan_only && steps.iter().any(|step| step.component == Some("program"));
         self.queue = steps.into();
         self.last = None;
@@ -518,7 +562,11 @@ impl Installer {
 
     fn report(&mut self, report: Report) {
         match report {
-            Report::Checked(Check::Online, answer) => self.online = Some(answer),
+            Report::Checked(Check::Online, answer) => {
+                // GitHub's own count comes marked fetching: git's answer is still to come.
+                self.asking = matches!(&answer, Ok(latest) if latest["pull"]["fetching"] == true);
+                self.online = Some(answer);
+            }
             Report::Checked(which, answer) => {
                 self.checking = self.checking.saturating_sub(1);
                 self.checks[Check::ALL.iter().position(|item| *item == which).unwrap()] = Some(answer);
@@ -603,6 +651,11 @@ pub fn run(event_loop: EventLoop<AppEvent>, context: WebContext, setup: Setup, l
                         *flow = ControlFlow::Exit;
                         return Ok(());
                     }
+                    // GitHub has commits this checkout can fast-forward to: installation.exe updates by itself.
+                    if let Some(behind) = installer.update_due() {
+                        installer.line(format!("GitHub has {behind} newer commit(s): updating this checkout…"));
+                        installer.start(installer.program())?;
+                    }
                     // A step that writes without pause still shows its lines every 50 ms.
                     if ended || installer.flush_at.is_some_and(|at| Instant::now() >= at) { installer.flush(&windows)?; }
                     if ended { windows.send_to(&Kind::Installer, &installer.state())?; }
@@ -672,20 +725,88 @@ mod tests {
         assert!(super::needed(&pylon, "pylon"));
     }
 
-    /// A Program row never reads as up to date when GitHub could not be asked.
+    use serde_json::{Value, json};
+
+    /// `fetch_engine.ps1 -Latest`'s answer with this pull standing.
+    fn online(pull: Value) -> Option<Result<Value, String>> { Some(Ok(json!({"tag": "v1", "newer": false, "pull": pull}))) }
+
+    /// An installer every check has answered, with this online answer; its events go nowhere.
+    fn installer(answer: Option<Result<Value, String>>) -> super::Installer {
+        use tao::platform::windows::EventLoopBuilderExtWindows;
+        let events = tao::event_loop::EventLoopBuilder::<super::AppEvent>::with_user_event().with_any_thread(true).build();
+        let mut installer = super::Installer::new(events.create_proxy(), None);
+        installer.checks = [(); 4].map(|_| Some(Ok(json!({}))));
+        installer.online = answer;
+        installer
+    }
+
+    /// The Program row says whether GitHub is being asked, how far ahead it is and why it cannot be
+    /// pulled; it never reads as up to date when GitHub could not be asked.
     #[test]
-    fn the_program_row_says_when_github_could_not_be_checked() {
-        let row = |online: Option<Result<serde_json::Value, String>>| super::against_github("ok", "Installed", "v1: this checkout's release".into(), "v1", online.as_ref());
-        let pull = |pull: serde_json::Value| Some(Ok(serde_json::json!({"tag": "v1", "newer": false, "pull": pull})));
-        assert_eq!(row(None), ("ok", "Installed", "v1: this checkout's release".into()));
-        assert_eq!(row(pull(serde_json::json!({"behind": 0, "pullable": false, "why": null}))), ("ok", "Installed", "v1: this checkout's release".into()));
-        assert_eq!(row(pull(serde_json::json!({"behind": 2, "pullable": true}))).1, "Update");
-        let (_, words, detail) = row(pull(serde_json::json!({"behind": 2, "pullable": false, "why": "GitHub did not answer git fetch (timeout)"})));
-        assert!(words == "Newer online" && detail.ends_with("GitHub is ahead: GitHub did not answer git fetch (timeout)"), "{detail}");
-        let (_, words, detail) = row(pull(serde_json::json!({"behind": 0, "pullable": false, "why": "git was not found on this PC: pull with GitHub Desktop"})));
-        assert!(words == "Not checked online" && detail.ends_with("not checked for newer commits: git was not found on this PC: pull with GitHub Desktop"), "{detail}");
-        let (_, words, detail) = row(Some(Err("GitHub did not answer, and git was not found".into())));
-        assert!(words == "Not checked online" && detail.ends_with("GitHub did not answer, and git was not found"), "{detail}");
+    fn the_program_row_says_how_this_checkout_stands_against_github() {
+        let row = |online: Option<Result<Value, String>>| super::against_github("ok", "Installed", "v1: this checkout's release".into(), "v1", online.as_ref());
+        assert_eq!(row(None), ("checking", "Checking online…", "v1: this checkout's release · checking GitHub for newer commits…".into()));
+        assert_eq!(row(online(json!({"behind": 3, "fetching": true}))), ("checking", "Checking online…", "v1: this checkout's release · GitHub has 3 newer commit(s): fetching them…".into()));
+        assert_eq!(row(online(json!({"behind": null, "fetching": true}))).1, "Checking online…");
+        assert_eq!(row(online(json!({"behind": 0, "pullable": false, "why": null}))), ("ok", "Installed", "v1: this checkout's release".into()));
+        assert_eq!(row(online(json!({"behind": 2, "pullable": true}))), ("missing", "Update", "v1 · GitHub has 2 newer commit(s): Update pulls them and installs the program they name".into()));
+        let why = "local edits to 1 file(s) the update changes (README.md): commit or discard them first";
+        assert_eq!(row(online(json!({"behind": 2, "pullable": false, "why": why}))), ("missing", "Cannot pull", format!("v1 · GitHub has 2 newer commit(s), not pulled: {why}")));
+        let (state, words, detail) = row(online(json!({"behind": null, "pullable": false, "why": "git was not found on this PC: pull with GitHub Desktop"})));
+        assert!(state == "ok" && words == "Not checked online" && detail.ends_with("not checked for newer commits: git was not found on this PC: pull with GitHub Desktop"), "{detail}");
+        let (_, words, detail) = row(Some(Err("Cannot run tools\\fetch_engine.ps1".into())));
+        assert!(words == "Not checked online" && detail.ends_with("Cannot run tools\\fetch_engine.ps1"), "{detail}");
+        // A row that says more than "up to date" keeps its words; the note follows its detail.
+        let older = super::against_github("missing", "Update", "v0 is older".into(), "v0", None);
+        assert_eq!(older, ("missing", "Update", "v0 is older · checking GitHub for newer commits…".into()));
+    }
+
+    /// The checkout is pulled before the program whenever GitHub may be ahead -- pullable or not, or
+    /// GitHub's answer missing or failed -- and a pull that fails ends the run: it never ends well
+    /// with nothing pulled.
+    #[test]
+    fn the_program_steps_pull_first_unless_github_has_nothing_newer() {
+        let titles = |answer| installer(answer).program().iter().map(|step| step.title.clone()).collect::<Vec<_>>();
+        let pulled = ["Pull this checkout from GitHub", "Program (this checkout's release)"];
+        for answer in [None, Some(Err("no answer".into())), online(json!({"behind": 2, "fetching": true})), online(json!({"behind": 2, "pullable": true})),
+                       online(json!({"behind": 2, "pullable": false, "why": "local edits"})), online(json!({"behind": null, "why": "git could not fetch"}))] {
+            assert_eq!(titles(answer.clone()), pulled, "{answer:?}");
+        }
+        assert_eq!(titles(online(json!({"behind": 0, "why": null}))), ["Program (this checkout's release)"]);
+        // Install selected with the program checked runs the same steps.
+        let mut selected = installer(online(json!({"behind": 2, "pullable": false, "why": "local edits"})));
+        selected.picked.insert("program", true);
+        assert_eq!(selected.plan(false).iter().map(|step| step.title.as_str()).take(2).collect::<Vec<_>>(), pulled);
+        // The pull fails: the program step after it never starts, and the run ends failed.
+        let mut run = installer(online(json!({"behind": 2, "pullable": false, "why": "local edits"})));
+        let mut steps = run.program().into_iter();
+        run.running = Some((steps.next().unwrap(), None));
+        run.queue = steps.collect();
+        run.checking = 1; // a check under way: the run's end starts no checks here
+        run.report(super::Report::Ended(Some(1)));
+        assert!(run.running.is_none() && run.queue.is_empty());
+        assert_eq!(run.last, Some(("Pull this checkout from GitHub failed with code 1. Read the messages above.".into(), false)));
+    }
+
+    /// installation.exe starts the update itself once a window, when git can fast-forward and every
+    /// check has answered -- never when the pull is blocked, nor while GitHub is still being asked.
+    #[test]
+    fn installation_updates_by_itself_once_when_it_can_fast_forward() {
+        let mut pullable = installer(online(json!({"behind": 3, "pullable": true})));
+        pullable.checks[1] = None;
+        assert_eq!(pullable.update_due(), None);
+        pullable.checks[1] = Some(Ok(json!({})));
+        assert_eq!(pullable.update_due(), Some(3));
+        assert_eq!(pullable.update_due(), None);
+        for answer in [None, online(json!({"behind": 3, "fetching": true})), online(json!({"behind": 3, "pullable": false, "why": "local edits"})),
+                       online(json!({"behind": 0})), Some(Err("no answer".into()))] {
+            assert_eq!(installer(answer.clone()).update_due(), None, "{answer:?}");
+        }
+        // Its steps wait for GitHub's answer while it is being asked.
+        let mut asking = installer(online(json!({"behind": 3, "fetching": true})));
+        asking.asking = true;
+        let steps = asking.program();
+        assert_eq!(asking.start(steps), Err("Checking GitHub for newer commits: wait for it to finish".into()));
     }
 
     #[test]

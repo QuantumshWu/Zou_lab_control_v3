@@ -181,7 +181,7 @@ class InstallationView {
         this.planOnly.disabled = busy;
         this.force.disabled = busy;
         const states = installation.components.map(component => component.state);
-        setState(this.dot, busy || installation.checking ? "task" : states.includes("error") ? "error" : states.includes("missing") ? "warning" : "running");
+        setState(this.dot, busy || installation.checking || installation.asking ? "task" : states.includes("error") ? "error" : states.includes("missing") ? "warning" : "running");
         const file = installation.log_file ?? "";
         this.logName.textContent = file.split(/[\\/]/).pop() ?? "";
         this.logName.title = file ? `This window's log: ${file}` : "";
@@ -221,8 +221,9 @@ class InstallationView {
         const installation = this.installation();
         const idle = installation?.running ? [`${sentence(installation.running.title)}${installation.queue.length ? ` (then ${installation.queue.join(", ")})` : ""}…`, "task"]
             : installation?.checking ? ["Checking this PC…", "task"]
-                : installation?.last ? [installation.last.text, installation.last.ok ? "idle" : "error"]
-                    : installation ? ["What is missing or broken starts checked: Fill in missing installs that, Install selected what is checked.", "idle"] : ["Checking this PC…", "task"];
+                : installation?.asking ? ["Checking GitHub for newer commits…", "task"]
+                    : installation?.last ? [installation.last.text, installation.last.ok ? "idle" : "error"]
+                        : installation ? ["What is missing or broken starts checked: Fill in missing installs that, Install selected what is checked.", "idle"] : ["Checking this PC…", "task"];
         const [text, word] = queueStatus(this.ctx.transport, idle);
         this.strip.show(text, word);
     }

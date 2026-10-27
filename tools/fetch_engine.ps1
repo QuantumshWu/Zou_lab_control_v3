@@ -2,13 +2,15 @@ param(
     # installation.exe's check: one JSON line -- the release this checkout names (bin\release.json),
     # the engine in bin\engine, and how they relate. Nothing changes.
     [switch]$Status,
-    # installation.exe's online check: one JSON line -- the newest release published on GitHub,
+    # installation.exe's online check: two JSON lines -- the newest release published on GitHub,
     # whether it is newer than this checkout's (a short timeout), and how this checkout stands
-    # against the branch it follows on GitHub (after a git fetch; the working tree is not touched).
+    # against the branch it follows on GitHub: GitHub's own count, then git's after a fetch (the
+    # working tree is not touched).
     [switch]$Latest,
     # Bring this checkout up to the branch it follows on GitHub: a fetch and a fast-forward only,
     # refused (nothing changed) when this checkout has commits of its own or local edits to files
-    # the update changes. installation.exe's Update runs it before the program step.
+    # the update changes, saying why. installation.exe runs it before the program step unless GitHub
+    # is known to have nothing newer.
     [switch]$Pull,
     # Only put a downloaded engine (bin\engine.next) in place, waiting up to this many seconds for
     # the programs running from bin to end (the four programs' first step).
@@ -140,8 +142,8 @@ function Find-Git {
     $null
 }
 
-# git -C <checkout> <arguments>, never asking for credentials, ended after $Seconds: its exit
-# code and its output lines (stdout, then stderr).
+# git -C <checkout> <arguments>, never asking for credentials, ended after $Seconds: its exit code
+# and its output lines (stdout, then stderr).
 function Invoke-Git([string]$Git, [string[]]$Arguments, [int]$Seconds = 60) {
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $Git
@@ -153,12 +155,20 @@ function Invoke-Git([string]$Git, [string[]]$Arguments, [int]$Seconds = 60) {
     $process = [Diagnostics.Process]::Start($start)
     $out = $process.StandardOutput.ReadToEndAsync(); $err = $process.StandardError.ReadToEndAsync()
     if (-not $process.WaitForExit($Seconds * 1000)) {
+        # Its own children (git-remote-https) keep the pipes open: what they wrote is not waited for.
         try { $process.Kill() } catch {}
-        return [pscustomobject]@{ Code = -1; Lines = @("git $($Arguments[0]) took longer than $Seconds s") }
+        return [pscustomobject]@{ Code = -1; Lines = @("git $($Arguments[0]) gave no answer in $Seconds s") }
     }
     $process.WaitForExit()
     $lines = @(($out.Result + "`n" + $err.Result) -split "`r?`n" | Where-Object { $_ -ne '' })
     [pscustomobject]@{ Code = $process.ExitCode; Lines = $lines }
+}
+
+# Why a git command failed, as git said it: its lines up to its first fatal: or error: one (ssh's
+# own reason comes before git's).
+function Get-GitReason($Answer) {
+    $said = foreach ($line in $Answer.Lines) { $line.Trim(); if ($line -match '^(fatal|error):') { break } }
+    @($said) -join ' '
 }
 
 # This checkout's branch and commit as its .git folder records them, read without git, or $null
@@ -181,14 +191,13 @@ function Read-GitHead {
     if ("$commit" -match '^[0-9a-f]{40}$') { [pscustomobject]@{ branch = $branch; commit = $commit } } else { $null }
 }
 
-# How many commits GitHub's $Branch (this checkout's own, when empty) has that this checkout does
-# not, asked of GitHub itself (its compare API, no git), or $null when GitHub cannot say.
-function Get-BehindOnGitHub([string]$Branch) {
+# How many commits GitHub's branch of this checkout's branch name has that this checkout does not,
+# asked of GitHub itself (its compare API, no git: a second or two), or $null when GitHub cannot say.
+function Get-BehindOnGitHub {
     $head = Read-GitHead
     if (-not $head) { return $null }
-    $name = if ($Branch) { $Branch } else { $head.branch }
     try {
-        $request = [Net.WebRequest]::Create("https://api.github.com/repos/$ZlcRepository/compare/$($head.commit)...$([Uri]::EscapeDataString($name))")
+        $request = [Net.WebRequest]::Create("https://api.github.com/repos/$ZlcRepository/compare/$($head.commit)...$([Uri]::EscapeDataString($head.branch))")
         $request.Timeout = 10000
         $request.UserAgent = 'zlc-fetch-engine'
         $request.Accept = 'application/vnd.github+json'
@@ -199,10 +208,11 @@ function Get-BehindOnGitHub([string]$Branch) {
 }
 
 # How this checkout stands against the branch it follows on GitHub, after fetching it: commits
-# behind and ahead, the local edits an update would overwrite, and whether a fast-forward can
-# bring it up (pullable). 'why' says, in the operator's words, why it cannot.
-function Get-PullState([int]$Seconds) {
-    $state = [ordered]@{ git = $null; branch = $null; upstream = $null; behind = 0; ahead = 0; blocked = @(); pullable = $false; why = $null }
+# behind and ahead ($null: not learned), the local edits an update would overwrite, and whether a
+# fast-forward can bring it up (pullable). 'why' says, in the operator's words, why it cannot; 'url'
+# says where git fetched from. $Say: the fetch is announced first.
+function Get-PullState([int]$Seconds, [switch]$Say) {
+    $state = [ordered]@{ git = $null; branch = $null; upstream = $null; url = $null; behind = $null; ahead = $null; blocked = @(); pullable = $false; why = $null }
     $git = Find-Git
     if (-not $git) { $state.why = 'git was not found on this PC: pull with GitHub Desktop'; return $state }
     $state.git = $git
@@ -213,10 +223,13 @@ function Get-PullState([int]$Seconds) {
     if ($upstream.Code -ne 0) { $state.why = "branch $($state.branch) follows no branch on GitHub: pull with GitHub Desktop"; return $state }
     $state.upstream = $upstream.Lines[0]
     $remote = (Invoke-Git $git @('config', "branch.$($state.branch).remote") 10).Lines | Select-Object -First 1
+    $state.url = (Invoke-Git $git @('remote', 'get-url', $remote) 10).Lines | Select-Object -First 1
+    if ($Say) { Write-Host "Fetching $($state.url) ..." }
     $fetch = Invoke-Git $git @('fetch', '--quiet', $remote) $Seconds
-    if ($fetch.Code -ne 0) { $state.why = "GitHub did not answer git fetch ($($fetch.Lines | Select-Object -Last 1))"; return $state }
-    $counts = (Invoke-Git $git @('rev-list', '--left-right', '--count', 'HEAD...@{u}') 10).Lines | Select-Object -First 1
-    if ("$counts" -match '^(\d+)\s+(\d+)$') { $state.ahead = [int]$Matches[1]; $state.behind = [int]$Matches[2] }
+    if ($fetch.Code -ne 0) { $state.why = "git could not fetch $($state.url): $(Get-GitReason $fetch); pull with GitHub Desktop"; return $state }
+    $counts = Invoke-Git $git @('rev-list', '--left-right', '--count', 'HEAD...@{u}') 10
+    if ("$($counts.Lines | Select-Object -First 1)" -match '^(\d+)\s+(\d+)$') { $state.ahead = [int]$Matches[1]; $state.behind = [int]$Matches[2] }
+    else { $state.why = "git could not compare this checkout with $($state.upstream): $(Get-GitReason $counts)"; return $state }
     if ($state.behind -eq 0) { return $state }
     if ($state.ahead -gt 0) { $state.why = "this checkout has $($state.ahead) commit(s) of its own that GitHub does not: merge with GitHub Desktop"; return $state }
     # Local edits (staged, unstaged or new files) to paths the update changes would be overwritten.
@@ -274,22 +287,21 @@ if ($Latest) {
         if ($location -match '/tag/([^/?#]+)$') { $tag = [Uri]::UnescapeDataString($Matches[1]) }
     } catch {}
     $newer = $tag -and $expected -and (Get-Version ($tag -replace '^v', '')) -gt (Get-Version $expected.version)
-    # A lab network may take a while to answer git; the window shows the rest meanwhile.
-    $standing = Get-PullState 60
+    # GitHub's own count first, while git has yet to fetch (the window says it meanwhile): a first
+    # line marked fetching, then git's answer.
+    $counted = Get-BehindOnGitHub
+    [ordered]@{ tag = $tag; newer = [bool]$newer; pull = [ordered]@{ behind = $counted; fetching = $true } } | ConvertTo-Json -Compress -Depth 4
+    $standing = Get-PullState 30
     # git could not say how this checkout stands (none, no branch it follows, a fetch that failed):
-    # GitHub says how far behind it is, so the window never reads up to date when it cannot know.
-    if ($standing.why -and -not $standing.behind -and -not $standing.ahead) {
-        $behind = Get-BehindOnGitHub ("$($standing.upstream)" -replace '^[^/]+/', '')
-        if ($null -ne $behind) { $standing.behind = $behind; if ($behind -eq 0) { $standing.why = $null } }
-    }
-    if (-not $tag -and -not $standing.git) { throw 'GitHub did not answer, and git was not found' }
+    # GitHub's count does, so the window never reads up to date when it cannot know.
+    if ($null -eq $standing.behind -and $null -ne $counted) { $standing.behind = $counted; if (-not $counted) { $standing.why = $null } }
     [ordered]@{ tag = $tag; newer = [bool]$newer; pull = $standing } | ConvertTo-Json -Compress -Depth 4
     return
 }
 
 if ($Pull) {
-    $state = Get-PullState 300
-    if (-not $state.git -or (-not $state.upstream) -or ($state.why -and -not $state.behind)) { throw $state.why }
+    $state = Get-PullState 300 -Say
+    if ($null -eq $state.behind) { throw $state.why }
     if ($state.behind -eq 0) { Write-Host "Up to date with $($state.upstream)."; return }
     $log = @((Invoke-Git $state.git @('log', '--oneline', '--no-decorate', '-n', '15', 'HEAD..@{u}') 30).Lines)
     Write-Host "$($state.upstream) on GitHub has $($state.behind) commit(s) this checkout does not:"
@@ -299,7 +311,7 @@ if ($Pull) {
     if ($DryRun) { Write-Host 'Dry run -- a fast-forward would bring them in; nothing changed.'; return }
     $before = (Invoke-Git $state.git @('rev-parse', '--short', 'HEAD') 10).Lines | Select-Object -First 1
     $merge = Invoke-Git $state.git @('merge', '--ff-only', '--quiet', '@{u}') 300
-    if ($merge.Code -ne 0) { throw "git could not fast-forward ($($merge.Lines | Select-Object -Last 1)); nothing was changed" }
+    if ($merge.Code -ne 0) { throw "git could not fast-forward ($(Get-GitReason $merge)); nothing was changed" }
     $after = (Invoke-Git $state.git @('rev-parse', '--short', 'HEAD') 10).Lines | Select-Object -First 1
     Write-Host "Pulled: $before -> $after. The program step that follows installs the release this checkout now names."
     return
