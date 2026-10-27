@@ -1,0 +1,86 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Panel Edit save regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<div id="host"></div>
+<script type="module">
+// Run with tools/test_ui.ps1. The Edit page's Save figure under the real style sheet and the real dialog: a host
+// that finds the image or the archive already there writes nothing and answers {exists: [...]}; the page lists those
+// files and asks Overwrite (the same save again, told to overwrite) or Cancel (nothing more sent). Every request is recorded.
+import {PanelEditView} from '../dist/views/panel_edit.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+const check=async(name,test)=>{await test();results.push(name)};
+// A request's answer and the dialog it opens come after the click.
+const settle=()=>new Promise(resolve=>setTimeout(resolve));
+// The host: each save is answered with the next of `answers` (the state's `saved`).
+const requests=[],notes=[],answers=[];
+const transport={request:(command,_feedback,pick)=>{requests.push(command);return Promise.resolve(pick({},{saved:answers.shift()}))},
+  note:text=>notes.push(text),choosePath:()=>Promise.resolve(null)};
+const view=new PanelEditView('edit-panel-1','panel-1',{views:new Map(),signals:[]},()=>0,()=>{},transport);
+document.getElementById('host').append(view.root);
+const DAY='C:\\data\\2026_10_27';
+view.update({id:'edit-panel-1',kind:'image',frame:{width:12,height:8,sequence:1},controls:[],binding:{signal:'@logic/cam/frames'},
+  edit:{panel:'panel-1',at_ms:0,revision:3,advanced:false,shape:[8,12],status:'frozen and ready to save'}},'Camera',[],DAY);
+const dialog=()=>document.querySelector('dialog.dialog');
+const button=(text)=>[...dialog().querySelectorAll('button')].find(node=>node.textContent.trim()===text);
+const IMAGE=`${DAY}\\scan.png`,ARCHIVE=`${DAY}\\scan.npz`;
+try {
+ await check('a typed name is saved as typed, not told to overwrite',async()=>{
+   view.autoName.click();
+   view.name.value='scan';
+   view.name.dispatchEvent(new Event('input'));
+   assert(!view.saveFigure.disabled,'Save figure is disabled');
+   answers.push([IMAGE,ARCHIVE]);
+   view.saveFigure.root.click();
+   await settle();
+   equal(requests,[{action:'save',panel:'edit-panel-1',path:IMAGE}],'the save');
+   assert(!dialog(),'a dialog for files that were not there');
+   equal(notes.at(-1),'panel saved to scan.png and scan.npz','the note');
+ });
+ await check('files already there are listed, and Overwrite sends the same save told to overwrite',async()=>{
+   answers.push({exists:[IMAGE,ARCHIVE]},[IMAGE,ARCHIVE]);
+   view.saveFigure.root.click();
+   await settle();
+   assert(dialog()?.open,'no dialog');
+   equal(dialog().querySelector('.dialog-title').textContent,'Files already exist','title');
+   equal(dialog().querySelector('.dialog-text').textContent,`scan.png\nscan.npz\nare already in ${DAY}\n\nOverwrite them?`,'the files');
+   equal([...dialog().querySelectorAll('button')].map(node=>node.textContent.trim()),['Cancel','Overwrite'],'the choices');
+   equal(requests.length,2,'one save so far');
+   button('Overwrite').click();
+   await settle();
+   equal(requests.slice(2),[{action:'save',panel:'edit-panel-1',path:IMAGE,overwrite:true}],'the same save, told to overwrite');
+   assert(!dialog(),'the dialog stayed');
+   equal(notes.at(-1),'panel saved to scan.png and scan.npz','the note');
+ });
+ await check('Cancel sends nothing more and says nothing was saved',async()=>{
+   answers.push({exists:[ARCHIVE]});
+   view.saveFigure.root.click();
+   await settle();
+   equal(dialog().querySelector('.dialog-title').textContent,'File already exists','title');
+   equal(dialog().querySelector('.dialog-text').textContent,`scan.npz\nis already in ${DAY}\n\nOverwrite it?`,'the file');
+   button('Cancel').click();
+   await settle();
+   await settle();
+   equal(requests.length,4,'nothing more sent');
+   assert(!dialog(),'the dialog stayed');
+   equal(notes.at(-1),'nothing was saved; scan.npz kept','the note');
+ });
+ await check('an auto name already there is asked about too, and Overwrite saves that name, not the next one',async()=>{
+   view.autoName.click();
+   const path=view.file.text;
+   assert(/\\Camera_\d{8}_\d{6}\.png$/.test(path),`auto name ${path}`);
+   answers.push({exists:[path]},[path,path.replace(/png$/,'npz')]);
+   view.saveFigure.root.click();
+   await settle();
+   equal(requests.at(-1),{action:'save',panel:'edit-panel-1',path},'the save');
+   button('Overwrite').click();
+   await settle();
+   equal(requests.at(-1),{action:'save',panel:'edit-panel-1',path,overwrite:true},'the same name, told to overwrite');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+</script>

@@ -397,6 +397,8 @@ impl PreparedFigure {
 }
 
 impl FigureWrite for PreparedFigure {
+    fn files(&self) -> Vec<PathBuf> { vec![self.image_path.clone(), self.archive_path.clone()] }
+
     fn write(self: Box<Self>, recipe: ValueMap, image: &mut dyn FnMut(&str) -> Result<Vec<u8>>) -> Result<Vec<String>> {
         let (image_path, archive_path) = self.finish(recipe, Some(image))?;
         Ok(image_path.into_iter().chain([archive_path]).map(|path| path.display().to_string()).collect())

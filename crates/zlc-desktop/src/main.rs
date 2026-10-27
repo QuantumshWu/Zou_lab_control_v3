@@ -1040,7 +1040,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                     let image = match path.strip_suffix(".npz").or_else(|| path.strip_suffix(".NPZ")) { Some(stem) => format!("{stem}.png"), None => format!("{path}.png") };
                                     let applies = viewer.drafts.get_mut(&editor).map_or(0, |draft| draft.applies);
                                     viewer.drafts.saving = Some((command["id"].as_u64().unwrap_or(0), editor, applies));
-                                    queue.push_back(json!({"id": command["id"], "action": "save", "panel": panel, "path": image, "document": document}));
+                                    // Written over as before: the window's Save dialog asked about the name, a remote client named the file.
+                                    queue.push_back(json!({"id": command["id"], "action": "save", "panel": panel, "path": image, "document": document, "overwrite": true}));
                                     viewer.state["data"] = viewer.drafts.state();
                                     return Ok(());
                                 }

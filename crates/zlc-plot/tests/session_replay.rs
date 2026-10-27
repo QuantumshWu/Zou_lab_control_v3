@@ -663,6 +663,8 @@ impl FigureSaver<CorpusRead> for Saver {
 struct Written { inner: Box<dyn FigureWrite>, python: PathBuf, paths: Vec<String>, archives: Arc<Mutex<BTreeMap<PathBuf, Vec<u8>>>> }
 
 impl FigureWrite for Written {
+    fn files(&self) -> Vec<PathBuf> { self.inner.files() }
+
     fn write(self: Box<Self>, recipe: ValueMap, image: &mut dyn FnMut(&str) -> PlotResult<Vec<u8>>) -> PlotResult<Vec<String>> {
         let _outside = outside();
         for written in self.inner.write(recipe, image)? {

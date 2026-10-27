@@ -24,7 +24,9 @@ pub struct Open {
     pub window: Option<String>,
 }
 
-/// Save one panel as an image together with its Figure archive.
+/// Save one panel as an image together with its Figure archive. When the image or the
+/// archive is already there nothing is written and the save is refused, naming them,
+/// unless `overwrite` says to write over them.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Save {
@@ -32,6 +34,8 @@ pub struct Save {
     pub panel: Option<String>,
     /// Image path ending in .png, .pdf or .svg; the paired .npz archive is written beside it.
     pub path: String,
+    /// Write over the image and archive when either is already there (otherwise refused).
+    pub overwrite: Option<bool>,
 }
 
 /// Start the camera (the virtual MOT camera on this build).
@@ -1047,7 +1051,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Open a board panel's Edit: the panel held still on the data it shows now (edit-<panel>), its settings shared with the panel; close it with close_panel."),
     command!("refresh_panel_edit", PanelRef, control, false, "Refresh snapshot: the panel's Edit takes the panel's newest data."),
     command!("open", Open, control, false, "Open a saved Figure archive (.npz) in a new Figure Viewer window, or in the one `window` names."),
-    command!("save", Save, control, false, "Save a panel as shown as a PNG, PDF or SVG (by the path's suffix) plus its Figure archive (.npz); the reply lists the files written."),
+    command!("save", Save, control, false, "Save a panel as shown as a PNG, PDF or SVG (by the path's suffix) plus its Figure archive (.npz); the reply lists the files written. \
+        Either file already there: nothing is written and the save is refused, naming it, unless overwrite is true."),
     // Workbench: plugins, apparatus and devices.
     command!("list_plugins", ListPlugins, read, true,
         "Installed device and logic-node types: what each is for, its settings/fields with choices and units, inputs, outputs, device needs; and plugins that failed to load."),
