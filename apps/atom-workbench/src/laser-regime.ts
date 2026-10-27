@@ -5,8 +5,8 @@ import {idLabel,withUnit} from './format.js';
 /** A detuning as the workbench writes one: its natural unit, four digits. */
 const frequency=(mhz:number):string=>{const a=Math.abs(mhz),[scale,unit]=a>=1e6?[1e6,'THz']:a>=1e3?[1e3,'GHz']:a>=1?[1,'MHz']:[1e-3,'kHz'];return withUnit(mhz/scale,unit,{digits:4});};
 /** A laser's regime decides its physics (full-master-model.ts): 'near' is a
- * rotating-wave drive of the master equation, 'far' only a static
- * second-order light shift. `valid` is the regime's own condition on the
+ * rotating-wave drive of the master equation, 'far' only a static light
+ * shift (spectroscopy.ts). `valid` is the regime's own condition on the
  * nearest allowed transition:
  * - far: |Δ| ≥ 100 max(Γ/2π, Ω/2π) for every allowed dipole (the static
  *   shift's own mixing check is in spectroscopy.ts; farValidity has both);

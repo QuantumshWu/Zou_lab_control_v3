@@ -440,7 +440,7 @@ function renderInspector():void{
     const l=scene.lasers.find(l=>l.id===selection.id);if(!l)return;normalizeLaserIntensity(l);setText('inspector-title',l.name);
     // ui-design.md §4 (release): how the laser enters the master equation. 静态光移 lasers are
     // also the levels chart's background. |Ω/2Δ| and the model's own refusal sit beside it.
-    const mode=group('激光类型');bindField(fields,mode,'inspector',()=>({name:'regime',label:'处理方式',kind:'choice',segmented:true,choices:[['near','进入主方程'],['far','静态光移']],value:l.regime??'near',description:'进入主方程：旋转波驱动，耦合 D1、D2 全部允许跃迁；静态光移：只取二阶光移，能级图背景显示它，不含散射'}),v=>{l.regime=v as 'near'|'far';});
+    const mode=group('激光类型');bindField(fields,mode,'inspector',()=>({name:'regime',label:'处理方式',kind:'choice',segmented:true,choices:[['near','进入主方程'],['far','静态光移']],value:l.regime??'near',description:'进入主方程：旋转波驱动，耦合 D1、D2 全部允许跃迁；静态光移：只取它的静态光移（全阶），能级图背景显示它，不含散射'}),v=>{l.regime=v as 'near'|'far';});
     mode.append(fieldRow('|Ω/2Δ| 最大',mixingReadout.root),mixingWarning);refreshMixing(l);
     const f=group('频率');
     frequencySection(f,l,laserReadout);

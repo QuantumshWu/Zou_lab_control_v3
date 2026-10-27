@@ -50,8 +50,9 @@ export interface Laser {
   referenceStateId?: string;
   /** The laser's physics (full-master-model.ts), part of the dynamics cache key:
    * 'near' (default) is a rotating-wave drive of every allowed D1/D2 dipole in the
-   * master equation; 'far' is only its static second-order light shift, in H0 and in
-   * the levels chart, refused when its mixing |Ω/2Δ| exceeds 1% (spectroscopy.ts
+   * master equation; 'far' is only its static light shift (the far lasers' Floquet
+   * background, to all orders), in H0 and in the levels chart, refused when its
+   * mixing |Ω/2Δ| exceeds 1% (spectroscopy.ts
    * displayMixing) or its detuning is below 100 max(Γ/2π, Ω/2π) (laser-regime.ts). */
   regime?: 'near' | 'far';
   referenceProcess?: 'absorption' | 'emission';
@@ -167,6 +168,10 @@ export interface Level {
   /** Relative to the zero-external-field state; null means no static spectrum is justified. */
   totalShiftMHz?:number|null;
   starkShiftMHz?:number|null;
+  /** Numerical error bounds of the total shift, MHz: the Floquet partitioning (layers,
+   * energy self-consistency) and the left-out couplings through states outside the
+   * model. Not the atomic data's uncertainty. Null where totalShiftMHz is. */
+  shiftBound?:{floquetMHz:number;outsideMHz:number}|null;
   /** Column vector in the solver's 32-state magnetic-field eigenbasis. */
   backgroundState?:{real:number[];imag:number[]};
   mixed?:boolean;
@@ -180,6 +185,9 @@ export interface SpectroscopyMetadata {
   requiresDensityProjection:boolean;
   warnings?:string[];
   maximumMixingRatio?:number;
+  /** The static background's partitioning: Floquet layers, clusters, cluster solves and
+   * the largest bound of each kind over the 32 levels (MHz). */
+  numerics?:{floquetLayers:number;clusters:number;solves:number;floquetBoundMHz:number;outsideBoundMHz:number};
   sources?:string[];
 }
 export interface Polarization {

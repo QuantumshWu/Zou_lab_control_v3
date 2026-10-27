@@ -188,9 +188,11 @@ test('the far static shift includes the Rb+ core: the mean ground shift is the s
 
 test('emission is secular per D line and ground F: one operator per line, photon polarization and F, total rate Gamma',()=>{
  const model=buildFullMasterModel(defaultScene()),states=model.states;assert.equal(model.collapse.length,12);
- for(const c of model.collapse){const rows=new Set(),lines=new Set();
-  for(let g=0;g<8;g++)for(let e=8;e<32;e++)if(c.real[g*32+e]!==0||c.imag[g*32+e]!==0){rows.add(states[g].F);lines.add(states[e].manifold);}
-  assert.equal(rows.size,1);assert.equal(lines.size,1);
+ // One D line per operator: the far tweezer mixes the two fine-structure manifolds of the
+ // background states (through the ground copies), so the other line carries ~1e-12 of the rate.
+ for(const c of model.collapse){const rows=new Set(),weight={D1:0,D2:0};
+  for(let g=0;g<8;g++)for(let e=8;e<32;e++)if(c.real[g*32+e]!==0||c.imag[g*32+e]!==0){rows.add(states[g].F);weight[states[e].manifold]+=c.real[g*32+e]**2+c.imag[g*32+e]**2;}
+  assert.equal(rows.size,1);assert.ok(Math.min(weight.D1,weight.D2)<1e-9*Math.max(weight.D1,weight.D2));
   for(let i=0;i<32;i++)for(let j=0;j<32;j++)if(!(i<8&&j>=8))assert.equal(c.real[i*32+j],0);
  }
  for(let e=8;e<32;e++){const rate=model.collapse.reduce((sum,c)=>sum+Array.from({length:8},(_,g)=>c.real[g*32+e]**2+c.imag[g*32+e]**2).reduce((a,b)=>a+b,0),0);
