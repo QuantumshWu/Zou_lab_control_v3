@@ -234,9 +234,9 @@ if ($Latest) {
         if ($location -match '/tag/([^/?#]+)$') { $tag = [Uri]::UnescapeDataString($Matches[1]) }
     } catch {}
     $newer = $tag -and $expected -and (Get-Version ($tag -replace '^v', '')) -gt (Get-Version $expected.version)
-    $pull = Get-PullState 20
-    if (-not $tag -and -not $pull.git) { throw 'GitHub did not answer, and git was not found' }
-    [ordered]@{ tag = $tag; newer = [bool]$newer; pull = $pull } | ConvertTo-Json -Compress -Depth 4
+    $standing = Get-PullState 20
+    if (-not $tag -and -not $standing.git) { throw 'GitHub did not answer, and git was not found' }
+    [ordered]@{ tag = $tag; newer = [bool]$newer; pull = $standing } | ConvertTo-Json -Compress -Depth 4
     return
 }
 
