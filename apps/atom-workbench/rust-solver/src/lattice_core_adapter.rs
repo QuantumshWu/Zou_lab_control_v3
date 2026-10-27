@@ -544,6 +544,120 @@ mod tests{
             "series":p.fold.diagnostics.series.iter().map(|(q,rho,order)|json!({"charge":q,"ratio":rho,"order":order})).collect::<Vec<_>>()}}});
         std::fs::write(dir.join("index.json"),serde_json::to_string_pretty(&index).unwrap()).unwrap();
     }
+    /// The error estimator (`lattice::estimator`) on R2's dumped spaces (N1's
+    /// pipeline, `research/population/unified/r2/n2_dump.py`), exported by
+    /// the session's `est_rust/export.py`: estimate against the actual error
+    /// and against R2's Python estimate. Ignored; ATOM_ESTIMATOR_FIXTURES =
+    /// the export root, ATOM_ESTIMATOR_CASES = comma-separated case names,
+    /// optional ATOM_ESTIMATOR_CLASSES (neighbours | full),
+    /// ATOM_ESTIMATOR_HORIZON_RATE, ATOM_ESTIMATOR_ENTRY, ATOM_ESTIMATOR_CAP. One JSON line per
+    /// checkpoint.
+    #[test]
+    #[ignore]
+    fn lattice_estimator_against_r2_fixtures(){
+        use atom_population_core::lattice::estimator::{self,Classes,ErrorLattice,KernelRule,Readout,RitzSources,SteadyRecycler};
+        use atom_population_core::lattice::estimate_api::SteadySolves;
+        use atom_population_core::lattice::operator::LatticeOperator;
+        use atom_population_core::lattice::preconditioner::{Preconditioning,Shift};
+        use atom_population_core::lattice::floquet::Reach;
+        use atom_population_core::lattice::krylov::{System,KrylovOptions,gmres};
+        type C=Complex64;
+        let root=std::path::PathBuf::from(std::env::var("ATOM_ESTIMATOR_FIXTURES").expect("ATOM_ESTIMATOR_FIXTURES"));
+        let cases=std::env::var("ATOM_ESTIMATOR_CASES").expect("ATOM_ESTIMATOR_CASES");
+        let classes=match std::env::var("ATOM_ESTIMATOR_CLASSES").as_deref(){Ok("full")=>Classes::Full,Ok("neighbours")=>Classes::Neighbours,_=>estimator::CLASSES};
+        let number=|name:&str,default:f64|std::env::var(name).ok().and_then(|v|v.parse().ok()).unwrap_or(default);
+        let horizon_rate=number("ATOM_ESTIMATOR_HORIZON_RATE",estimator::KERNEL_HORIZON_RATE);let entry=number("ATOM_ESTIMATOR_ENTRY",estimator::KERNEL_ENTRY);let cap=number("ATOM_ESTIMATOR_CAP",estimator::KERNEL_CAP);
+        let complex=|bytes:&[u8]|->Vec<C>{bytes.chunks_exact(16).map(|b|C{re:f64::from_le_bytes(b[..8].try_into().unwrap()),im:f64::from_le_bytes(b[8..].try_into().unwrap())}).collect()};
+        let charges=|v:&Value|->Vec<Vec<i32>>{v.as_array().unwrap().iter().map(|q|q.as_array().unwrap().iter().map(|k|k.as_i64().unwrap() as i32).collect()).collect()};
+        let floats=|v:&Value|->Vec<f64>{v.as_array().map(|a|a.iter().map(|x|x.as_f64().unwrap_or(f64::NAN)).collect()).unwrap_or_default()};
+        struct Bordered<'p>{prepared:&'p LatticePrepared,modes:Vec<Vec<i32>>,groups:Vec<Vec<usize>>}
+        impl SteadySolves for Bordered<'_>{
+            fn solve(&mut self,f:&[C],tolerance:f64)->Result<(Vec<C>,usize),String>{
+                let op=LatticeOperator::new(self.prepared,&self.modes)?;
+                let mut pre=Preconditioning::new(self.prepared)?.batch(&op,Shift::Steady,Some(Reach::All))?;
+                let mut system=System::new(op,&mut pre,Shift::Steady)?;
+                let options=KrylovOptions{populations:false,residual_guard:tolerance,..Default::default()};
+                let k=gmres(&mut system,f,None,&self.groups,&options)?;Ok((k.x,k.steps))
+            }
+        }
+        for case in cases.split(','){
+            let dir=root.join(case);
+            let index:Value=serde_json::from_str(&std::fs::read_to_string(dir.join("index.json")).unwrap()).unwrap();
+            let request:Value=serde_json::from_str(&std::fs::read_to_string(index["request"].as_str().unwrap()).unwrap()).unwrap();
+            let model:Model=serde_json::from_value(request["model"].clone()).unwrap();
+            let(ground,_)=groups(&model).unwrap();let(p,_)=prepare(&model,&ground).unwrap();
+            let modes:Vec<Vec<i32>>=charges(&index["P"]).into_iter().chain(charges(&index["Q"])).collect();
+            let fixture_groups:Vec<Vec<usize>>=index["groups"].as_array().unwrap().iter().map(|g|g.as_array().unwrap().iter().map(|i|i.as_u64().unwrap() as usize).collect()).collect();
+            let(times,horizons)=(floats(&index["times"]),floats(&index["horizons"]));
+            let dim=index["dim"].as_u64().unwrap() as usize;
+            let w=complex(&std::fs::read(dir.join("W.bin")).unwrap());let aw=complex(&std::fs::read(dir.join("AW.bin")).unwrap());
+            let basis:Vec<Vec<C>>=w.chunks_exact(dim).map(|c|c.to_vec()).collect();let images:Vec<Vec<C>>=aw.chunks_exact(dim).map(|c|c.to_vec()).collect();
+            // The Rust operator against the dumped images (same lattice, same model).
+            let mut op=LatticeOperator::new(&p,&modes).unwrap();let mut y=vec![C::default();dim];let mut operator=0_f64;
+            for j in [0,basis.len()/2,basis.len()-1]{op.apply(&basis[j],&mut y).unwrap();
+                let e=y.iter().zip(&images[j]).map(|(a,b)|(a.re-b.re).hypot(a.im-b.im)).fold(0.,f64::max);
+                operator=operator.max(e/images[j].iter().map(|v|v.re.hypot(v.im)).fold(0.,f64::max));}
+            drop(op);
+            let clock=Instant::now();
+            let rule=KernelRule{entry,horizon_rate,horizon:estimator::longest_time(&times,&horizons),cap};
+            let mut lattice=ErrorLattice::new(&p,&modes,rule,classes).unwrap();
+            let build_ms=clock.elapsed().as_secs_f64()*1e3;
+            println!("{}",json!({"case":case,"modes":modes.len(),"ring":lattice.ring.len(),"operatorDeviation":operator,"buildMs":build_ms,
+                "kernelMs":lattice.build_ms[0],"classMs":lattice.build_ms[1],"classes":lattice.classes.len(),"eigenbasisMs":p.eigenbasis().unwrap().milliseconds,
+                "kernelEntries":lattice.kernels.diagnostics.entries,"smallParameter":lattice.kernels.diagnostics.largest,
+                "classCondition":lattice.classes.iter().map(|c|c.condition).collect::<Vec<_>>()}));
+            let mut recycler=SteadyRecycler::new(&p,&modes).unwrap();
+            let mut solver=Bordered{prepared:&p,modes:modes.clone(),groups:fixture_groups.clone()};
+            let zero=vec![0.;p.generator.n];
+            for cp in index["checkpoints"].as_array().unwrap(){
+                let(k,r,solves)=(cp["k"].as_u64().unwrap() as usize,cp["r"].as_u64().unwrap() as usize,cp["solves"].as_u64().unwrap());
+                let data=complex(&std::fs::read(dir.join(format!("cp{solves:03}.bin"))).unwrap());
+                let mut at=0;let mut take=|len:usize|{let s=data[at..at+len].to_vec();at+=len;s};
+                let(x,_s,b,g)=(take(k*r),take(r*r),take(k*r),take(r*r));let(_c0,_th,th_e,_a,a_e,_ker,us)=(take(r),take(r),take(r),take(r),take(r),take(r),take(r));
+                let before=lattice.work.clone();let clock=Instant::now();
+                lattice.add_columns(&basis[..k],&images[..k]).unwrap();
+                let column_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
+                let ritz=RitzSources{vectors:&b,values:&th_e,coefficients:&a_e};
+                let series:Vec<f64>=lattice.populations(&ritz,&times,Readout::Laboratory).unwrap().iter().map(|p|ledger::metric(p,&zero,&fixture_groups)).collect();
+                let hz:Vec<f64>=lattice.populations(&ritz,&horizons,Readout::Centre).unwrap().iter().map(|p|ledger::metric(p,&zero,&fixture_groups)).collect();
+                let evaluate_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
+                // Steady: c = X u_inf, h = X G u_inf.
+                let mul=|a:C,b:C|C{re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re};
+                let combine=|m:&[C],v:&[C],rows:usize|->Vec<C>{(0..rows).map(|i|v.iter().enumerate().fold(C::default(),|s,(l,&x)|{let t=mul(m[i+rows*l],x);C{re:s.re+t.re,im:s.im+t.im}})).collect()};
+                let c=combine(&x,&us,k);let gu=combine(&g,&us,r);let h=combine(&x,&gu,k);
+                let f=estimator::steady_source(&mut lattice,&basis[..k],&images[..k],&c,&h).unwrap();
+                let e=recycler.error(&basis[..k],&images[..k],&f,&mut solver).unwrap();
+                let steady_est=ledger::metric(&e,&zero,&fixture_groups);let steady_ms=clock.elapsed().as_secs_f64()*1e3;
+                let mut row=json!({"case":case,"solves":solves,"k":k,"columnMs":column_ms,"evaluateMs":evaluate_ms,"steadyMs":steady_ms,
+                    "estMax":series.iter().fold(0_f64,|a,&b|a.max(b)),"steadyEst":steady_est,"horizons":hz,
+                    "work":{"blockOperations":lattice.work.block_operations-before.block_operations,"blockSolves":lattice.work.block_solves-before.block_solves,
+                        "frameBlocks":lattice.work.frame_blocks-before.frame_blocks,"columns":lattice.work.columns-before.columns,
+                        "steady":{"applications":recycler.work.applications,"preconditions":recycler.work.preconditions,"pipelineSolves":recycler.work.pipeline_solves,
+                            "innerSteps":recycler.work.inner_steps,"steps":recycler.work.steps}},
+                    "count":cp["count"].clone()});
+                if let Some(actual)=cp["actual"].as_array(){
+                    let actual:Vec<f64>=actual.iter().map(|v|v.as_f64().unwrap()).collect();
+                    let select:Vec<bool>=cp["select"].as_array().unwrap().iter().map(|v|v.as_u64()==Some(1)).collect();
+                    let chosen:Vec<usize>=(0..actual.len()).filter(|&i|select[i]).collect();
+                    let amax=actual.iter().fold(0_f64,|a,&b|a.max(b));
+                    let ratio=if index.get("dref").is_some()&&!chosen.is_empty(){chosen.iter().map(|&i|series[i]).fold(0.,f64::max)/chosen.iter().map(|&i|actual[i]).fold(0.,f64::max)}
+                        else{series.iter().fold(0_f64,|a,&b|a.max(b))/amax};
+                    let mut ratios:Vec<f64>=chosen.iter().map(|&i|series[i]/actual[i]).collect();ratios.sort_by(f64::total_cmp);
+                    let quantile=|q:f64|if ratios.is_empty(){f64::NAN}else{let pos=q*(ratios.len()-1) as f64;let(lo,hi)=(pos.floor() as usize,pos.ceil() as usize);ratios[lo]+(ratios[hi]-ratios[lo])*(pos-lo as f64)};
+                    row["actualMax"]=json!(amax);row["ratio"]=json!(ratio);row["quantiles"]=json!([quantile(0.05),quantile(0.5),quantile(0.95),ratios.first().copied().unwrap_or(f64::NAN)]);
+                    row["steadyActual"]=cp["err_steady"].clone();row["horizonActual"]=cp["err_h"].clone();
+                }
+                if let Some(py)=cp.get("python").and_then(|v|v.as_object()){
+                    for(variant,v)in py{let s=floats(&v["series"]);if s.len()!=series.len(){continue;}
+                        let size=s.iter().fold(0_f64,|a,&b|a.max(b));
+                        let dev=s.iter().zip(&series).map(|(a,b)|(a-b).abs()).fold(0.,f64::max)/size.max(1e-300);
+                        row["python"][variant]=json!({"ratio":v["ratio"],"deviation":dev,"max":size});}
+                    if let Some(st)=cp.get("python_steady"){row["pythonSteady"]=st.clone();}
+                }
+                println!("{row}");
+            }
+        }
+    }
     /// The lattice operator on a request against a per-component reference
     /// (every mode computed, fold targets as dense matrices); ignored,
     /// `validation` feature, ATOM_LATTICE_REQUEST=<request.json>.

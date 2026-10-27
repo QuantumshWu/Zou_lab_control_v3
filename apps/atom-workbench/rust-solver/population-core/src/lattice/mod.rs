@@ -29,6 +29,11 @@
 //!   (request-level, `LatticePrepared::eigenbasis`): error propagation
 //!   through the dressed blocks and exact batched block solves;
 //! - `finite`: the finite-time and long-time pipelines;
+//! - `estimate_api`: the interface between the unified pipeline and its
+//!   error estimate;
+//! - `estimator`: the unified error estimate (one error equation for every
+//!   output, the omitted ring slaved, Schrieffer-Wolff propagation, the
+//!   steady error by recycled GCRO);
 //! - `ledger`: the tolerance, the error metric and every remainder bound.
 //!
 //! Layout: an n x n block is row-major (entry (i, j) at i*n+j); a field on N
@@ -54,6 +59,7 @@ pub mod eigenbasis;
 pub mod finite;
 pub mod ledger;
 pub mod estimate_api;
+pub mod estimator;
 pub use generator::{Component,Generator,Sparse,Superop};
 
 pub(crate) const ZERO:C=C{re:0.,im:0.};
