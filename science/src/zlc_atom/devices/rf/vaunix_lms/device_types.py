@@ -70,7 +70,7 @@ DEVICE_TYPES = (
         label="Vaunix Lab Brick LMS",
         description=(
             "Vaunix Lab Brick LMS synthesizer over its vendor DLL: frequency on a 10 Hz grid, "
-            "power on a 0.25 dB grid (off-grid values are refused, not rounded) and output, "
+            "power on a 0.25 dB grid (a value is set to its nearest grid point, which it reads back) and output, "
             "inside the bench's policy window."
         ),
         # Stop all turns each channel's output off (RfSourceBase.make_safe).

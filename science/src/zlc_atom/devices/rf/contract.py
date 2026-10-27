@@ -34,9 +34,13 @@ plumbing here owns the rules that must not fork per driver:
 
 * a write is SET-THEN-READ-BACK, and ``tune`` returns what the instrument
   itself reports, never what was asked;
-* a value the instrument would silently round is REFUSED before it is
-  written, naming the grid -- a scan coordinate must mean exactly what its
-  dataset column says (the same law the pulse DAC axes obey);
+* a value is written as the instrument's nearest grid point and ``tune``
+  reports the point it landed on: setpoint and readback are different facts
+  the scan records apart (scan/devices.py), so a rounding is never a refusal
+  -- a scan's coordinates carry binary noise (1234.56 MHz is
+  1234559999.9999998 Hz) that no grid check may judge;
+* a bound is met within that same noise: a value a rounding past an edge it
+  was authored on is that edge;
 * ``settings_epoch`` compares the actual write result with the session's
   latest known value. It requires no extra device query or saved history.
   Explicit Refresh adopts external front-panel changes.
@@ -111,27 +115,34 @@ class RfSource(Protocol):
     def close(self) -> None: ...
 
 
-def snap_to_grid(value: float, step: float, *, name: str, unit: str) -> float:
-    """The value itself, or a refusal naming the instrument's grid.
+def grid_steps(value: float, step: float, *, name: str) -> int:
+    """How many of the instrument's ``step``s ``value`` is, to the nearest one.
 
     The instrument quantizes -- a Lab Brick holds frequency in 10 Hz units
-    and power in quarter-dB units -- and writing a value off that grid would
-    silently move what the scan believes it measured.  Refusing here, before
-    the write, keeps the dataset column exactly truthful and tells the
-    operator the step to author their scan on.
+    and power in quarter-dB units -- so a value is written as its nearest
+    grid point and ``tune`` reports where it landed.  Only a value with no
+    nearest point is refused.
     """
 
     if not math.isfinite(value):
         raise TuneRefused(f"{name} must be finite")
-    quantized = round(value / step) * step
-    # Compare in grid units, where representable values are exact integers;
-    # comparing the floats re-manufactures the rounding noise being judged.
-    if abs(value / step - round(value / step)) > 1e-9:
-        raise TuneRefused(
-            f"{name}={value!r} {unit} is not on this instrument's "
-            f"{step!r} {unit} grid; nearest is {quantized!r}"
-        )
-    return quantized
+    return round(value / step)
+
+
+#: How far past an edge binary noise may carry a value authored on it, relative
+#: to the magnitudes compared: doubles hold 15-16 significant digits.
+_EDGE_NOISE = 1e-12
+
+
+def within(value: float, low: float | None, high: float | None, *, name: str, unit: str) -> float:
+    """``value`` inside [low, high], a value a rounding past an edge being that edge; else refused."""
+
+    slack = _EDGE_NOISE * max(abs(value), abs(low or 0.0), abs(high or 0.0), 1.0)
+    if (low is not None and value < low - slack) or (high is not None and value > high + slack):
+        raise ValueError(f"{name} must lie in [{low!r}, {high!r}] {unit}")
+    if low is not None and value < low:
+        return float(low)
+    return float(high) if high is not None and value > high else value
 
 
 def channel_field(channel: str, field: str) -> str:
@@ -621,24 +632,16 @@ class RfSourceBase:
             # Checked before anything is dropped: a value refused here never
             # reached the instrument, so the reading stays true.
             if kind == FREQUENCY_FIELD:
-                requested = float(value)
                 low, high = self._frequency_range(channel)
-                if not low <= requested <= high:
-                    raise ValueError(
-                        f"{selected} must lie in [{low!r}, {high!r}] Hz"
-                    )
+                requested = within(float(value), low, high, name=selected, unit="Hz")
             elif kind == POWER_FIELD:
-                requested = float(value)
                 reader = getattr(self, "read_tunable_in_unit", None)
                 reading = reader(selected, unit or "dBm") if callable(reader) else None
                 low, high = (
                     (reading.metadata.minimum, reading.metadata.maximum)
                     if reading is not None else self._power_range(channel)
                 )
-                if (low is not None and requested < low) or (high is not None and requested > high):
-                    raise ValueError(
-                        f"{selected} must lie in [{low!r}, {high!r}] {unit or 'dBm'}"
-                    )
+                requested = within(float(value), low, high, name=selected, unit=unit or "dBm")
             elif type(value) is not bool:
                 raise TypeError(f"{selected} takes a bool")
             # The reading is dropped for the duration of the write, because a
@@ -685,5 +688,6 @@ __all__ = [
     "RfSource",
     "RfSourceBase",
     "channel_field",
-    "snap_to_grid",
+    "grid_steps",
+    "within",
 ]

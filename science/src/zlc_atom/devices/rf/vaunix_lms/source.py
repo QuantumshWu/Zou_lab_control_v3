@@ -4,13 +4,13 @@ A Lab Brick is a USB HID device driven through Vaunix's ``vnx_fmsynth``
 DLL, whose API speaks the instrument's own integer units: frequency in
 10 Hz steps, power in quarter-dB steps.  The driver is written against a
 small library Protocol so tests and the virtual bench stand in for the DLL
-alone -- the unit conversions, the grid refusals and the read-back
-discipline all run as shipped.
+alone -- the unit conversions, the grid and the read-back discipline all
+run as shipped.
 
-The grids are the honest part.  A requested value that is not exactly
-representable in the instrument's units is REFUSED before it is written,
-naming the step -- writing it would silently round, and the scan's dataset
-column would then say something the hardware never did.
+A requested value is written as its nearest grid point, and ``tune``
+reports the point the brick reads back -- the record's truth is the
+readback, which the scan keeps beside its setpoint, never a refusal of a
+coordinate's binary noise (contract.py).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from zlc_atom.devices.rf.contract import FREQUENCY_FIELD, POWER_FIELD, RfSourceBase, snap_to_grid
+from zlc_atom.devices.rf.contract import FREQUENCY_FIELD, POWER_FIELD, RfSourceBase, grid_steps
 from zlc_atom.devices.vendor import resolve_vendor_file
 
 #: The instrument's own units, from the vendor API reference.
@@ -200,18 +200,14 @@ class VaunixLmsRfSource(RfSourceBase):
     # ------------------------------------------------------- transport verbs
     # A Lab Brick has one output, so the channel is always the bare "".
     def _write_frequency(self, channel: str, value_hz: float) -> float:
-        snap_to_grid(
-            value_hz, FREQUENCY_UNIT_HZ, name=FREQUENCY_FIELD, unit="Hz"
-        )
         self._library.set_frequency(
-            self._handle, round(value_hz / FREQUENCY_UNIT_HZ)
+            self._handle, grid_steps(value_hz, FREQUENCY_UNIT_HZ, name=FREQUENCY_FIELD)
         )
         return self._read_frequency(channel)
 
     def _write_power(self, channel: str, value_dbm: float) -> float:
-        snap_to_grid(value_dbm, POWER_UNIT_DBM, name=POWER_FIELD, unit="dBm")
         self._library.set_power(
-            self._handle, round(value_dbm / POWER_UNIT_DBM)
+            self._handle, grid_steps(value_dbm, POWER_UNIT_DBM, name=POWER_FIELD)
         )
         return self._read_power(channel)
 
