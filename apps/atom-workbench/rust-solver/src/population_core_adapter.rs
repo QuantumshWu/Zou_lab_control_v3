@@ -215,9 +215,9 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
     let started=Instant::now();options.validate_population_tolerance()?;
     if !options.steady_only&&(!options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples)){return Err("Invalid finite population grid".into());}
     if options.mean_horizon_us.is_some_and(|h|!(h.is_finite()&&h>0.)){return Err("meanHorizonUs must be a finite positive time in us, or null".into());}
-    // ATOM_POPULATION_CORE=lattice (or solverCore) serves steadyOnly requests
-    // with the folded-lattice core; everything else stays on this path.
-    if crate::lattice_core_adapter::selected(options)?{return crate::lattice_core_adapter::mean_result(model,options,started);}
+    // ATOM_POPULATION_CORE=lattice (or solverCore) serves the request with
+    // the folded-lattice core.
+    if crate::lattice_core_adapter::selected(options)?{return crate::lattice_core_adapter::solve(model,options,publish_mean,started);}
     let(mut core,request)=prepare(model)?;
     if options.steady_only{
         let clock=Instant::now();

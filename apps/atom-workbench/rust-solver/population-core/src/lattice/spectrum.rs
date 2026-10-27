@@ -39,8 +39,7 @@ pub struct SlowSpectrum{
 pub fn slow_spectrum(prepared:&LatticePrepared)->Result<SlowSpectrum,String>{
     let clock=Instant::now();let lapack=&prepared.lapack;let generator=&prepared.generator;
     let n=generator.n;let d=n*n;
-    let mut l=vec![ZERO;d*d];generator.zero_component().op.dense_into(n,ONE,&mut l);
-    if let Some(t)=prepared.fold.targets.first().filter(|t|t.charge==generator.zero){t.dense_into(n,0,ONE,&mut l);}
+    let l=prepared.centre_generator();
     let ground=|p:usize|generator.ground[p/n]&&generator.ground[p%n];
     let g:Vec<usize>=(0..d).filter(|&p|ground(p)).collect();let x:Vec<usize>=(0..d).filter(|&p|!ground(p)).collect();
     let(r,m)=(g.len(),x.len());

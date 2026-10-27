@@ -45,6 +45,8 @@ pub mod krylov;
 pub mod estimate;
 pub mod steady;
 pub mod spectrum;
+pub mod eigenbasis;
+pub mod finite;
 pub mod ledger;
 #[cfg(any(test,feature="validation"))]
 pub mod dense_dressed;
@@ -125,6 +127,14 @@ impl LatticePrepared{
         Ok(modes)
     }
     pub fn nu(&self,q:&[i32])->Result<f64,String>{let f=self.source.phases.frequency(q)?;Ok(f.hi+f.lo)}
+    /// The folded centre generator L0' = L0 + K_0^(0) as a row-major d x d
+    /// matrix.
+    pub fn centre_generator(&self)->Vec<C>{
+        let n=self.generator.n;let d=n*n;
+        let mut l=vec![ZERO;d*d];self.generator.zero_component().op.dense_into(n,ONE,&mut l);
+        if let Some(t)=self.fold.targets.first().filter(|t|t.charge==self.generator.zero){t.dense_into(n,0,ONE,&mut l);}
+        l
+    }
     /// Test hook for the static-shift consistency check (the all-order static
     /// shifts are compared with this second-order fold): the Hermitian
     /// background Hamiltonian H_2 of the diagonal fold at q = 0. The

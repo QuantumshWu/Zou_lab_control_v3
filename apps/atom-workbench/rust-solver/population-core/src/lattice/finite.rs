@@ -1,0 +1,615 @@
+//! Finite-time populations p(t) on the folded lattice: x' = A x,
+//! x(0) = delta_q0 rho0, read out as the local time average (the near
+//! charges' diagonals with their phases e^{i nu_q t}; far charges never
+//! appear).
+//!
+//! Rational Krylov: v_j+1 is (sigma_j - A)^-1 v_j orthonormalized, with the
+//! pole POLE (1/us) and, for horizons above POLE_HORIZON, POLE_SCALE / T
+//! alternating with it. Every shifted solve is right-preconditioned GMRES
+//! with the dressed blocks shifted by the pole, to INNER_RTOL.
+//!
+//! Translation augmentation: the lattice is redundant (every Floquet mode mu
+//! has copies mu - i nu_s), x(0) is not in the span of the centred copies,
+//! and the difference evolves along the slow modes' translated copies, which
+//! a real pole cannot reach (the 2e-3 stall of b1-finite.md). For every
+//! explicit near step s with |V_s| / |nu_s| > TRANSLATION_MIXING the
+//! charge-shifted copies of the basis join the Galerkin space (no new shifted
+//! solves, one image each): in real coordinates S_s v + S_-s v and
+//! i (S_s v - S_-s v), Hermitian-symmetric like v.
+//!
+//! Reduced model: Galerkin on the span Z of the basis and its copies,
+//! orthonormalized through the Gram matrix (dependent directions dropped);
+//! every mode's trace evolves exactly (tr x_q' = -i nu_q tr x_q: the centre
+//! trace is conserved, the others stay zero), and reduced eigenvalues that
+//! grow over the horizon are reflected.
+//!
+//! Error ledger, accepted when KAPPA (basis + shell + fold) + projection
+//! <= POPULATION_TOLERANCE:
+//! - basis: the Galerkin residual r(t) = (A W - W G) u(t), exact (it includes
+//!   the inexact shifted solves) and nearly rank one; its leading singular
+//!   components (a randomized range finder) are propagated through every
+//!   mode's dressed block (`eigenbasis`);
+//! - shell: the next order's slaved source B y, y = -P_s^-1 C x(t), on a
+//!   low-rank compression of the trajectory, propagated the same way, plus
+//!   the shell's own populations;
+//! - fold: the third-order fold source on the same compression, propagated,
+//!   with the other fold bounds scaled by its response per unit bound (as for
+//!   the steady state);
+//! - projection: the change of the rows onto the probability simplex.
+use super::*;
+use super::krylov::{self,KrylovOptions,System,Vectors};
+use super::operator::LatticeOperator;
+use super::preconditioner::{StructuredBatch,StructuredDressed};
+use super::eigenbasis::BlockEigenbasis;
+use super::estimate::Shell;
+use super::ledger::{self,KAPPA,POPULATION_TOLERANCE,PopulationCharges,RemainderLedger};
+use super::steady::{START_ORDER,MAXIMUM_ORDER};
+use std::sync::OnceLock;
+
+const POLE:f64=20.;
+const POLE_HORIZON:f64=40.;
+const POLE_SCALE:f64=200.;
+/// Relative residual of the shifted solves; 1e-3 left 2-9e-3 on three
+/// lasers + tweezer (b1-finite.md section 6.2).
+const INNER_RTOL:f64=1e-6;
+const TRANSLATION_MIXING:f64=3e-3;
+/// Basis columns at the first checkpoint, added per checkpoint, at most.
+const FIRST_COLUMNS:usize=40;
+const MORE_COLUMNS:usize=20;
+const MAXIMUM_COLUMNS:usize=200;
+/// A generator whose part outside the span of the generators before it is
+/// below DEPENDENT of its norm (squared) is dropped: the translated copies
+/// grow nearly dependent (Gram condition 4e7 at 120 columns on old five
+/// lasers, where keeping them made the estimate erratic).
+const DEPENDENT:f64=1e-6;
+/// Randomized range of the residual per Galerkin generator of a basis
+/// vector (plus 8 oversampling), and its components kept down to this
+/// fraction of the largest (the estimate scaled by the dropped norm).
+const RESIDUAL_RANGE:usize=4;
+const RESIDUAL_COMPONENT:f64=1e-3;
+/// Trajectory components kept for the shell and fold sources (their
+/// estimates are scaled by the norm of the dropped rest).
+const TRAJECTORY_COMPONENT:f64=1e-4;
+const TRAJECTORY_RANGE:usize=12;
+/// Growth Re(beta) T above which a reduced eigenvalue is reflected.
+const GROWTH:f64=1e-9;
+/// Trace functionals below this fraction of the largest singular value are
+/// left unconstrained.
+const TRACE_RANK:f64=1e-7;
+
+#[derive(Clone,Debug,Default)]
+pub struct FiniteTiming{
+    pub eigenbasis_ms:f64,pub dressed_ms:f64,pub columns_ms:f64,pub images_ms:f64,
+    pub gram_ms:f64,pub reduced_ms:f64,pub basis_ms:f64,pub shell_ms:f64,pub fold_ms:f64,
+    /// The shifted solves' operator, preconditioner and orthogonalization time.
+    pub inner:krylov::KrylovTiming,
+}
+#[derive(Clone,Debug)]
+pub struct Checkpoint{
+    pub order:usize,pub columns:usize,pub dimension:usize,pub reflected:usize,
+    /// Largest / smallest kept Gram eigenvalue, and max Re(mu) T after the
+    /// reflection.
+    pub gram_condition:f64,pub growth:f64,
+    pub basis:f64,pub shell:Option<f64>,pub fold:Option<f64>,pub projection:f64,
+    /// KAPPA (basis + shell + fold) + projection, once all are known.
+    pub total:Option<f64>,
+    pub action:&'static str,pub milliseconds:f64,
+}
+pub struct FiniteSolution{
+    /// Rows projected onto the probability simplex (row 0 is rho0's).
+    pub populations:Vec<Vec<f64>>,
+    pub estimated_error:f64,pub projection_charge:f64,
+    pub basis:f64,pub shell:f64,pub fold:f64,
+    pub order:usize,pub modes:usize,pub columns:usize,pub dimension:usize,pub translations:usize,
+    pub inner_steps:usize,pub applications:usize,pub preconditions:usize,
+    pub eigenbasis_condition:f64,pub ritz_condition:f64,
+    pub checkpoints:Vec<Checkpoint>,
+    pub timing:FiniteTiming,
+}
+
+/// Real symmetric eigendecomposition (ascending; column-major vectors).
+fn symmetric_eigen(lapack:&Lapack,a:&[f64],m:usize)->Result<(Vec<f64>,Vec<f64>),String>{
+    let complex:Vec<C>=a.iter().map(|&x|C{re:x,im:0.}).collect();
+    let(values,vectors)=lapack.hermitian_eigen(&complex,m)?;
+    // A real symmetric input has real eigenvectors up to a phase per column.
+    let mut real=vec![0.;m*m];
+    for j in 0..m{let col=&vectors[j*m..(j+1)*m];
+        let pivot=col.iter().copied().max_by(|a,b|magnitude(*a).total_cmp(&magnitude(*b))).unwrap_or(ONE);
+        let s=magnitude(pivot).max(f64::MIN_POSITIVE);let phase=C{re:pivot.re/s,im:-pivot.im/s};
+        for i in 0..m{real[i+m*j]=mul(col[i],phase).re;}}
+    Ok((values,real))
+}
+/// Row-major (r x c) = (r x k) (k x c), all row-major: the column-major
+/// product C^T = B^T A^T.
+fn product(lapack:&Lapack,a:&[f64],b:&[f64],r:usize,k:usize,c:usize)->Vec<f64>{
+    let mut out=vec![0.;r*c];
+    if r*k*c>0{lapack.gemm(false,false,c,r,k,1.,b,c,a,k,0.,&mut out,c).expect("product dimensions are consistent");}
+    out
+}
+fn transpose_rows(a:&[f64],r:usize,c:usize)->Vec<f64>{let mut t=vec![0.;r*c];for i in 0..r{for j in 0..c{t[j*r+i]=a[i*c+j];}}t}
+
+/// Reflects reduced eigenvalues with Re(beta) T > GROWTH to -Re(beta)
+/// (row-major real generator): G' = G - 2 V_u diag(Re beta_u) (V^-1)_u over
+/// the growing columns, kept only when G' V = V L' holds to roundoff.
+fn reflect_growing(lapack:&Lapack,g:&mut[f64],m:usize,horizon:f64)->Result<usize,String>{
+    let column=transpose_rows(g,m,m);
+    let(re,im,vectors)=lapack.eigen(&column,m)?;
+    let growing:Vec<usize>=(0..m).filter(|&j|re[j]*horizon>GROWTH).collect();
+    if growing.is_empty()||vectors.iter().any(|x|!x.is_finite()){return Ok(0);}
+    let(lu,pivots)=lapack.factor(&vectors,m)?;
+    let mut identity=vec![0.;m*m];for j in 0..m{identity[j+j*m]=1.;}
+    let inverse=lapack.solve_matrix_factored(&lu,&pivots,&identity,m)?;
+    let mut reflected=g.to_vec();
+    for &u in &growing{let a=re[u];for c in 0..m{let row=inverse[u+c*m];if row==0.{continue;}
+        for r in 0..m{reflected[r*m+c]-=2.*a*vectors[r+u*m]*row;}}}
+    if reflected.iter().any(|x|!x.is_finite()){return Ok(0);}
+    // Check G' V = V L'.
+    let scale=g.iter().fold(0_f64,|s,x|s.max(x.abs())).max(f64::MIN_POSITIVE);
+    let mut defect=0_f64;let mut j=0;
+    // G' V, column-major.
+    let mut gv=vec![0.;m*m];lapack.gemm(false,false,m,m,m,1.,&transpose_rows(&reflected,m,m),m,&vectors,m,0.,&mut gv,m)?;
+    let apply=|col:usize|->Vec<f64>{gv[col*m..(col+1)*m].to_vec()};
+    while j<m{
+        let a=if re[j]*horizon>GROWTH{-re[j]}else{re[j]};
+        let norm=|c:usize|vectors[c*m..(c+1)*m].iter().map(|x|x*x).sum::<f64>().sqrt().max(f64::MIN_POSITIVE);
+        if im[j]!=0.&&j+1<m{let b=im[j];let(p,q)=(apply(j),apply(j+1));let s=norm(j).hypot(norm(j+1));
+            for r in 0..m{let(vr,vi)=(vectors[r+j*m],vectors[r+(j+1)*m]);
+                defect=defect.max((p[r]-(a*vr-b*vi)).abs()/s).max((q[r]-(b*vr+a*vi)).abs()/s);}j+=2;}
+        else{let p=apply(j);for r in 0..m{defect=defect.max((p[r]-a*vectors[r+j*m]).abs()/norm(j));}j+=1;}
+    }
+    if defect>1e-8*scale{return Ok(0);}
+    g.copy_from_slice(&reflected);Ok(growing.len())
+}
+
+/// The Galerkin span: basis vectors with their translated copies (the
+/// generators), their images, and the Gram matrices.
+struct Space{
+    /// The rational Krylov basis (indices of the generators).
+    basis:Vec<usize>,
+    z:Vec<Vec<C>>,az:Vec<Vec<C>>,
+    /// Columns covered by the Gram matrices.
+    covered:usize,
+    /// K = Z^T Z and H = Z^T A Z, row-major over `covered` columns.
+    k:Vec<f64>,h:Vec<f64>,
+    /// Per generator: the trace functionals and the canonical populations.
+    traces:Vec<Vec<f64>>,readout:Vec<Vec<C>>,
+}
+/// The reduced model of a checkpoint.
+struct Reduced{
+    /// Generators -> orthonormal coordinates (dimension x r, row-major).
+    t:Vec<f64>,r:usize,
+    g:Vec<f64>,reflected:usize,gram_condition:f64,growth:f64,
+    /// Trajectory u(t_i), row-major [time][r].
+    u:Vec<Vec<f64>>,
+    /// Ritz values, eigenvectors (row-major r x r, complex) and the
+    /// coefficients of u0 on them.
+    mu:Vec<C>,s:Vec<C>,a:Vec<C>,condition:f64,
+}
+impl Reduced{
+    /// psi(t) = b^T u(t) as an exponential sum: the coefficients of e^{mu_k t}.
+    fn exponential(&self,b:&[f64])->Vec<C>{
+        let r=self.r;(0..r).map(|k|{let mut s=ZERO;for i in 0..r{let v=self.s[i*r+k];s.re+=b[i]*v.re;s.im+=b[i]*v.im;}mul(s,self.a[k])}).collect()
+    }
+}
+
+struct Lattice<'a,'p>{
+    prepared:&'a LatticePrepared,
+    systems:Vec<System<'a,'p>>,poles:Vec<f64>,
+    vectors:Vectors,
+    /// Per translation pair: the source mode of q - s and of q + s.
+    translations:Vec<(Vec<Option<usize>>,Vec<Option<usize>>)>,
+    /// Canonical modes with their weights and frequencies.
+    canonical:Vec<(usize,f64,f64)>,
+    centre:usize,n:usize,d:usize,
+    inner_steps:usize,applications:usize,
+    timing:FiniteTiming,
+}
+impl Lattice<'_,'_>{
+    fn op(&self)->&LatticeOperator<'_>{&self.systems[0].op}
+    fn length(&self)->usize{self.op().dimension()}
+    fn image(&mut self,x:&[C])->Result<Vec<C>,String>{
+        let mut y=vec![ZERO;x.len()];self.systems[0].op.apply(x,&mut y)?;self.applications+=1;Ok(y)
+    }
+    fn traces(&self,x:&[C])->Vec<f64>{
+        let(n,d)=(self.n,self.d);let trace=|q:usize|(0..n).fold(ZERO,|s,i|C{re:s.re+x[q*d+i*n+i].re,im:s.im+x[q*d+i*n+i].im});
+        let mut out=vec![trace(self.centre).re];
+        for &(q,_,_)in &self.canonical{if q==self.centre{continue;}let t=trace(q);out.push(t.re);out.push(t.im);}
+        out
+    }
+    fn readout(&self,x:&[C])->Vec<C>{
+        let(n,d)=(self.n,self.d);self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|x[q*d+i*n+i])).collect()
+    }
+    /// The basis vector and its translated copies, with their images.
+    fn add_generators(&mut self,space:&mut Space,v:Vec<C>)->Result<(),String>{
+        let start=Instant::now();
+        let mut new=Vec::with_capacity(1+2*self.translations.len());
+        for(minus,plus)in &self.translations{
+            let(mut sum,mut diff)=(vec![ZERO;v.len()],vec![ZERO;v.len()]);let d=self.d;
+            for q in 0..minus.len(){
+                let a=minus[q].map(|p|&v[p*d..(p+1)*d]);let b=plus[q].map(|p|&v[p*d..(p+1)*d]);
+                for e in 0..d{let x=a.map_or(ZERO,|a|a[e]);let y=b.map_or(ZERO,|b|b[e]);
+                    sum[q*d+e]=C{re:x.re+y.re,im:x.im+y.im};
+                    // i (x - y).
+                    diff[q*d+e]=C{re:-(x.im-y.im),im:x.re-y.re};}
+            }
+            new.push(sum);new.push(diff);
+        }
+        new.insert(0,v);
+        space.basis.push(space.z.len());
+        for z in new{let image=self.image(&z)?;space.traces.push(self.traces(&z));space.readout.push(self.readout(&z));space.z.push(z);space.az.push(image);}
+        self.timing.images_ms+=start.elapsed().as_secs_f64()*1e3;Ok(())
+    }
+    /// One rational Krylov column.
+    fn extend(&mut self,space:&mut Space)->Result<bool,String>{
+        let start=Instant::now();
+        let j=space.basis.len()-1;let p=j%self.poles.len();
+        let b:Vec<C>=space.z[space.basis[j]].iter().map(|v|C{re:-v.re,im:-v.im}).collect();
+        let options=KrylovOptions{populations:false,residual_guard:INNER_RTOL,restart:60,maximum_steps:600,..KrylovOptions::default()};
+        let solve=krylov::gmres(&mut self.systems[p],&b,None,&[],&options)?;self.inner_steps+=solve.steps;
+        let mut w=solve.x;
+        let refs:Vec<&[C]>=space.basis.iter().map(|&g|space.z[g].as_slice()).collect();
+        for _ in 0..2{let h=self.vectors.dots(&refs,&w);self.vectors.subtract(&refs,&h,&mut w)?;}
+        let norm=self.vectors.norm(&w);
+        self.timing.columns_ms+=start.elapsed().as_secs_f64()*1e3;
+        if !(norm>1e-12){return Ok(false);}
+        for v in w.iter_mut(){*v=scaled(*v,1./norm);}
+        self.add_generators(space,w)?;Ok(true)
+    }
+    /// Gram matrices over every generator.
+    fn cover(&mut self,space:&mut Space)->Result<(),String>{
+        let start=Instant::now();let(old,new)=(space.covered,space.z.len());if new==old{return Ok(());}
+        let z:Vec<&[C]>=space.z.iter().map(|v|v.as_slice()).collect();let az:Vec<&[C]>=space.az.iter().map(|v|v.as_slice()).collect();
+        let kz=self.vectors.gram(&z,&z[old..])?;let hz=self.vectors.gram(&z,&az[old..])?;let hr=self.vectors.gram(&z[old..],&az[..old])?;
+        let width=new-old;let(mut k,mut h)=(vec![0.;new*new],vec![0.;new*new]);
+        for i in 0..old{for j in 0..old{k[i*new+j]=space.k[i*old+j];h[i*new+j]=space.h[i*old+j];}}
+        for i in 0..new{for c in 0..width{let j=old+c;k[i*new+j]=kz[i*width+c];k[j*new+i]=kz[i*width+c];h[i*new+j]=hz[i*width+c];}}
+        for c in 0..width{for j in 0..old{h[(old+c)*new+j]=hr[c*old+j];}}
+        space.k=k;space.h=h;space.covered=new;
+        self.timing.gram_ms+=start.elapsed().as_secs_f64()*1e3;Ok(())
+    }
+    fn reduce(&mut self,space:&Space,initial_norm:f64,times:&[f64])->Result<Reduced,String>{
+        let start=Instant::now();let lapack=&self.prepared.lapack;let m=space.covered;let horizon=*times.last().unwrap_or(&0.);
+        // Orthonormal coordinates W = Z_S L^-T: Gram-Schmidt with dropping on
+        // the Gram matrix (ordered Cholesky K_SS = L L^T over the kept
+        // generators S; the first, x(0), is always kept).
+        let k=&space.k;let mut kept:Vec<usize>=Vec::new();let mut lower:Vec<Vec<f64>>=Vec::new();
+        for g in 0..m{
+            let mut l=Vec::with_capacity(kept.len()+1);
+            for(a,&ka)in kept.iter().enumerate(){let mut s=k[ka*m+g];for b in 0..a{s-=lower[a][b]*l[b];}l.push(s/lower[a][a]);}
+            let residual=k[g*m+g]-l.iter().map(|x|x*x).sum::<f64>();
+            if residual>DEPENDENT*k[g*m+g]{l.push(residual.sqrt());lower.push(l);kept.push(g);}
+        }
+        let r=kept.len();
+        // L^-1 by forward substitution; T has the rows of L^-T on the kept generators.
+        let mut inverse=vec![0.;r*r];
+        for c in 0..r{for i in c..r{let mut s=if i==c{1.}else{0.};for b in c..i{s-=lower[i][b]*inverse[b*r+c];}inverse[i*r+c]=s/lower[i][i];}}
+        let mut t=vec![0.;m*r];
+        for(a,&g)in kept.iter().enumerate(){for c in 0..r{t[g*r+c]=inverse[c*r+a];}}
+        let diagonal=lower.iter().enumerate().map(|(a,row)|row[a]);
+        let(largest,smallest)=diagonal.fold((0_f64,f64::INFINITY),|(x,y),v|(x.max(v),y.min(v)));
+        let tt=transpose_rows(&t,m,r);
+        let g0=product(lapack,&product(lapack,&tt,&space.h,r,m,m),&t,r,m,r);
+        let column0:Vec<f64>=(0..m).map(|i|initial_norm*space.k[i*m]).collect();
+        let u0=product(lapack,&tt,&column0,r,m,1);
+        // Trace evolution: T_W G = Omega T_W, by the least-norm correction.
+        let tz=transpose_rows(&space.traces.concat(),m,space.traces[0].len());let kt=space.traces[0].len();
+        let tw=product(lapack,&tz,&t,kt,m,r);
+        let mut omega=vec![0.;kt*kt];
+        for(c,&(q,_,nu))in self.canonical.iter().filter(|c|c.0!=self.centre).enumerate(){let _=q;
+            let(a,b)=(1+2*c,2+2*c);omega[a*kt+b]=nu;omega[b*kt+a]=-nu;}
+        let defect={let mut x=product(lapack,&tw,&g0,kt,r,r);let y=product(lapack,&omega,&tw,kt,kt,r);for(a,b)in x.iter_mut().zip(&y){*a-=b;}x};
+        let gram=product(lapack,&tw,&transpose_rows(&tw,kt,r),kt,r,kt);
+        let(gv,ge)=symmetric_eigen(lapack,&gram,kt)?;let top=gv.iter().fold(0_f64,|a,&v|a.max(v));
+        let mut pseudo=vec![0.;kt*kt];
+        for j in 0..kt{if gv[j]>TRACE_RANK*TRACE_RANK*top{for a in 0..kt{for b in 0..kt{pseudo[a*kt+b]+=ge[a+kt*j]*ge[b+kt*j]/gv[j];}}}}
+        let correction=product(lapack,&product(lapack,&transpose_rows(&tw,kt,r),&pseudo,r,kt,kt),&defect,r,kt,r);
+        let mut g:Vec<f64>=g0.iter().zip(&correction).map(|(a,b)|a-b).collect();
+        let reflected=if horizon>0.{reflect_growing(lapack,&mut g,r,horizon)?}else{0};
+        // Trajectory on the uniform grid.
+        let step=if times.len()>1{times[1]-times[0]}else{0.};
+        let gcol=transpose_rows(&g,r,r);
+        let propagator=crate::dense_expm::exponential(lapack,&gcol,r,step)?;
+        let mut u=vec![u0.clone()];
+        for _ in 1..times.len(){let last=u.last().unwrap();let next:Vec<f64>=(0..r).map(|i|(0..r).map(|c|propagator[i+r*c]*last[c]).sum()).collect();u.push(next);}
+        if u.iter().flatten().any(|x|!x.is_finite()){return Err("Nonfinite reduced trajectory".into());}
+        // Ritz decomposition for the error propagation.
+        let(re,im,ev)=lapack.eigen(&gcol,r)?;
+        let mut mu=vec![ZERO;r];let mut s=vec![ZERO;r*r];let mut pair=vec![0_u8;r];let mut j=0;
+        while j<r{if im[j]!=0.&&j+1<r{mu[j]=C{re:re[j],im:im[j]};mu[j+1]=C{re:re[j],im:-im[j]};pair[j]=1;pair[j+1]=2;
+                for i in 0..r{let(a,b)=(ev[i+r*j],ev[i+r*(j+1)]);s[i*r+j]=C{re:a,im:b};s[i*r+j+1]=C{re:a,im:-b};}j+=2;}
+            else{mu[j]=C{re:re[j],im:0.};for i in 0..r{s[i*r+j]=C{re:ev[i+r*j],im:0.};}j+=1;}}
+        let(lu,pivots)=lapack.factor(&ev,r)?;let y=lapack.solve_matrix_factored(&lu,&pivots,&u0,r)?;
+        let mut a=vec![ZERO;r];let mut j=0;
+        while j<r{if pair[j]==1{a[j]=C{re:0.5*y[j],im:-0.5*y[j+1]};a[j+1]=C{re:0.5*y[j],im:0.5*y[j+1]};j+=2;}else{a[j]=C{re:y[j],im:0.};j+=1;}}
+        let mut identity=vec![0.;r*r];for i in 0..r{identity[i+r*i]=1.;}
+        let inverse=lapack.solve_matrix_factored(&lu,&pivots,&identity,r)?;
+        let one=|x:&[f64]|(0..r).map(|c|x[c*r..(c+1)*r].iter().map(|v|v.abs()).sum::<f64>()).fold(0.,f64::max);
+        let condition=one(&ev)*one(&inverse);
+        self.timing.reduced_ms+=start.elapsed().as_secs_f64()*1e3;
+        let growth=mu.iter().map(|z|z.re*horizon).fold(f64::NEG_INFINITY,f64::max);
+        let gram_condition=(largest/smallest).powi(2);
+        Ok(Reduced{t,r,g,reflected,gram_condition,growth,u,mu,s,a,condition})
+    }
+    /// Raw populations of the reduced trajectory.
+    fn populations(&self,space:&Space,reduced:&Reduced,times:&[f64])->Vec<Vec<f64>>{
+        let(n,m,r)=(self.n,space.covered,reduced.r);let lapack=&self.prepared.lapack;
+        // Per canonical mode: populations of the orthonormal coordinates
+        // (real parts in rows 0..n, imaginary in n..2n) and along the trajectory.
+        let mut trajectory=vec![0.;r*times.len()];for(k,u)in reduced.u.iter().enumerate(){for i in 0..r{trajectory[i*times.len()+k]=u[i];}}
+        let mut rows=vec![vec![0.;n];times.len()];
+        for(c,&(_,w,nu))in self.canonical.iter().enumerate(){
+            let mut y=vec![0.;2*n*m];
+            for g in 0..m{for i in 0..n{let v=space.readout[g][c*n+i];y[i*m+g]=v.re;y[(n+i)*m+g]=v.im;}}
+            let along=product(lapack,&product(lapack,&y,&reduced.t,2*n,m,r),&trajectory,2*n,r,times.len());
+            for(k,&time)in times.iter().enumerate(){let(cs,sn)=((nu*time).cos(),(nu*time).sin());
+                for i in 0..n{let(re,im)=(along[i*times.len()+k],along[(n+i)*times.len()+k]);rows[k][i]+=w*(cs*re-sn*im);}}
+        }
+        rows
+    }
+    /// Lattice fields Z T b for coefficient vectors b over the orthonormal coordinates.
+    fn fields(&self,space:&Space,reduced:&Reduced,coefficients:&[Vec<f64>],images:bool)->Result<Vec<Vec<C>>,String>{
+        let(m,r)=(space.covered,reduced.r);
+        let p=coefficients.len();let mut b=vec![0.;r*p];for(j,c)in coefficients.iter().enumerate(){for i in 0..r{b[i*p+j]=c[i];}}
+        let tb=product(&self.prepared.lapack,&reduced.t,&b,m,r,p);
+        let over:Vec<Vec<f64>>=(0..p).map(|j|(0..m).map(|g|tb[g*p+j]).collect()).collect();
+        let source:Vec<&[C]>=if images{space.az.iter().map(|v|v.as_slice()).collect()}else{space.z.iter().map(|v|v.as_slice()).collect()};
+        self.vectors.combinations(&source[..m],&over)
+    }
+    /// The basis estimate: the residual's leading singular components,
+    /// propagated.
+    /// An orthonormal basis Q of the range of R Omega (R = A W - W G) and
+    /// B = Q^T R (rows of length r).
+    fn residual_range(&self,space:&Space,reduced:&Reduced,omega:&[Vec<f64>])->Result<(Vec<Vec<C>>,Vec<f64>),String>{
+        let(r,m)=(reduced.r,space.covered);let lapack=&self.prepared.lapack;
+        let g_omega:Vec<Vec<f64>>=omega.iter().map(|o|(0..r).map(|i|(0..r).map(|c|reduced.g[i*r+c]*o[c]).sum()).collect()).collect();
+        let first=self.fields(space,reduced,omega,true)?;let second=self.fields(space,reduced,&g_omega,false)?;
+        let mut q:Vec<Vec<C>>=Vec::new();
+        for(a,b)in first.into_iter().zip(second){
+            let mut v:Vec<C>=a.iter().zip(&b).map(|(x,y)|C{re:x.re-y.re,im:x.im-y.im}).collect();
+            for _ in 0..2{if q.is_empty(){break;}let refs:Vec<&[C]>=q.iter().map(|x|x.as_slice()).collect();
+                let h=self.vectors.dots(&refs,&v);self.vectors.subtract(&refs,&h,&mut v)?;}
+            let norm=self.vectors.norm(&v);if norm>1e-300{q.push(v.iter().map(|x|scaled(*x,1./norm)).collect());}
+        }
+        let rows=q.len();if rows==0{return Ok((q,Vec::new()));}
+        let qr:Vec<&[C]>=q.iter().map(|v|v.as_slice()).collect();
+        let za:Vec<&[C]>=space.az[..m].iter().map(|v|v.as_slice()).collect();let zz:Vec<&[C]>=space.z[..m].iter().map(|v|v.as_slice()).collect();
+        let(qa,qz)=(self.vectors.gram(&qr,&za)?,self.vectors.gram(&qr,&zz)?);
+        let(ta,tz)=(product(lapack,&qa,&reduced.t,rows,m,r),product(lapack,&qz,&reduced.t,rows,m,r));
+        let tg=product(lapack,&tz,&reduced.g,rows,r,r);
+        Ok((q,ta.iter().zip(&tg).map(|(x,y)|x-y).collect()))
+    }
+    /// The basis estimate: the residual's leading singular components (a
+    /// randomized range finder with one power iteration), propagated.
+    fn basis_estimate(&mut self,space:&Space,reduced:&Reduced,eigenbasis:&BlockEigenbasis,times:&[f64],groups:&[Vec<usize>])->Result<f64,String>{
+        let start=Instant::now();let r=reduced.r;let lapack=&self.prepared.lapack;
+        // Translated copies multiply the residual's rank.
+        let p=(RESIDUAL_RANGE*(1+2*self.translations.len())+8).min(r);
+        let mut state=0x9e3779b97f4a7c15_u64;let mut random=||{state^=state<<13;state^=state>>7;state^=state<<17;(state>>11)as f64/(1u64<<53)as f64-0.5};
+        let omega:Vec<Vec<f64>>=(0..p).map(|_|(0..r).map(|_|random()).collect()).collect();
+        let(_,b)=self.residual_range(space,reduced,&omega)?;
+        let rows=b.len()/r.max(1);if rows==0{return Ok(0.);}
+        // Power iteration: Omega' = R^T Q = B^T.
+        let omega:Vec<Vec<f64>>=(0..rows).map(|i|b[i*r..(i+1)*r].to_vec()).collect();
+        let(q,b)=self.residual_range(space,reduced,&omega)?;
+        let rows=q.len();if rows==0{return Ok(0.);}
+        // SVD of B through B B^T: R ~ sum_j sigma_j (Q l_j) b_j^T.
+        let bbt=product(lapack,&b,&transpose_rows(&b,rows,r),rows,r,rows);
+        let(values,vectors)=symmetric_eigen(lapack,&bbt,rows)?;
+        let top=values.iter().fold(0_f64,|a,&v|a.max(v)).max(0.);
+        let total:f64=values.iter().map(|v|v.max(0.)).sum();let mut kept=0.;
+        let mut lefts=Vec::new();let mut alpha=Vec::new();
+        for j in(0..rows).rev(){
+            if !(values[j]>RESIDUAL_COMPONENT*RESIDUAL_COMPONENT*top){continue;}
+            kept+=values[j];let sigma=values[j].sqrt();let left:Vec<f64>=(0..rows).map(|i|vectors[i+rows*j]).collect();
+            let right:Vec<f64>=(0..r).map(|c|(0..rows).map(|i|b[i*r+c]*left[i]).sum::<f64>()/sigma).collect();
+            lefts.push(left);alpha.push(reduced.exponential(&right).into_iter().map(|a|scaled(a,sigma)).collect::<Vec<C>>());
+        }
+        let qr:Vec<&[C]>=q.iter().map(|v|v.as_slice()).collect();
+        let fields=self.vectors.combinations(&qr,&lefts)?;
+        let rows_t=eigenbasis.propagate(self.op(),&fields,&alpha,&reduced.mu,times)?;
+        self.timing.basis_ms+=start.elapsed().as_secs_f64()*1e3;
+        let scale=(total/kept.max(f64::MIN_POSITIVE)).sqrt();
+        Ok(scale*rows_t.iter().map(|p|ledger::metric(p,&vec![0.;self.n],groups)).fold(0.,f64::max))
+    }
+    /// Low-rank compression of the trajectory: fields x_i and coefficient
+    /// vectors y_i with x(t) ~ sum_i x_i (y_i^T u(t)), and the factor
+    /// |U|_F / |U_kept|_F by which estimates on it are scaled.
+    fn compression(&self,space:&Space,reduced:&Reduced)->Result<(Vec<Vec<C>>,Vec<Vec<f64>>,f64),String>{
+        let r=reduced.r;let mut uut=vec![0.;r*r];
+        for u in &reduced.u{for i in 0..r{for j in 0..r{uut[i*r+j]+=u[i]*u[j];}}}
+        let(values,vectors)=symmetric_eigen(&self.prepared.lapack,&uut,r)?;
+        let top=values.iter().fold(0_f64,|a,&v|a.max(v)).max(f64::MIN_POSITIVE);
+        let chosen:Vec<usize>=(0..r).rev().filter(|&j|values[j]>TRAJECTORY_COMPONENT*TRAJECTORY_COMPONENT*top).take(TRAJECTORY_RANGE).collect();
+        let total:f64=values.iter().map(|v|v.max(0.)).sum();let kept:f64=chosen.iter().map(|&j|values[j]).sum();
+        let ys:Vec<Vec<f64>>=chosen.iter().map(|&j|(0..r).map(|i|vectors[i+r*j]).collect()).collect();
+        Ok((self.fields(space,reduced,&ys,false)?,ys,(total/kept.max(f64::MIN_POSITIVE)).sqrt()))
+    }
+}
+
+/// Order-k propagation with its checkpoints; None when the shell asks for
+/// the next order.
+#[allow(clippy::too_many_arguments)]
+fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,eigenbasis:&OnceLock<Result<BlockEigenbasis,String>>,
+    order:usize,initial:&[C],times:&[f64],groups:&[Vec<usize>],checkpoints:&mut Vec<Checkpoint>)->Result<Option<FiniteSolution>,String>{
+    let n=prepared.generator.n;let d=n*n;let horizon=*times.last().unwrap_or(&0.);
+    let modes=prepared.modes(order)?;
+    let first=LatticeOperator::new(prepared,&modes)?;
+    let ledger=RemainderLedger::new(&prepared.plan,first.nu_max(),prepared.fold.dropped())?;
+    if ledger.expansion_parameter>ledger::EXPANSION_LIMIT{
+        return Err(format!("Static fold expansion parameter {:e} above {:e} at near order {order}",ledger.expansion_parameter,ledger::EXPANSION_LIMIT));}
+    let poles=if horizon>POLE_HORIZON{vec![POLE,POLE_SCALE/horizon]}else{vec![POLE]};
+    let clock=Instant::now();
+    // The pole moves the slow population block off zero, and the Woodbury
+    // term no longer helps: measured on old four lasers and three lasers +
+    // tweezer, 715 and 996 shifted-solve steps without it against 706 and
+    // 972 with it, at a sixth of the cost.
+    let mut batches:Vec<StructuredBatch<'_>>=poles.iter().map(|&s|dressed.batch(&first.nu,&first.canonical,&first.mirror,None,s,false)).collect::<Result<_,_>>()?;
+    let dressed_ms=clock.elapsed().as_secs_f64()*1e3;
+    let vectors=Vectors::new(&first)?;
+    let centre=first.centre;
+    let canonical:Vec<(usize,f64,f64)>=(0..modes.len()).filter(|&q|first.canonical[q]).map(|q|(q,if first.mirror[q]==q{1.}else{2.},first.nu[q])).collect();
+    // Translation pairs: explicit near steps mixing above TRANSLATION_MIXING.
+    let mut translations=Vec::new();
+    for s in prepared.plan.explicit(){let step=&prepared.plan.steps[s];
+        if !(step.size>TRANSLATION_MIXING*step.nu.abs())||step.charge<opposite(&step.charge){continue;}
+        let source=|sign:i32|->Vec<Option<usize>>{modes.iter().map(|q|{
+            let shifted:Option<Charge>=q.iter().zip(&step.charge).map(|(&a,&b)|a.checked_sub(sign*b)).collect();
+            shifted.and_then(|c|first.index.get(&c).copied())}).collect()};
+        translations.push((source(1),source(-1)));
+    }
+    let mut systems=Vec::new();let mut first=Some(first);
+    for(batch,&sigma)in batches.iter_mut().zip(&poles){
+        let op=match first.take(){Some(op)=>op,None=>LatticeOperator::new(prepared,&modes)?};
+        systems.push(System::shifted(op,batch,sigma)?);}
+    let mut lattice=Lattice{prepared,systems,poles,vectors,translations,canonical,centre,n,d,inner_steps:0,applications:0,
+        timing:FiniteTiming{dressed_ms,..Default::default()}};
+    // x(0) = delta_q0 rho0.
+    let mut x0=vec![ZERO;lattice.length()];x0[centre*d..(centre+1)*d].copy_from_slice(initial);
+    let initial_norm=lattice.vectors.norm(&x0);if !(initial_norm>0.){return Err("Zero initial density".into());}
+    let mut space=Space{basis:vec![],z:vec![],az:vec![],covered:0,k:vec![],h:vec![],traces:vec![],readout:vec![]};
+    lattice.add_generators(&mut space,x0.iter().map(|v|scaled(*v,1./initial_norm)).collect())?;
+    let initial_rows:Vec<f64>=(0..n).map(|i|initial[i*n+i].re).collect();
+    let mut target=FIRST_COLUMNS;
+    loop{
+        let clock=Instant::now();
+        let mut exhausted=false;
+        while space.basis.len()<target{if !lattice.extend(&mut space)?{exhausted=true;break;}}
+        lattice.cover(&mut space)?;
+        let reduced=lattice.reduce(&space,initial_norm,times)?;
+        let mut raw=lattice.populations(&space,&reduced,times);raw[0]=initial_rows.clone();
+        let projected:Vec<Vec<f64>>=raw.iter().map(|p|simplex(p)).collect();
+        let projection=raw.iter().zip(&projected).map(|(a,b)|ledger::metric(a,b,groups)).fold(0.,f64::max);
+        let eigen=eigenbasis.get_or_init(||BlockEigenbasis::new(prepared)).as_ref().map_err(|e|e.clone())?;
+        let basis=lattice.basis_estimate(&space,&reduced,eigen,times,groups)?;
+        let columns=space.basis.len();
+        let mut checkpoint=Checkpoint{order,columns,dimension:reduced.r,reflected:reduced.reflected,gram_condition:reduced.gram_condition,growth:reduced.growth,basis,shell:None,fold:None,projection,total:None,action:"",milliseconds:0.};
+        let more=|exhausted:bool,columns:usize|!exhausted&&columns<MAXIMUM_COLUMNS;
+        if KAPPA*basis+projection>POPULATION_TOLERANCE{
+            checkpoint.action=if more(exhausted,columns){"add-columns"}else{"not-converged"};
+            checkpoint.milliseconds=clock.elapsed().as_secs_f64()*1e3;checkpoints.push(checkpoint);
+            if !more(exhausted,columns){
+                let trail:Vec<String>=checkpoints.iter().map(|c|format!("{} columns {:.2e} (dimension {}, Gram condition {:.1e}, growth {:.1e}, reflected {})",
+                    c.columns,c.basis,c.dimension,c.gram_condition,c.growth,c.reflected)).collect();
+                return Err(format!("Finite-time basis estimate not below the tolerance: {}",trail.join(", ")));}
+            target+=MORE_COLUMNS;continue;
+        }
+        // Shell and fold on the trajectory's compression.
+        let(xs,ys,scale)=lattice.compression(&space,&reduced)?;
+        let phi:Vec<Vec<C>>=ys.iter().map(|y|reduced.exponential(y)).collect();
+        let start=Instant::now();
+        let shell=match Shell::new(prepared,dressed,lattice.op(),order,false)?{
+            None=>0.,
+            Some(mut shell)=>{
+                let mut sources=Vec::new();let mut own=vec![vec![0.;n];times.len()];
+                for(x,y)in xs.iter().zip(&ys){
+                    let(source,field)=shell.slaved(x)?;sources.push(source);
+                    // The shell's own populations, phi_i(t) = y_i^T u(t).
+                    for(ti,(&time,u))in times.iter().zip(&reduced.u).enumerate(){
+                        let phi_t:f64=y.iter().zip(u).map(|(a,b)|a*b).sum();if phi_t==0.{continue;}
+                        for(k,&s)in shell.modes.iter().enumerate(){if !shell.op.canonical[s]{continue;}
+                            let w=if shell.op.mirror[s]==s{1.}else{2.};let nu=shell.op.nu[s];let phase=C{re:(nu*time).cos(),im:(nu*time).sin()};
+                            for i in 0..n{own[ti][i]+=w*phi_t*mul(phase,field[k*d+i*n+i]).re;}}
+                    }
+                }
+                let propagated=eigen.propagate(lattice.op(),&sources,&phi,&reduced.mu,times)?;
+                scale*propagated.iter().zip(&own).map(|(a,b)|{let s:Vec<f64>=a.iter().zip(b).map(|(x,y)|x+y).collect();ledger::metric(&s,&vec![0.;n],groups)}).fold(0.,f64::max)
+            }
+        };
+        lattice.timing.shell_ms+=start.elapsed().as_secs_f64()*1e3;let start=Instant::now();
+        let fold=if prepared.plan.far().is_empty(){0.}else{
+            let mut sources=Vec::new();let mut third=false;
+            for x in &xs{let s=prepared.fold.third_order_source(lattice.op(),x)?;third|=s.iter().any(|z|nonzero(*z));sources.push(s);}
+            let(bound,sources)=if ledger.third_order>0.&&third{(ledger.third_order,sources)}
+                else{let mut fold=Vec::new();for x in &xs{fold.push(lattice.systems[0].op.apply_fold(x)?);}(ledger.fold,fold)};
+            let propagated=eigen.propagate(lattice.op(),&sources,&phi,&reduced.mu,times)?;
+            let response=scale*propagated.iter().map(|p|ledger::metric(p,&vec![0.;n],groups)).fold(0.,f64::max);
+            PopulationCharges::new(&ledger,if bound>0.{response/bound}else{0.}).total()
+        };
+        lattice.timing.fold_ms+=start.elapsed().as_secs_f64()*1e3;
+        let total=KAPPA*(basis+shell+fold)+projection;
+        checkpoint.shell=Some(shell);checkpoint.fold=Some(fold);checkpoint.total=Some(total);
+        if total<=POPULATION_TOLERANCE{
+            checkpoint.action="accept";checkpoint.milliseconds=clock.elapsed().as_secs_f64()*1e3;checkpoints.push(checkpoint);
+            let preconditions=lattice.systems.iter().map(|s|s.preconditions).sum();
+            for s in &lattice.systems{let t=&mut lattice.timing.inner;t.apply_ms+=s.timing.apply_ms;t.precondition_ms+=s.timing.precondition_ms;t.orthogonalize_ms+=s.timing.orthogonalize_ms;}
+            let applications=lattice.applications+lattice.systems.iter().map(|s|s.applications).sum::<usize>();
+            return Ok(Some(FiniteSolution{populations:projected,estimated_error:total,projection_charge:projection,basis,shell,fold,
+                order,modes:modes.len(),columns,dimension:reduced.r,translations:lattice.translations.len(),
+                inner_steps:lattice.inner_steps,applications,preconditions,eigenbasis_condition:eigen.condition,ritz_condition:reduced.condition,
+                checkpoints:std::mem::take(checkpoints),timing:lattice.timing}));
+        }
+        if KAPPA*shell>0.5*POPULATION_TOLERANCE&&order<MAXIMUM_ORDER{
+            checkpoint.action="next-order";checkpoint.milliseconds=clock.elapsed().as_secs_f64()*1e3;checkpoints.push(checkpoint);return Ok(None);}
+        checkpoint.action=if more(exhausted,columns){"add-columns"}else{"not-converged"};
+        checkpoint.milliseconds=clock.elapsed().as_secs_f64()*1e3;checkpoints.push(checkpoint);
+        if !more(exhausted,columns){return Err(format!("Finite-time estimate {total:e} not below the tolerance with {columns} columns"));}
+        target+=MORE_COLUMNS;
+    }
+}
+
+/// Euclidean projection of real values onto the probability simplex.
+fn simplex(values:&[f64])->Vec<f64>{
+    let mut sorted=values.to_vec();sorted.sort_by(|a,b|b.total_cmp(a));
+    let(mut sum,mut threshold)=(0.,0.);
+    for(index,&value)in sorted.iter().enumerate(){sum+=value;let candidate=(sum-1.)/(index+1)as f64;if value>candidate{threshold=candidate;}else{break;}}
+    values.iter().map(|x|(x-threshold).max(0.)).collect()
+}
+
+/// The populations of rho0 (row-major n x n, the request frame at t = 0)
+/// on the uniform grid `times` (starting at zero), with their estimated
+/// error.
+pub fn propagate(prepared:&LatticePrepared,initial:&[C],times:&[f64],groups:&[Vec<usize>])->Result<FiniteSolution,String>{
+    let n=prepared.generator.n;
+    if initial.len()!=n*n{return Err("Initial density dimension differs".into());}
+    if times.len()<2||times[0]!=0.{return Err("Finite-time grid must start at zero with at least two times".into());}
+    let step=times[1];let horizon=times[times.len()-1];
+    if !(horizon>0.)||times.iter().enumerate().any(|(i,&t)|(t-step*i as f64).abs()>1e-12*horizon.max(1.)){return Err("Finite-time grid must be uniform".into());}
+    // The centre eigenbasis is prepared beside the first columns.
+    let eigenbasis=OnceLock::new();
+    std::thread::scope(|scope|{
+        scope.spawn(||{eigenbasis.get_or_init(||BlockEigenbasis::new(prepared));});
+        let clock=Instant::now();
+        let dressed=StructuredDressed::new(prepared)?;let dressed_ms=clock.elapsed().as_secs_f64()*1e3;
+        let mut checkpoints=Vec::new();
+        for order in START_ORDER..=MAXIMUM_ORDER{
+            if let Some(mut solution)=attempt(prepared,&dressed,&eigenbasis,order,initial,times,groups,&mut checkpoints)?{
+                solution.timing.dressed_ms+=dressed_ms;
+                solution.timing.eigenbasis_ms=eigenbasis.get().and_then(|e|e.as_ref().ok()).map_or(0.,|e|e.milliseconds);
+                return Ok(solution);
+            }
+        }
+        Err(format!("Finite-time populations not accepted up to near order {MAXIMUM_ORDER}"))
+    })
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    use super::super::tests::{fixture,prepared};
+    #[test]
+    fn lattice_finite_populations_follow_the_exact_lattice_propagation(){
+        // The fixture from |0><0| over 2 us against the exact exponential of
+        // the same order-2 lattice (dense, real 2N x 2N form): the actual
+        // error stays below the claimed one.
+        let f=fixture();let p=prepared(&f);let n=4;let d=16;let groups=vec![vec![0,1],vec![2,3]];
+        let mut initial=vec![ZERO;d];initial[0]=ONE;
+        let times:Vec<f64>=(0..21).map(|i|0.1*i as f64).collect();
+        let s=propagate(&p,&initial,&times,&groups).unwrap();
+        let modes=p.modes(s.order).unwrap();let op=LatticeOperator::new(&p,&modes).unwrap();
+        let a=op.dense();let size=op.dimension();let real=2*size;
+        let mut big=vec![0.;real*real];
+        for r in 0..size{for c in 0..size{let v=a[r*size+c];
+            big[r+real*c]=v.re;big[r+real*(c+size)]=-v.im;big[r+size+real*c]=v.im;big[r+size+real*(c+size)]=v.re;}}
+        let step=crate::dense_expm::exponential(&p.lapack,&big,real,0.1).unwrap();
+        let mut x=vec![0.;real];x[op.centre*d]=1.;
+        let mut worst=0_f64;
+        for(i,&t)in times.iter().enumerate(){
+            if i>0{x=(0..real).map(|r|(0..real).map(|c|step[r+real*c]*x[c]).sum()).collect();}
+            let pops:Vec<f64>=(0..n).map(|k|(0..modes.len()).map(|q|{let e=q*d+k*n+k;
+                let v=C{re:x[e],im:x[e+size]};mul(C{re:(op.nu[q]*t).cos(),im:(op.nu[q]*t).sin()},v).re}).sum()).collect();
+            worst=worst.max(ledger::metric(&pops,&s.populations[i],&groups));
+        }
+        assert!(worst<=s.estimated_error,"actual {worst:e} above the estimate {:e} ({:?})",s.estimated_error,s.checkpoints);
+        assert!(s.estimated_error<=POPULATION_TOLERANCE);
+    }
+}

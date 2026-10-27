@@ -186,14 +186,17 @@ pub struct Shell<'a>{
 }
 impl<'a> Shell<'a>{
     /// None when the next order adds no mode (no near coupling).
-    pub fn new(prepared:&'a LatticePrepared,dressed:&'a StructuredDressed,inner:&LatticeOperator<'_>,order:usize)->Result<Option<Self>,String>{
+    /// `woodbury`: the shell's dressed blocks with the Woodbury term (the
+    /// steady estimate) or separable alone (|nu_q| of the shell modes keeps
+    /// their population block off zero; the finite-time estimate).
+    pub fn new(prepared:&'a LatticePrepared,dressed:&'a StructuredDressed,inner:&LatticeOperator<'_>,order:usize,woodbury:bool)->Result<Option<Self>,String>{
         let modes=prepared.modes(order+1)?;if modes.len()==inner.modes.len(){return Ok(None);}
         let op=LatticeOperator::new(prepared,&modes)?;
         let ball=inner.modes.iter().map(|q|op.index.get(q).copied().ok_or("Near ball is not nested")).collect::<Result<Vec<_>,_>>()?;
         let mut inside=vec![false;modes.len()];for &b in &ball{inside[b]=true;}
         let shell:Vec<usize>=(0..modes.len()).filter(|&q|!inside[q]).collect();
         let computed:Vec<bool>=(0..modes.len()).map(|q|op.canonical[q]&&!inside[q]).collect();
-        let pre=dressed.batch(&op.nu,&computed,&op.mirror,None)?;
+        let pre=dressed.batch(&op.nu,&computed,&op.mirror,None,0.,woodbury)?;
         Ok(Some(Self{op,pre,ball,modes:shell,applications:0}))
     }
     fn d(&self)->usize{self.op.n*self.op.n}
@@ -218,6 +221,13 @@ impl<'a> Shell<'a>{
         for &s in &self.modes{residual[s*d..(s+1)*d].copy_from_slice(&full[s*d..(s+1)*d]);}
         let mut z=vec![ZERO;full.len()];self.pre.apply(&residual,&mut z)?;
         let z=self.shell_rows(&z);Ok(y.iter().zip(&z).map(|(a,b)|C{re:a.re-b.re,im:a.im-b.im}).collect())
+    }
+    /// The slaved shell field y = -P_s^-1 C x of an order-k field x and its
+    /// source on the order-k ball, B y.
+    pub fn slaved(&mut self,x:&[C])->Result<(Vec<C>,Vec<C>),String>{
+        let zero=vec![ZERO;self.modes.len()*self.d()];
+        let first=self.apply(x,&zero)?;let y=self.relax(&first,&zero)?;
+        let full=self.apply(&vec![ZERO;x.len()],&y)?;Ok((self.ball_rows(&full),y))
     }
     /// The one-step Jacobi truncation source of a normalized order-k field x
     /// (v^T x = 1, so r_p = A x): f = -(A x + B y_1), y_1 = -P_s^-1 C x.

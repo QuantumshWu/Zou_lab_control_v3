@@ -108,11 +108,11 @@ impl StructuredDressed{
         Ok(Self{n,d,lapack:Arc::clone(lapack),left_in,right_in,left_out,right_out,lambda,mu,uhat,vhat,rank,trace_u,trace_v,
             tiny:TINY_DENOMINATOR*scale,sigma:SIGMA_FRACTION*damping,diagnostics})
     }
-    /// Factors of mode shift i nu; the centre adds the trace row.
-    fn factor(&self,nu:f64,centre:bool)->Result<(Factor,usize),String>{
-        let(n,d,rank)=(self.n,self.d,self.rank);
+    /// Factors of the block L0' - i nu - sigma; the centre adds the trace row.
+    fn factor(&self,nu:f64,sigma:f64,centre:bool,rank:usize)->Result<(Factor,usize),String>{
+        let(n,d)=(self.n,self.d);
         let mut reciprocal=vec![ZERO;d];let mut moved=Vec::new();
-        for a in 0..n{for b in 0..n{let z=C{re:self.lambda[a].re+self.mu[b].re,im:self.lambda[a].im+self.mu[b].im-nu};
+        for a in 0..n{for b in 0..n{let z=C{re:self.lambda[a].re+self.mu[b].re-sigma,im:self.lambda[a].im+self.mu[b].im-nu};
             let(z,shift)=if magnitude(z)<self.tiny{(C{re:-self.sigma,im:0.},Some(z))}else{(z,None)};
             if let Some(original)=shift{moved.push((a*n+b,C{re:original.re+self.sigma,im:original.im}));}
             let s=z.re*z.re+z.im*z.im;reciprocal[a*n+b]=C{re:z.re/s,im:-z.im/s};}}
@@ -130,20 +130,24 @@ impl StructuredDressed{
         for j in 0..total{for i in 0..rank{add(&mut g[i+total*j],top[i+rank*j]);}}
         if extra>0{let mut bottom=vec![ZERO;extra*total];gemm.multiply(extra,total,d,ONE,&extra_v,extra,&scaled,d,ZERO,&mut bottom,extra)?;
             for j in 0..total{for i in 0..extra{add(&mut g[rank+i+total*j],bottom[i+extra*j]);}}}
-        let capacitance=inverse(&self.lapack,&g,total)?;
+        let capacitance=if total==0{Vec::new()}else{inverse(&self.lapack,&g,total)?};
         Ok((Factor{reciprocal,extra_u,extra_v,extra,capacitance},moved.len()))
     }
-    /// The preconditioner of one mode set: frequencies, the computed modes
-    /// (the canonical half, or a subset of it), the Hermitian pairing and the
-    /// centre (None for a set without the zero charge).
-    pub fn batch<'a>(&'a self,nu:&[f64],canonical:&[bool],mirror:&[usize],centre:Option<usize>)->Result<StructuredBatch<'a>,String>{
+    /// The preconditioner of one mode set, (L0' - i nu_q - sigma)^-1 per
+    /// mode: frequencies, the computed modes (the canonical half, or a subset
+    /// of it), the Hermitian pairing, the centre carrying the trace row (None:
+    /// no trace row), the real shift sigma (a rational Krylov pole) and
+    /// whether the Woodbury term is included (else the separable part alone,
+    /// enough where nu_q or sigma moves the slow population block off zero).
+    pub fn batch<'a>(&'a self,nu:&[f64],canonical:&[bool],mirror:&[usize],centre:Option<usize>,sigma:f64,woodbury:bool)->Result<StructuredBatch<'a>,String>{
         let execution=Execution::new()?;
         let computed:Vec<usize>=(0..nu.len()).filter(|&q|canonical[q]).collect();
-        let factors=execution.map(computed.clone(),|q|self.factor(nu[q],Some(q)==centre)).into_iter().collect::<Result<Vec<_>,_>>()?;
+        let rank=if woodbury{self.rank}else{0};
+        let factors=execution.map(computed.clone(),|q|self.factor(nu[q],sigma,Some(q)==centre,rank)).into_iter().collect::<Result<Vec<_>,_>>()?;
         let regularized=factors.iter().map(|f|f.1).sum();let factors:Vec<Factor>=factors.into_iter().map(|f|f.0).collect();
         let(n,d)=(self.n,self.d);
-        let work=factors.iter().map(|f|4*n*n*n+2*(self.rank+f.extra)*d+(self.rank+f.extra).pow(2)).sum();
-        Ok(StructuredBatch{dressed:self,computed,factors,canonical:canonical.to_vec(),mirror:mirror.to_vec(),
+        let work=factors.iter().map(|f|4*n*n*n+2*(rank+f.extra)*d+(rank+f.extra).pow(2)).sum();
+        Ok(StructuredBatch{dressed:self,rank,computed,factors,canonical:canonical.to_vec(),mirror:mirror.to_vec(),
             buffer:Vec::new(),execution,scratch:Vec::new(),regularized,work})
     }
 }
@@ -152,6 +156,8 @@ impl StructuredDressed{
 pub struct BatchScratch{w:Vec<C>,c:Vec<C>,t:Vec<C>}
 pub struct StructuredBatch<'a>{
     dressed:&'a StructuredDressed,
+    /// Woodbury rank in use.
+    rank:usize,
     /// Canonical modes and their factors.
     computed:Vec<usize>,factors:Vec<Factor>,
     canonical:Vec<bool>,mirror:Vec<usize>,
@@ -163,7 +169,7 @@ pub struct StructuredBatch<'a>{
 impl Preconditioner for StructuredBatch<'_>{
     fn work(&self)->usize{self.work}
     fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{
-        let dressed=self.dressed;let(n,d,rank)=(dressed.n,dressed.d,dressed.rank);let modes=self.canonical.len();
+        let dressed=self.dressed;let(n,d,rank)=(dressed.n,dressed.d,self.rank);let modes=self.canonical.len();
         if x.len()!=modes*d||y.len()!=x.len(){return Err("Dressed preconditioner field dimensions differ".into());}
         let m=self.computed.len();grow(&mut self.buffer,m*d);
         for(k,&q)in self.computed.iter().enumerate(){self.buffer[k*d..(k+1)*d].copy_from_slice(&x[q*d..(q+1)*d]);}
@@ -173,7 +179,7 @@ impl Preconditioner for StructuredBatch<'_>{
             frame_transform(lapack,n,&dressed.left_in,&dressed.right_in,chunk,count)?;
             for(k,block)in chunk.chunks_exact_mut(d).enumerate(){for(v,&r)in block.iter_mut().zip(&factors[first+k].reciprocal){*v=mul(*v,r);}}
             grow(&mut scratch.w,rank*count);grow(&mut scratch.t,d*count);
-            gemm.multiply(rank,count,d,ONE,&dressed.vhat,rank,chunk,d,ZERO,&mut scratch.w,rank)?;
+            if rank>0{gemm.multiply(rank,count,d,ONE,&dressed.vhat,rank,chunk,d,ZERO,&mut scratch.w,rank)?;}
             let total_max=factors[first..first+count].iter().map(|f|rank+f.extra).max().unwrap_or(rank);grow(&mut scratch.c,total_max*count);
             for k in 0..count{let f=&factors[first+k];let total=rank+f.extra;let block=&chunk[k*d..(k+1)*d];
                 let mut w=scratch.w[k*rank..(k+1)*rank].to_vec();
@@ -182,7 +188,7 @@ impl Preconditioner for StructuredBatch<'_>{
                 for j in 0..total{for i in 0..total{mul_add(&mut c[i],f.capacitance[i+total*j],w[j]);}}}
             // t = U c (base columns as one GEMM, extra columns per mode).
             let mut base=vec![ZERO;rank*count];for k in 0..count{base[k*rank..(k+1)*rank].copy_from_slice(&scratch.c[k*total_max..k*total_max+rank]);}
-            gemm.multiply(d,count,rank,ONE,&dressed.uhat,d,&base,rank,ZERO,&mut scratch.t,d)?;
+            if rank>0{gemm.multiply(d,count,rank,ONE,&dressed.uhat,d,&base,rank,ZERO,&mut scratch.t,d)?;}else{scratch.t[..d*count].fill(ZERO);}
             for k in 0..count{let f=&factors[first+k];let t=&mut scratch.t[k*d..(k+1)*d];
                 for e in 0..f.extra{let ce=scratch.c[k*total_max+rank+e];for c in 0..d{mul_add(&mut t[c],f.extra_u[e*d+c],ce);}}
                 for(v,(&tv,&r))in chunk[k*d..(k+1)*d].iter_mut().zip(t.iter().zip(&f.reciprocal)){let s=mul(tv,r);v.re-=s.re;v.im-=s.im;}}
@@ -210,7 +216,7 @@ mod tests{
         let f=fixture();let p=prepared(&f);let n=4;let d=16;
         let dressed=StructuredDressed::new(&p).unwrap();
         let modes=p.modes(2).unwrap();let op=LatticeOperator::new(&p,&modes).unwrap();
-        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre)).unwrap();
+        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true).unwrap();
         let x=symmetric_field(&op,3);let mut y=vec![ZERO;x.len()];batch.apply(&x,&mut y).unwrap();
         let zero=p.generator.zero_component();let t=&p.fold.targets[0];
         let mut base=vec![ZERO;d*d];zero.op.dense_into(n,ONE,&mut base);

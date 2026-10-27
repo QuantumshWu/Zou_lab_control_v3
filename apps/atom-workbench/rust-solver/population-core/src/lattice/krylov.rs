@@ -1,7 +1,8 @@
-//! The primal Krylov solve of the steady trace-row system M x = u, with
-//! M = A + u v^T (u = I/n on the centre, v its trace): the time-averaged
-//! populations are the central diagonal of x (A x = 0, v^T x = 1 when the
-//! null vector is unique).
+//! Krylov solves on the lattice: the steady trace-row system M x = u, with
+//! M = A + u v^T (u = I/n on the centre, v its trace: the time-averaged
+//! populations are the central diagonal of x, A x = 0 and v^T x = 1 when the
+//! null vector is unique), and the shifted systems (A - sigma) w = b of the
+//! rational Krylov propagation (`finite`).
 //!
 //! Real coordinates: the fields are Hermitian-symmetric (x_-q = x_q^dagger),
 //! a real vector space that M and the dressed preconditioner preserve, with
@@ -11,10 +12,11 @@
 //!
 //! Right-preconditioned restarted GMRES with a fixed preconditioner, so only
 //! the populations of P^-1 v_j are kept per step and the iterate is formed
-//! once per cycle. It stops when the populations and the requested groups
-//! have stabilised (changes below the algebraic share of the tolerance for
-//! STABLE_STEPS consecutive steps) and the true relative residual, recomputed
-//! from the iterate after the cycle, is below a guard: the population change
+//! once per cycle. The steady solve stops when the populations and the
+//! requested groups have stabilised (changes below the algebraic share of the
+//! tolerance for STABLE_STEPS consecutive steps) and the true relative
+//! residual, recomputed from the iterate after the cycle, is below a guard; a
+//! shifted solve stops on the true relative residual alone. The population change
 //! alone can plateau in slow directions, and the recursive GMRES residual can
 //! fall eight orders below the true one (the operator spans 1e-6 to 5e7
 //! rad/us). The longest cycle's Arnoldi relation M P^-1 V_m = V_m+1 Hbar_m
@@ -33,8 +35,9 @@ const VECTOR_CHUNK:usize=16;
 
 #[derive(Clone,Debug)]
 pub struct KrylovOptions{
-    /// Population-stability tolerance.
-    pub algebraic:f64,
+    /// Stop only once the populations have stabilised as well (the steady
+    /// solve), and their stability tolerance.
+    pub populations:bool,pub algebraic:f64,
     /// Relative true-residual guard. Measured: a true residual of 3e-7 left
     /// 1.8e-5 in the populations (two lasers + tweezer, a 1e-6 /us Raman
     /// manifold); at 1e-8 every case is within 1e-7 of its reference.
@@ -45,21 +48,59 @@ pub struct KrylovOptions{
 }
 impl Default for KrylovOptions{
     fn default()->Self{
-        Self{algebraic:ledger::POPULATION_TOLERANCE*ledger::ALGEBRAIC_SHARE,residual_guard:1e-8,restart:80,maximum_steps:800,basis_bytes:1<<30}
+        Self{populations:true,algebraic:ledger::POPULATION_TOLERANCE*ledger::ALGEBRAIC_SHARE,residual_guard:1e-8,restart:80,maximum_steps:800,basis_bytes:1<<30}
     }
 }
 #[derive(Clone,Debug,Default)]
 pub struct KrylovTiming{pub apply_ms:f64,pub precondition_ms:f64,pub orthogonalize_ms:f64}
 
 /// Deterministic parallel kernels on Hermitian-symmetric fields.
-pub struct Vectors{execution:Execution,d:usize,
+pub struct Vectors{execution:Execution,n:usize,d:usize,
     /// Real inner-product weight per mode: 2 for a canonical pair member, 1
     /// for the centre, 0 for a mirrored mode.
-    weights:Vec<f64>}
+    weights:Vec<f64>,
+    canonical:Vec<bool>,mirror:Vec<usize>,lapack:Arc<Lapack>}
 impl Vectors{
     pub fn new(op:&LatticeOperator<'_>)->Result<Self,String>{
         let weights=(0..op.modes.len()).map(|q|if !op.canonical[q]{0.}else if op.mirror[q]==q{1.}else{2.}).collect();
-        Ok(Self{execution:Execution::new()?,d:op.n*op.n,weights})
+        Ok(Self{execution:Execution::new()?,n:op.n,d:op.n*op.n,weights,canonical:op.canonical.clone(),mirror:op.mirror.clone(),
+            lapack:Arc::clone(&op.prepared.lapack)})
+    }
+    /// Columns of a canonical block as a column-major (2 d) x count real
+    /// matrix (re and im interleaved: the real inner product is its dot).
+    fn block(&self,vectors:&[&[C]],q:usize)->Vec<f64>{
+        let d=self.d;let mut out=Vec::with_capacity(2*d*vectors.len());
+        for v in vectors{for z in &v[q*d..(q+1)*d]{out.push(z.re);out.push(z.im);}}
+        out
+    }
+    /// Re <rows_i, cols_j> for every pair (row-major |rows| x |cols|): one
+    /// real GEMM per canonical block, summed in block order.
+    pub fn gram(&self,rows:&[&[C]],cols:&[&[C]])->Result<Vec<f64>,String>{
+        let(r,c)=(rows.len(),cols.len());let d2=2*self.d;
+        if r==0||c==0{return Ok(vec![0.;r*c]);}
+        let blocks:Vec<usize>=(0..self.weights.len()).filter(|&q|self.weights[q]>0.).collect();
+        let parts=self.execution.map(blocks,|q|->Result<Vec<f64>,String>{
+            let(a,b)=(self.block(rows,q),self.block(cols,q));let mut out=vec![0.;r*c];
+            self.lapack.gemm(true,false,r,c,d2,self.weights[q],&a,d2,&b,d2,0.,&mut out,r)?;Ok(out)});
+        let mut gram=vec![0.;r*c];
+        for part in parts{let part=part?;for i in 0..r{for j in 0..c{gram[i*c+j]+=part[i+r*j];}}}
+        Ok(gram)
+    }
+    /// sum_i coefficients[k][i] basis_i for every k (Hermitian-symmetric
+    /// fields: canonical blocks by one real GEMM each, the rest mirrored).
+    pub fn combinations(&self,basis:&[&[C]],coefficients:&[Vec<f64>])->Result<Vec<Vec<C>>,String>{
+        let(m,k)=(basis.len(),coefficients.len());let(n,d)=(self.n,self.d);let d2=2*d;let modes=self.weights.len();
+        let mut out=vec![vec![ZERO;modes*d];k];
+        if m==0||k==0{return Ok(out);}
+        let mut coefficient=vec![0.;m*k];for(j,c)in coefficients.iter().enumerate(){coefficient[j*m..(j+1)*m].copy_from_slice(&c[..m]);}
+        let blocks:Vec<usize>=(0..modes).filter(|&q|self.canonical[q]).collect();
+        let parts=self.execution.map(blocks.clone(),|q|->Result<Vec<f64>,String>{
+            let a=self.block(basis,q);let mut product=vec![0.;d2*k];
+            self.lapack.gemm(false,false,d2,k,m,1.,&a,d2,&coefficient,m,0.,&mut product,d2)?;Ok(product)});
+        for(&q,part)in blocks.iter().zip(parts){let part=part?;
+            for(j,field)in out.iter_mut().enumerate(){for e in 0..d{field[q*d+e]=C{re:part[j*d2+2*e],im:part[j*d2+2*e+1]};}}}
+        for field in &mut out{mirror_field(field,n,&self.canonical,&self.mirror);}
+        Ok(out)
     }
     fn ranges(&self,length:usize)->Vec<(usize,usize)>{
         let w=VECTOR_CHUNK*self.d;(0..length.div_ceil(w)).map(|c|(c*w,((c+1)*w).min(length))).collect()
@@ -93,27 +134,33 @@ pub fn combine(basis:&[&[C]],c:&[f64],length:usize)->Vec<C>{
     out
 }
 
-/// The trace-row system on one mode set: M = A + u v^T, its preconditioner
-/// and the vector kernels.
+/// A system on one mode set, A + u v^T (the steady trace row) or A - sigma,
+/// with its preconditioner and the vector kernels.
 pub struct System<'a,'p>{
     pub op:LatticeOperator<'a>,
     pub pre:&'p mut dyn Preconditioner,
+    trace_row:bool,shift:f64,
     pub vectors:Vectors,
     /// Field indices of the central populations.
     pub watch:Vec<usize>,
     pub timing:KrylovTiming,pub applications:usize,pub preconditions:usize,
 }
 impl<'a,'p> System<'a,'p>{
-    pub fn new(op:LatticeOperator<'a>,pre:&'p mut dyn Preconditioner)->Result<Self,String>{
+    /// The steady trace-row system M = A + u v^T.
+    pub fn new(op:LatticeOperator<'a>,pre:&'p mut dyn Preconditioner)->Result<Self,String>{Self::with(op,pre,true,0.)}
+    /// The shifted system A - sigma.
+    pub fn shifted(op:LatticeOperator<'a>,pre:&'p mut dyn Preconditioner,sigma:f64)->Result<Self,String>{Self::with(op,pre,false,sigma)}
+    fn with(op:LatticeOperator<'a>,pre:&'p mut dyn Preconditioner,trace_row:bool,shift:f64)->Result<Self,String>{
         let n=op.n;let c0=op.centre*n*n;let watch=(0..n).map(|i|c0+i*n+i).collect();let vectors=Vectors::new(&op)?;
-        Ok(Self{op,pre,vectors,watch,timing:KrylovTiming::default(),applications:0,preconditions:0})
+        Ok(Self{op,pre,trace_row,shift,vectors,watch,timing:KrylovTiming::default(),applications:0,preconditions:0})
     }
     pub fn length(&self)->usize{self.op.dimension()}
-    /// y = M x.
+    /// y = M x (the trace row, or the shift).
     pub fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{
         let start=Instant::now();self.op.apply(x,y)?;
-        let n=self.watch.len();let t=self.watch.iter().fold(ZERO,|s,&k|C{re:s.re+x[k].re,im:s.im+x[k].im});
-        for &k in &self.watch{add(&mut y[k],scaled(t,1./n as f64));}
+        if self.trace_row{let n=self.watch.len();let t=self.watch.iter().fold(ZERO,|s,&k|C{re:s.re+x[k].re,im:s.im+x[k].im});
+            for &k in &self.watch{add(&mut y[k],scaled(t,1./n as f64));}}
+        if self.shift!=0.{for(v,a)in y.iter_mut().zip(x){v.re-=self.shift*a.re;v.im-=self.shift*a.im;}}
         self.timing.apply_ms+=start.elapsed().as_secs_f64()*1e3;self.applications+=1;Ok(())
     }
     /// y = P^-1 x.
@@ -210,11 +257,13 @@ pub fn gmres(system:&mut System<'_,'_>,b:&[C],x0:Option<Vec<C>>,groups:&[Vec<usi
             arnoldi.r.push(column);steps+=1;
             let residual=g[j+1].abs()/bnorm;
             y=arnoldi.back_substitute(&g[..=j]);
-            let mut current=xdiag.clone();for(k,zk)in arnoldi.diagonal.iter().enumerate(){for(t,&v)in current.iter_mut().zip(zk){*t+=y[k]*v;}}
-            let trace:f64=current.iter().sum();let current:Vec<f64>=current.iter().map(|v|v/trace).collect();
-            let change=previous.as_ref().map_or(f64::INFINITY,|p|ledger::metric(p,&current,groups));changes.push(change);
-            previous=Some(current);
-            let stable=changes.len()>=STABLE_STEPS&&changes[changes.len()-STABLE_STEPS..].iter().all(|&c|c<options.algebraic);
+            let stable=if options.populations{
+                let mut current=xdiag.clone();for(k,zk)in arnoldi.diagonal.iter().enumerate(){for(t,&v)in current.iter_mut().zip(zk){*t+=y[k]*v;}}
+                let trace:f64=current.iter().sum();let current:Vec<f64>=current.iter().map(|v|v/trace).collect();
+                let change=previous.as_ref().map_or(f64::INFINITY,|p|ledger::metric(p,&current,groups));changes.push(change);
+                previous=Some(current);
+                changes.len()>=STABLE_STEPS&&changes[changes.len()-STABLE_STEPS..].iter().all(|&c|c<options.algebraic)
+            }else{true};
             if stable&&residual<=options.residual_guard{stopped=Some("populations-stable");}
             else if hn==0.{stopped=Some("exact");}
             else if residual<=1e-15{stopped=Some("residual-at-roundoff");}

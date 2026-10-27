@@ -113,7 +113,7 @@ pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>])->Result<SteadySolut
         if ledger.expansion_parameter>ledger::EXPANSION_LIMIT{
             return Err(format!("Static fold expansion parameter {:e} above {:e} at near order {order}",ledger.expansion_parameter,ledger::EXPANSION_LIMIT));}
         let(nu_max,canonical,operator_work,edges)=(op.nu_max(),op.canonical_count(),op.work,op.edge_counts);
-        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre))?;
+        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true)?;
         let(precondition_work,regularized)=(batch.work,batch.regularized);
         let mut system=System::new(op,&mut batch)?;
         let mut timing=AttemptTiming{setup_ms:start.elapsed().as_secs_f64()*1e3,..Default::default()};
@@ -130,7 +130,7 @@ pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>])->Result<SteadySolut
         let start=Instant::now();
         let mut augmented=Augmented::new(primal.arnoldi);
         let mut parts=[0.;5];let mut lap=Instant::now();
-        let mut shell=Shell::new(prepared,&dressed,&system.op,order)?;
+        let mut shell=Shell::new(prepared,&dressed,&system.op,order,true)?;
         let mut split=|k:usize,parts:&mut[f64;5]|{parts[k]=lap.elapsed().as_secs_f64()*1e3;lap=Instant::now();};
         split(0,&mut parts);
         let(source,mut shell_field)=match &mut shell{
@@ -230,7 +230,7 @@ fn null_residual(system:&mut System<'_,'_>,x:&[C])->Result<f64,String>{
 /// Populations of the order-k primal alone (for the shell ratio).
 fn lower_order(prepared:&LatticePrepared,dressed:&StructuredDressed,order:usize,groups:&[Vec<usize>],options:&KrylovOptions)->Result<Vec<f64>,String>{
     let modes=prepared.modes(order)?;let op=LatticeOperator::new(prepared,&modes)?;
-    let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre))?;
+    let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true)?;
     let mut system=System::new(op,&mut batch)?;let b=system.source();
     let primal=krylov::gmres(&mut system,&b,None,groups,options)?;
     let p=system.populations(&primal.x);let t:f64=p.iter().sum();Ok(p.iter().map(|v|v/t).collect())
@@ -244,7 +244,7 @@ mod tests{
     fn primal(p:&LatticePrepared,order:usize)->(Vec<f64>,Vec<C>,Vec<Charge>){
         let dressed=StructuredDressed::new(p).unwrap();let modes=p.modes(order).unwrap();
         let op=LatticeOperator::new(p,&modes).unwrap();
-        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre)).unwrap();
+        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true).unwrap();
         let mut system=System::new(op,&mut batch).unwrap();let b=system.source();
         let k=krylov::gmres(&mut system,&b,None,&[vec![0,1],vec![2,3]],&tight()).unwrap();
         let t:f64=system.watch.iter().map(|&i|k.x[i].re).sum();let x:Vec<C>=k.x.iter().map(|v|scaled(*v,1./t)).collect();
@@ -269,13 +269,13 @@ mod tests{
         let f=fixture();let p=prepared(&f);let groups=vec![vec![0,1],vec![2,3]];
         let dressed=StructuredDressed::new(&p).unwrap();let modes=p.modes(1).unwrap();
         let op=LatticeOperator::new(&p,&modes).unwrap();
-        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre)).unwrap();
+        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true).unwrap();
         let mut system=System::new(op,&mut batch).unwrap();let b=system.source();
         let k=krylov::gmres(&mut system,&b,None,&groups,&tight()).unwrap();
         let t:f64=system.watch.iter().map(|&i|k.x[i].re).sum();let x:Vec<C>=k.x.iter().map(|v|scaled(*v,1./t)).collect();
         let pk=system.populations(&x);
         let mut augmented=Augmented::new(k.arnoldi);
-        let mut shell=Shell::new(&p,&dressed,&system.op,1).unwrap().unwrap();
+        let mut shell=Shell::new(&p,&dressed,&system.op,1,true).unwrap().unwrap();
         let(source,_)=shell.source(&x).unwrap();
         let mut eq=augmented.equation(&system,"truncation",source).unwrap();
         augmented.solve(&mut system,&mut[&mut eq],&groups).unwrap();
