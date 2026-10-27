@@ -5,7 +5,7 @@ import {Readout} from '../../desktop/ui/src/fluent/readout.js';
 import {TreeCombo,type TreeGroup} from '../../desktop/ui/src/fluent/tree_combo.js';
 import {element} from '../../desktop/ui/src/fluent/dom.js';
 import type {Scene} from './types.js';
-import {FREQUENCY_UNITS,WAVELENGTH_UNITS,baseName,baseValue,difference,inUnit,isWavelengthUnit,parseBase,readingHeading,readoutText,
+import {FREQUENCY_UNITS,WAVELENGTH_UNITS,baseName,baseValue,difference,inUnit,isWavelengthUnit,parseBase,readoutText,
   type FrequencyBase,type FrequencyUnit,type FrequencyValue} from './frequency-value.js';
 import {naturalDetuningUnit} from './laser-frequency.js';
 
@@ -26,20 +26,20 @@ export function unitTree(absolute:boolean):TreeGroup[]{
 const leafKeys=(groups:readonly TreeGroup[]):string[]=>groups.flatMap(g=>[...g.leaves.map(l=>l.key),...leafKeys(g.children??[])]);
 
 export type ReadoutOptions={
-  /** The bases offered, keyed as frequency-value.ts baseKey. */
-  bases:()=>TreeGroup[];
-  /** The base when the operator has chosen none ("自动"); undefined: absolute. */
-  automatic?:()=>string|undefined;
+  /** The bases offered, keyed as frequency-value.ts baseKey; none: the reading is absolute, with no base to choose. */
+  bases?:()=>TreeGroup[];
+  /** What the reading is relative to when the operator has chosen no base ("自动"): its name and frequency. */
+  automatic?:()=>{name:string;value:FrequencyValue|undefined};
   /** The fixed default base of a readout without "自动". */
   defaultBase?:string;
   changed:()=>void;
 };
 
-/** "ν₁₂  +6.834 682 610 9 GHz  [GHz ▾]  相对 [绝对 ▾]" */
+/** "Δν  +2.099 MHz  [MHz ▾]  相对 [自动（零场 ν₁₂） ▾]"; without bases "ν₁₂  6.834 682 610 9 GHz  [GHz ▾]". */
 export class FrequencyReadout{
   readonly readout=new Readout('');
   readonly unit:TreeCombo;
-  readonly base:TreeCombo;
+  readonly base:TreeCombo|undefined;
   readonly baseLabel=element('span','frequency-base-label','相对');
   private last:{value:FrequencyValue|undefined;scene:Pick<Scene,'lasers'|'referenceFrequencies'>}|undefined;
   private automaticWords:string|null=null;
@@ -47,44 +47,44 @@ export class FrequencyReadout{
     this.readout.root.classList.add('frequency-reading');
     this.unit=new TreeCombo(unit=>{this.prefs.set(key,{...this.prefs.get(key),unit:unit as FrequencyUnit});this.refresh();this.options.changed();});
     this.unit.root.classList.add('unit-picker');this.unit.root.setAttribute('aria-label','读数单位');
-    this.base=new TreeCombo(base=>{const pref=this.prefs.get(key);this.prefs.set(key,{...pref,base:base||undefined});this.refresh();this.options.changed();});
-    this.base.root.classList.add('frequency-base');this.base.root.setAttribute('aria-label','读数基准');
+    this.base=options.bases?new TreeCombo(base=>{const pref=this.prefs.get(key);this.prefs.set(key,{...pref,base:base||undefined});this.refresh();this.options.changed();}):undefined;
+    this.base?.root.classList.add('frequency-base');this.base?.root.setAttribute('aria-label','读数基准');
   }
   /** The operator's base and unit, when they chose one; a base this readout no longer offers
    * (a deleted laser, the laser being read) is no choice. */
-  chosenBase():string|undefined{const base=this.prefs.get(this.key).base;return base!==undefined&&leafKeys(this.options.bases()).includes(base)?base:undefined;}
+  chosenBase():string|undefined{const base=this.prefs.get(this.key).base;return base!==undefined&&leafKeys(this.options.bases?.()??[]).includes(base)?base:undefined;}
   chosenUnit():FrequencyUnit|undefined{return this.prefs.get(this.key).unit;}
-  /** The base in effect: the operator's, else "自动"'s, else the readout's default, else absolute. */
-  baseKey():string{return this.chosenBase()??this.options.automatic?.()??this.options.defaultBase??'absolute';}
-  resolvedBase(scene:Pick<Scene,'lasers'|'referenceFrequencies'>):FrequencyBase{const base=parseBase(this.baseKey());return base&&baseValue(base,scene)?base:{kind:'absolute'};}
+  /** The base the reading is relative to and its frequency: the operator's, else the readout's
+   * default (a base whose frequency is gone reads absolutely); undefined while "自动" stands. */
+  fixedBase(scene:Pick<Scene,'lasers'|'referenceFrequencies'>):{base:FrequencyBase;value:FrequencyValue}|undefined{
+    const key=this.chosenBase();if(key===undefined&&this.options.automatic)return undefined;
+    const base=parseBase(key??this.options.defaultBase??'absolute'),value=base&&baseValue(base,scene);
+    return base&&value?{base,value}:{base:{kind:'absolute'},value:baseValue({kind:'absolute'},scene)!};
+  }
   /** The unit in effect: the operator's when the base allows it, else the reading's natural one. */
-  unitFor(reading:number,absolute:boolean):FrequencyUnit{
+  private unitFor(reading:number,absolute:boolean):FrequencyUnit{
     const chosen=this.prefs.get(this.key).unit;
     if(chosen&&(!isWavelengthUnit(chosen)||(absolute&&reading>0)))return chosen;
     return Number.isFinite(reading)?naturalDetuningUnit(reading):'MHz';
   }
-  /** ν − ν(base) in MHz, or NaN. */
-  relative(value:FrequencyValue|undefined,scene:Pick<Scene,'lasers'|'referenceFrequencies'>):number{
-    const base=baseValue(this.resolvedBase(scene),scene);return value&&base?difference(value,base):NaN;
-  }
   show(value:FrequencyValue|undefined,scene:Pick<Scene,'lasers'|'referenceFrequencies'>):void{this.last={value,scene};this.refresh();}
-  /** The column heading a table reading this base and unit says: "ν − ν(探测光) / MHz". */
-  heading(scene:Pick<Scene,'lasers'|'referenceFrequencies'>,unit:FrequencyUnit):string{return readingHeading(this.resolvedBase(scene),scene,unit);}
   private refresh():void{
     if(!this.last)return;
-    const {value,scene}=this.last,base=this.resolvedBase(scene),absolute=base.kind==='absolute';
-    const reading=this.relative(value,scene),unit=this.unitFor(reading,absolute);
+    const {value,scene}=this.last,fixed=this.fixedBase(scene),automatic=this.options.automatic?.();
+    const reference=fixed?fixed.value:automatic?.value,name=fixed?baseName(fixed.base,scene):automatic?.name,absolute=fixed?.base.kind==='absolute';
+    const reading=value&&reference?difference(value,reference):NaN,unit=this.unitFor(reading,absolute);
     const shown=inUnit(reading,unit),words=value?`${readoutText(shown,!absolute)} ${unit}`:'—';
     this.readout.text=words;
     // The whole number, as computed, for the one who needs every digit.
-    this.readout.root.title=value&&Number.isFinite(shown)?`${shown} ${unit}${absolute?'':`（相对 ${baseName(base,scene)}）`}`:'';
+    this.readout.root.title=value&&Number.isFinite(shown)?`${shown} ${unit}${absolute?'':`（相对 ${name}）`}`:'';
     this.unit.setTree(unitTree(absolute&&reading>0),unit);
-    const automatic=this.options.automatic?`自动（${baseName(parseBase(this.options.automatic()??'absolute')??{kind:'absolute'},scene)}）`:null;
-    const bases=this.options.bases();
-    this.base.setTree(bases,this.chosenBase()??(automatic?'':this.baseKey()),automatic);
+    if(!this.base)return;
+    const automaticText=automatic?`自动（${automatic.name}）`:null;
+    const bases=this.options.bases!();
+    this.base.setTree(bases,this.chosenBase()??(automaticText?'':this.options.defaultBase??'absolute'),automaticText);
     // A WebView2 base-select keeps showing the old words of a picked option that is renamed:
     // "自动（…）" is picked again so the closed box says what it now resolves to.
-    if(automatic!==this.automaticWords&&this.base.value===''){const leaf=bases[0]?.leaves[0]?.key;if(leaf){this.base.value=leaf;this.base.value='';}}
-    this.automaticWords=automatic;
+    if(automaticText!==this.automaticWords&&this.base.value===''){const leaf=bases[0]?.leaves[0]?.key;if(leaf){this.base.value=leaf;this.base.value='';}}
+    this.automaticWords=automaticText;
   }
 }

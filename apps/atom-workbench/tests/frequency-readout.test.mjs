@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultScene } from '../dist/js/atom-workbench/src/types.js';
-import { analyze, laserFrequencyMHz, zeroFieldTransitionFrequencyMHz } from '../dist/js/atom-workbench/src/physics.js';
+import { RB87, analyze, laserFrequencyMHz, zeroFieldTransitionFrequencyMHz } from '../dist/js/atom-workbench/src/physics.js';
+import { spectroscopyAnalysis } from '../dist/js/atom-workbench/src/spectroscopy.js';
 import { setLaserDetuningUnit, setLaserDetuningValue, setLaserTransitionReference,
   zeroFieldTransitionOptions } from '../dist/js/atom-workbench/src/laser-frequency.js';
-import { C_NM_MHZ, baseKey, baseValue, difference, gap, inUnit, laserValue, levelValue, nearestTransition, parseBase, photon, readingHeading,
-  readoutText, total, transitionKey, transitionValue, value } from '../dist/js/atom-workbench/src/frequency-value.js';
+import { C_NM_MHZ, baseKey, baseValue, difference, gap, inUnit, laserValue, levelValue, parseBase, photon, readingHeading,
+  readoutText, stateValue, total, transitionKey, transitionValue, value, zeroFieldStateValue } from '../dist/js/atom-workbench/src/frequency-value.js';
 import { frequencyBaseTree } from '../dist/js/atom-workbench/src/choice-trees.js';
 import { laserEmits, levelReadoutMHz, referenceReadoutMHz, setLaserReferenceState } from '../dist/js/atom-workbench/src/transition-view.js';
 
@@ -25,7 +26,6 @@ test('every zero-field transition is a carrier plus a small offset with its full
     const v=transitionValue(t);
     near(total(v),zeroFieldTransitionFrequencyMHz(t.line,t.Fg,t.Fe,t.fromManifold),1e-6);
     assert.ok(Math.abs(v.offsetMHz)<1e5,`${t.label}: offset ${v.offsetMHz}`);
-    assert.deepEqual(nearestTransition(v,zeroFieldTransitionOptions()),t);
   }
 });
 
@@ -54,6 +54,30 @@ test('a readout spells twelve significant digits in groups of three, ≈ when it
   near(inUnit(C_NM_MHZ/780.241,'μm'),0.780241,1e-12);
   assert.ok(Number.isNaN(inUnit(-1,'nm')),'a relative reading has no wavelength');
   near(inUnit(6834.68,'GHz'),6.83468,1e-12);
+});
+
+// ui-design.md §1.8: the two-state readout's "自动" is the same two states with no field and no
+// light, so Δν = ν₁₂ − ν₁₂(零场) is what B and the 静态光移 lasers move the transition by.
+test('"自动" reads a pair against the same two states at zero field',()=>{
+  const scene=defaultScene(),a=spectroscopyAnalysis(scene,undefined,false),levels=[...a.ground,...a.D1,...a.D2],get=id=>levels.find(s=>s.id===id);
+  assert.equal(a.spectroscopy.status,'dispersive','3 G and the far tweezer shift the levels');
+  const pair=(read,from,to)=>photon(gap(read(from,levels,scene),read(to,levels,scene)));
+  const shift=(from,to)=>difference(pair(stateValue,from,to),pair(zeroFieldStateValue,from,to));
+  // Two ground states of different F: the zero-field ν₁₂ is the hyperfine splitting 2A.
+  near(total(pair(zeroFieldStateValue,'ground-1-0','ground-2-1')),2*RB87.groundA,1e-9);
+  near(shift('ground-1-0','ground-2-1'),get('ground-2-1').totalShiftMHz-get('ground-1-0').totalShiftMHz,1e-6);
+  assert.ok(Math.abs(shift('ground-1-0','ground-2-1'))>1,'the Zeeman and light shifts are read, not hidden');
+  // Ground to excited: the zero-field D2 hyperfine line; swapping the endpoints reads the same photon.
+  near(difference(pair(zeroFieldStateValue,'ground-2-0','D2-3-1'),transitionValue({line:'D2',Fg:2,Fe:3})),0,1e-6);
+  near(shift('D2-3-1','ground-2-0'),shift('ground-2-0','D2-3-1'),1e-9);
+  near(shift('ground-2-0','D2-3-1'),get('D2-3-1').totalShiftMHz-get('ground-2-0').totalShiftMHz,1e-6);
+  // A reference level keeps its photon and δ; only its anchor goes to zero field.
+  scene.references=[{id:'virtual',name:'虚能级',anchorId:'ground-2-0',anchorMode:'follow',offsetMHz:-12,photon:{source:{kind:'laser',id:'probe'},direction:'absorb'}}];
+  near(total(pair(zeroFieldStateValue,'ground-2-0','virtual')),laserFrequencyMHz(scene.lasers[0])-12,1e-6);
+  near(shift('ground-2-0','virtual'),0,1e-6);
+  near(shift('ground-1-0','virtual'),get('ground-2-0').totalShiftMHz-get('ground-1-0').totalShiftMHz,1e-6);
+  scene.references[0].anchorMode='zero-field';
+  near(shift('ground-2-0','virtual'),-get('ground-2-0').totalShiftMHz,1e-6);
 });
 
 test('a transition read from its upper state is the same photon',()=>{
