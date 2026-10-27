@@ -1,7 +1,7 @@
 // 示例…: ready-made scenes. Loading one replaces the whole scene; the caller
 // asks first when the current scene holds edits.
 import {defaultDynamics,defaultScene} from './types.js';
-import type {Scene,SpectralLine} from './types.js';
+import type {Direction,Scene,SpectralLine} from './types.js';
 import {migrateSceneFrequencies,normalizeLaserFrequency} from './laser-frequency.js';
 
 export type ExampleView='levels'|'dynamics'|'space';
@@ -16,11 +16,16 @@ export const EXAMPLES:readonly {key:string;label:string}[]=[
   {key:'tilted',label:'倾斜磁场'},
 ];
 
+const axis=(name:'+x'|'+z'):Direction=>({reference:{kind:'axis',axis:name},thetaDeg:0,phiDeg:0});
+const angles=(thetaDeg:number,phiDeg:number):Direction=>({reference:{kind:'angles',thetaDeg,phiDeg},thetaDeg:0,phiDeg:0});
+
+/** The probe of every example runs along the bias field (linked to its reference axis), except
+ * where the example is about a light that does not: D1 + D2 and the tilted field. */
 export function exampleScene(key:string):{scene:Scene;view:ExampleView;line:SpectralLine}{
   const next=defaultScene(),probe=next.lasers[0]!;let view:ExampleView='levels',line:SpectralLine='D2';
   delete probe.referenceTransition;probe.frequencyMode='transition';probe.detuningUnit='MHz';
   next.lasers.filter(l=>l.id==='tweezer').forEach(l=>l.enabled=false);
-  next.fields[0]!.thetaDeg=0;next.fields[0]!.magnitudeG=3;next.dynamics!.durationUs=1;probe.detuningMHz=4.2;
+  next.fields[0]!.direction=axis('+z');next.fields[0]!.magnitudeG=3;next.dynamics!.durationUs=1;probe.detuningMHz=4.2;
   next.name=EXAMPLES.find(example=>example.key===key)?.label??next.name;
   if(key==='three'){
     next.lasers[1]!.enabled=true;
@@ -31,12 +36,12 @@ export function exampleScene(key:string):{scene:Scene;view:ExampleView;line:Spec
     next.dynamics={...defaultDynamics(),durationUs:20};
   }
   if(key==='open'){
-    Object.assign(next.fields[0]!,{magnitudeG:3,thetaDeg:0,phiDeg:0});next.initialM=0;
-    Object.assign(probe,{line:'D2',detuningMHz:-266.65,intensityMWcm2:1,thetaDeg:0,phiDeg:0,ellipticityDeg:0});
+    next.fields[0]!.magnitudeG=3;next.initialM=0;
+    Object.assign(probe,{line:'D2',detuningMHz:-266.65,intensityMWcm2:1,ellipticityDeg:0});
     next.dynamics={...defaultDynamics(),initialStateId:'ground-2-0',monitoredStateIds:['ground-1--1','ground-1-0','ground-1-1','ground-2-0','D2-2-1'],durationUs:20};
   }
   if(key==='cycling'){
-    next.initialM=2;Object.assign(probe,{thetaDeg:0,phiDeg:0,ellipticityDeg:45,intensityMWcm2:.35});
+    next.initialM=2;Object.assign(probe,{ellipticityDeg:45,intensityMWcm2:.35});
     next.dynamics={...defaultDynamics(),initialStateId:'ground-2-2',monitoredStateIds:['ground-2-2','D2-3-3','ground-1-0'],durationUs:5};
   }
   if(key==='f3-linear'){
@@ -50,13 +55,13 @@ export function exampleScene(key:string):{scene:Scene;view:ExampleView;line:Spec
     view='dynamics';line='D1';
   }
   if(key==='both'){
-    Object.assign(next.fields[0]!,{magnitudeG:1.5,thetaDeg:32});next.initialM=0;
-    Object.assign(probe,{name:'D2 驱动',detuningMHz:0,intensityMWcm2:2.5,ellipticityDeg:18});
-    next.lasers.push({id:'d1-drive',name:'D1 驱动',enabled:true,line:'D1',detuningMHz:0,intensityMWcm2:2.5,thetaDeg:90,phiDeg:0,polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0});
+    Object.assign(next.fields[0]!,{magnitudeG:1.5,direction:angles(32,0)});next.initialM=0;
+    Object.assign(probe,{name:'D2 驱动',detuningMHz:0,intensityMWcm2:2.5,ellipticityDeg:18,direction:axis('+z')});
+    next.lasers.push({id:'d1-drive',name:'D1 驱动',enabled:true,line:'D1',detuningMHz:0,intensityMWcm2:2.5,direction:axis('+x'),polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0});
     next.dynamics={...defaultDynamics(),initialStateId:'ground-2-0',monitoredStateIds:['ground-2-0','D1-2-1','D1-2-0','D2-3-1','D2-3-0'],durationUs:.5};
     view='dynamics';
   }
-  if(key==='tilted'){Object.assign(next.fields[0]!,{thetaDeg:67,phiDeg:35});probe.ellipticityDeg=28;next.initialM=0;view='space';}
+  if(key==='tilted'){next.fields[0]!.direction=angles(67,35);Object.assign(probe,{ellipticityDeg:28,direction:axis('+z')});next.initialM=0;view='space';}
   next.lasers.forEach(l=>normalizeLaserFrequency(l));migrateSceneFrequencies(next);
   return {scene:next,view,line};
 }

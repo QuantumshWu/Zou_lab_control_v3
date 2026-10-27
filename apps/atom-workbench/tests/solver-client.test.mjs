@@ -46,10 +46,10 @@ test('late streamed progress cannot overwrite a superseding scene',async t=>{
 
 test('transient connection failure retries once with fresh identity and records the immutable scene',async t=>{
  const mock=transport(),records=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'recover',onFailure:r=>records.push(r)});t.after(()=>client.dispose());
- const scene=scenario(),pending=client.solve(scene,scene.dynamics);await waitCalls(mock,1);scene.fields[0].thetaDeg=99;
+ const scene=scenario(),pending=client.solve(scene,scene.dynamics);await waitCalls(mock,1);scene.fields[0].direction.thetaDeg=99;
  mock.calls[0].reject(new TypeError('Network disconnected'));await pause(230);await waitCalls(mock,2);
  assert.ok(mock.calls[1].body.request.sequence>mock.calls[0].body.request.sequence);
- assert.equal(mock.calls[1].body.scene.fields[0].thetaDeg,0);assert.equal(records[0].scene.fields[0].thetaDeg,0);assert.equal(records[0].willRetry,true);
+ assert.equal(mock.calls[1].body.scene.fields[0].direction.thetaDeg,0);assert.equal(records[0].scene.fields[0].direction.thetaDeg,0);assert.equal(records[0].willRetry,true);
  reply(mock.calls[1],fixture(mock.calls[1].body.scene));assert.equal((await pending).steady.converged,true);
 });
 

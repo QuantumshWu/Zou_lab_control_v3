@@ -2,7 +2,8 @@ import type { Analysis, Laser, Polarization, Scene, Vec3 } from './types.js';
 import {depthOpacity,splitSegment,rayDepth} from './space-depth.js';
 import {SpaceDepthRenderer} from './space-depth-renderer.js';
 import {arrowGeometry,shadeArrow} from './space-arrow.js';
-import {direction} from './physics.js';
+import {direction} from './angles.js';
+import {directionVector,referenceAxis} from './direction.js';
 import {identityToken,resolveColour} from './identity.js';
 import {withUnit} from './format.js';
 
@@ -64,7 +65,8 @@ export function cameraAlong(d:Vec3):{yaw:number;pitch:number}{
  * World +z is up. The selected beam's polarization ellipse is drawn at the atom in its
  * transverse u,v plane, never rotated to face the camera; an arrow on it gives the sense
  * of rotation. E(t) = Re[(cos(chi) u + i sin(chi) v) exp(i phi - i omega t)].
- * Beam width and vector lengths are schematic, not intensity / magnetic-field scales.
+ * Beam width and vector lengths are schematic, not intensity / magnetic-field scales. The
+ * selected field's or beam's reference axis is drawn dashed through the atom beside it.
  */
 export function renderSpace3D(container: HTMLElement, scene: Scene, analysis: Analysis, selection: SpaceSelection, options: SpaceOptions = {}): SpaceView {
   let currentScene = scene, currentAnalysis = analysis, currentSelection = selection;
@@ -102,7 +104,7 @@ export function renderSpace3D(container: HTMLElement, scene: Scene, analysis: An
   });
   const selectedLaser=()=>currentSelection.kind==='laser'?currentScene.lasers.find(l=>l.id===currentSelection.id&&l.enabled):undefined;
   const directionFor=(name:SpaceViewName):Vec3|undefined=>{
-    if(name==='B')return currentAnalysis.fieldMagnitudeG>0?currentAnalysis.fieldVector:[0,0,1];
+    if(name==='B')return currentAnalysis.fieldMagnitudeG>0?currentAnalysis.fieldVector:direction(currentAnalysis.fieldAxis.thetaDeg,currentAnalysis.fieldAxis.phiDeg);
     if(name==='k'){const laser=selectedLaser(),pol=laser?currentAnalysis.polarizations[laser.id]:undefined;return pol?.k;}
     return undefined;
   };
@@ -159,6 +161,9 @@ export function renderSpace3D(container: HTMLElement, scene: Scene, analysis: An
         depthRenderer.face(points,color,alpha*depthOpacity(points.reduce((s,p)=>s+p.z,0)/points.length));
       }
     };
+    const dashed = (a: Vec3, b: Vec3, color: string, strokeWidth: number, alpha = 1): void => {
+      const steps=28;for(let i=0;i<steps;i+=2)segment({a:add(a,mul(add(b,mul(a,-1)),i/steps)),b:add(a,mul(add(b,mul(a,-1)),(i+1)/steps)),color,width:strokeWidth,alpha});
+    };
     const curve = (points: Vec3[], color: string, strokeWidth: number, alpha = 1): void => {
       for(let i=1;i<points.length;i++)segment({a:points[i-1]!,b:points[i]!,color,width:strokeWidth,alpha});
     };
@@ -180,6 +185,16 @@ export function renderSpace3D(container: HTMLElement, scene: Scene, analysis: An
     ([[1, 0, 0], [0, 1, 0], [0, 0, 1]] as Vec3[]).forEach(axis => segment({a: mul(axis, -1.65), b: mul(axis,1.65), color: ink.axis, width: .7, alpha: .55}));
 
     const anySelected=currentSelection.kind!=='none';
+    // The selected object's reference axis, dashed through the atom: its direction is this axis
+    // and the offset (θ′, φ′) from it.
+    const chosen=currentSelection.kind==='laser'?currentScene.lasers.find(l=>l.id===currentSelection.id):currentSelection.kind==='field'?currentScene.fields.find(f=>f.id===currentSelection.id):undefined;
+    if(chosen){
+      try{
+        const axis=referenceAxis(currentScene.fields,chosen.direction.reference),n=direction(axis.thetaDeg+(axis.thetaResidualDeg??0),axis.phiDeg+(axis.phiResidualDeg??0));
+        const colour=currentSelection.kind==='field'?ink.field:resolveColour(host,identityToken(currentScene.lasers.findIndex(l=>l.id===currentSelection.id)));
+        dashed(mul(n,-1.75),mul(n,1.75),colour,1,.7);labels.push({p:mul(n,1.86),text:'参考轴',color:colour,alpha:.8,rank:4});
+      }catch{/* An unresolvable reference is reported where it is edited. */}
+    }
     currentScene.lasers.forEach((laser,slot) => {
       const pol = laser.enabled?currentAnalysis.polarizations[laser.id]:undefined;
       if (!pol) return;
@@ -222,7 +237,7 @@ export function renderSpace3D(container: HTMLElement, scene: Scene, analysis: An
     const longest=Math.max(total,...fields.map(f=>f.magnitudeG));
     if(fields.length>1)for(const field of fields){
       const target:Target={kind:'field',id:field.id},selected=same(target,currentSelection),hovered=same(target,hover);
-      const end=mul(direction(field.thetaDeg,field.phiDeg),1.42*field.magnitudeG/longest),start=mul(end,.06);
+      const end=mul(directionVector(currentScene.fields,field.direction),1.42*field.magnitudeG/longest),start=mul(end,.06);
       arrow(start,end,ink.field,selected?2.2:1.2,selected?1:hovered?.9:.55);
       hitRays.push({a:project(start),b:project(end),target});
       if(selected||hovered)labels.push({p:mul(end,1.1),text:`${field.name}  ${withUnit(field.magnitudeG,'G',{digits:4})}`,color:ink.field,strong:selected,rank:selected?1:3,target});
@@ -311,10 +326,10 @@ export function renderSpace3D(container: HTMLElement, scene: Scene, analysis: An
     else if(dragged){ leaveView();used();yaw -= (event.clientX - last.x) * .008; pitch = clamp(pitch + (event.clientY - last.y) * .007, -1.5, 1.5); queueDraw(); }
   }, eventOptions);
   const stopPointer = (event: PointerEvent) => {
-    // A click on a beam or a field selects it; a click on empty space changes nothing.
+    // A click on a beam or a field selects it; a click on empty space clears the selection.
     if(event.type==='pointerup'&&pointers.size===1&&!dragged){
       const rect=canvas.getBoundingClientRect(),hit=candidates(event.clientX-rect.left,event.clientY-rect.top)[0];
-      if(hit)choose(hit);
+      if(hit)choose(hit);else container.dispatchEvent(new CustomEvent('atom-select-none',{bubbles:true}));
     }
     pointers.delete(event.pointerId); if (!pointers.size) canvas.style.cursor = 'grab';
   };

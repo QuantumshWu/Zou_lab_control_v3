@@ -105,14 +105,14 @@ test('spectroscopy and pair readout follow selected reference and wavelength wit
   const beam=scene.lasers[0];beam.detuningMHz=17.25;
   let analysis=analyze(scene),transition=analysis.transitions.find(t=>t.laserId===beam.id&&t.line==='D2'&&t.Fe===2&&t.me===1);
   near(transition.detuningMHz,17.25,1e-9);near(transition.offsetMHz,0,1e-9);
-  const pair=couplingBetweenStates(transition.groundId,transition.excitedId,beam,[0,0,0]);
+  const pair=couplingBetweenStates(transition.groundId,transition.excitedId,beam,scene.fields);
   near(pair.detuningMHz,transition.detuningMHz,1e-9);near(pair.rabiMHz,transition.rabiMHz,1e-12);
   const originalDetuning=transition.detuningMHz;
   setLaserTransitionReference(beam,{line:'D2',Fg:1,Fe:1});analysis=analyze(scene);
   transition=analysis.transitions.find(t=>t.laserId===beam.id&&t.line==='D2'&&t.Fe===2&&t.me===1);
   near(transition.detuningMHz,originalDetuning,1e-9);
   const tweezer=scene.lasers[1],a=analysis.transitions.find(t=>t.laserId===tweezer.id);
-  const tweezerPair=couplingBetweenStates(a.groundId,a.excitedId,tweezer,[0,0,0]);
+  const tweezerPair=couplingBetweenStates(a.groundId,a.excitedId,tweezer,scene.fields);
   near(tweezerPair.detuningMHz,a.detuningMHz,1e-8);near(tweezerPair.rabiMHz,a.rabiMHz,1e-8);
   const rabi=a.rabiMHz;tweezer.powerMW*=4;
   near(analyze(scene).transitions.find(t=>t.id===a.id).rabiMHz,2*rabi,1e-8);
@@ -125,7 +125,7 @@ test('every beam acts on both D manifolds and changing frequency reference canno
     assert.ok(entries.length>0,`${beam.name} is missing ${line}`);
     assert.ok(entries.some(t=>t.rabiMHz>0));
     for(const t of entries) {
-      const pair=couplingBetweenStates(t.groundId,t.excitedId,beam,before.fieldVector);
+      const pair=couplingBetweenStates(t.groundId,t.excitedId,beam,scene.fields);
       near(t.detuningMHz,pair.detuningMHz,1e-8);near(t.rabiMHz,pair.rabiMHz,1e-8);
     }
     setLaserTransitionReference(beam,{line:'D1',Fg:1,Fe:2});

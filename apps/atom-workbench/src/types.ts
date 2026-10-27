@@ -30,14 +30,17 @@ export interface LaserIntensityAnchor {
   /** Canonical local intensity; switching P/w and I only changes its view. */
   intensityMWcm2:number; viewKey:string;
 }
-export interface LaserDirectionAnchor extends AxisAngles {
-  /** Only exact geometry shortcuts create this fixed lab direction. Explicit
-   * theta/phi entry invalidates it; later B edits never rotate the laser. */
-  viewKey:string;
-}
+/** A coordinate axis, as a scene saves it. */
+export type AxisName='+x'|'-x'|'+y'|'-y'|'+z'|'-z';
+/** What a direction is measured from (direction.ts): angles (with the exact residuals a saved
+ * fixed axis may carry), a coordinate axis, or a link to a magnetic field's reference axis. */
+export type ReferenceAxis=({kind:'angles'}&AxisAngles)|{kind:'axis';axis:AxisName}|{kind:'field';id:string};
+/** A field's or a laser's direction: its reference axis and the offset (θ′, φ′) from it, read in
+ * the frame the minimal rotation from z to the reference axis carries. */
+export interface Direction { reference: ReferenceAxis; thetaDeg: number; phiDeg: number }
 export interface MagneticField {
   id: string; name: string; enabled: boolean;
-  magnitudeG: number; thetaDeg: number; phiDeg: number;
+  magnitudeG: number; direction: Direction;
 }
 export interface Laser {
   /** `line` is derived from the frequency (the nearer D line of its carrier). */
@@ -68,8 +71,10 @@ export interface Laser {
   /** Gaussian beam power and 1/e² intensity radius at the atom's axial plane.
    * Power mode uses the on-axis intensity 2 P / (pi w²). */
   powerMW?: number; waistUm?: number;
-  thetaDeg: number; phiDeg: number; polarizationAngleDeg: number;
-  directionAnchor?:LaserDirectionAnchor;
+  /** The units power, waist and local intensity are read in: display only (laser-intensity.ts). */
+  powerUnit?: PowerUnit; waistUnit?: WaistUnit; intensityUnit?: IntensityUnit;
+  /** Propagation direction k; the polarization angle ψ is measured from the x of its frame. */
+  direction: Direction; polarizationAngleDeg: number;
   /** Jones vector cos(chi) u + i sin(chi) v in the documented transverse basis. */
   ellipticityDeg: number;
   /** Optical phase at the atom; relevant when coherent beams share a carrier. */
@@ -119,7 +124,7 @@ export interface DynamicsSettings {
   meanHorizonUs?: number|null;
   monitorMode?:'auto'|'manual';
   monitoredGroupIds?:string[];
-  durationUs: number; samples: number; autoRun: boolean;
+  durationUs: number; samples: number;
   /** Display unit only; physical duration and request identity remain in μs. */
   durationUnit?:DurationUnit;
   /** @deprecated Legacy scene-file metadata only. No UI control, numerical
@@ -127,6 +132,9 @@ export interface DynamicsSettings {
   quality?: 'preview' | 'verified';
 }
 export type DurationUnit='ns'|'μs'|'ms'|'s';
+export type PowerUnit='W'|'mW'|'μW'|'nW';
+export type WaistUnit='mm'|'μm'|'nm';
+export type IntensityUnit='kW/cm²'|'W/cm²'|'mW/cm²'|'μW/cm²';
 /** The one resolution of the dynamics initial state (see InitialStateSpec). */
 export function resolveInitialState(settings:Partial<DynamicsSettings>|undefined,scene:Scene):InitialStateSpec {
   if(settings?.initialState)return settings.initialState;
@@ -150,7 +158,7 @@ export const DEFAULT_TWEEZER_WAVELENGTH_NM=852;
 export const POPULATION_TOLERANCE=.005;
 export function defaultDynamics(): DynamicsSettings {
   return {laserId:'probe',initialStateId:'ground-2-0',monitoredStateIds:['ground-2-0','ground-1--1','ground-1-0','ground-1-1'],
-    durationUs:20,samples:DEFAULT_DYNAMICS_SAMPLES,meanHorizonUs:DEFAULT_MEAN_HORIZON_US,autoRun:true,monitorMode:'auto',monitoredGroupIds:[]};
+    durationUs:20,samples:DEFAULT_DYNAMICS_SAMPLES,meanHorizonUs:DEFAULT_MEAN_HORIZON_US,monitorMode:'auto',monitoredGroupIds:[]};
 }
 export interface Level {
   id: string; manifold: 'ground' | 'D1' | 'D2'; F: number; m: number;
@@ -181,8 +189,13 @@ export interface SpectroscopyMetadata {
   numerics?:{floquetLayers:number;clusters:number;solves:number;floquetBoundMHz:number;outsideBoundMHz:number};
   sources?:string[];
 }
+export interface ComplexAmplitude {re:number;im:number}
+/** A laser's polarization on the quantization axis (the total magnetic field; at zero field the
+ * first field's reference axis): the weights and complex amplitudes of q = −1, 0, +1, and its
+ * lab geometry -- k, and the Jones axes u, v. */
 export interface Polarization {
   minus: number; pi: number; plus: number;
+  amplitudes: [ComplexAmplitude,ComplexAmplitude,ComplexAmplitude];
   k: Vec3; u: Vec3; v: Vec3; angleToBDeg: number;
 }
 export interface Transition {
@@ -198,6 +211,7 @@ export interface Transition {
   mLabelApproximate?:boolean;
 }
 export interface Analysis {
+  /** The total field, and the quantization axis: along it, or at zero field the first field's reference axis. */
   fieldVector: Vec3; fieldMagnitudeG: number; fieldAxis:AxisAngles;
   ground: Level[]; D1: Level[]; D2: Level[];
   polarizations: Record<string, Polarization>;
@@ -211,10 +225,11 @@ export function defaultScene(): Scene {
   return {
     version: 1, name: `探测光 + ${DEFAULT_TWEEZER_WAVELENGTH_NM} nm 光镊`, initialF: 2, initialM: 0,
     marks:{},references:[],dynamics:defaultDynamics(),
-    fields: [{id:'bias',name:'偏置磁场',enabled:true,magnitudeG:3,thetaDeg:0,phiDeg:0}],
+    fields: [{id:'bias',name:'偏置磁场',enabled:true,magnitudeG:3,direction:{reference:{kind:'axis',axis:'+z'},thetaDeg:0,phiDeg:0}}],
+    // The probe runs along the bias field: its reference axis is linked to the field's.
     lasers: [{id:'probe',name:'探测光',enabled:true,showLightShift:false,line:'D2',detuningMHz:0,intensityMWcm2:1,
       referenceTransition:{line:'D2',Fg:2,Fe:2},frequencyMode:'transition',detuningUnit:'MHz',
-      thetaDeg:0,phiDeg:0,polarizationAngleDeg:0,ellipticityDeg:0}, defaultTweezer()],
+      direction:{reference:{kind:'field',id:'bias'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0}, defaultTweezer()],
   };
 }
 
@@ -224,5 +239,5 @@ export function defaultTweezer(): Laser {
   return {id:'tweezer',name:'光镊',enabled:true,showLightShift:true,line:'D2',frequencyMode:'wavelength',wavelengthNm:DEFAULT_TWEEZER_WAVELENGTH_NM,
     referenceTransition:{line:'D2',Fg:2,Fe:3},detuningMHz:0,detuningUnit:'THz',
     intensityMode:'power',powerMW:4,waistUm:1.2,intensityMWcm2:2*4/(Math.PI*1.2**2)*1e8,
-    thetaDeg:90,phiDeg:0,polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0};
+    direction:{reference:{kind:'axis',axis:'+x'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0};
 }

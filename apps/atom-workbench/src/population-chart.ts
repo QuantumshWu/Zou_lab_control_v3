@@ -34,7 +34,7 @@ export function populationSamplingInfo(result:PopulationPlot):string {
 export function populationLayout(result:PopulationPlot,ids:string[],options:PopulationChartOptions={}) {
   const left=64,right=778,top=32,bottom=300;
   let error='';const times=result.timesUs;
-  if(times.length<2)error='没有时间演化采样。请计算所选时长的轨迹。';
+  if(times.length<2)error='没有时间演化采样。';
   else if(times.some((t,i)=>!Number.isFinite(t)||t<0||(i>0&&t<=times[i-1]!)))error='时间采样无效，未绘制轨迹。';
   else if([...ids.map(id=>result.populations[id]),result.totalExcited].some(values=>!values||values.length!==times.length||values.some(v=>!Number.isFinite(v))))error='求解结果缺少完整采样数据，未绘制轨迹。';
   const minTime=times[0]??0,maxTime=times.at(-1)??1,span=maxTime-minTime;

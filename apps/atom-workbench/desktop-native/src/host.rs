@@ -151,7 +151,7 @@ fn run()->Result<(),String>{
         let request=argument("--test-request").ok_or("Headless full-app validation requires --test-request <JSON>")?;
         let value:Value=serde_json::from_slice(&fs::read(request).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
         let config=json!({"request":value,"runtimeVersion":version,"bundledWebView":bundled,"hiddenRafShim":true});
-        init=format!("window.__atomSelfTest={config};localStorage.clear();const testScene=structuredClone(window.__atomSelfTest.request.scene);testScene.dynamics.autoRun=false;localStorage.setItem('rb87-workbench-demo-v4',JSON.stringify(testScene));window.requestAnimationFrame=callback=>setTimeout(()=>callback(performance.now()),16);window.cancelAnimationFrame=clearTimeout;");
+        init=format!("window.__atomSelfTest={config};localStorage.clear();const testScene=structuredClone(window.__atomSelfTest.request.scene);localStorage.setItem('rb87-workbench-demo-v4',JSON.stringify(testScene));window.requestAnimationFrame=callback=>setTimeout(()=>callback(performance.now()),16);window.cancelAnimationFrame=clearTimeout;");
     }
     let backend=if cfg!(feature="embedded-solver"){Backend{executable:executable.clone(),working:executable.parent().unwrap().to_owned(),manifest,build_hash:format!("{:x}",Sha256::digest(&manifest_bytes)),embedded:true}}
         else{let folder=root.as_ref().unwrap().join("solver");Backend{executable:folder.join("atom-lindblad.exe"),working:folder,manifest,build_hash:format!("{:x}",Sha256::digest(&manifest_bytes)),embedded:false}};
