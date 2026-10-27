@@ -18,8 +18,8 @@ import {comparisonPair,chooseComparisonFrom,chooseComparisonTo,swapComparison,cl
 import {photonFrequencyMHz} from './reference-energy.js';
 import {frequencyBaseTree,stateTree} from './choice-trees.js';
 import {alignLevelReadouts} from './readout-alignment.js';
-import {DETUNING_UNIT_MHZ,expressionBase,followers,frequencyValue,frequencyValueLabel,migrateSceneFrequencies,naturalDetuningUnit,objectAnchor,objectKey,objectOf,releaseFollowers,setFrequencyBase,setFrequencyUnit,setFrequencyValue,zeroFieldTransitionOptions,type DefinedFrequency} from './laser-frequency.js';
-import {FREQUENCY_UNITS,WAVELENGTH_UNITS,anchorValue,baseKey,baseValue,difference,gap,inUnit,isWavelengthUnit,laserValue,levelValue,nearestTransition,parseBase,photon,readingHeading,readoutText,referenceLevelValue,transitionKey,type FrequencyValue} from './frequency-value.js';
+import {DETUNING_UNIT_MHZ,expressionBase,followers,frequencyValue,frequencyValueLabel,migrateSceneFrequencies,naturalDetuningUnit,objectAnchor,objectKey,objectOf,releaseFollowers,setFrequencyBase,setFrequencyUnit,setFrequencyValue,type DefinedFrequency} from './laser-frequency.js';
+import {FREQUENCY_UNITS,WAVELENGTH_UNITS,anchorValue,baseKey,difference,gap,inUnit,isWavelengthUnit,laserValue,parseBase,photon,readingHeading,readoutText,stateValue,zeroFieldStateValue,type FrequencyValue} from './frequency-value.js';
 import {FrequencyReadout,ReadoutPreferences,type ReadoutPreference} from './frequency-controls.js';
 import {analyze,dipoleBetweenStates,resolveSceneFrequencies,laserIntensityMWcm2,laserDirectionAxis,setLaserDirectionAxis,relativeDirectionAxis,setPolarizationPreset,composeMagneticField,type PolarizationPreset} from './physics.js';
 import {normalizeLaserIntensity,setLaserIntensityMode,setLaserLocalIntensity,setLaserPowerMW,setLaserWaistUm} from './laser-intensity.js';
@@ -267,6 +267,13 @@ function select(next:Selection):void{
   if(focusId)root.querySelector<HTMLButtonElement>(`[data-object-id="${CSS.escape(focusId)}"]`)?.focus({preventScroll:true});
 }
 function clearSourceSelection():void{if(selection.kind!=='none')select({kind:'none',id:''});}
+/** A click on an object selects it; on the selected one it clears the selection, so the levels
+ * chart shows the total shift of B and the 静态光移 lasers (ui-design.md §1.5). The second click
+ * of a double-click is no second choice. */
+function pick(next:Selection,event?:Event):void{
+  if(event instanceof MouseEvent&&event.detail>1)return;
+  select(selection.kind===next.kind&&selection.id===next.id?{kind:'none',id:''}:next);
+}
 function comparisonChoice():ComparisonChoice{return {selected:selectedStates,from:comparisonSource};}
 function applyComparison(choice:ComparisonChoice):void{selectedStates=choice.selected;comparisonSource=choice.from;persist();renderResults(false);}
 function markedComparison(l:Laser|undefined):string[]{const p=comparisonPair(comparisonChoice(),referenceStateId(l));return p.to?[p.from,p.to]:comparisonSource?[comparisonSource]:[];}
@@ -282,7 +289,7 @@ function item(kind:ObjectKind,id:string,index:number,name:string,sub:string,enab
   setMiddle(title,name,'cut');setMiddle(subtitle,sub,'cut');copy.append(title,subtitle);button.append(symbol,copy);
   // In the collapsed rail only the symbol shows: the button says what it stands for.
   button.addEventListener('pointerenter',()=>{button.title=copy.offsetParent===null?`${name} · ${sub}`:'';});
-  button.onclick=()=>select({kind,id});
+  button.onclick=event=>pick({kind,id},event);
   const toggle=onToggle?switchButton(next=>{onToggle(next);setChecked(toggle!,next);div.classList.toggle('disabled',!next);update();}):undefined;
   if(toggle){setChecked(toggle,enabled);toggle.classList.add('object-toggle');toggle.setAttribute('aria-label',`启用${name}`);}
   const remove=command('×',()=>void removeObject(kind,id),{role:'destructive',glyph:true,square:true,title:`删除${name}`}).root;
@@ -415,7 +422,7 @@ function renderInspector():void{
   const host=$('inspector-controls');const panel=host.closest<HTMLElement>('.inspector-panel')!,scroll=panel.scrollTop;
   disposeTrees(host);host.replaceChildren();inspectorFields.clear();directionCommands.length=0;
   renameObject.hidden=!selectedObject();
-  if(selection.kind==='none'){setText('inspector-title','总场');host.append(element('p','note wrap inspector-empty','选择磁场或激光以编辑其参数。'));return;}
+  if(selection.kind==='none'){setText('inspector-title','总场');host.append(element('p','note wrap inspector-empty','未选中对象：能级图标注磁场和“静态光移”激光带来的总能移。点选磁场、激光或参考以编辑其参数；再点一次已选中的对象即回到这里。'));return;}
   const fields=inspectorFields;
   if(selection.kind==='reference'){
     const r=scene.referenceFrequencies?.find(r=>r.id===selection.id);if(!r)return;setText('inspector-title',r.name);
@@ -526,7 +533,7 @@ function frequencySection(f:HTMLElement,object:DefinedFrequency,readout:Frequenc
       return {...numberSpec('frequency-value',frequencyValueLabel(object),value,unit,{spin:true,inexact:true}),units:[...FREQUENCY_UNITS.map(u=>({value:u,label:u,group:'频率'})),...(absolute?WAVELENGTH_UNITS.map(u=>({value:u,label:u,group:'波长'})):[])]};},
     v=>setFrequencyValue(scene,object,Number(v)),{unit:u=>{setFrequencyUnit(scene,object,u as FrequencyDisplayUnit);}});
   // The reading has the row to itself (twelve digits need it); how it is read sits under it.
-  f.append(fieldRow('频率 ν',readout.readout.root),fieldRow('读数相对',readout.base.root,readout.unit.root));
+  f.append(fieldRow('频率 ν',readout.readout.root),fieldRow('读数相对',readout.base!.root,readout.unit.root));
   readout.show(anchorValue(objectAnchor(scene,object)),scene);
   const names=followers(scene,key).map(k=>objectOf(scene,k)?.name).filter((name):name is string=>!!name);
   if(names.length)f.append(element('p','note wrap form-note',`被 ${names.join('、')} 跟随`));
@@ -606,31 +613,33 @@ function paintStateBadges():void{
   document.querySelectorAll<HTMLElement>('.selection-index[data-badge-number]').forEach(host=>drawBadges(host,[[host.dataset.badgeNumber!,'scan']]));
   $('levels-chart').querySelectorAll<SVGGElement>('.state-selection-number').forEach(group=>{const holder=document.createElement('span');drawBadges(holder,[[group.dataset.badgeNumber!,'scan']]);const svg=holder.firstElementChild!;svg.setAttribute('x',group.dataset.badgeX!);svg.setAttribute('y',group.dataset.badgeY!);group.replaceChildren(svg);});
 }
-/** A state's energy as a frequency, E/h; undefined where the background spectrum is. */
-function stateValue(id:string):FrequencyValue|undefined{const l=getLevel(id);if(l)return levelValue(l);const r=scene.references?.find(r=>r.id===id);return r?referenceLevelValue(r,allLevels(),scene):undefined;}
-/** A transition's photon frequency ν₁₂ = |E₂ − E₁|/h (the pickers say absorption or emission). */
-function photonValue(fromId:string,toId:string):FrequencyValue|undefined{const a=stateValue(fromId),b=stateValue(toId);return a&&b?photon(gap(a,b)):undefined;}
-/** "自动" (ui-design.md §1.4): a transition inside one manifold reads absolutely; an optical one
- * relative to the selected laser (its detuning), else to the nearest zero-field transition. */
-function automaticBase(v:FrequencyValue|undefined):string|undefined{
-  if(!v||v.centroidMHz===0)return 'absolute';
-  const laser=activeLaser();if(laser)return selection.kind==='reference'?`reference:${laser.id}`:`laser:${laser.id}`;
-  const t=nearestTransition(v,zeroFieldTransitionOptions());return t?transitionKey(t):undefined;
+/** A transition's photon frequency ν₁₂ = |E₂ − E₁|/h (the pickers say absorption or emission);
+ * `zeroField`: the same two states with no field and no light, "自动"'s reference (ui-design.md §1.8). */
+function photonValue(fromId:string,toId:string,zeroField=false):FrequencyValue|undefined{
+  const read=zeroField?zeroFieldStateValue:stateValue,a=read(fromId,allLevels(),scene),b=read(toId,allLevels(),scene);return a&&b?photon(gap(a,b)):undefined;
 }
-let pairValue:FrequencyValue|undefined;
+/** The two-state readout (ui-design.md §1.8): ν₁₂ itself, then Δν = ν₁₂ − ν(参考) against the
+ * frequency chosen beside it; "自动" is the same two states at zero field, so by default Δν is
+ * what the field and the 静态光移 lasers move this transition by. */
+let pairValue:FrequencyValue|undefined,pairZeroField:FrequencyValue|undefined;
+const pairFrequency=new FrequencyReadout('pair-frequency',readoutPrefs,{changed:()=>{}});
 const pairReadout=new FrequencyReadout('pair',readoutPrefs,{
   bases:()=>frequencyBaseTree({absolute:'光频',absoluteText:'绝对',lasers:scene.lasers,references:scene.referenceFrequencies}),
-  automatic:()=>automaticBase(pairValue),
+  automatic:()=>({name:'零场 ν₁₂',value:pairZeroField}),
   changed:()=>renderResults(false),
 });
-const pairRow=element('div','pair-frequency'),pairLabel=element('span','pair-label','ν₁₂');pairLabel.title='跃迁频率 |E(终点) − E(起点)|/h';pairRow.append(pairLabel,pairReadout.readout.root,pairReadout.unit.root,pairReadout.baseLabel,pairReadout.base.root);
+const pairRow=element('div','pair-frequency'),pairPart=(...nodes:HTMLElement[])=>{const part=element('span','pair-part');part.append(...nodes);return part;};
+const pairLabel=element('span','pair-label','ν₁₂'),shiftLabel=element('span','pair-label','Δν');
+pairLabel.title='跃迁频率 |E(终点) − E(起点)|/h';shiftLabel.title='ν₁₂ − ν(参考)：自动时参考为这两个态在零场（无磁场、无光移）下的 ν₁₂';
+pairRow.append(pairPart(pairLabel,pairFrequency.readout.root,pairFrequency.unit.root),pairPart(shiftLabel,pairReadout.readout.root,pairReadout.unit.root,pairReadout.baseLabel,pairReadout.base!.root));
+function showPair():void{pairFrequency.show(pairValue,scene);pairReadout.show(pairValue,scene);}
 function selectionReadout(a:Analysis,l:Laser|undefined):string{
   const origin=referenceStateId(l),pair=comparisonPair(comparisonChoice(),origin),from=pair.from,to=pair.to;
   const pickers=`<div class="selection-top"><div class="selection-pair"><div class="selection-endpoint"><label><span class="selection-index" data-badge-number="1">1</span>起点</label><div id="comparison-from"></div></div><div id="comparison-swap"></div><div class="selection-endpoint"><label><span class="selection-index" data-badge-number="2">2</span>终点</label><div id="comparison-to"></div></div></div><button class="quiet" id="clear-selection">清除</button></div>`;
-  pairValue=undefined;
+  pairValue=pairZeroField=undefined;
   if(!to)return pickers+'<div class="selection-empty">点选能级或选择终点。</div>';
   const defined=a.spectroscopy?.status!=='unresolved';
-  pairValue=defined?photonValue(from,to):undefined;
+  pairValue=defined?photonValue(from,to):undefined;pairZeroField=photonValue(from,to,true);
   const first=getLevel(from),second=getLevel(to);let coupling='';
   if(first&&second){const referenceLaser=selectedBeam(l)?l:scene.lasers[0],transition=defined&&referenceLaser?spectroscopyCoupling(a,referenceLaser,first.id,second.id):undefined;coupling=!defined?'<span>背景矩元未定义</span>':transition?(transition.allowed?`<span title="与所示背景能级使用同一基底的电偶极矩元">|d| <b>${measuredNumber(Math.abs(transition.amplitudeCM)/1e-29,4)} × 10⁻²⁹ C·m</b></span>${l&&selectedBeam(l)?`<span>${l.enabled?'Ω/2π':'Ω/2π（停用预览）'} <b>${measuredNumber(transition.rabiMHz,4)} MHz</b></span>`:''}`:'<span>E1 禁戒</span>'):'';}
   else coupling='<span>参考能级</span>';
@@ -641,9 +650,9 @@ function selectionReadout(a:Analysis,l:Laser|undefined):string{
 /** Solver responses update scientific readouts without unmounting an operator's editor. */
 function renderSelection(a:Analysis,l:Laser|undefined):void{
   const host=$('selection-readout'),key=JSON.stringify([selectedStates,comparisonSource,referenceStateId(l),l?.id,scene.references?.map(r=>[r.id,r.name])]),next=element('div');next.innerHTML=selectionReadout(a,l);
-  if(host.dataset.selectionKey!==key){disposeTrees(host);host.innerHTML=next.innerHTML;host.dataset.selectionKey=key;bindSelection();$('pair-frequency-slot')?.replaceWith(pairRow);pairReadout.show(pairValue,scene);return;}
+  if(host.dataset.selectionKey!==key){disposeTrees(host);host.innerHTML=next.innerHTML;host.dataset.selectionKey=key;bindSelection();$('pair-frequency-slot')?.replaceWith(pairRow);showPair();return;}
   if(!pairRow.isConnected)$('pair-frequency-slot')?.replaceWith(pairRow);
-  pairReadout.show(pairValue,scene);
+  showPair();
   const readout=host.querySelector('.compact-readout'),updated=next.querySelector('.compact-readout');if(readout&&updated&&readout.innerHTML!==updated.innerHTML)readout.innerHTML=updated.innerHTML;
 }
 function renderDetails(hostId:string,markup:string):void{
@@ -664,16 +673,15 @@ function bindSelection():void{
   if($('save-mark'))$('save-mark').onclick=()=>{const id=selectedStates.at(-1);if(id){const v=$<HTMLInputElement>('mark-text').value.trim();if(v)scene.marks![id]=v;else delete scene.marks![id];update();}};
   if($('monitor-selected'))$('monitor-selected').onclick=()=>{const ids=[...new Set(markedComparison(activeLaser()))].filter(id=>getLevel(id));const chosen=getLevel(ids.at(-1)??'');const matching=chosen?.manifold==='D1'||chosen?.manifold==='D2'?scene.lasers.find(l=>l.enabled&&l.line===chosen.manifold):activeLaser();if(matching)dynamics().laserId=matching.id;dynamics().monitoredStateIds=[...new Set([...dynamics().monitoredStateIds,...ids])];dynamics().monitorMode='manual';view='dynamics';controlsKey='';update();};
 }
-/** The table reads the two-state readout's base and unit (ui-design.md §1.8); its "自动" is the
- * same rule applied to the table's strongest row. Only components with Ω ≠ 0 are listed. */
+/** The table reads the two-state readout's base and unit (ui-design.md §1.8): the chosen base for
+ * every row, or under "自动" each row against its own two states at zero field. Only components with Ω ≠ 0 are listed. */
 function transitionTable(transitions:Transition[]):{heading:string;rows:string}{
   const listed=transitions.filter(t=>t.rabiMHz>0),ends=(t:Transition)=>transitionEndpoints(t,referenceStateId(scene.lasers.find(l=>l.id===t.laserId)))!;
-  const strongest=listed[0]&&ends(listed[0]),key=pairReadout.chosenBase()??automaticBase(strongest&&photonValue(strongest.fromId,strongest.toId));
-  const chosen=parseBase(key??'absolute'),base=chosen&&baseValue(chosen,scene)?chosen:{kind:'absolute' as const},origin=baseValue(base,scene)!,relative=base.kind!=='absolute';
+  const fixed=pairReadout.fixedBase(scene),relative=fixed?.base.kind!=='absolute';
   const pref=pairReadout.chosenUnit(),unit:DetuningUnit=pref&&!isWavelengthUnit(pref)?pref:relative?'MHz':'THz';
-  return {heading:readingHeading(base,scene,unit),rows:listed.map(t=>{
-  const endpoints=ends(t),mixed=t.mixedPolarization===true,ν=photonValue(endpoints.fromId,endpoints.toId);
-  return `<tr data-transition="${esc(t.id)}" data-from-state="${endpoints.fromId}" data-to-state="${endpoints.toId}" tabindex="0"><td title="${endpoints.emission?'受激辐射':'吸收'}">${stateCell(endpoints.fromId)} → ${stateCell(endpoints.toId)}</td><td title="${mixed?'混合背景态：多个球分量相干耦合':t.mLabelApproximate?`光场 q=${t.q}；mF 是混合本征态的主成分标签，标签之差不是严格的 ΔmF`:`光场 q=${t.q}；原子 Δm=${endpoints.deltaM}`}" aria-label="${mixed?'混合分量':t.q===-1?'sigma minus':t.q===0?'pi':'sigma plus'}">${mixed?'混合':math(t.q===-1?'\\sigma^-':t.q===0?'\\pi':'\\sigma^+')}</td><td>${ν?formatNumber(inUnit(difference(ν,origin),unit),{digits:relative?9:12,signed:relative}):'—'}</td><td>${measuredNumber(t.rabiMHz,4)}</td><td><div class="strength-cell"><span style="width:${Math.min(100,t.strength*t.weight*100)}%"></span><small>${measuredNumber(t.strength*t.weight,4)}</small></div></td></tr>`;
+  return {heading:fixed?readingHeading(fixed.base,scene,unit):`ν − ν(零场) / ${unit}`,rows:listed.map(t=>{
+  const endpoints=ends(t),mixed=t.mixedPolarization===true,ν=photonValue(endpoints.fromId,endpoints.toId),origin=fixed?.value??photonValue(endpoints.fromId,endpoints.toId,true);
+  return `<tr data-transition="${esc(t.id)}" data-from-state="${endpoints.fromId}" data-to-state="${endpoints.toId}" tabindex="0"><td title="${endpoints.emission?'受激辐射':'吸收'}">${stateCell(endpoints.fromId)} → ${stateCell(endpoints.toId)}</td><td title="${mixed?'混合背景态：多个球分量相干耦合':t.mLabelApproximate?`光场 q=${t.q}；mF 是混合本征态的主成分标签，标签之差不是严格的 ΔmF`:`光场 q=${t.q}；原子 Δm=${endpoints.deltaM}`}" aria-label="${mixed?'混合分量':t.q===-1?'sigma minus':t.q===0?'pi':'sigma plus'}">${mixed?'混合':math(t.q===-1?'\\sigma^-':t.q===0?'\\pi':'\\sigma^+')}</td><td>${ν&&origin?formatNumber(inUnit(difference(ν,origin),unit),{digits:relative?9:12,signed:relative}):'—'}</td><td>${measuredNumber(t.rabiMHz,4)}</td><td><div class="strength-cell"><span style="width:${Math.min(100,t.strength*t.weight*100)}%"></span><small>${measuredNumber(t.strength*t.weight,4)}</small></div></td></tr>`;
 }).join('')};}
 
 // ---------------------------------------------------------------- solver
@@ -1086,14 +1094,14 @@ function toggleScenePanel(open?:boolean):void{
 function toggleInspector():void{root.classList.toggle('inspector-open');syncLayout();}
 
 // ---------------------------------------------------------------- events
-root.addEventListener('atom-select-laser',event=>{const id=(event as CustomEvent<{id:string}>).detail?.id;if(scene.lasers.some(l=>l.id===id))select({kind:'laser',id});});root.addEventListener('atom-select-field',event=>{const id=(event as CustomEvent<{id:string}>).detail?.id;if(scene.fields.some(f=>f.id===id))select({kind:'field',id});});
+root.addEventListener('atom-select-laser',event=>{const id=(event as CustomEvent<{id:string}>).detail?.id;if(scene.lasers.some(l=>l.id===id))pick({kind:'laser',id});});root.addEventListener('atom-select-field',event=>{const id=(event as CustomEvent<{id:string}>).detail?.id;if(scene.fields.some(f=>f.id===id))pick({kind:'field',id});});
 root.addEventListener('click',event=>{
   const target=event.target as Element;
   if(target.closest('[data-export-solver-failures]')){download(JSON.stringify(failureRecords,null,2),'rb87-solver-failures.json');return;}
   if(root.classList.contains('scene-open')&&!target.closest('.scene-panel')){root.classList.remove('scene-open');syncLayout();}
   if(target.closest('[data-show-solver-details]')){showSolverDetails();return;}
-  const beam=target.closest<HTMLElement>('[data-laser-id]');if(beam){select({kind:'laser',id:beam.dataset.laserId!});return;}
-  const fieldItem=target.closest<HTMLElement>('[data-field-id]');if(fieldItem){select({kind:'field',id:fieldItem.dataset.fieldId!});return;}
+  const beam=target.closest<HTMLElement>('[data-laser-id]');if(beam){pick({kind:'laser',id:beam.dataset.laserId!},event);return;}
+  const fieldItem=target.closest<HTMLElement>('[data-field-id]');if(fieldItem){pick({kind:'field',id:fieldItem.dataset.fieldId!},event);return;}
   const state=target.closest<HTMLElement>('[data-state]');if(state){selectState(state.dataset.state!);return;}
   const tr=target.closest<HTMLElement>('[data-transition]');if(tr){const t=latestAnalysis.transitions.find(t=>t.id===tr.dataset.transition);if(t){const endpoints=transitionEndpoints(t,referenceStateId(scene.lasers.find(l=>l.id===t.laserId)));if(endpoints){comparisonSource=undefined;selectedStates=[endpoints.fromId,endpoints.toId];persist();renderResults(false);}}}
 });

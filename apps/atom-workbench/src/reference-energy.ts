@@ -9,19 +9,22 @@ export function photonFrequencyMHz(reference:ReferenceLevel,scene?:Pick<Scene,'l
   const r=scene.referenceFrequencies?.find(r=>r.id===link.source.id);return r?.frequencyAnchor?RB87[r.frequencyAnchor.line].frequencyHz/1e6+r.frequencyAnchor.offsetMHz:undefined;
 }
 
-const zeroFieldAnchors=new Map<string,Level>();
+const zeroFieldLevels=new Map<string,Level>();
+/** A state with no field and no light: its zero-field hyperfine level. */
+export function zeroFieldLevel(level:Pick<Level,'id'|'manifold'>):Level|undefined {
+  if(!zeroFieldLevels.has(level.id)) {
+    const system=atomicSystem(level.manifold==='D1'?'D1':'D2',0);
+    for(const state of [...system.ground,...system.excited])zeroFieldLevels.set(state.id,state);
+  }
+  return zeroFieldLevels.get(level.id);
+}
+
 /** An annotation energy only; references never enter the dynamical basis:
  * E = E(anchor) ± hν(photon) + h·offset. */
 export function referenceEnergyMHz(reference:ReferenceLevel,currentLevels:readonly Level[],scene?:Pick<Scene,'lasers'|'referenceFrequencies'>):number|undefined {
   let anchor=currentLevels.find(level=>level.id===reference.anchorId);
   if(!anchor)return undefined;
-  if(reference.anchorMode==='zero-field') {
-    if(!zeroFieldAnchors.has(anchor.id)) {
-      const system=atomicSystem(anchor.manifold==='D1'?'D1':'D2',0);
-      for(const level of [...system.ground,...system.excited])zeroFieldAnchors.set(level.id,level);
-    }
-    anchor=zeroFieldAnchors.get(anchor.id);
-  }
+  if(reference.anchorMode==='zero-field')anchor=zeroFieldLevel(anchor);
   const photon=photonFrequencyMHz(reference,scene);
   return anchor&&photon!==undefined?absoluteEnergyMHz(anchor)+(reference.photon?.direction==='emit'?-photon:photon)+reference.offsetMHz:undefined;
 }

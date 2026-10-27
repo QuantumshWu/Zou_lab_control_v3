@@ -4,7 +4,7 @@
 // parts first and keeps Hz-level offsets on a ~380 THz carrier.
 import type {DetuningUnit,FrequencyBaseSpec,Laser,LaserFrequencyAnchor,Level,ReferenceLevel,Scene,SpectralLine,ZeroFieldTransition} from './types.js';
 import {RB87,captureLaserFrequencyAnchor,transitionReferenceMHz} from './physics.js';
-import {referenceEnergyMHz} from './reference-energy.js';
+import {referenceEnergyMHz,zeroFieldLevel} from './reference-energy.js';
 import {formatNumber,TERMS,fSymbol} from './format.js';
 
 export type FrequencyValue={centroidMHz:number;offsetMHz:number};
@@ -37,6 +37,19 @@ export function referenceLevelValue(reference:ReferenceLevel,levels:readonly Lev
   const energy=referenceEnergyMHz(reference,levels,scene),anchor=levels.find(l=>l.id===reference.anchorId);
   if(energy===undefined||!anchor)return undefined;
   const base=anchor.manifold==='ground'?0:centroid(anchor.manifold);return value(base,energy-base);
+}
+type StateScene=FrequencyScene&Pick<Scene,'references'>;
+/** A state's energy as a frequency, E/h: a real state, or a reference level by its definition. */
+export function stateValue(id:string,levels:readonly Level[],scene:StateScene):FrequencyValue|undefined{
+  const level=levels.find(l=>l.id===id);if(level)return levelValue(level);
+  const r=scene.references?.find(r=>r.id===id);return r?referenceLevelValue(r,levels,scene):undefined;
+}
+/** The same state with no field and no light (ui-design.md §1.8): a real state's zero-field
+ * hyperfine level; a reference level's own definition on its anchor's zero-field level -- its
+ * photon and offset δ define it, they are not a shift. */
+export function zeroFieldStateValue(id:string,levels:readonly Level[],scene:StateScene):FrequencyValue|undefined{
+  const level=levels.find(l=>l.id===id);if(level){const zero=zeroFieldLevel(level);return zero&&levelValue(zero);}
+  const r=scene.references?.find(r=>r.id===id);return r?referenceLevelValue({...r,anchorMode:'zero-field'},levels,scene):undefined;
 }
 
 // ------------------------------------------------------------ bases
@@ -85,10 +98,4 @@ export function readoutText(reading:number,signed:boolean):string{
   const twelve=Number(reading.toPrecision(12)),rounded=Math.abs(twelve-reading)>Math.abs(reading)*1e-14;
   const text=formatNumber(twelve,{digits:12,signed}).replace(/\.(\d+)/,(_,digits:string)=>'.'+digits.replace(/(\d{3})(?=\d)/g,'$1 '));
   return `${rounded?'≈ ':''}${text}`;
-}
-/** The nearest zero-field transition to a frequency (the default base of a two-state reading). */
-export function nearestTransition(v:FrequencyValue,options:readonly ZeroFieldTransition[]):ZeroFieldTransition|undefined{
-  let best:ZeroFieldTransition|undefined,distance=Infinity;
-  for(const t of options){const d=Math.abs(difference(v,transitionValue(t)));if(d<distance){distance=d;best=t;}}
-  return best;
 }
