@@ -438,7 +438,7 @@ pub fn device_descriptors() -> Vec<Value> {
                json!([{"name": "backend", "type": "choice", "label": "Board transport", "default": "auto",
                        "choices": [{"value": "auto", "label": "Auto (UART, else JTAG)"}, {"value": "uart", "label": "UART"},
                                    {"value": "jtag-axi", "label": "JTAG-to-AXI (Vivado)"}, {"value": "memory", "label": "Memory mock (no hardware)"}]},
-                      {"name": "uart_port", "type": "str", "label": "UART port (blank = found on Init)", "default": ""},
+                      {"name": "uart_port", "type": "str", "label": "UART port", "default": "", "blank_label": "found on Init"},
                       {"name": "port", "type": "int", "label": "Serve on port", "default": zlc_pulse::remote::DEFAULT_PORT, "minimum": 1, "maximum": 65535},
                       config_file])),
     ];

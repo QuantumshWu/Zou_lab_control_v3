@@ -982,7 +982,7 @@ mod tests {
             "parameters": [{"name": "port", "type": "str", "label": "Serial port", "default": "", "blank_label": "found on Init"}]}));
         types.push(json!({"type_id": "sequencer.local", "kind": "device", "family": "sequencer", "label": "Board", "resources": ["serial:{uart_port}"], "queries": ["resolve"],
             "parameters": [{"name": "backend", "type": "str", "label": "Board transport", "default": "auto"},
-                           {"name": "uart_port", "type": "str", "label": "UART port (blank = found on Init)", "default": ""}]}));
+                           {"name": "uart_port", "type": "str", "label": "UART port", "default": "", "blank_label": "found on Init"}]}));
         catalog
     }
 
