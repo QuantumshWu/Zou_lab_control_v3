@@ -28,7 +28,7 @@ test('mF bands include the lowest complete shifted state card and lower padding'
     const scene=defaultScene();scene.fields[0].magnitudeG=field;
     if(field===20)scene.references=[{id:'reference-low',name:'参考',anchorId:'ground-1--1',offsetMHz:-1e5,anchorMode:'follow'}];
     const analysis=spectroscopyAnalysis(scene,'probe',false);
-    const svg=combinedLevelsChart(scene,analysis,undefined,{line:'D2',selectedIds:[],initialId:'ground-2-0'});
+    const svg=combinedLevelsChart(scene,analysis,undefined,{line:'D2',labelled:[],initialId:'ground-2-0'});
     const attr=(tag,name)=>Number(tag.match(new RegExp(`\\b${name}="([^"]+)"`))?.[1]);
     const cards=[...svg.matchAll(/<rect class="state-population-background"[^>]*>/g)].map(x=>attr(x[0],'y')+attr(x[0],'height'));
     const bands=[...svg.matchAll(/<g class="mf-band"[^>]*><rect[^>]*>/g)].map(x=>attr(x[0],'y')+attr(x[0],'height'));

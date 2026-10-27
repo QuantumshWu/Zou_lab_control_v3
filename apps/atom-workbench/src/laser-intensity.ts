@@ -1,4 +1,22 @@
-import type {Laser,LaserIntensityAnchor} from './types.js';
+import type {IntensityUnit,Laser,LaserIntensityAnchor,PowerUnit,WaistUnit} from './types.js';
+
+/** The units power, waist and local intensity are read in, each with its size in the stored unit
+ * (mW, μm, mW/cm²). A unit only changes how the value is read. */
+export const POWER_UNITS:readonly PowerUnit[]=['W','mW','μW','nW'];
+export const POWER_MW:Readonly<Record<PowerUnit,number>>={W:1e3,mW:1,'μW':1e-3,nW:1e-6};
+export const WAIST_UNITS:readonly WaistUnit[]=['mm','μm','nm'];
+export const WAIST_UM:Readonly<Record<WaistUnit,number>>={mm:1e3,'μm':1,nm:1e-3};
+export const INTENSITY_UNITS:readonly IntensityUnit[]=['kW/cm²','W/cm²','mW/cm²','μW/cm²'];
+export const INTENSITY_MWCM2:Readonly<Record<IntensityUnit,number>>={'kW/cm²':1e6,'W/cm²':1e3,'mW/cm²':1,'μW/cm²':1e-3};
+/** The largest unit the value reads at least 1 in (the base unit for zero, the smallest below it). */
+function naturalUnit<U extends string>(value:number,size:Readonly<Record<U,number>>,units:readonly U[],base:U):U{
+  const magnitude=Math.abs(value);if(magnitude===0||!Number.isFinite(magnitude))return base;
+  return units.find(u=>magnitude>=size[u])??units.at(-1)!;
+}
+/** The unit each is shown in: the operator's, else the natural one. */
+export const powerUnit=(l:Laser):PowerUnit=>l.powerUnit??naturalUnit(l.powerMW??0,POWER_MW,POWER_UNITS,'mW');
+export const waistUnit=(l:Laser):WaistUnit=>l.waistUnit??naturalUnit(l.waistUm??0,WAIST_UM,WAIST_UNITS,'μm');
+export const intensityUnit=(l:Laser):IntensityUnit=>l.intensityUnit??naturalUnit(laserIntensityMWcm2(l),INTENSITY_MWCM2,INTENSITY_UNITS,'mW/cm²');
 
 /** Active input fields only. Direct legacy edits invalidate the canonical
  * value; inactive representation fields do not override the selected input. */

@@ -7,11 +7,12 @@ import {levelsChart} from '../dist/js/atom-workbench/src/charts.js';
 import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {accurateSum,analyze,laserFrequencyDifferenceMHz,laserFrequencyMHz,laserIntensityMWcm2} from '../dist/js/atom-workbench/src/physics.js';
 import {VIRTUAL_MANIFOLDS} from '../dist/js/atom-workbench/src/spectroscopy-data.js';
+import {along,spherical} from './directions.mjs';
 
 const N=32,TAU=2*Math.PI;
 function threeNearBeams(){
  const scene=defaultScene(),probe=scene.lasers[0];
- probe.referenceTransition={line:'D2',Fg:2,Fe:3};probe.ellipticityDeg=17;probe.thetaDeg=7;normalizeLaserFrequency(probe);
+ probe.referenceTransition={line:'D2',Fg:2,Fe:3};probe.ellipticityDeg=17;probe.direction=spherical(7,0);normalizeLaserFrequency(probe);
  const repump={...probe,id:'repump',referenceTransition:{line:'D2',Fg:1,Fe:2},phaseDeg:19};normalizeLaserFrequency(repump);
  const third={...probe,id:'third',referenceTransition:{line:'D2',Fg:2,Fe:2},phaseDeg:-31};normalizeLaserFrequency(third);
  scene.lasers.push(repump,third);return scene;
@@ -60,7 +61,7 @@ test('integer phase coordinates reproduce the full laboratory dipole coupling of
 });
 
 test('the counter-rotating amplitude drives the opposite helicity with the conjugate optical phase',()=>{
- const build=phaseDeg=>{const scene=defaultScene();scene.lasers=scene.lasers.slice(0,1);Object.assign(scene.lasers[0],{thetaDeg:0,phiDeg:0,ellipticityDeg:45,phaseDeg});return buildFullMasterModel(scene);};
+ const build=phaseDeg=>{const scene=defaultScene();scene.lasers=scene.lasers.slice(0,1);Object.assign(scene.lasers[0],{direction:spherical(0,0),ellipticityDeg:45,phaseDeg});return buildFullMasterModel(scene);};
  const model=build(37),zero=build(0),states=model.states;assert.equal(model.drives.length,1);assert.deepEqual(model.frequencyCoordinates.driveIndices,[[2]]);
  const coDelta=new Set(),counterDelta=new Set(),phi=37*Math.PI/180;
  for(let e=8;e<N;e++)for(let g=0;g<8;g++){const k=e*N+g,co={re:model.hReal[k],im:model.hImag[k]},cr=plus(model.drives[0],k);
@@ -106,7 +107,7 @@ test('authoritative MHz tree coordinates retain exact 100 and 300 MHz carrier re
 
 test('the reference beam retains every allowed dipole in both ground F and both fine manifolds',()=>{
  for(const intensity of [1,2.2104853207207683e8]){
-  const s=defaultScene();s.lasers=s.lasers.slice(0,1);s.fields[0].thetaDeg=23;s.lasers[0].ellipticityDeg=17;s.lasers[0].intensityMWcm2=intensity;
+  const s=defaultScene();s.lasers=s.lasers.slice(0,1);s.fields[0].direction=along(23,0);s.lasers[0].ellipticityDeg=17;s.lasers[0].intensityMWcm2=intensity;
   // Couplings in the model basis (the static outside-model shifts of this beam mix m slightly).
   const model=buildFullMasterModel(s),bg=staticModelBackground(s),a={...bg.analysis,ground:bg.levels.slice(0,8),D1:bg.levels.slice(8,16),D2:bg.levels.slice(16)},seen=new Set();assert.equal(model.drives.length,1);
   for(let g=0;g<8;g++)for(let e=8;e<32;e++){
@@ -143,7 +144,7 @@ test('emission: one operator per photon polarization with both D lines and both 
 test('far-detuned spin-flip Raman scattering keeps the D1/D2 interference of the emission amplitudes',()=>{
  // 852 nm tweezer, pi-polarized, out of ground-2-0: adiabatic excited amplitude
  // a_e = H_eg / (E_g - E_e) (static co-rotating coupling in its own frame).
- const s=defaultScene();s.lasers=s.lasers.slice(1);Object.assign(s.lasers[0],{thetaDeg:90,phiDeg:0,ellipticityDeg:0,polarizationAngleDeg:0});
+ const s=defaultScene();s.lasers=s.lasers.slice(1);Object.assign(s.lasers[0],{direction:spherical(90,0),ellipticityDeg:0,polarizationAngleDeg:0});
  const m=buildFullMasterModel(s),g=m.states.findIndex(x=>x.id==='ground-2-0'),E=i=>m.hReal[i*N+i],a=[];
  for(let e=0;e<N;e++)a.push(e<8?{re:0,im:0}:{re:m.hReal[e*N+g]/(E(g)-E(e)),im:m.hImag[e*N+g]/(E(g)-E(e))});
  const rates=ops=>Array.from({length:8},(_,f)=>ops.reduce((sum,c)=>{let re=0,im=0;for(let e=8;e<N;e++){const cr=c.real[f*N+e],ci=c.imag[f*N+e];re+=cr*a[e].re-ci*a[e].im;im+=cr*a[e].im+ci*a[e].re;}return sum+re*re+im*im;},0)*1e6);
@@ -190,7 +191,7 @@ test('initial-state specs build a diagonal unit-trace density in the model basis
 
 test('many ground references stay in the ground region instead of being packed into excited manifolds',()=>{
  const s=defaultScene();s.references=Array.from({length:12},(_,i)=>({id:`ref-${i}`,name:`reference ${i}`,anchorId:'ground-1-0',offsetMHz:i,anchorMode:'follow'}));
- const svg=levelsChart(s,spectroscopyAnalysis(s),undefined,{line:'D2',selectedIds:[],initialId:s.dynamics.initialStateId});
+ const svg=levelsChart(s,spectroscopyAnalysis(s),undefined,{line:'D2',labelled:[],initialId:s.dynamics.initialStateId});
  const ys=s.references.map(r=>Number(svg.split(`data-state="${r.id}"`)[1].match(/<line x1="911" y1="([^"]+)"/)[1]));
  assert.ok(ys.every(y=>y>=535));for(let i=1;i<ys.length;i++)assert.ok(Math.abs(ys[i]-ys[i-1])>=51.9);
 });

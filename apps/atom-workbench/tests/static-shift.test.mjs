@@ -72,7 +72,7 @@ test('the π tweezer line centre moves from 23.274469 MHz (second order) by abou
 });
 
 test('the levels chart says each total shift has a numerical bound, not a data uncertainty',()=>{
-  const s=defaultScene(),svg=levelsChart(s,spectroscopyAnalysis(s),undefined,{line:'D2',selectedIds:[],initialId:s.dynamics.initialStateId});
+  const s=defaultScene(),svg=levelsChart(s,spectroscopyAnalysis(s),undefined,{line:'D2',labelled:[],initialId:s.dynamics.initialStateId});
   const label=svg.match(/data-state="ground-2-2"[^>]*aria-label="([^"]*)"/)[1];
   assert.match(label,/总能移 .*MHz/);assert.match(label,/数值误差 ≤ /);
 });

@@ -1,10 +1,12 @@
 import type {Analysis,Laser,Level,Scene,SpectralLine} from './types.js';
-import {RB87,accurateSum,analyze,atomicSystem,complexPolarization,laserCarrierOffsetMHz,laserFrequencyDifferenceMHz,laserFrequencyMHz,laserIntensityMWcm2,sinCosDegrees,transitionReferenceMHz,wigner3j as rawWigner3j} from './physics.js';
+import {RB87,accurateSum,analyze,atomicSystem,laserCarrierOffsetMHz,laserFrequencyDifferenceMHz,laserFrequencyMHz,laserIntensityMWcm2,sinCosDegrees,transitionReferenceMHz,wigner3j as rawWigner3j} from './physics.js';
 import type {Eigenstate} from './physics.js';
 import {CORE_POLARIZABILITY_AU,SPECTROSCOPY_SOURCES,VIRTUAL_MANIFOLDS} from './spectroscopy-data.js';
 import {cmatrix,solveStaticBackground} from './floquet-background.js';
 import {withUnit} from './format.js';
 import type {BackgroundProblem,BackgroundSolution,FarCarrier,Manifold,OutsideState} from './floquet-background.js';
+/** A laser's spherical amplitudes on the analysis' quantization axis (physics.ts polarization). */
+const polarizationOf=(analysis:Analysis,laser:Laser)=>{const p=analysis.polarizations[laser.id];if(!p)throw new Error(`「${laser.name}」不在这次分析中。`);return p.amplitudes;};
 
 const angularValues=new Map<string,number>();
 function wigner3j(a:number,b:number,c:number,d:number,e:number,f:number):number{const key=[a,b,c,d,e,f].join(':');const old=angularValues.get(key);if(old!==undefined)return old;const value=rawWigner3j(a,b,c,d,e,f);angularValues.set(key,value);return value;}
@@ -42,7 +44,7 @@ function groups(scene:Scene,analysis:Analysis,excluded?:string):Group[]{
     if(!group){group={beams:[],field:[]};result.push(group);}group.beams.push(beam);
   }
   for(const group of result){
-    const fields=group.beams.map(beam=>{const p=complexPolarization(beam,analysis.fieldVector,analysis.fieldAxis),phase=sinCosDegrees(beam.phaseDeg??0),scale=Math.sqrt(2*laserIntensityMWcm2(beam)*10/(EPS*C));return p.map(q=>({re:scale*(q.re*phase.cos-q.im*phase.sin),im:scale*(q.re*phase.sin+q.im*phase.cos)}));});
+    const fields=group.beams.map(beam=>{const p=polarizationOf(analysis,beam),phase=sinCosDegrees(beam.phaseDeg??0),scale=Math.sqrt(2*laserIntensityMWcm2(beam)*10/(EPS*C));return p.map(q=>({re:scale*(q.re*phase.cos-q.im*phase.sin),im:scale*(q.re*phase.sin+q.im*phase.cos)}));});
     group.field=[0,1,2].map(q=>({re:accurateSum(fields.map(f=>f[q]!.re)),im:accurateSum(fields.map(f=>f[q]!.im))}));
   }
   return result.filter(group=>group.field.some(q=>q.re!==0||q.im!==0));
@@ -289,7 +291,7 @@ export function spectroscopyCoupling(analysis:Analysis,laser:Laser,firstId:strin
     item={fieldG:analysis.fieldMagnitudeG,ground:{real:ug.real.slice(),imag:ug.imag.slice()},excited:{real:ue.real.slice(),imag:ue.imag.slice()},dipole:d};cache.set(key,item);
   }
   const d=item.dipole;
-  const components=[0,1,2].map(q=>Math.hypot(d.real[q]!,d.imag[q]!)),amplitudeCM=Math.hypot(...components),p=complexPolarization(laser,analysis.fieldVector,analysis.fieldAxis),coupled=p.map((x,k)=>mul(x,{re:d.real[k]!,im:d.imag[k]!})),rabiMHz=Math.hypot(accurateSum(coupled.map(x=>x.re)),accurateSum(coupled.map(x=>x.im)))*Math.sqrt(2*laserIntensityMWcm2(laser)*10/(EPS*C))/H/1e6;
+  const components=[0,1,2].map(q=>Math.hypot(d.real[q]!,d.imag[q]!)),amplitudeCM=Math.hypot(...components),p=polarizationOf(analysis,laser),coupled=p.map((x,k)=>mul(x,{re:d.real[k]!,im:d.imag[k]!})),rabiMHz=Math.hypot(accurateSum(coupled.map(x=>x.re)),accurateSum(coupled.map(x=>x.im)))*Math.sqrt(2*laserIntensityMWcm2(laser)*10/(EPS*C))/H/1e6;
   const driven= coupled.map(z=>Math.hypot(z.re,z.im)),displayComponents=driven.some(v=>v!==0)?driven:components,q=displayComponents.indexOf(Math.max(...displayComponents))-1;
   // This tolerance is for the label only; no Hamiltonian/dipole entry is dropped.
   const mixedM=(state:Level,v:Matrix)=>states.reduce((sum,bare,i)=>sum+(bare.m!==state.m?v.real[i]!**2+v.imag[i]!**2:0),0)>1e-8;

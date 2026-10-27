@@ -1,7 +1,7 @@
-import type {AxisAngles,Scene,DynamicsSettings,Laser,Level,InitialStateSpec,Vec3} from './types.js';
+import type {ComplexAmplitude,Scene,DynamicsSettings,Laser,Level,InitialStateSpec} from './types.js';
 import {resolveInitialState} from './types.js';
 import {staticModelBackground} from './spectroscopy.js';
-import {atomicSystem,complexPolarization,laserIntensityMWcm2,laserCarrierOffsetMHz,laserFrequencyMHz,captureLaserFrequencyAnchor,RB87,sinCosDegrees,accurateSum} from './physics.js';
+import {atomicSystem,laserIntensityMWcm2,laserCarrierOffsetMHz,laserFrequencyMHz,captureLaserFrequencyAnchor,RB87,sinCosDegrees,accurateSum} from './physics.js';
 import {FULL_MODEL_SCHEMA} from './solver-protocol.js';
 
 /** The rb87-full/2 model sent to the Rust worker: 32 states, complex row-major
@@ -98,8 +98,8 @@ const fieldAmplitude=(l:Laser)=>Math.sqrt(2*laserIntensityMWcm2(l)*10/(EPS*C));
  * couplings. The optical reference is the laser with the largest value: the
  * frame is an exact change of coordinates, so this only decides which
  * coupling is static (best conditioned), by magnitude. */
-function mixing(l:Laser,bare:BareFieldModel,fieldVector:Vec3,fieldAxis:AxisAngles):number {
- const pol=complexPolarization(l,fieldVector,fieldAxis),E=fieldAmplitude(l);let best=0;
+function mixing(l:Laser,bare:BareFieldModel,pol:readonly ComplexAmplitude[]):number {
+ const E=fieldAmplitude(l);let best=0;
  for(const line of ['D1','D2'] as const){const sys=bare.systems[line],width=RB87[line].gammaHz/(TAU*1e6),carrier=laserCarrierOffsetMHz(l,line);
   for(let e=0;e<sys.excited.length;e++)for(let g=0;g<8;g++){const q=sys.excited[e]!.m-sys.ground[g]!.m;if(q< -1||q>1)continue;
    const rabi=Math.abs(sys.dipoles[e*8+g]!)*RB87.D2.dipole*E/H_PLANCK/1e6*Math.hypot(pol[q+1]!.re,pol[q+1]!.im);
@@ -139,7 +139,7 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  const background=staticModelBackground(scene),a=background.analysis,states=background.levels;
  const bare=bareFieldModel(a.fieldMagnitudeG),u=matrix();states.forEach((s,j)=>{for(let i=0;i<N;i++){u.real[i*N+j]=s.backgroundState?.real[i]??(i===j?1:0);u.imag[i*N+j]=s.backgroundState?.imag[i]??0;}});
  const enabled=scene.lasers.filter(l=>l.enabled&&laserIntensityMWcm2(l)>0);
- let referenceIndex=0,best=-1;enabled.forEach((l,i)=>{const value=mixing(l,bare,a.fieldVector,a.fieldAxis);if(value>best){best=value;referenceIndex=i;}});
+ let referenceIndex=0,best=-1;enabled.forEach((l,i)=>{const value=mixing(l,bare,a.polarizations[l.id]!.amplitudes);if(value>best){best=value;referenceIndex=i;}});
  const reference=enabled[referenceIndex],lasers=reference?[reference,...enabled.filter((_,i)=>i!==referenceIndex)]:[];
  // Frequency axes: the tree of laser beats, then the reference optical
  // carrier itself. In the frame rotating at nu_ref a laser's co-rotating
@@ -172,7 +172,7 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
   put(drive.sin.real,i*N+j,-im);put(drive.sin.imag,i*N+j,re);put(drive.sin.real,j*N+i,-im);put(drive.sin.imag,j*N+i,-re);
  };
  for(const [laserIndex,l] of lasers.entries()){
-  const pol=complexPolarization(l,a.fieldVector,a.fieldAxis),phase=sinCosDegrees(l.phaseDeg??0),E=fieldAmplitude(l);
+  const pol=a.polarizations[l.id]!.amplitudes,phase=sinCosDegrees(l.phaseDeg??0),E=fieldAmplitude(l);
   // E(t) = (E/2)[eps e^{i phi} e^{-i w t} + c.c.]. The e^{+i w t} part drives
   // Delta m = q through (eps^*)_q = (-1)^q conj(eps_{-q}).
   const co=pol.map(p=>({re:p.re*phase.cos-p.im*phase.sin,im:p.re*phase.sin+p.im*phase.cos})),counter=[0,1,2].map(k=>{const r=co[2-k]!;return k===1?{re:r.re,im:-r.im}:{re:-r.re,im:r.im};});

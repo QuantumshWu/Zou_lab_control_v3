@@ -1,11 +1,12 @@
-import type {FrequencyDisplayUnit,FrequencyExpr,Scene,Laser,MagneticField,ReferenceFrequency} from './types.js';
+import type {AxisAngles,AxisName,Direction,FrequencyDisplayUnit,FrequencyExpr,Scene,Laser,MagneticField,ReferenceAxis,ReferenceFrequency} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
 import {DURATION_UNITS} from './duration.js';
 import type {DurationUnit,InitialStateSpec} from './types.js';
 import {DEFAULT_MEAN_HORIZON_US,MEAN_HORIZONS_US,defaultDynamics} from './types.js';
 import {analyze,resolveSceneFrequencies} from './physics.js';
 import {migrateLaserFrequency,normalizeLaserFrequency} from './laser-frequency.js';
-import {normalizeLaserIntensity} from './laser-intensity.js';
+import {INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,normalizeLaserIntensity} from './laser-intensity.js';
+import {AXIS_NAMES,legacyFieldDirection,legacyLaserDirection,referenceAxis} from './direction.js';
 
 /** Validates a saved initial-state spec; ids must be physical model states. */
 function initialStateSpec(input:unknown,physicalIds:Set<string>):InitialStateSpec {
@@ -24,6 +25,26 @@ function initialStateSpec(input:unknown,physicalIds:Set<string>):InitialStateSpe
   }
   return invalid();
 }
+
+/** A saved direction (direction.ts): a reference axis and the offset from it. That a linked
+ * field exists and no link forms a cycle is checked once every field is known. */
+function directionSpec(input:unknown):Direction {
+  const invalid=():never=>{throw new Error('方向定义无效');};
+  if(!input||typeof input!=='object'||Array.isArray(input))invalid();
+  const o=input as Record<string,unknown>,r=o.reference as Record<string,unknown>|undefined;
+  const angle=(v:unknown,min:number,max:number):v is number=>typeof v==='number'&&Number.isFinite(v)&&v>=min&&v<=max;
+  if(!angle(o.thetaDeg,0,180)||!angle(o.phiDeg,-180,180)||!r||typeof r!=='object'||Array.isArray(r))return invalid();
+  let reference:ReferenceAxis;
+  if(r.kind==='axis'){if(!AXIS_NAMES.includes(r.axis as AxisName))invalid();reference={kind:'axis',axis:r.axis as AxisName};}
+  else if(r.kind==='field'){if(typeof r.id!=='string'||!r.id)invalid();reference={kind:'field',id:r.id as string};}
+  else if(r.kind==='angles'){
+    const residual=(v:unknown)=>v===undefined||angle(v,-Number.MAX_VALUE,Number.MAX_VALUE);
+    if(!angle(r.thetaDeg,0,180)||!angle(r.phiDeg,-180,180)||!residual(r.thetaResidualDeg)||!residual(r.phiResidualDeg))invalid();
+    reference={kind:'angles',thetaDeg:r.thetaDeg as number,phiDeg:r.phiDeg as number,...(r.thetaResidualDeg?{thetaResidualDeg:r.thetaResidualDeg as number}:{}),...(r.phiResidualDeg?{phiResidualDeg:r.phiResidualDeg as number}:{})};
+  }else return invalid();
+  return {reference,thetaDeg:o.thetaDeg,phiDeg:o.phiDeg};
+}
+const unitChoice=<T extends string>(input:unknown,units:readonly T[],what:string):T|undefined=>{if(input===undefined)return undefined;if(!units.includes(input as T))throw new Error(`${what}单位无效`);return input as T;};
 
 const FREQUENCY_UNITS=['Hz','kHz','MHz','GHz','THz','nm','μm'];
 /** A saved frequency expression (ui-design.md §1.2); that its base exists and no cycle
@@ -48,6 +69,16 @@ function frequencyAnchor(input:unknown):NonNullable<Laser['frequencyAnchor']> {
   if(!a||typeof a!=='object'||(a.line!=='D1'&&a.line!=='D2')||typeof a.offsetMHz!=='number'||!Number.isFinite(a.offsetMHz)||typeof a.viewKey!=='string'||a.viewKey.length>2048)throw new Error('频率锚点无效');
   return {line:a.line,offsetMHz:a.offsetMHz,viewKey:a.viewKey};
 }
+/** A laser saved as (θ, φ), or with an exact fixed axis of the same (θ, φ): its reference axis is
+ * that direction and θ′ = 0 (direction.ts legacyLaserDirection). */
+function legacyDirection(l:Record<string,unknown>):Direction {
+  const angle=(k:string,min:number,max:number)=>{const n=l[k];if(typeof n!=='number'||!Number.isFinite(n)||n<min||n>max)throw new Error(`${k} 超出范围 ${min}…${max}`);return n;};
+  const thetaDeg=angle('thetaDeg',0,180),phiDeg=angle('phiDeg',-180,180),a=l.directionAnchor as Record<string,unknown>|undefined;
+  const finite=(v:unknown)=>typeof v==='number'&&Number.isFinite(v);
+  const fixed:AxisAngles|undefined=a&&typeof a==='object'&&a.viewKey===JSON.stringify([thetaDeg,phiDeg])&&finite(a.thetaDeg)&&finite(a.phiDeg)&&(a.thetaResidualDeg===undefined||finite(a.thetaResidualDeg))&&(a.phiResidualDeg===undefined||finite(a.phiResidualDeg))
+    ?{thetaDeg:a.thetaDeg as number,phiDeg:a.phiDeg as number,...(a.thetaResidualDeg?{thetaResidualDeg:a.thetaResidualDeg as number}:{}),...(a.phiResidualDeg?{phiResidualDeg:a.phiResidualDeg as number}:{})}:undefined;
+  return legacyLaserDirection(fixed??{thetaDeg,phiDeg});
+}
 export function validateScene(input:unknown):Scene {
   const obj=(v:unknown):Record<string,unknown>=>{if(!v||typeof v!=='object'||Array.isArray(v))throw new Error('场景结构不正确');return v as Record<string,unknown>;};
   const val=(o:Record<string,unknown>,k:string,min:number,max:number)=>{const n=o[k];if(typeof n!=='number'||!Number.isFinite(n)||n<min||n>max)throw new Error(`${k} 超出范围 ${min}…${max}`);return n;};
@@ -56,17 +87,19 @@ export function validateScene(input:unknown):Scene {
   const s=obj(input);if(s.version!==1)throw new Error('仅支持 version 1 场景');
   if(!Array.isArray(s.fields)||s.fields.length>8||!Array.isArray(s.lasers)||s.lasers.length>8)throw new Error('磁场和激光分别最多 8 个');
   const ids=new Set<string>(),id=(o:Record<string,unknown>)=>{const v=string(o,'id');if(!/^[A-Za-z0-9_-]+$/.test(v)||['__proto__','constructor','prototype'].includes(v)||ids.has(v))throw new Error('对象 ID 非法或重复');ids.add(v);return v;};
-  const fields:MagneticField[]=s.fields.map(v=>{const f=obj(v);return {id:id(f),name:string(f,'name'),enabled:enabled(f),magnitudeG:val(f,'magnitudeG',0,20),thetaDeg:val(f,'thetaDeg',0,180),phiDeg:val(f,'phiDeg',-180,180)};});
+  // A field saved as (θ, φ): its reference axis is that direction, its offset zero.
+  const fields:MagneticField[]=s.fields.map(v=>{const f=obj(v);return {id:id(f),name:string(f,'name'),enabled:enabled(f),magnitudeG:val(f,'magnitudeG',0,20),direction:f.direction!==undefined?directionSpec(f.direction):legacyFieldDirection(val(f,'thetaDeg',0,180),val(f,'phiDeg',-180,180))};});
   const lasers:Laser[]=s.lasers.map(v=>{const l=obj(v),expr=l.frequency===undefined?undefined:frequencyExpr(l.frequency);if(!expr&&l.line!=='D1'&&l.line!=='D2')throw new Error('光谱线必须为 D1 或 D2');
     // Only authored lab geometry and Jones parameters are restored. Legacy
     // preset/follow labels are intentionally outside this whitelist: shortcuts
     // are one-time commands and loading a scene must never apply one again.
-    const result:Laser={id:id(l),name:string(l,'name'),enabled:enabled(l),line:l.line==='D1'?'D1':'D2',...(expr?{frequency:expr}:{detuningMHz:val(l,'detuningMHz',-5e9,5e9)}),intensityMWcm2:val(l,'intensityMWcm2',0,Number.MAX_VALUE),thetaDeg:val(l,'thetaDeg',0,180),phiDeg:val(l,'phiDeg',-180,180),polarizationAngleDeg:val(l,'polarizationAngleDeg',-90,90),ellipticityDeg:val(l,'ellipticityDeg',-45,45),phaseDeg:l.phaseDeg===undefined?0:val(l,'phaseDeg',-180,180)};
+    const result:Laser={id:id(l),name:string(l,'name'),enabled:enabled(l),line:l.line==='D1'?'D1':'D2',...(expr?{frequency:expr}:{detuningMHz:val(l,'detuningMHz',-5e9,5e9)}),intensityMWcm2:val(l,'intensityMWcm2',0,Number.MAX_VALUE),direction:l.direction!==undefined?directionSpec(l.direction):legacyDirection(l),polarizationAngleDeg:val(l,'polarizationAngleDeg',-90,90),ellipticityDeg:val(l,'ellipticityDeg',-45,45),phaseDeg:l.phaseDeg===undefined?0:val(l,'phaseDeg',-180,180)};
     if(expr){const unit=frequencyUnit(l.frequencyUnit);if(unit)result.frequencyUnit=unit;}
     // A saved carrier is kept bit for bit when its fingerprint still matches (resolveSceneFrequencies).
     if(l.frequencyAnchor!==undefined)result.frequencyAnchor=frequencyAnchor(l.frequencyAnchor);
     if(l.intensityAnchor!==undefined){const anchor=obj(l.intensityAnchor);result.intensityAnchor={intensityMWcm2:val(anchor,'intensityMWcm2',0,Number.MAX_VALUE),viewKey:string(anchor,'viewKey',2048)};}
-    if(l.directionAnchor!==undefined){const anchor=obj(l.directionAnchor);result.directionAnchor={thetaDeg:val(anchor,'thetaDeg',0,180),phiDeg:val(anchor,'phiDeg',-180,180),viewKey:string(anchor,'viewKey',2048),...(anchor.thetaResidualDeg!==undefined?{thetaResidualDeg:val(anchor,'thetaResidualDeg',-Number.MAX_VALUE,Number.MAX_VALUE)}:{}),...(anchor.phiResidualDeg!==undefined?{phiResidualDeg:val(anchor,'phiResidualDeg',-Number.MAX_VALUE,Number.MAX_VALUE)}:{})};}
+    const powerUnit=unitChoice(l.powerUnit,POWER_UNITS,'功率'),waistUnit=unitChoice(l.waistUnit,WAIST_UNITS,'束腰'),intensityUnit=unitChoice(l.intensityUnit,INTENSITY_UNITS,'强度');
+    if(powerUnit)result.powerUnit=powerUnit;if(waistUnit)result.waistUnit=waistUnit;if(intensityUnit)result.intensityUnit=intensityUnit;
     if(!expr&&l.referenceTransition!==undefined){const ref=obj(l.referenceTransition);if(ref.line!=='D1'&&ref.line!=='D2')throw new Error('跃迁参考的 D 线无效');const Fg=val(ref,'Fg',1,2),Fe=val(ref,'Fe',0,3);if(!Number.isInteger(Fg)||!Number.isInteger(Fe))throw new Error('跃迁参考 F 必须为整数');if(ref.fromManifold!==undefined&&ref.fromManifold!=='ground'&&ref.fromManifold!=='D1')throw new Error('参考起始电子流形无效');result.referenceTransition={line:ref.line,Fg:Fg as 1|2,Fe,...(ref.fromManifold==='D1'?{fromManifold:'D1' as const}:{})};}
     if(l.showLightShift!==undefined&&typeof l.showLightShift!=='boolean')throw new Error('showLightShift 必须为布尔值');
     // A scene with a `regime` in place of the switch: a 'far' (静态光移) laser shows its light
@@ -82,6 +115,8 @@ export function validateScene(input:unknown):Scene {
     if(l.powerMW!==undefined)result.powerMW=val(l,'powerMW',0,Number.MAX_VALUE);if(l.waistUm!==undefined)result.waistUm=val(l,'waistUm',Number.MIN_VALUE,Number.MAX_VALUE);
     if(result.frequencyMode==='wavelength'&&result.wavelengthNm===undefined)throw new Error('请指定真空波长');if(result.intensityMode==='power'&&(result.powerMW===undefined||result.waistUm===undefined))throw new Error('请指定功率与束腰');return normalizeLaserIntensity(expr?result:migrateLaserFrequency(normalizeLaserFrequency(result)));
   });
+  // Every linked field exists and no link forms a cycle.
+  for(const object of [...fields,...lasers])try{referenceAxis(fields,object.direction.reference);}catch(error){throw new Error(`「${object.name}」的参考轴无效：${error instanceof Error?error.message:String(error)}`);}
   const F=val(s,'initialF',1,2);if(F!==1&&F!==2)throw new Error('F 必须为 1 或 2');const m=val(s,'initialM',-F,F);if(!Number.isInteger(m))throw new Error('mF 必须为整数');
   const legacyInitial=`ground-${F}-${m}`,legacyDefaults=defaultDynamics();
   if(s.referenceFrequencies!==undefined&&(!Array.isArray(s.referenceFrequencies)||s.referenceFrequencies.length>8))throw new Error('最多 8 个参考频率');
@@ -109,7 +144,7 @@ export function validateScene(input:unknown):Scene {
     if(d.durationUnit!==undefined&&!DURATION_UNITS.includes(d.durationUnit as DurationUnit))throw new Error('时间单位无效');
     if(d.monitorMode!==undefined&&d.monitorMode!=='auto'&&d.monitorMode!=='manual')throw new Error('观察态选择模式无效');
     const groups=d.monitoredGroupIds??[];if(!Array.isArray(groups)||groups.length>POPULATION_GROUPS.length||new Set(groups).size!==groups.length||groups.some(id=>!POPULATION_GROUPS.some(g=>g.id===id)))throw new Error('F 布居分组无效');
-    next.dynamics={laserId,initialStateId,...(spec&&spec.kind!=='state'?{initialState:spec}:{}),monitorMode:d.monitorMode==='manual'?'manual':'auto',monitoredGroupIds:[...groups] as string[],monitoredStateIds:[...d.monitoredStateIds] as string[],durationUs:val(d,'durationUs',Number.MIN_VALUE,Number.MAX_VALUE),...(d.durationUnit!==undefined?{durationUnit:d.durationUnit as DurationUnit}:{}),samples,meanHorizonUs:meanHorizonUs as number|null,...(d.quality==='verified'||d.quality==='preview'?{quality:d.quality}:{}),autoRun:d.autoRun!==false};
+    next.dynamics={laserId,initialStateId,...(spec&&spec.kind!=='state'?{initialState:spec}:{}),monitorMode:d.monitorMode==='manual'?'manual':'auto',monitoredGroupIds:[...groups] as string[],monitoredStateIds:[...d.monitoredStateIds] as string[],durationUs:val(d,'durationUs',Number.MIN_VALUE,Number.MAX_VALUE),...(d.durationUnit!==undefined?{durationUnit:d.durationUnit as DurationUnit}:{}),samples,meanHorizonUs:meanHorizonUs as number|null,...(d.quality==='verified'||d.quality==='preview'?{quality:d.quality}:{})};
   }
   const initial=[...validatedAnalysis.ground,...validatedAnalysis.D1,...validatedAnalysis.D2].find(l=>l.id===next.dynamics?.initialStateId);if(initial?.manifold==='ground'){next.initialF=initial.F as 1|2;next.initialM=initial.m;}
   return next;

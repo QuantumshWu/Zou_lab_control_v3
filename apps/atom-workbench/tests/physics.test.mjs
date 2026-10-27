@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyze, RB87, polarization, direction, clockFrequencyMHz, sinCosDegrees } from '../dist/js/atom-workbench/src/physics.js';
+import { analyze, RB87, polarization, clockFrequencyMHz, sinCosDegrees } from '../dist/js/atom-workbench/src/physics.js';
 import { defaultScene } from '../dist/js/atom-workbench/src/types.js';
+import { along, field, spherical } from './directions.mjs';
 
 const near=(actual,expected,tol=1e-8)=>assert.ok(Math.abs(actual-expected)<=tol,`${actual} differs from ${expected} (tolerance ${tol})`);
 function zeroScene() {
-  const s=defaultScene();s.fields[0].magnitudeG=0;s.lasers[0].thetaDeg=0;
+  const s=defaultScene();s.fields[0].magnitudeG=0;s.lasers[0].direction=spherical(0,0);
   // Isolate one beam for these spectroscopy sum-rule tests; the product's
   // default scene also includes an enabled far-detuned tweezer.
   s.lasers=s.lasers.filter(l=>l.id==='probe');delete s.lasers[0].referenceTransition;
@@ -15,10 +16,11 @@ function zeroScene() {
 
 test('exact opposite entered field directions cancel without erasing real tiny deviations',()=>{
   for(const [theta,phi]of [[37,25],[61,-17],[145,173]]){
-    const scene=zeroScene();Object.assign(scene.fields[0],{magnitudeG:3,thetaDeg:theta,phiDeg:phi});
-    scene.fields.push({...scene.fields[0],id:'opposite',thetaDeg:180-theta,phiDeg:phi>0?phi-180:phi+180});
-    const exact=analyze(scene);assert.equal(exact.fieldMagnitudeG,0);assert.deepEqual(exact.fieldAxis,{thetaDeg:0,phiDeg:0});
-    scene.fields[1].thetaDeg+=1e-8;assert.ok(analyze(scene).fieldMagnitudeG>0);
+    const scene=zeroScene();Object.assign(scene.fields[0],{magnitudeG:3,direction:along(theta,phi)});
+    scene.fields.push({...scene.fields[0],id:'opposite',direction:along(180-theta,phi>0?phi-180:phi+180)});
+    // At zero total field the quantization axis is the first field's reference axis.
+    const exact=analyze(scene);assert.equal(exact.fieldMagnitudeG,0);assert.deepEqual(exact.fieldAxis,{thetaDeg:theta,phiDeg:phi});
+    scene.fields[1].direction.reference.thetaDeg+=1e-8;assert.ok(analyze(scene).fieldMagnitudeG>0);
   }
   const tiny=sinCosDegrees(1e-20);assert.ok(tiny.sin>0,'a represented nonzero angle is not rounded to a cardinal direction');
   for(let angle=-720;angle<=720;angle+=7){const actual=sinCosDegrees(angle);near(actual.sin,Math.sin(angle*Math.PI/180),3e-15);near(actual.cos,Math.cos(angle*Math.PI/180),3e-15);}
@@ -63,19 +65,20 @@ test('field rotation preserves energies; disabled fields do not contribute',()=>
 
 test('Jones helicity, transverse geometry and polarization conservation',()=>{
   const s=zeroScene(),l=s.lasers[0];
-  let p=polarization(l,[0,0,1]);near(p.plus,1);near(p.pi,0);near(p.minus,0);
-  l.ellipticityDeg=-45;p=polarization(l,[0,0,1]);near(p.minus,1);
-  l.ellipticityDeg=0;p=polarization(l,[0,0,1]);near(p.plus,0.5);near(p.minus,0.5);
-  p=polarization(l,[1,0,0]);near(p.pi,1);
+  const b=(theta,phi)=>[field('b',1,theta,phi)];
+  let p=polarization(l,b(0,0));near(p.plus,1);near(p.pi,0);near(p.minus,0);
+  l.ellipticityDeg=-45;p=polarization(l,b(0,0));near(p.minus,1);
+  l.ellipticityDeg=0;p=polarization(l,b(0,0));near(p.plus,0.5);near(p.minus,0.5);
+  p=polarization(l,b(90,0));near(p.pi,1);
   for(let i=0;i<30;i++) {
-    l.thetaDeg=i*6;l.phiDeg=i*13;l.polarizationAngleDeg=i*7;l.ellipticityDeg=i*3-45;
-    p=polarization(l,direction(73,11));near(p.plus+p.pi+p.minus,1,1e-12);
+    l.direction=spherical(i*6,i*13);l.polarizationAngleDeg=i*7;l.ellipticityDeg=i*3-45;
+    p=polarization(l,b(73,11));near(p.plus+p.pi+p.minus,1,1e-12);
     near(p.k.reduce((sum,v,i)=>sum+v*p.u[i],0),0,1e-12);
     near(p.k.reduce((sum,v,i)=>sum+v*p.v[i],0),0,1e-12);
   }
   // Common rotation about lab z rotates the beam's e_theta/e_phi and B together.
-  const before=polarization(l,direction(73,11));l.phiDeg+=42;
-  const after=polarization(l,direction(73,53));near(before.plus,after.plus);near(before.pi,after.pi);
+  const before=polarization(l,b(73,11));l.direction.phiDeg+=42;
+  const after=polarization(l,b(73,53));near(before.plus,after.plus);near(before.pi,after.pi);
 });
 
 test('cycling line strength, zero-field reference and Rabi convention',()=>{

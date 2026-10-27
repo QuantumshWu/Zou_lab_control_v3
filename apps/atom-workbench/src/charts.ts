@@ -15,12 +15,11 @@ export function populationAppearance(population:number):{fill:string;ink:string}
 }
 
 export interface LevelChartOptions {
-  line:SpectralLine; selectedIds:string[]; initialId:string;
+  /** The two-state readout's labelled states (transition-choice.ts). */
+  line:SpectralLine; labelled:{id:string;label:1|2}[]; initialId:string;
   populations?:Record<string,number>; populationLabel?:string;
   /** Only a verified long-time result; never reuse a finite-time population. */
   steadyPopulations?:Record<string,number>|null;
-  /** The long-time population's name at the ground manifold, p̄(T). */
-  steadyPopulationLabel?:string;
   /** Actual SVG viewport width, preserving readable text in narrow panels. */
   viewportWidth?:number;
 }
