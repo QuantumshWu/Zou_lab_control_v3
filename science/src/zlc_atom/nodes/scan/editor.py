@@ -12,7 +12,7 @@ fields, ``plan`` (its axes, as the JSON document) and ``api_values`` (one
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from zlc_data.units import DEFAULT_UNITS, UnitError, format_quantity
 from zlc_plugin.tunable import convert_tunable_value
@@ -130,19 +130,33 @@ class _Spellings:
         self._limits[port.port] = limits
         return limits
 
+    def currents(self, port: ScanPort) -> dict[str, float]:
+        """Where the knob stands in each such spelling, by the same conversion."""
+
+        if port.current is None:
+            return {}
+        currents: dict[str, float] = {}
+        for symbol in self.limits(port):
+            try:
+                currents[symbol] = self.convert(port, (port.current,), port.unit, symbol)[0]
+            except Exception:  # noqa: BLE001 -- a reading the device cannot say in it (0 Vpp in dBm)
+                continue
+        return currents
+
 
 def _port(port: ScanPort, spellings: _Spellings) -> dict:
     """One knob with the branch it hangs under (a device's under the device),
     its name within it and the spellings its axis may be authored in: each
-    with its decade against the port's unit, or None and the port's limits in
-    it where no decimal shift reaches it."""
+    with its decade against the port's unit, or None and the port's limits
+    and reading in it where no decimal shift reaches it."""
 
     limits = spellings.limits(port)
     ladder = _ladder(port.unit) or ([[port.unit, 0]] if limits else [])
     units = [*ladder, *([symbol, None] for symbol in limits)]
     group = port.label.removesuffix(f".{port_leaf(port.port)}") if port.port.startswith(DEVICE_PARAM_FAMILY) else port_group(port.port)
     return {**asdict(port), "group": group, "leaf": port_leaf(port.port),
-            "units": units, "families": _families(symbol for symbol, _decade in units), "limits": limits}
+            "units": units, "families": _families(symbol for symbol, _decade in units), "limits": limits,
+            "currents": spellings.currents(port)}
 
 
 def _rows(plan: object) -> tuple[dict, ...]:
@@ -183,6 +197,23 @@ def _summary(plan: object) -> tuple[str, str]:
             f"{by_hand}{by_device}"), ""
 
 
+def _api_values(fields: Sequence[Mapping], text: object) -> tuple[dict[str, float], dict[str, float], bool]:
+    """The ``api_values`` text as written, the same with each label one of the
+    pulse's fields answers to written as that field's id, and whether it reads."""
+
+    authored = {str(field["field_id"]) for field in fields}
+    named: dict[str, list[str]] = {}
+    for field in fields:
+        named.setdefault(str(field["label"]), []).append(str(field["field_id"]))
+    try:
+        written = api_overrides_from_authored(text)
+    except ValueError:
+        return {}, {}, False  # the draft's issue says why; nothing to show yet
+    # A label one field answers to is that field.
+    return written, {named[name][0] if name not in authored and len(named.get(name, ())) == 1 else name: value
+                     for name, value in written.items()}, True
+
+
 def _api(pulse: Mapping[str, object], rows: Sequence[Mapping], text: object) -> dict:
     """The pulse's API values this run sets (v2 ``_reconcile_values``): one
     row per field the board does not sweep -- locked, with the reason, while
@@ -204,30 +235,22 @@ def _api(pulse: Mapping[str, object], rows: Sequence[Mapping], text: object) -> 
     named: dict[str, list[str]] = {}
     for field_id, label in labels.items():
         named.setdefault(label, []).append(field_id)
-    try:
-        written = api_overrides_from_authored(text)
-        readable = True
-    except ValueError:
-        written, readable = {}, False  # the draft's issue says why; nothing to show yet
-    # A label one field answers to is that field.
-    overrides = {named[name][0] if name not in authored and len(named.get(name, ())) == 1 else name: value
-                 for name, value in written.items()}
+    written, overrides, readable = _api_values(fields, text)
     shown = []
     for field in fields:
         name = str(field["field_id"])
         if name in scanned:
             continue
         code = bool(field.get("is_dac"))
-        low = field.get("limit_lo") if field.get("limit_lo") is not None else field.get("lo")
-        high = field.get("limit_hi") if field.get("limit_hi") is not None else field.get("hi")
+        low, high = field["limit_lo"], field["limit_hi"]
         number = overrides.get(name, authored[name][0])
         shown.append({
             "name": name, "label": labels[name], "kind": "integer" if code else "number",
             "unit": "" if code else authored[name][1], "units": [] if code else _ladder(authored[name][1]),
             "families": {} if code else _families(symbol for symbol, _decade in _ladder(authored[name][1])),
             "description": name,
-            "minimum": None if low is None else (int(low) if code else float(low)),
-            "maximum": None if high is None else (int(high) if code else float(high)),
+            "minimum": int(low) if code else float(low),
+            "maximum": int(high) if code else float(high),
             "authored": int(authored[name][0]) if code else authored[name][0],
             "value": int(number) if code else number,
             "unavailable_reason": (
@@ -278,6 +301,12 @@ def scan_editor_facts(values: Mapping[str, object], pulse: Mapping[str, object] 
 
     spellings = _Spellings(tunables)
     ports = [*hardware_scan_ports_for(pulse), *api_scan_ports_for(pulse)] if pulse is not None else []
+    if pulse is not None:
+        # An API parameter stands at the value this run gives it: its own, else the pulse's.
+        _written, overrides, _readable = _api_values(pulse.get("api_fields") or (), values.get("api_values"))
+        ports = [replace(port, current=float(overrides[port.port[len(API_PARAM_FAMILY):]]))
+                 if port.port.startswith(API_PARAM_FAMILY) and port.port[len(API_PARAM_FAMILY):] in overrides else port
+                 for port in ports]
     ports.extend(device_ports)
     summary, problem = _summary(values.get("plan"))
     # An axis on a knob nobody offers now (a slot renamed, a binding taken off,

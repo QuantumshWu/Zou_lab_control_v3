@@ -5,8 +5,11 @@
 // what (claims, protected fields, accepted risk) is the workbench's answer,
 // shown as each row's reason; the page never decides it.  The reading is
 // taken again whenever it may have gone stale under the page: its window
-// shown or brought forward, a run letting the device go.
-import { Field, StatusStrip, alignUnitPickers, command, element, readoutText, setChecked, setElided, setState, statusDot, switchButton, titleRow, } from "../fluent/index.js";
+// shown or brought forward, a run letting the device go.  A number is read in
+// the unit that shows it between 1 and 1000, in the family its device shows it
+// in (defaultUnit), chosen once, at the window's first reading; a unit the
+// operator picks stays.
+import { Field, StatusStrip, alignUnitPickers, command, defaultUnit, element, readoutText, setChecked, setElided, setState, shifted, statusDot, switchButton, titleRow, } from "../fluent/index.js";
 import { queueStatus } from "../shell.js";
 /** How long a live field waits after an edit before it tunes (v2: 75 ms). */
 const LIVE_DELAY_MS = 75;
@@ -37,6 +40,10 @@ export class DeviceControlView {
     reading = -1;
     /** Whether a run held the device at the last state: its letting go is a re-read (a scan puts its knobs back). */
     held = false;
+    /** Whether this window has chosen the units its rows are read in (once, at its first reading). */
+    defaulted = false;
+    /** Rows that first reading moved into the family their device shows them in, and the read that brings them. */
+    moved = null;
     constructor(id, ctx) {
         this.id = id;
         this.ctx = ctx;
@@ -155,6 +162,19 @@ export class DeviceControlView {
             for (const cell of [row.live, row.apply])
                 cell.title = spec.reason || "";
         }
+        // The units the rows are read in, chosen once: at this window's first reading, then the prefix
+        // of a row it moved into its device's family when that reading comes.
+        if (request !== undefined && !failed && device.state === "open") {
+            if (!this.defaulted && request === this.reading) {
+                this.defaulted = true;
+                this.defaultUnits([...this.rows.values()], true);
+            }
+            else if (this.moved?.request === request) {
+                const names = this.moved.rows;
+                this.moved = null;
+                this.defaultUnits([...this.rows.values()].filter(row => names.has(row.spec.name)), false);
+            }
+        }
         // One picker width, so every number box has the same right edge (v2 _align_headings).
         requestAnimationFrame(() => alignUnitPickers(this.table));
         this.status();
@@ -185,6 +205,7 @@ export class DeviceControlView {
         row.revision = 0;
         row.valid = true;
         row.unitRequest = null;
+        row.picked = false;
         row.applied = "";
         row.error = "";
         row.outside = false;
@@ -196,6 +217,7 @@ export class DeviceControlView {
                 this.cancelLive(row);
                 this.queued.delete(row.spec.name);
                 row.revision++;
+                row.picked = true;
                 row.unitRequest = this.ctx.transport.send({ action: "read_device", device: this.id, units: { [row.spec.name]: unit } }, `Reading ${row.spec.label} in ${unit}…`);
                 queueMicrotask(() => { if (this.device)
                     this.update(this.device); });
@@ -245,6 +267,46 @@ export class DeviceControlView {
         row.field.root.insertBefore(statusCell, row.field.problem);
         this.table.append(row.field.root);
         return row;
+    }
+    /** Read `rows` in the units `defaultUnit` picks from their readings, where that is not the one they are read in. A row whose
+     * device shows it in another family (its `display_unit`) is first read in that family (`family`), and takes its
+     * prefix there when that reading comes. A whole number, and a row the operator read in a unit, stay as they are. */
+    defaultUnits(rows, family) {
+        const units = {}, moved = new Set();
+        for (const row of rows) {
+            const spec = row.spec, choices = spec.units ?? [], unit = spec.unit;
+            if (row.picked || row.unitRequest !== null || !unit || (spec.kind !== "number" && spec.kind !== "integer"))
+                continue;
+            const integer = spec.kind === "integer";
+            const group = (symbol) => choices.find(choice => choice.value === symbol)?.group;
+            const own = spec.display_unit && group(spec.display_unit) ? spec.display_unit : unit;
+            if (group(own) !== group(unit)) {
+                if (family && !integer) {
+                    units[spec.name] = own;
+                    moved.add(spec.name);
+                }
+                continue;
+            }
+            const at = (value, decade) => typeof value === "number" ? shifted(value, -decade) : null;
+            const chosen = defaultUnit(unit, choices.filter(choice => choice.group === group(unit) && typeof choice.decade === "number")
+                .map(({ value: symbol, decade }) => ({ symbol, value: at(spec.current, decade), low: at(spec.minimum, decade), high: at(spec.maximum, decade) })), integer);
+            if (chosen !== unit)
+                units[spec.name] = chosen;
+        }
+        if (!Object.keys(units).length)
+            return;
+        const request = this.ctx.transport.send({ action: "read_device", device: this.id, units }, "Reading in default units…");
+        for (const name of Object.keys(units)) {
+            const row = this.rows.get(name);
+            this.cancelLive(row);
+            this.queued.delete(name);
+            row.revision++;
+            row.unitRequest = request;
+        }
+        if (moved.size)
+            this.moved = { request, rows: moved };
+        queueMicrotask(() => { if (this.device)
+            this.update(this.device); });
     }
     edit(row, value) {
         row.outside = false;

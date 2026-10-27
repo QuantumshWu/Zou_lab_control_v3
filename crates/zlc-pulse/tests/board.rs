@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use zlc_pulse::binding::resolve_api_parameters;
 use zlc_pulse::board::{Board, Fate, World, run_timeline};
-use zlc_pulse::run::{ScanRows, describe_document, done_json, read_document, run_document};
+use zlc_pulse::run::{ScanRows, describe_document, describe_sequence, done_json, read_document, run_document};
 use zlc_pulse::compile::compile_sequence;
 use zlc_pulse::json::Json;
 use zlc_pulse::transport::Event;
@@ -138,8 +138,14 @@ fn a_run_plays_a_scan_table_and_its_receipt_says_what_plays_when() {
     let description = describe_document(&document).unwrap();
     let field = description.get("api_fields").unwrap().as_array().unwrap()[1].clone();
     assert_eq!(field.get("field_id").and_then(Json::as_str), Some("duration:short"));
-    for key in ["is_dac", "lo", "hi", "limit_lo", "limit_hi"] { assert!(field.get(key).is_some(), "api field fact {key}"); }
+    for key in ["value", "is_dac", "limit_lo", "limit_hi"] { assert!(field.get(key).is_some(), "api field fact {key}"); }
     assert!(description.get("scan_fields").unwrap().as_array().unwrap().is_empty(), "the template carries no scan slot");
+    // Marked Scan, a slot says the value it holds in the pulse, where a plan's default sweep is centred.
+    let (_path, sequence) = read_document(&document).unwrap();
+    let marked = sequence.with(|parts| for binding in &mut parts.bindings { binding.scan |= binding.field_id() == "duration:short"; }).unwrap();
+    let slots = describe_sequence(&marked).unwrap().get("scan_fields").unwrap().as_array().unwrap().to_vec();
+    assert_eq!(slots.len(), 1);
+    assert_eq!(slots[0].get("value").and_then(Json::as_f64), field.get("value").and_then(Json::as_f64));
     // The table's rows are said in the field's own unit (s) and quantized to the board's 20 ns tick.
     let table = ScanRows { fields: vec!["duration:short".into()], rows: vec![vec![0.002], vec![0.003_000_001]] };
     let receipt = run_document(&board, &document, &[], Some(&table), 1, 1).unwrap();

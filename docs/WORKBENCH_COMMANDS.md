@@ -133,7 +133,10 @@ format_quantity: the readable prefix of its unit, or exactly the spelling the op
 picked; an inexact conversion's number -- 40 mVpp read in dBm -- rounded after "≈ " by
 the ≈ rule of `zlc_core::units::approximate`: "≈ -23.98 dBm") and
 `current_exact`/`limits_exact` (the same with every digit), `units` (the spellings a
-number may be read in, `[{value, label, group}]` grouped by unit family; `read_device
+number may be read in, `[{value, label, group, decade}]` grouped by unit family, `decade`
+each one's power of ten against the row's unit where a decimal shift reaches it, else
+null; with the field's `display_unit` they are what Device Control chooses the unit a
+row is read in by, once, at its window's first reading; `read_device
 {units}` re-reads the row in one: the reading is converted, a Desired draft not yet
 applied keeps its digits, read in the new unit, and is never tuned by the change) and
 `status`/`severity` (v2's words at rest: Ready, Protected, Stands outside its bounds).
