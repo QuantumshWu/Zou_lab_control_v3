@@ -235,7 +235,7 @@ impl Installer {
                                                     facts["commit"].as_str().unwrap_or("?").chars().take(7).collect::<String>());
                 let (have, wanted) = (named(&program["installed"]), format!("v{}", program["expected"]["version"].as_str().unwrap_or("?")));
                 let size = program["expected"]["asset"]["size"].as_f64().unwrap_or(0.0) / 1_048_576.0;
-                let (state, mut words, mut detail) = match program["relation"].as_str().unwrap_or("") {
+                let (mut state, mut words, mut detail) = match program["relation"].as_str().unwrap_or("") {
                     "match" => ("ok", "Installed", format!("{have}: this checkout's release")),
                     "built" => ("ok", "Built here", "Built on this PC from this checkout's sources".into()),
                     "staged" => ("optional", "Restart", format!("{wanted} is downloaded: it goes in place when installation.exe starts again")),
@@ -245,10 +245,20 @@ impl Installer {
                     "unreleased" => ("optional", "Not released", "This checkout names no release (bin\\release.json): build_release makes one".into()),
                     _ => ("missing", "Update", format!("{have} is not this checkout's release {wanted}: Update downloads it")),
                 };
-                // A newer release on GitHub is the checkout's to get (a pull): its words say so.
-                if let Some(Ok(latest)) = &self.online && latest["newer"] == true {
-                    if state == "ok" { words = "Newer online"; }
-                    detail.push_str(&format!(" · GitHub has {}: pull the repository to get it", latest["tag"].as_str().unwrap_or("a newer release")));
+                // GitHub ahead of this checkout: Update pulls it (a fast-forward) and then installs the
+                // release it names; when it cannot pull, the words say why and the pull is the operator's.
+                if let Some(Ok(latest)) = &self.online {
+                    let (pull, release) = (&latest["pull"], latest["tag"].as_str().filter(|_| latest["newer"] == true));
+                    let behind = pull["behind"].as_u64().unwrap_or(0);
+                    let release = release.map(|tag| format!(", release {tag}")).unwrap_or_default();
+                    if pull["pullable"] == true {
+                        (state, words) = ("missing", "Update");
+                        detail = format!("{have} · GitHub has {behind} newer commit(s){release}: Update pulls them and installs the program they name");
+                    } else if behind > 0 || !release.is_empty() {
+                        if state == "ok" { words = "Newer online"; }
+                        let why = pull["why"].as_str().unwrap_or("pull the repository to get it");
+                        detail.push_str(&format!(" · GitHub is ahead{release}: {why}"));
+                    }
                 }
                 let mut shown = row("program", "program", "Zou lab control", state, detail);
                 shown["words"] = json!(words);
@@ -371,7 +381,13 @@ impl Installer {
         let step = |component: &'static str, title: &str, script: &'static str, arguments: &[&str]|
             Step { title: named(title), script, arguments: dry(arguments), outcome: Outcome::Install, component: Some(component) };
         let mut steps = Vec::new();
-        if wanted("program") { steps.push(step("program", "Program (this checkout's release)", "fetch_engine.ps1", &[])); }
+        if wanted("program") {
+            // A checkout behind GitHub is brought up first: the program step then reads the release it names.
+            if matches!(&self.online, Some(Ok(latest)) if latest["pull"]["pullable"] == true) {
+                steps.push(step("program", "Pull this checkout from GitHub", "fetch_engine.ps1", &["-Pull"]));
+            }
+            steps.push(step("program", "Program (this checkout's release)", "fetch_engine.ps1", &[]));
+        }
         // Pylon and the GPU install into the environment (a venv, using the base's packages when it
         // can): one whose base lacks numpy, scipy or Pillow is made first.
         let usable = matches!(self.answer(Check::Science), Some(Ok(science)) if science["exists"] == true || science["inherit"] == true);

@@ -2,9 +2,14 @@ param(
     # installation.exe's check: one JSON line -- the release this checkout names (bin\release.json),
     # the engine in bin\engine, and how they relate. Nothing changes.
     [switch]$Status,
-    # installation.exe's online check: one JSON line -- the newest release published on GitHub and
-    # whether it is newer than this checkout's (a short timeout). Nothing changes.
+    # installation.exe's online check: one JSON line -- the newest release published on GitHub,
+    # whether it is newer than this checkout's (a short timeout), and how this checkout stands
+    # against the branch it follows on GitHub (after a git fetch; the working tree is not touched).
     [switch]$Latest,
+    # Bring this checkout up to the branch it follows on GitHub: a fetch and a fast-forward only,
+    # refused (nothing changed) when this checkout has commits of its own or local edits to files
+    # the update changes. installation.exe's Update runs it before the program step.
+    [switch]$Pull,
     # Only put a downloaded engine (bin\engine.next) in place, waiting up to this many seconds for
     # the programs running from bin to end (the four programs' first step).
     [int]$Swap = -1,
@@ -117,6 +122,75 @@ function Invoke-Swap([int]$Seconds) {
     $true
 }
 
+# git: on PATH, else GitHub Desktop's own (the newest app-* of this user), else Git for Windows.
+function Find-Git {
+    $found = (Get-Command git.exe -ErrorAction SilentlyContinue).Source
+    if ($found) { return $found }
+    $desktop = Join-Path $env:LOCALAPPDATA 'GitHubDesktop'
+    $bundled = @(Get-ChildItem -LiteralPath $desktop -Directory -Filter 'app-*' -ErrorAction SilentlyContinue |
+        Sort-Object { Get-Version ($_.Name -replace '^app-', '') } -Descending |
+        ForEach-Object { Join-Path $_.FullName 'resources\app\git\cmd\git.exe' } | Where-Object { Test-Path -LiteralPath $_ })
+    if ($bundled.Count) { return $bundled[0] }
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs'))) {
+        if ($base -and (Test-Path -LiteralPath (Join-Path $base 'Git\cmd\git.exe'))) { return (Join-Path $base 'Git\cmd\git.exe') }
+    }
+    $null
+}
+
+# git -C <checkout> <arguments>, never asking for credentials, ended after $Seconds: its exit
+# code and its output lines (stdout, then stderr).
+function Invoke-Git([string]$Git, [string[]]$Arguments, [int]$Seconds = 60) {
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $start.FileName = $Git
+    $start.Arguments = (@('-C', $root) + $Arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' '
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    $start.EnvironmentVariables['GIT_TERMINAL_PROMPT'] = '0'
+    $start.EnvironmentVariables['GCM_INTERACTIVE'] = 'never'
+    $process = [Diagnostics.Process]::Start($start)
+    $out = $process.StandardOutput.ReadToEndAsync(); $err = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($Seconds * 1000)) {
+        try { $process.Kill() } catch {}
+        return [pscustomobject]@{ Code = -1; Lines = @("git $($Arguments[0]) took longer than $Seconds s") }
+    }
+    $process.WaitForExit()
+    $lines = @(($out.Result + "`n" + $err.Result) -split "`r?`n" | Where-Object { $_ -ne '' })
+    [pscustomobject]@{ Code = $process.ExitCode; Lines = $lines }
+}
+
+# How this checkout stands against the branch it follows on GitHub, after fetching it: commits
+# behind and ahead, the local edits an update would overwrite, and whether a fast-forward can
+# bring it up (pullable). 'why' says, in the operator's words, why it cannot.
+function Get-PullState([int]$Seconds) {
+    $state = [ordered]@{ git = $null; branch = $null; upstream = $null; behind = 0; ahead = 0; blocked = @(); pullable = $false; why = $null }
+    $git = Find-Git
+    if (-not $git) { $state.why = 'git was not found on this PC: pull with GitHub Desktop'; return $state }
+    $state.git = $git
+    $branch = Invoke-Git $git @('symbolic-ref', '--short', '-q', 'HEAD') 10
+    if ($branch.Code -ne 0 -or -not $branch.Lines.Count) { $state.why = 'this checkout is on no branch: pull with GitHub Desktop'; return $state }
+    $state.branch = $branch.Lines[0]
+    $upstream = Invoke-Git $git @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}') 10
+    if ($upstream.Code -ne 0) { $state.why = "branch $($state.branch) follows no branch on GitHub: pull with GitHub Desktop"; return $state }
+    $state.upstream = $upstream.Lines[0]
+    $remote = (Invoke-Git $git @('config', "branch.$($state.branch).remote") 10).Lines | Select-Object -First 1
+    $fetch = Invoke-Git $git @('fetch', '--quiet', $remote) $Seconds
+    if ($fetch.Code -ne 0) { $state.why = "GitHub did not answer git fetch ($($fetch.Lines | Select-Object -Last 1))"; return $state }
+    $counts = (Invoke-Git $git @('rev-list', '--left-right', '--count', 'HEAD...@{u}') 10).Lines | Select-Object -First 1
+    if ("$counts" -match '^(\d+)\s+(\d+)$') { $state.ahead = [int]$Matches[1]; $state.behind = [int]$Matches[2] }
+    if ($state.behind -eq 0) { return $state }
+    if ($state.ahead -gt 0) { $state.why = "this checkout has $($state.ahead) commit(s) of its own that GitHub does not: merge with GitHub Desktop"; return $state }
+    # Local edits (staged, unstaged or new files) to paths the update changes would be overwritten.
+    $incoming = @((Invoke-Git $git @('diff', '--name-only', 'HEAD', '@{u}') 30).Lines)
+    $local = @((Invoke-Git $git @('diff', '--name-only', 'HEAD') 30).Lines) + @((Invoke-Git $git @('ls-files', '-o', '--exclude-standard') 30).Lines)
+    $state.blocked = @($incoming | Where-Object { $local -contains $_ })
+    if ($state.blocked.Count) {
+        $state.why = "local edits to $($state.blocked.Count) file(s) the update changes ($(($state.blocked | Select-Object -First 3) -join ', ')): commit or discard them first"
+        return $state
+    }
+    $state.pullable = $true
+    $state
+}
+
 if ($Swap -ge 0) {
     if (Invoke-Swap $Swap) { Write-Host 'Nothing waits to be put in place.' } else { Write-Host 'The downloaded program waits: a program still runs from bin.' }
     return
@@ -149,15 +223,38 @@ if ([Net.WebRequest]::DefaultWebProxy) { [Net.WebRequest]::DefaultWebProxy.Crede
 
 if ($Latest) {
     # releases/latest answers with a redirect to releases/tag/<the newest tag>.
-    $request = [Net.WebRequest]::Create("$releases/latest")
-    $request.AllowAutoRedirect = $false
-    $request.Timeout = 5000
-    $request.UserAgent = 'zlc-fetch-engine'
-    $response = $request.GetResponse()
-    try { $location = "$($response.Headers['Location'])" } finally { $response.Dispose() }
-    $tag = if ($location -match '/tag/([^/?#]+)$') { [Uri]::UnescapeDataString($Matches[1]) } else { $null }
+    $tag = $null
+    try {
+        $request = [Net.WebRequest]::Create("$releases/latest")
+        $request.AllowAutoRedirect = $false
+        $request.Timeout = 5000
+        $request.UserAgent = 'zlc-fetch-engine'
+        $response = $request.GetResponse()
+        try { $location = "$($response.Headers['Location'])" } finally { $response.Dispose() }
+        if ($location -match '/tag/([^/?#]+)$') { $tag = [Uri]::UnescapeDataString($Matches[1]) }
+    } catch {}
     $newer = $tag -and $expected -and (Get-Version ($tag -replace '^v', '')) -gt (Get-Version $expected.version)
-    [ordered]@{ tag = $tag; newer = [bool]$newer } | ConvertTo-Json -Compress
+    $pull = Get-PullState 20
+    if (-not $tag -and -not $pull.git) { throw 'GitHub did not answer, and git was not found' }
+    [ordered]@{ tag = $tag; newer = [bool]$newer; pull = $pull } | ConvertTo-Json -Compress -Depth 4
+    return
+}
+
+if ($Pull) {
+    $state = Get-PullState 300
+    if (-not $state.git -or (-not $state.upstream) -or ($state.why -and -not $state.behind)) { throw $state.why }
+    if ($state.behind -eq 0) { Write-Host "Up to date with $($state.upstream)."; return }
+    $log = @((Invoke-Git $state.git @('log', '--oneline', '--no-decorate', '-n', '15', 'HEAD..@{u}') 30).Lines)
+    Write-Host "$($state.upstream) on GitHub has $($state.behind) commit(s) this checkout does not:"
+    $log | ForEach-Object { Write-Host "  $_" }
+    if ($state.behind -gt $log.Count) { Write-Host "  ... and $($state.behind - $log.Count) more" }
+    if (-not $state.pullable) { throw $state.why }
+    if ($DryRun) { Write-Host 'Dry run -- a fast-forward would bring them in; nothing changed.'; return }
+    $before = (Invoke-Git $state.git @('rev-parse', '--short', 'HEAD') 10).Lines | Select-Object -First 1
+    $merge = Invoke-Git $state.git @('merge', '--ff-only', '--quiet', '@{u}') 300
+    if ($merge.Code -ne 0) { throw "git could not fast-forward ($($merge.Lines | Select-Object -Last 1)); nothing was changed" }
+    $after = (Invoke-Git $state.git @('rev-parse', '--short', 'HEAD') 10).Lines | Select-Object -First 1
+    Write-Host "Pulled: $before -> $after. The program step that follows installs the release this checkout now names."
     return
 }
 
