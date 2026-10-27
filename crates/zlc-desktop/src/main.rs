@@ -230,11 +230,15 @@ fn shows_panel(accepted: &Value, viewers: &BTreeMap<u32, Viewer>, panel: &Value)
 /// The Figure Viewer's accepted document as the page and remote clients get it:
 /// its own section, beside the live board's panels. The document goes into the
 /// message and back, never copied: it carries the opened Figure's whole record.
+/// A save's answer is the message's own `saved` section, as on the Task Console's
+/// state, so a page (an Edit's Save figure, Save as…) reads it in one place.
 fn viewer_message<T>(viewer: &mut Value, deliver: impl FnOnce(&Value) -> T) -> T {
-    let mut message = json!({"type":"state", "request":viewer["request"], "error":viewer["error"], "result":viewer["result"]});
+    let saved = viewer.as_object_mut().and_then(|document| document.remove("saved")).unwrap_or(Value::Null);
+    let mut message = json!({"type":"state", "request":viewer["request"], "error":viewer["error"], "result":viewer["result"], "saved": saved});
     message["viewer"] = std::mem::take(viewer);
     let delivered = deliver(&message);
     *viewer = message["viewer"].take();
+    viewer["saved"] = message["saved"].take();
     delivered
 }
 
@@ -2041,4 +2045,25 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             trace::flush();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Figure Viewer's page reads a save's answer where the Task Console's does: the
+    /// message's own `saved` section, not inside `viewer`; the viewer's document keeps it.
+    #[test]
+    fn a_viewer_message_carries_the_save_answer_as_its_own_section() {
+        let refused = json!({"exists": [r"C:\d\a.png", r"C:\d\a.npz"]});
+        let mut viewer = json!({"request": 7, "error": null, "result": null, "panels": [], "saved": refused});
+        let sent = viewer_message(&mut viewer, |message| message.clone());
+        assert_eq!(sent["saved"], refused);
+        assert!(sent["viewer"].get("saved").is_none(), "{sent}");
+        assert_eq!((sent["request"].clone(), viewer["saved"].clone(), viewer["panels"].clone()), (json!(7), refused.clone(), json!([])), "the document is given back whole");
+        // What the page is sent (windows.send_to): `saved` a section of its own.
+        let text = delta::Sent::default().encode(sent.as_object().unwrap(), |_| true, |_| true).unwrap();
+        let page: Value = serde_json::from_str(&text).unwrap();
+        assert!(page["changes"].as_array().unwrap().iter().any(|change| change[0] == json!(["saved"]) && change[1] == refused), "{text}");
+    }
 }

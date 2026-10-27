@@ -6,12 +6,12 @@
 import { ComboBox, Field, GroupBox, Segmented, SpinBox, command, confirmOverwrite, element, fontOf, labelColumnWidth, measurer, note, setText, summary, switchButton, setChecked, token, wholeText } from "../fluent/index.js";
 /** Save as… of one working copy (`intent` its save_as). The host asks where with the Save dialog,
  * which asks before replacing the archive chosen, and writes over no other file unasked: the
- * picture beside that archive already there comes back named (the viewer's `saved`: {exists,
- * path}), and Overwrite saves that archive again, told to; Cancel writes nothing. */
+ * picture beside that archive already there comes back named (`saved`: {exists, path}), and
+ * Overwrite saves that archive again, told to; Cancel writes nothing. */
 export async function saveDataAs(transport, editor, intent) {
     let saved;
     try {
-        saved = await transport.request({ action: "data_editor", editor, intent }, "Editing the data…", (_state, sections) => sections.viewer?.saved);
+        saved = await transport.request({ action: "data_editor", editor, intent }, "Editing the data…", (_state, sections) => sections.saved);
     }
     catch {
         return;

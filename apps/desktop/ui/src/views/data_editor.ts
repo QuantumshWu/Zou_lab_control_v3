@@ -23,13 +23,12 @@ export type Intent = { op: string; [key: string]: unknown };
 
 /** Save as… of one working copy (`intent` its save_as). The host asks where with the Save dialog,
  * which asks before replacing the archive chosen, and writes over no other file unasked: the
- * picture beside that archive already there comes back named (the viewer's `saved`: {exists,
- * path}), and Overwrite saves that archive again, told to; Cancel writes nothing. */
+ * picture beside that archive already there comes back named (`saved`: {exists, path}), and
+ * Overwrite saves that archive again, told to; Cancel writes nothing. */
 export async function saveDataAs(transport: Pick<Transport, "request" | "note">, editor: string, intent: Intent): Promise<void> {
   let saved: unknown;
   try {
-    saved = await transport.request({ action: "data_editor", editor, intent }, "Editing the data…",
-      (_state, sections) => (sections.viewer as { saved?: unknown } | undefined)?.saved);
+    saved = await transport.request({ action: "data_editor", editor, intent }, "Editing the data…", (_state, sections) => sections.saved);
   } catch { return; }
   const refused = saved as { exists?: unknown; path?: unknown } | null;
   const existing = refused?.exists;

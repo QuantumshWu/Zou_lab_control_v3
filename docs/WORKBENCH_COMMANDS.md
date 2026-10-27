@@ -62,7 +62,8 @@ opens the Figure in a new window; `open {path, window}` replaces that window's F
 (as its File field does); the live board, its camera and its runs go on. A command
 naming a `figure-<n>-<k>` panel, or `add_panel` of a viewer's signal, acts on that
 viewer; a panel cannot be bound to another document's signal. The host sends each
-viewer to its window as a `state` message `{request, error, viewer}`.
+viewer to its window as a `state` message `{request, error, result, saved, viewer}`: a
+save's answer is the message's own `saved`, as on the Task Console's state.
 
 Windows, as v2 had them: Devices@Zou lab (`devices`), TaskConsole@Zou lab
 (`task-console`), one FigureViewer@Zou lab per opened Figure (`figure-viewer-<n>`) and

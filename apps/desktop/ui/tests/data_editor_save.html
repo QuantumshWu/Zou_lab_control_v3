@@ -6,20 +6,30 @@
 <pre id="result">pending</pre>
 <script type="module">
 // Run with tools/test_ui.ps1. The Figure Viewer data editor's Save as… under the real style sheet and the real dialog: the
-// host's Save dialog chose (and asked about) the archive; a picture beside it already there comes back as the viewer's
+// host's Save dialog chose (and asked about) the archive; a picture beside it already there comes back as
 // saved {exists, path}; the page names only those files and asks Overwrite (that archive saved again, told to overwrite)
 // or Cancel (nothing more sent). Every request is recorded.
 import {saveDataAs} from '../dist/views/data_editor.js';
+import {Transport} from '../dist/transport.js';
 const assert = (condition, message) => { if (!condition) throw Error(message); };
 const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
 const results=[];
 const check=async(name,test)=>{await test();results.push(name)};
 // A request's answer and the dialog it opens come after the click.
 const settle=()=>new Promise(resolve=>setTimeout(resolve));
-// The host: each Save as is answered with the next of `answers` (the viewer's `saved`).
+const arrive=async()=>{await settle();await settle();await settle();};
+// The host, through the real transport: each Save as is answered with the next of `answers` as the Figure Viewer's
+// page gets it (main.rs viewer_message): the viewer's document its `viewer` section, the answer its own `saved` section.
 const requests=[],notes=[],answers=[];
-const transport={request:(command,_feedback,pick)=>{requests.push(command);return Promise.resolve(pick({},{viewer:{saved:answers.shift()}}))},
-  note:text=>notes.push(text)};
+const webview=new EventTarget();
+Object.defineProperty(window,'chrome',{value:{webview},configurable:true,writable:true});
+window.ipc={postMessage:text=>{const {id,...command}=JSON.parse(text);requests.push(command);const saved=answers.shift();
+  setTimeout(()=>webview.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'state',request:id,error:null,result:null,
+    changes:[[['saved'],saved],[['viewer'],{request:id,document:{path:'C:\\data\\figure.npz'},panels:[]}]]})})))}};
+const transport=new Transport(1e12);
+transport.attach({state(){},frame(){},shared(){},releaseMappings(){},image(){},changed(){}});
+const note=transport.note.bind(transport);
+transport.note=text=>{notes.push(text);note(text)};
 const dialog=()=>document.querySelector('dialog.dialog');
 const button=(text)=>[...dialog().querySelectorAll('button')].find(node=>node.textContent.trim()===text);
 const DAY='C:\\data\\2026_10_27',ARCHIVE=`${DAY}\\scan.npz`,IMAGE=`${DAY}\\scan.png`;
@@ -40,7 +50,7 @@ try {
  await check('the picture beside the chosen archive is named alone, and Overwrite saves that archive told to',async()=>{
    answers.push({exists:[IMAGE],path:ARCHIVE},[IMAGE,ARCHIVE]);
    const saving=saveDataAs(transport,'data-1',SAVE);
-   await settle();
+   await arrive();
    assert(dialog()?.open,'no dialog');
    equal(dialog().querySelector('.dialog-title').textContent,'File already exists','title');
    equal(dialog().querySelector('.dialog-text').textContent,`scan.png\nis already in ${DAY}\n\nOverwrite it?`,'the file');
@@ -55,7 +65,7 @@ try {
  await check('Cancel sends nothing more and says nothing was saved',async()=>{
    answers.push({exists:[IMAGE],path:ARCHIVE});
    const saving=saveDataAs(transport,'data-1',SAVE);
-   await settle();
+   await arrive();
    button('Cancel').click();
    await saving;
    equal(requests.length,5,'nothing more sent');
@@ -66,7 +76,7 @@ try {
    const named={...SAVE,path:ARCHIVE};
    answers.push({exists:[IMAGE,ARCHIVE],path:ARCHIVE},[IMAGE,ARCHIVE]);
    const saving=saveDataAs(transport,'data-1',named);
-   await settle();
+   await arrive();
    equal(dialog().querySelector('.dialog-title').textContent,'Files already exist','title');
    equal(dialog().querySelector('.dialog-text').textContent,`scan.png\nscan.npz\nare already in ${DAY}\n\nOverwrite them?`,'the files');
    button('Overwrite').click();
