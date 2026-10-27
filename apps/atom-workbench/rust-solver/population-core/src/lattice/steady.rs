@@ -1,287 +1,288 @@
-//! Steady state on the folded lattice at one near order. The time-averaged
-//! populations are the diagonal of the central block of the null vector of
-//! A; the central trace row M = A + u v^T (u = I/n on the centre, v its
-//! trace) makes it the solution of M x = u (A x = 0, v^T x = 1 when it is
-//! unique).
+//! The steady pipeline: the t -> infinity time average of the populations.
 //!
-//! Right-preconditioned restarted GMRES with the dressed block
-//! preconditioner (fixed, so only the populations of P v_j are kept per step
-//! and the iterate is formed once per cycle). It stops when the populations
-//! and the requested groups of the Krylov iterate have stabilised (their
-//! change stays below the algebraic share of the tolerance for STABLE_STEPS
-//! consecutive steps) and the true relative residual, recomputed from the
-//! iterate, is below a guard. Both are needed: the population change alone
-//! can plateau for a few steps in slow directions while still 0.1 away from
-//! the answer, and the recursive GMRES residual can fall eight orders below
-//! the true one (the operator spans 1e-6 to 5e7 rad/us).
+//! 1. Near order k = START_ORDER: the primal solve of M x = u (`krylov`).
+//! 2. The error estimate in the primal's Krylov space (`estimate`): the
+//!    one-step source of the order-(k+1) shell, which carries the primal's
+//!    algebraic error too, and the third-order fold source, whose response
+//!    turns the fold ledger into population charges.
+//! 3. Accept when KAPPA (truncation + fold) <= POPULATION_TOLERANCE.
+//!    Otherwise the shell Gauss-Seidel correction when its contraction
+//!    q_2 = d_2 / d_1 < 1: GAUSS_SEIDEL_STEPS steps, remainder
+//!    q / (1 - q) d_last plus the order-(k+2) shell extrapolated as
+//!    Delta_k+1^2 / Delta_k (Delta_k = |p_k - p_k-1|, calibrated:
+//!    conservative 40-1000 times on the research cases). Else the next
+//!    order, warm-started from the corrected field.
 //!
-//! Fold charge: the ledger's generator-norm bounds become population charges
-//! through one sensitivity solve, M delta = s, on the largest remainder's own
-//! source s (the third-order term when the lattice has near couplings, else
-//! the fold itself): sensitivity = |p(delta)| / bound(s).
+//! The populations reported are those of the accepted field: the order-k
+//! primal, or its Gauss-Seidel correction.
 use super::*;
+use super::krylov::{self,KrylovOptions,KrylovTiming,System};
+use super::estimate::{Augmented,Shell};
 use super::operator::LatticeOperator;
-use super::preconditioner::{DenseDressed,DressedBatch};
-use super::ledger::{self,PopulationCharges,RemainderLedger};
-use crate::parallel::Execution;
+use super::preconditioner::{StructuredDiagnostics,StructuredDressed};
+use super::ledger::{self,KAPPA,POPULATION_TOLERANCE,PopulationCharges,RemainderLedger};
 
-const STABLE_STEPS:usize=3;
-/// Blocks per reduction chunk: fixed, so sums do not depend on threads.
-const VECTOR_CHUNK:usize=16;
-/// True relative residual at which step counts are compared with the
-/// reference runs (rtol 1e-10).
-const TIGHT_RESIDUAL:f64=1e-10;
-/// Sensitivity solve: populations stable to this fraction of the response,
-/// true relative residual below SENSITIVITY_GUARD.
-const SENSITIVITY_SHARE:f64=0.05;
-const SENSITIVITY_GUARD:f64=1e-6;
+pub const START_ORDER:usize=2;
+pub const MAXIMUM_ORDER:usize=4;
+/// Shell Gauss-Seidel steps when the correction is used.
+const GAUSS_SEIDEL_STEPS:usize=3;
 
-#[derive(Clone,Debug)]
-pub struct SteadyOptions{
-    /// Population-stability tolerance of the algebraic stop.
-    pub algebraic:f64,
-    /// Relative true-residual guard of the algebraic stop. Measured: a true
-    /// residual of 3e-7 left 1.8e-5 in the populations (two lasers +
-    /// tweezer, a 1e-6 /us Raman manifold); at 1e-8 every case is within
-    /// 1e-7 of its reference.
-    pub residual_guard:f64,
-    pub restart:usize,pub maximum_steps:usize,
-    /// Keep every step's residual and populations.
-    pub history:bool,
-    /// Krylov basis memory budget (bytes); the restart length shrinks to fit.
-    pub basis_bytes:usize,
-}
-impl Default for SteadyOptions{
-    fn default()->Self{
-        Self{algebraic:ledger::POPULATION_TOLERANCE*ledger::ALGEBRAIC_SHARE,residual_guard:1e-8,restart:80,maximum_steps:800,history:false,basis_bytes:1<<30}
-    }
-}
-#[derive(Clone,Debug)]
-pub struct StepRecord{pub residual:f64,pub change:f64,pub populations:Vec<f64>}
-#[derive(Clone,Debug,Default)]
-pub struct SolveTiming{pub setup_ms:f64,pub apply_ms:f64,pub precondition_ms:f64,pub orthogonalize_ms:f64,pub total_ms:f64}
-/// The populations' response to the largest remainder and the charges it
-/// implies.
+/// The fold remainders as population charges.
 #[derive(Clone,Debug)]
 pub struct FoldCharge{
-    /// "third-order" or "fold".
+    /// "third-order" or "fold": the source whose response is measured.
     pub source:&'static str,
-    /// |p(delta)| and the generator-norm bound of its source.
+    /// |p(delta)| of that source and its generator-norm bound.
     pub response:f64,pub source_bound:f64,
     pub charges:PopulationCharges,
-    pub steps:usize,pub milliseconds:f64,
 }
-pub struct OrderSolve{
-    pub order:usize,pub modes:Vec<Charge>,pub nu_max:f64,
-    /// Normalized populations and field (central trace 1).
-    pub populations:Vec<f64>,pub field:Vec<C>,
-    pub steps:usize,pub restarts:usize,pub restart:usize,pub stop:&'static str,
-    /// |u - M x| / |u|, |A x| / |x| and the central trace before normalization.
-    pub residual:f64,pub null_residual:f64,pub trace:f64,
+#[derive(Clone,Debug,Default)]
+pub struct AttemptTiming{pub setup_ms:f64,pub primal_ms:f64,pub estimate_ms:f64,pub correction_ms:f64,
+    /// The estimate's parts: shell operator and preconditioner, truncation
+    /// source, fold source, augmentation, checked solution.
+    pub estimate_parts:[f64;5],
+    pub krylov:KrylovTiming}
+/// One near order.
+#[derive(Clone,Debug)]
+pub struct Attempt{
+    pub order:usize,pub modes:usize,pub canonical:usize,pub nu_max:f64,
+    pub steps:usize,pub restarts:usize,pub stop:&'static str,pub residual:f64,
+    pub populations:Vec<f64>,
+    /// |delta p| of the truncation equation (one-step shell source with the
+    /// primal's algebraic error).
+    pub truncation:f64,
+    pub fold:Option<FoldCharge>,
+    /// Augmentation steps, shell applications, true residual of the
+    /// truncation equation.
+    pub augmentation:usize,pub shell_applications:usize,pub shell_modes:usize,pub truncation_residual:Option<f64>,
+    /// Per error equation: label, augmentation steps to R2, |delta p|.
+    pub equations:Vec<(&'static str,usize,f64)>,
+    /// Gauss-Seidel population steps d_i and the contraction q_2.
+    pub corrections:Vec<f64>,pub contraction:Option<f64>,
+    /// KAPPA (estimates); the accepted attempt's is the reported error.
+    pub claimed:f64,
     pub applications:usize,pub preconditions:usize,
     pub operator_work:usize,pub precondition_work:usize,pub regularized:usize,pub edges:[usize;2],
-    pub timing:SolveTiming,
     pub ledger:RemainderLedger,
-    pub charge:Option<FoldCharge>,
-    pub history:Vec<StepRecord>,
-    /// Step at which the GMRES residual first fell below TIGHT_RESIDUAL.
-    pub steps_to_tight_residual:Option<usize>,
+    pub timing:AttemptTiming,
+}
+#[derive(Clone,Copy,Debug,PartialEq)]
+pub enum Acceptance{
+    /// The primal at its order, error estimated.
+    Estimate,
+    /// The shell Gauss-Seidel correction of the primal.
+    Corrected,
+}
+pub struct SteadySolution{
+    pub order:usize,pub modes:Vec<Charge>,
+    /// Normalized field (central trace 1) and its populations.
+    pub field:Vec<C>,pub populations:Vec<f64>,
+    pub acceptance:Acceptance,
+    /// KAPPA (algebraic + truncation + fold): the reported population error.
+    pub estimated_error:f64,
+    /// |A x| / |x| of the returned field (rad/us); for a corrected field, of
+    /// the field with its shell on the order-(k+1) lattice.
+    pub null_residual:f64,
+    pub attempts:Vec<Attempt>,
+    pub dressed:StructuredDiagnostics,pub dressed_ms:f64,
 }
 
-/// Deterministic parallel vector kernels (fixed reduction chunks).
-struct Vectors{execution:Execution,d:usize}
-impl Vectors{
-    fn ranges(&self,length:usize)->Vec<(usize,usize)>{let w=VECTOR_CHUNK*self.d;(0..length.div_ceil(w)).map(|c|(c*w,((c+1)*w).min(length))).collect()}
-    fn dots(&self,basis:&[Vec<C>],w:&[C])->Vec<C>{
-        let parts=self.execution.map(self.ranges(w.len()),|(a,b)|basis.iter().map(|v|{let mut s=ZERO;for k in a..b{mul_add(&mut s,conj(v[k]),w[k]);}s}).collect::<Vec<C>>());
-        let mut out=vec![ZERO;basis.len()];for p in parts{for(o,v)in out.iter_mut().zip(p){add(o,v);}}out
-    }
-    fn norm(&self,w:&[C])->f64{
-        self.execution.map(self.ranges(w.len()),|(a,b)|w[a..b].iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>()).into_iter().sum::<f64>().sqrt()
-    }
-    /// w -= sum_i h_i basis_i.
-    fn subtract(&self,basis:&[Vec<C>],h:&[C],w:&mut[C])->Result<(),String>{
-        let d=self.d;let work=basis.len()*w.len();
-        self.execution.for_mode_chunks(w,d,work,crate::parallel::MINIMUM_WORK_PER_TASK,&mut Vec::<()>::new(),|first,chunk,_|{
-            for(v,&c)in basis.iter().zip(h){let c=C{re:-c.re,im:-c.im};for(t,&x)in chunk.iter_mut().zip(&v[first*d..]){mul_add(t,c,x);}}
-            Ok(())
-        })
-    }
+fn size(p:&[f64],groups:&[Vec<usize>])->f64{ledger::metric(p,&vec![0.;p.len()],groups)}
+fn shifted(p:&[f64],delta:&[f64])->Vec<f64>{p.iter().zip(delta).map(|(a,b)|a+b).collect()}
+
+/// The field on another mode set (zero on modes it does not have).
+fn embed(field:&[C],from:&[Charge],to:&[Charge],d:usize)->Vec<C>{
+    let index:BTreeMap<&Charge,usize>=to.iter().enumerate().map(|(i,q)|(q,i)).collect();
+    let mut out=vec![ZERO;to.len()*d];
+    for(k,q)in from.iter().enumerate(){if let Some(&t)=index.get(q){out[t*d..(t+1)*d].copy_from_slice(&field[k*d..(k+1)*d]);}}
+    out
 }
 
-/// y = M x = A x + u (v^T x) on the centre.
-fn apply_m(op:&mut LatticeOperator<'_>,watch:&[usize],x:&[C],y:&mut[C],clock:&mut f64)->Result<(),String>{
-    let start=Instant::now();op.apply(x,y)?;
-    let n=watch.len();let t=watch.iter().fold(ZERO,|s,&k|C{re:s.re+x[k].re,im:s.im+x[k].im});
-    for &k in watch{add(&mut y[k],scaled(t,1./n as f64));}
-    *clock+=start.elapsed().as_secs_f64()*1e3;Ok(())
-}
-fn precondition(pre:&mut DressedBatch<'_>,x:&[C],y:&mut[C],clock:&mut f64)->Result<(),String>{
-    let start=Instant::now();pre.apply(x,y)?;*clock+=start.elapsed().as_secs_f64()*1e3;Ok(())
-}
-
-/// When the Krylov iterate is accepted.
-struct Stop{
-    /// Populations normalized by the central trace (primal) or raw (a
-    /// response to a traceless source).
-    normalize:bool,
-    /// Stability tolerance: absolute, or relative to the populations' size.
-    tolerance:f64,relative:bool,
-    residual_guard:f64,
-}
-struct Krylov{x:Vec<C>,steps:usize,restarts:usize,restart:usize,stop:&'static str,history:Vec<StepRecord>,tight:Option<usize>,
-    timing:SolveTiming,applications:usize,preconditions:usize}
-
-fn populations(diagonal:&[C],normalize:bool)->Vec<f64>{
-    let t:f64=if normalize{diagonal.iter().map(|z|z.re).sum()}else{1.};diagonal.iter().map(|z|z.re/t).collect()
-}
-
-fn gmres(op:&mut LatticeOperator<'_>,pre:&mut DressedBatch<'_>,b:&[C],stop:&Stop,groups:&[Vec<usize>],options:&SteadyOptions,vectors:&Vectors)->Result<Krylov,String>{
-    let n=op.n;let d=n*n;let length=op.dimension();let c0=op.centre*d;
-    let watch:Vec<usize>=(0..n).map(|i|c0+i*n+i).collect();
-    let bnorm=vectors.norm(b);
-    let fit=(options.basis_bytes/(length*std::mem::size_of::<C>())).saturating_sub(2);
-    let restart=options.restart.min(fit).max(8);
-    let mut timing=SolveTiming::default();let(mut applications,mut preconditions)=(0,0);
-    let mut x=vec![ZERO;length];let(mut z,mut w)=(vec![ZERO;length],vec![ZERO;length]);
-    let mut history=Vec::new();let mut previous:Option<Vec<f64>>=None;let mut changes:Vec<f64>=Vec::new();
-    let(mut steps,mut restarts)=(0,0);let mut stopped:Option<&'static str>=None;let mut tight=None;
-    if bnorm==0.{return Ok(Krylov{x,steps,restarts,restart,stop:"zero-source",history,tight,timing,applications,preconditions});}
-    // r = b - M x, recomputed from x after every cycle: the recursive GMRES
-    // residual drifts from the true one (M spans 1e-6 to 5e7 rad/us), so a
-    // stop is accepted only on the true residual.
-    let mut r=b.to_vec();let mut last_true=1_f64;
-    loop{
-        let beta=vectors.norm(&r);
-        if beta<=1e-15*bnorm{stopped=Some("exact");break;}
-        let mut basis=vec![r.iter().map(|v|scaled(*v,1./beta)).collect::<Vec<C>>()];let mut rotated:Vec<Vec<C>>=Vec::new();
-        let(mut cs,mut sn)=(Vec::<C>::new(),Vec::<C>::new());let mut g=vec![C{re:beta,im:0.}];
-        let mut zdiag:Vec<Vec<C>>=Vec::new();let xdiag:Vec<C>=watch.iter().map(|&k|x[k]).collect();
-        let mut y=Vec::new();
-        for j in 0..restart{
-            precondition(pre,&basis[j],&mut z,&mut timing.precondition_ms)?;preconditions+=1;
-            zdiag.push(watch.iter().map(|&k|z[k]).collect());
-            apply_m(op,&watch,&z,&mut w,&mut timing.apply_ms)?;applications+=1;
-            let start=Instant::now();
-            let h1=vectors.dots(&basis,&w);vectors.subtract(&basis,&h1,&mut w)?;
-            let h2=vectors.dots(&basis,&w);vectors.subtract(&basis,&h2,&mut w)?;
-            let mut column:Vec<C>=h1.iter().zip(&h2).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
-            let hn=vectors.norm(&w);column.push(C{re:hn,im:0.});
-            timing.orthogonalize_ms+=start.elapsed().as_secs_f64()*1e3;
-            for i in 0..j{let(a,c)=(column[i],column[i+1]);
-                column[i]=ZERO;mul_add(&mut column[i],conj(cs[i]),a);mul_add(&mut column[i],conj(sn[i]),c);
-                let mut lower=ZERO;mul_add(&mut lower,C{re:-sn[i].re,im:-sn[i].im},a);mul_add(&mut lower,cs[i],c);column[i+1]=lower;}
-            let size=magnitude(column[j]).hypot(magnitude(column[j+1]));
-            let(c,s)=if size>0.{(scaled(column[j],1./size),scaled(column[j+1],1./size))}else{(ONE,ZERO)};
-            cs.push(c);sn.push(s);column[j]=C{re:size,im:0.};column.truncate(j+1);
-            let gj=g[j];g.push(mul(C{re:-s.re,im:-s.im},gj));g[j]=mul(conj(c),gj);
-            rotated.push(column);steps+=1;
-            let residual=magnitude(g[j+1])/bnorm;
-            if tight.is_none()&&residual<=TIGHT_RESIDUAL{tight=Some(steps);}
-            // y = R^-1 g, R upper triangular by columns.
-            y=vec![ZERO;j+1];
-            for i in(0..=j).rev(){let mut s=g[i];for l in i+1..=j{let v=mul(rotated[l][i],y[l]);s.re-=v.re;s.im-=v.im;}
-                let rii=rotated[i][i];let q=rii.re*rii.re+rii.im*rii.im;y[i]=C{re:(s.re*rii.re+s.im*rii.im)/q,im:(s.im*rii.re-s.re*rii.im)/q};}
-            let mut diagonal=xdiag.clone();for(k,zk)in zdiag.iter().enumerate(){for(t,&v)in diagonal.iter_mut().zip(zk){mul_add(t,y[k],v);}}
-            let current=populations(&diagonal,stop.normalize);
-            let change=previous.as_ref().map_or(f64::INFINITY,|p|ledger::metric(p,&current,groups));changes.push(change);
-            let scale=if stop.relative{current.iter().map(|v|v.abs()).fold(0.,f64::max)}else{1.};
-            if options.history{history.push(StepRecord{residual,change,populations:current.clone()});}
-            previous=Some(current);
-            let stable=changes.len()>=STABLE_STEPS&&changes[changes.len()-STABLE_STEPS..].iter().all(|&c|c<stop.tolerance*scale);
-            if stable&&residual<=stop.residual_guard{stopped=Some("populations-stable");}
-            else if hn==0.{stopped=Some("exact");}
-            else if residual<=1e-15{stopped=Some("residual-at-roundoff");}
-            if stopped.is_some()||steps>=options.maximum_steps{break;}
-            if j+1<restart{let next:Vec<C>=w.iter().map(|v|scaled(*v,1./hn)).collect();basis.push(next);}
-        }
-        // x += P (V y).
-        let mut combination=vec![ZERO;length];
-        for(v,&c)in basis.iter().zip(&y){for(t,&a)in combination.iter_mut().zip(v){mul_add(t,c,a);}}
-        precondition(pre,&combination,&mut z,&mut timing.precondition_ms)?;preconditions+=1;
-        for(a,c)in x.iter_mut().zip(&z){add(a,*c);}
-        apply_m(op,&watch,&x,&mut w,&mut timing.apply_ms)?;applications+=1;
-        for((a,&bb),c)in r.iter_mut().zip(b).zip(&w){*a=C{re:bb.re-c.re,im:bb.im-c.im};}
-        let true_residual=vectors.norm(&r)/bnorm;
-        if stopped.is_some(){
-            if true_residual<=stop.residual_guard{break;}
-            // Restarting no longer reduces the true residual: its floor.
-            if true_residual>0.5*last_true{stopped=Some("true-residual-floor");break;}
-            stopped=None;
-        }
-        if steps>=options.maximum_steps{return Err(format!("Lattice steady GMRES did not stabilise in {steps} steps (true residual {true_residual:e})"));}
-        last_true=true_residual;restarts+=1;
-    }
-    Ok(Krylov{x,steps,restarts,restart,stop:stopped.unwrap_or("maximum"),history,tight,timing,applications,preconditions})
-}
-
-/// The steady state on the near ball of `order`, with its fold charge when
-/// `charge` is set.
-pub fn solve_order(prepared:&LatticePrepared,dressed:&DenseDressed,order:usize,groups:&[Vec<usize>],options:&SteadyOptions,charge:bool)->Result<OrderSolve,String>{
+/// The steady state with its estimated error.
+pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>])->Result<SteadySolution,String>{
     let clock=Instant::now();
-    let n=prepared.generator.n;let d=n*n;
-    let vectors=Vectors{execution:Execution::new()?,d};
-    let modes=prepared.modes(order)?;
-    let mut op=LatticeOperator::new(prepared,&modes)?;
-    let ledger=RemainderLedger::new(&prepared.plan,op.nu_max(),prepared.fold.dropped())?;
-    if ledger.expansion_parameter>ledger::EXPANSION_LIMIT{
-        return Err(format!("Static fold expansion parameter {:e} above {:e} at order {order}",ledger.expansion_parameter,ledger::EXPANSION_LIMIT));}
-    let mut batch=dressed.batch(&op.nu,op.centre)?;
-    let setup_ms=clock.elapsed().as_secs_f64()*1e3;
-    let length=op.dimension();let c0=op.centre*d;let watch:Vec<usize>=(0..n).map(|i|c0+i*n+i).collect();
-    let mut b=vec![ZERO;length];for &k in &watch{b[k]=C{re:1./n as f64,im:0.};}
-    let primal=Stop{normalize:true,tolerance:options.algebraic,relative:false,residual_guard:options.residual_guard};
-    let krylov=gmres(&mut op,&mut batch,&b,&primal,groups,options,&vectors)?;
-    let mut timing=krylov.timing;timing.setup_ms=setup_ms;
-    let(mut applications,mut preconditions)=(krylov.applications,krylov.preconditions);
-    let x=krylov.x;let mut w=vec![ZERO;length];
-    apply_m(&mut op,&watch,&x,&mut w,&mut timing.apply_ms)?;applications+=1;
-    let residual=b.iter().zip(&w).fold(0_f64,|s,(a,c)|s.hypot(magnitude(C{re:a.re-c.re,im:a.im-c.im})))/vectors.norm(&b);
-    let start=Instant::now();op.apply(&x,&mut w)?;timing.apply_ms+=start.elapsed().as_secs_f64()*1e3;applications+=1;
-    let null_residual=vectors.norm(&w)/vectors.norm(&x).max(f64::MIN_POSITIVE);
-    let trace:f64=watch.iter().map(|&k|x[k].re).sum();
-    if !(trace.is_finite()&&trace.abs()>0.){return Err("Lattice steady solution has no central trace".into());}
-    let field:Vec<C>=x.iter().map(|v|scaled(*v,1./trace)).collect();
-    let populations:Vec<f64>=watch.iter().map(|&k|field[k].re).collect();
-    timing.total_ms=clock.elapsed().as_secs_f64()*1e3-setup_ms;
-    let fold_charge=if charge&&!prepared.plan.far().is_empty(){
+    let dressed=StructuredDressed::new(prepared)?;let dressed_ms=clock.elapsed().as_secs_f64()*1e3;
+    let n=prepared.generator.n;let d=n*n;let options=KrylovOptions::default();
+    let mut attempts:Vec<Attempt>=Vec::new();
+    let mut warm:Option<(Vec<Charge>,Vec<C>)>=None;
+    for order in START_ORDER..=MAXIMUM_ORDER{
         let start=Instant::now();
-        let third=prepared.fold.third_order_source(&op,&field)?;
-        let(source,label,bound)=if ledger.third_order>0.&&third.iter().any(|z|nonzero(*z)){(third,"third-order",ledger.third_order)}
-            else{(op.apply_fold(&field)?,"fold",ledger.fold)};
-        let stop=Stop{normalize:false,tolerance:SENSITIVITY_SHARE,relative:true,residual_guard:SENSITIVITY_GUARD};
-        let response=gmres(&mut op,&mut batch,&source,&stop,groups,options,&vectors)?;
-        applications+=response.applications;preconditions+=response.preconditions;
-        let delta:Vec<f64>=watch.iter().map(|&k|response.x[k].re).collect();
-        let size=ledger::metric(&delta,&vec![0.;n],groups);
-        let sensitivity=if bound>0.{size/bound}else{0.};
-        Some(FoldCharge{source:label,response:size,source_bound:bound,charges:PopulationCharges::new(&ledger,sensitivity),
-            steps:response.steps,milliseconds:start.elapsed().as_secs_f64()*1e3})
-    }else{None};
-    Ok(OrderSolve{order,modes,nu_max:op.nu_max(),populations,field,steps:krylov.steps,restarts:krylov.restarts,restart:krylov.restart,stop:krylov.stop,
-        residual,null_residual,trace,applications,preconditions,operator_work:op.work,precondition_work:batch.work,regularized:batch.regularized,
-        edges:op.edge_counts,timing,ledger,charge:fold_charge,history:krylov.history,steps_to_tight_residual:krylov.tight})
+        let modes=prepared.modes(order)?;
+        let op=LatticeOperator::new(prepared,&modes)?;
+        let ledger=RemainderLedger::new(&prepared.plan,op.nu_max(),prepared.fold.dropped())?;
+        if ledger.expansion_parameter>ledger::EXPANSION_LIMIT{
+            return Err(format!("Static fold expansion parameter {:e} above {:e} at near order {order}",ledger.expansion_parameter,ledger::EXPANSION_LIMIT));}
+        let(nu_max,canonical,operator_work,edges)=(op.nu_max(),op.canonical_count(),op.work,op.edge_counts);
+        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre))?;
+        let(precondition_work,regularized)=(batch.work,batch.regularized);
+        let mut system=System::new(op,&mut batch)?;
+        let mut timing=AttemptTiming{setup_ms:start.elapsed().as_secs_f64()*1e3,..Default::default()};
+        // Primal.
+        let start=Instant::now();
+        let b=system.source();let x0=warm.take().map(|(from,field)|embed(&field,&from,&modes,d));
+        let primal=krylov::gmres(&mut system,&b,x0,groups,&options)?;
+        let trace:f64=system.watch.iter().map(|&k|primal.x[k].re).sum();
+        if !(trace.is_finite()&&trace.abs()>0.){return Err("Lattice steady solution has no central trace".into());}
+        let field:Vec<C>=primal.x.iter().map(|v|scaled(*v,1./trace)).collect();
+        let populations=system.populations(&field);
+        timing.primal_ms=start.elapsed().as_secs_f64()*1e3;
+        // Estimate.
+        let start=Instant::now();
+        let mut augmented=Augmented::new(primal.arnoldi);
+        let mut parts=[0.;5];let mut lap=Instant::now();
+        let mut shell=Shell::new(prepared,&dressed,&system.op,order)?;
+        let mut split=|k:usize,parts:&mut[f64;5]|{parts[k]=lap.elapsed().as_secs_f64()*1e3;lap=Instant::now();};
+        split(0,&mut parts);
+        let(source,mut shell_field)=match &mut shell{
+            Some(s)=>s.source(&field)?,
+            None=>{let mut w=vec![ZERO;system.length()];system.op.apply(&field,&mut w)?;system.applications+=1;
+                (w.into_iter().map(|v|C{re:-v.re,im:-v.im}).collect(),Vec::new())}};
+        let mut truncation=augmented.equation(&system,"truncation",source)?;
+        split(1,&mut parts);
+        let fold_source=if prepared.plan.far().is_empty(){None}else{
+            let third=prepared.fold.third_order_source(&system.op,&field)?;
+            Some(if ledger.third_order>0.&&third.iter().any(|z|nonzero(*z)){(third,"third-order",ledger.third_order)}
+                else{(system.op.apply_fold(&field)?,"fold",ledger.fold)})};
+        let mut fold=match fold_source{Some((s,label,bound))=>Some((augmented.equation(&system,label,s)?,bound)),None=>None};
+        split(2,&mut parts);
+        match &mut fold{
+            Some((eq,_))=>augmented.solve(&mut system,&mut[&mut truncation,eq],groups)?,
+            None=>augmented.solve(&mut system,&mut[&mut truncation],groups)?,
+        }
+        split(3,&mut parts);
+        let delta=augmented.checked_solution(&mut system,&mut truncation,groups)?;
+        split(4,&mut parts);
+        let mut equations=vec![(truncation.label,truncation.stable_at.unwrap_or(truncation.steps()),size(truncation.estimate(),groups))];
+        if let Some((eq,_))=&fold{equations.push((eq.label,eq.stable_at.unwrap_or(eq.steps()),size(eq.estimate(),groups)));}
+        let estimate=truncation.estimate().to_vec();
+        let fold=fold.map(|(eq,bound)|{let response=size(eq.estimate(),groups);let sensitivity=if bound>0.{response/bound}else{0.};
+            FoldCharge{source:eq.label,response,source_bound:bound,charges:PopulationCharges::new(&ledger,sensitivity)}});
+        let fold_total=fold.as_ref().map_or(0.,|f|f.charges.total());
+        let truncation_size=size(&estimate,groups);
+        timing.estimate_ms=start.elapsed().as_secs_f64()*1e3;timing.estimate_parts=parts;
+        let mut attempt=Attempt{order,modes:modes.len(),canonical,nu_max,steps:primal.steps,restarts:primal.restarts,stop:primal.stop,residual:primal.residual,
+            populations:populations.clone(),truncation:truncation_size,fold,augmentation:augmented.steps,
+            shell_applications:shell.as_ref().map_or(0,|s|s.applications),shell_modes:shell.as_ref().map_or(0,|s|s.modes.len()),
+            truncation_residual:truncation.true_residual,equations,corrections:vec![],contraction:None,claimed:KAPPA*(truncation_size+fold_total),
+            applications:0,preconditions:0,operator_work,precondition_work,regularized,edges,ledger,timing};
+        if attempt.claimed<=POPULATION_TOLERANCE{
+            let residual=null_residual(&mut system,&field)?;finish(&mut attempt,&system);let estimated_error=attempt.claimed;attempts.push(attempt);
+            return Ok(SteadySolution{order,modes,field,populations,acceptance:Acceptance::Estimate,estimated_error,null_residual:residual,attempts,dressed:dressed.diagnostics.clone(),dressed_ms});
+        }
+        // Shell Gauss-Seidel correction.
+        let mut corrected:Vec<C>=field.iter().zip(&delta).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
+        if let Some(shell)=&mut shell{
+            let start=Instant::now();
+            let mut previous=shifted(&populations,&estimate);let mut steps=vec![ledger::metric(&previous,&populations,groups)];
+            let mut converging=true;
+            for _ in 1..GAUSS_SEIDEL_STEPS{
+                let(source,next)=shell.gauss_seidel(&field,&corrected,&shell_field)?;shell_field=next;
+                let mut eq=augmented.equation(&system,"correction",source)?;augmented.solve(&mut system,&mut[&mut eq],groups)?;
+                let delta=augmented.checked_solution(&mut system,&mut eq,groups)?;
+                corrected=field.iter().zip(&delta).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
+                let current=shifted(&populations,eq.estimate());
+                steps.push(ledger::metric(&current,&previous,groups));previous=current;
+                if steps.len()==2{let q=steps[1]/steps[0].max(f64::MIN_POSITIVE);attempt.contraction=Some(q);if !(q<1.){converging=false;break;}}
+            }
+            attempt.corrections=steps.clone();attempt.augmentation=augmented.steps;attempt.shell_applications=shell.applications;
+            attempt.timing.correction_ms=start.elapsed().as_secs_f64()*1e3;
+            if converging{
+                let q=steps.windows(2).map(|w|w[1]/w[0].max(f64::MIN_POSITIVE)).fold(0.,f64::max);
+                let remainder=q/(1.-q)*steps[steps.len()-1];
+                let next_shell=ledger::metric(&previous,&populations,groups);
+                // Delta_k from the previous order's primal (order k-1 solved here when k is the start).
+                let lower=match attempts.last(){Some(a)=>a.populations.clone(),None=>lower_order(prepared,&dressed,order-1,groups,&options)?};
+                let shell_k=ledger::metric(&populations,&lower,groups);
+                let extrapolated=if shell_k>0.{next_shell*next_shell/shell_k}else{f64::INFINITY};
+                let claimed=KAPPA*(remainder+extrapolated+fold_total);
+                if claimed<=POPULATION_TOLERANCE{
+                    let trace:f64=system.watch.iter().map(|&k|corrected[k].re).sum();
+                    let field:Vec<C>=corrected.iter().map(|v|scaled(*v,1./trace)).collect();
+                    let populations=system.populations(&field);
+                    let shell_scaled:Vec<C>=shell_field.iter().map(|v|scaled(*v,1./trace)).collect();let residual=shell.residual(&field,&shell_scaled)?;
+                    attempt.claimed=claimed;finish(&mut attempt,&system);attempts.push(attempt);
+                    return Ok(SteadySolution{order,modes,field,populations,acceptance:Acceptance::Corrected,estimated_error:claimed,null_residual:residual,attempts,dressed:dressed.diagnostics.clone(),dressed_ms});
+                }
+            }
+            // The next order starts from the corrected field and its shell.
+            let next=prepared.modes(order+1)?;
+            let mut start_field=embed(&corrected,&modes,&next,d);
+            for(k,&s)in shell.modes.iter().enumerate(){start_field[s*d..(s+1)*d].copy_from_slice(&shell_field[k*d..(k+1)*d]);}
+            let trace:f64=(0..n).map(|i|start_field[shell.op.centre*d+i*n+i].re).sum();
+            warm=Some((next,start_field.iter().map(|v|scaled(*v,1./trace)).collect()));
+        }else{
+            finish(&mut attempt,&system);attempts.push(attempt);
+            return Err(format!("Lattice steady state not accepted: estimated error {:e} above {POPULATION_TOLERANCE} with no near shell to add",KAPPA*(truncation_size+fold_total)));
+        }
+        finish(&mut attempt,&system);attempts.push(attempt);
+    }
+    let last=attempts.last().map_or(f64::NAN,|a|a.claimed);
+    Err(format!("Lattice steady state not accepted up to near order {MAXIMUM_ORDER} (estimated error {last:e})"))
+}
+
+fn finish(attempt:&mut Attempt,system:&System<'_,'_>){
+    attempt.applications=system.applications;attempt.preconditions=system.preconditions;attempt.timing.krylov=system.timing.clone();
+}
+/// |A x| / |x|.
+fn null_residual(system:&mut System<'_,'_>,x:&[C])->Result<f64,String>{
+    let mut w=vec![ZERO;x.len()];system.op.apply(x,&mut w)?;Ok(system.vectors.norm(&w)/system.vectors.norm(x).max(f64::MIN_POSITIVE))
+}
+/// Populations of the order-k primal alone (for the shell ratio).
+fn lower_order(prepared:&LatticePrepared,dressed:&StructuredDressed,order:usize,groups:&[Vec<usize>],options:&KrylovOptions)->Result<Vec<f64>,String>{
+    let modes=prepared.modes(order)?;let op=LatticeOperator::new(prepared,&modes)?;
+    let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre))?;
+    let mut system=System::new(op,&mut batch)?;let b=system.source();
+    let primal=krylov::gmres(&mut system,&b,None,groups,options)?;
+    let p=system.populations(&primal.x);let t:f64=p.iter().sum();Ok(p.iter().map(|v|v/t).collect())
 }
 
 #[cfg(test)]
 mod tests{
     use super::*;
-    use super::super::tests::{fixture,prepared};
+    use super::super::tests::{fixture,prepared,explicit_matrix,dense_steady};
+    fn tight()->KrylovOptions{KrylovOptions{algebraic:1e-13,residual_guard:1e-13,..KrylovOptions::default()}}
+    fn primal(p:&LatticePrepared,order:usize)->(Vec<f64>,Vec<C>,Vec<Charge>){
+        let dressed=StructuredDressed::new(p).unwrap();let modes=p.modes(order).unwrap();
+        let op=LatticeOperator::new(p,&modes).unwrap();
+        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre)).unwrap();
+        let mut system=System::new(op,&mut batch).unwrap();let b=system.source();
+        let k=krylov::gmres(&mut system,&b,None,&[vec![0,1],vec![2,3]],&tight()).unwrap();
+        let t:f64=system.watch.iter().map(|&i|k.x[i].re).sum();let x:Vec<C>=k.x.iter().map(|v|scaled(*v,1./t)).collect();
+        (system.populations(&x),x,modes)
+    }
     #[test]
-    fn lattice_steady_state_is_the_null_vector_of_the_dense_lattice(){
+    fn lattice_primal_is_the_null_vector_of_the_dense_lattice(){
         // Against a dense LU of the same truncated, folded lattice with the
-        // trace row: the algebra only (truncation and fold are the same).
+        // trace row: the algebra only.
         let f=fixture();let p=prepared(&f);let groups=vec![vec![0,1],vec![2,3]];
-        let dressed=DenseDressed::new(&p).unwrap();
-        let options=SteadyOptions{algebraic:1e-12,residual_guard:1e-13,..SteadyOptions::default()};
-        let s=solve_order(&p,&dressed,2,&groups,&options,true).unwrap();
-        let op=LatticeOperator::new(&p,&s.modes).unwrap();
-        let exact=super::super::tests::dense_steady(&p,&op.dense(),op.centre,4);
-        let error=ledger::metric(&exact,&s.populations,&groups);
-        assert!(error<1e-10,"{error:e}, stop {}",s.stop);
-        assert!((s.populations.iter().sum::<f64>()-1.).abs()<1e-12);
-        let charge=s.charge.unwrap();assert_eq!(charge.source,"third-order");
-        assert!(charge.charges.sensitivity>0.&&charge.charges.total().is_finite());
+        let(populations,_,modes)=primal(&p,2);
+        let op=LatticeOperator::new(&p,&modes).unwrap();
+        let exact=dense_steady(&p,&op.dense(),op.centre,4);
+        let error=ledger::metric(&exact,&populations,&groups);
+        assert!(error<1e-10,"{error:e}");
+        assert!((populations.iter().sum::<f64>()-1.).abs()<1e-12);
+    }
+    #[test]
+    fn lattice_truncation_estimate_follows_the_next_order(){
+        // The GCRO estimate of the order-1 -> 2 shell against the tight
+        // order-2 solve (the nested k vs k+1 comparison, test-only).
+        let f=fixture();let p=prepared(&f);let groups=vec![vec![0,1],vec![2,3]];
+        let dressed=StructuredDressed::new(&p).unwrap();let modes=p.modes(1).unwrap();
+        let op=LatticeOperator::new(&p,&modes).unwrap();
+        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre)).unwrap();
+        let mut system=System::new(op,&mut batch).unwrap();let b=system.source();
+        let k=krylov::gmres(&mut system,&b,None,&groups,&tight()).unwrap();
+        let t:f64=system.watch.iter().map(|&i|k.x[i].re).sum();let x:Vec<C>=k.x.iter().map(|v|scaled(*v,1./t)).collect();
+        let pk=system.populations(&x);
+        let mut augmented=Augmented::new(k.arnoldi);
+        let mut shell=Shell::new(&p,&dressed,&system.op,1).unwrap().unwrap();
+        let(source,_)=shell.source(&x).unwrap();
+        let mut eq=augmented.equation(&system,"truncation",source).unwrap();
+        augmented.solve(&mut system,&mut[&mut eq],&groups).unwrap();
+        let estimate=size(eq.estimate(),&groups);
+        let(next,_,_)=primal(&p,2);let actual=ledger::metric(&next,&pk,&groups);
+        assert!(augmented.steps>=2);
+        assert!(estimate/actual>0.5&&estimate/actual<4.,"estimate {estimate:e}, actual {actual:e}");
     }
     #[test]
     fn lattice_fold_charge_covers_the_explicit_first_far_shell(){
@@ -289,16 +290,14 @@ mod tests{
         // couplings between far modes included): the difference is the fold
         // remainder, and the charged bound must cover it.
         let f=fixture();let p=prepared(&f);let n=4;let groups=vec![vec![0,1],vec![2,3]];
-        let dressed=DenseDressed::new(&p).unwrap();
-        let options=SteadyOptions{algebraic:1e-12,residual_guard:1e-13,..SteadyOptions::default()};
-        let s=solve_order(&p,&dressed,2,&groups,&options,true).unwrap();
-        // Every first-shell far charge the ball reaches (the 2003 drive moves the
-        // near index by one), near couplings between them included.
-        let charges:Vec<Charge>=(-1..=1).flat_map(|b:i32|{let reach=if b==0{2}else{3};(-reach..=reach).map(move|a|vec![a,b])}).collect();
-        let(matrix,centre)=super::super::tests::explicit_matrix(&p,&charges);
-        let explicit=super::super::tests::dense_steady(&p,&matrix,centre,n);
-        let actual=ledger::metric(&explicit,&s.populations,&groups);
-        let charged=s.charge.unwrap().charges.total();
-        assert!(actual<=charged,"actual fold remainder {actual:e} above its charge {charged:e}");
+        let s=solve(&p,&groups).unwrap();
+        let(folded,_,_)=primal(&p,s.order);
+        let charges:Vec<Charge>=(-1..=1).flat_map(|b:i32|{let reach=s.order as i32+if b==0{0}else{1};(-reach..=reach).map(move|a|vec![a,b])}).collect();
+        let(matrix,centre)=explicit_matrix(&p,&charges);
+        let explicit=dense_steady(&p,&matrix,centre,n);
+        let actual=ledger::metric(&explicit,&folded,&groups);
+        let fold=s.attempts.last().unwrap().fold.clone().unwrap();
+        assert_eq!(fold.source,"third-order");
+        assert!(actual<=fold.charges.total(),"actual fold remainder {actual:e} above its charge {:e}",fold.charges.total());
     }
 }

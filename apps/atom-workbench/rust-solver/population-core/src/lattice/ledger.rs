@@ -22,17 +22,17 @@
 //!
 //! Population charge = bound x sensitivity, where the sensitivity is the
 //! steady population response per unit generator norm, measured on the
-//! largest remainder's own source (`steady`): the third-order term when near
-//! couplings exist, else the fold itself.
+//! largest remainder's own source (an error equation, `estimate`): the
+//! third-order term when near couplings exist, else the fold itself.
 use super::*;
 use super::classification::{HarmonicPlan,Treatment};
 
 /// The population tolerance: absolute, on the probability scale, over every
 /// state and requested group. It is fixed; no other accuracy is served.
 pub const POPULATION_TOLERANCE:f64=5e-3;
-/// Estimate safety factor of the steady acceptance: kappa (estimate +
-/// charges) <= POPULATION_TOLERANCE.
-pub const KAPPA:f64=1.25;
+/// Safety factor of an acceptance: kappa (algebraic + truncation + fold
+/// estimates) <= POPULATION_TOLERANCE.
+pub const KAPPA:f64=1.5;
 /// Share of the tolerance left to the algebraic (Krylov) error.
 pub const ALGEBRAIC_SHARE:f64=1./20.;
 /// Largest accepted static-expansion parameter max |nu_q| ||D_s^-1||.

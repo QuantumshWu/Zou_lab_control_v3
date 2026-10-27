@@ -17,10 +17,12 @@
 //! folded) applies them on a lattice field.
 //!
 //! Storage: each K_t^(o) is its absorbable part A X + X B (n x n left/right
-//! factors, the least-squares projection) plus the rest, a CSR matrix of the
-//! entries above ENTRY_FLOOR times its largest entry. Population rows are
-//! never dropped, so the stored fold stays exactly trace preserving; the
-//! dropped entries' largest row sum is charged.
+//! factors, the least-squares projection) plus the rest, stored by sectors
+//! (GG, GE, EG, EE of the output and input elements): a sector pair that is
+//! filled is a dense block applied by GEMM, the scattered entries of the
+//! others a CSR remainder above ENTRY_FLOOR times the largest entry.
+//! Population rows are never dropped, so the stored fold stays exactly trace
+//! preserving; the dropped entries' largest row sum is charged.
 use super::*;
 use super::classification::HarmonicPlan;
 use super::operator::LatticeOperator;
@@ -31,10 +33,14 @@ use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 const EIGEN_CONDITION_LIMIT:f64=1e4;
 /// Relative residual of a structured solve above which it is refined once.
 const REFINE_RESIDUAL:f64=1e-14;
-/// Rest entries below this fraction of a target's largest entry are dropped
-/// (and charged). The dark states amplify dropped coherence entries: at 1e-9
-/// probe + tweezer populations move by 1e-4, at 1e-12 by 3e-8.
+/// Sparse-remainder entries below this fraction of a target's largest entry
+/// are dropped (and charged). The dark states amplify dropped coherence
+/// entries: at 1e-9 probe + tweezer populations move by 1e-4, at 1e-12 by
+/// 3e-8. Dense sector blocks drop nothing.
 const ENTRY_FLOOR:f64=1e-12;
+/// A sector pair with at least this share of its entries above the floor is
+/// stored as a dense block.
+const DENSE_FILL:f64=0.2;
 const MINUS_ONE:C=C{re:-1.,im:0.};
 
 /// Row-major sparse d x d matrix.
@@ -55,10 +61,24 @@ impl Csr{
     }
 }
 
+/// A dense sector block: rows x cols of the d x d matrix (column-major).
+pub struct DenseSector{pub rows:Vec<u32>,pub cols:Vec<u32>,pub values:Vec<C>}
+/// A fold rest: dense sector blocks plus a sparse remainder.
+#[derive(Default)]
+pub struct Rest{pub blocks:Vec<DenseSector>,pub sparse:Csr}
+impl Rest{
+    /// Stored entries (multiply-adds per source block).
+    pub fn stored(&self)->usize{self.blocks.iter().map(|b|b.values.len()).sum::<usize>()+self.sparse.nonzeros()}
+    pub fn dense_into(&self,d:usize,s:C,out:&mut[C]){
+        for b in &self.blocks{for(c,&col)in b.cols.iter().enumerate(){for(r,&row)in b.rows.iter().enumerate(){
+            add(&mut out[row as usize*d+col as usize],mul(s,b.values[r+b.rows.len()*c]));}}}
+        self.sparse.dense_into(d,s,out);
+    }
+}
 /// One stored fold target: K_t^(o) X = left[o] X + X right[o] + rest[o] X.
 pub struct StoredFold{
     pub charge:Charge,pub nu:f64,
-    pub left:[Vec<C>;2],pub right:[Vec<C>;2],pub rest:[Csr;2],
+    pub left:[Vec<C>;2],pub right:[Vec<C>;2],pub rest:[Rest;2],
     /// Largest row sum of the dropped rest entries.
     pub dropped:[f64;2],
     /// Frobenius norms: whole K, absorbed part, rest.
@@ -79,6 +99,8 @@ pub struct FoldDiagnostics{
     /// Largest relative residual of a structured solve before / after refinement.
     pub solve_residual:f64,pub refined_residual:f64,pub refined:usize,
     pub milliseconds:f64,
+    /// Milliseconds: the far solves (factors and columns), the storage.
+    pub phase_ms:[f64;2],
 }
 pub struct FoldLibrary{
     pub targets:Vec<StoredFold>,
@@ -94,7 +116,7 @@ pub struct FoldLibrary{
 /// row-major. Row-major data are column-major transposes, so
 /// Z_k^T = B^T Y_k^T A^T: one GEMM with B^T on the blocks side by side, one
 /// with A^T on the blocks stacked.
-fn sandwich_batch(gemm:&ComplexGemm<'_>,n:usize,a:&[C],b:&[C],blocks:&mut[C],m:usize,stack:&mut Vec<C>)->Result<(),String>{
+pub(crate) fn sandwich_batch(gemm:&ComplexGemm<'_>,n:usize,a:&[C],b:&[C],blocks:&mut[C],m:usize,stack:&mut Vec<C>)->Result<(),String>{
     let d=n*n;grow(stack,d*m);let stack=&mut stack[..d*m];
     gemm.multiply(n,n*m,n,ONE,b,n,blocks,n,ZERO,stack,n)?;
     for k in 0..m{for j in 0..n{for i in 0..n{blocks[(i+n*k)+n*m*j]=stack[i+n*(j+n*k)];}}}
@@ -102,9 +124,10 @@ fn sandwich_batch(gemm:&ComplexGemm<'_>,n:usize,a:&[C],b:&[C],blocks:&mut[C],m:u
     for k in 0..m{for j in 0..n{for i in 0..n{blocks[i+n*j+d*k]=stack[(i+n*k)+n*m*j];}}}
     Ok(())
 }
-fn transpose(a:&[C],n:usize)->Vec<C>{(0..n*n).map(|k|a[(k%n)*n+k/n]).collect()}
+pub(crate) fn transpose(a:&[C],n:usize)->Vec<C>{(0..n*n).map(|k|a[(k%n)*n+k/n]).collect()}
 fn adjoint(a:&[C],n:usize)->Vec<C>{transpose(a,n).into_iter().map(conj).collect()}
-fn frobenius(a:&[C])->f64{a.iter().fold(0_f64,|s,z|s.hypot(magnitude(*z)))}
+fn frobenius(a:&[C])->f64{a.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt()}
+#[inline]fn squared(z:C)->f64{z.re*z.re+z.im*z.im}
 fn one_norm(a:&[C],n:usize)->f64{(0..n).map(|j|(0..n).map(|i|magnitude(a[i*n+j])).sum::<f64>()).fold(0.,f64::max)}
 /// Inverse of a square complex matrix (any consistent major order).
 pub(crate) fn inverse(lapack:&Lapack,a:&[C],n:usize)->Result<Vec<C>,String>{
@@ -112,6 +135,18 @@ pub(crate) fn inverse(lapack:&Lapack,a:&[C],n:usize)->Result<Vec<C>,String>{
     lapack.complex_solve_matrix_factored(&lu,&pivots,&identity,n)
 }
 
+/// Eigenframe of a row-major n x n matrix m = P diag(values) P^-1: the
+/// values, row-major P and P^-1, a condition bound |P|_1 |P^-1|_1 and the
+/// relative reconstruction error.
+pub(crate) fn eigen_frame(lapack:&Lapack,m:&[C],n:usize)->Result<(Vec<C>,Vec<C>,Vec<C>,f64,f64),String>{
+    // Column-major data of m^T is m's row-major data; we need m itself.
+    let(values,vectors)=lapack.complex_eigen_right(&transpose(m,n),n)?;
+    let p=transpose(&vectors,n);let pinv=inverse(lapack,&p,n)?;
+    let condition=one_norm(&p,n)*one_norm(&pinv,n);
+    let mut recon=vec![ZERO;n*n];
+    for i in 0..n{for j in 0..n{let mut s=ZERO;for k in 0..n{mul_add(&mut s,mul(p[i*n+k],values[k]),pinv[k*n+j]);}recon[i*n+j]=C{re:s.re-m[i*n+j].re,im:s.im-m[i*n+j].im};}}
+    Ok((values,p,pinv,condition,frobenius(&recon)/frobenius(m).max(f64::MIN_POSITIVE)))
+}
 enum Reduced{Eigen{lambda:Vec<C>,mu:Vec<C>},Schur{ta:Vec<C>,tb:Vec<C>}}
 /// The structured inverse of L0 - z (see the module documentation).
 pub struct ShiftedL0{
@@ -141,15 +176,7 @@ impl ShiftedL0{
         let rank=positions.len();
         let mut dense=vec![ZERO;d*d];r0.dense_into(n,ONE,&mut dense);
         let mut v=vec![ZERO;rank*d];for(k,&p)in positions.iter().enumerate(){for c in 0..d{v[k+rank*c]=dense[p*d+c];}}
-        let eigen=|m:&[C]|->Result<(Vec<C>,Vec<C>,Vec<C>,f64,f64),String>{
-            // Column-major data of m^T is m's row-major data; we need m itself.
-            let(values,vectors)=lapack.complex_eigen_right(&transpose(m,n),n)?;
-            let p=transpose(&vectors,n);let pinv=inverse(lapack,&p,n)?;
-            let condition=one_norm(&p,n)*one_norm(&pinv,n);
-            let mut recon=vec![ZERO;d];
-            for i in 0..n{for j in 0..n{let mut s=ZERO;for k in 0..n{mul_add(&mut s,mul(p[i*n+k],values[k]),pinv[k*n+j]);}recon[i*n+j]=C{re:s.re-m[i*n+j].re,im:s.im-m[i*n+j].im};}}
-            Ok((values,p,pinv,condition,frobenius(&recon)/frobenius(m).max(f64::MIN_POSITIVE)))
-        };
+        let eigen=|m:&[C]|eigen_frame(lapack,m,n);
         let frames=match(eigen(&nl),eigen(&nr)){
             (Ok((lambda,p,pinv,ca,ra)),Ok((mu,q,qinv,cb,rb)))if ca*cb<=EIGEN_CONDITION_LIMIT&&ra.max(rb)<=1e-12=>
                 Some((pinv,q,p,qinv,Reduced::Eigen{lambda,mu},ca*cb)),
@@ -271,22 +298,35 @@ pub(crate) fn absorbable(k:&[C],n:usize)->(Vec<C>,Vec<C>){
 }
 
 /// Splits a row-major d x d K into its absorbable part and the rest, stored
-/// as CSR above ENTRY_FLOOR times its largest entry. Population rows (i, i)
-/// are never dropped, so the stored K keeps the fold's exact trace
-/// preservation (v^T K = 0); the largest dropped row sum is returned.
-fn store(k:&mut[C],n:usize)->(Vec<C>,Vec<C>,Csr,f64,[f64;3],f64){
-    let d=n*n;let largest=k.iter().map(|z|magnitude(*z)).fold(0.,f64::max);let total=frobenius(k);
+/// by sectors (see the module documentation). Population rows (i, i) are
+/// never dropped, so the stored K keeps the fold's exact trace preservation
+/// (v^T K = 0); the largest dropped row sum is returned.
+fn store(k:&mut[C],n:usize,ground:&[bool])->(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64){
+    let d=n*n;let largest=k.iter().map(|z|squared(*z)).fold(0.,f64::max).sqrt();let total=frobenius(k);
     let(a,b)=absorbable(k,n);
     let op=Superop{left:Sparse::from_dense(&a,n),right:Sparse::from_dense(&b,n),sandwich:vec![]};
     let mut absorbed=vec![ZERO;d*d];op.dense_into(n,ONE,&mut absorbed);
     let norms=[total,frobenius(&absorbed),{for(x,y)in k.iter_mut().zip(&absorbed){x.re-=y.re;x.im-=y.im;}frobenius(k)}];
-    let floor=ENTRY_FLOOR*largest;let mut dropped=0_f64;
+    let floor=ENTRY_FLOOR*largest;let floor2=floor*floor;
+    let sector=|p:usize|2*usize::from(!ground[p/n])+usize::from(!ground[p%n]);
+    let members:Vec<Vec<usize>>=(0..4).map(|s|(0..d).filter(|&p|sector(p)==s).collect()).collect();
+    let mut dense=[[false;4];4];let mut blocks=Vec::new();
+    for so in 0..4{for si in 0..4{
+        let(rows,cols)=(&members[so],&members[si]);if rows.is_empty()||cols.is_empty(){continue;}
+        let filled=rows.iter().map(|&r|cols.iter().filter(|&&c|squared(k[r*d+c])>=floor2&&floor>0.).count()).sum::<usize>();
+        if (filled as f64)<DENSE_FILL*(rows.len()*cols.len())as f64{continue;}
+        dense[so][si]=true;
+        let mut values=vec![ZERO;rows.len()*cols.len()];
+        for(c,&col)in cols.iter().enumerate(){for(r,&row)in rows.iter().enumerate(){values[r+rows.len()*c]=k[row*d+col];}}
+        blocks.push(DenseSector{rows:rows.iter().map(|&r|r as u32).collect(),cols:cols.iter().map(|&c|c as u32).collect(),values});
+    }}
+    let mut dropped=0_f64;
     let mut csr=Csr{row:Vec::with_capacity(d+1),col:vec![],value:vec![]};csr.row.push(0);
     for r in 0..d{let population=r/n==r%n;let mut lost=0.;
-        for c in 0..d{let v=k[r*d+c];let m=magnitude(v);if m==0.{continue;}
-            if population||m>=floor{csr.col.push(c as u32);csr.value.push(v);}else{lost+=m;}}
+        for c in 0..d{if dense[sector(r)][sector(c)]{continue;}let v=k[r*d+c];let m=squared(v);if m==0.{continue;}
+            if population||m>=floor2{csr.col.push(c as u32);csr.value.push(v);}else{lost+=m.sqrt();}}
         dropped=dropped.max(lost);csr.row.push(csr.value.len()as u32);}
-    (a,b,csr,dropped,norms,largest)
+    (a,b,Rest{blocks,sparse:csr},dropped,norms,largest)
 }
 
 impl FoldLibrary{
@@ -338,20 +378,21 @@ impl FoldLibrary{
             }
             factors.insert(s,factor);
         }
+        diagnostics.phase_ms[0]=clock.elapsed().as_secs_f64()*1e3;
         let mut stored=Vec::with_capacity(targets);let mut zero_dense=None;let mut k=vec![ZERO;d*d];
         for(t,target)in plan.targets.iter().enumerate(){
             let mut left:[Vec<C>;2]=[vec![],vec![]];let mut right:[Vec<C>;2]=[vec![],vec![]];
-            let mut rest:[Csr;2]=[Csr::default(),Csr::default()];let mut dropped=[0.;2];let mut norms=[[0.;3];2];let mut largest=[0.;2];
+            let mut rest:[Rest;2]=[Rest::default(),Rest::default()];let mut dropped=[0.;2];let mut norms=[[0.;3];2];let mut largest=[0.;2];
             for order in 0..2{
                 // Row-major K (row (i, j), column (k, l)).
                 for c in 0..d{let base=c*width+2*t*d+order*d;for r in 0..d{k[r*d+c]=build[base+r];}}
                 if t==0&&order==0&&target.charge==generator.zero{zero_dense=Some(k.clone());}
-                let(a,b,csr,lost,norm,big)=store(&mut k,n);
-                left[order]=a;right[order]=b;rest[order]=csr;dropped[order]=lost;norms[order]=norm;largest[order]=big;
+                let(a,b,stored_rest,lost,norm,big)=store(&mut k,n,&generator.ground);
+                left[order]=a;right[order]=b;rest[order]=stored_rest;dropped[order]=lost;norms[order]=norm;largest[order]=big;
             }
             stored.push(StoredFold{charge:target.charge.clone(),nu:target.nu,left,right,rest,dropped,norms,largest_entry:largest});
         }
-        diagnostics.milliseconds=clock.elapsed().as_secs_f64()*1e3;
+        diagnostics.milliseconds=clock.elapsed().as_secs_f64()*1e3;diagnostics.phase_ms[1]=diagnostics.milliseconds-diagnostics.phase_ms[0];
         Ok(Self{targets:stored,zero_dense,solver:Some(solver),factors,diagnostics})
     }
     /// Largest dropped row sums of K^(0) and K^(1), summed over the targets.
@@ -363,40 +404,52 @@ impl FoldLibrary{
     ///   y[q + s + e + b] += C_b D_s^-1 C_e D_s^-1 C_s x_q   (both in the lattice),
     /// the far-shell paths q -> q+s -> q+s+e -> q+s+e+b that the second-order
     /// fold leaves out, with both far blocks at the static frequency of s.
-    /// Applied in factored form: two block solves per (s, q, e), no d x d
-    /// storage.
+    /// Applied in factored form, no d x d storage: one block solve per (s, q)
+    /// and one per far mode r + s reached in the middle (r = q + e: the paths
+    /// through the same far mode share it), whose returns land in the lattice.
     pub fn third_order_source(&self,op:&LatticeOperator<'_>,x:&[C])->Result<Vec<C>,String>{
         let prepared=op.prepared;let(plan,generator)=(&prepared.plan,&prepared.generator);
         let n=op.n;let d=n*n;let modes=op.modes.len();let mut out=vec![ZERO;modes*d];
         let Some(solver)=&self.solver else{return Ok(out)};
         let(gemm,sylvester)=(prepared.lapack.complex_gemm(),prepared.lapack.sylvester_kernel());
-        let mut scratch=SolveScratch::default();let mut small=Vec::new();
         let explicit=plan.explicit();
         let far=plan.far();
-        for(&s,factor)in &self.factors{
-            let cs=&generator.components[&plan.steps[s].charge].op;
+        // One task per far step; the parts are summed in step order.
+        let steps:Vec<(&usize,&ShiftFactor)>=self.factors.iter().collect();
+        let parts=Execution::new()?.map(steps,|(&s,factor)|->Result<Option<Vec<C>>,String>{
+            let mut scratch=SolveScratch::default();let mut small=Vec::new();let mut out=vec![ZERO;modes*d];
+            let charge_s=&plan.steps[s].charge;
+            // Middle charges r (far mode r + s) with their returns (b, target).
+            let mut middles:BTreeMap<Charge,Vec<(usize,usize)>>=BTreeMap::new();
+            let mut hops:Vec<(usize,usize,Charge)>=Vec::new();
+            for &e in &explicit{
+                if (plan.steps[s].nu+plan.steps[e].nu).abs()<plan.cut{continue;}
+                for q in 0..modes{
+                    let r=charge_plus(&op.modes[q],&plan.steps[e].charge)?;
+                    if !middles.contains_key(&r){
+                        let returns:Vec<(usize,usize)>=far.iter().filter_map(|&b|{
+                            let t=charge_plus(&charge_plus(&r,charge_s).ok()?,&plan.steps[b].charge).ok()?;op.index.get(&t).map(|&t|(b,t))}).collect();
+                        middles.insert(r.clone(),returns);
+                    }
+                    if !middles[&r].is_empty(){hops.push((q,e,r));}
+                }
+            }
+            if hops.is_empty(){return Ok(None);}
+            let cs=&generator.components[charge_s].op;
             let mut y=vec![ZERO;modes*d];
             for q in 0..modes{cs.apply_into(n,ONE,&x[q*d..(q+1)*d],&mut y[q*d..(q+1)*d],&mut small);}
             solver.solve(factor,&gemm,&sylvester,&mut y,modes,&mut scratch)?;
-            for &e in &explicit{
-                let middle=plan.steps[s].nu+plan.steps[e].nu;if middle.abs()<plan.cut{continue;}
-                // Returns b with their lattice edges q -> q + s + e + b.
-                let returns:Vec<(usize,Vec<(usize,usize)>)>=far.iter().filter(|&&b|(middle+plan.steps[b].nu).abs()<plan.cut).map(|&b|{
-                    let t=charge_plus(&charge_plus(&plan.steps[s].charge,&plan.steps[e].charge)?,&plan.steps[b].charge)?;
-                    Ok::<_,String>((b,(0..modes).filter_map(|q|charge_plus(&op.modes[q],&t).ok().and_then(|t|op.index.get(&t).map(|&t|(q,t)))).collect()))
-                }).collect::<Result<_,_>>()?;
-                let sources:BTreeSet<usize>=returns.iter().flat_map(|(_,edges)|edges.iter().map(|e|e.0)).collect();
-                if sources.is_empty(){continue;}
-                let sources:Vec<usize>=sources.into_iter().collect();
-                let ce=&generator.components[&plan.steps[e].charge].op;
-                let mut z=vec![ZERO;sources.len()*d];
-                for(k,&q)in sources.iter().enumerate(){ce.apply_into(n,ONE,&y[q*d..(q+1)*d],&mut z[k*d..(k+1)*d],&mut small);}
-                solver.solve(factor,&gemm,&sylvester,&mut z,sources.len(),&mut scratch)?;
-                for(b,edges)in &returns{let cb=&generator.components[&plan.steps[*b].charge].op;
-                    for &(q,t)in edges{let k=sources.binary_search(&q).map_err(|_|"Third-order source edge without its solve")?;
-                        cb.apply_into(n,ONE,&z[k*d..(k+1)*d],&mut out[t*d..(t+1)*d],&mut small);}}
-            }
-        }
+            let slots:Vec<&Charge>=middles.iter().filter(|(_,r)|!r.is_empty()).map(|(c,_)|c).collect();
+            let slot=|c:&Charge|slots.binary_search(&c).map_err(|_|"Third-order source middle without its slot".to_string());
+            let mut z=vec![ZERO;slots.len()*d];
+            for(q,e,r)in &hops{let k=slot(r)?;
+                generator.components[&plan.steps[*e].charge].op.apply_into(n,ONE,&y[q*d..(q+1)*d],&mut z[k*d..(k+1)*d],&mut small);}
+            solver.solve(factor,&gemm,&sylvester,&mut z,slots.len(),&mut scratch)?;
+            for(k,r)in slots.iter().enumerate(){for &(b,t)in &middles[*r]{
+                generator.components[&plan.steps[b].charge].op.apply_into(n,ONE,&z[k*d..(k+1)*d],&mut out[t*d..(t+1)*d],&mut small);}}
+            Ok(Some(out))
+        });
+        for part in parts{if let Some(part)=part?{for(o,v)in out.iter_mut().zip(part){add(o,v);}}}
         Ok(out)
     }
 }

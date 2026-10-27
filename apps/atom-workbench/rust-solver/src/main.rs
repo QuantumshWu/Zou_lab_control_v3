@@ -76,9 +76,6 @@ struct Options {
     /// "lattice"; overrides ATOM_POPULATION_CORE. Not part of the UI schema.
     #[serde(default)]
     solver_core: Option<String>,
-    /// Hidden: lattice-core validation settings (frame, orders, tolerances).
-    #[serde(default)]
-    lattice: Option<Value>,
 }
 fn default_duration() -> f64 {
     5.
@@ -102,7 +99,6 @@ impl Default for Options {
             steady_only: false,
             mean_horizon_us: None,
             solver_core: None,
-            lattice: None,
         }
     }
 }

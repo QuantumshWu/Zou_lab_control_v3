@@ -16,13 +16,16 @@
 //!   third-order fold source;
 //! - `operator`: the lattice operator on a set of near charges;
 //! - `preconditioner`: the dressed block preconditioner (L0' - i nu_q)^-1;
-//! - `steady`: the steady state at one near order and its fold charge;
+//! - `krylov`: the primal solve of the trace-row system;
+//! - `estimate`: error equations in the primal's Krylov space (truncation,
+//!   fold) and the shell correction;
+//! - `steady`: the steady pipeline (order, estimate, acceptance);
+//! - `spectrum`: conserved quantities and the slowest relaxation;
 //! - `ledger`: the tolerance, the error metric and every remainder bound.
 //!
-//! Validation scaffolding (to be replaced, then deleted or moved into tests):
-//! `preconditioner::DenseDressed` (the exact dense block inverse; the
-//! structured Woodbury version replaces it) and `nested` (the k vs k+1
-//! near-order check; the GCRO error estimate replaces it).
+//! Validation only (tests and the `validation` feature): `dense_dressed`, the
+//! exact dense block inverse the structured preconditioner is measured
+//! against.
 //!
 //! Layout: an n x n block is row-major (entry (i, j) at i*n+j); a field on N
 //! modes is N consecutive blocks; a superoperator as a d x d matrix (d = n^2)
@@ -38,9 +41,13 @@ pub mod classification;
 pub mod fold;
 pub mod operator;
 pub mod preconditioner;
+pub mod krylov;
+pub mod estimate;
 pub mod steady;
+pub mod spectrum;
 pub mod ledger;
-pub mod nested;
+#[cfg(any(test,feature="validation"))]
+pub mod dense_dressed;
 pub use generator::{Component,Generator,Sparse,Superop};
 
 pub(crate) const ZERO:C=C{re:0.,im:0.};
@@ -53,6 +60,21 @@ pub(crate) const ONE:C=C{re:1.,im:0.};
 #[inline]pub(crate) fn magnitude(a:C)->f64{a.re.hypot(a.im)}
 #[inline]pub(crate) fn nonzero(a:C)->bool{a.re!=0.||a.im!=0.}
 pub(crate) fn grow(buffer:&mut Vec<C>,length:usize){if buffer.len()<length{buffer.resize(length,ZERO);}}
+/// A Hermitian-symmetric field (x_-q = x_q^dagger) from its canonical modes:
+/// the mirrored modes copied, the self-mirrored centre replaced by its
+/// Hermitian part. The anti-Hermitian roundoff of the centre is otherwise
+/// amplified by the slow modes and leaves the real space the solver works in
+/// (the true residual then stalls near 1e-7).
+pub(crate) fn mirror_field(x:&mut[C],n:usize,canonical:&[bool],mirror:&[usize]){
+    let d=n*n;
+    for q in 0..canonical.len(){let p=mirror[q];
+        if p==q{let b=&mut x[q*d..(q+1)*d];
+            for i in 0..n{b[i*n+i].im=0.;for j in 0..i{let(u,v)=(b[i*n+j],b[j*n+i]);let m=C{re:0.5*(u.re+v.re),im:0.5*(u.im-v.im)};b[i*n+j]=m;b[j*n+i]=conj(m);}}}
+        else if !canonical[q]{
+            if !canonical[p]{x[q*d..(q+1)*d].fill(ZERO);continue;}
+            for i in 0..n{for j in 0..n{x[q*d+i*n+j]=conj(x[p*d+j*n+i]);}}}
+    }
+}
 pub(crate) fn charge_plus(a:&[i32],b:&[i32])->Result<Charge,String>{
     a.iter().zip(b).map(|(&x,&y)|x.checked_add(y).ok_or_else(||"Lattice charge overflow".into())).collect()
 }

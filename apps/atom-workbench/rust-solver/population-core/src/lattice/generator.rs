@@ -72,7 +72,9 @@ pub struct Component{pub nu:f64,pub op:Superop,pub size:f64}
 /// Hamiltonian charge t and, from every pair of charges a, b of one collapse
 /// channel with a - b = t (the complete non-secular Lindblad form),
 /// C_a X C_b^dagger - (C_b^dagger C_a X + X C_b^dagger C_a)/2.
-pub struct Generator{pub n:usize,pub zero:Charge,pub components:BTreeMap<Charge,Component>}
+pub struct Generator{pub n:usize,pub zero:Charge,pub components:BTreeMap<Charge,Component>,
+    /// Whether each state is a ground state (the sectors of a block).
+    pub ground:Vec<bool>}
 impl Generator{
     pub fn new(source:&GaugedSource)->Result<Self,String>{
         let n=source.n;let d=n*n;let zero:Charge=vec![0;source.phases.axes.len()];
@@ -102,7 +104,8 @@ impl Generator{
             if !size.is_finite(){return Err("Nonfinite lattice generator component".into());}
             components.insert(q,Component{nu:f.hi+f.lo,op,size});
         }
-        Ok(Self{n,zero,components})
+        let ground=(0..n).map(|i|source.ground.contains(&i)).collect();
+        Ok(Self{n,zero,components,ground})
     }
     pub fn zero_component(&self)->&Component{&self.components[&self.zero]}
 }
