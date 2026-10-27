@@ -90,7 +90,7 @@ fn lattice_json(prepared:&LatticePrepared,solution:Option<&SteadySolution>)->Val
             "solveResidual":f.solve_residual,"refinedSolves":f.refined,"refinedResidual":f.refined_residual,"milliseconds":f.milliseconds,
             "phaseMs":{"solves":f.phase_ms[0],"storage":f.phase_ms[1]},"targets":targets},
         "preconditioner":solution.map(|s|json!({"kind":"structured","milliseconds":s.dressed_ms,"frameCondition":s.dressed.condition,
-            "frameReconstruction":s.dressed.reconstruction,"woodburyRank":s.dressed.woodbury_rank})),
+            "frameReconstruction":s.dressed.reconstruction,"woodburyRank":s.dressed.woodbury_rank,"precessingRate":s.dressed.precessing_rate})),
         "slowModes":solution.map(|s|{let m=&s.slow;json!({"conserved":m.conserved,"slowestRate":m.slowest_rate,"artifacts":m.artifacts,
             "artifactGrowth":m.artifact_growth,"solveSteps":m.solve_steps,"milliseconds":m.milliseconds,
             "kept":m.modes.iter().map(|x|json!({"lambda":[x.lambda.re,x.lambda.im],"residual":x.residual})).collect::<Vec<_>>(),
@@ -156,15 +156,36 @@ fn steady_solution(request:&Prepared,long:bool)->Result<SteadySolution,String>{
     steady::solve(&request.lattice,&request.groups,if long{Purpose::LongTime}else{Purpose::Report})
 }
 
+/// A horizon T with T times the tail rate at least TAIL_EXPONENT has the
+/// limit as its mean: the deviation from the limit (at most 2 in trace
+/// norm) has decayed by e^-30 = 1e-13, so an eigenbasis condition up to 1e8
+/// leaves under 1e-2 of the tolerance.
+const TAIL_EXPONENT:f64=30.;
+/// The rate bounding what still relaxes: the slowest relaxation found, and
+/// half the dressed frames' slowest precessing coherence (out of the shift's
+/// reach; the half covers the recycling's change of its rate). None when no
+/// relaxation was found.
+fn tail_rate(steady:&SteadySolution)->Option<f64>{
+    let precessing=steady.dressed.precessing_rate.map_or(f64::INFINITY,|r|0.5*r);
+    steady.slow.slowest_rate.map(|r|r.min(precessing))
+}
+fn relaxed_by(steady:&SteadySolution,horizon:f64)->bool{tail_rate(steady).is_some_and(|r|r*horizon>=TAIL_EXPONENT)}
+
 /// The state at the horizon T: its field (on the steady solution's modes),
 /// the estimated error of its populations, the populations still relaxing
 /// at T and how it was reached.
 struct HorizonState{field:Vec<Complex64>,error:f64,relaxing:f64,details:Value}
-/// Beyond LONG_HORIZON the long-time expansion (a trajectory's, else its
-/// own); up to it, or when the expansion misses slow modes, the Krylov
-/// propagation to T.
+/// Relaxed by T (`relaxed_by`): the limit, its tail charged. Else beyond
+/// LONG_HORIZON the long-time expansion (a trajectory's, else its own); up
+/// to it, or when the expansion misses slow modes, the Krylov propagation
+/// to T.
 fn horizon_state(request:&Prepared,steady:&SteadySolution,horizon:f64,long:Option<Result<&finite::LongTime,&Declined>>)->Result<HorizonState,String>{
     let groups=&request.groups;
+    if let Some(rate)=tail_rate(steady).filter(|_|relaxed_by(steady,horizon)){
+        let tail=(-rate*horizon).exp();
+        return Ok(HorizonState{field:steady.field.clone(),error:steady.estimated_error+tail,relaxing:tail,
+            details:json!({"method":"the limit, relaxed by the horizon","tailRatePerUs":rate,"tailBound":tail,"steadyEstimate":steady.estimated_error})});
+    }
     if horizon<=finite::LONG_HORIZON{return propagated_state(request,steady,horizon,None);}
     let own;
     let long=match long{Some(l)=>l,None=>{own=finite::long_time(&request.lattice,&request.density,groups,steady,None);own.as_ref()}};
@@ -198,9 +219,13 @@ fn propagated_state(request:&Prepared,steady:&SteadySolution,horizon:f64,decline
 pub fn mean_result(model:&Model,options:&Options,started:Instant)->Result<Value,String>{
     let request=prepare_request(model,options)?;mean_of(model,options,&request,started)
 }
-/// The mean with its own steady solution (and horizon state).
+/// The mean with its own steady solution: the report's, unless a horizon
+/// the found relaxation has not passed needs the long-time one.
 fn mean_of(model:&Model,options:&Options,request:&Prepared,started:Instant)->Result<Value,String>{
-    let steady=steady_solution(request,options.mean_horizon_us.is_some());
+    let report=steady_solution(request,false);
+    let limit=match(options.mean_horizon_us,&report){(None,_)=>true,(Some(t),Ok(s))=>relaxed_by(s,t),(Some(_),Err(_))=>false};
+    if limit{return mean_value(model,options,request,report.as_ref(),None,started);}
+    let steady=steady_solution(request,true);
     mean_value(model,options,request,steady.as_ref(),None,started)
 }
 

@@ -28,6 +28,9 @@ const TINY_DENOMINATOR:f64=1e-13;
 /// Regularized denominators are moved to -SIGMA_FRACTION times the largest
 /// frame damping.
 const SIGMA_FRACTION:f64=1e-3;
+/// Frame pairs whose frequency exceeds this fraction of the frame scale
+/// precess (below it: populations and degenerate coherences, roundoff).
+const PRECESSING:f64=1e-9;
 
 /// A block preconditioner on a lattice field.
 pub trait Preconditioner{
@@ -43,6 +46,9 @@ pub struct StructuredDiagnostics{
     /// Condition bounds and relative reconstruction errors of the frames.
     pub condition:[f64;2],pub reconstruction:[f64;2],
     pub woodbury_rank:usize,
+    /// The slowest decay rate (1/us) of the separable part's precessing
+    /// pairs lambda_a + mu_b: the coherences a shift at zero cannot reach.
+    pub precessing_rate:Option<f64>,
 }
 /// The request-level part: frames and Woodbury factors in frame coordinates.
 pub struct StructuredDressed{
@@ -104,7 +110,9 @@ impl StructuredDressed{
         frame_transform(lapack,n,&left_in,&right_in,&mut trace_u,1)?;frame_transform(lapack,n,&at,&bt,&mut trace_v,1)?;
         let scale=lambda.iter().map(|z|magnitude(*z)).fold(0.,f64::max)+mu.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
         let damping=lambda.iter().map(|z|z.re.abs()).fold(0.,f64::max)+mu.iter().map(|z|z.re.abs()).fold(0.,f64::max);
-        let diagnostics=StructuredDiagnostics{milliseconds:clock.elapsed().as_secs_f64()*1e3,condition:[ca,cb],reconstruction:[ra,rb],woodbury_rank:rank};
+        let precessing_rate=lambda.iter().flat_map(|a|mu.iter().map(move|b|C{re:a.re+b.re,im:a.im+b.im}))
+            .filter(|z|z.im.abs()>PRECESSING*scale).map(|z|(-z.re).max(0.)).reduce(f64::min);
+        let diagnostics=StructuredDiagnostics{milliseconds:clock.elapsed().as_secs_f64()*1e3,condition:[ca,cb],reconstruction:[ra,rb],woodbury_rank:rank,precessing_rate};
         Ok(Self{n,d,lapack:Arc::clone(lapack),left_in,right_in,left_out,right_out,lambda,mu,uhat,vhat,rank,trace_u,trace_v,
             tiny:TINY_DENOMINATOR*scale,sigma:SIGMA_FRACTION*damping,diagnostics})
     }
