@@ -1530,8 +1530,6 @@ pub struct SlowDual {
     /// fields at fast charges (None only for synthetic test duals).
     elimination: Option<Elimination>,
     pub(crate) diagnostics: SlowDualDiagnostics,
-    /// Ground "energies" `eps_a` (rad/us) of the slot criterion.
-    pub(crate) ground_energy: Vec<f64>,
     /// `[(0, R)]` with `||R xhat|| = ||K V xhat||` for the couplings `K` into
     /// the unrepresented slow charges (compressed to their range; empty when
     /// there are none): the readout of the norm every estimate charges.
@@ -2052,7 +2050,6 @@ impl SlowDual {
             slaved_central,
             elimination: Some(Elimination { blocks: Arc::clone(&blocks), sylvester: full_sylvester, cache: Default::default(), slow_cache: Default::default() }),
             diagnostics,
-            ground_energy,
             unrepresented_readout,
         })
     }
@@ -2169,10 +2166,6 @@ impl SlowDual {
     pub fn dimension(&self) -> usize { self.generator.rows }
     pub(crate) fn ground_entries(&self) -> usize { self.g * self.g }
     pub(crate) fn slot_of(&self, charge: &[i32]) -> Option<usize> { self.slots.iter().position(|s| s == charge) }
-    /// Whether a charge at envelope frequency `nu` carries a slow ground
-    /// coherence (the slot criterion; slots are the slow charges two
-    /// significant couplings reach).
-    pub(crate) fn is_slow(&self, nu: f64) -> bool { slow_ground_coherence(nu, &self.ground_energy, self.diagnostics.slow_frequency_cutoff) }
 
     /// Non-ground inverse of a slow charge for a field with a slow envelope,
     /// `(i nu_c - L_0)_{QQ}^{-1}` (cached).
@@ -2493,6 +2486,7 @@ pub(crate) fn add_natural(out: &mut [C], states: usize, weights: &Dense, exponen
 /// The signed population error as exponential families: sources of the slow
 /// error (propagated exactly through `J_eff`) and direct populations of fast
 /// responses, assembled per charge and evaluated once on the output grid.
+#[derive(Clone)]
 pub(crate) struct Series {
     /// Candidate exponents `beta_j`, shared by every family.
     pub(crate) beta: Vec<C>,
@@ -2622,6 +2616,34 @@ impl Series {
         } else {
             self.slow_pairs.push((first, second, v));
         }
+    }
+
+    /// Adds every term of `part`, whose columns are this series' columns
+    /// `start..start + part.beta.len()` (same horizon), to this series.
+    pub(crate) fn merge(&mut self, part: Series, start: usize) {
+        for (_, (f, v)) in part.slow {
+            self.add_slow(f, start, &v);
+        }
+        for (_, (f, v)) in part.direct {
+            self.add_direct(f, start, &v);
+        }
+        for ((slot, _), (offset, h)) in part.dressed_slow {
+            self.add_dressed_slow(slot, offset, &h);
+        }
+        if let Some(h) = part.dressed_direct {
+            self.add_dressed_direct(&h);
+        }
+        for (_, (mu, v)) in part.slow_points {
+            add_point(&mut self.slow_points, mu, ONE, &v);
+        }
+        self.slow_pairs.extend(part.slow_pairs);
+        if let Some(x) = part.initial {
+            self.add_initial(&x);
+        }
+        for (_, (mu, p)) in part.direct_points {
+            add_point(&mut self.direct_points, mu, ONE, &p);
+        }
+        self.direct_near.extend(part.direct_near);
     }
 
     /// Single exponential slow source `v exp(mu t)` (merged per exponent).
@@ -2935,6 +2957,179 @@ impl SlowDual {
             let exponents: Vec<C> = alpha.iter().map(|a| cadd(*a, complex(0., *omega))).collect();
             add_natural(out, rows, &w, &exponents, grid);
         }
+    }
+
+    /// Upper bound, per readout row, of `|evaluate_with(series, ..)|` at
+    /// every time in `[0, t_max]` (`t_max` of the series), homogeneous parts
+    /// included: every term by its amplitude times the supremum of its time
+    /// function, `|exp(mu t)| <= max(1, exp(Re mu t_max))`,
+    /// `|e_t[x, y]| <= t_max G` and `|e_t[x, y, z]| <= t_max^2 G / 2` (`G` the
+    /// largest growth of the nodes; both are integrals of exponentials over a
+    /// segment and a simplex). It evaluates no time, so a series whose bound
+    /// is small can be charged instead of evaluated.
+    pub(crate) fn series_bound(&self, series: &Series, readout_groups: &[(f64, Dense)], direct: bool) -> Result<Vec<f64>, String> {
+        let n = self.n;
+        let rows = readout_groups.first().map_or(n, |(_, r)| r.rows);
+        if direct && rows != n {
+            return Err("Direct populations need the population readout".into());
+        }
+        let dim = self.dimension();
+        let t_max = series.t_max;
+        let alpha = &self.eigenvalues;
+        let lap = &self.lapack;
+        let m = series.beta.len();
+        let growth = |mu: C| (mu.re * t_max).exp().max(1.);
+        let mut bound = vec![0_f64; rows];
+        let mut homogeneous = series.initial.clone().unwrap_or_else(|| vec![ZERO; dim]);
+        // Amplitude bounds of the terms v e_t[mu, alpha_k] (and of the
+        // clustered pair terms) at slow mode k.
+        let mut near = vec![0_f64; dim];
+        let particular = |v: C, mu: C, k: usize, homogeneous: &mut Vec<C>, near: &mut Vec<f64>| -> C {
+            let delta = csub(mu, alpha[k]);
+            if cabs(delta) * t_max <= 1. {
+                near[k] += cabs(v) * t_max * growth(mu).max(growth(alpha[k]));
+                ZERO
+            } else {
+                let y = cdiv(v, delta);
+                homogeneous[k] = csub(homogeneous[k], y);
+                y
+            }
+        };
+        let add_columns = |bound: &mut Vec<f64>, values: &Dense, growths: &[f64]| {
+            for (j, g) in growths.iter().enumerate() {
+                for (s, b) in bound.iter_mut().enumerate() {
+                    *b += cabs(values.at(s, j)) * g;
+                }
+            }
+        };
+        let beta_growth: Vec<f64> = series.beta.iter().map(|&b| growth(b)).collect();
+        // Slow families.
+        for (f, v) in series.slow.values() {
+            let mut c = Dense::zeros(dim, m);
+            for j in 0..m {
+                let mu = cadd(series.beta[j], complex(0., *f));
+                for k in 0..dim {
+                    let x = v.at(k, j);
+                    if x.re != 0. || x.im != 0. {
+                        let y = particular(x, mu, k, &mut homogeneous, &mut near);
+                        c.set(k, j, y);
+                    }
+                }
+            }
+            for (_, readout) in readout_groups {
+                add_columns(&mut bound, &readout.multiply(&c, lap)?, &beta_growth);
+            }
+        }
+        if direct {
+            for (_, f) in series.direct.values() {
+                add_columns(&mut bound, f, &beta_growth);
+            }
+        }
+        // Dressed families.
+        if let Some(dressed) = &self.dressed {
+            let n2 = n * n;
+            let lambda: Vec<C> = (0..n2).map(|ik| cadd(dressed.left_values[ik / n], dressed.right_values[ik % n])).collect();
+            let lambda_growth: Vec<f64> = lambda.iter().map(|&l| growth(l)).collect();
+            if let Some(h) = series.dressed_direct.as_ref().filter(|_| direct) {
+                for (ik, &x) in h.iter().enumerate() {
+                    for (s, b) in bound.iter_mut().enumerate() {
+                        *b += cabs(cmul(dressed.readout.at(s, ik), x)) * lambda_growth[ik];
+                    }
+                }
+            }
+            for ((slot, _), (o, h)) in &series.dressed_slow {
+                let recycling = &dressed.modal_recycling[*slot];
+                let mut c = Dense::zeros(dim, n2);
+                for (ik, &x) in h.iter().enumerate() {
+                    if x.re == 0. && x.im == 0. {
+                        continue;
+                    }
+                    let mu = cadd(lambda[ik], complex(0., *o));
+                    for k in 0..dim {
+                        let v = cmul(recycling.at(k, ik), x);
+                        if v.re != 0. || v.im != 0. {
+                            let y = particular(v, mu, k, &mut homogeneous, &mut near);
+                            c.set(k, ik, y);
+                        }
+                    }
+                }
+                for (_, readout) in readout_groups {
+                    add_columns(&mut bound, &readout.multiply(&c, lap)?, &lambda_growth);
+                }
+            }
+        } else if series.dressed_direct.is_some() || !series.dressed_slow.is_empty() {
+            return Err("Dressed sources without a dressed frame".into());
+        }
+        // Single exponential sources.
+        for (mu, v) in series.slow_points.values() {
+            let mut c = Dense::zeros(dim, 1);
+            for k in 0..dim {
+                if v[k].re != 0. || v[k].im != 0. {
+                    let y = particular(v[k], *mu, k, &mut homogeneous, &mut near);
+                    c.set(k, 0, y);
+                }
+            }
+            for (_, readout) in readout_groups {
+                add_columns(&mut bound, &readout.multiply(&c, lap)?, &[growth(*mu)]);
+            }
+        }
+        // Clustered pair sources v e_t[mu1, mu2] (as in `evaluate_with`).
+        for (mu1, mu2, v) in &series.slow_pairs {
+            let mut via_pair = Dense::zeros(dim, 1);
+            let mut point = Dense::zeros(dim, 1);
+            let pair_growth = growth(*mu1).max(growth(*mu2));
+            for k in 0..dim {
+                if v[k].re == 0. && v[k].im == 0. {
+                    continue;
+                }
+                let to_mu1 = csub(*mu1, alpha[k]);
+                let to_mu2 = csub(*mu2, alpha[k]);
+                if cabs(to_mu1) * t_max > 1. && cabs(to_mu2) * t_max > 1. {
+                    let a = cdiv(v[k], to_mu1);
+                    let c = csub(ZERO, cdiv(a, to_mu2));
+                    via_pair.set(k, 0, a);
+                    point.set(k, 0, c);
+                    homogeneous[k] = csub(homogeneous[k], c);
+                } else {
+                    near[k] += cabs(v[k]) * 0.5 * t_max * t_max * pair_growth.max(growth(alpha[k]));
+                }
+            }
+            for (_, readout) in readout_groups {
+                add_columns(&mut bound, &readout.multiply(&via_pair, lap)?, &[t_max * pair_growth]);
+                add_columns(&mut bound, &readout.multiply(&point, lap)?, &[growth(*mu2)]);
+            }
+        }
+        // Near-resonant amplitudes and the homogeneous solution.
+        let alpha_growth: Vec<f64> = alpha.iter().map(|&a| growth(a)).collect();
+        for (_, readout) in readout_groups {
+            for k in 0..dim {
+                let h = cabs(homogeneous[k]) * alpha_growth[k] + near[k];
+                if h == 0. {
+                    continue;
+                }
+                for (s, b) in bound.iter_mut().enumerate() {
+                    *b += cabs(readout.at(s, k)) * h;
+                }
+            }
+        }
+        if direct {
+            for (mu, p) in series.direct_points.values() {
+                let g = growth(*mu);
+                for (b, x) in bound.iter_mut().zip(p) {
+                    *b += cabs(*x) * g;
+                }
+            }
+            for (p, x, y) in &series.direct_near {
+                let g = t_max * growth(*x).max(growth(*y));
+                for (b, z) in bound.iter_mut().zip(p) {
+                    *b += cabs(*z) * g;
+                }
+            }
+        }
+        if bound.iter().any(|b| !b.is_finite()) {
+            return Ok(vec![f64::INFINITY; rows]);
+        }
+        Ok(bound)
     }
 }
 
@@ -3601,7 +3796,6 @@ mod tests {
                 dressed_condition: None,
                 preparation_ms: 0.,
             },
-            ground_energy: vec![],
             unrepresented_readout: vec![],
         };
         // Families with beta = {0, -0.1}: resonant with alpha[0] (secular
