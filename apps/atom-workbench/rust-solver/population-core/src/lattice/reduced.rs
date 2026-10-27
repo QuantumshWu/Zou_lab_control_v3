@@ -33,8 +33,9 @@
 //! diag(W X u(t))_q (the local time average); the state at a horizon T, its
 //! centre block (the laboratory time average at T); the steady state from
 //! the bordered small system (G + c0 tau^T) r = c0 (tau the centre trace
-//! row; a simple kernel), else the kernel's spectral projection; the slowest
-//! relaxation among the converged Ritz values and the conserved count.
+//! row; a simple kernel), else the kernel's spectral projection; the slow
+//! Ritz values the slowest relaxation is read from (`pipeline` checks their
+//! residuals against the images) and the conserved count.
 //!
 //! The error transform (R1) orders the poles: the Laplace transform of the
 //! population error with the residual propagated through the dressed blocks,
@@ -73,9 +74,16 @@ const DEPENDENT:f64=1e-14;
 /// Real entries per partial Gram product (fixed: sums do not depend on
 /// the thread count).
 const GRAM_CHUNK:usize=1<<14;
-/// A Ritz pair counts as converged (slowest relaxation) when its relative
-/// residual is below this share of |Re theta|.
-const RITZ_CONVERGED:f64=0.1;
+/// The slowest relaxation is resolved when its Ritz pair's residual
+/// |A W y - theta W y| / |W y| is below this
+/// share of its rate, or bounded far beyond the outputs when its rate plus
+/// residual is below 1 / (SLOW_REACH x the longest output time).
+pub const SLOW_ACCURACY:f64=0.1;
+const SLOW_REACH:f64=10.;
+/// Residual components of the error transform: at most TRANSFORM_RANK,
+/// down to TRANSFORM_COMPONENT of the largest singular value.
+const TRANSFORM_RANK:usize=24;
+const TRANSFORM_COMPONENT:f64=1e-3;
 
 /// Row-major (r x k) (k x c), the column-major (A B)^T = B^T A^T.
 pub(crate) fn product(lapack:&Lapack,a:&[f64],b:&[f64],r:usize,k:usize,c:usize)->Result<Vec<f64>,String>{
@@ -165,8 +173,8 @@ pub struct Model{
     /// and the values and coefficients the outputs use.
     pub theta:Vec<C>,pub vectors:Vec<C>,pub coefficients:Vec<C>,
     pub used_theta:Vec<C>,pub used_coefficients:Vec<C>,pub kernel:Vec<bool>,
-    /// Relative Ritz residuals (dressed metric) and mode amplitudes.
-    pub residuals:Vec<f64>,pub amplitudes:Vec<f64>,
+    /// Mode amplitudes (largest population contribution).
+    pub amplitudes:Vec<f64>,
     pub growing:usize,pub projected:usize,pub reflected:usize,pub growth_charge:f64,
     /// The reduced steady state (kernel part of c0).
     pub steady:Vec<f64>,pub simple_kernel:bool,
@@ -228,19 +236,6 @@ impl Dressed{
         let amplitudes:Vec<f64>=(0..r).map(|jj|{let mut largest=0_f64;
             for block in &readout{for i in 0..n{let mut v=ZERO;for col in 0..r{mul_add(&mut v,block[i*r+col],s[col*r+jj]);}largest=largest.max(magnitude(v));}}
             magnitude(a[jj])*largest}).collect();
-        // Relative Ritz residuals in the dressed metric: y = X s_j,
-        // |T(R s)|^2 = y^H M y - 2 Re(conj(theta) y^H H y) + |theta|^2 y^H K y.
-        let gemm=lapack.complex_gemm();
-        let to_complex=|a:&[f64]|->Vec<C>{a.iter().map(|&v|C{re:v,im:0.}).collect()};
-        // Y = X S (k x r) and the quadratic forms y_j^H M y_j etc. (column-major).
-        let(xc,sc)=(to_complex(&transpose_rows(&x,k,r)),(0..r*r).map(|e|s[(e%r)*r+e/r]).collect::<Vec<C>>());
-        let mut ys=vec![ZERO;k*r];gemm.multiply(k,r,r,ONE,&xc,k,&sc,r,ZERO,&mut ys,k)?;
-        let quadratic=|m:&[f64]|->Result<Vec<C>,String>{let mc=to_complex(&transpose_rows(m,k,k));let mut my=vec![ZERO;k*r];gemm.multiply(k,r,k,ONE,&mc,k,&ys,k,ZERO,&mut my,k)?;
-            Ok((0..r).map(|j|(0..k).fold(ZERO,|acc,i|{let mut acc=acc;mul_add(&mut acc,conj(ys[i+k*j]),my[i+k*j]);acc})).collect())};
-        let(ym,yh,yk)=(quadratic(&self.m)?,quadratic(&self.h)?,quadratic(&self.k)?);
-        let residuals:Vec<f64>=(0..r).map(|jj|{let t=theta[jj];
-            let value=ym[jj].re-2.*mul(conj(t),yh[jj]).re+(t.re*t.re+t.im*t.im)*yk[jj].re;
-            value.max(0.).sqrt()/yk[jj].re.max(f64::MIN_POSITIVE).sqrt()}).collect();
         // Kernel and growing modes.
         let least=(0..r).min_by(|&p,&q|magnitude(theta[p]).total_cmp(&magnitude(theta[q]))).ok_or("Empty reduced model")?;
         let kernel:Vec<bool>=(0..r).map(|jj|jj==least||magnitude(theta[jj])<KERNEL).collect();
@@ -266,7 +261,7 @@ impl Dressed{
             (0..r).map(|i|(0..r).filter(|&jj|kernel[jj]).fold(0.,|acc,jj|acc+mul(s[i*r+jj],a[jj]).re)).collect()
         };
         if steady.iter().chain(&g).any(|v|!v.is_finite()){return Err("Nonfinite reduced model".into());}
-        Ok(Model{r,x,g,c0,theta,vectors:s,coefficients:a,used_theta,used_coefficients,kernel,residuals,amplitudes,
+        Ok(Model{r,x,g,c0,theta,vectors:s,coefficients:a,used_theta,used_coefficients,kernel,amplitudes,
             growing,projected,reflected,growth_charge,steady,simple_kernel,readout,gram_condition})
     }
 }
@@ -300,51 +295,90 @@ impl Model{
     /// Basis coefficients X u of a reduced vector.
     pub fn coordinates(&self,u:&[f64])->Vec<f64>{let r=self.r;let k=self.x.len()/r.max(1);(0..k).map(|i|(0..r).map(|c|self.x[i*r+c]*u[c]).sum()).collect()}
     pub fn conserved(&self)->usize{self.kernel.iter().filter(|&&b|b).count().max(1)}
-    /// The slowest relaxation rate (1/us) among the converged decaying Ritz
-    /// values.
-    pub fn slowest_rate(&self)->Option<f64>{
-        (0..self.r).filter(|&j|!self.kernel[j]&&self.theta[j].re<0.&&self.residuals[j]<=RITZ_CONVERGED*(-self.theta[j].re))
-            .map(|j|-self.theta[j].re).reduce(f64::min)
+    /// The decaying Ritz values outside the kernel (rate at least KERNEL:
+    /// slower ones are undamped precession), slowest first, at most `count`:
+    /// (index, rate).
+    pub fn slow_candidates(&self,count:usize)->Vec<(usize,f64)>{
+        let mut out:Vec<(usize,f64)>=(0..self.r).filter(|&j|!self.kernel[j]&&-self.theta[j].re>=KERNEL).map(|j|(j,-self.theta[j].re)).collect();
+        out.sort_by(|a,b|a.1.total_cmp(&b.1));out.truncate(count);out
+    }
+    /// Basis coefficients X s_j of a Ritz vector (complex).
+    pub fn ritz_coordinates(&self,j:usize)->Vec<C>{
+        let r=self.r;let k=self.x.len()/r.max(1);
+        (0..k).map(|i|(0..r).fold(ZERO,|acc,c|{let mut acc=acc;let v=self.x[i*r+c];let z=self.vectors[c*r+j];acc.re+=v*z.re;acc.im+=v*z.im;acc})).collect()
     }
     /// The error transform per pole xi (populations, n each): see the module
     /// documentation. It reads the test-space columns as dressed
-    /// coordinates (the test space in use).
+    /// coordinates (the test space in use). The residual enters through its
+    /// leading singular components in the dressed metric (TRANSFORM_RANK,
+    /// down to TRANSFORM_COMPONENT of the largest): T R = sum_i u_i v_i^T
+    /// with u_i = T R v_i, from the eigenvectors v_i of (T R)^T T R =
+    /// X^T M X - G0^T G - G^T G0 + G^T G (X^T K X = I, G0 = X^T H X).
     pub fn error_transform(&self,dressed:&Dressed,eigen:&BlockEigenbasis,lapack:&Lapack,points:&[C])->Result<Vec<Vec<C>>,String>{
         let(n,d,r,l)=(dressed.n,dressed.d,self.r,dressed.length);let k=dressed.covered;let count=points.len();
         if count==0{return Ok(vec![]);}
         let gemm=lapack.complex_gemm();
-        // G S (r x r complex), X (k x r real as complex).
-        let gs:Vec<C>=(0..r*r).map(|e|{let(i,j)=(e/r,e%r);(0..r).fold(ZERO,|acc,c|{let mut acc=acc;mul_add(&mut acc,C{re:self.g[i*r+c],im:0.},self.vectors[c*r+j]);acc})}).collect();
+        // The residual's leading components.
+        let xt=transpose_rows(&self.x,k,r);
+        let xmx=product(lapack,&xt,&product(lapack,&dressed.m,&self.x,k,k,r)?,r,k,r)?;
+        let g0=product(lapack,&xt,&product(lapack,&dressed.h,&self.x,k,k,r)?,r,k,r)?;
+        let(g0t,gt)=(transpose_rows(&g0,r,r),transpose_rows(&self.g,r,r));
+        let(a1,a2,a3)=(product(lapack,&g0t,&self.g,r,r,r)?,product(lapack,&gt,&g0,r,r,r)?,product(lapack,&gt,&self.g,r,r,r)?);
+        let gram:Vec<C>=(0..r*r).map(|e|C{re:xmx[e]-a1[e]-a2[e]+a3[e],im:0.}).collect();
+        let(values,vectors)=lapack.hermitian_eigen(&gram,r)?;
+        let top=values.iter().fold(0_f64,|a,&v|a.max(v));
+        let chosen:Vec<usize>=(0..r).rev().filter(|&j|values[j]>TRANSFORM_COMPONENT*TRANSFORM_COMPONENT*top).take(TRANSFORM_RANK).collect();
+        let p=chosen.len();if p==0{return Ok(vec![vec![ZERO;n];count]);}
+        // Real singular vectors (up to a phase per column), V (r x p).
+        let v:Vec<f64>={let mut v=vec![0.;r*p];for(c,&j)in chosen.iter().enumerate(){let col=&vectors[r*j..r*(j+1)];
+            let pivot=col.iter().copied().max_by(|a,b|magnitude(*a).total_cmp(&magnitude(*b))).unwrap_or(ONE);let s=magnitude(pivot).max(f64::MIN_POSITIVE);
+            let phase=C{re:pivot.re/s,im:-pivot.im/s};for i in 0..r{v[i*p+c]=mul(col[i],phase).re;}}v};
+        // u_i = T A W (X v_i) - T W (X G v_i) on every canonical mode (L x p).
+        let xv=product(lapack,&self.x,&v,k,r,p)?;let xgv=product(lapack,&self.x,&product(lapack,&self.g,&v,r,r,p)?,k,r,p)?;
+        let to_columns=|a:&[f64]|->Vec<C>{(0..k*p).map(|e|C{re:a[(e%k)*p+e/k],im:0.}).collect()};
+        let mut u=vec![ZERO;l*p];
+        gemm.multiply(l,p,k,ONE,&dressed.images,l,&to_columns(&xv),k,ZERO,&mut u,l)?;
+        gemm.multiply(l,p,k,C{re:-1.,im:0.},&dressed.basis,l,&to_columns(&xgv),k,ONE,&mut u,l)?;
+        // V^T S diag(a) (p x r, complex).
+        let vs:Vec<C>=(0..p*r).map(|e|{let(i,j)=(e/r,e%r);let mut s=ZERO;for m in 0..r{mul_add(&mut s,C{re:v[m*p+i],im:0.},self.vectors[m*r+j]);}mul(s,self.used_coefficients[j])}).collect();
         let modes:Vec<(usize,bool)>=(0..dressed.canonical.len()).flat_map(|c|{let mirrored=dressed.canonical[c].1>1.;
             std::iter::once((c,false)).chain(mirrored.then_some((c,true)))}).collect();
         let parts=Execution::new()?.map(modes,|(c,mirror)|->Result<Vec<C>,String>{
             let(_,w,nu)=dressed.canonical[c];let nu=if mirror{-nu}else{nu};let unscale=1./w.sqrt();
-            // h = X S (a e / (xi - i nu - theta)), h' = X G S (...), k x count (column-major).
-            let(mut h,mut h2)=(vec![ZERO;k*count],vec![ZERO;k*count]);
-            for(p,&xi)in points.iter().enumerate(){
-                let coefficient:Vec<C>=(0..r).map(|j|{let den=C{re:xi.re-self.used_theta[j].re,im:xi.im-nu-self.used_theta[j].im};
-                    let s2=den.re*den.re+den.im*den.im;mul(self.used_coefficients[j],C{re:den.re/s2,im:-den.im/s2})}).collect();
-                let(mut v,mut v2)=(vec![ZERO;r],vec![ZERO;r]);
-                for i in 0..r{for j in 0..r{mul_add(&mut v[i],self.vectors[i*r+j],coefficient[j]);mul_add(&mut v2[i],gs[i*r+j],coefficient[j]);}}
-                for i in 0..k{let(mut a,mut b)=(ZERO,ZERO);for col in 0..r{let xv=self.x[i*r+col];a.re+=xv*v[col].re;a.im+=xv*v[col].im;b.re+=xv*v2[col].re;b.im+=xv*v2[col].im;}
-                    // A mirror mode's dressed block is the conjugate: conj(D) h = conj(D conj(h)).
-                    h[i+k*p]=if mirror{conj(a)}else{a};h2[i+k*p]=if mirror{conj(b)}else{b};}
+            // Coefficients of the components per point: (V^T S diag(a)) / (xi - i nu - theta), p x count.
+            let mut cm=vec![ZERO;p*count];
+            for(q,&xi)in points.iter().enumerate(){
+                let f:Vec<C>=(0..r).map(|j|{let den=C{re:xi.re-self.used_theta[j].re,im:xi.im-nu-self.used_theta[j].im};let s2=den.re*den.re+den.im*den.im;C{re:den.re/s2,im:-den.im/s2}}).collect();
+                for i in 0..p{let mut s=ZERO;for j in 0..r{mul_add(&mut s,vs[i*r+j],f[j]);}
+                    // A mirror mode's dressed block is the conjugate: conj(U) c = conj(U conj(c)).
+                    cm[i+p*q]=if mirror{conj(s)}else{s};}
             }
-            let mut y=vec![ZERO;d*count];
-            gemm.multiply(d,count,k,ONE,&dressed.images[c*d..],l,&h,k,ZERO,&mut y,d)?;
-            gemm.multiply(d,count,k,C{re:-1.,im:0.},&dressed.basis[c*d..],l,&h2,k,ONE,&mut y,d)?;
-            let mut out=vec![ZERO;n*count];
-            for(p,&xi)in points.iter().enumerate(){
-                let column:Vec<C>=y[p*d..(p+1)*d].iter().map(|z|{let z=scaled(*z,unscale);if mirror{conj(z)}else{z}}).collect();
-                let z=eigen.complex_coefficients(&column);
-                for(jj,&zj)in z.iter().enumerate(){if !nonzero(zj){continue;}let den=C{re:xi.re-eigen.lambda[jj].re,im:xi.im-eigen.lambda[jj].im};
-                    let s2=den.re*den.re+den.im*den.im;let f=mul(zj,C{re:den.re/s2,im:-den.im/s2});
-                    for i in 0..n{mul_add(&mut out[i+n*p],eigen.readout[i+n*jj],f);}}
+            let mut y=vec![ZERO;d*count];gemm.multiply(d,count,p,ONE,&u[c*d..],l,&cm,p,ZERO,&mut y,d)?;
+            // Complex eigen-coefficients scaled by 1/(xi - lambda), then the readout (n x d) by GEMM.
+            let mut z=vec![ZERO;d*count];
+            for(q,&xi)in points.iter().enumerate(){
+                let column:Vec<C>=y[q*d..(q+1)*d].iter().map(|e|{let e=scaled(*e,unscale);if mirror{conj(e)}else{e}}).collect();
+                for(jj,zj)in eigen.complex_coefficients(&column).into_iter().enumerate(){
+                    let den=C{re:xi.re-eigen.lambda[jj].re,im:xi.im-eigen.lambda[jj].im};let s2=den.re*den.re+den.im*den.im;
+                    z[jj+d*q]=mul(zj,C{re:den.re/s2,im:-den.im/s2});}
             }
+            let mut out=vec![ZERO;n*count];gemm.multiply(n,count,d,ONE,&eigen.readout,n,&z,d,ZERO,&mut out,n)?;
             Ok(out)
         });
         let mut total=vec![vec![ZERO;n];count];
-        for part in parts{let part=part?;for(p,row)in total.iter_mut().enumerate(){for(i,v)in row.iter_mut().enumerate(){add(v,part[i+n*p]);}}}
+        for part in parts{let part=part?;for(q,row)in total.iter_mut().enumerate(){for(i,v)in row.iter_mut().enumerate(){add(v,part[i+n*q]);}}}
         Ok(total)
     }
+}
+
+/// The slowest relaxation rate (1/us) and its residual (rad/us): resolved
+/// when the residual is within SLOW_ACCURACY of the rate, else a bound
+/// rate +- residual.
+#[derive(Clone,Copy,Debug)]
+pub struct SlowRate{pub rate:f64,pub residual:f64}
+impl SlowRate{
+    pub fn resolved(&self)->bool{self.residual<=SLOW_ACCURACY*self.rate}
+    /// Relaxation much longer than `longest` (at least SLOW_REACH times), as
+    /// certified by the bound.
+    pub fn beyond(&self,longest:f64)->bool{(self.rate+self.residual)*longest*SLOW_REACH<=1.}
 }

@@ -5,13 +5,24 @@
 //!    and its solves at the poles (`poles`).
 //! 2. One rational Krylov space from x0 (`space`): the bordered steady
 //!    column first, the translations through the gate active from the start,
-//!    then the ladder's poles in the order of the error transform (re-ranked
-//!    every RERANK solves; a pole that adds no direction leaves the ladder).
+//!    then the ladder's poles by their expected gain, re-ranked at every
+//!    checkpoint: sigma |p_err(xi)| (the error transform) times the share of its
+//!    own transform a pole's last solve removed (a pole whose solve did not
+//!    reduce it loses its turn; one never solved keeps the whole), per real
+//!    solve (a complex pole costs two); a pole that adds no direction leaves
+//!    the ladder. The slowest relaxation is an output too: while it is
+//!    neither resolved (residual within SLOW_ACCURACY of the rate) nor
+//!    bounded far beyond every output time, the real poles near its rate
+//!    gain priority: the best population gain (at least the tolerance) times
+//!    its relative need, by their log distance, and the share of the need
+//!    their last solve removed.
 //! 3. Every CHECKPOINT solves: the reduced model (`reduced`), its outputs
 //!    (trajectory on the grid, horizons, steady state, slowest relaxation,
 //!    conserved count) and the error estimate (`estimate_api`); accepted
-//!    when ACCEPTANCE_FACTOR x the largest bound is within the tolerance.
-//!    The ladder exhausted without acceptance is an error.
+//!    when ACCEPTANCE_FACTOR x the largest bound is within the tolerance; the
+//!    slowest relaxation is then reported resolved, or as the bound its
+//!    residual gives. The ladder exhausted, the solve budget or the basis
+//!    budget (BASIS_BYTES) spent without acceptance is an error.
 //!
 //! The conserved count is the reduced model's kernel (the conserved
 //! quantities x0 reaches), and the folded centre block's when the lattice is
@@ -20,17 +31,21 @@ use super::*;
 use super::charge_set::{self,ExplicitSet};
 use super::estimate_api::{ACCEPTANCE_FACTOR,Construct,ErrorEstimate,EstimateSetup,Outputs,ReducedView};
 use super::ledger::{self,EXPANSION_LIMIT,POPULATION_TOLERANCE,RemainderLedger};
-use super::reduced::{Dressed,Model};
+use super::reduced::{Dressed,Model,SLOW_ACCURACY,SlowRate};
 use super::poles::{InnerWork,Lattice,Pole};
-use super::space::{self,Column,Space};
+use super::space::{self,Column,SLOW_FLOOR,Space};
 
 /// The error estimate in use.
 pub const ESTIMATOR:Construct=super::estimate_placeholder::construct;
-/// Solves between checkpoints, and between re-rankings of the ladder.
+/// Slow Ritz values checked for the slowest relaxation.
+const SLOW_CANDIDATES:usize=6;
+/// Solves between checkpoints; the ladder is re-ranked at every checkpoint
+/// (from its reduced model) and whenever its queue runs out.
 const CHECKPOINT:usize=4;
-const RERANK:usize=2;
-/// Most solves of a request.
-const MAXIMUM_SOLVES:usize=64;
+/// Most solves of a request, and the basis memory (basis, images and their
+/// test-space columns).
+const MAXIMUM_SOLVES:usize=48;
+const BASIS_BYTES:usize=1<<30;
 /// Grid samples assumed for the ladder's top when a request has no grid,
 /// and the longest time of a request for the limit alone (us).
 const LADDER_SAMPLES:f64=200.;
@@ -50,7 +65,7 @@ pub struct Request<'a>{
 pub struct Checkpoint{
     pub solves:usize,pub columns:usize,pub dimension:usize,
     pub estimate:ErrorEstimate,pub accepted:bool,
-    pub growing:usize,pub reflected:usize,pub projected:usize,pub conserved:usize,pub slowest_rate:Option<f64>,
+    pub growing:usize,pub reflected:usize,pub projected:usize,pub conserved:usize,pub slowest:Option<SlowRate>,
     /// Raw outputs: trajectory rows, horizon rows, steady row.
     pub trajectory:Vec<Vec<f64>>,pub horizons:Vec<Vec<f64>>,pub steady:Vec<f64>,
     /// The solves so far (inner steps, block operations, ms) and the run's
@@ -73,7 +88,7 @@ pub struct Solution{
     pub horizon_fields:Vec<Vec<C>>,pub steady_field:Vec<C>,
     /// |A x| / |x| of the steady field (rad/us).
     pub steady_residual:f64,
-    pub estimate:ErrorEstimate,pub conserved:usize,pub slowest_rate:Option<f64>,
+    pub estimate:ErrorEstimate,pub conserved:usize,pub slowest:Option<SlowRate>,
     pub columns:Vec<Column>,pub checkpoints:Vec<Checkpoint>,
     pub dimension:usize,pub work:InnerWork,pub images:usize,
     pub ledger:RemainderLedger,pub timing:Timing,
@@ -85,6 +100,26 @@ pub fn simplex(values:&[f64])->Vec<f64>{
     let(mut sum,mut threshold)=(0.,0.);
     for(index,&value)in sorted.iter().enumerate(){sum+=value;let candidate=(sum-1.)/(index+1)as f64;if value>candidate{threshold=candidate;}else{break;}}
     values.iter().map(|x|(x-threshold).max(0.)).collect()
+}
+
+/// The slowest relaxation of a model: among its slowest decaying Ritz
+/// pairs (theta, W y) the least rate located by its residual
+/// |A W y - theta W y| / |W y| (at most the rate; the residual from the
+/// images, which keep its accuracy at slow rates), else the best located
+/// one.
+fn slowest(model:&Model,space:&Space,vectors:&super::krylov::Vectors)->Result<Option<SlowRate>,String>{
+    let candidates=model.slow_candidates(SLOW_CANDIDATES);if candidates.is_empty(){return Ok(None);}
+    let parts:Vec<Vec<f64>>=candidates.iter().flat_map(|&(j,_)|{let y=model.ritz_coordinates(j);[y.iter().map(|z|z.re).collect(),y.iter().map(|z|z.im).collect()]}).collect();
+    let basis:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();let images:Vec<&[C]>=space.images.iter().map(|v|v.as_slice()).collect();
+    let(w,aw)=(vectors.combinations(&basis,&parts)?,vectors.combinations(&images,&parts)?);
+    let found:Vec<SlowRate>=candidates.iter().enumerate().map(|(c,&(j,rate))|{
+        let theta=model.theta[j];let(wr,wi,ar,ai)=(&w[2*c],&w[2*c+1],&aw[2*c],&aw[2*c+1]);
+        // A W y - theta W y, real and imaginary parts.
+        let re:Vec<C>=(0..wr.len()).map(|e|C{re:ar[e].re-theta.re*wr[e].re+theta.im*wi[e].re,im:ar[e].im-theta.re*wr[e].im+theta.im*wi[e].im}).collect();
+        let im:Vec<C>=(0..wr.len()).map(|e|C{re:ai[e].re-theta.re*wi[e].re-theta.im*wr[e].re,im:ai[e].im-theta.re*wi[e].im-theta.im*wr[e].im}).collect();
+        let residual=(vectors.dot(&re,&re)+vectors.dot(&im,&im)).max(0.).sqrt()/(vectors.dot(wr,wr)+vectors.dot(wi,wi)).max(f64::MIN_POSITIVE).sqrt();
+        SlowRate{rate,residual}}).collect();
+    Ok(found.iter().copied().find(|s|s.residual<=s.rate).or_else(||found.iter().copied().min_by(|a,b|(a.residual/a.rate).total_cmp(&(b.residual/b.rate)))))
 }
 
 /// The reduced view of a model for the estimator.
@@ -119,17 +154,18 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     if ledger.expansion_parameter>EXPANSION_LIMIT{return Err(format!("Static fold expansion parameter {:e} above {EXPANSION_LIMIT:e}",ledger.expansion_parameter));}
     let modes=lattice.modes.clone();
     // 2. The space: translations, the steady column.
-    let mut space=Space::new(&mut lattice,initial)?;
+    let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*(op.modes.len()+op.canonical_count()))};
+    let mut space=Space::new(&mut lattice,initial,capacity)?;
     for s in charge_set::gated_steps(prepared,tolerance){if lattice.operator().index.contains_key(&s){space.activate(&mut lattice,&s)?;}}
     let outputs=Outputs{times,horizons:request.horizons,steady:true,groups:request.groups};
     let mut estimator=ESTIMATOR(EstimateSetup{prepared,lattice:&explicit.sets,outputs,ledger:&ledger,initial})?;
-    let points=space::ladder(eigen,initial,t1,longest,tolerance)?;let mut alive=vec![true;points.len()];
+    let(points,slow_points)=space::ladder(eigen,initial,t1,longest,tolerance)?;let mut alive=vec![true;points.len()];
     let mut dressed=Dressed::new(lattice.operator());
     timing.setup_ms=clock.elapsed().as_secs_f64()*1e3;
     space.solve(&mut lattice,Pole::Zero)?;
-    let(mut queue,mut age):(Vec<usize>,usize)=(Vec::new(),RERANK);
+    let mut queue:Vec<usize>=Vec::new();
     let mut checkpoints:Vec<Checkpoint>=Vec::new();
-    let lapack=&prepared.lapack;
+    let lapack=&prepared.lapack;let ops=super::krylov::Vectors::new(lattice.operator(),1)?;
     let mut checkpoint=|space:&Space,dressed:&mut Dressed,lattice:&mut Lattice<'_>,timing:&mut Timing,checkpoints:&mut Vec<Checkpoint>|->Result<(Model,Checkpoint),String>{
         let clock=Instant::now();
         dressed.ingest(lapack,eigen,&space.basis,&space.images)?;
@@ -144,36 +180,67 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
         let accepted=ACCEPTANCE_FACTOR*estimate.largest()<=tolerance;
         let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,accepted,
-            growing:model.growing,reflected:model.reflected,projected:model.projected,conserved:model.conserved(),slowest_rate:model.slowest_rate(),
+            growing:model.growing,reflected:model.reflected,projected:model.projected,conserved:model.conserved(),slowest:slowest(&model,space,&ops)?,
             trajectory,horizons,steady,inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
         checkpoints.push(point.clone());
         Ok((model,point))
     };
     let mut accepted:Option<Model>=None;
-    // The last checkpoint's model, reused by a re-ranking at the same solve.
+    // The last checkpoint's model, reused by the ranking at the same solve.
     let mut current:Option<(usize,Model)>=None;
+    // Per point: its last score, the score it had when last solved, and the
+    // share of its transform left after that solve; likewise the slowest
+    // relaxation's need when it was last solved and the share left.
+    let(mut score,mut solved_at,mut remaining)=(vec![0.;points.len()],vec![None::<f64>;points.len()],vec![0.;points.len()]);
+    let(mut slow_at,mut slow_remaining)=(vec![None::<f64>;points.len()],vec![0.;points.len()]);
+    // The slowest relaxation while it needs poles.
+    let mut slow_need:Option<SlowRate>=None;
     loop{
         let live:Vec<usize>=(0..points.len()).filter(|&i|alive[i]).collect();
-        let exhausted=live.is_empty()||space.solves()>=MAXIMUM_SOLVES;
+        let exhausted=live.is_empty()||space.solves()>=MAXIMUM_SOLVES||space.full();
         if exhausted||space.solves()%CHECKPOINT==0{
             let(model,point)=checkpoint(&space,&mut dressed,&mut lattice,&mut timing,&mut checkpoints)?;
             if let Some(o)=observer.as_mut(){o(&point);}
             if point.accepted{accepted=Some(model);break;}
             if exhausted{break;}
-            current=Some((space.solves(),model));
+            slow_need=point.slowest.filter(|s|!(s.resolved()||s.beyond(longest)));current=Some((space.solves(),model));queue.clear();
         }
-        // The next pole: the live points ranked by sigma |p_err(xi)|.
-        if queue.is_empty()||age>=RERANK{
+        // The next pole by its expected gain.
+        if queue.is_empty(){
             let clock=Instant::now();
             let model=match current.take(){Some((solves,model))if solves==space.solves()=>model,_=>{
                 dressed.ingest(lapack,eigen,&space.basis,&space.images)?;dressed.model(lapack,space.initial_norm,longest,tolerance)?}};
             let xis:Vec<C>=live.iter().map(|&i|points[i].sigma()).collect();
             let transform=model.error_transform(&dressed,eigen,lapack,&xis)?;
-            let mut scored:Vec<(usize,f64)>=live.iter().zip(&transform).map(|(&i,p)|(i,points[i].sigma().re*p.iter().map(|z|magnitude(*z)).fold(0.,f64::max))).collect();
-            scored.sort_by(|a,b|b.1.total_cmp(&a.1));queue=scored.into_iter().map(|x|x.0).collect();age=0;
+            for(&i,p)in live.iter().zip(&transform){if slow_points[i]{continue;}
+                score[i]=points[i].sigma().re*p.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
+                if let Some(before)=solved_at[i].take(){remaining[i]=if before>0.{(score[i]/before).min(1.)}else{1.};}
+            }
+            // Before the first checkpoint, the slowest relaxation of this model.
+            if checkpoints.is_empty(){slow_need=slowest(&model,&space,&ops)?.filter(|s|!(s.resolved()||s.beyond(longest)));}
+            let slow=slow_need;
+            // The slow relaxation's need and target: its rate once its
+            // residual locates it, else the slowest reach (the slow points
+            // reveal it).
+            let need=slow.map_or(0.,|s|(s.residual/(SLOW_ACCURACY*s.rate)).min(1.));
+            let reach=(0..points.len()).filter(|&i|slow_points[i]).map(|i|points[i].sigma().re).fold(SLOW_FLOOR.max(1./longest),f64::min);
+            let target=slow.map(|s|if s.residual<=s.rate{s.rate}else{reach});
+            for &i in &live{if let Some(before)=slow_at[i].take(){slow_remaining[i]=if before>0.{(need/before).min(1.)}else{1.};}}
+            // The slowest relaxation weighs as much as the best population
+            // gain (at least the tolerance) times its need.
+            let gain=|i:usize|->f64{if slow_points[i]{0.}else{score[i]*(1.-remaining[i])/points[i].copies()as f64}};
+            let weight=live.iter().map(|&i|gain(i)).fold(tolerance,f64::max);
+            let priority=|i:usize|->f64{
+                let bonus=match(target,points[i]){(Some(target),Pole::Real(sigma))=>{
+                    let distance=(sigma/target).ln();weight*need*(1.-slow_remaining[i])/(1.+distance*distance)}
+                    _=>0.};
+                gain(i)+bonus};
+            let mut ranked:Vec<(usize,f64)>=live.iter().map(|&i|(i,priority(i))).collect();
+            ranked.sort_by(|a,b|b.1.total_cmp(&a.1));queue=ranked.into_iter().map(|x|x.0).collect();
             timing.ordering_ms+=clock.elapsed().as_secs_f64()*1e3;
         }
-        let i=queue.remove(0);age+=1;if !alive[i]{continue;}
+        let i=queue.remove(0);if !alive[i]{continue;}
+        solved_at[i]=Some(score[i]);if slow_need.is_some(){slow_at[i]=Some(slow_need.map_or(0.,|s|(s.residual/(SLOW_ACCURACY*s.rate)).min(1.)));}
         if space.solve(&mut lattice,points[i])?==0{alive[i]=false;}
     }
     let Some(model)=accepted else{
@@ -186,7 +253,6 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     if let Some(first)=trajectory.first_mut(){*first=(0..n).map(|i|initial[i*n+i].re).collect();}
     let projected:Vec<Vec<f64>>=trajectory.iter().map(|p|simplex(p)).collect();
     let projection=trajectory.iter().zip(&projected).map(|(a,b)|ledger::metric(a,b,request.groups)).fold(0.,f64::max);
-    let ops=super::krylov::Vectors::new(lattice.operator(),1)?;
     let field=|u:&[f64],images:bool|->Result<Vec<C>,String>{
         let coefficients=model.coordinates(u);let source:Vec<&[C]>=if images{space.images.iter().map(|v|v.as_slice()).collect()}else{space.basis.iter().map(|v|v.as_slice()).collect()};
         Ok(ops.combinations(&source,&[coefficients])?.remove(0))};
@@ -197,7 +263,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     let conserved=if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{last.conserved};
     timing.solves_ms=work.milliseconds;timing.images_ms=space.images_ms;timing.dressed_ms=dressed.milliseconds;timing.total_ms=started.elapsed().as_secs_f64()*1e3;
     Ok(Solution{modes,translations:space.translations(),trajectory:projected,projection,horizons:last.horizons.clone(),steady:last.steady.clone(),
-        horizon_fields,steady_field,steady_residual,estimate:last.estimate.clone(),conserved,slowest_rate:last.slowest_rate,
+        horizon_fields,steady_field,steady_residual,estimate:last.estimate.clone(),conserved,slowest:last.slowest,
         columns:space.columns.clone(),dimension:model.r,images:space.basis.len(),work,ledger:ledger.clone(),timing,checkpoints,explicit:explicit.clone()})
 }
 
@@ -241,7 +307,7 @@ mod tests{
         let column:Vec<f64>=(0..n).map(|i|w[0][op.centre*d+i*n+i].re/trace).collect();
         let tight=ledger::metric(&exact,&column,&groups);assert!(tight<1e-10,"bordered column {tight:e}");
         let steady=ledger::metric(&exact,&s.steady,&groups);assert!(steady<1e-4,"steady {steady:e}");
-        assert!(s.conserved==1&&s.slowest_rate.is_some());
+        assert!(s.conserved==1&&s.slowest.is_some());
         // Projected rows: probabilities, the first one rho0's.
         assert!(s.trajectory.iter().all(|r|r.iter().all(|&v|v>=0.)&&(r.iter().sum::<f64>()-1.).abs()<1e-12)&&s.trajectory[0][0]==1.);
     }

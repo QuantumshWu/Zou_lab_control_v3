@@ -186,7 +186,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
                 "applyMs":w.timing.apply_ms,"preconditionMs":w.timing.precondition_ms,"orthogonalizeMs":w.timing.orthogonalize_ms},
             "checkpoints":s.checkpoints.iter().map(|c|json!({"solves":c.solves,"columns":c.columns,"dimension":c.dimension,"accepted":c.accepted,
                 "trajectory":c.estimate.trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"horizons":c.estimate.horizons,"steady":c.estimate.steady,
-                "growing":c.growing,"reflected":c.reflected,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest_rate,
+                "growing":c.growing,"reflected":c.reflected,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest.map(|s|s.rate),
                 "estimateMs":c.estimate.work.milliseconds,"ms":c.milliseconds})).collect::<Vec<_>>(),
             "ledger":{"nuFreeze":l.nu_freeze,"thirdOrder":l.third_order,"farShell":l.far_shell,"tail":l.tail,"omittedCross":l.omitted_cross,
                 "nonStructural":l.non_structural,"droppedEntries":l.dropped_entries,"total":l.total(),"fold":l.fold,"expansionParameter":l.expansion_parameter},
@@ -201,7 +201,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
         "fold":{"farSources":f.far_sources,"columns":f.columns,"restBound":f.rest_bound,"chargedTruncation":f.truncation,
             "series":f.series.iter().map(|(q,rho,order)|json!({"charge":q,"ratio":rho,"orders":order})).collect::<Vec<_>>(),"milliseconds":f.milliseconds,
             "phaseMs":{"columns":f.phase_ms[0],"storage":f.phase_ms[1]},"targets":targets},
-        "floquet":floquet,"eigenbasisMs":prepared.eigenbasis().map_or(0.,|e|e.milliseconds),"run":run})
+        "floquet":floquet,"eigenbasis":prepared.eigenbasis().ok().map(|e|json!({"milliseconds":e.milliseconds,"blocks":e.blocks,"largestBlock":e.largest_block,"condition":e.condition})),"run":run})
 }
 
 /// One run of the pipeline for a request: the grid (empty for a mean
@@ -262,7 +262,10 @@ fn mean_value(model:&Model,options:&Options,request:&Prepared,run:Result<&Soluti
             "asymptoticAccuracy":{"requestedTolerance":POPULATION_TOLERANCE,"estimatedMaximumError":estimated,"acceptanceFactor":ACCEPTANCE_FACTOR,
                 "projectionCharge":projection,"metric":"max over states and requested F groups"},
             "zeroModeCount":solution.conserved,"conservedQuantities":solution.conserved,
-            "slowestRatePerUs":solution.slowest_rate,"slowestRelaxationUs":solution.slowest_rate.map(|r|1./r),
+            "slowestRatePerUs":solution.slowest.map(|s|s.rate),"slowestRelaxationUs":solution.slowest.map(|s|1./s.rate),
+            "slowestRelaxation":solution.slowest.map(|s|json!({"ratePerUs":s.rate,"residualPerUs":s.residual,"resolved":s.resolved(),
+                "relaxationRangeUs":[1./(s.rate+s.residual),if s.rate>s.residual{Some(1./(s.rate-s.residual))}else{None}],
+                "rule":"the decaying Ritz value of least rate outside the kernel; resolved when its residual is within a tenth of the rate, else the range from the residual"})),
             "discardedOpticalCoherence":discarded,"horizonRelaxingBound":relaxing,
             "preparationMs":preparation,"lattice":lattice_json(prepared,Some(solution))}}))
 }
@@ -440,7 +443,7 @@ mod tests{
                 r.sort_by(f64::total_cmp);if r.is_empty(){vec![]}else{vec![r[r.len()/20],r[r.len()/2],r[(r.len()*19)/20]]}});
             let line=json!({"solves":c.solves,"columns":c.columns,"dimension":c.dimension,"accepted":c.accepted,"estTraj":est_traj,"estH":c.estimate.horizons,"estSteady":c.estimate.steady,
                 "errTraj":error_traj.as_ref().map(|e|e.0),"errTrajAt":error_traj.as_ref().map(|e|e.1),"errH":error_h,"errSteady":error_s,"estOverErrQuantiles":ratio,
-                "growing":c.growing,"reflected":c.reflected,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest_rate,"ms":c.milliseconds,
+                "growing":c.growing,"reflected":c.reflected,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest.map(|s|s.rate),"slowestResidual":c.slowest.map(|s|s.residual),"ms":c.milliseconds,
                 "operatorWork":c.inner.operator_work,"innerSteps":c.inner.steps,"innerMs":c.inner.milliseconds,"applyMs":c.inner.timing.apply_ms,"preconditionMs":c.inner.timing.precondition_ms,"orthogonalizeMs":c.inner.timing.orthogonalize_ms,"batchMs":c.inner.batch_ms,"blockOperations":c.inner.block_operations(),
                 "timingMs":{"explicitSet":c.timing.explicit_set_ms,"setup":c.timing.setup_ms,"dressed":c.timing.dressed_ms,"model":c.timing.model_ms,"ordering":c.timing.ordering_ms,"estimate":c.timing.estimate_ms},
                 "elapsedMs":started.elapsed().as_secs_f64()*1e3,"trajectoryNorm":c.trajectory.iter().map(|p|ledger::metric(p,&zero,&groups)).fold(0_f64,f64::max)});
@@ -450,7 +453,7 @@ mod tests{
         let total_ms=started.elapsed().as_secs_f64()*1e3;
         match result{
             Ok(s)=>println!("{}",json!({"summary":true,"prepareMs":prepare_ms,"totalMs":total_ms,"lattice":lattice_json(&prepared.lattice,Some(&s))["run"],
-                "conserved":s.conserved,"slowestRate":s.slowest_rate,"steadyResidual":s.steady_residual})),
+                "conserved":s.conserved,"slowestRate":s.slowest.map(|x|x.rate),"slowestResidual":s.slowest.map(|x|x.residual),"steadyResidual":s.steady_residual})),
             Err(e)=>println!("{}",json!({"summary":true,"error":e,"totalMs":total_ms})),
         }
     }

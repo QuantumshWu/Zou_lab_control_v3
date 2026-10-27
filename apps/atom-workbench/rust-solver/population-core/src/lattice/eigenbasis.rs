@@ -29,6 +29,11 @@
 //! product of the reduced model. The adjoint solves give the norm of a
 //! block's resolvent (`resolvent_norm`, the ring condition).
 //!
+//! The decomposition runs per connected block of the real matrix (the
+//! elements its nonzero entries connect: exact zeros exploited for speed
+//! only, the result is the full eigendecomposition): E_R and E_R^-1 are
+//! block diagonal up to the permutation.
+//!
 //! The basis is request-level (`LatticePrepared::eigenbasis`): computed once,
 //! shared by every pipeline that needs it.
 use super::*;
@@ -55,6 +60,8 @@ pub struct BlockEigenbasis{
     pub readout:Vec<C>,
     /// |E_R|_1 |E_R^-1|_1.
     pub condition:f64,
+    /// Connected blocks and the largest one.
+    pub blocks:usize,pub largest_block:usize,
     pub milliseconds:f64,
 }
 
@@ -99,8 +106,27 @@ impl BlockEigenbasis{
             put(k+1,a.iter().zip(&b).map(|(x,y)|C{re:-r*(x.im-y.im),im:r*(x.re-y.re)}).collect());
             k+=2;}}
         drop(l);
-        let(re,im,vectors)=lapack.eigen(&real,d)?;drop(real);
-        if vectors.iter().any(|v|!v.is_finite()){return Err("Nonfinite centre-generator eigenvectors".into());}
+        // Connected blocks: union-find over the nonzero entries, each block's
+        // elements ascending, the blocks by their first element.
+        fn root(parent:&mut[usize],mut i:usize)->usize{while parent[i]!=i{parent[i]=parent[parent[i]];i=parent[i];}i}
+        let mut parent:Vec<usize>=(0..d).collect();
+        for k in 0..d{for i in 0..d{if i!=k&&real[i+d*k]!=0.{let(a,b)=(root(&mut parent,i),root(&mut parent,k));if a!=b{parent[a.max(b)]=a.min(b);}}}}
+        let mut groups:BTreeMap<usize,Vec<usize>>=BTreeMap::new();
+        for i in 0..d{let r=root(&mut parent,i);groups.entry(r).or_default().push(i);}
+        let(mut re,mut im,mut vectors,mut inverse)=(vec![0.;d],vec![0.;d],vec![0.;d*d],vec![0.;d*d]);
+        let mut column=0;let largest_block=groups.values().map(|g|g.len()).max().unwrap_or(0);
+        for members in groups.values(){
+            let b=members.len();let mut sub=vec![0.;b*b];
+            for(c,&k)in members.iter().enumerate(){for(i,&row)in members.iter().enumerate(){sub[i+b*c]=real[row+d*k];}}
+            let(br,bi,bv)=lapack.eigen(&sub,b)?;
+            let(lu,pivots)=lapack.factor(&bv,b)?;let mut identity=vec![0.;b*b];for i in 0..b{identity[i+b*i]=1.;}
+            let bw=lapack.solve_matrix_factored(&lu,&pivots,&identity,b)?;
+            for c in 0..b{re[column+c]=br[c];im[column+c]=bi[c];
+                for(i,&row)in members.iter().enumerate(){vectors[row+d*(column+c)]=bv[i+b*c];inverse[(column+c)+d*row]=bw[c+b*i];}}
+            column+=b;
+        }
+        drop(real);
+        if vectors.iter().chain(&inverse).any(|v|!v.is_finite()){return Err("Nonfinite centre-generator eigenvectors".into());}
         let mut kind=vec![0_u8;d];let mut lambda=vec![ZERO;d];let mut j=0;
         while j<d{
             if im[j]!=0.&&j+1<d{kind[j]=1;kind[j+1]=2;lambda[j]=C{re:re[j],im:im[j]};lambda[j+1]=C{re:re[j],im:-im[j]};j+=2;}
@@ -109,12 +135,9 @@ impl BlockEigenbasis{
         let mut readout=vec![ZERO;n*d];
         for i in 0..n{for j in 0..d{let v=vectors[i+d*j];
             readout[i+n*j]=match kind[j]{0=>C{re:v,im:0.},1=>C{re:v,im:vectors[i+d*(j+1)]},_=>C{re:vectors[i+d*(j-1)],im:-v}};}}
-        let(lu,pivots)=lapack.factor(&vectors,d)?;
-        let mut identity=vec![0.;d*d];for i in 0..d{identity[i+d*i]=1.;}
-        let inverse=lapack.solve_matrix_factored(&lu,&pivots,&identity,d)?;
         let one=|a:&[f64]|(0..d).map(|c|a[c*d..(c+1)*d].iter().map(|x|x.abs()).sum::<f64>()).fold(0.,f64::max);
         let condition=one(&vectors)*one(&inverse);
-        Ok(Self{n,d,lapack:Arc::clone(lapack),lambda,vectors,inverse,kind,readout,condition,milliseconds:clock.elapsed().as_secs_f64()*1e3})
+        Ok(Self{n,d,lapack:Arc::clone(lapack),lambda,vectors,inverse,kind,readout,condition,blocks:groups.len(),largest_block,milliseconds:clock.elapsed().as_secs_f64()*1e3})
     }
     /// x_k <- (L0' - i nu_k - shift)^-1 x_k for row-major blocks x_k (exact;
     /// see the module documentation), spread over the workers.
