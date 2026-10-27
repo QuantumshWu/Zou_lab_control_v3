@@ -192,28 +192,35 @@ export class Field {
         select.addEventListener("change", () => {
             const value = select.value === "@scope" ? this.spec.cycle.value : JSON.parse(select.value);
             this.submit(value);
+            // Scope picked from the list comes back armed (v2 _restore_collapsed_focus); the pick is
+            // heard while the focus is still on its row.
+            this.setCycleActive(select.contains(document.activeElement) && this.cycleSelected());
         });
         // FluentCycleComboBox: with Scope chosen the box says "Scope: <value>";
         // a click on its words (not the arrow) arms the wheel, which then steps
-        // the coordinate while the box has the focus; the arrow opens the list.
+        // the coordinate while the box has the focus and the pointer; the arrow
+        // opens the list and disarms it, as do Esc and leaving the box.
         select.addEventListener("mousedown", event => {
             if (event.button !== 0 || !this.cycleSelected())
                 return;
             const rect = select.getBoundingClientRect();
-            if (event.clientX >= rect.right - parseFloat(getComputedStyle(select).paddingRight))
+            if (event.clientX >= rect.right - parseFloat(getComputedStyle(select).paddingRight)) {
+                this.setCycleActive(false);
                 return;
+            }
             event.preventDefault();
             select.focus();
             this.setCycleActive(!this.cycleActive);
         });
         select.addEventListener("click", event => { if (this.cycleSelected() && document.activeElement === select && !select.matches(":open"))
             event.preventDefault(); });
+        // v2 wheelEvent: a notch down is the next coordinate, up the one before; the ends stop it (the owner clamps).
         select.addEventListener("wheel", event => {
-            if (!this.cycleActive || document.activeElement !== select || event.deltaY === 0)
+            if (!this.cycleActive || document.activeElement !== select || select.matches(":open") || event.deltaY === 0)
                 return;
             event.preventDefault();
             const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 100 / 3 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 300 : 1;
-            this.cycleWheel += -event.deltaY * unit;
+            this.cycleWheel += event.deltaY * unit;
             const notches = Math.trunc(this.cycleWheel / 100);
             if (notches) {
                 this.cycleWheel -= notches * 100;
@@ -221,10 +228,18 @@ export class Field {
             }
         }, { passive: false });
         select.addEventListener("keydown", event => {
-            if (!this.cycleActive || (event.key !== "ArrowUp" && event.key !== "ArrowDown"))
+            if (!this.cycleActive || select.matches(":open"))
+                return;
+            if (event.key === "Escape") {
+                this.setCycleActive(false);
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
+            if (event.key !== "ArrowUp" && event.key !== "ArrowDown")
                 return;
             event.preventDefault();
-            this.stepScope(event.key === "ArrowUp" ? 1 : -1);
+            this.stepScope(event.key === "ArrowDown" ? 1 : -1);
         });
         select.addEventListener("blur", () => this.setCycleActive(false));
         return select;
@@ -290,10 +305,10 @@ export class Field {
             this.showValue();
         const cycle = spec.cycle;
         if (this.input instanceof HTMLSelectElement && cycle) {
-            const option = [...this.input.options].find(option => option.value === "@scope");
-            const text = cycle.index === null ? "Scope" : `Scope: ${cycle.label}`;
-            if (option && option.text !== text)
-                option.text = text;
+            // The coordinate Scope holds, after the row's "Scope" (the box redraws it: comboFace).
+            const at = [...this.input.options].find(option => option.value === "@scope")?.querySelector(".cycle-at");
+            if (at)
+                setText(at, cycle.index === null ? "" : `: ${cycle.label}`);
             setTitle(this.input, reason || (cycle.index === null ? "" : `Scope: ${cycle.label} · click the words, then scroll or use ↑ / ↓ to change the coordinate (${cycle.count} values)`));
         }
         if (!this.cycleSelected())
@@ -304,21 +319,32 @@ export class Field {
     reason() {
         return this.spec.unavailable_reason || (this.spec.enabled === false ? "Not used with the current settings" : "");
     }
+    /** The box shows Scope (the owner's, or a pick on its way to it) over more than one coordinate. */
     cycleSelected() {
-        const cycle = this.spec.cycle;
-        return this.input instanceof HTMLSelectElement && !this.input.disabled && Boolean(cycle) && cycle.index !== null && cycle.count > 1;
+        return this.input instanceof HTMLSelectElement && !this.input.disabled && this.input.value === "@scope" && (this.spec.cycle?.count ?? 0) > 1;
     }
     setCycleActive(active) {
         this.cycleActive = active;
         this.cycleWheel = 0;
-        if (this.input instanceof HTMLSelectElement)
-            this.input.classList.toggle("cycle-active", active);
+        if (!(this.input instanceof HTMLSelectElement))
+            return;
+        this.input.classList.toggle("cycle-active", active);
+        // v2 eventFilter: while armed, a press anywhere else disarms it, whether or not it takes the focus.
+        if (active)
+            document.addEventListener("pointerdown", this.pressElsewhere, true);
+        else
+            document.removeEventListener("pointerdown", this.pressElsewhere, true);
     }
+    pressElsewhere = (event) => {
+        if (!(event.target instanceof Node && this.input.contains(event.target)))
+            this.setCycleActive(false);
+    };
     updateChoices() {
         const choices = this.spec.kind === "boolean" ? [[false, "Off"], [true, "On"]] : [...(this.spec.choices || [])];
         if (this.spec.allow_none && !this.automatic && !choices.some(([value]) => value === null))
             choices.unshift([null, this.spec.placeholder || "(none)"]);
-        const held = this.spec.value;
+        // A coordinate Scope holds is the Scope row's, never a choice nobody offers.
+        const held = this.spec.cycle && this.spec.cycle.index !== null ? null : this.spec.value;
         if (held !== null && held !== "" && !choices.some(([value]) => encode(value) === encode(held))) {
             choices.push([held, `${String(held)} (unavailable)`]);
         }
@@ -329,9 +355,13 @@ export class Field {
         const select = this.input;
         const current = select.value;
         const options = choices.map(([value, label]) => new Option(label, encode(value)));
-        if (this.spec.cycle)
-            options.push(new Option("Scope", "@scope"));
-        select.replaceChildren(this.face ??= comboFace(), ...options);
+        if (this.spec.cycle) {
+            // v2 FluentCycleComboBox: one "Scope" row in the list; its coordinate is said on the closed box only (fluent.css .cycle-at).
+            const scope = new Option("Scope", "@scope");
+            scope.append(element("span", "cycle-at"));
+            options.push(scope);
+        }
+        select.replaceChildren(this.face ??= comboFace(select), ...options);
         select.value = current;
         hintWidest(select, options.map(option => option.text), this.spec.minimum_contents ?? 0);
     }
@@ -494,6 +524,10 @@ export class Field {
         this.root.classList.add("pending");
     }
     stepScope(steps) {
+        // v2: the ends stop the wheel; at one, nothing is asked past it.
+        const cycle = this.spec.cycle;
+        if (!this.pending && cycle?.index != null && (steps < 0 ? cycle.index === 0 : cycle.index === cycle.count - 1))
+            return;
         const id = this.handlers.scope?.(steps, this.spec);
         if (id === undefined)
             return;

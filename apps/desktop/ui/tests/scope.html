@@ -1,0 +1,136 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Scope regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<div id="host"></div>
+<script type="module">
+// Run with tools/test_ui.ps1. v2 test_settings_layout's Scope cases (FluentCycleComboBox) and PanelCardView._band_fragments,
+// on the real board under the real style sheet: the closed box says the coordinate the owner shows, the card's strip
+// names it, and the armed wheel steps it as v2's does. Every command the board sends is recorded.
+import {PanelBoard} from '../dist/views/board.js';
+import {ComboBox} from '../dist/fluent/combo.js';
+import {TreeCombo} from '../dist/fluent/tree_combo.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+const check=async(name,test)=>{await test();results.push(name)};
+// Observers and the strip's fitting run after the change that asked for them.
+const settle=()=>new Promise(resolve=>setTimeout(resolve));
+const sent=[];
+const transport={send:command=>{sent.push(command);return 1000+sent.length},post:()=>{},report:error=>{throw error}};
+const board=new PanelBoard(transport);
+document.getElementById('host').append(board.root);
+const REPEAT='fate:repeat:frames.repeat', FRAME='fate:point:frames.frame';
+// One fate row as the owner projects it (zlc-plot panel_controls): `index` null is not scoped.
+const fate=(name,label,index,count)=>({section:'semantic',name,label,kind:'choice',value:index===null?'reduce':['scope-value',index],
+  choices:[['reduce','(reduced)'],['facet','Facet']],allow_none:false,unavailable_reason:'',
+  cycle:{count,index,label:String(index??0),value:['scope-value',index??0]}});
+const accept=(repeat,frame=null,request)=>board.accept({type:'state',request,board:{panels:[],frozen:{},paused:false,selectors:true},
+  panels:[{id:'S',kind:'image',display_size:{width:900,height:200},structure:[[['repeat',5]],[['frame',3]],[['spatial-y',372],['spatial-x',460]]],
+    controls:[fate(REPEAT,'repeat',repeat,5),fate(FRAME,'frame',frame,3)]}]});
+const view=()=>board.views.get('S');
+const select=name=>view().fields.get(`semantic:${name}`).input;
+const face=name=>select(name).querySelector('selectedcontent').textContent;
+const axesLine=()=>view().kind.title.split('\n')[1];
+const pinned=text=>[...view().kind.querySelectorAll('span')].find(span=>span.textContent===text);
+const press=(target,x)=>{const r=target.getBoundingClientRect();target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0,clientX:x??r.left+10,clientY:r.top+r.height/2}))};
+const wheel=(target,deltaY)=>{const r=target.getBoundingClientRect();const event=new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY,deltaMode:0,clientX:r.left+10,clientY:r.top+r.height/2});target.dispatchEvent(event);return event.defaultPrevented};
+const key=(target,name)=>target.dispatchEvent(new KeyboardEvent('keydown',{key:name,bubbles:true,cancelable:true}));
+const steps=()=>sent.filter(command=>command.action==='scope_step').map(command=>[command.name,command.steps]);
+try {
+ accept(1);
+ view().settingButton.click();
+ await settle();
+ await check('the closed box says the coordinate Scope shows, and follows the owner',async()=>{
+   equal(face(REPEAT),'Scope: 1','projected');
+   equal(face(FRAME),'(reduced)','an ordinary fate');
+   const rows=[...select(REPEAT).options];
+   accept(3);
+   await settle();
+   equal(face(REPEAT),'Scope: 3','the owner moved it');
+   // The coordinate is the Scope row's: no row of its own, and the list is not refilled per step.
+   equal([...select(REPEAT).options].map(option=>option.value),['"reduce"','"facet"','@scope'],'the rows');
+   assert([...select(REPEAT).options].every((option,at)=>option===rows[at]),'the list was refilled');
+   // v2: the list's row is the one action "Scope"; its coordinate belongs to the closed box.
+   const coordinate=node=>getComputedStyle(node.querySelector('.cycle-at')).display;
+   equal(coordinate([...select(REPEAT).options].find(option=>option.value==='@scope')),'none','the list row says the coordinate');
+   assert(coordinate(select(REPEAT).querySelector('selectedcontent'))!=='none','the box hides the coordinate');
+ });
+ await check('the strip names what the panel has pinned, in its axis\'s colour',async()=>{
+   equal(axesLine(),'(repeat) × (frame) × (spatial-y × spatial-x), repeat=3','one scope');
+   assert(pinned('repeat=3')?.classList.contains('domain-repeat'),'repeat=3 is not in the Repeat colour');
+   accept(3,2);
+   await settle();
+   equal(axesLine(),'(repeat) × (frame) × (spatial-y × spatial-x), repeat=3, frame=2','two scopes');
+   assert(pinned('frame=2')?.classList.contains('domain-point'),'frame=2 is not in the Point colour');
+   equal(face(FRAME),'Scope: 2','the second box');
+   accept(3);
+   await settle();
+   equal(axesLine(),'(repeat) × (frame) × (spatial-y × spatial-x), repeat=3','the second let go');
+ });
+ await check('an ordinary fate never takes the wheel; Scope\'s words arm it, a notch down is the next coordinate',async()=>{
+   const box=select(REPEAT);
+   assert(!wheel(select(FRAME),100),'an ordinary fate took the wheel');
+   box.focus();
+   assert(!wheel(box,100),'an unarmed Scope took the wheel');
+   press(box);
+   assert(box.classList.contains('cycle-active'),'the words did not arm it');
+   assert(wheel(box,100)&&wheel(box,-100),'the armed wheel was not taken');
+   assert(wheel(box,40)&&!steps().some(([,n])=>Math.abs(n)!==1),'a part notch stepped');
+   equal(steps(),[[REPEAT,1],[REPEAT,-1]],'down then up');
+   key(box,'ArrowDown');key(box,'ArrowUp');
+   equal(steps().slice(2),[[REPEAT,1],[REPEAT,-1]],'↓ then ↑');
+   // The step's answer is drawn on the box at once, while its row still waits.
+   accept(4,null,1000+sent.length);
+   await settle();
+   equal(face(REPEAT),'Scope: 4','the stepped coordinate');
+   assert(box.classList.contains('cycle-active'),'a live refresh disarmed it');
+   // The last coordinate: the wheel is still taken (no page scroll) and nothing is asked past it.
+   assert(wheel(box,100),'the end gave the wheel to the page');
+   equal(steps().length,4,'a step past the end');
+ });
+ await check('Esc, a second click on the words, the arrow, a press elsewhere and leaving the box disarm it',async()=>{
+   const box=select(REPEAT),r=box.getBoundingClientRect();
+   // A press that takes no focus (the frame's caption cancels its own) still disarms it (v2 eventFilter).
+   view().settings.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0}));
+   assert(!box.classList.contains('cycle-active')&&document.activeElement===box,'a press elsewhere');
+   press(box);
+   key(box,'Escape');
+   assert(!box.classList.contains('cycle-active')&&!wheel(box,100),'Esc');
+   press(box);press(box);
+   assert(!box.classList.contains('cycle-active'),'a second click');
+   press(box);press(box,r.right-2);
+   assert(!box.classList.contains('cycle-active'),'the arrow');
+   press(box);box.blur();
+   assert(!box.classList.contains('cycle-active'),'leaving the box');
+ });
+ await check('Scope picked from the list comes back armed',async()=>{
+   accept(null);
+   await settle();
+   const box=select(REPEAT);
+   equal(face(REPEAT),'(reduced)','not scoped');
+   box.focus();box.value='@scope';box.dispatchEvent(new Event('change',{bubbles:true}));
+   equal(sent.at(-1),{action:'configure',panel:'S',semantic:{[REPEAT]:['scope-value',0]}},'the pick');
+   assert(box.classList.contains('cycle-active'),'not armed');
+   accept(0,null,1000+sent.length);
+   await settle();
+   equal(face(REPEAT),'Scope: 0','accepted');
+   assert(box.classList.contains('cycle-active'),'the answer disarmed it');
+ });
+ await check('every combo box redraws a picked row whose words change',async()=>{
+   const combo=new ComboBox(()=>{});document.body.append(combo.root);
+   combo.setChoices([[1,'one'],[2,'two']]);combo.value=2;await settle();
+   equal(combo.root.querySelector('selectedcontent').textContent,'two','picked');
+   combo.root.selectedOptions[0].text='two, again';await settle();
+   equal(combo.root.querySelector('selectedcontent').textContent,'two, again','renamed');
+   const tree=new TreeCombo(()=>{});document.body.append(tree.root);
+   tree.setTree([{heading:'h',leaves:[{key:'a',label:'a',text:'h · a'}]}],'','Off');await settle();
+   equal(tree.root.querySelector('selectedcontent').textContent,'Off','none row');
+   tree.setTree([{heading:'h',leaves:[{key:'a',label:'a',text:'h · a'}]}],'','(none)');await settle();
+   equal(tree.root.querySelector('selectedcontent').textContent,'(none)','none row renamed');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+</script>

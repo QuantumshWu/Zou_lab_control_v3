@@ -231,7 +231,7 @@
   --info-indent: calc(max(14px, round(calc(18px * var(--fluent)), 1px)) * var(--qt));        /* InfoTree indentation */
   --info-pad: calc(max(3px, round(calc(5px * var(--fluent)), 1px)) * var(--qt));            /* InfoTree item padding */
   --item-view-extra: calc(2px * var(--qt));   /* QWindowsVistaStyle CT_ItemViewItem: every item view row 2 px taller */
-  --install-state-w: calc(max(96px, round(calc(120px * var(--fluent)), 1px)) * var(--qt)); /* Installation@: a component's state column */
+  --install-state-w: calc(max(128px, round(calc(160px * var(--fluent)), 1px)) * var(--qt)); /* Installation@: a component's state column ("Not checked online") */
   --info-pane-extra: calc(max(220px, round(calc(280px * var(--fluent)), 1px)) * var(--qt));  /* label column + this = pane width */
   --path-min: calc(max(72px, round(calc(96px * var(--fluent)), 1px)) * var(--qt));          /* FluentPathEdit field floor */
   --logic-name-w: calc(max(150px, round(calc(200px * var(--fluent)), 1px)) * var(--qt));    /* LogicRowView name column */

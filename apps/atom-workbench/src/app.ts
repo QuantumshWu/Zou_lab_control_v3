@@ -390,7 +390,7 @@ function selectControl(parent:HTMLElement,label:string,value:string,options:[str
   if(label==='参考态'){
     const tree=new TreeCombo(changed);tree.setTree(stateTree(allLevels(),scene.references),value,'跟随动力学初态');tree.root.setAttribute('aria-label',label);treeOwners.set(tree.root,tree);const r=fieldRow(label,tree.root);r.classList.add('choice-field');parent.append(r);return tree.root;
   }
-  const el=element('select');el.setAttribute('aria-label',label);el.append(comboFace(),...options.map(([v,t])=>new Option(t,v)));el.value=value;el.onchange=()=>changed(el.value);const r=fieldRow(label,el);r.classList.add('choice-field');parent.append(r);return el;
+  const el=element('select');el.setAttribute('aria-label',label);el.append(comboFace(el),...options.map(([v,t])=>new Option(t,v)));el.value=value;el.onchange=()=>changed(el.value);const r=fieldRow(label,el);r.classList.add('choice-field');parent.append(r);return el;
 }
 function setChoiceValue(control:HTMLSelectElement,value:string):void{const tree=treeOwners.get(control);if(tree)tree.value=value;else control.value=value;}
 function disposeTrees(host:HTMLElement):void{host.querySelectorAll<HTMLSelectElement>('select.tree-combo').forEach(node=>treeOwners.get(node)?.dispose());}
@@ -530,7 +530,7 @@ function frequencySection(f:HTMLElement,object:DefinedFrequency,readout:Frequenc
 /** 初态 (ui-design.md §3): one description, edited here only -- a kind, then what that kind needs. */
 // Four kinds do not fit the scene panel side by side: a combo box.
 const initialKind={root:element('select','initial-kind'),setCurrent(kind:string){if(this.root.value!==kind)this.root.value=kind;}};
-initialKind.root.append(comboFace(),...INITIAL_KINDS.map(([kind,words])=>new Option(words,kind)));initialKind.root.setAttribute('aria-label','初态类型');
+initialKind.root.append(comboFace(initialKind.root),...INITIAL_KINDS.map(([kind,words])=>new Option(words,kind)));initialKind.root.setAttribute('aria-label','初态类型');
 initialKind.root.onchange=()=>{const kind=initialKind.root.value as InitialKind,levels=allLevels();applyInitial(startingSpec(kind,initialSpec(scene),levels));if(kind==='weights')void editInitialWeights();};
 const unpolarizedChoice=new Segmented(manifold=>applyInitial({kind:'unpolarized',manifold:manifold as UnpolarizedManifold}));
 unpolarizedChoice.setChoices(UNPOLARIZED);unpolarizedChoice.root.setAttribute('aria-label','未极化的流形');
@@ -827,7 +827,7 @@ function showSolverDetails():void{
 
 // The levels page's population row: what the cards are coloured by, the scale, the F totals and 计算.
 const populationMode$=element('select');populationMode$.id='population-mode';populationMode$.setAttribute('aria-label','能级布居着色');
-const populationModeFace=comboFace();populationMode$.append(populationModeFace,new Option('长期布居 p̄','steady'),new Option('指定时刻 p(t)','time'));
+const populationModeFace=comboFace(populationMode$);populationMode$.append(populationModeFace,new Option('长期布居 p̄','steady'),new Option('指定时刻 p(t)','time'));
 /** p̄(T)'s horizon: ∞ · 1 s · 100 ms (in the toolbar beside the mode). Changing it re-solves the mean only. */
 const HORIZONS:[string,number|null][]=[['inf',null],['1e6',1e6],['1e5',1e5]];
 const meanHorizon=new Segmented(value=>{dynamics().meanHorizonUs=HORIZONS.find(([key])=>key===value)![1];meanHorizon.setCurrent(value);update();});

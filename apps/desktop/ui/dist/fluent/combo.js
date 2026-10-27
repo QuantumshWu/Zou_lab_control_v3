@@ -30,18 +30,26 @@ export function hintWidest(select, labels, minimum = 0) {
         select.style.setProperty("--combo-min", value);
 }
 /** The closed box's words: the picked row's, ending in an ellipsis where the
- * box is narrower (v2 paints elidedText); first child of the select, kept there. */
-export function comboFace() {
+ * box is narrower (v2 paints elidedText); first child of `select`, kept there.
+ * The platform copies the row only when the pick changes: a picked row whose own
+ * words change (Scope's coordinate, a blank's words) is copied again here. */
+export function comboFace(select) {
     const face = element("button", "combo-face");
     face.type = "button";
-    face.append(document.createElement("selectedcontent"));
+    const shown = document.createElement("selectedcontent");
+    face.append(shown);
+    new MutationObserver(() => {
+        const picked = select.selectedOptions[0];
+        if (shown.textContent !== (picked?.textContent ?? ""))
+            shown.replaceChildren(...[...picked?.childNodes ?? []].map(node => node.cloneNode(true)));
+    }).observe(select, { subtree: true, childList: true, characterData: true });
     return face;
 }
 export class ComboBox {
     changed;
     placeholder;
     root = element("select");
-    face = comboFace();
+    face = comboFace(this.root);
     signature = "";
     current = null;
     minimum = 0;
