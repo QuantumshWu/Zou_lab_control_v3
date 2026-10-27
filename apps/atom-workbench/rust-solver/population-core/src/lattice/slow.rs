@@ -15,8 +15,9 @@
 //! also needs eigenvectors, so it takes more steps at a tighter tolerance.
 //! An eigenvalue counts (conserved quantities, the slowest relaxation,
 //! artifacts) once stable between the last two Arnoldi steps or resolved:
-//! its eigenvector's residual |A r - lambda r| / (|lambda| |r|) is at most
-//! RESIDUAL (it bounds the relative error of a mode's propagated amplitude,
+//! its eigenvector's residual |A r - lambda r| / (|Re lambda| |r|) is at most
+//! RESIDUAL (it bounds the relative error of a mode's propagated amplitude
+//! over its lifetime,
 //! charged by the caller). Only resolved modes enter the expansion.
 //!
 //! The shift at zero orders the modes by |lambda|: a slowly decaying mode
@@ -38,17 +39,22 @@ use super::krylov::{self,KrylovOptions,System};
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum Purpose{Report,LongTime}
 /// Arnoldi steps and solve tolerances per purpose. Measured on four lasers
-/// + tweezer (order 3): 12 long-time steps at 1e-8 give eigen-residuals of
-/// 1e-7 for the three slowest modes in 3.7 s, 8 steps leave 5e-3, 16 steps
-/// at 1e-10 take 8.8 s.
+/// + tweezer (order 3): 12 long-time steps resolve the three slowest modes
+/// (rates to 8e-3/us, eigen-residuals 1e-7), and the expansion then needs a
+/// switch time of 40 us (a second, longer Krylov propagation); 24 steps add
+/// the modes to rates of about 1/us, and it switches at 20 us. Solves to
+/// 1e-6 leave eigen-residuals of 4e-7 there at two thirds of the cost of
+/// 1e-8; 18 steps leave 3e-5, 8 steps 5e-3.
 const REPORT_STEPS:usize=4;
-const LONG_TIME_STEPS:usize=12;
+const LONG_TIME_STEPS:usize=24;
 const REPORT_RTOL:f64=1e-6;
-const LONG_TIME_RTOL:f64=1e-8;
+const LONG_TIME_RTOL:f64=1e-6;
 /// Relative change of a reported eigenvalue over the last Arnoldi step.
 const STABLE:f64=1e-3;
-/// Relative eigenpair residual of a mode kept for the long-time machinery.
-pub const RESIDUAL:f64=1e-2;
+/// Relative eigenpair residual of a mode kept for the long-time machinery
+/// (at 1e-2 a precessing mode resolved to 8e-3 put 1e-3 of misfit into the
+/// expansion on the test fixture).
+pub const RESIDUAL:f64=1e-3;
 /// Rates below this (1/us, relaxation slower than 1000 s) are conserved.
 pub const FLOOR:f64=1e-9;
 
@@ -60,7 +66,7 @@ pub struct SlowMode{
     /// The real field (lambda real), or the real and imaginary parts of the
     /// pair's eigenvector.
     pub a:Vec<C>,pub b:Option<Vec<C>>,
-    /// Relative residual |A r - lambda r| / (|lambda| |r|).
+    /// Relative residual |A r - lambda r| / (|Re lambda| |r|).
     pub residual:f64,
 }
 /// A Ritz value with its relative change over the last Arnoldi step and,
@@ -137,15 +143,18 @@ pub fn slow_modes(system:&mut System<'_,'_>,purpose:Purpose)->Result<SlowModes,S
         let(l,p,at)=(lambda[j],pair[j],j);j+=if p{2}else{1};
         if magnitude(l)==0.{continue;}
         let change=previous.iter().map(|x|magnitude(C{re:x.re-l.re,im:x.im-l.im})).fold(f64::INFINITY,f64::min)/magnitude(l);
+        // Relative to the decay rate: the amplitude's error over the mode's
+        // lifetime (a precessing mode's |lambda| would hide it).
+        let rate=l.re.abs().max(FLOOR);
         let residual=if fields.is_empty(){None}else{
             let a=&fields[at];let mut aa=vec![ZERO;length];system.op.apply(a,&mut aa)?;
             Some(if p{let b=&fields[at+1];let mut ab=vec![ZERO;length];system.op.apply(b,&mut ab)?;
                 // A a - l_r a + l_i b and A b - l_i a - l_r b.
                 let ra:Vec<C>=aa.iter().zip(a).zip(b).map(|((x,y),w)|C{re:x.re-l.re*y.re+l.im*w.re,im:x.im-l.re*y.im+l.im*w.im}).collect();
                 let rb:Vec<C>=ab.iter().zip(b).zip(a).map(|((x,y),w)|C{re:x.re-l.re*y.re-l.im*w.re,im:x.im-l.re*y.im-l.im*w.im}).collect();
-                (system.vectors.norm(&ra).hypot(system.vectors.norm(&rb)))/(magnitude(l)*system.vectors.norm(a).hypot(system.vectors.norm(b))).max(f64::MIN_POSITIVE)}
+                (system.vectors.norm(&ra).hypot(system.vectors.norm(&rb)))/(rate*system.vectors.norm(a).hypot(system.vectors.norm(b))).max(f64::MIN_POSITIVE)}
             else{let ra:Vec<C>=aa.iter().zip(a).map(|(x,y)|C{re:x.re-l.re*y.re,im:x.im-l.re*y.im}).collect();
-                system.vectors.norm(&ra)/(magnitude(l)*system.vectors.norm(a)).max(f64::MIN_POSITIVE)})};
+                system.vectors.norm(&ra)/(rate*system.vectors.norm(a)).max(f64::MIN_POSITIVE)})};
         result.ritz.push(Ritz{lambda:l,change,residual});
         // An eigenvalue counts once stable over the last Arnoldi step or
         // resolved (its eigenvector's residual); a mode enters the

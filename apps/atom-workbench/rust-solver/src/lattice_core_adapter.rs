@@ -44,6 +44,7 @@ use atom_population_core::lattice::slow::Purpose;
 const ENGINE:&str="rust-population-core-lattice";
 const MEAN_METHOD:&str="Full32 time average of the folded Fourier lattice (near charges explicit, far harmonics folded statically at second order, higher orders charged): dressed-block preconditioned null vector, its truncation and fold errors estimated in the solver's Krylov space";
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
+const STATIC_METHOD:&str="Full32 static Lindblad generator: spectral projectors of the imaginary-axis eigenvalues of each connected block applied to the initial density";
 const FINITE_METHOD:&str="Full32 density-matrix Lindblad evolution on the folded Fourier lattice: rational Krylov with lattice-translation augmentation, its basis, near-shell and fold errors estimated by propagating their sources through the dressed blocks; beyond 1 ms the slow eigenmodes' expansion from the Krylov state at a switch time";
 
 /// The worker start-up check: loads LAPACK and verifies one Hermitian
@@ -159,7 +160,7 @@ fn lattice_json(prepared:&LatticePrepared,solution:Option<&SteadySolution>)->Val
             "solveResidual":f.solve_residual,"refinedSolves":f.refined,"refinedResidual":f.refined_residual,"milliseconds":f.milliseconds,
             "phaseMs":{"solves":f.phase_ms[0],"storage":f.phase_ms[1]},"targets":targets},
         "preconditioner":solution.map(|s|json!({"kind":"structured","milliseconds":s.dressed_ms,"frameCondition":s.dressed.condition,
-            "frameReconstruction":s.dressed.reconstruction,"woodburyRank":s.dressed.woodbury_rank})),
+            "frameReconstruction":s.dressed.reconstruction,"woodburyRank":s.dressed.woodbury_rank,"precessingRate":s.dressed.precessing_rate})),
         "slowModes":solution.map(|s|{let m=&s.slow;json!({"conserved":m.conserved,"slowestRate":m.slowest_rate,"artifacts":m.artifacts,
             "artifactGrowth":m.artifact_growth,"solveSteps":m.solve_steps,"milliseconds":m.milliseconds,
             "kept":m.modes.iter().map(|x|json!({"lambda":[x.lambda.re,x.lambda.im],"residual":x.residual})).collect::<Vec<_>>(),
@@ -222,15 +223,31 @@ fn steady_solution(request:&Prepared,long:bool)->Result<SteadySolution,String>{
     steady::solve(&request.lattice,&request.groups,if long{Purpose::LongTime}else{Purpose::Report})
 }
 
+/// A horizon T with T times the tail rate at least TAIL_EXPONENT has the
+/// limit as its mean: the deviation from the limit (at most 2 in trace
+/// norm) has decayed by e^-30 = 1e-13, so an eigenbasis condition up to 1e8
+/// leaves under 1e-2 of the tolerance.
+const TAIL_EXPONENT:f64=30.;
+/// The rate bounding what still relaxes: the reported slowest relaxation
+/// (`SteadySolution::slowest_rate`).
+fn tail_rate(steady:&SteadySolution)->Option<f64>{steady.slowest_rate()}
+fn relaxed_by(steady:&SteadySolution,horizon:f64)->bool{tail_rate(steady).is_some_and(|r|r*horizon>=TAIL_EXPONENT)}
+
 /// The state at the horizon T: its field (on the steady solution's modes),
 /// the estimated error of its populations, the populations still relaxing
 /// at T and how it was reached.
 struct HorizonState{field:Vec<Complex64>,error:f64,relaxing:f64,details:Value}
-/// Beyond LONG_HORIZON the long-time expansion (a trajectory's, else its
-/// own); up to it, or when the expansion misses slow modes, the Krylov
-/// propagation to T.
+/// Relaxed by T (`relaxed_by`): the limit, its tail charged. Else beyond
+/// LONG_HORIZON the long-time expansion (a trajectory's, else its own); up
+/// to it, or when the expansion misses slow modes, the Krylov propagation
+/// to T.
 fn horizon_state(request:&Prepared,steady:&SteadySolution,horizon:f64,long:Option<Result<&finite::LongTime,&Declined>>)->Result<HorizonState,String>{
     let groups=&request.groups;
+    if let Some(rate)=tail_rate(steady).filter(|_|relaxed_by(steady,horizon)){
+        let tail=(-rate*horizon).exp();
+        return Ok(HorizonState{field:steady.field.clone(),error:steady.estimated_error+tail,relaxing:tail,
+            details:json!({"method":"the limit, relaxed by the horizon","tailRatePerUs":rate,"tailBound":tail,"steadyEstimate":steady.estimated_error})});
+    }
     if horizon<=finite::LONG_HORIZON{return propagated_state(request,steady,horizon,None);}
     let own;
     let long=match long{Some(l)=>l,None=>{own=finite::long_time(&request.lattice,&request.density,groups,steady,None);own.as_ref()}};
@@ -241,15 +258,15 @@ fn horizon_state(request:&Prepared,steady:&SteadySolution,horizon:f64,long:Optio
             "outsideSlowModes":long.fast,"fitDrift":long.drift,"eigenResiduals":long.residuals,"artifactGrowth":long.artifact_growth,
             "steadyEstimate":long.steady_error,"krylovColumns":long.krylov.columns,"krylovOrder":long.krylov.order,"reachUs":long.times.last(),"rejectedSwitches":long.trail})})
 }
-/// The state at T by the Krylov propagation to T from the steady order, on
-/// the steady modes (a higher order's field restricted, the part left out
-/// charged; `declined`: why the long-time expansion was not used).
+/// The state at T by the Krylov propagation to T, carried to the steady
+/// modes (a part left out charged; `declined`: why the long-time expansion
+/// was not used).
 fn propagated_state(request:&Prepared,steady:&SteadySolution,horizon:f64,declined:Option<String>)->Result<HorizonState,String>{
     let groups=&request.groups;
     let times:Vec<f64>=(0..finite::SWITCH_SAMPLES).map(|i|horizon*i as f64/(finite::SWITCH_SAMPLES-1)as f64).collect();
-    let mut krylov=finite::propagate(&request.lattice,&request.density,&times,groups,Some(steady.order),&[finite::SWITCH_SAMPLES-1])
+    let mut krylov=finite::propagate(&request.lattice,&request.density,&times,groups,None,&[finite::SWITCH_SAMPLES-1])
         .map_err(|e|match &declined{Some(d)=>format!("{d}; the propagation to the horizon: {e}"),None=>e})?;
-    let(field,left)=finite::restrict(&request.lattice,&krylov.fields.pop().ok_or("The propagation keeps the field at the horizon")?,
+    let(field,_,left)=finite::transfer(&request.lattice,&krylov.fields.pop().ok_or("The propagation keeps the field at the horizon")?,
         &request.lattice.modes(krylov.order)?,&steady.modes,horizon,groups)?;
     let readout=finite::Readout::new(&request.lattice,&steady.modes)?;
     let relative:Vec<Complex64>=field.iter().zip(&steady.field).map(|(a,b)|Complex64{re:a.re-b.re,im:a.im-b.im}).collect();
@@ -264,9 +281,59 @@ fn propagated_state(request:&Prepared,steady:&SteadySolution,horizon:f64,decline
 pub fn mean_result(model:&Model,options:&Options,started:Instant)->Result<Value,String>{
     let request=prepare_request(model,options)?;mean_of(model,options,&request,started)
 }
-/// The mean with its own steady solution (and horizon state).
+/// The mean of a static model (`steady::static_mean`): exact, any number of
+/// conserved quantities (the initial state's projection onto them,
+/// `initial-dependent` when there are several). None when it does not serve
+/// the request (a block too large for the dense decomposition, still
+/// relaxing at the horizon, or a kernel too close to a slow relaxation for
+/// its error bound): the steady pipeline then does.
+fn static_value(model:&Model,options:&Options,request:&Prepared,started:Instant)->Option<Value>{
+    let(prepared,axes)=(&request.lattice,&request.axes);let n=32;
+    let mean=steady::static_mean(prepared,&request.density,options.mean_horizon_us).ok()?;
+    (||->Result<Value,String>{
+        let rows=vec![request.initial.clone()];let(row_trace,initial_error)=row_errors(&rows,&request.initial)?;
+        let(raw,discarded)=lab_density(&mean.density,&[vec![0;axes.frame_indices[0].len()]],axes);
+        let density=project_density(&prepared.lapack,&raw)?;
+        let diagonal=|m:&[Complex64]|(0..n).map(|i|m[i*n+i].re).collect::<Vec<f64>>();
+        let projection=ledger::metric(&diagonal(&raw),&diagonal(&density),&request.groups);
+        let estimated=KAPPA*mean.error+mean.tail+projection;
+        let populations=diagonal(&density);
+        let positivity=(-prepared.lapack.hermitian_eigen(&density,n)?.0[0]).max(0.);
+        let horizon=options.mean_horizon_us.is_some();
+        let(status,reason)=match(mean.conserved>1,horizon,discarded>1e-8){
+            (true,true,_)=>("initial-dependent","Lindblad mean at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent."),
+            (true,false,_)=>("initial-dependent","Full Lindblad stationary projection from the specified initial density."),
+            (false,_,true)=>("population-stationary","Populations converge in the background basis; exported density is the laboratory-frame time average."),
+            (false,_,false)=>("stationary","Unique full-density Lindblad stationary solution (only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time)."),
+        };
+        if estimated>POPULATION_TOLERANCE{return Err(format!("The static mean is estimated at {estimated:e}; the tolerance was not relaxed"));}
+        Ok(json!({"timesUs":[0.],"states":model.states,"populations":rows,"horizonUs":options.mean_horizon_us,
+            "asymptoticStatus":status,"asymptoticReason":reason,"asymptoticPopulations":populations,
+            "asymptoticDensityReal":density.iter().map(|z|z.re).collect::<Vec<_>>(),
+            "asymptoticDensityImag":density.iter().map(|z|z.im).collect::<Vec<_>>(),
+            "diagnostics":{"engine":ENGINE,"traceError":row_trace,"initialStateError":initial_error,
+                "elapsedMs":started.elapsed().as_secs_f64()*1000.,"carrierSourceToBasis":axes.source_to_basis,
+                "asymptoticMethod":STATIC_METHOD,"meanDensityFrame":MEAN_FRAME,
+                "uniquenessScope":if mean.conserved>1{"several conserved quantities: mean of the specified initial density"}else{"unique limit: every mode but the trace relaxes, however slowly (slowestRelaxationUs)"},
+                "asymptoticTraceError":(populations.iter().sum::<f64>()-1.).abs(),"asymptoticPositivityError":positivity,"residual":mean.residual,
+                "asymptoticAccuracy":{"requestedTolerance":POPULATION_TOLERANCE,"estimatedMaximumError":estimated,"projectionCharge":projection,
+                    "kernelError":mean.error,"tail":mean.tail,"safetyFactor":KAPPA,"metric":"max over states and requested F groups"},
+                "zeroModeCount":mean.conserved,"conservedQuantities":mean.conserved,
+                "slowestRatePerUs":mean.slowest_rate,"slowestRelaxationUs":mean.slowest_rate.map(|r|1./r),
+                "discardedOpticalCoherence":discarded,"horizonRelaxingBound":horizon.then_some(mean.tail),
+                "horizonMethod":horizon.then(||json!({"method":"spectral projectors of the static generator's imaginary-axis eigenvalues"})),
+                "staticMean":{"blocks":mean.blocks,"largestBlock":mean.largest_block,"milliseconds":mean.milliseconds}}}))
+    })().ok()
+}
+
+/// The mean with its own steady solution: the report's, unless a horizon
+/// the found relaxation has not passed needs the long-time one.
 fn mean_of(model:&Model,options:&Options,request:&Prepared,started:Instant)->Result<Value,String>{
-    let steady=steady_solution(request,options.mean_horizon_us.is_some());
+    if model.drives.is_empty(){if let Some(value)=static_value(model,options,request,started){return Ok(value);}}
+    let report=steady_solution(request,false);
+    let limit=match(options.mean_horizon_us,&report){(None,_)=>true,(Some(t),Ok(s))=>relaxed_by(s,t),(Some(_),Err(_))=>false};
+    if limit{return mean_value(model,options,request,report.as_ref(),None,started);}
+    let steady=steady_solution(request,true);
     mean_value(model,options,request,steady.as_ref(),None,started)
 }
 
@@ -333,7 +400,9 @@ fn mean_value(model:&Model,options:&Options,request:&Prepared,steady:Result<&Ste
                 "scope":"near-shell truncation and the primal's algebraic error (an error equation in the Krylov space) plus the fold remainders charged through the fold response; at a horizon the propagation's estimate instead (beyond the switch time also the part outside the slow modes, the fit's drift and the slow modes' residuals)",
                 "metric":"max over states and requested F groups"},
             "zeroModeCount":spectrum.conserved,"conservedQuantities":spectrum.conserved,
-            "slowestRatePerUs":spectrum.slowest_rate,"slowestRelaxationUs":spectrum.slowest_rate.map(|r|1./r),
+            "slowestRatePerUs":solution.slowest_rate(),"slowestRelaxationUs":solution.slowest_rate().map(|r|1./r),
+            "slowestRelaxationBasis":{"shiftRatePerUs":spectrum.slowest_rate,"precessingRatePerUs":solution.dressed.precessing_rate,
+                "rule":"min of the zero shift's slowest rate and half the dressed frames' slowest precessing decay"},
             "latticeOrder":solution.order,"latticeModes":solution.modes.len(),"discardedOpticalCoherence":discarded,
             "horizonMethod":state.as_ref().map(|s|s.details.clone()),"horizonRelaxingBound":state.as_ref().map(|s|s.relaxing),
             "horizonPropagationEstimate":state.as_ref().map(|s|s.error),"horizonProjectionCharge":state.as_ref().map(|_|projection),
@@ -380,7 +449,9 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
     let request=prepare_request(model,options)?;
     let times:Vec<f64>=(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect();
     let mut publish=|mean:Result<Value,String>|{if let Ok(value)=&mean{publish_mean(value);}mean};
-    let(mean,trajectory)=if options.duration_us>finite::LONG_HORIZON{
+    // A static model's lattice is one block: its trajectory is propagated
+    // directly at any length.
+    let(mean,trajectory)=if options.duration_us>finite::LONG_HORIZON&&!model.drives.is_empty(){
         // The long-time expansion, else (slow modes it misses) the Krylov
         // propagation over the whole grid.
         let steady=steady_solution(&request,true);

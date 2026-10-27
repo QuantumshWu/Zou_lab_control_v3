@@ -37,15 +37,17 @@
 //!   the steady state);
 //! - projection: the change of the rows onto the probability simplex.
 //!
-//! Long times (`long_time`): one Krylov propagation from the steady
-//! solution's order to a short reach, then x(t) = x_s + sum_j (slow mode
-//! j)(t) for t >= t_s, the steady field and the slow modes those of the
-//! steady solution (`slow`), the coefficients fitted to x(t_s) - x_s. The
+//! Long times (`long_time`): one Krylov propagation to a short reach, then
+//! x(t) = x_s + sum_j (slow mode j)(t) for t >= t_s, the steady field and
+//! the slow modes those of the steady solution (`slow`), the coefficients
+//! fitted to x(t_s) - x_s (the propagated field carried to the steady
+//! solution's modes). The
 //! switch time t_s is the earliest candidate whose part outside the slow
 //! modes plus the drift of the fit (from t_s / 2) is below FAST_SHARE of the
 //! tolerance; the error at t is the Krylov estimate + the steady estimate +
 //! KAPPA (that part, grown by any excluded artifact, + the slow modes'
-//! eigen-residuals).
+//! eigen-residuals), and the propagation is accepted at the share of the
+//! tolerance the other terms leave.
 use super::*;
 use super::krylov::{self,KrylovOptions,System,Vectors};
 use super::operator::LatticeOperator;
@@ -525,7 +527,7 @@ impl Lattice<'_,'_>{
 /// the next order.
 #[allow(clippy::too_many_arguments)]
 fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,eigenbasis:&OnceLock<Result<BlockEigenbasis,String>>,
-    order:usize,initial:&[C],times:&[f64],keep:&[usize],groups:&[Vec<usize>],checkpoints:&mut Vec<Checkpoint>)->Result<Option<FiniteSolution>,String>{
+    order:usize,initial:&[C],times:&[f64],keep:&[usize],groups:&[Vec<usize>],tolerance:f64,checkpoints:&mut Vec<Checkpoint>)->Result<Option<FiniteSolution>,String>{
     let n=prepared.generator.n;let d=n*n;let horizon=*times.last().unwrap_or(&0.);
     let modes=prepared.modes(order)?;
     let first=LatticeOperator::new(prepared,&modes)?;
@@ -582,7 +584,7 @@ fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,eigenbasis:&Once
         let columns=space.basis.len();
         let mut checkpoint=Checkpoint{order,columns,dimension:reduced.r,reflected:reduced.reflected,gram_condition:reduced.gram_condition,growth:reduced.growth,basis,shell:None,fold:None,projection,total:None,action:"",milliseconds:0.};
         let more=|exhausted:bool,columns:usize|!exhausted&&columns<MAXIMUM_COLUMNS;
-        if KAPPA*basis+projection>POPULATION_TOLERANCE{
+        if KAPPA*basis+projection>tolerance{
             checkpoint.action=if more(exhausted,columns){"add-columns"}else{"not-converged"};
             checkpoint.milliseconds=clock.elapsed().as_secs_f64()*1e3;checkpoints.push(checkpoint);
             if !more(exhausted,columns){
@@ -594,7 +596,7 @@ fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,eigenbasis:&Once
         let(shell,fold)=lattice.shell_and_fold(dressed,&ledger,order,&space,&reduced,eigen,times,groups,true)?;
         let total=KAPPA*(basis+shell+fold)+projection;
         checkpoint.shell=Some(shell);checkpoint.fold=Some(fold);checkpoint.total=Some(total);
-        if total<=POPULATION_TOLERANCE{
+        if total<=tolerance{
             checkpoint.action="accept";checkpoint.milliseconds=clock.elapsed().as_secs_f64()*1e3;checkpoints.push(checkpoint);
             let preconditions=lattice.systems.iter().map(|s|s.preconditions).sum();
             for s in &lattice.systems{let t=&mut lattice.timing.inner;t.apply_ms+=s.timing.apply_ms;t.precondition_ms+=s.timing.precondition_ms;t.orthogonalize_ms+=s.timing.orthogonalize_ms;}
@@ -606,7 +608,7 @@ fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,eigenbasis:&Once
                 inner_steps:lattice.inner_steps,applications,preconditions,eigenbasis_condition:eigen.condition,ritz_condition:reduced.condition,
                 checkpoints:std::mem::take(checkpoints),timing:lattice.timing}));
         }
-        if KAPPA*shell>0.5*POPULATION_TOLERANCE&&order<MAXIMUM_ORDER{
+        if KAPPA*shell>0.5*tolerance&&order<MAXIMUM_ORDER{
             checkpoint.action="next-order";checkpoint.milliseconds=clock.elapsed().as_secs_f64()*1e3;checkpoints.push(checkpoint);return Ok(None);}
         checkpoint.action=if more(exhausted,columns){"add-columns"}else{"not-converged"};
         checkpoint.milliseconds=clock.elapsed().as_secs_f64()*1e3;checkpoints.push(checkpoint);
@@ -628,6 +630,10 @@ pub fn simplex(values:&[f64])->Vec<f64>{
 /// error; the near order rises from `start` (else START_ORDER) as the shell
 /// estimate asks, and the fields at the time indices `keep` are returned.
 pub fn propagate(prepared:&LatticePrepared,initial:&[C],times:&[f64],groups:&[Vec<usize>],start:Option<usize>,keep:&[usize])->Result<FiniteSolution,String>{
+    propagate_within(prepared,initial,times,groups,start,keep,POPULATION_TOLERANCE)
+}
+/// `propagate` accepted at `tolerance` (a share of POPULATION_TOLERANCE).
+fn propagate_within(prepared:&LatticePrepared,initial:&[C],times:&[f64],groups:&[Vec<usize>],start:Option<usize>,keep:&[usize],tolerance:f64)->Result<FiniteSolution,String>{
     let n=prepared.generator.n;
     if initial.len()!=n*n{return Err("Initial density dimension differs".into());}
     if times.len()<2||times[0]!=0.{return Err("Finite-time grid must start at zero with at least two times".into());}
@@ -642,7 +648,7 @@ pub fn propagate(prepared:&LatticePrepared,initial:&[C],times:&[f64],groups:&[Ve
         let dressed=StructuredDressed::new(prepared)?;let dressed_ms=clock.elapsed().as_secs_f64()*1e3;
         let mut checkpoints=Vec::new();
         for order in start.unwrap_or(START_ORDER)..=MAXIMUM_ORDER{
-            if let Some(mut solution)=attempt(prepared,&dressed,&eigenbasis,order,initial,times,keep,groups,&mut checkpoints)?{
+            if let Some(mut solution)=attempt(prepared,&dressed,&eigenbasis,order,initial,times,keep,groups,tolerance,&mut checkpoints)?{
                 solution.timing.dressed_ms+=dressed_ms;
                 solution.timing.eigenbasis_ms=eigenbasis.get().and_then(|e|e.as_ref().ok()).map_or(0.,|e|e.milliseconds);
                 return Ok(solution);
@@ -655,9 +661,12 @@ pub fn propagate(prepared:&LatticePrepared,initial:&[C],times:&[f64],groups:&[Ve
 /// Horizons above this (us) use the long-time machinery.
 pub const LONG_HORIZON:f64=1000.;
 /// The Krylov propagation's first reach (us; quadrupled while no switch
-/// time is accepted) and its largest; the earliest switch time.
-const REACH_START:f64=80.;
-const REACH_LIMIT:f64=2560.;
+/// time is accepted) and its largest; the earliest switch time. With the
+/// slow modes up to rates of about 1/us (`slow`), four lasers + tweezer
+/// switch at 20 us; five lasers + tweezer resolve a 20 us reach at order 2
+/// in 60 columns but needed 180 at 40 us and none converged at 80 us.
+const REACH_START:f64=20.;
+const REACH_LIMIT:f64=1280.;
 const SWITCH_START:f64=20.;
 /// Fewest points of the Krylov grid to its reach.
 pub const SWITCH_SAMPLES:usize=65;
@@ -685,26 +694,32 @@ impl Readout{
     fn size(&self,x:&[C],t:f64,groups:&[Vec<usize>])->f64{ledger::metric(&self.populations(x,t),&vec![0.;self.n],groups)}
 }
 
-/// A field on the modes `from` restricted to `to` (a subset: a lower near
-/// order), with the populations' size at t of the part left out.
-pub fn restrict(prepared:&LatticePrepared,x:&[C],from:&[Charge],to:&[Charge],t:f64,groups:&[Vec<usize>])->Result<(Vec<C>,f64),String>{
+/// A field on the modes `from` carried to the modes `to` (another near
+/// order): which of `to` it covers (the others zero, unknown to it), and
+/// the populations' size at t of the modes only in `from` (left out).
+pub fn transfer(prepared:&LatticePrepared,x:&[C],from:&[Charge],to:&[Charge],t:f64,groups:&[Vec<usize>])->Result<(Vec<C>,Vec<bool>,f64),String>{
     let d=prepared.generator.n.pow(2);let index:BTreeMap<&Charge,usize>=from.iter().enumerate().map(|(i,q)|(q,i)).collect();
-    let mut kept=vec![ZERO;to.len()*d];let mut rest=x.to_vec();
-    for(i,q)in to.iter().enumerate(){let j=*index.get(q).ok_or("The lower order's modes are not a subset")?;
+    let mut kept=vec![ZERO;to.len()*d];let mut covered=vec![false;to.len()];let mut rest=x.to_vec();
+    for(i,q)in to.iter().enumerate(){let Some(&j)=index.get(q)else{continue};covered[i]=true;
         kept[i*d..(i+1)*d].copy_from_slice(&x[j*d..(j+1)*d]);rest[j*d..(j+1)*d].fill(ZERO);}
-    Ok((kept,Readout::new(prepared,from)?.size(&rest,t,groups)))
+    Ok((kept,covered,Readout::new(prepared,from)?.size(&rest,t,groups)))
+}
+/// x on the covered modes only (block size d).
+fn masked(x:&[C],covered:&[bool],d:usize)->Vec<C>{
+    let mut y=x.to_vec();for(q,&c)in covered.iter().enumerate(){if !c{y[q*d..(q+1)*d].fill(ZERO);}}y
 }
 
 /// Least-squares coefficients (alpha, beta) per slow mode of y on the
-/// modes' real fields (Hermitian-symmetric fields: the real inner product
-/// over all modes), and the part of y outside their span.
-fn fit(lapack:&Lapack,modes:&[SlowMode],y:&[C])->Result<(Vec<(f64,f64)>,Vec<C>),String>{
-    let fields:Vec<&Vec<C>>=modes.iter().flat_map(|m|std::iter::once(&m.a).chain(m.b.as_ref())).collect();
+/// modes' real fields over the modes y covers (Hermitian-symmetric fields:
+/// the real inner product), and the part of y outside their span there.
+fn fit(lapack:&Lapack,modes:&[SlowMode],y:&[C],covered:&[bool])->Result<(Vec<(f64,f64)>,Vec<C>),String>{
+    let d=y.len()/covered.len().max(1);
+    let fields:Vec<Vec<C>>=modes.iter().flat_map(|m|std::iter::once(&m.a).chain(m.b.as_ref())).map(|f|masked(f,covered,d)).collect();
     let dot=|a:&[C],b:&[C]|a.iter().zip(b).map(|(x,y)|x.re*y.re+x.im*y.im).sum::<f64>();
     let r=fields.len();let mut gram=vec![0.;r*r];let mut rhs=vec![0.;r];
-    for i in 0..r{rhs[i]=dot(fields[i],y);for j in 0..r{gram[i+r*j]=dot(fields[i],fields[j]);}}
+    for i in 0..r{rhs[i]=dot(&fields[i],y);for j in 0..r{gram[i+r*j]=dot(&fields[i],&fields[j]);}}
     let solution=if r>0{lapack.solve(&gram,&rhs,r)?}else{vec![]};
-    let mut outside=y.to_vec();for(f,&c)in fields.iter().zip(&solution){for(t,v)in outside.iter_mut().zip(f.iter()){t.re-=c*v.re;t.im-=c*v.im;}}
+    let mut outside=masked(y,covered,d);for(f,&c)in fields.iter().zip(&solution){for(t,v)in outside.iter_mut().zip(f.iter()){t.re-=c*v.re;t.im-=c*v.im;}}
     let mut at=0;let coefficients=modes.iter().map(|m|{let alpha=solution[at];at+=1;
         let beta=if m.b.is_some(){at+=1;solution[at-1]}else{0.};(alpha,beta)}).collect();
     Ok((coefficients,outside))
@@ -742,9 +757,10 @@ pub struct LongTime{
     steady:Vec<C>,modes:Vec<SlowMode>,coefficients:Vec<(f64,f64)>,
     readout:Readout,
     /// Populations of the part of x(t_s) - x_s outside the slow modes (near
-    /// shells beyond the steady order included), the drift of the fit (the fit at the middle Krylov time evolved to t_s
-    /// against the propagation: the fast part the fit attributes to the slow
-    /// modes, which only shrinks as it decays), the eigen residuals' charge
+    /// shells beyond the steady order included), the drift of the fit (the
+    /// fit at t_s / 2 evolved to t_s against the propagation: the fast part
+    /// the fit attributes to the slow modes, which only shrinks as it
+    /// decays), the eigen residuals' charge
     /// (relative residual times each mode's size) and the largest growth rate
     /// of excluded truncation artifacts.
     pub fast:f64,pub drift:f64,pub residuals:f64,pub artifact_growth:f64,
@@ -782,13 +798,18 @@ impl std::fmt::Display for Declined{
 /// reach, the switch time t_s the earliest of reach/8, reach/4, reach/2 and
 /// the reach whose expansion is accepted, then the slow expansion of the
 /// steady solution (its slow modes for the long-time purpose). The
-/// propagation starts at the steady order; a higher order's fields are
-/// restricted to the steady modes, the part left out counted as outside the
-/// slow modes.
+/// propagation takes its own order; its fields are carried to the steady
+/// modes, a part left out counted as outside the slow modes, and the fit
+/// uses the modes they cover (the slow modes supply the others).
 pub fn long_time(prepared:&LatticePrepared,initial:&[C],groups:&[Vec<usize>],steady:&SteadySolution,step:Option<f64>)->Result<LongTime,Declined>{
     let failed=Declined::Failed;
     let readout=Readout::new(prepared,&steady.modes).map_err(failed)?;let modes=&steady.slow.modes;let lapack=&prepared.lapack;
     let relative=|x:&[C]|->Vec<C>{x.iter().zip(&steady.field).map(|(a,b)|C{re:a.re-b.re,im:a.im-b.im}).collect()};
+    // The propagation's share: what the steady estimate and the expansion's
+    // own terms (FAST_SHARE, KAPPA-weighted, and a tenth for the residuals
+    // and the projection) leave.
+    let budget=0.9*(POPULATION_TOLERANCE-steady.estimated_error-KAPPA*FAST_SHARE*POPULATION_TOLERANCE);
+    if !(budget>0.1*POPULATION_TOLERANCE){return Err(failed(format!("The steady estimate {:e} leaves the propagation no room",steady.estimated_error)));}
     let mut reach=REACH_START;let mut trail=Vec::new();
     loop{
         let times=switch_grid(reach,step);let(last,h)=(times.len()-1,times[1]);
@@ -796,17 +817,17 @@ pub fn long_time(prepared:&LatticePrepared,initial:&[C],groups:&[Vec<usize>],ste
             .filter(|&k|k>=2&&times[k]>=SWITCH_START*(1.-1e-9)).collect();
         candidates.dedup();
         let mut keep:Vec<usize>=candidates.iter().flat_map(|&k|[k/2,k]).collect();keep.sort_unstable();keep.dedup();
-        let krylov=propagate(prepared,initial,&times,groups,Some(steady.order),&keep).map_err(failed)?;
+        let krylov=propagate_within(prepared,initial,&times,groups,None,&keep,budget).map_err(failed)?;
         let from=prepared.modes(krylov.order).map_err(failed)?;
-        let fields:Vec<(Vec<C>,f64)>=keep.iter().zip(&krylov.fields).map(|(&k,x)|restrict(prepared,x,&from,&steady.modes,times[k],groups))
+        let fields:Vec<(Vec<C>,Vec<bool>,f64)>=keep.iter().zip(&krylov.fields).map(|(&k,x)|transfer(prepared,x,&from,&steady.modes,times[k],groups))
             .collect::<Result<_,_>>().map_err(failed)?;
-        let field=|k:usize|&fields[keep.binary_search(&k).unwrap_or(0)];
+        let field=|k:usize|&fields[keep.binary_search(&k).unwrap_or(0)];let d=prepared.generator.n.pow(2);
         for &k in &candidates{
-            let switch=times[k];let(at,left)=field(k);let y=relative(at);let(coefficients,outside)=fit(lapack,modes,&y).map_err(failed)?;
+            let switch=times[k];let(at,covered,left)=field(k);let y=relative(at);let(coefficients,outside)=fit(lapack,modes,&y,covered).map_err(failed)?;
             // The fit at t_s / 2 evolved to t_s against the propagation.
-            let(early,_)=fit(lapack,modes,&relative(&field(k/2).0)).map_err(failed)?;
-            let mut drift=y.clone();let mut predicted=vec![ZERO;y.len()];evolve(modes,&early,switch-times[k/2],&mut predicted);
-            for(a,b)in drift.iter_mut().zip(&predicted){a.re-=b.re;a.im-=b.im;}
+            let(early,_)=fit(lapack,modes,&relative(&field(k/2).0),covered).map_err(failed)?;
+            let mut drift=masked(&y,covered,d);let mut predicted=vec![ZERO;y.len()];evolve(modes,&early,switch-times[k/2],&mut predicted);
+            for(a,b)in drift.iter_mut().zip(&masked(&predicted,covered,d)){a.re-=b.re;a.im-=b.im;}
             let(fast,drift)=(readout.size(&outside,switch,groups)+left,readout.size(&drift,switch,groups));
             if fast+drift<=FAST_SHARE*POPULATION_TOLERANCE{
                 let residuals=modes.iter().zip(&coefficients).map(|(m,c)|{let mut part=vec![ZERO;y.len()];
@@ -818,10 +839,10 @@ pub fn long_time(prepared:&LatticePrepared,initial:&[C],groups:&[Vec<usize>],ste
         }
         let trail_text=||trail.iter().map(|(t,e)|format!("{t:.0} us: {e:.1e}")).collect::<Vec<_>>().join(", ");
         // An error that does not shrink with t_s (to half over the first
-        // reach) is no decaying fast part: slow modes the shift-invert set
+        // reaches) is no decaying fast part: slow modes the shift-invert set
         // misses (precessing ones, |lambda| large), which a longer reach
         // cannot fix.
-        if reach==REACH_START&&trail.len()>1&&trail[trail.len()-1].1>0.5*trail[0].1{
+        if reach<=4.*REACH_START&&trail.len()>2&&trail[trail.len()-1].1>0.5*trail[0].1{
             return Err(Declined::MissedModes(format!("The slow expansion's error does not decay with the switch time ({}): slow modes outside the shift-invert set",trail_text())));}
         if times[last]>=REACH_LIMIT{
             return Err(failed(format!("The slow expansion stays off by more than {:e} up to {:.0} us ({})",FAST_SHARE*POPULATION_TOLERANCE,times[last],trail_text())));}
@@ -866,7 +887,11 @@ mod tests{
         // within its claimed error, and its state at 1 s the steady field.
         let f=fixture();let p=prepared(&f);let n=4;let d=16;let groups=vec![vec![0,1],vec![2,3]];
         let mut initial=vec![ZERO;d];initial[0]=ONE;
-        let steady=super::super::steady::solve(&p,&groups,super::super::slow::Purpose::LongTime).unwrap();
+        let mut steady=super::super::steady::solve(&p,&groups,super::super::slow::Purpose::LongTime).unwrap();
+        // The reference is the same lattice, whose null vector the steady
+        // field is to solver precision: its fold charges (a bound against
+        // the unfolded model, 2.9e-3 here) would only crowd the budget.
+        steady.estimated_error=0.;
         let long=long_time(&p,&initial,&groups,&steady,None).unwrap();
         let op=LatticeOperator::new(&p,&steady.modes).unwrap();
         let a=op.dense();let size=op.dimension();let real=2*size;
