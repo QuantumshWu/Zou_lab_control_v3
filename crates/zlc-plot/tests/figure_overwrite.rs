@@ -1,6 +1,7 @@
 //! The document's `save` writes over no file it was not told to: with the
 //! image, the archive or both already there it writes nothing and names them;
-//! `overwrite` writes over them; with neither there it writes both.
+//! `overwrite: true` writes over them, a list of files only those it names
+//! (however spelled); with neither there it writes both.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -69,10 +70,10 @@ fn a_save_writes_over_no_file_unless_told() {
     let (image, archive) = (out.join("fig.png"), out.join("fig.npz"));
     let named = |paths: &[&PathBuf]| json!(paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>());
     let mut request = 1;
-    let mut save = |overwrite: Option<bool>| -> Json {
+    let mut save = |overwrite: Option<Json>| -> Json {
         request += 1;
         let mut command = json!({"id": request, "action": "save", "panel": "p", "path": image.display().to_string()});
-        if let Some(overwrite) = overwrite { command["overwrite"] = json!(overwrite); }
+        if let Some(overwrite) = overwrite { command["overwrite"] = overwrite; }
         let state = document.execute(&command.to_string(), Default::default(), None, None).unwrap().state;
         document.finish_presentation(&all, &all);
         assert!(state["error"].is_null(), "{}", state["error"]);
@@ -88,7 +89,7 @@ fn a_save_writes_over_no_file_unless_told() {
 
     let before = (disk(&image), disk(&archive));
     assert_eq!(save(None), json!({"exists": named(&[&image, &archive])}), "both there");
-    assert_eq!(save(Some(false)), json!({"exists": named(&[&image, &archive])}), "both there, overwrite false");
+    assert_eq!(save(Some(json!(false))), json!({"exists": named(&[&image, &archive])}), "both there, overwrite false");
     assert!((disk(&image), disk(&archive)) == before, "a refused save wrote");
 
     std::fs::remove_file(&image).unwrap();
@@ -103,7 +104,30 @@ fn a_save_writes_over_no_file_unless_told() {
     assert_eq!(save(None), json!({"exists": named(&[&image])}), "the image there");
     assert!(disk(&image) == before && disk(&archive).is_none(), "a refused save wrote");
 
+    // Agreeing to the archive (not there) leaves the image unagreed.
+    assert_eq!(save(Some(json!([archive.display().to_string()]))), json!({"exists": named(&[&image])}), "the image there, the archive agreed");
+    assert!(disk(&image) == before && disk(&archive).is_none(), "a refused save wrote");
+
+    // Both there, one agreed: only the other is named, and nothing is written.
     plant(&archive, b"the archive already there");
-    assert_eq!(save(Some(true)), named(&[&image, &archive]), "overwrite writes both");
+    let before = (disk(&image), disk(&archive));
+    let respelled = out.join("elsewhere").join("..").join("FIG.NPZ").display().to_string();
+    assert_eq!(save(Some(json!([respelled]))), json!({"exists": named(&[&image])}), "the archive agreed as FIG.NPZ");
+    assert_eq!(save(Some(json!([image.display().to_string()]))), json!({"exists": named(&[&archive])}), "the image agreed");
+    assert_eq!(save(Some(json!([]))), json!({"exists": named(&[&image, &archive])}), "nothing agreed");
+    assert!((disk(&image), disk(&archive)) == before, "a refused save wrote");
+
+    // Every file there agreed: written.
+    std::fs::remove_file(&image).unwrap();
+    assert_eq!(save(Some(json!([respelled]))), named(&[&image, &archive]), "the archive alone there and agreed");
+    assert!(real(&image, b"\x89PNG") && real(&archive, b"PK"), "both written");
+    plant(&image, b"the image already there");
+    plant(&archive, b"the archive already there");
+    assert_eq!(save(Some(json!([image.display().to_string(), archive.display().to_string()]))), named(&[&image, &archive]), "both agreed");
+    assert!(real(&image, b"\x89PNG") && real(&archive, b"PK"), "both written over");
+
+    plant(&image, b"the image already there");
+    plant(&archive, b"the archive already there");
+    assert_eq!(save(Some(json!(true))), named(&[&image, &archive]), "overwrite writes both");
     assert!(real(&image, b"\x89PNG") && real(&archive, b"PK"), "both written over");
 }

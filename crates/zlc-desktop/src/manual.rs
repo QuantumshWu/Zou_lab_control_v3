@@ -371,7 +371,19 @@ pub struct Apply {
 }
 
 /// What an intent asks of the viewer beyond the copy itself.
-pub enum Effect { None, Apply(Box<Apply>), Save { editor: String, panel: String, path: Option<String>, suggested: String }, Discarded { panel: Option<String>, signal: String } }
+/// `Save`: Save as… onto the archive `path` (None: the window's Save dialog asks), writing
+/// over files already there only when `overwrite`.
+pub enum Effect { None, Apply(Box<Apply>), Save { editor: String, panel: String, path: Option<String>, overwrite: bool, suggested: String }, Discarded { panel: Option<String>, signal: String } }
+
+/// The document `save` a Save as… onto the archive `path` becomes: its picture beside it
+/// (v2 `with_suffix(".png")`; a name's own dots, "scan_1.5us", stay), writing over no file
+/// already there the operator has not agreed to -- all of them with `overwrite`, else only
+/// the archive, when `asked` (the window's Save dialog asked about it as it was chosen).
+pub fn save_command(id: &Value, panel: &str, document: u32, path: &str, asked: bool, overwrite: bool) -> Value {
+    let image = match path.strip_suffix(".npz").or_else(|| path.strip_suffix(".NPZ")) { Some(stem) => format!("{stem}.png"), None => format!("{path}.png") };
+    let agreed = if overwrite { json!(true) } else if asked { json!([path]) } else { json!(false) };
+    json!({"id": id, "action": "save", "panel": panel, "path": image, "document": document, "overwrite": agreed})
+}
 
 pub struct Draft {
     pub id: String,
@@ -1007,7 +1019,8 @@ impl Draft {
                 self.note = text("note").trim().to_owned();
                 if self.modified || self.applied.is_none() { return Err("Apply & preview the current data before saving".into()); }
                 if !self.save_ready { return Err("the preview Panel has not accepted this data yet".into()); }
-                return Ok(Effect::Save { editor: self.id.clone(), panel: self.panel.clone(), path: op["path"].as_str().map(str::to_owned), suggested: self.suggested() });
+                return Ok(Effect::Save { editor: self.id.clone(), panel: self.panel.clone(), path: op["path"].as_str().map(str::to_owned),
+                                        overwrite: op["overwrite"].as_bool().unwrap_or(false), suggested: self.suggested() });
             }
             other => return Err(format!("unknown data edit operation {}", python_quote(other))),
         }
@@ -1308,8 +1321,8 @@ pub struct Drafts {
     pub published: BTreeMap<String, Arc<zlc_core::runtime::Publication>>,
     /// The panel epoch each Apply's preview reaches once it shows that data, by editor.
     pub epochs: BTreeMap<String, u64>,
-    /// A Save as… in flight: its request, its editor, and which Apply it saves.
-    pub saving: Option<(u64, String, u64)>,
+    /// A Save as… in flight: its request, its editor, which Apply it saves, and the archive it saves to.
+    pub saving: Option<(u64, String, u64, String)>,
 }
 
 impl Drafts {
@@ -1469,6 +1482,97 @@ mod tests {
         assert_eq!(apply.signal, "@figure/manual/2/data");
         assert_eq!(apply.metadata["operation"], "manual-create");
         assert_eq!(apply.metadata["note"], "why");
+    }
+
+    /// Save as… writes over no file the operator has not agreed to, as the document writes. The
+    /// window's Save dialog agreed to the archive it chose: the picture beside it already there is
+    /// refused, named alone, until the window's Overwrite saves that archive again told to; a named
+    /// archive (a remote client's) is refused naming every file there until told to overwrite.
+    /// A refused save changes no file.
+    #[test]
+    fn save_as_writes_over_only_what_the_operator_agreed_to() {
+        use std::path::Path;
+        use zlc_core::runtime::{Bundle, Declaration, Input, Runtime, Storage};
+        use zlc_plot::document::{DocumentRead, FigureDocument};
+
+        #[derive(Clone)]
+        struct Frame(Arc<zlc_plot::projection::Source>);
+        impl DocumentRead for Frame {
+            fn source(&self) -> &Arc<zlc_plot::projection::Source> { &self.0 }
+            fn provenance_json(&self) -> String { "null".into() }
+        }
+        // A 2 x 3 image committed to a Runtime and read back as the viewer reads an Apply.
+        let axis = |id: &str, role: &str, len: usize| Axis::new(id.into(), id.into(), role.into(), Coordinates::Index { origin: 0, len }, None, None, None, None).unwrap();
+        let one = |id: &str, role: &str| Domain::dense(vec![1], vec![axis(id, role, 1)]).unwrap();
+        let schema = DatasetSchema::new(one("repeat", "repeat"), one("frame", "readout-event"), Domain::dense(vec![2, 3], vec![axis("y", "spatial-y", 2), axis("x", "spatial-x", 3)]).unwrap(),
+                                        ValueSchema::new(DType::F64, None, None, ValidityContract::Value).unwrap()).unwrap();
+        let runtime = Runtime::new();
+        let generation = runtime.begin("manual", vec![Declaration { signal: "data".into(), schema: schema.clone(), storage: Storage::Latest }], json!({})).unwrap();
+        let data = DataBlock::new(schema, OwnedBuffer::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).into(), Validity::Uniform(true), None).unwrap();
+        runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "data".into(), ordinal: 0, data, origin: None }], metadata: json!({}), parents: vec![] }).unwrap();
+        let read = runtime.read_coherent_views(&[(generation, Arc::from("data"), None)], &mut Default::default()).pop().unwrap().unwrap();
+        let frame = Frame(Arc::new(zlc_plot::projection::Source::from_read(&read).unwrap()));
+
+        let mut document = FigureDocument::new(crate::pulse_host::services(), Some(Arc::new(zlc_plot::figure::ArchiveSaver)));
+        let all: std::collections::BTreeSet<String> = ["preview".to_owned()].into();
+        document.execute(r#"{"id": 0, "action": "ready", "dpr": 1.0}"#, Default::default(), None, None).unwrap();
+        document.finish_presentation(&all, &all);
+        let presented = json!({"id": 1, "action": "sync_panels", "inputs": [{"panel": "preview", "kind": "image", "window": 1, "signal": "data", "epoch": 1}],
+                               "targets": {"preview": {"semantic": {"kind": "image"}}}});
+        document.execute(&presented.to_string(), [("preview".to_owned(), frame)].into(), None, None).unwrap();
+        document.finish_presentation(&all, &all);
+
+        let folder = std::env::temp_dir().join(format!("zlc_save_as_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let folder = zlc_archive::durable::resolve(&folder).unwrap();
+        let (archive, image) = (folder.join("scan.npz"), folder.join("scan.png"));
+        let named = |paths: &[&std::path::PathBuf]| json!(paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>());
+        let mut request = 1;
+        // The host's save of the archive `archive`, as main.rs queues it, run by the document.
+        let mut save = |asked: bool, overwrite: bool| -> Value {
+            request += 1;
+            let mut command = save_command(&json!(request), "preview", 1, &archive.display().to_string(), asked, overwrite);
+            assert_eq!(command["path"], json!(image.display().to_string()), "the picture beside the archive");
+            // Which document it is for is the host's to read (main.rs), not the document's.
+            assert_eq!(command.as_object_mut().unwrap().remove("document"), Some(json!(1)));
+            let state = document.execute(&command.to_string(), Default::default(), None, None).unwrap().state;
+            document.finish_presentation(&all, &all);
+            assert!(state["error"].is_null(), "{}", state["error"]);
+            state["saved"].clone()
+        };
+        let disk = |path: &Path| std::fs::read(path).ok().map(|bytes| (bytes, std::fs::metadata(path).unwrap().modified().unwrap()));
+        let plant = |path: &Path, bytes: &[u8]| std::fs::write(path, bytes).unwrap();
+        let real = |path: &Path, magic: &[u8]| disk(path).is_some_and(|(bytes, _)| bytes.starts_with(magic));
+
+        // The window: the Save dialog chose (and asked about) scan.npz; scan.png beside it is there too.
+        plant(&archive, b"an older archive");
+        plant(&image, b"an older picture");
+        let before = (disk(&archive), disk(&image));
+        assert_eq!(save(true, false), json!({"exists": named(&[&image])}), "only the picture is asked about");
+        assert!((disk(&archive), disk(&image)) == before, "a refused save wrote");
+        // Overwrite: the same archive, named, told to.
+        assert_eq!(save(false, true), named(&[&image, &archive]), "written once agreed");
+        assert!(real(&image, b"\x89PNG") && real(&archive, b"PK"), "a picture and an archive");
+        // Only the archive the dialog asked about is there: written.
+        std::fs::remove_file(&image).unwrap();
+        plant(&archive, b"an older archive");
+        assert_eq!(save(true, false), named(&[&image, &archive]), "the dialog's answer is enough");
+        assert!(real(&image, b"\x89PNG") && real(&archive, b"PK"), "a picture and an archive");
+
+        // A named archive (a remote client's): refused naming every file there, written when told to.
+        plant(&archive, b"an older archive");
+        plant(&image, b"an older picture");
+        let before = (disk(&archive), disk(&image));
+        assert_eq!(save(false, false), json!({"exists": named(&[&image, &archive])}), "both named");
+        assert!((disk(&archive), disk(&image)) == before, "a refused save wrote");
+        std::fs::remove_file(&image).unwrap();
+        let before = disk(&archive);
+        assert_eq!(save(false, false), json!({"exists": named(&[&archive])}), "the archive named");
+        assert!(disk(&archive) == before && disk(&image).is_none(), "a refused save wrote");
+        assert_eq!(save(false, true), named(&[&image, &archive]), "overwrite: true writes");
+        assert!(real(&image, b"\x89PNG") && real(&archive, b"PK"), "a picture and an archive");
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

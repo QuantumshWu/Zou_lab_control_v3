@@ -10,6 +10,7 @@
 // that finds the image or the archive already there writes nothing and answers {exists: [...]}; the page lists those
 // files and asks Overwrite (the same save again, told to overwrite) or Cancel (nothing more sent). Every request is recorded.
 import {PanelEditView} from '../dist/views/panel_edit.js';
+import {Transport} from '../dist/transport.js';
 const assert = (condition, message) => { if (!condition) throw Error(message); };
 const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
 const results=[];
@@ -80,6 +81,56 @@ try {
    button('Overwrite').click();
    await settle();
    equal(requests.at(-1),{action:'save',panel:'edit-panel-1',path,overwrite:true},'the same name, told to overwrite');
+ });
+ // The Figure Viewer's Edit page, through the real transport: the host sends the viewer's document as the
+ // `viewer` section and a save's answer as the message's own `saved` section (main.rs viewer_message).
+ const webview=new EventTarget();
+ Object.defineProperty(window,'chrome',{value:{webview},configurable:true,writable:true});
+ const posted=[],replies=[];
+ window.ipc={postMessage:text=>{const command=JSON.parse(text);posted.push(command);const saved=replies.shift();
+   setTimeout(()=>webview.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'state',request:command.id,error:null,result:null,
+     changes:[[['saved'],saved],[['viewer'],{request:command.id,document:{path:`${DAY}\\figure.npz`},panels:[]}]]})})))}};
+ const viewerTransport=new Transport(1e12);
+ viewerTransport.attach({state(){},frame(){},shared(){},releaseMappings(){},image(){},changed(){}});
+ const viewerEdit=new PanelEditView('edit-figure-1-1','figure-1-1',{views:new Map(),signals:[]},()=>0,()=>{},viewerTransport);
+ document.getElementById('host').append(viewerEdit.root);
+ viewerEdit.update({id:'edit-figure-1-1',kind:'image',frame:{width:12,height:8,sequence:1},controls:[],binding:{signal:'@figure/1/data'},
+   edit:{panel:'figure-1-1',at_ms:0,revision:1,advanced:false,shape:[8,12],status:'frozen and ready to save'}},'data',[],DAY);
+ viewerEdit.autoName.click();
+ viewerEdit.name.value='viewer';
+ viewerEdit.name.dispatchEvent(new Event('input'));
+ const SHOWN=`${DAY}\\viewer.png`,HELD=`${DAY}\\viewer.npz`;
+ // A transport answer comes on a later turn than the post; the dialog after it.
+ const arrive=async()=>{await settle();await settle();await settle();};
+ await check('Figure Viewer: a fresh name is saved and says so',async()=>{
+   replies.push([SHOWN,HELD]);
+   viewerEdit.saveFigure.root.click();
+   await arrive();
+   equal(posted.map(({id,...command})=>command),[{action:'save',panel:'edit-figure-1-1',path:SHOWN}],'the save');
+   assert(!dialog(),'a dialog for files that were not there');
+   equal(viewerTransport.notice?.[0],'panel saved to viewer.png and viewer.npz','the note');
+ });
+ await check('Figure Viewer: the same name asks, and Cancel sends nothing more',async()=>{
+   replies.push({exists:[SHOWN,HELD]});
+   viewerEdit.saveFigure.root.click();
+   await arrive();
+   assert(dialog()?.open,'no dialog');
+   equal(dialog().querySelector('.dialog-text').textContent,`viewer.png\nviewer.npz\nare already in ${DAY}\n\nOverwrite them?`,'the files');
+   button('Cancel').click();
+   await arrive();
+   equal(posted.length,2,'nothing more sent');
+   equal(viewerTransport.notice?.[0],'nothing was saved; viewer.png and viewer.npz kept','the note');
+ });
+ await check('Figure Viewer: Overwrite sends the same save told to overwrite',async()=>{
+   replies.push({exists:[SHOWN,HELD]},[SHOWN,HELD]);
+   viewerEdit.saveFigure.root.click();
+   await arrive();
+   button('Overwrite').click();
+   await arrive();
+   equal(posted.slice(2).map(({id,...command})=>command),[{action:'save',panel:'edit-figure-1-1',path:SHOWN},
+     {action:'save',panel:'edit-figure-1-1',path:SHOWN,overwrite:true}],'the save, then the same save told to overwrite');
+   assert(!dialog(),'the dialog stayed');
+   equal(viewerTransport.notice?.[0],'panel saved to viewer.png and viewer.npz','the note');
  });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
 } catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}

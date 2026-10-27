@@ -11,7 +11,7 @@ import { confirmPulseDiscard } from "../pulse/widgets.js";
 import type { Panel, State } from "../protocol.js";
 import { queueStatus, saveImage, type View, type ViewContext } from "../shell.js";
 import type { PanelBoard } from "./board.js";
-import { DataEditorView, type DataProjection } from "./data_editor.js";
+import { DataEditorView, saveDataAs, type DataProjection } from "./data_editor.js";
 import { PanelEditView, type EditInfo } from "./panel_edit.js";
 
 const baseName = (path: string): string => path.split(/[\\/]/).pop() ?? path;
@@ -159,7 +159,10 @@ export class FigureViewerView implements View {
       let editor = this.editors.get(tab.id);
       const title = `${tab.title}${tab.dirty ? " *" : ""}`;
       if (!editor) {
-        editor = new DataEditorView(tab.id, intent => this.ctx.transport.send({ action: "data_editor", editor: tab.id, intent }, "Editing the data…"));
+        editor = new DataEditorView(tab.id, intent => {
+          if (intent.op === "save_as") void saveDataAs(this.ctx.transport, tab.id, intent);
+          else this.ctx.transport.send({ action: "data_editor", editor: tab.id, intent }, "Editing the data…");
+        });
         this.editors.set(tab.id, editor);
         this.tabs.addClosable(`data:${tab.id}`, title, editor.root, () => void this.closeEditor(tab.id), true);
       } else if (this.editorTitles.get(tab.id) !== title) this.tabs.setTitle(`data:${tab.id}`, title);

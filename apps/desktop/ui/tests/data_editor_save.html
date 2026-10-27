@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Data editor Save as regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. The Figure Viewer data editor's Save as… under the real style sheet and the real dialog: the
+// host's Save dialog chose (and asked about) the archive; a picture beside it already there comes back as
+// saved {exists, path}; the page names only those files and asks Overwrite (that archive saved again, told to overwrite)
+// or Cancel (nothing more sent). Every request is recorded.
+import {saveDataAs} from '../dist/views/data_editor.js';
+import {Transport} from '../dist/transport.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+const check=async(name,test)=>{await test();results.push(name)};
+// A request's answer and the dialog it opens come after the click.
+const settle=()=>new Promise(resolve=>setTimeout(resolve));
+const arrive=async()=>{await settle();await settle();await settle();};
+// The host, through the real transport: each Save as is answered with the next of `answers` as the Figure Viewer's
+// page gets it (main.rs viewer_message): the viewer's document its `viewer` section, the answer its own `saved` section.
+const requests=[],notes=[],answers=[];
+const webview=new EventTarget();
+Object.defineProperty(window,'chrome',{value:{webview},configurable:true,writable:true});
+window.ipc={postMessage:text=>{const {id,...command}=JSON.parse(text);requests.push(command);const saved=answers.shift();
+  setTimeout(()=>webview.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'state',request:id,error:null,result:null,
+    changes:[[['saved'],saved],[['viewer'],{request:id,document:{path:'C:\\data\\figure.npz'},panels:[]}]]})})))}};
+const transport=new Transport(1e12);
+transport.attach({state(){},frame(){},shared(){},releaseMappings(){},image(){},changed(){}});
+const note=transport.note.bind(transport);
+transport.note=text=>{notes.push(text);note(text)};
+const dialog=()=>document.querySelector('dialog.dialog');
+const button=(text)=>[...dialog().querySelectorAll('button')].find(node=>node.textContent.trim()===text);
+const DAY='C:\\data\\2026_10_27',ARCHIVE=`${DAY}\\scan.npz`,IMAGE=`${DAY}\\scan.png`;
+const SAVE={op:'save_as',note:'why'};
+try {
+ await check('a save that wrote asks nothing',async()=>{
+   answers.push([IMAGE,ARCHIVE]);
+   await saveDataAs(transport,'data-1',SAVE);
+   equal(requests,[{action:'data_editor',editor:'data-1',intent:SAVE}],'the save');
+   assert(!dialog(),'a dialog for files that were not there');
+ });
+ await check('a cancelled Save dialog asks nothing',async()=>{
+   answers.push(null);
+   await saveDataAs(transport,'data-1',SAVE);
+   equal(requests.length,2,'one save');
+   assert(!dialog(),'a dialog after a cancelled Save dialog');
+ });
+ await check('the picture beside the chosen archive is named alone, and Overwrite saves that archive told to',async()=>{
+   answers.push({exists:[IMAGE],path:ARCHIVE},[IMAGE,ARCHIVE]);
+   const saving=saveDataAs(transport,'data-1',SAVE);
+   await arrive();
+   assert(dialog()?.open,'no dialog');
+   equal(dialog().querySelector('.dialog-title').textContent,'File already exists','title');
+   equal(dialog().querySelector('.dialog-text').textContent,`scan.png\nis already in ${DAY}\n\nOverwrite it?`,'the file');
+   equal([...dialog().querySelectorAll('button')].map(node=>node.textContent.trim()),['Cancel','Overwrite'],'the choices');
+   assert(button('Overwrite').classList.contains('destructive-primary'),'Overwrite is not the red confirm');
+   equal(requests.length,3,'one save so far');
+   button('Overwrite').click();
+   await saving;
+   equal(requests.slice(3),[{action:'data_editor',editor:'data-1',intent:{...SAVE,path:ARCHIVE,overwrite:true}}],'the chosen archive, told to overwrite');
+   assert(!dialog(),'the dialog stayed');
+ });
+ await check('Cancel sends nothing more and says nothing was saved',async()=>{
+   answers.push({exists:[IMAGE],path:ARCHIVE});
+   const saving=saveDataAs(transport,'data-1',SAVE);
+   await arrive();
+   button('Cancel').click();
+   await saving;
+   equal(requests.length,5,'nothing more sent');
+   assert(!dialog(),'the dialog stayed');
+   equal(notes.at(-1),'nothing was saved; scan.png kept','the note');
+ });
+ await check('a named archive refused for both files lists both',async()=>{
+   const named={...SAVE,path:ARCHIVE};
+   answers.push({exists:[IMAGE,ARCHIVE],path:ARCHIVE},[IMAGE,ARCHIVE]);
+   const saving=saveDataAs(transport,'data-1',named);
+   await arrive();
+   equal(dialog().querySelector('.dialog-title').textContent,'Files already exist','title');
+   equal(dialog().querySelector('.dialog-text').textContent,`scan.png\nscan.npz\nare already in ${DAY}\n\nOverwrite them?`,'the files');
+   button('Overwrite').click();
+   await saving;
+   equal(requests.at(-1),{action:'data_editor',editor:'data-1',intent:{...named,overwrite:true}},'told to overwrite');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+</script>

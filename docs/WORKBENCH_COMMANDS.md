@@ -62,7 +62,8 @@ opens the Figure in a new window; `open {path, window}` replaces that window's F
 (as its File field does); the live board, its camera and its runs go on. A command
 naming a `figure-<n>-<k>` panel, or `add_panel` of a viewer's signal, acts on that
 viewer; a panel cannot be bound to another document's signal. The host sends each
-viewer to its window as a `state` message `{request, error, viewer}`.
+viewer to its window as a `state` message `{request, error, result, saved, viewer}`: a
+save's answer is the message's own `saved`, as on the Task Console's state.
 
 Windows, as v2 had them: Devices@Zou lab (`devices`), TaskConsole@Zou lab
 (`task-console`), one FigureViewer@Zou lab per opened Figure (`figure-viewer-<n>`) and
@@ -381,7 +382,16 @@ state's `saved` naming both. `save` writes over no file unasked: when the image 
 archive is already there as it writes, it writes nothing and `saved` is `{exists:
 [those files]}`; the page lists them and asks Overwrite or Cancel, and Overwrite sends
 the save again with `overwrite: true`. A remote client's `save` is refused naming the
-files, and passes `overwrite: true` to write over them.
+files, and passes `overwrite: true` to write over them. The host may instead pass a list,
+`overwrite: [files]`: only the files it names are written over, the others refused.
+
+A Figure Viewer data editor's Save as… (`data_editor {editor, intent: {op: "save_as",
+note, path?, overwrite?}}`) is that `save` of its preview panel: the archive and its
+picture beside it (`.png`). Without `path` the host's Save dialog chooses the archive and
+asks before replacing it, so the save passes `overwrite: [that archive]`; a picture already
+there is refused alone, `saved` being `{exists, path}` (`path` the archive), and the page
+asks as the Edit page does, Overwrite sending `save_as {path, overwrite: true}`. A `path`
+without `overwrite: true` is refused naming every file there.
 
 ### 4.5 `wait` (extended)
 `wait {node, until: "ready" | "terminal" | "request", timeout_seconds}` answers when

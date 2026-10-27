@@ -9,7 +9,7 @@
 import { ComboBox, InfoPane, TabWidget, command, confirm, element, note } from "../fluent/index.js";
 import { confirmPulseDiscard } from "../pulse/widgets.js";
 import { queueStatus, saveImage } from "../shell.js";
-import { DataEditorView } from "./data_editor.js";
+import { DataEditorView, saveDataAs } from "./data_editor.js";
 import { PanelEditView } from "./panel_edit.js";
 const baseName = (path) => path.split(/[\\/]/).pop() ?? path;
 /** The record's tabs v2 declares on its InfoPane (they bound its width; until the host sends them, they stand empty). */
@@ -166,7 +166,12 @@ export class FigureViewerView {
             let editor = this.editors.get(tab.id);
             const title = `${tab.title}${tab.dirty ? " *" : ""}`;
             if (!editor) {
-                editor = new DataEditorView(tab.id, intent => this.ctx.transport.send({ action: "data_editor", editor: tab.id, intent }, "Editing the data…"));
+                editor = new DataEditorView(tab.id, intent => {
+                    if (intent.op === "save_as")
+                        void saveDataAs(this.ctx.transport, tab.id, intent);
+                    else
+                        this.ctx.transport.send({ action: "data_editor", editor: tab.id, intent }, "Editing the data…");
+                });
                 this.editors.set(tab.id, editor);
                 this.tabs.addClosable(`data:${tab.id}`, title, editor.root, () => void this.closeEditor(tab.id), true);
             }

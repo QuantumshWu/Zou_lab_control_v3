@@ -230,11 +230,15 @@ fn shows_panel(accepted: &Value, viewers: &BTreeMap<u32, Viewer>, panel: &Value)
 /// The Figure Viewer's accepted document as the page and remote clients get it:
 /// its own section, beside the live board's panels. The document goes into the
 /// message and back, never copied: it carries the opened Figure's whole record.
+/// A save's answer is the message's own `saved` section, as on the Task Console's
+/// state, so a page (an Edit's Save figure, Save as…) reads it in one place.
 fn viewer_message<T>(viewer: &mut Value, deliver: impl FnOnce(&Value) -> T) -> T {
-    let mut message = json!({"type":"state", "request":viewer["request"], "error":viewer["error"], "result":viewer["result"]});
+    let saved = viewer.as_object_mut().and_then(|document| document.remove("saved")).unwrap_or(Value::Null);
+    let mut message = json!({"type":"state", "request":viewer["request"], "error":viewer["error"], "result":viewer["result"], "saved": saved});
     message["viewer"] = std::mem::take(viewer);
     let delivered = deliver(&message);
     *viewer = message["viewer"].take();
+    viewer["saved"] = message["saved"].take();
     delivered
 }
 
@@ -1026,22 +1030,19 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             manual::Effect::Discarded { panel, signal } => close.extend(discard_data(&runtime, viewer, panel, &signal)),
-                            manual::Effect::Save { editor, panel, path, suggested } => {
-                                let path = match path { Some(path) => Some(path), None => {
+                            manual::Effect::Save { editor, panel, path, overwrite, suggested } => {
+                                // A named archive, or the one the Save dialog chose (asking, as it was chosen, before replacing it).
+                                let chosen = match path { Some(path) => Some((path, false)), None => {
                                     // Beside its source Figure, else in today's folder (as the viewer opens).
                                     let home = viewer_folder(workbench.workspace());
                                     let start = if std::path::Path::new(&suggested).parent().is_some_and(|folder| !folder.as_os_str().is_empty()) { PathBuf::from(&suggested) }
                                                 else { home.join(&suggested) };
-                                    dialog::file(windows.hwnd(from.as_ref()), "Save edited figure", "Saved figure archives (*.npz)", true, &start, &home)?
+                                    dialog::file(windows.hwnd(from.as_ref()), "Save edited figure", "Saved figure archives (*.npz)", true, &start, &home)?.map(|path| (path, true))
                                 } };
-                                if let Some(path) = path {
-                                    // A Save as… of an archive name writes its picture beside it (v2 `with_suffix(".png")`);
-                                    // a name's own dots ("scan_1.5us") stay in it.
-                                    let image = match path.strip_suffix(".npz").or_else(|| path.strip_suffix(".NPZ")) { Some(stem) => format!("{stem}.png"), None => format!("{path}.png") };
+                                if let Some((path, asked)) = chosen {
                                     let applies = viewer.drafts.get_mut(&editor).map_or(0, |draft| draft.applies);
-                                    viewer.drafts.saving = Some((command["id"].as_u64().unwrap_or(0), editor, applies));
-                                    // Written over as before: the window's Save dialog asked about the name, a remote client named the file.
-                                    queue.push_back(json!({"id": command["id"], "action": "save", "panel": panel, "path": image, "document": document, "overwrite": true}));
+                                    queue.push_back(manual::save_command(&command["id"], &panel, document, &path, asked, overwrite));
+                                    viewer.drafts.saving = Some((command["id"].as_u64().unwrap_or(0), editor, applies, path));
                                     viewer.state["data"] = viewer.drafts.state();
                                     return Ok(());
                                 }
@@ -1053,6 +1054,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         viewer.state["data_focus"] = json!(focus);
                         viewer.state["request"] = command["id"].clone();
                         viewer.state["error"] = Value::Null;
+                        // This answer saved nothing (a Save as whose dialog was cancelled too), whatever an earlier save did.
+                        viewer.state["saved"] = Value::Null;
                         viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(document), message))?;
                         viewer.state["data_focus"] = Value::Null;
                         return Ok(());
@@ -1533,12 +1536,14 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 // A preview's document now holds the recipe it started from.
                                 targets.retain(|panel, _| !ids.contains(panel));
-                                if let Some((request, editor, applies)) = drafts.saving.clone().filter(|(request, ..)| *request == completion.request) {
-                                    drafts.saving = None;
+                                if let Some((_, editor, applies, path)) = drafts.saving.take_if(|(request, ..)| *request == completion.request) {
+                                    if state["saved"]["exists"].is_array() {
+                                        // Nothing written: the window names those files and asks, and Overwrite saves this archive again, told to.
+                                        state["saved"]["path"] = json!(path);
+                                    }
                                     let archive_name = state["saved"].as_array().into_iter().flatten().filter_map(Value::as_str).find(|path| path.to_ascii_lowercase().ends_with(".npz"))
                                         .map(|path| std::path::Path::new(path).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default());
                                     if let (Some(draft), Some(name)) = (drafts.get_mut(&editor), archive_name) { let current = draft.applies == applies; draft.saved(&name, current); }
-                                    let _ = request;
                                 }
                                 drafts.settle(&state["panels"]);
                                 state["data"] = drafts.state();
@@ -1557,8 +1562,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         Err(error) => {
                             let error = if superseded { superseded_error.to_owned() } else { error };
                             if let Some((drafts, _, _)) = viewer_data.as_mut() {
-                                if let Some((_, editor, _)) = drafts.saving.clone().filter(|(request, ..)| *request == completion.request) {
-                                    drafts.saving = None;
+                                if let Some((_, editor, ..)) = drafts.saving.take_if(|(request, ..)| *request == completion.request) {
                                     if let Some(draft) = drafts.get_mut(&editor) { let name = draft.name().to_owned(); draft.refused(format!("cannot save {name}: {error}")); }
                                     accepted["data"] = drafts.state();
                                 }
@@ -2041,4 +2045,25 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             trace::flush();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Figure Viewer's page reads a save's answer where the Task Console's does: the
+    /// message's own `saved` section, not inside `viewer`; the viewer's document keeps it.
+    #[test]
+    fn a_viewer_message_carries_the_save_answer_as_its_own_section() {
+        let refused = json!({"exists": [r"C:\d\a.png", r"C:\d\a.npz"]});
+        let mut viewer = json!({"request": 7, "error": null, "result": null, "panels": [], "saved": refused});
+        let sent = viewer_message(&mut viewer, |message| message.clone());
+        assert_eq!(sent["saved"], refused);
+        assert!(sent["viewer"].get("saved").is_none(), "{sent}");
+        assert_eq!((sent["request"].clone(), viewer["saved"].clone(), viewer["panels"].clone()), (json!(7), refused.clone(), json!([])), "the document is given back whole");
+        // What the page is sent (windows.send_to): `saved` a section of its own.
+        let text = delta::Sent::default().encode(sent.as_object().unwrap(), |_| true, |_| true).unwrap();
+        let page: Value = serde_json::from_str(&text).unwrap();
+        assert!(page["changes"].as_array().unwrap().iter().any(|change| change[0] == json!(["saved"]) && change[1] == refused), "{text}");
+    }
 }
