@@ -21,6 +21,7 @@ use super::estimate::{Augmented,Shell};
 use super::operator::LatticeOperator;
 use super::preconditioner::{StructuredDiagnostics,StructuredDressed};
 use super::ledger::{self,KAPPA,POPULATION_TOLERANCE,PopulationCharges,RemainderLedger};
+use super::slow::{Purpose,SlowModes,slow_modes};
 
 pub const START_ORDER:usize=2;
 pub const MAXIMUM_ORDER:usize=4;
@@ -85,6 +86,8 @@ pub struct SteadySolution{
     pub null_residual:f64,
     pub attempts:Vec<Attempt>,
     pub dressed:StructuredDiagnostics,pub dressed_ms:f64,
+    /// The slow eigenpairs of the accepted order's operator.
+    pub slow:SlowModes,
 }
 
 fn size(p:&[f64],groups:&[Vec<usize>])->f64{ledger::metric(p,&vec![0.;p.len()],groups)}
@@ -99,7 +102,10 @@ fn embed(field:&[C],from:&[Charge],to:&[Charge],d:usize)->Vec<C>{
 }
 
 /// The steady state with its estimated error.
-pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>])->Result<SteadySolution,String>{
+/// `purpose`: the slow modes it carries (`slow`). For the long-time
+/// machinery the order is the one accepted without the shell correction:
+/// the order-k dynamics and the steady state must be the same lattice's.
+pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>],purpose:Purpose)->Result<SteadySolution,String>{
     let clock=Instant::now();
     let dressed=StructuredDressed::new(prepared)?;let dressed_ms=clock.elapsed().as_secs_f64()*1e3;
     let n=prepared.generator.n;let d=n*n;let options=KrylovOptions::default();
@@ -166,42 +172,48 @@ pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>])->Result<SteadySolut
             truncation_residual:truncation.true_residual,equations,corrections:vec![],contraction:None,claimed:KAPPA*(truncation_size+fold_total),
             applications:0,preconditions:0,operator_work,precondition_work,regularized,edges,ledger,timing};
         if attempt.claimed<=POPULATION_TOLERANCE{
-            let residual=null_residual(&mut system,&field)?;finish(&mut attempt,&system);let estimated_error=attempt.claimed;attempts.push(attempt);
-            return Ok(SteadySolution{order,modes,field,populations,acceptance:Acceptance::Estimate,estimated_error,null_residual:residual,attempts,dressed:dressed.diagnostics.clone(),dressed_ms});
+            let residual=null_residual(&mut system,&field)?;let slow=slow_modes(&mut system,purpose)?;
+            finish(&mut attempt,&system);let estimated_error=attempt.claimed;attempts.push(attempt);
+            return Ok(SteadySolution{order,modes,field,populations,acceptance:Acceptance::Estimate,estimated_error,null_residual:residual,attempts,dressed:dressed.diagnostics.clone(),dressed_ms,slow});
         }
         // Shell Gauss-Seidel correction.
         let mut corrected:Vec<C>=field.iter().zip(&delta).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
         if let Some(shell)=&mut shell{
-            let start=Instant::now();
-            let mut previous=shifted(&populations,&estimate);let mut steps=vec![ledger::metric(&previous,&populations,groups)];
-            let mut converging=true;
-            for _ in 1..GAUSS_SEIDEL_STEPS{
-                let(source,next)=shell.gauss_seidel(&field,&corrected,&shell_field)?;shell_field=next;
-                let mut eq=augmented.equation(&system,"correction",source)?;augmented.solve(&mut system,&mut[&mut eq],groups)?;
-                let delta=augmented.checked_solution(&mut system,&mut eq,groups)?;
-                corrected=field.iter().zip(&delta).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
-                let current=shifted(&populations,eq.estimate());
-                steps.push(ledger::metric(&current,&previous,groups));previous=current;
-                if steps.len()==2{let q=steps[1]/steps[0].max(f64::MIN_POSITIVE);attempt.contraction=Some(q);if !(q<1.){converging=false;break;}}
-            }
-            attempt.corrections=steps.clone();attempt.augmentation=augmented.steps;attempt.shell_applications=shell.applications;
-            attempt.timing.correction_ms=start.elapsed().as_secs_f64()*1e3;
-            if converging{
-                let q=steps.windows(2).map(|w|w[1]/w[0].max(f64::MIN_POSITIVE)).fold(0.,f64::max);
-                let remainder=q/(1.-q)*steps[steps.len()-1];
-                let next_shell=ledger::metric(&previous,&populations,groups);
-                // Delta_k from the previous order's primal (order k-1 solved here when k is the start).
-                let lower=match attempts.last(){Some(a)=>a.populations.clone(),None=>lower_order(prepared,&dressed,order-1,groups,&options)?};
-                let shell_k=ledger::metric(&populations,&lower,groups);
-                let extrapolated=if shell_k>0.{next_shell*next_shell/shell_k}else{f64::INFINITY};
-                let claimed=KAPPA*(remainder+extrapolated+fold_total);
-                if claimed<=POPULATION_TOLERANCE{
-                    let trace:f64=system.watch.iter().map(|&k|corrected[k].re).sum();
-                    let field:Vec<C>=corrected.iter().map(|v|scaled(*v,1./trace)).collect();
-                    let populations=system.populations(&field);
-                    let shell_scaled:Vec<C>=shell_field.iter().map(|v|scaled(*v,1./trace)).collect();let residual=shell.residual(&field,&shell_scaled)?;
-                    attempt.claimed=claimed;finish(&mut attempt,&system);attempts.push(attempt);
-                    return Ok(SteadySolution{order,modes,field,populations,acceptance:Acceptance::Corrected,estimated_error:claimed,null_residual:residual,attempts,dressed:dressed.diagnostics.clone(),dressed_ms});
+            // Only the report takes the shell correction: the long-time
+            // machinery needs the steady state of the lattice it propagates.
+            if purpose==Purpose::Report{
+                let start=Instant::now();
+                let mut previous=shifted(&populations,&estimate);let mut steps=vec![ledger::metric(&previous,&populations,groups)];
+                let mut converging=true;
+                for _ in 1..GAUSS_SEIDEL_STEPS{
+                    let(source,next)=shell.gauss_seidel(&field,&corrected,&shell_field)?;shell_field=next;
+                    let mut eq=augmented.equation(&system,"correction",source)?;augmented.solve(&mut system,&mut[&mut eq],groups)?;
+                    let delta=augmented.checked_solution(&mut system,&mut eq,groups)?;
+                    corrected=field.iter().zip(&delta).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
+                    let current=shifted(&populations,eq.estimate());
+                    steps.push(ledger::metric(&current,&previous,groups));previous=current;
+                    if steps.len()==2{let q=steps[1]/steps[0].max(f64::MIN_POSITIVE);attempt.contraction=Some(q);if !(q<1.){converging=false;break;}}
+                }
+                attempt.corrections=steps.clone();attempt.augmentation=augmented.steps;attempt.shell_applications=shell.applications;
+                attempt.timing.correction_ms=start.elapsed().as_secs_f64()*1e3;
+                if converging{
+                    let q=steps.windows(2).map(|w|w[1]/w[0].max(f64::MIN_POSITIVE)).fold(0.,f64::max);
+                    let remainder=q/(1.-q)*steps[steps.len()-1];
+                    let next_shell=ledger::metric(&previous,&populations,groups);
+                    // Delta_k from the previous order's primal (order k-1 solved here when k is the start).
+                    let lower=match attempts.last(){Some(a)=>a.populations.clone(),None=>lower_order(prepared,&dressed,order-1,groups,&options)?};
+                    let shell_k=ledger::metric(&populations,&lower,groups);
+                    let extrapolated=if shell_k>0.{next_shell*next_shell/shell_k}else{f64::INFINITY};
+                    let claimed=KAPPA*(remainder+extrapolated+fold_total);
+                    if claimed<=POPULATION_TOLERANCE{
+                        let trace:f64=system.watch.iter().map(|&k|corrected[k].re).sum();
+                        let field:Vec<C>=corrected.iter().map(|v|scaled(*v,1./trace)).collect();
+                        let populations=system.populations(&field);
+                        let shell_scaled:Vec<C>=shell_field.iter().map(|v|scaled(*v,1./trace)).collect();let residual=shell.residual(&field,&shell_scaled)?;
+                        let slow=slow_modes(&mut system,purpose)?;
+                        attempt.claimed=claimed;finish(&mut attempt,&system);attempts.push(attempt);
+                        return Ok(SteadySolution{order,modes,field,populations,acceptance:Acceptance::Corrected,estimated_error:claimed,null_residual:residual,attempts,dressed:dressed.diagnostics.clone(),dressed_ms,slow});
+                    }
                 }
             }
             // The next order starts from the corrected field and its shell.
@@ -290,7 +302,7 @@ mod tests{
         // couplings between far modes included): the difference is the fold
         // remainder, and the charged bound must cover it.
         let f=fixture();let p=prepared(&f);let n=4;let groups=vec![vec![0,1],vec![2,3]];
-        let s=solve(&p,&groups).unwrap();
+        let s=solve(&p,&groups,Purpose::Report).unwrap();
         let(folded,_,_)=primal(&p,s.order);
         let charges:Vec<Charge>=(-1..=1).flat_map(|b:i32|{let reach=s.order as i32+if b==0{0}else{1};(-reach..=reach).map(move|a|vec![a,b])}).collect();
         let(matrix,centre)=explicit_matrix(&p,&charges);

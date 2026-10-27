@@ -20,7 +20,8 @@
 //! - `estimate`: error equations in the primal's Krylov space (truncation,
 //!   fold) and the shell correction;
 //! - `steady`: the steady pipeline (order, estimate, acceptance);
-//! - `spectrum`: conserved quantities and the slowest relaxation;
+//! - `slow`: the slow eigenpairs of the lattice operator (conserved
+//!   quantities, the slowest relaxation, the long-time machinery);
 //! - `ledger`: the tolerance, the error metric and every remainder bound.
 //!
 //! Validation only (tests and the `validation` feature): `dense_dressed`, the
@@ -44,7 +45,7 @@ pub mod preconditioner;
 pub mod krylov;
 pub mod estimate;
 pub mod steady;
-pub mod spectrum;
+pub mod slow;
 pub mod eigenbasis;
 pub mod finite;
 pub mod ledger;

@@ -127,6 +127,29 @@ impl Vectors{
         })
     }
 }
+/// Orthonormal coordinates of a span from its Gram matrix K (row-major m x
+/// m): Gram-Schmidt with dropping in the given order (ordered Cholesky
+/// K_SS = L L^T over the kept vectors S, a vector dropped when its part
+/// outside the span of those before it is below `dependent` of its norm,
+/// squared). Returns T (row-major m x r) with W = Z T orthonormal, and
+/// (largest / smallest diagonal of L)^2.
+pub fn orthonormal_coordinates(k:&[f64],m:usize,dependent:f64)->(Vec<f64>,usize,f64){
+    let mut kept:Vec<usize>=Vec::new();let mut lower:Vec<Vec<f64>>=Vec::new();
+    for g in 0..m{
+        let mut l=Vec::with_capacity(kept.len()+1);
+        for(a,&ka)in kept.iter().enumerate(){let mut s=k[ka*m+g];for b in 0..a{s-=lower[a][b]*l[b];}l.push(s/lower[a][a]);}
+        let residual=k[g*m+g]-l.iter().map(|x|x*x).sum::<f64>();
+        if residual>dependent*k[g*m+g]{l.push(residual.sqrt());lower.push(l);kept.push(g);}
+    }
+    let r=kept.len();
+    // L^-1 by forward substitution; T has the rows of L^-T on the kept vectors.
+    let mut inverse=vec![0.;r*r];
+    for c in 0..r{for i in c..r{let mut s=if i==c{1.}else{0.};for b in c..i{s-=lower[i][b]*inverse[b*r+c];}inverse[i*r+c]=s/lower[i][i];}}
+    let mut t=vec![0.;m*r];
+    for(a,&g)in kept.iter().enumerate(){for c in 0..r{t[g*r+c]=inverse[c*r+a];}}
+    let(largest,smallest)=lower.iter().enumerate().map(|(a,row)|row[a]).fold((0_f64,f64::INFINITY),|(x,y),v|(x.max(v),y.min(v)));
+    (t,r,(largest/smallest).powi(2))
+}
 /// sum_i c_i basis_i.
 pub fn combine(basis:&[&[C]],c:&[f64],length:usize)->Vec<C>{
     let mut out=vec![ZERO;length];
