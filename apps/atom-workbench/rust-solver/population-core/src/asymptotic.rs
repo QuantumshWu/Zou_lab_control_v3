@@ -174,6 +174,10 @@ const HALO_COVERAGE: f64 = 0.9;
 /// its best before the pole method stops (measured: one success came on the
 /// third expansion; failures kept the halo flat for many more).
 const HALO_STALL_EXPANSIONS: usize = 3;
+/// The condensed halo is accepted only while its second-order term is below
+/// this fraction of its first-order correction (the fixed point it
+/// approximates contracts at least this fast).
+const HALO_CONTRACTION: f64 = 0.5;
 /// Halo modes whose transport amplitude `|h_q| / |s + i omega_q|` is below
 /// this fraction of the largest one are condensed with the transport inverse
 /// instead of the exact mode-diagonal inverse (one P0 shift factor per mode).
@@ -309,9 +313,6 @@ pub struct MeanSolution {
 // ---------------------------------------------------------------------------
 // Charge and small dense helpers.
 
-fn charge_plus(a: &[i32], b: &[i32]) -> Charge {
-    a.iter().zip(b).map(|(x, y)| x + y).collect()
-}
 fn charge_minus(a: &[i32], b: &[i32]) -> Charge {
     a.iter().zip(b).map(|(x, y)| x - y).collect()
 }
@@ -629,21 +630,16 @@ fn correction(op: &mut DomainOperator, rhs: &[f64], null: &[f64], n: usize, targ
 // ---------------------------------------------------------------------------
 // Fourier truncation (halo).
 
-/// Modes one coupling step outside the domain.
-fn shell_modes(modes: &[Charge], steps: &[Charge]) -> Vec<Charge> {
+/// The halo shell of a domain: every mode one pencil application reaches
+/// from it (`OwnedPrepared::reachable`), outside the domain. One coupling
+/// step per Fourier step would miss the modes the layered shears reach.
+fn shell_modes(core: &RuntimeCore, modes: &[Charge]) -> Result<Vec<Charge>, String> {
     let inside: BTreeSet<&Charge> = modes.iter().collect();
-    let mut shell = BTreeSet::new();
-    for q in modes {
-        for s in steps {
-            for candidate in [charge_plus(q, s), charge_minus(q, s)] {
-                if !inside.contains(&candidate) {
-                    shell.insert(candidate);
-                }
-            }
-        }
-    }
-    shell.into_iter().collect()
+    Ok(core.prepared().reachable(modes)?.into_iter().filter(|q| !inside.contains(q)).collect())
 }
+
+/// Bytes of shell rows (E and F images of one column) held at once.
+const SHELL_CHUNK_BYTES: usize = 64 << 20;
 
 struct Halo {
     /// Density correction (laboratory frame) from the condensed halo.
@@ -657,6 +653,9 @@ struct Halo {
     counts: (usize, usize),
     /// Charge for the remaining residual of its correction solves.
     solve_charge: f64,
+    /// The domain correction of the whole condensed field (real domain
+    /// coordinates).
+    inner: Vec<f64>,
 }
 
 /// Condensed halo: `x_S = (s E - F)_SS^-1 F_SM w` approximated mode-diagonally
@@ -669,7 +668,10 @@ struct Halo {
 /// transport amplitude is below `FAR_HALO_AMPLITUDE` of the largest (a P0
 /// shift factor costs a dense factorisation per mode, the transport inverse
 /// nothing). The far contribution is computed separately so that it can be
-/// charged in full to the estimate.
+/// charged in full to the estimate. The shell is processed in chunks of
+/// `SHELL_CHUNK_BYTES`: a first pass finds the transport amplitudes, a second
+/// condenses each chunk and sums its feedback and direct readout (both
+/// linear), so the correction solves run once.
 #[allow(clippy::too_many_arguments)]
 fn halo(core: &mut RuntimeCore, op: &mut DomainOperator, frame: &Frame, readout: &mut TargetReadout,
     shell: &[Charge], null: &[f64], pole: f64, target: SolveTarget, applications: &mut usize) -> Result<Halo, String> {
@@ -677,72 +679,106 @@ fn halo(core: &mut RuntimeCore, op: &mut DomainOperator, frame: &Frame, readout:
     let d = n * n;
     let modes = op.modes().to_vec();
     let signed = op.signed_block(null, 1)?;
-    // Residual of the domain null vector on the shell.
-    let mut outward = core.prepared().pencil(&modes, shell, 1)?;
-    let mut e_shell = vec![C::default(); shell.len() * d];
-    let mut f_shell = vec![C::default(); shell.len() * d];
-    outward.apply_into(&signed, 1, &mut e_shell, &mut f_shell)?;
     let shifts: Vec<C> = {
         let phases = &core.prepared().primitives().hilbert.source.phases;
         shell.iter().map(|q| phases.frequency(q).map(|f| C { re: pole, im: f.hi + f.lo })).collect::<Result<_, _>>()?
     };
-    let transport: Vec<f64> = (0..shell.len()).map(|k| euclid_complex(&f_shell[k * d..(k + 1) * d]) / shifts[k].re.hypot(shifts[k].im))
-        .collect();
+    let chunk = (SHELL_CHUNK_BYTES / (2 * d * std::mem::size_of::<C>())).max(1);
+    let ranges: Vec<(usize, usize)> = (0..shell.len()).step_by(chunk).map(|a| (a, (a + chunk).min(shell.len()))).collect();
+    // Residual of the domain null vector on the shell, one chunk at a time.
+    let outward = |core: &RuntimeCore, a: usize, b: usize| -> Result<Vec<C>, String> {
+        let mut plan = core.prepared().pencil(&modes, &shell[a..b], 1)?;
+        let mut e_shell = vec![C::default(); (b - a) * d];
+        let mut f_shell = vec![C::default(); (b - a) * d];
+        plan.apply_into(&signed, 1, &mut e_shell, &mut f_shell)?;
+        Ok(f_shell)
+    };
+    let mut transport = vec![0_f64; shell.len()];
+    for &(a, b) in &ranges {
+        let f_shell = outward(core, a, b)?;
+        for k in a..b {
+            transport[k] = euclid_complex(&f_shell[(k - a) * d..(k - a + 1) * d]) / shifts[k].re.hypot(shifts[k].im);
+        }
+    }
     let largest = transport.iter().copied().fold(0_f64, f64::max);
-    let (near, far): (Vec<usize>, Vec<usize>) = (0..shell.len()).partition(|&k| transport[k] > FAR_HALO_AMPLITUDE * largest);
-    let mut condensed = vec![C::default(); shell.len() * d];
-    if !near.is_empty() {
-        let mut gathered = Vec::with_capacity(near.len() * d);
-        for &k in &near {
-            gathered.extend_from_slice(&f_shell[k * d..(k + 1) * d]);
+    let is_near = |k: usize| transport[k] > FAR_HALO_AMPLITUDE * largest;
+    let mut indicators: Vec<(Charge, f64)> = Vec::with_capacity(shell.len());
+    // Feedback (pulled into the domain rows) and direct readout of the whole
+    // condensed field and of its far part alone.
+    let rows = op.rows();
+    let mut feedback = [vec![0_f64; rows], vec![0_f64; rows]];
+    let mut direct_density = [vec![C::default(); d], vec![C::default(); d]];
+    let (mut near_count, mut far_count) = (0, 0);
+    for &(a, b) in &ranges {
+        let f_shell = outward(core, a, b)?;
+        let mut condensed = vec![C::default(); (b - a) * d];
+        let near: Vec<usize> = (a..b).filter(|&k| is_near(k)).collect();
+        if !near.is_empty() {
+            let mut gathered = Vec::with_capacity(near.len() * d);
+            for &k in &near {
+                gathered.extend_from_slice(&f_shell[(k - a) * d..(k - a + 1) * d]);
+            }
+            let near_shifts: Vec<C> = near.iter().map(|&k| shifts[k]).collect();
+            let mut p0 = core.p0_mut().prepare_batch(&near_shifts, 1)?;
+            let mut solved = vec![C::default(); gathered.len()];
+            p0.apply_into(&gathered, 1, &mut solved)?;
+            for (slot, &k) in near.iter().enumerate() {
+                condensed[(k - a) * d..(k - a + 1) * d].copy_from_slice(&solved[slot * d..(slot + 1) * d]);
+            }
         }
-        let near_shifts: Vec<C> = near.iter().map(|&k| shifts[k]).collect();
-        let mut p0 = core.p0_mut().prepare_batch(&near_shifts, 1)?;
-        let mut solved = vec![C::default(); gathered.len()];
-        p0.apply_into(&gathered, 1, &mut solved)?;
-        for (slot, &k) in near.iter().enumerate() {
-            condensed[k * d..(k + 1) * d].copy_from_slice(&solved[slot * d..(slot + 1) * d]);
+        let mut far_field = vec![C::default(); (b - a) * d];
+        let mut any_far = false;
+        for k in a..b {
+            if is_near(k) {
+                near_count += 1;
+                continue;
+            }
+            far_count += 1;
+            let inverse = reciprocal(shifts[k]);
+            for ((x, f), h) in condensed[(k - a) * d..(k - a + 1) * d].iter_mut().zip(&mut far_field[(k - a) * d..(k - a + 1) * d]).zip(&f_shell[(k - a) * d..(k - a + 1) * d]) {
+                *x = complex_product(*h, inverse);
+                *f = *x;
+                any_far |= x.re != 0. || x.im != 0.;
+            }
+        }
+        for k in a..b {
+            indicators.push((shell[k].clone(), euclid_complex(&condensed[(k - a) * d..(k - a + 1) * d])));
+        }
+        // Feedback of the condensed field on the domain and its direct
+        // readout, for the whole field and its far part.
+        let mut inward = core.prepared().pencil(&shell[a..b], &modes, 1)?;
+        let mut direct = TargetReadout::new(core, &shell[a..b], frame)?;
+        let parts: [Option<&Vec<C>>; 2] = [Some(&condensed), any_far.then_some(&far_field)];
+        for (index, field) in parts.into_iter().enumerate() {
+            let Some(field) = field else { continue };
+            let mut e_back = vec![C::default(); modes.len() * d];
+            let mut f_back = vec![C::default(); modes.len() * d];
+            inward.apply_into(field, 1, &mut e_back, &mut f_back)?;
+            let mut pulled = vec![C::default(); rows];
+            op.map().pull_complex_into(&f_back, 1, &mut pulled)?;
+            for (t, z) in feedback[index].iter_mut().zip(&pulled) {
+                *t += z.re;
+            }
+            add_into(&mut direct_density[index], &direct.density(core.physical(), frame, field)?);
         }
     }
-    for &k in &far {
-        let inverse = reciprocal(shifts[k]);
-        for (x, h) in condensed[k * d..(k + 1) * d].iter_mut().zip(&f_shell[k * d..(k + 1) * d]) {
-            *x = complex_product(*h, inverse);
-        }
-    }
-    let indicators: Vec<(Charge, f64)> = shell.iter().enumerate()
-        .map(|(k, q)| (q.clone(), euclid_complex(&condensed[k * d..(k + 1) * d])))
-        .collect();
-    let mut inward = core.prepared().pencil(shell, &modes, 1)?;
-    let mut direct = TargetReadout::new(core, shell, frame)?;
-    let mut response = |core: &RuntimeCore, field: &[C], applications: &mut usize| -> Result<(Vec<C>, f64, f64), String> {
-        // Feedback of the condensed halo on the domain, corrected inside it.
-        let mut e_back = vec![C::default(); modes.len() * d];
-        let mut f_back = vec![C::default(); modes.len() * d];
-        inward.apply_into(field, 1, &mut e_back, &mut f_back)?;
-        let mut pulled = vec![C::default(); op.rows()];
-        op.map().pull_complex_into(&f_back, 1, &mut pulled)?;
-        let feedback: Vec<f64> = pulled.iter().map(|z| z.re).collect();
-        let (inner, relative, charge) = correction(op, &feedback, null, n, target, applications)?;
+    // The feedback corrected inside the domain, plus the direct readout.
+    let mut response = |index: usize, applications: &mut usize| -> Result<(Vec<C>, f64, f64, Vec<f64>), String> {
+        let (inner, relative, charge) = correction(op, &feedback[index], null, n, target, applications)?;
         let inner_signed = op.signed_block(&inner, 1)?;
         let mut density = readout.density(core.physical(), frame, &inner_signed)?;
-        // Direct readout of the halo field itself.
-        add_into(&mut density, &direct.density(core.physical(), frame, field)?);
-        Ok((density, relative, charge))
+        add_into(&mut density, &direct_density[index]);
+        Ok((density, relative, charge, inner))
     };
-    let (density, relative, charge) = response(core, &condensed, applications)?;
-    let (far_density, far_relative, far_charge) = if far.is_empty() {
+    let (density, relative, charge, inner) = response(0, applications)?;
+    let (far_density, far_relative, far_charge) = if far_count == 0 {
         (None, 0., 0.)
     } else {
-        let mut far_field = vec![C::default(); condensed.len()];
-        for &k in &far {
-            far_field[k * d..(k + 1) * d].copy_from_slice(&condensed[k * d..(k + 1) * d]);
-        }
-        let (value, relative, charge) = response(core, &far_field, applications)?;
+        let (value, relative, charge, _) = response(1, applications)?;
         (Some(value), relative, charge)
     };
     Ok(Halo { density, far_density, reliable: relative.max(far_relative) <= ESTIMATE_RESIDUAL_LIMIT, indicators,
-        counts: (near.len(), far.len()), solve_charge: charge + far_charge })
+        counts: (near_count, far_count), solve_charge: charge + far_charge, inner })
 }
 
 /// Halo modes with the largest indicators covering `HALO_COVERAGE` of the
@@ -774,8 +810,6 @@ fn select_halo_modes(indicators: &[(Charge, f64)]) -> Vec<Charge> {
 struct Context {
     n: usize,
     axes: usize,
-    /// Every Fourier step (the halo covers all of them).
-    steps: Vec<Charge>,
     /// Steps with a significant mixing amplitude: the starting domain and the
     /// domain growth of the degenerate path.
     domain_steps: Vec<Charge>,
@@ -793,7 +827,7 @@ impl Context {
         let source = &core.prepared().primitives().hilbert.source;
         let steps = core.fourier_steps()?;
         let pole = slow.and_then(|s| s.slowest_rate).map_or(POLE_MAX, |rate| (POLE_RESOLUTION * rate).clamp(POLE_FLOOR, POLE_MAX));
-        Ok(Self { n: source.n, axes: steps.axes, steps: steps.all, domain_steps: steps.domain,
+        Ok(Self { n: source.n, axes: steps.axes, domain_steps: steps.domain,
             frame: Frame::new(&source.gauges, &options.lab)?, lapack: Arc::clone(core.lapack()), slow, pole })
     }
     /// Rates the current pole separates from zero.
@@ -1200,25 +1234,51 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
         let mut checkpoint = MeanCheckpoint { columns: space.columns(), modes: modes.len(), pole, basis_estimate,
             halo_estimate: None, halo_modes: (0, 0), inner_residual: inner, action: "" };
         if basis_reliable && SAFETY * basis_estimate <= 0.5 * epsilon {
-            let shell = shell_modes(&modes, &context.steps);
+            let shell = shell_modes(core, &modes)?;
             let halo = if shell.is_empty() {
                 None
             } else {
                 let clock = Instant::now();
-                let value = halo(core, &mut space.op, &context.frame, &mut readout, &shell, &null, pole, target, &mut work.applications)?;
+                let mut value = halo(core, &mut space.op, &context.frame, &mut readout, &shell, &null, pole, target, &mut work.applications)?;
+                // Second order: the condensed halo is linear, `Delta = A w`,
+                // and the domain's own null vector moves with it, so the
+                // consistent correction is the fixed point `Delta = A (w +
+                // delta + Delta)`. The halo of the first correction (basis and
+                // halo) is its next term; with the ratio `rho` of the two the
+                // tail is at most `|A Delta_1| / (1 - rho)` for a contraction.
+                // A correction outside the first-order regime (`rho` above
+                // `HALO_CONTRACTION`: a slow mode of the domain that the halo
+                // feedback moves by its own size) is not accepted; the domain
+                // grows instead.
+                let step: Vec<f64> = value.inner.iter().zip(&delta).map(|(a, b)| a + b).collect();
+                let second = halo(core, &mut space.op, &context.frame, &mut readout, &shell, &step, pole, target, &mut work.applications)?;
                 work.timing[2] += ms(clock);
+                // The contraction ratio: the second term against the step it
+                // was computed from (basis and halo correction together).
+                let mut step_density = value.density.clone();
+                add_into(&mut step_density, &basis_density);
+                let step_size = context.metric(&step_density, &options.groups)?;
+                let second_size = context.metric(&second.density, &options.groups)?;
+                let ratio = second_size / step_size.max(f64::MIN_POSITIVE);
+                let tail = if ratio < HALO_CONTRACTION { second_size / (1. - ratio) } else { f64::INFINITY };
+                add_into(&mut value.density, &second.density);
+                value.reliable &= second.reliable && ratio < HALO_CONTRACTION;
+                value.solve_charge += second.solve_charge;
                 // The correction itself, plus the transport part once more: the
                 // transport inverse may be off by its own size near a resonance.
                 let far = value.far_density.as_ref().map_or(Ok(0.), |far| context.metric(far, &options.groups))?;
-                let estimate = (context.metric(&value.density, &options.groups)? + far) * bias + value.solve_charge;
+                let size = (context.metric(&value.density, &options.groups)? + far) * bias + value.solve_charge;
+                let estimate = size + tail * bias;
                 checkpoint.halo_modes = value.counts;
-                Some((value, estimate))
+                // The stall rule follows the size of the correction (finite
+                // also when the second order rules out acceptance).
+                Some((value, estimate, size + second_size * bias))
             };
             let halo_estimate = halo.as_ref().map_or(0., |h| h.1);
             checkpoint.halo_estimate = halo.as_ref().map(|h| h.1);
             let mut corrected = raw_mean.clone();
             add_into(&mut corrected, &basis_density);
-            if let Some((h, _)) = &halo {
+            if let Some((h, _, _)) = &halo {
                 add_into(&mut corrected, &h.density);
             }
             let projected = project_density(&context.lapack, &corrected, context.n)?;
@@ -1234,7 +1294,7 @@ fn null_vector_mean(core: &mut RuntimeCore, options: &MeanOptions, context: &Con
                     relative_residual, slowest_rate: spectrum.slowest_rate(), zero_modes, modes, pole, columns: space.columns() };
                 return Ok(Outcome::Null(candidate, NullState { space, readout }));
             }
-            if let Some((h, value)) = halo.filter(|h| h.1 >= basis_estimate) {
+            if let Some((h, _, value)) = halo.filter(|h| h.1 >= basis_estimate) {
                 if modes.len() >= options.maximum_modes {
                     return Err(format!("Long-time mean needs more than {} Fourier modes; the tolerance was not relaxed", options.maximum_modes));
                 }
@@ -1465,9 +1525,16 @@ fn degenerate(core: &mut RuntimeCore, options: &MeanOptions, context: &Context, 
     let clock = Instant::now();
     let (mut mean, mut extrapolation, mut discarded, mut residual) = evaluate(core, &modes, &initial, work)?;
     loop {
-        let shell = shell_modes(&modes, &context.steps);
+        let shell = shell_modes(core, &modes)?;
         let mut larger: Vec<Charge> = modes.iter().cloned().chain(shell.iter().cloned()).collect();
         larger.sort();
+        if larger.len() > options.maximum_modes {
+            return Err(format!(
+                "Initial-dependent long-time mean: its Fourier check needs {} modes, more than {}; the tolerance was not relaxed",
+                larger.len(),
+                options.maximum_modes
+            ));
+        }
         let (halo_estimate, next) = if shell.is_empty() {
             (0., None)
         } else {
@@ -2038,8 +2105,10 @@ mod tests {
         assert!(matches!(mean.kind, MeanKind::InitialDependent { .. }), "{:?}", mean.kind);
         let first = mean.diagnostics.checkpoints.iter().find(|c| c.action == "degenerate-resolvent").expect("the degenerate branch");
         let modes = support_domain(steps.axes, &steps.domain, 1).unwrap();
-        assert_eq!(first.halo_modes.0, shell_modes(&modes, &steps.all).len(), "shell over every step");
-        assert!(first.halo_modes.0 > shell_modes(&modes, &steps.domain).len());
+        let reach = shell_modes(&core, &modes).unwrap();
+        assert_eq!(first.halo_modes.0, reach.len(), "shell over every reachable mode");
+        let weak = steps.all.iter().find(|q| !steps.domain.contains(q)).expect("the weak step");
+        assert!(reach.contains(weak), "the shell follows the weak step too");
     }
 
     #[test]
