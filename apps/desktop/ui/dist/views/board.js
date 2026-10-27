@@ -5,6 +5,7 @@
 // board only copies finished pixels and forwards pointer and setting
 // intents; every scientific decision is the host's.
 import { Field, armable, button, comboFace, element, fieldKind, hintWidest, setFragments, setState, shareLabelColumn, token } from "../fluent/index.js";
+import { BoardMetrics, GeomProxy, drop, firstFreeSlot, minBoardWidth, pack, slotUnder } from "./board_layout.js";
 import { CanvasPointer } from "./pointer.js";
 /** A panel's Edit (`edit-<panel>`): drawn on its Edit page, never a card on the board. */
 export const isEdit = (id) => id.startsWith("edit-");
@@ -15,10 +16,30 @@ export const isSlm = (id) => id.startsWith("slm-");
 /** The cards that stand on another page, not on the board: Edits, point reviews, SLM Editor pictures. */
 const offBoard = (id) => isEdit(id) || isReview(id) || isSlm(id);
 const mapKey = (mapping, slot) => JSON.stringify([mapping, slot]);
+/** v2 ConsoleBoardView: one rule set places every card.  Every card has a place, a card let go
+ * onto another changes places with it, a card let go on empty space goes there, cards that
+ * overlap make way, and everything falls north-west (board_layout).  A drop records where it
+ * left EVERY card for the board's column count (how many of the narrowest card fit side by side),
+ * and nothing else writes those places; a card no drop has placed takes the first free slot, in
+ * board order, at the width the board has now.  A column count no drop was made at shows the
+ * nearest wider count's arrangement packed narrower (none wider: the nearest narrower), so
+ * narrowing packs without destroying the arrangement and widening restores it.  The places live
+ * as long as the window; the workbench keeps the order (order_panels). */
 export class PanelBoard {
     transport;
-    /** #panels: cards in reading order, a card pad apart. */
+    /** #panels: the cards, absolutely placed in whole device px a card pad apart (the padding's left
+     * and top are BoardMetrics' margins), over the extent that makes the board scroll. */
     root = element("main");
+    /** The board's scroll extent (v2 setMinimumSize): as tall as the lowest card, the padding after it. */
+    extent = element("div", "board-extent");
+    /** v2 _arrangements: where the last drop at each column count left every card, by panel id.
+     * Written by a drop alone: packing reads it and never writes it back (that would ratchet). */
+    arrangements = new Map();
+    /** Where each card was last put (device px at a pixel ratio): only a moved card is written. */
+    drawn = new Map();
+    /** A card's or the board's size changed: settle again before the frame paints. */
+    observer = new ResizeObserver(() => this.resized());
+    frameRequest = 0;
     views = new Map();
     staged = new Map();
     /** Fronts the host delivers for a view of its own (the Pulse Editor's
@@ -41,6 +62,8 @@ export class PanelBoard {
         this.root.id = id;
         this.root.classList.add("panel-board");
         this.root.setAttribute("aria-label", "Figure panels");
+        this.root.append(this.extent);
+        this.observer.observe(this.root);
         window.addEventListener("blur", () => { for (const view of this.views.values())
             view.cancelPointer(); });
         window.addEventListener("resize", () => { for (const view of this.views.values())
@@ -87,7 +110,8 @@ export class PanelBoard {
     boardPanel(id) { return this.board?.panels.find(entry => entry.panel === id); }
     frozen(id) { return this.board?.frozen[id] ?? ""; }
     accept(state) {
-        if (state.request !== undefined && state.request === this.orderRequest)
+        const answered = state.request !== undefined && state.request === this.orderRequest;
+        if (answered)
             this.orderRequest = null;
         const boardChanged = Boolean(state.board) && JSON.stringify(state.board) !== JSON.stringify(this.board);
         if (state.board)
@@ -99,18 +123,27 @@ export class PanelBoard {
         }
         if (state.panels) {
             const alive = new Set(state.panels.map(panel => panel.id));
+            const cards = this.boardIds();
+            // A card that leaves takes its gesture with it (v2 set_cards ends the drag).
+            if (this.gesture && !alive.has(this.gesture.view.id))
+                this.gesture.end(false);
             for (const [id, view] of this.views)
                 if (!alive.has(id)) {
                     view.cancelPointer();
+                    this.observer.unobserve(view.root);
                     view.root.remove();
                     this.views.delete(id);
                     this.staged.delete(id);
+                    this.forget(id);
                 }
             for (const panel of state.panels) {
                 let view = this.views.get(panel.id);
                 if (!view) {
                     view = new PanelView(this, panel.id);
                     this.views.set(panel.id, view);
+                    // A board card's size is its own (its picture's): the board settles again when it changes.
+                    if (!offBoard(panel.id))
+                        this.observer.observe(view.root, { box: "border-box" });
                 }
                 const request = state.error ? state.request : panel.authoring_pending ? undefined : panel.target_request ?? state.request;
                 if (panel.frame && panel.frame.sequence < view.drawnSequence)
@@ -124,21 +157,54 @@ export class PanelBoard {
                 else
                     view.update(panel, request, Boolean(state.error || panel.error));
             }
-            // Cards in the order the state lists them (board.panels order, v2's
-            // order_committed), moving only the ones out of place -- unless the
-            // operator just put them in another one and its answer is still due.
-            this.order = state.panels.map(panel => panel.id);
+            this.reorder(state.panels.map(panel => panel.id));
             this.place();
+            // Cards came or went, or the order changed: v2 set_cards settles the board (a carried card's frame again).
+            if (this.boardIds().join() !== cards.join()) {
+                if (this.carried)
+                    this.reframe();
+                else
+                    this.schedule();
+            }
         }
+        else if (answered)
+            this.place();
         if (catalogChanged)
             for (const view of this.views.values())
                 view.refreshCatalog();
         this.root.classList.toggle("can-carry", Boolean(this.board) && this.size > 1);
         this.changed();
     }
-    /** The cards in the order the state last listed them. */
+    /** The order the workbench holds (state.panels, v2's order_committed) is the persisted fact: one
+     * that changes from elsewhere (a layout loaded, MCP) lays the board out afresh, every card in a
+     * first free slot in that order -- unless it is a drop's own order coming back.  While a drop's
+     * order_panels answer is due, a state's order is older than it: only its arrivals and departures count. */
+    reorder(incoming) {
+        const known = new Set(this.order), arriving = new Set(incoming);
+        if (this.orderRequest !== null) {
+            this.order = [...this.order.filter(id => arriving.has(id)), ...incoming.filter(id => !known.has(id))];
+            return;
+        }
+        const kept = (ids, other) => ids.filter(id => other.has(id) && !offBoard(id)).join();
+        if (kept(this.order, arriving) !== kept(incoming, known))
+            this.arrangements.clear();
+        this.order = incoming;
+    }
+    /** A card that left: no place, no arrangement keeps it (v2 set_cards). */
+    forget(id) {
+        this.drawn.delete(id);
+        for (const [columns, places] of this.arrangements) {
+            places.delete(id);
+            if (!places.size)
+                this.arrangements.delete(columns);
+        }
+    }
+    /** The board's cards in board order (an Edit, a review and an SLM Editor picture stand elsewhere). */
+    boardIds() { return this.order.filter(id => !offBoard(id) && this.views.has(id)); }
+    /** The cards' nodes in board order -- reading order, for the keyboard -- moving only the ones out
+     * of place, never while one is carried or a drop's order is still due. */
     place() {
-        let cursor = this.orderRequest !== null || this.carried ? null : this.root.firstElementChild;
+        let cursor = this.orderRequest !== null || this.carried ? null : this.extent.nextElementSibling;
         for (const id of this.order) {
             const view = this.views.get(id);
             // A panel's Edit card stands on its Edit page, a review's in its review.
@@ -216,28 +282,130 @@ export class PanelBoard {
             this.transport.post({ action: "frame_consumed", mapping: frame.mapping, slot: frame.slot, sequence: frame.sequence, accepted, error });
         }
     }
+    // ------------------------------------------------------------- placing
+    /** v2 _pack_current, now: every card where the board's places settle at its width, the
+     * board's extent under the lowest.  Null while the board is not laid out (a page not shown)
+     * or a card is carried (its frame stands still until it is let go). */
+    layout() {
+        if (this.frameRequest) {
+            cancelAnimationFrame(this.frameRequest);
+            this.frameRequest = 0;
+        }
+        if (this.carried)
+            return null;
+        const frame = this.settle();
+        if (!frame)
+            return null;
+        this.reach(this.put(frame.board), frame.metrics);
+        return frame.board;
+    }
+    /** Settle once, in the next frame, however many states asked. */
+    schedule() {
+        if (!this.frameRequest)
+            this.frameRequest = requestAnimationFrame(() => { this.frameRequest = 0; this.layout(); });
+    }
+    /** After layout, before paint: a card's picture or the board's width changed. */
+    resized() {
+        const carried = this.carried;
+        if (!carried) {
+            this.layout();
+            return;
+        }
+        // v2 resizeEvent: a carried card's frame was settled at the old width.
+        if (Math.round(this.extent.getBoundingClientRect().width * devicePixelRatio) !== carried.frame.room)
+            this.reframe();
+    }
+    /** v2 _settle at the board's width, every card measured first (reads only): a card the
+     * arrangement places starts there and falls; every other card -- one no drop has placed --
+     * then takes the first free slot, in board order.  Whole device px; the margins (the gap) are
+     * the board's padding, a card's right edge may reach its content edge. */
+    settle() {
+        const ids = this.boardIds(), dpr = devicePixelRatio;
+        const metrics = new BoardMetrics(Math.round((parseFloat(getComputedStyle(this.root).paddingLeft) || 0) * dpr));
+        const room = Math.round(this.extent.getBoundingClientRect().width * dpr);
+        const sizes = ids.map(id => this.views.get(id).root.getBoundingClientRect()).map(rect => [Math.round(rect.width * dpr), Math.round(rect.height * dpr)]);
+        if (ids.length && (room <= 0 || sizes.some(([width, height]) => width <= 0 || height <= 0)))
+            return null;
+        const board = new Map(ids.map((id, index) => [id, new GeomProxy(...sizes[index])]));
+        const boardW = Math.max(room + 2 * metrics.gap, minBoardWidth(board.values(), metrics));
+        const places = this.places([...board.values()], boardW, metrics);
+        const placed = [];
+        for (const [id, proxy] of board) {
+            const at = places?.get(id);
+            if (at) {
+                [proxy.col, proxy.row] = at;
+                placed.push(proxy);
+            }
+        }
+        pack(placed, metrics, boardW);
+        for (const [id, proxy] of board)
+            if (!places?.has(id)) {
+                [proxy.col, proxy.row] = firstFreeSlot(proxy, placed, boardW, metrics);
+                placed.push(proxy);
+            }
+        return { board, ids, boardW, room, metrics };
+    }
+    /** v2 _columns: how many of the narrowest card fit side by side on a board this wide. */
+    columns(cards, boardW, metrics) {
+        return Math.max(1, Math.floor((boardW - metrics.gap) / (Math.min(...cards.map(card => card.width)) + metrics.gap)));
+    }
+    /** v2 _places: the arrangement the last drop at this column count left, else the nearest wider
+     * one's (a narrower board packs it), else the nearest narrower one's. */
+    places(cards, boardW, metrics) {
+        if (!this.arrangements.size || !cards.length)
+            return undefined;
+        const columns = this.columns(cards, boardW, metrics), counts = [...this.arrangements.keys()], wider = counts.filter(count => count > columns);
+        return this.arrangements.get(columns) ?? this.arrangements.get(wider.length ? Math.min(...wider) : Math.max(...counts));
+    }
+    /** v2 _place: every card but the carried one to its place (writes only, a moved card's alone);
+     * the lowest bottom edge among them all. */
+    put(board, carried) {
+        const dpr = devicePixelRatio, moved = [];
+        let bottom = 0;
+        for (const [id, proxy] of board) {
+            bottom = Math.max(bottom, proxy.row + proxy.height);
+            const view = this.views.get(id), at = `${proxy.col},${proxy.row},${dpr}`;
+            if (id === carried || this.drawn.get(id) === at)
+                continue;
+            view.root.style.left = `${proxy.col / dpr}px`;
+            view.root.style.top = `${proxy.row / dpr}px`;
+            this.drawn.set(id, at);
+            moved.push(view);
+        }
+        // An open Setting frame rides its card, kept inside the board where the card now stands.
+        for (const view of moved)
+            view.placeSettings();
+        return bottom;
+    }
+    /** The board scrolls to `bottom` and its own bottom padding (v2 setMinimumSize(..., bottom + gap)). */
+    reach(bottom, metrics) {
+        this.extent.style.height = `${Math.max(0, bottom - metrics.gap) / devicePixelRatio}px`;
+    }
     // ------------------------------------------------------------ carrying
-    /** A card carried by its title band: past a small threshold it follows the
-     * pointer, the others already stand where letting go would leave them,
-     * the slot is an ACCENT_TINT card with a dashed edge, and the board scrolls
-     * under a pointer held near its top or bottom.  Letting go commits the
-     * order (order_panels); Escape or a lost capture puts it back. */
+    /** v2 ConsoleBoardView's drag.  A card carried by its title band follows the pointer past a
+     * small threshold.  The slot is chosen in the board as it stood at pick-up (the frame), which
+     * stands still, so the choice cannot chase its own consequence: under the pointer's x on the
+     * line of the card's strip, nearest where the card is drawn (slotUnder).  While it is carried
+     * the other cards already stand where letting go will leave them -- preview and drop are one
+     * computation (drop) -- with the slot under it an ACCENT_TINT card with a dashed edge, and held
+     * near the board's top or bottom edge the board scrolls under it.  Let go, the places are
+     * recorded for this column count and the cards' reading order committed (order_panels); Escape
+     * or a lost capture puts every card back. */
     carried = null;
+    /** A press on a title band until it is let go, and how to end it from outside (its card left, the board hid). */
+    gesture = null;
     orderRequest = null;
     order = [];
     carry(view, event) {
-        if (!this.board || this.carried || this.size < 2 || offBoard(view.id))
+        if (!this.board || this.gesture || this.size < 2 || offBoard(view.id))
             return;
         const grip = event.currentTarget;
         const start = { x: event.clientX, y: event.clientY };
         const threshold = token("--control") / 4;
         grip.setPointerCapture(event.pointerId);
         const move = (moved) => {
-            if (!this.carried) {
-                if (Math.hypot(moved.clientX - start.x, moved.clientY - start.y) < threshold)
-                    return;
-                this.lift(view, start);
-            }
+            if (!this.carried && (Math.hypot(moved.clientX - start.x, moved.clientY - start.y) < threshold || !this.lift(view, start)))
+                return;
             this.follow(moved.clientX, moved.clientY);
         };
         const end = (commit) => {
@@ -245,10 +413,13 @@ export class PanelBoard {
             grip.removeEventListener("pointerup", up);
             grip.removeEventListener("lostpointercapture", lost);
             window.removeEventListener("keydown", key, true);
+            this.gesture = null;
             if (this.carried)
-                this.drop(commit);
+                this.letGo(commit);
         };
-        const up = () => end(true);
+        // Let go where the pointer is released: the slot under it.
+        const up = (released) => { if (this.carried)
+            this.carried.pointer = { x: released.clientX, y: released.clientY }; end(true); };
         const lost = () => end(false);
         const key = (pressed) => { if (pressed.key === "Escape") {
             pressed.preventDefault();
@@ -259,65 +430,145 @@ export class PanelBoard {
         grip.addEventListener("pointerup", up);
         grip.addEventListener("lostpointercapture", lost);
         window.addEventListener("keydown", key, true);
+        this.gesture = { view, end };
     }
+    /** v2 _card_drag_started: the frame is the board as it stands; the card leaves it to follow the
+     * pointer (fixed, so it never stretches the board it is carried over), held where it was pressed. */
     lift(view, start) {
-        const card = view.root, rect = card.getBoundingClientRect();
-        const slot = element("div", "drop-slot");
-        slot.style.width = `${rect.width}px`;
-        slot.style.height = `${rect.height}px`;
-        const before = [...this.views.keys()].filter(id => !offBoard(id)).sort((a, b) => this.index(a) - this.index(b));
-        card.before(slot);
+        const frame = this.settle();
+        if (!frame)
+            return false;
+        const card = view.root, rect = card.getBoundingClientRect(), strip = card.querySelector(".panel-header").getBoundingClientRect(), dpr = devicePixelRatio;
+        const plate = element("div", "drop-slot");
+        this.carried = { view, frame, slot: null, plate, hold: { x: start.x - rect.left, y: start.y - rect.top },
+            strip: Math.round((strip.top + strip.height / 2 - rect.top) * dpr), band: Math.max(1, Math.round(strip.height * dpr)), pointer: start, scroll: 0 };
+        // Under every card: the cards stand after it.
+        this.extent.after(plate);
+        this.drawn.delete(view.id);
         card.classList.add("carried");
         document.body.classList.add("carrying");
         Object.assign(card.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px` });
-        this.carried = { view, slot, before, dx: start.x - rect.left, dy: start.y - rect.top, scroll: 0, pointer: start };
+        return true;
     }
-    index(id) { return [...this.root.children].indexOf(this.views.get(id).root); }
     follow(x, y) {
-        const carried = this.carried;
+        const carried = this.carried, box = this.root.getBoundingClientRect();
         carried.pointer = { x, y };
-        const card = carried.view.root;
-        card.style.left = `${x - carried.dx}px`;
-        card.style.top = `${y - carried.dy}px`;
-        // The slot goes before the card under the pointer's left half, after its right half.
-        const others = [...this.root.children].filter((node) => node !== card && node !== carried.slot && node.classList.contains("panel"));
-        const under = others.find(node => { const r = node.getBoundingClientRect(); return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; });
-        if (under) {
-            const r = under.getBoundingClientRect();
-            const target = x < r.left + r.width / 2 ? under : under.nextElementSibling;
-            if (target !== carried.slot && target !== carried.slot.nextElementSibling)
-                this.root.insertBefore(carried.slot, target);
-        }
-        else if (others.length && y > Math.max(...others.map(node => node.getBoundingClientRect().bottom)))
-            this.root.append(carried.slot);
-        // Held near the board's top or bottom edge, the board scrolls under it.
-        const view = this.root.getBoundingClientRect(), edge = token("--control") * 2;
-        const speed = y < view.top + edge ? -1 : y > view.bottom - edge ? 1 : 0;
-        window.clearInterval(carried.scroll);
-        carried.scroll = speed ? window.setInterval(() => { this.root.scrollTop += speed * token("--row-gap") * 2; }, 20) : 0;
+        this.aim(box);
+        Object.assign(carried.view.root.style, { left: `${x - carried.hold.x}px`, top: `${y - carried.hold.y}px` });
+        this.steer(box);
     }
-    drop(commit) {
+    /** v2 _show_drop: the board as letting go here would leave it, and the slot drawn where the card will rest. */
+    aim(box = this.root.getBoundingClientRect()) {
+        const carried = this.carried, { board, boardW, metrics } = carried.frame, dpr = devicePixelRatio;
+        // Board px of a client point: from the padding box's corner, scrolled.
+        const left = box.left + this.root.clientLeft - this.root.scrollLeft, top = box.top + this.root.clientTop - this.root.scrollTop;
+        const seen = [Math.round((carried.pointer.x - carried.hold.x - left) * dpr), Math.round((carried.pointer.y - carried.hold.y - top) * dpr)];
+        const others = [...board].filter(([id]) => id !== carried.view.id).map(([, proxy]) => proxy);
+        const slot = slotUnder([Math.round((carried.pointer.x - left) * dpr), seen[1] + carried.strip], board.get(carried.view.id), others, metrics, boardW, seen);
+        if (carried.slot && carried.slot[0] === slot[0] && carried.slot[1] === slot[1])
+            return;
+        carried.slot = slot;
+        const preview = this.droppedAt(slot), rest = preview.get(carried.view.id);
+        const bottom = this.put(preview, carried.view.id);
+        Object.assign(carried.plate.style, { left: `${rest.col / dpr}px`, top: `${rest.row / dpr}px`, width: `${rest.width / dpr}px`, height: `${rest.height / dpr}px` });
+        // Room for one more row while a card is carried: the slot after the last card must be reachable.
+        const lowest = Math.max(0, ...others.map(proxy => proxy.row + proxy.height));
+        this.reach(Math.max(bottom, lowest + metrics.gap + rest.height), metrics);
+    }
+    /** v2 _dropped_at: every card at rest once the carried one is let go at `slot`, on copies of the frame. */
+    droppedAt(slot) {
+        const carried = this.carried, { board, ids, boardW, metrics } = carried.frame;
+        const copies = new Map([...board].map(([id, proxy]) => [id, new GeomProxy(proxy.width, proxy.height, proxy.col, proxy.row)]));
+        drop(ids.map(id => copies.get(id)), copies.get(carried.view.id), slot, metrics, boardW);
+        return copies;
+    }
+    /** v2 _frame_drag again: the board's width or its set of cards changed under a carried card. */
+    reframe() {
+        const carried = this.carried, frame = this.settle();
+        if (!frame || !frame.board.has(carried.view.id)) {
+            this.gesture?.end(false);
+            return;
+        }
+        carried.frame = frame;
+        carried.slot = null;
+        this.aim();
+    }
+    /** v2 _card_dropped: the drop records where it left EVERY card at this column count, the board
+     * settles (to those places) and the cards' reading order is committed.  Not committed (Escape,
+     * a lost capture), every card goes back where it stood. */
+    letGo(commit) {
         const carried = this.carried;
+        if (commit)
+            this.aim();
+        const preview = commit && carried.slot ? this.droppedAt(carried.slot) : null;
         this.carried = null;
         window.clearInterval(carried.scroll);
-        const card = carried.view.root;
-        card.classList.remove("carried");
+        carried.plate.remove();
+        carried.view.root.classList.remove("carried");
+        carried.view.root.style.width = "";
         document.body.classList.remove("carrying");
-        card.style.left = card.style.top = card.style.width = "";
-        if (commit)
-            carried.slot.replaceWith(card);
-        else
-            carried.slot.remove();
-        const order = [...this.root.children].map(node => node.dataset.panel).filter((id) => Boolean(id));
-        if (commit && order.join() !== carried.before.join())
-            this.orderRequest = this.send({ action: "order_panels", order }, "Reordering panels…");
-        else if (!commit)
-            for (const id of carried.before)
-                this.root.append(this.views.get(id).root);
-        carried.view.placeSettings();
+        if (preview) {
+            const { boardW, metrics } = carried.frame;
+            this.arrangements.set(this.columns([...preview.values()], boardW, metrics), new Map([...preview].map(([id, proxy]) => [id, [proxy.col, proxy.row]])));
+        }
+        const packed = this.layout() ?? preview;
+        if (preview && packed)
+            this.commit(packed);
     }
-    /** The board leaves the screen with its view: no gesture stays captured. */
-    hidden() { for (const view of this.views.values())
+    /** v2 order_committed: the board's cards in the reading order of where they rest, sent when it changed. */
+    commit(packed) {
+        const ids = this.boardIds().filter(id => packed.has(id));
+        const order = [...ids].sort((a, b) => packed.get(a).row - packed.get(b).row || packed.get(a).col - packed.get(b).col);
+        if (order.join() === ids.join())
+            return;
+        const on = new Set(order);
+        let next = 0;
+        this.order = this.order.map(id => on.has(id) ? order[next++] : id);
+        this.orderRequest = this.send({ action: "order_panels", order }, "Reordering panels…");
+    }
+    /** v2 _scroll_speed: device px per tick -- none unless the pointer is within one title strip of
+     * the board's top or bottom edge (or past it), faster the deeper in, up to a quarter strip. */
+    speed(box = this.root.getBoundingClientRect()) {
+        const carried = this.carried;
+        if (!carried)
+            return 0;
+        const dpr = devicePixelRatio, band = carried.band;
+        const y = Math.round((carried.pointer.y - box.top - this.root.clientTop) * dpr), height = Math.round(this.root.clientHeight * dpr);
+        if (y < band)
+            return -Math.max(1, Math.floor(Math.min(band - y, band) / 4));
+        if (y > height - band)
+            return Math.max(1, Math.floor(Math.min(y - (height - band), band) / 4));
+        return 0;
+    }
+    /** v2 _steer_scroll: a tick every 20 ms while the pointer holds the card at an edge. */
+    steer(box) {
+        const carried = this.carried;
+        if (!this.speed(box)) {
+            window.clearInterval(carried.scroll);
+            carried.scroll = 0;
+        }
+        else if (!carried.scroll)
+            carried.scroll = window.setInterval(() => this.step(), 20);
+    }
+    /** v2 _scroll_step: the board moved under a pointer that did not -- the card keeps its hold
+     * and is aimed at the slot now under it.  At the board's end it stops. */
+    step() {
+        const carried = this.carried, speed = this.speed();
+        if (!carried)
+            return;
+        const before = this.root.scrollTop;
+        // At least a whole CSS px, so a fractional step is never rounded away.
+        if (speed)
+            this.root.scrollTop = before + Math.sign(speed) * Math.max(1, Math.abs(speed) / devicePixelRatio);
+        if (!speed || this.root.scrollTop === before) {
+            window.clearInterval(carried.scroll);
+            carried.scroll = 0;
+            return;
+        }
+        this.aim();
+    }
+    /** The board leaves the screen with its view: no gesture stays captured, no card carried. */
+    hidden() { this.gesture?.end(false); for (const view of this.views.values())
         view.cancelPointer(); }
     shown() { for (const view of this.views.values())
         view.placeSettings(); }
