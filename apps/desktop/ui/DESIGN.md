@@ -150,7 +150,7 @@ Every view stands on the same few edges; a view with its own number for one of t
 | FluentReadoutEdit / PathEdit / PublishedItemsLegend | `Readout`, `PathEdit`, `Legend` | selectable value elided in the middle; typed path + Browse…; BG chips (name TEXT, shape MUTED_INK) |
 | FluentScrollArea scrollbars | `::-webkit-scrollbar*` | NEUTRAL_FILL handle with margin, ACCENT under pointer, no arrows |
 | FluentStatusDot | `.dot[data-state]` | idle GREY, running GREEN, task ACCENT, warning ORANGE, error RED |
-| ConsoleBoardView | `.panel-board` (`PanelBoard`: `#panels` the Task Console's live board, `#figure-panels` the Figure Viewer's) | cards in board order, a card pad apart, each as large as its picture; a card carried by its title band (open hand) reorders the board, its slot an ACCENT_TINT card with a dashed edge |
+| ConsoleBoardView | `.panel-board` (`PanelBoard`: `#panels` the Task Console's live board, `#figure-panels` the Figure Viewer's) | cards placed under v2's north-west gravity (`views/board_layout.ts`, a port of board_layout.py), a card pad apart, each as large as its picture; a card carried by its title band (open hand) swaps with the card it is let go onto or takes the empty place, the others already standing where the drop leaves them, its slot an ACCENT_TINT card with a dashed edge; the places live per column count for the window, the reading order is committed (`order_panels`) |
 | PanelCardView | `.panel`, `.panel-header` | DIVIDER edge; BG title band inside the edge with the inner radius; two lines (id in MUTED_INK, structure groups in AXIS_GROUP_COLORS); status dot with the message as tooltip; `Setting` (active while open) and the red-on-hover × |
 | Setting frame (FluentOverlayFrame) | `.settings` | inside the board, right edge on Setting's, `Setting · panel` + quiet ×, sections Panel / Semantic / Display / Fit under FluentSectionLabel titles sharing one label column (Fit: Fit model, and Parameters / Cell fit value once a model is chosen, its Fit command on the title row), then `Edit … Remove` |
 | PanelEditorView (Panel Edit) | `.panel-edit` (panel_edit.ts) | a Task Console Edit page named after the panel: title + `(kind · cell cells)` scrolling with it, the panel's Setting sections in place, each a card of its own (no Cell kind, no card commands), Frozen snapshot (the held picture, `Held at … · revision n · the panel has newer data`, Refresh snapshot), Direct producer (`Logic node: name`, its selector-linked draft fields read only, Open producer); one label column down the page; the tab's × closes it; Save figure (v2's inline group: Directory with Browse…, the day's folder; Name with Auto-name, the panel's name stamped `_%Y%m%d_%H%M%S`; Format segmented PNG / PDF / SVG, PDF and SVG withheld until the native renderer writes them; File, the path it makes; Save figure, then `panel saved to <image> and <archive>`) in place of the card's Save… |
@@ -212,9 +212,9 @@ runs at Qt DPR 3 and v3 at WebView2 DPR 2.5):
   px (horizontalAdvance rounds, size() rounds up; v3 does the same for
   labels, samples and buttons) can land one Qt px apart.
 - Structure where the products differ. The per-panel Save sits in the Setting frame, as
-  v2 keeps figure saving off the card face. The panel protocol carries no size
-  preset, so a card is the size of its picture and the board is a reading-
-  order flow (v2: a gravity grid of size presets); only the order is kept.
+  v2 keeps figure saving off the card face. A card is the size of its picture
+  (the packer is given each card's own rectangle, as v2's is); the workbench
+  keeps only the order, the places a drop made live with the window, as v2's.
   Not yet in v3: browser sharing and Remote publication.
 - Headless captures (research/ui-mock) must force the device scale factor;
   an emulated one lays out in CSS px and drifts by fractions of a pixel.

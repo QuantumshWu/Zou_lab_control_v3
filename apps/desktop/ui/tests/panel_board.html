@@ -1,0 +1,103 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Panel board regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<div id="host"></div>
+<script type="module">
+// Run with tools/test_ui.ps1. The real board under the real style sheet; its states are written here and every
+// command it sends is recorded. Places are read back from the cards in device px of the board's padding box.
+import {PanelBoard} from '../dist/views/board.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+const check=async(name,test)=>{await test();results.push(name)};
+const sent=[];
+const transport={send:command=>{sent.push(command);return 1000+sent.length},post:()=>{},report:error=>{throw error}};
+const host=document.getElementById('host');
+host.style.cssText='flex:none;display:flex;flex-direction:column;height:300px;width:2000px';
+const board=new PanelBoard(transport),root=board.root,dpr=devicePixelRatio;
+host.append(root);
+// B is tall, A and C short: the screenshot's board.
+const heights={A:60,B:450,C:60};
+const accept=(ids,extra={})=>board.accept({type:'state',board:{panels:[],frozen:{},paused:false,selectors:true},
+  panels:ids.map(id=>({id,kind:'image',display_size:{width:300,height:heights[id]}})),...extra});
+const card=id=>board.views.get(id).root;
+const at=id=>{const r=card(id).getBoundingClientRect(),b=root.getBoundingClientRect();return [Math.round((r.left-b.left-root.clientLeft+root.scrollLeft)*dpr),Math.round((r.top-b.top-root.clientTop+root.scrollTop)*dpr)]};
+const size=id=>{const r=card(id).getBoundingClientRect();return [Math.round(r.width*dpr),Math.round(r.height*dpr)]};
+const pad=side=>parseFloat(getComputedStyle(root)[`padding${side}`]);
+/** The board's content as wide as `room` device px. */
+const widen=room=>{host.style.width=`${room/dpr+pad('Left')+pad('Right')+root.offsetWidth-root.clientWidth}px`;board.layout()};
+const pointer=(grip,type,x,y)=>grip.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,button:0,buttons:type==='pointerup'?0:1,pointerId:1,pointerType:'mouse',clientX:x,clientY:y}));
+const grip=id=>{const node=card(id).querySelector('.panel-header');node.setPointerCapture=()=>{};return node};
+const domOrder=()=>[...root.querySelectorAll(':scope > .panel')].map(node=>node.dataset.panel);
+try {
+ accept(['A','B','C']);
+ board.layout();
+ const g=Math.round(pad('Left')*dpr),[w,hA]=size('A'),[,hB]=size('B'),x2=g+w+g,yA=g+hA+g;
+ const two=2*w+g+Math.floor(w/2);
+ await check('cards stand absolutely, the one after a short card rises under it',()=>{
+   assert(hB>hA&&size('C')[1]===hA,`sizes ${hA} ${hB}`);
+   widen(two);
+   equal([at('A'),at('B'),at('C')],[[g,g],[x2,g],[g,yA]],'C under A, not under B');
+   equal(getComputedStyle(card('A')).position,'absolute','placed');
+   // The board scrolls to the lowest card and its bottom padding.
+   assert(Math.abs(root.scrollHeight-((g+hB)/dpr+pad('Bottom')))<=1,`extent ${root.scrollHeight}`);
+   assert(root.classList.contains('can-carry'),'carriable');
+ });
+ await check('a carried card previews the drop, and letting go commits the reading order',()=>{
+   const handle=grip('C'),c=card('C').getBoundingClientRect(),b=card('B').getBoundingClientRect();
+   pointer(handle,'pointerdown',c.left+20,c.top+10);
+   // Drawn 10 px into B, held where it was pressed.
+   pointer(handle,'pointermove',b.left+30,b.top+20);
+   assert(card('C').classList.contains('carried'),'not carried');
+   equal(at('B'),[g,yA],'B already stands where C stood');
+   const plate=root.querySelector('.drop-slot').getBoundingClientRect(),r=root.getBoundingClientRect();
+   equal([plate.left-r.left,plate.top-r.top,plate.width,plate.height].map(v=>Math.round(v*dpr)),[x2,g,...size('C')],'the slot where C will rest');
+   equal(sent,[],'nothing sent while carried');
+   pointer(handle,'pointerup',b.left+30,b.top+20);
+   equal(sent,[{action:'order_panels',order:['A','C','B']}],'the order committed');
+   equal([at('A'),at('C'),at('B')],[[g,g],[x2,g],[g,yA]],'where the preview stood');
+   assert(!root.querySelector('.drop-slot')&&!card('C').classList.contains('carried'),'the carry ended');
+ });
+ await check('the drop\'s answer keeps the places and puts the nodes in reading order',()=>{
+   accept(['A','C','B'],{request:1000+sent.length});
+   board.layout();
+   equal([at('A'),at('C'),at('B')],[[g,g],[x2,g],[g,yA]],'kept');
+   equal(domOrder(),['A','C','B'],'nodes');
+ });
+ await check('Escape puts every card back and commits nothing',()=>{
+   const handle=grip('A'),a=card('A').getBoundingClientRect(),b=card('B').getBoundingClientRect();
+   pointer(handle,'pointerdown',a.left+20,a.top+10);
+   pointer(handle,'pointermove',b.left+30,b.top+20);
+   assert(card('A').classList.contains('carried'),'not carried');
+   window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+   equal([at('A'),at('C'),at('B')],[[g,g],[x2,g],[g,yA]],'back');
+   equal(sent.length,1,'nothing more sent');
+   assert(!root.querySelector('.drop-slot'),'slot left behind');
+ });
+ await check('a narrower board packs the arrangement and a wider one restores it',()=>{
+   widen(w+Math.floor(w/2));
+   equal([at('A'),at('C'),at('B')],[[g,g],[g,yA],[g,yA+hA+g]],'one column, in reading order');
+   widen(two);
+   equal([at('A'),at('C'),at('B')],[[g,g],[x2,g],[g,yA]],'restored');
+ });
+ await check('an order from elsewhere lays the board out afresh in it',()=>{
+   accept(['C','B','A']);
+   board.layout();
+   equal([at('C'),at('B'),at('A')],[[g,g],[x2,g],[g,yA]],'first free slots in the new order');
+   equal(domOrder(),['C','B','A'],'nodes');
+ });
+ await check('a card that leaves gives up its place, a card that comes takes the first free slot',()=>{
+   accept(['C','A']);
+   board.layout();
+   equal([at('C'),at('A')],[[g,g],[x2,g]],'A rises beside C');
+   heights.D=450;
+   accept(['C','A','D']);
+   board.layout();
+   equal(at('D'),[g,yA],'D under C');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+</script>
