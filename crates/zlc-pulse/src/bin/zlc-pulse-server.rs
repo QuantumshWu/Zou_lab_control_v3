@@ -16,7 +16,7 @@ use zlc_pulse::axi::{JtagAxiRegisterTransport, default_vivado};
 use zlc_pulse::device::PulseStreamer;
 use zlc_pulse::manifest::target_from_config;
 use zlc_pulse::remote::{DEFAULT_BIND_HOST, DEFAULT_PORT, PulseRemoteServer, server_log};
-use zlc_pulse::serial::{ComPortLink, list_com_ports};
+use zlc_pulse::serial::{ComPortLink, find_board_uart, list_com_ports};
 use zlc_pulse::transport::{MemoryRegisterTransport, RegisterTransport};
 use zlc_pulse::uart::UartRegisterTransport;
 use zlc_pulse::wire::{load_streamer_config, require_streamer_config};
@@ -101,22 +101,9 @@ fn run(options: Options) -> Result<()> {
             jtag_transport()?
         }
         backend => {
+            // Run by hand without --uart-port it probes every port; the application finds the port on Init and names it.
             let ports = options.uart_port.clone().map_or_else(list_com_ports, |port| vec![port]);
-            let mut attempts = Vec::new();
-            let mut selected = None;
-            for port in &ports {
-                let probe = uart_transport(port, baud, Duration::from_millis(500)).and_then(|transport| {
-                    let streamer = PulseStreamer::new(transport.clone(), config.params, config.clock_hz, target.clone())?;
-                    let opened = streamer.open();
-                    let _ = transport.close();
-                    opened
-                });
-                match probe {
-                    Ok(()) => { attempts.push(format!("{port}: word63 fingerprint matched")); selected = Some(port.clone()); break; }
-                    Err(error) => attempts.push(format!("{port}: {}", if error.message.contains("layout mismatch") { "fingerprint mismatch".into() }
-                                                                   else if error.kind == Kind::Timeout { "timeout".into() } else { error.message })),
-                }
-            }
+            let (selected, attempts) = find_board_uart(&ports, baud, config.params, config.clock_hz, &target);
             let failure = if attempts.is_empty() { "no board UART detected".to_owned() } else { attempts.join("; ") };
             match selected {
                 Some(port) => {

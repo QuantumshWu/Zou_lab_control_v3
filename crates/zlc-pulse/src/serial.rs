@@ -1,8 +1,9 @@
-//! A Windows COM port as the pulse board's UART link.
+//! A Windows COM port as the pulse board's UART link, and how the board's port is found.
 //!
 //! Opened with DTR and RTS low and kept low: opening the pulse streamer's port
 //! must never reset or drive another instrument on the bus. Reads wait at most
 //! 10 ms per slice so a deadline and a Stop stay responsive.
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Devices::Communication::{
@@ -13,9 +14,12 @@ use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, H
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING, ReadFile, WriteFile};
 use windows_sys::Win32::System::Registry::{HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, RegCloseKey, RegEnumValueW, RegOpenKeyExW};
 
+use crate::device::PulseStreamer;
 use crate::error::{Error, Kind, Result};
-use crate::transport::{Event, aborted};
-use crate::uart::{MAX_FRAME_WORDS, UartLink, extract_reply, reply_frame_len};
+use crate::model::Target;
+use crate::transport::{Event, RegisterTransport, aborted};
+use crate::uart::{MAX_FRAME_WORDS, UartLink, UartRegisterTransport, extract_reply, reply_frame_len};
+use crate::wire::StreamerParams;
 
 fn wide(text: &str) -> Vec<u16> { text.encode_utf16().chain(std::iter::once(0)).collect() }
 
@@ -173,4 +177,54 @@ pub fn list_com_ports() -> Vec<String> {
     unsafe { RegCloseKey(key) };
     ports.sort_by_key(|(usb, _)| !*usb);
     ports.into_iter().map(|(_, port)| port).collect()
+}
+
+/// A COM port as one name whatever its spelling: upper-case, without `\\.\` (`\\.\com3` is `COM3`).
+pub fn com_name(port: &str) -> String { port.trim().trim_start_matches(r"\\.\").to_uppercase() }
+
+/// `ports` in their order, less those `excluded` names (any spelling): (the free ones, the ones passed over).
+pub fn free_ports(ports: &[String], excluded: &[String]) -> (Vec<String>, Vec<String>) {
+    let excluded: Vec<String> = excluded.iter().map(|port| com_name(port)).collect();
+    ports.iter().cloned().partition(|port| !excluded.contains(&com_name(port)))
+}
+
+/// The board's UART among `ports`, found as v2's server found it: each port opened in turn with
+/// the board's handshake (open and the word-63 fingerprint, 0.5 s) and released again. The first
+/// that answers, and what each port tried said (`COM4: timeout`).
+pub fn find_board_uart(ports: &[String], baud: u64, geometry: StreamerParams, clock_hz: f64, target: &Arc<Target>) -> (Option<String>, Vec<String>) {
+    let mut attempts = Vec::new();
+    for port in ports {
+        let probe = ComPortLink::new(port, baud).and_then(|link| {
+            let transport: Arc<dyn RegisterTransport> = Arc::new(UartRegisterTransport::new(Box::new(link), Duration::from_millis(500)));
+            let streamer = PulseStreamer::new(transport.clone(), geometry, clock_hz, target.clone())?;
+            let opened = streamer.open();
+            let _ = transport.close();
+            opened
+        });
+        match probe {
+            Ok(()) => { attempts.push(format!("{port}: word63 fingerprint matched")); return (Some(port.clone()), attempts); }
+            Err(error) => attempts.push(format!("{port}: {}", if error.message.contains("layout mismatch") { "fingerprint mismatch".into() }
+                                                           else if error.kind == Kind::Timeout { "timeout".into() } else { error.message })),
+        }
+    }
+    (None, attempts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bound port is one name however it is spelled, and the probe never reaches it.
+    #[test]
+    fn a_probe_passes_over_the_bound_ports_in_any_spelling() {
+        assert_eq!(com_name(r" \\.\com3 "), "COM3");
+        assert_eq!(com_name("COM12"), "COM12");
+        let listed: Vec<String> = ["COM5", "com3", r"\\.\COM4", "COM12"].map(str::to_owned).to_vec();
+        let (free, passed) = free_ports(&listed, &[r"\\.\COM3".to_owned(), "com4".to_owned(), "COM1".to_owned()]);
+        assert_eq!((free, passed), (vec!["COM5".to_owned(), "COM12".to_owned()], vec!["com3".to_owned(), r"\\.\COM4".to_owned()]));
+        assert_eq!(free_ports(&listed, &[]).0, listed, "nothing bound: every port, in its order");
+        let lane = ["d0".to_owned()];
+        let target = Target::new(&lane, vec![crate::model::PortSpec::new("probe", "digital", &lane, "", None, None, None, None, None).unwrap()], Vec::new()).unwrap();
+        assert_eq!(find_board_uart(&[], 115_200, StreamerParams::default(), 1.0e8, &target), (None, Vec::new()), "no free port: nothing opened, nothing tried");
+    }
 }
