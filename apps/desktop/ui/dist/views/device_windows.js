@@ -6,6 +6,9 @@
 import { element } from "../fluent/index.js";
 import { DeviceControlView, DeviceLogView } from "./device_control.js";
 const row = (ctx, id) => ctx.latest.devices?.find(device => device.instance_id === id);
+/** The host flickers a window's focus as it activates it (focus, blur, focus within ~30 ms): a window still forward
+ * this long after is brought forward once. */
+const SETTLED_MS = 150;
 class DeviceControlWindow {
     ctx;
     device;
@@ -16,13 +19,24 @@ class DeviceControlWindow {
     view;
     named = "";
     shownOnce = false;
+    settling = 0;
+    /** Whether the window has stood forward once: its first time is its opening, which read already. */
+    forward = false;
     constructor(ctx, device) {
         this.ctx = ctx;
         this.device = device;
         this.windowTitle = `${device} control`;
         this.view = new DeviceControlView(device, ctx);
         this.root.append(this.view.root);
-        ctx.transport.send({ action: "read_device", device }, "Reading the device…");
+        this.view.read();
+        // Brought forward from another window or shown again, the page reads the device again, once it stays forward.
+        window.addEventListener("focus", () => this.settle());
+        window.addEventListener("blur", () => window.clearTimeout(this.settling));
+    }
+    settle() {
+        window.clearTimeout(this.settling);
+        this.settling = window.setTimeout(() => { if (this.forward)
+            this.view.reread(); this.forward = true; }, SETTLED_MS);
     }
     update(state) {
         const device = row(this.ctx, this.device);
@@ -48,6 +62,7 @@ class DeviceControlWindow {
             });
         }
     }
+    shown() { this.settle(); }
     status() { }
 }
 class DeviceLogWindow {

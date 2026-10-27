@@ -17,7 +17,7 @@ const results=[];
 const check=async(name,test)=>{await test();results.push(name)};
 function setup({live=true,fields=[{}]}={}) {
   const calls=[];
-  const ctx={latest:{type:'state'},transport:{send:cmd=>{calls.push({id:calls.length+1,...cmd});return calls.length},busyText:()=>'',lastError:'refused'}};
+  const ctx={latest:{type:'state'},transport:{send:cmd=>{calls.push({id:calls.length+1,...cmd});return calls.length},pending:new Map(),busyText:()=>'',lastError:'refused'}};
   let device={instance_id:'audit',role:'audit',type_id:'test',state:'open',control:{owners:[],risk_enabled:false},fields:fields.map((f,i)=>({name:i?'power':'frequency',label:i?'Power':'Frequency',kind:'number',allow_none:true,step:1,minimum:0,maximum:1000,current:1,desired:1,current_text:'1',limits_text:'0–1000',live_write:true,editable:true,status:'Ready',severity:'idle',unit:'',...f}))};
   const view=new DeviceControlView('audit',ctx);document.body.append(view.root);view.update(device);
   const row=(i=0)=>view.root.querySelectorAll('.control-table > div.field')[i];
@@ -126,12 +126,31 @@ try {
  await check('the actual control window forwards acknowledgement readback',async()=>{
    const calls=[];
    const device={instance_id:'window',role:'RF',state:'open',fields:[{name:'frequency',label:'Frequency',kind:'number',current:1,desired:1,editable:true,live_write:true,current_text:'1'}]};
-   const ctx={latest:{type:'state',devices:[device]},transport:{send:c=>{calls.push(c);return calls.length},post:()=>{},busyText:()=>'',lastError:''}};
+   const ctx={latest:{type:'state',devices:[device]},transport:{send:c=>{calls.push(c);return calls.length},pending:new Map(),post:()=>{},busyText:()=>'',lastError:''}};
    const windowView=deviceControl('window')(ctx);document.body.append(windowView.root);windowView.update({type:'state'});
    windowView.root.querySelector('.control-live button').click();
    const input=windowView.root.querySelector('input.number');input.value='2';input.dispatchEvent(new Event('input'));await wait();
    windowView.update({type:'state',request:2,result:{device:'window',readback:1.9}});
    equal(input.value,'1.9','window dropped readback');equal(calls.filter(c=>c.action==='tune_device').length,1,'window write');
+ });
+ await check('the control window reads again when brought forward, shown, or let go by a run -- one read at a time, drafts kept',async()=>{
+   const calls=[],pending=new Map();
+   const device={instance_id:'again',role:'RF',state:'open',control:null,fields:[{name:'frequency',label:'Frequency',kind:'number',current:1,desired:1,editable:true,live_write:false,current_text:'1'}]};
+   const ctx={latest:{type:'state',devices:[device]},transport:{send:(c,feedback)=>{calls.push(c);if(feedback)pending.set(calls.length,feedback);return calls.length},pending,post:()=>{},busyText:()=>'',lastError:''}};
+   const reads=()=>calls.filter(c=>c.action==='read_device'&&c.device==='again').length;
+   const answer=request=>{pending.delete(request);windowView.update({type:'state',request})};
+   const settled=()=>new Promise(resolve=>setTimeout(resolve,200));
+   const windowView=deviceControl('again')(ctx);document.body.append(windowView.root);
+   equal(reads(),1,'opening reads');answer(1);
+   window.dispatchEvent(new Event('focus'));await settled();equal(reads(),1,'its first time forward is its opening, read already');
+   window.dispatchEvent(new Event('blur'));for(const type of ['focus','blur','focus'])window.dispatchEvent(new Event(type));await settled();equal(reads(),2,'brought forward through the activation flicker');
+   window.dispatchEvent(new Event('blur'));window.dispatchEvent(new Event('focus'));await settled();equal(reads(),2,'a read in flight answers the next asks');
+   const input=windowView.root.querySelector('input.number');input.value='5';input.dispatchEvent(new Event('input'));await wait();
+   answer(2);windowView.shown();await settled();equal(reads(),3,'shown again');answer(3);
+   equal(input.value,'5','a re-read replaced the draft');equal(calls.filter(c=>c.action==='tune_device').length,0,'a re-read applied the draft');
+   device.control={owners:['Scan'],reason:'',risk_enabled:false};windowView.update({type:'state'});equal(reads(),3,'a run claiming it');
+   device.control={owners:[],reason:'',risk_enabled:false};windowView.update({type:'state'});equal(reads(),4,'the run let it go');answer(4);
+   device.state='closed';windowView.update({type:'state'});window.dispatchEvent(new Event('focus'));windowView.shown();await settled();equal(reads(),4,'a closed device read');
  });
  await check('ordinary forms still commit only on Enter/change',async()=>{const calls=[];const field=new Field('normal',{name:'x',kind:'number',label:'x',value:1},{commit:v=>{calls.push(v);return 1}});document.body.append(field.root);field.input.value='2';field.input.dispatchEvent(new Event('input'));await wait();equal(calls,[],'ordinary form live mutation');field.input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}));equal(calls,[2],'ordinary Enter')});
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
