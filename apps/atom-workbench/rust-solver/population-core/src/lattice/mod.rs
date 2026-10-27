@@ -53,6 +53,7 @@ pub mod slow;
 pub mod eigenbasis;
 pub mod finite;
 pub mod ledger;
+pub mod estimate_api;
 pub use generator::{Component,Generator,Sparse,Superop};
 
 pub(crate) const ZERO:C=C{re:0.,im:0.};
