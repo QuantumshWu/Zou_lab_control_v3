@@ -68,8 +68,12 @@ because it is small or labelled forbidden.
   eigenpairs give the uniqueness check and the slowest relaxation time. For
   several lasers with incommensurate frequencies the mean is the time
   average of the quasi-periodic long-time state; a mean at a finite horizon
-  propagates the initial state to it. A mean with several conserved
-  quantities depends on the initial state and is reported as not converged.
+  propagates the initial state to it, or is the limit once the slowest
+  relaxation has passed. A driven mean with several conserved quantities is
+  reported as not converged.
+- Models without lasers are static: the mean is exact, the spectral
+  projectors of the static generator applied to the initial state
+  (initial-dependent when several quantities are conserved).
 - Finite-time trajectories: rational Krylov with lattice-translation
   augmentation and a Galerkin reduced model, its basis, near-shell and fold
   errors propagated through the dressed blocks; beyond 1 ms the trajectory

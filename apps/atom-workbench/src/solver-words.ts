@@ -22,6 +22,10 @@ const SENTENCES:Record<string,string>={
     '完整 32 态密度矩阵在折叠 Fourier 晶格上的 Lindblad 演化：带晶格平移增广的有理 Krylov 方法，基、近壳层与折叠误差由各自的源经缀饰块传播估计；1 ms 以后用切换时刻 Krylov 态的慢本征模展开。',
   "Full32 time average of the folded Fourier lattice (near charges explicit, far harmonics folded statically at second order, higher orders charged): dressed-block preconditioned null vector, its truncation and fold errors estimated in the solver's Krylov space":
     '完整 32 态折叠 Fourier 晶格上的时间平均（近共振电荷显式，远离的谐波按二阶静态折叠，更高阶计入误差）：缀饰块预条件的零空间向量，截断与折叠误差在求解器的 Krylov 空间中估计。',
+  'Full32 static Lindblad generator: spectral projectors of the imaginary-axis eigenvalues of each connected block applied to the initial density':
+    '完整 32 态静态 Lindblad 生成元：各连通块虚轴本征值的谱投影作用于初始密度矩阵。',
+  'Full Lindblad stationary projection from the specified initial density.':
+    '由给定初始密度矩阵得到的完整 Lindblad 稳态投影。',
   'Converged long-time phase average of the full driven Lindblad equation (unique limit: only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time); populations are a time average, not a time-independent density.':
     '完整受驱 Lindblad 方程的长期相位平均已收敛（极限唯一：只有迹守恒，最慢弛豫时间见上）；布居是时间平均，不是不随时间变化的密度矩阵。',
   'Unique full-density Lindblad stationary solution (only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time).':
