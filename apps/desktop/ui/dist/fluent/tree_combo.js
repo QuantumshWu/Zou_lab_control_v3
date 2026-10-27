@@ -42,7 +42,7 @@ export class TreeCombo {
     changed;
     placeholder;
     root = element("select", "tree-combo");
-    face = comboFace();
+    face = comboFace(this.root);
     /** The box's empty value: the none row's words, else the placeholder. */
     blank = new Option("", "");
     list = element("div", "tree-combo-list");

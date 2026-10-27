@@ -165,6 +165,9 @@ select.blank { color: var(--muted-ink); }
 select.blank:disabled { color: var(--disabled-ink); }
 /* An active cycle choice takes the SELECTED fill; its edge stays the field's. */
 select.cycle-active { background: var(--selected); }
+/* FluentCycleComboBox: the list's row says "Scope", the closed box "Scope: <coordinate>". */
+option > .cycle-at { display: none; }
+selectedcontent > .cycle-at { display: inline; }
 select > button.combo-face { all: unset; display: block; flex: 1; min-width: 0; overflow: hidden; }
 selectedcontent { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The one chevron, drawn in the drop column inside the edge -- the stepper

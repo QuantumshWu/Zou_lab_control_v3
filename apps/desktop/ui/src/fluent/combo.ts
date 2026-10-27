@@ -42,17 +42,24 @@ export function hintWidest(select: HTMLSelectElement, labels: Iterable<string>, 
 }
 
 /** The closed box's words: the picked row's, ending in an ellipsis where the
- * box is narrower (v2 paints elidedText); first child of the select, kept there. */
-export function comboFace(): HTMLButtonElement {
+ * box is narrower (v2 paints elidedText); first child of `select`, kept there.
+ * The platform copies the row only when the pick changes: a picked row whose own
+ * words change (Scope's coordinate, a blank's words) is copied again here. */
+export function comboFace(select: HTMLSelectElement): HTMLButtonElement {
   const face = element("button", "combo-face");
   face.type = "button";
-  face.append(document.createElement("selectedcontent"));
+  const shown = document.createElement("selectedcontent");
+  face.append(shown);
+  new MutationObserver(() => {
+    const picked = select.selectedOptions[0];
+    if (shown.textContent !== (picked?.textContent ?? "")) shown.replaceChildren(...[...picked?.childNodes ?? []].map(node => node.cloneNode(true)));
+  }).observe(select, { subtree: true, childList: true, characterData: true });
   return face;
 }
 
 export class ComboBox {
   readonly root = element("select");
-  private face = comboFace();
+  private face = comboFace(this.root);
   private signature = "";
   private current: Value = null;
   private minimum = 0;

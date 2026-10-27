@@ -49,7 +49,7 @@ type Row = { kind: "heading"; group: number } | { kind: "leaf"; group: number; l
  * the operator's pick; `value =` / `setTree` project one and never emit. */
 export class TreeCombo {
   readonly root = element("select", "tree-combo");
-  private face = comboFace();
+  private face = comboFace(this.root);
   /** The box's empty value: the none row's words, else the placeholder. */
   private blank = new Option("", "");
   private list = element("div", "tree-combo-list");
