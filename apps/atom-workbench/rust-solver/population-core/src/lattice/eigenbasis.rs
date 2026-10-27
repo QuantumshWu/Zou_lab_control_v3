@@ -16,9 +16,18 @@
 //!   e_q(t) = sum_j E_j sum_k beta_jk (e^{mu_k t} - e^{zeta_j t}) / (mu_k - zeta_j),
 //! zeta_j = lambda_j - i nu_q, read out on the populations with the phase
 //! e^{i nu_q t} (a near-resonant pair takes the limit t e^{mu_k t}).
+//!
+//! Block solves: (L0' - i nu_q - xi)^-1 on any blocks, exact for every mode
+//! and shift (real or complex): the blocks' coordinates, E_R^-1 (one real
+//! GEMM over every block's real and imaginary parts), the pair rule, the
+//! division by lambda_j - i nu_q - xi, the pair rule back, E_R (one GEMM),
+//! about 4 d^2 real multiply-adds per block.
+//!
+//! The basis is request-level (`LatticePrepared::eigenbasis`): computed once,
+//! shared by every pipeline that needs it.
 use super::*;
 use super::operator::LatticeOperator;
-use crate::parallel::Execution;
+use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// |mu_k - zeta_j| T below which a pair is treated as resonant.
 const RESONANT:f64=1e-8;
@@ -26,9 +35,9 @@ const RESONANT:f64=1e-8;
 pub struct BlockEigenbasis{
     n:usize,d:usize,lapack:Arc<Lapack>,
     pub lambda:Vec<C>,
-    /// E_R^-1 (column-major d x d): real coefficients on the real eigenvector
-    /// columns of Hermitian-basis coordinates.
-    inverse:Vec<f64>,
+    /// E_R and E_R^-1 (column-major d x d): the real eigenvector columns of
+    /// Hermitian-basis coordinates and their inverse.
+    vectors:Vec<f64>,inverse:Vec<f64>,
     /// Per column: 0 a real eigenvalue, 1 and 2 the real and imaginary
     /// columns of a complex pair.
     kind:Vec<u8>,
@@ -48,6 +57,18 @@ fn coordinates(x:&[C],n:usize)->Vec<C>{
         // -i (a - b)/sqrt2.
         c.push(C{re:r*(a.im-b.im),im:-r*(a.re-b.re)});}}
     c
+}
+
+/// The row-major n x n block of Hermitian-basis coordinates (the inverse of
+/// `coordinates`): a = x_ij = (s + i t)/sqrt2, b = x_ji = (s - i t)/sqrt2 for
+/// the symmetric and antisymmetric coordinates s, t of i < j.
+fn from_coordinates(c:&[C],n:usize)->Vec<C>{
+    let mut x=vec![ZERO;n*n];let r=std::f64::consts::FRAC_1_SQRT_2;
+    for i in 0..n{x[i*n+i]=c[i];}
+    let mut k=n;
+    for i in 0..n{for j in i+1..n{let(s,t)=(c[k],c[k+1]);
+        x[i*n+j]=C{re:r*(s.re-t.im),im:r*(s.im+t.re)};x[j*n+i]=C{re:r*(s.re+t.im),im:r*(s.im-t.re)};k+=2;}}
+    x
 }
 
 impl BlockEigenbasis{
@@ -83,7 +104,39 @@ impl BlockEigenbasis{
         let inverse=lapack.solve_matrix_factored(&lu,&pivots,&identity,d)?;
         let one=|a:&[f64]|(0..d).map(|c|a[c*d..(c+1)*d].iter().map(|x|x.abs()).sum::<f64>()).fold(0.,f64::max);
         let condition=one(&vectors)*one(&inverse);
-        Ok(Self{n,d,lapack:Arc::clone(lapack),lambda,inverse,kind,readout,condition,milliseconds:clock.elapsed().as_secs_f64()*1e3})
+        Ok(Self{n,d,lapack:Arc::clone(lapack),lambda,vectors,inverse,kind,readout,condition,milliseconds:clock.elapsed().as_secs_f64()*1e3})
+    }
+    /// x_k <- (L0' - i nu_k - shift)^-1 x_k for row-major blocks x_k (exact;
+    /// see the module documentation), spread over the workers.
+    pub fn solve_blocks(&self,nu:&[f64],shift:C,blocks:&mut[C])->Result<(),String>{
+        let(n,d)=(self.n,self.d);if blocks.len()!=nu.len()*d{return Err("Eigenbasis block solve dimensions differ".into());}
+        let work=4*d*d*nu.len()/2;
+        Execution::new()?.for_mode_chunks(blocks,d,work,MINIMUM_WORK_PER_TASK,&mut Vec::<()>::new(),|first,chunk,_|{
+            let count=chunk.len()/d;
+            // Real and imaginary parts of the coordinates, column-major d x 2 count.
+            let mut parts=vec![0.;d*2*count];
+            for(c,block)in chunk.chunks_exact(d).enumerate(){for(k,v)in coordinates(block,n).into_iter().enumerate(){parts[k+d*c]=v.re;parts[k+d*(count+c)]=v.im;}}
+            let mut y=vec![0.;d*2*count];self.lapack.gemm(false,false,d,2*count,d,1.,&self.inverse,d,&parts,d,0.,&mut y,d)?;
+            for c in 0..count{
+                let at=|j:usize,y:&[f64]|C{re:y[j+d*c],im:y[j+d*(count+c)]};let shift_q=C{re:shift.re,im:shift.im+nu[first+c]};
+                let divide=|z:C,l:C|{let den=C{re:l.re-shift_q.re,im:l.im-shift_q.im};let s=den.re*den.re+den.im*den.im;mul(z,C{re:den.re/s,im:-den.im/s})};
+                let mut j=0;
+                while j<d{
+                    if self.kind[j]==1{
+                        // a v_r + b v_i = z+ (v_r + i v_i) + z- (v_r - i v_i), z+- = (a -+ i b)/2.
+                        let(a,b)=(at(j,&y),at(j+1,&y));
+                        let plus=divide(C{re:0.5*(a.re+b.im),im:0.5*(a.im-b.re)},self.lambda[j]);let minus=divide(C{re:0.5*(a.re-b.im),im:0.5*(a.im+b.re)},self.lambda[j+1]);
+                        // Back: a' = z+ + z-, b' = i (z+ - z-).
+                        let(a2,b2)=(C{re:plus.re+minus.re,im:plus.im+minus.im},C{re:-(plus.im-minus.im),im:plus.re-minus.re});
+                        y[j+d*c]=a2.re;y[j+d*(count+c)]=a2.im;y[j+1+d*c]=b2.re;y[j+1+d*(count+c)]=b2.im;j+=2;}
+                    else{let z=divide(at(j,&y),self.lambda[j]);y[j+d*c]=z.re;y[j+d*(count+c)]=z.im;j+=1;}
+                }
+            }
+            self.lapack.gemm(false,false,d,2*count,d,1.,&self.vectors,d,&y,d,0.,&mut parts,d)?;
+            for(c,block)in chunk.chunks_exact_mut(d).enumerate(){
+                let coordinate:Vec<C>=(0..d).map(|k|C{re:parts[k+d*c],im:parts[k+d*(count+c)]}).collect();block.copy_from_slice(&from_coordinates(&coordinate,n));}
+            Ok(())
+        })
     }
     /// Coefficients on the complex eigenvectors of row-major blocks
     /// (column-major d x count): one real GEMM with E_R^-1, then the pair rule.
@@ -161,12 +214,26 @@ mod tests{
     use super::*;
     use super::super::tests::{fixture,prepared};
     #[test]
+    fn lattice_block_eigenbasis_solves_shifted_blocks_exactly(){
+        // (L0' - i nu - xi)^-1 on general complex blocks against a dense LU,
+        // for real and complex shifts and several modes.
+        let f=fixture();let p=prepared(&f);let d=16;let basis=p.eigenbasis().unwrap();let l=p.centre_generator();
+        let nu=[0.,3.,-6.];
+        for shift in[C{re:20.,im:0.},C{re:0.5,im:13.},C{re:1e-3,im:0.}]{
+            let b:Vec<C>=(0..3*d).map(|k|C{re:((k*7+3)%29)as f64/29.-0.5,im:((k*11+5)%31)as f64/31.-0.5}).collect();
+            let mut x=b.clone();basis.solve_blocks(&nu,shift,&mut x).unwrap();
+            for(q,&w)in nu.iter().enumerate(){let(xq,bq)=(&x[q*d..(q+1)*d],&b[q*d..(q+1)*d]);
+                let mut r=bq.to_vec();for i in 0..d{for k in 0..d{let v=mul(l[i*d+k],xq[k]);r[i].re-=v.re;r[i].im-=v.im;}let v=mul(C{re:-shift.re,im:-shift.im-w},xq[i]);r[i].re-=v.re;r[i].im-=v.im;}
+                let error=r.iter().map(|z|magnitude(*z)).fold(0.,f64::max);assert!(error<1e-11,"{shift:?} nu {w}: residual {error:e}");}
+        }
+    }
+    #[test]
     fn lattice_block_eigenbasis_propagates_a_source_exactly(){
         // One mode (the centre), a constant source f (mu = 0): e(t) =
         // (e^{L0' t} - 1) L0'^-1 f on the trace-free part; checked against a
         // fine explicit integration of e' = L0' e + f.
         let f=fixture();let p=prepared(&f);let n=4;let d=16;
-        let basis=BlockEigenbasis::new(&p).unwrap();
+        let basis=p.eigenbasis().unwrap();
         let op=LatticeOperator::new(&p,&[p.generator.zero.clone()]).unwrap();
         let mut source=vec![ZERO;d];for(i,v)in[(0,0.3),(5,-0.2),(10,-0.1),(15,0.0)]{source[i]=C{re:v,im:0.};}
         source[1]=C{re:0.05,im:0.02};source[4]=C{re:0.05,im:-0.02};

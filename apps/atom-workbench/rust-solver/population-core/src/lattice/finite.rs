@@ -59,7 +59,6 @@ use super::estimate::Shell;
 use super::ledger::{self,KAPPA,POPULATION_TOLERANCE,PopulationCharges,RemainderLedger};
 use super::steady::{MAXIMUM_ORDER,SteadySolution};
 use super::slow::SlowMode;
-use std::sync::OnceLock;
 
 const POLE:f64=20.;
 const POLE_HORIZON:f64=40.;
@@ -536,7 +535,7 @@ impl Lattice<'_,'_>{
 /// Order-k propagation with its checkpoints; None when the shell asks for
 /// the next order.
 #[allow(clippy::too_many_arguments)]
-fn attempt(prepared:&LatticePrepared,pre:&Preconditioning<'_>,eigenbasis:&OnceLock<Result<BlockEigenbasis,String>>,
+fn attempt(prepared:&LatticePrepared,pre:&Preconditioning<'_>,
     order:usize,initial:&[C],times:&[f64],keep:&[usize],groups:&[Vec<usize>],tolerance:f64,checkpoints:&mut Vec<Checkpoint>)->Result<Option<FiniteSolution>,String>{
     let n=prepared.generator.n;let d=n*n;let horizon=*times.last().unwrap_or(&0.);
     let modes=prepared.modes(order)?;
@@ -586,7 +585,7 @@ fn attempt(prepared:&LatticePrepared,pre:&Preconditioning<'_>,eigenbasis:&OnceLo
         let mut raw=lattice.populations(&space,&reduced,times);raw[0]=initial_rows.clone();
         let projected:Vec<Vec<f64>>=raw.iter().map(|p|simplex(p)).collect();
         let projection=raw.iter().zip(&projected).map(|(a,b)|ledger::metric(a,b,groups)).fold(0.,f64::max);
-        let eigen=eigenbasis.get_or_init(||BlockEigenbasis::new(prepared)).as_ref().map_err(|e|e.clone())?;
+        let eigen=prepared.eigenbasis()?;
         let basis=lattice.basis_estimate(&space,&reduced,eigen,times,groups)?;
         let columns=space.basis.len();
         let mut checkpoint=Checkpoint{order,columns,dimension:reduced.r,reflected:reduced.reflected,gram_condition:reduced.gram_condition,growth:reduced.growth,basis,shell:None,fold:None,projection,total:None,action:"",milliseconds:0.};
@@ -648,16 +647,15 @@ fn propagate_within(prepared:&LatticePrepared,initial:&[C],times:&[f64],groups:&
     if !(horizon>0.)||times.iter().enumerate().any(|(i,&t)|(t-step*i as f64).abs()>1e-12*horizon.max(1.)){return Err("Finite-time grid must be uniform".into());}
     if keep.iter().any(|&k|k>=times.len()){return Err("A kept field lies beyond the grid".into());}
     // The centre eigenbasis is prepared beside the first columns.
-    let eigenbasis=OnceLock::new();
     std::thread::scope(|scope|{
-        scope.spawn(||{eigenbasis.get_or_init(||BlockEigenbasis::new(prepared));});
+        scope.spawn(||{let _=prepared.eigenbasis();});
         let clock=Instant::now();
         let pre=Preconditioning::new(prepared)?;let preconditioner_ms=clock.elapsed().as_secs_f64()*1e3;
         let mut checkpoints=Vec::new();
         for order in start.unwrap_or(START_ORDER)..=MAXIMUM_ORDER{
-            if let Some(mut solution)=attempt(prepared,&pre,&eigenbasis,order,initial,times,keep,groups,tolerance,&mut checkpoints)?{
+            if let Some(mut solution)=attempt(prepared,&pre,order,initial,times,keep,groups,tolerance,&mut checkpoints)?{
                 solution.timing.preconditioner_ms+=preconditioner_ms;
-                solution.timing.eigenbasis_ms=eigenbasis.get().and_then(|e|e.as_ref().ok()).map_or(0.,|e|e.milliseconds);
+                solution.timing.eigenbasis_ms=prepared.eigenbasis().map_or(0.,|e|e.milliseconds);
                 return Ok(solution);
             }
         }

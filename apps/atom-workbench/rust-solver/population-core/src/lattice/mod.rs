@@ -94,6 +94,8 @@ pub struct LatticePrepared{
     pub plan:classification::HarmonicPlan,
     pub fold:fold::FoldLibrary,
     pub floquet:floquet::FloquetKernels,
+    /// The eigenbasis of L0' = L0 + K_0^(0), computed on first use.
+    eigenbasis:std::sync::OnceLock<Result<eigenbasis::BlockEigenbasis,String>>,
     pub lapack:Arc<Lapack>,
     /// Milliseconds: source, generator and classification, fold, Floquet
     /// kernels.
@@ -112,7 +114,13 @@ impl LatticePrepared{
         let fold_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
         let floquet=floquet::FloquetKernels::new(&generator,&plan,&fold,&lapack)?;
         let kernel_ms=clock.elapsed().as_secs_f64()*1e3;
-        Ok(Self{source,generator,plan,fold,floquet,lapack,timing:[source_ms,plan_ms,fold_ms,kernel_ms]})
+        Ok(Self{source,generator,plan,fold,floquet,eigenbasis:std::sync::OnceLock::new(),lapack,timing:[source_ms,plan_ms,fold_ms,kernel_ms]})
+    }
+    /// The real eigenbasis of the folded centre generator, computed once per
+    /// request (about 0.7 s for 32 states) and shared: the error propagation
+    /// and the exact block solves.
+    pub fn eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
+        self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::new(self)).as_ref().map_err(|e|e.clone())
     }
     /// The near ball of order k: every charge reachable from 0 with at most k
     /// structural steps (explicit near steps above the structural floor and
