@@ -6,10 +6,12 @@
 //! they moved by delta since the previous checkpoint, then the errors e_k,
 //! e_k-1 of the two satisfy delta <= e_k + e_k-1, so delta > 4 eps means one
 //! of them exceeds 2 eps: the full estimate is skipped (and delta returned)
-//! unless the previous full estimate was itself within GATE_FACTOR eps.
-//! The gate never accepts: a skipped checkpoint reports delta > 4 eps. Its
-//! cost is one checkpoint late at worst, when a jump from a poor checkpoint
-//! lands directly within the tolerance. The estimate's own per-column work
+//! unless the previous full estimate was itself within GATE_FACTOR eps. The
+//! first checkpoint has nothing to compare with and is not estimated.
+//! The gate never accepts: a skipped checkpoint reports delta > 4 eps (the
+//! first one infinity). Its cost is one checkpoint late at worst, when the
+//! first checkpoint is already within the tolerance or a jump from a poor
+//! checkpoint lands directly within it. The estimate's own per-column work
 //! is deferred while the gate is closed, not saved.
 //!
 //! A residual-norm bound is no gate: the fast components dominate the

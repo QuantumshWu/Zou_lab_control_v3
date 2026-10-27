@@ -1,5 +1,5 @@
-//! The closed-form propagation of the error lattice's sources and their
-//! population readout.
+//! The closed-form propagation of the fast Ritz modes' sources on the near
+//! modes and their population readout.
 //!
 //! Mode a of class c (eigenvalues mu_j, zeta_j = mu_j - i nu_a, a positive
 //! real part clipped to the axis: second-order roundoff that would grow
@@ -35,9 +35,9 @@ const RESONANT:f64=1e-9;
 fn cexp(z:C,t:f64)->C{let m=(z.re*t).exp();if m==0.{return ZERO;}C{re:m*(z.im*t).cos(),im:m*(z.im*t).sin()}}
 
 impl ErrorLattice<'_>{
-    /// Population errors (one row of n per time) of the error equation's
-    /// SW propagation for the checkpoint's sources, plus the ring's own
-    /// populations (laboratory readout only).
+    /// Population errors (one row of n per time) of the SW propagation of
+    /// the checkpoint's sources on the near modes (Ritz modes with a zero
+    /// coefficient carry none).
     pub fn populations(&self,ritz:&RitzSources<'_>,times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
         let(n,d,k)=(self.n,self.d,self.columns);let r=ritz.values.len();
         if ritz.vectors.len()!=k*r||ritz.coefficients.len()!=r{return Err("Estimator: Ritz data dimensions differ from the basis".into());}
@@ -49,12 +49,13 @@ impl ErrorLattice<'_>{
             for i in 0..k{ba[i+k*m]=mul(ritz.vectors[i+k*m],a);bta[i+k*m]=mul(ritz.vectors[i+k*m],ta);}}
         let slots=self.kernels.steps.len()+1;
         let lapack=&self.prepared.lapack;let theta=ritz.values;
-        let modes:Vec<usize>=(0..self.modes.len()).collect();
-        let parts=Execution::new()?.map(modes,|a|->Result<ModePart,String>{
+        let near_slots:Vec<usize>=(0..self.near.len()).collect();
+        let parts=Execution::new()?.map(near_slots,|slot|->Result<ModePart,String>{
+            let a=self.near[slot];
             let gemm=lapack.complex_gemm();let c=self.class_of[a];let class=&self.classes[c];
             let mut beta=vec![ZERO;d*r];
-            gemm.multiply(d,r,k,ONE,&self.image_coordinates[a],d,&ba,k,ZERO,&mut beta,d)?;
-            gemm.multiply(d,r,k,C{re:-1.,im:0.},&self.basis_coordinates[a],d,&bta,k,ONE,&mut beta,d)?;
+            gemm.multiply(d,r,k,ONE,&self.image_coordinates[slot],d,&ba,k,ZERO,&mut beta,d)?;
+            gemm.multiply(d,r,k,C{re:-1.,im:0.},&self.basis_coordinates[slot],d,&bta,k,ONE,&mut beta,d)?;
             let zeta:Vec<C>=class.values.iter().map(|z|C{re:z.re.min(0.),im:z.im-self.nu[a]}).collect();
             if a==self.centre{
                 let j0=(0..d).min_by(|&x,&y|magnitude(zeta[x]).total_cmp(&magnitude(zeta[y]))).unwrap();
@@ -115,14 +116,6 @@ impl ErrorLattice<'_>{
         }
         for(t,v,z)in resonant{
             for(ti,&time)in times.iter().enumerate(){let ph=mul(self.phase(t,time,readout),scaled(cexp(z,time),time));for i in 0..n{mul_add(&mut total[i+n*ti],ph,v[i]);}}
-        }
-        // The ring's own populations (laboratory readout).
-        if readout==Readout::Laboratory&&!self.ring.is_empty(){
-            let rows=self.ring.len()*n;
-            let mut y=vec![ZERO;rows*r];gemm.multiply(rows,r,k,ONE,&self.ring_populations,rows,&ba,k,ZERO,&mut y,rows)?;
-            let mut f=vec![ZERO;rows*t_count];gemm.multiply(rows,t_count,r,ONE,&y,rows,&ritz_exp,r,ZERO,&mut f,rows)?;
-            for(ti,&time)in times.iter().enumerate(){for(q,&nu)in self.ring_nu.iter().enumerate(){let ph=cexp(C{re:0.,im:nu},time);
-                for i in 0..n{mul_add(&mut total[i+n*ti],ph,f[q*n+i+rows*ti]);}}}
         }
         Ok((0..t_count).map(|ti|(0..n).map(|i|total[i+n*ti].re).collect()).collect())
     }

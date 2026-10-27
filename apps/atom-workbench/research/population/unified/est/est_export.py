@@ -1,7 +1,7 @@
 """Export R2's dumped N1 spaces (r2n/d2_<name>, n2_dump.py format) as fixtures for the Rust estimator test
 (rust-solver lattice_core_adapter::tests::lattice_estimator_against_r2_fixtures).
 
-usage: python est_export.py NAME [NAME ...]     (names as in r2n/eval2.sh: pt_20, two_20, three_10000, ...)
+usage: python est_export.py NAME [NAME ...] [--index-only]     (names as in r2n/eval2.sh: pt_20, two_20, three_10000, ...)
 
 Per case, OUT/<name>/:
   index.json  case, request path, P, Q, states, groups, times, horizons, dim, kmax and per checkpoint: solves, k, r,
@@ -66,8 +66,10 @@ def export(name):
     gr = list(groups(states).values())
     dref = metric_series(np.load(prevp), np.array(ref['pops']), st) if prevp else None
     ests = None
-    if os.path.exists(R2N + 'e2_' + name + '.json'):
-        ests = {r['solves']: r for r in json.load(open(R2N + 'e2_' + name + '.json'))['runs']}
+    for tag in ('e5_', 'e2_'):                       # R2's latest evaluation of this case
+        if os.path.exists(R2N + tag + name + '.json'):
+            ests = {r['solves']: r for r in json.load(open(R2N + tag + name + '.json'))['runs']}
+            break
     cps = {cp['solves']: cp for cp in run['checkpoints']}
     out = OUT + name + '/'
     os.makedirs(out, exist_ok=True)
@@ -75,10 +77,11 @@ def export(name):
     Wl, AWl = last['W'], last['AW']
     dim, kmax = Wl.shape
     n = int(round(np.sqrt(dim // (len(last['P']) + len(last['Q'])))))
-    with open(out + 'W.bin', 'wb') as f:
-        f.write(np.ascontiguousarray(Wl.T).astype('<c16').tobytes())
-    with open(out + 'AW.bin', 'wb') as f:
-        f.write(np.ascontiguousarray(AWl.T).astype('<c16').tobytes())
+    if not INDEX_ONLY:
+        with open(out + 'W.bin', 'wb') as f:
+            f.write(np.ascontiguousarray(Wl.T).astype('<c16').tobytes())
+        with open(out + 'AW.bin', 'wb') as f:
+            f.write(np.ascontiguousarray(AWl.T).astype('<c16').tobytes())
     rows_c = None
     index = dict(name=name, case=case, request=req.replace('\\', '/'), n=n, P=last['P'].tolist(), Q=last['Q'].tolist(),
                  states=states, groups=gr, times=last['times'].tolist(), horizons=last['horizons'].tolist(), dim=int(dim),
@@ -101,8 +104,9 @@ def export(name):
         us = np.linalg.lstsq(Mx, rhs, rcond=None)[0] * (tau @ c0)
         blob = b''.join(cbytes(a) for a in (X, z['S'], z['B'], G, c0, z['th'], z['th_e'], z['a'], z['a_e'],
                                                z['ker'].astype(float), us))
-        with open(out + f'cp{sol:03d}.bin', 'wb') as f:
-            f.write(blob)
+        if not INDEX_ONLY:
+            with open(out + f'cp{sol:03d}.bin', 'wb') as f:
+                f.write(blob)
         row = dict(solves=sol, k=int(k), r=int(r))
         cp = cps.get(sol)
         if cp is not None and 'traj' in cp:
@@ -115,7 +119,8 @@ def export(name):
                        err_h=cp.get('err_h'), steady_pops=cp.get('steady_pops'))
         if ests is not None and sol in ests:
             e = ests[sol]
-            row['python'] = {v: dict(series=x['series'], ratio=x['ratio'], q=x['q'], horizons=x.get('horizons')) for v, x in e['est'].items()}
+            row['python'] = {v: dict(series=x['series'], ratio=x['ratio'], q=x['q'], horizons=x.get('horizons'), work=x.get('work')) for v, x in e['est'].items()}
+            row['solve_gemv'] = e.get('solve_gemv')
             if 'steady' in e:
                 row['python_steady'] = e['steady']
             row['solve_blocks'] = e.get('solve_blocks')
@@ -127,6 +132,9 @@ def export(name):
     json.dump(clean(index), open(out + "index.json", "w"), allow_nan=False)
 
 
+INDEX_ONLY = '--index-only' in sys.argv
+
 if __name__ == '__main__':
     for nm in sys.argv[1:]:
-        export(nm)
+        if not nm.startswith('--'):
+            export(nm)
