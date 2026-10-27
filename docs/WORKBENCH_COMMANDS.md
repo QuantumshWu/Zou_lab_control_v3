@@ -376,8 +376,12 @@ thresholds) is given to the other; the Edit's binding is fixed, the panel's Task
 protection holds for it, and it publishes no ROI or fit outputs. The Edit's state row
 carries `edit: {panel, at_ms, revision, advanced}` (`advanced`: the panel's signal has
 newer data); it is not on `board.panels`. Its page's Save figure (v2's group) is
-`save {panel: "edit-<panel>", path}`: the held picture and its archive, the state's
-`saved` naming both.
+`save {panel: "edit-<panel>", path, overwrite?}`: the held picture and its archive, the
+state's `saved` naming both. `save` writes over no file unasked: when the image or the
+archive is already there as it writes, it writes nothing and `saved` is `{exists:
+[those files]}`; the page lists them and asks Overwrite or Cancel, and Overwrite sends
+the save again with `overwrite: true`. A remote client's `save` is refused naming the
+files, and passes `overwrite: true` to write over them.
 
 ### 4.5 `wait` (extended)
 `wait {node, until: "ready" | "terminal" | "request", timeout_seconds}` answers when
