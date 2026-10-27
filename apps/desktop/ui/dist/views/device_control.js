@@ -3,7 +3,9 @@
 // reads them (read_device) -- its reading, the desired value, the device's
 // own limits -- and tunes one field per Apply (tune_device).  Who may tune
 // what (claims, protected fields, accepted risk) is the workbench's answer,
-// shown as each row's reason; the page never decides it.
+// shown as each row's reason; the page never decides it.  The reading is
+// taken again whenever it may have gone stale under the page: its window
+// shown or brought forward, a run letting the device go.
 import { Field, StatusStrip, alignUnitPickers, command, element, readoutText, setChecked, setElided, setState, statusDot, switchButton, titleRow, } from "../fluent/index.js";
 import { queueStatus } from "../shell.js";
 /** How long a live field waits after an edit before it tunes (v2: 75 ms). */
@@ -31,6 +33,10 @@ export class DeviceControlView {
     queued = new Map();
     /** The strip's last word of its own (v2 show_status): "applied <field>" until the next read. */
     note = null;
+    /** The read this page has in flight: one at a time, however often it is asked for. */
+    reading = -1;
+    /** Whether a run held the device at the last state: its letting go is a re-read (a scan puts its knobs back). */
+    held = false;
     constructor(id, ctx) {
         this.id = id;
         this.ctx = ctx;
@@ -43,7 +49,17 @@ export class DeviceControlView {
         this.table.append(...headings);
         this.root.append(title, this.reason, this.table, this.strip.root);
     }
-    read() { this.note = null; this.ctx.transport.send({ action: "read_device", device: this.id }, "refreshing device settings"); }
+    /** Read the device's fields; asked again while a read is in flight, that read answers both. */
+    read() {
+        if (this.ctx.transport.pending.has(this.reading))
+            return;
+        this.note = null;
+        this.reading = this.ctx.transport.send({ action: "read_device", device: this.id }, "refreshing device settings");
+    }
+    /** The reading again unasked, for an open device: Current is then the device's, whatever moved it meanwhile (a scan,
+     * another node, its front panel).  A Desired not yet applied stays -- a re-read never replaces a draft. */
+    reread() { if (this.device?.state === "open")
+        this.read(); }
     update(device, request, failed = false, result) {
         this.device = device;
         const completed = this.active?.request === request ? this.active : null;
@@ -143,6 +159,11 @@ export class DeviceControlView {
         requestAnimationFrame(() => alignUnitPickers(this.table));
         this.status();
         this.drain();
+        // A run that held the device let it go: what it moved is back, or wherever it left it.
+        const held = Boolean(control?.owners.length);
+        if (this.held && !held)
+            this.reread();
+        this.held = held;
     }
     status() {
         // v2's words: ready (or that it has nothing to tune) once read, what the last Apply did.

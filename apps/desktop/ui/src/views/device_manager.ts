@@ -405,8 +405,8 @@ export class DeviceManagerView implements View {
     if (device.family === "sequencer") { this.ctx.show("pulse-editor"); return; }
     // A device with an editor of its own opens it (v2 control_factory: an SLM's Editor).
     if (device.control_window) { this.ctx.show(`${device.control_window}:${id}`); return; }
-    // v2: the control is read first, then its window opens (its page shows it once the fields are in).
-    this.ctx.transport.send({ action: "read_device", device: id }, `Reading ${device.role}…`);
+    // v2: the control is read first, then its window opens (its page shows it once the fields are in). The window reads
+    // the device itself, opening and brought forward: one reader, never two readings superseding each other.
     this.ctx.show(`control:${id}`);
   }
 

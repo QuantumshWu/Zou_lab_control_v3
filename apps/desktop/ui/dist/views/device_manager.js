@@ -450,8 +450,8 @@ export class DeviceManagerView {
             this.ctx.show(`${device.control_window}:${id}`);
             return;
         }
-        // v2: the control is read first, then its window opens (its page shows it once the fields are in).
-        this.ctx.transport.send({ action: "read_device", device: id }, `Reading ${device.role}…`);
+        // v2: the control is read first, then its window opens (its page shows it once the fields are in). The window reads
+        // the device itself, opening and brought forward: one reader, never two readings superseding each other.
         this.ctx.show(`control:${id}`);
     }
     openLog(id) { this.ctx.show(`log:${id}`); }
