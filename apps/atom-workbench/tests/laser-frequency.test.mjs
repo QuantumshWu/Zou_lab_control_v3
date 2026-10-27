@@ -153,7 +153,6 @@ test('100 cross-line reference, wavelength and serialization round trips preserv
       assert.equal(laserFrequencyMHz(converted),absolute);
       const scene=defaultScene();scene.lasers=[original,{...converted,id:'converted',phaseDeg:180}];
       const model=buildFullMasterModel(scene);
-      // Opposite-phase copies cancel exactly, co- and counter-rotating alike.
       assert.equal(model.drives.length,0,`iteration ${i} generated a fictitious beat`);
       for(let e=8;e<32;e++)for(let g=0;g<8;g++) {
         assert.equal(model.hReal[e*32+g],0);assert.equal(model.hImag[e*32+g],0);
@@ -168,9 +167,9 @@ test('explicit frequency inputs rebuild the anchor, direct legacy edits invalida
   const edited=structuredClone(beam);edited.detuningMHz+=.125e-6;
   near(laserCarrierOffsetMHz(edited,'D2')-original,.125e-6,3e-13);
   const scene=defaultScene();scene.lasers=[beam,{...edited,id:'real-beat'}];
-  const model=buildFullMasterModel(scene),beats=model.drives.filter((_,j)=>model.frequencyCoordinates.driveIndices[j].at(-1)===0);
-  assert.equal(beats.length,1);assert.ok(beats[0].omega>0);
-  near(beats[0].omega/(2*Math.PI),.125e-6,3e-13);
+  const model=buildFullMasterModel(scene);
+  assert.equal(model.drives.length,1);assert.ok(model.drives[0].omega>0);
+  near(model.drives[0].omega/(2*Math.PI),.125e-6,3e-13);
   setLaserFrequencyMode(edited,'wavelength');const prior=laserFrequencyMHz(edited);
   setLaserWavelengthNm(edited,850);near(laserFrequencyMHz(edited),299792458000/850,1e-7);
   assert.notEqual(laserFrequencyMHz(edited),prior);

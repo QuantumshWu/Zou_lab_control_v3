@@ -48,9 +48,11 @@ export interface Laser {
   /** Spectroscopy/diagram origin only. Omitted follows the actual initial state;
    * this does not restrict drive couplings or alter the density initial state. */
   referenceStateId?: string;
-  /** Display only: 'far' shows this laser's second-order light shift in the
-   * levels chart. It does not change the dynamics, where every enabled laser
-   * of nonzero intensity is an explicit drive of the master equation. */
+  /** The laser's physics (full-master-model.ts), part of the dynamics cache key:
+   * 'near' (default) is a rotating-wave drive of every allowed D1/D2 dipole in the
+   * master equation; 'far' is only its static second-order light shift, in H0 and in
+   * the levels chart, refused when its mixing |Ω/2Δ| exceeds 1% (spectroscopy.ts
+   * displayMixing) or its detuning is below 100 max(Γ/2π, Ω/2π) (laser-regime.ts). */
   regime?: 'near' | 'far';
   referenceProcess?: 'absorption' | 'emission';
   /** Legacy: detuning from referenceTransition, in MHz (transition mode). Legacy scenes
