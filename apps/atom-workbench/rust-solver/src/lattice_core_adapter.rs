@@ -162,14 +162,9 @@ fn steady_solution(request:&Prepared,long:bool)->Result<SteadySolution,String>{
 /// norm) has decayed by e^-30 = 1e-13, so an eigenbasis condition up to 1e8
 /// leaves under 1e-2 of the tolerance.
 const TAIL_EXPONENT:f64=30.;
-/// The rate bounding what still relaxes: the slowest relaxation found, and
-/// half the dressed frames' slowest precessing coherence (out of the shift's
-/// reach; the half covers the recycling's change of its rate). None when no
-/// relaxation was found.
-fn tail_rate(steady:&SteadySolution)->Option<f64>{
-    let precessing=steady.dressed.precessing_rate.map_or(f64::INFINITY,|r|0.5*r);
-    steady.slow.slowest_rate.map(|r|r.min(precessing))
-}
+/// The rate bounding what still relaxes: the reported slowest relaxation
+/// (`SteadySolution::slowest_rate`).
+fn tail_rate(steady:&SteadySolution)->Option<f64>{steady.slowest_rate()}
 fn relaxed_by(steady:&SteadySolution,horizon:f64)->bool{tail_rate(steady).is_some_and(|r|r*horizon>=TAIL_EXPONENT)}
 
 /// The state at the horizon T: its field (on the steady solution's modes),
@@ -339,7 +334,9 @@ fn mean_value(model:&Model,options:&Options,request:&Prepared,steady:Result<&Ste
                 "scope":"near-shell truncation and the primal's algebraic error (an error equation in the Krylov space) plus the fold remainders charged through the fold response; at a horizon the propagation's estimate instead (beyond the switch time also the part outside the slow modes, the fit's drift and the slow modes' residuals)",
                 "metric":"max over states and requested F groups"},
             "zeroModeCount":spectrum.conserved,"conservedQuantities":spectrum.conserved,
-            "slowestRatePerUs":spectrum.slowest_rate,"slowestRelaxationUs":spectrum.slowest_rate.map(|r|1./r),
+            "slowestRatePerUs":solution.slowest_rate(),"slowestRelaxationUs":solution.slowest_rate().map(|r|1./r),
+            "slowestRelaxationBasis":{"shiftRatePerUs":spectrum.slowest_rate,"precessingRatePerUs":solution.dressed.precessing_rate,
+                "rule":"min of the zero shift's slowest rate and half the dressed frames' slowest precessing decay"},
             "latticeOrder":solution.order,"latticeModes":solution.modes.len(),"discardedOpticalCoherence":discarded,
             "horizonMethod":state.as_ref().map(|s|s.details.clone()),"horizonRelaxingBound":state.as_ref().map(|s|s.relaxing),
             "horizonPropagationEstimate":state.as_ref().map(|s|s.error),"horizonProjectionCharge":state.as_ref().map(|_|projection),

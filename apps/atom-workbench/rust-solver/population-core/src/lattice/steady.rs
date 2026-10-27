@@ -96,6 +96,18 @@ pub struct SteadySolution{
     pub slow:SlowModes,
 }
 
+impl SteadySolution{
+    /// The slowest relaxation rate (1/us): the slowest found at the zero
+    /// shift and half the dressed frames' slowest precessing decay (out of
+    /// the shift's reach; the half covers the recycling's change of its
+    /// rate), so the slowest relaxation is never understated. None when the
+    /// shift found no relaxation.
+    pub fn slowest_rate(&self)->Option<f64>{
+        let precessing=self.dressed.precessing_rate.map_or(f64::INFINITY,|r|0.5*r);
+        self.slow.slowest_rate.map(|r|r.min(precessing))
+    }
+}
+
 fn size(p:&[f64],groups:&[Vec<usize>])->f64{ledger::metric(p,&vec![0.;p.len()],groups)}
 fn shifted(p:&[f64],delta:&[f64])->Vec<f64>{p.iter().zip(delta).map(|(a,b)|a+b).collect()}
 
@@ -367,6 +379,26 @@ mod tests{
         let k=krylov::gmres(&mut system,&b,None,&[vec![0,1],vec![2,3]],&tight()).unwrap();
         let t:f64=system.watch.iter().map(|&i|k.x[i].re).sum();let x:Vec<C>=k.x.iter().map(|v|scaled(*v,1./t)).collect();
         (system.populations(&x),x,modes)
+    }
+    #[test]
+    fn lattice_slowest_relaxation_is_not_understated(){
+        // The fixture's reported slowest rate against the dense spectrum of
+        // the accepted order's lattice within half the smallest near beat
+        // (the lattice repeats every mode at mu - i nu_s, and its edge copies
+        // carry the truncation): no decaying mode there, precessing ones
+        // included, relaxes more slowly than reported.
+        let f=fixture();let p=prepared(&f);let groups=vec![vec![0,1],vec![2,3]];
+        let s=solve(&p,&groups,Purpose::LongTime).unwrap();
+        let op=LatticeOperator::new(&p,&s.modes).unwrap();let size=op.dimension();let a=op.dense();let real=2*size;
+        let mut big=vec![0.;real*real];
+        for r in 0..size{for c in 0..size{let v=a[r*size+c];
+            big[r+real*c]=v.re;big[r+real*(c+size)]=-v.im;big[r+size+real*c]=v.im;big[r+size+real*(c+size)]=v.re;}}
+        let(re,im,_)=p.lapack.eigen(&big,real).unwrap();
+        let beat=p.plan.explicit().into_iter().map(|e|p.plan.steps[e].nu.abs()).fold(f64::INFINITY,f64::min);
+        let slowest=re.iter().zip(&im).filter(|(_,b)|b.abs()<=0.5*beat).map(|(a,_)|-a).filter(|&g|g>1e-9).fold(f64::INFINITY,f64::min);
+        let reported=s.slowest_rate().unwrap();
+        assert!(reported<=slowest*(1.+1e-6),"reported {reported:e}, dense slowest decay {slowest:e}");
+        assert!(reported<=s.slow.slowest_rate.unwrap()&&reported<=0.5*s.dressed.precessing_rate.unwrap());
     }
     #[test]
     fn lattice_primal_is_the_null_vector_of_the_dense_lattice(){
