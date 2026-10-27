@@ -8,10 +8,15 @@
 //! FOLD_DISTANCE ||L0|| (or, when every significant step is that fast, all of
 //! them are far). Far steps are folded at second order; a far + far pair with
 //! a nonzero near sum t joins the fold target K_t when its group is at least
-//! CROSS_FOLD_FLOOR of the diagonal (t = 0) fold, otherwise it is omitted and
-//! its bound charged (`ledger`). Near steps below the structural coupling
-//! floor do not grow the near ball; they still act exactly on every lattice
-//! edge, and their edges leaving the lattice are charged.
+//! CROSS_FOLD_FLOOR of the diagonal (t = 0) fold and at least the structural
+//! coupling floor, otherwise it is omitted and its bound charged (`ledger`):
+//! below the floor it would be a non-structural coupling at best, while a
+//! fold edge carries dense sector blocks (without a tweezer the
+//! counter-rotating cross folds land on near charges at about 1e-9 of the
+//! near couplings, each with some 0.6M stored entries). Near steps below the
+//! structural coupling floor do not grow the near ball; they still act
+//! exactly on every lattice edge, and their edges leaving the lattice are
+//! charged.
 use super::*;
 use crate::preparation::STRUCTURAL_COUPLING_FLOOR;
 
@@ -99,7 +104,7 @@ impl HarmonicPlan{
         let(mut targets,mut omitted)=(Vec::new(),Vec::new());
         for(charge,(nu,pairs))in groups{
             let size=pairs.iter().map(|x|x.bound).sum::<f64>();
-            if charge==generator.zero||(size>0.&&size>=CROSS_FOLD_FLOOR*diagonal){targets.push(FoldTarget{charge,nu,pairs,size});}
+            if charge==generator.zero||(size>0.&&size>=(CROSS_FOLD_FLOOR*diagonal).max(structural_floor)){targets.push(FoldTarget{charge,nu,pairs,size});}
             else{omitted.push(OmittedTarget{charge,nu,pairs,size});}
         }
         targets.sort_by_key(|t|t.charge!=generator.zero);
