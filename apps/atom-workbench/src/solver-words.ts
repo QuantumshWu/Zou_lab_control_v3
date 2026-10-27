@@ -37,6 +37,8 @@ const SENTENCES:Record<string,string>={
 /** A number the solver wrote (Rust {:e} or plain), as the workbench writes numbers. */
 const num=(text:string):string=>{const value=Number(text);return Number.isFinite(value)?formatNumber(value,{digits:3}):text;};
 const KEPT='误差目标未放宽。';
+/** The lattice's error equations, by their labels. */
+const EQUATION:Record<string,string>={truncation:'截断',fold:'折叠','third-order':'三阶折叠',correction:'壳层修正'};
 /** Failure reasons the native solver formats (rust-solver). */
 const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
   [/^(\d+) conserved quantities: the mean depends on the initial state, which the lattice core does not serve$/,n=>`${n} 个守恒量：长期平均依赖初态，求解器不计算这种长期平均。`],
@@ -45,6 +47,7 @@ const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
   [/^Lattice steady state not accepted up to near order (\d+) \(estimated error (\S+)\)$/,(k,e)=>`长期平均到近阶 ${k} 仍未达到误差目标（误差估计 ${num(e)}）；${KEPT}`],
   [/^Lattice steady state not accepted: estimated error (\S+) above (\S+) with no near shell to add$/,e=>`长期平均的误差估计 ${num(e)} 超过误差目标，且没有可加入的近壳层；${KEPT}`],
   [/^Finite-time populations not accepted up to near order (\d+)$/,k=>`时间演化布居到近阶 ${k} 仍未达到误差目标；${KEPT}`],
+  [/^Error equation (truncation|fold|third-order|correction) did not stabilise in (\d+) augmentation steps$/,(label,n)=>`${EQUATION[label]}误差方程在 ${n} 步增广内未稳定；${KEPT}`],
   [/^Finite-time estimate (\S+) not below the tolerance with (\d+) columns$/,(e,c)=>`时间演化的误差估计 ${num(e)} 在 ${c} 列时仍未低于误差目标；${KEPT}`],
 ];
 /** A solver sentence in Chinese; one this table does not know is shown as written. */

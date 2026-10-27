@@ -40,7 +40,17 @@
 
 ## 性能
 
-PERFORMANCE_PLACEHOLDER
+桌面 EXE 的真实 worker 路径（`atom_workbench.exe --worker`，`ATOM_SOLVER_THREADS=8`；请求由应用自己的 `scripts/native-protocol.mjs` 生成，结果都被 `normalizeDynamicsResult` 接受），研究场景 threeNearStrong（三束近共振光 + 852 nm 光镊，20 µs、161 点，初态 ground-2-0）。墙钟是两轮的范围，机器上同时有其它任务。
+
+| 请求 | 墙钟 | 估计误差 |
+|---|---:|---:|
+| 轨迹 + p̄(∞) | 3.1–4.4 s | 轨迹 1.5e-3，均值 1.5e-3 |
+| 轨迹 + p̄(1 s)（应用缺省） | 4.0 s；整个应用（界面点"计算"到出图）5.2–5.3 s | 轨迹 1.5e-3，均值 4.1e-3 |
+| 只算轨迹 | 3.4–4.4 s | 1.5e-3 |
+| 只算 p̄(∞) | 1.1–1.2 s | 1.5e-3 |
+| 只算 p̄(1 s) / p̄(100 ms) | 4.3–4.8 s | 4.1e-3 |
+
+近阶 2、13 个晶格模式；轨迹 80 列；最慢弛豫 684 µs。p̄(T) 比 p̄(∞) 慢，是因为要把初态传播到 T（T > 1 ms 时用慢模式展开）。
 
 ## 代码
 
