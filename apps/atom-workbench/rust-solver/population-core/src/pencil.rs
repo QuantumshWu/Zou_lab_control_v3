@@ -1077,9 +1077,13 @@ impl Plan {
     ) -> Result<(), String> {
         let (n, ground) = (self.n, self.ground);
         let block = n * n * rhs;
-        // Coordinate c = i + e*j of vec(J_EE) sits at J[block*s + n*b + offset(c)].
+        // Coordinate c = i + e*j of vec(J_EE) sits at J[block*s + n*b + offset[c]].
         let e = n - ground;
-        let excited = |c: usize| (ground + c % e) + n * rhs * (ground + c / e);
+        let offset: Vec<usize> = match source {
+            ThinSource::Excited(_) => (0..e * e).map(|c| (ground + c % e) + n * rhs * (ground + c / e)).collect(),
+            ThinSource::Packed(_) => Vec::new(),
+        };
+        let excited = |c: usize| offset[c];
         let library = &self.library.thin;
         let Some(first_link) = links.first() else { return Ok(()) };
         let target_width = match rows {
