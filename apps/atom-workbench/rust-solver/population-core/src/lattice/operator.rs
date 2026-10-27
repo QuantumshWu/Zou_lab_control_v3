@@ -6,11 +6,13 @@
 //! with sources restricted to the set (the Fourier truncation). The block
 //! factor NL'_q X + X NR'_q carries L0's left/right factors, -i nu_q and the
 //! diagonal fold's absorbable part as two dense n x n GEMMs; recycling and
-//! explicit steps act through their sparse factors, the fold rests as CSR.
-//! Target modes are split over the worker pool; every output block is
-//! accumulated by one task in a fixed edge order, so results do not depend
-//! on the thread count. No Hermitian half yet (first slice): every mode of
-//! the set is evaluated.
+//! explicit steps act through their sparse factors, and every fold rest (CSR)
+//! is applied once per application on all of its edges, so each stored
+//! matrix is read once. Block work is split over the worker pool by target
+//! modes, CSR work by rows; every output entry is accumulated by one task in
+//! a fixed order, so results do not depend on the thread count. Every mode
+//! of the set is evaluated (the Hermitian symmetry x_-q = x_q^dagger is not
+//! used to halve the work).
 use super::*;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 

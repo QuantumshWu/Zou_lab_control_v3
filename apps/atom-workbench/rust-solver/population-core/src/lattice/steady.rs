@@ -9,9 +9,11 @@
 //! and the iterate is formed once per cycle). It stops when the populations
 //! and the requested groups of the Krylov iterate have stabilised (their
 //! change stays below the algebraic share of the tolerance for STABLE_STEPS
-//! consecutive steps) and the true relative residual is below a guard. The
-//! guard is needed: the population change alone can plateau for a few steps
-//! in slow directions while still 0.1 away from the answer.
+//! consecutive steps) and the true relative residual, recomputed from the
+//! iterate, is below a guard. Both are needed: the population change alone
+//! can plateau for a few steps in slow directions while still 0.1 away from
+//! the answer, and the recursive GMRES residual can fall eight orders below
+//! the true one (the operator spans 1e-6 to 5e7 rad/us).
 //!
 //! Fold charge: the ledger's generator-norm bounds become population charges
 //! through one sensitivity solve, M delta = s, on the largest remainder's own
@@ -38,7 +40,10 @@ const SENSITIVITY_GUARD:f64=1e-6;
 pub struct SteadyOptions{
     /// Population-stability tolerance of the algebraic stop.
     pub algebraic:f64,
-    /// Relative true-residual guard of the algebraic stop.
+    /// Relative true-residual guard of the algebraic stop. Measured: a true
+    /// residual of 3e-7 left 1.8e-5 in the populations (two lasers +
+    /// tweezer, a 1e-6 /us Raman manifold); at 1e-8 every case is within
+    /// 1e-7 of its reference.
     pub residual_guard:f64,
     pub restart:usize,pub maximum_steps:usize,
     /// Keep every step's residual and populations.
@@ -48,7 +53,7 @@ pub struct SteadyOptions{
 }
 impl Default for SteadyOptions{
     fn default()->Self{
-        Self{algebraic:ledger::POPULATION_TOLERANCE*ledger::ALGEBRAIC_SHARE,residual_guard:1e-10,restart:80,maximum_steps:800,history:false,basis_bytes:1<<30}
+        Self{algebraic:ledger::POPULATION_TOLERANCE*ledger::ALGEBRAIC_SHARE,residual_guard:1e-8,restart:80,maximum_steps:800,history:false,basis_bytes:1<<30}
     }
 }
 #[derive(Clone,Debug)]
@@ -142,13 +147,14 @@ fn gmres(op:&mut LatticeOperator<'_>,pre:&mut DressedBatch<'_>,b:&[C],stop:&Stop
     let mut history=Vec::new();let mut previous:Option<Vec<f64>>=None;let mut changes:Vec<f64>=Vec::new();
     let(mut steps,mut restarts)=(0,0);let mut stopped:Option<&'static str>=None;let mut tight=None;
     if bnorm==0.{return Ok(Krylov{x,steps,restarts,restart,stop:"zero-source",history,tight,timing,applications,preconditions});}
+    // r = b - M x, recomputed from x after every cycle: the recursive GMRES
+    // residual drifts from the true one (M spans 1e-6 to 5e7 rad/us), so a
+    // stop is accepted only on the true residual.
+    let mut r=b.to_vec();let mut last_true=1_f64;
     loop{
-        let mut r=b.to_vec();
-        if steps>0{apply_m(op,&watch,&x,&mut w,&mut timing.apply_ms)?;applications+=1;for(a,c)in r.iter_mut().zip(&w){a.re-=c.re;a.im-=c.im;}}
         let beta=vectors.norm(&r);
         if beta<=1e-15*bnorm{stopped=Some("exact");break;}
-        for v in r.iter_mut(){*v=scaled(*v,1./beta);}
-        let mut basis=vec![r];let mut rotated:Vec<Vec<C>>=Vec::new();
+        let mut basis=vec![r.iter().map(|v|scaled(*v,1./beta)).collect::<Vec<C>>()];let mut rotated:Vec<Vec<C>>=Vec::new();
         let(mut cs,mut sn)=(Vec::<C>::new(),Vec::<C>::new());let mut g=vec![C{re:beta,im:0.}];
         let mut zdiag:Vec<Vec<C>>=Vec::new();let xdiag:Vec<C>=watch.iter().map(|&k|x[k]).collect();
         let mut y=Vec::new();
@@ -194,9 +200,17 @@ fn gmres(op:&mut LatticeOperator<'_>,pre:&mut DressedBatch<'_>,b:&[C],stop:&Stop
         for(v,&c)in basis.iter().zip(&y){for(t,&a)in combination.iter_mut().zip(v){mul_add(t,c,a);}}
         precondition(pre,&combination,&mut z,&mut timing.precondition_ms)?;preconditions+=1;
         for(a,c)in x.iter_mut().zip(&z){add(a,*c);}
-        if stopped.is_some(){break;}
-        if steps>=options.maximum_steps{return Err(format!("Lattice steady GMRES did not stabilise in {steps} steps (residual {:e})",magnitude(g[g.len()-1])/bnorm));}
-        restarts+=1;
+        apply_m(op,&watch,&x,&mut w,&mut timing.apply_ms)?;applications+=1;
+        for((a,&bb),c)in r.iter_mut().zip(b).zip(&w){*a=C{re:bb.re-c.re,im:bb.im-c.im};}
+        let true_residual=vectors.norm(&r)/bnorm;
+        if stopped.is_some(){
+            if true_residual<=stop.residual_guard{break;}
+            // Restarting no longer reduces the true residual: its floor.
+            if true_residual>0.5*last_true{stopped=Some("true-residual-floor");break;}
+            stopped=None;
+        }
+        if steps>=options.maximum_steps{return Err(format!("Lattice steady GMRES did not stabilise in {steps} steps (true residual {true_residual:e})"));}
+        last_true=true_residual;restarts+=1;
     }
     Ok(Krylov{x,steps,restarts,restart,stop:stopped.unwrap_or("maximum"),history,tight,timing,applications,preconditions})
 }

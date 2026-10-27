@@ -10,8 +10,9 @@
 //!
 //! Validation scaffolding: the hidden request object `lattice` (or the
 //! environment) sets `orders` (ATOM_LATTICE_ORDERS="2,3": solve exactly these
-//! near orders instead of the nested check), `algebraic` / `residualGuard`
-//! (the GMRES stop) and `history` (per-step populations).
+//! near orders instead of the nested check), `algebraic` / `residualGuard` /
+//! `restart` (the GMRES stop and cycle length) and `history` (per-step
+//! populations).
 use crate::{Model,Options,harmonics};
 use crate::population_core_adapter::{groups,row_errors};
 use serde_json::{json,Value};
@@ -58,6 +59,7 @@ impl Settings{
         })};
         if let Some(v)=number(setting(options,"algebraic","ATOM_LATTICE_ALGEBRAIC"),"algebraic")?{steady.algebraic=v;}
         if let Some(v)=number(setting(options,"residualGuard","ATOM_LATTICE_RESIDUAL_GUARD"),"residualGuard")?{steady.residual_guard=v;}
+        if let Some(v)=number(setting(options,"restart","ATOM_LATTICE_RESTART"),"restart")?{steady.restart=v as usize;}
         if let Some(v)=setting(options,"history","ATOM_LATTICE_HISTORY"){steady.history=v.as_bool().or_else(||v.as_str().map(|s|s=="1"||s=="true")).unwrap_or(false);}
         Ok(Self{orders,steady})
     }
