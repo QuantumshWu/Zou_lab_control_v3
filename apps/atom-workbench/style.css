@@ -39,7 +39,10 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 .workbench { height: 100%; min-height: 0; display: flex; flex-direction: column; gap: var(--window-pad-half); padding: var(--window-pad); }
 .header { flex: none; display: flex; align-items: center; gap: var(--row-gap); height: var(--header-h); padding: var(--header-pad-v) var(--window-pad); min-width: 0; }
 .header .identity { flex: 0 1 auto; min-width: 0; gap: var(--dot-gap); padding-bottom: 0; overflow: visible; }
-.header .document-name { flex: 0 1 var(--whole-width, auto); min-width: 0; max-width: var(--document-name-max); font-weight: var(--heading-weight); }
+/* The name's width is its whole text's (elide.ts --whole-width), never the cut text it shows:
+ * .identity sizes itself by its children's widths, so sized by a cut name it would keep a longer
+ * name cut after the scene changes or the window widens again. It still shrinks when room is short. */
+.header .document-name { flex: 0 1 var(--whole-width, auto); width: var(--whole-width, auto); min-width: 0; max-width: var(--document-name-max); font-weight: var(--heading-weight); }
 .header .identity > button { margin-left: calc(var(--row-gap) - var(--dot-gap)); }
 .header > .summary { flex: 1; min-width: 0; height: var(--control); align-content: center; padding-bottom: var(--cap-lift); color: var(--muted-ink); font-variant-numeric: tabular-nums; }
 .header > .inspector-toggle { display: none; }

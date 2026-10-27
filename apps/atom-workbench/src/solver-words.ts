@@ -32,6 +32,10 @@ const SENTENCES:Record<string,string>={
     '完整受驱 Lindblad 方程的长期相位平均已收敛（一维零空间）；布居是时间平均，不是不随时间变化的密度矩阵。',
   'Converged long-time phase average of the specified initial density; several conserved quantities make it initial-state dependent.':
     '给定初始密度矩阵的长期相位平均已收敛；存在多个守恒量，结果依赖初态。',
+  'Long-time phase average at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent.':
+    '给定初始密度矩阵在观察时长 T 处的长期相位平均：到 T 仍在弛豫的慢模式（或守恒量）使结果依赖初态。',
+  'Lindblad mean at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent.':
+    '给定初始密度矩阵在观察时长 T 处的 Lindblad 平均：到 T 仍在弛豫的慢模式（或守恒量）使结果依赖初态。',
   'Populations converge in the background basis; exported density is the laboratory-frame time average.':
     '布居在背景基中收敛；导出的密度矩阵是实验室系的时间平均。',
   'Unique full-density Lindblad stationary solution within the resolved rates.':

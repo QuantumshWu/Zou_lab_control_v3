@@ -245,7 +245,8 @@ function refreshStatus():void{
   let [text,word]=solverStatus();
   const regime=regimeProblems();
   if(analysisError)[text,word]=[`能级参数无效：${analysisError}`,'error'];
-  else if(regime.length&&word!=='error')[text,word]=[`处理方式不适用：${regime.join('；')}`,'warning'];
+  // A solve refused for a regime problem (requestSolve) is that problem, not a failed calculation.
+  else if(regime.length&&(word!=='error'||regime.includes(currentSolverError())))[text,word]=[`处理方式不适用：${regime.join('；')}`,'warning'];
   if(notice)[text,word]=[notice.text,notice.word];
   if(saveState==='failed')[text,word]=[`本地保存失败：${saveFailure}；请导出场景`,'error'];
   else if(loadFailure&&!notice)[text,word]=[`原本地场景无法载入：${loadFailure}。已显示默认场景，原数据已保留`,'warning'];
@@ -837,8 +838,10 @@ const HORIZONS:[string,number|null][]=[['inf',null],['1e6',1e6],['1e5',1e5]];
 const meanHorizon=new Segmented(value=>{dynamics().meanHorizonUs=HORIZONS.find(([key])=>key===value)![1];meanHorizon.setCurrent(value);update();});
 meanHorizon.setChoices(HORIZONS.map(([key,us])=>[key,horizonText(us)]));meanHorizon.root.setAttribute('aria-label','长期布居的观察时长');meanHorizon.root.classList.add('mean-horizon');
 function horizonText(us:number|null|undefined):string{return us==null?'∞':us===1e6?'1 s':us===1e5?'100 ms':durationText(us);}
-/** The name of the long-time population a result holds: p̄ at the horizon it was solved at. */
-function meanSymbol(result=currentResult()):string{return `p̄(${horizonText(result?.steady?.horizonUs)})`;}
+/** The name of the long-time population a result holds: p̄ at the horizon it was solved at (the
+ * solver's echo; none echoed reads t → ∞). While no converged mean is here (pending, refused or
+ * unresolved), the horizon being asked for, never a stale ∞. */
+function meanSymbol(result=currentResult()):string{const steady=result?.steady;return `p̄(${horizonText(steady?.converged?steady.horizonUs:resolveMeanHorizon(dynamics()))})`;}
 populationMode$.onchange=()=>{populationMode=populationMode$.value as 'steady'|'time';update();};
 const populationTime=element('input');populationTime.type='range';populationTime.id='population-time';populationTime.setAttribute('aria-label','布居时间');
 populationTime.oninput=()=>{populationTimeIndex=Number(populationTime.value);update();};
