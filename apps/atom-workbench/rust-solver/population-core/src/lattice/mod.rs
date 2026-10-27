@@ -35,7 +35,7 @@ use std::collections::{BTreeMap,BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 use crate::{C,Lapack};
-use crate::preparation::{Charge,GaugedSource,GaugePolicy,ModelView,PhaseBasis};
+use crate::preparation::{Charge,ModelView,PhaseBasis,Source};
 
 pub mod generator;
 pub mod classification;
@@ -89,8 +89,8 @@ pub(crate) fn opposite(a:&[i32])->Charge{a.iter().map(|&k|-k).collect()}
 /// Request-local lattice preparation: generator, classification and fold. It
 /// depends on the model only, never on a lattice mode set.
 pub struct LatticePrepared{
-    /// The request's frame (identity gauge).
-    pub source:GaugedSource,
+    /// The model in the request's frame.
+    pub source:Source,
     pub generator:Generator,
     pub plan:classification::HarmonicPlan,
     pub fold:fold::FoldLibrary,
@@ -102,7 +102,7 @@ impl LatticePrepared{
     pub fn prepare(model:&ModelView<'_>,phases:PhaseBasis)->Result<Self,String>{
         let lapack=Arc::new(Lapack::load()?);
         let clock=Instant::now();
-        let source=GaugedSource::prepare(model,phases,GaugePolicy::Identity)?;
+        let source=Source::prepare(model,phases)?;
         let source_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
         let generator=Generator::new(&source)?;
         let plan=classification::HarmonicPlan::new(&generator)?;
@@ -180,8 +180,8 @@ pub(crate) mod tests{
         let drives=[DriveView{omega:3.,cosine:MatrixView{real:&f.near,imag:&f.zero},sine:MatrixView{real:&f.zero,imag:&f.zero}},
             DriveView{omega:2000.,cosine:MatrixView{real:&f.far,imag:&f.zero},sine:MatrixView{real:&f.zero,imag:&f.zero}},
             DriveView{omega:2003.,cosine:MatrixView{real:&f.far2,imag:&f.zero},sine:MatrixView{real:&f.zero,imag:&f.zero}}];
-        let model=ModelView{dimension:4,hamiltonian:h,collapse:&channels,drives:&drives,ground:&[true,true,false,false],initial_index:0};
-        let phases=PhaseBasis::from_declared(&[3.,2000.],None,&[vec![1,0],vec![0,1],vec![1,1]]).unwrap();
+        let model=ModelView{dimension:4,hamiltonian:h,collapse:&channels,drives:&drives,ground:&[true,true,false,false]};
+        let phases=PhaseBasis::from_declared(&[3.,2000.],&[vec![1,0],vec![0,1],vec![1,1]]).unwrap();
         LatticePrepared::prepare(&model,phases).unwrap()
     }
     /// The dense lattice generator on any charge set with every component
@@ -203,7 +203,7 @@ pub(crate) mod tests{
         let mut col=vec![ZERO;size*size];for r in 0..size{for c in 0..size{col[r+size*c]=matrix[r*size+c];}}
         for &r in &watch{for &c in &watch{col[r+size*c].re+=1./n as f64;}}
         let(lu,piv)=p.lapack.complex_factor(&col,size).unwrap();let mut rhs=vec![ZERO;size];for &k in &watch{rhs[k].re=1./n as f64;}
-        let x=p.lapack.complex_solve_factored(&lu,&piv,&rhs,size).unwrap();
+        let x=p.lapack.complex_solve_matrix_factored(&lu,&piv,&rhs,size).unwrap();
         let trace:f64=watch.iter().map(|&k|x[k].re).sum();watch.iter().map(|&k|x[k].re/trace).collect()
     }
     #[test]
@@ -215,8 +215,8 @@ pub(crate) mod tests{
         let(v,nu)=(5.,2000.);let zero=vec![0.;4];let h=vec![0.,0.,0.,1.];
         let(cos,sin)=(vec![0.,v,v,0.],vec![0.,-v,v,0.]);
         let drives=[DriveView{omega:nu,cosine:MatrixView{real:&cos,imag:&zero},sine:MatrixView{real:&zero,imag:&sin}}];
-        let model=ModelView{dimension:2,hamiltonian:MatrixView{real:&h,imag:&zero},collapse:&[],drives:&drives,ground:&[true,false],initial_index:0};
-        let p=LatticePrepared::prepare(&model,PhaseBasis::from_declared(&[nu],None,&[vec![1]]).unwrap()).unwrap();
+        let model=ModelView{dimension:2,hamiltonian:MatrixView{real:&h,imag:&zero},collapse:&[],drives:&drives,ground:&[true,false]};
+        let p=LatticePrepared::prepare(&model,PhaseBasis::from_declared(&[nu],&[vec![1]]).unwrap()).unwrap();
         let(h2,rest)=p.folded_background_hamiltonian().unwrap();
         assert!((h2[1].re-h2[2].re).abs()<1e-15&&(h2[1].im+h2[2].im).abs()<1e-15&&(h2[0].re+h2[3].re).abs()<1e-15);
         let splitting=h2[3].re-h2[0].re;let expected=2.*v*v/nu;

@@ -1,22 +1,38 @@
-//! The folded-lattice population core, selected by ATOM_POPULATION_CORE=lattice
-//! or the hidden request option `solverCore`: the t -> infinity mean or the
-//! mean at the horizon `meanHorizonUs`, and the finite trajectory (with its
-//! mean alongside; beyond `finite::LONG_HORIZON` by the slow-mode
-//! expansion). It runs beside the shear core until the cut-over; without the
-//! selection every request is served by the shear core unchanged.
-//!
-//! The results have the shapes of the shear core's: a mean result (one t = 0
-//! row of initial populations, the `asymptotic*` fields, the
-//! conserved-quantity count and the slowest relaxation) and a finite result
-//! (projected rows, `populationAccuracy`, the mean merged in), with the
-//! lattice profiling under `diagnostics.lattice` and `diagnostics.finite`.
+//! The protocol bridge to the population core, the folded Fourier lattice:
+//! every rb87-full/2 request. The TypeScript model is the only owner of
+//! atomic physics; this adapter borrows its H/C, exact phase coordinates and
+//! state metadata, and serves the t -> infinity mean or the mean at the
+//! horizon `meanHorizonUs`, and the finite trajectory (with its mean
+//! alongside; beyond `finite::LONG_HORIZON` by the slow-mode expansion).
 //! The population tolerance is the fixed `ledger::POPULATION_TOLERANCE`; a
 //! request may only restate it.
+//!
+//! # Result contract
+//! The one result shape, read by `normalizeDynamicsResult` in
+//! src/solver-client.ts; main.rs adds `protocol` and `modelSchema`.
+//! - `states` (32 ids), `timesUs`, `populations` (one row per time). A mean
+//!   result has the single t = 0 row, the initial populations; a finite result
+//!   has >= 2 projected rows and `populationAccuracy`, their estimated error.
+//! - `horizonUs`: the echo of the request's `meanHorizonUs` (us, or null for
+//!   the t -> infinity mean), on every result that carries a mean.
+//! - `asymptoticStatus`. A converged mean (`stationary`, `population-stationary`
+//!   and `initial-dependent` for static models; `time-average` and
+//!   `initial-dependent-time-average` for driven ones) comes with
+//!   `asymptoticReason`, `asymptoticPopulations` and `asymptoticDensityReal/Imag`;
+//!   otherwise the status is `not-converged` (with its `asymptoticReason`) or
+//!   `not-requested`.
+//! - `diagnostics`. The reader gates the rows' `traceError` and
+//!   `initialStateError`, `elapsedMs`, a finite result's `method`, and a mean's
+//!   `asymptoticMethod`, `asymptoticTraceError`, `asymptoticPositivityError` and
+//!   `residual`, and shows `slowestRelaxationUs` and `conservedQuantities`;
+//!   every other key is profiling (the lattice's under `diagnostics.lattice`
+//!   and `diagnostics.finite`). A finite result carries the mean's
+//!   diagnostics under the same names; keys both report keep the finite value.
 use crate::{Model,Options,harmonics};
-use crate::population_core_adapter::{groups,row_errors};
 use serde_json::{json,Value};
+use std::collections::BTreeMap;
 use std::time::Instant;
-use atom_population_core::Complex64;
+use atom_population_core::{Complex64,Lapack};
 use atom_population_core::preparation::{ModelView,MatrixView,DriveView,PhaseBasis,FrequencyParts};
 use atom_population_core::lattice::LatticePrepared;
 use atom_population_core::lattice::classification::Treatment;
@@ -30,14 +46,67 @@ const MEAN_METHOD:&str="Full32 time average of the folded Fourier lattice (near 
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
 const FINITE_METHOD:&str="Full32 density-matrix Lindblad evolution on the folded Fourier lattice: rational Krylov with lattice-translation augmentation, its basis, near-shell and fold errors estimated by propagating their sources through the dressed blocks; beyond 1 ms the slow eigenmodes' expansion from the Krylov state at a switch time";
 
-/// Whether the lattice core serves this request.
-pub fn selected(options:&Options)->Result<bool,String>{
-    let choice=options.solver_core.clone().or_else(||std::env::var("ATOM_POPULATION_CORE").ok());
-    match choice.as_deref(){
-        None|Some("")|Some("shear")=>Ok(false),
-        Some("lattice")=>Ok(true),
-        Some(other)=>Err(format!("Unknown population core {other:?}; expected shear or lattice")),
+/// The worker start-up check: loads LAPACK and verifies one Hermitian
+/// eigensystem, [[2,1-i],[1+i,3]] -> {1,4}.
+pub fn warmup()->Result<(),String>{
+    let c=|re,im|Complex64{re,im};
+    let(values,_)=Lapack::load()?.hermitian_eigen(&[c(2.,0.),c(1.,1.),c(1.,-1.),c(3.,0.)],2)?;
+    if (values[0]-1.).abs()>1e-12||(values[1]-4.).abs()>1e-12{return Err("LAPACK numerical self-check failed".into());}
+    Ok(())
+}
+
+/// A requested population group: the eight F manifolds and all excited states.
+struct Group{name:String,indices:Vec<usize>}
+/// The ground flags and the requested groups, from the 32 state labels
+/// `manifold-F-m`.
+fn groups(model:&Model)->Result<(Vec<bool>,Vec<Group>),String>{
+    let mut grouped=BTreeMap::<String,Vec<usize>>::new();let mut excited=Vec::new();let mut ground=Vec::new();
+    for(i,label)in model.states.iter().enumerate(){
+        let mut fields=label.splitn(3,'-');let manifold=fields.next().ok_or("Missing atomic manifold label")?;
+        let f=fields.next().ok_or("Missing atomic F label")?;
+        if !matches!(manifold,"ground"|"D1"|"D2")||fields.next().is_none(){return Err("The population core needs the 32-state manifold metadata".into());}
+        ground.push(manifold=="ground");if manifold!="ground"{excited.push(i);}
+        grouped.entry(format!("F:{manifold}:{f}")).or_default().push(i);
     }
+    if ground.iter().filter(|&&x|x).count()!=8||grouped.len()!=8||excited.len()!=24{
+        return Err("Rb87 population metadata must contain 8 ground and 24 excited states in all 8 F manifolds".into());
+    }
+    grouped.insert("F:excited".into(),excited);
+    Ok((ground,grouped.into_iter().map(|(name,indices)|Group{name,indices}).collect()))
+}
+
+/// The row gates every result reports: the largest |row sum - 1| and the
+/// first row's largest deviation from the initial populations.
+fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
+    let trace=rows.iter().map(|p|(p.iter().sum::<f64>()-1.).abs()).fold(0_f64,f64::max);
+    let initial_error=rows[0].iter().zip(initial).map(|(a,b)|(a-b).abs()).fold(0_f64,f64::max);
+    if trace>1e-7||initial_error>1e-10{return Err("Returned population probabilities failed fixed trace/initial checks".into());}
+    Ok((trace,initial_error))
+}
+
+/// rho0 (row-major): `initialReal/initialImag` when given, else the state
+/// `initialIndex`. A given density must be Hermitian with trace one and
+/// positive semidefinite (to 1e-10).
+fn initial_density(model:&Model,lapack:&Lapack)->Result<Vec<Complex64>,String>{
+    let n=model.dimension;let d=n*n;
+    let density:Vec<Complex64>=match(&model.initial_real,&model.initial_imag){
+        (Some(re),Some(im))=>{
+            if re.len()!=d||im.len()!=d{return Err("initialReal/initialImag must be n*n row-major arrays".into());}
+            if re.iter().chain(im).any(|x|!x.is_finite()){return Err("Nonfinite initial density".into());}
+            re.iter().zip(im).map(|(&re,&im)|Complex64{re,im}).collect()
+        }
+        (None,None)=>{
+            if model.initial_index>=n{return Err("initialIndex is outside the state space".into());}
+            return Ok((0..d).map(|k|Complex64{re:if k==model.initial_index*(n+1){1.}else{0.},im:0.}).collect());
+        }
+        _=>return Err("initialReal and initialImag must be provided together".into()),
+    };
+    let trace:f64=(0..n).map(|i|density[i*n+i].re).sum();let trace_imaginary:f64=(0..n).map(|i|density[i*n+i].im).sum();
+    let hermiticity=(0..d).map(|k|{let(a,b)=(density[k],density[(k%n)*n+k/n]);(a.re-b.re).hypot(a.im+b.im)}).fold(0_f64,f64::max);
+    if (trace-1.).hypot(trace_imaginary)>1e-10||hermiticity>1e-10{return Err("Initial density fails the trace/Hermitian checks".into());}
+    // Read column-major the matrix is its conjugate, which has the same spectrum.
+    if lapack.hermitian_eigen(&density,n)?.0[0]< -1e-10{return Err("Initial density is not positive semidefinite".into());}
+    Ok(density)
 }
 
 /// The model's lattice preparation in the request frame, with its phase axes.
@@ -49,7 +118,7 @@ fn prepare(model:&Model,ground:&[bool])->Result<(LatticePrepared,harmonics::Phas
     let drives:Vec<_>=model.drives.iter().map(|x|DriveView{omega:x.omega,
         cosine:MatrixView{real:&x.cos.real,imag:&x.cos.imag},sine:MatrixView{real:&x.sin.real,imag:&x.sin.imag}}).collect();
     let view=ModelView{dimension:model.dimension,hamiltonian:MatrixView{real:&model.h_real,imag:&model.h_imag},
-        collapse:&collapse,drives:&drives,ground,initial_index:model.initial_index};
+        collapse:&collapse,drives:&drives,ground};
     Ok((LatticePrepared::prepare(&view,phases)?,axes))
 }
 
@@ -114,10 +183,7 @@ fn prepare_request(model:&Model,options:&Options)->Result<Prepared,String>{
     let(ground,requested)=groups(model)?;
     let(lattice,axes)=prepare(model,&ground)?;
     let n=32;
-    let density:Vec<Complex64>=match &model.initial_real{
-        Some(re)=>{let im=model.initial_imag.as_deref();(0..n*n).map(|k|Complex64{re:re[k],im:im.map_or(0.,|v|v[k])}).collect()}
-        None=>(0..n*n).map(|k|Complex64{re:if k==model.initial_index*(n+1){1.}else{0.},im:0.}).collect(),
-    };
+    let density=initial_density(model,&lattice.lapack)?;
     let initial=(0..n).map(|i|density[i*n+i].re).collect();
     Ok(Prepared{lattice,axes,groups:requested.iter().map(|g|g.indices.clone()).collect(),names:requested.iter().map(|g|g.name.clone()).collect(),density,initial})
 }
@@ -307,8 +373,10 @@ impl Trajectory{
 /// the finite result. Up to LONG_HORIZON the trajectory runs on its own
 /// thread beside the mean; beyond it one long-time steady solution serves
 /// the trajectory and then the mean (its horizon state too).
-pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value),started:Instant)->Result<Value,String>{
+pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))->Result<Value,String>{
+    let started=Instant::now();
     if options.steady_only{return mean_result(model,options,started);}
+    if !options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples){return Err("Invalid finite population grid".into());}
     let request=prepare_request(model,options)?;
     let times:Vec<f64>=(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect();
     let mut publish=|mean:Result<Value,String>|{if let Ok(value)=&mean{publish_mean(value);}mean};

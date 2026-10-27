@@ -76,7 +76,7 @@ pub struct Generator{pub n:usize,pub zero:Charge,pub components:BTreeMap<Charge,
     /// Whether each state is a ground state (the sectors of a block).
     pub ground:Vec<bool>}
 impl Generator{
-    pub fn new(source:&GaugedSource)->Result<Self,String>{
+    pub fn new(source:&Source)->Result<Self,String>{
         let n=source.n;let d=n*n;let zero:Charge=vec![0;source.phases.axes.len()];
         let mut left=BTreeMap::<Charge,Vec<C>>::new();let mut right=BTreeMap::<Charge,Vec<C>>::new();
         let mut sandwich=BTreeMap::<Charge,Vec<(Sparse,Sparse)>>::new();

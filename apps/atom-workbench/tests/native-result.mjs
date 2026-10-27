@@ -1,4 +1,4 @@
-// One contract-valid native result (rust-solver/src/population_core_adapter.rs)
+// One contract-valid native result (rust-solver/src/lattice_core_adapter.rs)
 // for the transport and reader tests: populations stay in the initial state.
 import {POPULATION_GROUPS} from '../dist/js/atom-workbench/src/population-selection.js';
 import {FULL_MODEL_SCHEMA,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';

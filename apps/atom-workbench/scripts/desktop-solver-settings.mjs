@@ -4,7 +4,7 @@ import {dirname,resolve} from 'node:path';
 // The population kernels parallelize over output modes; BLAS is always
 // single-threaded inside the worker.
 export const DESKTOP_SOLVER_DEFAULTS=Object.freeze({
-  ATOM_PENCIL_THREADS:'8',
+  ATOM_SOLVER_THREADS:'8',
 });
 
 // Only the desktop entry applies these defaults; the development service keeps

@@ -50,20 +50,30 @@ entry is `tools/atom_workbench.ps1`; the independent package entry is
 ## Numerical scope
 
 Every request (schema `rb87-full/2`) is solved by the population core in
-`rust-solver/population-core`; the worker in `rust-solver/src` only speaks the
-JSONL protocol. The complete 32-state Hamiltonian, drives and collapse
-operators of the TypeScript model are kept: the core changes variables
-exactly (gauge, Fourier envelope, optical and recycling shears) and never
-drops a coupling because it is small or labelled forbidden.
+`rust-solver/population-core`; the worker in `rust-solver/src` speaks the
+JSONL protocol and defines the one result contract
+(`lattice_core_adapter.rs`). The complete 32-state Hamiltonian, drives and
+collapse operators of the TypeScript model are kept: the core works on the
+Fourier envelopes of the request's own frame and never drops a coupling
+because it is small or labelled forbidden.
 
-- Finite-time trajectories: a rational Krylov trial space on the gauge pencil
-  with a Galerkin reduced model, grown until a dual-weighted residual estimate
-  of the population error (trial-space basis plus Fourier truncation) meets the
-  requested tolerance.
-- Long-time means: the null vector of the same pencil (or, when the null space
-  is degenerate, the projection of the initial state), with its own basis and
-  Fourier-truncation estimates. For several lasers with incommensurate
-  frequencies this is the time average of the quasi-periodic long-time state.
+- The folded Fourier lattice: near-resonant charge steps (the beats between
+  lasers) are explicit couplings between lattice modes; far steps (the
+  tweezer and every counter-rotating harmonic) are folded statically at
+  second order into the near couplings, and every remainder of the fold is
+  charged as a bound.
+- Long-time means: the null vector of the lattice operator, by GMRES with a
+  dressed-block preconditioner, its near-shell truncation and fold errors
+  estimated by error equations in the solver's Krylov space. The slowest
+  eigenpairs give the uniqueness check and the slowest relaxation time. For
+  several lasers with incommensurate frequencies the mean is the time
+  average of the quasi-periodic long-time state; a mean at a finite horizon
+  propagates the initial state to it. A mean with several conserved
+  quantities depends on the initial state and is reported as not converged.
+- Finite-time trajectories: rational Krylov with lattice-translation
+  augmentation and a Galerkin reduced model, its basis, near-shell and fold
+  errors propagated through the dressed blocks; beyond 1 ms the trajectory
+  continues as the expansion in the slow eigenmodes.
 
 Every request asks for the same absolute population error,
 `populationTolerance: 0.005` on the probability scale (0.5%); it is not a user

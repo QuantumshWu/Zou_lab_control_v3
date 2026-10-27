@@ -1,13 +1,12 @@
 //! Atom Workbench native worker: JSONL requests on stdin, one response line
 //! per request on stdout. Every rb87-full/2 solve is served by the population
-//! core (`population_core_adapter`). Matrices in the public protocol are
+//! core through `lattice_core_adapter`. Matrices in the public protocol are
 //! row-major, frequencies are rad/us, collapse amplitudes are sqrt(1/us).
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
 mod harmonics;
-mod population_core_adapter;
 mod lattice_core_adapter;
 const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/2";
 const FULL_MODEL_SCHEMA: &str = "rb87-full/2";
@@ -60,7 +59,8 @@ struct Options {
     duration_us: f64,
     #[serde(default = "default_samples")]
     samples: usize,
-    /// Absolute population error on the probability (0..1) scale.
+    /// Absolute population error on the probability (0..1) scale: the
+    /// core's fixed tolerance, which a request may only restate.
     #[serde(default = "default_population_tolerance")]
     population_tolerance: f64,
     #[serde(default = "default_true")]
@@ -72,10 +72,6 @@ struct Options {
     /// t -> infinity mean.
     #[serde(default)]
     mean_horizon_us: Option<f64>,
-    /// Hidden: the population core of a steadyOnly request, "shear" or
-    /// "lattice"; overrides ATOM_POPULATION_CORE. Not part of the UI schema.
-    #[serde(default)]
-    solver_core: Option<String>,
 }
 fn default_duration() -> f64 {
     5.
@@ -84,7 +80,7 @@ fn default_samples() -> usize {
     200
 }
 fn default_population_tolerance() -> f64 {
-    0.005
+    atom_population_core::lattice::ledger::POPULATION_TOLERANCE
 }
 fn default_true() -> bool {
     true
@@ -98,35 +94,6 @@ impl Default for Options {
             include_asymptotic: true,
             steady_only: false,
             mean_horizon_us: None,
-            solver_core: None,
-        }
-    }
-}
-impl Options {
-    fn validate_population_tolerance(&self) -> Result<(), String> {
-        if !self.population_tolerance.is_finite()
-            || self.population_tolerance <= 0.
-            || self.population_tolerance > 0.02
-        {
-            return Err("populationTolerance must be finite and in (0,0.02] on the probability scale".into());
-        }
-        Ok(())
-    }
-}
-#[cfg(test)]
-mod population_option_tests {
-    use super::*;
-    #[test]
-    fn population_options_keep_legacy_default_and_requested_probability_scale() {
-        let legacy:Options=serde_json::from_value(json!({})).unwrap();
-        assert_eq!(legacy.population_tolerance,0.005);
-        for value in [0.001,0.005,0.02,0.003] {
-            let parsed:Options=serde_json::from_value(json!({"populationTolerance":value})).unwrap();
-            assert_eq!(parsed.population_tolerance,value);
-            assert!(parsed.validate_population_tolerance().is_ok());
-        }
-        for value in [0.,-0.001,0.020001,f64::INFINITY,f64::NAN] {
-            assert!(Options{population_tolerance:value,..Default::default()}.validate_population_tolerance().is_err());
         }
     }
 }
@@ -159,7 +126,7 @@ fn respond(request: Request) -> Value {
     let id = request.id;
     match request.op.as_deref() {
         Some("capabilities") => return json!({"id":id,"protocol":NATIVE_PROTOCOL,"capabilities":[FULL_MODEL_SCHEMA]}),
-        Some("warmup") => return match population_core_adapter::warmup() {
+        Some("warmup") => return match lattice_core_adapter::warmup() {
             Ok(()) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"ready":true}),
             Err(error) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":error}),
         },
@@ -177,7 +144,7 @@ fn respond(request: Request) -> Value {
         }
     };
     let result = match (request.model_schema.as_deref(), request.model.as_ref()) {
-        (Some(FULL_MODEL_SCHEMA), Some(model)) => population_core_adapter::solve(model, &request.options, &mut publish_mean),
+        (Some(FULL_MODEL_SCHEMA), Some(model)) => lattice_core_adapter::solve(model, &request.options, &mut publish_mean),
         (Some(FULL_MODEL_SCHEMA), None) => Err("A solve request requires a model".into()),
         _ => Err(format!("Unsupported native model schema; this worker serves {FULL_MODEL_SCHEMA}")),
     };
@@ -236,5 +203,14 @@ mod tests {
         }
         let out = request(json!({"id":3,"modelSchema":FULL_MODEL_SCHEMA,"model":model}));
         assert!(out["error"].is_string(), "{out}");
+    }
+    #[test]
+    fn a_request_restates_the_fixed_tolerance_and_names_a_finite_grid() {
+        assert_eq!(serde_json::from_value::<Options>(json!({})).unwrap().population_tolerance, 0.005);
+        let model = json!({"dimension":1,"states":["a"],"hReal":[0],"hImag":[0],"collapse":[]});
+        let solve = |options: Value| request(json!({"id":4,"modelSchema":FULL_MODEL_SCHEMA,"model":model,"options":options}))["error"].as_str().unwrap().to_owned();
+        assert!(solve(json!({"steadyOnly":true,"populationTolerance":0.001})).contains("populationTolerance is fixed"));
+        assert!(solve(json!({"samples":1})).contains("Invalid finite population grid"));
+        assert!(solve(json!({"durationUs":0})).contains("Invalid finite population grid"));
     }
 }

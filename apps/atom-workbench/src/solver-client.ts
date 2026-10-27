@@ -104,7 +104,7 @@ export class DynamicsClient {
 }
 
 /** Reads the one native result contract (documented in
- * rust-solver/src/population_core_adapter.rs) and rejects anything else.
+ * rust-solver/src/lattice_core_adapter.rs) and rejects anything else.
  * `initial` is the requested initial state (an id is a single state). */
 export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics,scene)):DynamicsResult{
   const invalid=(detail:string):never=>{throw new Error(`求解结果不完整或无效：${detail}；未绘制替代数据。`);};

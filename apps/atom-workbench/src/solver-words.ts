@@ -16,53 +16,36 @@ const STATUS:Record<SteadyStatus,string>={
 /** The long-time result's kind, as a word. */
 export function steadyStatusText(status:SteadyStatus|undefined):string{return status?STATUS[status]??status:STATUS['not-converged'];}
 
-/** Sentences the native solver is known to write (rust-solver/src/population_core_adapter.rs). */
+/** Sentences the native solver is known to write (rust-solver/src/lattice_core_adapter.rs). */
 const SENTENCES:Record<string,string>={
-  'Full32 density-matrix Lindblad evolution with adaptive population refinement':
-    '完整 32 态密度矩阵 Lindblad 演化，布居误差自适应加密。',
-  'Full32 Cesàro mean of the gauge pencil: defect-corrected null vector with a near-zero pole, halo-condensed Fourier truncation':
-    '完整 32 态规范束的 Cesàro 平均：近零极点的零空间向量经缺陷校正，Fourier 截断凝聚晕模。',
-  'Full32 Cesàro mean of the gauge pencil: defect-corrected null vector with a near-zero pole below the slowest relaxation of the slow generator, halo-condensed Fourier truncation':
-    '完整 32 态规范束的 Cesàro 平均：取低于慢生成元最慢弛豫的近零极点，零空间向量经缺陷校正，Fourier 截断凝聚晕模。',
+  "Full32 density-matrix Lindblad evolution on the folded Fourier lattice: rational Krylov with lattice-translation augmentation, its basis, near-shell and fold errors estimated by propagating their sources through the dressed blocks; beyond 1 ms the slow eigenmodes' expansion from the Krylov state at a switch time":
+    '完整 32 态密度矩阵在折叠 Fourier 晶格上的 Lindblad 演化：带晶格平移增广的有理 Krylov 方法，基、近壳层与折叠误差由各自的源经缀饰块传播估计；1 ms 以后用切换时刻 Krylov 态的慢本征模展开。',
+  "Full32 time average of the folded Fourier lattice (near charges explicit, far harmonics folded statically at second order, higher orders charged): dressed-block preconditioned null vector, its truncation and fold errors estimated in the solver's Krylov space":
+    '完整 32 态折叠 Fourier 晶格上的时间平均（近共振电荷显式，远离的谐波按二阶静态折叠，更高阶计入误差）：缀饰块预条件的零空间向量，截断与折叠误差在求解器的 Krylov 空间中估计。',
   'Converged long-time phase average of the full driven Lindblad equation (unique limit: only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time); populations are a time average, not a time-independent density.':
     '完整受驱 Lindblad 方程的长期相位平均已收敛（极限唯一：只有迹守恒，最慢弛豫时间见上）；布居是时间平均，不是不随时间变化的密度矩阵。',
   'Unique full-density Lindblad stationary solution (only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time).':
     '完整密度矩阵的 Lindblad 稳态唯一（只有迹守恒，最慢弛豫时间见上）。',
-  'Converged long-time phase average of the full driven Lindblad equation (one-dimensional null space); populations are a time average, not a time-independent density.':
-    '完整受驱 Lindblad 方程的长期相位平均已收敛（一维零空间）；布居是时间平均，不是不随时间变化的密度矩阵。',
-  'Converged long-time phase average of the specified initial density; several conserved quantities make it initial-state dependent.':
-    '给定初始密度矩阵的长期相位平均已收敛；存在多个守恒量，结果依赖初态。',
   'Long-time phase average at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent.':
     '给定初始密度矩阵在观察时长 T 处的长期相位平均：到 T 仍在弛豫的慢模式（或守恒量）使结果依赖初态。',
   'Lindblad mean at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent.':
     '给定初始密度矩阵在观察时长 T 处的 Lindblad 平均：到 T 仍在弛豫的慢模式（或守恒量）使结果依赖初态。',
   'Populations converge in the background basis; exported density is the laboratory-frame time average.':
     '布居在背景基中收敛；导出的密度矩阵是实验室系的时间平均。',
-  'Unique full-density Lindblad stationary solution within the resolved rates.':
-    '在已分辨的速率内，完整密度矩阵的 Lindblad 稳态唯一。',
-  'Full Lindblad stationary projection from the specified initial density.':
-    '由给定初始密度矩阵得到的完整 Lindblad 稳态投影。',
   'Cancelled.':'计算已取消。',
 };
 /** A number the solver wrote (Rust {:e} or plain), as the workbench writes numbers. */
 const num=(text:string):string=>{const value=Number(text);return Number.isFinite(value)?formatNumber(value,{digits:3}):text;};
 const KEPT='误差目标未放宽。';
-/** Failure reasons the native solver formats (rust-solver/population-core). */
+/** Failure reasons the native solver formats (rust-solver). */
 const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
-  [/^(\d+) conserved quantities together with a relaxation of (\S+) us cannot be resolved by the near-zero pole; the tolerance was not relaxed$/,(n,t)=>`${n} 个守恒量与 ${num(t)} μs 的弛豫无法由近零极点分开；${KEPT}`],
-  [/^The resolvent solve at pole (\S+)\/us stalled at relative residual (\S+) \(requested (\S+)\); the tolerance was not relaxed$/,(p,r,t)=>`近零极点 ${num(p)}/μs 处的预解求解停滞在相对残差 ${num(r)}（要求 ${num(t)}）；${KEPT}`],
-  [/^Long-time mean estimate (\S+) exceeds the tolerance after the density projection; the tolerance was not relaxed$/,e=>`密度投影后长期平均的误差估计 ${num(e)} 超过误差目标；${KEPT}`],
-  [/^Long-time mean work limit reached with (\d+) columns on (\d+) Fourier modes; the tolerance was not relaxed$/,(c,m)=>`长期平均达到工作量上限（${m} 个 Fourier 模式、${c} 列）；${KEPT}`],
-  [/^Long-time mean needs more than (\d+) Fourier modes; the tolerance was not relaxed$/,m=>`长期平均需要超过 ${m} 个 Fourier 模式；${KEPT}`],
-  [/^Long-time mean trial space limit of (\d+) columns reached; the tolerance was not relaxed$/,c=>`长期平均的试探空间达到 ${c} 列上限；${KEPT}`],
-  [/^The long-time mean trial space cannot be extended further$/,()=>'长期平均的试探空间无法再扩展。'],
-  [/^Initial-dependent long-time mean did not reach the tolerance; the tolerance was not relaxed$/,()=>`依赖初态的长期平均未达到误差目标；${KEPT}`],
-  [/^Population work limit reached after (\S+) s with (\d+) Fourier modes and (\d+) columns; the tolerance was not relaxed$/,(s,m,c)=>`布居计算 ${num(s)} s 后达到工作量上限（${m} 个 Fourier 模式、${c} 列）；${KEPT}`],
-  [/^Trial space limit of (\d+) columns reached with (\d+) Fourier modes; the tolerance was not relaxed$/,(c,m)=>`试探空间达到 ${c} 列上限（${m} 个 Fourier 模式）；${KEPT}`],
-  [/^The trial space cannot be extended further$/,()=>'试探空间无法再扩展。'],
-  [/^Nonfinite population error series$/,()=>'布居误差级数出现非有限值。'],
-  [/^Nonfinite population error estimate$/,()=>'布居误差估计出现非有限值。'],
-  [/^Reduced generator eigenbasis is unresolved \(defect (\S+), amplification (\S+)\)$/,(d,a)=>`约化生成元的本征基未解析（缺陷 ${num(d)}，放大 ${num(a)}）。`],
+  [/^(\d+) conserved quantities: the mean depends on the initial state, which the lattice core does not serve$/,n=>`${n} 个守恒量：长期平均依赖初态，求解器不计算这种长期平均。`],
+  [/^The mean at the horizon is estimated at (\S+); the tolerance was not relaxed$/,e=>`观察时长处的长期平均误差估计为 ${num(e)}；${KEPT}`],
+  [/^Finite-time populations estimated at (\S+); the tolerance was not relaxed$/,e=>`时间演化布居的误差估计为 ${num(e)}；${KEPT}`],
+  [/^Lattice steady state not accepted up to near order (\d+) \(estimated error (\S+)\)$/,(k,e)=>`长期平均到近阶 ${k} 仍未达到误差目标（误差估计 ${num(e)}）；${KEPT}`],
+  [/^Lattice steady state not accepted: estimated error (\S+) above (\S+) with no near shell to add$/,e=>`长期平均的误差估计 ${num(e)} 超过误差目标，且没有可加入的近壳层；${KEPT}`],
+  [/^Finite-time populations not accepted up to near order (\d+)$/,k=>`时间演化布居到近阶 ${k} 仍未达到误差目标；${KEPT}`],
+  [/^Finite-time estimate (\S+) not below the tolerance with (\d+) columns$/,(e,c)=>`时间演化的误差估计 ${num(e)} 在 ${c} 列时仍未低于误差目标；${KEPT}`],
 ];
 /** A solver sentence in Chinese; one this table does not know is shown as written. */
 export function solverText(text:string):string{
