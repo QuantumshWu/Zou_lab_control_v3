@@ -17,6 +17,10 @@ pub struct Field {
     pub maximum: Option<f64>,
     pub step: Option<f64>,
     pub unit: Option<String>,
+    /// The unit family a number is shown in by default, when its owner
+    /// declares one (an RF generator's amplitude in Vpp, its unit dBm); the
+    /// view picks the prefix in it. Display only: `unit` stays the value's.
+    pub display_unit: Option<String>,
     pub choices: Vec<Choice>,
     pub segmented: bool,
     pub blank_label: Option<String>,
@@ -266,7 +270,7 @@ pub fn controls(fields: &[Field], values: &Map<String, Value>, section: &str, pr
         for (key, value) in [("minimum", field.minimum), ("maximum", field.maximum), ("step", field.step)] {
             if let Some(value) = value { control[key] = json!(value); }
         }
-        for (key, value) in [("unit", &field.unit), ("description", &field.description), ("blank_label", &field.blank_label)] {
+        for (key, value) in [("unit", &field.unit), ("display_unit", &field.display_unit), ("description", &field.description), ("blank_label", &field.blank_label)] {
             if let Some(value) = value { control[key] = json!(value); }
         }
         if let Some(group) = field.group.as_ref().filter(|group| !group.is_empty()) { control["group"] = json!(group); }
@@ -319,5 +323,10 @@ mod tests {
         assert_eq!(controls[0]["filter"], "Pulse Config (*.json)");
         assert_eq!(project(&file, &Value::Null, false).unwrap(), "");
         assert_eq!(project(&file, &json!("C:/config.json"), false).unwrap(), "C:/config.json");
+        // A declared display family reaches the row beside the value's own unit; none, no key.
+        let amplitude = field(json!({"name": "power", "type": "float", "label": "Power", "unit": "dBm", "display_unit": "Vpp"}));
+        let rows = super::controls(&[amplitude, fields[1].clone()], &Map::new(), "tunable", &[]);
+        assert_eq!((&rows[0]["unit"], &rows[0]["display_unit"]), (&json!("dBm"), &json!("Vpp")));
+        assert!(rows[1].get("display_unit").is_none());
     }
 }

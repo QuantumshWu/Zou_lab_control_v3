@@ -120,10 +120,21 @@ fn reading_text(value: &Value, unit: &str, picked: bool, step: Option<f64>) -> (
      format_quantity(number, &resolved, prefix).unwrap_or_else(|_| number.text()))
 }
 
-/// The spellings a numeric field may be read in, for its unit picker (`[]`: none).
+/// The spellings a numeric field may be read in, for its unit picker (`[]`: none),
+/// each under its family with its `decade` against `unit` where it is a decimal
+/// shift of it (MHz of Hz: 6), else null (mW of dBm).
 fn unit_choices(unit: &str) -> Vec<Value> {
+    let rung = |symbol: &str| DEFAULT_UNITS.resolve(symbol).and_then(|resolved| DEFAULT_UNITS.family_and_prefix(&resolved)).ok();
+    let own = rung(unit);
     DEFAULT_UNITS.choice_tree(unit).into_iter()
-        .flat_map(|(trunk, leaves)| leaves.into_iter().map(move |leaf| json!({"value": leaf, "label": leaf, "group": trunk})))
+        .flat_map(|(trunk, leaves)| leaves.into_iter().map(move |leaf| (trunk.clone(), leaf)))
+        .map(|(trunk, leaf)| {
+            let decade = match (&own, rung(&leaf)) {
+                (Some((family, prefix)), Some((other, shown))) if *family == other => json!(shown.exponent - prefix.exponent),
+                _ => Value::Null,
+            };
+            json!({"value": leaf, "label": leaf, "group": trunk, "decade": decade})
+        })
         .collect()
 }
 
@@ -1253,6 +1264,12 @@ mod tests {
         assert_eq!(reading_text(&json!(0.30000000000000004), "V", false, None), ("300 mV".into(), "300.00000000000004 mV".into()));
         let hertz: Vec<String> = unit_choices("Hz").iter().map(|choice| choice["value"].as_str().unwrap().to_owned()).collect();
         assert_eq!(hertz, ["GHz", "MHz", "kHz", "Hz"]);
+        // Each spelling's decade against the row's unit, where a decimal shift reaches it.
+        let decades = |unit: &str| unit_choices(unit).iter().map(|choice| (choice["value"].as_str().unwrap().to_owned(), choice["decade"].clone())).collect::<Vec<_>>();
+        assert_eq!(decades("MHz")[0], ("GHz".to_owned(), json!(3)));
+        assert_eq!(decades("MHz")[3], ("Hz".to_owned(), json!(-6)));
+        let power = decades("mVpp");
+        assert!(power.contains(&("Vpp".to_owned(), json!(3))) && power.contains(&("dBm".to_owned(), Value::Null)) && power.contains(&("mW".to_owned(), Value::Null)));
         let power = DEFAULT_UNITS.choice_tree("dBm");
         assert_eq!(power[0], ("dBm".to_owned(), vec!["dBm".to_owned()]));
         assert!(power.iter().any(|(trunk, leaves)| trunk == "W" && leaves.contains(&"mW".to_owned())));

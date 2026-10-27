@@ -96,6 +96,12 @@ class AuthoringField:
     group: str = ""
     #: A file path edited with Browse; the stored value remains a string.
     file_filter: str = ""
+    #: The unit family a view shows this number in by default, when its owner
+    #: prefers one to ``unit``'s own -- a function generator's amplitude, a
+    #: power in dBm, read in Vpp -- or None for ``unit``'s.  Display only:
+    #: commands, bounds and records stay in ``unit``, and a view converts
+    #: through the owner (an RF level into its channel's load).
+    display_unit: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not self.value_type or not self.label:
@@ -160,6 +166,10 @@ class AuthoringField:
             # signal generator's power died with "unknown unit 'dBm'" on a
             # panel, hours from the line that wrote it.
             resolve_unit(self.unit.strip())
+        if self.display_unit is not None:
+            # A family the value can be read in: the same quantity, said another way.
+            if self.unit is None or resolve_unit(str(self.display_unit).strip()).dimension != resolve_unit(self.unit.strip()).dimension:
+                raise ValueError(f"field {self.name!r} display unit {self.display_unit!r} is not a spelling of its unit {self.unit!r}")
         if self.enabled_when is not None:
             controller, values = self.enabled_when
             if not str(controller).strip():

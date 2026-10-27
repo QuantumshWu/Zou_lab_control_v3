@@ -4,8 +4,9 @@
 // the panel's own, shown in place (Panel / Semantic / Display / Fit) and
 // shared with the board's card both ways; Refresh snapshot takes the panel's
 // newest data; Direct producer opens the node that makes the signal; Save
-// figure writes the held picture and its archive (v2's inline group).
-import { checked, command, element, Field, form, note, PathEdit, Readout, row as settingRow, sectionTitle, Segmented, setChecked, shareLabelColumn, switchButton, wholeText, type Command } from "../fluent/index.js";
+// figure writes the held picture and its archive (v2's inline group), and
+// asks before writing over either file.
+import { checked, command, confirm, element, Field, form, note, PathEdit, Readout, row as settingRow, sectionTitle, Segmented, setChecked, shareLabelColumn, switchButton, wholeText, type Command } from "../fluent/index.js";
 import type { Panel } from "../protocol.js";
 import type { Transport } from "../transport.js";
 import type { LogicRow } from "../workbench.js";
@@ -141,13 +142,32 @@ export class PanelEditView {
   private save(): void {
     const path = this.savePath();
     if (!path || this.saveFigure.disabled) return;
-    const name = this.panelName;
-    this.transport.request({ action: "save", panel: this.edit, path }, `saving ${name}`, (_state, sections) => sections.saved).then(saved => {
-      const files = Array.isArray(saved) ? saved.map(String) : [];
-      if (files.length === 2) this.transport.note(`panel saved to ${baseName(files[0]!)} and ${baseName(files[1]!)}`);
-    }, () => {});
+    void this.write(path, this.panelName, false);
     this.stamp = stampNow();
     this.updateSave();
+  }
+
+  /** One save of `path`. The host writes over no file unasked: the files already there
+   * are listed and the operator chooses Overwrite (the same save, told to) or Cancel. */
+  private async write(path: string, name: string, overwrite: boolean): Promise<void> {
+    let saved: unknown;
+    try {
+      saved = await this.transport.request({ action: "save", panel: this.edit, path, ...(overwrite ? { overwrite } : {}) }, `saving ${name}`,
+        (_state, sections) => sections.saved);
+    } catch { return; }
+    const existing = (saved as { exists?: unknown } | null)?.exists;
+    if (Array.isArray(existing)) {
+      // One name a line; the archive is the image's name beside it, so their folder is said once.
+      const files = existing.map(String), names = files.map(baseName), one = files.length === 1;
+      const folder = files[0]!.slice(0, -names[0]!.length - 1);
+      if (await confirm(one ? "File already exists" : "Files already exist", `${names.join("\n")}\n${one ? "is" : "are"} already in ${folder}\n\nOverwrite ${one ? "it" : "them"}?`,
+                        { confirmText: "Overwrite" })) {
+        await this.write(path, name, true);
+      } else this.transport.note(`nothing was saved; ${names.join(" and ")} kept`);
+      return;
+    }
+    const files = Array.isArray(saved) ? saved.map(String) : [];
+    if (files.length === 2) this.transport.note(`panel saved to ${baseName(files[0]!)} and ${baseName(files[1]!)}`);
   }
 
   /** Each accepted state: the Edit's card (adopted once), what it holds, its producer. */

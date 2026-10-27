@@ -161,6 +161,9 @@ class VaunixLmsConfig:
 
 
 class VaunixLmsRfSource(RfSourceBase):
+    #: A synthesizer's level is read as a power.
+    POWER_DISPLAY_UNIT = "dBm"
+
     def __init__(self, config: VaunixLmsConfig, *, library: LmsLibrary | None = None) -> None:
         self.config = config
         # The authored half first, with nothing open: a window that cannot

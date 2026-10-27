@@ -547,6 +547,33 @@ export function unitTree(units, unit) {
     }
     return [...groups.values()];
 }
+/** `value` with its decimal digits shifted by `places` (Decimal.scaleb on its
+ * shortest spelling): a prefix change never takes a binary round trip. */
+export function shifted(value, places) {
+    const [digits, exponent = "0"] = String(value).split("e");
+    return Number(`${digits}e${Number(exponent) + places}`);
+}
+/** The unit a number is shown in until the operator picks one, by one rule
+ * wherever a unit picker stands: among one family's decimal-prefix spellings
+ * (`candidates`), the one that shows the number's size -- as its box shows it,
+ * by the ≈ rule -- in [1, 1000): 6.834 GHz, 500 mVpp, 10 ms.  A number at 0,
+ * or none, is judged by the wider end of its allowed range; with neither, and
+ * for a whole number (a code, a count), it stays in `own`.  Past the ladder's
+ * ends it takes the nearest end. */
+export function defaultUnit(own, candidates, integer = false) {
+    if (integer || !candidates.length)
+        return own;
+    const size = (value, symbol) => Math.abs(Number(approximateText(String(value), symbol, null).replace(/^≈ /, "")));
+    const standing = candidates.every(item => item.value != null && Number.isFinite(item.value) && item.value !== 0);
+    const sized = candidates.map(item => {
+        const ends = [item.low, item.high].filter((end) => end != null && Number.isFinite(end)).map(end => size(end, item.symbol));
+        return { symbol: item.symbol, size: standing ? size(item.value, item.symbol) : Math.max(0, ...ends) };
+    });
+    if (sized.every(item => item.size === 0))
+        return own;
+    const shown = sized.filter(item => item.size >= 1).sort((a, b) => a.size - b.size)[0];
+    return (shown ?? sized.reduce((a, b) => b.size > a.size ? b : a)).symbol;
+}
 // ------------------------------------------------------------- form layout
 /** A form: one label column (setting_label_width) and one control column;
  * rows a row gap apart, section titles a control high, sections a section gap. */

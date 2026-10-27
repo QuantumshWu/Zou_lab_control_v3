@@ -150,6 +150,9 @@ def discover_dg4000(
 
 
 class RigolDg4000RfSource(RfSourceBase):
+    #: A function generator's amplitude is read as a voltage swing.
+    POWER_DISPLAY_UNIT = "Vpp"
+
     def __init__(self, config: RigolDg4000Config, *, link: ScpiLink | None = None) -> None:
         self.config = config
         # The authored half first, with nothing open: a window that cannot
@@ -549,7 +552,7 @@ class RigolDg4000RfSource(RfSourceBase):
                 self._current_values[str(name)] = self._convert_amplitude(channel, raw, standing_unit, "dBm")
             return TunableField(
                 AuthoringField(str(name), "float", f"{self._channel_label(channel)}Power", None,
-                               minimum=low, maximum=high, unit=target),
+                               minimum=low, maximum=high, unit=target, display_unit=self.POWER_DISPLAY_UNIT),
                 current, True, (str(name),), device_limits=limits,
             )
 

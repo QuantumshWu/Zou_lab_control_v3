@@ -59,9 +59,12 @@ export type FieldSpec = {
   /** What a blank optional box means, shown as its placeholder. */
   placeholder?: string;
   /** The spelling the number is read in, and the others it can be read in
-   * (FluentUnitPicker).  Picking one asks the owner to re-project the row. */
+   * (FluentUnitPicker), each under its family with its decade against `unit`
+   * where a decimal shift reaches it.  Picking one asks the owner to re-project the row. */
   unit?: string;
-  units?: { value: string; label: string; group?: string }[];
+  units?: { value: string; label: string; group?: string; decade?: number | null }[];
+  /** The unit family the owner shows this number in by default (`defaultUnit` picks the prefix in it). */
+  display_unit?: string;
   /** A device's number (Device Manager, Device Control): a spin box even when it
    * may stand blank, its first step from `firstStep`. */
   spin?: boolean;
@@ -546,6 +549,37 @@ export function unitTree(units: readonly { value: string; label: string; group?:
     group.leaves.push({ key: spelling.value, label: spelling.label, text: spelling.label });
   }
   return [...groups.values()];
+}
+
+/** `value` with its decimal digits shifted by `places` (Decimal.scaleb on its
+ * shortest spelling): a prefix change never takes a binary round trip. */
+export function shifted(value: number, places: number): number {
+  const [digits, exponent = "0"] = String(value).split("e");
+  return Number(`${digits}e${Number(exponent) + places}`);
+}
+
+/** One spelling `defaultUnit` may choose: the number shown in it now (null when
+ * nothing stands) and the allowed range in it. */
+export type UnitCandidate = { symbol: string; value: number | null; low?: number | null; high?: number | null };
+
+/** The unit a number is shown in until the operator picks one, by one rule
+ * wherever a unit picker stands: among one family's decimal-prefix spellings
+ * (`candidates`), the one that shows the number's size -- as its box shows it,
+ * by the ≈ rule -- in [1, 1000): 6.834 GHz, 500 mVpp, 10 ms.  A number at 0,
+ * or none, is judged by the wider end of its allowed range; with neither, and
+ * for a whole number (a code, a count), it stays in `own`.  Past the ladder's
+ * ends it takes the nearest end. */
+export function defaultUnit(own: string, candidates: readonly UnitCandidate[], integer = false): string {
+  if (integer || !candidates.length) return own;
+  const size = (value: number, symbol: string): number => Math.abs(Number(approximateText(String(value), symbol, null).replace(/^≈ /, "")));
+  const standing = candidates.every(item => item.value != null && Number.isFinite(item.value) && item.value !== 0);
+  const sized = candidates.map(item => {
+    const ends = [item.low, item.high].filter((end): end is number => end != null && Number.isFinite(end)).map(end => size(end, item.symbol));
+    return { symbol: item.symbol, size: standing ? size(item.value!, item.symbol) : Math.max(0, ...ends) };
+  });
+  if (sized.every(item => item.size === 0)) return own;
+  const shown = sized.filter(item => item.size >= 1).sort((a, b) => a.size - b.size)[0];
+  return (shown ?? sized.reduce((a, b) => b.size > a.size ? b : a)).symbol;
 }
 
 // ------------------------------------------------------------- form layout

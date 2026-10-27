@@ -180,7 +180,8 @@ Relative paths in other commands are from
 the workspace root too, except resource fields (a pulse), which name a file in their folder (`pulses/`).
 
 `save {panel, path: "data/.../result.png"}` writes the panel as shown (a PNG, or a PDF/SVG by the suffix) and its Figure archive
-(`.npz`); the reply's `saved` lists both. `save` on `edit-<panel>` (`edit_panel`, `refresh_panel_edit`) writes its held
+(`.npz`); the reply's `saved` lists both. When either file is already there it writes nothing and is refused, naming
+it; `overwrite: true` writes over them. `save` on `edit-<panel>` (`edit_panel`, `refresh_panel_edit`) writes its held
 snapshot. `open {path}` shows an archive in the Figure Viewer (`get_state viewer`). `read_signal {signal}`
 reads a published signal's numbers with validity and axes, a page at a time; `dataset: true` reads a finite
 run's dataset or a monitor's retained history.

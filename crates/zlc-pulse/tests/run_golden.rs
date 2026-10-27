@@ -46,6 +46,21 @@ fn error_json(error: &Error) -> Json {
     Json::object(vec![("error", Json::Array(vec![Json::str(error.kind.python_name()), Json::str(&error.message)]))])
 }
 
+/// A description as both sides are compared: v3 states each scan slot's `value`
+/// (where a plan's default sweep is centred) and seeds no sweep, so neither
+/// that nor v2's column `lo`/`hi` is compared; the rest is v2's to the digit.
+fn comparable(answer: &Json) -> Json {
+    let Some(Json::Object(items)) = answer.get("ok") else { return answer.clone() };
+    let strip = |fields: &Json, keys: &[&str]| Json::Array(fields.as_array().unwrap().iter().map(|field| Json::Object(
+        field.as_object().unwrap().iter().filter(|(key, _)| !keys.contains(&key.as_str())).cloned().collect())).collect());
+    let items = items.iter().map(|(key, value)| (key.clone(), match key.as_str() {
+        "api_fields" => strip(value, &["lo", "hi"]),
+        "scan_fields" => strip(value, &["lo", "hi", "value"]),
+        _ => value.clone(),
+    })).collect();
+    Json::object(vec![("ok", Json::Object(items))])
+}
+
 fn geometry(case: &Json) -> StreamerParams {
     let mut params = StreamerParams::default();
     if let Some(Json::Object(items)) = case.get("geometry") {
@@ -98,7 +113,7 @@ fn run_case(case: &Json, tally: &mut Tally) {
     let name = case.get("name").and_then(Json::as_str).unwrap_or("?").to_owned();
     let Ok(sequence) = sequence_from_tree(case.get("tree").unwrap()) else { return };
     let params = geometry(case);
-    tally.check("describe", &name, &answer(describe_sequence(&sequence)), case.get("describe").unwrap());
+    tally.check("describe", &name, &comparable(&answer(describe_sequence(&sequence))), &comparable(case.get("describe").unwrap()));
     let Some(request) = case.get("request") else { return };
     let api = api_values(request);
     let config = config(case);
@@ -149,7 +164,7 @@ fn the_run_surface_matches_the_v2_goldens() {
             let Json::Object(items) = description else { unreachable!() };
             Json::Object(items.into_iter().filter(|(key, _)| key != "path" && key != "name").collect())
         });
-        tally.check("document describe", &name, &answer(described), document.get("describe").unwrap());
+        tally.check("document describe", &name, &comparable(&answer(described)), &comparable(document.get("describe").unwrap()));
         let (_path, sequence) = zlc_pulse::run::read_document(&path).unwrap();
         tally.check("document timing", &name, &answer(receipt(&sequence, &[], None, &StreamerParams::default(), None)), document.get("unscanned").unwrap());
         cases += 1;

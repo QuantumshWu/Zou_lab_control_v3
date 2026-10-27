@@ -80,26 +80,23 @@ class ScanPort:
     unit: str
     lo: float
     hi: float
-    seed_lo: float | None = None
-    seed_hi: float | None = None
+    #: Where the knob stands now, in ``unit`` -- the slot's value in the
+    #: pulse, the value this run gives an API parameter, the device's
+    #: reading -- or None when nothing says.  The editor centres an axis's
+    #: first sweep on it.
+    current: float | None = None
+    #: A whole-number knob (a DAC code, a repeat count, an int field).
+    integer: bool = False
+    #: The unit family its owner shows it in by default (AuthoringField.display_unit).
+    display_unit: str | None = None
 
     def __post_init__(self) -> None:
         if not str(self.port):
             raise ValueError("a scan port needs a name")
         if not math.isfinite(self.lo) or not math.isfinite(self.hi) or self.lo > self.hi:
             raise ValueError(f"port {self.port!r} has no usable range")
-        seed_lo = self.lo if self.seed_lo is None else float(self.seed_lo)
-        seed_hi = self.hi if self.seed_hi is None else float(self.seed_hi)
-        if (
-            not math.isfinite(seed_lo)
-            or not math.isfinite(seed_hi)
-            or seed_lo < self.lo
-            or seed_hi > self.hi
-            or seed_lo >= seed_hi
-        ):
-            raise ValueError(f"port {self.port!r} has no usable initial sweep")
-        object.__setattr__(self, "seed_lo", seed_lo)
-        object.__setattr__(self, "seed_hi", seed_hi)
+        if self.current is not None and not math.isfinite(self.current):
+            raise ValueError(f"port {self.port!r} stands at a non-finite value")
 
 
 def device_port_parts(port: str) -> tuple[str, str]:
@@ -209,14 +206,12 @@ def scan_axis_ids(labels: Sequence[str]) -> tuple[str, ...]:
 
 
 def _ports_from_columns(columns, *, family: str = PULSE_PARAM_FAMILY) -> tuple[ScanPort, ...]:
-    """One port per column of the description (``field_id, label, unit, is_dac,
-    lo, hi, limit_lo, limit_hi``): the range a plan may play is the column's
-    limit, the initial sweep its lo..hi."""
+    """One port per column of the description (``field_id, label, kind, unit,
+    value, is_dac, limit_lo, limit_hi``): the range a plan may play is the
+    column's limit, and it stands at the field's value in the pulse."""
 
     ports = []
     for column in columns:
-        lo = float(column["limit_lo"] if column.get("limit_lo") is not None else column["lo"])
-        hi = float(column["limit_hi"] if column.get("limit_hi") is not None else column["hi"])
         # The port's unit becomes the dataset axis's unit, and an axis unit is
         # something the plot's registry RESOLVES -- "s", "ms", "" -- not a
         # phrase.  A DAC code is a count of codes ("code"), not the editor's
@@ -226,10 +221,10 @@ def _ports_from_columns(columns, *, family: str = PULSE_PARAM_FAMILY) -> tuple[S
                 family + str(column["field_id"]),
                 str(column["label"]),
                 "code" if column.get("is_dac") else str(column["unit"]),
-                lo,
-                hi,
-                float(column["lo"]),
-                float(column["hi"]),
+                float(column["limit_lo"]),
+                float(column["limit_hi"]),
+                current=float(column["value"]),
+                integer=bool(column.get("is_dac")) or column.get("kind") == "bracket_count",
             )
         )
     return tuple(ports)
@@ -309,7 +304,8 @@ def scan_ports_for_devices(
     interval -- a knob pinned to one value by policy -- is a control, not
     an axis, and is passed over rather than failing the whole projection.
     The port's unit is the field's own declared unit -- an RF frequency
-    axis publishes hertz -- and its label names the device and the knob.
+    axis publishes hertz -- and its label names the device and the knob;
+    it stands at the device's reading, in that unit.
     """
 
     ports: list[ScanPort] = []
@@ -330,6 +326,7 @@ def scan_ports_for_devices(
                 continue
             if not tunable.live_write or tunable.dependency_group != (field.name,):
                 continue
+            reading = tunable.current
             ports.append(
                 ScanPort(
                     port,
@@ -337,6 +334,10 @@ def scan_ports_for_devices(
                     field.unit or "",
                     float(field.minimum),
                     float(field.maximum),
+                    current=float(reading) if isinstance(reading, Real) and not isinstance(reading, bool)
+                    and math.isfinite(reading) else None,
+                    integer=field.value_type == "int",
+                    display_unit=field.display_unit,
                 )
             )
     return label_device_scan_ports(ports, device_labels if device_labels is not None else
@@ -382,7 +383,7 @@ class DeviceKnob:
         metadata = AuthoringField(
             row["name"], row["type"], row["label"], row.get("default"), required=bool(row.get("required")),
             minimum=row.get("minimum"), maximum=row.get("maximum"), step=row.get("step"), unit=row.get("unit"),
-            choices=tuple(AuthoringChoice(choice["value"], choice["label"]) for choice in row.get("choices") or ()),
+            display_unit=row.get("display_unit"), choices=tuple(AuthoringChoice(choice["value"], choice["label"]) for choice in row.get("choices") or ()),
             description=str(row.get("description") or ""))
         limits = item.get("device_limits")
         return TunableField(metadata, item.get("current"), bool(item["live_write"]),

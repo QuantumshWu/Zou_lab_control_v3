@@ -175,7 +175,8 @@ pub fn parameters(command: &Value) -> Value {
 
 /// A pending remote command and what it acts on.
 /// `workbench`: the reply is the workbench's own result, not a panel summary.
-pub struct Pending { pub reply: Reply, pub panel: Option<String>, pub panels_before: BTreeSet<String>, pub workbench: bool }
+/// `save`: a `save`, whose files already there are a refusal.
+pub struct Pending { pub reply: Reply, pub panel: Option<String>, pub panels_before: BTreeSet<String>, pub workbench: bool, pub save: bool }
 
 fn panel_ids(accepted: &Value) -> BTreeSet<String> {
     accepted["panels"].as_array().into_iter().flatten().filter_map(|row| row["id"].as_str().map(str::to_owned)).collect()
@@ -184,7 +185,8 @@ fn panel_ids(accepted: &Value) -> BTreeSet<String> {
 pub fn pending(call: &RemoteCall, accepted: &Value) -> Pending {
     Pending { reply: call.reply.clone(), panel: call.params["panel"].as_str().map(str::to_owned), panels_before: panel_ids(accepted),
         // get_fit answers with the fit table itself (v2 lab_results), as workbench commands answer with their result.
-        workbench: zlc_workbench::Workbench::handles(&call.name) || call.name.contains("__") || call.name.starts_with("pulse_") || call.name == "get_fit" }
+        workbench: zlc_workbench::Workbench::handles(&call.name) || call.name.contains("__") || call.name.starts_with("pulse_") || call.name == "get_fit",
+        save: call.name == "save" }
 }
 
 /// Answer every remote command whose request the accepted state reports.
@@ -193,6 +195,14 @@ pub fn settle(accepted: &Value, pending: &mut BTreeMap<u64, Pending>) {
     let Some(entry) = pending.remove(&request) else { return };
     if let Some(error) = accepted["error"].as_str() {
         let _ = entry.reply.send(Err(error.to_owned()));
+        return;
+    }
+    // A save onto files already there wrote nothing (the window asks Overwrite or Cancel): refused, naming them.
+    if let Some(existing) = accepted["saved"]["exists"].as_array().filter(|_| entry.save) {
+        let files: Vec<&str> = existing.iter().filter_map(Value::as_str).collect();
+        let one = files.len() == 1;
+        let _ = entry.reply.send(Err(format!("Nothing was saved: {} already exist{}. Pass overwrite: true to write over {}.",
+                                             files.join(" and "), if one { "s" } else { "" }, if one { "it" } else { "them" })));
         return;
     }
     if entry.workbench {
@@ -208,7 +218,7 @@ pub fn settle(accepted: &Value, pending: &mut BTreeMap<u64, Pending>) {
     let mut reply = json!({"request": request, "acquisition": accepted["acquisition"], "panel_ids": now, "added_panels": added, "panels": panels,
                          "result": accepted["result"]});
     // A save answers with the files it wrote (the document's `saved`).
-    if !accepted["saved"].is_null() { reply["saved"] = accepted["saved"].clone(); }
+    if entry.save { reply["saved"] = accepted["saved"].clone(); }
     let _ = entry.reply.send(Ok(ToolOutput { json: reply, png: None }));
 }
 
@@ -334,4 +344,30 @@ pub fn png(front: &Front) -> Result<Vec<u8>, String> {
         writer.write_image_data(front.pixels.as_slice()).map_err(|error| error.to_string())?;
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn answer(save: bool, accepted: &Value) -> Result<Value, String> {
+        let (reply, answers) = mpsc::channel();
+        let mut pending = BTreeMap::from([(7, Pending { reply, panel: None, panels_before: BTreeSet::new(), workbench: false, save })]);
+        settle(accepted, &mut pending);
+        answers.recv().unwrap().map(|output| output.json)
+    }
+
+    /// A remote save onto files already there is refused, naming them and the flag; what it wrote is its reply.
+    #[test]
+    fn a_save_onto_existing_files_is_refused_naming_them() {
+        let both = json!({"request": 7, "error": null, "panels": [], "saved": {"exists": ["C:\\d\\a.png", "C:\\d\\a.npz"]}});
+        assert_eq!(answer(true, &both).unwrap_err(), "Nothing was saved: C:\\d\\a.png and C:\\d\\a.npz already exist. Pass overwrite: true to write over them.");
+        let one = json!({"request": 7, "error": null, "panels": [], "saved": {"exists": ["C:\\d\\a.npz"]}});
+        assert_eq!(answer(true, &one).unwrap_err(), "Nothing was saved: C:\\d\\a.npz already exists. Pass overwrite: true to write over it.");
+        let written = json!({"request": 7, "error": null, "panels": [], "saved": ["C:\\d\\a.png", "C:\\d\\a.npz"]});
+        assert_eq!(answer(true, &written).unwrap()["saved"], json!(["C:\\d\\a.png", "C:\\d\\a.npz"]));
+        // Another command answered after a refused save is not that refusal.
+        let reply = answer(false, &both).unwrap();
+        assert!(reply.get("saved").is_none(), "{reply}");
+    }
 }

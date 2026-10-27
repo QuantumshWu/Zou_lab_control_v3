@@ -9,11 +9,14 @@
 // amounts to and words the API values; this editor writes `plan` (the axes
 // as the JSON document) and `api_values` (only what differs from the pulse,
 // in the pulse's units whatever spelling a box is read in; re-read against
-// the pulse when the model says that changes it).  A unit picked converts a
+// the pulse when the model says that changes it).  An axis added, or its knob
+// changed, starts as a narrow sweep around where the knob stands (firstSweep);
+// it, and an API value first shown, is read in the unit that shows it between
+// 1 and 1000 (defaultUnit).  A unit picked converts a
 // displayed quantity and keeps a number the operator wrote: an axis's values
 // and an API override keep their digits, read in the new unit; an API box
 // still at the pulse's own number is that number re-read in it.
-import { Field, Segmented, SpinBox, TreeCombo, alignUnitPickers, button, choiceTree, element, sectionTitle, setText, token, unitTree } from "../../fluent/index.js";
+import { Field, Segmented, SpinBox, TreeCombo, alignUnitPickers, button, choiceTree, defaultUnit, element, sectionTitle, setText, shifted, token, unitTree } from "../../fluent/index.js";
 /** The word a manual axis carries in the label column: a hand moves it. */
 const BY_HAND = "By hand";
 /** numpy.linspace: the authored coordinates in the row's unit. */
@@ -45,11 +48,45 @@ function readPlan(text) {
         return [];
     }
 }
-/** `value` with its decimal digits shifted by `places` (Decimal.scaleb on its
- * shortest spelling): a prefix change never takes a binary round trip. */
-function shifted(value, places) {
-    const [digits, exponent = "0"] = String(value).split("e");
-    return Number(`${digits}e${Number(exponent) + places}`);
+/** `value` + `step` in decimal, each as its shortest spelling: 80 − 0.1 is 79.9, never 79.90000000000001. */
+function decimalSum(value, step) {
+    const parts = (number) => {
+        const [mantissa = "0", exponent = "0"] = String(number).split("e");
+        const [whole = "0", fraction = ""] = mantissa.split(".");
+        return [BigInt(whole + fraction), Number(exponent) - fraction.length];
+    };
+    const [a, at] = parts(value), [b, bt] = parts(step), last = Math.min(at, bt);
+    return Number(`${a * 10n ** BigInt(at - last) + b * 10n ** BigInt(bt - last)}e${last}`);
+}
+/** The port's reading and limits in `symbol`: a decimal shift on its ladder, else the device's conversion. */
+function inSpelling(port, symbol) {
+    const decade = symbol === port.unit ? 0 : port.units.find(([name]) => name === symbol)?.[1];
+    if (typeof decade === "number")
+        return { current: port.current === null ? null : shifted(port.current, -decade), bounds: [shifted(port.lo, -decade), shifted(port.hi, -decade)] };
+    return { current: port.currents[symbol] ?? null, bounds: port.limits[symbol] ?? [null, null] };
+}
+/** A knob's first sweep, when an axis is added or its knob changed: in the unit `defaultUnit` picks
+ * from where it stands (in the family its owner shows it in), from 0.1 below to 0.1 above that
+ * in it -- a whole-number knob 1, one value a point -- in five points, inside its limits.  A knob
+ * that says nowhere it stands is one point, at its lower limit: never its whole range. */
+function firstSweep(port) {
+    const family = (symbol) => port.families[symbol] ?? symbol;
+    const own = port.display_unit && port.units.some(([symbol]) => symbol === port.display_unit) ? port.display_unit : port.unit;
+    const unit = defaultUnit(own, port.units.filter(([symbol]) => family(symbol) === family(own)).map(([symbol]) => {
+        const { current, bounds: [low, high] } = inSpelling(port, symbol);
+        return { symbol, value: current, low, high };
+    }), port.integer);
+    const { current, bounds: [low, high] } = inSpelling(port, unit);
+    const inside = (value) => Math.min(high ?? Infinity, Math.max(low ?? -Infinity, value));
+    if (current === null)
+        return { unit, values: [low ?? high ?? 0] };
+    const step = port.integer ? 1 : 0.1;
+    const from = inside(decimalSum(current, -step)), to = inside(decimalSum(current, step));
+    if (!(from < to))
+        return { unit, values: [inside(current)] };
+    if (!port.integer)
+        return { unit, values: linspace(from, to, 5) };
+    return { unit, values: Array.from({ length: Math.floor(to) - Math.ceil(from) + 1 }, (_, index) => Math.ceil(from) + index) };
 }
 /** A spin box for one end or the count of a Range bank. */
 function rangeSpin(label, step, bounds, commit, decimal = true) {
@@ -141,10 +178,8 @@ class AxisRowView {
     port() { return this.owner.ports.find(port => port.port === this.entry.port); }
     /** The port's limits, read in the unit the axis is authored in. */
     bounds() {
-        const port = this.port(), places = port && this.places(port.unit, this.entry.unit);
-        if (port && places !== null && places !== undefined)
-            return [shifted(port.lo, places), shifted(port.hi, places)];
-        return port?.limits[this.entry.unit] ?? [null, null];
+        const port = this.port();
+        return port ? inSpelling(port, this.entry.unit).bounds : [null, null];
     }
     /** A box holding a number the limits refuse says so (red, its tooltip the limits): a unit
      * picked keeps the digits written, which the new unit's limits may not admit. */
@@ -187,14 +222,6 @@ class AxisRowView {
         this.unitWord.hidden = !this.unitWord.textContent;
         this.showMode();
     }
-    /** Decimal places from `unit` to `other` on this port's ladder (its own unit
-     * is decade 0), or null when either is not a rung of it. */
-    places(unit, other) {
-        const ladder = this.port()?.units ?? [];
-        const decade = (symbol) => symbol === this.port()?.unit ? 0 : ladder.find(([name]) => name === symbol)?.[1];
-        const from = decade(unit), to = decade(other);
-        return from == null || to == null ? null : from - to;
-    }
     /** Another spelling for the axis: its values are the operator's and keep their
      * digits (the default sweep too), now read in it, against the port's limits there. */
     unitPicked(symbol) {
@@ -227,13 +254,11 @@ class AxisRowView {
         this.showMode();
         this.owner.emitPlan();
     }
-    /** Another knob: its own unit, and its initial sweep in the boxes. */
+    /** Another knob: its first sweep and unit in the boxes (firstSweep). */
     portChanged(port) {
         const offered = this.owner.ports.find(item => item.port === port);
         this.customValues = null;
-        const count = Number(this.points.text) || 5;
-        this.entry = { ...this.entry, port, unit: offered?.unit ?? this.entry.unit,
-            values: offered ? linspace(offered.seed_lo, offered.seed_hi, count) : this.entry.values };
+        this.entry = { ...this.entry, port, ...(offered ? firstSweep(offered) : {}) };
         this.show(this.entry);
         this.owner.emitPlan();
     }
@@ -264,7 +289,7 @@ export class ScanPlanEditor {
     apiFields = new Map();
     planText = null;
     parkedSignature = "";
-    /** The spelling each API value is read in, when the operator picked another (FluentUnitPicker). */
+    /** The spelling each API value is read in: chosen when it is first shown (defaultUnit), then the operator's (FluentUnitPicker). */
     shownUnits = new Map();
     pickers = "";
     tidied = null;
@@ -348,7 +373,7 @@ export class ScanPlanEditor {
             const port = this.ports.find(item => !used.has(item.port)) ?? this.ports[0];
             if (!port)
                 return;
-            this.rows.push(new AxisRowView(this, false, { port: port.port, values: linspace(port.seed_lo, port.seed_hi, 5), unit: port.unit, mode: "range", value_text: "" }));
+            this.rows.push(new AxisRowView(this, false, { port: port.port, ...firstSweep(port), mode: "range", value_text: "" }));
         }
         const added = this.rows[this.rows.length - 1];
         added.show(added.entry);
@@ -381,6 +406,12 @@ export class ScanPlanEditor {
             }
         let cursor = this.apiForm.firstElementChild;
         for (const item of fields) {
+            // First shown, a value is read in the spelling `defaultUnit` picks from the value this run gives it.
+            if (!this.shownUnits.has(item.name)) {
+                const at = (value, decade) => value === null ? null : shifted(value, -decade);
+                this.shownUnits.set(item.name, defaultUnit(item.unit, item.units.map(([symbol, decade]) => ({ symbol, value: at(item.value, decade),
+                    low: at(item.minimum, decade), high: at(item.maximum, decade) })), item.kind === "integer"));
+            }
             // The box holds the pulse's number read in the picked spelling: a shift of its digits.
             const symbol = this.shownSymbol(item), places = this.apiPlaces(item);
             const shown = (value) => value === null ? null : shifted(value, places);

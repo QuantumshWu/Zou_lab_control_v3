@@ -8,58 +8,116 @@ import {ScanPlanEditor} from '../dist/views/node_editors/scan_plan.js';
 const wait = (ms=100) => new Promise(resolve=>setTimeout(resolve,ms));
 const assert = (condition, message) => { if (!condition) throw Error(message); };
 const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const near = (actual,expected,message) => assert(actual.length===expected.length&&actual.every((value,index)=>Math.abs(value-expected[index])<=1e-9*Math.max(1,Math.abs(expected[index]))),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
 const results=[];
 const check=async(name,test)=>{await test();results.push(name)};
-// One family heading, so the keyboard reaches every spelling: Home is the heading, each ArrowDown a spelling.
-const choose=(picker,index)=>{for(const key of ['Enter','Home',...Array(index+1).fill('ArrowDown'),'Enter']) picker.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}))};
-const port={port:'device:rf:level',label:'rf.level',unit:'mVpp',lo:0,hi:1000,seed_lo:10,seed_hi:50,group:'rf',leaf:'level',
-  units:[['mVpp',0],['Vpp',3],['dBm',null]],limits:{dBm:[-40,13.010299956639813]},families:{mVpp:'Vpp',Vpp:'Vpp',dBm:'Vpp'}};
+// A tree box's choice by its words: open it, open every heading, release the pointer on the leaf.
+const choose=(picker,label)=>{
+  picker.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+  const list=document.querySelector(':popover-open');
+  const up=row=>row.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:0}));
+  for(let heading;(heading=list.querySelector('.tree-row.heading:not(.open)'));) up(heading);
+  up([...list.querySelectorAll('.tree-row.leaf')].find(row=>row.textContent===label));
+};
+const port={port:'device:rf:level',label:'rf.level',unit:'mVpp',lo:0,hi:1000,current:500,integer:false,display_unit:null,group:'rf',leaf:'level',
+  units:[['mVpp',0],['Vpp',3],['dBm',null]],limits:{dBm:[-40,13.010299956639813]},currents:{dBm:7.958800173440752},families:{mVpp:'Vpp',Vpp:'Vpp',dBm:'dBm'}};
+// The knobs a bench offers, as scan/editor.py words them.
+const HZ=[['GHz',9],['MHz',6],['kHz',3],['Hz',0]];
+const knob=(name,more)=>({port:`device:rf:${name}`,label:`rf.${name}`,group:'rf',leaf:name,integer:false,display_unit:null,limits:{},currents:{},...more,
+  families:Object.fromEntries((more.units??[]).map(([symbol])=>[symbol,more.family?.[symbol]??more.unit]))});
+const ports={
+  carrier:knob('carrier',{unit:'Hz',lo:5e8,hi:8e9,current:6.834e9,units:HZ,family:{GHz:'Hz',MHz:'Hz',kHz:'Hz',Hz:'Hz'}}),
+  drive:knob('drive',{unit:'Hz',lo:5e7,hi:2e8,current:8e7,units:HZ,family:{GHz:'Hz',MHz:'Hz',kHz:'Hz',Hz:'Hz'}}),
+  edge:knob('edge',{unit:'Hz',lo:5e8,hi:8e9,current:5e8,units:HZ,family:{GHz:'Hz',MHz:'Hz',kHz:'Hz',Hz:'Hz'}}),
+  power:knob('power',{unit:'dBm',lo:-40,hi:10,current:-10,units:[['dBm',0],['mW',null]],limits:{mW:[1e-4,10]},currents:{mW:0.1},family:{dBm:'dBm',mW:'W'}}),
+  // A generator's amplitude: its unit dBm, shown in Vpp, each Vpp spelling as the device converts it.
+  amplitude:knob('amplitude',{unit:'dBm',lo:-30,hi:20,current:-2.0411998265592475,display_unit:'Vpp',
+    units:[['dBm',0],['Vpp',null],['mVpp',null],['mW',null]],limits:{Vpp:[0.02,6.32],mVpp:[20,6320],mW:[0.001,100]},currents:{Vpp:0.5,mVpp:500,mW:0.625},
+    family:{dBm:'dBm',Vpp:'Vpp',mVpp:'Vpp',mW:'W'}}),
+  unknown:knob('unknown',{unit:'Hz',lo:5e8,hi:8e9,current:null,units:HZ,family:{GHz:'Hz',MHz:'Hz',kHz:'Hz',Hz:'Hz'}}),
+  hold:{port:'pulse:param:duration:hold',label:'hold',group:'pulse',leaf:'duration:hold',unit:'s',lo:2e-8,hi:85,current:0.01,integer:false,display_unit:null,
+    units:[['s',0],['ms',-3],['µs',-6],['ns',-9]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s',ns:'s'}},
+  repeats:{port:'pulse:param:bracket:b1',label:'repeats',group:'pulse',leaf:'bracket:b1',unit:'count',lo:1,hi:65535,current:3,integer:true,display_unit:null,
+    units:[],limits:{},currents:{},families:{}},
+  once:{port:'pulse:param:bracket:b2',label:'once',group:'pulse',leaf:'bracket:b2',unit:'count',lo:1,hi:65535,current:1,integer:true,display_unit:null,
+    units:[],limits:{},currents:{},families:{}},
+};
 const delay=(value,overrides=[])=>({fields:[{name:'delay',label:'Delay',kind:'number',unit:'s',units:[['s',0],['ms',-3]],families:{s:'s',ms:'s'},
   description:'delay',minimum:0,maximum:1,authored:0.001,value,unavailable_reason:''}],overrides,parked:[],note:'',tidy:null});
-function setup(axes,api=null) {
+function setup(axes,api=null,offered=[port]) {
   const edits=[];
   const editor=new ScanPlanEditor(values=>{edits.push(values);return edits.length});
   document.body.append(editor.root);
   const facts={editor:'scan_plan',manages:['plan','api_values'],families:{pulse:'pulse:param:',api:'api:',device:'device:',manual:'manual:'},
-    host_advanced:['api:','device:','manual:'],ports:[port],withheld:{},unoffered:{},summary:'',problem:'',api};
+    host_advanced:['api:','device:','manual:'],ports:offered,withheld:{},unoffered:{},summary:'',problem:'',api};
   editor.update({node_id:'scan',values:{plan:JSON.stringify({axes}),api_values:''}},facts,'');
   const plan=()=>JSON.parse(edits.filter(edit=>'plan' in edit).at(-1).plan).axes;
-  return {editor,edits,plan};
+  const add=()=>[...editor.root.querySelectorAll('button')].find(item=>item.textContent==='Add axis').click();
+  // The model answers again, its knobs read anew (`ports`), with the plan the editor wrote.
+  const again=ports=>editor.update({node_id:'scan',values:{plan:edits.filter(edit=>'plan' in edit).at(-1).plan,api_values:''}},{...facts,ports},'');
+  return {editor,edits,plan,add,again};
 }
 try {
  await check('an axis keeps its digits in another spelling, decimal or not',async()=>{
    const t=setup([{port:port.port,unit:'mVpp',values:[10,20,30],mode:'range',value_text:'5, 7'}]);
    const picker=t.editor.root.querySelector('.axis-unit .unit-picker');
    const invalid=()=>[...t.editor.root.querySelectorAll('.range-bank input, .axis-list')].map(input=>input.classList.contains('invalid'));
-   choose(picker,1);equal(t.plan().map(axis=>[axis.unit,axis.values,axis.value_text]),[['Vpp',[10,20,30],'5, 7']],'Vpp');
+   choose(picker,'Vpp');equal(t.plan().map(axis=>[axis.unit,axis.values,axis.value_text]),[['Vpp',[10,20,30],'5, 7']],'Vpp');
    // 10..30 Vpp and 5, 7 Vpp lie past the port's 0..1 Vpp: the kept digits say so.
    equal(invalid(),[true,true,false,true],'kept digits outside the limits');
    assert(t.editor.root.querySelector('.range-bank input').title.startsWith('Outside the limits: 0 to 1 Vpp'),'limits tooltip');
-   choose(picker,2);equal(t.plan().map(axis=>[axis.unit,axis.values,axis.value_text]),[['dBm',[10,20,30],'5, 7']],'dBm');
+   choose(picker,'dBm');equal(t.plan().map(axis=>[axis.unit,axis.values,axis.value_text]),[['dBm',[10,20,30],'5, 7']],'dBm');
    equal(invalid(),[false,true,false,false],'only 30 dBm lies past 13.01 dBm');
    const spins=[...t.editor.root.querySelectorAll('.range-bank input')].map(input=>input.value);
    equal(spins,['10','30','3'],'from, to, points');
  });
- await check('an added axis keeps its seeded sweep in another spelling',async()=>{
-   const t=setup([]);
-   [...t.editor.root.querySelectorAll('button')].find(item=>item.textContent==='Add axis').click();
-   equal(t.plan().map(axis=>[axis.unit,axis.values]),[['mVpp',[10,20,30,40,50]]],'seeded');
-   choose(t.editor.root.querySelector('.axis-unit .unit-picker'),2);
-   equal(t.plan().map(axis=>[axis.unit,axis.values]),[['dBm',[10,20,30,40,50]]],'seed digits');
+ await check('an added axis starts at its reading ± 0.1 in the unit that reads it between 1 and 1000',async()=>{
+   const order=['carrier','drive','power','amplitude','hold'];
+   const t=setup([],null,order.map(name=>ports[name]));
+   for(const _ of order) t.add();
+   const axes=Object.fromEntries(t.plan().map(axis=>[axis.port.split(':').at(-1),axis]));
+   const sweep=(name,unit,from,to)=>{const axis=axes[name];equal(axis.unit,unit,`${name} unit`);near(axis.values,Array.from({length:5},(_,k)=>from+(to-from)*k/4),`${name} sweep`);
+     equal([axis.values[0],axis.values[4]],[from,to],`${name} ends, exact`)};
+   sweep('carrier','GHz',6.734,6.934);
+   sweep('drive','MHz',79.9,80.1);
+   sweep('power','dBm',-10.1,-9.9);
+   sweep('amplitude','mVpp',499.9,500.1);
+   sweep('hold','ms',9.9,10.1);
+   equal(t.editor.root.querySelector('.range-bank input').value,'6.734','from as written');
  });
- await check('an API box at the pulse\'s own number is re-read in the picked spelling',async()=>{
+ await check('a whole-number knob steps by one, the sweep stays inside its limits, and a knob that says nowhere it stands is one point',async()=>{
+   const t=setup([],null,[ports.repeats,ports.once,ports.edge,ports.unknown]);
+   for(let k=0;k<4;k++) t.add();
+   const axes=Object.fromEntries(t.plan().map(axis=>[axis.port.split(':').at(-1),axis]));
+   equal([axes.b1.unit,axes.b1.values],['count',[2,3,4]],'repeats 3: 2, 3, 4');
+   equal([axes.b2.unit,axes.b2.values],['count',[1,2]],'repeats 1: never below its limit');
+   equal(axes.edge.unit,'MHz','at its lower limit');near(axes.edge.values,[500,500.025,500.05,500.075,500.1],'clipped to its limit');
+   equal([axes.unknown.unit,axes.unknown.values],['GHz',[0.5]],'one point, in the unit its range reads in');
+ });
+ await check('a unit the operator picks stays until the knob is changed; a new knob starts again',async()=>{
+   const t=setup([],null,[ports.drive,ports.carrier]);
+   t.add();equal(t.plan()[0].unit,'MHz','default');
+   choose(t.editor.root.querySelector('.axis-unit .unit-picker'),'kHz');
+   equal(t.plan().map(axis=>[axis.unit,axis.values[0]]),[['kHz',79.9]],'picked: digits kept');
+   t.again([{...ports.drive,current:2e7},ports.carrier]);
+   equal(t.editor.root.querySelector('.axis-unit .unit-picker').value,'kHz','a new reading re-chose the unit');
+   choose(t.editor.root.querySelector('.axis-port'),'carrier');
+   equal(t.plan().map(axis=>[axis.port,axis.unit,axis.values[0],axis.values.length]),[['device:rf:carrier','GHz',6.734,5]],'new knob');
+ });
+ await check('an API value first shown reads in its default unit; a box at the pulse\'s own number is re-read in the picked spelling',async()=>{
    const t=setup([],delay(0.001));
-   const input=t.editor.root.querySelector('.api-values input');equal(input.value,'0.001','seconds');
-   choose(t.editor.root.querySelector('.api-values .unit-picker'),1);
-   equal(input.value,'1','milliseconds');
+   const input=t.editor.root.querySelector('.api-values input');equal(input.value,'1','1 ms by default');
+   equal(t.editor.root.querySelector('.api-values .unit-picker').value,'ms','default spelling');
+   choose(t.editor.root.querySelector('.api-values .unit-picker'),'s');
+   equal(input.value,'0.001','seconds');
    equal(t.edits.filter(edit=>'api_values' in edit),[],'no override was written');
  });
  await check('an API override keeps its digits and sets the value they now say',async()=>{
    const t=setup([],delay(0.002,[['delay',0.002]]));
-   const input=t.editor.root.querySelector('.api-values input');equal(input.value,'0.002','seconds');
-   choose(t.editor.root.querySelector('.api-values .unit-picker'),1);
-   equal(input.value,'0.002','override digits');
-   equal(t.edits.filter(edit=>'api_values' in edit).at(-1),{api_values:'delay = 0.000002'},'override in the pulse\'s unit');
+   const input=t.editor.root.querySelector('.api-values input');equal(input.value,'2','the value this run gives it, in ms');
+   choose(t.editor.root.querySelector('.api-values .unit-picker'),'s');
+   equal(input.value,'2','override digits');
+   equal(t.edits.filter(edit=>'api_values' in edit).at(-1),{api_values:'delay = 2'},'override in the pulse\'s unit');
  });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
 } catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
