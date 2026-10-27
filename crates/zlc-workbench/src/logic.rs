@@ -187,6 +187,11 @@ pub(crate) fn name_problem<'a>(text: &str, node: &str, others: impl IntoIterator
 
 fn names_a_panel(text: &str) -> bool { text.strip_prefix("panel-").is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())) }
 
+/// The draft fields whose values differ between two drafts.
+fn changed_fields(before: &Map<String, Value>, after: &Map<String, Value>) -> Vec<String> {
+    before.keys().chain(after.keys()).filter(|name| before.get(*name) != after.get(*name)).cloned().collect()
+}
+
 /// `@logic/<producer>/<output>`, split at the last `/` of the remainder.
 pub fn split_signal(signal: &str) -> Option<(&str, &str)> {
     signal.strip_prefix("@logic/")?.rsplit_once('/').filter(|(producer, output)| !producer.is_empty() && !output.is_empty())
@@ -668,6 +673,7 @@ impl Workbench {
         let auto_preview = params["auto_preview"].as_bool();
         let node = self.node_mut(id)?;
         let changed = draft != node.draft;
+        let moved = changed_fields(&node.draft.values, &draft.values);
         if let Some(flag) = auto_preview { node.auto_preview = flag; }
         if changed {
             node.draft = draft;
@@ -677,6 +683,7 @@ impl Workbench {
         }
         let revision = node.revision;
         if changed {
+            self.release_selections(id, &moved);
             self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Selection { node, .. } if node == id));
             self.send_queries(id);
         }
@@ -684,11 +691,23 @@ impl Workbench {
         Ok(json!({"node": id, "draft_revision": revision}))
     }
 
+    /// v2 `_commit_logic_draft`: a field whose value changes is no longer a region's to
+    /// give back -- the edit is the operator's (a region's own write records its owner
+    /// again right after, `selection_patched`).
+    fn release_selections(&mut self, id: &str, fields: &[String]) {
+        self.selection_restore.retain(|(node, field), _| node != id || !fields.contains(field));
+    }
+
     /// v2 `_route_exact_panel_selection`: a region committed on a panel showing a node's
     /// output asks that node what it sets in its draft (`selection_patch`, for the kinds of
     /// region its type maps); `None` gives back what this panel's region set (v2
     /// `_restore_producer_draft`). A running Task's panel keeps its science. Whether a
     /// draft changed now.
+    ///
+    /// The draft it is asked about is the one the region was drawn over: each field this
+    /// panel's region set reads as it held before (what removing the region gives back),
+    /// so moving or resizing the region narrows that again rather than its own last
+    /// narrowing.
     pub fn panel_selection(&mut self, panel: &str, signal: &str, selection: Option<&Value>, context: &Value) -> bool {
         if self.routed_selections.get(panel) == selection { return false; }
         let Some(selection) = selection else {
@@ -702,7 +721,11 @@ impl Workbench {
         let mapped = self.catalog.get(&node.type_id).is_some_and(|item| item.node().selection_mappings.iter()
             .any(|mapping| (mapping.plot_kind.as_str(), mapping.selector_kind.as_str()) == kinds));
         if !mapped { return false; }
-        let (id, args) = (node.id.clone(), json!({"selection": selection, "draft": Value::Object(node.draft.values.clone()), "context": context}));
+        let mut drawn_over = node.draft.values.clone();
+        for ((owned, field), (owner, before)) in &self.selection_restore {
+            if owned == &node.id && owner == panel { drawn_over.insert(field.clone(), before.clone()); }
+        }
+        let (id, args) = (node.id.clone(), json!({"selection": selection, "draft": Value::Object(drawn_over), "context": context}));
         self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Selection { node, .. } if node == &id));
         let ticket = self.ticket(Ticket::Selection { node: id.clone(), panel: panel.to_owned(), selection: selection.clone() });
         self.plugins.query(&node_instance(&id), ticket, "selection_patch", &args);
@@ -761,10 +784,12 @@ impl Workbench {
         let node = self.node_mut(id)?;
         let running = node.running.clone().ok_or_else(|| format!("{} is not running; there is no running configuration to return to", node.name))?;
         if node.draft != running {
+            let moved = changed_fields(&node.draft.values, &running.values);
             node.draft = running;
             node.revision += 1;
             node.recheck();
             node.error = None;
+            self.release_selections(id, &moved);
             self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Selection { node, .. } if node == id));
             self.send_queries(id);
         }

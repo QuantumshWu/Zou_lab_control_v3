@@ -717,77 +717,144 @@ def plan_from_authored(payload: object) -> ScanPlan:
     return payload if isinstance(payload, ScanPlan) else ScanPlan.from_tree(payload)
 
 
+def _scanned_axes(context: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
+    """Each axis of the dataset a region was drawn on, by its id, as the run
+    that wrote it recorded it: the port it swept and the values it played.
+
+    The ids are :func:`scan_axis_ids` of THAT run's plan -- the spelling its
+    writer named the axes by -- so a region lands on the port the picture
+    drew even after the plan has gained, lost or reordered a namesake.
+    """
+
+    record = context.get("run_record")
+    plan = record.get("plan") if isinstance(record, Mapping) else None
+    axes = plan.get("axes") if isinstance(plan, Mapping) else None
+    if not isinstance(axes, Sequence) or isinstance(axes, (str, bytes)):
+        raise ValueError("the region was drawn on data whose run record names no scan plan")
+    return dict(zip(scan_axis_ids([port_label(axis["port"]) for axis in axes]), axes, strict=True))
+
+
+def _bounds_in_row_unit(
+    axis_id: str, row: Mapping[str, object], bounds: tuple[float, float], source_unit: str,
+) -> tuple[float, float]:
+    """A region's walls on one axis, from the drawn dataset's unit into the
+    row's, low first."""
+
+    unit = row["unit"] or source_unit
+    if source_unit == unit:
+        return bounds
+    # A device's knob converts through the device: an amplitude in Vpp is a
+    # power only into the channel's own load and waveform.  Read here at the
+    # registry's 50-ohm sine, a region drawn in mVpp over a row since
+    # switched to dBm filled another load's power.  A prefix move, or a power
+    # read in mW or dBm, is the same number into any load; a move through an
+    # amplitude is refused by name.
+    families = (DEFAULT_UNITS.family_of(source_unit or "1"), DEFAULT_UNITS.family_of(unit or "1"))
+    if (
+        row["port"].startswith(DEVICE_PARAM_FAMILY)
+        and families[0] != families[1]
+        and any(isinstance(family.conversion, VoltageIntoLoad) for family in families)
+    ):
+        raise ValueError(
+            f"selected scan axis {axis_id!r} row is in {unit}, region drawn in "
+            f"{source_unit}: that conversion is the device's; set the row to "
+            f"{source_unit} to draw it"
+        )
+    converted = DEFAULT_UNITS.convert(bounds, source_unit or "1", unit or "1")
+    # A wall the row's unit has no value for -- below 0 mW or 0 Vpp, for a
+    # row now in dBm -- is refused by name.  Written as NaN it made the draft
+    # no plan at all, and the editor reading it back retired every row the
+    # operator had authored.
+    for name, bound, value in zip(("low", "high"), bounds, converted):
+        if not math.isfinite(float(value)):
+            raise ValueError(
+                f"selected scan axis {axis_id!r} {name} {bound:g} {source_unit} "
+                f"has no value in {unit}: draw the region where it has one"
+            )
+    low, high = sorted(float(value) for value in converted)
+    return low, high
+
+
 def _selected_plan(
     selection: object,
     draft: Mapping[str, object],
     context: Mapping[str, object],
 ) -> dict[str, object] | None:
-    """The authored plan, narrowed to the region the operator drew.
+    """The plan the region was drawn over, narrowed to it.
 
     A box or an x range on a scan's own plot names SCANNED axes -- that is
-    what the dataset's axes are -- so it says "sweep this part next".  Each
-    named axis keeps its point COUNT, because that is what the plan's form
-    offers (from, to, points): the same effort spent over a smaller range.
-    An axis the region does not name is untouched, and a region that names
-    none of them -- a camera ROI drawn on the frames a scan captured --
-    leaves the plan exactly as it was.  The frames belong to the camera.
+    what the dataset's axes are -- so it says "sweep this part next".  The
+    run that wrote the dataset says which port each axis swept and what it
+    played (its run record, :func:`_scanned_axes`); the region lands on the
+    draft's row for THAT port.  An axis the region does not name is
+    untouched, and so is one it spans whole -- a box the full height of an
+    image narrows its columns only -- or one of a single point.  A region
+    that names no scanned axis -- a camera ROI drawn on the frames a scan
+    captured -- sets nothing: the frames belong to the camera.  Nor does a
+    facet cell or a Scope pin the axis it shows one coordinate of: that is
+    where the operator looked, not what was drawn.
+
+    A Range row keeps its point COUNT and its direction, because that is
+    what the plan's form offers (from, to, points): the same effort spent
+    over a smaller range, walked the way it was authored.  Its new ends are
+    held to the span the scan played: past it -- the half pixel beyond an
+    image's last column, a curve's margin -- the picture shows nothing
+    scanned, and a range drawn there would sweep past the knob's limits
+    when the scan ran up to them.  A Values row is an exact statement and
+    stays one: the listed values the region holds, in their order and
+    spelling.  A region holding nothing scanned on an axis it cuts is
+    refused by name.
     """
 
     rows = plan_input_rows(draft.get("plan"))
-    wanted = {
-        str(getattr(item, "axis", "")): item
-        for item in getattr(selection, "ranges", ())
-    }
-    axis_ids = scan_axis_ids([port_label(row["port"]) for row in rows])
-    changed = False
-    for row, axis_id in zip(rows, axis_ids, strict=True):
-        chosen = wanted.get(axis_id)
-        if chosen is None or len(row["values"]) < 2:
+    scanned = _scanned_axes(context)
+    by_port = {row["port"]: row for row in rows}
+    named = changed = False
+    for chosen in getattr(selection, "ranges", ()):
+        axis_id = str(getattr(chosen, "axis", ""))
+        recorded = scanned.get(axis_id)
+        row = None if recorded is None else by_port.get(str(recorded["port"]))
+        if row is None:
+            continue
+        named = True
+        listed = row["mode"] == "values"
+        items = [item.strip() for item in row["value_text"].split(",")] if listed else []
+        authored = parse_scan_values(row["value_text"]) if listed else tuple(row["values"])
+        if len(authored) < 2:
+            continue
+        played = [float(value) for value in recorded["values"]]
+        first, last = min(played), max(played)
+        lower, upper = float(chosen.lower), float(chosen.upper)
+        if lower <= first and upper >= last:
             continue
         source_unit = context.get("axis_units", {}).get(axis_id)
         if source_unit is None:
             raise ValueError(f"selected scan axis {axis_id!r} has no recorded unit")
-        unit = row["unit"] or source_unit
-        bounds = (float(chosen.lower), float(chosen.upper))
-        if source_unit != unit:
-            # A device's knob converts through the device: an amplitude in Vpp
-            # is a power only into the channel's own load and waveform.  Read
-            # here at the registry's 50-ohm sine, a region drawn in mVpp over
-            # a row since switched to dBm filled another load's power.  A
-            # prefix move, or a power read in mW or dBm, is the same number
-            # into any load; a move through an amplitude is refused by name.
-            families = (DEFAULT_UNITS.family_of(source_unit or "1"),
-                        DEFAULT_UNITS.family_of(unit or "1"))
-            if (
-                row["port"].startswith(DEVICE_PARAM_FAMILY)
-                and families[0] != families[1]
-                and any(isinstance(family.conversion, VoltageIntoLoad) for family in families)
-            ):
+        if not listed:
+            lower, upper = max(lower, first), min(upper, last)
+        if not lower < upper:
+            raise ValueError(
+                f"selected scan axis {axis_id!r}: the region lies outside the "
+                f"{first:g} to {last:g} {source_unit} the scan played"
+            )
+        low, high = _bounds_in_row_unit(axis_id, row, (lower, upper), source_unit)
+        if listed:
+            kept = [item for item, value in zip(items, authored, strict=True) if low <= value <= high]
+            if not kept:
                 raise ValueError(
-                    f"selected scan axis {axis_id!r} row is in {unit}, region drawn in "
-                    f"{source_unit}: that conversion is the device's; set the row to "
-                    f"{source_unit} to draw it"
+                    f"selected scan axis {axis_id!r}: the region holds none of its listed values"
                 )
-            converted = DEFAULT_UNITS.convert(bounds, source_unit or "1", unit or "1")
-            # A wall the row's unit has no value for -- below 0 mW or 0 Vpp,
-            # for a row now in dBm -- is refused by name.  Written as NaN it
-            # made the draft no plan at all, and the editor reading it back
-            # retired every row the operator had authored.
-            for name, bound, value in zip(("low", "high"), bounds, converted):
-                if not math.isfinite(float(value)):
-                    raise ValueError(
-                        f"selected scan axis {axis_id!r} {name} {bound:g} {source_unit} "
-                        f"has no value in {unit}: draw the region where it has one"
-                    )
-            bounds = converted
-        row["values"] = [float(value) for value in np.linspace(
-            float(bounds[0]), float(bounds[1]), len(row["values"]))]
-        # Only the row's RANGE half.  A row authored as an explicit list is
-        # read from that list (see ScanPlan.from_tree), and a region drawn on
-        # a picture does not get to replace an exact statement: it fills the
-        # from/to/points the operator would switch to.
+            row["value_text"] = ", ".join(kept)
+        else:
+            values = [float(value) for value in np.linspace(low, high, len(authored))]
+            row["values"] = values if authored[0] <= authored[-1] else values[::-1]
         changed = True
-    return {"plan": json.dumps({"axes": rows})} if changed else None
+    if not named:
+        return None
+    # The draft asked about is the one the region was drawn over (the core's
+    # panel_selection), so a region that now narrows nothing it names gives
+    # that plan back as it was written.
+    return {"plan": json.dumps({"axes": rows}) if changed else draft.get("plan")}
 
 
 #: What a region drawn on a scan's plot does to that scan's plan.  A cell of a

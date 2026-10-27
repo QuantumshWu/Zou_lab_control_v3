@@ -1297,6 +1297,47 @@ mod tests {
         assert_eq!(workbench.node("camera_measurement").unwrap().draft.values["frames_per_cycle"], 3);
     }
 
+    /// A region narrows the draft it was drawn over: moved, its producer is asked about
+    /// the field as it held before the region set it, and removed, it gives that back.
+    #[test]
+    fn a_moved_region_is_asked_about_the_draft_it_was_drawn_over() {
+        let mut catalog = catalog();
+        catalog["types"][2]["node"]["selection_mappings"] = json!([{"plot_kind": "image", "selector_kind": "area", "draft_fields": ["frames_per_cycle"]}]);
+        let (_root, mut wb, calls, mut host) = rig("region-base", catalog);
+        add_open_node(&mut wb, &mut host, json!({"type_id": "camera_measurement"}));
+        let select = |wb: &mut Workbench, coordinate| { wb.panel_selection("p", "@logic/camera_measurement/frames",
+            Some(&json!({"plot_kind": "image", "selector_kind": "area", "coordinate": coordinate})), &json!({})); };
+        let asked_draft = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().rev().find(|(query, ..)| query == "selection_patch").unwrap().2["draft"].clone();
+        select(&mut wb, 1);
+        wb.on_event(Event::Answered { ticket: asked(&calls, "selection_patch"), result: Ok(json!({"frames_per_cycle": 3})) }, &mut host);
+        assert_eq!(wb.node("camera_measurement").unwrap().draft.values["frames_per_cycle"], 3);
+        select(&mut wb, 2);
+        assert_eq!(asked_draft(&calls)["frames_per_cycle"], 1, "asked about its own last write");
+        wb.on_event(Event::Answered { ticket: asked(&calls, "selection_patch"), result: Ok(json!({"frames_per_cycle": 4})) }, &mut host);
+        assert_eq!(wb.node("camera_measurement").unwrap().draft.values["frames_per_cycle"], 4);
+        wb.panel_selection("p", "@logic/camera_measurement/frames", None, &json!({}));
+        assert_eq!(wb.node("camera_measurement").unwrap().draft.values["frames_per_cycle"], 1);
+    }
+
+    /// v2 `_commit_logic_draft`: an edit of a field a region set makes it the operator's --
+    /// the region, moved, is asked about the edit, and removed, leaves it.
+    #[test]
+    fn an_edit_takes_what_a_region_set() {
+        let mut catalog = catalog();
+        catalog["types"][2]["node"]["selection_mappings"] = json!([{"plot_kind": "image", "selector_kind": "area", "draft_fields": ["frames_per_cycle"]}]);
+        let (_root, mut wb, calls, mut host) = rig("region-edit", catalog);
+        add_open_node(&mut wb, &mut host, json!({"type_id": "camera_measurement"}));
+        let select = |wb: &mut Workbench, coordinate| { wb.panel_selection("p", "@logic/camera_measurement/frames",
+            Some(&json!({"plot_kind": "image", "selector_kind": "area", "coordinate": coordinate})), &json!({})); };
+        select(&mut wb, 1);
+        wb.on_event(Event::Answered { ticket: asked(&calls, "selection_patch"), result: Ok(json!({"frames_per_cycle": 3})) }, &mut host);
+        apply(&mut wb, &mut host, "edit_node", json!({"node": "camera_measurement", "values": {"frames_per_cycle": 5}})).unwrap();
+        select(&mut wb, 2);
+        assert_eq!(calls.borrow().2.iter().rev().find(|(query, ..)| query == "selection_patch").unwrap().2["draft"]["frames_per_cycle"], 5);
+        wb.panel_selection("p", "@logic/camera_measurement/frames", None, &json!({}));
+        assert_eq!(wb.node("camera_measurement").unwrap().draft.values["frames_per_cycle"], 5);
+    }
+
     /// v2 lab_run_recipe: followers are standing processors, each once, apart from the entry node.
     #[test]
     fn a_recipe_follows_with_processors_only() {
