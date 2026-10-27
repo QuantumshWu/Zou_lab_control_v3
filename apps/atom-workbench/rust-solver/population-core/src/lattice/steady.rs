@@ -109,7 +109,7 @@ pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>])->Result<SteadySolut
         let start=Instant::now();
         let modes=prepared.modes(order)?;
         let op=LatticeOperator::new(prepared,&modes)?;
-        let ledger=RemainderLedger::new(&prepared.plan,op.nu_max(),prepared.fold.dropped())?;
+        let ledger=RemainderLedger::new(&prepared.plan,op.nu_max(),op.dropped())?;
         if ledger.expansion_parameter>ledger::EXPANSION_LIMIT{
             return Err(format!("Static fold expansion parameter {:e} above {:e} at near order {order}",ledger.expansion_parameter,ledger::EXPANSION_LIMIT));}
         let(nu_max,canonical,operator_work,edges)=(op.nu_max(),op.canonical_count(),op.work,op.edge_counts);

@@ -23,6 +23,11 @@ use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// Rows of a dense sector block per task.
 const SECTOR_ROWS:usize=64;
+/// The K^(1) rests are left out, but for their population rows (which keep
+/// the fold exactly trace preserving), and charged as dropped fold entries
+/// when nu_max times their summed row sums is below this fraction of the
+/// fold's size: about half of a research model's operator work.
+const K1_REST_SHARE:f64=1e-3;
 
 #[derive(Clone,Copy,Debug)]
 enum Edge{Explicit(usize),Fold(usize)}
@@ -65,6 +70,8 @@ pub struct LatticeOperator<'a>{
     pub work:usize,
     /// Edges per kind (canonical targets): explicit steps, cross folds.
     pub edge_counts:[usize;2],
+    /// Summed row sums of the K^(1) rests left out (0 when they are applied).
+    pub dropped_k1_rest:f64,
 }
 impl<'a> LatticeOperator<'a>{
     pub fn new(prepared:&'a LatticePrepared,modes:&[Charge])->Result<Self,String>{
@@ -96,10 +103,15 @@ impl<'a> LatticeOperator<'a>{
         let targets:Vec<usize>=(0..modes.len()).filter(|&q|canonical[q]).collect();
         let mut edges=vec![Vec::new();modes.len()];let mut edge_counts=[0;2];
         let mut block_work=targets.len()*(2*n*n*n+recycling.work(n));
+        let nu_max=nu.iter().map(|w|w.abs()).fold(0.,f64::max);
+        let k1_rest:f64=prepared.fold.targets.iter().map(|t|t.rest_row_sum[1]).sum();
+        let fold_size:f64=prepared.fold.targets.iter().map(|t|t.norms[0][0]).sum();
+        let dropped_k1_rest=if nu_max*k1_rest<=K1_REST_SHARE*fold_size{k1_rest}else{0.};
+        let k1=|t:&'a StoredFold|if dropped_k1_rest>0.{&t.population_rest[1]}else{&t.rest[1]};
         let mut terms=Vec::new();
         if let Some(t)=diagonal{let own:Vec<(usize,usize)>=targets.iter().map(|&q|(q,q)).collect();
             terms.push(Term{rest:&t.rest[0],edges:own.clone(),frequency:false,diagonal:true,offset:0});
-            terms.push(Term{rest:&t.rest[1],edges:own,frequency:true,diagonal:true,offset:0});}
+            terms.push(Term{rest:k1(t),edges:own,frequency:true,diagonal:true,offset:0});}
         let mut fold_edges=vec![Vec::new();prepared.fold.targets.len()];
         for &target in &targets{let q=&modes[target];
             for(e,s)in explicit_steps.iter().enumerate(){
@@ -113,17 +125,20 @@ impl<'a> LatticeOperator<'a>{
         }
         for(t,list)in fold_edges.into_iter().enumerate(){if list.is_empty(){continue;}let data=&prepared.fold.targets[t];
             terms.push(Term{rest:&data.rest[0],edges:list.clone(),frequency:false,diagonal:false,offset:0});
-            terms.push(Term{rest:&data.rest[1],edges:list,frequency:true,diagonal:false,offset:0});}
+            terms.push(Term{rest:k1(data),edges:list,frequency:true,diagonal:false,offset:0});}
         terms.retain(|t|t.rest.stored()>0);
         let mut offset=0;for t in &mut terms{t.offset=offset;offset+=d*t.edges.len();}
         let rest_work:usize=terms.iter().map(|t|t.rest.stored()*t.edges.len()).sum();
         Ok(Self{prepared,n,modes:modes.to_vec(),nu,centre,index,mirror,canonical,left,right,fold_left,fold_right,recycling,explicit,edges,terms,
             gathered:vec![ZERO;offset],interleaved:vec![ZERO;d*modes.len()],execution:Execution::new()?,scratch:Vec::new(),
-            block_work,rest_work,work:block_work+rest_work,edge_counts})
+            block_work,rest_work,work:block_work+rest_work,edge_counts,dropped_k1_rest})
     }
     pub fn dimension(&self)->usize{self.modes.len()*self.n*self.n}
     pub fn nu_max(&self)->f64{self.nu.iter().map(|w|w.abs()).fold(0.,f64::max)}
     pub fn canonical_count(&self)->usize{self.canonical.iter().filter(|&&c|c).count()}
+    /// Dropped fold entries (largest row sums of K^(0) and K^(1)), the
+    /// K^(1) rests left out included.
+    pub fn dropped(&self)->[f64;2]{let[a,b]=self.prepared.fold.dropped();[a,b+self.dropped_k1_rest]}
     /// y = A x for a Hermitian-symmetric field x (x_-q = x_q^dagger).
     pub fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{self.apply_parts(x,y,Parts::Full)}
     /// y = (selected parts of A) x for a Hermitian-symmetric field x.

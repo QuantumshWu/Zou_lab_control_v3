@@ -43,16 +43,25 @@ use super::preconditioner::{StructuredBatch,StructuredDressed};
 use super::eigenbasis::BlockEigenbasis;
 use super::estimate::Shell;
 use super::ledger::{self,KAPPA,POPULATION_TOLERANCE,PopulationCharges,RemainderLedger};
-use super::steady::{START_ORDER,MAXIMUM_ORDER};
+use super::steady::MAXIMUM_ORDER;
 use std::sync::OnceLock;
 
 const POLE:f64=20.;
 const POLE_HORIZON:f64=40.;
 const POLE_SCALE:f64=200.;
+/// The first near order (order 1 suffices for three lasers + tweezer, 1.9
+/// s, but four and five lasers, old and research, need order 2, and finding
+/// that out costs about 1 s: the old models are the common case).
+const START_ORDER:usize=2;
 /// Relative residual of the shifted solves; 1e-3 left 2-9e-3 on three
 /// lasers + tweezer (b1-finite.md section 6.2).
 const INNER_RTOL:f64=1e-6;
 const TRANSLATION_MIXING:f64=3e-3;
+/// At most this many translation pairs, the most strongly mixing: with all
+/// three on five lasers the copies made the space larger and less accurate
+/// (old five: 80 columns and 3.2e-3 against 60 and 2.2e-3 with two); with one
+/// the estimate missed the stall (0.57 of the actual).
+const MAXIMUM_TRANSLATIONS:usize=2;
 /// Basis columns at the first checkpoint, added per checkpoint, at most.
 const FIRST_COLUMNS:usize=40;
 const MORE_COLUMNS:usize=20;
@@ -184,11 +193,20 @@ struct Reduced{
     /// Ritz values, eigenvectors (row-major r x r, complex) and the
     /// coefficients of u0 on them.
     mu:Vec<C>,s:Vec<C>,a:Vec<C>,condition:f64,
+    /// LU of the real eigenvector matrix and the pair layout, for
+    /// coordinates on the eigenvectors.
+    lu:Vec<f64>,pivots:Vec<i32>,pair:Vec<u8>,
 }
 impl Reduced{
     /// psi(t) = b^T u(t) as an exponential sum: the coefficients of e^{mu_k t}.
     fn exponential(&self,b:&[f64])->Vec<C>{
         let r=self.r;(0..r).map(|k|{let mut s=ZERO;for i in 0..r{let v=self.s[i*r+k];s.re+=b[i]*v.re;s.im+=b[i]*v.im;}mul(s,self.a[k])}).collect()
+    }
+    /// Coordinates of a real reduced vector on the (complex) eigenvectors.
+    fn ritz(&self,lapack:&Lapack,w:&[f64])->Result<Vec<C>,String>{
+        let r=self.r;let y=lapack.solve_matrix_factored(&self.lu,&self.pivots,w,r)?;let mut c=vec![ZERO;r];let mut j=0;
+        while j<r{if self.pair[j]==1{c[j]=C{re:0.5*y[j],im:-0.5*y[j+1]};c[j+1]=C{re:0.5*y[j],im:0.5*y[j+1]};j+=2;}else{c[j]=C{re:y[j],im:0.};j+=1;}}
+        Ok(c)
     }
 }
 
@@ -328,14 +346,16 @@ impl Lattice<'_,'_>{
         self.timing.reduced_ms+=start.elapsed().as_secs_f64()*1e3;
         let growth=mu.iter().map(|z|z.re*horizon).fold(f64::NEG_INFINITY,f64::max);
         let gram_condition=(largest/smallest).powi(2);
-        Ok(Reduced{t,r,g,reflected,gram_condition,growth,u,mu,s,a,condition})
+        Ok(Reduced{t,r,g,reflected,gram_condition,growth,u,mu,s,a,condition,lu,pivots,pair})
     }
     /// Raw populations of the reduced trajectory.
-    fn populations(&self,space:&Space,reduced:&Reduced,times:&[f64])->Vec<Vec<f64>>{
+    fn populations(&self,space:&Space,reduced:&Reduced,times:&[f64])->Vec<Vec<f64>>{self.readout_rows(space,reduced,times,&reduced.u)}
+    /// Populations of reduced vectors (one per time) in the orthonormal coordinates.
+    fn readout_rows(&self,space:&Space,reduced:&Reduced,times:&[f64],vectors:&[Vec<f64>])->Vec<Vec<f64>>{
         let(n,m,r)=(self.n,space.covered,reduced.r);let lapack=&self.prepared.lapack;
         // Per canonical mode: populations of the orthonormal coordinates
         // (real parts in rows 0..n, imaginary in n..2n) and along the trajectory.
-        let mut trajectory=vec![0.;r*times.len()];for(k,u)in reduced.u.iter().enumerate(){for i in 0..r{trajectory[i*times.len()+k]=u[i];}}
+        let mut trajectory=vec![0.;r*times.len()];for(k,u)in vectors.iter().enumerate(){for i in 0..r{trajectory[i*times.len()+k]=u[i];}}
         let mut rows=vec![vec![0.;n];times.len()];
         for(c,&(_,w,nu))in self.canonical.iter().enumerate(){
             let mut y=vec![0.;2*n*m];
@@ -411,6 +431,84 @@ impl Lattice<'_,'_>{
         let scale=(total/kept.max(f64::MIN_POSITIVE)).sqrt();
         Ok(scale*rows_t.iter().map(|p|ledger::metric(p,&vec![0.;self.n],groups)).fold(0.,f64::max))
     }
+    /// Population response to sources sum_i s_i psi_i(t) (psi_i exponential
+    /// sums over the Ritz values): the Galerkin projection of the sources is
+    /// solved in the reduced model, which carries the couplings between
+    /// modes (a source on the ball's edge reaches the centre populations
+    /// only through them); the remainder is propagated through every mode's
+    /// dressed block (`eigenbasis`).
+    fn source_response(&self,space:&Space,reduced:&Reduced,eigen:&BlockEigenbasis,sources:&[Vec<C>],alpha:&[Vec<C>],times:&[f64])->Result<Vec<Vec<f64>>,String>{
+        let(m,r)=(space.covered,reduced.r);let lapack=&self.prepared.lapack;let count=sources.len();
+        if count==0{return Ok(vec![vec![0.;self.n];times.len()]);}
+        let z:Vec<&[C]>=space.z[..m].iter().map(|v|v.as_slice()).collect();let src:Vec<&[C]>=sources.iter().map(|v|v.as_slice()).collect();
+        // W^T s_i = T^T Z^T s_i (r x count).
+        let zs=self.vectors.gram(&z,&src)?;let ws=product(lapack,&transpose_rows(&reduced.t,m,r),&zs,r,m,count);
+        let columns:Vec<Vec<f64>>=(0..count).map(|i|(0..r).map(|k|ws[k*count+i]).collect()).collect();
+        let projected=self.fields(space,reduced,&columns,false)?;
+        let remainder:Vec<Vec<C>>=sources.iter().zip(&projected).map(|(a,b)|a.iter().zip(b).map(|(x,y)|C{re:x.re-y.re,im:x.im-y.im}).collect()).collect();
+        let mut rows=eigen.propagate(self.op(),&remainder,alpha,&reduced.mu,times)?;
+        // eps' = G eps + sum_i (W^T s_i) psi_i(t): in the eigenbasis,
+        // eps_k(t) = sum_l beta_kl (e^{mu_l t} - e^{mu_k t}) / (mu_l - mu_k).
+        let(mu,t_count)=(&reduced.mu,times.len());let horizon=times.iter().fold(0_f64,|a,&t|a.max(t)).max(1e-300);
+        let mut beta=vec![ZERO;r*r];
+        for(i,column)in columns.iter().enumerate(){let c=reduced.ritz(lapack,column)?;for k in 0..r{if !nonzero(c[k]){continue;}for l in 0..r{mul_add(&mut beta[k*r+l],c[k],alpha[i][l]);}}}
+        let cexp=|z:C,t:f64|{let a=(z.re*t).exp();C{re:a*(z.im*t).cos(),im:a*(z.im*t).sin()}};
+        // Column-major: Gamma (r x r), e^{mu t} (r x T), S (r x r).
+        let exps:Vec<C>=times.iter().flat_map(|&t|mu.iter().map(move|&z|cexp(z,t))).collect();
+        let mut gamma=vec![ZERO;r*r];let mut diagonal=vec![ZERO;r];let mut linear=vec![ZERO;r];
+        for k in 0..r{for l in 0..r{let b=beta[k*r+l];if !nonzero(b){continue;}let den=C{re:mu[l].re-mu[k].re,im:mu[l].im-mu[k].im};
+            if magnitude(den)*horizon<1e-8{add(&mut linear[k],b);continue;}
+            let q=den.re*den.re+den.im*den.im;let v=mul(b,C{re:den.re/q,im:-den.im/q});gamma[k+r*l]=v;add(&mut diagonal[k],v);}}
+        let gemm=lapack.complex_gemm();
+        let mut hat=vec![ZERO;r*t_count];gemm.multiply(r,t_count,r,ONE,&gamma,r,&exps,r,ZERO,&mut hat,r)?;
+        for(ti,&t)in times.iter().enumerate(){for k in 0..r{let e=exps[k+r*ti];let w=mul(e,diagonal[k]);let h=&mut hat[k+r*ti];h.re-=w.re;h.im-=w.im;mul_add(h,scaled(linear[k],t),e);}}
+        let mut s_cm=vec![ZERO;r*r];for i in 0..r{for k in 0..r{s_cm[i+r*k]=reduced.s[i*r+k];}}
+        let mut full=vec![ZERO;r*t_count];gemm.multiply(r,t_count,r,ONE,&s_cm,r,&hat,r,ZERO,&mut full,r)?;
+        let eps:Vec<Vec<f64>>=(0..t_count).map(|ti|(0..r).map(|i|full[i+r*ti].re).collect()).collect();
+        for(row,galerkin)in rows.iter_mut().zip(self.readout_rows(space,reduced,times,&eps)){for(a,b)in row.iter_mut().zip(galerkin){*a+=b;}}
+        Ok(rows)
+    }
+    /// The next shell's estimate (slaved shell, its source on the ball
+    /// propagated, plus the shell's own populations) and, when `fold`, the
+    /// fold charges, on the trajectory's compression.
+    #[allow(clippy::too_many_arguments)]
+    fn shell_and_fold(&mut self,dressed:&StructuredDressed,ledger:&RemainderLedger,order:usize,space:&Space,reduced:&Reduced,eigen:&BlockEigenbasis,
+        times:&[f64],groups:&[Vec<usize>],fold:bool)->Result<(f64,f64),String>{
+        let(n,d)=(self.n,self.d);let prepared=self.prepared;
+        let(xs,ys,scale)=self.compression(space,reduced)?;
+        let phi:Vec<Vec<C>>=ys.iter().map(|y|reduced.exponential(y)).collect();
+        let start=Instant::now();
+        let shell=match Shell::new(prepared,dressed,self.op(),order,false)?{
+            None=>0.,
+            Some(mut shell)=>{
+                let mut sources=Vec::new();let mut own=vec![vec![0.;n];times.len()];
+                for(x,y)in xs.iter().zip(&ys){
+                    let(source,field)=shell.slaved(x)?;sources.push(source);
+                    // The shell's own populations, phi_i(t) = y_i^T u(t).
+                    for(ti,(&time,u))in times.iter().zip(&reduced.u).enumerate(){
+                        let phi_t:f64=y.iter().zip(u).map(|(a,b)|a*b).sum();if phi_t==0.{continue;}
+                        for(k,&s)in shell.modes.iter().enumerate(){if !shell.op.canonical[s]{continue;}
+                            let w=if shell.op.mirror[s]==s{1.}else{2.};let nu=shell.op.nu[s];let phase=C{re:(nu*time).cos(),im:(nu*time).sin()};
+                            for i in 0..n{own[ti][i]+=w*phi_t*mul(phase,field[k*d+i*n+i]).re;}}
+                    }
+                }
+                let propagated=self.source_response(space,reduced,eigen,&sources,&phi,times)?;
+                scale*propagated.iter().zip(&own).map(|(a,b)|{let s:Vec<f64>=a.iter().zip(b).map(|(x,y)|x+y).collect();ledger::metric(&s,&vec![0.;n],groups)}).fold(0.,f64::max)
+            }
+        };
+        self.timing.shell_ms+=start.elapsed().as_secs_f64()*1e3;let start=Instant::now();
+        let charges=if !fold||prepared.plan.far().is_empty(){0.}else{
+            let mut sources=Vec::new();let mut third=false;
+            for x in &xs{let s=prepared.fold.third_order_source(self.op(),x)?;third|=s.iter().any(|z|nonzero(*z));sources.push(s);}
+            let(bound,sources)=if ledger.third_order>0.&&third{(ledger.third_order,sources)}
+                else{let mut fold=Vec::new();for x in &xs{fold.push(self.systems[0].op.apply_fold(x)?);}(ledger.fold,fold)};
+            let propagated=self.source_response(space,reduced,eigen,&sources,&phi,times)?;
+            let response=scale*propagated.iter().map(|p|ledger::metric(p,&vec![0.;n],groups)).fold(0.,f64::max);
+            PopulationCharges::new(ledger,if bound>0.{response/bound}else{0.}).total()
+        };
+        self.timing.fold_ms+=start.elapsed().as_secs_f64()*1e3;
+        Ok((shell,charges))
+    }
     /// Low-rank compression of the trajectory: fields x_i and coefficient
     /// vectors y_i with x(t) ~ sum_i x_i (y_i^T u(t)), and the factor
     /// |U|_F / |U_kept|_F by which estimates on it are scaled.
@@ -434,7 +532,7 @@ fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,eigenbasis:&Once
     let n=prepared.generator.n;let d=n*n;let horizon=*times.last().unwrap_or(&0.);
     let modes=prepared.modes(order)?;
     let first=LatticeOperator::new(prepared,&modes)?;
-    let ledger=RemainderLedger::new(&prepared.plan,first.nu_max(),prepared.fold.dropped())?;
+    let ledger=RemainderLedger::new(&prepared.plan,first.nu_max(),first.dropped())?;
     if ledger.expansion_parameter>ledger::EXPANSION_LIMIT{
         return Err(format!("Static fold expansion parameter {:e} above {:e} at near order {order}",ledger.expansion_parameter,ledger::EXPANSION_LIMIT));}
     let poles=if horizon>POLE_HORIZON{vec![POLE,POLE_SCALE/horizon]}else{vec![POLE]};
@@ -449,11 +547,14 @@ fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,eigenbasis:&Once
     let centre=first.centre;
     let canonical:Vec<(usize,f64,f64)>=(0..modes.len()).filter(|&q|first.canonical[q]).map(|q|(q,if first.mirror[q]==q{1.}else{2.},first.nu[q])).collect();
     // Translation pairs: explicit near steps mixing above TRANSLATION_MIXING.
+    let mut strong:Vec<(f64,usize,&Charge)>=prepared.plan.explicit().into_iter().map(|s|&prepared.plan.steps[s])
+        .filter(|st|st.size>TRANSLATION_MIXING*st.nu.abs()&&st.charge>=opposite(&st.charge)).enumerate().map(|(i,st)|(st.size/st.nu.abs(),i,&st.charge)).collect();
+    // The strongest, kept in the plan's order.
+    strong.sort_by(|a,b|b.0.total_cmp(&a.0));strong.truncate(MAXIMUM_TRANSLATIONS);strong.sort_by_key(|x|x.1);
     let mut translations=Vec::new();
-    for s in prepared.plan.explicit(){let step=&prepared.plan.steps[s];
-        if !(step.size>TRANSLATION_MIXING*step.nu.abs())||step.charge<opposite(&step.charge){continue;}
+    for(_,_,charge)in strong{
         let source=|sign:i32|->Vec<Option<usize>>{modes.iter().map(|q|{
-            let shifted:Option<Charge>=q.iter().zip(&step.charge).map(|(&a,&b)|a.checked_sub(sign*b)).collect();
+            let shifted:Option<Charge>=q.iter().zip(charge).map(|(&a,&b)|a.checked_sub(sign*b)).collect();
             shifted.and_then(|c|first.index.get(&c).copied())}).collect()};
         translations.push((source(1),source(-1)));
     }
@@ -493,39 +594,7 @@ fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,eigenbasis:&Once
                 return Err(format!("Finite-time basis estimate not below the tolerance: {}",trail.join(", ")));}
             target+=MORE_COLUMNS;continue;
         }
-        // Shell and fold on the trajectory's compression.
-        let(xs,ys,scale)=lattice.compression(&space,&reduced)?;
-        let phi:Vec<Vec<C>>=ys.iter().map(|y|reduced.exponential(y)).collect();
-        let start=Instant::now();
-        let shell=match Shell::new(prepared,dressed,lattice.op(),order,false)?{
-            None=>0.,
-            Some(mut shell)=>{
-                let mut sources=Vec::new();let mut own=vec![vec![0.;n];times.len()];
-                for(x,y)in xs.iter().zip(&ys){
-                    let(source,field)=shell.slaved(x)?;sources.push(source);
-                    // The shell's own populations, phi_i(t) = y_i^T u(t).
-                    for(ti,(&time,u))in times.iter().zip(&reduced.u).enumerate(){
-                        let phi_t:f64=y.iter().zip(u).map(|(a,b)|a*b).sum();if phi_t==0.{continue;}
-                        for(k,&s)in shell.modes.iter().enumerate(){if !shell.op.canonical[s]{continue;}
-                            let w=if shell.op.mirror[s]==s{1.}else{2.};let nu=shell.op.nu[s];let phase=C{re:(nu*time).cos(),im:(nu*time).sin()};
-                            for i in 0..n{own[ti][i]+=w*phi_t*mul(phase,field[k*d+i*n+i]).re;}}
-                    }
-                }
-                let propagated=eigen.propagate(lattice.op(),&sources,&phi,&reduced.mu,times)?;
-                scale*propagated.iter().zip(&own).map(|(a,b)|{let s:Vec<f64>=a.iter().zip(b).map(|(x,y)|x+y).collect();ledger::metric(&s,&vec![0.;n],groups)}).fold(0.,f64::max)
-            }
-        };
-        lattice.timing.shell_ms+=start.elapsed().as_secs_f64()*1e3;let start=Instant::now();
-        let fold=if prepared.plan.far().is_empty(){0.}else{
-            let mut sources=Vec::new();let mut third=false;
-            for x in &xs{let s=prepared.fold.third_order_source(lattice.op(),x)?;third|=s.iter().any(|z|nonzero(*z));sources.push(s);}
-            let(bound,sources)=if ledger.third_order>0.&&third{(ledger.third_order,sources)}
-                else{let mut fold=Vec::new();for x in &xs{fold.push(lattice.systems[0].op.apply_fold(x)?);}(ledger.fold,fold)};
-            let propagated=eigen.propagate(lattice.op(),&sources,&phi,&reduced.mu,times)?;
-            let response=scale*propagated.iter().map(|p|ledger::metric(p,&vec![0.;n],groups)).fold(0.,f64::max);
-            PopulationCharges::new(&ledger,if bound>0.{response/bound}else{0.}).total()
-        };
-        lattice.timing.fold_ms+=start.elapsed().as_secs_f64()*1e3;
+        let(shell,fold)=lattice.shell_and_fold(dressed,&ledger,order,&space,&reduced,eigen,times,groups,true)?;
         let total=KAPPA*(basis+shell+fold)+projection;
         checkpoint.shell=Some(shell);checkpoint.fold=Some(fold);checkpoint.total=Some(total);
         if total<=POPULATION_TOLERANCE{

@@ -79,11 +79,16 @@ impl Rest{
 pub struct StoredFold{
     pub charge:Charge,pub nu:f64,
     pub left:[Vec<C>;2],pub right:[Vec<C>;2],pub rest:[Rest;2],
+    /// The rest's population rows alone (sparse): what keeps a rest exactly
+    /// trace preserving when the rest is otherwise left out.
+    pub population_rest:[Rest;2],
     /// Largest row sum of the dropped rest entries.
     pub dropped:[f64;2],
     /// Frobenius norms: whole K, absorbed part, rest.
     pub norms:[[f64;3];2],
     pub largest_entry:[f64;2],
+    /// Largest absolute row sum of the stored rest (a generator-norm bound).
+    pub rest_row_sum:[f64;2],
 }
 impl StoredFold{
     /// out += s K^(o) as a row-major d x d matrix.
@@ -301,12 +306,16 @@ pub(crate) fn absorbable(k:&[C],n:usize)->(Vec<C>,Vec<C>){
 /// by sectors (see the module documentation). Population rows (i, i) are
 /// never dropped, so the stored K keeps the fold's exact trace preservation
 /// (v^T K = 0); the largest dropped row sum is returned.
-fn store(k:&mut[C],n:usize,ground:&[bool])->(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64){
+fn store(k:&mut[C],n:usize,ground:&[bool])->(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64,f64,Rest){
     let d=n*n;let largest=k.iter().map(|z|squared(*z)).fold(0.,f64::max).sqrt();let total=frobenius(k);
     let(a,b)=absorbable(k,n);
     let op=Superop{left:Sparse::from_dense(&a,n),right:Sparse::from_dense(&b,n),sandwich:vec![]};
     let mut absorbed=vec![ZERO;d*d];op.dense_into(n,ONE,&mut absorbed);
     let norms=[total,frobenius(&absorbed),{for(x,y)in k.iter_mut().zip(&absorbed){x.re-=y.re;x.im-=y.im;}frobenius(k)}];
+    let row_sum=(0..d).map(|r|k[r*d..(r+1)*d].iter().map(|z|squared(*z).sqrt()).sum::<f64>()).fold(0.,f64::max);
+    let mut populations=Csr{row:Vec::with_capacity(d+1),col:vec![],value:vec![]};populations.row.push(0);
+    for r in 0..d{if r/n==r%n{for c in 0..d{let v=k[r*d+c];if nonzero(v){populations.col.push(c as u32);populations.value.push(v);}}}
+        populations.row.push(populations.value.len()as u32);}
     let floor=ENTRY_FLOOR*largest;let floor2=floor*floor;
     let sector=|p:usize|2*usize::from(!ground[p/n])+usize::from(!ground[p%n]);
     let members:Vec<Vec<usize>>=(0..4).map(|s|(0..d).filter(|&p|sector(p)==s).collect()).collect();
@@ -326,7 +335,7 @@ fn store(k:&mut[C],n:usize,ground:&[bool])->(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64)
         for c in 0..d{if dense[sector(r)][sector(c)]{continue;}let v=k[r*d+c];let m=squared(v);if m==0.{continue;}
             if population||m>=floor2{csr.col.push(c as u32);csr.value.push(v);}else{lost+=m.sqrt();}}
         dropped=dropped.max(lost);csr.row.push(csr.value.len()as u32);}
-    (a,b,Rest{blocks,sparse:csr},dropped,norms,largest)
+    (a,b,Rest{blocks,sparse:csr},dropped,norms,largest,row_sum,Rest{blocks:vec![],sparse:populations})
 }
 
 impl FoldLibrary{
@@ -382,15 +391,16 @@ impl FoldLibrary{
         let mut stored=Vec::with_capacity(targets);let mut zero_dense=None;let mut k=vec![ZERO;d*d];
         for(t,target)in plan.targets.iter().enumerate(){
             let mut left:[Vec<C>;2]=[vec![],vec![]];let mut right:[Vec<C>;2]=[vec![],vec![]];
-            let mut rest:[Rest;2]=[Rest::default(),Rest::default()];let mut dropped=[0.;2];let mut norms=[[0.;3];2];let mut largest=[0.;2];
+            let mut rest:[Rest;2]=[Rest::default(),Rest::default()];let mut dropped=[0.;2];let mut norms=[[0.;3];2];let mut largest=[0.;2];let mut rows=[0.;2];
+            let mut population_rest:[Rest;2]=[Rest::default(),Rest::default()];
             for order in 0..2{
                 // Row-major K (row (i, j), column (k, l)).
                 for c in 0..d{let base=c*width+2*t*d+order*d;for r in 0..d{k[r*d+c]=build[base+r];}}
                 if t==0&&order==0&&target.charge==generator.zero{zero_dense=Some(k.clone());}
-                let(a,b,stored_rest,lost,norm,big)=store(&mut k,n,&generator.ground);
-                left[order]=a;right[order]=b;rest[order]=stored_rest;dropped[order]=lost;norms[order]=norm;largest[order]=big;
+                let(a,b,stored_rest,lost,norm,big,row,population)=store(&mut k,n,&generator.ground);
+                left[order]=a;right[order]=b;rest[order]=stored_rest;dropped[order]=lost;norms[order]=norm;largest[order]=big;rows[order]=row;population_rest[order]=population;
             }
-            stored.push(StoredFold{charge:target.charge.clone(),nu:target.nu,left,right,rest,dropped,norms,largest_entry:largest});
+            stored.push(StoredFold{charge:target.charge.clone(),nu:target.nu,left,right,rest,population_rest,dropped,norms,largest_entry:largest,rest_row_sum:rows});
         }
         diagnostics.milliseconds=clock.elapsed().as_secs_f64()*1e3;diagnostics.phase_ms[1]=diagnostics.milliseconds-diagnostics.phase_ms[0];
         Ok(Self{targets:stored,zero_dense,solver:Some(solver),factors,diagnostics})
