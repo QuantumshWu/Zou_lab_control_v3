@@ -8,6 +8,7 @@ use std::io::{self, BufRead, Write};
 
 mod harmonics;
 mod population_core_adapter;
+mod lattice_core_adapter;
 const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/2";
 const FULL_MODEL_SCHEMA: &str = "rb87-full/2";
 
@@ -71,6 +72,13 @@ struct Options {
     /// t -> infinity mean.
     #[serde(default)]
     mean_horizon_us: Option<f64>,
+    /// Hidden: the population core of a steadyOnly request, "shear" or
+    /// "lattice"; overrides ATOM_POPULATION_CORE. Not part of the UI schema.
+    #[serde(default)]
+    solver_core: Option<String>,
+    /// Hidden: lattice-core validation settings (frame, orders, tolerances).
+    #[serde(default)]
+    lattice: Option<Value>,
 }
 fn default_duration() -> f64 {
     5.
@@ -93,6 +101,8 @@ impl Default for Options {
             include_asymptotic: true,
             steady_only: false,
             mean_horizon_us: None,
+            solver_core: None,
+            lattice: None,
         }
     }
 }
