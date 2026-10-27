@@ -1,5 +1,5 @@
 import type {Analysis,Laser,Level,Scene,SpectralLine} from './types.js';
-import {RB87,accurateSum,analyze,atomicSystem,complexPolarization,laserCarrierOffsetMHz,laserFrequencyDifferenceMHz,laserIntensityMWcm2,sinCosDegrees,transitionReferenceMHz,wigner3j as rawWigner3j} from './physics.js';
+import {RB87,accurateSum,analyze,atomicSystem,complexPolarization,laserCarrierOffsetMHz,laserFrequencyDifferenceMHz,laserFrequencyMHz,laserIntensityMWcm2,sinCosDegrees,transitionReferenceMHz,wigner3j as rawWigner3j} from './physics.js';
 import type {Eigenstate} from './physics.js';
 import {CORE_POLARIZABILITY_AU,SPECTROSCOPY_SOURCES,VIRTUAL_MANIFOLDS} from './spectroscopy-data.js';
 import {cmatrix,solveStaticBackground} from './floquet-background.js';
@@ -15,16 +15,19 @@ type Z={re:number;im:number};
 type Matrix={real:number[];imag:number[]};
 type Group={beams:Laser[];field:Z[]};
 const mul=(a:Z,b:Z):Z=>({re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re});
-/** The far lasers' static background: the levels chart shows it and the
- * master model's H0 is built on it (full-master-model.ts). */
+const conj=(a:Z):Z=>({re:a.re,im:-a.im});
+const norm=(a:Z)=>Math.hypot(a.re,a.im);
+/** The levels chart's background: the static light shift of the lasers whose
+ * "显示光移" switch is on. Display only: the dynamics never uses it (every laser
+ * is an explicit drive there, full-master-model.ts). */
 const ASSUMPTIONS=[
-  '远失谐光的静态背景是 Floquet 准能量：D 线旋转与反旋转项、32 态以外能级（5S 的 6–9P；5P 的 6–10S、4–9D）和 Rb+ 芯极化，用能量相关的 Löwdin（Brillouin–Wigner）分块全阶求解，保留偏振、磁子态混合和多束远失谐光之间的交叉项。',
-  '动力学 H0 使用同一静态背景；近共振光是主方程中的显式旋转波驱动，不计入此背景。',
+  '能级图光移仅用于显示：打开“显示光移”的激光取静态光移，即这些光的 Floquet 准能量：D 线旋转与反旋转项、32 态以外能级（5S 的 6–9P；5P 的 6–10S、4–9D）和 Rb+ 芯极化，用能量相关的 Löwdin（Brillouin–Wigner）分块全阶求解，保留偏振、磁子态混合和多束光之间的交叉项。',
+  '动力学不使用这一显示背景：所有开启的激光都是主方程中的显式驱动。',
   '芯极化取 Arora & Sahoo 2012 的静态值（5S 9.1−0.26 au，5P 9.1 au）；未包含更高价态尾项和连续谱，高态超精细/同位素修正未分辨。',
-  '32 态以外能级只与各自的精细流形耦合（数据只有矩元大小），不含经它们的 5P1/2–5P3/2 耦合；未补这些高态的散射，也未补远失谐光的散射。',
+  '32 态以外能级只与各自的精细流形耦合（数据只有矩元大小），不含经它们的 5P1/2–5P3/2 耦合；静态光移不含散射。',
   '图中布居投影到背景本征态（准能态的零电荷分量，对称正交化）；它不是含光学激发态混入及微运动的 Floquet 态布居。',
 ];
-/** The largest mixing |Ω/2Δ| a static (far) treatment accepts. */
+/** The largest mixing |Ω/2Δ| for which a laser's static light shift represents its effect. */
 export const STATIC_MIXING_LIMIT=.01;
 
 type AtomicSystem=ReturnType<typeof atomicSystem>;
@@ -81,9 +84,9 @@ function backgroundProblem(analysis:Analysis,beams:Group[]):BackgroundProblem{
   });
   return {energies,core,carriers,outside:outsideStates(states,analysis.fieldMagnitudeG)};
 }
-/** The static treatment's validity measure: for every intermediate state of each
- * carrier, sqrt(Σ |V/Δ|²) over the levels of one manifold it couples to (bare
- * energies), and whether every such detuning keeps 100 MHz (D lines) or 10 GHz
+/** Whether a static light shift represents the carriers' effect: for every intermediate
+ * state of each carrier, sqrt(Σ |V/Δ|²) over the levels of one manifold it couples to
+ * (bare energies), and whether every such detuning keeps 100 MHz (D lines) or 10 GHz
  * (states outside the model). A refusal names the first carrier that fails. */
 function staticMixing(problem:BackgroundProblem):{ratio:number;withinGap:boolean;failure?:string}{
   const cD2=RB87.D2.frequencyHz/1e6,dD1=(RB87.D1.frequencyHz-RB87.D2.frequencyHz)/1e6,e=problem.energies;
@@ -112,9 +115,11 @@ function staticMixing(problem:BackgroundProblem):{ratio:number;withinGap:boolean
   }
   return {ratio,withinGap,failure};
 }
-/** The far lasers of a scene as the Floquet problem the levels chart solves. */
+/** The lasers whose light shift the levels chart shows ("显示光移"). */
+const shownLasers=(scene:Scene):Laser[]=>scene.lasers.filter(l=>l.showLightShift===true);
+/** The shown lasers of a scene as the Floquet problem the levels chart solves. */
 export function staticBackgroundProblem(scene:Scene,excludedLaserId?:string):BackgroundProblem{
-  const analysis=analyze(scene);return backgroundProblem(analysis,groups({...scene,lasers:scene.lasers.filter(l=>l.regime==='far')},analysis,excludedLaserId));
+  const analysis=analyze(scene);return backgroundProblem(analysis,groups({...scene,lasers:shownLasers(scene)},analysis,excludedLaserId));
 }
 const solutionCache=new Map<string,BackgroundSolution>();
 /** The solved background, cached on its physical inputs only: selecting another state
@@ -133,17 +138,113 @@ type BasisContext={dipoles:Map<string,DipoleEntry>;projection?:ProjectionPlan};
 const analysisContexts=new WeakMap<Analysis,BasisContext>();
 const contextFor=(analysis:Analysis):BasisContext=>{let value=analysisContexts.get(analysis);if(!value){value={dipoles:new Map()};analysisContexts.set(analysis,value);}return value;};
 
-/** A laser's largest mixing amplitude |Ω/2Δ| in the static (far) treatment, alone at its
- * own carrier -- the ratio that treatment refuses above STATIC_MIXING_LIMIT (1%) -- and
- * whether each of its virtual transitions keeps that treatment's minimum detuning. It
- * changes nothing; laser-regime.ts farValidity adds main's detuning rule. */
+// The master model's static H0 (full-master-model.ts): the magnetic eigenstates plus, for
+// every enabled laser, the second-order (van Vleck) shift through the states outside the
+// 32-state model and the Rb+ core. The D-line couplings are explicit drives of the master
+// equation and are not part of it, so nothing is counted twice.
+const zero=(n:number):Matrix=>({real:Array(n*n).fill(0),imag:Array(n*n).fill(0)});
+const entry=(m:Matrix,k:number):Z=>({re:m.real[k]!,im:m.imag[k]!});
+const amplitude=(d:number[],field:Z[]):Z=>({re:accurateSum(d.map((v,q)=>v*field[q]!.re))/(2*H*1e6),im:accurateSum(d.map((v,q)=>v*field[q]!.im))/(2*H*1e6)});
+const centroid=(manifold:Level['manifold']):number=>manifold==='ground'?0:RB87[manifold].frequencyHz/1e6;
+/** Adds one virtual state's symmetric second-order term and returns its mixing ratio. Every
+ * represented amplitude is kept; a coupling within minimumGap of resonance or a mixing above
+ * 1% is refused. */
+function addVirtual(matrix:Matrix,indices:number[],values:Z[],denominators:number[],minimumGap:number,label:string):number{
+  const magnitudes=values.map(norm),active=magnitudes.flatMap((value,i)=>value!==0?[i]:[]);let ratio2=0;
+  for(const a of active){
+    const gap=Math.abs(denominators[a]!);if(!(gap>=minimumGap))throw new Error(`${label}：虚跃迁失谐小于 ${minimumGap} MHz，超出静态色散光移模型。`);
+    ratio2+=(magnitudes[a]!/gap)**2;
+  }
+  const ratio=Math.sqrt(ratio2);if(!(ratio<=.01))throw new Error(`${label}：光耦合/失谐比 ${ratio.toPrecision(3)} 超过二阶色散模型范围。`);
+  for(let ai=0;ai<active.length;ai++)for(let bi=ai;bi<active.length;bi++){
+    const a=active[ai]!,b=active[bi]!;
+    const ab=mul(conj(values[a]!),values[b]!),factor=.5*(1/denominators[a]!+1/denominators[b]!),i=indices[a]!,j=indices[b]!,k=i*N+j;
+    matrix.real[k]!+=factor*ab.re;matrix.imag[k]!+=factor*ab.im;
+    if(i!==j){matrix.real[j*N+i]=matrix.real[k]!;matrix.imag[j*N+i]=-matrix.imag[k]!;}
+  }
+  return ratio;
+}
+type ModelCorrection={matrix:Matrix;maximumMixingRatio:number};
+const modelCorrectionCache=new Map<string,ModelCorrection>();
+/** The static correction in the magnetic eigenbasis (MHz): every carrier's co- and
+ * counter-rotating coupling to each state outside the model, then its core shift; with the
+ * largest mixing ratio of those couplings. */
+function modelCorrection(analysis:Analysis,beams:Group[]):ModelCorrection{
+  const key=JSON.stringify([analysis.fieldMagnitudeG,beams.map(g=>[laserCarrierOffsetMHz(g.beams[0]!,'D1'),laserCarrierOffsetMHz(g.beams[0]!,'D2'),g.field])]);
+  const cached=modelCorrectionCache.get(key);if(cached)return cached;
+  const states=cachedAtom(analysis.fieldMagnitudeG).states,outside=outsideStates(states,analysis.fieldMagnitudeG),matrix=zero(N);let maximumMixingRatio=0;
+  for(const group of beams){
+    const reverse=reversedField(group.field),frequency=laserFrequencyMHz(group.beams[0]!),names=group.beams.map(b=>b.name).join(' + ');
+    for(const {name:manifold,start,size} of MANIFOLDS){const indices=Array.from({length:size},(_,k)=>start+k);
+      for(const state of outside[manifold])for(const counter of [false,true]){
+        const values=indices.map((_,k)=>amplitude([state.dipoles[k*3]!,state.dipoles[k*3+1]!,state.dipoles[k*3+2]!],counter?reverse:group.field));
+        const delta=indices.map(i=>centroid(states[i]!.manifold)+states[i]!.energyMHz-state.energyMHz+(counter?-frequency:frequency));
+        maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,indices,values,delta,10000,`${state.name} 高态 / ${names}`));
+      }}
+    // Rb+ core: the scalar shift −α|E|²/4 of every state of a manifold, per carrier.
+    const squared=accurateSum(group.field.flatMap(q=>[q.re*q.re,q.im*q.im]));
+    states.forEach((state,i)=>{matrix.real[i*N+i]!+=-CORE_POLARIZABILITY_AU[state.manifold]*POLARIZABILITY_AU*squared/(4*H*1e6);});
+  }
+  const result={matrix,maximumMixingRatio};modelCorrectionCache.set(key,result);if(modelCorrectionCache.size>12)modelCorrectionCache.delete(modelCorrectionCache.keys().next().value!);return result;
+}
+/** Cyclic complex-Hermitian Jacobi. No amplitude pruning; a rotation is skipped only when
+ * its off-diagonal entry is exactly zero. The residual is checked against the input. */
+function diagonalizeHermitian(input:Matrix,n:number):{values:number[];vectors:Matrix}{
+  const a={real:input.real.slice(),imag:input.imag.slice()},v=zero(n);for(let i=0;i<n;i++)v.real[i*n+i]=1;
+  const scale=Math.max(1,...input.real.map(Math.abs),...input.imag.map(Math.abs));
+  for(let sweep=0;sweep<60;sweep++){
+    for(let p=0;p<n;p++)for(let q=p+1;q<n;q++){
+      const apq=entry(a,p*n+q),r=norm(apq);if(r===0)continue;
+      const phase={re:apq.re/r,im:apq.im/r},tau=(a.real[q*n+q]!-a.real[p*n+p]!)/(2*r),t=tau===0?1:Math.sign(tau)/(Math.abs(tau)+Math.hypot(1,tau)),c=1/Math.hypot(1,t),s=t*c;
+      if(s===0)continue;
+      for(let k=0;k<n;k++){
+        if(k!==p&&k!==q){const kp=entry(a,k*n+p),kq=entry(a,k*n+q),cq=mul(conj(phase),kq),cp=mul(phase,kp),np={re:c*kp.re-s*cq.re,im:c*kp.im-s*cq.im},nq={re:s*cp.re+c*kq.re,im:s*cp.im+c*kq.im};
+          a.real[k*n+p]=a.real[p*n+k]=np.re;a.imag[k*n+p]=np.im;a.imag[p*n+k]=-np.im;a.real[k*n+q]=a.real[q*n+k]=nq.re;a.imag[k*n+q]=nq.im;a.imag[q*n+k]=-nq.im;}
+        const vp=entry(v,k*n+p),vq=entry(v,k*n+q),cq=mul(conj(phase),vq),cp=mul(phase,vp);v.real[k*n+p]=c*vp.re-s*cq.re;v.imag[k*n+p]=c*vp.im-s*cq.im;v.real[k*n+q]=s*cp.re+c*vq.re;v.imag[k*n+q]=s*cp.im+c*vq.im;
+      }
+      a.real[p*n+p]!-=t*r;a.real[q*n+q]!+=t*r;a.real[p*n+q]=a.real[q*n+p]=a.imag[p*n+q]=a.imag[q*n+p]=0;
+    }
+    let off=0;for(let i=0;i<n;i++)for(let j=i+1;j<n;j++)off=Math.max(off,norm(entry(a,i*n+j)));if(off<=scale*Number.EPSILON*2)break;
+  }
+  const values=Array.from({length:n},(_,i)=>a.real[i*n+i]!);let residual=0;
+  for(let i=0;i<n;i++)for(let j=0;j<n;j++){const products=Array.from({length:n},(_,k)=>mul(entry(input,i*n+k),entry(v,k*n+j)));residual=Math.max(residual,Math.hypot(accurateSum(products.map(x=>x.re))-values[j]!*v.real[i*n+j]!,accurateSum(products.map(x=>x.im))-values[j]!*v.imag[i*n+j]!));}
+  if(!(residual<=scale*1e-11))throw new Error(`背景 Hamiltonian 对角化未收敛 (${residual} MHz)。`);
+  return {values,vectors:v};
+}
+/** Minimum-cost assignment of eigenvectors to state labels, without duplicates at crossings. */
+function labels(v:Matrix,n:number):number[]{
+  const u=Array(n+1).fill(0),w=Array(n+1).fill(0),p=Array(n+1).fill(0),way=Array(n+1).fill(0);
+  for(let i=1;i<=n;i++){p[0]=i;let j0=0;const min=Array(n+1).fill(Infinity),used=Array(n+1).fill(false);
+    do{used[j0]=true;const i0=p[j0];let delta=Infinity,j1=0;for(let j=1;j<=n;j++)if(!used[j]){const k=(i0-1)*n+j-1,cur=-(v.real[k]!**2+v.imag[k]!**2)-u[i0]-w[j];if(cur<min[j]){min[j]=cur;way[j]=j0;}if(min[j]<delta){delta=min[j];j1=j;}}for(let j=0;j<=n;j++){if(used[j]){u[p[j]]+=delta;w[j]-=delta;}else min[j]-=delta;}j0=j1;}while(p[j0]!==0);
+    do{const j1=way[j0];p[j0]=p[j1];j0=j1;}while(j0!==0);
+  }
+  const result=Array(n).fill(0);for(let j=1;j<=n;j++)result[p[j]-1]=j-1;return result;
+}
+/** The static part of the master-model H0 and its eigenbasis (the model basis): each
+ * fine-structure manifold's bare energies plus the static correction, diagonalized, each
+ * eigenvector labelled by the magnetic eigenstate it overlaps most; and the largest mixing
+ * ratio of the correction's couplings. */
+export function staticModelBackground(scene:Scene):{analysis:Analysis;levels:Level[];maximumMixingRatio:number}{
+  const analysis=analyze(scene),{matrix:correction,maximumMixingRatio}=modelCorrection(analysis,groups(scene,analysis)),zeroStates=cachedAtom(0).states,levels:Level[]=[];
+  for(const [offset,count,key] of [[0,8,'ground'],[8,8,'D1'],[16,16,'D2']] as const){
+    const original=analysis[key],h=zero(count);for(let i=0;i<count;i++)for(let j=0;j<count;j++){h.real[i*count+j]=correction.real[(offset+i)*N+offset+j]!+(i===j?original[i]!.energyMHz:0);h.imag[i*count+j]=correction.imag[(offset+i)*N+offset+j]!;}
+    const eig=diagonalizeHermitian(h,count),assignment=labels(eig.vectors,count);
+    levels.push(...original.map((state,i)=>{const col=assignment[i]!,vector={real:Array(N).fill(0),imag:Array(N).fill(0)};for(let k=0;k<count;k++){vector.real[offset+k]=eig.vectors.real[k*count+col]!;vector.imag[offset+k]=eig.vectors.imag[k*count+col]!;}const mixed=vector.real.some((x,k)=>k!==offset+i&&(x!==0||vector.imag[k]!==0));return {...state,energyMHz:eig.values[col]!,shiftMHz:eig.values[col]!-zeroStates[offset+i]!.energyMHz,totalShiftMHz:eig.values[col]!-zeroStates[offset+i]!.energyMHz,starkShiftMHz:eig.values[col]!-state.energyMHz,backgroundState:vector,mixed};}));
+  }
+  return {analysis,levels,maximumMixingRatio};
+}
+
+/** A laser's largest mixing amplitude |Ω/2Δ|, alone at its own carrier -- the ratio above
+ * which the levels chart does not draw a static light shift (STATIC_MIXING_LIMIT, 1%) --
+ * and whether each of its virtual transitions keeps the minimum detuning. The hint beside
+ * the "显示光移" switch; it changes nothing. */
 export function displayMixing(scene:Scene,laserId:string):{ratio:number;withinGap:boolean}{
   const laser=scene.lasers.find(l=>l.id===laserId);if(!laser||laserIntensityMWcm2(laser)===0)return {ratio:0,withinGap:true};
   const analysis=analyze(scene),m=staticMixing(backgroundProblem(analysis,groups({...scene,lasers:[{...laser,enabled:true}]},analysis)));
   return {ratio:m.ratio,withinGap:m.withinGap};
 }
 export function spectroscopyAnalysis(scene:Scene,excludedLaserId?:string,includeTransitions=true):Analysis{
-  const start=performance.now(),analysis=analyze(scene),beams=groups({...scene,lasers:scene.lasers.filter(l=>l.regime==='far')},analysis,excludedLaserId);
+  const start=performance.now(),analysis=analyze(scene),beams=groups({...scene,lasers:shownLasers(scene)},analysis,excludedLaserId);
   let solution:BackgroundSolution|undefined,failure='',maximumMixingRatio:number|undefined;
   if(beams.length){
     const problem=backgroundProblem(analysis,beams),validity=staticMixing(problem);maximumMixingRatio=validity.ratio;
@@ -153,7 +254,7 @@ export function spectroscopyAnalysis(scene:Scene,excludedLaserId?:string,include
   const status=failure?'unresolved':beams.length?'dispersive':'bare',numerics=solution&&{floquetLayers:solution.layers,clusters:solution.clusters,solves:solution.solves,floquetBoundMHz:Math.max(...solution.levels.map(l=>l.floquetBoundMHz)),outsideBoundMHz:Math.max(...solution.levels.map(l=>l.outsideBoundMHz))};
   // The scope's first line: how accurate the numbers on the chart are.
   const accuracy=numerics?[`静态光移的数值误差：32 个能级均 ≤ ${withUnit((numerics.floquetBoundMHz+numerics.outsideBoundMHz)*1e6,'Hz',{digits:2})}（Floquet 取 ${numerics.floquetLayers} 层；各能级的界见悬停提示）。这只是数值误差，不含原子数据（矩阵元、能级、芯极化）的不确定度；后者这里不计算，通常大得多。`]:[];
-  analysis.spectroscopy={status,backgroundLaserIds:beams.flatMap(g=>g.beams.map(b=>b.id)),excludedLaserId,modelScope:failure?'裸态位置/布居；静态总光移未定义。':beams.length?'磁场本征基上远失谐光的静态背景谱（与动力学 H0 相同）：Floquet 准能量，全阶分块求解；含偏振混合、D 线旋转与反旋转、列明高态和芯极化。':'HFS + Zeeman 裸态谱。',nearResonantLaserIds:failure&&beams.length===1?beams.flatMap(g=>g.beams.map(b=>b.id)):[],requiresDensityProjection:false,warnings:failure?[failure,...ASSUMPTIONS]:beams.length?[...accuracy,...ASSUMPTIONS]:[],maximumMixingRatio,sources:SPECTROSCOPY_SOURCES.slice(),...(numerics?{numerics}:{})};
+  analysis.spectroscopy={status,backgroundLaserIds:beams.flatMap(g=>g.beams.map(b=>b.id)),excludedLaserId,modelScope:failure?'裸态位置/布居；静态总光移未定义。':beams.length?'磁场本征基上打开“显示光移”的激光的静态背景谱（仅显示）：Floquet 准能量，全阶分块求解；含偏振混合、D 线旋转与反旋转、列明高态和芯极化。':'HFS + Zeeman 裸态谱。',nearResonantLaserIds:failure&&beams.length===1?beams.flatMap(g=>g.beams.map(b=>b.id)):[],requiresDensityProjection:false,warnings:failure?[failure,...ASSUMPTIONS]:beams.length?[...accuracy,...ASSUMPTIONS]:[],maximumMixingRatio,sources:SPECTROSCOPY_SOURCES.slice(),...(numerics?{numerics}:{})};
   const zeroStates=cachedAtom(0).states;
   for(const [offset,key] of [[0,'ground'],[8,'D1'],[16,'D2']] as const)analysis[key]=analysis[key].map((state,i)=>{
     if(!solution)return {...state,totalShiftMHz:failure?null:state.shiftMHz,starkShiftMHz:failure?null:0,shiftBound:failure?null:{floquetMHz:0,outsideMHz:0},backgroundState:identityState(offset+i),mixed:false};

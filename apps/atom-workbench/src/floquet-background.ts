@@ -1,5 +1,6 @@
-/** The far lasers' static background: the quasi-energies of their Floquet problem, to
- * all orders, by energy-dependent Löwdin (Brillouin–Wigner) partitioning.
+/** The static light shift of the lasers the levels chart shows (显示光移, display only):
+ * the quasi-energies of their Floquet problem, to all orders, by energy-dependent Löwdin
+ * (Brillouin–Wigner) partitioning.
  *
  * States: the 32 magnetic eigenstates and, for each of their three fine-structure
  * manifolds, the states outside the model (spectroscopy-data.ts), which couple only to
@@ -352,7 +353,7 @@ function dressed(p:Prepared,st:Structure,E:number):Dressed{
     // The remaining error enters the residuals (and the bound); a contraction above ½ is a
     // near resonance.
     if(change<=size*1e-9)break;
-    if(sweeps>=MAX_SWEEPS||sweeps>=3&&change>.5*last)throw new Error('远失谐光的 Floquet 分块不收敛：某个 Floquet 副本与能级近共振（例如两束远失谐光的拍频接近能级间隔）。静态光移未定义。');
+    if(sweeps>=MAX_SWEEPS||sweeps>=3&&change>.5*last)throw new Error('静态光移的 Floquet 分块不收敛：某个 Floquet 副本与能级近共振（例如两束光的拍频接近能级间隔）。静态光移未定义。');
     last=change;
   }
   const hx=copies.map((copy,q)=>{const out=spare[q]!;out.re.fill(0);out.im.fill(0);couple(q,out,true);const x=phi[q]!;for(let i=0;i<copy.dim;i++){const d=copy.diag[i]!-E;for(let j=0;j<nP;j++){out.re[i*nP+j]+=d*x.re[i*nP+j]!;out.im[i*nP+j]+=d*x.im[i*nP+j]!;}}return out;});
@@ -406,7 +407,7 @@ function clusterStep(p:Prepared,st:Structure,lo:number,hi:number,E:number):{leve
       for(const [i,j] of g.omitted){const a=g.attached[i]!,b=g.attached[j]!;pairs+=(i===j?1:2)*Math.sqrt(S[a.slot]!*S[b.slot]!)*amplitude[a.copy]!*amplitude[b.copy]!;}});
     let inModel=0,outsideTail=0;
     st.next.forEach((copy,n)=>{if(leakIn[n]===0&&leakOut[n]===0)return;const gap=gapTo(theta,[copy]);
-      if(!(gap>0))throw new Error('远失谐光的 Floquet 分块不满足能隙条件：能级离某个 Floquet 副本太近（多光子共振），无法界定误差。静态光移未定义。');
+      if(!(gap>0))throw new Error('静态光移的 Floquet 分块不满足能隙条件：能级离某个 Floquet 副本太近（多光子共振），无法界定误差。静态光移未定义。');
       inModel+=leakIn[n]!**2/gap;outsideTail+=(leakOut[n]!**2+2*leakIn[n]!*leakOut[n]!)/gap;});
     return {level:{energy:theta,E,delta,span,c:[re,im] as [Float64Array,Float64Array],floquet:0,outside:0},theta,inModel,outside:outsideTail+pairs};
   });
@@ -416,7 +417,7 @@ function clusterStep(p:Prepared,st:Structure,lo:number,hi:number,E:number):{leve
     for(let q=1;q<=copies;q++){
       const eta=q<copies?gapTo(f.theta,[st.copies[q]!]):d.poleGap-Math.abs(f.level.delta);let others=0;
       for(let l=0;l<members;l++)others+=residual[l*(copies+1)+q]!;const own=residual[k*(copies+1)+q]!;if(own===0)continue;
-      if(!(eta>4*others))throw new Error('远失谐光的 Floquet 分块不满足能隙条件：能级离某个 Floquet 副本或 32 态以外能级太近，无法界定误差。静态光移未定义。');
+      if(!(eta>4*others))throw new Error('静态光移的 Floquet 分块不满足能隙条件：能级离某个 Floquet 副本或 32 态以外能级太近，无法界定误差。静态光移未定义。');
       partition+=own*others/eta;}
     // The charge-0 part of r couples to the Q-like states only through their dressing.
     let own=residual[k*(copies+1)]!,others=0;for(let l=0;l<members;l++)others+=residual[l*(copies+1)]!;
@@ -470,12 +471,12 @@ export function solveStaticBackground(problem:BackgroundProblem):BackgroundSolut
     while(result.deeper){layers++;result=solveSector(p,sector,layers);solves+=result.solves;}
     layersUsed=Math.max(layersUsed,layers);clusters+=result.clusters;
     const start=sector==='ground'?0:8,nP=sector==='ground'?8:24,found=result.levels;
-    if(found.length!==nP)throw new Error('远失谐背景的能级数与模型不符。');
+    if(found.length!==nP)throw new Error('静态光移背景的能级数与模型不符。');
     // Charge-0 parts, orthonormalized symmetrically (Löwdin): the dressed states are
     // orthonormal in the full space, their charge-0 parts only nearly so.
     const v=cmatrix(nP,nP);found.forEach((l,j)=>{for(let i=0;i<nP;i++){v.re[i*nP+j]=l.c[0]![i]!;v.im[i*nP+j]=l.c[1]![i]!;}});
     const overlap=cmatrix(nP,nP);gram(overlap,v,v);const eig=hermitianEigen(overlap);
-    if(!(Math.min(...eig.values)>.5))throw new Error('远失谐背景的能级态线性相关。');
+    if(!(Math.min(...eig.values)>.5))throw new Error('静态光移背景的能级态线性相关。');
     const root=cmatrix(nP,nP);for(let i=0;i<nP;i++)for(let j=0;j<nP;j++){let re=0,im=0;for(let k=0;k<nP;k++){const f=1/Math.sqrt(eig.values[k]!),ar=eig.vectors.re[i*nP+k]!,ai=eig.vectors.im[i*nP+k]!,br=eig.vectors.re[j*nP+k]!,bi=-eig.vectors.im[j*nP+k]!;re+=f*(ar*br-ai*bi);im+=f*(ar*bi+ai*br);}root.re[i*nP+j]=re;root.im[i*nP+j]=im;}
     const u=cmatrix(nP,nP);multiply(u,v,root);
     const labels=assignment(Array.from({length:nP},(_,i)=>Array.from({length:nP},(_,j)=>u.re[i*nP+j]!**2+u.im[i*nP+j]!**2)));

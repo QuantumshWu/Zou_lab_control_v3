@@ -1,7 +1,7 @@
 import type {DynamicsResult,SteadyStatus,PopulationAccuracy} from './solver-types.js';
 import {CONVERGED_MEAN_STATUSES,STEADY_STATUSES,isInitialDependent,readPopulationAccuracy} from './solver-types.js';
 import type {DynamicsSettings,InitialStateSpec,Scene,Level} from './types.js';
-import {MEAN_HORIZONS_US,canonicalInitialState,resolveInitialState,resolveMeanHorizon,resolvePopulationTolerance} from './types.js';
+import {MEAN_HORIZONS_US,POPULATION_TOLERANCE,canonicalInitialState,resolveInitialState,resolveMeanHorizon} from './types.js';
 import {initialPopulations} from './full-master-model.js';
 import {laserIntensityMWcm2} from './physics.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from './solver-protocol.js';
@@ -42,7 +42,7 @@ export class DynamicsClient {
     try{
       const response=await this.transport(this.base+'/api/solve',{method:'POST',signal:job.controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({modelSchema:FULL_MODEL_SCHEMA,stream:!!job.onProgress,request:{clientId:this.clientId,sequence:job.id},scene:job.scene,options:{
         initialStateId:job.settings.initialStateId,initialState:canonicalInitialState(resolveInitialState(job.settings,job.scene)),durationUs:job.settings.durationUs,samples:job.settings.samples,
-        populationTolerance:resolvePopulationTolerance(job.settings.populationTolerance),meanHorizonUs:resolveMeanHorizon(job.settings),
+        populationTolerance:POPULATION_TOLERANCE,meanHorizonUs:resolveMeanHorizon(job.settings),
         includeAsymptotic:true,steadyOnly:job.steadyOnly,
       }})}).catch(error=>{if(error instanceof TypeError)throw new RequestFailure('本机 Rust 求解服务连接暂时失败。',0,'network-error',true);throw error;});
       if(!response.ok){const detail=await response.json().catch(()=>({error:''}));evidence=detail;throw new RequestFailure(detail.error||`Local solver: ${response.status}`,response.status,detail.code??'',(response.status===502||response.status===503)&&!/invalid|incompatible|numerical/.test(detail.code??''));}
@@ -53,7 +53,7 @@ export class DynamicsClient {
         !Array.isArray(data.service?.capabilities)||!data.service.capabilities.includes(FULL_MODEL_SCHEMA))throw new Error('本机求解服务版本不兼容：需要 rb87-full/2 模型，旧模型结果未显示。');
       if(!data.request||data.request.clientId!==this.clientId||data.request.sequence!==job.id)throw new Error('求解响应与当前请求不匹配。');
       const result=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings,job.scene));
-      this.checkAccuracyRequest(result,job);this.checkHorizon(result,job);
+      this.checkHorizon(result,job);
       const expected=job.steadyOnly?1:job.settings.samples;
       if(result.timesUs.length!==expected||(!job.steadyOnly&&Math.abs(result.timesUs.at(-1)!-job.settings.durationUs)>1e-10*Math.max(1,job.settings.durationUs)))throw new Error('求解响应的采样与请求不匹配。');
       if(!result.steady?.converged)this.recordFailure(job,new Error(result.steady?.reason??'长期布居未解析'),false,evidence);
@@ -82,7 +82,7 @@ export class DynamicsClient {
       const data=event.data;
       if(data?.request?.clientId!==this.clientId||data.request.sequence!==job.id||data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||!data.service?.capabilities?.includes(FULL_MODEL_SCHEMA))throw new Error('稳态进度与当前请求不匹配。');
       const mean=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings,job.scene));
-      this.checkAccuracyRequest(mean,job);this.checkHorizon(mean,job);
+      this.checkHorizon(mean,job);
       if(mean.timesUs.length!==1||!mean.steady.converged)throw new Error('稳态进度缺少已验证的长期布居。');
       job.onProgress?.(mean);
     };
@@ -92,9 +92,6 @@ export class DynamicsClient {
   }
   private recordFailure(job:Job,error:unknown,willRetry:boolean,response:unknown):void{
     try{this.onFailure?.({time:new Date().toISOString(),request:{clientId:this.clientId,sequence:job.id},scene:structuredClone(job.scene),options:{...job.settings,steadyOnly:job.steadyOnly,includeAsymptotic:true},attempt:job.attempt,willRetry,error:error instanceof Error?error.message:String(error),...(error instanceof RequestFailure?{status:error.status,code:error.code}:{}),response,page:globalThis.location?.href});}catch{/* Diagnostics cannot block or replace a physics result. */}
-  }
-  private checkAccuracyRequest(result:DynamicsResult,job:Job):void{
-    if(result.populationAccuracy&&result.populationAccuracy.requestedTolerance!==resolvePopulationTolerance(job.settings.populationTolerance))throw new Error('求解响应的布居误差目标与本次请求不匹配。');
   }
   private checkHorizon(result:DynamicsResult,job:Job):void{
     if(result.steady.horizonUs!==undefined&&result.steady.horizonUs!==resolveMeanHorizon(job.settings))throw new Error('求解响应的长期布居观察时长与本次请求不匹配。');

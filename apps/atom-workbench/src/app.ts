@@ -25,10 +25,9 @@ import {analyze,dipoleBetweenStates,resolveSceneFrequencies,laserIntensityMWcm2,
 import {normalizeLaserIntensity,setLaserIntensityMode,setLaserLocalIntensity,setLaserPowerMW,setLaserWaistUm} from './laser-intensity.js';
 import {dynamicsCacheKey} from './dynamics-cache-key.js';
 import {CurrentDynamicsResults} from './current-dynamics-results.js';
-import {spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
-import {classifyLasers,farValidity} from './laser-regime.js';
+import {STATIC_MIXING_LIMIT,displayMixing,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
 import {Readout} from '../../desktop/ui/src/fluent/readout.js';
-import {defaultDynamics,defaultScene,MAX_POPULATION_TOLERANCE,resolveMeanHorizon,resolvePopulationTolerance} from './types.js';
+import {defaultDynamics,defaultScene,POPULATION_TOLERANCE,resolveMeanHorizon} from './types.js';
 import type {Analysis,AxisAngles,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,Transition} from './types.js';
 import {isTimeAverage,type DynamicsResult} from './solver-types.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
@@ -202,12 +201,12 @@ function activeLaser(_line?:SpectralLine):Laser|undefined{
 }
 /** A reference frequency as the levels chart reads a beam: its frequency, no intensity, no geometry. */
 function referenceBeam(r:ReferenceFrequency):Laser{
-  return {id:r.id,name:r.name,enabled:true,regime:'near',line:r.frequencyAnchor?.line??'D2',frequency:r.frequency,frequencyAnchor:r.frequencyAnchor,intensityMWcm2:0,thetaDeg:0,phiDeg:0,polarizationAngleDeg:0,ellipticityDeg:0};
+  return {id:r.id,name:r.name,enabled:true,line:r.frequencyAnchor?.line??'D2',frequency:r.frequency,frequencyAnchor:r.frequencyAnchor,intensityMWcm2:0,thetaDeg:0,phiDeg:0,polarizationAngleDeg:0,ellipticityDeg:0};
 }
 /** The selected beam itself, not a reference frequency read as one. */
 function selectedBeam(l:Laser|undefined):boolean{return !!l&&scene.lasers.includes(l);}
 function referenceStateId(laser=activeLaser()):string{return laserReferenceStateId(scene,laser);}
-function dynamics():DynamicsSettings{const d=scene.dynamics??(scene.dynamics=defaultDynamics());d.populationTolerance=resolvePopulationTolerance(d.populationTolerance);return d;}
+function dynamics():DynamicsSettings{return scene.dynamics??(scene.dynamics=defaultDynamics());}
 function normalizeScene(next:Scene):void{try{migrateSceneFrequencies(next);}catch{/* The status reports an invalid frequency. */}for(const laser of next.lasers){try{normalizeLaserIntensity(laser);}catch{/* The inspector reports an invalid laser. */}}}
 
 // Edits since the scene was loaded: derived anchors and automatic curve choices are not edits.
@@ -215,7 +214,7 @@ let baseline:string|null=null;
 try{baseline=localStorage.getItem(`${STORAGE}-baseline`);}catch{}
 function editKey(value:Scene=scene):string{
   // The display unit, derived anchors and the automatic curve choice are not edits.
-  const d=value.dynamics,settings=d?{initialStateId:d.initialStateId,initialState:d.initialState,durationUs:d.durationUs,samples:d.samples,populationTolerance:d.populationTolerance,
+  const d=value.dynamics,settings=d?{initialStateId:d.initialStateId,initialState:d.initialState,durationUs:d.durationUs,samples:d.samples,
     curves:d.monitorMode==='manual'?[d.monitoredStateIds,d.monitoredGroupIds??[]]:'auto'}:null;
   return JSON.stringify({...value,display:undefined,dynamics:settings},(key,item)=>key.endsWith('Anchor')?undefined:item);
 }
@@ -243,10 +242,7 @@ function solverStatus():[string,StatusWord]{
 function refreshStatus():void{
   if(notice&&performance.now()>notice.until)notice=undefined;
   let [text,word]=solverStatus();
-  const regime=regimeProblems();
   if(analysisError)[text,word]=[`能级参数无效：${analysisError}`,'error'];
-  // A solve refused for a regime problem (requestSolve) is that problem, not a failed calculation.
-  else if(regime.length&&(word!=='error'||regime.includes(currentSolverError())))[text,word]=[`处理方式不适用：${regime.join('；')}`,'warning'];
   if(notice)[text,word]=[notice.text,notice.word];
   if(saveState==='failed')[text,word]=[`本地保存失败：${saveFailure}；请导出场景`,'error'];
   else if(loadFailure&&!notice)[text,word]=[`原本地场景无法载入：${loadFailure}。已显示默认场景，原数据已保留`,'warning'];
@@ -268,7 +264,7 @@ function select(next:Selection):void{
 }
 function clearSourceSelection():void{if(selection.kind!=='none')select({kind:'none',id:''});}
 /** A click on an object selects it; on the selected one it clears the selection, so the levels
- * chart shows the total shift of B and the 静态光移 lasers (ui-design.md §1.5). The second click
+ * chart shows the total shift of B and the lasers shown (显示光移, ui-design.md §1.5). The second click
  * of a double-click is no second choice. */
 function pick(next:Selection,event?:Event):void{
   if(event instanceof MouseEvent&&event.detail>1)return;
@@ -362,7 +358,7 @@ function addObject(kind:ObjectKind):void{
     select({kind:'level',id});update();return;
   }
   if(kind==='field'){if(scene.fields.length>=8)return;const id=`field-${Date.now()}`;scene.fields.push({id,name:nextObjectName('磁场',scene.fields),enabled:true,magnitudeG:1,thetaDeg:90,phiDeg:0});select({kind:'field',id});update();}
-  else{if(scene.lasers.length>=8)return;const id=`laser-${Date.now()}`;scene.lasers.push({id,name:nextObjectName('激光',scene.lasers),enabled:true,regime:'near',line:spectral,frequency:{base:{kind:'transition',line:spectral,Fg:2,Fe:spectral==='D1'?2:3},offsetMHz:0},frequencyUnit:'MHz',intensityMWcm2:.1,thetaDeg:90,phiDeg:0,polarizationAngleDeg:0,ellipticityDeg:0});controlsKey='';select({kind:'laser',id});update();}
+  else{if(scene.lasers.length>=8)return;const id=`laser-${Date.now()}`;scene.lasers.push({id,name:nextObjectName('激光',scene.lasers),enabled:true,showLightShift:false,line:spectral,frequency:{base:{kind:'transition',line:spectral,Fg:2,Fe:spectral==='D1'?2:3},offsetMHz:0},frequencyUnit:'MHz',intensityMWcm2:.1,thetaDeg:90,phiDeg:0,polarizationAngleDeg:0,ellipticityDeg:0});controlsKey='';select({kind:'laser',id});update();}
   update();
 }
 
@@ -422,7 +418,7 @@ function renderInspector():void{
   const host=$('inspector-controls');const panel=host.closest<HTMLElement>('.inspector-panel')!,scroll=panel.scrollTop;
   disposeTrees(host);host.replaceChildren();inspectorFields.clear();directionCommands.length=0;
   renameObject.hidden=!selectedObject();
-  if(selection.kind==='none'){setText('inspector-title','总场');host.append(element('p','note wrap inspector-empty','未选中对象：能级图标注磁场和“静态光移”激光带来的总能移。点选磁场、激光或参考以编辑其参数；再点一次已选中的对象即回到这里。'));return;}
+  if(selection.kind==='none'){setText('inspector-title','总场');host.append(element('p','note wrap inspector-empty','未选中对象：能级图标注磁场和打开“显示光移”的激光带来的总能移。点选磁场、激光或参考以编辑其参数；再点一次已选中的对象即回到这里。'));return;}
   const fields=inspectorFields;
   if(selection.kind==='reference'){
     const r=scene.referenceFrequencies?.find(r=>r.id===selection.id);if(!r)return;setText('inspector-title',r.name);
@@ -438,10 +434,10 @@ function renderInspector():void{
     directionButtons(g,(theta,phi)=>{field.thetaDeg=theta;field.phiDeg=phi;refreshFields(fields);renderObjects();update();});
   }else{
     const l=scene.lasers.find(l=>l.id===selection.id);if(!l)return;normalizeLaserIntensity(l);setText('inspector-title',l.name);
-    // ui-design.md §4 (release): how the laser enters the master equation. 静态光移 lasers are
-    // also the levels chart's background. |Ω/2Δ| and the model's own refusal sit beside it.
-    const mode=group('激光类型');bindField(fields,mode,'inspector',()=>({name:'regime',label:'处理方式',kind:'choice',segmented:true,choices:[['near','进入主方程'],['far','静态光移']],value:l.regime??'near',description:'进入主方程：旋转波驱动，耦合 D1、D2 全部允许跃迁；静态光移：只取它的静态光移（全阶），能级图背景显示它，不含散射'}),v=>{l.regime=v as 'near'|'far';});
-    mode.append(fieldRow('|Ω/2Δ| 最大',mixingReadout.root),mixingWarning);refreshMixing(l);
+    // ui-design.md §4: every laser drives the dynamics; this only chooses the levels chart's background.
+    const chart=group('能级图');bindField(fields,chart,'inspector',()=>({name:'show-light-shift',label:'显示光移',kind:'boolean',value:l.showLightShift===true,description:'开：未选中对象时，能级图的背景包含这束光的静态光移（全阶，仅显示，不影响动力学）'}),v=>{l.showLightShift=v===true;});
+    // A hint beside the switch, never acting on it: |Ω/2Δ|, which the static light shift holds to 1%.
+    chart.append(fieldRow('|Ω/2Δ| 最大',mixingReadout.root),mixingWarning);refreshMixing(l);
     const f=group('频率');
     frequencySection(f,l,laserReadout);
     const originPicker=selectControl(f,'参考态',l.referenceStateId??'',[['','跟随动力学初态'],...allLevels().map(state=>[state.id,stateText(state)] as [string,string]),...(scene.references??[]).map(ref=>[ref.id,ref.name+' · 参考能级'] as [string,string])],id=>{setLaserReferenceState(scene,l,id||undefined);persist();renderInspector();renderResults(false);});originPicker.id='laser-reference-state';originPicker.setAttribute('aria-label','参考出发态');originPicker.title='只改变这束光的箭头起点和矩元参考；不改变动力学初态或任何驱动。';
@@ -473,33 +469,26 @@ const readoutPrefs=new ReadoutPreferences(()=>((scene.display??={}).readouts??={
 const laserReadout=new FrequencyReadout('laser-frequency',readoutPrefs,{
   bases:()=>frequencyBaseTree({absolute:'光频',absoluteText:'绝对',lasers:scene.lasers.filter(other=>other.id!==selection.id),references:scene.referenceFrequencies}),defaultBase:'absolute',changed:()=>{},
 });
-const mixingReadout=new Readout(''),mixingWarning=element('p','note wrap mixing-warning');
+const mixingReadout=new Readout(''),mixingWarning=element('p','note wrap mixing-warning','离共振太近，静态光移不能代表它的作用');
 mixingReadout.root.classList.add('frequency-reading');
-/** Why the model would refuse this laser in its regime, in the model's own words: a 静态光移
- * laser by laser-regime.ts farValidity (its detuning rule and |Ω/2Δ| ≤ 1%), an 进入主方程 one by
- * classifyLasers' near-resonance range. '' when it is accepted (or does not take part). */
-let problemsKey='',problems=new Map<string,string>();
-function laserProblem(l:Laser):string{
-  // Recomputed only when a field or a laser changed: the status, badge, legend and inspector all ask.
-  const key=JSON.stringify([scene.fields,scene.lasers]);if(key!==problemsKey){problemsKey=key;problems=new Map();}
-  const known=problems.get(l.id);if(known!==undefined)return known;
-  const found=checkLaser(l);problems.set(l.id,found);return found;
+/** A laser's |Ω/2Δ| and whether it is too close to resonance for a static light shift to
+ * represent its effect: the levels chart draws one only while |Ω/2Δ| ≤ 1% and every virtual
+ * transition keeps its minimum detuning (spectroscopy.ts displayMixing). Recomputed only
+ * when a field or a laser changed: the inspector and the legend both ask. */
+let mixingKey='',mixings=new Map<string,{ratio:number;tooClose:boolean}|undefined>();
+function mixingOf(l:Laser):{ratio:number;tooClose:boolean}|undefined{
+  const key=JSON.stringify([scene.fields,scene.lasers]);if(key!==mixingKey){mixingKey=key;mixings=new Map();}
+  if(mixings.has(l.id))return mixings.get(l.id);
+  let found:{ratio:number;tooClose:boolean}|undefined;
+  try{const m=displayMixing(scene,l.id);found={ratio:m.ratio,tooClose:!(m.ratio<=STATIC_MIXING_LIMIT)||!m.withinGap};}catch{found=undefined;}
+  mixings.set(l.id,found);return found;
 }
-function checkLaser(l:Laser):string{
-  try{
-    if(!l.enabled||laserIntensityMWcm2(l)===0)return '';
-    if((l.regime??'near')==='far'){const check=farValidity(scene,l.id);return check.valid?'':check.message;}
-    const near=classifyLasers(scene).find(c=>c.id===l.id);return near&&!near.valid?near.message:'';
-  }catch(error){return message(error);}
-}
-function regimeProblems():string[]{return scene.lasers.map(laserProblem).filter(Boolean);}
 function refreshMixing(l:Laser):void{
-  let mixing:number|undefined;try{mixing=farValidity(scene,l.id).mixing;}catch{mixing=undefined;}
-  mixingReadout.text=mixing===undefined?'—':Number.isFinite(mixing)?populationValue(mixing):'∞';
-  mixingReadout.root.title='这束光各跃迁 |Ω/2Δ| 的最大值；“静态光移”要求它不超过 1%';
-  const problem=laserProblem(l);mixingWarning.textContent=problem;
+  const m=mixingOf(l);
+  mixingReadout.text=!m?'—':Number.isFinite(m.ratio)?populationValue(m.ratio):'∞';
+  mixingReadout.root.title='这束光各跃迁 |Ω/2Δ| 的最大值；能级图的静态光移要求它不超过 1%';
   // The warning concerns a displayed shift only: with the switch off the value is just a reading.
-  mixingWarning.hidden=!problem;
+  mixingWarning.hidden=!(l.showLightShift===true&&m?.tooClose);
 }
 const referenceReadout=new FrequencyReadout('reference-frequency',readoutPrefs,{
   bases:()=>frequencyBaseTree({absolute:'光频',absoluteText:'绝对',lasers:scene.lasers,references:(scene.referenceFrequencies??[]).filter(other=>other.id!==selection.id)}),defaultBase:'absolute',changed:()=>{},
@@ -620,7 +609,7 @@ function photonValue(fromId:string,toId:string,zeroField=false):FrequencyValue|u
 }
 /** The two-state readout (ui-design.md §1.8): ν₁₂ itself, then Δν = ν₁₂ − ν(参考) against the
  * frequency chosen beside it; "自动" is the same two states at zero field, so by default Δν is
- * what the field and the 静态光移 lasers move this transition by. */
+ * what the field and the lasers shown (显示光移) move this transition by. */
 let pairValue:FrequencyValue|undefined,pairZeroField:FrequencyValue|undefined;
 const pairFrequency=new FrequencyReadout('pair-frequency',readoutPrefs,{changed:()=>{}});
 const pairReadout=new FrequencyReadout('pair',readoutPrefs,{
@@ -725,8 +714,6 @@ function refreshPopulationOnly():void{
   renderedPopulationKey=dynamicsKey();root.dataset.populationFresh=String(!!currentResult());root.dataset.populationPaintCount=String(++populationPaintCount);refreshStatus();
 }
 function requestSolve(force=false):void{
-  const refused=regimeProblems()[0];
-  if(refused){cancelObsoleteSolve();solverError=refused;requestedKey=dynamicsKey();refreshPopulationOnly();return;}
   // A trajectory already here for these inputs needs only its mean at the new horizon.
   const physicalKey=trajectoryKey(),trajectory=displayedResults.get(physicalKey,'trajectory'),steadyOnly=meanOnly()&&!(force&&view==='dynamics');
   const key=dynamicsKey(steadyOnly),horizon=resolveMeanHorizon(dynamics());
@@ -800,9 +787,9 @@ function populationSnapshot():{populations?:Record<string,number>;label:string;t
   if(populationMode==='steady'){const populations=steadyPopulationsInView();return result.steady?.converged&&result.steady.populations?{populations,label:populations?meanSymbol(result):'当前背景布居未定义'}:{label:'长期布居未解析'};}
   const index=populationTimeIndex<0?result.timesUs.length-1:Math.min(populationTimeIndex,result.timesUs.length-1),timeUs=result.timesUs[index]??0;
   // p(t) is in the model basis; on the chart's states it reads by id only while the bases'
-  // difference stays within the population error target (population-basis.ts).
+  // difference stays within the population accuracy (population-basis.ts).
   const basisError=view==='levels'?timeBasisError(result):0;
-  if(!(basisError<=resolvePopulationTolerance(dynamics().populationTolerance)))return {label:'p(t) 在模型基中，与能级图的基相差过大，未着色',timeUs};
+  if(!(basisError<=POPULATION_TOLERANCE))return {label:'p(t) 在模型基中，与能级图的基相差过大，未着色',timeUs};
   return {populations:Object.fromEntries(Object.entries(result.populations).map(([id,values])=>[id,values[index]??0])),label:`p(${formatNumber(timeUs,{digits:4})} μs)${basisError>1e-6?` · 基差 ≤ ${formatNumber(basisError,{digits:2})}`:''}`,timeUs};
 }
 /** How much carrying the result's p(t) over to the chart's states by id can change them. */
@@ -889,12 +876,11 @@ function renderDynamicsControls(a:Analysis):void{
     return;
   }
   controlsKey=key;const monitorsWereOpen=parent.querySelector<HTMLDetailsElement>('.monitor-controls')?.open??false;disposeTrees(parent);parent.replaceChildren();dynamicsFields.clear();
-  const time=form('dynamics-config'),accuracy=form('dynamics-config');parent.append(time,accuracy);
+  const time=form('dynamics-config'),curves=form('dynamics-config');parent.append(time,curves);
   const after=()=>update();
   bindField(dynamicsFields,time,'dynamics',()=>({...numberSpec('duration','时长',durationValue(d),durationUnit(d),{spin:true,inexact:true}),units:DURATION_UNITS.map(u=>({value:u,label:u,group:'时间'}))}),v=>setDurationValue(d,Number(v)),{after,unit:unit=>{setDurationUnit(d,unit as DurationUnit);}});
   bindField(dynamicsFields,time,'dynamics',()=>({name:'samples',label:'采样点数',kind:'integer',value:d.samples,minimum:2,maximum:2001,step:1}),v=>{const n=Number(v);if(!Number.isInteger(n))throw new Error('采样点数必须为整数');d.samples=n;},{after});
-  bindField(dynamicsFields,accuracy,'dynamics',()=>numberSpec('population-tolerance','布居误差目标',Number((d.populationTolerance*100).toPrecision(12)),'%',{maximum:MAX_POPULATION_TOLERANCE*100,step:.1}),v=>{d.populationTolerance=resolvePopulationTolerance(Number(v)/100);},{after});
-  bindField(dynamicsFields,accuracy,'dynamics',()=>({name:'monitor-mode',label:'显示曲线',kind:'choice',segmented:true,choices:[['auto','初末各 3 态'],['manual','手动选择']],value:d.monitorMode??'auto'}),v=>{d.monitorMode=v as 'auto'|'manual';if(v==='auto')d.monitoredGroupIds=[];else parent.querySelector<HTMLDetailsElement>('.monitor-controls')!.open=true;},{after});
+  bindField(dynamicsFields,curves,'dynamics',()=>({name:'monitor-mode',label:'显示曲线',kind:'choice',segmented:true,choices:[['auto','初末各 3 态'],['manual','手动选择']],value:d.monitorMode??'auto'}),v=>{d.monitorMode=v as 'auto'|'manual';if(v==='auto')d.monitoredGroupIds=[];else parent.querySelector<HTMLDetailsElement>('.monitor-controls')!.open=true;},{after});
   const monitors=element('details','monitor-controls');monitors.open=monitorsWereOpen;
   const summary=element('summary');summary.append(element('span','monitor-title','观察曲线'),element('span','monitor-count',`${populationDisplayIds(d).length} 条`),element('span','spacer'),monitorAll.root,monitorNone.root);
   monitors.append(summary);const list=element('div','monitor-tree');monitors.append(list);parent.append(monitors);
@@ -908,7 +894,7 @@ function renderDynamicsControls(a:Analysis):void{
       rowNode.append(choices);section.append(rowNode);
     }list.append(section);
   }
-  requestAnimationFrame(()=>{shareLabelColumn(time);shareLabelColumn(accuracy);});
+  requestAnimationFrame(()=>{shareLabelColumn(time);shareLabelColumn(curves);});
 }
 const monitorAll=command('全部磁子能级',()=>{const d=dynamics();d.monitorMode='manual';d.monitoredStateIds=allLevels().map(state=>state.id);update();},{role:'quiet'});monitorAll.root.id='monitor-all';
 const monitorNone=command('清空',()=>{const d=dynamics();d.monitorMode='manual';d.monitoredStateIds=[];d.monitoredGroupIds=[];update();},{role:'quiet'});monitorNone.root.id='monitor-none';
@@ -938,7 +924,7 @@ function refreshDirectionStates(a:Analysis):void{
 
 /** The level diagram's one-line definition of its labels (ui-design.md §1.5). */
 function levelsLegend(a:Analysis,laser:Laser|undefined):string{
-  const beam=(id:string)=>{const l=scene.lasers.find(l=>l.id===id);return !l?id:laserProblem(l)?`${l.name}（静态光移不适用）`:l.name;};
+  const beam=(id:string)=>{const l=scene.lasers.find(l=>l.id===id);return !l?id:mixingOf(l)?.tooClose?`${l.name}（离共振太近）`:l.name;};
   const background=[...(a.fieldMagnitudeG>0?['B']:[]),...(a.spectroscopy?.backgroundLaserIds??[]).map(beam)].join(' + ')||'无';
   if(a.spectroscopy?.status==='unresolved')return `标注：裸态能级，背景光移未确定；背景：${background}`;
   // Every card is how far its state lies above its anchor (levelReadoutMHz): + is higher.
@@ -949,7 +935,7 @@ function levelsLegend(a:Analysis,laser:Laser|undefined):string{
 /** What the level diagram is showing now, for its ⓘ. */
 function levelScope():{title:string;lines:string[]}|undefined{
   const a=latestAnalysis;if(!a)return undefined;
-  const lines=[...regimeProblems(),a.spectroscopy?.modelScope,...(a.spectroscopy?.warnings??[])].filter((line):line is string=>Boolean(line)).flatMap(line=>line.split('\n'));
+  const lines=[a.spectroscopy?.modelScope,...(a.spectroscopy?.warnings??[])].filter((line):line is string=>Boolean(line)).flatMap(line=>line.split('\n'));
   return lines.length?{title:'当前能级图',lines}:undefined;
 }
 function samplingScope():{title:string;lines:string[]}|undefined{
@@ -1001,7 +987,7 @@ function renderResults(allowSolve=true):void{
     setText('levels-heading',a.spectroscopy?.status==='unresolved'?'裸态能级':laser?'背景能级':'总场能级');
     setText('levels-legend',levelsLegend(a,laser));
     beamChip.hidden=!laser;if(laser)setMiddle(beamChipName,laser.name,'cut');
-    setText('levels-badge',regimeProblems().length?'处理方式不适用':a.spectroscopy?.status==='unresolved'?(laser?'裸态失谐 · 背景光移未确定':'静态光移未定义'):populationMode==='time'&&currentResult()&&!(timeBasisError(currentResult()!)<=resolvePopulationTolerance(dynamics().populationTolerance))?'p(t) 在模型基中':laser&&!laser.enabled?'已停用':'');
+    setText('levels-badge',a.spectroscopy?.status==='unresolved'?(laser?'裸态失谐 · 背景光移未确定':'静态光移未定义'):populationMode==='time'&&currentResult()&&!(timeBasisError(currentResult()!)<=POPULATION_TOLERANCE)?'p(t) 在模型基中':laser&&!laser.enabled?'已停用':'');
     renderSelection(a,laser);
     levelsChart$.innerHTML=levelsChart(scene,a,laser,{line:spectral,selectedIds:markedComparison(laser),initialId:singleInitialId(),populations:snapshot.populations,steadyPopulations:steadyPopulationsInView(a),steadyPopulationLabel:meanSymbol(),populationLabel:snapshot.label,viewportWidth:levelsChart$.clientWidth});
     const table=transitionTable(transitions);

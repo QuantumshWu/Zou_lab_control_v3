@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {setTimeout as pause} from 'node:timers/promises';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
-import {defaultScene,resolvePopulationTolerance} from '../dist/js/atom-workbench/src/types.js';
+import {POPULATION_TOLERANCE,defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {nativeResult} from './native-result.mjs';
@@ -13,7 +13,7 @@ import {isTimeAverage} from '../dist/js/atom-workbench/src/solver-types.js';
 /** The HTTP response for this scene: a native result plus transport metadata. */
 function fixture(scene=defaultScene(),settings=scene.dynamics,timesUs=[0,settings.durationUs/2,settings.durationUs]){
   const states=buildFullMasterModel(scene,settings).states,initialIndex=states.findIndex(s=>s.id===settings.initialStateId);
-  return {...nativeResult({states,initialIndex,timesUs,tolerance:resolvePopulationTolerance(settings.populationTolerance)}),assumptions:['test assumption'],
+  return {...nativeResult({states,initialIndex,timesUs,tolerance:POPULATION_TOLERANCE}),assumptions:['test assumption'],
     service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]}};
 }
 const noMean=data=>{for(const key of ['asymptoticPopulations','asymptoticDensityReal','asymptoticDensityImag'])delete data[key];return data;};
@@ -76,18 +76,13 @@ function transport(){const calls=[];return {calls,fetch:async(url,init)=>new Pro
 const reply=(call,data)=>call.resolve(new Response(JSON.stringify({...data,request:call.body.request}),{status:200,headers:{'Content-Type':'application/json'}}));
 async function waitCalls(mock,count){for(let i=0;i<100&&mock.calls.length<count;i++)await pause(2);assert.equal(mock.calls.length,count);}
 
-test('population tolerance POST preserves custom units, supplies legacy default and rejects invalid input before transport',async t=>{
+test('every POST asks for the fixed population accuracy, whatever the settings carry',async t=>{
  const mock=transport(),client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'population-tolerance'});t.after(()=>client.dispose());
- for(const [index,epsilon]of [.003731,undefined].entries()){
-  const scene=scenario();if(epsilon===undefined)delete scene.dynamics.populationTolerance;else scene.dynamics.populationTolerance=epsilon;
+ for(const [index,stray] of [undefined,.003731,.02,'0.005'].entries()){
+  const scene=scenario();if(stray!==undefined)scene.dynamics.populationTolerance=stray;
   const pending=client.solve(scene,scene.dynamics);await waitCalls(mock,index+1);
-  assert.equal(mock.calls[index].body.options.populationTolerance,epsilon??.005);
+  assert.equal(mock.calls[index].body.options.populationTolerance,.005);
   reply(mock.calls[index],fixture(scene));await pending;
- }
- for(const invalid of [0,-.001,.0200001,NaN,Infinity,null,'0.005']){
-  const scene=scenario();scene.dynamics.populationTolerance=invalid;
-  await assert.rejects(client.solve(scene,scene.dynamics),/populationTolerance/);
-  assert.equal(mock.calls.length,2);
  }
 });
 

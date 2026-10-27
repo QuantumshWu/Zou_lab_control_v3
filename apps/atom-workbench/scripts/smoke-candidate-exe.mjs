@@ -9,7 +9,7 @@ import {resolve,dirname} from 'node:path';
 import {createModelWorker} from '../desktop-native/ui/model-worker.mjs';
 import {DESKTOP_SOLVER_DEFAULTS} from './desktop-solver-settings.mjs';
 import {nativeChildEnvironment} from './native-child-env.mjs';
-import {defaultScene,resolvePopulationTolerance} from '../dist/js/atom-workbench/src/types.js';
+import {POPULATION_TOLERANCE,defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {FULL_MODEL_SCHEMA} from '../dist/js/atom-workbench/src/solver-protocol.js';
@@ -17,7 +17,7 @@ import {FULL_MODEL_SCHEMA} from '../dist/js/atom-workbench/src/solver-protocol.j
 const option=name=>{const i=process.argv.indexOf(name);return i<0?undefined:process.argv[i+1];};
 if(process.argv.includes('--help')){
   console.log('node scripts/smoke-candidate-exe.mjs --exe <candidate.exe> --out <fresh-report.json> [--request <HTTP-scene-request.json>] [--timeout-ms 120000]');
-  console.log('Default: fresh single-near-laser scene, 0.02 us, 3 samples, epsilon=.005. No GUI or answer cache.');
+  console.log('Default: fresh scene with the probe laser alone, 0.02 us, 3 samples. No GUI or answer cache.');
   process.exit(0);
 }
 if(!option('--exe')||!option('--out'))throw Error('--exe and a fresh --out path are required');
@@ -31,17 +31,16 @@ if(option('--request')){
   if(!value.scene)throw Error('--request must contain a current HTTP scene request, not a stored numerical answer');
   scene=validateScene(value.scene);settings={...scene.dynamics,...value.options};
 }else{
-  scene.lasers=scene.lasers.filter(laser=>(laser.regime??'near')==='near');
-  settings={...scene.dynamics,durationUs:.02,samples:3,populationTolerance:.005};
+  scene.lasers=scene.lasers.filter(laser=>laser.id==='probe');
+  settings={...scene.dynamics,durationUs:.02,samples:3};
 }
-settings.populationTolerance=resolvePopulationTolerance(settings.populationTolerance);
 const baseEnv={...process.env};
 // Use the release defaults, not inherited research experiment switches.
 for(const key of Object.keys(baseEnv))if(key.toUpperCase().startsWith('ATOM_'))delete baseEnv[key];
 Object.assign(baseEnv,DESKTOP_SOLVER_DEFAULTS);
 const report={status:'starting',executable:exe,binarySha256,bytes:binary.length,windowOpened:false,
   scope:'Candidate EXE/backend-info plus normal Worker/IPC/JSONL finite and mean requests; no independent physics oracle',
-  requestSource:option('--request')?resolve(option('--request')):'Generated single-near-laser smoke fixture',
+  requestSource:option('--request')?resolve(option('--request')):'Generated probe-only smoke fixture',
   requestSha256:sha(JSON.stringify({scene,settings})),options:settings,processes:[],workerRequests:[],historicalAnswerRead:false};
 const children=new Map(),pending=new Map();let worker,sequence=0;
 const forward=(command,event)=>Promise.resolve(worker.receive({kind:'native',event:{lane:command.lane,generation:command.generation,...event}})).catch(error=>{
@@ -101,7 +100,7 @@ try{
     buildSha256:sha(JSON.stringify(report.backendInfo.numericSource)),defaults:DESKTOP_SOLVER_DEFAULTS}});
   const finite=await request('finite',{...settings,steadyOnly:false,includeAsymptotic:true});
   const parsed=normalizeDynamicsResult(finite,scene,settings.initialStateId);
-  assert.equal(parsed.populationAccuracy.requestedTolerance,settings.populationTolerance);
+  assert.equal(parsed.populationAccuracy.requestedTolerance,POPULATION_TOLERANCE);
   assert.equal(parsed.timesUs.length,settings.samples);assert.equal(parsed.timesUs.at(-1),settings.durationUs);
   assert.equal(parsed.steady.converged,true,'The finite request carries its qualified inline mean');
   const mean=await request('mean',{...settings,steadyOnly:true,includeAsymptotic:true});

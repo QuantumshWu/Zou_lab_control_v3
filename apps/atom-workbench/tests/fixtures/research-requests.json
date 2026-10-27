@@ -1,0 +1,723 @@
+{
+ "source": "claude/atom-research 435f6fa, apps/atom-workbench/research/population/inputs/<scene>.scene.json and the <scene>_new.request.json that research/population/models/gen_model.mjs wrote from it (the lattice core's validation requests)",
+ "scenes": {
+  "probeTweezer": {
+   "scene": {
+    "version": 1,
+    "name": "probe + tweezer (UI default-like)",
+    "initialF": 2,
+    "initialM": 0,
+    "marks": {},
+    "references": [],
+    "dynamics": {
+     "laserId": "probe",
+     "initialStateId": "ground-2-0",
+     "monitoredStateIds": [
+      "ground-2-0",
+      "ground-1--1",
+      "ground-1-0",
+      "ground-1-1"
+     ],
+     "durationUs": 20,
+     "samples": 200,
+     "populationTolerance": 0.005,
+     "autoRun": true,
+     "monitorMode": "auto",
+     "monitoredGroupIds": []
+    },
+    "fields": [
+     {
+      "id": "b",
+      "name": "b",
+      "enabled": true,
+      "magnitudeG": 3,
+      "thetaDeg": 0,
+      "phiDeg": 0
+     }
+    ],
+    "lasers": [
+     {
+      "id": "probe",
+      "name": "探测光",
+      "enabled": true,
+      "regime": "near",
+      "line": "D2",
+      "detuningMHz": 0,
+      "intensityMWcm2": 1,
+      "referenceTransition": {
+       "line": "D2",
+       "Fg": 2,
+       "Fe": 2
+      },
+      "frequencyMode": "transition",
+      "detuningUnit": "MHz",
+      "thetaDeg": 0,
+      "phiDeg": 0,
+      "polarizationAngleDeg": 0,
+      "ellipticityDeg": 0
+     },
+     {
+      "id": "tweezer",
+      "name": "光镊",
+      "enabled": true,
+      "regime": "far",
+      "line": "D2",
+      "frequencyMode": "wavelength",
+      "wavelengthNm": 852,
+      "referenceTransition": {
+       "line": "D2",
+       "Fg": 2,
+       "Fe": 3
+      },
+      "detuningMHz": 0,
+      "detuningUnit": "THz",
+      "intensityMode": "power",
+      "powerMW": 4,
+      "waistUm": 1.2,
+      "intensityMWcm2": 176838825.6576615,
+      "thetaDeg": 90,
+      "phiDeg": 0,
+      "polarizationAngleDeg": 0,
+      "ellipticityDeg": 0,
+      "phaseDeg": 0
+     }
+    ]
+   },
+   "request": {
+    "sha256": "5638a0b98f7c2c6458616014f81d04240691bc3fdd8e3931a33ed300a7bc1b37",
+    "modelSchema": "rb87-full/2",
+    "options": {},
+    "dimension": 32,
+    "states": [
+     "ground-1--1",
+     "ground-1-0",
+     "ground-1-1",
+     "ground-2--2",
+     "ground-2--1",
+     "ground-2-0",
+     "ground-2-1",
+     "ground-2-2",
+     "D1-1--1",
+     "D1-1-0",
+     "D1-1-1",
+     "D1-2--2",
+     "D1-2--1",
+     "D1-2-0",
+     "D1-2-1",
+     "D1-2-2",
+     "D2-0-0",
+     "D2-1--1",
+     "D2-1-0",
+     "D2-1-1",
+     "D2-2--2",
+     "D2-2--1",
+     "D2-2-0",
+     "D2-2-1",
+     "D2-2-2",
+     "D2-3--3",
+     "D2-3--2",
+     "D2-3--1",
+     "D2-3-0",
+     "D2-3-1",
+     "D2-3-2",
+     "D2-3-3"
+    ],
+    "initialIndex": 5,
+    "frequencyCoordinates": {
+     "frequenciesMHz": [
+      32358766.39164653,
+      384227848.5512709
+     ],
+     "driveIndices": [
+      [
+       0,
+       2
+      ],
+      [
+       1,
+       0
+      ],
+      [
+       -1,
+       2
+      ]
+     ]
+    },
+    "drives": 3,
+    "collapse": 3,
+    "fieldSha256": {
+     "hReal": "3f9e2d4a21262028262e176a0ce05c802a7a80e8040191cb4f680455fe543224",
+     "hImag": "5a314d59dfe9ba42c2a25b887a6d358f9384ba85dba0adce90520c4ccc0b8d74",
+     "collapse": "dd235eac88e142e0311504548715a27d2e47dc27281f3f7fa7ad6d7e613ce66d",
+     "initialReal": "ab20259f01463f3686249f09bcd08934cdee298b18391e6422ef3cc1be280b40",
+     "initialImag": "5a314d59dfe9ba42c2a25b887a6d358f9384ba85dba0adce90520c4ccc0b8d74",
+     "drives": "f3164d118db4c443d97a3bdc3a0ad0269d040c3c7bd2fd836dfa4e45eb002059",
+     "frequencyCoordinates": "4adbaa0f2a0afa6f796ad7852de58d1b4e7cebeecb7a55caa5a58e11bab1986a"
+    }
+   }
+  },
+  "twoNearNoTrap": {
+   "scene": {
+    "version": 1,
+    "name": "验证矩阵 · 两近光/微偏离几何与偏振",
+    "fields": [
+     {
+      "id": "bias",
+      "name": "偏置磁场",
+      "enabled": true,
+      "magnitudeG": 3.11,
+      "thetaDeg": 4.2,
+      "phiDeg": 9.3
+     }
+    ],
+    "lasers": [
+     {
+      "id": "probe",
+      "name": "探测光",
+      "enabled": true,
+      "line": "D2",
+      "detuningMHz": 0.19,
+      "intensityMWcm2": 18.53836777134397,
+      "thetaDeg": 6.4,
+      "phiDeg": 8.7,
+      "polarizationAngleDeg": 4.8,
+      "ellipticityDeg": 41.4,
+      "phaseDeg": 8.3,
+      "referenceTransition": {
+       "line": "D2",
+       "Fg": 2,
+       "Fe": 3
+      },
+      "regime": "near",
+      "referenceStateId": "ground-2-0",
+      "frequencyMode": "transition",
+      "detuningUnit": "MHz",
+      "intensityMode": "intensity",
+      "powerMW": 0.08,
+      "waistUm": 500
+     },
+     {
+      "id": "tweezer",
+      "name": "光镊",
+      "enabled": false,
+      "line": "D2",
+      "detuningMHz": -32359033.043646533,
+      "intensityMWcm2": 222816920.3286535,
+      "thetaDeg": 90,
+      "phiDeg": 90,
+      "polarizationAngleDeg": 0,
+      "ellipticityDeg": 0,
+      "phaseDeg": 0,
+      "frequencyAnchor": {
+       "line": "D2",
+       "offsetMHz": -32361402.30887562,
+       "viewKey": "[\"wavelength\",\"D2\",\"D2\",2,3,852]"
+      },
+      "intensityAnchor": {
+       "intensityMWcm2": 222816920.3286535,
+       "viewKey": "[\"power\",3.5,1]"
+      },
+      "referenceTransition": {
+       "line": "D2",
+       "Fg": 2,
+       "Fe": 3
+      },
+      "regime": "far",
+      "frequencyMode": "wavelength",
+      "wavelengthNm": 852,
+      "detuningUnit": "THz",
+      "intensityMode": "power",
+      "powerMW": 3.5,
+      "waistUm": 1
+     },
+     {
+      "id": "laser-1792725697397",
+      "name": "repump",
+      "enabled": true,
+      "line": "D2",
+      "detuningMHz": -0.28,
+      "intensityMWcm2": 0.113,
+      "thetaDeg": 18.2,
+      "phiDeg": 21.5,
+      "polarizationAngleDeg": 3.1,
+      "ellipticityDeg": -19.5,
+      "phaseDeg": 6.7,
+      "referenceTransition": {
+       "line": "D2",
+       "Fg": 1,
+       "Fe": 2
+      },
+      "regime": "near",
+      "referenceStateId": "ground-1-0",
+      "frequencyMode": "transition",
+      "detuningUnit": "MHz",
+      "intensityMode": "intensity"
+     },
+     {
+      "id": "laser-1792756665788",
+      "name": "激光 1",
+      "enabled": false,
+      "line": "D2",
+      "detuningMHz": 0,
+      "intensityMWcm2": 20.371832715762604,
+      "thetaDeg": 11,
+      "phiDeg": -13,
+      "polarizationAngleDeg": 0,
+      "ellipticityDeg": 39,
+      "phaseDeg": 0,
+      "frequencyAnchor": {
+       "line": "D2",
+       "offsetMHz": -2635.9172290891092,
+       "viewKey": "[\"transition\",\"D2\",\"D2\",2,2,0]"
+      },
+      "intensityAnchor": {
+       "intensityMWcm2": 20.371832715762604,
+       "viewKey": "[\"power\",0.08,500]"
+      },
+      "referenceTransition": {
+       "line": "D2",
+       "Fg": 2,
+       "Fe": 2,
+       "label": "D2 · F=2 → F′=2"
+      },
+      "regime": "near",
+      "referenceStateId": "ground-2-0",
+      "frequencyMode": "transition",
+      "detuningUnit": "MHz",
+      "intensityMode": "power",
+      "powerMW": 0.08,
+      "waistUm": 500
+     }
+    ],
+    "initialF": 2,
+    "initialM": 0,
+    "marks": {},
+    "references": [
+     {
+      "id": "reference-1792732327984",
+      "name": "虚拟中间态",
+      "anchorId": "D2-3-0",
+      "offsetMHz": 100,
+      "anchorMode": "zero-field"
+     }
+    ],
+    "dynamics": {
+     "laserId": "tweezer",
+     "initialStateId": "ground-2-0",
+     "monitorMode": "manual",
+     "monitoredGroupIds": [
+      "F:ground:2",
+      "F:ground:1"
+     ],
+     "monitoredStateIds": [],
+     "durationUs": 20,
+     "durationUnit": "us",
+     "samples": 161,
+     "autoRun": true
+    }
+   },
+   "request": {
+    "sha256": "5c0412328a4ff55868a8389f4ddd94d2e5f1256ce084b597418f110329ff29b3",
+    "modelSchema": "rb87-full/2",
+    "options": {},
+    "dimension": 32,
+    "states": [
+     "ground-1--1",
+     "ground-1-0",
+     "ground-1-1",
+     "ground-2--2",
+     "ground-2--1",
+     "ground-2-0",
+     "ground-2-1",
+     "ground-2-2",
+     "D1-1--1",
+     "D1-1-0",
+     "D1-1-1",
+     "D1-2--2",
+     "D1-2--1",
+     "D1-2-0",
+     "D1-2-1",
+     "D1-2-2",
+     "D2-0-0",
+     "D2-1--1",
+     "D2-1-0",
+     "D2-1-1",
+     "D2-2--2",
+     "D2-2--1",
+     "D2-2-0",
+     "D2-2-1",
+     "D2-2-2",
+     "D2-3--3",
+     "D2-3--2",
+     "D2-3--1",
+     "D2-3-0",
+     "D2-3-1",
+     "D2-3-2",
+     "D2-3-3"
+    ],
+    "initialIndex": 5,
+    "frequencyCoordinates": {
+     "frequenciesMHz": [
+      6567.560610904291,
+      384228115.3932709
+     ],
+     "driveIndices": [
+      [
+       0,
+       2
+      ],
+      [
+       1,
+       0
+      ],
+      [
+       1,
+       2
+      ]
+     ]
+    },
+    "drives": 3,
+    "collapse": 3,
+    "fieldSha256": {
+     "hReal": "54166e3d8a189604b68e1bd6312c4d86bbae5043f6110944aebdee0cceba150e",
+     "hImag": "503b0b461dd6f24d256e82e8ced3a05c7af813bcc50ffde51a1c24241605b097",
+     "collapse": "3e3a61dd9d70f873fd7c4c78fdf7e8b2ff07d3b50c3c8c5bc1e36f3a65d565c3",
+     "initialReal": "ab20259f01463f3686249f09bcd08934cdee298b18391e6422ef3cc1be280b40",
+     "initialImag": "5a314d59dfe9ba42c2a25b887a6d358f9384ba85dba0adce90520c4ccc0b8d74",
+     "drives": "6bb079acd32690732815389d37e3a04325389b845795feea86b811f43f7e0f8e",
+     "frequencyCoordinates": "fcae2457d7c9aa1f0c5d03ff406d55b771bfb81f2c54e61e83dce10ebcdabd48"
+    }
+   }
+  },
+  "fourNear": {
+   "scene": {
+    "version": 1,
+    "name": "验证样本 · 四近共振光/新频率",
+    "fields": [
+     {
+      "id": "bias",
+      "name": "偏置磁场",
+      "enabled": true,
+      "magnitudeG": 3,
+      "thetaDeg": 1,
+      "phiDeg": 2
+     }
+    ],
+    "lasers": [
+     {
+      "id": "probe",
+      "name": "探测光",
+      "enabled": true,
+      "line": "D2",
+      "detuningMHz": 0,
+      "intensityMWcm2": 20.371832715762604,
+      "thetaDeg": 5,
+      "phiDeg": 7,
+      "polarizationAngleDeg": 0,
+      "ellipticityDeg": 43,
+      "phaseDeg": 0,
+      "frequencyAnchor": {
+       "line": "D2",
+       "offsetMHz": -2369.265229089109,
+       "viewKey": "[\"transition\",\"D2\",\"D2\",2,3,0]"
+      },
+      "intensityAnchor": {
+       "intensityMWcm2": 20.371832715762604,
+       "viewKey": "[\"power\",0.08,500]"
+      },
+      "referenceTransition": {
+       "line": "D2",
+       "Fg": 2,
+       "Fe": 3
+      },
+      "regime": "near",
+      "referenceStateId": "ground-2-0",
+      "frequencyMode": "transition",
+      "detuningUnit": "GHz",
+      "intensityMode": "power",
+      "powerMW": 0.08,
+      "waistUm": 500
+     },
+     {
+      "id": "tweezer",
+      "name": "光镊",
+      "enabled": true,
+      "line": "D2",
+      "detuningMHz": -32359033.043646533,
+      "intensityMWcm2": 222816920.3286535,
+      "thetaDeg": 90,
+      "phiDeg": 90,
+      "polarizationAngleDeg": 0,
+      "ellipticityDeg": 0,
+      "phaseDeg": 0,
+      "frequencyAnchor": {
+       "line": "D2",
+       "offsetMHz": -32361402.30887562,
+       "viewKey": "[\"wavelength\",\"D2\",\"D2\",2,3,852]"
+      },
+      "intensityAnchor": {
+       "intensityMWcm2": 222816920.3286535,
+       "viewKey": "[\"power\",3.5,1]"
+      },
+      "referenceTransition": {
+       "line": "D2",
+       "Fg": 2,
+       "Fe": 3
+      },
+      "regime": "far",
+      "frequencyMode": "wavelength",
+      "wavelengthNm": 852,
+      "detuningUnit": "THz",
+      "intensityMode": "power",
+      "powerMW": 3.5,
+      "waistUm": 1
+     },
+     {
+      "id": "laser-1792725697397",
+      "name": "repump",
+      "enabled": true,
+      "line": "D2",
+      "detuningMHz": 0,
+      "intensityMWcm2": 0.1,
+      "thetaDeg": 17,
+      "phiDeg": 23,
+      "polarizationAngleDeg": 0,
+      "ellipticityDeg": -21,
+      "phaseDeg": 0,
+      "frequencyAnchor": {
+       "line": "D2",
+       "offsetMHz": 4198.765381815181,
+       "viewKey": "[\"transition\",\"D2\",\"D2\",1,2,0]"
+      },
+      "intensityAnchor": {
+       "intensityMWcm2": 0.1,
+       "viewKey": "[\"intensity\",0.1]"
+      },
+      "referenceTransition": {
+       "line": "D2",
+       "Fg": 1,
+       "Fe": 2
+      },
+      "regime": "near",
+      "referenceStateId": "ground-1-0",
+      "frequencyMode": "transition",
+      "detuningUnit": "GHz",
+      "intensityMode": "intensity"
+     },
+     {
+      "id": "laser-1792756665788",
+      "name": "激光 1",
+      "enabled": true,
+      "line": "D2",
+      "detuningMHz": 0,
+      "intensityMWcm2": 20.371832715762604,
+      "thetaDeg": 11,
+      "phiDeg": -13,
+      "polarizationAngleDeg": 0,
+      "ellipticityDeg": 39,
+      "phaseDeg": 0,
+      "frequencyAnchor": {
+       "line": "D2",
+       "offsetMHz": -2635.9172290891092,
+       "viewKey": "[\"transition\",\"D2\",\"D2\",2,2,0]"
+      },
+      "intensityAnchor": {
+       "intensityMWcm2": 20.371832715762604,
+       "viewKey": "[\"power\",0.08,500]"
+      },
+      "referenceTransition": {
+       "line": "D2",
+       "Fg": 2,
+       "Fe": 2,
+       "label": "D2 · F=2 → F′=2"
+      },
+      "regime": "near",
+      "referenceStateId": "ground-2-0",
+      "frequencyMode": "transition",
+      "detuningUnit": "MHz",
+      "intensityMode": "power",
+      "powerMW": 0.08,
+      "waistUm": 500
+     },
+     {
+      "id": "validation-fourth-near",
+      "name": "第四束验证光",
+      "enabled": true,
+      "line": "D2",
+      "detuningMHz": 137.17,
+      "intensityMWcm2": 6.1115498147287814,
+      "thetaDeg": 23,
+      "phiDeg": 31,
+      "polarizationAngleDeg": 0,
+      "ellipticityDeg": 17,
+      "phaseDeg": 27,
+      "referenceTransition": {
+       "line": "D2",
+       "Fg": 2,
+       "Fe": 3
+      },
+      "regime": "near",
+      "referenceStateId": "ground-2-0",
+      "frequencyMode": "transition",
+      "detuningUnit": "MHz",
+      "intensityMode": "intensity",
+      "powerMW": 0.08,
+      "waistUm": 500
+     }
+    ],
+    "initialF": 2,
+    "initialM": 0,
+    "marks": {},
+    "references": [
+     {
+      "id": "reference-1792732327984",
+      "name": "虚拟中间态",
+      "anchorId": "D2-3-0",
+      "offsetMHz": 100,
+      "anchorMode": "zero-field"
+     }
+    ],
+    "dynamics": {
+     "laserId": "tweezer",
+     "initialStateId": "ground-2-0",
+     "monitorMode": "manual",
+     "monitoredGroupIds": [
+      "F:ground:2",
+      "F:ground:1"
+     ],
+     "monitoredStateIds": [],
+     "durationUs": 20,
+     "durationUnit": "us",
+     "samples": 161,
+     "autoRun": true
+    }
+   },
+   "request": {
+    "sha256": "fda3895c393f106d35875b4b637b9b8a5fa2a0de8819c9d82477e4b025be1c8e",
+    "modelSchema": "rb87-full/2",
+    "options": {},
+    "dimension": 32,
+    "states": [
+     "ground-1--1",
+     "ground-1-0",
+     "ground-1-1",
+     "ground-2--2",
+     "ground-2--1",
+     "ground-2-0",
+     "ground-2-1",
+     "ground-2-2",
+     "D1-1--1",
+     "D1-1-0",
+     "D1-1-1",
+     "D1-2--2",
+     "D1-2--1",
+     "D1-2-0",
+     "D1-2-1",
+     "D1-2-2",
+     "D2-0-0",
+     "D2-1--1",
+     "D2-1-0",
+     "D2-1-1",
+     "D2-2--2",
+     "D2-2--1",
+     "D2-2-0",
+     "D2-2-1",
+     "D2-2-2",
+     "D2-3--3",
+     "D2-3--2",
+     "D2-3--1",
+     "D2-3-0",
+     "D2-3-1",
+     "D2-3-2",
+     "D2-3-3"
+    ],
+    "initialIndex": 5,
+    "frequencyCoordinates": {
+     "frequenciesMHz": [
+      137.17000000000007,
+      266.65200000000004,
+      6430.86061090429,
+      32358766.39164653,
+      384228115.2032709
+     ],
+     "driveIndices": [
+      [
+       0,
+       0,
+       0,
+       0,
+       2
+      ],
+      [
+       0,
+       1,
+       0,
+       1,
+       0
+      ],
+      [
+       0,
+       -1,
+       0,
+       -1,
+       2
+      ],
+      [
+       1,
+       0,
+       1,
+       0,
+       0
+      ],
+      [
+       1,
+       0,
+       1,
+       0,
+       2
+      ],
+      [
+       0,
+       1,
+       0,
+       0,
+       0
+      ],
+      [
+       0,
+       -1,
+       0,
+       0,
+       2
+      ],
+      [
+       1,
+       0,
+       0,
+       0,
+       0
+      ],
+      [
+       1,
+       0,
+       0,
+       0,
+       2
+      ]
+     ]
+    },
+    "drives": 9,
+    "collapse": 3,
+    "fieldSha256": {
+     "hReal": "64ea54245170cd8a010f75597e576da8bccec21188532e1e246e88117bec76d9",
+     "hImag": "1bdf0e8ab9b8872ddab449101f964f713daa2b9fa332c65925b3795a67fe6c48",
+     "collapse": "09ea5dbd6b7f3995fd913b578695972403ce95fbc9fa1a2c154c13a6ea08af35",
+     "initialReal": "ab20259f01463f3686249f09bcd08934cdee298b18391e6422ef3cc1be280b40",
+     "initialImag": "5a314d59dfe9ba42c2a25b887a6d358f9384ba85dba0adce90520c4ccc0b8d74",
+     "drives": "00793664db4405786320ad3a9ad52da48f1a6debe931158a65186cc5c729d0b6",
+     "frequencyCoordinates": "31a89ceb294ed92a50767c1761740f1312c4e3de5e73e59719016f6d17415d7b"
+    }
+   }
+  }
+ }
+}

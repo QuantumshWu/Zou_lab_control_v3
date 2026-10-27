@@ -57,7 +57,7 @@ test('a readout spells twelve significant digits in groups of three, ≈ when it
 });
 
 // ui-design.md §1.8: the two-state readout's "自动" is the same two states with no field and no
-// light, so Δν = ν₁₂ − ν₁₂(零场) is what B and the 静态光移 lasers move the transition by.
+// light, so Δν = ν₁₂ − ν₁₂(零场) is what B and the lasers shown (显示光移) move the transition by.
 test('"自动" reads a pair against the same two states at zero field',()=>{
   const scene=defaultScene(),a=spectroscopyAnalysis(scene,undefined,false),levels=[...a.ground,...a.D1,...a.D2],get=id=>levels.find(s=>s.id===id);
   assert.equal(a.spectroscopy.status,'dispersive','3 G and the far tweezer shift the levels');

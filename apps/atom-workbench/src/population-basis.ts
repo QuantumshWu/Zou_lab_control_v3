@@ -1,8 +1,9 @@
 // Which basis a population is in. The solver returns populations in the model basis (the
-// eigenstates of the static H0: B and the far lasers' static background, spectroscopy.ts);
-// the levels chart shows the display basis (the same background without a selected far
-// laser). A long-time mean carries its full density and is
-// projected exactly (spectroscopy.ts projectSpectroscopyPopulations). A finite-time
+// eigenstates of the static H0: B, the second-order shifts through states outside the model
+// and the Rb+ core, spectroscopy.ts staticModelBackground); the levels chart shows the
+// display basis (B, plus the static light shift of the lasers shown). A long-time mean
+// carries its full density and is projected exactly (spectroscopy.ts
+// projectSpectroscopyPopulations). A finite-time
 // p(t) carries populations only: read on a display state by its id it is off by at most
 // 2√δ + 2δ, δ = 1 − |⟨model state|display state⟩|² of that id -- the bound below.
 import type {Level} from './types.js';

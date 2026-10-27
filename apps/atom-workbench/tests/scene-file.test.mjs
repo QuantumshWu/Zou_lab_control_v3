@@ -65,8 +65,37 @@ test('initial-state specs round-trip, a state spec folds into initialStateId, an
   }
 });
 
-test('a regime change is a different dynamics request: the regime decides the physics',()=>{
+test('显示光移 is saved with the scene and is no part of the dynamics request identity',()=>{
   const s=roundtrip(defaultScene()),key=dynamicsCacheKey(s,s.dynamics,false);
-  s.lasers[1].regime='near';assert.notEqual(dynamicsCacheKey(s,s.dynamics,false),key);
-  assert.equal(roundtrip(s).lasers[1].regime,'near','the regime survives a save');
+  assert.deepEqual(s.lasers.map(l=>l.showLightShift),[false,true]);
+  s.lasers[1].showLightShift=false;assert.equal(dynamicsCacheKey(s,s.dynamics,false),key);
+  assert.equal(roundtrip(s).lasers[1].showLightShift,false,'the switch survives a save, also for a laser called tweezer');
+  s.lasers[1].showLightShift='yes';assert.throws(()=>roundtrip(s),/showLightShift/);
+});
+
+// A scene saved with the 处理方式 control: every laser is an explicit drive, and a laser that
+// was 静态光移 ('far') shows its light shift. Nothing else changes and nothing is said.
+test('a scene with regimes loads into the explicit model, its 静态光移 lasers shown',()=>{
+  const old=JSON.parse(JSON.stringify(defaultScene()));
+  old.lasers.forEach(l=>delete l.showLightShift);old.lasers[0].regime='near';old.lasers[1].regime='far';
+  old.lasers.push({...old.lasers[0],id:'second',name:'second',regime:'far'},{...old.lasers[0],id:'third',name:'third'});delete old.lasers[3].regime;
+  const loaded=validateScene(old);
+  assert.deepEqual(loaded.lasers.map(l=>l.showLightShift),[false,true,true,false]);
+  assert.ok(loaded.lasers.every(l=>!('regime' in l)),'no regime is kept');
+  // A tweezer saved before either field: shown.
+  const first=JSON.parse(JSON.stringify(defaultScene()));first.lasers.forEach(l=>delete l.showLightShift);
+  assert.deepEqual(validateScene(first).lasers.map(l=>l.showLightShift),[false,true]);
+  // The model is the explicit one whatever the old regime said.
+  const explicit=defaultScene(),model=buildFullMasterModel(loaded,loaded.dynamics),reference=buildFullMasterModel({...loaded,lasers:loaded.lasers.map(l=>({...l,showLightShift:false}))},loaded.dynamics);
+  assert.equal(model.laserCount,4);assert.deepEqual(model.drives,reference.drives);assert.deepEqual(model.hReal,reference.hReal);
+  assert.equal(buildFullMasterModel(explicit).laserCount,2);
+});
+
+test('a saved population tolerance, whatever its value, loads silently and is not kept',()=>{
+  for(const value of [.001,.005,.02,.05,0,-1,NaN,'0.005',null,{}]){
+    const old=JSON.parse(JSON.stringify(defaultScene()));old.dynamics.populationTolerance=value;
+    const loaded=validateScene(old);
+    assert.ok(!('populationTolerance' in loaded.dynamics),String(value));
+    assert.equal(dynamicsCacheKey(loaded,loaded.dynamics,false),dynamicsCacheKey(roundtrip(defaultScene()),roundtrip(defaultScene()).dynamics,false));
+  }
 });

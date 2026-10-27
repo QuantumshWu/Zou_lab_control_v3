@@ -17,7 +17,7 @@ const sorted=levels=>Object.fromEntries(MANIFOLDS.map(([m,start,size])=>[m,level
 
 /** The partitioning stopped at first order: the symmetric second-order (van Vleck)
  * Hamiltonian of the same Floquet problem, each fine-structure manifold diagonalized on
- * its own -- what the release computed. */
+ * its own: the second-order display background. */
 function secondOrderLevels(problem){
   const absolute=i=>i<8?problem.energies[i]:(i<16?D1:D2)+problem.energies[i],re=new Float64Array(1024),im=new Float64Array(1024);
   const add=(i,j,ar,ai,br,bi,f)=>{re[i*32+j]+=f*(ar*br+ai*bi);im[i*32+j]+=f*(ar*bi-ai*br);};// conj(a) b f
@@ -35,22 +35,22 @@ function secondOrderLevels(problem){
   return out;
 }
 
-test('stopped at first order, the partitioning reproduces the release second-order levels to rounding',()=>{
+test('stopped at first order, the partitioning reproduces the second-order (van Vleck) levels to rounding',()=>{
   for(const [name,build] of Object.entries(STATIC_SHIFT_SCENES)){
-    const mine=sorted(secondOrderLevels(staticBackgroundProblem(build()))),release=sorted(Object.values(fixture.levels[name]));
-    for(const [m] of MANIFOLDS)mine[m].forEach((x,i)=>assert.ok(Math.abs(x-release[m][i])<=1e-9,`${name} ${m} ${i}: ${x} vs ${release[m][i]}`));
+    const mine=sorted(secondOrderLevels(staticBackgroundProblem(build()))),second=sorted(Object.values(fixture.levels[name]));
+    for(const [m] of MANIFOLDS)mine[m].forEach((x,i)=>assert.ok(Math.abs(x-second[m][i])<=1e-9,`${name} ${m} ${i}: ${x} vs ${second[m][i]}`));
   }
 });
 
 test('all orders: the levels move from second order by the expected small amounts, each with its bound',()=>{
   for(const [name,build] of Object.entries(STATIC_SHIFT_SCENES)){
     const a=spectroscopyAnalysis(build(),undefined,false),levels=[...a.ground,...a.D1,...a.D2];assert.equal(a.spectroscopy.status,'dispersive',name);
-    const mixing=a.spectroscopy.maximumMixingRatio,release=fixture.levels[name];
+    const mixing=a.spectroscopy.maximumMixingRatio,second=fixture.levels[name];
     for(const level of levels){
       // Fourth order: |Δθ| ≲ (mixing)² × (largest shift) plus the D1–D2 coupling through the
       // ground copies (second order in a second-order coupling, over the 7 THz fine structure).
       const shift=Math.max(...levels.map(l=>Math.abs(l.starkShiftMHz)));
-      assert.ok(Math.abs(level.energyMHz-release[level.id])<=10*mixing**2*shift+shift**2/7e6,`${name} ${level.id}`);
+      assert.ok(Math.abs(level.energyMHz-second[level.id])<=10*mixing**2*shift+shift**2/7e6,`${name} ${level.id}`);
       assert.ok(level.shiftBound.floquetMHz+level.shiftBound.outsideMHz<=TARGET_MHZ+1e-8,`${name} ${level.id} bound`);
     }
   }

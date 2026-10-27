@@ -1,11 +1,11 @@
-// Scenes for the static background checks: far lasers alone, by name.
+// Scenes for the static background checks: far-detuned lasers shown in the levels chart, by name.
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {laserIntensityMWcm2,setPolarizationPreset} from '../dist/js/atom-workbench/src/physics.js';
 import {displayMixing} from '../dist/js/atom-workbench/src/spectroscopy.js';
 
 /** A far beam at a vacuum wavelength, local intensity in mW/cm². */
 function farBeam(id,wavelengthNm,intensityMWcm2){
- return {id,name:id,enabled:true,regime:'far',line:'D2',frequencyMode:'wavelength',wavelengthNm,referenceTransition:{line:'D2',Fg:2,Fe:3},detuningMHz:0,detuningUnit:'THz',
+ return {id,name:id,enabled:true,showLightShift:true,line:'D2',frequencyMode:'wavelength',wavelengthNm,referenceTransition:{line:'D2',Fg:2,Fe:3},detuningMHz:0,detuningUnit:'THz',
   intensityMode:'intensity',intensityMWcm2,thetaDeg:90,phiDeg:0,polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0};
 }
 /** Scale a far beam's intensity until its static mixing |Ω/2Δ| is `ratio`. */
