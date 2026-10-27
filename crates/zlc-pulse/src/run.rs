@@ -35,14 +35,15 @@ pub fn read_document(path: &Path) -> Result<(PathBuf, Sequence)> {
 }
 
 // ------------------------------------------------------------ describe
-fn facts(column: &ScanColumnSpec) -> [(&'static str, Json); 5] {
-    [("is_dac", Json::Bool(column.is_dac)), ("lo", Json::Float(column.lo)), ("hi", Json::Float(column.hi)),
-     ("limit_lo", Json::Float(column.limit_lo)), ("limit_hi", Json::Float(column.limit_hi))]
+fn facts(column: &ScanColumnSpec) -> [(&'static str, Json); 3] {
+    [("is_dac", Json::Bool(column.is_dac)), ("limit_lo", Json::Float(column.limit_lo)), ("limit_hi", Json::Float(column.limit_hi))]
 }
 
 /// What a node reads of a pulse: its API fields in the order it plays them
-/// (own unit, authored value, column facts), its scan slots in slot order,
-/// the API fields it offers no plan (an empty bracket's count) and its periods.
+/// (own unit, authored value, column facts), its scan slots in slot order
+/// (with the value each holds in the pulse, where a plan's default sweep is
+/// centred), the API fields it offers no plan (an empty bracket's count) and
+/// its periods.
 pub fn describe_sequence(sequence: &Sequence) -> Result<Json> {
     let columns = api_parameter_columns_for(sequence)?;
     let mut api_fields = Vec::new();
@@ -57,10 +58,14 @@ pub fn describe_sequence(sequence: &Sequence) -> Result<Json> {
         api_fields.push(Json::object(items));
     }
     let mut scan_fields = Vec::new();
+    // A slot's value as the board plays it unscanned (resolve_scan_point's authored row).
+    let resolved = resolve_subpulse_sources(sequence, None)?;
+    let slots = resolved.scan_bindings();
     for column in scan_columns_for(sequence, &StreamerParams::default())? {
         let kind = sequence.bindings.iter().find(|binding| binding.field_id() == column.name).map_or("duration", |binding| binding.kind().name());
+        let slot = slots.iter().find(|slot| slot.field_id() == column.name).expect("one slot per scan column");
         let mut items = vec![("field_id", Json::str(&column.name)), ("label", Json::str(&column.label)), ("kind", Json::str(kind)),
-                             ("unit", Json::str(&column.unit))];
+                             ("unit", Json::str(&column.unit)), ("value", Json::Float(pulse_field_value(&resolved, &slot.field_ref, &slot.unit)?))];
         items.extend(facts(&column));
         scan_fields.push(Json::object(items));
     }

@@ -96,11 +96,17 @@ A type descriptor (JSON, the only form the core sees):
 ```
 
 `Field` is v2's `AuthoringField` as data: `{name, type, label, default, required,
-minimum, maximum, step, unit, choices: [{value, label}], segmented, blank_label,
+minimum, maximum, step, unit, display_unit, choices: [{value, label}], segmented, blank_label,
 description, enabled_when: [field, [values]] | null, derived, group, columns, file_filter}` with
 `type` in `int | float | bool | str | text | pair | choice | rows | resource`. Choices
 are `(value, label)` pairs stated by the declaring plugin; no layer transforms a value
-into a label. Units are the field's own unit string (zlc_data unit grammar). `group`
+into a label. Units are the field's own unit string (zlc_data unit grammar).
+`display_unit` (optional, null for none) names the unit family a view shows the
+number in by default when its owner prefers one to `unit`'s own -- a function
+generator's amplitude, its `unit` dBm, shown in Vpp; the view picks the prefix in
+that family that reads the number between 1 and 1000. It is display only: commands,
+bounds and records stay in `unit`, and the view reads the number in that family
+through the owner's own conversion (`fields {units}`). `group`
 names the form section the field stands in ("Imaging"); the form titles each change
 of it. A nonempty `file_filter` (for example `Pulse Config (*.json)`) presents a
 string field as a file path with Browse; its stored value and validation stay text.
@@ -121,7 +127,11 @@ draws it in place of the fields it manages and writes them back with `edit_node`
 holds no rule of the node's (the model says what is offered, derived, kept or wrong).
 `source` is the node's source frames `[axis_name | null, [labels...]]` or null.
 Kinds: `scan_plan` (seamless scan, `scan/editor.py`: `ports [{port, label, unit, lo,
-hi, seed_lo, seed_hi, group, leaf}]`, `withheld {port: reason}`, `families`,
+hi, current, integer, display_unit, group, leaf, units, families, limits, currents}]` --
+`current` where the knob stands in its unit (a slot's value in the pulse, this run's
+API value, the device's reading; null when nothing says), the editor's first sweep
+around it; `limits`/`currents` its limits and reading in each spelling no decimal
+shift reaches, as the device converts them --, `withheld {port: reason}`, `families`,
 `host_advanced` prefixes, `summary`/`problem`, `api {fields, overrides, parked, note}`
 or null) and `pair_matrix` (frame survival, `frame_survival/editor.py`: `grid {rows,
 columns, cells}`, `selected`, `states`, `tips`, `identity`, `override_rows/_cells`,

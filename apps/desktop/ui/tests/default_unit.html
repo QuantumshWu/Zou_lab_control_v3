@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Default unit regression tests</title>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. The one rule every unit picker's default follows (fluent/form.ts defaultUnit).
+import {defaultUnit, shifted} from '../dist/fluent/form.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+const check=(name,test)=>{test();results.push(name)};
+// One family's rungs, each with its decade against the unit the value is written in.
+const HZ=[['GHz',9],['MHz',6],['kHz',3],['Hz',0]], V=[['V',0],['mV',-3],['µV',-6]], S=[['s',0],['ms',-3],['µs',-6],['ns',-9]];
+const at=(value,decade)=>value===null?null:shifted(value,-decade);
+const pick=(own,rungs,value,low=null,high=null,integer=false)=>defaultUnit(own,rungs.map(([symbol,decade])=>({symbol,value:at(value,decade),low:at(low,decade),high:at(high,decade)})),integer);
+try {
+ check('the prefix that shows the value in [1, 1000)',()=>{
+   equal(pick('Hz',HZ,80e6),'MHz','80 MHz');
+   equal(pick('Hz',HZ,6.834e9),'GHz','6.834 GHz');
+   equal(pick('s',S,0.01),'ms','10 ms');
+   equal(pick('s',S,2.5e-7),'ns','250 ns');
+   equal(pick('V',V,0.5),'mV','500 mV');
+   equal(pick('V',V,1.2),'V','1.2 V');
+ });
+ check('the boundaries: 1 is in, 1000 is out',()=>{
+   equal(pick('Hz',HZ,1e6),'MHz','1 MHz');
+   equal(pick('Hz',HZ,1e9),'GHz','1000 MHz is 1 GHz');
+   equal(pick('Hz',HZ,999999),'kHz','999.999 kHz');
+   equal(pick('Hz',HZ,999999600),'MHz','999.9996 MHz is shown whole');
+ });
+ check('judged as the box shows it: rounded to 1000 is the next prefix',()=>{
+   // An inexact reading the ≈ rule shows as "≈ 1000" MHz reads "≈ 1" GHz.
+   equal(pick('Hz',HZ,999999961.2345678),'GHz','≈ 1000 MHz');
+   equal(pick('Hz',HZ,999999961.2345678*0.999),'MHz','≈ 999 MHz');
+ });
+ check('a negative value is judged by its size',()=>{
+   equal(pick('V',V,-0.5),'mV','-500 mV');
+   equal(pick('V',V,-0.0005),'µV','-500 µV');
+   equal(pick('Hz',HZ,null,-8e9,5e8),'GHz','the wider end below 0');
+ });
+ check('no value, or 0: the wider end of the allowed range; with none, its own unit',()=>{
+   equal(pick('Hz',HZ,0,0,8e9),'GHz','0 within 0..8 GHz');
+   equal(pick('Hz',HZ,null,5e8,8e9),'GHz','none within 0.5..8 GHz');
+   equal(pick('s',S,null,-2e-3,1e-3),'ms','none within -2..1 ms');
+   equal(pick('Hz',HZ,0),'Hz','0, no range');
+   equal(pick('Hz',HZ,null),'Hz','none, no range');
+ });
+ check('past the ladder, its nearest end',()=>{
+   equal(pick('Hz',HZ,5e12),'GHz','5000 GHz');
+   equal(pick('Hz',HZ,0.5),'Hz','0.5 Hz');
+ });
+ check('a whole number and a unit without prefixes stay as they are',()=>{
+   equal(pick('count',[['count',0]],3,1,65535,true),'count','a count');
+   equal(pick('code',[],1200,-2048,2047,true),'code','a DAC code');
+   equal(pick('Hz',HZ,80e6,0,8e9,true),'Hz','an integer field never takes a prefix');
+   equal(pick('dBm',[['dBm',0]],-10),'dBm','dBm');
+   equal(pick('°',[],720),'°','no spellings');
+ });
+ check('the family it is told, whatever the number is written in',()=>{
+   // An amplitude in dBm, read in its Vpp family: each spelling's number as the device converts it.
+   equal(defaultUnit('Vpp',[{symbol:'Vpp',value:0.5},{symbol:'mVpp',value:500},{symbol:'µVpp',value:5e5}]),'mVpp','500 mVpp');
+   equal(defaultUnit('Vpp',[{symbol:'Vpp',value:1.2},{symbol:'mVpp',value:1200},{symbol:'µVpp',value:1.2e6}]),'Vpp','1.2 Vpp');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+</script>

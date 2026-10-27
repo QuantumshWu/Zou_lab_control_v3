@@ -37,6 +37,7 @@ def field_json(item: object) -> dict[str, Any]:
         "maximum": getattr(item, "maximum", None),
         "step": getattr(item, "step", None),
         "unit": getattr(item, "unit", None),
+        "display_unit": getattr(item, "display_unit", None),
         "choices": [{"value": plain(choice.value), "label": str(choice.label)} for choice in getattr(item, "choices", ())],
         "segmented": bool(getattr(item, "segmented", False)),
         "blank_label": str(getattr(item, "blank_label", "")),

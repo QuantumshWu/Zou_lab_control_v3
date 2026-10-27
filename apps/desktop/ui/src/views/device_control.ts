@@ -5,9 +5,12 @@
 // what (claims, protected fields, accepted risk) is the workbench's answer,
 // shown as each row's reason; the page never decides it.  The reading is
 // taken again whenever it may have gone stale under the page: its window
-// shown or brought forward, a run letting the device go.
+// shown or brought forward, a run letting the device go.  A number is read in
+// the unit that shows it between 1 and 1000, in the family its device shows it
+// in (defaultUnit), chosen once, at the window's first reading; a unit the
+// operator picks stays.
 import {
-  Field, StatusStrip, alignUnitPickers, command, element, readoutText, setChecked, setElided, setState, statusDot, switchButton, titleRow,
+  Field, StatusStrip, alignUnitPickers, command, defaultUnit, element, readoutText, setChecked, setElided, setState, shifted, statusDot, switchButton, titleRow,
   type FieldSpec, type Value,
 } from "../fluent/index.js";
 import { queueStatus, type ViewContext } from "../shell.js";
@@ -33,6 +36,8 @@ type Row = {
   revision: number;
   valid: boolean;
   unitRequest: number | null;
+  /** The operator picked the unit it is read in: no default replaces it. */
+  picked: boolean;
   /** The last Apply's outcome until the next edit: "" or v2's Applied / the refusal. */
   applied: string;
   error: string;
@@ -69,6 +74,10 @@ export class DeviceControlView {
   private reading = -1;
   /** Whether a run held the device at the last state: its letting go is a re-read (a scan puts its knobs back). */
   private held = false;
+  /** Whether this window has chosen the units its rows are read in (once, at its first reading). */
+  private defaulted = false;
+  /** Rows that first reading moved into the family their device shows them in, and the read that brings them. */
+  private moved: { request: number; rows: Set<string> } | null = null;
 
   constructor(readonly id: string, private ctx: ViewContext) {
     this.risk = switchButton(on => ctx.transport.send({ action: "accept_device_risk", device: id, accepted: on }, on ? "Accepting the risk…" : "Withdrawing the risk…"), "Accept risk");
@@ -164,6 +173,16 @@ export class DeviceControlView {
       row.status.title = spec.reason || words;
       for (const cell of [row.live, row.apply]) cell.title = spec.reason || "";
     }
+    // The units the rows are read in, chosen once: at this window's first reading, then the prefix
+    // of a row it moved into its device's family when that reading comes.
+    if (request !== undefined && !failed && device.state === "open") {
+      if (!this.defaulted && request === this.reading) { this.defaulted = true; this.defaultUnits([...this.rows.values()], true); }
+      else if (this.moved?.request === request) {
+        const names = this.moved.rows;
+        this.moved = null;
+        this.defaultUnits([...this.rows.values()].filter(row => names.has(row.spec.name)), false);
+      }
+    }
     // One picker width, so every number box has the same right edge (v2 _align_headings).
     requestAnimationFrame(() => alignUnitPickers(this.table));
     this.status();
@@ -193,7 +212,7 @@ export class DeviceControlView {
     row.liveOn = false;
     row.timer = 0;
     row.tuning = null;
-    row.revision = 0; row.valid = true; row.unitRequest = null;
+    row.revision = 0; row.valid = true; row.unitRequest = null; row.picked = false;
     row.applied = "";
     row.error = "";
     row.outside = false;
@@ -202,7 +221,7 @@ export class DeviceControlView {
       // load): the row is re-read in it, reading, bounds and limits together
       // (a draft keeps its digits: update).
       unit: unit => {
-        this.cancelLive(row); this.queued.delete(row.spec.name); row.revision++;
+        this.cancelLive(row); this.queued.delete(row.spec.name); row.revision++; row.picked = true;
         row.unitRequest = this.ctx.transport.send({ action: "read_device", device: this.id, units: { [row.spec.name]: unit } }, `Reading ${row.spec.label} in ${unit}…`);
         queueMicrotask(() => { if (this.device) this.update(this.device); });
         return row.unitRequest;
@@ -240,6 +259,36 @@ export class DeviceControlView {
     row.field.root.insertBefore(statusCell, row.field.problem);
     this.table.append(row.field.root);
     return row;
+  }
+
+  /** Read `rows` in the units `defaultUnit` picks from their readings, where that is not the one they are read in. A row whose
+   * device shows it in another family (its `display_unit`) is first read in that family (`family`), and takes its
+   * prefix there when that reading comes. A whole number, and a row the operator read in a unit, stay as they are. */
+  private defaultUnits(rows: Row[], family: boolean): void {
+    const units: Record<string, string> = {}, moved = new Set<string>();
+    for (const row of rows) {
+      const spec = row.spec, choices = spec.units ?? [], unit = spec.unit;
+      if (row.picked || row.unitRequest !== null || !unit || (spec.kind !== "number" && spec.kind !== "integer")) continue;
+      const integer = spec.kind === "integer";
+      const group = (symbol: string): string | undefined => choices.find(choice => choice.value === symbol)?.group;
+      const own = spec.display_unit && group(spec.display_unit) ? spec.display_unit : unit;
+      if (group(own) !== group(unit)) {
+        if (family && !integer) { units[spec.name] = own; moved.add(spec.name); }
+        continue;
+      }
+      const at = (value: unknown, decade: number): number | null => typeof value === "number" ? shifted(value, -decade) : null;
+      const chosen = defaultUnit(unit, choices.filter(choice => choice.group === group(unit) && typeof choice.decade === "number")
+        .map(({ value: symbol, decade }) => ({ symbol, value: at(spec.current, decade!), low: at(spec.minimum, decade!), high: at(spec.maximum, decade!) })), integer);
+      if (chosen !== unit) units[spec.name] = chosen;
+    }
+    if (!Object.keys(units).length) return;
+    const request = this.ctx.transport.send({ action: "read_device", device: this.id, units }, "Reading in default units…");
+    for (const name of Object.keys(units)) {
+      const row = this.rows.get(name)!;
+      this.cancelLive(row); this.queued.delete(name); row.revision++; row.unitRequest = request;
+    }
+    if (moved.size) this.moved = { request, rows: moved };
+    queueMicrotask(() => { if (this.device) this.update(this.device); });
   }
 
   private edit(row: Row, value: Value | undefined): void {

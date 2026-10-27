@@ -152,6 +152,49 @@ try {
    device.control={owners:[],reason:'',risk_enabled:false};windowView.update({type:'state'});equal(reads(),4,'the run let it go');answer(4);
    device.state='closed';windowView.update({type:'state'});window.dispatchEvent(new Event('focus'));windowView.shown();await settled();equal(reads(),4,'a closed device read');
  });
+ // A number's spellings as the engine offers them: under its family, each with its decade against the row's unit.
+ const spellings=rows=>rows.map(([value,group,decade])=>({value,label:value,group,decade}));
+ const hertz=unit=>{const own={GHz:9,MHz:6,kHz:3,Hz:0}[unit];return spellings([['GHz','Hz',9-own],['MHz','Hz',6-own],['kHz','Hz',3-own],['Hz','Hz',-own]])};
+ const unitReads=t=>t.calls.filter(c=>c.action==='read_device'&&c.units).map(c=>c.units);
+ const chooseUnit=(t,label,i=0)=>{
+   t.row(i).querySelector('.unit-picker').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+   const list=document.querySelector(':popover-open'),up=row=>row.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:0}));
+   for(let heading;(heading=list.querySelector('.tree-row.heading:not(.open)'));) up(heading);
+   up([...list.querySelectorAll('.tree-row.leaf')].find(row=>row.textContent===label));
+ };
+ const frequency={unit:'Hz',units:hertz('Hz'),current:80e6,desired:80e6,minimum:5e7,maximum:2e8,step:null};
+ const power={name:'power',label:'Power',unit:'dBm',units:spellings([['dBm','dBm',0],['mW','W',null]]),current:-10,desired:-10,minimum:-40,maximum:10,step:null};
+ await check('the first reading reads each row in the unit that shows it between 1 and 1000, and never again',async()=>{
+   const t=setup({live:false,fields:[frequency,power]});
+   t.view.read();const first=t.calls.at(-1).id;
+   t.project({},first);await Promise.resolve();
+   equal(unitReads(t),[{frequency:'MHz'}],'80 MHz; -10 dBm has no prefix');
+   assert(t.row().textContent.includes('Reading unit'),'the row waits for its new unit');
+   t.project({frequency:{unit:'MHz',units:hertz('MHz'),current:80,desired:80,minimum:50,maximum:200}},t.calls.at(-1).id);
+   equal(t.input().value,'80','Desired in MHz');
+   // A later reading -- Refresh, a new value, a decade away -- keeps the unit.
+   t.view.read();t.project({frequency:{current:2,desired:2}},t.calls.at(-1).id);await Promise.resolve();
+   equal(unitReads(t).length,1,'a later reading chose again');
+ });
+ await check('a row its device shows in another family is read there first, then takes its prefix',async()=>{
+   const amplitude={name:'power',label:'Power',unit:'dBm',display_unit:'Vpp',current:-2.0411998265592475,desired:-2.0411998265592475,minimum:-30,maximum:20,step:null,
+     units:spellings([['dBm','dBm',0],['Vpp','Vpp',null],['mVpp','Vpp',null],['mW','W',null]])};
+   const t=setup({live:false,fields:[amplitude]});
+   t.view.read();t.project({},t.calls.at(-1).id);await Promise.resolve();
+   equal(unitReads(t),[{power:'Vpp'}],'read in its family');
+   t.project({power:{unit:'Vpp',current:0.5,desired:0.5,minimum:0.02,maximum:6.32,units:spellings([['Vpp','Vpp',0],['mVpp','Vpp',-3],['dBm','dBm',null],['mW','W',null]])}},t.calls.at(-1).id);
+   await Promise.resolve();
+   equal(unitReads(t),[{power:'Vpp'},{power:'mVpp'}],'500 mVpp');
+   t.project({power:{unit:'mVpp',current:500,desired:500,minimum:20,maximum:6320,units:spellings([['Vpp','Vpp',3],['mVpp','Vpp',0],['dBm','dBm',null],['mW','W',null]])}},t.calls.at(-1).id);
+   await Promise.resolve();equal(unitReads(t).length,2,'chosen once');equal(t.input().value,'500','Desired in mVpp');
+ });
+ await check('a unit the operator picks is never replaced by the default',async()=>{
+   const t=setup({live:false,fields:[frequency]});
+   t.view.read();const first=t.calls.at(-1).id;
+   chooseUnit(t,'kHz');equal(unitReads(t),[{frequency:'kHz'}],'the pick');
+   t.project({},first);await Promise.resolve();
+   equal(unitReads(t),[{frequency:'kHz'}],'the first reading replaced the pick');
+ });
  await check('ordinary forms still commit only on Enter/change',async()=>{const calls=[];const field=new Field('normal',{name:'x',kind:'number',label:'x',value:1},{commit:v=>{calls.push(v);return 1}});document.body.append(field.root);field.input.value='2';field.input.dispatchEvent(new Event('input'));await wait();equal(calls,[],'ordinary form live mutation');field.input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}));equal(calls,[2],'ordinary Enter')});
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
 } catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}

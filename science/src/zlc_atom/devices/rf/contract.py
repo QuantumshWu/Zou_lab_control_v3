@@ -170,6 +170,11 @@ class RfSourceBase:
     without an owner.
     """
 
+    #: The family each channel's power is shown in by default
+    #: (AuthoringField.display_unit), the driver's own word; None for its
+    #: unit's.  The power itself stays in dBm.
+    POWER_DISPLAY_UNIT: str | None = None
+
     def __init__(
         self,
         *,
@@ -436,6 +441,7 @@ class RfSourceBase:
                             minimum=power_range[0],
                             maximum=power_range[1],
                             unit="dBm",
+                            display_unit=self.POWER_DISPLAY_UNIT,
                         ),
                         current=power,
                         live_write=True,
