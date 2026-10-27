@@ -65,11 +65,20 @@ drops a coupling because it is small or labelled forbidden.
   Fourier-truncation estimates. For several lasers with incommensurate
   frequencies this is the time average of the quasi-periodic long-time state.
 
-Each request carries an absolute population error target `populationTolerance`
-on the probability scale, `0 < ε ≤ 0.02`, default `0.005`. The estimates are
-calibrated a-posteriori estimates (checked against independent references),
-not certified bounds; a safety factor of 1.5 is applied. A result that does not
-reach the target is reported as a failure, never as a relaxed result.
-Near-resonant lasers participate in the master equation; user-designated
-far-detuned lasers contribute the existing Stark model. Reference calculations
-using QuTiP/Python are development evidence, not shipped runtime components.
+Every request asks for the same absolute population error,
+`populationTolerance: 0.005` on the probability scale (0.5%); it is not a user
+setting. The estimates are calibrated a-posteriori estimates (checked against
+independent references), not certified bounds; a safety factor of 1.5 is
+applied. A result that does not reach the target is reported as a failure,
+never as a relaxed result.
+
+Every enabled laser is an explicit drive of the master equation, with its co-
+and counter-rotating terms on every allowed D1/D2 dipole, whatever its
+detuning. Spontaneous emission has one collapse operator per photon
+polarization across both D lines and both ground F (no secular
+approximation). The static H0 holds the magnetic field and, for every laser,
+the second-order shift through the states outside the 32-state model and the
+Rb⁺ core polarizability. A laser's "显示光移" switch only adds its all-order
+static light shift to the levels chart's background; it never changes the
+dynamics. Reference calculations using QuTiP/Python are development evidence,
+not shipped runtime components.
