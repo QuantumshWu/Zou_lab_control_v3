@@ -21,7 +21,7 @@ const setting=(value,fallback,min,max)=>{const result=Number(value??fallback);if
 
 async function fileIdentity(path){const [data,info]=await Promise.all([readFile(path),stat(path)]);return {path,sha256:hash(data),size:info.size,modifiedAt:info.mtime.toISOString()};}
 async function buildIdentity(){
-  const files=['physics.js','laser-frequency.js','laser-intensity.js','types.js','solver-protocol.js','mean-density.js','spectroscopy.js','spectroscopy-data.js','full-master-model.js','dynamics-cache-key.js','laser-regime.js'];
+  const files=['physics.js','laser-frequency.js','laser-intensity.js','types.js','solver-protocol.js','mean-density.js','spectroscopy.js','spectroscopy-data.js','full-master-model.js','dynamics-cache-key.js','floquet-background.js'];
   const entries=await Promise.all(files.map(async name=>({name,sha256:hash(await readFile(resolve(root,'js/atom-workbench/src',name)))})));
   entries.push({name:'scripts/serve.mjs',sha256:hash(await readFile(fileURLToPath(import.meta.url)))});
   entries.push({name:'scripts/solver-failure-log.mjs',sha256:hash(await readFile(resolve(app,'scripts/solver-failure-log.mjs')))});

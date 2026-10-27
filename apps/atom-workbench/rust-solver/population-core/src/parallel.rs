@@ -1,4 +1,4 @@
-//! Persistent worker pool for the population kernels.
+//! Persistent worker pool for the lattice kernels.
 //!
 //! Threading policy: work is split by output modes into contiguous chunks
 //! (a few per worker, balanced by work stealing); each task owns its packing
@@ -8,7 +8,7 @@
 //! Every output entry is accumulated by exactly one task. Small stages run
 //! serially on the calling thread.
 //!
-//! ATOM_PENCIL_THREADS sets the pool size (1..=32). When it is unset the
+//! ATOM_SOLVER_THREADS sets the pool size (1..=32). When it is unset the
 //! pool uses the available hardware threads, capped at 8.
 use rayon::prelude::*;
 use std::{
@@ -31,39 +31,20 @@ pub struct Execution {
 
 impl Execution {
     pub fn new() -> Result<Self, String> {
-        let threads = match std::env::var("ATOM_PENCIL_THREADS") {
-            Ok(value) => value.parse::<usize>().map_err(|_| "ATOM_PENCIL_THREADS must be an integer in 1..32")?,
+        let threads = match std::env::var("ATOM_SOLVER_THREADS") {
+            Ok(value) => value.parse::<usize>().map_err(|_| "ATOM_SOLVER_THREADS must be an integer in 1..32")?,
             Err(std::env::VarError::NotPresent) => default_threads(),
-            Err(_) => return Err("Invalid ATOM_PENCIL_THREADS environment value".into()),
+            Err(_) => return Err("Invalid ATOM_SOLVER_THREADS environment value".into()),
         };
         Self::with_threads(threads)
     }
 
     pub(crate) fn with_threads(threads: usize) -> Result<Self, String> {
         if !(1..=32).contains(&threads) {
-            return Err("ATOM_PENCIL_THREADS must be in 1..32".into());
+            return Err("ATOM_SOLVER_THREADS must be in 1..32".into());
         }
         let pool = if threads == 1 { None } else { Some(shared_pool(threads)?) };
         Ok(Self { threads, pool })
-    }
-
-    pub fn threads(&self) -> usize {
-        self.threads
-    }
-
-    /// Runs `a` and `b` concurrently on the pool (serially without one). Both
-    /// stay on pool workers, which already own their BLAS buffers.
-    pub fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
-    where
-        A: FnOnce() -> RA + Send,
-        B: FnOnce() -> RB + Send,
-        RA: Send,
-        RB: Send,
-    {
-        match &self.pool {
-            Some(pool) => pool.install(|| rayon::join(a, b)),
-            None => (a(), b()),
-        }
     }
 
     /// `action` on every item, in parallel on the pool (serially without
@@ -149,9 +130,9 @@ fn shared_pool(threads: usize) -> Result<Arc<rayon::ThreadPool>, String> {
     }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
-        .thread_name(move |i| format!("awb-pencil-{threads}-{i}"))
+        .thread_name(move |i| format!("awb-solver-{threads}-{i}"))
         .build()
-        .map_err(|e| format!("Cannot prepare pencil workers: {e}"))?;
+        .map_err(|e| format!("Cannot prepare solver workers: {e}"))?;
     let pool = Arc::new(pool);
     pools.insert(threads, Arc::clone(&pool));
     Ok(pool)

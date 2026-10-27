@@ -48,12 +48,11 @@ export interface Laser {
   /** Spectroscopy/diagram origin only. Omitted follows the actual initial state;
    * this does not restrict drive couplings or alter the density initial state. */
   referenceStateId?: string;
-  /** The laser's physics (full-master-model.ts), part of the dynamics cache key:
-   * 'near' (default) is a rotating-wave drive of every allowed D1/D2 dipole in the
-   * master equation; 'far' is only its static second-order light shift, in H0 and in
-   * the levels chart, refused when its mixing |Ω/2Δ| exceeds 1% (spectroscopy.ts
-   * displayMixing) or its detuning is below 100 max(Γ/2π, Ω/2π) (laser-regime.ts). */
-  regime?: 'near' | 'far';
+  /** Display only ("显示光移"): the levels chart's background includes this laser's
+   * static light shift (spectroscopy.ts). It never changes the dynamics, where every
+   * enabled laser of nonzero intensity is an explicit drive of the master equation,
+   * and it is no part of a request or of the dynamics cache key. */
+  showLightShift?: boolean;
   referenceProcess?: 'absorption' | 'emission';
   /** Legacy: detuning from referenceTransition, in MHz (transition mode). Legacy scenes
    * without a reference use F=2 → F'=3 (D2) or F'=2 (D1). */
@@ -121,8 +120,6 @@ export interface DynamicsSettings {
   monitorMode?:'auto'|'manual';
   monitoredGroupIds?:string[];
   durationUs: number; samples: number; autoRun: boolean;
-  /** Absolute population error target in probability units, not percent. */
-  populationTolerance: number;
   /** Display unit only; physical duration and request identity remain in μs. */
   durationUnit?:DurationUnit;
   /** @deprecated Legacy scene-file metadata only. No UI control, numerical
@@ -148,17 +145,12 @@ export const DEFAULT_MEAN_HORIZON_US=1e6;
 export function resolveMeanHorizon(settings?:{meanHorizonUs?:number|null}):number|null{const h=settings?.meanHorizonUs;return h===undefined?DEFAULT_MEAN_HORIZON_US:h;}
 export const DEFAULT_DYNAMICS_SAMPLES=1000;
 export const DEFAULT_TWEEZER_WAVELENGTH_NM=852;
-export const DEFAULT_POPULATION_TOLERANCE=.005;
-export const MAX_POPULATION_TOLERANCE=.02;
-/** Missing legacy settings use the default; supplied invalid values fail. */
-export function resolvePopulationTolerance(value:unknown):number {
-  if(value===undefined)return DEFAULT_POPULATION_TOLERANCE;
-  if(typeof value!=='number'||!Number.isFinite(value)||value<=0||value>MAX_POPULATION_TOLERANCE)throw new Error('populationTolerance 必须满足 0 < ε ≤ 0.02');
-  return value;
-}
+/** The population accuracy of every solve: an absolute error of 0.005 in probability
+ * units (0.5%), sent with each request. */
+export const POPULATION_TOLERANCE=.005;
 export function defaultDynamics(): DynamicsSettings {
   return {laserId:'probe',initialStateId:'ground-2-0',monitoredStateIds:['ground-2-0','ground-1--1','ground-1-0','ground-1-1'],
-    durationUs:20,samples:DEFAULT_DYNAMICS_SAMPLES,populationTolerance:DEFAULT_POPULATION_TOLERANCE,meanHorizonUs:DEFAULT_MEAN_HORIZON_US,autoRun:true,monitorMode:'auto',monitoredGroupIds:[]};
+    durationUs:20,samples:DEFAULT_DYNAMICS_SAMPLES,meanHorizonUs:DEFAULT_MEAN_HORIZON_US,autoRun:true,monitorMode:'auto',monitoredGroupIds:[]};
 }
 export interface Level {
   id: string; manifold: 'ground' | 'D1' | 'D2'; F: number; m: number;
@@ -167,6 +159,10 @@ export interface Level {
   /** Relative to the zero-external-field state; null means no static spectrum is justified. */
   totalShiftMHz?:number|null;
   starkShiftMHz?:number|null;
+  /** Numerical error bounds of the total shift, MHz: the Floquet partitioning (layers,
+   * energy self-consistency) and the left-out couplings through states outside the
+   * model. Not the atomic data's uncertainty. Null where totalShiftMHz is. */
+  shiftBound?:{floquetMHz:number;outsideMHz:number}|null;
   /** Column vector in the solver's 32-state magnetic-field eigenbasis. */
   backgroundState?:{real:number[];imag:number[]};
   mixed?:boolean;
@@ -180,6 +176,9 @@ export interface SpectroscopyMetadata {
   requiresDensityProjection:boolean;
   warnings?:string[];
   maximumMixingRatio?:number;
+  /** The static background's partitioning: Floquet layers, clusters, cluster solves and
+   * the largest bound of each kind over the 32 levels (MHz). */
+  numerics?:{floquetLayers:number;clusters:number;solves:number;floquetBoundMHz:number;outsideBoundMHz:number};
   sources?:string[];
 }
 export interface Polarization {
@@ -213,7 +212,7 @@ export function defaultScene(): Scene {
     version: 1, name: `探测光 + ${DEFAULT_TWEEZER_WAVELENGTH_NM} nm 光镊`, initialF: 2, initialM: 0,
     marks:{},references:[],dynamics:defaultDynamics(),
     fields: [{id:'bias',name:'偏置磁场',enabled:true,magnitudeG:3,thetaDeg:0,phiDeg:0}],
-    lasers: [{id:'probe',name:'探测光',enabled:true,regime:'near',line:'D2',detuningMHz:0,intensityMWcm2:1,
+    lasers: [{id:'probe',name:'探测光',enabled:true,showLightShift:false,line:'D2',detuningMHz:0,intensityMWcm2:1,
       referenceTransition:{line:'D2',Fg:2,Fe:2},frequencyMode:'transition',detuningUnit:'MHz',
       thetaDeg:0,phiDeg:0,polarizationAngleDeg:0,ellipticityDeg:0}, defaultTweezer()],
   };
@@ -222,7 +221,7 @@ export function defaultScene(): Scene {
 /** A tweezer is an ordinary enabled laser, with its physical optical frequency.
  * No separate trap approximation, hidden beam exclusion, or effective shift. */
 export function defaultTweezer(): Laser {
-  return {id:'tweezer',name:'光镊',enabled:true,regime:'far',line:'D2',frequencyMode:'wavelength',wavelengthNm:DEFAULT_TWEEZER_WAVELENGTH_NM,
+  return {id:'tweezer',name:'光镊',enabled:true,showLightShift:true,line:'D2',frequencyMode:'wavelength',wavelengthNm:DEFAULT_TWEEZER_WAVELENGTH_NM,
     referenceTransition:{line:'D2',Fg:2,Fe:3},detuningMHz:0,detuningUnit:'THz',
     intensityMode:'power',powerMW:4,waistUm:1.2,intensityMWcm2:2*4/(Math.PI*1.2**2)*1e8,
     thetaDeg:90,phiDeg:0,polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0};

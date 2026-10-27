@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {formatNumber,formatElapsed,stateLabel,idLabel,labelStateIds,signedInteger,MINUS} from '../dist/js/atom-workbench/src/format.js';
 import {solverText,steadyStatusText} from '../dist/js/atom-workbench/src/solver-words.js';
 import {stateTree} from '../dist/js/atom-workbench/src/choice-trees.js';
@@ -40,6 +41,13 @@ test('every state is spelled one way, in trees, groups and labels',()=>{
 test('solver statuses and known sentences are shown in Chinese; unknown text is kept',()=>{
   assert.equal(steadyStatusText('time-average'),'长期时间平均');
   assert.equal(steadyStatusText('not-converged'),'未收敛');
-  assert.match(solverText('Full32 density-matrix Lindblad evolution with adaptive population refinement'),/完整 32 态/);
   assert.equal(solverText('an unforeseen native message'),'an unforeseen native message');
+});
+test('the method sentences the native adapter writes are shown in Chinese',()=>{
+  const adapter=readFileSync(new URL('../rust-solver/src/lattice_core_adapter.rs',import.meta.url),'utf8');
+  for(const name of ['FINITE_METHOD','MEAN_METHOD','STATIC_METHOD']){
+    const sentence=new RegExp(`const ${name}:&str="([^"]+)";`).exec(adapter)?.[1];
+    assert.ok(sentence,name);
+    assert.match(solverText(sentence),/^完整 32 态/,name);
+  }
 });

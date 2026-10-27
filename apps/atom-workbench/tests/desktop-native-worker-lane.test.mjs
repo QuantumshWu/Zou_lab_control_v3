@@ -46,7 +46,7 @@ test('Worker sends the identical complete model, finite jobs to the trajectory l
   };
   worker=createModelWorker(message=>{events.push(message);if(message.kind==='native')host(message.command);});
   await worker.receive({kind:'solve',channel:'invalid',request:{}});
-  await worker.receive({kind:'native',event:{kind:'configuration',binarySha256:'binary',buildSha256:'build',defaults:{ATOM_PENCIL_THREADS:'8'}}});
+  await worker.receive({kind:'native',event:{kind:'configuration',binarySha256:'binary',buildSha256:'build',defaults:{ATOM_SOLVER_THREADS:'8'}}});
   await tick();assert.equal(events.find(e=>e.channel==='invalid').status,400);
   const scene=defaultScene();scene.lasers[1].enabled=false;scene.lasers.push({...scene.lasers[0],id:'second',detuningMHz:100});
   const options={durationUs:0.1,samples:3,populationTolerance:.003731,steadyOnly:false,includeAsymptotic:true};const request={scene,modelSchema:FULL_MODEL_SCHEMA,stream:true,request:{clientId:'worker-test',sequence:1},options};
@@ -58,7 +58,8 @@ test('Worker sends the identical complete model, finite jobs to the trajectory l
   assert.equal(requests[0].options.includeAsymptotic,true);assert.equal(requests[0].progress,true);
   const model=buildFullMasterModel(scene,{...scene.dynamics,...options});
   for(const sent of requests){
-    assert.equal(sent.options.populationTolerance,.003731);
+    // A tolerance in the options is not read: every native request asks for 0.005.
+    assert.equal(sent.options.populationTolerance,.005);
     assert.equal(sent.modelSchema,FULL_MODEL_SCHEMA);
     // Exactly the fields the worker reads; e.g. no frameFrequenciesMHz: the
     // native solver returns the laboratory-frame mean itself.
@@ -72,18 +73,14 @@ test('Worker sends the identical complete model, finite jobs to the trajectory l
   // The Worker's response is exactly what the UI reader accepts.
   const finite=normalizeDynamicsResult(messages.at(-1).event.data,scene);
   assert.equal(finite.timesUs.length,3);assert.equal(finite.steady.converged,true);assert.deepEqual(finite.assumptions,model.assumptions);
-  const legacy=structuredClone(scene);delete legacy.dynamics.populationTolerance;
-  await worker.receive({kind:'solve',channel:'legacy',request:{scene:legacy,modelSchema:FULL_MODEL_SCHEMA,
+  // A scene that still carries a tolerance of its own: the mean asks for 0.005 too.
+  const old=structuredClone(scene);old.dynamics.populationTolerance=.021;
+  await worker.receive({kind:'solve',channel:'mean',request:{scene:old,modelSchema:FULL_MODEL_SCHEMA,
     request:{clientId:'worker-test',sequence:2},options:{durationUs:.1,samples:3,steadyOnly:true,includeAsymptotic:true}}});
-  for(let i=0;i<50&&!events.some(e=>e.channel==='legacy'&&e.kind==='response');i++)await tick();
+  for(let i=0;i<50&&!events.some(e=>e.channel==='mean'&&e.kind==='response');i++)await tick();
   assert.equal(requests.at(-1).options.populationTolerance,.005);assert.equal(requests.at(-1).lane,'steady');
-  const mean=normalizeDynamicsResult(events.find(e=>e.channel==='legacy'&&e.kind==='response').data,legacy);
+  const mean=normalizeDynamicsResult(events.find(e=>e.channel==='mean'&&e.kind==='response').data,old);
   assert.equal(mean.timesUs.length,1);assert.equal(mean.steady.converged,true);
-  const count=requests.length;
-  await worker.receive({kind:'solve',channel:'invalid-tolerance',request:{scene,modelSchema:FULL_MODEL_SCHEMA,
-    request:{clientId:'worker-test',sequence:3},options:{populationTolerance:.021}}});
-  await tick();assert.equal(events.find(e=>e.channel==='invalid-tolerance').status,400);
-  assert.equal(requests.length,count,'invalid tolerance never reaches a native lane');
   await worker.receive({kind:'shutdown'});assert.equal(events.at(-1).kind,'shutdown-complete');
 });
 

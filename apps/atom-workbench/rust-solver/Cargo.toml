@@ -7,6 +7,7 @@ edition = "2021"
 
 [features]
 static-numerics = ["atom-population-core/static-numerics"]
+validation = ["atom-population-core/validation"]
 
 [dependencies]
 atom-population-core = { path = "population-core" }

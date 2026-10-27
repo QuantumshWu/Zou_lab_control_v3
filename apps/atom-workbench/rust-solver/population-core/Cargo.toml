@@ -9,6 +9,8 @@ crate-type = ["rlib"]
 
 [features]
 static-numerics = []
+# Validation-only code paths (the exact dense dressed preconditioner).
+validation = []
 
 [dependencies]
 rayon = "=1.12.0"

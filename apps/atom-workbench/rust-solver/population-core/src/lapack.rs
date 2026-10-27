@@ -145,9 +145,7 @@ pub struct Lapack {
 /// implementation. The caller keeps OpenBLAS single-threaded for outer workers.
 #[derive(Clone, Copy)]
 pub struct SylvesterKernel<'a> {
-    zgemm: ZGemm,
     ztrsyl: ZTrSyl,
-    zgetrs: ZGetRs,
     _owner: std::marker::PhantomData<&'a ()>,
 }
 /// Strided column-major complex GEMM on sub-matrices. Like `SylvesterKernel`
@@ -202,32 +200,19 @@ impl ComplexGemm<'_> {
     }
 }
 impl SylvesterKernel<'_> {
+    /// Solve A X - X B^H = rhs for upper-triangular n x n A and B
+    /// (column-major). LAPACK's overflow scale is undone, never silently left
+    /// in the solution.
     pub fn complex_sylvester(&self, a: &[Complex64], b: &[Complex64], rhs: &[Complex64], n: usize) -> Result<Vec<Complex64>, String> {
-        self.complex_sylvester_rect(a,b,rhs,n,n)
-    }
-    /// Rectangular A X - X B^H = rhs. The same mature ztrsyl kernel and scale
-    /// handling as the square entry; no padding or second decomposition.
-    pub fn complex_sylvester_rect(&self,a:&[Complex64],b:&[Complex64],rhs:&[Complex64],m:usize,n:usize)->Result<Vec<Complex64>,String>{
-        self.complex_sylvester_rect_side(a,b,rhs,m,n,false)
-    }
-    /// Rectangular A^H X - X B = rhs, using the SAME upper-triangular A/B.
-    /// This is the HS adjoint of the forward Sylvester operator; do not also
-    /// conjugate a frequency already contained in A before calling it.
-    pub fn complex_sylvester_rect_adjoint(&self,a:&[Complex64],b:&[Complex64],rhs:&[Complex64],m:usize,n:usize)->Result<Vec<Complex64>,String>{
-        self.complex_sylvester_rect_side(a,b,rhs,m,n,true)
-    }
-    fn complex_sylvester_rect_side(&self,a:&[Complex64],b:&[Complex64],rhs:&[Complex64],m:usize,n:usize,adjoint:bool)->Result<Vec<Complex64>,String>{
-        if m == 0 || n == 0 || m > i32::MAX as usize || n > i32::MAX as usize || a.len() != m*m || b.len() != n*n || rhs.len() != m*n {
+        if n == 0 || n > i32::MAX as usize || a.len() != n*n || b.len() != n*n || rhs.len() != n*n {
             return Err("Invalid complex Sylvester dimensions".into());
         }
-        let mi = m as i32;
         let ni = n as i32;
         let mut x = rhs.to_vec();
         let mut scale = 1.;
         let mut info = 0;
-        let ta=(if adjoint{b'C'}else{b'N'}) as c_char;let tb=(if adjoint{b'N'}else{b'C'}) as c_char;
-        unsafe { (self.ztrsyl)(&ta, &tb, &-1,
-            &mi, &ni, a.as_ptr(), &mi, b.as_ptr(), &ni, x.as_mut_ptr(), &mi, &mut scale, &mut info); }
+        unsafe { (self.ztrsyl)(&(b'N' as c_char), &(b'C' as c_char), &-1,
+            &ni, &ni, a.as_ptr(), &ni, b.as_ptr(), &ni, x.as_mut_ptr(), &ni, &mut scale, &mut info); }
         if info != 0 || !scale.is_finite() || scale <= 0. {
             return Err(format!("LAPACK ztrsyl unresolved: info={info}, scale={scale}"));
         }
@@ -235,81 +220,18 @@ impl SylvesterKernel<'_> {
         if x.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()) { return Err("Non-finite Sylvester solution".into()); }
         Ok(x)
     }
-    pub fn complex_solve_factored(&self, lu: &[Complex64], pivots: &[i32], rhs: &[Complex64], n: usize) -> Result<Vec<Complex64>, String> {
-        if n == 0 || lu.len() != n*n || pivots.len() != n || rhs.len() != n { return Err("Invalid complex LU solve dimensions".into()); }
-        let ni = n as i32;
-        let mut x = rhs.to_vec();
-        let mut info = 0;
-        unsafe { (self.zgetrs)(&(b'N' as c_char), &ni, &1, lu.as_ptr(), &ni, pivots.as_ptr(), x.as_mut_ptr(), &ni, &mut info); }
-        if info != 0 || x.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()) { return Err(format!("LAPACK zgetrs failed: {info}")); }
-        Ok(x)
-    }
-    pub fn multiply_complex(
-        &self,
-        a: &[Complex64],
-        b: &[Complex64],
-        m: usize,
-        n: usize,
-        k: usize,
-    ) -> Result<Vec<Complex64>, String> {
-        if m > i32::MAX as usize
-            || n > i32::MAX as usize
-            || k > i32::MAX as usize
-            || m.checked_mul(k) != Some(a.len())
-            || k.checked_mul(n) != Some(b.len())
-        {
-            return Err("Invalid complex BLAS matrix dimensions".into());
-        }
-        if a.iter()
-            .chain(b)
-            .any(|v| !v.re.is_finite() || !v.im.is_finite())
-        {
-            return Err("Complex BLAS input is not finite".into());
-        }
-        let mut out =
-            vec![Complex64::default(); m.checked_mul(n).ok_or("Complex BLAS allocation overflow")?];
-        if m == 0 || n == 0 || k == 0 {
-            return Ok(out);
-        }
-        let no = b'N' as c_char;
-        let (mi, ni, ki) = (m as i32, n as i32, k as i32);
-        let one = Complex64 { re: 1., im: 0. };
-        let zero = Complex64::default();
-        unsafe {
-            (self.zgemm)(
-                &no,
-                &no,
-                &mi,
-                &ni,
-                &ki,
-                &one,
-                a.as_ptr(),
-                &mi,
-                b.as_ptr(),
-                &ki,
-                &zero,
-                out.as_mut_ptr(),
-                &mi,
-            );
-        }
-        if out.iter().any(|v| !v.re.is_finite() || !v.im.is_finite()) {
-            return Err("Complex BLAS output is not finite".into());
-        }
-        Ok(out)
-    }
 }
 impl Lapack {
     pub fn sylvester_kernel(&self) -> SylvesterKernel<'_> {
-        SylvesterKernel { zgemm:self.zgemm, ztrsyl:self.ztrsyl, zgetrs:self.zgetrs,
-            _owner:std::marker::PhantomData }
+        SylvesterKernel { ztrsyl:self.ztrsyl, _owner:std::marker::PhantomData }
     }
     /// Thread-shareable strided complex GEMM entry (see `ComplexGemm`).
     pub fn complex_gemm(&self) -> ComplexGemm<'_> {
         ComplexGemm { zgemm: self.zgemm, _owner: std::marker::PhantomData }
     }
 
-    /// BLAS always runs single-threaded: the population kernels parallelize
-    /// over output modes (`ATOM_PENCIL_THREADS`), and threaded level-3 OpenBLAS
+    /// BLAS always runs single-threaded: the lattice kernels parallelize
+    /// over output modes (`ATOM_SOLVER_THREADS`), and threaded level-3 OpenBLAS
     /// both oversubscribes that pool and keeps per-call job tables on the
     /// calling thread's stack.
     #[cfg(feature="static-numerics")]
@@ -413,11 +335,6 @@ impl Lapack {
         if info!=0||eigen.iter().chain(&right).any(|z|!z.re.is_finite()||!z.im.is_finite()){return Err(format!("LAPACK zgeev unresolved: {info}"));}
         Ok((eigen,right))
     }
-    /// Solve A X - X B^H = rhs for upper-triangular A and B.
-    /// LAPACK's overflow scale is undone, never silently left in the solution.
-    pub fn complex_sylvester(&self, a: &[Complex64], b: &[Complex64], rhs: &[Complex64], n: usize) -> Result<Vec<Complex64>, String> {
-        self.sylvester_kernel().complex_sylvester(a, b, rhs, n)
-    }
     pub fn complex_factor(&self, a: &[Complex64], n: usize) -> Result<(Vec<Complex64>, Vec<i32>), String> {
         if n == 0 || n > i32::MAX as usize || a.len() != n*n { return Err("Invalid complex LU dimensions".into()); }
         let ni = n as i32;
@@ -428,8 +345,18 @@ impl Lapack {
         if info != 0 { return Err(format!("LAPACK zgetrf failed: {info}")); }
         Ok((lu, pivots))
     }
-    pub fn complex_solve_factored(&self, lu: &[Complex64], pivots: &[i32], rhs: &[Complex64], n: usize) -> Result<Vec<Complex64>, String> {
-        self.sylvester_kernel().complex_solve_factored(lu, pivots, rhs, n)
+    /// Solve every column-major RHS column with one complex LU factorization.
+    pub fn complex_solve_matrix_factored(&self, lu: &[Complex64], pivots: &[i32], rhs: &[Complex64], n: usize) -> Result<Vec<Complex64>, String> {
+        if n == 0 || n > i32::MAX as usize || lu.len() != n*n || pivots.len() != n || rhs.len() % n != 0 || rhs.len() / n > i32::MAX as usize {
+            return Err("Invalid complex multiple-RHS LU solve dimensions".into());
+        }
+        let mut x = rhs.to_vec();
+        if x.is_empty() { return Ok(x); }
+        let (ni, columns) = (n as i32, (rhs.len() / n) as i32);
+        let mut info = 0;
+        unsafe { (self.zgetrs)(&(b'N' as c_char), &ni, &columns, lu.as_ptr(), &ni, pivots.as_ptr(), x.as_mut_ptr(), &ni, &mut info); }
+        if info != 0 || x.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()) { return Err(format!("LAPACK zgetrs multiple-RHS failed: {info}")); }
+        Ok(x)
     }
     pub fn eigen(&self, a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), String> {
         let ni = n as i32;
@@ -689,33 +616,31 @@ impl Lapack {
         }
         Ok(())
     }
-    pub fn multiply_complex(
-        &self,
-        a: &[Complex64],
-        b: &[Complex64],
-        m: usize,
-        n: usize,
-        k: usize,
-    ) -> Result<Vec<Complex64>, String> {
-        self.sylvester_kernel().multiply_complex(a, b, m, n, k)
-    }
-    /// Allocation-free complex C = A B, column-major and BLAS beta=0.
-    /// This validates only dimensions/overflow, not floating-point contents.
-    /// Callers using reusable scratch buffers must check finiteness at their
-    /// numerical-operation boundary. No allocation or full-array scan occurs.
-    pub fn multiply_complex_into(
-        &self,a:&[Complex64],b:&[Complex64],out:&mut[Complex64],m:usize,n:usize,k:usize,
-    )->Result<(),String>{
-        if m>i32::MAX as usize||n>i32::MAX as usize||k>i32::MAX as usize||
-            m.checked_mul(k)!=Some(a.len())||k.checked_mul(n)!=Some(b.len())||m.checked_mul(n)!=Some(out.len()){
-            return Err("Invalid trusted complex BLAS matrix dimensions".into());
+    /// Complex C = A B, column-major, with finite inputs and output.
+    #[cfg(any(test, feature = "validation"))]
+    pub fn multiply_complex(&self, a: &[Complex64], b: &[Complex64], m: usize, n: usize, k: usize) -> Result<Vec<Complex64>, String> {
+        if m > i32::MAX as usize || n > i32::MAX as usize || k > i32::MAX as usize
+            || m.checked_mul(k) != Some(a.len()) || k.checked_mul(n) != Some(b.len())
+        {
+            return Err("Invalid complex BLAS matrix dimensions".into());
         }
-        if m==0||n==0{return Ok(());}
-        if k==0{out.fill(Complex64::default());return Ok(());}
-        let no=b'N' as c_char;let(mi,ni,ki)=(m as i32,n as i32,k as i32);
-        let one=Complex64{re:1.,im:0.};let zero=Complex64::default();
-        unsafe{(self.zgemm)(&no,&no,&mi,&ni,&ki,&one,a.as_ptr(),&mi,b.as_ptr(),&ki,&zero,out.as_mut_ptr(),&mi);}
-        Ok(())
+        if a.iter().chain(b).any(|v| !v.re.is_finite() || !v.im.is_finite()) {
+            return Err("Complex BLAS input is not finite".into());
+        }
+        let mut out = vec![Complex64::default(); m.checked_mul(n).ok_or("Complex BLAS allocation overflow")?];
+        if m == 0 || n == 0 || k == 0 {
+            return Ok(out);
+        }
+        let no = b'N' as c_char;
+        let (mi, ni, ki) = (m as i32, n as i32, k as i32);
+        let (one, zero) = (Complex64 { re: 1., im: 0. }, Complex64::default());
+        unsafe {
+            (self.zgemm)(&no, &no, &mi, &ni, &ki, &one, a.as_ptr(), &mi, b.as_ptr(), &ki, &zero, out.as_mut_ptr(), &mi);
+        }
+        if out.iter().any(|v| !v.re.is_finite() || !v.im.is_finite()) {
+            return Err("Complex BLAS output is not finite".into());
+        }
+        Ok(out)
     }
 }
 
@@ -775,8 +700,5 @@ mod added_wrapper_tests {
         assert!((product[0].im - 5.).abs() < 1e-15);
         assert!((product[1].re - 7.).abs() < 1e-15);
         assert!((product[1].im - 1.).abs() < 1e-15);
-        let mut reused=[Complex64{re:f64::NAN,im:f64::NAN};2];
-        lap.multiply_complex_into(&a,&b,&mut reused,2,1,1).unwrap();
-        for(actual,expected)in reused.iter().zip(product){assert_eq!(actual.re,expected.re);assert_eq!(actual.im,expected.im);}
     }
 }

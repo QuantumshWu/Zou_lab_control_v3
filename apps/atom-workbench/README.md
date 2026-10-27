@@ -50,26 +50,49 @@ entry is `tools/atom_workbench.ps1`; the independent package entry is
 ## Numerical scope
 
 Every request (schema `rb87-full/2`) is solved by the population core in
-`rust-solver/population-core`; the worker in `rust-solver/src` only speaks the
-JSONL protocol. The complete 32-state Hamiltonian, drives and collapse
-operators of the TypeScript model are kept: the core changes variables
-exactly (gauge, Fourier envelope, optical and recycling shears) and never
-drops a coupling because it is small or labelled forbidden.
+`rust-solver/population-core`; the worker in `rust-solver/src` speaks the
+JSONL protocol and defines the one result contract
+(`lattice_core_adapter.rs`). The complete 32-state Hamiltonian, drives and
+collapse operators of the TypeScript model are kept: the core works on the
+Fourier envelopes of the request's own frame and never drops a coupling
+because it is small or labelled forbidden.
 
-- Finite-time trajectories: a rational Krylov trial space on the gauge pencil
-  with a Galerkin reduced model, grown until a dual-weighted residual estimate
-  of the population error (trial-space basis plus Fourier truncation) meets the
-  requested tolerance.
-- Long-time means: the null vector of the same pencil (or, when the null space
-  is degenerate, the projection of the initial state), with its own basis and
-  Fourier-truncation estimates. For several lasers with incommensurate
-  frequencies this is the time average of the quasi-periodic long-time state.
+- The folded Fourier lattice: near-resonant charge steps (the beats between
+  lasers) are explicit couplings between lattice modes; far steps (the
+  tweezer and every counter-rotating harmonic) are folded statically at
+  second order into the near couplings, and every remainder of the fold is
+  charged as a bound.
+- Long-time means: the null vector of the lattice operator, by GMRES with a
+  dressed-block preconditioner, its near-shell truncation and fold errors
+  estimated by error equations in the solver's Krylov space. The slowest
+  eigenpairs give the uniqueness check and the slowest relaxation time. For
+  several lasers with incommensurate frequencies the mean is the time
+  average of the quasi-periodic long-time state; a mean at a finite horizon
+  propagates the initial state to it, or is the limit once the slowest
+  relaxation has passed. A driven mean with several conserved quantities is
+  reported as not converged.
+- Models without lasers are static: the mean is exact, the spectral
+  projectors of the static generator applied to the initial state
+  (initial-dependent when several quantities are conserved).
+- Finite-time trajectories: rational Krylov with lattice-translation
+  augmentation and a Galerkin reduced model, its basis, near-shell and fold
+  errors propagated through the dressed blocks; beyond 1 ms the trajectory
+  continues as the expansion in the slow eigenmodes.
 
-Each request carries an absolute population error target `populationTolerance`
-on the probability scale, `0 < ε ≤ 0.02`, default `0.005`. The estimates are
-calibrated a-posteriori estimates (checked against independent references),
-not certified bounds; a safety factor of 1.5 is applied. A result that does not
-reach the target is reported as a failure, never as a relaxed result.
-Near-resonant lasers participate in the master equation; user-designated
-far-detuned lasers contribute the existing Stark model. Reference calculations
-using QuTiP/Python are development evidence, not shipped runtime components.
+Every request asks for the same absolute population error,
+`populationTolerance: 0.005` on the probability scale (0.5%); it is not a user
+setting. The estimates are calibrated a-posteriori estimates (checked against
+independent references), not certified bounds; a safety factor of 1.5 is
+applied. A result that does not reach the target is reported as a failure,
+never as a relaxed result.
+
+Every enabled laser is an explicit drive of the master equation, with its co-
+and counter-rotating terms on every allowed D1/D2 dipole, whatever its
+detuning. Spontaneous emission has one collapse operator per photon
+polarization across both D lines and both ground F (no secular
+approximation). The static H0 holds the magnetic field and, for every laser,
+the second-order shift through the states outside the 32-state model and the
+Rb⁺ core polarizability. A laser's "显示光移" switch only adds its all-order
+static light shift to the levels chart's background; it never changes the
+dynamics. Reference calculations using QuTiP/Python are development evidence,
+not shipped runtime components.

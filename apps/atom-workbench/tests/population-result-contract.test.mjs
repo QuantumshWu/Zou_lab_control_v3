@@ -41,6 +41,7 @@ test('a finite trajectory cannot bypass complete accuracy and projection-charge 
     d=>d.populationAccuracy.projectionCharge=-1,d=>d.populationAccuracy.estimatedMaximumError=.006,
     d=>d.populationAccuracy.estimatedMaximumError=NaN,d=>d.populationAccuracy.requestedTolerance=0,
     d=>d.populationAccuracy.requestedTolerance=.021,d=>d.populationAccuracy.requestedTolerance='0.005',
+    d=>d.populationAccuracy.requestedTolerance=.001,
     d=>d.populationAccuracy.scope.states=31,d=>d.populationAccuracy.scope.samples=2,
     d=>d.populationAccuracy.scope.groups.pop(),d=>d.populationAccuracy.scope.groups[0]=d.populationAccuracy.scope.groups[1],
     d=>d.populationAccuracy.scope.groups[0]='unknown',
@@ -83,16 +84,16 @@ test('mean trace, positivity and complex-density gates hold in mean and finite r
   assert.throws(()=>normalizeDynamicsResult(invalid,f.scene),/长期复密度/);
 });
 
-test('transport binds population accuracy to the actual requested tolerance and initial state',async t=>{
-  const f=fixture();f.scene.dynamics.populationTolerance=.001;
-  let reply=f.data,calls=0;
+test('transport binds population accuracy to the fixed requested accuracy and the initial state',async t=>{
+  const f=fixture();
+  let reply=structuredClone(f.data),calls=0;reply.populationAccuracy.requestedTolerance=.001;reply.populationAccuracy.estimatedMaximumError=.0006;
   const client=new DynamicsClient({clientId:'population-contract',debounceMs:0,fetch:async(_url,init)=>{
     calls++;const body=JSON.parse(init.body);
     return new Response(JSON.stringify({...reply,request:body.request}),{headers:{'Content-Type':'application/json'}});
   }});t.after(()=>client.dispose());
-  await assert.rejects(client.solve(f.scene,f.scene.dynamics),/误差目标与本次请求不匹配/);
-  reply=structuredClone(f.data);reply.populationAccuracy.requestedTolerance=.001;reply.populationAccuracy.estimatedMaximumError=.0006;
-  assert.equal((await client.solve(f.scene,f.scene.dynamics)).populationAccuracy.requestedTolerance,.001);
+  await assert.rejects(client.solve(f.scene,f.scene.dynamics),/不完整或无效/);
+  reply=f.data;
+  assert.equal((await client.solve(f.scene,f.scene.dynamics)).populationAccuracy.requestedTolerance,.005);
   const other=f.states.find(state=>state.id!==f.scene.dynamics.initialStateId).id;
   await assert.rejects(client.solve(f.scene,{...f.scene.dynamics,initialStateId:other}),/布居初态/);
   assert.equal(calls,3);

@@ -2,7 +2,7 @@ import type {FrequencyDisplayUnit,FrequencyExpr,Scene,Laser,MagneticField,Refere
 import {POPULATION_GROUPS} from './population-selection.js';
 import {DURATION_UNITS} from './duration.js';
 import type {DurationUnit,InitialStateSpec} from './types.js';
-import {DEFAULT_MEAN_HORIZON_US,MEAN_HORIZONS_US,defaultDynamics,resolvePopulationTolerance} from './types.js';
+import {DEFAULT_MEAN_HORIZON_US,MEAN_HORIZONS_US,defaultDynamics} from './types.js';
 import {analyze,resolveSceneFrequencies} from './physics.js';
 import {migrateLaserFrequency,normalizeLaserFrequency} from './laser-frequency.js';
 import {normalizeLaserIntensity} from './laser-intensity.js';
@@ -68,8 +68,10 @@ export function validateScene(input:unknown):Scene {
     if(l.intensityAnchor!==undefined){const anchor=obj(l.intensityAnchor);result.intensityAnchor={intensityMWcm2:val(anchor,'intensityMWcm2',0,Number.MAX_VALUE),viewKey:string(anchor,'viewKey',2048)};}
     if(l.directionAnchor!==undefined){const anchor=obj(l.directionAnchor);result.directionAnchor={thetaDeg:val(anchor,'thetaDeg',0,180),phiDeg:val(anchor,'phiDeg',-180,180),viewKey:string(anchor,'viewKey',2048),...(anchor.thetaResidualDeg!==undefined?{thetaResidualDeg:val(anchor,'thetaResidualDeg',-Number.MAX_VALUE,Number.MAX_VALUE)}:{}),...(anchor.phiResidualDeg!==undefined?{phiResidualDeg:val(anchor,'phiResidualDeg',-Number.MAX_VALUE,Number.MAX_VALUE)}:{})};}
     if(!expr&&l.referenceTransition!==undefined){const ref=obj(l.referenceTransition);if(ref.line!=='D1'&&ref.line!=='D2')throw new Error('跃迁参考的 D 线无效');const Fg=val(ref,'Fg',1,2),Fe=val(ref,'Fe',0,3);if(!Number.isInteger(Fg)||!Number.isInteger(Fe))throw new Error('跃迁参考 F 必须为整数');if(ref.fromManifold!==undefined&&ref.fromManifold!=='ground'&&ref.fromManifold!=='D1')throw new Error('参考起始电子流形无效');result.referenceTransition={line:ref.line,Fg:Fg as 1|2,Fe,...(ref.fromManifold==='D1'?{fromManifold:'D1' as const}:{})};}
-    if(l.regime!==undefined&&l.regime!=='near'&&l.regime!=='far')throw new Error('激光类型必须是 near 或 far');
-    result.regime=(l.regime??(l.id==='tweezer'?'far':'near')) as 'near'|'far';
+    if(l.showLightShift!==undefined&&typeof l.showLightShift!=='boolean')throw new Error('showLightShift 必须为布尔值');
+    // A scene with a `regime` in place of the switch: a 'far' (静态光移) laser shows its light
+    // shift, as does a 'tweezer' saved with neither field.
+    result.showLightShift=typeof l.showLightShift==='boolean'?l.showLightShift:l.regime==='far'||(l.regime===undefined&&l.id==='tweezer');
     if(l.referenceProcess!==undefined&&l.referenceProcess!=='absorption'&&l.referenceProcess!=='emission')throw new Error('光子方向无效');
     result.referenceProcess=l.referenceProcess as Laser['referenceProcess'];
     if(l.referenceStateId!==undefined)result.referenceStateId=string(l,'referenceStateId');
@@ -107,7 +109,7 @@ export function validateScene(input:unknown):Scene {
     if(d.durationUnit!==undefined&&!DURATION_UNITS.includes(d.durationUnit as DurationUnit))throw new Error('时间单位无效');
     if(d.monitorMode!==undefined&&d.monitorMode!=='auto'&&d.monitorMode!=='manual')throw new Error('观察态选择模式无效');
     const groups=d.monitoredGroupIds??[];if(!Array.isArray(groups)||groups.length>POPULATION_GROUPS.length||new Set(groups).size!==groups.length||groups.some(id=>!POPULATION_GROUPS.some(g=>g.id===id)))throw new Error('F 布居分组无效');
-    next.dynamics={laserId,initialStateId,...(spec&&spec.kind!=='state'?{initialState:spec}:{}),monitorMode:d.monitorMode==='manual'?'manual':'auto',monitoredGroupIds:[...groups] as string[],monitoredStateIds:[...d.monitoredStateIds] as string[],durationUs:val(d,'durationUs',Number.MIN_VALUE,Number.MAX_VALUE),...(d.durationUnit!==undefined?{durationUnit:d.durationUnit as DurationUnit}:{}),samples,populationTolerance:resolvePopulationTolerance(d.populationTolerance),meanHorizonUs:meanHorizonUs as number|null,...(d.quality==='verified'||d.quality==='preview'?{quality:d.quality}:{}),autoRun:d.autoRun!==false};
+    next.dynamics={laserId,initialStateId,...(spec&&spec.kind!=='state'?{initialState:spec}:{}),monitorMode:d.monitorMode==='manual'?'manual':'auto',monitoredGroupIds:[...groups] as string[],monitoredStateIds:[...d.monitoredStateIds] as string[],durationUs:val(d,'durationUs',Number.MIN_VALUE,Number.MAX_VALUE),...(d.durationUnit!==undefined?{durationUnit:d.durationUnit as DurationUnit}:{}),samples,meanHorizonUs:meanHorizonUs as number|null,...(d.quality==='verified'||d.quality==='preview'?{quality:d.quality}:{}),autoRun:d.autoRun!==false};
   }
   const initial=[...validatedAnalysis.ground,...validatedAnalysis.D1,...validatedAnalysis.D2].find(l=>l.id===next.dynamics?.initialStateId);if(initial?.manifold==='ground'){next.initialF=initial.F as 1|2;next.initialM=initial.m;}
   return next;

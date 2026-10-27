@@ -1,6 +1,6 @@
 import {FULL_MODEL_SCHEMA,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
-import {DEFAULT_DYNAMICS_SAMPLES,resolvePopulationTolerance} from '../dist/js/atom-workbench/src/types.js';
+import {DEFAULT_DYNAMICS_SAMPLES,POPULATION_TOLERANCE} from '../dist/js/atom-workbench/src/types.js';
 
 const requestError=(message,code)=>Object.assign(new Error(message),{status:400,code});
 
@@ -17,9 +17,9 @@ export function nativeCapabilities(message){
 export function prepareNativeSolve(input){
   if(input.modelSchema!==undefined&&input.modelSchema!==FULL_MODEL_SCHEMA)throw requestError('Unsupported atomic model schema.','incompatible-model-schema');
   const settings={...input.scene.dynamics,...input.options};
-  const populationTolerance=resolvePopulationTolerance(settings.populationTolerance);
   const started=performance.now(),model=buildFullMasterModel(input.scene,settings),modelBuildMs=performance.now()-started;
-  const options={durationUs:settings.durationUs??5,samples:settings.samples??DEFAULT_DYNAMICS_SAMPLES,populationTolerance,
+  // The population accuracy is fixed (POPULATION_TOLERANCE); a value in the scene or the options is not read.
+  const options={durationUs:settings.durationUs??5,samples:settings.samples??DEFAULT_DYNAMICS_SAMPLES,populationTolerance:POPULATION_TOLERANCE,
     includeAsymptotic:input.options?.includeAsymptotic??true,steadyOnly:input.options?.steadyOnly??false,
     // The mean's observation horizon (us; null: t -> infinity), for a solver that reads it.
     ...(input.options&&Object.hasOwn(input.options,'meanHorizonUs')?{meanHorizonUs:input.options.meanHorizonUs}:{})};

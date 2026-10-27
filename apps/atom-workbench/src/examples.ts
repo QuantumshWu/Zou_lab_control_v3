@@ -24,7 +24,7 @@ export function exampleScene(key:string):{scene:Scene;view:ExampleView;line:Spec
   next.name=EXAMPLES.find(example=>example.key===key)?.label??next.name;
   if(key==='three'){
     next.lasers[1]!.enabled=true;
-    Object.assign(probe,{regime:'near',name:'探测光',referenceTransition:{line:'D2',Fg:2,Fe:2},detuningMHz:0});
+    Object.assign(probe,{name:'探测光',referenceTransition:{line:'D2',Fg:2,Fe:2},detuningMHz:0});
     delete probe.frequencyAnchor;normalizeLaserFrequency(probe);
     const repump={...probe,id:'repump',name:'回泵光',referenceTransition:{line:'D2' as const,Fg:1 as const,Fe:2},detuningMHz:0};
     delete repump.frequencyAnchor;normalizeLaserFrequency(repump);next.lasers.push(repump);

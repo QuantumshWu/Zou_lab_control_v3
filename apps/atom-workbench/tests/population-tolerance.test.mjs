@@ -1,33 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {defaultScene,defaultDynamics,resolvePopulationTolerance} from '../dist/js/atom-workbench/src/types.js';
-import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
+import {POPULATION_TOLERANCE,defaultDynamics,defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
+import {prepareNativeSolve} from '../scripts/native-protocol.mjs';
 
-test('population tolerance defaults old scenes and preserves valid custom probability values',()=>{
-  assert.equal(defaultDynamics().populationTolerance,.005);
-  const legacy=defaultScene();delete legacy.dynamics.populationTolerance;
-  assert.equal(validateScene(legacy).dynamics.populationTolerance,.005);
-  delete legacy.dynamics;
-  assert.equal(validateScene(legacy).dynamics.populationTolerance,.005);
-  for(const epsilon of [.001,.005,.02,.003731,1e-12]){
-    const scene=defaultScene();scene.dynamics.populationTolerance=epsilon;
-    const loaded=validateScene(JSON.parse(JSON.stringify(scene)));
-    assert.equal(loaded.dynamics.populationTolerance,epsilon);
-    assert.equal(validateScene(JSON.parse(JSON.stringify(loaded))).dynamics.populationTolerance,epsilon);
-  }
-  for(const invalid of [0,-.001,.0200001,NaN,Infinity,null,'0.005']){
-    assert.throws(()=>resolvePopulationTolerance(invalid),/populationTolerance/);
-    const scene=defaultScene();scene.dynamics.populationTolerance=invalid;
-    assert.throws(()=>validateScene(scene),/populationTolerance/);
+// The population accuracy is fixed at 0.5%: no setting, no part of a scene or of a request's identity.
+test('every native request asks for populationTolerance 0.005, whatever the scene or the options carry',()=>{
+  assert.equal(POPULATION_TOLERANCE,.005);assert.ok(!('populationTolerance' in defaultDynamics()));
+  for(const stray of [undefined,.001,.02,.05,'0.005',null]){
+    const scene=defaultScene();scene.lasers=scene.lasers.slice(0,1);if(stray!==undefined)scene.dynamics.populationTolerance=stray;
+    for(const options of [{},{populationTolerance:stray},{steadyOnly:true}]){
+      const {payload}=prepareNativeSolve({scene,options});
+      assert.equal(payload.options.populationTolerance,.005,`${stray} ${JSON.stringify(options)}`);
+    }
   }
 });
 
-test('population tolerance is part of current request identity with legacy default equivalence',()=>{
-  const scene=defaultScene(),settings=scene.dynamics;
-  const before=dynamicsCacheKey(scene,settings,false);
-  delete settings.populationTolerance;
-  assert.equal(dynamicsCacheKey(scene,settings,false),before);
-  settings.populationTolerance=.003731;
-  assert.notEqual(dynamicsCacheKey(scene,settings,false),before);
+test('a stray tolerance is no part of the request identity',()=>{
+  const scene=defaultScene(),settings=scene.dynamics,before=dynamicsCacheKey(scene,settings,false);
+  for(const stray of [.001,.02,'x'])assert.equal(dynamicsCacheKey(scene,{...settings,populationTolerance:stray},false),before);
 });
