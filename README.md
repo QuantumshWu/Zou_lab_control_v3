@@ -21,8 +21,11 @@ On a Windows PC with this repository checked out and the Python v2 runs with
    GitHub releases; `bin\release.json` names it). Then it shows what this PC has
    and installs what is selected: the program (its card says which release is
    installed and how it relates to this checkout -- *Update* after a pull that
-   brings a new release -- and, when GitHub answers, whether a newer release is
-   published: pull the repository to get it), the plugins' Python environment (the
+   brings a new release -- and, when GitHub answers, whether GitHub is ahead of
+   this checkout: then *Update* pulls it first, a fast-forward with git or GitHub
+   Desktop's own git, and installs the release it names; with commits of its own
+   or local edits to the files the update changes, the card says so and the pull
+   is the operator's), the plugins' Python environment (the
    Python v2 runs with, as it is when it has everything v2 needs, else a venv of it
    inside this folder, `.tools\science-env`; nothing outside the checkout is
    changed) with the instrument links, Basler pylon on the PC with a Basler camera, and on the PC
