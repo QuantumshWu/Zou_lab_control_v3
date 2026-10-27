@@ -67,9 +67,23 @@
 //!   1.8e-4 (with it, 1.7e-4). Slaving is linear, so it acts on the returns
 //!   summed per target charge (and per pair for the indicators).
 //!
-//! Evaluated are the halo charges that return into the retained domain or a
-//! slot through a significant coupling in one hop, and every slow halo charge
-//! (its own populations accumulate even without such a return).
+//! The halo is every mode one pencil application reaches from the retained
+//! domain (`OwnedPrepared::reachable`), and every halo mode is evaluated this
+//! way, whether or not it returns in one hop: its own populations, boundary
+//! and same-charge recycling are first order in its residual. Nothing is left
+//! out by construction; what is not evaluated is charged by a computed bound:
+//!
+//! * a halo mode whose residual is small: the error a residual source `r(t)`
+//!   drives is the exact propagator's integral of it, and that propagator
+//!   (completely positive and trace preserving in the laboratory frame) does
+//!   not increase the trace norm of a Hermitian matrix (twice that bounds any
+//!   matrix), so every population and group it moves stays below
+//!   `2 sqrt(n) T sum_k g_k |R_q[:, k]|_F`, `g_k = max(1, exp(Re beta_k T))`;
+//! * a pair's part whose series bound (`SlowDual::series_bound`: amplitudes
+//!   times the suprema of their time functions, no time evaluated) is small.
+//!
+//! The charged bounds sum to at most `HaloOptions::negligible`; they enter the
+//! margin and the pair's indicator.
 //!
 //! # Indicators partition the halo estimate
 //!
