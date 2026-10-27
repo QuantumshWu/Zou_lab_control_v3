@@ -30,10 +30,13 @@
 //! dressed block NL' X + X NR'.
 //!
 //! A `Transform` applies x -> sum P_k x Q_l (forward) or the inverse kernels
-//! (backward) on the Hermitian-symmetric fields of a mode set: only the
-//! canonical modes are computed (the caller mirrors), and every output
-//! entry is accumulated by one task in a fixed order, so results do not
-//! depend on the thread count.
+//! (backward) on the Hermitian-symmetric fields of a mode set, in the
+//! central frame's coordinates: P_k = P_0 E_k with sparse E_k (about 80 of
+//! 1024 entries), so every block takes one dense frame change P_0^-1 x Q_0^-1
+//! or P_0 c Q_0 (batched GEMMs) and the kernels act as sparse row
+//! operations. Only the canonical modes are computed (the caller mirrors),
+//! and every output entry is accumulated by one task in a fixed order, so
+//! results do not depend on the thread count.
 use super::*;
 use super::operator::LatticeOperator;
 use crate::lapack::ComplexGemm;
@@ -47,6 +50,12 @@ const MIXING_FLOOR:f64=1e-4;
 /// for the others; both pay at small and complex shifts and at the steady
 /// state).
 const KERNEL_FLOOR:f64=5e-3;
+/// Kernel entries in the central frame's coordinates (E_s = P_0^-1 P_s,
+/// identity scale) below this are left to the Krylov solver: about 110 of
+/// the 1024 entries of a kernel remain on the research models (80 at 1e-3,
+/// where three lasers + tweezer took 8.8 inner steps per column against 8.1
+/// here, as many as with the dense kernels).
+const KERNEL_ENTRY_FLOOR:f64=3e-4;
 /// Kernel elements with |numerator / denominator| above this are near
 /// resonant and left out.
 const RESONANCE_GUARD:f64=0.5;
@@ -111,31 +120,50 @@ pub enum Frames{
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum Reach{All,Centre}
 
-/// One frame set as the tables of the four convolution stages: the support
-/// charges (0 first), the quasi-energies and the row-major kernels. Index k
-/// of `forward` is support charge k; `backward` holds the plain inverse
-/// P_0^-1 first (modes the kernels do not reach), then P~_k.
+/// A sparse n x n kernel in frame coordinates: (row, column, value), the
+/// entries from KERNEL_ENTRY_FLOOR up.
+#[derive(Clone,Default)]
+struct Kernel{entries:Vec<(usize,usize,C)>}
+impl Kernel{
+    fn new(a:&[C],n:usize)->Self{Self{entries:(0..n*n).filter(|&k|magnitude(a[k])>=KERNEL_ENTRY_FLOOR).map(|k|(k/n,k%n,a[k])).collect()}}
+    /// out += K x on row-major blocks: row a of out gains K[a, b] times row b of x.
+    fn left_into(&self,n:usize,x:&[C],out:&mut[C]){
+        for &(a,b,v)in &self.entries{for(t,&u)in out[a*n..(a+1)*n].iter_mut().zip(&x[b*n..(b+1)*n]){mul_add(t,v,u);}}
+    }
+    /// out += K y^dagger: row b of y^dagger is the conjugated column b of y.
+    fn left_adjoint_into(&self,n:usize,y:&[C],out:&mut[C]){
+        for &(a,b,v)in &self.entries{for(j,t)in out[a*n..(a+1)*n].iter_mut().enumerate(){mul_add(t,v,conj(y[j*n+b]));}}
+    }
+}
+/// One frame set: the support charges (0 first), the quasi-energies, the
+/// central frame P_0 (Q_0 = P_0^dagger) and the kernels in its coordinates,
+/// P_k = P_0 E_k: forward E_k, backward -E_k (P~_k = -P_0^-1 P_k P_0^-1)
+/// and the backward centre's second-order term sum_s E_s E_-s (index 0 of
+/// the kernel lists is the identity).
 struct Tables{
     charges:Vec<Charge>,
     lambda:Vec<C>,mu:Vec<C>,
-    /// [left, right]: P_k and Q_k = P_-k^dagger.
-    forward:[Vec<Vec<C>>;2],
-    /// [left, right]: P_0^-1, P~_0, P~_k and their right counterparts.
-    backward:[Vec<Vec<C>>;2],
+    p0:Vec<C>,p0inv:Vec<C>,q0:Vec<C>,q0inv:Vec<C>,
+    forward:Vec<Kernel>,backward:Vec<Kernel>,centre:Kernel,
 }
 impl Tables{
-    /// Left kernels (forward P_k and backward P~_k on `charges`) to the
-    /// two-sided tables: Q_l = P_-l^dagger, mu = conj(lambda) + c.
-    fn new(n:usize,charges:Vec<Charge>,lambda:Vec<C>,shift:C,forward:Vec<Vec<C>>,plain:Vec<C>,backward:Vec<Vec<C>>)->Result<Self,String>{
+    /// From the left kernels P_k of `charges` after the centre: mu =
+    /// conj(lambda) + c.
+    #[allow(clippy::too_many_arguments)]
+    fn new(gemm:&ComplexGemm<'_>,n:usize,charges:Vec<Charge>,lambda:Vec<C>,shift:C,p0:Vec<C>,p0inv:Vec<C>,kernels:&[&[C]])->Result<Self,String>{
         let index=|q:&Charge|charges.iter().position(|k|k==q).ok_or("Floquet support is not closed under q -> -q");
-        let right=|table:&[Vec<C>]|->Result<Vec<Vec<C>>,String>{charges.iter().map(|k|Ok(adjoint(&table[index(&opposite(k))?],n))).collect()};
-        let(forward_right,backward_right)=(right(&forward)?,right(&backward)?);
+        let e:Vec<Vec<C>>=kernels.iter().map(|k|product(gemm,&p0inv,k,n)).collect::<Result<_,_>>()?;
+        let mut centre=vec![ZERO;n*n];
+        for(i,k)in charges.iter().enumerate().skip(1){let j=index(&opposite(k))?;for(c,v)in centre.iter_mut().zip(product(gemm,&e[i-1],&e[j-1],n)?){add(c,v);}}
+        let mut forward=vec![Kernel::default()];forward.extend(e.iter().map(|m|Kernel::new(m,n)));
+        let mut backward=vec![Kernel::default()];backward.extend(e.iter().map(|m|Kernel::new(&m.iter().map(|z|C{re:-z.re,im:-z.im}).collect::<Vec<C>>(),n)));
         let mu=lambda.iter().map(|z|C{re:z.re+shift.re,im:-z.im+shift.im}).collect();
-        let mut left=vec![plain.clone()];left.extend(backward);
-        let mut back_right=vec![adjoint(&plain,n)];back_right.extend(backward_right);
-        Ok(Self{charges,lambda,mu,forward:[forward,forward_right],backward:[left,back_right]})
+        let(q0,q0inv)=(adjoint(&p0,n),adjoint(&p0inv,n));
+        Ok(Self{charges,lambda,mu,p0,p0inv,q0,q0inv,forward,backward,centre:Kernel::new(&centre,n)})
     }
     fn scale(&self)->f64{self.lambda.iter().chain(&self.mu).map(|z|magnitude(*z)).fold(0.,f64::max)}
+    /// Stored kernel entries.
+    fn entries(&self)->usize{self.forward.iter().chain(&self.backward).map(|k|k.entries.len()).sum::<usize>()+self.centre.entries.len()}
 }
 
 #[derive(Clone,Debug,Default)]
@@ -150,8 +178,8 @@ pub struct KernelDiagnostics{
     /// Condition bounds of the block and the central frames.
     pub condition:[f64;2],
     /// The support: (charge, |P_s|_F / |P_0|_F) per kept kernel; the pairs
-    /// below the floor.
-    pub support:Vec<(Charge,f64)>,pub below:usize,
+    /// below the floor; the kernel entries kept in frame coordinates.
+    pub support:Vec<(Charge,f64)>,pub below:usize,pub entries:usize,
     /// The slowest decay rate (1/us) of the dressed block's precessing pairs
     /// lambda_a + mu_b: the coherences a shift at zero cannot reach.
     pub precessing_rate:Option<f64>,
@@ -228,24 +256,15 @@ impl FloquetKernels{
         // The support and the inverse kernels.
         let size0=frobenius(&central.p);let sizes:Vec<f64>=forward.iter().map(|p|frobenius(p)/size0).collect();
         let kept:Vec<usize>=(0..steps.len()).filter(|&i|sizes[i]>=KERNEL_FLOOR||index(&opposite(&steps[i].0)).is_some_and(|j|sizes[j]>=KERNEL_FLOOR)).collect();
-        let pinv=&central.pinv;
-        let mut charges=vec![generator.zero.clone()];let mut left=vec![central.p.clone()];let mut back=Vec::with_capacity(kept.len());
-        let mut centre=pinv.clone();
-        for &i in &kept{
-            let t=product(&gemm,pinv,&product(&gemm,&forward[i],pinv,n)?,n)?;
-            if let Some(j)=index(&opposite(&steps[i].0)).filter(|j|kept.contains(j)){
-                let w=product(&gemm,&t,&product(&gemm,&forward[j],pinv,n)?,n)?;for(c,v)in centre.iter_mut().zip(w){add(c,v);}}
-            back.push(t.into_iter().map(|z|C{re:-z.re,im:-z.im}).collect::<Vec<C>>());
-            charges.push(steps[i].0.clone());left.push(forward[i].clone());
-        }
-        let mut backward=vec![centre];backward.extend(back);
-        let floquet=Tables::new(n,charges,central.values.clone(),shift,left,pinv.clone(),backward)?;
-        let block_tables=Tables::new(n,vec![generator.zero.clone()],block.values.clone(),shift,vec![block.p.clone()],block.pinv.clone(),vec![block.pinv.clone()])?;
+        let mut charges=vec![generator.zero.clone()];let mut support=Vec::with_capacity(kept.len());
+        for &i in &kept{charges.push(steps[i].0.clone());support.push(forward[i].as_slice());}
+        let floquet=Tables::new(&gemm,n,charges,central.values.clone(),shift,central.p.clone(),central.pinv.clone(),&support)?;
+        let block_tables=Tables::new(&gemm,n,vec![generator.zero.clone()],block.values.clone(),shift,block.p.clone(),block.pinv.clone(),&[])?;
         let block_scale=block_tables.scale();
         let precessing_rate=block_tables.lambda.iter().flat_map(|a|block_tables.mu.iter().map(move|b|C{re:a.re+b.re,im:a.im+b.im}))
             .filter(|z|z.im.abs()>PRECESSING*block_scale).map(|z|(-z.re).max(0.)).reduce(f64::min);
         let diagnostics=KernelDiagnostics{milliseconds:clock.elapsed().as_secs_f64()*1e3,iterations,change,pairs:steps.len(),guarded,small_parameter:small,
-            condition:[block.condition,central.condition],support:kept.iter().map(|&i|(steps[i].0.clone(),sizes[i])).collect(),below:steps.len()-kept.len(),precessing_rate};
+            condition:[block.condition,central.condition],support:kept.iter().map(|&i|(steps[i].0.clone(),sizes[i])).collect(),below:steps.len()-kept.len(),entries:floquet.entries(),precessing_rate};
         let steps=steps.into_iter().zip(forward).map(|((q,_,_),p)|(q,p)).collect();
         Ok(Self{n,lapack:Arc::clone(lapack),block:block_tables,floquet,effective:diagonalized,shift,steps,diagnostics})
     }
@@ -253,7 +272,7 @@ impl FloquetKernels{
     /// The quasi-energies (lambda, mu) of a frame set.
     pub fn quasi_energies(&self,frames:Frames)->(&[C],&[C]){let t=self.tables(frames);(&t.lambda,&t.mu)}
     /// The central kernel P_0 and its inverse (row-major) of a frame set.
-    pub fn central(&self,frames:Frames)->(&[C],&[C]){let t=self.tables(frames);(&t.forward[0][0],&t.backward[0][0])}
+    pub fn central(&self,frames:Frames)->(&[C],&[C]){let t=self.tables(frames);(&t.p0,&t.p0inv)}
     /// The effective central generators (A_eff, B_eff) of
     /// X -> A_eff X + X B_eff (row-major), B_eff^T = conj A_eff + c I.
     pub fn effective_generators(&self)->[Vec<C>;2]{
@@ -267,95 +286,134 @@ impl FloquetKernels{
     /// the outer stage on `computed` (the canonical modes or a subset), the
     /// kernels where `reach` says.
     pub fn transform<'k>(&'k self,op:&LatticeOperator<'_>,frames:Frames,computed:&[bool],reach:Reach)->Result<Transform<'k>,String>{
-        let tables=self.tables(frames);let modes=op.modes.len();let slots=1+tables.charges.len();
+        let tables=self.tables(frames);let modes=op.modes.len();let slots=tables.charges.len();
         let near:BTreeSet<&Charge>=tables.charges.iter().collect();
         let active:Vec<bool>=op.modes.iter().map(|q|reach==Reach::All||near.contains(q)).collect();
-        // Slot 0: the central frame alone (modes the kernels do not reach);
-        // slot 1 + k: support charge k.
+        // Per output mode and support charge k the source mode q - k (the
+        // centre alone where the kernels do not reach).
         let mut sources=vec![usize::MAX;modes*slots];
         for q in 0..modes{
             if !active[q]{sources[q*slots]=q;continue;}
             for(k,c)in tables.charges.iter().enumerate(){
-                if let Some(&p)=charge_minus(&op.modes[q],c).ok().as_ref().and_then(|p|op.index.get(p)){sources[q*slots+1+k]=p;}}
+                if let Some(&p)=charge_minus(&op.modes[q],c).ok().as_ref().and_then(|p|op.index.get(p)){sources[q*slots+k]=p;}}
         }
         let mut needed=vec![false;modes];
         for q in(0..modes).filter(|&q|computed[q]){for &p in &sources[q*slots..(q+1)*slots]{if p!=usize::MAX{needed[p]=true;}}}
+        // The inner stage computes at the mirrors of the needed modes.
         let inner:Vec<bool>=(0..modes).map(|q|needed[op.mirror[q]]).collect();
-        let n=self.n;
-        let count=|set:&[bool]|(0..modes).filter(|&q|set[q]).map(|q|sources[q*slots..(q+1)*slots].iter().filter(|&&p|p!=usize::MAX).count()).sum::<usize>()*n*n*n;
-        Ok(Transform{lapack:&self.lapack,tables,n,reach,slots,work:[count(&inner),count(computed)],sources,needed,inner,computed:computed.to_vec(),
-            mirror:op.mirror.clone(),execution:Execution::new()?,scratch:Vec::new(),middle:Vec::new(),flipped:Vec::new()})
+        let n=self.n;let d=n*n;let kernels=slots>1;
+        let stage_work=|set:&[bool],table:&[Kernel],backward:bool|(0..modes).filter(|&q|set[q]).map(|q|(0..slots).filter(|&s|sources[q*slots+s]!=usize::MAX)
+            .map(|s|d+n*if s>0{table[s].entries.len()}else if backward&&active[q]{tables.centre.entries.len()}else{0}).sum::<usize>()).sum::<usize>();
+        let stages=|table:&[Kernel],backward:bool|if kernels{stage_work(&inner,table,backward)+stage_work(computed,table,backward)}else{0};
+        let work=[2*n*n*n*computed.iter().filter(|&&c|c).count(),stages(&tables.backward,true),stages(&tables.forward,false)];
+        Ok(Transform{lapack:&self.lapack,tables,n,reach,slots,sources,active,needed,computed:computed.to_vec(),mirror:op.mirror.clone(),kernels,work,
+            execution:Execution::new()?,scratch:Vec::new(),flipped:Vec::new(),hat:Vec::new()})
     }
 }
 
+/// Mirrored blocks from the computed ones (zero where neither a block nor
+/// its mirror is computed), the centre Hermitian.
+pub(crate) fn mirror_computed(x:&mut[C],n:usize,computed:&[bool],mirror:&[usize]){
+    let d=n*n;
+    for q in 0..computed.len(){if !computed[q]&&!computed[mirror[q]]{x[q*d..(q+1)*d].fill(ZERO);}}
+    mirror_field(x,n,computed,mirror);
+}
+
 #[derive(Default)]
-struct StageScratch{a:Vec<C>,b:Vec<C>}
+struct FrameScratch{blocks:Vec<C>,stack:Vec<C>}
 /// The two-sided Floquet transform on one mode set's Hermitian-symmetric
-/// fields. On such fields the left convolution is the mirrored right one,
-/// sum_k P_k x_{p-k} = (sum_l x_{-p-l} Q_l)^dagger with Q_l = P_-l^dagger,
-/// so both stages are right multiplications x_p K: per kernel one GEMM over
-/// every gathered block of a task, (x K)^T = K^T x^T on the row-major
-/// blocks side by side.
+/// fields (see the module documentation). The kernels' two-sided
+/// convolution is two left stages: on such fields the right convolution is
+/// the mirrored left one, sum_l z_{p-l} E'_l = (sum_k E_k z_{-p-k})^dagger
+/// with E'_l = E_-l^dagger.
 pub struct Transform<'k>{
     lapack:&'k Lapack,tables:&'k Tables,n:usize,
     pub reach:Reach,
-    /// Per output mode and slot (0: the central frame alone, 1 + k: support
-    /// charge k) the source mode, usize::MAX for none.
+    /// Per output mode and support charge the source mode (usize::MAX: none).
     slots:usize,sources:Vec<usize>,
-    /// The modes the outer stage reads, the inner stage computes (their
-    /// mirrors) and the outer stage computes.
-    needed:Vec<bool>,inner:Vec<bool>,computed:Vec<bool>,mirror:Vec<usize>,
-    /// Complex multiply-adds of the inner and the outer stage.
-    work:[usize;2],
-    execution:Execution,scratch:Vec<StageScratch>,middle:Vec<C>,flipped:Vec<C>,
+    /// The modes the kernels act on, the modes the outer stage reads (the
+    /// inner stage's outputs) and the outer stage's outputs.
+    active:Vec<bool>,needed:Vec<bool>,computed:Vec<bool>,mirror:Vec<usize>,
+    /// Whether any kernel acts (else the transform is the frame change alone).
+    kernels:bool,
+    /// Complex multiply-adds of one frame change, of the backward and of
+    /// the forward stages.
+    work:[usize;3],
+    execution:Execution,scratch:Vec<FrameScratch>,flipped:Vec<C>,hat:Vec<C>,
 }
 impl Transform<'_>{
-    /// Complex multiply-adds of one transform.
-    pub fn work(&self)->usize{self.work[0]+self.work[1]}
+    /// Complex multiply-adds of a backward and a forward transform.
+    pub fn work(&self)->usize{2*self.work[0]+self.work[1]+self.work[2]}
     /// Whether two transforms apply the same kernels on the same modes.
     pub fn same(&self,other:&Transform<'_>)->bool{self.sources==other.sources}
     /// c = sum P~_k x Q~_l on the computed modes (frame coordinates; the
-    /// caller mirrors).
-    pub fn backward(&mut self,x:&[C],c:&mut[C])->Result<(),String>{self.run(true,x,c)}
-    /// x = sum P_k c Q_l on the computed modes (the caller mirrors).
-    pub fn forward(&mut self,c:&[C],x:&mut[C])->Result<(),String>{self.run(false,c,x)}
-    fn run(&mut self,backward:bool,input:&[C],out:&mut[C])->Result<(),String>{
-        let(n,d)=(self.n,self.n*self.n);let t=self.tables;let length=input.len();
-        // Backward: [Q0^-1 plain, Q~_0, Q~_k]; forward: [Q_0, Q_0, Q_k].
-        let table:Vec<&[C]>=(0..self.slots).map(|s|if backward{t.backward[1][s].as_slice()}else{t.forward[1][s.saturating_sub(1)].as_slice()}).collect();
-        grow(&mut self.middle,length);grow(&mut self.flipped,length);
-        stage(&self.execution,self.lapack,&mut self.scratch,n,&self.sources,self.slots,&table,input,&mut self.middle[..length],&self.inner,self.work[0])?;
-        // The left stage from the right one: u_p = (v_-p)^dagger.
-        let(middle,needed,mirror)=(&self.middle,&self.needed,&self.mirror);
-        self.execution.for_mode_chunks(&mut self.flipped[..length],d,needed.len()*d,MINIMUM_WORK_PER_TASK/8,&mut Vec::<()>::new(),|first,chunk,_|{
-            for(k,block)in chunk.chunks_exact_mut(d).enumerate(){let p=first+k;if !needed[p]{continue;}let m=mirror[p];
-                for i in 0..n{for j in 0..n{block[i*n+j]=conj(middle[m*d+j*n+i]);}}}
-            Ok(())})?;
-        stage(&self.execution,self.lapack,&mut self.scratch,n,&self.sources,self.slots,&table,&self.flipped[..length],out,&self.computed,self.work[1])
+    /// caller mirrors). Reads x on every mode.
+    pub fn backward(&mut self,x:&[C],c:&mut[C])->Result<(),String>{
+        let Self{lapack,tables,n,slots,sources,active,needed,computed,mirror,kernels,work,execution,scratch,flipped,hat,..}=self;
+        let(t,n)=(*tables,*n);
+        if !*kernels{return frame(execution,lapack,scratch,n,&t.p0inv,&t.q0inv,x,c,computed,work[0]);}
+        grow(hat,x.len());let hat=&mut hat[..x.len()];
+        frame(execution,lapack,scratch,n,&t.p0inv,&t.q0inv,x,hat,computed,work[0])?;
+        convolve(execution,n,t,true,*slots,sources,active,needed,computed,mirror,hat,c,flipped,work[1])
+    }
+    /// x = sum P_k c Q_l on the computed modes (the caller mirrors). Reads c
+    /// on the computed modes only (the others are their mirrors).
+    pub fn forward(&mut self,c:&[C],x:&mut[C])->Result<(),String>{
+        let Self{lapack,tables,n,slots,sources,active,needed,computed,mirror,kernels,work,execution,scratch,flipped,hat,..}=self;
+        let(t,n)=(*tables,*n);
+        if !*kernels{return frame(execution,lapack,scratch,n,&t.p0,&t.q0,c,x,computed,work[0]);}
+        grow(hat,c.len());let hat=&mut hat[..c.len()];
+        convolve(execution,n,t,false,*slots,sources,active,needed,computed,mirror,c,hat,flipped,work[2])?;
+        frame(execution,lapack,scratch,n,&t.p0,&t.q0,hat,x,computed,work[0])
     }
 }
-/// out_q = sum over q's slots s of in_{source(q, s)} K_s on the modes
-/// `only` (zeroed first): per task and slot one GEMM over the gathered
-/// blocks, tasks of about one worker's share. Each output block is
-/// accumulated by one task in slot order.
+/// out_q = A in_q B on the computed modes: per task the computed blocks
+/// gathered and changed by two GEMMs (`sandwich_batch`).
 #[allow(clippy::too_many_arguments)]
-fn stage(execution:&Execution,lapack:&Lapack,scratch:&mut Vec<StageScratch>,n:usize,sources:&[usize],slots:usize,table:&[&[C]],input:&[C],out:&mut[C],only:&[bool],work:usize)->Result<(),String>{
+fn frame(execution:&Execution,lapack:&Lapack,scratch:&mut Vec<FrameScratch>,n:usize,a:&[C],b:&[C],input:&[C],out:&mut[C],computed:&[bool],work:usize)->Result<(),String>{
     let d=n*n;let minimum=work.div_ceil(execution.threads()).max(MINIMUM_WORK_PER_TASK/8);
     execution.for_mode_chunks(out,d,work,minimum,scratch,|first,chunk,scratch|{
-        let gemm=lapack.complex_gemm();let count=chunk.len()/d;
-        grow(&mut scratch.a,count*d);grow(&mut scratch.b,count*d);
-        for(k,block)in chunk.chunks_exact_mut(d).enumerate(){if only[first+k]{block.fill(ZERO);}}
-        let mut targets=Vec::with_capacity(count);
-        for s in 0..slots{
-            targets.clear();
-            for k in 0..count{let q=first+k;if !only[q]{continue;}let p=sources[q*slots+s];if p==usize::MAX{continue;}
-                let i=targets.len();scratch.a[i*d..(i+1)*d].copy_from_slice(&input[p*d..(p+1)*d]);targets.push(k);}
-            let m=targets.len();if m==0{continue;}
-            gemm.multiply(n,n*m,n,ONE,table[s],n,&scratch.a[..m*d],n,ZERO,&mut scratch.b[..m*d],n)?;
-            for(i,&k)in targets.iter().enumerate(){for(o,v)in chunk[k*d..(k+1)*d].iter_mut().zip(&scratch.b[i*d..(i+1)*d]){add(o,*v);}}
+        let modes:Vec<usize>=(first..first+chunk.len()/d).filter(|&q|computed[q]).collect();if modes.is_empty(){return Ok(());}
+        grow(&mut scratch.blocks,modes.len()*d);let blocks=&mut scratch.blocks[..modes.len()*d];
+        for(i,&q)in modes.iter().enumerate(){blocks[i*d..(i+1)*d].copy_from_slice(&input[q*d..(q+1)*d]);}
+        sandwich_batch(&lapack.complex_gemm(),n,a,b,blocks,modes.len(),&mut scratch.stack)?;
+        for(i,&q)in modes.iter().enumerate(){chunk[(q-first)*d..(q-first+1)*d].copy_from_slice(&blocks[i*d..(i+1)*d]);}
+        Ok(())})
+}
+/// The kernels' two-sided convolution on the computed modes, input valid
+/// on the computed modes (a mirrored block is read as the adjoint of its
+/// partner): the right convolution as the mirrored left one, written as its
+/// adjoint on the needed modes, then the left stage.
+#[allow(clippy::too_many_arguments)]
+fn convolve(execution:&Execution,n:usize,tables:&Tables,backward:bool,slots:usize,sources:&[usize],active:&[bool],needed:&[bool],computed:&[bool],
+    mirror:&[usize],input:&[C],out:&mut[C],flipped:&mut Vec<C>,work:usize)->Result<(),String>{
+    let length=input.len();grow(flipped,length);let flipped=&mut flipped[..length];
+    stage(execution,n,tables,backward,slots,sources,active,mirror,input,computed,flipped,needed,true,work/2)?;
+    stage(execution,n,tables,backward,slots,sources,active,mirror,flipped,needed,out,computed,false,work/2)
+}
+/// out_q = sum over the sources (p, k) of K_k in_p on the modes `only`: the
+/// identity for k = 0 (with the backward centre's second-order term where
+/// the kernels act), the sparse kernels otherwise. An input block outside
+/// `valid` is the adjoint of its mirror's. With `flip`, out_q is the
+/// adjoint of that sum at -q.
+#[allow(clippy::too_many_arguments)]
+fn stage(execution:&Execution,n:usize,tables:&Tables,backward:bool,slots:usize,sources:&[usize],active:&[bool],mirror:&[usize],input:&[C],valid:&[bool],
+    out:&mut[C],only:&[bool],flip:bool,work:usize)->Result<(),String>{
+    let d=n*n;let kernels=if backward{&tables.backward}else{&tables.forward};
+    execution.for_mode_chunks(out,d,work,MINIMUM_WORK_PER_TASK/8,&mut Vec::<Vec<C>>::new(),|first,chunk,scratch|{
+        grow(scratch,d);
+        for(k,o)in chunk.chunks_exact_mut(d).enumerate(){let q=first+k;if !only[q]{continue;}
+            let target=if flip{mirror[q]}else{q};let sum=if flip{&mut scratch[..d]}else{&mut *o};sum.fill(ZERO);
+            for s in 0..slots{let p=sources[target*slots+s];if p==usize::MAX{continue;}
+                let(direct,x)=if valid[p]{(true,&input[p*d..(p+1)*d])}else{let m=mirror[p];(false,&input[m*d..(m+1)*d])};
+                let kernel=if s>0{&kernels[s]}else{
+                    if direct{for(t,&v)in sum.iter_mut().zip(x){add(t,v);}}else{for i in 0..n{for j in 0..n{add(&mut sum[i*n+j],conj(x[j*n+i]));}}}
+                    if !(backward&&active[target]){continue;}&tables.centre};
+                if direct{kernel.left_into(n,x,sum);}else{kernel.left_adjoint_into(n,x,sum);}
+            }
+            if flip{for i in 0..n{for j in 0..n{o[i*n+j]=conj(scratch[j*n+i]);}}}
         }
-        Ok(())
-    })
+        Ok(())})
 }
 
 #[cfg(test)]

@@ -28,7 +28,7 @@
 //! mode subset in the eigenframes of the dressed block (the estimate's
 //! shell).
 use super::*;
-use super::floquet::{FloquetKernels,Frames,Reach,Transform,adjoint,inverse,sandwich_batch,transpose};
+use super::floquet::{FloquetKernels,Frames,Reach,Transform,adjoint,inverse,mirror_computed,sandwich_batch,transpose};
 use super::operator::LatticeOperator;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
@@ -209,11 +209,7 @@ impl<'p> FloquetBatch<'p>{
     }
     /// Mirrored blocks from the computed ones (zero where neither a block nor
     /// its mirror is computed), the centre Hermitian.
-    fn mirror(&self,x:&mut[C]){
-        let d=self.n*self.n;
-        for q in 0..self.computed.len(){if !self.computed[q]&&!self.computed[self.mirror[q]]{x[q*d..(q+1)*d].fill(ZERO);}}
-        mirror_field(x,self.n,&self.computed,&self.mirror);
-    }
+    fn mirror(&self,x:&mut[C]){mirror_computed(x,self.n,&self.computed,&self.mirror);}
     /// Divides by the denominators on the divided modes and applies the
     /// centre factor.
     fn divide(&self,c:&mut[C])->Result<(),String>{
@@ -253,7 +249,7 @@ impl<'p> FloquetBatch<'p>{
             self.transforms[selected].forward(b,y1)?;self.mirror(y1);
             self.transforms[selected].forward(c,y2)?;self.mirror(y2);
         }else{
-            self.transforms[selected].backward(x,b)?;self.divide(b)?;self.mirror(b);
+            self.transforms[selected].backward(x,b)?;self.divide(b)?;
             self.transforms[selected].forward(b,y)?;self.mirror(y);
         }
         Ok(())
@@ -263,7 +259,7 @@ impl Preconditioner for FloquetBatch<'_>{
     fn reach(&self)->Reach{self.transforms[self.selected].reach}
     fn work(&self)->usize{
         let d=self.n*self.n;
-        2*self.shift.copies()*self.transforms[self.selected].work()+self.divided.iter().filter(|&&c|c).count()*d+self.factor.as_ref().map_or(0,|f|2*f.total*d+f.total*f.total)
+        self.shift.copies()*self.transforms[self.selected].work()+self.divided.iter().filter(|&&c|c).count()*d+self.factor.as_ref().map_or(0,|f|2*f.total*d+f.total*f.total)
     }
     fn record(&mut self,steps:usize,residual:f64,tolerance:f64,operator_work:usize){
         if self.costs.iter().all(|c|c.is_some())||steps==0{return;}

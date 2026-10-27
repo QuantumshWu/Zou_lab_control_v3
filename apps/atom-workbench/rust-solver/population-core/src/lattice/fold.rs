@@ -10,15 +10,18 @@
 //! Closed form: L0 = L_c + L_r with L_c the diagonal of L0 (the left and
 //! right factors' diagonals) and L_r the rest (their off-diagonal entries and
 //! the recycling). G_s = (L_c - i nu_s)^-1 is elementwise, and
-//!   D_s^-1 = sum_{k <= m_s} (-G_s L_r)^k G_s + R_s,
-//!   |R_s| <= |G_s| rho_s^(m_s+1) / (1 - rho_s),  rho_s = |L_r| |G_s|
-//! (Schur-test norms). Far blocks sit beyond 2 |L0| (classification), so
-//! rho_s is small (about 1e-6 for the tweezer, 1e-7 for counter-rotating
-//! terms) and each step's order m_s comes from its own bound: its pairs'
-//! remainders below SERIES_FLOOR of their targets' sizes, D_s^-2 included,
-//! far below the storage floor. Each K column c is then a short chain of
-//! sparse factor applications on one block, C_s e_c, G, L_r, ..., C_s',
-//! columns spread over the workers.
+//!   D_s^-1 = sum_{k <= m} (-G_s L_r)^k G_s + R,
+//!   |R| <= |G_s| rho_s^(m+1) / (1 - rho_s),  rho_s = |L_r| |G_s|
+//! (largest row sums). Far blocks sit beyond 2 |L0| (classification), so
+//! rho_s is small (3e-6 for the tweezer, 1e-7 for counter-rotating terms).
+//! Each step's orders come from its own bounds: m0 for D_s^-1 C_s with the
+//! pairs' remainders below K0_FLOOR of their targets' sizes, m1 for the
+//! second D_s^-1 of K^(1) (which enters times nu_q) below K1_FLOOR; both
+//! remainders are charged with the dropped entries. A K column c is
+//! Y = D_s^-1 C_s e_c, whose first L_r acts on the coupling's few elements
+//! of e_c (scattered), Z = D_s^-1 Y, and -C_s' Y, -C_s' Z; the further L_r
+//! act by GEMM over batches of columns (L_r's factors are nearly dense in
+//! the request frame), columns spread over the workers.
 //!
 //! Hermitian pairing: C_-s(X) = C_s(X^dagger)^dagger and D_-s likewise, so a
 //! pair (-s, -s') gives flip(T_{s,s'}), flip(K)[(i,j),(k,l)] =
@@ -46,8 +49,14 @@ const ENTRY_FLOOR:f64=1e-12;
 /// A sector pair with at least this share of its entries above the floor is
 /// stored as a dense block.
 const DENSE_FILL:f64=0.2;
-/// Each far block's Neumann remainder, relative to its targets' sizes.
-const SERIES_FLOOR:f64=1e-16;
+/// Each far block's Neumann remainders (charged with the dropped entries),
+/// relative to its targets' sizes: for K^(0) far below every remainder the
+/// ledger carries, for K^(1), which enters times nu_q, about the accuracy
+/// it needs.
+const K0_FLOOR:f64=1e-10;
+const K1_FLOOR:f64=1e-8;
+/// Columns per batch of the far-block series.
+const BATCH:usize=32;
 /// The series ratio rho_s up to which a far block is folded.
 const SERIES_LIMIT:f64=0.5;
 const MINUS_ONE:C=C{re:-1.,im:0.};
@@ -110,26 +119,77 @@ impl StoredFold{
 pub struct FoldDiagnostics{
     /// Far steps solved (the rest by pairing) and their active columns.
     pub far_sources:usize,pub columns:usize,
-    /// |L_r| (Schur-test bound, rad/us) and per far step (charge, rho_s, m_s).
-    pub rest_bound:f64,pub series:Vec<(Charge,f64,usize)>,
+    /// |L_r| (largest row sum, rad/us) and per far step (charge, rho_s, the
+    /// Neumann orders of D_s^-1 for K^(0) and of the second D_s^-1 for K^(1)).
+    pub rest_bound:f64,pub series:Vec<(Charge,f64,[usize;2])>,
+    /// The charged Neumann remainders of K^(0) and K^(1) (row sums, summed
+    /// over the targets).
+    pub truncation:[f64;2],
     pub milliseconds:f64,
     /// Milliseconds: the far columns, the storage.
     pub phase_ms:[f64;2],
 }
-/// One far block's inverse (L0 - i nu_s)^-1 as its truncated Neumann series.
-struct FarBlock{order:usize,
+/// One far block's inverse (L0 - i nu_s)^-1 as truncated Neumann series:
+/// the orders for D_s^-1 C_s (K^(0)) and for the second D_s^-1 (K^(1)).
+struct FarBlock{order:[usize;2],
     /// G_s = (L_c - i nu_s)^-1, elementwise on a row-major block.
     g:Vec<C>}
+/// A superoperator's factors indexed for single elements: X -> A X + X B +
+/// sum P X Q at the element (k, l) is A's column k into column l, B's row l
+/// into row k, and P's column k times Q's row l.
+struct Scatter{left:Vec<Vec<(usize,C)>>,right:Vec<Vec<(usize,C)>>,sandwich:Vec<(Vec<Vec<(usize,C)>>,Vec<Vec<(usize,C)>>)>}
+impl Scatter{
+    fn new(op:&Superop,n:usize)->Self{
+        let columns=|s:&Sparse|{let mut out=vec![Vec::new();n];for &(i,k,a)in &s.entries{out[k].push((i,a));}out};
+        let rows=|s:&Sparse|{let mut out=vec![Vec::new();n];for &(l,j,b)in &s.entries{out[l].push((j,b));}out};
+        Self{left:columns(&op.left),right:rows(&op.right),sandwich:op.sandwich.iter().map(|(p,q)|(columns(p),rows(q))).collect()}
+    }
+    /// out += op(v E_kl).
+    fn add(&self,n:usize,k:usize,l:usize,v:C,out:&mut[C]){
+        for &(i,a)in &self.left[k]{mul_add(&mut out[i*n+l],a,v);}
+        for &(j,b)in &self.right[l]{mul_add(&mut out[k*n+j],v,b);}
+        for(p,q)in &self.sandwich{for &(i,a)in &p[k]{let av=mul(a,v);for &(j,b)in &q[l]{mul_add(&mut out[i*n+j],av,b);}}}
+    }
+}
+/// L_r = (NL - diag) X + X (NR - diag) + sum P X Q (the recycling): the
+/// off-diagonal factors dense (nearly full in the request frame), applied
+/// by GEMM over a batch of blocks; single elements scattered.
+struct RestOperator{left:Vec<C>,right:Vec<C>,recycling:Superop,scatter:Scatter,lapack:Arc<Lapack>}
+impl RestOperator{
+    /// t -= L_r w on m consecutive row-major blocks: the right factor one
+    /// GEMM on the blocks side by side ((w NR)^T = NR^T w^T), the left one
+    /// one GEMM on the blocks stacked ((NL w)^T = w^T NL^T).
+    fn subtract(&self,n:usize,w:&[C],t:&mut[C],m:usize,stack:&mut Vec<C>,small:&mut Vec<C>)->Result<(),String>{
+        let d=n*n;let gemm=self.lapack.complex_gemm();
+        gemm.multiply(n,n*m,n,MINUS_ONE,&self.right,n,w,n,ONE,t,n)?;
+        grow(stack,2*d*m);let(stacked,product)=stack.split_at_mut(d*m);
+        for k in 0..m{for j in 0..n{for i in 0..n{stacked[(i+n*k)+n*m*j]=w[i+n*(j+n*k)];}}}
+        gemm.multiply(n*m,n,n,ONE,stacked,n*m,&self.left,n,ZERO,&mut product[..d*m],n*m)?;
+        for k in 0..m{for j in 0..n{for i in 0..n{let v=product[(i+n*k)+n*m*j];let o=&mut t[i+n*(j+n*k)];o.re-=v.re;o.im-=v.im;}}}
+        for k in 0..m{self.recycling.apply_into(n,MINUS_ONE,&w[k*d..(k+1)*d],&mut t[k*d..(k+1)*d],small);}
+        Ok(())
+    }
+    /// t -= L_r w on one block with few nonzero elements.
+    fn subtract_sparse(&self,n:usize,w:&[C],t:&mut[C]){
+        for(e,&v)in w.iter().enumerate(){if nonzero(v){self.scatter.add(n,e/n,e%n,C{re:-v.re,im:-v.im},t);}}
+    }
+}
+/// The largest row sum of a superoperator as a d x d matrix (A's rows, B's
+/// columns, and their products for the sandwich terms).
+fn row_bound(op:&Superop,n:usize)->f64{
+    let rows=|s:&Sparse|{let mut r=vec![0_f64;n];for &(i,_,a)in &s.entries{r[i]+=magnitude(a);}r.into_iter().fold(0.,f64::max)};
+    let columns=|s:&Sparse|{let mut c=vec![0_f64;n];for &(_,j,b)in &s.entries{c[j]+=magnitude(b);}c.into_iter().fold(0.,f64::max)};
+    rows(&op.left)+columns(&op.right)+op.sandwich.iter().map(|(p,q)|rows(p)*columns(q)).sum::<f64>()
+}
 pub struct FoldLibrary{
     pub targets:Vec<StoredFold>,
     /// K_0^(0) as a row-major d x d matrix (the static-shift test hook).
     pub zero_dense:Option<Vec<C>>,
     /// L_r and every far step's block.
-    rest:Superop,blocks:BTreeMap<usize,FarBlock>,
+    rest:RestOperator,blocks:BTreeMap<usize,FarBlock>,
     pub diagnostics:FoldDiagnostics,
 }
 #[inline]fn squared(z:C)->f64{z.re*z.re+z.im*z.im}
-fn frobenius(a:&[C])->f64{a.iter().map(|z|squared(*z)).sum::<f64>().sqrt()}
 
 /// Whether input coordinate c = (k, l) has a nonzero image under `op`
 /// (structurally; an exactly cancelling image just folds to zero).
@@ -140,19 +200,8 @@ fn column_active(op:&Superop,n:usize,c:usize)->bool{
 }
 /// The superoperator index of the transposed element: (i, j) -> (j, i).
 #[inline]fn swapped(p:usize,n:usize)->usize{(p%n)*n+p/n}
-/// K + flip(K) in place (row-major d x d).
-fn add_flip(k:&mut[C],n:usize){
-    let d=n*n;
-    for r in 0..d{for c in 0..d{let(a,b)=(r*d+c,swapped(r,n)*d+swapped(c,n));
-        if a<b{let v=C{re:k[a].re+k[b].re,im:k[a].im-k[b].im};k[a]=v;k[b]=conj(v);}else if a==b{k[a]=C{re:2.*k[a].re,im:0.};}}}
-}
-/// flip(K) (row-major d x d).
-fn flipped(k:&[C],n:usize)->Vec<C>{
-    let d=n*n;(0..d*d).map(|e|conj(k[swapped(e/d,n)*d+swapped(e%d,n)])).collect()
-}
-
 #[derive(Default)]
-struct BuildScratch{y:Vec<C>,z:Vec<C>,t:Vec<C>,w:Vec<C>,small:Vec<C>}
+struct BuildScratch{y:Vec<C>,z:Vec<C>,t:Vec<C>,w:Vec<C>,stack:Vec<C>,small:Vec<C>}
 
 /// The absorbable part of a row-major d x d K: the least-squares projection
 /// onto X -> A X + X B (row-major n x n A, B; the identity split between them
@@ -169,78 +218,106 @@ pub(crate) fn absorbable(k:&[C],n:usize)->(Vec<C>,Vec<C>){
 /// Splits a row-major d x d K into its absorbable part and the rest, stored
 /// by sectors (see the module documentation). Population rows (i, i) are
 /// never dropped, so the stored K keeps the fold's exact trace preservation
-/// (v^T K = 0); the largest dropped row sum is returned.
+/// (v^T K = 0); the largest dropped row sum is returned. Three passes: the
+/// scale, the rest's measures after the absorbable band is taken out, the
+/// storage.
 fn store(k:&mut[C],n:usize,ground:&[bool])->(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64,f64,Rest){
-    let d=n*n;let largest=k.iter().map(|z|squared(*z)).fold(0.,f64::max).sqrt();let total=frobenius(k);
-    let(a,b)=absorbable(k,n);
-    let op=Superop{left:Sparse::from_dense(&a,n),right:Sparse::from_dense(&b,n),sandwich:vec![]};
-    let mut absorbed=vec![ZERO;d*d];op.dense_into(n,ONE,&mut absorbed);
-    let norms=[total,frobenius(&absorbed),{for(x,y)in k.iter_mut().zip(&absorbed){x.re-=y.re;x.im-=y.im;}frobenius(k)}];
-    let row_sum=(0..d).map(|r|k[r*d..(r+1)*d].iter().map(|z|squared(*z).sqrt()).sum::<f64>()).fold(0.,f64::max);
-    let mut populations=Csr{row:Vec::with_capacity(d+1),col:vec![],value:vec![]};populations.row.push(0);
-    for r in 0..d{if r/n==r%n{for c in 0..d{let v=k[r*d+c];if nonzero(v){populations.col.push(c as u32);populations.value.push(v);}}}
-        populations.row.push(populations.value.len()as u32);}
+    let d=n*n;
+    let(largest,total)={let(mut l,mut t)=(0_f64,0_f64);for z in k.iter(){let m=squared(*z);l=l.max(m);t+=m;}(l.sqrt(),t.sqrt())};
+    // A X + X B lives on the band ((i,j),(k,j)) <- A[i,k], ((i,j),(i,l)) <- B[l,j].
+    let(a,b)=absorbable(k,n);let mut absorbed=0_f64;
+    for i in 0..n{for j in 0..n{let row=&mut k[(i*n+j)*d..(i*n+j+1)*d];
+        for kk in 0..n{let mut v=a[i*n+kk];if kk==i{add(&mut v,b[j*n+j]);}let e=&mut row[kk*n+j];e.re-=v.re;e.im-=v.im;absorbed+=squared(v);}
+        for l in(0..n).filter(|&l|l!=j){let v=b[l*n+j];let e=&mut row[i*n+l];e.re-=v.re;e.im-=v.im;absorbed+=squared(v);}}}
     let floor=ENTRY_FLOOR*largest;let floor2=floor*floor;
-    let sector=|p:usize|2*usize::from(!ground[p/n])+usize::from(!ground[p%n]);
-    let members:Vec<Vec<usize>>=(0..4).map(|s|(0..d).filter(|&p|sector(p)==s).collect()).collect();
-    let mut dense=[[false;4];4];let mut blocks=Vec::new();
+    let sector:Vec<usize>=(0..d).map(|p|2*usize::from(!ground[p/n])+usize::from(!ground[p%n])).collect();
+    let mut members:Vec<Vec<usize>>=vec![Vec::new();4];let mut position=vec![0;d];
+    for p in 0..d{position[p]=members[sector[p]].len();members[sector[p]].push(p);}
+    let(mut rest,mut row_sum,mut filled)=(0_f64,0_f64,[[0_usize;4];4]);
+    for r in 0..d{let(row,so)=(&k[r*d..(r+1)*d],sector[r]);let mut sum=0.;
+        for(c,z)in row.iter().enumerate(){let m=squared(*z);rest+=m;sum+=m.sqrt();if m>=floor2&&floor>0.{filled[so][sector[c]]+=1;}}
+        row_sum=row_sum.max(sum);}
+    let mut dense=[[None;4];4];let mut blocks=Vec::new();
     for so in 0..4{for si in 0..4{
         let(rows,cols)=(&members[so],&members[si]);if rows.is_empty()||cols.is_empty(){continue;}
-        let filled=rows.iter().map(|&r|cols.iter().filter(|&&c|squared(k[r*d+c])>=floor2&&floor>0.).count()).sum::<usize>();
-        if (filled as f64)<DENSE_FILL*(rows.len()*cols.len())as f64{continue;}
-        dense[so][si]=true;
-        let mut values=vec![ZERO;rows.len()*cols.len()];
-        for(c,&col)in cols.iter().enumerate(){for(r,&row)in rows.iter().enumerate(){values[r+rows.len()*c]=k[row*d+col];}}
-        blocks.push(DenseSector{rows:rows.iter().map(|&r|r as u32).collect(),cols:cols.iter().map(|&c|c as u32).collect(),values});
+        if (filled[so][si] as f64)<DENSE_FILL*(rows.len()*cols.len())as f64{continue;}
+        dense[so][si]=Some(blocks.len());
+        blocks.push(DenseSector{rows:rows.iter().map(|&r|r as u32).collect(),cols:cols.iter().map(|&c|c as u32).collect(),values:vec![ZERO;rows.len()*cols.len()]});
     }}
-    let mut dropped=0_f64;
+    let(mut dropped,mut populations)=(0_f64,Csr{row:Vec::with_capacity(d+1),col:vec![],value:vec![]});populations.row.push(0);
     let mut csr=Csr{row:Vec::with_capacity(d+1),col:vec![],value:vec![]};csr.row.push(0);
-    for r in 0..d{let population=r/n==r%n;let mut lost=0.;
-        for c in 0..d{if dense[sector(r)][sector(c)]{continue;}let v=k[r*d+c];let m=squared(v);if m==0.{continue;}
+    for r in 0..d{let(population,so)=(r/n==r%n,sector[r]);let mut lost=0.;
+        for(c,&v)in k[r*d..(r+1)*d].iter().enumerate(){let m=squared(v);if m==0.{continue;}
+            if population{populations.col.push(c as u32);populations.value.push(v);}
+            if let Some(blk)=dense[so][sector[c]]{let h=members[so].len();blocks[blk].values[position[r]+h*position[c]]=v;continue;}
             if population||m>=floor2{csr.col.push(c as u32);csr.value.push(v);}else{lost+=m.sqrt();}}
-        dropped=dropped.max(lost);csr.row.push(csr.value.len()as u32);}
-    (a,b,Rest{blocks,sparse:csr},dropped,norms,largest,row_sum,Rest{blocks:vec![],sparse:populations})
+        dropped=dropped.max(lost);csr.row.push(csr.value.len()as u32);populations.row.push(populations.value.len()as u32);}
+    (a,b,Rest{blocks,sparse:csr},dropped,[total,absorbed.sqrt(),rest.sqrt()],largest,row_sum,Rest{blocks:vec![],sparse:populations})
 }
 
-/// x <- sum_{k <= m_s} (-G_s L_r)^k G_s x on one block (w, t scratch).
-fn series(rest:&Superop,block:&FarBlock,n:usize,x:&mut[C],w:&mut[C],t:&mut[C],small:&mut Vec<C>){
-    for(v,&g)in x.iter_mut().zip(&block.g){*v=mul(*v,g);}
-    w.copy_from_slice(x);
-    for _ in 0..block.order{
-        t.fill(ZERO);rest.apply_into(n,MINUS_ONE,w,t,small);
-        for((v,&g),&u)in w.iter_mut().zip(&block.g).zip(t.iter()){*v=mul(u,g);}
-        for(a,&b)in x.iter_mut().zip(w.iter()){add(a,b);}
+/// x <- sum_{k <= order} (-G_s L_r)^k G_s x on m consecutive blocks (term,
+/// t scratch of the same length); with `scattered` the first L_r acts on
+/// single elements (each block a coupling's image of a unit element).
+#[allow(clippy::too_many_arguments)]
+fn series(rest:&RestOperator,g:&[C],order:usize,n:usize,x:&mut[C],term:&mut[C],t:&mut[C],m:usize,scattered:bool,stack:&mut Vec<C>,small:&mut Vec<C>)->Result<(),String>{
+    let d=n*n;
+    for xb in x.chunks_exact_mut(d){for(v,&gv)in xb.iter_mut().zip(g){*v=mul(*v,gv);}}
+    term.copy_from_slice(x);
+    for k in 0..order{
+        t.fill(ZERO);
+        if k==0&&scattered{for(tb,wb)in t.chunks_exact_mut(d).zip(term.chunks_exact(d)){rest.subtract_sparse(n,wb,tb);}}
+        else{rest.subtract(n,term,t,m,stack,small)?;}
+        for(wb,tb)in term.chunks_exact_mut(d).zip(t.chunks_exact(d)){for((v,&gv),&u)in wb.iter_mut().zip(g).zip(tb){*v=mul(u,gv);}}
+        for(a,&b)in x.iter_mut().zip(term.iter()){add(a,b);}
     }
+    Ok(())
 }
 /// One stored order of a target, as `store` returns it.
 type StoredOrder=(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64,f64,Rest);
 
 impl FoldLibrary{
-    pub fn build(generator:&Generator,plan:&HarmonicPlan)->Result<Self,String>{
+    pub fn build(generator:&Generator,plan:&HarmonicPlan,lapack:&Arc<Lapack>)->Result<Self,String>{
         let clock=Instant::now();let n=generator.n;let d=n*n;let zero=generator.zero_component();
         // L_c (the factors' diagonals) and L_r.
         let(mut left,mut right)=(vec![ZERO;n],vec![ZERO;n]);let(mut left_rest,mut right_rest)=(Vec::new(),Vec::new());
         for &(i,k,a)in &zero.op.left.entries{if i==k{add(&mut left[i],a);}else{left_rest.push((i,k,a));}}
         for &(k,j,b)in &zero.op.right.entries{if k==j{add(&mut right[j],b);}else{right_rest.push((k,j,b));}}
-        let rest=Superop{left:Sparse{entries:left_rest},right:Sparse{entries:right_rest},sandwich:zero.op.sandwich.clone()};
-        let rest_bound=rest.norm_bound(n);
-        let mut diagnostics=FoldDiagnostics{rest_bound,..Default::default()};
+        let off=Superop{left:Sparse{entries:left_rest},right:Sparse{entries:right_rest},sandwich:zero.op.sandwich.clone()};
+        let bound=row_bound(&off,n);
+        let rest=RestOperator{left:off.left.dense(n),right:off.right.dense(n),recycling:Superop{left:Sparse::default(),right:Sparse::default(),sandwich:off.sandwich.clone()},
+            scatter:Scatter::new(&off,n),lapack:Arc::clone(lapack)};
+        let mut diagnostics=FoldDiagnostics{rest_bound:bound,..Default::default()};
         if plan.targets.is_empty(){return Ok(Self{targets:vec![],zero_dense:None,rest,blocks:BTreeMap::new(),diagnostics});}
-        // Every far block: G_s, rho_s and the order from its pairs' bounds
-        // (c_s c_s' |G_s| rho^(m+1) against SERIES_FLOOR of the target's size,
-        // with 2 / (1 - rho) for D_s^-2).
-        let mut blocks=BTreeMap::new();
+        // Every far block's G_s and rho_s, the couplings' row sums and the
+        // targets' sizes in the same norms.
+        let couplings:BTreeMap<usize,f64>=plan.steps.iter().enumerate().filter(|(_,s)|s.treatment==classification::Treatment::Fold)
+            .map(|(i,s)|(i,row_bound(&generator.components[&s.charge].op,n))).collect();
+        let mut blocks=BTreeMap::new();let mut scale=BTreeMap::new();
         for s in plan.far(){
             let step=&plan.steps[s];
             let g:Vec<C>=(0..d).map(|p|{let z=C{re:left[p/n].re+right[p%n].re,im:left[p/n].im+right[p%n].im-step.nu};let m=squared(z);C{re:z.re/m,im:-z.im/m}}).collect();
-            let largest=g.iter().map(|z|magnitude(*z)).fold(0.,f64::max);let rho=rest_bound*largest;
+            let largest=g.iter().map(|z|magnitude(*z)).fold(0.,f64::max);let rho=bound*largest;
             if !(rho<SERIES_LIMIT){return Err(format!("Far step {:?} is too close to L0's spectrum to fold (series ratio {rho:e})",step.charge));}
-            let need=plan.targets.iter().flat_map(|t|t.pairs.iter().filter(|p|p.source==s).map(move|p|plan.steps[p.back].size/t.size.max(f64::MIN_POSITIVE))).fold(0.,f64::max);
-            let scale=step.size*largest*need*2./(1.-rho).powi(2);
-            let mut order=0;while scale*rho.powi(order as i32+1)>SERIES_FLOOR&&order<64{order+=1;}
-            diagnostics.series.push((step.charge.clone(),rho,order));
-            blocks.insert(s,FarBlock{order,g});
+            scale.insert(s,(largest,rho));blocks.insert(s,FarBlock{order:[0,0],g});
         }
+        let pair=|p:&classification::FoldPair|->(f64,f64,f64){let(g,rho)=scale[&p.source];(couplings[&p.back]*couplings[&p.source],g,rho)};
+        let sizes:Vec<[f64;2]>=plan.targets.iter().map(|t|t.pairs.iter().fold([0.;2],|z,p|{let(c,g,_)=pair(p);[z[0]+c*g,z[1]+c*g*g]})).collect();
+        // The orders: c_s' c_s |G| rho^(m0+1) / (1 - rho) within K0_FLOOR,
+        // c_s' c_s |G|^2 (rho^(m0+1) + rho^(m1+1)) / (1 - rho)^2 within
+        // K1_FLOOR of the target's size, for every pair of the step.
+        let remainder=|c:f64,g:f64,rho:f64,[m0,m1]:[usize;2]|[c*g*rho.powi(m0 as i32+1)/(1.-rho),c*g*g*(rho.powi(m0 as i32+1)+rho.powi(m1 as i32+1))/(1.-rho).powi(2)];
+        for(&s,block)in blocks.iter_mut(){
+            let(_,rho)=scale[&s];
+            let pairs:Vec<(f64,f64,usize)>=plan.targets.iter().enumerate().flat_map(|(t,target)|target.pairs.iter().filter(|p|p.source==s).map(move|p|(p,t)))
+                .map(|(p,t)|{let(c,g,_)=pair(p);(c,g,t)}).collect();
+            let fits=|order:[usize;2],o:usize|pairs.iter().all(|&(c,g,t)|remainder(c,g,rho,order)[o]<=[K0_FLOOR,K1_FLOOR][o]*sizes[t][o]);
+            let mut order=[0,0];
+            while !fits(order,0)&&order[0]<64{order[0]+=1;}
+            while !fits(order,1)&&order[1]<64{order[1]+=1;}
+            block.order=order;diagnostics.series.push((plan.steps[s].charge.clone(),rho,order));
+        }
+        let charged:Vec<[f64;2]>=plan.targets.iter().map(|t|t.pairs.iter().fold([0.;2],|z,p|{let(c,g,rho)=pair(p);let r=remainder(c,g,rho,blocks[&p.source].order);[z[0]+r[0],z[1]+r[1]]})).collect();
+        for c in &charged{diagnostics.truncation[0]+=c[0];diagnostics.truncation[1]+=c[1];}
         // The targets built here (the diagonal one and canonical t != 0) and
         // the far steps solved for them (for the diagonal target, the pairs
         // with a canonical source only).
@@ -254,23 +331,26 @@ impl FoldLibrary{
         let mut build=vec![ZERO;d*width];
         let execution=Execution::new()?;let mut scratch:Vec<BuildScratch>=Vec::new();
         for(&s,partners)in &partners{
-            let op=&generator.components[&plan.steps[s].charge].op;let block=&blocks[&s];
+            let op=&generator.components[&plan.steps[s].charge].op;let block=&blocks[&s];let coupling=Scatter::new(op,n);
             let active:Vec<bool>=(0..d).map(|c|column_active(op,n,c)).collect();
             let count=active.iter().filter(|&&a|a).count();diagnostics.columns+=count;diagnostics.far_sources+=1;
             let backs:Vec<&Superop>=partners.iter().map(|&(_,b)|&generator.components[&plan.steps[b].charge].op).collect();
-            let work=count*((2*block.order+1)*rest.work(n)+backs.iter().map(|b|2*b.work(n)).sum::<usize>()+op.work(n));
-            let(rest,active,backs)=(&rest,&active,&backs);
+            let work=count*((block.order[0]+block.order[1])*(2*n*n*n+rest.recycling.work(n))+backs.iter().map(|b|2*b.work(n)).sum::<usize>());
+            let(rest,active,backs,coupling)=(&rest,&active,&backs,&coupling);
             execution.for_mode_chunks(&mut build,width,work,MINIMUM_WORK_PER_TASK,&mut scratch,|first,chunk,scratch|{
-                let BuildScratch{y,z,t,w,small}=scratch;for v in[&mut *y,&mut *z,&mut *t,&mut *w]{grow(v,d);}
-                let(y,z,t,w)=(&mut y[..d],&mut z[..d],&mut t[..d],&mut w[..d]);
-                for(k,column)in chunk.chunks_exact_mut(width).enumerate(){let c=first+k;if !active[c]{continue;}
+                let BuildScratch{y,z,t,w,stack,small}=scratch;
+                let columns:Vec<usize>=(first..first+chunk.len()/width).filter(|&c|active[c]).collect();
+                for group in columns.chunks(BATCH){
+                    let m=group.len();for v in[&mut *y,&mut *z,&mut *t,&mut *w]{grow(v,m*d);}
+                    let(y,z,t,w)=(&mut y[..m*d],&mut z[..m*d],&mut t[..m*d],&mut w[..m*d]);
                     // Y = D_s^-1 C_s e_c and Z = D_s^-1 Y.
-                    t.fill(ZERO);t[c]=ONE;y.fill(ZERO);op.apply_into(n,ONE,t,y,small);
-                    series(rest,block,n,y,w,t,small);
-                    z.copy_from_slice(y);series(rest,block,n,z,w,t,small);
-                    for(&(slot,_),back)in partners.iter().zip(backs){let base=2*slot*d;
-                        back.apply_into(n,MINUS_ONE,y,&mut column[base..base+d],small);
-                        back.apply_into(n,MINUS_ONE,z,&mut column[base+d..base+2*d],small);}
+                    y.fill(ZERO);for(k,&c)in group.iter().enumerate(){coupling.add(n,c/n,c%n,ONE,&mut y[k*d..(k+1)*d]);}
+                    series(rest,&block.g,block.order[0],n,y,w,t,m,true,stack,small)?;
+                    z.copy_from_slice(y);series(rest,&block.g,block.order[1],n,z,w,t,m,false,stack,small)?;
+                    for(k,&c)in group.iter().enumerate(){let column=&mut chunk[(c-first)*width..(c-first+1)*width];
+                        for(&(slot,_),back)in partners.iter().zip(backs){let base=2*slot*d;
+                            back.apply_into(n,MINUS_ONE,&y[k*d..(k+1)*d],&mut column[base..base+d],small);
+                            back.apply_into(n,MINUS_ONE,&z[k*d..(k+1)*d],&mut column[base+d..base+2*d],small);}}
                 }
                 Ok(())
             })?;
@@ -285,21 +365,24 @@ impl FoldLibrary{
             let target=&plan.targets[t];
             let(slot,flip)=match built.iter().position(|&b|b==t){Some(slot)=>(slot,false),
                 None=>(built.iter().position(|&b|plan.targets[b].charge==opposite(&target.charge)).ok_or("A fold target without its built partner")?,true)};
-            let mut k=vec![ZERO;d*d];let offset=(2*slot+order)*d;
-            for cb in(0..d).step_by(64){for rb in(0..d).step_by(64){for c in cb..(cb+64).min(d){let column=&build[c*width+offset..c*width+offset+d];
-                for r in rb..(rb+64).min(d){k[r*d+c]=column[r];}}}}
-            if flip{k=flipped(&k,n);}else if target.charge==generator.zero{add_flip(&mut k,n);}
+            // K[r, c] = H[r, c] (+ conj H[r~, c~] for the diagonal target), or
+            // conj K_-t[r~, c~] for a flipped one, H's column c at build[c][slot][order].
+            let offset=(2*slot+order)*d;let h=|r:usize,c:usize|build[c*width+offset+r];
+            let diagonal=!flip&&target.charge==generator.zero;
+            let mut k=vec![ZERO;d*d];
+            for cb in(0..d).step_by(64){for rb in(0..d).step_by(64){for c in cb..(cb+64).min(d){let cs=swapped(c,n);for r in rb..(rb+64).min(d){
+                k[r*d+c]=if flip{conj(h(swapped(r,n),cs))}else if diagonal{let(u,v)=(h(r,c),h(swapped(r,n),cs));C{re:u.re+v.re,im:u.im-v.im}}else{h(r,c)};}}}}
             let zero=(order==0&&target.charge==generator.zero).then(||k.clone());
             Ok((store(&mut k,n,&generator.ground),zero))
         });
         let mut parts=stored.into_iter();let mut targets=Vec::with_capacity(plan.targets.len());let mut zero_dense=None;
-        for target in &plan.targets{
+        for(t,target)in plan.targets.iter().enumerate(){
             let mut fold=StoredFold{charge:target.charge.clone(),nu:target.nu,left:[vec![],vec![]],right:[vec![],vec![]],rest:[Rest::default(),Rest::default()],
                 population_rest:[Rest::default(),Rest::default()],dropped:[0.;2],norms:[[0.;3];2],largest_entry:[0.;2],rest_row_sum:[0.;2]};
             for order in 0..2{
                 let((a,b,rest,lost,norms,largest,row,population),zero)=parts.next().ok_or("Fold storage lost a target")??;
                 if zero.is_some(){zero_dense=zero;}
-                fold.left[order]=a;fold.right[order]=b;fold.rest[order]=rest;fold.dropped[order]=lost;fold.norms[order]=norms;
+                fold.left[order]=a;fold.right[order]=b;fold.rest[order]=rest;fold.dropped[order]=lost+charged[t][order];fold.norms[order]=norms;
                 fold.largest_entry[order]=largest;fold.rest_row_sum[order]=row;fold.population_rest[order]=population;
             }
             targets.push(fold);
@@ -307,12 +390,11 @@ impl FoldLibrary{
         diagnostics.milliseconds=clock.elapsed().as_secs_f64()*1e3;diagnostics.phase_ms[1]=diagnostics.milliseconds-diagnostics.phase_ms[0];
         Ok(Self{targets,zero_dense,rest,blocks,diagnostics})
     }
-    /// D_s^-1 on m consecutive row-major blocks, in place.
+    /// D_s^-1 (order m0) on m consecutive row-major blocks, in place.
     fn far_solve(&self,s:usize,blocks:&mut[C],m:usize)->Result<(),String>{
-        let block=self.blocks.get(&s).ok_or("A far step without its block")?;let d=blocks.len()/m.max(1);let n=(d as f64).sqrt().round() as usize;
-        let(mut w,mut t,mut small)=(vec![ZERO;d],vec![ZERO;d],Vec::new());
-        for x in blocks.chunks_exact_mut(d){series(&self.rest,block,n,x,&mut w,&mut t,&mut small);}
-        Ok(())
+        let block=self.blocks.get(&s).ok_or("A far step without its block")?;let n=(((blocks.len()/m.max(1))as f64).sqrt().round())as usize;
+        let(mut w,mut t)=(vec![ZERO;blocks.len()],vec![ZERO;blocks.len()]);
+        series(&self.rest,&block.g,block.order[0],n,blocks,&mut w,&mut t,m,false,&mut Vec::new(),&mut Vec::new())
     }
     /// Largest dropped row sums of K^(0) and K^(1), summed over the targets.
     pub fn dropped(&self)->[f64;2]{
@@ -383,15 +465,16 @@ mod tests{
         // Every far block's truncated Neumann series solves (L0 - i nu_s) X = Y
         // to roundoff, recycling included.
         let f=fixture();let p=prepared(&f);let d=16;let l0=dense_l0(&p);
-        assert!(!p.fold.blocks.is_empty()&&p.fold.blocks.values().any(|b|b.order>0));
+        assert!(!p.fold.blocks.is_empty()&&p.fold.blocks.values().any(|b|b.order[0]>0));
         for(&s,block)in &p.fold.blocks{
             let nu=p.plan.steps[s].nu;let mut m=l0.clone();for i in 0..d{m[i*d+i].im-=nu;}
             let y:Vec<C>=(0..2*d).map(|k|C{re:((k*37+11)%97)as f64/97.-0.5,im:((k*53+7)%89)as f64/89.-0.5}).collect();
             let mut x=y.clone();p.fold.far_solve(s,&mut x,2).unwrap();
             let scale=y.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
             for b in 0..2{let mut r=y[b*d..(b+1)*d].to_vec();for i in 0..d{for k in 0..d{let v=mul(m[i*d+k],x[b*d+k]);r[i].re-=v.re;r[i].im-=v.im;}}
-                let error=r.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
-                assert!(error<1e-13*scale,"step {s}: residual {error:e} (order {})",block.order);}
+                // (L0 - i nu) S_m = 1 - (-L_r G)^(m+1): the residual is within rho^(m+1).
+                let error=r.iter().map(|z|magnitude(*z)).fold(0.,f64::max);let rho=p.fold.diagnostics.rest_bound*block.g.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
+                assert!(error<=(rho.powi(block.order[0] as i32+1)+1e-13)*scale,"step {s}: residual {error:e} (order {:?})",block.order);}
         }
     }
     #[test]
@@ -418,8 +501,10 @@ mod tests{
                 // The +-s terms cancel to (V/nu)^2: roundoff scales with the pair bounds.
                 let scale=target.size;
                 let error=exact.iter().zip(&folded).map(|(a,b)|magnitude(C{re:a.re-b.re,im:a.im-b.im})).fold(0.,f64::max);
-                assert!(error<=ledger.nu_freeze+1e-13*scale,"t {:?} nu {nu}: |exact - folded| {error:e} > bound {:e}",target.charge,ledger.nu_freeze);
-                if nu==0.{assert!(error<1e-13*scale,"static fold must be exact at nu = 0: {error:e}");}
+                // Within nu-freeze and the charged Neumann remainders (and dropped entries).
+                let charged=stored.dropped[0]+nu.abs()*stored.dropped[1];
+                assert!(error<=ledger.nu_freeze+charged+1e-13*scale,"t {:?} nu {nu}: |exact - folded| {error:e} > bound {:e}",target.charge,ledger.nu_freeze+charged);
+                if nu==0.{assert!(error<=stored.dropped[0]+1e-13*scale,"static fold beyond its charged remainder at nu = 0: {error:e}");}
                 // Trace preservation: the output is traceless for every input.
                 for c in 0..d{let mut t=ZERO;for i in 0..n{add(&mut t,folded[(i*n+i)*d+c]);}assert!(magnitude(t)<1e-13*scale);}
             }
