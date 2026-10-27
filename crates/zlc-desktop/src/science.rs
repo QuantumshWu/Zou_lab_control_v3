@@ -68,13 +68,17 @@ pub struct PresentationDecision { pub targets:BTreeSet<String>, pub fronts:BTree
 pub struct SelectionNote { pub panel: String, pub signal: String, pub selection: Option<Value>, pub context: Value }
 
 /// v2 `_selection_context`: the read's run record device snapshots (one camera's
-/// facts spread at the top) and each axis's unit.
+/// facts spread at the top) and each axis's unit, and the run record itself -- the
+/// producer's own account of the run that wrote what was drawn on (a scan's says
+/// which port each of its axes is and what it played).
 fn selection_context(read: &Read) -> Value {
-    let snapshots = read.anchor().run().metadata["device_snapshots"].clone();
+    let record = &read.anchor().run().metadata;
+    let snapshots = record["device_snapshots"].clone();
     let schema = read.schema();
     let units: serde_json::Map<String, Value> = [zlc_core::schema::DomainRole::Repeat, zlc_core::schema::DomainRole::Point, zlc_core::schema::DomainRole::Cell].into_iter()
         .flat_map(|role| schema.domain(role).axes().iter().map(|axis| (axis.id().to_owned(), json!(axis.unit().unwrap_or("1")))).collect::<Vec<_>>()).collect();
-    let mut context = json!({"device_snapshots": if snapshots.is_object() { snapshots.clone() } else { json!({}) }, "axis_units": units});
+    let mut context = json!({"device_snapshots": if snapshots.is_object() { snapshots.clone() } else { json!({}) }, "axis_units": units,
+                             "run_record": record});
     if let Some(only) = snapshots.as_object().filter(|items| items.len() == 1).and_then(|items| items.values().next()).and_then(Value::as_object) {
         for (key, value) in only { context[key] = value.clone(); }
     }
