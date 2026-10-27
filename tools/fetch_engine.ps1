@@ -68,11 +68,16 @@ function Sync-AtomWorkbench {
     $temporary = Join-Path $bin 'atom_workbench.next.exe'
     Copy-Item -LiteralPath $source -Destination $temporary -Force
     try {
-        if (Test-Path -LiteralPath $destination) { [IO.File]::Replace($temporary, $destination, $null) }
+        # No backup: [NullString]::Value, since PowerShell passes $null to a string parameter as "".
+        if (Test-Path -LiteralPath $destination) { [IO.File]::Replace($temporary, $destination, [NullString]::Value) }
         else { [IO.File]::Move($temporary, $destination) }
         return $true
     } catch {
-        Write-Host 'Atom Workbench is still running: close it and start installation.exe again to finish its update.'
+        $reason = $_.Exception.GetBaseException()
+        # A sharing violation (0x20) is a running Atom Workbench; anything else is said as it is.
+        if ($reason -is [IO.IOException] -and ($reason.HResult -band 0xFFFF) -eq 32) {
+            Write-Host 'Atom Workbench is still running: close it and start installation.exe again to finish its update.'
+        } else { Write-Host "Atom Workbench was not updated: $($reason.Message)" }
         return $false
     }
 }
