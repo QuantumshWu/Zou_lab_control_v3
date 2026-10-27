@@ -322,13 +322,17 @@ export class ScanPlanEditor implements NodeEditor {
   families: Facts["families"] = { pulse: "pulse:param:", api: "api:", device: "device:", manual: "manual:" };
   ports: Port[] = [];
 
-  constructor(private edit: DraftEdit) {
+  /** `readOnly`: Panel Edit's Direct producer (v2 `read_only_fields`) -- the
+   * same axis rows and what the plan is, without Add axis, the API values or
+   * anything written back. */
+  constructor(private edit: DraftEdit, private readOnly = false) {
     // An API value's name stands in the label column in the room the editor
     // keeps for it (labelFloor), never setting it: the column, and every field
     // after it, stays put when a pulse that binds some is chosen.
     this.apiForm.dataset.labelRoom = "";
     this.root.append(sectionTitle("Scan plan", this.add, this.addManual), this.axes, this.problem, this.summary,
       this.apiTitle, this.apiForm, this.parked, this.apiNote);
+    if (readOnly) for (const node of [this.add, this.addManual, this.apiTitle, this.apiForm, this.parked, this.apiNote]) node.hidden = true;
   }
 
   labelFloor(): number { return token("--api-label-room"); }
@@ -352,7 +356,7 @@ export class ScanPlanEditor implements NodeEditor {
     this.problem.hidden = !facts.problem;
     setText(this.summary, facts.problem ? "" : facts.summary);
     this.summary.hidden = !this.summary.textContent;
-    this.updateApi(row, facts);
+    if (!this.readOnly) this.updateApi(row, facts);
   }
 
   /** Every knob under the thing that owns it (v2 _fill_ports); an authored port the bench

@@ -275,6 +275,7 @@ class AxisRowView {
 }
 export class ScanPlanEditor {
     edit;
+    readOnly;
     root = element("div", "node-editor scan-plan");
     add = button("Add axis", () => this.addRow(false));
     addManual = button("Add manual axis", () => this.addRow(true));
@@ -297,13 +298,20 @@ export class ScanPlanEditor {
     locked = "";
     families = { pulse: "pulse:param:", api: "api:", device: "device:", manual: "manual:" };
     ports = [];
-    constructor(edit) {
+    /** `readOnly`: Panel Edit's Direct producer (v2 `read_only_fields`) -- the
+     * same axis rows and what the plan is, without Add axis, the API values or
+     * anything written back. */
+    constructor(edit, readOnly = false) {
         this.edit = edit;
+        this.readOnly = readOnly;
         // An API value's name stands in the label column in the room the editor
         // keeps for it (labelFloor), never setting it: the column, and every field
         // after it, stays put when a pulse that binds some is chosen.
         this.apiForm.dataset.labelRoom = "";
         this.root.append(sectionTitle("Scan plan", this.add, this.addManual), this.axes, this.problem, this.summary, this.apiTitle, this.apiForm, this.parked, this.apiNote);
+        if (readOnly)
+            for (const node of [this.add, this.addManual, this.apiTitle, this.apiForm, this.parked, this.apiNote])
+                node.hidden = true;
     }
     labelFloor() { return token("--api-label-room"); }
     update(row, raw, locked) {
@@ -326,7 +334,8 @@ export class ScanPlanEditor {
         this.problem.hidden = !facts.problem;
         setText(this.summary, facts.problem ? "" : facts.summary);
         this.summary.hidden = !this.summary.textContent;
-        this.updateApi(row, facts);
+        if (!this.readOnly)
+            this.updateApi(row, facts);
     }
     /** Every knob under the thing that owns it (v2 _fill_ports); an authored port the bench
      * no longer offers keeps saying what was authored, never silently another. Closed, the box

@@ -1,0 +1,131 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Panel Edit Direct producer regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<div id="host" style="width:1100px"></div>
+<script type="module">
+// Run with tools/test_ui.ps1. The Edit page's Direct producer (v2 PanelEditorView producer_form and its
+// ui_contributions): the producer's selector-linked draft fields, read only. A field the producer's own
+// editor draws is drawn by that editor (a seamless scan's plan as its axis rows, never its JSON); the
+// rest stand as plain rows (a camera's ROI). Nothing here writes the draft: every command is recorded.
+import {PanelEditView} from '../dist/views/panel_edit.js';
+const wait = (ms=100) => new Promise(resolve=>setTimeout(resolve,ms));
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+const check=async(name,test)=>{await test();results.push(name)};
+const sent=[],opened=[];
+const transport={request:()=>Promise.resolve(null),note:()=>{},choosePath:()=>Promise.resolve(null)};
+const view=new PanelEditView('edit-panel-1','panel-1',{views:new Map(),signals:[]},command=>{sent.push(command);return sent.length},node=>opened.push(node),transport);
+document.getElementById('host').append(view.root);
+const card=()=>[...view.root.querySelectorAll('.panel-edit-card')].find(node=>node.querySelector('.section-title')?.textContent==='Direct producer');
+const shown=node=>Boolean(node&&node.offsetParent);
+// A seamless scan as the workbench rows it: its plan a text field, the scan_plan editor's model managing it.
+const freq={port:'device:rf:frequency',label:'rf.frequency',group:'rf',leaf:'frequency',unit:'Hz',lo:1e6,hi:6e9,current:1e8,integer:false,display_unit:null,
+  units:[['GHz',9],['MHz',6],['kHz',3],['Hz',0]],limits:{},currents:{},families:{GHz:'Hz',MHz:'Hz',kHz:'Hz',Hz:'Hz'}};
+const hold={port:'pulse:param:duration:hold',label:'hold',group:'pulse',leaf:'duration:hold',unit:'s',lo:2e-8,hi:85,current:0.01,integer:false,display_unit:null,
+  units:[['s',0],['ms',-3],['µs',-6]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s'}};
+const api={fields:[{name:'delay',label:'Delay',kind:'number',unit:'s',units:[['s',0],['ms',-3]],families:{s:'s',ms:'s'},description:'delay',minimum:0,maximum:1,
+  authored:0.001,value:0.001,unavailable_reason:''}],overrides:[],parked:[{name:'gone',text:'gone = 3 (not in this pulse)',problem:false}],note:'API note',tidy:'delay = 0.002'};
+const facts={editor:'scan_plan',manages:['plan','api_values'],families:{pulse:'pulse:param:',api:'api:',device:'device:',manual:'manual:'},
+  host_advanced:['api:','device:','manual:'],ports:[freq,hold],withheld:{},unoffered:{},summary:'2 × 3 points',problem:'',api};
+const plan=axes=>JSON.stringify({axes});
+const AXES=[{port:'device:rf:frequency',unit:'MHz',values:[99.9,100,100.1],mode:'range',value_text:''},
+  {port:'pulse:param:duration:hold',unit:'ms',values:[9.9,10.1],mode:'values',value_text:'9.9, 10.1'}];
+const scanRow=(text,more={})=>({node_id:'scan',name:'Seamless scan',type_id:'seamless_scan',node_kind:'measurement',values:{plan:text,api_values:'',repeats:1},
+  controls:[{name:'plan',label:'Plan',kind:'text',value:text,required:true},{name:'api_values',label:'API values',kind:'text',value:''},
+    {name:'repeats',label:'Repeats',kind:'integer',value:1}],
+  selector_fields:['plan'],editor_facts:facts,...more});
+const roi=(x)=>['roi_x','roi_y','roi_width','roi_height'].map((name,index)=>({name,label:name.replace('_',' '),kind:'integer',value:[x,4,24,32][index],required:true}));
+const cameraRow=(x=3)=>({node_id:'cam',name:'Camera',type_id:'camera_measurement',node_kind:'measurement',values:{},controls:[...roi(x),{name:'exposure',label:'Exposure',kind:'number',value:1}],
+  selector_fields:['roi_x','roi_y','roi_width','roi_height'],editor_facts:null});
+const panel=signal=>({id:'edit-panel-1',kind:'curve',frame:{width:12,height:8,sequence:1},controls:[],binding:{signal},
+  edit:{panel:'panel-1',at_ms:0,revision:3,advanced:false,shape:[2,3],status:'frozen and ready to save'}});
+const update=(signal,logic)=>view.update(panel(signal),'Scan counts',logic,'C:\\data');
+try {
+ await check('a seamless scan\'s plan is its axis rows, read only, never its JSON',async()=>{
+   update('@logic/scan/counts',[scanRow(plan(AXES))]);
+   await wait();
+   const producer=card();
+   equal(producer.querySelector('.panel-edit-held').textContent,'Logic node: Seamless scan','the node');
+   const editor=producer.querySelector('.node-editor.scan-plan');
+   assert(shown(editor),'no scan plan editor in the Direct producer');
+   assert(![...producer.querySelectorAll('input, textarea')].some(input=>input.value.includes('"axes"')),'the plan shown as JSON');
+   assert(!shown(producer.querySelector('.form')),'a plain form beside the editor');
+   equal(producer.querySelectorAll('.scan-axes > .axis-port').length,2,'one row per axis');
+   const banks=[...editor.querySelectorAll('.range-bank')];
+   equal([...banks[0].querySelectorAll('input')].map(input=>input.value),['99.9','100.1','3'],'the range axis: from, to, points');
+   assert(!shown(banks[1]),'the values axis shows its range bank');
+   equal([...editor.querySelectorAll('.axis-list')][1].value,'9.9, 10.1','the values axis: its list');
+   equal([...editor.querySelectorAll('.axis-unit .unit-picker')].map(picker=>picker.value),['MHz','ms'],'each axis in its unit');
+   equal(editor.querySelector('.note.wrap').textContent,'2 × 3 points','what the plan is, under the rows');
+ });
+ await check('nothing in it is offered: Add axis, the API values and the parked lines are left out, every control disabled',async()=>{
+   const editor=card().querySelector('.scan-plan');
+   assert(![...editor.querySelectorAll('button')].some(button=>shown(button)&&/^Add/.test(button.textContent)),'an Add button is shown');
+   assert(!shown(editor.querySelector('.api-values'))&&!shown(editor.querySelector('.api-parked')),'the API values are shown');
+   assert(![...editor.querySelectorAll('.section-title')].some(title=>shown(title)&&title.textContent.startsWith('API values')),'the API values title is shown');
+   const controls=[...editor.querySelectorAll('input, button, select')].filter(shown);
+   assert(controls.length>0,'no controls');
+   const live=controls.filter(node=>!node.disabled&&!node.closest('[disabled]'));
+   equal(live.map(node=>node.outerHTML.slice(0,60)),[],'enabled controls');
+   equal(sent,[],'commands sent');
+ });
+ await check('the Direct producer stands on the page\'s one label column',async()=>{
+   await wait();
+   const producer=card();
+   const save=[...view.root.querySelectorAll('.panel-edit-card')].find(node=>node.querySelector('.section-title')?.textContent==='Save figure');
+   const port=producer.querySelector('.scan-axes > .axis-port').getBoundingClientRect().left;
+   const control=save.querySelector('.field-control').getBoundingClientRect().left;
+   assert(Math.abs(port-control)<0.5,`the axis starts at ${port}, the Save figure controls at ${control}`);
+   const probe=document.createElement('div');probe.style.width='var(--api-label-room)';document.body.append(probe);
+   const floor=probe.getBoundingClientRect().width;probe.remove();
+   const room=parseFloat(getComputedStyle(producer).getPropertyValue('--label-width'));
+   assert(floor>0&&room>=floor-0.5,`the column (${room}px) keeps the scan editor's API label room (${floor}px)`);
+ });
+ await check('a new plan re-points the same rows; a manual axis\'s "By hand" stands in the column',async()=>{
+   const before=card().querySelector('.scan-axes > .axis-port');
+   update('@logic/scan/counts',[scanRow(plan([{...AXES[0],values:[99,100,101,102]},AXES[1],{port:'manual:stage',unit:'mm',values:[0,1],mode:'range',value_text:''}]))]);
+   await wait();
+   const producer=card();
+   assert(producer.querySelector('.scan-axes > .axis-port')===before,'the first row was rebuilt');
+   const ends=[...producer.querySelector('.range-bank').querySelectorAll('input')].map(input=>input.value);
+   equal(ends,['99','102','4'],'the new range');
+   const hand=[...producer.querySelectorAll('.axis-kind')].find(label=>label.textContent==='By hand');
+   assert(shown(hand),'no By hand');
+   assert(producer.querySelector('.axis-name').disabled&&producer.querySelector('.axis-name').value==='stage','the manual axis name');
+ });
+ await check('a camera\'s ROI is its plain rows, read only; the scan editor leaves with its producer',async()=>{
+   update('@logic/cam/frames',[scanRow(plan(AXES)),cameraRow(3)]);
+   await wait();
+   const producer=card();
+   equal(producer.querySelector('.panel-edit-held').textContent,'Logic node: Camera','the node');
+   assert(!producer.querySelector('.node-editor'),'an editor without a field it draws');
+   const rows=[...producer.querySelectorAll('.form .field')].filter(row=>shown(row.querySelector('.field-label')));
+   equal(rows.map(row=>row.querySelector('.field-label').textContent.replace(/ \*$/,'')),['roi x','roi y','roi width','roi height'],'the linked fields only');
+   const inputs=rows.map(row=>row.querySelector('input'));
+   equal(inputs.map(input=>input.value),['3','4','24','32'],'their values');
+   assert(inputs.every(input=>input.disabled),'an ROI field is editable');
+   update('@logic/cam/frames',[cameraRow(11)]);
+   equal(producer.querySelector('.form .field input').value,'11','a new ROI');
+ });
+ await check('a producer no editor draws for a linked field keeps it as a plain row; no producer shows neither',async()=>{
+   update('@logic/scan/counts',[scanRow(plan(AXES),{editor_facts:{...facts,editor:'some_editor_this_ui_does_not_draw'}})]);
+   await wait();
+   const producer=card();
+   assert(!producer.querySelector('.node-editor'),'an editor drawn');
+   equal([...producer.querySelectorAll('.form .field')].filter(row=>shown(row.querySelector('.field-label'))).map(row=>row.querySelector('.field-label').textContent.replace(/ \*$/,'')),['Plan'],'the plan as a row');
+   update('@board/panel-2/roi',[scanRow(plan(AXES))]);
+   equal(producer.querySelector('.panel-edit-held').textContent,'This signal has no editable direct producer.','no producer');
+   assert(!producer.querySelector('.node-editor')&&!shown(producer.querySelector('.form')),'fields without a producer');
+   update('@logic/scan/counts',[scanRow(plan(AXES))]);
+   assert(shown(producer.querySelector('.scan-plan')),'the scan editor came back');
+   const open=[...producer.querySelectorAll('button')].find(button=>button.textContent==='Open producer');
+   open.click();
+   equal(opened,['scan'],'Open producer');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+</script>
