@@ -204,6 +204,9 @@ impl BlockEigenbasis{
         let(n,d)=(self.n,self.d);let z=self.coefficients(&[block])?;
         Ok((0..d).map(|j|magnitude(z[j])*(0..n).map(|i|{let v=self.readout[i+n*j];v.re*v.re+v.im*v.im}).sum::<f64>().sqrt()).collect())
     }
+    /// Eigenvalues of modulus below `floor`: the conserved quantities of the
+    /// folded centre block.
+    pub fn kernel_count(&self,floor:f64)->usize{self.lambda.iter().filter(|l|magnitude(**l)<floor).count()}
     /// The block of the eigenvalue of least modulus (the dressed centre's
     /// steady state when it is unique), trace one.
     pub fn kernel_block(&self)->Result<Vec<C>,String>{

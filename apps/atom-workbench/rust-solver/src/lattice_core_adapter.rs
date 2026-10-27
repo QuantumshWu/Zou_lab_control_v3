@@ -422,6 +422,7 @@ mod tests{
         let horizons:Vec<f64>=var("ATOM_VALIDATE_HORIZONS").map_or(vec![],|h|h.split(',').map(|x|x.parse().unwrap()).collect());
         let started=Instant::now();
         let options=Options::default();let prepared=prepare_request(&model,&options).unwrap();let prepare_ms=started.elapsed().as_secs_f64()*1e3;
+        println!("{}",json!({"preparation":lattice_json(&prepared.lattice,None)}));
         let rows=|v:&Value|->Option<Vec<Vec<f64>>>{v.as_array().map(|a|a.iter().map(|r|r.as_array().unwrap().iter().map(|x|x.as_f64().unwrap()).collect()).collect())};
         let reference_pops=rows(&reference["pops"]).filter(|p|p.len()==times.len());
         let reference_steady:Option<Vec<f64>>=reference["steady"].as_array().map(|a|a.iter().map(|x|x.as_f64().unwrap()).collect());
@@ -440,6 +441,8 @@ mod tests{
             let line=json!({"solves":c.solves,"columns":c.columns,"dimension":c.dimension,"accepted":c.accepted,"estTraj":est_traj,"estH":c.estimate.horizons,"estSteady":c.estimate.steady,
                 "errTraj":error_traj.as_ref().map(|e|e.0),"errTrajAt":error_traj.as_ref().map(|e|e.1),"errH":error_h,"errSteady":error_s,"estOverErrQuantiles":ratio,
                 "growing":c.growing,"reflected":c.reflected,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest_rate,"ms":c.milliseconds,
+                "operatorWork":c.inner.operator_work,"innerSteps":c.inner.steps,"innerMs":c.inner.milliseconds,"applyMs":c.inner.timing.apply_ms,"preconditionMs":c.inner.timing.precondition_ms,"orthogonalizeMs":c.inner.timing.orthogonalize_ms,"batchMs":c.inner.batch_ms,"blockOperations":c.inner.block_operations(),
+                "timingMs":{"explicitSet":c.timing.explicit_set_ms,"setup":c.timing.setup_ms,"dressed":c.timing.dressed_ms,"model":c.timing.model_ms,"ordering":c.timing.ordering_ms,"estimate":c.timing.estimate_ms},
                 "elapsedMs":started.elapsed().as_secs_f64()*1e3,"trajectoryNorm":c.trajectory.iter().map(|p|ledger::metric(p,&zero,&groups)).fold(0_f64,f64::max)});
             println!("{line}");lines.push(line);
         };

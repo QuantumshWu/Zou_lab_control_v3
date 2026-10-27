@@ -12,6 +12,10 @@
 //!    conserved count) and the error estimate (`estimate_api`); accepted
 //!    when ACCEPTANCE_FACTOR x the largest bound is within the tolerance.
 //!    The ladder exhausted without acceptance is an error.
+//!
+//! The conserved count is the reduced model's kernel (the conserved
+//! quantities x0 reaches), and the folded centre block's when the lattice is
+//! that one block (a static model: its kernel is known exactly).
 use super::*;
 use super::charge_set::{self,ExplicitSet};
 use super::estimate_api::{ACCEPTANCE_FACTOR,Construct,ErrorEstimate,EstimateSetup,Outputs,ReducedView};
@@ -49,6 +53,9 @@ pub struct Checkpoint{
     pub growing:usize,pub reflected:usize,pub projected:usize,pub conserved:usize,pub slowest_rate:Option<f64>,
     /// Raw outputs: trajectory rows, horizon rows, steady row.
     pub trajectory:Vec<Vec<f64>>,pub horizons:Vec<Vec<f64>>,pub steady:Vec<f64>,
+    /// The solves so far (inner steps, block operations, ms) and the run's
+    /// timing so far.
+    pub inner:InnerWork,pub timing:Timing,
     pub milliseconds:f64,
 }
 
@@ -127,6 +134,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         let clock=Instant::now();
         dressed.ingest(lapack,eigen,&space.basis,&space.images)?;
         let model=dressed.model(lapack,space.initial_norm,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
+        timing.dressed_ms=dressed.milliseconds;timing.images_ms=space.images_ms;
         let trajectory=model.trajectory(dressed,times);
         let horizons:Vec<Vec<f64>>=request.horizons.iter().map(|&t|model.horizon(dressed,t)).collect();
         let steady=model.steady_populations(dressed);
@@ -137,11 +145,13 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         let accepted=ACCEPTANCE_FACTOR*estimate.largest()<=tolerance;
         let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,accepted,
             growing:model.growing,reflected:model.reflected,projected:model.projected,conserved:model.conserved(),slowest_rate:model.slowest_rate(),
-            trajectory,horizons,steady,milliseconds:clock.elapsed().as_secs_f64()*1e3};
+            trajectory,horizons,steady,inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
         checkpoints.push(point.clone());
         Ok((model,point))
     };
     let mut accepted:Option<Model>=None;
+    // The last checkpoint's model, reused by a re-ranking at the same solve.
+    let mut current:Option<(usize,Model)>=None;
     loop{
         let live:Vec<usize>=(0..points.len()).filter(|&i|alive[i]).collect();
         let exhausted=live.is_empty()||space.solves()>=MAXIMUM_SOLVES;
@@ -150,12 +160,13 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             if let Some(o)=observer.as_mut(){o(&point);}
             if point.accepted{accepted=Some(model);break;}
             if exhausted{break;}
+            current=Some((space.solves(),model));
         }
         // The next pole: the live points ranked by sigma |p_err(xi)|.
         if queue.is_empty()||age>=RERANK{
             let clock=Instant::now();
-            dressed.ingest(lapack,eigen,&space.basis,&space.images)?;
-            let model=dressed.model(lapack,space.initial_norm,longest,tolerance)?;
+            let model=match current.take(){Some((solves,model))if solves==space.solves()=>model,_=>{
+                dressed.ingest(lapack,eigen,&space.basis,&space.images)?;dressed.model(lapack,space.initial_norm,longest,tolerance)?}};
             let xis:Vec<C>=live.iter().map(|&i|points[i].sigma()).collect();
             let transform=model.error_transform(&dressed,eigen,lapack,&xis)?;
             let mut scored:Vec<(usize,f64)>=live.iter().zip(&transform).map(|(&i,p)|(i,points[i].sigma().re*p.iter().map(|z|magnitude(*z)).fold(0.,f64::max))).collect();
@@ -183,8 +194,55 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     let steady_residual=ops.norm(&steady_image)/ops.norm(&steady_field).max(f64::MIN_POSITIVE);
     let horizon_fields=request.horizons.iter().map(|&t|field(&model.state(t),false)).collect::<Result<Vec<_>,_>>()?;
     let work=lattice.work().clone();
+    let conserved=if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{last.conserved};
     timing.solves_ms=work.milliseconds;timing.images_ms=space.images_ms;timing.dressed_ms=dressed.milliseconds;timing.total_ms=started.elapsed().as_secs_f64()*1e3;
     Ok(Solution{modes,translations:space.translations(),trajectory:projected,projection,horizons:last.horizons.clone(),steady:last.steady.clone(),
-        horizon_fields,steady_field,steady_residual,estimate:last.estimate.clone(),conserved:last.conserved,slowest_rate:last.slowest_rate,
+        horizon_fields,steady_field,steady_residual,estimate:last.estimate.clone(),conserved,slowest_rate:last.slowest_rate,
         columns:space.columns.clone(),dimension:model.r,images:space.basis.len(),work,ledger:ledger.clone(),timing,checkpoints,explicit:explicit.clone()})
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    use super::super::tests::{fixture,prepared,dense_steady};
+    use super::super::operator::LatticeOperator;
+    #[test]
+    fn lattice_pipeline_follows_the_exact_lattice_dynamics(){
+        // The fixture from |0><0|: the trajectory (2 us), the state at a
+        // horizon and the steady state against the same lattice P u Q
+        // propagated densely (RK4, real form) and its dense null vector.
+        let f=fixture();let p=prepared(&f);let n=4;let d=16;let groups=vec![vec![0,1],vec![2,3]];
+        let mut initial=vec![ZERO;d];initial[0]=ONE;
+        let times:Vec<f64>=(0..21).map(|i|0.1*i as f64).collect();let horizons=[3.];
+        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,groups:&groups},None).unwrap();
+        let op=LatticeOperator::new(&p,&s.modes).unwrap();let a=op.dense();let size=op.dimension();
+        let rate=|x:&[C]|->Vec<C>{(0..size).map(|r|{let mut v=ZERO;for c in 0..size{mul_add(&mut v,a[r*size+c],x[c]);}v}).collect()};
+        let mut x=vec![ZERO;size];x[op.centre*d]=ONE;
+        let readout=|x:&[C],t:f64|->Vec<f64>{(0..n).map(|i|(0..s.modes.len()).map(|q|mul(C{re:(op.nu[q]*t).cos(),im:(op.nu[q]*t).sin()},x[q*d+i*n+i]).re).sum()).collect()};
+        let steps=400;let h=0.1/steps as f64;let mut worst=0_f64;let mut t=0.;
+        let axpy=|x:&[C],k:&[C],s:f64|->Vec<C>{x.iter().zip(k).map(|(a,b)|C{re:a.re+s*b.re,im:a.im+s*b.im}).collect()};
+        for(i,row)in s.trajectory.iter().enumerate(){
+            if i>0{for _ in 0..steps{let k1=rate(&x);let k2=rate(&axpy(&x,&k1,h/2.));let k3=rate(&axpy(&x,&k2,h/2.));let k4=rate(&axpy(&x,&k3,h));
+                for e in 0..size{x[e].re+=h/6.*(k1[e].re+2.*k2[e].re+2.*k3[e].re+k4[e].re);x[e].im+=h/6.*(k1[e].im+2.*k2[e].im+2.*k3[e].im+k4[e].im);}t+=h;}}
+            worst=worst.max(ledger::metric(&readout(&x,t),row,&groups));
+        }
+        // The placeholder estimate accepts within the tolerance.
+        assert!(worst<=POPULATION_TOLERANCE,"trajectory {worst:e}");
+        for _ in 0..10*steps{let k1=rate(&x);let k2=rate(&axpy(&x,&k1,h/2.));let k3=rate(&axpy(&x,&k2,h/2.));let k4=rate(&axpy(&x,&k3,h));
+            for e in 0..size{x[e].re+=h/6.*(k1[e].re+2.*k2[e].re+2.*k3[e].re+k4[e].re);x[e].im+=h/6.*(k1[e].im+2.*k2[e].im+2.*k3[e].im+k4[e].im);}}
+        let centre:Vec<f64>=(0..n).map(|i|x[op.centre*d+i*n+i].re).collect();
+        let horizon=ledger::metric(&centre,&s.horizons[0],&groups);assert!(horizon<=POPULATION_TOLERANCE,"horizon {horizon:e}");
+        let exact=dense_steady(&p,&a,op.centre,n);
+        // The bordered column at a tight tolerance is the lattice's null
+        // vector; the reported steady state carries the algebraic error of
+        // the bordered solve at STEADY_TOLERANCE.
+        let mut lattice=Lattice::new(&p,s.explicit.sets.clone()).unwrap();let mut u=vec![ZERO;size];for i in 0..n{u[op.centre*d+i*n+i]=C{re:0.25,im:0.};}
+        let(w,_,_)=lattice.solve(Pole::Zero,&[u],1e-13).unwrap();let trace:f64=(0..n).map(|i|w[0][op.centre*d+i*n+i].re).sum();
+        let column:Vec<f64>=(0..n).map(|i|w[0][op.centre*d+i*n+i].re/trace).collect();
+        let tight=ledger::metric(&exact,&column,&groups);assert!(tight<1e-10,"bordered column {tight:e}");
+        let steady=ledger::metric(&exact,&s.steady,&groups);assert!(steady<1e-4,"steady {steady:e}");
+        assert!(s.conserved==1&&s.slowest_rate.is_some());
+        // Projected rows: probabilities, the first one rho0's.
+        assert!(s.trajectory.iter().all(|r|r.iter().all(|&v|v>=0.)&&(r.iter().sum::<f64>()-1.).abs()<1e-12)&&s.trajectory[0][0]==1.);
+    }
 }

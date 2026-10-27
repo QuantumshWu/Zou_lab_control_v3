@@ -1,8 +1,11 @@
 //! The reduced model of the space and every output from it.
 //!
-//! Galerkin in the dressed eigen-coordinates: the inner product of the
-//! reduced model is Re <T a, T b> with T = blockdiag(E_R^-1) on Hermitian-
-//! basis coordinates (`eigenbasis::dressed`), where the lattice's
+//! The projection is one test-space operator applied to the append-only
+//! basis (`TestSpace`): the reduced model is the Galerkin model in the inner
+//! product Re <T a, T b>, from the Gram matrices of T W and T A W alone, so
+//! another block-diagonal T (a weighted metric) changes nothing else. The
+//! one in use is the dressed eigen-coordinates: T = blockdiag(E_R^-1) on
+//! Hermitian-basis coordinates (`eigenbasis::dressed`), where the lattice's
 //! block-diagonal part is diagonal (rotations for complex pairs) with
 //! Re <= 0, so only the couplings between blocks push the reduced numerical
 //! range to the right (in the Euclidean product the conditioning of E_R
@@ -41,6 +44,17 @@
 use super::*;
 use super::eigenbasis::BlockEigenbasis;
 use super::operator::LatticeOperator;
+
+/// The test space of the projection: a map T of row-major n x n blocks
+/// (one per canonical mode, the mirrors' being the conjugates), the reduced
+/// model's inner product Re <T a, T b>.
+pub trait TestSpace{
+    fn apply(&self,blocks:&[C])->Result<Vec<C>,String>;
+}
+/// The dressed eigen-coordinates.
+impl TestSpace for BlockEigenbasis{
+    fn apply(&self,blocks:&[C])->Result<Vec<C>,String>{self.dressed(blocks)}
+}
 use crate::parallel::Execution;
 
 /// Trace rows below this fraction of the largest are left unconstrained.
@@ -81,7 +95,8 @@ fn real_gram(lapack:&Lapack,a:&[C],m:usize,b:&[C],c:usize,length:usize)->Result<
     Ok(gram)
 }
 
-/// The dressed columns of the space and their Gram matrices.
+/// The test-space columns of the space (T W and T A W) and their Gram
+/// matrices.
 pub struct Dressed{
     n:usize,d:usize,
     /// Canonical modes: (mode, weight, nu); the centre's position.
@@ -107,12 +122,12 @@ impl Dressed{
     }
     pub fn columns(&self)->usize{self.covered}
     /// Takes the space's columns not yet covered.
-    pub fn ingest(&mut self,lapack:&Lapack,eigen:&BlockEigenbasis,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
+    pub fn ingest(&mut self,lapack:&Lapack,test:&dyn TestSpace,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
         let clock=Instant::now();let(old,new)=(self.covered,basis.len());if new==old{return Ok(());}
         let(n,d)=(self.n,self.d);let l=self.length;
         // Every new column and image in one batch of dressed coordinates.
         let blocks:Vec<C>=(old..new).flat_map(|j|[&basis[j],&images[j]]).flat_map(|field|self.canonical.iter().flat_map(move|&(q,_,_)|field[q*d..(q+1)*d].iter().copied())).collect();
-        let mut dressed=eigen.dressed(&blocks)?;
+        let mut dressed=test.apply(&blocks)?;
         for(c,&(_,w,_))in self.canonical.iter().enumerate(){let s=w.sqrt();for column in dressed.chunks_exact_mut(l){for v in &mut column[c*d..(c+1)*d]{*v=scaled(*v,s);}}}
         for(j,pair)in(old..new).zip(dressed.chunks_exact(2*l)){
             self.basis.extend_from_slice(&pair[..l]);self.images.extend_from_slice(&pair[l..]);
@@ -288,7 +303,8 @@ impl Model{
             .map(|j|-self.theta[j].re).reduce(f64::min)
     }
     /// The error transform per pole xi (populations, n each): see the module
-    /// documentation.
+    /// documentation. It reads the test-space columns as dressed
+    /// coordinates (the test space in use).
     pub fn error_transform(&self,dressed:&Dressed,eigen:&BlockEigenbasis,lapack:&Lapack,points:&[C])->Result<Vec<Vec<C>>,String>{
         let(n,d,r,l)=(dressed.n,dressed.d,self.r,dressed.length);let k=dressed.covered;let count=points.len();
         if count==0{return Ok(vec![]);}

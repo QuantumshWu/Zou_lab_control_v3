@@ -52,6 +52,9 @@ pub struct InnerWork{
     pub applied_blocks:usize,pub preconditioned_blocks:usize,
     /// Preconditioner batches built (one per pole) and their time.
     pub batches:usize,pub batch_ms:f64,
+    /// Complex multiply-adds of one operator application (blocks and edges,
+    /// fold rests).
+    pub operator_work:[usize;2],
     pub milliseconds:f64,
     pub timing:KrylovTiming,
 }
@@ -68,8 +71,8 @@ pub struct Lattice<'a>{
 impl<'a> Lattice<'a>{
     pub fn new(prepared:&'a LatticePrepared,sets:LatticeSets)->Result<Self,String>{
         if sets.centre()!=Some(0){return Err("The explicit set must start with the zero charge".into());}
-        let modes=sets.modes();let op=LatticeOperator::new(prepared,&modes)?;
-        Ok(Self{sets,modes,op,preconditioning:Preconditioning::new(prepared)?,batches:Vec::new(),work:InnerWork::default()})
+        let modes=sets.modes();let op=LatticeOperator::new(prepared,&modes)?;let operator_work=op.work_split();
+        Ok(Self{sets,modes,op,preconditioning:Preconditioning::new(prepared)?,batches:Vec::new(),work:InnerWork{operator_work,..InnerWork::default()}})
     }
     pub fn operator(&self)->&LatticeOperator<'a>{&self.op}
     /// y = A x.

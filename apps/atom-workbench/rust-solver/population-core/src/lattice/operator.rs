@@ -160,6 +160,9 @@ impl<'a> LatticeOperator<'a>{
     pub fn canonical_count(&self)->usize{self.canonical.iter().filter(|&&c|c).count()}
     /// Edges between modes (canonical targets).
     pub fn edges(&self)->usize{self.edges.iter().map(|e|e.len()).sum()}
+    /// Complex multiply-adds of one application: the blocks and edges, the
+    /// fold rests.
+    pub fn work_split(&self)->[usize;2]{[self.block_work,self.rest_work]}
     /// Dropped fold entries (largest row sums of K^(0) and K^(1)), the
     /// K^(1) rests left out included.
     pub fn dropped(&self)->[f64;2]{let[a,b]=self.prepared.fold.dropped();[a,b+self.dropped_k1_rest]}
