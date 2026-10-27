@@ -178,7 +178,8 @@ mod tests{
     use super::*;
     use super::super::tests::{fixture,prepared};
     use super::super::operator::LatticeOperator;
-    use super::super::preconditioner::StructuredDressed;
+    use super::super::floquet::Reach;
+    use super::super::preconditioner::{Preconditioning,Shift};
     /// Eigenvalues of a dense complex matrix (row-major) through its real
     /// 2N x 2N form (each eigenvalue appears with its conjugate).
     fn dense_eigenvalues(p:&LatticePrepared,a:&[C],size:usize)->Vec<C>{
@@ -194,10 +195,10 @@ mod tests{
         // dense lattice matrix, the slowest relaxation is its smallest
         // nonzero |lambda|, and only the trace is conserved.
         let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
-        let dressed=StructuredDressed::new(&p).unwrap();let op=LatticeOperator::new(&p,&modes).unwrap();
+        let pre=Preconditioning::new(&p).unwrap();let op=LatticeOperator::new(&p,&modes).unwrap();
         let exact=dense_eigenvalues(&p,&op.dense(),op.dimension());
-        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true).unwrap();
-        let mut system=System::new(op,&mut batch).unwrap();
+        let mut batch=pre.batch(&op,Shift::Steady,Some(Reach::All)).unwrap();
+        let mut system=System::new(op,&mut batch,Shift::Steady).unwrap();
         let slow=slow_modes(&mut system,Purpose::LongTime).unwrap();
         assert_eq!(slow.conserved,1);assert_eq!(slow.artifacts,0);
         assert!(!slow.modes.is_empty());

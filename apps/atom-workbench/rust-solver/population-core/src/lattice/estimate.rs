@@ -33,7 +33,7 @@
 use super::*;
 use super::krylov::{Arnoldi,System,combine,symmetrize};
 use super::operator::LatticeOperator;
-use super::preconditioner::{Preconditioner,StructuredBatch,StructuredDressed};
+use super::preconditioner::{FloquetBatch,Preconditioner,Preconditioning};
 use super::ledger;
 
 /// R2: relative stability of the last two changes.
@@ -175,28 +175,27 @@ impl Augmented{
     }
 }
 
-/// The next near shell: the order-k+1 ball's operator and the dressed
-/// preconditioner on its new modes.
+/// The next near shell: the order-k+1 ball's operator and the inverse of
+/// its new modes' dressed blocks (`Preconditioning::block_batch`).
 pub struct Shell<'a>{
     pub op:LatticeOperator<'a>,
-    pre:StructuredBatch<'a>,
+    pre:FloquetBatch<'a>,
     /// Index in the k+1 ball of each order-k mode, and the shell modes.
     ball:Vec<usize>,pub modes:Vec<usize>,
     pub applications:usize,
 }
 impl<'a> Shell<'a>{
-    /// None when the next order adds no mode (no near coupling).
-    /// `woodbury`: the shell's dressed blocks with the Woodbury term (the
-    /// steady estimate) or separable alone (|nu_q| of the shell modes keeps
-    /// their population block off zero; the finite-time estimate).
-    pub fn new(prepared:&'a LatticePrepared,dressed:&'a StructuredDressed,inner:&LatticeOperator<'_>,order:usize,woodbury:bool)->Result<Option<Self>,String>{
+    /// None when the next order adds no mode (no near coupling). The shell
+    /// modes' population blocks sit at -i nu_q, |nu_q| >> Gamma: the dressed
+    /// blocks' separable inverse, the recycling left out.
+    pub fn new(prepared:&'a LatticePrepared,pre:&Preconditioning<'a>,inner:&LatticeOperator<'_>,order:usize)->Result<Option<Self>,String>{
         let modes=prepared.modes(order+1)?;if modes.len()==inner.modes.len(){return Ok(None);}
         let op=LatticeOperator::new(prepared,&modes)?;
         let ball=inner.modes.iter().map(|q|op.index.get(q).copied().ok_or("Near ball is not nested")).collect::<Result<Vec<_>,_>>()?;
         let mut inside=vec![false;modes.len()];for &b in &ball{inside[b]=true;}
         let shell:Vec<usize>=(0..modes.len()).filter(|&q|!inside[q]).collect();
         let computed:Vec<bool>=(0..modes.len()).map(|q|op.canonical[q]&&!inside[q]).collect();
-        let pre=dressed.batch(&op.nu,&computed,&op.mirror,None,0.,woodbury)?;
+        let pre=pre.block_batch(&op,&computed,0.)?;
         Ok(Some(Self{op,pre,ball,modes:shell,applications:0}))
     }
     fn d(&self)->usize{self.op.n*self.op.n}

@@ -12,21 +12,20 @@
 //! - `generator`: the frame's Fourier components L_t;
 //! - `classification`: explicit / fold for every nonzero charge step, and the
 //!   far + far pairs that land on near charges;
-//! - `fold`: the structured (L0 - z)^-1, the folded couplings K_t and the
-//!   third-order fold source;
+//! - `fold`: the folded couplings K_t (closed form: diagonal inverse and
+//!   Neumann series of every far block) and the third-order fold source;
+//! - `floquet`: the Floquet frames of the lattice, the micromotion kernels
+//!   shared by the preconditioner and the estimates;
 //! - `operator`: the lattice operator on a set of near charges;
-//! - `preconditioner`: the dressed block preconditioner (L0' - i nu_q)^-1;
-//! - `krylov`: the primal solve of the trace-row system;
+//! - `preconditioner`: the Floquet-frame preconditioner with its centre
+//!   Woodbury term, for the steady trace row, real and complex shifts;
+//! - `krylov`: GMRES on the lattice systems (DCGS2 orthogonalization);
 //! - `estimate`: error equations in the primal's Krylov space (truncation,
 //!   fold) and the shell correction;
 //! - `steady`: the steady pipeline (order, estimate, acceptance);
 //! - `slow`: the slow eigenpairs of the lattice operator (conserved
 //!   quantities, the slowest relaxation, the long-time machinery);
 //! - `ledger`: the tolerance, the error metric and every remainder bound.
-//!
-//! Validation only (tests and the `validation` feature): `dense_dressed`, the
-//! exact dense block inverse the structured preconditioner is measured
-//! against.
 //!
 //! Layout: an n x n block is row-major (entry (i, j) at i*n+j); a field on N
 //! modes is N consecutive blocks; a superoperator as a d x d matrix (d = n^2)
@@ -40,6 +39,7 @@ use crate::preparation::{Charge,ModelView,PhaseBasis,Source};
 pub mod generator;
 pub mod classification;
 pub mod fold;
+pub mod floquet;
 pub mod operator;
 pub mod preconditioner;
 pub mod krylov;
@@ -49,11 +49,6 @@ pub mod slow;
 pub mod eigenbasis;
 pub mod finite;
 pub mod ledger;
-#[cfg(any(test,feature="validation"))]
-pub mod dense_dressed;
-/// R3 research prototype (Floquet frames); selected at run time by
-/// ATOM_R3_PRECOND=floquet, else unused.
-pub mod floquet;
 pub use generator::{Component,Generator,Sparse,Superop};
 
 pub(crate) const ZERO:C=C{re:0.,im:0.};
@@ -89,17 +84,20 @@ pub(crate) fn charge_minus(a:&[i32],b:&[i32])->Result<Charge,String>{
 }
 pub(crate) fn opposite(a:&[i32])->Charge{a.iter().map(|&k|-k).collect()}
 
-/// Request-local lattice preparation: generator, classification and fold. It
-/// depends on the model only, never on a lattice mode set.
+/// Request-local lattice preparation: generator, classification, fold and
+/// Floquet kernels. It depends on the model only, never on a lattice mode
+/// set.
 pub struct LatticePrepared{
     /// The model in the request's frame.
     pub source:Source,
     pub generator:Generator,
     pub plan:classification::HarmonicPlan,
     pub fold:fold::FoldLibrary,
+    pub floquet:floquet::FloquetKernels,
     pub lapack:Arc<Lapack>,
-    /// Milliseconds: source, generator and classification, fold.
-    pub timing:[f64;3],
+    /// Milliseconds: source, generator and classification, fold, Floquet
+    /// kernels.
+    pub timing:[f64;4],
 }
 impl LatticePrepared{
     pub fn prepare(model:&ModelView<'_>,phases:PhaseBasis)->Result<Self,String>{
@@ -111,8 +109,10 @@ impl LatticePrepared{
         let plan=classification::HarmonicPlan::new(&generator)?;
         let plan_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
         let fold=fold::FoldLibrary::build(&generator,&plan,&lapack)?;
-        let fold_ms=clock.elapsed().as_secs_f64()*1e3;
-        Ok(Self{source,generator,plan,fold,lapack,timing:[source_ms,plan_ms,fold_ms]})
+        let fold_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
+        let floquet=floquet::FloquetKernels::new(&generator,&plan,&fold,&lapack)?;
+        let kernel_ms=clock.elapsed().as_secs_f64()*1e3;
+        Ok(Self{source,generator,plan,fold,floquet,lapack,timing:[source_ms,plan_ms,fold_ms,kernel_ms]})
     }
     /// The near ball of order k: every charge reachable from 0 with at most k
     /// structural steps (explicit near steps above the structural floor and

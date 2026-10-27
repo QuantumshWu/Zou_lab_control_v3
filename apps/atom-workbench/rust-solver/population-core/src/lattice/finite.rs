@@ -6,7 +6,8 @@
 //! Rational Krylov: v_j+1 is (sigma_j - A)^-1 v_j orthonormalized, with the
 //! pole POLE (1/us) and, for horizons above POLE_HORIZON, POLE_SCALE / T
 //! alternating with it. Every shifted solve is right-preconditioned GMRES
-//! with the dressed blocks shifted by the pole, to INNER_RTOL.
+//! with the Floquet-frame preconditioner at the pole (its kernels' reach
+//! chosen by the measured cost of the first solves), to INNER_RTOL.
 //!
 //! Translation augmentation: the lattice is redundant (every Floquet mode mu
 //! has copies mu - i nu_s), x(0) is not in the span of the centred copies,
@@ -51,7 +52,8 @@
 use super::*;
 use super::krylov::{self,KrylovOptions,System,Vectors};
 use super::operator::LatticeOperator;
-use super::preconditioner::StructuredDressed;
+use super::floquet::Reach;
+use super::preconditioner::{FloquetBatch,Preconditioning,Shift};
 use super::eigenbasis::BlockEigenbasis;
 use super::estimate::Shell;
 use super::ledger::{self,KAPPA,POPULATION_TOLERANCE,PopulationCharges,RemainderLedger};
@@ -66,9 +68,13 @@ const POLE_SCALE:f64=200.;
 /// s, but four and five lasers, old and research, need order 2, and finding
 /// that out costs about 1 s: the old models are the common case).
 const START_ORDER:usize=2;
-/// Relative residual of the shifted solves; 1e-3 left 2-9e-3 on three
-/// lasers + tweezer (b1-finite.md section 6.2).
-const INNER_RTOL:f64=1e-6;
+/// Relative residual of the shifted solves, fixed. 1e-3 left 2-9e-3 on
+/// three lasers + tweezer (b1-finite.md section 6.2); with the Floquet
+/// frames 1e-6 left the outer iteration stalling on five lasers (with and
+/// without the tweezer) while 1e-7 reproduced every reference case (R3):
+/// the stronger preconditioner leaves the same residual's error in the
+/// central populations, which the slow modes carry furthest.
+const INNER_RTOL:f64=1e-7;
 const TRANSLATION_MIXING:f64=3e-3;
 /// At most this many translation pairs, the most strongly mixing: with all
 /// three on five lasers the copies made the space larger and less accurate
@@ -101,7 +107,7 @@ const TRACE_RANK:f64=1e-7;
 
 #[derive(Clone,Debug,Default)]
 pub struct FiniteTiming{
-    pub eigenbasis_ms:f64,pub dressed_ms:f64,pub columns_ms:f64,pub images_ms:f64,
+    pub eigenbasis_ms:f64,pub preconditioner_ms:f64,pub columns_ms:f64,pub images_ms:f64,
     pub gram_ms:f64,pub reduced_ms:f64,pub basis_ms:f64,pub shell_ms:f64,pub fold_ms:f64,
     /// The shifted solves' operator, preconditioner and orthogonalization time.
     pub inner:krylov::KrylovTiming,
@@ -124,6 +130,8 @@ pub struct FiniteSolution{
     pub basis:f64,pub shell:f64,pub fold:f64,
     pub order:usize,pub modes:usize,pub columns:usize,pub dimension:usize,pub translations:usize,
     pub inner_steps:usize,pub applications:usize,pub preconditions:usize,
+    /// The kernels' reach per pole, as chosen by measured cost.
+    pub reaches:Vec<Reach>,
     pub eigenbasis_condition:f64,pub ritz_condition:f64,
     pub checkpoints:Vec<Checkpoint>,
     pub timing:FiniteTiming,
@@ -277,9 +285,10 @@ impl Lattice<'_,'_>{
         let start=Instant::now();
         let j=space.basis.len()-1;let p=j%self.poles.len();
         let b:Vec<C>=space.z[space.basis[j]].iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-        let options=KrylovOptions{populations:false,residual_guard:super::floquet::inner_rtol(INNER_RTOL),restart:60,maximum_steps:600,
-            population_error:std::env::var("ATOM_R3_POP_TOL").ok().and_then(|v|v.parse().ok()),..KrylovOptions::default()};
-        let solve=krylov::gmres(&mut self.systems[p],&b,None,&[],&options)?;self.inner_steps+=solve.steps;
+        let options=KrylovOptions{populations:false,residual_guard:INNER_RTOL,restart:60,maximum_steps:600,..KrylovOptions::default()};
+        let system=&mut self.systems[p];
+        let solve=krylov::gmres(system,&b,None,&[],&options)?;self.inner_steps+=solve.steps;
+        let work=system.op.work;system.pre.record(solve.steps,solve.residual,INNER_RTOL,work);
         let mut w=solve.x;
         let refs:Vec<&[C]>=space.basis.iter().map(|&g|space.z[g].as_slice()).collect();
         for _ in 0..2{let h=self.vectors.dots(&refs,&w);self.vectors.subtract(&refs,&h,&mut w)?;}
@@ -472,13 +481,13 @@ impl Lattice<'_,'_>{
     /// propagated, plus the shell's own populations) and, when `fold`, the
     /// fold charges, on the trajectory's compression.
     #[allow(clippy::too_many_arguments)]
-    fn shell_and_fold(&mut self,dressed:&StructuredDressed,ledger:&RemainderLedger,order:usize,space:&Space,reduced:&Reduced,eigen:&BlockEigenbasis,
+    fn shell_and_fold(&mut self,pre:&Preconditioning<'_>,ledger:&RemainderLedger,order:usize,space:&Space,reduced:&Reduced,eigen:&BlockEigenbasis,
         times:&[f64],groups:&[Vec<usize>],fold:bool)->Result<(f64,f64),String>{
         let(n,d)=(self.n,self.d);let prepared=self.prepared;
         let(xs,ys,scale)=self.compression(space,reduced)?;
         let phi:Vec<Vec<C>>=ys.iter().map(|y|reduced.exponential(y)).collect();
         let start=Instant::now();
-        let shell=match Shell::new(prepared,dressed,self.op(),order,false)?{
+        let shell=match Shell::new(prepared,pre,self.op(),order)?{
             None=>0.,
             Some(mut shell)=>{
                 let mut sources=Vec::new();let mut own=vec![vec![0.;n];times.len()];
@@ -527,7 +536,7 @@ impl Lattice<'_,'_>{
 /// Order-k propagation with its checkpoints; None when the shell asks for
 /// the next order.
 #[allow(clippy::too_many_arguments)]
-fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,frames:Option<&super::floquet::FloquetFrames>,eigenbasis:&OnceLock<Result<BlockEigenbasis,String>>,
+fn attempt(prepared:&LatticePrepared,pre:&Preconditioning<'_>,eigenbasis:&OnceLock<Result<BlockEigenbasis,String>>,
     order:usize,initial:&[C],times:&[f64],keep:&[usize],groups:&[Vec<usize>],tolerance:f64,checkpoints:&mut Vec<Checkpoint>)->Result<Option<FiniteSolution>,String>{
     let n=prepared.generator.n;let d=n*n;let horizon=*times.last().unwrap_or(&0.);
     let modes=prepared.modes(order)?;
@@ -537,14 +546,10 @@ fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,frames:Option<&s
         return Err(format!("Static fold expansion parameter {:e} above {:e} at near order {order}",ledger.expansion_parameter,ledger::EXPANSION_LIMIT));}
     let poles=if horizon>POLE_HORIZON{vec![POLE,POLE_SCALE/horizon]}else{vec![POLE]};
     let clock=Instant::now();
-    // The pole moves the slow population block off zero, and the Woodbury
-    // term no longer helps: measured on old four lasers and three lasers +
-    // tweezer, 715 and 996 shifted-solve steps without it against 706 and
-    // 972 with it, at a sixth of the cost.
-    let mut batches:Vec<Box<dyn super::preconditioner::Preconditioner+'_>>=poles.iter().map(|&s|->Result<Box<dyn super::preconditioner::Preconditioner+'_>,String>{
-        Ok(match frames{Some(f)=>Box::new(f.batch_with(&first,s,true,false)?),None=>Box::new(dressed.batch(&first.nu,&first.canonical,&first.mirror,None,s,false)?)})}).collect::<Result<_,_>>()?;
-    let dressed_ms=clock.elapsed().as_secs_f64()*1e3;
-    let vectors=Vectors::new(&first)?;
+    // One batch per pole: its solves probe the kernels' reach.
+    let mut batches:Vec<FloquetBatch<'_>>=poles.iter().map(|&s|pre.batch(&first,Shift::Real(s),None)).collect::<Result<_,_>>()?;
+    let preconditioner_ms=clock.elapsed().as_secs_f64()*1e3;
+    let vectors=Vectors::new(&first,1)?;
     let centre=first.centre;
     let canonical:Vec<(usize,f64,f64)>=(0..modes.len()).filter(|&q|first.canonical[q]).map(|q|(q,if first.mirror[q]==q{1.}else{2.},first.nu[q])).collect();
     // Translation pairs: explicit near steps mixing above TRANSLATION_MIXING.
@@ -562,9 +567,9 @@ fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,frames:Option<&s
     let mut systems=Vec::new();let mut first=Some(first);
     for(batch,&sigma)in batches.iter_mut().zip(&poles){
         let op=match first.take(){Some(op)=>op,None=>LatticeOperator::new(prepared,&modes)?};
-        systems.push(System::shifted(op,batch.as_mut(),sigma)?);}
+        systems.push(System::new(op,batch,Shift::Real(sigma))?);}
     let mut lattice=Lattice{prepared,systems,poles,vectors,translations,canonical,centre,n,d,inner_steps:0,applications:0,
-        timing:FiniteTiming{dressed_ms,..Default::default()}};
+        timing:FiniteTiming{preconditioner_ms,..Default::default()}};
     // x(0) = delta_q0 rho0.
     let mut x0=vec![ZERO;lattice.length()];x0[centre*d..(centre+1)*d].copy_from_slice(initial);
     let initial_norm=lattice.vectors.norm(&x0);if !(initial_norm>0.){return Err("Zero initial density".into());}
@@ -595,19 +600,19 @@ fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,frames:Option<&s
                 return Err(format!("Finite-time basis estimate not below the tolerance: {}",trail.join(", ")));}
             target+=MORE_COLUMNS;continue;
         }
-        let(shell,fold)=lattice.shell_and_fold(dressed,&ledger,order,&space,&reduced,eigen,times,groups,true)?;
+        let(shell,fold)=lattice.shell_and_fold(pre,&ledger,order,&space,&reduced,eigen,times,groups,true)?;
         let total=KAPPA*(basis+shell+fold)+projection;
         checkpoint.shell=Some(shell);checkpoint.fold=Some(fold);checkpoint.total=Some(total);
         if total<=tolerance{
             checkpoint.action="accept";checkpoint.milliseconds=clock.elapsed().as_secs_f64()*1e3;checkpoints.push(checkpoint);
-            let preconditions=lattice.systems.iter().map(|s|s.preconditions).sum();
+            let preconditions=lattice.systems.iter().map(|s|s.preconditions).sum();let reaches=lattice.systems.iter().map(|s|s.pre.reach()).collect();
             for s in &lattice.systems{let t=&mut lattice.timing.inner;t.apply_ms+=s.timing.apply_ms;t.precondition_ms+=s.timing.precondition_ms;t.orthogonalize_ms+=s.timing.orthogonalize_ms;}
             let applications=lattice.applications+lattice.systems.iter().map(|s|s.applications).sum::<usize>();
             let picks:Vec<Vec<f64>>=keep.iter().map(|&k|reduced.u[k].clone()).collect();
             let fields=if picks.is_empty(){vec![]}else{lattice.fields(&space,&reduced,&picks,false)?};
             return Ok(Some(FiniteSolution{fields,populations:projected,estimated_error:total,projection_charge:projection,basis,shell,fold,
                 order,modes:modes.len(),columns,dimension:reduced.r,translations:lattice.translations.len(),
-                inner_steps:lattice.inner_steps,applications,preconditions,eigenbasis_condition:eigen.condition,ritz_condition:reduced.condition,
+                inner_steps:lattice.inner_steps,applications,preconditions,reaches,eigenbasis_condition:eigen.condition,ritz_condition:reduced.condition,
                 checkpoints:std::mem::take(checkpoints),timing:lattice.timing}));
         }
         if KAPPA*shell>0.5*tolerance&&order<MAXIMUM_ORDER{
@@ -647,11 +652,11 @@ fn propagate_within(prepared:&LatticePrepared,initial:&[C],times:&[f64],groups:&
     std::thread::scope(|scope|{
         scope.spawn(||{eigenbasis.get_or_init(||BlockEigenbasis::new(prepared));});
         let clock=Instant::now();
-        let dressed=StructuredDressed::new(prepared)?;let frames=super::floquet::from_env(prepared)?;let dressed_ms=clock.elapsed().as_secs_f64()*1e3;
+        let pre=Preconditioning::new(prepared)?;let preconditioner_ms=clock.elapsed().as_secs_f64()*1e3;
         let mut checkpoints=Vec::new();
         for order in start.unwrap_or(START_ORDER)..=MAXIMUM_ORDER{
-            if let Some(mut solution)=attempt(prepared,&dressed,frames.as_ref(),&eigenbasis,order,initial,times,keep,groups,tolerance,&mut checkpoints)?{
-                solution.timing.dressed_ms+=dressed_ms;
+            if let Some(mut solution)=attempt(prepared,&pre,&eigenbasis,order,initial,times,keep,groups,tolerance,&mut checkpoints)?{
+                solution.timing.preconditioner_ms+=preconditioner_ms;
                 solution.timing.eigenbasis_ms=eigenbasis.get().and_then(|e|e.as_ref().ok()).map_or(0.,|e|e.milliseconds);
                 return Ok(solution);
             }

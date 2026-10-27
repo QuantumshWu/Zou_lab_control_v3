@@ -19,7 +19,8 @@ use super::*;
 use super::krylov::{self,KrylovOptions,KrylovTiming,System};
 use super::estimate::{Augmented,Shell};
 use super::operator::LatticeOperator;
-use super::preconditioner::{StructuredDiagnostics,StructuredDressed};
+use super::floquet::Reach;
+use super::preconditioner::{Preconditioner,PreconditionerDiagnostics,Preconditioning,Shift};
 use super::ledger::{self,KAPPA,POPULATION_TOLERANCE,PopulationCharges,RemainderLedger};
 use super::slow::{FLOOR,Purpose,SlowModes,slow_modes};
 
@@ -91,7 +92,9 @@ pub struct SteadySolution{
     /// the field with its shell on the order-(k+1) lattice.
     pub null_residual:f64,
     pub attempts:Vec<Attempt>,
-    pub dressed:StructuredDiagnostics,pub dressed_ms:f64,
+    pub preconditioner:PreconditionerDiagnostics,
+    /// The dressed block's slowest precessing decay (`floquet`).
+    pub precessing_rate:Option<f64>,
     /// The slow eigenpairs of the accepted order's operator.
     pub slow:SlowModes,
 }
@@ -103,7 +106,7 @@ impl SteadySolution{
     /// rate), so the slowest relaxation is never understated. None when the
     /// shift found no relaxation.
     pub fn slowest_rate(&self)->Option<f64>{
-        let precessing=self.dressed.precessing_rate.map_or(f64::INFINITY,|r|0.5*r);
+        let precessing=self.precessing_rate.map_or(f64::INFINITY,|r|0.5*r);
         self.slow.slowest_rate.map(|r|r.min(precessing))
     }
 }
@@ -124,9 +127,7 @@ fn embed(field:&[C],from:&[Charge],to:&[Charge],d:usize)->Vec<C>{
 /// machinery the order is the one accepted without the shell correction:
 /// the order-k dynamics and the steady state must be the same lattice's.
 pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>],purpose:Purpose)->Result<SteadySolution,String>{
-    let clock=Instant::now();
-    let dressed=StructuredDressed::new(prepared)?;let dressed_ms=clock.elapsed().as_secs_f64()*1e3;
-    let frames=super::floquet::from_env(prepared)?;
+    let pre=Preconditioning::new(prepared)?;let precessing_rate=prepared.floquet.diagnostics.precessing_rate;
     let n=prepared.generator.n;let d=n*n;let options=KrylovOptions::default();
     let mut attempts:Vec<Attempt>=Vec::new();
     let mut warm:Option<(Vec<Charge>,Vec<C>)>=None;
@@ -138,12 +139,9 @@ pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>],purpose:Purpose)->Re
         if ledger.expansion_parameter>ledger::EXPANSION_LIMIT{
             return Err(format!("Static fold expansion parameter {:e} above {:e} at near order {order}",ledger.expansion_parameter,ledger::EXPANSION_LIMIT));}
         let(nu_max,canonical,operator_work,edges)=(op.nu_max(),op.canonical_count(),op.work,op.edge_counts);
-        let mut sbatch=None;let mut fbatch=None;
-        let(precondition_work,regularized)=match &frames{
-            Some(f)=>{let b=f.batch_with(&op,0.,true,true)?;let w=(b.work,b.moved);fbatch=Some(b);w}
-            None=>{let b=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true)?;let w=(b.work,b.regularized);sbatch=Some(b);w}};
-        let pre:&mut dyn super::preconditioner::Preconditioner=match(&mut fbatch,&mut sbatch){(Some(f),_)=>f,(_,Some(s))=>s,_=>unreachable!()};
-        let mut system=System::new(op,pre)?;
+        let mut batch=pre.batch(&op,Shift::Steady,Some(Reach::All))?;
+        let(precondition_work,regularized)=(batch.work(),batch.moved);
+        let mut system=System::new(op,&mut batch,Shift::Steady)?;
         let mut timing=AttemptTiming{setup_ms:start.elapsed().as_secs_f64()*1e3,..Default::default()};
         // Primal.
         let start=Instant::now();
@@ -158,7 +156,7 @@ pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>],purpose:Purpose)->Re
         let start=Instant::now();
         let mut augmented=Augmented::new(primal.arnoldi);
         let mut parts=[0.;5];let mut lap=Instant::now();
-        let mut shell=Shell::new(prepared,&dressed,&system.op,order,true)?;
+        let mut shell=Shell::new(prepared,&pre,&system.op,order)?;
         let mut split=|k:usize,parts:&mut[f64;5]|{parts[k]=lap.elapsed().as_secs_f64()*1e3;lap=Instant::now();};
         split(0,&mut parts);
         let(source,mut shell_field)=match &mut shell{
@@ -202,7 +200,7 @@ pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>],purpose:Purpose)->Re
         if accept{
             let residual=null_residual(&mut system,&field)?;let slow=slow_modes(&mut system,purpose)?;
             finish(&mut attempt,&system);let estimated_error=attempt.claimed;attempts.push(attempt);
-            return Ok(SteadySolution{order,modes,field,populations,acceptance:Acceptance::Estimate,estimated_error,null_residual:residual,attempts,dressed:dressed.diagnostics.clone(),dressed_ms,slow});
+            return Ok(SteadySolution{order,modes,field,populations,acceptance:Acceptance::Estimate,estimated_error,null_residual:residual,attempts,preconditioner:pre.diagnostics.clone(),precessing_rate,slow});
         }
         // Shell Gauss-Seidel correction.
         let mut corrected:Vec<C>=field.iter().zip(&delta).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
@@ -229,7 +227,7 @@ pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>],purpose:Purpose)->Re
                     let remainder=q/(1.-q)*steps[steps.len()-1];
                     let next_shell=ledger::metric(&previous,&populations,groups);
                     // Delta_k from the previous order's primal (order k-1 solved here when k is the start).
-                    let lower=match attempts.last(){Some(a)=>a.populations.clone(),None=>lower_order(prepared,&dressed,order-1,groups,&options)?};
+                    let lower=match attempts.last(){Some(a)=>a.populations.clone(),None=>lower_order(prepared,&pre,order-1,groups,&options)?};
                     let shell_k=ledger::metric(&populations,&lower,groups);
                     let extrapolated=if shell_k>0.{next_shell*next_shell/shell_k}else{f64::INFINITY};
                     let claimed=KAPPA*(remainder+extrapolated+fold_total);
@@ -240,7 +238,7 @@ pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>],purpose:Purpose)->Re
                         let shell_scaled:Vec<C>=shell_field.iter().map(|v|scaled(*v,1./trace)).collect();let residual=shell.residual(&field,&shell_scaled)?;
                         let slow=slow_modes(&mut system,purpose)?;
                         attempt.claimed=claimed;finish(&mut attempt,&system);attempts.push(attempt);
-                        return Ok(SteadySolution{order,modes,field,populations,acceptance:Acceptance::Corrected,estimated_error:claimed,null_residual:residual,attempts,dressed:dressed.diagnostics.clone(),dressed_ms,slow});
+                        return Ok(SteadySolution{order,modes,field,populations,acceptance:Acceptance::Corrected,estimated_error:claimed,null_residual:residual,attempts,preconditioner:pre.diagnostics.clone(),precessing_rate,slow});
                     }
                 }
             }
@@ -268,10 +266,10 @@ fn null_residual(system:&mut System<'_,'_>,x:&[C])->Result<f64,String>{
     let mut w=vec![ZERO;x.len()];system.op.apply(x,&mut w)?;Ok(system.vectors.norm(&w)/system.vectors.norm(x).max(f64::MIN_POSITIVE))
 }
 /// Populations of the order-k primal alone (for the shell ratio).
-fn lower_order(prepared:&LatticePrepared,dressed:&StructuredDressed,order:usize,groups:&[Vec<usize>],options:&KrylovOptions)->Result<Vec<f64>,String>{
+fn lower_order(prepared:&LatticePrepared,pre:&Preconditioning<'_>,order:usize,groups:&[Vec<usize>],options:&KrylovOptions)->Result<Vec<f64>,String>{
     let modes=prepared.modes(order)?;let op=LatticeOperator::new(prepared,&modes)?;
-    let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true)?;
-    let mut system=System::new(op,&mut batch)?;let b=system.source();
+    let mut batch=pre.batch(&op,Shift::Steady,Some(Reach::All))?;
+    let mut system=System::new(op,&mut batch,Shift::Steady)?;let b=system.source();
     let primal=krylov::gmres(&mut system,&b,None,groups,options)?;
     let p=system.populations(&primal.x);let t:f64=p.iter().sum();Ok(p.iter().map(|v|v/t).collect())
 }
@@ -376,10 +374,10 @@ mod tests{
     use super::super::tests::{fixture,prepared,explicit_matrix,dense_steady};
     fn tight()->KrylovOptions{KrylovOptions{algebraic:1e-13,residual_guard:1e-13,..KrylovOptions::default()}}
     fn primal(p:&LatticePrepared,order:usize)->(Vec<f64>,Vec<C>,Vec<Charge>){
-        let dressed=StructuredDressed::new(p).unwrap();let modes=p.modes(order).unwrap();
+        let pre=Preconditioning::new(p).unwrap();let modes=p.modes(order).unwrap();
         let op=LatticeOperator::new(p,&modes).unwrap();
-        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true).unwrap();
-        let mut system=System::new(op,&mut batch).unwrap();let b=system.source();
+        let mut batch=pre.batch(&op,Shift::Steady,Some(Reach::All)).unwrap();
+        let mut system=System::new(op,&mut batch,Shift::Steady).unwrap();let b=system.source();
         let k=krylov::gmres(&mut system,&b,None,&[vec![0,1],vec![2,3]],&tight()).unwrap();
         let t:f64=system.watch.iter().map(|&i|k.x[i].re).sum();let x:Vec<C>=k.x.iter().map(|v|scaled(*v,1./t)).collect();
         (system.populations(&x),x,modes)
@@ -402,7 +400,7 @@ mod tests{
         let slowest=re.iter().zip(&im).filter(|(_,b)|b.abs()<=0.5*beat).map(|(a,_)|-a).filter(|&g|g>1e-9).fold(f64::INFINITY,f64::min);
         let reported=s.slowest_rate().unwrap();
         assert!(reported<=slowest*(1.+1e-6),"reported {reported:e}, dense slowest decay {slowest:e}");
-        assert!(reported<=s.slow.slowest_rate.unwrap()&&reported<=0.5*s.dressed.precessing_rate.unwrap());
+        assert!(reported<=s.slow.slowest_rate.unwrap()&&reported<=0.5*s.precessing_rate.unwrap());
     }
     #[test]
     fn lattice_primal_is_the_null_vector_of_the_dense_lattice(){
@@ -421,15 +419,15 @@ mod tests{
         // The GCRO estimate of the order-1 -> 2 shell against the tight
         // order-2 solve (the nested k vs k+1 comparison, test-only).
         let f=fixture();let p=prepared(&f);let groups=vec![vec![0,1],vec![2,3]];
-        let dressed=StructuredDressed::new(&p).unwrap();let modes=p.modes(1).unwrap();
+        let pre=Preconditioning::new(&p).unwrap();let modes=p.modes(1).unwrap();
         let op=LatticeOperator::new(&p,&modes).unwrap();
-        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true).unwrap();
-        let mut system=System::new(op,&mut batch).unwrap();let b=system.source();
+        let mut batch=pre.batch(&op,Shift::Steady,Some(Reach::All)).unwrap();
+        let mut system=System::new(op,&mut batch,Shift::Steady).unwrap();let b=system.source();
         let k=krylov::gmres(&mut system,&b,None,&groups,&tight()).unwrap();
         let t:f64=system.watch.iter().map(|&i|k.x[i].re).sum();let x:Vec<C>=k.x.iter().map(|v|scaled(*v,1./t)).collect();
         let pk=system.populations(&x);
         let mut augmented=Augmented::new(k.arnoldi);
-        let mut shell=Shell::new(&p,&dressed,&system.op,1,true).unwrap().unwrap();
+        let mut shell=Shell::new(&p,&pre,&system.op,1).unwrap().unwrap();
         let(source,_)=shell.source(&x).unwrap();
         let mut eq=augmented.equation(&system,"truncation",source).unwrap();
         augmented.solve(&mut system,&mut[&mut eq],&groups).unwrap();

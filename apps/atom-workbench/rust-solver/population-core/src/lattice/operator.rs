@@ -40,12 +40,6 @@ pub enum Parts{
     Diagonal,
     /// The fold alone: sum_t (K_t^(0) + i nu_p K_t^(1)) x_p on every fold edge.
     Fold,
-    /// R3 probe (validation): every left/right factor (blocks with -i nu, the
-    /// absorbable folds, explicit steps' left/right parts), no recycling, no
-    /// sandwich, no fold rest: the Kronecker-sum ("separable") lattice.
-    Separable,
-    /// R3 probe (validation): the whole operator without the fold rests.
-    NoRest,
 }
 #[derive(Default)]
 pub struct OperatorScratch{small:Vec<C>,left:Vec<C>,right:Vec<C>}
@@ -140,8 +134,6 @@ impl<'a> LatticeOperator<'a>{
             block_work,rest_work,work:block_work+rest_work,edge_counts,dropped_k1_rest})
     }
     pub fn dimension(&self)->usize{self.modes.len()*self.n*self.n}
-    /// R3 probe: multiply-adds of one application, [blocks and edges, fold rests].
-    pub fn work_parts(&self)->[usize;2]{[self.block_work,self.rest_work]}
     pub fn nu_max(&self)->f64{self.nu.iter().map(|w|w.abs()).fold(0.,f64::max)}
     pub fn canonical_count(&self)->usize{self.canonical.iter().filter(|&&c|c).count()}
     /// Dropped fold entries (largest row sums of K^(0) and K^(1)), the
@@ -162,15 +154,12 @@ impl<'a> LatticeOperator<'a>{
                 let(l,r)=if parts==Parts::Fold{(&fold_left[q],&fold_right[q])}else{(&left[q],&right[q])};
                 gemm.multiply(n,n,n,ONE,xq,n,l,n,ZERO,yq,n)?;
                 gemm.multiply(n,n,n,ONE,r,n,xq,n,ONE,yq,n)?;
-                if parts!=Parts::Fold&&parts!=Parts::Separable{recycling.apply_into(n,ONE,xq,yq,&mut scratch.small);}
+                if parts!=Parts::Fold{recycling.apply_into(n,ONE,xq,yq,&mut scratch.small);}
                 if parts==Parts::Diagonal{continue;}
                 for &(p,edge)in &edges[q]{
                     let xp=&x[p*d..(p+1)*d];
                     match edge{
-                        Edge::Explicit(e)=>match parts{
-                            Parts::Full|Parts::NoRest=>explicit[e].apply_into(n,ONE,xp,yq,&mut scratch.small),
-                            Parts::Separable=>{explicit[e].left.left_into(n,ONE,xp,yq);explicit[e].right.right_into(n,ONE,xp,yq);}
-                            _=>{}},
+                        Edge::Explicit(e)=>if parts==Parts::Full{explicit[e].apply_into(n,ONE,xp,yq,&mut scratch.small)},
                         Edge::Fold(t)=>{
                             let data=&fold[t];let w=C{re:0.,im:nu[p]};
                             grow(&mut scratch.left,d);grow(&mut scratch.right,d);
@@ -184,7 +173,7 @@ impl<'a> LatticeOperator<'a>{
             }
             Ok(())
         })?;
-        let active:Vec<&Term>=terms.iter().filter(|t|match parts{Parts::Diagonal=>t.diagonal,Parts::Separable|Parts::NoRest=>false,_=>true}).collect();
+        let active:Vec<&Term>=terms.iter().filter(|t|parts!=Parts::Diagonal||t.diagonal).collect();
         if !active.is_empty(){
             interleaved.fill(ZERO);
             // Dense sector blocks: gather each block's sources, GEMM by row chunks.

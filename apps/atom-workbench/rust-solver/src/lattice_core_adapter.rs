@@ -42,7 +42,7 @@ use atom_population_core::lattice::finite::{self,Declined};
 use atom_population_core::lattice::slow::Purpose;
 
 const ENGINE:&str="rust-population-core-lattice";
-const MEAN_METHOD:&str="Full32 time average of the folded Fourier lattice (near charges explicit, far harmonics folded statically at second order, higher orders charged): dressed-block preconditioned null vector, its truncation and fold errors estimated in the solver's Krylov space";
+const MEAN_METHOD:&str="Full32 time average of the folded Fourier lattice (near charges explicit, far harmonics folded statically at second order, higher orders charged): Floquet-frame preconditioned null vector, its truncation and fold errors estimated in the solver's Krylov space";
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
 const STATIC_METHOD:&str="Full32 static Lindblad generator: spectral projectors of the imaginary-axis eigenvalues of each connected block applied to the initial density";
 const FINITE_METHOD:&str="Full32 density-matrix Lindblad evolution on the folded Fourier lattice: rational Krylov with lattice-translation augmentation, its basis, near-shell and fold errors estimated by propagating their sources through the dressed blocks; beyond 1 ms the slow eigenmodes' expansion from the Krylov state at a switch time";
@@ -57,10 +57,10 @@ pub fn warmup()->Result<(),String>{
 }
 
 /// A requested population group: the eight F manifolds and all excited states.
-pub(crate) struct Group{pub(crate) name:String,pub(crate) indices:Vec<usize>}
+struct Group{name:String,indices:Vec<usize>}
 /// The ground flags and the requested groups, from the 32 state labels
 /// `manifold-F-m`.
-pub(crate) fn groups(model:&Model)->Result<(Vec<bool>,Vec<Group>),String>{
+fn groups(model:&Model)->Result<(Vec<bool>,Vec<Group>),String>{
     let mut grouped=BTreeMap::<String,Vec<usize>>::new();let mut excited=Vec::new();let mut ground=Vec::new();
     for(i,label)in model.states.iter().enumerate(){
         let mut fields=label.splitn(3,'-');let manifold=fields.next().ok_or("Missing atomic manifold label")?;
@@ -88,7 +88,7 @@ fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
 /// rho0 (row-major): `initialReal/initialImag` when given, else the state
 /// `initialIndex`. A given density must be Hermitian with trace one and
 /// positive semidefinite (to 1e-10).
-pub(crate) fn initial_density(model:&Model,lapack:&Lapack)->Result<Vec<Complex64>,String>{
+fn initial_density(model:&Model,lapack:&Lapack)->Result<Vec<Complex64>,String>{
     let n=model.dimension;let d=n*n;
     let density:Vec<Complex64>=match(&model.initial_real,&model.initial_imag){
         (Some(re),Some(im))=>{
@@ -111,7 +111,7 @@ pub(crate) fn initial_density(model:&Model,lapack:&Lapack)->Result<Vec<Complex64
 }
 
 /// The model's lattice preparation in the request frame, with its phase axes.
-pub(crate) fn prepare(model:&Model,ground:&[bool])->Result<(LatticePrepared,harmonics::PhaseAxes),String>{
+fn prepare(model:&Model,ground:&[bool])->Result<(LatticePrepared,harmonics::PhaseAxes),String>{
     let axes=harmonics::model_phase_axes(model)?;
     let parts:Vec<_>=axes.parts.iter().map(|&(hi,lo)|FrequencyParts{hi,lo}).collect();
     let phases=PhaseBasis::from_parts(&parts,&axes.drive_indices)?;
@@ -150,6 +150,10 @@ fn lattice_json(prepared:&LatticePrepared,solution:Option<&SteadySolution>)->Val
     let targets:Vec<Value>=prepared.fold.targets.iter().map(|t|json!({"charge":t.charge,"nu":t.nu,
         "restStored":[t.rest[0].stored(),t.rest[1].stored()],"denseSectors":[t.rest[0].blocks.len(),t.rest[1].blocks.len()],
         "norms":t.norms,"dropped":t.dropped,"largestEntry":t.largest_entry})).collect();
+    let k=&prepared.floquet.diagnostics;
+    let floquet=json!({"milliseconds":k.milliseconds,"iterations":k.iterations,"change":k.change,
+        "pairs":k.pairs,"guarded":k.guarded,"smallParameter":k.small_parameter,"frameCondition":k.condition,
+        "support":k.support.iter().map(|(q,size)|json!({"charge":q,"kernel":size})).collect::<Vec<_>>(),"belowFloor":k.below,"precessingRate":k.precessing_rate});
     json!({
         "harmonicPlan":{"explicit":plan.count(&Treatment::Explicit{structural:true}),"nonStructural":plan.count(&Treatment::Explicit{structural:false}),
             "folded":plan.count(&Treatment::Fold),"gap":plan.gap,"cut":plan.cut,"l0Bound":plan.l0_bound,"structuralFloor":plan.structural_floor,
@@ -159,8 +163,8 @@ fn lattice_json(prepared:&LatticePrepared,solution:Option<&SteadySolution>)->Val
         "fold":{"backend":f.backend,"frameCondition":f.frame_condition,"woodburyRank":f.woodbury_rank,"farSources":f.far_sources,"columns":f.columns,
             "solveResidual":f.solve_residual,"refinedSolves":f.refined,"refinedResidual":f.refined_residual,"milliseconds":f.milliseconds,
             "phaseMs":{"solves":f.phase_ms[0],"storage":f.phase_ms[1]},"targets":targets},
-        "preconditioner":solution.map(|s|json!({"kind":"structured","milliseconds":s.dressed_ms,"frameCondition":s.dressed.condition,
-            "frameReconstruction":s.dressed.reconstruction,"woodburyRank":s.dressed.woodbury_rank,"precessingRate":s.dressed.precessing_rate})),
+        "floquet":floquet,
+        "preconditioner":solution.map(|s|json!({"kind":"floquet","woodburyMs":s.preconditioner.milliseconds,"woodburyRank":s.preconditioner.woodbury_rank})),
         "slowModes":solution.map(|s|{let m=&s.slow;json!({"conserved":m.conserved,"slowestRate":m.slowest_rate,"artifacts":m.artifacts,
             "artifactGrowth":m.artifact_growth,"solveSteps":m.solve_steps,"milliseconds":m.milliseconds,
             "kept":m.modes.iter().map(|x|json!({"lambda":[x.lambda.re,x.lambda.im],"residual":x.residual})).collect::<Vec<_>>(),
@@ -372,7 +376,7 @@ fn mean_value(model:&Model,options:&Options,request:&Prepared,steady:Result<&Ste
     let positivity=(-prepared.lapack.hermitian_eigen(&density,n)?.0[0]).max(0.);
     let trace_error=(populations.iter().sum::<f64>()-1.).abs();
     let accepted=solution.attempts.last().ok_or("An accepted lattice solution has its attempt")?;
-    let solve_ms:f64=solution.attempts.iter().map(|a|a.timing.setup_ms+a.timing.primal_ms+a.timing.estimate_ms+a.timing.correction_ms).sum::<f64>()+solution.dressed_ms;
+    let solve_ms:f64=solution.attempts.iter().map(|a|a.timing.setup_ms+a.timing.primal_ms+a.timing.estimate_ms+a.timing.correction_ms).sum::<f64>()+solution.preconditioner.milliseconds;
     let control_ms:f64=solution.attempts.iter().map(|a|a.timing.estimate_ms+a.timing.correction_ms).sum();
     // At a horizon, populations still relaxing by more than a twentieth of
     // the tolerance keep the mean initial-state dependent.
@@ -401,13 +405,13 @@ fn mean_value(model:&Model,options:&Options,request:&Prepared,steady:Result<&Ste
                 "metric":"max over states and requested F groups"},
             "zeroModeCount":spectrum.conserved,"conservedQuantities":spectrum.conserved,
             "slowestRatePerUs":solution.slowest_rate(),"slowestRelaxationUs":solution.slowest_rate().map(|r|1./r),
-            "slowestRelaxationBasis":{"shiftRatePerUs":spectrum.slowest_rate,"precessingRatePerUs":solution.dressed.precessing_rate,
+            "slowestRelaxationBasis":{"shiftRatePerUs":spectrum.slowest_rate,"precessingRatePerUs":solution.precessing_rate,
                 "rule":"min of the zero shift's slowest rate and half the dressed frames' slowest precessing decay"},
             "latticeOrder":solution.order,"latticeModes":solution.modes.len(),"discardedOpticalCoherence":discarded,
             "horizonMethod":state.as_ref().map(|s|s.details.clone()),"horizonRelaxingBound":state.as_ref().map(|s|s.relaxing),
             "horizonPropagationEstimate":state.as_ref().map(|s|s.error),"horizonProjectionCharge":state.as_ref().map(|_|projection),
             "preparationMs":preparation,"slowModesMs":spectrum.milliseconds,
-            "meanTimingMs":{"solve":solve_ms,"errorControl":control_ms,"dressed":solution.dressed_ms},
+            "meanTimingMs":{"solve":solve_ms,"errorControl":control_ms,"preconditioner":solution.preconditioner.milliseconds},
             "lattice":lattice_json(prepared,Some(solution))}}))
 }
 
@@ -474,7 +478,7 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
     let checkpoints:Vec<Value>=solution.checkpoints.iter().map(|c|json!({"order":c.order,"columns":c.columns,"dimension":c.dimension,
         "reflected":c.reflected,"gramCondition":c.gram_condition,"growth":c.growth,"basis":c.basis,"shell":c.shell,"fold":c.fold,"projection":c.projection,"total":c.total,"action":c.action,"milliseconds":c.milliseconds})).collect();
     let control_ms=t.basis_ms+t.shell_ms+t.fold_ms;
-    let solve_ms=t.dressed_ms+t.columns_ms+t.images_ms+t.gram_ms+t.reduced_ms+control_ms;
+    let solve_ms=t.preconditioner_ms+t.columns_ms+t.images_ms+t.gram_ms+t.reduced_ms+control_ms;
     let long=trajectory.long_time().map(|l|json!({"switchUs":l.switch,"krylovEstimate":l.krylov.estimated_error,"outsideSlowModes":l.fast,"fitDrift":l.drift,
         "eigenResiduals":l.residuals,"artifactGrowth":l.artifact_growth,"steadyEstimate":l.steady_error,"reachUs":l.times.last(),"rejectedSwitches":l.trail}));
     if trajectory.estimated>POPULATION_TOLERANCE{return Err(format!("Finite-time populations estimated at {:e}; the tolerance was not relaxed",trajectory.estimated));}
@@ -484,12 +488,12 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
             "includesProjectionCharge":true,"scope":{"states":32,"samples":options.samples,"groups":request.names}},
         "diagnostics":{"engine":ENGINE,"traceError":row_trace,"initialStateError":initial_error,
             "elapsedMs":started.elapsed().as_secs_f64()*1000.,"carrierSourceToBasis":request.axes.source_to_basis,"method":FINITE_METHOD,
-            "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2]},
-            "finiteTimingMs":{"solve":solve_ms,"errorControl":control_ms,"eigenbasis":t.eigenbasis_ms,"dressed":t.dressed_ms,
+            "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2],"floquetKernels":prepared.timing[3]},
+            "finiteTimingMs":{"solve":solve_ms,"errorControl":control_ms,"eigenbasis":t.eigenbasis_ms,"preconditioner":t.preconditioner_ms,
                 "columns":t.columns_ms,"innerApply":t.inner.apply_ms,"innerPrecondition":t.inner.precondition_ms,"innerOrthogonalize":t.inner.orthogonalize_ms,"images":t.images_ms,"gram":t.gram_ms,"reduced":t.reduced_ms,"basis":t.basis_ms,"shell":t.shell_ms,"fold":t.fold_ms},
             "finite":{"order":solution.order,"modes":solution.modes,"columns":solution.columns,"dimension":solution.dimension,
                 "translations":solution.translations,"innerSteps":solution.inner_steps,"innerStepsPerColumn":solution.inner_steps as f64/solution.columns.max(1) as f64,
-                "applications":solution.applications,"preconditions":solution.preconditions,
+                "applications":solution.applications,"preconditions":solution.preconditions,"reaches":solution.reaches.iter().map(|r|format!("{r:?}")).collect::<Vec<_>>(),
                 "eigenbasisCondition":solution.eigenbasis_condition,"ritzCondition":solution.ritz_condition,
                 "basisEstimate":solution.basis,"shellEstimate":solution.shell,"foldEstimate":solution.fold,"safetyFactor":KAPPA,
                 "longTime":long,"checkpoints":checkpoints}}});
@@ -589,9 +593,9 @@ mod tests{
             let nonlinear=s.iter().zip(a.iter().zip(&b)).map(|(s,(a,b))|(s.re-a.re-b.re).hypot(s.im-a.im-b.im)).fold(0.,f64::max)/scale;
             let repeat=a.iter().zip(&a2).map(|(p,q)|(p.re-q.re).hypot(p.im-q.im)).fold(0.,f64::max)/scale;(nonlinear,repeat)};
         let operator_linearity=linear(&mut |u,v|op.apply(u,v).unwrap());
-        let structured=atom_population_core::lattice::preconditioner::StructuredDressed::new(&p).unwrap();
-        let mut batch=structured.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true).unwrap();
-        use atom_population_core::lattice::preconditioner::Preconditioner;
+        use atom_population_core::lattice::preconditioner::{Preconditioner,Preconditioning,Shift};
+        let pre=Preconditioning::new(&p).unwrap();
+        let mut batch=pre.batch(&op,Shift::Steady,Some(atom_population_core::lattice::floquet::Reach::All)).unwrap();
         let preconditioner_linearity=linear(&mut |u,v|batch.apply(u,v).unwrap());
         println!("{}",json!({"operatorLinearity":operator_linearity,"preconditionerLinearity":preconditioner_linearity}));
         let size=reference.iter().map(|v|v.re.hypot(v.im)).fold(0.,f64::max);
@@ -599,38 +603,5 @@ mod tests{
         for(k,(a,b))in y.iter().zip(&reference).enumerate(){let e=(a.re-b.re).hypot(a.im-b.im);if e>worst.0{worst=(e,k/d,k%d);}}
         println!("{}",json!({"request":path,"modes":modes.len(),"largest":size,"worstError":worst.0,"worstMode":worst.1,"worstEntry":worst.2,
             "canonical":op.canonical,"charges":modes}));
-    }
-    /// Step counts of the primal at order 2 with the structured and the exact
-    /// dense dressed preconditioner (ignored, `validation` feature; needs
-    /// ATOM_LATTICE_REQUEST=<request.json>; prints one JSON line).
-    #[cfg(feature="validation")]
-    #[test]
-    #[ignore]
-    fn lattice_preconditioner_steps_against_the_dense_dressed_block(){
-        use atom_population_core::lattice::krylov::{self,KrylovOptions,System};
-        use atom_population_core::lattice::operator::LatticeOperator;
-        use atom_population_core::lattice::preconditioner::StructuredDressed;
-        use atom_population_core::lattice::dense_dressed::DenseDressed;
-        let path=std::env::var("ATOM_LATTICE_REQUEST").expect("ATOM_LATTICE_REQUEST");
-        let request:Value=serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let model:Model=serde_json::from_value(request["model"].clone()).unwrap();
-        let(ground,requested)=groups(&model).unwrap();let(p,_)=prepare(&model,&ground).unwrap();
-        let group_indices:Vec<Vec<usize>>=requested.iter().map(|g|g.indices.clone()).collect();
-        let modes=p.modes(steady::START_ORDER).unwrap();let mut options=KrylovOptions::default();
-        if let Ok(v)=std::env::var("ATOM_LATTICE_RESTART"){options.restart=v.parse().unwrap();}
-        if let Ok(v)=std::env::var("ATOM_LATTICE_GUARD"){options.residual_guard=v.parse().unwrap();}
-        let run=|pre:&mut dyn atom_population_core::lattice::preconditioner::Preconditioner|{
-            let op=LatticeOperator::new(&p,&modes).unwrap();let mut system=System::new(op,pre).unwrap();let b=system.source();
-            let clock=Instant::now();let k=krylov::gmres(&mut system,&b,None,&group_indices,&options).unwrap();
-            let t:f64=system.watch.iter().map(|&i|k.x[i].re).sum();
-            (k.steps,clock.elapsed().as_secs_f64()*1e3,system.watch.iter().map(|&i|k.x[i].re/t).collect::<Vec<f64>>(),k.stop,k.residual)};
-        let clock=Instant::now();let structured=StructuredDressed::new(&p).unwrap();let structured_ms=clock.elapsed().as_secs_f64()*1e3;
-        let op=LatticeOperator::new(&p,&modes).unwrap();
-        let mut batch=structured.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true).unwrap();let a=run(&mut batch);
-        let clock=Instant::now();let dense=DenseDressed::new(&p).unwrap();let dense_ms=clock.elapsed().as_secs_f64()*1e3;
-        let mut batch=dense.batch(&op.nu,op.centre,Some((op.canonical.clone(),op.mirror.clone()))).unwrap();let b=run(&mut batch);
-        let difference=a.2.iter().zip(&b.2).map(|(x,y)|(x-y).abs()).fold(0.,f64::max);
-        println!("{}",json!({"request":path,"modes":modes.len(),"structured":{"steps":a.0,"primalMs":a.1,"buildMs":structured_ms,"stop":a.3,"residual":a.4,"populations":a.2},
-            "dense":{"steps":b.0,"primalMs":b.1,"buildMs":dense_ms,"stop":b.3,"residual":b.4,"populations":b.2},"populationDifference":difference}));
     }
 }
