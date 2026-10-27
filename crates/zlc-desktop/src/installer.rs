@@ -151,6 +151,37 @@ fn needed(rows: &[Value], id: &str) -> bool {
         .any(|row| match row["state"].as_str() { Some("missing") => true, Some("error") => *required || row["failed"] == true, _ => false })
 }
 
+/// The Program row against GitHub (`fetch_engine.ps1 -Latest`, `have` the installed program in words).
+/// GitHub ahead of this checkout: Update pulls it (a fast-forward) and then installs the release it
+/// names; when it cannot pull, the words say why and the pull is the operator's. A check that could
+/// not ask GitHub -- no git, a fetch that failed, the check itself refused -- says so: it never reads
+/// as up to date. Still checking: the row as the checkout's own status has it.
+fn against_github(state: &'static str, words: &'static str, mut detail: String, have: &str, online: Option<&Result<Value, String>>)
+    -> (&'static str, &'static str, String) {
+    let unchecked = |mut detail: String, why: &str| {
+        detail.push_str(&format!(" · GitHub was not checked for newer commits: {why}"));
+        (state, if state == "ok" { "Not checked online" } else { words }, detail)
+    };
+    let latest = match online {
+        None => return (state, words, detail),
+        Some(Err(error)) => return unchecked(detail, error),
+        Some(Ok(latest)) => latest,
+    };
+    let (pull, release) = (&latest["pull"], latest["tag"].as_str().filter(|_| latest["newer"] == true));
+    let behind = pull["behind"].as_u64().unwrap_or(0);
+    let release = release.map(|tag| format!(", release {tag}")).unwrap_or_default();
+    if pull["pullable"] == true {
+        return ("missing", "Update", format!("{have} · GitHub has {behind} newer commit(s){release}: Update pulls them and installs the program they name"));
+    }
+    if behind > 0 || !release.is_empty() {
+        let why = pull["why"].as_str().unwrap_or("pull the repository to get it");
+        detail.push_str(&format!(" · GitHub is ahead{release}: {why}"));
+        return (state, if state == "ok" { "Newer online" } else { words }, detail);
+    }
+    // Nothing behind, yet a reason: how far behind could not be learned at all.
+    match pull["why"].as_str() { Some(why) => unchecked(detail, why), None => (state, words, detail) }
+}
+
 pub struct Installer {
     proxy: EventLoopProxy<AppEvent>,
     checks: [Option<Result<Value, String>>; 4],
@@ -248,7 +279,7 @@ impl Installer {
                                                     facts["commit"].as_str().unwrap_or("?").chars().take(7).collect::<String>());
                 let (have, wanted) = (named(&program["installed"]), format!("v{}", program["expected"]["version"].as_str().unwrap_or("?")));
                 let size = program["expected"]["asset"]["size"].as_f64().unwrap_or(0.0) / 1_048_576.0;
-                let (mut state, mut words, mut detail) = match program["relation"].as_str().unwrap_or("") {
+                let (state, words, detail) = match program["relation"].as_str().unwrap_or("") {
                     "match" => ("ok", "Installed", format!("{have}: this checkout's release")),
                     "built" => ("ok", "Built here", "Built on this PC from this checkout's sources".into()),
                     "staged" => ("optional", "Restart", format!("{wanted} is downloaded: it goes in place when installation.exe starts again")),
@@ -258,21 +289,7 @@ impl Installer {
                     "unreleased" => ("optional", "Not released", "This checkout names no release (bin\\release.json): build_release makes one".into()),
                     _ => ("missing", "Update", format!("{have} is not this checkout's release {wanted}: Update downloads it")),
                 };
-                // GitHub ahead of this checkout: Update pulls it (a fast-forward) and then installs the
-                // release it names; when it cannot pull, the words say why and the pull is the operator's.
-                if let Some(Ok(latest)) = &self.online {
-                    let (pull, release) = (&latest["pull"], latest["tag"].as_str().filter(|_| latest["newer"] == true));
-                    let behind = pull["behind"].as_u64().unwrap_or(0);
-                    let release = release.map(|tag| format!(", release {tag}")).unwrap_or_default();
-                    if pull["pullable"] == true {
-                        (state, words) = ("missing", "Update");
-                        detail = format!("{have} · GitHub has {behind} newer commit(s){release}: Update pulls them and installs the program they name");
-                    } else if behind > 0 || !release.is_empty() {
-                        if state == "ok" { words = "Newer online"; }
-                        let why = pull["why"].as_str().unwrap_or("pull the repository to get it");
-                        detail.push_str(&format!(" · GitHub is ahead{release}: {why}"));
-                    }
-                }
+                let (state, words, detail) = against_github(state, words, detail, &have, self.online.as_ref());
                 let mut shown = row("program", "program", "Zou lab control", state, detail);
                 shown["words"] = json!(words);
                 shown
@@ -653,6 +670,22 @@ mod tests {
         assert!(!super::needed(&pylon, "pylon"));
         pylon[0]["failed"] = serde_json::json!(true);
         assert!(super::needed(&pylon, "pylon"));
+    }
+
+    /// A Program row never reads as up to date when GitHub could not be asked.
+    #[test]
+    fn the_program_row_says_when_github_could_not_be_checked() {
+        let row = |online: Option<Result<serde_json::Value, String>>| super::against_github("ok", "Installed", "v1: this checkout's release".into(), "v1", online.as_ref());
+        let pull = |pull: serde_json::Value| Some(Ok(serde_json::json!({"tag": "v1", "newer": false, "pull": pull})));
+        assert_eq!(row(None), ("ok", "Installed", "v1: this checkout's release".into()));
+        assert_eq!(row(pull(serde_json::json!({"behind": 0, "pullable": false, "why": null}))), ("ok", "Installed", "v1: this checkout's release".into()));
+        assert_eq!(row(pull(serde_json::json!({"behind": 2, "pullable": true}))).1, "Update");
+        let (_, words, detail) = row(pull(serde_json::json!({"behind": 2, "pullable": false, "why": "GitHub did not answer git fetch (timeout)"})));
+        assert!(words == "Newer online" && detail.ends_with("GitHub is ahead: GitHub did not answer git fetch (timeout)"), "{detail}");
+        let (_, words, detail) = row(pull(serde_json::json!({"behind": 0, "pullable": false, "why": "git was not found on this PC: pull with GitHub Desktop"})));
+        assert!(words == "Not checked online" && detail.ends_with("not checked for newer commits: git was not found on this PC: pull with GitHub Desktop"), "{detail}");
+        let (_, words, detail) = row(Some(Err("GitHub did not answer, and git was not found".into())));
+        assert!(words == "Not checked online" && detail.ends_with("GitHub did not answer, and git was not found"), "{detail}");
     }
 
     #[test]

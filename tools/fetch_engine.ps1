@@ -161,6 +161,43 @@ function Invoke-Git([string]$Git, [string[]]$Arguments, [int]$Seconds = 60) {
     [pscustomobject]@{ Code = $process.ExitCode; Lines = $lines }
 }
 
+# This checkout's branch and commit as its .git folder records them, read without git, or $null
+# (no branch checked out). A worktree's .git names its folder, whose commondir holds the refs.
+function Read-GitHead {
+    $dir = Join-Path $root '.git'
+    if (Test-Path -LiteralPath $dir -PathType Leaf) {
+        if ((Get-Content -LiteralPath $dir -TotalCount 1) -notmatch '^gitdir:\s*(.+)$') { return $null }
+        $dir = [IO.Path]::GetFullPath([IO.Path]::Combine($root, $Matches[1].Trim()))
+    }
+    $head = Join-Path $dir 'HEAD'
+    if (-not (Test-Path -LiteralPath $head) -or (Get-Content -LiteralPath $head -TotalCount 1) -notmatch '^ref:\s*refs/heads/(\S+)$') { return $null }
+    $branch = $Matches[1]
+    $common = Join-Path $dir 'commondir'
+    $common = if (Test-Path -LiteralPath $common) { [IO.Path]::GetFullPath([IO.Path]::Combine($dir, (Get-Content -LiteralPath $common -TotalCount 1).Trim())) } else { $dir }
+    $loose = Join-Path $common "refs\heads\$branch"
+    $packed = Join-Path $common 'packed-refs'
+    $commit = if (Test-Path -LiteralPath $loose) { (Get-Content -LiteralPath $loose -TotalCount 1).Trim() }
+        elseif (Test-Path -LiteralPath $packed) { "$(Get-Content -LiteralPath $packed | Where-Object { $_ -match " refs/heads/$([regex]::Escape($branch))$" } | Select-Object -First 1)".Split(' ')[0] }
+    if ("$commit" -match '^[0-9a-f]{40}$') { [pscustomobject]@{ branch = $branch; commit = $commit } } else { $null }
+}
+
+# How many commits GitHub's $Branch (this checkout's own, when empty) has that this checkout does
+# not, asked of GitHub itself (its compare API, no git), or $null when GitHub cannot say.
+function Get-BehindOnGitHub([string]$Branch) {
+    $head = Read-GitHead
+    if (-not $head) { return $null }
+    $name = if ($Branch) { $Branch } else { $head.branch }
+    try {
+        $request = [Net.WebRequest]::Create("https://api.github.com/repos/$ZlcRepository/compare/$($head.commit)...$([Uri]::EscapeDataString($name))")
+        $request.Timeout = 10000
+        $request.UserAgent = 'zlc-fetch-engine'
+        $request.Accept = 'application/vnd.github+json'
+        $response = $request.GetResponse()
+        try { $text = (New-Object IO.StreamReader $response.GetResponseStream()).ReadToEnd() } finally { $response.Dispose() }
+        [int]($text | ConvertFrom-Json).ahead_by
+    } catch { $null }
+}
+
 # How this checkout stands against the branch it follows on GitHub, after fetching it: commits
 # behind and ahead, the local edits an update would overwrite, and whether a fast-forward can
 # bring it up (pullable). 'why' says, in the operator's words, why it cannot.
@@ -237,7 +274,14 @@ if ($Latest) {
         if ($location -match '/tag/([^/?#]+)$') { $tag = [Uri]::UnescapeDataString($Matches[1]) }
     } catch {}
     $newer = $tag -and $expected -and (Get-Version ($tag -replace '^v', '')) -gt (Get-Version $expected.version)
-    $standing = Get-PullState 20
+    # A lab network may take a while to answer git; the window shows the rest meanwhile.
+    $standing = Get-PullState 60
+    # git could not say how this checkout stands (none, no branch it follows, a fetch that failed):
+    # GitHub says how far behind it is, so the window never reads up to date when it cannot know.
+    if ($standing.why -and -not $standing.behind -and -not $standing.ahead) {
+        $behind = Get-BehindOnGitHub ("$($standing.upstream)" -replace '^[^/]+/', '')
+        if ($null -ne $behind) { $standing.behind = $behind; if ($behind -eq 0) { $standing.why = $null } }
+    }
     if (-not $tag -and -not $standing.git) { throw 'GitHub did not answer, and git was not found' }
     [ordered]@{ tag = $tag; newer = [bool]$newer; pull = $standing } | ConvertTo-Json -Compress -Depth 4
     return
