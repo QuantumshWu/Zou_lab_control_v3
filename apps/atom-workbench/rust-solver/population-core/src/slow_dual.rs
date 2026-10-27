@@ -1013,8 +1013,17 @@ impl FrameLiouvillian {
         for (index, charge) in effective.charges.iter().enumerate() {
             let hamiltonian = Dense::from_row_major(&effective.hamiltonian[index], n, n);
             let gamma = Dense::from_row_major(&effective.gamma[index], n, n);
+            // Pairs sharing their second operator are one product: sum their
+            // first operators (`R'(X) = sum_b (sum_a A_a) X B_b^dagger`).
+            let mut grouped: BTreeMap<usize, (Vec<C>, &[C])> = BTreeMap::new();
+            for (a, b) in effective.recycling_pairs(index) {
+                let entry = grouped.entry(b.as_ptr() as usize).or_insert_with(|| (vec![ZERO; n * n], b));
+                for (t, v) in entry.0.iter_mut().zip(a) {
+                    *t = cadd(*t, *v);
+                }
+            }
             let pairs: Vec<(Dense, Dense)> =
-                effective.recycling_pairs(index).map(|(a, b)| (Dense::from_row_major(a, n, n), Dense::from_row_major(b, n, n).adjoint())).collect();
+                grouped.into_values().map(|(a, b)| (Dense::from_row_major(&a, n, n), Dense::from_row_major(b, n, n).adjoint())).collect();
             // Excited -> ground part: (A X B^dagger)_ab over X_EE.
             let mut standard = Dense::zeros(g * g, e * e);
             for (a_mat, b_adj) in &pairs {
