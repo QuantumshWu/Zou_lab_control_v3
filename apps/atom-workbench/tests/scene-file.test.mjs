@@ -65,7 +65,8 @@ test('initial-state specs round-trip, a state spec folds into initialStateId, an
   }
 });
 
-test('a display-only regime change keeps the dynamics request identity',()=>{
+test('a regime change is a different dynamics request: the regime decides the physics',()=>{
   const s=roundtrip(defaultScene()),key=dynamicsCacheKey(s,s.dynamics,false);
-  s.lasers[1].regime='near';assert.equal(dynamicsCacheKey(s,s.dynamics,false),key);
+  s.lasers[1].regime='near';assert.notEqual(dynamicsCacheKey(s,s.dynamics,false),key);
+  assert.equal(roundtrip(s).lasers[1].regime,'near','the regime survives a save');
 });

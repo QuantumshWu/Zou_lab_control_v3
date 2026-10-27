@@ -25,7 +25,8 @@ import {analyze,dipoleBetweenStates,resolveSceneFrequencies,laserIntensityMWcm2,
 import {normalizeLaserIntensity,setLaserIntensityMode,setLaserLocalIntensity,setLaserPowerMW,setLaserWaistUm} from './laser-intensity.js';
 import {dynamicsCacheKey} from './dynamics-cache-key.js';
 import {CurrentDynamicsResults} from './current-dynamics-results.js';
-import {displayMixing,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
+import {spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
+import {classifyLasers,farValidity} from './laser-regime.js';
 import {Readout} from '../../desktop/ui/src/fluent/readout.js';
 import {defaultDynamics,defaultScene,MAX_POPULATION_TOLERANCE,resolveMeanHorizon,resolvePopulationTolerance} from './types.js';
 import type {Analysis,AxisAngles,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,Transition} from './types.js';
@@ -242,7 +243,9 @@ function solverStatus():[string,StatusWord]{
 function refreshStatus():void{
   if(notice&&performance.now()>notice.until)notice=undefined;
   let [text,word]=solverStatus();
+  const regime=regimeProblems();
   if(analysisError)[text,word]=[`能级参数无效：${analysisError}`,'error'];
+  else if(regime.length&&word!=='error')[text,word]=[`处理方式不适用：${regime.join('；')}`,'warning'];
   if(notice)[text,word]=[notice.text,notice.word];
   if(saveState==='failed')[text,word]=[`本地保存失败：${saveFailure}；请导出场景`,'error'];
   else if(loadFailure&&!notice)[text,word]=[`原本地场景无法载入：${loadFailure}。已显示默认场景，原数据已保留`,'warning'];
@@ -427,10 +430,10 @@ function renderInspector():void{
     directionButtons(g,(theta,phi)=>{field.thetaDeg=theta;field.phiDeg=phi;refreshFields(fields);renderObjects();update();});
   }else{
     const l=scene.lasers.find(l=>l.id===selection.id);if(!l)return;normalizeLaserIntensity(l);setText('inspector-title',l.name);
-    // ui-design.md §4: every laser drives the dynamics; this only chooses the levels chart's background.
-    const chart=group('能级图');bindField(fields,chart,'inspector',()=>({name:'show-light-shift',label:'显示光移',kind:'boolean',value:l.regime==='far',description:'开：未选中对象时，能级图的背景包含这束光的二阶光移（仅显示，不影响动力学）'}),v=>{l.regime=v===true?'far':'near';});
-    // A hint beside the switch, never acting on it: the display model's own |Ω/2Δ| (it holds to 1%).
-    chart.append(fieldRow('|Ω/2Δ| 最大',mixingReadout.root),mixingWarning);refreshMixing(l);
+    // ui-design.md §4 (release): how the laser enters the master equation. 静态光移 lasers are
+    // also the levels chart's background. |Ω/2Δ| and the model's own refusal sit beside it.
+    const mode=group('激光类型');bindField(fields,mode,'inspector',()=>({name:'regime',label:'处理方式',kind:'choice',segmented:true,choices:[['near','进入主方程'],['far','静态光移']],value:l.regime??'near',description:'进入主方程：旋转波驱动，耦合 D1、D2 全部允许跃迁；静态光移：只取二阶光移，能级图背景显示它，不含散射'}),v=>{l.regime=v as 'near'|'far';});
+    mode.append(fieldRow('|Ω/2Δ| 最大',mixingReadout.root),mixingWarning);refreshMixing(l);
     const f=group('频率');
     frequencySection(f,l,laserReadout);
     const originPicker=selectControl(f,'参考态',l.referenceStateId??'',[['','跟随动力学初态'],...allLevels().map(state=>[state.id,stateText(state)] as [string,string]),...(scene.references??[]).map(ref=>[ref.id,ref.name+' · 参考能级'] as [string,string])],id=>{setLaserReferenceState(scene,l,id||undefined);persist();renderInspector();renderResults(false);});originPicker.id='laser-reference-state';originPicker.setAttribute('aria-label','参考出发态');originPicker.title='只改变这束光的箭头起点和矩元参考；不改变动力学初态或任何驱动。';
@@ -462,19 +465,33 @@ const readoutPrefs=new ReadoutPreferences(()=>((scene.display??={}).readouts??={
 const laserReadout=new FrequencyReadout('laser-frequency',readoutPrefs,{
   bases:()=>frequencyBaseTree({absolute:'光频',absoluteText:'绝对',lasers:scene.lasers.filter(other=>other.id!==selection.id),references:scene.referenceFrequencies}),defaultBase:'absolute',changed:()=>{},
 });
-const mixingReadout=new Readout(''),mixingWarning=element('p','note wrap mixing-warning','离共振太近，二阶光移不能代表它的作用');
+const mixingReadout=new Readout(''),mixingWarning=element('p','note wrap mixing-warning');
 mixingReadout.root.classList.add('frequency-reading');
-/** The levels chart's second-order model holds while a laser's |Ω/2Δ| stays within 1% and its
- * detunings keep the model's minimum (spectroscopy.ts displayMixing): too close otherwise. */
-function mixingOf(l:Laser):{ratio:number;tooClose:boolean}|undefined{
-  try{const m=displayMixing(scene,l.id);return {ratio:m.ratio,tooClose:!(m.ratio<=.01)||!m.withinGap};}catch{return undefined;}
+/** Why the model would refuse this laser in its regime, in the model's own words: a 静态光移
+ * laser by laser-regime.ts farValidity (its detuning rule and |Ω/2Δ| ≤ 1%), an 进入主方程 one by
+ * classifyLasers' near-resonance range. '' when it is accepted (or does not take part). */
+let problemsKey='',problems=new Map<string,string>();
+function laserProblem(l:Laser):string{
+  // Recomputed only when a field or a laser changed: the status, badge, legend and inspector all ask.
+  const key=JSON.stringify([scene.fields,scene.lasers]);if(key!==problemsKey){problemsKey=key;problems=new Map();}
+  const known=problems.get(l.id);if(known!==undefined)return known;
+  const found=checkLaser(l);problems.set(l.id,found);return found;
 }
+function checkLaser(l:Laser):string{
+  try{
+    if(!l.enabled||laserIntensityMWcm2(l)===0)return '';
+    if((l.regime??'near')==='far'){const check=farValidity(scene,l.id);return check.valid?'':check.message;}
+    const near=classifyLasers(scene).find(c=>c.id===l.id);return near&&!near.valid?near.message:'';
+  }catch(error){return message(error);}
+}
+function regimeProblems():string[]{return scene.lasers.map(laserProblem).filter(Boolean);}
 function refreshMixing(l:Laser):void{
-  const m=mixingOf(l);
-  mixingReadout.text=!m?'—':Number.isFinite(m.ratio)?populationValue(m.ratio):'∞';
-  mixingReadout.root.title='这束光各跃迁 |Ω/2Δ| 的最大值；能级图的二阶光移模型要求它不超过 1%';
+  let mixing:number|undefined;try{mixing=farValidity(scene,l.id).mixing;}catch{mixing=undefined;}
+  mixingReadout.text=mixing===undefined?'—':Number.isFinite(mixing)?populationValue(mixing):'∞';
+  mixingReadout.root.title='这束光各跃迁 |Ω/2Δ| 的最大值；“静态光移”要求它不超过 1%';
+  const problem=laserProblem(l);mixingWarning.textContent=problem;
   // The warning concerns a displayed shift only: with the switch off the value is just a reading.
-  mixingWarning.hidden=!(l.regime==='far'&&m?.tooClose);
+  mixingWarning.hidden=!problem;
 }
 const referenceReadout=new FrequencyReadout('reference-frequency',readoutPrefs,{
   bases:()=>frequencyBaseTree({absolute:'光频',absoluteText:'绝对',lasers:scene.lasers,references:(scene.referenceFrequencies??[]).filter(other=>other.id!==selection.id)}),defaultBase:'absolute',changed:()=>{},
@@ -699,6 +716,8 @@ function refreshPopulationOnly():void{
   renderedPopulationKey=dynamicsKey();root.dataset.populationFresh=String(!!currentResult());root.dataset.populationPaintCount=String(++populationPaintCount);refreshStatus();
 }
 function requestSolve(force=false):void{
+  const refused=regimeProblems()[0];
+  if(refused){cancelObsoleteSolve();solverError=refused;requestedKey=dynamicsKey();refreshPopulationOnly();return;}
   // A trajectory already here for these inputs needs only its mean at the new horizon.
   const physicalKey=trajectoryKey(),trajectory=displayedResults.get(physicalKey,'trajectory'),steadyOnly=meanOnly()&&!(force&&view==='dynamics');
   const key=dynamicsKey(steadyOnly),horizon=resolveMeanHorizon(dynamics());
@@ -802,7 +821,7 @@ function solverDetails():string{
     ...(result.steady?.slowestRelaxationUs!=null?[readout('最慢弛豫时间',(()=>{const unit=timeDisplayUnit(result.steady.slowestRelaxationUs!);return withUnit(result.steady.slowestRelaxationUs!*unit.factor,unit.name,{digits:3});})()),...(unreachedLine(result)?[`<p class="horizon-note">${esc(unreachedLine(result))}</p>`]:[])]:[]),
     ...(result.steady?.conservedQuantities!=null?[readout('守恒量个数',`${result.steady.conservedQuantities}（含迹）`)]:[]),
   ].join(''):'';
-  const notes=result?[...(result.method?[`时间演化：${solverText(result.method)}`]:[]),...(result.steady.method?[`长期解：${solverText(result.steady.method)}`]:[]),...(result.steady.reason?[solverText(result.steady.reason)]:[]),...result.assumptions]:[];
+  const notes=result?[...(result.method?[`时间演化：${solverText(result.method)}`]:[]),...(result.steady.method?[`长期解：${solverText(result.steady.method)}`]:[]),...(result.steady.reason?[solverText(result.steady.reason)]:[]),...result.assumptions.map(labelStateIds)]:[];
   return `<details class="solver-details"><summary>计算详情</summary>${error?`<p class="solver-error">${esc(solverText(error))}</p>`:''}${result?`<div class="form solver-readouts">${rows}</div>${notes.map(text=>`<p class="note wrap">${esc(text)}</p>`).join('')}`:'<p class="note">没有当前参数的求解结果。</p>'}${failureRecords.length?'<button data-export-solver-failures>导出失败记录</button>':''}</details>`;
 }
 function showSolverDetails():void{
@@ -908,7 +927,7 @@ function refreshDirectionStates(a:Analysis):void{
 
 /** The level diagram's one-line definition of its labels (ui-design.md §1.5). */
 function levelsLegend(a:Analysis,laser:Laser|undefined):string{
-  const beam=(id:string)=>{const l=scene.lasers.find(l=>l.id===id);return !l?id:l.regime==='far'&&mixingOf(l)?.tooClose?`${l.name}（离共振太近）`:l.name;};
+  const beam=(id:string)=>{const l=scene.lasers.find(l=>l.id===id);return !l?id:laserProblem(l)?`${l.name}（静态光移不适用）`:l.name;};
   const background=[...(a.fieldMagnitudeG>0?['B']:[]),...(a.spectroscopy?.backgroundLaserIds??[]).map(beam)].join(' + ')||'无';
   if(a.spectroscopy?.status==='unresolved')return `标注：裸态能级，背景光移未确定；背景：${background}`;
   // Every card is how far its state lies above its anchor (levelReadoutMHz): + is higher.
@@ -919,7 +938,7 @@ function levelsLegend(a:Analysis,laser:Laser|undefined):string{
 /** What the level diagram is showing now, for its ⓘ. */
 function levelScope():{title:string;lines:string[]}|undefined{
   const a=latestAnalysis;if(!a)return undefined;
-  const lines=[a.spectroscopy?.modelScope,...(a.spectroscopy?.warnings??[])].filter((line):line is string=>Boolean(line)).flatMap(line=>line.split('\n'));
+  const lines=[...regimeProblems(),a.spectroscopy?.modelScope,...(a.spectroscopy?.warnings??[])].filter((line):line is string=>Boolean(line)).flatMap(line=>line.split('\n'));
   return lines.length?{title:'当前能级图',lines}:undefined;
 }
 function samplingScope():{title:string;lines:string[]}|undefined{
@@ -971,7 +990,7 @@ function renderResults(allowSolve=true):void{
     setText('levels-heading',a.spectroscopy?.status==='unresolved'?'裸态能级':laser?'背景能级':'总场能级');
     setText('levels-legend',levelsLegend(a,laser));
     beamChip.hidden=!laser;if(laser)setMiddle(beamChipName,laser.name,'cut');
-    setText('levels-badge',a.spectroscopy?.status==='unresolved'?(laser?'裸态失谐 · 背景光移未确定':'静态光移未定义'):populationMode==='time'&&currentResult()&&!(timeBasisError(currentResult()!)<=resolvePopulationTolerance(dynamics().populationTolerance))?'p(t) 在模型基中':laser&&!laser.enabled?'已停用':'');
+    setText('levels-badge',regimeProblems().length?'处理方式不适用':a.spectroscopy?.status==='unresolved'?(laser?'裸态失谐 · 背景光移未确定':'静态光移未定义'):populationMode==='time'&&currentResult()&&!(timeBasisError(currentResult()!)<=resolvePopulationTolerance(dynamics().populationTolerance))?'p(t) 在模型基中':laser&&!laser.enabled?'已停用':'');
     renderSelection(a,laser);
     levelsChart$.innerHTML=levelsChart(scene,a,laser,{line:spectral,selectedIds:markedComparison(laser),initialId:singleInitialId(),populations:snapshot.populations,steadyPopulations:steadyPopulationsInView(a),steadyPopulationLabel:meanSymbol(),populationLabel:snapshot.label,viewportWidth:levelsChart$.clientWidth});
     const table=transitionTable(transitions);
