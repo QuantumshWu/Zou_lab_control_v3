@@ -64,6 +64,10 @@ pub struct TypeDescriptor {
     /// The physical instrument a row names, over its parameters (`rigol-dg4000:{resource}`).
     #[serde(default)]
     pub identity: String,
+    /// The physical resources a row binds, over its parameters (`serial:{port}`): the core
+    /// arbitrates them and hands every scan and resolve the bound ones (PLUGIN_PROTOCOL §2).
+    #[serde(default)]
+    pub resources: Vec<String>,
 }
 
 fn yes() -> bool { true }

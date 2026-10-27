@@ -584,14 +584,26 @@ impl PluginHost {
     /// A device type's hardware scan (v2 Scan hardware), with no instance opened:
     /// in the process its instances open in (a vendor runtime that is a process
     /// singleton is the one its open devices use), answering `{found, notes}` or
-    /// the scan's refusal.
-    pub fn discover(&self, type_id: &str, deadline: Duration) -> Result<Value, CallError> {
+    /// the scan's refusal. `excluded`: the resources bound now, which it touches none of.
+    pub fn discover(&self, type_id: &str, excluded: &[String], deadline: Duration) -> Result<Value, CallError> {
+        self.typed(type_id, "discover", json!({"excluded": excluded}), deadline)
+    }
+
+    /// What a row leaves blank, found before it opens (`resolve`), with no instance opened, in
+    /// the process its instance will open in: `{parameters, note}` or why it found nothing.
+    pub fn resolve(&self, type_id: &str, parameters: Value, excluded: &[String], deadline: Duration) -> Result<Value, CallError> {
+        self.typed(type_id, "resolve", json!({"parameters": parameters, "excluded": excluded}), deadline)
+    }
+
+    /// One op of a type rather than of an instance (`discover`, `resolve`), on its process's own thread.
+    fn typed(&self, type_id: &str, op: &str, mut params: Value, deadline: Duration) -> Result<Value, CallError> {
         let inner = &self.inner;
         let catalog = self.catalog()?;
         let descriptor = catalog.find(type_id).ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("No plugin type {type_id:?}")))?;
         if inner.state.lock().unwrap().closed { return Err(CallError::lost("the plugin host is closed")); }
         let process = inner.acquire(&Self::key_of(descriptor), None)?;
-        let answer = process.request_untracked("discover", json!({"type_id": type_id, "module": descriptor.module, "plain": true}), deadline);
+        for (key, value) in [("type_id", json!(type_id)), ("module", json!(descriptor.module)), ("plain", json!(true))] { params[key] = value; }
+        let answer = process.request_untracked(op, params, deadline);
         inner.done(&process);
         answer.map(|reply| reply.message["ok"].clone())
     }

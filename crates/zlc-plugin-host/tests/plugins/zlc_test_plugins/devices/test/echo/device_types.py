@@ -98,6 +98,24 @@ class PatternDevice(EchoDevice):
 
 
 SERVED = AuthoringSchema((AuthoringField("port", "int", "Serve on port", 18990, minimum=1, maximum=65535),))
+WIRED = AuthoringSchema((AuthoringField("port", "str", "Serial port", "", blank_label="found on Init"),))
+#: The serial ports the wired test device is found on, in the order they are tried.
+WIRES = ("COM3", "COM4", "COM5")
+
+
+def _scan_wires(excluded):
+    """A scan that is handed the bound resources: it reports them, and finds a device on every other wire."""
+    free = [port for port in WIRES if f"serial:{port}" not in excluded]
+    return (tuple({"instance_id": f"wired_{port}", "role": f"wired_{port}", "parameters": {"port": port}} for port in free),
+            (f"excluded {', '.join(sorted(excluded)) or 'nothing'}",))
+
+
+def _pin_wire(values, excluded):
+    """A row left without its port: the first wire nothing binds."""
+    free = [port for port in WIRES if f"serial:{port}" not in excluded]
+    if not free:
+        raise RuntimeError(f"no free wire (tried none; passed over {', '.join(WIRES)}: bound)")
+    return {"parameters": {"port": free[0]}, "note": f"found on {free[0]} (given {values['port']!r})"}
 
 
 def _served(key, values):
@@ -127,6 +145,12 @@ DEVICE_TYPES = (
     DeviceType("test.plain", "test", SCHEMA, ("test.echo",), factory=lambda key, values: PlainDevice()),
     DeviceType("test.pattern", "test", SCHEMA, ("test.echo",), factory=lambda key, values: PatternDevice(values)),
     DeviceType("test.failed_init", "test", FILE, ("test.echo",), factory=lambda key, values: FailedInitDevice(values["path"])),
+    # A device on a serial wire: it binds its port, its scan is handed the bound ones, and a blank port is found on Init.
+    DeviceType("test.wired", "test", WIRED, ("test.echo",), factory=lambda key, values: PlainDevice(), resources=("serial:{port}",),
+               discover=_scan_wires, resolve=_pin_wire),
+    # A scan written before the bound resources existed: it takes nothing and still answers.
+    DeviceType("test.scanned", "test", SCHEMA, ("test.echo",), factory=lambda key, values: PlainDevice(),
+               discover=lambda: (({"instance_id": "scanned", "role": "scanned", "parameters": {}},), ("scanned as before",))),
     DeviceType("test.served", "test", SERVED, ("test.echo",), factory=_served,
                announce=("test.echo", lambda values: {"port": int(values["port"])})),
     DeviceType("test.echo", "test", SCHEMA, ("test.echo",), factory=lambda key, values: EchoDevice(values),

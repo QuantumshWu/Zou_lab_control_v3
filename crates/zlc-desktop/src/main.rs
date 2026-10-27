@@ -1846,6 +1846,17 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         let answer = if op == "fields" { json!([]) } else { json!({}) };
                         let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Answered { ticket, result: Ok(answer) }));
                     }
+                    // The local board's UART, found before it opens: off the turn (a port may take seconds to open), bounded.
+                    workbench_host::NativeRequest::Resolve { ticket, type_id, parameters, excluded } => {
+                        let proxy = self_proxy.clone();
+                        let spawned = std::thread::Builder::new().name("zlc-pulse-resolve".into()).spawn(move || {
+                            let result = pulse_host::resolve(&type_id, &parameters, &excluded, pulse_host::RESOLVE_WAIT);
+                            let _ = proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Answered { ticket, result }));
+                        });
+                        if let Err(error) = spawned {
+                            let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Answered { ticket, result: Err(error.to_string()) }));
+                        }
+                    }
                     // Remote for the pulse board on this computer: its own server admits the other
                     // computers, and the fabric announces it as a sequencer.hardware at that server.
                     workbench_host::NativeRequest::Publish { ticket, instance, role, published } => {

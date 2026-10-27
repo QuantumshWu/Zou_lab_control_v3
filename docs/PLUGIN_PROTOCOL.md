@@ -76,6 +76,8 @@ A type descriptor (JSON, the only form the core sees):
   "commands": [Command...],              // operator/AI commands (section 8)
   "control_window": "slm-editor",        // device only: the window its Control opens ("" = the field form)
   "announces": "",                       // device only: the client type its own server is opened as (section 10)
+  "identity": "visa:{resource}",         // device only: the instrument a row names, over its parameters ("" = every row its own)
+  "resources": ["serial:{port}"],        // device only: the physical resources a row binds, over its parameters (below)
   "node": {                              // node only
     "node_kind": "measurement",          // measurement | task | processor
     "inputs": [{"name": "source", "contract": "zlc.camera.frames", "delivery": "exact", "select_bundle": false}],
@@ -141,6 +143,23 @@ draft, no devices, files or source, while it describes the type; one that cannot
 left out), and a draft just edited draws the answers of the one before it until its
 own land. Only a Start waits for the draft's own answers (`Checking the draft…`).
 
+**Physical resources.** A device type's `resources` are templates over a row's
+parameters, as `identity` is (`serial:{port}`, `visa:{resource}`; SDK
+`DeviceType(resources=...)`). The core names each `<kind>:<value>`: the kind
+lower-case; a `serial` value upper-case without `\\.\` (`serial:COM3`), any other
+value trimmed and lower-case. A template whose value is blank binds nothing yet. The
+bound set is every apparatus row's resources and every live device's that holds them
+(opening, open, closing, or a close that failed), each with the row that binds it. A
+row binding one an earlier row or another live device binds is refused before it
+opens (`RuntimeError: serial:COM3 is already bound (to n100)`). Every scan is handed
+the bound set and every resolve the bound set less its row's own (`excluded`, section
+3); neither opens a resource in it. A device type's `queries` say what it answers
+without an instance: `discover` (its hardware scan; an SDK `discover` that takes
+`excluded` is handed it, one that takes nothing scans as before) and `resolve` (SDK
+`resolve(parameters, excluded)`): a row of such a type with a resource still blank is
+resolved before it opens, one row at a time in the operator's order while the other
+rows open, and what it finds is pinned into the apparatus (WORKBENCH_COMMANDS §4.2).
+
 Capabilities name a device SPI by token (`camera.adapter`, `rf.source`,
 `slm.phase`, `waveform.source`; the pulse board is native and no plugin claims it:
 a node plays a pulse through the core's `pulse_*` commands). `zlc_plugin.capabilities`
@@ -165,7 +184,8 @@ spawned -> ready -> open -> (idle <-> running) -> closing -> closed
 | stop (node) | event `run.stop {instance, run}` | sets the run's cancel flag | none |
 | health | `ping` | answered by the reader thread (proves the interpreter and GIL are alive) | `{}` |
 | catalogue (process) | `describe {packages}` | imports every leaf module on a thread of its own | the descriptor document (section 2) |
-| hardware scan (process) | `discover {type_id, module}` (no instance; in the process its instances open in, so a vendor runtime that is a process singleton -- DCAM -- is the one its devices use) | the type's `discover()` on a thread of its own | `{found: [{instance_id, role, parameters}], notes}`; the core stops waiting at its deadline (20 s, v2) and drops a late answer |
+| hardware scan (process) | `discover {type_id, module, excluded}` (no instance; in the process its instances open in, so a vendor runtime that is a process singleton -- DCAM -- is the one its devices use; `excluded`: the bound resources, section 2) | the type's `discover(excluded=...)` (or `discover()`) on a thread of its own | `{found: [{instance_id, role, parameters}], notes}`; the core stops waiting at its deadline (20 s, v2) and drops a late answer |
+| resolve (process) | `resolve {type_id, module, parameters, excluded}` (no instance; Init, before the row opens; `excluded`: the bound resources but the row's own) | the type's `resolve(projected parameters, excluded)` on a thread of its own | `{parameters: {name: value}, note}`: the values found (none: open as authored), pinned into the row; an error fails the row and says what it tried and passed over. Deadline 20 s |
 | close | `close {instance}` | device: its closer (stop capture, release SDK); node: stop run | `{state}`; a process left with nothing to serve ends |
 | abandon | event `abandon {instance}` | stop accepting work for the instance; keep its name reserved until the overrunning call returns and cleanup succeeds | none |
 | exit (process) | `exit` | closes what is left | `{}`, then exits 0 |
@@ -245,6 +265,13 @@ and may `cancel_phase_sequence`; a callable (v2's `stop_requested`) cannot cross
 processes, so the caller cancels instead.
 
 ## 5. Operations
+
+Core -> plugin requests of a type, with no instance (section 3): `describe {packages}`,
+`discover {type_id, module, excluded}` and `resolve {type_id, module, parameters,
+excluded}`, for example `{"op": "resolve", "p": {"type_id": "waveform.wheeltec_n100",
+"module": "...", "parameters": {"port": "", "baud": 921600, "timeout_seconds": 2.0},
+"excluded": ["serial:COM3"]}}` answered `{"parameters": {"port": "COM5"}, "note": "N100
+streaming on COM5 (passed over COM3: bound)"}`.
 
 Core -> plugin requests (each names its `instance`): `hello`, `open`, `configure`,
 `close`, `exit`, `ping`, `spi {method, args, kwargs}` (call the open device's

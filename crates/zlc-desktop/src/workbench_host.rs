@@ -203,6 +203,8 @@ pub enum NativeRequest {
     Call { ticket: u64, op: String },
     /// Remote on/off for the pulse board (its own server admits the other computers).
     Publish { ticket: u64, instance: String, role: String, published: bool },
+    /// What a native row leaves blank, found before it opens (the local board's UART), off the window's turn.
+    Resolve { ticket: u64, type_id: String, parameters: Value, excluded: Vec<String> },
 }
 
 #[derive(Clone)]
@@ -221,7 +223,7 @@ pub(crate) fn descriptor(item: &zlc_plugin_host::TypeDescriptor) -> Value {
         "commands": item.commands.iter().map(|command| json!({"name": command.name, "summary": command.summary, "read_only": command.read_only,
             "drives": command.drives, "input_schema": command.input_schema, "params": command.params, "file": command.file})).collect::<Vec<_>>(),
         "addable": item.addable, "node": node, "queries": if item.node.is_none() { json!(item.queries) } else { json!([]) },
-        "control_window": item.control_window, "identity": item.identity})
+        "control_window": item.control_window, "identity": item.identity, "resources": item.resources})
 }
 
 fn origin(text: &str) -> Origin { if text == "operator" || text.is_empty() { Origin::Operator } else { Origin::Remote(text.to_owned()) } }
@@ -716,8 +718,8 @@ impl Plugins for Builtin {
         if let (Some(ticket), Some(host)) = (ticket, &self.0.borrow().host) { host.respond(ticket, result); }
     }
     fn acquired(&mut self, _run: &str, ticket: u64, result: Result<Value, String>) { self.respond(ticket, result); }
-    fn discover(&mut self, ticket: u64, type_id: &str) {
-        let type_id = type_id.to_owned();
+    fn discover(&mut self, ticket: u64, type_id: &str, excluded: &[String]) {
+        let (type_id, excluded) = (type_id.to_owned(), excluded.to_vec());
         // The bench part of the scan: what other computers publish (v2's remote family).
         let bench = self.bench().filter(|_| type_id == zlc_fabric::REMOTE_TYPE);
         // v2 _scan_families: one deadline from the scan's start, the process's start inside it. A family
@@ -729,7 +731,7 @@ impl Plugins for Builtin {
             let (sender, answer) = std::sync::mpsc::channel();
             let (host, family, ended) = (host.clone(), type_id.clone(), scanning.clone());
             let asked = std::thread::Builder::new().name(format!("zlc-scan-{type_id}")).spawn(move || {
-                let _ = sender.send(match &bench { Some(bench) => Ok(bench.discover(&host)), None => host.discover(&family, LATE_SCAN).map_err(|error| error.message) });
+                let _ = sender.send(match &bench { Some(bench) => Ok(bench.discover(&host)), None => host.discover(&family, &excluded, LATE_SCAN).map_err(|error| error.message) });
                 ended.lock().unwrap().remove(&family);
             });
             if let Err(error) = asked { return Event::Answered { ticket, result: Err(error.to_string()) }; }
@@ -745,6 +747,18 @@ impl Plugins for Builtin {
             };
             Event::Answered { ticket, result }
         });
+        if let Err(error) = started { self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error) }); }
+    }
+    fn resolve(&mut self, ticket: u64, instance: &str, type_id: &str, parameters: &Value, excluded: &[String]) {
+        if let Some(handler) = self.native_handler(Some(type_id), instance) {
+            handler(NativeRequest::Resolve { ticket, type_id: type_id.to_owned(), parameters: parameters.clone(), excluded: excluded.to_vec() });
+            return;
+        }
+        let (type_id, parameters, excluded) = (type_id.to_owned(), parameters.clone(), excluded.to_vec());
+        // A resolve probes as a scan does, port by port with a bounded wait each, so it is held to a
+        // family's scan deadline (the process's start inside it); Init waits for nothing longer.
+        let started = self.spawn("resolve", move |host| Event::Answered { ticket,
+            result: host.resolve(&type_id, parameters, &excluded, SCAN).map_err(|error| error.to_string()) });
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error) }); }
     }
     fn scanning(&self) -> Vec<String> { self.0.borrow().scanning.lock().unwrap().iter().cloned().collect() }

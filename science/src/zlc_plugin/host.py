@@ -5,11 +5,13 @@ The main thread reads frames. ``ping``, ``cancel``, ``release``, ``abandon`` and
 ``run.stop`` are answered there; every other request for an instance runs on
 that instance's lane thread, in arrival order. A node run executes on its own
 thread so its lane stays free for queries and its device calls' replies. The
-catalogue (``describe``) and hardware scans (``discover``) run on threads of their own.
+catalogue (``describe``), hardware scans (``discover``) and a row's ``resolve``
+run on threads of their own.
 """
 
 from __future__ import annotations
 
+import inspect
 import itertools
 import logging
 import os
@@ -212,9 +214,22 @@ class Process:
             declared = find(str(params["type_id"]), str(params["module"]))
             if not isinstance(declared, DeviceType) or declared.discover is None:
                 raise PluginError("unknown_op", f"{params['type_id']} has no hardware scan")
-            found, notes = declared.discover()
+            # The bound resources, to a scan that takes them (one written before they existed scans as it did).
+            excluded = frozenset(str(item) for item in params.get("excluded") or ())
+            found, notes = declared.discover(excluded=excluded) if _takes(declared.discover, "excluded") else declared.discover()
             self.reply(identity, {"found": [dict(entry) for entry in found], "notes": [str(note) for note in notes]}, plain=True)
         except BaseException as error:  # noqa: BLE001 -- the scan's own refusal, reported per family
+            self.reply(identity, error=error)
+
+    def _resolve(self, identity: int, params: dict[str, Any]) -> None:
+        try:
+            declared = find(str(params["type_id"]), str(params["module"]))
+            if not isinstance(declared, DeviceType) or declared.resolve is None:
+                raise PluginError("unknown_op", f"{params['type_id']} finds nothing before it opens")
+            answer = declared.resolve(declared.project(params.get("parameters")), frozenset(str(item) for item in params.get("excluded") or ()))
+            self.reply(identity, {"parameters": {str(name): value for name, value in dict(answer.get("parameters") or {}).items()},
+                                  "note": str(answer.get("note") or "")}, plain=True)
+        except BaseException as error:  # noqa: BLE001 -- the row's own failure, said where it is
             self.reply(identity, error=error)
 
     def _describe(self, identity: int, params: dict[str, Any]) -> None:
@@ -243,12 +258,12 @@ class Process:
         if op == "exit":
             self.reply(identity, {})
             return "exit"
-        if op in ("discover", "describe"):
-            # A hardware scan of one type, no instance opened (v2 Scan hardware), or the
-            # catalogue: on a thread of its own, so a vendor call that hangs or a slow
-            # import holds up neither this process's instances nor its channel; the core
-            # stops waiting at its deadline and a late answer is dropped.
-            target = self._discover if op == "discover" else self._describe
+        if op in ("discover", "resolve", "describe"):
+            # A hardware scan of one type or a row's resolve, no instance opened (v2 Scan
+            # hardware), or the catalogue: on a thread of its own, so a vendor call that hangs
+            # or a slow import holds up neither this process's instances nor its channel; the
+            # core stops waiting at its deadline and a late answer is dropped.
+            target = {"discover": self._discover, "resolve": self._resolve, "describe": self._describe}[op]
             threading.Thread(target=target, args=(identity, params), name=f"zlc-{op}", daemon=True).start()
             return None
         name = str(params.get("instance", ""))
@@ -435,6 +450,15 @@ def _projected(project: Callable[[Any], dict[str, Any]], values: Any) -> dict[st
 
 def _tunable(adapter: object) -> bool:
     return all(callable(getattr(adapter, name, None)) for name in capabilities.TUNABLE)
+
+
+def _takes(function: Callable[..., Any], name: str) -> bool:
+    """Whether ``function`` has a parameter called ``name``."""
+
+    try:
+        return name in inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def _open(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:

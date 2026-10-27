@@ -189,8 +189,9 @@ class DeviceType:
     physical_outputs: tuple[PhysicalOutput, ...] = ()
     commands: tuple[Command, ...] = ()
     #: Hardware scan, answered by ``query discover``: (found entries
-    #: ``{instance_id, role, parameters}``, notes about what could not be asked).
-    discover: Callable[[], tuple[tuple[Mapping[str, Any], ...], tuple[str, ...]]] | None = None
+    #: ``{instance_id, role, parameters}``, notes about what could not be asked). One that
+    #: takes ``excluded`` is handed the bound resources (``resources``) and touches none.
+    discover: Callable[..., tuple[tuple[Mapping[str, Any], ...], tuple[str, ...]]] | None = None
     addable: bool = True
     #: SPI methods answered on their own thread instead of the lane, for an
     #: adapter that is thread-safe for them: a phase-movie submit or cancel
@@ -212,6 +213,17 @@ class DeviceType:
     #: ``"rigol-dg4000:{resource}"``. The core refuses a second row naming one already
     #: bound, before opening it. Empty: every row is its own instrument (a virtual one).
     identity: str = ""
+    #: The physical resources a row binds, over its parameters as ``identity`` is
+    #: (``("serial:{port}",)``, ``("visa:{resource}",)``). The core names each
+    #: ``<kind>:<value>`` (a serial port upper-case without ``\\.\``, any other value
+    #: lower-case), refuses a row binding one another row binds, and hands every scan and
+    #: ``resolve`` the bound ones as ``excluded``: they touch none. A blank value binds nothing yet.
+    resources: tuple[str, ...] = ()
+    #: What a row leaves blank, found before it opens (Init, one row at a time):
+    #: ``resolve(parameters, excluded)`` answers ``{"parameters": {name: value}, "note": "..."}``,
+    #: the values the core pins into the apparatus and opens the row with (none: as authored),
+    #: or raises with what it tried and what it passed over.
+    resolve: Callable[[Mapping[str, Any], frozenset[str]], Mapping[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         if not self.type_id or not self.family:
@@ -219,6 +231,7 @@ class DeviceType:
         if not callable(self.factory):
             raise TypeError("a device type needs a callable factory")
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
+        object.__setattr__(self, "resources", tuple(str(item) for item in self.resources))
         object.__setattr__(self, "physical_outputs", tuple(self.physical_outputs))
         object.__setattr__(self, "commands", tuple(self.commands))
         object.__setattr__(self, "concurrent", tuple(str(name) for name in self.concurrent))
@@ -241,10 +254,10 @@ class DeviceType:
             "parameters": [field_json(item) for item in _fields(self.parameters)],
             "physical_outputs": [{"name": item.name} for item in self.physical_outputs],
             "commands": [command.descriptor() for command in self.commands],
-            "queries": ["discover"] if self.discover is not None else [], "addable": self.addable,
-            "concurrent": list(self.concurrent), "control_window": self.control_window,
+            "queries": [name for name, answer in (("discover", self.discover), ("resolve", self.resolve)) if answer is not None],
+            "addable": self.addable, "concurrent": list(self.concurrent), "control_window": self.control_window,
             "announces": self.announce[0] if self.announce is not None else "",
-            "identity": self.identity,
+            "identity": self.identity, "resources": list(self.resources),
         }
 
 

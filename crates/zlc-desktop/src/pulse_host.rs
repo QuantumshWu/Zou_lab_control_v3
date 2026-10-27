@@ -288,10 +288,7 @@ fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Res
     use std::os::windows::process::CommandExt;
     let server = std::env::current_exe().map_err(|error| error.to_string())?.with_file_name("zlc-pulse-server.exe");
     if !server.is_file() { return Err(format!("{} is not built", server.display())); }
-    let mut arguments = vec!["--host".to_owned(), zlc_fabric::bind_address(), "--admission".to_owned(), "stdin".to_owned(),
-                             "--backend".to_owned(), parameters["backend"].as_str().unwrap_or("auto").to_owned(),
-                             "--port".to_owned(), parameters["port"].as_u64().unwrap_or(0).to_string()];
-    if let Some(port) = parameters["uart_port"].as_str().filter(|port| !port.trim().is_empty()) { arguments.extend(["--uart-port".to_owned(), port.trim().to_owned()]); }
+    let (backend, arguments) = server_arguments(parameters)?;
     // A console program, given no console window; its errors go where this application's go.
     let mut child = std::process::Command::new(&server).args(&arguments).stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit())
@@ -312,7 +309,7 @@ fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Res
         for line in lines.map_while(Result::ok) { if let Some(line) = narration(&line) { narrate(line); } }
     });
     // A JTAG board waits for Vivado to come up and open its target first.
-    let startup = if matches!(parameters["backend"].as_str(), Some("uart" | "memory")) { Duration::ZERO } else { zlc_pulse::axi::STARTUP_TIMEOUT };
+    let startup = if matches!(backend, "uart" | "memory") { Duration::ZERO } else { zlc_pulse::axi::STARTUP_TIMEOUT };
     let port = match port.recv_timeout(Duration::from_secs(60) + startup) {
         Ok(Some(port)) => port,
         _ => { let _ = child.kill(); return Err("the local pulse server did not start (see its log)".into()); }
@@ -320,6 +317,60 @@ fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Res
     match Board::remote("127.0.0.1", port) {
         Ok(board) => Ok((board, Served { child, port, control })),
         Err(error) => { let _ = child.kill(); Err(error.message) }
+    }
+}
+
+/// The local server's backend and command line for a row. It never probes a port: Init found
+/// the board's UART first (`resolve`), so `auto` with none found is its JTAG cable, `uart`
+/// without a port is refused, and a port the row names is the only one it opens.
+fn server_arguments(parameters: &Value) -> Result<(&str, Vec<String>), String> {
+    let port = parameters["uart_port"].as_str().map(str::trim).filter(|port| !port.is_empty());
+    let backend = match (parameters["backend"].as_str().unwrap_or("auto"), port) {
+        ("auto", None) => "jtag-axi",
+        ("uart", None) => return Err("no UART port: Init finds it, or set one".into()),
+        (backend, _) => backend,
+    };
+    let mut arguments = vec!["--host".to_owned(), zlc_fabric::bind_address(), "--admission".to_owned(), "stdin".to_owned(),
+                             "--backend".to_owned(), backend.to_owned(), "--port".to_owned(), parameters["port"].as_u64().unwrap_or(0).to_string()];
+    if let Some(port) = port { arguments.extend(["--uart-port".to_owned(), port.to_owned()]); }
+    Ok((backend, arguments))
+}
+
+/// How long the local board's UART is looked for on Init: what its server's start was given for the same probe.
+pub const RESOLVE_WAIT: Duration = Duration::from_secs(60);
+
+/// `resolve` of the local board (`sequencer.local`) before it opens: its blank UART port, looked
+/// for on the free ports only (a bound one -- an IMU's COM3 -- is never opened) with the server's
+/// own handshake, against the deployed config its server loads. A JTAG or memory board has nothing
+/// to find; `auto` with no UART answering opens over JTAG, `uart` fails with what it tried.
+pub fn resolve(type_id: &str, parameters: &Value, excluded: &[String], wait: Duration) -> Result<Value, String> {
+    if type_id != "sequencer.local" { return Err(format!("{type_id} finds nothing before it opens")); }
+    let backend = parameters["backend"].as_str().unwrap_or("auto").to_owned();
+    if matches!(backend.as_str(), "jtag-axi" | "memory") { return Ok(json!({"parameters": {}, "note": ""})); }
+    let bound: Vec<String> = excluded.iter().filter_map(|resource| resource.strip_prefix("serial:")).map(str::to_owned).collect();
+    let (sender, answer) = mpsc::channel();
+    std::thread::Builder::new().name("zlc-pulse-probe".into()).spawn(move || {
+        let (free, passed) = zlc_pulse::serial::free_ports(&zlc_pulse::serial::list_com_ports(), &bound);
+        let probed = (|| -> zlc_pulse::Result<_> {
+            let found = zlc_pulse::wire::load_streamer_config(None)?;
+            let source = found.source.clone().ok_or_else(|| zlc_pulse::Error::new(zlc_pulse::Kind::Value, format!("no deployed streamer config: {}", found.warnings.join("; "))))?;
+            let config = zlc_pulse::wire::require_streamer_config(&source)?;
+            let target = zlc_pulse::manifest::target_from_config(&config, None, None)?;
+            Ok(zlc_pulse::serial::find_board_uart(&free, config.uart_baud, config.params, config.clock_hz, &target))
+        })();
+        let _ = sender.send(probed.map(|(port, attempts)| (port, attempts, passed)).map_err(|error| error.message));
+    }).map_err(|error| error.to_string())?;
+    let (port, attempts, passed) = answer.recv_timeout(wait).unwrap_or_else(|_| Err(format!("its UART was not found within {} s", wait.as_secs())))?;
+    // What it tried (the one that answered aside) and what it passed over, as the line says them.
+    let mut said: Vec<String> = Vec::new();
+    let tried = &attempts[..attempts.len() - usize::from(port.is_some())];
+    if !tried.is_empty() { said.push(format!("tried {}", tried.join("; "))); }
+    if !passed.is_empty() { said.push(format!("passed over {}: bound", passed.join(", "))); }
+    let context = if said.is_empty() { String::new() } else { format!(" ({})", said.join("; ")) };
+    match port {
+        Some(port) => Ok(json!({"parameters": {"uart_port": port}, "note": format!("board UART found on {port}{context}")})),
+        None if backend == "uart" => Err(format!("no board UART on the free ports{}", if context.is_empty() { " (no COM port is free)".to_owned() } else { context })),
+        None => Ok(json!({"parameters": {}, "note": format!("no board UART on the free ports{context}; opening over JTAG")})),
     }
 }
 
@@ -387,11 +438,17 @@ pub fn device_descriptors() -> Vec<Value> {
                json!([{"name": "backend", "type": "choice", "label": "Board transport", "default": "auto",
                        "choices": [{"value": "auto", "label": "Auto (UART, else JTAG)"}, {"value": "uart", "label": "UART"},
                                    {"value": "jtag-axi", "label": "JTAG-to-AXI (Vivado)"}, {"value": "memory", "label": "Memory mock (no hardware)"}]},
-                      {"name": "uart_port", "type": "str", "label": "UART port (blank = probe)", "default": ""},
+                      {"name": "uart_port", "type": "str", "label": "UART port (blank = found on Init)", "default": ""},
                       {"name": "port", "type": "int", "label": "Serve on port", "default": zlc_pulse::remote::DEFAULT_PORT, "minimum": 1, "maximum": 65535},
                       config_file])),
     ];
-    for item in &mut types { if item["type_id"] == "sequencer.local" { item["announces"] = json!(ANNOUNCED_AS); } }
+    // The local board binds its UART, which Init finds when the row leaves it blank (`resolve`):
+    // no other row, scan or resolve touches it, and its server never probes for it.
+    for item in &mut types {
+        if item["type_id"] == "sequencer.local" {
+            (item["announces"], item["resources"], item["queries"]) = (json!(ANNOUNCED_AS), json!(["serial:{uart_port}"]), json!(["resolve"]));
+        }
+    }
     // The board a row names (v2 pulse_board_identity): one pulse server serves one board, here or reached over the network.
     for (type_id, identity) in [("sequencer.hardware", "pulse-server:{host}:{port}"), ("sequencer.local", "pulse-server:127.0.0.1:{port}")] {
         if let Some(item) = types.iter_mut().find(|item| item["type_id"] == type_id) { item["identity"] = json!(identity); }
@@ -965,6 +1022,26 @@ mod tests {
             if let PulseEvent::Touched = events.recv_timeout(Duration::from_secs(30)).expect("the SAFE") { break; }
         }
         assert_eq!(board(&host).last_fire(), Some((id, Fate::Safed)));
+    }
+
+    /// The local board's UART is found on Init (it binds that port): a JTAG or memory board has
+    /// nothing to find, and its server never probes -- `auto` with none found is the JTAG cable,
+    /// `uart` without a port is refused, and a named port is the only one it opens.
+    #[test]
+    fn the_local_board_is_found_on_init_and_its_server_never_probes() {
+        let local = device_descriptors().into_iter().find(|item| item["type_id"] == "sequencer.local").unwrap();
+        assert_eq!((&local["resources"], &local["queries"]), (&json!(["serial:{uart_port}"]), &json!(["resolve"])));
+        for backend in ["jtag-axi", "memory"] {
+            let answer = resolve("sequencer.local", &json!({"backend": backend, "uart_port": ""}), &["serial:COM3".to_owned()], Duration::from_secs(1));
+            assert_eq!(answer.unwrap(), json!({"parameters": {}, "note": ""}), "{backend}");
+        }
+        let line = |parameters: Value| server_arguments(&parameters).map(|(backend, arguments)| (backend.to_owned(), arguments.join(" ")));
+        let (backend, arguments) = line(json!({"backend": "auto", "uart_port": " ", "port": 18861})).unwrap();
+        assert!(backend == "jtag-axi" && arguments.ends_with("--backend jtag-axi --port 18861"), "{arguments}");
+        let (backend, arguments) = line(json!({"backend": "auto", "uart_port": "COM5", "port": 18861})).unwrap();
+        assert!(backend == "auto" && arguments.ends_with("--backend auto --port 18861 --uart-port COM5"), "{arguments}");
+        assert_eq!(line(json!({"backend": "uart", "uart_port": ""})).unwrap_err(), "no UART port: Init finds it, or set one");
+        assert!(line(json!({"backend": "uart", "uart_port": "COM5"})).unwrap().1.ends_with("--backend uart --port 0 --uart-port COM5"));
     }
 
     /// v2 slm_rearrangement: the Pulse is loaded first and the FIRE is then the FIRE alone.

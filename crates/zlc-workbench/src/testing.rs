@@ -27,7 +27,8 @@ impl Plugins for LatePlugins {
     fn stop(&mut self, run: &str) { self.plugins.stop(run) }
     fn answer(&mut self, run: &str, request: &str, response: Option<&Value>) { self.plugins.answer(run, request, response) }
     fn acquired(&mut self, run: &str, ticket: u64, result: Result<Value, String>) { self.plugins.acquired(run, ticket, result) }
-    fn discover(&mut self, ticket: u64, type_id: &str) { self.plugins.discover(ticket, type_id) }
+    fn discover(&mut self, ticket: u64, type_id: &str, excluded: &[String]) { self.plugins.discover(ticket, type_id, excluded) }
+    fn resolve(&mut self, ticket: u64, instance: &str, type_id: &str, parameters: &Value, excluded: &[String]) { self.plugins.resolve(ticket, instance, type_id, parameters, excluded) }
     fn publish(&mut self, ticket: u64, instance: &str, role: &str, published: bool) { self.plugins.publish(ticket, instance, role, published) }
 }
 
@@ -49,7 +50,16 @@ impl Plugins for FakePlugins {
     fn stop(&mut self, run: &str) { self.calls.borrow_mut().0.push(format!("stop {run}")); }
     fn answer(&mut self, run: &str, request: &str, response: Option<&Value>) { self.calls.borrow_mut().0.push(format!("answer {run} {request} {}", response.is_some())); }
     fn acquired(&mut self, run: &str, ticket: u64, result: Result<Value, String>) { self.calls.borrow_mut().0.push(format!("acquired {run} {ticket} {}", result.is_ok())); }
-    fn discover(&mut self, ticket: u64, type_id: &str) { self.calls.borrow_mut().0.push(format!("discover {ticket} {type_id}")); }
+    fn discover(&mut self, ticket: u64, type_id: &str, excluded: &[String]) {
+        let mut calls = self.calls.borrow_mut();
+        calls.0.push(format!("discover {ticket} {type_id}"));
+        calls.2.push(("discover".into(), ticket, json!({"type_id": type_id, "excluded": excluded})));
+    }
+    fn resolve(&mut self, ticket: u64, instance: &str, type_id: &str, parameters: &Value, excluded: &[String]) {
+        let mut calls = self.calls.borrow_mut();
+        calls.0.push(format!("resolve {ticket} {instance} {type_id}"));
+        calls.2.push(("resolve".into(), ticket, json!({"instance": instance, "parameters": parameters, "excluded": excluded})));
+    }
     fn publish(&mut self, ticket: u64, instance: &str, _: &str, published: bool) { self.calls.borrow_mut().0.push(format!("publish {ticket} {instance} {published}")); }
 }
 
@@ -961,6 +971,148 @@ mod tests {
         assert_eq!(rows.iter().map(|row| row["state"].as_str().unwrap()).collect::<Vec<_>>(), ["opening", "failed", "opening"]);
         assert_eq!(rows[1]["error"], "RuntimeError: physical device 'visa:tcpip::10.0.0.5::instr' is already bound (to rf)");
         assert_eq!(count(&calls, "open rf2 rf.visa"), 0, "refused before it is opened");
+    }
+
+    /// An IMU on the serial port its row names (it scans for one), and a board whose UART Init
+    /// finds when its row leaves it blank: both bind their port.
+    fn ports_catalog() -> Value {
+        let mut catalog = catalog();
+        let types = catalog["types"].as_array_mut().unwrap();
+        types.push(json!({"type_id": "waveform.n100", "kind": "device", "family": "waveform", "label": "IMU", "resources": ["serial:{port}"], "queries": ["discover"],
+            "parameters": [{"name": "port", "type": "str", "label": "Serial port", "default": "", "blank_label": "found on Init"}]}));
+        types.push(json!({"type_id": "sequencer.local", "kind": "device", "family": "sequencer", "label": "Board", "resources": ["serial:{uart_port}"], "queries": ["resolve"],
+            "parameters": [{"name": "backend", "type": "str", "label": "Board transport", "default": "auto"},
+                           {"name": "uart_port", "type": "str", "label": "UART port (blank = found on Init)", "default": ""}]}));
+        catalog
+    }
+
+    /// A draft of these rows (id, type, settings), not applied.
+    fn ports_rig(name: &str, rows: &[(&str, &str, Value)]) -> (Workbench, Rc<RefCell<Calls>>, FakeHost) {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&scratch(name), Box::new(FakePlugins { calls: calls.clone(), catalog: ports_catalog() })).unwrap();
+        let mut host = FakeHost::default();
+        for (id, type_id, parameters) in rows {
+            apply(&mut workbench, &mut host, "add_device", json!({"type_id": type_id, "instance_id": id, "parameters": parameters})).unwrap();
+        }
+        (workbench, calls, host)
+    }
+
+    /// Every resolve asked so far: (ticket, {instance, parameters, excluded}).
+    fn resolves(calls: &Rc<RefCell<Calls>>) -> Vec<(u64, Value)> {
+        calls.borrow().2.iter().filter(|(op, ..)| op == "resolve").map(|(_, ticket, params)| (*ticket, params.clone())).collect()
+    }
+
+    /// Init finds what a row leaves blank before the row opens, while the other rows open at once: a
+    /// board's UART among the ports nothing binds, pinned into the apparatus, which then reads unsaved.
+    #[test]
+    fn init_finds_a_blank_port_on_the_free_ports_and_pins_it() {
+        let (mut wb, calls, mut host) = ports_rig("resolve", &[("sequencer", "sequencer.local", json!({})), ("n100", "waveform.n100", json!({"port": "com3"}))]);
+        apply(&mut wb, &mut host, "save_apparatus", json!({"path": "apparatus.json"})).unwrap();
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        assert_eq!(count(&calls, "open n100 waveform.n100"), 1, "the IMU opens at once");
+        assert_eq!(count(&calls, "open sequencer sequencer.local"), 0, "the board waits to be found");
+        let asked = resolves(&calls);
+        assert_eq!((asked.len(), &asked[0].1["instance"], &asked[0].1["excluded"]), (1, &json!("sequencer"), &json!(["serial:COM3"])));
+        let state = wb.apparatus_state();
+        assert_eq!((state["busy"].as_str(), state["dirty"].as_bool()), (Some("initializing devices · finding sequencer's UART port"), Some(false)));
+        assert_eq!((wb.device_rows()[0]["state"].as_str(), wb.device_rows()[0]["resolving"].as_bool()), (Some("opening"), Some(true)));
+        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"parameters": {"uart_port": "COM5"},
+            "note": "board UART found on COM5 (passed over COM3: bound)"})) }, &mut host);
+        assert_eq!(count(&calls, "open sequencer sequencer.local"), 1, "opened with what was found");
+        assert_eq!(wb.apparatus.draft[0].parameters["uart_port"], "COM5");
+        assert_eq!(wb.apparatus_state()["dirty"], true, "pinned into the apparatus, not saved");
+        assert_eq!(wb.device_rows()[0]["pending"], Value::Null, "what opened is what the apparatus says");
+        for device in ["n100", "sequencer"] { event(&mut wb, Event::Opened { instance: device.into(), working_point: json!({}) }, &mut host); }
+        assert_eq!(wb.apparatus_state()["report"]["text"], "2 devices initialized: sequencer, n100 · sequencer: board UART found on COM5 \
+                   (passed over COM3: bound), written into the apparatus -- Save to keep it");
+    }
+
+    /// One port, one row: of rows binding one resource the later is refused before it opens, however it spells it.
+    #[test]
+    fn two_rows_binding_one_port_open_only_the_first() {
+        let (mut wb, calls, mut host) = ports_rig("bound", &[("n100", "waveform.n100", json!({"port": "COM3"})),
+            ("n100b", "waveform.n100", json!({"port": r"\\.\com3"})), ("sequencer", "sequencer.local", json!({"uart_port": " COM3"}))]);
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        let rows = wb.device_rows();
+        assert_eq!(rows.iter().map(|row| row["state"].as_str().unwrap()).collect::<Vec<_>>(), ["opening", "failed", "failed"]);
+        for row in &rows[1..] { assert_eq!(row["error"], "RuntimeError: serial:COM3 is already bound (to n100)"); }
+        assert_eq!((count(&calls, "open n100b waveform.n100"), count(&calls, "open sequencer sequencer.local"), resolves(&calls).len()), (0, 0, 0));
+    }
+
+    /// A scan is handed what the apparatus binds, touches none of it, and says what it passed over.
+    #[test]
+    fn a_scan_passes_over_the_bound_ports() {
+        let (mut wb, calls, mut host) = ports_rig("scan-bound", &[("n100", "waveform.n100", json!({"port": "COM3"}))]);
+        wb.apply("discover_devices", &json!({}), &Origin::Operator, 7, &mut host);
+        let (_, ticket, asked) = calls.borrow().2.iter().find(|(op, ..)| op == "discover").cloned().unwrap();
+        assert_eq!(asked, json!({"type_id": "waveform.n100", "excluded": ["serial:COM3"]}));
+        event(&mut wb, Event::Answered { ticket, result: Ok(json!({"found": [], "notes": []})) }, &mut host);
+        assert_eq!(wb.take_replies().pop().unwrap().1.unwrap()["message"], "discovered 0 devices; camera: No module named pypylon · passed over COM3 (n100)");
+    }
+
+    /// A row whose blank port is not found fails with what its resolve tried; the others open as ever,
+    /// and Apply looks for it again.
+    #[test]
+    fn a_resolve_that_finds_nothing_fails_only_its_row() {
+        let (mut wb, calls, mut host) = ports_rig("resolve-error", &[("sequencer", "sequencer.local", json!({"backend": "uart"})), ("n100", "waveform.n100", json!({"port": "COM3"}))]);
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        let why = "no board UART on the free ports (tried COM4: timeout; passed over COM3: bound)";
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[0].0, result: Err(why.into()) }, &mut host);
+        event(&mut wb, Event::Opened { instance: "n100".into(), working_point: json!({}) }, &mut host);
+        let rows = wb.device_rows();
+        assert_eq!((rows[0]["state"].as_str(), rows[0]["error"].as_str(), rows[1]["state"].as_str()), (Some("failed"), Some(why), Some("open")));
+        assert_eq!(count(&calls, "open sequencer sequencer.local"), 0);
+        let state = wb.apparatus_state();
+        assert_eq!(state["report"]["text"], format!("1 device initialized: n100 · 1 failed -- sequencer: {why}"));
+        assert_eq!((state["action"].as_str(), wb.apparatus.draft[0].parameters["uart_port"].as_str()), (Some("apply"), Some("")));
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        assert_eq!(resolves(&calls).len(), 2, "Apply looks again");
+    }
+
+    /// Two rows to be found are found one after the other, the second passing over what the first found.
+    #[test]
+    fn rows_to_be_found_are_found_one_at_a_time() {
+        let (mut wb, calls, mut host) = ports_rig("resolve-order", &[("board", "sequencer.local", json!({})), ("board2", "sequencer.local", json!({}))]);
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        let asked = resolves(&calls);
+        assert_eq!((asked.len(), &asked[0].1["instance"], &asked[0].1["excluded"]), (1, &json!("board"), &json!([])));
+        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"parameters": {"uart_port": "COM5"}, "note": ""})) }, &mut host);
+        let asked = resolves(&calls);
+        assert_eq!((asked.len(), &asked[1].1["instance"], &asked[1].1["excluded"]), (2, &json!("board2"), &json!(["serial:COM5"])));
+        event(&mut wb, Event::Answered { ticket: asked[1].0, result: Ok(json!({"parameters": {"uart_port": "COM6"}, "note": ""})) }, &mut host);
+        assert_eq!((count(&calls, "open board sequencer.local"), count(&calls, "open board2 sequencer.local")), (1, 1));
+        let ports: Vec<&Value> = wb.apparatus.draft.iter().map(|entry| &entry.parameters["uart_port"]).collect();
+        assert_eq!(ports, [&json!("COM5"), &json!("COM6")]);
+    }
+
+    /// A row stops waiting when it is shut down or taken out by Apply: its resolve's late answer opens
+    /// and pins nothing, and the next row is asked only once that answer is in (two never probe at once).
+    #[test]
+    fn a_row_taken_out_while_it_is_found_opens_nothing() {
+        let (mut wb, calls, mut host) = ports_rig("resolve-cancel", &[("board", "sequencer.local", json!({})), ("n100", "waveform.n100", json!({"port": "COM3"}))]);
+        let found = || Ok(json!({"parameters": {"uart_port": "COM5"}, "note": "board UART found on COM5"}));
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        let first = resolves(&calls)[0].0;
+        apply(&mut wb, &mut host, "shut_down_devices", json!({})).unwrap();
+        assert_eq!(count(&calls, "close board"), 0, "nothing was opened to close");
+        event(&mut wb, Event::Closed { instance: "n100".into(), error: None }, &mut host);
+        assert_eq!(wb.apparatus_state()["report"]["text"], "devices shut down");
+        event(&mut wb, Event::Answered { ticket: first, result: found() }, &mut host);
+        assert_eq!((count(&calls, "open board sequencer.local"), wb.apparatus.draft[0].parameters["uart_port"].as_str()), (0, Some("")));
+        // Apply takes it out while it is found; a row added meanwhile waits for that answer.
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        event(&mut wb, Event::Opened { instance: "n100".into(), working_point: json!({}) }, &mut host);
+        let second = resolves(&calls)[1].0;
+        apply(&mut wb, &mut host, "remove_device", json!({"device": "board"})).unwrap();
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        assert!(!wb.devices.contains_key("board") && count(&calls, "close board") == 0);
+        apply(&mut wb, &mut host, "add_device", json!({"type_id": "sequencer.local", "instance_id": "board2"})).unwrap();
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        assert_eq!(resolves(&calls).len(), 2, "the next waits for the answer still out");
+        event(&mut wb, Event::Answered { ticket: second, result: found() }, &mut host);
+        let asked = resolves(&calls);
+        assert_eq!((asked.len(), &asked[2].1["instance"]), (3, &json!("board2")));
+        assert_eq!(count(&calls, "open board sequencer.local"), 0);
     }
 
     /// v2: a row can always be started again; a node whose plugin process was lost opens again on check or Start.

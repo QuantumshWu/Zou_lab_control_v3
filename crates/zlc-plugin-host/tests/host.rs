@@ -392,3 +392,29 @@ fn a_start_records_the_bench_its_devices_report_and_a_busy_one_is_not_lost() {
     assert!(recorded(start(None)).get("apparatus").is_none());
     host.shutdown();
 }
+
+/// A type names the resources its rows bind (and that it finds a blank one: `resolve`); its scan is
+/// handed the bound ones and touches none, a scan written before them still answers, and a row left
+/// without its port is found on a free one before it opens -- or says why not.
+#[test]
+fn scans_and_resolves_are_handed_the_bound_resources() {
+    let Some((host, _runtime, _safe, _events)) = host() else { return };
+    let catalog = host.catalog().unwrap();
+    let wired = catalog.find("test.wired").unwrap();
+    assert_eq!((wired.resources.clone(), wired.queries.clone()), (vec!["serial:{port}".to_owned()], vec!["discover".to_owned(), "resolve".to_owned()]));
+    assert!(catalog.find("test.echo").unwrap().resources.is_empty() && catalog.find("test.scanned").unwrap().queries == ["discover"]);
+    let wait = Duration::from_secs(20);
+    let scanned = host.discover("test.wired", &["serial:COM3".to_owned()], wait).unwrap();
+    assert_eq!(scanned["notes"], json!(["excluded serial:COM3"]));
+    let ports: Vec<&serde_json::Value> = scanned["found"].as_array().unwrap().iter().map(|found| &found["parameters"]["port"]).collect();
+    assert_eq!(ports, [&json!("COM4"), &json!("COM5")]);
+    let old = host.discover("test.scanned", &["serial:COM3".to_owned()], wait).unwrap();
+    assert_eq!((old["found"][0]["instance_id"].as_str(), &old["notes"]), (Some("scanned"), &json!(["scanned as before"])));
+    let pinned = host.resolve("test.wired", json!({"port": ""}), &["serial:COM3".to_owned(), "serial:COM4".to_owned()], wait).unwrap();
+    assert_eq!(pinned, json!({"parameters": {"port": "COM5"}, "note": "found on COM5 (given '')"}));
+    let all: Vec<String> = ["COM3", "COM4", "COM5"].iter().map(|port| format!("serial:{port}")).collect();
+    let refused = host.resolve("test.wired", json!({}), &all, wait).unwrap_err();
+    assert_eq!(refused.to_string(), "RuntimeError: no free wire (tried none; passed over COM3, COM4, COM5: bound)");
+    assert_eq!(host.resolve("test.echo", json!({}), &[], wait).unwrap_err().kind, ErrorKind::UnknownOp);
+    host.shutdown();
+}

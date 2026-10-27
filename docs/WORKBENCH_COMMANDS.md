@@ -117,6 +117,7 @@ Each `types` row also has `family_label` (the family in words, for card titles).
 {"instance_id": "mot_camera", "role": "mot_camera", "type_id": "camera.virtual_mot", "family": "camera",
  "parameters": {...}, "controls": [Control...],   // the draft's Init settings
  "state": "draft" | "opening" | "open" | "closing" | "failed",  // live state of this instance
+ "resolving": false,                               // opening, what it leaves blank being found first (§4.2 apply_devices)
  "pending": "add" | "change" | "remove" | null,     // what apply_devices would do to it
  "error": null | "text",
  "claimed_by": [{"node_id": "camera_measurement", "run": "camera_measurement#2", "protected_fields": ["exposure"]}],
@@ -314,11 +315,11 @@ plugin event changes `state` again (use `wait`).
 | `edit_device` | `device`, `role?`, `type_id?`, `parameters?` (partial) | control | Rename role / change type (parameters reset to the new type's defaults) / edit settings: draft only. |
 | `edit_simulation` | `values` (partial) | control | Simulation world settings of the draft. |
 | `use_template` | `template` (`virtual`/`hardware`) | control | New from template: replaces the draft. |
-| `discover_devices` | — | control | Scan hardware: every type with a scan (`types[].discoverable`) at once, in its own plugin process (PLUGIN_PROTOCOL `discover`), one 20 s deadline from the scan's start; fills `apparatus.discovered` (with each find's `type_id`) and answers `{found, message, severity}` once every family answered or the deadline passed (`discovered N devices; <families>: <reason>`, `no answer within 20s`, v2's words); a family's answer after the deadline is dropped. `apparatus.busy` says Scanning hardware; while the scan runs, or a family past the deadline still answers, `apply_devices` and another scan are refused (`hardware scan still running: <families>`). |
+| `discover_devices` | — | control | Scan hardware: every type with a scan (`types[].discoverable`) at once, in its own plugin process (PLUGIN_PROTOCOL `discover`), one 20 s deadline from the scan's start; fills `apparatus.discovered` (with each find's `type_id`) and answers `{found, message, severity}` once every family answered or the deadline passed (`discovered N devices; <families>: <reason>`, `no answer within 20s`, v2's words); a family's answer after the deadline is dropped. Every scan is handed the resources the apparatus binds (PLUGIN_PROTOCOL §2 `resources`: every row's, every live device's) and opens none of them; the line names those of a kind a scanned type binds (`· passed over COM3 (n100)`). `apparatus.busy` says Scanning hardware; while the scan runs, or a family past the deadline still answers, `apply_devices` and another scan are refused (`hardware scan still running: <families>`). |
 | `add_discovered` | `instance_id` | control | Copies a discovered entry into the draft. |
 | `load_apparatus` | `path?` | control | Replaces the draft from a `zlc.installation` file, entry by entry: an entry v2 would refuse is left out (`skipped`, with why) and the rest load; dropped settings are `notes`. The Devices@ line says both. |
 | `save_apparatus` | `path?`, `replace_unread?` | control | Writes the draft (atomic, strict). A file the draft was not read from in full (it could not be read, or entries or settings were left out: `apparatus.unread` says why) is replaced only with `replace_unread` (the window's Save goes through Save as). |
-| `apply_devices` | — | control | Init / Apply: opens what the draft adds or changes (in parallel, admitted in operator order), closes what it removes; runs that claim a closing device are stopped first. Partial failures stay per instance. |
+| `apply_devices` | — | control | Init / Apply: opens what the draft adds or changes (in parallel, admitted in operator order), closes what it removes; runs that claim a closing device are stopped first. Partial failures stay per instance. One physical resource, one row: a row binding one an earlier row or another live device binds fails before it opens (`RuntimeError: serial:COM3 is already bound (to n100)`). A row of a resolvable type that leaves a resource blank (the board's UART, an IMU's port) is `opening` and `resolving`: it is resolved first (PLUGIN_PROTOCOL `resolve`), one row at a time in operator order and handed every bound resource but its own, while every other row opens at once (`busy`: `… · finding sequencer's UART port`). What it finds is written into its draft row -- the apparatus reads unsaved; Save keeps it -- and the row opens with it under the same checks; the line says it (`sequencer: board UART found on COM5 (…), written into the apparatus -- Save to keep it`). What it cannot find fails the row with what it tried and passed over. Shut down, Close or an Apply that takes the row out drop its resolve; a late answer opens and pins nothing, and the next row is asked once it is in. |
 | `close_device` | `device` | control | Close one live instance (its claiming runs are stopped first); the draft keeps it, so `apply_devices` reopens it. |
 | `shut_down_devices` | — | control | Shut down: stops every run, closes every instance. Never refused. |
 | `read_device` | `device`, `units?` | read | Device Control open/Refresh: reads `fields` (PLUGIN_PROTOCOL ops `fields`, `values`); `units` {field: spelling} reads those fields in the operator's unit from now on (the device converts: an RF level depends on its load). |
@@ -417,6 +418,8 @@ pub trait Plugins {
     fn stop(&mut self, run: &str);
     fn answer(&mut self, run: &str, request: &str, response: Option<&Value>);     // operator input (None cancels)
     fn acquired(&mut self, run: &str, ticket: u64, result: Result<Value, String>); // reply to RunAcquire
+    fn discover(&mut self, ticket: u64, type_id: &str, excluded: &[String]);       // a type's scan; excluded: the bound resources
+    fn resolve(&mut self, ticket: u64, instance: &str, type_id: &str, parameters: &Value, excluded: &[String]); // {parameters, note}
 }
 ```
 The host's application requests map as: `run.operator_input` → `RunRequest`
@@ -473,7 +476,9 @@ window), `fit`, `selector`+`crosshair`→`selectors`, `focused_cell`→`facet_fo
 reason; an unknown parameter is ignored with a note (v2 refused the whole file). Such a
 file is `unread`: the draft shows unsaved and Save does not write back fewer devices or
 settings than it holds. A device type may declare `identity` (`visa:{resource}`): of
-two rows naming one instrument the later is refused before it opens (v2's broker). A
+two rows naming one instrument the later is refused before it opens (v2's broker); and
+`resources` (`serial:{port}`) likewise, a blank one found on Init and written back
+into the draft (§4.2 `apply_devices`). A
 device and a logic node may share an id: a node's plugin instance is `node/<id>`.
 
 ### 7.3 Task runs (`zlc.task-start` / `zlc.task-run`)

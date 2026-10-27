@@ -25,13 +25,17 @@ pub struct TypeDescriptor {
     pub commands: Vec<Value>,
     pub addable: Option<bool>,
     pub node: Option<NodeSpec>,
-    /// What a device type answers without an open instance (`discover`: its hardware scan).
+    /// What a device type answers without an open instance (`discover`: its hardware scan;
+    /// `resolve`: what a row leaves blank, found before it opens).
     pub queries: Vec<String>,
     /// The window its Control opens instead of the field form (`slm-editor`); empty for the form.
     pub control_window: String,
     /// The physical instrument a row of this type names, from its settings (v2's bound
     /// identity): `rigol-dg4000:{resource}`. Empty: every row is its own instrument.
     pub identity: String,
+    /// The physical resources a row binds, over its settings (`serial:{port}`): one bound
+    /// row per resource, and no scan or resolve touches a bound one (`apparatus::resource`).
+    pub resources: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -133,6 +137,8 @@ impl TypeDescriptor {
     pub fn label(&self) -> &str { if self.label.is_empty() { &self.type_id } else { &self.label } }
     /// A device type with a hardware scan (v2 `discover`).
     pub fn discoverable(&self) -> bool { self.is_device() && self.queries.iter().any(|query| query == "discover") }
+    /// A device type that finds what a row leaves blank before it opens (Init's resolve phase).
+    pub fn resolvable(&self) -> bool { self.is_device() && self.queries.iter().any(|query| query == "resolve") }
     /// What views list: everything except the authoring schema.
     pub fn summary(&self) -> Value {
         let mut row = json!({"type_id": self.type_id, "kind": self.kind, "family": self.family, "label": self.label(),

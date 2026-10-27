@@ -49,7 +49,11 @@ pub trait Plugins {
     /// The reply to a run's `RunAcquire`: at the child's ready or terminal.
     fn acquired(&mut self, run: &str, ticket: u64, result: Result<Value, String>);
     /// A device type's hardware scan, no instance opened: `{found: [{instance_id, role, parameters}], notes}`.
-    fn discover(&mut self, ticket: u64, type_id: &str);
+    /// `excluded`: the physical resources bound now (`serial:COM3`), which the scan touches none of.
+    fn discover(&mut self, ticket: u64, type_id: &str, excluded: &[String]);
+    /// What a row of a resolvable type leaves blank, found before it opens (no instance opened):
+    /// `{parameters: {name: value}, note}`. `excluded` as a scan's, less the row's own.
+    fn resolve(&mut self, ticket: u64, instance: &str, type_id: &str, parameters: &Value, excluded: &[String]);
     /// Device types whose scan missed its deadline and is still answering (v2 `_scan_pending`).
     fn scanning(&self) -> Vec<String> { Vec::new() }
     /// The plugin types are still being discovered (the catalogue is not in yet).
@@ -145,6 +149,8 @@ pub(crate) enum Ticket {
     Tune { device: String, request: u64 },
     Command { request: u64 },
     Discover { type_id: String },
+    /// A row's resolve before it opens.
+    Resolve { device: String },
     Publish { device: String, published: bool, request: u64 },
     /// A panel's region asked its producer what it sets (`selection_patch`).
     Selection { node: String, panel: String, selection: Value },
@@ -188,6 +194,11 @@ pub struct Workbench {
     pub(crate) applied_simulation: Option<Map<String, Value>>,
     /// A hardware scan in flight.
     pub(crate) scan: Option<apparatus::Scan>,
+    /// The resolve in flight (one at a time: two never probe at once): its ticket and its row,
+    /// None once that row stopped waiting (its answer is then only awaited, and dropped).
+    pub(crate) resolution: Option<(u64, Option<String>)>,
+    /// What this Init's or Apply's resolves found, said on its line once it settles.
+    pub(crate) found: Vec<String>,
     /// Each node's source bundle as its queries read it (`bundle`): node -> (what it was
     /// built from, the members).
     pub(crate) bundles: BTreeMap<String, (String, Value)>,
@@ -231,7 +242,8 @@ impl Workbench {
             report: (String::new(), "idle"), settling: None, settling_since: None,
             // v2 set_deriving(False) when the console is built.
             console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None,
-            tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), applied_simulation: None, scan: None, bundles: BTreeMap::new(),
+            tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), applied_simulation: None, scan: None,
+            resolution: None, found: Vec::new(), bundles: BTreeMap::new(),
             selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default() };
         let path = workbench.workspace.apparatus();
         if path.is_file() {
@@ -450,6 +462,7 @@ impl Workbench {
             }
             Ticket::Command { request } => self.replies.push((request, result)),
             Ticket::Discover { type_id } => self.discovered(&type_id, result),
+            Ticket::Resolve { device } => self.resolved(ticket, &device, result),
             Ticket::Publish { device, published, request } => self.published(&device, published, request, result),
             Ticket::Selection { node, panel, selection } => self.selection_patched(&node, &panel, &selection, result),
             Ticket::Snapshot { node, device } => self.bench_answered(&node, &device, ticket, result, host),

@@ -61,8 +61,9 @@ pub enum LiveState { Opening, Open, Closing, Failed }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Settling { Init, Apply, Close(String), Shutdown }
 
-/// A hardware scan in flight: who asked, the types still to answer, what came back.
-pub struct Scan { request: u64, asked: Vec<String>, pending: Vec<String>, found: Vec<Entry>, reasons: Vec<(String, Vec<String>)> }
+/// A hardware scan in flight: who asked, the types still to answer, what came back, and the
+/// bound resources of a kind a scanned type binds, which it passed over (`COM3 (n100)`).
+pub struct Scan { request: u64, asked: Vec<String>, pending: Vec<String>, found: Vec<Entry>, reasons: Vec<(String, Vec<String>)>, passed: Vec<String> }
 
 /// One live instance: what it was opened with and what it reports.
 pub struct Live {
@@ -87,9 +88,16 @@ pub struct Live {
     pub published: bool,
     /// The physical instrument it binds (its type's identity), while it is loaded.
     pub identity: Option<String>,
+    /// The physical resources it binds (its type's `resources`), while it is loaded.
+    pub resources: Vec<String>,
+    /// Waiting for its resolve (opening, nothing opened yet): what it leaves blank is found first.
+    pub resolving: bool,
 }
 
 const PUBLISHED: &str = "published on the bench fabric -- withdraw Remote to control it here";
+
+/// A live device holds what it binds while opening, open or closing, and after a close that failed.
+fn holds(live: &Live) -> bool { live.close_failed || matches!(live.state, LiveState::Opening | LiveState::Open | LiveState::Closing) }
 
 /// One device reading in words (zlc_ui `_readable_value`), as shown and exactly:
 /// a number in the spelling the operator picked for its row as it stands, else
@@ -128,6 +136,27 @@ fn simulation_fields() -> Vec<fields::Field> {
         {"name": "seed", "type": "int", "label": "Seed", "default": 0},
         {"name": "world_profile", "type": "str", "label": "World profile", "default": ""},
     ])).expect("simulation schema")
+}
+
+/// A template over a row's settings (`visa:{resource}`), each `{name}` its value as text.
+fn expand(template: &str, parameters: &Map<String, Value>) -> String {
+    let mut text = template.to_owned();
+    for (name, value) in parameters {
+        let value = match value { Value::String(text) => text.trim().to_owned(), Value::Null => String::new(), other => other.to_string() };
+        text = text.replace(&format!("{{{name}}}"), &value);
+    }
+    text
+}
+
+/// A resource a row binds as the core names it (PLUGIN_PROTOCOL §2 `resources`): `<kind>:<value>`,
+/// the kind lower-case; a serial port upper-case without its `\\.\` (`serial:COM3`), any other
+/// value trimmed and lower-case, as an identity is. None: its value is blank (not bound yet).
+pub(crate) fn resource(template: &str, parameters: &Map<String, Value>) -> Option<String> {
+    let expanded = expand(template, parameters);
+    let (kind, value) = expanded.split_once(':')?;
+    let kind = kind.trim().to_lowercase();
+    let value = if kind == "serial" { value.trim().trim_start_matches(r"\\.\").to_uppercase() } else { value.trim().to_lowercase() };
+    (!value.is_empty() && !value.contains('{')).then(|| format!("{kind}:{value}"))
 }
 
 /// zlc_ui.status.counted: "1 device", "2 devices".
@@ -302,12 +331,33 @@ impl Workbench {
             let why: String = self.unavailable_families().iter().map(|(reason, families)| format!("; {}: {reason}", families.join(", "))).collect();
             return Err(format!("No installed device type can scan for hardware{why}"));
         }
+        // Every scan is handed what the apparatus binds and touches none of it; the line names
+        // those of a kind a scanned type binds (a serial scan passed over COM3).
+        let bound = self.bound_resources(None);
+        let excluded: Vec<String> = bound.iter().map(|(resource, _)| resource.clone()).collect();
+        let kinds: BTreeSet<String> = types.iter().filter_map(|type_id| self.catalog.get(type_id)).flat_map(|item| &item.resources)
+            .filter_map(|template| template.split_once(':').map(|(kind, _)| kind.trim().to_lowercase())).collect();
+        let passed = bound.iter().filter_map(|(resource, role)| resource.split_once(':').filter(|(kind, _)| kinds.contains(*kind))
+            .map(|(_, value)| format!("{value} ({role})"))).collect();
         for type_id in &types {
             let ticket = self.ticket(Ticket::Discover { type_id: type_id.clone() });
-            self.plugins.discover(ticket, type_id);
+            self.plugins.discover(ticket, type_id, &excluded);
         }
-        self.scan = Some(Scan { request, asked: types.clone(), pending: types, found: Vec::new(), reasons: Vec::new() });
+        self.scan = Some(Scan { request, asked: types.clone(), pending: types, found: Vec::new(), reasons: Vec::new(), passed });
         Ok(None)
+    }
+
+    /// Every physical resource bound now, once each with the role that binds it: each draft row's,
+    /// in operator order, then each live device's that holds them (opening, open, closing, or whose
+    /// close failed). `except`: the row whose own are left out (the one being resolved).
+    pub(crate) fn bound_resources(&self, except: Option<&str>) -> Vec<(String, String)> {
+        let drafted = self.apparatus.draft.iter().map(|entry| (entry.instance_id.as_str(), entry.role.as_str(), self.resources_of(entry)));
+        let loaded = self.devices.values().filter(|live| holds(live)).map(|live| (live.entry.instance_id.as_str(), live.entry.role.as_str(), live.resources.clone()));
+        let mut bound: Vec<(String, String)> = Vec::new();
+        for (_, role, resources) in drafted.chain(loaded).filter(|(id, ..)| Some(*id) != except) {
+            for resource in resources { if !bound.iter().any(|(known, _)| *known == resource) { bound.push((resource, role.to_owned())); } }
+        }
+        bound
     }
 
     /// v2 _still_scanning: a scan, or a family still answering past its deadline, holds Init, Apply and
@@ -370,6 +420,7 @@ impl Workbench {
         let count = scan.found.len();
         let mut message = format!("discovered {count} device{}", if count == 1 { "" } else { "s" });
         for (reason, families) in &scan.reasons { message.push_str(&format!("; {}: {reason}", families.join(", "))); }
+        if !scan.passed.is_empty() { message.push_str(&format!(" · passed over {}", scan.passed.join(", "))); }
         self.apparatus.discovered = scan.found;
         let severity = if scan.reasons.is_empty() { "task" } else { "warning" };
         // v2 discover's line on the status strip.
@@ -503,26 +554,43 @@ impl Workbench {
     /// The instrument a row names (its type's identity over its settings), if its type says.
     fn identity_of(&self, entry: &Entry) -> Option<String> {
         let template = &self.catalog.get(&entry.type_id)?.identity;
-        if template.is_empty() { return None; }
-        let mut identity = template.clone();
-        for (name, value) in &entry.parameters {
-            let text = match value { Value::String(text) => text.trim().to_owned(), Value::Null => String::new(), other => other.to_string() };
-            identity = identity.replace(&format!("{{{name}}}"), &text);
-        }
-        Some(identity.to_lowercase())
+        (!template.is_empty()).then(|| expand(template, &entry.parameters).to_lowercase())
     }
 
-    fn open_entry(&mut self, entry: Entry) {
+    /// The resources a row binds as it stands (its type's over its settings; a blank one not yet).
+    fn resources_of(&self, entry: &Entry) -> Vec<String> {
+        self.catalog.get(&entry.type_id).into_iter().flat_map(|item| &item.resources).filter_map(|template| resource(template, &entry.parameters)).collect()
+    }
+
+    /// A row of a type that resolves, with a resource still blank: Init finds it before the row opens.
+    fn needs_resolving(&self, entry: &Entry) -> bool {
+        self.catalog.get(&entry.type_id).is_some_and(|item| item.resolvable() && item.resources.iter().any(|template| resource(template, &entry.parameters).is_none()))
+    }
+
+    /// Why row `id` may not bind what it names, if it may not (v2's broker: one physical thing,
+    /// one row). The rows open in the operator's order, so of two naming one the later is
+    /// refused, and so is a row naming one a loaded device holds, before it is opened (opening
+    /// takes it): the instrument a loaded device is, or a resource an earlier row or a loaded device binds.
+    fn bound(&self, id: &str, identity: Option<&str>, resources: &[String]) -> Option<String> {
+        let loaded = || self.devices.values().filter(move |other| other.entry.instance_id != id && holds(other));
+        if let Some(identity) = identity {
+            if let Some(other) = loaded().find(|other| other.identity.as_deref() == Some(identity)) {
+                return Some(format!("RuntimeError: physical device '{identity}' is already bound (to {})", other.entry.role));
+            }
+        }
+        let binders: Vec<(&str, Vec<String>)> = self.apparatus.draft.iter().take_while(|entry| entry.instance_id != id)
+            .map(|entry| (entry.role.as_str(), self.resources_of(entry))).chain(loaded().map(|other| (other.entry.role.as_str(), other.resources.clone()))).collect();
+        resources.iter().find_map(|resource| binders.iter().find(|(_, bound)| bound.contains(resource))
+            .map(|(role, _)| format!("RuntimeError: {resource} is already bound (to {role})")))
+    }
+
+    fn open_entry(&mut self, entry: Entry) { self.open_with(entry, true) }
+
+    /// Open a row; `resolve`: one with a resource still blank is found first (Init's resolve phase).
+    fn open_with(&mut self, entry: Entry, resolve: bool) {
         let context = if self.simulated(&entry.type_id) { json!({"simulation": self.apparatus.simulation}) } else { json!({}) };
         let complete = self.catalog.get(&entry.type_id).map(|item| fields::project_values(&item.parameters, &entry.parameters, true));
         let id = entry.instance_id.clone();
-        let identity = self.identity_of(&entry);
-        // v2's broker: one physical instrument is bound to one row. The rows open in the
-        // operator's order, so of two naming it the later is refused, and a row naming one
-        // a loaded device holds is refused before it is opened (opening takes it).
-        let bound = identity.as_ref().and_then(|identity| self.devices.values()
-            .find(|other| other.entry.instance_id != id && other.identity.as_ref() == Some(identity)
-                && (other.close_failed || matches!(other.state, LiveState::Opening | LiveState::Open | LiveState::Closing))).map(|other| (identity.clone(), other.entry.role.clone())));
         let failure = match (self.catalog.get(&entry.type_id), complete) {
             (None, _) => Some({
                 let words = format!("{} is not installed", entry.type_id);
@@ -531,12 +599,82 @@ impl Workbench {
             }),
             // v2: the factory's projection raised it, and _outcome names its type.
             (_, Some(Err(error))) => Some(format!("ValueError: {error}")),
-            _ => bound.map(|(identity, role)| format!("RuntimeError: physical device '{identity}' is already bound (to {role})")),
+            _ => None,
         };
+        // Found before it opens, one row at a time in the operator's order (two resolvers never probe
+        // at once); every other row opens now, beside it: no resolver touches a bound resource.
+        let resolving = failure.is_none() && resolve && self.needs_resolving(&entry);
+        // A row being found names no instrument yet (its identity may be over the blank) and is checked once found.
+        let (identity, resources) = ((!resolving).then(|| self.identity_of(&entry)).flatten(), self.resources_of(&entry));
+        let failure = failure.or_else(|| (!resolving).then(|| self.bound(&id, identity.as_deref(), &resources)).flatten());
         let state = if failure.is_some() { LiveState::Failed } else { LiveState::Opening };
-        if failure.is_none() { self.plugins.open(&id, &entry.type_id, &Value::Object(entry.parameters.clone()), &context); }
+        if failure.is_none() && !resolving { self.plugins.open(&id, &entry.type_id, &Value::Object(entry.parameters.clone()), &context); }
         self.devices.insert(id, Live { entry, state, error: failure, working_point: Value::Null, fields: None, fields_ticket: None, close_pending: false, close_failed: false, reopen: None,
-            risk: None, units: BTreeMap::new(), descriptor: None, published: false, identity });
+            risk: None, units: BTreeMap::new(), descriptor: None, published: false, identity, resources, resolving });
+        if resolving { self.next_resolution(); }
+    }
+
+    /// Ask the next row waiting to be found, in operator order, once none is in flight. It is
+    /// handed every resource bound now but its own, and touches none of them.
+    fn next_resolution(&mut self) {
+        if self.resolution.is_some() { return; }
+        let order = |id: &String| self.apparatus.draft.iter().position(|entry| entry.instance_id == *id).unwrap_or(usize::MAX);
+        let Some(id) = self.devices.iter().filter(|(_, live)| live.resolving).map(|(id, _)| id.clone()).min_by_key(order) else { return };
+        let excluded: Vec<String> = self.bound_resources(Some(&id)).into_iter().map(|(resource, _)| resource).collect();
+        let entry = self.devices[&id].entry.clone();
+        let ticket = self.ticket(Ticket::Resolve { device: id.clone() });
+        self.resolution = Some((ticket, Some(id.clone())));
+        self.plugins.resolve(ticket, &id, &entry.type_id, &Value::Object(entry.parameters), &excluded);
+    }
+
+    /// A row's resolve answered `{parameters, note}`: what it found is pinned into the apparatus
+    /// (which then reads unsaved) and the row opens with it, through the checks any row meets;
+    /// what it could not find fails the row with its words. A row that stopped waiting meanwhile
+    /// (shut down, closed, taken out by Apply) is answered by nobody. Then the next is asked.
+    pub(crate) fn resolved(&mut self, ticket: u64, id: &str, result: Result<Value, String>) {
+        if self.resolution.as_ref().map(|(asked, _)| *asked) != Some(ticket) { return; }
+        let row = self.resolution.take().and_then(|(_, row)| row);
+        if row.as_deref() == Some(id) && self.devices.get(id).is_some_and(|live| live.resolving) {
+            let mut live = self.devices.remove(id).expect("waiting");
+            match result.and_then(|answer| self.pin(&live.entry, &answer)) {
+                Ok((entry, line)) => {
+                    if let Some(line) = line { self.found.push(format!("{}: {line}", entry.role)); }
+                    self.open_with(entry, false);
+                }
+                Err(error) => {
+                    (live.state, live.error, live.resolving) = (LiveState::Failed, Some(error), false);
+                    self.devices.insert(id.to_owned(), live);
+                }
+            }
+        }
+        self.next_resolution();
+        self.settle();
+    }
+
+    /// The entry a resolve's answer opens (the values it found over the row's) and what to say of
+    /// it. They are written into the draft row while that is still what was resolved: an edit the
+    /// operator made meanwhile is theirs and stays.
+    fn pin(&mut self, entry: &Entry, answer: &Value) -> Result<(Entry, Option<String>), String> {
+        let found = answer["parameters"].as_object().cloned().unwrap_or_default();
+        let note = answer["note"].as_str().map(str::trim).filter(|note| !note.is_empty()).map(str::to_owned);
+        if found.is_empty() { return Ok((entry.clone(), note)); }
+        let mut merged = entry.parameters.clone();
+        merged.extend(found);
+        let pinned = Entry { parameters: self.draft_parameters(&entry.type_id, &merged).map_err(|error| format!("ValueError: {error}"))?, ..entry.clone() };
+        let row = self.apparatus.draft.iter_mut().find(|row| **row == *entry);
+        let kept = if let Some(row) = row { row.parameters = pinned.parameters.clone(); "written into the apparatus -- Save to keep it" }
+                   else { "not written into the apparatus (its row was edited meanwhile)" };
+        Ok((pinned, Some(note.map_or_else(|| kept.to_owned(), |note| format!("{note}, {kept}")))))
+    }
+
+    /// What a row waiting to be found leaves blank, in words: the field its first blank resource names.
+    fn blank_field(&self, entry: &Entry) -> Option<String> {
+        let item = self.catalog.get(&entry.type_id)?;
+        let template = item.resources.iter().find(|template| resource(template, &entry.parameters).is_none())?;
+        let name = template.split_once('{')?.1.split_once('}')?.0;
+        let label = item.parameters.iter().find(|field| field.name == name).map_or(name, |field| field.label.split(" (").next().unwrap_or(&field.label));
+        // "Serial port" reads "serial port" mid-line; "UART port" stays.
+        Some(if label.chars().nth(1).is_some_and(char::is_lowercase) { label.to_lowercase() } else { label.to_owned() })
     }
 
     /// The type a live instance is: the one it opened as, else its row's.
@@ -638,6 +776,7 @@ impl Workbench {
             if let Some(live) = self.devices.get_mut(&entry.instance_id) { live.entry.role = entry.role.clone(); }
         }
         for id in &reopened { self.devices.remove(id); }
+        self.found.clear();
         // Opened in the operator's order: of two rows naming one instrument the later is refused.
         let mut opened = Vec::new();
         for entry in self.apparatus.draft.clone() {
@@ -692,6 +831,13 @@ impl Workbench {
         for id in ready {
             let live = self.devices.get_mut(&id).unwrap();
             live.close_pending = false;
+            // A row still waiting to be found opened nothing: it goes at once, and its resolve's answer is nobody's.
+            if live.resolving {
+                let reopen = self.devices.remove(&id).and_then(|live| live.reopen);
+                if let Some(asked) = self.resolution.as_mut().filter(|asked| asked.1.as_deref() == Some(id.as_str())) { asked.1 = None; }
+                if let Some(entry) = reopen { self.open_entry(entry); }
+                continue;
+            }
             live.state = LiveState::Closing;
             self.plugins.close(&id);
         }
@@ -747,6 +893,7 @@ impl Workbench {
         let failed: Vec<String> = ordered.iter().filter(|live| live.state == LiveState::Failed)
             .map(|live| format!("{}: {}", live.entry.role, live.error.as_deref().unwrap_or("did not start"))).collect();
         let loaded = counted(open.len(), "device");
+        let found = std::mem::take(&mut self.found);
         let mut text = match &kind {
             Settling::Shutdown => {
                 self.report = if failed.is_empty() { ("devices shut down".into(), "task") }
@@ -759,8 +906,9 @@ impl Workbench {
             Settling::Close(id) if self.devices.get(id).is_some_and(|live| live.close_failed) => format!("{} could not be closed", self.device_role(id)),
             Settling::Close(id) => format!("{} closed · {loaded} loaded", self.device_role(id)),
         };
-        // v2 _outcome: each failure's reason on the line.
+        // v2 _outcome: each failure's reason on the line; then what a resolve found (a port now in the apparatus).
         if !failed.is_empty() { text += &format!(" · {} failed -- {}", failed.len(), failed.join("; ")); }
+        for line in &found { text += &format!(" · {line}"); }
         self.report = (text, if failed.is_empty() { "task" } else { "warning" });
     }
 
@@ -984,6 +1132,9 @@ impl Workbench {
         let action = if self.devices.is_empty() { (!self.apparatus.draft.is_empty()).then_some("init") }
             else if pending { Some("apply") } else { Some("shut_down") };
         let busy = self.devices.values().filter(|live| matches!(live.state, LiveState::Opening | LiveState::Closing)).count();
+        // The row being found says what it is finding ("finding sequencer's UART port").
+        let finding = self.resolution.as_ref().and_then(|(_, row)| self.devices.get(row.as_deref()?)).filter(|live| live.resolving)
+            .map(|live| format!(" · finding {}'s {}", live.entry.role, self.blank_field(&live.entry).unwrap_or_else(|| "settings".into()))).unwrap_or_default();
         json!({
             "path": self.apparatus.path, "dirty": self.apparatus.dirty(), "unread": self.apparatus.unread,
             "simulation": self.apparatus.simulation,
@@ -1001,7 +1152,7 @@ impl Workbench {
                         Settling::Apply => "applying device changes".to_owned(),
                         Settling::Close(id) => format!("closing {}", self.device_role(id)),
                         Settling::Shutdown => "shutting down devices".to_owned(),
-                    }).or_else(|| (busy > 0).then(|| "applying device changes".to_owned())) },
+                    }).or_else(|| (busy > 0).then(|| "applying device changes".to_owned())).map(|words| words + &finding) },
         })
     }
 
@@ -1034,6 +1185,8 @@ impl Workbench {
                 "parameters": entry.parameters,
                 "controls": descriptor.map(|item| fields::controls(&item.parameters, &entry.parameters, "device", &[])).unwrap_or_default(),
                 "state": state, "pending": pending, "error": live.and_then(|live| live.error.clone()),
+                // Opening, its blank settings being found first (Init's resolve phase).
+                "resolving": live.is_some_and(|live| live.resolving),
                 "close_failed": live.is_some_and(|live| live.close_failed),
                 "working_point": live.map(|live| live.working_point.clone()).unwrap_or(Value::Null),
                 "claimed_by": claims,
