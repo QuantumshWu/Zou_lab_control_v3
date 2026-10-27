@@ -308,6 +308,9 @@ const BASIS_SHARE: f64 = 0.6;
 /// After adding halo modes, the excluded indicators may still sum to this
 /// share of the tolerance (divided by kappa).
 const HALO_REMAINDER_SHARE: f64 = 0.25;
+/// Share of the tolerance the halo may charge for pair parts whose computed
+/// bound is too small to be worth evaluating (`HaloOptions::negligible`).
+const HALO_CHARGE_SHARE: f64 = 0.01;
 /// Signed mode pairs added per domain step at most.
 const MAXIMUM_PAIRS_PER_STEP: usize = 24;
 /// Refinements of one domain after which the limiting estimate must have
@@ -564,6 +567,7 @@ impl Run {
         // Aim a little below the halo threshold: basis estimates are cheap, so
         // a few more checkpoints cost less than overshooting the basis.
         let target = 0.8 * BASIS_SHARE * epsilon / kappa;
+        let halo_options = HaloOptions { negligible: Some(HALO_CHARGE_SHARE * epsilon / kappa), ..Default::default() };
         let groups: Vec<PopulationGroup> =
             self.groups.iter().map(|g| PopulationGroup { name: g.name.clone(), indices: g.indices.clone() }).collect();
         let mut history: Vec<(usize, f64)> = Vec::new();
@@ -598,7 +602,7 @@ impl Run {
                 match basis {
                     Ok(basis) if kappa * basis.maximum <= BASIS_SHARE * epsilon => {
                         let clock = Instant::now();
-                        let halo = dual.halo_estimate(self.core.prepared(), &view, &groups, HaloOptions::default())?;
+                        let halo = dual.halo_estimate(self.core.prepared(), &view, &groups, halo_options)?;
                         self.timing.halo_estimate += ms(clock);
                         Ok((basis, halo))
                     }
@@ -630,7 +634,7 @@ impl Run {
                                 initial: &model.initial,
                                 times: &self.times,
                             };
-                            dual.halo_estimate(self.core.prepared(), &view, &groups, HaloOptions::default())?
+                            dual.halo_estimate(self.core.prepared(), &view, &groups, halo_options)?
                         };
                         self.timing.halo_estimate += ms(clock);
                         if kappa * halo.estimate.maximum > 0.5 * BASIS_SHARE * epsilon {
