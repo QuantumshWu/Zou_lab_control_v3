@@ -1,7 +1,7 @@
 import type {Scene,DynamicsSettings,Laser,Level,InitialStateSpec} from './types.js';
 import {resolveInitialState} from './types.js';
 import {spectroscopyAnalysis} from './spectroscopy.js';
-import {classifyLasers} from './laser-regime.js';
+import {classifyLasers,farValidity} from './laser-regime.js';
 import {atomicSystem,complexPolarization,laserFrequencyDifferenceMHz,laserIntensityMWcm2,laserCarrierOffsetMHz,captureLaserFrequencyAnchor,RB87,sinCosDegrees,accurateSum} from './physics.js';
 import {FULL_MODEL_SCHEMA} from './solver-protocol.js';
 
@@ -112,6 +112,8 @@ function initialText(spec:InitialStateSpec):string {
 }
 export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSettings>,frame:'common'|'resonant'='resonant'){
  const classification=classifyLasers(scene),invalid=classification.find(c=>!c.valid);if(invalid)throw new Error(invalid.message);
+ // A static (far) laser is refused with the editor's own words (laser-regime.ts farValidity).
+ for(const l of scene.lasers)if(l.enabled&&l.regime==='far'&&laserIntensityMWcm2(l)>0){const check=farValidity(scene,l.id);if(!check.valid)throw new Error(check.message);}
  // The far lasers' static background (D-line rotating and counter-rotating
  // terms, states outside the model, Rb+ core) and its eigenbasis: the model
  // basis of H0, the collapse operators, the initial density and the result.
@@ -164,5 +166,5 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  // whether an integer relation exists between the original carrier phases.
  frequencyCoordinates:{frequenciesMHz,frequencies,driveIndices,frameIndices:states.map(s=>s.manifold==='ground'?groundPhaseIndices.get(s.F)!.slice():frequencies.map(()=>0)),frameSectors:states.map(s=>s.manifold==='ground'?0:1)},
  fieldVector:a.fieldVector,fieldMagnitudeG:a.fieldMagnitudeG,laserCount:near.length,frameFrequenciesMHz:states.map(s=>s.manifold==='ground'?groundFrames.get(s.F)!:opticalFrameMHz),
- assumptions:['远失谐光仅贡献静态背景 Stark Hamiltonian：D 线旋转与反旋转二阶光移、32 态以外能级（5S 的 6–9P；5P 的 6–10S、4–9D）和 Rb+ 芯极化（Arora & Sahoo 2012：α_c = 9.1 au，5S 另加 α_vc = −0.26 au）；混合比 |Ω/2Δ| 超过 1% 时拒绝静态处理。不包含远失谐光散射。','统一光学旋转系；每束近共振光显式保留两个基态 F 与 D1、D2 全部允许电偶极耦合。','仅去除近共振光的光学反旋转项，不按失谐或流形删除驱动矩阵元；近共振光不计 32 态以外能级与芯极化的光移。','不同光频的真实拍频显式进入 Lindblad 方程。','衰变算符变换到相同的背景本征基；不同基态超精细发射频率采用 secular 分辨（每条 D 线、每个光子偏振分量、每个基态 F 一个塌缩算符）。','初态及返回布居定义在远失谐背景本征基；参考能级不进入动力学。',initialText(initialState)]};
+ assumptions:['处理方式为“静态光移”的光仅贡献静态背景 Stark Hamiltonian：D 线旋转与反旋转二阶光移、32 态以外能级（5S 的 6–9P；5P 的 6–10S、4–9D）和 Rb+ 芯极化（Arora & Sahoo 2012：α_c = 9.1 au，5S 另加 α_vc = −0.26 au）；混合比 |Ω/2Δ| 超过 1% 时拒绝静态处理。不包含这些光的散射。','统一光学旋转系；每束“进入主方程”的光显式保留两个基态 F 与 D1、D2 全部允许电偶极耦合。','仅去除“进入主方程”的光的光学反旋转项，不按失谐或流形删除驱动矩阵元；这些光不计 32 态以外能级与芯极化的光移。','不同光频的真实拍频显式进入 Lindblad 方程。','衰变算符变换到相同的背景本征基；不同基态超精细发射频率采用 secular 分辨（每条 D 线、每个光子偏振分量、每个基态 F 一个塌缩算符）。','初态及返回布居定义在“静态光移”背景的本征基；参考能级不进入动力学。',initialText(initialState)]};
 }
