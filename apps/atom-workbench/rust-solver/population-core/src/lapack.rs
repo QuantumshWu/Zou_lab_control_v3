@@ -431,6 +431,19 @@ impl Lapack {
     pub fn complex_solve_factored(&self, lu: &[Complex64], pivots: &[i32], rhs: &[Complex64], n: usize) -> Result<Vec<Complex64>, String> {
         self.sylvester_kernel().complex_solve_factored(lu, pivots, rhs, n)
     }
+    /// Solve every column-major RHS column with one complex LU factorization.
+    pub fn complex_solve_matrix_factored(&self, lu: &[Complex64], pivots: &[i32], rhs: &[Complex64], n: usize) -> Result<Vec<Complex64>, String> {
+        if n == 0 || n > i32::MAX as usize || lu.len() != n*n || pivots.len() != n || rhs.len() % n != 0 || rhs.len() / n > i32::MAX as usize {
+            return Err("Invalid complex multiple-RHS LU solve dimensions".into());
+        }
+        let mut x = rhs.to_vec();
+        if x.is_empty() { return Ok(x); }
+        let (ni, columns) = (n as i32, (rhs.len() / n) as i32);
+        let mut info = 0;
+        unsafe { (self.zgetrs)(&(b'N' as c_char), &ni, &columns, lu.as_ptr(), &ni, pivots.as_ptr(), x.as_mut_ptr(), &ni, &mut info); }
+        if info != 0 || x.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()) { return Err(format!("LAPACK zgetrs multiple-RHS failed: {info}")); }
+        Ok(x)
+    }
     pub fn eigen(&self, a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), String> {
         let ni = n as i32;
         let mut input = a.to_vec();

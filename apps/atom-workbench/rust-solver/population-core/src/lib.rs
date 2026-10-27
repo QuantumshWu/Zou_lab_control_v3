@@ -9,6 +9,8 @@ pub mod preparation;
 mod pencil;
 pub mod owned_prepared;
 mod dense_expm;
+/// The folded Fourier lattice core (first slice: steady state).
+pub mod lattice;
 
 /// Sparse row-major (CSR) complex matrix.
 pub(crate) struct Coefficient {

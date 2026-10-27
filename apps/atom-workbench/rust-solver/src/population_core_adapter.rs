@@ -59,7 +59,7 @@ fn positivity(core:&RuntimeCore,density:&[Complex64])->Result<f64,String>{
     Ok((-core.lapack().hermitian_eigen(density,32)?.0[0]).max(0.))
 }
 
-fn groups(model:&Model)->Result<(Vec<bool>,Vec<RequestedGroup>),String>{
+pub(crate) fn groups(model:&Model)->Result<(Vec<bool>,Vec<RequestedGroup>),String>{
     let mut grouped=BTreeMap::<String,Vec<usize>>::new();let mut excited=Vec::new();let mut ground=Vec::new();
     for(i,label)in model.states.iter().enumerate(){
         let mut fields=label.splitn(3,'-');let manifold=fields.next().ok_or("Missing atomic manifold label")?;
@@ -112,7 +112,7 @@ fn prepare(model:&Model)->Result<(RuntimeCore,Request),String>{
 
 /// The row gates every result reports: the largest |row sum - 1| and the
 /// first row's largest deviation from the prepared initial populations.
-fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
+pub(crate) fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
     let trace=rows.iter().map(|p|(p.iter().sum::<f64>()-1.).abs()).fold(0_f64,f64::max);
     let initial_error=rows[0].iter().zip(initial).map(|(a,b)|(a-b).abs()).fold(0_f64,f64::max);
     if trace>1e-7||initial_error>1e-10{return Err("Returned population probabilities failed fixed trace/initial checks".into());}
@@ -215,6 +215,9 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
     let started=Instant::now();options.validate_population_tolerance()?;
     if !options.steady_only&&(!options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples)){return Err("Invalid finite population grid".into());}
     if options.mean_horizon_us.is_some_and(|h|!(h.is_finite()&&h>0.)){return Err("meanHorizonUs must be a finite positive time in us, or null".into());}
+    // ATOM_POPULATION_CORE=lattice (or solverCore) serves the request with
+    // the folded-lattice core.
+    if crate::lattice_core_adapter::selected(options)?{return crate::lattice_core_adapter::solve(model,options,publish_mean,started);}
     let(mut core,request)=prepare(model)?;
     if options.steady_only{
         let clock=Instant::now();
