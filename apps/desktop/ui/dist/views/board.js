@@ -596,7 +596,7 @@ export class PanelView {
     fields = new Map();
     titles = new Map();
     model = element("select");
-    modelFace = comboFace();
+    modelFace = comboFace(this.model);
     expression = element("input");
     /** v2's "Two populations if ΔBIC >": a two-population model's evidence threshold. */
     bicGain = null;
@@ -714,7 +714,8 @@ export class PanelView {
         body.append(this.settingsStatus, this.form);
         this.settings.append(header, body);
         this.settings.addEventListener("keydown", event => {
-            if (event.key === "Escape" && !this.inlined && !(event.target instanceof HTMLInputElement)) {
+            // An open list's Esc closes the list only (v2 FluentComboBox.keyPressEvent).
+            if (event.key === "Escape" && !this.inlined && !(event.target instanceof HTMLInputElement) && !event.target.closest("select:open")) {
                 event.stopPropagation();
                 this.setSettingsOpen(false);
             }
@@ -861,7 +862,10 @@ export class PanelView {
         const title = entry?.title || (source.startsWith("@figure/") ? label : "");
         const words = title ? ` ${title}` : signal ? `@${signal}` : "";
         const shownId = panel.caption_id ?? this.id;
-        const key = JSON.stringify([shownId, words, panel.structure, panel.kind, panel.focus]);
+        // What the panel has pinned (v2 data_scope): each Scope row's axis and the coordinate it shows.
+        const pinned = (panel.controls ?? []).flatMap(control => control.section === "semantic" && control.cycle && control.cycle.index !== null
+            ? [[control.label, control.cycle.label]] : []);
+        const key = JSON.stringify([shownId, words, panel.structure, panel.kind, panel.focus, pinned]);
         if (key === this.headerKey)
             return;
         this.headerKey = key;
@@ -884,11 +888,12 @@ export class PanelView {
                 name.push({ text: words, elide: "right" });
         }
         const kind = [];
+        const domains = ["domain-repeat", "domain-point", "domain-cell"];
         if (panel.structure) {
             name.push({ text: " ", elide: null });
             for (const [line, names] of [[name, false], [kind, true]]) {
                 for (let domain = 0; domain < 3; domain++) {
-                    const className = ["domain-repeat", "domain-point", "domain-cell"][domain];
+                    const className = domains[domain];
                     if (domain)
                         line.push({ text: " × ", elide: null });
                     const items = panel.structure[domain] || [];
@@ -896,9 +901,17 @@ export class PanelView {
                     line.push({ text: "(", className, elide: null }, { text, className, elide: "middle" }, { text: ")", className, elide: null });
                 }
             }
-            // v2 _vacancy_note: why the card holds no picture, as the operator's next step.
         }
-        else
+        // The pinned coordinates close the axes' line, each in its axis's group colour: the part
+        // that changes under the operator's hands (v2 _band_fragments).
+        for (const [axis, coordinate] of pinned) {
+            const domain = panel.structure?.findIndex(items => items.some(item => String(item[0]) === axis)) ?? -1;
+            if (kind.length)
+                kind.push({ text: ", ", elide: null });
+            kind.push({ text: `${axis}=${coordinate}`, className: domains[domain], elide: "middle" });
+        }
+        // v2 _vacancy_note: why the card holds no picture, as the operator's next step.
+        if (!kind.length)
             kind.push({ text: `${this.board.plotKinds.find(item => item.id === panel.kind)?.label || panel.kind} · ${source ? "No data yet" : "Choose a signal in Setting"}`, className: "vacancy", elide: "right" });
         setFragments(this.name, name);
         setFragments(this.kind, kind);
