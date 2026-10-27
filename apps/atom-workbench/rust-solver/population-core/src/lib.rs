@@ -7,5 +7,4 @@ pub use lapack::{Complex64, Lapack};
 use lapack::Complex64 as C;
 mod parallel;
 pub mod preparation;
-mod dense_expm;
 pub mod lattice;

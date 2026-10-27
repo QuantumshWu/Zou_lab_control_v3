@@ -1,69 +1,55 @@
-//! Krylov solves on the lattice: the steady trace-row system M x = u, with
-//! M = A + u v^T (u = I/n on the centre, v its trace: the time-averaged
-//! populations are the central diagonal of x, A x = 0 and v^T x = 1 when the
-//! null vector is unique), and the shifted systems (A - sigma) w = b of the
-//! rational Krylov propagation (`finite`), sigma real or complex.
+//! GMRES on the lattice systems: the shifted systems (A - sigma) w = b of
+//! the rational Krylov columns (sigma real or complex), the steady trace-row
+//! system M x = f with M = A + u v^T (u = I/n on the centre, v its trace),
+//! on a whole lattice (`System`) or on the explicit charges with the ring
+//! eliminated (`ring`): anything that implements `LinearSystem`.
 //!
 //! Real coordinates: the fields are Hermitian-symmetric (x_-q = x_q^dagger),
-//! a real vector space that M and the preconditioner preserve, with the real
-//! inner product Re <a, b>. Inner products are summed over the canonical
-//! modes only (weight 2 for a pair, 1 for the centre) and the Hessenberg
-//! matrix, rotations and coefficients are real. A complex shift acts on the
-//! real form: a pair (w_1, w_2) of such fields for w_1 + i w_2, with
-//! (A - a) w_1 + b w_2 and (A - a) w_2 - b w_1 for sigma = a + i b.
+//! a real vector space that the operators and preconditioners preserve, with
+//! the real inner product Re <a, b>. Inner products are summed over the
+//! canonical modes only (weight 2 for a pair, 1 for the centre) and the
+//! Hessenberg matrix, rotations and coefficients are real. A complex shift
+//! acts on the real form: a pair (w_1, w_2) of such fields for w_1 + i w_2,
+//! with (A - a) w_1 + b w_2 and (A - a) w_2 - b w_1 for sigma = a + i b.
 //!
-//! Right-preconditioned restarted GMRES with a fixed preconditioner, so only
-//! the populations of P^-1 v_j are kept per step and the iterate is formed
-//! once per cycle. Orthogonalization is DCGS2 (classical Gram-Schmidt with
-//! the reorthogonalization delayed by one step): one pass over the basis
-//! takes the new image's projections together with the previous candidate's
-//! reorthogonalization coefficients, a second pass finalizes the candidate
-//! and orthogonalizes the image once, the Hessenberg column of the candidate
-//! corrected by the Arnoldi relation; two basis passes per step against four
-//! for CGS2, on the canonical modes only (the rest mirrored). The column of
-//! the latest step is provisional (once orthogonalized) for the stopping
-//! tests, and finalized with one more reorthogonalization when the cycle
-//! ends. The steady solve stops when the populations and the
-//! requested groups have stabilised (changes below the algebraic share of the
-//! tolerance for STABLE_STEPS consecutive steps) and the true relative
-//! residual, recomputed from the iterate after the cycle, is below a guard; a
-//! shifted solve stops on the true relative residual alone. The population change
-//! alone can plateau in slow directions, and the recursive GMRES residual can
-//! fall eight orders below the true one (the operator spans 1e-6 to 5e7
-//! rad/us). The longest cycle's Arnoldi relation M P^-1 V_m = V_m+1 Hbar_m
-//! is kept for the error estimate (`estimate`): the preconditioner is fixed,
-//! so every cycle's relation stays valid, and a final cycle of a few steps
-//! (a restart for the true-residual guard) holds too little of the space.
+//! Right-preconditioned restarted GMRES with a fixed preconditioner; the
+//! iterate is formed once per cycle. Orthogonalization is DCGS2 (classical
+//! Gram-Schmidt with the reorthogonalization delayed by one step): one pass
+//! over the basis takes the new image's projections together with the
+//! previous candidate's reorthogonalization coefficients, a second pass
+//! finalizes the candidate and orthogonalizes the image once, the
+//! Hessenberg column of the candidate corrected by the Arnoldi relation; two
+//! basis passes per step against four for CGS2, on the canonical modes only
+//! (the rest mirrored). The column of the latest step is provisional (once
+//! orthogonalized) for the stopping test and finalized with one more
+//! reorthogonalization when the cycle ends. A solve stops on the true
+//! relative residual, recomputed from the iterate after the cycle: the
+//! recursive GMRES residual can fall eight orders below the true one (the
+//! operator spans 1e-6 to 5e7 rad/us).
 use super::*;
 use super::operator::LatticeOperator;
 use super::preconditioner::{Preconditioner,Shift};
-use super::ledger;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
-const STABLE_STEPS:usize=3;
 /// Blocks per reduction chunk: fixed, so sums do not depend on threads.
 const VECTOR_CHUNK:usize=16;
 
 #[derive(Clone,Debug)]
 pub struct KrylovOptions{
-    /// Stop only once the populations have stabilised as well (the steady
-    /// solve), and their stability tolerance.
-    pub populations:bool,pub algebraic:f64,
-    /// Relative true-residual guard. Measured: a true residual of 3e-7 left
-    /// 1.8e-5 in the populations (two lasers + tweezer, a 1e-6 /us Raman
-    /// manifold); at 1e-8 every case is within 1e-7 of its reference.
-    pub residual_guard:f64,
+    /// Relative true-residual tolerance.
+    pub tolerance:f64,
     pub restart:usize,pub maximum_steps:usize,
     /// Krylov basis memory budget (bytes); the restart length shrinks to fit.
     pub basis_bytes:usize,
 }
-impl Default for KrylovOptions{
-    fn default()->Self{
-        Self{populations:true,algebraic:ledger::POPULATION_TOLERANCE*ledger::ALGEBRAIC_SHARE,residual_guard:1e-8,restart:80,maximum_steps:800,basis_bytes:1<<30}
-    }
+impl KrylovOptions{
+    pub fn new(tolerance:f64)->Self{Self{tolerance,restart:60,maximum_steps:900,basis_bytes:1<<30}}
 }
 #[derive(Clone,Debug,Default)]
 pub struct KrylovTiming{pub apply_ms:f64,pub precondition_ms:f64,pub orthogonalize_ms:f64}
+impl KrylovTiming{
+    pub fn add(&mut self,other:&KrylovTiming){self.apply_ms+=other.apply_ms;self.precondition_ms+=other.precondition_ms;self.orthogonalize_ms+=other.orthogonalize_ms;}
+}
 
 /// Deterministic parallel kernels on fields of `copies` Hermitian-symmetric
 /// components (one block per mode and copy).
@@ -211,28 +197,44 @@ pub fn combine(basis:&[&[C]],c:&[f64],length:usize)->Vec<C>{
     out
 }
 
-/// A system on one mode set at a shift (`Shift`: A + u v^T, the steady
-/// trace row, or A - sigma), with its preconditioner and the vector kernels.
-pub struct System<'a,'p>{
-    pub op:LatticeOperator<'a>,
-    pub pre:&'p mut dyn Preconditioner,
+/// A linear system as GMRES sees it.
+pub trait LinearSystem{
+    /// Field length (blocks times copies).
+    fn length(&self)->usize;
+    /// The vector kernels of the field layout.
+    fn vectors(&self)->&Vectors;
+    /// y = M x.
+    fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>;
+    /// y = P^-1 x.
+    fn precondition(&mut self,x:&[C],y:&mut[C])->Result<(),String>;
+    fn timing(&mut self)->&mut KrylovTiming;
+}
+
+/// A system on a whole lattice at a shift (`Shift`: A + u v^T, the steady
+/// trace row, or A - sigma), with its preconditioner.
+pub struct System<'s,'a>{
+    pub op:&'s mut LatticeOperator<'a>,
+    pub pre:&'s mut dyn Preconditioner,
     pub shift:Shift,
-    pub vectors:Vectors,
+    vectors:Vectors,
     /// Field indices of the central populations (the first copy).
-    pub watch:Vec<usize>,
+    watch:Vec<usize>,
     pub timing:KrylovTiming,
     /// Operator applications (a complex shift's real form takes two per
     /// system application) and preconditioner applications.
     pub applications:usize,pub preconditions:usize,
 }
-impl<'a,'p> System<'a,'p>{
-    pub fn new(op:LatticeOperator<'a>,pre:&'p mut dyn Preconditioner,shift:Shift)->Result<Self,String>{
-        let n=op.n;let c0=op.centre*n*n;let watch=(0..n).map(|i|c0+i*n+i).collect();let vectors=Vectors::new(&op,shift.copies())?;
+impl<'s,'a> System<'s,'a>{
+    pub fn new(op:&'s mut LatticeOperator<'a>,pre:&'s mut dyn Preconditioner,shift:Shift)->Result<Self,String>{
+        let n=op.n;let c0=op.centre*n*n;let watch=(0..n).map(|i|c0+i*n+i).collect();let vectors=Vectors::new(op,shift.copies())?;
         Ok(Self{op,pre,shift,vectors,watch,timing:KrylovTiming::default(),applications:0,preconditions:0})
     }
-    pub fn length(&self)->usize{self.op.dimension()*self.shift.copies()}
-    /// y = M x (the trace row, or the shift).
-    pub fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{
+}
+impl LinearSystem for System<'_,'_>{
+    fn length(&self)->usize{self.op.dimension()*self.shift.copies()}
+    fn vectors(&self)->&Vectors{&self.vectors}
+    fn timing(&mut self)->&mut KrylovTiming{&mut self.timing}
+    fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{
         let start=Instant::now();
         match self.shift{
             Shift::Steady=>{self.op.apply(x,y)?;let n=self.watch.len();let t=self.watch.iter().fold(ZERO,|s,&k|C{re:s.re+x[k].re,im:s.im+x[k].im});
@@ -241,51 +243,29 @@ impl<'a,'p> System<'a,'p>{
             Shift::Complex(sigma)=>{
                 let size=self.op.dimension();let(x1,x2)=x.split_at(size);let(y1,y2)=y.split_at_mut(size);
                 self.op.apply(x1,y1)?;self.op.apply(x2,y2)?;self.applications+=2;
-                for k in 0..size{let(a,b)=(x1[k],x2[k]);
-                    y1[k].re+=-sigma.re*a.re+sigma.im*b.re;y1[k].im+=-sigma.re*a.im+sigma.im*b.im;
-                    y2[k].re+=-sigma.re*b.re-sigma.im*a.re;y2[k].im+=-sigma.re*b.im-sigma.im*a.im;}
+                shift_pair(sigma,x1,x2,y1,y2);
             }
         }
         self.timing.apply_ms+=start.elapsed().as_secs_f64()*1e3;Ok(())
     }
-    /// y = P^-1 x.
-    pub fn precondition(&mut self,x:&[C],y:&mut[C])->Result<(),String>{
+    fn precondition(&mut self,x:&[C],y:&mut[C])->Result<(),String>{
         let start=Instant::now();self.pre.apply(x,y)?;
         self.timing.precondition_ms+=start.elapsed().as_secs_f64()*1e3;self.preconditions+=1;Ok(())
     }
-    /// The central populations of a field.
-    pub fn populations(&self,x:&[C])->Vec<f64>{self.watch.iter().map(|&k|x[k].re).collect()}
-    /// The right-hand side u.
-    pub fn source(&self)->Vec<C>{
-        let n=self.watch.len();let mut b=vec![ZERO;self.length()];for &k in &self.watch{b[k]=C{re:1./n as f64,im:0.};}b
-    }
+}
+/// (y_1, y_2) -= sigma (x_1 + i x_2) in the real form.
+pub fn shift_pair(sigma:C,x1:&[C],x2:&[C],y1:&mut[C],y2:&mut[C]){
+    for k in 0..x1.len(){let(a,b)=(x1[k],x2[k]);
+        y1[k].re+=-sigma.re*a.re+sigma.im*b.re;y1[k].im+=-sigma.re*a.im+sigma.im*b.im;
+        y2[k].re+=-sigma.re*b.re-sigma.im*a.re;y2[k].im+=-sigma.re*b.im-sigma.im*a.im;}
 }
 
-/// The last GMRES cycle's Arnoldi relation M P^-1 V_m = V_m+1 Hbar_m in
-/// factored form: Hbar_m = Q_H [R; 0] with Q_H the product of the Givens
-/// rotations.
-pub struct Arnoldi{
-    /// v_1 .. v_m+1 (v_m+1 is zero when the relation closed exactly).
-    pub basis:Vec<Vec<C>>,
-    /// Givens rotations (c, s): rotation j acts on rows j, j+1.
-    pub rotations:Vec<(f64,f64)>,
-    /// R by columns (column j has j+1 entries).
-    pub r:Vec<Vec<f64>>,
-    /// Central populations of P^-1 v_j, j < m.
-    pub diagonal:Vec<Vec<f64>>,
-}
-impl Arnoldi{
-    pub fn steps(&self)->usize{self.r.len()}
-    /// Q_H^T t (t has m + 1 entries).
-    pub fn rotate(&self,t:&mut[f64]){
-        for(j,&(c,s))in self.rotations.iter().enumerate(){let(a,b)=(t[j],t[j+1]);t[j]=c*a+s*b;t[j+1]=-s*a+c*b;}
-    }
-    /// Q_H t.
-    pub fn unrotate(&self,t:&mut[f64]){
-        for(j,&(c,s))in self.rotations.iter().enumerate().rev(){let(a,b)=(t[j],t[j+1]);t[j]=c*a-s*b;t[j+1]=s*a+c*b;}
-    }
-    /// R^-1 g (g has m entries).
-    pub fn back_substitute(&self,g:&[f64])->Vec<f64>{
+/// A cycle's Hessenberg matrix in factored form, Hbar = Q_H [R; 0] with
+/// Q_H the product of the Givens rotations.
+struct Hessenberg{rotations:Vec<(f64,f64)>,r:Vec<Vec<f64>>}
+impl Hessenberg{
+    /// R^-1 g (g has as many entries as R has columns).
+    fn back_substitute(&self,g:&[f64])->Vec<f64>{
         let m=self.r.len();let mut y=vec![0.;m];
         for i in(0..m).rev(){let mut s=g[i];for l in i+1..m{s-=self.r[l][i]*y[l];}y[i]=s/self.r[i][i];}
         y
@@ -293,11 +273,9 @@ impl Arnoldi{
 }
 
 pub struct Krylov{
-    pub x:Vec<C>,pub steps:usize,pub restarts:usize,pub restart:usize,pub stop:&'static str,
-    /// The true relative residual |u - M x| / |u| of the returned iterate.
+    pub x:Vec<C>,pub steps:usize,pub restarts:usize,pub stop:&'static str,
+    /// The true relative residual |b - M x| / |b| of the returned iterate.
     pub residual:f64,
-    /// The longest cycle's Arnoldi relation.
-    pub arnoldi:Arnoldi,
 }
 
 /// Applies the rotations to a new Hessenberg column (j + 2 entries) and
@@ -310,46 +288,47 @@ fn givens(rotations:&[(f64,f64)],column:&[f64])->(Vec<f64>,(f64,f64)){
     column[j]=size;column.truncate(j+1);(column,rotation)
 }
 
-/// Solves M x = b from x0 (zero when None).
-pub fn gmres(system:&mut System<'_,'_>,b:&[C],x0:Option<Vec<C>>,groups:&[Vec<usize>],options:&KrylovOptions)->Result<Krylov,String>{
+/// Solves M x = b from x0 (zero when None). Returns the iterate also when
+/// restarting no longer reduces the true residual (`stop` =
+/// "true-residual-floor"): the caller compares `residual` with its
+/// tolerance.
+pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],x0:Option<Vec<C>>,options:&KrylovOptions)->Result<Krylov,String>{
     let length=system.length();
-    let bnorm=system.vectors.norm(b);
+    let bnorm=system.vectors().norm(b);
+    if !(bnorm>0.){return Err("Lattice GMRES source is zero".into());}
     let fit=(options.basis_bytes/(length*std::mem::size_of::<C>())).saturating_sub(2);
     let restart=options.restart.min(fit).max(8);
     let mut x=x0.unwrap_or_else(||vec![ZERO;length]);let(mut z,mut w)=(vec![ZERO;length],vec![ZERO;length]);
-    let mut previous:Option<Vec<f64>>=None;let mut changes:Vec<f64>=Vec::new();
     let(mut steps,mut restarts)=(0,0);
-    if bnorm==0.{return Err("Lattice steady source is zero".into());}
-    // r = b - M x, recomputed from x after every cycle (see the module
-    // documentation).
     let mut r=b.to_vec();
     if x.iter().any(|v|nonzero(*v)){system.apply(&x,&mut w)?;for((a,&bb),c)in r.iter_mut().zip(b).zip(&w){*a=C{re:bb.re-c.re,im:bb.im-c.im};}}
-    let mut last_true=system.vectors.norm(&r)/bnorm;
-    let mut longest:Option<Arnoldi>=None;
+    let mut last_true=system.vectors().norm(&r)/bnorm;
+    if last_true<=options.tolerance{return Ok(Krylov{x,steps,restarts,stop:"initial",residual:last_true});}
     loop{
-        let beta=system.vectors.norm(&r);
-        let mut arnoldi=Arnoldi{basis:vec![r.iter().map(|v|scaled(*v,1./beta)).collect()],rotations:vec![],r:vec![],diagonal:vec![]};
+        let beta=system.vectors().norm(&r);
+        let mut basis:Vec<Vec<C>>=vec![r.iter().map(|v|scaled(*v,1./beta)).collect()];
+        let mut hessenberg=Hessenberg{rotations:vec![],r:vec![]};
         let mut g=vec![beta];
         // Final (unrotated) Hessenberg columns, and the latest column's
         // once-orthogonalized coefficients: the last basis vector is then
         // the unnormalized candidate.
         let mut columns:Vec<Vec<f64>>=Vec::new();let mut provisional:Option<Vec<f64>>=None;
-        let xdiag=system.populations(&x);
         let mut y=Vec::new();let mut stopped:Option<&'static str>=None;
         for j in 0..restart{
-            system.precondition(&arnoldi.basis[j],&mut z)?;let zpop=system.populations(&z);
+            system.precondition(&basis[j],&mut z)?;
             system.apply(&z,&mut w)?;
             let start=Instant::now();
-            let(done,rest)=arnoldi.basis.split_at_mut(j);let u=&mut rest[0];
+            let(done,rest)=basis.split_at_mut(j);let u=&mut rest[0];
             let refs:Vec<&[C]>=done.iter().map(|v|v.as_slice()).collect();
             // The candidate's reorthogonalization coefficients a and the
             // image's projections, one pass; alpha by Pythagoras unless the
             // candidate was mostly inside the span (then explicitly).
-            let(mut a,projections,mut uu,mut uw)=system.vectors.fused_dots(&refs,u,&w);
+            let vectors=system.vectors();
+            let(mut a,projections,mut uu,mut uw)=vectors.fused_dots(&refs,u,&w);
             let inside=a.iter().map(|v|v*v).sum::<f64>();let explicit=!(uu-inside>0.25*uu);
             if explicit{
-                system.vectors.subtract(&refs,&a,u)?;let again=system.vectors.dots(&refs,u);system.vectors.subtract(&refs,&again,u)?;
-                for(x,y)in a.iter_mut().zip(again){*x+=y;}uu=system.vectors.dot(u,u);uw=system.vectors.dot(u,&w);
+                vectors.subtract(&refs,&a,u)?;let again=vectors.dots(&refs,u);vectors.subtract(&refs,&again,u)?;
+                for(x,y)in a.iter_mut().zip(again){*x+=y;}uu=vectors.dot(u,u);uw=vectors.dot(u,&w);
             }
             let alpha=(if explicit{uu}else{uu-inside}).sqrt();
             if !(alpha>0.&&alpha.is_finite()){return Err("Lattice GMRES basis broke down".into());}
@@ -357,11 +336,9 @@ pub fn gmres(system:&mut System<'_,'_>,b:&[C],x0:Option<Vec<C>>,groups:&[Vec<usi
             // Column j - 1 final: its coefficients plus a, and alpha.
             if let Some(mut column)=provisional.take(){
                 for(x,y)in column.iter_mut().zip(&a){*x+=y;}column.push(alpha);
-                let(rcol,(c,s))=givens(&arnoldi.rotations,&column);
-                arnoldi.rotations.push((c,s));arnoldi.r.push(rcol);let gj=g[j-1];g[j-1]=c*gj;g.push(-s*gj);columns.push(column);
+                let(rcol,(c,s))=givens(&hessenberg.rotations,&column);
+                hessenberg.rotations.push((c,s));hessenberg.r.push(rcol);let gj=g[j-1];g[j-1]=c*gj;g.push(-s*gj);columns.push(column);
             }
-            let mut pop=zpop;for(d,&ai)in arnoldi.diagonal.iter().zip(&a){for(t,&v)in pop.iter_mut().zip(d){*t-=ai*v;}}
-            arnoldi.diagonal.push(pop.into_iter().map(|v|v/alpha).collect());
             // A P^-1 v_j = (w - V e) / alpha with e = Hbar a; its projections
             // h on v_0..v_j, assuming the basis orthonormal.
             let mut e=vec![0.;j+1];for(column,&ai)in columns.iter().zip(&a){for(t,&v)in e.iter_mut().zip(column){*t+=v*ai;}}
@@ -369,66 +346,46 @@ pub fn gmres(system:&mut System<'_,'_>,b:&[C],x0:Option<Vec<C>>,groups:&[Vec<usi
             let mut h:Vec<f64>=(0..j).map(|i|(projections[i]-e[i])/alpha).collect();h.push((along-e[j])/alpha);
             let coefficients:Vec<f64>=e.iter().zip(&h).map(|(x,y)|x+alpha*y).collect();
             let reorthogonalize=if explicit{vec![0.;j]}else{a};
-            let hn=system.vectors.fused_update(&refs,u,&reorthogonalize,alpha,&mut w,&coefficients)?.sqrt();
-            system.timing.orthogonalize_ms+=start.elapsed().as_secs_f64()*1e3;
+            let hn=vectors.fused_update(&refs,u,&reorthogonalize,alpha,&mut w,&coefficients)?.sqrt();
+            system.timing().orthogonalize_ms+=start.elapsed().as_secs_f64()*1e3;
             steps+=1;
             // Tentative rotation of the provisional column j.
             let mut column=h.clone();column.push(hn);
-            let(rcol,(c,s))=givens(&arnoldi.rotations,&column);
+            let(_,(_,s))=givens(&hessenberg.rotations,&column);
             let residual=(s*g[j]).abs()/bnorm;
-            arnoldi.r.push(rcol);let mut gt=g.clone();gt[j]=c*g[j];y=arnoldi.back_substitute(&gt[..=j]);arnoldi.r.pop();
-            let stable=if options.populations{
-                let mut current=xdiag.clone();for(k,zk)in arnoldi.diagonal.iter().enumerate(){for(t,&v)in current.iter_mut().zip(zk){*t+=y[k]*v;}}
-                let trace:f64=current.iter().sum();let current:Vec<f64>=current.iter().map(|v|v/trace).collect();
-                let change=previous.as_ref().map_or(f64::INFINITY,|p|ledger::metric(p,&current,groups));changes.push(change);
-                previous=Some(current);
-                changes.len()>=STABLE_STEPS&&changes[changes.len()-STABLE_STEPS..].iter().all(|&c|c<options.algebraic)
-            }else{true};
-            if stable&&residual<=options.residual_guard{stopped=Some("populations-stable");}
+            if residual<=options.tolerance{stopped=Some("residual");}
             else if hn==0.{stopped=Some("exact");}
             else if residual<=1e-15{stopped=Some("residual-at-roundoff");}
             let last=stopped.is_some()||steps>=options.maximum_steps||j+1==restart;
-            if !last{arnoldi.basis.push(w.clone());provisional=Some(h);continue;}
+            if !last{basis.push(w.clone());provisional=Some(h);continue;}
             // The cycle ends: reorthogonalize the image once more, close the
-            // relation M P^-1 V_m = V_m+1 Hbar_m with column j final.
+            // relation with column j final.
             let start=Instant::now();
             let mut column=h;
-            let next=if hn>0.{
-                let refs:Vec<&[C]>=arnoldi.basis.iter().map(|v|v.as_slice()).collect();
-                let a=system.vectors.dots(&refs,&w);system.vectors.subtract(&refs,&a,&mut w)?;
-                let size=system.vectors.norm(&w);for(x,y)in column.iter_mut().zip(&a){*x+=y;}column.push(size);
-                if size>0.{w.iter().map(|v|scaled(*v,1./size)).collect()}else{vec![ZERO;length]}
-            }else{column.push(0.);vec![ZERO;length]};
-            let(rcol,(c,s))=givens(&arnoldi.rotations,&column);
-            arnoldi.rotations.push((c,s));arnoldi.r.push(rcol);let gj=g[j];g[j]=c*gj;g.push(-s*gj);
-            y=arnoldi.back_substitute(&g[..=j]);arnoldi.basis.push(next);
-            system.timing.orthogonalize_ms+=start.elapsed().as_secs_f64()*1e3;
+            if hn>0.{
+                let refs:Vec<&[C]>=basis.iter().map(|v|v.as_slice()).collect();
+                let vectors=system.vectors();
+                let a=vectors.dots(&refs,&w);vectors.subtract(&refs,&a,&mut w)?;
+                let size=vectors.norm(&w);for(x,y)in column.iter_mut().zip(&a){*x+=y;}column.push(size);
+            }else{column.push(0.);}
+            let(rcol,(c,s))=givens(&hessenberg.rotations,&column);
+            hessenberg.rotations.push((c,s));hessenberg.r.push(rcol);let gj=g[j];g[j]=c*gj;g.push(-s*gj);
+            y=hessenberg.back_substitute(&g[..=j]);
+            system.timing().orthogonalize_ms+=start.elapsed().as_secs_f64()*1e3;
             break;
         }
         // x += P^-1 (V y).
-        let combination={let basis:Vec<&[C]>=arnoldi.basis[..y.len()].iter().map(|v|v.as_slice()).collect();combine(&basis,&y,length)};
+        let combination={let refs:Vec<&[C]>=basis[..y.len()].iter().map(|v|v.as_slice()).collect();combine(&refs,&y,length)};
         system.precondition(&combination,&mut z)?;
         for(a,c)in x.iter_mut().zip(&z){add(a,*c);}
         system.apply(&x,&mut w)?;
         for((a,&bb),c)in r.iter_mut().zip(b).zip(&w){*a=C{re:bb.re-c.re,im:bb.im-c.im};}
-        let true_residual=system.vectors.norm(&r)/bnorm;
-        let arnoldi=match longest.take(){Some(l)if l.steps()>arnoldi.steps()=>l,_=>arnoldi};
-        if let Some(stop)=stopped{
-            if true_residual<=options.residual_guard{return Ok(Krylov{x,steps,restarts,restart,stop,residual:true_residual,arnoldi});}
-            // Restarting no longer reduces the true residual: its floor.
-            if true_residual>0.5*last_true{return Ok(Krylov{x,steps,restarts,restart,stop:"true-residual-floor",residual:true_residual,arnoldi});}
-        }
-        longest=Some(arnoldi);
-        if steps>=options.maximum_steps{return Err(format!("Lattice GMRES did not converge in {steps} steps (true residual {true_residual:e})"));}
+        let true_residual=system.vectors().norm(&r)/bnorm;
+        if !true_residual.is_finite(){return Err("Lattice GMRES iterate is not finite".into());}
+        if true_residual<=options.tolerance{return Ok(Krylov{x,steps,restarts,stop:stopped.unwrap_or("residual"),residual:true_residual});}
+        // Restarting no longer reduces the true residual: its floor.
+        if stopped.is_some()&&true_residual>0.5*last_true{return Ok(Krylov{x,steps,restarts,stop:"true-residual-floor",residual:true_residual});}
+        if steps>=options.maximum_steps{return Ok(Krylov{x,steps,restarts,stop:"maximum-steps",residual:true_residual});}
         last_true=true_residual;restarts+=1;
     }
-}
-
-/// x_q <- (x_q + x_-q^dagger) / 2: removes the roundoff asymmetry of a
-/// source assembled on every mode.
-pub fn symmetrize(op:&LatticeOperator<'_>,x:&mut[C]){
-    let n=op.n;let d=n*n;
-    for q in 0..op.modes.len(){let p=op.mirror[q];if p<q{continue;}
-        for i in 0..n{for j in 0..n{let(a,b)=(q*d+i*n+j,p*d+j*n+i);if p==q&&j<i{continue;}
-            let m=C{re:0.5*(x[a].re+x[b].re),im:0.5*(x[a].im-x[b].im)};x[a]=m;x[b]=conj(m);}}}
 }

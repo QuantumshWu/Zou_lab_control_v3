@@ -13,23 +13,27 @@
 //! - `classification`: explicit / fold for every nonzero charge step, and the
 //!   far + far pairs that land on near charges;
 //! - `fold`: the folded couplings K_t (closed form: diagonal inverse and
-//!   Neumann series of every far block) and the third-order fold source;
+//!   Neumann series of every far block);
 //! - `floquet`: the Floquet frames of the lattice, the micromotion kernels
-//!   shared by the preconditioner and the estimates;
-//! - `operator`: the lattice operator on a set of near charges;
+//!   shared by the preconditioner and the error estimate;
+//! - `eigenbasis`: the real eigenbasis of the folded centre generator
+//!   (request-level, `LatticePrepared::eigenbasis`): exact batched block
+//!   solves, the dressed coordinates, propagation through the dressed blocks;
+//! - `operator`: the lattice operator on a set of charges, whole or
+//!   restricted to target rows and source columns;
 //! - `preconditioner`: the Floquet-frame preconditioner with its centre
 //!   Woodbury term, for the steady trace row, real and complex shifts;
 //! - `krylov`: GMRES on the lattice systems (DCGS2 orthogonalization);
-//! - `estimate`: error equations in the primal's Krylov space (truncation,
-//!   fold) and the shell correction;
-//! - `steady`: the steady pipeline (order, estimate, acceptance);
-//! - `slow`: the slow eigenpairs of the lattice operator (conserved
-//!   quantities, the slowest relaxation, the long-time machinery);
-//! - `eigenbasis`: the real eigenbasis of the folded centre generator
-//!   (request-level, `LatticePrepared::eigenbasis`): error propagation
-//!   through the dressed blocks and exact batched block solves;
-//! - `finite`: the finite-time and long-time pipelines;
-//! - `ledger`: the tolerance, the error metric and every remainder bound.
+//! - `charge_set`: the explicit charges P of a request and their ring Q;
+//! - `poles`: the lattice P u Q and its solves at the poles;
+//! - `space`: the one rational Krylov space from x0 (poles, translations);
+//! - `reduced`: the Galerkin model in the dressed coordinates and every
+//!   output from it;
+//! - `estimate_api`: what the error estimate reads and returns;
+//!   `estimate_placeholder`: the temporary residual bound behind it;
+//! - `pipeline`: the request: lattice, space, checkpoints, acceptance;
+//! - `ledger`: the tolerance, the error metric and the fold's remainder
+//!   bounds.
 //!
 //! Layout: an n x n block is row-major (entry (i, j) at i*n+j); a field on N
 //! modes is N consecutive blocks; a superoperator as a d x d matrix (d = n^2)
@@ -44,16 +48,18 @@ pub mod generator;
 pub mod classification;
 pub mod fold;
 pub mod floquet;
+pub mod eigenbasis;
 pub mod operator;
 pub mod preconditioner;
 pub mod krylov;
-pub mod estimate;
-pub mod steady;
-pub mod slow;
-pub mod eigenbasis;
-pub mod finite;
-pub mod ledger;
+pub mod charge_set;
+pub mod poles;
+pub mod space;
+pub mod reduced;
 pub mod estimate_api;
+pub mod estimate_placeholder;
+pub mod pipeline;
+pub mod ledger;
 pub use generator::{Component,Generator,Sparse,Superop};
 
 pub(crate) const ZERO:C=C{re:0.,im:0.};
@@ -122,8 +128,8 @@ impl LatticePrepared{
         Ok(Self{source,generator,plan,fold,floquet,eigenbasis:std::sync::OnceLock::new(),lapack,timing:[source_ms,plan_ms,fold_ms,kernel_ms]})
     }
     /// The real eigenbasis of the folded centre generator, computed once per
-    /// request (about 0.7 s for 32 states) and shared: the error propagation
-    /// and the exact block solves.
+    /// request (about 0.7 s for 32 states) and shared: the exact block
+    /// solves, the dressed coordinates and the error propagation.
     pub fn eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
         self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::new(self)).as_ref().map_err(|e|e.clone())
     }
