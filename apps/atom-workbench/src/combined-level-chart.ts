@@ -14,7 +14,7 @@ const short=(s:string,width=116)=>{let out='',size=0;for(const c of s){const nex
 const pct=(p:number|undefined)=>p===undefined?'—':populationValue(p);
 /** The static shift's numerical bound (spectroscopy.ts): partitioning and states outside the model. */
 const boundText=(s:Level)=>{const b=s.shiftBound;if(!b||b.floquetMHz+b.outsideMHz===0)return '';const hz=(mhz:number)=>withUnit(mhz*1e6,'Hz',{digits:2});
- return `; 数值误差 ≤ ${hz(b.floquetMHz+b.outsideMHz)}（Floquet 分块 ${hz(b.floquetMHz)}，32 态外能级 ${hz(b.outsideMHz)}；不含原子数据的不确定度）`;};
+ return `; 数值误差 ≤ ${hz(b.floquetMHz+b.outsideMHz)}（分块 ${hz(b.floquetMHz)}，32 态外 ${hz(b.outsideMHz)}；不含原子数据的不确定度）`;};
 // Compact Fluent marker: ordinary numerals, the shared selected face and text
 // colors. Its dedicated gutter never recolors or overlays a population readout.
 const selectionNumber=(x:number,y:number,index:number,both=false)=>{const label=both?'1·2':String(index+1);return `<g class="state-selection-number" data-badge-number="${label}" data-badge-x="${x-51}" data-badge-y="${y-14}" aria-label="所选态 ${label}"><circle cx="${x-43}" cy="${y}" r="7" fill="var(--orange-dark, #A65F00)"/><text x="${x-43}" y="${y+3.5}" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">${label}</text></g>`;};

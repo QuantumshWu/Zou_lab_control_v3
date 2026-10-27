@@ -19,7 +19,6 @@ const mul=(a:Z,b:Z):Z=>({re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re});
  * master model's H0 is built on it (full-master-model.ts). */
 const ASSUMPTIONS=[
   '远失谐光的静态背景是 Floquet 准能量：D 线旋转与反旋转项、32 态以外能级（5S 的 6–9P；5P 的 6–10S、4–9D）和 Rb+ 芯极化，用能量相关的 Löwdin（Brillouin–Wigner）分块全阶求解，保留偏振、磁子态混合和多束远失谐光之间的交叉项。',
-  '每个能级给出数值误差界（Floquet 层截断、能量自洽、略去的高层 32 态外虚跃迁）。它只是数值误差，不含原子数据（矩阵元、能级、芯极化）的不确定度；后者这里不计算，通常大得多。',
   '动力学 H0 使用同一静态背景；近共振光是主方程中的显式旋转波驱动，不计入此背景。',
   '芯极化取 Arora & Sahoo 2012 的静态值（5S 9.1−0.26 au，5P 9.1 au）；未包含更高价态尾项和连续谱，高态超精细/同位素修正未分辨。',
   '32 态以外能级只与各自的精细流形耦合（数据只有矩元大小），不含经它们的 5P1/2–5P3/2 耦合；未补这些高态的散射，也未补远失谐光的散射。',
@@ -153,7 +152,7 @@ export function spectroscopyAnalysis(scene:Scene,excludedLaserId?:string,include
   }
   const status=failure?'unresolved':beams.length?'dispersive':'bare',numerics=solution&&{floquetLayers:solution.layers,clusters:solution.clusters,solves:solution.solves,floquetBoundMHz:Math.max(...solution.levels.map(l=>l.floquetBoundMHz)),outsideBoundMHz:Math.max(...solution.levels.map(l=>l.outsideBoundMHz))};
   // The scope's first line: how accurate the numbers on the chart are.
-  const accuracy=numerics?[`静态光移的数值误差：32 个能级均 ≤ ${withUnit((numerics.floquetBoundMHz+numerics.outsideBoundMHz)*1e6,'Hz',{digits:2})}（Floquet 取 ${numerics.floquetLayers} 层；各能级的界见悬停提示）。`]:[];
+  const accuracy=numerics?[`静态光移的数值误差：32 个能级均 ≤ ${withUnit((numerics.floquetBoundMHz+numerics.outsideBoundMHz)*1e6,'Hz',{digits:2})}（Floquet 取 ${numerics.floquetLayers} 层；各能级的界见悬停提示）。这只是数值误差，不含原子数据（矩阵元、能级、芯极化）的不确定度；后者这里不计算，通常大得多。`]:[];
   analysis.spectroscopy={status,backgroundLaserIds:beams.flatMap(g=>g.beams.map(b=>b.id)),excludedLaserId,modelScope:failure?'裸态位置/布居；静态总光移未定义。':beams.length?'磁场本征基上远失谐光的静态背景谱（与动力学 H0 相同）：Floquet 准能量，全阶分块求解；含偏振混合、D 线旋转与反旋转、列明高态和芯极化。':'HFS + Zeeman 裸态谱。',nearResonantLaserIds:failure&&beams.length===1?beams.flatMap(g=>g.beams.map(b=>b.id)):[],requiresDensityProjection:false,warnings:failure?[failure,...ASSUMPTIONS]:beams.length?[...accuracy,...ASSUMPTIONS]:[],maximumMixingRatio,sources:SPECTROSCOPY_SOURCES.slice(),...(numerics?{numerics}:{})};
   const zeroStates=cachedAtom(0).states;
   for(const [offset,key] of [[0,'ground'],[8,'D1'],[16,'D2']] as const)analysis[key]=analysis[key].map((state,i)=>{
