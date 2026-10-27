@@ -47,9 +47,11 @@ impl Superop{
         if self.sandwich.is_empty(){return;}
         grow(scratch,n*n);
         for(p,q)in &self.sandwich{
-            let rows=p.rows();let t=&mut scratch[..n*n];for &i in &rows{t[i*n..(i+1)*n].fill(ZERO);}
+            // P's distinct rows, from its row-sorted entries.
+            let rows=||{let mut last=usize::MAX;p.entries.iter().map(|e|e.0).filter(move|&i|{let new=i!=last;last=i;new})};
+            let t=&mut scratch[..n*n];for i in rows(){t[i*n..(i+1)*n].fill(ZERO);}
             p.left_into(n,ONE,x,t);
-            for &(l,j,b)in &q.entries{let b=mul(s,b);for &i in &rows{mul_add(&mut y[i*n+j],t[i*n+l],b);}}
+            for &(l,j,b)in &q.entries{let b=mul(s,b);for i in rows(){mul_add(&mut y[i*n+j],t[i*n+l],b);}}
         }
     }
     /// out += s M, M the row-major d x d matrix of this component.

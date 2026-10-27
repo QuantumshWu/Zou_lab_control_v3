@@ -160,9 +160,9 @@ fn lattice_json(prepared:&LatticePrepared,solution:Option<&SteadySolution>)->Val
             "steps":plan.steps.iter().map(|s|json!({"charge":s.charge,"nu":s.nu,"size":s.size,"treatment":format!("{:?}",s.treatment)})).collect::<Vec<_>>(),
             "foldTargets":plan.targets.iter().map(|t|json!({"charge":t.charge,"nu":t.nu,"pairs":t.pairs.len(),"size":t.size})).collect::<Vec<_>>(),
             "omittedTargets":plan.omitted.iter().map(|t|json!({"charge":t.charge,"nu":t.nu,"pairs":t.pairs.len(),"size":t.size})).collect::<Vec<_>>()},
-        "fold":{"backend":f.backend,"frameCondition":f.frame_condition,"woodburyRank":f.woodbury_rank,"farSources":f.far_sources,"columns":f.columns,
-            "solveResidual":f.solve_residual,"refinedSolves":f.refined,"refinedResidual":f.refined_residual,"milliseconds":f.milliseconds,
-            "phaseMs":{"solves":f.phase_ms[0],"storage":f.phase_ms[1]},"targets":targets},
+        "fold":{"farSources":f.far_sources,"columns":f.columns,"restBound":f.rest_bound,
+            "series":f.series.iter().map(|(q,rho,order)|json!({"charge":q,"ratio":rho,"order":order})).collect::<Vec<_>>(),"milliseconds":f.milliseconds,
+            "phaseMs":{"columns":f.phase_ms[0],"storage":f.phase_ms[1]},"targets":targets},
         "floquet":floquet,
         "preconditioner":solution.map(|s|json!({"kind":"floquet","woodburyMs":s.preconditioner.milliseconds,"woodburyRank":s.preconditioner.woodbury_rank})),
         "slowModes":solution.map(|s|{let m=&s.slow;json!({"conserved":m.conserved,"slowestRate":m.slowest_rate,"artifacts":m.artifacts,
@@ -540,8 +540,8 @@ mod tests{
         let(h2,rest)=p.folded_background_hamiltonian().unwrap();write("common_h2.bin",&h2);
         let far:Vec<Value>=p.plan.steps.iter().filter(|s|s.treatment==Treatment::Fold).map(|s|json!({"charge":s.charge,"nu":s.nu,"size":s.size})).collect();
         let index=json!({"common":{"targets":targets,"corrections":[],"far":far,"h2":"common_h2.bin","h2RestShare":rest,
-            "foldMs":p.timing[2],"prepareMs":ms,"diagnostics":{"backend":p.fold.diagnostics.backend,"condition":p.fold.diagnostics.frame_condition,
-            "residual":p.fold.diagnostics.solve_residual,"refined":p.fold.diagnostics.refined,"refinedResidual":p.fold.diagnostics.refined_residual}}});
+            "foldMs":p.timing[2],"prepareMs":ms,"diagnostics":{"restBound":p.fold.diagnostics.rest_bound,"phaseMs":p.fold.diagnostics.phase_ms,
+            "series":p.fold.diagnostics.series.iter().map(|(q,rho,order)|json!({"charge":q,"ratio":rho,"order":order})).collect::<Vec<_>>()}}});
         std::fs::write(dir.join("index.json"),serde_json::to_string_pretty(&index).unwrap()).unwrap();
     }
     /// The lattice operator on a request against a per-component reference
