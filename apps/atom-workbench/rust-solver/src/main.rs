@@ -8,6 +8,8 @@ use std::io::{self, BufRead, Write};
 
 mod harmonics;
 mod lattice_core_adapter;
+#[cfg(all(test,feature="validation"))]
+mod r3_probe;
 const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/2";
 const FULL_MODEL_SCHEMA: &str = "rb87-full/2";
 

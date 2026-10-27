@@ -45,10 +45,14 @@ pub struct KrylovOptions{
     pub restart:usize,pub maximum_steps:usize,
     /// Krylov basis memory budget (bytes); the restart length shrinks to fit.
     pub basis_bytes:usize,
+    /// R3 probe: a shifted solve also stops only when the central
+    /// populations of the error estimate P^-1 r are below this fraction of
+    /// |x| (the guard is tightened and the solve restarted otherwise).
+    pub population_error:Option<f64>,
 }
 impl Default for KrylovOptions{
     fn default()->Self{
-        Self{populations:true,algebraic:ledger::POPULATION_TOLERANCE*ledger::ALGEBRAIC_SHARE,residual_guard:1e-8,restart:80,maximum_steps:800,basis_bytes:1<<30}
+        Self{populations:true,algebraic:ledger::POPULATION_TOLERANCE*ledger::ALGEBRAIC_SHARE,residual_guard:1e-8,restart:80,maximum_steps:800,basis_bytes:1<<30,population_error:None}
     }
 }
 #[derive(Clone,Debug,Default)]
@@ -253,7 +257,7 @@ pub fn gmres(system:&mut System<'_,'_>,b:&[C],x0:Option<Vec<C>>,groups:&[Vec<usi
     let mut r=b.to_vec();
     if x.iter().any(|v|nonzero(*v)){system.apply(&x,&mut w)?;for((a,&bb),c)in r.iter_mut().zip(b).zip(&w){*a=C{re:bb.re-c.re,im:bb.im-c.im};}}
     let mut last_true=system.vectors.norm(&r)/bnorm;
-    let mut longest:Option<Arnoldi>=None;
+    let mut longest:Option<Arnoldi>=None;let mut guard=options.residual_guard;
     loop{
         let beta=system.vectors.norm(&r);
         let mut arnoldi=Arnoldi{basis:vec![r.iter().map(|v|scaled(*v,1./beta)).collect()],rotations:vec![],r:vec![],diagonal:vec![]};
@@ -287,7 +291,7 @@ pub fn gmres(system:&mut System<'_,'_>,b:&[C],x0:Option<Vec<C>>,groups:&[Vec<usi
                 previous=Some(current);
                 changes.len()>=STABLE_STEPS&&changes[changes.len()-STABLE_STEPS..].iter().all(|&c|c<options.algebraic)
             }else{true};
-            if stable&&residual<=options.residual_guard{stopped=Some("populations-stable");}
+            if stable&&residual<=guard{stopped=Some("populations-stable");}
             else if hn==0.{stopped=Some("exact");}
             else if residual<=1e-15{stopped=Some("residual-at-roundoff");}
             let last=stopped.is_some()||steps>=options.maximum_steps||j+1==restart;
@@ -303,7 +307,13 @@ pub fn gmres(system:&mut System<'_,'_>,b:&[C],x0:Option<Vec<C>>,groups:&[Vec<usi
         let true_residual=system.vectors.norm(&r)/bnorm;
         let arnoldi=match longest.take(){Some(l)if l.steps()>arnoldi.steps()=>l,_=>arnoldi};
         if let Some(stop)=stopped{
-            if true_residual<=options.residual_guard{return Ok(Krylov{x,steps,restarts,restart,stop,residual:true_residual,arnoldi});}
+            if true_residual<=guard{
+                let pop=match options.population_error{Some(tau)if !options.populations=>{
+                    system.precondition(&r,&mut z)?;let e=system.watch.iter().map(|&k|z[k].re*z[k].re+z[k].im*z[k].im).sum::<f64>().sqrt();
+                    let xn=system.vectors.norm(&x);Some((e/xn.max(f64::MIN_POSITIVE),tau))},_=>None};
+                match pop{Some((e,tau))if e>tau&&steps<options.maximum_steps=>{guard=true_residual*0.5*tau/e;}
+                    _=>return Ok(Krylov{x,steps,restarts,restart,stop,residual:true_residual,arnoldi})}
+            }
             // Restarting no longer reduces the true residual: its floor.
             if true_residual>0.5*last_true{return Ok(Krylov{x,steps,restarts,restart,stop:"true-residual-floor",residual:true_residual,arnoldi});}
         }

@@ -51,6 +51,9 @@ pub mod finite;
 pub mod ledger;
 #[cfg(any(test,feature="validation"))]
 pub mod dense_dressed;
+/// R3 research prototype (Floquet frames); selected at run time by
+/// ATOM_R3_PRECOND=floquet, else unused.
+pub mod floquet;
 pub use generator::{Component,Generator,Sparse,Superop};
 
 pub(crate) const ZERO:C=C{re:0.,im:0.};

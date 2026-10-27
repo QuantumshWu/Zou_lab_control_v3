@@ -51,7 +51,7 @@
 use super::*;
 use super::krylov::{self,KrylovOptions,System,Vectors};
 use super::operator::LatticeOperator;
-use super::preconditioner::{StructuredBatch,StructuredDressed};
+use super::preconditioner::StructuredDressed;
 use super::eigenbasis::BlockEigenbasis;
 use super::estimate::Shell;
 use super::ledger::{self,KAPPA,POPULATION_TOLERANCE,PopulationCharges,RemainderLedger};
@@ -277,7 +277,8 @@ impl Lattice<'_,'_>{
         let start=Instant::now();
         let j=space.basis.len()-1;let p=j%self.poles.len();
         let b:Vec<C>=space.z[space.basis[j]].iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-        let options=KrylovOptions{populations:false,residual_guard:INNER_RTOL,restart:60,maximum_steps:600,..KrylovOptions::default()};
+        let options=KrylovOptions{populations:false,residual_guard:super::floquet::inner_rtol(INNER_RTOL),restart:60,maximum_steps:600,
+            population_error:std::env::var("ATOM_R3_POP_TOL").ok().and_then(|v|v.parse().ok()),..KrylovOptions::default()};
         let solve=krylov::gmres(&mut self.systems[p],&b,None,&[],&options)?;self.inner_steps+=solve.steps;
         let mut w=solve.x;
         let refs:Vec<&[C]>=space.basis.iter().map(|&g|space.z[g].as_slice()).collect();
@@ -526,7 +527,7 @@ impl Lattice<'_,'_>{
 /// Order-k propagation with its checkpoints; None when the shell asks for
 /// the next order.
 #[allow(clippy::too_many_arguments)]
-fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,eigenbasis:&OnceLock<Result<BlockEigenbasis,String>>,
+fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,frames:Option<&super::floquet::FloquetFrames>,eigenbasis:&OnceLock<Result<BlockEigenbasis,String>>,
     order:usize,initial:&[C],times:&[f64],keep:&[usize],groups:&[Vec<usize>],tolerance:f64,checkpoints:&mut Vec<Checkpoint>)->Result<Option<FiniteSolution>,String>{
     let n=prepared.generator.n;let d=n*n;let horizon=*times.last().unwrap_or(&0.);
     let modes=prepared.modes(order)?;
@@ -540,7 +541,8 @@ fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,eigenbasis:&Once
     // term no longer helps: measured on old four lasers and three lasers +
     // tweezer, 715 and 996 shifted-solve steps without it against 706 and
     // 972 with it, at a sixth of the cost.
-    let mut batches:Vec<StructuredBatch<'_>>=poles.iter().map(|&s|dressed.batch(&first.nu,&first.canonical,&first.mirror,None,s,false)).collect::<Result<_,_>>()?;
+    let mut batches:Vec<Box<dyn super::preconditioner::Preconditioner+'_>>=poles.iter().map(|&s|->Result<Box<dyn super::preconditioner::Preconditioner+'_>,String>{
+        Ok(match frames{Some(f)=>Box::new(f.batch_with(&first,s,true,false)?),None=>Box::new(dressed.batch(&first.nu,&first.canonical,&first.mirror,None,s,false)?)})}).collect::<Result<_,_>>()?;
     let dressed_ms=clock.elapsed().as_secs_f64()*1e3;
     let vectors=Vectors::new(&first)?;
     let centre=first.centre;
@@ -560,7 +562,7 @@ fn attempt(prepared:&LatticePrepared,dressed:&StructuredDressed,eigenbasis:&Once
     let mut systems=Vec::new();let mut first=Some(first);
     for(batch,&sigma)in batches.iter_mut().zip(&poles){
         let op=match first.take(){Some(op)=>op,None=>LatticeOperator::new(prepared,&modes)?};
-        systems.push(System::shifted(op,batch,sigma)?);}
+        systems.push(System::shifted(op,batch.as_mut(),sigma)?);}
     let mut lattice=Lattice{prepared,systems,poles,vectors,translations,canonical,centre,n,d,inner_steps:0,applications:0,
         timing:FiniteTiming{dressed_ms,..Default::default()}};
     // x(0) = delta_q0 rho0.
@@ -645,10 +647,10 @@ fn propagate_within(prepared:&LatticePrepared,initial:&[C],times:&[f64],groups:&
     std::thread::scope(|scope|{
         scope.spawn(||{eigenbasis.get_or_init(||BlockEigenbasis::new(prepared));});
         let clock=Instant::now();
-        let dressed=StructuredDressed::new(prepared)?;let dressed_ms=clock.elapsed().as_secs_f64()*1e3;
+        let dressed=StructuredDressed::new(prepared)?;let frames=super::floquet::from_env(prepared)?;let dressed_ms=clock.elapsed().as_secs_f64()*1e3;
         let mut checkpoints=Vec::new();
         for order in start.unwrap_or(START_ORDER)..=MAXIMUM_ORDER{
-            if let Some(mut solution)=attempt(prepared,&dressed,&eigenbasis,order,initial,times,keep,groups,tolerance,&mut checkpoints)?{
+            if let Some(mut solution)=attempt(prepared,&dressed,frames.as_ref(),&eigenbasis,order,initial,times,keep,groups,tolerance,&mut checkpoints)?{
                 solution.timing.dressed_ms+=dressed_ms;
                 solution.timing.eigenbasis_ms=eigenbasis.get().and_then(|e|e.as_ref().ok()).map_or(0.,|e|e.milliseconds);
                 return Ok(solution);

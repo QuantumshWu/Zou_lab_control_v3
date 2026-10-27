@@ -126,6 +126,7 @@ fn embed(field:&[C],from:&[Charge],to:&[Charge],d:usize)->Vec<C>{
 pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>],purpose:Purpose)->Result<SteadySolution,String>{
     let clock=Instant::now();
     let dressed=StructuredDressed::new(prepared)?;let dressed_ms=clock.elapsed().as_secs_f64()*1e3;
+    let frames=super::floquet::from_env(prepared)?;
     let n=prepared.generator.n;let d=n*n;let options=KrylovOptions::default();
     let mut attempts:Vec<Attempt>=Vec::new();
     let mut warm:Option<(Vec<Charge>,Vec<C>)>=None;
@@ -137,9 +138,12 @@ pub fn solve(prepared:&LatticePrepared,groups:&[Vec<usize>],purpose:Purpose)->Re
         if ledger.expansion_parameter>ledger::EXPANSION_LIMIT{
             return Err(format!("Static fold expansion parameter {:e} above {:e} at near order {order}",ledger.expansion_parameter,ledger::EXPANSION_LIMIT));}
         let(nu_max,canonical,operator_work,edges)=(op.nu_max(),op.canonical_count(),op.work,op.edge_counts);
-        let mut batch=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true)?;
-        let(precondition_work,regularized)=(batch.work,batch.regularized);
-        let mut system=System::new(op,&mut batch)?;
+        let mut sbatch=None;let mut fbatch=None;
+        let(precondition_work,regularized)=match &frames{
+            Some(f)=>{let b=f.batch_with(&op,0.,true,true)?;let w=(b.work,b.moved);fbatch=Some(b);w}
+            None=>{let b=dressed.batch(&op.nu,&op.canonical,&op.mirror,Some(op.centre),0.,true)?;let w=(b.work,b.regularized);sbatch=Some(b);w}};
+        let pre:&mut dyn super::preconditioner::Preconditioner=match(&mut fbatch,&mut sbatch){(Some(f),_)=>f,(_,Some(s))=>s,_=>unreachable!()};
+        let mut system=System::new(op,pre)?;
         let mut timing=AttemptTiming{setup_ms:start.elapsed().as_secs_f64()*1e3,..Default::default()};
         // Primal.
         let start=Instant::now();

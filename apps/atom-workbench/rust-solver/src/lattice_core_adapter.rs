@@ -57,10 +57,10 @@ pub fn warmup()->Result<(),String>{
 }
 
 /// A requested population group: the eight F manifolds and all excited states.
-struct Group{name:String,indices:Vec<usize>}
+pub(crate) struct Group{pub(crate) name:String,pub(crate) indices:Vec<usize>}
 /// The ground flags and the requested groups, from the 32 state labels
 /// `manifold-F-m`.
-fn groups(model:&Model)->Result<(Vec<bool>,Vec<Group>),String>{
+pub(crate) fn groups(model:&Model)->Result<(Vec<bool>,Vec<Group>),String>{
     let mut grouped=BTreeMap::<String,Vec<usize>>::new();let mut excited=Vec::new();let mut ground=Vec::new();
     for(i,label)in model.states.iter().enumerate(){
         let mut fields=label.splitn(3,'-');let manifold=fields.next().ok_or("Missing atomic manifold label")?;
@@ -88,7 +88,7 @@ fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
 /// rho0 (row-major): `initialReal/initialImag` when given, else the state
 /// `initialIndex`. A given density must be Hermitian with trace one and
 /// positive semidefinite (to 1e-10).
-fn initial_density(model:&Model,lapack:&Lapack)->Result<Vec<Complex64>,String>{
+pub(crate) fn initial_density(model:&Model,lapack:&Lapack)->Result<Vec<Complex64>,String>{
     let n=model.dimension;let d=n*n;
     let density:Vec<Complex64>=match(&model.initial_real,&model.initial_imag){
         (Some(re),Some(im))=>{
@@ -111,7 +111,7 @@ fn initial_density(model:&Model,lapack:&Lapack)->Result<Vec<Complex64>,String>{
 }
 
 /// The model's lattice preparation in the request frame, with its phase axes.
-fn prepare(model:&Model,ground:&[bool])->Result<(LatticePrepared,harmonics::PhaseAxes),String>{
+pub(crate) fn prepare(model:&Model,ground:&[bool])->Result<(LatticePrepared,harmonics::PhaseAxes),String>{
     let axes=harmonics::model_phase_axes(model)?;
     let parts:Vec<_>=axes.parts.iter().map(|&(hi,lo)|FrequencyParts{hi,lo}).collect();
     let phases=PhaseBasis::from_parts(&parts,&axes.drive_indices)?;
