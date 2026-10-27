@@ -13,6 +13,7 @@ from .source import (
     WheeltecN100Config,
     WheeltecN100WaveformSource,
     discover_n100,
+    free_serial_ports,
 )
 
 
@@ -24,7 +25,7 @@ from .source import (
 #: Control, where the module answers with the rate it actually took.
 WHEELTEC_N100_SCHEMA = AuthoringSchema(
     (
-        AuthoringField("port", "str", "Serial port", "", required=True),
+        AuthoringField("port", "str", "Serial port", "", blank_label="found on Init"),
         AuthoringField("baud", "int", "Baud", DEFAULT_BAUD, minimum=1200),
         AuthoringField(
             "timeout_seconds", "float", "Record timeout (s)", 2.0, minimum=0.05
@@ -41,13 +42,27 @@ def _factory(key: str, values: Mapping[str, Any]) -> WheeltecN100WaveformSource:
     ))
 
 
-def _discover() -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
+def _discover(excluded: frozenset[str] = frozenset()) -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
     # No module on the air is an empty answer, as every other family gives:
     # a bench without an N100 has nothing to offer, not a fault to report.
+    # A port the apparatus binds is passed over, never opened.
     return tuple(
         discovered(f"n100_{underscored(port)}", WHEELTEC_N100_SCHEMA.project_values({"port": port}))
-        for port in discover_n100()
+        for port in discover_n100(excluded=excluded)
     ), ()
+
+
+def _resolve(values: Mapping[str, Any], excluded: frozenset[str]) -> dict[str, Any]:
+    """A row left without its port, on Init: the first free port an N100 streams on, found as a
+    scan finds one (listening only; a bound port is not opened), pinned into the apparatus."""
+
+    free, passed = free_serial_ports(excluded)
+    found = discover_n100(baud=int(values["baud"]), ports=free, first=True)
+    bound = [f"passed over {', '.join(passed)}: bound"] if passed else []
+    if not found:
+        said = "; ".join([f"listened to {', '.join(free) or 'no free port'}", *bound])
+        raise RuntimeError(f"no WHEELTEC N100 streams on the free serial ports ({said}); set its port, or power it and Init again")
+    return {"parameters": {"port": found[0]}, "note": f"N100 streaming on {found[0]}" + "".join(f" ({said})" for said in bound)}
 
 
 DEVICE_TYPES = (
@@ -58,6 +73,7 @@ DEVICE_TYPES = (
         ("waveform.source",),
         factory=_factory,
         identity="wheeltec-n100:{port}",
+        resources=("serial:{port}",),
         label="WHEELTEC N100 IMU",
         description=(
             "WHEELTEC N100 nine-axis IMU over its FDILink serial stream: magnetic field (uT), "
@@ -65,6 +81,7 @@ DEVICE_TYPES = (
             "rate is tunable and lives in the module's flash."
         ),
         discover=_discover,
+        resolve=_resolve,
     ),
 )
 

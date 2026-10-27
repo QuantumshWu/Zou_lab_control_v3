@@ -42,13 +42,13 @@ def _factory(key: str, values: Mapping[str, Any]) -> TekScopeWaveformSource:
     ))
 
 
-def _discover() -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
+def _discover(excluded: frozenset[str] = frozenset()) -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
     def found(resource: str, identity: str) -> dict[str, Any]:
         fields = identity_fields(identity)
         tail = fields[2] if len(fields) > 2 and fields[2] else underscored(resource)
         return discovered(f"scope_{tail}", TEK_SCOPE_SCHEMA.project_values({"resource": resource}))
 
-    return tuple(found(resource, identity) for resource, identity in discover_tek_scopes()), ()
+    return tuple(found(resource, identity) for resource, identity in discover_tek_scopes(excluded=excluded)), ()
 
 
 DEVICE_TYPES = (
@@ -59,6 +59,7 @@ DEVICE_TYPES = (
         ("waveform.source",),
         factory=_factory,
         identity="visa:{resource}",
+        resources=("visa:{resource}",),
         label="Tektronix oscilloscope",
         description=(
             "Tektronix DPO/MSO/MDO/TDS scope over VISA: one record per single-sequence "

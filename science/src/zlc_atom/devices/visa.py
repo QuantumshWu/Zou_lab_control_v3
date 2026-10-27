@@ -149,6 +149,15 @@ _PROBE_LOCK = threading.Lock()
 _HELD_RESOURCES: list[str] = []
 
 
+def _canonical(manager: VisaResources, name: str) -> str:
+    """A resource as one lower-case name, however it is spelled (VISA's own parse; the text itself when VISA cannot parse it)."""
+
+    try:
+        return str(manager.resource_info(name.strip()).resource_name).lower()
+    except Exception:  # noqa: BLE001 -- an unparsable name still compares as written
+        return name.strip().lower()
+
+
 def identity_fields(identity: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in str(identity).split(","))
 
@@ -167,6 +176,7 @@ def identify_resources(
     resources: VisaResources | None = None,
     *,
     timeout_seconds: float = PROBE_TIMEOUT_SECONDS,
+    excluded: frozenset[str] = frozenset(),
 ) -> tuple[tuple[str, str], ...]:
     """Every probeable resource that answered ``*IDN?``, with its answer.
 
@@ -187,11 +197,15 @@ def identify_resources(
 
     Every family that looks for its instrument this way takes its turn under
     ``_PROBE_LOCK``, and an instrument this process holds open as a device is
-    not asked at all, so no instrument is ever asked twice at once.
+    not asked at all, so no instrument is ever asked twice at once.  Nor is
+    one the apparatus binds (``excluded``, the core's ``visa:<resource>``
+    names): a row's instrument may be opening in another process, and asking
+    it ``*IDN?`` then is the same interrupted query.
     """
 
     with _PROBE_LOCK:
         manager = visa_resources() if resources is None else resources
+        bound = {_canonical(manager, item.split(":", 1)[1]) for item in excluded if item.lower().startswith("visa:")}
         listed = tuple(str(name) for name in manager.list_resources())
         probeable = probeable_resources(listed)
         if not probeable:
@@ -220,7 +234,7 @@ def identify_resources(
                     _HELD_RESOURCES
                     and str(manager.resource_info(name).resource_name)
                     in _HELD_RESOURCES
-                ):
+                ) or (bound and _canonical(manager, name) in bound):
                     continue
                 session = manager.open_resource(name, open_timeout=milliseconds)
             except Exception:

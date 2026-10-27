@@ -89,13 +89,14 @@ def discover_tek_scopes(
     resources: VisaResources | None = None,
     *,
     timeout_seconds: float = PROBE_TIMEOUT_SECONDS,
+    excluded: frozenset[str] = frozenset(),
 ) -> tuple[tuple[str, str], ...]:
-    """Every Tektronix scope attached, as ``(resource, identity)`` pairs."""
+    """Every Tektronix scope attached, as ``(resource, identity)`` pairs; none the apparatus binds is asked."""
 
     return tuple(
         (name, identity)
         for name, identity in visa.identify_resources(
-            resources, timeout_seconds=timeout_seconds
+            resources, timeout_seconds=timeout_seconds, excluded=excluded
         )
         if is_tektronix(identity)
     )

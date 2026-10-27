@@ -131,17 +131,19 @@ def discover_dg4000(
     resources: VisaResources | None = None,
     *,
     timeout_seconds: float = PROBE_TIMEOUT_SECONDS,
+    excluded: frozenset[str] = frozenset(),
 ) -> tuple[Dg4000Sighting, ...]:
     """Every DG4000 attached to this machine, found by asking ``*IDN?``.
 
     A Lab Brick can be counted without being opened; a SCPI instrument
-    cannot, so this opens and asks every listed resource in turn.
+    cannot, so this opens and asks every listed resource in turn -- but
+    none the apparatus binds (``excluded``).
     """
 
     return tuple(
         Dg4000Sighting(name, identity)
         for name, identity in visa.identify_resources(
-            resources, timeout_seconds=timeout_seconds
+            resources, timeout_seconds=timeout_seconds, excluded=excluded
         )
         if is_dg4000(identity)
     )

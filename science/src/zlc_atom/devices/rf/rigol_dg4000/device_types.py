@@ -52,14 +52,15 @@ def _rigol_factory(key: str, values: Mapping[str, Any]) -> RigolDg4000RfSource:
     ))
 
 
-def _discover_rigol() -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
+def _discover_rigol(excluded: frozenset[str] = frozenset()) -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
     """Every DG4000 that answers on this machine, named by what it answered.
 
     The serial is the instrument's own, off ``*IDN?``, so unplugging one and
     scanning again offers the same card rather than a differently numbered
     stranger.  When an instrument gives no serial the resource it was found
     at is the name -- still stable, still that instrument, just longer.
-    A VISA that lists nothing to ask is raised by the bus probe itself.
+    A VISA that lists nothing to ask is raised by the bus probe itself,
+    and an instrument the apparatus binds is not asked.
     """
 
     from .source import discover_dg4000
@@ -67,7 +68,7 @@ def _discover_rigol() -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
     return tuple(
         discovered(f"dg4000_{sighting.serial or underscored(sighting.resource)}",
                    RIGOL_DG4000_SCHEMA.project_values({"resource": sighting.resource}))
-        for sighting in discover_dg4000()
+        for sighting in discover_dg4000(excluded=excluded)
     ), ()
 
 
@@ -79,6 +80,7 @@ DEVICE_TYPES = (
         ("rf.source",),
         factory=_rigol_factory,
         identity="visa:{resource}",
+        resources=("visa:{resource}",),
         label="Rigol DG4000",
         description=(
             "Rigol DG4000 two-channel generator as an RF source over VISA SCPI: per channel "

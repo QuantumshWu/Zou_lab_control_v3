@@ -1201,14 +1201,45 @@ def _listen_for_packets(port, listen_seconds: float) -> int:
     return packets
 
 
-def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> tuple[str, ...]:
+def serial_name(port: object) -> str:
+    """A COM port as the core names one in ``serial:COM3``: upper-case, without ``\\\\.\\``."""
+
+    text = str(port).strip()
+    return (text[4:] if text.startswith("\\\\.\\") else text).upper()
+
+
+def free_serial_ports(excluded: frozenset[str] = frozenset()) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """This machine's serial ports in order: (those free to listen to, those bound and passed over).
+
+    ``excluded`` is the core's bound resources (``serial:COM3``); a port an
+    open device or another row of the apparatus binds is never opened -- the
+    pulse board's UART while its server starts, an IMU that is opening.
+    """
+
+    from serial.tools import list_ports
+
+    bound = {serial_name(item.split(":", 1)[1]) for item in excluded if item.lower().startswith("serial:")}
+    ports = [info.device for info in sorted(list_ports.comports(), key=lambda item: item.device)]
+    return tuple(port for port in ports if serial_name(port) not in bound), tuple(port for port in ports if serial_name(port) in bound)
+
+
+def discover_n100(
+    *,
+    baud: int = DEFAULT_BAUD,
+    listen_seconds: float = 0.5,
+    excluded: frozenset[str] = frozenset(),
+    ports: tuple[str, ...] | None = None,
+    first: bool = False,
+) -> tuple[str, ...]:
     """Every serial port with an FDILink IMU talking on it, found by listening.
 
     The module has no identification query; what identifies it is the
     stream itself, so each port that can be opened is listened to for a
     moment and kept if whole IMU packets frame up on it.  A port another
     program holds cannot be opened and is passed over, which is the ordinary
-    case on a bench whose pulse board owns one.
+    case on a bench whose pulse board owns one; a port the apparatus binds
+    (``excluded``) is not even opened.  ``ports``: just these, in order;
+    ``first``: stop at the first that streams.
 
     Listening is all it does.  A scan reaches every serial port on the
     bench -- the pulse board's side-channel, an SLM, whatever else is idle
@@ -1217,12 +1248,10 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
     the ``#fdeconfig`` that brings it back.
     """
 
-    from serial.tools import list_ports
-
     found: list[str] = []
-    for info in sorted(list_ports.comports(), key=lambda item: item.device):
+    for device in free_serial_ports(excluded)[0] if ports is None else ports:
         try:
-            port = _open_serial(info.device, baud)
+            port = _open_serial(device, baud)
         except Exception:
             continue
         try:
@@ -1235,7 +1264,9 @@ def discover_n100(*, baud: int = DEFAULT_BAUD, listen_seconds: float = 0.5) -> t
             except Exception:
                 pass
         if packets >= 2:
-            found.append(info.device)
+            found.append(device)
+            if first:
+                break
     return tuple(found)
 
 
@@ -1250,7 +1281,9 @@ __all__ = [
     "WheeltecN100WaveformSource",
     "discover_n100",
     "drain_imu_samples",
+    "free_serial_ports",
     "header_crc8",
     "payload_crc16",
+    "serial_name",
     "wake_from_config_mode",
 ]
