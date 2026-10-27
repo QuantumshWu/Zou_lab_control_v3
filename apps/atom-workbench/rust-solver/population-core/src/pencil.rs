@@ -747,12 +747,10 @@ impl Plan {
     /// Upper bound of the workspace bytes needed per right-hand side.
     pub(crate) fn workspace_bytes_per_rhs(&self) -> usize {
         let d = self.n * self.n;
-        let e = self.n - self.ground;
         let layers: usize = self.layers.iter().map(|l| l.classes.iter().map(|c| c.first.len()).sum::<usize>() + l.output.len()).sum();
         // Fields, plus the conjugated copy of a stage source (largest: J)
         // that the sparse kernel makes outside half mode.
         let fields = (self.input.len() + layers + 2 * self.j.len() + 2 * self.output.len()) * d
-            + self.j.len() * e * e
             + self.z.len() * self.rank;
         // Hilbert tasks stack at most all sources and coefficient blocks of
         // one target; thin tasks pack one coefficient's edges.
@@ -859,17 +857,13 @@ impl Plan {
             }
         }
 
-        // z = K vec(J_EE) on the selected ground coordinates.
-        let e = n - self.ground;
-        let ee_width = e * e * rhs;
-        ensure(&mut w.ee, self.j.len() * ee_width);
-        extract_excited(&w.j, &mut w.ee, self.j.len(), n, self.ground, rhs);
+        // z = K vec(J_EE) on the selected ground coordinates (J read in place).
         let z_width = self.rank * rhs;
         let z_count = self.z.computed(half);
         ensure(&mut w.z, self.z.len() * z_width);
         w.z[..z_count * z_width].fill(ZERO);
         let z = &mut w.z[..z_count * z_width];
-        self.thin_stage(gemm, &self.selected_k, &w.ee, z, Rows::Vector, rhs, &mut w.scratch)?;
+        self.thin_stage(gemm, &self.selected_k, ThinSource::Excited(&w.j), z, Rows::Vector, rhs, &mut w.scratch)?;
         if half {
             mirror_ground(&mut w.z, &self.z, self.gg_transpose.as_deref().unwrap_or(&[]), self.rank, rhs);
         }
@@ -899,10 +893,11 @@ impl Plan {
         let (scratch, conjugated) = (&mut w.scratch, &mut w.conjugated);
         self.hilbert_stage(gemm, &self.left_no_jump, sources, f_field, rhs, Some(1.), None, scratch, conjugated)?;
         self.hilbert_stage(gemm, &self.right_no_jump, sources, f_field, rhs, None, Some(1.), scratch, conjugated)?;
-        self.thin_stage(gemm, &self.recycling, &w.ee, f_field, Rows::Matrix(&self.gg), rhs, &mut w.scratch)?;
-        self.thin_stage(gemm, &self.ground_hamiltonian, &w.z, f_field, Rows::Matrix(&self.gg), rhs, &mut w.scratch)?;
+        let gg = Rows::Matrix(&self.gg);
+        self.thin_stage(gemm, &self.recycling, ThinSource::Excited(&w.j), f_field, gg, rhs, &mut w.scratch)?;
+        self.thin_stage(gemm, &self.ground_hamiltonian, ThinSource::Packed(&w.z), f_field, gg, rhs, &mut w.scratch)?;
         let optical = Rows::Matrix(&self.optical);
-        self.thin_stage(gemm, &self.optical_hamiltonian, &w.z, f_field, optical, rhs, &mut w.scratch)?;
+        self.thin_stage(gemm, &self.optical_hamiltonian, ThinSource::Packed(&w.z), f_field, optical, rhs, &mut w.scratch)?;
         for t in 0..output_count {
             let omega = self.frequency[t];
             let range = t * block..(t + 1) * block;
@@ -1074,13 +1069,17 @@ impl Plan {
         &self,
         gemm: Gemm<'_>,
         links: &[Link],
-        source: &[C],
+        source: ThinSource<'_>,
         target: &mut [C],
         rows: Rows<'_>,
         rhs: usize,
         scratch: &mut Vec<Scratch>,
     ) -> Result<(), String> {
-        let n = self.n;
+        let (n, ground) = (self.n, self.ground);
+        let block = n * n * rhs;
+        // Coordinate c = i + e*j of vec(J_EE) sits at J[block*s + n*b + offset(c)].
+        let e = n - ground;
+        let excited = |c: usize| (ground + c % e) + n * rhs * (ground + c / e);
         let library = &self.library.thin;
         let Some(first_link) = links.first() else { return Ok(()) };
         let target_width = match rows {
@@ -1116,8 +1115,36 @@ impl Plan {
                     Rows::Matrix(at) => at[row].0 + n * (b + rhs * at[row].1),
                 };
                 let width = a.cols * rhs;
-                match &a.dense {
-                    Some(dense) => {
+                match (&a.dense, source) {
+                    (Some(dense), ThinSource::Excited(field)) => {
+                        // The used EE coordinates of every column (source s,
+                        // rhs b), read straight from J into the GEMM operand.
+                        let (m, k, columns) = (a.used_rows.len(), a.used_cols.len(), sources.len() * rhs);
+                        let Scratch { product, packed, .. } = scratch;
+                        ensure(packed, k * columns);
+                        for (index, &s) in sources.iter().enumerate() {
+                            for b in 0..rhs {
+                                let x = &field[block * s + n * b..block * (s + 1)];
+                                let to = &mut packed[k * (index * rhs + b)..k * (index * rhs + b + 1)];
+                                for (slot, &c) in to.iter_mut().zip(&a.used_cols) {
+                                    *slot = x[excited(c)];
+                                }
+                            }
+                        }
+                        ensure(product, m * columns);
+                        gemm.multiply(m, columns, k, ONE, dense, m, packed, k, ZERO, product, m)?;
+                        for (index, &t) in destinations.iter().enumerate() {
+                            let out = &mut chunk[(t - first) * target_width..(t - first + 1) * target_width];
+                            for b in 0..rhs {
+                                let column = &product[m * (index * rhs + b)..m * (index * rhs + b + 1)];
+                                for (&row, &value) in a.used_rows.iter().zip(column) {
+                                    let at = position(row, b);
+                                    out[at] = add(out[at], value);
+                                }
+                            }
+                        }
+                    }
+                    (Some(dense), ThinSource::Packed(source)) => {
                         let columns = sources.len() * rhs;
                         let (m, k) = (a.used_rows.len(), a.used_cols.len());
                         let Scratch { packed, product, .. } = scratch;
@@ -1156,7 +1183,7 @@ impl Plan {
                             }
                         }
                     }
-                    _ => {
+                    (None, ThinSource::Packed(source)) => {
                         let csr = &a.sparse;
                         for (&s, &t) in sources.iter().zip(destinations) {
                             let x = &source[s * width..(s + 1) * width];
@@ -1174,11 +1201,37 @@ impl Plan {
                             }
                         }
                     }
+                    (None, ThinSource::Excited(field)) => {
+                        let csr = &a.sparse;
+                        for (&s, &t) in sources.iter().zip(destinations) {
+                            let out = &mut chunk[(t - first) * target_width..(t - first + 1) * target_width];
+                            for b in 0..rhs {
+                                let x = &field[block * s + n * b..block * (s + 1)];
+                                for &row in &a.used_rows {
+                                    let mut sum = ZERO;
+                                    for at in csr.row[row]..csr.row[row + 1] {
+                                        sum = add(sum, mul(csr.value[at], x[excited(csr.col[at])]));
+                                    }
+                                    let at = position(row, b);
+                                    out[at] = add(out[at], sum);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Ok(())
         })
     }
+}
+
+/// Where a thin stage reads its source columns.
+#[derive(Clone, Copy)]
+enum ThinSource<'a> {
+    /// Column (mode s, rhs b), coordinate c at field[(s*rhs + b)*cols + c] (z).
+    Packed(&'a [C]),
+    /// vec(J_EE) of the J field read in place from its mode blocks.
+    Excited(&'a [C]),
 }
 
 /// Where a thin coefficient's rows land in a target mode.
@@ -1501,7 +1554,6 @@ pub(crate) struct Workspace {
     layer_dx: Vec<Vec<C>>,
     layer_out: Vec<Vec<C>>,
     j: Vec<C>,
-    ee: Vec<C>,
     z: Vec<C>,
     pub(crate) e: Vec<C>,
     pub(crate) f: Vec<C>,
@@ -1559,20 +1611,6 @@ fn mirror_ground(field: &mut [C], order: &ModeOrder, transpose: &[usize], rank: 
     }
 }
 
-/// vec(J_EE) of every mode, column-major (i + e*j), rhs-major.
-fn extract_excited(j: &[C], ee: &mut [C], modes: usize, n: usize, ground: usize, rhs: usize) {
-    let e = n - ground;
-    let block = n * n * rhs;
-    for m in 0..modes {
-        for b in 0..rhs {
-            for col in 0..e {
-                let from = m * block + ground + n * (b + rhs * (ground + col));
-                let to = (m * rhs + b) * e * e + e * col;
-                ee[to..to + e].copy_from_slice(&j[from..from + e]);
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
