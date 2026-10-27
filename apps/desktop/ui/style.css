@@ -127,6 +127,9 @@ canvas { display: block; max-width: 100%; height: auto; touch-action: none; user
 .panel-edit-surface > .panel > .panel-body { padding: 0; }
 .panel-edit-held { white-space: normal; }
 .panel-edit-held.warning { color: var(--orange-dark); }
+/* The producer's own editors stand in its card a row gap apart, as its form does (v2 contributions in the card's layout). */
+.panel-edit-producer { display: contents; }
+.panel-edit-producer > .node-editor { margin-top: 0; }
 .settings.inline { position: static; z-index: auto; border: none; padding: 0; min-width: 0; background: none; }
 .settings.inline .settings-header { display: none; }
 .settings.inline .settings-body { overflow: visible; padding-right: 0; }

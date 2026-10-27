@@ -11,6 +11,7 @@ import type { Panel } from "../protocol.js";
 import type { Transport } from "../transport.js";
 import type { LogicRow } from "../workbench.js";
 import type { PanelBoard, PanelView } from "./board.js";
+import { NodeEditors, READ_ONLY, editorModels } from "./node_editors/index.js";
 
 /** What the host says of an Edit's held read (state panels[].edit). */
 export type EditInfo = { panel: string; at_ms: number; revision: number; advanced: boolean; shape: number[]; status: string };
@@ -40,9 +41,13 @@ export class PanelEditView {
   private held = element("p", "note panel-edit-held");
   private refresh: Command;
   private producerText = element("p", "note panel-edit-held");
-  /** The producer's draft fields a selector of this panel writes, read only (v2 producer_form). */
+  /** The producer's draft fields a selector of this panel writes, read only (v2 producer_form)... */
   private producerForm = form();
   private producerFields = new Map<string, Field>();
+  /** ...but one the producer's own editor manages is drawn by that editor, read only, as its Logic
+   * page draws it (v2's producer ui_contributions): a seamless scan's plan as its axis rows. */
+  private producerEditors = new NodeEditors(READ_ONLY);
+  private producerDrawn = element("div", "panel-edit-producer");
   private openProducer: Command;
   private producerNode = "";
   /** The page's labels as last measured into its one column. */
@@ -82,7 +87,7 @@ export class PanelEditView {
     const producer = element("div", "card bordered panel-edit-card");
     const producerRow = element("div", "form-actions");
     producerRow.append(element("span", "spacer"), this.openProducer.root);
-    producer.append(sectionTitle("Direct producer"), this.producerText, this.producerForm, producerRow);
+    producer.append(sectionTitle("Direct producer"), this.producerText, this.producerForm, this.producerDrawn, producerRow);
     this.directory = new PathEdit(() => this.updateSave(), () => void this.chooseDirectory());
     this.autoName = switchButton(on => { setChecked(this.autoName, on); this.updateSave(); }, "Auto-name");
     setChecked(this.autoName, true);
@@ -205,9 +210,15 @@ export class PanelEditView {
     const text = producer ? `Logic node: ${producer.name}` : "This signal has no editable direct producer.";
     if (this.producerText.textContent !== text) this.producerText.textContent = text;
     this.openProducer.disabled = !producer;
-    // Its selector-linked draft fields, as the draft holds them, never edited here.
+    // Its selector-linked draft fields, as the draft holds them, never edited here: each of its
+    // editors that manages one draws what it manages (v2: a contribution whose managed fields meet
+    // the linked ones), and the form the linked fields no editor draws.
     const linked = new Set(producer?.selector_fields ?? []);
-    const shown = (producer?.controls ?? []).filter(control => linked.has(control.name));
+    const editors = this.producerEditors.reconcile(editorModels(producer?.editor_facts).filter(model => model.manages.some(name => linked.has(name))));
+    if (editors.length !== this.producerDrawn.children.length || editors.some((root, index) => this.producerDrawn.children[index] !== root)) this.producerDrawn.replaceChildren(...editors);
+    if (producer) this.producerEditors.update(producer, "Shown read only: Open producer to edit it");
+    const drawn = new Set(this.producerEditors.models.flatMap(model => model.manages));
+    const shown = (producer?.controls ?? []).filter(control => linked.has(control.name) && !drawn.has(control.name));
     for (const [name, field] of this.producerFields) if (!shown.some(control => control.name === name)) { field.root.remove(); this.producerFields.delete(name); }
     for (const control of shown) {
       const spec = { ...control, enabled: false };
@@ -217,8 +228,11 @@ export class PanelEditView {
       if (field.root.parentElement !== this.producerForm) this.producerForm.append(field.root);
     }
     this.producerForm.hidden = shown.length === 0;
-    // One label column down the page (v2 _share_label_column), measured when its words change.
-    const labels = [...this.body.querySelectorAll<HTMLElement>(".form .field-label")].map(wholeText).join("|");
-    if (labels !== this.labels) { this.labels = labels; requestAnimationFrame(() => shareLabelColumn(this.body)); }
+    this.producerDrawn.hidden = editors.length === 0;
+    // One label column down the page (v2 _share_label_column), measured when its words change: the forms'
+    // labels, and the room the producer's editors keep in it (a scan's "By hand", its API values' room).
+    const floor = this.producerEditors.labelFloor();
+    const labels = [floor, ...[...this.body.querySelectorAll<HTMLElement>(".form .field-label, .label-column")].map(wholeText)].join("|");
+    if (labels !== this.labels) { this.labels = labels; requestAnimationFrame(() => shareLabelColumn(this.body, floor)); }
   }
 }

@@ -2,7 +2,7 @@
 // LogicEditorView).  Both draw one node's projection and send its intents;
 // admission, follow intent, restarts and claims are the workbench's.
 import { Field, Legend, Readout, StatusLine, assign, command, element, fieldKind, form, row as formRow, sectionTitle, setChecked, setState, setTitle, shareLabelColumn, switchButton, } from "../fluent/index.js";
-import { nodeEditor } from "./node_editors/index.js";
+import { NodeEditors, editorModels } from "./node_editors/index.js";
 /** Every word the Start slot can say, on the row and on its Edit page. */
 export const START_LABELS = ["Start", "Restart", "Starting…"];
 /** Each node state as the status word it is drawn with (v2 STATE_WORDS): a
@@ -125,8 +125,8 @@ export class LogicEditorView {
     row = null;
     projection = null;
     groupTitles = new Map();
-    /** The node's own editors, each with the model it was last handed and what that was drawn from. */
-    editors = [];
+    /** The node's own editors. */
+    editors;
     /** Why the node's editor model could not be had for this draft (`editor_facts_error`). */
     editorError = element("p", "field-error editor-error");
     artifactFields = new Map();
@@ -141,6 +141,11 @@ export class LogicEditorView {
         this.statusLine.text.classList.add("wrap");
         this.editorError.hidden = true;
         this.body.append(this.form, this.editorError);
+        this.editors = new NodeEditors({
+            edit: (values, what) => intents.editDraft(id, { values }, what),
+            editArtifacts: (inputs, what) => intents.editDraft(id, { artifact_inputs: inputs }, what),
+            choose: ask => intents.choose(ask),
+        });
         const footer = this.footer;
         this.remove = command("Remove", () => intents.remove(id), { role: "destructive", confirm: "remove this node" });
         this.revert = command("Revert", () => intents.revert(id), { role: "destructive",
@@ -168,7 +173,7 @@ export class LogicEditorView {
     }
     fitLabels() {
         this.labelsQueued = false;
-        shareLabelColumn(this.body, Math.max(0, ...this.editors.map(editor => editor.view.labelFloor?.() ?? 0)));
+        shareLabelColumn(this.body, this.editors.labelFloor());
     }
     labelsQueued = false;
     /** The node's page from its workbench row; `projection` is the row's
@@ -203,10 +208,12 @@ export class LogicEditorView {
         }
         // The node's own editors (one model, or a stack of them) draw the fields
         // and files their models say they manage.
-        const facts = row.editor_facts ?? null;
-        const models = facts?.editor === "stack" ? facts.editors ?? [] : facts ? [facts] : [];
-        this.reconcileEditors(row.node_id, models);
-        const drawn = this.editors.map(editor => editor.facts);
+        const order = this.editors.reconcile(editorModels(row.editor_facts));
+        // The editors stand after the form and its error, in their models' order.
+        const placed = [...this.body.children].slice(2);
+        if (placed.length !== order.length || placed.some((node, index) => node !== order[index]))
+            this.body.append(...order);
+        const drawn = this.editors.models;
         const managed = new Set(drawn.flatMap(model => model.manages));
         const managedFiles = new Set(drawn.flatMap(model => model.manages_artifacts ?? []));
         for (const control of row.controls) {
@@ -284,17 +291,8 @@ export class LogicEditorView {
             this.editorError.textContent = problem;
         assign(this.editorError, "hidden", !problem);
         if (this.editors.length) {
-            // A state push that changes nothing an editor draws costs it nothing: its model, the lock,
-            // the node's name and the fields it manages (an edit of another field leaves it as it is).
-            for (const editor of this.editors) {
-                const fields = editor.facts.manages.map(name => [row.values[name], row.controls.find(control => control.name === name)]);
-                const key = JSON.stringify([editor.facts, locked, row.name, fields]);
-                if (key === editor.key)
-                    continue;
-                editor.key = key;
-                editor.view.update(row, editor.facts, locked);
+            if (this.editors.update(row, locked))
                 this.shareLabels();
-            }
         }
         else
             this.body.style.removeProperty("--label-width");
@@ -311,35 +309,6 @@ export class LogicEditorView {
     }
     complete(request, failed = false) { for (const field of [...this.fields.values(), ...this.artifactFields.values()])
         field.complete(request, failed); }
-    /** The node's editors brought to its models: one per model, kept while its kind stays. */
-    reconcileEditors(node, models) {
-        const host = {
-            edit: (values, what) => this.intents.editDraft(node, { values }, what),
-            editArtifacts: (inputs, what) => this.intents.editDraft(node, { artifact_inputs: inputs }, what),
-            choose: ask => this.intents.choose(ask),
-        };
-        const kept = [];
-        models.forEach((model, index) => {
-            const editor = this.editors[index];
-            if (editor && editor.kind === model.editor) {
-                editor.facts = model;
-                kept.push(editor);
-                return;
-            }
-            const view = nodeEditor(model.editor, host);
-            if (view)
-                kept.push({ kind: model.editor, view, facts: model, key: "" });
-        });
-        const order = kept.map(editor => editor.view.root);
-        for (const editor of this.editors)
-            if (!kept.includes(editor))
-                editor.view.root.remove();
-        this.editors = kept;
-        // The editors stand after the form and its error, in their models' order.
-        const placed = [...this.body.children].slice(2);
-        if (placed.length !== order.length || placed.some((node, index) => node !== order[index]))
-            this.body.append(...order);
-    }
     /** The files a node reads (v2 artifact_form): each declared input under its
      * own label, a path with Browse... (the window's file dialog) -- or, for one
      * that claims frames and no editor draws, what it claims -- then Refresh
