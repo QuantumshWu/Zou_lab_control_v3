@@ -66,6 +66,23 @@
 //! far harmonics' second-order (van Vleck) Hamiltonian (`far_dressing`); its
 //! third-order remainder is reported (`far_dressing_remainder`).
 //!
+//! # Known limitation: three lasers + tweezer
+//!
+//! Against the exact Floquet slow spectrum (`floquet_spectrum.py`, the
+//! truncated Fourier-extended Lindbladian), two lasers + tweezer (RWA) agree
+//! to 0.1-8% (-1.209e-3, -2.834e-3, -4.721e-3, -9.79e-2 against -1.210e-3,
+//! -2.961e-3, -5.012e-3, -1.067e-1 /us), but three lasers + tweezer (RWA)
+//! relax 40% too slowly in their slowest mode (-1.423e-3 against
+//! -2.507e-3 /us; -4.121e-3 and -8.922e-3 against -4.818e-3 and
+//! -9.109e-3). Building `J_eff` on the effective generator of the sheared
+//! coordinates (`SlowDualOptions::effective`, with every layer's light shift
+//! and scattering) leaves it at -1.510e-3, so the missing piece is not the
+//! light shift. Hypotheses: the static (Markov) elimination of the non-ground
+//! blocks at the near-resonant hyperfine Raman slots (+-4.29e4 rad/us), or
+//! the fast -> fast couplings beyond the second hop that the Schur
+//! complement drops. `J_eff` weights the error estimates and labels the
+//! status; no accepted result rests on its rates.
+//!
 //! The expansion point `s_c = -i r_c` of column slot `c` is the envelope
 //! frequency its slow content actually carries: `r_c = nu_c` when the
 //! populations of charge `c` are themselves slow (`|nu_c| < cutoff`; this keeps

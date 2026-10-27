@@ -78,7 +78,7 @@
 //!   (completely positive and trace preserving in the laboratory frame) does
 //!   not increase the trace norm of a Hermitian matrix (twice that bounds any
 //!   matrix), so every population and group it moves stays below
-//!   `2 sqrt(n) T sum_k g_k |R_q[:, k]|_F`, `g_k = max(1, exp(Re beta_k T))`;
+//!   `2 sqrt(n) sum_k I_k |R_q[:, k]|_F`, `I_k = int_0^T |exp(beta_k s)| ds`;
 //! * a pair's part whose series bound (`SlowDual::series_bound`: amplitudes
 //!   times the suprema of their time functions, no time evaluated) is small.
 //!
@@ -1253,10 +1253,15 @@ impl SlowDual {
         // (completely positive, trace preserving) propagator does not increase
         // the trace norm of a Hermitian matrix (twice that bounds any matrix),
         // so every population and group it moves stays below
-        // 2 int_0^T ||r(s)||_1 ds <= 2 sqrt(n) T sum_k g_k ||R_q[:, k]||_F,
-        // g_k = max(1, exp(Re beta_k T)). No gap, condition number or slow
+        // 2 int_0^T ||r(s)||_1 ds <= 2 sqrt(n) sum_k I_k ||R_q[:, k]||_F,
+        // I_k = int_0^T |exp(beta_k s)| ds (T for an undamped column, about
+        // 1/|Re beta_k| for a damped one). No gap, condition number or slow
         // generator enters this bound.
-        let screen_gain = 2. * (n as f64).sqrt() * horizon;
+        let screen_gain = 2. * (n as f64).sqrt();
+        let time_integral = |b: C| -> f64 {
+            let x = b.re * horizon;
+            if x.abs() < 1e-8 { horizon } else { horizon * x.exp_m1() / x }
+        };
         let mut screened = 0_f64;
         let mut screened_modes = 0usize;
         let mut pair_screened: Vec<f64> = vec![0.; pairs];
@@ -1351,7 +1356,7 @@ impl SlowDual {
                 let mut pair_fast: BTreeMap<(usize, usize), Dense> = BTreeMap::new();
                 let mut ground_returns: BTreeMap<(usize, usize, i64), (f64, Dense)> = BTreeMap::new();
 
-                let column_growth: Vec<f64> = beta.iter().map(|b| (b.re * horizon).exp().max(1.)).collect();
+                let column_growth: Vec<f64> = beta.iter().map(|&b| time_integral(b)).collect();
                 // Contractivity bounds of every mode of the chunk, and the
                 // smallest of them charged within this chunk-block's budget.
                 let screen_of: Vec<f64> = execution.map((c0..c1).collect(), |local: usize| {
