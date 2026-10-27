@@ -70,9 +70,11 @@ const START_ORDER:usize=2;
 /// Relative residual of the shifted solves, fixed. 1e-3 left 2-9e-3 on
 /// three lasers + tweezer (b1-finite.md section 6.2); with the Floquet
 /// frames 1e-6 left the outer iteration stalling on five lasers (with and
-/// without the tweezer) while 1e-7 reproduced every reference case (R3):
-/// the stronger preconditioner leaves the same residual's error in the
-/// central populations, which the slow modes carry furthest.
+/// without the tweezer: spurious growing Ritz values) while 1e-7 reproduced
+/// every reference case. An error-based stop (the central populations of
+/// P^-1 r below tau |x|, from a looser residual) does not relax it safely:
+/// tau = 1e-8 stalls the same cases, tau = 3e-9 converges at 9.4-9.6 inner
+/// steps per column against 8.1-8.8 here (and once at twice the columns).
 const INNER_RTOL:f64=1e-7;
 const TRANSLATION_MIXING:f64=3e-3;
 /// At most this many translation pairs, the most strongly mixing: with all

@@ -25,6 +25,10 @@
 //! - `steady`: the steady pipeline (order, estimate, acceptance);
 //! - `slow`: the slow eigenpairs of the lattice operator (conserved
 //!   quantities, the slowest relaxation, the long-time machinery);
+//! - `eigenbasis`: the real eigenbasis of the folded centre generator
+//!   (request-level, `LatticePrepared::eigenbasis`): error propagation
+//!   through the dressed blocks and exact batched block solves;
+//! - `finite`: the finite-time and long-time pipelines;
 //! - `ledger`: the tolerance, the error metric and every remainder bound.
 //!
 //! Layout: an n x n block is row-major (entry (i, j) at i*n+j); a field on N
