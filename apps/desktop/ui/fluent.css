@@ -182,14 +182,19 @@ select:open::picker-icon { rotate: none; }
 select.cycle-active::picker-icon { background: var(--text); }
 select:disabled::picker-icon { background: var(--placeholder); }
 /* FluentPopup + _combo_popup_stylesheet: a white card, DIVIDER edge, the
- * picked row SELECTED, the row under the pointer ACCENT_TINT. */
+ * picked row SELECTED, the row under the pointer ACCENT_TINT.  It opens below
+ * the box, or above it (.drop-up) capped at --drop-room, as combo.ts
+ * dropPlacement chooses; the browser flips it only sideways. */
 ::picker(select) {
   border: var(--edge) solid var(--divider); border-radius: var(--radius);
   background: var(--surface); padding: var(--popup-gap); margin: var(--popup-gap) 0;
   box-shadow: none; color: var(--text);
-  max-height: calc(12 * (var(--font-line) + 2 * var(--popup-item-pad-v) + 2 * var(--edge)) + 2 * var(--popup-gap) + 2 * var(--edge));
+  max-height: var(--drop-room, calc(12 * (var(--font-line) + 2 * var(--popup-item-pad-v) + 2 * var(--edge)) + 2 * var(--popup-gap) + 2 * var(--edge)));
   overflow-y: auto;
+  position-area: block-end span-inline-end;
+  position-try-order: normal; position-try-fallbacks: flip-inline;
 }
+select.drop-up::picker(select) { position-area: block-start span-inline-end; }
 /* A choice row of a popup (a select's option, an editable combo's, a tree's
  * item, a check list's): its face drawn one device pixel inside the row, so the
  * picked and the hovered rows' faces stand apart as v2's item views draw them,
@@ -245,7 +250,7 @@ optgroup::label, optgroup legend {
  * its own) then its item box, which takes the hover and SELECTED faces.  A
  * heading reads bold; it opens and closes, it is never picked. */
 .tree-combo-list {
-  position: fixed; inset: auto; margin: var(--popup-gap) 0 0; box-sizing: border-box; width: max-content;
+  position: fixed; inset: auto; margin: var(--popup-gap) 0; box-sizing: border-box; width: max-content;
   border: var(--edge) solid var(--divider); border-radius: var(--radius); background: var(--surface);
   padding: calc(2 * var(--popup-gap)) var(--popup-gap) var(--popup-gap); color: var(--text); overflow-y: auto;
 }
@@ -668,7 +673,7 @@ dialog.dialog::backdrop { background: transparent; }
   background: var(--graphite); -webkit-mask: var(--chevron-drop) 0 0 / 100% 100% no-repeat; mask: var(--chevron-drop) 0 0 / 100% 100% no-repeat;
 }
 .check-combo:disabled::after { background: var(--placeholder); }
-.check-menu { padding: var(--popup-gap); gap: 0; max-height: calc(12 * (var(--control)) + 2 * var(--popup-gap)); overflow-y: auto; }
+.check-menu { margin: var(--popup-gap) 0; padding: var(--popup-gap); gap: 0; max-height: calc(12 * (var(--control)) + 2 * var(--popup-gap)); overflow-y: auto; }
 .check-menu-item, .check-menu-header {
   height: auto; border: var(--dpx) solid transparent; border-radius: var(--radius); background-clip: padding-box;
   padding: calc(var(--popup-item-pad-v) + var(--edge) - var(--dpx)) calc(var(--popup-item-pad-h) + var(--edge) - var(--dpx)) calc(var(--popup-item-pad-v) + var(--edge) - var(--dpx) + var(--cap-lift));

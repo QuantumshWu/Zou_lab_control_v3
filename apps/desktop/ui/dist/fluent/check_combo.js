@@ -1,3 +1,4 @@
+import { placeDrop } from "./combo.js";
 import { element, setText, setTitle, token } from "./dom.js";
 import { checkBox, setChecked } from "./toggles.js";
 /** FluentComboBox set_checkable: a field like a combo whose popup ticks
@@ -32,6 +33,11 @@ export class CheckCombo {
             const open = event.newState === "open";
             // The field says it is open while its list is (v2: the ACCENT edge while its popup shows).
             this.root.classList.toggle("open", open);
+            // Placed again when the window is resized while it is open.
+            if (open)
+                addEventListener("resize", this.place);
+            else
+                removeEventListener("resize", this.place);
             if (open || !this.opened)
                 return;
             const before = this.opened;
@@ -76,13 +82,15 @@ export class CheckCombo {
         this.opened = [...this.checked];
         document.body.append(this.list);
         this.list.showPopover();
-        const rect = this.root.getBoundingClientRect(), gap = token("--popup-gap"), pad = token("--window-pad");
-        this.list.style.minWidth = `${rect.width}px`;
-        const height = this.list.offsetHeight, width = this.list.offsetWidth;
-        const below = rect.bottom + gap;
-        this.list.style.left = `${Math.max(pad, Math.min(rect.left, innerWidth - pad - width))}px`;
-        this.list.style.top = `${below + height <= innerHeight - pad ? below : Math.max(pad, rect.top - gap - height)}px`;
+        this.place();
     }
+    /** Below the field, or above it where the list fits better (placeDrop); its left edge on the field's, inside the window. */
+    place = () => {
+        const rect = this.root.getBoundingClientRect(), pad = token("--window-pad");
+        this.list.style.minWidth = `${rect.width}px`;
+        placeDrop(this.list, rect);
+        this.list.style.left = `${Math.max(pad, Math.min(rect.left, innerWidth - pad - this.list.offsetWidth))}px`;
+    };
     build() {
         const rows = [];
         let group = [];

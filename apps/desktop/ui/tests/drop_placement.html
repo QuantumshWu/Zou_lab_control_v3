@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Combo drop-down placement regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. Where a combo box's list opens (fluent/combo.ts dropPlacement): below unless it fits
+// better above, and the tree, editable and checkable combos' lists placed by it in this window. A select's own
+// ::picker opens only on a user's gesture, so its placement is looked at in the running app.
+import {dropPlacement, EditableCombo} from '../dist/fluent/combo.js';
+import {TreeCombo} from '../dist/fluent/tree_combo.js';
+import {CheckCombo} from '../dist/fluent/check_combo.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+const check=async(name,test)=>{await test();results.push(name)};
+const settle=()=>new Promise(resolve=>setTimeout(resolve));
+const view=()=>document.documentElement.clientHeight;
+/** A box standing `at` from the window's top (negative: from its bottom), in a fixed host. */
+function stand(node,at){const host=document.createElement('div');host.style.cssText=`position:fixed;left:40px;width:240px;${at<0?`bottom:${-at}px`:`top:${at}px`}`;host.append(node);document.body.append(host);return host}
+const gapOf=list=>parseFloat(getComputedStyle(list).marginTop);
+/** The list against its box: which side, its own gap kept, inside the window, and whether it scrolls. */
+function side(list,box){
+  const l=list.getBoundingClientRect(),b=box.getBoundingClientRect(),gap=gapOf(list),near=(x,y)=>Math.abs(x-y)<0.75;
+  const up=l.bottom<=b.top+0.5;
+  assert(up?near(l.bottom,b.top-gap):near(l.top,b.bottom+gap),`a popup gap from the box: ${JSON.stringify([l.top,l.bottom,b.top,b.bottom,gap])}`);
+  assert(l.top>=-0.5&&l.bottom<=view()+0.5,`inside the window: ${l.top}..${l.bottom} of ${view()}`);
+  return {up,scrolls:list.scrollHeight>list.clientHeight+1};
+}
+const leaves=(n,prefix)=>Array.from({length:n},(_,i)=>({key:`${prefix}${i}`,label:`${prefix} ${i}`,text:`${prefix} · ${i}`}));
+function tree(groups,current){const combo=new TreeCombo(()=>{});combo.setTree(groups,current);return combo}
+const openTree=combo=>combo.root.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));
+const close=list=>{if(list.matches(':popover-open'))list.hidePopover()};
+try {
+ await check('the rule: below when the whole list fits there, else the side with more room',()=>{
+   equal(dropPlacement(100,300,50),{up:false,height:100},'fits below');
+   equal(dropPlacement(100,300,900),{up:false,height:100},'fits below, more room above: still below');
+   equal(dropPlacement(100,100,900),{up:false,height:100},'exactly fits below');
+   equal(dropPlacement(200,100,300),{up:true,height:200},'fits only above: above, whole');
+   equal(dropPlacement(500,100,300),{up:true,height:300},'fits neither, more above: above, capped there');
+   equal(dropPlacement(500,300,100),{up:false,height:300},'fits neither, more below: below, capped there');
+   equal(dropPlacement(200,150,100),{up:false,height:150},'short below, shorter above: below, capped');
+   equal(dropPlacement(500,200,200),{up:false,height:200},'a tie opens below');
+   equal(dropPlacement(100,-20,-10),{up:true,height:0},'no room either side: never a negative height');
+ });
+ await check('a tree combo near the bottom opens above, near the top below',async()=>{
+   const groups=[{heading:'Laser',leaves:leaves(4,'laser')},{heading:'Clock',leaves:leaves(3,'clock')}];
+   for(const [at,up] of [[-8,true],[8,false]]){
+     const combo=tree(groups,'laser1'),host=stand(combo.root,at);await settle();
+     openTree(combo);await settle();
+     const list=document.querySelector('.tree-combo-list:popover-open');assert(list,'opened');
+     equal(side(list,combo.root),{up,scrolls:false},`box at ${at}`);
+     combo.dispose();host.remove();
+   }
+ });
+ await check('a tree too tall for either side opens on the larger one and scrolls; a heading opened keeps it there',async()=>{
+   const groups=Array.from({length:6},(_,g)=>({heading:`Group ${g}`,leaves:leaves(30,`g${g}`)}));
+   const combo=tree(groups,'g01'),host=stand(combo.root,Math.round(view()*0.3));await settle();
+   openTree(combo);await settle();
+   const list=document.querySelector('.tree-combo-list:popover-open');
+   const below=side(list,combo.root);
+   equal(below,{up:false,scrolls:true},'more room below: below, scrolling');
+   assert(Math.abs(list.getBoundingClientRect().bottom-(view()-gapOf(list)))<0.75,'as far as the window goes');
+   combo.dispose();host.remove();
+   // Nearer the bottom: above.  A small tree that fits below opens below; opening a heading grows it on that side.
+   const low=tree(groups,'g01'),lowHost=stand(low.root,-Math.round(view()*0.3));await settle();
+   openTree(low);await settle();
+   equal(side(document.querySelector('.tree-combo-list:popover-open'),low.root),{up:true,scrolls:true},'more room above: above, scrolling');
+   low.dispose();lowHost.remove();
+   const small=tree(groups,''),smallHost=stand(small.root,-Math.round(view()*0.45));await settle();
+   openTree(small);await settle();
+   const smallList=document.querySelector('.tree-combo-list:popover-open');
+   equal(side(smallList,small.root),{up:false,scrolls:false},'the closed headings fit below');
+   for(const key of ['ArrowDown','ArrowRight'])small.root.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true}));await settle();
+   equal(side(smallList,small.root),{up:false,scrolls:true},'a heading opened: still below, capped');
+   small.dispose();smallHost.remove();
+ });
+ await check('an editable combo and a checkable combo near the bottom open above',async()=>{
+   const edit=new EditableCombo(()=>{});edit.fill(['one','two','three'],'one');const host=stand(edit.root,-8);await settle();
+   const opener=edit.root.querySelector('.edit-combo-open');opener.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true}));opener.click();await settle();
+   const list=edit.root.querySelector('.edit-combo-list');assert(list.matches(':popover-open'),'opened');
+   equal(side(list,edit.root),{up:true,scrolls:false},'editable');
+   close(list);host.remove();
+   const ticks=new CheckCombo();ticks.set([{value:'a',label:'A'},{value:'b',label:'B'}],['a']);const tickHost=stand(ticks.root,-8);await settle();
+   ticks.open();await settle();
+   const menu=document.querySelector('.check-menu:popover-open');assert(menu,'opened');
+   equal(side(menu,ticks.root),{up:true,scrolls:false},'checkable');
+   close(menu);tickHost.remove();
+   const top=new CheckCombo();top.set([{value:'a',label:'A'}],[]);const topHost=stand(top.root,8);await settle();
+   top.open();await settle();
+   equal(side(document.querySelector('.check-menu:popover-open'),top.root),{up:false,scrolls:false},'checkable near the top');
+   close(document.querySelector('.check-menu:popover-open'));topHost.remove();
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+</script>
