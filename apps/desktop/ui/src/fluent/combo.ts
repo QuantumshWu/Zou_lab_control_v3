@@ -41,10 +41,70 @@ export function hintWidest(select: HTMLSelectElement, labels: Iterable<string>, 
   if (select.style.getPropertyValue("--combo-min") !== value) select.style.setProperty("--combo-min", value);
 }
 
+/** Where a combo box's list opens (QComboBox::showPopup): below the box when
+ * the whole list fits there; otherwise on the side with more room -- above when
+ * the list fits there or shows more of itself there -- as tall as that side
+ * allows, the rest scrolling.  `natural` is the list's own height, `below` and
+ * `above` the room the window leaves it on each side; a tie opens below. */
+export function dropPlacement(natural: number, below: number, above: number): { up: boolean; height: number } {
+  const up = natural > below && above > below;
+  return { up, height: Math.max(0, Math.min(natural, up ? above : below)) };
+}
+
+/** The window a list opens in, without a scroll bar (a fixed popup's containing block). */
+const windowHeight = (): number => document.documentElement.clientHeight;
+const px = (value: string): number => parseFloat(value) || 0;
+
+/** Place an open `list` (a fixed popover whose CSS margins are its popup gaps)
+ * under `box` or over it, as dropPlacement says; given `up`, on that side (a
+ * list that grows while open stays on the side it opened on), capped to it.
+ * Returns the side. */
+export function placeDrop(list: HTMLElement, box: DOMRect, up?: boolean): boolean {
+  const style = list.style;
+  style.maxHeight = "";
+  const css = getComputedStyle(list);
+  const margins = px(css.marginTop) + px(css.marginBottom);
+  const natural = list.getBoundingClientRect().height;
+  const view = windowHeight(), below = view - box.bottom - margins, above = box.top - margins;
+  const drop = up === undefined ? dropPlacement(natural, below, above) : { up, height: Math.max(0, Math.min(natural, up ? above : below)) };
+  style.top = drop.up ? "" : `${box.bottom}px`;
+  style.bottom = drop.up ? `${view - box.top}px` : "";
+  if (drop.height < natural) style.maxHeight = `${drop.height}px`;
+  return drop.up;
+}
+
+/** The select whose list was placed last: placed again when the window is resized while it is open. */
+let placedPicker: HTMLSelectElement | null = null;
+
+/** A select's list is the browser's ::picker(select): fluent.css opens it
+ * above the box for `drop-up` and caps it at `--drop-room`; this sets them as
+ * dropPlacement says, from the list's height before either applies. */
+function placePicker(select: HTMLSelectElement): void {
+  if (!select.matches(":open")) return;
+  select.classList.remove("drop-up");
+  select.style.removeProperty("--drop-room");
+  const picker = getComputedStyle(select, "::picker(select)");
+  const natural = px(picker.height) + (picker.boxSizing === "border-box" ? 0
+    : px(picker.paddingTop) + px(picker.paddingBottom) + px(picker.borderTopWidth) + px(picker.borderBottomWidth));
+  const margins = px(picker.marginTop) + px(picker.marginBottom);
+  const box = select.getBoundingClientRect();
+  const drop = dropPlacement(natural, windowHeight() - box.bottom - margins, box.top - margins);
+  select.classList.toggle("drop-up", drop.up);
+  if (drop.height < natural) select.style.setProperty("--drop-room", `${drop.height}px`);
+  // The row the list opened on stays in sight in the shorter list.
+  const focused = document.activeElement;
+  if (focused instanceof HTMLOptionElement && select.contains(focused)) focused.scrollIntoView({ block: "nearest" });
+  if (!placedPicker) addEventListener("resize", () => { if (placedPicker?.matches(":open")) placePicker(placedPicker); });
+  placedPicker = select;
+}
+
 /** The closed box's words: the picked row's, ending in an ellipsis where the
  * box is narrower (v2 paints elidedText); first child of `select`, kept there.
  * The platform copies the row only when the pick changes: a picked row whose own
- * words change (Scope's coordinate, a blank's words) is copied again here. */
+ * words change (Scope's coordinate, a blank's words) is copied again here.
+ * Its list opens below the box, or above it where it fits better (placePicker):
+ * placed when the list opens and focuses a row (a move between rows is not an
+ * opening), or, when no row can take the focus, after the press or key that opened it. */
 export function comboFace(select: HTMLSelectElement): HTMLButtonElement {
   const face = element("button", "combo-face");
   face.type = "button";
@@ -54,6 +114,13 @@ export function comboFace(select: HTMLSelectElement): HTMLButtonElement {
     const picked = select.selectedOptions[0];
     if (shown.textContent !== (picked?.textContent ?? "")) shown.replaceChildren(...[...picked?.childNodes ?? []].map(node => node.cloneNode(true)));
   }).observe(select, { subtree: true, childList: true, characterData: true });
+  select.addEventListener("focusin", event => {
+    const from = event.relatedTarget;
+    if (event.target instanceof HTMLOptionElement && !(from instanceof HTMLOptionElement && select.contains(from))) placePicker(select);
+  });
+  const opened = (): void => { requestAnimationFrame(() => { if (document.activeElement === select) placePicker(select); }); };
+  select.addEventListener("pointerdown", opened);
+  select.addEventListener("keydown", opened);
   return face;
 }
 
@@ -156,6 +223,10 @@ export class EditableCombo {
     let wasOpen = false;
     open.addEventListener("pointerdown", event => { event.preventDefault(); wasOpen = this.listOpen; });
     open.addEventListener("click", () => { if (!wasOpen) this.showList(); wasOpen = false; });
+    // Placed again when the window is resized while it is open.
+    this.list.addEventListener("toggle", event => {
+      if ((event as ToggleEvent).newState === "open") addEventListener("resize", this.place); else removeEventListener("resize", this.place);
+    });
     this.input.addEventListener("input", () => { this.draft = true; });
     this.input.addEventListener("keydown", event => { if (event.key === "Enter") this.finish(); });
     this.input.addEventListener("blur", () => this.finish());
@@ -186,12 +257,16 @@ export class EditableCombo {
     // Inside the field: a popup holding the field stays open under its list (popover ancestry).
     if (!this.list.isConnected) this.root.append(this.list);
     this.list.showPopover();
+    this.place();
+  }
+
+  /** Below the field, or above it where the list fits better (placeDrop). */
+  private place = (): void => {
     const rect = this.root.getBoundingClientRect();
     this.list.style.minWidth = `${rect.width}px`;
     this.list.style.left = `${rect.left}px`;
-    const below = rect.bottom;
-    this.list.style.top = `${below + this.list.offsetHeight <= innerHeight ? below : Math.max(0, rect.top - this.list.offsetHeight)}px`;
-  }
+    placeDrop(this.list, rect);
+  };
 
   /** v2 fill_editable_combo: offer `names`, show `key` (the accepted one) unless a draft is being typed. */
   fill(names: readonly string[], key: string, keepDraft = true): void {
