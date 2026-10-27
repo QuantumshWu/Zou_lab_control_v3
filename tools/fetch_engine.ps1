@@ -65,6 +65,9 @@ $current = { param($facts) $facts -and $expected -and $facts.source -eq $expecte
 # Keep the independently runnable tool at the checkout root after an engine
 # update. Older engine archives do not contain it and keep their old behavior.
 function Sync-AtomWorkbench {
+    # Replacing a running Atom Workbench leaves the old file as atom_workbench.exe~RF*.TMP: gone once it ended.
+    Get-ChildItem -LiteralPath $root -Filter 'atom_workbench.exe~RF*.TMP' -File -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
     $source = Join-Path $engine 'atom_workbench.exe'
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return $true }
     $destination = Join-Path $root 'atom_workbench.exe'

@@ -176,6 +176,9 @@ pub struct Installer {
     /// Counts the closes asked while a step runs: the page asks the operator each time.
     close_asked: u64,
     log_file: Option<String>,
+    /// The operator's steps include the program: once they all end well and the check finds the
+    /// new engine waiting (this window runs from bin\engine), the window starts again by itself.
+    restart_after: bool,
 }
 
 /// The log the page keeps; past it, the lines are in the log file alone.
@@ -184,7 +187,17 @@ const LOG_LINES: usize = 20_000;
 impl Installer {
     fn new(proxy: EventLoopProxy<AppEvent>, log_file: Option<String>) -> Installer {
         Installer { proxy, checks: [None, None, None, None], checking: 0, online: None, picked: BTreeMap::new(), failed: BTreeMap::new(), plan_only: false, force_build: false, queue: VecDeque::new(),
-                    running: None, stopped: false, last: None, log: Vec::new(), sent: 0, flush_at: None, close_asked: 0, log_file }
+                    running: None, stopped: false, last: None, log: Vec::new(), sent: 0, flush_at: None, close_asked: 0, log_file, restart_after: false }
+    }
+
+    /// Whether the window should start again now: the operator's program update ended well, every
+    /// check has answered, and the new engine waits in bin\engine.next for this one to end.
+    fn restart_due(&mut self) -> bool {
+        let staged = matches!(self.answer(Check::Program), Some(Ok(program)) if program["relation"] == "staged");
+        let done = self.running.is_none() && self.queue.is_empty() && self.checking == 0;
+        if !(self.restart_after && done) { return false; }
+        self.restart_after = false;
+        staged && self.last.as_ref().is_some_and(|(_, ok)| *ok)
     }
 
     fn check_all(&mut self) {
@@ -473,6 +486,7 @@ impl Installer {
         if self.running.is_some() { return Err("A step is under way: wait for it or stop it".into()); }
         // What to do, and what a step's end is checked against, is the status: a check under way decides it.
         if self.checking > 0 { return Err("Checking this PC: wait for the check to finish".into()); }
+        self.restart_after = !self.plan_only && steps.iter().any(|step| step.component == Some("program"));
         self.queue = steps.into();
         self.last = None;
         self.next();
@@ -564,6 +578,14 @@ pub fn run(event_loop: EventLoop<AppEvent>, context: WebContext, setup: Setup, l
                 Event::UserEvent(AppEvent::Installer(report)) => {
                     let ended = matches!(report, Report::Ended(_) | Report::Checked(..));
                     installer.report(report);
+                    // A program update that left the new engine waiting: installation.exe again puts it in place.
+                    if installer.restart_due() {
+                        installer.line("The new program goes in place: installation.exe starts again.".into());
+                        installer.flush(&windows)?;
+                        Command::new(zlc_core::checkout::path("installation.exe")).spawn().map_err(|error| format!("Cannot start installation.exe: {error}"))?;
+                        *flow = ControlFlow::Exit;
+                        return Ok(());
+                    }
                     // A step that writes without pause still shows its lines every 50 ms.
                     if ended || installer.flush_at.is_some_and(|at| Instant::now() >= at) { installer.flush(&windows)?; }
                     if ended { windows.send_to(&Kind::Installer, &installer.state())?; }
