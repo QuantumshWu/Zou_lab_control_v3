@@ -219,6 +219,9 @@ pub struct CurveTables {
     pub hover: Option<Focus>,
     pub hover_frozen: bool,
     pub locked: Option<Focus>,
+    /// Wheel travel short of a whole notch, and the locked series it was
+    /// made on: it counts only while that series is still the locked one.
+    pub wheel: Option<(SeriesId, f64)>,
     pub press: Option<(f64, f64, Option<SeriesId>)>,
     /// axes -> inspector annotation text id.
     pub annotations: BTreeMap<usize, ChildId>,
@@ -905,11 +908,26 @@ impl Renderer {
             .and_then(|v| v.iter().find(|(id, _)| *id == locked.identity).map(|(_, i)| *i));
         let Some(current) = current else { return false };
         if entries.is_empty() { return false; }
-        let target = (current as i64 + if step > 0.0 { -1 } else { 1 }).clamp(0, entries.len() as i64 - 1) as usize;
-        if target == current { return true; }
+        // A whole notch is one series: a hi-res wheel or a touchpad sends a
+        // notch as many small steps, each of which used to move a series.
+        // The travel short of a notch is kept for the series it was made on.
+        let travel = step + match &self.curve.wheel { Some((identity, rest)) if *identity == locked.identity => *rest, _ => 0.0 };
+        // Steps summed in binary land a hair short of a whole notch (0.3 * 3 + 0.1).
+        let notches = if (travel - travel.round()).abs() <= 1e-9 { travel.round() } else { travel.trunc() };
+        let last = entries.len() as f64 - 1.0;
+        let target = (current as f64 - notches).clamp(0.0, last);
+        // At an end the travel past it is dropped: the first notch back moves.
+        let beyond = (target == 0.0 && travel > 0.0) || (target == last && travel < 0.0);
+        let rest = if beyond { 0.0 } else { travel - notches };
+        let target = target as usize;
+        if target == current {
+            self.curve.wheel = Some((locked.identity, rest));
+            return true;
+        }
         let (line, identity, label) = entries[target].clone();
         let mut anchor = (locked.x, locked.y);
         if let Some(start) = self.series_start(locked.axes, line).filter(|s| s.0.is_finite() && s.1.is_finite()) { anchor = start; }
+        self.curve.wheel = Some((identity.clone(), rest));
         self.curve.locked = Some(Focus { axes: locked.axes, identity, label, x: anchor.0, y: anchor.1 });
         self.apply_series_focus(None);
         true

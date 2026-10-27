@@ -327,8 +327,8 @@ pub fn hit_selector(
 ) -> Result<Option<(SelectorState, DragHandle)>> {
     let x_scale = transform.interaction_scale(Axis::X);
     let y_scale = transform.interaction_scale(Axis::Y);
-    let tx = py_max(hit_fraction * transform.drawn_span(Axis::X), 1e-12);
-    let ty = py_max(hit_fraction * transform.drawn_span(Axis::Y), 1e-12);
+    let tx = reach(hit_fraction, transform.drawn_span(Axis::X));
+    let ty = reach(hit_fraction, transform.drawn_span(Axis::Y));
     let mut best: Option<((u8, f64, usize), SelectorState, DragHandle)> = None;
     for (order, state) in states.iter().enumerate() {
         if !on_axes(state) || state.facet_index != focused_facet { continue; }
@@ -371,11 +371,21 @@ pub fn new_area_draft(point: CrosshairPoint, focused_facet: Option<u64>) -> Resu
 /// (the press is still the rail's).  `bounds` is the rail's canonical
 /// extent, `value` the effective colour limits.
 pub fn begin_color_limit_drag(bounds: NumericRange, value: NumericRange, point_x: f64, hit_fraction: f64) -> Result<Option<ColorLimitDrag>> {
-    let tolerance = py_max(bounds.span() * hit_fraction, 1.0e-12);
+    let tolerance = reach(hit_fraction, bounds.span());
     let Some((_score, handle)) = range_endpoint_hit(value, point_x, tolerance, &AxisScale::Linear)? else { return Ok(None) };
-    let minimum_span = py_min(bounds.span(), py_max(py_max(value.span() * 1.0e-12, bounds.span() * 1.0e-12), 1.0e-12));
+    // Relative to the rail alone: v2's absolute 1e-12 floor made a rail of
+    // smaller values (a current in A) its own minimum span, every drag of
+    // limits narrower than the rail refused.
+    let minimum_span = py_min(bounds.span(), py_max(value.span() * 1.0e-12, bounds.span() * 1.0e-12));
     Ok(Some(ColorLimitDrag { original: value, candidate: value, handle, origin: point_x, bounds, minimum_span }))
 }
+
+/// How far a press reaches along an axis spanning `span`: `fraction` of
+/// it, never below its binary noise (1e-12 of it), and something even on
+/// an axis of no span.  v2's floor was an absolute 1e-12, a whole axis of
+/// small values (a current in A), where every press then held a selector
+/// end.
+fn reach(fraction: f64, span: f64) -> f64 { py_max(py_max(fraction * span, 1.0e-12 * span), f64::MIN_POSITIVE) }
 
 impl SelectorGesture {
     /// Exact pixel inequality is the sole activation edge: no drag threshold.
@@ -426,25 +436,38 @@ pub fn wheel_zoom(range: NumericRange, scale: &AxisScale, factor: f64) -> Result
 
 /// The viewport one wheel burst asks for (`_on_scroll` on a 2-D surface).
 ///
-/// Anchored on the COMMITTED viewport: `committed_x` (already mapped to the
-/// axes' coordinates) and `committed_y`, each `None` where nothing is
-/// committed, when the drawn limits stand in.  Only an image zooms y.
+/// Anchored on the view the wheel last asked for, never on the drawn
+/// limits (renders lag commits): `base_x` (already mapped to the axes'
+/// coordinates) and `base_y`, each `None` where nothing is asked, when the
+/// drawn limits stand in.  Only an image zooms y.  `fewest` is one source
+/// pixel in each axis' drawn space: the view is never asked to be narrower
+/// (the axis spanning the most pixels stops at one), so the first notch
+/// back out moves it again.
+#[allow(clippy::too_many_arguments)]
 pub fn wheel_viewport(
-    committed_x: Option<NumericRange>,
-    committed_y: Option<NumericRange>,
+    base_x: Option<NumericRange>,
+    base_y: Option<NumericRange>,
     drawn_x: (f64, f64),
     drawn_y: (f64, f64),
     scales: (&AxisScale, &AxisScale),
     image_like: bool,
     zoom_factor: f64,
     ticks: f64,
+    fewest: Option<(f64, f64)>,
 ) -> Result<(NumericRange, Option<NumericRange>)> {
-    let factor = pow(zoom_factor, ticks)?;
+    let mut factor = pow(zoom_factor, ticks)?;
     let sorted_range = |limits: (f64, f64)| { let (low, high) = sorted2(limits.0, limits.1); NumericRange::new(low, high) };
-    let x_axes = match committed_x { None => sorted_range(drawn_x)?, Some(x) => x };
-    let y_axes = match committed_y { None => sorted_range(drawn_y)?, Some(y) => y };
+    let x_axes = match base_x { None => sorted_range(drawn_x)?, Some(x) => x };
+    let y_axes = match base_y { None => sorted_range(drawn_y)?, Some(y) => y };
+    if let Some((pixel_x, pixel_y)) = fewest {
+        let floor = |range: NumericRange, scale: &AxisScale, pixel: f64| {
+            let span = (scale.space(range.high) - scale.space(range.low)).abs();
+            if span > 0.0 && span.is_finite() { pixel / span } else { 0.0 }
+        };
+        factor = py_max(factor, py_min(floor(x_axes, scales.0, pixel_x), floor(y_axes, scales.1, pixel_y)));
+    }
     let zoomed_x = wheel_zoom(x_axes, scales.0, factor)?;
-    let zoomed_y = if image_like { Some(wheel_zoom(y_axes, scales.1, factor)?) } else { committed_y };
+    let zoomed_y = if image_like { Some(wheel_zoom(y_axes, scales.1, factor)?) } else { base_y };
     Ok((zoomed_x, zoomed_y))
 }
 

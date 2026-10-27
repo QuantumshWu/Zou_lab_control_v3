@@ -107,10 +107,13 @@ pub struct ColorLimitDrag {
 }
 
 impl ColorLimitDrag {
-    /// The candidate differs from the original beyond `allclose(rtol=1e-12, atol=1e-15)`.
+    /// The candidate differs from the original beyond binary noise:
+    /// `allclose(rtol=1e-12)` with the absolute part relative to the rail
+    /// (v2's `atol=1e-15` was the whole rail of a small-valued image, whose
+    /// every drag then let go unchanged).
     pub fn changed(&self) -> bool {
-        !(isclose(self.candidate.low, self.original.low, 1.0e-12, 1.0e-15)
-            && isclose(self.candidate.high, self.original.high, 1.0e-12, 1.0e-15))
+        let atol = 1.0e-12 * self.bounds.span();
+        !(isclose(self.candidate.low, self.original.low, 1.0e-12, atol) && isclose(self.candidate.high, self.original.high, 1.0e-12, atol))
     }
 
     /// The drag with the pointer at `position`.

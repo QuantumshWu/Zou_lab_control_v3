@@ -92,6 +92,10 @@ pub(crate) struct Scene {
     pub projection: FitProjection,
     pub image_overlay: Option<OverlayHandle>,
     pub viewport: Option<Viewport>,
+    /// Where the wheel last asked the view to be, before an image put it on
+    /// its pixel grid: the next notch goes on from here while the committed
+    /// viewport is still what committing it showed.
+    pub wheel_request: Option<Viewport>,
     pub focused_facet_index: Option<usize>,
     pub facet_focus_index: Option<usize>,
     pub accepted_fit: Option<Arc<AcceptedFit>>,
@@ -230,7 +234,8 @@ impl PlotSession {
         let focused = if spec.is_facet_grid() { Some(0) } else { None };
         let scene = Scene {
             parameter_schema: candidate.parameter_schema.clone(), display, projection: prepared.projection.clone(), image_overlay: None,
-            viewport: candidate.viewport, focused_facet_index: candidate.focused_facet_index.map(|i| i as usize).or(if spec.is_facet_grid() { focused } else { None }),
+            viewport: candidate.viewport, wheel_request: None,
+            focused_facet_index: candidate.focused_facet_index.map(|i| i as usize).or(if spec.is_facet_grid() { focused } else { None }),
             facet_focus_index: candidate.facet_focus.map(|i| i as usize), accepted_fit: None, classifier_results: Arc::from(Vec::new()),
             classifier_overlays: Arc::from(Vec::new()), classifier_thresholds: OrderedMap::new(), classifier_components: OrderedMap::new(),
             fit_expression_failure: None, layout_revision: 0, size, fit_context_generation: 0, fit_request_generation: 0,

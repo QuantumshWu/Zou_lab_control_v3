@@ -20,6 +20,7 @@ use crate::interaction::pymath::sorted2;
 use crate::interaction::transform::AxisTransform;
 use crate::kinds::PlotKind;
 
+use super::control::GridSnap;
 use super::core::PlotSession;
 use super::renderer::SeriesAction;
 
@@ -278,12 +279,25 @@ impl PlotSession {
             return self.configure_parameters(ValueMap::from_pairs([("camera_zoom", Value::Float(zoomed))]));
         }
         let geometry = self.renderer.geometry(&active).ok_or_else(|| PlotError::runtime("active axes have no geometry"))?;
-        let committed = self.scene.viewport.unwrap_or((None, None));
-        let committed_x = committed.0.map(|x| self.viewport_x_to_axes(x)).transpose()?;
-        let (x, y) = wheel_viewport(committed_x, committed.1, geometry.x_limits, geometry.y_limits, (&geometry.x_scale, &geometry.y_scale),
-                                    self.semantic_kind() == PlotKind::Image, factor, ticks)?;
-        let x = self.viewport_x_from_axes(x)?;
-        self.set_viewport(Some(x), y)
+        // The notch goes on from where the wheel asked the view to be, not
+        // from that request put on an image's pixel grid: a notch moving
+        // each edge less than a pixel would otherwise snap straight back,
+        // every notch the same, and the zoom stall short of the pixels.
+        // Only while the committed view is still what that request showed:
+        // anything else that moved the view (a pan, home, a zoom to the
+        // selection, another grid) is where the wheel starts from instead.
+        let base = match self.scene.wheel_request {
+            Some(request) if self.committed_view(Some(request))? == self.scene.viewport => request,
+            _ => self.scene.viewport.unwrap_or((None, None)),
+        };
+        let base_x = base.0.map(|x| self.viewport_x_to_axes(x)).transpose()?;
+        let pixel = self.image_pixel_grid()?.map(|[x, y]| (x.pitch, y.pitch));
+        let (x, y) = wheel_viewport(base_x, base.1, geometry.x_limits, geometry.y_limits, (&geometry.x_scale, &geometry.y_scale),
+                                    self.semantic_kind() == PlotKind::Image, factor, ticks, pixel)?;
+        let request = (Some(self.viewport_x_from_axes(x)?), y);
+        self.set_viewport(request.0, request.1)?;
+        self.scene.wheel_request = Some(request);
+        Ok(())
     }
 
     /// `_on_motion`.
@@ -343,7 +357,7 @@ impl PlotSession {
         let image = self.semantic_kind() == PlotKind::Image;
         let committed = self.projected().viewport();
         update_pan(gesture, Some(pixel), canvas, image, self.scene.viewport.and_then(|view| view.1), committed,
-                   |x| self.viewport_x_from_axes(x), |selected| self.image_viewport_on_pixel_grid(selected))
+                   |x| self.viewport_x_from_axes(x), |selected| self.image_viewport_on_pixel_grid(selected, GridSnap::Nearest))
     }
 
     /// `_on_button_release`.
