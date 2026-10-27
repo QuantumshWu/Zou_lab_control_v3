@@ -545,13 +545,15 @@ mod tests{
         std::fs::write(dir.join("index.json"),serde_json::to_string_pretty(&index).unwrap()).unwrap();
     }
     /// The error estimator (`lattice::estimator`) on R2's dumped spaces (N1's
-    /// pipeline, `research/population/unified/r2/n2_dump.py`), exported by
-    /// the session's `est_rust/export.py`: estimate against the actual error
+    /// pipeline, `research/population/unified/r2/n2_dump.py` on branch
+    /// claude/unified-estimate), exported by
+    /// `research/population/unified/est/est_export.py` (summary:
+    /// `est_summary.py` on the output): estimate against the actual error
     /// and against R2's Python estimate. Ignored; ATOM_ESTIMATOR_FIXTURES =
     /// the export root, ATOM_ESTIMATOR_CASES = comma-separated case names,
     /// optional ATOM_ESTIMATOR_CLASSES (neighbours | full),
     /// ATOM_ESTIMATOR_HORIZON_RATE, ATOM_ESTIMATOR_ENTRY, ATOM_ESTIMATOR_CAP. One JSON line per
-    /// checkpoint.
+    /// checkpoint; the fold charges (added by the Estimator) are left out.
     #[test]
     #[ignore]
     fn lattice_estimator_against_r2_fixtures(){
