@@ -196,7 +196,7 @@ function background(analysis:Analysis,result:Correction):Background{
 /** A laser's largest mixing amplitude |Ω/2Δ| in the static (far) treatment, alone at its
  * own carrier -- the ratio that treatment refuses above STATIC_MIXING_LIMIT (1%) -- and
  * whether each of its virtual transitions keeps that treatment's minimum detuning. It
- * changes nothing. */
+ * changes nothing; laser-regime.ts farValidity adds main's detuning rule. */
 export function displayMixing(scene:Scene,laserId:string):{ratio:number;withinGap:boolean}{
   const laser=scene.lasers.find(l=>l.id===laserId);if(!laser||laserIntensityMWcm2(laser)===0)return {ratio:0,withinGap:true};
   const analysis=analyze(scene),beams=groups({...scene,lasers:[{...laser,enabled:true}]},analysis),measure:Measure={withinGap:true};

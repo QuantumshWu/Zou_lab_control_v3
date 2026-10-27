@@ -1,8 +1,8 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
-import {spectroscopyAnalysis,spectroscopyCoupling} from '../dist/js/atom-workbench/src/spectroscopy.js';
-import {classifyLasers} from '../dist/js/atom-workbench/src/laser-regime.js';
+import {STATIC_MIXING_LIMIT,displayMixing,spectroscopyAnalysis,spectroscopyCoupling} from '../dist/js/atom-workbench/src/spectroscopy.js';
+import {classifyLasers,farValidity} from '../dist/js/atom-workbench/src/laser-regime.js';
 import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {normalizeLaserFrequency} from '../dist/js/atom-workbench/src/laser-frequency.js';
 import {levelsChart} from '../dist/js/atom-workbench/src/charts.js';
@@ -148,6 +148,24 @@ test('a far laser near resonance and a near laser far from resonance are refused
  const near=defaultScene();near.lasers[1].regime='near';
  assert.equal(classifyLasers(near).find(x=>x.id==='tweezer').valid,false);assert.throws(()=>buildFullMasterModel(near),/近共振范围/);
  const off=defaultScene();off.lasers[0].regime='far';off.lasers[0].enabled=false;assert.ok(classifyLasers(off).every(x=>x.valid));
+});
+
+test('a far laser is refused as on main: the detuning rule and the 1% static mixing |Ω/2Δ|, both in farValidity',()=>{
+ const s=defaultScene(),tweezer=s.lasers.find(l=>l.id==='tweezer'),base=farValidity(s,'tweezer'),intensity=laserIntensityMWcm2(tweezer);
+ assert.equal(STATIC_MIXING_LIMIT,.01);assert.equal(base.mixingLimit,.01);assert.ok(base.valid&&base.detuningRule&&base.withinGap&&base.mixing>0&&base.mixing<.01&&base.message==='');
+ assert.equal(base.mixing,displayMixing(s,'tweezer').ratio);
+ const at=ratio=>{const scene=structuredClone(s),t=scene.lasers.find(l=>l.id==='tweezer');t.intensityMode='intensity';t.intensityMWcm2=intensity*(ratio/base.mixing)**2;return scene;};
+ // Main's detuning rule |Δ| ≥ 100 Ω/2π binds first for this tweezer, near |Ω/2Δ| = 0.53%.
+ const ok=at(.005),rule=at(.006),above=at(.012);
+ assert.ok(farValidity(ok,'tweezer').valid);assert.equal(buildFullMasterModel(ok).laserCount,1);
+ const r=farValidity(rule,'tweezer');assert.ok(!r.valid&&!r.detuningRule&&r.mixing<.01);
+ assert.throws(()=>buildFullMasterModel(rule),error=>error.message===r.message&&/远失谐条件/.test(r.message));
+ // Above 1% the static shift itself is refused too: the levels chart has no static shift for it.
+ const a=farValidity(above,'tweezer');assert.ok(!a.valid&&Math.abs(a.mixing-.012)<1e-9);
+ assert.equal(spectroscopyAnalysis({...above,lasers:above.lasers.filter(l=>l.id==='tweezer')}).spectroscopy.status,'unresolved');
+ assert.throws(()=>buildFullMasterModel(above));
+ const probe=farValidity(s,'probe');assert.ok(!probe.valid&&!probe.withinGap&&!probe.detuningRule,'a resonant probe cannot be far');
+ assert.deepEqual(farValidity(s,'nobody'),{mixing:0,mixingLimit:.01,withinGap:true,detuningRule:true,valid:true,message:''});
 });
 
 test('the far static shift includes the Rb+ core: the mean ground shift is the scalar polarizability sum',()=>{

@@ -1,11 +1,12 @@
 import type {Scene} from './types.js';
 import {atomicSystem,complexPolarization,composeMagneticField,laserCarrierOffsetMHz,laserIntensityMWcm2,RB87} from './physics.js';
+import {STATIC_MIXING_LIMIT,displayMixing} from './spectroscopy.js';
 /** A laser's regime decides its physics (full-master-model.ts): 'near' is a
  * rotating-wave drive of the master equation, 'far' only a static
  * second-order light shift. `valid` is the regime's own condition on the
  * nearest allowed transition:
  * - far: |Δ| ≥ 100 max(Γ/2π, Ω/2π) for every allowed dipole (the static
- *   shift's own mixing check |Ω/2Δ| ≤ 1% is in spectroscopy.ts);
+ *   shift's own mixing check is in spectroscopy.ts; farValidity has both);
  * - near: the nearest transition within max(1 GHz, 10 Ω/2π).
  * A disabled or dark laser is always valid. */
 export interface LaserClassification {id:string;regime:'near'|'far';nearestMHz:number;transition:string;maximumMixing:number;valid:boolean;message:string;line:'D1'|'D2';groundF:1|2}
@@ -29,3 +30,17 @@ export function classifyLasers(scene:Scene):LaserClassification[]{
  });
 }
 export function assertLaserRegimes(scene:Scene):void{const invalid=classifyLasers(scene).find(c=>!c.valid);if(invalid)throw new Error(invalid.message);}
+/** Whether a laser may be 'far' (a static shift), by the master model's two checks
+ * for it alone at its carrier: main's detuning rule above (detuningRule) and the static
+ * shift's mixing |Ω/2Δ| ≤ STATIC_MIXING_LIMIT (1%) with its minimum gaps (spectroscopy.ts
+ * displayMixing). For the default 852 nm tweezer the detuning rule binds first, at
+ * |Ω/2Δ| ≈ 0.53%. Beams of one carrier enter the model together, so their sum is
+ * what the model checks. It changes nothing. */
+export function farValidity(scene:Scene,laserId:string):{mixing:number;mixingLimit:number;withinGap:boolean;detuningRule:boolean;valid:boolean;message:string}{
+ const laser=scene.lasers.find(l=>l.id===laserId);
+ if(!laser||laserIntensityMWcm2(laser)===0)return {mixing:0,mixingLimit:STATIC_MIXING_LIMIT,withinGap:true,detuningRule:true,valid:true,message:''};
+ const rule=classifyLasers({...scene,lasers:[{...laser,enabled:true,regime:'far'}]})[0]!,m=displayMixing(scene,laserId);
+ const mixingValid=m.ratio<=STATIC_MIXING_LIMIT&&m.withinGap,valid=rule.valid&&mixingValid;
+ const message=!rule.valid?rule.message:mixingValid?'':!m.withinGap?`${laser.name}：静态光移的虚跃迁离共振太近（D 线 < 100 MHz 或高态 < 10 GHz），超出静态色散模型，请改为近共振光或调整频率。`:`${laser.name}：静态光移的混合比 |Ω/2Δ| = ${(100*m.ratio).toPrecision(3)}%，超过 ${100*STATIC_MIXING_LIMIT}% 的静态色散模型范围，请改为近共振光或调整频率/强度。`;
+ return {mixing:m.ratio,mixingLimit:STATIC_MIXING_LIMIT,withinGap:m.withinGap,detuningRule:rule.valid,valid,message};
+}
