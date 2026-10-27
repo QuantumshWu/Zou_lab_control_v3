@@ -70,6 +70,9 @@ const GROWTH_NEGLIGIBLE:f64=1e-6;
 const GROWTH_BUDGET:f64=0.1;
 /// Dependent columns of the dressed Gram matrix (squared ratio).
 const DEPENDENT:f64=1e-14;
+/// Real entries per partial Gram product (fixed: sums do not depend on
+/// the thread count).
+const GRAM_CHUNK:usize=1<<14;
 /// A Ritz pair counts as converged (slowest relaxation) when its relative
 /// residual is below this share of |Re theta|.
 const RITZ_CONVERGED:f64=0.1;
@@ -82,12 +85,13 @@ pub(crate) fn transpose_rows(a:&[f64],r:usize,c:usize)->Vec<f64>{let mut t=vec![
 /// A real view of complex data (Complex64 is repr(C) {re, im}).
 fn real_view(x:&[C])->&[f64]{unsafe{std::slice::from_raw_parts(x.as_ptr()as *const f64,2*x.len())}}
 /// Re (A^H B) for column-major complex A (length x m) and B (length x c):
-/// row-major m x c, the length split over the workers (partial sums added
-/// in a fixed order).
+/// row-major m x c, the length split into fixed chunks over the workers
+/// (partial sums added in chunk order, so the result does not depend on the
+/// thread count).
 fn real_gram(lapack:&Lapack,a:&[C],m:usize,b:&[C],c:usize,length:usize)->Result<Vec<f64>,String>{
     if m==0||c==0{return Ok(vec![0.;m*c]);}
     let(ar,br)=(real_view(a),real_view(b));let total=2*length;let execution=Execution::new()?;
-    let chunk=total.div_ceil(execution.threads().max(1)).max(4096);
+    let chunk=GRAM_CHUNK;
     let starts:Vec<usize>=(0..total).step_by(chunk).collect();
     let parts=execution.map(starts,|start|->Result<Vec<f64>,String>{let end=(start+chunk).min(total);let mut out=vec![0.;m*c];
         lapack.gemm(true,false,m,c,end-start,1.,&ar[start..],total,&br[start..],total,0.,&mut out,m)?;Ok(out)});

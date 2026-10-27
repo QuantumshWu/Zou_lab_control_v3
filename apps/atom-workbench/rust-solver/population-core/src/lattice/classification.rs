@@ -9,9 +9,10 @@
 //! them are far). Far steps are folded at second order; a far + far pair with
 //! a nonzero near sum t joins the fold target K_t when its group is at least
 //! CROSS_FOLD_FLOOR of the diagonal (t = 0) fold, otherwise it is omitted and
-//! its bound charged (`ledger`). Near steps below the structural coupling
-//! floor do not grow the near ball; they still act exactly on every lattice
-//! edge, and their edges leaving the lattice are charged.
+//! its bound charged (`ledger`). Near steps and fold targets below the
+//! structural coupling floor do not grow the near ball or a ring; they still
+//! act exactly on every lattice edge, and their edges leaving the lattice
+//! are charged.
 use super::*;
 use crate::preparation::STRUCTURAL_COUPLING_FLOOR;
 
@@ -109,12 +110,20 @@ impl HarmonicPlan{
     pub fn explicit(&self)->Vec<usize>{(0..self.steps.len()).filter(|&i|matches!(self.steps[i].treatment,Treatment::Explicit{..})).collect()}
     /// The step with the opposite charge (every Hermitian component has one).
     pub fn opposite(&self,step:usize)->Option<usize>{let o=opposite(&self.steps[step].charge);self.steps.iter().position(|s|s.charge==o)}
-    /// The steps that generate the near ball: structural explicit steps and
-    /// the nonzero fold targets.
+    /// The steps that generate the near ball and the rings: structural
+    /// explicit steps and the nonzero fold targets at or above the structural
+    /// floor (without a tweezer the counter-rotating cross folds land on
+    /// near charges at about 1e-9 of the near couplings).
     pub fn structural_steps(&self)->Vec<Charge>{
         let mut out:BTreeSet<Charge>=self.steps.iter().filter(|s|s.treatment==Treatment::Explicit{structural:true}).map(|s|s.charge.clone()).collect();
-        out.extend(self.targets.iter().filter(|t|t.charge.iter().any(|&k|k!=0)).map(|t|t.charge.clone()));
+        out.extend(self.cross_targets(true).map(|t|t.charge.clone()));
         out.into_iter().collect()
+    }
+    /// The nonzero fold targets at or above (`structural`) or below the
+    /// structural floor.
+    pub fn cross_targets(&self,structural:bool)->impl Iterator<Item=&FoldTarget>{
+        let floor=self.structural_floor;
+        self.targets.iter().filter(move|t|t.charge.iter().any(|&k|k!=0)&&(t.size>=floor)==structural)
     }
     pub fn count(&self,treatment:&Treatment)->usize{self.steps.iter().filter(|s|&s.treatment==treatment).count()}
 }
