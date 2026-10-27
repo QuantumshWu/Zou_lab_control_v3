@@ -16,8 +16,8 @@
 //! - `tail`: seven and more steps (Neumann series with the far shell above
 //!   half the slowest far frequency);
 //! - `omitted_cross`: far + far groups below the cross-fold floor;
-//! - `non_structural`: near couplings and fold targets below the structural
-//!   floor, on their edges leaving the lattice;
+//! - `non_structural`: near couplings below the structural floor, on their
+//!   edges leaving the lattice;
 //! - `dropped_entries`: fold entries below the storage floor (row sums).
 use super::*;
 use super::classification::{HarmonicPlan,Treatment};
@@ -55,8 +55,7 @@ impl RemainderLedger{
     pub fn new(plan:&HarmonicPlan,nu_max:f64,dropped:[f64;2])->Result<Self,String>{
         let l0=plan.l0_bound;let cut=plan.cut;
         let mut ledger=Self{dropped_entries:dropped[0]+nu_max*dropped[1],..Default::default()};
-        ledger.non_structural=plan.steps.iter().filter(|s|s.treatment==Treatment::Explicit{structural:false}).map(|s|s.size).sum::<f64>()
-            +plan.cross_targets(false).map(|t|t.size).sum::<f64>();
+        ledger.non_structural=plan.steps.iter().filter(|s|s.treatment==Treatment::Explicit{structural:false}).map(|s|s.size).sum();
         ledger.fold=plan.targets.iter().map(|t|t.size).sum();
         let far=plan.far();
         if far.is_empty(){return Ok(ledger);}

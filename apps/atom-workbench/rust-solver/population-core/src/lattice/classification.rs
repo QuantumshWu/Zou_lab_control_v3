@@ -8,11 +8,16 @@
 //! FOLD_DISTANCE ||L0|| (or, when every significant step is that fast, all of
 //! them are far). Far steps are folded at second order; a far + far pair with
 //! a nonzero near sum t joins the fold target K_t when its group is at least
-//! CROSS_FOLD_FLOOR of the diagonal (t = 0) fold, otherwise it is omitted and
-//! its bound charged (`ledger`). Near steps and fold targets below the
-//! structural coupling floor do not grow the near ball or a ring; they still
-//! act exactly on every lattice edge, and their edges leaving the lattice
-//! are charged.
+//! CROSS_FOLD_FLOOR of the diagonal (t = 0) fold and at least the structural
+//! coupling floor, otherwise it is omitted and its bound charged (`ledger`):
+//! below the floor it would be a non-structural coupling at best, while a
+//! fold edge carries dense sector blocks (without a tweezer the
+//! counter-rotating cross folds land on near charges at about 1e-9 of the
+//! near couplings, each with some 0.6M stored entries). Near steps below the
+//! structural coupling floor do not grow the near ball; they still act
+//! exactly on every lattice edge, and their edges leaving the lattice are
+//! charged. The structural steps and the kept fold targets generate the near
+//! ball and the rings of the explicit charges (`charge_set`).
 use super::*;
 use crate::preparation::STRUCTURAL_COUPLING_FLOOR;
 
@@ -100,7 +105,7 @@ impl HarmonicPlan{
         let(mut targets,mut omitted)=(Vec::new(),Vec::new());
         for(charge,(nu,pairs))in groups{
             let size=pairs.iter().map(|x|x.bound).sum::<f64>();
-            if charge==generator.zero||(size>0.&&size>=CROSS_FOLD_FLOOR*diagonal){targets.push(FoldTarget{charge,nu,pairs,size});}
+            if charge==generator.zero||(size>0.&&size>=(CROSS_FOLD_FLOOR*diagonal).max(structural_floor)){targets.push(FoldTarget{charge,nu,pairs,size});}
             else{omitted.push(OmittedTarget{charge,nu,pairs,size});}
         }
         targets.sort_by_key(|t|t.charge!=generator.zero);
@@ -111,19 +116,12 @@ impl HarmonicPlan{
     /// The step with the opposite charge (every Hermitian component has one).
     pub fn opposite(&self,step:usize)->Option<usize>{let o=opposite(&self.steps[step].charge);self.steps.iter().position(|s|s.charge==o)}
     /// The steps that generate the near ball and the rings: structural
-    /// explicit steps and the nonzero fold targets at or above the structural
-    /// floor (without a tweezer the counter-rotating cross folds land on
-    /// near charges at about 1e-9 of the near couplings).
+    /// explicit steps and the nonzero fold targets (all at or above the
+    /// structural floor).
     pub fn structural_steps(&self)->Vec<Charge>{
         let mut out:BTreeSet<Charge>=self.steps.iter().filter(|s|s.treatment==Treatment::Explicit{structural:true}).map(|s|s.charge.clone()).collect();
-        out.extend(self.cross_targets(true).map(|t|t.charge.clone()));
+        out.extend(self.targets.iter().filter(|t|t.charge.iter().any(|&k|k!=0)).map(|t|t.charge.clone()));
         out.into_iter().collect()
-    }
-    /// The nonzero fold targets at or above (`structural`) or below the
-    /// structural floor.
-    pub fn cross_targets(&self,structural:bool)->impl Iterator<Item=&FoldTarget>{
-        let floor=self.structural_floor;
-        self.targets.iter().filter(move|t|t.charge.iter().any(|&k|k!=0)&&(t.size>=floor)==structural)
     }
     pub fn count(&self,treatment:&Treatment)->usize{self.steps.iter().filter(|s|&s.treatment==treatment).count()}
 }
