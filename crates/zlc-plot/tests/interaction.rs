@@ -460,7 +460,8 @@ fn session_pointer_rules_match() {
             outcome(wheel_camera_zoom(f(&c[10]), d.wheel_zoom_factor, ticks), |zoom| json!([["parameter", "camera_zoom", b(zoom)]]))
         } else {
             let (cx, cy) = viewport(&c[7]).unwrap_or((None, None));
-            outcome(wheel_viewport(cx, cy, pair(&c[0]), pair(&c[1]), (&xs, &ys), c[6].as_bool().unwrap(), d.wheel_zoom_factor, ticks),
+            outcome(wheel_viewport(cx, cy, pair(&c[0]), pair(&c[1]), (&xs, &ys), c[6].as_bool().unwrap(), d.wheel_zoom_factor, ticks,
+                                   None),
                     |(x, y)| json!([["viewport", enc_range(Some(x)), enc_range(y)]]))
         };
         let want = if c[11].is_array() { ok(c[11].clone()) } else { c[11].clone() };

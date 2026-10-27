@@ -21,6 +21,21 @@ use super::core::PlotSession;
 use super::projected::PlotInput;
 use super::evaluation::classifier_threshold_target;
 
+/// One image axis' source pixels in its drawn space: cell `k` spans
+/// `origin + k * pitch` to `origin + (k + 1) * pitch`.
+pub(crate) struct PixelAxis { pub scale: AxisScale, pub pitch: f64, pub origin: f64 }
+
+/// How a rectangle is put on an image's pixel grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GridSnap {
+    /// A view asked for grows outward to whole cells: it stays wholly visible.
+    Outward,
+    /// A view carried by the hand (a pan) keeps its cells and lands on the
+    /// nearest: outward, every shift short of a whole pixel grew it by one,
+    /// and the next pan carried that wider view on.
+    Nearest,
+}
+
 impl PlotSession {
     /// `_configure(parameters=values)`: resolve, prepare and accept through
     /// the asynchronous path; a failure restores the scene.
@@ -236,10 +251,16 @@ impl PlotSession {
         self.set_viewport(Some(NumericRange::new(low, high)?), current.1)
     }
 
+    /// The viewport committing `selected` shows (`_set_viewport_state`'s
+    /// normalized view on its pixel grid).
+    pub(crate) fn committed_view(&self, selected: Option<Viewport>) -> Result<Option<Viewport>> {
+        self.image_viewport_on_pixel_grid(normalize_viewport(selected), GridSnap::Outward)
+    }
+
     /// `_set_viewport_state`: commit the viewport and the fit authority
     /// after their frame draws.
     pub(crate) fn set_viewport_state(&mut self, selected: Option<Viewport>) -> Result<bool> {
-        let selected = self.image_viewport_on_pixel_grid(normalize_viewport(selected))?;
+        let selected = self.committed_view(selected)?;
         self.assert_open_session()?;
         if selected == self.scene.viewport { return Ok(false); }
         let previous = (self.scene.viewport, self.scene.fit_context_generation);
@@ -262,44 +283,66 @@ impl PlotSession {
         Ok((NumericRange::new(x0, x1)?, NumericRange::new(y0, y1)?))
     }
 
+    /// The source-pixel lattice an image view snaps to (`_image_viewport_on_pixel_grid`'s
+    /// grid): each axis' drawn scale, pixel pitch and first cell edge in that
+    /// scale's space, or `None` where the view is not put on one (not an
+    /// image, a single sample, cells of the two axes not one screen size).
+    pub(crate) fn image_pixel_grid(&self) -> Result<Option<[PixelAxis; 2]>> {
+        if self.semantic_kind() != PlotKind::Image { return Ok(None); }
+        let payload = self.scene.projection.payload().clone();
+        let image = match &*payload {
+            Payload::Image(image) => image,
+            Payload::Facet(facet) => match facet.cells.first().map(|cell| &cell.payload) { Some(Payload::Image(image)) => image, _ => return Ok(None) },
+            _ => return Ok(None),
+        };
+        let axes = [image.x.display.to_f64(), image.y.display.to_f64()];
+        let mut grid = Vec::with_capacity(2);
+        for values in &axes {
+            if values.len() < 2 { return Ok(None); }
+            let scale = image_coordinate_scale(values).map_err(PlotError::value)?;
+            let (first, last) = (scale.space(values[0]), scale.space(values[values.len() - 1]));
+            let pitch = ((last - first) / (values.len() - 1) as f64).abs();
+            if !pitch.is_finite() || pitch <= 0.0 { return Ok(None); }
+            grid.push(PixelAxis { origin: first.min(last) - pitch / 2.0, pitch, scale });
+        }
+        let Some(aspect) = image_cell_aspect(&axes[0], &axes[1], (&grid[0].scale, &grid[1].scale)) else { return Ok(None) };
+        if !isclose(grid[0].pitch, grid[1].pitch * aspect, 1e-9) { return Ok(None); }
+        let y = grid.pop().expect("two axes");
+        Ok(Some([grid.pop().expect("two axes"), y]))
+    }
+
     /// `_image_viewport_on_pixel_grid`: an image view is a whole number of
     /// source pixels, both axes snapped together in cell units.
-    pub(crate) fn image_viewport_on_pixel_grid(&self, selected: Option<Viewport>) -> Result<Option<Viewport>> {
+    pub(crate) fn image_viewport_on_pixel_grid(&self, selected: Option<Viewport>, snap: GridSnap) -> Result<Option<Viewport>> {
         let Some(mut selected) = selected else { return Ok(None) };
         if self.semantic_kind() != PlotKind::Image { return Ok(Some(selected)); }
         if selected.0.is_none() || selected.1.is_none() {
             let (x, y) = self.current_display_limits()?;
             selected = (selected.0.or(Some(x)), selected.1.or(Some(y)));
         }
-        let payload = self.scene.projection.payload().clone();
-        let image = match &*payload {
-            Payload::Image(image) => image,
-            Payload::Facet(facet) => match facet.cells.first().map(|cell| &cell.payload) { Some(Payload::Image(image)) => image, _ => return Ok(Some(selected)) },
-            _ => return Ok(Some(selected)),
-        };
-        let axes = [image.x.display.to_f64(), image.y.display.to_f64()];
+        let Some(grid) = self.image_pixel_grid()? else { return Ok(Some(selected)) };
         let spans = [selected.0.unwrap(), selected.1.unwrap()];
-        let (mut pitches, mut origins, mut counts, mut lows, mut scales) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for (values, span) in axes.iter().zip(spans) {
-            if values.len() < 2 { return Ok(Some(selected)); }
-            let scale = image_coordinate_scale(values).map_err(PlotError::value)?;
-            let positions: Vec<f64> = values.iter().map(|value| scale.space(*value)).collect();
-            let (span_low, span_high) = (scale.space(span.low), scale.space(span.high));
-            let pitch = ((positions[positions.len() - 1] - positions[0]) / (positions.len() - 1) as f64).abs();
-            if !pitch.is_finite() || pitch <= 0.0 { return Ok(Some(selected)); }
-            let origin = positions[0].min(positions[positions.len() - 1]) - pitch / 2.0;
-            let tolerance = pitch * 1e-9;
-            let first = ((span_low.min(span_high) - origin) / pitch + tolerance).floor();
-            let last = ((span_low.max(span_high) - origin) / pitch - tolerance).ceil();
+        let (mut lows, mut counts) = ([0.0; 2], [0.0; 2]);
+        for (index, (axis, span)) in grid.iter().zip(spans).enumerate() {
+            let (low, high) = sorted2(axis.scale.space(span.low), axis.scale.space(span.high));
+            let (first, last) = match snap {
+                GridSnap::Outward => {
+                    // An end within binary noise of a cell edge is on it. The
+                    // noise of a cell count is relative to the coordinates it
+                    // is taken from, so the slack is too (v2's `pitch * 1e-9`
+                    // was in the axis' unit, not in cells).
+                    let slack = 1e-9 * (low.abs().max(high.abs()).max(axis.origin.abs()) / axis.pitch).max(1.0);
+                    (((low - axis.origin) / axis.pitch + slack).floor(), ((high - axis.origin) / axis.pitch - slack).ceil())
+                }
+                GridSnap::Nearest => {
+                    let first = ((low - axis.origin) / axis.pitch + 0.5).floor();
+                    (first, first + ((high - low) / axis.pitch).round())
+                }
+            };
             if last <= first { return Ok(Some(selected)); }
-            pitches.push(pitch);
-            origins.push(origin);
-            lows.push(first);
-            counts.push(last - first);
-            scales.push(scale);
+            lows[index] = first;
+            counts[index] = last - first;
         }
-        let Some(aspect) = image_cell_aspect(&axes[0], &axes[1], (&scales[0], &scales[1])) else { return Ok(Some(selected)) };
-        if !isclose(pitches[0], pitches[1] * aspect, 1e-9) { return Ok(Some(selected)); }
         let wanted = counts[0].max(counts[1]);
         for index in 0..2 {
             let missing = wanted - counts[index];
@@ -308,9 +351,9 @@ impl PlotSession {
             counts[index] = wanted;
         }
         let snapped = |index: usize| -> Result<NumericRange> {
-            let scale: &AxisScale = &scales[index];
-            let a = axis_value(scale, origins[index] + lows[index] * pitches[index])?;
-            let b = axis_value(scale, origins[index] + (lows[index] + counts[index]) * pitches[index])?;
+            let axis = &grid[index];
+            let a = axis_value(&axis.scale, axis.origin + lows[index] * axis.pitch)?;
+            let b = axis_value(&axis.scale, axis.origin + (lows[index] + counts[index]) * axis.pitch)?;
             let (low, high) = sorted2(a, b);
             NumericRange::new(low, high)
         };
