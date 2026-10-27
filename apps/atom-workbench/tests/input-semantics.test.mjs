@@ -6,7 +6,7 @@ import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-mo
 import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {setLaserIntensityMode,setLaserLocalIntensity,setLaserPowerMW,setLaserWaistUm} from '../dist/js/atom-workbench/src/laser-intensity.js';
-import {setLaserDetuningUnit,setLaserDetuningValue,setLaserFrequencyMode,setLaserWavelengthNm} from '../dist/js/atom-workbench/src/laser-frequency.js';
+import {expressionBase,setFrequencyBase,setFrequencyUnit,setFrequencyValue} from '../dist/js/atom-workbench/src/laser-frequency.js';
 const roundtrip=scene=>validateScene(JSON.parse(JSON.stringify(scene)));
 const field=(id,magnitudeG,thetaDeg=61,phiDeg=19)=>({id,name:id,enabled:true,magnitudeG,thetaDeg,phiDeg});
 const key=scene=>dynamicsCacheKey(scene,scene.dynamics,true);
@@ -33,9 +33,11 @@ test('pure input-mode changes cannot spoil two-beam destructive interference by 
 });
 
 test('all positive supported detunings survive wavelength/transition, export/import and direct wavelength edits',()=>{
-  for(const detuning of [-350,1000,5000]){let s=defaultScene(),l=s.lasers[0];setLaserDetuningUnit(l,'THz');setLaserDetuningValue(l,detuning);const frequency=laserFrequencyMHz(l),baseKey=key(s);for(let i=0;i<10;i++){setLaserFrequencyMode(l,'wavelength');s=roundtrip(s);l=s.lasers[0];assert.equal(laserFrequencyMHz(l),frequency);assert.equal(key(s),baseKey);setLaserFrequencyMode(l,'transition');s=roundtrip(s);l=s.lasers[0];assert.equal(laserFrequencyMHz(l),frequency);}}
-  const s=defaultScene(),l=s.lasers[0];setLaserWavelengthNm(l,8758.729242094549);assert.equal(roundtrip(s).lasers[0].wavelengthNm,8758.729242094549);
-  const before=JSON.stringify(l);for(const invalid of [0,-1,Number.MIN_VALUE,Infinity,NaN]){assert.throws(()=>setLaserWavelengthNm(l,invalid));assert.equal(JSON.stringify(l),before,'failed input is atomic');}
+  // Scenes load as frequency expressions; re-expressing one keeps its carrier bit for bit.
+  for(const detuning of [-350,1000,5000]){let s=roundtrip(defaultScene()),l=s.lasers[0];setFrequencyUnit(s,l,'THz');setFrequencyValue(s,l,detuning);const transition=expressionBase(l.frequency),frequency=laserFrequencyMHz(l),baseKey=key(s);
+    for(let i=0;i<10;i++){setFrequencyBase(s,l,{kind:'absolute'});setFrequencyUnit(s,l,'nm');s=roundtrip(s);l=s.lasers[0];assert.equal(laserFrequencyMHz(l),frequency);assert.equal(key(s),baseKey);setFrequencyBase(s,l,transition);s=roundtrip(s);l=s.lasers[0];assert.equal(laserFrequencyMHz(l),frequency);}}
+  const s=roundtrip(defaultScene()),l=s.lasers[0];setFrequencyBase(s,l,{kind:'absolute'});setFrequencyUnit(s,l,'nm');setFrequencyValue(s,l,8758.729242094549);assert.equal(roundtrip(s).lasers[0].frequency.wavelengthNm,8758.729242094549);
+  const before=JSON.stringify(l);for(const invalid of [0,-1,Number.MIN_VALUE,Infinity,NaN]){assert.throws(()=>setFrequencyValue(s,l,invalid));assert.equal(JSON.stringify(l),before,'failed input is atomic');}
 });
 
 test('single B and split collinear B give bitwise identical full H, radiative metadata and exact cycling support',()=>{

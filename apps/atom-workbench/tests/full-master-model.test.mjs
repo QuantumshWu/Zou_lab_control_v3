@@ -1,10 +1,13 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
-import {spectroscopyAnalysis,spectroscopyCoupling} from '../dist/js/atom-workbench/src/spectroscopy.js';
+import {STATIC_MIXING_LIMIT,displayMixing,spectroscopyAnalysis,spectroscopyCoupling} from '../dist/js/atom-workbench/src/spectroscopy.js';
+import {classifyLasers,farValidity} from '../dist/js/atom-workbench/src/laser-regime.js';
+import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {normalizeLaserFrequency} from '../dist/js/atom-workbench/src/laser-frequency.js';
 import {levelsChart} from '../dist/js/atom-workbench/src/charts.js';
-import {accurateSum,laserFrequencyDifferenceMHz} from '../dist/js/atom-workbench/src/physics.js';
+import {RB87,accurateSum,laserFrequencyDifferenceMHz,laserFrequencyMHz,laserIntensityMWcm2} from '../dist/js/atom-workbench/src/physics.js';
+import {CORE_POLARIZABILITY_AU,VIRTUAL_MANIFOLDS} from '../dist/js/atom-workbench/src/spectroscopy-data.js';
 
 function threeNearBeams(){
  const scene=defaultScene(),probe=scene.lasers[0];
@@ -124,6 +127,94 @@ test('resonant and common frames have identical physical driving at multiple pha
   const re=a.real[k]*Math.cos(phase)-a.imag[k]*Math.sin(phase)-(i===j?deltaI:0),im=a.real[k]*Math.sin(phase)+a.imag[k]*Math.cos(phase);
   assert.ok(Math.abs(re-b.real[k])<1e-7*Math.max(1,Math.abs(re)));assert.ok(Math.abs(im-b.imag[k])<1e-7*Math.max(1,Math.abs(im)));
  }}
+});
+
+test('the regime decides the physics: a far laser is only a static shift and is part of the dynamics key',()=>{
+ const s=defaultScene(),model=buildFullMasterModel(s);
+ assert.equal(model.laserCount,1);assert.ok(model.drives.every(d=>!d.laserIds.includes('tweezer')));
+ // The far tweezer moves H0 (and its basis), nothing else.
+ const dark=buildFullMasterModel({...s,lasers:s.lasers.filter(l=>l.id!=='tweezer')});
+ assert.equal(dark.laserCount,1);assert.notDeepEqual(dark.hReal.filter((_,k)=>k%33===0),model.hReal.filter((_,k)=>k%33===0));
+ const display=spectroscopyAnalysis(s,undefined,false);
+ assert.deepEqual(model.states.map(l=>l.energyMHz),[...display.ground,...display.D1,...display.D2].map(l=>l.energyMHz),'the levels chart shows the H0 the dynamics uses');
+ const key=scene=>dynamicsCacheKey(scene,scene.dynamics,false),flipped=structuredClone(s);flipped.lasers[1].regime='near';
+ assert.notEqual(key(flipped),key(s));
+});
+
+test('a far laser near resonance and a near laser far from resonance are refused, as on main',()=>{
+ const far=defaultScene();far.lasers[0].regime='far';
+ const c=classifyLasers(far).find(x=>x.id==='probe');assert.equal(c.valid,false);assert.match(c.message,/远失谐条件/);
+ assert.throws(()=>buildFullMasterModel(far),/远失谐条件/);
+ const near=defaultScene();near.lasers[1].regime='near';
+ assert.equal(classifyLasers(near).find(x=>x.id==='tweezer').valid,false);assert.throws(()=>buildFullMasterModel(near),/近共振范围/);
+ const off=defaultScene();off.lasers[0].regime='far';off.lasers[0].enabled=false;assert.ok(classifyLasers(off).every(x=>x.valid));
+});
+
+test('a far laser is refused as on main: the detuning rule and the 1% static mixing |Ω/2Δ|, both in farValidity',()=>{
+ const s=defaultScene(),tweezer=s.lasers.find(l=>l.id==='tweezer'),base=farValidity(s,'tweezer'),intensity=laserIntensityMWcm2(tweezer);
+ assert.equal(STATIC_MIXING_LIMIT,.01);assert.equal(base.mixingLimit,.01);assert.ok(base.valid&&base.detuningRule&&base.withinGap&&base.mixing>0&&base.mixing<.01&&base.message==='');
+ assert.equal(base.mixing,displayMixing(s,'tweezer').ratio);
+ const at=ratio=>{const scene=structuredClone(s),t=scene.lasers.find(l=>l.id==='tweezer');t.intensityMode='intensity';t.intensityMWcm2=intensity*(ratio/base.mixing)**2;return scene;};
+ // Main's detuning rule |Δ| ≥ 100 Ω/2π binds first for this tweezer, near |Ω/2Δ| = 0.53%.
+ const ok=at(.005),rule=at(.006),above=at(.012);
+ assert.ok(farValidity(ok,'tweezer').valid);assert.equal(buildFullMasterModel(ok).laserCount,1);
+ const r=farValidity(rule,'tweezer');assert.ok(!r.valid&&!r.detuningRule&&r.mixing<.01);
+ assert.throws(()=>buildFullMasterModel(rule),error=>error.message===r.message&&/远失谐条件/.test(r.message));
+ // Above 1% the static shift itself is refused too: the levels chart has no static shift for it.
+ const a=farValidity(above,'tweezer');assert.ok(!a.valid&&Math.abs(a.mixing-.012)<1e-9);
+ assert.equal(spectroscopyAnalysis({...above,lasers:above.lasers.filter(l=>l.id==='tweezer')}).spectroscopy.status,'unresolved');
+ assert.throws(()=>buildFullMasterModel(above));
+ const probe=farValidity(s,'probe');assert.ok(!probe.valid&&!probe.withinGap&&!probe.detuningRule,'a resonant probe cannot be far');
+ assert.deepEqual(farValidity(s,'nobody'),{mixing:0,mixingLimit:.01,withinGap:true,detuningRule:true,valid:true,message:''});
+});
+
+test('the far static shift includes the Rb+ core: the mean ground shift is the scalar polarizability sum',()=>{
+ // pi-polarized 852 nm tweezer alone. The trace over the 8 ground states removes
+ // hyperfine and Zeeman structure to first order: what is left is the scalar
+ // shift -alpha |E|^2 / 4 of D1 + D2 (co- and counter-rotating), the listed
+ // outside states and the core.
+ const s=defaultScene();s.lasers=s.lasers.filter(l=>l.id==='tweezer');Object.assign(s.lasers[0],{thetaDeg:90,phiDeg:0,ellipticityDeg:0,polarizationAngleDeg:0});
+ const model=buildFullMasterModel(s),ground=model.states.slice(0,8),mean=accurateSum(ground.map(l=>l.starkShiftMHz))/8;
+ const H=6.62607015e-34,hartree=4.3597447222071e-18,eV=1.602176634e-19,ea0=eV*5.29177210903e-11,omega=H*laserFrequencyMHz(s.lasers[0])*1e6/hartree;
+ const term=(reduced,de)=>reduced*reduced*de/(de*de-omega*omega)/3;
+ // Edmonds reduced elements: sqrt(2J+1) times Steck's <J||er||J'>; RB87.D2.dipole is the stretched-state dipole, 1/sqrt(2) of it.
+ const dLines=term(Math.SQRT2*RB87.D1.dipole/ea0,H*RB87.D1.frequencyHz/hartree)+term(2*RB87.D2.dipole/ea0,H*RB87.D2.frequencyHz/hartree);
+ const valence=VIRTUAL_MANIFOLDS.ground.reduce((sum,v)=>sum+term(v.reducedEA0,v.energyEV*eV/hartree),0),core=CORE_POLARIZABILITY_AU.ground;
+ const E2=2*laserIntensityMWcm2(s.lasers[0])*10/(8.8541878128e-12*299792458),shift=alpha=>-alpha*1.64877727436e-41*E2/(4*H*1e6);
+ assert.ok(Math.abs(mean/shift(dLines+valence+core)-1)<1e-6,`mean ground shift ${mean} MHz vs ${shift(dLines+valence+core)} MHz`);
+ assert.ok(Math.abs(shift(core)/mean)>1e-3&&Math.abs(shift(valence)/mean)>1e-4,'the test resolves the core and the outside states');
+ assert.ok(model.assumptions.some(text=>text.includes('Rb+ 芯极化')));
+});
+
+test('emission is secular per D line and ground F: one operator per line, photon polarization and F, total rate Gamma',()=>{
+ const model=buildFullMasterModel(defaultScene()),states=model.states;assert.equal(model.collapse.length,12);
+ for(const c of model.collapse){const rows=new Set(),lines=new Set();
+  for(let g=0;g<8;g++)for(let e=8;e<32;e++)if(c.real[g*32+e]!==0||c.imag[g*32+e]!==0){rows.add(states[g].F);lines.add(states[e].manifold);}
+  assert.equal(rows.size,1);assert.equal(lines.size,1);
+  for(let i=0;i<32;i++)for(let j=0;j<32;j++)if(!(i<8&&j>=8))assert.equal(c.real[i*32+j],0);
+ }
+ for(let e=8;e<32;e++){const rate=model.collapse.reduce((sum,c)=>sum+Array.from({length:8},(_,g)=>c.real[g*32+e]**2+c.imag[g*32+e]**2).reduce((a,b)=>a+b,0),0);
+  const gamma=states[e].manifold==='D1'?36.129:38.117;assert.ok(Math.abs(rate/gamma-1)<1e-3,`${states[e].id} ${rate}`);}
+});
+
+test('initial-state specs build a diagonal unit-trace density in the model basis',()=>{
+ const s=defaultScene(),states=buildFullMasterModel(s).states,diag=m=>states.map((_,i)=>m.initialReal[i*32+i]);
+ const check=(m)=>{assert.ok(Math.abs(diag(m).reduce((a,b)=>a+b,0)-1)<1e-14);assert.ok(m.initialImag.every(v=>v===0));for(let i=0;i<32;i++)for(let j=0;j<32;j++)if(i!==j)assert.equal(m.initialReal[i*32+j],0);assert.equal(m.initialIndex,diag(m).indexOf(Math.max(...diag(m))));};
+ const one=buildFullMasterModel(s);check(one);assert.equal(diag(one)[states.findIndex(x=>x.id===s.dynamics.initialStateId)],1);
+ assert.equal(one.initialIndex,states.findIndex(x=>x.id===s.dynamics.initialStateId));
+ const all=buildFullMasterModel(s,{...s.dynamics,initialState:{kind:'unpolarized',manifold:'ground'}});check(all);
+ states.forEach((x,i)=>assert.equal(diag(all)[i],x.manifold==='ground'?1/8:0));
+ const f1=buildFullMasterModel(s,{...s.dynamics,initialState:{kind:'unpolarized',manifold:'F1'}});check(f1);
+ states.forEach((x,i)=>assert.ok(Math.abs(diag(f1)[i]-(x.manifold==='ground'&&x.F===1?1/3:0))<1e-15));
+ const hot=buildFullMasterModel(s,{...s.dynamics,initialState:{kind:'thermal',temperatureK:1e-3}});check(hot);
+ const g20=states.findIndex(x=>x.id==='ground-2-0'),g10=states.findIndex(x=>x.id==='ground-1-0');
+ const ratio=diag(hot)[g20]/diag(hot)[g10],expected=Math.exp(-(states[g20].energyMHz-states[g10].energyMHz)*6.62607015e-28/1.380649e-23/1e-3);
+ assert.ok(Math.abs(ratio/expected-1)<1e-9);assert.ok(diag(hot)[g20]<diag(hot)[g10]);
+ const flat=buildFullMasterModel(s,{...s.dynamics,initialState:{kind:'thermal',temperatureK:1e9}});states.forEach((x,i)=>assert.ok(Math.abs(diag(flat)[i]-(x.manifold==='ground'?1/8:0))<1e-6));
+ const mixed=buildFullMasterModel(s,{...s.dynamics,initialState:{kind:'weights',weights:{'ground-2-0':3,'D2-3-0':1}}});check(mixed);
+ assert.equal(diag(mixed)[g20],0.75);assert.equal(mixed.initialPopulations[states.findIndex(x=>x.id==='D2-3-0')],0.25);
+ assert.throws(()=>buildFullMasterModel(s,{...s.dynamics,initialState:{kind:'weights',weights:{'ground-2-0':0}}}));
+ assert.ok(mixed.assumptions.some(text=>text.startsWith('初态：')));
 });
 
 test('many ground references stay in the ground region instead of being packed into excited manifolds',()=>{

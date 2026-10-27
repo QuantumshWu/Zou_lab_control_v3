@@ -1,17 +1,35 @@
 //! Complete E/F pencil action on a finite Fourier domain.
 //!
 //! For a signed Fourier field x (modes q, one n x n matrix per mode and
-//! right-hand side) the pencil computes
-//!   J   = x + [S, x] + [S, [S, x]] / 2,      z = K vec(J_EE),
+//! right-hand side) the pencil computes, shear layer by layer (inner first),
+//! each layer a sum over its classes c,
+//!   J_k = J_{k-1} + sum_c ([S_c, J_{k-1}] + [S_c, [S_c, J_{k-1}]] / 2),
+//!   J_0 = x,  J = J_last,      z = K vec(J_EE),
 //!   E x = J + embed_GG(z),
 //!   F x = NL * J + J * NR + R vec(J_EE) + L_GG z + L_OG z - i omega E x,
 //! where `*` is the convolution over charges, (A * X)_q = sum_p A_p X_{q-p}.
 //! The charge pairs (source mode, target mode) of every coefficient are its
-//! edges. Hilbert stages are evaluated per target mode: for each ground or
-//! excited output part, the nonzero blocks of all incoming coefficients are
-//! concatenated along the contraction and the matching source rows/columns
-//! stacked, so one ZGEMM accumulates the whole convolution into the target.
-//! Thin stages (K, R, L_GG, L_OG) use one dense GEMM or a CSR pass per charge.
+//! edges.
+//!
+//! Hilbert stages (S, NL, NR) are evaluated per target mode and multiply only
+//! the nonzero coefficient entries (`Kernel::Sparse`, the default where AVX2
+//! and FMA exist). Right products X A read whole field columns, which are
+//! contiguous in the mode-block layout: for every output column, a
+//! register-tiled kernel (pencil_kernel.rs) sums the nonzero A_p[k, j] of all
+//! edges times field column k of their source, read in place. Left
+//! products use A X = (X^dagger A^dagger)^dagger: the same kernel runs over
+//! the columns of X^dagger with the lists of A^dagger and adds its result
+//! conjugate-transposed. X_s^dagger is the partner mode X_{-s} when the field
+//! is exactly Hermitian-paired (half mode; the self-paired central mode is
+//! conjugate-transposed explicitly), else a conjugated copy. Exact zeros are
+//! skipped and nothing else, so the work is the number of nonzero
+//! coefficient entries per edge; denser coefficients only cost more.
+//! `Kernel::Blas` (also the fallback) instead concatenates, per ground or
+//! excited output part, the nonzero blocks of all incoming coefficients and
+//! stacks the matching source rows/columns for one ZGEMM.
+//! Thin stages (K, R, L_GG, L_OG) multiply the block of their used rows and
+//! columns with one dense GEMM per charge, or run a CSR pass over the used
+//! rows when that block is mostly zero.
 //!
 //! Field layout ("mode blocks"): mode m stores the matrices of all rhs
 //! columns as one column-major n x (rhs*n) block whose column index is
@@ -35,6 +53,9 @@ use crate::parallel::{Execution, MINIMUM_WORK_PER_TASK};
 use crate::preparation::{Charge, FourierMatrices};
 use crate::{Coefficient, Finite, C};
 
+#[path = "pencil_kernel.rs"]
+mod kernel;
+
 const ZERO: C = C { re: 0., im: 0. };
 const ONE: C = C { re: 1., im: 0. };
 /// Task-sizing weights in complex multiply-add units (scheduling only):
@@ -45,6 +66,25 @@ const CSR_WORK: usize = 4;
 // ---------------------------------------------------------------------------
 // GEMM backend
 // ---------------------------------------------------------------------------
+
+/// Arithmetic of the Hilbert stages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kernel {
+    /// Per target and output part: stack every edge's nonzero blocks and the
+    /// matching source rows/columns, then one ZGEMM.
+    Blas,
+    /// Per target: only the nonzero coefficient entries, by column, over
+    /// field columns read in place (see the module documentation).
+    Sparse,
+}
+
+impl Kernel {
+    /// The sparse kernel where its vector code runs, else BLAS.
+    pub(crate) fn best() -> Self {
+        if kernel::available() { Kernel::Sparse } else { Kernel::Blas }
+    }
+}
+
 
 /// Column-major C = alpha*A*B + beta*C. `Reference` is a plain triple loop
 /// used by small validation fixtures that run without BLAS.
@@ -138,10 +178,45 @@ struct Block {
     input: Range<usize>,
 }
 
+/// Nonzero entries of an n x n matrix by column: column j holds the pairs
+/// (row[e], value[e]) for e in start[j]..start[j+1], in row order.
+#[derive(Default)]
+struct Columns {
+    start: Vec<usize>,
+    row: Vec<usize>,
+    value: Vec<C>,
+}
+
+impl Columns {
+    /// Columns of the matrix whose entry (k, j) is `entry(k, j)`.
+    fn new(n: usize, entry: impl Fn(usize, usize) -> C) -> Self {
+        let mut columns = Columns { start: vec![0], ..Default::default() };
+        for j in 0..n {
+            for k in 0..n {
+                let z = entry(k, j);
+                if z.re != 0. || z.im != 0. {
+                    columns.row.push(k);
+                    columns.value.push(z);
+                }
+            }
+            columns.start.push(columns.row.len());
+        }
+        columns
+    }
+
+    fn bytes(&self) -> usize {
+        (self.start.len() + self.row.len()) * std::mem::size_of::<usize>() + self.value.len() * std::mem::size_of::<C>()
+    }
+}
+
 /// S, NL or NR at one charge, with its nonzero ground/excited block pattern.
 pub(crate) struct HilbertCoefficient {
     /// Column-major n x n.
     dense: Vec<C>,
+    /// Nonzeros of A, for right products X A.
+    right_columns: Columns,
+    /// Nonzeros of A^dagger, for left products A X = (X^dagger A^dagger)^dagger.
+    left_columns: Columns,
     /// Blocks of A*X: for each output row part, the contracted columns.
     left: Vec<Block>,
     /// Blocks of X*A: for each output column part, the contracted rows.
@@ -185,7 +260,9 @@ impl HilbertCoefficient {
             }
         }
         let macs = |blocks: &[Block]| blocks.iter().map(|b| b.output.len() * b.input.len() * n).sum();
-        Self { dense, left_macs: macs(&left), right_macs: macs(&right), left, right }
+        let right_columns = Columns::new(n, |k, j| matrix[k * n + j]);
+        let left_columns = Columns::new(n, |k, j| conj(matrix[j * n + k]));
+        Self { dense, right_columns, left_columns, left_macs: macs(&left), right_macs: macs(&right), left, right }
     }
 }
 
@@ -194,7 +271,14 @@ pub(crate) struct ThinCoefficient {
     rows: usize,
     cols: usize,
     sparse: Coefficient,
-    /// Column-major copy when at least 15% of the entries are nonzero.
+    /// Rows and columns that hold a nonzero entry. Every entry is in this
+    /// block, so its product is the complete one (the non-secular recycling
+    /// of one charge feeds only the F=1/F=2 coherences, 15 of 64 ground
+    /// rows).
+    used_rows: Vec<usize>,
+    used_cols: Vec<usize>,
+    /// Column-major copy of the used rows x used columns block, when at
+    /// least a quarter of that block is nonzero.
     dense: Option<Vec<C>>,
 }
 
@@ -220,20 +304,28 @@ impl ThinCoefficient {
             }
             sparse.row.push(sparse.value.len());
         }
-        let dense = (rows.min(cols) >= 8 && sparse.value.len() as f64 >= 0.15 * (rows * cols) as f64).then(|| {
-            let mut dense = vec![ZERO; rows * cols];
-            for r in 0..rows {
-                for c in 0..cols {
-                    dense[r + rows * c] = permuted[r * cols + c];
+        let used_rows: Vec<usize> = (0..rows).filter(|&r| sparse.row[r + 1] > sparse.row[r]).collect();
+        let mut used = vec![false; cols];
+        for &c in &sparse.col {
+            used[c] = true;
+        }
+        let used_cols: Vec<usize> = (0..cols).filter(|&c| used[c]).collect();
+        let (ur, uc) = (used_rows.len(), used_cols.len());
+        let dense = (ur * uc >= 64 && sparse.value.len() as f64 >= 0.25 * (ur * uc) as f64).then(|| {
+            let mut dense = vec![ZERO; ur * uc];
+            for (i, &r) in used_rows.iter().enumerate() {
+                for (k, &c) in used_cols.iter().enumerate() {
+                    dense[i + ur * k] = permuted[r * cols + c];
                 }
             }
             dense
         });
-        Self { rows, cols, sparse, dense }
+        Self { rows, cols, sparse, used_rows, used_cols, dense }
     }
 
     fn bytes(&self) -> usize {
-        (self.sparse.row.len() + self.sparse.col.len()) * std::mem::size_of::<usize>()
+        (self.sparse.row.len() + self.sparse.col.len() + self.used_rows.len() + self.used_cols.len())
+            * std::mem::size_of::<usize>()
             + (self.sparse.value.len() + self.dense.as_ref().map_or(0, Vec::len)) * std::mem::size_of::<C>()
     }
 }
@@ -247,7 +339,10 @@ pub(crate) struct Library {
 
 impl Library {
     pub(crate) fn bytes(&self) -> usize {
-        self.hilbert.iter().map(|a| a.dense.len() * std::mem::size_of::<C>()).sum::<usize>()
+        self.hilbert
+            .iter()
+            .map(|a| a.dense.len() * std::mem::size_of::<C>() + a.right_columns.bytes() + a.left_columns.bytes())
+            .sum::<usize>()
             + self.thin.iter().map(ThinCoefficient::bytes).sum::<usize>()
     }
 }
@@ -437,12 +532,20 @@ fn embedding(input: &ModeOrder, output: &ModeOrder) -> Vec<(usize, usize)> {
 // Plan
 // ---------------------------------------------------------------------------
 
+/// One shear layer: per class its S family and [S, .] modes, and the
+/// layer's output modes.
+pub(crate) struct LayerInput<'a> {
+    pub classes: Vec<(&'a Family, &'a [Charge])>,
+    pub output: &'a [Charge],
+}
+
 /// Families and index sets for one rectangular domain (input -> output).
 pub(crate) struct PlanInput<'a> {
     pub n: usize,
     pub ground: usize,
     pub library: Arc<Library>,
-    pub commutator: &'a Family,
+    /// Shear layers, inner first; the last layer's output modes are `j`.
+    pub layers: Vec<LayerInput<'a>>,
     pub left: &'a Family,
     pub right: &'a Family,
     pub selected_k: &'a Family,
@@ -450,7 +553,6 @@ pub(crate) struct PlanInput<'a> {
     pub ground_hamiltonian: &'a Family,
     pub optical_hamiltonian: &'a Family,
     pub input: &'a [Charge],
-    pub first: &'a [Charge],
     pub j: &'a [Charge],
     pub z: &'a [Charge],
     pub output: &'a [Charge],
@@ -464,26 +566,39 @@ pub(crate) struct PlanInput<'a> {
     pub blas: Option<Arc<Lapack>>,
 }
 
+/// One compiled shear class: input -> first = [S_c, input] -> output.
+struct LayerClass {
+    first: ModeOrder,
+    first_commutator: Adjacency,
+    second_commutator: Adjacency,
+    first_to_output: Vec<(usize, usize)>,
+}
+
+/// One compiled shear layer: output = input + sum_c (first_c + [S_c, first_c] / 2).
+struct Layer {
+    classes: Vec<LayerClass>,
+    output: ModeOrder,
+    input_to_output: Vec<(usize, usize)>,
+}
+
 pub(crate) struct Plan {
     n: usize,
     ground: usize,
     rank: usize,
     max_rhs: usize,
     input: ModeOrder,
-    first: ModeOrder,
+    layers: Vec<Layer>,
     j: ModeOrder,
     z: ModeOrder,
     output: ModeOrder,
-    first_commutator: Adjacency,
-    second_commutator: Adjacency,
     left_no_jump: Adjacency,
     right_no_jump: Adjacency,
     selected_k: Vec<Link>,
     recycling: Vec<Link>,
     ground_hamiltonian: Vec<Link>,
     optical_hamiltonian: Vec<Link>,
+    /// Without layers J is the input itself.
     input_to_j: Vec<(usize, usize)>,
-    first_to_j: Vec<(usize, usize)>,
     j_to_output: Vec<(usize, usize)>,
     z_to_output: Vec<(usize, usize)>,
     gg: Vec<(usize, usize)>,
@@ -496,20 +611,40 @@ pub(crate) struct Plan {
     library: Arc<Library>,
     blas: Option<Arc<Lapack>>,
     execution: Execution,
+    kernel: Kernel,
 }
 
 impl Plan {
     pub(crate) fn new(spec: PlanInput<'_>) -> Result<Self, String> {
         let input = ModeOrder::new(spec.input);
-        let first = ModeOrder::new(spec.first);
         let j = ModeOrder::new(spec.j);
+        let mut layers = Vec::with_capacity(spec.layers.len());
+        let mut previous = input.clone();
+        for layer in &spec.layers {
+            let output = ModeOrder::new(layer.output);
+            let mut classes = Vec::with_capacity(layer.classes.len());
+            for &(family, first) in &layer.classes {
+                let first = ModeOrder::new(first);
+                classes.push(LayerClass {
+                    first_commutator: Adjacency::new(&links(family, &previous, &first)?, first.len()),
+                    second_commutator: Adjacency::new(&links(family, &first, &output)?, output.len()),
+                    first_to_output: embedding(&first, &output),
+                    first,
+                });
+            }
+            layers.push(Layer { classes, input_to_output: embedding(&previous, &output), output: output.clone() });
+            previous = output;
+        }
+        if spec.layers.last().is_some_and(|last| last.output != spec.j) {
+            return Err("The last shear layer must produce the J modes".into());
+        }
         let z = ModeOrder::new(spec.z);
         let output = ModeOrder::new(spec.output);
         let gg_position: BTreeMap<(usize, usize), usize> = spec.gg.iter().enumerate().map(|(k, &p)| (p, k)).collect();
         let gg_transpose: Option<Vec<usize>> =
             spec.gg.iter().map(|&(a, b)| gg_position.get(&(b, a)).copied()).collect();
+        let layer_families: Vec<&Family> = spec.layers.iter().flat_map(|l| l.classes.iter().map(|c| c.0)).collect();
         let families_closed = [
-            spec.commutator,
             spec.left,
             spec.right,
             spec.selected_k,
@@ -518,18 +653,18 @@ impl Plan {
             spec.optical_hamiltonian,
         ]
         .iter()
+        .chain(&layer_families)
         .all(|family| family.keys().all(|q| negate(q).is_some_and(|p| family.contains_key(&p))));
         let half_capable = families_closed
             && gg_transpose.is_some()
-            && [&input, &first, &j, &z, &output].iter().all(|order| order.pairing.is_some());
+            && [&input, &j, &z, &output].iter().all(|order| order.pairing.is_some())
+            && layers.iter().all(|l| l.output.pairing.is_some() && l.classes.iter().all(|c| c.first.pairing.is_some()));
         let frequency = (0..output.len()).map(|t| spec.frequency[output.external[t]]).collect();
         Ok(Self {
             n: spec.n,
             ground: spec.ground,
             rank: spec.gg.len(),
             max_rhs: spec.max_rhs,
-            first_commutator: Adjacency::new(&links(spec.commutator, &input, &first)?, first.len()),
-            second_commutator: Adjacency::new(&links(spec.commutator, &first, &j)?, j.len()),
             left_no_jump: Adjacency::new(&links(spec.left, &j, &output)?, output.len()),
             right_no_jump: Adjacency::new(&links(spec.right, &j, &output)?, output.len()),
             selected_k: links(spec.selected_k, &j, &z)?,
@@ -537,7 +672,6 @@ impl Plan {
             ground_hamiltonian: links(spec.ground_hamiltonian, &z, &output)?,
             optical_hamiltonian: links(spec.optical_hamiltonian, &z, &output)?,
             input_to_j: embedding(&input, &j),
-            first_to_j: embedding(&first, &j),
             j_to_output: embedding(&j, &output),
             z_to_output: embedding(&z, &output),
             gg: spec.gg,
@@ -548,13 +682,15 @@ impl Plan {
             library: spec.library,
             blas: spec.blas,
             execution: Execution::new()?,
+            kernel: Kernel::best(),
             input,
-            first,
+            layers,
             j,
             z,
             output,
         })
     }
+
 
     pub(crate) fn input_modes(&self) -> usize {
         self.input.len()
@@ -564,8 +700,11 @@ impl Plan {
         self.output.len()
     }
 
+    /// (all [S, .] modes, all layer outputs, z modes).
     pub(crate) fn intermediate_modes(&self) -> (usize, usize, usize) {
-        (self.first.len(), self.j.len(), self.z.len())
+        let first = self.layers.iter().flat_map(|l| l.classes.iter().map(|c| c.first.len())).sum();
+        let outputs = self.layers.iter().map(|l| l.output.len()).sum::<usize>().max(self.j.len());
+        (first, outputs, self.z.len())
     }
 
     pub(crate) fn max_rhs(&self) -> usize {
@@ -584,13 +723,22 @@ impl Plan {
     /// Bytes of the index tables owned by this plan (coefficients excluded).
     pub(crate) fn index_bytes(&self) -> usize {
         let word = std::mem::size_of::<usize>();
-        let hilbert = [&self.first_commutator, &self.second_commutator, &self.left_no_jump, &self.right_no_jump];
+        let hilbert: Vec<&Adjacency> = self
+            .layers
+            .iter()
+            .flat_map(|l| l.classes.iter().flat_map(|c| [&c.first_commutator, &c.second_commutator]))
+            .chain([&self.left_no_jump, &self.right_no_jump])
+            .collect();
         let thin = [&self.selected_k, &self.recycling, &self.ground_hamiltonian, &self.optical_hamiltonian];
         let edges: usize = hilbert.iter().map(|s| s.offsets.len() + 2 * s.source.len()).sum::<usize>()
             + thin.iter().flat_map(|s| s.iter()).map(|l| 2 * l.sources.len()).sum::<usize>();
-        let maps = self.input_to_j.len() + self.first_to_j.len() + self.j_to_output.len() + self.z_to_output.len();
-        let orders = [&self.input, &self.first, &self.j, &self.z, &self.output]
-            .iter()
+        let maps = self.input_to_j.len()
+            + self.layers.iter().map(|l| l.input_to_output.len() + l.classes.iter().map(|c| c.first_to_output.len()).sum::<usize>()).sum::<usize>()
+            + self.j_to_output.len()
+            + self.z_to_output.len();
+        let orders = [&self.input, &self.j, &self.z, &self.output]
+            .into_iter()
+            .chain(self.layers.iter().flat_map(|l| l.classes.iter().map(|c| &c.first).chain([&l.output])))
             .map(|o| 2 * o.len() + o.charges.iter().map(Vec::len).sum::<usize>() / 2)
             .sum::<usize>();
         (edges + 2 * maps + orders + 2 * (self.gg.len() + self.optical.len())) * word + self.frequency.len() * 8
@@ -599,14 +747,20 @@ impl Plan {
     /// Upper bound of the workspace bytes needed per right-hand side.
     pub(crate) fn workspace_bytes_per_rhs(&self) -> usize {
         let d = self.n * self.n;
-        let e = self.n - self.ground;
-        let fields = (self.input.len() + self.first.len() + self.j.len() + 2 * self.output.len()) * d
-            + self.j.len() * e * e
+        let layers: usize = self.layers.iter().map(|l| l.classes.iter().map(|c| c.first.len()).sum::<usize>() + l.output.len()).sum();
+        // Fields, plus the conjugated copy of a stage source (largest: J)
+        // that the sparse kernel makes outside half mode.
+        let fields = (self.input.len() + layers + 2 * self.j.len() + 2 * self.output.len()) * d
             + self.z.len() * self.rank;
         // Hilbert tasks stack at most all sources and coefficient blocks of
         // one target; thin tasks pack one coefficient's edges.
-        let hilbert = [&self.first_commutator, &self.second_commutator, &self.left_no_jump, &self.right_no_jump];
-        let widest = hilbert.iter().map(|s| s.widest()).max().unwrap_or(0);
+        let widest = self
+            .layers
+            .iter()
+            .flat_map(|l| l.classes.iter().flat_map(|c| [c.first_commutator.widest(), c.second_commutator.widest()]))
+            .chain([self.left_no_jump.widest(), self.right_no_jump.widest()])
+            .max()
+            .unwrap_or(0);
         let thin = [&self.selected_k, &self.recycling, &self.ground_hamiltonian, &self.optical_hamiltonian];
         let thin_widest = thin
             .iter()
@@ -640,42 +794,76 @@ impl Plan {
         // Input in mode-block layout; detect exact Hermitian symmetry.
         let half = self.load_input(input, rhs, w)?;
 
-        // dx = [S, x].
-        let first_count = self.first.computed(half);
-        ensure(&mut w.dx, self.first.len() * block);
-        w.dx[..first_count * block].fill(ZERO);
-        let dx = &mut w.dx[..first_count * block];
-        self.hilbert_stage(gemm, &self.first_commutator, &w.x, dx, rhs, Some(1.), Some(-1.), &mut w.scratch)?;
-        if half {
-            mirror(&mut w.dx, &self.first, n, rhs);
-        }
-
-        // J = x + dx + [S, dx] / 2.
-        let j_count = self.j.computed(half);
-        ensure(&mut w.j, self.j.len() * block);
-        let j_field = &mut w.j[..j_count * block];
-        j_field.fill(ZERO);
-        for map in [(&self.input_to_j, &w.x), (&self.first_to_j, &w.dx)] {
-            for &(s, t) in map.0.iter().take_while(|p| p.1 < j_count) {
-                add_slice(&mut j_field[t * block..(t + 1) * block], &map.1[s * block..(s + 1) * block]);
+        // Shear layers, inner first: dx = [S_k, y], y <- y + dx + [S_k, dx] / 2.
+        // The last layer writes J; without layers J is the input itself.
+        let count = self.layers.len();
+        w.layer_dx.resize_with(count, Vec::new);
+        w.layer_out.resize_with(count, Vec::new);
+        if count == 0 {
+            let j_count = self.j.computed(half);
+            ensure(&mut w.j, self.j.len() * block);
+            let j_field = &mut w.j[..j_count * block];
+            j_field.fill(ZERO);
+            for &(s, t) in self.input_to_j.iter().take_while(|p| p.1 < j_count) {
+                j_field[t * block..(t + 1) * block].copy_from_slice(&w.x[s * block..(s + 1) * block]);
+            }
+            if half {
+                mirror(&self.execution, &mut w.j, &self.j, n, rhs)?;
             }
         }
-        self.hilbert_stage(gemm, &self.second_commutator, &w.dx, j_field, rhs, Some(0.5), Some(-0.5), &mut w.scratch)?;
-        if half {
-            mirror(&mut w.j, &self.j, n, rhs);
+        for (k, layer) in self.layers.iter().enumerate() {
+            let last = k + 1 == count;
+            let mut dx = std::mem::take(&mut w.layer_dx[k]);
+            let mut out = if last { std::mem::take(&mut w.j) } else { std::mem::take(&mut w.layer_out[k]) };
+            {
+                let source: &[C] = if k == 0 { &w.x } else { &w.layer_out[k - 1] };
+                let source_order = if k == 0 { &self.input } else { &self.layers[k - 1].output };
+                let sources = Sources { field: source, conjugate: self.conjugate(source_order, half) };
+                let out_count = layer.output.computed(half);
+                ensure(&mut out, layer.output.len() * block);
+                out[..out_count * block].fill(ZERO);
+                for &(s, t) in layer.input_to_output.iter().take_while(|p| p.1 < out_count) {
+                    add_slice(&mut out[t * block..(t + 1) * block], &source[s * block..(s + 1) * block]);
+                }
+                for class in &layer.classes {
+                    let first_count = class.first.computed(half);
+                    ensure(&mut dx, class.first.len() * block);
+                    dx[..first_count * block].fill(ZERO);
+                    let commutator = &class.first_commutator;
+                    let (scratch, conjugated) = (&mut w.scratch, &mut w.conjugated);
+                    let dx_field = &mut dx[..first_count * block];
+                    self.hilbert_stage(gemm, commutator, sources, dx_field, rhs, Some(1.), Some(-1.), scratch, conjugated)?;
+                    if half {
+                        mirror(&self.execution, &mut dx, &class.first, n, rhs)?;
+                    }
+                    let field = &mut out[..out_count * block];
+                    for &(s, t) in class.first_to_output.iter().take_while(|p| p.1 < out_count) {
+                        add_slice(&mut field[t * block..(t + 1) * block], &dx[s * block..(s + 1) * block]);
+                    }
+                    let commutator = &class.second_commutator;
+                    let dx_sources = Sources { field: &dx, conjugate: self.conjugate(&class.first, half) };
+                    let (scratch, conjugated) = (&mut w.scratch, &mut w.conjugated);
+                    self.hilbert_stage(gemm, commutator, dx_sources, field, rhs, Some(0.5), Some(-0.5), scratch, conjugated)?;
+                }
+                if half {
+                    mirror(&self.execution, &mut out, &layer.output, n, rhs)?;
+                }
+            }
+            w.layer_dx[k] = dx;
+            if last {
+                w.j = out;
+            } else {
+                w.layer_out[k] = out;
+            }
         }
 
-        // z = K vec(J_EE) on the selected ground coordinates.
-        let e = n - self.ground;
-        let ee_width = e * e * rhs;
-        ensure(&mut w.ee, self.j.len() * ee_width);
-        extract_excited(&w.j, &mut w.ee, self.j.len(), n, self.ground, rhs);
+        // z = K vec(J_EE) on the selected ground coordinates (J read in place).
         let z_width = self.rank * rhs;
         let z_count = self.z.computed(half);
         ensure(&mut w.z, self.z.len() * z_width);
         w.z[..z_count * z_width].fill(ZERO);
         let z = &mut w.z[..z_count * z_width];
-        self.thin_stage(gemm, &self.selected_k, &w.ee, z, Rows::Vector, rhs, &mut w.scratch)?;
+        self.thin_stage(gemm, &self.selected_k, ThinSource::Excited(&w.j), z, Rows::Vector, rhs, &mut w.scratch)?;
         if half {
             mirror_ground(&mut w.z, &self.z, self.gg_transpose.as_deref().unwrap_or(&[]), self.rank, rhs);
         }
@@ -701,12 +889,15 @@ impl Plan {
         ensure(&mut w.f, self.output.len() * block);
         let f_field = &mut w.f[..output_count * block];
         f_field.fill(ZERO);
-        self.hilbert_stage(gemm, &self.left_no_jump, &w.j, f_field, rhs, Some(1.), None, &mut w.scratch)?;
-        self.hilbert_stage(gemm, &self.right_no_jump, &w.j, f_field, rhs, None, Some(1.), &mut w.scratch)?;
-        self.thin_stage(gemm, &self.recycling, &w.ee, f_field, Rows::Matrix(&self.gg), rhs, &mut w.scratch)?;
-        self.thin_stage(gemm, &self.ground_hamiltonian, &w.z, f_field, Rows::Matrix(&self.gg), rhs, &mut w.scratch)?;
+        let sources = Sources { field: &w.j, conjugate: self.conjugate(&self.j, half) };
+        let (scratch, conjugated) = (&mut w.scratch, &mut w.conjugated);
+        self.hilbert_stage(gemm, &self.left_no_jump, sources, f_field, rhs, Some(1.), None, scratch, conjugated)?;
+        self.hilbert_stage(gemm, &self.right_no_jump, sources, f_field, rhs, None, Some(1.), scratch, conjugated)?;
+        let gg = Rows::Matrix(&self.gg);
+        self.thin_stage(gemm, &self.recycling, ThinSource::Excited(&w.j), f_field, gg, rhs, &mut w.scratch)?;
+        self.thin_stage(gemm, &self.ground_hamiltonian, ThinSource::Packed(&w.z), f_field, gg, rhs, &mut w.scratch)?;
         let optical = Rows::Matrix(&self.optical);
-        self.thin_stage(gemm, &self.optical_hamiltonian, &w.z, f_field, optical, rhs, &mut w.scratch)?;
+        self.thin_stage(gemm, &self.optical_hamiltonian, ThinSource::Packed(&w.z), f_field, optical, rhs, &mut w.scratch)?;
         for t in 0..output_count {
             let omega = self.frequency[t];
             let range = t * block..(t + 1) * block;
@@ -842,34 +1033,57 @@ impl Plan {
         })
     }
 
+    /// Where the sparse kernel finds X_s^dagger: the partner mode when the
+    /// field is exactly Hermitian-paired (half mode), else a conjugated copy.
+    fn conjugate(&self, order: &ModeOrder, half: bool) -> Conjugate {
+        match order.pairing {
+            Some(pairing) if half => Conjugate::Partner(pairing),
+            _ => Conjugate::Copy,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn hilbert_stage(
         &self,
         gemm: Gemm<'_>,
         stage: &Adjacency,
-        source: &[C],
+        sources: Sources<'_>,
         target: &mut [C],
         rhs: usize,
         left: Option<f64>,
         right: Option<f64>,
         scratch: &mut Vec<Scratch>,
+        conjugated: &mut Vec<C>,
     ) -> Result<(), String> {
         let products = StageProducts { gemm, library: &self.library.hilbert, n: self.n, ground: self.ground, stage, rhs };
-        products.apply(&self.execution, source, target, left, right, scratch)
+        match self.kernel {
+            Kernel::Sparse => products.apply_sparse(&self.execution, sources, conjugated, target, left, right, scratch),
+            Kernel::Blas => products.apply(&self.execution, sources.field, target, left, right, scratch),
+        }
     }
+
+
 
     #[allow(clippy::too_many_arguments)]
     fn thin_stage(
         &self,
         gemm: Gemm<'_>,
         links: &[Link],
-        source: &[C],
+        source: ThinSource<'_>,
         target: &mut [C],
         rows: Rows<'_>,
         rhs: usize,
         scratch: &mut Vec<Scratch>,
     ) -> Result<(), String> {
-        let n = self.n;
+        let (n, ground) = (self.n, self.ground);
+        let block = n * n * rhs;
+        // Coordinate c = i + e*j of vec(J_EE) sits at J[block*s + n*b + offset[c]].
+        let e = n - ground;
+        let offset: Vec<usize> = match source {
+            ThinSource::Excited(_) => (0..e * e).map(|c| (ground + c % e) + n * rhs * (ground + c / e)).collect(),
+            ThinSource::Packed(_) => Vec::new(),
+        };
+        let excited = |c: usize| offset[c];
         let library = &self.library.thin;
         let Some(first_link) = links.first() else { return Ok(()) };
         let target_width = match rows {
@@ -881,7 +1095,11 @@ impl Plan {
             .iter()
             .map(|link| {
                 let a = &library[link.coefficient];
-                let per_edge = if a.dense.is_some() { a.rows * a.cols } else { CSR_WORK * a.sparse.value.len() };
+                let per_edge = if a.dense.is_some() {
+                    a.used_rows.len() * a.used_cols.len()
+                } else {
+                    CSR_WORK * a.sparse.value.len()
+                };
                 link.within(&modes).len() * per_edge * rhs
             })
             .sum();
@@ -901,44 +1119,102 @@ impl Plan {
                     Rows::Matrix(at) => at[row].0 + n * (b + rhs * at[row].1),
                 };
                 let width = a.cols * rhs;
-                match &a.dense {
-                    Some(dense) if sources.len() * rhs >= 8 => {
-                        let columns = sources.len() * rhs;
-                        let Scratch { packed, product, .. } = scratch;
-                        let input: &[C] = if consecutive(sources) {
-                            &source[sources[0] * width..(sources[0] + sources.len()) * width]
-                        } else {
-                            ensure(packed, sources.len() * width);
-                            for (k, &s) in sources.iter().enumerate() {
-                                packed[k * width..(k + 1) * width].copy_from_slice(&source[s * width..(s + 1) * width]);
+                match (&a.dense, source) {
+                    (Some(dense), ThinSource::Excited(field)) => {
+                        // The used EE coordinates of every column (source s,
+                        // rhs b), read straight from J into the GEMM operand.
+                        let (m, k, columns) = (a.used_rows.len(), a.used_cols.len(), sources.len() * rhs);
+                        let Scratch { product, packed, .. } = scratch;
+                        ensure(packed, k * columns);
+                        for (index, &s) in sources.iter().enumerate() {
+                            for b in 0..rhs {
+                                let x = &field[block * s + n * b..block * (s + 1)];
+                                let to = &mut packed[k * (index * rhs + b)..k * (index * rhs + b + 1)];
+                                for (slot, &c) in to.iter_mut().zip(&a.used_cols) {
+                                    *slot = x[excited(c)];
+                                }
                             }
-                            &packed[..sources.len() * width]
-                        };
-                        ensure(product, a.rows * columns);
-                        let (rows, cols) = (a.rows, a.cols);
-                        gemm.multiply(rows, columns, cols, ONE, dense, rows, input, cols, ZERO, product, rows)?;
-                        for (k, &t) in destinations.iter().enumerate() {
+                        }
+                        ensure(product, m * columns);
+                        gemm.multiply(m, columns, k, ONE, dense, m, packed, k, ZERO, product, m)?;
+                        for (index, &t) in destinations.iter().enumerate() {
                             let out = &mut chunk[(t - first) * target_width..(t - first + 1) * target_width];
                             for b in 0..rhs {
-                                let column = &product[a.rows * (k * rhs + b)..a.rows * (k * rhs + b + 1)];
-                                for (row, &value) in column.iter().enumerate() {
+                                let column = &product[m * (index * rhs + b)..m * (index * rhs + b + 1)];
+                                for (&row, &value) in a.used_rows.iter().zip(column) {
                                     let at = position(row, b);
                                     out[at] = add(out[at], value);
                                 }
                             }
                         }
                     }
-                    _ => {
+                    (Some(dense), ThinSource::Packed(source)) => {
+                        let columns = sources.len() * rhs;
+                        let (m, k) = (a.used_rows.len(), a.used_cols.len());
+                        let Scratch { packed, product, .. } = scratch;
+                        let input: &[C] = if k < a.cols {
+                            // Gather the used input coordinates of every column.
+                            ensure(packed, columns * k);
+                            for (index, &s) in sources.iter().enumerate() {
+                                let x = &source[s * width..(s + 1) * width];
+                                for b in 0..rhs {
+                                    let to = &mut packed[(index * rhs + b) * k..(index * rhs + b + 1) * k];
+                                    for (slot, &c) in to.iter_mut().zip(&a.used_cols) {
+                                        *slot = x[a.cols * b + c];
+                                    }
+                                }
+                            }
+                            &packed[..columns * k]
+                        } else if consecutive(sources) {
+                            &source[sources[0] * width..(sources[0] + sources.len()) * width]
+                        } else {
+                            ensure(packed, sources.len() * width);
+                            for (index, &s) in sources.iter().enumerate() {
+                                packed[index * width..(index + 1) * width].copy_from_slice(&source[s * width..(s + 1) * width]);
+                            }
+                            &packed[..sources.len() * width]
+                        };
+                        ensure(product, m * columns);
+                        gemm.multiply(m, columns, k, ONE, dense, m, input, k, ZERO, product, m)?;
+                        for (index, &t) in destinations.iter().enumerate() {
+                            let out = &mut chunk[(t - first) * target_width..(t - first + 1) * target_width];
+                            for b in 0..rhs {
+                                let column = &product[m * (index * rhs + b)..m * (index * rhs + b + 1)];
+                                for (&row, &value) in a.used_rows.iter().zip(column) {
+                                    let at = position(row, b);
+                                    out[at] = add(out[at], value);
+                                }
+                            }
+                        }
+                    }
+                    (None, ThinSource::Packed(source)) => {
                         let csr = &a.sparse;
                         for (&s, &t) in sources.iter().zip(destinations) {
                             let x = &source[s * width..(s + 1) * width];
                             let out = &mut chunk[(t - first) * target_width..(t - first + 1) * target_width];
                             for b in 0..rhs {
                                 let x = &x[a.cols * b..a.cols * (b + 1)];
-                                for row in 0..a.rows {
+                                for &row in &a.used_rows {
                                     let mut sum = ZERO;
                                     for at in csr.row[row]..csr.row[row + 1] {
                                         sum = add(sum, mul(csr.value[at], x[csr.col[at]]));
+                                    }
+                                    let at = position(row, b);
+                                    out[at] = add(out[at], sum);
+                                }
+                            }
+                        }
+                    }
+                    (None, ThinSource::Excited(field)) => {
+                        let csr = &a.sparse;
+                        for (&s, &t) in sources.iter().zip(destinations) {
+                            let out = &mut chunk[(t - first) * target_width..(t - first + 1) * target_width];
+                            for b in 0..rhs {
+                                let x = &field[block * s + n * b..block * (s + 1)];
+                                for &row in &a.used_rows {
+                                    let mut sum = ZERO;
+                                    for at in csr.row[row]..csr.row[row + 1] {
+                                        sum = add(sum, mul(csr.value[at], x[excited(csr.col[at])]));
                                     }
                                     let at = position(row, b);
                                     out[at] = add(out[at], sum);
@@ -951,6 +1227,15 @@ impl Plan {
             Ok(())
         })
     }
+}
+
+/// Where a thin stage reads its source columns.
+#[derive(Clone, Copy)]
+enum ThinSource<'a> {
+    /// Column (mode s, rhs b), coordinate c at field[(s*rhs + b)*cols + c] (z).
+    Packed(&'a [C]),
+    /// vec(J_EE) of the J field read in place from its mode blocks.
+    Excited(&'a [C]),
 }
 
 /// Where a thin coefficient's rows land in a target mode.
@@ -1008,10 +1293,119 @@ impl StageProducts<'_> {
     }
 }
 
+/// A stage's source field and where its modes' conjugate transposes are.
+#[derive(Clone, Copy)]
+struct Sources<'a> {
+    field: &'a [C],
+    conjugate: Conjugate,
+}
+
+/// How the sparse kernel finds X_s^dagger of a source mode.
+#[derive(Clone, Copy)]
+enum Conjugate {
+    /// x_{-q} = x_q^dagger holds exactly: read the partner mode.
+    Partner(Pairing),
+    /// Conjugate-transpose every source mode into a copy first.
+    Copy,
+}
+
+impl StageProducts<'_> {
+    /// Sparse stage: per target, the right products from the coefficient
+    /// columns, and the left products as (sum X_s^dagger A^dagger)^dagger.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_sparse(
+        &self,
+        execution: &Execution,
+        sources: Sources<'_>,
+        copy: &mut Vec<C>,
+        target: &mut [C],
+        left: Option<f64>,
+        right: Option<f64>,
+        scratch: &mut Vec<Scratch>,
+    ) -> Result<(), String> {
+        let (library, n, stage, rhs, source) = (self.library, self.n, self.stage, self.rhs, sources.field);
+        let height = n * rhs;
+        let block = n * height;
+        // X_s^dagger: the partner block of a paired field; the central
+        // (self-paired) modes are computed fields, Hermitian only to
+        // rounding, so they are conjugate-transposed explicitly like every
+        // mode of an unpaired field.
+        let (bar, pairing): (&[C], Option<Pairing>) = match sources.conjugate {
+            Conjugate::Partner(pairing) if left.is_some() => {
+                ensure(copy, pairing.central * block);
+                for (s, to) in copy[..pairing.central * block].chunks_exact_mut(block).enumerate() {
+                    conjugate_transpose(&source[s * block..(s + 1) * block], to, n, rhs);
+                }
+                (&copy[..pairing.central * block], Some(pairing))
+            }
+            Conjugate::Partner(pairing) => (source, Some(pairing)),
+            Conjugate::Copy if left.is_some() => {
+                ensure(copy, source.len());
+                let copy = &mut copy[..source.len()];
+                let work = copy.len() * COPY_WORK;
+                execution.for_mode_chunks(copy, block, work, MINIMUM_WORK_PER_TASK, &mut Vec::<()>::new(), |first, chunk, _| {
+                    for (k, to) in chunk.chunks_exact_mut(block).enumerate() {
+                        conjugate_transpose(&source[(first + k) * block..(first + k + 1) * block], to, n, rhs);
+                    }
+                    Ok(())
+                })?;
+                (&*copy, None)
+            }
+            Conjugate::Copy => (source, None),
+        };
+        // Address of block s of the source and of its conjugate transpose.
+        let (source_at, bar_at) = (source.as_ptr() as usize, bar.as_ptr() as usize);
+        let size = block * std::mem::size_of::<C>();
+        let direct = move |s: usize| source_at + s * size;
+        let conjugate = move |s: usize| match pairing {
+            Some(p) if s >= p.canonical => source_at + (s - (p.canonical - p.central)) * size,
+            Some(p) if s >= p.central => source_at + (s + (p.canonical - p.central)) * size,
+            _ => bar_at + s * size,
+        };
+        let work: usize = (0..target.len() / block)
+            .flat_map(|t| stage.edges(t))
+            .map(|(c, _)| {
+                let a = &library[c];
+                left.map_or(0, |_| a.left_columns.row.len()) + right.map_or(0, |_| a.right_columns.row.len())
+            })
+            .sum::<usize>()
+            * height;
+        execution.for_mode_chunks(target, block, work, MINIMUM_WORK_PER_TASK, scratch, |first, chunk, scratch| {
+            for (k, y) in chunk.chunks_exact_mut(block).enumerate() {
+                let t = first + k;
+                for (alpha, left_side) in [(right, false), (left, true)] {
+                    let Some(alpha) = alpha else { continue };
+                    let edges = &mut scratch.edges;
+                    edges.clear();
+                    for (c, s) in stage.edges(t) {
+                        let a = &library[c];
+                        let (columns, block) =
+                            if left_side { (&a.left_columns, conjugate(s)) } else { (&a.right_columns, direct(s)) };
+                        edges.push(kernel::Edge::new(block, &columns.start, &columns.row, &columns.value));
+                    }
+                    let epilogue = if left_side {
+                        kernel::Epilogue::ConjugateTranspose { n, rhs }
+                    } else {
+                        kernel::Epilogue::Add { stride: height }
+                    };
+                    // SAFETY: every edge's block is a whole block (n field
+                    // columns of height entries) of `source` or `bar`, which
+                    // outlive the stage, and its lists are an n x n
+                    // coefficient's; y is one block of n columns of height, and
+                    // the conjugate-transposed positions stay inside it.
+                    unsafe { kernel::columns(edges, n, height, height, y.as_mut_ptr(), epilogue, alpha) };
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
 /// Commutator convolution between two mode sets given in the caller's order:
 /// target_t += alpha * sum_p (A_p X_{t-p} - X_{t-p} A_p), with the fields in
-/// mode-block layout. It runs on the same blocked kernel as the pencil's
-/// Hilbert stages (zero ground/excited blocks of A_p are skipped).
+/// mode-block layout. It runs on the same kernels as the pencil's Hilbert
+/// stages (the sparse kernel where available, with conjugated copies of the
+/// input since its modes carry no Hermitian pairing).
 pub(crate) struct Commutator {
     n: usize,
     ground: usize,
@@ -1047,6 +1441,11 @@ impl Commutator {
         scratch: &mut Vec<Scratch>,
     ) -> Result<(), String> {
         let products = StageProducts { gemm, library: &self.library, n: self.n, ground: self.ground, stage: &self.stage, rhs };
+        if Kernel::best() == Kernel::Sparse {
+            let sources = Sources { field: input, conjugate: Conjugate::Copy };
+            let mut copy = Vec::new();
+            return products.apply_sparse(execution, sources, &mut copy, output, Some(alpha), Some(-alpha), scratch);
+        }
         products.apply(execution, input, output, Some(alpha), Some(-alpha), scratch)
     }
 }
@@ -1147,33 +1546,54 @@ pub(crate) struct Scratch {
     packed: Vec<C>,
     product: Vec<C>,
     stacked: Vec<C>,
+    /// Edges of one target for the sparse kernel.
+    edges: Vec<kernel::Edge>,
 }
 
 /// Reusable buffers of one plan; they only grow.
 #[derive(Default)]
 pub(crate) struct Workspace {
     x: Vec<C>,
-    dx: Vec<C>,
+    /// [S_k, .] and output field of every shear layer (the last output is j).
+    layer_dx: Vec<Vec<C>>,
+    layer_out: Vec<Vec<C>>,
     j: Vec<C>,
-    ee: Vec<C>,
     z: Vec<C>,
     pub(crate) e: Vec<C>,
     pub(crate) f: Vec<C>,
     symmetric: Vec<bool>,
     scratch: Vec<Scratch>,
+    /// Conjugate-transposed stage source (sparse kernel outside half mode).
+    conjugated: Vec<C>,
 }
 
 /// Fill the non-canonical modes of a mode-block field from their partners.
-fn mirror(field: &mut [C], order: &ModeOrder, n: usize, rhs: usize) {
-    let Some((start, offset)) = order.mirrored() else { return };
+fn mirror(execution: &Execution, field: &mut [C], order: &ModeOrder, n: usize, rhs: usize) -> Result<(), String> {
+    let Some((start, offset)) = order.mirrored() else { return Ok(()) };
     let block = n * n * rhs;
     let (canonical, partners) = field[..order.len() * block].split_at_mut(start * block);
-    for (k, target) in partners.chunks_exact_mut(block).enumerate() {
-        let source = &canonical[(start + k - offset) * block..(start + k - offset + 1) * block];
-        for i in 0..n {
-            for b in 0..rhs {
-                for j in 0..n {
-                    target[i + n * (b + rhs * j)] = conj(source[j + n * (b + rhs * i)]);
+    let work = partners.len() * COPY_WORK;
+    execution.for_mode_chunks(partners, block, work, MINIMUM_WORK_PER_TASK, &mut Vec::<()>::new(), |first, chunk, _| {
+        for (k, target) in chunk.chunks_exact_mut(block).enumerate() {
+            let at = (start + first + k - offset) * block;
+            conjugate_transpose(&canonical[at..at + block], target, n, rhs);
+        }
+        Ok(())
+    })
+}
+
+/// to[i + n*(b + rhs*j)] = conj(from[j + n*(b + rhs*i)]): every right-hand
+/// side of a mode block conjugate-transposed, in 8 x 8 tiles.
+fn conjugate_transpose(from: &[C], to: &mut [C], n: usize, rhs: usize) {
+    const TILE: usize = 8;
+    let ld = n * rhs;
+    for b in 0..rhs {
+        for jb in (0..n).step_by(TILE) {
+            for ib in (0..n).step_by(TILE) {
+                for j in jb..(jb + TILE).min(n) {
+                    for i in ib..(ib + TILE).min(n) {
+                        to[n * b + i + ld * j] = conj(from[n * b + j + ld * i]);
+                    }
                 }
             }
         }
@@ -1195,17 +1615,150 @@ fn mirror_ground(field: &mut [C], order: &ModeOrder, transpose: &[usize], rank: 
     }
 }
 
-/// vec(J_EE) of every mode, column-major (i + e*j), rhs-major.
-fn extract_excited(j: &[C], ee: &mut [C], modes: usize, n: usize, ground: usize, rhs: usize) {
-    let e = n - ground;
-    let block = n * n * rhs;
-    for m in 0..modes {
-        for b in 0..rhs {
-            for col in 0..e {
-                let from = m * block + ground + n * (b + rhs * (ground + col));
-                let to = (m * rhs + b) * e * e + e * col;
-                ee[to..to + e].copy_from_slice(&j[from..from + e]);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deterministic values in [-0.5, 0.5).
+    struct Random(u64);
+
+    impl Random {
+        fn real(&mut self) -> f64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64 / (1u64 << 53) as f64) - 0.5
+        }
+
+        fn complex(&mut self) -> C {
+            C { re: self.real(), im: self.real() }
+        }
+
+        /// Row-major n x n with entries only in the allowed (row ground,
+        /// column ground) blocks, each kept with probability `density`.
+        fn sparse(&mut self, n: usize, ground: usize, blocks: &[(bool, bool)], density: f64) -> Vec<C> {
+            let mut matrix = vec![ZERO; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    let allowed = blocks.contains(&(i < ground, j < ground));
+                    if allowed && self.real() + 0.5 < density {
+                        matrix[i * n + j] = self.complex();
+                    }
+                }
             }
+            matrix
+        }
+    }
+
+    fn charges(range: std::ops::RangeInclusive<i32>) -> Vec<Charge> {
+        range.map(|q| vec![q]).collect()
+    }
+
+    /// E and F of `input` on a synthetic plan (S with off-diagonal ground/
+    /// excited blocks, general NL/NR, no thin terms) with the given kernel.
+    fn evaluate(kernel: Kernel, output: &[Charge], input: &[C], rhs: usize) -> (Vec<C>, Vec<C>, bool) {
+        let (n, ground) = (11, 3);
+        let mut random = Random(17);
+        let mut hilbert = Vec::new();
+        let mut family = |charges: &[i32], blocks: &[(bool, bool)], density: f64, hilbert: &mut Vec<HilbertCoefficient>| {
+            let mut family = Family::new();
+            for &q in charges {
+                family.insert(vec![q], hilbert.len());
+                hilbert.push(HilbertCoefficient::new(&random.sparse(n, ground, blocks, density), n, ground));
+            }
+            family
+        };
+        let off = [(true, false), (false, true)];
+        let all = [(true, true), (true, false), (false, true), (false, false)];
+        let s = family(&[-2, -1, 1, 2], &off, 0.3, &mut hilbert);
+        let left = family(&[-1, 0, 1], &all, 0.5, &mut hilbert);
+        let right = family(&[-1, 0, 1], &all, 0.5, &mut hilbert);
+        let empty = Family::new();
+        let library = Arc::new(Library { hilbert, thin: Vec::new() });
+        let frequency = output.iter().map(|q| 0.3 * q[0] as f64).collect();
+        let (first, j) = (charges(-4..=4), charges(-6..=6));
+        let mut plan = Plan::new(PlanInput {
+            n,
+            ground,
+            library,
+            layers: vec![LayerInput { classes: vec![(&s, &first[..])], output: &j }],
+            left: &left,
+            right: &right,
+            selected_k: &empty,
+            recycling: &empty,
+            ground_hamiltonian: &empty,
+            optical_hamiltonian: &empty,
+            input: &charges(-2..=2),
+            j: &j,
+            z: &[],
+            output,
+            gg: vec![(0, 0)],
+            optical: Vec::new(),
+            frequency,
+            max_rhs: rhs,
+            blas: Some(Arc::new(Lapack::load().unwrap())),
+        })
+        .unwrap();
+        plan.kernel = kernel;
+        let mut w = Workspace::default();
+        let half = plan.apply(&mut w, input, rhs).unwrap();
+        let size = output.len() * n * n * rhs;
+        let (mut e, mut f) = (vec![ZERO; size], vec![ZERO; size]);
+        plan.store(&w, half, rhs, &mut e, &mut f).unwrap();
+        (e, f, half)
+    }
+
+    /// Input in caller layout over charges -2..=2; with `hermitian`,
+    /// x_{-q} = x_q^dagger exactly.
+    fn input(rhs: usize, hermitian: bool) -> Vec<C> {
+        let n = 11;
+        let mut random = Random(5);
+        let block = n * n * rhs;
+        let mut x: Vec<C> = (0..5 * block).map(|_| random.complex()).collect();
+        if hermitian {
+            for m in 0..5 {
+                let partner = 4 - m;
+                for i in 0..n {
+                    for j in 0..n {
+                        for b in 0..rhs {
+                            let mut z = x[m * block + (i * n + j) * rhs + b];
+                            if partner == m && i == j {
+                                z.im = 0.;
+                                x[m * block + (i * n + j) * rhs + b] = z;
+                            }
+                            if partner > m || (partner == m && j > i) {
+                                x[partner * block + (j * n + i) * rhs + b] = conj(z);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        x
+    }
+
+    fn assert_close(a: &[C], b: &[C]) {
+        let scale = b.iter().map(|z| z.re.abs().max(z.im.abs())).fold(0., f64::max);
+        let error = a.iter().zip(b).map(|(x, y)| (x.re - y.re).abs().max((x.im - y.im).abs())).fold(0., f64::max);
+        assert!(scale > 0. && error <= 1e-13 * scale, "relative difference {}", error / scale);
+    }
+
+    #[test]
+    fn pencil_sparse_kernel_matches_blas() {
+        if !kernel::available() {
+            return;
+        }
+        let rhs = 3;
+        // Square closed domain with Hermitian-paired input (half mode), the
+        // same domain with general complex input, and a rectangle.
+        for (output, hermitian, expect_half) in
+            [(charges(-2..=2), true, true), (charges(-2..=2), false, false), (charges(-1..=3), true, false)]
+        {
+            let x = input(rhs, hermitian);
+            let (e_blas, f_blas, half_blas) = evaluate(Kernel::Blas, &output, &x, rhs);
+            let (e_sparse, f_sparse, half_sparse) = evaluate(Kernel::Sparse, &output, &x, rhs);
+            assert_eq!((half_blas, half_sparse), (expect_half, expect_half));
+            assert_close(&e_sparse, &e_blas);
+            assert_close(&f_sparse, &f_blas);
         }
     }
 }

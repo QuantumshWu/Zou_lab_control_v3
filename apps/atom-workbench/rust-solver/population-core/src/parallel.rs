@@ -66,6 +66,21 @@ impl Execution {
         }
     }
 
+    /// `action` on every item, in parallel on the pool (serially without
+    /// one), results in item order. Each item is one task: for independent
+    /// items of comparable work (BLAS stays single-threaded in a task).
+    pub fn map<T, R, F>(&self, items: Vec<T>, action: F) -> Vec<R>
+    where
+        T: Send,
+        R: Send,
+        F: Fn(T) -> R + Sync + Send,
+    {
+        match &self.pool {
+            Some(pool) if items.len() > 1 => pool.install(|| items.into_par_iter().map(action).collect()),
+            _ => items.into_iter().map(action).collect(),
+        }
+    }
+
     /// Number of tasks for `items` independent output items, `work` complex
     /// multiply-adds in total and at least `minimum_work` per task.
     pub fn tasks(&self, items: usize, work: usize, minimum_work: usize) -> usize {
@@ -174,6 +189,15 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn map_keeps_the_item_order() {
+        for threads in [1, 3] {
+            let execution = Execution::with_threads(threads).unwrap();
+            let squares = execution.map((0..50).collect(), |x: usize| x * x);
+            assert_eq!(squares, (0..50).map(|x| x * x).collect::<Vec<_>>());
+        }
     }
 
     #[test]

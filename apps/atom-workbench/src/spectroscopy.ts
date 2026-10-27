@@ -1,11 +1,13 @@
 import type {Analysis,Laser,Level,Scene,SpectralLine} from './types.js';
 import {RB87,accurateSum,analyze,atomicSystem,complexPolarization,laserCarrierOffsetMHz,laserFrequencyDifferenceMHz,laserFrequencyMHz,laserIntensityMWcm2,sinCosDegrees,transitionReferenceMHz,wigner3j as rawWigner3j} from './physics.js';
 import type {Eigenstate} from './physics.js';
-import {SPECTROSCOPY_SOURCES,VIRTUAL_MANIFOLDS} from './spectroscopy-data.js';
+import {CORE_POLARIZABILITY_AU,SPECTROSCOPY_SOURCES,VIRTUAL_MANIFOLDS} from './spectroscopy-data.js';
 
 const angularValues=new Map<string,number>();
 function wigner3j(a:number,b:number,c:number,d:number,e:number,f:number):number{const key=[a,b,c,d,e,f].join(':');const old=angularValues.get(key);if(old!==undefined)return old;const value=rawWigner3j(a,b,c,d,e,f);angularValues.set(key,value);return value;}
 const H=6.62607015e-34,EPS=8.8541878128e-12,C=299792458,EA0=1.602176634e-19*5.29177210903e-11,EV_MHZ=1.602176634e-19/H/1e6,N=32;
+/** Atomic unit of polarizability, e^2 a0^2 / Eh, in C m^2 / V (CODATA 2018). */
+const POLARIZABILITY_AU=1.64877727436e-41;
 type Z={re:number;im:number};
 type Matrix={real:number[];imag:number[]};
 type Group={beams:Laser[];frequency:number;field:Z[]};
@@ -14,14 +16,18 @@ const mul=(a:Z,b:Z):Z=>({re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re});
 const conj=(a:Z):Z=>({re:a.re,im:-a.im});
 const z=(m:Matrix,k:number):Z=>({re:m.real[k]!,im:m.imag[k]!});
 const norm=(a:Z)=>Math.hypot(a.re,a.im);
+/** The far lasers' static background: the levels chart shows it and the
+ * master model's H0 is built on it (full-master-model.ts). */
 const ASSUMPTIONS=[
-  'DC 二阶价电子光移：5S 的 6–9P；5P 的 6–10S、4–9D。保留偏振和磁子态混合。',
-  '保留 D 线反旋转光移；D 线旋转耦合仍由原 32 态主方程显式演化，未重复计入。',
-  '未包含芯电子、连续谱和更高价态尾项；高态超精细/同位素修正未分辨，数据精度不等于求解器数值精度。',
-  '缺失高态只补 DC Hamiltonian：未补跨载频 Raman 项或这些高态的散射；反旋转散射也未补。',
+  '远失谐光的 DC 二阶光移：D 线旋转与反旋转项、32 态以外能级（5S 的 6–9P；5P 的 6–10S、4–9D）和 Rb+ 芯极化，保留偏振和磁子态混合。',
+  '动力学 H0 使用同一静态背景；近共振光是主方程中的显式旋转波驱动，不计入此背景。',
+  '芯极化取 Arora & Sahoo 2012 的静态值（5S 9.1−0.26 au，5P 9.1 au）；未包含更高价态尾项和连续谱，高态超精细/同位素修正未分辨，数据精度不等于求解器数值精度。',
+  '缺失高态只补 DC Hamiltonian：未补跨载频 Raman 项或这些高态的散射；远失谐光的散射也未补。',
   '分开处理 5S、5P1/2、5P3/2 的二阶光移；不包含高态诱导的两条精细流形间耦合。',
   '图中布居投影到这些流形内部 DC 本征基；它不是含光学激发态混入及微运动的 Floquet 态布居。',
 ];
+/** The largest mixing |Ω/2Δ| a static (far) treatment accepts. */
+export const STATIC_MIXING_LIMIT=.01;
 
 type AtomicSystem=ReturnType<typeof atomicSystem>;
 const atomicCache=new Map<number,{D1:AtomicSystem;D2:AtomicSystem;states:Eigenstate[]}>();
@@ -46,6 +52,8 @@ function amplitude(d:number[],field:Z[]):Z{return {re:accurateSum(d.map((v,q)=>v
 function centroid(manifold:Level['manifold']):number{return manifold==='ground'?0:RB87[manifold].frequencyHz/1e6;}
 
 interface Correction {matrix:Matrix;maximumMixingRatio:number}
+/** The checks measured instead of enforced: did every gap keep its minimum? */
+type Measure={withinGap:boolean};
 const correctionCache=new Map<string,Correction>();
 type VirtualRow={indices:number[];dipoles:number[][];energyMHz:number;name:string};
 const virtualRowsCache=new Map<number,VirtualRow[]>();
@@ -68,13 +76,16 @@ function virtualRows(states:Eigenstate[],fieldG:number):VirtualRow[]{
 /** Symmetric second-order (van Vleck) Hamiltonian. Each virtual row retains all
  * represented amplitudes. The safety guard controls the expansion, not a
  * dipole/level cutoff. Resonant nonzero couplings are an explicit failure. */
-function addVirtual(matrix:Matrix,indices:number[],values:Z[],denominators:number[],minimumGap:number,label:string):number{
+function addVirtual(matrix:Matrix,indices:number[],values:Z[],denominators:number[],minimumGap:number,label:string,measure?:Measure):number{
   const magnitudes=values.map(norm),active=magnitudes.flatMap((value,i)=>value!==0?[i]:[]);let ratio2=0;
   for(const a of active){
-    const gap=Math.abs(denominators[a]!);if(!(gap>=minimumGap))throw new Error(`${label}：虚跃迁失谐小于 ${minimumGap} MHz，超出静态色散光移模型。`);
+    const gap=Math.abs(denominators[a]!);if(!(gap>=minimumGap)){if(!measure)throw new Error(`${label}：虚跃迁失谐小于 ${minimumGap} MHz，超出静态色散光移模型。`);measure.withinGap=false;if(gap===0){ratio2=Infinity;continue;}}
     ratio2+=(magnitudes[a]!/gap)**2;
   }
-  const ratio=Math.sqrt(ratio2);if(!(ratio<=.01))throw new Error(`${label}：光耦合/失谐比 ${ratio.toPrecision(3)} 超过二阶色散模型范围。`);
+  const ratio=Math.sqrt(ratio2);
+  // Measured only: the same ratio, nothing added and nothing refused.
+  if(measure)return ratio;
+  if(!(ratio<=STATIC_MIXING_LIMIT))throw new Error(`${label}：光耦合/失谐比 ${ratio.toPrecision(3)} 超过二阶色散模型范围。`);
   for(let ai=0;ai<active.length;ai++)for(let bi=ai;bi<active.length;bi++){
     const a=active[ai]!,b=active[bi]!;
     const ab=mul(conj(values[a]!),values[b]!),factor=.5*(1/denominators[a]!+1/denominators[b]!),i=indices[a]!,j=indices[b]!,k=i*N+j;
@@ -84,13 +95,15 @@ function addVirtual(matrix:Matrix,indices:number[],values:Z[],denominators:numbe
   return ratio;
 }
 
-/** This returns the DC correction in the same magnetic eigenbasis used by the
- * master model. No master-model import: spectroscopy and dynamics share it. */
-function correction(states:Eigenstate[],analysis:Analysis,beams:Group[],includeExplicitRotating:boolean):Correction{
+/** The second-order DC correction in the magnetic eigenbasis: D-line rotating
+ * and counter-rotating terms, states outside the 32-state model and the Rb+
+ * core. This returns the correction in the same magnetic eigenbasis used by
+ * the master model. No master-model import: spectroscopy and dynamics share it. */
+function correction(states:Eigenstate[],analysis:Analysis,beams:Group[],measure?:Measure):Correction{
   // Cache physical inputs only: selecting another displayed state/reference
   // cannot alter the correction or retrigger the virtual-state summation.
-  const key=JSON.stringify([analysis.fieldMagnitudeG,includeExplicitRotating,beams.map(g=>[laserCarrierOffsetMHz(g.beams[0]!,'D1'),laserCarrierOffsetMHz(g.beams[0]!,'D2'),g.field])]);
-  const cached=correctionCache.get(key);if(cached)return cached;
+  const key=JSON.stringify([analysis.fieldMagnitudeG,beams.map(g=>[laserCarrierOffsetMHz(g.beams[0]!,'D1'),laserCarrierOffsetMHz(g.beams[0]!,'D2'),g.field])]);
+  const cached=measure?undefined:correctionCache.get(key);if(cached)return cached;
   const matrix=zero(N);let maximumMixingRatio=0;
   for(const group of beams){
     const reverse=reversedField(group.field);
@@ -98,15 +111,14 @@ function correction(states:Eigenstate[],analysis:Analysis,beams:Group[],includeE
       const system=cachedAtom(analysis.fieldMagnitudeG)[line],offset=line==='D1'?8:16,excited=system.excited;
       // Excited<-ground absorption and its conjugate stimulated-emission row.
       for(const counter of [false,true]){
-        if(!counter&&!includeExplicitRotating)continue;
         const field=counter?reverse:group.field,up:Z[][]=excited.map((e,ei)=>system.ground.map((g,gi)=>{const q=e.m-g.m,d=[0,0,0];if(q===-1||q===0||q===1)d[q+1]=system.dipoles[ei*8+gi]!*RB87.D2.dipole;return amplitude(d,field);}));
         for(let e=0;e<excited.length;e++){
           const delta=system.ground.map(g=>counter?g.energyMHz-excited[e]!.energyMHz-centroid(line)-group.frequency:laserCarrierOffsetMHz(group.beams[0]!,line)+g.energyMHz-excited[e]!.energyMHz);
-          maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,[0,1,2,3,4,5,6,7],up[e]!,delta,100,`${line} / ${group.beams.map(b=>b.name).join(' + ')}`));
+          maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,[0,1,2,3,4,5,6,7],up[e]!,delta,100,`${line} / ${group.beams.map(b=>b.name).join(' + ')}`,measure));
         }
         for(let g=0;g<8;g++){
           const delta=excited.map(e=>counter?centroid(line)+e.energyMHz-system.ground[g]!.energyMHz+group.frequency:e.energyMHz-system.ground[g]!.energyMHz-laserCarrierOffsetMHz(group.beams[0]!,line));
-          maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,excited.map((_,i)=>offset+i),up.map(row=>conj(row[g]!)),delta,100,`${line} / ${group.beams.map(b=>b.name).join(' + ')}`));
+          maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,excited.map((_,i)=>offset+i),up.map(row=>conj(row[g]!)),delta,100,`${line} / ${group.beams.map(b=>b.name).join(' + ')}`,measure));
         }
       }
     }
@@ -114,25 +126,17 @@ function correction(states:Eigenstate[],analysis:Analysis,beams:Group[],includeE
       for(const counter of [false,true]){
         const values=row.dipoles.map(d=>amplitude(d,counter?reverse:group.field));
         const delta=row.indices.map(i=>centroid(states[i]!.manifold)+states[i]!.energyMHz-row.energyMHz+(counter?-group.frequency:group.frequency));
-        maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,row.indices,values,delta,10000,`${row.name} 高态 / ${group.beams.map(b=>b.name).join(' + ')}`));
+        maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,row.indices,values,delta,10000,`${row.name} 高态 / ${group.beams.map(b=>b.name).join(' + ')}`,measure));
       }
     }
+    // Rb+ core: the scalar shift -alpha |E|^2 / 4 of every state of a manifold
+    // (E is the coherent field amplitude of this carrier group).
+    const squared=accurateSum(group.field.flatMap(q=>[q.re*q.re,q.im*q.im]));
+    states.forEach((state,i)=>{matrix.real[i*N+i]!+=-CORE_POLARIZABILITY_AU[state.manifold]*POLARIZABILITY_AU*squared/(4*H*1e6);});
   }
-  const result={matrix,maximumMixingRatio};correctionCache.set(key,result);if(correctionCache.size>12)correctionCache.delete(correctionCache.keys().next().value!);return result;
+  const result={matrix,maximumMixingRatio};if(measure)return result;correctionCache.set(key,result);if(correctionCache.size>12)correctionCache.delete(correctionCache.keys().next().value!);return result;
 }
 
-/** Far lasers enter only as their dispersive DC Hamiltonian. */
-export function farFieldLightShift(scene:Scene):Matrix&{assumptions:string[]} {
-  const analysis=analyze(scene),states=basis(analysis),far={...scene,lasers:scene.lasers.filter(l=>l.regime==='far')};
-  const out=correction(states,analysis,groups(far,analysis),true).matrix;
-  return {real:out.real.slice(),imag:out.imag.slice(),assumptions:[...ASSUMPTIONS,'远失谐光仅作为静态光移；不包含它们的散射、拍频和显式光学驱动。']};
-}
-
-export function missingManifoldLightShift(scene:Scene):Matrix&{assumptions:string[]}{
-  const analysis=analyze(scene),states=basis(analysis),beams=groups(scene,analysis);
-  const out=correction(states,analysis,beams,false).matrix;
-  return {real:out.real.slice(),imag:out.imag.slice(),assumptions:beams.length?ASSUMPTIONS.slice():[]};
-}
 
 /** Cyclic complex-Hermitian Jacobi. No amplitude pruning; a rotation is skipped
  * only when its represented off-diagonal entry is exactly zero. The residual
@@ -189,13 +193,22 @@ function background(analysis:Analysis,result:Correction):Background{
   backgroundCache.set(result,out);return out;
 }
 
+/** A laser's largest mixing amplitude |Ω/2Δ| in the static (far) treatment, alone at its
+ * own carrier -- the ratio that treatment refuses above STATIC_MIXING_LIMIT (1%) -- and
+ * whether each of its virtual transitions keeps that treatment's minimum detuning. It
+ * changes nothing; laser-regime.ts farValidity adds main's detuning rule. */
+export function displayMixing(scene:Scene,laserId:string):{ratio:number;withinGap:boolean}{
+  const laser=scene.lasers.find(l=>l.id===laserId);if(!laser||laserIntensityMWcm2(laser)===0)return {ratio:0,withinGap:true};
+  const analysis=analyze(scene),beams=groups({...scene,lasers:[{...laser,enabled:true}]},analysis),measure:Measure={withinGap:true};
+  return {ratio:correction(basis(analysis),analysis,beams,measure).maximumMixingRatio,withinGap:measure.withinGap};
+}
 export function spectroscopyAnalysis(scene:Scene,excludedLaserId?:string,includeTransitions=true):Analysis{
   const start=performance.now(),analysis=analyze(scene),states=basis(analysis),beams=groups({...scene,lasers:scene.lasers.filter(l=>l.regime==='far')},analysis,excludedLaserId);
   let result:Correction|undefined,failure='';
   // Independent far-detuned fields contribute DC shifts under the declared model.
-  if(!failure)try{result=correction(states,analysis,beams,true);}catch(error){failure=error instanceof Error?error.message:String(error);}
+  if(!failure)try{result=correction(states,analysis,beams);}catch(error){failure=error instanceof Error?error.message:String(error);}
   const status=failure?'unresolved':beams.length?'dispersive':'bare';
-  analysis.spectroscopy={status,backgroundLaserIds:beams.flatMap(g=>g.beams.map(b=>b.id)),excludedLaserId,modelScope:failure?'裸态位置/布居；静态总光移未定义。':beams.length?'磁场本征基上的 DC 二阶价电子背景谱；含偏振混合、D 线反旋转和列明高态，非全原子/Floquet 精确谱。':'HFS + Zeeman 裸态谱。',nearResonantLaserIds:failure&&beams.length===1?beams.flatMap(g=>g.beams.map(b=>b.id)):[],requiresDensityProjection:false,warnings:failure?[failure,...ASSUMPTIONS]:beams.length?ASSUMPTIONS.slice():[],maximumMixingRatio:result?.maximumMixingRatio,sources:SPECTROSCOPY_SOURCES.slice()};
+  analysis.spectroscopy={status,backgroundLaserIds:beams.flatMap(g=>g.beams.map(b=>b.id)),excludedLaserId,modelScope:failure?'裸态位置/布居；静态总光移未定义。':beams.length?'磁场本征基上远失谐光的 DC 二阶背景谱（与动力学 H0 相同）；含偏振混合、D 线旋转与反旋转、列明高态和芯极化，非全原子/Floquet 精确谱。':'HFS + Zeeman 裸态谱。',nearResonantLaserIds:failure&&beams.length===1?beams.flatMap(g=>g.beams.map(b=>b.id)):[],requiresDensityProjection:false,warnings:failure?[failure,...ASSUMPTIONS]:beams.length?ASSUMPTIONS.slice():[],maximumMixingRatio:result?.maximumMixingRatio,sources:SPECTROSCOPY_SOURCES.slice()};
   if(status==='dispersive'){
     const saved=background(analysis,result!);for(const key of ['ground','D1','D2'] as const)analysis[key]=saved[key].map(copyLevel);analysisContexts.set(analysis,saved.context);
   }else for(const [offset,key] of [[0,'ground'],[8,'D1'],[16,'D2']] as const)analysis[key]=analysis[key].map((state,i)=>({...state,totalShiftMHz:failure?null:state.shiftMHz,starkShiftMHz:failure?null:0,backgroundState:identityState(offset+i),mixed:false}));

@@ -1,8 +1,9 @@
 import type {DynamicsResult} from './solver-types.js';
 import type {DynamicsSettings} from './types.js';
+import {hyperfineLabel} from './format.js';
 export const POPULATION_GROUPS=[
  ...(['ground','D1','D2'] as const).flatMap(manifold=>(manifold==='D2'?[0,1,2,3]:[1,2]).map(F=>({
-  id:`F:${manifold}:${F}`,label:`${manifold==='ground'?'5S₁/₂':manifold==='D1'?'5P₁/₂':'5P₃/₂'} · ${manifold==='ground'?'F':manifold==='D1'?'F″':'F′'}=${F}`,
+  id:`F:${manifold}:${F}`,label:hyperfineLabel(manifold,F),
   members:Array.from({length:2*F+1},(_,i)=>`${manifold}-${F}-${i-F}`),
  }))),
  {id:'F:excited',label:'激发态总布居',members:(['D1','D2'] as const).flatMap(manifold=>(manifold==='D1'?[1,2]:[0,1,2,3]).flatMap(F=>Array.from({length:2*F+1},(_,i)=>`${manifold}-${F}-${i-F}`)))},

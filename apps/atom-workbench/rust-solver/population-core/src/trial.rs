@@ -156,13 +156,31 @@ impl DomainOperator {
 
     /// P0 preconditioner of each column for its own pole, an approximate
     /// inverse of `pole_j E - F`.
+    ///
+    /// Columns that share a pole go through its P0 together, up to
+    /// `KERNEL_BLOCK` at a time (one batched application per block).
     pub fn precondition(&mut self, x: &[f64], k: usize, pole: &[usize], out: &mut [f64]) -> Result<(), String> {
         let rows = self.rows;
-        for j in 0..k {
-            let length = self.push(x, j, 1)?;
-            self.p0[pole[j]].apply_into(&self.signed[..length], 1, &mut self.first[..length])?;
-            self.map.pull_complex_into(&self.first[..length], 1, &mut self.pulled[..length])?;
-            deinterleave_real(&self.pulled[..length], rows, j, 1, out);
+        let mut order: Vec<usize> = (0..k).collect();
+        order.sort_by_key(|&j| pole[j]);
+        for group in order.chunk_by(|&a, &b| pole[a] == pole[b]) {
+            for block in group.chunks(KERNEL_BLOCK) {
+                let width = block.len();
+                let length = rows * width;
+                for (c, &j) in block.iter().enumerate() {
+                    for (i, &value) in x[j * rows..(j + 1) * rows].iter().enumerate() {
+                        self.interleaved[i * width + c] = value;
+                    }
+                }
+                self.map.push_into(&self.interleaved[..length], width, &mut self.signed[..length])?;
+                self.p0[pole[block[0]]].apply_into(&self.signed[..length], width, &mut self.first[..length])?;
+                self.map.pull_complex_into(&self.first[..length], width, &mut self.pulled[..length])?;
+                for (c, &j) in block.iter().enumerate() {
+                    for (i, value) in out[j * rows..(j + 1) * rows].iter_mut().enumerate() {
+                        *value = self.pulled[i * width + c].re;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -249,6 +267,17 @@ pub struct SpaceTiming {
 
 fn ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.
+}
+
+impl SpaceTiming {
+    /// Adds the times of an earlier (retired) space.
+    pub fn absorb(&mut self, earlier: &SpaceTiming) {
+        self.orthogonalize_ms += earlier.orthogonalize_ms;
+        self.images_ms += earlier.images_ms;
+        self.projections_ms += earlier.projections_ms;
+        self.readout_ms += earlier.readout_ms;
+        self.transfer_ms += earlier.transfer_ms;
+    }
 }
 
 impl TrialSpace {

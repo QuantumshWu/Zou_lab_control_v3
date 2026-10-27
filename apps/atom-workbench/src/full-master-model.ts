@@ -1,15 +1,23 @@
-import type {Scene,DynamicsSettings,Laser} from './types.js';
+import type {Scene,DynamicsSettings,Laser,Level,InitialStateSpec} from './types.js';
+import {resolveInitialState} from './types.js';
 import {spectroscopyAnalysis} from './spectroscopy.js';
-import {classifyLasers} from './laser-regime.js';
+import {classifyLasers,farValidity} from './laser-regime.js';
 import {atomicSystem,complexPolarization,laserFrequencyDifferenceMHz,laserIntensityMWcm2,laserCarrierOffsetMHz,captureLaserFrequencyAnchor,RB87,sinCosDegrees,accurateSum} from './physics.js';
 import {FULL_MODEL_SCHEMA} from './solver-protocol.js';
 
 /** The rb87-full/2 model sent to the Rust worker: 32 states, complex row-major
  * matrices, H in rad/us, collapse amplitudes in 1/sqrt(us), and
- * H(t) = H0 + sum [cos(omega t) Hcos + sin(omega t) Hsin] with omega in rad/us. */
+ * H(t) = H0 + sum [cos(omega t) Hcos + sin(omega t) Hsin] with omega in rad/us.
+ *
+ * Physics: each laser's regime decides how it enters. A near laser is a
+ * rotating-wave drive of every allowed D1 and D2 dipole; a far laser is only
+ * its static second-order (van Vleck) light shift in H0, with the Rb+ core
+ * term (spectroscopy.ts). Emission is secular per D line and ground F. */
 interface MasterMatrix {real:number[];imag:number[]}
 interface MasterDrive {omega:number;cos:MasterMatrix;sin:MasterMatrix;laserIds:string[]}
 const N=32,TAU=2*Math.PI,zeros=()=>Array(1024).fill(0),matrix=():MasterMatrix=>({real:zeros(),imag:zeros()});
+/** h * 1 MHz / k_B, in kelvin. */
+const MHZ_KELVIN=6.62607015e-34*1e6/1.380649e-23;
 
 type AtomicSystem=ReturnType<typeof atomicSystem>;
 interface BareFieldModel {systems:Record<'D1'|'D2',AtomicSystem>;collapse:MasterMatrix[]}
@@ -79,8 +87,36 @@ function transformOperator(a:MasterMatrix,u:MasterMatrix):MasterMatrix {
  for(let i=0;i<N;i++)for(let k=0;k<N;k++){const ar=a.real[i*N+k]!,ai=a.imag[i*N+k]!;if(ar===0&&ai===0)continue;for(let j=0;j<N;j++){const br=u.real[k*N+j]!,bi=u.imag[k*N+j]!;tmp.real[i*N+j]+=ar*br-ai*bi;tmp.imag[i*N+j]+=ar*bi+ai*br;}}
  for(let i=0;i<N;i++)for(let k=0;k<N;k++){const ar=u.real[k*N+i]!,ai=-u.imag[k*N+i]!;if(ar===0&&ai===0)continue;for(let j=0;j<N;j++){const br=tmp.real[k*N+j]!,bi=tmp.imag[k*N+j]!;out.real[i*N+j]+=ar*br-ai*bi;out.imag[i*N+j]+=ar*bi+ai*br;}}return out;
 }
+/** Diagonal initial populations in the model basis (see InitialStateSpec). */
+export function initialPopulations(spec:InitialStateSpec,states:Level[]):number[] {
+ let weights:number[];
+ if(spec.kind==='state'){const index=states.findIndex(s=>s.id===spec.id);if(index<0)throw new Error('动力学初态必须是真实原子态');weights=states.map((_,i)=>+(i===index));}
+ else if(spec.kind==='unpolarized')weights=states.map(s=>+(s.manifold==='ground'&&(spec.manifold==='ground'||s.F===(spec.manifold==='F1'?1:2))));
+ else if(spec.kind==='thermal'){
+  const T=spec.temperatureK;if(!Number.isFinite(T)||!(T>0))throw new Error('热平衡初态需要有限的正温度');
+  const lowest=Math.min(...states.filter(s=>s.manifold==='ground').map(s=>s.energyMHz));
+  weights=states.map(s=>s.manifold==='ground'?Math.exp(-MHZ_KELVIN*(s.energyMHz-lowest)/T):0);
+ }else{
+  const ids=new Set(states.map(s=>s.id));
+  if(Object.entries(spec.weights).some(([id,w])=>!ids.has(id)||!Number.isFinite(w)||w<0))throw new Error('初态权重必须是真实原子态上的非负有限数');
+  weights=states.map(s=>spec.weights[s.id]??0);
+ }
+ const total=accurateSum(weights);if(!(total>0)||!Number.isFinite(total))throw new Error('初态权重之和必须为正');
+ return weights.map(w=>w/total);
+}
+function initialText(spec:InitialStateSpec):string {
+ if(spec.kind==='state')return `初态：模型基中的单一本征态 ${spec.id}。`;
+ if(spec.kind==='unpolarized')return spec.manifold==='ground'?'初态：8 个基态等权混合（非极化）。':`初态：F=${spec.manifold==='F1'?1:2} 的基态等权混合（非极化）。`;
+ if(spec.kind==='thermal')return `初态：静态 H0 的 8 个基态本征能量上的 Boltzmann 分布，T = ${spec.temperatureK} K。`;
+ return '初态：按给定权重（归一化）在模型基中的对角混合。';
+}
 export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSettings>,frame:'common'|'resonant'='resonant'){
  const classification=classifyLasers(scene),invalid=classification.find(c=>!c.valid);if(invalid)throw new Error(invalid.message);
+ // A static (far) laser is refused with the editor's own words (laser-regime.ts farValidity).
+ for(const l of scene.lasers)if(l.enabled&&l.regime==='far'&&laserIntensityMWcm2(l)>0){const check=farValidity(scene,l.id);if(!check.valid)throw new Error(check.message);}
+ // The far lasers' static background (D-line rotating and counter-rotating
+ // terms, states outside the model, Rb+ core) and its eigenbasis: the model
+ // basis of H0, the collapse operators, the initial density and the result.
  const a=spectroscopyAnalysis(scene,undefined,false),states=[...a.ground,...a.D1,...a.D2];
  if(a.spectroscopy?.status==='unresolved')throw new Error(a.spectroscopy.warnings?.[0]??'远失谐背景不满足色散条件');
  const bare=bareFieldModel(a.fieldMagnitudeG),u=matrix();states.forEach((s,j)=>{for(let i=0;i<N;i++){u.real[i*N+j]=s.backgroundState?.real[i]??(i===j?1:0);u.imag[i*N+j]=s.backgroundState?.imag[i]??0;}});
@@ -118,12 +154,17 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  // in the chosen manifold frame; no population-rate equation is introduced.
  const collapse:MasterMatrix[]=[];
  for(const c of bare.collapse){const transformed=transformOperator(c,u);for(const F of [1,2]){const channel=matrix();for(let g=0;g<8;g++)if(states[g]!.F===F)for(let e=8;e<N;e++){channel.real[g*N+e]=transformed.real[g*N+e]!;channel.imag[g*N+e]=transformed.imag[g*N+e]!;}if(channel.real.some(v=>v!==0)||channel.imag.some(v=>v!==0))collapse.push(channel);}}
- const initialId=settings?.initialStateId??scene.dynamics?.initialStateId??`ground-${scene.initialF}-${scene.initialM}`,initialIndex=states.findIndex(s=>s.id===initialId);if(initialIndex<0)throw new Error('动力学初态必须是真实原子态');
- return {modelSchema:FULL_MODEL_SCHEMA,dimension:32,states,hReal:h.real,hImag:h.imag,collapse,initialIndex,drives,
+ const initialState=resolveInitialState(settings,scene),populations=initialPopulations(initialState,states);
+ const initialReal=zeros();populations.forEach((p,i)=>initialReal[i*N+i]=p);
+ const initialIndex=populations.indexOf(Math.max(...populations));
+ return {modelSchema:FULL_MODEL_SCHEMA,dimension:32,states,hReal:h.real,hImag:h.imag,collapse,
+ // Full initial density, diagonal in the model basis; initialIndex is its
+ // largest population (the solver's coordinate anchor).
+ initialIndex,initialReal,initialImag:zeros(),initialPopulations:populations,initialState,drives,
  // MHz coordinates are authoritative carrier differences. Angular values
  // are redundant representations; multiplication by TAU must not decide
  // whether an integer relation exists between the original carrier phases.
  frequencyCoordinates:{frequenciesMHz,frequencies,driveIndices,frameIndices:states.map(s=>s.manifold==='ground'?groundPhaseIndices.get(s.F)!.slice():frequencies.map(()=>0)),frameSectors:states.map(s=>s.manifold==='ground'?0:1)},
  fieldVector:a.fieldVector,fieldMagnitudeG:a.fieldMagnitudeG,laserCount:near.length,frameFrequenciesMHz:states.map(s=>s.manifold==='ground'?groundFrames.get(s.F)!:opticalFrameMHz),
- assumptions:['远失谐光仅贡献背景 Stark Hamiltonian；不包含远失谐光散射。','统一光学旋转系；每束近共振光显式保留两个基态 F 与 D1、D2 全部允许电偶极耦合。','仅去除光学反旋转项，不按失谐或流形删除驱动矩阵元。','不同光频的真实拍频显式进入 Lindblad 方程。','衰变算符变换到相同的背景本征基；不同基态超精细发射频率采用 secular 分辨。','初态及返回布居定义在远失谐背景本征基；参考能级不进入动力学。']};
+ assumptions:['处理方式为“静态光移”的光仅贡献静态背景 Stark Hamiltonian：D 线旋转与反旋转二阶光移、32 态以外能级（5S 的 6–9P；5P 的 6–10S、4–9D）和 Rb+ 芯极化（Arora & Sahoo 2012：α_c = 9.1 au，5S 另加 α_vc = −0.26 au）；混合比 |Ω/2Δ| 超过 1% 时拒绝静态处理。不包含这些光的散射。','统一光学旋转系；每束“进入主方程”的光显式保留两个基态 F 与 D1、D2 全部允许电偶极耦合。','仅去除“进入主方程”的光的光学反旋转项，不按失谐或流形删除驱动矩阵元；这些光不计 32 态以外能级与芯极化的光移。','不同光频的真实拍频显式进入 Lindblad 方程。','衰变算符变换到相同的背景本征基；不同基态超精细发射频率采用 secular 分辨（每条 D 线、每个光子偏振分量、每个基态 F 一个塌缩算符）。','初态及返回布居定义在“静态光移”背景的本征基；参考能级不进入动力学。',initialText(initialState)]};
 }

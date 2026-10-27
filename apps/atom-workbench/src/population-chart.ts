@@ -69,7 +69,7 @@ export function populationChart(result:PopulationPlot,monitoredIds:string[],labe
   if(options.showTotalExcited!==false)svg+=series('__excited__',result.totalExcited,'#808080',true);
   for(const id of monitoredIds)svg+=series(id,result.populations[id]!,populationColor(id));
   svg+='</g><g class="population-cursor" pointer-events="none" style="display:none"></g>';
-  return `<svg class="chart-svg population-svg" viewBox="0 0 800 355" xmlns="${SVG}" role="img" tabindex="0" data-population-scale="${scale}" aria-label="态布居随时间的演化。移动指针读取采样值，方向键逐点查看，Home 和 End 到达首末采样。" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" style="fill:#323130;outline:none"><title>${esc(populationSamplingInfo(result))}</title>${svg}</svg>`;
+  return `<svg class="chart-svg population-svg" viewBox="0 0 800 355" xmlns="${SVG}" role="img" tabindex="0" data-population-scale="${scale}" aria-label="态布居随时间的演化。移动指针读取采样值，方向键逐点查看，Home 和 End 到达首末采样。" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" style="fill:#323130;outline:none">${svg}</svg>`;
 }
 
 /** A common time cursor reads actual solver samples, including values below
@@ -78,7 +78,7 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
   const found=host.querySelector<SVGSVGElement>('svg.population-svg');if(!found)return ()=>{};const svg:SVGSVGElement=found;
   const g=populationLayout(result,ids,options),cursor=svg.querySelector<SVGGElement>('.population-cursor')!;
   const tooltip=document.createElement('div');tooltip.className='population-readout';tooltip.setAttribute('role','region');tooltip.setAttribute('aria-label','所选时刻的态布居');tooltip.tabIndex=0;tooltip.hidden=true;
-  tooltip.style.cssText='position:absolute;z-index:5;pointer-events:auto;background:var(--surface,#fff);border:1px solid var(--divider,#e1dfdd);border-radius:4px;padding:9px 11px;box-sizing:border-box;overflow-y:auto;overscroll-behavior:contain;box-shadow:0 4px 16px #32313014;font:12px var(--font-family,Segoe UI);max-width:calc(100% - 16px);min-width:240px';host.append(tooltip);
+  tooltip.classList.add('card','bordered');host.append(tooltip);
   const abort=new AbortController();let index=result.timesUs.length-1;
   const element=(name:string,attrs:Record<string,string>)=>{const el=document.createElementNS(SVG,name);for(const [key,value]of Object.entries(attrs))el.setAttribute(key,value);return el;};
   function show(next:number):void {
@@ -87,10 +87,10 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     for(const id of ids){const p=result.populations[id]![index]!;cursor.append(element('circle',{cx:String(xx),cy:String(g.y(p)),r:'3',fill:options.scale==='log'&&p<=g.floor?'white':populationColor(id),stroke:'white','stroke-width':'1.5'}));}
     cursor.style.display='';
     const steady=result.steady?.converged&&result.steady.populations?result.steady:undefined,mean=isTimeAverage(steady?.status);
-    const head=steady?`<div style="display:grid;grid-template-columns:minmax(100px,1fr) 80px 80px;gap:10px;color:#6a6866;font-size:11px;margin:0 0 5px"><span></span><span style="text-align:right">p(t)</span><span style="text-align:right">${mean?'〈p〉∞':'p∞'}</span></div>`:'';
+    const head=steady?`<div class="readout-row readout-head"><span></span><span>p(t)</span><span>${mean?'长期平均':'长期布居'}</span></div>`:'';
     const asymptotic=(id:string)=>{if(id!=='__excited__')return steady?.populations?.[id]??NaN;const excited=Object.entries(steady?.populations??{}).filter(([state])=>/^(D1|D2)-/.test(state));return excited.length?excited.reduce((sum,[,p])=>sum+p,0):NaN;};
-    const row=(id:string,name:string,p:number,color:string)=>`<div data-population-readout="${esc(id)}" style="display:grid;grid-template-columns:minmax(100px,1fr) 80px${steady?' 80px':''};gap:10px;align-items:center;margin:4px 0"><span title="${esc(name)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;color:${color}">${esc(name)}${id===options.initialId?' · ψ₀':''}</span><span style="text-align:right;font-variant-numeric:tabular-nums">${esc(populationValue(p))}</span>${steady?`<span style="text-align:right;color:#6a6866;font-variant-numeric:tabular-nums">${esc(populationValue(asymptotic(id)))}</span>`:''}</div>`;
-    tooltip.innerHTML=`<div style="font-weight:600;margin-bottom:7px">t = ${digits(t*g.unit.factor)} ${g.unit.name}</div>${head}${ids.map(id=>row(id,labels[id]??id,result.populations[id]![index]!,populationColor(id))).join('')}${options.showTotalExcited===false?'':row('__excited__','激发态合计',result.totalExcited[index]!,'#808080')}${mean?'<div style="color:#6a6866;font-size:11px;margin-top:6px">〈p〉∞ 为长期时间平均，不是瞬时布居。</div>':''}`;
+    const row=(id:string,name:string,p:number,color:string)=>`<div class="readout-row${steady?'':' two'}" data-population-readout="${esc(id)}"><span class="readout-name" style="color:${color}">${esc(name)}${id===options.initialId?' · 初态':''}</span><span>${esc(populationValue(p))}</span>${steady?`<span class="readout-steady">${esc(populationValue(asymptotic(id)))}</span>`:''}</div>`;
+    tooltip.innerHTML=`<div class="readout-time">t = ${digits(t*g.unit.factor)} ${g.unit.name}</div>${head}${ids.map(id=>row(id,labels[id]??id,result.populations[id]![index]!,populationColor(id))).join('')}${options.showTotalExcited===false?'':row('__excited__','激发态合计',result.totalExcited[index]!,'#808080')}${mean?'<p class="note wrap">“长期平均”一列是长期时间平均，不是瞬时布居。</p>':''}`;
     tooltip.hidden=false;tooltip.dataset.sampleIndex=String(index);tooltip.style.maxHeight=`${Math.max(100,host.clientHeight-35)}px`;
     const bounds=svg.getBoundingClientRect(),parent=host.getBoundingClientRect(),px=(xx/800)*bounds.width+bounds.left-parent.left,tw=tooltip.offsetWidth;
     tooltip.style.left=`${clamp(px<host.clientWidth/2?px+18:px-tw-18,8,Math.max(8,host.clientWidth-tw-8))}px`;tooltip.style.top='27px';

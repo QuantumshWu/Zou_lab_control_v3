@@ -6,9 +6,9 @@ import {laserFrequencyMHz} from '../dist/js/atom-workbench/src/physics.js';
 import {spectroscopyAnalysis} from '../dist/js/atom-workbench/src/spectroscopy.js';
 import {combinedLevelsChart} from '../dist/js/atom-workbench/src/combined-level-chart.js';
 
-test('new/reset scenes use 200 points and a physically specified 852 nm tweezer',()=>{
-  assert.equal(defaultDynamics().samples,200);
-  assert.equal(defaultScene().dynamics.samples,200);
+test('new/reset scenes use 1000 points and a physically specified 852 nm tweezer',()=>{
+  assert.equal(defaultDynamics().samples,1000);
+  assert.equal(defaultScene().dynamics.samples,1000);
   assert.equal(defaultTweezer().wavelengthNm,852);
   assert.ok(Math.abs(laserFrequencyMHz(defaultTweezer())-299792458000/852)<1e-7);
   assert.match(defaultScene().name,/852 nm/);
@@ -19,7 +19,7 @@ test('loading an existing scene preserves its sample count and 850 nm carrier',(
   const loaded=validateScene(JSON.parse(JSON.stringify(old)));
   assert.equal(loaded.dynamics.samples,161);
   const tweezer=loaded.lasers.find(x=>x.id==='tweezer');
-  assert.equal(tweezer.wavelengthNm,850);
+  assert.equal(tweezer.frequency.wavelengthNm,850,'migrated to the wavelength as written');
   assert.ok(Math.abs(laserFrequencyMHz(tweezer)-299792458000/850)<1e-7);
 });
 

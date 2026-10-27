@@ -6,7 +6,7 @@
 //! and reverse dependencies retain every path that returns to the output.
 use std::{collections::{BTreeMap,BTreeSet},sync::Arc,time::Instant};
 use crate::{C,Coefficient,Finite,Lapack,product};
-use crate::pencil::{Family,HilbertCoefficient,Library,Plan,PlanInput,ThinCoefficient,Workspace};
+use crate::pencil::{Family,HilbertCoefficient,LayerInput,Library,Plan,PlanInput,ThinCoefficient,Workspace};
 use crate::preparation::{Charge,FourierMatrices,GaugedSource,GaugePolicy,ModelView,PhaseBasis};
 use crate::preparation::primitives::{self,PrimitivePreparation};
 
@@ -56,8 +56,11 @@ pub enum KernelPolicy { Csr, HybridBlas }
 pub struct OwnedPrepared {
     primitives:Arc<PrimitivePreparation>,
     library:Arc<Library>,
-    /// S, NL, NR, K, R, L_GG, L_OG. S is shared by both commutators.
+    /// S (the union of all shear layers), NL, NR, K, R, L_GG, L_OG.
     families:[Family;7],
+    /// The shear layers, inner first, each a list of classes; the pencil
+    /// applies the layers in order and sums the classes of one layer.
+    layers:Vec<Vec<Family>>,
     lapack:Option<Arc<Lapack>>,
     preparation_lapack:Arc<Lapack>,
     coefficient_bytes:usize,
@@ -135,8 +138,14 @@ impl OwnedPrepared {
         let thin_families:[(&FourierMatrices,usize,usize,Option<&[usize]>);4]=[
             (&primitives.selected_k,rank,e*e,Some(&excited_order)),(&primitives.selected_recycling,rank,e*e,Some(&excited_order)),
             (&primitives.gg_hamiltonian,rank,rank,None),(&primitives.optical_hamiltonian,optical,rank,None)];
-        let mut library=Library::default();let mut families:[Family;7]=std::array::from_fn(|_|Family::new());
         let valid=|q:&Charge,matrix:&[C],length:usize|q.len()==axes&&matrix.len()==length&&matrix.iter().all(|z|z.finite());
+        let mut library=Library::default();let mut families:[Family;7]=std::array::from_fn(|_|Family::new());
+        let mut layers=Vec::with_capacity(primitives.layers.len());
+        for layer in &primitives.layers{let mut classes=Vec::with_capacity(layer.len());for class in layer{let mut family=Family::new();
+            for(q,matrix)in class{
+                if !valid(q,matrix,n*n){return Err("Invalid owned complete primitive matrix".into());}
+                family.insert(q.clone(),library.hilbert.len());library.hilbert.push(HilbertCoefficient::new(matrix,n,g));
+            }classes.push(family);}layers.push(classes);}
         // Exact zero matrices may remain in a prepared family. Keeping their
         // charge is harmless; their block pattern is empty.
         for(i,family)in hilbert_families.into_iter().enumerate(){for(q,matrix)in family{
@@ -148,11 +157,38 @@ impl OwnedPrepared {
             families[3+i].insert(q.clone(),library.thin.len());library.thin.push(ThinCoefficient::new(matrix,rows,cols,order));
         }}
         let bytes=library.bytes();
-        Ok(Self{primitives:Arc::new(primitives),library:Arc::new(library),families,
+        Ok(Self{primitives:Arc::new(primitives),library:Arc::new(library),families,layers,
             lapack:if matches!(policy,KernelPolicy::HybridBlas){Some(Arc::clone(&lap))}else{None},
             preparation_lapack:lap,coefficient_bytes:bytes,timing:[0.;3]})
     }
     pub fn primitives(&self)->&PrimitivePreparation{&self.primitives}
+    /// The generator of the sheared coordinates at `charges`
+    /// (`preparation::effective`).
+    pub fn effective_generator(&self,charges:&[Charge])->Result<crate::preparation::effective::EffectiveGenerator,String>{
+        crate::preparation::effective::EffectiveGenerator::new(&self.primitives,&self.preparation_lapack,charges)
+    }
+    /// Forward modes of every shear layer from `input`: ([S_c, .] modes per
+    /// class, output modes) per layer, and the final J modes.
+    fn forward_layers(&self,input:&Modes)->Result<(Vec<(Vec<Modes>,Modes)>,Modes),String>{
+        let axes=self.primitives.hilbert.source.phases.axes.len();let mut current=input.clone();let mut out=Vec::with_capacity(self.layers.len());
+        for classes in &self.layers{let mut firsts=Vec::with_capacity(classes.len());let mut support=Modes::from([vec![0;axes]]);
+            for family in classes{let keys:Modes=family.keys().cloned().collect();
+                firsts.push(combinations(&current,&keys,false)?);
+                support.extend(keys.iter().cloned());support.extend(combinations(&keys,&keys,false)?);}
+            let next=combinations(&current,&support,false)?;out.push((firsts,next.clone()));current=next;}
+        Ok((out,current))
+    }
+    /// Every output mode one pencil application reaches from `input`. The
+    /// estimate of the Fourier truncation must evaluate exactly these.
+    pub fn reachable(&self,input:&[Charge])->Result<Vec<Charge>,String>{
+        let keys:Vec<Modes>=self.families.iter().map(|f|f.keys().cloned().collect()).collect();
+        let axes=self.primitives.hilbert.source.phases.axes.len();let input=mode_set(input,axes)?;
+        let(_,forward_j)=self.forward_layers(&input)?;let z=combinations(&forward_j,&keys[3],false)?;
+        let mut output=forward_j.clone();output.extend(z.iter().cloned());
+        for family in[&keys[1],&keys[2],&keys[4]]{output.extend(combinations(&forward_j,family,false)?);}
+        for family in[&keys[5],&keys[6]]{output.extend(combinations(&z,family,false)?);}
+        Ok(output.into_iter().collect())
+    }
     pub fn shared_coefficient_bytes(&self)->usize{self.coefficient_bytes}
     pub fn physical_coordinates(&self)->coordinates::PhysicalCoordinates{
         coordinates::PhysicalCoordinates::new(Arc::clone(&self.primitives),Arc::clone(&self.preparation_lapack))
@@ -165,23 +201,35 @@ impl OwnedPrepared {
         // Forward reachability from the input, intersected with every path
         // that returns to the output (reverse dependencies).
         let keys:Vec<Modes>=self.families.iter().map(|f|f.keys().cloned().collect()).collect();
-        let(s,left,right,k,r,lgg,log)=(&keys[0],&keys[1],&keys[2],&keys[3],&keys[4],&keys[5],&keys[6]);
-        let mut j_support=Modes::from([vec![0;axes]]);j_support.extend(s.iter().cloned());j_support.extend(combinations(s,s,false)?);
-        let forward_j=combinations(&input,&j_support,false)?;
+        let(left,right,k,r,lgg,log)=(&keys[1],&keys[2],&keys[3],&keys[4],&keys[5],&keys[6]);
+        let(forward,forward_j)=self.forward_layers(&input)?;
         let mut z_needed=output.clone();z_needed.extend(combinations(&output,lgg,true)?);z_needed.extend(combinations(&output,log,true)?);
         let z_modes:Vec<_>=combinations(&forward_j,k,false)?.intersection(&z_needed).cloned().collect();
         let no_jump:Modes=left.union(right).cloned().collect();
         let mut j_needed=output.clone();j_needed.extend(combinations(&output,&no_jump,true)?);
         j_needed.extend(combinations(&output,r,true)?);j_needed.extend(combinations(&z_modes.iter().cloned().collect(),k,true)?);
         let j_set:Modes=forward_j.intersection(&j_needed).cloned().collect();let j_modes:Vec<_>=j_set.iter().cloned().collect();
-        let mut d_needed=j_set.clone();d_needed.extend(combinations(&j_set,s,true)?);
-        let d_modes:Vec<_>=combinations(&input,s,false)?.intersection(&d_needed).cloned().collect();
+        // Backward through the layers: an output mode needs its input mode
+        // (identity) and first mode (identity and [S, first]); a first mode
+        // needs the input modes [S, .] maps onto it.
+        let mut sets:Vec<(Vec<Vec<Charge>>,Vec<Charge>)>=vec![(Vec::new(),Vec::new());self.layers.len()];let mut needed=j_set.clone();
+        for(l,classes)in self.layers.iter().enumerate().rev(){
+            let(first_forward,out_forward)=&forward[l];
+            let out:Modes=needed.intersection(out_forward).cloned().collect();let mut input_needed=out.clone();let mut firsts=Vec::with_capacity(classes.len());
+            for(family,forward_first)in classes.iter().zip(first_forward){let keys:Modes=family.keys().cloned().collect();
+                let mut first_needed=out.clone();first_needed.extend(combinations(&out,&keys,true)?);
+                let first:Modes=first_needed.intersection(forward_first).cloned().collect();
+                input_needed.extend(combinations(&first,&keys,true)?);firsts.push(first.into_iter().collect());}
+            sets[l]=(firsts,out.into_iter().collect());needed=input_needed;
+        }
+        let layers:Vec<LayerInput<'_>>=self.layers.iter().zip(&sets).map(|(classes,(firsts,output))|LayerInput{
+            classes:classes.iter().zip(firsts).map(|(family,first)|(family,first.as_slice())).collect(),output}).collect();
         let n=source.n;let g=source.ground.len();
         let frequency:Vec<f64>=output_modes.iter().map(|q|source.phases.frequency(q).map(|v|v.hi+v.lo)).collect::<Result<_,_>>()?;
         let plan=Plan::new(PlanInput{n,ground:g,library:Arc::clone(&self.library),
-            commutator:&self.families[0],left:&self.families[1],right:&self.families[2],selected_k:&self.families[3],
+            layers,left:&self.families[1],right:&self.families[2],selected_k:&self.families[3],
             recycling:&self.families[4],ground_hamiltonian:&self.families[5],optical_hamiltonian:&self.families[6],
-            input:input_modes,first:&d_modes,j:&j_modes,z:&z_modes,output:output_modes,
+            input:input_modes,j:&j_modes,z:&z_modes,output:output_modes,
             gg:p.gg_rows.iter().map(|&row|(row/g,row%g)).collect(),optical:p.optical_rows.iter().map(|&at|(at/n,at%n)).collect(),
             frequency:frequency.clone(),max_rhs,blas:self.lapack.clone()})?;
         // A disjoint rectangular operator may have no intermediate modes; its
@@ -229,7 +277,7 @@ impl OwnedPencil {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preparation::MatrixView;
+    use crate::preparation::{DriveView,MatrixView};
     fn add(a:&mut C,b:C){a.re+=b.re;a.im+=b.im;}
     fn mul(a:C,b:C)->C{C{re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re}}
     fn scale(a:C,s:f64)->C{C{re:a.re*s,im:a.im*s}}
@@ -249,12 +297,27 @@ mod tests {
         let phases=PhaseBasis::from_declared(&[7.],None,&[]).unwrap();let gauge=[vec![0],vec![1],vec![0],vec![0]];
         OwnedPrepared::prepare(&model,phases,GaugePolicy::Explicit(&gauge),policy).unwrap()
     }
+    /// A near drive (detuning 0.1) and a strong far drive (detuning ~17)
+    /// whose cross couplings are significant: the shear has two layers.
+    fn two_layer_fixture()->OwnedPrepared{
+        let n=4;let mut h=vec![0.;16];let zero=vec![0.;16];for(i,v)in[0.,0.6,3.,4.].iter().enumerate(){h[i*n+i]=*v;}
+        let mut near=vec![0.;16];near[2]=0.01;near[2*n]=0.01;
+        let mut far=vec![0.;16];for(i,j,v)in[(0,2,2.),(1,3,1.5),(0,3,0.7)]{far[i*n+j]=v;far[j*n+i]=v;}
+        let drives=[DriveView{omega:2.9,cosine:MatrixView{real:&near,imag:&zero},sine:MatrixView{real:&zero,imag:&zero}},
+            DriveView{omega:20.,cosine:MatrixView{real:&far,imag:&zero},sine:MatrixView{real:&zero,imag:&zero}}];
+        let mut c=vec![0.;16];c[2]=0.7;c[3]=0.1;c[6]=0.2;c[7]=0.8;
+        let channels=[MatrixView{real:&c,imag:&zero}];let model=ModelView{dimension:n,hamiltonian:MatrixView{real:&h,imag:&zero},
+            collapse:&channels,drives:&drives,ground:&[true,true,false,false],initial_index:0};
+        let phases=PhaseBasis::from_declared(&[2.9,20.],None,&[vec![1,0],vec![0,1]]).unwrap();
+        OwnedPrepared::prepare(&model,phases,GaugePolicy::MaximumScoreGapForest,KernelPolicy::Csr).unwrap()
+    }
     /// Full convolution independent of the staged return graph and compact
     /// K/R/LGG/LOG: form T x, then use original transformed H/C directly.
     fn original_oracle(p:&PrimitivePreparation,x:&FourierMatrices)->(FourierMatrices,FourierMatrices){
         let n=p.hilbert.source.n;let g=p.hilbert.source.ground.len();let e=n-g;
-        let dx=comm(&p.s,x,n);let ddx=comm(&p.s,&dx,n);let mut j=x.clone();
-        for(q,a)in dx{add_field(&mut j,q,&a,1.);}for(q,a)in ddx{add_field(&mut j,q,&a,0.5);}
+        let mut j=x.clone();
+        for layer in &p.layers{let mut next=j.clone();for class in layer{let dx=comm(class,&j,n);let ddx=comm(class,&dx,n);
+            for(q,a)in dx{add_field(&mut next,q,&a,1.);}for(q,a)in ddx{add_field(&mut next,q,&a,0.5);}}j=next;}
         let mut mass=j.clone();for(q,k)in &p.k_hat{for(h,a)in &j{let mut z=vec![C::default();n*n];
             for ab in 0..g*g{for ij in 0..e*e{add(&mut z[(ab/g)*n+ab%g],mul(k[ab*e*e+ij],a[(g+ij/e)*n+g+ij%e]));}}
             add_field(&mut mass,add_charge(q,h,false).unwrap(),&z,1.);
@@ -298,6 +361,78 @@ mod tests {
         let shift=C{re:8.,im:-2.};let mut shifted=vec![C::default();count];part.apply_shifted_into(&x,rhs,shift,&mut shifted).unwrap();
         for i in 0..count{let expected=mul(shift,ep[i]);assert_eq!(shifted[i].re,expected.re-fp[i].re);assert_eq!(shifted[i].im,expected.im-fp[i].im);}
         let previous=fp.clone();part.apply_into(&vec![C::default();x.len()],rhs,&mut ep,&mut fp).unwrap();assert!(fp.iter().chain(&ep).all(|z|z.re==0.&&z.im==0.));assert!(previous.iter().any(|z|z.re!=0.));
+    }
+    /// Layered shears: the pencil applies T_far(T_near(x)) exactly, and
+    /// `reachable` names every mode it reaches.
+    #[test]
+    fn preparation_owned_layered_shears_match_oracle(){
+        let owned=two_layer_fixture();let p=owned.primitives();
+        assert!(p.layers.len()>=2,"expected separate near and far layers, got {}",p.layers.len());
+        let input_modes=[vec![0,0],vec![1,0],vec![0,-1]];let n=4;let d=n*n;let rhs=2;
+        let x:Vec<_>=(0..input_modes.len()*d*rhs).map(|i|C{re:((i*17+3)%41)as f64/47.,im:((i*11+7)%29)as f64/-31.}).collect();
+        let mut oracles=Vec::new();let mut targets=Modes::new();
+        for b in 0..rhs{let input:FourierMatrices=input_modes.iter().enumerate().map(|(i,q)|(q.clone(),(0..d).map(|k|x[(i*d+k)*rhs+b]).collect())).collect();
+            let oracle=original_oracle(p,&input);targets.extend(oracle.0.keys().chain(oracle.1.keys()).cloned());oracles.push(oracle);}
+        let reach:Modes=owned.reachable(&input_modes).unwrap().into_iter().collect();
+        assert!(targets.iter().all(|q|reach.contains(q)),"reachable misses an oracle output mode");
+        let outputs:Vec<_>=targets.into_iter().collect();let mut plan=owned.pencil(&input_modes,&outputs,rhs).unwrap();
+        let count=outputs.len()*d*rhs;let(mut e,mut f)=(vec![C::default();count],vec![C::default();count]);plan.apply_into(&x,rhs,&mut e,&mut f).unwrap();
+        let scale=oracles.iter().flat_map(|(a,b)|a.values().chain(b.values())).flatten().map(|z|z.re.hypot(z.im)).fold(0_f64,f64::max);
+        for(m,q)in outputs.iter().enumerate(){for k in 0..d{for b in 0..rhs{let at=(m*d+k)*rhs+b;
+            for(actual,family)in[(e[at],&oracles[b].0),(f[at],&oracles[b].1)]{
+                let expected=family.get(q).map_or(C::default(),|a|a[k]);
+                assert!((actual.re-expected.re).hypot(actual.im-expected.im)<1e-12*scale,"mode {q:?} entry {k}");
+            }
+        }}}
+    }
+    /// The effective generator L'_0 is the charge-0 block of the pencil's
+    /// own generator T^{-1} F (T^{-1} by a Neumann series on a window of
+    /// modes) within its stated bounds, far closer than the bare L_0, and it
+    /// conserves the trace and the Hermitian pairing exactly.
+    #[test]
+    fn preparation_effective_generator_matches_the_pencil_frame(){
+        use crate::preparation::effective::EffectiveGenerator;
+        let owned=two_layer_fixture();let p=owned.primitives();let lap=&owned.preparation_lapack;let n=4;let d=n*n;
+        assert!(p.k_hat.is_empty(),"the fixture's frame must be the shear alone");
+        let zero=vec![0,0];let near=vec![1,0];let far_near=vec![-1,1];
+        let generator=EffectiveGenerator::new(p,lap,&[zero.clone(),near.clone(),vec![-1,0],far_near.clone()]).unwrap();
+        // Hermitian pairing and exact trace conservation.
+        let(i,j)=(generator.position(&near).unwrap(),generator.position(&[-1,0]).unwrap());
+        for a in 0..n{for b in 0..n{for f in[&generator.hamiltonian,&generator.gamma]{
+            let(x,y)=(f[i][a*n+b],f[j][b*n+a]);assert!((x.re-y.re).abs()+(x.im+y.im).abs()<1e-12*(1.+x.re.hypot(x.im)));}}}
+        let x:Vec<C>=(0..d).map(|k|C{re:((k*7+3)%11)as f64/9.-0.5,im:((k*5+1)%13)as f64/17.-0.3}).collect();
+        for q in [&zero,&near,&far_near]{let k=generator.position(q).unwrap();
+            let r=generator.recycle(k,&x,lap).unwrap();let gm=&generator.gamma[k];
+            let(mut tr,mut tg)=(C::default(),C::default());for a in 0..n{add(&mut tr,r[a*n+a]);for b in 0..n{add(&mut tg,mul(gm[a*n+b],x[b*n+a]));}}
+            assert!((tr.re-tg.re).hypot(tr.im-tg.im)<1e-12,"trace at {q:?}");}
+        // The pencil frame: z = T^{-1} (F x) at the central mode.
+        let mut window:Modes=owned.reachable(&[zero.clone()]).unwrap().into_iter().collect();
+        for _ in 0..2{let current:Vec<Charge>=window.iter().cloned().collect();window.extend(owned.reachable(&current).unwrap());}
+        let window:Vec<Charge>=window.into_iter().collect();let m=window.len();let center=window.iter().position(|q|*q==zero).unwrap();
+        let mut once=owned.pencil(&[zero.clone()],&window,1).unwrap();let(mut ex,mut fx)=(vec![C::default();m*d],vec![C::default();m*d]);
+        once.apply_into(&x,1,&mut ex,&mut fx).unwrap();
+        let mut full=owned.pencil(&window,&window,1).unwrap();let mut z=fx.clone();
+        for _ in 0..200{let(mut tz,mut unused)=(vec![C::default();m*d],vec![C::default();m*d]);full.apply_into(&z,1,&mut tz,&mut unused).unwrap();
+            let mut change=0_f64;for k in 0..m*d{let next=C{re:fx[k].re-(tz[k].re-z[k].re),im:fx[k].im-(tz[k].im-z[k].im)};
+                change=change.max((next.re-z[k].re).hypot(next.im-z[k].im));z[k]=next;}
+            if change<1e-14{break;}}
+        let exact=&z[center*d..(center+1)*d];let effective=generator.apply(generator.position(&zero).unwrap(),&x,lap).unwrap();
+        // The bare frame L_0 for comparison.
+        let src=&p.hilbert.source;let(g,e)=(src.ground.len(),n-src.ground.len());let h=&src.hamiltonian[&zero];
+        let mut gm=vec![C::default();d];if let Some(block)=p.hilbert.radiation.gamma.get(&zero){for a in 0..e{for b in 0..e{gm[(g+a)*n+g+b]=block[a*e+b];}}}
+        let mut bare=vec![C::default();d];
+        for a in 0..n{for b in 0..n{let mut v=C::default();for c in 0..n{
+            let commutator=C{re:mul(h[a*n+c],x[c*n+b]).re-mul(x[a*n+c],h[c*n+b]).re,im:mul(h[a*n+c],x[c*n+b]).im-mul(x[a*n+c],h[c*n+b]).im};
+            let anti=C{re:mul(gm[a*n+c],x[c*n+b]).re+mul(x[a*n+c],gm[c*n+b]).re,im:mul(gm[a*n+c],x[c*n+b]).im+mul(x[a*n+c],gm[c*n+b]).im};
+            v.re+=commutator.im-0.5*anti.re;v.im+=-commutator.re-0.5*anti.im;}bare[a*n+b]=v;}}
+        if let Some(r)=p.hilbert.radiation.recycling.get(&zero){for a in 0..g{for b in 0..g{for i in 0..e{for j in 0..e{
+            add(&mut bare[a*n+b],mul(r[(a*g+b)*e*e+i*e+j],x[(g+i)*n+g+j]));}}}}}
+        let distance=|a:&[C],b:&[C]|a.iter().zip(b).fold(0_f64,|s,(x,y)|s.hypot((x.re-y.re).hypot(x.im-y.im)));
+        let size=x.iter().fold(0_f64,|s,z|s.hypot(z.re.hypot(z.im)));
+        let(error,error_bare)=(distance(exact,&effective),distance(exact,&bare));
+        eprintln!("effective error {error:.3e}, bare {error_bare:.3e}, bound {:.3e} + frame {:.3e} (|x| {size:.2})",generator.remainder,generator.frame_difference);
+        assert!(error<=(generator.remainder+generator.frame_difference)*size,"outside the stated bounds");
+        assert!(error<0.2*error_bare,"not closer than the bare generator");
     }
     /// Hermitian-symmetric input on a symmetric domain uses the canonical
     /// half and mirrors it; a perturbed input takes the full path. Both

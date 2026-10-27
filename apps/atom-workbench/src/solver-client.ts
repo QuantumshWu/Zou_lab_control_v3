@@ -1,7 +1,8 @@
 import type {DynamicsResult,SteadyStatus,PopulationAccuracy} from './solver-types.js';
 import {CONVERGED_MEAN_STATUSES,STEADY_STATUSES,isInitialDependent,readPopulationAccuracy} from './solver-types.js';
-import type {DynamicsSettings,Scene,Level} from './types.js';
-import {resolvePopulationTolerance} from './types.js';
+import type {DynamicsSettings,InitialStateSpec,Scene,Level} from './types.js';
+import {MEAN_HORIZONS_US,canonicalInitialState,resolveInitialState,resolveMeanHorizon,resolvePopulationTolerance} from './types.js';
+import {initialPopulations} from './full-master-model.js';
 import {laserIntensityMWcm2} from './physics.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from './solver-protocol.js';
 import {readMeanDensity} from './mean-density.js';
@@ -40,8 +41,8 @@ export class DynamicsClient {
     job.attempt++;let evidence:unknown;
     try{
       const response=await this.transport(this.base+'/api/solve',{method:'POST',signal:job.controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({modelSchema:FULL_MODEL_SCHEMA,stream:!!job.onProgress,request:{clientId:this.clientId,sequence:job.id},scene:job.scene,options:{
-        initialStateId:job.settings.initialStateId,durationUs:job.settings.durationUs,samples:job.settings.samples,
-        populationTolerance:resolvePopulationTolerance(job.settings.populationTolerance),
+        initialStateId:job.settings.initialStateId,initialState:canonicalInitialState(resolveInitialState(job.settings,job.scene)),durationUs:job.settings.durationUs,samples:job.settings.samples,
+        populationTolerance:resolvePopulationTolerance(job.settings.populationTolerance),meanHorizonUs:resolveMeanHorizon(job.settings),
         includeAsymptotic:true,steadyOnly:job.steadyOnly,
       }})}).catch(error=>{if(error instanceof TypeError)throw new RequestFailure('本机 Rust 求解服务连接暂时失败。',0,'network-error',true);throw error;});
       if(!response.ok){const detail=await response.json().catch(()=>({error:''}));evidence=detail;throw new RequestFailure(detail.error||`Local solver: ${response.status}`,response.status,detail.code??'',(response.status===502||response.status===503)&&!/invalid|incompatible|numerical/.test(detail.code??''));}
@@ -51,8 +52,8 @@ export class DynamicsClient {
       if(data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||
         !Array.isArray(data.service?.capabilities)||!data.service.capabilities.includes(FULL_MODEL_SCHEMA))throw new Error('本机求解服务版本不兼容：需要 rb87-full/2 模型，旧模型结果未显示。');
       if(!data.request||data.request.clientId!==this.clientId||data.request.sequence!==job.id)throw new Error('求解响应与当前请求不匹配。');
-      const result=normalizeDynamicsResult(data,job.scene,job.settings.initialStateId);
-      this.checkAccuracyRequest(result,job);
+      const result=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings,job.scene));
+      this.checkAccuracyRequest(result,job);this.checkHorizon(result,job);
       const expected=job.steadyOnly?1:job.settings.samples;
       if(result.timesUs.length!==expected||(!job.steadyOnly&&Math.abs(result.timesUs.at(-1)!-job.settings.durationUs)>1e-10*Math.max(1,job.settings.durationUs)))throw new Error('求解响应的采样与请求不匹配。');
       if(!result.steady?.converged)this.recordFailure(job,new Error(result.steady?.reason??'长期布居未解析'),false,evidence);
@@ -80,8 +81,8 @@ export class DynamicsClient {
       if(this.current!==job||job.controller.signal.aborted)return;
       const data=event.data;
       if(data?.request?.clientId!==this.clientId||data.request.sequence!==job.id||data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||!data.service?.capabilities?.includes(FULL_MODEL_SCHEMA))throw new Error('稳态进度与当前请求不匹配。');
-      const mean=normalizeDynamicsResult(data,job.scene,job.settings.initialStateId);
-      this.checkAccuracyRequest(mean,job);
+      const mean=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings,job.scene));
+      this.checkAccuracyRequest(mean,job);this.checkHorizon(mean,job);
       if(mean.timesUs.length!==1||!mean.steady.converged)throw new Error('稳态进度缺少已验证的长期布居。');
       job.onProgress?.(mean);
     };
@@ -95,6 +96,9 @@ export class DynamicsClient {
   private checkAccuracyRequest(result:DynamicsResult,job:Job):void{
     if(result.populationAccuracy&&result.populationAccuracy.requestedTolerance!==resolvePopulationTolerance(job.settings.populationTolerance))throw new Error('求解响应的布居误差目标与本次请求不匹配。');
   }
+  private checkHorizon(result:DynamicsResult,job:Job):void{
+    if(result.steady.horizonUs!==undefined&&result.steady.horizonUs!==resolveMeanHorizon(job.settings))throw new Error('求解响应的长期布居观察时长与本次请求不匹配。');
+  }
   private abortCurrent(reason:string):void{
     const job=this.current;if(!job)return;this.current=null;clearTimeout(job.timer);job.controller.abort();job.reject(new DOMException(reason,'AbortError'));
   }
@@ -103,8 +107,9 @@ export class DynamicsClient {
 }
 
 /** Reads the one native result contract (documented in
- * rust-solver/src/population_core_adapter.rs) and rejects anything else. */
-export function normalizeDynamicsResult(data:any,scene:Scene,initialStateId=scene.dynamics?.initialStateId??`ground-${scene.initialF}-${scene.initialM}`):DynamicsResult{
+ * rust-solver/src/population_core_adapter.rs) and rejects anything else.
+ * `initial` is the requested initial state (an id is a single state). */
+export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics,scene)):DynamicsResult{
   const invalid=(detail:string):never=>{throw new Error(`求解结果不完整或无效：${detail}；未绘制替代数据。`);};
   const bounded=(value:unknown,limit=Infinity)=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=limit;
   const probabilities=(row:unknown,slack:number):row is number[]=>Array.isArray(row)&&row.length===32&&
@@ -117,9 +122,13 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initialStateId=scen
   // Every row is a projected probability vector: no negative or >1 entries.
   if(!Array.isArray(rows)||rows.length!==timesUs.length||!rows.every(row=>probabilities(row,0)))invalid('布居矩阵');
   if(!d||typeof d!=='object'||!bounded(d.traceError,5e-6)||!bounded(d.initialStateError,1e-10)||!bounded(d.elapsedMs))invalid('布居数值验证信息');
-  const initialIndex=states.findIndex(state=>state.id===initialStateId);
-  if(initialIndex<0)invalid('请求初态');
-  const initialError=Math.max(...rows[0].map((p:number,i:number)=>Math.abs(p-(i===initialIndex?1:0))));
+  // The first row is the requested initial state's diagonal in the returned basis: a mixture
+  // as much as a single state. The model's own populations, when sent, must be the same.
+  const spec=typeof initial==='string'?{kind:'state' as const,id:initial}:initial;
+  let expected:number[]=[];try{expected=initialPopulations(spec,states);}catch{invalid('请求初态');}
+  if(data.initialState!==undefined&&JSON.stringify(canonicalInitialState(data.initialState))!==JSON.stringify(canonicalInitialState(spec)))invalid('请求初态');
+  if(data.initialPopulations!==undefined&&(!probabilities(data.initialPopulations,0)||data.initialPopulations.some((p:number,i:number)=>Math.abs(p-expected[i]!)>1e-12)))invalid('请求初态');
+  const initialError=Math.max(...rows[0].map((p:number,i:number)=>Math.abs(p-expected[i]!)));
   if(initialError>1e-10||initialError>d.initialStateError+64*Number.EPSILON)invalid('布居初态');
   // A finite trajectory (more than one sample) carries its estimated population
   // error; the single t = 0 row of a mean result is the initial state itself.
@@ -142,6 +151,7 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initialStateId=scen
     if(!density)invalid('长期复密度矩阵');
     steadyPopulations=Object.fromEntries(states.map((state,i)=>[state.id,mean[i]!]));
   }else if(data.asymptoticPopulations!=null||data.asymptoticDensityReal!=null||data.asymptoticDensityImag!=null)invalid('未收敛结果携带长期布居');
+  const horizon=data.horizonUs;if(horizon!==undefined&&!MEAN_HORIZONS_US.includes(horizon))invalid('长期布居观察时长');
   const assumptions=data.assumptions;
   if(!Array.isArray(assumptions)||assumptions.some((text:unknown)=>typeof text!=='string'))invalid('模型假设');
   const populations=Object.fromEntries(states.map((state,i)=>[state.id,rows.map((row:number[])=>row[i]!)]));
@@ -149,7 +159,10 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initialStateId=scen
   return {states,timesUs,populations,totalExcited:timesUs.map((_,i)=>states.filter(s=>s.manifold!=='ground').reduce((sum,s)=>sum+populations[s.id]![i]!,0)),
     activeLaserIds:active.map(l=>l.id),
     steady:{converged,status,populations:steadyPopulations,density,residual:converged?d.residual:null,method:converged?d.asymptoticMethod:undefined,reason,
-      initialDependent:isInitialDependent(status)},
+      initialDependent:isInitialDependent(status),
+      slowestRelaxationUs:converged&&typeof d.slowestRelaxationUs==='number'&&Number.isFinite(d.slowestRelaxationUs)&&d.slowestRelaxationUs>0?d.slowestRelaxationUs:null,
+      conservedQuantities:converged&&Number.isSafeInteger(d.conservedQuantities)&&d.conservedQuantities>0?d.conservedQuantities:null,
+      ...(horizon!==undefined?{horizonUs:horizon as number|null}:{})},
     metrics:{totalMs:d.elapsedMs},validation:{maxTraceError:d.traceError,minPopulation:Math.min(...rows.flat())},
     ...(populationAccuracy?{populationAccuracy,method:d.method}:{}),assumptions};
 }

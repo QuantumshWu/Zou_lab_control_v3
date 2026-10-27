@@ -10,5 +10,4 @@ export function math(source:string,display=false):string {
 export function term(manifold:Level['manifold']):string {
   return `<span class="atomic-term">${manifold==='ground'?'5S':'5P'}<sub>${manifold==='D2'?'3/2':'1/2'}</sub></span>`;
 }
-export function ket(level:Pick<Level,'F'|'m'> & Partial<Pick<Level,'manifold'>>):string {return `|${level.manifold==='D1'?'F″':level.manifold==='D2'?'F′':'F'}=${level.F}, m<sub>F</sub>=${level.m}⟩`;}
 export function shortKet(F:number,m:number):string {return `|${F}, ${m}⟩`;}

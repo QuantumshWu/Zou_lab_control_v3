@@ -37,6 +37,15 @@ export interface SteadyResult {
   /** Native full complex long-time mean, row-major in DynamicsResult.states. */
   density?:{real:number[];imag:number[]};
   residual:number|null;method?:string;reason?:string;initialDependent:boolean;
+  /** Slowest relaxation time (us) of a converged mean's decaying modes: the
+   * limit is reached after a few of them (null: none resolved or reported). */
+  slowestRelaxationUs?:number|null;
+  /** Conserved quantities (trace included) found by the slow generator; more
+   * than one makes the mean initial-dependent (null: not reported). */
+  conservedQuantities?:number|null;
+  /** The horizon T of p̄(T) the solver echoes (us; null: t → ∞). Undefined: a solver that
+   * does not echo one returns t → ∞. */
+  horizonUs?:number|null;
 }
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];
