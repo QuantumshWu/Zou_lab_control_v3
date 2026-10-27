@@ -14,7 +14,7 @@ import { queueStatus, type View, type ViewContext } from "../shell.js";
 
 type Component = { id: string; card: string; title: string; state: "ok" | "missing" | "optional" | "error" | "checking"; words: string; detail: string; selectable: boolean; selected: boolean; time?: number };
 type Installation = {
-  components: Component[]; checking: boolean; running: { title: string; stopping: boolean } | null; queue: string[];
+  components: Component[]; checking: boolean; asking: boolean; running: { title: string; stopping: boolean } | null; queue: string[];
   plan_only: boolean; force_build: boolean; close_asked: number; log_file: string | null; last: { text: string; ok: boolean } | null; restart: boolean;
 };
 
@@ -184,7 +184,7 @@ class InstallationView implements View {
     this.planOnly.disabled = busy;
     this.force.disabled = busy;
     const states = installation.components.map(component => component.state);
-    setState(this.dot, busy || installation.checking ? "task" : states.includes("error") ? "error" : states.includes("missing") ? "warning" : "running");
+    setState(this.dot, busy || installation.checking || installation.asking ? "task" : states.includes("error") ? "error" : states.includes("missing") ? "warning" : "running");
     const file = installation.log_file ?? "";
     this.logName.textContent = file.split(/[\\/]/).pop() ?? "";
     this.logName.title = file ? `This window's log: ${file}` : "";
@@ -219,6 +219,7 @@ class InstallationView implements View {
     const installation = this.installation();
     const idle: [string, StatusWord] = installation?.running ? [`${sentence(installation.running.title)}${installation.queue.length ? ` (then ${installation.queue.join(", ")})` : ""}…`, "task"]
       : installation?.checking ? ["Checking this PC…", "task"]
+      : installation?.asking ? ["Checking GitHub for newer commits…", "task"]
       : installation?.last ? [installation.last.text, installation.last.ok ? "idle" : "error"]
       : installation ? ["What is missing or broken starts checked: Fill in missing installs that, Install selected what is checked.", "idle"] : ["Checking this PC…", "task"];
     const [text, word] = queueStatus(this.ctx.transport, idle);
