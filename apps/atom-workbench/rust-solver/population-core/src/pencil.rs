@@ -27,9 +27,9 @@
 //! `Kernel::Blas` (also the fallback) instead concatenates, per ground or
 //! excited output part, the nonzero blocks of all incoming coefficients and
 //! stacks the matching source rows/columns for one ZGEMM.
-//! Thin stages (K, R, L_GG, L_OG) multiply the block of their active rows
-//! and columns with one dense GEMM per charge, or run a CSR pass over the
-//! active rows when that block is mostly zero.
+//! Thin stages (K, R, L_GG, L_OG) multiply the block of their used rows and
+//! columns with one dense GEMM per charge, or run a CSR pass over the used
+//! rows when that block is mostly zero.
 //!
 //! Field layout ("mode blocks"): mode m stores the matrices of all rhs
 //! columns as one column-major n x (rhs*n) block whose column index is
@@ -271,15 +271,15 @@ pub(crate) struct ThinCoefficient {
     rows: usize,
     cols: usize,
     sparse: Coefficient,
-    /// Column-major copy of the block of rows and columns that hold a
-    /// stored entry (`active_rows` x `active_cols`), when at least 15% of
-    /// that block is nonzero. Every stored entry is in the block, so the
-    /// product is the complete one; rows and columns outside it are empty
-    /// (the non-secular recycling of one charge feeds only the F=1/F=2
-    /// coherences, 15 of 64 ground rows).
+    /// Rows and columns that hold a nonzero entry. Every entry is in this
+    /// block, so its product is the complete one (the non-secular recycling
+    /// of one charge feeds only the F=1/F=2 coherences, 15 of 64 ground
+    /// rows).
+    used_rows: Vec<usize>,
+    used_cols: Vec<usize>,
+    /// Column-major copy of the used rows x used columns block, when at
+    /// least a quarter of that block is nonzero.
     dense: Option<Vec<C>>,
-    active_rows: Vec<usize>,
-    active_cols: Vec<usize>,
 }
 
 impl ThinCoefficient {
@@ -304,29 +304,29 @@ impl ThinCoefficient {
             }
             sparse.row.push(sparse.value.len());
         }
-        let stored = |r: usize, c: usize| {
-            let z = permuted[r * cols + c];
-            z.re != 0. || z.im != 0.
-        };
-        let active_rows: Vec<usize> = (0..rows).filter(|&r| (0..cols).any(|c| stored(r, c))).collect();
-        let active_cols: Vec<usize> = (0..cols).filter(|&c| (0..rows).any(|r| stored(r, c))).collect();
-        let (m, k) = (active_rows.len(), active_cols.len());
-        let dense = (m.min(k) >= 8 && sparse.value.len() as f64 >= 0.15 * (m * k) as f64).then(|| {
-            let mut dense = vec![ZERO; m * k];
-            for (i, &r) in active_rows.iter().enumerate() {
-                for (j, &c) in active_cols.iter().enumerate() {
-                    dense[i + m * j] = permuted[r * cols + c];
+        let used_rows: Vec<usize> = (0..rows).filter(|&r| sparse.row[r + 1] > sparse.row[r]).collect();
+        let mut used = vec![false; cols];
+        for &c in &sparse.col {
+            used[c] = true;
+        }
+        let used_cols: Vec<usize> = (0..cols).filter(|&c| used[c]).collect();
+        let (ur, uc) = (used_rows.len(), used_cols.len());
+        let dense = (ur * uc >= 64 && sparse.value.len() as f64 >= 0.25 * (ur * uc) as f64).then(|| {
+            let mut dense = vec![ZERO; ur * uc];
+            for (i, &r) in used_rows.iter().enumerate() {
+                for (k, &c) in used_cols.iter().enumerate() {
+                    dense[i + ur * k] = permuted[r * cols + c];
                 }
             }
             dense
         });
-        Self { rows, cols, sparse, dense, active_rows, active_cols }
+        Self { rows, cols, sparse, used_rows, used_cols, dense }
     }
 
     fn bytes(&self) -> usize {
-        (self.sparse.row.len() + self.sparse.col.len()) * std::mem::size_of::<usize>()
+        (self.sparse.row.len() + self.sparse.col.len() + self.used_rows.len() + self.used_cols.len())
+            * std::mem::size_of::<usize>()
             + (self.sparse.value.len() + self.dense.as_ref().map_or(0, Vec::len)) * std::mem::size_of::<C>()
-            + (self.active_rows.len() + self.active_cols.len()) * std::mem::size_of::<usize>()
     }
 }
 
@@ -1092,7 +1092,11 @@ impl Plan {
             .iter()
             .map(|link| {
                 let a = &library[link.coefficient];
-                let per_edge = if a.dense.is_some() { a.active_rows.len() * a.active_cols.len() } else { CSR_WORK * a.sparse.value.len() };
+                let per_edge = if a.dense.is_some() {
+                    a.used_rows.len() * a.used_cols.len()
+                } else {
+                    CSR_WORK * a.sparse.value.len()
+                };
                 link.within(&modes).len() * per_edge * rhs
             })
             .sum();
@@ -1115,16 +1119,16 @@ impl Plan {
                 match &a.dense {
                     Some(dense) => {
                         let columns = sources.len() * rhs;
-                        let (m, k) = (a.active_rows.len(), a.active_cols.len());
+                        let (m, k) = (a.used_rows.len(), a.used_cols.len());
                         let Scratch { packed, product, .. } = scratch;
                         let input: &[C] = if k < a.cols {
-                            // Gather the active input coordinates of every column.
+                            // Gather the used input coordinates of every column.
                             ensure(packed, columns * k);
                             for (index, &s) in sources.iter().enumerate() {
                                 let x = &source[s * width..(s + 1) * width];
                                 for b in 0..rhs {
                                     let to = &mut packed[(index * rhs + b) * k..(index * rhs + b + 1) * k];
-                                    for (slot, &c) in to.iter_mut().zip(&a.active_cols) {
+                                    for (slot, &c) in to.iter_mut().zip(&a.used_cols) {
                                         *slot = x[a.cols * b + c];
                                     }
                                 }
@@ -1145,7 +1149,7 @@ impl Plan {
                             let out = &mut chunk[(t - first) * target_width..(t - first + 1) * target_width];
                             for b in 0..rhs {
                                 let column = &product[m * (index * rhs + b)..m * (index * rhs + b + 1)];
-                                for (&row, &value) in a.active_rows.iter().zip(column) {
+                                for (&row, &value) in a.used_rows.iter().zip(column) {
                                     let at = position(row, b);
                                     out[at] = add(out[at], value);
                                 }
@@ -1159,7 +1163,7 @@ impl Plan {
                             let out = &mut chunk[(t - first) * target_width..(t - first + 1) * target_width];
                             for b in 0..rhs {
                                 let x = &x[a.cols * b..a.cols * (b + 1)];
-                                for &row in &a.active_rows {
+                                for &row in &a.used_rows {
                                     let mut sum = ZERO;
                                     for at in csr.row[row]..csr.row[row + 1] {
                                         sum = add(sum, mul(csr.value[at], x[csr.col[at]]));
