@@ -78,7 +78,7 @@ const SETTLED_RESIDUAL:f64=1e-3;
 const SETTLE_TIMES:usize=6;
 const MAXIMUM_STEPS:usize=60;
 /// Real rows per panel of Q and per task of the block products.
-const PANEL_ROWS:usize=1<<15;
+const PANEL_ROWS:usize=1<<12;
 /// A block column whose part outside the block's earlier pivots is below
 /// this fraction of its size adds no direction (a Gram matrix resolves
 /// singular values down to about the square root of the roundoff).
