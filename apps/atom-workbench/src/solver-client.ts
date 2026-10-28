@@ -147,7 +147,9 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   const converged=(CONVERGED_MEAN_STATUSES as readonly SteadyStatus[]).includes(status);
   // A computed result carries its estimated error and whether that is within ε, and its time T.
   const meanError=data.asymptoticEstimatedError,meanWithin=data.asymptoticWithinTolerance;
-  if(converged&&(!bounded(meanError)||meanWithin!==(meanError<=POPULATION_TOLERANCE)))invalid('长期布居误差估计');
+  // Within ε is the solver's acceptance: never with a bound above ε, but a bound within ε from a
+  // run it did not accept (a slow class unresolved) is not within -- computed, unconfirmed.
+  if(converged&&(!bounded(meanError)||typeof meanWithin!=='boolean'||(meanWithin&&meanError>POPULATION_TOLERANCE)))invalid('长期布居误差估计');
   if(!converged&&((meanError!==undefined&&!bounded(meanError))||(meanWithin!==undefined&&meanWithin!==false)))invalid('长期布居误差估计');
   const withinTolerance=converged&&meanWithin===true;
   let steadyPopulations:Record<string,number>|null=null,density;
