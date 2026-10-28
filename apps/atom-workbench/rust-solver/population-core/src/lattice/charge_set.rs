@@ -221,13 +221,16 @@ pub fn explicit_set(prepared:&LatticePrepared,initial:&[C],tolerance:f64)->Resul
     // 1. The gated start.
     let gated=gated_steps(prepared,tolerance);
     let mut explicit:BTreeSet<Charge>=BTreeSet::from([zero]);
-    for s in &gated{explicit.insert(s.clone());explicit.insert(opposite(s));}
+    // Experiment (ATOM_DIAG_MINIMAL_P): no translation gate and no cover, {0}
+    // and the closure alone (the completion grows the set).
+    let minimal=std::env::var("ATOM_DIAG_MINIMAL_P").is_ok();
+    if !minimal{for s in &gated{explicit.insert(s.clone());explicit.insert(opposite(s));}}
     // 2. Ring closure.
     let promoted=condition.close(&mut explicit)?;
     // 3. Cover.
     let need:Vec<(&Charge,f64)>=amplitudes.iter().filter(|(_,&a)|a>=SEED_AMPLITUDE*tolerance).map(|(q,&a)|(q,a)).collect();
     let mut covered=Vec::new();
-    loop{
+    while !minimal{
         let set:Vec<Charge>=explicit.iter().cloned().collect();let lattice:BTreeSet<Charge>=set.iter().cloned().chain(ring(prepared,&set)?).collect();
         let Some((c,_))=need.iter().filter(|(q,_)|!lattice.contains(*q)).max_by(|a,b|a.1.total_cmp(&b.1).then(a.0.cmp(b.0)))else{break};
         let c=(*c).clone();explicit.insert(opposite(&c));explicit.insert(c.clone());covered.push(c);
