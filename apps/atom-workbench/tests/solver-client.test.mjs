@@ -9,6 +9,7 @@ import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-mo
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {nativeResult} from './native-result.mjs';
 import {isTimeAverage} from '../dist/js/atom-workbench/src/solver-types.js';
+import {CurrentDynamicsResults} from '../dist/js/atom-workbench/src/current-dynamics-results.js';
 
 /** The HTTP response for this scene: a native result plus transport metadata. */
 function fixture(scene=defaultScene(),settings=scene.dynamics,timesUs=[0,settings.durationUs/2,settings.durationUs]){
@@ -16,40 +17,76 @@ function fixture(scene=defaultScene(),settings=scene.dynamics,timesUs=[0,setting
   return {...nativeResult({states,initialIndex,timesUs,tolerance:POPULATION_TOLERANCE}),assumptions:['test assumption'],
     service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]}};
 }
-const noMean=data=>{for(const key of ['asymptoticPopulations','asymptoticDensityReal','asymptoticDensityImag'])delete data[key];return data;};
+const noMean=data=>{for(const key of ['asymptoticPopulations','asymptoticDensityReal','asymptoticDensityImag','asymptoticEstimatedError','asymptoticWithinTolerance','horizonUs'])delete data[key];return data;};
 function scenario(){const s=defaultScene();s.dynamics.samples=3;s.dynamics.durationUs=.2;return s;}
 
 function streamReply(call){let controller;const body=new ReadableStream({start(c){controller=c;}});call.resolve(new Response(body,{headers:{'Content-Type':'application/x-ndjson'}}));const encoder=new TextEncoder();return {send:event=>controller.enqueue(encoder.encode(JSON.stringify(event)+'\n')),close:()=>controller.close()};}
 function meanFixture(scene,request){return {...fixture(scene,scene.dynamics,[0]),request};}
-test('verified mean arrives before the trajectory and remains available when evolution fails',async t=>{
+/** A streamed checkpoint (ui-design.md §6.16): a full result so far, flagged as progress, with its per-sample errors. */
+function checkpoint(scene,request,sampleErrors){const settings=scene.dynamics,timesUs=[0,settings.durationUs/2,settings.durationUs],states=buildFullMasterModel(scene,settings).states;
+ return {...nativeResult({states,initialIndex:states.findIndex(s=>s.id===settings.initialStateId),timesUs,sampleErrors}),assumptions:['test assumption'],
+   service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]},progress:true,request};}
+test('a checkpoint arrives before the final result and stays available when evolution fails',async t=>{
  const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'partial-mean'});t.after(()=>client.dispose());
  const scene=scenario();let finished=false;const pending=client.solve(scene,scene.dynamics,{onProgress:value=>progress.push(value)});const rejected=assert.rejects(pending,/unstable evolution/).then(()=>finished=true);
  await waitCalls(mock,1);assert.equal(mock.calls[0].body.stream,true);const stream=streamReply(mock.calls[0]);
- stream.send({type:'asymptotic',data:meanFixture(scene,mock.calls[0].body.request)});await pause(15);
- assert.equal(progress.length,1);assert.equal(progress[0].steady.converged,true);assert.equal(progress[0].timesUs.length,1);assert.equal(finished,false);
+ stream.send({type:'checkpoint',data:checkpoint(scene,mock.calls[0].body.request,[0,.012,.003])});await pause(15);
+ assert.equal(progress.length,1);assert.equal(progress[0].timesUs.length,3);assert.equal(progress[0].populationAccuracy.status,'estimated-partial');assert.deepEqual(progress[0].populationAccuracy.sampleErrors,[0,.012,.003]);assert.equal(finished,false);
  stream.send({type:'error',status:422,data:{error:'unstable evolution',code:'numerical-failure'}});stream.close();await rejected;
  assert.equal(progress[0].steady.converged,true);assert.equal(mock.calls.length,1);
 });
-test('streamed mean and final trajectory share request identity and preserve actual samples',async t=>{
+test('two checkpoints, then the final result: each shown in turn, the final one without a progress flag',async t=>{
  const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-success'});t.after(()=>client.dispose());
  const scene=scenario(),pending=client.solve(scene,scene.dynamics,{onProgress:value=>progress.push(value)});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]),request=mock.calls[0].body.request;
- stream.send({type:'asymptotic',data:meanFixture(scene,request)});stream.send({type:'result',data:{...fixture(scene),request}});stream.close();
- const result=await pending;assert.equal(progress.length,1);assert.equal(result.timesUs.length,3);assert.equal(result.timesUs.at(-1),scene.dynamics.durationUs);
+ stream.send({type:'checkpoint',data:checkpoint(scene,request,[0,.02,.009])});stream.send({type:'checkpoint',data:checkpoint(scene,request,[0,.007,.001])});
+ const final=checkpoint(scene,request,[0,.002,.001]);delete final.progress;stream.send({type:'result',data:final});stream.close();
+ const result=await pending;assert.equal(progress.length,2);assert.deepEqual(progress.map(p=>p.populationAccuracy.estimatedMaximumError),[.02,.007]);
+ assert.equal(result.populationAccuracy.status,'estimated-converged');assert.equal(result.timesUs.length,3);assert.equal(result.timesUs.at(-1),scene.dynamics.durationUs);
+});
+test('two checkpoints, then 停止: the solve ends and the last checkpoint is what remains, marked partial',async t=>{
+ const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-stop'});t.after(()=>client.dispose());
+ const scene=scenario(),pending=client.solve(scene,scene.dynamics,{onProgress:value=>progress.push(value)}).catch(e=>e);await waitCalls(mock,1);const stream=streamReply(mock.calls[0]),request=mock.calls[0].body.request;
+ stream.send({type:'checkpoint',data:checkpoint(scene,request,[0,.03,.004])});stream.send({type:'checkpoint',data:checkpoint(scene,request,[0,.011,.002])});await pause(15);
+ client.cancel();assert.equal((await pending).name,'AbortError');
+ const last=progress.at(-1);assert.equal(progress.length,2);assert.equal(last.populationAccuracy.status,'estimated-partial');assert.deepEqual(last.populationAccuracy.sampleErrors,[0,.011,.002]);
+ // The page keeps it: a stop does not clear the displayed results of the same inputs.
+ const shown=new CurrentDynamicsResults(),epoch=shown.activate('inputs');for(const value of progress)shown.set('inputs',epoch,'progress',value);
+ shown.activate('inputs');assert.equal(shown.get('inputs','progress'),last);
+});
+test('the stream speaks checkpoints and one final result only',async t=>{
+ const scene=scenario();
+ for(const [label,events] of [
+   ['a retired asymptotic event',request=>[{type:'asymptotic',data:meanFixture(scene,request)}]],
+   ['a checkpoint without its progress flag',request=>[{type:'checkpoint',data:{...checkpoint(scene,request,[0,.001,.001]),progress:undefined}}]],
+   ['a final result flagged as progress',request=>[{type:'result',data:checkpoint(scene,request,[0,.001,.001])}]],
+   ['a checkpoint on another time grid',request=>[{type:'checkpoint',data:{...meanFixture(scene,request),progress:true}}]],
+ ]){
+   const mock=transport(),client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-contract'});
+   const pending=client.solve(scene,scene.dynamics,{onProgress:()=>{}});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]);
+   for(const event of events(mock.calls[0].body.request))stream.send(event);stream.close();
+   await assert.rejects(pending,/未知求解进度|不匹配|进度标记/,label);client.dispose();
+ }
+});
+test('a mean request streams checkpoints of its single t = 0 row',async t=>{
+ const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-mean'});t.after(()=>client.dispose());
+ const scene=scenario(),pending=client.solve(scene,scene.dynamics,{steadyOnly:true,onProgress:value=>progress.push(value)});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]),request=mock.calls[0].body.request;
+ stream.send({type:'checkpoint',data:{...meanFixture(scene,request),progress:true}});stream.send({type:'result',data:meanFixture(scene,request)});stream.close();
+ const result=await pending;assert.equal(progress.length,1);assert.equal(progress[0].timesUs.length,1);assert.equal(result.steady.converged,true);
 });
 test('late streamed progress cannot overwrite a superseding scene',async t=>{
  const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-race'});t.after(()=>client.dispose());
  const scene=scenario(),old=client.solve(scene,scene.dynamics,{onProgress:value=>progress.push(value)}).catch(e=>e);await waitCalls(mock,1);const stream=streamReply(mock.calls[0]);
  const next=client.solve(scene,scene.dynamics);assert.equal((await old).name,'AbortError');await waitCalls(mock,2);
- stream.send({type:'asymptotic',data:meanFixture(scene,mock.calls[0].body.request)});stream.send({type:'result',data:{...fixture(scene),request:mock.calls[0].body.request}});stream.close();
+ stream.send({type:'checkpoint',data:checkpoint(scene,mock.calls[0].body.request,[0,.001,.001])});stream.send({type:'result',data:{...fixture(scene),request:mock.calls[0].body.request}});stream.close();
  reply(mock.calls[1],fixture(scene));await next;await pause(15);assert.equal(progress.length,0);
 });
 
 test('transient connection failure retries once with fresh identity and records the immutable scene',async t=>{
  const mock=transport(),records=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'recover',onFailure:r=>records.push(r)});t.after(()=>client.dispose());
- const scene=scenario(),pending=client.solve(scene,scene.dynamics);await waitCalls(mock,1);scene.fields[0].thetaDeg=99;
+ const scene=scenario(),pending=client.solve(scene,scene.dynamics);await waitCalls(mock,1);scene.fields[0].direction.thetaDeg=99;
  mock.calls[0].reject(new TypeError('Network disconnected'));await pause(230);await waitCalls(mock,2);
  assert.ok(mock.calls[1].body.request.sequence>mock.calls[0].body.request.sequence);
- assert.equal(mock.calls[1].body.scene.fields[0].thetaDeg,0);assert.equal(records[0].scene.fields[0].thetaDeg,0);assert.equal(records[0].willRetry,true);
+ assert.equal(mock.calls[1].body.scene.fields[0].direction.thetaDeg,0);assert.equal(records[0].scene.fields[0].direction.thetaDeg,0);assert.equal(records[0].willRetry,true);
  reply(mock.calls[1],fixture(mock.calls[1].body.scene));assert.equal((await pending).steady.converged,true);
 });
 

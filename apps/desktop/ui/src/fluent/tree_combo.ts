@@ -1,4 +1,4 @@
-import { comboFace, hintWidest } from "./combo.js";
+import { comboFace, hintWidest, placeDrop } from "./combo.js";
 import { assign, element } from "./dom.js";
 import { flattenTree, type FlatTreeGroup, type TreeGroup, type TreeLeaf } from "./tree_model.js";
 export type { TreeGroup, TreeLeaf } from "./tree_model.js";
@@ -64,6 +64,10 @@ export class TreeCombo {
   private cursor = -1;
   private typed = "";
   private typedAt = 0;
+  /** The side this opening chose (placeDrop): kept while a heading opens or closes. */
+  private up: boolean | undefined;
+  /** A resized window chooses the side again. */
+  private resized = (): void => { this.up = undefined; this.place(); };
 
   constructor(private changed: (key: string) => void, private placeholder = "") {
     this.blank.hidden = true;
@@ -86,7 +90,11 @@ export class TreeCombo {
       wasOpen = false;
     });
     this.root.addEventListener("keydown", event => this.key(event));
-    this.list.addEventListener("toggle", event => this.root.classList.toggle("open", (event as ToggleEvent).newState === "open"));
+    this.list.addEventListener("toggle", event => {
+      const open = (event as ToggleEvent).newState === "open";
+      this.root.classList.toggle("open", open);
+      if (open) addEventListener("resize", this.resized); else removeEventListener("resize", this.resized);
+    });
     this.list.addEventListener("pointerdown", event => event.preventDefault());
     this.list.addEventListener("pointerup", event => {
       const row = (event.target as Element).closest<HTMLElement>(".tree-row");
@@ -139,7 +147,8 @@ export class TreeCombo {
     return undefined;
   }
 
-  /** v2 showPopup: the picked choice's heading opened, the popup below the box. */
+  /** v2 showPopup: the picked choice's heading opened, the popup below the box
+   * (above it where it fits better: placeDrop). */
   private show(): void {
     if (this.root.disabled) return;
     const at = this.groups.findIndex(group => group.leaves.some(leaf => leaf.key === this.current));
@@ -147,6 +156,7 @@ export class TreeCombo {
     if (!this.list.isConnected) document.body.append(this.list);
     this.list.showPopover();
     this.cursor = -1;
+    this.up = undefined;
     this.render();
     // The picked row is the tree's selection (SELECTED) when it opens.
     this.move(this.rows.findIndex(row => row.kind === "leaf" ? row.leaf.key === this.current : row.kind === "none" && this.current === ""));
@@ -197,10 +207,8 @@ export class TreeCombo {
     const style = this.list.style;
     style.minWidth = `${field.width}px`;
     style.maxWidth = `${innerWidth}px`;
-    const top = field.bottom;
-    style.top = `${top}px`;
-    // Every row it reveals, as far down as the window goes; the rest scrolls (never above the box).
-    style.maxHeight = `${Math.max(0, innerHeight - top)}px`;
+    // Every row it reveals, below the box or above it, as far as the window goes on that side; the rest scrolls.
+    this.up = placeDrop(this.list, field, this.up);
     const width = this.list.offsetWidth;
     const left = width <= field.width ? field.left : field.right - width;
     style.left = `${Math.max(0, Math.min(left, innerWidth - width))}px`;

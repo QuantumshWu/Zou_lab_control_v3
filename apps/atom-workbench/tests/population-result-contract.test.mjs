@@ -76,6 +76,7 @@ test('mean trace, positivity and complex-density gates hold in mean and finite r
   // As the writer merges: the mean's asymptotic fields; finite diagnostics win.
   const combined={...f.data,asymptoticStatus:mean.asymptoticStatus,asymptoticReason:mean.asymptoticReason,asymptoticPopulations:mean.asymptoticPopulations,
     asymptoticDensityReal:mean.asymptoticDensityReal,asymptoticDensityImag:mean.asymptoticDensityImag,
+    asymptoticEstimatedError:mean.asymptoticEstimatedError,asymptoticWithinTolerance:mean.asymptoticWithinTolerance,horizonUs:mean.horizonUs,
     diagnostics:{...mean.diagnostics,...f.data.diagnostics}};
   assert.equal(normalizeDynamicsResult(combined,f.scene).steady.converged,true);
   const missing=structuredClone(combined);delete missing.diagnostics.asymptoticPositivityError;

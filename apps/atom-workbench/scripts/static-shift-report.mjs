@@ -11,7 +11,7 @@ import {exactStaticLevels} from '../tests/static-shift-reference.mjs';
 
 const fixture=JSON.parse(readFileSync(new URL('../tests/fixtures/static-shift-second-order.json',import.meta.url),'utf8'));
 const MANIFOLDS=[['ground',0,8],['D1',8,8],['D2',16,16]],hz=x=>(x*1e6).toExponential(2);
-const far=(id,nm,I)=>({id,name:id,enabled:true,showLightShift:true,line:'D2',frequencyMode:'wavelength',wavelengthNm:nm,referenceTransition:{line:'D2',Fg:2,Fe:3},detuningMHz:0,detuningUnit:'THz',intensityMode:'intensity',intensityMWcm2:I,thetaDeg:60,phiDeg:20,polarizationAngleDeg:10,ellipticityDeg:15,phaseDeg:0});
+const far=(id,nm,I)=>({id,name:id,enabled:true,showLightShift:true,line:'D2',frequency:{wavelengthNm:nm},frequencyUnit:'nm',intensityMode:'intensity',intensityMWcm2:I,powerUnit:'mW',waistUnit:'μm',intensityUnit:'mW/cm²',direction:{reference:{kind:'axis',axis:'+z'},thetaDeg:60,phiDeg:20},polarizationAngleDeg:10,ellipticityDeg:15,phaseDeg:0});
 const EXTRA=[far('1064',1064,2e7),far('810',810,2e6),far('532',532,5e6),far('880',880,3e6)];
 const withLasers=K=>{const s=STATIC_SHIFT_SCENES['pi-3G']();s.lasers.push(...EXTRA.slice(0,K-1).map(l=>({...l})));return s;};
 const scenes=[...Object.entries(STATIC_SHIFT_SCENES).map(([n,b])=>[n,b,4]),...Object.entries(BEYOND_LIMIT_SCENES).map(([n,b])=>[n,b,4]),['3 lasers',()=>withLasers(3),3]];

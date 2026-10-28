@@ -4,10 +4,11 @@ import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {analyze} from '../dist/js/atom-workbench/src/physics.js';
 import {displayMixing,spectroscopyAnalysis,staticBackgroundProblem} from '../dist/js/atom-workbench/src/spectroscopy.js';
 import {solveStaticBackground} from '../dist/js/atom-workbench/src/floquet-background.js';
+import {spherical} from './directions.mjs';
 
 const levels=a=>[...a.ground,...a.D1,...a.D2];
 const lattice=()=>({id:'lattice',name:'晶格光',enabled:true,showLightShift:true,line:'D2',frequency:{wavelengthNm:1064},intensityMode:'intensity',intensityMWcm2:2e7,
-  thetaDeg:60,phiDeg:20,polarizationAngleDeg:10,ellipticityDeg:15,phaseDeg:0});
+  direction:spherical(60,20),polarizationAngleDeg:10,ellipticityDeg:15,phaseDeg:0});
 
 // ui-design.md §4, §6.8: 显示光移 puts a laser's all-order static shift into the levels chart's background.
 test('a laser shown in the levels chart adds its all-order static shift to the background',()=>{

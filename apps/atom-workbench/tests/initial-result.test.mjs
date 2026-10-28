@@ -38,9 +38,9 @@ test('a mixed initial state is checked against its own populations',()=>{
 
 test('the solver\'s formatted failure reasons read in Chinese',()=>{
   assert.equal(solverText('8 conserved quantities: the mean depends on the initial state, which the lattice core does not serve'),
-    '8 个守恒量：长期平均依赖初态，求解器不计算这种长期平均。');
-  assert.equal(solverText('The mean at the horizon is estimated at 6.2e-3; the tolerance was not relaxed'),'观察时长处的长期平均误差估计为 0.0062；误差目标未放宽。');
-  assert.match(solverText('Lattice steady state not accepted up to near order 6 (estimated error 7.5e-3)'),/^长期平均到近阶 6 仍未达到误差目标（误差估计 .+）；误差目标未放宽。$/);
+    '8 个守恒量：长期布居依赖初态，求解器不计算这种长期布居。');
+  assert.equal(solverText('The mean at the horizon is estimated at 6.2e-3; the tolerance was not relaxed'),'时刻 T 的长期布居误差估计为 0.0062；误差目标未放宽。');
+  assert.match(solverText('Lattice steady state not accepted up to near order 6 (estimated error 7.5e-3)'),/^长期布居到近阶 6 仍未达到误差目标（误差估计 .+）；误差目标未放宽。$/);
   assert.match(solverText('Finite-time estimate 5.1e-3 not below the tolerance with 120 columns'),/^时间演化的误差估计 .+ 在 120 列时仍未低于误差目标；误差目标未放宽。$/);
   assert.equal(solverText('Error equation truncation did not stabilise in 40 augmentation steps'),'截断误差方程在 40 步增广内未稳定；误差目标未放宽。');
   assert.equal(solverText('an unknown sentence'),'an unknown sentence');
@@ -54,7 +54,7 @@ test('one initial-state description: a single state clears a mixture, a mixture 
   // A single state chosen afterwards is the initial state: no loaded mixture overrides it.
   setInitialSpec(scene,{kind:'state',id:'ground-2-1'},levels);
   assert.deepEqual(initialSpec(scene),{kind:'state',id:'ground-2-1'});assert.equal(scene.dynamics.initialState,undefined);
-  assert.equal(scene.initialF,2);assert.equal(scene.initialM,1);
+  assert.equal('temperatureUnit' in scene.dynamics,false);
   assert.equal(initialAnchor({kind:'weights',weights:{'ground-2-0':1,'D2-3-0':3}},levels),'D2-3-0');
   assert.deepEqual(startingSpec('weights',{kind:'state',id:'ground-2-1'},levels),{kind:'weights',weights:{'ground-2-1':1}});
   assert.deepEqual(startingSpec('state',{kind:'weights',weights:{'ground-1-0':1,'ground-2-2':2}},levels),{kind:'state',id:'ground-2-2'});
@@ -66,7 +66,7 @@ test('one initial-state description: a single state clears a mixture, a mixture 
 
 test('a mixed initial state survives the scene file; a single one is stored as initialStateId',()=>{
   const scene=defaultScene(),a=analyze(scene),levels=[...a.ground,...a.D1,...a.D2];
-  setInitialSpec(scene,{kind:'thermal',temperatureK:3e-4},levels);
+  setInitialSpec(scene,{kind:'thermal',temperatureK:3e-4},levels);assert.equal(scene.dynamics.temperatureUnit,'μK','a new thermal state has its natural unit');
   assert.deepEqual(initialSpec(validateScene(JSON.parse(JSON.stringify(scene)))),{kind:'thermal',temperatureK:3e-4});
   setInitialSpec(scene,{kind:'state',id:'ground-1-1'},levels);
   const back=validateScene(JSON.parse(JSON.stringify(scene)));

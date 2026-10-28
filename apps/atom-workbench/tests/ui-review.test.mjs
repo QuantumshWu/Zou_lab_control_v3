@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {lineMesh,triangleMesh,rasterizeDepth} from '../dist/js/atom-workbench/src/space-raster.js';
 import {rayDepth} from '../dist/js/atom-workbench/src/space-depth.js';
 import {readoutBaseline} from '../dist/js/atom-workbench/src/readout-alignment.js';
-import {comparisonPair,chooseComparisonFrom,chooseComparisonTo,swapComparison} from '../dist/js/atom-workbench/src/transition-choice.js';
+import {clickState,keepLabels,labelled,readLabels,swapLabels,withLabel} from '../dist/js/atom-workbench/src/transition-choice.js';
 import {referenceFromLaser} from '../dist/js/atom-workbench/src/reference-draft.js';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {analyze,laserFrequencyMHz} from '../dist/js/atom-workbench/src/physics.js';
@@ -29,17 +29,31 @@ test('population and shift ink have the same distance from the energy line',()=>
  assert.equal(line-(readoutBaseline(line,'above',ink)+ink.bottom),8);
  assert.equal(readoutBaseline(line,'below',ink)+ink.top-line,8);
 });
-test('comparison source follows the origin until pinned, with independent target and swap',()=>{
- let choice=chooseComparisonTo({selected:[]},'D2-3-0');
- assert.deepEqual(comparisonPair(choice,'ground-2-0'),{from:'ground-2-0',to:'D2-3-0'});
- choice=chooseComparisonFrom(choice,'reference-1');choice=chooseComparisonTo(choice,'D1-2-0');
- assert.deepEqual(comparisonPair(choice,'ground-1-0'),{from:'reference-1',to:'D1-2-0'});
- choice=swapComparison(choice,'ground-1-0');assert.deepEqual(comparisonPair(choice,'ground-1-0'),{from:'D1-2-0',to:'reference-1'});
- choice=chooseComparisonTo(choice,'');assert.equal(comparisonPair(choice,'ground-1-0').from,'D1-2-0');
+test('state labels: nothing preselected, 1 then 2 in click order, a labelled click removes its label, a third replaces 2',()=>{
+ let labels=readLabels(undefined);assert.deepEqual(labels,{},'no state, not even the initial one, is labelled 1');
+ labels=clickState(labels,'ground-2-0');assert.deepEqual(labels,{first:'ground-2-0'});
+ labels=clickState(labels,'D2-3-1');assert.deepEqual(labels,{first:'ground-2-0',second:'D2-3-1'});
+ labels=clickState(labels,'D2-2-0');assert.deepEqual(labels,{first:'ground-2-0',second:'D2-2-0'},'a third state replaces 2 and keeps 1');
+ assert.deepEqual(labelled(labels),[{id:'ground-2-0',label:1},{id:'D2-2-0',label:2}]);
+ // A click on a labelled state removes that label; nothing moves to fill it.
+ labels=clickState(labels,'ground-2-0');assert.deepEqual(labels,{second:'D2-2-0'},'no automatic swap: 2 stays 2');
+ labels=clickState(labels,'ground-1-1');assert.deepEqual(labels,{first:'ground-1-1',second:'D2-2-0'},'the free label 1 is taken first');
+ labels=clickState(labels,'D2-2-0');assert.deepEqual(labels,{first:'ground-1-1'});
+ labels=clickState(labels,'ground-1-1');assert.deepEqual(labels,{});
+});
+test('state labels: a picker sets one label, a state holds one label, the swap is explicit, missing states drop out',()=>{
+ let labels=withLabel({},'second','D1-2-1');assert.deepEqual(labels,{second:'D1-2-1'});
+ labels=withLabel(labels,'first','D1-2-1');assert.deepEqual(labels,{first:'D1-2-1'},'taking the other label moves the state, never duplicates it');
+ labels=withLabel(labels,'second','reference-1');assert.deepEqual(swapLabels(labels),{first:'reference-1',second:'D1-2-1'});
+ assert.deepEqual(swapLabels({first:'a'}),{second:'a'});
+ assert.deepEqual(keepLabels({first:'a',second:'reference-gone'},id=>id!=='reference-gone'),{first:'a'});
+ assert.deepEqual(withLabel({first:'a',second:'b'},'first',undefined),{second:'b'});
+ for(const saved of [null,[],'x',{first:3},{first:'',second:''}])assert.deepEqual(readLabels(saved),{});
+ assert.deepEqual(readLabels({first:'a',second:'a'}),{second:'a'});
 });
 test('a photon endpoint from a reference preserves the physical anchor and anchor mode',()=>{
  const scene=defaultScene(),laser={...scene.lasers[0],referenceStateId:'reference-1'};
- scene.references=[{id:'reference-1',name:'Reference',anchorId:'ground-2-0',anchorMode:'zero-field',offsetMHz:123}];
+ scene.references=[{id:'reference-1',name:'Reference',anchorId:'ground-2-0',anchorMode:'zero-field',offsetMHz:123,offsetUnit:'MHz'}];
  const a=analyze(scene),states=[...a.ground,...a.D1,...a.D2],result=referenceFromLaser(scene,laser,states);
  assert.equal(result.anchorId,'ground-2-0');assert.equal(result.anchorMode,'zero-field');assert.equal(result.offsetMHz,123+laserFrequencyMHz(laser));
  assert.equal(referenceFromLaser(scene,{...laser,referenceProcess:'emission'},states).offsetMHz,123-laserFrequencyMHz(laser));

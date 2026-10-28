@@ -42,9 +42,32 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 /* The name's width is its whole text's (elide.ts --whole-width), never the cut text it shows:
  * .identity sizes itself by its children's widths, so sized by a cut name it would keep a longer
  * name cut after the scene changes or the window widens again. It still shrinks when room is short. */
-.header .document-name { flex: 0 1 var(--whole-width, auto); width: var(--whole-width, auto); min-width: 0; max-width: var(--document-name-max); font-weight: var(--heading-weight); }
-.header .identity > button { margin-left: calc(var(--row-gap) - var(--dot-gap)); }
-.header > .summary { flex: 1; min-width: 0; height: var(--control); align-content: center; padding-bottom: var(--cap-lift); color: var(--muted-ink); font-variant-numeric: tabular-nums; }
+.header .document-name { flex: 0 1 auto; min-width: 0; max-width: var(--document-name-max); }
+.header .document-name > .inline-name-text { flex: 0 1 var(--whole-width, auto); width: var(--whole-width, auto); }
+.header > .summary { flex: 1; min-width: 0; height: var(--control); align-content: center; padding-bottom: var(--cap-lift); color: var(--muted-ink); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- a name edited where it stands (inline-name.ts) -------------- */
+/* The name and its edit share one box -- the field's edge and inner padding -- so editing moves nothing. */
+.inline-name { display: inline-flex; align-items: center; min-width: 0; }
+.inline-name-text, .inline-name-edit { box-sizing: border-box; height: var(--control); padding: 0 calc(var(--field-text-inset) - var(--edge)) var(--cap-lift); border: var(--edge) solid transparent; border-radius: var(--radius); font: inherit; font-weight: var(--heading-weight); }
+.inline-name-text { display: block; min-width: 0; overflow: hidden; white-space: nowrap; align-content: center; cursor: text; }
+.inline-name-text:hover { border-color: var(--placeholder); }
+.inline-name-text:focus-visible { outline: none; border-color: var(--accent); }
+.inline-name-edit { min-width: calc(4 * var(--control)); max-width: 100%; padding-bottom: 0; border-color: var(--accent); background: var(--surface); color: var(--text); }
+.inline-name-edit[aria-invalid=true] { border-color: var(--red-dark); }
+/* Its box's padding stands where the heading's ink did. */
+.header .identity > .inline-name, .inspector-heading > .inline-name { margin-left: calc(var(--edge) - var(--field-text-inset)); }
+
+/* ---------- a reading in a fixed slot ------------------------------------ */
+/* Each number is right-aligned in a slot as wide as its longest value (tabular digits), so a value
+ * of another length never moves what stands after it. */
+.slot { display: inline-block; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 400; color: var(--text); }
+.slot.percent { min-width: 7ch; }
+.slot.angle { min-width: 6.5ch; }
+.slot.field { min-width: 7ch; }
+.slot.dipole { min-width: 16ch; }
+.slot.rabi { min-width: 11ch; }
+.slot-label { color: var(--muted-ink); }
 .header > .inspector-toggle { display: none; }
 .workspace { position: relative; flex: 1; min-height: 0; display: grid; grid-template-columns: var(--atom-scene-w) minmax(0, 1fr) var(--atom-inspector-w); gap: var(--window-pad-half); }
 /* Each card keeps its column: an overlay (position: absolute) leaves its cell empty, never shifts the others. */
@@ -120,10 +143,9 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 .page-title { flex: none; min-height: var(--control); margin-top: var(--row-gap); }
 .page-title .heading { flex: 0 1 auto; min-width: 0; }
 .page-title > .summary { flex: 1; min-width: 0; color: var(--muted-ink); padding-bottom: var(--cap-lift); font-variant-numeric: tabular-nums; }
-/* The selected laser of the level diagram, removable from its own chip. */
-.beam-chip { flex: 0 1 auto; display: inline-flex; align-items: center; min-width: 0; max-width: calc(8 * var(--control)); height: var(--control); padding-left: var(--chip-pad-x); border-radius: var(--radius); background: var(--accent-tint); color: var(--ink-accent); }
-.beam-chip-name { display: block; min-width: 0; overflow: hidden; white-space: nowrap; padding-bottom: var(--cap-lift); }
-.beam-chip > button { flex: none; }
+/* The levels chart's one tag: what its shift includes (B + 光镊); a warning only when it is undefined. */
+.shift-tag { flex: 0 1 auto; min-width: 0; height: var(--control); align-content: center; padding: 0 var(--chip-pad-x) var(--cap-lift); border-radius: var(--radius); background: var(--bg); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shift-warning { flex: 0 1 auto; min-width: 0; padding-bottom: var(--cap-lift); color: var(--orange-dark); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chart-surface { position: relative; flex: none; min-width: 0; overflow-x: auto; overflow-y: hidden; }
 .chart-surface > svg.chart-svg { display: block; width: 100%; max-width: calc(36 * var(--control)); height: auto; margin: auto; }
 .chart-surface > svg.chart-svg text { font-family: var(--font-family); font-variant-numeric: tabular-nums; }
@@ -136,13 +158,15 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 /* The level page's population row: what colours the cards, the fixed scale, F totals, 计算. */
 .population-toolbar { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: var(--row-gap) var(--section-gap); }
 #population-mode { flex: none; width: auto; }
-.population-time-value { color: var(--muted-ink); font-variant-numeric: tabular-nums; }
+.population-time-value { min-width: 9ch; text-align: right; padding-bottom: var(--cap-lift); color: var(--muted-ink); font-variant-numeric: tabular-nums; }
+.population-note { padding-bottom: var(--cap-lift); color: var(--orange-dark); }
+/* Populations shown outside the tolerance (ui-design.md §6.16): their estimated error, marked. */
+.population-accuracy { padding-bottom: var(--cap-lift); color: var(--orange-dark); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .population-scale { display: inline-flex; align-items: center; gap: var(--row-gap); color: var(--muted-ink); padding-bottom: var(--cap-lift); }
 .scale-bar { width: calc(2 * var(--control)); height: calc(var(--control) / 5); border-radius: var(--radius); background: linear-gradient(to right, var(--population-0), var(--population-1)); }
 /* The F totals keep together: with the horizon beside the mode they move to their own row when narrow. */
 .population-data { flex: 1 0 auto; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: var(--row-gap) var(--section-gap); }
 .population-total { white-space: nowrap; color: var(--muted-ink); padding-bottom: var(--cap-lift); }
-.population-total b, .compact-readout b { font-weight: 400; color: var(--text); font-variant-numeric: tabular-nums; }
 input[type=range] { flex: 1 1 calc(3 * var(--control)); max-width: calc(5 * var(--control)); min-width: var(--control); height: var(--control); padding: 0; border: 0; background: transparent; cursor: pointer; appearance: none; }
 input[type=range]::-webkit-slider-runnable-track { height: var(--segment-rim); border-radius: var(--radius); background: var(--neutral-fill); }
 input[type=range]::-webkit-slider-thumb { appearance: none; width: var(--check-size); height: var(--check-size); margin-top: calc((var(--segment-rim) - var(--check-size)) / 2); border-radius: 50%; background: var(--accent); }
@@ -153,15 +177,16 @@ input[type=range]:hover::-webkit-slider-thumb { background: var(--accent-hover);
 .selection-top { display: flex; align-items: center; gap: var(--row-gap); }
 .selection-pair { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: var(--row-gap); align-items: center; }
 .selection-endpoint { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--row-gap); align-items: center; }
-.selection-endpoint > label { display: flex; align-items: center; gap: var(--row-gap); white-space: nowrap; }
 .selection-endpoint select { width: 100%; min-width: 0; }
-.selection-index { display: inline-flex; align-items: center; flex: none; width: var(--pulse-badge); }
+/* A label's badge: dimmed while the label is free; a set one clears its label when clicked. */
+.selection-index { display: inline-flex; align-items: center; flex: none; width: var(--pulse-badge); opacity: .45; }
+.selection-index.set { opacity: 1; cursor: pointer; }
 .selection-index svg { display: block; }
 .selection-index circle, .state-selection-number circle { fill: var(--orange-dark); }
 .selection-index text, .state-selection-number text { fill: var(--surface); }
 .state-selection-number { pointer-events: none; }
-.selection-empty { color: var(--muted-ink); }
 .compact-readout { display: flex; flex-wrap: wrap; align-items: center; gap: var(--row-gap) var(--section-gap); color: var(--muted-ink); font-variant-numeric: tabular-nums; }
+.compact-readout:empty { display: none; }
 .selection-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--row-gap); }
 .mark-editor { margin-left: auto; display: flex; align-items: center; gap: var(--row-gap); }
 .mark-editor input { width: var(--number-edit-min-w); }
@@ -185,26 +210,18 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .transition-table th:first-child { left: 0; z-index: 2; }
 .transition-table td:first-child { position: sticky; left: 0; background: var(--surface); }
 .transition-table tbody tr { cursor: pointer; }
+/* Numbers right-aligned in columns as wide as their longest value: a new value moves no column. */
+.transition-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.transition-table td.frequency { min-width: 17ch; }
+.transition-table td.rabi { min-width: 9ch; }
+.transition-table td.component { text-align: center; }
 .transition-table tbody tr:hover, .transition-table tbody tr:hover td:first-child { background: var(--accent-tint); }
 .strength-cell { position: relative; width: calc(3 * var(--control)); height: var(--font-line); border-bottom: var(--segment-rim) solid var(--divider); }
 .strength-cell > span { position: absolute; left: 0; bottom: calc(0px - var(--segment-rim)); height: var(--segment-rim); background: var(--accent-strong); }
 .strength-cell small { position: absolute; right: 0; top: 0; color: var(--muted-ink); }
-.reference-form-caption { color: var(--muted-ink); margin: var(--row-gap) 0; }
-.reference-form.form { grid-template-columns: var(--label-width, max-content) minmax(0, 1fr); max-width: calc(20 * var(--control)); }
-.reference-form .field-control { align-items: center; }
-.reference-form .number-field { max-width: var(--number-cap); }
-.reference-definition { grid-column: 2; padding-left: var(--field-text-inset); color: var(--muted-ink); }
-.reference-form .form-actions { grid-column: 2; margin-top: var(--row-gap); }
-.reference-laser-copy { flex: none; }
-.reference-list { display: flex; flex-direction: column; gap: var(--row-gap); margin-top: var(--row-gap); }
-.reference-row { display: grid; grid-template-columns: minmax(calc(3.5 * var(--control)), calc(6 * var(--control))) minmax(0, 1fr) auto auto; gap: var(--row-gap); align-items: center; }
-.reference-row > span { min-width: 0; color: var(--muted-ink); }
-.state-chip { justify-content: flex-start; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; padding: 0 var(--field-text-inset) var(--cap-lift); border: 0; background: var(--accent-tint); color: var(--ink-accent); }
-.state-chip .katex { font-size: 1em; }
 .state-label { white-space: nowrap; }
 .solver-readouts.form { margin: var(--row-gap) 0; }
 .solver-error { margin: var(--row-gap) 0; color: var(--red-dark); white-space: normal; overflow-wrap: anywhere; }
-.solver-details .note { margin: var(--row-gap) 0 0; }
 .solver-details > button { margin-top: var(--row-gap); }
 
 /* ---------- 布居演化 ------------------------------------------------------ */
@@ -227,11 +244,13 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .chart-caption { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--row-gap) var(--section-gap); color: var(--muted-ink); }
 .chart-caption:empty { display: none; }
 .population-legend { display: inline-flex; align-items: center; gap: var(--row-gap); color: var(--text); }
-.initial-tag, .sampling-note { color: var(--muted-ink); }
-.sampling-note { flex-basis: 100%; }
+.initial-tag { color: var(--muted-ink); }
 /* The time cursor's readout card. */
 .population-readout { position: absolute; z-index: 5; display: flex; flex-direction: column; gap: var(--edge); min-width: calc(8 * var(--control)); max-width: calc(100% - 2 * var(--card-pad)); padding: var(--card-inset); overflow-y: auto; overscroll-behavior: contain; }
 .readout-time { font-weight: var(--heading-weight); }
+.readout-error { margin-left: var(--section-gap); font-weight: 400; color: var(--muted-ink); font-variant-numeric: tabular-nums; }
+.readout-error.outside, .readout-outside { color: var(--orange-dark); }
+.accuracy-swatch { display: inline-block; width: 18px; height: 10px; border-radius: 2px; background: #fbecdc; box-shadow: inset 0 0 0 1px #f0d3b4; }
 .readout-row { display: grid; grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)) calc(2.6 * var(--control)); gap: var(--row-gap); align-items: center; font-variant-numeric: tabular-nums; }
 .readout-row.two { grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)); }
 .readout-row > span:not(.readout-name) { text-align: right; }
@@ -250,7 +269,6 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .legend-item { display: inline-flex; align-items: center; gap: var(--row-gap); color: var(--text); white-space: nowrap; padding-bottom: var(--cap-lift); }
 button.legend-item { padding: 0 var(--field-text-inset) var(--cap-lift); color: var(--text); }
 button.legend-item.selected { background: var(--selected); border-color: var(--selected); }
-.legend-item b { font-weight: 400; font-variant-numeric: tabular-nums; }
 .legend-swatch { flex: none; width: calc(1.2 * var(--chip-pad-x)); height: var(--segment-rim); border-radius: var(--radius); }
 .legend-swatch.thick { height: calc(2 * var(--segment-rim)); }
 
@@ -264,46 +282,49 @@ button.legend-item.selected { background: var(--selected); border-color: var(--s
 .full-form-row { grid-column: 1 / -1; min-width: 0; }
 .preset-actions { display: flex; gap: var(--row-gap); min-width: 0; }
 .preset-actions > button { flex: 1 1 0; min-width: 0; padding-left: 0; padding-right: 0; }
+/* Presets beside a label fill the control column, as the presets on their own row fill the row. */
+.field-control > .preset-actions { flex: 1 1 auto; }
 .polarization-bars { display: flex; flex-wrap: wrap; gap: var(--row-gap); }
 .polarization-axis-label { flex-basis: 100%; color: var(--muted-ink); }
 .pol-row { flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr auto; gap: var(--edge); }
 .pol-row > span { color: var(--muted-ink); }
-.pol-row strong { font-weight: 400; text-align: right; font-variant-numeric: tabular-nums; }
+.pol-row strong { min-width: 7ch; font-weight: 400; text-align: right; font-variant-numeric: tabular-nums; }
 .bar-track { grid-row: 2; grid-column: 1 / -1; height: var(--segment-rim); background: var(--divider); overflow: hidden; }
 .bar-fill { display: block; height: 100%; background: var(--accent-strong); }
 .advanced-controls { margin-top: var(--section-gap); border-top: var(--edge) solid var(--divider); }
 .advanced-controls > .form { margin-top: var(--row-gap); }
-/* The reference editor's number box and its unit column. */
-.number-field { flex: 1 1 0; min-width: 0; }
-.number-field input { font-variant-numeric: tabular-nums; }
-.field-control > .unit, .field-control > .unit-picker { flex: none; width: calc(var(--combo-chrome) + 3em); min-width: calc(var(--combo-chrome) + 3em); }
+/* The actual direction: θ and φ in fixed slots, at a field's text inset. */
+.direction-reading { display: flex; align-items: center; gap: var(--section-gap); min-height: var(--control); padding: 0 0 var(--cap-lift) var(--field-text-inset); font-variant-numeric: tabular-nums; }
+.direction-angle { display: inline-flex; gap: var(--row-gap); }
+/* A number with a unit picker takes the room the picker leaves, up to the number cap: beside a
+ * kW/cm²-wide picker a computed intensity or an output waist still shows its digits. */
+.inspector-panel .field-control.capped:has(> select.unit-picker) > .spin { flex: 1 1 auto; }
+.inspector-panel .field-control.capped:has(> select.unit-picker)::after { content: none; }
+.field-control > .unit { flex: none; width: calc(var(--combo-chrome) + 3em); min-width: calc(var(--combo-chrome) + 3em); }
 .field-control > .unit { padding-left: var(--field-text-inset); color: var(--muted-ink); white-space: nowrap; }
 .field-control > .segmented { min-width: 0; }
 .field-control > select.tree-combo:not(.unit-picker) { width: 100%; min-width: 0; }
-/* The frequency readout (ui-design.md §1.4): the reading, its unit, its base -- display only. */
+/* The frequency readout (ui-design.md §1.4): the reading and its unit -- display only. */
 .frequency-reading { flex: 1 1 auto; min-width: 0; font-variant-numeric: tabular-nums; }
 /* The two-state readout: ν₁₂, then Δν against its base; a narrow page wraps between the two. */
 .pair-frequency { display: flex; flex-wrap: wrap; align-items: center; gap: var(--row-gap) var(--section-gap); min-width: 0; }
 .pair-part { display: flex; align-items: center; gap: var(--row-gap); min-width: 0; }
 .pair-part > .pair-label, .pair-part > .frequency-base-label { flex: none; color: var(--muted-ink); padding-bottom: var(--cap-lift); }
-.pair-part > .frequency-reading { flex: 0 1 auto; padding-left: 0; }
+/* Each reading in a slot as wide as twelve digits with their groups, right-aligned. */
+.pair-part > .frequency-reading { flex: none; width: 21ch; padding-left: 0; text-align: right; }
 .pair-part > .unit-picker { flex: none; width: calc(var(--combo-chrome) + 3em); min-width: calc(var(--combo-chrome) + 3em); }
 .pair-part > select.frequency-base { flex: 0 1 auto; width: auto; min-width: 0; }
-/* The display model's small parameter, beside the light-shift switch (a hint only). */
+/* The one warning beside 显示光移: the light is too close for a static shift. */
 .mixing-warning { grid-column: 1 / -1; margin: 0; color: var(--orange-dark); }
-/* The level diagram's one line saying what its labels are (ui-design.md §1.5). */
-.levels-legend { flex: none; margin: 0; }
 
-/* ---------- 模型说明 ------------------------------------------------------ */
-/* Centred on the window, it never reaches into the title bar band above it. */
-dialog.dialog.model-dialog { max-height: calc(100vh - 2 * var(--title-bar-h)); }
-.model-dialog > .dialog-content { flex: 1; min-height: 0; }
-.model-notes { width: min(calc(2 * var(--dialog-body-w)), calc(100vw - 4 * var(--window-pad))); min-height: 0; overflow: auto; white-space: normal; line-height: var(--font-line); padding-right: var(--row-gap); }
+/* ---------- 详情 ---------------------------------------------------------- */
+/* One readable column: what is computed now, the definitions, the model. */
+.details-notes { max-width: calc(34 * var(--control)); padding-top: var(--row-gap); white-space: normal; line-height: var(--font-line); }
 .model-notes h3, .model-notes h4 { font-size: inherit; font-weight: var(--heading-weight); margin: var(--section-gap) 0 0; }
-.model-notes > section:first-child > h3:first-child { margin-top: 0; }
+.model-notes h3 { min-height: var(--control); align-content: center; margin-top: calc(2 * var(--section-gap)); padding-bottom: var(--cap-lift); border-bottom: var(--edge) solid var(--divider); }
+.model-notes > div:first-child > section:first-child > h3:first-child { margin-top: 0; }
 .model-notes p { margin: var(--row-gap) 0 0; }
-.model-current { padding: var(--card-inset); border-radius: var(--radius); background: var(--accent-tint); }
-.model-current p { margin-top: var(--edge); }
+.model-notes .solver-readouts { margin-top: var(--row-gap); }
 
 /* ---------- narrow windows: the rail, then the inspector as an overlay -- */
 .scene-compact .workspace { grid-template-columns: var(--atom-rail-w) minmax(0, 1fr) var(--atom-inspector-w); }
@@ -317,6 +338,6 @@ dialog.dialog.model-dialog { max-height: calc(100vh - 2 * var(--title-bar-h)); }
   .inspector-panel { display: none; position: absolute; z-index: 9; top: 0; right: 0; bottom: 0; width: var(--atom-inspector-w); border: var(--edge) solid var(--divider); }
   .inspector-open .inspector-panel { display: block; }
   .inspector-dismiss { display: inline-flex; }
-  .reference-form.form { grid-template-columns: var(--label-width, max-content) minmax(0, 1fr); }
+
   .mark-editor { margin-left: 0; }
 }
