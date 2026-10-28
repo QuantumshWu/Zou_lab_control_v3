@@ -7,7 +7,7 @@ import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/
 import {POPULATION_TOLERANCE,defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
-import {nativeResult} from './native-result.mjs';
+import {HORIZONS,entryAt,nativeResult} from './native-result.mjs';
 import {isTimeAverage} from '../dist/js/atom-workbench/src/solver-types.js';
 import {CurrentResults} from '../dist/js/atom-workbench/src/current-results.js';
 import {horizonRecords,keptCheckpoint} from '../dist/js/atom-workbench/src/solve-plan.js';
@@ -18,9 +18,8 @@ function fixture(scene=defaultScene(),settings=scene.dynamics,timesUs=[0,setting
   return {...nativeResult({states,initialIndex,timesUs,tolerance:POPULATION_TOLERANCE}),assumptions:['test assumption'],
     service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]}};
 }
-const noMean=data=>{for(const key of ['asymptoticPopulations','asymptoticDensityReal','asymptoticDensityImag','asymptoticEstimatedError','asymptoticWithinTolerance','horizonUs','asymptoticHorizons'])delete data[key];return data;};
-/** A trajectory alone (includeAsymptotic false): no mean, no T. */
-const trajectoryOnly=data=>{noMean(data);data.asymptoticStatus='not-requested';delete data.asymptoticReason;return data;};
+/** A trajectory alone (includeAsymptotic false): no mean. */
+const trajectoryOnly=data=>{delete data.asymptoticHorizons;return data;};
 function scenario(){const s=defaultScene();s.dynamics.samples=3;s.dynamics.durationUs=.2;return s;}
 
 function streamReply(call){let controller;const body=new ReadableStream({start(c){controller=c;}});call.resolve(new Response(body,{headers:{'Content-Type':'application/x-ndjson'}}));const encoder=new TextEncoder();return {send:event=>controller.enqueue(encoder.encode(JSON.stringify(event)+'\n')),close:()=>controller.close()};}
@@ -113,10 +112,9 @@ test('numerical failures and unresolved means are recorded without blind retries
  const scene=scenario(),pending=client.solve(scene,scene.dynamics),rejected=assert.rejects(pending,/numerical failure/);await waitCalls(mock,1);
  mock.calls[0].resolve(new Response(JSON.stringify({error:'numerical failure',code:'numerical-failure',service:{binarySha256:'test-binary'}}),{status:422}));await rejected;
  assert.equal(records[0].willRetry,false);assert.equal(records[0].response.service.binarySha256,'test-binary');
- const next=client.solve(scene,scene.dynamics);await waitCalls(mock,2);const data=noMean(fixture(scene));
- Object.assign(data,{asymptoticStatus:'not-converged',asymptoticReason:'slow modes unresolved',horizonUs:scene.dynamics.meanHorizonUs,
-   asymptoticHorizons:[1e5,1e6,null].map(horizonUs=>({horizonUs,status:'not-converged',reason:'slow modes unresolved',populations:null,densityReal:null,densityImag:null,estimatedError:null,withinTolerance:false}))});reply(mock.calls[1],data);
- assert.equal((await next).steady.converged,false);assert.equal(records[1].response.asymptoticStatus,'not-converged');await pause(230);assert.equal(mock.calls.length,2);
+ const next=client.solve(scene,scene.dynamics);await waitCalls(mock,2);const data=fixture(scene);
+ data.asymptoticHorizons=HORIZONS.map(horizonUs=>({horizonUs,status:'not-converged',reason:'slow modes unresolved',populations:null,densityReal:null,densityImag:null,estimatedError:null,withinTolerance:false}));reply(mock.calls[1],data);
+ assert.equal((await next).steady.converged,false);assert.deepEqual(records[1].response.means,HORIZONS.map(horizonUs=>({horizonUs,status:'not-converged'})));await pause(230);assert.equal(mock.calls.length,2);
 });
 function transport(){const calls=[];return {calls,fetch:async(url,init)=>new Promise((resolve,reject)=>calls.push({url,init,resolve,reject,body:JSON.parse(init.body)}))};}
 const reply=(call,data)=>call.resolve(new Response(JSON.stringify({...data,request:call.body.request}),{status:200,headers:{'Content-Type':'application/json'}}));
@@ -139,10 +137,10 @@ test('malformed native payloads never become fabricated populations',()=>{
     data=>{data.populations[0].fill(0);}, data=>{data.populations[0][0]=-.2;data.populations[0][1]+=.2;},
     data=>{data.states[1].id=data.states[0].id;},data=>{data.states[0].energyMHz=Infinity;},
     data=>{data.states[0].id='arbitrary-reference';},data=>{data.states[0].F=99;},
-    data=>{data.timesUs[1]=data.timesUs[0];},data=>{data.asymptoticPopulations.pop();},
-    data=>{data.asymptoticPopulations[0]=Infinity;},data=>{data.asymptoticPopulations.fill(0);},
-    data=>{data.asymptoticPopulations=null;},data=>{delete data.asymptoticDensityReal;},
-    data=>{data.asymptoticStatus='not-converged';},data=>{data.asymptoticStatus='periodic-mean';},data=>{data.asymptoticReason=7;},
+    data=>{data.timesUs[1]=data.timesUs[0];},data=>{entryAt(data).populations.pop();},
+    data=>{entryAt(data).populations[0]=Infinity;},data=>{entryAt(data).populations.fill(0);},
+    data=>{entryAt(data).populations=null;},data=>{delete entryAt(data).densityReal;},
+    data=>{entryAt(data).status='not-converged';},data=>{entryAt(data).status='periodic-mean';},data=>{entryAt(data).reason=7;},
     data=>{data.diagnostics.traceError=NaN;},data=>{delete data.diagnostics.asymptoticPositivityError;},data=>{data.diagnostics.asymptoticPositivityError=.1;},
     data=>{data.diagnostics.asymptoticTraceError=6e-6;},data=>{data.diagnostics.residual=NaN;},data=>{delete data.diagnostics.asymptoticMethod;},
     data=>{delete data.diagnostics.method;},data=>{delete data.populationAccuracy;},data=>{delete data.diagnostics.elapsedMs;},
@@ -156,13 +154,13 @@ test('time averages and initial dependence are separate properties of a converge
   const scene=scenario();
   for(const [status,timeAverage,initialDependent] of [['stationary',false,false],['population-stationary',false,false],['initial-dependent',false,true],
     ['time-average',true,false],['initial-dependent-time-average',true,true]]){
-    const data=fixture(scene);data.asymptoticStatus=status;data.asymptoticReason='reason of '+status;for(const entry of data.asymptoticHorizons)entry.status=status;
+    const data=fixture(scene);for(const entry of data.asymptoticHorizons)Object.assign(entry,{status,reason:'reason of '+status});
     const result=normalizeDynamicsResult(data,scene);
     assert.equal(result.steady.converged,true,status);assert.equal(result.steady.initialDependent,initialDependent,status);
-    assert.equal(isTimeAverage(result.steady.status),timeAverage,status);assert.equal(result.steady.reason,data.asymptoticReason);
+    assert.equal(isTimeAverage(result.steady.status),timeAverage,status);assert.equal(result.steady.reason,'reason of '+status);
   }
   for(const status of ['initial-dependent-mean','nonunique-initial-dependent','periodic-mean']){
-    const data=fixture(scene);data.asymptoticStatus=status;assert.throws(()=>normalizeDynamicsResult(data,scene),/不完整或无效/,status);
+    const data=fixture(scene);entryAt(data).status=status;assert.throws(()=>normalizeDynamicsResult(data,scene),/不完整或无效/,status);
   }
 });
 

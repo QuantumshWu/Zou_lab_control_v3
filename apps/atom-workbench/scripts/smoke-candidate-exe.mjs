@@ -99,18 +99,18 @@ try{
   await worker.receive({kind:'native',event:{kind:'configuration',binarySha256,
     buildSha256:sha(JSON.stringify(report.backendInfo.numericSource)),defaults:DESKTOP_SOLVER_DEFAULTS}});
   const finite=await request('finite',{...settings,steadyOnly:false,includeAsymptotic:true});
-  const parsed=normalizeDynamicsResult(finite,scene,settings.initialStateId);
+  const parsed=normalizeDynamicsResult(finite,scene,settings.initialStateId,settings.meanHorizonUs);
   assert.equal(parsed.populationAccuracy.requestedTolerance,POPULATION_TOLERANCE);
   assert.equal(parsed.timesUs.length,settings.samples);assert.equal(parsed.timesUs.at(-1),settings.durationUs);
   assert.equal(parsed.steady.converged,true,'The finite request carries its qualified inline mean');
   const mean=await request('mean',{...settings,steadyOnly:true,includeAsymptotic:true});
-  const meanParsed=normalizeDynamicsResult(mean,scene,settings.initialStateId);
+  const meanParsed=normalizeDynamicsResult(mean,scene,settings.initialStateId,settings.meanHorizonUs);
   assert.equal(meanParsed.steady.converged,true,'Smoke mean must be qualified, never the finite endpoint');
   assert.equal(report.workerRequests.length,2);assert.deepEqual(report.workerRequests.map(r=>r.lane),['trajectory','steady']);
   assert.equal(report.workerRequests[0].modelSha256,report.workerRequests[1].modelSha256,'Both fresh results must use the identical current Model');
   // Both means are p(T) of the same equation, each within its own bound.
-  const meanDelta=Math.max(...finite.asymptoticPopulations.map((p,i)=>Math.abs(p-mean.asymptoticPopulations[i])));
-  const meanBounds=finite.asymptoticEstimatedError+mean.asymptoticEstimatedError;
+  const meanDelta=Math.max(...parsed.states.map(s=>Math.abs(parsed.steady.populations[s.id]-meanParsed.steady.populations[s.id])));
+  const meanBounds=parsed.steady.estimatedError+meanParsed.steady.estimatedError;
   assert.ok(Number.isFinite(meanBounds)&&meanDelta<=meanBounds,`Inline and steadyOnly means agree within their bounds (difference ${meanDelta}, bounds ${meanBounds})`);
   report.status='passed';report.validation={backendStatic:true,normalIpcAndJsonl:true,finitePopulationAccuracy:parsed.populationAccuracy,
     meanStatus:meanParsed.steady.status,finiteNativeMs:finite.diagnostics.elapsedMs,meanNativeMs:mean.diagnostics.elapsedMs};

@@ -10,7 +10,6 @@ export interface PopulationAccuracy {
   sampleErrors:number[];
   /** Why the solver stopped short of ε (partial only). */
   reason?:string;
-  projectionCharge:number;includesProjectionCharge:true;
   scope:{states:32;samples:number;groups:string[]};
 }
 /** Explicit population-output qualification; never a density/PSD claim. */
@@ -19,10 +18,10 @@ export function readPopulationAccuracy(value:unknown,samples:number):PopulationA
   if(!value||typeof value!=='object'||Array.isArray(value))invalid();
   const a=value as Record<string,unknown>,partial=a.status==='estimated-partial';
   // Every request asks for POPULATION_TOLERANCE; the echo must be that one.
-  if((a.status!=='estimated-converged'&&!partial)||a.includesProjectionCharge!==true||a.requestedTolerance!==POPULATION_TOLERANCE)invalid();
-  const error=a.estimatedMaximumError,charge=a.projectionCharge,finite=(v:unknown):v is number=>typeof v==='number'&&Number.isFinite(v)&&v>=0;
+  if((a.status!=='estimated-converged'&&!partial)||a.requestedTolerance!==POPULATION_TOLERANCE)invalid();
+  const error=a.estimatedMaximumError,finite=(v:unknown):v is number=>typeof v==='number'&&Number.isFinite(v)&&v>=0;
   // Partial exactly when the largest bound is above ε.
-  if(!finite(error)||!finite(charge)||charge>error||partial!==(error>POPULATION_TOLERANCE))invalid();
+  if(!finite(error)||partial!==(error>POPULATION_TOLERANCE))invalid();
   // The per-sample bounds: one for each sample, their maximum the trajectory's. A partial result
   // says why the solver stopped short of ε.
   const errors=a.sampleErrors;
@@ -33,10 +32,9 @@ export function readPopulationAccuracy(value:unknown,samples:number):PopulationA
   if(scope.states!==32||scope.samples!==samples||!Number.isSafeInteger(samples)||samples<1||!Array.isArray(groups)||groups.length!==POPULATION_GROUPS.length||new Set(groups).size!==groups.length||groups.some(id=>typeof id!=='string'||!POPULATION_GROUPS.some(group=>group.id===id)))invalid();
   return {status:partial?'estimated-partial':'estimated-converged',requestedTolerance:POPULATION_TOLERANCE,estimatedMaximumError:error as number,
     sampleErrors:[...(errors as number[])],...(partial?{reason:a.reason as string}:{}),
-    projectionCharge:charge as number,includesProjectionCharge:true,
     scope:{states:32,samples,groups:[...(groups as string[])]}};
 }
-/** The native `asymptoticStatus` values: a converged long-time mean (static:
+/** The native mean `status` values (`asymptoticHorizons`): a converged long-time mean (static:
  * stationary / population-stationary / initial-dependent; driven:
  * time-average / initial-dependent-time-average), or none. */
 export const CONVERGED_MEAN_STATUSES=['stationary','population-stationary','initial-dependent','time-average','initial-dependent-time-average'] as const;
@@ -63,8 +61,7 @@ export interface SteadyResult {
   /** Conserved quantities (trace included) found by the slow generator; more
    * than one makes the mean initial-dependent (null: not reported). */
   conservedQuantities?:number|null;
-  /** The time T of the computed p̄(T), as the solver echoes it (us; null: t → ∞); undefined
-   * when nothing was computed. */
+  /** The time T of p̄(T) (us; null: t → ∞); undefined when no mean was requested. */
   horizonUs?:number|null;
 }
 export interface DynamicsResult {

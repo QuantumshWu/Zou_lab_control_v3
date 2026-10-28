@@ -50,14 +50,15 @@ export class DynamicsClient {
       }})}).catch(error=>{if(error instanceof TypeError)throw new RequestFailure('本机 Rust 求解服务连接暂时失败。',0,'network-error',true);throw error;});
       if(!response.ok){const detail=await response.json().catch(()=>({error:''}));evidence=detail;throw new RequestFailure(detail.error||`Local solver: ${response.status}`,response.status,detail.code??'',(response.status===502||response.status===503)&&!/invalid|incompatible|numerical/.test(detail.code??''));}
       const data=await this.readResponse(response,job);if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('求解结果不完整或无效：响应对象。');
-      evidence={protocol:data.protocol,modelSchema:data.modelSchema,service:data.service,diagnostics:data.diagnostics,asymptoticStatus:data.asymptoticStatus};if(data.error)throw new Error(data.error);
+      evidence={protocol:data.protocol,modelSchema:data.modelSchema,service:data.service,diagnostics:data.diagnostics,
+        means:Array.isArray(data.asymptoticHorizons)?data.asymptoticHorizons.map((e:any)=>({horizonUs:e?.horizonUs,status:e?.status})):undefined};if(data.error)throw new Error(data.error);
       if(this.current!==job||job.controller.signal.aborted)return;
       if(data.progress!==undefined)throw new Error('最终结果带有进度标记。');
       if(data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||
         !Array.isArray(data.service?.capabilities)||!data.service.capabilities.includes(FULL_MODEL_SCHEMA))throw new Error('本机求解服务版本不兼容：需要 rb87-full/2 模型，旧模型结果未显示。');
       if(!data.request||data.request.clientId!==this.clientId||data.request.sequence!==job.id)throw new Error('求解响应与当前请求不匹配。');
-      const result=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings));
-      this.checkHorizon(result,job);this.checkSamples(result,job);
+      const result=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings),job.settings.meanHorizonUs);
+      this.checkMean(result,job);this.checkSamples(result,job);
       if(job.includeAsymptotic&&!result.steady?.converged)this.recordFailure(job,new Error(result.steady?.reason??'长期布居未解析'),false,evidence);
       this.current=null;this.lastRoundTripMs=performance.now()-job.started;job.resolve(result);
     }catch(error){
@@ -85,8 +86,8 @@ export class DynamicsClient {
       // single t = 0 row of a mean request) with its per-sample errors, and the mean when computed.
       const data=event.data;
       if(data?.progress!==true||data.request?.clientId!==this.clientId||data.request.sequence!==job.id||data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||!data.service?.capabilities?.includes(FULL_MODEL_SCHEMA))throw new Error('中间结果与当前请求不匹配。');
-      const checkpoint=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings));
-      this.checkHorizon(checkpoint,job);this.checkSamples(checkpoint,job);
+      const checkpoint=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings),job.settings.meanHorizonUs);
+      this.checkMean(checkpoint,job);this.checkSamples(checkpoint,job);
       job.onProgress?.(checkpoint);
     };
     try{while(true){const {done,value}=await reader.read();buffer+=decoder.decode(value,{stream:!done});if(buffer.length>64*1024*1024)throw new Error('求解流超过大小限制。');let end;while((end=buffer.indexOf('\n'))>=0){consume(buffer.slice(0,end));buffer=buffer.slice(end+1);}if(done)break;}if(buffer.trim())consume(buffer);}
@@ -101,10 +102,9 @@ export class DynamicsClient {
     const expected=job.steadyOnly?1:job.settings.samples;
     if(result.timesUs.length!==expected||(!job.steadyOnly&&Math.abs(result.timesUs.at(-1)!-job.settings.durationUs)>1e-10*Math.max(1,job.settings.durationUs)))throw new Error('求解响应的采样与请求不匹配。');
   }
-  /** The mean asked for, at the T asked for; none for a trajectory alone. */
-  private checkHorizon(result:DynamicsResult,job:Job):void{
+  /** The mean asked for (every standard T); none for a trajectory alone. */
+  private checkMean(result:DynamicsResult,job:Job):void{
     if((result.steady.status!=='not-requested')!==job.includeAsymptotic)throw new Error('求解响应的长期布居与本次请求不符。');
-    if(job.includeAsymptotic&&result.steady.horizonUs!==job.settings.meanHorizonUs)throw new Error('求解响应的长期布居时刻 T 与本次请求不匹配。');
   }
   private abortCurrent(reason:string):void{
     const job=this.current;if(!job)return;this.current=null;clearTimeout(job.timer);job.controller.abort();job.reject(new DOMException(reason,'AbortError'));
@@ -115,8 +115,9 @@ export class DynamicsClient {
 
 /** Reads the one native result contract (documented in
  * rust-solver/src/lattice_core_adapter.rs) and rejects anything else.
- * `initial` is the requested initial state (an id is a single state). */
-export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics)):DynamicsResult{
+ * `initial` is the requested initial state (an id is a single state), `horizon`
+ * the requested time T of the mean (us; null: t → ∞). */
+export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics),horizon:number|null=scene.dynamics.meanHorizonUs):DynamicsResult{
   const invalid=(detail:string):never=>{throw new Error(`求解结果不完整或无效：${detail}；未绘制替代数据。`);};
   const bounded=(value:unknown,limit=Infinity)=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=limit;
   const probabilities=(row:unknown,slack:number):row is number[]=>Array.isArray(row)&&row.length===32&&
@@ -145,67 +146,41 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   if(timesUs.length>1&&typeof d.method!=='string')invalid('时间演化方法');
   if(timesUs.length>1||data.populationAccuracy!==undefined)try{populationAccuracy=readPopulationAccuracy(data.populationAccuracy,timesUs.length);}catch{invalid('布居精度元数据');}
   if(data.progress!==undefined&&data.progress!==true)invalid('进度标记');
-  const status=data.asymptoticStatus as SteadyStatus,reason=data.asymptoticReason as string|undefined;
-  if(!STEADY_STATUSES.includes(status)||(reason!==undefined&&typeof reason!=='string'))invalid('长期布居状态');
-  // A computed long-time result (its status the physics classification), with or without its
-  // estimated error; 'not-converged' means nothing usable was computed.
-  const converged=(CONVERGED_MEAN_STATUSES as readonly SteadyStatus[]).includes(status);
-  // A computed result carries its estimated error and whether that is within ε, and its time T.
-  const meanError=data.asymptoticEstimatedError,meanWithin=data.asymptoticWithinTolerance;
-  // Within ε is its bound within ε.
-  if(converged&&(!bounded(meanError)||meanWithin!==(meanError<=POPULATION_TOLERANCE)))invalid('长期布居误差估计');
-  if(!converged&&((meanError!==undefined&&!bounded(meanError))||(meanWithin!==undefined&&meanWithin!==false)))invalid('长期布居误差估计');
-  const withinTolerance=converged&&meanWithin===true;
-  let steadyPopulations:Record<string,number>|null=null,density;
-  if(converged){
-    const mean=data.asymptoticPopulations;
-    if(!probabilities(mean,5e-6))invalid('长期布居矩阵');
-    if(!bounded(d.asymptoticTraceError,5e-6)||!bounded(d.asymptoticPositivityError,1e-4)||!bounded(d.residual)||typeof d.asymptoticMethod!=='string')invalid('长期密度数值验证信息');
-    try{density=readMeanDensity(data,32,mean);}catch{invalid('长期复密度矩阵');}
-    if(!density)invalid('长期复密度矩阵');
-    steadyPopulations=Object.fromEntries(states.map((state,i)=>[state.id,mean[i]!]));
-  }else if(data.asymptoticPopulations!=null||data.asymptoticDensityReal!=null||data.asymptoticDensityImag!=null)invalid('未收敛结果携带长期布居');
-  // A requested mean, computed or not, says its time T; a trajectory alone has none.
-  const requested=status!=='not-requested',horizon=data.horizonUs;
-  if(requested?!MEAN_HORIZONS_US.includes(horizon):horizon!==undefined)invalid('长期布居时刻 T');
+  // The mean, when one was asked for: every standard T from the one mean run (`asymptoticHorizons`,
+  // one entry per T, in any order), each a computed long-time result -- its status the physics
+  // classification, with its estimated error and whether that is within ε -- or 'not-converged',
+  // nothing usable computed. The run's method and relaxation are every T's; the residual and the
+  // density checks belong to the requested T, whose mean is `steady`.
   const slowest=typeof d.slowestRelaxationUs==='number'&&Number.isFinite(d.slowestRelaxationUs)&&d.slowestRelaxationUs>0?d.slowestRelaxationUs as number:null;
   const conserved=Number.isSafeInteger(d.conservedQuantities)&&d.conservedQuantities>0?d.conservedQuantities as number:null;
-  const steady:SteadyResult={converged,status,populations:steadyPopulations,density,residual:converged?d.residual:null,method:converged?d.asymptoticMethod:undefined,reason,
-    estimatedError:converged?meanError as number:null,withinTolerance,initialDependent:isInitialDependent(status),
-    slowestRelaxationUs:converged?slowest:null,conservedQuantities:converged?conserved:null,...(requested?{horizonUs:horizon as number|null}:{})};
-  // Every mean run returns every standard T, under the primary mean's rules: one entry per T,
-  // the requested T's the primary mean itself. The run's method and relaxation are each T's;
-  // the residual and the density checks belong to the requested mean.
-  let horizonMeans:SteadyResult[]|undefined;
-  const entries=data.asymptoticHorizons;
-  if(!requested){if(entries!==undefined)invalid('长期布居各时刻 T');}
-  else{
+  const entries=data.asymptoticHorizons;let horizonMeans:SteadyResult[]|undefined;
+  if(entries!==undefined){
     if(!Array.isArray(entries)||entries.length!==MEAN_HORIZONS_US.length)invalid('长期布居各时刻 T');
     horizonMeans=MEAN_HORIZONS_US.map(T=>{
       const found=(entries as unknown[]).filter((e:any)=>e&&typeof e==='object'&&!Array.isArray(e)&&e.horizonUs===T);
       if(found.length!==1)invalid('长期布居各时刻 T');
-      const e=found[0] as any,bad=():never=>invalid(`长期布居 T = ${T===null?'∞':`${T} μs`}`);
-      const s=e.status as SteadyStatus;
-      if(!STEADY_STATUSES.includes(s)||s==='not-requested'||(e.reason!==undefined&&typeof e.reason!=='string'))bad();
-      const ok=(CONVERGED_MEAN_STATUSES as readonly SteadyStatus[]).includes(s),error=e.estimatedError,within=e.withinTolerance;
-      if(ok?!bounded(error)||within!==(error<=POPULATION_TOLERANCE):(error!=null&&!bounded(error))||(within!==undefined&&within!==false))bad();
-      let mean:Record<string,number>|null=null,meanDensity;
-      if(ok){
-        if(!probabilities(e.populations,5e-6))bad();
-        try{meanDensity=readMeanDensity({asymptoticDensityReal:e.densityReal,asymptoticDensityImag:e.densityImag},32,e.populations);}catch{bad();}
-        if(!meanDensity)bad();
-        mean=Object.fromEntries(states.map((state,i)=>[state.id,e.populations[i]!]));
-      }else if(e.populations!=null||e.densityReal!=null||e.densityImag!=null)bad();
-      if(T===horizon){
-        // The requested T's entry is the primary mean, the same numbers.
-        if(s!==status||(error??undefined)!==(meanError??undefined)||(ok&&within)!==withinTolerance||(ok&&!(e.populations as number[]).every((p,i)=>p===data.asymptoticPopulations[i])))bad();
-        return steady;
-      }
-      return {converged:ok,status:s,populations:mean,density:meanDensity,residual:null,method:ok&&typeof d.asymptoticMethod==='string'?d.asymptoticMethod:undefined,reason:e.reason,
-        estimatedError:ok?error as number:null,withinTolerance:ok&&within===true,initialDependent:isInitialDependent(s),
-        slowestRelaxationUs:ok?slowest:null,conservedQuantities:ok?conserved:null,horizonUs:T};
+      const e=found[0] as any,requested=T===horizon,bad=(what:string):never=>invalid(`${what}（T = ${T===null?'∞':`${T} μs`}）`);
+      const status=e.status as SteadyStatus;
+      if(!STEADY_STATUSES.includes(status)||status==='not-requested'||(e.reason!==undefined&&typeof e.reason!=='string'))bad('长期布居状态');
+      const converged=(CONVERGED_MEAN_STATUSES as readonly SteadyStatus[]).includes(status),error=e.estimatedError,within=e.withinTolerance;
+      // Within ε is its bound within ε; nothing computed is never within.
+      if(converged?!bounded(error)||within!==(error<=POPULATION_TOLERANCE):(error!=null&&!bounded(error))||(within!==undefined&&within!==false))bad('长期布居误差估计');
+      let populations:Record<string,number>|null=null,density;
+      if(converged){
+        if(!probabilities(e.populations,5e-6))bad('长期布居矩阵');
+        if(requested&&(!bounded(d.asymptoticTraceError,5e-6)||!bounded(d.asymptoticPositivityError,1e-4)||!bounded(d.residual)||typeof d.asymptoticMethod!=='string'))invalid('长期密度数值验证信息');
+        try{density=readMeanDensity(e,32,e.populations);}catch{bad('长期复密度矩阵');}
+        if(!density)bad('长期复密度矩阵');
+        populations=Object.fromEntries(states.map((state,i)=>[state.id,e.populations[i]!]));
+      }else if(e.populations!=null||e.densityReal!=null||e.densityImag!=null)bad('未收敛结果携带长期布居');
+      return {converged,status,populations,density,residual:converged&&requested?d.residual:null,method:converged&&typeof d.asymptoticMethod==='string'?d.asymptoticMethod:undefined,reason:e.reason,
+        estimatedError:converged?error as number:null,withinTolerance:converged&&within===true,initialDependent:isInitialDependent(status),
+        slowestRelaxationUs:converged?slowest:null,conservedQuantities:converged?conserved:null,horizonUs:T};
     });
   }
+  // The requested T's mean, or none requested.
+  const steady:SteadyResult=horizonMeans?horizonMeans.find(s=>s.horizonUs===horizon)??invalid('长期布居时刻 T')
+    :{converged:false,status:'not-requested',populations:null,estimatedError:null,withinTolerance:false,residual:null,initialDependent:false};
   const assumptions=data.assumptions;
   if(!Array.isArray(assumptions)||assumptions.some((text:unknown)=>typeof text!=='string'))invalid('模型假设');
   const populations=Object.fromEntries(states.map((state,i)=>[state.id,rows.map((row:number[])=>row[i]!)]));

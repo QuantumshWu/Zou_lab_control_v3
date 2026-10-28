@@ -151,9 +151,9 @@ pub struct Answer{
     /// The lattice's modes (the fields' layout).
     pub modes:Vec<Charge>,
     /// Trajectory rows projected onto the probability simplex (row 0 is
-    /// rho0's), the bound of each (ACCEPTANCE_FACTOR x the estimate plus the
-    /// projection's change), and the largest projection change.
-    pub trajectory:Vec<Vec<f64>>,pub sample_errors:Vec<f64>,pub projection:f64,
+    /// rho0's) and the bound of each (ACCEPTANCE_FACTOR x the estimate plus
+    /// the projection's change).
+    pub trajectory:Vec<Vec<f64>>,pub sample_errors:Vec<f64>,
     /// Horizon and steady populations (laboratory time averages, raw), their
     /// fields on `modes` (Hermitian-symmetric) and bounds.
     pub horizons:Vec<Vec<f64>>,pub steady:Vec<f64>,
@@ -401,7 +401,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                 let steady_residual=ops.norm(&steady_image)/ops.norm(&steady_field).max(f64::MIN_POSITIVE);
                 let horizon_fields=request.horizons.iter().map(|&t|field(&model.state(t),false)).collect::<Result<Vec<_>,_>>()?;
                 timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
-                let mut answer=Answer{solves:space.solves(),modes:modes.clone(),trajectory:projected,sample_errors,projection:changes.iter().fold(0.,|a:f64,&b|a.max(b)),
+                let mut answer=Answer{solves:space.solves(),modes:modes.clone(),trajectory:projected,sample_errors,
                     horizons:horizons.clone(),steady:steady.clone(),horizon_fields,steady_field,
                     horizon_errors:estimate.horizons.iter().map(|e|ACCEPTANCE_FACTOR*e).collect(),
                     horizon_relaxing:request.horizons.iter().map(|&t|(0..model.r).filter(|&j|!model.kernel[j]&&!model.projected_out[j])

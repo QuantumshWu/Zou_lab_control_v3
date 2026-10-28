@@ -20,17 +20,16 @@ test('the time T of p̄(T) is a dynamics setting: 1 s by default, saved and requ
   assert.equal(trajectoryInputsKey(scene,scene.dynamics),trajectoryInputsKey(scene,other),'a trajectory does not depend on it');
 });
 
-test('the time T goes to the solver, and a computed mean echoes the one asked for',()=>{
+test('the time T goes to the solver, and the reader takes that T\'s mean',()=>{
   const scene=defaultScene();
   assert.equal(prepareNativeSolve({scene,options:{meanHorizonUs:null}}).payload.options.meanHorizonUs,null);
   assert.equal(prepareNativeSolve({scene,options:{meanHorizonUs:1e5}}).payload.options.meanHorizonUs,1e5);
   assert.equal(Object.hasOwn(prepareNativeSolve({scene,options:{}}).payload.options,'meanHorizonUs'),false);
   const states=buildFullMasterModel(scene,scene.dynamics).states,index=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
   const data={...nativeResult({states,initialIndex:index,timesUs:[0]}),assumptions:[]};
-  assert.equal(normalizeDynamicsResult(data,scene).steady.horizonUs,1e6);
-  assert.equal(normalizeDynamicsResult({...data,horizonUs:null},scene).steady.horizonUs,null);
-  const {horizonUs:_,...unechoed}=data;assert.throws(()=>normalizeDynamicsResult(unechoed,scene),/长期布居时刻 T/,'a computed mean says its T');
-  assert.throws(()=>normalizeDynamicsResult({...data,horizonUs:42},scene),/长期布居时刻 T/);
+  assert.equal(normalizeDynamicsResult(data,scene).steady.horizonUs,1e6,'the scene\'s T unless said');
+  assert.equal(normalizeDynamicsResult(data,scene,undefined,null).steady.horizonUs,null);
+  assert.throws(()=>normalizeDynamicsResult(data,scene,undefined,42),/长期布居时刻 T/,'no mean at another T');
 });
 
 /** A mean result at T `horizonUs` with the mean at every T (asymptoticHorizons). */
@@ -42,7 +41,7 @@ const entry=(data,T)=>data.asymptoticHorizons.find(e=>e.horizonUs===T);
 
 test('every mean run returns the mean at every standard T: the requested T\'s is the mean itself',()=>{
   const {scene,data}=meanData({horizonUs:1e5,meanError:.001,horizonErrors:{'1000000':.002,'null':.009}});
-  const result=normalizeDynamicsResult(data,scene);
+  const result=normalizeDynamicsResult(data,scene,undefined,1e5);
   assert.deepEqual(result.horizonMeans.map(s=>s.horizonUs),HORIZONS,'one per T, in order');
   assert.strictEqual(result.horizonMeans[0],result.steady,'the requested T\'s is the primary mean, its diagnostics and all');
   assert.deepEqual(result.horizonMeans.map(s=>[s.estimatedError,s.withinTolerance]),[[.001,true],[.002,true],[.009,false]]);
@@ -50,16 +49,14 @@ test('every mean run returns the mean at every standard T: the requested T\'s is
   assert.equal(result.horizonMeans[1].residual,null,'the residual is the requested mean\'s');assert.equal(result.horizonMeans[1].method,'test mean');
   assert.ok(result.horizonMeans[1].density,'each T keeps its complex density');
   // The order of the list is the solver's; the reader keys it by T.
-  normalizeDynamicsResult({...data,asymptoticHorizons:[...data.asymptoticHorizons].reverse()},scene);
+  assert.equal(normalizeDynamicsResult({...data,asymptoticHorizons:[...data.asymptoticHorizons].reverse()},scene,undefined,1e5).steady.estimatedError,.001);
   // A trajectory alone carries no mean, and no list.
   const {data:none}=meanData({mean:false});assert.equal(normalizeDynamicsResult(none,scene).horizonMeans,undefined);
 });
 
-test('asymptoticHorizons is read strictly, under the primary mean\'s rules',()=>{
+test('asymptoticHorizons is read strictly, every T under the same rules',()=>{
   const {scene,data}=meanData({horizonUs:1e6,meanError:.001});
   const variants=[
-    ['no list with a mean',d=>{delete d.asymptoticHorizons;}],
-    ['a list with no mean',d=>{d.asymptoticStatus='not-requested';for(const k of ['asymptoticReason','asymptoticPopulations','asymptoticDensityReal','asymptoticDensityImag','asymptoticEstimatedError','asymptoticWithinTolerance','horizonUs'])delete d[k];}],
     ['a T missing',d=>{d.asymptoticHorizons.pop();}],
     ['a T twice',d=>{d.asymptoticHorizons[2]={...d.asymptoticHorizons[0]};}],
     ['a fourth entry',d=>{d.asymptoticHorizons.push({...d.asymptoticHorizons[0],horizonUs:3e6});}],
@@ -78,11 +75,8 @@ test('asymptoticHorizons is read strictly, under the primary mean\'s rules',()=>
     ['a density off its diagonal',d=>{entry(d,1e5).densityReal=entry(d,1e5).densityReal.map((v,i)=>i===0?v+.1:v);}],
     ['no density',d=>{delete entry(d,1e5).densityImag;}],
     ['populations without a computed mean',d=>{Object.assign(entry(d,1e5),{status:'not-converged',estimatedError:null,withinTolerance:false});}],
-    ['the requested T at another error than the mean',d=>{entry(d,1e6).estimatedError=.002;}],
-    ['the requested T with other populations',d=>{entry(d,1e6).populations=entry(d,1e6).populations.map((p,i)=>i<2?.5:0);entry(d,1e6).densityReal=Array(1024).fill(0).map((_,k)=>k===0||k===33?.5:0);}],
-    ['the requested T in another state',d=>{entry(d,1e6).status='population-stationary';}],
   ];
-  for(const [label,change] of variants){const d=structuredClone(data);change(d);assert.throws(()=>normalizeDynamicsResult(d,scene),/长期布居/,label);}
+  for(const [label,change] of variants){const d=structuredClone(data);change(d);assert.throws(()=>normalizeDynamicsResult(d,scene),/长期/,label);}
 });
 
 test('a T the run did not resolve is said so, and the requested mean may be that T',()=>{
@@ -92,11 +86,7 @@ test('a T the run did not resolve is said so, and the requested mean may be that
   assert.equal(result.horizonMeans[2].converged,false);assert.equal(result.horizonMeans[2].populations,null);assert.equal(result.horizonMeans[2].reason,'no steady state resolved');
   delete entry(data,null).withinTolerance;delete entry(data,null).estimatedError;delete entry(data,null).populations;
   result=normalizeDynamicsResult(data,scene);assert.equal(result.horizonMeans[2].estimatedError,null,'absent and null are the same here');
-  // The mean asked for at ∞, not resolved: the primary says so too, and the other T stand.
-  const failed=structuredClone(data);
-  for(const k of ['asymptoticPopulations','asymptoticDensityReal','asymptoticDensityImag','asymptoticEstimatedError','asymptoticWithinTolerance'])delete failed[k];
-  Object.assign(failed,{asymptoticStatus:'not-converged',asymptoticReason:'no steady state resolved',horizonUs:null});
-  result=normalizeDynamicsResult(failed,scene);
+  // The mean asked for at ∞, not resolved: the requested mean says so, and the other T stand.
+  result=normalizeDynamicsResult(data,scene,undefined,null);
   assert.equal(result.steady.converged,false);assert.strictEqual(result.horizonMeans[2],result.steady);assert.equal(result.horizonMeans[0].converged,true);
-  const unechoed=structuredClone(failed);delete unechoed.horizonUs;assert.throws(()=>normalizeDynamicsResult(unechoed,scene),/长期布居时刻 T/,'a requested mean says its T, resolved or not');
 });

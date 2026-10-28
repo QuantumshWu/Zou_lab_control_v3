@@ -7,7 +7,7 @@ import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {populationChart} from '../dist/js/atom-workbench/src/population-chart.js';
 import {errorPercent,outsideRuns,partialSentence,partialShort} from '../dist/js/atom-workbench/src/accuracy.js';
-import {nativeResult} from './native-result.mjs';
+import {HORIZONS,entryAt,nativeResult} from './native-result.mjs';
 
 const scene=defaultScene(),states=buildFullMasterModel(scene,scene.dynamics).states,initialIndex=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
 const times=n=>Array.from({length:n},(_,i)=>i*scene.dynamics.durationUs/(n-1));
@@ -41,29 +41,27 @@ test('converged and within ε are the bounds within ε, exactly: a status that d
   const data=result({timesUs:times(5),sampleErrors:[0,.001,.002,.001,.001]});
   Object.assign(data.populationAccuracy,{status:'estimated-partial',reason:'stopped'});assert.throws(()=>read(data),/布居精度元数据/);
   // The mean: not within for a bound within ε, within for one above it, or said other than true or false.
-  const unclaimed=result({timesUs:[0],meanError:.0007});unclaimed.asymptoticWithinTolerance=false;unclaimed.asymptoticHorizons.find(e=>e.horizonUs===1e6).withinTolerance=false;
-  assert.throws(()=>read(unclaimed),/长期布居误差估计/);
-  const claimed=result({timesUs:[0],meanError:.0072});claimed.asymptoticWithinTolerance=true;assert.throws(()=>read(claimed),/长期布居误差估计/);
-  const vague=result({timesUs:[0],meanError:.0007});delete vague.asymptoticWithinTolerance;assert.throws(()=>read(vague),/长期布居误差估计/);
+  const unclaimed=result({timesUs:[0],meanError:.0007});entryAt(unclaimed).withinTolerance=false;assert.throws(()=>read(unclaimed),/长期布居误差估计/);
+  const claimed=result({timesUs:[0],meanError:.0072});entryAt(claimed).withinTolerance=true;assert.throws(()=>read(claimed),/长期布居误差估计/);
+  const vague=result({timesUs:[0],meanError:.0007});delete entryAt(vague).withinTolerance;assert.throws(()=>read(vague),/长期布居误差估计/);
 });
 
 test('the old format, with no per-sample errors or mean error, is no longer read',()=>{
   const old=result({timesUs:times(3)});delete old.populationAccuracy.sampleErrors;assert.throws(()=>read(old),/布居精度元数据/);
-  const mean=result({timesUs:[0]});delete mean.asymptoticEstimatedError;delete mean.asymptoticWithinTolerance;assert.throws(()=>read(mean),/长期布居误差估计/);
+  const mean=result({timesUs:[0]});delete entryAt(mean).estimatedError;delete entryAt(mean).withinTolerance;assert.throws(()=>read(mean),/长期布居误差估计/);
 });
 
 test('a p̄(T) outside the tolerance is computed and shown, with its estimated error',()=>{
   const r=read(result({timesUs:[0],meanError:.0072}));
   assert.equal(r.steady.converged,true);assert.equal(r.steady.withinTolerance,false);assert.equal(r.steady.estimatedError,.0072);assert.ok(r.steady.populations);
   const within=read(result({timesUs:[0],meanError:.001}));assert.equal(within.steady.withinTolerance,true);
-  for(const change of [d=>{d.asymptoticWithinTolerance=true;},d=>{d.asymptoticEstimatedError=NaN;},d=>{d.asymptoticWithinTolerance='no';}]){
-    const bad=result({timesUs:[0],meanError:.0072});change(bad);assert.throws(()=>read(bad),/长期布居误差估计/);
+  for(const change of [e=>{e.withinTolerance=true;},e=>{e.estimatedError=NaN;},e=>{e.withinTolerance='no';}]){
+    const bad=result({timesUs:[0],meanError:.0072});change(entryAt(bad));assert.throws(()=>read(bad),/长期布居误差估计/);
   }
   // 'not-converged': nothing usable computed -- no populations, never within the tolerance.
-  const none=result({timesUs:[0],mean:false});
-  Object.assign(none,{asymptoticStatus:'not-converged',horizonUs:1e6,asymptoticHorizons:[1e5,1e6,null].map(horizonUs=>({horizonUs,status:'not-converged',withinTolerance:false}))});
+  const none=result({timesUs:[0],mean:false});none.asymptoticHorizons=HORIZONS.map(horizonUs=>({horizonUs,status:'not-converged',withinTolerance:false}));
   assert.equal(read(none).steady.converged,false);
-  none.asymptoticWithinTolerance=true;assert.throws(()=>read(none),/长期布居误差估计/);
+  entryAt(none).withinTolerance=true;assert.throws(()=>read(none),/长期布居误差估计/);
 });
 
 test('the status sentence says where the trajectory misses ε',()=>{

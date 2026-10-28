@@ -37,7 +37,7 @@ const SENTENCES:Record<string,string>={
   'Cancelled.':'计算已取消。',
 };
 /** What a mean's reason adds when its bound is above the tolerance (lattice_core_adapter.rs `OUTSIDE`). */
-const OUTSIDE=' Not converged: its error bound (asymptoticEstimatedError) is above the tolerance, so the populations are an estimate.';
+const OUTSIDE=' Not converged: its error bound (estimatedError) is above the tolerance, so the populations are an estimate.';
 const OUTSIDE_WORDS='未收敛：误差界高于误差目标，布居只是估计值。';
 /** A number the solver wrote (Rust {:e} or plain), as the workbench writes numbers. */
 const num=(text:string):string=>{const value=Number(text);return Number.isFinite(value)?formatNumber(value,{digits:3}):text;};

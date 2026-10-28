@@ -5,14 +5,14 @@ import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {POPULATION_GROUPS} from '../dist/js/atom-workbench/src/population-selection.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
-import {nativeResult} from './native-result.mjs';
+import {entryAt,nativeResult} from './native-result.mjs';
 
 const response=data=>({...data,assumptions:['test assumption'],
   service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA],binarySha256:'binary',buildSha256:'build'}});
 function fixture(){
   const scene=defaultScene();scene.dynamics.samples=3;scene.dynamics.durationUs=.2;
   const states=buildFullMasterModel(scene,scene.dynamics).states,index=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
-  const data=response(nativeResult({states,initialIndex:index,timesUs:[0,.1,.2],error:.003,charge:.0001,mean:false}));
+  const data=response(nativeResult({states,initialIndex:index,timesUs:[0,.1,.2],error:.003,mean:false}));
   return {scene,data,index,states};
 }
 function meanFixture(f){
@@ -25,20 +25,17 @@ test('a finite result accepts complete all-group accuracy without claiming a den
   const f=fixture();f.data.diagnostics.rawDensityPositivityError=.2;
   const result=normalizeDynamicsResult(f.data,f.scene);
   assert.equal(result.populationAccuracy.requestedTolerance,.005);
-  assert.equal(result.populationAccuracy.includesProjectionCharge,true);
   assert.equal(result.populationAccuracy.scope.groups.length,POPULATION_GROUPS.length);
   assert.equal(result.steady.density,undefined);
   f.data.populationAccuracy.scope.groups.pop();
   assert.equal(result.populationAccuracy.scope.groups.length,POPULATION_GROUPS.length);
 });
 
-test('a finite trajectory cannot bypass complete accuracy and projection-charge qualification',()=>{
+test('a finite trajectory cannot bypass complete accuracy qualification',()=>{
   const f=fixture();
   for(const change of [
     d=>delete d.populationAccuracy,d=>d.populationAccuracy=null,
-    d=>d.populationAccuracy.status='unresolved',d=>d.populationAccuracy.includesProjectionCharge=false,
-    d=>delete d.populationAccuracy.projectionCharge,d=>d.populationAccuracy.projectionCharge=.004,
-    d=>d.populationAccuracy.projectionCharge=-1,d=>d.populationAccuracy.estimatedMaximumError=.006,
+    d=>d.populationAccuracy.status='unresolved',d=>d.populationAccuracy.estimatedMaximumError=.006,
     d=>d.populationAccuracy.estimatedMaximumError=NaN,d=>d.populationAccuracy.requestedTolerance=0,
     d=>d.populationAccuracy.requestedTolerance=.021,d=>d.populationAccuracy.requestedTolerance='0.005',
     d=>d.populationAccuracy.requestedTolerance=.001,
@@ -73,15 +70,12 @@ test('mean trace, positivity and complex-density gates hold in mean and finite r
     const bad=structuredClone(mean);bad.diagnostics[key]=value;
     assert.throws(()=>normalizeDynamicsResult(bad,f.scene),/长期密度数值验证信息/);
   }
-  // As the writer merges: the mean's asymptotic fields; finite diagnostics win.
-  const combined={...f.data,asymptoticStatus:mean.asymptoticStatus,asymptoticReason:mean.asymptoticReason,asymptoticPopulations:mean.asymptoticPopulations,
-    asymptoticDensityReal:mean.asymptoticDensityReal,asymptoticDensityImag:mean.asymptoticDensityImag,
-    asymptoticEstimatedError:mean.asymptoticEstimatedError,asymptoticWithinTolerance:mean.asymptoticWithinTolerance,horizonUs:mean.horizonUs,asymptoticHorizons:mean.asymptoticHorizons,
-    diagnostics:{...mean.diagnostics,...f.data.diagnostics}};
+  // As the writer merges: the mean's entries; finite diagnostics win.
+  const combined={...f.data,asymptoticHorizons:mean.asymptoticHorizons,diagnostics:{...mean.diagnostics,...f.data.diagnostics}};
   assert.equal(normalizeDynamicsResult(combined,f.scene).steady.converged,true);
   const missing=structuredClone(combined);delete missing.diagnostics.asymptoticPositivityError;
   assert.throws(()=>normalizeDynamicsResult(missing,f.scene),/长期密度/);
-  const invalid=structuredClone(combined);invalid.asymptoticDensityImag[f.index*32+f.index]=.01;
+  const invalid=structuredClone(combined);entryAt(invalid).densityImag[f.index*32+f.index]=.01;
   assert.throws(()=>normalizeDynamicsResult(invalid,f.scene),/长期复密度/);
 });
 

@@ -282,7 +282,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 
 ### 6.16 部分达到精度的结果与中间结果（2026-10-27）
 
-- **不扣留算出的结果**（取代 §6.13 中"达不到即失败"的做法）。轨迹的 `populationAccuracy` 带 `sampleErrors`（每个采样时刻一个布居误差上界）、`estimatedMaximumError`（其最大值）和状态：全部 ≤ ε 为 `estimated-converged`，否则为 `estimated-partial`，并带 `reason`。长期布居带 `asymptoticEstimatedError` 和 `asymptoticWithinTolerance`；`asymptoticStatus` 仍是物理分类，`not-converged` 只表示没有算出可用结果。这些字段都是必需的：界面与求解器在同一个 EXE 中发布，不保留旧格式。
+- **不扣留算出的结果**（取代 §6.13 中"达不到即失败"的做法）。轨迹的 `populationAccuracy` 带 `sampleErrors`（每个采样时刻一个布居误差上界）、`estimatedMaximumError`（其最大值）和状态：全部 ≤ ε 为 `estimated-converged`，否则为 `estimated-partial`，并带 `reason`。长期布居（`asymptoticHorizons` 的每一项）带 `estimatedError` 和 `withinTolerance`；`status` 仍是物理分类，`not-converged` 只表示没有算出可用结果。这些字段都是必需的：界面与求解器在同一个 EXE 中发布，不保留旧格式。
 - **布居演化图**：所有曲线照画；误差超过 0.5% 的采样（到相邻采样的一半为止）铺浅橙色背景，曲线在那里画成淡色虚线，图例加一项"估计误差 > 0.5%"。悬停读数在时刻后写该时刻的 ±误差，超出时为橙色并注明。读数放在光标线较宽的一侧，图窄时按那一侧的宽度换行，不盖住光标，指针始终在图上；新的检查点或最终结果替换图时，打开的读数留在原采样上（同一次计算的检查点与最终结果采样相同）。
 - **状态栏**：部分达到时加一句，例如"t ≤ 0.021 μs 估计误差最大 0.61%（超过 0.5%），其余时刻 ≤ 0.5%"（`accuracy.ts`）；p̄(T) 超出时写"p̄(1 s) 估计误差 0.72%（超过 0.5%）"。两者同时出现时状态栏写短句"t ≤ 0.021 μs 误差最大 0.61% · p̄(1 s) 误差 0.72%（均超 0.5%）"，完整的两句在它的悬停提示中，800 px 宽时也放得下一行。
 - **每个输出按自己的误差界判断**（2026-10-28）：`estimated-converged` 表示轨迹每个采样点的误差上界都在 0.5% 内，长期平均的 `withinTolerance: true` 表示它自己的误差上界（含投影到密度矩阵的改变量）在 0.5% 内；否则分别为 `estimated-partial` 与 false，文字写"超过 0.5%"。求解器不再有"上界在 0.5% 内但未确认收敛"的结果（原来的"未确认收敛"已取消）：读取时状态与误差界不一致的结果被拒绝。
@@ -300,8 +300,8 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 
 ### 6.18 三个时刻 T 一次算出，切换 T 即时显示（2026-10-28）
 
-- **求解器契约**：每次长期平均的计算都给出三个标准时刻的结果。请求的 T 仍在原来的长期平均字段中（`asymptoticPopulations` 等，`horizonUs`），另有 `asymptoticHorizons`：三项，每项 `{horizonUs: 1e5 | 1e6 | null, populations, densityReal, densityImag, estimatedError, withinTolerance, status, reason}`。完整请求带 `includeAsymptotic: false` 时只返回轨迹（`asymptoticStatus` 为 `not-requested`，没有 `horizonUs` 和 `asymptoticHorizons`）。
-- **严格读取**（`solver-client.ts`）：请求了长期平均（算出与否）就必须有 `horizonUs` 和 `asymptoticHorizons`，没有请求就都不能有。列表恰好三项，三个 T 各一项（顺序不限）；每项按主字段的规则读：状态是已知的计算结果或 `not-converged`；算出的项有 32 个概率、复密度（对角与布居一致、厄米、正性子式）、误差上界，且 `withinTolerance` 与"误差 ≤ 0.5%"一致；未算出的项没有布居和密度。请求的 T 那一项必须与主字段相同（状态、误差、是否在 ε 内、布居），读出后就是主字段的结果本身。方法、最慢弛豫时间和守恒量个数属于这次计算，各 T 共用；残差和长期密度的数值验证只属于请求的 T。没有兼容旧求解器的路径：旧求解器的长期平均结果因缺少 `asymptoticHorizons` 不再读入。
+- **求解器契约**：每次长期平均的计算都给出三个标准时刻的结果，长期平均只有这一种写法：`asymptoticHorizons`，三项，每项 `{horizonUs: 1e5 | 1e6 | null, populations, densityReal, densityImag, estimatedError, withinTolerance, status, reason}`。请求的 `meanHorizonUs` 只能是这三个时刻之一（其它值报错）；它指明界面当作长期平均读的那一项，诊断里的残差和长期密度的数值验证属于这一项。原来与这一项重复的顶层字段（`asymptoticPopulations`、`asymptoticStatus`、`horizonUs` 等）已取消。完整请求带 `includeAsymptotic: false` 时只返回轨迹（没有 `asymptoticHorizons`）。
+- **严格读取**（`solver-client.ts`）：请求了长期平均（算出与否）就必须有 `asymptoticHorizons`，没有请求就不能有。列表恰好三项，三个 T 各一项（顺序不限）；每项按同一规则读：状态是已知的计算结果或 `not-converged`；算出的项有 32 个概率、复密度（对角与布居一致、厄米、正性子式）、误差上界，且 `withinTolerance` 与"误差 ≤ 0.5%"一致；未算出的项没有布居和密度。请求的 T 那一项就是结果的长期平均（`steady`）。方法、最慢弛豫时间和守恒量个数属于这次计算，各 T 共用；残差和长期密度的数值验证只属于请求的 T。界面与求解器同版发布，没有兼容旧求解器的路径。
 - **缓存**（`current-results.ts`、`solve-plan.ts`、`dynamics-cache-key.ts`）：长期平均按"长期平均的输入 + T"缓存，输入是物理参数与初态（`meanInputsKey`），不含时长、采样点数和 T；轨迹按"轨迹的输入"（`trajectoryInputsKey`：长期平均的输入 + 时长 + 采样点数）缓存。每个结果带来的三个 T 全部存入。只保留当前输入的结果：物理参数或初态一变，三个 T 一起作废；时长或采样点数一变，只作废轨迹。回到早先的输入要重新计算。
 - **请求**：页面需要什么就只请求什么。长期布居模式（能级图 p̄）只需要 T 时刻的长期平均，其余页面还需要轨迹。缓存里有 T 时刻的长期平均时，切换 T 立即显示，不发请求；改时长或采样点数（以及其它不改变长期平均输入的修改）只请求轨迹（`includeAsymptotic: false`），长期平均用缓存中的。都没有时发完整请求；只缺长期平均时发只求长期平均的请求。正在进行的请求若能带来所缺的内容（长期平均的计算带来全部三个 T），换页面或换 T 不会取消或重发它。
 - 其余不变：计算期间不画中间结果，最终结果一次画出；"停止"后最后一个检查点成为结果（它的轨迹，以及在没有最终结果的 T 上它的长期平均，都标为中间结果）；每个时刻的误差标记照旧。

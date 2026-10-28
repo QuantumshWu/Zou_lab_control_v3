@@ -207,7 +207,8 @@ export async function createAtomServer(options={}){
         const native=prepareNativeSolve(payload),options=native.payload.options;
         task=service.submit(native.payload,token,streaming?result=>streamEvent({type:'checkpoint',data:native.respond(result,token)}):undefined);
         const result=await task.promise;
-        if(options.includeAsymptotic&&!result.asymptoticPopulations)await recordFailure({time:new Date().toISOString(),request:token,scene:payload.scene,options,buildSha256:build.sha256,binarySha256:result.service?.binarySha256??configuredBinary.sha256,status:result.asymptoticStatus,diagnostics:result.diagnostics}).catch(()=>{});
+        const mean=result.asymptoticHorizons?.find(entry=>entry.horizonUs===(options.meanHorizonUs??null));
+        if(options.includeAsymptotic&&!mean?.populations)await recordFailure({time:new Date().toISOString(),request:token,scene:payload.scene,options,buildSha256:build.sha256,binarySha256:result.service?.binarySha256??configuredBinary.sha256,status:mean?.status,diagnostics:result.diagnostics}).catch(()=>{});
         send(200,native.respond(result,token));
       }catch(error){const evidence={time:new Date().toISOString(),request:submitted?.request,scene:submitted?.scene,options:submitted?.options,buildSha256:build.sha256,binarySha256:configuredBinary.sha256,error:error.message,code:error.code??'invalid-request',httpStatus:error.status??400};if(submitted?.scene&&error.code!=='superseded')await recordFailure(evidence).catch(()=>{});send(error.status??400,{error:error.message,code:error.code??'invalid-request',service:{buildSha256:build.sha256,binarySha256:configuredBinary.sha256}});}
       finally{response.removeListener('close',disconnected);}return;
