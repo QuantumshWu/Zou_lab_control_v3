@@ -106,7 +106,7 @@ pub(crate) fn product(lapack:&Lapack,a:&[f64],b:&[f64],r:usize,k:usize,c:usize)-
 pub(crate) fn transpose_rows(a:&[f64],r:usize,c:usize)->Vec<f64>{let mut t=vec![0.;r*c];for i in 0..r{for j in 0..c{t[j*r+i]=a[i*c+j];}}t}
 
 /// The metric columns M W of the space and the Gram matrices.
-pub struct Projection{
+pub struct Projection<'m>{
     n:usize,d:usize,
     /// Canonical modes: (mode, weight, nu); the centre's position.
     pub canonical:Vec<(usize,f64,f64)>,centre:usize,
@@ -120,19 +120,21 @@ pub struct Projection{
     /// F = Re (AW)^T A W, row-major over the covered columns; whether
     /// M = I (no metric: G0 = E, K and H are not built).
     k:Vec<f64>,h:Vec<f64>,e:Vec<f64>,f:Vec<f64>,covered:usize,euclidean:bool,
+    /// The frame's metric (None: M = I, a request that propagates nothing).
+    frame_metric:Option<&'m SwMetric<'m>>,
     vectors:Vectors,
     pub milliseconds:f64,
 }
 /// Grows a row-major old x old matrix to new x new (zeros in the new part).
 fn grow(old_matrix:&[f64],old:usize,new:usize)->Vec<f64>{let mut g=vec![0.;new*new];for i in 0..old{for j in 0..old{g[i*new+j]=old_matrix[i*old+j];}}g}
-impl Projection{
-    /// `euclidean`: M = I (a request that propagates nothing).
-    pub fn new(op:&LatticeOperator<'_>,euclidean:bool)->Result<Self,String>{
+impl<'m> Projection<'m>{
+    /// `metric` None: M = I (a request that propagates nothing).
+    pub fn new(op:&LatticeOperator<'_>,metric:Option<&'m SwMetric<'m>>)->Result<Self,String>{
         let n=op.n;let d=n*n;
         let canonical:Vec<(usize,f64,f64)>=(0..op.modes.len()).filter(|&q|op.canonical[q]).map(|q|(q,if op.mirror[q]==q{1.}else{2.},op.nu[q])).collect();
         let centre=canonical.iter().position(|c|c.0==op.centre).unwrap_or(0);
         let length=canonical.len()*d;
-        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],traces:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,euclidean,
+        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],traces:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,euclidean:metric.is_none(),frame_metric:metric,
             vectors:Vectors::new(op,1)?,milliseconds:0.})
     }
     pub fn columns(&self)->usize{self.covered}
@@ -146,13 +148,11 @@ impl Projection{
                 for(c,&(q,_,_))in self.canonical.iter().enumerate(){for(x,y)in column[c*d..(c+1)*d].iter().zip(&field[q*d..(q+1)*d]){s+=x.re*y.re+x.im*y.im;}}s}).collect::<Vec<f64>>()});
         Ok(rows.concat())
     }
-    /// Takes the space's columns not yet covered; `metric` None exactly when
-    /// the projection is Euclidean.
-    pub fn ingest(&mut self,metric:Option<&SwMetric<'_>>,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
+    /// Takes the space's columns not yet covered.
+    pub fn ingest(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
         let clock=Instant::now();let(old,new)=(self.covered,basis.len());if new==old{return Ok(());}
         let(n,d,l)=(self.n,self.d,self.length);let width=new-old;
-        if self.euclidean!=metric.is_none(){return Err("Galerkin projection: the metric differs from the projection's".into());}
-        if let Some(metric)=metric{let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();self.metric.extend(metric.apply(&fresh)?);}
+        if let Some(metric)=self.frame_metric{let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();self.metric.extend(metric.apply(&fresh)?);}
         for column in &basis[old..new]{
             let pops:Vec<C>=self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect();
             let mut traces=vec![0.;2*self.canonical.len()-1];let mut at=1;
@@ -187,13 +187,14 @@ impl Projection{
 pub struct Model{
     /// Reduced dimension (the basis' columns: W is orthonormal), G (r x r).
     pub r:usize,pub g:Vec<f64>,
-    /// Ritz values, eigenvectors (r x r row-major, complex), coefficients,
-    /// and the values and coefficients the outputs use; per mode the kernel
-    /// and a growing mode projected out (used theta = a = 0).
-    pub theta:Vec<C>,pub vectors:Vec<C>,pub coefficients:Vec<C>,
+    /// Ritz values and eigenvectors (r x r row-major, complex), the values
+    /// and coefficients the outputs use; per mode the kernel and a growing
+    /// mode projected out (used theta = a = 0).
+    pub theta:Vec<C>,pub vectors:Vec<C>,
     pub used_theta:Vec<C>,pub used_coefficients:Vec<C>,pub kernel:Vec<bool>,pub projected_out:Vec<bool>,
-    /// Mode amplitudes (largest population contribution).
-    pub amplitudes:Vec<f64>,
+    /// Mode amplitudes: the largest population contribution on any mode,
+    /// and on the centre alone (the laboratory time average's).
+    pub amplitudes:Vec<f64>,pub centre_amplitudes:Vec<f64>,
     pub growing:usize,pub projected:usize,pub clipped:usize,pub growth_charge:f64,
     /// The reduced steady state (kernel part of c0).
     pub steady:Vec<f64>,
@@ -201,7 +202,7 @@ pub struct Model{
     readout:Vec<Vec<C>>,
 }
 
-impl Projection{
+impl<'m> Projection<'m>{
     /// The reduced model over the covered columns; `initial_norm` = |x0|,
     /// `longest` the longest output time (growth), `tolerance` the
     /// population tolerance.
@@ -260,9 +261,12 @@ impl Projection{
         // Readout of W per canonical mode, and the modes' amplitudes.
         let readout:Vec<Vec<C>>=(0..self.canonical.len()).map(|c|{
             let mut out=vec![ZERO;n*r];for i in 0..n{for jj in 0..k{out[i*r+jj]=self.populations[jj][c*n+i];}}out}).collect();
-        let amplitudes:Vec<f64>=(0..r).map(|jj|{let mut largest=0_f64;
-            for block in &readout{for i in 0..n{let mut v=ZERO;for col in 0..r{mul_add(&mut v,block[i*r+col],s[col*r+jj]);}largest=largest.max(magnitude(v));}}
-            magnitude(a[jj])*largest}).collect();
+        let amplitude=|jj:usize,blocks:&[&Vec<C>]|->f64{let mut largest=0_f64;
+            for block in blocks{for i in 0..n{let mut v=ZERO;for col in 0..r{mul_add(&mut v,block[i*r+col],s[col*r+jj]);}largest=largest.max(magnitude(v));}}
+            magnitude(a[jj])*largest};
+        let every:Vec<&Vec<C>>=readout.iter().collect();
+        let amplitudes:Vec<f64>=(0..r).map(|jj|amplitude(jj,&every)).collect();
+        let centre_amplitudes:Vec<f64>=(0..r).map(|jj|amplitude(jj,&[&readout[self.centre]])).collect();
         // Kernel and growing modes.
         let least=(0..r).min_by(|&p,&q|magnitude(theta[p]).total_cmp(&magnitude(theta[q]))).ok_or("Empty reduced model")?;
         let kernel:Vec<bool>=(0..r).map(|jj|jj==least||magnitude(theta[jj])<KERNEL).collect();
@@ -288,7 +292,7 @@ impl Projection{
             (0..r).map(|i|(0..r).filter(|&jj|kernel[jj]).fold(0.,|acc,jj|acc+mul(s[i*r+jj],a[jj]).re)).collect()
         };
         if steady.iter().chain(&g).any(|v|!v.is_finite()){return Err("Nonfinite reduced model".into());}
-        Ok(Model{r,g,theta,vectors:s,coefficients:a,used_theta,used_coefficients,kernel,projected_out,amplitudes,
+        Ok(Model{r,g,theta,vectors:s,used_theta,used_coefficients,kernel,projected_out,amplitudes,centre_amplitudes,
             growing,projected,clipped,growth_charge,steady,readout})
     }
 }

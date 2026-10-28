@@ -29,10 +29,17 @@ use super::*;
 use super::ledger::RemainderLedger;
 use super::frame::SwFrame;
 
-/// An output's bound is ACCEPTANCE_FACTOR x its estimated error (measured: the
-/// smallest measured ratio of the time-maximum estimate to the actual error
-/// is 0.93); a checkpoint is accepted when every bound is within
-/// POPULATION_TOLERANCE.
+/// An output's bound is ACCEPTANCE_FACTOR x its estimated error; a checkpoint
+/// is accepted when every bound is within POPULATION_TOLERANCE. Measured
+/// (`pipeline_against_a_reference`, 20 us / 200 samples, every checkpoint
+/// whose actual error is above 2% of the tolerance): the smallest ratio of
+/// the time-maximum estimate to the actual error is 0.89 over the research
+/// requests (probe + tweezer, two lasers without the trap, three, four and
+/// five lasers; 1 / 0.89 = 1.12 below the factor). Four lasers without the
+/// trap gave 0.77 at its accepted checkpoint (estimate 1.7e-3, "actual"
+/// 2.2e-3), but against its older reference, which is accurate only to about
+/// 1.2-1.5e-3: that actual is within the reference's own uncertainty, so it
+/// is no evidence against the factor.
 pub const ACCEPTANCE_FACTOR:f64=1.25;
 
 /// The lattice of a run: `modes()` = explicit (P) then ring (Q), the centre

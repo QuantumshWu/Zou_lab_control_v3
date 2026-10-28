@@ -21,10 +21,14 @@
 //! - `states` (32 ids), `timesUs`, `populations` (one row per time). A mean
 //!   result has the single t = 0 row, the initial populations; a finite result
 //!   has >= 2 projected rows and `populationAccuracy`: `status`
-//!   (`estimated-converged` when every sample is within the tolerance, else
+//!   (`estimated-converged` when the run was accepted: every sample within
+//!   the tolerance and every slow class it needs resolved; else
 //!   `estimated-partial` with its `reason`), `sampleErrors` (per sample: the
-//!   acceptance factor times the estimate, the fold remainders included, plus
-//!   the projection's change; an absolute population error),
+//!   acceptance factor times the estimate, plus the projection's change; an
+//!   absolute population error; the estimate's sources are the Krylov
+//!   residual, the omitted ring's feedback and the K^(1) rests the lattice
+//!   leaves out, the other fold remainders are reported only, in
+//!   `diagnostics.lattice.run.ledger`),
 //!   `estimatedMaximumError` (their largest), `requestedTolerance`,
 //!   `projectionCharge`, `includesProjectionCharge`, `scope`.
 //! - `horizonUs`: the echo of the request's `meanHorizonUs` (us, or null for
@@ -32,11 +36,14 @@
 //! - The mean, whenever it was computed: `asymptoticPopulations`,
 //!   `asymptoticDensityReal/Imag`, `asymptoticEstimatedError` (the
 //!   acceptance factor times the estimate plus the density projection's
-//!   change), `asymptoticWithinTolerance`, and `asymptoticStatus`, its
+//!   change), `asymptoticWithinTolerance` (its run accepted and the bound
+//!   within the tolerance), and `asymptoticStatus`, its
 //!   physics (`stationary`, `population-stationary` and `initial-dependent`
 //!   for static models; `time-average` and `initial-dependent-time-average`
-//!   for driven ones) with `asymptoticReason`; `not-converged` (with its
-//!   reason) only when nothing usable was computed; `not-requested`.
+//!   for driven ones) with `asymptoticReason` (a convergence claim only
+//!   within the tolerance); `not-converged` (with its reason, no populations)
+//!   when nothing usable was computed or the bound is 1 or more;
+//!   `not-requested`.
 //! - `diagnostics`. The reader gates the rows' `traceError` and
 //!   `initialStateError`, `elapsedMs`, a finite result's `method`, and a mean's
 //!   `asymptoticMethod`, `asymptoticTraceError`, `asymptoticPositivityError` and
@@ -66,6 +73,11 @@ const RELAXING_SHARE:f64=0.05;
 /// when the optical coherence its background basis discards exceeds this (a
 /// deliberate margin over the eigensolver's roundoff).
 const DISCARDED_COHERENCE:f64=1e-8;
+/// A mean whose bound reaches this carries no information (a population
+/// error of 1 bounds nothing): it is reported not converged, unshown.
+const UNINFORMATIVE_BOUND:f64=1.;
+/// The sentence added to a mean's reason when its run was not accepted.
+const OUTSIDE:&str=" Not converged: the run was not accepted (its error bound, asymptoticEstimatedError, is above the tolerance, or a slow class it needs is not resolved), so the populations are an estimate.";
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
 /// Stack of the mean's thread (LAPACK on it).
 const MEAN_STACK:usize=1<<26;
@@ -243,11 +255,11 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
 /// steady state; `observer` sees every checkpoint.
 fn mean_run(request:&Prepared,horizon:Option<f64>,observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
     let horizons:Vec<f64>=horizon.into_iter().collect();
-    pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&horizons,steady:horizon.is_none(),groups:&request.groups,explicit:Some(&request.explicit)},Some(observer))
+    pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&horizons,steady:horizon.is_none(),groups:&request.groups,explicit:&request.explicit},Some(observer))
 }
 /// The trajectory of a request alone on its grid.
 fn trajectory_run(request:&Prepared,times:&[f64],observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
-    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&[],steady:false,groups:&request.groups,explicit:Some(&request.explicit)},Some(observer))
+    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&[],steady:false,groups:&request.groups,explicit:&request.explicit},Some(observer))
 }
 
 /// The mean of an answer: the laboratory time average of the steady state,
@@ -267,6 +279,9 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
     let populations=diagonal(&density);
     let positivity=(-prepared.lapack.hermitian_eigen(&density,n)?.0[0]).max(0.);
     let trace_error=(populations.iter().sum::<f64>()-1.).abs();
+    // Converged: the run accepted (every bound within the tolerance and every
+    // slow class it needs resolved) and the projected mean within it.
+    let within=answer.accepted&&estimated<=POPULATION_TOLERANCE;
     // At a horizon, populations still relaxing (the horizon's own reduced
     // model: its modes alive at T; the steady state a horizon run never
     // bounds) by more than RELAXING_SHARE of the tolerance, or several
@@ -276,17 +291,19 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
     let(status,reason)=match(model.drives.is_empty(),dependent){
         (false,true)=>("initial-dependent-time-average","Long-time phase average at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent."),
         (true,true)=>("initial-dependent","Lindblad mean of the specified initial density: slow modes still relaxing at the horizon (horizonUs), or conserved quantities, keep it initial-state dependent."),
-        (false,false)=>("time-average","Converged long-time phase average of the full driven Lindblad equation (unique limit: only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time); populations are a time average, not a time-independent density."),
+        (false,false)=>("time-average",if within{"Converged long-time phase average of the full driven Lindblad equation (unique limit: only the trace is conserved); populations are a time average, not a time-independent density."}
+            else{"Long-time phase average of the full driven Lindblad equation (unique limit: only the trace is conserved); populations are a time average, not a time-independent density."}),
         (true,false)if discarded>DISCARDED_COHERENCE=>("population-stationary","Populations converge in the background basis; exported density is the laboratory-frame time average."),
-        (true,false)=>("stationary","Unique full-density Lindblad stationary solution (only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time)."),
+        (true,false)=>("stationary",if within{"Unique full-density Lindblad stationary solution (only the trace is conserved)."}else{"Full-density Lindblad stationary solution (only the trace is conserved)."}),
     };
+    let reason=if within{reason.to_string()}else{format!("{reason}{OUTSIDE}")};
     let fields=json!({"horizonUs":horizon,"asymptoticStatus":status,"asymptoticReason":reason,"asymptoticPopulations":populations,
         "asymptoticDensityReal":density.iter().map(|z|z.re).collect::<Vec<_>>(),
         "asymptoticDensityImag":density.iter().map(|z|z.im).collect::<Vec<_>>(),
-        "asymptoticEstimatedError":estimated,"asymptoticWithinTolerance":estimated<=POPULATION_TOLERANCE});
+        "asymptoticEstimatedError":estimated,"asymptoticWithinTolerance":within});
     let slow=answer.slowest.as_ref();let resolved=slow.filter(|s|s.resolved());
     let diagnostics=json!({"asymptoticMethod":METHOD,"meanDensityFrame":MEAN_FRAME,
-        "uniquenessScope":if answer.conserved>1{"several conserved quantities: mean of the specified initial density"}else{"unique limit: every mode but the trace relaxes, however slowly (slowestRelaxationUs)"},
+        "uniquenessScope":if answer.conserved>1{"several conserved quantities: mean of the specified initial density"}else{"unique limit: every mode but the trace relaxes, however slowly"},
         "asymptoticTraceError":trace_error,"asymptoticPositivityError":positivity,"residual":answer.steady_residual,
         "asymptoticAccuracy":{"requestedTolerance":POPULATION_TOLERANCE,"acceptanceFactor":ACCEPTANCE_FACTOR,
             "projectionCharge":projection,"metric":"max over states and requested F groups"},
@@ -321,7 +338,9 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
             "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2],"floquetKernels":prepared.timing[3]}}});
     if let Some((answer,solution))=trajectory{
         let estimated=answer.sample_errors.iter().fold(0_f64,|a,&b|a.max(b));
-        let converged=estimated<=POPULATION_TOLERANCE;
+        // The run's acceptance, not the bound alone: a slow class the
+        // estimate cannot see may still be missing.
+        let converged=answer.accepted;
         result["populationAccuracy"]=json!({"status":if converged{"estimated-converged"}else{"estimated-partial"},"requestedTolerance":POPULATION_TOLERANCE,
             "sampleErrors":answer.sample_errors,"estimatedMaximumError":estimated,"projectionCharge":answer.projection,
             "includesProjectionCharge":true,"scope":{"states":32,"samples":options.samples,"groups":request.names}});
@@ -333,7 +352,13 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
     match mean{
         Some(Ok((answer,solution)))=>{
             let(fields,diagnostics)=mean_fields(model,options,request,answer)?;
-            for(key,value)in fields{result[key.as_str()]=value;}
+            let bound=fields.get("asymptoticEstimatedError").and_then(Value::as_f64).unwrap_or(f64::INFINITY);
+            if bound>=UNINFORMATIVE_BOUND{
+                // A bound of 1 or more bounds nothing: no populations shown.
+                result["horizonUs"]=json!(options.mean_horizon_us);result["asymptoticStatus"]=json!("not-converged");
+                result["asymptoticReason"]=json!(format!("The mean's error bound is {bound:.2e}, at least 1: it carries no information, so no populations are shown"));
+                result["asymptoticEstimatedError"]=json!(bound);result["asymptoticWithinTolerance"]=json!(false);
+            }else{for(key,value)in fields{result[key.as_str()]=value;}}
             if let Value::Object(target)=&mut result["diagnostics"]{for(key,value)in diagnostics{target.insert(key,value);}}
             if let Some(s)=solution{result["diagnostics"][if trajectory.is_some(){"meanLattice"}else{"lattice"}]=lattice_json(prepared,Some(s));}
         }
@@ -409,9 +434,11 @@ mod tests{
     }
     /// The default scene's mean at T = 100 ms, 1 s and infinity against
     /// exact references (tests/fixtures/default_scene_horizons.json), each
-    /// within its bound above the references' agreement floor (both solvers
-    /// agree with them to 7e-7; the release returned the steady state for
-    /// 100 ms, off by 7.8e-3 with a bound of 7e-13), and p(T) moving toward
+    /// within its bound above the comparison floor (both solvers agree with
+    /// them to 7e-7, inside the references' own accuracy: their two
+    /// cross-check methods differ by 3e-5 and more; the release returned the
+    /// steady state for 100 ms, off by 7.8e-3 with a bound of 7e-13), and
+    /// p(T) moving toward
     /// the steady state as T grows (exact: 7.8e-3 at 100 ms, 4.0e-3 at 1 s;
     /// the scene's two slow classes decay monotonically).
     #[test]
@@ -508,7 +535,7 @@ mod tests{
             let mut line=line;if let(Value::Object(a),Value::Object(b))=(&mut line,work){a.extend(b);}
             println!("{line}");
         };
-        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,steady,groups:&prepared.groups,explicit:None},Some(&mut observe));
+        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,steady,groups:&prepared.groups,explicit:&std::sync::OnceLock::new()},Some(&mut observe));
         let total_ms=started.elapsed().as_secs_f64()*1e3;
         match result{
             Ok(s)=>{let a=&s.answer;

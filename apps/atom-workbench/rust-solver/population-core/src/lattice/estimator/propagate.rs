@@ -139,7 +139,7 @@ impl ErrorLattice<'_>{
         // output entry is accumulated by one task in the serial order.
         let execution=Execution::new()?;
         let per_time=targets.len()*n*r+classes.iter().map(|(_,t)|t.len()*n*d).sum::<usize>();
-        let width=t_count.div_ceil(execution.tasks(t_count,per_time*t_count,crate::parallel::MINIMUM_WORK_PER_TASK));
+        let width=super::time_chunk(t_count,per_time);
         let chunks:Vec<(usize,usize)>=(0..t_count).step_by(width).map(|a|(a,(a+width).min(t_count))).collect();
         let parts=execution.map(chunks,|(a,b)|->Result<Vec<C>,String>{
             let(gemm,ts,tc)=(lapack.complex_gemm(),&times[a..b],b-a);

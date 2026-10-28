@@ -21,7 +21,7 @@
 //! complex inverse on every mode.
 
 use super::*;
-use super::floquet::{FloquetKernels,Transform,adjoint,inverse,mirror_computed,sandwich_batch,transpose};
+use super::floquet::{FloquetKernels,Transform,adjoint,inverse,sandwich_batch,transpose};
 use super::operator::LatticeOperator;
 use super::poles::Pole;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
@@ -106,9 +106,8 @@ impl<'p> Preconditioning<'p>{
     /// every mode, the centre Woodbury and, for the steady shift, the trace
     /// row.
     pub fn batch(&self,op:&LatticeOperator<'_>,shift:Pole)->Result<FloquetBatch<'p>,String>{
-        let computed=op.canonical.clone();
-        let transform=self.kernels.transform(op,&computed)?;
-        FloquetBatch::new(self.kernels,self,op,shift,computed,transform)
+        let transform=self.kernels.transform(op)?;
+        FloquetBatch::new(self,op,shift,transform)
     }
 }
 
@@ -120,20 +119,19 @@ pub struct FloquetBatch<'p>{
     shift:Pole,centre:usize,
     /// The modes the transforms compute (canonical or a subset of them),
     /// and those divided (every mode for a complex shift).
-    computed:Vec<bool>,divided:Vec<bool>,mirror:Vec<usize>,
+    canonical:Vec<bool>,divided:Vec<bool>,mirror:Vec<usize>,
     transform:Transform<'p>,
     /// 1 / (lambda_a + mu_b - i nu_q - sigma) per divided mode.
     reciprocal:Vec<C>,
     factor:Option<CentreFactor>,
-    /// Centre denominators at roundoff, moved and corrected.
-    pub moved:usize,
     execution:Execution,buffers:[Vec<C>;3],
 }
 impl<'p> FloquetBatch<'p>{
-    fn new(kernels:&'p FloquetKernels,woodbury:&Preconditioning<'p>,op:&LatticeOperator<'_>,shift:Pole,computed:Vec<bool>,transform:Transform<'p>)->Result<Self,String>{
+    fn new(woodbury:&Preconditioning<'p>,op:&LatticeOperator<'_>,shift:Pole,transform:Transform<'p>)->Result<Self,String>{
+        let(kernels,canonical)=(woodbury.kernels,op.canonical.clone());
         let n=op.n;let d=n*n;let modes=op.modes.len();let sigma=shift.sigma();let centre=op.centre;
         let(lambda,mu)=kernels.quasi_energies();
-        let divided=if shift.copies()==2{vec![true;modes]}else{computed.clone()};
+        let divided=if shift.copies()==2{vec![true;modes]}else{canonical.clone()};
         let mut reciprocal=vec![ZERO;modes*d];let mut moved=Vec::new();
         for q in(0..modes).filter(|&q|divided[q]){for a in 0..n{for b in 0..n{
             let z=C{re:lambda[a].re+mu[b].re-sigma.re,im:lambda[a].im+mu[b].im-op.nu[q]-sigma.im};
@@ -157,12 +155,11 @@ impl<'p> FloquetBatch<'p>{
                 w.lapack.complex_gemm().multiply(total,d,total,ONE,&ginv,total,&v,total,ZERO,&mut gv,total)?;
                 Some(CentreFactor{total,du,gv})}
             else{None};
-        Ok(Self{n,lapack:Arc::clone(&op.prepared.lapack),shift,centre,computed,divided,mirror:op.mirror.clone(),transform,reciprocal,factor,
-            moved:moved.len(),execution:Execution::new()?,buffers:[vec![],vec![],vec![]]})
+        Ok(Self{n,lapack:Arc::clone(&op.prepared.lapack),shift,centre,canonical,divided,mirror:op.mirror.clone(),transform,reciprocal,factor,
+            execution:Execution::new()?,buffers:[vec![],vec![],vec![]]})
     }
-    /// Mirrored blocks from the computed ones (zero where neither a block nor
-    /// its mirror is computed), the centre Hermitian.
-    fn mirror(&self,x:&mut[C]){mirror_computed(x,self.n,&self.computed,&self.mirror);}
+    /// The mirror modes from the canonical ones, the centre Hermitian.
+    fn mirror(&self,x:&mut[C]){mirror_field(x,self.n,&self.canonical,&self.mirror);}
     /// Divides by the denominators on the divided modes and applies the
     /// centre factor.
     fn divide(&self,c:&mut[C])->Result<(),String>{
@@ -185,7 +182,7 @@ impl<'p> FloquetBatch<'p>{
         Ok(())
     }
     fn solve(&mut self,x:&[C],y:&mut[C],buffers:&mut[Vec<C>;3])->Result<(),String>{
-        let(n,d)=(self.n,self.n*self.n);let modes=self.computed.len();let size=modes*d;
+        let(n,d)=(self.n,self.n*self.n);let modes=self.canonical.len();let size=modes*d;
         let[a,b,c]=buffers;let(a,b,c)=(&mut a[..size],&mut b[..size],&mut c[..size]);
         if self.shift.copies()==2{
             // The transforms are complex-linear and keep Hermitian symmetry:
@@ -211,7 +208,7 @@ impl<'p> FloquetBatch<'p>{
 }
 impl Preconditioner for FloquetBatch<'_>{
     fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{
-        let size=self.computed.len()*self.n*self.n;
+        let size=self.canonical.len()*self.n*self.n;
         if x.len()!=size*self.shift.copies()||y.len()!=x.len(){return Err("Floquet preconditioner field dimensions differ".into());}
         let mut buffers=std::mem::take(&mut self.buffers);for b in &mut buffers{grow(b,size);}
         let result=self.solve(x,y,&mut buffers);

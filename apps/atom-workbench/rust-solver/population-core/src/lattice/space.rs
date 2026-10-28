@@ -19,7 +19,8 @@
 //! Pi0 u = Pi0 x0 when the trace is the only left kernel vector; it is done
 //! first and joins the basis only. When the bordered system is singular
 //! (more conserved quantities) the residue is taken at 0+ on x0
-//! (ZERO_PLUS), where the kernel dominates the column.
+//! (`reduced::KERNEL`, the rate below which a mode is conserved), where the
+//! kernel dominates the column.
 //!
 //! Translations (A S_s = S_s (A - i nu_s) up to the fold's i nu_s K^(1) and
 //! the lattice boundary): S_s K(A, x0; xi) = K(A, S_s x0; xi - i nu_s), the
@@ -51,10 +52,6 @@ pub const STEADY_TOLERANCE:f64=1e-9;
 /// bordered system reaches and a singular one (more conserved quantities)
 /// stalls far above.
 const BORDERED_SINGULAR:f64=1e-6;
-/// The pole 0+ (1/us) of a singular bordered system. Derived: the column is
-/// Pi0 x0 + O(xi / gap), and rates below `reduced::KERNEL` (the same 1e-9)
-/// count as conserved, so the kernel dominates it.
-const ZERO_PLUS:f64=1e-9;
 /// A Krylov direction below NOISE x INNER_TOLERANCE of its column is noise.
 /// Measured: without the floor a repeated pole near 1 / T added inner-solve
 /// noise and a spurious mode (Re theta +4.6e-2 /us) on two lasers at 10 ms.
@@ -171,7 +168,7 @@ impl Space{
                 let bordered=lattice.solve(Pole::Zero,&[u],steady);
                 let(w,steps,residual)=match bordered{Ok((w,steps,residual))if residual<=BORDERED_SINGULAR=>(w.into_iter().next().unwrap_or_default(),steps,residual),
                     _=>{let x0:Vec<C>=self.krylov[0].iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-                        let(w,steps,residual)=lattice.solve(Pole::Real(ZERO_PLUS),&[x0],inner)?;(w.into_iter().next().unwrap_or_default(),steps,residual)}};
+                        let(w,steps,residual)=lattice.solve(Pole::Real(super::reduced::KERNEL),&[x0],inner)?;(w.into_iter().next().unwrap_or_default(),steps,residual)}};
                 let floor=self.floor();(usize::from(self.append(lattice,w,floor)?),steps,residual)
             }
             Pole::Real(_)|Pole::Complex(_)=>{
