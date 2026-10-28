@@ -17,6 +17,13 @@
 //!   replaces TRACE_CORRECTION (`reduced`); ATOM_DIAG_EUCLIDEAN=1 takes the
 //!   Euclidean Galerkin model for a request that propagates too,
 //!   ATOM_DIAG_DRESSED=1 the dressed metric E^-H E^-1 (`frame`).
+//! - A reference run on a larger lattice: ATOM_DIAG_RINGS=k enlarges the
+//!   explicit set by its ring k times (`charge_set`), ATOM_DIAG_INNER=tol
+//!   replaces the inner and steady tolerances (`space`),
+//!   ATOM_DIAG_MAX_SOLVES and ATOM_DIAG_BASIS_GB the budgets and
+//!   ATOM_DIAG_NO_ESTIMATE=1 skips the estimate (never accepted: the run
+//!   ends at a budget with an error; ATOM_DIAG_DUMP of the validation test
+//!   keeps every checkpoint's outputs).
 use super::*;
 
 /// The relative size of the perturbation ATOM_DIAG_<part> (None unset).
