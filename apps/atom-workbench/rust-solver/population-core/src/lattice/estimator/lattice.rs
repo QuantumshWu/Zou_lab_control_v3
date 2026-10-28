@@ -93,8 +93,7 @@ pub struct ErrorLattice<'p>{
     /// slaved amplitude's feedback onto P u Q alone, the mirror with it).
     pub attribute:bool,pub last_ring:Vec<f64>,
     outer:LatticeOperator<'p>,inner_mask:Vec<bool>,ring_mask:Vec<bool>,edge_modes:usize,
-    /// The request's frame: its kernels and blocks are read on first use (a
-    /// steady state alone reads neither).
+    /// The request's frame: its kernels and blocks.
     frame:&'p SwFrame<'p>,
     /// The near modes (the centre and its one-step neighbours), and the (I - S)
     /// pairs into them: (target, source, step), target = source + step.

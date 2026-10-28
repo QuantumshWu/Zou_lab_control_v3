@@ -380,7 +380,7 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
             "projectionCharge":mean.projection,"metric":"max over states and requested F groups"},
         "conservedQuantities":answer.conserved,"slowestRelaxationUs":resolved.map(|s|1./s.rate),
         "slowestRelaxation":slow.map(|s|json!({"ratePerUs":s.rate,"residualPerUs":s.residual,"classesMatched":s.matched,"resolved":s.resolved(),
-            "relaxationRangeUs":[1./(s.rate+s.residual),if s.matched==Some(true)&&s.rate>s.residual{Some(1./(s.rate-s.residual))}else{None}],
+            "relaxationRangeUs":[1./(s.rate+s.residual),if s.matched&&s.rate>s.residual{Some(1./(s.rate-s.residual))}else{None}],
             "rule":"the slowest decaying Ritz pair of population weight at least 1% of the tolerance; resolved (slowestRelaxationUs) when its residual is within a tenth of its rate and every slower class of the initial state (the second-order block's eigenvalues) has a pair within 40%, else only the range: at least 1 / (rate + residual)"})),
         "discardedOpticalCoherence":mean.discarded,"horizonRelaxingBound":mean.relaxing});
     match diagnostics{Value::Object(d)=>Ok((fields,d)),_=>Err("Mean diagnostics are not an object".into())}
@@ -590,8 +590,9 @@ mod tests{
     }
     /// End-to-end validation of the pipeline against a reference (ignored):
     /// ATOM_VALIDATE_REQUEST=<request.json>, ATOM_VALIDATE_GRID="T:samples"
-    /// (absent: no trajectory), ATOM_VALIDATE_HORIZONS="1e5,1e6",
-    /// ATOM_VALIDATE_STEADY=0 (no steady output),
+    /// (absent: no trajectory) and ATOM_VALIDATE_HORIZONS="1e5,1e6" (absent:
+    /// none; a request has a trajectory or a horizon), ATOM_VALIDATE_STEADY=0
+    /// (no steady output),
     /// ATOM_VALIDATE_REFERENCE=<json with times/pops, steady, horizons{T}>,
     /// ATOM_VALIDATE_DUMP=<path> (every checkpoint's outputs and bounds
     /// appended as a JSON line). One JSON line per checkpoint (its bounds and
@@ -607,6 +608,7 @@ mod tests{
         let times:Vec<f64>=var("ATOM_VALIDATE_GRID").map_or(vec![],|g|{let(t,s)=g.split_once(':').unwrap();let(t,s):(f64,usize)=(t.parse().unwrap(),s.parse().unwrap());
             (0..s).map(|i|t*i as f64/(s-1)as f64).collect()});
         let horizons:Vec<f64>=var("ATOM_VALIDATE_HORIZONS").map_or(vec![],|h|h.split(',').map(|x|x.parse().unwrap()).collect());
+        assert!(!times.is_empty()||!horizons.is_empty(),"ATOM_VALIDATE_GRID or ATOM_VALIDATE_HORIZONS: a request has a trajectory or a horizon");
         let steady=var("ATOM_VALIDATE_STEADY").is_none_or(|v|v!="0");
         let started=Instant::now();
         let options=Options::default();let prepared=prepare_request(&model,&options).unwrap();let prepare_ms=started.elapsed().as_secs_f64()*1e3;
@@ -650,7 +652,7 @@ mod tests{
                 "perTimeMin":coverage.map(|c|c.0),"perTimeViolations":coverage.map(|c|c.1),"perTimeMinAll":coverage.map(|c|c.2),
                 "returnedErrTraj":returned.as_ref().map(|e|e.iter().fold(0_f64,|x,&y|x.max(y))),
                 "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"conserved":c.conserved,
-                "slowestRate":c.slowest.map(|s|s.rate),"slowestResidual":c.slowest.map(|s|s.residual),"slowestMatched":c.slowest.and_then(|s|s.matched),"ms":c.milliseconds});
+                "slowestRate":c.slowest.map(|s|s.rate),"slowestResidual":c.slowest.map(|s|s.residual),"slowestMatched":c.slowest.map(|s|s.matched),"ms":c.milliseconds});
             let work=json!({"slowModes":c.estimate.work.slow_modes,"slowTrajectory":c.estimate.work.slow_trajectory,"lambdaSlow":c.estimate.work.lambda_slow,"estimateMs":c.estimate.work.milliseconds,
                 "operatorWork":c.inner.operator_work,"innerSteps":c.inner.steps,"innerMs":c.inner.milliseconds,"applyMs":c.inner.timing.apply_ms,"preconditionMs":c.inner.timing.precondition_ms,"orthogonalizeMs":c.inner.timing.orthogonalize_ms,"batchMs":c.inner.batch_ms,"blockOperations":c.inner.block_operations(),
                 "timingMs":{"explicitSet":c.timing.explicit_set_ms,"setup":c.timing.setup_ms,"frame":c.timing.frame_ms.iter().sum::<f64>(),"frameWait":c.timing.frame_wait_ms,"projection":c.timing.projection_ms,"model":c.timing.model_ms,"ordering":c.timing.ordering_ms,"estimate":c.timing.estimate_ms,"outputs":c.timing.outputs_ms},

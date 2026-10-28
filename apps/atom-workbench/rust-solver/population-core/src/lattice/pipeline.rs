@@ -2,10 +2,9 @@
 //! of one lattice operator applied to x0, read from one reduced model.
 //!
 //! 1. The explicit set P and its ring Q (`charge_set`); the lattice P u Q
-//!    and its solves at the poles (`poles`). A request that propagates (a
-//!    trajectory or a horizon) builds its frame (`frame`: the reduced
-//!    model's metric, the estimate's fast part, the slowest relaxation's
-//!    classes) on its own thread meanwhile.
+//!    and its solves at the poles (`poles`). The request's frame (`frame`:
+//!    the reduced model's metric, the estimate's fast part, the slowest
+//!    relaxation's classes) is built on its own thread meanwhile.
 //! 2. One rational Krylov space from x0 (`space`): the bordered steady
 //!    column first, the translations through the gate active from the start,
 //!    then the ladder's poles by their expected gain, re-ranked at every
@@ -14,11 +13,8 @@
 //!    not reduce it loses its turn; one never solved keeps the whole), per
 //!    real solve (a complex pole costs two); a pole that adds no direction
 //!    leaves the ladder.
-//! 3. Every CHECKPOINT solves (a request that propagates nothing: also
-//!    right after the steady column): the Galerkin model in the frame's
-//!    metric (`reduced`; a request for the steady state alone takes M = I,
-//!    a speed case: it skips about 1 s of frame build, and its steady
-//!    column makes the kernel independent of the metric), its outputs (trajectory on the grid, horizons, steady
+//! 3. Every CHECKPOINT solves: the Galerkin model in the frame's metric
+//!    (`reduced`), its outputs (trajectory on the grid, horizons, steady
 //!    state, slowest relaxation, conserved count) and the error estimate
 //!    (`estimator`). An output's bound is ACCEPTANCE_FACTOR x its estimate,
 //!    plus, on a trajectory row, the change of its projection onto the
@@ -89,14 +85,10 @@ const CLASS_GAP:f64=1.+CLASS_MATCH;
 /// frame's second-order block) and its Ritz pair: 18% on a four-laser case
 /// (class 0.0418 /us, pair 0.0344 /us).
 const CLASS_MATCH:f64=0.4;
-/// Grid samples assumed for the ladder's top when a request has no grid,
-/// and the longest time of a request for the limit alone (us).
+/// Grid samples assumed for the ladder's top when a request has no grid.
 /// LADDER_SAMPLES is a deliberate margin: as if the horizon were sampled
 /// like the app's trajectories (161-200 samples on the research scenes).
 const LADDER_SAMPLES:f64=200.;
-/// A deliberate margin: the app's default horizon, 1 s; the steady column
-/// and the slow points (down to `space::SLOW_FLOOR`) serve slower rates.
-const LIMIT_REACH:f64=1e6;
 /// A decaying class of the frame's block carries none of x0's trace; a
 /// class whose trace is at least this share of its weight is the block's
 /// kernel. Measured: decaying classes at most 5e-3 of their weight, the
@@ -121,7 +113,8 @@ const RING_COMPLETION:f64=0.9;
 /// Stack of the frame's thread (LAPACK on it).
 const FRAME_STACK:usize=1<<26;
 
-/// What a request asks for.
+/// What a request asks for: a trajectory or horizons (or both), and with
+/// them the steady state.
 pub struct Request<'a>{
     /// The uniform grid from 0 (empty: no trajectory).
     pub times:&'a[f64],
@@ -251,9 +244,9 @@ fn class_rates(frame:&SwFrame<'_>,eigen:&BlockEigenbasis,lapack:&Lapack,initial:
 /// slowest first, each with its population weight and its rate, residual
 /// |A W y - theta W y| / |W y| (from the images, which keep its accuracy at
 /// slow rates) and whether the classes `classes` slower than its rate /
-/// CLASS_GAP are matched (None: not checked): the residual cannot see a
-/// slow class the space lacks.
-fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:Option<&[f64]>,tolerance:f64)->Result<Vec<(SlowRate,f64)>,String>{
+/// CLASS_GAP are matched: the residual cannot see a slow class the space
+/// lacks.
+fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:&[f64],tolerance:f64)->Result<Vec<(SlowRate,f64)>,String>{
     let chosen=model.slow_candidates(CANDIDATE_WEIGHT*tolerance);
     if chosen.is_empty(){return Ok(Vec::new());}
     let parts:Vec<Vec<f64>>=chosen.iter().flat_map(|&(j,_)|{let y=model.ritz_coordinates(j);[y.iter().map(|z|z.re).collect(),y.iter().map(|z|z.im).collect()]}).collect();
@@ -266,7 +259,7 @@ fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:
         let im:Vec<C>=(0..wr.len()).map(|e|C{re:ai[e].re-theta.re*wi[e].re-theta.im*wr[e].re,im:ai[e].im-theta.re*wi[e].im-theta.im*wr[e].im}).collect();
         let residual=(vectors.dot(&re,&re)+vectors.dot(&im,&im)).max(0.).sqrt()/(vectors.dot(wr,wr)+vectors.dot(wi,wi)).max(f64::MIN_POSITIVE).sqrt();
         (rate,residual,model.amplitudes[j])}).collect();
-    let matched=|rate:f64|classes.map(|classes|classes.iter().filter(|&&class|class<rate/CLASS_GAP).all(|&class|found.iter().any(|f|(f.0-class).abs()<=CLASS_MATCH*class)));
+    let matched=|rate:f64|classes.iter().filter(|&&class|class<rate/CLASS_GAP).all(|&class|found.iter().any(|f|(f.0-class).abs()<=CLASS_MATCH*class));
     Ok(found.iter().map(|&(rate,residual,weight)|(SlowRate{rate,residual,matched:matched(rate)},weight)).collect())
 }
 
@@ -285,12 +278,18 @@ fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:
 /// eigenbasis are kept). Every other run is unchanged.
 pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut observer:Option<&mut dyn FnMut(&Checkpoint,&Answer)>)->Result<Solution,String>{
     let started=Instant::now();
-    let longest=request.times.last().copied().into_iter().chain(request.horizons.iter().copied()).fold(0_f64,f64::max);
-    let longest=if longest>0.{longest}else{LIMIT_REACH};
-    let propagates=!request.times.is_empty()||!request.horizons.is_empty();
+    let times=request.times;
+    if times.is_empty()&&request.horizons.is_empty(){return Err("A request asks for a trajectory or a horizon".into());}
+    if !times.is_empty(){
+        if times.len()<2||times[0]!=0.{return Err("A trajectory grid starts at zero with at least two times".into());}
+        let(step,end)=(times[1],times[times.len()-1]);
+        if !(end>0.)||times.iter().enumerate().any(|(i,&t)|(t-step*i as f64).abs()>1e-12*end.max(1.)){return Err("A trajectory grid must be uniform".into());}
+    }
+    if request.horizons.iter().any(|&t|!(t.is_finite()&&t>0.)){return Err("A horizon must be a finite positive time".into());}
+    let longest=times.last().copied().into_iter().chain(request.horizons.iter().copied()).fold(0_f64,f64::max);
     let frame=SwFrame::new(prepared,longest);
     std::thread::scope(|scope|->Result<Solution,String>{
-        if propagates{std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||{let _=frame.class();}).map_err(|e|e.to_string())?;}
+        std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||{let _=frame.class();}).map_err(|e|e.to_string())?;
         match attempt(prepared,initial,request,&mut observer,&frame,None,started)?{
             Ok(solution)=>Ok(solution),
             Err(completion)=>attempt(prepared,initial,request,&mut observer,&frame,Some(&completion),started)?
@@ -306,19 +305,10 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let tolerance=POPULATION_TOLERANCE;let n=prepared.generator.n;
     if initial.len()!=n*n{return Err("Initial density dimension differs".into());}
     let times=request.times;
-    if !times.is_empty(){
-        if times.len()<2||times[0]!=0.{return Err("A trajectory grid starts at zero with at least two times".into());}
-        let(step,end)=(times[1],times[times.len()-1]);
-        if !(end>0.)||times.iter().enumerate().any(|(i,&t)|(t-step*i as f64).abs()>1e-12*end.max(1.)){return Err("A trajectory grid must be uniform".into());}
-    }
-    if request.horizons.iter().any(|&t|!(t.is_finite()&&t>0.)){return Err("A horizon must be a finite positive time".into());}
     let longest=times.last().copied().into_iter().chain(request.horizons.iter().copied()).fold(0_f64,f64::max);
-    let longest=if longest>0.{longest}else{LIMIT_REACH};
     let t1=if times.len()>1{times[1]}else{longest/LADDER_SAMPLES};
-    let propagates=!times.is_empty()||!request.horizons.is_empty();
     let mut timing=Timing::default();
-    // 1. The lattice; the frame on its own thread for a request that
-    // propagates.
+    // 1. The lattice (the frame is built on its own thread meanwhile).
     let clock=Instant::now();let eigen=prepared.eigenbasis()?;timing.eigenbasis_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
     let base=request.explicit.get_or_init(||charge_set::explicit_set(prepared,initial,tolerance)).clone()?;
     let explicit=match completion{Some(c)=>charge_set::completed(prepared,&base,&c.promoted)?,None=>base};
@@ -354,16 +344,15 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     // accepted at 16-24 solves (four without the trap partial before) and
     // five lasers at 10 us / 2000 samples reached 7.0e-3 against 2.3e-2.
     let(points,slow_points)=space::ladder(eigen,initial,t1,times.last().copied().unwrap_or(longest),tolerance)?;let mut alive=vec![true;points.len()];
-    // The frame's metric (waiting for the frame's thread). A request that
-    // propagates nothing (the steady state alone) takes M = I instead, a
-    // speed case: it skips about 1 s of frame build (`reduced`).
+    // The frame's metric (waiting for the frame's thread).
     let clock=Instant::now();
-    let metric=if propagates{Some(SwMetric::new(frame,eigen,lattice.operator())?)}else{None};
+    let metric=SwMetric::new(frame,eigen,lattice.operator())?;
     timing.frame_wait_ms=clock.elapsed().as_secs_f64()*1e3;
-    let mut galerkin=Projection::new(lattice.operator(),metric.as_ref())?;
+    let mut galerkin=Projection::new(lattice.operator(),&metric)?;
     let lapack=&prepared.lapack;let ops=super::krylov::Vectors::new(lattice.operator(),1)?;
-    // The classes of x0 (a request that propagates).
-    let mut classes:Option<Vec<(f64,f64)>>=None;
+    // The decaying classes of x0, which the slowest relaxation is checked
+    // against (the frame's block).
+    let classes:Vec<f64>=class_rates(frame,eigen,lapack,initial,tolerance)?.into_iter().map(|c|c.0).collect();
     let mut checkpoints:Vec<Checkpoint>=Vec::new();
     // The best checkpoint so far, the latest model, and per checkpoint the
     // progress measure of the stopping rule.
@@ -378,7 +367,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     loop{
         let live:Vec<usize>=(0..points.len()).filter(|&i|alive[i]).collect();
         let exhausted=live.is_empty()||space.solves()>=MAXIMUM_SOLVES||space.full();
-        if exhausted||space.solves()%CHECKPOINT==0||(!propagates&&space.solves()==1){
+        if exhausted||space.solves()%CHECKPOINT==0{
             // 3. The checkpoint: model, outputs, estimate, bounds.
             let clock=Instant::now();
             galerkin.ingest(&space.basis,&space.images)?;
@@ -396,10 +385,8 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             timing.estimate_ms+=estimate_clock.elapsed().as_secs_f64()*1e3;
             // The growth charge on every output.
             for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
-            // The slowest relaxation (the classes from the frame's block).
-            if classes.is_none()&&propagates{classes=Some(class_rates(frame,eigen,lapack,initial,tolerance)?);}
-            let rates:Option<Vec<f64>>=classes.as_ref().map(|c|c.iter().map(|x|x.0).collect());
-            let pairs=slow_pairs(&model,&space,&ops,rates.as_deref(),tolerance)?;
+            // The slowest relaxation.
+            let pairs=slow_pairs(&model,&space,&ops,&classes,tolerance)?;
             if let Some(delta)=freeze{let tau=pairs.first().map_or(f64::INFINITY,|(p,_)|1./p.rate);
                 for(v,&t)in estimate.trajectory.iter_mut().zip(times){*v+=delta*t.min(tau);}
                 for(v,&t)in estimate.horizons.iter_mut().zip(request.horizons){*v+=delta*t.min(tau);}

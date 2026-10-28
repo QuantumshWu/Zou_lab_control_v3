@@ -32,8 +32,8 @@
 //!   kernels, the second-order block's eigensystem, each built on first
 //!   use): the error estimate's fast part, and the classes the slowest
 //!   relaxation is checked against;
-//! - `reduced`: the Euclidean Galerkin model of the space and every output
-//!   from it;
+//! - `reduced`: the Galerkin model of the space in the frame's metric and
+//!   every output from it;
 //! - `estimate_api`: what the error estimate reads and returns;
 //! - `estimator`: the error estimate (one error equation for every output,
 //!   the omitted ring slaved, Schrieffer-Wolff propagation of the near

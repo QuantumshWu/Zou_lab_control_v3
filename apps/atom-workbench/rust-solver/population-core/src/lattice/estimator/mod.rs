@@ -186,9 +186,8 @@ impl<'a> UnifiedEstimate<'a>{
     /// The population errors of a checkpoint's outputs.
     fn errors(&mut self,cp:&RitzModel<'_>,steady:&mut dyn SteadySolves)->Result<Errors,String>{
         let(k,r)=(cp.basis.len(),cp.theta.len());let outputs=self.setup.outputs;
-        // The fast part's columns (the trajectory and the horizons read the
-        // fast part).
-        if !(outputs.times.is_empty()&&outputs.horizons.is_empty()){self.lattice.add_columns(cp.basis,cp.images)?;}
+        // The fast part's columns.
+        self.lattice.add_columns(cp.basis,cp.images)?;
         let b=cp.s;
         // The slow modes and which outputs use them. A projected growing mode
         // is never among them; the kernel is. At an

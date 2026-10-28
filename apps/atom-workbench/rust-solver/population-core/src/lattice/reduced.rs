@@ -6,13 +6,10 @@
 //! first-order couplings between the modes and leaves the dissipative
 //! second-order blocks, so the reduced numerical range is pushed right only
 //! at second order (no strict guarantee: the provable bound is the
-//! Hilbert-Schmidt one, Re theta <= Gamma/2). One model for every output
-//! that propagates (the trajectory, the horizons); the Euclidean Galerkin
-//! model (M = I) grew spurious near-zero slow pairs there (`frame`). A
-//! request that propagates nothing (the steady state alone) takes M = I as
-//! a speed case: it skips about 1 s of frame build, and its kernel does not
-//! depend on the metric (the steady column is in the space). Append-only: per basis
-//! column w_j only M w_j is kept (on the canonical modes), and the Gram
+//! Hilbert-Schmidt one, Re theta <= Gamma/2). One model for every output;
+//! the Euclidean Galerkin model (M = I) grew spurious near-zero slow pairs
+//! (`frame`). Append-only: per basis column w_j only M w_j is kept (on the
+//! canonical modes), and the Gram
 //! matrices K = Re W^H M W and H = Re (M W)^H A W grow by one column (and
 //! row) each; G = K^-1 H in the coordinates of W (the basis is
 //! Euclidean-orthonormal), x(t) ~ W u(t), u' = G u, u(0) = c0 = |x0| e_0
@@ -117,24 +114,22 @@ pub struct Projection<'m>{
     /// trace functionals [centre, then Re and Im per other canonical mode].
     populations:Vec<Vec<C>>,traces:Vec<Vec<f64>>,
     /// K = Re W^H M W, H = Re (M W)^H A W, E = Re W^T A W and
-    /// F = Re (AW)^T A W, row-major over the covered columns; whether
-    /// M = I (no metric: G0 = E, K and H are not built).
-    k:Vec<f64>,h:Vec<f64>,e:Vec<f64>,f:Vec<f64>,covered:usize,euclidean:bool,
-    /// The frame's metric (None: M = I, a request that propagates nothing).
-    frame_metric:Option<&'m SwMetric<'m>>,
+    /// F = Re (AW)^T A W, row-major over the covered columns.
+    k:Vec<f64>,h:Vec<f64>,e:Vec<f64>,f:Vec<f64>,covered:usize,
+    /// The frame's metric.
+    frame_metric:&'m SwMetric<'m>,
     vectors:Vectors,
     pub milliseconds:f64,
 }
 /// Grows a row-major old x old matrix to new x new (zeros in the new part).
 fn grow(old_matrix:&[f64],old:usize,new:usize)->Vec<f64>{let mut g=vec![0.;new*new];for i in 0..old{for j in 0..old{g[i*new+j]=old_matrix[i*old+j];}}g}
 impl<'m> Projection<'m>{
-    /// `metric` None: M = I (a request that propagates nothing).
-    pub fn new(op:&LatticeOperator<'_>,metric:Option<&'m SwMetric<'m>>)->Result<Self,String>{
+    pub fn new(op:&LatticeOperator<'_>,metric:&'m SwMetric<'m>)->Result<Self,String>{
         let n=op.n;let d=n*n;
         let canonical:Vec<(usize,f64,f64)>=(0..op.modes.len()).filter(|&q|op.canonical[q]).map(|q|(q,if op.mirror[q]==q{1.}else{2.},op.nu[q])).collect();
         let centre=canonical.iter().position(|c|c.0==op.centre).unwrap_or(0);
         let length=canonical.len()*d;
-        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],traces:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,euclidean:metric.is_none(),frame_metric:metric,
+        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],traces:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,frame_metric:metric,
             vectors:Vectors::new(op,1)?,milliseconds:0.})
     }
     pub fn columns(&self)->usize{self.covered}
@@ -152,7 +147,7 @@ impl<'m> Projection<'m>{
     pub fn ingest(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
         let clock=Instant::now();let(old,new)=(self.covered,basis.len());if new==old{return Ok(());}
         let(n,d,l)=(self.n,self.d,self.length);let width=new-old;
-        if let Some(metric)=self.frame_metric{let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();self.metric.extend(metric.apply(&fresh)?);}
+        let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();self.metric.extend(self.frame_metric.apply(&fresh)?);
         for column in &basis[old..new]{
             let pops:Vec<C>=self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect();
             let mut traces=vec![0.;2*self.canonical.len()-1];let mut at=1;
@@ -163,21 +158,20 @@ impl<'m> Projection<'m>{
         let all_basis:Vec<&[C]>=basis[..new].iter().map(|v|v.as_slice()).collect();
         let all_images:Vec<&[C]>=images[..new].iter().map(|v|v.as_slice()).collect();
         let new_images=&all_images[old..];
-        let(kb,hc,hr)=if self.euclidean{(vec![],vec![],vec![])}else{
-            let z_new=&self.metric[old*l..new*l];
-            (self.metric_dots(z_new,width,&all_basis)?,                     // K[i, old + c] at i * width + c
-             self.metric_dots(&self.metric,new,new_images)?,               // H[i, old + c] at c * new + i
-             self.metric_dots(z_new,width,&all_images[..old])?)};          // H[old + c, j] at j * width + c
+        let z_new=&self.metric[old*l..new*l];
+        let kb=self.metric_dots(z_new,width,&all_basis)?;                 // K[i, old + c] at i * width + c
+        let hc=self.metric_dots(&self.metric,new,new_images)?;           // H[i, old + c] at c * new + i
+        let hr=self.metric_dots(z_new,width,&all_images[..old])?;        // H[old + c, j] at j * width + c
         let ec=self.vectors.gram(&all_basis,new_images)?;                 // E[:, old..new]
         let er=self.vectors.gram(&all_basis[old..],&all_images[..old])?;  // E[old..new, ..old]
         let fc=self.vectors.gram(&all_images,new_images)?;                // F[:, old..new]
-        let(mut k,mut h)=if self.euclidean{(Vec::new(),Vec::new())}else{(grow(&self.k,old,new),grow(&self.h,old,new))};
+        let(mut k,mut h)=(grow(&self.k,old,new),grow(&self.h,old,new));
         let(mut e,mut f)=(grow(&self.e,old,new),grow(&self.f,old,new));
         for i in 0..new{for c in 0..width{let j=old+c;
-            if !self.euclidean{k[i*new+j]=kb[i*width+c];k[j*new+i]=kb[i*width+c];h[i*new+j]=hc[c*new+i];}
+            k[i*new+j]=kb[i*width+c];k[j*new+i]=kb[i*width+c];h[i*new+j]=hc[c*new+i];
             e[i*new+j]=ec[i*width+c];
             f[i*new+j]=fc[i*width+c];f[j*new+i]=fc[i*width+c];}}
-        for c in 0..width{for j in 0..old{if !self.euclidean{h[(old+c)*new+j]=hr[j*width+c];}e[(old+c)*new+j]=er[c*old+j];}}
+        for c in 0..width{for j in 0..old{h[(old+c)*new+j]=hr[j*width+c];e[(old+c)*new+j]=er[c*old+j];}}
         self.k=k;self.h=h;self.e=e;self.f=f;self.covered=new;
         self.milliseconds+=clock.elapsed().as_secs_f64()*1e3;Ok(())
     }
@@ -209,8 +203,8 @@ impl<'m> Projection<'m>{
     pub fn model(&self,lapack:&Lapack,initial_norm:f64,longest:f64,tolerance:f64)->Result<Model,String>{
         let k=self.covered;let n=self.n;let r=k;
         // G0 = K^-1 H (K symmetric: its row-major form is its column-major one).
-        let g0=if self.euclidean{self.e.clone()}else{let(lu,pivots)=lapack.factor(&self.k,k)?;
-            transpose_rows(&lapack.solve_matrix_factored(&lu,&pivots,&transpose_rows(&self.h,k,k),k)?,k,k)};
+        let(lu,pivots)=lapack.factor(&self.k,k)?;
+        let g0=transpose_rows(&lapack.solve_matrix_factored(&lu,&pivots,&transpose_rows(&self.h,k,k),k)?,k,k);
         let mut c0=vec![0.;k];c0[0]=initial_norm;
         // Trace correction on the significant rows.
         let kt=self.traces[0].len();
@@ -399,12 +393,11 @@ impl Model{
 
 /// A slow relaxation rate (1/us), its residual (rad/us) and whether every
 /// class of the frame's second-order block slower than it is matched by a
-/// Ritz pair (`pipeline`; None: not checked): resolved when it is and the
-/// residual is
-/// within SLOW_ACCURACY of the rate, else only the range rate +- residual
-/// (a slower class the space has not reached included).
+/// Ritz pair (`pipeline`): resolved when it is and the residual is within
+/// SLOW_ACCURACY of the rate, else only the range rate +- residual (a
+/// slower class the space has not reached included).
 #[derive(Clone,Copy,Debug)]
-pub struct SlowRate{pub rate:f64,pub residual:f64,pub matched:Option<bool>}
+pub struct SlowRate{pub rate:f64,pub residual:f64,pub matched:bool}
 impl SlowRate{
-    pub fn resolved(&self)->bool{self.matched==Some(true)&&self.residual<=SLOW_ACCURACY*self.rate}
+    pub fn resolved(&self)->bool{self.matched&&self.residual<=SLOW_ACCURACY*self.rate}
 }
