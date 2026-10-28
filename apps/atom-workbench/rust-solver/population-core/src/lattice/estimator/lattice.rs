@@ -17,6 +17,14 @@
 //! e^{theta_m t}: beta = (z_a b - z_w b theta) a, then the closed-form
 //! convolution and the readout (`propagate`).
 //!
+//! Flip symmetry: the columns are Hermitian-symmetric (x_-q = x_q^dagger)
+//! and the Ritz data come in conjugate pairs, so a mirrored mode's
+//! coordinates are the flip of its partner's, c_-q[i] = conj c_q[i*]
+//! (`partner`), and its population errors are the conjugates of its
+//! partner's. Only the canonical member of each pair is transformed and
+//! propagated (counted twice); the mirrored frame modes' coordinates, which
+//! the transfer reads, are flipped copies.
+//!
 //! Ring (`ring_feedback`): for a field x on P u Q and a shift z, the ring
 //! slaved at z, y = (z - D_R)^-1 (C x)|_R (exact block solves, refined for
 //! the diagonal fold's i nu_r K^(1)), and its feedback (B y)|_{P u Q}.
@@ -90,14 +98,19 @@ pub struct ErrorLattice<'p>{
     /// The near modes (the centre and its one-step neighbours), and the (I - S)
     /// pairs into them: (target, source, step), target = source + step.
     pub near:Vec<usize>,pub(super) pairs:Vec<(usize,usize,usize)>,
-    /// The modes whose eigen-coordinates the transform reads, and those of
-    /// them outside the near modes (the outer modes): their errors are
-    /// propagated by the dressed blocks of L0' alone, from the coordinates
-    /// the transform reads anyway.
+    /// The modes whose eigen-coordinates the transform reads, and the
+    /// canonical ones of them outside the near modes (the outer modes):
+    /// their errors are propagated by the dressed blocks of L0' alone, from
+    /// the coordinates the transform reads anyway.
     frames:Vec<usize>,pub outer_modes:Vec<usize>,
+    /// Per mode whether it is the canonical member of its mirror pair (the
+    /// centre is its own mirror), the near slots of the canonical near
+    /// modes, and the flip's permutation of the eigen-coordinates.
+    pub(super) canonical:Vec<bool>,pub(super) near_canonical:Vec<usize>,partner:Vec<usize>,
     pub classes:Vec<BlockSystem>,pub(super) class_of:Vec<usize>,
-    /// Per near mode (in `near` order), column-major d x k: class
-    /// coordinates of the transformed basis columns and images.
+    /// Per near mode (in `near` order; the canonical ones filled),
+    /// column-major d x k: class coordinates of the transformed basis
+    /// columns and images.
     pub(super) basis_coordinates:Vec<Vec<C>>,pub(super) image_coordinates:Vec<Vec<C>>,
     /// Per outer mode, column-major d x k: eigen-coordinates of L0' of the
     /// basis columns and images.
@@ -152,9 +165,12 @@ impl<'p> ErrorLattice<'p>{
         let classes=built.into_iter().collect::<Result<Vec<_>,_>>()?;
         let class_ms=clock.elapsed().as_secs_f64()*1e3;
         let count=near.len();
-        let outer_modes:Vec<usize>=frames.iter().copied().filter(|q|!near.contains(q)).collect();let outer_count=outer_modes.len();
+        let canonical:Vec<bool>=(0..modes.len()).map(|q|modes[q]>=modes[mirror[q]]).collect();
+        let near_canonical:Vec<usize>=(0..count).filter(|&slot|canonical[near[slot]]).collect();
+        let partner:Vec<usize>=(0..d).map(|j|basis.partner(j)).collect();
+        let outer_modes:Vec<usize>=frames.iter().copied().filter(|&q|!near.contains(&q)&&canonical[q]).collect();let outer_count=outer_modes.len();
         Ok(Self{prepared,basis,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,kernels,
-            near,pairs,frames,outer_modes,classes,class_of,basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],
+            near,pairs,frames,outer_modes,canonical,near_canonical,partner,classes,class_of,basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],
             outer_basis:vec![Vec::new();outer_count],outer_image:vec![Vec::new();outer_count],columns:0,ring_in_fast:false,outer_bare:true,
             work:ErrorWork::default(),build_ms:[kernel_ms,class_ms]})
     }
@@ -178,7 +194,7 @@ impl<'p> ErrorLattice<'p>{
         let(near,outer)=(self.near.len(),self.outer_modes.len());
         for(i,_)in(first..basis.len()).enumerate(){
             let(w,a)=(2*i,2*i+1);
-            for slot in 0..near{
+            for &slot in &self.near_canonical{
                 self.basis_coordinates[slot].extend_from_slice(&z[(w*near+slot)*d..(w*near+slot+1)*d]);
                 self.image_coordinates[slot].extend_from_slice(&z[(a*near+slot)*d..(a*near+slot+1)*d]);}
             for slot in 0..outer{
@@ -189,33 +205,39 @@ impl<'p> ErrorLattice<'p>{
         self.work.column_ms+=clock.elapsed().as_secs_f64()*1e3;
         Ok(())
     }
-    /// For fields on P u Q: the class coordinates V_c^-1 E^-1 (I - S) v per
-    /// near mode, (field, near slot) consecutive, and the coordinates E^-1 v
-    /// per outer mode, (field, outer slot) consecutive. The coordinate
-    /// changes run as large GEMMs over every field and mode (E^-1 streamed
-    /// once per task).
+    /// For Hermitian-symmetric fields on P u Q: the class coordinates
+    /// V_c^-1 E^-1 (I - S) v per canonical near mode, (field, near slot)
+    /// consecutive (the other slots zero), and the coordinates E^-1 v per
+    /// outer mode, (field, outer slot) consecutive. The coordinate changes
+    /// run as large GEMMs over every field and mode (E^-1 streamed once per
+    /// task).
     fn coordinates(&mut self,fields:&[&[C]])->Result<(Vec<C>,Vec<C>),String>{
         let d=self.d;let execution=Execution::new()?;let basis=self.basis;
-        let(count,frames,near,outer)=(fields.len(),self.frames.len(),self.near.len(),self.outer_modes.len());
-        // E^-1 on every (field, frame mode).
-        let items:Vec<(usize,usize)>=(0..count).flat_map(|f|self.frames.iter().map(move|&q|(f,q))).collect();
+        let(count,near,outer)=(fields.len(),self.near.len(),self.outer_modes.len());
+        // E^-1 on every (field, canonical frame mode).
+        let canonical=&self.canonical;
+        let computed:Vec<usize>=self.frames.iter().copied().filter(|&q|canonical[q]).collect();
+        let items:Vec<(usize,usize)>=(0..count).flat_map(|f|computed.iter().map(move|&q|(f,q))).collect();
         let chunks:Vec<Vec<(usize,usize)>>=items.chunks(BLOCKS_PER_TASK).map(|c|c.to_vec()).collect();
         let parts=execution.map(chunks.clone(),|chunk|{let blocks:Vec<&[C]>=chunk.iter().map(|&(f,q)|&fields[f][q*d..(q+1)*d]).collect();basis.coefficients(&blocks)});
         let modes=self.modes.len();let mut c=vec![ZERO;count*modes*d];
         for(chunk,part)in chunks.iter().zip(parts){let part=part?;for(i,&(f,q))in chunk.iter().enumerate(){c[(f*modes+q)*d..(f*modes+q+1)*d].copy_from_slice(&part[i*d..(i+1)*d]);}}
-        let _=frames;
-        // (I - S) into the near modes.
+        // The mirrored frame modes: c_-q[i] = conj c_q[partner i].
+        for f in 0..count{for &q in self.frames.iter().filter(|&&q|!canonical[q]){
+            let source=c[(f*modes+self.mirror[q])*d..(f*modes+self.mirror[q]+1)*d].to_vec();
+            for(i,v)in c[(f*modes+q)*d..(f*modes+q+1)*d].iter_mut().enumerate(){*v=conj(source[self.partner[i]]);}}}
+        // (I - S) into the canonical near modes.
         let slot_of:Vec<usize>=(0..modes).map(|q|self.near.iter().position(|&x|x==q).unwrap_or(usize::MAX)).collect();
         let mut t=vec![ZERO;count*near*d];
         for f in 0..count{
-            for(slot,&a)in self.near.iter().enumerate(){t[(f*near+slot)*d..(f*near+slot+1)*d].copy_from_slice(&c[(f*modes+a)*d..(f*modes+a+1)*d]);}
-            for &(a,b,s)in &self.pairs{let slot=slot_of[a];let source=&c[(f*modes+b)*d..(f*modes+b+1)*d];
+            for &slot in &self.near_canonical{let a=self.near[slot];t[(f*near+slot)*d..(f*near+slot+1)*d].copy_from_slice(&c[(f*modes+a)*d..(f*modes+a+1)*d]);}
+            for &(a,b,s)in self.pairs.iter().filter(|p|canonical[p.0]){let slot=slot_of[a];let source=&c[(f*modes+b)*d..(f*modes+b+1)*d];
                 self.kernels.subtract_kernel(s,source,&mut t[(f*near+slot)*d..(f*near+slot+1)*d]);}
         }
-        // V_c^-1 per class over every (field, near slot) of the class.
+        // V_c^-1 per class over every (field, canonical near slot) of the class.
         let(classes,class_of,lapack)=(&self.classes,&self.class_of,&self.prepared.lapack);
         let mut groups:Vec<(usize,Vec<usize>)>=Vec::new();
-        for f in 0..count{for(slot,&a)in self.near.iter().enumerate(){let c=class_of[a];let item=f*near+slot;
+        for f in 0..count{for &slot in &self.near_canonical{let c=class_of[self.near[slot]];let item=f*near+slot;
             match groups.iter_mut().find(|g|g.0==c){Some(g)=>g.1.push(item),None=>groups.push((c,vec![item]))}}}
         let tasks:Vec<(usize,Vec<usize>)>=groups.iter().flat_map(|(c,items)|items.chunks(BLOCKS_PER_TASK).map(move|ch|(*c,ch.to_vec()))).collect();
         let t=&t;
@@ -226,7 +248,7 @@ impl<'p> ErrorLattice<'p>{
         for((_,items),part)in tasks.iter().zip(parts){let part=part?;for(i,&item)in items.iter().enumerate(){z[item*d..(item+1)*d].copy_from_slice(&part[i*d..(i+1)*d]);}}
         let mut o=vec![ZERO;count*outer*d];
         for f in 0..count{for(slot,&q)in self.outer_modes.iter().enumerate(){o[(f*outer+slot)*d..(f*outer+slot+1)*d].copy_from_slice(&c[(f*modes+q)*d..(f*modes+q+1)*d]);}}
-        self.work.frame_blocks+=count*(self.frames.len()+near);
+        self.work.frame_blocks+=count*(computed.len()+self.near_canonical.len());
         Ok((z,o))
     }
     /// The ring's feedback on P u Q of a field x at the shift z:

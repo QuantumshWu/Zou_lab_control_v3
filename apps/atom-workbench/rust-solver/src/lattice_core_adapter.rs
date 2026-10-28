@@ -464,9 +464,16 @@ mod tests{
     /// `est_summary.py` on the output): estimate against the actual error
     /// and against R2's Python estimate. Ignored; ATOM_ESTIMATOR_FIXTURES =
     /// the export root, ATOM_ESTIMATOR_CASES = comma-separated case names,
-    /// optional ATOM_ESTIMATOR_SEED (1: the pipeline's solve seeds the slow pool),
-    /// ATOM_ESTIMATOR_NEAR (one-step: the explicit set not among the near modes).
-    /// One JSON line per checkpoint; the fold charges (added by the
+    /// optional: ATOM_ESTIMATOR_SEED (0: no seed; else the steady solve's
+    /// directions seed the slow pool, as the pipeline's hook will),
+    /// ATOM_ESTIMATOR_GATED (1: a closed gate skips the estimate, so the work
+    /// is the estimator's own), ATOM_ESTIMATOR_RUST_IMAGES (1: the images by
+    /// the Rust operator, which differs from the dumped ones by
+    /// `operatorDeviation`), ATOM_ESTIMATOR_RANK (1: singular values of the
+    /// weighted Ritz sources), ATOM_ESTIMATOR_NEAR (one-step: the explicit
+    /// set not among the near modes; all: every mode near),
+    /// ATOM_ESTIMATOR_FASTRING, ATOM_ESTIMATOR_OUTER (variants of the fast
+    /// part). One JSON line per checkpoint; the fold charges (added by the
     /// Estimator) are left out.
     #[test]
     #[ignore]
@@ -475,16 +482,30 @@ mod tests{
         use atom_population_core::lattice::estimate_api::{EstimateSetup,LatticeSets,Outputs};
         use atom_population_core::lattice::ledger::RemainderLedger;
         use atom_population_core::lattice::operator::LatticeOperator;
-        use atom_population_core::lattice::poles::Lattice;
+        use atom_population_core::lattice::preconditioner::{Preconditioning,Shift};
+        use atom_population_core::lattice::floquet::Reach;
+        use atom_population_core::lattice::krylov::{self,KrylovOptions,KrylovTiming,LinearSystem,System,Vectors};
         type C=Complex64;
+        // The pipeline's steady solve as the pool's seed (R2 section 12): its
+        // preconditioned directions z_j recorded (canonical modes, mirrored
+        // here), their images A z_j computed here (the pipeline has them from
+        // its Arnoldi relation; not counted).
+        struct Recording<'r,'s,'a>{system:&'r mut System<'s,'a>,directions:Vec<Vec<C>>}
+        impl LinearSystem for Recording<'_,'_,'_>{
+            fn length(&self)->usize{self.system.length()}
+            fn vectors(&self)->&Vectors{self.system.vectors()}
+            fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{self.system.apply(x,y)}
+            fn precondition(&mut self,x:&[C],y:&mut[C])->Result<(),String>{
+                self.system.precondition(x,y)?;let mut z=y.to_vec();self.system.vectors().mirror(&mut z);self.directions.push(z);Ok(())}
+            fn timing(&mut self)->&mut KrylovTiming{self.system.timing()}
+        }
         let root=std::path::PathBuf::from(std::env::var("ATOM_ESTIMATOR_FIXTURES").expect("ATOM_ESTIMATOR_FIXTURES"));
         let cases=std::env::var("ATOM_ESTIMATOR_CASES").expect("ATOM_ESTIMATOR_CASES");
-        let seed=std::env::var("ATOM_ESTIMATOR_SEED").is_ok_and(|v|v=="1");
+        let seed=std::env::var("ATOM_ESTIMATOR_SEED").map_or(true,|v|v!="0");
+        let gated=std::env::var("ATOM_ESTIMATOR_GATED").is_ok_and(|v|v=="1");
         let complex=|bytes:&[u8]|->Vec<C>{bytes.chunks_exact(16).map(|b|C{re:f64::from_le_bytes(b[..8].try_into().unwrap()),im:f64::from_le_bytes(b[8..].try_into().unwrap())}).collect()};
         let charges=|v:&Value|->Vec<Vec<i32>>{v.as_array().unwrap().iter().map(|q|q.as_array().unwrap().iter().map(|k|k.as_i64().unwrap() as i32).collect()).collect()};
         let floats=|v:&Value|->Vec<f64>{v.as_array().map(|a|a.iter().map(|x|x.as_f64().unwrap_or(f64::NAN)).collect()).unwrap_or_default()};
-        // The pipeline's own lattice P u Q (its bordered steady solves and steady preconditioner).
-        let solver_ms=|s:&Lattice<'_>|s.work().milliseconds;
         for case in cases.split(','){
             let dir=root.join(case);
             let index:Value=serde_json::from_str(&std::fs::read_to_string(dir.join("index.json")).unwrap()).unwrap();
@@ -504,7 +525,10 @@ mod tests{
             for j in [0,basis.len()/2,basis.len()-1]{op.apply(&basis[j],&mut y).unwrap();
                 let e=y.iter().zip(&images[j]).map(|(a,b)|(a.re-b.re).hypot(a.im-b.im)).fold(0.,f64::max);
                 operator=operator.max(e/images[j].iter().map(|v|v.re.hypot(v.im)).fold(0.,f64::max));}
-            let ledger=RemainderLedger::new(&p.plan,op.nu_max(),op.dropped()).unwrap();drop(op);
+            let ledger=RemainderLedger::new(&p.plan,op.nu_max(),op.dropped()).unwrap();
+            // The images by the Rust operator (the fixtures' are Python's, which differ by `operatorDeviation`).
+            let images:Vec<Vec<C>>=if std::env::var("ATOM_ESTIMATOR_RUST_IMAGES").is_ok_and(|v|v=="1"){basis.iter().map(|w|{let mut y=vec![C::default();dim];op.apply(w,&mut y).unwrap();y}).collect()}else{images};
+            drop(op);
             let sets=LatticeSets{explicit,ring};let initial=vec![C::default();p.generator.n*p.generator.n];
             let setup=EstimateSetup{prepared:&p,lattice:&sets,outputs:Outputs{times:&times,horizons:&horizons,steady:true,groups:&fixture_groups},ledger:&ledger,initial:&initial};
             let clock=Instant::now();
@@ -512,17 +536,32 @@ mod tests{
             let all_sets=LatticeSets{explicit:modes.clone(),ring:Vec::new()};
             let mut estimate=if near=="all"{
                 // Every mode near: the explicit set given as the whole lattice (the setup's lattice is only read for its modes and P).
-                let mut e=UnifiedEstimate::with_near(EstimateSetup{lattice:&all_sets,..setup},true).unwrap();e.seed_with_pipeline=seed;e
+                UnifiedEstimate::with_near(EstimateSetup{lattice:&all_sets,..setup},true).unwrap()
             }else{UnifiedEstimate::with_near(setup,near!="one-step").unwrap()};
-            estimate.seed_with_pipeline=seed;
             estimate.lattice.ring_in_fast=std::env::var("ATOM_ESTIMATOR_FASTRING").is_ok_and(|v|v=="1");
             estimate.lattice.outer_bare=std::env::var("ATOM_ESTIMATOR_OUTER").map_or(true,|v|v!="0");
             let build_ms=clock.elapsed().as_secs_f64()*1e3;
             let n_modes=modes.len();
+            // The steady solve (u = I/n on the centre, R2's tolerance 1e-9, no restart) and its directions.
+            let(mut seed_count,mut seed_steps)=(0,0);
+            if seed{
+                let mut op=LatticeOperator::new(&p,&modes).unwrap();
+                let mut pre=Preconditioning::new(&p).unwrap().batch(&op,Shift::Steady,Some(Reach::All)).unwrap();
+                let size=op.dimension();let n=p.generator.n;let centre=sets.centre().unwrap();
+                let mut u=vec![C::default();size];for i in 0..n{u[centre*n*n+i*n+i]=C{re:1./n as f64,im:0.};}
+                let directions={let mut system=System::new(&mut op,&mut pre,Shift::Steady).unwrap();
+                    let mut recording=Recording{system:&mut system,directions:Vec::new()};
+                    let mut options=KrylovOptions::new(1e-9);options.restart=200;options.maximum_steps=200;
+                    let solve=krylov::gmres(&mut recording,&u,None,&options).unwrap();seed_steps=solve.steps;
+                    // The last preconditioning forms the iterate (x = P^-1 V y), in the span of the others.
+                    let mut directions=recording.directions;directions.pop();directions};
+                let images:Vec<Vec<C>>=directions.iter().map(|z|{let mut y=vec![C::default();size];op.apply(z,&mut y).unwrap();y}).collect();
+                seed_count=directions.len();
+                estimate.seed(&directions,&images).unwrap();
+            }
             println!("{}",json!({"case":case,"modes":n_modes,"near":estimate.lattice.near.len(),"ring":estimate.lattice.ring.len(),"operatorDeviation":operator,"buildMs":build_ms,
                 "kernelMs":estimate.lattice.build_ms[0],"classMs":estimate.lattice.build_ms[1],"classes":estimate.lattice.classes.len(),"eigenbasisMs":p.eigenbasis().unwrap().milliseconds,"eigenBlocks":p.eigenbasis().unwrap().blocks,"largestBlock":p.eigenbasis().unwrap().largest_block,
-                "kernelEntries":estimate.lattice.kernels.diagnostics.entries,"smallParameter":estimate.lattice.kernels.diagnostics.largest,"ledger":ledger.total()}));
-            let mut solver=Lattice::new(&p,LatticeSets{explicit:sets.explicit.clone(),ring:sets.ring.clone()}).unwrap();
+                "seeds":seed_count,"seedSteps":seed_steps,"d":p.generator.n*p.generator.n,"kernelEntries":estimate.lattice.kernels.diagnostics.entries,"smallParameter":estimate.lattice.kernels.diagnostics.largest,"ledger":ledger.total()}));
             let mut gate=OutputGate::new(p.generator.n,estimate.lattice.nu.clone(),estimate.lattice.centre);let limit=estimator::gate::GATE_FACTOR*POPULATION_TOLERANCE;
             let zero=vec![0.;p.generator.n];
             for cp in index["checkpoints"].as_array().unwrap(){
@@ -530,33 +569,57 @@ mod tests{
                 let data=complex(&std::fs::read(dir.join(format!("cp{solves:03}.bin"))).unwrap());
                 let mut at=0;let mut take=|len:usize|{let s=data[at..at+len].to_vec();at+=len;s};
                 let(x,s,b,_g)=(take(k*r),take(r*r),take(k*r),take(r*r));let(_c0,_th,th_e,_a,a_e,_ker,us)=(take(r),take(r),take(r),take(r),take(r),take(r),take(r));
-                let before=(estimate.lattice.work.clone(),estimate.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default(),solver.work().steps,solver_ms(&solver));
-                let clock=Instant::now();
-                let errors=estimate.errors(&Checkpoint{basis:&basis[..k],images:&images[..k],x:&x,s:&s,theta:&th_e,coefficients:&a_e},&mut solver).unwrap();
-                let ms=clock.elapsed().as_secs_f64()*1e3;
-                let series:Vec<f64>=errors.trajectory.iter().map(|p|ledger::metric(p,&zero,&fixture_groups)).collect();
-                let hz:Vec<f64>=errors.horizons.iter().map(|p|ledger::metric(p,&zero,&fixture_groups)).collect();
-                let steady_est=errors.steady.as_ref().map(|p|ledger::metric(p,&zero,&fixture_groups)).unwrap_or(0.);
-                // The gate as the estimator runs it.
+                // Diagnostics: singular values of the weighted Ritz sources a_m (A W - theta_m W) b_m (all modes, fast modes).
+                let rank=if std::env::var("ATOM_ESTIMATOR_RANK").is_ok_and(|v|v=="1"){
+                    let gemm=p.lapack.complex_gemm();let(one,zero_c)=(C{re:1.,im:0.},C::default());let cm=|a:C,b:C|C{re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re};
+                    let mut bm=vec![zero_c;k*r];gemm.multiply(k,r,r,one,&x,k,&s,r,zero_c,&mut bm,k).unwrap();
+                    let(wcat,acat):(Vec<C>,Vec<C>)=(basis[..k].concat(),images[..k].concat());
+                    let spectrum=|fast:bool|->Value{
+                        let(mut ba,mut bta)=(vec![zero_c;k*r],vec![zero_c;k*r]);
+                        for m in 0..r{let a=if fast&&th_e[m].re.hypot(th_e[m].im)<estimator::slow::SLOW{zero_c}else{a_e[m]};let ta=cm(th_e[m],a);
+                            for i in 0..k{ba[i+k*m]=cm(bm[i+k*m],a);bta[i+k*m]=cm(bm[i+k*m],ta);}}
+                        let mut f=vec![zero_c;dim*r];gemm.multiply(dim,r,k,one,&acat,dim,&ba,k,zero_c,&mut f,dim).unwrap();
+                        gemm.multiply(dim,r,k,C{re:-1.,im:0.},&wcat,dim,&bta,k,one,&mut f,dim).unwrap();
+                        let mut fh=vec![zero_c;dim*r];for m in 0..r{for i in 0..dim{fh[m+r*i]=C{re:f[i+dim*m].re,im:-f[i+dim*m].im};}}
+                        let mut g=vec![zero_c;r*r];gemm.multiply(r,r,dim,one,&fh,r,&f,dim,zero_c,&mut g,r).unwrap();
+                        let(vals,_)=p.lapack.hermitian_eigen(&g,r).unwrap();
+                        let mut sv:Vec<f64>=vals.iter().map(|v|v.max(0.).sqrt()).collect();sv.sort_by(|a,b|b.total_cmp(a));
+                        let top=sv[0].max(1e-300);
+                        let counts:Vec<usize>=[1e-1,1e-2,1e-3,1e-4,1e-6].iter().map(|&t|sv.iter().filter(|&&v|v>t*top).count()).collect();
+                        json!({"top":sv[0],"counts":counts,
+                            "nonzero":(0..r).filter(|&m|!(fast&&th_e[m].re.hypot(th_e[m].im)<estimator::slow::SLOW)&&a_e[m].re.hypot(a_e[m].im)>0.).count()})};
+                    json!({"r":r,"all":spectrum(false),"fast":spectrum(true)})
+                }else{Value::Null};
+                // The gate as the estimator runs it; in the gated mode a closed
+                // gate skips the estimate (its columns are processed at the next
+                // open checkpoint), so the work is the estimator's own.
                 gate.add_columns(&basis[..k]);
                 let mul=|a:C,b:C|C{re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re};
                 let c:Vec<C>=(0..k).map(|i|us.iter().enumerate().fold(C::default(),|v,(l,&u)|{let t=mul(x[i+k*l],u);C{re:v.re+t.re,im:v.im+t.im}})).collect();
                 let outputs=gate.outputs(&p.lapack,&b,&th_e,&a_e,&times,&horizons,Some(&c)).unwrap();
                 let change=gate.change(outputs,&fixture_groups);
                 let open=change.is_some_and(|v|v<=limit)||gate.last_estimate.is_some_and(|v|v<=limit);
+                let skipped=gated&&!open;
+                let before=(estimate.lattice.work.clone(),estimate.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default());
+                let clock=Instant::now();
+                let errors=if skipped{estimator::Errors::default()}else{estimate.errors(&Checkpoint{basis:&basis[..k],images:&images[..k],x:&x,s:&s,theta:&th_e,coefficients:&a_e}).unwrap()};
+                let ms=clock.elapsed().as_secs_f64()*1e3;
+                let series:Vec<f64>=errors.trajectory.iter().map(|p|ledger::metric(p,&zero,&fixture_groups)).collect();
+                let hz:Vec<f64>=errors.horizons.iter().map(|p|ledger::metric(p,&zero,&fixture_groups)).collect();
+                let steady_est=errors.steady.as_ref().map(|p|ledger::metric(p,&zero,&fixture_groups)).unwrap_or(0.);
                 let largest=series.iter().fold(steady_est,|a,&b|a.max(b));if open{gate.last_estimate=Some(largest);}
                 let(lw,pw)=(&estimate.lattice.work,estimate.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default());
                 let mut row=json!({"case":case,"solves":solves,"k":k,"ms":ms,"estMax":series.iter().fold(0_f64,|a,&b|a.max(b)),"steadyEst":steady_est,"horizons":hz,
                     "slowModes":errors.slow_modes,"partsMs":errors.milliseconds,"slowTrajectory":errors.slow_trajectory,"lambdaSlow":errors.lambda_slow,
-                    "gate":{"change":change,"open":open},
+                    "gate":{"change":change,"open":open},"skipped":skipped,
                     "work":{"columns":lw.columns-before.0.columns,"columnMs":lw.column_ms-before.0.column_ms,"frameBlocks":lw.frame_blocks-before.0.frame_blocks,
                         "ringOperations":lw.block_operations-before.0.block_operations,"ringSolves":lw.block_solves-before.0.block_solves,
                         "poolApplications":pw.applications-before.1.applications,"poolPreconditions":pw.preconditions-before.1.preconditions,"poolSteps":pw.steps-before.1.steps,
-                        "poolSolves":pw.solves-before.1.solves,"poolFrames":pw.frame_blocks-before.1.frame_blocks,"pipelineSolves":pw.pipeline_solves-before.1.pipeline_solves,
-                        "pipelineSteps":solver.work().steps-before.2,"pipelineMs":solver_ms(&solver)-before.3,
+                        "poolSolves":pw.solves-before.1.solves,"poolFrames":pw.frame_blocks-before.1.frame_blocks,"poolMacs":pw.qr_macs-before.1.qr_macs,"pipelineSolves":0,
+                        "pipelineSteps":0,"pipelineMs":0,
                         "extendMs":pw.extend_ms-before.1.extend_ms,"stepMs":pw.step_ms-before.1.step_ms,"solveMs":pw.solve_ms-before.1.solve_ms},
-                    "count":cp["count"].clone(),"modes":n_modes});
-                if let Some(actual)=cp["actual"].as_array(){
+                    "count":cp["count"].clone(),"modes":n_modes,"rank":rank});
+                if let Some(actual)=cp["actual"].as_array().filter(|_|!skipped){
                     let actual:Vec<f64>=actual.iter().map(|v|v.as_f64().unwrap()).collect();
                     let select:Vec<bool>=cp["select"].as_array().unwrap().iter().map(|v|v.as_u64()==Some(1)).collect();
                     let chosen:Vec<usize>=(0..actual.len()).filter(|&i|select[i]).collect();
@@ -567,7 +630,7 @@ mod tests{
                     row["actualMax"]=json!(amax);row["ratio"]=json!(ratio);row["quantiles"]=json!([quantile(0.05),quantile(0.5),quantile(0.95),ratios.first().copied().unwrap_or(f64::NAN)]);
                     row["steadyActual"]=cp["err_steady"].clone();row["horizonActual"]=cp["err_h"].clone();
                 }
-                if let Some(py)=cp.get("python").and_then(|v|v.as_object()){
+                if let Some(py)=cp.get("python").and_then(|v|v.as_object()).filter(|_|!skipped){
                     for(variant,v)in py{let s=floats(&v["series"]);if s.len()!=series.len(){continue;}
                         let size=s.iter().fold(0_f64,|a,&b|a.max(b));
                         let dev=s.iter().zip(&series).map(|(a,b)|(a-b).abs()).fold(0.,f64::max)/size.max(1e-300);

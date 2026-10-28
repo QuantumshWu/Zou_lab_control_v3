@@ -12,6 +12,10 @@
 //! phase e^{i nu t} (laboratory) or at the centre alone (a horizon's time
 //! average), the homogeneous part of every target carries e^{i nu_s t}
 //! e^{mu_j t}, so it is summed per class and step before its time GEMM.
+//! Only the canonical modes are propagated: a mirrored mode's population
+//! errors are the conjugates of its partner's (the Ritz data come in
+//! conjugate pairs), so a pair's canonical member counts twice in the real
+//! part.
 use super::super::*;
 use super::lattice::ErrorLattice;
 use crate::parallel::Execution;
@@ -38,7 +42,7 @@ impl ErrorLattice<'_>{
     /// Population errors (one row of n per time) of the SW propagation of
     /// the checkpoint's sources on the near modes and of the dressed-block
     /// propagation on the outer modes (Ritz modes with a zero coefficient
-    /// carry none).
+    /// carry none). The Ritz data must be closed under conjugation.
     pub fn populations(&self,ritz:&RitzSources<'_>,times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
         let(n,d,k)=(self.n,self.d,self.columns);let r=ritz.values.len();
         if ritz.vectors.len()!=k*r||ritz.coefficients.len()!=r{return Err("Estimator: Ritz data dimensions differ from the basis".into());}
@@ -53,16 +57,18 @@ impl ErrorLattice<'_>{
         // The near modes with their classes, then the outer modes with the dressed blocks of L0' (class key `bare`).
         let bare=self.classes.len();
         let outer=if self.outer_bare{self.outer_modes.len()}else{0};
-        let items:Vec<(usize,bool)>=(0..self.near.len()).map(|s|(s,true)).chain((0..outer).map(|s|(s,false))).collect();
+        let items:Vec<(usize,bool)>=self.near_canonical.iter().map(|&s|(s,true)).chain((0..outer).map(|s|(s,false))).collect();
         let parts=Execution::new()?.map(items,|(slot,near)|->Result<ModePart,String>{
             let a=if near{self.near[slot]}else{self.outer_modes[slot]};
             let gemm=lapack.complex_gemm();
             let(c,values,own,image,base):(usize,&[C],&[C],&[C],&[C])=if near{let c=self.class_of[a];let class=&self.classes[c];
                 (c,&class.values,&class.readout,&self.image_coordinates[slot],&self.basis_coordinates[slot])}
                 else{(bare,&self.basis.lambda,self.basis.population_rows(),&self.outer_image[slot],&self.outer_basis[slot])};
+            // A mirror pair's canonical member counts twice.
+            let weight=if self.mirror[a]==a{1.}else{2.};
             let mut beta=vec![ZERO;d*r];
-            gemm.multiply(d,r,k,ONE,image,d,&ba,k,ZERO,&mut beta,d)?;
-            gemm.multiply(d,r,k,C{re:-1.,im:0.},base,d,&bta,k,ONE,&mut beta,d)?;
+            gemm.multiply(d,r,k,C{re:weight,im:0.},image,d,&ba,k,ZERO,&mut beta,d)?;
+            gemm.multiply(d,r,k,C{re:-weight,im:0.},base,d,&bta,k,ONE,&mut beta,d)?;
             let zeta:Vec<C>=values.iter().map(|z|C{re:z.re.min(0.),im:z.im-self.nu[a]}).collect();
             if a==self.centre{
                 let j0=(0..d).min_by(|&x,&y|magnitude(zeta[x]).total_cmp(&magnitude(zeta[y]))).unwrap();

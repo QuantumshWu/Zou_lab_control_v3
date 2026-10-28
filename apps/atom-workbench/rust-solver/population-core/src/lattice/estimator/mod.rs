@@ -11,15 +11,18 @@
 //!
 //! - Slow Ritz modes (|theta| < `slow::SLOW`, the kernel included) are exact
 //!   (`slow`): e_m(t) = a_m (e^{theta_m t} Y_m - e^{tA} Y_m) with
-//!   Y_m = (theta_m - A)^-1 F_m on one shared GCRO pool, the ring slaved at
-//!   z = theta_m and fed back. The kernel mode's Y is the steady error.
+//!   Y_m = (theta_m - A)^-1 F_m, the space's part of F_m solved in closed
+//!   form and the ring (slaved at z = theta_m and fed back) by GCRO on one
+//!   shared pool seeded with the pipeline's steady solve. The kernel mode's
+//!   Y is the steady error.
 //! - Fast Ritz modes: second-order Schrieffer-Wolff averaging on the near
 //!   modes, the centre, its one-step neighbours and the explicit set P
 //!   (`kernels`, `blocks`, `lattice`, `propagate`), sources transferred in
 //!   from their neighbours at first order, no ring; the neighbours' own
 //!   errors by the dressed blocks of L0' alone (five lasers, 20 us: without
 //!   them the estimate is 0.50-0.54 of the actual error and accepts a
-//!   checkpoint at 5.5e-3).
+//!   checkpoint at 5.5e-3). Only the canonical member of each mirror pair
+//!   is transformed and propagated (the flip symmetry of the fields).
 //! - Horizon rule: the slow part runs for an output time T only when
 //!   T lambda_slow >= 1 (lambda_slow the slowest decay rate of the reduced
 //!   model); before that the slow modes' far sources have not grown and the
@@ -92,11 +95,6 @@ pub struct UnifiedEstimate<'a>{
     pub lattice:ErrorLattice<'a>,
     pub pool:Option<SlowPool<'a>>,
     pub gate:OutputGate,
-    /// Whether the pool's first kernel direction is the pipeline's bordered
-    /// solve (else the Floquet preconditioner's). Measured on three and four
-    /// lasers at 10 ms: the solve's 12-13 inner steps save about 5 GCRO
-    /// steps, a net loss; off by default.
-    pub seed_with_pipeline:bool,
 }
 
 /// The estimator of a request (`estimate_api::Construct`).
@@ -119,10 +117,18 @@ impl<'a> UnifiedEstimate<'a>{
         let explicit=if near_explicit{setup.lattice.explicit.clone()}else{Vec::new()};
         let lattice=ErrorLattice::new(setup.prepared,&modes,&explicit,rule,CLASSES)?;
         let gate=OutputGate::new(lattice.n,lattice.nu.clone(),lattice.centre);
-        Ok(Self{setup,lattice,pool:None,gate,seed_with_pipeline:false})
+        Ok(Self{setup,lattice,pool:None,gate})
     }
+    fn pool(&mut self)->Result<&mut SlowPool<'a>,String>{
+        if self.pool.is_none(){self.pool=Some(SlowPool::new(self.setup.prepared,&self.lattice)?);}
+        Ok(self.pool.as_mut().unwrap())
+    }
+    /// Seeds the slow modes' pool with directions z and their images A z on
+    /// P u Q (A unbordered): the inner directions of the pipeline's steady
+    /// solve, whose images its Arnoldi relation gives for free.
+    pub fn seed(&mut self,directions:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{self.pool()?.seed(directions,images)}
     /// The population errors of a checkpoint's outputs.
-    pub fn errors(&mut self,cp:&Checkpoint<'_>,steady:&mut dyn SteadySolves)->Result<Errors,String>{
+    pub fn errors(&mut self,cp:&Checkpoint<'_>)->Result<Errors,String>{
         let(k,r)=(cp.basis.len(),cp.theta.len());let outputs=self.setup.outputs;
         let mut ms=[0.;5];let clock=Instant::now();
         self.lattice.add_columns(cp.basis,cp.images)?;ms[0]=clock.elapsed().as_secs_f64()*1e3;
@@ -135,22 +141,21 @@ impl<'a> UnifiedEstimate<'a>{
         let grid=outputs.times.last().is_some_and(|&t|uses(t));
         let horizon_slow:Vec<bool>=outputs.horizons.iter().map(|&t|uses(t)).collect();
         let kernel:Vec<usize>=slow.iter().copied().filter(|&m|magnitude(cp.theta[m])<1e-12).collect();
-        // The kernel modes first: the pool's first direction is the pipeline's solve of a kernel source.
+        // The kernel modes first.
         let needed:Vec<usize>=if grid||horizon_slow.iter().any(|&h|h){kernel.iter().chain(slow.iter().filter(|m|!kernel.contains(m))).copied().collect()}
             else if outputs.steady{kernel.clone()}else{Vec::new()};
         let mut solutions=Vec::new();
         if !needed.is_empty(){
-            if self.pool.is_none(){let mut pool=SlowPool::new(self.setup.prepared,&self.lattice)?;pool.seed_with_pipeline=self.seed_with_pipeline;self.pool=Some(pool);}
             let clock=Instant::now();
-            let pool=self.pool.as_mut().unwrap();pool.add_columns(cp.basis,cp.images)?;ms[1]=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
+            self.pool()?.add_columns(cp.basis)?;ms[1]=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
             let length=self.lattice.dimension();
             for &m in &needed{
-                // x = W b_m, F = (A W - theta W) b_m + the ring's feedback at theta.
-                let(mut x,mut f)=(vec![ZERO;length],vec![ZERO;length]);let theta=cp.theta[m];
-                for j in 0..k{let c=b[j+k*m];if !nonzero(c){continue;}let ct=mul(c,theta);
-                    for((xv,fv),(&w,&aw))in x.iter_mut().zip(f.iter_mut()).zip(cp.basis[j].iter().zip(&cp.images[j])){mul_add(xv,c,w);mul_add(fv,c,aw);let v=mul(ct,w);fv.re-=v.re;fv.im-=v.im;}}
-                let g=self.lattice.ring_feedback(&x,theta)?;for(a,v)in f.iter_mut().zip(g){add(a,v);}
-                solutions.push(pool.solve(cp.basis,&f,theta,cp.coefficients[m],steady)?);
+                // x = W b_m, A x and the ring's feedback of x at theta.
+                let(theta,bm)=(cp.theta[m],&b[k*m..k*(m+1)]);let(mut x,mut ax)=(vec![ZERO;length],vec![ZERO;length]);
+                for(j,&c)in bm.iter().enumerate(){if !nonzero(c){continue;}
+                    for((xv,av),(&w,&aw))in x.iter_mut().zip(ax.iter_mut()).zip(cp.basis[j].iter().zip(&cp.images[j])){mul_add(xv,c,w);mul_add(av,c,aw);}}
+                let g=self.lattice.ring_feedback(&x,theta)?;
+                solutions.push(self.pool.as_mut().unwrap().mode(bm,&ax,&g,theta,cp.coefficients[m])?);
             }
             ms[2]=clock.elapsed().as_secs_f64()*1e3;
         }
@@ -188,7 +193,7 @@ impl<'a> UnifiedEstimate<'a>{
 }
 
 impl Estimator for UnifiedEstimate<'_>{
-    fn estimate(&mut self,reduced:&ReducedView<'_>,steady:&mut dyn SteadySolves)->Result<ErrorEstimate,String>{
+    fn estimate(&mut self,reduced:&ReducedView<'_>,_steady:&mut dyn SteadySolves)->Result<ErrorEstimate,String>{
         let clock=Instant::now();
         let(k,r)=(reduced.basis.len(),reduced.r);
         let groups=self.setup.outputs.groups;let outputs=self.setup.outputs;
@@ -212,7 +217,7 @@ impl Estimator for UnifiedEstimate<'_>{
         }
         let before=(self.lattice.work.clone(),self.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default());
         let cp=Checkpoint{basis:reduced.basis,images:reduced.images,x:&x,s:&s,theta:reduced.used_theta,coefficients:reduced.used_coefficients};
-        let errors=self.errors(&cp,steady)?;
+        let errors=self.errors(&cp)?;
         let zero=vec![0.;self.lattice.n];
         let delta=self.setup.ledger.total();
         let tau=relaxation_time(reduced.used_theta,reduced.used_coefficients,reduced.kernel);
@@ -222,10 +227,12 @@ impl Estimator for UnifiedEstimate<'_>{
         let steady_error=errors.steady.as_ref().map(|p|metric(p,&zero,groups)+delta*tau);
         let(w,p)=(&self.lattice.work,self.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default());
         let blocks=self.lattice.modes.len();
+        // The pool's products with Q in block units (4 real multiply-adds per complex one, d^2 per block).
+        let qr=((p.qr_macs-before.1.qr_macs)/(4.*(self.lattice.d*self.lattice.d)as f64)).round()as usize;
         let work=EstimateWork{
             block_operations:w.block_operations-before.0.block_operations+w.frame_blocks-before.0.frame_blocks+p.frame_blocks-before.1.frame_blocks
-                +(p.applications-before.1.applications+p.preconditions-before.1.preconditions)*blocks,
-            block_solves:w.block_solves-before.0.block_solves,inner_steps:p.inner_steps-before.1.inner_steps,milliseconds:clock.elapsed().as_secs_f64()*1e3};
+                +(p.applications-before.1.applications+p.preconditions-before.1.preconditions)*blocks+qr,
+            block_solves:w.block_solves-before.0.block_solves,inner_steps:0,milliseconds:clock.elapsed().as_secs_f64()*1e3};
         let estimate=ErrorEstimate{trajectory,horizons,steady:steady_error,work};
         self.gate.last_estimate=Some(estimate.largest());
         Ok(estimate)
