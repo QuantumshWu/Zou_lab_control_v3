@@ -149,9 +149,8 @@ pub struct EstimateWork{
     pub block_operations:usize,pub block_solves:usize,
     /// Time (ms).
     pub milliseconds:f64,
-    /// Slow modes solved, whether the trajectory took the slow part, and
-    /// the slowest decay rate the time rule read (1/us).
-    pub slow_modes:usize,pub slow_trajectory:bool,pub lambda_slow:f64,
+    /// Slow modes solved.
+    pub slow_modes:usize,
 }
 
 /// Estimated errors of one checkpoint's outputs (population metric).

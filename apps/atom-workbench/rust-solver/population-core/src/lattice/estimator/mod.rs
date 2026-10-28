@@ -41,15 +41,23 @@
 //!   the dressed blocks of L0' alone (five lasers, 20 us: without them the
 //!   estimate is 0.50-0.54 of the actual error). Krylov residual alone. Only
 //!   the canonical member of each mirror pair is transformed and propagated.
-//! - Time rule for the trajectory: the slow part runs when T lambda_slow >= 1
-//!   at the grid's last time T (lambda_slow the slowest decay rate of the
-//!   reduced model); before that the slow modes' far sources have not grown
-//!   and the two large terms of the exact form cancel badly: every Ritz mode
-//!   goes through the SW part (always taking the slow part: per-time ratio
-//!   0.03) but the kernel modes, which always take it. A horizon
-//!   always takes the slow part for the slow modes and the fast part for the
-//!   others (the complete form): the fast modes' residuals reach the
-//!   slow classes of the frame's block, which carry them to T. Without the
+//! - Every output, the trajectory and each horizon, takes the slow part for
+//!   the slow modes it needs and the fast part for the others (the complete
+//!   form): the fast modes' residuals reach the slow classes of the frame's
+//!   block, which carry them to T. There was a time rule (the trajectory took
+//!   the slow part only when T lambda_slow >= 1 at the grid's last time):
+//!   with the trace correction the corrected model's kernel vector and slow
+//!   pairs were no Galerkin vectors (five lasers without the trap, 16 solves:
+//!   a kernel residual of 3.1e-5 against 1e-9, a slow pair at 1.45e-3 /us of
+//!   residual 1.12), the exact form's two large terms cancelled badly, and
+//!   always taking the slow part gave per-time ratios down to 0.03 (forced
+//!   on that basis: 7.3e-2 against an error of 7.3e-4). With the trace
+//!   carried by construction (`space`) the rule only handed the slowest
+//!   relaxation (0.034 /us at 20 us, T lambda = 0.69) to the SW part, which
+//!   does not follow it: at the 4- and 8-solve checkpoints of four and five
+//!   lasers (with and without the trap) at 20 us the worst per-time ratio was
+//!   0.29-0.72 with the rule and 0.93-1.29 without it, the accepted
+//!   checkpoints unchanged. Without the
 //!   fast part a slow mode the space lacks was invisible: the default scene
 //!   (probe + tweezer) at T = 100 ms was off by 7.8e-3 with a bound of
 //!   7e-13, its slow classes at 5.6e-7 and 8.7e-7 /us outside the space;
@@ -193,21 +201,16 @@ impl<'a> UnifiedEstimate<'a>{
         // is never among them; the kernel is. At an
         // output time T a decaying mode slower than 1/T with a coefficient
         // below the tolerance stays in the SW part and holds no other back
-        // (`set`); the slowest decay rate of the others decides whether the
-        // slow part runs for the trajectory.
+        // (`set`).
         let slow:Vec<usize>=(0..r).filter(|&m|magnitude(cp.theta[m])<slow::SLOW&&!cp.projected[m]).collect();
         let kernel:Vec<usize>=slow.iter().copied().filter(|&m|cp.kernel[m]).collect();
         let negligible=|m:usize,t:f64|t*cp.theta[m].re.abs()<1.&&magnitude(cp.coefficients[m])<ledger::POPULATION_TOLERANCE&&!kernel.contains(&m);
-        let rate=|t:f64|{let l=(0..r).filter(|&m|cp.theta[m].re.abs()>=super::reduced::KERNEL&&!cp.projected[m]&&!negligible(m,t)).map(|m|cp.theta[m].re.abs()).fold(f64::INFINITY,f64::min);
-            if l.is_finite(){l}else{0.}};
         let set=|t:f64|->Vec<usize>{slow.iter().copied().filter(|&m|!negligible(m,t)).collect()};
         let last=outputs.times.last().copied().unwrap_or(0.);
-        let lambda_slow=rate(last);
-        let grid=outputs.times.last().is_some_and(|&t|t*rate(t)>=1.);
         // The kernel modes first, then every slow mode an output takes: every
-        // horizon, the grid when it runs the slow part.
+        // horizon and the grid's last time.
         let mut taken:Vec<usize>=Vec::new();
-        for t in outputs.horizons.iter().copied().chain(grid.then_some(last)){for m in set(t){if !taken.contains(&m){taken.push(m);}}}
+        for t in outputs.horizons.iter().copied().chain(outputs.times.last().copied()){for m in set(t){if !taken.contains(&m){taken.push(m);}}}
         // Those an output may leave out last, slowest last: every output time
         // takes a prefix of the solutions.
         let key=|m:usize|(magnitude(cp.coefficients[m])<ledger::POPULATION_TOLERANCE,-cp.theta[m].re.abs());
@@ -254,14 +257,9 @@ impl<'a> UnifiedEstimate<'a>{
         let n=self.lattice.n;
         // The trajectory: the fast part without the modes the slow part takes
         // (and the invariant kernel modes).
-        // The kernel modes (first among the solutions) always take the slow
-        // part: their error a_0 (Y_0 - e^{tA} Y_0) has no large cancelling
-        // terms, and it grows to the steady error, the omitted ring's, which
-        // the fast part cannot see (a spurious slow Ritz value, or T just
-        // below 1 / lambda_slow, otherwise leaves it out: per-time ratios
-        // 0.05 on four lasers at 10 ms, 0.29 on four lasers without the trap
-        // at 20 us).
-        let slow_grid=grid&&!solutions.is_empty();
+        // The kernel modes come first among the solutions: their error
+        // a_0 (Y_0 - e^{tA} Y_0) grows to the steady error, the omitted ring's,
+        // which the fast part cannot see.
         let kernels=solved.iter().take_while(|m|kernel.contains(m)).count();
         // The non-kernel slow modes among the first `count` solutions, for
         // their own residuals' SW part (charged apart); none with one source
@@ -270,7 +268,7 @@ impl<'a> UnifiedEstimate<'a>{
         let only=self.only.is_some();
         let(mut own_trajectory,mut slow_trajectory,mut slow_horizons)=(Vec::new(),Vec::new(),Vec::new());
         let trajectory=if outputs.times.is_empty(){Vec::new()}else{
-            let count=if slow_grid{taking(last).max(kernels)}else{kernels};
+            let count=taking(last).max(kernels);
             let skip:Vec<usize>=solved[..count].iter().chain(&invariant).copied().collect();
             let coefficients:Vec<C>=(0..r).map(|m|if skip.contains(&m)||only{ZERO}else{cp.coefficients[m]}).collect();
             let fast=self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&coefficients},outputs.times,Readout::Laboratory)?;
@@ -296,7 +294,7 @@ impl<'a> UnifiedEstimate<'a>{
             let mut e=vec![0.;n];
             if let Some(pool)=self.pool.as_ref(){for sol in solutions.iter().filter(|s|s.kernel){for(a,v)in e.iter_mut().zip(pool.steady_populations(cp.basis,sol)){*a+=v;}}}
             e});
-        Ok(Errors{trajectory,horizons,steady,own_trajectory,own_horizons,slow_trajectory,slow_horizons,work:EstimateWork{slow_modes:solutions.len(),slow_trajectory:slow_grid,lambda_slow,..Default::default()}})
+        Ok(Errors{trajectory,horizons,steady,own_trajectory,own_horizons,slow_trajectory,slow_horizons,work:EstimateWork{slow_modes:solutions.len(),..Default::default()}})
     }
     /// The work counters so far: the fast part's and the pool's.
     fn counters(&self)->(lattice::ErrorWork,slow::PoolWork){

@@ -651,7 +651,7 @@ mod tests{
                 "returnedErrTraj":returned.as_ref().map(|e|e.iter().fold(0_f64,|x,&y|x.max(y))),
                 "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"conserved":c.conserved,
                 "slowestRate":c.slowest.map(|s|s.rate),"slowestResidual":c.slowest.map(|s|s.residual),"slowestMatched":c.slowest.and_then(|s|s.matched),"ms":c.milliseconds});
-            let work=json!({"slowModes":c.estimate.work.slow_modes,"slowTrajectory":c.estimate.work.slow_trajectory,"lambdaSlow":c.estimate.work.lambda_slow,"estimateMs":c.estimate.work.milliseconds,
+            let work=json!({"slowModes":c.estimate.work.slow_modes,"estimateMs":c.estimate.work.milliseconds,
                 "operatorWork":c.inner.operator_work,"innerSteps":c.inner.steps,"innerMs":c.inner.milliseconds,"applyMs":c.inner.timing.apply_ms,"preconditionMs":c.inner.timing.precondition_ms,"orthogonalizeMs":c.inner.timing.orthogonalize_ms,"batchMs":c.inner.batch_ms,"blockOperations":c.inner.block_operations(),
                 "timingMs":{"explicitSet":c.timing.explicit_set_ms,"setup":c.timing.setup_ms,"frame":c.timing.frame_ms.iter().sum::<f64>(),"frameWait":c.timing.frame_wait_ms,"projection":c.timing.projection_ms,"model":c.timing.model_ms,"ordering":c.timing.ordering_ms,"estimate":c.timing.estimate_ms,"outputs":c.timing.outputs_ms},
                 "elapsedMs":started.elapsed().as_secs_f64()*1e3,"trajectoryNorm":c.trajectory.iter().map(|p|ledger::metric(p,&zero,&groups)).fold(0_f64,f64::max)});
