@@ -69,6 +69,7 @@ pub mod estimate_api;
 pub mod estimator;
 pub mod pipeline;
 pub mod ledger;
+pub mod diagnostics;
 pub use generator::{Component,Generator,Sparse,Superop};
 
 pub(crate) const ZERO:C=C{re:0.,im:0.};
