@@ -62,6 +62,14 @@ const CHECKPOINT:usize=4;
 /// accepted research case takes (16-24 at 20 us).
 const MAXIMUM_SOLVES:usize=48;
 const BASIS_BYTES:usize=1<<30;
+/// Memory guard: a request takes about BASE_BYTES plus MODE_BYTES per lattice
+/// mode (measured, private bytes: D1 + three D2 lasers, 13 modes, 0.62 GB;
+/// six lasers without the trap, 63 modes, 2.0 GB; the pole batches and the
+/// estimator's ring grow with the modes); one whose lattice would need more
+/// than MEMORY_BYTES stops before its first solve, with the reason.
+const BASE_BYTES:f64=5e8;
+const MODE_BYTES:f64=3.2e7;
+const MEMORY_BYTES:f64=5e9;
 /// The plateau: the largest bound (or the slowest relaxation's need) did
 /// not improve by PLATEAU_GAIN over the last PLATEAU checkpoints. Measured
 /// before the rule: four lasers + tweezer at 10 us / 2000 samples held the
@@ -300,7 +308,15 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     let clock=Instant::now();
     let mut lattice=Lattice::new(prepared,explicit.sets.clone())?;
     let ledger=lattice.operator().ledger()?;
-    if ledger.expansion_parameter>EXPANSION_LIMIT{return Err(format!("Static fold expansion parameter {:e} above {EXPANSION_LIMIT:e}",ledger.expansion_parameter));}
+    let planned=BASE_BYTES+MODE_BYTES*lattice.modes.len()as f64;
+    if planned>MEMORY_BYTES{return Err(format!("The lattice of this request has {} modes and would need about {:.1} GB, above the {:.0} GB memory budget: not solved",lattice.modes.len(),planned/1e9,MEMORY_BYTES/1e9));}
+    // A static fold whose expansion parameter p = nu_max / (|nu_far| - ||L0||)
+    // exceeds EXPANSION_LIMIT keeps its K^(1) term and is charged its
+    // remainder (`ledger::nu_freeze`, a generator bound delta): delta min(t, tau)
+    // on every output, tau the slowest relaxation time; at p >= 1 the
+    // expansion diverges and the request is not solved.
+    if ledger.expansion_parameter>=1.{return Err(format!("Static fold expansion parameter {:e}: the fold's frequency expansion diverges on this lattice, not solved",ledger.expansion_parameter));}
+    let freeze=(ledger.expansion_parameter>EXPANSION_LIMIT).then_some(ledger.nu_freeze);
     // 2. The space: translations, the steady column.
     let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*op.modes.len())};
     let mut space=Space::new(&mut lattice,initial,capacity)?;
@@ -371,6 +387,10 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             if classes.is_none()&&propagates{classes=Some(class_rates(&frame,eigen,lapack,initial,tolerance)?);}
             let rates:Option<Vec<f64>>=classes.as_ref().map(|c|c.iter().map(|x|x.0).collect());
             let pairs=slow_pairs(&model,&space,&ops,rates.as_deref(),tolerance)?;
+            if let Some(delta)=freeze{let tau=pairs.first().map_or(f64::INFINITY,|(p,_)|1./p.rate);
+                for(v,&t)in estimate.trajectory.iter_mut().zip(times){*v+=delta*t.min(tau);}
+                for(v,&t)in estimate.horizons.iter_mut().zip(request.horizons){*v+=delta*t.min(tau);}
+                for v in estimate.steady.iter_mut(){*v+=delta*tau;}}
             let unresolved:Vec<&SlowRate>=pairs.iter().filter(|(p,w)|!p.resolved()&&required(p,*w)).map(|(p,_)|p).collect();
             let missing=missing_classes(classes.as_deref().unwrap_or(&[]),&pairs,request.horizons,tolerance);
             // The outputs with their bounds.

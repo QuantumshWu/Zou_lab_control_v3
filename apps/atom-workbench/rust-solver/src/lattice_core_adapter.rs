@@ -143,7 +143,12 @@ fn prepare(model:&Model,ground:&[bool])->Result<(LatticePrepared,harmonics::Phas
         cosine:MatrixView{real:&x.cos.real,imag:&x.cos.imag},sine:MatrixView{real:&x.sin.real,imag:&x.sin.imag}}).collect();
     let view=ModelView{dimension:model.dimension,hamiltonian:MatrixView{real:&model.h_real,imag:&model.h_imag},
         collapse:&collapse,drives:&drives,ground};
-    Ok((LatticePrepared::prepare(&view,phases)?,axes))
+    let lattice=LatticePrepared::prepare(&view,phases)?;
+    // A re-framed excited manifold (`Source::frame_shift` g): its states'
+    // laboratory frame indices f - g.
+    let mut axes=axes;
+    for(f,g)in axes.frame_indices.iter_mut().zip(&lattice.source.frame_shift){for(a,b)in f.iter_mut().zip(g){*a-=b;}}
+    Ok((lattice,axes))
 }
 
 /// One request's lattice preparation, shared by its mean and its trajectory.
