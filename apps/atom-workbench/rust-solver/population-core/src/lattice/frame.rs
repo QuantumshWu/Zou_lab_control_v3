@@ -170,6 +170,12 @@ impl<'f> SwMetric<'f>{
         let t:Vec<Vec<C>>=execution.map(items.clone(),|(f,c)|{let field=&coefficients[f*cc*d..(f+1)*cc*d];
             let mut t=field[c*d..(c+1)*d].to_vec();for &(b,s)in &self.into[c]{kernels.subtract_kernel(s,&self.block(field,b),&mut t);}t});
         let t:Vec<C>=t.concat();
+        // Diagnostics: ATOM_DIAG_DRESSED takes the dressed metric E^-H E^-1
+        // per mode (no transfer, no block) for the projection.
+        if super::diagnostics::perturbation("DRESSED").is_some(){let c_ref=&coefficients;
+            let mut out=gather(execution.map(chunks,|(s,e)|basis.coefficients_adjoint(&c_ref[s*d..e*d],e-s)))?;
+            for(e,block)in out.chunks_exact_mut(d).enumerate(){let s=self.weights[e%cc];for z in block{*z=scaled(*z,s);}}
+            return Ok(FrameFields{metric:out,eigen:coefficients,transferred:t});}
         // v = N t.
         let normal=if self.applied.fetch_add(blocks,Ordering::Relaxed)>=d/NORMAL_SHARE{Some(self.frame.normal()?)}else{None};
         let(inverse,lapack,t_ref)=(self.inverse,&self.lapack,&t);

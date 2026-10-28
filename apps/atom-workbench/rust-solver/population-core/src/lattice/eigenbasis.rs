@@ -217,6 +217,30 @@ impl BlockEigenbasis{
             if im[j]!=0.&&j+1<d{kind[j]=1;kind[j+1]=2;lambda[j]=C{re:re[j],im:im[j]};lambda[j+1]=C{re:re[j],im:-im[j]};j+=2;}
             else{lambda[j]=C{re:re[j],im:0.};j+=1;}
         }
+        // Diagnostics: the eigenvectors perturbed, or rotated within
+        // eigenspaces whose values agree to ATOM_DIAG_ROTATE (a pair's real
+        // and imaginary columns by the same rotation), their inverse exact.
+        let(mut vectors,mut inverse)=(vectors,inverse);
+        if let Some(eps)=super::diagnostics::perturbation("EIGEN"){
+            vectors=vectors.iter().enumerate().map(|(e,&x)|x*(1.+eps*super::diagnostics::noise(1,e as u64))).collect();inverse=real_inverse(lapack,&vectors,d)?;}
+        if let Some(tol)=super::diagnostics::perturbation("ROTATE"){
+            // Leading indices (a real value or the first of a pair) by value.
+            let leading:Vec<usize>=(0..d).filter(|&j|kind[j]!=2).collect();let mut rotated=0;let mut used=vec![false;d];
+            for(x,&a)in leading.iter().enumerate(){if used[a]{continue;}
+                let Some(&b)=leading[x+1..].iter().find(|&&b|!used[b]&&kind[b]==kind[a]&&magnitude(C{re:lambda[a].re-lambda[b].re,im:lambda[a].im-lambda[b].im})<=tol)else{continue};
+                used[a]=true;used[b]=true;rotated+=1;
+                let angle=std::f64::consts::FRAC_PI_4*(1.+super::diagnostics::noise(6,a as u64));let(c,s)=(angle.cos(),angle.sin());
+                let columns=if kind[a]==1{2}else{1};
+                for o in 0..columns{for h in 0..d{let(u,v)=(vectors[h+d*(a+o)],vectors[h+d*(b+o)]);vectors[h+d*(a+o)]=c*u+s*v;vectors[h+d*(b+o)]=-s*u+c*v;}}}
+            inverse=real_inverse(lapack,&vectors,d)?;
+            eprintln!("DBG eigen rotated {rotated} pairs within {tol:e}");
+        }
+        // Diagnostics: the inverse alone perturbed (E^-1 E = I to eps), or the
+        // values (a pair's kept conjugate).
+        if let Some(eps)=super::diagnostics::perturbation("INVERSE"){for(e,x)in inverse.iter_mut().enumerate(){*x*=1.+eps*super::diagnostics::noise(7,e as u64);}}
+        let mut lambda=lambda;
+        if let Some(eps)=super::diagnostics::perturbation("VALUES"){let mut j=0;while j<d{
+            let f=1.+eps*super::diagnostics::noise(8,j as u64);lambda[j]=scaled(lambda[j],f);if kind[j]==1{lambda[j+1]=conj(lambda[j]);j+=2;}else{j+=1;}}}
         Self::finish(n,d,lapack,lambda,vectors,inverse,kind,[groups.len(),largest,1],clock)
     }
     /// The eigenbasis from an eigensystem and `transform`: for leading

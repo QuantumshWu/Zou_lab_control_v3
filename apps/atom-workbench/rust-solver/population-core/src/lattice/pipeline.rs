@@ -209,7 +209,10 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     // The frame's metric (waiting for the frame's thread), none when no
     // output propagates.
     let clock=Instant::now();
-    let metric=if propagates{Some(SwMetric::new(&frame,eigen,lattice.operator())?)}else{None};
+    // Diagnostics: ATOM_DIAG_EUCLIDEAN takes the Euclidean Galerkin model for
+    // a request that propagates too (the frame still serves the estimate).
+    let euclidean=super::diagnostics::perturbation("EUCLIDEAN").is_some();
+    let metric=if propagates&&!euclidean{Some(SwMetric::new(&frame,eigen,lattice.operator())?)}else{None};
     timing.frame_wait_ms=clock.elapsed().as_secs_f64()*1e3;
     let test=metric.as_ref().map(|m|m as &dyn TestSpace);
     let mut galerkin=Projection::new(lattice.operator())?;
@@ -234,7 +237,9 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
         // A mean also needs the slowest relaxation resolved (the solve or
         // basis budget spent: reported as its range).
         let slow=slowest(&model,galerkin,lapack,space,&ops,true)?;let ranking=slowest(&model,galerkin,lapack,space,&ops,false)?;
-        let accepted=ACCEPTANCE_FACTOR*estimate.largest()<=tolerance&&(!resolve||exhausted||slow.is_none_or(|s|s.resolved()));
+        let accepted=ACCEPTANCE_FACTOR*estimate.largest()<=tolerance&&(!resolve||exhausted||slow.is_none_or(|s|s.resolved()))
+            // Diagnostics: acceptance held back until ATOM_DIAG_ACCEPT_AFTER solves.
+            &&super::diagnostics::perturbation("ACCEPT_AFTER").is_none_or(|after|space.solves()as f64>=after);
         let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,accepted,
             growing:model.growing,clipped:model.clipped,projected:model.projected,conserved:model.conserved(),slowest:slow,
             trajectory,horizons,steady,inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
@@ -267,7 +272,9 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
             let model=match current.take(){Some((solves,model))if solves==space.solves()=>model,_=>{
                 galerkin.ingest(test,&space.basis,&space.images)?;galerkin.model(lapack,space.initial_norm,longest,tolerance)?}};
             let xis:Vec<C>=live.iter().map(|&i|points[i].sigma()).collect();
-            let transform=model.error_transform(&galerkin,&space.basis,&space.images,eigen,lapack,&xis)?;
+            let mut transform=model.error_transform(&galerkin,&space.basis,&space.images,eigen,lapack,&xis)?;
+            // Diagnostics: the error transform perturbed.
+            if let Some(eps)=super::diagnostics::perturbation("TRANSFORM"){for(a,p)in transform.iter_mut().enumerate(){for(b,z)in p.iter_mut().enumerate(){*z=scaled(*z,1.+eps*super::diagnostics::noise(5,(a*1000+b)as u64));}}}
             for(&i,p)in live.iter().zip(&transform){if slow_points[i]{continue;}
                 score[i]=points[i].sigma().re*p.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
                 if let Some(before)=solved_at[i].take(){remaining[i]=if before>0.{(score[i]/before).min(1.)}else{1.};}
@@ -292,7 +299,13 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
                     _=>0.};
                 gain(i)+bonus};
             let mut ranked:Vec<(usize,f64)>=live.iter().map(|&i|(i,priority(i))).collect();
-            ranked.sort_by(|a,b|b.1.total_cmp(&a.1));queue=ranked.into_iter().map(|x|x.0).collect();
+            ranked.sort_by(|a,b|b.1.total_cmp(&a.1));
+            if super::diagnostics::reporting(){
+                let top:Vec<String>=ranked.iter().take(5).map(|&(i,p)|format!("{}={:.4e}",points[i],p)).collect();
+                let margin=if ranked.len()>1&&ranked[0].1>0.{(ranked[0].1-ranked[1].1)/ranked[0].1}else{f64::NAN};
+                eprintln!("DBG rank solves {} margin {margin:.3e} top {}",space.solves(),top.join(" "));
+            }
+            queue=ranked.into_iter().map(|x|x.0).collect();
             timing.ordering_ms+=clock.elapsed().as_secs_f64()*1e3;
         }
         let i=queue.remove(0);if !alive[i]{continue;}

@@ -68,8 +68,23 @@ use crate::parallel::Execution;
 
 /// Trace rows below this fraction of the largest are left unconstrained.
 const TRACE_ROWS:f64=1e-6;
-/// Singular values of the trace rows below this fraction are dropped.
-const TRACE_RANK:f64=1e-10;
+/// A direction of the trace rows is enforced while its share of the
+/// correction, |u_j^T D| / s_j (D the defect T G0 - Omega T, s_j its
+/// singular value), stays below this fraction of |G0| (the correction stays
+/// a correction), and always while s_j is at least the population
+/// tolerance times the largest (a trace the space carries above the
+/// tolerance). Measured with the runs continued to 40 solves (five lasers
+/// + tweezer at 20 us, five lasers without the trap at 10 ms, four lasers
+/// without the trap at 20 us with a 1 s horizon): the determined directions
+/// take shares of 1e-6 to 8.6e-3 (singular values down to 5e-4 of the
+/// largest), the directions of inner-solve roundoff (at most 1.6e-5 of the
+/// largest) 0.18 to 4e4; 3e-2 lies 3.5x above the first and 6x below the
+/// second. A direction inverted at roundoff turned the defect into a
+/// correction of up to 1e6 |G0|: spurious growing modes (Re theta up to
+/// 3e4 /us) once the space reached new modes' trace rows.
+const TRACE_CORRECTION:f64=3e-2;
+/// Singular values below this fraction of the largest are roundoff.
+const TRACE_ROUNDOFF:f64=1e-14;
 /// |theta| below this (1/us) is a conserved quantity.
 pub const KERNEL:f64=1e-9;
 /// Growth (e^{Re theta T} - 1) x amplitude below this is clipped.
@@ -171,7 +186,11 @@ impl Projection{
         let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();
         self.euclidean=test.is_none();
         if let Some(test)=test{
-            let columns=test.columns(&fresh)?;self.metric.extend(columns.metric);
+            let columns=test.columns(&fresh)?;
+            // Diagnostics: the metric's columns perturbed.
+            match super::diagnostics::perturbation("METRIC"){
+                Some(eps)=>{let base=self.metric.len();self.metric.extend(columns.metric.iter().enumerate().map(|(e,&z)|scaled(z,1.+eps*super::diagnostics::noise(3,(base+e)as u64))));}
+                None=>self.metric.extend(columns.metric)}
             if self.frame_modes.is_empty(){self.frame_modes=test.canonical().to_vec();}
             self.frame_eigen.extend(columns.eigen);self.frame_transferred.extend(columns.transferred);
         }
@@ -257,11 +276,42 @@ impl Projection{
             let gram=product(lapack,&t,&transpose_rows(&t,rows,r),rows,r,rows)?;
             let complex:Vec<C>=gram.iter().map(|&v|C{re:v,im:0.}).collect();
             let(values,vectors)=lapack.hermitian_eigen(&complex,rows)?;let top=values.iter().fold(0_f64,|a,&v|a.max(v));
+            // Per direction j of the rows (T T^T u_j = s_j^2 u_j) its share of
+            // the correction, T^T u_j (u_j^T D) / s_j^2, of Frobenius norm
+            // |u_j^T D| / s_j: kept while that stays below TRACE_CORRECTION |G0|
+            // or while its trace content s_j is at least the tolerance times
+            // the largest (a space too small to conserve a trace it carries
+            // needs an O(1) correction: two columns of no laser, share 1).
+            let size=|m:&[f64]|m.iter().map(|v|v*v).sum::<f64>().sqrt();let g0_size=size(&g0);
+            let singular:Vec<f64>=values.iter().map(|v|v.max(0.).sqrt()).collect();let largest_singular=top.max(0.).sqrt();
+            let share:Vec<f64>=(0..rows).map(|j|{let mut p=vec![ZERO;r];for a in 0..rows{let u=conj(vectors[a+rows*j]);for c in 0..r{mul_add(&mut p[c],u,C{re:defect[a*r+c],im:0.});}}
+                p.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt()/singular[j].max(f64::MIN_POSITIVE)}).collect();
+            // Diagnostics: ATOM_DIAG_TRACE_RANK keeps directions by a fixed
+            // singular-value ratio instead; ATOM_DIAG_TRACE_CORRECTION
+            // replaces TRACE_CORRECTION.
+            let fixed=super::diagnostics::perturbation("TRACE_RANK");
+            let fraction=super::diagnostics::perturbation("TRACE_CORRECTION").unwrap_or(TRACE_CORRECTION);
+            let keep:Vec<bool>=(0..rows).map(|j|match fixed{Some(ratio)=>singular[j]>ratio*largest_singular,
+                None=>singular[j]>TRACE_ROUNDOFF*largest_singular&&(share[j]<=fraction*g0_size||singular[j]>=tolerance*largest_singular)}).collect();
             let mut pseudo=vec![0.;rows*rows];
-            for j in 0..rows{if values[j]>TRACE_RANK*TRACE_RANK*top{for a in 0..rows{for b in 0..rows{pseudo[a*rows+b]+=mul(vectors[a+rows*j],conj(vectors[b+rows*j])).re/values[j];}}}}
+            for j in 0..rows{if keep[j]{for a in 0..rows{for b in 0..rows{pseudo[a*rows+b]+=mul(vectors[a+rows*j],conj(vectors[b+rows*j])).re/values[j];}}}}
             let correction=product(lapack,&product(lapack,&transpose_rows(&t,rows,r),&pseudo,r,rows,rows)?,&defect,r,rows,r)?;
+            if super::diagnostics::reporting(){
+                // The trace rows' directions by singular value (ratio to the
+                // largest : share of the correction against |G0|, * when kept),
+                // the least kept and the largest dropped ratio, the defect and
+                // the correction against G0.
+                let mut order:Vec<usize>=(0..rows).collect();order.sort_by(|&a,&b|singular[b].total_cmp(&singular[a]));
+                let least_kept=order.iter().filter(|&&j|keep[j]).map(|&j|singular[j]/largest_singular).fold(f64::INFINITY,f64::min);
+                let largest_dropped=order.iter().filter(|&&j|!keep[j]).map(|&j|singular[j]/largest_singular).fold(0.,f64::max);
+                let list:Vec<String>=order.iter().map(|&j|format!("{:.1e}:{:.1e}{}",singular[j]/largest_singular,share[j]/g0_size,if keep[j]{"*"}else{""})).collect();
+                eprintln!("DBG trace k {k} rows {rows} kept {} least kept {least_kept:.2e} largest dropped {largest_dropped:.2e} defect {:.3e} correction/G0 {:.3e} directions {}",
+                    keep.iter().filter(|&&b|b).count(),size(&defect),size(&correction)/g0_size,list.join(" "));
+            }
             for(a,b)in g.iter_mut().zip(&correction){*a-=b;}
         }
+        // Diagnostics: G perturbed.
+        if let Some(eps)=super::diagnostics::perturbation("MODEL"){for(e,v)in g.iter_mut().enumerate(){*v*=1.+eps*super::diagnostics::noise(4,e as u64);}}
         // Ritz decomposition.
         let(re,im,ev)=lapack.eigen(&transpose_rows(&g,r,r),r)?;
         let mut theta=vec![ZERO;r];let mut s=vec![ZERO;r*r];let mut pair=vec![0_u8;r];let mut j=0;
@@ -290,6 +340,17 @@ impl Projection{
             growing+=1;
             if amplitudes[jj]<=GROWTH_BUDGET*tolerance{used_theta[jj]=ZERO;used_coefficients[jj]=ZERO;projected+=1;growth_charge+=amplitudes[jj];}
             else{used_theta[jj].re=0.;clipped+=1;}
+        }
+        if super::diagnostics::reporting(){
+            // The numerical abscissae of K^-1 H (the projection) and of G (with
+            // the trace correction) in the K-norm, the Gram's condition, the
+            // Ritz values nearest the axis (outside the kernel) with their
+            // amplitudes.
+            let kg=product(lapack,&self.k,&g,k,k,k)?;
+            let(omega_h,omega_g)=(super::diagnostics::abscissa(lapack,&self.k,&self.h,k)?,super::diagnostics::abscissa(lapack,&self.k,&kg,k)?);
+            let mut near:Vec<usize>=(0..r).filter(|&j|!kernel[j]).collect();near.sort_by(|&p,&q|theta[q].re.total_cmp(&theta[p].re));
+            let shown:Vec<String>=near.iter().take(6).map(|&j|format!("{:.3e}{:+.3e}i(a{:.1e})",theta[j].re,theta[j].im,amplitudes[j])).collect();
+            eprintln!("DBG model k {k} cond {gram_condition:.3e} omegaH {omega_h:+.3e} omegaG {omega_g:+.3e} growing {growing} clipped {clipped} projected {projected} top {}",shown.join(" "));
         }
         // The steady state.
         let simple_kernel=kernel.iter().filter(|&&b|b).count()==1;
