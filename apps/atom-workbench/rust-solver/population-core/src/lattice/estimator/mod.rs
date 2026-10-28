@@ -13,10 +13,13 @@
 //!   (`slow`): e_m(t) = a_m (e^{theta_m t} Y_m - e^{tA} Y_m) with
 //!   Y_m = (theta_m - A)^-1 F_m on one shared GCRO pool, the ring slaved at
 //!   z = theta_m and fed back. The kernel mode's Y is the steady error.
-//! - Fast Ritz modes: second-order Schrieffer-Wolff averaging on the
-//!   centre and its one-step neighbours (`kernels`, `blocks`, `lattice`,
-//!   `propagate`), sources transferred in from their neighbours at first
-//!   order, no ring.
+//! - Fast Ritz modes: second-order Schrieffer-Wolff averaging on the near
+//!   modes, the centre, its one-step neighbours and the explicit set P
+//!   (`kernels`, `blocks`, `lattice`, `propagate`), sources transferred in
+//!   from their neighbours at first order, no ring; the neighbours' own
+//!   errors by the dressed blocks of L0' alone (five lasers, 20 us: without
+//!   them the estimate is 0.50-0.54 of the actual error and accepts a
+//!   checkpoint at 5.5e-3).
 //! - Horizon rule: the slow part runs for an output time T only when
 //!   T lambda_slow >= 1 (lambda_slow the slowest decay rate of the reduced
 //!   model); before that the slow modes' far sources have not grown and the
@@ -58,6 +61,8 @@ pub const KERNEL_CAP:f64=f64::INFINITY;
 /// complex eigensystems, 10-18 s on three/four lasers): the same estimate to
 /// 0.5% on every two/three/four-laser checkpoint, the build 1.0-1.2 s.
 pub const CLASSES:Classes=Classes::Full;
+/// Whether the explicit set joins the near modes of the fast part.
+pub const NEAR_EXPLICIT:bool=true;
 /// A mode decays when |Re theta| is above this (1/us).
 const DECAYING:f64=1e-10;
 
@@ -101,11 +106,14 @@ pub fn relaxation_time(values:&[C],coefficients:&[C],kernel:&[bool])->f64{
 }
 
 impl<'a> UnifiedEstimate<'a>{
-    pub fn new(setup:EstimateSetup<'a>)->Result<Self,String>{
+    pub fn new(setup:EstimateSetup<'a>)->Result<Self,String>{Self::with_near(setup,NEAR_EXPLICIT)}
+    /// With or without the explicit set among the near modes.
+    pub fn with_near(setup:EstimateSetup<'a>,near_explicit:bool)->Result<Self,String>{
         let modes=setup.lattice.modes();
         let horizon=longest_time(setup.outputs.times,setup.outputs.horizons);
         let rule=KernelRule{entry:KERNEL_ENTRY,horizon_rate:KERNEL_HORIZON_RATE,horizon,cap:KERNEL_CAP};
-        let lattice=ErrorLattice::new(setup.prepared,&modes,rule,CLASSES)?;
+        let explicit=if near_explicit{setup.lattice.explicit.clone()}else{Vec::new()};
+        let lattice=ErrorLattice::new(setup.prepared,&modes,&explicit,rule,CLASSES)?;
         let gate=OutputGate::new(lattice.n,lattice.nu.clone(),lattice.centre);
         Ok(Self{setup,lattice,pool:None,gate,seed_with_pipeline:false})
     }

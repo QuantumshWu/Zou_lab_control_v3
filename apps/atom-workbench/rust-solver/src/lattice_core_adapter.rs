@@ -551,7 +551,8 @@ mod tests{
     /// `est_summary.py` on the output): estimate against the actual error
     /// and against R2's Python estimate. Ignored; ATOM_ESTIMATOR_FIXTURES =
     /// the export root, ATOM_ESTIMATOR_CASES = comma-separated case names,
-    /// optional ATOM_ESTIMATOR_SEED (1: the pipeline's solve seeds the slow pool).
+    /// optional ATOM_ESTIMATOR_SEED (1: the pipeline's solve seeds the slow pool),
+    /// ATOM_ESTIMATOR_NEAR (one-step: the explicit set not among the near modes).
     /// One JSON line per checkpoint; the fold charges (added by the
     /// Estimator) are left out.
     #[test]
@@ -605,7 +606,15 @@ mod tests{
             let sets=LatticeSets{explicit,ring};let initial=vec![C::default();p.generator.n*p.generator.n];
             let setup=EstimateSetup{prepared:&p,lattice:&sets,outputs:Outputs{times:&times,horizons:&horizons,steady:true,groups:&fixture_groups},ledger:&ledger,initial:&initial};
             let clock=Instant::now();
-            let mut estimate=UnifiedEstimate::new(setup).unwrap();estimate.seed_with_pipeline=seed;
+            let near=std::env::var("ATOM_ESTIMATOR_NEAR").unwrap_or_default();
+            let all_sets=LatticeSets{explicit:modes.clone(),ring:Vec::new()};
+            let mut estimate=if near=="all"{
+                // Every mode near: the explicit set given as the whole lattice (the setup's lattice is only read for its modes and P).
+                let mut e=UnifiedEstimate::with_near(EstimateSetup{lattice:&all_sets,..setup},true).unwrap();e.seed_with_pipeline=seed;e
+            }else{UnifiedEstimate::with_near(setup,near!="one-step").unwrap()};
+            estimate.seed_with_pipeline=seed;
+            estimate.lattice.ring_in_fast=std::env::var("ATOM_ESTIMATOR_FASTRING").is_ok_and(|v|v=="1");
+            estimate.lattice.outer_bare=std::env::var("ATOM_ESTIMATOR_OUTER").map_or(true,|v|v!="0");
             let build_ms=clock.elapsed().as_secs_f64()*1e3;
             let n_modes=modes.len();
             println!("{}",json!({"case":case,"modes":n_modes,"near":estimate.lattice.near.len(),"ring":estimate.lattice.ring.len(),"operatorDeviation":operator,"buildMs":build_ms,

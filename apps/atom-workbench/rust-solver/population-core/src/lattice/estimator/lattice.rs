@@ -2,13 +2,17 @@
 //! Schrieffer-Wolff blocks of the fast Ritz modes near the centre, and the
 //! omitted ring R = ring(P u Q) for the slow modes' sources.
 //!
-//! Fast part (R2 section 11.2): only the centre and its one-step neighbours
-//! (the near modes) get class coordinates; their sources are transformed by
+//! Fast part (R2 section 11.2): only the centre, its one-step neighbours and
+//! the explicit set P (the near modes) get class coordinates; their sources are transformed by
 //! I - S with the first-order transfer from every lattice neighbour (whose
 //! eigen-coordinates of L0' are therefore read), and their errors are read
 //! out on themselves and, through I + S, on their neighbours. Per basis
 //! column w_j (with its image A w_j), once:
 //!   z_w = V^-1 E^-1 (I - S) w_j,  z_a = V^-1 E^-1 (I - S) A w_j  on the near modes.
+//! The other lattice neighbours of the near modes (the outer modes) carry
+//! their error with the dressed blocks of L0' alone, from the
+//! eigen-coordinates the transfer reads anyway (five lasers: the error on
+//! the ring Q is a large part at 20 us).
 //! Per checkpoint the source of Ritz mode m is (A W - W theta_m) b_m a_m
 //! e^{theta_m t}: beta = (z_a b - z_w b theta) a, then the closed-form
 //! convolution and the readout (`propagate`).
@@ -85,20 +89,31 @@ pub struct ErrorLattice<'p>{
     /// The near modes (the centre and its one-step neighbours), and the (I - S)
     /// pairs into them: (target, source, step), target = source + step.
     pub near:Vec<usize>,pub(super) pairs:Vec<(usize,usize,usize)>,
-    /// The modes whose eigen-coordinates the transform reads.
-    frames:Vec<usize>,
+    /// The modes whose eigen-coordinates the transform reads, and those of
+    /// them outside the near modes (the outer modes): their errors are
+    /// propagated by the dressed blocks of L0' alone, from the coordinates
+    /// the transform reads anyway.
+    frames:Vec<usize>,pub outer_modes:Vec<usize>,
     pub classes:Vec<BlockSystem>,pub(super) class_of:Vec<usize>,
     /// Per near mode (in `near` order), column-major d x k: class
     /// coordinates of the transformed basis columns and images.
     pub(super) basis_coordinates:Vec<Vec<C>>,pub(super) image_coordinates:Vec<Vec<C>>,
+    /// Per outer mode, column-major d x k: eigen-coordinates of L0' of the
+    /// basis columns and images.
+    pub(super) outer_basis:Vec<Vec<C>>,pub(super) outer_image:Vec<Vec<C>>,
     pub columns:usize,
+    /// Whether the fast part's sources carry the ring slaved at z = 0 (its
+    /// feedback added to every image), and whether the outer modes are
+    /// propagated.
+    pub ring_in_fast:bool,pub outer_bare:bool,
     pub work:ErrorWork,
     /// Build times (ms): kernels, classes.
     pub build_ms:[f64;2],
 }
 
 impl<'p> ErrorLattice<'p>{
-    pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],rule:KernelRule,classes:Classes)->Result<Self,String>{
+    /// `explicit`: the explicit set P, whose modes join the near ones.
+    pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],explicit:&[Charge],rule:KernelRule,classes:Classes)->Result<Self,String>{
         let basis=prepared.eigenbasis()?;
         let n=prepared.generator.n;let d=n*n;
         let index:BTreeMap<Charge,usize>=modes.iter().enumerate().map(|(i,q)|(q.clone(),i)).collect();
@@ -115,9 +130,10 @@ impl<'p> ErrorLattice<'p>{
         let clock=Instant::now();
         let kernels=SwKernels::new(prepared,basis,rule)?;
         let kernel_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
-        // Near modes: the centre and every lattice mode one kernel step away.
+        // Near modes: the centre, every lattice mode one kernel step away and
+        // the explicit set (by construction where the state has weight).
         let mut near=vec![centre];
-        for step in &kernels.steps{if let Some(&q)=index.get(&step.charge){if !near.contains(&q){near.push(q);}}}
+        for q in kernels.steps.iter().map(|s|&s.charge).chain(explicit){if let Some(&q)=index.get(q){if !near.contains(&q){near.push(q);}}}
         let mut pairs=Vec::new();let mut keys:Vec<Vec<usize>>=Vec::new();let mut frames=near.clone();
         for &a in &near{
             let q=&modes[a];let mut steps=Vec::new();
@@ -135,8 +151,10 @@ impl<'p> ErrorLattice<'p>{
         let classes=built.into_iter().collect::<Result<Vec<_>,_>>()?;
         let class_ms=clock.elapsed().as_secs_f64()*1e3;
         let count=near.len();
+        let outer_modes:Vec<usize>=frames.iter().copied().filter(|q|!near.contains(q)).collect();let outer_count=outer_modes.len();
         Ok(Self{prepared,basis,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,kernels,
-            near,pairs,frames,classes,class_of,basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],columns:0,
+            near,pairs,frames,outer_modes,classes,class_of,basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],
+            outer_basis:vec![Vec::new();outer_count],outer_image:vec![Vec::new();outer_count],columns:0,ring_in_fast:false,outer_bare:true,
             work:ErrorWork::default(),build_ms:[kernel_ms,class_ms]})
     }
     pub fn dimension(&self)->usize{self.modes.len()*self.d}
@@ -145,18 +163,23 @@ impl<'p> ErrorLattice<'p>{
         let clock=Instant::now();
         for j in self.columns..basis.len(){
             if basis[j].len()!=self.dimension()||images[j].len()!=basis[j].len(){return Err("Estimator: basis column dimensions differ from the lattice".into());}
-            let zw=self.coordinates(&basis[j])?;let za=self.coordinates(&images[j])?;
+            let(zw,ow)=self.coordinates(&basis[j])?;
+            let(za,oa)=if self.ring_in_fast{
+                let g=self.ring_feedback(&basis[j],ZERO)?;let image:Vec<C>=images[j].iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
+                self.coordinates(&image)?}else{self.coordinates(&images[j])?};
             let d=self.d;
             for(slot,(w,a))in self.basis_coordinates.iter_mut().zip(self.image_coordinates.iter_mut()).enumerate(){
                 w.extend_from_slice(&zw[slot*d..(slot+1)*d]);a.extend_from_slice(&za[slot*d..(slot+1)*d]);}
+            for(slot,(w,a))in self.outer_basis.iter_mut().zip(self.outer_image.iter_mut()).enumerate(){
+                w.extend_from_slice(&ow[slot*d..(slot+1)*d]);a.extend_from_slice(&oa[slot*d..(slot+1)*d]);}
             self.columns+=1;self.work.columns+=1;
         }
         self.work.column_ms+=clock.elapsed().as_secs_f64()*1e3;
         Ok(())
     }
-    /// Class coordinates V_c^-1 E^-1 (I - S) v of a field on P u Q, per
-    /// near mode (in `near` order).
-    fn coordinates(&mut self,v:&[C])->Result<Vec<C>,String>{
+    /// Class coordinates V_c^-1 E^-1 (I - S) v of a field on P u Q per near
+    /// mode (in `near` order), and its coordinates E^-1 v per outer mode.
+    fn coordinates(&mut self,v:&[C])->Result<(Vec<C>,Vec<C>),String>{
         let d=self.d;let execution=Execution::new()?;let basis=self.basis;
         let chunks:Vec<Vec<usize>>=self.frames.chunks(BLOCKS_PER_TASK).map(|c|c.to_vec()).collect();
         let parts=execution.map(chunks.clone(),|modes|{let blocks:Vec<&[C]>=modes.iter().map(|&q|&v[q*d..(q+1)*d]).collect();basis.coefficients(&blocks)});
@@ -171,8 +194,9 @@ impl<'p> ErrorLattice<'p>{
             let mut out=vec![ZERO;d];
             lapack.complex_gemm().multiply(d,1,d,ONE,&classes[class_of[near[slot]]].inverse,d,&t[slot*d..(slot+1)*d],d,ZERO,&mut out,d)?;Ok(out)});
         let mut z=Vec::with_capacity(near.len()*d);for p in parts{z.extend(p?);}
+        let outer:Vec<C>=self.outer_modes.iter().flat_map(|&q|c[q*d..(q+1)*d].iter().copied()).collect();
         self.work.frame_blocks+=self.frames.len()+self.near.len();
-        Ok(z)
+        Ok((z,outer))
     }
     /// The ring's feedback on P u Q of a field x at the shift z:
     /// (B (z - D_R)^-1 C x)|_{P u Q}.

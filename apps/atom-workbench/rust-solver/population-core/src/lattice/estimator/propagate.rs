@@ -36,8 +36,9 @@ fn cexp(z:C,t:f64)->C{let m=(z.re*t).exp();if m==0.{return ZERO;}C{re:m*(z.im*t)
 
 impl ErrorLattice<'_>{
     /// Population errors (one row of n per time) of the SW propagation of
-    /// the checkpoint's sources on the near modes (Ritz modes with a zero
-    /// coefficient carry none).
+    /// the checkpoint's sources on the near modes and of the dressed-block
+    /// propagation on the outer modes (Ritz modes with a zero coefficient
+    /// carry none).
     pub fn populations(&self,ritz:&RitzSources<'_>,times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
         let(n,d,k)=(self.n,self.d,self.columns);let r=ritz.values.len();
         if ritz.vectors.len()!=k*r||ritz.coefficients.len()!=r{return Err("Estimator: Ritz data dimensions differ from the basis".into());}
@@ -49,14 +50,20 @@ impl ErrorLattice<'_>{
             for i in 0..k{ba[i+k*m]=mul(ritz.vectors[i+k*m],a);bta[i+k*m]=mul(ritz.vectors[i+k*m],ta);}}
         let slots=self.kernels.steps.len()+1;
         let lapack=&self.prepared.lapack;let theta=ritz.values;
-        let near_slots:Vec<usize>=(0..self.near.len()).collect();
-        let parts=Execution::new()?.map(near_slots,|slot|->Result<ModePart,String>{
-            let a=self.near[slot];
-            let gemm=lapack.complex_gemm();let c=self.class_of[a];let class=&self.classes[c];
+        // The near modes with their classes, then the outer modes with the dressed blocks of L0' (class key `bare`).
+        let bare=self.classes.len();
+        let outer=if self.outer_bare{self.outer_modes.len()}else{0};
+        let items:Vec<(usize,bool)>=(0..self.near.len()).map(|s|(s,true)).chain((0..outer).map(|s|(s,false))).collect();
+        let parts=Execution::new()?.map(items,|(slot,near)|->Result<ModePart,String>{
+            let a=if near{self.near[slot]}else{self.outer_modes[slot]};
+            let gemm=lapack.complex_gemm();
+            let(c,values,own,image,base):(usize,&[C],&[C],&[C],&[C])=if near{let c=self.class_of[a];let class=&self.classes[c];
+                (c,&class.values,&class.readout,&self.image_coordinates[slot],&self.basis_coordinates[slot])}
+                else{(bare,&self.basis.lambda,self.basis.population_rows(),&self.outer_image[slot],&self.outer_basis[slot])};
             let mut beta=vec![ZERO;d*r];
-            gemm.multiply(d,r,k,ONE,&self.image_coordinates[slot],d,&ba,k,ZERO,&mut beta,d)?;
-            gemm.multiply(d,r,k,C{re:-1.,im:0.},&self.basis_coordinates[slot],d,&bta,k,ONE,&mut beta,d)?;
-            let zeta:Vec<C>=class.values.iter().map(|z|C{re:z.re.min(0.),im:z.im-self.nu[a]}).collect();
+            gemm.multiply(d,r,k,ONE,image,d,&ba,k,ZERO,&mut beta,d)?;
+            gemm.multiply(d,r,k,C{re:-1.,im:0.},base,d,&bta,k,ONE,&mut beta,d)?;
+            let zeta:Vec<C>=values.iter().map(|z|C{re:z.re.min(0.),im:z.im-self.nu[a]}).collect();
             if a==self.centre{
                 let j0=(0..d).min_by(|&x,&y|magnitude(zeta[x]).total_cmp(&magnitude(zeta[y]))).unwrap();
                 if magnitude(zeta[j0])<1e-6{for m in 0..r{beta[j0+d*m]=ZERO;}}
@@ -69,11 +76,11 @@ impl ErrorLattice<'_>{
                 let s=den.re*den.re+den.im*den.im;let g=mul(b,C{re:den.re/s,im:-den.im/s});beta[j+d*m]=g;add(&mut gamma[j],g);
             }}
             // Targets: the mode itself (slot 0) and its neighbours a + s (slot s + 1).
-            let mut targets:Vec<(usize,usize,&[C])>=vec![(a,0,&class.readout[..])];
-            for &s in &class.steps{
+            let mut targets:Vec<(usize,usize,&[C])>=vec![(a,0,own)];
+            if near{let class=&self.classes[c];for &s in &class.steps{
                 let Some(&t)=self.index.get(&charge_plus(&self.modes[a],&self.kernels.steps[s].charge)?)else{continue};
                 targets.push((t,s+1,class.step_readout[s].as_deref().unwrap()));
-            }
+            }}
             if readout==Readout::Centre{targets.retain(|x|x.0==self.centre);}
             let mut part=ModePart{particular:Vec::new(),homogeneous:Vec::new(),resonant:Vec::new()};
             for(t,slot,rows)in targets{
@@ -104,10 +111,10 @@ impl ErrorLattice<'_>{
         let mut by_class:BTreeMap<usize,Vec<(usize,Vec<C>)>>=BTreeMap::new();
         for(key,g)in homogeneous{by_class.entry(key/slots).or_default().push((key%slots,g));}
         for(c,list)in by_class{
-            let class=&self.classes[c];
-            let block:Vec<C>=times.iter().flat_map(|&t|class.values.iter().map(move|&z|cexp(C{re:z.re.min(0.),im:z.im},t))).collect();
+            let values:&[C]=if c==bare{&self.basis.lambda}else{&self.classes[c].values};
+            let block:Vec<C>=times.iter().flat_map(|&t|values.iter().map(move|&z|cexp(C{re:z.re.min(0.),im:z.im},t))).collect();
             for(slot,g)in list{
-                let rows=if slot==0{&class.readout[..]}else{class.step_readout[slot-1].as_deref().unwrap()};
+                let rows:&[C]=if c==bare{self.basis.population_rows()}else if slot==0{&self.classes[c].readout}else{self.classes[c].step_readout[slot-1].as_deref().unwrap()};
                 let mut h=rows.to_vec();for j in 0..d{for i in 0..n{h[i+n*j]=mul(h[i+n*j],g[j]);}}
                 let mut f=vec![ZERO;n*t_count];gemm.multiply(n,t_count,d,ONE,&h,n,&block,d,ZERO,&mut f,n)?;
                 let nu=if slot==0{0.}else{self.kernels.steps[slot-1].nu};
