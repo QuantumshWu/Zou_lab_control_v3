@@ -42,8 +42,6 @@ pub enum Parts{
     Full,
     /// The mode-diagonal blocks only (no edge between modes).
     Diagonal,
-    /// The fold alone: sum_t (K_t^(0) + i nu_p K_t^(1)) x_p on every fold edge.
-    Fold,
 }
 /// A restriction of an application: which modes are read (the others are
 /// taken as zero) and which are computed (the others come out zero).
@@ -64,8 +62,8 @@ pub struct LatticeOperator<'a>{
     /// The mode of -q, and whether q is computed (the others are mirrored).
     pub mirror:Vec<usize>,pub canonical:Vec<bool>,
     /// Per mode: row-major L0's left/right factors with -i nu_q and the
-    /// diagonal fold's absorbable part, and the absorbable part alone.
-    left:Vec<Vec<C>>,right:Vec<Vec<C>>,fold_left:Vec<Vec<C>>,fold_right:Vec<Vec<C>>,
+    /// diagonal fold's absorbable part.
+    left:Vec<Vec<C>>,right:Vec<Vec<C>>,
     recycling:Superop,
     explicit:Vec<&'a Superop>,
     /// Per canonical target: (source mode, edge kind).
@@ -97,7 +95,7 @@ impl<'a> LatticeOperator<'a>{
         let zero=prepared.generator.zero_component();
         let(nl,nr)=(zero.op.left.dense(n),zero.op.right.dense(n));
         let diagonal=prepared.fold.targets.first().filter(|t|t.charge==prepared.generator.zero);
-        let(mut left,mut right,mut fold_left,mut fold_right)=(vec![],vec![],vec![],vec![]);
+        let(mut left,mut right)=(vec![],vec![]);
         for &w in &nu{
             let(mut a,mut b)=(vec![ZERO;d],vec![ZERO;d]);
             if let Some(t)=diagonal{for k in 0..d{
@@ -106,7 +104,7 @@ impl<'a> LatticeOperator<'a>{
             let mut l:Vec<C>=nl.iter().zip(&a).map(|(x,y)|C{re:x.re+y.re,im:x.im+y.im}).collect();
             let r:Vec<C>=nr.iter().zip(&b).map(|(x,y)|C{re:x.re+y.re,im:x.im+y.im}).collect();
             for i in 0..n{l[i*n+i].im-=w;}
-            left.push(l);right.push(r);fold_left.push(a);fold_right.push(b);
+            left.push(l);right.push(r);
         }
         let recycling=Superop{left:Sparse::default(),right:Sparse::default(),sandwich:zero.op.sandwich.clone()};
         let explicit_steps:Vec<&classification::HarmonicStep>=prepared.plan.explicit().into_iter().map(|i|&prepared.plan.steps[i]).collect();
@@ -140,7 +138,7 @@ impl<'a> LatticeOperator<'a>{
         terms.retain(|t|t.rest.stored()>0);
         let offset:usize=terms.iter().map(|t|d*t.edges.len()).sum();
         let rest_work:usize=terms.iter().map(|t|t.rest.stored()*t.edges.len()).sum();
-        Ok(Self{prepared,n,modes:modes.to_vec(),nu,centre,index,mirror,canonical,left,right,fold_left,fold_right,recycling,explicit,edges,terms,
+        Ok(Self{prepared,n,modes:modes.to_vec(),nu,centre,index,mirror,canonical,left,right,recycling,explicit,edges,terms,
             gathered:vec![ZERO;offset],interleaved:vec![ZERO;d*modes.len()],execution:Execution::new()?,scratch:Vec::new(),
             block_work,rest_work,work:block_work+rest_work,edge_counts,dropped_k1_rest})
     }
@@ -165,7 +163,7 @@ impl<'a> LatticeOperator<'a>{
         let n=self.n;let d=n*n;let modes=self.modes.len();
         if x.len()!=self.dimension()||y.len()!=x.len(){return Err("Lattice operator field dimensions differ".into());}
         if mask.is_some_and(|m|m.targets.len()!=modes||m.sources.len()!=modes){return Err("Lattice operator mask dimensions differ".into());}
-        let Self{prepared,left,right,fold_left,fold_right,recycling,explicit,edges,terms,gathered,interleaved,execution,scratch,block_work,rest_work,nu,canonical,mirror,..}=self;
+        let Self{prepared,left,right,recycling,explicit,edges,terms,gathered,interleaved,execution,scratch,block_work,rest_work,nu,canonical,mirror,..}=self;
         let gemm=prepared.lapack.complex_gemm();let fold=&prepared.fold.targets;let canonical=&*canonical;let mirror=&*mirror;
         let computed=|q:usize|canonical[q]&&mask.is_none_or(|m|m.targets[q]||m.targets[mirror[q]]);
         let reads=|p:usize|mask.is_none_or(|m|m.sources[p]);
@@ -176,17 +174,16 @@ impl<'a> LatticeOperator<'a>{
                 if reads(q){
                     let xq=&x[q*d..(q+1)*d];
                     // Column-major views are transposes: y^T = X^T NL^T + NR^T X^T.
-                    let(l,r)=if parts==Parts::Fold{(&fold_left[q],&fold_right[q])}else{(&left[q],&right[q])};
-                    gemm.multiply(n,n,n,ONE,xq,n,l,n,ZERO,yq,n)?;
-                    gemm.multiply(n,n,n,ONE,r,n,xq,n,ONE,yq,n)?;
-                    if parts!=Parts::Fold{recycling.apply_into(n,ONE,xq,yq,&mut scratch.small);}
+                    gemm.multiply(n,n,n,ONE,xq,n,&left[q],n,ZERO,yq,n)?;
+                    gemm.multiply(n,n,n,ONE,&right[q],n,xq,n,ONE,yq,n)?;
+                    recycling.apply_into(n,ONE,xq,yq,&mut scratch.small);
                 }else{yq.fill(ZERO);}
                 if parts==Parts::Diagonal{continue;}
                 for &(p,edge)in &edges[q]{
                     if !reads(p){continue;}
                     let xp=&x[p*d..(p+1)*d];
                     match edge{
-                        Edge::Explicit(e)=>if parts==Parts::Full{explicit[e].apply_into(n,ONE,xp,yq,&mut scratch.small)},
+                        Edge::Explicit(e)=>explicit[e].apply_into(n,ONE,xp,yq,&mut scratch.small),
                         Edge::Fold(t)=>{
                             let data=&fold[t];let w=C{re:0.,im:nu[p]};
                             grow(&mut scratch.left,d);grow(&mut scratch.right,d);
@@ -247,8 +244,6 @@ impl<'a> LatticeOperator<'a>{
         mirror_field(y,n,canonical,mirror);
         Ok(())
     }
-    /// The fold part alone on a Hermitian-symmetric field.
-    pub fn apply_fold(&mut self,x:&[C])->Result<Vec<C>,String>{let mut y=vec![ZERO;self.dimension()];self.apply_parts(x,&mut y,Parts::Fold)?;Ok(y)}
     /// What the operator leaves out of the true one on a Hermitian-symmetric
     /// field x: the K^(1) rests but for their population rows when they are
     /// dropped (`dropped_k1_rest`), i nu_p (K_t^(1) rest - its population
@@ -322,16 +317,8 @@ mod tests{
         assert!(error<=1e-13*scale,"{error:e} of {scale:e}");
         let mut y2=vec![ZERO;size];op.apply(&x,&mut y2).unwrap();
         assert!(y.iter().zip(&y2).all(|(a,b)|a.re.to_bits()==b.re.to_bits()&&a.im.to_bits()==b.im.to_bits()),"repeatable");
-        // The diagonal blocks and the fold alone against the explicit components.
-        let(mut diagonal,mut small)=(vec![ZERO;size],Vec::new());op.apply_parts(&x,&mut diagonal,Parts::Diagonal).unwrap();
-        let fold=op.apply_fold(&x).unwrap();let mut explicit=vec![ZERO;size];
-        for(q,mode)in modes.iter().enumerate(){for(t,c)in &p.generator.components{
-            if p.plan.steps.iter().any(|s|&s.charge==t&&s.treatment==classification::Treatment::Fold){continue;}
-            let Ok(source)=charge_minus(mode,t)else{continue};let Some(&s)=op.index.get(&source)else{continue};
-            c.op.apply_into(4,ONE,&x[s*d..(s+1)*d],&mut explicit[q*d..(q+1)*d],&mut small);}
-            for k in 0..d{explicit[q*d+k].im-=op.nu[q]*x[q*d+k].re;explicit[q*d+k].re+=op.nu[q]*x[q*d+k].im;}}
-        let error=y.iter().zip(&explicit).zip(&fold).map(|((a,b),c)|magnitude(C{re:a.re-b.re-c.re,im:a.im-b.im-c.im})).fold(0.,f64::max);
-        assert!(error<=1e-13*scale,"fold part {error:e} of {scale:e}");
+        // The diagonal blocks against the dense assembly.
+        let mut diagonal=vec![ZERO;size];op.apply_parts(&x,&mut diagonal,Parts::Diagonal).unwrap();
         let mut blocks=vec![ZERO;size];
         for q in 0..modes.len(){let mut z=vec![ZERO;size];z[q*d..(q+1)*d].copy_from_slice(&x[q*d..(q+1)*d]);
             for r in 0..d{let mut v=ZERO;for c in 0..d{mul_add(&mut v,dense[(q*d+r)*size+q*d+c],z[q*d+c]);}blocks[q*d+r]=v;}}

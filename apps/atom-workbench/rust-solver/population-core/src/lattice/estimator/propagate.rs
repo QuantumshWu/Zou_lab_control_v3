@@ -65,14 +65,15 @@ impl ErrorLattice<'_>{
         let(n,d)=(self.n,self.d);let r=theta.len();let t_count=times.len();
         let slots=self.kernels()?.steps.len()+1;
         let lapack=&self.prepared.lapack;
-        // The near modes with their classes, then the outer modes with the dressed blocks of L0' (class key `bare`).
-        let bare=self.classes()?.len();
+        // The near modes with the frame's block (key 0), then the outer modes
+        // with the dressed blocks of L0' (key `bare`).
+        let(class,bare)=(self.class()?,1);
         let outer=self.outer_modes.len();
         let items:Vec<(usize,bool)>=self.near_canonical.iter().map(|&s|(s,true)).chain((0..outer).map(|s|(s,false))).collect();
         let parts=Execution::new()?.map(items,|(slot,near)|->Result<ModePart,String>{
             let a=if near{self.near[slot]}else{self.outer_modes[slot]};
             let gemm=lapack.complex_gemm();
-            let(c,values,own):(usize,&[C],&[C])=if near{let c=self.class_of[a];let class=&self.classes()?[c];(c,&class.values,&class.readout)}
+            let(c,values,own):(usize,&[C],&[C])=if near{(0,&class.values,&class.readout)}
                 else{(bare,&self.basis()?.lambda,self.basis()?.population_rows())};
             // A mirror pair's canonical member counts twice.
             let mut beta=source(slot,near,if self.mirror[a]==a{1.}else{2.})?;
@@ -90,7 +91,7 @@ impl ErrorLattice<'_>{
             }}
             // Targets: the mode itself (slot 0) and its neighbours a + s (slot s + 1).
             let mut targets:Vec<(usize,usize,&[C])>=vec![(a,0,own)];
-            if near{let class=&self.classes()?[c];for &s in &class.steps{
+            if near{for &s in &class.steps{
                 let Some(&t)=self.index.get(&charge_plus(&self.modes[a],&self.kernels()?.steps[s].charge)?)else{continue};
                 targets.push((t,s+1,class.step_readout[s].as_deref().unwrap()));
             }}
@@ -124,10 +125,10 @@ impl ErrorLattice<'_>{
         let mut by_class:BTreeMap<usize,Vec<(usize,Vec<C>)>>=BTreeMap::new();
         for(key,g)in homogeneous{by_class.entry(key/slots).or_default().push((key%slots,g));}
         for(c,list)in by_class{
-            let values:&[C]=if c==bare{&self.basis()?.lambda}else{&self.classes()?[c].values};
+            let values:&[C]=if c==bare{&self.basis()?.lambda}else{&class.values};
             let block:Vec<C>=times.iter().flat_map(|&t|values.iter().map(move|&z|cexp(C{re:z.re.min(0.),im:z.im},t))).collect();
             for(slot,g)in list{
-                let rows:&[C]=if c==bare{self.basis()?.population_rows()}else if slot==0{&self.classes()?[c].readout}else{self.classes()?[c].step_readout[slot-1].as_deref().unwrap()};
+                let rows:&[C]=if c==bare{self.basis()?.population_rows()}else if slot==0{&class.readout}else{class.step_readout[slot-1].as_deref().unwrap()};
                 let mut h=rows.to_vec();for j in 0..d{for i in 0..n{h[i+n*j]=mul(h[i+n*j],g[j]);}}
                 let mut f=vec![ZERO;n*t_count];gemm.multiply(n,t_count,d,ONE,&h,n,&block,d,ZERO,&mut f,n)?;
                 let nu=if slot==0{0.}else{self.kernels()?.steps[slot-1].nu};

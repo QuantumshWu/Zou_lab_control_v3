@@ -115,11 +115,6 @@ pub enum Frames{
     /// The self-consistent central frames with the kernels of the support.
     Floquet,
 }
-/// Where the kernels act: on every mode, or on the centre and its kernel
-/// neighbours only (elsewhere the central frame alone).
-#[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum Reach{All,Centre}
-
 /// A sparse n x n kernel in frame coordinates: (row, column, value), the
 /// entries from KERNEL_ENTRY_FLOOR up.
 #[derive(Clone,Default)]
@@ -284,16 +279,12 @@ impl FloquetKernels{
     pub fn step_kernels(&self)->&[(Charge,Vec<C>)]{&self.steps}
     /// The two-sided transform on an operator's Hermitian-symmetric fields:
     /// the outer stage on `computed` (the canonical modes or a subset), the
-    /// kernels where `reach` says.
-    pub fn transform<'k>(&'k self,op:&LatticeOperator<'_>,frames:Frames,computed:&[bool],reach:Reach)->Result<Transform<'k>,String>{
+    /// kernels on every mode.
+    pub fn transform<'k>(&'k self,op:&LatticeOperator<'_>,frames:Frames,computed:&[bool])->Result<Transform<'k>,String>{
         let tables=self.tables(frames);let modes=op.modes.len();let slots=tables.charges.len();
-        let near:BTreeSet<&Charge>=tables.charges.iter().collect();
-        let active:Vec<bool>=op.modes.iter().map(|q|reach==Reach::All||near.contains(q)).collect();
-        // Per output mode and support charge k the source mode q - k (the
-        // centre alone where the kernels do not reach).
+        // Per output mode and support charge k the source mode q - k.
         let mut sources=vec![usize::MAX;modes*slots];
         for q in 0..modes{
-            if !active[q]{sources[q*slots]=q;continue;}
             for(k,c)in tables.charges.iter().enumerate(){
                 if let Some(&p)=charge_minus(&op.modes[q],c).ok().as_ref().and_then(|p|op.index.get(p)){sources[q*slots+k]=p;}}
         }
@@ -303,10 +294,10 @@ impl FloquetKernels{
         let inner:Vec<bool>=(0..modes).map(|q|needed[op.mirror[q]]).collect();
         let n=self.n;let d=n*n;let kernels=slots>1;
         let stage_work=|set:&[bool],table:&[Kernel],backward:bool|(0..modes).filter(|&q|set[q]).map(|q|(0..slots).filter(|&s|sources[q*slots+s]!=usize::MAX)
-            .map(|s|d+n*if s>0{table[s].entries.len()}else if backward&&active[q]{tables.centre.entries.len()}else{0}).sum::<usize>()).sum::<usize>();
+            .map(|s|d+n*if s>0{table[s].entries.len()}else if backward{tables.centre.entries.len()}else{0}).sum::<usize>()).sum::<usize>();
         let stages=|table:&[Kernel],backward:bool|if kernels{stage_work(&inner,table,backward)+stage_work(computed,table,backward)}else{0};
         let work=[2*n*n*n*computed.iter().filter(|&&c|c).count(),stages(&tables.backward,true),stages(&tables.forward,false)];
-        Ok(Transform{lapack:&self.lapack,tables,n,reach,slots,sources,active,needed,computed:computed.to_vec(),mirror:op.mirror.clone(),kernels,work,
+        Ok(Transform{lapack:&self.lapack,tables,n,slots,sources,needed,computed:computed.to_vec(),mirror:op.mirror.clone(),kernels,work,
             execution:Execution::new()?,scratch:Vec::new(),flipped:Vec::new(),hat:Vec::new()})
     }
 }
@@ -328,12 +319,11 @@ struct FrameScratch{blocks:Vec<C>,stack:Vec<C>}
 /// with E'_l = E_-l^dagger.
 pub struct Transform<'k>{
     lapack:&'k Lapack,tables:&'k Tables,n:usize,
-    pub reach:Reach,
     /// Per output mode and support charge the source mode (usize::MAX: none).
     slots:usize,sources:Vec<usize>,
-    /// The modes the kernels act on, the modes the outer stage reads (the
-    /// inner stage's outputs) and the outer stage's outputs.
-    active:Vec<bool>,needed:Vec<bool>,computed:Vec<bool>,mirror:Vec<usize>,
+    /// The modes the outer stage reads (the inner stage's outputs) and the
+    /// outer stage's outputs.
+    needed:Vec<bool>,computed:Vec<bool>,mirror:Vec<usize>,
     /// Whether any kernel acts (else the transform is the frame change alone).
     kernels:bool,
     /// Complex multiply-adds of one frame change, of the backward and of
@@ -344,26 +334,24 @@ pub struct Transform<'k>{
 impl Transform<'_>{
     /// Complex multiply-adds of a backward and a forward transform.
     pub fn work(&self)->usize{2*self.work[0]+self.work[1]+self.work[2]}
-    /// Whether two transforms apply the same kernels on the same modes.
-    pub fn same(&self,other:&Transform<'_>)->bool{self.sources==other.sources}
     /// c = sum P~_k x Q~_l on the computed modes (frame coordinates; the
     /// caller mirrors). Reads x on every mode.
     pub fn backward(&mut self,x:&[C],c:&mut[C])->Result<(),String>{
-        let Self{lapack,tables,n,slots,sources,active,needed,computed,mirror,kernels,work,execution,scratch,flipped,hat,..}=self;
+        let Self{lapack,tables,n,slots,sources,needed,computed,mirror,kernels,work,execution,scratch,flipped,hat,..}=self;
         let(t,n)=(*tables,*n);
         if !*kernels{return frame(execution,lapack,scratch,n,&t.p0inv,&t.q0inv,x,c,computed,work[0]);}
         grow(hat,x.len());let hat=&mut hat[..x.len()];
         frame(execution,lapack,scratch,n,&t.p0inv,&t.q0inv,x,hat,computed,work[0])?;
-        convolve(execution,n,t,true,*slots,sources,active,needed,computed,mirror,hat,c,flipped,work[1])
+        convolve(execution,n,t,true,*slots,sources,needed,computed,mirror,hat,c,flipped,work[1])
     }
     /// x = sum P_k c Q_l on the computed modes (the caller mirrors). Reads c
     /// on the computed modes only (the others are their mirrors).
     pub fn forward(&mut self,c:&[C],x:&mut[C])->Result<(),String>{
-        let Self{lapack,tables,n,slots,sources,active,needed,computed,mirror,kernels,work,execution,scratch,flipped,hat,..}=self;
+        let Self{lapack,tables,n,slots,sources,needed,computed,mirror,kernels,work,execution,scratch,flipped,hat,..}=self;
         let(t,n)=(*tables,*n);
         if !*kernels{return frame(execution,lapack,scratch,n,&t.p0,&t.q0,c,x,computed,work[0]);}
         grow(hat,c.len());let hat=&mut hat[..c.len()];
-        convolve(execution,n,t,false,*slots,sources,active,needed,computed,mirror,c,hat,flipped,work[2])?;
+        convolve(execution,n,t,false,*slots,sources,needed,computed,mirror,c,hat,flipped,work[2])?;
         frame(execution,lapack,scratch,n,&t.p0,&t.q0,hat,x,computed,work[0])
     }
 }
@@ -385,11 +373,11 @@ fn frame(execution:&Execution,lapack:&Lapack,scratch:&mut Vec<FrameScratch>,n:us
 /// partner): the right convolution as the mirrored left one, written as its
 /// adjoint on the needed modes, then the left stage.
 #[allow(clippy::too_many_arguments)]
-fn convolve(execution:&Execution,n:usize,tables:&Tables,backward:bool,slots:usize,sources:&[usize],active:&[bool],needed:&[bool],computed:&[bool],
+fn convolve(execution:&Execution,n:usize,tables:&Tables,backward:bool,slots:usize,sources:&[usize],needed:&[bool],computed:&[bool],
     mirror:&[usize],input:&[C],out:&mut[C],flipped:&mut Vec<C>,work:usize)->Result<(),String>{
     let length=input.len();grow(flipped,length);let flipped=&mut flipped[..length];
-    stage(execution,n,tables,backward,slots,sources,active,mirror,input,computed,flipped,needed,true,work/2)?;
-    stage(execution,n,tables,backward,slots,sources,active,mirror,flipped,needed,out,computed,false,work/2)
+    stage(execution,n,tables,backward,slots,sources,mirror,input,computed,flipped,needed,true,work/2)?;
+    stage(execution,n,tables,backward,slots,sources,mirror,flipped,needed,out,computed,false,work/2)
 }
 /// out_q = sum over the sources (p, k) of K_k in_p on the modes `only`: the
 /// identity for k = 0 (with the backward centre's second-order term where
@@ -397,7 +385,7 @@ fn convolve(execution:&Execution,n:usize,tables:&Tables,backward:bool,slots:usiz
 /// `valid` is the adjoint of its mirror's. With `flip`, out_q is the
 /// adjoint of that sum at -q.
 #[allow(clippy::too_many_arguments)]
-fn stage(execution:&Execution,n:usize,tables:&Tables,backward:bool,slots:usize,sources:&[usize],active:&[bool],mirror:&[usize],input:&[C],valid:&[bool],
+fn stage(execution:&Execution,n:usize,tables:&Tables,backward:bool,slots:usize,sources:&[usize],mirror:&[usize],input:&[C],valid:&[bool],
     out:&mut[C],only:&[bool],flip:bool,work:usize)->Result<(),String>{
     let d=n*n;let kernels=if backward{&tables.backward}else{&tables.forward};
     execution.for_mode_chunks(out,d,work,MINIMUM_WORK_PER_TASK/8,&mut Vec::<Vec<C>>::new(),|first,chunk,scratch|{
@@ -408,7 +396,7 @@ fn stage(execution:&Execution,n:usize,tables:&Tables,backward:bool,slots:usize,s
                 let(direct,x)=if valid[p]{(true,&input[p*d..(p+1)*d])}else{let m=mirror[p];(false,&input[m*d..(m+1)*d])};
                 let kernel=if s>0{&kernels[s]}else{
                     if direct{for(t,&v)in sum.iter_mut().zip(x){add(t,v);}}else{for i in 0..n{for j in 0..n{add(&mut sum[i*n+j],conj(x[j*n+i]));}}}
-                    if !(backward&&active[target]){continue;}&tables.centre};
+                    if !backward{continue;}&tables.centre};
                 if direct{kernel.left_into(n,x,sum);}else{kernel.left_adjoint_into(n,x,sum);}
             }
             if flip{for i in 0..n{for j in 0..n{o[i*n+j]=conj(scratch[j*n+i]);}}}
@@ -455,7 +443,7 @@ mod tests{
         let modes=p.modes(2).unwrap();let op=LatticeOperator::new(&p,&modes).unwrap();
         let x=symmetric_field(&op,4);let(mut c,mut y)=(vec![ZERO;x.len()],vec![ZERO;x.len()]);
         // The block frames: an exact round trip.
-        let mut b=k.transform(&op,Frames::Block,&op.canonical,Reach::All).unwrap();
+        let mut b=k.transform(&op,Frames::Block,&op.canonical).unwrap();
         b.backward(&x,&mut c).unwrap();mirror_field(&mut c,n,&op.canonical,&op.mirror);b.forward(&c,&mut y).unwrap();mirror_field(&mut y,n,&op.canonical,&op.mirror);
         let e=x.iter().zip(&y).map(|(a,b)|magnitude(C{re:a.re-b.re,im:a.im-b.im})).fold(0.,f64::max);assert!(e<1e-12,"block round trip {e:e}");
     }

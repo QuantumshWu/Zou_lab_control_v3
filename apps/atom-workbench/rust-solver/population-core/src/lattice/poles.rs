@@ -6,7 +6,7 @@
 //!
 //! Inner solves: GMRES on all of P u Q with the Floquet-frame preconditioner
 //! on every block (`preconditioner`), one batch per pole, the kernels on
-//! every mode (a pole serves few solves, too few to probe the reaches).
+//! every mode.
 //! Measured against eliminating the ring Q exactly at the pole (GMRES on P
 //! with the Schur complement A_PP + A_PQ (xi - A_QQ)^-1 A_QP, the ring by
 //! batched eigenbasis block solves): on two, three and four lasers + tweezer
@@ -21,7 +21,6 @@ use super::*;
 use super::estimate_api::{LatticeSets,SteadySolves};
 use super::operator::LatticeOperator;
 use super::preconditioner::{FloquetBatch,Preconditioner,Preconditioning,Shift};
-use super::floquet::Reach;
 use super::krylov::{self,KrylovOptions,KrylovTiming,System};
 
 /// A pole of the rational Krylov space: the bordered steady system (the
@@ -84,7 +83,7 @@ impl<'a> Lattice<'a>{
     fn batch(&mut self,pole:Pole)->Result<usize,String>{
         if let Some(i)=self.batches.iter().position(|(p,_)|*p==pole){return Ok(i);}
         let start=Instant::now();
-        let batch=self.preconditioning.batch(&self.op,pole.shift(),Some(Reach::All))?;self.batches.push((pole,batch));
+        let batch=self.preconditioning.batch(&self.op,pole.shift())?;self.batches.push((pole,batch));
         self.work.batches+=1;self.work.batch_ms+=start.elapsed().as_secs_f64()*1e3;Ok(self.batches.len()-1)
     }
     pub fn operator(&self)->&LatticeOperator<'a>{&self.op}
@@ -105,8 +104,7 @@ impl<'a> Lattice<'a>{
         let solve=krylov::gmres(&mut system,&b,None,&KrylovOptions::new(tolerance))?;
         if record{*recorded=true;if let Some((list,_))=system.recorded.take(){for(z,az)in list{directions.push(z);images.push(az);}}}
         let(applications,preconditions,timing)=(system.applications,system.preconditions,system.timing.clone());
-        let operator_work=system.op.work;drop(system);
-        batch.record(solve.steps,solve.residual,tolerance,operator_work);
+        drop(system);
         work.applied_blocks+=applications*count;work.preconditioned_blocks+=preconditions*count*copies;work.timing.add(&timing);
         work.solves+=1;work.steps+=solve.steps;work.milliseconds+=clock.elapsed().as_secs_f64()*1e3;
         Ok(((0..copies).map(|c|solve.x[c*size..(c+1)*size].to_vec()).collect(),solve.steps,solve.residual))
