@@ -487,6 +487,28 @@ mod tests{
     /// ATOM_ESTIMATOR_FASTRING, ATOM_ESTIMATOR_OUTER (variants of the fast
     /// part). One JSON line per checkpoint; the fold charges (added by the
     /// Estimator) are left out.
+    /// The outputs of a dumped checkpoint as the pipeline reads them: per mode
+    /// q the population rows of the basis columns, the Ritz vectors B
+    /// (column-major k x r), values theta and coefficients a; the steady
+    /// state from its basis coordinates c.
+    #[allow(clippy::too_many_arguments)]
+    fn fixture_outputs(basis:&[Vec<Complex64>],nu:&[f64],centre:usize,n:usize,vectors:&[Complex64],theta:&[Complex64],coefficients:&[Complex64],times:&[f64],horizons:&[f64],c:&[Complex64])
+        ->atom_population_core::lattice::estimator::gate::Outputs{
+        type C=Complex64;
+        let(d,k,r)=(n*n,basis.len(),theta.len());
+        let mul=|a:C,b:C|C{re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re};
+        let cexp=|z:C,t:f64|{let m=(z.re*t).exp();if m==0.{C::default()}else{C{re:m*(z.im*t).cos(),im:m*(z.im*t).sin()}}};
+        let row=|q:usize,i:usize,j:usize|basis[j][q*d+i*n+i];
+        let mut ba=vec![C::default();k*r];for m in 0..r{for i in 0..k{ba[i+k*m]=mul(vectors[i+k*m],coefficients[m]);}}
+        // Per time: the sum over modes q of e^{i nu_q t} times their populations of W B diag(e^{theta t}) a.
+        let trajectory=times.iter().map(|&t|{let e:Vec<C>=theta.iter().map(|&z|cexp(z,t)).collect();
+            let coordinates:Vec<C>=(0..k).map(|j|(0..r).fold(C::default(),|s,m|{let v=mul(ba[j+k*m],e[m]);C{re:s.re+v.re,im:s.im+v.im}})).collect();
+            (0..n).map(|i|nu.iter().enumerate().map(|(q,&f)|{let ph=cexp(C{re:0.,im:f},t);
+                mul(ph,(0..k).fold(C::default(),|s,j|{let v=mul(row(q,i,j),coordinates[j]);C{re:s.re+v.re,im:s.im+v.im}})).re}).sum()).collect()}).collect();
+        let read=|c:&[C]|->Vec<f64>{(0..n).map(|i|(0..k).map(|j|mul(row(centre,i,j),c[j]).re).sum()).collect()};
+        let horizons=horizons.iter().map(|&t|{let c:Vec<C>=(0..k).map(|i|(0..r).fold(C::default(),|s,m|{let v=mul(ba[i+k*m],cexp(theta[m],t));C{re:s.re+v.re,im:s.im+v.im}})).collect();read(&c)}).collect();
+        atom_population_core::lattice::estimator::gate::Outputs{trajectory,horizons,steady:Some(read(c))}
+    }
     #[test]
     #[ignore]
     fn lattice_estimator_against_r2_fixtures(){
@@ -602,7 +624,7 @@ mod tests{
                 "seeds":seed_count,"seedSteps":seed_steps,"poleSeeds":pole_seeds,"seedMacs":seed_macs,"d":p.generator.n*p.generator.n,"kernelEntries":estimate.lattice.kernels().unwrap().diagnostics.entries,"smallParameter":estimate.lattice.kernels().unwrap().diagnostics.largest,"ledger":ledger.total()}));
             // The pipeline's lattice: the slow pool's operator and steady preconditioner.
             let mut solver=atom_population_core::lattice::poles::Lattice::new(&p,LatticeSets{explicit:sets.explicit.clone(),ring:sets.ring.clone()}).unwrap();
-            let mut gate=OutputGate::new(p.generator.n,estimate.lattice.nu.clone(),estimate.lattice.centre);let limit=estimator::gate::GATE_FACTOR*POPULATION_TOLERANCE;
+            let mut gate=OutputGate::default();let limit=estimator::gate::GATE_FACTOR*POPULATION_TOLERANCE;
             let zero=vec![0.;p.generator.n];
             for cp in index["checkpoints"].as_array().unwrap(){
                 let(k,r,solves)=(cp["k"].as_u64().unwrap() as usize,cp["r"].as_u64().unwrap() as usize,cp["solves"].as_u64().unwrap());
@@ -633,10 +655,9 @@ mod tests{
                 // The gate as the estimator runs it; in the gated mode a closed
                 // gate skips the estimate (its columns are processed at the next
                 // open checkpoint), so the work is the estimator's own.
-                gate.add_columns(&basis[..k]);
                 let mul=|a:C,b:C|C{re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re};
                 let c:Vec<C>=(0..k).map(|i|us.iter().enumerate().fold(C::default(),|v,(l,&u)|{let t=mul(x[i+k*l],u);C{re:v.re+t.re,im:v.im+t.im}})).collect();
-                let outputs=gate.outputs(&p.lapack,&b,&th_e,&a_e,&times,&horizons,Some(&c)).unwrap();
+                let outputs=fixture_outputs(&basis[..k],&estimate.lattice.nu,estimate.lattice.centre,p.generator.n,&b,&th_e,&a_e,&times,&horizons,&c);
                 let change=gate.change(outputs,&fixture_groups);
                 let open=change.is_some_and(|v|v<=limit)||gate.last_estimate.is_some_and(|v|v<=limit);
                 let skipped=gated&&!open;

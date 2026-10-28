@@ -142,8 +142,7 @@ impl<'a> UnifiedEstimate<'a>{
         let modes=setup.lattice.modes();
         let explicit=if near_explicit{setup.lattice.explicit.clone()}else{Vec::new()};
         let lattice=ErrorLattice::new(setup.prepared,&modes,&explicit,setup.frame,CLASSES)?;
-        let gate=OutputGate::new(lattice.n,lattice.nu.clone(),lattice.centre);
-        Ok(Self{setup,lattice,pool:None,gate,seeded:0})
+        Ok(Self{setup,lattice,pool:None,gate:OutputGate::default(),seeded:0})
     }
     fn pool(&mut self)->Result<&mut SlowPool,String>{
         if self.pool.is_none(){self.pool=Some(SlowPool::new(self.setup.prepared,&self.lattice,longest_time(self.setup.outputs.times,self.setup.outputs.horizons))?);}
@@ -234,6 +233,21 @@ impl<'a> UnifiedEstimate<'a>{
     }
 }
 
+impl UnifiedEstimate<'_>{
+    /// The work since `before` (the fast part's and the pool's counters) and
+    /// `clock`: block operations (the pool's products with Q in block units,
+    /// 4 real multiply-adds per complex one, d^2 per block) and ring solves.
+    fn work_since(&self,before:&(lattice::ErrorWork,slow::PoolWork),clock:Instant)->EstimateWork{
+        let(w,p)=(&self.lattice.work,self.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default());
+        let blocks=self.lattice.modes.len();
+        let qr=((p.qr_macs-before.1.qr_macs)/(4.*(self.lattice.d*self.lattice.d)as f64)).round()as usize;
+        EstimateWork{
+            block_operations:w.block_operations-before.0.block_operations+w.frame_blocks-before.0.frame_blocks+p.frame_blocks-before.1.frame_blocks
+                +(p.applications-before.1.applications+p.preconditions-before.1.preconditions)*blocks+qr,
+            block_solves:w.block_solves-before.0.block_solves,inner_steps:0,milliseconds:clock.elapsed().as_secs_f64()*1e3}
+    }
+}
+
 impl Estimator for UnifiedEstimate<'_>{
     fn estimate(&mut self,reduced:&ReducedView<'_>,steady:&mut dyn SteadySolves)->Result<ErrorEstimate,String>{
         let clock=Instant::now();
@@ -259,9 +273,8 @@ impl Estimator for UnifiedEstimate<'_>{
         // estimated) and while the outputs move by more than the limit.
         let change=change.unwrap_or(f64::INFINITY);
         if change>limit&&self.gate.last_estimate.is_none_or(|e|e>limit){
-            let blocks=self.lattice.work.frame_blocks-before.0.frame_blocks;
             return Ok(ErrorEstimate{trajectory:vec![change;outputs.times.len()],horizons:vec![change;outputs.horizons.len()],
-                steady:outputs.steady.then_some(change),work:EstimateWork{block_operations:blocks,milliseconds:clock.elapsed().as_secs_f64()*1e3,..Default::default()}});
+                steady:outputs.steady.then_some(change),work:self.work_since(&before,clock)});
         }
         // The pipeline's steady-solve directions not taken yet seed the pool.
         let(directions,images)=steady.directions();
@@ -275,15 +288,7 @@ impl Estimator for UnifiedEstimate<'_>{
         let trajectory=errors.trajectory.iter().zip(outputs.times).map(|(p,&t)|metric(p,&zero,groups)+fold(t)).collect();
         let horizons=errors.horizons.iter().zip(outputs.horizons).map(|(p,&t)|metric(p,&zero,groups)+fold(t)).collect();
         let steady_error=errors.steady.as_ref().map(|p|metric(p,&zero,groups)+delta*tau);
-        let(w,p)=(&self.lattice.work,self.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default());
-        let blocks=self.lattice.modes.len();
-        // The pool's products with Q in block units (4 real multiply-adds per complex one, d^2 per block).
-        let qr=((p.qr_macs-before.1.qr_macs)/(4.*(self.lattice.d*self.lattice.d)as f64)).round()as usize;
-        let work=EstimateWork{
-            block_operations:w.block_operations-before.0.block_operations+w.frame_blocks-before.0.frame_blocks+p.frame_blocks-before.1.frame_blocks
-                +(p.applications-before.1.applications+p.preconditions-before.1.preconditions)*blocks+qr,
-            block_solves:w.block_solves-before.0.block_solves,inner_steps:0,milliseconds:clock.elapsed().as_secs_f64()*1e3};
-        let estimate=ErrorEstimate{trajectory,horizons,steady:steady_error,work};
+        let estimate=ErrorEstimate{trajectory,horizons,steady:steady_error,work:self.work_since(&before,clock)};
         self.gate.last_estimate=Some(estimate.largest());
         Ok(estimate)
     }
