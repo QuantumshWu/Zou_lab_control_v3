@@ -70,6 +70,7 @@ test('asymptoticHorizons is read strictly, under the primary mean\'s rules',()=>
     ['not requested in the list',d=>{entry(d,1e5).status='not-requested';}],
     ['a reason that is no text',d=>{entry(d,1e5).reason=7;}],
     ['within ε claimed for an error above it',d=>{Object.assign(entry(d,1e5),{estimatedError:.02,withinTolerance:true});}],
+    ['within said other than true or false',d=>{entry(d,1e5).withinTolerance='yes';}],
     ['an error that is no bound',d=>{entry(d,1e5).estimatedError=-1;}],
     ['no error for a computed mean',d=>{delete entry(d,1e5).estimatedError;}],
     ['populations that are no probabilities',d=>{entry(d,1e5).populations=entry(d,1e5).populations.map(()=>.5);}],
@@ -81,6 +82,11 @@ test('asymptoticHorizons is read strictly, under the primary mean\'s rules',()=>
     ['the requested T in another state',d=>{entry(d,1e6).status='population-stationary';}],
   ];
   for(const [label,change] of variants){const d=structuredClone(data);change(d);assert.throws(()=>normalizeDynamicsResult(d,scene),/长期布居/,label);}
+});
+
+test('a T whose bound is within ε from a run not accepted is computed, and not within',()=>{
+  const {scene,data}=meanData({horizonUs:1e6,meanError:.001});Object.assign(entry(data,1e5),{estimatedError:.0007,withinTolerance:false});
+  const s=normalizeDynamicsResult(data,scene).horizonMeans[0];assert.equal(s.converged,true);assert.equal(s.withinTolerance,false);assert.equal(s.estimatedError,.0007);
 });
 
 test('a T the run did not resolve is said so, and the requested mean may be that T',()=>{

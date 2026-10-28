@@ -46,7 +46,7 @@ import {idMappingError} from './population-basis.js';
 import {installWindowChrome} from './window-chrome.js';
 import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,signedInteger,stateLabel,subscript,withUnit} from './format.js';
 import {solverText,steadyStatusText} from './solver-words.js';
-import {errorPercent,outsideRuns,partialSentence,partialShort,sampleErrors} from './accuracy.js';
+import {errorPercent,outsideRuns,outsideWords,partialSentence,partialShort,sampleErrors} from './accuracy.js';
 import {definitionNotes,modelNotes} from './model-notes.js';
 import {InlineName} from './inline-name.js';
 import {EXAMPLES,exampleScene} from './examples.js';
@@ -252,7 +252,7 @@ function solverStatus():[string,StatusWord,string?,string?]{
   // short (with p̄(T)'s error when that misses it too), or p̄(T)'s error; the full words in the tooltip.
   if(record?.checkpoint){
     const head=`${record.checkpoint==='stopped'?'计算已停止':'计算未完成'} · 显示最后的中间结果`,tolerance=errorPercent(POPULATION_TOLERANCE);
-    const words=trajectory?both||(partial?`${trajectoryShort(result)}（超过 ${tolerance}）`:mean):mean,full=trajectory?[partial,mean].filter(Boolean).join(' · '):mean;
+    const miss=trajectoryMiss(result),words=trajectory?both||(miss?`${miss.words}（${missWhy(miss.over)}）`:mean):mean,full=trajectory?[partial,mean].filter(Boolean).join(' · '):mean;
     return [`${head}${words?`：${words}`:trajectory?`（各时刻 ≤ ${tolerance}）`:''}`,'warning',undefined,words!==full?`${head}：${full}`:undefined];
   }
   if(resultPage()==='dynamics'){
@@ -266,16 +266,29 @@ function solverStatus():[string,StatusWord,string?,string?]{
   return [words,mean||(populationMode==='time'&&partial)?'warning':'idle',elapsed];
 }
 /** Where the trajectory misses the population tolerance, in one sentence (empty: nowhere, or no trajectory). */
-function trajectorySentence(result:DynamicsResult):string{const errors=sampleErrors(result);return result.timesUs.length>1&&errors?partialSentence(result.timesUs,errors,dynamics().durationUnit):'';}
-/** A computed p̄(T) outside the tolerance: its estimated error (empty when within). */
-function meanSentence(result:DynamicsResult):string{const s=result.steady;return s.converged&&!s.withinTolerance?`${meanSymbol(result)} 估计误差 ${s.estimatedError===null?'未知':errorPercent(s.estimatedError)}（超过 ${errorPercent(POPULATION_TOLERANCE)}）`:'';}
-/** Where the trajectory misses the tolerance, short (empty: nowhere). */
-function trajectoryShort(result:DynamicsResult):string{const errors=sampleErrors(result);return result.timesUs.length>1&&errors?partialShort(result.timesUs,errors,dynamics().durationUnit):'';}
-/** Both outside the tolerance, said short enough for one line at the narrowest window:
+function trajectorySentence(result:DynamicsResult):string{
+  const errors=sampleErrors(result);if(!(result.timesUs.length>1&&errors))return '';
+  const a=result.populationAccuracy!;
+  // Every sample within ε, but the run not accepted: unconfirmed.
+  return partialSentence(result.timesUs,errors,dynamics().durationUnit)||(a.status==='estimated-partial'?`估计误差最大 ${errorPercent(a.estimatedMaximumError)}（${outsideWords(a.estimatedMaximumError)}）`:'');
+}
+/** A computed p̄(T) not within the tolerance: its estimated error, above ε or unconfirmed (empty when within). */
+function meanSentence(result:DynamicsResult):string{const s=result.steady;return s.converged&&!s.withinTolerance?`${meanSymbol(result)} 估计误差 ${errorPercent(s.estimatedError!)}（${outsideWords(s.estimatedError)}）`:'';}
+/** What of the trajectory and of p̄(T) is not within ε, short, and whether above it (else unconfirmed). */
+function trajectoryMiss(result:DynamicsResult):{words:string;over:boolean}|undefined{
+  const errors=sampleErrors(result);if(!(result.timesUs.length>1&&errors))return undefined;
+  const short=partialShort(result.timesUs,errors,dynamics().durationUnit),a=result.populationAccuracy!;
+  return short?{words:short,over:true}:a.status==='estimated-partial'?{words:`误差最大 ${errorPercent(a.estimatedMaximumError)}`,over:false}:undefined;
+}
+function meanMiss(result:DynamicsResult):{words:string;over:boolean}|undefined{
+  const s=result.steady;return s.converged&&!s.withinTolerance?{words:`${meanSymbol(result)} 误差 ${errorPercent(s.estimatedError!)}`,over:s.estimatedError!>POPULATION_TOLERANCE}:undefined;
+}
+const missWhy=(over:boolean)=>over?`超过 ${errorPercent(POPULATION_TOLERANCE)}`:'未确认收敛';
+/** Both not within the tolerance, said short enough for one line at the narrowest window:
  * "t ≤ 0.42 μs 误差最大 0.61% · p̄(1 s) 误差 0.72%（均超 0.5%）". */
 function bothSentence(result:DynamicsResult):string{
-  const where=trajectoryShort(result),error=result.steady.estimatedError,tolerance=errorPercent(POPULATION_TOLERANCE);
-  return error===null?`${where}（超过 ${tolerance}） · ${meanSymbol(result)} 误差未知`:`${where} · ${meanSymbol(result)} 误差 ${errorPercent(error)}（均超 ${tolerance}）`;
+  const t=trajectoryMiss(result)!,m=meanMiss(result)!;
+  return t.over&&m.over?`${t.words} · ${m.words}（均超 ${errorPercent(POPULATION_TOLERANCE)}）`:`${t.words}（${missWhy(t.over)}） · ${m.words}（${missWhy(m.over)}）`;
 }
 function refreshStatus():void{
   if(notice&&performance.now()>notice.until)notice=undefined;
@@ -849,7 +862,7 @@ function invalidateObsoletePopulation():void{
 }
 /** The levels chart's populations and their hover words; a value outside the tolerance says its error. */
 function paintLevelPopulations(snapshot:ReturnType<typeof populationSnapshot>):void{
-  const result=currentResult(),outside=(error:number|null|undefined,over:boolean|undefined)=>over?`（估计误差 ${error==null?'未知':errorPercent(error)}，超过 ${errorPercent(POPULATION_TOLERANCE)}）`:'';
+  const result=currentResult(),outside=(error:number|null|undefined,over:boolean|undefined)=>over?`（估计误差 ${error==null?'未知':errorPercent(error)}，${outsideWords(error)}）`:'';
   patchLevelPopulations($('levels-chart'),{populations:snapshot.populations,steady:steadyPopulationsInView(),label:snapshot.label,steadyLabel:meanSymbol(),initialId:singleInitialId(),
     note:outside(snapshot.error,snapshot.outside),steadyNote:result?.steady.converged?outside(result.steady.estimatedError,!result.steady.withinTolerance):''});
 }
@@ -977,9 +990,9 @@ function solverDetails():string{
   const accuracy=result?.populationAccuracy;
   const rows=result?[
     readout('求解耗时',formatElapsed(result.metrics.totalMs)),readout('含通信',formatElapsed(currentRecord()?.wallMs??solverWallMs)),
-    ...(accuracy?[readout('布居误差估计',accuracy.status==='estimated-partial'?`最大 ${small(accuracy.estimatedMaximumError)}，部分时刻超过目标 ${small(accuracy.requestedTolerance)}`:`≤ ${small(accuracy.estimatedMaximumError)}（目标 ${small(accuracy.requestedTolerance)}）`)]:[]),
+    ...(accuracy?[readout('布居误差估计',accuracy.status==='estimated-partial'?`最大 ${small(accuracy.estimatedMaximumError)}，${outsideRuns(accuracy.sampleErrors).length?`部分时刻超过目标 ${small(accuracy.requestedTolerance)}`:'未确认收敛'}`:`≤ ${small(accuracy.estimatedMaximumError)}（目标 ${small(accuracy.requestedTolerance)}）`)]:[]),
     ...(accuracy?.status==='estimated-partial'?[`<p class="horizon-note">${esc([trajectorySentence(result),accuracy.reason?solverText(accuracy.reason):''].filter(Boolean).join('。'))}</p>`]:[]),
-    ...(result.steady.converged&&result.steady.estimatedError!==null?[readout('长期布居误差估计',result.steady.withinTolerance?`≤ ${small(result.steady.estimatedError)}（目标 ${small(POPULATION_TOLERANCE)}）`:`${small(result.steady.estimatedError)}，超过目标 ${small(POPULATION_TOLERANCE)}`)]:[]),
+    ...(result.steady.converged&&result.steady.estimatedError!==null?[readout('长期布居误差估计',result.steady.withinTolerance?`≤ ${small(result.steady.estimatedError)}（目标 ${small(POPULATION_TOLERANCE)}）`:`${small(result.steady.estimatedError)}，${result.steady.estimatedError>POPULATION_TOLERANCE?`超过目标 ${small(POPULATION_TOLERANCE)}`:'未确认收敛'}`)]:[]),
     readout('概率守恒误差',small(result.validation.maxTraceError)),readout('最小布居',small(result.validation.minPopulation)),
     readout('长期解',`${steadyStatusText(result.steady?.status)}${result.steady?.residual==null?'':` · 残差 ${small(result.steady.residual)}`}`),
     // The limit is reached after a few of these; more than one conserved quantity makes it initial-dependent.
@@ -1041,7 +1054,7 @@ function populationToolbar():void{
   const uncoloured=!!result&&!p&&populationMode==='time';populationNote.textContent=uncoloured?snap.label:'';populationNote.hidden=!uncoloured;
   const marked=!!p&&snap.outside===true,words=marked?`⚠ 估计误差 ${snap.error==null?'未知':errorPercent(snap.error)}`:'';
   if(populationAccuracy.textContent!==words)populationAccuracy.textContent=words;populationAccuracy.hidden=!marked;
-  populationAccuracy.title=marked?`${snap.label} 的估计误差超过 ${errorPercent(POPULATION_TOLERANCE)}；能级仍按算出的布居着色`:'';
+  populationAccuracy.title=marked?`${snap.label} 的估计误差${outsideWords(snap.error)==='未确认收敛'?' 在目标内，但求解未确认收敛':`超过 ${errorPercent(POPULATION_TOLERANCE)}`}；能级仍按算出的布居着色`:'';
 }
 
 // ---------------------------------------------------------------- 布居演化
