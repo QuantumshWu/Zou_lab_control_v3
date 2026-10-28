@@ -45,9 +45,10 @@
 //! two at 1e-3).
 //!
 //! e^{tA} Y_k: Y's part in the space, W r0 (r0 = W^T Y), is propagated by
-//! the reduced model, W S e^{theta t} S^-1 r0 (a kernel mode's without its
-//! kernel coordinates, `populations`);
-//! the rest decays at the fast rates and is propagated by the dressed blocks
+//! the reduced model, W S e^{theta t} S^-1 r0 (`populations`); a kernel
+//! mode's Y is trace free and so is its part in the space (the trace carrier
+//! is the basis' first column, `space`), so the reduced model propagates it
+//! without a conserved trace; the rest decays at the fast rates and is propagated by the dressed blocks
 //! of L0' on the near modes only (its readout elsewhere is micromotion).
 use super::super::*;
 use super::super::estimate_api::SteadySolves;
@@ -604,14 +605,11 @@ impl SlowPool{
     /// Population errors (one row per time) of the slow modes,
     /// sum_k a_k (e^{theta_k t} Y_k - e^{tA} Y_k), for the reduced model's
     /// eigenvectors S (r x r, column-major, r = basis.len()), the values theta
-    /// (r) the outputs use and its kernel modes `kernel`. A kernel mode's Y
-    /// (the steady error) is trace free: the true e^{tA} Y decays, so its
-    /// projection on the space is propagated without its kernel coordinates
-    /// (which the reduced model would keep forever; measured: early
-    /// checkpoints of three and four lasers 0.88 and 2.3 of the actual error
-    /// without, 1.00-1.01 with).
+    /// (r) the outputs use. A kernel mode's Y (the steady error) is trace
+    /// free, and so is its projection on the space (whose trace carrier is the
+    /// first basis column): the reduced model propagates it as it is.
     #[allow(clippy::too_many_arguments)]
-    pub fn populations(&mut self,lattice:&ErrorLattice<'_>,basis:&[Vec<C>],s:&[C],theta:&[C],kernel:&[usize],solutions:&[SlowSolution],times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
+    pub fn populations(&mut self,lattice:&ErrorLattice<'_>,basis:&[Vec<C>],s:&[C],theta:&[C],solutions:&[SlowSolution],times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
         let(n,d,k,r)=(self.n,self.d,basis.len(),theta.len());let t_count=times.len();
         if solutions.is_empty()||t_count==0{return Ok(vec![vec![0.;n];t_count]);}
         let lapack=Arc::clone(&self.lapack);
@@ -624,8 +622,7 @@ impl SlowPool{
         let mut ritz_weights=vec![ZERO;r];let mut in_space:Vec<Vec<C>>=Vec::new();let mut remainders:Vec<(usize,C,C,Vec<C>)>=Vec::new();
         for sol in solutions{
             let(r0,near)=self.parts(basis,&gram,sol);
-            let mut cs=lapack.complex_solve_matrix_factored(&lu_s,&piv_s,&r0,r)?;
-            if sol.kernel{for &j in kernel{cs[j]=ZERO;}}
+            let cs=lapack.complex_solve_matrix_factored(&lu_s,&piv_s,&r0,r)?;
             for(w,c)in ritz_weights.iter_mut().zip(&cs){mul_add(w,sol.coefficient,*c);}
             let xr=r0;
             for(slot,&q)in self.near.iter().enumerate(){

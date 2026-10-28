@@ -14,20 +14,21 @@
 //! depend on the metric (the steady column is in the space). Append-only: per basis
 //! column w_j only M w_j is kept (on the canonical modes), and the Gram
 //! matrices K = Re W^H M W and H = Re (M W)^H A W grow by one column (and
-//! row) each; G = K^-1 H in the coordinates of W (the basis is
-//! Euclidean-orthonormal), x(t) ~ W u(t), u' = G u, u(0) = c0 = |x0| e_0
-//! (w_0 = x0 / |x0|). The Euclidean Grams E = Re W^T A W and
+//! row) each. The basis is Euclidean-orthonormal, its first column the
+//! trace carrier w_0 = u / |u| and every other in K (`space`): x(t) ~ W u(t)
+//! with u_0 fixed at |u| (the trace, exactly) and the K coordinates by the
+//! Galerkin condition on the K columns alone, u' = G u with G's first row
+//! zero and its other rows K'^-1 H[1.., ..] (K' the Gram of the K columns;
+//! A W lies in K, so no image leaks into the carrier). u(0) = c0 = (|u|,
+//! |x0 - u|, 0, ...). Every block trace is conserved by construction: no
+//! trace correction. The Euclidean Grams E = Re W^T A W and
 //! F = Re (AW)^T AW give the residual's norm for the error transform.
 //!
-//! Trace correction: tr x_q evolves by -i nu_q tr x_q exactly; G is replaced
-//! by the Frobenius-closest matrix with the trace rows of W as left
-//! eigenvectors, on the significant rows only (above TRACE_ROWS of the
-//! largest): the other rows are inner-solve roundoff, and fitting them
-//! turns roundoff into O(1) changes of G.
-//!
-//! Ritz decomposition G S = S diag(theta), a = S^-1 c0. The kernel holds
-//! |theta| < KERNEL and always the value of least modulus (the trace
-//! correction pins one exact zero). Growing modes (Re theta > 0) are never
+//! Ritz decomposition G S = S diag(theta), a = S^-1 c0. G's zero first row
+//! makes 0 an eigenvalue, its eigenvector the one carrying the trace (its
+//! carrier coordinate nonzero, every other eigenvector's zero): that mode is
+//! the kernel, with every further |theta| < KERNEL (more conserved
+//! quantities). Growing modes (Re theta > 0) are never
 //! reflected: a mode of amplitude (its largest population contribution) up
 //! to GROWTH_BUDGET x tolerance is projected out and charged; any other is
 //! clipped to the imaginary axis, the minimal change of the residual
@@ -35,9 +36,9 @@
 //!
 //! Outputs from the one G: the trajectory p(t) = sum_q Re e^{i nu_q t}
 //! diag(W u(t))_q (the local time average); the state at a horizon T, its
-//! centre block (the laboratory time average at T); the steady state from
-//! the bordered small system (G + c0 tau^T) r = c0 (tau the centre trace
-//! row; a simple kernel), else the kernel's spectral projection; the slow
+//! centre block (the laboratory time average at T); the steady state
+//! (|u|, y) with G[1..,1..] y = -|u| G[1..,0] (a simple kernel), else the
+//! kernel's spectral projection; the slow
 //! Ritz values the slowest relaxation is read from (`pipeline` checks their
 //! residuals against the images and the frame's classes) and the conserved
 //! count.
@@ -55,25 +56,6 @@ use super::operator::LatticeOperator;
 
 use crate::parallel::Execution;
 
-/// Trace rows below this fraction of the largest are left unconstrained.
-const TRACE_ROWS:f64=1e-6;
-/// A direction of the trace rows is enforced while its share of the
-/// correction, |u_j^T D| / s_j (D the defect T G0 - Omega T, s_j its
-/// singular value), stays below this fraction of |G0| (the correction stays
-/// a correction), and always while s_j is at least the population
-/// tolerance times the largest (a trace the space carries above the
-/// tolerance). Measured with the runs continued to 40 solves (five lasers
-/// + tweezer at 20 us, five lasers without the trap at 10 ms, four lasers
-/// without the trap at 20 us with a 1 s horizon): the determined directions
-/// take shares of 1e-6 to 8.6e-3 (singular values down to 5e-4 of the
-/// largest), the directions of inner-solve roundoff (at most 1.6e-5 of the
-/// largest) 0.18 to 4e4; 3e-2 lies 3.5x above the first and 6x below the
-/// second. A direction inverted at roundoff turned the defect into a
-/// correction of up to 1e6 |G0|: spurious growing modes (Re theta up to
-/// 3e4 /us) once the space reached new modes' trace rows.
-const TRACE_CORRECTION:f64=3e-2;
-/// Singular values below this fraction of the largest are roundoff.
-const TRACE_ROUNDOFF:f64=1e-14;
 /// |theta| below this (1/us) is a conserved quantity.
 pub const KERNEL:f64=1e-9;
 /// The largest exponent of a growth factor e^{theta T} (e^700 ~ 1e304,
@@ -113,9 +95,8 @@ pub struct Projection<'m>{
     /// M w_j on the canonical modes, weighted (`SwMetric::apply`),
     /// column-major (length L = canonical x d per column).
     metric:Vec<C>,length:usize,
-    /// Per column: the canonical modes' diagonals (canonical x n) and the
-    /// trace functionals [centre, then Re and Im per other canonical mode].
-    populations:Vec<Vec<C>>,traces:Vec<Vec<f64>>,
+    /// Per column: the canonical modes' diagonals (canonical x n).
+    populations:Vec<Vec<C>>,
     /// K = Re W^H M W, H = Re (M W)^H A W, E = Re W^T A W and
     /// F = Re (AW)^T A W, row-major over the covered columns; whether
     /// M = I (no metric: G0 = E, K and H are not built).
@@ -134,7 +115,7 @@ impl<'m> Projection<'m>{
         let canonical:Vec<(usize,f64,f64)>=(0..op.modes.len()).filter(|&q|op.canonical[q]).map(|q|(q,if op.mirror[q]==q{1.}else{2.},op.nu[q])).collect();
         let centre=canonical.iter().position(|c|c.0==op.centre).unwrap_or(0);
         let length=canonical.len()*d;
-        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],traces:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,euclidean:metric.is_none(),frame_metric:metric,
+        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,euclidean:metric.is_none(),frame_metric:metric,
             vectors:Vectors::new(op,1)?,milliseconds:0.})
     }
     pub fn columns(&self)->usize{self.covered}
@@ -154,11 +135,7 @@ impl<'m> Projection<'m>{
         let(n,d,l)=(self.n,self.d,self.length);let width=new-old;
         if let Some(metric)=self.frame_metric{let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();self.metric.extend(metric.apply(&fresh)?);}
         for column in &basis[old..new]{
-            let pops:Vec<C>=self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect();
-            let mut traces=vec![0.;2*self.canonical.len()-1];let mut at=1;
-            for(c,_)in self.canonical.iter().enumerate(){let t=(0..n).fold(ZERO,|s,i|{let v=pops[c*n+i];C{re:s.re+v.re,im:s.im+v.im}});
-                if c==self.centre{traces[0]=t.re;}else{traces[at]=t.re;traces[at+1]=t.im;at+=2;}}
-            self.populations.push(pops);self.traces.push(traces);
+            self.populations.push(self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect());
         }
         let all_basis:Vec<&[C]>=basis[..new].iter().map(|v|v.as_slice()).collect();
         let all_images:Vec<&[C]>=images[..new].iter().map(|v|v.as_slice()).collect();
@@ -203,51 +180,24 @@ pub struct Model{
 }
 
 impl<'m> Projection<'m>{
-    /// The reduced model over the covered columns; `initial_norm` = |x0|,
-    /// `longest` the longest output time (growth), `tolerance` the
-    /// population tolerance.
-    pub fn model(&self,lapack:&Lapack,initial_norm:f64,longest:f64,tolerance:f64)->Result<Model,String>{
+    /// The reduced model over the covered columns; `initial` x0's leading
+    /// coordinates (`Space::initial`), `longest` the longest output time
+    /// (growth), `tolerance` the population tolerance.
+    pub fn model(&self,lapack:&Lapack,initial:&[f64],longest:f64,tolerance:f64)->Result<Model,String>{
         let k=self.covered;let n=self.n;let r=k;
-        // G0 = K^-1 H (K symmetric: its row-major form is its column-major one).
-        let g0=if self.euclidean{self.e.clone()}else{let(lu,pivots)=lapack.factor(&self.k,k)?;
-            transpose_rows(&lapack.solve_matrix_factored(&lu,&pivots,&transpose_rows(&self.h,k,k),k)?,k,k)};
-        let mut c0=vec![0.;k];c0[0]=initial_norm;
-        // Trace correction on the significant rows.
-        let kt=self.traces[0].len();
-        let tw:Vec<f64>=(0..kt).flat_map(|t|(0..k).map(move|j|(t,j))).map(|(t,j)|self.traces[j][t]).collect();
-        let row_norm=|t:usize|tw[t*r..(t+1)*r].iter().map(|v|v*v).sum::<f64>();
-        let charge_norm:Vec<f64>=(0..self.canonical.len()).map(|c|if c==self.centre{row_norm(0)}else{let a=1+2*(c-usize::from(c>self.centre));row_norm(a)+row_norm(a+1)}).map(f64::sqrt).collect();
-        let largest=charge_norm.iter().fold(0_f64,|a,&b|a.max(b));
-        let mut kept:Vec<(usize,usize,f64)>=Vec::new();// (row, partner row or usize::MAX, nu)
-        for(c,&(_,_,nu))in self.canonical.iter().enumerate(){if !(charge_norm[c]>TRACE_ROWS*largest){continue;}
-            if c==self.centre{kept.push((0,usize::MAX,0.));}else{let a=1+2*(c-usize::from(c>self.centre));kept.push((a,a+1,nu));kept.push((a+1,a,-nu));}}
-        let mut g=g0.clone();
-        if !kept.is_empty(){
-            let rows=kept.len();let t:Vec<f64>=kept.iter().flat_map(|&(row,_,_)|tw[row*r..(row+1)*r].iter().copied()).collect();
-            // Omega: d(re)/dt = nu im, d(im)/dt = -nu re; rows in kept order.
-            let position=|row:usize|kept.iter().position(|e|e.0==row);
-            let tg=product(lapack,&t,&g0,rows,r,r)?;let mut defect=tg;
-            for(i,&(_,partner,nu))in kept.iter().enumerate(){if partner==usize::MAX{continue;}let Some(p)=position(partner)else{continue};
-                for c in 0..r{defect[i*r+c]-=nu*t[p*r+c];}}
-            let gram=product(lapack,&t,&transpose_rows(&t,rows,r),rows,r,rows)?;
-            let complex:Vec<C>=gram.iter().map(|&v|C{re:v,im:0.}).collect();
-            let(values,vectors)=lapack.hermitian_eigen(&complex,rows)?;let top=values.iter().fold(0_f64,|a,&v|a.max(v));
-            // Per direction j of the rows (T T^T u_j = s_j^2 u_j) its share of
-            // the correction, T^T u_j (u_j^T D) / s_j^2, of Frobenius norm
-            // |u_j^T D| / s_j: kept while that stays below TRACE_CORRECTION |G0|
-            // or while its trace content s_j is at least the tolerance times
-            // the largest (a space too small to conserve a trace it carries
-            // needs an O(1) correction: two columns of no laser, share 1).
-            let size=|m:&[f64]|m.iter().map(|v|v*v).sum::<f64>().sqrt();let g0_size=size(&g0);
-            let singular:Vec<f64>=values.iter().map(|v|v.max(0.).sqrt()).collect();let largest_singular=top.max(0.).sqrt();
-            let share:Vec<f64>=(0..rows).map(|j|{let mut p=vec![ZERO;r];for a in 0..rows{let u=conj(vectors[a+rows*j]);for c in 0..r{mul_add(&mut p[c],u,C{re:defect[a*r+c],im:0.});}}
-                p.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt()/singular[j].max(f64::MIN_POSITIVE)}).collect();
-            let keep:Vec<bool>=(0..rows).map(|j|singular[j]>TRACE_ROUNDOFF*largest_singular&&(share[j]<=TRACE_CORRECTION*g0_size||singular[j]>=tolerance*largest_singular)).collect();
-            let mut pseudo=vec![0.;rows*rows];
-            for j in 0..rows{if keep[j]{for a in 0..rows{for b in 0..rows{pseudo[a*rows+b]+=mul(vectors[a+rows*j],conj(vectors[b+rows*j])).re/values[j];}}}}
-            let correction=product(lapack,&product(lapack,&transpose_rows(&t,rows,r),&pseudo,r,rows,rows)?,&defect,r,rows,r)?;
-            for(a,b)in g.iter_mut().zip(&correction){*a-=b;}
+        // G: the carrier's row zero, the K rows K'^-1 H[1.., ..] (K' the
+        // Gram of the K columns, symmetric: its row-major form is its
+        // column-major one); without a metric E[1.., ..].
+        let mut g=vec![0.;r*r];
+        if r>1{
+            let m=r-1;
+            let rows:Vec<f64>=if self.euclidean{self.e[r..].to_vec()}else{
+                let kk:Vec<f64>=(1..r).flat_map(|i|(1..r).map(move|j|(i,j))).map(|(i,j)|self.k[i*r+j]).collect();
+                let(lu,pivots)=lapack.factor(&kk,m)?;
+                transpose_rows(&lapack.solve_matrix_factored(&lu,&pivots,&transpose_rows(&self.h[r..],m,r),m)?,r,m)};
+            g[r..].copy_from_slice(&rows);
         }
+        let mut c0=vec![0.;k];for(c,&v)in c0.iter_mut().zip(initial){*c=v;}
         // Ritz decomposition.
         let(re,im,ev)=lapack.eigen(&transpose_rows(&g,r,r),r)?;
         let(pair,theta)=conjugate_pairs(&re,&im);let mut s=vec![ZERO;r*r];
@@ -267,9 +217,11 @@ impl<'m> Projection<'m>{
         let every:Vec<&Vec<C>>=readout.iter().collect();
         let amplitudes:Vec<f64>=(0..r).map(|jj|amplitude(jj,&every)).collect();
         let centre_amplitudes:Vec<f64>=(0..r).map(|jj|amplitude(jj,&[&readout[self.centre]])).collect();
-        // Kernel and growing modes.
-        let least=(0..r).min_by(|&p,&q|magnitude(theta[p]).total_cmp(&magnitude(theta[q]))).ok_or("Empty reduced model")?;
-        let kernel:Vec<bool>=(0..r).map(|jj|jj==least||magnitude(theta[jj])<KERNEL).collect();
+        // Kernel and growing modes: the eigenvector carrying the trace (the
+        // largest carrier coordinate; every other eigenvector's is zero) and
+        // every further conserved quantity.
+        let carrying=(0..r).max_by(|&p,&q|magnitude(s[p]).total_cmp(&magnitude(s[q]))).ok_or("Empty reduced model")?;
+        let kernel:Vec<bool>=(0..r).map(|jj|jj==carrying||magnitude(theta[jj])<KERNEL).collect();
         let(mut used_theta,mut used_coefficients)=(theta.clone(),a.clone());
         let(mut growing,mut projected,mut clipped,mut growth_charge)=(0,0,0,0.);let mut projected_out=vec![false;r];
         for jj in 0..r{
@@ -281,14 +233,15 @@ impl<'m> Projection<'m>{
             if amplitudes[jj]<=GROWTH_BUDGET*tolerance{used_theta[jj]=ZERO;used_coefficients[jj]=ZERO;projected_out[jj]=true;projected+=1;growth_charge+=amplitudes[jj];}
             else{used_theta[jj].re=0.;clipped+=1;}
         }
-        // The steady state.
+        // The steady state: (|u|, y), G[1..,1..] y = -|u| G[1..,0] (a simple
+        // kernel), else the kernel's spectral projection.
         let simple_kernel=kernel.iter().filter(|&&b|b).count()==1;
-        let tau:Vec<f64>=tw[..r].to_vec();
-        let steady:Vec<f64>=if simple_kernel{
-            let mut bordered=g.clone();for i in 0..r{for c in 0..r{bordered[i*r+c]+=c0[i]*tau[c];}}
-            let solution=lapack.solve(&transpose_rows(&bordered,r,r),&c0,r)?;
-            let trace:f64=tau.iter().zip(&c0).map(|(a,b)|a*b).sum();solution.iter().map(|v|v*trace).collect()
-        }else{
+        let steady:Vec<f64>=if simple_kernel&&r>1{
+            let m=r-1;let block:Vec<f64>=(1..r).flat_map(|i|(1..r).map(move|j|(i,j))).map(|(i,j)|g[i*r+j]).collect();
+            let rhs:Vec<f64>=(1..r).map(|i|-c0[0]*g[i*r]).collect();
+            let y=lapack.solve(&transpose_rows(&block,m,m),&rhs,m)?;
+            std::iter::once(c0[0]).chain(y).collect()
+        }else if r==1{c0.clone()}else{
             (0..r).map(|i|(0..r).filter(|&jj|kernel[jj]).fold(0.,|acc,jj|acc+mul(s[i*r+jj],a[jj]).re)).collect()
         };
         if steady.iter().chain(&g).any(|v|!v.is_finite()){return Err("Nonfinite reduced model".into());}

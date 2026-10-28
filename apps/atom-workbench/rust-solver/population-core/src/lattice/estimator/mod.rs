@@ -18,9 +18,8 @@
 //!   Y_m = (theta_m - A)^-1 (F_m + g_m + dA W b_m), the space's part of F_m in
 //!   closed form and the rest by GCRO on one shared pool seeded with the
 //!   pipeline's steady solve, the slow Ritz directions deflated. The kernel
-//!   mode's Y is the steady error; before it is propagated its projection
-//!   on the space loses its kernel coordinate (Y_0 is trace free, so the
-//!   true e^{tA} Y_0 decays; the projection's trace would stay forever).
+//!   mode's Y is the steady error, trace free like its projection on the
+//!   space (the basis carries the trace in its first column alone, `space`).
 //! - A slow mode's own residual, charged apart: for a Ritz pair (theta, x)
 //!   with r = (A - theta) x, e^{tA} x - e^{theta t} x = int_0^t
 //!   e^{(t-s)A} r e^{theta s} ds exactly, and the slow part's in-space -W b,
@@ -277,7 +276,7 @@ impl<'a> UnifiedEstimate<'a>{
             let fast=self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&coefficients},outputs.times,Readout::Laboratory)?;
             if count>kernels&&!only{own_trajectory=self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&own(count)},outputs.times,Readout::Laboratory)?;}
             if count>0{
-                let s=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,&kernel,&solutions[..count],outputs.times,Readout::Laboratory)?;
+                let s=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,&solutions[..count],outputs.times,Readout::Laboratory)?;
                 slow_trajectory=s.clone();
                 sum(fast,s)
             }else{fast}
@@ -290,7 +289,7 @@ impl<'a> UnifiedEstimate<'a>{
             let fast=self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&coefficients},&[t],Readout::Centre)?.remove(0);
             own_horizons.push(if count>kernels&&!only{self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&own(count)},&[t],Readout::Centre)?.remove(0)}else{vec![0.;n]});
             horizons.push(if count==0{slow_horizons.push(vec![0.;n]);fast}else{
-                let slow=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,&kernel,&solutions[..count],&[t],Readout::Centre)?.remove(0);
+                let slow=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,&solutions[..count],&[t],Readout::Centre)?.remove(0);
                 let total=fast.iter().zip(&slow).map(|(a,b)|a+b).collect();slow_horizons.push(slow);total});
         }
         let steady=outputs.steady.then(||{

@@ -382,7 +382,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             // 3. The checkpoint: model, outputs, estimate, bounds.
             let clock=Instant::now();
             galerkin.ingest(&space.basis,&space.images)?;
-            let model=galerkin.model(lapack,space.initial_norm,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
+            let model=galerkin.model(lapack,&space.initial,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
             timing.projection_ms=galerkin.milliseconds;timing.images_ms=space.images_ms;
             let outputs_clock=Instant::now();
             let mut trajectory=model.trajectory(&galerkin,times);
@@ -510,7 +510,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
         // The next pole by its expected gain.
         let clock=Instant::now();
         let model=match current.take(){Some((solves,model))if solves==space.solves()=>model,_=>{
-            galerkin.ingest(&space.basis,&space.images)?;galerkin.model(lapack,space.initial_norm,longest,tolerance)?}};
+            galerkin.ingest(&space.basis,&space.images)?;galerkin.model(lapack,&space.initial,longest,tolerance)?}};
         let xis:Vec<C>=live.iter().map(|&i|points[i].sigma()).collect();
         let transform=model.error_transform(&galerkin,&space.basis,&space.images,eigen,lapack,&xis)?;
         for(&i,p)in live.iter().zip(&transform){if slow_points[i]{continue;}

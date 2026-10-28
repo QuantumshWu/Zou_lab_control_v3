@@ -1,6 +1,19 @@
 //! The one rational Krylov space of a request, built from x0 on the lattice
 //! P u Q, and its poles.
 //!
+//! Trace by construction: every Fourier component of the generator, and so
+//! every coupling and fold term of the lattice operator, annihilates the
+//! trace, so each block trace tau_q(x) = tr x_q is an exact left eigenvector,
+//! tau_q A = -i nu_q tau_q, whatever P u Q is (measured to 1e-15 of the
+//! operator's entries). The solution stays in u + K, u = I / n on the centre
+//! (tr u = 1 = tr x0) and K the fields of zero block traces, and A maps
+//! u + K into K. The basis is [u / |u|, then K]: its first column is the
+//! trace carrier, every later direction is projected into K (its block
+//! traces removed along I / n: the orthogonal projection, so the basis stays
+//! orthonormal) before it is orthogonalized. The reduced model then holds
+//! the carrier's coefficient fixed and conserves every block trace exactly
+//! (`reduced`).
+//!
 //! Columns: w = (xi - A)^-1 v with v the last vector of the Krylov sequence
 //! (orthonormalized within the sequence only, so the continuation stays in
 //! the rational Krylov space of x0: a continuation carrying translated
@@ -91,7 +104,9 @@ pub struct Space{
     vectors:Vectors,noise_floor:f64,
     /// Most basis columns (the memory budget).
     capacity:usize,
-    pub initial_norm:f64,
+    /// x0's coordinates in the basis: the carrier's |u| and its K part's |x0 - u|
+    /// (the further columns are orthogonal to both).
+    pub initial:Vec<f64>,
     pub columns:Vec<Column>,
     pub images_ms:f64,
 }
@@ -100,10 +115,18 @@ impl Space{
     pub fn new(lattice:&mut Lattice<'_>,initial:&[C],capacity:usize)->Result<Self,String>{
         let op=lattice.operator();let d=op.n*op.n;let mut x0=vec![ZERO;op.dimension()];
         x0[op.centre*d..(op.centre+1)*d].copy_from_slice(initial);
-        let vectors=Vectors::new(op,1)?;let initial_norm=vectors.norm(&x0);
-        if !(initial_norm>0.){return Err("Zero initial density".into());}
-        let mut space=Self{basis:vec![],images:vec![],krylov:vec![],translations:vec![],vectors,noise_floor:0.,capacity:capacity.max(1),initial_norm,columns:vec![],images_ms:0.};
-        space.add_krylov(lattice,x0)?;Ok(space)
+        let vectors=Vectors::new(op,1)?;
+        if !(vectors.norm(&x0)>0.){return Err("Zero initial density".into());}
+        // The trace carrier u = I / n on the centre (tr u = tr x0 = 1).
+        let n=op.n;let mut u=vec![ZERO;op.dimension()];for i in 0..n{u[op.centre*d+i*n+i]=C{re:1./n as f64,im:0.};}
+        let carrier=vectors.norm(&u);
+        let mut space=Self{basis:vec![],images:vec![],krylov:vec![],translations:vec![],vectors,noise_floor:0.,capacity:capacity.max(2),initial:vec![carrier],columns:vec![],images_ms:0.};
+        space.append(lattice,u,0.)?;
+        // x0's K part (zero when rho0 is I / n).
+        let mut k0=x0.clone();project_traces(&mut k0,n);let rest=space.vectors.norm(&k0);
+        space.add_krylov(lattice,x0)?;
+        if space.basis.len()>1{space.initial.push(rest);}
+        Ok(space)
     }
     pub fn translations(&self)->Vec<Charge>{self.translations.iter().map(|t|t.0.clone()).collect()}
     /// Whether the basis has reached its capacity.
@@ -135,10 +158,15 @@ impl Space{
     }
     /// Appends a vector orthonormalized against the basis, with its image,
     /// when its part outside the basis is above `floor` of its norm and the
-    /// basis has room.
+    /// basis has room. Every column but the first (the trace carrier) is
+    /// projected into K first, and again after the orthogonalization (which
+    /// leaves K only at roundoff).
     fn append(&mut self,lattice:&mut Lattice<'_>,mut w:Vec<C>,floor:f64)->Result<bool,String>{
+        let n=lattice.operator().n;let carrier=self.basis.is_empty();
         let size=self.vectors.norm(&w);if !(size>0.)||self.full(){return Ok(false);}
+        if !carrier{project_traces(&mut w,n);}
         for _ in 0..2{let refs:Vec<&[C]>=self.basis.iter().map(|v|v.as_slice()).collect();let h=self.vectors.dots(&refs,&w);self.vectors.subtract(&refs,&h,&mut w)?;}
+        if !carrier{project_traces(&mut w,n);}
         let rest=self.vectors.norm(&w);if !(rest>floor*size){return Ok(false);}
         for v in w.iter_mut(){*v=scaled(*v,1./rest);}
         let clock=Instant::now();let mut image=vec![ZERO;w.len()];lattice.apply(&w,&mut image)?;self.images_ms+=clock.elapsed().as_secs_f64()*1e3;
@@ -185,6 +213,17 @@ impl Space{
         Ok(added)
     }
     pub fn solves(&self)->usize{self.columns.len()}
+}
+
+/// Projects a Hermitian-symmetric field into K: every block x_q loses its
+/// trace along I / n (x_q - tr(x_q) I / n; a mirror block's trace is the
+/// conjugate, so the field stays Hermitian-symmetric).
+pub fn project_traces(x:&mut[C],n:usize){
+    let d=n*n;
+    for block in x.chunks_exact_mut(d){
+        let t=(0..n).fold(ZERO,|s,i|C{re:s.re+block[i*n+i].re,im:s.im+block[i*n+i].im});
+        for i in 0..n{block[i*n+i].re-=t.re/n as f64;block[i*n+i].im-=t.im/n as f64;}
+    }
 }
 
 /// The ladder of a request: real poles from LADDER_TOP / t1 down to
