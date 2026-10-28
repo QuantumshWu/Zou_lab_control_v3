@@ -23,6 +23,7 @@ use super::super::floquet::inverse;
 use super::kernels::SwKernels;
 use crate::parallel::Execution;
 
+#[derive(Clone)]
 pub struct BlockSystem{
     /// The steps whose second-order terms the class carries.
     pub steps:Vec<usize>,

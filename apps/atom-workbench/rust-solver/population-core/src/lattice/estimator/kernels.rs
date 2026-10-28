@@ -125,6 +125,10 @@ impl SwKernels{
     pub fn subtract_kernel(&self,s:usize,input:&[C],out:&mut[C]){
         for &(i,j,x)in &self.steps[s].entries{let v=mul(x,input[j]);out[i].re-=v.re;out[i].im-=v.im;}
     }
+    /// The adjoint: out[j] -= conj(x) * input[i].
+    pub fn subtract_kernel_adjoint(&self,s:usize,input:&[C],out:&mut[C]){
+        for &(i,j,x)in &self.steps[s].entries{let v=mul(conj(x),input[i]);out[j].re-=v.re;out[j].im-=v.im;}
+    }
 }
 
 /// K~_s = 1/2 (C~_-s X~_s - X~_-s C~_s) from C~_s (column-major) and the

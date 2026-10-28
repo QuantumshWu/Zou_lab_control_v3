@@ -35,7 +35,10 @@ use super::super::*;
 use super::super::eigenbasis::BlockEigenbasis;
 use super::super::operator::{LatticeOperator,Mask,Parts};
 use super::blocks::BlockSystem;
-use super::kernels::{KernelRule,SwKernels};
+use super::kernels::SwKernels;
+use super::super::frame::SwFrame;
+use super::super::estimate_api::FrameColumns;
+use std::borrow::Cow;
 use crate::parallel::Execution;
 
 /// Refinement passes of the ring's block solves for the diagonal fold's
@@ -94,7 +97,7 @@ pub struct ErrorLattice<'p>{
     /// the ring's diagonal blocks, R -> P u Q for the feedback.
     pub ring:Vec<Charge>,ring_nu:Vec<f64>,
     outer:LatticeOperator<'p>,inner_mask:Vec<bool>,ring_mask:Vec<bool>,edge_modes:usize,
-    pub kernels:SwKernels,
+    pub kernels:&'p SwKernels,
     /// The near modes (the centre and its one-step neighbours), and the (I - S)
     /// pairs into them: (target, source, step), target = source + step.
     pub near:Vec<usize>,pub(super) pairs:Vec<(usize,usize,usize)>,
@@ -107,7 +110,9 @@ pub struct ErrorLattice<'p>{
     /// centre is its own mirror), the near slots of the canonical near
     /// modes, and the flip's permutation of the eigen-coordinates.
     pub(super) canonical:Vec<bool>,pub(super) near_canonical:Vec<usize>,partner:Vec<usize>,
-    pub classes:Vec<BlockSystem>,pub(super) class_of:Vec<usize>,
+    /// The classes: the frame's own block when every mode carries every
+    /// step (`Classes::Full`).
+    pub classes:Vec<Cow<'p,BlockSystem>>,pub(super) class_of:Vec<usize>,
     /// Per near mode (in `near` order; the canonical ones filled),
     /// column-major d x k: class coordinates of the transformed basis
     /// columns and images.
@@ -121,13 +126,13 @@ pub struct ErrorLattice<'p>{
     /// propagated.
     pub ring_in_fast:bool,pub outer_bare:bool,
     pub work:ErrorWork,
-    /// Build times (ms): kernels, classes.
+    /// Build times (ms): kernels, classes (the frame's for shared ones).
     pub build_ms:[f64;2],
 }
 
 impl<'p> ErrorLattice<'p>{
     /// `explicit`: the explicit set P, whose modes join the near ones.
-    pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],explicit:&[Charge],rule:KernelRule,classes:Classes)->Result<Self,String>{
+    pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],explicit:&[Charge],frame:&'p SwFrame,classes:Classes)->Result<Self,String>{
         let basis=prepared.eigenbasis()?;
         let n=prepared.generator.n;let d=n*n;
         let index:BTreeMap<Charge,usize>=modes.iter().enumerate().map(|(i,q)|(q.clone(),i)).collect();
@@ -141,9 +146,7 @@ impl<'p> ErrorLattice<'p>{
         let inner_mask:Vec<bool>=(0..all.len()).map(|q|q<modes.len()).collect();let ring_mask:Vec<bool>=inner_mask.iter().map(|&b|!b).collect();
         let structural=prepared.plan.structural_steps();
         let edge_modes=modes.iter().filter(|q|ring.iter().any(|r|charge_minus(r,q).is_ok_and(|s|structural.contains(&s)))).count();
-        let clock=Instant::now();
-        let kernels=SwKernels::new(prepared,basis,rule)?;
-        let kernel_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
+        let kernels=&frame.kernels;let clock=Instant::now();
         // Near modes: the centre, every lattice mode one kernel step away and
         // the explicit set (by construction where the state has weight).
         let mut near=vec![centre];
@@ -160,10 +163,12 @@ impl<'p> ErrorLattice<'p>{
         let mut distinct:Vec<Vec<usize>>=keys.clone();distinct.sort();distinct.dedup();
         let mut class_of=vec![usize::MAX;modes.len()];
         for(&a,k)in near.iter().zip(&keys){class_of[a]=distinct.iter().position(|x|x==k).unwrap();}
-        let lapack=&prepared.lapack;
-        let built=Execution::new()?.map(distinct,|steps|BlockSystem::new(lapack,basis,&kernels,steps,n,rule.horizon));
+        let lapack=&prepared.lapack;let every:Vec<usize>=(0..kernels.steps.len()).collect();
+        let built=Execution::new()?.map(distinct,|steps|->Result<Cow<'p,BlockSystem>,String>{
+            if steps==every{Ok(Cow::Borrowed(&frame.class))}else{Ok(Cow::Owned(BlockSystem::new(lapack,basis,kernels,steps,n,frame.horizon)?))}});
         let classes=built.into_iter().collect::<Result<Vec<_>,_>>()?;
-        let class_ms=clock.elapsed().as_secs_f64()*1e3;
+        let class_ms=if classes.iter().all(|c|matches!(c,Cow::Borrowed(_))){frame.milliseconds[1]}else{clock.elapsed().as_secs_f64()*1e3};
+        let kernel_ms=frame.milliseconds[0];
         let count=near.len();
         let canonical:Vec<bool>=(0..modes.len()).map(|q|modes[q]>=modes[mirror[q]]).collect();
         let near_canonical:Vec<usize>=(0..count).filter(|&slot|canonical[near[slot]]).collect();
@@ -176,34 +181,72 @@ impl<'p> ErrorLattice<'p>{
     }
     pub fn dimension(&self)->usize{self.modes.len()*self.d}
     /// Process the basis columns not seen yet (columns are append-only).
-    pub fn add_columns(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
+    /// `frame`: the projection's frame coordinates of basis columns (the
+    /// eigen-coordinates and their transfer on the canonical modes), used for
+    /// the columns they cover: only the class change remains for those.
+    pub fn add_columns(&mut self,basis:&[Vec<C>],images:&[Vec<C>],frame:Option<&FrameColumns<'_>>)->Result<(),String>{
         let clock=Instant::now();
         if basis.len()<=self.columns{return Ok(());}
         let d=self.d;let first=self.columns;
+        let given=frame.filter(|f|f.first<=first&&f.first+f.count>=basis.len()&&self.frame_modes_covered(f.canonical));
         // Every new column and its image (with the ring's feedback where the
-        // fast part carries it), transformed together.
+        // fast part carries it), transformed together; a column the frame
+        // covers takes its coordinates from there.
         let mut fields:Vec<Vec<C>>=Vec::with_capacity(2*(basis.len()-first));
         for j in first..basis.len(){
             if basis[j].len()!=self.dimension()||images[j].len()!=basis[j].len(){return Err("Estimator: basis column dimensions differ from the lattice".into());}
-            fields.push(basis[j].clone());
+            if given.is_none(){fields.push(basis[j].clone());}
             if self.ring_in_fast{let g=self.ring_feedback(&basis[j],ZERO)?;fields.push(images[j].iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect());}
             else{fields.push(images[j].clone());}
         }
         let refs:Vec<&[C]>=fields.iter().map(|f|&f[..]).collect();
         let(z,o)=self.coordinates(&refs)?;
+        let given_coordinates=match given{Some(f)=>Some(self.frame_coordinates(f,first,basis.len())?),None=>None};
         let(near,outer)=(self.near.len(),self.outer_modes.len());
         for(i,_)in(first..basis.len()).enumerate(){
-            let(w,a)=(2*i,2*i+1);
+            let(w,a)=if given.is_some(){(i,i)}else{(2*i,2*i+1)};
+            let(zw,ow):(&[C],&[C])=match &given_coordinates{Some((zg,og))=>(zg,og),None=>(&z,&o)};
             for &slot in &self.near_canonical{
-                self.basis_coordinates[slot].extend_from_slice(&z[(w*near+slot)*d..(w*near+slot+1)*d]);
+                self.basis_coordinates[slot].extend_from_slice(&zw[(w*near+slot)*d..(w*near+slot+1)*d]);
                 self.image_coordinates[slot].extend_from_slice(&z[(a*near+slot)*d..(a*near+slot+1)*d]);}
             for slot in 0..outer{
-                self.outer_basis[slot].extend_from_slice(&o[(w*outer+slot)*d..(w*outer+slot+1)*d]);
+                self.outer_basis[slot].extend_from_slice(&ow[(w*outer+slot)*d..(w*outer+slot+1)*d]);
                 self.outer_image[slot].extend_from_slice(&o[(a*outer+slot)*d..(a*outer+slot+1)*d]);}
         }
         let added=basis.len()-first;self.columns=basis.len();self.work.columns+=added;
         self.work.column_ms+=clock.elapsed().as_secs_f64()*1e3;
         Ok(())
+    }
+    /// Whether the frame's canonical modes include every canonical near and
+    /// outer mode.
+    fn frame_modes_covered(&self,canonical:&[usize])->bool{
+        self.near_canonical.iter().map(|&s|self.near[s]).chain(self.outer_modes.iter().copied()).all(|q|canonical.binary_search(&q).is_ok())
+    }
+    /// Class coordinates (per near slot) and outer eigen-coordinates of the
+    /// basis columns first..end from the projection's frame coordinates:
+    /// V_c^-1 of their transfer on the canonical near modes.
+    fn frame_coordinates(&mut self,frame:&FrameColumns<'_>,first:usize,end:usize)->Result<(Vec<C>,Vec<C>),String>{
+        let(d,count)=(self.d,end-first);let cc=frame.canonical.len();
+        let(near,outer)=(self.near.len(),self.outer_modes.len());
+        let at=|q:usize|frame.canonical.binary_search(&q).unwrap();
+        let column=|j:usize,q:usize|->usize{((j-frame.first)*cc+at(q))*d};
+        let execution=Execution::new()?;
+        let(classes,class_of,lapack)=(&self.classes,&self.class_of,&self.prepared.lapack);
+        let mut groups:Vec<(usize,Vec<(usize,usize)>)>=Vec::new();
+        for i in 0..count{for &slot in &self.near_canonical{let c=class_of[self.near[slot]];
+            match groups.iter_mut().find(|g|g.0==c){Some(g)=>g.1.push((i,slot)),None=>groups.push((c,vec![(i,slot)]))}}}
+        let tasks:Vec<(usize,Vec<(usize,usize)>)>=groups.iter().flat_map(|(c,items)|items.chunks(BLOCKS_PER_TASK).map(move|ch|(*c,ch.to_vec()))).collect();
+        let near_modes=&self.near;
+        let parts=execution.map(tasks.clone(),|(c,items)|->Result<Vec<C>,String>{
+            let m=items.len();let mut input=vec![ZERO;d*m];
+            for(k,&(i,slot))in items.iter().enumerate(){let s=column(first+i,near_modes[slot]);input[k*d..(k+1)*d].copy_from_slice(&frame.transferred[s..s+d]);}
+            let mut out=vec![ZERO;d*m];lapack.complex_gemm().multiply(d,m,d,ONE,&classes[c].inverse,d,&input,d,ZERO,&mut out,d)?;Ok(out)});
+        let mut z=vec![ZERO;count*near*d];
+        for((_,items),part)in tasks.iter().zip(parts){let part=part?;for(k,&(i,slot))in items.iter().enumerate(){z[(i*near+slot)*d..(i*near+slot+1)*d].copy_from_slice(&part[k*d..(k+1)*d]);}}
+        let mut o=vec![ZERO;count*outer*d];
+        for i in 0..count{for(slot,&q)in self.outer_modes.iter().enumerate(){let s=column(first+i,q);o[(i*outer+slot)*d..(i*outer+slot+1)*d].copy_from_slice(&frame.eigen[s..s+d]);}}
+        self.work.frame_blocks+=count*self.near_canonical.len();
+        Ok((z,o))
     }
     /// For Hermitian-symmetric fields on P u Q: the class coordinates
     /// V_c^-1 E^-1 (I - S) v per canonical near mode, (field, near slot)
@@ -228,12 +271,13 @@ impl<'p> ErrorLattice<'p>{
             for(i,v)in c[(f*modes+q)*d..(f*modes+q+1)*d].iter_mut().enumerate(){*v=conj(source[self.partner[i]]);}}}
         // (I - S) into the canonical near modes.
         let slot_of:Vec<usize>=(0..modes).map(|q|self.near.iter().position(|&x|x==q).unwrap_or(usize::MAX)).collect();
-        let mut t=vec![ZERO;count*near*d];
-        for f in 0..count{
-            for &slot in &self.near_canonical{let a=self.near[slot];t[(f*near+slot)*d..(f*near+slot+1)*d].copy_from_slice(&c[(f*modes+a)*d..(f*modes+a+1)*d]);}
-            for &(a,b,s)in self.pairs.iter().filter(|p|canonical[p.0]){let slot=slot_of[a];let source=&c[(f*modes+b)*d..(f*modes+b+1)*d];
-                self.kernels.subtract_kernel(s,source,&mut t[(f*near+slot)*d..(f*near+slot+1)*d]);}
-        }
+        let(kernels,c_ref)=(self.kernels,&c);
+        let rows=execution.map((0..count).collect(),|f|{
+            let mut t=vec![ZERO;near*d];
+            for &slot in &self.near_canonical{let a=self.near[slot];t[slot*d..(slot+1)*d].copy_from_slice(&c_ref[(f*modes+a)*d..(f*modes+a+1)*d]);}
+            for &(a,b,s)in self.pairs.iter().filter(|p|canonical[p.0]){let slot=slot_of[a];kernels.subtract_kernel(s,&c_ref[(f*modes+b)*d..(f*modes+b+1)*d],&mut t[slot*d..(slot+1)*d]);}
+            t});
+        let t:Vec<C>=rows.concat();
         // V_c^-1 per class over every (field, canonical near slot) of the class.
         let(classes,class_of,lapack)=(&self.classes,&self.class_of,&self.prepared.lapack);
         let mut groups:Vec<(usize,Vec<usize>)>=Vec::new();

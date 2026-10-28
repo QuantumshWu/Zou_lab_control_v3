@@ -49,9 +49,7 @@
 //! the rest decays at the fast rates and is propagated by the dressed blocks
 //! of L0' on the near modes only (its readout elsewhere is micromotion).
 use super::super::*;
-use super::super::operator::LatticeOperator;
-use super::super::preconditioner::{FloquetBatch,Preconditioner,Preconditioning,Shift};
-use super::super::floquet::Reach;
+use super::super::estimate_api::SteadySolves;
 use super::lattice::{ErrorLattice,split};
 use super::propagate::Readout;
 use crate::parallel::Execution;
@@ -155,18 +153,26 @@ impl Panels{
         // span six or more orders of magnitude).
         for(c,&size)in sizes.iter().enumerate(){let scale=if size>0.{1./size}else{0.};for v in &mut g[c*length..(c+1)*length]{*v*=scale;}}
         let gram=block_cross(lapack,execution,&g,m,&g,m,length)?;
-        let(order,r1)=cholesky(&gram,m,&vec![1.;m],true);let k=order.len();
-        let mut fresh:Vec<Vec<f64>>=Vec::new();let mut t=vec![0.;k*m];
+        let(order,r1)=cholesky(&gram,m,&vec![1.;m],true);let mut k=order.len();
+        let mut fresh:Vec<Vec<f64>>=Vec::new();let mut t=Vec::new();
         if k>0{
             let mut selected=vec![0.;length*k];for(i,&c)in order.iter().enumerate(){selected[i*length..(i+1)*length].copy_from_slice(&g[c*length..(c+1)*length]);}
-            let q1=block_times(lapack,execution,&selected,length,k,&upper_inverse(&r1,k))?;drop(selected);
-            let gram=block_cross(lapack,execution,&q1,k,&q1,k,length)?;
-            let(kept,r2)=cholesky(&gram,k,&vec![1.;k],false);
-            if kept.len()!=k{return Err("Slow pool: the second Cholesky QR pass lost a column".into());}
-            let q=block_times(lapack,execution,&q1,length,k,&upper_inverse(&r2,k))?;drop(q1);
-            t=block_cross(lapack,execution,&q,k,&g,m,length)?;
-            for(c,&size)in sizes.iter().enumerate(){for v in &mut t[c*k..(c+1)*k]{*v*=size;}}
-            for i in 0..k{let column=q[i*length..(i+1)*length].to_vec();self.push(&column);fresh.push(column);}
+            let mut q1=block_times(lapack,execution,&selected,length,k,&upper_inverse(&r1,k))?;drop(selected);
+            // A column the second pass loses was dependent within the first
+            // pass's accuracy (the Gram squares its condition): it is left out.
+            let r2=loop{
+                let gram=block_cross(lapack,execution,&q1,k,&q1,k,length)?;
+                let(kept,r2)=cholesky(&gram,k,&vec![1.;k],false);
+                if kept.len()==k{break r2;}
+                let mut columns=vec![0.;length*kept.len()];for(i,&c)in kept.iter().enumerate(){columns[i*length..(i+1)*length].copy_from_slice(&q1[c*length..(c+1)*length]);}
+                q1=columns;k=kept.len();
+            };
+            if k>0{
+                let q=block_times(lapack,execution,&q1,length,k,&upper_inverse(&r2,k))?;drop(q1);
+                t=block_cross(lapack,execution,&q,k,&g,m,length)?;
+                for(c,&size)in sizes.iter().enumerate(){for v in &mut t[c*k..(c+1)*k]{*v*=size;}}
+                for i in 0..k{let column=q[i*length..(i+1)*length].to_vec();self.push(&column);fresh.push(column);}
+            }
         }
         // The Gram matrices, the two triangular products and the coordinates.
         self.count_macs(((m*m+2*k*k+k*k+k*m)*length)as f64);
@@ -277,8 +283,8 @@ struct Deflation{index:Vec<usize>,theta:Vec<C>,b:Vec<Vec<C>>,left:Vec<Vec<C>>,cx
 /// modes (positions in the deflation) with their amplitudes.
 struct Solved{x:Vec<C>,basis:Vec<C>,deflated:Vec<(usize,C)>}
 
-pub struct SlowPool<'p>{
-    op:LatticeOperator<'p>,batch:FloquetBatch<'p>,lapack:Arc<Lapack>,execution:Execution,
+pub struct SlowPool{
+    dimension:usize,lapack:Arc<Lapack>,execution:Execution,
     n:usize,d:usize,watch:Vec<usize>,mirror:Vec<usize>,near:Vec<usize>,packing:Packing,
     q:Panels,
     /// Per direction: its coordinates and its image's (on Q at insertion),
@@ -293,22 +299,20 @@ pub struct SlowPool<'p>{
     pub work:PoolWork,
 }
 
-impl<'p> SlowPool<'p>{
-    pub fn new(prepared:&'p LatticePrepared,lattice:&ErrorLattice<'_>)->Result<Self,String>{
-        let op=LatticeOperator::new(prepared,&lattice.modes)?;
-        let batch=Preconditioning::new(prepared)?.batch(&op,Shift::Steady,Some(Reach::All))?;
+impl SlowPool{
+    pub fn new(prepared:&LatticePrepared,lattice:&ErrorLattice<'_>)->Result<Self,String>{
         let(n,d)=(lattice.n,lattice.d);let c0=lattice.centre*d;let watch:Vec<usize>=(0..n).map(|i|c0+i*n+i).collect();
         let packing=Packing::new(lattice);let length=packing.length();
-        let mut pool=Self{op,batch,lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),packing,
+        let mut pool=Self{dimension:lattice.dimension(),lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),packing,
             q:Panels::new(length),cu:Vec::new(),cau:Vec::new(),trace:Vec::new(),near_parts:Vec::new(),u:Vec::new(),
             packed_basis:Vec::new(),wq:Vec::new(),columns:0,deflation:None,work:PoolWork::default()};
         let packed=pool.packing.pack(&pool.trace_row());let(mut coordinates,_)=pool.extend(packed,1)?;pool.u=coordinates.remove(0);
         Ok(pool)
     }
     /// u = I/n on the centre.
-    fn trace_row(&self)->Vec<C>{let mut u=vec![ZERO;self.op.dimension()];for &k in &self.watch{u[k]=C{re:1./self.n as f64,im:0.};}u}
+    fn trace_row(&self)->Vec<C>{let mut u=vec![ZERO;self.dimension];for &k in &self.watch{u[k]=C{re:1./self.n as f64,im:0.};}u}
     fn centre_trace(&self,x:&[C])->f64{self.watch.iter().map(|&k|x[k].re).sum()}
-    fn apply(&mut self,x:&[C])->Result<Vec<C>,String>{let mut y=vec![ZERO;x.len()];self.op.apply(x,&mut y)?;self.work.applications+=1;Ok(y)}
+    fn apply(&mut self,steady:&mut dyn SteadySolves,x:&[C])->Result<Vec<C>,String>{let mut y=vec![ZERO;x.len()];steady.apply(x,&mut y)?;self.work.applications+=1;Ok(y)}
     /// Extends Q by the span of m packed columns and every new column's
     /// products with the basis. Returns the columns' coordinates and Q's new
     /// columns.
@@ -408,7 +412,7 @@ impl<'p> SlowPool<'p>{
     /// its steady limit, -lambda_j x_j / theta_j, would weigh the Ritz
     /// vectors' residuals by 1 / theta_j (measured: the steady estimate moved
     /// by up to a factor 2.7).
-    fn solve(&mut self,f:&[C],theta:C,deflate:bool)->Result<Solved,String>{
+    fn solve(&mut self,f:&[C],theta:C,deflate:bool,steady:&mut dyn SteadySolves)->Result<Solved,String>{
         let clock=Instant::now();self.work.solves+=1;
         let kernel=magnitude(theta)<KERNEL;let length=self.q.length;
         let deflation=if deflate&&!kernel{self.deflation.take()}else{None};
@@ -454,8 +458,8 @@ impl<'p> SlowPool<'p>{
             for part in r.chunks_exact(length){
                 let size=dot(part,part).sqrt();if !(size>1e-3*rn){continue;}
                 let field:Vec<C>=self.packing.unpack(part).iter().map(|v|C{re:v.re/size,im:v.im/size}).collect();
-                let mut z=vec![ZERO;field.len()];self.batch.apply(&field,&mut z)?;self.work.preconditions+=1;
-                let az=self.apply(&z)?;new.push((z,az));
+                let mut z=vec![ZERO;field.len()];steady.precondition(&field,&mut z)?;self.work.preconditions+=1;
+                let az=self.apply(steady,&z)?;new.push((z,az));
             }
             if new.is_empty(){break x;}
             let first=self.cu.len();let fresh=self.add(new)?;
@@ -494,13 +498,13 @@ impl<'p> SlowPool<'p>{
     /// Y = -x + tau0(x) x_ss - (A + u tau0^T)^-1 g, whose first two terms (the
     /// reduced and the true steady state) cancel to the steady error itself,
     /// so there the small source A x + g is solved whole.
-    pub fn mode(&mut self,b:&[C],ax:&[C],g:&[C],theta:C,coefficient:C)->Result<SlowSolution,String>{
+    pub fn mode(&mut self,b:&[C],ax:&[C],g:&[C],theta:C,coefficient:C,steady:&mut dyn SteadySolves)->Result<SlowSolution,String>{
         if magnitude(theta)<KERNEL{
             let f:Vec<C>=ax.iter().zip(g).map(|(a,v)|C{re:a.re+v.re,im:a.im+v.im}).collect();
-            let s=self.solve(&f,theta,false)?;
+            let s=self.solve(&f,theta,false,steady)?;
             return Ok(SlowSolution{theta,coefficient,basis:Vec::new(),x:s.x,deflated:Vec::new()});
         }
-        let s=self.solve(g,theta,true)?;
+        let s=self.solve(g,theta,true,steady)?;
         let mut basis=s.basis;basis.resize(b.len(),ZERO);for(t,v)in basis.iter_mut().zip(b){t.re-=v.re;t.im-=v.im;}
         let deflated=self.deflation.as_ref().map_or(Vec::new(),|d|s.deflated.iter().map(|&(i,l)|(d.index[i],d.theta[i],l)).collect());
         Ok(SlowSolution{theta,coefficient,basis,x:s.x,deflated})

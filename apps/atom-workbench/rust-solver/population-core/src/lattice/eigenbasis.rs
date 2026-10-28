@@ -1,8 +1,8 @@
-//! The eigenbasis of the folded centre generator L0' = L0 + K_0^(0), which
-//! propagates error sources through every mode's dressed block
-//! B_q = L0' - i nu_q exactly (estimates-math.md section 3.3; the near
-//! couplings between modes are left out of the propagation, the source
-//! carries them).
+//! The eigenbasis of the folded centre generator L0' = L0 + K_0^(0): the
+//! dressed blocks B_q = L0' - i nu_q of every mode, solved exactly, the
+//! eigen-coordinates of the Schrieffer-Wolff frame (`frame`) and of the
+//! error estimate's propagation (`estimator`), and the dressed coordinates
+//! of the pole ordering's error transform (`reduced`).
 //!
 //! L0' maps Hermitian matrices to Hermitian matrices, so in the orthonormal
 //! Hermitian basis (E_ii; (E_ij + E_ji)/sqrt2 and i (E_ij - E_ji)/sqrt2 for
@@ -12,11 +12,6 @@
 //! the real eigenvector columns v_r, v_i has the eigenvectors v_r +- i v_i,
 //! and a vector a v_r + b v_i has the coefficients (a -+ i b)/2 on them.
 //!
-//! Propagation: a source s_q(t) = sum_k beta_k e^{mu_k t} on mode q gives
-//!   e_q(t) = sum_j E_j sum_k beta_jk (e^{mu_k t} - e^{zeta_j t}) / (mu_k - zeta_j),
-//! zeta_j = lambda_j - i nu_q, read out on the populations with the phase
-//! e^{i nu_q t} (a near-resonant pair takes the limit t e^{mu_k t}).
-//!
 //! Block solves: (L0' - i nu_q - xi)^-1 on any blocks, exact for every mode
 //! and shift (real or complex): the blocks' coordinates, E_R^-1 (one real
 //! GEMM over every block's real and imaginary parts), the pair rule, the
@@ -25,9 +20,9 @@
 //!
 //! Dressed coordinates: E_R^-1 applied to a block's Hermitian-basis
 //! coordinates (`dressed`), where the block-diagonal part of the lattice is
-//! diagonal (2 x 2 rotations for complex pairs) with Re <= 0: the inner
-//! product of the reduced model. The adjoint solves give the norm of a
-//! block's resolvent (`resolvent_norm`, the ring condition).
+//! diagonal (2 x 2 rotations for complex pairs) with Re <= 0. The adjoint
+//! solves give the norm of a block's resolvent (`resolvent_norms`, the ring
+//! condition).
 //!
 //! The decomposition runs per connected block of the real matrix (the
 //! elements its nonzero entries connect: exact zeros exploited for speed
@@ -37,11 +32,8 @@
 //! The basis is request-level (`LatticePrepared::eigenbasis`): computed once,
 //! shared by every pipeline that needs it.
 use super::*;
-use super::operator::LatticeOperator;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
-/// |mu_k - zeta_j| T below which a pair is treated as resonant.
-const RESONANT:f64=1e-8;
 /// Power iterations of `resolvent_norms`.
 const RESOLVENT_ITERATIONS:usize=20;
 /// Fewest blocks per task of the dressed coordinates.
@@ -281,56 +273,25 @@ impl BlockEigenbasis{
             }}
         Ok(z)
     }
-    /// Population trajectories (one row of n per time) of e' = B e + s(t),
-    /// e(0) = 0, with B the block-diagonal dressed generator of the mode set
-    /// and s(t) = sum_c fields[c] psi_c(t), psi_c(t) = sum_k alpha[c][k]
-    /// e^{mu_k t}; the fields are Hermitian-symmetric on the modes of `op`.
-    /// Per mode, complex GEMMs: beta = Z alpha, the readout of
-    /// beta / (mu - zeta), and the two exponential sums.
-    pub fn propagate(&self,op:&LatticeOperator<'_>,fields:&[Vec<C>],alpha:&[Vec<C>],mu:&[C],times:&[f64])->Result<Vec<Vec<f64>>,String>{
-        let(n,d)=(self.n,self.d);let(c_count,k_count,t_count)=(fields.len(),mu.len(),times.len());
-        if c_count==0||k_count==0{return Ok(vec![vec![0.;n];t_count]);}
-        let horizon=times.iter().fold(0_f64,|a,&t|a.max(t.abs())).max(1e-300);
-        let cexp=|z:C,t:f64|{let m=(z.re*t).exp();C{re:m*(z.im*t).cos(),im:m*(z.im*t).sin()}};
-        // e^{mu_k t} (K x T) and e^{lambda_j t} (d x T), column-major.
-        let ritz:Vec<C>=times.iter().flat_map(|&t|mu.iter().map(move|&z|cexp(z,t))).collect();
-        let block:Vec<C>=times.iter().flat_map(|&t|self.lambda.iter().map(move|&z|cexp(z,t))).collect();
-        let mut alpha_cm=vec![ZERO;c_count*k_count];for(c,a)in alpha.iter().enumerate(){for k in 0..k_count{alpha_cm[c+c_count*k]=a[k];}}
-        let gemm=self.lapack.complex_gemm();
-        let computed:Vec<usize>=(0..op.modes.len()).filter(|&q|op.canonical[q]).collect();
-        let parts=Execution::new()?.map(computed,|q|->Result<Vec<f64>,String>{
-            let weight=if op.mirror[q]==q{1.}else{2.};let nu=op.nu[q];
-            let blocks:Vec<&[C]>=fields.iter().map(|f|&f[q*d..(q+1)*d]).collect();
-            let z=self.coefficients(&blocks)?;
-            let mut beta=vec![ZERO;d*k_count];gemm.multiply(d,k_count,c_count,ONE,&z,d,&alpha_cm,c_count,ZERO,&mut beta,d)?;
-            // G_jk = beta_jk / (mu_k - zeta_j), zeta_j = lambda_j - i nu;
-            // resonant pairs take the limit t e^{mu_k t}.
-            let mut gamma=vec![ZERO;d];let mut resonant=Vec::new();
-            for k in 0..k_count{for j in 0..d{
-                let b=beta[j+d*k];if !nonzero(b){continue;}
-                let den=C{re:mu[k].re-self.lambda[j].re,im:mu[k].im-self.lambda[j].im+nu};
-                if magnitude(den)*horizon<RESONANT{resonant.push((j,k,b));beta[j+d*k]=ZERO;continue;}
-                let s=den.re*den.re+den.im*den.im;let v=mul(b,C{re:den.re/s,im:-den.im/s});beta[j+d*k]=v;add(&mut gamma[j],v);
+    /// The adjoint of `coefficients`: row-major blocks (count of them, one
+    /// after the other) from complex eigen-coordinates w (column-major
+    /// d x count): the pair rule's adjoint, E_R^-T (one real GEMM), the
+    /// Hermitian-basis coordinates' inverse (they are orthonormal).
+    pub fn coefficients_adjoint(&self,w:&[C],count:usize)->Result<Vec<C>,String>{
+        let(n,d)=(self.n,self.d);
+        let mut parts=vec![0.;d*2*count];
+        for c in 0..count{let mut j=0;let col=&w[c*d..(c+1)*d];
+            while j<d{
+                if self.kind[j]==1{let(u,v)=(col[j],col[j+1]);
+                    // ((u + v)/2, i (u - v)/2).
+                    let(a,b)=(C{re:0.5*(u.re+v.re),im:0.5*(u.im+v.im)},C{re:-0.5*(u.im-v.im),im:0.5*(u.re-v.re)});
+                    parts[j+d*c]=a.re;parts[j+d*(count+c)]=a.im;parts[j+1+d*c]=b.re;parts[j+1+d*(count+c)]=b.im;j+=2;}
+                else{parts[j+d*c]=col[j].re;parts[j+d*(count+c)]=col[j].im;j+=1;}
             }}
-            let mut m1=vec![ZERO;n*k_count];gemm.multiply(n,k_count,d,ONE,&self.readout,n,&beta,d,ZERO,&mut m1,n)?;
-            let mut first=vec![ZERO;n*t_count];gemm.multiply(n,t_count,k_count,ONE,&m1,n,&ritz,k_count,ZERO,&mut first,n)?;
-            // e^{i nu t} e^{zeta_j t} = e^{lambda_j t}.
-            let mut weighted=self.readout.clone();for j in 0..d{for i in 0..n{weighted[i+n*j]=mul(weighted[i+n*j],gamma[j]);}}
-            let mut second=vec![ZERO;n*t_count];gemm.multiply(n,t_count,d,ONE,&weighted,n,&block,d,ZERO,&mut second,n)?;
-            let mut out=vec![0.;t_count*n];
-            for(ti,&t)in times.iter().enumerate(){
-                let phase=cexp(C{re:0.,im:nu},t);
-                for i in 0..n{
-                    let mut v=first[i+n*ti];
-                    for &(j,k,b)in &resonant{mul_add(&mut v,mul(self.readout[i+n*j],b),scaled(ritz[k+k_count*ti],t));}
-                    out[ti*n+i]=weight*(mul(phase,v).re-second[i+n*ti].re);
-                }
-            }
-            Ok(out)
-        });
-        let mut rows=vec![vec![0.;n];t_count];
-        for part in parts{let part=part?;for(ti,row)in rows.iter_mut().enumerate(){for(r,&v)in row.iter_mut().zip(&part[ti*n..(ti+1)*n]){*r+=v;}}}
-        Ok(rows)
+        let mut y=vec![0.;d*2*count];self.lapack.gemm(true,false,d,2*count,d,1.,&self.inverse,d,&parts,d,0.,&mut y,d)?;
+        let mut out=Vec::with_capacity(d*count);
+        for c in 0..count{let coordinate:Vec<C>=(0..d).map(|k|C{re:y[k+d*c],im:y[k+d*(count+c)]}).collect();out.extend(from_coordinates(&coordinate,n));}
+        Ok(out)
     }
 }
 
@@ -367,30 +328,5 @@ mod tests{
             let size=u.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();sigma=size.sqrt();v=u.iter().map(|z|scaled(*z,1./size)).collect();}
         let norm=basis.resolvent_norms(&[nu0]).unwrap()[0];
         assert!((norm/sigma-1.).abs()<0.05,"resolvent norm {norm:e} against {sigma:e}");
-    }
-    #[test]
-    fn lattice_block_eigenbasis_propagates_a_source_exactly(){
-        // One mode (the centre), a constant source f (mu = 0): e(t) =
-        // (e^{L0' t} - 1) L0'^-1 f on the trace-free part; checked against a
-        // fine explicit integration of e' = L0' e + f.
-        let f=fixture();let p=prepared(&f);let n=4;let d=16;
-        let basis=p.eigenbasis().unwrap();
-        let op=LatticeOperator::new(&p,&[p.generator.zero.clone()]).unwrap();
-        let mut source=vec![ZERO;d];for(i,v)in[(0,0.3),(5,-0.2),(10,-0.1),(15,0.0)]{source[i]=C{re:v,im:0.};}
-        source[1]=C{re:0.05,im:0.02};source[4]=C{re:0.05,im:-0.02};
-        let times=[0.,0.5,1.,1.5,2.];
-        let rows=basis.propagate(&op,&[source.clone()],&[vec![ONE]],&[ZERO],&times).unwrap();
-        let l=p.centre_generator();let steps=200000;let dt=2./steps as f64;let mut e=vec![ZERO;d];let mut check=Vec::new();
-        for s in 0..=steps{
-            if s%(steps/4)==0{check.push((0..n).map(|i|e[i*n+i].re).collect::<Vec<f64>>());}
-            // Midpoint step.
-            let rate=|e:&[C]|->Vec<C>{(0..d).map(|r|{let mut v=source[r];for c in 0..d{mul_add(&mut v,l[r*d+c],e[c]);}v}).collect()};
-            let k1=rate(&e);let half:Vec<C>=e.iter().zip(&k1).map(|(a,b)|C{re:a.re+0.5*dt*b.re,im:a.im+0.5*dt*b.im}).collect();
-            let k2=rate(&half);for(a,b)in e.iter_mut().zip(&k2){a.re+=dt*b.re;a.im+=dt*b.im;}
-        }
-        for(t,(row,expected))in rows.iter().zip(&check).enumerate(){
-            let error=row.iter().zip(expected).map(|(a,b)|(a-b).abs()).fold(0.,f64::max);
-            assert!(error<1e-6,"time {t}: {error:e}, {row:?} vs {expected:?}");
-        }
     }
 }

@@ -167,29 +167,6 @@ impl Vectors{
         })
     }
 }
-/// Orthonormal coordinates of a span from its Gram matrix K (row-major m x
-/// m): Gram-Schmidt with dropping in the given order (ordered Cholesky
-/// K_SS = L L^T over the kept vectors S, a vector dropped when its part
-/// outside the span of those before it is below `dependent` of its norm,
-/// squared). Returns T (row-major m x r) with W = Z T orthonormal, and
-/// (largest / smallest diagonal of L)^2.
-pub fn orthonormal_coordinates(k:&[f64],m:usize,dependent:f64)->(Vec<f64>,usize,f64){
-    let mut kept:Vec<usize>=Vec::new();let mut lower:Vec<Vec<f64>>=Vec::new();
-    for g in 0..m{
-        let mut l=Vec::with_capacity(kept.len()+1);
-        for(a,&ka)in kept.iter().enumerate(){let mut s=k[ka*m+g];for b in 0..a{s-=lower[a][b]*l[b];}l.push(s/lower[a][a]);}
-        let residual=k[g*m+g]-l.iter().map(|x|x*x).sum::<f64>();
-        if residual>dependent*k[g*m+g]{l.push(residual.sqrt());lower.push(l);kept.push(g);}
-    }
-    let r=kept.len();
-    // L^-1 by forward substitution; T has the rows of L^-T on the kept vectors.
-    let mut inverse=vec![0.;r*r];
-    for c in 0..r{for i in c..r{let mut s=if i==c{1.}else{0.};for b in c..i{s-=lower[i][b]*inverse[b*r+c];}inverse[i*r+c]=s/lower[i][i];}}
-    let mut t=vec![0.;m*r];
-    for(a,&g)in kept.iter().enumerate(){for c in 0..r{t[g*r+c]=inverse[c*r+a];}}
-    let(largest,smallest)=lower.iter().enumerate().map(|(a,row)|row[a]).fold((0_f64,f64::INFINITY),|(x,y),v|(x.max(v),y.min(v)));
-    (t,r,(largest/smallest).powi(2))
-}
 /// sum_i c_i basis_i.
 pub fn combine(basis:&[&[C]],c:&[f64],length:usize)->Vec<C>{
     let mut out=vec![ZERO;length];
@@ -208,6 +185,8 @@ pub trait LinearSystem{
     /// y = P^-1 x.
     fn precondition(&mut self,x:&[C],y:&mut[C])->Result<(),String>;
     fn timing(&mut self)->&mut KrylovTiming;
+    /// Sees every inner direction z = P^-1 v_j with its image M z.
+    fn record(&mut self,_z:&[C],_image:&[C]){}
 }
 
 /// A system on a whole lattice at a shift (`Shift`: A + u v^T, the steady
@@ -223,11 +202,14 @@ pub struct System<'s,'a>{
     /// Operator applications (a complex shift's real form takes two per
     /// system application) and preconditioner applications.
     pub applications:usize,pub preconditions:usize,
+    /// When set, the inner directions z with their images A z (the trace
+    /// row or the shift taken off), up to the capacity.
+    pub recorded:Option<(Vec<(Vec<C>,Vec<C>)>,usize)>,
 }
 impl<'s,'a> System<'s,'a>{
     pub fn new(op:&'s mut LatticeOperator<'a>,pre:&'s mut dyn Preconditioner,shift:Shift)->Result<Self,String>{
         let n=op.n;let c0=op.centre*n*n;let watch=(0..n).map(|i|c0+i*n+i).collect();let vectors=Vectors::new(op,shift.copies())?;
-        Ok(Self{op,pre,shift,vectors,watch,timing:KrylovTiming::default(),applications:0,preconditions:0})
+        Ok(Self{op,pre,shift,vectors,watch,timing:KrylovTiming::default(),applications:0,preconditions:0,recorded:None})
     }
 }
 impl LinearSystem for System<'_,'_>{
@@ -251,6 +233,15 @@ impl LinearSystem for System<'_,'_>{
     fn precondition(&mut self,x:&[C],y:&mut[C])->Result<(),String>{
         let start=Instant::now();self.pre.apply(x,y)?;
         self.timing.precondition_ms+=start.elapsed().as_secs_f64()*1e3;self.preconditions+=1;Ok(())
+    }
+    fn record(&mut self,z:&[C],image:&[C]){
+        let Some((list,capacity))=self.recorded.as_mut()else{return};
+        if list.len()>=*capacity||self.shift.copies()!=1{return;}
+        let mut az=image.to_vec();let sigma=self.shift.sigma();
+        if self.shift.steady(){let n=self.watch.len();let t=self.watch.iter().fold(ZERO,|s,&k|C{re:s.re+z[k].re,im:s.im+z[k].im});
+            for &k in &self.watch{let v=scaled(t,1./n as f64);az[k].re-=v.re;az[k].im-=v.im;}}
+        else{for(a,v)in az.iter_mut().zip(z){a.re+=sigma.re*v.re;a.im+=sigma.re*v.im;}}
+        list.push((z.to_vec(),az));
     }
 }
 /// (y_1, y_2) -= sigma (x_1 + i x_2) in the real form.
@@ -317,6 +308,7 @@ pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],x0:Option<Vec<C>>,optio
         for j in 0..restart{
             system.precondition(&basis[j],&mut z)?;
             system.apply(&z,&mut w)?;
+            system.record(&z,&w);
             let start=Instant::now();
             let(done,rest)=basis.split_at_mut(j);let u=&mut rest[0];
             let refs:Vec<&[C]>=done.iter().map(|v|v.as_slice()).collect();

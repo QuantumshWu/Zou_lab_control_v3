@@ -28,6 +28,7 @@
 //! X, G, c0 and the Ritz data are recomputed at every checkpoint.
 use super::*;
 use super::ledger::RemainderLedger;
+use super::frame::SwFrame;
 
 /// Acceptance: ACCEPTANCE_FACTOR x (largest estimated error over the grid,
 /// the horizons and the steady state) <= POPULATION_TOLERANCE.
@@ -74,6 +75,9 @@ pub struct EstimateSetup<'a>{
     pub prepared:&'a LatticePrepared,
     pub lattice:&'a LatticeSets,
     pub outputs:Outputs<'a>,
+    /// The request's Schrieffer-Wolff / Floquet frame (built for the
+    /// longest output time).
+    pub frame:&'a SwFrame,
     /// The fold remainders as generator-norm bounds (rad/us) for the
     /// lattice's largest |nu_q|: the fold charges.
     pub ledger:&'a RemainderLedger,
@@ -89,33 +93,66 @@ pub struct ReducedView<'a>{
     pub basis:&'a[Vec<C>],pub images:&'a[Vec<C>],
     /// Reduced dimension r and the coordinates: x(t) ~ W X u(t) with X
     /// (k x r, row-major, k = basis.len()), u' = G u (r x r, row-major),
-    /// u(0) = c0. G is the Galerkin model in the dressed eigen-coordinates
-    /// with the trace correction (not a pure projection: the residual
-    /// A W X - W X G is what the outputs leave out).
+    /// u(0) = c0. G is the Galerkin model in the Schrieffer-Wolff / Floquet
+    /// frame's inner product with the trace correction (not a pure
+    /// projection: the residual A W X - W X G is what the outputs leave
+    /// out); X = I there.
     pub r:usize,pub x:&'a[f64],pub g:&'a[f64],pub c0:&'a[f64],
     /// Ritz decomposition G S = S diag(theta): theta (r), S (r x r,
     /// row-major, column j the eigenvector of theta_j), a = S^-1 c0 (r).
     pub theta:&'a[C],pub vectors:&'a[C],pub coefficients:&'a[C],
     /// The values and coefficients the outputs use: u(t) = S diag(e^{used_theta t}) used_coefficients.
-    /// They differ from theta, a only on growing modes (negligible growth
-    /// clipped to the axis, small amplitude projected out with its readout
-    /// charged in `growth_charge`, else reflected) and on the kernel
-    /// (theta = 0 exactly).
+    /// They differ from theta, a only on growing modes (small amplitude
+    /// projected out with its readout charged in `growth_charge`, any other
+    /// clipped to the imaginary axis: the residual of the clipped pair, read
+    /// from the images, carries it) and on the kernel (theta = 0 exactly).
     pub used_theta:&'a[C],pub used_coefficients:&'a[C],pub kernel:&'a[bool],
     /// Population size of the modes projected out (charged by the pipeline).
     pub growth_charge:f64,
     /// The reduced steady state u_inf (r; G u_inf = 0 with the centre trace
     /// of W X u_inf equal to that of x0) when the kernel is simple.
     pub steady:Option<&'a[f64]>,
+    /// The outputs the pipeline reads from this model: populations per grid
+    /// time (laboratory readout), per horizon (centre readout) and of the
+    /// steady state.
+    pub outputs:ModelOutputs<'a>,
+    /// The populations of the pipeline's own steady solve (the bordered
+    /// pole-0 column, trace one): a baseline of the steady output before any
+    /// earlier checkpoint.
+    pub steady_baseline:Option<&'a[f64]>,
+    /// The basis columns the projection brought into the frame since the
+    /// previous estimate, with their frame coordinates (None: none).
+    pub frame_columns:Option<FrameColumns<'a>>,
 }
 
-/// The pipeline's own steady solver on the lattice P u Q: the bordered
-/// system (A + u tau0^T) y = f, u = I/n on the centre, tau0 the centre
-/// trace, solved with the ring eliminated exactly (as the pole-0 column).
+/// Basis columns first..first+count in the request's frame (`frame`): the
+/// eigen-coordinates E^-1 w_j and their transfer (I - S~) E^-1 w_j on the
+/// canonical modes (`canonical`, ascending; column after column, blocks in
+/// that order), from the projection's own transform of the column.
+#[derive(Clone,Copy,Debug)]
+pub struct FrameColumns<'a>{pub first:usize,pub count:usize,pub canonical:&'a[usize],pub eigen:&'a[C],pub transferred:&'a[C]}
+
+/// The outputs of one reduced model.
+#[derive(Clone,Copy,Debug)]
+pub struct ModelOutputs<'a>{pub trajectory:&'a[Vec<f64>],pub horizons:&'a[Vec<f64>],pub steady:&'a[f64]}
+
+/// The pipeline's own lattice P u Q at the steady shift: its operator, its
+/// steady-shift preconditioner, the bordered system (A + u tau0^T) y = f,
+/// u = I/n on the centre, tau0 the centre trace (as the pole-0 column), and
+/// the inner directions of the pipeline's own steady solve. Fields are
+/// Hermitian-symmetric on the lattice's modes.
 pub trait SteadySolves{
-    /// y for a Hermitian-symmetric f on the lattice's modes, with the inner
-    /// steps it took.
+    /// y for f, with the inner steps it took.
     fn solve(&mut self,f:&[C],tolerance:f64)->Result<(Vec<C>,usize),String>;
+    /// y = A x.
+    fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>;
+    /// y = M0^-1 x: the Floquet frames with the centre Woodbury term and the
+    /// trace row at the steady shift.
+    fn precondition(&mut self,x:&[C],y:&mut[C])->Result<(),String>;
+    /// The pole-0 (steady) solve's inner directions z_j = P^-1 v_j and their
+    /// images A z_j (A unbordered) on P u Q, mirror-completed; append-only:
+    /// an entry never changes once handed out.
+    fn directions(&self)->(&[Vec<C>],&[Vec<C>]){(&[],&[])}
 }
 
 /// Work of one estimate, for the diagnostics.
