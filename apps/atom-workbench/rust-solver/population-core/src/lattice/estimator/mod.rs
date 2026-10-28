@@ -13,8 +13,9 @@
 //!   (`slow`): e_m(t) = a_m (e^{theta_m t} Y_m - e^{tA} Y_m) with
 //!   Y_m = (theta_m - A)^-1 F_m, the space's part of F_m solved in closed
 //!   form and the ring (slaved at z = theta_m and fed back) by GCRO on one
-//!   shared pool seeded with the pipeline's steady solve. The kernel mode's
-//!   Y is the steady error.
+//!   shared pool seeded with the pipeline's steady solve, the near-singular
+//!   slow Ritz directions deflated (their response in closed form). The
+//!   kernel mode's Y is the steady error.
 //! - Fast Ritz modes: second-order Schrieffer-Wolff averaging on the near
 //!   modes, the centre, its one-step neighbours and the explicit set P
 //!   (`kernels`, `blocks`, `lattice`, `propagate`), sources transferred in
@@ -101,6 +102,18 @@ pub struct UnifiedEstimate<'a>{
 pub const CONSTRUCT:super::estimate_api::Construct=construct;
 pub fn construct(setup:EstimateSetup<'_>)->Result<Box<dyn Estimator+'_>,String>{Ok(Box::new(UnifiedEstimate::new(setup)?))}
 
+/// The reduced model's left functionals of the Ritz modes `modes` on W^T y:
+/// rows of S^-1 (X^H X)^-1 X^H (X k x r, S r x r, column-major), so that
+/// l_j(W X s_i) = delta_ij.
+fn left_functionals(lapack:&Lapack,x:&[C],s:&[C],k:usize,r:usize,modes:&[usize])->Result<Vec<Vec<C>>,String>{
+    let mut xhx=vec![ZERO;r*r];
+    for a in 0..r{for b in 0..r{let mut v=ZERO;for i in 0..k{mul_add(&mut v,conj(x[i+k*a]),x[i+k*b]);}xhx[a+r*b]=v;}}
+    let xh:Vec<C>=(0..k).flat_map(|i|(0..r).map(move|a|conj(x[i+k*a]))).collect();
+    let(lu,piv)=lapack.complex_factor(&xhx,r)?;let n=lapack.complex_solve_matrix_factored(&lu,&piv,&xh,r)?;
+    let(lu,piv)=lapack.complex_factor(s,r)?;let m=lapack.complex_solve_matrix_factored(&lu,&piv,&n,r)?;
+    Ok(modes.iter().map(|&j|(0..k).map(|i|m[j+r*i]).collect()).collect())
+}
+
 /// The reduced model's slowest relaxation time: 1 / |theta| over the modes
 /// outside the kernel that carry weight.
 pub fn relaxation_time(values:&[C],coefficients:&[C],kernel:&[bool])->f64{
@@ -149,13 +162,24 @@ impl<'a> UnifiedEstimate<'a>{
             let clock=Instant::now();
             self.pool()?.add_columns(cp.basis)?;ms[1]=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
             let length=self.lattice.dimension();
-            for &m in &needed{
-                // x = W b_m, A x and the ring's feedback of x at theta.
-                let(theta,bm)=(cp.theta[m],&b[k*m..k*(m+1)]);let(mut x,mut ax)=(vec![ZERO;length],vec![ZERO;length]);
-                for(j,&c)in bm.iter().enumerate(){if !nonzero(c){continue;}
+            // x = W b_m and A x per slow mode. Away from the kernel the solves
+            // deflate every slow Ritz mode (`SlowPool::mode`); then every slow
+            // mode is needed.
+            let fields:Vec<(Vec<C>,Vec<C>)>=needed.iter().map(|&m|{let(mut x,mut ax)=(vec![ZERO;length],vec![ZERO;length]);
+                for(j,&c)in b[k*m..k*(m+1)].iter().enumerate(){if !nonzero(c){continue;}
                     for((xv,av),(&w,&aw))in x.iter_mut().zip(ax.iter_mut()).zip(cp.basis[j].iter().zip(&cp.images[j])){mul_add(xv,c,w);mul_add(av,c,aw);}}
-                let g=self.lattice.ring_feedback(&x,theta)?;
-                solutions.push(self.pool.as_mut().unwrap().mode(bm,&ax,&g,theta,cp.coefficients[m])?);
+                (x,ax)}).collect();
+            if needed.iter().any(|&m|magnitude(cp.theta[m])>=1e-12){
+                let left=left_functionals(&self.setup.prepared.lapack,cp.x,cp.s,k,r,&needed)?;
+                let(xs,axs):(Vec<Vec<C>>,Vec<Vec<C>>)=fields.iter().cloned().unzip();
+                let thetas:Vec<C>=needed.iter().map(|&m|cp.theta[m]).collect();let bs:Vec<Vec<C>>=needed.iter().map(|&m|b[k*m..k*(m+1)].to_vec()).collect();
+                self.pool.as_mut().unwrap().deflate(&needed,&thetas,&bs,&left,&xs,&axs)?;
+            }
+            for(&m,(x,ax))in needed.iter().zip(&fields){
+                // The ring's feedback of x at theta.
+                let(theta,bm)=(cp.theta[m],&b[k*m..k*(m+1)]);
+                let g=self.lattice.ring_feedback(x,theta)?;
+                solutions.push(self.pool.as_mut().unwrap().mode(bm,ax,&g,theta,cp.coefficients[m])?);
             }
             ms[2]=clock.elapsed().as_secs_f64()*1e3;
         }
