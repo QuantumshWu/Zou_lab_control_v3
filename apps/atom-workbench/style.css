@@ -254,7 +254,7 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .readout-row { display: grid; grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)) calc(2.6 * var(--control)); gap: var(--row-gap); align-items: center; font-variant-numeric: tabular-nums; }
 .readout-row.two { grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)); }
 .readout-row > span:not(.readout-name) { text-align: right; }
-.readout-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.readout-name { min-width: 0; word-break: keep-all; }
 .readout-head, .readout-steady { color: var(--muted-ink); }
 
 /* ---------- 方向与偏振 ---------------------------------------------------- */
