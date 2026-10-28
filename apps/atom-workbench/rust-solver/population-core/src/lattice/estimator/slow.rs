@@ -652,24 +652,29 @@ impl SlowPool{
             for(sol,xr)in solutions.iter().zip(&in_space){let mut v=vec![ZERO;n];gemm.multiply(n,1,k,ONE,&rows,n,xr,k,ZERO,&mut v,n)?;constants.push((sol.coefficient,sol.theta,v));}
             Ok((q,rb,constants))}).into_iter().collect::<Result<Vec<_>,_>>()?;
         // The remainders on the near modes: e^{i nu_q t} e^{theta_k t} Y_perp
-        // - its dressed-block propagation, H = R diag(a c) per remainder.
+        // - its dressed-block propagation R diag(a c) e^{lambda t}, which
+        // carries no phase of its own: every remainder's decay is one
+        // H = R diag(sum a c) for all of them.
         let lambda:Vec<C>=lattice.basis()?.lambda.iter().map(|z|C{re:z.re.min(0.),im:z.im}).collect();
-        let mut decays:Vec<(usize,C,C,Vec<C>,Vec<C>)>=Vec::with_capacity(remainders.len());
+        let mut rises:Vec<(usize,C,C,Vec<C>)>=Vec::with_capacity(remainders.len());let mut decay:Option<Vec<C>>=None;
         if !remainders.is_empty(){
             let readout_rows=lattice.basis()?.population_rows();
             let blocks:Vec<&[C]>=remainders.iter().map(|x|&x.3[..]).collect();
             let coefficients=lattice.basis()?.coefficients(&blocks)?;self.work.frame_blocks+=remainders.len();
+            let mut weights=vec![ZERO;d];
             for(i,(q,a,th,y))in remainders.iter().enumerate(){
-                let mut h=readout_rows.to_vec();for j in 0..d{let c=mul(*a,coefficients[j+d*i]);for row in 0..n{h[row+n*j]=mul(h[row+n*j],c);}}
-                decays.push((*q,*a,*th,h,(0..n).map(|row|y[row*n+row]).collect()));
+                for(j,w)in weights.iter_mut().enumerate(){mul_add(w,*a,coefficients[j+d*i]);}
+                rises.push((*q,*a,*th,(0..n).map(|row|y[row*n+row]).collect()));
             }
+            let mut h=readout_rows.to_vec();for j in 0..d{for row in 0..n{h[row+n*j]=mul(h[row+n*j],weights[j]);}}
+            decay=Some(h);
         }
         // The time GEMMs by chunks of the grid over the workers: every
         // output entry is accumulated by one task in the serial order.
-        let per_time=per_mode.len()*n*r+decays.len()*n*d;
+        let per_time=per_mode.len()*n*r+usize::from(decay.is_some())*n*d+rises.len()*n;
         let width=super::time_chunk(t_count,per_time);
         let chunks:Vec<(usize,usize)>=(0..t_count).step_by(width).map(|a|(a,(a+width).min(t_count))).collect();
-        let(ritz_weights,per_mode,decays,lambda)=(&ritz_weights,&per_mode,&decays,&lambda);
+        let(ritz_weights,per_mode,rises,decay,lambda)=(&ritz_weights,&per_mode,&rises,&decay,&lambda);
         let parts=self.execution.map(chunks,|(a0,b0)|->Result<Vec<C>,String>{
             let(gemm,ts,tc)=(lapack.complex_gemm(),&times[a0..b0],b0-a0);
             let mut total=vec![ZERO;n*tc];
@@ -683,13 +688,14 @@ impl SlowPool{
                         for(a,th,c)in constants{mul_add(&mut v,mul(*a,cexp(*th,t)),c[i]);}
                         mul_add(&mut total[i+n*ti],ph,v);}}
             }
-            if !decays.is_empty(){
+            for(q,a,th,y)in rises{
+                for(ti,&t)in ts.iter().enumerate(){let ph=mul(phase(*q,t),mul(*a,cexp(*th,t)));
+                    for row in 0..n{mul_add(&mut total[row+n*ti],ph,y[row]);}}
+            }
+            if let Some(h)=decay{
                 let block:Vec<C>=ts.iter().flat_map(|&t|lambda.iter().map(move|&z|cexp(z,t))).collect();
-                for(q,a,th,h,y)in decays{
-                    let mut dec=vec![ZERO;n*tc];gemm.multiply(n,tc,d,ONE,h,n,&block,d,ZERO,&mut dec,n)?;
-                    for(ti,&t)in ts.iter().enumerate(){let ph=mul(phase(*q,t),mul(*a,cexp(*th,t)));
-                        for row in 0..n{let v=mul(ph,y[row]);total[row+n*ti].re+=v.re-dec[row+n*ti].re;total[row+n*ti].im+=v.im-dec[row+n*ti].im;}}
-                }
+                let mut dec=vec![ZERO;n*tc];gemm.multiply(n,tc,d,ONE,h,n,&block,d,ZERO,&mut dec,n)?;
+                for(t,v)in total.iter_mut().zip(&dec){t.re-=v.re;t.im-=v.im;}
             }
             Ok(total)});
         let mut total=Vec::with_capacity(n*t_count);for part in parts{total.extend(part?);}
