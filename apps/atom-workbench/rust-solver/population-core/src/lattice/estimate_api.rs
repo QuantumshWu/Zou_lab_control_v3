@@ -165,6 +165,9 @@ pub struct EstimateWork{
     pub block_operations:usize,pub block_solves:usize,
     /// Inner steps of steady solves.
     pub inner_steps:usize,
+    /// The Krylov part's time (ms): the fast part's columns, the pool's
+    /// columns, the slow solves, the fast propagation, the slow propagation.
+    pub krylov_ms:[f64;5],
     /// The fold charge's time (ms): the K^(1) rests and the memory, the
     /// third order, the slow responses, the models and the fast part.
     pub fold_ms:[f64;4],

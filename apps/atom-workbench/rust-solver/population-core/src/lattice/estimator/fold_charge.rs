@@ -44,7 +44,9 @@
 //! are higher products of the same far couplings and far resolvents as the
 //! fold K itself, smaller by the ledger's ratio: they are charged
 //! SAFETY S_K U, S_K the steady response to the stored fold K (one kernel
-//! solve) per unit of its size. Not a strict bound (measured margin 12-29);
+//! solve) per unit of its size: a property of the lattice's steady state,
+//! computed once per run, at the first checkpoint charged (its steady state
+//! within the acceptance tolerance). Not a strict bound (measured margin 12-29);
 //! the third order changes the near couplings themselves and must be built
 //! (S_K underestimates it 30 times).
 use super::super::*;
@@ -105,6 +107,8 @@ pub struct FoldCharge<'a>{
     edges:Vec<(usize,usize,usize)>,
     /// x0 on the lattice and |x0|.
     x0:Vec<C>,x0_norm:f64,
+    /// S_K, once computed.
+    sensitivity:Option<f64>,
     pub work:FoldWork,
 }
 
@@ -181,7 +185,7 @@ impl<'a> FoldCharge<'a>{
             let Ok(source)=charge_minus(mode,&target.charge)else{continue};if let Some(&p)=op.index.get(&source){edges.push((t,p,q));}}}
         let(n,d)=(op.n,op.n*op.n);let mut x0=vec![ZERO;op.dimension()];x0[op.centre*d..(op.centre+1)*d].copy_from_slice(&setup.initial[..n*n]);
         let x0_norm=x0.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();
-        Ok(Self{prepared,op,edges,x0,x0_norm,work:FoldWork::default()})
+        Ok(Self{prepared,op,edges,x0,x0_norm,sensitivity:None,work:FoldWork::default()})
     }
     /// The K^(1) rests left out and the memory on Hermitian-symmetric fields
     /// x with their images A x. The K^(1) rest on every fold edge acts once
@@ -366,17 +370,17 @@ impl<'a> FoldCharge<'a>{
             self.work.milliseconds[3]+=clock.elapsed().as_secs_f64()*1e3;
         }
         // The unbuilt remainders: S_K from the steady response to the
-        // stored fold on x_inf = W b_0 a_0 (one kernel solve).
-        if let Some(m)=kernel.filter(|_|ledger.fold>0.&&ledger.unbuilt()>0.){
+        // stored fold on x_inf = W b_0 a_0 (one kernel solve, once per run).
+        if self.sensitivity.is_none()&&ledger.fold>0.&&ledger.unbuilt()>0.{if let Some(m)=kernel{
             let clock=Instant::now();
             let c:Vec<f64>=(0..k).map(|i|mul(b[i+k*m],a[m]).re).collect();
             let x=combine(&w,std::slice::from_ref(&c))?.remove(0);
             let f=self.fold(&[&x])?.remove(0);
             let solution=pool.response(&f,ZERO,ONE,RESPONSE_RESIDUAL,steady)?;self.work.solves+=1;
-            let sensitivity=metric(&pool.steady_populations(basis,&solution),&vec![0.;n],outputs.groups)/ledger.fold;
-            effect.unbuilt=SAFETY*sensitivity*ledger.unbuilt();
+            self.sensitivity=Some(metric(&pool.steady_populations(basis,&solution),&vec![0.;n],outputs.groups)/ledger.fold);
             self.work.milliseconds[2]+=clock.elapsed().as_secs_f64()*1e3;
-        }
+        }}
+        effect.unbuilt=SAFETY*self.sensitivity.unwrap_or(0.)*ledger.unbuilt();
         Ok(effect)
     }
 }

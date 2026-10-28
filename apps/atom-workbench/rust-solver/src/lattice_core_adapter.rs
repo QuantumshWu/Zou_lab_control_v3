@@ -445,7 +445,7 @@ mod tests{
             let line=json!({"solves":c.solves,"columns":c.columns,"dimension":c.dimension,"accepted":c.accepted,"estTraj":est_traj,"estH":c.estimate.horizons,"estSteady":c.estimate.steady,
                 "errTraj":error_traj.as_ref().map(|e|e.0),"errTrajAt":error_traj.as_ref().map(|e|e.1),"errH":error_h,"errSteady":error_s,"estOverErrQuantiles":ratio,
                 "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest.map(|s|s.rate),"slowestResidual":c.slowest.map(|s|s.residual),"ms":c.milliseconds,
-                "foldBuilt":c.estimate.fold.built,"foldUnbuilt":c.estimate.fold.unbuilt,"foldMs":c.estimate.work.fold_ms,"estimateMs":c.estimate.work.milliseconds,
+                "foldBuilt":c.estimate.fold.built,"foldUnbuilt":c.estimate.fold.unbuilt,"foldMs":c.estimate.work.fold_ms,"krylovMs":c.estimate.work.krylov_ms,"estimateMs":c.estimate.work.milliseconds,
                 "operatorWork":c.inner.operator_work,"innerSteps":c.inner.steps,"innerMs":c.inner.milliseconds,"applyMs":c.inner.timing.apply_ms,"preconditionMs":c.inner.timing.precondition_ms,"orthogonalizeMs":c.inner.timing.orthogonalize_ms,"batchMs":c.inner.batch_ms,"blockOperations":c.inner.block_operations(),
                 "timingMs":{"explicitSet":c.timing.explicit_set_ms,"setup":c.timing.setup_ms,"frame":c.timing.frame_ms.iter().sum::<f64>(),"frameWait":c.timing.frame_wait_ms,"projection":c.timing.projection_ms,"model":c.timing.model_ms,"ordering":c.timing.ordering_ms,"estimate":c.timing.estimate_ms},
                 "elapsedMs":started.elapsed().as_secs_f64()*1e3,"trajectoryNorm":c.trajectory.iter().map(|p|ledger::metric(p,&zero,&groups)).fold(0_f64,f64::max)});

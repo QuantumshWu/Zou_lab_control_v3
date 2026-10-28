@@ -262,7 +262,7 @@ impl UnifiedEstimate<'_>{
             block_operations:w.block_operations-before.0.block_operations+w.frame_blocks-before.0.frame_blocks+p.frame_blocks-before.1.frame_blocks
                 +(p.applications-before.1.applications+p.preconditions-before.1.preconditions)*blocks+qr
                 +(f.remainders-before.2.remainders+f.folds-before.2.folds)*blocks,
-            block_solves:w.block_solves-before.0.block_solves,inner_steps:0,fold_ms,milliseconds:clock.elapsed().as_secs_f64()*1e3}
+            block_solves:w.block_solves-before.0.block_solves,inner_steps:0,krylov_ms:[0.;5],fold_ms,milliseconds:clock.elapsed().as_secs_f64()*1e3}
     }
 }
 
@@ -314,7 +314,7 @@ impl Estimator for UnifiedEstimate<'_>{
         let trajectory=errors.trajectory.iter().enumerate().map(|(i,p)|size(p)+built(fold.as_ref().map(|f|&f.trajectory[i]))+charges.unbuilt).collect();
         let horizons=errors.horizons.iter().enumerate().map(|(i,p)|size(p)+built(fold.as_ref().map(|f|&f.horizons[i]))+charges.unbuilt).collect();
         let steady_error=errors.steady.as_ref().map(|p|size(p)+built(fold.as_ref().and_then(|f|f.steady.as_ref()))+charges.unbuilt);
-        let estimate=ErrorEstimate{trajectory,horizons,steady:steady_error,fold:charges,work:self.work_since(&before,clock)};
+        let estimate=ErrorEstimate{trajectory,horizons,steady:steady_error,fold:charges,work:EstimateWork{krylov_ms:errors.milliseconds,..self.work_since(&before,clock)}};
         self.gate.last_estimate=Some(estimate.largest());
         Ok(estimate)
     }
