@@ -34,6 +34,9 @@ use super::estimator::blocks::BlockSystem;
 use super::estimator::kernels::{KernelRule,SwKernels};
 use crate::parallel::Execution;
 
+/// Columns of N per task.
+const NORMAL_PANEL:usize=64;
+
 pub struct SwFrame{
     pub kernels:SwKernels,
     /// The second-order block over every step.
@@ -53,8 +56,12 @@ impl SwFrame{
         let kernels=SwKernels::new(prepared,basis,rule)?;
         let kernel_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
         let class=BlockSystem::new(&prepared.lapack,basis,&kernels,(0..kernels.steps.len()).collect(),n)?;
+        // N = V^-H V^-1 by column panels over the workers.
         let inv=&class.inverse;let mut adjoint=vec![ZERO;d*d];for j in 0..d{for i in 0..d{adjoint[j+d*i]=conj(inv[i+d*j]);}}
-        let mut normal=vec![ZERO;d*d];prepared.lapack.complex_gemm().multiply(d,d,d,ONE,&adjoint,d,inv,d,ZERO,&mut normal,d)?;
+        let panels:Vec<usize>=(0..d).step_by(NORMAL_PANEL).collect();let(adjoint,lapack)=(&adjoint,&prepared.lapack);
+        let parts=Execution::new()?.map(panels.clone(),|start|->Result<Vec<C>,String>{let width=NORMAL_PANEL.min(d-start);let mut out=vec![ZERO;d*width];
+            lapack.complex_gemm().multiply(d,width,d,ONE,adjoint,d,&inv[start*d..],d,ZERO,&mut out,d)?;Ok(out)});
+        let mut normal=Vec::with_capacity(d*d);for part in parts{normal.extend(part?);}
         Ok(Self{kernels,class,normal,milliseconds:[kernel_ms,clock.elapsed().as_secs_f64()*1e3]})
     }
 }

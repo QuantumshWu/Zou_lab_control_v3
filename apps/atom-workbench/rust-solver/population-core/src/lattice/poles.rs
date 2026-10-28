@@ -70,16 +70,15 @@ pub struct Lattice<'a>{
     preconditioning:Preconditioning<'a>,
     batches:Vec<(Pole,FloquetBatch<'a>)>,
     work:InnerWork,
-    /// The inner directions (z, A z) of the first steady solve (the
-    /// pipeline's pole-0 column) until the estimate takes them; None before
-    /// that solve.
-    recorded:Option<Vec<(Vec<C>,Vec<C>)>>,
+    /// The inner directions z and their images A z of the first steady solve
+    /// (the pipeline's pole-0 column; append-only), and whether it ran.
+    directions:Vec<Vec<C>>,images:Vec<Vec<C>>,recorded:bool,
 }
 impl<'a> Lattice<'a>{
     pub fn new(prepared:&'a LatticePrepared,sets:LatticeSets)->Result<Self,String>{
         if sets.centre()!=Some(0){return Err("The explicit set must start with the zero charge".into());}
         let modes=sets.modes();let op=LatticeOperator::new(prepared,&modes)?;let operator_work=op.work_split();
-        Ok(Self{sets,modes,op,preconditioning:Preconditioning::new(prepared)?,batches:Vec::new(),work:InnerWork{operator_work,..InnerWork::default()},recorded:None})
+        Ok(Self{sets,modes,op,preconditioning:Preconditioning::new(prepared)?,batches:Vec::new(),work:InnerWork{operator_work,..InnerWork::default()},directions:Vec::new(),images:Vec::new(),recorded:false})
     }
     /// The preconditioner batch of a pole (built at its first use).
     fn batch(&mut self,pole:Pole)->Result<usize,String>{
@@ -98,13 +97,13 @@ impl<'a> Lattice<'a>{
     pub fn solve(&mut self,pole:Pole,f:&[Vec<C>],tolerance:f64)->Result<(Vec<Vec<C>>,usize,f64),String>{
         let clock=Instant::now();let copies=pole.copies();
         let i=self.batch(pole)?;
-        let Self{op,batches,work,recorded,..}=self;let batch=&mut batches[i].1;
+        let Self{op,batches,work,recorded,directions,images,..}=self;let batch=&mut batches[i].1;
         let count=op.modes.len();let size=op.dimension();let b:Vec<C>=f.concat();
         let mut system=System::new(op,batch,pole.shift())?;
-        let record=pole==Pole::Zero&&recorded.is_none();
+        let record=pole==Pole::Zero&&!*recorded;
         if record{system.recorded=Some((Vec::new(),RECORDED_BYTES/(2*size*std::mem::size_of::<C>()).max(1)));}
         let solve=krylov::gmres(&mut system,&b,None,&KrylovOptions::new(tolerance))?;
-        if record{*recorded=system.recorded.take().map(|r|r.0);}
+        if record{*recorded=true;if let Some((list,_))=system.recorded.take(){for(z,az)in list{directions.push(z);images.push(az);}}}
         let(applications,preconditions,timing)=(system.applications,system.preconditions,system.timing.clone());
         let operator_work=system.op.work;drop(system);
         batch.record(solve.steps,solve.residual,tolerance,operator_work);
@@ -117,9 +116,7 @@ impl SteadySolves for Lattice<'_>{
     fn solve(&mut self,f:&[C],tolerance:f64)->Result<(Vec<C>,usize),String>{
         let(mut w,steps,_)=Lattice::solve(self,Pole::Zero,&[f.to_vec()],tolerance)?;Ok((w.remove(0),steps))
     }
-    fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{self.op.apply(x,y)}
-    fn precondition(&mut self,x:&[C],y:&mut[C])->Result<(),String>{let i=self.batch(Pole::Zero)?;self.batches[i].1.apply(x,y)}
-    fn directions(&mut self)->Vec<(Vec<C>,Vec<C>)>{self.recorded.as_mut().map(std::mem::take).unwrap_or_default()}
+    fn directions(&self)->(&[Vec<C>],&[Vec<C>]){(&self.directions,&self.images)}
 }
 
 #[cfg(test)]

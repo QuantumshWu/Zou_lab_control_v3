@@ -114,23 +114,18 @@ pub struct ReducedView<'a>{
     pub steady:Option<&'a[f64]>,
 }
 
-/// The pipeline's own lattice P u Q at the steady shift: its operator, its
-/// preconditioner at the steady shift (the Floquet frames with the centre
-/// Woodbury term and the trace row), the bordered system
-/// (A + u tau0^T) y = f (u = I/n on the centre, tau0 the centre trace, as
-/// the pole-0 column) and the inner directions of the pipeline's own
-/// steady solve. Fields are Hermitian-symmetric on the lattice's modes.
+/// The pipeline's own steady solver on the lattice P u Q: the bordered
+/// system (A + u tau0^T) y = f, u = I/n on the centre, tau0 the centre
+/// trace (as the pole-0 column), and the inner directions of the
+/// pipeline's own steady solve.
 pub trait SteadySolves{
-    /// y for f, with the inner steps it took.
+    /// y for a Hermitian-symmetric f on the lattice's modes, with the inner
+    /// steps it took.
     fn solve(&mut self,f:&[C],tolerance:f64)->Result<(Vec<C>,usize),String>;
-    /// y = A x.
-    fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>;
-    /// y = M0^-1 x, the steady-shift preconditioner.
-    fn precondition(&mut self,x:&[C],y:&mut[C])->Result<(),String>;
-    /// The preconditioned inner directions z of the pipeline's steady solve
-    /// with their images A z, handed over once (empty afterwards, and before
-    /// that solve).
-    fn directions(&mut self)->Vec<(Vec<C>,Vec<C>)>;
+    /// The pole-0 (steady) solve's inner directions z_j = P^-1 v_j and their
+    /// images A z_j (A unbordered) on P u Q, mirror-completed; append-only:
+    /// an entry never changes once handed out.
+    fn directions(&self)->(&[Vec<C>],&[Vec<C>]){(&[],&[])}
 }
 
 /// Work of one estimate, for the diagnostics.

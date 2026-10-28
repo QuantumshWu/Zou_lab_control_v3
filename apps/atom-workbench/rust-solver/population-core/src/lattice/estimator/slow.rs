@@ -3,40 +3,56 @@
 //! For a Ritz mode k with |theta_k| < SLOW (the kernel included) the error
 //! its source F_k drives is, exactly,
 //!   e_k(t) = a_k (e^{theta_k t} Y_k - e^{tA} Y_k),  Y_k = (theta_k - A)^-1 F_k,
-//! with F_k = (A W - theta_k W) b_k plus the omitted ring slaved at
+//! with F_k = (A W - theta_k W) b_k plus g_k, the omitted ring slaved at
 //! z = theta_k and fed back (`ErrorLattice::ring_feedback`). The kernel
 //! mode's Y (from the bordered system (A + u tau0^T) y = F, Y = -y) is the
 //! steady error itself.
 //!
-//! One shared pool answers every shift: the basis columns W with A W, the
-//! trace-row vector u, and every augmentation direction z with A z, their
-//! span kept orthonormal (Q, row panels, extended block by block) with every
-//! direction's and image's coordinates. For any shift the images of the pool
-//! are (theta U - A U) in those coordinates, so GCRO for (theta_k, F_k)
-//! costs the projection of F_k, a small least-squares problem, and, while
-//! the residual or the readout has not settled, preconditioned augmentation
-//! steps that join the pool for every later mode and checkpoint. The
-//! operator and the preconditioner are the pipeline's own (`SteadySolves`:
-//! its lattice, the Floquet frames at the steady shift), and the pool starts
-//! with the inner directions of the pipeline's steady solve and their images
-//! (computed by that solve, free here).
+//! The space's part of the source is solved exactly away from the kernel:
+//! (theta - A)^-1 of (A - theta) W b is -W b (`mode`), and only the ring's
+//! feedback g_k needs a solve. At the kernel the whole (small) source is
+//! solved. (R2 kept W in the pool, where the
+//! least-squares problem found -W b itself; a pool of seeds and
+//! augmentations alone failed there on two of sixteen solves of the whole
+//! source. For g_k alone W adds little: as directions it saved 4 of 44
+//! steps at the first estimate of three and four lasers at 10 ms, for
+//! 250-940 GEMV of products with Q. The basis columns now enter only
+//! through W^T U.)
+//!
+//! One shared pool answers every shift: the trace-row vector u, the seed
+//! directions (the inner directions of the pipeline's own steady solve,
+//! whose images its Arnoldi relation gives for free) and every augmentation
+//! direction z with A z, their span kept orthonormal (Q, row panels of the
+//! fields' canonical half, extended block by block: no Gram matrix of the
+//! pool is ever rebuilt) with every direction's and image's coordinates.
+//! For any shift the images of the pool are (theta U - A U) in those
+//! coordinates, so GCRO for (theta_k, g_k) costs the projection of g_k, a
+//! small least-squares problem, and, while the residual is above
+//! RESIDUAL |g_k|, preconditioned augmentation steps that join the pool for
+//! every later mode and checkpoint. The preconditioner is the solver's own
+//! first-order-kernel one: the shared Floquet frames at the steady shift;
+//! the stop is the residual alone (R2 section 12; its accuracy at RESIDUAL).
 //!
 //! e^{tA} Y_k: Y's part in the space, W X r0 (r0 its least-squares
 //! coordinates), is propagated by the reduced model, W X S e^{theta t} S^-1 r0;
 //! the rest decays at the fast rates and is propagated by the dressed blocks
 //! of L0' on the near modes only (its readout elsewhere is micromotion).
 use super::super::*;
-use super::super::estimate_api::SteadySolves;
+use super::super::operator::LatticeOperator;
+use super::super::preconditioner::{FloquetBatch,Preconditioner,Preconditioning,Shift};
+use super::super::floquet::Reach;
 use super::lattice::{ErrorLattice,split};
 use super::propagate::Readout;
 use crate::parallel::Execution;
 
 /// Ritz modes with |theta| below this (1/us) are answered exactly.
 pub const SLOW:f64=0.05;
-/// GCRO stops when the residual is below RESIDUAL |F| and the readout has
-/// settled (two consecutive changes below STABLE of its size).
+/// GCRO stops when the residual is below RESIDUAL |F| (R2 section 12).
+/// Measured against solves to 1e-8 on three and four lasers at 10 ms: the
+/// estimates within 10% (1e-5: 10%, 1e-6: 0.5%, 1e-3: a factor two). A slow
+/// Ritz value lies close to an eigenvalue of A, so (theta - A) is nearly
+/// singular along it and the residual does not bound the readout.
 const RESIDUAL:f64=1e-4;
-const STABLE:f64=0.1;
 const MAXIMUM_STEPS:usize=60;
 /// A Ritz value below this is the kernel (theta = 0 exactly in the outputs).
 const KERNEL:f64=1e-12;
@@ -50,20 +66,47 @@ const CHOLESKY_DEPENDENT:f64=1e-7;
 /// size outside the earlier ones is left out.
 const SMALL_DEPENDENT:f64=1e-12;
 
-fn reals(x:&[C])->Vec<f64>{let mut out=Vec::with_capacity(2*x.len());for v in x{out.push(v.re);out.push(v.im);}out}
-fn complex(x:&[f64])->Vec<C>{x.chunks_exact(2).map(|v|C{re:v[0],im:v[1]}).collect()}
+/// Hermitian-symmetric fields as real vectors: the canonical modes only
+/// (the others are their mirrors' adjoints), real and imaginary parts, a
+/// pair's block scaled by sqrt 2 so that the dot product is the real inner
+/// product over every mode. Half the length of the whole field.
+#[derive(Clone)]
+struct Packing{d:usize,n:usize,canonical:Vec<usize>,mirror:Vec<usize>,modes:usize}
+impl Packing{
+    fn new(lattice:&ErrorLattice<'_>)->Self{
+        let canonical:Vec<usize>=(0..lattice.modes.len()).filter(|&q|lattice.modes[q]>=lattice.modes[lattice.mirror[q]]).collect();
+        Self{d:lattice.d,n:lattice.n,canonical,mirror:lattice.mirror.clone(),modes:lattice.modes.len()}
+    }
+    fn length(&self)->usize{2*self.d*self.canonical.len()}
+    fn pack(&self,x:&[C])->Vec<f64>{
+        let d=self.d;let mut out=Vec::with_capacity(self.length());
+        for &q in &self.canonical{let w=if self.mirror[q]==q{1.}else{std::f64::consts::SQRT_2};for v in &x[q*d..(q+1)*d]{out.push(w*v.re);out.push(w*v.im);}}
+        out
+    }
+    fn unpack(&self,v:&[f64])->Vec<C>{
+        let(n,d)=(self.n,self.d);let mut x=vec![ZERO;self.modes*d];
+        for(i,&q)in self.canonical.iter().enumerate(){let w=if self.mirror[q]==q{1.}else{std::f64::consts::FRAC_1_SQRT_2};
+            for k in 0..d{x[q*d+k]=C{re:w*v[2*(i*d+k)],im:w*v[2*(i*d+k)+1]};}
+            let m=self.mirror[q];if m!=q{for a in 0..n{for b in 0..n{x[m*d+a*n+b]=conj(x[q*d+b*n+a]);}}}}
+        x
+    }
+}
 fn dot(a:&[f64],b:&[f64])->f64{a.iter().zip(b).map(|(x,y)|x*y).sum()}
 fn cexp(z:C,t:f64)->C{let m=(z.re*t).exp();if m==0.{return ZERO;}C{re:m*(z.im*t).cos(),im:m*(z.im*t).sin()}}
 
-/// Orthonormal real columns stored by row panels (each column-major).
-struct Panels{length:usize,starts:Vec<usize>,q:Vec<Vec<f64>>,count:usize}
+/// Orthonormal real columns stored by row panels (each column-major), with
+/// the real multiply-adds of every product with them.
+struct Panels{length:usize,starts:Vec<usize>,q:Vec<Vec<f64>>,count:usize,macs:std::sync::atomic::AtomicU64}
 impl Panels{
-    fn new(length:usize)->Self{let starts:Vec<usize>=(0..length).step_by(PANEL_ROWS).collect();let panels=starts.len();Self{length,starts,q:vec![Vec::new();panels],count:0}}
+    fn new(length:usize)->Self{let starts:Vec<usize>=(0..length).step_by(PANEL_ROWS).collect();let panels=starts.len();Self{length,starts,q:vec![Vec::new();panels],count:0,macs:std::sync::atomic::AtomicU64::new(0)}}
+    fn count_macs(&self,v:f64){self.macs.fetch_add(v as u64,std::sync::atomic::Ordering::Relaxed);}
+    fn macs(&self)->f64{self.macs.load(std::sync::atomic::Ordering::Relaxed)as f64}
     fn rows(&self,p:usize)->(usize,usize){(self.starts[p],self.starts.get(p+1).copied().unwrap_or(self.length))}
     fn push(&mut self,column:&[f64]){for p in 0..self.starts.len(){let(s,e)=self.rows(p);self.q[p].extend_from_slice(&column[s..e]);}self.count+=1;}
     /// Q^T g (count x m) for g (length x m), column-major.
     fn dots(&self,lapack:&Lapack,execution:&Execution,g:&[f64],m:usize)->Result<Vec<f64>,String>{
         let count=self.count;if count==0||m==0{return Ok(vec![0.;count*m]);}
+        self.count_macs((count*m*self.length)as f64);
         let parts=execution.map((0..self.starts.len()).collect(),|p|->Result<Vec<f64>,String>{
             let(s,e)=self.rows(p);let mut out=vec![0.;count*m];
             lapack.gemm(true,false,count,m,e-s,1.,&self.q[p],e-s,&g[s..],self.length,0.,&mut out,count)?;Ok(out)});
@@ -73,6 +116,7 @@ impl Panels{
     /// g += alpha Q h.
     fn combine(&self,lapack:&Lapack,execution:&Execution,g:&mut[f64],h:&[f64],m:usize,alpha:f64)->Result<(),String>{
         let count=self.count;if count==0||m==0{return Ok(());}
+        self.count_macs((count*m*self.length)as f64);
         let parts=execution.map((0..self.starts.len()).collect(),|p|->Result<Vec<f64>,String>{
             let(s,e)=self.rows(p);let mut out=vec![0.;(e-s)*m];
             lapack.gemm(false,false,e-s,m,count,1.,&self.q[p],e-s,h,count,0.,&mut out,e-s)?;Ok(out)});
@@ -88,8 +132,12 @@ impl Panels{
         let sizes:Vec<f64>=(0..m).map(|c|{let x=&g[c*length..(c+1)*length];dot(x,x).sqrt()}).collect();
         let mut h=vec![0.;base*m];
         for _ in 0..2{let a=self.dots(lapack,execution,&g,m)?;self.combine(lapack,execution,&mut g,&a,m,-1.)?;for(x,y)in h.iter_mut().zip(a){*x+=y;}}
+        // Every column at the unit scale of its size: the block's Gram matrix
+        // then resolves each column's own part (seed directions and images
+        // span six or more orders of magnitude).
+        for(c,&size)in sizes.iter().enumerate(){let scale=if size>0.{1./size}else{0.};for v in &mut g[c*length..(c+1)*length]{*v*=scale;}}
         let gram=block_cross(lapack,execution,&g,m,&g,m,length)?;
-        let(order,r1)=cholesky(&gram,m,&sizes,true);let mut k=order.len();
+        let(order,r1)=cholesky(&gram,m,&vec![1.;m],true);let mut k=order.len();
         let mut fresh:Vec<Vec<f64>>=Vec::new();let mut t=Vec::new();
         if k>0{
             let mut selected=vec![0.;length*k];for(i,&c)in order.iter().enumerate(){selected[i*length..(i+1)*length].copy_from_slice(&g[c*length..(c+1)*length]);}
@@ -106,9 +154,12 @@ impl Panels{
             if k>0{
                 let q=block_times(lapack,execution,&q1,length,k,&upper_inverse(&r2,k))?;drop(q1);
                 t=block_cross(lapack,execution,&q,k,&g,m,length)?;
+                for(c,&size)in sizes.iter().enumerate(){for v in &mut t[c*k..(c+1)*k]{*v*=size;}}
                 for i in 0..k{let column=q[i*length..(i+1)*length].to_vec();self.push(&column);fresh.push(column);}
             }
         }
+        // The Gram matrices, the two triangular products and the coordinates.
+        self.count_macs(((m*m+2*k*k+k*k+k*m)*length)as f64);
         let coordinates=(0..m).map(|c|{let mut v:Vec<f64>=(0..base).map(|i|h[i+base*c]).collect();v.extend((0..k).map(|i|t[i+k*c]));v}).collect();
         Ok((coordinates,fresh))
     }
@@ -182,76 +233,106 @@ fn least_squares(m:&[C],rows:usize,cols:usize,b:&[C])->(Vec<C>,Vec<C>){
     (x,residual)
 }
 
-#[derive(Clone,Copy,Debug)]
-enum Direction{Basis(usize),Augmented(usize)}
-
 #[derive(Clone,Debug,Default)]
 pub struct PoolWork{
-    /// Operator and preconditioner applications on P u Q, the pipeline's
-    /// bordered solves and their inner steps, GCRO steps and solves (one
-    /// per slow mode and checkpoint), the directions taken over from the
-    /// pipeline's steady solve; ring block solves inside the ring feedback
-    /// are counted by the lattice.
-    pub applications:usize,pub preconditions:usize,pub pipeline_solves:usize,pub inner_steps:usize,pub steps:usize,pub solves:usize,
-    pub inherited:usize,
+    /// Operator and preconditioner applications on P u Q, GCRO steps and
+    /// solves (one per slow mode and checkpoint); ring block solves inside
+    /// the ring feedback are counted by the lattice.
+    pub applications:usize,pub preconditions:usize,pub steps:usize,pub solves:usize,
+    /// Seed directions taken from the pipeline.
+    pub seeds:usize,
     /// Near-mode coordinate changes of the slow modes' remainders.
     pub frame_blocks:usize,
-    /// Time (ms): extending Q, GCRO steps, the rest of the solves.
+    /// Real multiply-adds of the products with Q and with the basis
+    /// (extensions, projections, W^T Q).
+    pub qr_macs:f64,
+    /// Time (ms): extending Q and the basis products, GCRO steps, the rest
+    /// of the solves.
     pub extend_ms:f64,pub step_ms:f64,pub solve_ms:f64,
 }
 
-/// One slow mode's solution: Y = sign * U x over the pool's directions.
-pub struct SlowSolution{pub theta:C,pub coefficient:C,x:Vec<C>,sign:f64}
+/// One slow mode's Y = W c + U x: the basis part c (the Ritz vector's own
+/// -b, exact; none at the kernel) and the pool part x over the pool's
+/// directions.
+pub struct SlowSolution{pub theta:C,pub coefficient:C,basis:Vec<C>,x:Vec<C>}
 
-pub struct SlowPool{
-    lapack:Arc<Lapack>,execution:Execution,
-    n:usize,d:usize,watch:Vec<usize>,mirror:Vec<usize>,near:Vec<usize>,
+pub struct SlowPool<'p>{
+    op:LatticeOperator<'p>,batch:FloquetBatch<'p>,lapack:Arc<Lapack>,execution:Execution,
+    n:usize,d:usize,watch:Vec<usize>,mirror:Vec<usize>,near:Vec<usize>,packing:Packing,
     q:Panels,
-    /// Pool directions and the coordinates (on Q at insertion) of each and
-    /// of its image, its centre trace, the trace-row vector's coordinates.
-    directions:Vec<Direction>,cu:Vec<Vec<f64>>,cau:Vec<Vec<f64>>,trace:Vec<f64>,u:Vec<f64>,
-    /// Near-mode parts of the augmentation directions (near.len() blocks each).
-    augmented:Vec<Vec<C>>,
-    /// Whether the first kernel direction comes from the pipeline's solve.
-    pub seed_with_pipeline:bool,
-    /// Whether the pipeline's steady-solve directions were taken.
-    inherited:bool,
-    columns:usize,
+    /// Per direction: its coordinates and its image's (on Q at insertion),
+    /// its centre trace and its near-mode blocks (near.len() each); the
+    /// trace-row vector's coordinates.
+    cu:Vec<Vec<f64>>,cau:Vec<Vec<f64>>,trace:Vec<f64>,near_parts:Vec<Vec<C>>,u:Vec<f64>,
+    /// The basis columns' canonical halves (column-major, length x k) and
+    /// per column of Q its products with them, W^T q (k each).
+    packed_basis:Vec<f64>,wq:Vec<Vec<f64>>,columns:usize,
     pub work:PoolWork,
 }
 
-impl SlowPool{
-    pub fn new(prepared:&LatticePrepared,lattice:&ErrorLattice<'_>)->Result<Self,String>{
+impl<'p> SlowPool<'p>{
+    pub fn new(prepared:&'p LatticePrepared,lattice:&ErrorLattice<'_>)->Result<Self,String>{
+        let op=LatticeOperator::new(prepared,&lattice.modes)?;
+        let batch=Preconditioning::new(prepared)?.batch(&op,Shift::Steady,Some(Reach::All))?;
         let(n,d)=(lattice.n,lattice.d);let c0=lattice.centre*d;let watch:Vec<usize>=(0..n).map(|i|c0+i*n+i).collect();
-        let length=2*lattice.dimension();
-        let mut pool=Self{lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),
-            q:Panels::new(length),directions:Vec::new(),cu:Vec::new(),cau:Vec::new(),trace:Vec::new(),u:Vec::new(),augmented:Vec::new(),
-            seed_with_pipeline:true,inherited:false,columns:0,work:PoolWork::default()};
-        let mut u=vec![ZERO;length/2];for &k in &pool.watch{u[k]=C{re:1./n as f64,im:0.};}
-        let(mut coordinates,_)=pool.q.extend(&pool.lapack,&pool.execution,reals(&u),1)?;pool.u=coordinates.remove(0);
+        let packing=Packing::new(lattice);let length=packing.length();
+        let mut pool=Self{op,batch,lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),packing,
+            q:Panels::new(length),cu:Vec::new(),cau:Vec::new(),trace:Vec::new(),near_parts:Vec::new(),u:Vec::new(),
+            packed_basis:Vec::new(),wq:Vec::new(),columns:0,work:PoolWork::default()};
+        let packed=pool.packing.pack(&pool.trace_row());let(mut coordinates,_)=pool.extend(packed,1)?;pool.u=coordinates.remove(0);
         Ok(pool)
     }
+    /// u = I/n on the centre.
+    fn trace_row(&self)->Vec<C>{let mut u=vec![ZERO;self.op.dimension()];for &k in &self.watch{u[k]=C{re:1./self.n as f64,im:0.};}u}
     fn centre_trace(&self,x:&[C])->f64{self.watch.iter().map(|&k|x[k].re).sum()}
-    fn apply(&mut self,steady:&mut dyn SteadySolves,x:&[C])->Result<Vec<C>,String>{let mut y=vec![ZERO;x.len()];steady.apply(x,&mut y)?;self.work.applications+=1;Ok(y)}
+    fn apply(&mut self,x:&[C])->Result<Vec<C>,String>{let mut y=vec![ZERO;x.len()];self.op.apply(x,&mut y)?;self.work.applications+=1;Ok(y)}
+    /// Extends Q by the span of m packed columns and every new column's
+    /// products with the basis. Returns the columns' coordinates and Q's new
+    /// columns.
+    fn extend(&mut self,block:Vec<f64>,m:usize)->Result<(Vec<Vec<f64>>,Vec<Vec<f64>>),String>{
+        let(coordinates,fresh)=self.q.extend(&self.lapack,&self.execution,block,m)?;
+        let(k,length,count)=(self.columns,self.q.length,fresh.len());
+        if count>0{
+            let products=if k>0{let flat=fresh.concat();block_cross(&self.lapack,&self.execution,&self.packed_basis,k,&flat,count,length)?}else{Vec::new()};
+            self.q.count_macs((k*count*length)as f64);
+            for c in 0..count{self.wq.push(products.get(c*k..(c+1)*k).map_or(Vec::new(),|v|v.to_vec()));}
+        }
+        Ok((coordinates,fresh))
+    }
     /// Adds directions with their images: Q extended by both, the
     /// coordinates kept. Returns Q's new columns.
-    fn add(&mut self,directions:Vec<(Direction,Vec<C>,Vec<C>)>)->Result<Vec<Vec<f64>>,String>{
+    fn add(&mut self,directions:Vec<(Vec<C>,Vec<C>)>)->Result<Vec<Vec<f64>>,String>{
         let clock=Instant::now();let m=directions.len();let length=self.q.length;
-        let mut block=Vec::with_capacity(2*m*length);for(_,x,ax)in &directions{block.extend(reals(x));block.extend(reals(ax));}
-        let(coordinates,fresh)=self.q.extend(&self.lapack,&self.execution,block,2*m)?;
-        for(i,(kind,x,_))in directions.into_iter().enumerate(){
-            self.trace.push(self.centre_trace(&x));self.cu.push(coordinates[2*i].clone());self.cau.push(coordinates[2*i+1].clone());self.directions.push(kind);
-            if let Direction::Augmented(_)=kind{let d=self.d;self.augmented.push(self.near.iter().flat_map(|&q|x[q*d..(q+1)*d].iter().copied()).collect());}
+        let mut block=Vec::with_capacity(2*m*length);for(x,ax)in &directions{block.extend(self.packing.pack(x));block.extend(self.packing.pack(ax));}
+        let(coordinates,fresh)=self.extend(block,2*m)?;
+        let d=self.d;
+        for(i,(x,_))in directions.into_iter().enumerate(){
+            self.trace.push(self.centre_trace(&x));self.cu.push(coordinates[2*i].clone());self.cau.push(coordinates[2*i+1].clone());
+            self.near_parts.push(self.near.iter().flat_map(|&q|x[q*d..(q+1)*d].iter().copied()).collect());
         }
-        self.work.extend_ms+=clock.elapsed().as_secs_f64()*1e3;
+        self.work.extend_ms+=clock.elapsed().as_secs_f64()*1e3;self.work.qr_macs=self.q.macs();
         Ok(fresh)
     }
-    /// The basis columns not in the pool yet.
-    pub fn add_columns(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
-        if basis.len()>self.columns{
-            let new:Vec<(Direction,Vec<C>,Vec<C>)>=(self.columns..basis.len()).map(|j|(Direction::Basis(j),basis[j].clone(),images[j].clone())).collect();
-            self.add(new)?;self.columns=basis.len();
-        }
+    /// Seed directions z with their images A z (A on P u Q, unbordered):
+    /// Hermitian-symmetric fields, such as the inner directions of the
+    /// pipeline's steady solve.
+    pub fn seed(&mut self,directions:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
+        if directions.len()!=images.len(){return Err("Slow pool: seed directions and images differ in number".into());}
+        self.work.seeds+=directions.len();
+        if !directions.is_empty(){self.add(directions.iter().cloned().zip(images.iter().cloned()).collect())?;}
+        Ok(())
+    }
+    /// The basis columns not seen yet: their products with Q (they are not
+    /// pool directions; the slow modes' sources in their span are solved
+    /// exactly, `mode`).
+    pub fn add_columns(&mut self,basis:&[Vec<C>])->Result<(),String>{
+        if basis.len()<=self.columns{return Ok(());}
+        let clock=Instant::now();let(first,length)=(self.columns,self.q.length);let m=basis.len()-first;
+        let mut block=Vec::with_capacity(m*length);for w in &basis[first..]{block.extend(self.packing.pack(w));}
+        let products=self.q.dots(&self.lapack,&self.execution,&block,m)?;let count=self.q.count;
+        for(i,w)in self.wq.iter_mut().enumerate(){for c in 0..m{w.push(products[i+count*c]);}}
+        self.packed_basis.extend(block);self.columns=basis.len();
+        self.work.extend_ms+=clock.elapsed().as_secs_f64()*1e3;self.work.qr_macs=self.q.macs();
         Ok(())
     }
     /// Pool image coordinates of direction j at the shift: theta u_j - A u_j,
@@ -262,46 +343,40 @@ impl SlowPool{
         else{for(i,&a)in self.cu[j].iter().enumerate(){v[i]=scaled(theta,a);}for(i,&a)in self.cau[j].iter().enumerate(){v[i].re-=a;}}
         v
     }
-    /// Centre populations (real parts) of U x.
-    fn readout(&self,basis:&[Vec<C>],x:&[C])->Vec<f64>{
+    /// Centre populations (real parts) of scale Y.
+    fn readout(&self,basis:&[Vec<C>],s:&SlowSolution,scale:C)->Vec<f64>{
         let(n,d)=(self.n,self.d);let centre_slot=self.near.iter().position(|&q|q==self.watch[0]/d).unwrap_or(0);
         let mut out=vec![0.;n];
-        for(j,kind)in self.directions.iter().enumerate().take(x.len()){let c=x[j];if !nonzero(c){continue;}
-            for(i,o)in out.iter_mut().enumerate(){let v=match kind{Direction::Basis(b)=>basis[*b][self.watch[i]],Direction::Augmented(a)=>self.augmented[*a][centre_slot*d+i*n+i]};*o+=mul(c,v).re;}}
+        for(j,&c)in s.x.iter().enumerate(){if !nonzero(c){continue;}let c=mul(scale,c);
+            for(i,o)in out.iter_mut().enumerate(){*o+=mul(c,self.near_parts[j][centre_slot*d+i*n+i]).re;}}
+        for(j,&c)in s.basis.iter().enumerate(){if !nonzero(c){continue;}let c=mul(scale,c);
+            for(i,o)in out.iter_mut().enumerate(){*o+=mul(c,basis[j][self.watch[i]]).re;}}
         out
     }
-    /// Y = (theta - A)^-1 f (at the kernel the trace-free solution -y of
-    /// (A + u tau0^T) y = f) by GCRO on the pool.
-    pub fn solve(&mut self,basis:&[Vec<C>],f:&[C],theta:C,coefficient:C,steady:&mut dyn SteadySolves)->Result<SlowSolution,String>{
+    /// The pool coefficients of (theta - A)^-1 f (at the kernel of the
+    /// trace-free -y, (A + u tau0^T) y = f) by GCRO on the pool.
+    fn solve(&mut self,f:&[C],theta:C)->Result<Vec<C>,String>{
         let clock=Instant::now();self.work.solves+=1;
-        if !self.inherited{
-            self.inherited=true;let given=steady.directions();self.work.inherited+=given.len();
-            if !given.is_empty(){let first=self.augmented.len();self.add(given.into_iter().enumerate().map(|(i,(z,az))|(Direction::Augmented(first+i),z,az)).collect())?;}
-        }
         let kernel=magnitude(theta)<KERNEL;let length=self.q.length;
         // f = e^{i phi} (g1 + i g2) with g1, g2 Hermitian-symmetric and
         // orthogonal, g1 the larger: a real problem when theta is real.
-        let(f1,f2)=split(f,&self.mirror,self.n);let(a,b)=(reals(&f1),reals(&f2));
+        let(f1,f2)=split(f,&self.mirror,self.n);let(a,b)=(self.packing.pack(&f1),self.packing.pack(&f2));
         let(aa,bb,ab)=(dot(&a,&a),dot(&b,&b),dot(&a,&b));let phi=0.5*(2.*ab).atan2(aa-bb);let(cs,sn)=(phi.cos(),phi.sin());
         let g1:Vec<f64>=a.iter().zip(&b).map(|(x,y)|cs*x+sn*y).collect();let g2:Vec<f64>=a.iter().zip(&b).map(|(x,y)|-sn*x+cs*y).collect();
         let fsize=(dot(&g1,&g1)+dot(&g2,&g2)).sqrt();
-        if fsize==0.{return Ok(SlowSolution{theta,coefficient,x:vec![ZERO;self.directions.len()],sign:1.});}
+        if fsize==0.{return Ok(vec![ZERO;self.cu.len()]);}
         // Coordinates on Q and the parts outside it.
         let mut parts=g1.clone();parts.extend(&g2);
         let h=self.q.dots(&self.lapack,&self.execution,&parts,2)?;self.q.combine(&self.lapack,&self.execution,&mut parts,&h,2,-1.)?;
+        self.q.count_macs((4*length)as f64);
         let count=self.q.count;let mut phi_c:Vec<C>=(0..count).map(|i|C{re:h[i],im:h[i+count]}).collect();
-        let mut history:Vec<Vec<f64>>=Vec::new();let mut steps=0;
+        let mut steps=0;
         let solution=loop{
-            let(count,p)=(self.q.count,self.directions.len());
+            let(count,p)=(self.q.count,self.cu.len());
             let mut m=Vec::with_capacity(count*p);for j in 0..p{m.extend(self.image(j,theta,kernel,count));}
             let(x,rho)=least_squares(&m,count,p,&phi_c);
             let outside=dot(&parts,&parts);let rn=(rho.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>()+outside).sqrt();
-            history.push(self.readout(basis,&x));
-            let settled=history.len()>=3&&rn<=RESIDUAL*fsize&&{
-                let h=&history;let last=&h[h.len()-1];let size=last.iter().fold(0_f64,|a,&b|a.max(b.abs()));
-                let change=|a:&[f64],b:&[f64]|a.iter().zip(b).fold(0_f64,|m,(x,y)|m.max((x-y).abs()));
-                change(last,&h[h.len()-2])<=STABLE*size&&change(&h[h.len()-2],&h[h.len()-3])<=STABLE*size};
-            if settled||rn<=1e-13*fsize||steps>=MAXIMUM_STEPS{break x;}
+            if rn<=RESIDUAL*fsize||steps>=MAXIMUM_STEPS{break x;}
             // The residual field r = Q rho + (the parts outside Q), split in two real fields.
             let mut r=parts.clone();
             let rho_parts:Vec<f64>=rho.iter().map(|z|z.re).chain(rho.iter().map(|z|z.im)).collect();
@@ -310,11 +385,9 @@ impl SlowPool{
             let mut new=Vec::new();
             for part in r.chunks_exact(length){
                 let size=dot(part,part).sqrt();if !(size>1e-3*rn){continue;}
-                let field:Vec<C>=complex(part).iter().map(|v|C{re:v.re/size,im:v.im/size}).collect();
-                let z=if self.seed_with_pipeline&&kernel&&self.augmented.is_empty()&&new.is_empty(){
-                    let(y,inner)=steady.solve(&field,RESIDUAL)?;self.work.pipeline_solves+=1;self.work.inner_steps+=inner;y
-                }else{let mut z=vec![ZERO;field.len()];steady.precondition(&field,&mut z)?;self.work.preconditions+=1;z};
-                let az=self.apply(steady,&z)?;new.push((Direction::Augmented(self.augmented.len()+new.len()),z,az));
+                let field:Vec<C>=self.packing.unpack(part).iter().map(|v|C{re:v.re/size,im:v.im/size}).collect();
+                let mut z=vec![ZERO;field.len()];self.batch.apply(&field,&mut z)?;self.work.preconditions+=1;
+                let az=self.apply(&z)?;new.push((z,az));
             }
             if new.is_empty(){break x;}
             let fresh=self.add(new)?;
@@ -323,37 +396,48 @@ impl SlowPool{
                 for(t,v)in parts[..length].iter_mut().zip(q){*t-=c1*v;}for(t,v)in parts[length..].iter_mut().zip(q){*t-=c2*v;}}
             steps+=1;self.work.steps+=1;self.work.step_ms+=step.elapsed().as_secs_f64()*1e3;
         };
-        // Back from the rotation: Y = sign e^{i phi} U x.
-        let rotation=C{re:cs,im:sn};
-        let x=solution.iter().map(|&v|mul(rotation,v)).collect();
-        self.work.solve_ms+=clock.elapsed().as_secs_f64()*1e3;
-        Ok(SlowSolution{theta,coefficient,x,sign:if kernel{-1.}else{1.}})
+        // Back from the rotation: e^{i phi} x, negated at the kernel.
+        let rotation=if kernel{C{re:-cs,im:-sn}}else{C{re:cs,im:sn}};
+        self.work.solve_ms+=clock.elapsed().as_secs_f64()*1e3;self.work.qr_macs=self.q.macs();
+        Ok(solution.iter().map(|&v|mul(rotation,v)).collect())
+    }
+    /// Y of a slow mode from its Ritz vector x = W b, A x = A W b (the
+    /// pipeline's images) and the ring's feedback g of x at theta. Away from
+    /// the kernel the source (A - theta) x + g gives, exactly,
+    /// Y = -W b + (theta - A)^-1 g: the first part lies in the space and needs
+    /// no solve. At the kernel the same split would read
+    /// Y = -x + tau0(x) x_ss - (A + u tau0^T)^-1 g, whose first two terms (the
+    /// reduced and the true steady state) cancel to the steady error itself,
+    /// so there the small source A x + g is solved whole.
+    pub fn mode(&mut self,b:&[C],ax:&[C],g:&[C],theta:C,coefficient:C)->Result<SlowSolution,String>{
+        if magnitude(theta)<KERNEL{
+            let f:Vec<C>=ax.iter().zip(g).map(|(a,v)|C{re:a.re+v.re,im:a.im+v.im}).collect();
+            return Ok(SlowSolution{theta,coefficient,basis:Vec::new(),x:self.solve(&f,theta)?});
+        }
+        let pool=self.solve(g,theta)?;
+        Ok(SlowSolution{theta,coefficient,basis:b.iter().map(|v|C{re:-v.re,im:-v.im}).collect(),x:pool})
     }
     /// The Gram matrix W^T U of the basis against every pool direction
-    /// (column-major k x p), from the pool coordinates.
+    /// (column-major k x p), from the directions' coordinates and W^T Q.
     fn basis_gram(&self,k:usize)->Vec<f64>{
-        let p=self.directions.len();let mut g=vec![0.;k*p];
-        for(i,kind)in self.directions.iter().enumerate(){let Direction::Basis(b)=*kind else{continue};if b>=k{continue;}
-            for j in 0..p{let l=self.cu[i].len().min(self.cu[j].len());g[b+k*j]=dot(&self.cu[i][..l],&self.cu[j][..l]);}}
+        let p=self.cu.len();let mut g=vec![0.;k*p];
+        for(j,cu)in self.cu.iter().enumerate(){for(i,&c)in cu.iter().enumerate(){if c==0.{continue;}
+            for(t,&w)in g[k*j..k*(j+1)].iter_mut().zip(&self.wq[i][..k]){*t+=c*w;}}}
         g
     }
-    /// W^H Y (from the Gram matrix) and Y on the near modes.
+    /// W^T Y (from the Gram matrix) and Y on the near modes.
     fn parts(&self,basis:&[Vec<C>],gram:&[f64],s:&SlowSolution)->(Vec<C>,Vec<C>){
         // Directions added after this solution carry no coefficient.
         let d=self.d;let k=basis.len();let p=s.x.len();
-        let coordinates:Vec<C>=(0..k).map(|i|scaled((0..p).fold(ZERO,|v,j|{let w=scaled(s.x[j],gram[i+k*j]);C{re:v.re+w.re,im:v.im+w.im}}),s.sign)).collect();
+        let coordinates:Vec<C>=(0..k).map(|i|{let mut v=s.basis.get(i).copied().unwrap_or(ZERO);for j in 0..p{add(&mut v,scaled(s.x[j],gram[i+k*j]));}v}).collect();
         let mut near=vec![ZERO;self.near.len()*d];
-        for(j,kind)in self.directions.iter().enumerate().take(p){let c=scaled(s.x[j],s.sign);if !nonzero(c){continue;}
-            for(slot,&q)in self.near.iter().enumerate(){let block:&[C]=match kind{Direction::Basis(b)=>&basis[*b][q*d..(q+1)*d],Direction::Augmented(a)=>&self.augmented[*a][slot*d..(slot+1)*d]};
-                for(t,&v)in near[slot*d..(slot+1)*d].iter_mut().zip(block){mul_add(t,c,v);}}}
+        for(j,&c)in s.x.iter().enumerate(){if !nonzero(c){continue;}for(t,&v)in near.iter_mut().zip(&self.near_parts[j]){mul_add(t,c,v);}}
+        for(i,&c)in s.basis.iter().enumerate(){if !nonzero(c){continue;}
+            for(slot,&q)in self.near.iter().enumerate(){for(t,&v)in near[slot*d..(slot+1)*d].iter_mut().zip(&basis[i][q*d..(q+1)*d]){mul_add(t,c,v);}}}
         (coordinates,near)
     }
     /// The centre populations of a_k Y_k (a kernel mode's: its steady error).
-    pub fn steady_populations(&self,basis:&[Vec<C>],s:&SlowSolution)->Vec<f64>{
-        let c=mul(s.coefficient,C{re:s.sign,im:0.});
-        let y=self.readout(basis,&s.x.iter().map(|&v|mul(c,v)).collect::<Vec<_>>());
-        y
-    }
+    pub fn steady_populations(&self,basis:&[Vec<C>],s:&SlowSolution)->Vec<f64>{self.readout(basis,s,s.coefficient)}
     /// Population errors (one row per time) of the slow modes,
     /// sum_k a_k (e^{theta_k t} Y_k - e^{tA} Y_k), for the reduced model's
     /// coordinates X (k x r), eigenvectors S (r x r, column-major) and the

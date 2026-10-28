@@ -17,6 +17,14 @@
 //! e^{theta_m t}: beta = (z_a b - z_w b theta) a, then the closed-form
 //! convolution and the readout (`propagate`).
 //!
+//! Flip symmetry: the columns are Hermitian-symmetric (x_-q = x_q^dagger)
+//! and the Ritz data come in conjugate pairs, so a mirrored mode's
+//! coordinates are the flip of its partner's, c_-q[i] = conj c_q[i*]
+//! (`partner`), and its population errors are the conjugates of its
+//! partner's. Only the canonical member of each pair is transformed and
+//! propagated (counted twice); the mirrored frame modes' coordinates, which
+//! the transfer reads, are flipped copies.
+//!
 //! Ring (`ring_feedback`): for a field x on P u Q and a shift z, the ring
 //! slaved at z, y = (z - D_R)^-1 (C x)|_R (exact block solves, refined for
 //! the diagonal fold's i nu_r K^(1)), and its feedback (B y)|_{P u Q}.
@@ -39,8 +47,9 @@ use crate::parallel::Execution;
 /// 1e-4 of the block, one refinement reaches it).
 const RING_REFINEMENTS:usize=12;
 const RING_RESIDUAL:f64=1e-8;
-/// Blocks per task of the coordinate changes.
-const BLOCKS_PER_TASK:usize=4;
+/// Blocks per task of the coordinate changes (E^-1 and V^-1 streamed once
+/// per task).
+const BLOCKS_PER_TASK:usize=64;
 
 /// Which second-order terms a mode's block carries: those of the steps
 /// whose neighbour is on the lattice (the error equation on P u Q as R2
@@ -91,16 +100,21 @@ pub struct ErrorLattice<'p>{
     /// The near modes (the centre and its one-step neighbours), and the (I - S)
     /// pairs into them: (target, source, step), target = source + step.
     pub near:Vec<usize>,pub(super) pairs:Vec<(usize,usize,usize)>,
-    /// The modes whose eigen-coordinates the transform reads, and those of
-    /// them outside the near modes (the outer modes): their errors are
-    /// propagated by the dressed blocks of L0' alone, from the coordinates
-    /// the transform reads anyway.
+    /// The modes whose eigen-coordinates the transform reads, and the
+    /// canonical ones of them outside the near modes (the outer modes):
+    /// their errors are propagated by the dressed blocks of L0' alone, from
+    /// the coordinates the transform reads anyway.
     frames:Vec<usize>,pub outer_modes:Vec<usize>,
+    /// Per mode whether it is the canonical member of its mirror pair (the
+    /// centre is its own mirror), the near slots of the canonical near
+    /// modes, and the flip's permutation of the eigen-coordinates.
+    pub(super) canonical:Vec<bool>,pub(super) near_canonical:Vec<usize>,partner:Vec<usize>,
     /// The classes: the frame's own block when every mode carries every
     /// step (`Classes::Full`).
     pub classes:Vec<Cow<'p,BlockSystem>>,pub(super) class_of:Vec<usize>,
-    /// Per near mode (in `near` order), column-major d x k: class
-    /// coordinates of the transformed basis columns and images.
+    /// Per near mode (in `near` order; the canonical ones filled),
+    /// column-major d x k: class coordinates of the transformed basis
+    /// columns and images.
     pub(super) basis_coordinates:Vec<Vec<C>>,pub(super) image_coordinates:Vec<Vec<C>>,
     /// Per outer mode, column-major d x k: eigen-coordinates of L0' of the
     /// basis columns and images.
@@ -155,69 +169,92 @@ impl<'p> ErrorLattice<'p>{
         let class_ms=if classes.iter().all(|c|matches!(c,Cow::Borrowed(_))){frame.milliseconds[1]}else{clock.elapsed().as_secs_f64()*1e3};
         let kernel_ms=frame.milliseconds[0];
         let count=near.len();
-        let outer_modes:Vec<usize>=frames.iter().copied().filter(|q|!near.contains(q)).collect();let outer_count=outer_modes.len();
+        let canonical:Vec<bool>=(0..modes.len()).map(|q|modes[q]>=modes[mirror[q]]).collect();
+        let near_canonical:Vec<usize>=(0..count).filter(|&slot|canonical[near[slot]]).collect();
+        let partner:Vec<usize>=(0..d).map(|j|basis.partner(j)).collect();
+        let outer_modes:Vec<usize>=frames.iter().copied().filter(|&q|!near.contains(&q)&&canonical[q]).collect();let outer_count=outer_modes.len();
         Ok(Self{prepared,basis,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,kernels,
-            near,pairs,frames,outer_modes,classes,class_of,basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],
+            near,pairs,frames,outer_modes,canonical,near_canonical,partner,classes,class_of,basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],
             outer_basis:vec![Vec::new();outer_count],outer_image:vec![Vec::new();outer_count],columns:0,ring_in_fast:false,outer_bare:true,
             work:ErrorWork::default(),build_ms:[kernel_ms,class_ms]})
     }
     pub fn dimension(&self)->usize{self.modes.len()*self.d}
     /// Process the basis columns not seen yet (columns are append-only).
     pub fn add_columns(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
-        let clock=Instant::now();let(old,new)=(self.columns,basis.len());
-        if new<=old{return Ok(());}
-        if basis[old..new].iter().zip(&images[old..new]).any(|(w,a)|w.len()!=self.dimension()||a.len()!=w.len()){return Err("Estimator: basis column dimensions differ from the lattice".into());}
-        // Every new column and image in one batch.
-        let mut fed:Vec<Vec<C>>=Vec::new();
-        if self.ring_in_fast{for j in old..new{let g=self.ring_feedback(&basis[j],ZERO)?;fed.push(images[j].iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect());}}
-        let fields:Vec<&[C]>=(old..new).flat_map(|j|[basis[j].as_slice(),if self.ring_in_fast{fed[j-old].as_slice()}else{images[j].as_slice()}]).collect();
-        let coordinates=self.coordinates(&fields)?;
-        let d=self.d;
-        for pair in coordinates.chunks_exact(2){let((zw,ow),(za,oa))=(&pair[0],&pair[1]);
-            for(slot,(w,a))in self.basis_coordinates.iter_mut().zip(self.image_coordinates.iter_mut()).enumerate(){
-                w.extend_from_slice(&zw[slot*d..(slot+1)*d]);a.extend_from_slice(&za[slot*d..(slot+1)*d]);}
-            for(slot,(w,a))in self.outer_basis.iter_mut().zip(self.outer_image.iter_mut()).enumerate(){
-                w.extend_from_slice(&ow[slot*d..(slot+1)*d]);a.extend_from_slice(&oa[slot*d..(slot+1)*d]);}
+        let clock=Instant::now();
+        if basis.len()<=self.columns{return Ok(());}
+        let d=self.d;let first=self.columns;
+        // Every new column and its image (with the ring's feedback where the
+        // fast part carries it), transformed together.
+        let mut fields:Vec<Vec<C>>=Vec::with_capacity(2*(basis.len()-first));
+        for j in first..basis.len(){
+            if basis[j].len()!=self.dimension()||images[j].len()!=basis[j].len(){return Err("Estimator: basis column dimensions differ from the lattice".into());}
+            fields.push(basis[j].clone());
+            if self.ring_in_fast{let g=self.ring_feedback(&basis[j],ZERO)?;fields.push(images[j].iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect());}
+            else{fields.push(images[j].clone());}
         }
-        self.columns=new;self.work.columns+=new-old;
+        let refs:Vec<&[C]>=fields.iter().map(|f|&f[..]).collect();
+        let(z,o)=self.coordinates(&refs)?;
+        let(near,outer)=(self.near.len(),self.outer_modes.len());
+        for(i,_)in(first..basis.len()).enumerate(){
+            let(w,a)=(2*i,2*i+1);
+            for &slot in &self.near_canonical{
+                self.basis_coordinates[slot].extend_from_slice(&z[(w*near+slot)*d..(w*near+slot+1)*d]);
+                self.image_coordinates[slot].extend_from_slice(&z[(a*near+slot)*d..(a*near+slot+1)*d]);}
+            for slot in 0..outer{
+                self.outer_basis[slot].extend_from_slice(&o[(w*outer+slot)*d..(w*outer+slot+1)*d]);
+                self.outer_image[slot].extend_from_slice(&o[(a*outer+slot)*d..(a*outer+slot+1)*d]);}
+        }
+        let added=basis.len()-first;self.columns=basis.len();self.work.columns+=added;
         self.work.column_ms+=clock.elapsed().as_secs_f64()*1e3;
         Ok(())
     }
-    /// Class coordinates V_c^-1 E^-1 (I - S) v of fields on P u Q per near
-    /// mode (in `near` order), and their coordinates E^-1 v per outer mode:
-    /// the eigen-coordinates of every field's frame modes and the class
-    /// changes of every near mode as GEMMs over the batch.
-    fn coordinates(&mut self,fields:&[&[C]])->Result<Vec<(Vec<C>,Vec<C>)>,String>{
-        let(d,m)=(self.d,fields.len());let execution=Execution::new()?;let basis=self.basis;let frames=self.frames.len();
-        let items:Vec<(usize,usize)>=(0..m).flat_map(|f|(0..frames).map(move|i|(f,i))).collect();
+    /// For Hermitian-symmetric fields on P u Q: the class coordinates
+    /// V_c^-1 E^-1 (I - S) v per canonical near mode, (field, near slot)
+    /// consecutive (the other slots zero), and the coordinates E^-1 v per
+    /// outer mode, (field, outer slot) consecutive. The coordinate changes
+    /// run as large GEMMs over every field and mode (E^-1 streamed once per
+    /// task).
+    fn coordinates(&mut self,fields:&[&[C]])->Result<(Vec<C>,Vec<C>),String>{
+        let d=self.d;let execution=Execution::new()?;let basis=self.basis;
+        let(count,near,outer)=(fields.len(),self.near.len(),self.outer_modes.len());
+        // E^-1 on every (field, canonical frame mode).
+        let canonical=&self.canonical;
+        let computed:Vec<usize>=self.frames.iter().copied().filter(|&q|canonical[q]).collect();
+        let items:Vec<(usize,usize)>=(0..count).flat_map(|f|computed.iter().map(move|&q|(f,q))).collect();
         let chunks:Vec<Vec<(usize,usize)>>=items.chunks(BLOCKS_PER_TASK).map(|c|c.to_vec()).collect();
-        let parts=execution.map(chunks.clone(),|list|{let blocks:Vec<&[C]>=list.iter().map(|&(f,i)|{let q=self.frames[i];&fields[f][q*d..(q+1)*d]}).collect();basis.coefficients(&blocks)});
-        // c[f][frame slot]
-        let mut c=vec![ZERO;m*frames*d];
-        for(list,part)in chunks.iter().zip(parts){let part=part?;for(k,&(f,i))in list.iter().enumerate(){c[(f*frames+i)*d..(f*frames+i+1)*d].copy_from_slice(&part[k*d..(k+1)*d]);}}
-        let position=|q:usize|self.frames.iter().position(|&x|x==q).unwrap();
-        let near=self.near.len();
-        // (I - S~) on the near modes, one task per field.
-        let pairs:Vec<(usize,usize,usize)>=self.pairs.iter().map(|&(a,b,s)|(self.near.iter().position(|&x|x==a).unwrap(),position(b),s)).collect();
+        let parts=execution.map(chunks.clone(),|chunk|{let blocks:Vec<&[C]>=chunk.iter().map(|&(f,q)|&fields[f][q*d..(q+1)*d]).collect();basis.coefficients(&blocks)});
+        let modes=self.modes.len();let mut c=vec![ZERO;count*modes*d];
+        for(chunk,part)in chunks.iter().zip(parts){let part=part?;for(i,&(f,q))in chunk.iter().enumerate(){c[(f*modes+q)*d..(f*modes+q+1)*d].copy_from_slice(&part[i*d..(i+1)*d]);}}
+        // The mirrored frame modes: c_-q[i] = conj c_q[partner i].
+        for f in 0..count{for &q in self.frames.iter().filter(|&&q|!canonical[q]){
+            let source=c[(f*modes+self.mirror[q])*d..(f*modes+self.mirror[q]+1)*d].to_vec();
+            for(i,v)in c[(f*modes+q)*d..(f*modes+q+1)*d].iter_mut().enumerate(){*v=conj(source[self.partner[i]]);}}}
+        // (I - S) into the canonical near modes.
+        let slot_of:Vec<usize>=(0..modes).map(|q|self.near.iter().position(|&x|x==q).unwrap_or(usize::MAX)).collect();
         let(kernels,c_ref)=(self.kernels,&c);
-        let rows=execution.map((0..m).collect(),|f|{
+        let rows=execution.map((0..count).collect(),|f|{
             let mut t=vec![ZERO;near*d];
-            for(slot,&a)in self.near.iter().enumerate(){let i=position(a);t[slot*d..(slot+1)*d].copy_from_slice(&c_ref[(f*frames+i)*d..(f*frames+i+1)*d]);}
-            for &(slot,i,s)in &pairs{kernels.subtract_kernel(s,&c_ref[(f*frames+i)*d..(f*frames+i+1)*d],&mut t[slot*d..(slot+1)*d]);}
+            for &slot in &self.near_canonical{let a=self.near[slot];t[slot*d..(slot+1)*d].copy_from_slice(&c_ref[(f*modes+a)*d..(f*modes+a+1)*d]);}
+            for &(a,b,s)in self.pairs.iter().filter(|p|canonical[p.0]){let slot=slot_of[a];kernels.subtract_kernel(s,&c_ref[(f*modes+b)*d..(f*modes+b+1)*d],&mut t[slot*d..(slot+1)*d]);}
             t});
         let t:Vec<C>=rows.concat();
-        // V_c^-1 per near slot over the batch (one GEMM per slot and chunk).
+        // V_c^-1 per class over every (field, canonical near slot) of the class.
         let(classes,class_of,lapack)=(&self.classes,&self.class_of,&self.prepared.lapack);
-        let slots:Vec<usize>=(0..near).collect();let t=&t;
-        let parts=execution.map(slots,|slot|->Result<Vec<C>,String>{
-            let mut input=vec![ZERO;d*m];for f in 0..m{input[f*d..(f+1)*d].copy_from_slice(&t[(f*near+slot)*d..(f*near+slot+1)*d]);}
-            let mut out=vec![ZERO;d*m];
-            lapack.complex_gemm().multiply(d,m,d,ONE,&classes[class_of[self.near[slot]]].inverse,d,&input,d,ZERO,&mut out,d)?;Ok(out)});
-        let mut z=vec![vec![ZERO;near*d];m];
-        for(slot,part)in parts.into_iter().enumerate(){let part=part?;for f in 0..m{z[f][slot*d..(slot+1)*d].copy_from_slice(&part[f*d..(f+1)*d]);}}
-        let outer:Vec<usize>=self.outer_modes.iter().map(|&q|position(q)).collect();
-        self.work.frame_blocks+=m*(frames+near);
-        Ok(z.into_iter().enumerate().map(|(f,z)|(z,outer.iter().flat_map(|&i|c[(f*frames+i)*d..(f*frames+i+1)*d].iter().copied()).collect())).collect())
+        let mut groups:Vec<(usize,Vec<usize>)>=Vec::new();
+        for f in 0..count{for &slot in &self.near_canonical{let c=class_of[self.near[slot]];let item=f*near+slot;
+            match groups.iter_mut().find(|g|g.0==c){Some(g)=>g.1.push(item),None=>groups.push((c,vec![item]))}}}
+        let tasks:Vec<(usize,Vec<usize>)>=groups.iter().flat_map(|(c,items)|items.chunks(BLOCKS_PER_TASK).map(move|ch|(*c,ch.to_vec()))).collect();
+        let t=&t;
+        let parts=execution.map(tasks.clone(),|(c,items)|->Result<Vec<C>,String>{
+            let m=items.len();let mut input=vec![ZERO;d*m];for(i,&item)in items.iter().enumerate(){input[i*d..(i+1)*d].copy_from_slice(&t[item*d..(item+1)*d]);}
+            let mut out=vec![ZERO;d*m];lapack.complex_gemm().multiply(d,m,d,ONE,&classes[c].inverse,d,&input,d,ZERO,&mut out,d)?;Ok(out)});
+        let mut z=vec![ZERO;count*near*d];
+        for((_,items),part)in tasks.iter().zip(parts){let part=part?;for(i,&item)in items.iter().enumerate(){z[item*d..(item+1)*d].copy_from_slice(&part[i*d..(i+1)*d]);}}
+        let mut o=vec![ZERO;count*outer*d];
+        for f in 0..count{for(slot,&q)in self.outer_modes.iter().enumerate(){o[(f*outer+slot)*d..(f*outer+slot+1)*d].copy_from_slice(&c[(f*modes+q)*d..(f*modes+q+1)*d]);}}
+        self.work.frame_blocks+=count*(computed.len()+self.near_canonical.len());
+        Ok((z,o))
     }
     /// The ring's feedback on P u Q of a field x at the shift z:
     /// (B (z - D_R)^-1 C x)|_{P u Q}.
