@@ -53,13 +53,17 @@ const why=(text:string):string=>{for(const [pattern,words] of WHY){const match=p
 const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
   [/^Stopped because (.+?): the best checkpoint \((\d+) solves\) has an error bound of (\S+) against the tolerance (\S+?)(?:; (\d+) of (\d+) samples above it, t = (\S+) to (\S+) us)?(?:; (\d+) mean output\(s\) above it)?$/,
     (reason,n,bound,tolerance,over,samples,from,to,means)=>[`${why(reason)}，计算停止：最好的检查点（${n} 次求解）误差界为 ${num(bound)}，误差目标 ${num(tolerance)}`,
-      ...(over?[`${samples} 个采样点中有 ${over} 个超过误差目标（t = ${num(from)} 到 ${num(to)} µs）`]:[]),...(means?[`${means} 个长期布居输出超过误差目标`]:[])].join('；')+'。'],
+      ...(over?[`${samples} 个采样点中有 ${over} 个超过误差目标（t = ${from===to?num(from):`${num(from)} 到 ${num(to)}`} µs）`]:[]),...(means?[`${means} 个长期布居输出超过误差目标`]:[])].join('；')+'。'],
   [/^Every output is within the tolerance; a slow class of the initial state an output needs is not resolved \((.+)\)$/,
     reason=>`所有输出都在误差目标内；某个输出所需的初态慢类未分辨（${why(reason)}）。`],
   [/^Checkpoint at (\d+) solves: the error bound is (\S+) against the tolerance (\S+); the run continues$/,
     (n,bound,tolerance)=>`第 ${n} 次求解的检查点：误差界 ${num(bound)}，误差目标 ${num(tolerance)}；计算继续。`],
   [/^The mean's error bound is (\S+), at least 1: it carries no information, so no populations are shown$/,
     bound=>`长期布居的误差界为 ${num(bound)}（不小于 1），不含任何信息，不显示布居。`],
+  [/^The lattice of this request has (\d+) modes and would need about (\S+) GB, above the (\S+) GB memory budget: not solved$/,
+    (modes,need,budget)=>`未求解（不收敛）：此请求的晶格有 ${modes} 个模式，约需 ${need} GB 内存，超过 ${budget} GB 的内存预算。`],
+  [/^Static fold expansion parameter (\S+): the fold's frequency expansion diverges on this lattice, not solved$/,
+    parameter=>`未求解（不收敛）：静态折叠的展开参数为 ${num(parameter)}，折叠的频率展开在此晶格上发散。`],
 ];
 /** A solver sentence in Chinese; one this table does not know is shown as written. */
 export function solverText(text:string):string{

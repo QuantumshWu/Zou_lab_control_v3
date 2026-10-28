@@ -67,6 +67,14 @@ test('the stop and checkpoint reasons the solver formats are shown in Chinese',(
   }
   chinese(formatted(adapterSource,'Checkpoint at',[8,'1.20e-2','5e-3']),'checkpoint');
   chinese(formatted(adapterSource,"The mean's error bound is",['3.61e0']),'uninformative mean');
+  // A request stopped before its first solve: nothing computed, the reason alone.
+  chinese(formatted(pipelineSource,'The lattice of this request has',[150,'5.3','5']),'memory guard');
+  chinese(formatted(pipelineSource,'Static fold expansion parameter',['1.2e0']),'diverging fold');
+});
+test('every sentence the pipeline and the adapter format is shown in Chinese (a new one fails here)',()=>{
+  const sentences=[...formatStrings(pipelineSource),...formatStrings(adapterSource)].filter(f=>/^[A-Z][a-z]/.test(f));
+  assert.ok(sentences.length>=6,`${sentences.length} sentences`);
+  for(const format of sentences)chinese(format.replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'),format);
 });
 test('every mean reason the native adapter writes is shown in Chinese, within the tolerance and outside it',()=>{
   const outside=/const OUTSIDE:&str="([^"]+)";/.exec(adapterSource)?.[1];assert.ok(outside,'OUTSIDE');

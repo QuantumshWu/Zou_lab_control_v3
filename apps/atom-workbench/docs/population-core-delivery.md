@@ -93,5 +93,7 @@
 
 ## 相关分支
 
+- 提交 ceb6cd86（D1 + D2：每个激发精细结构流形一个旋转系、折叠展开计入误差、内存保护）说明中的 "not for merge: ex_both 10 ms" 已过时：ex_both 的 10 ms 轨迹与独立的稠密 Floquet 参考相差 4.3e-5，该提交已合并。
+
 - `claude/atom-lattice`：晶格核的开发与验证记录（提交说明中有各阶段的测量）。
 - `claude/atom-research`：独立参考、普查工具、请求生成器 `gen_model.mjs` 与研究结论（`apps/atom-workbench/research/population/README.md`）。
