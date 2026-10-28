@@ -90,6 +90,34 @@ class PlainDevice:
         pass
 
 
+class FabricDevice(EchoDevice):
+    """A concurrent hardware write gated by the fabric integration test."""
+
+    def __init__(self, values):
+        super().__init__(values)
+        self.output_on = False
+        self.fail_safe = False
+
+    def slow_write(self, started, released):
+        Path(started).write_text("started", encoding="utf-8")
+        until = time.monotonic() + 15
+        while not Path(released).exists():
+            if time.monotonic() >= until:
+                raise TimeoutError("test did not release the hardware write")
+            time.sleep(0.01)
+        self.output_on = True
+
+    def fail_safe_once(self):
+        self.fail_safe = True
+
+    def make_safe(self, output):
+        if self.fail_safe:
+            self.fail_safe = False
+            raise RuntimeError("hardware did not confirm SAFE")
+        self.output_on = False
+        super().make_safe(output)
+
+
 class PatternDevice(EchoDevice):
     """A device whose state is more than its knobs (an SLM's pattern) answers its own snapshot."""
 
@@ -122,7 +150,15 @@ def _served(key, values):
     """A device with a server of its own: its admissions are what Remote did to it."""
     device = EchoDevice(values)
     device.admitted = []
-    return Opened(device, lambda: None, admit_peers=device.admitted.append)
+    device.fail_withdraw_once = lambda: setattr(device, "refuse_withdraw", True)
+
+    def admit_peers(admitted):
+        if not admitted and getattr(device, "refuse_withdraw", False):
+            device.refuse_withdraw = False
+            raise RuntimeError("the device server could not refuse peers")
+        device.admitted.append(admitted)
+
+    return Opened(device, lambda: None, admit_peers=admit_peers)
 
 
 class FailedInitDevice:
@@ -142,6 +178,8 @@ class FailedInitDevice:
 
 
 DEVICE_TYPES = (
+    DeviceType("test.fabric", "test", SCHEMA, ("test.echo",), factory=lambda key, values: FabricDevice(values),
+               concurrent=("slow_write",), physical_outputs=(PhysicalOutput("beam"),)),
     DeviceType("test.plain", "test", SCHEMA, ("test.echo",), factory=lambda key, values: PlainDevice()),
     DeviceType("test.pattern", "test", SCHEMA, ("test.echo",), factory=lambda key, values: PatternDevice(values)),
     DeviceType("test.failed_init", "test", FILE, ("test.echo",), factory=lambda key, values: FailedInitDevice(values["path"])),

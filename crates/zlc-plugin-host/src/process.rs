@@ -26,7 +26,7 @@ pub(crate) struct PluginProcess {
     pub key: String,
     writer: Mutex<Option<ChildStdin>>,
     /// Each request's waiter, and whether its deadline watches the process.
-    pending: Mutex<HashMap<u64, (mpsc::Sender<Incoming>, bool)>>,
+    pending: Mutex<HashMap<u64, (mpsc::Sender<Incoming>, bool, Option<String>)>>,
     next: AtomicU64,
     pub alive: AtomicBool,
     /// Set when the core itself ends the process: its exit is then no failure.
@@ -94,7 +94,7 @@ impl PluginProcess {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let instance = params["instance"].as_str().map(str::to_owned);
         let (sender, answer) = mpsc::channel();
-        self.pending.lock().unwrap().insert(id, (sender, track));
+        self.pending.lock().unwrap().insert(id, (sender, track, instance.clone()));
         let message = json!({"t": "req", "id": id, "op": op, "p": params, "blocks": blocks,
                              "deadline_ms": deadline.as_millis() as u64});
         if let Err(error) = self.send(&message) {
@@ -107,8 +107,10 @@ impl PluginProcess {
                 None => Ok(incoming),
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if track { self.overdue.lock().unwrap().insert(id, (Instant::now(), instance)); }
-                else { self.pending.lock().unwrap().remove(&id); }
+                let mut pending = self.pending.lock().unwrap();
+                if track {
+                    if pending.contains_key(&id) { self.overdue.lock().unwrap().insert(id, (Instant::now(), instance)); }
+                } else { pending.remove(&id); }
                 Err(CallError::new(ErrorKind::Timeout, format!("{op} did not answer within {:.1} s", deadline.as_secs_f64())))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(CallError::lost(format!(
@@ -118,8 +120,15 @@ impl PluginProcess {
 
     /// Deliver a response; a late answer to an overdue request is only dropped.
     pub fn resolve(&self, id: u64, incoming: Incoming) {
+        let mut pending = self.pending.lock().unwrap();
         self.overdue.lock().unwrap().remove(&id);
-        if let Some((sender, _)) = self.pending.lock().unwrap().remove(&id) { let _ = sender.send(incoming); }
+        if let Some((sender, _, _)) = pending.remove(&id) { let _ = sender.send(incoming); }
+    }
+
+    /// A caller's timeout is not completion: keep counting the request until
+    /// its reply arrives or the process ends, including declared concurrent SPI.
+    pub fn requests_pending(&self, instance: &str) -> bool {
+        self.pending.lock().unwrap().values().any(|(_, _, name)| name.as_deref() == Some(instance))
     }
 
     /// The instances (None: the process's own request) whose requests have stayed

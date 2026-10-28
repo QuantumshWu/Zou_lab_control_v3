@@ -75,9 +75,8 @@
 //!    error cancel and report).
 //! 5. Cancel / lost capture: [`cancel_selector_gesture`] for a started drag,
 //!    then clear the gesture.
-//! 6. Wheel: [`wheel_ticks`], then [`wheel_viewport`] (from the wheel's own
-//!    last request while the committed view is still its snap, an image
-//!    never asked below one source pixel) or [`wheel_camera_zoom`].
+//! 6. Wheel: [wheel_ticks], then [wheel_viewport] from the committed
+//!    continuous view, or [wheel_camera_zoom]. Sampling never snaps navigation.
 //! 7. Frame: [`SelectorSceneOwner::build`] over the snapshot's states (with
 //!    a derived classifier threshold in its kind's place) and the colour
 //!    state; [`pointer_latch`] tells the frontend whether to keep the button

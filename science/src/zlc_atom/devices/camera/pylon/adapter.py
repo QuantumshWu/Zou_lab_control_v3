@@ -181,16 +181,18 @@ class PylonCameraAdapter:
         if not devices:
             raise RuntimeError(f"no Basler camera with serial {self.config.serial!r}")
         device = factory.CreateDevice(devices[0])
-        camera = pylon.InstantCamera(device)
         try:
-            camera.Open()
+            camera = pylon.InstantCamera(device)
         except BaseException as primary:
             try:
-                camera.Close()
+                factory.DestroyDevice(device)
             except BaseException as secondary:
-                primary.add_note(f"pylon close after SDK Open failure also failed: {secondary}")
+                primary.add_note(f"pylon destroy after SDK attach failure also failed: {secondary}")
             raise
+        # Own the handle before Open: even a partial SDK failure is cleaned up
+        # by open()'s ordinary close path, with ownership retained on failure.
         self._camera = camera
+        camera.Open()
 
     def close(self) -> None:
         primary: BaseException | None = None
@@ -228,16 +230,27 @@ class PylonCameraAdapter:
             self._stop_and_restore_external()
         except BaseException as error:
             primary = error
-        closed = False
+        released = False
         try:
             camera.Close()
-            closed = True
         except BaseException as error:
             if primary is None:
                 primary = error
             else:
                 primary.add_note(f"pylon camera close also failed: {error}")
-        if closed:
+        try:
+            # Close releases control; DestroyDevice releases the transport
+            # object as well. Do this explicitly, before acknowledging Close:
+            # SDK nodes or a saved exception traceback can retain the wrapper.
+            # No receiver may access the device or its node maps at this point.
+            camera.DestroyDevice()
+            released = True
+        except BaseException as error:
+            if primary is None:
+                primary = error
+            else:
+                primary.add_note(f"pylon device destroy also failed: {error}")
+        if released:
             self._camera = None
             self._configured = False
             self._armed = False

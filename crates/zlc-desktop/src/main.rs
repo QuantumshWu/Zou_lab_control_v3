@@ -27,6 +27,7 @@ mod share;
 mod slm_host;
 mod readers;
 mod cadence;
+mod pointer_queue;
 mod installer;
 
 use std::{collections::{BTreeMap,BTreeSet,VecDeque}, path::PathBuf, sync::{Arc,mpsc,atomic::Ordering}};
@@ -1314,6 +1315,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     // instead of failing inside the worker (a missing panel read as a KeyError).
                     let queued = command["action"].as_str().unwrap_or("");
                     if !SCIENCE_ACTIONS.contains(&queued) { return Err(format!("Unknown command {queued:?}")); }
+                    if queue.back_mut().is_some_and(|last| pointer_queue::merge_scroll(last, &command)) { return Ok(()); }
                     if queue.len() >= 64 { return Err("Scientific command queue is full; no command was silently dropped".into()); }
                     let request = command["id"].clone();
                     // An operator's edit of one panel goes before the hovers waiting for the worker.

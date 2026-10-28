@@ -615,6 +615,17 @@ answer `{type_id, parameters}` is announced; off asks `publish {published:
 false}` and the server drops them. Any other device is served by the fabric
 itself and offered as `remote.device` (v2's `remote.tunable`):
 
+These are two transports behind the same Device Manager workflow, not two
+RF/SLM policies. Keep RF on the generic fabric: its USB/VISA driver already
+implements the plugin contract, so a separate RF server/client would repeat
+discovery, ownership, timeout and shutdown code. Keep the SLM and sequencer's
+existing device protocols: SLM commands carry revision checks, phase sequence
+ownership and presentation receipts; the pulse server owns board-specific
+SAFE, cancellation and single-owner operations and also serves headless clients.
+The fabric discovers and withdraws those endpoints without wrapping every
+hardware command in a second network protocol. Camera and other plugin devices
+use the same generic transport as RF, with array blocks as needed.
+
 A device can be served by another core: the publishing core hands an open
 device over (`PluginHost::lend_out`; its own runs, commands, tunes and calls are
 refused until `take_back`) and answers the using core's instance ops through
@@ -645,3 +656,20 @@ reconnect, `detach`, withdrawal). The user fails requests in flight on a break
 (never resent), redials for 10 s, and otherwise loses the instance as a
 crashed plugin's is (`endpoint_lost`: `HostEvent::Failed`, v2's device error state;
 Apply opens it again).
+
+Generic-device ownership changes are barriers: first refuse new operations,
+then wait for all admitted requests to actually answer, then confirm SAFE,
+and only then admit another owner or return local control. A caller timeout
+does not count as a plugin reply; concurrent operations are still pending until
+the plugin answers or ends. Failed draining or SAFE keeps the device reserved
+and reports the failure; withdrawing Remote retries the barrier. Closing a
+remote client releases its claim, never the publishing machine's device handle.
+Duplicate publication cannot overwrite an owner, and queued requests from a
+socket that has already closed cannot claim or drive a device. Servers with
+their own protocol retain their announcement if refusing peers fails, so Remote
+does not falsely report a successful withdrawal.
+Initial publication also waits for local operations admitted before Remote was
+enabled, including calls that have not yet sent their plugin request. It offers
+the device only after those calls settle, preserving their resulting hardware
+state; if that initial barrier fails, local control is restored and no remote
+owner has been admitted.

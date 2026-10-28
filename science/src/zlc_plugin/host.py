@@ -91,6 +91,7 @@ class Process:
         self.shared: dict[str, Any] = {}
         self._pending: dict[int, _Pending] = {}
         self._pending_lock = threading.Lock()
+        self._closed = False
         self._ids = itertools.count(1)
         self.device_log = _DeviceLog(self)
         threading.Thread(target=self._send_releases, name="zlc-plugin-release", daemon=True).start()
@@ -131,6 +132,8 @@ class Process:
         identity = next(self._ids)
         pending = _Pending()
         with self._pending_lock:
+            if self._closed:
+                raise PluginError("cancelled", "the plugin channel is closing")
             self._pending[identity] = pending
         value, blocks = self.encode(params)
         message: dict[str, Any] = {"t": "req", "id": identity, "op": op, "p": value, "blocks": blocks}
@@ -169,6 +172,24 @@ class Process:
     # --------------------------------------------------------------- serving
 
     def serve(self) -> int:
+        try:
+            return self._serve()
+        finally:
+            # Runs may be waiting for a core reply that can no longer arrive.
+            # Wake them before joining lanes, so their finally blocks can run.
+            with self._pending_lock:
+                self._closed = True
+                pending, self._pending = self._pending, {}
+            for waiter in pending.values():
+                waiter.message = {"error": error_payload(PluginError("cancelled", "the plugin channel closed"))}
+                waiter.event.set()
+            instances = list(self.instances.values())
+            for instance in instances:
+                instance.shutdown(wait=False)
+            for instance in instances:
+                instance.shutdown()
+
+    def _serve(self) -> int:
         while True:
             try:
                 message = self.channel.receive()
@@ -188,8 +209,6 @@ class Process:
             elif kind == "req":
                 if self._request(message) == "exit":
                     break
-        for instance in list(self.instances.values()):
-            instance.shutdown()
         return 0
 
     def _event(self, message: dict[str, Any]) -> None:
@@ -283,8 +302,7 @@ class Process:
         if op == "spi" and instance.concurrent(str(params.get("method", ""))):
             # A call the device declared it answers beside its lane (a cancel
             # while a playback holds the lane): on a thread of its own.
-            threading.Thread(target=instance._handle, args=(message,), name=f"zlc-call-{name}",
-                             daemon=True).start()
+            instance.dispatch_concurrent(message)
             return None
         instance.lane.put(message)
         return None
@@ -317,12 +335,37 @@ class Instance:
         self.runs: dict[str, Run] = {}
         self.prepared: dict[str, tuple[object, dict[str, Any]]] = {}
         self.lane: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._shutdown_requested = threading.Event()
+        self._calls = threading.Condition()
+        self._active_calls = 0
+        self._closing_device = False
         self._thread = threading.Thread(target=self._serve, name=f"zlc-lane-{name}", daemon=True)
         self._thread.start()
 
     def _serve(self) -> None:
+        try:
+            self._serve_lane()
+        finally:
+            # A lane owns its device from construction through destruction.
+            # Channel shutdown must not close concurrently with an unfinished
+            # Open/SDK call, nor miss a handle that Open has not returned yet.
+            runs = list(self.runs.values())
+            for run in runs:
+                run.cancel.set()
+            for run in runs:
+                run.thread.join()
+            try:
+                self.close_device()
+            except BaseException as error:
+                print(f"{self.name}: close at lane exit failed: {error}", file=sys.stderr)
+            else:
+                self._detach()
+
+    def _serve_lane(self) -> None:
         while True:
             message = self.lane.get()
+            if self._shutdown_requested.is_set():
+                return
             if message is not None:
                 if self.abandoned:
                     self.process.reply(int(message["id"]), error=PluginError("cancelled", "the instance is releasing an overdue operation"))
@@ -402,20 +445,48 @@ class Instance:
         declared = self.declared
         return isinstance(declared, DeviceType) and self.adapter is not None and method in declared.concurrent
 
-    def close_device(self) -> None:
-        if callable(self.closer):
-            self.closer()
-        self.closer, self.adapter = None, None
-        self.admit_peers, self.log_token = None, None
+    def dispatch_concurrent(self, message: dict[str, Any]) -> None:
+        with self._calls:
+            if self._closing_device or self._shutdown_requested.is_set():
+                self.process.reply(int(message["id"]), error=PluginError("cancelled", "the device is closing"))
+                return
+            self._active_calls += 1
+        def call():
+            try:
+                self._handle(message)
+            finally:
+                with self._calls:
+                    self._active_calls -= 1
+                    self._calls.notify_all()
+        try:
+            threading.Thread(target=call, name=f"zlc-call-{self.name}", daemon=True).start()
+        except BaseException:
+            with self._calls:
+                self._active_calls -= 1
+                self._calls.notify_all()
+            raise
 
-    def shutdown(self) -> None:
+    def close_device(self) -> None:
+        with self._calls:
+            self._closing_device = True
+            while self._active_calls:
+                self._calls.wait()
+        try:
+            if callable(self.closer):
+                self.closer()
+            self.closer, self.adapter = None, None
+            self.admit_peers, self.log_token = None, None
+        finally:
+            with self._calls:
+                self._closing_device = False
+
+    def shutdown(self, *, wait: bool = True) -> None:
+        self._shutdown_requested.set()
         for run in list(self.runs.values()):
             run.cancel.set()
-        try:
-            self.close_device()
-        except Exception as error:  # noqa: BLE001 -- the process is ending; say what failed
-            print(f"{self.name}: close at shutdown failed: {error}", file=sys.stderr)
         self.lane.put(None)
+        if wait:
+            self._thread.join()
 
     def stop_run(self, run: str) -> None:
         current = self.runs.get(run)
@@ -505,9 +576,13 @@ def _configure(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _close(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
-    for run in list(instance.runs.values()):
+    runs = list(instance.runs.values())
+    for run in runs:
         run.cancel.set()
+    for run in runs:
         run.thread.join(timeout=10.0)
+        if run.thread.is_alive():
+            raise PluginError("timeout", "the node run has not stopped; its instance is retained")
     instance.close_device()
     return {"state": "closed"}
 

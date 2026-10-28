@@ -1,9 +1,6 @@
-//! Navigation on a real session, through the pointer path the desktop
-//! drives: the wheel zooms an image from where it asked the view to be (not
-//! from that request put on the pixel grid), with any step size, down to one
-//! source pixel and back; a pan or home restarts it; a locked series moves
-//! one per whole notch; a small-valued colour rail and axis keep their
-//! drags and reach.
+//! Continuous image navigation through the real raster-pointer session path.
+//! Viewports are independent of source pixel quantization; samples and ROI
+//! semantics stay with the projection layer.
 
 use std::sync::Arc;
 
@@ -115,75 +112,84 @@ fn drawn(session: &PlotSession) -> (NumericRange, NumericRange) {
 
 fn centre(range: NumericRange) -> f64 { (range.low + range.high) / 2.0 }
 
-/// Wheel `step` until the view has stood still for longer than any whole
-/// pixel can take at that step (a third of the view: from 3 pixels to 1),
-/// at most `limit` events; every event shrinks (or grows) the view or
-/// leaves it, never the other way.  The event that last moved it, and the
-/// view's widths.
-fn wheel_until_still(session: &mut PlotSession, step: f64, limit: usize) -> (usize, Vec<f64>) {
-    let settle = (3f64.ln() / (step.abs() * 1.1f64.ln())).ceil() as usize + 2;
-    let mut widths = vec![view(session).0.span()];
-    let mut moved = 0;
-    for event in 1..=limit {
-        wheel(session, step);
-        let width = view(session).0.span();
-        let last = *widths.last().unwrap();
-        assert!(if step < 0.0 { width <= last } else { width >= last }, "event {event}: {last} -> {width}");
-        if width != last { moved = event; widths.push(width); }
-        if event - moved == settle { break; }
-    }
-    (moved, widths)
+fn close(a: f64, b: f64) { assert!((a - b).abs() <= 1e-10 * a.abs().max(b.abs()).max(1.0), "{a} != {b}"); }
+fn same_view(a: (NumericRange, NumericRange), b: (NumericRange, NumericRange)) {
+    for (a, b) in [(a.0.low, b.0.low), (a.0.high, b.0.high), (a.1.low, b.1.low), (a.1.high, b.1.high)] { close(a, b); }
 }
 
-/// The events a zoom by `ratio` takes at `step` (a notch is 1.1).
-fn events_for(ratio: f64, step: f64) -> f64 { ratio.ln() / (step.abs() * 1.1f64.ln()) }
-
-/// Small wheel steps keep zooming an image down to one source pixel (the
-/// frame's centre is a pixel's centre), and the first step back out moves
-/// it; the same events in and out bring the view back exactly.
+/// Subpixel movement is real view state, not an invisible wheel remainder.
+/// Each touchpad event changes the view, even when only a few cells remain.
 #[test]
-fn small_wheel_steps_zoom_an_image_to_one_pixel_and_back() {
+fn small_wheel_steps_are_continuous_below_one_source_pixel() {
     let mut plot = session(frame(45, 61, None), PlotKind::Image);
-    let home = view(&plot);
-    assert_eq!((home.0.span(), home.1.span()), (61.0, 61.0), "home: the whole frame, letterboxed square");
-    // Touchpad-sized events (deltaY 8: 0.08 notch) in, then as many out.
-    for _ in 0..500 { wheel(&mut plot, -0.08); }
-    let zoomed = view(&plot);
-    assert!(zoomed.0.span() <= 4.0, "500 touchpad events (40 notches) zoom in: {zoomed:?}");
-    for _ in 0..500 { wheel(&mut plot, 0.08); }
-    assert_eq!(view(&plot), home, "the same travel out is home again");
-    for step in [-0.08, -1.0] {
-        let (events, widths) = wheel_until_still(&mut plot, step, 10_000);
-        let last = view(&plot);
-        assert_eq!((last.0.span(), last.1.span()), (1.0, 1.0), "step {step}: one source pixel fills the view after {events} events: {widths:?}");
-        assert!((events as f64 - events_for(61.0, step)).abs() <= 1.0, "step {step}: there when the wheel asked for one pixel ({events} events)");
-        assert_eq!((centre(last.0), centre(last.1)), (centre(home.0), centre(home.1)), "about the view's centre");
-        wheel(&mut plot, -step);
-        assert!(view(&plot).0.span() > 1.0, "step {step}: the first event back out moves the view");
-        for _ in 0..60 { wheel(&mut plot, 1.0); }
-        assert!(view(&plot).0.span() >= 61.0, "and out again");
-        plot.reset_viewport().unwrap();
+    let range = NumericRange::new(29.0, 31.0).unwrap();
+    plot.set_x_limits(range.low, range.high).unwrap();
+    let start = view(&plot);
+    for event in 1..=330 {
+        let before = view(&plot);
+        wheel(&mut plot, -0.08);
+        let after = view(&plot);
+        assert!(after.0.span() < before.0.span(), "event {event} stalled");
+        close(after.0.span(), 2.0 * 1.1f64.powf(-0.08 * event as f64));
+        close(centre(after.0), centre(start.0));
+        close(centre(after.1), centre(start.1));
+        same_view(after, drawn(&plot));
     }
+    assert!(view(&plot).0.span() < 0.2, "a source pixel is not a navigation limit");
+    let before = view(&plot);
+    wheel(&mut plot, 0.08);
+    assert!(view(&plot).0.span() > before.0.span(), "first reverse event must move");
+    for _ in 1..330 { wheel(&mut plot, 0.08); }
+    same_view(view(&plot), start);
 }
 
-/// The camera frame (an even width: the view's centre is a pixel edge, so
-/// the closest view is the two pixels beside it) zooms down to them with
-/// notches and with touchpad steps; it used to stop at 20 pixels with
-/// notches and at hundreds with touchpad steps.
+/// Even camera dimensions put the view centre on a pixel edge. That edge
+/// must not stop zoom at two cells, or cause a visible stair-step at 20 cells.
 #[test]
-fn the_camera_frame_zooms_to_the_pixels_at_its_centre() {
-    for step in [-1.0, -0.08, -0.013] {
-        let mut plot = session(frame(372, 460, None), PlotKind::Image);
-        let (events, widths) = wheel_until_still(&mut plot, step, 20_000);
-        let last = view(&plot);
-        assert_eq!((last.0.span(), last.1.span()), (2.0, 2.0), "step {step}, after {events} events: {:?}", &widths[widths.len().saturating_sub(8)..]);
-        // No stall on the way: the two pixels show when the wheel asked for two.
-        assert!((events as f64 - events_for(230.0, step)).abs() <= 1.0, "step {step}: {events} events");
+fn camera_zoom_keeps_advancing_through_cell_edges() {
+    for (rows, columns) in [(372, 460), (45, 61)] {
+        let mut plot = session(frame(rows, columns, None), PlotKind::Image);
+        let home = view(&plot);
+        for notch in 1..=100 {
+            let before = view(&plot);
+            wheel(&mut plot, -1.0);
+            assert!(view(&plot).0.span() < before.0.span(), "notch {notch}");
+            close(view(&plot).0.span(), home.0.span() * 1.1f64.powi(-notch));
+        }
+        assert!(view(&plot).0.span() < 0.04);
+        if rows % 2 == 1 && columns % 2 == 1 {
+            // At this magnification the image axes lie inside the central
+            // source pixel. Check actual composed pixels, not only limits:
+            // fractional cropping must neither go blank nor sample a neighbour.
+            let value = (((rows / 2 * columns + columns / 2) * 7919) % 251) as f64;
+            let (low, high) = plot.renderer().resolved_color_limits().unwrap();
+            let code = (((value - low) / (high - low) * 256.0) as usize).min(255);
+            let cmap = plot.display_state().get("colormap").unwrap().as_str().unwrap().to_owned();
+            let expected = &zlc_plot::render::image::color_lut(&cmap).unwrap()[code * 4..code * 4 + 4];
+            let axes = plot_axes(&plot);
+            let front = plot.rgba().unwrap();
+            let (left, top, right, bottom) = axes.bounds;
+            for (fx, fy) in [(0.23, 0.37), (0.71, 0.29), (0.67, 0.79)] {
+                let x = ((left + fx * (right - left)) * f64::from(front.width)) as usize;
+                let y = ((top + fy * (bottom - top)) * f64::from(front.height)) as usize;
+                let offset = (y * front.width as usize + x) * 4;
+                assert_eq!(&front.pixels.as_slice()[offset..offset + 4], expected, "wrong image pixel at ({fx}, {fy})");
+            }
+        }
+        for _ in 0..100 { wheel(&mut plot, 1.0); }
+        let restored = view(&plot);
+        // Endpoint subtraction amplifies accumulated rounding after 100
+        // contractions/expansions. Normalize this round-trip error to the
+        // original view width, not the near-zero lower endpoint itself.
+        for (actual, expected) in [(restored.0, home.0), (restored.1, home.1)] {
+            for (actual, wanted) in [(actual.low, expected.low), (actual.high, expected.high)] {
+                assert!((actual - wanted).abs() <= 1e-11 * expected.span(), "round trip: {actual} != {wanted}");
+            }
+        }
     }
 }
 
-/// Any step size and any number of events land where one equivalent step
-/// does (up to the pixel grid, which both are put on).
+/// Batching a wheel burst changes neither the destination nor its centre.
 #[test]
 fn many_small_wheel_steps_are_one_big_step() {
     for (step, count) in [(-0.04, 25), (-0.08, 250), (-0.25, 40), (-1.0, 30), (0.1, 30), (1.0, 3)] {
@@ -191,10 +197,156 @@ fn many_small_wheel_steps_are_one_big_step() {
         for _ in 0..count { wheel(&mut many, step); }
         let mut one = session(frame(372, 460, None), PlotKind::Image);
         wheel(&mut one, step * count as f64);
-        assert_eq!(view(&many), view(&one), "{count} x {step}");
+        same_view(view(&many), view(&one));
     }
 }
 
+/// The live-data presentation and saved-configuration paths keep fractional
+/// navigation; they must not restart zoom from a rounded or earlier frame.
+#[test]
+fn continuous_zoom_survives_new_frames_and_session_reconstruction() {
+    let input = PlotInput::Dataset(Arc::new(frame(45, 61, None)));
+    let mut plot = session(frame(45, 61, None), PlotKind::Image);
+    let range = NumericRange::new(29.25, 30.75).unwrap();
+    plot.set_x_limits(range.low, range.high).unwrap();
+    for revision in 1..=12 {
+        wheel(&mut plot, -0.08);
+        let shown = view(&plot);
+        let configuration = plot.resolve_configuration(None, None, None, None, None, true, None, None, None, None).unwrap();
+        let prepared = plot.prepare_data(&input, Some(revision), Some(configuration.clone())).unwrap();
+        plot.present_prepared(prepared.clone(), Some(configuration.clone()), true).unwrap();
+        plot.finish_presentation(true, None);
+        assert_eq!(view(&plot), shown, "live frame {revision} changed navigation");
+        let restored = PlotSession::from_prepared(prepared, configuration, 1.0, "restored", services()).unwrap();
+        assert_eq!(view(&restored), shown, "restored frame {revision} changed navigation");
+        close(shown.0.span(), 1.5 * 1.1f64.powf(-0.08 * revision as f64));
+    }
+}
+
+/// The desktop document may draw gestures on the old frame while new data
+/// is pending, then replay them when data arrives. Continuous wheel travel
+/// must appear once, including fractional steps and a direction reversal.
+#[test]
+fn document_waiting_wheel_replay_preserves_the_continuous_view() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use zlc_plot::document::{axis_wire, DocumentRead, FigureDocument};
+    #[derive(Clone)]
+    struct CameraRead(Arc<Source>);
+    impl DocumentRead for CameraRead {
+        fn source(&self) -> &Arc<Source> { &self.0 }
+        fn provenance_json(&self) -> String { "null".into() }
+    }
+    let mut document = FigureDocument::<CameraRead>::new(services(), None);
+    document.execute(r#"{"action":"ready","id":1,"dpr":1.0,"targets":{},"target_requests":{}}"#,
+        BTreeMap::new(), None, None).unwrap();
+    document.finish_presentation(&BTreeSet::new(), &BTreeSet::new());
+    let panels = BTreeSet::from(["p".to_owned()]);
+    let reads = BTreeMap::from([("p".to_owned(), CameraRead(Arc::new(frame(45, 61, None))))]);
+    let mut binding = json!([{"panel":"p","signal":"frames","kind":"image","window":1,"epoch":1,"waiting":false,"reason":null}]);
+    let result = document.execute(&json!({"action":"sync_panels","id":2,"reset_document":true,
+        "inputs":binding,"targets":{},"target_requests":{"p":2}}).to_string(), reads.clone(), None, None).unwrap();
+    document.finish_presentation(&panels, &panels);
+    let mut target = result.state["panels"][0]["target"].clone();
+    let result = document.execute(&json!({"action":"configure","id":3,"panel":"p","inputs":binding,
+        "viewport":{"x":[29.25,30.75],"y":[21.25,22.75]},"targets":{"p":target},"target_requests":{"p":3}}).to_string(),
+        reads.clone(), None, None).unwrap();
+    document.finish_presentation(&panels, &panels);
+    target = result.state["panels"][0]["target"].clone();
+    binding[0]["waiting"] = json!(true);
+    binding[0]["reason"] = json!("Waiting for data");
+    let mut travel = 0.0;
+    for (index, steps) in [-0.08, -0.04, 0.013].into_iter().enumerate() {
+        let axes = plot_axes(&document.session("p").unwrap().lock().unwrap());
+        let (left, top, right, bottom) = axes.bounds;
+        let result = document.execute(&json!({"action":"pointer","event":"scroll","id":4+index,"panel":"p",
+            "steps":steps,"axes":axis_wire(&axes),"x":(left+right)/2.0,"y":(top+bottom)/2.0,
+            "inputs":binding,"targets":{"p":target},"target_requests":{"p":4+index}}).to_string(),
+            BTreeMap::new(), None, None).unwrap();
+        assert!(result.state["error"].is_null());
+        let fronts = result.fronts.keys().cloned().collect();
+        document.finish_presentation(&panels, &fronts);
+        target = result.state["panels"][0]["target"].clone();
+        travel += steps;
+        let shown = view(&document.session("p").unwrap().lock().unwrap());
+        close(shown.0.span(), 1.5 * 1.1f64.powf(travel));
+        close(shown.1.span(), shown.0.span());
+    }
+    let waiting = view(&document.session("p").unwrap().lock().unwrap());
+    binding[0]["waiting"] = json!(false);
+    binding[0]["reason"] = json!(null);
+    let result = document.execute(&json!({"action":"sync_panels","id":0,"inputs":binding,
+        "targets":{"p":target},"target_requests":{"p":6}}).to_string(), reads, None, None).unwrap();
+    assert!(result.state["error"].is_null());
+    let fronts = result.fronts.keys().cloned().collect();
+    document.finish_presentation(&panels, &fronts);
+    same_view(view(&document.session("p").unwrap().lock().unwrap()), waiting);
+}
+
+/// A finite precision limit must not accumulate hidden inward travel or
+/// bounce outward when the axis renderer expands a numerically singular range.
+#[test]
+fn numerical_zoom_limit_is_finite_and_reverses_immediately() {
+    use zlc_plot::interaction::gesture::wheel_viewport;
+    use zlc_plot::render::scale::AxisScale;
+    let mut x = NumericRange::new(1e6 - 1.0, 1e6 + 1.0).unwrap();
+    let mut y = NumericRange::new(2e6 - 1.0, 2e6 + 1.0).unwrap();
+    for _ in 0..1000 {
+        let before = (x, y);
+        (x, y) = {
+            let (x, y) = wheel_viewport(Some(x), Some(y), (x.low, x.high), (y.low, y.high),
+                (&AxisScale::Linear, &AxisScale::Linear), true, 1.1, -1.0, None).unwrap();
+            (x, y.unwrap())
+        };
+        assert!(x.span() > 0.0 && y.span() > 0.0);
+        assert!(x.span() <= before.0.span() && y.span() <= before.1.span());
+    }
+    for step in [1.0, 0.08, 0.04, 0.013] {
+        let (out, _) = wheel_viewport(Some(x), Some(y), (x.low, x.high), (y.low, y.high),
+            (&AxisScale::Linear, &AxisScale::Linear), true, 1.1, step, None).unwrap();
+        assert!(out.span() > x.span(), "reverse step {step} stalled");
+    }
+    let initial = NumericRange::new(-0.5, 0.5).unwrap();
+    let zoom = |range: NumericRange, steps| wheel_viewport(Some(range), None, (range.low, range.high), (0.0, 1.0),
+        (&AxisScale::Linear, &AxisScale::Linear), false, 1.1, steps, None).unwrap().0;
+    let one = zoom(initial, -1000.0);
+    let mut many = initial;
+    for _ in 0..1000 { many = zoom(many, -1.0); }
+    assert!(one.span() > 0.0 && one.span() < 1e-40);
+    assert!((one.span() - many.span()).abs() <= one.span() * 1e-12, "centred-at-zero bursts must compound identically");
+}
+
+#[test]
+fn log_zoom_near_one_keeps_distinct_values_at_the_precision_limit() {
+    use zlc_plot::interaction::gesture::wheel_viewport;
+    use zlc_plot::render::scale::AxisScale;
+    let mut range = NumericRange::new(0.5, 2.0).unwrap();
+    for _ in 0..1000 {
+        let before = range;
+        range = wheel_viewport(Some(range), None, (range.low, range.high), (0.0, 1.0),
+            (&AxisScale::Log, &AxisScale::Linear), false, 1.1, -1.0, None).unwrap().0;
+        assert!(range.low > 0.0 && range.span() > 1e-15);
+        assert!(range.span() <= before.span());
+    }
+    let out = wheel_viewport(Some(range), None, (range.low, range.high), (0.0, 1.0),
+        (&AxisScale::Log, &AxisScale::Linear), false, 1.1, 1.0, None).unwrap().0;
+    assert!(out.span() > range.span());
+}
+
+#[test]
+fn zoom_uses_finite_midpoints_for_large_valid_ranges() {
+    use zlc_plot::interaction::gesture::{wheel_zoom, wheel_viewport};
+    use zlc_plot::render::scale::AxisScale;
+    for (range, factor) in [(NumericRange::new(1e308, 1.2e308).unwrap(), 0.5),
+        (NumericRange::new(-1e308, 1e308).unwrap(), 0.5),
+        (NumericRange::new(-5e307, 5e307).unwrap(), 3.0)] {
+        let zoomed = wheel_zoom(range, &AxisScale::Linear, factor).unwrap();
+        assert!(zoomed.low.is_finite() && zoomed.high.is_finite() && zoomed.low < zoomed.high);
+    }
+    let range = NumericRange::new(-1e308, 1e308).unwrap();
+    let zoomed = wheel_viewport(Some(range), None, (range.low, range.high), (0.0, 1.0),
+        (&AxisScale::Linear, &AxisScale::Linear), false, 1.1, -1.0, None).unwrap().0;
+    assert!(zoomed.low > range.low && zoomed.high < range.high, "a finite range must not be clamped by overflow in its span");
+}
 /// A pan or home moves the view somewhere the wheel did not ask for: the
 /// next notch goes on from there, not from the wheel's earlier request.
 #[test]
@@ -219,7 +371,7 @@ fn a_pan_or_home_restarts_the_wheel() {
     assert_eq!(view(&plot), view(&fresh), "from home, as a fresh plot");
 }
 
-/// A pan carries the view by whole pixels and keeps its size, pan after
+/// A pan carries the continuous view and keeps its size, pan after
 /// pan (a shift short of a pixel used to grow it by one, and the next pan
 /// carried the wider view on).
 #[test]
@@ -227,29 +379,35 @@ fn a_pan_keeps_the_view_size() {
     let mut plot = session(frame(372, 460, None), PlotKind::Image);
     for _ in 0..40 { wheel(&mut plot, -1.0); }
     let zoomed = view(&plot);
-    assert_eq!(zoomed.0.span(), 12.0);
+    close(zoomed.0.span(), 460.0 * 1.1f64.powi(-40));
     let mut last = zoomed;
-    for (index, to) in [(0.57, 0.5), (0.61, 0.43), (0.38, 0.55), (0.5, 0.71), (0.45, 0.45)].into_iter().enumerate() {
+    for to in [(0.57, 0.5), (0.61, 0.43), (0.38, 0.55), (0.5, 0.71), (0.45, 0.45)] {
+        let axes = plot_axes(&plot);
+        let canvas = plot.renderer().canvas_size();
         pointer(&mut plot, PointerAction::Press, (0.5, 0.5), Some(2), 0.0);
         pointer(&mut plot, PointerAction::Move, ((0.5 + to.0) / 2.0, (0.5 + to.1) / 2.0), Some(2), 0.0);
         let dragging = drawn(&plot);
         pointer(&mut plot, PointerAction::Move, to, Some(2), 0.0);
         pointer(&mut plot, PointerAction::Release, to, Some(2), 0.0);
         let panned = view(&plot);
-        assert_eq!((dragging.0.span(), panned.0.span(), panned.1.span()), (12.0, 12.0, 12.0), "pan {index}: {last:?} -> {panned:?}");
-        // The hand's travel, to the nearest pixel (12 pixels across the box).
-        let travel = ((to.0 - 0.5) * 12.0, (0.5 - to.1) * 12.0);
-        assert!((centre(last.0) - centre(panned.0) - travel.0).abs() <= 0.5, "pan {index}: x moved with the hand");
-        assert!((centre(panned.1) - centre(last.1) - travel.1).abs() <= 0.5, "pan {index}: y moved with the hand");
+        for span in [dragging.0.span(), panned.0.span(), panned.1.span()] { close(span, zoomed.0.span()); }
+        // Pointer coordinates are whole canvas pixels, while the view is
+        // continuous in source coordinates. Account only for that rounding.
+        let (left, top, right, bottom) = axes.bounds;
+        let point = |(x, y): (f64, f64)| (((left + x * (right - left)) * canvas.width).trunc(),
+            ((1.0 - (top + y * (bottom - top))) * canvas.height).trunc());
+        let (start, end) = (point((0.5, 0.5)), point(to));
+        let travel = ((end.0 - start.0) / ((right - left) * canvas.width) * (axes.x_limits.1 - axes.x_limits.0),
+            (end.1 - start.1) / ((bottom - top) * canvas.height) * (axes.y_limits.1 - axes.y_limits.0));
+        close(centre(last.0) - centre(panned.0), travel.0);
+        close(centre(last.1) - centre(panned.1), travel.1);
         last = panned;
     }
 }
 
-/// The view snapped on coordinates of a small physical pitch is its own
-/// snap: the cell edges are taken within binary noise of the coordinates
-/// themselves (a slack in the axis' unit was below that noise).
+/// Restating a continuous view on small physical coordinates keeps it exact.
 #[test]
-fn an_image_view_on_physical_coordinates_is_its_own_snap() {
+fn an_image_view_on_physical_coordinates_round_trips_exactly() {
     let x: Vec<f64> = (0..61).map(|i| 1.0e-3 + i as f64 * 6.5e-6).collect();
     let y: Vec<f64> = (0..45).map(|i| 2.0e-3 + i as f64 * 6.5e-6).collect();
     let mut plot = session(frame(45, 61, Some((y, x))), PlotKind::Image);
