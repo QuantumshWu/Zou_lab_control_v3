@@ -50,7 +50,9 @@ test('a p̄(T) outside the tolerance is computed and shown, with its estimated e
     const bad=result({timesUs:[0],meanError:.0072});change(bad);assert.throws(()=>read(bad),/长期布居误差估计/);
   }
   // 'not-converged': nothing usable computed -- no populations, never within the tolerance.
-  const none=result({timesUs:[0],mean:false});none.asymptoticStatus='not-converged';assert.equal(read(none).steady.converged,false);
+  const none=result({timesUs:[0],mean:false});
+  Object.assign(none,{asymptoticStatus:'not-converged',horizonUs:1e6,asymptoticHorizons:[1e5,1e6,null].map(horizonUs=>({horizonUs,status:'not-converged',withinTolerance:false}))});
+  assert.equal(read(none).steady.converged,false);
   none.asymptoticWithinTolerance=true;assert.throws(()=>read(none),/长期布居误差估计/);
 });
 

@@ -225,10 +225,10 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 ### 6.10 T 时刻的长期布居 p̄(T)
 
 - p̄(T) 是时刻 t = T 的布居，只把该时刻附近的快振荡（激光间的拍频与光频微运动）平均掉，即 T 时刻态的零频 Fourier 分量（相位平均，或局部时间平均）。它不是 0 到 T 的时间平均；T = ∞ 是 t → ∞ 的极限。两个求解器都按这个定义计算。界面上统一写"时刻 T""T 时刻的长期布居 p̄(T)""相位平均"，不写"观察时长"或"长期时间平均"。
-- 时刻 T 可选 ∞ · 1 s · 100 ms，默认 1 s。它存在 `dynamics.meanHorizonUs`（1e5 / 1e6 / null，必需）；它参与动力学缓存键，但不影响有限时间轨迹的缓存键。改变它时只重算长期平均，已算好的轨迹保留。
+- 时刻 T 可选 ∞ · 1 s · 100 ms，默认 1 s。它存在 `dynamics.meanHorizonUs`（1e5 / 1e6 / null，必需）。T 不进入任何输入键：长期平均按 T 缓存（见 §6.18），有限时间轨迹与 T 无关。
 - 控件原本应放在能级图基态处原来写"长期平均 / 长期布居"的位置，但那里与"5S₁/₂"标签同一行，900 px 时只剩约 95 px，放不下三段控件，所以放在工具栏的模式选择旁边。图上该处改为符号 p̄(T)。
 - 模式选择为"长期布居 p̄ / 指定时刻 p(t)"。各处读数和标签写 p̄(1 s)、p̄(100 ms)、p̄(∞)。标签写的是结果实际所在的时刻 T：求解器回传 `horizonUs` 时用回传值，不回传时就是 t→∞（目前的求解器都是这样）。
-- 请求选项为 `meanHorizonUs`。求解器若回传 `horizonUs`，必须与请求一致；`scripts/native-protocol.mjs` 把它原样传给本机求解器。
+- 请求选项为 `meanHorizonUs`。带长期平均的结果必须回传 `horizonUs`（算出与否都回传），且与请求一致；`scripts/native-protocol.mjs` 把它原样传给本机求解器。
 - 计算详情中，最慢弛豫时间长于所选时刻 T 时，紧接其下加一行，例如"最慢弛豫约 2.9 s，长于 1 s：尚未到达 t→∞ 的稳态"。
 
 ### 6.11 求解器的新结果
@@ -297,3 +297,10 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 - 可选（本身就是可有可无的）：`display`（读数偏好）；激光的 `referenceStateId`、`referenceProcess`，以及别的强度方式留下的 `powerMW`、`waistUm`、`numericalAperture`；参考能级的 `photon`；混合初态的 `dynamics.initialState`，热分布时还有 `dynamics.temperatureUnit`（且只在热分布时有）；派生的 `frequencyAnchor`、`intensityAnchor`（没有时由输入算出，有时只在指纹相符时使用）。
 - 取消的旧写法：`initialF/initialM`、`dynamics.laserId`、`dynamics.quality`、`dynamics.populationTolerance`、激光的 `regime`、`detuningMHz/referenceTransition/frequencyMode/wavelengthNm/detuningUnit`、以角度 `thetaDeg/phiDeg` 和 `directionAnchor` 写的方向、预设与跟随标记，以及缺省 `meanHorizonUs`、单位、`showLightShift`、`phaseDeg`、`intensityMode` 时的补齐。
 
+### 6.18 三个时刻 T 一次算出，切换 T 即时显示（2026-10-28）
+
+- **求解器契约**：每次长期平均的计算都给出三个标准时刻的结果。请求的 T 仍在原来的长期平均字段中（`asymptoticPopulations` 等，`horizonUs`），另有 `asymptoticHorizons`：三项，每项 `{horizonUs: 1e5 | 1e6 | null, populations, densityReal, densityImag, estimatedError, withinTolerance, status, reason}`。完整请求带 `includeAsymptotic: false` 时只返回轨迹（`asymptoticStatus` 为 `not-requested`，没有 `horizonUs` 和 `asymptoticHorizons`）。
+- **严格读取**（`solver-client.ts`）：请求了长期平均（算出与否）就必须有 `horizonUs` 和 `asymptoticHorizons`，没有请求就都不能有。列表恰好三项，三个 T 各一项（顺序不限）；每项按主字段的规则读：状态是已知的计算结果或 `not-converged`；算出的项有 32 个概率、复密度（对角与布居一致、厄米、正性子式）、误差上界，且 `withinTolerance` 与"误差 ≤ 0.5%"一致；未算出的项没有布居和密度。请求的 T 那一项必须与主字段相同（状态、误差、是否在 ε 内、布居），读出后就是主字段的结果本身。方法、最慢弛豫时间和守恒量个数属于这次计算，各 T 共用；残差和长期密度的数值验证只属于请求的 T。没有兼容旧求解器的路径：旧求解器的长期平均结果因缺少 `asymptoticHorizons` 不再读入。
+- **缓存**（`current-results.ts`、`solve-plan.ts`、`dynamics-cache-key.ts`）：长期平均按"长期平均的输入 + T"缓存，输入是物理参数与初态（`meanInputsKey`），不含时长、采样点数和 T；轨迹按"轨迹的输入"（`trajectoryInputsKey`：长期平均的输入 + 时长 + 采样点数）缓存。每个结果带来的三个 T 全部存入。只保留当前输入的结果：物理参数或初态一变，三个 T 一起作废；时长或采样点数一变，只作废轨迹。回到早先的输入要重新计算。
+- **请求**：页面需要什么就只请求什么。长期布居模式（能级图 p̄）只需要 T 时刻的长期平均，其余页面还需要轨迹。缓存里有 T 时刻的长期平均时，切换 T 立即显示，不发请求；改时长或采样点数（以及其它不改变长期平均输入的修改）只请求轨迹（`includeAsymptotic: false`），长期平均用缓存中的。都没有时发完整请求；只缺长期平均时发只求长期平均的请求。正在进行的请求若能带来所缺的内容（长期平均的计算带来全部三个 T），换页面或换 T 不会取消或重发它。
+- 其余不变：计算期间不画中间结果，最终结果一次画出；"停止"后最后一个检查点成为结果（它的轨迹，以及在没有最终结果的 T 上它的长期平均，都标为中间结果）；每个时刻的误差标记照旧。

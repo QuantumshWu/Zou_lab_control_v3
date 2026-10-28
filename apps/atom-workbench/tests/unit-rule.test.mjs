@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {laserFrequencyMHz} from '../dist/js/atom-workbench/src/physics.js';
-import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
+import {trajectoryInputsKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {typedDigits} from '../dist/js/atom-workbench/src/unit-input.js';
 import {expressionBase,frequencyValue,setFrequencyBase,setFrequencyValue} from '../dist/js/atom-workbench/src/laser-frequency.js';
@@ -18,7 +18,7 @@ import {INTENSITY_MWCM2,WAIST_UM,intensityReading,laserIntensityMWcm2,laserWaist
   waistReading,writeLaserIntensity,writeLaserPower,writeLaserWaist} from '../dist/js/atom-workbench/src/laser-intensity.js';
 
 const roundtrip=scene=>validateScene(JSON.parse(JSON.stringify(scene)));
-const key=scene=>dynamicsCacheKey(scene,scene.dynamics,false);
+const key=scene=>trajectoryInputsKey(scene,scene.dynamics);
 /** The inspector's unit change on an input: the digits in the box, written in the new unit. */
 const pick=(read,write,unit)=>write(typedDigits(read().value),unit);
 const levels=scene=>{const a=analyze(scene);return [...a.ground,...a.D1,...a.D2];};

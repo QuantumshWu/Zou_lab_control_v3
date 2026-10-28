@@ -68,6 +68,9 @@ export interface SteadyResult {
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];
   activeLaserIds:string[];steady:SteadyResult;
+  /** The mean at every standard time T (MEAN_HORIZONS_US order), all from the one mean run;
+   * the requested T's is `steady` itself. Absent when no mean was requested. */
+  horizonMeans?:SteadyResult[];
   metrics:{totalMs:number};
   validation:{maxTraceError:number;minPopulation:number};
   /** Estimated error of returned populations and all declared groups only. */
