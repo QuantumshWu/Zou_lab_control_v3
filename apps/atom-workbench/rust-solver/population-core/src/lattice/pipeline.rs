@@ -91,7 +91,7 @@ pub struct Checkpoint{
 }
 
 #[derive(Clone,Debug,Default)]
-pub struct Timing{pub eigenbasis_ms:f64,pub explicit_set_ms:f64,pub setup_ms:f64,pub estimator_build_ms:f64,pub outputs_ms:f64,pub frame_ms:f64,pub frame_wait_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub projection_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
+pub struct Timing{pub eigenbasis_ms:f64,pub explicit_set_ms:f64,pub setup_ms:f64,pub estimator_build_ms:f64,pub outputs_ms:f64,pub frame_ms:[f64;3],pub frame_wait_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub projection_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
 
 pub struct Solution{
     pub explicit:ExplicitSet,pub modes:Vec<Charge>,pub translations:Vec<Charge>,
@@ -318,7 +318,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     let work=lattice.work().clone();
     let conserved=if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{last.conserved};
     timing.solves_ms=work.milliseconds;timing.images_ms=space.images_ms;timing.projection_ms=galerkin.milliseconds;timing.total_ms=started.elapsed().as_secs_f64()*1e3;
-    timing.frame_ms=frame.milliseconds().iter().sum();
+    timing.frame_ms=frame.milliseconds();
     Ok(Solution{modes,translations:space.translations(),trajectory:projected,projection,horizons:last.horizons.clone(),steady:last.steady.clone(),
         horizon_fields,steady_field,steady_residual,estimate:last.estimate.clone(),conserved,slowest:last.slowest,
         columns:space.columns.clone(),dimension:model.r,images:space.basis.len(),work,ledger:ledger.clone(),timing,checkpoints,explicit:explicit.clone()})

@@ -34,11 +34,18 @@ use super::estimator::blocks::BlockSystem;
 use super::estimator::kernels::{KernelRule,SwKernels};
 use crate::parallel::Execution;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize,Ordering};
 
+/// Fewest blocks per task of the metric's coordinate changes (each GEMM
+/// reads its d x d matrix once per task).
+const METRIC_BLOCKS:usize=16;
 /// Columns of N per task.
 const NORMAL_PANEL:usize=64;
-/// Blocks per task of the metric's coordinate changes.
-const METRIC_BLOCKS:usize=16;
+/// The metric forms N = V^-H V^-1 (a d x d x d product) once it has
+/// applied d / NORMAL_SHARE blocks with V^-1 and V^-H separately: at most
+/// that share of N's cost goes to the second product, and a short request
+/// never forms N.
+const NORMAL_SHARE:usize=4;
 
 /// A batch of fields in the frame: M x on the canonical modes (each block
 /// times its mode's weight), the eigen-coordinates E^-1 x and their
@@ -81,29 +88,35 @@ impl<'p> SwFrame<'p>{
             let class=BlockSystem::new(&self.prepared.lapack,basis,kernels,(0..kernels.steps.len()).collect(),self.prepared.generator.n,self.horizon)?;
             Ok((class,clock.elapsed().as_secs_f64()*1e3))}).as_ref().map(|x|&x.0).map_err(|e|e.clone())
     }
-    /// N = V^-H V^-1 by column panels over the workers.
+    /// N = V^-H V^-1 by column panels over the workers (`SwMetric`
+    /// forms it once it pays).
     pub fn normal(&self)->Result<&[C],String>{
         self.normal.get_or_init(||{let class=self.class()?;let clock=Instant::now();
-            let d=self.prepared.generator.n*self.prepared.generator.n;
-            let inv=&class.inverse;let mut adjoint=vec![ZERO;d*d];for j in 0..d{for i in 0..d{adjoint[j+d*i]=conj(inv[i+d*j]);}}
-            let panels:Vec<usize>=(0..d).step_by(NORMAL_PANEL).collect();let(adjoint,lapack)=(&adjoint,&self.prepared.lapack);
-            let parts=Execution::new()?.map(panels,|start|->Result<Vec<C>,String>{let width=NORMAL_PANEL.min(d-start);let mut out=vec![ZERO;d*width];
-                lapack.complex_gemm().multiply(d,width,d,ONE,adjoint,d,&inv[start*d..],d,ZERO,&mut out,d)?;Ok(out)});
+            let(d,inverse,lapack)=(self.prepared.generator.n*self.prepared.generator.n,&class.inverse,&self.prepared.lapack);
+            let parts=Execution::new()?.map((0..d).step_by(NORMAL_PANEL).collect(),|start|->Result<Vec<C>,String>{
+                let width=NORMAL_PANEL.min(d-start);let mut out=vec![ZERO;d*width];
+                lapack.complex_gemm().multiply_adjoint(d,width,d,ONE,inverse,d,&inverse[start*d..],d,ZERO,&mut out,d)?;Ok(out)});
             let mut normal=Vec::with_capacity(d*d);for part in parts{normal.extend(part?);}
             Ok((normal,clock.elapsed().as_secs_f64()*1e3))}).as_ref().map(|x|x.0.as_slice()).map_err(|e|e.clone())
     }
-    /// Every part (the projection's metric reads all three).
-    pub fn build(&self)->Result<(),String>{self.normal().map(|_|())}
+    /// The parts the projection's metric needs from its first column: the
+    /// kernels and the block (the frame's thread).
+    pub fn build(&self)->Result<(),String>{self.class().map(|_|())}
     /// Build times (ms) of the parts built so far: kernels, block, N.
     pub fn milliseconds(&self)->[f64;3]{
         let ms=|x:Option<f64>|x.unwrap_or(0.);
-        [ms(self.kernels.get().and_then(|r|r.as_ref().ok()).map(|x|x.1)),ms(self.class.get().and_then(|r|r.as_ref().ok()).map(|x|x.1)),ms(self.normal.get().and_then(|r|r.as_ref().ok()).map(|x|x.1))]
+        [ms(self.kernels.get().and_then(|r|r.as_ref().ok()).map(|x|x.1)),ms(self.class.get().and_then(|r|r.as_ref().ok()).map(|x|x.1)),
+            ms(self.normal.get().and_then(|r|r.as_ref().ok()).map(|x|x.1))]
     }
 }
 
 /// The frame's metric M = T^H T on a lattice's fields.
 pub struct SwMetric<'f>{
-    kernels:&'f SwKernels,normal:&'f [C],basis:&'f BlockEigenbasis,lapack:Arc<Lapack>,
+    /// The frame, its kernels, V^-1 of the second-order block (column-major
+    /// d x d) and the eigenbasis of L0'.
+    frame:&'f SwFrame<'f>,kernels:&'f SwKernels,inverse:&'f [C],basis:&'f BlockEigenbasis,lapack:Arc<Lapack>,
+    /// Blocks applied so far (`NORMAL_SHARE`).
+    applied:AtomicUsize,
     d:usize,
     /// Per mode: its canonical slot (or that of its mirror) and whether it
     /// is the mirror.
@@ -116,8 +129,8 @@ pub struct SwMetric<'f>{
     partner:Vec<usize>,
 }
 impl<'f> SwMetric<'f>{
-    pub fn new(frame:&'f SwFrame<'_>,basis:&'f BlockEigenbasis,op:&LatticeOperator<'_>)->Result<Self,String>{
-        let(kernels,normal)=(frame.kernels()?,frame.normal()?);
+    pub fn new(frame:&'f SwFrame<'f>,basis:&'f BlockEigenbasis,op:&LatticeOperator<'_>)->Result<Self,String>{
+        let(kernels,inverse)=(frame.kernels()?,frame.class()?.inverse.as_slice());
         let d=op.n*op.n;let modes=op.modes.len();
         let canonical:Vec<usize>=(0..modes).filter(|&q|op.canonical[q]).collect();
         let weights=canonical.iter().map(|&q|if op.mirror[q]==q{1.}else{2.}).collect();
@@ -128,7 +141,7 @@ impl<'f> SwMetric<'f>{
             if let Some(&b)=op.index.get(&charge_minus(&op.modes[q],&step.charge)?){into[c].push((b,s));}
             if let Some(&a)=op.index.get(&charge_plus(&op.modes[q],&step.charge)?){out_of[c].push((a,s));}
         }}
-        Ok(Self{kernels,normal,basis,lapack:Arc::clone(&op.prepared.lapack),d,slot,canonical,weights,into,out_of,partner:(0..d).map(|j|basis.partner(j)).collect()})
+        Ok(Self{frame,kernels,inverse,basis,applied:AtomicUsize::new(0),lapack:Arc::clone(&op.prepared.lapack),d,slot,canonical,weights,into,out_of,partner:(0..d).map(|j|basis.partner(j)).collect()})
     }
     /// A mode's block of per-canonical coordinates (the mirror's by the
     /// partner rule).
@@ -140,13 +153,15 @@ impl<'f> SwMetric<'f>{
     /// each times its weight, one field after the other) for
     /// Hermitian-symmetric fields: Re <y, M x> summed over every mode is
     /// the plain sum of Re <y_q, (weighted M x)_q> over the canonical ones.
-    /// The coordinate changes and N as GEMMs over chunks of blocks on the
-    /// workers.
+    /// The coordinate changes and N (or V^-1 and V^-H before N is formed,
+    /// `NORMAL_SHARE`) as GEMMs over chunks of blocks, a few per worker and
+    /// at least METRIC_BLOCKS each.
     pub fn apply(&self,fields:&[&[C]])->Result<FrameFields,String>{
         let(d,cc,m)=(self.d,self.canonical.len(),fields.len());
         if m==0{return Ok(FrameFields{metric:Vec::new(),eigen:Vec::new(),transferred:Vec::new()});}
         let execution=Execution::new()?;let kernels=self.kernels;let basis=self.basis;
-        let chunks:Vec<(usize,usize)>=(0..m*cc).step_by(METRIC_BLOCKS).map(|s|(s,(s+METRIC_BLOCKS).min(m*cc))).collect();
+        let blocks=m*cc;let width=blocks.div_ceil(execution.tasks(blocks,blocks,METRIC_BLOCKS));
+        let chunks:Vec<(usize,usize)>=(0..blocks).step_by(width).map(|s|(s,(s+width).min(blocks))).collect();
         let gather=|parts:Vec<Result<Vec<C>,String>>|->Result<Vec<C>,String>{let mut out=Vec::with_capacity(d*m*cc);for p in parts{out.extend(p?);}Ok(out)};
         let coefficients=gather(execution.map(chunks.clone(),|(s,e)|{
             let blocks:Vec<&[C]>=(s..e).map(|i|{let(f,c)=(i/cc,i%cc);let q=self.canonical[c];&fields[f][q*d..(q+1)*d]}).collect();basis.coefficients(&blocks)}))?;
@@ -155,9 +170,16 @@ impl<'f> SwMetric<'f>{
         let t:Vec<Vec<C>>=execution.map(items.clone(),|(f,c)|{let field=&coefficients[f*cc*d..(f+1)*cc*d];
             let mut t=field[c*d..(c+1)*d].to_vec();for &(b,s)in &self.into[c]{kernels.subtract_kernel(s,&self.block(field,b),&mut t);}t});
         let t:Vec<C>=t.concat();
-        let(normal,lapack,t_ref)=(self.normal,&self.lapack,&t);
-        let v=gather(execution.map(chunks.clone(),|(s,e)|{let mut out=vec![ZERO;d*(e-s)];
-            lapack.complex_gemm().multiply(d,e-s,d,ONE,normal,d,&t_ref[s*d..e*d],d,ZERO,&mut out,d)?;Ok(out)}))?;
+        // v = N t.
+        let normal=if self.applied.fetch_add(blocks,Ordering::Relaxed)>=d/NORMAL_SHARE{Some(self.frame.normal()?)}else{None};
+        let(inverse,lapack,t_ref)=(self.inverse,&self.lapack,&t);
+        let v=gather(execution.map(chunks.clone(),|(s,e)|{let(gemm,width,t)=(lapack.complex_gemm(),e-s,&t_ref[s*d..e*d]);let mut out=vec![ZERO;d*width];
+            match normal{
+                Some(normal)=>gemm.multiply(d,width,d,ONE,normal,d,t,d,ZERO,&mut out,d)?,
+                None=>{let mut u=vec![ZERO;d*width];gemm.multiply(d,width,d,ONE,inverse,d,t,d,ZERO,&mut u,d)?;
+                    gemm.multiply_adjoint(d,width,d,ONE,inverse,d,&u,d,ZERO,&mut out,d)?;}
+            }
+            Ok(out)}))?;
         // w = (I - S~)^H v on the canonical modes.
         let w:Vec<Vec<C>>=execution.map(items,|(f,c)|{let field=&v[f*cc*d..(f+1)*cc*d];
             let mut w=field[c*d..(c+1)*d].to_vec();for &(a,s)in &self.out_of[c]{kernels.subtract_kernel_adjoint(s,&self.block(field,a),&mut w);}w});
@@ -198,5 +220,11 @@ mod tests{
         let xx:f64=metric.canonical.iter().enumerate().map(|(c,&q)|(0..d).map(|k|{let(a,b)=(x[q*d+k],mx[c*d+k]);a.re*b.re+a.im*b.im}).sum::<f64>()).sum();
         let norm:f64=tx.iter().map(|z|z.re*z.re+z.im*z.im).sum();
         assert!((xx-norm).abs()<=1e-11*norm,"{xx:e} against {norm:e}");
+        // N once d / NORMAL_SHARE blocks are applied: the same metric.
+        metric.apply(&vec![x.as_slice();d/NORMAL_SHARE]).unwrap();
+        let again=metric.apply(&[&x]).unwrap().metric;
+        assert!(frame.normal.get().is_some(),"N not formed");
+        let size=mx.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
+        assert!(mx.iter().zip(&again).all(|(a,b)|magnitude(C{re:a.re-b.re,im:a.im-b.im})<=1e-12*size),"N against V^-1 and V^-H");
     }
 }

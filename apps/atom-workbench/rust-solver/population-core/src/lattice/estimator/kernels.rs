@@ -32,6 +32,11 @@ use super::super::*;
 use super::super::eigenbasis::BlockEigenbasis;
 use crate::parallel::Execution;
 
+/// Columns of C~_s and K~_s per task: a step's coordinate change is a
+/// d x d x d product, spread over the workers even when the steps are
+/// fewer.
+const KERNEL_PANEL:usize=64;
+
 /// The support rule of the kernels.
 #[derive(Clone,Copy,Debug)]
 pub struct KernelRule{
@@ -83,27 +88,30 @@ impl SwKernels{
         let vectors=basis.eigenvector_blocks();let lambda=&basis.lambda;
         let execution=Execution::new()?;
         let computed:Vec<usize>=(0..steps.len()).filter(|&s|steps[s].charge>steps[steps[s].opposite].charge).collect();
-        let built=execution.map(computed.clone(),|s|->Result<(Vec<(usize,usize,C)>,Vec<C>),String>{
-            let step=&steps[s];let op=&prepared.generator.components[&step.charge].op;
-            // C~_s, column j = coordinates of C_s e_j.
-            let mut image=vec![ZERO;d*d];let mut scratch=Vec::new();
-            for j in 0..d{op.apply_into(n,ONE,&vectors[j*d..(j+1)*d],&mut image[j*d..(j+1)*d],&mut scratch);}
+        // C~_s (column j = coordinates of C_s e_j) and the kept entries of
+        // X~_s, by column panels.
+        let tasks:Vec<(usize,usize)>=(0..computed.len()).flat_map(|slot|(0..d).step_by(KERNEL_PANEL).map(move|start|(slot,start))).collect();
+        let panels=execution.map(tasks.clone(),|(slot,start)|->Result<(Vec<C>,Vec<(usize,usize,C)>),String>{
+            let step=&steps[computed[slot]];let op=&prepared.generator.components[&step.charge].op;let end=(start+KERNEL_PANEL).min(d);
+            let mut image=vec![ZERO;d*(end-start)];let mut scratch=Vec::new();
+            for j in start..end{op.apply_into(n,ONE,&vectors[j*d..(j+1)*d],&mut image[(j-start)*d..(j-start+1)*d],&mut scratch);}
             let blocks:Vec<&[C]>=image.chunks_exact(d).collect();
             let c=basis.coefficients(&blocks)?;drop(image);
             let mut entries=Vec::new();
-            for j in 0..d{for i in 0..d{
+            for j in start..end{for i in 0..d{
                 let den=C{re:lambda[i].re-lambda[j].re,im:lambda[i].im-lambda[j].im-step.nu};
-                let num=c[i+d*j];let s2=den.re*den.re+den.im*den.im;if s2==0.{continue;}
+                let num=c[i+d*(j-start)];let s2=den.re*den.re+den.im*den.im;if s2==0.{continue;}
                 let x=C{re:-(num.re*den.re+num.im*den.im)/s2,im:-(num.im*den.re-num.re*den.im)/s2};
                 let size=magnitude(x);
                 if size<=rule.cap&&(size>=rule.entry||(rule.horizon_rate>0.&&size*magnitude(num)*rule.horizon>=rule.horizon_rate)){entries.push((i,j,x));}
             }}
-            let k=second_order(&c,&entries,&partner,d);
-            Ok((entries,k))
+            Ok((c,entries))
         });
+        let mut whole:Vec<(Vec<C>,Vec<(usize,usize,C)>)>=computed.iter().map(|_|(Vec::with_capacity(d*d),Vec::new())).collect();
+        for(&(slot,_),panel)in tasks.iter().zip(panels){let(part,entries)=panel?;whole[slot].0.extend(part);whole[slot].1.extend(entries);}
         let mut second_order:Vec<Option<Vec<C>>>=(0..steps.len()).map(|_|None).collect();
-        for(&s,result)in computed.iter().zip(built){
-            let(entries,k)=result?;let o=steps[s].opposite;
+        for(&s,(c,entries))in computed.iter().zip(whole){
+            let k=second_order_block(&execution,&c,&entries,&partner,d);let o=steps[s].opposite;
             steps[o].entries=entries.iter().map(|&(i,j,x)|(partner[i],partner[j],conj(x))).collect();
             steps[s].entries=entries;second_order[s]=Some(k);
         }
@@ -132,21 +140,24 @@ impl SwKernels{
 }
 
 /// K~_s = 1/2 (C~_-s X~_s - X~_-s C~_s) from C~_s (column-major) and the
-/// entries of X~_s, with C~_-s[l, i] = conj C~_s[l*, i*] and the entries
-/// (i*, j*, conj x) of X~_-s. Both products run over contiguous columns:
-/// the first on C~_-s, the second on C~_s^T into K^T.
-fn second_order(c:&[C],entries:&[(usize,usize,C)],partner:&[usize],d:usize)->Vec<C>{
-    let mut minus=vec![ZERO;d*d];for i in 0..d{for l in 0..d{minus[l+d*i]=conj(c[partner[l]+d*partner[i]]);}}
-    let mut ct=vec![ZERO;d*d];for j in 0..d{for l in 0..d{ct[j+d*l]=c[l+d*j];}}
-    let(mut k,mut kt)=(vec![ZERO;d*d],vec![ZERO;d*d]);
-    for &(i,j,x)in entries{
-        // Column j of K gains 1/2 x C~_-s[:, i]; column i* of K^T loses 1/2 conj(x) C~_s[j*, :].
-        let half=scaled(x,0.5);for(t,&v)in k[j*d..(j+1)*d].iter_mut().zip(&minus[i*d..(i+1)*d]){mul_add(t,half,v);}
-        let y=scaled(conj(x),-0.5);let(row,from)=(partner[i],partner[j]);
-        for(t,&v)in kt[row*d..(row+1)*d].iter_mut().zip(&ct[from*d..(from+1)*d]){mul_add(t,y,v);}
-    }
-    for i in 0..d{for l in 0..d{add(&mut k[i+d*l],kt[l+d*i]);}}
-    k
+/// entries of X~_s in column order, with C~_-s[l, i] = conj C~_s[l*, i*]
+/// and the entries (i*, j*, conj x) of X~_-s: column j of K~_s gains
+/// 1/2 x C~_-s[:, i] for each entry (i, j, x) of its column, and X~_-s
+/// times column j of C~_s. One task per panel of columns.
+fn second_order_block(execution:&Execution,c:&[C],entries:&[(usize,usize,C)],partner:&[usize],d:usize)->Vec<C>{
+    debug_assert!(entries.windows(2).all(|w|w[0].1<=w[1].1));
+    let mut starts=vec![0;d+1];for &(_,j,_)in entries{starts[j+1]+=1;}for j in 0..d{starts[j+1]+=starts[j];}
+    let panels:Vec<usize>=(0..d).step_by(KERNEL_PANEL).collect();
+    let parts=execution.map(panels,|start|{let end=(start+KERNEL_PANEL).min(d);let mut k=vec![ZERO;d*(end-start)];
+        for(column,out)in(start..end).zip(k.chunks_exact_mut(d)){
+            for &(i,_,x)in &entries[starts[column]..starts[column+1]]{
+                let(half,source)=(scaled(x,0.5),&c[partner[i]*d..(partner[i]+1)*d]);
+                for(t,&p)in out.iter_mut().zip(partner){mul_add(t,half,conj(source[p]));}}
+            let source=&c[column*d..(column+1)*d];
+            for &(i,j,x)in entries{mul_add(&mut out[partner[i]],scaled(conj(x),-0.5),source[partner[j]]);}
+        }
+        k});
+    parts.concat()
 }
 
 #[cfg(test)]
