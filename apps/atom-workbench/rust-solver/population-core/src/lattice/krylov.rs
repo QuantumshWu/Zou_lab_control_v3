@@ -79,7 +79,6 @@ impl Vectors{
     }
     /// Mirrored blocks from their canonical partners, the centre Hermitian.
     pub fn mirror(&self,x:&mut[C]){mirror_field(x,self.n,&self.canonical,&self.mirror);}
-    /// Elements of the canonical blocks (what a pass over a vector reads).
     /// One pass: Re <v_i, u> and Re <v_i, w> over the basis, Re <u, u> and
     /// Re <u, w>.
     pub fn fused_dots(&self,basis:&[&[C]],u:&[C],w:&[C])->(Vec<f64>,Vec<f64>,f64,f64){

@@ -245,13 +245,13 @@ impl<'a> LatticeOperator<'a>{
         mirror_field(y,n,canonical,mirror);
         Ok(())
     }
-    /// What the operator leaves out of the true one on a Hermitian-symmetric
-    /// field x: the K^(1) rests but for their population rows when they are
-    /// dropped (`drops_k1_rest`), i nu_p (K_t^(1) rest - its population
-    /// rows) x_p on every fold edge p -> q of the lattice; None when the
-    /// rests are applied.
     /// Whether the operator leaves K^(1) rests out (the estimate charges them).
     pub fn drops_k1_rests(&self)->bool{self.drops_k1_rest}
+    /// What the operator leaves out of the true one on a Hermitian-symmetric
+    /// field x: the K^(1) rests but for their population rows when they are
+    /// dropped (`drops_k1_rests`), i nu_p (K_t^(1) rest - its population
+    /// rows) x_p on every fold edge p -> q of the lattice; None when the
+    /// rests are applied.
     pub fn left_out(&self,x:&[C])->Result<Option<Vec<C>>,String>{
         if !self.drops_k1_rest{return Ok(None);}
         let(n,d)=(self.n,self.n*self.n);let mut y=vec![ZERO;self.dimension()];
