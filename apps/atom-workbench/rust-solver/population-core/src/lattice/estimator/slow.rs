@@ -644,11 +644,11 @@ impl SlowPool{
         }
         // The remainders on the near modes: e^{i nu_q t} e^{theta_k t} Y_perp - its dressed-block propagation.
         if !remainders.is_empty(){
-            let lambda:Vec<C>=lattice.basis.lambda.iter().map(|z|C{re:z.re.min(0.),im:z.im}).collect();
+            let lambda:Vec<C>=lattice.basis()?.lambda.iter().map(|z|C{re:z.re.min(0.),im:z.im}).collect();
             let block:Vec<C>=times.iter().flat_map(|&t|lambda.iter().map(move|&z|cexp(z,t))).collect();
-            let readout_rows=lattice.basis.population_rows();
+            let readout_rows=lattice.basis()?.population_rows();
             let blocks:Vec<&[C]>=remainders.iter().map(|x|&x.3[..]).collect();
-            let coefficients=lattice.basis.coefficients(&blocks)?;self.work.frame_blocks+=remainders.len();
+            let coefficients=lattice.basis()?.coefficients(&blocks)?;self.work.frame_blocks+=remainders.len();
             for(i,(q,a,th,y))in remainders.iter().enumerate(){
                 let mut h=readout_rows.to_vec();for j in 0..d{let c=mul(*a,coefficients[j+d*i]);for row in 0..n{h[row+n*j]=mul(h[row+n*j],c);}}
                 let mut dec=vec![ZERO;n*t_count];gemm.multiply(n,t_count,d,ONE,&h,n,&block,d,ZERO,&mut dec,n)?;

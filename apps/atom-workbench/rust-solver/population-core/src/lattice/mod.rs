@@ -17,8 +17,10 @@
 //! - `floquet`: the Floquet frames of the lattice, the micromotion kernels
 //!   shared by the preconditioner and the error estimate;
 //! - `eigenbasis`: the real eigenbasis of the folded centre generator
-//!   (request-level, `LatticePrepared::eigenbasis`): exact batched block
-//!   solves, the eigen- and dressed coordinates;
+//!   (request-level, `LatticePrepared::eigenbasis` exact and
+//!   `clustered_eigenbasis`; by clusters, the one eigensystem method, shared
+//!   with the estimator's second-order blocks): batched block solves, the
+//!   eigen- and dressed coordinates;
 //! - `operator`: the lattice operator on a set of charges, whole or
 //!   restricted to target rows and source columns;
 //! - `preconditioner`: the Floquet-frame preconditioner with its centre
@@ -112,8 +114,10 @@ pub struct LatticePrepared{
     pub plan:classification::HarmonicPlan,
     pub fold:fold::FoldLibrary,
     pub floquet:floquet::FloquetKernels,
-    /// The eigenbasis of L0' = L0 + K_0^(0), computed on first use.
+    /// The eigenbasis of L0' = L0 + K_0^(0), exact and to the clusters'
+    /// error control, each computed on first use.
     eigenbasis:std::sync::OnceLock<Result<eigenbasis::BlockEigenbasis,String>>,
+    clustered:std::sync::OnceLock<Result<eigenbasis::BlockEigenbasis,String>>,
     pub lapack:Arc<Lapack>,
     /// Milliseconds: source, generator and classification, fold, Floquet
     /// kernels.
@@ -132,16 +136,30 @@ impl LatticePrepared{
         let fold_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
         let floquet=floquet::FloquetKernels::new(&generator,&plan,&fold,&lapack)?;
         let kernel_ms=clock.elapsed().as_secs_f64()*1e3;
-        Ok(Self{source,generator,plan,fold,floquet,eigenbasis:std::sync::OnceLock::new(),lapack,timing:[source_ms,plan_ms,fold_ms,kernel_ms]})
+        Ok(Self{source,generator,plan,fold,floquet,eigenbasis:std::sync::OnceLock::new(),clustered:std::sync::OnceLock::new(),lapack,timing:[source_ms,plan_ms,fold_ms,kernel_ms]})
     }
-    /// The real eigenbasis of the folded centre generator, computed once per
-    /// request (about 0.7 s for 32 states) and shared: the exact block
-    /// solves, the eigen-coordinates of the frame and of the error
-    /// propagation.
-    /// The eigenbasis when it has been built (never builds it).
-    pub fn eigenbasis_built(&self)->Option<&eigenbasis::BlockEigenbasis>{self.eigenbasis.get().and_then(|r|r.as_ref().ok())}
+    /// The eigenbases when they have been built (never builds them): exact,
+    /// clustered.
+    pub fn eigenbasis_built(&self)->[Option<&eigenbasis::BlockEigenbasis>;2]{
+        [self.eigenbasis.get().and_then(|r|r.as_ref().ok()),self.clustered.get().and_then(|r|r.as_ref().ok())]
+    }
+    /// The real eigenbasis of the folded centre generator, exact (0.7 s for
+    /// 32 states), computed once per request and shared: the eigen-coordinates
+    /// of the frame (its kernels, its block, the projection's metric), of the
+    /// error propagation and of the pole ordering. Five lasers + tweezer at
+    /// 20 us need it: with the clustered one (block solves to 1e-3, or to
+    /// 4e-6 with 30x tighter clusters) the reduced model grew 11-19
+    /// pseudo-modes and took 32 solves or none instead of 12.
     pub fn eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
-        self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::new(self)).as_ref().map_err(|e|e.clone())
+        self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::new(self,eigenbasis::ClusterControl::exact())).as_ref().map_err(|e|e.clone())
+    }
+    /// The eigenbasis to the clusters' error control (block solves to about
+    /// 1e-3, 0.25-0.3 s for 32 states): the explicit set, the ladder, the
+    /// error estimate's ring solves (refined) and a request that propagates
+    /// nothing. The explicit sets, the steady poles and their inner steps
+    /// are the exact basis's on every case.
+    pub fn clustered_eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
+        self.clustered.get_or_init(||eigenbasis::BlockEigenbasis::new(self,eigenbasis::ClusterControl::centre())).as_ref().map_err(|e|e.clone())
     }
     /// The near ball of order k: every charge reachable from 0 with at most k
     /// structural steps (explicit near steps above the structural floor and

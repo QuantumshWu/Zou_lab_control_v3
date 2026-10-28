@@ -202,7 +202,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
             "series":f.series.iter().map(|(q,rho,order)|json!({"charge":q,"ratio":rho,"orders":order})).collect::<Vec<_>>(),"milliseconds":f.milliseconds,
             "phaseMs":{"columns":f.phase_ms[0],"storage":f.phase_ms[1]},"targets":targets},
         "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2],"floquetKernels":prepared.timing[3]},
-        "floquet":floquet,"eigenbasis":prepared.eigenbasis_built().map(|e|json!({"milliseconds":e.milliseconds,"blocks":e.blocks,"largestBlock":e.largest_block,"condition":e.condition})),"run":run})
+        "floquet":floquet,"eigenbasis":prepared.eigenbasis_built().map(|b|b.map(|e|json!({"milliseconds":e.milliseconds,"clusters":e.clusters,"largestCluster":e.largest_cluster,"passes":e.passes,"condition":e.condition}))),"run":run})
 }
 
 /// One run of the pipeline for a request: the grid (empty for a mean
@@ -509,6 +509,33 @@ mod tests{
         let horizons=horizons.iter().map(|&t|{let c:Vec<C>=(0..k).map(|i|(0..r).fold(C::default(),|s,m|{let v=mul(ba[i+k*m],cexp(theta[m],t));C{re:s.re+v.re,im:s.im+v.im}})).collect();read(&c)}).collect();
         atom_population_core::lattice::estimator::gate::Outputs{trajectory,horizons,steady:Some(read(c))}
     }
+    /// The centre eigenbasis of a request (ATOM_VALIDATE_REQUEST): its build
+    /// time, clusters and block-solve residuals (`eigen_residual`).
+    #[test]
+    #[ignore]
+    fn eigenbasis_on_a_request(){
+        let request:Value=serde_json::from_str(&std::fs::read_to_string(std::env::var("ATOM_VALIDATE_REQUEST").expect("ATOM_VALIDATE_REQUEST")).unwrap()).unwrap();
+        let model:Model=serde_json::from_value(request["model"].clone()).unwrap();
+        let prepared=prepare_request(&model,&Options::default()).unwrap();let p=&prepared.lattice;
+        for(name,exact)in[("clustered",false),("exact",true)]{
+            let clock=Instant::now();let e=if exact{p.eigenbasis()}else{p.clustered_eigenbasis()}.unwrap();let ms=clock.elapsed().as_secs_f64()*1e3;
+            println!("{}",json!({"basis":name,"eigenbasisMs":ms,"clusters":e.clusters,"largestCluster":e.largest_cluster,"passes":e.passes,"condition":e.condition,"solveResidual":eigen_residual(p,e)}));
+        }
+    }
+    /// The relative residual |b - (L0' - i nu - xi) x| / |b| of the eigenbasis'
+    /// block solves against the dense centre generator, for a far, a complex
+    /// and a near-kernel shift.
+    fn eigen_residual(p:&LatticePrepared,basis:&atom_population_core::lattice::eigenbasis::BlockEigenbasis)->Vec<f64>{
+        type C=Complex64;
+        let l=p.centre_generator();let d=basis.dimension();
+        [(0.,C{re:20.,im:0.}),(3.,C{re:0.5,im:13.}),(0.,C{re:1e-3,im:0.})].iter().map(|&(nu,shift)|{
+            let b:Vec<C>=(0..d).map(|k|C{re:((k*7+3)%29)as f64/29.-0.5,im:((k*11+5)%31)as f64/31.-0.5}).collect();
+            let mut x=b.clone();basis.solve_blocks(&[nu],shift,&mut x).unwrap();
+            let mut worst=0_f64;let size=b.iter().map(|z|z.re.hypot(z.im)).fold(0.,f64::max);
+            for i in 0..d{let mut r=b[i];for k in 0..d{let(a,v)=(l[i*d+k],x[k]);r.re-=a.re*v.re-a.im*v.im;r.im-=a.re*v.im+a.im*v.re;}
+                let(sr,si)=(-shift.re,-shift.im-nu);let v=x[i];r.re-=sr*v.re-si*v.im;r.im-=sr*v.im+si*v.re;worst=worst.max(r.re.hypot(r.im));}
+            worst/size}).collect()
+    }
     #[test]
     #[ignore]
     fn lattice_estimator_against_r2_fixtures(){
@@ -620,7 +647,7 @@ mod tests{
             }
             let seed_macs=estimate.pool.as_ref().map_or(0.,|p|p.work.qr_macs);
             println!("{}",json!({"case":case,"modes":n_modes,"near":estimate.lattice.near.len(),"ring":estimate.lattice.ring.len(),"operatorDeviation":operator,"buildMs":build_ms,
-                "kernelMs":estimate.lattice.build_ms()[0],"classMs":estimate.lattice.build_ms()[1],"classes":estimate.lattice.classes().map_or(0,|c|c.len()),"largestCluster":estimate.lattice.classes().ok().and_then(|c|c.iter().map(|c|c.largest_cluster).max()),"eigenbasisMs":p.eigenbasis().unwrap().milliseconds,"eigenBlocks":p.eigenbasis().unwrap().blocks,"largestBlock":p.eigenbasis().unwrap().largest_block,
+                "kernelMs":estimate.lattice.build_ms()[0],"classMs":estimate.lattice.build_ms()[1],"classes":estimate.lattice.classes().map_or(0,|c|c.len()),"largestCluster":estimate.lattice.classes().ok().and_then(|c|c.iter().map(|c|c.largest_cluster).max()),"eigenbasisMs":p.eigenbasis().unwrap().milliseconds,"eigenClusters":p.eigenbasis().unwrap().clusters,"eigenLargestCluster":p.eigenbasis().unwrap().largest_cluster,"eigenPasses":p.eigenbasis().unwrap().passes,"eigenCondition":p.eigenbasis().unwrap().condition,"eigenSolveResidual":eigen_residual(&p,p.eigenbasis().unwrap()),
                 "seeds":seed_count,"seedSteps":seed_steps,"poleSeeds":pole_seeds,"seedMacs":seed_macs,"d":p.generator.n*p.generator.n,"kernelEntries":estimate.lattice.kernels().unwrap().diagnostics.entries,"smallParameter":estimate.lattice.kernels().unwrap().diagnostics.largest,"ledger":ledger.total()}));
             // The pipeline's lattice: the slow pool's operator and steady preconditioner.
             let mut solver=atom_population_core::lattice::poles::Lattice::new(&p,LatticeSets{explicit:sets.explicit.clone(),ring:sets.ring.clone()}).unwrap();

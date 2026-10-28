@@ -1,22 +1,43 @@
 //! The eigenbasis of the folded centre generator L0' = L0 + K_0^(0): the
-//! dressed blocks B_q = L0' - i nu_q of every mode, solved exactly, the
+//! dressed blocks B_q = L0' - i nu_q of every mode and their solves, the
 //! eigen-coordinates of the Schrieffer-Wolff frame (`frame`) and of the
 //! error estimate's propagation (`estimator`), and the dressed coordinates
 //! of the pole ordering's error transform (`reduced`).
 //!
 //! L0' maps Hermitian matrices to Hermitian matrices, so in the orthonormal
 //! Hermitian basis (E_ii; (E_ij + E_ji)/sqrt2 and i (E_ij - E_ji)/sqrt2 for
-//! i < j) it is a real d x d matrix: one real eigendecomposition, about a
-//! quarter of the complex one's cost, and complex blocks take complex
-//! coordinates in the same basis. A complex pair lambda, conj(lambda) with
-//! the real eigenvector columns v_r, v_i has the eigenvectors v_r +- i v_i,
-//! and a vector a v_r + b v_i has the coefficients (a -+ i b)/2 on them.
+//! i < j) it is a real d x d matrix: real eigensystems, about a quarter of
+//! the complex ones' cost, and complex blocks take complex coordinates in
+//! the same basis. A complex pair lambda, conj(lambda) with the real
+//! eigenvector columns v_r, v_i has the eigenvectors v_r +- i v_i, and a
+//! vector a v_r + b v_i has the coefficients (a -+ i b)/2 on them.
 //!
-//! Block solves: (L0' - i nu_q - xi)^-1 on any blocks, exact for every mode
-//! and shift (real or complex): the blocks' coordinates, E_R^-1 (one real
-//! GEMM over every block's real and imaginary parts), the pair rule, the
-//! division by lambda_j - i nu_q - xi, the pair rule back, E_R (one GEMM),
-//! about 4 d^2 real multiply-adds per block.
+//! The eigensystem by clusters (`clustered_eigensystem`, shared with the
+//! estimator's second-order blocks): L0' X = NL' X + X NR' + J X, the
+//! separable part diagonal on X_ab = p_a p_b^H (the Floquet block frame,
+//! NL' = P diag(lambda) P^-1, NR' = NL'^H + c: the value lambda_a + mu_b),
+//! J the rest (the recycling, the fold's scattering). In the coordinates of
+//! the X_ab most couplings are far below their gaps (coherences of states
+//! at different frequencies), so the strongly coupled ones (the
+//! populations, the coherences of near-degenerate states) form clusters,
+//! each diagonalized exactly, the couplings between them at first
+//! (vectors) and second (values) order, with the mixing and the values'
+//! error over CENTRE_HORIZON bounded (merged clusters otherwise). The
+//! pair (X_ab, X_ba) is the flip pair of the real form. Two controls
+//! (`ClusterControl`): `centre` (mixing 0.05, block solves to about 1e-3;
+//! clusters of 250-280 on the tweezer cases, 0.25-0.3 s) and `exact` (mixing
+//! 1e-8: to roundoff; one cluster on the tweezer cases, the old cost). The
+//! sector grading of the frame does not decouple the centre: the separable
+//! part's eigenvectors mix ground and excited states by 6% (three and five
+//! lasers + tweezer) to 36% (four lasers, no trap) (near drives at charge 0),
+//! and couplings between the sectors reach 0.04-1 of their gaps.
+//!
+//! Block solves: (L0' - i nu_q - xi)^-1 on any blocks, for every mode and
+//! shift (real or complex), to the eigensystem's accuracy (the clusters'
+//! mixing squared; exact with one cluster): the blocks' coordinates, E_R^-1
+//! (one real GEMM over every block's real and imaginary parts), the pair
+//! rule, the division by lambda_j - i nu_q - xi, the pair rule back, E_R (one
+//! GEMM), about 4 d^2 real multiply-adds per block.
 //!
 //! Dressed coordinates: E_R^-1 applied to a block's Hermitian-basis
 //! coordinates (`dressed`), where the block-diagonal part of the lattice is
@@ -24,22 +45,26 @@
 //! solves give the norm of a block's resolvent (`resolvent_norms`, the ring
 //! condition).
 //!
-//! The decomposition runs per connected block of the real matrix (the
-//! elements its nonzero entries connect: exact zeros exploited for speed
-//! only, the result is the full eigendecomposition): E_R and E_R^-1 are
-//! block diagonal up to the permutation.
-//!
 //! The basis is request-level (`LatticePrepared::eigenbasis`): computed once,
 //! shared by every pipeline that needs it.
 use super::*;
+use super::floquet::{Frames,adjoint,sandwich_batch,transpose};
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// Power iterations of `resolvent_norms`.
 const RESOLVENT_ITERATIONS:usize=20;
-/// Columns per task of the eigenvectors' inverse.
+/// Columns per task of a large eigenvector matrix's inverse.
 const INVERSE_PANEL:usize=64;
 /// Fewest blocks per task of the dressed coordinates.
 const DRESSED_BLOCKS:usize=16;
+/// Base coordinates per task of the centre's coupling matrix and of its
+/// eigenvectors' Hermitian-basis coordinates.
+const BASE_CHUNK:usize=32;
+/// The longest time (us) over which the centre's values keep their error
+/// control: the longest output time a request reaches (the pipeline's
+/// LIMIT_REACH, the 1 s mean horizon). A request-level basis serves every
+/// pipeline of a request.
+const CENTRE_HORIZON:f64=1e6;
 
 pub struct BlockEigenbasis{
     n:usize,d:usize,lapack:Arc<Lapack>,
@@ -54,8 +79,8 @@ pub struct BlockEigenbasis{
     pub readout:Vec<C>,
     /// |E_R|_1 |E_R^-1|_1.
     pub condition:f64,
-    /// Connected blocks and the largest one.
-    pub blocks:usize,pub largest_block:usize,
+    /// The eigensystem's clusters, the largest one and the merge passes.
+    pub clusters:usize,pub largest_cluster:usize,pub passes:usize,
     pub milliseconds:f64,
 }
 
@@ -82,60 +107,87 @@ fn from_coordinates(c:&[C],n:usize)->Vec<C>{
     x
 }
 
+/// The Hermitian-basis coefficients of a functional f(x) = sum_ij F_ij x_ij
+/// on row-major blocks (F row-major): F_ii, and for i < j (F_ij + F_ji)/sqrt2
+/// on the symmetric and i (F_ij - F_ji)/sqrt2 on the antisymmetric coordinate.
+fn functional_coordinates(f:&[C],n:usize)->Vec<C>{
+    let mut c=Vec::with_capacity(n*n);let r=std::f64::consts::FRAC_1_SQRT_2;
+    for i in 0..n{c.push(f[i*n+i]);}
+    for i in 0..n{for j in i+1..n{let(a,b)=(f[i*n+j],f[j*n+i]);
+        c.push(C{re:r*(a.re+b.re),im:r*(a.im+b.im)});
+        c.push(C{re:-r*(a.im-b.im),im:r*(a.re-b.re)});}}
+    c
+}
+
 impl BlockEigenbasis{
-    pub fn new(prepared:&LatticePrepared)->Result<Self,String>{
+    /// The eigenbasis to `control` (`ClusterControl::exact` or `centre`).
+    pub fn new(prepared:&LatticePrepared,control:ClusterControl)->Result<Self,String>{
         let clock=Instant::now();let lapack=&prepared.lapack;
-        let n=prepared.generator.n;let d=n*n;let l=prepared.centre_generator();
-        // Real matrix: column k is the coordinate vector of L0' applied to
-        // basis element k.
-        let r=std::f64::consts::FRAC_1_SQRT_2;
-        let column=|k:usize|->Vec<C>{(0..d).map(|row|l[row*d+k]).collect()};
-        let mut real=vec![0_f64;d*d];
-        let mut put=|k:usize,y:Vec<C>|{for(i,v)in coordinates(&y,n).into_iter().enumerate(){real[i+d*k]=v.re;}};
-        for i in 0..n{put(i,column(i*n+i));}
-        let mut k=n;
-        for i in 0..n{for j in i+1..n{
-            let(a,b)=(column(i*n+j),column(j*n+i));
-            put(k,a.iter().zip(&b).map(|(x,y)|C{re:r*(x.re+y.re),im:r*(x.im+y.im)}).collect());
-            put(k+1,a.iter().zip(&b).map(|(x,y)|C{re:-r*(x.im-y.im),im:r*(x.re-y.re)}).collect());
-            k+=2;}}
-        drop(l);
-        // Connected blocks: union-find over the nonzero entries, each block's
-        // elements ascending, the blocks by their first element.
-        fn root(parent:&mut[usize],mut i:usize)->usize{while parent[i]!=i{parent[i]=parent[parent[i]];i=parent[i];}i}
-        let mut parent:Vec<usize>=(0..d).collect();
-        for k in 0..d{for i in 0..d{if i!=k&&real[i+d*k]!=0.{let(a,b)=(root(&mut parent,i),root(&mut parent,k));if a!=b{parent[a.max(b)]=a.min(b);}}}}
-        let mut groups:BTreeMap<usize,Vec<usize>>=BTreeMap::new();
-        for i in 0..d{let r=root(&mut parent,i);groups.entry(r).or_default().push(i);}
-        let(mut re,mut im,mut vectors,mut inverse)=(vec![0.;d],vec![0.;d],vec![0.;d*d],vec![0.;d*d]);
-        let mut column=0;let largest_block=groups.values().map(|g|g.len()).max().unwrap_or(0);
-        for members in groups.values(){
-            let b=members.len();let mut sub=vec![0.;b*b];
-            for(c,&k)in members.iter().enumerate(){for(i,&row)in members.iter().enumerate(){sub[i+b*c]=real[row+d*k];}}
-            let(br,bi,bv)=lapack.eigen(&sub,b)?;
-            // The inverse: one LU, the identity's columns solved in panels on the workers.
-            let(lu,pivots)=lapack.factor(&bv,b)?;let(lu,pivots)=(&lu,&pivots);
-            let panels:Vec<usize>=(0..b).step_by(INVERSE_PANEL).collect();
-            let parts=Execution::new()?.map(panels,|start|->Result<Vec<f64>,String>{let width=INVERSE_PANEL.min(b-start);
-                let mut columns=vec![0.;b*width];for c in 0..width{columns[start+c+b*c]=1.;}lapack.solve_matrix_factored(lu,pivots,&columns,b)});
-            let mut bw=Vec::with_capacity(b*b);for part in parts{bw.extend(part?);}
-            for c in 0..b{re[column+c]=br[c];im[column+c]=bi[c];
-                for(i,&row)in members.iter().enumerate(){vectors[row+d*(column+c)]=bv[i+b*c];inverse[(column+c)+d*row]=bw[c+b*i];}}
-            column+=b;
-        }
-        drop(real);
+        let n=prepared.generator.n;let d=n*n;
+        // The separable part's frame: X_ab = p_a q_b, Q = P^H (row-major).
+        let(p,pinv)=prepared.floquet.central(Frames::Block);
+        let(q,qinv)=(adjoint(p,n),adjoint(pinv,n));
+        // Base coordinates: X_aa, then the flip pairs (X_ab, X_ba), a < b.
+        let mut base=Vec::with_capacity(d);for a in 0..n{base.push((a,a));}
+        for a in 0..n{for b in a+1..n{base.push((a,b));base.push((b,a));}}
+        let first:Vec<bool>=(0..d).map(|j|j>=n&&(j-n)%2==0).collect();
+        let mut slot=vec![0;d];for(j,&(a,b))in base.iter().enumerate(){slot[a*n+b]=j;}
+        // m = B^-1 L0' B (column-major, base coordinates), L0' row-major over
+        // matrix units: row r of L0' as the block R_r, (L0' B)[r, (a, b)] =
+        // (P^T R_r Q^T)[a, b]; then the column (a, b) of L0' B as the block Y,
+        // P^-1 Y Q^-1. Batched GEMMs on the workers, 4 n^3 per base coordinate.
+        let execution=Execution::new()?;let chunks:Vec<usize>=(0..d).step_by(BASE_CHUNK).collect();
+        let(pt,qt)=(transpose(p,n),transpose(&q,n));
+        let right={let l=prepared.centre_generator();
+            let parts=execution.map(chunks.clone(),|s|->Result<Vec<C>,String>{let e=(s+BASE_CHUNK).min(d);
+                let mut blocks=l[s*d..e*d].to_vec();let mut stack=Vec::new();sandwich_batch(&lapack.complex_gemm(),n,&pt,&qt,&mut blocks,e-s,&mut stack)?;Ok(blocks)});
+            let mut out=Vec::with_capacity(d*d);for part in parts{out.extend(part?);}out};
+        let right_ref=&right;
+        let parts=execution.map(chunks.clone(),|s|->Result<Vec<C>,String>{let e=(s+BASE_CHUNK).min(d);let count=e-s;
+            let mut blocks=vec![ZERO;d*count];
+            for k in 0..d{for(c,&v)in right_ref[k*d+s..k*d+e].iter().enumerate(){blocks[c*d+k]=v;}}
+            let mut stack=Vec::new();sandwich_batch(&lapack.complex_gemm(),n,pinv,&qinv,&mut blocks,count,&mut stack)?;Ok(blocks)});
+        let mut m=vec![ZERO;d*d];
+        for(&s,part)in chunks.iter().zip(parts){for(c,block)in part?.chunks_exact(d).enumerate(){let j=slot[s+c];for(k,&v)in block.iter().enumerate(){m[slot[k]+d*j]=v;}}}
+        drop(right);
+        // The eigensystem by clusters, the diagonal as the gaps' reference.
+        let reference:Vec<C>=(0..d).map(|j|m[j+d*j]).collect();
+        let system=clustered_eigensystem(lapack,&m,&reference,&first,control)?;drop(m);
+        let(mut kind,mut lambda)=(vec![0_u8;d],system.values.clone());let mut l=0;
+        while l<d{if system.pair[l]{kind[l]=1;kind[l+1]=2;lambda[l+1]=conj(lambda[l]);l+=2;}else{lambda[l].im=0.;l+=1;}}
+        // E_R from the Hermitian-basis coordinates of B V[:, l] = P C_l Q
+        // (the leading column of each value; a pair's second is its flip), and
+        // E_R^-1 from the functionals of V^-1[l, :] B^-1: F = P^-T R_l conj(P^-1).
+        let leading:Vec<usize>=(0..d).filter(|&l|kind[l]!=2).collect();
+        let tasks:Vec<Vec<usize>>=leading.chunks(BASE_CHUNK).map(|c|c.to_vec()).collect();
+        let(pinv_t,pinv_c)=(transpose(pinv,n),pinv.iter().map(|z|conj(*z)).collect::<Vec<C>>());
+        let(v,w,slot_ref)=(&system.vectors,&system.inverse,&slot);
+        let parts=execution.map(tasks.clone(),|ls|->Result<(Vec<C>,Vec<C>),String>{
+            let count=ls.len();let gemm=lapack.complex_gemm();let mut stack=Vec::new();
+            let mut right=vec![ZERO;d*count];let mut left=vec![ZERO;d*count];
+            for(c,&l)in ls.iter().enumerate(){for k in 0..d{right[c*d+k]=v[slot_ref[k]+d*l];left[c*d+k]=w[l+d*slot_ref[k]];}}
+            sandwich_batch(&gemm,n,p,&q,&mut right,count,&mut stack)?;
+            sandwich_batch(&gemm,n,&pinv_t,&pinv_c,&mut left,count,&mut stack)?;
+            let columns:Vec<C>=right.chunks_exact(d).flat_map(|b|coordinates(b,n)).collect();
+            let rows:Vec<C>=left.chunks_exact(d).flat_map(|b|functional_coordinates(b,n)).collect();
+            Ok((columns,rows))});
+        let(mut vectors,mut inverse)=(vec![0.;d*d],vec![0.;d*d]);
+        for(ls,part)in tasks.iter().zip(parts){let(columns,rows)=part?;
+            for(c,&l)in ls.iter().enumerate(){let(x,f)=(&columns[c*d..(c+1)*d],&rows[c*d..(c+1)*d]);
+                // Unit eigenvectors in the Hermitian basis (a pair's complex vector),
+                // as the frame's metric and the kernels' support rule read them.
+                let size=x.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();
+                let(x,f):(Vec<C>,Vec<C>)=(x.iter().map(|z|scaled(*z,1./size)).collect(),f.iter().map(|z|scaled(*z,size)).collect());
+                if kind[l]==1{for h in 0..d{vectors[h+d*l]=x[h].re;vectors[h+d*(l+1)]=x[h].im;inverse[l+d*h]=2.*f[h].re;inverse[l+1+d*h]=-2.*f[h].im;}}
+                else{for h in 0..d{vectors[h+d*l]=x[h].re;inverse[l+d*h]=f[h].re;}}}}
         if vectors.iter().chain(&inverse).any(|v|!v.is_finite()){return Err("Nonfinite centre-generator eigenvectors".into());}
-        let mut kind=vec![0_u8;d];let mut lambda=vec![ZERO;d];let mut j=0;
-        while j<d{
-            if im[j]!=0.&&j+1<d{kind[j]=1;kind[j+1]=2;lambda[j]=C{re:re[j],im:im[j]};lambda[j+1]=C{re:re[j],im:-im[j]};j+=2;}
-            else{lambda[j]=C{re:re[j],im:0.};j+=1;}
-        }
         let mut readout=vec![ZERO;n*d];
         for i in 0..n{for j in 0..d{let v=vectors[i+d*j];
             readout[i+n*j]=match kind[j]{0=>C{re:v,im:0.},1=>C{re:v,im:vectors[i+d*(j+1)]},_=>C{re:vectors[i+d*(j-1)],im:-v}};}}
         let one=|a:&[f64]|(0..d).map(|c|a[c*d..(c+1)*d].iter().map(|x|x.abs()).sum::<f64>()).fold(0.,f64::max);
         let condition=one(&vectors)*one(&inverse);
-        Ok(Self{n,d,lapack:Arc::clone(lapack),lambda,vectors,inverse,kind,readout,condition,blocks:groups.len(),largest_block,milliseconds:clock.elapsed().as_secs_f64()*1e3})
+        Ok(Self{n,d,lapack:Arc::clone(lapack),lambda,vectors,inverse,kind,readout,condition,clusters:system.clusters,largest_cluster:system.largest,passes:system.passes,
+            milliseconds:clock.elapsed().as_secs_f64()*1e3})
     }
     /// x_k <- (L0' - i nu_k - shift)^-1 x_k for row-major blocks x_k (exact;
     /// see the module documentation), spread over the workers.
@@ -301,10 +353,288 @@ impl BlockEigenbasis{
     }
 }
 
+
+/// Couplings below CLUSTER_ENTRY times their gap, |m_ij| < CLUSTER_ENTRY
+/// |base_i - base_j|, leave coordinates i, j in different clusters; the
+/// clusters are diagonalized exactly and the couplings between them at first
+/// order (vectors) and second order (values). Measured on the estimator's
+/// second-order blocks against the whole eigensystem on three, four and five
+/// lasers (20 us, 10 ms): the estimates within 0.35%, the largest cluster
+/// 156-362 of 1024 (1e-3: 330-552), the block built in 0.2-0.33 s instead
+/// of 0.55-1.2 s.
+const CLUSTER_ENTRY:f64=1e-2;
+/// Two clusters merge when a first-order mixing between them exceeds this,
+/// or when the third-order error of a value, over the time its mode lives
+/// (the horizon, or 1 / |Re mu| when shorter), exceeds CLUSTER_PHASE.
+const CLUSTER_MIXING:f64=0.05;
+const CLUSTER_PHASE:f64=1e-2;
+/// The exact control (`ClusterControl::exact`).
+const EXACT_ENTRY:f64=1e-10;
+const EXACT_MIXING:f64=1e-8;
+const EXACT_PHASE:f64=1e-8;
+/// Merge passes before the whole matrix is diagonalized at once.
+const CLUSTER_PASSES:usize=4;
+/// Clusters of at least CLUSTER_SPLIT coordinates run their products over
+/// the whole dimension in panels of CLUSTER_PANEL (on the workers).
+const CLUSTER_SPLIT:usize=32;
+const CLUSTER_PANEL:usize=128;
+/// Coordinates per tile of the second-order check (K'_ab and K'_ba).
+const CHECK_TILE:usize=64;
+
+/// The error control of `clustered_eigensystem`: couplings below `entry`
+/// times their gap leave two coordinates in different clusters; two
+/// clusters merge when a first-order mixing between them exceeds `mixing`,
+/// or when the third-order error of a value, over the time its mode lives
+/// (`horizon`, or 1 / |Re mu| when shorter), exceeds `phase`.
+#[derive(Clone,Copy,Debug)]
+pub struct ClusterControl{pub entry:f64,pub mixing:f64,pub phase:f64,pub horizon:f64}
+impl ClusterControl{
+    /// The estimator's second-order blocks over a request's horizon.
+    pub fn blocks(horizon:f64)->Self{Self{entry:CLUSTER_ENTRY,mixing:CLUSTER_MIXING,phase:CLUSTER_PHASE,horizon}}
+    /// The centre generator's clustered eigenbasis (over CENTRE_HORIZON).
+    pub fn centre()->Self{Self{entry:CLUSTER_ENTRY,mixing:CLUSTER_MIXING,phase:CLUSTER_PHASE,horizon:CENTRE_HORIZON}}
+    /// Exact to roundoff: the mixings between clusters below EXACT_MIXING
+    /// (their square, the vectors' error, below double precision), the
+    /// values' third-order error over CENTRE_HORIZON below EXACT_PHASE.
+    pub fn exact()->Self{Self{entry:EXACT_ENTRY,mixing:EXACT_MIXING,phase:EXACT_PHASE,horizon:CENTRE_HORIZON}}
+}
+
+/// An eigensystem m V = V diag(values) (`clustered_eigensystem`): V and V^-1
+/// column-major; `pair[l]`: eigen-indices l, l + 1 are a conjugate pair
+/// (values[l + 1] = conj values[l], V[:, l + 1] the flip of V[:, l]). The
+/// clusters, the largest one and the merge passes.
+pub struct Clustered{pub values:Vec<C>,pub vectors:Vec<C>,pub inverse:Vec<C>,pub pair:Vec<bool>,pub clusters:usize,pub largest:usize,pub passes:usize}
+
+/// The eigensystem of a flip-invariant matrix m (column-major d x d, complex
+/// coordinates where `first[j]` marks a conjugate pair (j, j + 1), the rest
+/// real) by clusters of strongly coupled coordinates (closed under the
+/// pairing; `base`: the values the gaps are measured with): each cluster
+/// exactly (`real_eigensystem`), the couplings K' between clusters, in the
+/// clusters' eigencoordinates, by first-order mixing T_ba = K'_ba / (mu_a -
+/// mu_b) and the second-order values mu_a + sum_b K'_ab T_ba. V = V_c (1 + T),
+/// V^-1 = (1 - T) V_c^-1 (error O(T^2)). A cluster pair whose mixing or
+/// third-order value error over `horizon` is above its bound is merged and
+/// the whole is redone; one cluster is the exact eigensystem.
+pub fn clustered_eigensystem(lapack:&Lapack,m:&[C],base:&[C],first:&[bool],control:ClusterControl)->Result<Clustered,String>{
+    let ClusterControl{entry,mixing:mixing_bound,phase,horizon}=control;
+    let d=base.len();
+    // Atoms: a pair (j, j + 1) or a single coordinate.
+    let mut atom=vec![0;d];let mut atoms=0;let mut j=0;
+    while j<d{atom[j]=atoms;if first[j]{atom[j+1]=atoms;j+=2;}else{j+=1;}atoms+=1;}
+    let mut parent:Vec<usize>=(0..atoms).collect();
+    fn root(p:&mut [usize],mut i:usize)->usize{while p[i]!=i{p[i]=p[p[i]];i=p[i];}i}
+    fn join(p:&mut [usize],a:usize,b:usize){let(x,y)=(root(p,a),root(p,b));if x!=y{p[x]=y;}}
+    for j in 0..d{for i in 0..d{if atom[i]==atom[j]{continue;}let v=magnitude(m[i+d*j]);if v==0.{continue;}
+        let gap=magnitude(C{re:base[i].re-base[j].re,im:base[i].im-base[j].im});
+        if v>=entry*gap{join(&mut parent,atom[i],atom[j]);}}}
+    let execution=Execution::new()?;
+    let mut kept:BTreeMap<Vec<usize>,RealSystem>=BTreeMap::new();let mut passes=0;
+    for pass in 0..CLUSTER_PASSES{passes=pass+1;
+        // Clusters (sorted coordinates) and their exact eigensystems.
+        let mut members:BTreeMap<usize,Vec<usize>>=BTreeMap::new();
+        for j in 0..d{let r=root(&mut parent,atom[j]);members.entry(r).or_default().push(j);}
+        let clusters:Vec<Vec<usize>>=members.into_values().collect();
+        let largest=clusters.iter().map(|c|c.len()).max().unwrap_or(0);
+        if clusters.len()==1{break;}
+        // The clusters a merge left unchanged keep their eigensystems.
+        let missing:Vec<Vec<usize>>=clusters.iter().filter(|c|!kept.contains_key(*c)).cloned().collect();
+        let built=execution.map(missing.clone(),|c|->Result<RealSystem,String>{
+            let n=c.len();let local:Vec<C>=(0..n*n).map(|k|m[c[k%n]+d*c[k/n]]).collect();
+            let pairs:Vec<bool>=c.iter().map(|&j|first[j]).collect();
+            real_eigensystem(lapack,&pairs,&local,n)});
+        for(c,system)in missing.into_iter().zip(built){kept.insert(c,system?);}
+        let systems:Vec<RealSystem>=clusters.iter().map(|c|kept.remove(c).unwrap()).collect();
+        // Eigen-index a of cluster k: offset[k] + l.
+        let mut offset=Vec::with_capacity(clusters.len());let mut owner=vec![0;d];let mut total=0;
+        for(k,c)in clusters.iter().enumerate(){offset.push(total);for a in total..total+c.len(){owner[a]=k;}total+=c.len();}
+        let values:Vec<C>=systems.iter().flat_map(|s|s.values.iter().copied()).collect();
+        // Clusters no entry couples (exact zeros, for speed only): the exact
+        // eigensystem, block diagonal.
+        let mut cluster_of=vec![0;d];for(k,c)in clusters.iter().enumerate(){for &j in c{cluster_of[j]=k;}}
+        if (0..d).all(|j|(0..d).all(|i|cluster_of[i]==cluster_of[j]||!nonzero(m[i+d*j]))){
+            let(mut vectors,mut inverse)=(vec![ZERO;d*d],vec![ZERO;d*d]);
+            for(k,c)in clusters.iter().enumerate(){let(n,system)=(c.len(),&systems[k]);
+                for l in 0..n{for(jl,&j)in c.iter().enumerate(){vectors[j+d*(offset[k]+l)]=system.vectors[jl+n*l];inverse[offset[k]+l+d*j]=system.inverse[l+n*jl];}}}
+            let pair:Vec<bool>=systems.iter().flat_map(|s|s.pair.iter().copied()).collect();
+            return Ok(Clustered{values,vectors,inverse,pair,clusters:clusters.len(),largest,passes:pass+1});
+        }
+        // Y = m V_c (d x d, eigen-index columns), K' = V_c^-1 Y: per cluster,
+        // a large one in panels of the other dimension.
+        let tasks:Vec<(usize,usize,usize)>=(0..clusters.len()).flat_map(|k|{let step=if clusters[k].len()>=CLUSTER_SPLIT{CLUSTER_PANEL}else{d};
+            (0..d).step_by(step).map(move|s|(k,s,(s+step).min(d)))}).collect();
+        let slabs=execution.map(tasks.clone(),|(k,s,e)|->Result<Vec<C>,String>{let(c,n,w)=(&clusters[k],clusters[k].len(),e-s);
+            let mut columns=vec![ZERO;w*n];for(l,&j)in c.iter().enumerate(){columns[l*w..(l+1)*w].copy_from_slice(&m[j*d+s..j*d+e]);}
+            let mut out=vec![ZERO;w*n];lapack.complex_gemm().multiply(w,n,n,ONE,&columns,w,&systems[k].vectors,n,ZERO,&mut out,w)?;Ok(out)});
+        let mut y=vec![ZERO;d*d];
+        for(&(k,s,e),slab)in tasks.iter().zip(slabs){let(slab,w)=(slab?,e-s);for l in 0..clusters[k].len(){let a=offset[k]+l;y[a*d+s..a*d+e].copy_from_slice(&slab[l*w..(l+1)*w]);}}
+        // K' in panels of columns over every cluster.
+        let columns:Vec<usize>=(0..d).step_by(CLUSTER_PANEL).collect();
+        let panels=execution.map(columns.clone(),|s|->Result<Vec<C>,String>{let e=(s+CLUSTER_PANEL).min(d);let w=e-s;let gemm=lapack.complex_gemm();
+            let mut panel=vec![ZERO;d*w];
+            for(k,c)in clusters.iter().enumerate(){let n=c.len();
+                let mut rows=vec![ZERO;n*w];for a in s..e{for(l,&j)in c.iter().enumerate(){rows[l+n*(a-s)]=y[j+d*a];}}
+                let mut out=vec![ZERO;n*w];gemm.multiply(n,w,n,ONE,&systems[k].inverse,n,&rows,n,ZERO,&mut out,n)?;
+                for a in 0..w{panel[offset[k]+d*a..offset[k]+n+d*a].copy_from_slice(&out[n*a..n*(a+1)]);}}
+            Ok(panel)});
+        drop(y);
+        let mut coupling=Vec::with_capacity(d*d);for panel in panels{coupling.extend(panel?);}
+        // First-order mixing between clusters, second-order values, and the
+        // checks: per eigenvector a, its column of T, its value's shift, the
+        // clusters that dominate them and the merge it asks for (K'_ab and
+        // K'_ba by tiles of b).
+        let(coupling_ref,values_ref,owner_ref)=(&coupling,&values,&owner);
+        let checked=execution.map(columns.clone(),|s|{let e=(s+CLUSTER_PANEL).min(d);let w=e-s;let mut t_part=vec![ZERO;d*w];
+            // Per a: the most mixed cluster and its mixing, the most shifting one and its shift, the shifts' sum, the shift.
+            let mut state=vec![(usize::MAX,0_f64,usize::MAX,0_f64,0_f64,ZERO);w];
+            for b0 in(0..d).step_by(CHECK_TILE){let b1=(b0+CHECK_TILE).min(d);
+                for a in s..e{let(most_mixed,largest_mix,most_shifting,largest_shift,shifts,shift_a)=&mut state[a-s];
+                    for b in b0..b1{if owner_ref[b]==owner_ref[a]{continue;}
+                        let kba=coupling_ref[b+d*a];if !nonzero(kba){continue;}
+                        let gap=C{re:values_ref[a].re-values_ref[b].re,im:values_ref[a].im-values_ref[b].im};let g=gap.re*gap.re+gap.im*gap.im;
+                        let t=if g>0.{mul(kba,C{re:gap.re/g,im:-gap.im/g})}else{C{re:f64::INFINITY,im:0.}};
+                        t_part[b+d*(a-s)]=t;let shift=mul(coupling_ref[a+d*b],t);add(shift_a,shift);
+                        let(tm,sm)=(magnitude(t),magnitude(shift));*shifts+=sm;
+                        if tm>*largest_mix{*largest_mix=tm;*most_mixed=owner_ref[b];}
+                        if sm>*largest_shift{*largest_shift=sm;*most_shifting=owner_ref[b];}}}}
+            let out:Vec<(C,Option<(usize,usize)>)>=state.into_iter().enumerate().map(|(i,(most_mixed,largest_mix,most_shifting,_,shifts,shift_a))|{let a=s+i;
+                let lives=if values_ref[a].re<0.{horizon.min(1./-values_ref[a].re)}else{horizon};
+                let merge=if largest_mix>mixing_bound{Some((owner_ref[a],most_mixed))}else if shifts*largest_mix*lives>phase{Some((owner_ref[a],most_shifting))}else{None};
+                (shift_a,merge)}).collect();
+            (t_part,out)});
+        drop(coupling);
+        let mut mixing=Vec::with_capacity(d*d);let mut shifted=values.clone();let mut merge:Vec<(usize,usize)>=Vec::new();
+        for(&s,(t_part,out))in columns.iter().zip(checked){mixing.extend(t_part);for(i,(shift,wanted))in out.into_iter().enumerate(){add(&mut shifted[s+i],shift);merge.extend(wanted);}}
+        if !merge.is_empty(){
+            if pass+1==CLUSTER_PASSES{break;}
+            for(x,y)in merge{let(a,b)=(clusters[x][0],clusters[y][0]);join(&mut parent,atom[a],atom[b]);}
+            kept=clusters.into_iter().zip(systems).collect();
+            continue;
+        }
+        // V = V_c (1 + T): rows of cluster k (in panels of columns); V^-1 =
+        // (1 - T) V_c^-1: columns of cluster k (in panels of rows).
+        let panels=execution.map(columns,|s|->Result<Vec<C>,String>{let e=(s+CLUSTER_PANEL).min(d);let w=e-s;let gemm=lapack.complex_gemm();
+            let mut panel=vec![ZERO;d*w];
+            for(k,c)in clusters.iter().enumerate(){let n=c.len();
+                let mut right=vec![ZERO;n*w];for a in s..e{right[n*(a-s)..n*(a-s+1)].copy_from_slice(&mixing[offset[k]+d*a..offset[k]+n+d*a]);
+                    if a>=offset[k]&&a<offset[k]+n{right[a-offset[k]+n*(a-s)]=ONE;}}
+                let mut rows=vec![ZERO;n*w];gemm.multiply(n,w,n,ONE,&systems[k].vectors,n,&right,n,ZERO,&mut rows,n)?;
+                for a in 0..w{for(l,&j)in c.iter().enumerate(){panel[j+d*a]=rows[l+n*a];}}}
+            Ok(panel)});
+        let parts=execution.map(tasks.clone(),|(k,s,e)|->Result<Vec<C>,String>{let(n,w)=(clusters[k].len(),e-s);
+            let mut left=vec![ZERO;w*n];for l in 0..n{let b=offset[k]+l;for a in s..e{let t=mixing[a+d*b];left[(a-s)+w*l]=if a==b{ONE}else{C{re:-t.re,im:-t.im}};}}
+            let mut columns=vec![ZERO;w*n];lapack.complex_gemm().multiply(w,n,n,ONE,&left,w,&systems[k].inverse,n,ZERO,&mut columns,w)?;
+            Ok(columns)});
+        let mut vectors=Vec::with_capacity(d*d);for panel in panels{vectors.extend(panel?);}
+        let mut inverse=vec![ZERO;d*d];
+        for(&(k,s,e),part)in tasks.iter().zip(parts){let(columns,c)=(part?,&clusters[k]);let w=e-s;
+            for(l,&j)in c.iter().enumerate(){inverse[j*d+s..j*d+e].copy_from_slice(&columns[l*w..(l+1)*w]);}}
+        let pair:Vec<bool>=systems.iter().flat_map(|s|s.pair.iter().copied()).collect();
+        // A pair's values are conjugate.
+        for l in 0..d{if pair[l]{shifted[l+1]=conj(shifted[l]);}}
+        return Ok(Clustered{values:shifted,vectors,inverse,pair,clusters:clusters.len(),largest,passes:pass+1});
+    }
+    // One cluster, or the couplings still too strong after CLUSTER_PASSES merges: the whole.
+    let whole=real_eigensystem(lapack,first,m,d)?;
+    Ok(Clustered{values:whole.values,vectors:whole.vectors,inverse:whole.inverse,pair:whole.pair,clusters:1,largest:d,passes})
+}
+
+/// A cluster's eigensystem (`real_eigensystem`).
+struct RealSystem{values:Vec<C>,vectors:Vec<C>,inverse:Vec<C>,pair:Vec<bool>}
+
+/// The eigensystem of a flip-invariant matrix m (column-major, complex
+/// coordinates z, `pairs[j]` the first of a conjugate pair (j, j + 1)). With
+/// the real coordinates x of a pair, z = T x, T = 1/2 [[1, -i], [1, i]], the
+/// matrix T^-1 m T is real; its real eigenvectors VR give the complex ones
+/// V_c = VR S, S = [[1, 1], [i, -i]] per eigenvalue pair, so V = T V_c and
+/// V^-1 = S^-1 VR^-1 T^-1.
+fn real_eigensystem(lapack:&Lapack,pairs:&[bool],m:&[C],d:usize)->Result<RealSystem,String>{
+    let first=|j:usize|pairs[j];
+    let i_times=|z:C|C{re:-z.im,im:z.re};
+    // Y = m T (columns), then x = T^-1 Y (rows): real up to roundoff.
+    let mut y=m.to_vec();
+    for j in(0..d).filter(|&j|first(j)){for i in 0..d{let(a,b)=(m[i+d*j],m[i+d*(j+1)]);
+        y[i+d*j]=C{re:0.5*(a.re+b.re),im:0.5*(a.im+b.im)};y[i+d*(j+1)]=i_times(C{re:0.5*(b.re-a.re),im:0.5*(b.im-a.im)});}}
+    let(mut real,mut imaginary,mut size)=(vec![0.;d*d],0_f64,0_f64);
+    for c in 0..d{let mut j=0;while j<d{
+        if first(j){let(a,b)=(y[j+d*c],y[j+1+d*c]);let(u,v)=(C{re:a.re+b.re,im:a.im+b.im},i_times(C{re:a.re-b.re,im:a.im-b.im}));
+            real[j+d*c]=u.re;real[j+1+d*c]=v.re;imaginary=imaginary.max(u.im.abs()).max(v.im.abs());size=size.max(u.re.abs()).max(v.re.abs());j+=2;}
+        else{real[j+d*c]=y[j+d*c].re;imaginary=imaginary.max(y[j+d*c].im.abs());size=size.max(y[j+d*c].re.abs());j+=1;}}}
+    drop(y);
+    if imaginary>1e-10*size{return Err(format!("Eigensystem matrix is not flip invariant ({:e})",imaginary/size));}
+    let(wr,wi,vr)=lapack.eigen(&real,d)?;drop(real);
+    if vr.iter().any(|v|!v.is_finite()){return Err("Nonfinite eigenvectors".into());}
+    let vri=real_inverse(lapack,&vr,d)?;
+    let mut pair=vec![false;d];let mut l=0;while l<d{if wi[l]!=0.&&l+1<d{pair[l]=true;l+=2;}else{l+=1;}}
+    let values:Vec<C>=(0..d).map(|l|if pair[l]{C{re:wr[l],im:wi[l]}}else if l>0&&pair[l-1]{C{re:wr[l],im:-wi[l-1]}}else{C{re:wr[l],im:0.}}).collect();
+    // V_c = VR S (columns), V = T V_c (rows).
+    let mut vc:Vec<C>=vr.iter().map(|&v|C{re:v,im:0.}).collect();
+    for l in(0..d).filter(|&l|pair[l]){for i in 0..d{let(a,b)=(vr[i+d*l],vr[i+d*(l+1)]);vc[i+d*l]=C{re:a,im:b};vc[i+d*(l+1)]=C{re:a,im:-b};}}
+    let mut vectors=vc.clone();
+    for c in 0..d{for j in(0..d).filter(|&j|first(j)){let(a,b)=(vc[j+d*c],vc[j+1+d*c]);let ib=i_times(b);
+        vectors[j+d*c]=C{re:0.5*(a.re-ib.re),im:0.5*(a.im-ib.im)};vectors[j+1+d*c]=C{re:0.5*(a.re+ib.re),im:0.5*(a.im+ib.im)};}}
+    // V^-1 = S^-1 VR^-1 (rows), then T^-1 (columns).
+    let mut w:Vec<C>=vri.iter().map(|&v|C{re:v,im:0.}).collect();
+    for l in(0..d).filter(|&l|pair[l]){for c in 0..d{let(a,b)=(vri[l+d*c],vri[l+1+d*c]);
+        w[l+d*c]=C{re:0.5*a,im:-0.5*b};w[l+1+d*c]=C{re:0.5*a,im:0.5*b};}}
+    let mut inverse=w.clone();
+    for j in(0..d).filter(|&j|first(j)){for r in 0..d{let(a,b)=(w[r+d*j],w[r+d*(j+1)]);let ib=i_times(b);
+        inverse[r+d*j]=C{re:a.re+ib.re,im:a.im+ib.im};inverse[r+d*(j+1)]=C{re:a.re-ib.re,im:a.im-ib.im};}}
+    Ok(RealSystem{values,vectors,inverse,pair})
+}
+
+/// The inverse of a real matrix (column-major d x d): one LU, the identity's
+/// columns solved in panels on the workers.
+fn real_inverse(lapack:&Lapack,a:&[f64],d:usize)->Result<Vec<f64>,String>{
+    let(lu,pivots)=lapack.factor(a,d)?;let(lu,pivots)=(&lu,&pivots);
+    let panels:Vec<usize>=(0..d).step_by(INVERSE_PANEL).collect();
+    let parts=Execution::new()?.map(panels,|start|->Result<Vec<f64>,String>{let width=INVERSE_PANEL.min(d-start);
+        let mut columns=vec![0.;d*width];for c in 0..width{columns[start+c+d*c]=1.;}lapack.solve_matrix_factored(lu,pivots,&columns,d)});
+    let mut out=Vec::with_capacity(d*d);for part in parts{out.extend(part?);}
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests{
     use super::*;
     use super::super::tests::{fixture,prepared};
+    #[test]
+    fn clustered_eigensystems_are_exact_within_clusters_and_second_order_between(){
+        // A flip-invariant matrix (real coordinates x, pairs z = T x): two
+        // strongly coupled groups and weak couplings eps between them. Clusters
+        // form; m V = V diag(mu) and V^-1 V = I hold to O(eps^2) and the
+        // values to O(eps^3) against the whole eigensystem.
+        let f=fixture();let p=prepared(&f);let lapack=&p.lapack;
+        let first=[false,true,false,false,true,false,false];let d=first.len();
+        let eps=1e-3;
+        // Real form: a single (0), a pair (1, 2) as a rotation block, a single (3),
+        // a pair (4, 5) and a single (6); 0-1-2 strongly coupled, 3-4-5-6 strongly
+        // coupled, everything else at eps of the gaps.
+        let mut r=vec![0_f64;d*d];
+        let diag=[-1.,-3.,-3.,-20.,-25.,-25.,-24.];for j in 0..d{r[j+d*j]=diag[j];}
+        r[1+d*2]=-7.;r[2+d*1]=7.;r[4+d*5]=-30.;r[5+d*4]=30.;
+        let strong=[(0,1,2.),(2,0,1.5),(3,4,4.),(5,6,3.),(6,3,2.5)];for &(i,j,v)in &strong{r[i+d*j]=v;}
+        for i in 0..d{for j in 0..d{if r[i+d*j]==0.{r[i+d*j]=eps*(((i*5+j*3)%7)as f64-3.);}}}
+        // m = T R T^-1 per pair: z_j = (x_j - i x_j+1)/2, z_j+1 = (x_j + i x_j+1)/2.
+        let mut t=vec![ZERO;d*d];let mut ti=vec![ZERO;d*d];let mut j=0;
+        while j<d{if first[j]{t[j+d*j]=C{re:0.5,im:0.};t[j+d*(j+1)]=C{re:0.,im:-0.5};t[j+1+d*j]=C{re:0.5,im:0.};t[j+1+d*(j+1)]=C{re:0.,im:0.5};
+            ti[j+d*j]=ONE;ti[j+d*(j+1)]=ONE;ti[j+1+d*j]=C{re:0.,im:1.};ti[j+1+d*(j+1)]=C{re:0.,im:-1.};j+=2;}else{t[j+d*j]=ONE;ti[j+d*j]=ONE;j+=1;}}
+        let product=|a:&[C],b:&[C]|->Vec<C>{let mut c=vec![ZERO;d*d];for i in 0..d{for k in 0..d{for l in 0..d{mul_add(&mut c[i+d*k],a[i+d*l],b[l+d*k]);}}}c};
+        let rc:Vec<C>=r.iter().map(|&v|C{re:v,im:0.}).collect();let m=product(&product(&t,&rc),&ti);
+        let base:Vec<C>=(0..d).map(|j|m[j+d*j]).collect();
+        let c=clustered_eigensystem(lapack,&m,&base,&first,ClusterControl::blocks(1.)).unwrap();
+        assert!(c.clusters==2&&c.largest==4,"clusters {} largest {}",c.clusters,c.largest);
+        let(mv,vi)=(product(&m,&c.vectors),product(&c.inverse,&c.vectors));
+        let scale=m.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
+        for a in 0..d{for i in 0..d{
+            let e=C{re:mv[i+d*a].re-(c.vectors[i+d*a].re*c.values[a].re-c.vectors[i+d*a].im*c.values[a].im),im:mv[i+d*a].im-(c.vectors[i+d*a].re*c.values[a].im+c.vectors[i+d*a].im*c.values[a].re)};
+            assert!(magnitude(e)<=100.*eps*eps*scale,"eigenpair {a}: {e:?}");
+            assert!(magnitude(C{re:vi[i+d*a].re-f64::from(u8::from(i==a)),im:vi[i+d*a].im})<=100.*eps*eps,"inverse ({i}, {a})");}}
+        // The values against the whole eigensystem (conjugate pairs adjacent).
+        let whole=real_eigensystem(lapack,&first,&m,d).unwrap();
+        for v in &c.values{let nearest=whole.values.iter().map(|w|magnitude(C{re:v.re-w.re,im:v.im-w.im})).fold(f64::INFINITY,f64::min);
+            assert!(nearest<=100.*eps*eps*eps*scale,"value {v:?}: {nearest:e}");}
+        for l in 0..d{if c.pair[l]{assert!(c.values[l+1].re==c.values[l].re&&c.values[l+1].im==-c.values[l].im);}}
+    }
     #[test]
     fn lattice_block_eigenbasis_solves_shifted_blocks_exactly(){
         // (L0' - i nu - xi)^-1 on general complex blocks against a dense LU,

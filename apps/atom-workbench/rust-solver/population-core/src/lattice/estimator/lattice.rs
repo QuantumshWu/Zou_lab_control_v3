@@ -87,7 +87,7 @@ pub(super) fn join(a:&[C],b:&[C])->Vec<C>{a.iter().zip(b).map(|(x,y)|C{re:x.re-y
 pub(super) fn norm(x:&[C])->f64{x.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt()}
 
 pub struct ErrorLattice<'p>{
-    pub(super) prepared:&'p LatticePrepared,pub(super) basis:&'p BlockEigenbasis,
+    pub(super) prepared:&'p LatticePrepared,
     pub n:usize,pub d:usize,
     /// P u Q (the space's modes), their frequencies, the centre and the
     /// mirror map.
@@ -112,7 +112,7 @@ pub struct ErrorLattice<'p>{
     /// Per mode whether it is the canonical member of its mirror pair (the
     /// centre is its own mirror), the near slots of the canonical near
     /// modes, and the flip's permutation of the eigen-coordinates.
-    pub(super) canonical:Vec<bool>,pub(super) near_canonical:Vec<usize>,partner:Vec<usize>,
+    pub(super) canonical:Vec<bool>,pub(super) near_canonical:Vec<usize>,partner:OnceLock<Vec<usize>>,
     /// The classes: the frame's own block when every mode carries every
     /// step (`Classes::Full`).
     classes:OnceLock<Result<Vec<Cow<'p,BlockSystem>>,String>>,distinct:Vec<Vec<usize>>,pub(super) class_of:Vec<usize>,
@@ -134,7 +134,6 @@ pub struct ErrorLattice<'p>{
 impl<'p> ErrorLattice<'p>{
     /// `explicit`: the explicit set P, whose modes join the near ones.
     pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],explicit:&[Charge],frame:&'p SwFrame<'p>,classes:Classes)->Result<Self,String>{
-        let basis=prepared.eigenbasis()?;
         let n=prepared.generator.n;let d=n*n;
         let index:BTreeMap<Charge,usize>=modes.iter().enumerate().map(|(i,q)|(q.clone(),i)).collect();
         let centre=*index.get(&prepared.generator.zero).ok_or("Error lattice without the centre")?;
@@ -166,19 +165,26 @@ impl<'p> ErrorLattice<'p>{
         let count=near.len();
         let canonical:Vec<bool>=(0..modes.len()).map(|q|modes[q]>=modes[mirror[q]]).collect();
         let near_canonical:Vec<usize>=(0..count).filter(|&slot|canonical[near[slot]]).collect();
-        let partner:Vec<usize>=(0..d).map(|j|basis.partner(j)).collect();
         let outer_modes:Vec<usize>=frames.iter().copied().filter(|&q|!near.contains(&q)&&canonical[q]).collect();let outer_count=outer_modes.len();
-        Ok(Self{prepared,basis,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,frame,
-            near,pairs,frames,outer_modes,canonical,near_canonical,partner,classes:OnceLock::new(),distinct,class_of,basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],
+        Ok(Self{prepared,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,frame,
+            near,pairs,frames,outer_modes,canonical,near_canonical,partner:OnceLock::new(),classes:OnceLock::new(),distinct,class_of,basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],
             outer_basis:vec![Vec::new();outer_count],outer_image:vec![Vec::new();outer_count],columns:0,ring_in_fast:false,outer_bare:true,
             work:ErrorWork::default()})
     }
     /// The frame's kernels.
     pub fn kernels(&self)->Result<&'p SwKernels,String>{self.frame.kernels()}
+    /// The exact eigenbasis of L0' (the frame's; the fast part's
+    /// coordinates), built on first use (a request that propagates nothing
+    /// reads it not).
+    pub fn basis(&self)->Result<&'p BlockEigenbasis,String>{self.prepared.eigenbasis()}
+    /// The flip partner of each eigen-coordinate (`BlockEigenbasis::partner`).
+    fn partner(&self)->Result<&[usize],String>{
+        let basis=self.basis()?;Ok(self.partner.get_or_init(||(0..self.d).map(|j|basis.partner(j)).collect()))
+    }
     /// The classes (the frame's own block for the class of every step),
     /// built on first use.
     pub fn classes(&self)->Result<&[Cow<'p,BlockSystem>],String>{
-        let frame:&'p SwFrame<'p>=self.frame;let(basis,lapack,n)=(self.basis,&self.prepared.lapack,self.n);
+        let frame:&'p SwFrame<'p>=self.frame;let(basis,lapack,n)=(self.basis()?,&self.prepared.lapack,self.n);
         self.classes.get_or_init(||{
             let kernels=frame.kernels()?;let every:Vec<usize>=(0..kernels.steps.len()).collect();
             let built=Execution::new()?.map(self.distinct.clone(),|steps|->Result<Cow<'p,BlockSystem>,String>{
@@ -263,7 +269,7 @@ impl<'p> ErrorLattice<'p>{
     /// run as large GEMMs over every field and mode (E^-1 streamed once per
     /// task).
     fn coordinates(&mut self,fields:&[&[C]])->Result<(Vec<C>,Vec<C>),String>{
-        let d=self.d;let execution=Execution::new()?;let basis=self.basis;
+        let d=self.d;let execution=Execution::new()?;let basis=self.basis()?;let partner=self.partner()?;
         let(count,near,outer)=(fields.len(),self.near.len(),self.outer_modes.len());
         // E^-1 on every (field, canonical frame mode).
         let canonical=&self.canonical;
@@ -276,7 +282,7 @@ impl<'p> ErrorLattice<'p>{
         // The mirrored frame modes: c_-q[i] = conj c_q[partner i].
         for f in 0..count{for &q in self.frames.iter().filter(|&&q|!canonical[q]){
             let source=c[(f*modes+self.mirror[q])*d..(f*modes+self.mirror[q]+1)*d].to_vec();
-            for(i,v)in c[(f*modes+q)*d..(f*modes+q+1)*d].iter_mut().enumerate(){*v=conj(source[self.partner[i]]);}}}
+            for(i,v)in c[(f*modes+q)*d..(f*modes+q+1)*d].iter_mut().enumerate(){*v=conj(source[partner[i]]);}}}
         // (I - S) into the canonical near modes.
         let slot_of:Vec<usize>=(0..modes).map(|q|self.near.iter().position(|&x|x==q).unwrap_or(usize::MAX)).collect();
         let(kernels,c_ref)=(self.kernels()?,&c);
@@ -317,13 +323,15 @@ impl<'p> ErrorLattice<'p>{
         let(oa,ob)=(outflow(self,&xa)?,outflow(self,&xb)?);let source=join(&oa,&ob);let size=norm(&source);
         if size==0.{return Ok(vec![ZERO;inner*d]);}
         // (D_R - z) y = source, then -y.
-        let mut y=source.clone();self.basis.solve_blocks(&self.ring_nu,shift,&mut y)?;self.work.block_solves+=count;
+        // The clustered basis's block solves, refined against the ring's blocks.
+        let clustered=self.prepared.clustered_eigenbasis()?;
+        let mut y=source.clone();clustered.solve_blocks(&self.ring_nu,shift,&mut y)?;self.work.block_solves+=count;
         for _ in 0..RING_REFINEMENTS{
             let mut r=source.clone();
             let applied=self.ring_parts(&y,Parts::Diagonal,true)?;
             for((t,a),v)in r.iter_mut().zip(&applied).zip(&y){let w=mul(shift,*v);t.re-=a.re-w.re;t.im-=a.im-w.im;}
             if norm(&r)<=RING_RESIDUAL*size{break;}
-            self.basis.solve_blocks(&self.ring_nu,shift,&mut r)?;self.work.block_solves+=count;
+            clustered.solve_blocks(&self.ring_nu,shift,&mut r)?;self.work.block_solves+=count;
             for(a,b)in y.iter_mut().zip(&r){add(a,*b);}
         }
         for v in &mut y{v.re=-v.re;v.im=-v.im;}

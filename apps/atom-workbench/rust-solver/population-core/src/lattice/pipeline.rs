@@ -183,7 +183,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     // 1. The lattice, its space's steady column; the request's frame
     // (kernels and the second-order block's eigensystem, the projection's
     // inner product) on its own thread meanwhile.
-    let clock=Instant::now();let eigen=prepared.eigenbasis()?;timing.eigenbasis_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
+    let clock=Instant::now();let eigen=prepared.clustered_eigenbasis()?;timing.eigenbasis_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
     let frame=SwFrame::new(prepared,estimator::longest_time(times,request.horizons));
     std::thread::scope(|scope|->Result<Solution,String>{
     if propagates{std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||frame.build()).map_err(|e|e.to_string())?;}
@@ -207,7 +207,10 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     // The frame's metric (waiting for the frame's thread), none when no
     // output propagates.
     let clock=Instant::now();
-    let metric=if propagates{Some(SwMetric::new(&frame,eigen,lattice.operator())?)}else{None};
+    let metric=if propagates{Some(SwMetric::new(&frame,prepared.eigenbasis()?,lattice.operator())?)}else{None};
+    // The pole ordering's dressed coordinates: the exact basis when the
+    // frame (which builds it) is there.
+    let ordering=if propagates{prepared.eigenbasis()?}else{eigen};
     timing.frame_wait_ms=clock.elapsed().as_secs_f64()*1e3;
     let test=metric.as_ref().map(|m|m as &dyn TestSpace);
     let mut galerkin=Projection::new(lattice.operator())?;
@@ -265,7 +268,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
             let model=match current.take(){Some((solves,model))if solves==space.solves()=>model,_=>{
                 galerkin.ingest(test,&space.basis,&space.images)?;galerkin.model(lapack,space.initial_norm,longest,tolerance)?}};
             let xis:Vec<C>=live.iter().map(|&i|points[i].sigma()).collect();
-            let transform=model.error_transform(&galerkin,&space.basis,&space.images,eigen,lapack,&xis)?;
+            let transform=model.error_transform(&galerkin,&space.basis,&space.images,ordering,lapack,&xis)?;
             for(&i,p)in live.iter().zip(&transform){if slow_points[i]{continue;}
                 score[i]=points[i].sigma().re*p.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
                 if let Some(before)=solved_at[i].take(){remaining[i]=if before>0.{(score[i]/before).min(1.)}else{1.};}
@@ -316,7 +319,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     let horizon_fields=request.horizons.iter().map(|&t|field(&model.state(t),false)).collect::<Result<Vec<_>,_>>()?;
     timing.outputs_ms+=clock.elapsed().as_secs_f64()*1e3;
     let work=lattice.work().clone();
-    let conserved=if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{last.conserved};
+    let conserved=if modes.len()==1{ordering.kernel_count(super::reduced::KERNEL).max(1)}else{last.conserved};
     timing.solves_ms=work.milliseconds;timing.images_ms=space.images_ms;timing.projection_ms=galerkin.milliseconds;timing.total_ms=started.elapsed().as_secs_f64()*1e3;
     timing.frame_ms=frame.milliseconds().iter().sum();
     Ok(Solution{modes,translations:space.translations(),trajectory:projected,projection,horizons:last.horizons.clone(),steady:last.steady.clone(),

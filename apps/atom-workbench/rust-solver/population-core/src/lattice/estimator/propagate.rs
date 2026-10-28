@@ -63,7 +63,7 @@ impl ErrorLattice<'_>{
             let gemm=lapack.complex_gemm();
             let(c,values,own,image,base):(usize,&[C],&[C],&[C],&[C])=if near{let c=self.class_of[a];let class=&self.classes()?[c];
                 (c,&class.values,&class.readout,&self.image_coordinates[slot],&self.basis_coordinates[slot])}
-                else{(bare,&self.basis.lambda,self.basis.population_rows(),&self.outer_image[slot],&self.outer_basis[slot])};
+                else{(bare,&self.basis()?.lambda,self.basis()?.population_rows(),&self.outer_image[slot],&self.outer_basis[slot])};
             // A mirror pair's canonical member counts twice.
             let weight=if self.mirror[a]==a{1.}else{2.};
             let mut beta=vec![ZERO;d*r];
@@ -117,10 +117,10 @@ impl ErrorLattice<'_>{
         let mut by_class:BTreeMap<usize,Vec<(usize,Vec<C>)>>=BTreeMap::new();
         for(key,g)in homogeneous{by_class.entry(key/slots).or_default().push((key%slots,g));}
         for(c,list)in by_class{
-            let values:&[C]=if c==bare{&self.basis.lambda}else{&self.classes()?[c].values};
+            let values:&[C]=if c==bare{&self.basis()?.lambda}else{&self.classes()?[c].values};
             let block:Vec<C>=times.iter().flat_map(|&t|values.iter().map(move|&z|cexp(C{re:z.re.min(0.),im:z.im},t))).collect();
             for(slot,g)in list{
-                let rows:&[C]=if c==bare{self.basis.population_rows()}else if slot==0{&self.classes()?[c].readout}else{self.classes()?[c].step_readout[slot-1].as_deref().unwrap()};
+                let rows:&[C]=if c==bare{self.basis()?.population_rows()}else if slot==0{&self.classes()?[c].readout}else{self.classes()?[c].step_readout[slot-1].as_deref().unwrap()};
                 let mut h=rows.to_vec();for j in 0..d{for i in 0..n{h[i+n*j]=mul(h[i+n*j],g[j]);}}
                 let mut f=vec![ZERO;n*t_count];gemm.multiply(n,t_count,d,ONE,&h,n,&block,d,ZERO,&mut f,n)?;
                 let nu=if slot==0{0.}else{self.kernels()?.steps[slot-1].nu};
