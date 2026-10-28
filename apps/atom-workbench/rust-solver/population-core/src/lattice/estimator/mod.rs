@@ -81,6 +81,10 @@ pub struct Errors{
     pub trajectory:Vec<Vec<f64>>,pub horizons:Vec<Vec<f64>>,pub steady:Option<Vec<f64>>,
     /// Slow modes solved, whether the trajectory used them, lambda_slow.
     pub slow_modes:usize,pub slow_trajectory:bool,pub lambda_slow:f64,
+    /// Time (ms): the fast part's columns, the pool's columns, the slow
+    /// solves (sources, ring, GCRO), the fast propagation, the slow
+    /// propagation.
+    pub milliseconds:[f64;5],
 }
 
 pub struct UnifiedEstimate<'a>{
@@ -120,7 +124,8 @@ impl<'a> UnifiedEstimate<'a>{
     /// The population errors of a checkpoint's outputs.
     pub fn errors(&mut self,cp:&Checkpoint<'_>,steady:&mut dyn SteadySolves)->Result<Errors,String>{
         let(k,r)=(cp.basis.len(),cp.theta.len());let outputs=self.setup.outputs;
-        self.lattice.add_columns(cp.basis,cp.images)?;
+        let mut ms=[0.;5];let clock=Instant::now();
+        self.lattice.add_columns(cp.basis,cp.images)?;ms[0]=clock.elapsed().as_secs_f64()*1e3;
         let mut b=vec![ZERO;k*r];self.setup.prepared.lapack.complex_gemm().multiply(k,r,r,ONE,cp.x,k,cp.s,r,ZERO,&mut b,k)?;
         // The slowest decay rate, the slow modes and which outputs use them.
         let lambda_slow=cp.theta.iter().zip(cp.coefficients).filter(|(z,a)|z.re.abs()>DECAYING&&nonzero(**a)).map(|(z,_)|z.re.abs()).fold(f64::INFINITY,f64::min);
@@ -136,7 +141,8 @@ impl<'a> UnifiedEstimate<'a>{
         let mut solutions=Vec::new();
         if !needed.is_empty(){
             if self.pool.is_none(){let mut pool=SlowPool::new(self.setup.prepared,&self.lattice)?;pool.seed_with_pipeline=self.seed_with_pipeline;self.pool=Some(pool);}
-            let pool=self.pool.as_mut().unwrap();pool.add_columns(cp.basis,cp.images)?;
+            let clock=Instant::now();
+            let pool=self.pool.as_mut().unwrap();pool.add_columns(cp.basis,cp.images)?;ms[1]=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
             let length=self.lattice.dimension();
             for &m in &needed{
                 // x = W b_m, F = (A W - theta W) b_m + the ring's feedback at theta.
@@ -146,15 +152,21 @@ impl<'a> UnifiedEstimate<'a>{
                 let g=self.lattice.ring_feedback(&x,theta)?;for(a,v)in f.iter_mut().zip(g){add(a,v);}
                 solutions.push(pool.solve(cp.basis,&f,theta,cp.coefficients[m],steady)?);
             }
+            ms[2]=clock.elapsed().as_secs_f64()*1e3;
         }
+        let fast_ms=std::cell::Cell::new(0.);let slow_ms=std::cell::Cell::new(0.);
         let fast=|lattice:&ErrorLattice<'_>,skip:bool,times:&[f64],readout:Readout|->Result<Vec<Vec<f64>>,String>{
+            let clock=Instant::now();
             let coefficients:Vec<C>=(0..r).map(|m|if skip&&slow.contains(&m){ZERO}else{cp.coefficients[m]}).collect();
-            lattice.populations(&RitzSources{vectors:&b,values:cp.theta,coefficients:&coefficients},times,readout)};
+            let out=lattice.populations(&RitzSources{vectors:&b,values:cp.theta,coefficients:&coefficients},times,readout);
+            fast_ms.set(fast_ms.get()+clock.elapsed().as_secs_f64()*1e3);out};
         let sum=|a:Vec<Vec<f64>>,c:Vec<Vec<f64>>|->Vec<Vec<f64>>{a.into_iter().zip(c).map(|(x,y)|x.iter().zip(&y).map(|(p,q)|p+q).collect()).collect()};
         // Without slow modes the slow part is zero and every mode is fast.
         let grid=grid&&!solutions.is_empty();
         let trajectory=if grid{
+            let clock=Instant::now();
             let s=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.x,cp.s,cp.theta,&solutions,outputs.times,Readout::Laboratory)?;
+            slow_ms.set(slow_ms.get()+clock.elapsed().as_secs_f64()*1e3);
             sum(fast(&self.lattice,true,outputs.times,Readout::Laboratory)?,s)
         }else{fast(&self.lattice,false,outputs.times,Readout::Laboratory)?};
         let mut horizons=Vec::with_capacity(outputs.horizons.len());
@@ -170,7 +182,8 @@ impl<'a> UnifiedEstimate<'a>{
             for sol in solutions.iter().filter(|s|magnitude(s.theta)<1e-12){for(a,v)in e.iter_mut().zip(pool.unwrap().steady_populations(cp.basis,sol)){*a+=v;}}
             Some(e)
         }else{None};
-        Ok(Errors{trajectory,horizons,steady,slow_modes:solutions.len(),slow_trajectory:grid,lambda_slow})
+        ms[3]=fast_ms.get();ms[4]=slow_ms.get();
+        Ok(Errors{trajectory,horizons,steady,slow_modes:solutions.len(),slow_trajectory:grid,lambda_slow,milliseconds:ms})
     }
 }
 

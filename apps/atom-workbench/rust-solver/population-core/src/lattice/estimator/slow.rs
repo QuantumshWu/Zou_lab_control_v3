@@ -10,7 +10,8 @@
 //!
 //! One shared pool answers every shift: the basis columns W with A W, the
 //! trace-row vector u, and every augmentation direction z with A z, their
-//! span kept orthonormal (Q, row panels, extended block by block) with every
+//! span kept orthonormal (Q, row panels of the fields' canonical half,
+//! extended block by block) with every
 //! direction's and image's coordinates. For any shift the images of the pool
 //! are (theta U - A U) in those coordinates, so GCRO for (theta_k, F_k)
 //! costs the projection of F_k, a small least-squares problem, and, while
@@ -52,8 +53,31 @@ const CHOLESKY_DEPENDENT:f64=1e-7;
 /// size outside the earlier ones is left out.
 const SMALL_DEPENDENT:f64=1e-12;
 
-fn reals(x:&[C])->Vec<f64>{let mut out=Vec::with_capacity(2*x.len());for v in x{out.push(v.re);out.push(v.im);}out}
-fn complex(x:&[f64])->Vec<C>{x.chunks_exact(2).map(|v|C{re:v[0],im:v[1]}).collect()}
+/// Hermitian-symmetric fields as real vectors: the canonical modes only
+/// (the others are their mirrors' adjoints), real and imaginary parts, a
+/// pair's block scaled by sqrt 2 so that the dot product is the real inner
+/// product over every mode. Half the length of the whole field.
+#[derive(Clone)]
+struct Packing{d:usize,n:usize,canonical:Vec<usize>,mirror:Vec<usize>,modes:usize}
+impl Packing{
+    fn new(lattice:&ErrorLattice<'_>)->Self{
+        let canonical:Vec<usize>=(0..lattice.modes.len()).filter(|&q|lattice.modes[q]>=lattice.modes[lattice.mirror[q]]).collect();
+        Self{d:lattice.d,n:lattice.n,canonical,mirror:lattice.mirror.clone(),modes:lattice.modes.len()}
+    }
+    fn length(&self)->usize{2*self.d*self.canonical.len()}
+    fn pack(&self,x:&[C])->Vec<f64>{
+        let d=self.d;let mut out=Vec::with_capacity(self.length());
+        for &q in &self.canonical{let w=if self.mirror[q]==q{1.}else{std::f64::consts::SQRT_2};for v in &x[q*d..(q+1)*d]{out.push(w*v.re);out.push(w*v.im);}}
+        out
+    }
+    fn unpack(&self,v:&[f64])->Vec<C>{
+        let(n,d)=(self.n,self.d);let mut x=vec![ZERO;self.modes*d];
+        for(i,&q)in self.canonical.iter().enumerate(){let w=if self.mirror[q]==q{1.}else{std::f64::consts::FRAC_1_SQRT_2};
+            for k in 0..d{x[q*d+k]=C{re:w*v[2*(i*d+k)],im:w*v[2*(i*d+k)+1]};}
+            let m=self.mirror[q];if m!=q{for a in 0..n{for b in 0..n{x[m*d+a*n+b]=conj(x[q*d+b*n+a]);}}}}
+        x
+    }
+}
 fn dot(a:&[f64],b:&[f64])->f64{a.iter().zip(b).map(|(x,y)|x*y).sum()}
 fn cexp(z:C,t:f64)->C{let m=(z.re*t).exp();if m==0.{return ZERO;}C{re:m*(z.im*t).cos(),im:m*(z.im*t).sin()}}
 
@@ -197,7 +221,7 @@ pub struct SlowSolution{pub theta:C,pub coefficient:C,x:Vec<C>,sign:f64}
 
 pub struct SlowPool<'p>{
     op:LatticeOperator<'p>,batch:FloquetBatch<'p>,lapack:Arc<Lapack>,execution:Execution,
-    n:usize,d:usize,watch:Vec<usize>,mirror:Vec<usize>,near:Vec<usize>,
+    n:usize,d:usize,watch:Vec<usize>,mirror:Vec<usize>,near:Vec<usize>,packing:Packing,
     q:Panels,
     /// Pool directions and the coordinates (on Q at insertion) of each and
     /// of its image, its centre trace, the trace-row vector's coordinates.
@@ -215,12 +239,12 @@ impl<'p> SlowPool<'p>{
         let op=LatticeOperator::new(prepared,&lattice.modes)?;
         let batch=Preconditioning::new(prepared)?.batch(&op,Shift::Steady,Some(Reach::All))?;
         let(n,d)=(lattice.n,lattice.d);let c0=lattice.centre*d;let watch:Vec<usize>=(0..n).map(|i|c0+i*n+i).collect();
-        let length=2*op.dimension();
-        let mut pool=Self{op,batch,lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),
+        let packing=Packing::new(lattice);let length=packing.length();
+        let mut pool=Self{op,batch,lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),packing,
             q:Panels::new(length),directions:Vec::new(),cu:Vec::new(),cau:Vec::new(),trace:Vec::new(),u:Vec::new(),augmented:Vec::new(),
             seed_with_pipeline:true,columns:0,work:PoolWork::default()};
-        let mut u=vec![ZERO;length/2];for &k in &pool.watch{u[k]=C{re:1./n as f64,im:0.};}
-        let(mut coordinates,_)=pool.q.extend(&pool.lapack,&pool.execution,reals(&u),1)?;pool.u=coordinates.remove(0);
+        let mut u=vec![ZERO;lattice.dimension()];for &k in &pool.watch{u[k]=C{re:1./n as f64,im:0.};}
+        let packed=pool.packing.pack(&u);let(mut coordinates,_)=pool.q.extend(&pool.lapack,&pool.execution,packed,1)?;pool.u=coordinates.remove(0);
         Ok(pool)
     }
     fn centre_trace(&self,x:&[C])->f64{self.watch.iter().map(|&k|x[k].re).sum()}
@@ -229,7 +253,7 @@ impl<'p> SlowPool<'p>{
     /// coordinates kept. Returns Q's new columns.
     fn add(&mut self,directions:Vec<(Direction,Vec<C>,Vec<C>)>)->Result<Vec<Vec<f64>>,String>{
         let clock=Instant::now();let m=directions.len();let length=self.q.length;
-        let mut block=Vec::with_capacity(2*m*length);for(_,x,ax)in &directions{block.extend(reals(x));block.extend(reals(ax));}
+        let mut block=Vec::with_capacity(2*m*length);for(_,x,ax)in &directions{block.extend(self.packing.pack(x));block.extend(self.packing.pack(ax));}
         let(coordinates,fresh)=self.q.extend(&self.lapack,&self.execution,block,2*m)?;
         for(i,(kind,x,_))in directions.into_iter().enumerate(){
             self.trace.push(self.centre_trace(&x));self.cu.push(coordinates[2*i].clone());self.cau.push(coordinates[2*i+1].clone());self.directions.push(kind);
@@ -269,7 +293,7 @@ impl<'p> SlowPool<'p>{
         let kernel=magnitude(theta)<KERNEL;let length=self.q.length;
         // f = e^{i phi} (g1 + i g2) with g1, g2 Hermitian-symmetric and
         // orthogonal, g1 the larger: a real problem when theta is real.
-        let(f1,f2)=split(f,&self.mirror,self.n);let(a,b)=(reals(&f1),reals(&f2));
+        let(f1,f2)=split(f,&self.mirror,self.n);let(a,b)=(self.packing.pack(&f1),self.packing.pack(&f2));
         let(aa,bb,ab)=(dot(&a,&a),dot(&b,&b),dot(&a,&b));let phi=0.5*(2.*ab).atan2(aa-bb);let(cs,sn)=(phi.cos(),phi.sin());
         let g1:Vec<f64>=a.iter().zip(&b).map(|(x,y)|cs*x+sn*y).collect();let g2:Vec<f64>=a.iter().zip(&b).map(|(x,y)|-sn*x+cs*y).collect();
         let fsize=(dot(&g1,&g1)+dot(&g2,&g2)).sqrt();
@@ -298,7 +322,7 @@ impl<'p> SlowPool<'p>{
             let mut new=Vec::new();
             for part in r.chunks_exact(length){
                 let size=dot(part,part).sqrt();if !(size>1e-3*rn){continue;}
-                let field:Vec<C>=complex(part).iter().map(|v|C{re:v.re/size,im:v.im/size}).collect();
+                let field:Vec<C>=self.packing.unpack(part).iter().map(|v|C{re:v.re/size,im:v.im/size}).collect();
                 let z=if self.seed_with_pipeline&&kernel&&self.augmented.is_empty()&&new.is_empty(){
                     let(y,inner)=steady.solve(&field,RESIDUAL)?;self.work.pipeline_solves+=1;self.work.inner_steps+=inner;y
                 }else{let mut z=vec![ZERO;field.len()];self.batch.apply(&field,&mut z)?;self.work.preconditions+=1;z};

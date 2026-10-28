@@ -557,7 +557,7 @@ mod tests{
                 let largest=series.iter().fold(steady_est,|a,&b|a.max(b));if open{gate.last_estimate=Some(largest);}
                 let(lw,pw)=(&estimate.lattice.work,estimate.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default());
                 let mut row=json!({"case":case,"solves":solves,"k":k,"ms":ms,"estMax":series.iter().fold(0_f64,|a,&b|a.max(b)),"steadyEst":steady_est,"horizons":hz,
-                    "slowModes":errors.slow_modes,"slowTrajectory":errors.slow_trajectory,"lambdaSlow":errors.lambda_slow,
+                    "slowModes":errors.slow_modes,"partsMs":errors.milliseconds,"slowTrajectory":errors.slow_trajectory,"lambdaSlow":errors.lambda_slow,
                     "gate":{"change":change,"open":open},
                     "work":{"columns":lw.columns-before.0.columns,"columnMs":lw.column_ms-before.0.column_ms,"frameBlocks":lw.frame_blocks-before.0.frame_blocks,
                         "ringOperations":lw.block_operations-before.0.block_operations,"ringSolves":lw.block_solves-before.0.block_solves,
