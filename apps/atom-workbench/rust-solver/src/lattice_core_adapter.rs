@@ -378,6 +378,37 @@ mod tests{
         assert_eq!(full["populationAccuracy"]["status"],json!("estimated-converged"));
         assert_eq!(full["asymptoticWithinTolerance"],json!(true));
     }
+    /// The default scene's mean at T = 100 ms, 1 s and infinity against
+    /// exact references (tests/fixtures/default_scene_horizons.json), each
+    /// within its bound above the references' agreement floor (both solvers
+    /// agree with them to 7e-7; the release returned the steady state for
+    /// 100 ms, off by 7.8e-3 with a bound of 7e-13), and p(T) moving toward
+    /// the steady state as T grows (exact: 7.8e-3 at 100 ms, 4.0e-3 at 1 s;
+    /// the scene's two slow classes decay monotonically).
+    #[test]
+    fn the_default_scene_means_follow_their_horizons(){
+        let fixture:Value=serde_json::from_str(include_str!("../tests/fixtures/default_scene_horizons.json")).unwrap();
+        let model:Model=serde_json::from_value(fixture["model"].clone()).unwrap();
+        let groups:Vec<Vec<usize>>=serde_json::from_value(fixture["groups"].clone()).unwrap();
+        let read=|v:&Value|->Vec<f64>{v.as_array().unwrap().iter().map(|x|x.as_f64().unwrap()).collect()};
+        // The populations' and the groups' largest difference.
+        let metric=|a:&[f64],b:&[f64]|->f64{let d:Vec<f64>=a.iter().zip(b).map(|(x,y)|x-y).collect();
+            groups.iter().map(|g|g.iter().map(|&i|d[i]).sum::<f64>().abs()).chain(d.iter().map(|x|x.abs())).fold(0.,f64::max)};
+        const FLOOR:f64=1e-5;
+        let mut means=Vec::new();
+        for(horizon,key)in[(json!(1e5),"100000"),(json!(1e6),"1000000"),(Value::Null,"steady")]{
+            let mut o=fixture["options"].clone();o["steadyOnly"]=json!(true);o["meanHorizonUs"]=horizon;
+            let out=solve(&model,&serde_json::from_value(o).unwrap(),&mut |_|{}).unwrap();
+            let(p,bound)=(read(&out["asymptoticPopulations"]),out["asymptoticEstimatedError"].as_f64().unwrap());
+            let off=metric(&p,&read(&fixture["exact"][key]));
+            assert_eq!(out["asymptoticWithinTolerance"],json!(true),"{key}");
+            assert!(off<=bound+FLOOR,"p({key}) {off:e} from the exact, bound {bound:e}");
+            means.push((p,bound));
+        }
+        let to_steady=|i:usize|metric(&means[i].0,&means[2].0);
+        let bounds:f64=means.iter().map(|m|m.1).sum();
+        assert!(to_steady(1)<=to_steady(0)+bounds,"p(1 s) {:e} from the steady state, p(100 ms) {:e}",to_steady(1),to_steady(0));
+    }
     /// End-to-end validation of the pipeline against a reference (ignored):
     /// ATOM_VALIDATE_REQUEST=<request.json>, ATOM_VALIDATE_GRID="T:samples"
     /// (absent: no trajectory), ATOM_VALIDATE_HORIZONS="1e5,1e6",

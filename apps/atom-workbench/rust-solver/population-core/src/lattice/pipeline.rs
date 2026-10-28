@@ -29,7 +29,8 @@
 //!    plus, on a trajectory row, the change of its projection onto the
 //!    probability simplex (computed exactly, not estimated). A checkpoint
 //!    is accepted when every bound is within the tolerance and the slowest
-//!    relaxation is resolved where a horizon needs it (`slow_pairs`).
+//!    relaxation is resolved where a horizon needs it (`slow_pairs`, and
+//!    every class of x0 a horizon needs: `missing_classes`).
 //! 4. Stopping (deterministic, no wall time): accepted; or the largest
 //!    bound, above the tolerance, did not improve by PLATEAU_GAIN over the
 //!    last PLATEAU checkpoints (likewise the slowest relaxation's need once
@@ -71,7 +72,9 @@ const PLATEAU_GAIN:f64=2.;
 /// resolved when its weight at a horizon T, weight x e^{-rate T}, is at
 /// least REQUIRED_CONTRIBUTION x tolerance; it is matched when every class
 /// of x0 (weight at least CANDIDATE_WEIGHT x tolerance) slower than its rate
-/// / CLASS_GAP has a candidate within CLASS_MATCH of its rate.
+/// / CLASS_GAP has a candidate within CLASS_MATCH of its rate. A class of
+/// x0 itself must be resolved (`missing_classes`) when its own weight at a
+/// horizon is at least REQUIRED_CONTRIBUTION x tolerance.
 const CANDIDATE_WEIGHT:f64=1e-2;
 const REQUIRED_CONTRIBUTION:f64=0.1;
 const CLASS_GAP:f64=1.4;
@@ -161,14 +164,40 @@ pub fn simplex(values:&[f64])->Vec<f64>{
 /// The decaying classes of x0: the eigenvalues of the frame's second-order
 /// block (L0' + sum_s K_s, the Raman rates included) on which x0 carries
 /// population weight |c_j| max_i |(E V)_ij| (c = V^-1 E^-1 x0) of at least
-/// CANDIDATE_WEIGHT x tolerance; their rates, slowest first.
-fn class_rates(frame:&SwFrame<'_>,eigen:&BlockEigenbasis,lapack:&Lapack,initial:&[C],tolerance:f64)->Result<Vec<f64>,String>{
+/// CANDIDATE_WEIGHT x tolerance; (rate, weight), slowest first. The block's
+/// kernel is not a class: the block annihilates the trace, so a decaying class
+/// carries none of x0's trace |c_j sum_i (E V)_ij| (measured: at most 5e-3
+/// of its weight) and a class carrying at least half its weight is the
+/// kernel, its value zero within the eigensystem's error over the horizon
+/// (three lasers at T = 1 s: 1.4e-8 /us, weight 0.63, trace 1.00; taken as
+/// a class, every candidate was unmatched and a horizon needed it).
+fn class_rates(frame:&SwFrame<'_>,eigen:&BlockEigenbasis,lapack:&Lapack,initial:&[C],tolerance:f64)->Result<Vec<(f64,f64)>,String>{
     let class=frame.class()?;let d=initial.len();let n=class.readout.len()/d.max(1);
     let coordinates=eigen.coefficients(&[initial])?;
     let mut c=vec![ZERO;d];lapack.complex_gemm().multiply(d,1,d,ONE,&class.inverse,d,&coordinates,d,ZERO,&mut c,d)?;
-    let mut rates:Vec<f64>=(0..d).filter(|&j|-class.values[j].re>=super::reduced::KERNEL&&
-        magnitude(c[j])*(0..n).map(|i|magnitude(class.readout[i+n*j])).fold(0.,f64::max)>=CANDIDATE_WEIGHT*tolerance).map(|j|-class.values[j].re).collect();
-    rates.sort_by(f64::total_cmp);Ok(rates)
+    let mut classes:Vec<(f64,f64)>=(0..d).filter_map(|j|{
+        let column=&class.readout[n*j..n*(j+1)];
+        let weight=magnitude(c[j])*column.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
+        let trace=magnitude(c[j])*magnitude(column.iter().fold(ZERO,|a,z|C{re:a.re+z.re,im:a.im+z.im}));
+        let rate=-class.values[j].re;
+        (rate>=super::reduced::KERNEL&&weight>=CANDIDATE_WEIGHT*tolerance&&trace<0.5*weight).then_some((rate,weight))}).collect();
+    classes.sort_by(|a,b|a.0.total_cmp(&b.0));Ok(classes)
+}
+
+/// The classes of x0 a horizon needs and the space has not resolved,
+/// slowest first: a class whose own weight at a horizon T, weight x
+/// e^{-rate T}, is at least REQUIRED_CONTRIBUTION x tolerance, without a
+/// resolved candidate within CLASS_MATCH of its rate. A candidate's own
+/// requirement is taken at its rate, so a class slower than every candidate
+/// escaped it, and neither the residual nor the estimate sees a class the
+/// space lacks: the default scene (probe + 852 nm tweezer) at T = 100 ms had
+/// its classes at 5.6e-7 and 8.7e-7 /us (weights 0.7% and 1.0%) outside a
+/// space whose slowest candidate decayed at 5.1e-5 /us, and p(T) was the
+/// steady state's, off by 7.8e-3 against a bound of 7e-13 (5e-4 with the
+/// horizons' fast part).
+fn missing_classes(classes:&[(f64,f64)],pairs:&[(SlowRate,f64)],horizons:&[f64],tolerance:f64)->Vec<f64>{
+    classes.iter().filter(|&&(rate,weight)|horizons.iter().any(|&t|weight*(-rate*t).exp()>=REQUIRED_CONTRIBUTION*tolerance)
+        &&!pairs.iter().any(|(p,_)|p.resolved()&&(p.rate-rate).abs()<=CLASS_MATCH*rate)).map(|c|c.0).collect()
 }
 
 /// The slowest relaxation's candidates of a model (`Model::slow_candidates`),
@@ -203,6 +232,15 @@ fn need(pair:&SlowRate,classes:&[f64])->(f64,f64){
     match classes.iter().copied().find(|&class|class<pair.rate/CLASS_GAP&&pair.matched==Some(false)){
         Some(class)=>(accuracy.max(1.)*pair.rate/class,class),
         None=>(accuracy,pair.rate)}
+}
+
+/// How far a missing class is from resolved: the nearest candidate's
+/// residual against SLOW_ACCURACY x its rate (at least one) times its rate's
+/// ratio to the class's (at least one); one without a candidate. Its poles
+/// aim at the class's rate.
+fn class_need(class:f64,pairs:&[(SlowRate,f64)])->(f64,f64){
+    let need=pairs.iter().map(|(p,_)|(p.residual/(SLOW_ACCURACY*p.rate)).max(1.)*(p.rate/class).max(class/p.rate)).fold(f64::INFINITY,f64::min);
+    (if need.is_finite(){need}else{1.},class)
 }
 
 /// Every output of a request from rho0 (row-major n x n); `observer` sees
@@ -262,7 +300,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     // x tolerance at a horizon.
     let required=|pair:&SlowRate,weight:f64|request.horizons.iter().any(|&t|weight*(-pair.rate*t).exp()>=REQUIRED_CONTRIBUTION*tolerance);
     // The classes of x0 (a request that propagates).
-    let mut classes:Option<Vec<f64>>=None;
+    let mut classes:Option<Vec<(f64,f64)>>=None;
     let mut checkpoints:Vec<Checkpoint>=Vec::new();
     // The best checkpoint so far, the latest model, and per checkpoint the
     // progress measure of the stopping rule.
@@ -299,8 +337,10 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
             // The slowest relaxation (the classes from the frame's block).
             if classes.is_none()&&propagates{classes=Some(class_rates(&frame,eigen,lapack,initial,tolerance)?);}
-            let pairs=slow_pairs(&model,&space,&ops,classes.as_deref(),tolerance)?;
+            let rates:Option<Vec<f64>>=classes.as_ref().map(|c|c.iter().map(|x|x.0).collect());
+            let pairs=slow_pairs(&model,&space,&ops,rates.as_deref(),tolerance)?;
             let unresolved:Vec<&SlowRate>=pairs.iter().filter(|(p,w)|!p.resolved()&&required(p,*w)).map(|(p,_)|p).collect();
+            let missing=missing_classes(classes.as_deref().unwrap_or(&[]),&pairs,request.horizons,tolerance);
             // The outputs with their bounds.
             let answer={
                 let outputs_clock=Instant::now();
@@ -320,7 +360,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
                     steady_residual,estimate:estimate.clone(),
                     conserved:if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{model.conserved()},
                     slowest:pairs.first().map(|p|p.0),accepted:false};
-                answer.accepted=answer.largest()<=tolerance&&unresolved.is_empty();
+                answer.accepted=answer.largest()<=tolerance&&unresolved.is_empty()&&missing.is_empty();
                 answer};
             let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,largest:answer.largest(),accepted:answer.accepted,
                 growing:model.growing,clipped:model.clipped,projected:model.projected,conserved:answer.conserved,slowest:answer.slowest,
@@ -334,15 +374,20 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             if answer.accepted{break;}
             // 4. The stopping rule on the bound above the tolerance, else on
             // the slowest relaxation's need.
-            let needs:Vec<(f64,f64)>=unresolved.iter().map(|p|need(p,classes.as_deref().unwrap_or(&[]))).collect();
+            // The missing classes first (slowest first), then the candidates.
+            let needs:Vec<(f64,f64)>=missing.iter().map(|&class|class_need(class,&pairs))
+                .chain(unresolved.iter().map(|p|need(p,rates.as_deref().unwrap_or(&[])))).collect();
             progress.push(if within{needs.iter().map(|x|x.0).fold(0.,f64::max)}else{answer.largest()});
             let phase=|i:usize|checkpoints[i].largest<=tolerance;
             let last=progress.len()-1;
-            let plateau=last>=PLATEAU&&phase(last-PLATEAU)==within&&{
-                let start=(0..=last).rev().take_while(|&i|phase(i)==within).last().unwrap_or(last);
+            // Over the checkpoints of the current phase (within the tolerance
+            // or not) only: a phase that began less than PLATEAU checkpoints
+            // ago has no plateau yet.
+            let start=(0..=last).rev().take_while(|&i|phase(i)==within).last().unwrap_or(last);
+            let plateau=last-start>=PLATEAU&&{
                 let before=progress[start..=last-PLATEAU].iter().copied().fold(f64::INFINITY,f64::min);
                 let recent=progress[last+1-PLATEAU..].iter().copied().fold(f64::INFINITY,f64::min);
-                last-start>=PLATEAU&&recent>before/PLATEAU_GAIN};
+                recent>before/PLATEAU_GAIN};
             if exhausted||plateau{
                 let b=best.as_ref().ok_or("A run has its checkpoint")?;
                 let why=if plateau{format!("the error bound stopped improving ({PLATEAU_GAIN}x over {PLATEAU} checkpoints) after {} solves",space.solves())}
@@ -358,7 +403,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
                         format!("Stopped because {why}: the best checkpoint ({} solves) has an error bound of {:.2e} against the tolerance {tolerance:e}{samples}{means}",b.solves,b.largest())});
                 break;
             }
-            slow_need=unresolved.first().map(|p|need(p,classes.as_deref().unwrap_or(&[])));
+            slow_need=needs.first().copied();
             current=Some((space.solves(),model));
         }
         // The next pole by its expected gain.
