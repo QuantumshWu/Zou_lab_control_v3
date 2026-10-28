@@ -34,6 +34,8 @@ use super::ledger::{self,EXPANSION_LIMIT,POPULATION_TOLERANCE,RemainderLedger};
 use super::reduced::{Dressed,Model,SLOW_ACCURACY,SlowRate};
 use super::poles::{InnerWork,Lattice,Pole};
 use super::space::{self,Column,SLOW_FLOOR,Space};
+use super::frame::SwFrame;
+use super::estimator;
 
 /// The error estimate in use.
 pub const ESTIMATOR:Construct=super::estimator::CONSTRUCT;
@@ -75,7 +77,7 @@ pub struct Checkpoint{
 }
 
 #[derive(Clone,Debug,Default)]
-pub struct Timing{pub explicit_set_ms:f64,pub setup_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub dressed_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
+pub struct Timing{pub explicit_set_ms:f64,pub setup_ms:f64,pub frame_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub dressed_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
 
 pub struct Solution{
     pub explicit:ExplicitSet,pub modes:Vec<Charge>,pub translations:Vec<Charge>,
@@ -129,9 +131,9 @@ fn view<'v>(space:&'v Space,model:&'v Model)->ReducedView<'v>{
         kernel:&model.kernel,growth_charge:model.growth_charge,steady:model.simple_kernel.then_some(model.steady.as_slice())}
 }
 
-/// Every output of a request from rho0 (row-major n x n); `observer` sees
-/// every checkpoint.
-pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut observer:Option<&mut dyn FnMut(&Checkpoint)>)->Result<Solution,String>{
+/// Every output of a request from rho0 (row-major n x n) with the error
+/// estimate `construct` (`ESTIMATOR`); `observer` sees every checkpoint.
+pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,construct:Construct,mut observer:Option<&mut dyn FnMut(&Checkpoint)>)->Result<Solution,String>{
     let started=Instant::now();let tolerance=POPULATION_TOLERANCE;let n=prepared.generator.n;
     if initial.len()!=n*n{return Err("Initial density dimension differs".into());}
     let times=request.times;
@@ -153,12 +155,14 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     let ledger=RemainderLedger::new(&prepared.plan,lattice.operator().nu_max(),lattice.operator().dropped())?;
     if ledger.expansion_parameter>EXPANSION_LIMIT{return Err(format!("Static fold expansion parameter {:e} above {EXPANSION_LIMIT:e}",ledger.expansion_parameter));}
     let modes=lattice.modes.clone();
+    eprintln!("DBG ledger {:?} total {:e} nu_max {:e} dropped {:?}",ledger,ledger.total(),lattice.operator().nu_max(),lattice.operator().dropped());
     // 2. The space: translations, the steady column.
     let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*(op.modes.len()+op.canonical_count()))};
     let mut space=Space::new(&mut lattice,initial,capacity)?;
     for s in charge_set::gated_steps(prepared,tolerance){if lattice.operator().index.contains_key(&s){space.activate(&mut lattice,&s)?;}}
     let outputs=Outputs{times,horizons:request.horizons,steady:true,groups:request.groups};
-    let mut estimator=ESTIMATOR(EstimateSetup{prepared,lattice:&explicit.sets,outputs,ledger:&ledger,initial})?;
+    let frame=SwFrame::new(prepared,estimator::longest_time(times,request.horizons))?;timing.frame_ms=frame.milliseconds[0]+frame.milliseconds[1];
+    let mut estimator=construct(EstimateSetup{prepared,lattice:&explicit.sets,outputs,frame:&frame,ledger:&ledger,initial})?;
     let(points,slow_points)=space::ladder(eigen,initial,t1,longest,tolerance)?;let mut alive=vec![true;points.len()];
     let mut dressed=Dressed::new(lattice.operator());
     timing.setup_ms=clock.elapsed().as_secs_f64()*1e3;
@@ -283,7 +287,7 @@ mod tests{
         let mut f=fixture();for v in f.far.iter_mut().chain(f.far2.iter_mut()){*v*=0.02;}let p=prepared(&f);let n=4;let d=16;let groups=vec![vec![0,1],vec![2,3]];
         let mut initial=vec![ZERO;d];initial[0]=ONE;
         let times:Vec<f64>=(0..21).map(|i|0.1*i as f64).collect();let horizons=[3.];
-        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,groups:&groups},None).unwrap();
+        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,groups:&groups},ESTIMATOR,None).unwrap();
         let op=LatticeOperator::new(&p,&s.modes).unwrap();let a=op.dense();let size=op.dimension();
         let rate=|x:&[C]|->Vec<C>{(0..size).map(|r|{let mut v=ZERO;for c in 0..size{mul_add(&mut v,a[r*size+c],x[c]);}v}).collect()};
         let mut x=vec![ZERO;size];x[op.centre*d]=ONE;

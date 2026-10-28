@@ -190,7 +190,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
                 "estimateMs":c.estimate.work.milliseconds,"ms":c.milliseconds})).collect::<Vec<_>>(),
             "ledger":{"nuFreeze":l.nu_freeze,"thirdOrder":l.third_order,"farShell":l.far_shell,"tail":l.tail,"omittedCross":l.omitted_cross,
                 "nonStructural":l.non_structural,"droppedEntries":l.dropped_entries,"total":l.total(),"fold":l.fold,"expansionParameter":l.expansion_parameter},
-            "timingMs":{"explicitSet":t.explicit_set_ms,"setup":t.setup_ms,"solves":t.solves_ms,"images":t.images_ms,"dressed":t.dressed_ms,
+            "timingMs":{"explicitSet":t.explicit_set_ms,"setup":t.setup_ms,"frame":t.frame_ms,"solves":t.solves_ms,"images":t.images_ms,"dressed":t.dressed_ms,
                 "model":t.model_ms,"ordering":t.ordering_ms,"estimate":t.estimate_ms,"total":t.total_ms}})});
     json!({
         "harmonicPlan":{"explicit":plan.count(&Treatment::Explicit{structural:true}),"nonStructural":plan.count(&Treatment::Explicit{structural:false}),
@@ -208,7 +208,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
 /// alone) and the mean's horizon when one is asked for.
 fn run(request:&Prepared,times:&[f64],horizon:Option<f64>)->Result<Solution,String>{
     let horizons:Vec<f64>=horizon.into_iter().collect();
-    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&horizons,groups:&request.groups},None)
+    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&horizons,groups:&request.groups},pipeline::ESTIMATOR,None)
 }
 
 /// The mean of a run: the laboratory time average of the steady state, or
@@ -445,17 +445,26 @@ mod tests{
                 "errTraj":error_traj.as_ref().map(|e|e.0),"errTrajAt":error_traj.as_ref().map(|e|e.1),"errH":error_h,"errSteady":error_s,"estOverErrQuantiles":ratio,
                 "growing":c.growing,"reflected":c.reflected,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest.map(|s|s.rate),"slowestResidual":c.slowest.map(|s|s.residual),"ms":c.milliseconds,
                 "operatorWork":c.inner.operator_work,"innerSteps":c.inner.steps,"innerMs":c.inner.milliseconds,"applyMs":c.inner.timing.apply_ms,"preconditionMs":c.inner.timing.precondition_ms,"orthogonalizeMs":c.inner.timing.orthogonalize_ms,"batchMs":c.inner.batch_ms,"blockOperations":c.inner.block_operations(),
-                "timingMs":{"explicitSet":c.timing.explicit_set_ms,"setup":c.timing.setup_ms,"dressed":c.timing.dressed_ms,"model":c.timing.model_ms,"ordering":c.timing.ordering_ms,"estimate":c.timing.estimate_ms},
+                "timingMs":{"explicitSet":c.timing.explicit_set_ms,"setup":c.timing.setup_ms,"frame":c.timing.frame_ms,"dressed":c.timing.dressed_ms,"model":c.timing.model_ms,"ordering":c.timing.ordering_ms,"estimate":c.timing.estimate_ms},
                 "elapsedMs":started.elapsed().as_secs_f64()*1e3,"trajectoryNorm":c.trajectory.iter().map(|p|ledger::metric(p,&zero,&groups)).fold(0_f64,f64::max)});
             println!("{line}");lines.push(line);
         };
-        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,groups:&prepared.groups},Some(&mut observe));
+        // ATOM_VALIDATE_FOLD=0: the estimate without the fold charges (their
+        // ledger reported in the summary).
+        let construct=if std::env::var("ATOM_VALIDATE_FOLD").is_ok_and(|v|v=="0"){without_fold}else{pipeline::ESTIMATOR};
+        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,groups:&prepared.groups},construct,Some(&mut observe));
         let total_ms=started.elapsed().as_secs_f64()*1e3;
         match result{
             Ok(s)=>println!("{}",json!({"summary":true,"prepareMs":prepare_ms,"totalMs":total_ms,"lattice":lattice_json(&prepared.lattice,Some(&s))["run"],
                 "conserved":s.conserved,"slowestRate":s.slowest.map(|x|x.rate),"slowestResidual":s.slowest.map(|x|x.residual),"steadyResidual":s.steady_residual})),
             Err(e)=>println!("{}",json!({"summary":true,"error":e,"totalMs":total_ms})),
         }
+    }
+    /// The estimator with a zero ledger (no fold charges), for validation.
+    fn without_fold<'a>(setup:atom_population_core::lattice::estimate_api::EstimateSetup<'a>)->Result<Box<dyn atom_population_core::lattice::estimate_api::Estimator+'a>,String>{
+        use atom_population_core::lattice::ledger::RemainderLedger;
+        static NONE:RemainderLedger=RemainderLedger{nu_freeze:0.,third_order:0.,far_shell:0.,tail:0.,omitted_cross:0.,non_structural:0.,dropped_entries:0.,expansion_parameter:0.,fold:0.};
+        pipeline::ESTIMATOR(atom_population_core::lattice::estimate_api::EstimateSetup{ledger:&NONE,..setup})
     }
     /// The error estimator (`lattice::estimator`) on R2's dumped spaces (N1's
     /// pipeline, `research/population/unified/r2/n2_dump.py` on branch
@@ -476,6 +485,7 @@ mod tests{
         use atom_population_core::lattice::ledger::RemainderLedger;
         use atom_population_core::lattice::operator::LatticeOperator;
         use atom_population_core::lattice::poles::Lattice;
+        use atom_population_core::lattice::frame::SwFrame;
         type C=Complex64;
         let root=std::path::PathBuf::from(std::env::var("ATOM_ESTIMATOR_FIXTURES").expect("ATOM_ESTIMATOR_FIXTURES"));
         let cases=std::env::var("ATOM_ESTIMATOR_CASES").expect("ATOM_ESTIMATOR_CASES");
@@ -506,7 +516,8 @@ mod tests{
                 operator=operator.max(e/images[j].iter().map(|v|v.re.hypot(v.im)).fold(0.,f64::max));}
             let ledger=RemainderLedger::new(&p.plan,op.nu_max(),op.dropped()).unwrap();drop(op);
             let sets=LatticeSets{explicit,ring};let initial=vec![C::default();p.generator.n*p.generator.n];
-            let setup=EstimateSetup{prepared:&p,lattice:&sets,outputs:Outputs{times:&times,horizons:&horizons,steady:true,groups:&fixture_groups},ledger:&ledger,initial:&initial};
+            let frame=SwFrame::new(&p,estimator::longest_time(&times,&horizons)).unwrap();
+            let setup=EstimateSetup{prepared:&p,lattice:&sets,outputs:Outputs{times:&times,horizons:&horizons,steady:true,groups:&fixture_groups},frame:&frame,ledger:&ledger,initial:&initial};
             let clock=Instant::now();
             let near=std::env::var("ATOM_ESTIMATOR_NEAR").unwrap_or_default();
             let all_sets=LatticeSets{explicit:modes.clone(),ring:Vec::new()};

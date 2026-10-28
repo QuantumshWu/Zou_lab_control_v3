@@ -27,7 +27,9 @@ use super::super::*;
 use super::super::eigenbasis::BlockEigenbasis;
 use super::super::operator::{LatticeOperator,Mask,Parts};
 use super::blocks::BlockSystem;
-use super::kernels::{KernelRule,SwKernels};
+use super::kernels::SwKernels;
+use super::super::frame::SwFrame;
+use std::borrow::Cow;
 use crate::parallel::Execution;
 
 /// Refinement passes of the ring's block solves for the diagonal fold's
@@ -85,7 +87,7 @@ pub struct ErrorLattice<'p>{
     /// the ring's diagonal blocks, R -> P u Q for the feedback.
     pub ring:Vec<Charge>,ring_nu:Vec<f64>,
     outer:LatticeOperator<'p>,inner_mask:Vec<bool>,ring_mask:Vec<bool>,edge_modes:usize,
-    pub kernels:SwKernels,
+    pub kernels:&'p SwKernels,
     /// The near modes (the centre and its one-step neighbours), and the (I - S)
     /// pairs into them: (target, source, step), target = source + step.
     pub near:Vec<usize>,pub(super) pairs:Vec<(usize,usize,usize)>,
@@ -94,7 +96,9 @@ pub struct ErrorLattice<'p>{
     /// propagated by the dressed blocks of L0' alone, from the coordinates
     /// the transform reads anyway.
     frames:Vec<usize>,pub outer_modes:Vec<usize>,
-    pub classes:Vec<BlockSystem>,pub(super) class_of:Vec<usize>,
+    /// The classes: the frame's own block when every mode carries every
+    /// step (`Classes::Full`).
+    pub classes:Vec<Cow<'p,BlockSystem>>,pub(super) class_of:Vec<usize>,
     /// Per near mode (in `near` order), column-major d x k: class
     /// coordinates of the transformed basis columns and images.
     pub(super) basis_coordinates:Vec<Vec<C>>,pub(super) image_coordinates:Vec<Vec<C>>,
@@ -107,13 +111,13 @@ pub struct ErrorLattice<'p>{
     /// propagated.
     pub ring_in_fast:bool,pub outer_bare:bool,
     pub work:ErrorWork,
-    /// Build times (ms): kernels, classes.
+    /// Build times (ms): kernels, classes (the frame's for shared ones).
     pub build_ms:[f64;2],
 }
 
 impl<'p> ErrorLattice<'p>{
     /// `explicit`: the explicit set P, whose modes join the near ones.
-    pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],explicit:&[Charge],rule:KernelRule,classes:Classes)->Result<Self,String>{
+    pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],explicit:&[Charge],frame:&'p SwFrame,classes:Classes)->Result<Self,String>{
         let basis=prepared.eigenbasis()?;
         let n=prepared.generator.n;let d=n*n;
         let index:BTreeMap<Charge,usize>=modes.iter().enumerate().map(|(i,q)|(q.clone(),i)).collect();
@@ -127,9 +131,7 @@ impl<'p> ErrorLattice<'p>{
         let inner_mask:Vec<bool>=(0..all.len()).map(|q|q<modes.len()).collect();let ring_mask:Vec<bool>=inner_mask.iter().map(|&b|!b).collect();
         let structural=prepared.plan.structural_steps();
         let edge_modes=modes.iter().filter(|q|ring.iter().any(|r|charge_minus(r,q).is_ok_and(|s|structural.contains(&s)))).count();
-        let clock=Instant::now();
-        let kernels=SwKernels::new(prepared,basis,rule)?;
-        let kernel_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
+        let kernels=&frame.kernels;let clock=Instant::now();
         // Near modes: the centre, every lattice mode one kernel step away and
         // the explicit set (by construction where the state has weight).
         let mut near=vec![centre];
@@ -146,10 +148,12 @@ impl<'p> ErrorLattice<'p>{
         let mut distinct:Vec<Vec<usize>>=keys.clone();distinct.sort();distinct.dedup();
         let mut class_of=vec![usize::MAX;modes.len()];
         for(&a,k)in near.iter().zip(&keys){class_of[a]=distinct.iter().position(|x|x==k).unwrap();}
-        let lapack=&prepared.lapack;
-        let built=Execution::new()?.map(distinct,|steps|BlockSystem::new(lapack,basis,&kernels,steps,n));
+        let lapack=&prepared.lapack;let every:Vec<usize>=(0..kernels.steps.len()).collect();
+        let built=Execution::new()?.map(distinct,|steps|->Result<Cow<'p,BlockSystem>,String>{
+            if steps==every{Ok(Cow::Borrowed(&frame.class))}else{Ok(Cow::Owned(BlockSystem::new(lapack,basis,kernels,steps,n)?))}});
         let classes=built.into_iter().collect::<Result<Vec<_>,_>>()?;
-        let class_ms=clock.elapsed().as_secs_f64()*1e3;
+        let class_ms=if classes.iter().all(|c|matches!(c,Cow::Borrowed(_))){frame.milliseconds[1]}else{clock.elapsed().as_secs_f64()*1e3};
+        let kernel_ms=frame.milliseconds[0];
         let count=near.len();
         let outer_modes:Vec<usize>=frames.iter().copied().filter(|q|!near.contains(q)).collect();let outer_count=outer_modes.len();
         Ok(Self{prepared,basis,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,kernels,

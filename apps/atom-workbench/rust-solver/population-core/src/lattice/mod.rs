@@ -29,6 +29,9 @@
 //! - `space`: the one rational Krylov space from x0 (poles, translations);
 //! - `reduced`: the Galerkin model in the dressed coordinates and every
 //!   output from it;
+//! - `frame`: the Schrieffer-Wolff / Floquet frame of a request (first-order
+//!   kernels, the second-order block's eigensystem), shared by the error
+//!   estimate;
 //! - `estimate_api`: what the error estimate reads and returns;
 //! - `estimator`: the error estimate (one error equation for every output,
 //!   the omitted ring slaved, Schrieffer-Wolff propagation of the near
@@ -58,6 +61,7 @@ pub mod charge_set;
 pub mod poles;
 pub mod space;
 pub mod reduced;
+pub mod frame;
 pub mod estimate_api;
 pub mod estimator;
 pub mod pipeline;

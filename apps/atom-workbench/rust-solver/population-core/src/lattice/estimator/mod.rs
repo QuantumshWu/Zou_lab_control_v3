@@ -54,8 +54,9 @@ pub use gate::OutputGate;
 /// output time.
 pub const KERNEL_ENTRY:f64=5e-3;
 pub const KERNEL_HORIZON_RATE:f64=1e-2;
-/// Near-resonant entries above this stay couplings (none by default).
-pub const KERNEL_CAP:f64=f64::INFINITY;
+/// Near-resonant entries above this stay couplings: the first-order
+/// kernel is no small parameter there (N1).
+pub const KERNEL_CAP:f64=1.;
 /// Every near mode's block carries every step's second-order term: one real
 /// eigensystem. Measured against the per-neighbour classes of R2 (9-19
 /// complex eigensystems, 10-18 s on three/four lasers): the same estimate to
@@ -86,7 +87,7 @@ pub struct Errors{
 pub struct UnifiedEstimate<'a>{
     setup:EstimateSetup<'a>,
     pub lattice:ErrorLattice<'a>,
-    pub pool:Option<SlowPool<'a>>,
+    pub pool:Option<SlowPool>,
     pub gate:OutputGate,
     /// Whether the pool's first kernel direction is the pipeline's bordered
     /// solve (else the Floquet preconditioner's). Measured on three and four
@@ -110,10 +111,8 @@ impl<'a> UnifiedEstimate<'a>{
     /// With or without the explicit set among the near modes.
     pub fn with_near(setup:EstimateSetup<'a>,near_explicit:bool)->Result<Self,String>{
         let modes=setup.lattice.modes();
-        let horizon=longest_time(setup.outputs.times,setup.outputs.horizons);
-        let rule=KernelRule{entry:KERNEL_ENTRY,horizon_rate:KERNEL_HORIZON_RATE,horizon,cap:KERNEL_CAP};
         let explicit=if near_explicit{setup.lattice.explicit.clone()}else{Vec::new()};
-        let lattice=ErrorLattice::new(setup.prepared,&modes,&explicit,rule,CLASSES)?;
+        let lattice=ErrorLattice::new(setup.prepared,&modes,&explicit,setup.frame,CLASSES)?;
         let gate=OutputGate::new(lattice.n,lattice.nu.clone(),lattice.centre);
         Ok(Self{setup,lattice,pool:None,gate,seed_with_pipeline:false})
     }
@@ -225,9 +224,9 @@ mod tests{
     use super::super::estimate_api::{LatticeSets,Outputs};
     use super::super::ledger::RemainderLedger;
     use super::super::operator::LatticeOperator;
+    use super::super::poles::Lattice;
+    use super::super::frame::SwFrame;
     use super::super::tests::{fixture,prepared};
-    struct NoSolves;
-    impl SteadySolves for NoSolves{fn solve(&mut self,_:&[C],_:f64)->Result<(Vec<C>,usize),String>{Err("not used".into())}}
     #[test]
     fn estimator_runs_through_the_pipeline_interface(){
         // A two-column space (x0 and its image's new direction) on the
@@ -253,15 +252,17 @@ mod tests{
         let lattice=LatticeSets{explicit:modes.clone(),ring:Vec::new()};
         let ledger=RemainderLedger::new(&p.plan,op.nu_max(),op.dropped()).unwrap();
         let times=[0.,0.5,1.];let horizons=[10.];let groups=vec![vec![0,1]];
-        let setup=EstimateSetup{prepared:&p,lattice:&lattice,outputs:Outputs{times:&times,horizons:&horizons,steady:false,groups:&groups},ledger:&ledger,initial:&initial};
+        let frame=SwFrame::new(&p,longest_time(&times,&horizons)).unwrap();
+        let setup=EstimateSetup{prepared:&p,lattice:&lattice,outputs:Outputs{times:&times,horizons:&horizons,steady:false,groups:&groups},frame:&frame,ledger:&ledger,initial:&initial};
         let mut estimator=CONSTRUCT(setup).unwrap();
         let x=[1.,0.,0.,1.];let c0=[1.,0.];let kernel=[false,false];
         let reduced=ReducedView{basis:&basis,images:&images,r:2,x:&x,g:&g,c0:&c0,theta:&theta,vectors:&sr,coefficients:&a,
             used_theta:&theta,used_coefficients:&a,kernel:&kernel,growth_charge:0.,steady:None};
         // The first checkpoint is not estimated; the second (unchanged outputs) is.
-        let first=estimator.estimate(&reduced,&mut NoSolves).unwrap();
+        let mut solver=Lattice::new(&p,lattice.clone()).unwrap();
+        let first=estimator.estimate(&reduced,&mut solver).unwrap();
         assert!(first.largest().is_infinite());
-        let e=estimator.estimate(&reduced,&mut NoSolves).unwrap();
+        let e=estimator.estimate(&reduced,&mut solver).unwrap();
         assert_eq!((e.trajectory.len(),e.horizons.len()),(3,1));
         assert!(e.trajectory[0].abs()<1e-12&&e.trajectory[1..].iter().chain(&e.horizons).all(|v|v.is_finite()&&*v>0.),"{e:?}");
         assert!(e.largest().is_finite()&&e.work.block_operations>0);

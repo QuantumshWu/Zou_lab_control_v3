@@ -16,9 +16,10 @@
 //! costs the projection of F_k, a small least-squares problem, and, while
 //! the residual or the readout has not settled, preconditioned augmentation
 //! steps that join the pool for every later mode and checkpoint. The
-//! preconditioner is the solver's own: the shared Floquet frames at the
-//! steady shift, and the first direction is the pipeline's bordered solve
-//! (`SteadySolves`) of the first kernel source.
+//! operator and the preconditioner are the pipeline's own (`SteadySolves`:
+//! its lattice, the Floquet frames at the steady shift), and the pool starts
+//! with the inner directions of the pipeline's steady solve and their images
+//! (computed by that solve, free here).
 //!
 //! e^{tA} Y_k: Y's part in the space, W X r0 (r0 its least-squares
 //! coordinates), is propagated by the reduced model, W X S e^{theta t} S^-1 r0;
@@ -26,9 +27,6 @@
 //! of L0' on the near modes only (its readout elsewhere is micromotion).
 use super::super::*;
 use super::super::estimate_api::SteadySolves;
-use super::super::operator::LatticeOperator;
-use super::super::preconditioner::{FloquetBatch,Preconditioner,Preconditioning,Shift};
-use super::super::floquet::Reach;
 use super::lattice::{ErrorLattice,split};
 use super::propagate::Readout;
 use crate::parallel::Execution;
@@ -183,9 +181,11 @@ enum Direction{Basis(usize),Augmented(usize)}
 pub struct PoolWork{
     /// Operator and preconditioner applications on P u Q, the pipeline's
     /// bordered solves and their inner steps, GCRO steps and solves (one
-    /// per slow mode and checkpoint), ring block solves inside the ring
-    /// feedback are counted by the lattice.
+    /// per slow mode and checkpoint), the directions taken over from the
+    /// pipeline's steady solve; ring block solves inside the ring feedback
+    /// are counted by the lattice.
     pub applications:usize,pub preconditions:usize,pub pipeline_solves:usize,pub inner_steps:usize,pub steps:usize,pub solves:usize,
+    pub inherited:usize,
     /// Near-mode coordinate changes of the slow modes' remainders.
     pub frame_blocks:usize,
     /// Time (ms): extending Q, GCRO steps, the rest of the solves.
@@ -195,8 +195,8 @@ pub struct PoolWork{
 /// One slow mode's solution: Y = sign * U x over the pool's directions.
 pub struct SlowSolution{pub theta:C,pub coefficient:C,x:Vec<C>,sign:f64}
 
-pub struct SlowPool<'p>{
-    op:LatticeOperator<'p>,batch:FloquetBatch<'p>,lapack:Arc<Lapack>,execution:Execution,
+pub struct SlowPool{
+    lapack:Arc<Lapack>,execution:Execution,
     n:usize,d:usize,watch:Vec<usize>,mirror:Vec<usize>,near:Vec<usize>,
     q:Panels,
     /// Pool directions and the coordinates (on Q at insertion) of each and
@@ -206,25 +206,25 @@ pub struct SlowPool<'p>{
     augmented:Vec<Vec<C>>,
     /// Whether the first kernel direction comes from the pipeline's solve.
     pub seed_with_pipeline:bool,
+    /// Whether the pipeline's steady-solve directions were taken.
+    inherited:bool,
     columns:usize,
     pub work:PoolWork,
 }
 
-impl<'p> SlowPool<'p>{
-    pub fn new(prepared:&'p LatticePrepared,lattice:&ErrorLattice<'_>)->Result<Self,String>{
-        let op=LatticeOperator::new(prepared,&lattice.modes)?;
-        let batch=Preconditioning::new(prepared)?.batch(&op,Shift::Steady,Some(Reach::All))?;
+impl SlowPool{
+    pub fn new(prepared:&LatticePrepared,lattice:&ErrorLattice<'_>)->Result<Self,String>{
         let(n,d)=(lattice.n,lattice.d);let c0=lattice.centre*d;let watch:Vec<usize>=(0..n).map(|i|c0+i*n+i).collect();
-        let length=2*op.dimension();
-        let mut pool=Self{op,batch,lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),
+        let length=2*lattice.dimension();
+        let mut pool=Self{lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),
             q:Panels::new(length),directions:Vec::new(),cu:Vec::new(),cau:Vec::new(),trace:Vec::new(),u:Vec::new(),augmented:Vec::new(),
-            seed_with_pipeline:true,columns:0,work:PoolWork::default()};
+            seed_with_pipeline:true,inherited:false,columns:0,work:PoolWork::default()};
         let mut u=vec![ZERO;length/2];for &k in &pool.watch{u[k]=C{re:1./n as f64,im:0.};}
         let(mut coordinates,_)=pool.q.extend(&pool.lapack,&pool.execution,reals(&u),1)?;pool.u=coordinates.remove(0);
         Ok(pool)
     }
     fn centre_trace(&self,x:&[C])->f64{self.watch.iter().map(|&k|x[k].re).sum()}
-    fn apply(&mut self,x:&[C])->Result<Vec<C>,String>{let mut y=vec![ZERO;x.len()];self.op.apply(x,&mut y)?;self.work.applications+=1;Ok(y)}
+    fn apply(&mut self,steady:&mut dyn SteadySolves,x:&[C])->Result<Vec<C>,String>{let mut y=vec![ZERO;x.len()];steady.apply(x,&mut y)?;self.work.applications+=1;Ok(y)}
     /// Adds directions with their images: Q extended by both, the
     /// coordinates kept. Returns Q's new columns.
     fn add(&mut self,directions:Vec<(Direction,Vec<C>,Vec<C>)>)->Result<Vec<Vec<f64>>,String>{
@@ -266,6 +266,10 @@ impl<'p> SlowPool<'p>{
     /// (A + u tau0^T) y = f) by GCRO on the pool.
     pub fn solve(&mut self,basis:&[Vec<C>],f:&[C],theta:C,coefficient:C,steady:&mut dyn SteadySolves)->Result<SlowSolution,String>{
         let clock=Instant::now();self.work.solves+=1;
+        if !self.inherited{
+            self.inherited=true;let given=steady.directions();self.work.inherited+=given.len();
+            if !given.is_empty(){let first=self.augmented.len();self.add(given.into_iter().enumerate().map(|(i,(z,az))|(Direction::Augmented(first+i),z,az)).collect())?;}
+        }
         let kernel=magnitude(theta)<KERNEL;let length=self.q.length;
         // f = e^{i phi} (g1 + i g2) with g1, g2 Hermitian-symmetric and
         // orthogonal, g1 the larger: a real problem when theta is real.
@@ -301,8 +305,8 @@ impl<'p> SlowPool<'p>{
                 let field:Vec<C>=complex(part).iter().map(|v|C{re:v.re/size,im:v.im/size}).collect();
                 let z=if self.seed_with_pipeline&&kernel&&self.augmented.is_empty()&&new.is_empty(){
                     let(y,inner)=steady.solve(&field,RESIDUAL)?;self.work.pipeline_solves+=1;self.work.inner_steps+=inner;y
-                }else{let mut z=vec![ZERO;field.len()];self.batch.apply(&field,&mut z)?;self.work.preconditions+=1;z};
-                let az=self.apply(&z)?;new.push((Direction::Augmented(self.augmented.len()+new.len()),z,az));
+                }else{let mut z=vec![ZERO;field.len()];steady.precondition(&field,&mut z)?;self.work.preconditions+=1;z};
+                let az=self.apply(steady,&z)?;new.push((Direction::Augmented(self.augmented.len()+new.len()),z,az));
             }
             if new.is_empty(){break x;}
             let fresh=self.add(new)?;

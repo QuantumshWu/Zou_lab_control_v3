@@ -18,6 +18,7 @@ use super::super::eigenbasis::BlockEigenbasis;
 use super::super::floquet::inverse;
 use super::kernels::SwKernels;
 
+#[derive(Clone)]
 pub struct BlockSystem{
     /// The steps whose second-order terms the class carries.
     pub steps:Vec<usize>,
