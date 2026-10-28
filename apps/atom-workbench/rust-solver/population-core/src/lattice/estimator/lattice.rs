@@ -27,7 +27,9 @@
 //!
 //! Ring (`ring_feedback`): for a field x on P u Q and a shift z, the ring
 //! slaved at z, y = (z - D_R)^-1 (C x)|_R (exact block solves, refined for
-//! the diagonal fold's i nu_r K^(1)), and its feedback (B y)|_{P u Q}.
+//! the diagonal fold's i nu_r K^(1)), and its feedback (B y)|_{P u Q}; per
+//! ring charge, the size of its own amplitude's feedback
+//! (`ring_attribution`, the completion's).
 //! Complex fields are split into their Hermitian-symmetric parts
 //! (x = a + i b, a = (x + J x)/2, b = (x - J x)/2i), the parts the lattice
 //! operator acts on.
@@ -89,9 +91,6 @@ pub struct ErrorLattice<'p>{
     /// P u Q u R, applied with masks: P u Q -> R for the outflow, R -> R for
     /// the ring's diagonal blocks, R -> P u Q for the feedback.
     pub ring:Vec<Charge>,ring_nu:Vec<f64>,
-    /// When `attribute`, the last feedback's |B y_r| per ring charge r (its
-    /// slaved amplitude's feedback onto P u Q alone, the mirror with it).
-    pub attribute:bool,pub last_ring:Vec<f64>,
     outer:LatticeOperator<'p>,inner_mask:Vec<bool>,ring_mask:Vec<bool>,edge_modes:usize,
     /// The request's frame: its kernels and blocks.
     frame:&'p SwFrame<'p>,
@@ -150,7 +149,7 @@ impl<'p> ErrorLattice<'p>{
         let count=near.len();
         let near_canonical:Vec<usize>=(0..count).filter(|&slot|canonical[near[slot]]).collect();
         let outer_modes:Vec<usize>=frames.iter().copied().filter(|&q|!near.contains(&q)&&canonical[q]).collect();let outer_count=outer_modes.len();
-        Ok(Self{prepared,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,attribute:false,last_ring:Vec::new(),outer,inner_mask,ring_mask,edge_modes,frame,
+        Ok(Self{prepared,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,frame,
             near,pairs,frames,outer_modes,canonical,near_canonical,partner:OnceLock::new(),basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],
             outer_basis:vec![Vec::new();outer_count],outer_image:vec![Vec::new();outer_count],columns:0,
             work:ErrorWork::default()})
@@ -245,11 +244,11 @@ impl<'p> ErrorLattice<'p>{
         self.work.frame_blocks+=count*(computed.len()+self.near_canonical.len());
         Ok((z,o))
     }
-    /// The ring's feedback on P u Q of a field x at the shift z:
-    /// (B (z - D_R)^-1 C x)|_{P u Q}.
-    pub fn ring_feedback(&mut self,x:&[C],shift:C)->Result<Vec<C>,String>{
+    /// The ring slaved to a field x on P u Q at the shift z,
+    /// y = (z - D_R)^-1 (C x)|_R; None when x feeds no ring charge.
+    fn slaved(&mut self,x:&[C],shift:C)->Result<Option<Vec<C>>,String>{
         let d=self.d;let(inner,count)=(self.modes.len(),self.ring.len());
-        if count==0{return Ok(vec![ZERO;inner*d]);}
+        if count==0{return Ok(None);}
         let(xa,xb)=split(x,&self.mirror,self.n);
         let outflow=|this:&mut Self,part:&[C]|->Result<Vec<C>,String>{
             if norm(part)==0.{return Ok(vec![ZERO;count*d]);}
@@ -257,7 +256,7 @@ impl<'p> ErrorLattice<'p>{
             this.outer.apply_masked(&field,&mut out,Parts::Full,Some(Mask{targets:&this.ring_mask,sources:&this.inner_mask}))?;this.work.block_operations+=count;
             Ok(out[inner*d..].to_vec())};
         let(oa,ob)=(outflow(self,&xa)?,outflow(self,&xb)?);let source=join(&oa,&ob);let size=norm(&source);
-        if size==0.{return Ok(vec![ZERO;inner*d]);}
+        if size==0.{return Ok(None);}
         // (D_R - z) y = source, then -y.
         // The eigenbasis's block solves, refined for the ring blocks' frequency term.
         let basis=self.prepared.eigenbasis()?;
@@ -271,14 +270,24 @@ impl<'p> ErrorLattice<'p>{
             for(a,b)in y.iter_mut().zip(&r){add(a,*b);}
         }
         for v in &mut y{v.re=-v.re;v.im=-v.im;}
-        if self.attribute{
-            let mut per=Vec::with_capacity(count);
-            for r in 0..count{let mut yr=vec![ZERO;count*d];yr[r*d..(r+1)*d].copy_from_slice(&y[r*d..(r+1)*d]);
-                let m=self.outer.mirror[inner+r]-inner;if m!=r{yr[m*d..(m+1)*d].copy_from_slice(&y[m*d..(m+1)*d]);}
-                per.push(norm(&self.ring_parts(&yr,Parts::Full,false)?));}
-            self.last_ring=per;
-        }
-        self.ring_parts(&y,Parts::Full,false)
+        Ok(Some(y))
+    }
+    /// The ring's feedback on P u Q of a field x at the shift z:
+    /// (B (z - D_R)^-1 C x)|_{P u Q}.
+    pub fn ring_feedback(&mut self,x:&[C],shift:C)->Result<Vec<C>,String>{
+        match self.slaved(x,shift)?{Some(y)=>self.ring_parts(&y,Parts::Full,false),None=>Ok(vec![ZERO;self.dimension()])}
+    }
+    /// Per ring charge r (in `ring` order), the feedback onto P u Q of its
+    /// slaved amplitude alone (the mirror with it), |B y_r|, for a field x at
+    /// the shift z.
+    pub fn ring_attribution(&mut self,x:&[C],shift:C)->Result<Vec<f64>,String>{
+        let(d,inner,count)=(self.d,self.modes.len(),self.ring.len());
+        let Some(y)=self.slaved(x,shift)? else{return Ok(vec![0.;count]);};
+        let mut per=Vec::with_capacity(count);
+        for r in 0..count{let mut yr=vec![ZERO;count*d];yr[r*d..(r+1)*d].copy_from_slice(&y[r*d..(r+1)*d]);
+            let m=self.outer.mirror[inner+r]-inner;if m!=r{yr[m*d..(m+1)*d].copy_from_slice(&y[m*d..(m+1)*d]);}
+            per.push(norm(&self.ring_parts(&yr,Parts::Full,false)?));}
+        Ok(per)
     }
     /// The operator's parts on a (complex) ring field: its diagonal blocks
     /// back onto the ring (`ring_rows`) or its couplings onto P u Q.

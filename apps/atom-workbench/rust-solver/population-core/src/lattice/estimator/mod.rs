@@ -64,7 +64,7 @@
 //! (centre readout: the time average) and the steady state, every one
 //! estimated at every checkpoint. Errors are measured with `ledger::metric`.
 use super::*;
-use super::estimate_api::{EstimateSetup,ErrorEstimate,EstimateWork,ReducedView,SteadySolves};
+use super::estimate_api::{EstimateSetup,ErrorEstimate,EstimateWork,Outputs,ReducedView,SteadySolves};
 use super::ledger::{self,metric};
 
 pub mod kernels;
@@ -106,10 +106,6 @@ pub const KERNEL_CAP:f64=1.;
 /// rates of 3.5e-7 /us, an error of 7.0e-7 the skip estimated as zero;
 /// solved, 8.8e-7).
 const INVARIANT:f64=1e-12;
-/// One source of the slow part alone (`UnifiedEstimate::estimate_by_source`).
-#[derive(Clone,Copy,Debug,PartialEq)]
-pub enum Source{Ring,K1}
-
 /// Tasks of the time GEMMs (the grid's chunks): fixed, so that the chunking
 /// does not depend on the thread count (as BLOCK_TASKS); four per worker of
 /// the desktop app's eight, at least MINIMUM_WORK_PER_TASK each.
@@ -125,6 +121,75 @@ pub fn time_chunk(times:usize,per_time:usize)->usize{
 /// model's kernel and projected-growing flags.
 pub struct RitzModel<'c>{pub basis:&'c[Vec<C>],pub images:&'c[Vec<C>],pub s:&'c[C],pub theta:&'c[C],pub coefficients:&'c[C],
     pub kernel:&'c[bool],pub projected:&'c[bool]}
+impl<'c> RitzModel<'c>{
+    /// A checkpoint's reduced model, its Ritz vectors `s` column-major.
+    fn new(reduced:&ReducedView<'c>,s:&'c[C])->Self{
+        Self{basis:reduced.basis,images:reduced.images,s,theta:reduced.used_theta,coefficients:reduced.used_coefficients,
+            kernel:reduced.kernel,projected:reduced.projected}
+    }
+}
+/// The Ritz vectors S of a reduced model, column-major.
+fn column_major(reduced:&ReducedView<'_>)->Vec<C>{let r=reduced.r;(0..r*r).map(|i|reduced.vectors[(i%r)*r+i/r]).collect()}
+/// The Ritz vector x = W b_m of mode m and its image A x (from the
+/// pipeline's images), on fields of `length`.
+fn ritz_field(cp:&RitzModel<'_>,m:usize,length:usize)->(Vec<C>,Vec<C>){
+    let k=cp.basis.len();let(mut x,mut ax)=(vec![ZERO;length],vec![ZERO;length]);
+    for(j,&c)in cp.s[k*m..k*(m+1)].iter().enumerate(){if !nonzero(c){continue;}
+        for((xv,av),(&w,&aw))in x.iter_mut().zip(ax.iter_mut()).zip(cp.basis[j].iter().zip(&cp.images[j])){mul_add(xv,c,w);mul_add(av,c,aw);}}
+    (x,ax)
+}
+
+/// The slow modes of a checkpoint and which outputs take them. A projected
+/// growing mode is never among them; the kernel is. At an output time T a
+/// decaying mode slower than 1/T with a coefficient below the tolerance
+/// stays in the SW part and holds no other back (`at`); the slowest decay
+/// rate of the others decides whether the slow part runs for the
+/// trajectory (`grid`).
+struct SlowModes{
+    /// The slow modes, and the kernel's among them.
+    slow:Vec<usize>,kernel:Vec<usize>,
+    /// The modes solved, the kernel's first and then in the order an output
+    /// time takes a prefix of them, and the modes deflating the pool.
+    needed:Vec<usize>,deflated:Vec<usize>,
+    /// The grid's last time, the slowest decay rate the time rule reads
+    /// there, and whether the trajectory runs the slow part.
+    last:f64,lambda_slow:f64,grid:bool,
+}
+impl SlowModes{
+    fn new(cp:&RitzModel<'_>,outputs:&Outputs<'_>)->Self{
+        let r=cp.theta.len();
+        let slow:Vec<usize>=(0..r).filter(|&m|magnitude(cp.theta[m])<slow::SLOW&&!cp.projected[m]).collect();
+        let kernel:Vec<usize>=slow.iter().copied().filter(|&m|cp.kernel[m]).collect();
+        let last=outputs.times.last().copied().unwrap_or(0.);
+        let modes=Self{slow,kernel,needed:Vec::new(),deflated:Vec::new(),last,lambda_slow:0.,grid:false};
+        let rate=|t:f64|{let l=(0..r).filter(|&m|cp.theta[m].re.abs()>=super::reduced::KERNEL&&!cp.projected[m]&&!modes.negligible(cp,m,t)).map(|m|cp.theta[m].re.abs()).fold(f64::INFINITY,f64::min);
+            if l.is_finite(){l}else{0.}};
+        let lambda_slow=rate(last);
+        let grid=outputs.times.last().is_some_and(|&t|t*rate(t)>=1.);
+        // The kernel modes first, then every slow mode an output takes: every
+        // horizon, the grid when it runs the slow part.
+        let mut taken:Vec<usize>=Vec::new();
+        for t in outputs.horizons.iter().copied().chain(grid.then_some(last)){for m in modes.at(cp,t){if !taken.contains(&m){taken.push(m);}}}
+        // Those an output may leave out last, slowest last: every output time
+        // takes a prefix of the solutions.
+        let key=|m:usize|(magnitude(cp.coefficients[m])<ledger::POPULATION_TOLERANCE,-cp.theta[m].re.abs());
+        taken.sort_by(|&p,&q|{let(a,b)=(key(p),key(q));a.0.cmp(&b.0).then(a.1.total_cmp(&b.1))});
+        let kernel=&modes.kernel;
+        let needed:Vec<usize>=if !taken.is_empty(){kernel.iter().chain(taken.iter().filter(|m|!kernel.contains(m))).copied().collect()}
+            else if outputs.steady||!outputs.times.is_empty(){kernel.clone()}else{Vec::new()};
+        // Every slow mode (the kernel's first) deflates the pool once an
+        // output takes one.
+        let deflated:Vec<usize>=if !taken.is_empty(){kernel.iter().chain(modes.slow.iter().filter(|m|!kernel.contains(m))).copied().collect()}else{needed.clone()};
+        Self{needed,deflated,lambda_slow,grid,..modes}
+    }
+    /// A decaying mode slower than 1/t with a coefficient below the
+    /// tolerance, outside the kernel.
+    fn negligible(&self,cp:&RitzModel<'_>,m:usize,t:f64)->bool{
+        t*cp.theta[m].re.abs()<1.&&magnitude(cp.coefficients[m])<ledger::POPULATION_TOLERANCE&&!self.kernel.contains(&m)
+    }
+    /// The slow modes an output time t takes.
+    fn at(&self,cp:&RitzModel<'_>,t:f64)->Vec<usize>{self.slow.iter().copied().filter(|&m|!self.negligible(cp,m,t)).collect()}
+}
 
 /// Population errors of one checkpoint's outputs (before the metric), and
 /// what ran (the slow modes' part of the work).
@@ -141,13 +206,8 @@ struct Errors{
 
 pub struct UnifiedEstimate<'a>{
     setup:EstimateSetup<'a>,
-    pub lattice:ErrorLattice<'a>,
+    lattice:ErrorLattice<'a>,
     pub pool:Option<SlowPool>,
-    /// One source alone (`Source`), else every source.
-    only:Option<Source>,
-    /// Per ring charge (the error lattice's ring order): sum over the kernel
-    /// and slow modes of |a_m| |B y_r| (`estimate_by_source` with attribution).
-    pub ring_attribution:Vec<f64>,
     /// The pipeline's steady-solve directions taken so far.
     seeded:usize,
 }
@@ -164,18 +224,18 @@ impl<'a> UnifiedEstimate<'a>{
     pub fn new(setup:EstimateSetup<'a>)->Result<Self,String>{
         let modes=setup.lattice.modes();
         let lattice=ErrorLattice::new(setup.prepared,&modes,&setup.lattice.explicit,setup.frame,setup.keep_k1)?;
-        Ok(Self{setup,lattice,pool:None,seeded:0,only:None,ring_attribution:Vec::new()})
+        Ok(Self{setup,lattice,pool:None,seeded:0})
     }
     fn pool(&mut self)->Result<&mut SlowPool,String>{
         if self.pool.is_none(){self.pool=Some(SlowPool::new(self.setup.prepared,&self.lattice,self.setup.frame.horizon)?);}
         Ok(self.pool.as_mut().unwrap())
     }
-    /// The ring's feedback and the K^(1) rests left out (by the pipeline's
-    /// operator, when it leaves any out) on a field x at the shift theta (x
-    /// complex: its Hermitian-symmetric parts).
-    fn sources(&mut self,x:&[C],theta:C,steady:&dyn SteadySolves)->Result<Vec<C>,String>{
-        let mut g=if self.only==Some(Source::K1){vec![ZERO;x.len()]}else{self.lattice.ring_feedback(x,theta)?};
-        if self.only==Some(Source::Ring){return Ok(g);}
+    /// The slow modes' sources on a field x at the shift theta (x complex:
+    /// its Hermitian-symmetric parts): the ring's feedback, but with
+    /// `k1_alone`, and the K^(1) rests left out (by the pipeline's operator,
+    /// when it leaves any out).
+    fn sources(&mut self,x:&[C],theta:C,steady:&dyn SteadySolves,k1_alone:bool)->Result<Vec<C>,String>{
+        let mut g=if k1_alone{vec![ZERO;x.len()]}else{self.lattice.ring_feedback(x,theta)?};
         let(xa,xb)=lattice::split(x,&self.lattice.mirror,self.lattice.n);
         if let(Some(a),Some(b))=(steady.left_out(&xa)?,steady.left_out(&xb)?){
             let rest=lattice::join(&a,&b);
@@ -183,40 +243,15 @@ impl<'a> UnifiedEstimate<'a>{
         }
         Ok(g)
     }
-    /// The population errors of a checkpoint's outputs.
-    fn errors(&mut self,cp:&RitzModel<'_>,steady:&mut dyn SteadySolves)->Result<Errors,String>{
+    /// The population errors of a checkpoint's outputs; with `k1_alone`
+    /// those of the K^(1) rests alone, through the slow modes (no Krylov
+    /// residual, no fast part).
+    fn errors(&mut self,cp:&RitzModel<'_>,steady:&mut dyn SteadySolves,k1_alone:bool)->Result<Errors,String>{
         let(k,r)=(cp.basis.len(),cp.theta.len());let outputs=self.setup.outputs;
         // The fast part's columns.
         self.lattice.add_columns(cp.basis,cp.images)?;
         let b=cp.s;
-        // The slow modes and which outputs use them. A projected growing mode
-        // is never among them; the kernel is. At an
-        // output time T a decaying mode slower than 1/T with a coefficient
-        // below the tolerance stays in the SW part and holds no other back
-        // (`set`); the slowest decay rate of the others decides whether the
-        // slow part runs for the trajectory.
-        let slow:Vec<usize>=(0..r).filter(|&m|magnitude(cp.theta[m])<slow::SLOW&&!cp.projected[m]).collect();
-        let kernel:Vec<usize>=slow.iter().copied().filter(|&m|cp.kernel[m]).collect();
-        let negligible=|m:usize,t:f64|t*cp.theta[m].re.abs()<1.&&magnitude(cp.coefficients[m])<ledger::POPULATION_TOLERANCE&&!kernel.contains(&m);
-        let rate=|t:f64|{let l=(0..r).filter(|&m|cp.theta[m].re.abs()>=super::reduced::KERNEL&&!cp.projected[m]&&!negligible(m,t)).map(|m|cp.theta[m].re.abs()).fold(f64::INFINITY,f64::min);
-            if l.is_finite(){l}else{0.}};
-        let set=|t:f64|->Vec<usize>{slow.iter().copied().filter(|&m|!negligible(m,t)).collect()};
-        let last=outputs.times.last().copied().unwrap_or(0.);
-        let lambda_slow=rate(last);
-        let grid=outputs.times.last().is_some_and(|&t|t*rate(t)>=1.);
-        // The kernel modes first, then every slow mode an output takes: every
-        // horizon, the grid when it runs the slow part.
-        let mut taken:Vec<usize>=Vec::new();
-        for t in outputs.horizons.iter().copied().chain(grid.then_some(last)){for m in set(t){if !taken.contains(&m){taken.push(m);}}}
-        // Those an output may leave out last, slowest last: every output time
-        // takes a prefix of the solutions.
-        let key=|m:usize|(magnitude(cp.coefficients[m])<ledger::POPULATION_TOLERANCE,-cp.theta[m].re.abs());
-        taken.sort_by(|&p,&q|{let(a,b)=(key(p),key(q));a.0.cmp(&b.0).then(a.1.total_cmp(&b.1))});
-        let needed:Vec<usize>=if !taken.is_empty(){kernel.iter().chain(taken.iter().filter(|m|!kernel.contains(m))).copied().collect()}
-            else if outputs.steady||!outputs.times.is_empty(){kernel.clone()}else{Vec::new()};
-        // Every slow mode (the kernel's first) deflates the pool once an
-        // output takes one.
-        let deflated:Vec<usize>=if !taken.is_empty(){kernel.iter().chain(slow.iter().filter(|m|!kernel.contains(m))).copied().collect()}else{needed.clone()};
+        let modes=SlowModes::new(cp,&outputs);let(kernel,deflated)=(&modes.kernel,&modes.deflated);
         let(mut solutions,mut solved,mut invariant)=(Vec::new(),Vec::new(),Vec::new());
         let scale=cp.images.iter().map(|a|lattice::norm(a)).fold(0_f64,f64::max);
         if !deflated.is_empty(){
@@ -224,25 +259,20 @@ impl<'a> UnifiedEstimate<'a>{
             let length=self.lattice.dimension();
             // x = W b_m and A x per slow mode. Away from the kernel the solves
             // deflate every slow Ritz mode (`SlowPool::mode`).
-            let fields:Vec<(Vec<C>,Vec<C>)>=deflated.iter().map(|&m|{let(mut x,mut ax)=(vec![ZERO;length],vec![ZERO;length]);
-                for(j,&c)in b[k*m..k*(m+1)].iter().enumerate(){if !nonzero(c){continue;}
-                    for((xv,av),(&w,&aw))in x.iter_mut().zip(ax.iter_mut()).zip(cp.basis[j].iter().zip(&cp.images[j])){mul_add(xv,c,w);mul_add(av,c,aw);}}
-                (x,ax)}).collect();
+            let fields:Vec<(Vec<C>,Vec<C>)>=deflated.iter().map(|&m|ritz_field(cp,m,length)).collect();
             if deflated.iter().any(|&m|!cp.kernel[m]){
-                let left=left_functionals(&self.setup.prepared.lapack,cp.s,r,&deflated)?;
+                let left=left_functionals(&self.setup.prepared.lapack,cp.s,r,deflated)?;
                 let(xs,axs):(Vec<Vec<C>>,Vec<Vec<C>>)=fields.iter().cloned().unzip();
                 let thetas:Vec<C>=deflated.iter().map(|&m|cp.theta[m]).collect();let bs:Vec<Vec<C>>=deflated.iter().map(|&m|b[k*m..k*(m+1)].to_vec()).collect();
-                self.pool.as_mut().unwrap().deflate(&deflated,&thetas,&bs,&left,&xs,&axs)?;
+                self.pool.as_mut().unwrap().deflate(deflated,&thetas,&bs,&left,&xs,&axs)?;
             }
             // In the order of `needed` (an output time takes a prefix).
-            for &m in &needed{let(x,ax)=&fields[deflated.iter().position(|&d|d==m).ok_or("Estimator: a needed slow mode outside the deflated ones")?];
+            for &m in &modes.needed{let(x,ax)=&fields[deflated.iter().position(|&d|d==m).ok_or("Estimator: a needed slow mode outside the deflated ones")?];
                 let theta=cp.theta[m];
-                let g=self.sources(x,theta,steady)?;
-                if self.lattice.attribute{let a=magnitude(cp.coefficients[m]);self.ring_attribution.resize(self.lattice.ring.len(),0.);
-                    for(t,&f)in self.ring_attribution.iter_mut().zip(&self.lattice.last_ring){*t+=a*f;}}
-                // One source alone: the mode's own Krylov residual is none.
+                let g=self.sources(x,theta,steady,k1_alone)?;
+                // The K^(1) rests alone: the mode's own Krylov residual is none.
                 let(zb,zax)=(vec![ZERO;k],vec![ZERO;ax.len()]);
-                let(bm,axm):(&[C],&[C])=if self.only.is_some(){(&zb,&zax)}else{(&b[k*m..k*(m+1)],ax)};
+                let(bm,axm):(&[C],&[C])=if k1_alone{(&zb,&zax)}else{(&b[k*m..k*(m+1)],ax)};
                 if kernel.len()>1&&kernel.contains(&m){let f:Vec<C>=axm.iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
                     if lattice::norm(&f)<=INVARIANT*scale*lattice::norm(x){invariant.push(m);continue;}}
                 solutions.push(self.pool.as_mut().unwrap().mode(bm,axm,&g,theta,cp.coefficients[m],kernel.contains(&m),steady)?);solved.push(m);
@@ -250,10 +280,10 @@ impl<'a> UnifiedEstimate<'a>{
         }
         let sum=|a:Vec<Vec<f64>>,c:Vec<Vec<f64>>|->Vec<Vec<f64>>{a.into_iter().zip(c).map(|(x,y)|x.iter().zip(&y).map(|(p,q)|p+q).collect()).collect()};
         // The solved slow modes an output time takes (a prefix).
-        let taking=|t:f64|->usize{let s=set(t);solved.iter().take_while(|m|s.contains(m)).count()};
+        let taking=|t:f64|->usize{let s=modes.at(cp,t);solved.iter().take_while(|m|s.contains(m)).count()};
         let n=self.lattice.n;
         // The trajectory: the fast part without the modes the slow part takes
-        // (and the invariant kernel modes).
+        // (and the invariant kernel modes); none with the K^(1) rests alone.
         // The kernel modes (first among the solutions) always take the slow
         // part: their error a_0 (Y_0 - e^{tA} Y_0) has no large cancelling
         // terms, and it grows to the steady error, the omitted ring's, which
@@ -261,22 +291,22 @@ impl<'a> UnifiedEstimate<'a>{
         // below 1 / lambda_slow, otherwise leaves it out: per-time ratios
         // 0.05 on four lasers at 10 ms, 0.29 on four lasers without the trap
         // at 20 us).
-        let slow_grid=grid&&!solutions.is_empty();
+        let slow_grid=modes.grid&&!solutions.is_empty();
         let kernels=solved.iter().take_while(|m|kernel.contains(m)).count();
         // The non-kernel slow modes among the first `count` solutions, for
-        // their own residuals' SW part (charged apart); none with one source
-        // alone (`estimate_by_source`).
+        // their own residuals' SW part (charged apart); none with the K^(1)
+        // rests alone.
         let own=|count:usize|->Vec<C>{(0..r).map(|m|if solved[kernels.min(count)..count].contains(&m){cp.coefficients[m]}else{ZERO}).collect()};
-        let only=self.only.is_some();
         let(mut own_trajectory,mut slow_trajectory,mut slow_horizons)=(Vec::new(),Vec::new(),Vec::new());
         let trajectory=if outputs.times.is_empty(){Vec::new()}else{
-            let count=if slow_grid{taking(last).max(kernels)}else{kernels};
-            let skip:Vec<usize>=solved[..count].iter().chain(&invariant).copied().collect();
-            let coefficients:Vec<C>=(0..r).map(|m|if skip.contains(&m)||only{ZERO}else{cp.coefficients[m]}).collect();
-            let fast=self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&coefficients},outputs.times,Readout::Laboratory)?;
-            if count>kernels&&!only{own_trajectory=self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&own(count)},outputs.times,Readout::Laboratory)?;}
+            let count=if slow_grid{taking(modes.last).max(kernels)}else{kernels};
+            let fast=if k1_alone{vec![vec![0.;n];outputs.times.len()]}else{
+                let skip:Vec<usize>=solved[..count].iter().chain(&invariant).copied().collect();
+                let coefficients:Vec<C>=(0..r).map(|m|if skip.contains(&m){ZERO}else{cp.coefficients[m]}).collect();
+                self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&coefficients},outputs.times,Readout::Laboratory)?};
+            if count>kernels&&!k1_alone{own_trajectory=self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&own(count)},outputs.times,Readout::Laboratory)?;}
             if count>0{
-                let s=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,&kernel,&solutions[..count],outputs.times,Readout::Laboratory)?;
+                let s=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,kernel,&solutions[..count],outputs.times,Readout::Laboratory)?;
                 slow_trajectory=s.clone();
                 sum(fast,s)
             }else{fast}
@@ -284,19 +314,20 @@ impl<'a> UnifiedEstimate<'a>{
         let mut horizons=Vec::with_capacity(outputs.horizons.len());let mut own_horizons=Vec::with_capacity(outputs.horizons.len());
         for &t in outputs.horizons{
             let count=taking(t);
-            let skip:Vec<usize>=solved[..count].iter().chain(&invariant).copied().collect();
-            let coefficients:Vec<C>=(0..r).map(|m|if skip.contains(&m)||only{ZERO}else{cp.coefficients[m]}).collect();
-            let fast=self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&coefficients},&[t],Readout::Centre)?.remove(0);
-            own_horizons.push(if count>kernels&&!only{self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&own(count)},&[t],Readout::Centre)?.remove(0)}else{vec![0.;n]});
+            let fast=if k1_alone{vec![0.;n]}else{
+                let skip:Vec<usize>=solved[..count].iter().chain(&invariant).copied().collect();
+                let coefficients:Vec<C>=(0..r).map(|m|if skip.contains(&m){ZERO}else{cp.coefficients[m]}).collect();
+                self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&coefficients},&[t],Readout::Centre)?.remove(0)};
+            own_horizons.push(if count>kernels&&!k1_alone{self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&own(count)},&[t],Readout::Centre)?.remove(0)}else{vec![0.;n]});
             horizons.push(if count==0{slow_horizons.push(vec![0.;n]);fast}else{
-                let slow=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,&kernel,&solutions[..count],&[t],Readout::Centre)?.remove(0);
+                let slow=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,kernel,&solutions[..count],&[t],Readout::Centre)?.remove(0);
                 let total=fast.iter().zip(&slow).map(|(a,b)|a+b).collect();slow_horizons.push(slow);total});
         }
         let steady=outputs.steady.then(||{
             let mut e=vec![0.;n];
             if let Some(pool)=self.pool.as_ref(){for sol in solutions.iter().filter(|s|s.kernel){for(a,v)in e.iter_mut().zip(pool.steady_populations(cp.basis,sol)){*a+=v;}}}
             e});
-        Ok(Errors{trajectory,horizons,steady,own_trajectory,own_horizons,slow_trajectory,slow_horizons,work:EstimateWork{slow_modes:solutions.len(),slow_trajectory:slow_grid,lambda_slow,..Default::default()}})
+        Ok(Errors{trajectory,horizons,steady,own_trajectory,own_horizons,slow_trajectory,slow_horizons,work:EstimateWork{slow_modes:solutions.len(),slow_trajectory:slow_grid,lambda_slow:modes.lambda_slow,..Default::default()}})
     }
     /// The work counters so far: the fast part's and the pool's.
     fn counters(&self)->(lattice::ErrorWork,slow::PoolWork){
@@ -316,19 +347,23 @@ impl<'a> UnifiedEstimate<'a>{
     /// The estimated errors of a checkpoint's outputs; `steady` is the
     /// pipeline's own lattice (its operator, steady preconditioner and
     /// steady-solve directions).
-    pub fn estimate(&mut self,reduced:&ReducedView<'_>,steady:&mut dyn SteadySolves)->Result<ErrorEstimate,String>{
-        let clock=Instant::now();let r=reduced.r;
+    pub fn estimate(&mut self,reduced:&ReducedView<'_>,steady:&mut dyn SteadySolves)->Result<ErrorEstimate,String>{self.estimate_with(reduced,steady,false)}
+    /// The estimate with the K^(1) rests the lattice leaves out alone,
+    /// through the slow modes (no Krylov residual, no fast part): what keeping
+    /// them in the operator could remove (`pipeline`'s completion). The pool
+    /// keeps the directions these solves add.
+    pub fn k1_estimate(&mut self,reduced:&ReducedView<'_>,steady:&mut dyn SteadySolves)->Result<ErrorEstimate,String>{self.estimate_with(reduced,steady,true)}
+    fn estimate_with(&mut self,reduced:&ReducedView<'_>,steady:&mut dyn SteadySolves,k1_alone:bool)->Result<ErrorEstimate,String>{
+        let clock=Instant::now();
         let groups=self.setup.outputs.groups;
         let before=self.counters();
-        // S column-major.
-        let s:Vec<C>=(0..r*r).map(|i|reduced.vectors[(i%r)*r+i/r]).collect();
+        let s=column_major(reduced);
         // The pipeline's steady-solve directions not taken yet seed the pool.
         let(directions,images)=steady.directions();
         let seeded=self.seeded;
         if directions.len()>seeded{self.pool()?.seed(&directions[seeded..],&images[seeded..])?;self.seeded=directions.len();}
-        let cp=RitzModel{basis:reduced.basis,images:reduced.images,s:&s,theta:reduced.used_theta,coefficients:reduced.used_coefficients,
-            kernel:reduced.kernel,projected:reduced.projected};
-        let mut errors=self.errors(&cp,steady)?;
+        let cp=RitzModel::new(reduced,&s);
+        let mut errors=self.errors(&cp,steady,k1_alone)?;
         let zero=vec![0.;self.lattice.n];let size=|p:&Vec<f64>|metric(p,&zero,groups);
         (errors.work.block_operations,errors.work.block_solves)=self.work_since(&before);errors.work.milliseconds=clock.elapsed().as_secs_f64()*1e3;
         // Each output's error, and its slow modes' own residuals charged apart.
@@ -339,16 +374,20 @@ impl<'a> UnifiedEstimate<'a>{
             slow_trajectory:if errors.slow_trajectory.is_empty(){vec![0.;errors.trajectory.len()]}else{errors.slow_trajectory.iter().map(size).collect()},
             slow_horizons:errors.slow_horizons.iter().map(size).collect(),work:errors.work})
     }
-    /// The estimate with one source alone (the ring's feedback or the K^(1)
-    /// rests, through the slow modes; no Krylov residual), and with
-    /// `attribute` the ring attribution per ring charge (`ring_attribution`,
-    /// in the error lattice's ring order). The pool keeps the directions these
-    /// solves add.
-    pub fn estimate_by_source(&mut self,reduced:&ReducedView<'_>,steady:&mut dyn SteadySolves,source:Source,attribute:bool)->Result<ErrorEstimate,String>{
-        self.only=Some(source);self.lattice.attribute=attribute;self.ring_attribution.clear();
-        let estimate=self.estimate(reduced,steady);
-        self.only=None;self.lattice.attribute=false;
-        estimate
+    /// The ring attribution of a checkpoint (`pipeline`'s completion): per
+    /// ring charge (the error lattice's ring order), the sum over the slow
+    /// modes the estimate solves (the kernel's included) of |a_m| times the
+    /// feedback of the charge's slaved amplitude, |B y_r|
+    /// (`ErrorLattice::ring_attribution`): the ring's feedback alone, no solve.
+    pub fn ring_attribution(&mut self,reduced:&ReducedView<'_>)->Result<Vec<(Charge,f64)>,String>{
+        let s=column_major(reduced);let cp=RitzModel::new(reduced,&s);
+        let modes=SlowModes::new(&cp,&self.setup.outputs);let length=self.lattice.dimension();
+        let mut shares=vec![0.;self.lattice.ring.len()];
+        for &m in &modes.needed{
+            let(x,_)=ritz_field(&cp,m,length);let a=magnitude(cp.coefficients[m]);
+            for(t,f)in shares.iter_mut().zip(self.lattice.ring_attribution(&x,cp.theta[m])?){*t+=a*f;}
+        }
+        Ok(self.lattice.ring.iter().cloned().zip(shares).collect())
     }
 }
 

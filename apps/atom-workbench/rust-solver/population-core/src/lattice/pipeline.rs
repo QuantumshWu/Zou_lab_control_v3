@@ -40,7 +40,7 @@ use super::reduced::{Model,Projection,SlowRate};
 use super::poles::{InnerWork,Lattice,Pole};
 use super::space::{self,Column,Space};
 use super::frame::{SwFrame,SwMetric};
-use super::estimator::{Source,UnifiedEstimate};
+use super::estimator::UnifiedEstimate;
 use super::eigenbasis::BlockEigenbasis;
 
 /// Solves between checkpoints; the ladder is re-ranked at every checkpoint
@@ -188,6 +188,8 @@ pub struct Solution{
     /// restarted the run.
     pub completion:Option<Completion>,
     pub explicit:ExplicitSet,pub translations:Vec<Charge>,
+    /// The completed run's solves, and every checkpoint reported (when the
+    /// run restarted, the first run's first).
     pub columns:Vec<Column>,pub checkpoints:Vec<Checkpoint>,
     pub dimension:usize,pub work:InnerWork,pub images:usize,
     pub ledger:RemainderLedger,pub timing:Timing,
@@ -196,13 +198,12 @@ pub struct Solution{
 /// A lattice completion: the ring charges promoted into P (one of each
 /// pair; their mirrors join with them) and whether the operator keeps every
 /// K^(1) rest; where it was decided, the bound there, its slow part and the
-/// K^(1) rests' and the ring's parts (bound units), the ring charges'
-/// attribution shares, and whether the run restarted on the completed
-/// lattice.
+/// K^(1) rests' part (bound units), the ring charges' attribution shares,
+/// and whether the run restarted on the completed lattice.
 #[derive(Clone,Debug,Default)]
 pub struct Completion{
     pub promoted:Vec<Charge>,pub keep_k1:bool,pub decided_at:usize,
-    pub bound:f64,pub slow_part:f64,pub k1_part:f64,pub ring_part:f64,
+    pub bound:f64,pub slow_part:f64,pub k1_part:f64,
     pub attribution:Vec<(Charge,f64)>,pub restarted:bool,
 }
 
@@ -267,12 +268,13 @@ fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:
 /// Completion: at the first checkpoint, when the largest bound is above the
 /// tolerance and its slow part (the omitted ring's feedback and the K^(1)
 /// rests the lattice leaves out) is at least COMPLETION_SHARE of it, the
-/// estimate is taken again with each source alone: the K^(1) rests join the
-/// operator when their part is at least K1_COMPLETION x tolerance, and the
-/// ring charges carrying RING_COMPLETION of the ring's attribution
-/// (|a_m| |B y_r| over the kernel and slow modes) join P with their mirrors.
-/// The run then restarts once on the completed lattice (the frame and the
-/// eigenbasis are kept). Every other run is unchanged.
+/// K^(1) rests the lattice leaves out join the operator when the estimate
+/// with them alone is at least K1_COMPLETION x tolerance, and the ring
+/// charges carrying RING_COMPLETION of the ring's attribution (|a_m| |B y_r|
+/// over the kernel and slow modes, from the ring's feedback alone) join P
+/// with their mirrors. The run then restarts once on the completed lattice
+/// (the frame and the eigenbasis are kept), its checkpoints after the first
+/// run's. Every other run is unchanged.
 pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut observer:Option<&mut dyn FnMut(&Checkpoint,&Answer)>)->Result<Solution,String>{
     let started=Instant::now();
     let times=request.times;
@@ -289,16 +291,19 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||{let _=frame.class();}).map_err(|e|e.to_string())?;
         match attempt(prepared,initial,request,&mut observer,&frame,None,started)?{
             Ok(solution)=>Ok(solution),
-            Err(completion)=>attempt(prepared,initial,request,&mut observer,&frame,Some(&completion),started)?
-                .map_err(|_|"A completed lattice asked for another completion".to_string()),
+            Err((completion,first))=>{
+                let mut solution=attempt(prepared,initial,request,&mut observer,&frame,Some(&completion),started)?
+                    .map_err(|_|"A completed lattice asked for another completion".to_string())?;
+                solution.checkpoints.splice(0..0,first);Ok(solution)}
         }
     })
 }
 
 /// One run of `solve` on the request's lattice or on its completion: the
-/// solution, or (Err) the completion its first checkpoint asks for.
+/// solution, or (Err) the completion its first checkpoint asks for, with
+/// that checkpoint.
 fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,observer:&mut Option<&mut dyn FnMut(&Checkpoint,&Answer)>,
-    frame:&'a SwFrame<'a>,completion:Option<&Completion>,started:Instant)->Result<Result<Solution,Completion>,String>{
+    frame:&'a SwFrame<'a>,completion:Option<&Completion>,started:Instant)->Result<Result<Solution,(Completion,Vec<Checkpoint>)>,String>{
     let tolerance=POPULATION_TOLERANCE;let n=prepared.generator.n;
     if initial.len()!=n*n{return Err("Initial density dimension differs".into());}
     let times=request.times;
@@ -435,15 +440,14 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                     let view=ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
                         used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out};
                     let pick=|x:&ErrorEstimate|ACCEPTANCE_FACTOR*if at<off{x.trajectory[at]}else if at<off+horizons_count{x.horizons[at-off]}else{x.steady.unwrap_or(0.)};
-                    let k1=estimator.estimate_by_source(&view,&mut lattice,Source::K1,false)?;
-                    let ring=estimator.estimate_by_source(&view,&mut lattice,Source::Ring,true)?;
-                    let(k1_part,ring_part)=(pick(&k1),pick(&ring));
-                    let keep=lattice.operator().drops_k1_rests()&&k1_part>=K1_COMPLETION*tolerance;
+                    // The K^(1) rests' part, when the lattice leaves any out.
+                    let drops=lattice.operator().drops_k1_rests();
+                    let k1_part=if drops{pick(&estimator.k1_estimate(&view,&mut lattice)?)}else{0.};
+                    let keep=drops&&k1_part>=K1_COMPLETION*tolerance;
                     // The ring charges by attribution, a pair together (the canonical
                     // member, the larger charge, stands for it).
-                    let charges=&estimator.lattice.ring;let shares=&estimator.ring_attribution;
                     let mut pairs:BTreeMap<Charge,f64>=BTreeMap::new();
-                    for(c,&a)in charges.iter().zip(shares){let m=opposite(c);let key=if *c>m{c.clone()}else{m};*pairs.entry(key).or_default()+=a;}
+                    for(c,a)in estimator.ring_attribution(&view)?{let m=opposite(&c);let key=if c>m{c}else{m};*pairs.entry(key).or_default()+=a;}
                     let total:f64=pairs.values().sum();
                     let mut ranked:Vec<(Charge,f64)>=pairs.into_iter().collect();ranked.sort_by(|a,b|b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
                     let mut promoted=Vec::new();let mut carried=0.;
@@ -460,8 +464,8 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                     }
                     let attribution:Vec<(Charge,f64)>=ranked.iter().map(|(c,a)|(c.clone(),if total>0.{a/total}else{0.})).collect();
                     let restarted=keep||!promoted.is_empty();
-                    let decision=Completion{promoted,keep_k1:keep,decided_at:space.solves(),bound,slow_part:part,k1_part,ring_part,attribution,restarted};
-                    if restarted{return Ok(Err(decision));}
+                    let decision=Completion{promoted,keep_k1:keep,decided_at:space.solves(),bound,slow_part:part,k1_part,attribution,restarted};
+                    if restarted{return Ok(Err((decision,checkpoints)));}
                     decided=Some(decision);
                 }
             }
