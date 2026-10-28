@@ -11,8 +11,11 @@
 //! src/solver-client.ts; main.rs adds `protocol` and `modelSchema`. A run
 //! stops when every output is within the tolerance, when its error bound
 //! stops improving, or when its budget is spent, and returns its best
-//! checkpoint: a computed result is never withheld. Every checkpoint is
-//! streamed first (`progress`: true) in the same shape.
+//! checkpoint: a computed result is never withheld. The mean of every
+//! request is the run of the mean alone (the same for a full request and a
+//! mean-only one); a full request then runs its trajectory, whose space
+//! spans the grid's times only. Every checkpoint of the request's own run
+//! is streamed first (`progress`: true) in the same shape.
 //! - `states` (32 ids), `timesUs`, `populations` (one row per time). A mean
 //!   result has the single t = 0 row, the initial populations; a finite result
 //!   has >= 2 projected rows and `populationAccuracy`: `status`
@@ -217,12 +220,15 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
         "floquet":floquet,"eigenbasis":prepared.eigenbasis_built().map(|e|json!({"milliseconds":e.milliseconds,"clusters":e.clusters,"largestCluster":e.largest_cluster,"passes":e.passes,"condition":e.condition})),"run":run})
 }
 
-/// One run of the pipeline for a request: the grid (empty for a mean
-/// alone) and the mean (at the horizon `meanHorizonUs`, else the steady
-/// state) when one is asked for; `observer` sees every checkpoint.
-fn run(request:&Prepared,times:&[f64],mean:bool,horizon:Option<f64>,observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
-    let horizons:Vec<f64>=horizon.filter(|_|mean).into_iter().collect();
-    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&horizons,steady:mean&&horizon.is_none(),groups:&request.groups},Some(observer))
+/// The mean of a request alone: the horizon `meanHorizonUs`, else the
+/// steady state; `observer` sees every checkpoint.
+fn mean_run(request:&Prepared,horizon:Option<f64>,observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
+    let horizons:Vec<f64>=horizon.into_iter().collect();
+    pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&horizons,steady:horizon.is_none(),groups:&request.groups},Some(observer))
+}
+/// The trajectory of a request alone on its grid.
+fn trajectory_run(request:&Prepared,times:&[f64],observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
+    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&[],steady:false,groups:&request.groups},Some(observer))
 }
 
 /// The mean of an answer: the laboratory time average of the steady state,
@@ -273,21 +279,25 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
     match(fields,diagnostics){(Value::Object(f),Value::Object(d))=>Ok((f,d)),_=>Err("Mean fields are not an object".into())}
 }
 
-/// The result of an answer in the one contract: the trajectory with its
-/// per-sample bounds (none for a mean alone), the mean when one was asked
-/// for; `solution` (the final result) adds the run's diagnostics, its
+/// The mean of a request as computed: its answer and run, or why nothing
+/// usable was computed.
+type MeanRun<'a>=Result<(&'a Answer,Option<&'a Solution>),String>;
+
+/// The result in the one contract: the trajectory with its per-sample
+/// bounds (`trajectory`; none for a mean alone) and the mean when one was
+/// asked for; `solutions` (the final result) add the runs' diagnostics, their
 /// absence marks a streamed checkpoint (`progress`).
-fn result(model:&Model,options:&Options,request:&Prepared,answer:&Answer,solution:Option<&Solution>,started:Instant)->Result<Value,String>{
+fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&Answer,Option<&Solution>)>,mean:Option<MeanRun<'_>>,last:bool,started:Instant)->Result<Value,String>{
     let prepared=&request.lattice;
-    let finite=!options.steady_only;let mean=options.steady_only||options.include_asymptotic;
-    let rows=if finite{answer.trajectory.clone()}else{vec![request.initial.clone()]};
+    let rows=match trajectory{Some((answer,_))=>answer.trajectory.clone(),None=>vec![request.initial.clone()]};
     let(row_trace,initial_error)=row_errors(&rows,&request.initial)?;
-    let times:Vec<f64>=if finite{(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect()}else{vec![0.]};
+    let times:Vec<f64>=if trajectory.is_some(){(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect()}else{vec![0.]};
+    let solves=trajectory.map(|t|t.0.solves).or_else(||mean.as_ref().and_then(|m|m.as_ref().ok().map(|m|m.0.solves))).unwrap_or(0);
     let mut result=json!({"states":model.states,"timesUs":times,"populations":rows,"asymptoticStatus":"not-requested",
         "diagnostics":{"engine":ENGINE,"traceError":row_trace,"initialStateError":initial_error,
-            "elapsedMs":started.elapsed().as_secs_f64()*1000.,"carrierSourceToBasis":request.axes.source_to_basis,"solves":answer.solves,
+            "elapsedMs":started.elapsed().as_secs_f64()*1000.,"carrierSourceToBasis":request.axes.source_to_basis,"solves":solves,
             "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2],"floquetKernels":prepared.timing[3]}}});
-    if finite{
+    if let Some((answer,solution))=trajectory{
         let estimated=answer.sample_errors.iter().fold(0_f64,|a,&b|a.max(b));
         let converged=estimated<=POPULATION_TOLERANCE;
         result["populationAccuracy"]=json!({"status":if converged{"estimated-converged"}else{"estimated-partial"},"requestedTolerance":POPULATION_TOLERANCE,
@@ -296,50 +306,78 @@ fn result(model:&Model,options:&Options,request:&Prepared,answer:&Answer,solutio
         if !converged{result["populationAccuracy"]["reason"]=json!(solution.and_then(|s|s.reason.clone())
             .unwrap_or_else(||format!("Checkpoint at {} solves: the error bound is {estimated:.2e} against the tolerance {POPULATION_TOLERANCE:e}; the run continues",answer.solves)));}
         result["diagnostics"]["method"]=json!(METHOD);
+        if let Some(s)=solution{result["diagnostics"]["lattice"]=lattice_json(prepared,Some(s));if !s.converged{result["diagnostics"]["stopReason"]=json!(s.reason);}}
     }
-    if mean{
-        let(fields,diagnostics)=mean_fields(model,options,request,answer)?;
-        for(key,value)in fields{result[key.as_str()]=value;}
-        if let Value::Object(target)=&mut result["diagnostics"]{for(key,value)in diagnostics{target.insert(key,value);}}
+    match mean{
+        Some(Ok((answer,solution)))=>{
+            let(fields,diagnostics)=mean_fields(model,options,request,answer)?;
+            for(key,value)in fields{result[key.as_str()]=value;}
+            if let Value::Object(target)=&mut result["diagnostics"]{for(key,value)in diagnostics{target.insert(key,value);}}
+            if let Some(s)=solution{result["diagnostics"][if trajectory.is_some(){"meanLattice"}else{"lattice"}]=lattice_json(prepared,Some(s));}
+        }
+        // Nothing usable was computed for the mean.
+        Some(Err(e))=>{result["horizonUs"]=json!(options.mean_horizon_us);result["asymptoticStatus"]=json!("not-converged");result["asymptoticReason"]=json!(e);
+            result["diagnostics"]["asymptoticMethod"]=json!(METHOD);}
+        None=>{}
     }
-    match solution{
-        Some(s)=>{result["diagnostics"]["lattice"]=lattice_json(prepared,Some(s));if !s.converged{result["diagnostics"]["stopReason"]=json!(s.reason);}}
-        None=>{result["progress"]=json!(true);}
-    }
+    if !last{result["progress"]=json!(true);}
+    if result["diagnostics"].get("lattice").is_none(){result["diagnostics"]["lattice"]=lattice_json(prepared,None);}
     Ok(result)
 }
 
 /// A request through the lattice core: the mean alone (steadyOnly), or the
-/// trajectory with the mean, from one run; every checkpoint is published
-/// as it is made, the best one returned.
+/// mean and then the trajectory; every checkpoint of the request's own run
+/// (the mean's for a mean alone, the trajectory's with the mean for a full
+/// request) is published as it is made, the best one returned.
 pub fn solve(model:&Model,options:&Options,publish:&mut dyn FnMut(&Value))->Result<Value,String>{
     let started=Instant::now();
     if !options.steady_only&&(!options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples)){return Err("Invalid finite population grid".into());}
     let request=prepare_request(model,options)?;
-    let times:Vec<f64>=if options.steady_only{Vec::new()}else{(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect()};
-    let mean=options.steady_only||options.include_asymptotic;
     let mut failure:Option<String>=None;
-    let mut observe=|_:&Checkpoint,answer:&Answer|{if failure.is_some(){return;}
-        match result(model,options,&request,answer,None,started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
-    let solution=run(&request,&times,mean,options.mean_horizon_us,&mut observe);
-    if let Some(e)=failure{return Err(e);}
-    match solution{
-        Ok(solution)=>result(model,options,&request,&solution.answer,Some(&solution),started),
-        // Nothing usable was computed: a mean alone reports it as its status.
-        Err(e)if options.steady_only=>{
-            let(row_trace,initial_error)=row_errors(&[request.initial.clone()],&request.initial)?;
-            Ok(json!({"timesUs":[0.],"states":model.states,"populations":[request.initial],
-                "horizonUs":options.mean_horizon_us,"asymptoticStatus":"not-converged","asymptoticReason":e,
-                "diagnostics":{"engine":ENGINE,"traceError":row_trace,"initialStateError":initial_error,"elapsedMs":started.elapsed().as_secs_f64()*1000.,
-                    "carrierSourceToBasis":request.axes.source_to_basis,"asymptoticMethod":METHOD,"lattice":lattice_json(&request.lattice,None)}}))
-        }
-        Err(e)=>Err(e),
+    if options.steady_only{
+        let mut observe=|_:&Checkpoint,answer:&Answer|{if failure.is_some(){return;}
+            match result(model,options,&request,None,Some(Ok((answer,None))),false,started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
+        let mean=mean_run(&request,options.mean_horizon_us,&mut observe);
+        if let Some(e)=failure{return Err(e);}
+        return result(model,options,&request,None,Some(mean.as_ref().map(|s|(&s.answer,Some(s))).map_err(|e|e.clone())),true,started);
     }
+    let times:Vec<f64>=(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect();
+    let mean=options.include_asymptotic.then(||mean_run(&request,options.mean_horizon_us,&mut |_:&Checkpoint,_:&Answer|{}));
+    let mean_view=||mean.as_ref().map(|m|m.as_ref().map(|s|(&s.answer,Some(s))).map_err(|e|e.clone()));
+    let mut observe=|_:&Checkpoint,answer:&Answer|{if failure.is_some(){return;}
+        match result(model,options,&request,Some((answer,None)),mean_view(),false,started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
+    let trajectory=trajectory_run(&request,&times,&mut observe)?;
+    if let Some(e)=failure{return Err(e);}
+    result(model,options,&request,Some((&trajectory.answer,Some(&trajectory))),mean_view(),true,started)
 }
 
 #[cfg(test)]
 mod tests{
     use super::*;
+    /// A full request's p(1 s) is the mean-only request's, within the sum of
+    /// their bounds, and both are within 1e-4 of the release solver's
+    /// (tests/fixtures/probe_only_short.json: the candidate-EXE smoke
+    /// fixture, a probe alone with a 0.02 us trajectory, where the full
+    /// request's inline mean was once off by 3.4e-2 with a bound of 3e-12).
+    #[test]
+    fn a_short_trajectory_full_request_has_the_mean_only_mean(){
+        let fixture:Value=serde_json::from_str(include_str!("../tests/fixtures/probe_only_short.json")).unwrap();
+        let model:Model=serde_json::from_value(fixture["model"].clone()).unwrap();
+        let options=|steady_only:bool|->Options{let mut o=fixture["options"].clone();o["steadyOnly"]=json!(steady_only);serde_json::from_value(o).unwrap()};
+        let full=solve(&model,&options(false),&mut |_|{}).unwrap();
+        let mean=solve(&model,&options(true),&mut |_|{}).unwrap();
+        let read=|v:&Value|->Vec<f64>{v.as_array().unwrap().iter().map(|x|x.as_f64().unwrap()).collect()};
+        let(a,b,reference)=(read(&full["asymptoticPopulations"]),read(&mean["asymptoticPopulations"]),read(&fixture["referenceMean"]));
+        let bounds=full["asymptoticEstimatedError"].as_f64().unwrap()+mean["asymptoticEstimatedError"].as_f64().unwrap();
+        let difference=a.iter().zip(&b).map(|(x,y)|(x-y).abs()).fold(0.,f64::max);
+        assert!(difference<=bounds,"full against mean-only {difference:e}, bounds {bounds:e}");
+        for(name,p)in[("full",&a),("mean-only",&b)]{
+            let off=p.iter().zip(&reference).map(|(x,y)|(x-y).abs()).fold(0.,f64::max);
+            assert!(off<=1e-4,"{name} p(1 s) {off:e} from the release solver's");
+        }
+        assert_eq!(full["populationAccuracy"]["status"],json!("estimated-converged"));
+        assert_eq!(full["asymptoticWithinTolerance"],json!(true));
+    }
     /// End-to-end validation of the pipeline against a reference (ignored):
     /// ATOM_VALIDATE_REQUEST=<request.json>, ATOM_VALIDATE_GRID="T:samples"
     /// (absent: no trajectory), ATOM_VALIDATE_HORIZONS="1e5,1e6",
