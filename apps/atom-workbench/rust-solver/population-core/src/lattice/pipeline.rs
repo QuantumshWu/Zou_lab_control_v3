@@ -31,7 +31,7 @@ use super::*;
 use super::charge_set::{self,ExplicitSet};
 use super::estimate_api::{ACCEPTANCE_FACTOR,Construct,ErrorEstimate,EstimateSetup,ModelOutputs,Outputs,ReducedView};
 use super::ledger::{self,EXPANSION_LIMIT,POPULATION_TOLERANCE,RemainderLedger};
-use super::reduced::{Model,Projection,SLOW_ACCURACY,SlowRate};
+use super::reduced::{Model,Projection,SLOW_ACCURACY,SlowRate,TestSpace};
 use super::poles::{InnerWork,Lattice,Pole};
 use super::space::{self,Column,SLOW_FLOOR,Space};
 use super::frame::{SwFrame,SwMetric};
@@ -160,49 +160,47 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     let longest=if longest>0.{longest}else{LIMIT_REACH};
     let t1=if times.len()>1{times[1]}else{longest/LADDER_SAMPLES};
     let mut timing=Timing::default();
-    // A mean (steady state or horizon) needs the slowest relaxation resolved;
-    // a steady-only request is checked right after the steady column.
-    let mean=request.steady||!request.horizons.is_empty();
+    // A horizon needs the slowest relaxation resolved. A steady state alone
+    // is the kernel of the space, whatever the inner product (the steady
+    // column is in it): it is read from the Euclidean Galerkin model, the
+    // frame left unbuilt, and checked right after the steady column.
+    let resolve=!request.horizons.is_empty();
     let steady_only=times.is_empty()&&request.horizons.is_empty();
     // 1. The lattice, its space's steady column; the request's frame
     // (kernels and the second-order block's eigensystem, the projection's
     // inner product) on its own thread meanwhile.
     let clock=Instant::now();let eigen=prepared.eigenbasis()?;
-    let horizon=estimator::longest_time(times,request.horizons);
-    let(frame,explicit,mut lattice,ledger,mut space)=std::thread::scope(|scope|->Result<_,String>{
-        let building=std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||SwFrame::new(prepared,horizon)).map_err(|e|e.to_string())?;
-        let explicit=charge_set::explicit_set(prepared,initial,tolerance)?;timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
-        let clock=Instant::now();
-        let mut lattice=Lattice::new(prepared,explicit.sets.clone())?;
-        let ledger=RemainderLedger::new(&prepared.plan,lattice.operator().nu_max(),lattice.operator().dropped())?;
-        if ledger.expansion_parameter>EXPANSION_LIMIT{return Err(format!("Static fold expansion parameter {:e} above {EXPANSION_LIMIT:e}",ledger.expansion_parameter));}
-        // 2. The space: translations, the steady column.
-        let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*(op.modes.len()+op.canonical_count()))};
-        let mut space=Space::new(&mut lattice,initial,capacity)?;
-        for s in charge_set::gated_steps(prepared,tolerance){if lattice.operator().index.contains_key(&s){space.activate(&mut lattice,&s)?;}}
-        timing.setup_ms=clock.elapsed().as_secs_f64()*1e3;
-        space.solve(&mut lattice,Pole::Zero)?;
-        let clock=Instant::now();
-        let frame=building.join().map_err(|_|"The frame build failed".to_string())??;
-        timing.frame_wait_ms=clock.elapsed().as_secs_f64()*1e3;
-        Ok((frame,explicit,lattice,ledger,space))
-    })?;
-    timing.frame_ms=frame.milliseconds[0]+frame.milliseconds[1];
+    let frame=SwFrame::new(prepared,estimator::longest_time(times,request.horizons));
+    std::thread::scope(|scope|->Result<Solution,String>{
+    if !steady_only{std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||frame.build()).map_err(|e|e.to_string())?;}
+    let explicit=charge_set::explicit_set(prepared,initial,tolerance)?;timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
+    let clock=Instant::now();
+    let mut lattice=Lattice::new(prepared,explicit.sets.clone())?;
+    let ledger=RemainderLedger::new(&prepared.plan,lattice.operator().nu_max(),lattice.operator().dropped())?;
+    if ledger.expansion_parameter>EXPANSION_LIMIT{return Err(format!("Static fold expansion parameter {:e} above {EXPANSION_LIMIT:e}",ledger.expansion_parameter));}
+    // 2. The space: translations, the steady column.
+    let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*(op.modes.len()+op.canonical_count()))};
+    let mut space=Space::new(&mut lattice,initial,capacity)?;
+    for s in charge_set::gated_steps(prepared,tolerance){if lattice.operator().index.contains_key(&s){space.activate(&mut lattice,&s)?;}}
+    timing.setup_ms=clock.elapsed().as_secs_f64()*1e3;
+    space.solve(&mut lattice,Pole::Zero)?;
     let modes=lattice.modes.clone();
     let outputs=Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups};
     let mut estimator=construct(EstimateSetup{prepared,lattice:&explicit.sets,outputs,frame:&frame,ledger:&ledger,initial})?;
-    // The steady state's ladder reaches the limit's relaxations (its slowest
-    // relaxation is resolved as well).
-    let reach=if request.steady{longest.max(LIMIT_REACH)}else{longest};
-    let(points,slow_points)=space::ladder(eigen,initial,t1,reach,tolerance)?;let mut alive=vec![true;points.len()];
-    let metric=SwMetric::new(&frame,eigen,lattice.operator())?;
+    let(points,slow_points)=space::ladder(eigen,initial,t1,longest,tolerance)?;let mut alive=vec![true;points.len()];
+    // The frame's metric (waiting for the frame's thread), none for a
+    // steady state alone.
+    let clock=Instant::now();
+    let metric=if steady_only{None}else{Some(SwMetric::new(&frame,eigen,lattice.operator())?)};
+    timing.frame_wait_ms=clock.elapsed().as_secs_f64()*1e3;
+    let test=metric.as_ref().map(|m|m as &dyn TestSpace);
     let mut galerkin=Projection::new(lattice.operator())?;
     let mut queue:Vec<usize>=Vec::new();
     let mut checkpoints:Vec<Checkpoint>=Vec::new();
     let lapack=&prepared.lapack;let ops=super::krylov::Vectors::new(lattice.operator(),1)?;
     let mut checkpoint=|space:&Space,galerkin:&mut Projection,lattice:&mut Lattice<'_>,timing:&mut Timing,checkpoints:&mut Vec<Checkpoint>,exhausted:bool|->Result<(Model,Checkpoint),String>{
         let clock=Instant::now();
-        galerkin.ingest(&metric,&space.basis,&space.images)?;
+        galerkin.ingest(test,&space.basis,&space.images)?;
         let model=galerkin.model(lapack,space.initial_norm,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
         timing.projection_ms=galerkin.milliseconds;timing.images_ms=space.images_ms;
         let trajectory=model.trajectory(galerkin,times);
@@ -216,7 +214,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
         // A mean also needs the slowest relaxation resolved (the solve or
         // basis budget spent: reported as its range).
         let slow=slowest(&model,galerkin,lapack,space,&ops)?;
-        let accepted=ACCEPTANCE_FACTOR*estimate.largest()<=tolerance&&(!mean||exhausted||slow.is_none_or(|s|s.resolved()));
+        let accepted=ACCEPTANCE_FACTOR*estimate.largest()<=tolerance&&(!resolve||exhausted||slow.is_none_or(|s|s.resolved()));
         let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,accepted,
             growing:model.growing,clipped:model.clipped,projected:model.projected,conserved:model.conserved(),slowest:slow,
             trajectory,horizons,steady,inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
@@ -241,13 +239,13 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
             if let Some(o)=observer.as_mut(){o(&point);}
             if point.accepted{accepted=Some(model);break;}
             if exhausted{break;}
-            slow_need=point.slowest.filter(|s|!(s.resolved()||(!mean&&s.beyond(longest))));current=Some((space.solves(),model));queue.clear();
+            slow_need=point.slowest.filter(|s|!(s.resolved()||(!resolve&&s.beyond(longest))));current=Some((space.solves(),model));queue.clear();
         }
         // The next pole by its expected gain.
         if queue.is_empty(){
             let clock=Instant::now();
             let model=match current.take(){Some((solves,model))if solves==space.solves()=>model,_=>{
-                galerkin.ingest(&metric,&space.basis,&space.images)?;galerkin.model(lapack,space.initial_norm,longest,tolerance)?}};
+                galerkin.ingest(test,&space.basis,&space.images)?;galerkin.model(lapack,space.initial_norm,longest,tolerance)?}};
             let xis:Vec<C>=live.iter().map(|&i|points[i].sigma()).collect();
             let transform=model.error_transform(&galerkin,&space.basis,&space.images,eigen,lapack,&xis)?;
             for(&i,p)in live.iter().zip(&transform){if slow_points[i]{continue;}
@@ -255,13 +253,13 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
                 if let Some(before)=solved_at[i].take(){remaining[i]=if before>0.{(score[i]/before).min(1.)}else{1.};}
             }
             // Before the first checkpoint, the slowest relaxation of this model.
-            if checkpoints.is_empty(){slow_need=slowest(&model,&galerkin,lapack,&space,&ops)?.filter(|s|!(s.resolved()||(!mean&&s.beyond(longest))));}
+            if checkpoints.is_empty(){slow_need=slowest(&model,&galerkin,lapack,&space,&ops)?.filter(|s|!(s.resolved()||(!resolve&&s.beyond(longest))));}
             let slow=slow_need;
             // The slow relaxation's need and target: its rate once its
             // residual locates it, else the slowest reach (the slow points
             // reveal it).
             let need=slow.map_or(0.,|s|(s.residual/(SLOW_ACCURACY*s.rate)).min(1.));
-            let lowest=(0..points.len()).filter(|&i|slow_points[i]).map(|i|points[i].sigma().re).fold(SLOW_FLOOR.max(1./reach),f64::min);
+            let lowest=(0..points.len()).filter(|&i|slow_points[i]).map(|i|points[i].sigma().re).fold(SLOW_FLOOR.max(1./longest),f64::min);
             let target=slow.map(|s|if s.residual<=s.rate{s.rate}else{lowest});
             for &i in &live{if let Some(before)=slow_at[i].take(){slow_remaining[i]=if before>0.{(need/before).min(1.)}else{1.};}}
             // The slowest relaxation weighs as much as the best population
@@ -300,9 +298,11 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     let work=lattice.work().clone();
     let conserved=if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{last.conserved};
     timing.solves_ms=work.milliseconds;timing.images_ms=space.images_ms;timing.projection_ms=galerkin.milliseconds;timing.total_ms=started.elapsed().as_secs_f64()*1e3;
+    timing.frame_ms=frame.milliseconds().iter().sum();
     Ok(Solution{modes,translations:space.translations(),trajectory:projected,projection,horizons:last.horizons.clone(),steady:last.steady.clone(),
         horizon_fields,steady_field,steady_residual,estimate:last.estimate.clone(),conserved,slowest:last.slowest,
         columns:space.columns.clone(),dimension:model.r,images:space.basis.len(),work,ledger:ledger.clone(),timing,checkpoints,explicit:explicit.clone()})
+    })
 }
 
 #[cfg(test)]

@@ -157,7 +157,9 @@ impl<'a> UnifiedEstimate<'a>{
     pub fn errors(&mut self,cp:&Checkpoint<'_>,steady:&mut dyn SteadySolves)->Result<Errors,String>{
         let(k,r)=(cp.basis.len(),cp.theta.len());let outputs=self.setup.outputs;
         let mut ms=[0.;5];let clock=Instant::now();
-        self.lattice.add_columns(cp.basis,cp.images,cp.frame.as_ref())?;ms[0]=clock.elapsed().as_secs_f64()*1e3;
+        // The fast part's columns (a steady state alone has no fast part).
+        if !(outputs.times.is_empty()&&outputs.horizons.is_empty()){self.lattice.add_columns(cp.basis,cp.images,cp.frame.as_ref())?;}
+        ms[0]=clock.elapsed().as_secs_f64()*1e3;
         let mut b=vec![ZERO;k*r];self.setup.prepared.lapack.complex_gemm().multiply(k,r,r,ONE,cp.x,k,cp.s,r,ZERO,&mut b,k)?;
         // The slowest decay rate, the slow modes and which outputs use them.
         let lambda_slow=cp.theta.iter().zip(cp.coefficients).filter(|(z,a)|z.re.abs()>DECAYING&&nonzero(**a)).map(|(z,_)|z.re.abs()).fold(f64::INFINITY,f64::min);
@@ -240,7 +242,7 @@ impl Estimator for UnifiedEstimate<'_>{
         // The new columns enter now, with the projection's frame coordinates
         // (handed over once per checkpoint); their work counts here.
         let before=(self.lattice.work.clone(),self.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default());
-        self.lattice.add_columns(reduced.basis,reduced.images,reduced.frame_columns.as_ref())?;
+        if !(outputs.times.is_empty()&&outputs.horizons.is_empty()){self.lattice.add_columns(reduced.basis,reduced.images,reduced.frame_columns.as_ref())?;}
         // X and S column-major and complex.
         let x:Vec<C>=(0..k*r).map(|i|C{re:reduced.x[(i%k)*r+i/k],im:0.}).collect();
         let s:Vec<C>=(0..r*r).map(|i|reduced.vectors[(i%r)*r+i/r]).collect();
@@ -320,7 +322,7 @@ mod tests{
         let lattice=LatticeSets{explicit:modes.clone(),ring:Vec::new()};
         let ledger=RemainderLedger::new(&p.plan,op.nu_max(),op.dropped()).unwrap();
         let times=[0.,0.5,1.];let horizons=[10.];let groups=vec![vec![0,1]];
-        let frame=SwFrame::new(&p,longest_time(&times,&horizons)).unwrap();
+        let frame=SwFrame::new(&p,longest_time(&times,&horizons));
         let setup=EstimateSetup{prepared:&p,lattice:&lattice,outputs:Outputs{times:&times,horizons:&horizons,steady:false,groups:&groups},frame:&frame,ledger:&ledger,initial:&initial};
         let mut estimator=CONSTRUCT(setup).unwrap();
         let x=[1.,0.,0.,1.];let c0=[1.,0.];let kernel=[false,false];

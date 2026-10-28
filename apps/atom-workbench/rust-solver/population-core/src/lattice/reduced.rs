@@ -113,6 +113,8 @@ pub struct Projection{
     /// (eigen-coordinates and their transfer, canonical modes), the first of
     /// them, and the canonical modes.
     frame_first:usize,frame_eigen:Vec<C>,frame_transferred:Vec<C>,frame_modes:Vec<usize>,
+    /// Whether the model is the Euclidean Galerkin one (no test space).
+    euclidean:bool,
     pub milliseconds:f64,
 }
 /// Grows a row-major old x old matrix to new x new (zeros in the new part).
@@ -124,7 +126,7 @@ impl Projection{
         let centre=canonical.iter().position(|c|c.0==op.centre).unwrap_or(0);
         let length=canonical.len()*d;
         Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],traces:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,
-            vectors:Vectors::new(op,1)?,frame_first:0,frame_eigen:vec![],frame_transferred:vec![],frame_modes:vec![],milliseconds:0.})
+            vectors:Vectors::new(op,1)?,frame_first:0,frame_eigen:vec![],frame_transferred:vec![],frame_modes:vec![],euclidean:false,milliseconds:0.})
     }
     pub fn columns(&self)->usize{self.covered}
     /// The frame coordinates of the columns ingested since the last
@@ -162,13 +164,17 @@ impl Projection{
         Ok(rows.concat())
     }
     /// Takes the space's columns not yet covered.
-    pub fn ingest(&mut self,test:&dyn TestSpace,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
+    /// `test`: None for the Euclidean Galerkin model (K = I, H = E).
+    pub fn ingest(&mut self,test:Option<&dyn TestSpace>,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
         let clock=Instant::now();let(old,new)=(self.covered,basis.len());if new==old{return Ok(());}
         let(n,d,l)=(self.n,self.d,self.length);let width=new-old;
         let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();
-        let columns=test.columns(&fresh)?;self.metric.extend(columns.metric);
-        if self.frame_modes.is_empty(){self.frame_modes=test.canonical().to_vec();}
-        self.frame_eigen.extend(columns.eigen);self.frame_transferred.extend(columns.transferred);
+        self.euclidean=test.is_none();
+        if let Some(test)=test{
+            let columns=test.columns(&fresh)?;self.metric.extend(columns.metric);
+            if self.frame_modes.is_empty(){self.frame_modes=test.canonical().to_vec();}
+            self.frame_eigen.extend(columns.eigen);self.frame_transferred.extend(columns.transferred);
+        }
         for column in &basis[old..new]{
             let pops:Vec<C>=self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect();
             let mut traces=vec![0.;2*self.canonical.len()-1];let mut at=1;
@@ -179,19 +185,22 @@ impl Projection{
         let all_basis:Vec<&[C]>=basis[..new].iter().map(|v|v.as_slice()).collect();
         let all_images:Vec<&[C]>=images[..new].iter().map(|v|v.as_slice()).collect();
         let new_images=&all_images[old..];
-        let z_new=&self.metric[old*l..new*l];
-        let kb=self.metric_dots(z_new,width,&all_basis)?;                  // K[i, old + c] at i * width + c
-        let hc=self.metric_dots(&self.metric,new,new_images)?;            // H[i, old + c] at c * new + i
-        let hr=self.metric_dots(z_new,width,&all_images[..old])?;         // H[old + c, j] at j * width + c
+        let(kb,hc,hr)=if self.euclidean{(vec![],vec![],vec![])}else{
+            let z_new=&self.metric[old*l..new*l];
+            (self.metric_dots(z_new,width,&all_basis)?,                     // K[i, old + c] at i * width + c
+             self.metric_dots(&self.metric,new,new_images)?,               // H[i, old + c] at c * new + i
+             self.metric_dots(z_new,width,&all_images[..old])?)};          // H[old + c, j] at j * width + c
         let ec=self.vectors.gram(&all_basis,new_images)?;                 // E[:, old..new]
         let er=self.vectors.gram(&all_basis[old..],&all_images[..old])?;  // E[old..new, ..old]
         let fc=self.vectors.gram(&all_images,new_images)?;                // F[:, old..new]
         let(mut k,mut h,mut e,mut f)=(grow(&self.k,old,new),grow(&self.h,old,new),grow(&self.e,old,new),grow(&self.f,old,new));
         for i in 0..new{for c in 0..width{let j=old+c;
-            k[i*new+j]=kb[i*width+c];k[j*new+i]=kb[i*width+c];
-            h[i*new+j]=hc[c*new+i];e[i*new+j]=ec[i*width+c];
+            if !self.euclidean{k[i*new+j]=kb[i*width+c];k[j*new+i]=kb[i*width+c];h[i*new+j]=hc[c*new+i];}
+            e[i*new+j]=ec[i*width+c];
             f[i*new+j]=fc[i*width+c];f[j*new+i]=fc[i*width+c];}}
-        for c in 0..width{for j in 0..old{h[(old+c)*new+j]=hr[j*width+c];e[(old+c)*new+j]=er[c*old+j];}}
+        for c in 0..width{for j in 0..old{if !self.euclidean{h[(old+c)*new+j]=hr[j*width+c];}e[(old+c)*new+j]=er[c*old+j];}}
+        // The Euclidean model: K = I (W is orthonormal), H = E.
+        if self.euclidean{for i in 0..new{k[i*new+i]=1.;}h=e.clone();}
         self.k=k;self.h=h;self.e=e;self.f=f;self.covered=new;
         self.milliseconds+=clock.elapsed().as_secs_f64()*1e3;Ok(())
     }

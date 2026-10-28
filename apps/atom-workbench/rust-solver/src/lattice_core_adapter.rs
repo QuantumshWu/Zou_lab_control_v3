@@ -542,7 +542,7 @@ mod tests{
             let images:Vec<Vec<C>>=if std::env::var("ATOM_ESTIMATOR_RUST_IMAGES").is_ok_and(|v|v=="1"){basis.iter().map(|w|{let mut y=vec![C::default();dim];op.apply(w,&mut y).unwrap();y}).collect()}else{images};
             drop(op);
             let sets=LatticeSets{explicit,ring};let initial=vec![C::default();p.generator.n*p.generator.n];
-            let frame=SwFrame::new(&p,estimator::longest_time(&times,&horizons)).unwrap();
+            let frame=SwFrame::new(&p,estimator::longest_time(&times,&horizons));
             let setup=EstimateSetup{prepared:&p,lattice:&sets,outputs:Outputs{times:&times,horizons:&horizons,steady:true,groups:&fixture_groups},frame:&frame,ledger:&ledger,initial:&initial};
             let clock=Instant::now();
             let near=std::env::var("ATOM_ESTIMATOR_NEAR").unwrap_or_default();
@@ -597,8 +597,8 @@ mod tests{
             }
             let seed_macs=estimate.pool.as_ref().map_or(0.,|p|p.work.qr_macs);
             println!("{}",json!({"case":case,"modes":n_modes,"near":estimate.lattice.near.len(),"ring":estimate.lattice.ring.len(),"operatorDeviation":operator,"buildMs":build_ms,
-                "kernelMs":estimate.lattice.build_ms[0],"classMs":estimate.lattice.build_ms[1],"classes":estimate.lattice.classes.len(),"largestCluster":estimate.lattice.classes.iter().map(|c|c.largest_cluster).max(),"eigenbasisMs":p.eigenbasis().unwrap().milliseconds,"eigenBlocks":p.eigenbasis().unwrap().blocks,"largestBlock":p.eigenbasis().unwrap().largest_block,
-                "seeds":seed_count,"seedSteps":seed_steps,"poleSeeds":pole_seeds,"seedMacs":seed_macs,"d":p.generator.n*p.generator.n,"kernelEntries":estimate.lattice.kernels.diagnostics.entries,"smallParameter":estimate.lattice.kernels.diagnostics.largest,"ledger":ledger.total()}));
+                "kernelMs":estimate.lattice.build_ms()[0],"classMs":estimate.lattice.build_ms()[1],"classes":estimate.lattice.classes().map_or(0,|c|c.len()),"largestCluster":estimate.lattice.classes().ok().and_then(|c|c.iter().map(|c|c.largest_cluster).max()),"eigenbasisMs":p.eigenbasis().unwrap().milliseconds,"eigenBlocks":p.eigenbasis().unwrap().blocks,"largestBlock":p.eigenbasis().unwrap().largest_block,
+                "seeds":seed_count,"seedSteps":seed_steps,"poleSeeds":pole_seeds,"seedMacs":seed_macs,"d":p.generator.n*p.generator.n,"kernelEntries":estimate.lattice.kernels().unwrap().diagnostics.entries,"smallParameter":estimate.lattice.kernels().unwrap().diagnostics.largest,"ledger":ledger.total()}));
             // The pipeline's lattice: the slow pool's operator and steady preconditioner.
             let mut solver=atom_population_core::lattice::poles::Lattice::new(&p,LatticeSets{explicit:sets.explicit.clone(),ring:sets.ring.clone()}).unwrap();
             let mut gate=OutputGate::new(p.generator.n,estimate.lattice.nu.clone(),estimate.lattice.centre);let limit=estimator::gate::GATE_FACTOR*POPULATION_TOLERANCE;

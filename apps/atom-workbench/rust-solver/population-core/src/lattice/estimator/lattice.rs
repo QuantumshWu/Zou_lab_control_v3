@@ -39,6 +39,7 @@ use super::kernels::SwKernels;
 use super::super::frame::SwFrame;
 use super::super::estimate_api::FrameColumns;
 use std::borrow::Cow;
+use std::sync::OnceLock;
 use crate::parallel::Execution;
 
 /// Refinement passes of the ring's block solves for the diagonal fold's
@@ -97,7 +98,9 @@ pub struct ErrorLattice<'p>{
     /// the ring's diagonal blocks, R -> P u Q for the feedback.
     pub ring:Vec<Charge>,ring_nu:Vec<f64>,
     outer:LatticeOperator<'p>,inner_mask:Vec<bool>,ring_mask:Vec<bool>,edge_modes:usize,
-    pub kernels:&'p SwKernels,
+    /// The request's frame: its kernels and blocks are read on first use (a
+    /// steady state alone reads neither).
+    frame:&'p SwFrame<'p>,
     /// The near modes (the centre and its one-step neighbours), and the (I - S)
     /// pairs into them: (target, source, step), target = source + step.
     pub near:Vec<usize>,pub(super) pairs:Vec<(usize,usize,usize)>,
@@ -112,7 +115,7 @@ pub struct ErrorLattice<'p>{
     pub(super) canonical:Vec<bool>,pub(super) near_canonical:Vec<usize>,partner:Vec<usize>,
     /// The classes: the frame's own block when every mode carries every
     /// step (`Classes::Full`).
-    pub classes:Vec<Cow<'p,BlockSystem>>,pub(super) class_of:Vec<usize>,
+    classes:OnceLock<Result<Vec<Cow<'p,BlockSystem>>,String>>,distinct:Vec<Vec<usize>>,pub(super) class_of:Vec<usize>,
     /// Per near mode (in `near` order; the canonical ones filled),
     /// column-major d x k: class coordinates of the transformed basis
     /// columns and images.
@@ -126,13 +129,11 @@ pub struct ErrorLattice<'p>{
     /// propagated.
     pub ring_in_fast:bool,pub outer_bare:bool,
     pub work:ErrorWork,
-    /// Build times (ms): kernels, classes (the frame's for shared ones).
-    pub build_ms:[f64;2],
 }
 
 impl<'p> ErrorLattice<'p>{
     /// `explicit`: the explicit set P, whose modes join the near ones.
-    pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],explicit:&[Charge],frame:&'p SwFrame,classes:Classes)->Result<Self,String>{
+    pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],explicit:&[Charge],frame:&'p SwFrame<'p>,classes:Classes)->Result<Self,String>{
         let basis=prepared.eigenbasis()?;
         let n=prepared.generator.n;let d=n*n;
         let index:BTreeMap<Charge,usize>=modes.iter().enumerate().map(|(i,q)|(q.clone(),i)).collect();
@@ -146,39 +147,46 @@ impl<'p> ErrorLattice<'p>{
         let inner_mask:Vec<bool>=(0..all.len()).map(|q|q<modes.len()).collect();let ring_mask:Vec<bool>=inner_mask.iter().map(|&b|!b).collect();
         let structural=prepared.plan.structural_steps();
         let edge_modes=modes.iter().filter(|q|ring.iter().any(|r|charge_minus(r,q).is_ok_and(|s|structural.contains(&s)))).count();
-        let kernels=&frame.kernels;let clock=Instant::now();
         // Near modes: the centre, every lattice mode one kernel step away and
         // the explicit set (by construction where the state has weight).
         let mut near=vec![centre];
-        for q in kernels.steps.iter().map(|s|&s.charge).chain(explicit){if let Some(&q)=index.get(q){if !near.contains(&q){near.push(q);}}}
+        for q in frame.steps.iter().chain(explicit){if let Some(&q)=index.get(q){if !near.contains(&q){near.push(q);}}}
         let mut pairs=Vec::new();let mut keys:Vec<Vec<usize>>=Vec::new();let mut frames=near.clone();
         for &a in &near{
             let q=&modes[a];let mut steps=Vec::new();
-            for(s,step)in kernels.steps.iter().enumerate(){
-                if let Some(&b)=index.get(&charge_minus(q,&step.charge)?){pairs.push((a,b,s));if !frames.contains(&b){frames.push(b);}}
-                if classes==Classes::Full||index.contains_key(&charge_plus(q,&step.charge)?){steps.push(s);}
+            for(s,step)in frame.steps.iter().enumerate(){
+                if let Some(&b)=index.get(&charge_minus(q,step)?){pairs.push((a,b,s));if !frames.contains(&b){frames.push(b);}}
+                if classes==Classes::Full||index.contains_key(&charge_plus(q,step)?){steps.push(s);}
             }
             keys.push(steps);
         }
         let mut distinct:Vec<Vec<usize>>=keys.clone();distinct.sort();distinct.dedup();
         let mut class_of=vec![usize::MAX;modes.len()];
         for(&a,k)in near.iter().zip(&keys){class_of[a]=distinct.iter().position(|x|x==k).unwrap();}
-        let lapack=&prepared.lapack;let every:Vec<usize>=(0..kernels.steps.len()).collect();
-        let built=Execution::new()?.map(distinct,|steps|->Result<Cow<'p,BlockSystem>,String>{
-            if steps==every{Ok(Cow::Borrowed(&frame.class))}else{Ok(Cow::Owned(BlockSystem::new(lapack,basis,kernels,steps,n,frame.horizon)?))}});
-        let classes=built.into_iter().collect::<Result<Vec<_>,_>>()?;
-        let class_ms=if classes.iter().all(|c|matches!(c,Cow::Borrowed(_))){frame.milliseconds[1]}else{clock.elapsed().as_secs_f64()*1e3};
-        let kernel_ms=frame.milliseconds[0];
         let count=near.len();
         let canonical:Vec<bool>=(0..modes.len()).map(|q|modes[q]>=modes[mirror[q]]).collect();
         let near_canonical:Vec<usize>=(0..count).filter(|&slot|canonical[near[slot]]).collect();
         let partner:Vec<usize>=(0..d).map(|j|basis.partner(j)).collect();
         let outer_modes:Vec<usize>=frames.iter().copied().filter(|&q|!near.contains(&q)&&canonical[q]).collect();let outer_count=outer_modes.len();
-        Ok(Self{prepared,basis,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,kernels,
-            near,pairs,frames,outer_modes,canonical,near_canonical,partner,classes,class_of,basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],
+        Ok(Self{prepared,basis,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,frame,
+            near,pairs,frames,outer_modes,canonical,near_canonical,partner,classes:OnceLock::new(),distinct,class_of,basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],
             outer_basis:vec![Vec::new();outer_count],outer_image:vec![Vec::new();outer_count],columns:0,ring_in_fast:false,outer_bare:true,
-            work:ErrorWork::default(),build_ms:[kernel_ms,class_ms]})
+            work:ErrorWork::default()})
     }
+    /// The frame's kernels.
+    pub fn kernels(&self)->Result<&'p SwKernels,String>{self.frame.kernels()}
+    /// The classes (the frame's own block for the class of every step),
+    /// built on first use.
+    pub fn classes(&self)->Result<&[Cow<'p,BlockSystem>],String>{
+        let frame:&'p SwFrame<'p>=self.frame;let(basis,lapack,n)=(self.basis,&self.prepared.lapack,self.n);
+        self.classes.get_or_init(||{
+            let kernels=frame.kernels()?;let every:Vec<usize>=(0..kernels.steps.len()).collect();
+            let built=Execution::new()?.map(self.distinct.clone(),|steps|->Result<Cow<'p,BlockSystem>,String>{
+                if steps==every{Ok(Cow::Borrowed(frame.class()?))}else{Ok(Cow::Owned(BlockSystem::new(lapack,basis,kernels,steps,n,frame.horizon)?))}});
+            built.into_iter().collect()}).as_ref().map(|v|v.as_slice()).map_err(|e|e.clone())
+    }
+    /// Build times (ms) of the frame's kernels and block.
+    pub fn build_ms(&self)->[f64;2]{let m=self.frame.milliseconds();[m[0],m[1]]}
     pub fn dimension(&self)->usize{self.modes.len()*self.d}
     /// Process the basis columns not seen yet (columns are append-only).
     /// `frame`: the projection's frame coordinates of basis columns (the
@@ -231,7 +239,7 @@ impl<'p> ErrorLattice<'p>{
         let at=|q:usize|frame.canonical.binary_search(&q).unwrap();
         let column=|j:usize,q:usize|->usize{((j-frame.first)*cc+at(q))*d};
         let execution=Execution::new()?;
-        let(classes,class_of,lapack)=(&self.classes,&self.class_of,&self.prepared.lapack);
+        let(classes,class_of,lapack)=(self.classes()?,&self.class_of,&self.prepared.lapack);
         let mut groups:Vec<(usize,Vec<(usize,usize)>)>=Vec::new();
         for i in 0..count{for &slot in &self.near_canonical{let c=class_of[self.near[slot]];
             match groups.iter_mut().find(|g|g.0==c){Some(g)=>g.1.push((i,slot)),None=>groups.push((c,vec![(i,slot)]))}}}
@@ -271,7 +279,7 @@ impl<'p> ErrorLattice<'p>{
             for(i,v)in c[(f*modes+q)*d..(f*modes+q+1)*d].iter_mut().enumerate(){*v=conj(source[self.partner[i]]);}}}
         // (I - S) into the canonical near modes.
         let slot_of:Vec<usize>=(0..modes).map(|q|self.near.iter().position(|&x|x==q).unwrap_or(usize::MAX)).collect();
-        let(kernels,c_ref)=(self.kernels,&c);
+        let(kernels,c_ref)=(self.kernels()?,&c);
         let rows=execution.map((0..count).collect(),|f|{
             let mut t=vec![ZERO;near*d];
             for &slot in &self.near_canonical{let a=self.near[slot];t[slot*d..(slot+1)*d].copy_from_slice(&c_ref[(f*modes+a)*d..(f*modes+a+1)*d]);}
@@ -279,7 +287,7 @@ impl<'p> ErrorLattice<'p>{
             t});
         let t:Vec<C>=rows.concat();
         // V_c^-1 per class over every (field, canonical near slot) of the class.
-        let(classes,class_of,lapack)=(&self.classes,&self.class_of,&self.prepared.lapack);
+        let(classes,class_of,lapack)=(self.classes()?,&self.class_of,&self.prepared.lapack);
         let mut groups:Vec<(usize,Vec<usize>)>=Vec::new();
         for f in 0..count{for &slot in &self.near_canonical{let c=class_of[self.near[slot]];let item=f*near+slot;
             match groups.iter_mut().find(|g|g.0==c){Some(g)=>g.1.push(item),None=>groups.push((c,vec![item]))}}}
