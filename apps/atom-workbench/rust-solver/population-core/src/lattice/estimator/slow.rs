@@ -667,7 +667,7 @@ impl SlowPool{
         // The time GEMMs by chunks of the grid over the workers: every
         // output entry is accumulated by one task in the serial order.
         let per_time=per_mode.len()*n*r+decays.len()*n*d;
-        let width=t_count.div_ceil(self.execution.tasks(t_count,per_time*t_count,crate::parallel::MINIMUM_WORK_PER_TASK));
+        let width=super::time_chunk(t_count,per_time);
         let chunks:Vec<(usize,usize)>=(0..t_count).step_by(width).map(|a|(a,(a+width).min(t_count))).collect();
         let(ritz_weights,per_mode,decays,lambda)=(&ritz_weights,&per_mode,&decays,&lambda);
         let parts=self.execution.map(chunks,|(a0,b0)|->Result<Vec<C>,String>{

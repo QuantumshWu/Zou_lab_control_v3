@@ -62,11 +62,6 @@ impl Execution {
         }
     }
 
-    /// Pool size.
-    pub fn threads(&self) -> usize {
-        self.threads
-    }
-
     /// Number of tasks for `items` independent output items, `work` complex
     /// multiply-adds in total and at least `minimum_work` per task.
     pub fn tasks(&self, items: usize, work: usize, minimum_work: usize) -> usize {

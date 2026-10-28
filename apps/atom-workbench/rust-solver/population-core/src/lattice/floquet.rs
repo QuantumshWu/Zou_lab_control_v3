@@ -271,10 +271,9 @@ impl FloquetKernels{
     #[cfg(test)]
     pub fn step_kernels(&self)->&[(Charge,Vec<C>)]{&self.steps}
     /// The two-sided transform on an operator's Hermitian-symmetric fields:
-    /// the outer stage on `computed` (the canonical modes or a subset), the
-    /// kernels on every mode.
-    pub fn transform<'k>(&'k self,op:&LatticeOperator<'_>,computed:&[bool])->Result<Transform<'k>,String>{
-        let tables=&self.floquet;let modes=op.modes.len();let slots=tables.charges.len();
+    /// the outer stage on the canonical modes, the kernels on every mode.
+    pub fn transform<'k>(&'k self,op:&LatticeOperator<'_>)->Result<Transform<'k>,String>{
+        let tables=&self.floquet;let computed=&op.canonical;let modes=op.modes.len();let slots=tables.charges.len();
         // Per output mode and support charge k the source mode q - k.
         let mut sources=vec![usize::MAX;modes*slots];
         for q in 0..modes{
@@ -295,14 +294,10 @@ impl FloquetKernels{
     }
 }
 
-/// Mirrored blocks from the computed ones (zero where neither a block nor
-/// its mirror is computed), the centre Hermitian.
-pub(crate) fn mirror_computed(x:&mut[C],n:usize,computed:&[bool],mirror:&[usize]){
-    let d=n*n;
-    for q in 0..computed.len(){if !computed[q]&&!computed[mirror[q]]{x[q*d..(q+1)*d].fill(ZERO);}}
-    mirror_field(x,n,computed,mirror);
-}
 
+/// Tasks of the frame changes at most: one per worker of the desktop app's
+/// eight (fixed: the chunking does not depend on the thread count).
+const FRAME_TASKS:usize=8;
 #[derive(Default)]
 struct FrameScratch{blocks:Vec<C>,stack:Vec<C>}
 /// The two-sided Floquet transform on one mode set's Hermitian-symmetric
@@ -350,7 +345,7 @@ impl Transform<'_>{
 /// gathered and changed by two GEMMs (`sandwich_batch`).
 #[allow(clippy::too_many_arguments)]
 fn frame(execution:&Execution,lapack:&Lapack,scratch:&mut Vec<FrameScratch>,n:usize,a:&[C],b:&[C],input:&[C],out:&mut[C],computed:&[bool],work:usize)->Result<(),String>{
-    let d=n*n;let minimum=work.div_ceil(execution.threads()).max(MINIMUM_WORK_PER_TASK/8);
+    let d=n*n;let minimum=work.div_ceil(FRAME_TASKS).max(MINIMUM_WORK_PER_TASK/8);
     execution.for_mode_chunks(out,d,work,minimum,scratch,|first,chunk,scratch|{
         let modes:Vec<usize>=(first..first+chunk.len()/d).filter(|&q|computed[q]).collect();if modes.is_empty(){return Ok(());}
         grow(&mut scratch.blocks,modes.len()*d);let blocks=&mut scratch.blocks[..modes.len()*d];

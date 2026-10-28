@@ -1,8 +1,7 @@
 //! The second-order block of the error propagation and of the frame:
-//! D'_q = L0' - i nu_q + sum_s K_s over a set of steps (`kernels`); modes
-//! with the same steps share one eigensystem (their blocks differ by
-//! -i nu_q only): a class. The product builds one class over every
-//! explicit step (`frame::SwFrame::class`), shared by every near mode.
+//! D'_q = L0' - i nu_q + sum_s K_s over every step s (`kernels`), one block
+//! for every near mode (their blocks differ by -i nu_q only), built once
+//! (`frame::SwFrame::class`).
 //!
 //! In eigen-coordinates of L0' a class is diag(lambda) + sum_s K~_s, whose
 //! eigendecomposition V diag(mu) V^-1 propagates any source exactly. The

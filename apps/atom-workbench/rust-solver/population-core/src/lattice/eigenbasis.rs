@@ -58,6 +58,9 @@ const RESOLVENT_ITERATIONS:usize=20;
 const INVERSE_PANEL:usize=64;
 /// Fewest blocks per task of the dressed coordinates.
 const DRESSED_BLOCKS:usize=16;
+/// Tasks of the dressed transform at most: one per worker of the desktop
+/// app's eight (fixed: the chunking does not depend on the thread count).
+const DRESSED_TASKS:usize=8;
 /// The complex coordinates z+- = (a -+ i b)/2 of a conjugate pair from its
 /// real coordinates (a, b): a v_r + b v_i = z+ (v_r + i v_i) + z- (v_r - i v_i).
 pub(crate) fn pair_coordinates(a:C,b:C)->(C,C){(C{re:0.5*(a.re+b.im),im:0.5*(a.im-b.re)},C{re:0.5*(a.re-b.im),im:0.5*(a.im+b.re)})}
@@ -227,9 +230,10 @@ impl BlockEigenbasis{
     /// One real GEMM over every block, spread over the workers.
     pub fn dressed(&self,blocks:&[C])->Result<Vec<C>,String>{
         let(n,d)=(self.n,self.d);let mut out=blocks.to_vec();let count=blocks.len()/d;
-        // At least DRESSED_BLOCKS blocks per task: the GEMM streams E_R^-1
-        // once per task.
-        let execution=Execution::new()?;let tasks=execution.threads().min(count.div_ceil(DRESSED_BLOCKS)).max(1);
+        // At least DRESSED_BLOCKS blocks per task (the GEMM streams E_R^-1
+        // once per task), at most DRESSED_TASKS tasks: independent of the
+        // thread count.
+        let execution=Execution::new()?;let tasks=DRESSED_TASKS.min(count.div_ceil(DRESSED_BLOCKS)).max(1);
         let work=2*d*d*count;
         execution.for_mode_chunks(&mut out,d,work,work/tasks,&mut Vec::<()>::new(),|_,chunk,_|{
             let count=chunk.len()/d;let mut parts=vec![0.;d*2*count];

@@ -10,13 +10,19 @@
 //!    (the translation gate: a copy along s carries population weight of
 //!    that order);
 //! 2. ring closure: while the ring has an internal edge q <- q - t with
-//!    rho = ||C_t|| ||D_q^-1|| above RING_COUPLING (the contraction of the
-//!    ring's block Jacobi elimination), the ring charge carrying the largest
-//!    summed rho joins P with its mirror, at most PROMOTIONS times;
+//!    rho = ||C_t|| ||D_q^-1|| above RING_COUPLING, the ring charge carrying
+//!    the largest summed rho joins P with its mirror, at most PROMOTIONS
+//!    times. Q is solved whole, so this is no elimination's contraction;
+//!    what it buys is a lattice one shell wider where the ring is strongly
+//!    coupled, which the estimate's slaved outer ring needs: without it four
+//!    lasers + tweezer at 10 ms had a sample at 50 us with an error of
+//!    8.0e-4 against a bound of 3.9e-4 (0.89 of its error at worst with it);
+//!    solves and means were unchanged;
 //! 3. cover: every charge whose seed amplitude is at least SEED_AMPLITUDE x
 //!    tolerance and that P u Q misses joins P (largest first, with its
-//!    mirror);
-//! 4. the ring closure again.
+//!    mirror). A second closure after the cover promoted nothing on any
+//!    research case (three, four, five lasers, four without the trap, probe
+//!    + tweezer; 20 us, 10 ms, means) and is not run.
 //!
 //! Seed amplitudes: the slaved (z = 0) amplitudes layer by layer from the
 //! probe states on the centre, y_r = -D_r^-1 sum_p C_{r-p} y_p over the
@@ -32,7 +38,9 @@ use super::classification::HarmonicStep;
 /// margin, a step's copies carry population weight of order its mixing, a
 /// tenth of the tolerance at the gate.
 pub const GATE:f64=0.1;
-/// Largest rho = ||C_t|| ||D_q^-1|| of an edge inside the ring. Measured:
+/// Largest rho = ||C_t|| ||D_q^-1|| of an edge inside the ring (the
+/// coupling a block of the ring receives from a ring neighbour, relative to
+/// its own resolvent). Measured:
 /// the gate alone left ring-internal edges up to rho = 54 (the Raman
 /// charges' resolvent); closed at 0.1, no research case's ring keeps one.
 pub const RING_COUPLING:f64=0.1;
@@ -188,7 +196,7 @@ pub fn explicit_set(prepared:&LatticePrepared,initial:&[C],tolerance:f64)->Resul
     let mut explicit:BTreeSet<Charge>=BTreeSet::from([zero]);
     for s in &gated{explicit.insert(s.clone());explicit.insert(opposite(s));}
     // 2. Ring closure.
-    let mut promoted=condition.close(&mut explicit)?;
+    let promoted=condition.close(&mut explicit)?;
     // 3. Cover.
     let need:Vec<(&Charge,f64)>=amplitudes.iter().filter(|(_,&a)|a>=SEED_AMPLITUDE*tolerance).map(|(q,&a)|(q,a)).collect();
     let mut covered=Vec::new();
@@ -197,8 +205,6 @@ pub fn explicit_set(prepared:&LatticePrepared,initial:&[C],tolerance:f64)->Resul
         let Some((c,_))=need.iter().filter(|(q,_)|!lattice.contains(*q)).max_by(|a,b|a.1.total_cmp(&b.1).then(a.0.cmp(b.0)))else{break};
         let c=(*c).clone();explicit.insert(opposite(&c));explicit.insert(c.clone());covered.push(c);
     }
-    // 4. Ring closure again.
-    promoted.extend(condition.close(&mut explicit)?);
     let mut p:Vec<Charge>=explicit.into_iter().collect();
     p.sort_by_key(|q|(q.iter().map(|&k|k.unsigned_abs()as u64).sum::<u64>(),q.clone()));
     let q=ring(prepared,&p)?;
