@@ -116,8 +116,12 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     const row=(id:string,name:string,p:number,color:string)=>`<div class="readout-row${steady?'':' two'}" data-population-readout="${esc(id)}"><span class="readout-name" style="color:${color}">${esc(name)}${id===options.initialId?' · 初态':''}</span><span>${esc(populationValue(p))}</span>${steady?`<span class="readout-steady">${esc(populationValue(asymptotic(id)))}</span>`:''}</div>`;
     tooltip.innerHTML=`<div class="readout-time">t = ${digits(t*g.unit.factor)} ${g.unit.name}${accuracy}</div>${head}${ids.map(id=>row(id,labels[id]??id,result.populations[id]![index]!,populationColor(id))).join('')}${options.showTotalExcited===false?'':row('__excited__','激发态合计',result.totalExcited[index]!,'#808080')}${mean?`<p class="note wrap">${esc(meanLabel)} 一列是时刻 T 的相位平均布居（只平均掉拍频与光频微运动），不是瞬时布居。</p>`:''}${meanOutside}`;
     tooltip.hidden=false;tooltip.dataset.sampleIndex=String(index);tooltip.style.maxHeight=`${Math.max(100,host.clientHeight-35)}px`;
-    const bounds=svg.getBoundingClientRect(),parent=host.getBoundingClientRect(),px=(xx/800)*bounds.width+bounds.left-parent.left,tw=tooltip.offsetWidth;
-    tooltip.style.left=`${clamp(px<host.clientWidth/2?px+18:px-tw-18,8,Math.max(8,host.clientWidth-tw-8))}px`;tooltip.style.top='27px';
+    // Beside the cursor, on its wider side, never over it: in a narrow chart the readout wraps
+    // to that side's width, so the pointer stays on the plot and keeps moving the cursor.
+    const bounds=svg.getBoundingClientRect(),parent=host.getBoundingClientRect(),px=(xx/800)*bounds.width+bounds.left-parent.left;
+    const right=px<host.clientWidth/2;tooltip.style.maxWidth=`${Math.max(0,right?host.clientWidth-px-26:px-26)}px`;
+    const tw=tooltip.offsetWidth;
+    tooltip.style.left=`${clamp(right?px+18:px-tw-18,8,Math.max(8,host.clientWidth-tw-8))}px`;tooltip.style.top='27px';
   }
   function hide():void {cursor.style.display='none';tooltip.hidden=true;}
   svg.addEventListener('pointermove',event=>{

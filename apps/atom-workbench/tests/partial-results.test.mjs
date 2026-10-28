@@ -6,7 +6,7 @@ import {normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-clie
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {populationChart} from '../dist/js/atom-workbench/src/population-chart.js';
-import {errorPercent,outsideRuns,partialSentence} from '../dist/js/atom-workbench/src/accuracy.js';
+import {errorPercent,outsideRuns,partialSentence,partialShort} from '../dist/js/atom-workbench/src/accuracy.js';
 import {nativeResult} from './native-result.mjs';
 
 const scene=defaultScene(),states=buildFullMasterModel(scene,scene.dynamics).states,initialIndex=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
@@ -62,6 +62,10 @@ test('the status sentence says where the trajectory misses ε',()=>{
   assert.equal(partialSentence(t,[0,0,0,.006,.007,.008],'μs'),'t ≥ 0.03 μs 估计误差最大 0.8%（超过 0.5%），其余时刻 ≤ 0.5%');
   assert.equal(partialSentence(t,[0,.006,0,0,.009,0],'μs'),'2 段时刻（最早 t = 0.01 μs） 估计误差最大 0.9%（超过 0.5%），其余时刻 ≤ 0.5%');
   assert.equal(partialSentence(t,[0,.001,.001,.001,.001,.001],'μs'),'');assert.equal(errorPercent(.0061),'0.61%');
+  // Beside p̄(T)'s error the status line says it short; the full sentence stays in its tooltip.
+  assert.equal(partialShort(t,[0,.0061,.0052,.004,.001,0],'μs'),'t ≤ 0.021 μs 误差最大 0.61%');
+  assert.equal(partialShort(t,[0,.006,0,0,.009,0],'μs'),'2 段时刻（最早 t = 0.01 μs） 误差最大 0.9%');
+  assert.equal(partialShort(t,[0,.001,.001,.001,.001,.001],'μs'),'');
 });
 
 test('the chart draws every curve, its samples above ε on a light band, dashed and faded there',()=>{

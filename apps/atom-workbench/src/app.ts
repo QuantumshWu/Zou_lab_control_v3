@@ -4,7 +4,7 @@
 import {Field,alignUnitPickers,form,row as fieldRow,sectionTitle,shareLabelColumn,type FieldSpec} from '../../desktop/ui/src/fluent/form.js';
 import {Dialog,confirm} from '../../desktop/ui/src/fluent/dialog.js';
 import {command,type Command} from '../../desktop/ui/src/fluent/button.js';
-import {element,reconcileChildren,type Value} from '../../desktop/ui/src/fluent/dom.js';
+import {element,reconcileChildren,setTitle,type Value} from '../../desktop/ui/src/fluent/dom.js';
 import {comboFace} from '../../desktop/ui/src/fluent/combo.js';
 import {TreeCombo,type TreeGroup} from '../../desktop/ui/src/fluent/tree_combo.js';
 import {StatusStrip,setState,statusDot,type StatusWord} from '../../desktop/ui/src/fluent/status.js';
@@ -45,7 +45,7 @@ import {idMappingError} from './population-basis.js';
 import {installWindowChrome} from './window-chrome.js';
 import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,signedInteger,stateLabel,subscript,withUnit} from './format.js';
 import {solverText,steadyStatusText} from './solver-words.js';
-import {errorPercent,outsideRuns,partialSentence,sampleErrors} from './accuracy.js';
+import {errorPercent,outsideRuns,partialSentence,partialShort,sampleErrors} from './accuracy.js';
 import {definitionNotes,modelNotes} from './model-notes.js';
 import {InlineName} from './inline-name.js';
 import {EXAMPLES,exampleScene} from './examples.js';
@@ -228,9 +228,10 @@ function update():void{try{resolveSceneFrequencies(scene);}catch{/* analyze() re
 function note(text:string,word:StatusWord='task'):void{notice={text,word,until:performance.now()+6000};refreshStatus();window.setTimeout(refreshStatus,6100);}
 
 // ---------------------------------------------------------------- status
-/** The solver's line: words, their status, and the solve's wall time, written last so a time of
- * another length moves nothing before it. Computing is automatic; 停止 ends a running solve. */
-function solverStatus():[string,StatusWord,string?]{
+/** The solver's line: words, their status, the solve's wall time, written last so a time of
+ * another length moves nothing before it, and the full words for the tooltip when the line says
+ * them short. Computing is automatic; 停止 ends a running solve. */
+function solverStatus():[string,StatusWord,string?,string?]{
   const result=currentResult(),error=currentSolverError(),checkpoint=displayedCheckpoint();
   if(error)return [result?.steady.converged?`时间演化失败（长期布居已就绪）：${labelStateIds(solverText(error))}`:`布居计算失败：${labelStateIds(solverText(error))}`,'error'];
   // A streamed checkpoint stands on the page while the solve goes on.
@@ -238,33 +239,43 @@ function solverStatus():[string,StatusWord,string?]{
   const stopped=stoppedKey!==''&&stoppedKey===solveKey();
   if(view==='space')return ['方向与偏振实时显示','idle'];
   if(!result)return stopped?['计算已停止 · 修改参数后重新计算','warning']:['布居待计算','idle'];
-  const elapsed=formatElapsed(currentRecord()?.wallMs??solverWallMs),partial=trajectorySentence(result),mean=meanSentence(result);
+  const elapsed=formatElapsed(currentRecord()?.wallMs??solverWallMs),partial=trajectorySentence(result),mean=meanSentence(result),both=partial&&mean?bothSentence(result):'';
   const trajectory=resultPage()==='dynamics'||populationMode==='time';
   // 停止 keeps the last checkpoint, marked as any partial result is.
   if(stopped&&checkpoint&&trajectory)return [`计算已停止 · 显示最后的中间结果${partial?`：${partial}`:'（各时刻 ≤ 0.5%）'}`,'warning'];
-  if(resultPage()==='dynamics'&&result.timesUs.length>1)return [['轨迹已计算',partial,result.steady?.converged?mean:'长期布居未解析'].filter(Boolean).join(' · '),result.steady?.converged&&!partial&&!mean?'idle':'warning',elapsed];
+  if(resultPage()==='dynamics'&&result.timesUs.length>1){
+    const full=['轨迹已计算',partial,result.steady?.converged?mean:'长期布居未解析'].filter(Boolean).join(' · ');
+    return both?[`轨迹已计算 · ${both}`,'warning',elapsed,full]:[full,result.steady?.converged&&!partial&&!mean?'idle':'warning',elapsed];
+  }
   if(resultPage()==='dynamics')return stopped?[`计算已停止 · ${steadyStatusText(result.steady?.status)}已就绪，时间演化未计算`,'warning']:[result.steady?.converged?`${steadyStatusText(result.steady.status)}${mean?` · ${mean}`:'已收敛'} · 时间演化待计算`:'长期布居未解析',mean?'warning':'idle'];
   if(!result.steady?.converged)return ['长期布居未解析','warning'];
   // The levels chart: p̄(T), or p(t) of the trajectory at the chosen time.
-  const words=[`${steadyStatusText(result.steady.status)}${mean?` · ${mean}`:'已收敛'}`,...(populationMode==='time'&&partial?[partial]:[])];
-  return [words.join(' · '),mean||(populationMode==='time'&&partial)?'warning':'idle',elapsed];
+  const words=[`${steadyStatusText(result.steady.status)}${mean?` · ${mean}`:'已收敛'}`,...(populationMode==='time'&&partial?[partial]:[])].join(' · ');
+  if(populationMode==='time'&&both)return [`${steadyStatusText(result.steady.status)} · ${both}`,'warning',elapsed,words];
+  return [words,mean||(populationMode==='time'&&partial)?'warning':'idle',elapsed];
 }
 /** Where the trajectory misses the population tolerance, in one sentence (empty: nowhere, or no trajectory). */
 function trajectorySentence(result:DynamicsResult):string{const errors=sampleErrors(result);return result.timesUs.length>1&&errors?partialSentence(result.timesUs,errors,dynamics().durationUnit):'';}
 /** A computed p̄(T) outside the tolerance: its estimated error (empty when within). */
 function meanSentence(result:DynamicsResult):string{const s=result.steady;return s.converged&&!s.withinTolerance?`${meanSymbol(result)} 估计误差 ${s.estimatedError===null?'未知':errorPercent(s.estimatedError)}（超过 ${errorPercent(POPULATION_TOLERANCE)}）`:'';}
+/** Both outside the tolerance, said short enough for one line at the narrowest window:
+ * "t ≤ 0.42 μs 误差最大 0.61% · p̄(1 s) 误差 0.72%（均超 0.5%）". */
+function bothSentence(result:DynamicsResult):string{
+  const errors=sampleErrors(result)!,where=partialShort(result.timesUs,errors,dynamics().durationUnit),error=result.steady.estimatedError,tolerance=errorPercent(POPULATION_TOLERANCE);
+  return error===null?`${where}（超过 ${tolerance}） · ${meanSymbol(result)} 误差未知`:`${where} · ${meanSymbol(result)} 误差 ${errorPercent(error)}（均超 ${tolerance}）`;
+}
 /** The trajectory shown is a streamed checkpoint, not a final result. */
 function displayedCheckpoint():boolean{const key=trajectoryKey();return !displayedResults.get(key,'trajectory')&&(displayedResults.get(key,'progress')?.result.timesUs.length??0)>1;}
 function refreshStatus():void{
   if(notice&&performance.now()>notice.until)notice=undefined;
-  let [text,word,elapsed]=solverStatus();
-  if(analysisError)[text,word,elapsed]=[`能级参数无效：${analysisError}`,'error',undefined];
-  if(notice)[text,word,elapsed]=[notice.text,notice.word,undefined];
-  if(saveState==='failed')[text,word,elapsed]=[`本地保存失败：${saveFailure}；请导出场景`,'error',undefined];
-  else if(loadFailure&&!notice)[text,word,elapsed]=[`已改用默认场景：本地场景不是当前格式（${loadFailure}），原数据可下载`,'warning',undefined];
-  if(word==='idle')text+=saveState==='pending'?' · 正在保存…':' · 场景已保存';
-  if(elapsed)text+=` · ${elapsed}`;
-  strip.show(text,word);strip.setActionVisible(currentSolverBusy());
+  let [text,word,elapsed,full]=solverStatus();
+  if(analysisError)[text,word,elapsed,full]=[`能级参数无效：${analysisError}`,'error',undefined,undefined];
+  if(notice)[text,word,elapsed,full]=[notice.text,notice.word,undefined,undefined];
+  if(saveState==='failed')[text,word,elapsed,full]=[`本地保存失败：${saveFailure}；请导出场景`,'error',undefined,undefined];
+  else if(loadFailure&&!notice)[text,word,elapsed,full]=[`已改用默认场景：本地场景不是当前格式（${loadFailure}），原数据可下载`,'warning',undefined,undefined];
+  const tail=(word==='idle'?saveState==='pending'?' · 正在保存…':' · 场景已保存':'')+(elapsed?` · ${elapsed}`:'');
+  // A line said short keeps the full words in its tooltip.
+  strip.show(text+tail,word);if(full)setTitle(strip.root,full+tail);strip.setActionVisible(currentSolverBusy());
   detailsCommand.hidden=!currentSolverError();recoverCommand.hidden=!loadFailure;
   const sceneWord:StatusWord=saveState==='failed'?'error':loadFailure?'warning':'idle';setState(sceneDot,sceneWord);
   sceneDot.title=saveState==='failed'?'本地保存失败':loadFailure?'原本地场景未载入':'场景已保存在本机';
