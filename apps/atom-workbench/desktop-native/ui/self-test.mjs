@@ -58,11 +58,11 @@ export function installSelfTest({adapter,postNative}){
   const consume=line=>{
    if(!line.trim())return;if(terminal)throw Error('Extra native stream event followed a terminal result.');
    const event=JSON.parse(line),atMs=performance.now()-started;
-   if(!['asymptotic','result','error'].includes(event.type))throw Error('Unknown native NDJSON event.');
+   if(!['checkpoint','result','error'].includes(event.type))throw Error('Unknown native NDJSON event.');
    if(event.type==='error'){terminal=true;report.streamEvents.push({...event,requestIndex,atMs});throw Error(event.data?.error??'Native stream failed.');}
    assertToken(event.data,body);
-   report.streamEvents.push({type:event.type,requestIndex,atMs,request:event.data.request,...(event.type==='asymptotic'?{data:event.data}:{} )});
-   if(event.type==='asymptotic')report.firstMeanMs??=performance.now()-firstFetchAt;
+   report.streamEvents.push({type:event.type,requestIndex,atMs,request:event.data.request,...(event.type==='checkpoint'?{progress:{solves:event.data.diagnostics?.solves,estimatedMaximumError:event.data.populationAccuracy?.estimatedMaximumError}}:{} )});
+   if(event.type==='checkpoint')report.firstCheckpointMs??=performance.now()-firstFetchAt;
    else{final=event.data;terminal=true;}
   };
   try{

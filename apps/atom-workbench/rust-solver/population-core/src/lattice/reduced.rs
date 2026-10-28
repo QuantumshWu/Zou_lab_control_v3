@@ -1,21 +1,16 @@
 //! The reduced model of the space and every output from it.
 //!
-//! The projection (N1, round four): a Galerkin model in the inner product
-//! Re <x, M y> of a test-space metric (`TestSpace`), the Schrieffer-Wolff /
-//! Floquet frame's M = T^H T (`frame::SwMetric`): T = V^-1 (I - S~) E^-1
-//! removes the first-order couplings between the modes and leaves the
-//! dissipative second-order blocks, so the reduced numerical range is
-//! pushed right only at second order (no strict guarantee: the provable
-//! bound is the Hilbert-Schmidt one, Re theta <= Gamma/2). Append-only: per
-//! basis column w_j only M w_j is kept (on the canonical modes), and the
-//! Gram matrices K = Re W^H M W and H = Re (M W)^H A W grow by one column
-//! (and row) each; G = K^-1 H in the coordinates of W (X = I, the basis is
-//! Euclidean-orthonormal), x(t) ~ W u(t), u' = G u, u(0) = c0 = |x0| e_0
-//! (w_0 = x0 / |x0|). The Euclidean Grams E = Re W^T A W and
-//! F = Re (AW)^T AW give the residual's norm for the error transform.
+//! The projection (N1, round five): the Euclidean (Hilbert-Schmidt)
+//! Galerkin model G = Re W^T A W on the orthonormal basis, x(t) ~ W u(t),
+//! u' = G u, u(0) = c0 = |x0| e_0 (w_0 = x0 / |x0|). Its numerical range
+//! obeys the one provable bound, Re theta <= Gamma/2, and it depends on no
+//! frame (measured: the same block work as the SW frame's metric, without
+//! its per-checkpoint projection). Append-only: G and F = Re (AW)^T AW (the
+//! residual's norm for the error transform) grow by one column and row per
+//! basis column.
 //!
 //! Trace correction: tr x_q evolves by -i nu_q tr x_q exactly; G is replaced
-//! by the Frobenius-closest matrix with the trace rows of W X as left
+//! by the Frobenius-closest matrix with the trace rows of W as left
 //! eigenvectors, on the significant rows only (above TRACE_ROWS of the
 //! largest): the other rows are inner-solve roundoff, and fitting them
 //! turns roundoff into O(1) changes of G.
@@ -29,12 +24,13 @@
 //! (|Re theta| |W y|), which the error estimate reads from the images.
 //!
 //! Outputs from the one G: the trajectory p(t) = sum_q Re e^{i nu_q t}
-//! diag(W X u(t))_q (the local time average); the state at a horizon T, its
+//! diag(W u(t))_q (the local time average); the state at a horizon T, its
 //! centre block (the laboratory time average at T); the steady state from
 //! the bordered small system (G + c0 tau^T) r = c0 (tau the centre trace
 //! row; a simple kernel), else the kernel's spectral projection; the slow
 //! Ritz values the slowest relaxation is read from (`pipeline` checks their
-//! residuals against the images) and the conserved count.
+//! residuals against the images and the frame's classes) and the conserved
+//! count.
 //!
 //! The error transform (R1) orders the poles: the Laplace transform of the
 //! population error with the residual propagated through the dressed blocks,
@@ -43,27 +39,9 @@
 //! error near t = 1/sigma at frequency omega.
 use super::*;
 use super::eigenbasis::BlockEigenbasis;
-use super::frame::{FrameFields,SwMetric};
-use super::estimate_api::FrameColumns;
 use super::krylov::Vectors;
 use super::operator::LatticeOperator;
 
-/// The test space of the projection: the metric M of the reduced model's
-/// inner product Re <x, M y> (summed over every mode).
-pub trait TestSpace{
-    /// For Hermitian-symmetric fields: M x on the canonical modes
-    /// (row-major blocks in mode order, each times its weight: 2 for a pair,
-    /// 1 for the centre; one field after the other), and the fields' frame
-    /// coordinates on the way (`FrameFields`).
-    fn columns(&self,fields:&[&[C]])->Result<FrameFields,String>;
-    /// The canonical modes of the blocks, ascending.
-    fn canonical(&self)->&[usize];
-}
-/// The Schrieffer-Wolff / Floquet frame.
-impl TestSpace for SwMetric<'_>{
-    fn columns(&self,fields:&[&[C]])->Result<FrameFields,String>{self.apply(fields)}
-    fn canonical(&self)->&[usize]{&self.canonical}
-}
 use crate::parallel::Execution;
 
 /// Trace rows below this fraction of the largest are left unconstrained.
@@ -92,12 +70,10 @@ const GROWTH_NEGLIGIBLE:f64=1e-6;
 /// Amplitude (times the tolerance) a growing mode may have to be projected
 /// out.
 const GROWTH_BUDGET:f64=0.1;
-/// The slowest relaxation is resolved when its Ritz pair's residual
-/// |A W y - theta W y| / |W y| is below this
-/// share of its rate, or bounded far beyond the outputs when its rate plus
-/// residual is below 1 / (SLOW_REACH x the longest output time).
+/// A slow Ritz pair is resolved when its residual |A W y - theta W y| / |W y|
+/// is below this share of its rate (and no slower class is missing,
+/// `SlowRate`).
 pub const SLOW_ACCURACY:f64=0.1;
-const SLOW_REACH:f64=10.;
 /// Residual components of the error transform: at most TRANSFORM_RANK,
 /// down to TRANSFORM_COMPONENT of the largest singular value.
 const TRANSFORM_RANK:usize=24;
@@ -109,27 +85,18 @@ pub(crate) fn product(lapack:&Lapack,a:&[f64],b:&[f64],r:usize,k:usize,c:usize)-
 }
 pub(crate) fn transpose_rows(a:&[f64],r:usize,c:usize)->Vec<f64>{let mut t=vec![0.;r*c];for i in 0..r{for j in 0..c{t[j*r+i]=a[i*c+j];}}t}
 
-/// The metric columns M W of the space and the Gram matrices.
+/// The Gram matrices of the space.
 pub struct Projection{
     n:usize,d:usize,
     /// Canonical modes: (mode, weight, nu); the centre's position.
     pub canonical:Vec<(usize,f64,f64)>,centre:usize,
-    /// M w_j on the canonical modes, weighted (`TestSpace::metric`),
-    /// column-major (length L = canonical x d per column).
-    metric:Vec<C>,length:usize,
     /// Per column: the canonical modes' diagonals (canonical x n) and the
     /// trace functionals [centre, then Re and Im per other canonical mode].
     populations:Vec<Vec<C>>,traces:Vec<Vec<f64>>,
-    /// K = Re W^H M W, H = Re (M W)^H A W, E = Re W^T A W and
-    /// F = Re (AW)^T A W, row-major over the covered columns.
-    k:Vec<f64>,h:Vec<f64>,e:Vec<f64>,f:Vec<f64>,covered:usize,
+    /// E = Re W^T A W and F = Re (AW)^T A W, row-major over the covered
+    /// columns.
+    e:Vec<f64>,f:Vec<f64>,covered:usize,
     vectors:Vectors,
-    /// The frame coordinates of the columns since the last `take_frame`
-    /// (eigen-coordinates and their transfer, canonical modes), the first of
-    /// them, and the canonical modes.
-    frame_first:usize,frame_eigen:Vec<C>,frame_transferred:Vec<C>,frame_modes:Vec<usize>,
-    /// Whether the model is the Euclidean Galerkin one (no test space).
-    euclidean:bool,
     pub milliseconds:f64,
 }
 /// Grows a row-major old x old matrix to new x new (zeros in the new part).
@@ -139,61 +106,13 @@ impl Projection{
         let n=op.n;let d=n*n;
         let canonical:Vec<(usize,f64,f64)>=(0..op.modes.len()).filter(|&q|op.canonical[q]).map(|q|(q,if op.mirror[q]==q{1.}else{2.},op.nu[q])).collect();
         let centre=canonical.iter().position(|c|c.0==op.centre).unwrap_or(0);
-        let length=canonical.len()*d;
-        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],traces:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,
-            vectors:Vectors::new(op,1)?,frame_first:0,frame_eigen:vec![],frame_transferred:vec![],frame_modes:vec![],euclidean:false,milliseconds:0.})
+        Ok(Self{n,d,canonical,centre,populations:vec![],traces:vec![],e:vec![],f:vec![],covered:0,vectors:Vectors::new(op,1)?,milliseconds:0.})
     }
     pub fn columns(&self)->usize{self.covered}
-    /// The frame coordinates of the columns ingested since the last
-    /// `clear_frame`.
-    pub fn frame_columns(&self)->Option<FrameColumns<'_>>{
-        let count=self.covered-self.frame_first;
-        (count>0&&!self.frame_eigen.is_empty()).then_some(FrameColumns{first:self.frame_first,count,canonical:&self.frame_modes,eigen:&self.frame_eigen,transferred:&self.frame_transferred})
-    }
-    pub fn clear_frame(&mut self){self.frame_first=self.covered;self.frame_eigen.clear();self.frame_transferred.clear();}
-    /// The Euclidean Rayleigh-Ritz pairs of the space (W^T A W = E, the
-    /// residual orthogonal to W): the slowest decaying values outside
-    /// |theta| < KERNEL, at most `count`, with their basis coordinates.
-    pub fn euclidean_slow_pairs(&self,lapack:&Lapack,count:usize)->Result<Vec<(C,Vec<C>)>,String>{
-        let k=self.covered;if k==0{return Ok(vec![]);}
-        let(re,im,ev)=lapack.eigen(&transpose_rows(&self.e,k,k),k)?;
-        let mut pairs:Vec<(C,Vec<C>)>=Vec::new();let mut j=0;
-        while j<k{
-            let theta=C{re:re[j],im:im[j]};let complex=im[j]!=0.&&j+1<k;
-            if -theta.re>=KERNEL&&magnitude(theta)>=KERNEL{
-                let y:Vec<C>=(0..k).map(|i|if complex{C{re:ev[i+k*j],im:ev[i+k*(j+1)]}}else{C{re:ev[i+k*j],im:0.}}).collect();
-                pairs.push((theta,y));}
-            j+=if complex{2}else{1};
-        }
-        pairs.sort_by(|a,b|(-a.0.re).total_cmp(&(-b.0.re)));pairs.truncate(count);
-        Ok(pairs)
-    }
-    /// Re <z_a, field_c> on the canonical modes for metric columns z
-    /// (column-major, `count` of them) and fields (row-major |fields| x
-    /// count): one task per field, a fixed order of summation.
-    fn metric_dots(&self,z:&[C],count:usize,fields:&[&[C]])->Result<Vec<f64>,String>{
-        let(d,l)=(self.d,self.length);
-        let rows=Execution::new()?.map(fields.to_vec(),|field|{
-            (0..count).map(|a|{let column=&z[a*l..(a+1)*l];let mut s=0.;
-                for(c,&(q,_,_))in self.canonical.iter().enumerate(){for(x,y)in column[c*d..(c+1)*d].iter().zip(&field[q*d..(q+1)*d]){s+=x.re*y.re+x.im*y.im;}}s}).collect::<Vec<f64>>()});
-        Ok(rows.concat())
-    }
     /// Takes the space's columns not yet covered.
-    /// `test`: None for the Euclidean Galerkin model (K = I, H = E).
-    pub fn ingest(&mut self,test:Option<&dyn TestSpace>,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
+    pub fn ingest(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
         let clock=Instant::now();let(old,new)=(self.covered,basis.len());if new==old{return Ok(());}
-        let(n,d,l)=(self.n,self.d,self.length);let width=new-old;
-        let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();
-        self.euclidean=test.is_none();
-        if let Some(test)=test{
-            let columns=test.columns(&fresh)?;
-            // Diagnostics: the metric's columns perturbed.
-            match super::diagnostics::perturbation("METRIC"){
-                Some(eps)=>{let base=self.metric.len();self.metric.extend(columns.metric.iter().enumerate().map(|(e,&z)|scaled(z,1.+eps*super::diagnostics::noise(3,(base+e)as u64))));}
-                None=>self.metric.extend(columns.metric)}
-            if self.frame_modes.is_empty(){self.frame_modes=test.canonical().to_vec();}
-            self.frame_eigen.extend(columns.eigen);self.frame_transferred.extend(columns.transferred);
-        }
+        let(n,d)=(self.n,self.d);let width=new-old;
         for column in &basis[old..new]{
             let pops:Vec<C>=self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect();
             let mut traces=vec![0.;2*self.canonical.len()-1];let mut at=1;
@@ -204,31 +123,22 @@ impl Projection{
         let all_basis:Vec<&[C]>=basis[..new].iter().map(|v|v.as_slice()).collect();
         let all_images:Vec<&[C]>=images[..new].iter().map(|v|v.as_slice()).collect();
         let new_images=&all_images[old..];
-        let(kb,hc,hr)=if self.euclidean{(vec![],vec![],vec![])}else{
-            let z_new=&self.metric[old*l..new*l];
-            (self.metric_dots(z_new,width,&all_basis)?,                     // K[i, old + c] at i * width + c
-             self.metric_dots(&self.metric,new,new_images)?,               // H[i, old + c] at c * new + i
-             self.metric_dots(z_new,width,&all_images[..old])?)};          // H[old + c, j] at j * width + c
         let ec=self.vectors.gram(&all_basis,new_images)?;                 // E[:, old..new]
         let er=self.vectors.gram(&all_basis[old..],&all_images[..old])?;  // E[old..new, ..old]
         let fc=self.vectors.gram(&all_images,new_images)?;                // F[:, old..new]
-        let(mut k,mut h,mut e,mut f)=(grow(&self.k,old,new),grow(&self.h,old,new),grow(&self.e,old,new),grow(&self.f,old,new));
-        for i in 0..new{for c in 0..width{let j=old+c;
-            if !self.euclidean{k[i*new+j]=kb[i*width+c];k[j*new+i]=kb[i*width+c];h[i*new+j]=hc[c*new+i];}
-            e[i*new+j]=ec[i*width+c];
-            f[i*new+j]=fc[i*width+c];f[j*new+i]=fc[i*width+c];}}
-        for c in 0..width{for j in 0..old{if !self.euclidean{h[(old+c)*new+j]=hr[j*width+c];}e[(old+c)*new+j]=er[c*old+j];}}
-        // The Euclidean model: K = I (W is orthonormal), H = E.
-        if self.euclidean{for i in 0..new{k[i*new+i]=1.;}h=e.clone();}
-        self.k=k;self.h=h;self.e=e;self.f=f;self.covered=new;
+        let(mut e,mut f)=(grow(&self.e,old,new),grow(&self.f,old,new));
+        for i in 0..new{for c in 0..width{let j=old+c;e[i*new+j]=ec[i*width+c];f[i*new+j]=fc[i*width+c];f[j*new+i]=fc[i*width+c];}}
+        for c in 0..width{for j in 0..old{e[(old+c)*new+j]=er[c*old+j];}}
+        self.e=e;self.f=f;self.covered=new;
         self.milliseconds+=clock.elapsed().as_secs_f64()*1e3;Ok(())
     }
 }
 
 /// The reduced model of one checkpoint.
 pub struct Model{
-    /// Reduced dimension, X (k x r row-major), G (r x r), c0.
-    pub r:usize,pub x:Vec<f64>,pub g:Vec<f64>,pub c0:Vec<f64>,
+    /// Reduced dimension (the basis' columns: W is orthonormal), G (r x r),
+    /// c0.
+    pub r:usize,pub g:Vec<f64>,pub c0:Vec<f64>,
     /// Ritz values, eigenvectors (r x r row-major, complex), coefficients,
     /// and the values and coefficients the outputs use.
     pub theta:Vec<C>,pub vectors:Vec<C>,pub coefficients:Vec<C>,
@@ -238,9 +148,8 @@ pub struct Model{
     pub growing:usize,pub projected:usize,pub clipped:usize,pub growth_charge:f64,
     /// The reduced steady state (kernel part of c0).
     pub steady:Vec<f64>,pub simple_kernel:bool,
-    /// Per canonical mode: populations of W X (n x r, row-major complex).
+    /// Per canonical mode: populations of W (n x r, row-major complex).
     readout:Vec<Vec<C>>,
-    pub gram_condition:f64,
 }
 
 impl Projection{
@@ -249,12 +158,7 @@ impl Projection{
     /// population tolerance.
     pub fn model(&self,lapack:&Lapack,initial_norm:f64,longest:f64,tolerance:f64)->Result<Model,String>{
         let k=self.covered;let n=self.n;let r=k;
-        let mut x=vec![0.;k*k];for i in 0..k{x[i*k+i]=1.;}
-        // G0 = K^-1 H (K symmetric: its row-major form is its column-major one).
-        let(lu,pivots)=lapack.factor(&self.k,k)?;
-        let g0=transpose_rows(&lapack.solve_matrix_factored(&lu,&pivots,&transpose_rows(&self.h,k,k),k)?,k,k);
-        let(values,_)=lapack.hermitian_eigen(&self.k.iter().map(|&v|C{re:v,im:0.}).collect::<Vec<_>>(),k)?;
-        let gram_condition=values.iter().fold(0_f64,|a,&v|a.max(v))/values.iter().fold(f64::INFINITY,|a,&v|a.min(v));
+        let g0=self.e.clone();
         let mut c0=vec![0.;k];c0[0]=initial_norm;
         // Trace correction on the significant rows.
         let kt=self.traces[0].len();
@@ -286,32 +190,12 @@ impl Projection{
             let singular:Vec<f64>=values.iter().map(|v|v.max(0.).sqrt()).collect();let largest_singular=top.max(0.).sqrt();
             let share:Vec<f64>=(0..rows).map(|j|{let mut p=vec![ZERO;r];for a in 0..rows{let u=conj(vectors[a+rows*j]);for c in 0..r{mul_add(&mut p[c],u,C{re:defect[a*r+c],im:0.});}}
                 p.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt()/singular[j].max(f64::MIN_POSITIVE)}).collect();
-            // Diagnostics: ATOM_DIAG_TRACE_RANK keeps directions by a fixed
-            // singular-value ratio instead; ATOM_DIAG_TRACE_CORRECTION
-            // replaces TRACE_CORRECTION.
-            let fixed=super::diagnostics::perturbation("TRACE_RANK");
-            let fraction=super::diagnostics::perturbation("TRACE_CORRECTION").unwrap_or(TRACE_CORRECTION);
-            let keep:Vec<bool>=(0..rows).map(|j|match fixed{Some(ratio)=>singular[j]>ratio*largest_singular,
-                None=>singular[j]>TRACE_ROUNDOFF*largest_singular&&(share[j]<=fraction*g0_size||singular[j]>=tolerance*largest_singular)}).collect();
+            let keep:Vec<bool>=(0..rows).map(|j|singular[j]>TRACE_ROUNDOFF*largest_singular&&(share[j]<=TRACE_CORRECTION*g0_size||singular[j]>=tolerance*largest_singular)).collect();
             let mut pseudo=vec![0.;rows*rows];
             for j in 0..rows{if keep[j]{for a in 0..rows{for b in 0..rows{pseudo[a*rows+b]+=mul(vectors[a+rows*j],conj(vectors[b+rows*j])).re/values[j];}}}}
             let correction=product(lapack,&product(lapack,&transpose_rows(&t,rows,r),&pseudo,r,rows,rows)?,&defect,r,rows,r)?;
-            if super::diagnostics::reporting(){
-                // The trace rows' directions by singular value (ratio to the
-                // largest : share of the correction against |G0|, * when kept),
-                // the least kept and the largest dropped ratio, the defect and
-                // the correction against G0.
-                let mut order:Vec<usize>=(0..rows).collect();order.sort_by(|&a,&b|singular[b].total_cmp(&singular[a]));
-                let least_kept=order.iter().filter(|&&j|keep[j]).map(|&j|singular[j]/largest_singular).fold(f64::INFINITY,f64::min);
-                let largest_dropped=order.iter().filter(|&&j|!keep[j]).map(|&j|singular[j]/largest_singular).fold(0.,f64::max);
-                let list:Vec<String>=order.iter().map(|&j|format!("{:.1e}:{:.1e}{}",singular[j]/largest_singular,share[j]/g0_size,if keep[j]{"*"}else{""})).collect();
-                eprintln!("DBG trace k {k} rows {rows} kept {} least kept {least_kept:.2e} largest dropped {largest_dropped:.2e} defect {:.3e} correction/G0 {:.3e} directions {}",
-                    keep.iter().filter(|&&b|b).count(),size(&defect),size(&correction)/g0_size,list.join(" "));
-            }
             for(a,b)in g.iter_mut().zip(&correction){*a-=b;}
         }
-        // Diagnostics: G perturbed.
-        if let Some(eps)=super::diagnostics::perturbation("MODEL"){for(e,v)in g.iter_mut().enumerate(){*v*=1.+eps*super::diagnostics::noise(4,e as u64);}}
         // Ritz decomposition.
         let(re,im,ev)=lapack.eigen(&transpose_rows(&g,r,r),r)?;
         let mut theta=vec![ZERO;r];let mut s=vec![ZERO;r*r];let mut pair=vec![0_u8;r];let mut j=0;
@@ -341,17 +225,6 @@ impl Projection{
             if amplitudes[jj]<=GROWTH_BUDGET*tolerance{used_theta[jj]=ZERO;used_coefficients[jj]=ZERO;projected+=1;growth_charge+=amplitudes[jj];}
             else{used_theta[jj].re=0.;clipped+=1;}
         }
-        if super::diagnostics::reporting(){
-            // The numerical abscissae of K^-1 H (the projection) and of G (with
-            // the trace correction) in the K-norm, the Gram's condition, the
-            // Ritz values nearest the axis (outside the kernel) with their
-            // amplitudes.
-            let kg=product(lapack,&self.k,&g,k,k,k)?;
-            let(omega_h,omega_g)=(super::diagnostics::abscissa(lapack,&self.k,&self.h,k)?,super::diagnostics::abscissa(lapack,&self.k,&kg,k)?);
-            let mut near:Vec<usize>=(0..r).filter(|&j|!kernel[j]).collect();near.sort_by(|&p,&q|theta[q].re.total_cmp(&theta[p].re));
-            let shown:Vec<String>=near.iter().take(6).map(|&j|format!("{:.3e}{:+.3e}i(a{:.1e})",theta[j].re,theta[j].im,amplitudes[j])).collect();
-            eprintln!("DBG model k {k} cond {gram_condition:.3e} omegaH {omega_h:+.3e} omegaG {omega_g:+.3e} growing {growing} clipped {clipped} projected {projected} top {}",shown.join(" "));
-        }
         // The steady state.
         let simple_kernel=kernel.iter().filter(|&&b|b).count()==1;
         let tau:Vec<f64>=tw[..r].to_vec();
@@ -363,12 +236,11 @@ impl Projection{
             (0..r).map(|i|(0..r).filter(|&jj|kernel[jj]).fold(0.,|acc,jj|acc+mul(s[i*r+jj],a[jj]).re)).collect()
         };
         if steady.iter().chain(&g).any(|v|!v.is_finite()){return Err("Nonfinite reduced model".into());}
-        Ok(Model{r,x,g,c0,theta,vectors:s,coefficients:a,used_theta,used_coefficients,kernel,amplitudes,
-            growing,projected,clipped,growth_charge,steady,simple_kernel,readout,gram_condition})
+        Ok(Model{r,g,c0,theta,vectors:s,coefficients:a,used_theta,used_coefficients,kernel,amplitudes,
+            growing,projected,clipped,growth_charge,steady,simple_kernel,readout})
     }
 }
 
-fn cexp(z:C,t:f64)->C{let m=(z.re*t).exp();C{re:m*(z.im*t).cos(),im:m*(z.im*t).sin()}}
 impl Model{
     /// u(t) = Re S diag(e^{used theta t}) used coefficients.
     pub fn state(&self,t:f64)->Vec<f64>{
@@ -394,21 +266,19 @@ impl Model{
     /// The laboratory time average at the horizon T (the centre block).
     pub fn horizon(&self,projection:&Projection,t:f64)->Vec<f64>{self.populations(projection,&self.state(t),t,true)}
     pub fn steady_populations(&self,projection:&Projection)->Vec<f64>{self.populations(projection,&self.steady,0.,true)}
-    /// Basis coefficients X u of a reduced vector.
-    pub fn coordinates(&self,u:&[f64])->Vec<f64>{let r=self.r;let k=self.x.len()/r.max(1);(0..k).map(|i|(0..r).map(|c|self.x[i*r+c]*u[c]).sum()).collect()}
     pub fn conserved(&self)->usize{self.kernel.iter().filter(|&&b|b).count().max(1)}
-    /// The decaying Ritz values outside the kernel (rate at least KERNEL:
-    /// slower ones are undamped precession), slowest first, at most `count`:
-    /// (index, rate).
-    pub fn slow_candidates(&self,count:usize)->Vec<(usize,f64)>{
-        let mut out:Vec<(usize,f64)>=(0..self.r).filter(|&j|!self.kernel[j]&&-self.theta[j].re>=KERNEL).map(|j|(j,-self.theta[j].re)).collect();
-        out.sort_by(|a,b|a.1.total_cmp(&b.1));out.truncate(count);out
+    /// The slowest relaxation's candidates (N1 round five): the decaying
+    /// Ritz values outside the kernel (rate at least KERNEL: slower ones are
+    /// undamped precession; growing ones are projected out or clipped) of
+    /// population weight (`amplitudes`) at least `weight`, one of each
+    /// conjugate pair, slowest first: (index, rate).
+    pub fn slow_candidates(&self,weight:f64)->Vec<(usize,f64)>{
+        let mut out:Vec<(usize,f64)>=(0..self.r).filter(|&j|!self.kernel[j]&&-self.theta[j].re>=KERNEL&&self.theta[j].im>=0.&&self.amplitudes[j]>=weight)
+            .map(|j|(j,-self.theta[j].re)).collect();
+        out.sort_by(|a,b|a.1.total_cmp(&b.1));out
     }
-    /// Basis coefficients X s_j of a Ritz vector (complex).
-    pub fn ritz_coordinates(&self,j:usize)->Vec<C>{
-        let r=self.r;let k=self.x.len()/r.max(1);
-        (0..k).map(|i|(0..r).fold(ZERO,|acc,c|{let mut acc=acc;let v=self.x[i*r+c];let z=self.vectors[c*r+j];acc.re+=v*z.re;acc.im+=v*z.im;acc})).collect()
-    }
+    /// Basis coefficients s_j of a Ritz vector (complex).
+    pub fn ritz_coordinates(&self,j:usize)->Vec<C>{let r=self.r;(0..r).map(|i|self.vectors[i*r+j]).collect()}
     /// The error transform per pole xi (populations, n each): see the module
     /// documentation. The residual R = A W - W G enters through its leading
     /// singular components (TRANSFORM_RANK, down to TRANSFORM_COMPONENT of
@@ -471,14 +341,14 @@ impl Model{
     }
 }
 
-/// The slowest relaxation rate (1/us) and its residual (rad/us): resolved
-/// when the residual is within SLOW_ACCURACY of the rate, else a bound
-/// rate +- residual.
+/// A slow relaxation rate (1/us), its residual (rad/us) and whether every
+/// class of the frame's second-order block slower than it is matched by a
+/// Ritz pair (`pipeline`; None: not checked): resolved when it is and the
+/// residual is
+/// within SLOW_ACCURACY of the rate, else only the range rate +- residual
+/// (a slower class the space has not reached included).
 #[derive(Clone,Copy,Debug)]
-pub struct SlowRate{pub rate:f64,pub residual:f64}
+pub struct SlowRate{pub rate:f64,pub residual:f64,pub matched:Option<bool>}
 impl SlowRate{
-    pub fn resolved(&self)->bool{self.residual<=SLOW_ACCURACY*self.rate}
-    /// Relaxation much longer than `longest` (at least SLOW_REACH times), as
-    /// certified by the bound.
-    pub fn beyond(&self,longest:f64)->bool{(self.rate+self.residual)*longest*SLOW_REACH<=1.}
+    pub fn resolved(&self)->bool{self.matched==Some(true)&&self.residual<=SLOW_ACCURACY*self.rate}
 }

@@ -4,7 +4,8 @@
 //! its source F_k drives is, exactly,
 //!   e_k(t) = a_k (e^{theta_k t} Y_k - e^{tA} Y_k),  Y_k = (theta_k - A)^-1 F_k,
 //! with F_k = (A W - theta_k W) b_k plus g_k, the omitted ring slaved at
-//! z = theta_k and fed back (`ErrorLattice::ring_feedback`). The kernel
+//! z = theta_k and fed back (`ErrorLattice::ring_feedback`), and the K^(1)
+//! rests the lattice operator leaves out on W b_k (one source g_k). The kernel
 //! mode's Y (from the bordered system (A + u tau0^T) y = F, Y = -y) is the
 //! steady error itself.
 //!
@@ -36,7 +37,7 @@
 //!
 //! Deflation (away from the kernel): a slow Ritz value lies close to an
 //! eigenvalue of A, so (theta - A) is nearly singular along the slow Ritz
-//! vectors x_j = W X s_j, and Y carried large components there whose
+//! vectors x_j = W s_j, and Y carried large components there whose
 //! response cancelled to the error. The solve is bordered by them and by
 //! the reduced model's left functionals l_j: (theta - A) y + sum_j lambda_j x_j = g
 //! with l_j(y) = 0, and the lambda_j respond in closed form (`mode`).
@@ -45,8 +46,9 @@
 //! residual-only stop reliable at 1e-5 (undeflated: 10% at 1e-4, a factor
 //! two at 1e-3).
 //!
-//! e^{tA} Y_k: Y's part in the space, W X r0 (r0 its least-squares
-//! coordinates), is propagated by the reduced model, W X S e^{theta t} S^-1 r0;
+//! e^{tA} Y_k: Y's part in the space, W r0 (r0 = W^T Y), is propagated by
+//! the reduced model, W S e^{theta t} S^-1 r0 (a kernel mode's without its
+//! kernel coordinates, `populations`);
 //! the rest decays at the fast rates and is propagated by the dressed blocks
 //! of L0' on the near modes only (its readout elsewhere is micromotion).
 use super::super::*;
@@ -91,19 +93,19 @@ const SMALL_DEPENDENT:f64=1e-12;
 /// pair's block scaled by sqrt 2 so that the dot product is the real inner
 /// product over every mode. Half the length of the whole field.
 #[derive(Clone)]
-pub(super) struct Packing{d:usize,n:usize,canonical:Vec<usize>,mirror:Vec<usize>,modes:usize}
+struct Packing{d:usize,n:usize,canonical:Vec<usize>,mirror:Vec<usize>,modes:usize}
 impl Packing{
-    pub(super) fn new(lattice:&ErrorLattice<'_>)->Self{
+    fn new(lattice:&ErrorLattice<'_>)->Self{
         let canonical:Vec<usize>=(0..lattice.modes.len()).filter(|&q|lattice.modes[q]>=lattice.modes[lattice.mirror[q]]).collect();
         Self{d:lattice.d,n:lattice.n,canonical,mirror:lattice.mirror.clone(),modes:lattice.modes.len()}
     }
-    pub(super) fn length(&self)->usize{2*self.d*self.canonical.len()}
-    pub(super) fn pack(&self,x:&[C])->Vec<f64>{
+    fn length(&self)->usize{2*self.d*self.canonical.len()}
+    fn pack(&self,x:&[C])->Vec<f64>{
         let d=self.d;let mut out=Vec::with_capacity(self.length());
         for &q in &self.canonical{let w=if self.mirror[q]==q{1.}else{std::f64::consts::SQRT_2};for v in &x[q*d..(q+1)*d]{out.push(w*v.re);out.push(w*v.im);}}
         out
     }
-    pub(super) fn unpack(&self,v:&[f64])->Vec<C>{
+    fn unpack(&self,v:&[f64])->Vec<C>{
         let(n,d)=(self.n,self.d);let mut x=vec![ZERO;self.modes*d];
         for(i,&q)in self.canonical.iter().enumerate(){let w=if self.mirror[q]==q{1.}else{std::f64::consts::FRAC_1_SQRT_2};
             for k in 0..d{x[q*d+k]=C{re:w*v[2*(i*d+k)],im:w*v[2*(i*d+k)+1]};}
@@ -111,7 +113,7 @@ impl Packing{
         x
     }
 }
-pub(super) fn dot(a:&[f64],b:&[f64])->f64{a.iter().zip(b).map(|(x,y)|x*y).sum()}
+fn dot(a:&[f64],b:&[f64])->f64{a.iter().zip(b).map(|(x,y)|x*y).sum()}
 /// (e^{a t} - e^{b t}) / (a - b), and its limit t e^{b t} (1 + d t / 2 + (d t)^2 / 6)
 /// for d = a - b with |d t| small.
 fn secular(a:C,b:C,t:f64)->C{
@@ -119,7 +121,6 @@ fn secular(a:C,b:C,t:f64)->C{
     if dt<1e-3{let e=scaled(cexp(b,t),t);let(x,y)=(scaled(d,t/2.),scaled(mul(d,d),t*t/6.));return mul(e,C{re:1.+x.re+y.re,im:x.im+y.im});}
     let n=C{re:cexp(a,t).re-cexp(b,t).re,im:cexp(a,t).im-cexp(b,t).im};let s=d.re*d.re+d.im*d.im;mul(n,C{re:d.re/s,im:-d.im/s})
 }
-pub(super) fn cexp(z:C,t:f64)->C{let m=(z.re*t).exp();if m==0.{return ZERO;}C{re:m*(z.im*t).cos(),im:m*(z.im*t).sin()}}
 
 /// Orthonormal real columns stored by row panels (each column-major), with
 /// the real multiply-adds of every product with them.
@@ -194,7 +195,7 @@ impl Panels{
 /// Rows per task of the block products: two tasks per worker, at most a panel.
 fn block_rows(execution:&Execution,length:usize)->usize{length.div_ceil(2*execution.threads()).clamp(1<<12,PANEL_ROWS)}
 /// A^T B (ka x mb, column-major) of blocks A (length x ka) and B (length x mb), by row chunks.
-pub(super) fn block_cross(lapack:&Lapack,execution:&Execution,a:&[f64],ka:usize,b:&[f64],mb:usize,length:usize)->Result<Vec<f64>,String>{
+fn block_cross(lapack:&Lapack,execution:&Execution,a:&[f64],ka:usize,b:&[f64],mb:usize,length:usize)->Result<Vec<f64>,String>{
     if ka==0||mb==0{return Ok(vec![0.;ka*mb]);}
     let chunk=block_rows(execution,length);
     let parts=execution.map((0..length).step_by(chunk).collect(),|s:usize|->Result<Vec<f64>,String>{
@@ -204,7 +205,7 @@ pub(super) fn block_cross(lapack:&Lapack,execution:&Execution,a:&[f64],ka:usize,
     Ok(out)
 }
 /// G T (length x m) for G (length x k) and T (k x m), by row chunks.
-pub(super) fn block_times(lapack:&Lapack,execution:&Execution,g:&[f64],length:usize,k:usize,t:&[f64],m:usize)->Result<Vec<f64>,String>{
+fn block_times(lapack:&Lapack,execution:&Execution,g:&[f64],length:usize,k:usize,t:&[f64],m:usize)->Result<Vec<f64>,String>{
     if k==0||m==0{return Ok(vec![0.;length*m]);}
     let chunk=block_rows(execution,length);let starts:Vec<usize>=(0..length).step_by(chunk).collect();
     let parts=execution.map(starts.clone(),|s|->Result<Vec<f64>,String>{
@@ -218,7 +219,7 @@ pub(super) fn block_times(lapack:&Lapack,execution:&Execution,g:&[f64],length:us
 /// Upper Cholesky factor (column-major, in the returned order) of a Gram
 /// matrix, with diagonal pivoting or in the given order; a column whose
 /// remaining norm is below CHOLESKY_DEPENDENT of its size is dropped.
-pub(super) fn cholesky(gram:&[f64],m:usize,sizes:&[f64],pivoting:bool)->(Vec<usize>,Vec<f64>){
+fn cholesky(gram:&[f64],m:usize,sizes:&[f64],pivoting:bool)->(Vec<usize>,Vec<f64>){
     let mut a=gram.to_vec();let mut left:Vec<usize>=(0..m).collect();let mut order=Vec::new();let mut rows:Vec<Vec<f64>>=Vec::new();
     let small=|a:&[f64],j:usize|!(a[j+m*j]>(CHOLESKY_DEPENDENT*sizes[j]).powi(2));
     loop{
@@ -234,7 +235,7 @@ pub(super) fn cholesky(gram:&[f64],m:usize,sizes:&[f64],pivoting:bool)->(Vec<usi
     for(i,row)in rows.iter().enumerate(){for(j,&c)in order.iter().enumerate().skip(i){r[i+k*j]=row[c];}}
     (order,r)
 }
-pub(super) fn upper_inverse(r:&[f64],k:usize)->Vec<f64>{
+fn upper_inverse(r:&[f64],k:usize)->Vec<f64>{
     let mut inv=vec![0.;k*k];
     for j in 0..k{inv[j+k*j]=1./r[j+k*j];for i in(0..j).rev(){let s:f64=(i+1..=j).map(|l|r[i+k*l]*inv[l+k*j]).sum();inv[i+k*j]=-s/r[i+k*i];}}
     inv
@@ -289,8 +290,8 @@ pub struct PoolWork{
 pub struct SlowSolution{pub theta:C,pub coefficient:C,basis:Vec<C>,x:Vec<C>,deflated:Vec<(usize,C,C)>}
 
 /// The reduced model's slow invariant subspace at one checkpoint: per slow
-/// Ritz mode j its Ritz index and value, b_j = X s_j, its left functional
-/// on W^T y (row j of S^-1 (X^H X)^-1 X^H: l_j(x_i) = delta_ij), and the
+/// Ritz mode j its Ritz index and value, b_j = s_j, its left functional
+/// on W^T y (row j of S^-1: l_j(x_i) = delta_ij), and the
 /// coordinates on Q of x_j = W b_j and of A x_j.
 struct Deflation{index:Vec<usize>,theta:Vec<C>,b:Vec<Vec<C>>,left:Vec<Vec<C>>,cx:Vec<Vec<C>>,cax:Vec<Vec<C>>,centre:Vec<Vec<C>>}
 
@@ -383,7 +384,7 @@ impl SlowPool{
         Ok(())
     }
     /// The checkpoint's slow Ritz modes to deflate: Ritz indices, values,
-    /// b_j = X s_j, the left functionals (k each), x_j = W b_j and A x_j
+    /// b_j = s_j, the left functionals (k each), x_j = W b_j and A x_j
     /// (the pipeline's images). x_j and A x_j join Q (their two
     /// Hermitian-symmetric parts), not the directions.
     pub fn deflate(&mut self,index:&[usize],theta:&[C],b:&[Vec<C>],left:&[Vec<C>],fields:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
@@ -456,7 +457,7 @@ impl SlowPool{
     /// its steady limit, -lambda_j x_j / theta_j, would weigh the Ritz
     /// vectors' residuals by 1 / theta_j (measured: the steady estimate moved
     /// by up to a factor 2.7).
-    fn solve(&mut self,f:&[C],theta:C,coefficient:C,deflate:bool,residual:f64,steady:&mut dyn SteadySolves)->Result<Solved,String>{
+    fn solve(&mut self,f:&[C],theta:C,coefficient:C,deflate:bool,steady:&mut dyn SteadySolves)->Result<Solved,String>{
         let clock=Instant::now();self.work.solves+=1;
         let kernel=magnitude(theta)<KERNEL;let length=self.q.length;
         let deflation=if deflate&&!kernel{self.deflation.take()}else{None};
@@ -500,7 +501,7 @@ impl SlowPool{
             if let Some(d)=&deflation{for cx in &d.cx{let mut v=cx.clone();v.resize(count,ZERO);m.extend(v);}}
             let(x,rho)=least_squares(&m,count,p+slow,&phi_c);
             let outside=dot(&parts,&parts);let rn=(rho.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>()+outside).sqrt();
-            if rn<=residual*fsize||steps>=MAXIMUM_STEPS{break x;}
+            if rn<=RESIDUAL*fsize||steps>=MAXIMUM_STEPS{break x;}
             // Settled: two consecutive changes of the contribution below SETTLE
             // of its size (or of the steady error, the larger), the residual
             // below SETTLED_RESIDUAL.
@@ -564,41 +565,15 @@ impl SlowPool{
     pub fn mode(&mut self,b:&[C],ax:&[C],g:&[C],theta:C,coefficient:C,steady:&mut dyn SteadySolves)->Result<SlowSolution,String>{
         if magnitude(theta)<KERNEL{
             let f:Vec<C>=ax.iter().zip(g).map(|(a,v)|C{re:a.re+v.re,im:a.im+v.im}).collect();
-            let s=self.solve(&f,theta,coefficient,false,RESIDUAL,steady)?;
+            let s=self.solve(&f,theta,coefficient,false,steady)?;
             let solution=SlowSolution{theta,coefficient,basis:Vec::new(),x:s.x,deflated:Vec::new()};
             self.steady_scale=self.centre_populations(&solution.x).iter().map(|z|magnitude(*z)).fold(0.,f64::max)*magnitude(coefficient);
             return Ok(solution);
         }
-        let s=self.solve(g,theta,coefficient,true,RESIDUAL,steady)?;
+        let s=self.solve(g,theta,coefficient,true,steady)?;
         let mut basis=s.basis;basis.resize(b.len(),ZERO);for(t,v)in basis.iter_mut().zip(b){t.re-=v.re;t.im-=v.im;}
         let deflated=self.deflation.as_ref().map_or(Vec::new(),|d|s.deflated.iter().map(|&(i,l)|(d.index[i],d.theta[i],l)).collect());
         Ok(SlowSolution{theta,coefficient,basis,x:s.x,deflated})
-    }
-    /// (theta - A)^-1 f for a source outside the space (`fold_charge`), to the
-    /// residual `residual` |f|: the deflated solve away from the kernel,
-    /// whose part along the slow Ritz vectors (the deflated amplitudes) the
-    /// caller's model spans already, and the trace-free bordered one at the
-    /// kernel.
-    pub fn response(&mut self,f:&[C],theta:C,coefficient:C,residual:f64,steady:&mut dyn SteadySolves)->Result<SlowSolution,String>{
-        let s=self.solve(f,theta,coefficient,magnitude(theta)>=KERNEL,residual,steady)?;
-        Ok(SlowSolution{theta,coefficient,basis:s.basis,x:s.x,deflated:Vec::new()})
-    }
-    /// A solution's field Y = W c + U x and its image A Y (A unbordered),
-    /// as Hermitian-symmetric parts: [Y_a, Y_b, (A Y)_a, (A Y)_b] with
-    /// Y = Y_a + i Y_b.
-    pub fn fields(&self,basis:&[Vec<C>],images:&[Vec<C>],s:&SlowSolution)->Result<[Vec<C>;4],String>{
-        let(count,length)=(self.q.count,self.q.length);
-        let combine=|coordinates:&[Vec<f64>]|->Result<[Vec<C>;2],String>{
-            let mut h=vec![0.;2*count];
-            for(&x,c)in s.x.iter().zip(coordinates){if !nonzero(x){continue;}for(i,&v)in c.iter().enumerate(){h[i]+=x.re*v;h[count+i]+=x.im*v;}}
-            let mut g=vec![0.;2*length];self.q.combine(&self.lapack,&self.execution,&mut g,&h,2,1.)?;
-            Ok([self.packing.unpack(&g[..length]),self.packing.unpack(&g[length..])])};
-        let([mut ya,mut yb],[mut aa,mut ab])=(combine(&self.cu)?,combine(&self.cau)?);
-        for((&c,w),aw)in s.basis.iter().zip(basis).zip(images){if !nonzero(c){continue;}
-            for(((a,b),(p,q)),(&v,&u))in ya.iter_mut().zip(yb.iter_mut()).zip(aa.iter_mut().zip(ab.iter_mut())).zip(w.iter().zip(aw)){
-                *a=C{re:a.re+c.re*v.re,im:a.im+c.re*v.im};*b=C{re:b.re+c.im*v.re,im:b.im+c.im*v.im};
-                *p=C{re:p.re+c.re*u.re,im:p.im+c.re*u.im};*q=C{re:q.re+c.im*u.re,im:q.im+c.im*u.im};}}
-        Ok([ya,yb,aa,ab])
     }
     /// The Gram matrix W^T U of the basis against every pool direction
     /// (column-major k x p), from the directions' coordinates and W^T Q.
@@ -623,30 +598,32 @@ impl SlowPool{
     pub fn steady_populations(&self,basis:&[Vec<C>],s:&SlowSolution)->Vec<f64>{self.readout(basis,s,s.coefficient)}
     /// Population errors (one row per time) of the slow modes,
     /// sum_k a_k (e^{theta_k t} Y_k - e^{tA} Y_k), for the reduced model's
-    /// coordinates X (k x r), eigenvectors S (r x r, column-major) and the
-    /// values theta (r) the outputs use.
+    /// eigenvectors S (r x r, column-major, r = basis.len()), the values theta
+    /// (r) the outputs use and its kernel modes `kernel`. A kernel mode's Y
+    /// (the steady error) is trace free: the true e^{tA} Y decays, so its
+    /// projection on the space is propagated without its kernel coordinates
+    /// (which the reduced model would keep forever; R2 14.4: early
+    /// checkpoints of three and four lasers 0.88 and 2.3 of the actual error
+    /// without, 1.00-1.01 with).
     #[allow(clippy::too_many_arguments)]
-    pub fn populations(&mut self,lattice:&ErrorLattice<'_>,basis:&[Vec<C>],x:&[C],s:&[C],theta:&[C],solutions:&[SlowSolution],times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
+    pub fn populations(&mut self,lattice:&ErrorLattice<'_>,basis:&[Vec<C>],s:&[C],theta:&[C],kernel:&[usize],solutions:&[SlowSolution],times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
         let(n,d,k,r)=(self.n,self.d,basis.len(),theta.len());let t_count=times.len();
         if solutions.is_empty()||t_count==0{return Ok(vec![vec![0.;n];t_count]);}
         let lapack=Arc::clone(&self.lapack);let gemm=lapack.complex_gemm();
-        // (X^H X) and S factored once; B = X S.
-        let mut xhx=vec![ZERO;r*r];
-        for a in 0..r{for b in 0..r{let mut v=ZERO;for i in 0..k{mul_add(&mut v,conj(x[i+k*a]),x[i+k*b]);}xhx[a+r*b]=v;}}
-        let(lu_x,piv_x)=lapack.complex_factor(&xhx,r)?;let(lu_s,piv_s)=lapack.complex_factor(s,r)?;
-        let mut b=vec![ZERO;k*r];gemm.multiply(k,r,r,ONE,x,k,s,r,ZERO,&mut b,k)?;
+        // S factored once; the Ritz vectors B = S over the basis.
+        let(lu_s,piv_s)=lapack.complex_factor(s,r)?;let b=s;
         let gram=self.basis_gram(k);
         let modes:Vec<usize>=match readout{Readout::Laboratory=>(0..lattice.modes.len()).collect(),Readout::Centre=>vec![lattice.centre]};
         let phase=|q:usize,t:f64|match readout{Readout::Laboratory=>cexp(C{re:0.,im:lattice.nu[q]},t),Readout::Centre=>ONE};
         let mut total=vec![ZERO;n*t_count];
-        // Per slow mode: X r0 (Y's part in the space) and the remainder on the near modes.
+        // Per slow mode: r0 = W^T Y (Y's part in the space) and the remainder on the near modes.
         let mut ritz_weights=vec![ZERO;r];let mut in_space:Vec<Vec<C>>=Vec::new();let mut remainders:Vec<(usize,C,C,Vec<C>)>=Vec::new();
         for sol in solutions{
-            let(wy,near)=self.parts(basis,&gram,sol);
-            let xh:Vec<C>=(0..r).map(|a|(0..k).fold(ZERO,|v,i|{let w=mul(conj(x[i+k*a]),wy[i]);C{re:v.re+w.re,im:v.im+w.im}})).collect();
-            let r0=lapack.complex_solve_matrix_factored(&lu_x,&piv_x,&xh,r)?;let cs=lapack.complex_solve_matrix_factored(&lu_s,&piv_s,&r0,r)?;
+            let(r0,near)=self.parts(basis,&gram,sol);
+            let mut cs=lapack.complex_solve_matrix_factored(&lu_s,&piv_s,&r0,r)?;
+            if magnitude(sol.theta)<KERNEL{for &j in kernel{cs[j]=ZERO;}}
             for(w,c)in ritz_weights.iter_mut().zip(&cs){mul_add(w,sol.coefficient,*c);}
-            let xr:Vec<C>=(0..k).map(|i|(0..r).fold(ZERO,|v,a|{let w=mul(x[i+k*a],r0[a]);C{re:v.re+w.re,im:v.im+w.im}})).collect();
+            let xr=r0;
             for(slot,&q)in self.near.iter().enumerate(){
                 if readout==Readout::Centre&&q!=lattice.centre{continue;}
                 let mut block=near[slot*d..(slot+1)*d].to_vec();
@@ -655,7 +632,7 @@ impl SlowPool{
             }
             in_space.push(xr);
         }
-        // In the space, per mode: sum_k a_k e^{theta_k t} P_q(W X r0_k) - P_q(B (sum_k a_k cS_k) e^{theta t}),
+        // In the space, per mode: sum_k a_k e^{theta_k t} P_q(W r0_k) - P_q(B (sum_k a_k cS_k) e^{theta t}),
         // and the deflated amplitudes' closed-form response, P_q(B h(t)) with
         // h_j(t) = sum_k a_k lambda_kj (e^{theta_k t} - e^{theta_j t}) / (theta_k - theta_j).
         let mut ritz_exp:Vec<C>=times.iter().flat_map(|&t|theta.iter().zip(&ritz_weights).map(move|(&z,&w)|mul(w,cexp(z,t)))).collect();
@@ -663,7 +640,7 @@ impl SlowPool{
             for(ti,&t)in times.iter().enumerate(){let v=mul(a,secular(sol.theta,zj,t));let e=&mut ritz_exp[j+r*ti];e.re-=v.re;e.im-=v.im;}}}
         for &q in &modes{
             let mut rows=vec![ZERO;n*k];for j in 0..k{for i in 0..n{rows[i+n*j]=basis[j][q*d+i*n+i];}}
-            let mut rb=vec![ZERO;n*r];gemm.multiply(n,r,k,ONE,&rows,n,&b,k,ZERO,&mut rb,n)?;
+            let mut rb=vec![ZERO;n*r];gemm.multiply(n,r,k,ONE,&rows,n,b,k,ZERO,&mut rb,n)?;
             let mut reduced=vec![ZERO;n*t_count];gemm.multiply(n,t_count,r,ONE,&rb,n,&ritz_exp,r,ZERO,&mut reduced,n)?;
             let mut constants=Vec::with_capacity(solutions.len());
             for(sol,xr)in solutions.iter().zip(&in_space){let mut v=vec![ZERO;n];gemm.multiply(n,1,k,ONE,&rows,n,xr,k,ZERO,&mut v,n)?;constants.push((sol.coefficient,sol.theta,v));}

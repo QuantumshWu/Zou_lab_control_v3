@@ -93,7 +93,6 @@ impl SwKernels{
         let tasks:Vec<(usize,usize)>=(0..computed.len()).flat_map(|slot|(0..d).step_by(KERNEL_PANEL).map(move|start|(slot,start))).collect();
         let panels=execution.map(tasks.clone(),|(slot,start)|->Result<(Vec<C>,Vec<(usize,usize,C)>),String>{
             let step=&steps[computed[slot]];let op=&prepared.generator.components[&step.charge].op;let end=(start+KERNEL_PANEL).min(d);
-            let noise_eps=super::super::diagnostics::perturbation("KERNELS");
             let mut image=vec![ZERO;d*(end-start)];let mut scratch=Vec::new();
             for j in start..end{op.apply_into(n,ONE,&vectors[j*d..(j+1)*d],&mut image[(j-start)*d..(j-start+1)*d],&mut scratch);}
             let blocks:Vec<&[C]>=image.chunks_exact(d).collect();
@@ -104,9 +103,7 @@ impl SwKernels{
                 let num=c[i+d*(j-start)];let s2=den.re*den.re+den.im*den.im;if s2==0.{continue;}
                 let x=C{re:-(num.re*den.re+num.im*den.im)/s2,im:-(num.im*den.re-num.re*den.im)/s2};
                 let size=magnitude(x);
-                if size<=rule.cap&&(size>=rule.entry||(rule.horizon_rate>0.&&size*magnitude(num)*rule.horizon>=rule.horizon_rate)){
-                    let x=match noise_eps{Some(eps)=>scaled(x,1.+eps*super::super::diagnostics::noise(2+slot as u64,(i+d*j)as u64)),None=>x};
-                    entries.push((i,j,x));}
+                if size<=rule.cap&&(size>=rule.entry||(rule.horizon_rate>0.&&size*magnitude(num)*rule.horizon>=rule.horizon_rate)){entries.push((i,j,x));}
             }}
             Ok((c,entries))
         });

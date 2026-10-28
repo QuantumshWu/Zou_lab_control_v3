@@ -576,7 +576,7 @@ impl Lapack {
         Ok(())
     }
     /// Complex C = A B, column-major, with finite inputs and output.
-    #[cfg(any(test, feature = "validation"))]
+    #[cfg(test)]
     pub fn multiply_complex(&self, a: &[Complex64], b: &[Complex64], m: usize, n: usize, k: usize) -> Result<Vec<Complex64>, String> {
         if m > i32::MAX as usize || n > i32::MAX as usize || k > i32::MAX as usize
             || m.checked_mul(k) != Some(a.len()) || k.checked_mul(n) != Some(b.len())

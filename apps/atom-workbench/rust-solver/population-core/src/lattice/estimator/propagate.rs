@@ -26,19 +26,8 @@ use crate::parallel::Execution;
 pub enum Readout{Laboratory,Centre}
 
 /// The Ritz data of one checkpoint: the Ritz vectors over the basis
-/// (column-major k x r, b_m = X s_m), the values and coefficients the
-/// outputs use.
+/// (column-major k x r), the values and coefficients the outputs use.
 pub struct RitzSources<'a>{pub vectors:&'a[C],pub values:&'a[C],pub coefficients:&'a[C]}
-
-/// Sources on fields outside the space, sum_j F_j h_jm e^{theta_m t}: the
-/// fields' coordinates (`ErrorLattice::field_coordinates`), h (column-major
-/// p x r) and the values theta (closed under conjugation with h).
-pub struct FieldSources<'a>{pub fields:&'a FieldCoordinates,pub weights:&'a[C],pub values:&'a[C]}
-
-/// Hermitian-symmetric fields in the fast part's coordinates: the class
-/// coordinates per canonical near mode and the eigen-coordinates of L0' per
-/// outer mode, (field, slot) consecutive.
-pub struct FieldCoordinates{pub count:usize,pub near:Vec<C>,pub outer:Vec<C>}
 
 /// One mode's contribution: its particular parts per target (target, n x r
 /// readout of G), its homogeneous weights per (class slot) and resonant terms.
@@ -46,7 +35,6 @@ struct ModePart{particular:Vec<(usize,Vec<C>)>,homogeneous:Vec<(usize,Vec<C>)>,r
 
 const RESONANT:f64=1e-9;
 
-fn cexp(z:C,t:f64)->C{let m=(z.re*t).exp();if m==0.{return ZERO;}C{re:m*(z.im*t).cos(),im:m*(z.im*t).sin()}}
 
 impl ErrorLattice<'_>{
     /// Population errors (one row of n per time) of the SW propagation of
@@ -69,19 +57,6 @@ impl ErrorLattice<'_>{
             gemm.multiply(d,r,k,C{re:-weight,im:0.},base,d,&bta,k,ONE,&mut beta,d)?;
             Ok(beta)})
     }
-    /// Population errors of sources on fields outside the space
-    /// (`FieldSources`), propagated as the Ritz modes' sources are.
-    pub fn field_populations(&self,sources:&FieldSources<'_>,times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
-        let(n,d,r,p)=(self.n,self.d,sources.values.len(),sources.fields.count);
-        if times.is_empty()||r==0||p==0{return Ok(vec![vec![0.;n];times.len()]);}
-        if sources.weights.len()!=p*r{return Err("Estimator: field source dimensions differ".into());}
-        let fields=sources.fields;let(near_count,outer_count)=(self.near.len(),self.outer_modes.len());
-        self.propagate(sources.values,times,readout,|slot,near,weight|{
-            let(all,count)=if near{(&fields.near,near_count)}else{(&fields.outer,outer_count)};
-            let mut f=vec![ZERO;d*p];for j in 0..p{f[j*d..(j+1)*d].copy_from_slice(&all[(j*count+slot)*d..(j*count+slot+1)*d]);}
-            let mut beta=vec![ZERO;d*r];self.prepared.lapack.complex_gemm().multiply(d,r,p,C{re:weight,im:0.},&f,d,sources.weights,p,ZERO,&mut beta,d)?;
-            Ok(beta)})
-    }
     /// The SW propagation of sources sum_m beta_jm e^{theta_m t} per
     /// canonical near mode (class coordinates) and outer mode
     /// (eigen-coordinates of L0'), beta (column-major d x r) from `source`
@@ -92,7 +67,7 @@ impl ErrorLattice<'_>{
         let lapack=&self.prepared.lapack;
         // The near modes with their classes, then the outer modes with the dressed blocks of L0' (class key `bare`).
         let bare=self.classes()?.len();
-        let outer=if self.outer_bare{self.outer_modes.len()}else{0};
+        let outer=self.outer_modes.len();
         let items:Vec<(usize,bool)>=self.near_canonical.iter().map(|&s|(s,true)).chain((0..outer).map(|s|(s,false))).collect();
         let parts=Execution::new()?.map(items,|(slot,near)|->Result<ModePart,String>{
             let a=if near{self.near[slot]}else{self.outer_modes[slot]};

@@ -249,7 +249,30 @@ impl<'a> LatticeOperator<'a>{
     }
     /// The fold part alone on a Hermitian-symmetric field.
     pub fn apply_fold(&mut self,x:&[C])->Result<Vec<C>,String>{let mut y=vec![ZERO;self.dimension()];self.apply_parts(x,&mut y,Parts::Fold)?;Ok(y)}
-    /// The operator as a dense row-major matrix (validation only).
+    /// What the operator leaves out of the true one on a Hermitian-symmetric
+    /// field x: the K^(1) rests but for their population rows when they are
+    /// dropped (`dropped_k1_rest`), i nu_p (K_t^(1) rest - its population
+    /// rows) x_p on every fold edge p -> q of the lattice; zero when the
+    /// rests are applied.
+    pub fn left_out(&self,x:&[C])->Result<Vec<C>,String>{
+        let(n,d)=(self.n,self.n*self.n);let mut y=vec![ZERO;self.dimension()];
+        if self.dropped_k1_rest==0.{return Ok(y);}
+        let targets:Vec<usize>=(0..self.modes.len()).filter(|&q|self.canonical[q]).collect();
+        let(fold,modes,index,nu)=(&self.prepared.fold.targets,&self.modes,&self.index,&self.nu);
+        let blocks=self.execution.map(targets.clone(),|q|->Result<Vec<C>,String>{
+            let mut out=vec![ZERO;d];
+            for data in fold{
+                let source=charge_minus(&modes[q],&data.charge)?;let Some(&p)=index.get(&source)else{continue};
+                let xp=&x[p*d..(p+1)*d];
+                data.rest[1].apply_into(C{re:0.,im:nu[p]},xp,&mut out);data.population_rest[1].apply_into(C{re:0.,im:-nu[p]},xp,&mut out);
+            }
+            Ok(out)});
+        for(&q,block)in targets.iter().zip(blocks){y[q*d..(q+1)*d].copy_from_slice(&block?);}
+        mirror_field(&mut y,n,&self.canonical,&self.mirror);
+        Ok(y)
+    }
+    /// The operator as a dense row-major matrix (tests).
+    #[cfg(test)]
     pub fn dense(&self)->Vec<C>{
         let n=self.n;let d=n*n;let size=self.dimension();let mut out=vec![ZERO;size*size];
         let generator=&self.prepared.generator;let fold=&self.prepared.fold.targets;

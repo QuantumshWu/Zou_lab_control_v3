@@ -99,7 +99,7 @@ class NativeLane {
       if(!job||message.id!==job.nativeId){this.failWorker(w,failure('Native response identity mismatch.',502,'invalid-native-response'));return;}
       if(message.progress!==undefined){
         try{
-          if(message.progress!=='asymptotic'||!job.onProgress)throw Error('Unexpected native progress message.');
+          if(message.progress!=='checkpoint'||!job.onProgress)throw Error('Unexpected native progress message.');
           const result=message.result;validateAtomicResult(result,job.payload);
           job.onProgress({...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:w.identity.sha256,buildSha256:this.owner.build.sha256,asymptoticCacheHit:false}});
         }catch(error){this.failWorker(w,failure(error.message,502,'invalid-native-response'));return;}
@@ -205,7 +205,7 @@ export async function createAtomServer(options={}){
         if(token!==undefined&&(!token||typeof token.clientId!=='string'||!/^[-\w]{1,96}$/.test(token.clientId)||!Number.isSafeInteger(token.sequence)||token.sequence<1))throw failure('Invalid request identity',400,'invalid-request');
         token=token?{clientId:token.clientId,sequence:token.sequence}:{clientId:`legacy-${++legacySequence}`,sequence:1};
         const native=prepareNativeSolve(payload),options=native.payload.options;
-        task=service.submit(native.payload,token,streaming?result=>streamEvent({type:'asymptotic',data:native.respond(result,token)}):undefined);
+        task=service.submit(native.payload,token,streaming?result=>streamEvent({type:'checkpoint',data:native.respond(result,token)}):undefined);
         const result=await task.promise;
         if(options.includeAsymptotic&&!result.asymptoticPopulations)await recordFailure({time:new Date().toISOString(),request:token,scene:payload.scene,options,buildSha256:build.sha256,binarySha256:result.service?.binarySha256??configuredBinary.sha256,status:result.asymptoticStatus,diagnostics:result.diagnostics}).catch(()=>{});
         send(200,native.respond(result,token));

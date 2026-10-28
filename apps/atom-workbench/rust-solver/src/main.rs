@@ -121,7 +121,8 @@ fn write_line(message: &Value) -> bool {
 
 /// One protocol response. `capabilities` and `warmup` (the worker start-up
 /// LAPACK self-check) are operations; anything else is an rb87-full/2 solve,
-/// which may first stream the long-time mean as `asymptotic` progress.
+/// which with `progress` first streams every checkpoint's result as
+/// `checkpoint` progress (the same contract, marked `progress`).
 fn respond(request: Request) -> Value {
     let id = request.id;
     match request.op.as_deref() {
@@ -138,13 +139,13 @@ fn respond(request: Request) -> Value {
         result["modelSchema"] = json!(FULL_MODEL_SCHEMA);
         result
     };
-    let mut publish_mean = |mean: &Value| {
+    let mut publish = |checkpoint: &Value| {
         if request.progress {
-            write_line(&json!({"id":id,"protocol":NATIVE_PROTOCOL,"progress":"asymptotic","result":stamp(mean.clone())}));
+            write_line(&json!({"id":id,"protocol":NATIVE_PROTOCOL,"progress":"checkpoint","result":stamp(checkpoint.clone())}));
         }
     };
     let result = match (request.model_schema.as_deref(), request.model.as_ref()) {
-        (Some(FULL_MODEL_SCHEMA), Some(model)) => lattice_core_adapter::solve(model, &request.options, &mut publish_mean),
+        (Some(FULL_MODEL_SCHEMA), Some(model)) => lattice_core_adapter::solve(model, &request.options, &mut publish),
         (Some(FULL_MODEL_SCHEMA), None) => Err("A solve request requires a model".into()),
         _ => Err(format!("Unsupported native model schema; this worker serves {FULL_MODEL_SCHEMA}")),
     };

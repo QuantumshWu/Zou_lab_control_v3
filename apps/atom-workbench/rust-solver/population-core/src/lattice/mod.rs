@@ -17,10 +17,9 @@
 //! - `floquet`: the Floquet frames of the lattice, the micromotion kernels
 //!   shared by the preconditioner and the error estimate;
 //! - `eigenbasis`: the real eigenbasis of the folded centre generator
-//!   (request-level, `LatticePrepared::eigenbasis` exact and
-//!   `clustered_eigenbasis`; by clusters, the one eigensystem method, shared
-//!   with the estimator's second-order blocks): batched block solves, the
-//!   eigen- and dressed coordinates;
+//!   (request-level, `LatticePrepared::eigenbasis`), and the eigensystem by
+//!   clusters of the estimator's second-order blocks: batched block solves,
+//!   the eigen- and dressed coordinates;
 //! - `operator`: the lattice operator on a set of charges, whole or
 //!   restricted to target rows and source columns;
 //! - `preconditioner`: the Floquet-frame preconditioner with its centre
@@ -31,15 +30,16 @@
 //! - `space`: the one rational Krylov space from x0 (poles, translations);
 //! - `frame`: the Schrieffer-Wolff / Floquet frame of a request (first-order
 //!   kernels, the second-order block's eigensystem, each built on first
-//!   use), shared by the reduced model's inner product and the error
-//!   estimate;
-//! - `reduced`: the Galerkin model in the frame's inner product and every
-//!   output from it;
+//!   use): the error estimate's fast part, and the classes the slowest
+//!   relaxation is checked against;
+//! - `reduced`: the Euclidean Galerkin model of the space and every output
+//!   from it;
 //! - `estimate_api`: what the error estimate reads and returns;
 //! - `estimator`: the error estimate (one error equation for every output,
 //!   the omitted ring slaved, Schrieffer-Wolff propagation of the near
 //!   modes, the slow modes exact by recycled GCRO);
-//! - `pipeline`: the request: lattice, space, checkpoints, acceptance;
+//! - `pipeline`: the request: lattice, space, checkpoints, acceptance and
+//!   the stopping rule;
 //! - `ledger`: the tolerance, the error metric and the fold's remainder
 //!   bounds.
 //!
@@ -69,7 +69,6 @@ pub mod estimate_api;
 pub mod estimator;
 pub mod pipeline;
 pub mod ledger;
-pub mod diagnostics;
 pub use generator::{Component,Generator,Sparse,Superop};
 
 pub(crate) const ZERO:C=C{re:0.,im:0.};
@@ -81,6 +80,8 @@ pub(crate) const ONE:C=C{re:1.,im:0.};
 #[inline]pub(crate) fn scaled(a:C,s:f64)->C{C{re:a.re*s,im:a.im*s}}
 #[inline]pub(crate) fn magnitude(a:C)->f64{a.re.hypot(a.im)}
 #[inline]pub(crate) fn nonzero(a:C)->bool{a.re!=0.||a.im!=0.}
+/// e^{z t} (zero once the modulus underflows).
+pub(crate) fn cexp(z:C,t:f64)->C{let m=(z.re*t).exp();if m==0.{return ZERO;}C{re:m*(z.im*t).cos(),im:m*(z.im*t).sin()}}
 pub(crate) fn grow(buffer:&mut Vec<C>,length:usize){if buffer.len()<length{buffer.resize(length,ZERO);}}
 /// A Hermitian-symmetric field (x_-q = x_q^dagger) from its canonical modes:
 /// the mirrored modes copied, the self-mirrored centre replaced by its
@@ -115,10 +116,8 @@ pub struct LatticePrepared{
     pub plan:classification::HarmonicPlan,
     pub fold:fold::FoldLibrary,
     pub floquet:floquet::FloquetKernels,
-    /// The eigenbasis of L0' = L0 + K_0^(0), exact and to the clusters'
-    /// error control, each computed on first use.
+    /// The eigenbasis of L0' = L0 + K_0^(0), computed on first use.
     eigenbasis:std::sync::OnceLock<Result<eigenbasis::BlockEigenbasis,String>>,
-    clustered:std::sync::OnceLock<Result<eigenbasis::BlockEigenbasis,String>>,
     pub lapack:Arc<Lapack>,
     /// Milliseconds: source, generator and classification, fold, Floquet
     /// kernels.
@@ -137,35 +136,19 @@ impl LatticePrepared{
         let fold_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
         let floquet=floquet::FloquetKernels::new(&generator,&plan,&fold,&lapack)?;
         let kernel_ms=clock.elapsed().as_secs_f64()*1e3;
-        Ok(Self{source,generator,plan,fold,floquet,eigenbasis:std::sync::OnceLock::new(),clustered:std::sync::OnceLock::new(),lapack,timing:[source_ms,plan_ms,fold_ms,kernel_ms]})
+        Ok(Self{source,generator,plan,fold,floquet,eigenbasis:std::sync::OnceLock::new(),lapack,timing:[source_ms,plan_ms,fold_ms,kernel_ms]})
     }
-    /// The eigenbases when they have been built (never builds them): exact,
-    /// clustered.
-    pub fn eigenbasis_built(&self)->[Option<&eigenbasis::BlockEigenbasis>;2]{
-        [self.eigenbasis.get().and_then(|r|r.as_ref().ok()),self.clustered.get().and_then(|r|r.as_ref().ok())]
-    }
+    /// The eigenbasis when it has been built (never builds it).
+    pub fn eigenbasis_built(&self)->Option<&eigenbasis::BlockEigenbasis>{self.eigenbasis.get().and_then(|r|r.as_ref().ok())}
     /// The real eigenbasis of the folded centre generator, exact (0.7 s for
-    /// 32 states), computed once per request and shared: the eigen-coordinates
-    /// of the frame (its kernels, its block, the projection's metric), of the
-    /// error propagation and of the pole ordering. Five lasers + tweezer at
-    /// 20 us need it: with the clustered one (block solves to 1e-3, or to
-    /// 4e-6 with 30x tighter clusters) the reduced model grew 11-19
-    /// pseudo-modes and took 32 solves or none instead of 12.
+    /// 32 states), computed once per request and shared: the screening (the
+    /// explicit set, the ladder), the frame (its kernels and block), the
+    /// error propagation, the ring's block solves and the pole ordering.
+    /// One basis for every reader: a clustered one (block solves to about
+    /// 1e-3, 0.25-0.3 s) would save about 0.4 s where nothing else needs
+    /// the exact one.
     pub fn eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
         self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::exact(self)).as_ref().map_err(|e|e.clone())
-    }
-    /// The eigenbasis to the clusters' error control (block solves to about
-    /// 1e-3, 0.25-0.3 s for 32 states).
-    pub fn clustered_eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
-        self.clustered.get_or_init(||eigenbasis::BlockEigenbasis::clustered(self)).as_ref().map_err(|e|e.clone())
-    }
-    /// The eigenbasis the screening reads (the explicit set, the ladder, the
-    /// error estimate's ring solves, refined): the exact one once built (a
-    /// request that propagates builds it first), else the clustered one. The
-    /// explicit sets, the steady poles and their inner steps are the exact
-    /// basis's on every case.
-    pub fn screening_eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
-        match self.eigenbasis.get(){Some(Ok(e))=>Ok(e),_=>self.clustered_eigenbasis()}
     }
     /// The near ball of order k: every charge reachable from 0 with at most k
     /// structural steps (explicit near steps above the structural floor and
@@ -200,6 +183,7 @@ impl LatticePrepared{
     /// Hermitian part of i (A - B)/2 with its trace removed (row-major n x n,
     /// rad/us). Also returned: |K - (A X + X B)|_F / |K|_F, the share of the
     /// fold that is not of that form (scattering and higher orders in 1/nu).
+    #[cfg(test)]
     pub fn folded_background_hamiltonian(&self)->Option<(Vec<C>,f64)>{
         let k=self.fold.zero_dense.as_ref()?;let n=self.generator.n;let d=n*n;
         let(a,b)=fold::absorbable(k,n);

@@ -22,12 +22,12 @@
 //! populations, the coherences of near-degenerate states) form clusters,
 //! each diagonalized exactly, the couplings between them at first
 //! (vectors) and second (values) order, with the mixing and the values'
-//! error over CENTRE_HORIZON bounded (merged clusters otherwise). The
-//! pair (X_ab, X_ba) is the flip pair of the real form. Two eigenbases:
-//! `clustered` (mixing 0.05, block solves to about 1e-3; clusters of
-//! 250-280 on the tweezer cases, 0.25-0.3 s) and `exact` (its exact limit
-//! in the Hermitian basis: the connected blocks of the real form, each
-//! whole; one block of 1024 on the tweezer cases). The
+//! error over the horizon bounded (merged clusters otherwise). The
+//! pair (X_ab, X_ba) is the flip pair of the real form. The centre's
+//! eigenbasis is its exact limit (`exact`) in the Hermitian basis: the
+//! connected blocks of the real form, each whole (one block of 1024 on the
+//! tweezer cases); the clusters serve the estimator's second-order blocks
+//! (`estimator::blocks`). The
 //! sector grading of the frame does not decouple the centre: the separable
 //! part's eigenvectors mix ground and excited states by 6% (three and five
 //! lasers + tweezer) to 36% (four lasers, no trap) (near drives at charge 0),
@@ -46,14 +46,10 @@
 //! solves give the norm of a block's resolvent (`resolvent_norms`, the ring
 //! condition).
 //!
-//! The bases are request-level (`LatticePrepared::eigenbasis`, exact: the
-//! frame, its metric, the estimator's fast part and the pole ordering of a
-//! request that propagates; `screening_eigenbasis`, the clustered one when
-//! the exact one is not built: the explicit set, the ladder and the ring
-//! solves of a request that propagates nothing), each computed once and
-//! shared by every pipeline that needs it.
+//! The basis is request-level (`LatticePrepared::eigenbasis`: the
+//! screening, the frame, the estimator and the pole ordering), computed
+//! once and shared.
 use super::*;
-use super::floquet::{Frames,adjoint,sandwich_batch,transpose};
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// Power iterations of `resolvent_norms`.
@@ -62,15 +58,6 @@ const RESOLVENT_ITERATIONS:usize=20;
 const INVERSE_PANEL:usize=64;
 /// Fewest blocks per task of the dressed coordinates.
 const DRESSED_BLOCKS:usize=16;
-/// Base coordinates per task of the centre's coupling matrix and of its
-/// eigenvectors' Hermitian-basis coordinates.
-const BASE_CHUNK:usize=32;
-/// The longest time (us) over which the centre's values keep their error
-/// control: the longest output time a request reaches (the pipeline's
-/// LIMIT_REACH, the 1 s mean horizon). A request-level basis serves every
-/// pipeline of a request.
-const CENTRE_HORIZON:f64=1e6;
-
 pub struct BlockEigenbasis{
     n:usize,d:usize,lapack:Arc<Lapack>,
     pub lambda:Vec<C>,
@@ -112,67 +99,7 @@ fn from_coordinates(c:&[C],n:usize)->Vec<C>{
     x
 }
 
-/// The Hermitian-basis coefficients of a functional f(x) = sum_ij F_ij x_ij
-/// on row-major blocks (F row-major): F_ii, and for i < j (F_ij + F_ji)/sqrt2
-/// on the symmetric and i (F_ij - F_ji)/sqrt2 on the antisymmetric coordinate.
-fn functional_coordinates(f:&[C],n:usize)->Vec<C>{
-    let mut c=Vec::with_capacity(n*n);let r=std::f64::consts::FRAC_1_SQRT_2;
-    for i in 0..n{c.push(f[i*n+i]);}
-    for i in 0..n{for j in i+1..n{let(a,b)=(f[i*n+j],f[j*n+i]);
-        c.push(C{re:r*(a.re+b.re),im:r*(a.im+b.im)});
-        c.push(C{re:-r*(a.im-b.im),im:r*(a.re-b.re)});}}
-    c
-}
-
 impl BlockEigenbasis{
-    /// To the clusters' error control (`ClusterControl::centre`), in the
-    /// separable part's frame.
-    pub fn clustered(prepared:&LatticePrepared)->Result<Self,String>{
-        let clock=Instant::now();let lapack=&prepared.lapack;
-        let n=prepared.generator.n;let d=n*n;
-        // The separable part's frame: X_ab = p_a q_b, Q = P^H (row-major).
-        let(p,pinv)=prepared.floquet.central(Frames::Block);
-        let(q,qinv)=(adjoint(p,n),adjoint(pinv,n));
-        // Base coordinates: X_aa, then the flip pairs (X_ab, X_ba), a < b.
-        let mut base=Vec::with_capacity(d);for a in 0..n{base.push((a,a));}
-        for a in 0..n{for b in a+1..n{base.push((a,b));base.push((b,a));}}
-        let first:Vec<bool>=(0..d).map(|j|j>=n&&(j-n)%2==0).collect();
-        let mut slot=vec![0;d];for(j,&(a,b))in base.iter().enumerate(){slot[a*n+b]=j;}
-        // m = B^-1 L0' B (column-major, base coordinates), L0' row-major over
-        // matrix units: row r of L0' as the block R_r, (L0' B)[r, (a, b)] =
-        // (P^T R_r Q^T)[a, b]; then the column (a, b) of L0' B as the block Y,
-        // P^-1 Y Q^-1. Batched GEMMs on the workers, 4 n^3 per base coordinate.
-        let execution=Execution::new()?;let chunks:Vec<usize>=(0..d).step_by(BASE_CHUNK).collect();
-        let(pt,qt)=(transpose(p,n),transpose(&q,n));
-        let right={let l=prepared.centre_generator();
-            let parts=execution.map(chunks.clone(),|s|->Result<Vec<C>,String>{let e=(s+BASE_CHUNK).min(d);
-                let mut blocks=l[s*d..e*d].to_vec();let mut stack=Vec::new();sandwich_batch(&lapack.complex_gemm(),n,&pt,&qt,&mut blocks,e-s,&mut stack)?;Ok(blocks)});
-            let mut out=Vec::with_capacity(d*d);for part in parts{out.extend(part?);}out};
-        let right_ref=&right;
-        let parts=execution.map(chunks.clone(),|s|->Result<Vec<C>,String>{let e=(s+BASE_CHUNK).min(d);let count=e-s;
-            let mut blocks=vec![ZERO;d*count];
-            for k in 0..d{for(c,&v)in right_ref[k*d+s..k*d+e].iter().enumerate(){blocks[c*d+k]=v;}}
-            let mut stack=Vec::new();sandwich_batch(&lapack.complex_gemm(),n,pinv,&qinv,&mut blocks,count,&mut stack)?;Ok(blocks)});
-        let mut m=vec![ZERO;d*d];
-        for(&s,part)in chunks.iter().zip(parts){for(c,block)in part?.chunks_exact(d).enumerate(){let j=slot[s+c];for(k,&v)in block.iter().enumerate(){m[slot[k]+d*j]=v;}}}
-        drop(right);
-        // The eigensystem by clusters, the diagonal as the gaps' reference.
-        let reference:Vec<C>=(0..d).map(|j|m[j+d*j]).collect();
-        let system=clustered_eigensystem(lapack,&m,&reference,&first,ClusterControl::centre())?;drop(m);
-        // The Hermitian-basis coordinates of B V[:, l] = P C_l Q (the leading
-        // column of each value), and the functionals of V^-1[l, :] B^-1:
-        // F = P^-T R_l conj(P^-1).
-        let(pinv_t,pinv_c)=(transpose(pinv,n),pinv.iter().map(|z|conj(*z)).collect::<Vec<C>>());
-        let(v,w,slot_ref)=(&system.vectors,&system.inverse,&slot);
-        let transform=|ls:&[usize]|->Result<(Vec<C>,Vec<C>),String>{
-            let count=ls.len();let gemm=lapack.complex_gemm();let mut stack=Vec::new();
-            let mut right=vec![ZERO;d*count];let mut left=vec![ZERO;d*count];
-            for(c,&l)in ls.iter().enumerate(){for k in 0..d{right[c*d+k]=v[slot_ref[k]+d*l];left[c*d+k]=w[l+d*slot_ref[k]];}}
-            sandwich_batch(&gemm,n,p,&q,&mut right,count,&mut stack)?;
-            sandwich_batch(&gemm,n,&pinv_t,&pinv_c,&mut left,count,&mut stack)?;
-            Ok((right.chunks_exact(d).flat_map(|b|coordinates(b,n)).collect(),left.chunks_exact(d).flat_map(|b|functional_coordinates(b,n)).collect()))};
-        Self::assemble(prepared,&system,transform,clock)
-    }
     /// Exact: the clustered method's exact limit (every coupling joins its
     /// coordinates) in the Hermitian basis, where the clusters are the
     /// connected blocks of the real form (exact zeros, for speed only), each
@@ -217,53 +144,7 @@ impl BlockEigenbasis{
             if im[j]!=0.&&j+1<d{kind[j]=1;kind[j+1]=2;lambda[j]=C{re:re[j],im:im[j]};lambda[j+1]=C{re:re[j],im:-im[j]};j+=2;}
             else{lambda[j]=C{re:re[j],im:0.};j+=1;}
         }
-        // Diagnostics: the eigenvectors perturbed, or rotated within
-        // eigenspaces whose values agree to ATOM_DIAG_ROTATE (a pair's real
-        // and imaginary columns by the same rotation), their inverse exact.
-        let(mut vectors,mut inverse)=(vectors,inverse);
-        if let Some(eps)=super::diagnostics::perturbation("EIGEN"){
-            vectors=vectors.iter().enumerate().map(|(e,&x)|x*(1.+eps*super::diagnostics::noise(1,e as u64))).collect();inverse=real_inverse(lapack,&vectors,d)?;}
-        if let Some(tol)=super::diagnostics::perturbation("ROTATE"){
-            // Leading indices (a real value or the first of a pair) by value.
-            let leading:Vec<usize>=(0..d).filter(|&j|kind[j]!=2).collect();let mut rotated=0;let mut used=vec![false;d];
-            for(x,&a)in leading.iter().enumerate(){if used[a]{continue;}
-                let Some(&b)=leading[x+1..].iter().find(|&&b|!used[b]&&kind[b]==kind[a]&&magnitude(C{re:lambda[a].re-lambda[b].re,im:lambda[a].im-lambda[b].im})<=tol)else{continue};
-                used[a]=true;used[b]=true;rotated+=1;
-                let angle=std::f64::consts::FRAC_PI_4*(1.+super::diagnostics::noise(6,a as u64));let(c,s)=(angle.cos(),angle.sin());
-                let columns=if kind[a]==1{2}else{1};
-                for o in 0..columns{for h in 0..d{let(u,v)=(vectors[h+d*(a+o)],vectors[h+d*(b+o)]);vectors[h+d*(a+o)]=c*u+s*v;vectors[h+d*(b+o)]=-s*u+c*v;}}}
-            inverse=real_inverse(lapack,&vectors,d)?;
-            eprintln!("DBG eigen rotated {rotated} pairs within {tol:e}");
-        }
-        // Diagnostics: the inverse alone perturbed (E^-1 E = I to eps), or the
-        // values (a pair's kept conjugate).
-        if let Some(eps)=super::diagnostics::perturbation("INVERSE"){for(e,x)in inverse.iter_mut().enumerate(){*x*=1.+eps*super::diagnostics::noise(7,e as u64);}}
-        let mut lambda=lambda;
-        if let Some(eps)=super::diagnostics::perturbation("VALUES"){let mut j=0;while j<d{
-            let f=1.+eps*super::diagnostics::noise(8,j as u64);lambda[j]=scaled(lambda[j],f);if kind[j]==1{lambda[j+1]=conj(lambda[j]);j+=2;}else{j+=1;}}}
         Self::finish(n,d,lapack,lambda,vectors,inverse,kind,[groups.len(),largest,1],clock)
-    }
-    /// The eigenbasis from an eigensystem and `transform`: for leading
-    /// eigen-indices (each real value, the first of each pair; a pair's
-    /// second is its flip), the Hermitian-basis coordinates of their
-    /// eigenvectors and the functionals of their rows of the inverse.
-    /// Unit eigenvectors (a pair's complex vector), as the frame's metric and
-    /// the kernels' support rule read them.
-    fn assemble(prepared:&LatticePrepared,system:&Clustered,transform:impl Fn(&[usize])->Result<(Vec<C>,Vec<C>),String>+Sync,clock:Instant)->Result<Self,String>{
-        let lapack=&prepared.lapack;let n=prepared.generator.n;let d=n*n;
-        let(mut kind,mut lambda)=(vec![0_u8;d],system.values.clone());let mut l=0;
-        while l<d{if system.pair[l]{kind[l]=1;kind[l+1]=2;lambda[l+1]=conj(lambda[l]);l+=2;}else{lambda[l].im=0.;l+=1;}}
-        let leading:Vec<usize>=(0..d).filter(|&l|kind[l]!=2).collect();
-        let tasks:Vec<Vec<usize>>=leading.chunks(BASE_CHUNK).map(|c|c.to_vec()).collect();
-        let parts=Execution::new()?.map(tasks.clone(),|ls|transform(&ls));
-        let(mut vectors,mut inverse)=(vec![0.;d*d],vec![0.;d*d]);
-        for(ls,part)in tasks.iter().zip(parts){let(columns,rows)=part?;
-            for(c,&l)in ls.iter().enumerate(){let(x,f)=(&columns[c*d..(c+1)*d],&rows[c*d..(c+1)*d]);
-                let size=x.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();
-                let(x,f):(Vec<C>,Vec<C>)=(x.iter().map(|z|scaled(*z,1./size)).collect(),f.iter().map(|z|scaled(*z,size)).collect());
-                if kind[l]==1{for h in 0..d{vectors[h+d*l]=x[h].re;vectors[h+d*(l+1)]=x[h].im;inverse[l+d*h]=2.*f[h].re;inverse[l+1+d*h]=-2.*f[h].im;}}
-                else{for h in 0..d{vectors[h+d*l]=x[h].re;inverse[l+d*h]=f[h].re;}}}}
-        Self::finish(n,d,lapack,lambda,vectors,inverse,kind,[system.clusters,system.largest,system.passes],clock)
     }
     /// The readout and the condition of E_R, E_R^-1 and the values.
     #[allow(clippy::too_many_arguments)]
@@ -475,8 +356,6 @@ pub struct ClusterControl{pub entry:f64,pub mixing:f64,pub phase:f64,pub horizon
 impl ClusterControl{
     /// The estimator's second-order blocks over a request's horizon.
     pub fn blocks(horizon:f64)->Self{Self{entry:CLUSTER_ENTRY,mixing:CLUSTER_MIXING,phase:CLUSTER_PHASE,horizon}}
-    /// The centre generator's clustered eigenbasis (over CENTRE_HORIZON).
-    pub fn centre()->Self{Self{entry:CLUSTER_ENTRY,mixing:CLUSTER_MIXING,phase:CLUSTER_PHASE,horizon:CENTRE_HORIZON}}
 }
 
 /// An eigensystem m V = V diag(values) (`clustered_eigensystem`): V and V^-1

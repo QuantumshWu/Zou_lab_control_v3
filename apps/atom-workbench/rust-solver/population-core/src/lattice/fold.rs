@@ -43,7 +43,6 @@
 //! charged.
 use super::*;
 use super::classification::HarmonicPlan;
-use super::operator::LatticeOperator;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// Sparse-remainder entries below this fraction of a target's largest entry
@@ -196,9 +195,10 @@ fn row_bound(op:&Superop,n:usize)->f64{
 pub struct FoldLibrary{
     pub targets:Vec<StoredFold>,
     /// K_0^(0) as a row-major d x d matrix (the static-shift test hook).
+    #[cfg(test)]
     pub zero_dense:Option<Vec<C>>,
-    /// L_r and every far step's block.
-    rest:RestOperator,blocks:BTreeMap<usize,FarBlock>,
+    /// L_r and every far step's block (the build's; kept for the tests).
+    #[cfg(test)]rest:RestOperator,#[cfg(test)]blocks:BTreeMap<usize,FarBlock>,
     pub diagnostics:FoldDiagnostics,
 }
 #[inline]fn squared(z:C)->f64{z.re*z.re+z.im*z.im}
@@ -301,7 +301,7 @@ impl FoldLibrary{
         let rest=RestOperator{left:off.left.dense(n),right:off.right.dense(n),recycling:Superop{left:Sparse::default(),right:Sparse::default(),sandwich:off.sandwich.clone()},
             scatter:Scatter::new(&off,n),lapack:Arc::clone(lapack)};
         let mut diagnostics=FoldDiagnostics{rest_bound:bound,..Default::default()};
-        if plan.targets.is_empty(){return Ok(Self{targets:vec![],zero_dense:None,rest,blocks:BTreeMap::new(),diagnostics});}
+        if plan.targets.is_empty(){return Ok(Self{targets:vec![],#[cfg(test)]zero_dense:None,#[cfg(test)]rest,#[cfg(test)]blocks:BTreeMap::new(),diagnostics});}
         // Every far block's G_s and rho_s, the couplings' row sums and the
         // targets' sizes in the same norms.
         let couplings:BTreeMap<usize,f64>=plan.steps.iter().enumerate().filter(|(_,s)|s.treatment==classification::Treatment::Fold)
@@ -386,25 +386,27 @@ impl FoldLibrary{
             let mut k=vec![ZERO;d*d];
             for cb in(0..d).step_by(64){for rb in(0..d).step_by(64){for c in cb..(cb+64).min(d){let cs=swapped(c,n);for r in rb..(rb+64).min(d){
                 k[r*d+c]=if flip{conj(h(swapped(r,n),cs))}else if diagonal{let(u,v)=(h(r,c),h(swapped(r,n),cs));C{re:u.re+v.re,im:u.im-v.im}}else{h(r,c)};}}}}
-            let zero=(order==0&&target.charge==generator.zero).then(||k.clone());
+            let zero=(cfg!(test)&&order==0&&target.charge==generator.zero).then(||k.clone());
             Ok((store(&mut k,n,&generator.ground,if order==0{1.}else{plan.cut.min(f64::MAX)},plan.structural_floor),zero))
         });
-        let mut parts=stored.into_iter();let mut targets=Vec::with_capacity(plan.targets.len());let mut zero_dense=None;
+        let mut parts=stored.into_iter();let mut targets=Vec::with_capacity(plan.targets.len());
+        #[cfg(test)]let mut zero_dense=None;
         for(t,target)in plan.targets.iter().enumerate(){
             let mut fold=StoredFold{charge:target.charge.clone(),nu:target.nu,left:[vec![],vec![]],right:[vec![],vec![]],rest:[Rest::default(),Rest::default()],
                 population_rest:[Rest::default(),Rest::default()],dropped:[0.;2],norms:[[0.;3];2],largest_entry:[0.;2],rest_row_sum:[0.;2]};
             for order in 0..2{
-                let((a,b,rest,lost,norms,largest,row,population),zero)=parts.next().ok_or("Fold storage lost a target")??;
-                if zero.is_some(){zero_dense=zero;}
+                let((a,b,rest,lost,norms,largest,row,population),_zero)=parts.next().ok_or("Fold storage lost a target")??;
+                #[cfg(test)]if _zero.is_some(){zero_dense=_zero;}
                 fold.left[order]=a;fold.right[order]=b;fold.rest[order]=rest;fold.dropped[order]=lost+charged[t][order];fold.norms[order]=norms;
                 fold.largest_entry[order]=largest;fold.rest_row_sum[order]=row;fold.population_rest[order]=population;
             }
             targets.push(fold);
         }
         diagnostics.milliseconds=clock.elapsed().as_secs_f64()*1e3;diagnostics.phase_ms[1]=diagnostics.milliseconds-diagnostics.phase_ms[0];
-        Ok(Self{targets,zero_dense,rest,blocks,diagnostics})
+        Ok(Self{targets,#[cfg(test)]zero_dense,#[cfg(test)]rest,#[cfg(test)]blocks,diagnostics})
     }
     /// D_s^-1 (order m0) on m consecutive row-major blocks, in place.
+    #[cfg(test)]
     fn far_solve(&self,s:usize,blocks:&mut[C],m:usize)->Result<(),String>{
         let block=self.blocks.get(&s).ok_or("A far step without its block")?;let n=(((blocks.len()/m.max(1))as f64).sqrt().round())as usize;
         let(mut w,mut t)=(vec![ZERO;blocks.len()],vec![ZERO;blocks.len()]);
@@ -413,59 +415,6 @@ impl FoldLibrary{
     /// Largest dropped row sums of K^(0) and K^(1), summed over the targets.
     pub fn dropped(&self)->[f64;2]{
         let mut out=[0.;2];for t in &self.targets{for o in 0..2{out[o]+=t.dropped[o];}}out
-    }
-    /// The third-order fold source on a lattice field x: for every far step s,
-    /// explicit near coupling e and far step b returning below the cut,
-    ///   y[q + s + e + b] += C_b D_s^-1 C_e D_s^-1 C_s x_q   (both in the lattice),
-    /// the far-shell paths q -> q+s -> q+s+e -> q+s+e+b that the second-order
-    /// fold leaves out, with both far blocks at the static frequency of s.
-    /// Applied in factored form, no d x d storage: one block solve per (s, q)
-    /// and one per far mode r + s reached in the middle (r = q + e: the paths
-    /// through the same far mode share it), whose returns land in the lattice;
-    /// the fields side by side in every block solve.
-    pub fn third_order_source(&self,op:&LatticeOperator<'_>,fields:&[&[C]])->Result<Vec<Vec<C>>,String>{
-        let prepared=op.prepared;let(plan,generator)=(&prepared.plan,&prepared.generator);
-        let n=op.n;let d=n*n;let modes=op.modes.len();let count=fields.len();let mut out=vec![vec![ZERO;modes*d];count];
-        if self.blocks.is_empty()||count==0{return Ok(out);}
-        let explicit=plan.explicit();
-        let far=plan.far();
-        // One task per far step; the parts are summed in step order.
-        let steps:Vec<usize>=self.blocks.keys().copied().collect();
-        let parts=Execution::new()?.map(steps,|s|->Result<Option<Vec<Vec<C>>>,String>{
-            let mut small=Vec::new();let mut out=vec![vec![ZERO;modes*d];count];
-            let charge_s=&plan.steps[s].charge;
-            // Middle charges r (far mode r + s) with their returns (b, target).
-            let mut middles:BTreeMap<Charge,Vec<(usize,usize)>>=BTreeMap::new();
-            let mut hops:Vec<(usize,usize,Charge)>=Vec::new();
-            for &e in &explicit{
-                if (plan.steps[s].nu+plan.steps[e].nu).abs()<plan.cut{continue;}
-                for q in 0..modes{
-                    let r=charge_plus(&op.modes[q],&plan.steps[e].charge)?;
-                    if !middles.contains_key(&r){
-                        let returns:Vec<(usize,usize)>=far.iter().filter_map(|&b|{
-                            let t=charge_plus(&charge_plus(&r,charge_s).ok()?,&plan.steps[b].charge).ok()?;op.index.get(&t).map(|&t|(b,t))}).collect();
-                        middles.insert(r.clone(),returns);
-                    }
-                    if !middles[&r].is_empty(){hops.push((q,e,r));}
-                }
-            }
-            if hops.is_empty(){return Ok(None);}
-            let cs=&generator.components[charge_s].op;
-            let mut y=vec![ZERO;count*modes*d];
-            for(f,x)in fields.iter().enumerate(){for q in 0..modes{cs.apply_into(n,ONE,&x[q*d..(q+1)*d],&mut y[(f*modes+q)*d..(f*modes+q+1)*d],&mut small);}}
-            self.far_solve(s,&mut y,count*modes)?;
-            let slots:Vec<&Charge>=middles.iter().filter(|(_,r)|!r.is_empty()).map(|(c,_)|c).collect();
-            let slot=|c:&Charge|slots.binary_search(&c).map_err(|_|"Third-order source middle without its slot".to_string());
-            let width=slots.len();let mut z=vec![ZERO;count*width*d];
-            for f in 0..count{for(q,e,r)in &hops{let k=f*width+slot(r)?;
-                generator.components[&plan.steps[*e].charge].op.apply_into(n,ONE,&y[(f*modes+q)*d..(f*modes+q+1)*d],&mut z[k*d..(k+1)*d],&mut small);}}
-            self.far_solve(s,&mut z,count*width)?;
-            for(f,out)in out.iter_mut().enumerate(){for(k,r)in slots.iter().enumerate(){for &(b,t)in &middles[*r]{
-                generator.components[&plan.steps[b].charge].op.apply_into(n,ONE,&z[(f*width+k)*d..(f*width+k+1)*d],&mut out[t*d..(t+1)*d],&mut small);}}}
-            Ok(Some(out))
-        });
-        for part in parts{if let Some(part)=part?{for(o,p)in out.iter_mut().zip(part){for(a,b)in o.iter_mut().zip(p){add(a,b);}}}}
-        Ok(out)
     }
 }
 
@@ -540,47 +489,5 @@ mod tests{
                 for c in 0..d{let mut t=ZERO;for i in 0..n{add(&mut t,folded[(i*n+i)*d+c]);}assert!(magnitude(t)<1e-13*scale);}
             }
         }
-    }
-    #[test]
-    fn lattice_third_order_source_is_the_near_coupling_inside_the_far_shell(){
-        // The factored source equals + C_-s D_s^-1 C_e D_s^-1 C_s x from dense
-        // solves, and with it in the lattice the folded steady state moves
-        // toward the explicit first far shell (near couplings between far
-        // modes included): what is left is beyond third order.
-        let f=fixture();let p=prepared(&f);let n=4;let d=16;let lap=&p.lapack;
-        let l0=dense_l0(&p);
-        let dense=|q:&[i32]|{let mut m=vec![ZERO;d*d];p.generator.components[q].op.dense_into(n,ONE,&mut m);m};
-        let solve=|nu:f64,rhs:&[C]|{let mut b=l0.clone();for i in 0..d{b[i*d+i].im-=nu;}
-            let(lu,piv)=lap.complex_factor(&transpose(&b,d),d).unwrap();transpose(&lap.complex_solve_matrix_factored(&lu,&piv,&transpose(rhs,d),d).unwrap(),d)};
-        let mm=|a:&[C],b:&[C]|{let mut o=vec![ZERO;d*d];for r in 0..d{for k in 0..d{let x=a[r*d+k];if !nonzero(x){continue;}for c in 0..d{mul_add(&mut o[r*d+c],x,b[k*d+c]);}}}o};
-        let modes=p.modes(2).unwrap();let op=LatticeOperator::new(&p,&modes).unwrap();let size=op.dimension();
-        let x:Vec<C>=(0..size).map(|k|C{re:((k*7+3)%29)as f64/29.-0.5,im:((k*11+5)%31)as f64/31.-0.5}).collect();
-        let source=p.fold.third_order_source(&op,&[&x]).unwrap().remove(0);
-        // Dense: the sum over (s, e, b) of the third-order operators on the lattice edges.
-        let mut third=vec![ZERO;size*size];
-        for s in p.plan.far(){let st=&p.plan.steps[s];
-            for e in p.plan.explicit(){let et=&p.plan.steps[e];
-                let inner=solve(st.nu,&mm(&dense(&et.charge),&solve(st.nu,&dense(&st.charge))));
-                for b in p.plan.far(){let bt=&p.plan.steps[b];if (st.nu+et.nu+bt.nu).abs()>=p.plan.cut{continue;}
-                    let term=mm(&dense(&bt.charge),&inner);
-                    let shift=charge_plus(&charge_plus(&st.charge,&et.charge).unwrap(),&bt.charge).unwrap();
-                    for(qi,q)in modes.iter().enumerate(){let t=charge_plus(q,&shift).unwrap();let Some(ti)=modes.iter().position(|m|*m==t)else{continue};
-                        for r in 0..d{for c in 0..d{add(&mut third[(ti*d+r)*size+qi*d+c],term[r*d+c]);}}}
-                }
-            }}
-        let mut expected=vec![ZERO;size];for r in 0..size{for c in 0..size{mul_add(&mut expected[r],third[r*size+c],x[c]);}}
-        let scale=expected.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
-        let error=expected.iter().zip(&source).map(|(a,b)|magnitude(C{re:a.re-b.re,im:a.im-b.im})).fold(0.,f64::max);
-        assert!(scale>0.&&error<=1e-10*scale,"third-order source {error:e} of {scale:e}");
-        // Every first-shell far charge the ball reaches (the 2003 drive moves the
-        // near index by one), near couplings between them included.
-        let charges:Vec<Charge>=(-1..=1).flat_map(|b:i32|{let reach=if b==0{2}else{3};(-reach..=reach).map(move|a|vec![a,b])}).collect();
-        let(matrix,centre)=super::super::tests::explicit_matrix(&p,&charges);
-        let explicit=super::super::tests::dense_steady(&p,&matrix,centre,n);
-        let mut lattice=op.dense();let second=super::super::tests::dense_steady(&p,&lattice,op.centre,n);
-        for(a,b)in lattice.iter_mut().zip(&third){add(a,*b);}
-        let corrected=super::super::tests::dense_steady(&p,&lattice,op.centre,n);
-        let error=|a:&[f64]|a.iter().zip(&explicit).map(|(x,y)|(x-y).abs()).fold(0.,f64::max);
-        assert!(error(&second)>1e-9&&error(&corrected)<0.05*error(&second),"fold-2 {:e}, fold-2 + third order {:e}",error(&second),error(&corrected));
     }
 }

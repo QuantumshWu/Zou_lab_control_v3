@@ -106,7 +106,7 @@ impl RingCondition<'_>{
         let key=|nu:f64|(nu*1e6).round()as i64;
         let mut missing:Vec<f64>=Vec::new();
         for(q,_,_)in &found{let nu=self.prepared.nu(q)?;if !self.resolvent.contains_key(&key(nu))&&!missing.iter().any(|&m|key(m)==key(nu)){missing.push(nu);}}
-        if !missing.is_empty(){for(nu,v)in missing.iter().zip(self.prepared.screening_eigenbasis()?.resolvent_norms(&missing)?){self.resolvent.insert(key(*nu),v);}}
+        if !missing.is_empty(){for(nu,v)in missing.iter().zip(self.prepared.eigenbasis()?.resolvent_norms(&missing)?){self.resolvent.insert(key(*nu),v);}}
         found.into_iter().map(|(q,p,t)|{let rho=self.coupling(&t)*self.resolvent[&key(self.prepared.nu(&q)?)];Ok((q,p,rho))}).collect()
     }
     /// While an internal edge has rho above RING_COUPLING: the ring charge
@@ -133,7 +133,7 @@ fn seed_amplitudes(prepared:&LatticePrepared,probes:&[Vec<C>])->Result<BTreeMap<
     let modes=prepared.modes(SEED_DEPTH)?;let index:BTreeMap<&Charge,usize>=modes.iter().enumerate().map(|(i,q)|(q,i)).collect();
     let mut layer=vec![usize::MAX;modes.len()];
     for k in(0..=SEED_DEPTH).rev(){for q in prepared.modes(k)?{layer[index[&q]]=k;}}
-    let eigen=prepared.screening_eigenbasis()?;
+    let eigen=prepared.eigenbasis()?;
     let mut op=LatticeOperator::new(prepared,&modes)?;
     // Layer k+1 from the layers up to k (disjoint: no diagonal block acts).
     let masks:Vec<(Vec<bool>,Vec<bool>)>=(0..SEED_DEPTH).map(|k|(layer.iter().map(|&l|l==k+1).collect(),layer.iter().map(|&l|l<=k).collect())).collect();
@@ -163,7 +163,7 @@ fn seed_amplitudes(prepared:&LatticePrepared,probes:&[Vec<C>])->Result<BTreeMap<
 pub fn explicit_set(prepared:&LatticePrepared,initial:&[C],tolerance:f64)->Result<ExplicitSet,String>{
     let clock=Instant::now();let zero=prepared.generator.zero.clone();
     let mut probes=vec![initial.to_vec()];
-    if let Ok(block)=prepared.screening_eigenbasis()?.kernel_block(){probes.push(block);}
+    if let Ok(block)=prepared.eigenbasis()?.kernel_block(){probes.push(block);}
     let amplitudes=seed_amplitudes(prepared,&probes)?;
     let mut condition=RingCondition{prepared,steps:prepared.plan.structural_steps(),coupling:BTreeMap::new(),resolvent:BTreeMap::new()};
     // 1. The gated start.
@@ -182,14 +182,9 @@ pub fn explicit_set(prepared:&LatticePrepared,initial:&[C],tolerance:f64)->Resul
     }
     // 4. Ring closure again.
     promoted.extend(condition.close(&mut explicit)?);
-    // Diagnostics: ATOM_DIAG_RINGS=k enlarges P by its ring k times (a
-    // reference lattice).
-    for _ in 0..super::diagnostics::perturbation("RINGS").map_or(0,|k|k as usize){
-        let set:Vec<Charge>=explicit.iter().cloned().collect();explicit.extend(ring(prepared,&set)?);}
     let mut p:Vec<Charge>=explicit.into_iter().collect();
     p.sort_by_key(|q|(q.iter().map(|&k|k.unsigned_abs()as u64).sum::<u64>(),q.clone()));
     let q=ring(prepared,&p)?;
-    if super::diagnostics::perturbation("RINGS").is_some(){eprintln!("DBG lattice P {} Q {}",p.len(),q.len());}
     let lattice:BTreeSet<&Charge>=p.iter().chain(&q).collect();
     let leak=amplitudes.iter().filter(|(c,_)|!lattice.contains(c)).map(|(_,&a)|a).fold(0.,f64::max);
     let internal=condition.edges(&p.iter().cloned().collect())?;
