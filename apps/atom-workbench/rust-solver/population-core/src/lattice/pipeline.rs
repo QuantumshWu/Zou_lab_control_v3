@@ -141,7 +141,7 @@ impl Answer{
 }
 
 #[derive(Clone,Debug,Default)]
-pub struct Timing{pub eigenbasis_ms:f64,pub explicit_set_ms:f64,pub setup_ms:f64,pub estimator_build_ms:f64,pub outputs_ms:f64,pub frame_ms:[f64;3],pub frame_wait_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub projection_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
+pub struct Timing{pub pairs_ms:f64,pub observer_ms:f64,pub eigenbasis_ms:f64,pub explicit_set_ms:f64,pub setup_ms:f64,pub estimator_build_ms:f64,pub outputs_ms:f64,pub frame_ms:[f64;3],pub frame_wait_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub projection_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
 
 pub struct Solution{
     /// The best checkpoint's outputs; `converged` when it was accepted, else
@@ -336,11 +336,13 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             // The growth charge on every output.
             for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
             // The slowest relaxation (the classes from the frame's block).
+            let pairs_clock=Instant::now();
             if classes.is_none()&&propagates{classes=Some(class_rates(&frame,eigen,lapack,initial,tolerance)?);}
             let rates:Option<Vec<f64>>=classes.as_ref().map(|c|c.iter().map(|x|x.0).collect());
             let pairs=slow_pairs(&model,&space,&ops,rates.as_deref(),tolerance)?;
             let unresolved:Vec<&SlowRate>=pairs.iter().filter(|(p,w)|!p.resolved()&&required(p,*w)).map(|(p,_)|p).collect();
             let missing=missing_classes(classes.as_deref().unwrap_or(&[]),&pairs,request.horizons,tolerance);
+            timing.pairs_ms+=pairs_clock.elapsed().as_secs_f64()*1e3;
             // The outputs with their bounds.
             let answer={
                 let outputs_clock=Instant::now();
@@ -365,7 +367,9 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,largest:answer.largest(),accepted:answer.accepted,
                 growing:model.growing,clipped:model.clipped,projected:model.projected,conserved:answer.conserved,slowest:answer.slowest,
                 trajectory,horizons,steady,inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
+            let observer_clock=Instant::now();
             if let Some(o)=observer.as_mut(){o(&point,&answer);}
+            timing.observer_ms+=observer_clock.elapsed().as_secs_f64()*1e3;
             checkpoints.push(point);
             // The best checkpoint: one within the tolerance over any other,
             // the latest of those, else the least largest bound.

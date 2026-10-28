@@ -113,31 +113,49 @@ impl ErrorLattice<'_>{
             for(key,g)in part.homogeneous{let e=homogeneous.entry(key).or_insert_with(||vec![ZERO;d]);for(a,b)in e.iter_mut().zip(g){add(a,b);}}
             resonant.extend(part.resonant);
         }
-        let gemm=lapack.complex_gemm();
-        let mut total=vec![ZERO;n*t_count];
-        // Particular part: phase_t(t) (Y_t e^{theta t}).
-        let ritz_exp:Vec<C>=times.iter().flat_map(|&t|theta.iter().map(move|&z|cexp(z,t))).collect();
-        for(t,y)in particular.iter().enumerate(){if !used[t]{continue;}
-            let mut f=vec![ZERO;n*t_count];gemm.multiply(n,t_count,r,ONE,y,n,&ritz_exp,r,ZERO,&mut f,n)?;
-            for(ti,&time)in times.iter().enumerate(){let ph=self.phase(t,time,readout);for i in 0..n{mul_add(&mut total[i+n*ti],ph,f[i+n*ti]);}}
-        }
-        // Homogeneous part: -e^{i nu_s t} R_{c,s} diag(Gamma) e^{mu t}.
+        // Homogeneous part: -e^{i nu_s t} R_{c,s} diag(Gamma) e^{mu t}, per
+        // class its values and per slot H = R_{c,s} diag(Gamma) and nu_s.
         let mut by_class:BTreeMap<usize,Vec<(usize,Vec<C>)>>=BTreeMap::new();
         for(key,g)in homogeneous{by_class.entry(key/slots).or_default().push((key%slots,g));}
+        let mut classes:Vec<(&[C],Vec<(Vec<C>,f64)>)>=Vec::new();
         for(c,list)in by_class{
             let values:&[C]=if c==bare{&self.basis()?.lambda}else{&class.values};
-            let block:Vec<C>=times.iter().flat_map(|&t|values.iter().map(move|&z|cexp(C{re:z.re.min(0.),im:z.im},t))).collect();
+            let mut terms=Vec::with_capacity(list.len());
             for(slot,g)in list{
                 let rows:&[C]=if c==bare{self.basis()?.population_rows()}else if slot==0{&class.readout}else{class.step_readout[slot-1].as_deref().unwrap()};
                 let mut h=rows.to_vec();for j in 0..d{for i in 0..n{h[i+n*j]=mul(h[i+n*j],g[j]);}}
-                let mut f=vec![ZERO;n*t_count];gemm.multiply(n,t_count,d,ONE,&h,n,&block,d,ZERO,&mut f,n)?;
-                let nu=if slot==0{0.}else{self.kernels()?.steps[slot-1].nu};
-                for(ti,&time)in times.iter().enumerate(){let ph=cexp(C{re:0.,im:nu},time);for i in 0..n{let v=mul(ph,f[i+n*ti]);total[i+n*ti].re-=v.re;total[i+n*ti].im-=v.im;}}
+                terms.push((h,if slot==0{0.}else{self.kernels()?.steps[slot-1].nu}));
             }
+            classes.push((values,terms));
         }
-        for(t,v,z)in resonant{
-            for(ti,&time)in times.iter().enumerate(){let ph=mul(self.phase(t,time,readout),scaled(cexp(z,time),time));for i in 0..n{mul_add(&mut total[i+n*ti],ph,v[i]);}}
-        }
+        let targets:Vec<(usize,&Vec<C>)>=particular.iter().enumerate().filter(|(t,_)|used[*t]).collect();
+        // The time GEMMs by chunks of the grid over the workers: every
+        // output entry is accumulated by one task in the serial order.
+        let execution=Execution::new()?;
+        let per_time=targets.len()*n*r+classes.iter().map(|(_,t)|t.len()*n*d).sum::<usize>();
+        let width=t_count.div_ceil(execution.tasks(t_count,per_time*t_count,crate::parallel::MINIMUM_WORK_PER_TASK));
+        let chunks:Vec<(usize,usize)>=(0..t_count).step_by(width).map(|a|(a,(a+width).min(t_count))).collect();
+        let parts=execution.map(chunks,|(a,b)|->Result<Vec<C>,String>{
+            let(gemm,ts,tc)=(lapack.complex_gemm(),&times[a..b],b-a);
+            let mut total=vec![ZERO;n*tc];
+            // Particular part: phase_t(t) (Y_t e^{theta t}).
+            let ritz_exp:Vec<C>=ts.iter().flat_map(|&t|theta.iter().map(move|&z|cexp(z,t))).collect();
+            for &(t,y)in &targets{
+                let mut f=vec![ZERO;n*tc];gemm.multiply(n,tc,r,ONE,y,n,&ritz_exp,r,ZERO,&mut f,n)?;
+                for(ti,&time)in ts.iter().enumerate(){let ph=self.phase(t,time,readout);for i in 0..n{mul_add(&mut total[i+n*ti],ph,f[i+n*ti]);}}
+            }
+            for(values,terms)in &classes{
+                let block:Vec<C>=ts.iter().flat_map(|&t|values.iter().map(move|&z|cexp(C{re:z.re.min(0.),im:z.im},t))).collect();
+                for(h,nu)in terms{
+                    let mut f=vec![ZERO;n*tc];gemm.multiply(n,tc,d,ONE,h,n,&block,d,ZERO,&mut f,n)?;
+                    for(ti,&time)in ts.iter().enumerate(){let ph=cexp(C{re:0.,im:*nu},time);for i in 0..n{let v=mul(ph,f[i+n*ti]);total[i+n*ti].re-=v.re;total[i+n*ti].im-=v.im;}}
+                }
+            }
+            for(t,v,z)in &resonant{
+                for(ti,&time)in ts.iter().enumerate(){let ph=mul(self.phase(*t,time,readout),scaled(cexp(*z,time),time));for i in 0..n{mul_add(&mut total[i+n*ti],ph,v[i]);}}
+            }
+            Ok(total)});
+        let mut total=Vec::with_capacity(n*t_count);for part in parts{total.extend(part?);}
         Ok((0..t_count).map(|ti|(0..n).map(|i|total[i+n*ti].re).collect()).collect())
     }
     fn phase(&self,mode:usize,time:f64,readout:Readout)->C{

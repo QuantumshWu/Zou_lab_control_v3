@@ -609,13 +609,12 @@ impl SlowPool{
     pub fn populations(&mut self,lattice:&ErrorLattice<'_>,basis:&[Vec<C>],s:&[C],theta:&[C],kernel:&[usize],solutions:&[SlowSolution],times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
         let(n,d,k,r)=(self.n,self.d,basis.len(),theta.len());let t_count=times.len();
         if solutions.is_empty()||t_count==0{return Ok(vec![vec![0.;n];t_count]);}
-        let lapack=Arc::clone(&self.lapack);let gemm=lapack.complex_gemm();
+        let lapack=Arc::clone(&self.lapack);
         // S factored once; the Ritz vectors B = S over the basis.
         let(lu_s,piv_s)=lapack.complex_factor(s,r)?;let b=s;
         let gram=self.basis_gram(k);
         let modes:Vec<usize>=match readout{Readout::Laboratory=>(0..lattice.modes.len()).collect(),Readout::Centre=>vec![lattice.centre]};
         let phase=|q:usize,t:f64|match readout{Readout::Laboratory=>cexp(C{re:0.,im:lattice.nu[q]},t),Readout::Centre=>ONE};
-        let mut total=vec![ZERO;n*t_count];
         // Per slow mode: r0 = W^T Y (Y's part in the space) and the remainder on the near modes.
         let mut ritz_weights=vec![ZERO;r];let mut in_space:Vec<Vec<C>>=Vec::new();let mut remainders:Vec<(usize,C,C,Vec<C>)>=Vec::new();
         for sol in solutions{
@@ -635,34 +634,56 @@ impl SlowPool{
         // In the space, per mode: sum_k a_k e^{theta_k t} P_q(W r0_k) - P_q(B (sum_k a_k cS_k) e^{theta t}),
         // and the deflated amplitudes' closed-form response, P_q(B h(t)) with
         // h_j(t) = sum_k a_k lambda_kj (e^{theta_k t} - e^{theta_j t}) / (theta_k - theta_j).
-        let mut ritz_exp:Vec<C>=times.iter().flat_map(|&t|theta.iter().zip(&ritz_weights).map(move|(&z,&w)|mul(w,cexp(z,t)))).collect();
-        for sol in solutions{for &(j,zj,l)in &sol.deflated{let a=mul(sol.coefficient,l);if !nonzero(a){continue;}
-            for(ti,&t)in times.iter().enumerate(){let v=mul(a,secular(sol.theta,zj,t));let e=&mut ritz_exp[j+r*ti];e.re-=v.re;e.im-=v.im;}}}
-        for &q in &modes{
+        // Per mode: P_q(B) and the constants P_q(W r0_k) (time-independent).
+        let per_mode=self.execution.map(modes.clone(),|q|->Result<(usize,Vec<C>,Vec<(C,C,Vec<C>)>),String>{
+            let gemm=lapack.complex_gemm();
             let mut rows=vec![ZERO;n*k];for j in 0..k{for i in 0..n{rows[i+n*j]=basis[j][q*d+i*n+i];}}
             let mut rb=vec![ZERO;n*r];gemm.multiply(n,r,k,ONE,&rows,n,b,k,ZERO,&mut rb,n)?;
-            let mut reduced=vec![ZERO;n*t_count];gemm.multiply(n,t_count,r,ONE,&rb,n,&ritz_exp,r,ZERO,&mut reduced,n)?;
             let mut constants=Vec::with_capacity(solutions.len());
             for(sol,xr)in solutions.iter().zip(&in_space){let mut v=vec![ZERO;n];gemm.multiply(n,1,k,ONE,&rows,n,xr,k,ZERO,&mut v,n)?;constants.push((sol.coefficient,sol.theta,v));}
-            for(ti,&t)in times.iter().enumerate(){let ph=phase(q,t);
-                for i in 0..n{let mut v=C{re:-reduced[i+n*ti].re,im:-reduced[i+n*ti].im};
-                    for(a,th,c)in &constants{mul_add(&mut v,mul(*a,cexp(*th,t)),c[i]);}
-                    mul_add(&mut total[i+n*ti],ph,v);}}
-        }
-        // The remainders on the near modes: e^{i nu_q t} e^{theta_k t} Y_perp - its dressed-block propagation.
+            Ok((q,rb,constants))}).into_iter().collect::<Result<Vec<_>,_>>()?;
+        // The remainders on the near modes: e^{i nu_q t} e^{theta_k t} Y_perp
+        // - its dressed-block propagation, H = R diag(a c) per remainder.
+        let lambda:Vec<C>=lattice.basis()?.lambda.iter().map(|z|C{re:z.re.min(0.),im:z.im}).collect();
+        let mut decays:Vec<(usize,C,C,Vec<C>,Vec<C>)>=Vec::with_capacity(remainders.len());
         if !remainders.is_empty(){
-            let lambda:Vec<C>=lattice.basis()?.lambda.iter().map(|z|C{re:z.re.min(0.),im:z.im}).collect();
-            let block:Vec<C>=times.iter().flat_map(|&t|lambda.iter().map(move|&z|cexp(z,t))).collect();
             let readout_rows=lattice.basis()?.population_rows();
             let blocks:Vec<&[C]>=remainders.iter().map(|x|&x.3[..]).collect();
             let coefficients=lattice.basis()?.coefficients(&blocks)?;self.work.frame_blocks+=remainders.len();
             for(i,(q,a,th,y))in remainders.iter().enumerate(){
                 let mut h=readout_rows.to_vec();for j in 0..d{let c=mul(*a,coefficients[j+d*i]);for row in 0..n{h[row+n*j]=mul(h[row+n*j],c);}}
-                let mut dec=vec![ZERO;n*t_count];gemm.multiply(n,t_count,d,ONE,&h,n,&block,d,ZERO,&mut dec,n)?;
-                for(ti,&t)in times.iter().enumerate(){let ph=mul(phase(*q,t),mul(*a,cexp(*th,t)));
-                    for row in 0..n{let v=mul(ph,y[row*n+row]);total[row+n*ti].re+=v.re-dec[row+n*ti].re;total[row+n*ti].im+=v.im-dec[row+n*ti].im;}}
+                decays.push((*q,*a,*th,h,(0..n).map(|row|y[row*n+row]).collect()));
             }
         }
+        // The time GEMMs by chunks of the grid over the workers: every
+        // output entry is accumulated by one task in the serial order.
+        let per_time=per_mode.len()*n*r+decays.len()*n*d;
+        let width=t_count.div_ceil(self.execution.tasks(t_count,per_time*t_count,crate::parallel::MINIMUM_WORK_PER_TASK));
+        let chunks:Vec<(usize,usize)>=(0..t_count).step_by(width).map(|a|(a,(a+width).min(t_count))).collect();
+        let(ritz_weights,per_mode,decays,lambda)=(&ritz_weights,&per_mode,&decays,&lambda);
+        let parts=self.execution.map(chunks,|(a0,b0)|->Result<Vec<C>,String>{
+            let(gemm,ts,tc)=(lapack.complex_gemm(),&times[a0..b0],b0-a0);
+            let mut total=vec![ZERO;n*tc];
+            let mut ritz_exp:Vec<C>=ts.iter().flat_map(|&t|theta.iter().zip(ritz_weights).map(move|(&z,&w)|mul(w,cexp(z,t)))).collect();
+            for sol in solutions{for &(j,zj,l)in &sol.deflated{let a=mul(sol.coefficient,l);if !nonzero(a){continue;}
+                for(ti,&t)in ts.iter().enumerate(){let v=mul(a,secular(sol.theta,zj,t));let e=&mut ritz_exp[j+r*ti];e.re-=v.re;e.im-=v.im;}}}
+            for(q,rb,constants)in per_mode{
+                let mut reduced=vec![ZERO;n*tc];gemm.multiply(n,tc,r,ONE,rb,n,&ritz_exp,r,ZERO,&mut reduced,n)?;
+                for(ti,&t)in ts.iter().enumerate(){let ph=phase(*q,t);
+                    for i in 0..n{let mut v=C{re:-reduced[i+n*ti].re,im:-reduced[i+n*ti].im};
+                        for(a,th,c)in constants{mul_add(&mut v,mul(*a,cexp(*th,t)),c[i]);}
+                        mul_add(&mut total[i+n*ti],ph,v);}}
+            }
+            if !decays.is_empty(){
+                let block:Vec<C>=ts.iter().flat_map(|&t|lambda.iter().map(move|&z|cexp(z,t))).collect();
+                for(q,a,th,h,y)in decays{
+                    let mut dec=vec![ZERO;n*tc];gemm.multiply(n,tc,d,ONE,h,n,&block,d,ZERO,&mut dec,n)?;
+                    for(ti,&t)in ts.iter().enumerate(){let ph=mul(phase(*q,t),mul(*a,cexp(*th,t)));
+                        for row in 0..n{let v=mul(ph,y[row]);total[row+n*ti].re+=v.re-dec[row+n*ti].re;total[row+n*ti].im+=v.im-dec[row+n*ti].im;}}
+                }
+            }
+            Ok(total)});
+        let mut total=Vec::with_capacity(n*t_count);for part in parts{total.extend(part?);}
         Ok((0..t_count).map(|ti|(0..n).map(|i|total[i+n*ti].re).collect()).collect())
     }
 }
