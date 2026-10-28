@@ -51,6 +51,8 @@ pub struct FrameFields{pub metric:Vec<C>,pub eigen:Vec<C>,pub transferred:Vec<C>
 /// reads nothing of it.
 pub struct SwFrame<'p>{
     prepared:&'p LatticePrepared,rule:KernelRule,
+    /// The longest output time it is built for (us).
+    pub horizon:f64,
     /// The explicit steps' charges in plan order: the kernels' steps.
     pub steps:Vec<Charge>,
     /// The kernels; the second-order block over every step; N = V^-H V^-1
@@ -66,7 +68,7 @@ impl<'p> SwFrame<'p>{
     pub fn new(prepared:&'p LatticePrepared,horizon:f64)->Self{
         let rule=KernelRule{entry:KERNEL_ENTRY,horizon_rate:KERNEL_HORIZON_RATE,horizon,cap:KERNEL_CAP};
         let plan=&prepared.plan;let steps=plan.explicit().into_iter().map(|i|plan.steps[i].charge.clone()).collect();
-        Self{prepared,rule,steps,kernels:OnceLock::new(),class:OnceLock::new(),normal:OnceLock::new()}
+        Self{prepared,rule,horizon,steps,kernels:OnceLock::new(),class:OnceLock::new(),normal:OnceLock::new()}
     }
     pub fn kernels(&self)->Result<&SwKernels,String>{
         self.kernels.get_or_init(||{let clock=Instant::now();let basis=self.prepared.eigenbasis()?;
@@ -75,7 +77,7 @@ impl<'p> SwFrame<'p>{
     /// The second-order block over every step.
     pub fn class(&self)->Result<&BlockSystem,String>{
         self.class.get_or_init(||{let kernels=self.kernels()?;let clock=Instant::now();let basis=self.prepared.eigenbasis()?;
-            let class=BlockSystem::new(&self.prepared.lapack,basis,kernels,(0..kernels.steps.len()).collect(),self.prepared.generator.n)?;
+            let class=BlockSystem::new(&self.prepared.lapack,basis,kernels,(0..kernels.steps.len()).collect(),self.prepared.generator.n,self.horizon)?;
             Ok((class,clock.elapsed().as_secs_f64()*1e3))}).as_ref().map(|x|&x.0).map_err(|e|e.clone())
     }
     /// N = V^-H V^-1 by column panels over the workers.

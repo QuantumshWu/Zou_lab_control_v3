@@ -572,9 +572,33 @@ mod tests{
                 seed_count=directions.len();
                 estimate.seed(&directions,&images).unwrap();
             }
+            // The pipeline's real poles in the slow region (its ladder: 10 / t1 down to
+            // 1 / T, two per decade, those below slow::SLOW), solved on the first basis
+            // column at its inner tolerance, as further seeds.
+            let mut pole_seeds=0;
+            if std::env::var("ATOM_ESTIMATOR_POLE_SEEDS").is_ok_and(|v|v=="1"){
+                let t1=times.iter().copied().find(|&t|t>0.).unwrap_or(1.);let longest=times.iter().chain(&horizons).fold(0_f64,|a,&b|a.max(b));
+                let mut sigma=10./t1;let mut poles=Vec::new();
+                while sigma>=(1./longest)*(1.-1e-9){if sigma<=estimator::slow::SLOW{poles.push(sigma);}sigma/=10_f64.sqrt();}
+                if let Some(top)=std::env::var("ATOM_ESTIMATOR_POLE_MAX").ok().and_then(|v|v.parse::<f64>().ok()){poles.retain(|&s|s<=top);}
+                if let Some(keep)=std::env::var("ATOM_ESTIMATOR_POLE_KEEP").ok().and_then(|v|v.parse::<usize>().ok()){poles.truncate(keep);}
+                for sigma in poles{
+                    let mut op=LatticeOperator::new(&p,&modes).unwrap();
+                    let mut pre=Preconditioning::new(&p).unwrap().batch(&op,Shift::Real(sigma),Some(Reach::All)).unwrap();
+                    let size=op.dimension();
+                    let directions={let mut system=System::new(&mut op,&mut pre,Shift::Real(sigma)).unwrap();
+                        let mut recording=Recording{system:&mut system,directions:Vec::new()};
+                        let mut options=KrylovOptions::new(1e-7);options.restart=200;options.maximum_steps=200;
+                        krylov::gmres(&mut recording,&basis[0],None,&options).unwrap();
+                        let mut directions=recording.directions;directions.pop();directions};
+                    let images:Vec<Vec<C>>=directions.iter().map(|z|{let mut y=vec![C::default();size];op.apply(z,&mut y).unwrap();y}).collect();
+                    pole_seeds+=directions.len();estimate.seed(&directions,&images).unwrap();
+                }
+            }
+            let seed_macs=estimate.pool.as_ref().map_or(0.,|p|p.work.qr_macs);
             println!("{}",json!({"case":case,"modes":n_modes,"near":estimate.lattice.near.len(),"ring":estimate.lattice.ring.len(),"operatorDeviation":operator,"buildMs":build_ms,
-                "kernelMs":estimate.lattice.build_ms()[0],"classMs":estimate.lattice.build_ms()[1],"classes":estimate.lattice.classes().map_or(0,|c|c.len()),"eigenbasisMs":p.eigenbasis().unwrap().milliseconds,"eigenBlocks":p.eigenbasis().unwrap().blocks,"largestBlock":p.eigenbasis().unwrap().largest_block,
-                "seeds":seed_count,"seedSteps":seed_steps,"d":p.generator.n*p.generator.n,"kernelEntries":estimate.lattice.kernels().unwrap().diagnostics.entries,"smallParameter":estimate.lattice.kernels().unwrap().diagnostics.largest,"ledger":ledger.total()}));
+                "kernelMs":estimate.lattice.build_ms()[0],"classMs":estimate.lattice.build_ms()[1],"classes":estimate.lattice.classes().map_or(0,|c|c.len()),"largestCluster":estimate.lattice.classes().ok().and_then(|c|c.iter().map(|c|c.largest_cluster).max()),"eigenbasisMs":p.eigenbasis().unwrap().milliseconds,"eigenBlocks":p.eigenbasis().unwrap().blocks,"largestBlock":p.eigenbasis().unwrap().largest_block,
+                "seeds":seed_count,"seedSteps":seed_steps,"poleSeeds":pole_seeds,"seedMacs":seed_macs,"d":p.generator.n*p.generator.n,"kernelEntries":estimate.lattice.kernels().unwrap().diagnostics.entries,"smallParameter":estimate.lattice.kernels().unwrap().diagnostics.largest,"ledger":ledger.total()}));
             // The pipeline's lattice: the slow pool's operator and steady preconditioner.
             let mut solver=atom_population_core::lattice::poles::Lattice::new(&p,LatticeSets{explicit:sets.explicit.clone(),ring:sets.ring.clone()}).unwrap();
             let mut gate=OutputGate::new(p.generator.n,estimate.lattice.nu.clone(),estimate.lattice.centre);let limit=estimator::gate::GATE_FACTOR*POPULATION_TOLERANCE;

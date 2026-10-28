@@ -182,7 +182,7 @@ impl<'p> ErrorLattice<'p>{
         self.classes.get_or_init(||{
             let kernels=frame.kernels()?;let every:Vec<usize>=(0..kernels.steps.len()).collect();
             let built=Execution::new()?.map(self.distinct.clone(),|steps|->Result<Cow<'p,BlockSystem>,String>{
-                if steps==every{Ok(Cow::Borrowed(frame.class()?))}else{Ok(Cow::Owned(BlockSystem::new(lapack,basis,kernels,steps,n)?))}});
+                if steps==every{Ok(Cow::Borrowed(frame.class()?))}else{Ok(Cow::Owned(BlockSystem::new(lapack,basis,kernels,steps,n,frame.horizon)?))}});
             built.into_iter().collect()}).as_ref().map(|v|v.as_slice()).map_err(|e|e.clone())
     }
     /// Build times (ms) of the frame's kernels and block.

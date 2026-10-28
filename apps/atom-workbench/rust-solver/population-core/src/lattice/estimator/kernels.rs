@@ -133,17 +133,19 @@ impl SwKernels{
 
 /// K~_s = 1/2 (C~_-s X~_s - X~_-s C~_s) from C~_s (column-major) and the
 /// entries of X~_s, with C~_-s[l, i] = conj C~_s[l*, i*] and the entries
-/// (i*, j*, conj x) of X~_-s.
+/// (i*, j*, conj x) of X~_-s. Both products run over contiguous columns:
+/// the first on C~_-s, the second on C~_s^T into K^T.
 fn second_order(c:&[C],entries:&[(usize,usize,C)],partner:&[usize],d:usize)->Vec<C>{
-    let mut k=vec![ZERO;d*d];
+    let mut minus=vec![ZERO;d*d];for i in 0..d{for l in 0..d{minus[l+d*i]=conj(c[partner[l]+d*partner[i]]);}}
+    let mut ct=vec![ZERO;d*d];for j in 0..d{for l in 0..d{ct[j+d*l]=c[l+d*j];}}
+    let(mut k,mut kt)=(vec![ZERO;d*d],vec![ZERO;d*d]);
     for &(i,j,x)in entries{
-        let half=scaled(x,0.5);let column=&c[partner[i]*d..(partner[i]+1)*d];
-        // Column j gains 1/2 x C~_-s[:, i].
-        for(l,t)in k[j*d..(j+1)*d].iter_mut().enumerate(){mul_add(t,half,conj(column[partner[l]]));}
-        // Row i* loses 1/2 conj(x) C~_s[j*, :].
-        let(row,from)=(partner[i],partner[j]);let y=scaled(conj(x),-0.5);
-        for l in 0..d{mul_add(&mut k[row+d*l],y,c[from+d*l]);}
+        // Column j of K gains 1/2 x C~_-s[:, i]; column i* of K^T loses 1/2 conj(x) C~_s[j*, :].
+        let half=scaled(x,0.5);for(t,&v)in k[j*d..(j+1)*d].iter_mut().zip(&minus[i*d..(i+1)*d]){mul_add(t,half,v);}
+        let y=scaled(conj(x),-0.5);let(row,from)=(partner[i],partner[j]);
+        for(t,&v)in kt[row*d..(row+1)*d].iter_mut().zip(&ct[from*d..(from+1)*d]){mul_add(t,y,v);}
     }
+    for i in 0..d{for l in 0..d{add(&mut k[i+d*l],kt[l+d*i]);}}
     k
 }
 
