@@ -56,6 +56,8 @@ use atom_population_core::lattice::pipeline::{self,Answer,Checkpoint,Request,Sol
 const ENGINE:&str="rust-population-core-lattice";
 const METHOD:&str="Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically): one rational Krylov space from the initial state, every output read from one Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, its error estimated per output from the reduced model's residual, the omitted ring and the fold rests the lattice leaves out";
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
+/// Stack of the mean's thread (LAPACK on it).
+const MEAN_STACK:usize=1<<26;
 
 /// The worker start-up check: loads LAPACK and verifies one Hermitian
 /// eigensystem, [[2,1-i],[1+i,3]] -> {1,4}.
@@ -343,11 +345,18 @@ pub fn solve(model:&Model,options:&Options,publish:&mut dyn FnMut(&Value))->Resu
         return result(model,options,&request,None,Some(mean.as_ref().map(|s|(&s.answer,Some(s))).map_err(|e|e.clone())),true,started);
     }
     let times:Vec<f64>=(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect();
-    let mean=options.include_asymptotic.then(||mean_run(&request,options.mean_horizon_us,&mut |_:&Checkpoint,_:&Answer|{}));
-    let mean_view=||mean.as_ref().map(|m|m.as_ref().map(|s|(&s.answer,Some(s))).map_err(|e|e.clone()));
-    let mut observe=|_:&Checkpoint,answer:&Answer|{if failure.is_some(){return;}
-        match result(model,options,&request,Some((answer,None)),mean_view(),false,started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
-    let trajectory=trajectory_run(&request,&times,&mut observe)?;
+    // The mean runs on its own thread while the trajectory runs: a
+    // trajectory checkpoint is published once the mean is there.
+    let mean:std::sync::OnceLock<Result<Solution,String>>=std::sync::OnceLock::new();
+    let mean_view=||mean.get().map(|m|m.as_ref().map(|s|(&s.answer,Some(s))).map_err(|e|e.clone()));
+    let trajectory=std::thread::scope(|scope|->Result<Solution,String>{
+        let worker=if options.include_asymptotic{Some(std::thread::Builder::new().stack_size(MEAN_STACK).spawn_scoped(scope,||{
+            let _=mean.set(mean_run(&request,options.mean_horizon_us,&mut |_:&Checkpoint,_:&Answer|{}));}).map_err(|e|e.to_string())?)}else{None};
+        let mut observe=|_:&Checkpoint,answer:&Answer|{if failure.is_some()||(options.include_asymptotic&&mean.get().is_none()){return;}
+            match result(model,options,&request,Some((answer,None)),mean_view(),false,started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
+        let trajectory=trajectory_run(&request,&times,&mut observe);
+        if let Some(worker)=worker{worker.join().map_err(|_|"The mean's thread failed".to_string())?;}
+        trajectory})?;
     if let Some(e)=failure{return Err(e);}
     result(model,options,&request,Some((&trajectory.answer,Some(&trajectory))),mean_view(),true,started)
 }
