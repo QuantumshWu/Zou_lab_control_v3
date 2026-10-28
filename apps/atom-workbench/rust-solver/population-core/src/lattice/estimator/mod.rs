@@ -160,18 +160,31 @@ impl<'a> UnifiedEstimate<'a>{
         if !(outputs.times.is_empty()&&outputs.horizons.is_empty()){self.lattice.add_columns(cp.basis,cp.images,cp.frame.as_ref())?;}
         ms[0]=clock.elapsed().as_secs_f64()*1e3;
         let mut b=vec![ZERO;k*r];self.setup.prepared.lapack.complex_gemm().multiply(k,r,r,ONE,cp.x,k,cp.s,r,ZERO,&mut b,k)?;
-        // The slowest decay rate, the slow modes and which outputs use them.
-        let lambda_slow=cp.theta.iter().zip(cp.coefficients).filter(|(z,a)|z.re.abs()>DECAYING&&nonzero(**a)).map(|(z,_)|z.re.abs()).fold(f64::INFINITY,f64::min);
-        let lambda_slow=if lambda_slow.is_finite(){lambda_slow}else{0.};
-        let uses=|t:f64|t*lambda_slow>=1.;
+        // The slow modes and which outputs use them. At an output time T a
+        // decaying mode slower than 1/T with a coefficient below the
+        // tolerance stays in the SW part and holds no other back (`set`); the
+        // slowest decay rate of the others decides whether the slow part
+        // runs at T.
         let slow:Vec<usize>=(0..r).filter(|&m|magnitude(cp.theta[m])<slow::SLOW&&nonzero(cp.coefficients[m])).collect();
+        let kernel:Vec<usize>=slow.iter().copied().filter(|&m|magnitude(cp.theta[m])<1e-12).collect();
+        let negligible=|m:usize,t:f64|t*cp.theta[m].re.abs()<1.&&magnitude(cp.coefficients[m])<ledger::POPULATION_TOLERANCE&&!kernel.contains(&m);
+        let rate=|t:f64|{let l=(0..r).filter(|&m|cp.theta[m].re.abs()>DECAYING&&nonzero(cp.coefficients[m])&&!negligible(m,t)).map(|m|cp.theta[m].re.abs()).fold(f64::INFINITY,f64::min);
+            if l.is_finite(){l}else{0.}};
+        let uses=|t:f64|t*rate(t)>=1.;
+        let set=|t:f64|->Vec<usize>{slow.iter().copied().filter(|&m|!negligible(m,t)).collect()};
+        let last=outputs.times.last().copied().unwrap_or(0.);
+        let lambda_slow=rate(last);
         let grid=outputs.times.last().is_some_and(|&t|uses(t));
         let horizon_slow:Vec<bool>=outputs.horizons.iter().map(|&t|uses(t)).collect();
-        let kernel:Vec<usize>=slow.iter().copied().filter(|&m|magnitude(cp.theta[m])<1e-12).collect();
-        // The kernel modes first.
-        let needed:Vec<usize>=if grid||horizon_slow.iter().any(|&h|h){kernel.iter().chain(slow.iter().filter(|m|!kernel.contains(m))).copied().collect()}
+        // The kernel modes first, then every slow mode an output takes.
+        let mut taken:Vec<usize>=Vec::new();
+        for t in outputs.horizons.iter().zip(&horizon_slow).filter(|x|*x.1).map(|x|*x.0).chain(grid.then_some(last)){for m in set(t){if !taken.contains(&m){taken.push(m);}}}
+        // Those an output may leave in the SW part last, slowest last: every
+        // output time takes a prefix of the solutions.
+        taken.sort_by(|&p,&q|{let key=|m:usize|(magnitude(cp.coefficients[m])<ledger::POPULATION_TOLERANCE,-cp.theta[m].re.abs());key(p).partial_cmp(&key(q)).unwrap()});
+        let needed:Vec<usize>=if !taken.is_empty(){kernel.iter().chain(taken.iter().filter(|m|!kernel.contains(m))).copied().collect()}
             else if outputs.steady{kernel.clone()}else{Vec::new()};
-        let mut solutions=Vec::new();
+        let(mut solutions,mut solved,mut invariant)=(Vec::new(),Vec::new(),Vec::new());
         let scale=cp.images.iter().map(|a|a.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt()).fold(0_f64,f64::max);
         let size=|v:&[C]|v.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();
         if !needed.is_empty(){
@@ -195,32 +208,39 @@ impl<'a> UnifiedEstimate<'a>{
                 // The ring's feedback of x at theta.
                 let(theta,bm)=(cp.theta[m],&b[k*m..k*(m+1)]);
                 let g=self.lattice.ring_feedback(x,theta)?;
-                if kernel.contains(&m){let f:Vec<C>=ax.iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();if size(&f)<=INVARIANT*scale*size(x){continue;}}
-                solutions.push(self.pool.as_mut().unwrap().mode(bm,ax,&g,theta,cp.coefficients[m],steady)?);
+                if kernel.contains(&m){let f:Vec<C>=ax.iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();if size(&f)<=INVARIANT*scale*size(x){invariant.push(m);continue;}}
+                solutions.push(self.pool.as_mut().unwrap().mode(bm,ax,&g,theta,cp.coefficients[m],steady)?);solved.push(m);
             }
             ms[2]=clock.elapsed().as_secs_f64()*1e3;
         }
         let fast_ms=std::cell::Cell::new(0.);let slow_ms=std::cell::Cell::new(0.);
-        let fast=|lattice:&ErrorLattice<'_>,skip:bool,times:&[f64],readout:Readout|->Result<Vec<Vec<f64>>,String>{
+        // The fast part without the modes `skip` (those the slow part takes).
+        let fast=|lattice:&ErrorLattice<'_>,skip:&[usize],times:&[f64],readout:Readout|->Result<Vec<Vec<f64>>,String>{
             let clock=Instant::now();
-            let coefficients:Vec<C>=(0..r).map(|m|if skip&&slow.contains(&m){ZERO}else{cp.coefficients[m]}).collect();
+            let coefficients:Vec<C>=(0..r).map(|m|if skip.contains(&m){ZERO}else{cp.coefficients[m]}).collect();
             let out=lattice.populations(&RitzSources{vectors:&b,values:cp.theta,coefficients:&coefficients},times,readout);
             fast_ms.set(fast_ms.get()+clock.elapsed().as_secs_f64()*1e3);out};
         let sum=|a:Vec<Vec<f64>>,c:Vec<Vec<f64>>|->Vec<Vec<f64>>{a.into_iter().zip(c).map(|(x,y)|x.iter().zip(&y).map(|(p,q)|p+q).collect()).collect()};
         // Without slow modes the slow part is zero and every mode is fast.
         let grid=grid&&!solutions.is_empty();
+        // The solved slow modes an output time takes (a prefix) and those the
+        // fast part leaves out with them: these and the invariant kernel modes.
+        let taking=|t:f64|->usize{let s=set(t);solved.iter().take_while(|m|s.contains(m)).count()};
+        let skipping=|count:usize|->Vec<usize>{solved[..count].iter().chain(&invariant).copied().collect()};
         let trajectory=if grid{
+            let count=taking(last);
             let clock=Instant::now();
-            let s=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.x,cp.s,cp.theta,&solutions,outputs.times,Readout::Laboratory)?;
+            let s=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.x,cp.s,cp.theta,&solutions[..count],outputs.times,Readout::Laboratory)?;
             slow_ms.set(slow_ms.get()+clock.elapsed().as_secs_f64()*1e3);
-            sum(fast(&self.lattice,true,outputs.times,Readout::Laboratory)?,s)
-        }else{fast(&self.lattice,false,outputs.times,Readout::Laboratory)?};
+            sum(fast(&self.lattice,&skipping(count),outputs.times,Readout::Laboratory)?,s)
+        }else{fast(&self.lattice,&[],outputs.times,Readout::Laboratory)?};
         let mut horizons=Vec::with_capacity(outputs.horizons.len());
         for(&t,&with)in outputs.horizons.iter().zip(&horizon_slow){
             let row=if with&&!solutions.is_empty(){
-                let s=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.x,cp.s,cp.theta,&solutions,&[t],Readout::Centre)?;
-                sum(fast(&self.lattice,true,&[t],Readout::Centre)?,s)
-            }else{fast(&self.lattice,false,&[t],Readout::Centre)?};
+                let count=taking(t);
+                let s=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.x,cp.s,cp.theta,&solutions[..count],&[t],Readout::Centre)?;
+                sum(fast(&self.lattice,&skipping(count),&[t],Readout::Centre)?,s)
+            }else{fast(&self.lattice,&[],&[t],Readout::Centre)?};
             horizons.push(row.into_iter().next().unwrap());
         }
         let steady=if outputs.steady{

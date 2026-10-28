@@ -434,7 +434,14 @@ mod tests{
             reference["horizons"].get(&key).and_then(|v|v.as_array()).map(|a|a.iter().map(|x|x.as_f64().unwrap()).collect())}).collect();
         let groups=prepared.groups.clone();let zero=vec![0.;32];
         let mut lines=Vec::new();
+        // Diagnostics: ATOM_DIAG_DUMP=path appends every checkpoint's outputs
+        // and estimates (per time) as a JSON line.
+        let dump=var("ATOM_DIAG_DUMP");
         let mut observe=|c:&Checkpoint|{
+            if let Some(path)=&dump{use std::io::Write;
+                let line=json!({"solves":c.solves,"trajectory":c.trajectory,"horizons":c.horizons,"steady":c.steady,
+                    "estTrajectory":c.estimate.trajectory,"estHorizons":c.estimate.horizons,"estSteady":c.estimate.steady,"accepted":c.accepted});
+                let mut f=std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();writeln!(f,"{line}").unwrap();}
             let error_traj=reference_pops.as_ref().map(|r|{let e:Vec<f64>=c.trajectory.iter().zip(r).map(|(a,b)|ledger::metric(a,b,&groups)).collect();
                 let(i,m)=e.iter().enumerate().fold((0,0_f64),|(bi,bm),(i,&v)|if v>bm{(i,v)}else{(bi,bm)});(m,times[i],e)});
             let error_h:Vec<Option<f64>>=c.horizons.iter().zip(&reference_horizons).map(|(a,b)|b.as_ref().map(|b|ledger::metric(a,b,&groups))).collect();
