@@ -69,6 +69,12 @@ pub const CLASSES:Classes=Classes::Full;
 pub const NEAR_EXPLICIT:bool=true;
 /// A mode decays when |Re theta| is above this (1/us).
 const DECAYING:f64=1e-10;
+/// A kernel mode whose source |F| is below this fraction of |A| |W b|
+/// (|A| the largest image of a basis column) is invariant to roundoff: its
+/// error is zero. Every further conserved quantity of a drive-free lattice
+/// is such a mode, and the bordered system (one trace row) is singular on
+/// it.
+const INVARIANT:f64=1e-12;
 
 /// The longest output time of a request.
 pub fn longest_time(times:&[f64],horizons:&[f64])->f64{times.iter().chain(horizons).fold(0_f64,|a,&b|a.max(b.abs()))}
@@ -136,6 +142,7 @@ impl<'a> UnifiedEstimate<'a>{
         let needed:Vec<usize>=if grid||horizon_slow.iter().any(|&h|h){kernel.iter().chain(slow.iter().filter(|m|!kernel.contains(m))).copied().collect()}
             else if outputs.steady{kernel.clone()}else{Vec::new()};
         let mut solutions=Vec::new();
+        let scale=cp.images.iter().map(|a|a.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt()).fold(0_f64,f64::max);
         if !needed.is_empty(){
             if self.pool.is_none(){let mut pool=SlowPool::new(self.setup.prepared,&self.lattice)?;pool.seed_with_pipeline=self.seed_with_pipeline;self.pool=Some(pool);}
             let pool=self.pool.as_mut().unwrap();pool.add_columns(cp.basis,cp.images)?;
@@ -146,6 +153,8 @@ impl<'a> UnifiedEstimate<'a>{
                 for j in 0..k{let c=b[j+k*m];if !nonzero(c){continue;}let ct=mul(c,theta);
                     for((xv,fv),(&w,&aw))in x.iter_mut().zip(f.iter_mut()).zip(cp.basis[j].iter().zip(&cp.images[j])){mul_add(xv,c,w);mul_add(fv,c,aw);let v=mul(ct,w);fv.re-=v.re;fv.im-=v.im;}}
                 let g=self.lattice.ring_feedback(&x,theta)?;for(a,v)in f.iter_mut().zip(g){add(a,v);}
+                let size=|v:&[C]|v.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();
+                if kernel.contains(&m)&&size(&f)<=INVARIANT*scale*size(&x){continue;}
                 solutions.push(pool.solve(cp.basis,&f,theta,cp.coefficients[m],steady)?);
             }
         }

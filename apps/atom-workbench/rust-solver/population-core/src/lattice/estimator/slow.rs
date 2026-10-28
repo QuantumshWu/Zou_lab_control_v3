@@ -89,17 +89,25 @@ impl Panels{
         let mut h=vec![0.;base*m];
         for _ in 0..2{let a=self.dots(lapack,execution,&g,m)?;self.combine(lapack,execution,&mut g,&a,m,-1.)?;for(x,y)in h.iter_mut().zip(a){*x+=y;}}
         let gram=block_cross(lapack,execution,&g,m,&g,m,length)?;
-        let(order,r1)=cholesky(&gram,m,&sizes,true);let k=order.len();
-        let mut fresh:Vec<Vec<f64>>=Vec::new();let mut t=vec![0.;k*m];
+        let(order,r1)=cholesky(&gram,m,&sizes,true);let mut k=order.len();
+        let mut fresh:Vec<Vec<f64>>=Vec::new();let mut t=Vec::new();
         if k>0{
             let mut selected=vec![0.;length*k];for(i,&c)in order.iter().enumerate(){selected[i*length..(i+1)*length].copy_from_slice(&g[c*length..(c+1)*length]);}
-            let q1=block_times(lapack,execution,&selected,length,k,&upper_inverse(&r1,k))?;drop(selected);
-            let gram=block_cross(lapack,execution,&q1,k,&q1,k,length)?;
-            let(kept,r2)=cholesky(&gram,k,&vec![1.;k],false);
-            if kept.len()!=k{return Err("Slow pool: the second Cholesky QR pass lost a column".into());}
-            let q=block_times(lapack,execution,&q1,length,k,&upper_inverse(&r2,k))?;drop(q1);
-            t=block_cross(lapack,execution,&q,k,&g,m,length)?;
-            for i in 0..k{let column=q[i*length..(i+1)*length].to_vec();self.push(&column);fresh.push(column);}
+            let mut q1=block_times(lapack,execution,&selected,length,k,&upper_inverse(&r1,k))?;drop(selected);
+            // A column the second pass loses was dependent within the first
+            // pass's accuracy (the Gram squares its condition): it is left out.
+            let r2=loop{
+                let gram=block_cross(lapack,execution,&q1,k,&q1,k,length)?;
+                let(kept,r2)=cholesky(&gram,k,&vec![1.;k],false);
+                if kept.len()==k{break r2;}
+                let mut columns=vec![0.;length*kept.len()];for(i,&c)in kept.iter().enumerate(){columns[i*length..(i+1)*length].copy_from_slice(&q1[c*length..(c+1)*length]);}
+                q1=columns;k=kept.len();
+            };
+            if k>0{
+                let q=block_times(lapack,execution,&q1,length,k,&upper_inverse(&r2,k))?;drop(q1);
+                t=block_cross(lapack,execution,&q,k,&g,m,length)?;
+                for i in 0..k{let column=q[i*length..(i+1)*length].to_vec();self.push(&column);fresh.push(column);}
+            }
         }
         let coordinates=(0..m).map(|c|{let mut v:Vec<f64>=(0..base).map(|i|h[i+base*c]).collect();v.extend((0..k).map(|i|t[i+k*c]));v}).collect();
         Ok((coordinates,fresh))

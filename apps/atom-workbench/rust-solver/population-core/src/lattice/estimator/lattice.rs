@@ -197,12 +197,15 @@ impl<'p> ErrorLattice<'p>{
         for(list,part)in chunks.iter().zip(parts){let part=part?;for(k,&(f,i))in list.iter().enumerate(){c[(f*frames+i)*d..(f*frames+i+1)*d].copy_from_slice(&part[k*d..(k+1)*d]);}}
         let position=|q:usize|self.frames.iter().position(|&x|x==q).unwrap();
         let near=self.near.len();
-        let mut t=vec![ZERO;m*near*d];
-        for f in 0..m{
-            for(slot,&a)in self.near.iter().enumerate(){let i=position(a);t[(f*near+slot)*d..(f*near+slot+1)*d].copy_from_slice(&c[(f*frames+i)*d..(f*frames+i+1)*d]);}
-            for &(a,b,s)in &self.pairs{let slot=self.near.iter().position(|&x|x==a).unwrap();let i=position(b);
-                let(source,target)=(&c[(f*frames+i)*d..(f*frames+i+1)*d],(f*near+slot)*d);self.kernels.subtract_kernel(s,source,&mut t[target..target+d]);}
-        }
+        // (I - S~) on the near modes, one task per field.
+        let pairs:Vec<(usize,usize,usize)>=self.pairs.iter().map(|&(a,b,s)|(self.near.iter().position(|&x|x==a).unwrap(),position(b),s)).collect();
+        let(kernels,c_ref)=(self.kernels,&c);
+        let rows=execution.map((0..m).collect(),|f|{
+            let mut t=vec![ZERO;near*d];
+            for(slot,&a)in self.near.iter().enumerate(){let i=position(a);t[slot*d..(slot+1)*d].copy_from_slice(&c_ref[(f*frames+i)*d..(f*frames+i+1)*d]);}
+            for &(slot,i,s)in &pairs{kernels.subtract_kernel(s,&c_ref[(f*frames+i)*d..(f*frames+i+1)*d],&mut t[slot*d..(slot+1)*d]);}
+            t});
+        let t:Vec<C>=rows.concat();
         // V_c^-1 per near slot over the batch (one GEMM per slot and chunk).
         let(classes,class_of,lapack)=(&self.classes,&self.class_of,&self.prepared.lapack);
         let slots:Vec<usize>=(0..near).collect();let t=&t;
