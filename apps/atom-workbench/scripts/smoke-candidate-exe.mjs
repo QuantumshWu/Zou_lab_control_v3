@@ -108,8 +108,10 @@ try{
   assert.equal(meanParsed.steady.converged,true,'Smoke mean must be qualified, never the finite endpoint');
   assert.equal(report.workerRequests.length,2);assert.deepEqual(report.workerRequests.map(r=>r.lane),['trajectory','steady']);
   assert.equal(report.workerRequests[0].modelSha256,report.workerRequests[1].modelSha256,'Both fresh results must use the identical current Model');
+  // Both means are p(T) of the same equation, each within its own bound.
   const meanDelta=Math.max(...finite.asymptoticPopulations.map((p,i)=>Math.abs(p-mean.asymptoticPopulations[i])));
-  assert.ok(meanDelta<1e-9,`Inline and steadyOnly means solve the same equation (difference ${meanDelta})`);
+  const meanBounds=finite.asymptoticEstimatedError+mean.asymptoticEstimatedError;
+  assert.ok(Number.isFinite(meanBounds)&&meanDelta<=meanBounds,`Inline and steadyOnly means agree within their bounds (difference ${meanDelta}, bounds ${meanBounds})`);
   report.status='passed';report.validation={backendStatic:true,normalIpcAndJsonl:true,finitePopulationAccuracy:parsed.populationAccuracy,
     meanStatus:meanParsed.steady.status,finiteNativeMs:finite.diagnostics.elapsedMs,meanNativeMs:mean.diagnostics.elapsedMs};
 }catch(error){report.status='failed';report.error=error.stack??error.message;process.exitCode=1;}
