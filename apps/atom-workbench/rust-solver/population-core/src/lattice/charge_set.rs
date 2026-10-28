@@ -12,12 +12,20 @@
 //! 2. ring closure: while the ring has an internal edge q <- q - t with
 //!    rho = ||C_t|| ||D_q^-1|| above RING_COUPLING, the ring charge carrying
 //!    the largest summed rho joins P with its mirror, at most PROMOTIONS
-//!    times. Q is solved whole, so this is no elimination's contraction;
-//!    what it buys is a lattice one shell wider where the ring is strongly
-//!    coupled, which the estimate's slaved outer ring needs: without it four
-//!    lasers + tweezer at 10 ms had a sample at 50 us with an error of
-//!    8.0e-4 against a bound of 3.9e-4 (0.89 of its error at worst with it);
-//!    solves and means were unchanged;
+//!    times. It protects the solution, not the estimate. A ring charge q on
+//!    such an edge is near resonant (||D_q^-1|| large); left at the lattice's
+//!    edge it couples to the omitted charges r beyond, whose second-order
+//!    self-energy Sigma_q = sum_r C_qr (z - D_r)^-1 C_rq acts relative to its
+//!    small denominator, ||Sigma_q|| ||D_q^-1|| (a Feshbach quantity: the
+//!    natural criterion, of which rho is the first-order proxy). Promoting q
+//!    puts those neighbours in Q, solved whole. Measured without the
+//!    closure, four lasers + tweezer at 10 ms: partial, bound 6.7e-3, error
+//!    2.3e-3 against 4.6e-4 with it, per-sample coverage 0.10. Neither the
+//!    estimate's slaved outer ring explains it (rho inside ring(P u Q) at
+//!    most 1.8e-3 without the closure, no internal edge with it) nor the
+//!    estimate's near modes (the strong ring charges added to them, P
+//!    unchanged: the same 6.7e-3); three and five lasers and every mean were
+//!    unchanged;
 //! 3. cover: every charge whose seed amplitude is at least SEED_AMPLITUDE x
 //!    tolerance and that P u Q misses joins P (largest first, with its
 //!    mirror). A second closure after the cover promoted nothing on any
@@ -38,11 +46,12 @@ use super::classification::HarmonicStep;
 /// margin, a step's copies carry population weight of order its mixing, a
 /// tenth of the tolerance at the gate.
 pub const GATE:f64=0.1;
-/// Largest rho = ||C_t|| ||D_q^-1|| of an edge inside the ring (the
-/// coupling a block of the ring receives from a ring neighbour, relative to
-/// its own resolvent). Measured:
-/// the gate alone left ring-internal edges up to rho = 54 (the Raman
-/// charges' resolvent); closed at 0.1, no research case's ring keeps one.
+/// Largest rho = ||C_t|| ||D_q^-1|| of an edge inside the ring: the coupling
+/// a ring block receives from a ring neighbour relative to its own
+/// resolvent, the first-order proxy for a near-resonant charge at the
+/// lattice's edge (the module's step 2). Measured: the gate alone left
+/// ring-internal edges up to rho = 54 (the Raman charges' resolvent); closed
+/// at 0.1, no research case's ring keeps one.
 pub const RING_COUPLING:f64=0.1;
 /// A cap on the ring closure's promotions: rho's norm bound is
 /// conservative, and promotion cascades (uncapped, four and five lasers grew
