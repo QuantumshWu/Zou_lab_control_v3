@@ -45,7 +45,7 @@ test('solver statuses and known sentences are shown in Chinese; unknown text is 
 });
 test('the method sentences the native adapter writes are shown in Chinese',()=>{
   const adapter=readFileSync(new URL('../rust-solver/src/lattice_core_adapter.rs',import.meta.url),'utf8');
-  for(const name of ['FINITE_METHOD','MEAN_METHOD','STATIC_METHOD']){
+  for(const name of ['METHOD']){
     const sentence=new RegExp(`const ${name}:&str="([^"]+)";`).exec(adapter)?.[1];
     assert.ok(sentence,name);
     assert.match(solverText(sentence),/^完整 32 态/,name);

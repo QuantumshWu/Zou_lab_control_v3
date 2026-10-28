@@ -98,7 +98,9 @@ export function installSelfTest({adapter,postNative}){
   if(!expected?.scene)throw Error('Full-app self-test is missing the reference scene.');
   // v3 TabWidget pages turn on the tab's press.
   const tab=await waitFor('.tab[data-view="dynamics"]');clickAt=performance.now();tab.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0}));
-  const run=await waitFor('#run-dynamics');if(run.disabled)throw Error('The actual Population solve button is disabled.');run.click();
+  // The app solves on its own once the Population tab shows a stale result
+  // (automatic solving); an explicit solve button, where present, is pressed.
+  const run=document.querySelector('#run-dynamics');if(run&&!run.disabled)run.click();
  }catch(error){await finish(false,error);}}
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>void start(),{once:true});else queueMicrotask(()=>void start());
  return wrappedFetch;

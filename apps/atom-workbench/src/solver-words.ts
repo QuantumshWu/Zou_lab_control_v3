@@ -18,6 +18,10 @@ export function steadyStatusText(status:SteadyStatus|undefined):string{return st
 
 /** Sentences the native solver is known to write (rust-solver/src/lattice_core_adapter.rs). */
 const SENTENCES:Record<string,string>={
+  "Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically): one rational Krylov space from the initial state, every output read from one Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, its error estimated per output from the reduced model's residual, the omitted ring and the fold rests the lattice leaves out":
+    '完整 32 态密度矩阵在折叠 Fourier 晶格上的 Lindblad 动力学（显式电荷按混合、种子幅度与环条件选取，连同其环；远离的谐波静态折叠）：从初态出发的一个有理 Krylov 空间，每个输出都由 Schrieffer–Wolff/Floquet 框架度量下的同一个 Galerkin 约化模型读出，误差按输出由约化模型的残差、省略的环和晶格留下的折叠余项估计。',
+  'Lindblad mean of the specified initial density: slow modes still relaxing at the horizon (horizonUs), or conserved quantities, keep it initial-state dependent.':
+    '给定初始密度矩阵的 Lindblad 长期布居：到 T 仍在弛豫的慢模式（或守恒量）使结果依赖初态。',
   "Full32 density-matrix Lindblad evolution on the folded Fourier lattice: rational Krylov with lattice-translation augmentation, its basis, near-shell and fold errors estimated by propagating their sources through the dressed blocks; beyond 1 ms the slow eigenmodes' expansion from the Krylov state at a switch time":
     '完整 32 态密度矩阵在折叠 Fourier 晶格上的 Lindblad 演化：带晶格平移增广的有理 Krylov 方法，基、近壳层与折叠误差由各自的源经缀饰块传播估计；1 ms 以后用切换时刻 Krylov 态的慢本征模展开。',
   "Full32 time average of the folded Fourier lattice (near charges explicit, far harmonics folded statically at second order, higher orders charged): dressed-block preconditioned null vector, its truncation and fold errors estimated in the solver's Krylov space":
