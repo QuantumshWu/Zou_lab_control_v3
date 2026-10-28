@@ -472,12 +472,10 @@ mod tests{
     #[ignore]
     fn lattice_estimator_against_r2_fixtures(){
         use atom_population_core::lattice::estimator::{self,Checkpoint,OutputGate,UnifiedEstimate};
-        use atom_population_core::lattice::estimate_api::{EstimateSetup,LatticeSets,Outputs,SteadySolves};
+        use atom_population_core::lattice::estimate_api::{EstimateSetup,LatticeSets,Outputs};
         use atom_population_core::lattice::ledger::RemainderLedger;
         use atom_population_core::lattice::operator::LatticeOperator;
-        use atom_population_core::lattice::preconditioner::{Preconditioning,Shift};
-        use atom_population_core::lattice::floquet::Reach;
-        use atom_population_core::lattice::krylov::{System,KrylovOptions,gmres};
+        use atom_population_core::lattice::poles::Lattice;
         type C=Complex64;
         let root=std::path::PathBuf::from(std::env::var("ATOM_ESTIMATOR_FIXTURES").expect("ATOM_ESTIMATOR_FIXTURES"));
         let cases=std::env::var("ATOM_ESTIMATOR_CASES").expect("ATOM_ESTIMATOR_CASES");
@@ -485,16 +483,8 @@ mod tests{
         let complex=|bytes:&[u8]|->Vec<C>{bytes.chunks_exact(16).map(|b|C{re:f64::from_le_bytes(b[..8].try_into().unwrap()),im:f64::from_le_bytes(b[8..].try_into().unwrap())}).collect()};
         let charges=|v:&Value|->Vec<Vec<i32>>{v.as_array().unwrap().iter().map(|q|q.as_array().unwrap().iter().map(|k|k.as_i64().unwrap() as i32).collect()).collect()};
         let floats=|v:&Value|->Vec<f64>{v.as_array().map(|a|a.iter().map(|x|x.as_f64().unwrap_or(f64::NAN)).collect()).unwrap_or_default()};
-        struct Bordered<'p>{prepared:&'p LatticePrepared,modes:Vec<Vec<i32>>,solves:usize,steps:usize,ms:f64}
-        impl SteadySolves for Bordered<'_>{
-            fn solve(&mut self,f:&[C],tolerance:f64)->Result<(Vec<C>,usize),String>{
-                let clock=Instant::now();
-                let mut op=LatticeOperator::new(self.prepared,&self.modes)?;
-                let mut pre=Preconditioning::new(self.prepared)?.batch(&op,Shift::Steady,Some(Reach::All))?;
-                let mut system=System::new(&mut op,&mut pre,Shift::Steady)?;
-                let k=gmres(&mut system,f,None,&KrylovOptions::new(tolerance))?;self.solves+=1;self.steps+=k.steps;self.ms+=clock.elapsed().as_secs_f64()*1e3;Ok((k.x,k.steps))
-            }
-        }
+        // The pipeline's own lattice P u Q (its bordered steady solves and steady preconditioner).
+        let solver_ms=|s:&Lattice<'_>|s.work().milliseconds;
         for case in cases.split(','){
             let dir=root.join(case);
             let index:Value=serde_json::from_str(&std::fs::read_to_string(dir.join("index.json")).unwrap()).unwrap();
@@ -532,7 +522,7 @@ mod tests{
             println!("{}",json!({"case":case,"modes":n_modes,"near":estimate.lattice.near.len(),"ring":estimate.lattice.ring.len(),"operatorDeviation":operator,"buildMs":build_ms,
                 "kernelMs":estimate.lattice.build_ms[0],"classMs":estimate.lattice.build_ms[1],"classes":estimate.lattice.classes.len(),"eigenbasisMs":p.eigenbasis().unwrap().milliseconds,"eigenBlocks":p.eigenbasis().unwrap().blocks,"largestBlock":p.eigenbasis().unwrap().largest_block,
                 "kernelEntries":estimate.lattice.kernels.diagnostics.entries,"smallParameter":estimate.lattice.kernels.diagnostics.largest,"ledger":ledger.total()}));
-            let mut solver=Bordered{prepared:&p,modes:modes.clone(),solves:0,steps:0,ms:0.};
+            let mut solver=Lattice::new(&p,LatticeSets{explicit:sets.explicit.clone(),ring:sets.ring.clone()}).unwrap();
             let mut gate=OutputGate::new(p.generator.n,estimate.lattice.nu.clone(),estimate.lattice.centre);let limit=estimator::gate::GATE_FACTOR*POPULATION_TOLERANCE;
             let zero=vec![0.;p.generator.n];
             for cp in index["checkpoints"].as_array().unwrap(){
@@ -540,7 +530,7 @@ mod tests{
                 let data=complex(&std::fs::read(dir.join(format!("cp{solves:03}.bin"))).unwrap());
                 let mut at=0;let mut take=|len:usize|{let s=data[at..at+len].to_vec();at+=len;s};
                 let(x,s,b,_g)=(take(k*r),take(r*r),take(k*r),take(r*r));let(_c0,_th,th_e,_a,a_e,_ker,us)=(take(r),take(r),take(r),take(r),take(r),take(r),take(r));
-                let before=(estimate.lattice.work.clone(),estimate.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default(),solver.steps,solver.ms);
+                let before=(estimate.lattice.work.clone(),estimate.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default(),solver.work().steps,solver_ms(&solver));
                 let clock=Instant::now();
                 let errors=estimate.errors(&Checkpoint{basis:&basis[..k],images:&images[..k],x:&x,s:&s,theta:&th_e,coefficients:&a_e},&mut solver).unwrap();
                 let ms=clock.elapsed().as_secs_f64()*1e3;
@@ -563,7 +553,7 @@ mod tests{
                         "ringOperations":lw.block_operations-before.0.block_operations,"ringSolves":lw.block_solves-before.0.block_solves,
                         "poolApplications":pw.applications-before.1.applications,"poolPreconditions":pw.preconditions-before.1.preconditions,"poolSteps":pw.steps-before.1.steps,
                         "poolSolves":pw.solves-before.1.solves,"poolFrames":pw.frame_blocks-before.1.frame_blocks,"pipelineSolves":pw.pipeline_solves-before.1.pipeline_solves,
-                        "pipelineSteps":solver.steps-before.2,"pipelineMs":solver.ms-before.3,
+                        "pipelineSteps":solver.work().steps-before.2,"pipelineMs":solver_ms(&solver)-before.3,
                         "extendMs":pw.extend_ms-before.1.extend_ms,"stepMs":pw.step_ms-before.1.step_ms,"solveMs":pw.solve_ms-before.1.solve_ms},
                     "count":cp["count"].clone(),"modes":n_modes});
                 if let Some(actual)=cp["actual"].as_array(){

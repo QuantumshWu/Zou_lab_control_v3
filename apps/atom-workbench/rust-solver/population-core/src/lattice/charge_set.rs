@@ -25,7 +25,7 @@
 //! |y_r| over the probes.
 use super::*;
 use super::estimate_api::{LatticeSets,ring};
-use super::operator::{LatticeOperator,Restriction};
+use super::operator::{LatticeOperator,Mask,Parts};
 use super::classification::HarmonicStep;
 
 /// Translation gate and explicit start (times the tolerance).
@@ -134,18 +134,16 @@ fn seed_amplitudes(prepared:&LatticePrepared,probes:&[Vec<C>])->Result<BTreeMap<
     let mut layer=vec![usize::MAX;modes.len()];
     for k in(0..=SEED_DEPTH).rev(){for q in prepared.modes(k)?{layer[index[&q]]=k;}}
     let eigen=prepared.eigenbasis()?;
-    let mut steps=Vec::new();
-    for k in 0..SEED_DEPTH{
-        let restriction=Restriction{rows:layer.iter().map(|&l|l==k+1).collect(),columns:layer.iter().map(|&l|l<=k).collect(),diagonal:false};
-        steps.push(LatticeOperator::restricted(prepared,&modes,Some(&restriction))?);
-    }
+    let mut op=LatticeOperator::new(prepared,&modes)?;
+    // Layer k+1 from the layers up to k (disjoint: no diagonal block acts).
+    let masks:Vec<(Vec<bool>,Vec<bool>)>=(0..SEED_DEPTH).map(|k|(layer.iter().map(|&l|l==k+1).collect(),layer.iter().map(|&l|l<=k).collect())).collect();
     let mut amplitudes=BTreeMap::new();
     for probe in probes{
         let size=probe.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();if !(size>0.){continue;}
         let mut field=vec![ZERO;modes.len()*d];let centre=index[&prepared.generator.zero];
         for(t,v)in field[centre*d..(centre+1)*d].iter_mut().zip(probe){*t=scaled(*v,1./size);}
-        for(k,op)in steps.iter_mut().enumerate(){
-            let mut source=vec![ZERO;field.len()];op.apply(&field,&mut source)?;
+        for(k,(targets,sources))in masks.iter().enumerate(){
+            let mut source=vec![ZERO;field.len()];op.apply_masked(&field,&mut source,Parts::Full,Some(Mask{targets,sources}))?;
             let rows:Vec<usize>=(0..modes.len()).filter(|&q|layer[q]==k+1&&op.canonical[q]).collect();
             let mut blocks:Vec<C>=rows.iter().flat_map(|&q|source[q*d..(q+1)*d].iter().copied()).collect();
             let nu:Vec<f64>=rows.iter().map(|&q|op.nu[q]).collect();

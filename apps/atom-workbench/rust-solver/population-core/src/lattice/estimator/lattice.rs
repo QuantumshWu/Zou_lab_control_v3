@@ -25,7 +25,7 @@
 //! operator acts on.
 use super::super::*;
 use super::super::eigenbasis::BlockEigenbasis;
-use super::super::operator::{LatticeOperator,Parts,Restriction};
+use super::super::operator::{LatticeOperator,Mask,Parts};
 use super::blocks::BlockSystem;
 use super::kernels::{KernelRule,SwKernels};
 use crate::parallel::Execution;
@@ -82,11 +82,10 @@ pub struct ErrorLattice<'p>{
     pub modes:Vec<Charge>,pub nu:Vec<f64>,pub centre:usize,
     pub(super) index:BTreeMap<Charge,usize>,pub(super) mirror:Vec<usize>,
     /// The omitted ring R = ring(P u Q) and the lattice operator on
-    /// P u Q u R restricted to its pieces: P u Q -> R (the outflow), R's
-    /// diagonal blocks, R -> P u Q (the feedback); the modes of P u Q with a
-    /// ring neighbour.
+    /// P u Q u R, applied with masks: P u Q -> R for the outflow, R -> R for
+    /// the ring's diagonal blocks, R -> P u Q for the feedback.
     pub ring:Vec<Charge>,ring_nu:Vec<f64>,
-    outflow_op:LatticeOperator<'p>,ring_op:LatticeOperator<'p>,feedback_op:LatticeOperator<'p>,ring_mirror:Vec<usize>,edge_modes:usize,
+    outer:LatticeOperator<'p>,inner_mask:Vec<bool>,ring_mask:Vec<bool>,edge_modes:usize,
     pub kernels:SwKernels,
     /// The near modes (the centre and its one-step neighbours), and the (I - S)
     /// pairs into them: (target, source, step), target = source + step.
@@ -125,10 +124,8 @@ impl<'p> ErrorLattice<'p>{
         let ring=super::super::estimate_api::ring(prepared,modes)?;
         let ring_nu=ring.iter().map(|q|prepared.nu(q)).collect::<Result<Vec<_>,_>>()?;
         let all:Vec<Charge>=modes.iter().chain(&ring).cloned().collect();
+        let outer=LatticeOperator::new(prepared,&all)?;
         let inner_mask:Vec<bool>=(0..all.len()).map(|q|q<modes.len()).collect();let ring_mask:Vec<bool>=inner_mask.iter().map(|&b|!b).collect();
-        let piece=|rows:&[bool],columns:&[bool],diagonal:bool|LatticeOperator::restricted(prepared,&all,Some(&Restriction{rows:rows.to_vec(),columns:columns.to_vec(),diagonal}));
-        let(outflow_op,ring_op,feedback_op)=(piece(&ring_mask,&inner_mask,false)?,piece(&ring_mask,&ring_mask,true)?,piece(&inner_mask,&ring_mask,false)?);
-        let ring_mirror:Vec<usize>=(0..ring.len()).map(|r|outflow_op.mirror[modes.len()+r]-modes.len()).collect();
         let structural=prepared.plan.structural_steps();
         let edge_modes=modes.iter().filter(|q|ring.iter().any(|r|charge_minus(r,q).is_ok_and(|s|structural.contains(&s)))).count();
         let clock=Instant::now();
@@ -156,7 +153,7 @@ impl<'p> ErrorLattice<'p>{
         let class_ms=clock.elapsed().as_secs_f64()*1e3;
         let count=near.len();
         let outer_modes:Vec<usize>=frames.iter().copied().filter(|q|!near.contains(q)).collect();let outer_count=outer_modes.len();
-        Ok(Self{prepared,basis,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outflow_op,ring_op,feedback_op,ring_mirror,edge_modes,kernels,
+        Ok(Self{prepared,basis,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,kernels,
             near,pairs,frames,outer_modes,classes,class_of,basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],
             outer_basis:vec![Vec::new();outer_count],outer_image:vec![Vec::new();outer_count],columns:0,ring_in_fast:false,outer_bare:true,
             work:ErrorWork::default(),build_ms:[kernel_ms,class_ms]})
@@ -241,7 +238,7 @@ impl<'p> ErrorLattice<'p>{
         let outflow=|this:&mut Self,part:&[C]|->Result<Vec<C>,String>{
             if norm(part)==0.{return Ok(vec![ZERO;count*d]);}
             let mut field=vec![ZERO;(inner+count)*d];field[..inner*d].copy_from_slice(part);let mut out=vec![ZERO;field.len()];
-            this.outflow_op.apply(&field,&mut out)?;this.work.block_operations+=count;
+            this.outer.apply_masked(&field,&mut out,Parts::Full,Some(Mask{targets:&this.ring_mask,sources:&this.inner_mask}))?;this.work.block_operations+=count;
             Ok(out[inner*d..].to_vec())};
         let(oa,ob)=(outflow(self,&xa)?,outflow(self,&xb)?);let source=join(&oa,&ob);let size=norm(&source);
         if size==0.{return Ok(vec![ZERO;inner*d]);}
@@ -262,13 +259,14 @@ impl<'p> ErrorLattice<'p>{
     /// back onto the ring (`ring_rows`) or its couplings onto P u Q.
     fn ring_parts(&mut self,y:&[C],parts:Parts,ring_rows:bool)->Result<Vec<C>,String>{
         let d=self.d;let(inner,count)=(self.modes.len(),self.ring.len());
-        let(ya,yb)=split(y,&self.ring_mirror,self.n);
+        let ring_mirror:Vec<usize>=(0..count).map(|r|self.outer.mirror[inner+r]-inner).collect();
+        let(ya,yb)=split(y,&ring_mirror,self.n);
         let mut results=Vec::new();
         for part in[&ya,&yb]{
             if norm(part)==0.{results.push(vec![ZERO;if ring_rows{count*d}else{inner*d}]);continue;}
             let mut field=vec![ZERO;(inner+count)*d];field[inner*d..].copy_from_slice(part);let mut out=vec![ZERO;field.len()];
-            if ring_rows{self.ring_op.apply_parts(&field,&mut out,parts)?;self.work.block_operations+=count;}
-            else{self.feedback_op.apply_parts(&field,&mut out,parts)?;self.work.block_operations+=self.edge_modes;}
+            let mask=if ring_rows{Mask{targets:&self.ring_mask,sources:&self.ring_mask}}else{Mask{targets:&self.inner_mask,sources:&self.ring_mask}};
+            self.outer.apply_masked(&field,&mut out,parts,Some(mask))?;self.work.block_operations+=if ring_rows{count}else{self.edge_modes};
             results.push(if ring_rows{out[inner*d..].to_vec()}else{out[..inner*d].to_vec()});
         }
         Ok(join(&results[0],&results[1]))

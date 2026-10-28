@@ -36,7 +36,7 @@ use super::poles::{InnerWork,Lattice,Pole};
 use super::space::{self,Column,SLOW_FLOOR,Space};
 
 /// The error estimate in use.
-pub const ESTIMATOR:Construct=super::estimate_placeholder::construct;
+pub const ESTIMATOR:Construct=super::estimator::CONSTRUCT;
 /// Slow Ritz values checked for the slowest relaxation.
 const SLOW_CANDIDATES:usize=6;
 /// Solves between checkpoints; the ladder is re-ranked at every checkpoint
@@ -276,8 +276,11 @@ mod tests{
     fn lattice_pipeline_follows_the_exact_lattice_dynamics(){
         // The fixture from |0><0|: the trajectory (2 us), the state at a
         // horizon and the steady state against the same lattice P u Q
-        // propagated densely (RK4, real form) and its dense null vector.
-        let f=fixture();let p=prepared(&f);let n=4;let d=16;let groups=vec![vec![0,1],vec![2,3]];
+        // propagated densely (RK4, real form) and its dense null vector. The
+        // far drives at 2% of the fixture's: the estimate charges the fold's
+        // remainders over the slowest relaxation time (about 50 us here),
+        // which the fixture's own far drives (0.02/us) never let through.
+        let mut f=fixture();for v in f.far.iter_mut().chain(f.far2.iter_mut()){*v*=0.02;}let p=prepared(&f);let n=4;let d=16;let groups=vec![vec![0,1],vec![2,3]];
         let mut initial=vec![ZERO;d];initial[0]=ONE;
         let times:Vec<f64>=(0..21).map(|i|0.1*i as f64).collect();let horizons=[3.];
         let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,groups:&groups},None).unwrap();
@@ -292,7 +295,7 @@ mod tests{
                 for e in 0..size{x[e].re+=h/6.*(k1[e].re+2.*k2[e].re+2.*k3[e].re+k4[e].re);x[e].im+=h/6.*(k1[e].im+2.*k2[e].im+2.*k3[e].im+k4[e].im);}t+=h;}}
             worst=worst.max(ledger::metric(&readout(&x,t),row,&groups));
         }
-        // The placeholder estimate accepts within the tolerance.
+        // The estimate accepts within the tolerance.
         assert!(worst<=POPULATION_TOLERANCE,"trajectory {worst:e}");
         for _ in 0..10*steps{let k1=rate(&x);let k2=rate(&axpy(&x,&k1,h/2.));let k3=rate(&axpy(&x,&k2,h/2.));let k4=rate(&axpy(&x,&k3,h));
             for e in 0..size{x[e].re+=h/6.*(k1[e].re+2.*k2[e].re+2.*k3[e].re+k4[e].re);x[e].im+=h/6.*(k1[e].im+2.*k2[e].im+2.*k3[e].im+k4[e].im);}}
