@@ -171,12 +171,12 @@ impl<'a> FoldCharge<'a>{
         let x0_norm=x0.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();
         Ok(Self{prepared,op,edges,x0,x0_norm,work:FoldWork::default()})
     }
-    /// dA_b on Hermitian-symmetric fields x with their images A x.
-    /// The K^(1) rest on every fold edge acts once on i nu_p x_p + (A x)_p
-    /// (i nu_p x_p only where the operator leaves the rest out): its dense
-    /// sector blocks by GEMM over every (field, edge) side by side. The
-    /// third order acts on the fields marked `third` (`effect`).
-    fn remainder(&mut self,fields:&[(&[C],&[C])],third:&[bool])->Result<Vec<Vec<C>>,String>{
+    /// The K^(1) rests left out and the memory on Hermitian-symmetric fields
+    /// x with their images A x. The K^(1) rest on every fold edge acts once
+    /// on i nu_p x_p + (A x)_p (i nu_p x_p only where the operator leaves the
+    /// rest out): its dense sector blocks by GEMM over every (field, edge)
+    /// side by side.
+    fn remainder(&mut self,fields:&[(&[C],&[C])])->Result<Vec<Vec<C>>,String>{
         let clock=Instant::now();self.work.remainders+=fields.len();
         let(n,d,count)=(self.op.n,self.op.n*self.op.n,fields.len());let(fold,nu,edges)=(&self.prepared.fold,&self.op.nu,&self.edges);
         let(canonical,mirror)=(&self.op.canonical,&self.op.mirror);
@@ -208,12 +208,13 @@ impl<'a> FoldCharge<'a>{
                 for(c,&(f,e))in chunk.iter().enumerate(){let q=list[e].1;for(i,&row)in block.rows.iter().enumerate(){add(&mut out[f][q*d+row as usize],y[i+h*c]);}}}
         }}
         for y in &mut out{mirror_field(y,n,canonical,mirror);}
-        self.work.milliseconds[0]+=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
-        let marked:Vec<usize>=(0..count).filter(|&f|third[f]).collect();
-        let refs:Vec<&[C]>=marked.iter().map(|&f|fields[f].0).collect();
-        for(&f,y)in marked.iter().zip(fold.third_order_source(&self.op,&refs)?){for(a,b)in out[f].iter_mut().zip(y){add(a,b);}}
-        self.work.milliseconds[1]+=clock.elapsed().as_secs_f64()*1e3;
+        self.work.milliseconds[0]+=clock.elapsed().as_secs_f64()*1e3;
         Ok(out)
+    }
+    /// The third-order source on fields.
+    fn third_order(&mut self,fields:&[&[C]])->Result<Vec<Vec<C>>,String>{
+        let clock=Instant::now();let out=self.prepared.fold.third_order_source(&self.op,fields)?;
+        self.work.milliseconds[1]+=clock.elapsed().as_secs_f64()*1e3;Ok(out)
     }
     /// The stored fold K (the operator's fold part) on Hermitian-symmetric fields.
     fn fold(&mut self,fields:&[&[C]])->Result<Vec<Vec<C>>,String>{
@@ -266,9 +267,24 @@ impl<'a> FoldCharge<'a>{
             Ok(block_times(&lapack,&execution,packed,length,k,&flat,c.len())?.chunks_exact(length).map(|v|packing.unpack(v)).collect())};
         let mut model:Vec<[Vec<C>;2]>=vec![[self.x0.clone(),images[0].iter().map(|z|scaled(*z,self.x0_norm)).collect()]];
         for(x,ax)in combine(&w,&columns)?.into_iter().zip(combine(&aw,&columns)?){model.push([x,ax]);}
-        let third:Vec<bool>=(0..model.len()).map(|j|j>rank&&(long||(j==rank+1&&kernel.is_some()))).collect();
         let pairs:Vec<(&[C],&[C])>=model.iter().map(|[x,ax]|(&x[..],&ax[..])).collect();
-        let mut perturbed=self.remainder(&pairs,&third)?;
+        let mut perturbed=self.remainder(&pairs)?;
+        // P_s = R_s^T B diag(1_s) B^+: the slow coordinates along the fast
+        // Ritz vectors (the projector onto the slow Ritz vectors).
+        let bplus=pseudo_inverse(&lapack,b,k,r)?;
+        let mut projector=vec![0.;k*k];
+        for &m in &slow{for i in 0..k{for j in 0..k{projector[i+k*j]+=mul(b[i+k*m],bplus[m+r*j]).re;}}}
+        let ps:Vec<Vec<f64>>=columns[rank..].iter().map(|c|(0..k).map(|j|(0..k).map(|i|c[i]*projector[i+k*j]).sum()).collect()).collect();
+        // The third order on the slow Ritz vectors (the kernel's alone
+        // without a long output), and through P_s on every field: one linear
+        // operator on every column of the models (applied to x0 and Z, its
+        // effect is a short trajectory's, below 2e-6, R2 13.6).
+        let slow_third:Vec<usize>=if long{(0..ns).collect()}else{kernel.map(|_|0).into_iter().collect()};
+        let third=self.third_order(&slow_third.iter().map(|&j|&model[1+rank+j][0][..]).collect::<Vec<_>>())?;
+        let through=|y:&mut Vec<C>,c:&[f64]|{for(t,&j)in third.iter().zip(&slow_third){let s:f64=ps[j].iter().zip(c).map(|(u,v)|u*v).sum();
+            if s!=0.{for(a,v)in y.iter_mut().zip(t){a.re+=s*v.re;a.im+=s*v.im;}}}};
+        let mut origin=vec![0.;k];origin[0]=self.x0_norm;
+        for(y,c)in perturbed.iter_mut().zip(std::iter::once(&origin).chain(&columns)){through(y,c);}
         // The slow responses Y_m to dA_b v_m = dA_b V_s (R_s^T b_m): the
         // kernel's for the steady state, every slow mode's (one of each
         // conjugate pair: the other's Y is the flip) for a long output.
@@ -290,7 +306,11 @@ impl<'a> FoldCharge<'a>{
         // A long output: the compact model on [x0, Z, V_s, Y].
         if long{
             let pairs:Vec<(&[C],&[C])>=responses.iter().map(|[y,ay]|(&y[..],&ay[..])).collect();
-            perturbed.extend(self.remainder(&pairs,&vec![false;pairs.len()])?);model.extend(responses);
+            let mut changes=self.remainder(&pairs)?;
+            let packed:Vec<f64>=responses.iter().flat_map(|[y,_]|packing.pack(y)).collect();
+            let wy=block_cross(&lapack,&execution,&w,k,&packed,responses.len(),length)?;
+            for(i,y)in changes.iter_mut().enumerate(){through(y,&wy[k*i..k*(i+1)]);}
+            perturbed.extend(changes);model.extend(responses);
             let clock=Instant::now();
             let(response,rows)=Compact::new(&lapack,&execution,&packing,&model,&perturbed,&self.x0,lattice.centre,n)?.response(&lapack)?;
             if long_trajectory{effect.trajectory=rows.trajectory(&lapack,&response,outputs.times,&lattice.nu)?;}
@@ -302,11 +322,7 @@ impl<'a> FoldCharge<'a>{
         if !long_trajectory&&!outputs.times.is_empty(){
             let clock=Instant::now();
             let p=rank+ns;
-            // C = [U_r^T (I - R_s P_s); P_s], P_s = R_s^T B diag(1_s) B^+.
-            let bplus=pseudo_inverse(&lapack,b,k,r)?;
-            let mut projector=vec![0.;k*k];
-            for &m in &slow{for i in 0..k{for j in 0..k{projector[i+k*j]+=mul(b[i+k*m],bplus[m+r*j]).re;}}}
-            let ps:Vec<Vec<f64>>=columns[rank..].iter().map(|c|(0..k).map(|j|(0..k).map(|i|c[i]*projector[i+k*j]).sum()).collect()).collect();
+            // C = [U_r^T (I - R_s P_s); P_s].
             let mut cmat=vec![0.;p*k];
             for(i,u)in columns[..rank].iter().enumerate(){for j in 0..k{
                 let mut v=u[j];for(s,rs)in columns[rank..].iter().enumerate(){let urs:f64=(0..k).map(|l|u[l]*rs[l]).sum();v-=urs*ps[s][j];}cmat[i+p*j]=v;}}
@@ -459,7 +475,8 @@ mod tests{
         let setup=EstimateSetup{prepared:&p,lattice:&sets,outputs:Outputs{times:&times,horizons:&[],steady:true,groups:&groups},frame:&frame,ledger:&ledger,initial:&initial};
         let mut charge=FoldCharge::new(&setup).unwrap();
         let x=symmetric_field(&op,5);let mut ax=vec![ZERO;size];op.apply(&x,&mut ax).unwrap();
-        let y=charge.remainder(&[(&x,&ax)],&[true]).unwrap().remove(0);
+        let mut y=charge.remainder(&[(&x,&ax)]).unwrap().remove(0);
+        for(a,b)in y.iter_mut().zip(charge.third_order(&[&x]).unwrap().remove(0)){add(a,b);}
         let mut expected=p.fold.third_order_source(&op,&[&x]).unwrap().remove(0);
         let dropped=op.dropped_k1_rest>0.;
         for target in &p.fold.targets{
