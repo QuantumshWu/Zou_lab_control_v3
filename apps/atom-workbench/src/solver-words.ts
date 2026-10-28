@@ -37,8 +37,8 @@ const SENTENCES:Record<string,string>={
   'Cancelled.':'计算已取消。',
 };
 /** What a mean's reason adds when its run was not accepted (lattice_core_adapter.rs `OUTSIDE`). */
-const OUTSIDE=' Not converged: the run was not accepted (its error bound, asymptoticEstimatedError, is above the tolerance, or a slow class it needs is not resolved), so the populations are an estimate.';
-const OUTSIDE_WORDS='未收敛：计算未被接受（误差界高于误差目标，或所需的慢类未分辨），布居只是估计值。';
+const OUTSIDE=' Not converged: its error bound (asymptoticEstimatedError) is above the tolerance, so the populations are an estimate.';
+const OUTSIDE_WORDS='未收敛：误差界高于误差目标，布居只是估计值。';
 /** A number the solver wrote (Rust {:e} or plain), as the workbench writes numbers. */
 const num=(text:string):string=>{const value=Number(text);return Number.isFinite(value)?formatNumber(value,{digits:3}):text;};
 /** Why a run stopped (rust-solver population-core lattice/pipeline.rs). */
@@ -54,8 +54,6 @@ const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
   [/^Stopped because (.+?): the best checkpoint \((\d+) solves\) has an error bound of (\S+) against the tolerance (\S+?)(?:; (\d+) of (\d+) samples above it, t = (\S+) to (\S+) us)?(?:; (\d+) mean output\(s\) above it)?$/,
     (reason,n,bound,tolerance,over,samples,from,to,means)=>[`${why(reason)}，计算停止：最好的检查点（${n} 次求解）误差界为 ${num(bound)}，误差目标 ${num(tolerance)}`,
       ...(over?[`${samples} 个采样点中有 ${over} 个超过误差目标（t = ${from===to?num(from):`${num(from)} 到 ${num(to)}`} µs）`]:[]),...(means?[`${means} 个长期布居输出超过误差目标`]:[])].join('；')+'。'],
-  [/^Every output is within the tolerance; a slow class of the initial state an output needs is not resolved \((.+)\)$/,
-    reason=>`所有输出都在误差目标内；某个输出所需的初态慢类未分辨（${why(reason)}）。`],
   [/^Checkpoint at (\d+) solves: the error bound is (\S+) against the tolerance (\S+); the run continues$/,
     (n,bound,tolerance)=>`第 ${n} 次求解的检查点：误差界 ${num(bound)}，误差目标 ${num(tolerance)}；计算继续。`],
   [/^The mean's error bound is (\S+), at least 1: it carries no information, so no populations are shown$/,

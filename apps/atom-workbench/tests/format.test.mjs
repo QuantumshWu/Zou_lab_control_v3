@@ -63,7 +63,6 @@ test('the stop and checkpoint reasons the solver formats are shown in Chinese',(
     for(const tail of [['',''],[samples,''],['',means],[samples,means]]){
       chinese(formatted(pipelineSource,'Stopped because',[why,24,'1.89e-2','5e-3',...tail]),why);
     }
-    chinese(formatted(pipelineSource,'Every output is within the tolerance',[why]),why);
   }
   chinese(formatted(adapterSource,'Checkpoint at',[8,'1.20e-2','5e-3']),'checkpoint');
   chinese(formatted(adapterSource,"The mean's error bound is",['3.61e0']),'uninformative mean');
@@ -73,7 +72,7 @@ test('the stop and checkpoint reasons the solver formats are shown in Chinese',(
 });
 test('every sentence the pipeline and the adapter format is shown in Chinese (a new one fails here)',()=>{
   const sentences=[...formatStrings(pipelineSource),...formatStrings(adapterSource)].filter(f=>/^[A-Z][a-z]/.test(f));
-  assert.ok(sentences.length>=6,`${sentences.length} sentences`);
+  assert.ok(sentences.length>=5,`${sentences.length} sentences`);
   for(const format of sentences)chinese(format.replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'),format);
 });
 test('every mean reason the native adapter writes is shown in Chinese, within the tolerance and outside it',()=>{
