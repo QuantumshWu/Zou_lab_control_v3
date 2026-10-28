@@ -152,26 +152,64 @@ impl ComplexGemm<'_> {
         c: &mut [Complex64],
         ldc: usize,
     ) -> Result<(), String> {
+        self.call(false, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc)
+    }
+    /// C = alpha * A^H * B + beta * C, where A is k x m (leading dimension
+    /// lda); otherwise as `multiply`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn multiply_adjoint(
+        &self,
+        m: usize,
+        n: usize,
+        k: usize,
+        alpha: Complex64,
+        a: &[Complex64],
+        lda: usize,
+        b: &[Complex64],
+        ldb: usize,
+        beta: Complex64,
+        c: &mut [Complex64],
+        ldc: usize,
+    ) -> Result<(), String> {
+        self.call(true, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn call(
+        &self,
+        adjoint: bool,
+        m: usize,
+        n: usize,
+        k: usize,
+        alpha: Complex64,
+        a: &[Complex64],
+        lda: usize,
+        b: &[Complex64],
+        ldb: usize,
+        beta: Complex64,
+        c: &mut [Complex64],
+        ldc: usize,
+    ) -> Result<(), String> {
         fn span(rows: usize, cols: usize, ld: usize) -> Option<usize> {
             if rows == 0 || cols == 0 { Some(0) } else { ld.checked_mul(cols - 1)?.checked_add(rows) }
         }
         if m == 0 || n == 0 {
             return Ok(());
         }
+        let (a_rows, a_cols) = if adjoint { (k, m) } else { (m, k) };
         let fits = |v: usize| v <= i32::MAX as usize;
-        let valid = lda >= m.max(1) && ldb >= k.max(1) && ldc >= m
+        let valid = lda >= a_rows.max(1) && ldb >= k.max(1) && ldc >= m
             && [m, n, k, lda, ldb, ldc].iter().all(|&v| fits(v))
-            && span(m, k, lda).is_some_and(|v| v <= a.len())
+            && span(a_rows, a_cols, lda).is_some_and(|v| v <= a.len())
             && span(k, n, ldb).is_some_and(|v| v <= b.len())
             && span(m, n, ldc).is_some_and(|v| v <= c.len());
         if !valid {
             return Err("Invalid strided complex GEMM dimensions".into());
         }
-        let no = b'N' as c_char;
+        let (transa, no) = ((if adjoint { b'C' } else { b'N' }) as c_char, b'N' as c_char);
         let (mi, ni, ki) = (m as i32, n as i32, k as i32);
         let (la, lb, lc) = (lda as i32, ldb as i32, ldc as i32);
         unsafe {
-            (self.zgemm)(&no, &no, &mi, &ni, &ki, &alpha, a.as_ptr(), &la, b.as_ptr(), &lb, &beta, c.as_mut_ptr(), &lc);
+            (self.zgemm)(&transa, &no, &mi, &ni, &ki, &alpha, a.as_ptr(), &la, b.as_ptr(), &lb, &beta, c.as_mut_ptr(), &lc);
         }
         Ok(())
     }
