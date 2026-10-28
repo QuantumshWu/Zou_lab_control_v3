@@ -3,7 +3,7 @@ import {absoluteEnergyMHz,laserCarrierOffsetMHz,laserFrequencyMHz} from './physi
 
 /** A spectroscopy origin belongs to one beam. It never changes rho(0). */
 export function laserReferenceStateId(scene:Scene,laser?:Laser):string {
-  return laser?.referenceStateId??scene.dynamics?.initialStateId??`ground-${scene.initialF}-${scene.initialM}`;
+  return laser?.referenceStateId??scene.dynamics.initialStateId;
 }
 
 /** A state's card with a laser selected (ui-design.md §1.5): how far the state lies above
@@ -57,13 +57,13 @@ export function targetDetuningMHz(initial:Level,target:Level,laser:Laser):number
  * from an earlier reference level never applies to a real state. */
 export function laserEmits(scene:Scene,laser:Laser,states:readonly Pick<Level,'id'|'manifold'>[]):boolean{
   const id=laserReferenceStateId(scene,laser);
-  if(scene.references?.some(r=>r.id===id))return laser.referenceProcess==='emission';
+  if(scene.references.some(r=>r.id===id))return laser.referenceProcess==='emission';
   const state=states.find(s=>s.id===id);return state!==undefined&&state.manifold!=='ground';
 }
 /** The laser's diagram origin; the photon direction belongs to a reference level and goes with it. */
 export function setLaserReferenceState(scene:Scene,laser:Laser,id:string|undefined):void{
   if(id)laser.referenceStateId=id;else delete laser.referenceStateId;
-  if(!id||!scene.references?.some(r=>r.id===id))delete laser.referenceProcess;
+  if(!id||!scene.references.some(r=>r.id===id))delete laser.referenceProcess;
 }
 /** A card when the laser's reference state is a reference level, and every reference
  * level's own card: read by the rule of the manifold its energy lies in, as a state there

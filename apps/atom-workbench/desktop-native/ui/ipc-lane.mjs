@@ -53,7 +53,7 @@ export class IpcNativeLane {
       return {...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:this.owner.binarySha256,buildSha256:this.owner.build.sha256,asymptoticCacheHit:false,startup:{...w.startup}}};
     };
     if(message.progress!==undefined){
-      try{if(message.progress!=='asymptotic'||!job.onProgress)throw Error('Unexpected native progress message.');job.onProgress(convert());}
+      try{if(message.progress!=='checkpoint'||!job.onProgress)throw Error('Unexpected native progress message.');job.onProgress(convert());}
       catch(error){this.failWorker(w,failure(error.message,502,'invalid-native-response'));}return;
     }
     this.active=null;

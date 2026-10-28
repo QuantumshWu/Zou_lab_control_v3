@@ -28,7 +28,7 @@ const boundText=(s:Level)=>{const b=s.shiftBound;if(!b||b.floquetMHz+b.outsideMH
 // colors. Its dedicated gutter never recolors or overlays a population readout.
 const selectionNumber=(x:number,y:number,label:1|2)=>`<g class="state-selection-number" data-badge-number="${label}" data-badge-x="${x-51}" data-badge-y="${y-14}" aria-label="标记 ${label}"><circle cx="${x-43}" cy="${y}" r="7" fill="var(--orange-dark, #A65F00)"/><text x="${x-43}" y="${y+3.5}" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">${label}</text></g>`;
 export function combinedLevelsChart(scene:Scene,a:Analysis,laser:Laser|undefined,o:LevelChartOptions):string{
- const all=[...a.ground,...a.D1,...a.D2],byId=new Map(all.map(s=>[s.id,s])),refs=scene.references??[],W=990,x=(m:number)=>480+m*90;
+ const all=[...a.ground,...a.D1,...a.D2],byId=new Map(all.map(s=>[s.id,s])),refs=scene.references,W=990,x=(m:number)=>480+m*90;
  const refE=new Map(refs.map(r=>[r.id,referenceEnergyMHz(r,all,scene)!]));
  const energyManifold=(energy:number)=>energy<1e8?'ground':Math.abs(energy-absoluteEnergyMHz(a.D1[0]!))<Math.abs(energy-absoluteEnergyMHz(a.D2[0]!))?'D1':'D2';
  const count=(name:string)=>refs.filter(r=>energyManifold(refE.get(r.id)!)===name).length;
@@ -65,7 +65,7 @@ export function combinedLevelsChart(scene:Scene,a:Analysis,laser:Laser|undefined
  if(mark!==undefined)svg+=selectionNumber(xx,yy,mark);
  if(ground)svg+=readout(xx,yy,'above',percent(o.steadyPopulations?.[s.id]),'steady-population-label',`data-state-id="${s.id}"`);
  svg+=readout(xx,yy,'below',reading(read),'level-value-label',`data-state-id="${s.id}" data-quantity="${laser?'detuning':'total-shift'}" data-value-mhz="${read??''}"`);
- if(scene.marks?.[s.id])svg+=t(xx,yy-(ground?31:14),scene.marks[s.id]!, 'text-anchor="middle" font-size="10"');svg+='</g>';}
+ if(scene.marks[s.id])svg+=t(xx,yy-(ground?31:14),scene.marks[s.id]!, 'text-anchor="middle" font-size="10"');svg+='</g>';}
  svg+='</g>';}
  const stateLayer=svg;svg=prefix;
  // Coupling paths refer to the selected laser only; all manifolds stay visible.

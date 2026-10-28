@@ -50,14 +50,14 @@ type StateScene=FrequencyScene&Pick<Scene,'references'>;
 /** A state's energy as a frequency, E/h: a real state, or a reference level by its definition. */
 export function stateValue(id:string,levels:readonly Level[],scene:StateScene):FrequencyValue|undefined{
   const level=levels.find(l=>l.id===id);if(level)return levelValue(level);
-  const r=scene.references?.find(r=>r.id===id);return r?referenceLevelValue(r,levels,scene):undefined;
+  const r=scene.references.find(r=>r.id===id);return r?referenceLevelValue(r,levels,scene):undefined;
 }
 /** The same state with no field and no light (ui-design.md §1.8): a real state's zero-field
  * hyperfine level; a reference level's own definition on its anchor's zero-field level -- its
  * photon and offset δ define it, they are not a shift. */
 export function zeroFieldStateValue(id:string,levels:readonly Level[],scene:StateScene):FrequencyValue|undefined{
   const level=levels.find(l=>l.id===id);if(level){const zero=zeroFieldLevel(level);return zero&&levelValue(zero);}
-  const r=scene.references?.find(r=>r.id===id);return r?referenceLevelValue({...r,anchorMode:'zero-field'},levels,scene):undefined;
+  const r=scene.references.find(r=>r.id===id);return r?referenceLevelValue({...r,anchorMode:'zero-field'},levels,scene):undefined;
 }
 
 // ------------------------------------------------------------ bases
@@ -76,7 +76,7 @@ export function parseBase(key:string):FrequencyBase|undefined{
 export function baseValue(base:FrequencyBase,scene:FrequencyScene):FrequencyValue|undefined{
   if(base.kind==='absolute')return value(0,0);
   if(base.kind==='transition')return transitionValue(base);
-  if(base.kind==='reference'){const r=scene.referenceFrequencies?.find(r=>r.id===base.id);return r?.frequencyAnchor?anchorValue(r.frequencyAnchor):undefined;}
+  if(base.kind==='reference'){const r=scene.referenceFrequencies.find(r=>r.id===base.id);return r?.frequencyAnchor?anchorValue(r.frequencyAnchor):undefined;}
   const laser=scene.lasers.find(l=>l.id===base.id);return laser?laserValue(laser):undefined;
 }
 export function transitionName(t:ZeroFieldTransition):string{
@@ -89,7 +89,7 @@ export function readingHeading(base:FrequencyBase,scene:FrequencyScene,unit:Freq
   return base.kind==='absolute'?`ν / ${unit}`:`ν − ν(${baseName(base,scene)}) / ${unit}`;
 }
 export function baseName(base:FrequencyBase,scene:FrequencyScene):string{
-  return base.kind==='absolute'?'绝对':base.kind==='transition'?transitionName(base):base.kind==='reference'?scene.referenceFrequencies?.find(r=>r.id===base.id)?.name??base.id:scene.lasers.find(l=>l.id===base.id)?.name??base.id;
+  return base.kind==='absolute'?'绝对':base.kind==='transition'?transitionName(base):base.kind==='reference'?scene.referenceFrequencies.find(r=>r.id===base.id)?.name??base.id:scene.lasers.find(l=>l.id===base.id)?.name??base.id;
 }
 
 // ------------------------------------------------------------ reading

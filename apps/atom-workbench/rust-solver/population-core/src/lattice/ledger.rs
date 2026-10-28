@@ -1,7 +1,14 @@
 //! The error ledger: the population tolerance, the error metric, and every
-//! remainder the folded lattice leaves out, first as a generator-norm bound
-//! (closed form, prepared from the classification) and then as a population
-//! charge.
+//! remainder the folded lattice leaves out as a generator-norm bound (closed
+//! form, prepared from the classification). The error estimate builds one
+//! of them, the K^(1) rests the operator leaves out (`k1_rest`), into the
+//! slow modes' sources (`estimator`); the others (`unbuilt`) are reported
+//! only. Their action on the computed state, measured with the third order
+//! and the fold's memory built (R2 section 14.3; two to five lasers, 20 us
+//! to 10 ms, the steady state and the mean over 1 s): third order and memory
+//! at most 6e-6 each, every other remainder at most 2.6e-7, against the
+//! tolerance 5e-3; their generator-norm bounds lie 6-8 orders of magnitude
+//! above what they do.
 //!
 //! Bounds (rad/us, Schur test over the lattice blocks, for a lattice whose
 //! largest mode frequency is nu_max; d(r) = 1/(|nu_r| - nu_max - ||L0||)
@@ -18,23 +25,15 @@
 //! - `omitted_cross`: far + far groups below the cross-fold floor;
 //! - `non_structural`: near couplings below the structural floor, on their
 //!   edges leaving the lattice;
-//! - `dropped_entries`: fold entries below the storage floor (row sums).
-//!
-//! Population charge = bound x sensitivity, where the sensitivity is the
-//! steady population response per unit generator norm, measured on the
-//! largest remainder's own source (an error equation, `estimate`): the
-//! third-order term when near couplings exist, else the fold itself.
+//! - `dropped_entries`: fold entries below the storage floor (row sums);
+//! - `k1_rest`: the K^(1) rests the lattice operator leaves out but for
+//!   their population rows (`operator::K1_REST_SHARE`), times nu_max.
 use super::*;
 use super::classification::{HarmonicPlan,Treatment};
 
 /// The population tolerance: absolute, on the probability scale, over every
 /// state and requested group. It is fixed; no other accuracy is served.
 pub const POPULATION_TOLERANCE:f64=5e-3;
-/// Safety factor of an acceptance: kappa (algebraic + truncation + fold
-/// estimates) <= POPULATION_TOLERANCE.
-pub const KAPPA:f64=1.5;
-/// Share of the tolerance left to the algebraic (Krylov) error.
-pub const ALGEBRAIC_SHARE:f64=1./20.;
 /// Largest accepted static-expansion parameter max |nu_q| ||D_s^-1||.
 pub const EXPANSION_LIMIT:f64=1e-2;
 /// Far-shell paths enumerated exactly up to this many steps.
@@ -50,21 +49,24 @@ pub fn metric(a:&[f64],b:&[f64],groups:&[Vec<usize>])->f64{
 #[derive(Clone,Debug,Default)]
 pub struct RemainderLedger{
     pub nu_freeze:f64,pub third_order:f64,pub far_shell:f64,pub tail:f64,
-    pub omitted_cross:f64,pub non_structural:f64,pub dropped_entries:f64,
+    pub omitted_cross:f64,pub non_structural:f64,pub dropped_entries:f64,pub k1_rest:f64,
     /// max |nu_q| ||D_s^-1|| over the folded steps.
     pub expansion_parameter:f64,
     /// The diagonal and cross folds' own bound sum c c' d (the size of K).
     pub fold:f64,
 }
 impl RemainderLedger{
-    pub fn total(&self)->f64{
+    /// The remainders the estimate does not build (reported only; see the
+    /// module documentation for their measured action).
+    pub fn unbuilt(&self)->f64{
         self.nu_freeze+self.third_order+self.far_shell+self.tail+self.omitted_cross+self.non_structural+self.dropped_entries
     }
     /// Bounds for a lattice with largest |nu_q| = `nu_max`; `dropped` are the
-    /// fold storage's dropped row sums of K^(0) and K^(1).
-    pub fn new(plan:&HarmonicPlan,nu_max:f64,dropped:[f64;2])->Result<Self,String>{
+    /// fold storage's dropped row sums of K^(0) and K^(1), `k1_rest` the
+    /// summed row sums of the K^(1) rests the lattice operator leaves out.
+    pub fn new(plan:&HarmonicPlan,nu_max:f64,dropped:[f64;2],k1_rest:f64)->Result<Self,String>{
         let l0=plan.l0_bound;let cut=plan.cut;
-        let mut ledger=Self{dropped_entries:dropped[0]+nu_max*dropped[1],..Default::default()};
+        let mut ledger=Self{dropped_entries:dropped[0]+nu_max*dropped[1],k1_rest:nu_max*k1_rest,..Default::default()};
         ledger.non_structural=plan.steps.iter().filter(|s|s.treatment==Treatment::Explicit{structural:false}).map(|s|s.size).sum();
         ledger.fold=plan.targets.iter().map(|t|t.size).sum();
         let far=plan.far();
@@ -110,25 +112,6 @@ impl RemainderLedger{
     }
 }
 
-/// The ledger's bounds as population charges (probability scale).
-#[derive(Clone,Debug,Default)]
-pub struct PopulationCharges{
-    /// Population response per unit generator norm (1/(rad/us)).
-    pub sensitivity:f64,
-    pub nu_freeze:f64,pub third_order:f64,pub far_shell:f64,pub tail:f64,
-    pub omitted_cross:f64,pub non_structural:f64,pub dropped_entries:f64,
-}
-impl PopulationCharges{
-    pub fn new(ledger:&RemainderLedger,sensitivity:f64)->Self{
-        Self{sensitivity,nu_freeze:ledger.nu_freeze*sensitivity,third_order:ledger.third_order*sensitivity,
-            far_shell:ledger.far_shell*sensitivity,tail:ledger.tail*sensitivity,omitted_cross:ledger.omitted_cross*sensitivity,
-            non_structural:ledger.non_structural*sensitivity,dropped_entries:ledger.dropped_entries*sensitivity}
-    }
-    pub fn total(&self)->f64{
-        self.nu_freeze+self.third_order+self.far_shell+self.tail+self.omitted_cross+self.non_structural+self.dropped_entries
-    }
-}
-
 #[cfg(test)]
 mod tests{
     use super::*;
@@ -136,10 +119,10 @@ mod tests{
     #[test]
     fn lattice_ledger_bounds_are_finite_and_split_without_double_counting(){
         let f=fixture();let p=prepared(&f);
-        let ledger=RemainderLedger::new(&p.plan,6.,[0.,0.]).unwrap();
-        assert!(ledger.expansion_parameter<1e-2&&ledger.nu_freeze>0.&&ledger.third_order>0.&&ledger.total().is_finite());
+        let ledger=RemainderLedger::new(&p.plan,6.,[0.,0.],0.).unwrap();
+        assert!(ledger.expansion_parameter<1e-2&&ledger.nu_freeze>0.&&ledger.third_order>0.&&ledger.unbuilt().is_finite());
         // The third-order paths are part of the enumerated three-step returns.
         assert!(ledger.far_shell>=0.&&ledger.tail.is_finite());
-        assert_eq!(RemainderLedger::new(&p.plan,0.,[0.,0.]).unwrap().nu_freeze,0.);
+        assert_eq!(RemainderLedger::new(&p.plan,0.,[0.,0.],0.).unwrap().nu_freeze,0.);
     }
 }

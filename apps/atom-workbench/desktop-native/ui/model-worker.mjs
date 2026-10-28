@@ -12,14 +12,14 @@ export function createModelWorker(post){
     if(unavailable){finish(channel,503,{error:unavailable,code:'solver-unavailable'});return;}
     if(!service){if(pending.length>=8)finish(channel,503,{error:'Native bridge is not ready.',code:'solver-unavailable'});else pending.push({channel,input});return;}
     let task,streaming=false,token;
-    const event=(type,data,status)=>{streaming=true;post({kind:'stream',channel,event:{type,data,...(status===undefined?{}:{status})},done:type!=='asymptotic'});};
+    const event=(type,data,status)=>{streaming=true;post({kind:'stream',channel,event:{type,data,...(status===undefined?{}:{status})},done:type!=='checkpoint'});};
     try{
       if(!input?.scene||typeof input.scene!=='object')throw Error('Scene required');
       token=input.request;
       if(!token||typeof token.clientId!=='string'||!/^[-\w]{1,96}$/.test(token.clientId)||!Number.isSafeInteger(token.sequence)||token.sequence<1)throw Error('Invalid request identity');
       if(input.stream!==undefined&&typeof input.stream!=='boolean')throw Error('Invalid stream option');
       const native=prepareNativeSolve(input);
-      task=service.submit(native.payload,token,input.stream?result=>event('asymptotic',native.respond(result,token)):undefined);active.set(channel,task);
+      task=service.submit(native.payload,token,input.stream?result=>event('checkpoint',native.respond(result,token)):undefined);active.set(channel,task);
       const result=await task.promise;
       if(active.get(channel)!==task)return;
       const data=native.respond(result,token);if(input.stream)event('result',data);else finish(channel,200,data);

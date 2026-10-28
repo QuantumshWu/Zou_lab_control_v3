@@ -9,8 +9,8 @@ function zeroScene() {
   const s=defaultScene();s.fields[0].magnitudeG=0;s.lasers[0].direction=spherical(0,0);
   // Isolate one beam for these spectroscopy sum-rule tests; the product's
   // default scene also includes an enabled far-detuned tweezer.
-  s.lasers=s.lasers.filter(l=>l.id==='probe');delete s.lasers[0].referenceTransition;
-  s.initialF=2;s.initialM=2;s.dynamics.initialStateId='ground-2-2';s.lasers[0].ellipticityDeg=45;
+  s.lasers=s.lasers.filter(l=>l.id==='probe');s.lasers[0].frequency={base:{kind:'transition',line:'D2',Fg:2,Fe:3},offsetMHz:0};
+  s.dynamics.initialStateId='ground-2-2';s.lasers[0].ellipticityDeg=45;
   return s;
 }
 
@@ -82,7 +82,7 @@ test('Jones helicity, transverse geometry and polarization conservation',()=>{
 });
 
 test('cycling line strength, zero-field reference and Rabi convention',()=>{
-  const s=zeroScene();s.lasers[0].intensityMWcm2=1.66933;s.lasers[0].detuningMHz=0;
+  const s=zeroScene();s.lasers[0].intensityMWcm2=1.66933;
   const a=analyze(s),t=a.transitions.find(t=>t.Fe===3&&t.me===3);
   near(t.strength,1);near(t.weight,1);near(t.offsetMHz,0,1e-9);
   near(t.rabiMHz,RB87.D2.gammaHz/(2*Math.PI)/1e6/Math.sqrt(2),0.001);

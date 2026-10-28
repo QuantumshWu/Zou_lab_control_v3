@@ -95,19 +95,9 @@ type ZGemm = unsafe extern "C" fn(
     *mut Complex64,
     *const i32,
 );
-type ZGeEs = unsafe extern "C" fn(
-    *const c_char, *const c_char, Option<unsafe extern "C" fn(*const Complex64) -> i32>,
-    *const i32, *mut Complex64, *const i32, *mut i32, *mut Complex64,
-    *mut Complex64, *const i32, *mut Complex64, *const i32, *mut f64, *mut i32, *mut i32,
-);
 type ZGeEv = unsafe extern "C" fn(
     *const c_char,*const c_char,*const i32,*mut Complex64,*const i32,*mut Complex64,
     *mut Complex64,*const i32,*mut Complex64,*const i32,*mut Complex64,*const i32,*mut f64,*mut i32,
-);
-type ZTrSyl = unsafe extern "C" fn(
-    *const c_char, *const c_char, *const i32, *const i32, *const i32,
-    *const Complex64, *const i32, *const Complex64, *const i32,
-    *mut Complex64, *const i32, *mut f64, *mut i32,
 );
 type ZGetRf = unsafe extern "C" fn(*const i32, *const i32, *mut Complex64, *const i32, *mut i32, *mut i32);
 type ZGetRs = unsafe extern "C" fn(
@@ -131,25 +121,12 @@ pub struct Lapack {
     heev: HeEv,
     gemm: Gemm,
     zgemm: ZGemm,
-    zgees: ZGeEs,
     zgeev: ZGeEv,
-    ztrsyl: ZTrSyl,
     zgetrf: ZGetRf,
     zgetrs: ZGetRs,
 }
-/// Narrow shared kernel for independent Sylvester applications. It copies only
-/// immutable BLAS/LAPACK entry points; no raw library handle, global setters,
-/// mutable factor, or workspace is shared. Its lifetime is tied to the loaded
-/// Lapack owner; every FFI output buffer below is allocated inside the call.
-/// Function pointers and the lifetime marker are Send + Sync without an unsafe
-/// implementation. The caller keeps OpenBLAS single-threaded for outer workers.
-#[derive(Clone, Copy)]
-pub struct SylvesterKernel<'a> {
-    ztrsyl: ZTrSyl,
-    _owner: std::marker::PhantomData<&'a ()>,
-}
-/// Strided column-major complex GEMM on sub-matrices. Like `SylvesterKernel`
-/// it copies only the immutable BLAS entry point, so it is Send + Sync and may
+/// Strided column-major complex GEMM on sub-matrices. It copies only the
+/// immutable BLAS entry point, so it is Send + Sync and may
 /// be called from worker threads while OpenBLAS itself runs single-threaded.
 #[derive(Clone, Copy)]
 pub struct ComplexGemm<'a> {
@@ -175,56 +152,69 @@ impl ComplexGemm<'_> {
         c: &mut [Complex64],
         ldc: usize,
     ) -> Result<(), String> {
+        self.call(false, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc)
+    }
+    /// C = alpha * A^H * B + beta * C, where A is k x m (leading dimension
+    /// lda); otherwise as `multiply`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn multiply_adjoint(
+        &self,
+        m: usize,
+        n: usize,
+        k: usize,
+        alpha: Complex64,
+        a: &[Complex64],
+        lda: usize,
+        b: &[Complex64],
+        ldb: usize,
+        beta: Complex64,
+        c: &mut [Complex64],
+        ldc: usize,
+    ) -> Result<(), String> {
+        self.call(true, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn call(
+        &self,
+        adjoint: bool,
+        m: usize,
+        n: usize,
+        k: usize,
+        alpha: Complex64,
+        a: &[Complex64],
+        lda: usize,
+        b: &[Complex64],
+        ldb: usize,
+        beta: Complex64,
+        c: &mut [Complex64],
+        ldc: usize,
+    ) -> Result<(), String> {
         fn span(rows: usize, cols: usize, ld: usize) -> Option<usize> {
             if rows == 0 || cols == 0 { Some(0) } else { ld.checked_mul(cols - 1)?.checked_add(rows) }
         }
         if m == 0 || n == 0 {
             return Ok(());
         }
+        let (a_rows, a_cols) = if adjoint { (k, m) } else { (m, k) };
         let fits = |v: usize| v <= i32::MAX as usize;
-        let valid = lda >= m.max(1) && ldb >= k.max(1) && ldc >= m
+        let valid = lda >= a_rows.max(1) && ldb >= k.max(1) && ldc >= m
             && [m, n, k, lda, ldb, ldc].iter().all(|&v| fits(v))
-            && span(m, k, lda).is_some_and(|v| v <= a.len())
+            && span(a_rows, a_cols, lda).is_some_and(|v| v <= a.len())
             && span(k, n, ldb).is_some_and(|v| v <= b.len())
             && span(m, n, ldc).is_some_and(|v| v <= c.len());
         if !valid {
             return Err("Invalid strided complex GEMM dimensions".into());
         }
-        let no = b'N' as c_char;
+        let (transa, no) = ((if adjoint { b'C' } else { b'N' }) as c_char, b'N' as c_char);
         let (mi, ni, ki) = (m as i32, n as i32, k as i32);
         let (la, lb, lc) = (lda as i32, ldb as i32, ldc as i32);
         unsafe {
-            (self.zgemm)(&no, &no, &mi, &ni, &ki, &alpha, a.as_ptr(), &la, b.as_ptr(), &lb, &beta, c.as_mut_ptr(), &lc);
+            (self.zgemm)(&transa, &no, &mi, &ni, &ki, &alpha, a.as_ptr(), &la, b.as_ptr(), &lb, &beta, c.as_mut_ptr(), &lc);
         }
         Ok(())
     }
 }
-impl SylvesterKernel<'_> {
-    /// Solve A X - X B^H = rhs for upper-triangular n x n A and B
-    /// (column-major). LAPACK's overflow scale is undone, never silently left
-    /// in the solution.
-    pub fn complex_sylvester(&self, a: &[Complex64], b: &[Complex64], rhs: &[Complex64], n: usize) -> Result<Vec<Complex64>, String> {
-        if n == 0 || n > i32::MAX as usize || a.len() != n*n || b.len() != n*n || rhs.len() != n*n {
-            return Err("Invalid complex Sylvester dimensions".into());
-        }
-        let ni = n as i32;
-        let mut x = rhs.to_vec();
-        let mut scale = 1.;
-        let mut info = 0;
-        unsafe { (self.ztrsyl)(&(b'N' as c_char), &(b'C' as c_char), &-1,
-            &ni, &ni, a.as_ptr(), &ni, b.as_ptr(), &ni, x.as_mut_ptr(), &ni, &mut scale, &mut info); }
-        if info != 0 || !scale.is_finite() || scale <= 0. {
-            return Err(format!("LAPACK ztrsyl unresolved: info={info}, scale={scale}"));
-        }
-        for z in &mut x { z.re /= scale; z.im /= scale; }
-        if x.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()) { return Err("Non-finite Sylvester solution".into()); }
-        Ok(x)
-    }
-}
 impl Lapack {
-    pub fn sylvester_kernel(&self) -> SylvesterKernel<'_> {
-        SylvesterKernel { ztrsyl:self.ztrsyl, _owner:std::marker::PhantomData }
-    }
     /// Thread-shareable strided complex GEMM entry (see `ComplexGemm`).
     pub fn complex_gemm(&self) -> ComplexGemm<'_> {
         ComplexGemm { zgemm: self.zgemm, _owner: std::marker::PhantomData }
@@ -279,42 +269,11 @@ impl Lapack {
                 heev: symbol(library, b"scipy_zheev_\0")?,
                 gemm: symbol(library, b"scipy_dgemm_\0")?,
                 zgemm: symbol(library, b"scipy_zgemm_\0")?,
-                zgees: symbol(library, b"scipy_zgees_\0")?,
                 zgeev: symbol(library, b"scipy_zgeev_\0")?,
-                ztrsyl: symbol(library, b"scipy_ztrsyl_\0")?,
                 zgetrf: symbol(library, b"scipy_zgetrf_\0")?,
                 zgetrs: symbol(library, b"scipy_zgetrs_\0")?,
             })
         }
-    }
-    /// Unitary complex Schur decomposition, column-major input/output.
-    pub fn complex_schur(&self, a: &[Complex64], n: usize) -> Result<(Vec<Complex64>, Vec<Complex64>), String> {
-        if n == 0 || n > i32::MAX as usize || n.checked_mul(n) != Some(a.len())
-            || a.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()) {
-            return Err("Invalid complex Schur input".into());
-        }
-        let ni = n as i32;
-        let mut t = a.to_vec();
-        let mut q = vec![Complex64::default(); n*n];
-        let mut eigen = vec![Complex64::default(); n];
-        let mut real_work = vec![0.; n];
-        let mut bool_work = vec![0; n];
-        let mut selected = 0;
-        let mut info = 0;
-        let mut query = [Complex64::default()];
-        let yes = b'V' as c_char;
-        let no = b'N' as c_char;
-        unsafe { (self.zgees)(&yes, &no, None, &ni, t.as_mut_ptr(), &ni,
-            &mut selected, eigen.as_mut_ptr(), q.as_mut_ptr(), &ni, query.as_mut_ptr(), &-1,
-            real_work.as_mut_ptr(), bool_work.as_mut_ptr(), &mut info); }
-        if info != 0 { return Err(format!("LAPACK zgees workspace query failed: {info}")); }
-        let length = (query[0].re as i32).max(2*ni);
-        let mut work = vec![Complex64::default(); length as usize];
-        unsafe { (self.zgees)(&yes, &no, None, &ni, t.as_mut_ptr(), &ni,
-            &mut selected, eigen.as_mut_ptr(), q.as_mut_ptr(), &ni, work.as_mut_ptr(), &length,
-            real_work.as_mut_ptr(), bool_work.as_mut_ptr(), &mut info); }
-        if info != 0 { return Err(format!("LAPACK zgees failed: {info}")); }
-        Ok((t, q))
     }
     /// General complex right eigenvectors, COLUMN-MAJOR. Callers validate
     /// conditioning/backward error themselves.
@@ -617,7 +576,7 @@ impl Lapack {
         Ok(())
     }
     /// Complex C = A B, column-major, with finite inputs and output.
-    #[cfg(any(test, feature = "validation"))]
+    #[cfg(test)]
     pub fn multiply_complex(&self, a: &[Complex64], b: &[Complex64], m: usize, n: usize, k: usize) -> Result<Vec<Complex64>, String> {
         if m > i32::MAX as usize || n > i32::MAX as usize || k > i32::MAX as usize
             || m.checked_mul(k) != Some(a.len()) || k.checked_mul(n) != Some(b.len())

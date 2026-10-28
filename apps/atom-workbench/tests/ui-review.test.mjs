@@ -53,7 +53,7 @@ test('state labels: a picker sets one label, a state holds one label, the swap i
 });
 test('a photon endpoint from a reference preserves the physical anchor and anchor mode',()=>{
  const scene=defaultScene(),laser={...scene.lasers[0],referenceStateId:'reference-1'};
- scene.references=[{id:'reference-1',name:'Reference',anchorId:'ground-2-0',anchorMode:'zero-field',offsetMHz:123}];
+ scene.references=[{id:'reference-1',name:'Reference',anchorId:'ground-2-0',anchorMode:'zero-field',offsetMHz:123,offsetUnit:'MHz'}];
  const a=analyze(scene),states=[...a.ground,...a.D1,...a.D2],result=referenceFromLaser(scene,laser,states);
  assert.equal(result.anchorId,'ground-2-0');assert.equal(result.anchorMode,'zero-field');assert.equal(result.offsetMHz,123+laserFrequencyMHz(laser));
  assert.equal(referenceFromLaser(scene,{...laser,referenceProcess:'emission'},states).offsetMHz,123-laserFrequencyMHz(laser));

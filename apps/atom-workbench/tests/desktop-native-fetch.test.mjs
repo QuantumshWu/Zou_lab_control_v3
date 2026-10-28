@@ -30,12 +30,12 @@ test('native JSON response preserves identity and other URL paths use the origin
 test('mean then final result form one ordered NDJSON stream and late messages are ignored',async()=>{
  const f=fixture();try{
   const pending=solve(f.adapter,input(1,true)),message=await posted(f.worker);
-  f.worker.emit({kind:'stream',channel:message.channel,event:{type:'asymptotic',data:{request:input().request,mean:0.2}}});
+  f.worker.emit({kind:'stream',channel:message.channel,event:{type:'checkpoint',data:{request:input().request,mean:0.2}}});
   const response=await pending;assert.match(response.headers.get('Content-Type'),/application\/x-ndjson/);const reader=response.body.getReader();
-  assert.equal(line((await reader.read()).value).type,'asymptotic');
+  assert.equal(line((await reader.read()).value).type,'checkpoint');
   f.worker.emit({kind:'stream',channel:message.channel,event:{type:'result',data:{request:input().request,populations:[[1,0]]}},done:true});
   assert.equal(line((await reader.read()).value).type,'result');assert.equal((await reader.read()).done,true);
-  f.worker.emit({kind:'stream',channel:message.channel,event:{type:'asymptotic',data:{late:true}}});
+  f.worker.emit({kind:'stream',channel:message.channel,event:{type:'checkpoint',data:{late:true}}});
   assert.equal(f.worker.messages.filter(message=>message.kind==='cancel').length,0);
  }finally{await f.adapter.dispose();}
 });
@@ -49,7 +49,7 @@ test('abort before Worker dispatch never starts a native request',async()=>{
 test('abort after mean errors the body, cancels once, and stale final cannot affect the next request',async()=>{
  const f=fixture();try{
   const controller=new AbortController(),pending=solve(f.adapter,input(1,true),controller.signal),old=await posted(f.worker);
-  f.worker.emit({kind:'stream',channel:old.channel,event:{type:'asymptotic',data:{mean:0.4}}});
+  f.worker.emit({kind:'stream',channel:old.channel,event:{type:'checkpoint',data:{mean:0.4}}});
   const reader=(await pending).body.getReader();await reader.read();const blocked=reader.read();controller.abort();
   await assert.rejects(blocked,{name:'AbortError'});assert.equal(f.worker.messages.filter(message=>message.kind==='cancel'&&message.channel===old.channel).length,1);
   const next=solve(f.adapter,input(2)),fresh=await posted(f.worker);assert.notEqual(fresh.channel,old.channel);
@@ -61,7 +61,7 @@ test('abort after mean errors the body, cancels once, and stale final cannot aff
 
 test('canceling the response reader cancels native work without waiting for AbortSignal',async()=>{
  const f=fixture();try{const pending=solve(f.adapter,input(1,true)),message=await posted(f.worker);
-  f.worker.emit({kind:'stream',channel:message.channel,event:{type:'asymptotic',data:{}}});const response=await pending;
+  f.worker.emit({kind:'stream',channel:message.channel,event:{type:'checkpoint',data:{}}});const response=await pending;
   await response.body.cancel();assert.equal(f.worker.messages.filter(value=>value.kind==='cancel').length,1);
   f.worker.emit({kind:'stream',channel:message.channel,event:{type:'result',data:{}},done:true});
  }finally{await f.adapter.dispose();}
@@ -78,7 +78,7 @@ test('Worker failure rejects pending fetch/body and synchronously closes native 
  const f=fixture();try{
   const pending=solve(f.adapter),waiting=assert.rejects(pending,/Worker crashed/);await posted(f.worker);
   const streaming=solve(f.adapter,input(2,true)),message=await posted(f.worker);
-  f.worker.emit({kind:'stream',channel:message.channel,event:{type:'asymptotic',data:{}}});const reader=(await streaming).body.getReader();await reader.read();
+  f.worker.emit({kind:'stream',channel:message.channel,event:{type:'checkpoint',data:{}}});const reader=(await streaming).body.getReader();await reader.read();
   const bodyFailure=assert.rejects(reader.read(),/Worker crashed/);f.worker.crash();
   assert.equal(f.commands.at(-1).op,'close-all');await waiting;await bodyFailure;await tick();assert.equal(f.worker.terminated,1);
   await assert.rejects(solve(f.adapter,input(3)),{name:'AbortError'});
@@ -101,15 +101,15 @@ test('invalid JSON/method and premature stream termination fail without inventin
   assert.equal((await f.adapter.fetch('/api/solve',{method:'POST',body:'{'})).status,400);
   assert.equal(f.worker.messages.filter(message=>message.kind==='solve').length,0);
   const pending=solve(f.adapter,input(1,true)),rejected=assert.rejects(pending,/without a final result/),message=await posted(f.worker);
-  f.worker.emit({kind:'stream',channel:message.channel,event:{type:'asymptotic',data:{}},done:true});await rejected;
+  f.worker.emit({kind:'stream',channel:message.channel,event:{type:'checkpoint',data:{}},done:true});await rejected;
  }finally{await f.adapter.dispose();}
 });
 
 test('a numerical stream error is terminal only for that request and a fresh retry can succeed',async()=>{
  const f=fixture();try{
   const first=solve(f.adapter,input(1,true)),old=await posted(f.worker);
-  f.worker.emit({kind:'stream',channel:old.channel,event:{type:'asymptotic',data:{request:input(1).request,mean:0.4}}});
-  const reader=(await first).body.getReader();assert.equal(line((await reader.read()).value).type,'asymptotic');
+  f.worker.emit({kind:'stream',channel:old.channel,event:{type:'checkpoint',data:{request:input(1).request,mean:0.4}}});
+  const reader=(await first).body.getReader();assert.equal(line((await reader.read()).value).type,'checkpoint');
   f.worker.emit({kind:'stream',channel:old.channel,event:{type:'error',status:422,data:{request:input(1).request,error:'Numerical refinement failed',code:'numerical-failure'}},done:true});
   assert.equal(line((await reader.read()).value).data.code,'numerical-failure');assert.equal((await reader.read()).done,true);
   assert.equal(f.worker.terminated,0);assert.equal(f.commands.length,0);

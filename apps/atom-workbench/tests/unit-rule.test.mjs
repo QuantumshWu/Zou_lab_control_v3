@@ -87,13 +87,11 @@ test('a unit whose frequency the physics refuses changes nothing and says why',(
 });
 
 test('a reference level\'s offset δ is an input with its unit saved; a refused unit changes nothing',()=>{
-  const s=roundtrip(defaultScene());s.references=[{id:'reference-1',name:'虚拟态',anchorId:'ground-2-0',anchorMode:'follow',offsetMHz:0}];const r=s.references[0];
+  const s=roundtrip(defaultScene());s.references=[{id:'reference-1',name:'虚拟态',anchorId:'ground-2-0',anchorMode:'follow',offsetMHz:0,offsetUnit:'MHz'}];const r=s.references[0];
   setReferenceOffset(r,12,'MHz');pick(()=>offsetReading(r),(v,u)=>setReferenceOffset(r,v,u),'kHz');
   assert.deepEqual(offsetReading(r),{value:12,unit:'kHz'});assert.equal(r.offsetMHz,.012);
   assert.deepEqual(offsetReading(roundtrip(s).references[0]),{value:12,unit:'kHz'});
   setReferenceOffset(r,5e6,'MHz');assert.throws(()=>pick(()=>offsetReading(r),(v,u)=>setReferenceOffset(r,v,u),'THz'),/偏移/);assert.equal(r.offsetMHz,5e6);assert.equal(r.offsetUnit,'MHz');
-  // A scene without the unit reads the offset in its natural unit.
-  delete r.offsetUnit;assert.deepEqual(offsetReading(r),{value:5,unit:'THz'});
 });
 
 test('a thermal temperature is an input with its unit saved; another initial state drops the unit',()=>{
@@ -154,14 +152,15 @@ test('an NA outside 0 < NA ≤ 1 is refused with its reason, in the inspector an
   for(const value of [0,-.1,1.2,NaN,Infinity])assert.throws(()=>setLaserNumericalAperture(l,value),/0 < NA ≤ 1/);
   assert.equal(JSON.stringify(l),before,'a refused NA changes nothing');setLaserNumericalAperture(l,1);assert.equal(l.numericalAperture,1);
   const file=JSON.parse(JSON.stringify(s));file.lasers[1].numericalAperture=1.5;assert.throws(()=>validateScene(file),/0 < NA ≤ 1/);
-  delete file.lasers[1].numericalAperture;assert.throws(()=>validateScene(file),/数值孔径/);
-  file.lasers[1].intensityMode='objective';assert.throws(()=>validateScene(file),/强度模式/);
+  delete file.lasers[1].numericalAperture;assert.throws(()=>validateScene(file),/功率与 NA 方式缺少 powerMW 或 numericalAperture/);
+  file.lasers[1].intensityMode='objective';assert.throws(()=>validateScene(file),/lasers\[1\]\.intensityMode/);
 });
 
-test('scenes saved before NA mode load with the same intensities bit for bit',()=>{
+test('a saved intensity anchor is kept bit for bit while its inputs stand',()=>{
   // A power-mode beam saved with its exact intensity anchor (1 ULP off the formula) keeps it.
-  const file=JSON.parse(JSON.stringify(roundtrip(defaultScene()))),t=file.lasers[1];delete t.powerUnit;delete t.waistUnit;delete t.intensityUnit;
+  const file=JSON.parse(JSON.stringify(roundtrip(defaultScene()))),t=file.lasers[1];
   const exact=2*t.powerMW/(Math.PI*t.waistUm**2)*1e8,saved=exact*(1+Number.EPSILON);t.intensityAnchor={intensityMWcm2:saved,viewKey:JSON.stringify(['power',t.powerMW,t.waistUm])};t.intensityMWcm2=saved;
-  const loaded=validateScene(file);assert.equal(laserIntensityMWcm2(loaded.lasers[1]),saved);assert.equal(loaded.lasers[1].numericalAperture,undefined);
-  assert.equal(loaded.dynamics.temperatureUnit,undefined);
+  const loaded=validateScene(file);assert.equal(laserIntensityMWcm2(loaded.lasers[1]),saved);
+  // Another power is another intensity: the anchor no longer holds.
+  loaded.lasers[1].powerMW*=2;assert.equal(laserIntensityMWcm2(loaded.lasers[1]),2*exact);
 });

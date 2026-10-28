@@ -4,24 +4,22 @@ import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {analyze,laserFrequencyMHz,resolveSceneFrequencies} from '../dist/js/atom-workbench/src/physics.js';
 import {referenceEnergyMHz} from '../dist/js/atom-workbench/src/reference-energy.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
-import {followers,migrateSceneFrequencies,releaseFollowers,setFrequencyBase,setFrequencyValue} from '../dist/js/atom-workbench/src/laser-frequency.js';
+import {followers,releaseFollowers,setFrequencyBase,setFrequencyValue} from '../dist/js/atom-workbench/src/laser-frequency.js';
 
 const roundtrip=scene=>validateScene(JSON.parse(JSON.stringify(scene)));
 const hz=scene=>Object.fromEntries(scene.lasers.map(l=>[l.id,laserFrequencyMHz(l)]));
 
-test('legacy beams migrate to one expression each, at the same frequency',()=>{
-  const legacy=defaultScene(),before=hz(legacy),scene=migrateSceneFrequencies(structuredClone(legacy));
-  assert.deepEqual(hz(scene),before);
+test('every beam has one frequency expression, kept bit for bit by the scene file',()=>{
+  const scene=defaultScene();resolveSceneFrequencies(scene);const before=hz(scene);
   const [probe,tweezer]=scene.lasers;
   assert.deepEqual(probe.frequency,{base:{kind:'transition',line:'D2',Fg:2,Fe:2},offsetMHz:0});
   assert.deepEqual(tweezer.frequency,{wavelengthNm:852});
-  for(const field of ['frequencyMode','referenceTransition','detuningMHz','wavelengthNm','detuningUnit'])assert.equal(field in probe||field in tweezer,false,field);
   assert.deepEqual(hz(roundtrip(scene)),before,'export and import keep every bit');
 });
 
 test('a laser can follow another laser or a reference frequency (an offset lock)',()=>{
   const scene=roundtrip(defaultScene()),[probe]=scene.lasers;
-  scene.referenceFrequencies=[{id:'lock',name:'锁频点',frequency:{base:{kind:'transition',line:'D2',Fg:2,Fe:3},offsetMHz:-12}}];
+  scene.referenceFrequencies=[{id:'lock',name:'锁频点',frequency:{base:{kind:'transition',line:'D2',Fg:2,Fe:3},offsetMHz:-12},frequencyUnit:'MHz'}];
   const repump={...structuredClone(probe),id:'repump',name:'回泵光'};scene.lasers.push(repump);
   setFrequencyBase(scene,repump,{kind:'laser',id:'probe'});setFrequencyValue(scene,repump,6.568,'GHz');
   const offset=laserFrequencyMHz(repump)-laserFrequencyMHz(probe);assert.ok(Math.abs(offset-6568)<1e-6);
@@ -37,7 +35,7 @@ test('a laser can follow another laser or a reference frequency (an offset lock)
   // A saved cycle or a missing base is refused.
   const cyclic=JSON.parse(JSON.stringify(scene));cyclic.referenceFrequencies[0].frequency={base:{kind:'laser',id:'repump'},offsetMHz:0};
   assert.throws(()=>validateScene(cyclic),/成环/);
-  const missing=JSON.parse(JSON.stringify(scene));missing.lasers[1].frequency={base:{kind:'laser',id:'gone'},offsetMHz:0};
+  const missing=JSON.parse(JSON.stringify(scene));missing.lasers[1].frequency={base:{kind:'laser',id:'gone'},offsetMHz:0};missing.lasers[1].frequencyUnit='MHz';
   assert.throws(()=>validateScene(missing),/不存在/);
 });
 
@@ -58,7 +56,7 @@ test('switching base never re-rounds; removing a base releases its followers unc
 
 test('a reference level linked to a photon follows it, and survives the scene file',()=>{
   const scene=roundtrip(defaultScene()),[probe]=scene.lasers,a=analyze(scene),levels=[...a.ground,...a.D1,...a.D2];
-  scene.references=[{id:'reference-1',name:'虚拟中间态',anchorId:'ground-2-0',anchorMode:'follow',offsetMHz:-5,photon:{source:{kind:'laser',id:'probe'},direction:'absorb'}}];
+  scene.references=[{id:'reference-1',name:'虚拟中间态',anchorId:'ground-2-0',anchorMode:'follow',offsetMHz:-5,offsetUnit:'MHz',photon:{source:{kind:'laser',id:'probe'},direction:'absorb'}}];
   const anchor=levels.find(l=>l.id==='ground-2-0').energyMHz,energy=()=>referenceEnergyMHz(scene.references[0],levels,scene);
   assert.ok(Math.abs(energy()-(anchor+laserFrequencyMHz(probe)-5))<1e-6);
   setFrequencyValue(scene,probe,100);assert.ok(Math.abs(energy()-(anchor+laserFrequencyMHz(probe)-5))<1e-6,'it moves with the probe');
@@ -72,5 +70,5 @@ test('a reference level linked to a photon follows it, and survives the scene fi
 test('how a frequency is read is saved with the scene, as a display preference only',()=>{
   const scene=roundtrip(defaultScene());scene.display={readouts:{pair:{unit:'GHz',base:'laser:probe'},'laser-frequency':{base:'absolute'}}};
   assert.deepEqual(roundtrip(scene).display,scene.display);
-  assert.throws(()=>validateScene({...JSON.parse(JSON.stringify(scene)),display:{readouts:{pair:{unit:'parsec'}}}}),/单位/);
+  assert.throws(()=>validateScene({...JSON.parse(JSON.stringify(scene)),display:{readouts:{pair:{unit:'parsec'}}}}),/display.readouts.pair.unit/);
 });

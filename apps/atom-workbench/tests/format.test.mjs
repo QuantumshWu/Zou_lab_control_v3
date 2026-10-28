@@ -39,13 +39,13 @@ test('every state is spelled one way, in trees, groups and labels',()=>{
   assert.equal(POPULATION_GROUPS.find(g=>g.id==='F:D2:3').label,'5P₃/₂ · F′=3');
 });
 test('solver statuses and known sentences are shown in Chinese; unknown text is kept',()=>{
-  assert.equal(steadyStatusText('time-average'),'长期时间平均');
+  assert.equal(steadyStatusText('time-average'),'长期相位平均');assert.equal(steadyStatusText('initial-dependent-time-average'),'长期相位平均（依赖初态）');
   assert.equal(steadyStatusText('not-converged'),'未收敛');
   assert.equal(solverText('an unforeseen native message'),'an unforeseen native message');
 });
 test('the method sentences the native adapter writes are shown in Chinese',()=>{
   const adapter=readFileSync(new URL('../rust-solver/src/lattice_core_adapter.rs',import.meta.url),'utf8');
-  for(const name of ['FINITE_METHOD','MEAN_METHOD','STATIC_METHOD']){
+  for(const name of ['METHOD']){
     const sentence=new RegExp(`const ${name}:&str="([^"]+)";`).exec(adapter)?.[1];
     assert.ok(sentence,name);
     assert.match(solverText(sentence),/^完整 32 态/,name);

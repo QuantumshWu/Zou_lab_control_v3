@@ -266,7 +266,7 @@ export function spectroscopyAnalysis(scene:Scene,excludedLaserId?:string,include
   analysis.spectroscopy.requiresDensityProjection=status==='dispersive'&&allLevels(analysis).some(s=>s.mixed);
   analysis.transitions=[];
   if(includeTransitions&&status!=='unresolved')for(const laser of scene.lasers)if(laser.enabled){
-    const source=allLevels(analysis).find(s=>s.id===(laser.referenceStateId??scene.dynamics?.initialStateId??`ground-${scene.initialF}-${scene.initialM}`));if(!source)continue;
+    const source=allLevels(analysis).find(s=>s.id===(laser.referenceStateId??scene.dynamics.initialStateId));if(!source)continue;
     for(const target of allLevels(analysis)){if((source.manifold==='ground')===(target.manifold==='ground'))continue;const g=source.manifold==='ground'?source:target,e=source.manifold==='ground'?target:source,coupling=spectroscopyCoupling(analysis,laser,g.id,e.id);if(!coupling?.allowed)continue;
       const field=Math.sqrt(2*laserIntensityMWcm2(laser)*10/(EPS*C)),fullRabi=field*coupling.amplitudeCM/H/1e6;
       analysis.transitions.push({id:`${laser.id}:${g.id}:${e.id}`,laserId:laser.id,line:e.manifold as SpectralLine,groundId:g.id,excitedId:e.id,Fg:g.F,mg:g.m,Fe:e.F,me:e.m,q:coupling.q as -1|0|1,offsetMHz:coupling.offsetMHz,detuningMHz:coupling.detuningMHz,strength:coupling.strength,weight:fullRabi===0?0:(coupling.rabiMHz/fullRabi)**2,rabiMHz:coupling.rabiMHz,mixedPolarization:coupling.mixedPolarization,mLabelApproximate:coupling.mLabelApproximate});
@@ -296,7 +296,7 @@ export function spectroscopyCoupling(analysis:Analysis,laser:Laser,firstId:strin
   // This tolerance is for the label only; no Hamiltonian/dipole entry is dropped.
   const mixedM=(state:Level,v:Matrix)=>states.reduce((sum,bare,i)=>sum+(bare.m!==state.m?v.real[i]!**2+v.imag[i]!**2:0),0)>1e-8;
   const mLabelApproximate=mixedM(g,ug)||mixedM(e,ue);
-  const ref=laser.referenceTransition,offsetMHz=(RB87[line].frequencyHz-RB87[laser.line].frequencyHz)/1e6+e.energyMHz-g.energyMHz-transitionReferenceMHz(laser.line,ref?.Fg,ref?.Fe,ref?.fromManifold);
+  const offsetMHz=(RB87[line].frequencyHz-RB87[laser.line].frequencyHz)/1e6+e.energyMHz-g.energyMHz-transitionReferenceMHz(laser.line);
   return {allowed:amplitudeCM!==0,q,amplitudeCM,dipoleCM:amplitudeCM,strength:(amplitudeCM/RB87.D2.dipole)**2,rabiMHz,offsetMHz,detuningMHz:laserCarrierOffsetMHz(laser,line)-(e.energyMHz-g.energyMHz),line,mixedPolarization:displayComponents.filter(x=>x!==0).length>1,mLabelApproximate,dipoleComponentsCM:{real:d.real.slice(),imag:d.imag.slice()}};
 }
 

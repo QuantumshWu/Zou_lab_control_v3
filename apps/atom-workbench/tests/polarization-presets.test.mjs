@@ -57,17 +57,10 @@ test('a linked light keeps its place when the field moves by its own offset, and
  const reloaded=roundtrip(s);assert.deepEqual({direction:reloaded.lasers[0].direction,psi:reloaded.lasers[0].polarizationAngleDeg,chi:reloaded.lasers[0].ellipticityDeg},edited);
 });
 
-test('legacy preset and follow labels are ignored on import and never reactivate a constraint',()=>{
- for(const preset of ['pi','sigma-minus','sigma-plus']){
-  const raw=JSON.parse(JSON.stringify(defaultScene())),laser=raw.lasers[0];delete laser.direction;
-  Object.assign(laser,{thetaDeg:53,phiDeg:19,polarizationAngleDeg:27,ellipticityDeg:8,
-   polarizationPreset:preset,polarizationMode:'relative-to-B',followMagneticField:true});
-  const loaded=validateScene(raw),l=loaded.lasers[0],saved={reference:{kind:'angles',thetaDeg:53,phiDeg:19},thetaDeg:0,phiDeg:19};
-  for(const key of ['polarizationPreset','polarizationMode','followMagneticField','thetaDeg','phiDeg'])assert.equal(Object.hasOwn(l,key),false);
-  loaded.fields[0].direction=along(116,-41);analyze(loaded);
-  assert.deepEqual([l.direction,l.polarizationAngleDeg,l.ellipticityDeg],[saved,27,8]);
-  const reloaded=roundtrip(loaded);reloaded.fields[0].direction.reference={kind:'axis',axis:'+x'};analyze(reloaded);
-  assert.deepEqual([reloaded.lasers[0].direction,reloaded.lasers[0].polarizationAngleDeg,reloaded.lasers[0].ellipticityDeg],[saved,27,8]);
+test('presets are commands, not saved state: a file with a preset or follow label is refused',()=>{
+ for(const [key,value] of [['polarizationPreset','pi'],['polarizationMode','relative-to-B'],['followMagneticField',true]]){
+  const raw=JSON.parse(JSON.stringify(defaultScene()));raw.lasers[0][key]=value;
+  assert.throws(()=>validateScene(raw),error=>error.message.endsWith(`lasers[0] 含有未知字段 ${key}`));
  }
 });
 

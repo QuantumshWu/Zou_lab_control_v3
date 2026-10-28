@@ -160,6 +160,8 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 #population-mode { flex: none; width: auto; }
 .population-time-value { min-width: 9ch; text-align: right; padding-bottom: var(--cap-lift); color: var(--muted-ink); font-variant-numeric: tabular-nums; }
 .population-note { padding-bottom: var(--cap-lift); color: var(--orange-dark); }
+/* Populations shown outside the tolerance (ui-design.md §6.16): their estimated error, marked. */
+.population-accuracy { padding-bottom: var(--cap-lift); color: var(--orange-dark); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .population-scale { display: inline-flex; align-items: center; gap: var(--row-gap); color: var(--muted-ink); padding-bottom: var(--cap-lift); }
 .scale-bar { width: calc(2 * var(--control)); height: calc(var(--control) / 5); border-radius: var(--radius); background: linear-gradient(to right, var(--population-0), var(--population-1)); }
 /* The F totals keep together: with the horizon beside the mode they move to their own row when narrow. */
@@ -246,6 +248,9 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 /* The time cursor's readout card. */
 .population-readout { position: absolute; z-index: 5; display: flex; flex-direction: column; gap: var(--edge); min-width: calc(8 * var(--control)); max-width: calc(100% - 2 * var(--card-pad)); padding: var(--card-inset); overflow-y: auto; overscroll-behavior: contain; }
 .readout-time { font-weight: var(--heading-weight); }
+.readout-error { margin-left: var(--section-gap); font-weight: 400; color: var(--muted-ink); font-variant-numeric: tabular-nums; }
+.readout-error.outside, .readout-outside { color: var(--orange-dark); }
+.accuracy-swatch { display: inline-block; width: 18px; height: 10px; border-radius: 2px; background: #fbecdc; box-shadow: inset 0 0 0 1px #f0d3b4; }
 .readout-row { display: grid; grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)) calc(2.6 * var(--control)); gap: var(--row-gap); align-items: center; font-variant-numeric: tabular-nums; }
 .readout-row.two { grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)); }
 .readout-row > span:not(.readout-name) { text-align: right; }

@@ -19,17 +19,6 @@ export const DEFAULT_WAIST_UM=1.2,DEFAULT_NUMERICAL_APERTURE=.5;
 /** c in μm·MHz: λ/μm = C_UM_MHZ / (ν/MHz). */
 const C_UM_MHZ=299792458;
 
-/** The largest unit the value reads at least 1 in (the base unit for zero, the smallest below it). */
-function naturalUnit<U extends string>(value:number,size:Readonly<Record<U,number>>,units:readonly U[],base:U):U{
-  const magnitude=Math.abs(value);if(magnitude===0||!Number.isFinite(magnitude))return base;
-  return units.find(u=>magnitude>=size[u])??units.at(-1)!;
-}
-/** A value that may not be computable now (a frequency not yet resolved): NaN then. */
-const attempt=(value:()=>number):number=>{try{return value();}catch{return NaN;}};
-/** The unit each is shown in: the operator's, else the natural one. */
-export const powerUnit=(l:Laser):PowerUnit=>l.powerUnit??naturalUnit(l.powerMW??0,POWER_MW,POWER_UNITS,'mW');
-export const waistUnit=(l:Laser):WaistUnit=>l.waistUnit??naturalUnit(attempt(()=>laserWaistUm(l)),WAIST_UM,WAIST_UNITS,'μm');
-export const intensityUnit=(l:Laser):IntensityUnit=>l.intensityUnit??naturalUnit(attempt(()=>laserIntensityMWcm2(l)),INTENSITY_MWCM2,INTENSITY_UNITS,'mW/cm²');
 
 export function checkNumericalAperture(value:number):number{
   if(!Number.isFinite(value)||!(value>0)||value>1)throw new Error('数值孔径必须满足 0 < NA ≤ 1（原子在真空中）。');return value;
@@ -43,9 +32,9 @@ export function laserWaistUm(laser:Laser):number{
   return laser.intensityMode==='na'?laserWavelengthUm(laser)/(Math.PI*checkNumericalAperture(laser.numericalAperture!)):laser.waistUm??DEFAULT_WAIST_UM;
 }
 
-/** Active input fields only. Direct legacy edits invalidate the canonical value; inactive
- * representation fields do not override the selected input. NA mode includes the wavelength,
- * so a frequency change moves its waist and intensity. */
+/** The fingerprint of the active inputs an anchored intensity was taken at; inactive fields
+ * (another mode's) are not in it. NA mode includes the wavelength, so a frequency change moves
+ * its waist and intensity. */
 export function laserIntensityViewKey(laser:Laser):string {
   const mode=laser.intensityMode;
   return JSON.stringify(mode==='power'?['power',laser.powerMW,laser.waistUm]:mode==='na'?['na',laser.powerMW,laser.numericalAperture,laserWavelengthUm(laser)]:['intensity',laser.intensityMWcm2]);
@@ -71,9 +60,10 @@ export function captureLaserIntensityAnchor(laser:Laser):LaserIntensityAnchor {
 /** Local on-axis intensity in mW/cm², preserving exact physical inputs across
  * representation changes so coherent cancellation is not spoiled by 1 ULP. */
 export function laserIntensityMWcm2(laser:Laser):number{return captureLaserIntensityAnchor(laser).intensityMWcm2;}
+/** The laser's local intensity and its anchor, written from its active inputs. */
 export function normalizeLaserIntensity(laser:Laser):Laser {
-  if(laser.intensityMode!==undefined&&!INTENSITY_MODES.includes(laser.intensityMode))throw new Error('未知的强度输入模式。');
-  const anchor=captureLaserIntensityAnchor(laser);laser.intensityMode??='intensity';laser.intensityMWcm2=anchor.intensityMWcm2;
+  if(!INTENSITY_MODES.includes(laser.intensityMode))throw new Error('未知的强度输入模式。');
+  const anchor=captureLaserIntensityAnchor(laser);laser.intensityMWcm2=anchor.intensityMWcm2;
   laser.intensityAnchor={intensityMWcm2:anchor.intensityMWcm2,viewKey:laserIntensityViewKey(laser)};return laser;
 }
 /** Another way to give the same local intensity: the new mode's waist or NA is the laser's own
@@ -112,9 +102,9 @@ export function setLaserNumericalAperture(laser:Laser,value:number):void {
 
 // ------------------------------------------------------------ in the operator's units
 /** Power, waist and local intensity as the inspector shows them: the number in its unit. */
-export const powerReading=(l:Laser):Reading<PowerUnit>=>{const unit=powerUnit(l);return {value:(l.powerMW??0)/POWER_MW[unit],unit};};
-export const waistReading=(l:Laser):Reading<WaistUnit>=>{const unit=waistUnit(l);return {value:laserWaistUm(l)/WAIST_UM[unit],unit};};
-export const intensityReading=(l:Laser):Reading<IntensityUnit>=>{const unit=intensityUnit(l);return {value:laserIntensityMWcm2(l)/INTENSITY_MWCM2[unit],unit};};
+export const powerReading=(l:Laser):Reading<PowerUnit>=>({value:(l.powerMW??0)/POWER_MW[l.powerUnit],unit:l.powerUnit});
+export const waistReading=(l:Laser):Reading<WaistUnit>=>({value:laserWaistUm(l)/WAIST_UM[l.waistUnit],unit:l.waistUnit});
+export const intensityReading=(l:Laser):Reading<IntensityUnit>=>({value:laserIntensityMWcm2(l)/INTENSITY_MWCM2[l.intensityUnit],unit:l.intensityUnit});
 const known=<U extends string>(unit:U,units:readonly U[]):U=>{if(!units.includes(unit))throw new Error('单位无效。');return unit;};
 /** The operator's number in `unit`, and the unit with it: a unit picked for an input keeps its
  * digits, so the quantity changes with it. A refused number changes nothing. */

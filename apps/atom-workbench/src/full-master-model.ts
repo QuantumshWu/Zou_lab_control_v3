@@ -191,7 +191,8 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  // state rotates at the same carrier and no ground state rotates, so each
  // operator, cross-F terms included, is static.
  const collapse=bare.collapse.map(c=>transformOperator(c,u)).filter(c=>c.real.some(v=>v!==0)||c.imag.some(v=>v!==0));
- const initialState=resolveInitialState(settings,scene),populations=initialPopulations(initialState,states);
+ // The request's initial state when it names one, else the scene's.
+ const initialState=resolveInitialState(settings?.initialState||settings?.initialStateId!==undefined?{initialStateId:settings.initialStateId??scene.dynamics.initialStateId,initialState:settings.initialState}:scene.dynamics),populations=initialPopulations(initialState,states);
  const initialReal=zeros();populations.forEach((p,i)=>initialReal[i*N+i]=p);
  const initialIndex=populations.indexOf(Math.max(...populations));
  return {modelSchema:FULL_MODEL_SCHEMA,dimension:32,states,hReal:h.real,hImag:h.imag,collapse,
@@ -211,6 +212,6 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
   '32 态以外的能级（5S 的 6–9P；5P 的 6–10S、4–9D）和 Rb+ 芯极化（Arora & Sahoo 2012：α_c = 9.1 au，5S 另加 α_vc = −0.26 au）只作为二阶静态（van Vleck）光移进入 H0，并检查耦合/失谐比 ≤ 0.01、失谐 ≥ 10 GHz；不含这些能级的跨载频项和散射、更高价态尾项与连续谱。',
   '基矢：H0 静态部分（磁场 + 上述 32 态外静态光移）的本征基，初态与返回布居都在此基中；态标签 F、mF 指与之重叠最大的磁场本征态。D 线光学缀饰不进入基矢，而由动力学显式给出。',
   initialText(initialState),
-  '返回瞬时布居（含反旋转项引起的光频微运动，幅度约 (Ω/ω)²）；长期结果是时间平均。',
+  '返回瞬时布居（含反旋转项引起的光频微运动，幅度约 (Ω/ω)²）；长期布居 p̄(T) 是时刻 T 的相位平均，只平均掉这些快振荡，不是 0 到 T 的时间平均。',
  ]};
 }
