@@ -209,7 +209,10 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     // The frame's metric (waiting for the frame's thread), none when no
     // output propagates.
     let clock=Instant::now();
-    let metric=if propagates{Some(SwMetric::new(&frame,eigen,lattice.operator())?)}else{None};
+    // Diagnostics: ATOM_DIAG_EUCLIDEAN takes the Euclidean Galerkin model for
+    // a request that propagates too (the frame still serves the estimate).
+    let euclidean=super::diagnostics::perturbation("EUCLIDEAN").is_some();
+    let metric=if propagates&&!euclidean{Some(SwMetric::new(&frame,eigen,lattice.operator())?)}else{None};
     timing.frame_wait_ms=clock.elapsed().as_secs_f64()*1e3;
     let test=metric.as_ref().map(|m|m as &dyn TestSpace);
     let mut galerkin=Projection::new(lattice.operator())?;

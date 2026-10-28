@@ -11,7 +11,12 @@
 //!   alone), VALUES (the eigenvalues), KERNELS (the SW kernels'
 //!   entries), METRIC (the metric's columns M w), MODEL (the reduced G),
 //!   TRANSFORM (the ranking's error transform). ATOM_DIAG_ACCEPT_AFTER=k
-//!   holds acceptance back until k solves (the run continues past it).
+//!   holds acceptance back until k solves (the run continues past it);
+//!   ATOM_DIAG_TRACE_RANK=ratio keeps the trace correction's directions by
+//!   a fixed singular-value ratio, ATOM_DIAG_TRACE_CORRECTION=fraction
+//!   replaces TRACE_CORRECTION (`reduced`); ATOM_DIAG_EUCLIDEAN=1 takes the
+//!   Euclidean Galerkin model for a request that propagates too,
+//!   ATOM_DIAG_DRESSED=1 the dressed metric E^-H E^-1 (`frame`).
 use super::*;
 
 /// The relative size of the perturbation ATOM_DIAG_<part> (None unset).
