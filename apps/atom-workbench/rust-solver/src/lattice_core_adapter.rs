@@ -234,7 +234,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
         "support":k.support.iter().map(|(q,size)|json!({"charge":q,"kernel":size})).collect::<Vec<_>>(),"belowFloor":k.below});
     let run=run.map(|s|{let e=&s.explicit;let w=&s.work;let t=&s.timing;let l=&s.ledger;
         json!({"explicit":e.sets.explicit,"ring":e.sets.ring,"gated":e.gated,"promoted":e.promoted,"covered":e.covered,"leak":e.leak,
-            "ringInternalEdges":e.internal.len(),"explicitSetMs":e.milliseconds,"translations":s.translations,
+            "ringInternalEdges":e.internal.len(),"completion":s.completion.as_ref().map(|c|json!({"promoted":c.promoted,"keepK1":c.keep_k1,"decidedAt":c.decided_at,"bound":c.bound,"slowPart":c.slow_part,"k1Part":c.k1_part,"ringPart":c.ring_part,"restarted":c.restarted,"attribution":c.attribution.iter().take(8).map(|(q,a)|json!([q,a])).collect::<Vec<_>>()})),"explicitSetMs":e.milliseconds,"translations":s.translations,
             "columns":s.columns.iter().map(|c|json!({"pole":c.pole.to_string(),"innerSteps":c.steps,"residual":c.residual,"added":c.added,"ms":c.milliseconds,"blocks":c.blocks})).collect::<Vec<_>>(),
             "basis":s.images,"dimension":s.dimension,
             "inner":{"solves":w.solves,"steps":w.steps,"appliedBlocks":w.applied_blocks,"preconditionedBlocks":w.preconditioned_blocks,

@@ -50,7 +50,7 @@ use super::reduced::{Model,Projection,SLOW_ACCURACY,SlowRate};
 use super::poles::{InnerWork,Lattice,Pole};
 use super::space::{self,Column,Space};
 use super::frame::{SwFrame,SwMetric};
-use super::estimator::UnifiedEstimate;
+use super::estimator::{Source,UnifiedEstimate};
 use super::eigenbasis::BlockEigenbasis;
 
 /// Solves between checkpoints; the ladder is re-ranked at every checkpoint
@@ -113,6 +113,22 @@ const LIMIT_REACH:f64=1e6;
 /// kernel. Measured: decaying classes at most 5e-3 of their weight, the
 /// kernel 1.6 (trace 1.00, weight 0.63): a margin of 100x and 3x.
 const KERNEL_TRACE_SHARE:f64=0.5;
+/// Completion (`solve`): at the first checkpoint, a bound above the
+/// tolerance of which the slow part (the ring's feedback and the K^(1) rests
+/// the lattice leaves out) carries at least COMPLETION_SHARE is completed.
+/// Measured (three lasers at B = 0 and 1 mG, p(1 s)): at the first
+/// checkpoint the Krylov part is 1e-11 of bounds of 7.1-7.4e-3, the ring's
+/// part 3.8-4.3e-3 and the K^(1) rests' 1.1-1.2e-2 (signed parts, partly
+/// cancelling); a trajectory's first checkpoint is the Krylov residual's
+/// (2e-1 against 2-8e-3).
+const COMPLETION_SHARE:f64=0.5;
+/// The K^(1) rests join the operator when their part is at least this
+/// share of the tolerance (each alone fails: both lattices' means stayed
+/// 1.3-2.0e-3 off with either change alone, 4e-5 and 1.7e-4 with both).
+const K1_COMPLETION:f64=0.25;
+/// The ring charges promoted: by decreasing attribution until they carry
+/// this share of the ring total.
+const RING_COMPLETION:f64=0.9;
 /// Stack of the frame's thread (LAPACK on it).
 const FRAME_STACK:usize=1<<26;
 
@@ -190,10 +206,27 @@ pub struct Solution{
     /// The best checkpoint's outputs; `converged` when it was accepted, else
     /// the reason the run stopped.
     pub answer:Answer,pub converged:bool,pub reason:Option<String>,
+    /// The completion decided at the first checkpoint (also when it changed
+    /// nothing: `restarted` false), and the first run's solves when it
+    /// restarted the run.
+    pub completion:Option<Completion>,
     pub explicit:ExplicitSet,pub translations:Vec<Charge>,
     pub columns:Vec<Column>,pub checkpoints:Vec<Checkpoint>,
     pub dimension:usize,pub work:InnerWork,pub images:usize,
     pub ledger:RemainderLedger,pub timing:Timing,
+}
+
+/// A lattice completion: the ring charges promoted into P (one of each
+/// pair; their mirrors join with them) and whether the operator keeps every
+/// K^(1) rest; where it was decided, the bound there, its slow part and the
+/// K^(1) rests' and the ring's parts (bound units), the ring charges'
+/// attribution shares, and whether the run restarted on the completed
+/// lattice.
+#[derive(Clone,Debug,Default)]
+pub struct Completion{
+    pub promoted:Vec<Charge>,pub keep_k1:bool,pub decided_at:usize,
+    pub bound:f64,pub slow_part:f64,pub k1_part:f64,pub ring_part:f64,
+    pub attribution:Vec<(Charge,f64)>,pub restarted:bool,
 }
 
 /// Euclidean projection of real values onto the probability simplex.
@@ -280,8 +313,37 @@ fn class_need(class:f64,pairs:&[(SlowRate,f64)])->(f64,f64){
 
 /// Every output of a request from rho0 (row-major n x n); `observer` sees
 /// every checkpoint with its outputs as it is made.
+///
+/// Completion: at the first checkpoint, when the largest bound is above the
+/// tolerance and its slow part (the omitted ring's feedback and the K^(1)
+/// rests the lattice leaves out) is at least COMPLETION_SHARE of it, the
+/// estimate is taken again with each source alone: the K^(1) rests join the
+/// operator when their part is at least K1_COMPLETION x tolerance, and the
+/// ring charges carrying RING_COMPLETION of the ring's attribution
+/// (|a_m| |B y_r| over the kernel and slow modes) join P with their mirrors.
+/// The run then restarts once on the completed lattice (the frame and the
+/// eigenbasis are kept). Every other run is unchanged.
 pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut observer:Option<&mut dyn FnMut(&Checkpoint,&Answer)>)->Result<Solution,String>{
-    let started=Instant::now();let tolerance=POPULATION_TOLERANCE;let n=prepared.generator.n;
+    let started=Instant::now();
+    let longest=request.times.last().copied().into_iter().chain(request.horizons.iter().copied()).fold(0_f64,f64::max);
+    let longest=if longest>0.{longest}else{LIMIT_REACH};
+    let propagates=!request.times.is_empty()||!request.horizons.is_empty();
+    let frame=SwFrame::new(prepared,longest);
+    std::thread::scope(|scope|->Result<Solution,String>{
+        if propagates{std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||{let _=frame.class();}).map_err(|e|e.to_string())?;}
+        match attempt(prepared,initial,request,&mut observer,&frame,None,started)?{
+            Ok(solution)=>Ok(solution),
+            Err(completion)=>attempt(prepared,initial,request,&mut observer,&frame,Some(&completion),started)?
+                .map_err(|_|"A completed lattice asked for another completion".to_string()),
+        }
+    })
+}
+
+/// One run of `solve` on the request's lattice or on its completion: the
+/// solution, or (Err) the completion its first checkpoint asks for.
+fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,observer:&mut Option<&mut dyn FnMut(&Checkpoint,&Answer)>,
+    frame:&'a SwFrame<'a>,completion:Option<&Completion>,started:Instant)->Result<Result<Solution,Completion>,String>{
+    let tolerance=POPULATION_TOLERANCE;let n=prepared.generator.n;
     if initial.len()!=n*n{return Err("Initial density dimension differs".into());}
     let times=request.times;
     if !times.is_empty(){
@@ -298,12 +360,12 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     // 1. The lattice; the frame on its own thread for a request that
     // propagates.
     let clock=Instant::now();let eigen=prepared.eigenbasis()?;timing.eigenbasis_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
-    let frame=SwFrame::new(prepared,longest);
-    std::thread::scope(|scope|->Result<Solution,String>{
-    if propagates{std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||{let _=frame.class();}).map_err(|e|e.to_string())?;}
-    let explicit=request.explicit.get_or_init(||charge_set::explicit_set(prepared,initial,tolerance)).clone()?;timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
+    let base=request.explicit.get_or_init(||charge_set::explicit_set(prepared,initial,tolerance)).clone()?;
+    let explicit=match completion{Some(c)=>charge_set::completed(prepared,&base,&c.promoted)?,None=>base};
+    timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
+    let keep_k1=completion.is_some_and(|c|c.keep_k1);
     let clock=Instant::now();
-    let mut lattice=Lattice::new(prepared,explicit.sets.clone())?;
+    let mut lattice=Lattice::with_k1_rests(prepared,explicit.sets.clone(),keep_k1)?;
     let ledger=lattice.operator().ledger()?;
     let planned=BASE_BYTES+MODE_BYTES*lattice.modes.len()as f64;
     if planned>MEMORY_BYTES{return Err(format!("The lattice of this request has {} modes and would need about {:.1} GB, above the {:.0} GB memory budget: not solved",lattice.modes.len(),planned/1e9,MEMORY_BYTES/1e9));}
@@ -322,7 +384,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     space.solve(&mut lattice,Pole::Zero)?;
     let modes=lattice.modes.clone();
     let clock=Instant::now();
-    let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups},frame:&frame,ledger:&ledger})?;
+    let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups},frame,ledger:&ledger,keep_k1})?;
     timing.estimator_build_ms=clock.elapsed().as_secs_f64()*1e3;
     // The ladder spans the grid's times when there is one (a horizon is
     // served by the steady column, the slow points and the slowest
@@ -337,7 +399,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     // propagates nothing (the steady state alone) takes M = I instead, a
     // speed case: it skips about 1 s of frame build (`reduced`).
     let clock=Instant::now();
-    let metric=if propagates{Some(SwMetric::new(&frame,eigen,lattice.operator())?)}else{None};
+    let metric=if propagates{Some(SwMetric::new(frame,eigen,lattice.operator())?)}else{None};
     timing.frame_wait_ms=clock.elapsed().as_secs_f64()*1e3;
     let mut galerkin=Projection::new(lattice.operator(),metric.as_ref())?;
     let lapack=&prepared.lapack;let ops=super::krylov::Vectors::new(lattice.operator(),1)?;
@@ -356,6 +418,8 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     let(mut slow_at,mut slow_remaining)=(vec![None::<f64>;points.len()],vec![0.;points.len()]);
     // The slowest relaxation while it needs poles: (need, target rate).
     let mut slow_need:Option<(f64,f64)>=None;
+    // The first checkpoint's completion decision when it changed nothing.
+    let mut decided:Option<Completion>=None;
     loop{
         let live:Vec<usize>=(0..points.len()).filter(|&i|alive[i]).collect();
         let exhausted=live.is_empty()||space.solves()>=MAXIMUM_SOLVES||space.full();
@@ -378,7 +442,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             // The growth charge on every output.
             for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
             // The slowest relaxation (the classes from the frame's block).
-            if classes.is_none()&&propagates{classes=Some(class_rates(&frame,eigen,lapack,initial,tolerance)?);}
+            if classes.is_none()&&propagates{classes=Some(class_rates(frame,eigen,lapack,initial,tolerance)?);}
             let rates:Option<Vec<f64>>=classes.as_ref().map(|c|c.iter().map(|x|x.0).collect());
             let pairs=slow_pairs(&model,&space,&ops,rates.as_deref(),tolerance)?;
             if let Some(delta)=freeze{let tau=pairs.first().map_or(f64::INFINITY,|(p,_)|1./p.rate);
@@ -425,6 +489,40 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             let within=answer.largest()<=tolerance;
             if best.as_ref().is_none_or(|b|if within{true}else{b.largest()>tolerance&&answer.largest()<b.largest()}){best=Some(answer.clone());}
             if answer.accepted{break;}
+            // 5. Completion, decided at the first checkpoint (see `solve`).
+            if completion.is_none()&&checkpoints.len()==1&&std::env::var("ATOM_DIAG_NO_COMPLETION").is_err(){
+                let e=&answer.estimate;let off=answer.sample_errors.len();let horizons_count=answer.horizon_errors.len();
+                // Per output: its bound and its slow part (bound units); the steady
+                // state's estimate is its slow part.
+                let mut outputs:Vec<(f64,f64,usize)>=answer.sample_errors.iter().enumerate()
+                    .map(|(i,&b)|(b,ACCEPTANCE_FACTOR*e.slow_trajectory.get(i).copied().unwrap_or(0.),i)).collect();
+                outputs.extend(answer.horizon_errors.iter().enumerate().map(|(h,&b)|(b,ACCEPTANCE_FACTOR*e.slow_horizons.get(h).copied().unwrap_or(0.),off+h)));
+                if let Some(b)=answer.steady_error{outputs.push((b,b,off+horizons_count));}
+                let(bound,part,at)=outputs.iter().copied().max_by(|a,b|a.0.total_cmp(&b.0)).unwrap_or((0.,0.,0));
+                if bound>tolerance&&part>=COMPLETION_SHARE*bound{
+                    let view=ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
+                        used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out};
+                    let pick=|x:&ErrorEstimate|ACCEPTANCE_FACTOR*if at<off{x.trajectory[at]}else if at<off+horizons_count{x.horizons[at-off]}else{x.steady.unwrap_or(0.)};
+                    let k1=estimator.estimate_by_source(&view,&mut lattice,Source::K1,false)?;
+                    let ring=estimator.estimate_by_source(&view,&mut lattice,Source::Ring,true)?;
+                    let(k1_part,ring_part)=(pick(&k1),pick(&ring));
+                    let keep=lattice.operator().drops_k1_rests()&&k1_part>=K1_COMPLETION*tolerance;
+                    // The ring charges by attribution, a pair together (the canonical
+                    // member, the larger charge, stands for it).
+                    let charges=&estimator.lattice.ring;let shares=&estimator.ring_attribution;
+                    let mut pairs:BTreeMap<Charge,f64>=BTreeMap::new();
+                    for(c,&a)in charges.iter().zip(shares){let m=opposite(c);let key=if *c>m{c.clone()}else{m};*pairs.entry(key).or_default()+=a;}
+                    let total:f64=pairs.values().sum();
+                    let mut ranked:Vec<(Charge,f64)>=pairs.into_iter().collect();ranked.sort_by(|a,b|b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                    let mut promoted=Vec::new();let mut carried=0.;
+                    if total>0.{for(c,a)in &ranked{if carried>=RING_COMPLETION*total{break;}promoted.push(c.clone());carried+=a;}}
+                    let attribution:Vec<(Charge,f64)>=ranked.iter().map(|(c,a)|(c.clone(),if total>0.{a/total}else{0.})).collect();
+                    let restarted=keep||!promoted.is_empty();
+                    let decision=Completion{promoted,keep_k1:keep,decided_at:space.solves(),bound,slow_part:part,k1_part,ring_part,attribution,restarted};
+                    if restarted{return Ok(Err(decision));}
+                    decided=Some(decision);
+                }
+            }
             // 4. The stopping rule on the bound above the tolerance, else on
             // the missing classes' need (slowest first).
             let needs:Vec<(f64,f64)>=missing.iter().map(|&class|class_need(class,&pairs)).collect();
@@ -494,9 +592,8 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     timing.solves_ms=work.milliseconds;timing.images_ms=space.images_ms;timing.projection_ms=galerkin.milliseconds;timing.total_ms=started.elapsed().as_secs_f64()*1e3;
     timing.frame_ms=frame.milliseconds();
     let converged=answer.accepted;
-    Ok(Solution{answer,converged,reason:if converged{None}else{reason},translations:space.translations(),
-        columns:space.columns.clone(),dimension:galerkin.columns(),images:space.basis.len(),work,ledger:ledger.clone(),timing,checkpoints,explicit:explicit.clone()})
-    })
+    Ok(Ok(Solution{answer,converged,reason:if converged{None}else{reason},completion:completion.cloned().or(decided),translations:space.translations(),
+        columns:space.columns.clone(),dimension:galerkin.columns(),images:space.basis.len(),work,ledger:ledger.clone(),timing,checkpoints,explicit:explicit.clone()}))
 }
 
 #[cfg(test)]

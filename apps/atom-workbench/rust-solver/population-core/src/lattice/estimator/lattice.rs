@@ -89,6 +89,9 @@ pub struct ErrorLattice<'p>{
     /// P u Q u R, applied with masks: P u Q -> R for the outflow, R -> R for
     /// the ring's diagonal blocks, R -> P u Q for the feedback.
     pub ring:Vec<Charge>,ring_nu:Vec<f64>,
+    /// When `attribute`, the last feedback's |B y_r| per ring charge r (its
+    /// slaved amplitude's feedback onto P u Q alone, the mirror with it).
+    pub attribute:bool,pub last_ring:Vec<f64>,
     outer:LatticeOperator<'p>,inner_mask:Vec<bool>,ring_mask:Vec<bool>,edge_modes:usize,
     /// The request's frame: its kernels and blocks are read on first use (a
     /// steady state alone reads neither).
@@ -118,11 +121,11 @@ pub struct ErrorLattice<'p>{
 
 impl<'p> ErrorLattice<'p>{
     /// `explicit`: the explicit set P, whose modes join the near ones.
-    pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],explicit:&[Charge],frame:&'p SwFrame<'p>)->Result<Self,String>{
+    pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],explicit:&[Charge],frame:&'p SwFrame<'p>,keep_k1:bool)->Result<Self,String>{
         let n=prepared.generator.n;let d=n*n;
         let ring=super::super::estimate_api::ring(prepared,modes)?;
         let all:Vec<Charge>=modes.iter().chain(&ring).cloned().collect();
-        let outer=LatticeOperator::new(prepared,&all)?;
+        let outer=LatticeOperator::with_k1_rests(prepared,&all,keep_k1)?;
         // P u Q comes first in the operator: its index, mirrors (closed on
         // P u Q) and frequencies, the ring's after them.
         let count=modes.len();let centre=outer.centre;
@@ -148,7 +151,7 @@ impl<'p> ErrorLattice<'p>{
         let count=near.len();
         let near_canonical:Vec<usize>=(0..count).filter(|&slot|canonical[near[slot]]).collect();
         let outer_modes:Vec<usize>=frames.iter().copied().filter(|&q|!near.contains(&q)&&canonical[q]).collect();let outer_count=outer_modes.len();
-        Ok(Self{prepared,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,frame,
+        Ok(Self{prepared,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,attribute:false,last_ring:Vec::new(),outer,inner_mask,ring_mask,edge_modes,frame,
             near,pairs,frames,outer_modes,canonical,near_canonical,partner:OnceLock::new(),basis_coordinates:vec![Vec::new();count],image_coordinates:vec![Vec::new();count],
             outer_basis:vec![Vec::new();outer_count],outer_image:vec![Vec::new();outer_count],columns:0,
             work:ErrorWork::default()})
@@ -269,6 +272,13 @@ impl<'p> ErrorLattice<'p>{
             for(a,b)in y.iter_mut().zip(&r){add(a,*b);}
         }
         for v in &mut y{v.re=-v.re;v.im=-v.im;}
+        if self.attribute{
+            let mut per=Vec::with_capacity(count);
+            for r in 0..count{let mut yr=vec![ZERO;count*d];yr[r*d..(r+1)*d].copy_from_slice(&y[r*d..(r+1)*d]);
+                let m=self.outer.mirror[inner+r]-inner;if m!=r{yr[m*d..(m+1)*d].copy_from_slice(&y[m*d..(m+1)*d]);}
+                per.push(norm(&self.ring_parts(&yr,Parts::Full,false)?));}
+            self.last_ring=per;
+        }
         self.ring_parts(&y,Parts::Full,false)
     }
     /// The operator's parts on a (complex) ring field: its diagonal blocks
