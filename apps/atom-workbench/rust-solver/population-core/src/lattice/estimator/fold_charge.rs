@@ -74,6 +74,12 @@ const DENSE_COLUMNS:usize=64;
 /// The slow responses' pool solves stop at this residual (R2: only their
 /// directions outside the space enter the model).
 const RESPONSE_RESIDUAL:f64=1e-4;
+/// A response's source below this fraction of |A| |v_m| (|A| the largest
+/// image of a basis column) is roundoff: its response is zero.
+const NEGLIGIBLE:f64=1e-12;
+/// Divided differences of values closer than this (times t) take the
+/// expm1 form.
+const CLOSE:f64=1e-3;
 
 /// The built remainders' effect per output (population differences) and
 /// the unbuilt ones' charge.
@@ -106,10 +112,16 @@ pub struct FoldCharge<'a>{
 /// dG^ = S^-1 dG S (column-major r x r) in its Ritz coordinates.
 struct Response{theta:Vec<C>,a:Vec<C>,dg:Vec<C>}
 impl Response{
-    /// c(t) (`Phi` divided differences).
+    /// c(t): the divided differences Phi_kl(t) in the expm1 form where
+    /// |theta_k - theta_l| t < CLOSE, else from the exponentials (the
+    /// difference loses at most a factor 1 / CLOSE of their size).
     fn at(&self,t:f64)->Vec<C>{
-        let r=self.theta.len();
-        (0..r).map(|k|(0..r).fold(ZERO,|s,l|{let v=mul(mul(phi(self.theta[k],self.theta[l],t),self.dg[k+r*l]),self.a[l]);C{re:s.re+v.re,im:s.im+v.im}})).collect()
+        let r=self.theta.len();let e:Vec<C>=self.theta.iter().map(|&z|cexp(z,t)).collect();
+        (0..r).map(|k|(0..r).fold(ZERO,|s,l|{
+            let(d,m)=(C{re:self.theta[k].re-self.theta[l].re,im:self.theta[k].im-self.theta[l].im},mul(self.dg[k+r*l],self.a[l]));
+            if !nonzero(m){return s;}
+            let p=if magnitude(d)*t<CLOSE{phi(self.theta[k],self.theta[l],t)}else{div(C{re:e[k].re-e[l].re,im:e[k].im-e[l].im},d)};
+            let v=mul(p,m);C{re:s.re+v.re,im:s.im+v.im}})).collect()
     }
 }
 /// (e^{a t} - e^{b t}) / (a - b) = e^{hi t} t phi_1((lo - hi) t), hi the
@@ -290,6 +302,7 @@ impl<'a> FoldCharge<'a>{
         // conjugate pair: the other's Y is the flip) for a long output.
         let clock=Instant::now();
         let partner=|m:usize|slow.iter().any(|&l|magnitude(C{re:theta[l].re-theta[m].re,im:theta[l].im+theta[m].im})<PAIRED*(1.+magnitude(theta[m])));
+        let scale=images.iter().map(|x|x.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt()).fold(0_f64,f64::max);
         let respond:Vec<usize>=ordered.iter().copied().filter(|&m|if long{theta[m].im>=0.||!partner(m)}else{outputs.steady&&Some(m)==kernel}).collect();
         if !respond.is_empty(){pool.add_columns(basis)?;}
         let mut responses=Vec::new();
@@ -297,6 +310,8 @@ impl<'a> FoldCharge<'a>{
             let coordinates:Vec<C>=columns[rank..].iter().map(|c|(0..k).fold(ZERO,|s,i|C{re:s.re+c[i]*b[i+k*m].re,im:s.im+c[i]*b[i+k*m].im})).collect();
             let mut f=vec![ZERO;self.x0.len()];
             for(c,dv)in coordinates.iter().zip(&perturbed[1+rank..1+rank+ns]){for(o,v)in f.iter_mut().zip(dv){mul_add(o,*c,*v);}}
+            let size=|v:&[C]|v.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();
+            if size(&f)<=NEGLIGIBLE*scale*size(&b[k*m..k*(m+1)]){continue;}
             let solution=pool.response(&f,theta[m],a[m],RESPONSE_RESIDUAL,steady)?;self.work.solves+=1;
             // The steady state: the kernel's response itself, a_0 Y_0.
             if Some(m)==kernel&&outputs.steady{effect.steady=Some(pool.steady_populations(basis,&solution));}
