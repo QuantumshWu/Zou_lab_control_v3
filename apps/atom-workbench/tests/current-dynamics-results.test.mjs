@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {CurrentDynamicsResults} from '../dist/js/atom-workbench/src/current-dynamics-results.js';
+import {CurrentDynamicsResults,keptCheckpoint} from '../dist/js/atom-workbench/src/current-dynamics-results.js';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 
@@ -15,10 +15,19 @@ test('current display survives pure UI edits, but changing physics, duration or 
   }
 });
 
-test('a streamed current mean is displayable without masquerading as a completed finite trajectory',()=>{
+test('a final mean is displayable without masquerading as a completed finite trajectory',()=>{
   const store=new CurrentDynamicsResults(),epoch=store.activate('current'),mean={times:[0]},full={times:[0,1,2]};
-  store.set('current',epoch,'mean',mean);store.set('current',epoch,'progress',mean);
-  assert.strictEqual(store.get('current','mean'),mean);assert.strictEqual(store.get('current','progress'),mean);assert.equal(store.get('current','trajectory'),undefined);
-  store.set('current',epoch,'trajectory',full);assert.strictEqual(store.get('current','trajectory'),full);assert.equal(store.get('current','progress'),undefined);
+  store.set('current',epoch,'mean',mean);
+  assert.strictEqual(store.get('current','mean'),mean);assert.equal(store.get('current','trajectory'),undefined);
+  store.set('current',epoch,'trajectory',full);assert.strictEqual(store.get('current','trajectory'),full);assert.strictEqual(store.get('current','mean'),mean);
   store.clear();assert.equal(store.get('current','mean'),undefined);assert.equal(store.get('current','trajectory'),undefined);
+});
+
+test('on 停止 the last checkpoint stands as the trajectory it is, and as the mean unless a final one is here',()=>{
+  const trajectory={timesUs:[0,1,2],steady:{converged:true}},noMean={timesUs:[0,1,2],steady:{converged:false}},meanOnly={timesUs:[0],steady:{converged:true}};
+  assert.deepEqual(keptCheckpoint(trajectory,false,false),['trajectory','mean']);
+  assert.deepEqual(keptCheckpoint(trajectory,false,true),['trajectory'],'a final mean already here stays');
+  assert.deepEqual(keptCheckpoint(noMean,false,false),['trajectory']);
+  assert.deepEqual(keptCheckpoint(meanOnly,true,false),['mean'],'a mean request\'s checkpoint is a mean, never a trajectory');
+  assert.deepEqual(keptCheckpoint({timesUs:[0],steady:{converged:false}},true,false),[]);
 });

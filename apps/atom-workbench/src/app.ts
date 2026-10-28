@@ -7,13 +7,13 @@ import {command,type Command} from '../../desktop/ui/src/fluent/button.js';
 import {element,reconcileChildren,setTitle,type Value} from '../../desktop/ui/src/fluent/dom.js';
 import {comboFace} from '../../desktop/ui/src/fluent/combo.js';
 import {TreeCombo,type TreeGroup} from '../../desktop/ui/src/fluent/tree_combo.js';
-import {StatusStrip,setState,statusDot,type StatusWord} from '../../desktop/ui/src/fluent/status.js';
+import {StatusStrip,type StatusWord} from '../../desktop/ui/src/fluent/status.js';
 import {TabWidget} from '../../desktop/ui/src/fluent/tabs.js';
 import {Menu} from '../../desktop/ui/src/fluent/menu.js';
 import {setMiddle} from '../../desktop/ui/src/fluent/elide.js';
 import {drawBadges} from '../../desktop/ui/src/pulse/widgets.js';
 import {Segmented,setChecked,switchButton,checkBox} from '../../desktop/ui/src/fluent/toggles.js';
-import {clickState,keepLabels,labelled,readLabels,swapLabels,withLabel,type LabelSlot,type StateLabels} from './transition-choice.js';
+import {clickState,keepLabels,labelled,swapLabels,withLabel,type LabelSlot,type StateLabels} from './transition-choice.js';
 import {offsetReading,photonFrequencyMHz,setReferenceOffset} from './reference-energy.js';
 import {typedDigits,type Reading} from './unit-input.js';
 import {frequencyBaseTree,stateTree} from './choice-trees.js';
@@ -25,13 +25,13 @@ import {analyze,dipoleBetweenStates,resolveSceneFrequencies,laserIntensityMWcm2,
 import {AXIS_NAMES,axisWords,directionAxis,linkableFields,linkedTo,referenceAxis,releaseLinks,sameDirection,shortcutDirection,shortcutField,type DirectionShortcut} from './direction.js';
 import {DEFAULT_NUMERICAL_APERTURE,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,intensityReading,normalizeLaserIntensity,powerReading,setLaserIntensityMode,setLaserNumericalAperture,waistReading,writeLaserIntensity,writeLaserPower,writeLaserWaist} from './laser-intensity.js';
 import {dynamicsCacheKey} from './dynamics-cache-key.js';
-import {CurrentDynamicsResults} from './current-dynamics-results.js';
+import {CurrentDynamicsResults,keptCheckpoint} from './current-dynamics-results.js';
 import {STATIC_MIXING_LIMIT,displayMixing,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
 import {defaultScene,POPULATION_TOLERANCE} from './types.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
 import type {DynamicsResult} from './solver-types.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
-import {loadSavedScene,validateScene} from './scene-file.js';
+import {startupScene,validateScene} from './scene-file.js';
 import {incidentTransitions,laserEmits,laserReferenceStateId,setLaserReferenceState,transitionEndpoints} from './transition-view.js';
 import {escapeHtml as esc,levelsChart,number,populationChart,bindPopulationChart,populationColor,populationValue,populationSamplingInfo} from './charts.js';
 import {math} from './math.js';
@@ -60,11 +60,10 @@ type Selection={kind:'field'|'laser'|'reference'|'level'|'none';id:string};
 type ObjectKind=Exclude<Selection['kind'],'none'>;
 const APP_TITLE='Rb87 实验工作台';
 const STORAGE='rb87-workbench-demo-v4',root=document.querySelector<HTMLDivElement>('#app')!;
-let scene=defaultScene(),view:View='levels',resultView:ResultView='levels',spectral:SpectralLine='D2',selection:Selection={kind:'laser',id:'probe'};
+let scene=startupScene((()=>{try{return localStorage;}catch{return undefined;}})(),STORAGE),view:View='levels',resultView:ResultView='levels',spectral:SpectralLine='D2',selection:Selection={kind:'laser',id:'probe'};
 let populationMode:'steady'|'time'='steady',populationTimeIndex=-1,populationScale:'linear'|'log'='linear';let unbindPopulation:(()=>void)|undefined;
 let spaceRenderer:ReturnType<typeof renderSpace3D>|undefined;const spaceMount=document.createElement('div');spaceMount.className='retained-space-view';
-let saveState:'saved'|'pending'|'failed'='saved',saveFailure='',loadFailure='',unreadableScene:string|null=null;
-let stateLabels:StateLabels={},dirty=false,saveTimer=0,renderCount=0;
+let stateLabels:StateLabels={},dirty=false,renderCount=0;
 let latestAnalysis:Analysis,analysisError='',solverError='',solverBusy=false,solverQueued=false,solverRevision=0,requestedKey='',solverTimer=0,solverWallMs=0,controlsKey='',renderedPopulationKey='';
 let requestedPhysicalKey='',requestedSteadyOnly=false,stoppedKey='';
 let requestedHorizon:number|null|undefined;
@@ -79,15 +78,13 @@ let initialBody='';
 const directionCommands:{command:Command;mode:DirectionShortcut}[]=[];
 const projectedPopulationCache=new WeakMap<Analysis,WeakMap<object,Record<string,number>|null>>();
 let spectrumBuildCount=0,populationPaintCount=0;
-/** A solve's result and the mean horizon it was asked for. */
-type SolvedRecord={result:DynamicsResult;wallMs:number;horizon:number|null};const displayedResults=new CurrentDynamicsResults<SolvedRecord>();
+/** A solve's result and the mean horizon it was asked for; `checkpoint` when it is the last
+ * checkpoint of a solve that was stopped or failed, standing as the result. */
+type SolvedRecord={result:DynamicsResult;wallMs:number;horizon:number|null;checkpoint?:'stopped'|'failed'};const displayedResults=new CurrentDynamicsResults<SolvedRecord>();
+/** The running solve's latest checkpoint: never drawn; on 停止 (or a failure) it becomes the result. */
+let lastCheckpoint:{record:SolvedRecord;physicalKey:string;epoch:number;steadyOnly:boolean}|undefined;
 const $=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T;
 const message=(error:unknown)=>error instanceof Error?error.message:String(error);
-
-// The autosaved scene, if it is a valid current scene; else the default scene, the original kept to download.
-{let saved:string|null=null;try{saved=localStorage.getItem(STORAGE);}catch{}const loaded=loadSavedScene(saved);scene=loaded.scene;if(loaded.failure){unreadableScene=saved;loadFailure=loaded.failure;}}
-if(!scene.lasers.some(l=>l.id===selection.id))selection=scene.lasers[0]?{kind:'laser',id:scene.lasers[0].id}:{kind:'field',id:scene.fields[0]?.id??''};
-try{stateLabels=readLabels(JSON.parse(localStorage.getItem(`${STORAGE}-state-labels`)??'{}'));}catch{/* Ignore malformed presentation state. */}
 
 // ---------------------------------------------------------------- the window
 root.innerHTML=`<div class="workbench">
@@ -114,8 +111,8 @@ const workbench=root.querySelector<HTMLElement>('.workbench')!,workspace=root.qu
 // The header card: the scene's identity (its name edited where it stands), its muted summary and
 // the file commands (v3 TaskConsole header).
 const header=element('header','card header');
-const sceneDot=statusDot('idle'),sceneName=new InlineName(name=>renameScene(name),'场景名称','heading document-name');sceneName.root.id='scene-name';
-const identity=element('div','identity');identity.append(sceneDot,sceneName.root);
+const sceneName=new InlineName(name=>renameScene(name),'场景名称','heading document-name');sceneName.root.id='scene-name';
+const identity=element('div','identity');identity.append(sceneName.root);
 const summaryLine=element('span','summary');summaryLine.id='summary';
 const examplesCommand=command('示例…',()=>showExamples());examplesCommand.root.id='examples-button';
 const importCommand=command('导入…',()=>$<HTMLInputElement>('file-input').click());importCommand.root.id='import-button';
@@ -123,11 +120,10 @@ const exportCommand=command('导出…',()=>exportScene());exportCommand.root.id
 const inspectorToggle=command('参数',()=>toggleInspector(),{role:'quiet'});inspectorToggle.root.classList.add('inspector-toggle');inspectorToggle.root.setAttribute('aria-controls','inspector-controls');
 header.append(identity,summaryLine,inspectorToggle.root,examplesCommand.root,importCommand.root,exportCommand.root);
 
-// The status strip: save and solver state, Stop while a solve runs (v3 FluentStatusStrip).
+// The status strip: the solver's state, Stop while a solve runs (v3 FluentStatusStrip).
 const strip=new StatusStrip({action:['停止',()=>stopSolve()]});strip.root.id='status';strip.text.id='status-text';
 const detailsCommand=command('详情',()=>showView('details'),{role:'quiet'});detailsCommand.hidden=true;
-const recoverCommand=command('下载原本地场景',()=>downloadUnreadableScene());recoverCommand.hidden=true;
-strip.trailing.prepend(detailsCommand.root,recoverCommand.root);
+strip.trailing.prepend(detailsCommand.root);
 workbench.prepend(header,strip.root);
 
 // The three analysis pages and 详情 (v3 FluentTabWidget); each page's own controls on its title
@@ -209,9 +205,8 @@ function dynamics():DynamicsSettings{return scene.dynamics;}
 /** Resolves the scene's frequencies and intensities (a scene built in code: the default and examples). */
 function normalizeScene(next:Scene):void{try{resolveSceneFrequencies(next);}catch{/* The status reports an invalid frequency. */}for(const laser of next.lasers){try{normalizeLaserIntensity(laser);}catch{/* The inspector reports an invalid laser. */}}}
 
-// Edits since the scene was loaded: derived anchors and automatic curve choices are not edits.
-let baseline:string|null=null;
-try{baseline=localStorage.getItem(`${STORAGE}-baseline`);}catch{}
+// Edits since the scene was loaded or exported: derived anchors and automatic curve choices are not edits.
+let baseline='';
 function editKey(value:Scene=scene):string{
   // Readout preferences, derived anchors and the automatic curve choice are not edits; a unit
   // picked for the duration or the temperature is one through the quantity it changes.
@@ -219,12 +214,10 @@ function editKey(value:Scene=scene):string{
     curves:d.monitorMode==='manual'?[d.monitoredStateIds,d.monitoredGroupIds??[]]:'auto'}:null;
   return JSON.stringify({...value,display:undefined,dynamics:settings},(key,item)=>key.endsWith('Anchor')?undefined:item);
 }
-function markBaseline():void{baseline=editKey();try{localStorage.setItem(`${STORAGE}-baseline`,baseline);}catch{}}
-function sceneEdited():boolean{return baseline===null||baseline!==editKey();}
+function markBaseline():void{baseline=editKey();}
+function sceneEdited():boolean{return baseline!==editKey();}
 
-function saveSceneNow():void{clearTimeout(saveTimer);try{if(unreadableScene!==null){localStorage.setItem(`${STORAGE}-unreadable`,unreadableScene);unreadableScene=null;}localStorage.setItem(STORAGE,JSON.stringify(scene));localStorage.setItem(`${STORAGE}-state-labels`,JSON.stringify(stateLabels));saveState='saved';saveFailure='';}catch(error){saveState='failed';saveFailure=message(error);}refreshStatus();}
-function persist():void{saveState='pending';clearTimeout(saveTimer);saveTimer=window.setTimeout(saveSceneNow,200);}
-function update():void{try{resolveSceneFrequencies(scene);}catch{/* analyze() reports it */}persist();invalidateObsoletePopulation();if(dirty)return;dirty=true;requestAnimationFrame(()=>{dirty=false;renderResults();});}
+function update():void{try{resolveSceneFrequencies(scene);}catch{/* analyze() reports it */}invalidateObsoletePopulation();if(dirty)return;dirty=true;requestAnimationFrame(()=>{dirty=false;renderResults();});}
 function note(text:string,word:StatusWord='task'):void{notice={text,word,until:performance.now()+6000};refreshStatus();window.setTimeout(refreshStatus,6100);}
 
 // ---------------------------------------------------------------- status
@@ -232,17 +225,25 @@ function note(text:string,word:StatusWord='task'):void{notice={text,word,until:p
  * another length moves nothing before it, and the full words for the tooltip when the line says
  * them short. Computing is automatic; 停止 ends a running solve. */
 function solverStatus():[string,StatusWord,string?,string?]{
-  const result=currentResult(),error=currentSolverError(),checkpoint=displayedCheckpoint();
-  if(error)return [result?.steady.converged?`时间演化失败（长期布居已就绪）：${labelStateIds(solverText(error))}`:`布居计算失败：${labelStateIds(solverText(error))}`,'error'];
-  // A streamed checkpoint stands on the page while the solve goes on.
-  if(currentSolverBusy())return [checkpoint&&result?.populationAccuracy?`计算中：当前估计误差最大 ${errorPercent(result.populationAccuracy.estimatedMaximumError)}`:result?.steady.converged?'长期布居已就绪 · 时间演化计算中…':solverQueued?'布居待计算':'布居计算中…','task'];
+  const record=currentRecord(),result=record?.result,error=currentSolverError();
+  if(error){const why=labelStateIds(solverText(error));return [record?.checkpoint==='failed'?`计算失败 · 显示最后的中间结果：${why}`:result?.steady.converged?`时间演化失败（长期布居已就绪）：${why}`:`布居计算失败：${why}`,'error'];}
+  // While a solve runs nothing new is drawn; the status says how far its checkpoints have come.
+  if(currentSolverBusy()){
+    const last=lastCheckpoint?.record.result,reached=last?.populationAccuracy?.estimatedMaximumError??(last?.steady.converged?last.steady.estimatedError:null);
+    return [reached!=null?`布居计算中… · 当前估计误差最大 ${errorPercent(reached)}`:result?.steady.converged?'长期布居已就绪 · 时间演化计算中…':solverQueued?'布居待计算':'布居计算中…','task'];
+  }
   const stopped=stoppedKey!==''&&stoppedKey===solveKey();
   if(view==='space')return ['方向与偏振实时显示','idle'];
   if(!result)return stopped?['计算已停止 · 修改参数后重新计算','warning']:['布居待计算','idle'];
-  const elapsed=formatElapsed(currentRecord()?.wallMs??solverWallMs),partial=trajectorySentence(result),mean=meanSentence(result),both=partial&&mean?bothSentence(result):'';
+  const elapsed=formatElapsed(record?.wallMs??solverWallMs),partial=trajectorySentence(result),mean=meanSentence(result),both=partial&&mean?bothSentence(result):'';
   const trajectory=resultPage()==='dynamics'||populationMode==='time';
-  // 停止 keeps the last checkpoint, marked as any partial result is.
-  if(stopped&&checkpoint&&trajectory)return [`计算已停止 · 显示最后的中间结果${partial?`：${partial}`:'（各时刻 ≤ 0.5%）'}`,'warning'];
+  // 停止 keeps the last checkpoint, marked as any partial result is: where the trajectory misses ε,
+  // short (with p̄(T)'s error when that misses it too), or p̄(T)'s error; the full words in the tooltip.
+  if(record?.checkpoint){
+    const head=`${record.checkpoint==='stopped'?'计算已停止':'计算未完成'} · 显示最后的中间结果`,tolerance=errorPercent(POPULATION_TOLERANCE);
+    const words=trajectory?both||(partial?`${trajectoryShort(result)}（超过 ${tolerance}）`:mean):mean,full=trajectory?[partial,mean].filter(Boolean).join(' · '):mean;
+    return [`${head}${words?`：${words}`:trajectory?`（各时刻 ≤ ${tolerance}）`:''}`,'warning',undefined,words!==full?`${head}：${full}`:undefined];
+  }
   if(resultPage()==='dynamics'&&result.timesUs.length>1){
     const full=['轨迹已计算',partial,result.steady?.converged?mean:'长期布居未解析'].filter(Boolean).join(' · ');
     return both?[`轨迹已计算 · ${both}`,'warning',elapsed,full]:[full,result.steady?.converged&&!partial&&!mean?'idle':'warning',elapsed];
@@ -258,27 +259,23 @@ function solverStatus():[string,StatusWord,string?,string?]{
 function trajectorySentence(result:DynamicsResult):string{const errors=sampleErrors(result);return result.timesUs.length>1&&errors?partialSentence(result.timesUs,errors,dynamics().durationUnit):'';}
 /** A computed p̄(T) outside the tolerance: its estimated error (empty when within). */
 function meanSentence(result:DynamicsResult):string{const s=result.steady;return s.converged&&!s.withinTolerance?`${meanSymbol(result)} 估计误差 ${s.estimatedError===null?'未知':errorPercent(s.estimatedError)}（超过 ${errorPercent(POPULATION_TOLERANCE)}）`:'';}
+/** Where the trajectory misses the tolerance, short (empty: nowhere). */
+function trajectoryShort(result:DynamicsResult):string{const errors=sampleErrors(result);return result.timesUs.length>1&&errors?partialShort(result.timesUs,errors,dynamics().durationUnit):'';}
 /** Both outside the tolerance, said short enough for one line at the narrowest window:
  * "t ≤ 0.42 μs 误差最大 0.61% · p̄(1 s) 误差 0.72%（均超 0.5%）". */
 function bothSentence(result:DynamicsResult):string{
-  const errors=sampleErrors(result)!,where=partialShort(result.timesUs,errors,dynamics().durationUnit),error=result.steady.estimatedError,tolerance=errorPercent(POPULATION_TOLERANCE);
+  const where=trajectoryShort(result),error=result.steady.estimatedError,tolerance=errorPercent(POPULATION_TOLERANCE);
   return error===null?`${where}（超过 ${tolerance}） · ${meanSymbol(result)} 误差未知`:`${where} · ${meanSymbol(result)} 误差 ${errorPercent(error)}（均超 ${tolerance}）`;
 }
-/** The trajectory shown is a streamed checkpoint, not a final result. */
-function displayedCheckpoint():boolean{const key=trajectoryKey();return !displayedResults.get(key,'trajectory')&&(displayedResults.get(key,'progress')?.result.timesUs.length??0)>1;}
 function refreshStatus():void{
   if(notice&&performance.now()>notice.until)notice=undefined;
   let [text,word,elapsed,full]=solverStatus();
   if(analysisError)[text,word,elapsed,full]=[`能级参数无效：${analysisError}`,'error',undefined,undefined];
   if(notice)[text,word,elapsed,full]=[notice.text,notice.word,undefined,undefined];
-  if(saveState==='failed')[text,word,elapsed,full]=[`本地保存失败：${saveFailure}；请导出场景`,'error',undefined,undefined];
-  else if(loadFailure&&!notice)[text,word,elapsed,full]=[`已改用默认场景：本地场景不是当前格式（${loadFailure}），原数据可下载`,'warning',undefined,undefined];
-  const tail=(word==='idle'?saveState==='pending'?' · 正在保存…':' · 场景已保存':'')+(elapsed?` · ${elapsed}`:'');
+  const tail=elapsed?` · ${elapsed}`:'';
   // A line said short keeps the full words in its tooltip.
   strip.show(text+tail,word);if(full)setTitle(strip.root,full+tail);strip.setActionVisible(currentSolverBusy());
-  detailsCommand.hidden=!currentSolverError();recoverCommand.hidden=!loadFailure;
-  const sceneWord:StatusWord=saveState==='failed'?'error':loadFailure?'warning':'idle';setState(sceneDot,sceneWord);
-  sceneDot.title=saveState==='failed'?'本地保存失败':loadFailure?'原本地场景未载入':'场景已保存在本机';
+  detailsCommand.hidden=!currentSolverError();
 }
 
 // ---------------------------------------------------------------- selection
@@ -295,7 +292,7 @@ function select(next:Selection):void{
  * click on empty space clears the selection (the levels chart then shows the total shift). */
 function pick(next:Selection):void{select(next);}
 function clearSelection():void{select({kind:'none',id:''});}
-function applyLabels(next:StateLabels):void{stateLabels=next;persist();renderResults(false);}
+function applyLabels(next:StateLabels):void{stateLabels=next;renderResults(false);}
 function selectState(id:string):void{applyLabels(clickState(stateLabels,id));}
 
 // ---------------------------------------------------------------- scene list
@@ -459,7 +456,7 @@ function bindQuantity(registry:Map<string,BoundField>,parent:HTMLElement,prefix:
 function bindDerived(registry:Map<string,BoundField>,parent:HTMLElement,prefix:string,scope:string,spec:{name:string;label:string;description:string;from:string},reading:()=>Reading,units:NonNullable<FieldSpec['units']>,pick:(unit:string)=>void):Field{
   const {from,...words}=spec;
   return bindField(registry,parent,prefix,()=>{const r=reading();return {...words,kind:'number',spin:true,inexact:true,allow_none:true,placeholder:'—',value:Number.isFinite(r.value)?r.value:null,unit:r.unit,units,unavailable_reason:from};},
-    ()=>{throw new Error(from);},{scope,computed:true,unit:pick,after:()=>persist()});
+    ()=>{throw new Error(from);},{scope,computed:true,unit:pick,after:()=>{/* a display unit: the row re-reads itself */}});
 }
 /** A reading that may not be computable now (a frequency not yet resolved): NaN in its unit. */
 const attempt=(reading:()=>Reading,unit:()=>string):Reading=>{try{return reading();}catch{return {value:NaN,unit:unit()};}};
@@ -548,7 +545,7 @@ function renderInspector():void{
     chart.append(mixingWarning);refreshMixing(l);
     const f=group('频率');
     frequencySection(f,l,laserReadout);
-    const originPicker=selectControl(f,'参考态',l.referenceStateId??'',[['','跟随动力学初态'],...allLevels().map(state=>[state.id,stateText(state)] as [string,string]),...scene.references.map(ref=>[ref.id,ref.name+' · 参考能级'] as [string,string])],id=>{setLaserReferenceState(scene,l,id||undefined);persist();renderInspector();renderResults(false);});originPicker.id='laser-reference-state';originPicker.setAttribute('aria-label','参考出发态');originPicker.title='只改变这束光的箭头起点和矩元参考；不改变动力学初态或任何驱动。';
+    const originPicker=selectControl(f,'参考态',l.referenceStateId??'',[['','跟随动力学初态'],...allLevels().map(state=>[state.id,stateText(state)] as [string,string]),...scene.references.map(ref=>[ref.id,ref.name+' · 参考能级'] as [string,string])],id=>{setLaserReferenceState(scene,l,id||undefined);renderInspector();renderResults(false);});originPicker.id='laser-reference-state';originPicker.setAttribute('aria-label','参考出发态');originPicker.title='只改变这束光的箭头起点和矩元参考；不改变动力学初态或任何驱动。';
     if(scene.references.some(r=>r.id===l.referenceStateId))selectControl(f,'光子方向',l.referenceProcess??'absorption',[['absorption','吸收 ↑'],['emission','受激辐射 ↓']],v=>{l.referenceProcess=v as 'absorption'|'emission';update();});
     // 强度 (laser-intensity.ts): the local intensity itself, or power with a waist or with the NA the
     // beam fills. The mode's inputs are written in units the operator picks; what follows from
@@ -584,7 +581,7 @@ function renderInspector():void{
 }
 /** 频率 (ui-design.md §1.3–1.4): the definition -- "相对" a base and the value against it -- then
  * the absolute frequency it defines. */
-const readoutPrefs=new ReadoutPreferences(()=>((scene.display??={}).readouts??={}) as Record<string,ReadoutPreference>,()=>persist());
+const readoutPrefs=new ReadoutPreferences(()=>((scene.display??={}).readouts??={}) as Record<string,ReadoutPreference>);
 const laserReadout=new FrequencyReadout('laser-frequency',readoutPrefs,{unitPicker:false,changed:()=>{}});
 const mixingWarning=element('p','note wrap mixing-warning','离共振太近：能级图不画它的光移');
 /** A laser's |Ω/2Δ| and whether it is too close to resonance for a static light shift to
@@ -860,39 +857,43 @@ function requestSolve():void{
   const revision=++solverRevision;clearTimeout(solverTimer);solverBusy=true;solverQueued=true;solverError='';
   const submittedScene=structuredClone(scene),submittedSettings=structuredClone(dynamics()),submittedAt=performance.now();
   const stillCurrent=()=>revision===solverRevision&&physicalKey===trajectoryKey()&&horizon===dynamics().meanHorizonUs;
+  // A checkpoint is kept, not drawn: the page shows the final result, rendered once.
+  lastCheckpoint=undefined;
   const submittedOptions={steadyOnly,onProgress:(result:DynamicsResult)=>{
     if(!stillCurrent())return;
-    // A computed mean is the long-time result so far; a checkpoint also carries the trajectory
-    // evaluated so far, shown until the next one or the final result replaces it.
-    const record={result,wallMs:performance.now()-submittedAt,horizon};
-    if(result.steady.converged)displayedResults.set(physicalKey,epoch,'mean',record);
-    displayedResults.set(physicalKey,epoch,'progress',record);
-    refreshPopulationOnly();
+    lastCheckpoint={record:{result,wallMs:performance.now()-submittedAt,horizon},physicalKey,epoch,steadyOnly};refreshStatus();
   }};
   solverTimer=window.setTimeout(async()=>{
     if(!stillCurrent())return;solverQueued=false;refreshPopulationOnly();const begin=performance.now();
     try{
       const result=await solver.solve(submittedScene,submittedSettings,submittedOptions);if(!stillCurrent())return;
-      solverWallMs=performance.now()-begin;const record={result,wallMs:solverWallMs,horizon};
+      solverWallMs=performance.now()-begin;const record={result,wallMs:solverWallMs,horizon};lastCheckpoint=undefined;
       displayedResults.set(physicalKey,epoch,steadyOnly?'mean':'trajectory',record);
       if(result.steady.converged)displayedResults.set(physicalKey,epoch,'mean',record);
       solverBusy=false;refreshPopulationOnly();
-    }catch(e){if(!stillCurrent())return;solverBusy=false;solverError=message(e);refreshPopulationOnly();}
+    }catch(e){if(!stillCurrent())return;keepLastCheckpoint('failed');solverBusy=false;solverError=message(e);refreshPopulationOnly();}
   },16);
   refreshPopulationOnly();
 }
-function cancelObsoleteSolve():void{solver.cancel();solverRevision++;clearTimeout(solverTimer);requestedKey='';requestedPhysicalKey='';requestedSteadyOnly=false;solverBusy=false;solverQueued=false;solverError='';}
-/** 停止: the running solve ends here; a mean it already delivered stays. Other inputs solve again. */
+function cancelObsoleteSolve():void{solver.cancel();solverRevision++;clearTimeout(solverTimer);lastCheckpoint=undefined;requestedKey='';requestedPhysicalKey='';requestedSteadyOnly=false;solverBusy=false;solverQueued=false;solverError='';}
+/** The running solve's last checkpoint becomes the result, rendered once and marked; a final
+ * mean already here stays. */
+function keepLastCheckpoint(cause:'stopped'|'failed'):void{
+  const last=lastCheckpoint;lastCheckpoint=undefined;if(!last)return;
+  const record:SolvedRecord={...last.record,checkpoint:cause};
+  for(const kind of keptCheckpoint(record.result,last.steadyOnly,!!meanRecord(last.physicalKey)))displayedResults.set(last.physicalKey,last.epoch,kind,record);
+}
+/** 停止: the running solve ends here and its last checkpoint stands as the result. Other inputs solve again. */
 function stopSolve():void{
   if(!currentSolverBusy())return;
-  const key=solveKey();cancelObsoleteSolve();stoppedKey=key;requestedKey=key;
+  const key=solveKey();keepLastCheckpoint('stopped');cancelObsoleteSolve();stoppedKey=key;requestedKey=key;
   if(view==='dynamics')renderDynamics(latestAnalysis);else refreshPopulationOnly();
   refreshStatus();
 }
 function currentRecord():SolvedRecord|undefined{
   const key=trajectoryKey();
   if(resultPage()==='levels'&&populationMode==='steady')return meanRecord(key);
-  const trajectory=displayedResults.get(key,'trajectory')??displayedResults.get(key,'progress');
+  const trajectory=displayedResults.get(key,'trajectory');
   if(!trajectory||trajectory.horizon===dynamics().meanHorizonUs)return trajectory;
   // The trajectory stays; its long-time part is the mean at the current horizon, or pending.
   const mean=meanRecord(key);return withMean(trajectory,mean);
@@ -901,7 +902,7 @@ const mergedRecords=new WeakMap<SolvedRecord,{mean:SolvedRecord|undefined;record
 function withMean(trajectory:SolvedRecord,mean:SolvedRecord|undefined):SolvedRecord{
   const saved=mergedRecords.get(trajectory);if(saved&&saved.mean===mean)return saved.record;
   const steady=mean?.result.steady??{converged:false,status:'not-requested' as const,populations:null,estimatedError:null,withinTolerance:false,residual:null,initialDependent:false};
-  const record={...trajectory,result:{...trajectory.result,steady},horizon:dynamics().meanHorizonUs};mergedRecords.set(trajectory,{mean,record});return record;
+  const checkpoint=trajectory.checkpoint??mean?.checkpoint,record={...trajectory,result:{...trajectory.result,steady},horizon:dynamics().meanHorizonUs,...(checkpoint?{checkpoint}:{})};mergedRecords.set(trajectory,{mean,record});return record;
 }
 function currentResult():DynamicsResult|undefined{return currentRecord()?.result;}
 function currentSolverError():string{return requestedKey===dynamicsKey(requestedSteadyOnly)?solverError:'';}
@@ -1055,7 +1056,7 @@ function renderDynamics(a:Analysis):void{
   const d=dynamics(),raw=currentResult();if((d.monitorMode??'auto')==='auto')d.monitoredStateIds=recommendedPopulationStates(raw,d.initialStateId);
   renderDynamicsControls(a);const ids=populationDisplayIds(d),result=raw?withPopulationGroups(raw,d.monitoredGroupIds??[]):undefined;
   const labels=Object.fromEntries([...allLevels(a).map(l=>[l.id,stateText(l)]),...POPULATION_GROUPS.map(g=>[g.id,g.label])]);
-  // A newer checkpoint (or the final result) redraws the same axes; an open readout stays at its sample.
+  // A redraw of the same result (a resize, another scale or curve) keeps an open readout at its sample.
   const host=$('population-chart'),open=host.querySelector<HTMLElement>('.population-readout:not([hidden])')?.dataset.sampleIndex;
   unbindPopulation?.();unbindPopulation=undefined;
   const plotOptions={showTotalExcited:false,timeUnit:d.durationUnit,scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),...(open===undefined?{}:{cursor:Number(open)})};
@@ -1063,7 +1064,8 @@ function renderDynamics(a:Analysis):void{
   host.innerHTML=result&&result.timesUs.length>1?populationChart(result,ids,labels,plotOptions):result?.steady.converged?`<div class="empty-state"><div><p>长期布居 ${esc(meanSymbol(raw))}</p><div class="form solver-readouts">${ids.map(id=>`<span class="field-label">${esc(labels[id]??id)}</span><span class="readout-edit">${populationValue(result.steady.populations?.[id]??0)}</span>`).join('')}</div><p class="note">${currentSolverError()?'时间演化未完成':stopped?'时间演化已停止':'时间演化计算中…'}</p></div></div>`:`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
   if(result&&result.timesUs.length>1)unbindPopulation=bindPopulationChart(host,result,ids,labels,plotOptions);
   const errors=raw&&raw.timesUs.length>1?sampleErrors(raw):undefined,banded=!!errors&&outsideRuns(errors).length>0;
-  const legend=(banded?`<span class="population-legend accuracy-legend"><span class="accuracy-swatch" aria-hidden="true"></span>估计误差 &gt; ${errorPercent(POPULATION_TOLERANCE)}</span>`:'')+ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
+  // The legend names the curves drawn: none until a result is here.
+  const legend=!(result&&result.timesUs.length>1)?'':(banded?`<span class="population-legend accuracy-legend"><span class="accuracy-swatch" aria-hidden="true"></span>估计误差 &gt; ${errorPercent(POPULATION_TOLERANCE)}</span>`:'')+ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
   if($('population-caption').innerHTML!==legend)$('population-caption').innerHTML=legend;
 }
 
@@ -1162,7 +1164,7 @@ function renderResults(allowSolve=true):void{
 
 // ---------------------------------------------------------------- the scene as a document
 function replaceScene(next:Scene,text:string):void{
-  loadFailure='';unitDrafts.clear();fieldProblems.clear();solver.cancel();solverRevision++;clearTimeout(solverTimer);requestedKey='';requestedPhysicalKey='';requestedSteadyOnly=false;stoppedKey='';solverError='';solverBusy=false;controlsKey='';displayedResults.clear();
+  unitDrafts.clear();fieldProblems.clear();solver.cancel();solverRevision++;clearTimeout(solverTimer);requestedKey='';requestedPhysicalKey='';requestedSteadyOnly=false;stoppedKey='';solverError='';solverBusy=false;controlsKey='';displayedResults.clear();
   disposeTrees($('levels-details'));$('levels-details').replaceChildren();$('selection-readout').dataset.selectionKey='';
   normalizeScene(next);scene=next;stateLabels=keepLabels(stateLabels,id=>!id.startsWith('reference-')||!!scene.references.some(r=>r.id===id));populationTimeIndex=-1;
   selection=scene.lasers[0]?{kind:'laser',id:scene.lasers[0].id}:scene.fields[0]?{kind:'field',id:scene.fields[0].id}:{kind:'none',id:''};
@@ -1183,7 +1185,6 @@ async function loadExample(key:string):Promise<void>{
 async function resetScene():Promise<void>{if(await confirmReplace('恢复默认场景'))replaceScene(defaultScene(),'已恢复默认场景');}
 function download(text:string,name:string):void{const url=URL.createObjectURL(new Blob([text],{type:'application/json'})),link=document.createElement('a');link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function exportScene():void{const name=`${scene.name.replace(/[\\/:*?"<>|]/g,'_').slice(0,100)||'rb87-scene'}.json`;download(JSON.stringify(scene,null,2),name);markBaseline();note(`已导出场景、标记与动力学设置：${name}`);}
-function downloadUnreadableScene():void{let original:string|null=null;try{original=localStorage.getItem(`${STORAGE}-unreadable`)??unreadableScene;}catch{original=unreadableScene;}if(original)download(original,'rb87-unreadable-scene.json');}
 $<HTMLInputElement>('file-input').onchange=async event=>{
   const input=event.target as HTMLInputElement,file=input.files?.[0];if(!file)return;
   try{if(file.size>100_000)throw new Error('场景文件应小于 100 KB');const next=validateScene(JSON.parse(await file.text()));if(await confirmReplace('导入场景'))replaceScene(next,`已导入场景「${next.name}」`);}
@@ -1193,7 +1194,7 @@ $<HTMLInputElement>('file-input').onchange=async event=>{
 /** A name edited in place (inline-name.ts): the scene's, 1 to 100 characters. */
 function renameScene(name:string):string|void{
   if(!name||name.length>100){const problem='场景名称应包含 1 至 100 个字符';note(problem,'warning');return problem;}
-  scene.name=name;renderObjects();persist();refreshStatus();
+  scene.name=name;renderObjects();refreshStatus();
 }
 function selectedObject():{name:string}|undefined{const lists={field:scene.fields,laser:scene.lasers,reference:scene.referenceFrequencies,level:scene.references};return selection.kind==='none'?undefined:(lists[selection.kind] as {id:string;name:string}[]).find(o=>o.id===selection.id);}
 /** The selected object's name, 1 to 64 characters. */
@@ -1250,12 +1251,11 @@ root.addEventListener('keydown',event=>{
   const el=(event.target as Element).closest<HTMLElement>('g[data-state],g[data-laser-id],tr[data-transition],[data-clear-label]');if(el){event.preventDefault();el.dispatchEvent(new MouseEvent('click',{bubbles:true}));}
 
 });
-window.addEventListener('pagehide',()=>{if(saveState==='pending')saveSceneNow();cancelObsoleteSolve();});
+window.addEventListener('pagehide',()=>cancelObsoleteSolve());
 window.addEventListener('pageshow',event=>{if(event.persisted)renderResults();});
 window.addEventListener('resize',syncLayout);
 let chartWidth=0,resizeFrame=0;new ResizeObserver(entries=>{const width=Math.round(entries[0]?.contentRect.width??0);if(width!==chartWidth){chartWidth=width;cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(()=>{if(latestAnalysis&&(view==='levels'||view==='dynamics'))renderResults(false);});}}).observe(tabs.stack);
 
 // ---------------------------------------------------------------- start
-normalizeScene(scene);if(baseline===null&&!unreadableScene&&!loadFailure){let stored:string|null=null;try{stored=localStorage.getItem(STORAGE);}catch{}if(stored===null)markBaseline();}
+normalizeScene(scene);markBaseline();
 syncLayout();latestAnalysis=analyze(scene);renderInitial();renderObjects();renderInspector();renderResults();
-if(loadFailure)refreshStatus();

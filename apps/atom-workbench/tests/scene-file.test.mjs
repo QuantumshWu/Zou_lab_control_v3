@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {analyze} from '../dist/js/atom-workbench/src/physics.js';
-import {loadSavedScene,validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
+import {startupScene,validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {laserReferenceStateId} from '../dist/js/atom-workbench/src/transition-view.js';
@@ -63,13 +63,17 @@ test('a file in an older format is refused cleanly, naming what does not match',
   const bare=file();delete bare.display;for(const l of bare.lasers){delete l.frequencyAnchor;delete l.intensityAnchor;}assert.equal(validateScene(bare).lasers.length,2);
 });
 
-test('an autosave that is not a current scene falls back to the default scene and says why',()=>{
-  assert.deepEqual(loadSavedScene(null),{scene:defaultScene()},'nothing saved: the default, no notice');
-  const saved=JSON.stringify(roundtrip(defaultScene()));assert.equal(loadSavedScene(saved).failure,undefined);
-  assert.equal(loadSavedScene('{"version":1}').failure,'version 为 1，应为 2','the reason, briefly');assert.equal(loadSavedScene('not json').failure,'不是 JSON');
-  for(const text of ['{"version":1,"name":"old","fields":[],"lasers":[]}','not json','null','[]']){
-    const loaded=loadSavedScene(text);assert.deepEqual(loaded.scene,defaultScene(),text);assert.ok(loaded.failure&&loaded.failure.length<80,text);
+test('a fresh start always shows the default scene; scene data an earlier version kept is removed',()=>{
+  const prefix='rb87-workbench-demo-v4',edited=roundtrip(defaultScene());edited.name='Edited';edited.fields[0].magnitudeG=7;
+  const storage=entries=>{const items=new Map(entries);return {items,removeItem:key=>items.delete(key)};};
+  for(const saved of [JSON.stringify(edited),'{"version":1,"name":"old"}','not json']){
+    const s=storage([[prefix,saved],[`${prefix}-unreadable`,saved],[`${prefix}-baseline`,'{}'],[`${prefix}-state-labels`,'{"first":"ground-2-0"}'],[`${prefix}-solver-failures`,'[]']]);
+    assert.deepEqual(startupScene(s,prefix),defaultScene(),saved);
+    assert.deepEqual([...s.items.keys()],[`${prefix}-solver-failures`],'only the solver-failure log stays: it is not scene data');
   }
+  assert.deepEqual(startupScene(storage([]),prefix),defaultScene(),'nothing stored');
+  assert.deepEqual(startupScene(undefined,prefix),defaultScene(),'no storage at all');
+  assert.deepEqual(startupScene({removeItem(){throw new Error('denied');}},prefix),defaultScene(),'storage that refuses');
 });
 
 test('independent per-laser reference states roundtrip without changing rho0, Hamiltonian or physical cache identity',()=>{
