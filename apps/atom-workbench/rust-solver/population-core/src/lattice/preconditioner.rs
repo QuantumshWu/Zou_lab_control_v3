@@ -23,10 +23,7 @@
 //! mirrored); a complex sigma acts on the real form of a complex field, a
 //! pair of Hermitian-symmetric fields (x_1, x_2) for x_1 + i x_2, through the
 //! complex inverse on every mode.
-//!
-//! `block_batch` is the block-diagonal inverse (L0' - i nu_q - sigma)^-1 of a
-//! mode subset in the eigenframes of the dressed block (the estimate's
-//! shell).
+
 use super::*;
 use super::floquet::{FloquetKernels,Frames,Reach,Transform,adjoint,inverse,mirror_computed,sandwich_batch,transpose};
 use super::operator::LatticeOperator;
@@ -145,7 +142,9 @@ impl<'p> Preconditioning<'p>{
     }
     /// The dressed blocks' inverse (L0' - i nu_q - sigma)^-1 on the computed
     /// modes (a subset of the canonical ones; the others zero but for the
-    /// mirrors of computed modes) in the block frames, no Woodbury term.
+    /// mirrors of computed modes) in the block frames, no Woodbury term: the
+    /// comparison for the Floquet frames' gain.
+    #[cfg(test)]
     pub fn block_batch(&self,op:&LatticeOperator<'_>,computed:&[bool],sigma:f64)->Result<FloquetBatch<'p>,String>{
         let t=self.kernels.transform(op,Frames::Block,computed,Reach::All)?;
         FloquetBatch::new(self.kernels,None,Frames::Block,op,Shift::Real(sigma),computed.to_vec(),vec![t])
@@ -360,14 +359,13 @@ mod tests{
     /// (real shifts only).
     fn shifted_solve(p:&LatticePrepared,shift:Shift,block:bool)->(usize,f64){
         let pre=Preconditioning::new(p).unwrap();
-        let modes=p.modes(2).unwrap();let op=LatticeOperator::new(p,&modes).unwrap();let size=op.dimension();let d=16;
+        let modes=p.modes(2).unwrap();let mut op=LatticeOperator::new(p,&modes).unwrap();let size=op.dimension();let d=16;
         let dense=op.dense();let canonical=op.canonical.clone();let centre=op.centre;
         let mut batch=if block{pre.block_batch(&op,&canonical,shift.sigma().re).unwrap()}else{pre.batch(&op,shift,Some(Reach::All)).unwrap()};
         let x=symmetric_field(&op,2);
         let mut b:Vec<C>=x.iter().map(|v|C{re:-v.re,im:-v.im}).collect();if shift.copies()==2{b.extend(vec![ZERO;size]);}
-        let mut system=System::new(op,&mut batch,shift).unwrap();
-        let options=KrylovOptions{populations:false,residual_guard:1e-11,..KrylovOptions::default()};
-        let solve=krylov::gmres(&mut system,&b,None,&[],&options).unwrap();
+        let mut system=System::new(&mut op,&mut batch,shift).unwrap();
+        let solve=krylov::gmres(&mut system,&b,None,&KrylovOptions::new(1e-11)).unwrap();
         // Dense: (A - sigma) w = b, the steady system with the trace row u v^T.
         let sigma=shift.sigma();let mut m=dense;for r in 0..size{m[r*size+r].re-=sigma.re;m[r*size+r].im-=sigma.im;}
         if shift.steady(){let c=centre*d;for i in 0..4{for j in 0..4{m[(c+i*4+i)*size+c+j*4+j].re+=0.25;}}}

@@ -1,7 +1,7 @@
 //! The error ledger: the population tolerance, the error metric, and every
-//! remainder the folded lattice leaves out, first as a generator-norm bound
-//! (closed form, prepared from the classification) and then as a population
-//! charge.
+//! remainder the folded lattice leaves out as a generator-norm bound (closed
+//! form, prepared from the classification); the error estimate turns the
+//! bounds into population charges.
 //!
 //! Bounds (rad/us, Schur test over the lattice blocks, for a lattice whose
 //! largest mode frequency is nu_max; d(r) = 1/(|nu_r| - nu_max - ||L0||)
@@ -19,22 +19,12 @@
 //! - `non_structural`: near couplings below the structural floor, on their
 //!   edges leaving the lattice;
 //! - `dropped_entries`: fold entries below the storage floor (row sums).
-//!
-//! Population charge = bound x sensitivity, where the sensitivity is the
-//! steady population response per unit generator norm, measured on the
-//! largest remainder's own source (an error equation, `estimate`): the
-//! third-order term when near couplings exist, else the fold itself.
 use super::*;
 use super::classification::{HarmonicPlan,Treatment};
 
 /// The population tolerance: absolute, on the probability scale, over every
 /// state and requested group. It is fixed; no other accuracy is served.
 pub const POPULATION_TOLERANCE:f64=5e-3;
-/// Safety factor of an acceptance: kappa (algebraic + truncation + fold
-/// estimates) <= POPULATION_TOLERANCE.
-pub const KAPPA:f64=1.5;
-/// Share of the tolerance left to the algebraic (Krylov) error.
-pub const ALGEBRAIC_SHARE:f64=1./20.;
 /// Largest accepted static-expansion parameter max |nu_q| ||D_s^-1||.
 pub const EXPANSION_LIMIT:f64=1e-2;
 /// Far-shell paths enumerated exactly up to this many steps.
@@ -107,25 +97,6 @@ impl RemainderLedger{
         let q=c_all*delta(0.5*far_min)?;
         ledger.tail=if q<1.{c_far*q.powi(ENUMERATED_STEPS as i32)/(1.-q)}else{f64::INFINITY};
         Ok(ledger)
-    }
-}
-
-/// The ledger's bounds as population charges (probability scale).
-#[derive(Clone,Debug,Default)]
-pub struct PopulationCharges{
-    /// Population response per unit generator norm (1/(rad/us)).
-    pub sensitivity:f64,
-    pub nu_freeze:f64,pub third_order:f64,pub far_shell:f64,pub tail:f64,
-    pub omitted_cross:f64,pub non_structural:f64,pub dropped_entries:f64,
-}
-impl PopulationCharges{
-    pub fn new(ledger:&RemainderLedger,sensitivity:f64)->Self{
-        Self{sensitivity,nu_freeze:ledger.nu_freeze*sensitivity,third_order:ledger.third_order*sensitivity,
-            far_shell:ledger.far_shell*sensitivity,tail:ledger.tail*sensitivity,omitted_cross:ledger.omitted_cross*sensitivity,
-            non_structural:ledger.non_structural*sensitivity,dropped_entries:ledger.dropped_entries*sensitivity}
-    }
-    pub fn total(&self)->f64{
-        self.nu_freeze+self.third_order+self.far_shell+self.tail+self.omitted_cross+self.non_structural+self.dropped_entries
     }
 }
 

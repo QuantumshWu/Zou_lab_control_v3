@@ -33,9 +33,14 @@
 //! factors, the least-squares projection) plus the rest, stored by sectors
 //! (GG, GE, EG, EE of the output and input elements): a sector pair that is
 //! filled is a dense block applied by GEMM, the scattered entries of the
-//! others a CSR remainder above ENTRY_FLOOR times the largest entry.
-//! Population rows are never dropped, so the stored fold stays exactly trace
-//! preserving; the dropped entries' largest row sum is charged.
+//! others a CSR remainder above ENTRY_FLOOR times the largest entry. A rest
+//! whose row sums stay below the structural coupling floor (K^(1)'s times
+//! the cut frequency, the largest |nu_q| it meets) is a non-structural
+//! coupling: it is left out but for its population rows, its row sum
+//! charged (without a tweezer the diagonal fold's rest is about 1e-7 rad/us
+//! in 0.57M entries). Population rows are never dropped, so the stored fold
+//! stays exactly trace preserving; the dropped entries' largest row sum is
+//! charged.
 use super::*;
 use super::classification::HarmonicPlan;
 use super::operator::LatticeOperator;
@@ -216,12 +221,13 @@ pub(crate) fn absorbable(k:&[C],n:usize)->(Vec<C>,Vec<C>){
 }
 
 /// Splits a row-major d x d K into its absorbable part and the rest, stored
-/// by sectors (see the module documentation). Population rows (i, i) are
-/// never dropped, so the stored K keeps the fold's exact trace preservation
-/// (v^T K = 0); the largest dropped row sum is returned. Three passes: the
-/// scale, the rest's measures after the absorbable band is taken out, the
-/// storage.
-fn store(k:&mut[C],n:usize,ground:&[bool])->(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64,f64,Rest){
+/// by sectors (see the module documentation); a rest whose largest row sum
+/// times `scale` is below `rest_floor` keeps its population rows alone. Population
+/// rows (i, i) are never dropped, so the stored K keeps the fold's exact
+/// trace preservation (v^T K = 0); the largest dropped row sum is returned.
+/// Three passes: the scale, the rest's measures after the absorbable band is
+/// taken out, the storage.
+fn store(k:&mut[C],n:usize,ground:&[bool],scale:f64,rest_floor:f64)->(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64,f64,Rest){
     let d=n*n;
     let(largest,total)={let(mut l,mut t)=(0_f64,0_f64);for z in k.iter(){let m=squared(*z);l=l.max(m);t+=m;}(l.sqrt(),t.sqrt())};
     // A X + X B lives on the band ((i,j),(k,j)) <- A[i,k], ((i,j),(i,l)) <- B[l,j].
@@ -233,12 +239,13 @@ fn store(k:&mut[C],n:usize,ground:&[bool])->(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64,
     let sector:Vec<usize>=(0..d).map(|p|2*usize::from(!ground[p/n])+usize::from(!ground[p%n])).collect();
     let mut members:Vec<Vec<usize>>=vec![Vec::new();4];let mut position=vec![0;d];
     for p in 0..d{position[p]=members[sector[p]].len();members[sector[p]].push(p);}
-    let(mut rest,mut row_sum,mut filled)=(0_f64,0_f64,[[0_usize;4];4]);
+    let(mut rest,mut row_sum,mut population_sum,mut filled)=(0_f64,0_f64,0_f64,[[0_usize;4];4]);
     for r in 0..d{let(row,so)=(&k[r*d..(r+1)*d],sector[r]);let mut sum=0.;
         for(c,z)in row.iter().enumerate(){let m=squared(*z);rest+=m;sum+=m.sqrt();if m>=floor2&&floor>0.{filled[so][sector[c]]+=1;}}
-        row_sum=row_sum.max(sum);}
+        row_sum=row_sum.max(sum);if r/n==r%n{population_sum=population_sum.max(sum);}}
+    let kept=scale*row_sum>=rest_floor;
     let mut dense=[[None;4];4];let mut blocks=Vec::new();
-    for so in 0..4{for si in 0..4{
+    for so in 0..4{for si in 0..4{if !kept{continue;}
         let(rows,cols)=(&members[so],&members[si]);if rows.is_empty()||cols.is_empty(){continue;}
         if (filled[so][si] as f64)<DENSE_FILL*(rows.len()*cols.len())as f64{continue;}
         dense[so][si]=Some(blocks.len());
@@ -250,9 +257,9 @@ fn store(k:&mut[C],n:usize,ground:&[bool])->(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64,
         for(c,&v)in k[r*d..(r+1)*d].iter().enumerate(){let m=squared(v);if m==0.{continue;}
             if population{populations.col.push(c as u32);populations.value.push(v);}
             if let Some(blk)=dense[so][sector[c]]{let h=members[so].len();blocks[blk].values[position[r]+h*position[c]]=v;continue;}
-            if population||m>=floor2{csr.col.push(c as u32);csr.value.push(v);}else{lost+=m.sqrt();}}
+            if population||(kept&&m>=floor2){csr.col.push(c as u32);csr.value.push(v);}else{lost+=m.sqrt();}}
         dropped=dropped.max(lost);csr.row.push(csr.value.len()as u32);populations.row.push(populations.value.len()as u32);}
-    (a,b,Rest{blocks,sparse:csr},dropped,[total,absorbed.sqrt(),rest.sqrt()],largest,row_sum,Rest{blocks:vec![],sparse:populations})
+    (a,b,Rest{blocks,sparse:csr},dropped,[total,absorbed.sqrt(),rest.sqrt()],largest,if kept{row_sum}else{population_sum},Rest{blocks:vec![],sparse:populations})
 }
 
 /// x <- sum_{k <= order} (-G_s L_r)^k G_s x on m consecutive blocks (term,
@@ -373,7 +380,7 @@ impl FoldLibrary{
             for cb in(0..d).step_by(64){for rb in(0..d).step_by(64){for c in cb..(cb+64).min(d){let cs=swapped(c,n);for r in rb..(rb+64).min(d){
                 k[r*d+c]=if flip{conj(h(swapped(r,n),cs))}else if diagonal{let(u,v)=(h(r,c),h(swapped(r,n),cs));C{re:u.re+v.re,im:u.im-v.im}}else{h(r,c)};}}}}
             let zero=(order==0&&target.charge==generator.zero).then(||k.clone());
-            Ok((store(&mut k,n,&generator.ground),zero))
+            Ok((store(&mut k,n,&generator.ground,if order==0{1.}else{plan.cut.min(f64::MAX)},plan.structural_floor),zero))
         });
         let mut parts=stored.into_iter();let mut targets=Vec::with_capacity(plan.targets.len());let mut zero_dense=None;
         for(t,target)in plan.targets.iter().enumerate(){
@@ -476,6 +483,22 @@ mod tests{
                 let error=r.iter().map(|z|magnitude(*z)).fold(0.,f64::max);let rho=p.fold.diagnostics.rest_bound*block.g.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
                 assert!(error<=(rho.powi(block.order[0] as i32+1)+1e-13)*scale,"step {s}: residual {error:e} (order {:?})",block.order);}
         }
+    }
+    #[test]
+    fn lattice_weak_folds_are_omitted_or_reduced_and_charged(){
+        // Far drives weak enough that their cross folds and the diagonal
+        // fold's rest fall below the structural floor (a tweezer-free model's
+        // counter-rotating terms): the cross targets are omitted and charged,
+        // the diagonal keeps its absorbable part and its rest's population
+        // rows, the rest's row sum charged.
+        let mut f=fixture();for v in f.far.iter_mut().chain(f.far2.iter_mut()){*v*=1e-3;}
+        let p=prepared(&f);let n=4;
+        assert_eq!(p.plan.targets.len(),1);assert!(!p.plan.omitted.is_empty()&&p.plan.omitted.iter().all(|t|t.size<p.plan.structural_floor));
+        let t=&p.fold.targets[0];let s=&t.rest[0].sparse;
+        assert!(t.rest[0].blocks.is_empty()&&(0..n*n).all(|r|r/n==r%n||s.row[r+1]==s.row[r]),"only population rows stored");
+        assert!(t.dropped[0]>0.&&t.dropped[0]<p.plan.structural_floor);
+        let ledger=super::super::ledger::RemainderLedger::new(&p.plan,3.,p.fold.dropped()).unwrap();
+        assert!(ledger.omitted_cross>0.&&ledger.dropped_entries>=t.dropped[0]);
     }
     #[test]
     fn lattice_fold_matches_the_dense_schur_complement(){
