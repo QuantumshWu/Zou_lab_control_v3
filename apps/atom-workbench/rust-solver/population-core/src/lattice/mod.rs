@@ -28,8 +28,9 @@
 //! - `poles`: the lattice P u Q and its solves at the poles;
 //! - `space`: the one rational Krylov space from x0 (poles, translations);
 //! - `frame`: the Schrieffer-Wolff / Floquet frame of a request (first-order
-//!   kernels, the second-order block's eigensystem), shared by the reduced
-//!   model's inner product and the error estimate;
+//!   kernels, the second-order block's eigensystem, each built on first
+//!   use), shared by the reduced model's inner product and the error
+//!   estimate;
 //! - `reduced`: the Galerkin model in the frame's inner product and every
 //!   output from it;
 //! - `estimate_api`: what the error estimate reads and returns;
@@ -137,6 +138,8 @@ impl LatticePrepared{
     /// request (about 0.7 s for 32 states) and shared: the exact block
     /// solves, the eigen-coordinates of the frame and of the error
     /// propagation.
+    /// The eigenbasis when it has been built (never builds it).
+    pub fn eigenbasis_built(&self)->Option<&eigenbasis::BlockEigenbasis>{self.eigenbasis.get().and_then(|r|r.as_ref().ok())}
     pub fn eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
         self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::new(self)).as_ref().map_err(|e|e.clone())
     }

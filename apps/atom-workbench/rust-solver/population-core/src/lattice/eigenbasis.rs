@@ -36,6 +36,8 @@ use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// Power iterations of `resolvent_norms`.
 const RESOLVENT_ITERATIONS:usize=20;
+/// Columns per task of the eigenvectors' inverse.
+const INVERSE_PANEL:usize=64;
 /// Fewest blocks per task of the dressed coordinates.
 const DRESSED_BLOCKS:usize=16;
 
@@ -111,8 +113,12 @@ impl BlockEigenbasis{
             let b=members.len();let mut sub=vec![0.;b*b];
             for(c,&k)in members.iter().enumerate(){for(i,&row)in members.iter().enumerate(){sub[i+b*c]=real[row+d*k];}}
             let(br,bi,bv)=lapack.eigen(&sub,b)?;
-            let(lu,pivots)=lapack.factor(&bv,b)?;let mut identity=vec![0.;b*b];for i in 0..b{identity[i+b*i]=1.;}
-            let bw=lapack.solve_matrix_factored(&lu,&pivots,&identity,b)?;
+            // The inverse: one LU, the identity's columns solved in panels on the workers.
+            let(lu,pivots)=lapack.factor(&bv,b)?;let(lu,pivots)=(&lu,&pivots);
+            let panels:Vec<usize>=(0..b).step_by(INVERSE_PANEL).collect();
+            let parts=Execution::new()?.map(panels,|start|->Result<Vec<f64>,String>{let width=INVERSE_PANEL.min(b-start);
+                let mut columns=vec![0.;b*width];for c in 0..width{columns[start+c+b*c]=1.;}lapack.solve_matrix_factored(lu,pivots,&columns,b)});
+            let mut bw=Vec::with_capacity(b*b);for part in parts{bw.extend(part?);}
             for c in 0..b{re[column+c]=br[c];im[column+c]=bi[c];
                 for(i,&row)in members.iter().enumerate(){vectors[row+d*(column+c)]=bv[i+b*c];inverse[(column+c)+d*row]=bw[c+b*i];}}
             column+=b;

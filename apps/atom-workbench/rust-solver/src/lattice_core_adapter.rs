@@ -179,7 +179,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
     let run=run.map(|s|{let e=&s.explicit;let w=&s.work;let t=&s.timing;let l=&s.ledger;
         json!({"explicit":e.sets.explicit,"ring":e.sets.ring,"gated":e.gated,"promoted":e.promoted,"covered":e.covered,"leak":e.leak,
             "ringInternalEdges":e.internal.len(),"explicitSetMs":e.milliseconds,"translations":s.translations,
-            "columns":s.columns.iter().map(|c|json!({"pole":c.pole.to_string(),"innerSteps":c.steps,"residual":c.residual,"added":c.added,"ms":c.milliseconds})).collect::<Vec<_>>(),
+            "columns":s.columns.iter().map(|c|json!({"pole":c.pole.to_string(),"innerSteps":c.steps,"residual":c.residual,"added":c.added,"ms":c.milliseconds,"blocks":c.blocks})).collect::<Vec<_>>(),
             "basis":s.images,"dimension":s.dimension,
             "inner":{"solves":w.solves,"steps":w.steps,"appliedBlocks":w.applied_blocks,"preconditionedBlocks":w.preconditioned_blocks,
                 "blockOperations":w.block_operations(),"imageBlocks":s.images*s.modes.len(),"batches":w.batches,"batchMs":w.batch_ms,
@@ -190,7 +190,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
                 "estimateMs":c.estimate.work.milliseconds,"ms":c.milliseconds})).collect::<Vec<_>>(),
             "ledger":{"nuFreeze":l.nu_freeze,"thirdOrder":l.third_order,"farShell":l.far_shell,"tail":l.tail,"omittedCross":l.omitted_cross,
                 "nonStructural":l.non_structural,"droppedEntries":l.dropped_entries,"total":l.total(),"fold":l.fold,"expansionParameter":l.expansion_parameter},
-            "timingMs":{"explicitSet":t.explicit_set_ms,"setup":t.setup_ms,"frame":t.frame_ms,"frameWait":t.frame_wait_ms,"solves":t.solves_ms,"images":t.images_ms,"projection":t.projection_ms,
+            "timingMs":{"eigenbasis":t.eigenbasis_ms,"explicitSet":t.explicit_set_ms,"setup":t.setup_ms,"estimatorBuild":t.estimator_build_ms,"outputs":t.outputs_ms,"frame":t.frame_ms,"frameWait":t.frame_wait_ms,"solves":t.solves_ms,"images":t.images_ms,"projection":t.projection_ms,
                 "model":t.model_ms,"ordering":t.ordering_ms,"estimate":t.estimate_ms,"total":t.total_ms}})});
     json!({
         "harmonicPlan":{"explicit":plan.count(&Treatment::Explicit{structural:true}),"nonStructural":plan.count(&Treatment::Explicit{structural:false}),
@@ -201,7 +201,8 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
         "fold":{"farSources":f.far_sources,"columns":f.columns,"restBound":f.rest_bound,"chargedTruncation":f.truncation,
             "series":f.series.iter().map(|(q,rho,order)|json!({"charge":q,"ratio":rho,"orders":order})).collect::<Vec<_>>(),"milliseconds":f.milliseconds,
             "phaseMs":{"columns":f.phase_ms[0],"storage":f.phase_ms[1]},"targets":targets},
-        "floquet":floquet,"eigenbasis":prepared.eigenbasis().ok().map(|e|json!({"milliseconds":e.milliseconds,"blocks":e.blocks,"largestBlock":e.largest_block,"condition":e.condition})),"run":run})
+        "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2],"floquetKernels":prepared.timing[3]},
+        "floquet":floquet,"eigenbasis":prepared.eigenbasis_built().map(|e|json!({"milliseconds":e.milliseconds,"blocks":e.blocks,"largestBlock":e.largest_block,"condition":e.condition})),"run":run})
 }
 
 /// One run of the pipeline for a request: the grid (empty for a mean
@@ -262,10 +263,10 @@ fn mean_value(model:&Model,options:&Options,request:&Prepared,run:Result<&Soluti
             "asymptoticAccuracy":{"requestedTolerance":POPULATION_TOLERANCE,"estimatedMaximumError":estimated,"acceptanceFactor":ACCEPTANCE_FACTOR,
                 "projectionCharge":projection,"metric":"max over states and requested F groups"},
             "zeroModeCount":solution.conserved,"conservedQuantities":solution.conserved,
-            "slowestRatePerUs":solution.slowest.map(|s|s.rate),"slowestRelaxationUs":solution.slowest.map(|s|1./s.rate),
+            "slowestRatePerUs":solution.slowest.filter(|s|s.resolved()).map(|s|s.rate),"slowestRelaxationUs":solution.slowest.filter(|s|s.resolved()).map(|s|1./s.rate),
             "slowestRelaxation":solution.slowest.map(|s|json!({"ratePerUs":s.rate,"residualPerUs":s.residual,"resolved":s.resolved(),
                 "relaxationRangeUs":[1./(s.rate+s.residual),if s.rate>s.residual{Some(1./(s.rate-s.residual))}else{None}],
-                "rule":"the decaying Ritz value of least rate outside the kernel; resolved when its residual is within a tenth of the rate, else the range from the residual"})),
+                "rule":"the decaying Ritz value of least rate outside the kernel; resolved when its residual is within a tenth of the rate (then slowestRelaxationUs), else only the range from the residual: at least 1 / (rate + residual), a slower mode the space has not reached included"})),
             "discardedOpticalCoherence":discarded,"horizonRelaxingBound":relaxing,
             "preparationMs":preparation,"lattice":lattice_json(prepared,Some(solution))}}))
 }

@@ -47,7 +47,8 @@ const METRIC_BLOCKS:usize=16;
 pub struct FrameFields{pub metric:Vec<C>,pub eigen:Vec<C>,pub transferred:Vec<C>}
 
 /// The frame of a request, each part built on its first use (a part's
-/// failure is kept and returned by every later use); a steady state alone
+/// failure is kept and returned by every later use); a request that
+/// propagates nothing (`pipeline`)
 /// reads nothing of it.
 pub struct SwFrame<'p>{
     prepared:&'p LatticePrepared,rule:KernelRule,
