@@ -77,6 +77,9 @@ pub struct Space{
     pub initial_norm:f64,
     pub columns:Vec<Column>,
     pub images_ms:f64,
+    /// The populations of the bordered steady solve (centre block, trace
+    /// one), when it was regular.
+    pub steady_baseline:Option<Vec<f64>>,
 }
 impl Space{
     /// The space of x0 = rho0 on the centre, at most `capacity` columns.
@@ -85,7 +88,7 @@ impl Space{
         x0[op.centre*d..(op.centre+1)*d].copy_from_slice(initial);
         let vectors=Vectors::new(op,1)?;let initial_norm=vectors.norm(&x0);
         if !(initial_norm>0.){return Err("Zero initial density".into());}
-        let mut space=Self{basis:vec![],images:vec![],krylov:vec![],translations:vec![],vectors,noise_floor:0.,capacity:capacity.max(1),initial_norm,columns:vec![],images_ms:0.};
+        let mut space=Self{basis:vec![],images:vec![],krylov:vec![],translations:vec![],vectors,noise_floor:0.,capacity:capacity.max(1),initial_norm,columns:vec![],images_ms:0.,steady_baseline:None};
         space.add_krylov(lattice,x0)?;Ok(space)
     }
     pub fn translations(&self)->Vec<Charge>{self.translations.iter().map(|t|t.0.clone()).collect()}
@@ -148,7 +151,10 @@ impl Space{
             Pole::Zero=>{
                 let op=lattice.operator();let n=op.n;let c0=op.centre*n*n;let mut u=vec![ZERO;length];for i in 0..n{u[c0+i*n+i]=C{re:1./n as f64,im:0.};}
                 let bordered=lattice.solve(Pole::Zero,&[u],STEADY_TOLERANCE);
-                let(w,steps,residual)=match bordered{Ok((w,steps,residual))if residual<=BORDERED_SINGULAR=>(w.into_iter().next().unwrap_or_default(),steps,residual),
+                let(w,steps,residual)=match bordered{Ok((w,steps,residual))if residual<=BORDERED_SINGULAR=>{
+                        let w=w.into_iter().next().unwrap_or_default();let trace:f64=(0..n).map(|i|w[c0+i*n+i].re).sum();
+                        if trace.abs()>0.{self.steady_baseline=Some((0..n).map(|i|w[c0+i*n+i].re/trace).collect());}
+                        (w,steps,residual)},
                     _=>{let x0:Vec<C>=self.krylov[0].iter().map(|v|C{re:-v.re,im:-v.im}).collect();
                         let(w,steps,residual)=lattice.solve(Pole::Real(ZERO_PLUS),&[x0],INNER_TOLERANCE)?;(w.into_iter().next().unwrap_or_default(),steps,residual)}};
                 let floor=self.floor();(usize::from(self.append(lattice,w,floor)?),steps,residual)

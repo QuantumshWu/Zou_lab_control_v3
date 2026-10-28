@@ -36,6 +36,14 @@ use crate::parallel::Execution;
 
 /// Columns of N per task.
 const NORMAL_PANEL:usize=64;
+/// Blocks per task of the metric's coordinate changes.
+const METRIC_BLOCKS:usize=16;
+
+/// A batch of fields in the frame: M x on the canonical modes (each block
+/// times its mode's weight), the eigen-coordinates E^-1 x and their
+/// transfer (I - S~) E^-1 x on the canonical modes (field after field,
+/// blocks in `SwMetric::canonical` order).
+pub struct FrameFields{pub metric:Vec<C>,pub eigen:Vec<C>,pub transferred:Vec<C>}
 
 pub struct SwFrame{
     pub kernels:SwKernels,
@@ -104,25 +112,31 @@ impl<'f> SwMetric<'f>{
     /// each times its weight, one field after the other) for
     /// Hermitian-symmetric fields: Re <y, M x> summed over every mode is
     /// the plain sum of Re <y_q, (weighted M x)_q> over the canonical ones.
-    pub fn apply(&self,fields:&[&[C]])->Result<Vec<C>,String>{
+    /// The coordinate changes and N as GEMMs over chunks of blocks on the
+    /// workers.
+    pub fn apply(&self,fields:&[&[C]])->Result<FrameFields,String>{
         let(d,cc,m)=(self.d,self.canonical.len(),fields.len());
-        if m==0{return Ok(Vec::new());}
-        let blocks:Vec<&[C]>=fields.iter().flat_map(|f|self.canonical.iter().map(move|&q|&f[q*d..(q+1)*d])).collect();
-        let coefficients=self.basis.coefficients(&blocks)?;
-        let execution=Execution::new()?;let kernels=&self.frame.kernels;
+        if m==0{return Ok(FrameFields{metric:Vec::new(),eigen:Vec::new(),transferred:Vec::new()});}
+        let execution=Execution::new()?;let kernels=&self.frame.kernels;let basis=self.basis;
+        let chunks:Vec<(usize,usize)>=(0..m*cc).step_by(METRIC_BLOCKS).map(|s|(s,(s+METRIC_BLOCKS).min(m*cc))).collect();
+        let gather=|parts:Vec<Result<Vec<C>,String>>|->Result<Vec<C>,String>{let mut out=Vec::with_capacity(d*m*cc);for p in parts{out.extend(p?);}Ok(out)};
+        let coefficients=gather(execution.map(chunks.clone(),|(s,e)|{
+            let blocks:Vec<&[C]>=(s..e).map(|i|{let(f,c)=(i/cc,i%cc);let q=self.canonical[c];&fields[f][q*d..(q+1)*d]}).collect();basis.coefficients(&blocks)}))?;
         let items:Vec<(usize,usize)>=(0..m).flat_map(|f|(0..cc).map(move|c|(f,c))).collect();
         // t = (I - S~) c on the canonical modes.
         let t:Vec<Vec<C>>=execution.map(items.clone(),|(f,c)|{let field=&coefficients[f*cc*d..(f+1)*cc*d];
             let mut t=field[c*d..(c+1)*d].to_vec();for &(b,s)in &self.into[c]{kernels.subtract_kernel(s,&self.block(field,b),&mut t);}t});
         let t:Vec<C>=t.concat();
-        let mut v=vec![ZERO;d*m*cc];self.lapack.complex_gemm().multiply(d,m*cc,d,ONE,&self.frame.normal,d,&t,d,ZERO,&mut v,d)?;
+        let(normal,lapack,t_ref)=(&self.frame.normal,&self.lapack,&t);
+        let v=gather(execution.map(chunks.clone(),|(s,e)|{let mut out=vec![ZERO;d*(e-s)];
+            lapack.complex_gemm().multiply(d,e-s,d,ONE,normal,d,&t_ref[s*d..e*d],d,ZERO,&mut out,d)?;Ok(out)}))?;
         // w = (I - S~)^H v on the canonical modes.
         let w:Vec<Vec<C>>=execution.map(items,|(f,c)|{let field=&v[f*cc*d..(f+1)*cc*d];
             let mut w=field[c*d..(c+1)*d].to_vec();for &(a,s)in &self.out_of[c]{kernels.subtract_kernel_adjoint(s,&self.block(field,a),&mut w);}w});
-        let w:Vec<C>=w.concat();
-        let mut out=self.basis.coefficients_adjoint(&w,m*cc)?;
+        let w:Vec<C>=w.concat();let w_ref=&w;
+        let mut out=gather(execution.map(chunks,|(s,e)|basis.coefficients_adjoint(&w_ref[s*d..e*d],e-s)))?;
         for(e,block)in out.chunks_exact_mut(d).enumerate(){let s=self.weights[e%cc];for z in block{*z=scaled(*z,s);}}
-        Ok(out)
+        Ok(FrameFields{metric:out,eigen:coefficients,transferred:t})
     }
 }
 
@@ -147,7 +161,7 @@ mod tests{
                 let mut z=vec![ZERO;d];p.lapack.complex_gemm().multiply(d,1,d,ONE,&frame.class.inverse,d,&t,d,ZERO,&mut z,d).unwrap();out.extend(z);}
             out};
         let(tx,ty)=(t(&x),t(&y));let direct:f64=tx.iter().zip(&ty).map(|(a,b)|a.re*b.re+a.im*b.im).sum();
-        let mx=metric.apply(&[&x]).unwrap();
+        let mx=metric.apply(&[&x]).unwrap().metric;
         let reduced:f64=metric.canonical.iter().enumerate().map(|(c,&q)|(0..d).map(|k|{let(a,b)=(y[q*d+k],mx[c*d+k]);a.re*b.re+a.im*b.im}).sum::<f64>()).sum();
         let scale=tx.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt()*ty.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();
         assert!(frame.kernels.steps.iter().any(|s|!s.entries.is_empty()),"the fixture's kernels are empty");

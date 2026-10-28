@@ -38,9 +38,7 @@
 //! the rest decays at the fast rates and is propagated by the dressed blocks
 //! of L0' on the near modes only (its readout elsewhere is micromotion).
 use super::super::*;
-use super::super::operator::LatticeOperator;
-use super::super::preconditioner::{FloquetBatch,Preconditioner,Preconditioning,Shift};
-use super::super::floquet::Reach;
+use super::super::estimate_api::SteadySolves;
 use super::lattice::{ErrorLattice,split};
 use super::propagate::Readout;
 use crate::parallel::Execution;
@@ -256,8 +254,8 @@ pub struct PoolWork{
 /// directions.
 pub struct SlowSolution{pub theta:C,pub coefficient:C,basis:Vec<C>,x:Vec<C>}
 
-pub struct SlowPool<'p>{
-    op:LatticeOperator<'p>,batch:FloquetBatch<'p>,lapack:Arc<Lapack>,execution:Execution,
+pub struct SlowPool{
+    dimension:usize,lapack:Arc<Lapack>,execution:Execution,
     n:usize,d:usize,watch:Vec<usize>,mirror:Vec<usize>,near:Vec<usize>,packing:Packing,
     q:Panels,
     /// Per direction: its coordinates and its image's (on Q at insertion),
@@ -270,22 +268,20 @@ pub struct SlowPool<'p>{
     pub work:PoolWork,
 }
 
-impl<'p> SlowPool<'p>{
-    pub fn new(prepared:&'p LatticePrepared,lattice:&ErrorLattice<'_>)->Result<Self,String>{
-        let op=LatticeOperator::new(prepared,&lattice.modes)?;
-        let batch=Preconditioning::new(prepared)?.batch(&op,Shift::Steady,Some(Reach::All))?;
+impl SlowPool{
+    pub fn new(prepared:&LatticePrepared,lattice:&ErrorLattice<'_>)->Result<Self,String>{
         let(n,d)=(lattice.n,lattice.d);let c0=lattice.centre*d;let watch:Vec<usize>=(0..n).map(|i|c0+i*n+i).collect();
         let packing=Packing::new(lattice);let length=packing.length();
-        let mut pool=Self{op,batch,lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),packing,
+        let mut pool=Self{dimension:lattice.dimension(),lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),packing,
             q:Panels::new(length),cu:Vec::new(),cau:Vec::new(),trace:Vec::new(),near_parts:Vec::new(),u:Vec::new(),
             packed_basis:Vec::new(),wq:Vec::new(),columns:0,work:PoolWork::default()};
         let packed=pool.packing.pack(&pool.trace_row());let(mut coordinates,_)=pool.extend(packed,1)?;pool.u=coordinates.remove(0);
         Ok(pool)
     }
     /// u = I/n on the centre.
-    fn trace_row(&self)->Vec<C>{let mut u=vec![ZERO;self.op.dimension()];for &k in &self.watch{u[k]=C{re:1./self.n as f64,im:0.};}u}
+    fn trace_row(&self)->Vec<C>{let mut u=vec![ZERO;self.dimension];for &k in &self.watch{u[k]=C{re:1./self.n as f64,im:0.};}u}
     fn centre_trace(&self,x:&[C])->f64{self.watch.iter().map(|&k|x[k].re).sum()}
-    fn apply(&mut self,x:&[C])->Result<Vec<C>,String>{let mut y=vec![ZERO;x.len()];self.op.apply(x,&mut y)?;self.work.applications+=1;Ok(y)}
+    fn apply(&mut self,steady:&mut dyn SteadySolves,x:&[C])->Result<Vec<C>,String>{let mut y=vec![ZERO;x.len()];steady.apply(x,&mut y)?;self.work.applications+=1;Ok(y)}
     /// Extends Q by the span of m packed columns and every new column's
     /// products with the basis. Returns the columns' coordinates and Q's new
     /// columns.
@@ -355,7 +351,7 @@ impl<'p> SlowPool<'p>{
     }
     /// The pool coefficients of (theta - A)^-1 f (at the kernel of the
     /// trace-free -y, (A + u tau0^T) y = f) by GCRO on the pool.
-    fn solve(&mut self,f:&[C],theta:C)->Result<Vec<C>,String>{
+    fn solve(&mut self,f:&[C],theta:C,steady:&mut dyn SteadySolves)->Result<Vec<C>,String>{
         let clock=Instant::now();self.work.solves+=1;
         let kernel=magnitude(theta)<KERNEL;let length=self.q.length;
         // f = e^{i phi} (g1 + i g2) with g1, g2 Hermitian-symmetric and
@@ -386,8 +382,8 @@ impl<'p> SlowPool<'p>{
             for part in r.chunks_exact(length){
                 let size=dot(part,part).sqrt();if !(size>1e-3*rn){continue;}
                 let field:Vec<C>=self.packing.unpack(part).iter().map(|v|C{re:v.re/size,im:v.im/size}).collect();
-                let mut z=vec![ZERO;field.len()];self.batch.apply(&field,&mut z)?;self.work.preconditions+=1;
-                let az=self.apply(&z)?;new.push((z,az));
+                let mut z=vec![ZERO;field.len()];steady.precondition(&field,&mut z)?;self.work.preconditions+=1;
+                let az=self.apply(steady,&z)?;new.push((z,az));
             }
             if new.is_empty(){break x;}
             let fresh=self.add(new)?;
@@ -409,12 +405,12 @@ impl<'p> SlowPool<'p>{
     /// Y = -x + tau0(x) x_ss - (A + u tau0^T)^-1 g, whose first two terms (the
     /// reduced and the true steady state) cancel to the steady error itself,
     /// so there the small source A x + g is solved whole.
-    pub fn mode(&mut self,b:&[C],ax:&[C],g:&[C],theta:C,coefficient:C)->Result<SlowSolution,String>{
+    pub fn mode(&mut self,b:&[C],ax:&[C],g:&[C],theta:C,coefficient:C,steady:&mut dyn SteadySolves)->Result<SlowSolution,String>{
         if magnitude(theta)<KERNEL{
             let f:Vec<C>=ax.iter().zip(g).map(|(a,v)|C{re:a.re+v.re,im:a.im+v.im}).collect();
-            return Ok(SlowSolution{theta,coefficient,basis:Vec::new(),x:self.solve(&f,theta)?});
+            return Ok(SlowSolution{theta,coefficient,basis:Vec::new(),x:self.solve(&f,theta,steady)?});
         }
-        let pool=self.solve(g,theta)?;
+        let pool=self.solve(g,theta,steady)?;
         Ok(SlowSolution{theta,coefficient,basis:b.iter().map(|v|C{re:-v.re,im:-v.im}).collect(),x:pool})
     }
     /// The Gram matrix W^T U of the basis against every pool direction

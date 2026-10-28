@@ -116,6 +116,8 @@ impl SteadySolves for Lattice<'_>{
     fn solve(&mut self,f:&[C],tolerance:f64)->Result<(Vec<C>,usize),String>{
         let(mut w,steps,_)=Lattice::solve(self,Pole::Zero,&[f.to_vec()],tolerance)?;Ok((w.remove(0),steps))
     }
+    fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{self.op.apply(x,y)}
+    fn precondition(&mut self,x:&[C],y:&mut[C])->Result<(),String>{let i=self.batch(Pole::Zero)?;self.batches[i].1.apply(x,y)}
     fn directions(&self)->(&[Vec<C>],&[Vec<C>]){(&self.directions,&self.images)}
 }
 

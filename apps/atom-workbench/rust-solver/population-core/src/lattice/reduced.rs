@@ -43,21 +43,26 @@
 //! error near t = 1/sigma at frequency omega.
 use super::*;
 use super::eigenbasis::BlockEigenbasis;
-use super::frame::SwMetric;
+use super::frame::{FrameFields,SwMetric};
+use super::estimate_api::FrameColumns;
 use super::krylov::Vectors;
 use super::operator::LatticeOperator;
 
 /// The test space of the projection: the metric M of the reduced model's
 /// inner product Re <x, M y> (summed over every mode).
 pub trait TestSpace{
-    /// M x on the canonical modes (row-major blocks in mode order, each
-    /// times its weight: 2 for a pair, 1 for the centre; one field after the
-    /// other) for Hermitian-symmetric fields.
-    fn metric(&self,fields:&[&[C]])->Result<Vec<C>,String>;
+    /// For Hermitian-symmetric fields: M x on the canonical modes
+    /// (row-major blocks in mode order, each times its weight: 2 for a pair,
+    /// 1 for the centre; one field after the other), and the fields' frame
+    /// coordinates on the way (`FrameFields`).
+    fn columns(&self,fields:&[&[C]])->Result<FrameFields,String>;
+    /// The canonical modes of the blocks, ascending.
+    fn canonical(&self)->&[usize];
 }
 /// The Schrieffer-Wolff / Floquet frame.
 impl TestSpace for SwMetric<'_>{
-    fn metric(&self,fields:&[&[C]])->Result<Vec<C>,String>{self.apply(fields)}
+    fn columns(&self,fields:&[&[C]])->Result<FrameFields,String>{self.apply(fields)}
+    fn canonical(&self)->&[usize]{&self.canonical}
 }
 use crate::parallel::Execution;
 
@@ -104,6 +109,10 @@ pub struct Projection{
     /// F = Re (AW)^T A W, row-major over the covered columns.
     k:Vec<f64>,h:Vec<f64>,e:Vec<f64>,f:Vec<f64>,covered:usize,
     vectors:Vectors,
+    /// The frame coordinates of the columns since the last `take_frame`
+    /// (eigen-coordinates and their transfer, canonical modes), the first of
+    /// them, and the canonical modes.
+    frame_first:usize,frame_eigen:Vec<C>,frame_transferred:Vec<C>,frame_modes:Vec<usize>,
     pub milliseconds:f64,
 }
 /// Grows a row-major old x old matrix to new x new (zeros in the new part).
@@ -115,9 +124,33 @@ impl Projection{
         let centre=canonical.iter().position(|c|c.0==op.centre).unwrap_or(0);
         let length=canonical.len()*d;
         Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],traces:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,
-            vectors:Vectors::new(op,1)?,milliseconds:0.})
+            vectors:Vectors::new(op,1)?,frame_first:0,frame_eigen:vec![],frame_transferred:vec![],frame_modes:vec![],milliseconds:0.})
     }
     pub fn columns(&self)->usize{self.covered}
+    /// The frame coordinates of the columns ingested since the last
+    /// `clear_frame`.
+    pub fn frame_columns(&self)->Option<FrameColumns<'_>>{
+        let count=self.covered-self.frame_first;
+        (count>0&&!self.frame_eigen.is_empty()).then_some(FrameColumns{first:self.frame_first,count,canonical:&self.frame_modes,eigen:&self.frame_eigen,transferred:&self.frame_transferred})
+    }
+    pub fn clear_frame(&mut self){self.frame_first=self.covered;self.frame_eigen.clear();self.frame_transferred.clear();}
+    /// The Euclidean Rayleigh-Ritz pairs of the space (W^T A W = E, the
+    /// residual orthogonal to W): the slowest decaying values outside
+    /// |theta| < KERNEL, at most `count`, with their basis coordinates.
+    pub fn euclidean_slow_pairs(&self,lapack:&Lapack,count:usize)->Result<Vec<(C,Vec<C>)>,String>{
+        let k=self.covered;if k==0{return Ok(vec![]);}
+        let(re,im,ev)=lapack.eigen(&transpose_rows(&self.e,k,k),k)?;
+        let mut pairs:Vec<(C,Vec<C>)>=Vec::new();let mut j=0;
+        while j<k{
+            let theta=C{re:re[j],im:im[j]};let complex=im[j]!=0.&&j+1<k;
+            if -theta.re>=KERNEL&&magnitude(theta)>=KERNEL{
+                let y:Vec<C>=(0..k).map(|i|if complex{C{re:ev[i+k*j],im:ev[i+k*(j+1)]}}else{C{re:ev[i+k*j],im:0.}}).collect();
+                pairs.push((theta,y));}
+            j+=if complex{2}else{1};
+        }
+        pairs.sort_by(|a,b|(-a.0.re).total_cmp(&(-b.0.re)));pairs.truncate(count);
+        Ok(pairs)
+    }
     /// Re <z_a, field_c> on the canonical modes for metric columns z
     /// (column-major, `count` of them) and fields (row-major |fields| x
     /// count): one task per field, a fixed order of summation.
@@ -133,7 +166,9 @@ impl Projection{
         let clock=Instant::now();let(old,new)=(self.covered,basis.len());if new==old{return Ok(());}
         let(n,d,l)=(self.n,self.d,self.length);let width=new-old;
         let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();
-        self.metric.extend(test.metric(&fresh)?);
+        let columns=test.columns(&fresh)?;self.metric.extend(columns.metric);
+        if self.frame_modes.is_empty(){self.frame_modes=test.canonical().to_vec();}
+        self.frame_eigen.extend(columns.eigen);self.frame_transferred.extend(columns.transferred);
         for column in &basis[old..new]{
             let pops:Vec<C>=self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect();
             let mut traces=vec![0.;2*self.canonical.len()-1];let mut at=1;

@@ -37,6 +37,7 @@ use super::super::operator::{LatticeOperator,Mask,Parts};
 use super::blocks::BlockSystem;
 use super::kernels::SwKernels;
 use super::super::frame::SwFrame;
+use super::super::estimate_api::FrameColumns;
 use std::borrow::Cow;
 use crate::parallel::Execution;
 
@@ -180,34 +181,72 @@ impl<'p> ErrorLattice<'p>{
     }
     pub fn dimension(&self)->usize{self.modes.len()*self.d}
     /// Process the basis columns not seen yet (columns are append-only).
-    pub fn add_columns(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
+    /// `frame`: the projection's frame coordinates of basis columns (the
+    /// eigen-coordinates and their transfer on the canonical modes), used for
+    /// the columns they cover: only the class change remains for those.
+    pub fn add_columns(&mut self,basis:&[Vec<C>],images:&[Vec<C>],frame:Option<&FrameColumns<'_>>)->Result<(),String>{
         let clock=Instant::now();
         if basis.len()<=self.columns{return Ok(());}
         let d=self.d;let first=self.columns;
+        let given=frame.filter(|f|f.first<=first&&f.first+f.count>=basis.len()&&self.frame_modes_covered(f.canonical));
         // Every new column and its image (with the ring's feedback where the
-        // fast part carries it), transformed together.
+        // fast part carries it), transformed together; a column the frame
+        // covers takes its coordinates from there.
         let mut fields:Vec<Vec<C>>=Vec::with_capacity(2*(basis.len()-first));
         for j in first..basis.len(){
             if basis[j].len()!=self.dimension()||images[j].len()!=basis[j].len(){return Err("Estimator: basis column dimensions differ from the lattice".into());}
-            fields.push(basis[j].clone());
+            if given.is_none(){fields.push(basis[j].clone());}
             if self.ring_in_fast{let g=self.ring_feedback(&basis[j],ZERO)?;fields.push(images[j].iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect());}
             else{fields.push(images[j].clone());}
         }
         let refs:Vec<&[C]>=fields.iter().map(|f|&f[..]).collect();
         let(z,o)=self.coordinates(&refs)?;
+        let given_coordinates=match given{Some(f)=>Some(self.frame_coordinates(f,first,basis.len())?),None=>None};
         let(near,outer)=(self.near.len(),self.outer_modes.len());
         for(i,_)in(first..basis.len()).enumerate(){
-            let(w,a)=(2*i,2*i+1);
+            let(w,a)=if given.is_some(){(i,i)}else{(2*i,2*i+1)};
+            let(zw,ow):(&[C],&[C])=match &given_coordinates{Some((zg,og))=>(zg,og),None=>(&z,&o)};
             for &slot in &self.near_canonical{
-                self.basis_coordinates[slot].extend_from_slice(&z[(w*near+slot)*d..(w*near+slot+1)*d]);
+                self.basis_coordinates[slot].extend_from_slice(&zw[(w*near+slot)*d..(w*near+slot+1)*d]);
                 self.image_coordinates[slot].extend_from_slice(&z[(a*near+slot)*d..(a*near+slot+1)*d]);}
             for slot in 0..outer{
-                self.outer_basis[slot].extend_from_slice(&o[(w*outer+slot)*d..(w*outer+slot+1)*d]);
+                self.outer_basis[slot].extend_from_slice(&ow[(w*outer+slot)*d..(w*outer+slot+1)*d]);
                 self.outer_image[slot].extend_from_slice(&o[(a*outer+slot)*d..(a*outer+slot+1)*d]);}
         }
         let added=basis.len()-first;self.columns=basis.len();self.work.columns+=added;
         self.work.column_ms+=clock.elapsed().as_secs_f64()*1e3;
         Ok(())
+    }
+    /// Whether the frame's canonical modes include every canonical near and
+    /// outer mode.
+    fn frame_modes_covered(&self,canonical:&[usize])->bool{
+        self.near_canonical.iter().map(|&s|self.near[s]).chain(self.outer_modes.iter().copied()).all(|q|canonical.binary_search(&q).is_ok())
+    }
+    /// Class coordinates (per near slot) and outer eigen-coordinates of the
+    /// basis columns first..end from the projection's frame coordinates:
+    /// V_c^-1 of their transfer on the canonical near modes.
+    fn frame_coordinates(&mut self,frame:&FrameColumns<'_>,first:usize,end:usize)->Result<(Vec<C>,Vec<C>),String>{
+        let(d,count)=(self.d,end-first);let cc=frame.canonical.len();
+        let(near,outer)=(self.near.len(),self.outer_modes.len());
+        let at=|q:usize|frame.canonical.binary_search(&q).unwrap();
+        let column=|j:usize,q:usize|->usize{((j-frame.first)*cc+at(q))*d};
+        let execution=Execution::new()?;
+        let(classes,class_of,lapack)=(&self.classes,&self.class_of,&self.prepared.lapack);
+        let mut groups:Vec<(usize,Vec<(usize,usize)>)>=Vec::new();
+        for i in 0..count{for &slot in &self.near_canonical{let c=class_of[self.near[slot]];
+            match groups.iter_mut().find(|g|g.0==c){Some(g)=>g.1.push((i,slot)),None=>groups.push((c,vec![(i,slot)]))}}}
+        let tasks:Vec<(usize,Vec<(usize,usize)>)>=groups.iter().flat_map(|(c,items)|items.chunks(BLOCKS_PER_TASK).map(move|ch|(*c,ch.to_vec()))).collect();
+        let near_modes=&self.near;
+        let parts=execution.map(tasks.clone(),|(c,items)|->Result<Vec<C>,String>{
+            let m=items.len();let mut input=vec![ZERO;d*m];
+            for(k,&(i,slot))in items.iter().enumerate(){let s=column(first+i,near_modes[slot]);input[k*d..(k+1)*d].copy_from_slice(&frame.transferred[s..s+d]);}
+            let mut out=vec![ZERO;d*m];lapack.complex_gemm().multiply(d,m,d,ONE,&classes[c].inverse,d,&input,d,ZERO,&mut out,d)?;Ok(out)});
+        let mut z=vec![ZERO;count*near*d];
+        for((_,items),part)in tasks.iter().zip(parts){let part=part?;for(k,&(i,slot))in items.iter().enumerate(){z[(i*near+slot)*d..(i*near+slot+1)*d].copy_from_slice(&part[k*d..(k+1)*d]);}}
+        let mut o=vec![ZERO;count*outer*d];
+        for i in 0..count{for(slot,&q)in self.outer_modes.iter().enumerate(){let s=column(first+i,q);o[(i*outer+slot)*d..(i*outer+slot+1)*d].copy_from_slice(&frame.eigen[s..s+d]);}}
+        self.work.frame_blocks+=count*self.near_canonical.len();
+        Ok((z,o))
     }
     /// For Hermitian-symmetric fields on P u Q: the class coordinates
     /// V_c^-1 E^-1 (I - S) v per canonical near mode, (field, near slot)

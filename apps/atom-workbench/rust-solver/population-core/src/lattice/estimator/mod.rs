@@ -36,7 +36,7 @@
 //! outputs still move by more than 4 eps between checkpoints. Errors are
 //! measured with `ledger::metric`.
 use super::*;
-use super::estimate_api::{EstimateSetup,Estimator,ErrorEstimate,EstimateWork,ReducedView,SteadySolves};
+use super::estimate_api::{EstimateSetup,Estimator,ErrorEstimate,EstimateWork,FrameColumns,ReducedView,SteadySolves};
 use super::ledger::{self,metric};
 
 pub mod kernels;
@@ -85,7 +85,9 @@ pub fn longest_time(times:&[f64],horizons:&[f64])->f64{times.iter().chain(horizo
 /// The reduced model of a checkpoint in the estimator's terms: the basis
 /// and images, X (k x r) and S (r x r) column-major, the values and
 /// coefficients the outputs use.
-pub struct Checkpoint<'c>{pub basis:&'c[Vec<C>],pub images:&'c[Vec<C>],pub x:&'c[C],pub s:&'c[C],pub theta:&'c[C],pub coefficients:&'c[C]}
+pub struct Checkpoint<'c>{pub basis:&'c[Vec<C>],pub images:&'c[Vec<C>],pub x:&'c[C],pub s:&'c[C],pub theta:&'c[C],pub coefficients:&'c[C],
+    /// The projection's frame coordinates of new basis columns, if any.
+    pub frame:Option<FrameColumns<'c>>}
 
 /// Population errors of one checkpoint's outputs (before the metric and the
 /// fold charges), and what ran.
@@ -103,7 +105,7 @@ pub struct Errors{
 pub struct UnifiedEstimate<'a>{
     setup:EstimateSetup<'a>,
     pub lattice:ErrorLattice<'a>,
-    pub pool:Option<SlowPool<'a>>,
+    pub pool:Option<SlowPool>,
     pub gate:OutputGate,
     /// The pipeline's steady-solve directions taken so far.
     seeded:usize,
@@ -113,10 +115,11 @@ pub struct UnifiedEstimate<'a>{
 pub const CONSTRUCT:super::estimate_api::Construct=construct;
 pub fn construct(setup:EstimateSetup<'_>)->Result<Box<dyn Estimator+'_>,String>{Ok(Box::new(UnifiedEstimate::new(setup)?))}
 
-/// The reduced model's slowest relaxation time: 1 / |theta| over the modes
-/// outside the kernel that carry weight.
+/// The reduced model's slowest relaxation time: 1 / |Re theta| over the
+/// decaying modes outside the kernel that carry weight (a mode clipped to the
+/// imaginary axis does not relax).
 pub fn relaxation_time(values:&[C],coefficients:&[C],kernel:&[bool])->f64{
-    values.iter().zip(coefficients).zip(kernel).filter(|((_,a),&k)|!k&&nonzero(**a)).map(|((z,_),_)|1./magnitude(*z)).fold(0.,f64::max)
+    values.iter().zip(coefficients).zip(kernel).filter(|((z,a),&k)|!k&&nonzero(**a)&&z.re< -DECAYING).map(|((z,_),_)|-1./z.re).fold(0.,f64::max)
 }
 
 impl<'a> UnifiedEstimate<'a>{
@@ -129,7 +132,7 @@ impl<'a> UnifiedEstimate<'a>{
         let gate=OutputGate::new(lattice.n,lattice.nu.clone(),lattice.centre);
         Ok(Self{setup,lattice,pool:None,gate,seeded:0})
     }
-    fn pool(&mut self)->Result<&mut SlowPool<'a>,String>{
+    fn pool(&mut self)->Result<&mut SlowPool,String>{
         if self.pool.is_none(){self.pool=Some(SlowPool::new(self.setup.prepared,&self.lattice)?);}
         Ok(self.pool.as_mut().unwrap())
     }
@@ -138,10 +141,10 @@ impl<'a> UnifiedEstimate<'a>{
     /// solve, whose images its Arnoldi relation gives for free.
     pub fn seed(&mut self,directions:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{self.pool()?.seed(directions,images)}
     /// The population errors of a checkpoint's outputs.
-    pub fn errors(&mut self,cp:&Checkpoint<'_>)->Result<Errors,String>{
+    pub fn errors(&mut self,cp:&Checkpoint<'_>,steady:&mut dyn SteadySolves)->Result<Errors,String>{
         let(k,r)=(cp.basis.len(),cp.theta.len());let outputs=self.setup.outputs;
         let mut ms=[0.;5];let clock=Instant::now();
-        self.lattice.add_columns(cp.basis,cp.images)?;ms[0]=clock.elapsed().as_secs_f64()*1e3;
+        self.lattice.add_columns(cp.basis,cp.images,cp.frame.as_ref())?;ms[0]=clock.elapsed().as_secs_f64()*1e3;
         let mut b=vec![ZERO;k*r];self.setup.prepared.lapack.complex_gemm().multiply(k,r,r,ONE,cp.x,k,cp.s,r,ZERO,&mut b,k)?;
         // The slowest decay rate, the slow modes and which outputs use them.
         let lambda_slow=cp.theta.iter().zip(cp.coefficients).filter(|(z,a)|z.re.abs()>DECAYING&&nonzero(**a)).map(|(z,_)|z.re.abs()).fold(f64::INFINITY,f64::min);
@@ -168,7 +171,7 @@ impl<'a> UnifiedEstimate<'a>{
                     for((xv,av),(&w,&aw))in x.iter_mut().zip(ax.iter_mut()).zip(cp.basis[j].iter().zip(&cp.images[j])){mul_add(xv,c,w);mul_add(av,c,aw);}}
                 let g=self.lattice.ring_feedback(&x,theta)?;
                 if kernel.contains(&m){let f:Vec<C>=ax.iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();if size(&f)<=INVARIANT*scale*size(&x){continue;}}
-                solutions.push(self.pool.as_mut().unwrap().mode(bm,&ax,&g,theta,cp.coefficients[m])?);
+                solutions.push(self.pool.as_mut().unwrap().mode(bm,&ax,&g,theta,cp.coefficients[m],steady)?);
             }
             ms[2]=clock.elapsed().as_secs_f64()*1e3;
         }
@@ -210,30 +213,35 @@ impl Estimator for UnifiedEstimate<'_>{
         let clock=Instant::now();
         let(k,r)=(reduced.basis.len(),reduced.r);
         let groups=self.setup.outputs.groups;let outputs=self.setup.outputs;
-        // X and S column-major and complex; B = X S for the gate; the reduced steady state over the basis.
+        // The new columns enter now, with the projection's frame coordinates
+        // (handed over once per checkpoint); their work counts here.
+        let before=(self.lattice.work.clone(),self.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default());
+        self.lattice.add_columns(reduced.basis,reduced.images,reduced.frame_columns.as_ref())?;
+        // X and S column-major and complex.
         let x:Vec<C>=(0..k*r).map(|i|C{re:reduced.x[(i%k)*r+i/k],im:0.}).collect();
         let s:Vec<C>=(0..r*r).map(|i|reduced.vectors[(i%r)*r+i/r]).collect();
-        let mut b=vec![ZERO;k*r];self.setup.prepared.lapack.complex_gemm().multiply(k,r,r,ONE,&x,k,&s,r,ZERO,&mut b,k)?;
-        let steady_coordinates:Option<Vec<C>>=reduced.steady.map(|u|(0..k).map(|i|C{re:(0..r).map(|l|reduced.x[i*r+l]*u[l]).sum(),im:0.}).collect());
-        // The gate: the outputs' change since the previous checkpoint.
-        self.gate.add_columns(reduced.basis);
-        let current=self.gate.outputs(&self.setup.prepared.lapack,&b,reduced.used_theta,reduced.used_coefficients,outputs.times,outputs.horizons,
-            if outputs.steady{steady_coordinates.as_deref()}else{None})?;
-        let change=self.gate.change(current,groups);
+        // The gate: the change of the pipeline's outputs since the previous
+        // checkpoint; at the first one a steady-only request compares its
+        // steady state with the pipeline's own steady solve.
+        let current=gate::Outputs{trajectory:reduced.outputs.trajectory.to_vec(),horizons:reduced.outputs.horizons.to_vec(),
+            steady:outputs.steady.then(||reduced.outputs.steady.to_vec())};
+        let steady_only=outputs.times.is_empty()&&outputs.horizons.is_empty();
+        let baseline=reduced.steady_baseline.filter(|_|steady_only).map(|b|metric(reduced.outputs.steady,b,groups));
+        let change=self.gate.change(current,groups).or(baseline);
         let limit=gate::GATE_FACTOR*ledger::POPULATION_TOLERANCE;
-        // Closed at the first checkpoint (nothing to compare with: reported as
-        // not estimated) and while the outputs move by more than the limit.
+        // Closed at the first checkpoint without a baseline (reported as not
+        // estimated) and while the outputs move by more than the limit.
         let change=change.unwrap_or(f64::INFINITY);
         if change>limit&&self.gate.last_estimate.is_none_or(|e|e>limit){
+            let blocks=self.lattice.work.frame_blocks-before.0.frame_blocks;
             return Ok(ErrorEstimate{trajectory:vec![change;outputs.times.len()],horizons:vec![change;outputs.horizons.len()],
-                steady:outputs.steady.then_some(change),work:EstimateWork{milliseconds:clock.elapsed().as_secs_f64()*1e3,..Default::default()}});
+                steady:outputs.steady.then_some(change),work:EstimateWork{block_operations:blocks,milliseconds:clock.elapsed().as_secs_f64()*1e3,..Default::default()}});
         }
         // The pipeline's steady-solve directions not taken yet seed the pool.
         let(directions,images)=steady.directions();
         if directions.len()>self.seeded{self.seed(&directions[self.seeded..],&images[self.seeded..])?;self.seeded=directions.len();}
-        let before=(self.lattice.work.clone(),self.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default());
-        let cp=Checkpoint{basis:reduced.basis,images:reduced.images,x:&x,s:&s,theta:reduced.used_theta,coefficients:reduced.used_coefficients};
-        let errors=self.errors(&cp)?;
+        let cp=Checkpoint{basis:reduced.basis,images:reduced.images,x:&x,s:&s,theta:reduced.used_theta,coefficients:reduced.used_coefficients,frame:None};
+        let errors=self.errors(&cp,steady)?;
         let zero=vec![0.;self.lattice.n];
         let delta=self.setup.ledger.total();
         let tau=relaxation_time(reduced.used_theta,reduced.used_coefficients,reduced.kernel);
@@ -258,13 +266,11 @@ impl Estimator for UnifiedEstimate<'_>{
 #[cfg(test)]
 mod tests{
     use super::*;
-    use super::super::estimate_api::{LatticeSets,Outputs};
+    use super::super::estimate_api::{LatticeSets,ModelOutputs,Outputs};
     use super::super::ledger::RemainderLedger;
     use super::super::operator::LatticeOperator;
     use super::super::tests::{fixture,prepared};
     use super::super::frame::SwFrame;
-    struct NoSolves;
-    impl SteadySolves for NoSolves{fn solve(&mut self,_:&[C],_:f64)->Result<(Vec<C>,usize),String>{Err("not used".into())}}
     #[test]
     fn estimator_runs_through_the_pipeline_interface(){
         // A two-column space (x0 and its image's new direction) on the
@@ -294,14 +300,17 @@ mod tests{
         let setup=EstimateSetup{prepared:&p,lattice:&lattice,outputs:Outputs{times:&times,horizons:&horizons,steady:false,groups:&groups},frame:&frame,ledger:&ledger,initial:&initial};
         let mut estimator=CONSTRUCT(setup).unwrap();
         let x=[1.,0.,0.,1.];let c0=[1.,0.];let kernel=[false,false];
+        let(trajectory,horizon_rows,steady_row)=(vec![vec![0.;n];3],vec![vec![0.;n]],vec![0.;n]);
         let reduced=ReducedView{basis:&basis,images:&images,r:2,x:&x,g:&g,c0:&c0,theta:&theta,vectors:&sr,coefficients:&a,
-            used_theta:&theta,used_coefficients:&a,kernel:&kernel,growth_charge:0.,steady:None};
+            used_theta:&theta,used_coefficients:&a,kernel:&kernel,growth_charge:0.,steady:None,
+            outputs:ModelOutputs{trajectory:&trajectory,horizons:&horizon_rows,steady:&steady_row},steady_baseline:None,frame_columns:None};
         // The first checkpoint is not estimated; the second (unchanged outputs) is.
-        let first=estimator.estimate(&reduced,&mut NoSolves).unwrap();
+        let mut solver=super::super::poles::Lattice::new(&p,lattice.clone()).unwrap();
+        let first=estimator.estimate(&reduced,&mut solver).unwrap();
         assert!(first.largest().is_infinite());
-        let e=estimator.estimate(&reduced,&mut NoSolves).unwrap();
+        let e=estimator.estimate(&reduced,&mut solver).unwrap();
         assert_eq!((e.trajectory.len(),e.horizons.len()),(3,1));
         assert!(e.trajectory[0].abs()<1e-12&&e.trajectory[1..].iter().chain(&e.horizons).all(|v|v.is_finite()&&*v>0.),"{e:?}");
-        assert!(e.largest().is_finite()&&e.work.block_operations>0);
+        assert!(e.largest().is_finite()&&first.work.block_operations+e.work.block_operations>0);
     }
 }

@@ -190,7 +190,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
                 "estimateMs":c.estimate.work.milliseconds,"ms":c.milliseconds})).collect::<Vec<_>>(),
             "ledger":{"nuFreeze":l.nu_freeze,"thirdOrder":l.third_order,"farShell":l.far_shell,"tail":l.tail,"omittedCross":l.omitted_cross,
                 "nonStructural":l.non_structural,"droppedEntries":l.dropped_entries,"total":l.total(),"fold":l.fold,"expansionParameter":l.expansion_parameter},
-            "timingMs":{"explicitSet":t.explicit_set_ms,"setup":t.setup_ms,"frame":t.frame_ms,"solves":t.solves_ms,"images":t.images_ms,"projection":t.projection_ms,
+            "timingMs":{"explicitSet":t.explicit_set_ms,"setup":t.setup_ms,"frame":t.frame_ms,"frameWait":t.frame_wait_ms,"solves":t.solves_ms,"images":t.images_ms,"projection":t.projection_ms,
                 "model":t.model_ms,"ordering":t.ordering_ms,"estimate":t.estimate_ms,"total":t.total_ms}})});
     json!({
         "harmonicPlan":{"explicit":plan.count(&Treatment::Explicit{structural:true}),"nonStructural":plan.count(&Treatment::Explicit{structural:false}),
@@ -206,9 +206,9 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
 
 /// One run of the pipeline for a request: the grid (empty for a mean
 /// alone) and the mean's horizon when one is asked for.
-fn run(request:&Prepared,times:&[f64],horizon:Option<f64>)->Result<Solution,String>{
+fn run(request:&Prepared,times:&[f64],horizon:Option<f64>,steady:bool)->Result<Solution,String>{
     let horizons:Vec<f64>=horizon.into_iter().collect();
-    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&horizons,groups:&request.groups},pipeline::ESTIMATOR,None)
+    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&horizons,steady,groups:&request.groups},pipeline::ESTIMATOR,None)
 }
 
 /// The mean of a run: the laboratory time average of the steady state, or
@@ -274,7 +274,7 @@ fn mean_value(model:&Model,options:&Options,request:&Prepared,run:Result<&Soluti
 /// the horizon `meanHorizonUs`.
 pub fn mean_result(model:&Model,options:&Options,started:Instant)->Result<Value,String>{
     let request=prepare_request(model,options)?;
-    let solution=run(&request,&[],options.mean_horizon_us);
+    let solution=run(&request,&[],options.mean_horizon_us,true);
     mean_value(model,options,&request,solution.as_ref(),started)
 }
 
@@ -287,7 +287,7 @@ pub fn solve(model:&Model,options:&Options,publish_mean:&mut dyn FnMut(&Value))-
     if !options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples){return Err("Invalid finite population grid".into());}
     let request=prepare_request(model,options)?;
     let times:Vec<f64>=(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect();
-    let solution=run(&request,&times,options.mean_horizon_us.filter(|_|options.include_asymptotic))?;
+    let solution=run(&request,&times,options.mean_horizon_us.filter(|_|options.include_asymptotic),options.include_asymptotic)?;
     let mean=if options.include_asymptotic{let mean=mean_value(model,options,&request,Ok(&solution),started)?;publish_mean(&mean);Some(mean)}else{None};
     let(row_trace,initial_error)=row_errors(&solution.trajectory,&request.initial)?;
     let estimated=solution.estimate.trajectory.iter().fold(0_f64,|a,&b|a.max(b))+solution.projection;
@@ -445,14 +445,16 @@ mod tests{
                 "errTraj":error_traj.as_ref().map(|e|e.0),"errTrajAt":error_traj.as_ref().map(|e|e.1),"errH":error_h,"errSteady":error_s,"estOverErrQuantiles":ratio,
                 "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest.map(|s|s.rate),"slowestResidual":c.slowest.map(|s|s.residual),"ms":c.milliseconds,
                 "operatorWork":c.inner.operator_work,"innerSteps":c.inner.steps,"innerMs":c.inner.milliseconds,"applyMs":c.inner.timing.apply_ms,"preconditionMs":c.inner.timing.precondition_ms,"orthogonalizeMs":c.inner.timing.orthogonalize_ms,"batchMs":c.inner.batch_ms,"blockOperations":c.inner.block_operations(),
-                "timingMs":{"explicitSet":c.timing.explicit_set_ms,"setup":c.timing.setup_ms,"frame":c.timing.frame_ms,"projection":c.timing.projection_ms,"model":c.timing.model_ms,"ordering":c.timing.ordering_ms,"estimate":c.timing.estimate_ms},
+                "timingMs":{"explicitSet":c.timing.explicit_set_ms,"setup":c.timing.setup_ms,"frame":c.timing.frame_ms,"frameWait":c.timing.frame_wait_ms,"projection":c.timing.projection_ms,"model":c.timing.model_ms,"ordering":c.timing.ordering_ms,"estimate":c.timing.estimate_ms},
                 "elapsedMs":started.elapsed().as_secs_f64()*1e3,"trajectoryNorm":c.trajectory.iter().map(|p|ledger::metric(p,&zero,&groups)).fold(0_f64,f64::max)});
             println!("{line}");lines.push(line);
         };
         // ATOM_VALIDATE_FOLD=0: the estimate without the fold charges (their
         // ledger reported in the summary).
         let construct=if std::env::var("ATOM_VALIDATE_FOLD").is_ok_and(|v|v=="0"){without_fold}else{pipeline::ESTIMATOR};
-        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,groups:&prepared.groups},construct,Some(&mut observe));
+        // ATOM_VALIDATE_STEADY=0: no steady output (a trajectory alone).
+        let steady=std::env::var("ATOM_VALIDATE_STEADY").map_or(true,|v|v!="0");
+        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,steady,groups:&prepared.groups},construct,Some(&mut observe));
         let total_ms=started.elapsed().as_secs_f64()*1e3;
         match result{
             Ok(s)=>println!("{}",json!({"summary":true,"prepareMs":prepare_ms,"totalMs":total_ms,"lattice":lattice_json(&prepared.lattice,Some(&s))["run"],
@@ -573,6 +575,8 @@ mod tests{
             println!("{}",json!({"case":case,"modes":n_modes,"near":estimate.lattice.near.len(),"ring":estimate.lattice.ring.len(),"operatorDeviation":operator,"buildMs":build_ms,
                 "kernelMs":estimate.lattice.build_ms[0],"classMs":estimate.lattice.build_ms[1],"classes":estimate.lattice.classes.len(),"eigenbasisMs":p.eigenbasis().unwrap().milliseconds,"eigenBlocks":p.eigenbasis().unwrap().blocks,"largestBlock":p.eigenbasis().unwrap().largest_block,
                 "seeds":seed_count,"seedSteps":seed_steps,"d":p.generator.n*p.generator.n,"kernelEntries":estimate.lattice.kernels.diagnostics.entries,"smallParameter":estimate.lattice.kernels.diagnostics.largest,"ledger":ledger.total()}));
+            // The pipeline's lattice: the slow pool's operator and steady preconditioner.
+            let mut solver=atom_population_core::lattice::poles::Lattice::new(&p,LatticeSets{explicit:sets.explicit.clone(),ring:sets.ring.clone()}).unwrap();
             let mut gate=OutputGate::new(p.generator.n,estimate.lattice.nu.clone(),estimate.lattice.centre);let limit=estimator::gate::GATE_FACTOR*POPULATION_TOLERANCE;
             let zero=vec![0.;p.generator.n];
             for cp in index["checkpoints"].as_array().unwrap(){
@@ -613,7 +617,7 @@ mod tests{
                 let skipped=gated&&!open;
                 let before=(estimate.lattice.work.clone(),estimate.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default());
                 let clock=Instant::now();
-                let errors=if skipped{estimator::Errors::default()}else{estimate.errors(&Checkpoint{basis:&basis[..k],images:&images[..k],x:&x,s:&s,theta:&th_e,coefficients:&a_e}).unwrap()};
+                let errors=if skipped{estimator::Errors::default()}else{estimate.errors(&Checkpoint{basis:&basis[..k],images:&images[..k],x:&x,s:&s,theta:&th_e,coefficients:&a_e,frame:None},&mut solver).unwrap()};
                 let ms=clock.elapsed().as_secs_f64()*1e3;
                 let series:Vec<f64>=errors.trajectory.iter().map(|p|ledger::metric(p,&zero,&fixture_groups)).collect();
                 let hz:Vec<f64>=errors.horizons.iter().map(|p|ledger::metric(p,&zero,&fixture_groups)).collect();
