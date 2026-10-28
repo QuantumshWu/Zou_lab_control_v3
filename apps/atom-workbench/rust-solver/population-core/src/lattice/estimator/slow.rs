@@ -30,8 +30,9 @@
 //! small least-squares problem, and, while the residual is above
 //! RESIDUAL |g_k|, preconditioned augmentation steps that join the pool for
 //! every later mode and checkpoint. The preconditioner is the solver's own
-//! first-order-kernel one: the shared Floquet frames at the steady shift;
-//! the stop is the residual alone (R2 section 12; its accuracy at RESIDUAL).
+//! first-order-kernel one: the shared Floquet frames at the steady shift.
+//! A solve stops when the mode's contribution to the outputs has settled
+//! (`SETTLE`), or at the residual RESIDUAL.
 //!
 //! Deflation (away from the kernel): a slow Ritz value lies close to an
 //! eigenvalue of A, so (theta - A) is nearly singular along the slow Ritz
@@ -62,6 +63,16 @@ pub const SLOW:f64=0.05;
 /// 42% at a later checkpoint of four lasers; 1e-3: 8%). The residual bounds
 /// the readout loosely: the tolerance keeps a margin.
 const RESIDUAL:f64=1e-5;
+/// A solve also stops once its contribution to the outputs has settled:
+/// two consecutive changes below SETTLE of its size (away from the kernel
+/// at least of the steady error), with the residual below SETTLED_RESIDUAL;
+/// the response is read at SETTLE_TIMES times halving from the horizon.
+/// Measured against solves to 1e-7 on two to five lasers at 10 ms: within
+/// 2.1%, the first estimate's steps 27-32 -> 17-29 (one settled change, or
+/// 3e-2: 30% once, 3.6%).
+const SETTLE:f64=1e-2;
+const SETTLED_RESIDUAL:f64=1e-3;
+const SETTLE_TIMES:usize=6;
 const MAXIMUM_STEPS:usize=60;
 /// A Ritz value below this is the kernel (theta = 0 exactly in the outputs).
 const KERNEL:f64=1e-12;
@@ -277,7 +288,7 @@ pub struct SlowSolution{pub theta:C,pub coefficient:C,basis:Vec<C>,x:Vec<C>,defl
 /// Ritz mode j its Ritz index and value, b_j = X s_j, its left functional
 /// on W^T y (row j of S^-1 (X^H X)^-1 X^H: l_j(x_i) = delta_ij), and the
 /// coordinates on Q of x_j = W b_j and of A x_j.
-struct Deflation{index:Vec<usize>,theta:Vec<C>,b:Vec<Vec<C>>,left:Vec<Vec<C>>,cx:Vec<Vec<C>>,cax:Vec<Vec<C>>}
+struct Deflation{index:Vec<usize>,theta:Vec<C>,b:Vec<Vec<C>>,left:Vec<Vec<C>>,cx:Vec<Vec<C>>,cax:Vec<Vec<C>>,centre:Vec<Vec<C>>}
 
 /// A solve's coefficients: the pool part, the basis part, and the deflated
 /// modes (positions in the deflation) with their amplitudes.
@@ -296,16 +307,21 @@ pub struct SlowPool{
     packed_basis:Vec<f64>,wq:Vec<Vec<f64>>,columns:usize,
     /// The checkpoint's slow invariant subspace (`deflate`).
     deflation:Option<Deflation>,
+    /// The longest output time (us), and the latest kernel mode's steady
+    /// error (population units), the floor of the other modes' settling
+    /// scale (`solve`).
+    horizon:f64,steady_scale:f64,
     pub work:PoolWork,
 }
 
 impl SlowPool{
-    pub fn new(prepared:&LatticePrepared,lattice:&ErrorLattice<'_>)->Result<Self,String>{
+    /// `horizon`: the longest output time (us).
+    pub fn new(prepared:&LatticePrepared,lattice:&ErrorLattice<'_>,horizon:f64)->Result<Self,String>{
         let(n,d)=(lattice.n,lattice.d);let c0=lattice.centre*d;let watch:Vec<usize>=(0..n).map(|i|c0+i*n+i).collect();
         let packing=Packing::new(lattice);let length=packing.length();
         let mut pool=Self{dimension:lattice.dimension(),lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),packing,
             q:Panels::new(length),cu:Vec::new(),cau:Vec::new(),trace:Vec::new(),near_parts:Vec::new(),u:Vec::new(),
-            packed_basis:Vec::new(),wq:Vec::new(),columns:0,deflation:None,work:PoolWork::default()};
+            packed_basis:Vec::new(),wq:Vec::new(),columns:0,deflation:None,horizon,steady_scale:0.,work:PoolWork::default()};
         let packed=pool.packing.pack(&pool.trace_row());let(mut coordinates,_)=pool.extend(packed,1)?;pool.u=coordinates.remove(0);
         Ok(pool)
     }
@@ -376,9 +392,26 @@ impl SlowPool{
         let(coordinates,_)=self.extend(block,4*m)?;
         let complex=|a:&[f64],b:&[f64]|->Vec<C>{(0..a.len().max(b.len())).map(|i|C{re:a.get(i).copied().unwrap_or(0.),im:b.get(i).copied().unwrap_or(0.)}).collect()};
         let(cx,cax)=((0..m).map(|i|complex(&coordinates[4*i],&coordinates[4*i+1])).collect(),(0..m).map(|i|complex(&coordinates[4*i+2],&coordinates[4*i+3])).collect());
-        self.deflation=Some(Deflation{index:index.to_vec(),theta:theta.to_vec(),b:b.to_vec(),left:left.to_vec(),cx,cax});
+        let centre=fields.iter().map(|x|self.watch.iter().map(|&k|x[k]).collect()).collect();
+        self.deflation=Some(Deflation{index:index.to_vec(),theta:theta.to_vec(),b:b.to_vec(),left:left.to_vec(),cx,cax,centre});
         self.work.extend_ms+=clock.elapsed().as_secs_f64()*1e3;self.work.qr_macs=self.q.macs();
         Ok(())
+    }
+    /// A slow mode's contribution measure (centre populations, n values):
+    /// |a| (Y_perp + sum_j lambda_j Phi_j x_j) for the pool coefficients c,
+    /// the deflated amplitudes lambda and the directions' left functionals
+    /// l_j(u_k); without the deflation the centre populations of U c.
+    fn contribution(&self,c:&[C],lambda:&[C],ell:&[Vec<C>],deflation:Option<&Deflation>,phi:&[f64],weight:f64)->Vec<C>{
+        let(n,d)=(self.n,self.d);let centre_slot=self.near.iter().position(|&q|q==self.watch[0]/d).unwrap_or(0);
+        let mut out=vec![ZERO;n];
+        for(k,&v)in c.iter().enumerate(){if !nonzero(v){continue;}for(i,o)in out.iter_mut().enumerate(){mul_add(o,v,self.near_parts[k][centre_slot*d+i*n+i]);}}
+        if let Some(d)=deflation{for(i,centre)in d.centre.iter().enumerate(){
+            // - l_i(U c) x_i + lambda_i Phi_i x_i
+            let l=c.iter().enumerate().fold(ZERO,|s,(k,&v)|{let w=mul(ell[k][i],v);C{re:s.re+w.re,im:s.im+w.im}});
+            let a=C{re:lambda[i].re*phi[i]-l.re,im:lambda[i].im*phi[i]-l.im};
+            for(o,&v)in out.iter_mut().zip(centre){mul_add(o,a,v);}}}
+        for o in &mut out{o.re*=weight;o.im*=weight;}
+        out
     }
     /// W^T u_j of direction j (k values), from its coordinates and W^T Q.
     fn basis_products(&self,j:usize)->Vec<f64>{
@@ -393,6 +426,13 @@ impl SlowPool{
         if kernel{for(i,&a)in self.cau[j].iter().enumerate(){v[i].re+=a;}for(i,&a)in self.u.iter().enumerate(){v[i].re+=a*self.trace[j];}}
         else{for(i,&a)in self.cu[j].iter().enumerate(){v[i]=scaled(theta,a);}for(i,&a)in self.cau[j].iter().enumerate(){v[i].re-=a;}}
         v
+    }
+    /// The centre populations of U x (complex: x carries both real parts).
+    fn centre_populations(&self,x:&[C])->Vec<C>{
+        let(n,d)=(self.n,self.d);let centre_slot=self.near.iter().position(|&q|q==self.watch[0]/d).unwrap_or(0);
+        let mut out=vec![ZERO;n];
+        for(j,&c)in x.iter().enumerate(){if !nonzero(c){continue;}for(i,o)in out.iter_mut().enumerate(){mul_add(o,c,self.near_parts[j][centre_slot*d+i*n+i]);}}
+        out
     }
     /// Centre populations (real parts) of scale Y.
     fn readout(&self,basis:&[Vec<C>],s:&SlowSolution,scale:C)->Vec<f64>{
@@ -412,7 +452,7 @@ impl SlowPool{
     /// its steady limit, -lambda_j x_j / theta_j, would weigh the Ritz
     /// vectors' residuals by 1 / theta_j (measured: the steady estimate moved
     /// by up to a factor 2.7).
-    fn solve(&mut self,f:&[C],theta:C,deflate:bool,steady:&mut dyn SteadySolves)->Result<Solved,String>{
+    fn solve(&mut self,f:&[C],theta:C,coefficient:C,deflate:bool,steady:&mut dyn SteadySolves)->Result<Solved,String>{
         let clock=Instant::now();self.work.solves+=1;
         let kernel=magnitude(theta)<KERNEL;let length=self.q.length;
         let deflation=if deflate&&!kernel{self.deflation.take()}else{None};
@@ -434,6 +474,14 @@ impl SlowPool{
         let functionals=|this:&Self,d:&Deflation,k:usize|->Vec<C>{let w=this.basis_products(k);
             d.left.iter().map(|l|l.iter().zip(&w).fold(ZERO,|s,(a,&v)|C{re:s.re+a.re*v,im:s.im+a.im*v})).collect()};
         if let Some(d)=&deflation{for k in 0..self.cu.len(){ell.push(functionals(self,d,k));}}
+        // The settling measure: the mode's contribution to the outputs read at
+        // the centre, a (Y_perp + sum_j lambda_j Phi_j x_j), Phi_j the largest
+        // closed-form response of x_j over the outputs' times (`secular`).
+        let times:Vec<f64>=(0..SETTLE_TIMES).map(|i|self.horizon/f64::from(1<<i)).collect();
+        let phi:Vec<f64>=deflation.as_ref().map_or(Vec::new(),|d|d.theta.iter().map(|&z|times.iter().map(|&t|magnitude(secular(theta,z,t))).fold(0.,f64::max)).collect());
+        let weight=magnitude(coefficient);
+        let(mut previous,mut settled):(Option<Vec<C>>,usize)=(None,0);
+        let floor=if kernel{0.}else{self.steady_scale};
         let mut steps=0;
         let solution=loop{
             let(count,p)=(self.q.count,self.cu.len());
@@ -449,6 +497,17 @@ impl SlowPool{
             let(x,rho)=least_squares(&m,count,p+slow,&phi_c);
             let outside=dot(&parts,&parts);let rn=(rho.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>()+outside).sqrt();
             if rn<=RESIDUAL*fsize||steps>=MAXIMUM_STEPS{break x;}
+            // Settled: two consecutive changes of the contribution below SETTLE
+            // of its size (or of the steady error, the larger), the residual
+            // below SETTLED_RESIDUAL.
+            let contribution=self.contribution(&x[..p],&x[p..],&ell,deflation.as_ref(),&phi,weight);
+            if let Some(last)=&previous{
+                let largest=|v:&[C]|v.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
+                let change=contribution.iter().zip(last).map(|(a,b)|magnitude(C{re:a.re-b.re,im:a.im-b.im})).fold(0.,f64::max);
+                if change<=SETTLE*largest(&contribution).max(floor){settled+=1;}else{settled=0;}
+                if settled>=2&&rn<=SETTLED_RESIDUAL*fsize{break x;}
+            }
+            previous=Some(contribution);
             // The residual field r = Q rho + (the parts outside Q), split in two real fields.
             let mut r=parts.clone();
             let rho_parts:Vec<f64>=rho.iter().map(|z|z.re).chain(rho.iter().map(|z|z.im)).collect();
@@ -501,10 +560,12 @@ impl SlowPool{
     pub fn mode(&mut self,b:&[C],ax:&[C],g:&[C],theta:C,coefficient:C,steady:&mut dyn SteadySolves)->Result<SlowSolution,String>{
         if magnitude(theta)<KERNEL{
             let f:Vec<C>=ax.iter().zip(g).map(|(a,v)|C{re:a.re+v.re,im:a.im+v.im}).collect();
-            let s=self.solve(&f,theta,false,steady)?;
-            return Ok(SlowSolution{theta,coefficient,basis:Vec::new(),x:s.x,deflated:Vec::new()});
+            let s=self.solve(&f,theta,coefficient,false,steady)?;
+            let solution=SlowSolution{theta,coefficient,basis:Vec::new(),x:s.x,deflated:Vec::new()};
+            self.steady_scale=self.centre_populations(&solution.x).iter().map(|z|magnitude(*z)).fold(0.,f64::max)*magnitude(coefficient);
+            return Ok(solution);
         }
-        let s=self.solve(g,theta,true,steady)?;
+        let s=self.solve(g,theta,coefficient,true,steady)?;
         let mut basis=s.basis;basis.resize(b.len(),ZERO);for(t,v)in basis.iter_mut().zip(b){t.re-=v.re;t.im-=v.im;}
         let deflated=self.deflation.as_ref().map_or(Vec::new(),|d|s.deflated.iter().map(|&(i,l)|(d.index[i],d.theta[i],l)).collect());
         Ok(SlowSolution{theta,coefficient,basis,x:s.x,deflated})
