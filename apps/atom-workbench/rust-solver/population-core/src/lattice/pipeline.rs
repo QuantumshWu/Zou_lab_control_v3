@@ -516,6 +516,16 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                     let mut ranked:Vec<(Charge,f64)>=pairs.into_iter().collect();ranked.sort_by(|a,b|b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
                     let mut promoted=Vec::new();let mut carried=0.;
                     if total>0.{for(c,a)in &ranked{if carried>=RING_COMPLETION*total{break;}promoted.push(c.clone());carried+=a;}}
+                    // The completed lattice must fit the memory budget and keep the
+                    // fold's frequency expansion small (its parameter scales with the
+                    // largest |nu_q|): else no charge is promoted.
+                    if !promoted.is_empty(){
+                        let grown=charge_set::completed(prepared,&explicit,&promoted)?;let size=grown.sets.modes().len()as f64;
+                        let nu_max=|modes:&[Charge]|->Result<f64,String>{modes.iter().map(|q|prepared.nu(q).map(f64::abs)).try_fold(0_f64,|a,v|v.map(|v|a.max(v)))};
+                        let(before,after)=(nu_max(&explicit.sets.modes())?,nu_max(&grown.sets.modes())?);
+                        let expansion=if before>0.{ledger.expansion_parameter*after/before}else{ledger.expansion_parameter};
+                        if BASE_BYTES+MODE_BYTES*size>MEMORY_BYTES||expansion>EXPANSION_LIMIT{promoted.clear();}
+                    }
                     let attribution:Vec<(Charge,f64)>=ranked.iter().map(|(c,a)|(c.clone(),if total>0.{a/total}else{0.})).collect();
                     let restarted=keep||!promoted.is_empty();
                     let decision=Completion{promoted,keep_k1:keep,decided_at:space.solves(),bound,slow_part:part,k1_part,ring_part,attribution,restarted};

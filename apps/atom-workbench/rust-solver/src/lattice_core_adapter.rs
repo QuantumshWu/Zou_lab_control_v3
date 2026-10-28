@@ -241,7 +241,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
                 "blockOperations":w.block_operations(),"imageBlocks":s.images*s.answer.modes.len(),"batches":w.batches,"batchMs":w.batch_ms,
                 "applyMs":w.timing.apply_ms,"preconditionMs":w.timing.precondition_ms,"orthogonalizeMs":w.timing.orthogonalize_ms},
             "checkpoints":s.checkpoints.iter().map(|c|json!({"solves":c.solves,"columns":c.columns,"dimension":c.dimension,"accepted":c.accepted,"bound":c.largest,
-                "trajectory":c.estimate.trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"horizons":c.estimate.horizons,"steady":c.estimate.steady,
+                "trajectory":c.estimate.trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"horizons":c.estimate.horizons,"steady":c.estimate.steady,"slowTrajectory":c.estimate.slow_trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"slowHorizons":c.estimate.slow_horizons,
                 "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest.map(|s|s.rate),
                 "estimateMs":c.estimate.work.milliseconds,"ms":c.milliseconds})).collect::<Vec<_>>(),
             "ledger":{"nuFreeze":l.nu_freeze,"thirdOrder":l.third_order,"farShell":l.far_shell,"tail":l.tail,"omittedCross":l.omitted_cross,
