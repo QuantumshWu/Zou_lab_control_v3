@@ -77,7 +77,9 @@ const SETTLE:f64=1e-2;
 const SETTLED_RESIDUAL:f64=1e-3;
 const SETTLE_TIMES:usize=6;
 const MAXIMUM_STEPS:usize=60;
-/// Real rows per panel of Q and per task of the block products.
+/// Real rows per panel of Q and per task of the block products: fixed, so
+/// that the partial sums (in panel order) do not depend on the thread count;
+/// 4096 rows (two modes) give the product lattices 4-16 panels to spread.
 const PANEL_ROWS:usize=1<<12;
 /// A block column whose part outside the block's earlier pivots is below
 /// this fraction of its size adds no direction (a Gram matrix resolves
@@ -195,16 +197,10 @@ impl Panels{
         Ok((coordinates,fresh))
     }
 }
-/// Tasks of the block products: fixed, so that their partial sums (and the
-/// results) do not depend on the thread count; two per worker of the
-/// desktop app's eight.
-const BLOCK_TASKS:usize=16;
-/// Rows per task of the block products: BLOCK_TASKS tasks, at most a panel.
-fn block_rows(length:usize)->usize{length.div_ceil(BLOCK_TASKS).clamp(1<<12,PANEL_ROWS)}
 /// A^T B (ka x mb, column-major) of blocks A (length x ka) and B (length x mb), by row chunks.
 fn block_cross(lapack:&Lapack,execution:&Execution,a:&[f64],ka:usize,b:&[f64],mb:usize,length:usize)->Result<Vec<f64>,String>{
     if ka==0||mb==0{return Ok(vec![0.;ka*mb]);}
-    let chunk=block_rows(length);
+    let chunk=PANEL_ROWS;
     let parts=execution.map((0..length).step_by(chunk).collect(),|s:usize|->Result<Vec<f64>,String>{
         let rows=(s+chunk).min(length)-s;let mut out=vec![0.;ka*mb];
         lapack.gemm(true,false,ka,mb,rows,1.,&a[s..],length,&b[s..],length,0.,&mut out,ka)?;Ok(out)});
@@ -214,7 +210,7 @@ fn block_cross(lapack:&Lapack,execution:&Execution,a:&[f64],ka:usize,b:&[f64],mb
 /// G T (length x m) for G (length x k) and T (k x m), by row chunks.
 fn block_times(lapack:&Lapack,execution:&Execution,g:&[f64],length:usize,k:usize,t:&[f64],m:usize)->Result<Vec<f64>,String>{
     if k==0||m==0{return Ok(vec![0.;length*m]);}
-    let chunk=block_rows(length);let starts:Vec<usize>=(0..length).step_by(chunk).collect();
+    let chunk=PANEL_ROWS;let starts:Vec<usize>=(0..length).step_by(chunk).collect();
     let parts=execution.map(starts.clone(),|s|->Result<Vec<f64>,String>{
         let rows=(s+chunk).min(length)-s;let mut out=vec![0.;rows*m];
         lapack.gemm(false,false,rows,m,k,1.,&g[s..],length,t,k,0.,&mut out,rows)?;Ok(out)});
