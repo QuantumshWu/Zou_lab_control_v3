@@ -61,6 +61,8 @@ const BASIS_BYTES:usize=1<<30;
 const BASE_BYTES:f64=5e8;
 const MODE_BYTES:f64=3.2e7;
 const MEMORY_BYTES:f64=5e9;
+/// The memory a lattice of `modes` modes is planned to take (bytes).
+fn planned_bytes(modes:usize)->f64{BASE_BYTES+MODE_BYTES*modes as f64}
 /// The plateau: the largest bound did not improve by PLATEAU_GAIN over the
 /// last PLATEAU checkpoints. Measured
 /// before the rule: four lasers + tweezer at 10 us / 2000 samples held the
@@ -196,13 +198,14 @@ pub struct Solution{
 }
 
 /// A lattice completion: the ring charges promoted into P (one of each
-/// pair; their mirrors join with them) and whether the operator keeps every
-/// K^(1) rest; where it was decided, the bound there, its slow part and the
-/// K^(1) rests' part (bound units), the ring charges' attribution shares,
-/// and whether the run restarted on the completed lattice.
-#[derive(Clone,Debug,Default)]
+/// pair; their mirrors join with them), the completed explicit set (the
+/// run's own when none is) and whether the operator keeps every K^(1) rest;
+/// where it was decided, the bound there, its slow part and the K^(1)
+/// rests' part (bound units), the ring charges' attribution shares, and
+/// whether the run restarted on the completed lattice.
+#[derive(Clone,Debug)]
 pub struct Completion{
-    pub promoted:Vec<Charge>,pub keep_k1:bool,pub decided_at:usize,
+    pub promoted:Vec<Charge>,pub explicit:ExplicitSet,pub keep_k1:bool,pub decided_at:usize,
     pub bound:f64,pub slow_part:f64,pub k1_part:f64,
     pub attribution:Vec<(Charge,f64)>,pub restarted:bool,
 }
@@ -306,20 +309,19 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     frame:&'a SwFrame<'a>,completion:Option<&Completion>,started:Instant)->Result<Result<Solution,(Completion,Vec<Checkpoint>)>,String>{
     let tolerance=POPULATION_TOLERANCE;let n=prepared.generator.n;
     if initial.len()!=n*n{return Err("Initial density dimension differs".into());}
-    let times=request.times;
-    let longest=times.last().copied().into_iter().chain(request.horizons.iter().copied()).fold(0_f64,f64::max);
+    // The longest output time, the frame's.
+    let(times,longest)=(request.times,frame.horizon);
     let t1=if times.len()>1{times[1]}else{longest/LADDER_SAMPLES};
     let mut timing=Timing::default();
     // 1. The lattice (the frame is built on its own thread meanwhile).
     let clock=Instant::now();let eigen=prepared.eigenbasis()?;timing.eigenbasis_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
-    let base=request.explicit.get_or_init(||charge_set::explicit_set(prepared,initial,tolerance)).clone()?;
-    let explicit=match completion{Some(c)=>charge_set::completed(prepared,&base,&c.promoted)?,None=>base};
+    let explicit=match completion{Some(c)=>c.explicit.clone(),None=>request.explicit.get_or_init(||charge_set::explicit_set(prepared,initial,tolerance)).clone()?};
     timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
     let keep_k1=completion.is_some_and(|c|c.keep_k1);
     let clock=Instant::now();
     let mut lattice=Lattice::with_k1_rests(prepared,explicit.sets.clone(),keep_k1)?;
     let ledger=lattice.operator().ledger()?;
-    let planned=BASE_BYTES+MODE_BYTES*lattice.modes.len()as f64;
+    let planned=planned_bytes(lattice.modes.len());
     if planned>MEMORY_BYTES{return Err(format!("The lattice of this request has {} modes and would need about {:.1} GB, above the {:.0} GB memory budget: not solved",lattice.modes.len(),planned/1e9,MEMORY_BYTES/1e9));}
     // A static fold whose expansion parameter p = nu_max / (|nu_far| - ||L0||)
     // exceeds EXPANSION_LIMIT keeps its K^(1) term and is charged its
@@ -455,16 +457,17 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                     // The completed lattice must fit the memory budget and keep the
                     // fold's frequency expansion small (its parameter scales with the
                     // largest |nu_q|): else no charge is promoted.
+                    let mut grown=None;
                     if !promoted.is_empty(){
-                        let grown=charge_set::completed(prepared,&explicit,&promoted)?;let size=grown.sets.modes().len()as f64;
+                        let set=charge_set::completed(prepared,&explicit,&promoted)?;
                         let nu_max=|modes:&[Charge]|->Result<f64,String>{modes.iter().map(|q|prepared.nu(q).map(f64::abs)).try_fold(0_f64,|a,v|v.map(|v|a.max(v)))};
-                        let(before,after)=(nu_max(&explicit.sets.modes())?,nu_max(&grown.sets.modes())?);
+                        let(before,after)=(nu_max(&explicit.sets.modes())?,nu_max(&set.sets.modes())?);
                         let expansion=if before>0.{ledger.expansion_parameter*after/before}else{ledger.expansion_parameter};
-                        if BASE_BYTES+MODE_BYTES*size>MEMORY_BYTES||expansion>EXPANSION_LIMIT{promoted.clear();}
+                        if planned_bytes(set.sets.modes().len())>MEMORY_BYTES||expansion>EXPANSION_LIMIT{promoted.clear();}else{grown=Some(set);}
                     }
                     let attribution:Vec<(Charge,f64)>=ranked.iter().map(|(c,a)|(c.clone(),if total>0.{a/total}else{0.})).collect();
                     let restarted=keep||!promoted.is_empty();
-                    let decision=Completion{promoted,keep_k1:keep,decided_at:space.solves(),bound,slow_part:part,k1_part,attribution,restarted};
+                    let decision=Completion{promoted,explicit:grown.unwrap_or_else(||explicit.clone()),keep_k1:keep,decided_at:space.solves(),bound,slow_part:part,k1_part,attribution,restarted};
                     if restarted{return Ok(Err((decision,checkpoints)));}
                     decided=Some(decision);
                 }

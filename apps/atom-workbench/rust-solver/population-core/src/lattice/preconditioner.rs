@@ -24,7 +24,7 @@ use super::*;
 use super::floquet::{FloquetKernels,Transform,adjoint,inverse,sandwich_batch,transpose};
 use super::operator::LatticeOperator;
 use super::poles::Pole;
-use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
+use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK,REFERENCE_WORKERS};
 
 /// Centre denominators below this fraction of the frame scale are at
 /// roundoff (a deliberate margin of about 500x over double precision);
@@ -34,10 +34,6 @@ const TINY_DENOMINATOR:f64=1e-13;
 /// A deliberate margin: ten orders above TINY_DENOMINATOR; the exact
 /// rank-one correction (Woodbury) removes the move up to roundoff.
 const MOVED_FRACTION:f64=1e-3;
-/// Column ranges of the centre factor's z = G^-1 V^T c0: fixed, so that the
-/// partial sums do not depend on the thread count; one per worker of the
-/// desktop app's eight.
-const CENTRE_RANGES:usize=8;
 
 
 /// A lattice preconditioner as the Krylov solver sees it.
@@ -167,11 +163,11 @@ impl<'p> FloquetBatch<'p>{
         for q in(0..self.divided.len()).filter(|&q|self.divided[q]){for(v,&r)in c[q*d..(q+1)*d].iter_mut().zip(&self.reciprocal[q*d..(q+1)*d]){*v=mul(*v,r);}}
         if let Some(f)=&self.factor{
             // Two memory-bound products, split over the workers: z = G^-1 V^T c0
-            // by CENTRE_RANGES column ranges (partial sums added in range
-            // order, independent of the thread count), then c0 -= D^-1 U z by
-            // row ranges.
+            // by one column range per reference worker (partial sums added in
+            // range order, independent of the thread count), then
+            // c0 -= D^-1 U z by row ranges.
             let c0=&mut c[self.centre*d..(self.centre+1)*d];let t=f.total;let lapack=&self.lapack;
-            let width=d.div_ceil(CENTRE_RANGES);let starts:Vec<usize>=(0..d).step_by(width).collect();let view:&[C]=c0;
+            let width=d.div_ceil(REFERENCE_WORKERS);let starts:Vec<usize>=(0..d).step_by(width).collect();let view:&[C]=c0;
             let parts=self.execution.map(starts,|start|->Result<Vec<C>,String>{let end=(start+width).min(d);let mut z=vec![ZERO;t];
                 lapack.complex_gemm().multiply(t,1,end-start,ONE,&f.gv[start*t..],t,&view[start..end],end-start,ZERO,&mut z,t)?;Ok(z)});
             let mut z=vec![ZERO;t];for part in parts{for(a,b)in z.iter_mut().zip(part?){add(a,b);}}

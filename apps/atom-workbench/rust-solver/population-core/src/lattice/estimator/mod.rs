@@ -106,13 +106,12 @@ pub const KERNEL_CAP:f64=1.;
 /// rates of 3.5e-7 /us, an error of 7.0e-7 the skip estimated as zero;
 /// solved, 8.8e-7).
 const INVARIANT:f64=1e-12;
-/// Tasks of the time GEMMs (the grid's chunks): fixed, so that the chunking
-/// does not depend on the thread count (as BLOCK_TASKS); four per worker of
-/// the desktop app's eight, at least MINIMUM_WORK_PER_TASK each.
-pub const TIME_TASKS:usize=32;
-/// Rows of the grid per task for `per_time` multiply-adds per time.
+/// Rows of the grid per task of the time GEMMs for `per_time` multiply-adds
+/// per time: at most four tasks per reference worker, at least
+/// MINIMUM_WORK_PER_TASK each (fixed: the chunking does not depend on the
+/// thread count).
 pub fn time_chunk(times:usize,per_time:usize)->usize{
-    times.div_ceil(TIME_TASKS.min(times).min(per_time*times/crate::parallel::MINIMUM_WORK_PER_TASK).max(1))
+    times.div_ceil((4*crate::parallel::REFERENCE_WORKERS).min(times).min(per_time*times/crate::parallel::MINIMUM_WORK_PER_TASK).max(1))
 }
 
 /// The reduced model of a checkpoint in the estimator's terms: the basis
@@ -327,7 +326,7 @@ impl<'a> UnifiedEstimate<'a>{
             let mut e=vec![0.;n];
             if let Some(pool)=self.pool.as_ref(){for sol in solutions.iter().filter(|s|s.kernel){for(a,v)in e.iter_mut().zip(pool.steady_populations(cp.basis,sol)){*a+=v;}}}
             e});
-        Ok(Errors{trajectory,horizons,steady,own_trajectory,own_horizons,slow_trajectory,slow_horizons,work:EstimateWork{slow_modes:solutions.len(),slow_trajectory:slow_grid,lambda_slow:modes.lambda_slow,..Default::default()}})
+        Ok(Errors{trajectory,horizons,steady,own_trajectory,own_horizons,slow_trajectory,slow_horizons,work:EstimateWork{slow_modes:solutions.len(),slow_grid,lambda_slow:modes.lambda_slow,..Default::default()}})
     }
     /// The work counters so far: the fast part's and the pool's.
     fn counters(&self)->(lattice::ErrorWork,slow::PoolWork){

@@ -22,6 +22,10 @@ pub const MINIMUM_WORK_PER_TASK: usize = 262_144;
 /// Tasks per worker, so work stealing evens out uneven chunks and workers
 /// that are preempted or run on slower cores.
 const TASKS_PER_THREAD: usize = 4;
+/// The desktop app's workers. A stage whose partial sums must not depend on
+/// the thread count splits into a fixed number of tasks, set per worker of
+/// this reference.
+pub const REFERENCE_WORKERS: usize = 8;
 const DEFAULT_THREAD_CAP: usize = 8;
 
 pub struct Execution {

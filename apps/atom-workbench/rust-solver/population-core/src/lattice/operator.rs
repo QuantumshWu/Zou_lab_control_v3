@@ -79,7 +79,7 @@ pub struct LatticeOperator<'a>{
     pub work:usize,
     /// Whether the K^(1) rests are applied but for their population rows
     /// (the rest is left out: `left_out`), and their summed row sums.
-    pub drops_k1_rest:bool,k1_rest:f64,
+    drops_k1_rest:bool,k1_rest:f64,
 }
 impl<'a> LatticeOperator<'a>{
     pub fn new(prepared:&'a LatticePrepared,modes:&[Charge])->Result<Self,String>{Self::with_k1_rests(prepared,modes,false)}

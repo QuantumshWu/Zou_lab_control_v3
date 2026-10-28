@@ -38,7 +38,7 @@
 use super::*;
 use super::operator::LatticeOperator;
 use crate::lapack::ComplexGemm;
-use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
+use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK,REFERENCE_WORKERS};
 
 /// Explicit step pairs mixing (|V_s| / |nu_s|) above this enter the
 /// self-consistent central frames. A deliberate margin: a pair below it
@@ -295,9 +295,6 @@ impl FloquetKernels{
 }
 
 
-/// Tasks of the frame changes at most: one per worker of the desktop app's
-/// eight (fixed: the chunking does not depend on the thread count).
-const FRAME_TASKS:usize=8;
 #[derive(Default)]
 struct FrameScratch{blocks:Vec<C>,stack:Vec<C>}
 /// The two-sided Floquet transform on one mode set's Hermitian-symmetric
@@ -342,10 +339,12 @@ impl Transform<'_>{
     }
 }
 /// out_q = A in_q B on the computed modes: per task the computed blocks
-/// gathered and changed by two GEMMs (`sandwich_batch`).
+/// gathered and changed by two GEMMs (`sandwich_batch`), at most one task per
+/// reference worker (fixed: the chunking does not depend on the thread
+/// count).
 #[allow(clippy::too_many_arguments)]
 fn frame(execution:&Execution,lapack:&Lapack,scratch:&mut Vec<FrameScratch>,n:usize,a:&[C],b:&[C],input:&[C],out:&mut[C],computed:&[bool],work:usize)->Result<(),String>{
-    let d=n*n;let minimum=work.div_ceil(FRAME_TASKS).max(MINIMUM_WORK_PER_TASK/8);
+    let d=n*n;let minimum=work.div_ceil(REFERENCE_WORKERS).max(MINIMUM_WORK_PER_TASK/8);
     execution.for_mode_chunks(out,d,work,minimum,scratch,|first,chunk,scratch|{
         let modes:Vec<usize>=(first..first+chunk.len()/d).filter(|&q|computed[q]).collect();if modes.is_empty(){return Ok(());}
         grow(&mut scratch.blocks,modes.len()*d);let blocks=&mut scratch.blocks[..modes.len()*d];

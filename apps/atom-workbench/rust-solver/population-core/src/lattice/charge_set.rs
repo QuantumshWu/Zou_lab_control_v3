@@ -82,8 +82,6 @@ pub struct ExplicitSet{
     pub leak:f64,
     /// The ring's internal edges left (target, source, rho).
     pub internal:Vec<(Charge,Charge,f64)>,
-    /// The ring charges a completion promoted (one of each pair; `completed`).
-    pub completed:Vec<Charge>,
     pub milliseconds:f64,
 }
 
@@ -98,7 +96,7 @@ pub fn completed(prepared:&LatticePrepared,base:&ExplicitSet,extra:&[Charge])->R
     let q=ring(prepared,&p)?;
     let mut condition=RingCondition{prepared,steps:prepared.plan.structural_steps(),coupling:BTreeMap::new(),resolvent:BTreeMap::new()};
     let internal=condition.edges(&p.iter().cloned().collect())?;
-    let mut set=base.clone();set.sets=LatticeSets{explicit:p,ring:q};set.internal=internal;set.completed=extra.to_vec();
+    let mut set=base.clone();set.sets=LatticeSets{explicit:p,ring:q};set.internal=internal;
     set.milliseconds+=clock.elapsed().as_secs_f64()*1e3;
     Ok(set)
 }
@@ -238,7 +236,7 @@ pub fn explicit_set(prepared:&LatticePrepared,initial:&[C],tolerance:f64)->Resul
     let lattice:BTreeSet<&Charge>=p.iter().chain(&q).collect();
     let leak=amplitudes.iter().filter(|(c,_)|!lattice.contains(c)).map(|(_,&a)|a).fold(0.,f64::max);
     let internal=condition.edges(&p.iter().cloned().collect())?;
-    Ok(ExplicitSet{sets:LatticeSets{explicit:p,ring:q},gated,promoted,covered,leak,internal,completed:Vec::new(),milliseconds:clock.elapsed().as_secs_f64()*1e3})
+    Ok(ExplicitSet{sets:LatticeSets{explicit:p,ring:q},gated,promoted,covered,leak,internal,milliseconds:clock.elapsed().as_secs_f64()*1e3})
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ use super::*;
 use super::operator::LatticeOperator;
 use super::poles::Pole;
 use super::preconditioner::Preconditioner;
-use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
+use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK,REFERENCE_WORKERS};
 
 /// Blocks per reduction chunk: fixed, so sums do not depend on threads.
 const VECTOR_CHUNK:usize=16;
@@ -44,10 +44,6 @@ const ROUNDOFF_RESIDUAL:f64=1e-15;
 /// factor marks its floor: a deliberate margin, one that does not halve it
 /// gains nothing from restarting.
 const STALL_FACTOR:f64=0.5;
-/// Tasks of the fused update: fixed, so that its partial norms (summed in
-/// task order) do not depend on the thread count; four per worker of the
-/// desktop app's eight.
-const UPDATE_TASKS:usize=32;
 
 #[derive(Clone,Debug)]
 pub struct KrylovOptions{
@@ -101,7 +97,9 @@ impl Vectors{
     /// than the basis, for the new u); both mirrored. Returns |w|^2.
     pub fn fused_update(&self,basis:&[&[C]],u:&mut[C],a:&[f64],alpha:f64,w:&mut[C],c:&[f64])->Result<f64,String>{
         let(d,m)=(self.d,basis.len());let blocks=w.len()/d;let inverse=1./alpha;
-        let tasks=UPDATE_TASKS.min(blocks).min((2*m+2)*w.len()/MINIMUM_WORK_PER_TASK).max(1);let per=blocks.div_ceil(tasks);
+        // At most four tasks per reference worker: fixed, so that the partial
+        // norms (summed in task order) do not depend on the thread count.
+        let tasks=(4*REFERENCE_WORKERS).min(blocks).min((2*m+2)*w.len()/MINIMUM_WORK_PER_TASK).max(1);let per=blocks.div_ceil(tasks);
         let mut items=Vec::with_capacity(tasks);let(mut ur,mut wr)=(&mut u[..],&mut w[..]);let mut first=0;
         while first<blocks{let count=per.min(blocks-first);let(uc,ut)=ur.split_at_mut(count*d);let(wc,wt)=wr.split_at_mut(count*d);
             items.push((first,uc,wc));ur=ut;wr=wt;first+=count;}
