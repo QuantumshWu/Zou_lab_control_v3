@@ -161,7 +161,7 @@ impl<'p> ErrorLattice<'p>{
         let mut class_of=vec![usize::MAX;modes.len()];
         for(&a,k)in near.iter().zip(&keys){class_of[a]=distinct.iter().position(|x|x==k).unwrap();}
         let lapack=&prepared.lapack;
-        let built=Execution::new()?.map(distinct,|steps|BlockSystem::new(lapack,basis,&kernels,steps,n));
+        let built=Execution::new()?.map(distinct,|steps|BlockSystem::new(lapack,basis,&kernels,steps,n,rule.horizon));
         let classes=built.into_iter().collect::<Result<Vec<_>,_>>()?;
         let class_ms=clock.elapsed().as_secs_f64()*1e3;
         let count=near.len();
