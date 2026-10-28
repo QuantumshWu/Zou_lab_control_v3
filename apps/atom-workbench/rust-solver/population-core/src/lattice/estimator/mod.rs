@@ -34,10 +34,16 @@
 //!   reduced model); before that the slow modes' far sources have not grown
 //!   and the two large terms of the exact form cancel badly: every Ritz mode
 //!   goes through the SW part (always taking the slow part: per-time ratio
-//!   0.03, R2 14.1) but the kernel modes, which always take it. The
-//!   horizons and the steady state always take the slow part, and only it
-//!   (the fast part, the frame's kernels and classes, serves the trajectory
-//!   alone).
+//!   0.03, R2 14.1) but the kernel modes, which always take it. A horizon
+//!   always takes the slow part for the slow modes and the fast part for the
+//!   others (R2 14.1's complete form): the fast modes' residuals reach the
+//!   slow classes of the frame's block, which carry them to T. Without the
+//!   fast part a slow mode the space lacks was invisible: the default scene
+//!   (probe + tweezer) at T = 100 ms was off by 7.8e-3 with a bound of
+//!   7e-13, its slow classes at 5.6e-7 and 8.7e-7 /us outside the space;
+//!   with it the bound is 4.8e-4, still short (the pipeline resolves such a
+//!   class: `pipeline::missing_classes`). The steady state takes the slow
+//!   part alone (the kernel's error).
 //!
 //! Outputs: the trajectory on the grid (laboratory readout), each horizon T
 //! (centre readout: the time average) and the steady state, every one
@@ -146,8 +152,9 @@ impl<'a> UnifiedEstimate<'a>{
     pub fn errors(&mut self,cp:&Checkpoint<'_>,steady:&mut dyn SteadySolves)->Result<Errors,String>{
         let(k,r)=(cp.basis.len(),cp.theta.len());let outputs=self.setup.outputs;
         let mut ms=[0.;5];let clock=Instant::now();
-        // The fast part's columns: only the trajectory reads the fast part.
-        if !outputs.times.is_empty(){self.lattice.add_columns(cp.basis,cp.images)?;}
+        // The fast part's columns (the trajectory and the horizons read the
+        // fast part).
+        if !(outputs.times.is_empty()&&outputs.horizons.is_empty()){self.lattice.add_columns(cp.basis,cp.images)?;}
         ms[0]=clock.elapsed().as_secs_f64()*1e3;
         let b=cp.s;
         // The slow modes and which outputs use them. A projected growing mode
@@ -237,8 +244,12 @@ impl<'a> UnifiedEstimate<'a>{
         let mut horizons=Vec::with_capacity(outputs.horizons.len());
         for &t in outputs.horizons{
             let count=taking(t);
-            horizons.push(if count==0{vec![0.;n]}else{
-                self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,&kernel,&solutions[..count],&[t],Readout::Centre)?.remove(0)});
+            let skip:Vec<usize>=solved[..count].iter().chain(&invariant).copied().collect();
+            let coefficients:Vec<C>=(0..r).map(|m|if skip.contains(&m){ZERO}else{cp.coefficients[m]}).collect();
+            let fast=self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&coefficients},&[t],Readout::Centre)?.remove(0);
+            horizons.push(if count==0{fast}else{
+                let slow=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,&kernel,&solutions[..count],&[t],Readout::Centre)?.remove(0);
+                fast.iter().zip(&slow).map(|(a,b)|a+b).collect()});
         }
         ms[4]+=clock.elapsed().as_secs_f64()*1e3;
         let steady=outputs.steady.then(||{
