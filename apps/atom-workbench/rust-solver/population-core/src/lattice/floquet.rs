@@ -43,7 +43,9 @@ use crate::lapack::ComplexGemm;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// Explicit step pairs mixing (|V_s| / |nu_s|) above this enter the
-/// self-consistent central frames.
+/// self-consistent central frames. A deliberate margin: a pair below it
+/// moves the frames at second order, by about its mixing squared (1e-8),
+/// below the inner tolerance; the frames only precondition.
 const MIXING_FLOOR:f64=1e-4;
 /// Kernels |P_s|_F / |P_0|_F below this stay out of the transforms
 /// (measured: two tiers, 0.08-0.11 for the main beat pair and 0.008-0.011
@@ -57,7 +59,8 @@ const KERNEL_FLOOR:f64=5e-3;
 /// here, as many as with the dense kernels).
 const KERNEL_ENTRY_FLOOR:f64=3e-4;
 /// Kernel elements with |numerator / denominator| above this are near
-/// resonant and left out.
+/// resonant and left out: a deliberate margin below 1, where the first
+/// order stops being a small parameter.
 const RESONANCE_GUARD:f64=0.5;
 /// Relative quasi-energy change at which the self-consistency stops (it
 /// stalls near 1e-9 on eigenvalue pairing noise), and its iteration cap.

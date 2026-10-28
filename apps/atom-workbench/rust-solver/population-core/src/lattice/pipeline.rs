@@ -13,17 +13,16 @@
 //!    its own transform a pole's last solve removed (a pole whose solve did
 //!    not reduce it loses its turn; one never solved keeps the whole), per
 //!    real solve (a complex pole costs two); a pole that adds no direction
-//!    leaves the ladder. (Scores within 2x of the best taken as tied, the
-//!    larger sigma first, N1 round five: the ladder then runs down in sigma
-//!    and three, five and four lasers without the trap at 10 ms ended
-//!    partial, 12-20 solves, against 8-16 accepted by score.) While
+//!    leaves the ladder. While
 //!    the slowest relaxation needs resolving, the real poles near its rate
 //!    gain priority: the best population gain (at least the tolerance)
 //!    times its relative need, by their log distance, and the share of the
 //!    need their last solve removed.
 //! 3. Every CHECKPOINT solves (a request that propagates nothing: also
 //!    right after the steady column): the Galerkin model in the frame's
-//!    metric (`reduced`; M = I for the steady state alone), its outputs (trajectory on the grid, horizons, steady
+//!    metric (`reduced`; a request for the steady state alone takes M = I,
+//!    a speed case: it skips about 1 s of frame build, and its steady
+//!    column makes the kernel independent of the metric), its outputs (trajectory on the grid, horizons, steady
 //!    state, slowest relaxation, conserved count) and the error estimate
 //!    (`estimator`). An output's bound is ACCEPTANCE_FACTOR x its estimate,
 //!    plus, on a trajectory row, the change of its projection onto the
@@ -54,9 +53,13 @@ use super::estimator::{self,UnifiedEstimate};
 use super::eigenbasis::BlockEigenbasis;
 
 /// Solves between checkpoints; the ladder is re-ranked at every checkpoint
-/// (from its reduced model) and whenever its queue runs out.
+/// (from its reduced model) and whenever its queue runs out. Measured at
+/// this spacing: the estimates up to acceptance cost 19-35% of the solves on
+/// three to five lasers; acceptance is seen at most three solves late.
 const CHECKPOINT:usize=4;
 /// Most solves of a request, and the basis memory (basis and images).
+/// MAXIMUM_SOLVES is a deliberate margin: twice the 24 solves the slowest
+/// accepted research case takes (16-24 at 20 us).
 const MAXIMUM_SOLVES:usize=48;
 const BASIS_BYTES:usize=1<<30;
 /// The plateau: the largest bound (or the slowest relaxation's need) did
@@ -67,7 +70,7 @@ const BASIS_BYTES:usize=1<<30;
 /// solves (bound 1.2e-2), accepted at 20 over three.
 const PLATEAU:usize=3;
 const PLATEAU_GAIN:f64=2.;
-/// The slowest relaxation (N1 round five): its candidates carry population
+/// The slowest relaxation: its candidates carry population
 /// weight of at least CANDIDATE_WEIGHT x tolerance; a candidate must be
 /// resolved when its weight at a horizon T, weight x e^{-rate T}, is at
 /// least REQUIRED_CONTRIBUTION x tolerance; it is matched when every class
@@ -75,14 +78,33 @@ const PLATEAU_GAIN:f64=2.;
 /// / CLASS_GAP has a candidate within CLASS_MATCH of its rate. A class of
 /// x0 itself must be resolved (`missing_classes`) when its own weight at a
 /// horizon is at least REQUIRED_CONTRIBUTION x tolerance.
+/// CANDIDATE_WEIGHT, measured: the spurious slow pairs of a four-laser case
+/// carried 1.2e-5 and 1.5e-6, the physical one 4e-2; 1e-2 x tolerance =
+/// 5e-5 lies 2-3 orders from both.
 const CANDIDATE_WEIGHT:f64=1e-2;
+/// A deliberate margin: a pair or class contributing less than a tenth of
+/// the tolerance at every horizon cannot move an output beyond it.
 const REQUIRED_CONTRIBUTION:f64=0.1;
+/// Derived: 1 + CLASS_MATCH, so a class slower than rate / CLASS_GAP is
+/// outside the candidate's own match and needs another candidate.
 const CLASS_GAP:f64=1.4;
+/// A deliberate margin over the measured offset between a class (the
+/// frame's second-order block) and its Ritz pair: 18% on a four-laser case
+/// (class 0.0418 /us, pair 0.0344 /us).
 const CLASS_MATCH:f64=0.4;
 /// Grid samples assumed for the ladder's top when a request has no grid,
 /// and the longest time of a request for the limit alone (us).
+/// LADDER_SAMPLES is a deliberate margin: as if the horizon were sampled
+/// like the app's trajectories (161-200 samples on the research scenes).
 const LADDER_SAMPLES:f64=200.;
+/// A deliberate margin: the app's default horizon, 1 s; the steady column
+/// and the slow points (down to `space::SLOW_FLOOR`) serve slower rates.
 const LIMIT_REACH:f64=1e6;
+/// A decaying class of the frame's block carries none of x0's trace; a
+/// class whose trace is at least this share of its weight is the block's
+/// kernel. Measured: decaying classes at most 5e-3 of their weight, the
+/// kernel 1.6 (trace 1.00, weight 0.63): a margin of 100x and 3x.
+const KERNEL_TRACE_SHARE:f64=0.5;
 /// Stack of the frame's thread (LAPACK on it).
 const FRAME_STACK:usize=1<<26;
 
@@ -170,8 +192,8 @@ pub fn simplex(values:&[f64])->Vec<f64>{
 /// CANDIDATE_WEIGHT x tolerance; (rate, weight), slowest first. The block's
 /// kernel is not a class: the block annihilates the trace, so a decaying class
 /// carries none of x0's trace |c_j sum_i (E V)_ij| (measured: at most 5e-3
-/// of its weight) and a class carrying at least half its weight is the
-/// kernel, its value zero within the eigensystem's error over the horizon
+/// of its weight) and a class carrying at least KERNEL_TRACE_SHARE of its
+/// weight is the kernel, its value zero within the eigensystem's error over the horizon
 /// (three lasers at T = 1 s: 1.4e-8 /us, weight 0.63, trace 1.00; taken as
 /// a class, every candidate was unmatched and a horizon needed it).
 fn class_rates(frame:&SwFrame<'_>,eigen:&BlockEigenbasis,lapack:&Lapack,initial:&[C],tolerance:f64)->Result<Vec<(f64,f64)>,String>{
@@ -183,7 +205,7 @@ fn class_rates(frame:&SwFrame<'_>,eigen:&BlockEigenbasis,lapack:&Lapack,initial:
         let weight=magnitude(c[j])*column.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
         let trace=magnitude(c[j])*magnitude(column.iter().fold(ZERO,|a,z|C{re:a.re+z.re,im:a.im+z.im}));
         let rate=-class.values[j].re;
-        (rate>=super::reduced::KERNEL&&weight>=CANDIDATE_WEIGHT*tolerance&&trace<0.5*weight).then_some((rate,weight))}).collect();
+        (rate>=super::reduced::KERNEL&&weight>=CANDIDATE_WEIGHT*tolerance&&trace<KERNEL_TRACE_SHARE*weight).then_some((rate,weight))}).collect();
     classes.sort_by(|a,b|a.0.total_cmp(&b.0));Ok(classes)
 }
 
@@ -293,7 +315,9 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     // accepted at 16-24 solves (four without the trap partial before) and
     // five lasers at 10 us / 2000 samples reached 7.0e-3 against 2.3e-2.
     let(points,slow_points)=space::ladder(eigen,initial,t1,times.last().copied().unwrap_or(longest),tolerance)?;let mut alive=vec![true;points.len()];
-    // The frame's metric (waiting for the frame's thread).
+    // The frame's metric (waiting for the frame's thread). A request that
+    // propagates nothing (the steady state alone) takes M = I instead, a
+    // speed case: it skips about 1 s of frame build (`reduced`).
     let clock=Instant::now();
     let metric=if propagates{Some(SwMetric::new(&frame,eigen,lattice.operator())?)}else{None};
     timing.frame_wait_ms=clock.elapsed().as_secs_f64()*1e3;
@@ -484,7 +508,7 @@ mod tests{
                 for e in 0..size{x[e].re+=h/6.*(k1[e].re+2.*k2[e].re+2.*k3[e].re+k4[e].re);x[e].im+=h/6.*(k1[e].im+2.*k2[e].im+2.*k3[e].im+k4[e].im);}t+=h;}}
             // Every sample within 1 / 0.8 of its own bound (above 2% of the
             // tolerance: the validation's floor; the estimate is no per-time
-            // bound, R2 14.1), the bounds within the tolerance.
+            // bound), the bounds within the tolerance.
             let error=ledger::metric(&readout(&x,t),row,&groups);worst=(worst.0.max(error),worst.1.max(a.sample_errors[i]));
             assert!(0.8*error<=a.sample_errors[i].max(0.02*POPULATION_TOLERANCE)&&a.sample_errors[i]<=POPULATION_TOLERANCE,"sample {i}: {error:e} against {:e}",a.sample_errors[i]);
         }

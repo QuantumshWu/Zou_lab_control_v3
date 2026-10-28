@@ -46,24 +46,40 @@ use super::eigenbasis::BlockEigenbasis;
 /// solve (its algebraic error is the steady output's).
 pub const INNER_TOLERANCE:f64=1e-7;
 pub const STEADY_TOLERANCE:f64=1e-9;
-/// The bordered solve counts as singular above this true residual.
+/// The bordered solve counts as singular above this true residual: a
+/// deliberate margin of 1000x over STEADY_TOLERANCE, which a regular
+/// bordered system reaches and a singular one (more conserved quantities)
+/// stalls far above.
 const BORDERED_SINGULAR:f64=1e-6;
-/// The pole 0+ (1/us) of a singular bordered system.
+/// The pole 0+ (1/us) of a singular bordered system. Derived: the column is
+/// Pi0 x0 + O(xi / gap), and rates below `reduced::KERNEL` (the same 1e-9)
+/// count as conserved, so the kernel dominates it.
 const ZERO_PLUS:f64=1e-9;
 /// A Krylov direction below NOISE x INNER_TOLERANCE of its column is noise.
+/// Measured: without the floor a repeated pole near 1 / T added inner-solve
+/// noise and a spurious mode (Re theta +4.6e-2 /us) on two lasers at 10 ms.
 const NOISE:f64=100.;
 /// A basis vector whose part outside the basis is below this fraction of
 /// its norm is dependent.
 const APPEND_FLOOR:f64=1e-11;
+/// Ladder points per decade: a deliberate choice, not measured (the
+/// reference runs used two to three); the ranking chooses among them.
 const PER_DECADE:f64=2.;
-/// The slow points reach relaxation rates down to SLOW_FLOOR (1/us).
+/// The slow points reach relaxation rates down to SLOW_FLOOR (1/us): a
+/// deliberate margin, a decade below the 1 s horizon's 1e-6 /us and below
+/// the slowest relaxation measured (probe + tweezer, 5.6e-7 /us).
 pub const SLOW_FLOOR:f64=1e-7;
+/// The ladder's top, LADDER_TOP / t1. Measured: three lasers at 20 us
+/// stalled at 3.8-5.8e-3 over 48 solves with 1 / t1, reached 1.9e-3 at 24
+/// solves with 10 / t1 (half the inner steps per solve); 30 / t1 gave the
+/// same errors on five lasers at 10 us.
 const LADDER_TOP:f64=10.;
+/// A deliberate margin: a dressed mode carrying less than a tenth of the
+/// tolerance of x0's population weight gets no complex pole.
 const COMPLEX_WEIGHT:f64=0.1;
 
-/// One solve of the space.
 #[derive(Clone,Debug)]
-/// One solve: its pole, inner steps, true relative residual, directions
+/// One solve of the space: its pole, inner steps, true relative residual, directions
 /// added, time (ms) and lattice block operations (operator and
 /// preconditioner applications per block).
 pub struct Column{pub pole:Pole,pub steps:usize,pub residual:f64,pub added:usize,pub milliseconds:f64,pub blocks:usize}

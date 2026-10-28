@@ -1,6 +1,5 @@
-//! The error estimate of the unified pipeline (R2, unified/R2-estimate.md
-//! sections 10-11 and 14.6): one error equation for every output f(A) x0 of
-//! the reduced model, with three sources.
+//! The error estimate of the unified pipeline: one error equation for every
+//! output f(A) x0 of the reduced model, with three sources.
 //!
 //! Error equation (exact): with u(t) the reduced model's trajectory, the
 //! error of x(t) ~ W u(t) obeys E' = A' E + (A' W - W G) u(t), E(0) = 0, on
@@ -34,9 +33,9 @@
 //!   reduced model); before that the slow modes' far sources have not grown
 //!   and the two large terms of the exact form cancel badly: every Ritz mode
 //!   goes through the SW part (always taking the slow part: per-time ratio
-//!   0.03, R2 14.1) but the kernel modes, which always take it. A horizon
+//!   0.03) but the kernel modes, which always take it. A horizon
 //!   always takes the slow part for the slow modes and the fast part for the
-//!   others (R2 14.1's complete form): the fast modes' residuals reach the
+//!   others (the complete form): the fast modes' residuals reach the
 //!   slow classes of the frame's block, which carry them to T. Without the
 //!   fast part a slow mode the space lacks was invisible: the default scene
 //!   (probe + tweezer) at T = 100 ms was off by 7.8e-3 with a bound of
@@ -64,8 +63,8 @@ pub use propagate::{Readout,RitzSources};
 pub use slow::{SlowPool,SlowSolution};
 
 /// Kernel support: the first-order entry floor and the horizon floor on an
-/// entry's second-order rate times the longest output time. R2: 5e-3 keeps
-/// 0.3% of the beat kernel's entries and reproduces the full kernels for
+/// entry's second-order rate times the longest output time. Measured: 5e-3
+/// keeps 0.3% of the beat kernel's entries and reproduces the full kernels for
 /// the estimate (5e-2 does not); the reduced model's metric (`frame`) needs
 /// more: five lasers + tweezer at 20 us grew 2-19 pseudo-modes from the
 /// 12th solve at 5e-3 (accepted at 40 solves), none at 1e-3 (0.6-2% of the
@@ -73,9 +72,13 @@ pub use slow::{SlowPool,SlowSolution};
 pub const KERNEL_ENTRY:f64=1e-3;
 pub const KERNEL_HORIZON_RATE:f64=1e-2;
 /// Near-resonant entries above this stay couplings: the first-order
-/// kernel is no small parameter there (N1).
+/// kernel is no small parameter there. Derived: |X~| = 1 is where the
+/// expansion stops being small (measured without the trap: the 1675 rad/us
+/// step's kernel has 212 entries above 1, the largest 24, near an optical
+/// resonance).
 pub const KERNEL_CAP:f64=1.;
-/// A mode decays when |Re theta| is above this (1/us).
+/// A mode decays when |Re theta| is above this (1/us). Derived: a slower
+/// mode relaxes over more than 1e4 s, 1e4 times the 1 s horizon.
 const DECAYING:f64=1e-10;
 /// A Ritz value below this is the kernel (theta = 0 exactly in the outputs).
 const KERNEL:f64=1e-12;
@@ -83,7 +86,9 @@ const KERNEL:f64=1e-12;
 /// this fraction of |A| |W b| (|A| the largest image of a basis column) is
 /// invariant to roundoff: its error is zero. Every further conserved
 /// quantity of a drive-free lattice is such a mode, and the bordered system
-/// (one trace row) is singular on it.
+/// (one trace row) is singular on it. A deliberate margin of about four
+/// orders over double-precision roundoff; measured on the drive-free model:
+/// solving that mode gave a steady estimate of 1.4e7, skipping it 6e-13.
 const INVARIANT:f64=1e-12;
 
 /// The longest output time of a request.

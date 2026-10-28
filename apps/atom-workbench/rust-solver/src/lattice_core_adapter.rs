@@ -2,8 +2,9 @@
 //! every rb87-full/2 request. The TypeScript model is the only owner of
 //! atomic physics; this adapter borrows its H/C, exact phase coordinates and
 //! state metadata, and serves the finite trajectory with the t -> infinity
-//! mean or the mean at the horizon `meanHorizonUs`: every output from one
-//! run of the pipeline (`lattice::pipeline`). The population tolerance is
+//! mean or the mean at the horizon `meanHorizonUs`: the mean from a run of
+//! the pipeline (`lattice::pipeline`) for the mean alone, the trajectory
+//! from a run for the grid alone (see the result contract). The population tolerance is
 //! the fixed `ledger::POPULATION_TOLERANCE`; a request may only restate it.
 //!
 //! # Result contract
@@ -13,9 +14,10 @@
 //! stops improving, or when its budget is spent, and returns its best
 //! checkpoint: a computed result is never withheld. The mean of every
 //! request is the run of the mean alone (the same for a full request and a
-//! mean-only one); a full request then runs its trajectory, whose space
-//! spans the grid's times only. Every checkpoint of the request's own run
-//! is streamed first (`progress`: true) in the same shape.
+//! mean-only one); a full request runs it on its own thread beside the run
+//! of its trajectory, whose space spans the grid's times only. Every
+//! checkpoint of the request's own run (a full request's trajectory, once
+//! its mean is there) is streamed first (`progress`: true) in the same shape.
 //! - `states` (32 ids), `timesUs`, `populations` (one row per time). A mean
 //!   result has the single t = 0 row, the initial populations; a finite result
 //!   has >= 2 projected rows and `populationAccuracy`: `status`
@@ -332,7 +334,7 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
 }
 
 /// A request through the lattice core: the mean alone (steadyOnly), or the
-/// mean and then the trajectory; every checkpoint of the request's own run
+/// mean on its own thread beside the trajectory; every checkpoint of the request's own run
 /// (the mean's for a mean alone, the trajectory's with the mean for a full
 /// request) is published as it is made, the best one returned.
 pub fn solve(model:&Model,options:&Options,publish:&mut dyn FnMut(&Value))->Result<Value,String>{

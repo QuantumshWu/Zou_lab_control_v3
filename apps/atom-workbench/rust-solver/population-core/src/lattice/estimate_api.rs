@@ -29,7 +29,7 @@ use super::*;
 use super::ledger::RemainderLedger;
 use super::frame::SwFrame;
 
-/// An output's bound is ACCEPTANCE_FACTOR x its estimated error (R2: the
+/// An output's bound is ACCEPTANCE_FACTOR x its estimated error (measured: the
 /// smallest measured ratio of the time-maximum estimate to the actual error
 /// is 0.93); a checkpoint is accepted when every bound is within
 /// POPULATION_TOLERANCE.

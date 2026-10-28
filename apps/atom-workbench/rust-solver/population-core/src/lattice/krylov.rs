@@ -1,8 +1,7 @@
 //! GMRES on the lattice systems: the shifted systems (A - sigma) w = b of
 //! the rational Krylov columns (sigma real or complex), the steady trace-row
 //! system M x = f with M = A + u v^T (u = I/n on the centre, v its trace),
-//! on a whole lattice (`System`) or on the explicit charges with the ring
-//! eliminated (`ring`): anything that implements `LinearSystem`.
+//! on the whole lattice P u Q (`System`, the one `LinearSystem`).
 //!
 //! Real coordinates: the fields are Hermitian-symmetric (x_-q = x_q^dagger),
 //! a real vector space that the operators and preconditioners preserve, with
@@ -33,6 +32,17 @@ use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// Blocks per reduction chunk: fixed, so sums do not depend on threads.
 const VECTOR_CHUNK:usize=16;
+/// A candidate whose part outside the span is at most this share of its
+/// squared norm is reorthogonalized explicitly. Derived: above it alpha^2 =
+/// uu - inside loses at most a factor 4 of its accuracy to cancellation.
+const PYTHAGORAS_SHARE:f64=0.25;
+/// The recursive relative residual below this is roundoff: a deliberate
+/// margin of about 4.5x the double-precision unit roundoff (2.2e-16).
+const ROUNDOFF_RESIDUAL:f64=1e-15;
+/// A cycle that stopped and reduced the true residual by less than this
+/// factor marks its floor: a deliberate margin, one that does not halve it
+/// gains nothing from restarting.
+const STALL_FACTOR:f64=0.5;
 
 #[derive(Clone,Debug)]
 pub struct KrylovOptions{
@@ -317,7 +327,7 @@ pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],x0:Option<Vec<C>>,optio
             // candidate was mostly inside the span (then explicitly).
             let vectors=system.vectors();
             let(mut a,projections,mut uu,mut uw)=vectors.fused_dots(&refs,u,&w);
-            let inside=a.iter().map(|v|v*v).sum::<f64>();let explicit=!(uu-inside>0.25*uu);
+            let inside=a.iter().map(|v|v*v).sum::<f64>();let explicit=!(uu-inside>PYTHAGORAS_SHARE*uu);
             if explicit{
                 vectors.subtract(&refs,&a,u)?;let again=vectors.dots(&refs,u);vectors.subtract(&refs,&again,u)?;
                 for(x,y)in a.iter_mut().zip(again){*x+=y;}uu=vectors.dot(u,u);uw=vectors.dot(u,&w);
@@ -347,7 +357,7 @@ pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],x0:Option<Vec<C>>,optio
             let residual=(s*g[j]).abs()/bnorm;
             if residual<=options.tolerance{stopped=Some("residual");}
             else if hn==0.{stopped=Some("exact");}
-            else if residual<=1e-15{stopped=Some("residual-at-roundoff");}
+            else if residual<=ROUNDOFF_RESIDUAL{stopped=Some("residual-at-roundoff");}
             let last=stopped.is_some()||steps>=options.maximum_steps||j+1==restart;
             if !last{basis.push(w.clone());provisional=Some(h);continue;}
             // The cycle ends: reorthogonalize the image once more, close the
@@ -376,7 +386,7 @@ pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],x0:Option<Vec<C>>,optio
         if !true_residual.is_finite(){return Err("Lattice GMRES iterate is not finite".into());}
         if true_residual<=options.tolerance{return Ok(Krylov{x,steps,restarts,stop:stopped.unwrap_or("residual"),residual:true_residual});}
         // Restarting no longer reduces the true residual: its floor.
-        if stopped.is_some()&&true_residual>0.5*last_true{return Ok(Krylov{x,steps,restarts,stop:"true-residual-floor",residual:true_residual});}
+        if stopped.is_some()&&true_residual>STALL_FACTOR*last_true{return Ok(Krylov{x,steps,restarts,stop:"true-residual-floor",residual:true_residual});}
         if steps>=options.maximum_steps{return Ok(Krylov{x,steps,restarts,stop:"maximum-steps",residual:true_residual});}
         last_true=true_residual;restarts+=1;
     }

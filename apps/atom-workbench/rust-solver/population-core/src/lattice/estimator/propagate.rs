@@ -34,6 +34,10 @@ pub struct RitzSources<'a>{pub vectors:&'a[C],pub values:&'a[C],pub coefficients
 struct ModePart{particular:Vec<(usize,Vec<C>)>,homogeneous:Vec<(usize,Vec<C>)>,resonant:Vec<(usize,Vec<C>,C)>}
 
 const RESONANT:f64=1e-9;
+/// The centre's eigenvalue of least modulus below this (1/us) is its trace
+/// mode, zeta = 0 exactly (the block annihilates the trace): a deliberate
+/// margin over the eigensystem's error on that value.
+const TRACE_MODE:f64=1e-6;
 
 
 impl ErrorLattice<'_>{
@@ -80,7 +84,7 @@ impl ErrorLattice<'_>{
             let zeta:Vec<C>=values.iter().map(|z|C{re:z.re.min(0.),im:z.im-self.nu[a]}).collect();
             if a==self.centre{
                 let j0=(0..d).min_by(|&x,&y|magnitude(zeta[x]).total_cmp(&magnitude(zeta[y]))).unwrap();
-                if magnitude(zeta[j0])<1e-6{for m in 0..r{beta[j0+d*m]=ZERO;}}
+                if magnitude(zeta[j0])<TRACE_MODE{for m in 0..r{beta[j0+d*m]=ZERO;}}
             }
             let mut gamma=vec![ZERO;d];let mut resonant=Vec::new();
             for m in 0..r{for j in 0..d{

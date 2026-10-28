@@ -2,7 +2,7 @@
 //! Schrieffer-Wolff blocks of the fast Ritz modes near the centre, and the
 //! omitted ring R = ring(P u Q) for the slow modes' sources.
 //!
-//! Fast part (R2 section 11.2): only the centre, its one-step neighbours and
+//! Fast part: only the centre, its one-step neighbours and
 //! the explicit set P (the near modes) get class coordinates; their sources are transformed by
 //! I - S with the first-order transfer from every lattice neighbour (whose
 //! eigen-coordinates of L0' are therefore read), and their errors are read
@@ -44,7 +44,9 @@ use crate::parallel::Execution;
 /// frequency term i nu_r K^(1) (left out of the eigenbasis), and their
 /// relative residual target: the slaved field enters the sources linearly,
 /// so a few digits beyond the estimate's own are enough (the term is about
-/// 1e-4 of the block, one refinement reaches it).
+/// 1e-4 of the block, one refinement reaches it). RING_REFINEMENTS is a cap,
+/// not a working count: it bounds the passes should the term be a large
+/// share of a block, where each pass gains less.
 const RING_REFINEMENTS:usize=12;
 const RING_RESIDUAL:f64=1e-8;
 /// Blocks per task of the coordinate changes (E^-1 and V^-1 streamed once
@@ -152,8 +154,8 @@ impl<'p> ErrorLattice<'p>{
     /// The frame's kernels.
     pub fn kernels(&self)->Result<&'p SwKernels,String>{self.frame.kernels()}
     /// The exact eigenbasis of L0' (the frame's; the fast part's
-    /// coordinates), built on first use (a request that propagates nothing
-    /// reads it not).
+    /// coordinates; the ring's block solves): request-level, built by the
+    /// pipeline for every request (`pipeline::solve`).
     pub fn basis(&self)->Result<&'p BlockEigenbasis,String>{self.prepared.eigenbasis()}
     /// The flip partner of each eigen-coordinate (`BlockEigenbasis::partner`).
     fn partner(&self)->Result<&[usize],String>{

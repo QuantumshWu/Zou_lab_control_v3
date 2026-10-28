@@ -1,4 +1,4 @@
-//! The slow Ritz modes, exact (R2 section 11.2).
+//! The slow Ritz modes, exact.
 //!
 //! For a Ritz mode k with |theta_k| < SLOW (the kernel included) the error
 //! its source F_k drives is, exactly,
@@ -12,13 +12,11 @@
 //! The space's part of the source is solved exactly away from the kernel:
 //! (theta - A)^-1 of (A - theta) W b is -W b (`mode`), and only the ring's
 //! feedback g_k needs a solve. At the kernel the whole (small) source is
-//! solved. (R2 kept W in the pool, where the
-//! least-squares problem found -W b itself; a pool of seeds and
-//! augmentations alone failed there on two of sixteen solves of the whole
-//! source. For g_k alone W adds little: as directions it saved 4 of 44
-//! steps at the first estimate of three and four lasers at 10 ms, for
-//! 250-940 GEMV of products with Q. The basis columns now enter only
-//! through W^T U.)
+//! solved. Why the closed form: a pool of seeds and augmentations alone
+//! failed on two of sixteen solves of the whole source. Why W is not in the
+//! pool: for g_k alone it adds little (as directions it saved 4 of 44 steps
+//! at the first estimate of three and four lasers at 10 ms, for 250-940
+//! GEMV of products with Q); the basis columns enter only through W^T U.
 //!
 //! One shared pool answers every shift: the trace-row vector u, the seed
 //! directions (the inner directions of the pipeline's own steady solve,
@@ -57,9 +55,12 @@ use super::lattice::{ErrorLattice,split};
 use super::propagate::Readout;
 use crate::parallel::Execution;
 
-/// Ritz modes with |theta| below this (1/us) are answered exactly.
+/// Ritz modes with |theta| below this (1/us) are answered exactly: a
+/// deliberate margin over the research cases' slowest relaxation rates
+/// (2e-3 to 8e-3 /us on three lasers, 3.4e-2 on four), whose far sources'
+/// transport the SW part cannot follow (it is no small parameter there).
 pub const SLOW:f64=0.05;
-/// GCRO stops when the residual is below RESIDUAL |F| (R2 section 12).
+/// GCRO stops when the residual is below RESIDUAL |F|.
 /// With the deflation, measured against solves to 1e-7 on two to five lasers
 /// at 10 ms (first estimates): within 1.2% (3e-5: 2.7%; 1e-4: 5.4% there, but
 /// 42% at a later checkpoint of four lasers; 1e-3: 8%). The residual bounds
@@ -87,6 +88,10 @@ const CHOLESKY_DEPENDENT:f64=1e-7;
 /// A column of the small least-squares problem below this fraction of its
 /// size outside the earlier ones is left out.
 const SMALL_DEPENDENT:f64=1e-12;
+/// A real or imaginary part of the residual field below this fraction of
+/// the residual's norm adds no augmentation direction: a deliberate margin,
+/// the part left is at most a thousandth of the residual.
+const AUGMENT_PART:f64=1e-3;
 
 /// Hermitian-symmetric fields as real vectors: the canonical modes only
 /// (the others are their mirrors' adjoints), real and imaginary parts, a
@@ -520,7 +525,7 @@ impl SlowPool{
             let step=Instant::now();
             let mut new=Vec::new();
             for part in r.chunks_exact(length){
-                let size=dot(part,part).sqrt();if !(size>1e-3*rn){continue;}
+                let size=dot(part,part).sqrt();if !(size>AUGMENT_PART*rn){continue;}
                 let field:Vec<C>=self.packing.unpack(part).iter().map(|v|C{re:v.re/size,im:v.im/size}).collect();
                 let mut z=vec![ZERO;field.len()];steady.precondition(&field,&mut z)?;self.work.preconditions+=1;
                 let az=self.apply(steady,&z)?;new.push((z,az));
@@ -602,7 +607,7 @@ impl SlowPool{
     /// (r) the outputs use and its kernel modes `kernel`. A kernel mode's Y
     /// (the steady error) is trace free: the true e^{tA} Y decays, so its
     /// projection on the space is propagated without its kernel coordinates
-    /// (which the reduced model would keep forever; R2 14.4: early
+    /// (which the reduced model would keep forever; measured: early
     /// checkpoints of three and four lasers 0.88 and 2.3 of the actual error
     /// without, 1.00-1.01 with).
     #[allow(clippy::too_many_arguments)]

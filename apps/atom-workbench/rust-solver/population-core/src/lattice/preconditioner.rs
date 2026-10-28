@@ -26,9 +26,12 @@ use super::operator::LatticeOperator;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// Centre denominators below this fraction of the frame scale are at
-/// roundoff; they are moved to -MOVED_FRACTION times the largest frame
-/// damping and corrected exactly.
+/// roundoff (a deliberate margin of about 500x over double precision);
+/// they are moved to -MOVED_FRACTION times the largest frame damping and
+/// corrected exactly.
 const TINY_DENOMINATOR:f64=1e-13;
+/// A deliberate margin: ten orders above TINY_DENOMINATOR; the exact
+/// rank-one correction (Woodbury) removes the move up to roundoff.
 const MOVED_FRACTION:f64=1e-3;
 
 /// The shift of a system: the steady trace row (M = A + u v^T), A - sigma

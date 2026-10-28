@@ -1,6 +1,6 @@
 //! The reduced model of the space and every output from it.
 //!
-//! The projection (N1, round four): a Galerkin model in the inner product
+//! The projection: a Galerkin model in the inner product
 //! Re <x, M y> of the Schrieffer-Wolff / Floquet frame's metric
 //! M = T^H T (`frame::SwMetric`): T = V^-1 (I - S~) E^-1 removes the
 //! first-order couplings between the modes and leaves the dissipative
@@ -8,10 +8,10 @@
 //! at second order (no strict guarantee: the provable bound is the
 //! Hilbert-Schmidt one, Re theta <= Gamma/2). One model for every output
 //! that propagates (the trajectory, the horizons); the Euclidean Galerkin
-//! model (M = I) of N1's round five grew spurious near-zero slow pairs in
-//! the Rust product (`frame`). A request that propagates nothing (the
-//! steady state alone) takes M = I: the kernel does not depend on the
-//! metric (the steady column is in the space). Append-only: per basis
+//! model (M = I) grew spurious near-zero slow pairs there (`frame`). A
+//! request that propagates nothing (the steady state alone) takes M = I as
+//! a speed case: it skips about 1 s of frame build, and its kernel does not
+//! depend on the metric (the steady column is in the space). Append-only: per basis
 //! column w_j only M w_j is kept (on the canonical modes), and the Gram
 //! matrices K = Re W^H M W and H = Re (M W)^H A W grow by one column (and
 //! row) each; G = K^-1 H in the coordinates of W (the basis is
@@ -42,7 +42,7 @@
 //! residuals against the images and the frame's classes) and the conserved
 //! count.
 //!
-//! The error transform (R1) orders the poles: the Laplace transform of the
+//! The error transform orders the poles: the Laplace transform of the
 //! population error with the residual propagated through the dressed blocks,
 //! p_err(xi) = sum_q W_d (xi - Lambda)^-1 Z_q (xi - i nu_q - Theta)^-1 1,
 //! Z_q = W^-1 (R S diag a)_q; sigma |p_err(sigma + i omega)| is the mean
@@ -76,17 +76,23 @@ const TRACE_CORRECTION:f64=3e-2;
 const TRACE_ROUNDOFF:f64=1e-14;
 /// |theta| below this (1/us) is a conserved quantity.
 pub const KERNEL:f64=1e-9;
-/// Growth (e^{Re theta T} - 1) x amplitude below this is clipped.
+/// Growth (e^{Re theta T} - 1) x amplitude below this is clipped (not
+/// counted as growing): a deliberate margin, 2e-4 of the tolerance.
 const GROWTH_NEGLIGIBLE:f64=1e-6;
 /// Amplitude (times the tolerance) a growing mode may have to be projected
-/// out.
+/// out (its amplitude is charged to every output). Measured: projecting
+/// regardless of amplitude removed a three-laser slow mode of amplitude
+/// 8.9e-2 (trajectory off by 9e-2); a tenth of the tolerance is a margin.
 const GROWTH_BUDGET:f64=0.1;
 /// A slow Ritz pair is resolved when its residual |A W y - theta W y| / |W y|
 /// is below this share of its rate (and no slower class is missing,
-/// `SlowRate`).
+/// `SlowRate`): a deliberate margin, the relaxation time within about 10%.
 pub const SLOW_ACCURACY:f64=0.1;
 /// Residual components of the error transform: at most TRANSFORM_RANK,
-/// down to TRANSFORM_COMPONENT of the largest singular value.
+/// down to TRANSFORM_COMPONENT of the largest singular value. Margins: the
+/// residual's rank in exact arithmetic is at most 2 + 2 per translation pair
+/// (14 for six pairs), below TRANSFORM_RANK; the transform only ranks the
+/// poles, so components below 1e-3 of the largest are left out.
 const TRANSFORM_RANK:usize=24;
 const TRANSFORM_COMPONENT:f64=1e-3;
 
@@ -308,7 +314,7 @@ impl Model{
     pub fn horizon(&self,projection:&Projection,t:f64)->Vec<f64>{self.populations(projection,&self.state(t),t,true)}
     pub fn steady_populations(&self,projection:&Projection)->Vec<f64>{self.populations(projection,&self.steady,0.,true)}
     pub fn conserved(&self)->usize{self.kernel.iter().filter(|&&b|b).count().max(1)}
-    /// The slowest relaxation's candidates (N1 round five): the decaying
+    /// The slowest relaxation's candidates: the decaying
     /// Ritz values outside the kernel (rate at least KERNEL: slower ones are
     /// undamped precession; growing ones are projected out or clipped) of
     /// population weight (`amplitudes`) at least `weight`, one of each
