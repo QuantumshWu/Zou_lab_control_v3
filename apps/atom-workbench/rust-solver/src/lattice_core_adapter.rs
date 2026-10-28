@@ -25,7 +25,7 @@
 //!   result has the single t = 0 row, the initial populations; a finite result
 //!   has >= 2 projected rows and `populationAccuracy`: `status`
 //!   (`estimated-converged` when the run was accepted: every sample within
-//!   the tolerance and every slow class it needs resolved; else
+//!   the tolerance; else
 //!   `estimated-partial` with its `reason`), `sampleErrors` (per sample: the
 //!   acceptance factor times the estimate, plus the projection's change; an
 //!   absolute population error; the estimate's sources are the Krylov
@@ -86,7 +86,7 @@ const DISCARDED_COHERENCE:f64=1e-8;
 /// error of 1 bounds nothing): it is reported not converged, unshown.
 const UNINFORMATIVE_BOUND:f64=1.;
 /// The sentence added to a mean's reason when its run was not accepted.
-const OUTSIDE:&str=" Not converged: the run was not accepted (its error bound, asymptoticEstimatedError, is above the tolerance, or a slow class it needs is not resolved), so the populations are an estimate.";
+const OUTSIDE:&str=" Not converged: its error bound (asymptoticEstimatedError) is above the tolerance, so the populations are an estimate.";
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
 /// Stack of the mean's thread (LAPACK on it).
 const MEAN_STACK:usize=1<<26;
@@ -320,8 +320,8 @@ fn mean_at(model:&Model,request:&Prepared,answer:&Answer,horizons:&[f64],horizon
     let populations=diagonal(&density);
     let positivity=(-prepared.lapack.hermitian_eigen(&density,n)?.0[0]).max(0.);
     let trace_error=(populations.iter().sum::<f64>()-1.).abs();
-    // Converged: this output accepted (its bound within the tolerance and
-    // every slow class it needs resolved) and the projected mean within it.
+    // Converged: this output accepted (its bound within the tolerance) and
+    // the projected mean within it.
     let within=accepted&&estimated<=POPULATION_TOLERANCE;
     // At a horizon, populations still relaxing (the horizon's own reduced
     // model: its modes alive at T) by more than RELAXING_SHARE of the
@@ -393,8 +393,7 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
             "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2],"floquetKernels":prepared.timing[3]}}});
     if let Some((answer,solution))=trajectory{
         let estimated=answer.sample_errors.iter().fold(0_f64,|a,&b|a.max(b));
-        // The run's acceptance, not the bound alone: a slow class the
-        // estimate cannot see may still be missing.
+        // The run's acceptance: every sample within the tolerance.
         let converged=answer.accepted;
         result["populationAccuracy"]=json!({"status":if converged{"estimated-converged"}else{"estimated-partial"},"requestedTolerance":POPULATION_TOLERANCE,
             "sampleErrors":answer.sample_errors,"estimatedMaximumError":estimated,"projectionCharge":answer.projection,
