@@ -291,6 +291,10 @@ button.legend-item.selected { background: var(--selected); border-color: var(--s
 /* The actual direction: θ and φ in fixed slots, at a field's text inset. */
 .direction-reading { display: flex; align-items: center; gap: var(--section-gap); min-height: var(--control); padding: 0 0 var(--cap-lift) var(--field-text-inset); font-variant-numeric: tabular-nums; }
 .direction-angle { display: inline-flex; gap: var(--row-gap); }
+/* A number with a unit picker takes the room the picker leaves, up to the number cap: beside a
+ * kW/cm²-wide picker a computed intensity or an output waist still shows its digits. */
+.inspector-panel .field-control.capped:has(> select.unit-picker) > .spin { flex: 1 1 auto; }
+.inspector-panel .field-control.capped:has(> select.unit-picker)::after { content: none; }
 .field-control > .unit { flex: none; width: calc(var(--combo-chrome) + 3em); min-width: calc(var(--combo-chrome) + 3em); }
 .field-control > .unit { padding-left: var(--field-text-inset); color: var(--muted-ink); white-space: nowrap; }
 .field-control > .segmented { min-width: 0; }

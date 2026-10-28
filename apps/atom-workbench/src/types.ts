@@ -9,7 +9,7 @@ export type FrequencyBaseSpec={kind:'absolute'}|({kind:'transition'}&ZeroFieldTr
 /** The one form of a defined frequency: a base and the offset from it (MHz, canonical), or
  * a vacuum wavelength exactly as written. */
 export type FrequencyExpr={base:FrequencyBaseSpec;offsetMHz:number}|{wavelengthNm:number};
-/** The unit a definition's value is read in (a wavelength unit only for a wavelength). */
+/** The unit a definition's value is written in (a wavelength unit only for a wavelength). */
 export type FrequencyDisplayUnit=DetuningUnit|'nm'|'μm';
 /** A frequency with no intensity, polarization or direction ("冷却光锁频点"): it can be
  * selected (the chart shows detunings from it) and be a base of other frequencies. */
@@ -66,12 +66,17 @@ export interface Laser {
   wavelengthNm?: number;
   detuningUnit?: DetuningUnit;
   frequencyAnchor?: LaserFrequencyAnchor;
-  intensityMode?: 'intensity' | 'power';
+  /** How the local intensity is given (laser-intensity.ts): directly, by power and waist, or by
+   * power and the numerical aperture the beam fills (its waist then follows from the wavelength). */
+  intensityMode?: IntensityMode;
   intensityAnchor?: LaserIntensityAnchor;
   /** Gaussian beam power and 1/e² intensity radius at the atom's axial plane.
    * Power mode uses the on-axis intensity 2 P / (pi w²). */
   powerMW?: number; waistUm?: number;
-  /** The units power, waist and local intensity are read in: display only (laser-intensity.ts). */
+  /** NA mode: the numerical aperture the beam fills, 0 < NA ≤ 1 (the atoms are in vacuum). */
+  numericalAperture?: number;
+  /** The units power, waist and local intensity are written or read in (laser-intensity.ts):
+   * an input's number keeps its digits when its unit changes; a computed one converts. */
   powerUnit?: PowerUnit; waistUnit?: WaistUnit; intensityUnit?: IntensityUnit;
   /** Propagation direction k; the polarization angle ψ is measured from the x of its frame. */
   direction: Direction; polarizationAngleDeg: number;
@@ -95,6 +100,8 @@ export interface ReferenceLevel {
   id: string; name: string;
   /** Annotation energy = anchor physical state's energy + offsetMHz. Not a dynamical state. */
   anchorId: string; offsetMHz: number;
+  /** The unit the operator writes the offset in (its digits stay when it changes). */
+  offsetUnit?: DetuningUnit;
   /** Follow the instantaneous anchor, or hold its zero-field energy fixed. */
   anchorMode?: 'follow' | 'zero-field';
   /** A linked photon (ui-design.md §1.6): E = E(anchor) ± hν(source) + h·offset, following
@@ -125,13 +132,18 @@ export interface DynamicsSettings {
   monitorMode?:'auto'|'manual';
   monitoredGroupIds?:string[];
   durationUs: number; samples: number;
-  /** Display unit only; physical duration and request identity remain in μs. */
+  /** The unit the operator writes the duration in: its digits stay when it changes, so a
+   * new unit is a new duration. The physical duration and request identity are in μs. */
   durationUnit?:DurationUnit;
+  /** The unit the operator writes a thermal initial state's temperature in (as durationUnit). */
+  temperatureUnit?:TemperatureUnit;
   /** @deprecated Legacy scene-file metadata only. No UI control, numerical
    * mode, cache key or native request uses this field. */
   quality?: 'preview' | 'verified';
 }
 export type DurationUnit='ns'|'μs'|'ms'|'s';
+export type TemperatureUnit='K'|'mK'|'μK';
+export type IntensityMode='intensity'|'power'|'na';
 export type PowerUnit='W'|'mW'|'μW'|'nW';
 export type WaistUnit='mm'|'μm'|'nm';
 export type IntensityUnit='kW/cm²'|'W/cm²'|'mW/cm²'|'μW/cm²';
