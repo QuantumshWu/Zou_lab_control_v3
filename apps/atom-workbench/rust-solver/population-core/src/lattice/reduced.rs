@@ -48,7 +48,7 @@
 //! Z_q = W^-1 (R S diag a)_q; sigma |p_err(sigma + i omega)| is the mean
 //! error near t = 1/sigma at frequency omega.
 use super::*;
-use super::eigenbasis::BlockEigenbasis;
+use super::eigenbasis::{BlockEigenbasis,conjugate_pairs};
 use super::frame::SwMetric;
 use super::krylov::Vectors;
 use super::operator::LatticeOperator;
@@ -76,6 +76,9 @@ const TRACE_CORRECTION:f64=3e-2;
 const TRACE_ROUNDOFF:f64=1e-14;
 /// |theta| below this (1/us) is a conserved quantity.
 pub const KERNEL:f64=1e-9;
+/// The largest exponent of a growth factor e^{theta T} (e^700 ~ 1e304,
+/// below the double range's 1.8e308: the factor stays finite).
+const EXPONENT_LIMIT:f64=700.;
 /// Growth (e^{Re theta T} - 1) x amplitude below this is clipped (not
 /// counted as growing): a deliberate margin, 2e-4 of the tolerance.
 const GROWTH_NEGLIGIBLE:f64=1e-6;
@@ -115,7 +118,7 @@ pub struct Projection{
     populations:Vec<Vec<C>>,traces:Vec<Vec<f64>>,
     /// K = Re W^H M W, H = Re (M W)^H A W, E = Re W^T A W and
     /// F = Re (AW)^T A W, row-major over the covered columns; whether
-    /// M = I (no metric: K = I, H = E).
+    /// M = I (no metric: G0 = E, K and H are not built).
     k:Vec<f64>,h:Vec<f64>,e:Vec<f64>,f:Vec<f64>,covered:usize,euclidean:bool,
     vectors:Vectors,
     pub milliseconds:f64,
@@ -123,12 +126,13 @@ pub struct Projection{
 /// Grows a row-major old x old matrix to new x new (zeros in the new part).
 fn grow(old_matrix:&[f64],old:usize,new:usize)->Vec<f64>{let mut g=vec![0.;new*new];for i in 0..old{for j in 0..old{g[i*new+j]=old_matrix[i*old+j];}}g}
 impl Projection{
-    pub fn new(op:&LatticeOperator<'_>)->Result<Self,String>{
+    /// `euclidean`: M = I (a request that propagates nothing).
+    pub fn new(op:&LatticeOperator<'_>,euclidean:bool)->Result<Self,String>{
         let n=op.n;let d=n*n;
         let canonical:Vec<(usize,f64,f64)>=(0..op.modes.len()).filter(|&q|op.canonical[q]).map(|q|(q,if op.mirror[q]==q{1.}else{2.},op.nu[q])).collect();
         let centre=canonical.iter().position(|c|c.0==op.centre).unwrap_or(0);
         let length=canonical.len()*d;
-        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],traces:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,euclidean:true,
+        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],traces:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,euclidean,
             vectors:Vectors::new(op,1)?,milliseconds:0.})
     }
     pub fn columns(&self)->usize{self.covered}
@@ -142,12 +146,12 @@ impl Projection{
                 for(c,&(q,_,_))in self.canonical.iter().enumerate(){for(x,y)in column[c*d..(c+1)*d].iter().zip(&field[q*d..(q+1)*d]){s+=x.re*y.re+x.im*y.im;}}s}).collect::<Vec<f64>>()});
         Ok(rows.concat())
     }
-    /// Takes the space's columns not yet covered; `metric` None: M = I (a
-    /// request that propagates nothing).
+    /// Takes the space's columns not yet covered; `metric` None exactly when
+    /// the projection is Euclidean.
     pub fn ingest(&mut self,metric:Option<&SwMetric<'_>>,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
         let clock=Instant::now();let(old,new)=(self.covered,basis.len());if new==old{return Ok(());}
         let(n,d,l)=(self.n,self.d,self.length);let width=new-old;
-        self.euclidean=metric.is_none();
+        if self.euclidean!=metric.is_none(){return Err("Galerkin projection: the metric differs from the projection's".into());}
         if let Some(metric)=metric{let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();self.metric.extend(metric.apply(&fresh)?);}
         for column in &basis[old..new]{
             let pops:Vec<C>=self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect();
@@ -167,13 +171,13 @@ impl Projection{
         let ec=self.vectors.gram(&all_basis,new_images)?;                 // E[:, old..new]
         let er=self.vectors.gram(&all_basis[old..],&all_images[..old])?;  // E[old..new, ..old]
         let fc=self.vectors.gram(&all_images,new_images)?;                // F[:, old..new]
-        let(mut k,mut h,mut e,mut f)=(grow(&self.k,old,new),grow(&self.h,old,new),grow(&self.e,old,new),grow(&self.f,old,new));
+        let(mut k,mut h)=if self.euclidean{(Vec::new(),Vec::new())}else{(grow(&self.k,old,new),grow(&self.h,old,new))};
+        let(mut e,mut f)=(grow(&self.e,old,new),grow(&self.f,old,new));
         for i in 0..new{for c in 0..width{let j=old+c;
             if !self.euclidean{k[i*new+j]=kb[i*width+c];k[j*new+i]=kb[i*width+c];h[i*new+j]=hc[c*new+i];}
             e[i*new+j]=ec[i*width+c];
             f[i*new+j]=fc[i*width+c];f[j*new+i]=fc[i*width+c];}}
         for c in 0..width{for j in 0..old{if !self.euclidean{h[(old+c)*new+j]=hr[j*width+c];}e[(old+c)*new+j]=er[c*old+j];}}
-        if self.euclidean{k=vec![0.;new*new];for i in 0..new{k[i*new+i]=1.;}h=e.clone();}
         self.k=k;self.h=h;self.e=e;self.f=f;self.covered=new;
         self.milliseconds+=clock.elapsed().as_secs_f64()*1e3;Ok(())
     }
@@ -181,18 +185,18 @@ impl Projection{
 
 /// The reduced model of one checkpoint.
 pub struct Model{
-    /// Reduced dimension (the basis' columns: W is orthonormal), G (r x r),
-    /// c0.
-    pub r:usize,pub g:Vec<f64>,pub c0:Vec<f64>,
+    /// Reduced dimension (the basis' columns: W is orthonormal), G (r x r).
+    pub r:usize,pub g:Vec<f64>,
     /// Ritz values, eigenvectors (r x r row-major, complex), coefficients,
-    /// and the values and coefficients the outputs use.
+    /// and the values and coefficients the outputs use; per mode the kernel
+    /// and a growing mode projected out (used theta = a = 0).
     pub theta:Vec<C>,pub vectors:Vec<C>,pub coefficients:Vec<C>,
-    pub used_theta:Vec<C>,pub used_coefficients:Vec<C>,pub kernel:Vec<bool>,
+    pub used_theta:Vec<C>,pub used_coefficients:Vec<C>,pub kernel:Vec<bool>,pub projected_out:Vec<bool>,
     /// Mode amplitudes (largest population contribution).
     pub amplitudes:Vec<f64>,
     pub growing:usize,pub projected:usize,pub clipped:usize,pub growth_charge:f64,
     /// The reduced steady state (kernel part of c0).
-    pub steady:Vec<f64>,pub simple_kernel:bool,
+    pub steady:Vec<f64>,
     /// Per canonical mode: populations of W (n x r, row-major complex).
     readout:Vec<Vec<C>>,
 }
@@ -204,7 +208,7 @@ impl Projection{
     pub fn model(&self,lapack:&Lapack,initial_norm:f64,longest:f64,tolerance:f64)->Result<Model,String>{
         let k=self.covered;let n=self.n;let r=k;
         // G0 = K^-1 H (K symmetric: its row-major form is its column-major one).
-        let g0=if self.euclidean{self.h.clone()}else{let(lu,pivots)=lapack.factor(&self.k,k)?;
+        let g0=if self.euclidean{self.e.clone()}else{let(lu,pivots)=lapack.factor(&self.k,k)?;
             transpose_rows(&lapack.solve_matrix_factored(&lu,&pivots,&transpose_rows(&self.h,k,k),k)?,k,k)};
         let mut c0=vec![0.;k];c0[0]=initial_norm;
         // Trace correction on the significant rows.
@@ -245,10 +249,11 @@ impl Projection{
         }
         // Ritz decomposition.
         let(re,im,ev)=lapack.eigen(&transpose_rows(&g,r,r),r)?;
-        let mut theta=vec![ZERO;r];let mut s=vec![ZERO;r*r];let mut pair=vec![0_u8;r];let mut j=0;
-        while j<r{if im[j]!=0.&&j+1<r{theta[j]=C{re:re[j],im:im[j]};theta[j+1]=C{re:re[j],im:-im[j]};pair[j]=1;pair[j+1]=2;
-                for i in 0..r{let(a,b)=(ev[i+r*j],ev[i+r*(j+1)]);s[i*r+j]=C{re:a,im:b};s[i*r+j+1]=C{re:a,im:-b};}j+=2;}
-            else{theta[j]=C{re:re[j],im:0.};for i in 0..r{s[i*r+j]=C{re:ev[i+r*j],im:0.};}j+=1;}}
+        let(pair,theta)=conjugate_pairs(&re,&im);let mut s=vec![ZERO;r*r];
+        for j in 0..r{match pair[j]{
+            1=>for i in 0..r{let(a,b)=(ev[i+r*j],ev[i+r*(j+1)]);s[i*r+j]=C{re:a,im:b};s[i*r+j+1]=C{re:a,im:-b};},
+            0=>for i in 0..r{s[i*r+j]=C{re:ev[i+r*j],im:0.};},
+            _=>{}}}
         let(lu,pivots)=lapack.factor(&ev,r)?;let y=lapack.solve_matrix_factored(&lu,&pivots,&c0,r)?;
         let mut a=vec![ZERO;r];let mut j=0;
         while j<r{if pair[j]==1{a[j]=C{re:0.5*y[j],im:-0.5*y[j+1]};a[j+1]=C{re:0.5*y[j],im:0.5*y[j+1]};j+=2;}else{a[j]=C{re:y[j],im:0.};j+=1;}}
@@ -262,14 +267,14 @@ impl Projection{
         let least=(0..r).min_by(|&p,&q|magnitude(theta[p]).total_cmp(&magnitude(theta[q]))).ok_or("Empty reduced model")?;
         let kernel:Vec<bool>=(0..r).map(|jj|jj==least||magnitude(theta[jj])<KERNEL).collect();
         let(mut used_theta,mut used_coefficients)=(theta.clone(),a.clone());
-        let(mut growing,mut projected,mut clipped,mut growth_charge)=(0,0,0,0.);
+        let(mut growing,mut projected,mut clipped,mut growth_charge)=(0,0,0,0.);let mut projected_out=vec![false;r];
         for jj in 0..r{
             if kernel[jj]{used_theta[jj]=ZERO;continue;}
             if !(theta[jj].re>0.){continue;}
-            let growth=((theta[jj].re*longest).min(700.).exp()-1.)*amplitudes[jj];
+            let growth=((theta[jj].re*longest).min(EXPONENT_LIMIT).exp()-1.)*amplitudes[jj];
             if growth<=GROWTH_NEGLIGIBLE{used_theta[jj].re=0.;continue;}
             growing+=1;
-            if amplitudes[jj]<=GROWTH_BUDGET*tolerance{used_theta[jj]=ZERO;used_coefficients[jj]=ZERO;projected+=1;growth_charge+=amplitudes[jj];}
+            if amplitudes[jj]<=GROWTH_BUDGET*tolerance{used_theta[jj]=ZERO;used_coefficients[jj]=ZERO;projected_out[jj]=true;projected+=1;growth_charge+=amplitudes[jj];}
             else{used_theta[jj].re=0.;clipped+=1;}
         }
         // The steady state.
@@ -283,8 +288,8 @@ impl Projection{
             (0..r).map(|i|(0..r).filter(|&jj|kernel[jj]).fold(0.,|acc,jj|acc+mul(s[i*r+jj],a[jj]).re)).collect()
         };
         if steady.iter().chain(&g).any(|v|!v.is_finite()){return Err("Nonfinite reduced model".into());}
-        Ok(Model{r,g,c0,theta,vectors:s,coefficients:a,used_theta,used_coefficients,kernel,amplitudes,
-            growing,projected,clipped,growth_charge,steady,simple_kernel,readout})
+        Ok(Model{r,g,theta,vectors:s,coefficients:a,used_theta,used_coefficients,kernel,projected_out,amplitudes,
+            growing,projected,clipped,growth_charge,steady,readout})
     }
 }
 

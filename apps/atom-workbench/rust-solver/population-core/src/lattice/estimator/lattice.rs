@@ -143,7 +143,8 @@ impl<'p> ErrorLattice<'p>{
             }
         }
         let count=near.len();
-        let canonical:Vec<bool>=(0..modes.len()).map(|q|modes[q]>=modes[mirror[q]]).collect();
+        // The operator's canonical members (P u Q comes first in it).
+        let canonical:Vec<bool>=outer.canonical[..modes.len()].to_vec();
         let near_canonical:Vec<usize>=(0..count).filter(|&slot|canonical[near[slot]]).collect();
         let outer_modes:Vec<usize>=frames.iter().copied().filter(|&q|!near.contains(&q)&&canonical[q]).collect();let outer_count=outer_modes.len();
         Ok(Self{prepared,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,frame,

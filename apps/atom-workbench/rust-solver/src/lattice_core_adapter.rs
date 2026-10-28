@@ -58,6 +58,14 @@ use atom_population_core::lattice::pipeline::{self,Answer,Checkpoint,Request,Sol
 
 const ENGINE:&str="rust-population-core-lattice";
 const METHOD:&str="Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically): one rational Krylov space from the initial state, every output read from one Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, its error estimated per output from the reduced model's residual, the omitted ring and the fold rests the lattice leaves out";
+/// A mean at a horizon is initial-state dependent while the population
+/// still relaxing at T exceeds this share of the tolerance (a twentieth: a
+/// deliberate margin below the tolerance the mean is bounded to).
+const RELAXING_SHARE:f64=0.05;
+/// A static model's mean is population-stationary rather than stationary
+/// when the optical coherence its background basis discards exceeds this (a
+/// deliberate margin over the eigensolver's roundoff).
+const DISCARDED_COHERENCE:f64=1e-8;
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
 /// Stack of the mean's thread (LAPACK on it).
 const MEAN_STACK:usize=1<<26;
@@ -197,7 +205,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
     let k=&prepared.floquet.diagnostics;
     let floquet=json!({"milliseconds":k.milliseconds,"iterations":k.iterations,"change":k.change,
         "pairs":k.pairs,"guarded":k.guarded,"smallParameter":k.small_parameter,"frameCondition":k.condition,
-        "support":k.support.iter().map(|(q,size)|json!({"charge":q,"kernel":size})).collect::<Vec<_>>(),"belowFloor":k.below,"precessingRate":k.precessing_rate});
+        "support":k.support.iter().map(|(q,size)|json!({"charge":q,"kernel":size})).collect::<Vec<_>>(),"belowFloor":k.below});
     let run=run.map(|s|{let e=&s.explicit;let w=&s.work;let t=&s.timing;let l=&s.ledger;
         json!({"explicit":e.sets.explicit,"ring":e.sets.ring,"gated":e.gated,"promoted":e.promoted,"covered":e.covered,"leak":e.leak,
             "ringInternalEdges":e.internal.len(),"explicitSetMs":e.milliseconds,"translations":s.translations,
@@ -209,8 +217,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
             "checkpoints":s.checkpoints.iter().map(|c|json!({"solves":c.solves,"columns":c.columns,"dimension":c.dimension,"accepted":c.accepted,"bound":c.largest,
                 "trajectory":c.estimate.trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"horizons":c.estimate.horizons,"steady":c.estimate.steady,
                 "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest.map(|s|s.rate),
-                "estimateMs":c.estimate.work.milliseconds,"estimateParts":c.estimate.work.parts_ms,"slowModes":c.estimate.work.slow_modes,"slowTrajectory":c.estimate.work.slow_trajectory,
-                "pairsMs":c.timing.pairs_ms,"observerMs":c.timing.observer_ms,"ms":c.milliseconds})).collect::<Vec<_>>(),
+                "estimateMs":c.estimate.work.milliseconds,"ms":c.milliseconds})).collect::<Vec<_>>(),
             "ledger":{"nuFreeze":l.nu_freeze,"thirdOrder":l.third_order,"farShell":l.far_shell,"tail":l.tail,"omittedCross":l.omitted_cross,
                 "nonStructural":l.non_structural,"droppedEntries":l.dropped_entries,"k1Rest":l.k1_rest,"unbuilt":l.unbuilt(),"fold":l.fold,"expansionParameter":l.expansion_parameter},
             "timingMs":{"eigenbasis":t.eigenbasis_ms,"explicitSet":t.explicit_set_ms,"setup":t.setup_ms,"estimatorBuild":t.estimator_build_ms,"outputs":t.outputs_ms,"frame":t.frame_ms.iter().sum::<f64>(),"frameParts":t.frame_ms,"frameWait":t.frame_wait_ms,"solves":t.solves_ms,"images":t.images_ms,"projection":t.projection_ms,
@@ -224,7 +231,6 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
         "fold":{"farSources":f.far_sources,"columns":f.columns,"restBound":f.rest_bound,"chargedTruncation":f.truncation,
             "series":f.series.iter().map(|(q,rho,order)|json!({"charge":q,"ratio":rho,"orders":order})).collect::<Vec<_>>(),"milliseconds":f.milliseconds,
             "phaseMs":{"columns":f.phase_ms[0],"storage":f.phase_ms[1]},"targets":targets},
-        "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2],"floquetKernels":prepared.timing[3]},
         "floquet":floquet,"eigenbasis":prepared.eigenbasis_built().map(|e|json!({"milliseconds":e.milliseconds,"clusters":e.clusters,"largestCluster":e.largest_cluster,"passes":e.passes,"condition":e.condition})),"run":run})
 }
 
@@ -256,16 +262,17 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
     let populations=diagonal(&density);
     let positivity=(-prepared.lapack.hermitian_eigen(&density,n)?.0[0]).max(0.);
     let trace_error=(populations.iter().sum::<f64>()-1.).abs();
-    // At a horizon, populations still relaxing by more than a twentieth of
-    // the tolerance (or several conserved quantities) keep the mean
-    // initial-state dependent.
-    let relaxing=horizon.map(|_|ledger::metric(&answer.horizons[0],&answer.steady,&request.groups));
-    let dependent=answer.conserved>1||relaxing.is_some_and(|r|r>0.05*POPULATION_TOLERANCE);
+    // At a horizon, populations still relaxing (the horizon's own reduced
+    // model: its modes alive at T; the steady state a horizon run never
+    // bounds) by more than RELAXING_SHARE of the tolerance, or several
+    // conserved quantities, keep the mean initial-state dependent.
+    let relaxing=horizon.map(|_|answer.horizon_relaxing[0]);
+    let dependent=answer.conserved>1||relaxing.is_some_and(|r|r>RELAXING_SHARE*POPULATION_TOLERANCE);
     let(status,reason)=match(model.drives.is_empty(),dependent){
         (false,true)=>("initial-dependent-time-average","Long-time phase average at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent."),
         (true,true)=>("initial-dependent","Lindblad mean of the specified initial density: slow modes still relaxing at the horizon (horizonUs), or conserved quantities, keep it initial-state dependent."),
         (false,false)=>("time-average","Converged long-time phase average of the full driven Lindblad equation (unique limit: only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time); populations are a time average, not a time-independent density."),
-        (true,false)if discarded>1e-8=>("population-stationary","Populations converge in the background basis; exported density is the laboratory-frame time average."),
+        (true,false)if discarded>DISCARDED_COHERENCE=>("population-stationary","Populations converge in the background basis; exported density is the laboratory-frame time average."),
         (true,false)=>("stationary","Unique full-density Lindblad stationary solution (only the trace is conserved; diagnostics.slowestRelaxationUs is the slowest relaxation time)."),
     };
     let fields=json!({"horizonUs":horizon,"asymptoticStatus":status,"asymptoticReason":reason,"asymptoticPopulations":populations,
@@ -276,16 +283,18 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
     let diagnostics=json!({"asymptoticMethod":METHOD,"meanDensityFrame":MEAN_FRAME,
         "uniquenessScope":if answer.conserved>1{"several conserved quantities: mean of the specified initial density"}else{"unique limit: every mode but the trace relaxes, however slowly (slowestRelaxationUs)"},
         "asymptoticTraceError":trace_error,"asymptoticPositivityError":positivity,"residual":answer.steady_residual,
-        "asymptoticAccuracy":{"requestedTolerance":POPULATION_TOLERANCE,"estimatedMaximumError":estimated,"acceptanceFactor":ACCEPTANCE_FACTOR,
+        "asymptoticAccuracy":{"requestedTolerance":POPULATION_TOLERANCE,"acceptanceFactor":ACCEPTANCE_FACTOR,
             "projectionCharge":projection,"metric":"max over states and requested F groups"},
-        "zeroModeCount":answer.conserved,"conservedQuantities":answer.conserved,
-        "slowestRatePerUs":resolved.map(|s|s.rate),"slowestRelaxationUs":resolved.map(|s|1./s.rate),
+        "conservedQuantities":answer.conserved,"slowestRelaxationUs":resolved.map(|s|1./s.rate),
         "slowestRelaxation":slow.map(|s|json!({"ratePerUs":s.rate,"residualPerUs":s.residual,"classesMatched":s.matched,"resolved":s.resolved(),
             "relaxationRangeUs":[1./(s.rate+s.residual),if s.matched==Some(true)&&s.rate>s.residual{Some(1./(s.rate-s.residual))}else{None}],
             "rule":"the slowest decaying Ritz pair of population weight at least 1% of the tolerance; resolved (slowestRelaxationUs) when its residual is within a tenth of its rate and every slower class of the initial state (the second-order block's eigenvalues) has a pair within 40%, else only the range: at least 1 / (rate + residual)"})),
         "discardedOpticalCoherence":discarded,"horizonRelaxingBound":relaxing});
     match(fields,diagnostics){(Value::Object(f),Value::Object(d))=>Ok((f,d)),_=>Err("Mean fields are not an object".into())}
 }
+
+/// The request's uniform grid (us).
+fn grid(options:&Options)->Vec<f64>{(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect()}
 
 /// The mean of a request as computed: its answer and run, or why nothing
 /// usable was computed.
@@ -299,7 +308,7 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
     let prepared=&request.lattice;
     let rows=match trajectory{Some((answer,_))=>answer.trajectory.clone(),None=>vec![request.initial.clone()]};
     let(row_trace,initial_error)=row_errors(&rows,&request.initial)?;
-    let times:Vec<f64>=if trajectory.is_some(){(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect()}else{vec![0.]};
+    let times:Vec<f64>=if trajectory.is_some(){grid(options)}else{vec![0.]};
     let solves=trajectory.map(|t|t.0.solves).or_else(||mean.as_ref().and_then(|m|m.as_ref().ok().map(|m|m.0.solves))).unwrap_or(0);
     let mut result=json!({"states":model.states,"timesUs":times,"populations":rows,"asymptoticStatus":"not-requested",
         "diagnostics":{"engine":ENGINE,"traceError":row_trace,"initialStateError":initial_error,
@@ -314,7 +323,7 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
         if !converged{result["populationAccuracy"]["reason"]=json!(solution.and_then(|s|s.reason.clone())
             .unwrap_or_else(||format!("Checkpoint at {} solves: the error bound is {estimated:.2e} against the tolerance {POPULATION_TOLERANCE:e}; the run continues",answer.solves)));}
         result["diagnostics"]["method"]=json!(METHOD);
-        if let Some(s)=solution{result["diagnostics"]["lattice"]=lattice_json(prepared,Some(s));if !s.converged{result["diagnostics"]["stopReason"]=json!(s.reason);}}
+        if let Some(s)=solution{result["diagnostics"]["lattice"]=lattice_json(prepared,Some(s));}
     }
     match mean{
         Some(Ok((answer,solution)))=>{
@@ -349,7 +358,7 @@ pub fn solve(model:&Model,options:&Options,publish:&mut dyn FnMut(&Value))->Resu
         if let Some(e)=failure{return Err(e);}
         return result(model,options,&request,None,Some(mean.as_ref().map(|s|(&s.answer,Some(s))).map_err(|e|e.clone())),true,started);
     }
-    let times:Vec<f64>=(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect();
+    let times=grid(options);
     // The mean runs on its own thread while the trajectory runs: a
     // trajectory checkpoint is published once the mean is there.
     let mean:std::sync::OnceLock<Result<Solution,String>>=std::sync::OnceLock::new();
@@ -487,7 +496,7 @@ mod tests{
                 "returnedErrTraj":returned.as_ref().map(|e|e.iter().fold(0_f64,|x,&y|x.max(y))),
                 "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"conserved":c.conserved,
                 "slowestRate":c.slowest.map(|s|s.rate),"slowestResidual":c.slowest.map(|s|s.residual),"slowestMatched":c.slowest.and_then(|s|s.matched),"ms":c.milliseconds});
-            let work=json!({"slowModes":c.estimate.work.slow_modes,"slowTrajectory":c.estimate.work.slow_trajectory,"lambdaSlow":c.estimate.work.lambda_slow,"estimateMs":c.estimate.work.milliseconds,"estimateParts":c.estimate.work.parts_ms,
+            let work=json!({"slowModes":c.estimate.work.slow_modes,"slowTrajectory":c.estimate.work.slow_trajectory,"lambdaSlow":c.estimate.work.lambda_slow,"estimateMs":c.estimate.work.milliseconds,
                 "operatorWork":c.inner.operator_work,"innerSteps":c.inner.steps,"innerMs":c.inner.milliseconds,"applyMs":c.inner.timing.apply_ms,"preconditionMs":c.inner.timing.precondition_ms,"orthogonalizeMs":c.inner.timing.orthogonalize_ms,"batchMs":c.inner.batch_ms,"blockOperations":c.inner.block_operations(),
                 "timingMs":{"explicitSet":c.timing.explicit_set_ms,"setup":c.timing.setup_ms,"frame":c.timing.frame_ms.iter().sum::<f64>(),"frameWait":c.timing.frame_wait_ms,"projection":c.timing.projection_ms,"model":c.timing.model_ms,"ordering":c.timing.ordering_ms,"estimate":c.timing.estimate_ms,"outputs":c.timing.outputs_ms},
                 "elapsedMs":started.elapsed().as_secs_f64()*1e3,"trajectoryNorm":c.trajectory.iter().map(|p|ledger::metric(p,&zero,&groups)).fold(0_f64,f64::max)});

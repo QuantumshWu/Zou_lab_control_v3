@@ -153,6 +153,11 @@ pub struct Answer{
     pub horizons:Vec<Vec<f64>>,pub steady:Vec<f64>,
     pub horizon_fields:Vec<Vec<C>>,pub steady_field:Vec<C>,
     pub horizon_errors:Vec<f64>,pub steady_error:Option<f64>,
+    /// Per horizon T, the population the reduced model still relaxes at T:
+    /// sum over its decaying modes (neither kernel nor projected) of their
+    /// largest population contribution at T, amplitude x e^{Re theta T} (an
+    /// upper bound on |p(T) - p(inf)| as the model holds it).
+    pub horizon_relaxing:Vec<f64>,
     /// |A x| / |x| of the steady field (rad/us).
     pub steady_residual:f64,
     pub estimate:ErrorEstimate,pub conserved:usize,pub slowest:Option<SlowRate>,
@@ -166,7 +171,7 @@ impl Answer{
 }
 
 #[derive(Clone,Debug,Default)]
-pub struct Timing{pub pairs_ms:f64,pub observer_ms:f64,pub eigenbasis_ms:f64,pub explicit_set_ms:f64,pub setup_ms:f64,pub estimator_build_ms:f64,pub outputs_ms:f64,pub frame_ms:[f64;3],pub frame_wait_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub projection_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
+pub struct Timing{pub eigenbasis_ms:f64,pub explicit_set_ms:f64,pub setup_ms:f64,pub estimator_build_ms:f64,pub outputs_ms:f64,pub frame_ms:[f64;3],pub frame_wait_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub projection_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
 
 pub struct Solution{
     /// The best checkpoint's outputs; `converged` when it was accepted, else
@@ -304,7 +309,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     space.solve(&mut lattice,Pole::Zero)?;
     let modes=lattice.modes.clone();
     let clock=Instant::now();
-    let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups},frame:&frame,ledger:&ledger,initial})?;
+    let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups},frame:&frame,ledger:&ledger})?;
     timing.estimator_build_ms=clock.elapsed().as_secs_f64()*1e3;
     // The ladder spans the grid's times when there is one (a horizon is
     // served by the steady column, the slow points and the slowest
@@ -321,7 +326,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     let clock=Instant::now();
     let metric=if propagates{Some(SwMetric::new(&frame,eigen,lattice.operator())?)}else{None};
     timing.frame_wait_ms=clock.elapsed().as_secs_f64()*1e3;
-    let mut galerkin=Projection::new(lattice.operator())?;
+    let mut galerkin=Projection::new(lattice.operator(),metric.is_none())?;
     let lapack=&prepared.lapack;let ops=super::krylov::Vectors::new(lattice.operator(),1)?;
     // A slow pair must be resolved when it contributes REQUIRED_CONTRIBUTION
     // x tolerance at a horizon.
@@ -358,18 +363,16 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
             let estimate_clock=Instant::now();
             let mut estimate=estimator.estimate(&ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
-                used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel},&mut lattice)?;
+                used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out},&mut lattice)?;
             timing.estimate_ms+=estimate_clock.elapsed().as_secs_f64()*1e3;
             // The growth charge on every output.
             for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
             // The slowest relaxation (the classes from the frame's block).
-            let pairs_clock=Instant::now();
             if classes.is_none()&&propagates{classes=Some(class_rates(&frame,eigen,lapack,initial,tolerance)?);}
             let rates:Option<Vec<f64>>=classes.as_ref().map(|c|c.iter().map(|x|x.0).collect());
             let pairs=slow_pairs(&model,&space,&ops,rates.as_deref(),tolerance)?;
             let unresolved:Vec<&SlowRate>=pairs.iter().filter(|(p,w)|!p.resolved()&&required(p,*w)).map(|(p,_)|p).collect();
             let missing=missing_classes(classes.as_deref().unwrap_or(&[]),&pairs,request.horizons,tolerance);
-            timing.pairs_ms+=pairs_clock.elapsed().as_secs_f64()*1e3;
             // The outputs with their bounds.
             let answer={
                 let outputs_clock=Instant::now();
@@ -385,7 +388,9 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
                 timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
                 let mut answer=Answer{solves:space.solves(),modes:modes.clone(),trajectory:projected,sample_errors,projection:changes.iter().fold(0.,|a:f64,&b|a.max(b)),
                     horizons:horizons.clone(),steady:steady.clone(),horizon_fields,steady_field,
-                    horizon_errors:estimate.horizons.iter().map(|e|ACCEPTANCE_FACTOR*e).collect(),steady_error:estimate.steady.map(|e|ACCEPTANCE_FACTOR*e),
+                    horizon_errors:estimate.horizons.iter().map(|e|ACCEPTANCE_FACTOR*e).collect(),
+                    horizon_relaxing:request.horizons.iter().map(|&t|(0..model.r).filter(|&j|!model.kernel[j]&&!model.projected_out[j])
+                        .map(|j|model.amplitudes[j]*(model.used_theta[j].re*t).exp()).sum()).collect(),steady_error:estimate.steady.map(|e|ACCEPTANCE_FACTOR*e),
                     steady_residual,estimate:estimate.clone(),
                     conserved:if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{model.conserved()},
                     slowest:pairs.first().map(|p|p.0),accepted:false};
@@ -394,9 +399,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,largest:answer.largest(),accepted:answer.accepted,
                 growing:model.growing,clipped:model.clipped,projected:model.projected,conserved:answer.conserved,slowest:answer.slowest,
                 trajectory,horizons,steady,inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
-            let observer_clock=Instant::now();
             if let Some(o)=observer.as_mut(){o(&point,&answer);}
-            timing.observer_ms+=observer_clock.elapsed().as_secs_f64()*1e3;
             checkpoints.push(point);
             // The best checkpoint: one within the tolerance over any other,
             // the latest of those, else the least largest bound.

@@ -20,11 +20,12 @@
 use super::*;
 use super::estimate_api::{LatticeSets,SteadySolves};
 use super::operator::LatticeOperator;
-use super::preconditioner::{FloquetBatch,Preconditioner,Preconditioning,Shift};
+use super::preconditioner::{FloquetBatch,Preconditioner,Preconditioning};
 use super::krylov::{self,KrylovOptions,KrylovTiming,System};
 
-/// A pole of the rational Krylov space: the bordered steady system (the
-/// residue at 0), a real or a complex shift.
+/// A pole of the rational Krylov space and the shift of its system: the
+/// bordered steady system (the residue at 0: the trace row, M = A + u v^T),
+/// A - sigma with real sigma, or A - sigma with complex sigma (real form).
 #[derive(Clone,Copy,Debug)]
 pub enum Pole{Zero,Real(f64),Complex(C)}
 impl PartialEq for Pole{
@@ -33,9 +34,10 @@ impl PartialEq for Pole{
     }
 }
 impl Pole{
-    pub fn shift(&self)->Shift{match *self{Pole::Zero=>Shift::Steady,Pole::Real(s)=>Shift::Real(s),Pole::Complex(s)=>Shift::Complex(s)}}
-    pub fn sigma(&self)->C{self.shift().sigma()}
-    pub fn copies(&self)->usize{self.shift().copies()}
+    pub fn sigma(&self)->C{match *self{Pole::Zero=>ZERO,Pole::Real(s)=>C{re:s,im:0.},Pole::Complex(s)=>s}}
+    /// Hermitian-symmetric fields per system field (2 for the real form).
+    pub fn copies(&self)->usize{if matches!(self,Pole::Complex(_)){2}else{1}}
+    pub fn steady(&self)->bool{matches!(self,Pole::Zero)}
 }
 impl std::fmt::Display for Pole{
     fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{
@@ -83,7 +85,7 @@ impl<'a> Lattice<'a>{
     fn batch(&mut self,pole:Pole)->Result<usize,String>{
         if let Some(i)=self.batches.iter().position(|(p,_)|*p==pole){return Ok(i);}
         let start=Instant::now();
-        let batch=self.preconditioning.batch(&self.op,pole.shift())?;self.batches.push((pole,batch));
+        let batch=self.preconditioning.batch(&self.op,pole)?;self.batches.push((pole,batch));
         self.work.batches+=1;self.work.batch_ms+=start.elapsed().as_secs_f64()*1e3;Ok(self.batches.len()-1)
     }
     pub fn operator(&self)->&LatticeOperator<'a>{&self.op}
@@ -98,10 +100,10 @@ impl<'a> Lattice<'a>{
         let i=self.batch(pole)?;
         let Self{op,batches,work,recorded,directions,images,..}=self;let batch=&mut batches[i].1;
         let count=op.modes.len();let size=op.dimension();let b:Vec<C>=f.concat();
-        let mut system=System::new(op,batch,pole.shift())?;
+        let mut system=System::new(op,batch,pole)?;
         let record=pole==Pole::Zero&&!*recorded;
         if record{system.recorded=Some((Vec::new(),RECORDED_BYTES/(2*size*std::mem::size_of::<C>()).max(1)));}
-        let solve=krylov::gmres(&mut system,&b,None,&KrylovOptions::new(tolerance))?;
+        let solve=krylov::gmres(&mut system,&b,&KrylovOptions::new(tolerance))?;
         if record{*recorded=true;if let Some((list,_))=system.recorded.take(){for(z,az)in list{directions.push(z);images.push(az);}}}
         let(applications,preconditions,timing)=(system.applications,system.preconditions,system.timing.clone());
         drop(system);
@@ -114,6 +116,7 @@ impl SteadySolves for Lattice<'_>{
     fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{self.op.apply(x,y)}
     fn precondition(&mut self,x:&[C],y:&mut[C])->Result<(),String>{let i=self.batch(Pole::Zero)?;self.batches[i].1.apply(x,y)}
     fn directions(&self)->(&[Vec<C>],&[Vec<C>]){(&self.directions,&self.images)}
+    fn left_out(&self,x:&[C])->Result<Option<Vec<C>>,String>{self.op.left_out(x)}
 }
 
 #[cfg(test)]

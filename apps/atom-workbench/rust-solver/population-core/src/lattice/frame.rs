@@ -83,7 +83,7 @@ impl<'p> SwFrame<'p>{
     /// The second-order block over every step.
     pub fn class(&self)->Result<&BlockSystem,String>{
         self.class.get_or_init(||{let kernels=self.kernels()?;let clock=Instant::now();let basis=self.prepared.eigenbasis()?;
-            let class=BlockSystem::new(&self.prepared.lapack,basis,kernels,(0..kernels.steps.len()).collect(),self.prepared.generator.n,self.horizon)?;
+            let class=BlockSystem::new(&self.prepared.lapack,basis,kernels,self.prepared.generator.n,self.horizon)?;
             Ok((class,clock.elapsed().as_secs_f64()*1e3))}).as_ref().map(|x|&x.0).map_err(|e|e.clone())
     }
     /// N = V^-H V^-1 by column panels over the workers (`SwMetric`

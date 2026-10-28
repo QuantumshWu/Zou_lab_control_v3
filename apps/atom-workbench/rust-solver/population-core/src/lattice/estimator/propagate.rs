@@ -29,9 +29,10 @@ pub enum Readout{Laboratory,Centre}
 /// (column-major k x r), the values and coefficients the outputs use.
 pub struct RitzSources<'a>{pub vectors:&'a[C],pub values:&'a[C],pub coefficients:&'a[C]}
 
-/// One mode's contribution: its particular parts per target (target, n x r
-/// readout of G), its homogeneous weights per (class slot) and resonant terms.
-struct ModePart{particular:Vec<(usize,Vec<C>)>,homogeneous:Vec<(usize,Vec<C>)>,resonant:Vec<(usize,Vec<C>,C)>}
+/// One mode's contribution (a near mode or an outer one): its particular
+/// parts per target (target, n x r readout of G), its homogeneous weights per
+/// slot and resonant terms.
+struct ModePart{near:bool,particular:Vec<(usize,Vec<C>)>,homogeneous:Vec<(usize,Vec<C>)>,resonant:Vec<(usize,Vec<C>,C)>}
 
 const RESONANT:f64=1e-9;
 /// The centre's eigenvalue of least modulus below this (1/us) is its trace
@@ -69,16 +70,16 @@ impl ErrorLattice<'_>{
         let(n,d)=(self.n,self.d);let r=theta.len();let t_count=times.len();
         let slots=self.kernels()?.steps.len()+1;
         let lapack=&self.prepared.lapack;
-        // The near modes with the frame's block (key 0), then the outer modes
-        // with the dressed blocks of L0' (key `bare`).
-        let(class,bare)=(self.class()?,1);
+        // The near modes with the frame's block, then the outer modes with
+        // the dressed blocks of L0'.
+        let class=self.class()?;
         let outer=self.outer_modes.len();
         let items:Vec<(usize,bool)>=self.near_canonical.iter().map(|&s|(s,true)).chain((0..outer).map(|s|(s,false))).collect();
         let parts=Execution::new()?.map(items,|(slot,near)|->Result<ModePart,String>{
             let a=if near{self.near[slot]}else{self.outer_modes[slot]};
             let gemm=lapack.complex_gemm();
-            let(c,values,own):(usize,&[C],&[C])=if near{(0,&class.values,&class.readout)}
-                else{(bare,&self.basis()?.lambda,self.basis()?.population_rows())};
+            let(values,own):(&[C],&[C])=if near{(&class.values,&class.readout)}
+                else{(&self.basis()?.lambda,self.basis()?.population_rows())};
             // A mirror pair's canonical member counts twice.
             let mut beta=source(slot,near,if self.mirror[a]==a{1.}else{2.})?;
             let zeta:Vec<C>=values.iter().map(|z|C{re:z.re.min(0.),im:z.im-self.nu[a]}).collect();
@@ -95,43 +96,44 @@ impl ErrorLattice<'_>{
             }}
             // Targets: the mode itself (slot 0) and its neighbours a + s (slot s + 1).
             let mut targets:Vec<(usize,usize,&[C])>=vec![(a,0,own)];
-            if near{for &s in &class.steps{
+            if near{for(s,rows)in class.step_readout.iter().enumerate(){
                 let Some(&t)=self.index.get(&charge_plus(&self.modes[a],&self.kernels()?.steps[s].charge)?)else{continue};
-                targets.push((t,s+1,class.step_readout[s].as_deref().unwrap()));
+                targets.push((t,s+1,rows));
             }}
             if readout==Readout::Centre{targets.retain(|x|x.0==self.centre);}
-            let mut part=ModePart{particular:Vec::new(),homogeneous:Vec::new(),resonant:Vec::new()};
+            let mut part=ModePart{near,particular:Vec::new(),homogeneous:Vec::new(),resonant:Vec::new()};
             for(t,slot,rows)in targets{
                 let mut y=vec![ZERO;n*r];gemm.multiply(n,r,d,ONE,rows,n,&beta,d,ZERO,&mut y,n)?;
                 part.particular.push((t,y));
-                part.homogeneous.push((c*slots+slot,gamma.clone()));
+                part.homogeneous.push((slot,gamma.clone()));
                 for &(j,m,b)in &resonant{part.resonant.push((t,rows[n*j..n*(j+1)].iter().map(|&v|mul(v,b)).collect(),theta[m]));}
             }
             Ok(part)
         });
-        // Sum the particular readouts per target and the homogeneous weights per class slot.
+        // Sum the particular readouts per target and the homogeneous weights
+        // per slot: the near modes' (slot 0 the mode itself, s + 1 its
+        // neighbour by step s) and the outer modes' (their own slot alone).
         let mut particular=vec![vec![ZERO;n*r];self.modes.len()];let mut used=vec![false;self.modes.len()];
-        let mut homogeneous:BTreeMap<usize,Vec<C>>=BTreeMap::new();let mut resonant=Vec::new();
+        let(mut near_weights,mut outer_weights):(Vec<Option<Vec<C>>>,Option<Vec<C>>)=(vec![None;slots],None);let mut resonant=Vec::new();
         for part in parts{let part=part?;
             for(t,y)in part.particular{used[t]=true;for(a,b)in particular[t].iter_mut().zip(y){add(a,b);}}
-            for(key,g)in part.homogeneous{let e=homogeneous.entry(key).or_insert_with(||vec![ZERO;d]);for(a,b)in e.iter_mut().zip(g){add(a,b);}}
+            for(slot,g)in part.homogeneous{
+                let e=if part.near{&mut near_weights[slot]}else{&mut outer_weights}.get_or_insert_with(||vec![ZERO;d]);
+                for(a,b)in e.iter_mut().zip(g){add(a,b);}}
             resonant.extend(part.resonant);
         }
-        // Homogeneous part: -e^{i nu_s t} R_{c,s} diag(Gamma) e^{mu t}, per
-        // class its values and per slot H = R_{c,s} diag(Gamma) and nu_s.
-        let mut by_class:BTreeMap<usize,Vec<(usize,Vec<C>)>>=BTreeMap::new();
-        for(key,g)in homogeneous{by_class.entry(key/slots).or_default().push((key%slots,g));}
+        // Homogeneous part: -e^{i nu_s t} R_s diag(Gamma) e^{mu t}: per block
+        // (the frame's, then L0''s) its values and per slot H = R_s
+        // diag(Gamma) and nu_s.
+        let weighted=|rows:&[C],g:&[C]|->Vec<C>{let mut h=rows.to_vec();for j in 0..d{for i in 0..n{h[i+n*j]=mul(h[i+n*j],g[j]);}}h};
         let mut classes:Vec<(&[C],Vec<(Vec<C>,f64)>)>=Vec::new();
-        for(c,list)in by_class{
-            let values:&[C]=if c==bare{&self.basis()?.lambda}else{&class.values};
-            let mut terms=Vec::with_capacity(list.len());
-            for(slot,g)in list{
-                let rows:&[C]=if c==bare{self.basis()?.population_rows()}else if slot==0{&class.readout}else{class.step_readout[slot-1].as_deref().unwrap()};
-                let mut h=rows.to_vec();for j in 0..d{for i in 0..n{h[i+n*j]=mul(h[i+n*j],g[j]);}}
-                terms.push((h,if slot==0{0.}else{self.kernels()?.steps[slot-1].nu}));
-            }
-            classes.push((values,terms));
+        let mut terms=Vec::new();
+        for(slot,g)in near_weights.iter().enumerate(){let Some(g)=g else{continue};
+            let rows:&[C]=if slot==0{&class.readout}else{&class.step_readout[slot-1]};
+            terms.push((weighted(rows,g),if slot==0{0.}else{self.kernels()?.steps[slot-1].nu}));
         }
+        if !terms.is_empty(){classes.push((&class.values,terms));}
+        if let Some(g)=&outer_weights{classes.push((&self.basis()?.lambda,vec![(weighted(self.basis()?.population_rows(),g),0.)]));}
         let targets:Vec<(usize,&Vec<C>)>=particular.iter().enumerate().filter(|(t,_)|used[*t]).collect();
         // The time GEMMs by chunks of the grid over the workers: every
         // output entry is accumulated by one task in the serial order.

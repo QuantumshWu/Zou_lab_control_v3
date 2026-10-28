@@ -224,18 +224,6 @@ pub(crate) mod tests{
         let phases=PhaseBasis::from_declared(&[3.,2000.],&[vec![1,0],vec![0,1],vec![1,1]]).unwrap();
         LatticePrepared::prepare(&model,phases).unwrap()
     }
-    /// The dense lattice generator on any charge set with every component
-    /// explicit (nothing folded), row-major, and the centre index.
-    pub(crate) fn explicit_matrix(p:&LatticePrepared,charges:&[Charge])->(Vec<C>,usize){
-        let n=p.generator.n;let d=n*n;let size=charges.len()*d;let mut out=vec![ZERO;size*size];let mut block=vec![ZERO;d*d];
-        for(qi,q)in charges.iter().enumerate(){for(pi,source)in charges.iter().enumerate(){
-            let t=charge_minus(q,source).unwrap();let Some(c)=p.generator.components.get(&t)else{continue};
-            block.fill(ZERO);c.op.dense_into(n,ONE,&mut block);
-            if qi==pi{let nu=p.nu(q).unwrap();for r in 0..d{block[r*d+r].im-=nu;}}
-            for r in 0..d{for k in 0..d{add(&mut out[(qi*d+r)*size+pi*d+k],block[r*d+k]);}}
-        }}
-        (out,charges.iter().position(|q|q.iter().all(|&k|k==0)).unwrap())
-    }
     /// Populations of the null vector of a dense lattice matrix (trace row
     /// on the centre), by LU.
     pub(crate) fn dense_steady(p:&LatticePrepared,matrix:&[C],centre:usize,n:usize)->Vec<f64>{

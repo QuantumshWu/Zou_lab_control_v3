@@ -174,15 +174,11 @@ impl Space{
                         let(w,steps,residual)=lattice.solve(Pole::Real(ZERO_PLUS),&[x0],inner)?;(w.into_iter().next().unwrap_or_default(),steps,residual)}};
                 let floor=self.floor();(usize::from(self.append(lattice,w,floor)?),steps,residual)
             }
-            Pole::Real(_)=>{
+            Pole::Real(_)|Pole::Complex(_)=>{
+                // A complex pole's real form: the second right-hand side zero.
                 let f:Vec<C>=self.krylov.last().ok_or("Empty Krylov sequence")?.iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-                let(w,steps,residual)=lattice.solve(pole,&[f],inner)?;
-                let mut added=0;for column in w{added+=self.add_krylov(lattice,column)?;}
-                (added,steps,residual)
-            }
-            Pole::Complex(_)=>{
-                let f:Vec<C>=self.krylov.last().ok_or("Empty Krylov sequence")?.iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-                let(w,steps,residual)=lattice.solve(pole,&[f,vec![ZERO;length]],inner)?;
+                let rhs=if pole.copies()==2{vec![f,vec![ZERO;length]]}else{vec![f]};
+                let(w,steps,residual)=lattice.solve(pole,&rhs,inner)?;
                 let mut added=0;for column in w{added+=self.add_krylov(lattice,column)?;}
                 (added,steps,residual)
             }

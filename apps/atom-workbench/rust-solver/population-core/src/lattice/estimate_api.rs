@@ -82,8 +82,6 @@ pub struct EstimateSetup<'a>{
     /// The fold remainders as generator-norm bounds (rad/us) for the
     /// lattice's largest |nu_q|.
     pub ledger:&'a RemainderLedger,
-    /// rho0 (n x n row-major); x0 is rho0 on the centre mode.
-    pub initial:&'a[C],
 }
 
 /// The reduced model of one checkpoint.
@@ -103,7 +101,11 @@ pub struct ReducedView<'a>{
     /// axis: the residual of the clipped pair, read from the images, carries
     /// it) and on the kernel (theta = 0 exactly; `kernel`, never a projected
     /// mode).
-    pub r:usize,pub vectors:&'a[C],pub used_theta:&'a[C],pub used_coefficients:&'a[C],pub kernel:&'a[bool],
+    pub r:usize,pub vectors:&'a[C],pub used_theta:&'a[C],pub used_coefficients:&'a[C],
+    /// Per Ritz mode: the kernel, and a growing mode projected out (the
+    /// estimator reads these flags, never theta or a being zero: a clipped
+    /// real growing mode also has theta = 0).
+    pub kernel:&'a[bool],pub projected:&'a[bool],
 }
 
 /// The pipeline's own lattice P u Q at the steady shift: its operator, its
@@ -120,7 +122,11 @@ pub trait SteadySolves{
     /// The pole-0 (steady) solve's inner directions z_j = P^-1 v_j and their
     /// images A z_j (A unbordered) on P u Q, mirror-completed; append-only:
     /// an entry never changes once handed out.
-    fn directions(&self)->(&[Vec<C>],&[Vec<C>]){(&[],&[])}
+    fn directions(&self)->(&[Vec<C>],&[Vec<C>]);
+    /// The K^(1) rests the operator leaves out applied to a
+    /// Hermitian-symmetric field (`LatticeOperator::left_out`; None when it
+    /// leaves none out).
+    fn left_out(&self,x:&[C])->Result<Option<Vec<C>>,String>;
 }
 
 /// Work of one estimate, for the diagnostics.
@@ -129,9 +135,8 @@ pub struct EstimateWork{
     /// Operator or preconditioner applications and exact block solves,
     /// counted per n x n block (one lattice block = 1).
     pub block_operations:usize,pub block_solves:usize,
-    /// Time (ms): the fast part's columns, the pool's columns, the slow
-    /// solves, the fast propagation, the slow propagation; and the whole.
-    pub parts_ms:[f64;5],pub milliseconds:f64,
+    /// Time (ms).
+    pub milliseconds:f64,
     /// Slow modes solved, whether the trajectory took the slow part, and
     /// the slowest decay rate the time rule read (1/us).
     pub slow_modes:usize,pub slow_trajectory:bool,pub lambda_slow:f64,
