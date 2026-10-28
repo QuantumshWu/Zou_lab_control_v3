@@ -30,6 +30,16 @@ pub enum Readout{Laboratory,Centre}
 /// outputs use.
 pub struct RitzSources<'a>{pub vectors:&'a[C],pub values:&'a[C],pub coefficients:&'a[C]}
 
+/// Sources on fields outside the space, sum_j F_j h_jm e^{theta_m t}: the
+/// fields' coordinates (`ErrorLattice::field_coordinates`), h (column-major
+/// p x r) and the values theta (closed under conjugation with h).
+pub struct FieldSources<'a>{pub fields:&'a FieldCoordinates,pub weights:&'a[C],pub values:&'a[C]}
+
+/// Hermitian-symmetric fields in the fast part's coordinates: the class
+/// coordinates per canonical near mode and the eigen-coordinates of L0' per
+/// outer mode, (field, slot) consecutive.
+pub struct FieldCoordinates{pub count:usize,pub near:Vec<C>,pub outer:Vec<C>}
+
 /// One mode's contribution: its particular parts per target (target, n x r
 /// readout of G), its homogeneous weights per (class slot) and resonant terms.
 struct ModePart{particular:Vec<(usize,Vec<C>)>,homogeneous:Vec<(usize,Vec<C>)>,resonant:Vec<(usize,Vec<C>,C)>}
@@ -45,15 +55,41 @@ impl ErrorLattice<'_>{
     /// carry none). The Ritz data must be closed under conjugation.
     pub fn populations(&self,ritz:&RitzSources<'_>,times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
         let(n,d,k)=(self.n,self.d,self.columns);let r=ritz.values.len();
-        let t_count=times.len();
-        if t_count==0||r==0{return Ok(vec![vec![0.;n];t_count]);}
+        if times.is_empty()||r==0{return Ok(vec![vec![0.;n];times.len()]);}
         if ritz.vectors.len()!=k*r||ritz.coefficients.len()!=r{return Err("Estimator: Ritz data dimensions differ from the basis".into());}
         // B a and B theta a (column-major k x r).
         let mut ba=vec![ZERO;k*r];let mut bta=vec![ZERO;k*r];
         for m in 0..r{let(a,ta)=(ritz.coefficients[m],mul(ritz.values[m],ritz.coefficients[m]));
             for i in 0..k{ba[i+k*m]=mul(ritz.vectors[i+k*m],a);bta[i+k*m]=mul(ritz.vectors[i+k*m],ta);}}
+        // beta = (z_a b - z_w b theta) a.
+        self.propagate(ritz.values,times,readout,|slot,near,weight|{
+            let(image,base):(&[C],&[C])=if near{(&self.image_coordinates[slot],&self.basis_coordinates[slot])}else{(&self.outer_image[slot],&self.outer_basis[slot])};
+            let(gemm,mut beta)=(self.prepared.lapack.complex_gemm(),vec![ZERO;d*r]);
+            gemm.multiply(d,r,k,C{re:weight,im:0.},image,d,&ba,k,ZERO,&mut beta,d)?;
+            gemm.multiply(d,r,k,C{re:-weight,im:0.},base,d,&bta,k,ONE,&mut beta,d)?;
+            Ok(beta)})
+    }
+    /// Population errors of sources on fields outside the space
+    /// (`FieldSources`), propagated as the Ritz modes' sources are.
+    pub fn field_populations(&self,sources:&FieldSources<'_>,times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
+        let(n,d,r,p)=(self.n,self.d,sources.values.len(),sources.fields.count);
+        if times.is_empty()||r==0||p==0{return Ok(vec![vec![0.;n];times.len()]);}
+        if sources.weights.len()!=p*r{return Err("Estimator: field source dimensions differ".into());}
+        let fields=sources.fields;let(near_count,outer_count)=(self.near.len(),self.outer_modes.len());
+        self.propagate(sources.values,times,readout,|slot,near,weight|{
+            let(all,count)=if near{(&fields.near,near_count)}else{(&fields.outer,outer_count)};
+            let mut f=vec![ZERO;d*p];for j in 0..p{f[j*d..(j+1)*d].copy_from_slice(&all[(j*count+slot)*d..(j*count+slot+1)*d]);}
+            let mut beta=vec![ZERO;d*r];self.prepared.lapack.complex_gemm().multiply(d,r,p,C{re:weight,im:0.},&f,d,sources.weights,p,ZERO,&mut beta,d)?;
+            Ok(beta)})
+    }
+    /// The SW propagation of sources sum_m beta_jm e^{theta_m t} per
+    /// canonical near mode (class coordinates) and outer mode
+    /// (eigen-coordinates of L0'), beta (column-major d x r) from `source`
+    /// for (slot, near, weight), weight 2 for a pair's canonical member.
+    fn propagate(&self,theta:&[C],times:&[f64],readout:Readout,source:impl Fn(usize,bool,f64)->Result<Vec<C>,String>+Sync)->Result<Vec<Vec<f64>>,String>{
+        let(n,d)=(self.n,self.d);let r=theta.len();let t_count=times.len();
         let slots=self.kernels()?.steps.len()+1;
-        let lapack=&self.prepared.lapack;let theta=ritz.values;
+        let lapack=&self.prepared.lapack;
         // The near modes with their classes, then the outer modes with the dressed blocks of L0' (class key `bare`).
         let bare=self.classes()?.len();
         let outer=if self.outer_bare{self.outer_modes.len()}else{0};
@@ -61,14 +97,10 @@ impl ErrorLattice<'_>{
         let parts=Execution::new()?.map(items,|(slot,near)|->Result<ModePart,String>{
             let a=if near{self.near[slot]}else{self.outer_modes[slot]};
             let gemm=lapack.complex_gemm();
-            let(c,values,own,image,base):(usize,&[C],&[C],&[C],&[C])=if near{let c=self.class_of[a];let class=&self.classes()?[c];
-                (c,&class.values,&class.readout,&self.image_coordinates[slot],&self.basis_coordinates[slot])}
-                else{(bare,&self.basis()?.lambda,self.basis()?.population_rows(),&self.outer_image[slot],&self.outer_basis[slot])};
+            let(c,values,own):(usize,&[C],&[C])=if near{let c=self.class_of[a];let class=&self.classes()?[c];(c,&class.values,&class.readout)}
+                else{(bare,&self.basis()?.lambda,self.basis()?.population_rows())};
             // A mirror pair's canonical member counts twice.
-            let weight=if self.mirror[a]==a{1.}else{2.};
-            let mut beta=vec![ZERO;d*r];
-            gemm.multiply(d,r,k,C{re:weight,im:0.},image,d,&ba,k,ZERO,&mut beta,d)?;
-            gemm.multiply(d,r,k,C{re:-weight,im:0.},base,d,&bta,k,ONE,&mut beta,d)?;
+            let mut beta=source(slot,near,if self.mirror[a]==a{1.}else{2.})?;
             let zeta:Vec<C>=values.iter().map(|z|C{re:z.re.min(0.),im:z.im-self.nu[a]}).collect();
             if a==self.centre{
                 let j0=(0..d).min_by(|&x,&y|magnitude(zeta[x]).total_cmp(&magnitude(zeta[y]))).unwrap();

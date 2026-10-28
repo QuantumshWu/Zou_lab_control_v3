@@ -92,6 +92,13 @@ pub struct Rest{pub blocks:Vec<DenseSector>,pub sparse:Csr}
 impl Rest{
     /// Stored entries (multiply-adds per source block).
     pub fn stored(&self)->usize{self.blocks.iter().map(|b|b.values.len()).sum::<usize>()+self.sparse.nonzeros()}
+    /// y += s R x on one block (row-major d-vectors).
+    pub fn apply_into(&self,s:C,x:&[C],y:&mut[C]){
+        for b in &self.blocks{let h=b.rows.len();
+            for(c,&col)in b.cols.iter().enumerate(){let v=mul(s,x[col as usize]);if !nonzero(v){continue;}
+                for(r,&row)in b.rows.iter().enumerate(){mul_add(&mut y[row as usize],b.values[r+h*c],v);}}}
+        self.sparse.apply_into(s,x,y);
+    }
     pub fn dense_into(&self,d:usize,s:C,out:&mut[C]){
         for b in &self.blocks{for(c,&col)in b.cols.iter().enumerate(){for(r,&row)in b.rows.iter().enumerate(){
             add(&mut out[row as usize*d+col as usize],mul(s,b.values[r+b.rows.len()*c]));}}}
@@ -414,17 +421,18 @@ impl FoldLibrary{
     /// fold leaves out, with both far blocks at the static frequency of s.
     /// Applied in factored form, no d x d storage: one block solve per (s, q)
     /// and one per far mode r + s reached in the middle (r = q + e: the paths
-    /// through the same far mode share it), whose returns land in the lattice.
-    pub fn third_order_source(&self,op:&LatticeOperator<'_>,x:&[C])->Result<Vec<C>,String>{
+    /// through the same far mode share it), whose returns land in the lattice;
+    /// the fields side by side in every block solve.
+    pub fn third_order_source(&self,op:&LatticeOperator<'_>,fields:&[&[C]])->Result<Vec<Vec<C>>,String>{
         let prepared=op.prepared;let(plan,generator)=(&prepared.plan,&prepared.generator);
-        let n=op.n;let d=n*n;let modes=op.modes.len();let mut out=vec![ZERO;modes*d];
-        if self.blocks.is_empty(){return Ok(out);}
+        let n=op.n;let d=n*n;let modes=op.modes.len();let count=fields.len();let mut out=vec![vec![ZERO;modes*d];count];
+        if self.blocks.is_empty()||count==0{return Ok(out);}
         let explicit=plan.explicit();
         let far=plan.far();
         // One task per far step; the parts are summed in step order.
         let steps:Vec<usize>=self.blocks.keys().copied().collect();
-        let parts=Execution::new()?.map(steps,|s|->Result<Option<Vec<C>>,String>{
-            let mut small=Vec::new();let mut out=vec![ZERO;modes*d];
+        let parts=Execution::new()?.map(steps,|s|->Result<Option<Vec<Vec<C>>>,String>{
+            let mut small=Vec::new();let mut out=vec![vec![ZERO;modes*d];count];
             let charge_s=&plan.steps[s].charge;
             // Middle charges r (far mode r + s) with their returns (b, target).
             let mut middles:BTreeMap<Charge,Vec<(usize,usize)>>=BTreeMap::new();
@@ -443,20 +451,20 @@ impl FoldLibrary{
             }
             if hops.is_empty(){return Ok(None);}
             let cs=&generator.components[charge_s].op;
-            let mut y=vec![ZERO;modes*d];
-            for q in 0..modes{cs.apply_into(n,ONE,&x[q*d..(q+1)*d],&mut y[q*d..(q+1)*d],&mut small);}
-            self.far_solve(s,&mut y,modes)?;
+            let mut y=vec![ZERO;count*modes*d];
+            for(f,x)in fields.iter().enumerate(){for q in 0..modes{cs.apply_into(n,ONE,&x[q*d..(q+1)*d],&mut y[(f*modes+q)*d..(f*modes+q+1)*d],&mut small);}}
+            self.far_solve(s,&mut y,count*modes)?;
             let slots:Vec<&Charge>=middles.iter().filter(|(_,r)|!r.is_empty()).map(|(c,_)|c).collect();
             let slot=|c:&Charge|slots.binary_search(&c).map_err(|_|"Third-order source middle without its slot".to_string());
-            let mut z=vec![ZERO;slots.len()*d];
-            for(q,e,r)in &hops{let k=slot(r)?;
-                generator.components[&plan.steps[*e].charge].op.apply_into(n,ONE,&y[q*d..(q+1)*d],&mut z[k*d..(k+1)*d],&mut small);}
-            self.far_solve(s,&mut z,slots.len())?;
-            for(k,r)in slots.iter().enumerate(){for &(b,t)in &middles[*r]{
-                generator.components[&plan.steps[b].charge].op.apply_into(n,ONE,&z[k*d..(k+1)*d],&mut out[t*d..(t+1)*d],&mut small);}}
+            let width=slots.len();let mut z=vec![ZERO;count*width*d];
+            for f in 0..count{for(q,e,r)in &hops{let k=f*width+slot(r)?;
+                generator.components[&plan.steps[*e].charge].op.apply_into(n,ONE,&y[(f*modes+q)*d..(f*modes+q+1)*d],&mut z[k*d..(k+1)*d],&mut small);}}
+            self.far_solve(s,&mut z,count*width)?;
+            for(f,out)in out.iter_mut().enumerate(){for(k,r)in slots.iter().enumerate(){for &(b,t)in &middles[*r]{
+                generator.components[&plan.steps[b].charge].op.apply_into(n,ONE,&z[(f*width+k)*d..(f*width+k+1)*d],&mut out[t*d..(t+1)*d],&mut small);}}}
             Ok(Some(out))
         });
-        for part in parts{if let Some(part)=part?{for(o,v)in out.iter_mut().zip(part){add(o,v);}}}
+        for part in parts{if let Some(part)=part?{for(o,p)in out.iter_mut().zip(part){for(a,b)in o.iter_mut().zip(p){add(a,b);}}}}
         Ok(out)
     }
 }
@@ -497,7 +505,7 @@ mod tests{
         let t=&p.fold.targets[0];let s=&t.rest[0].sparse;
         assert!(t.rest[0].blocks.is_empty()&&(0..n*n).all(|r|r/n==r%n||s.row[r+1]==s.row[r]),"only population rows stored");
         assert!(t.dropped[0]>0.&&t.dropped[0]<p.plan.structural_floor);
-        let ledger=super::super::ledger::RemainderLedger::new(&p.plan,3.,p.fold.dropped()).unwrap();
+        let ledger=super::super::ledger::RemainderLedger::new(&p.plan,3.,p.fold.dropped(),0.).unwrap();
         assert!(ledger.omitted_cross>0.&&ledger.dropped_entries>=t.dropped[0]);
     }
     #[test]
@@ -509,7 +517,7 @@ mod tests{
         let l0=dense_l0(&p);
         let dense=|q:&[i32]|{let mut m=vec![ZERO;d*d];p.generator.components[q].op.dense_into(n,ONE,&mut m);m};
         for nu in[0_f64,3.,-6.]{
-            let ledger=super::super::ledger::RemainderLedger::new(&p.plan,nu.abs(),[0.,0.]).unwrap();
+            let ledger=super::super::ledger::RemainderLedger::new(&p.plan,nu.abs(),[0.,0.],0.).unwrap();
             for(target,stored)in p.plan.targets.iter().zip(&p.fold.targets){
                 let mut exact=vec![ZERO;d*d];
                 for pair in &target.pairs{
@@ -547,7 +555,7 @@ mod tests{
         let mm=|a:&[C],b:&[C]|{let mut o=vec![ZERO;d*d];for r in 0..d{for k in 0..d{let x=a[r*d+k];if !nonzero(x){continue;}for c in 0..d{mul_add(&mut o[r*d+c],x,b[k*d+c]);}}}o};
         let modes=p.modes(2).unwrap();let op=LatticeOperator::new(&p,&modes).unwrap();let size=op.dimension();
         let x:Vec<C>=(0..size).map(|k|C{re:((k*7+3)%29)as f64/29.-0.5,im:((k*11+5)%31)as f64/31.-0.5}).collect();
-        let source=p.fold.third_order_source(&op,&x).unwrap();
+        let source=p.fold.third_order_source(&op,&[&x]).unwrap().remove(0);
         // Dense: the sum over (s, e, b) of the third-order operators on the lattice edges.
         let mut third=vec![ZERO;size*size];
         for s in p.plan.far(){let st=&p.plan.steps[s];

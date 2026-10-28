@@ -189,7 +189,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
                 "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest.map(|s|s.rate),
                 "estimateMs":c.estimate.work.milliseconds,"ms":c.milliseconds})).collect::<Vec<_>>(),
             "ledger":{"nuFreeze":l.nu_freeze,"thirdOrder":l.third_order,"farShell":l.far_shell,"tail":l.tail,"omittedCross":l.omitted_cross,
-                "nonStructural":l.non_structural,"droppedEntries":l.dropped_entries,"total":l.total(),"fold":l.fold,"expansionParameter":l.expansion_parameter},
+                "nonStructural":l.non_structural,"droppedEntries":l.dropped_entries,"k1Rest":l.k1_rest,"unbuilt":l.unbuilt(),"fold":l.fold,"expansionParameter":l.expansion_parameter},
             "timingMs":{"eigenbasis":t.eigenbasis_ms,"explicitSet":t.explicit_set_ms,"setup":t.setup_ms,"estimatorBuild":t.estimator_build_ms,"outputs":t.outputs_ms,"frame":t.frame_ms.iter().sum::<f64>(),"frameParts":t.frame_ms,"frameWait":t.frame_wait_ms,"solves":t.solves_ms,"images":t.images_ms,"projection":t.projection_ms,
                 "model":t.model_ms,"ordering":t.ordering_ms,"estimate":t.estimate_ms,"total":t.total_ms}})});
     json!({
@@ -445,6 +445,7 @@ mod tests{
             let line=json!({"solves":c.solves,"columns":c.columns,"dimension":c.dimension,"accepted":c.accepted,"estTraj":est_traj,"estH":c.estimate.horizons,"estSteady":c.estimate.steady,
                 "errTraj":error_traj.as_ref().map(|e|e.0),"errTrajAt":error_traj.as_ref().map(|e|e.1),"errH":error_h,"errSteady":error_s,"estOverErrQuantiles":ratio,
                 "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest.map(|s|s.rate),"slowestResidual":c.slowest.map(|s|s.residual),"ms":c.milliseconds,
+                "foldBuilt":c.estimate.fold.built,"foldUnbuilt":c.estimate.fold.unbuilt,"foldMs":c.estimate.work.fold_ms,"estimateMs":c.estimate.work.milliseconds,
                 "operatorWork":c.inner.operator_work,"innerSteps":c.inner.steps,"innerMs":c.inner.milliseconds,"applyMs":c.inner.timing.apply_ms,"preconditionMs":c.inner.timing.precondition_ms,"orthogonalizeMs":c.inner.timing.orthogonalize_ms,"batchMs":c.inner.batch_ms,"blockOperations":c.inner.block_operations(),
                 "timingMs":{"explicitSet":c.timing.explicit_set_ms,"setup":c.timing.setup_ms,"frame":c.timing.frame_ms.iter().sum::<f64>(),"frameWait":c.timing.frame_wait_ms,"projection":c.timing.projection_ms,"model":c.timing.model_ms,"ordering":c.timing.ordering_ms,"estimate":c.timing.estimate_ms},
                 "elapsedMs":started.elapsed().as_secs_f64()*1e3,"trajectoryNorm":c.trajectory.iter().map(|p|ledger::metric(p,&zero,&groups)).fold(0_f64,f64::max)});
@@ -463,11 +464,9 @@ mod tests{
             Err(e)=>println!("{}",json!({"summary":true,"error":e,"totalMs":total_ms})),
         }
     }
-    /// The estimator with a zero ledger (no fold charges), for validation.
+    /// The estimator without the fold charge, for validation.
     fn without_fold<'a>(setup:atom_population_core::lattice::estimate_api::EstimateSetup<'a>)->Result<Box<dyn atom_population_core::lattice::estimate_api::Estimator+'a>,String>{
-        use atom_population_core::lattice::ledger::RemainderLedger;
-        static NONE:RemainderLedger=RemainderLedger{nu_freeze:0.,third_order:0.,far_shell:0.,tail:0.,omitted_cross:0.,non_structural:0.,dropped_entries:0.,expansion_parameter:0.,fold:0.};
-        pipeline::ESTIMATOR(atom_population_core::lattice::estimate_api::EstimateSetup{ledger:&NONE,..setup})
+        Ok(Box::new(atom_population_core::lattice::estimator::UnifiedEstimate::without_fold(setup)?))
     }
     /// The error estimator (`lattice::estimator`) on R2's dumped spaces (N1's
     /// pipeline, `research/population/unified/r2/n2_dump.py` on branch
@@ -541,7 +540,6 @@ mod tests{
     fn lattice_estimator_against_r2_fixtures(){
         use atom_population_core::lattice::estimator::{self,Checkpoint,OutputGate,UnifiedEstimate};
         use atom_population_core::lattice::estimate_api::{EstimateSetup,LatticeSets,Outputs};
-        use atom_population_core::lattice::ledger::RemainderLedger;
         use atom_population_core::lattice::operator::LatticeOperator;
         use atom_population_core::lattice::frame::SwFrame;
         use atom_population_core::lattice::preconditioner::{Preconditioning,Shift};
@@ -587,7 +585,7 @@ mod tests{
             for j in [0,basis.len()/2,basis.len()-1]{op.apply(&basis[j],&mut y).unwrap();
                 let e=y.iter().zip(&images[j]).map(|(a,b)|(a.re-b.re).hypot(a.im-b.im)).fold(0.,f64::max);
                 operator=operator.max(e/images[j].iter().map(|v|v.re.hypot(v.im)).fold(0.,f64::max));}
-            let ledger=RemainderLedger::new(&p.plan,op.nu_max(),op.dropped()).unwrap();
+            let ledger=op.ledger().unwrap();
             // The images by the Rust operator (the fixtures' are Python's, which differ by `operatorDeviation`).
             let images:Vec<Vec<C>>=if std::env::var("ATOM_ESTIMATOR_RUST_IMAGES").is_ok_and(|v|v=="1"){basis.iter().map(|w|{let mut y=vec![C::default();dim];op.apply(w,&mut y).unwrap();y}).collect()}else{images};
             drop(op);
@@ -599,8 +597,8 @@ mod tests{
             let all_sets=LatticeSets{explicit:modes.clone(),ring:Vec::new()};
             let mut estimate=if near=="all"{
                 // Every mode near: the explicit set given as the whole lattice (the setup's lattice is only read for its modes and P).
-                UnifiedEstimate::with_near(EstimateSetup{lattice:&all_sets,..setup},true).unwrap()
-            }else{UnifiedEstimate::with_near(setup,near!="one-step").unwrap()};
+                UnifiedEstimate::with_near(EstimateSetup{lattice:&all_sets,..setup},true,false).unwrap()
+            }else{UnifiedEstimate::with_near(setup,near!="one-step",false).unwrap()};
             estimate.lattice.ring_in_fast=std::env::var("ATOM_ESTIMATOR_FASTRING").is_ok_and(|v|v=="1");
             estimate.lattice.outer_bare=std::env::var("ATOM_ESTIMATOR_OUTER").map_or(true,|v|v!="0");
             let build_ms=clock.elapsed().as_secs_f64()*1e3;
@@ -648,7 +646,7 @@ mod tests{
             let seed_macs=estimate.pool.as_ref().map_or(0.,|p|p.work.qr_macs);
             println!("{}",json!({"case":case,"modes":n_modes,"near":estimate.lattice.near.len(),"ring":estimate.lattice.ring.len(),"operatorDeviation":operator,"buildMs":build_ms,
                 "kernelMs":estimate.lattice.build_ms()[0],"classMs":estimate.lattice.build_ms()[1],"classes":estimate.lattice.classes().map_or(0,|c|c.len()),"largestCluster":estimate.lattice.classes().ok().and_then(|c|c.iter().map(|c|c.largest_cluster).max()),"eigenbasisMs":p.eigenbasis().unwrap().milliseconds,"eigenClusters":p.eigenbasis().unwrap().clusters,"eigenLargestCluster":p.eigenbasis().unwrap().largest_cluster,"eigenPasses":p.eigenbasis().unwrap().passes,"eigenCondition":p.eigenbasis().unwrap().condition,"eigenSolveResidual":eigen_residual(&p,p.eigenbasis().unwrap()),
-                "seeds":seed_count,"seedSteps":seed_steps,"poleSeeds":pole_seeds,"seedMacs":seed_macs,"d":p.generator.n*p.generator.n,"kernelEntries":estimate.lattice.kernels().unwrap().diagnostics.entries,"smallParameter":estimate.lattice.kernels().unwrap().diagnostics.largest,"ledger":ledger.total()}));
+                "seeds":seed_count,"seedSteps":seed_steps,"poleSeeds":pole_seeds,"seedMacs":seed_macs,"d":p.generator.n*p.generator.n,"kernelEntries":estimate.lattice.kernels().unwrap().diagnostics.entries,"smallParameter":estimate.lattice.kernels().unwrap().diagnostics.largest,"ledger":ledger.unbuilt()}));
             // The pipeline's lattice: the slow pool's operator and steady preconditioner.
             let mut solver=atom_population_core::lattice::poles::Lattice::new(&p,LatticeSets{explicit:sets.explicit.clone(),ring:sets.ring.clone()}).unwrap();
             let mut gate=OutputGate::default();let limit=estimator::gate::GATE_FACTOR*POPULATION_TOLERANCE;
@@ -690,7 +688,7 @@ mod tests{
                 let skipped=gated&&!open;
                 let before=(estimate.lattice.work.clone(),estimate.pool.as_ref().map(|p|p.work.clone()).unwrap_or_default());
                 let clock=Instant::now();
-                let errors=if skipped{estimator::Errors::default()}else{estimate.errors(&Checkpoint{basis:&basis[..k],images:&images[..k],x:&x,s:&s,theta:&th_e,coefficients:&a_e,frame:None},&mut solver).unwrap()};
+                let errors=if skipped{estimator::Errors::default()}else{estimate.errors(&Checkpoint{basis:&basis[..k],images:&images[..k],x:&x,s:&s,theta:&th_e,coefficients:&a_e,frame:None},false,&mut solver).unwrap()};
                 let ms=clock.elapsed().as_secs_f64()*1e3;
                 let series:Vec<f64>=errors.trajectory.iter().map(|p|ledger::metric(p,&zero,&fixture_groups)).collect();
                 let hz:Vec<f64>=errors.horizons.iter().map(|p|ledger::metric(p,&zero,&fixture_groups)).collect();

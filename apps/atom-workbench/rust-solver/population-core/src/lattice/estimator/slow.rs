@@ -91,19 +91,19 @@ const SMALL_DEPENDENT:f64=1e-12;
 /// pair's block scaled by sqrt 2 so that the dot product is the real inner
 /// product over every mode. Half the length of the whole field.
 #[derive(Clone)]
-struct Packing{d:usize,n:usize,canonical:Vec<usize>,mirror:Vec<usize>,modes:usize}
+pub(super) struct Packing{d:usize,n:usize,canonical:Vec<usize>,mirror:Vec<usize>,modes:usize}
 impl Packing{
-    fn new(lattice:&ErrorLattice<'_>)->Self{
+    pub(super) fn new(lattice:&ErrorLattice<'_>)->Self{
         let canonical:Vec<usize>=(0..lattice.modes.len()).filter(|&q|lattice.modes[q]>=lattice.modes[lattice.mirror[q]]).collect();
         Self{d:lattice.d,n:lattice.n,canonical,mirror:lattice.mirror.clone(),modes:lattice.modes.len()}
     }
-    fn length(&self)->usize{2*self.d*self.canonical.len()}
-    fn pack(&self,x:&[C])->Vec<f64>{
+    pub(super) fn length(&self)->usize{2*self.d*self.canonical.len()}
+    pub(super) fn pack(&self,x:&[C])->Vec<f64>{
         let d=self.d;let mut out=Vec::with_capacity(self.length());
         for &q in &self.canonical{let w=if self.mirror[q]==q{1.}else{std::f64::consts::SQRT_2};for v in &x[q*d..(q+1)*d]{out.push(w*v.re);out.push(w*v.im);}}
         out
     }
-    fn unpack(&self,v:&[f64])->Vec<C>{
+    pub(super) fn unpack(&self,v:&[f64])->Vec<C>{
         let(n,d)=(self.n,self.d);let mut x=vec![ZERO;self.modes*d];
         for(i,&q)in self.canonical.iter().enumerate(){let w=if self.mirror[q]==q{1.}else{std::f64::consts::FRAC_1_SQRT_2};
             for k in 0..d{x[q*d+k]=C{re:w*v[2*(i*d+k)],im:w*v[2*(i*d+k)+1]};}
@@ -111,7 +111,7 @@ impl Packing{
         x
     }
 }
-fn dot(a:&[f64],b:&[f64])->f64{a.iter().zip(b).map(|(x,y)|x*y).sum()}
+pub(super) fn dot(a:&[f64],b:&[f64])->f64{a.iter().zip(b).map(|(x,y)|x*y).sum()}
 /// (e^{a t} - e^{b t}) / (a - b), and its limit t e^{b t} (1 + d t / 2 + (d t)^2 / 6)
 /// for d = a - b with |d t| small.
 fn secular(a:C,b:C,t:f64)->C{
@@ -119,7 +119,7 @@ fn secular(a:C,b:C,t:f64)->C{
     if dt<1e-3{let e=scaled(cexp(b,t),t);let(x,y)=(scaled(d,t/2.),scaled(mul(d,d),t*t/6.));return mul(e,C{re:1.+x.re+y.re,im:x.im+y.im});}
     let n=C{re:cexp(a,t).re-cexp(b,t).re,im:cexp(a,t).im-cexp(b,t).im};let s=d.re*d.re+d.im*d.im;mul(n,C{re:d.re/s,im:-d.im/s})
 }
-fn cexp(z:C,t:f64)->C{let m=(z.re*t).exp();if m==0.{return ZERO;}C{re:m*(z.im*t).cos(),im:m*(z.im*t).sin()}}
+pub(super) fn cexp(z:C,t:f64)->C{let m=(z.re*t).exp();if m==0.{return ZERO;}C{re:m*(z.im*t).cos(),im:m*(z.im*t).sin()}}
 
 /// Orthonormal real columns stored by row panels (each column-major), with
 /// the real multiply-adds of every product with them.
@@ -168,7 +168,7 @@ impl Panels{
         let mut fresh:Vec<Vec<f64>>=Vec::new();let mut t=Vec::new();
         if k>0{
             let mut selected=vec![0.;length*k];for(i,&c)in order.iter().enumerate(){selected[i*length..(i+1)*length].copy_from_slice(&g[c*length..(c+1)*length]);}
-            let mut q1=block_times(lapack,execution,&selected,length,k,&upper_inverse(&r1,k))?;drop(selected);
+            let mut q1=block_times(lapack,execution,&selected,length,k,&upper_inverse(&r1,k),k)?;drop(selected);
             // A column the second pass loses was dependent within the first
             // pass's accuracy (the Gram squares its condition): it is left out.
             let r2=loop{
@@ -179,7 +179,7 @@ impl Panels{
                 q1=columns;k=kept.len();
             };
             if k>0{
-                let q=block_times(lapack,execution,&q1,length,k,&upper_inverse(&r2,k))?;drop(q1);
+                let q=block_times(lapack,execution,&q1,length,k,&upper_inverse(&r2,k),k)?;drop(q1);
                 t=block_cross(lapack,execution,&q,k,&g,m,length)?;
                 for(c,&size)in sizes.iter().enumerate(){for v in &mut t[c*k..(c+1)*k]{*v*=size;}}
                 for i in 0..k{let column=q[i*length..(i+1)*length].to_vec();self.push(&column);fresh.push(column);}
@@ -191,30 +191,34 @@ impl Panels{
         Ok((coordinates,fresh))
     }
 }
+/// Rows per task of the block products: two tasks per worker, at most a panel.
+fn block_rows(execution:&Execution,length:usize)->usize{length.div_ceil(2*execution.threads()).clamp(1<<12,PANEL_ROWS)}
 /// A^T B (ka x mb, column-major) of blocks A (length x ka) and B (length x mb), by row chunks.
-fn block_cross(lapack:&Lapack,execution:&Execution,a:&[f64],ka:usize,b:&[f64],mb:usize,length:usize)->Result<Vec<f64>,String>{
+pub(super) fn block_cross(lapack:&Lapack,execution:&Execution,a:&[f64],ka:usize,b:&[f64],mb:usize,length:usize)->Result<Vec<f64>,String>{
     if ka==0||mb==0{return Ok(vec![0.;ka*mb]);}
-    let parts=execution.map((0..length).step_by(PANEL_ROWS).collect(),|s:usize|->Result<Vec<f64>,String>{
-        let rows=(s+PANEL_ROWS).min(length)-s;let mut out=vec![0.;ka*mb];
+    let chunk=block_rows(execution,length);
+    let parts=execution.map((0..length).step_by(chunk).collect(),|s:usize|->Result<Vec<f64>,String>{
+        let rows=(s+chunk).min(length)-s;let mut out=vec![0.;ka*mb];
         lapack.gemm(true,false,ka,mb,rows,1.,&a[s..],length,&b[s..],length,0.,&mut out,ka)?;Ok(out)});
     let mut out=vec![0.;ka*mb];for part in parts{for(x,y)in out.iter_mut().zip(part?){*x+=y;}}
     Ok(out)
 }
-/// G T (length x k) for G (length x k) and T (k x k), by row chunks.
-fn block_times(lapack:&Lapack,execution:&Execution,g:&[f64],length:usize,k:usize,t:&[f64])->Result<Vec<f64>,String>{
-    let starts:Vec<usize>=(0..length).step_by(PANEL_ROWS).collect();
+/// G T (length x m) for G (length x k) and T (k x m), by row chunks.
+pub(super) fn block_times(lapack:&Lapack,execution:&Execution,g:&[f64],length:usize,k:usize,t:&[f64],m:usize)->Result<Vec<f64>,String>{
+    if k==0||m==0{return Ok(vec![0.;length*m]);}
+    let chunk=block_rows(execution,length);let starts:Vec<usize>=(0..length).step_by(chunk).collect();
     let parts=execution.map(starts.clone(),|s|->Result<Vec<f64>,String>{
-        let rows=(s+PANEL_ROWS).min(length)-s;let mut out=vec![0.;rows*k];
-        lapack.gemm(false,false,rows,k,k,1.,&g[s..],length,t,k,0.,&mut out,rows)?;Ok(out)});
-    let mut out=vec![0.;length*k];
-    for(&s,part)in starts.iter().zip(parts){let part=part?;let rows=(s+PANEL_ROWS).min(length)-s;
-        for c in 0..k{out[s+length*c..s+rows+length*c].copy_from_slice(&part[rows*c..rows*(c+1)]);}}
+        let rows=(s+chunk).min(length)-s;let mut out=vec![0.;rows*m];
+        lapack.gemm(false,false,rows,m,k,1.,&g[s..],length,t,k,0.,&mut out,rows)?;Ok(out)});
+    let mut out=vec![0.;length*m];
+    for(&s,part)in starts.iter().zip(parts){let part=part?;let rows=(s+chunk).min(length)-s;
+        for c in 0..m{out[s+length*c..s+rows+length*c].copy_from_slice(&part[rows*c..rows*(c+1)]);}}
     Ok(out)
 }
 /// Upper Cholesky factor (column-major, in the returned order) of a Gram
 /// matrix, with diagonal pivoting or in the given order; a column whose
 /// remaining norm is below CHOLESKY_DEPENDENT of its size is dropped.
-fn cholesky(gram:&[f64],m:usize,sizes:&[f64],pivoting:bool)->(Vec<usize>,Vec<f64>){
+pub(super) fn cholesky(gram:&[f64],m:usize,sizes:&[f64],pivoting:bool)->(Vec<usize>,Vec<f64>){
     let mut a=gram.to_vec();let mut left:Vec<usize>=(0..m).collect();let mut order=Vec::new();let mut rows:Vec<Vec<f64>>=Vec::new();
     let small=|a:&[f64],j:usize|!(a[j+m*j]>(CHOLESKY_DEPENDENT*sizes[j]).powi(2));
     loop{
@@ -230,7 +234,7 @@ fn cholesky(gram:&[f64],m:usize,sizes:&[f64],pivoting:bool)->(Vec<usize>,Vec<f64
     for(i,row)in rows.iter().enumerate(){for(j,&c)in order.iter().enumerate().skip(i){r[i+k*j]=row[c];}}
     (order,r)
 }
-fn upper_inverse(r:&[f64],k:usize)->Vec<f64>{
+pub(super) fn upper_inverse(r:&[f64],k:usize)->Vec<f64>{
     let mut inv=vec![0.;k*k];
     for j in 0..k{inv[j+k*j]=1./r[j+k*j];for i in(0..j).rev(){let s:f64=(i+1..=j).map(|l|r[i+k*l]*inv[l+k*j]).sum();inv[i+k*j]=-s/r[i+k*i];}}
     inv
@@ -452,7 +456,7 @@ impl SlowPool{
     /// its steady limit, -lambda_j x_j / theta_j, would weigh the Ritz
     /// vectors' residuals by 1 / theta_j (measured: the steady estimate moved
     /// by up to a factor 2.7).
-    fn solve(&mut self,f:&[C],theta:C,coefficient:C,deflate:bool,steady:&mut dyn SteadySolves)->Result<Solved,String>{
+    fn solve(&mut self,f:&[C],theta:C,coefficient:C,deflate:bool,residual:f64,steady:&mut dyn SteadySolves)->Result<Solved,String>{
         let clock=Instant::now();self.work.solves+=1;
         let kernel=magnitude(theta)<KERNEL;let length=self.q.length;
         let deflation=if deflate&&!kernel{self.deflation.take()}else{None};
@@ -496,7 +500,7 @@ impl SlowPool{
             if let Some(d)=&deflation{for cx in &d.cx{let mut v=cx.clone();v.resize(count,ZERO);m.extend(v);}}
             let(x,rho)=least_squares(&m,count,p+slow,&phi_c);
             let outside=dot(&parts,&parts);let rn=(rho.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>()+outside).sqrt();
-            if rn<=RESIDUAL*fsize||steps>=MAXIMUM_STEPS{break x;}
+            if rn<=residual*fsize||steps>=MAXIMUM_STEPS{break x;}
             // Settled: two consecutive changes of the contribution below SETTLE
             // of its size (or of the steady error, the larger), the residual
             // below SETTLED_RESIDUAL.
@@ -560,15 +564,41 @@ impl SlowPool{
     pub fn mode(&mut self,b:&[C],ax:&[C],g:&[C],theta:C,coefficient:C,steady:&mut dyn SteadySolves)->Result<SlowSolution,String>{
         if magnitude(theta)<KERNEL{
             let f:Vec<C>=ax.iter().zip(g).map(|(a,v)|C{re:a.re+v.re,im:a.im+v.im}).collect();
-            let s=self.solve(&f,theta,coefficient,false,steady)?;
+            let s=self.solve(&f,theta,coefficient,false,RESIDUAL,steady)?;
             let solution=SlowSolution{theta,coefficient,basis:Vec::new(),x:s.x,deflated:Vec::new()};
             self.steady_scale=self.centre_populations(&solution.x).iter().map(|z|magnitude(*z)).fold(0.,f64::max)*magnitude(coefficient);
             return Ok(solution);
         }
-        let s=self.solve(g,theta,coefficient,true,steady)?;
+        let s=self.solve(g,theta,coefficient,true,RESIDUAL,steady)?;
         let mut basis=s.basis;basis.resize(b.len(),ZERO);for(t,v)in basis.iter_mut().zip(b){t.re-=v.re;t.im-=v.im;}
         let deflated=self.deflation.as_ref().map_or(Vec::new(),|d|s.deflated.iter().map(|&(i,l)|(d.index[i],d.theta[i],l)).collect());
         Ok(SlowSolution{theta,coefficient,basis,x:s.x,deflated})
+    }
+    /// (theta - A)^-1 f for a source outside the space (`fold_charge`), to the
+    /// residual `residual` |f|: the deflated solve away from the kernel,
+    /// whose part along the slow Ritz vectors (the deflated amplitudes) the
+    /// caller's model spans already, and the trace-free bordered one at the
+    /// kernel.
+    pub fn response(&mut self,f:&[C],theta:C,coefficient:C,residual:f64,steady:&mut dyn SteadySolves)->Result<SlowSolution,String>{
+        let s=self.solve(f,theta,coefficient,magnitude(theta)>=KERNEL,residual,steady)?;
+        Ok(SlowSolution{theta,coefficient,basis:s.basis,x:s.x,deflated:Vec::new()})
+    }
+    /// A solution's field Y = W c + U x and its image A Y (A unbordered),
+    /// as Hermitian-symmetric parts: [Y_a, Y_b, (A Y)_a, (A Y)_b] with
+    /// Y = Y_a + i Y_b.
+    pub fn fields(&self,basis:&[Vec<C>],images:&[Vec<C>],s:&SlowSolution)->Result<[Vec<C>;4],String>{
+        let(count,length)=(self.q.count,self.q.length);
+        let combine=|coordinates:&[Vec<f64>]|->Result<[Vec<C>;2],String>{
+            let mut h=vec![0.;2*count];
+            for(&x,c)in s.x.iter().zip(coordinates){if !nonzero(x){continue;}for(i,&v)in c.iter().enumerate(){h[i]+=x.re*v;h[count+i]+=x.im*v;}}
+            let mut g=vec![0.;2*length];self.q.combine(&self.lapack,&self.execution,&mut g,&h,2,1.)?;
+            Ok([self.packing.unpack(&g[..length]),self.packing.unpack(&g[length..])])};
+        let([mut ya,mut yb],[mut aa,mut ab])=(combine(&self.cu)?,combine(&self.cau)?);
+        for((&c,w),aw)in s.basis.iter().zip(basis).zip(images){if !nonzero(c){continue;}
+            for(((a,b),(p,q)),(&v,&u))in ya.iter_mut().zip(yb.iter_mut()).zip(aa.iter_mut().zip(ab.iter_mut())).zip(w.iter().zip(aw)){
+                *a=C{re:a.re+c.re*v.re,im:a.im+c.re*v.im};*b=C{re:b.re+c.im*v.re,im:b.im+c.im*v.im};
+                *p=C{re:p.re+c.re*u.re,im:p.im+c.re*u.im};*q=C{re:q.re+c.im*u.re,im:q.im+c.im*u.im};}}
+        Ok([ya,yb,aa,ab])
     }
     /// The Gram matrix W^T U of the basis against every pool direction
     /// (column-major k x p), from the directions' coordinates and W^T Q.

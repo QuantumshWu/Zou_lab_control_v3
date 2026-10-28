@@ -38,6 +38,7 @@ use super::blocks::BlockSystem;
 use super::kernels::SwKernels;
 use super::super::frame::SwFrame;
 use super::super::estimate_api::FrameColumns;
+use super::propagate::FieldCoordinates;
 use std::borrow::Cow;
 use std::sync::OnceLock;
 use crate::parallel::Execution;
@@ -268,6 +269,12 @@ impl<'p> ErrorLattice<'p>{
     /// outer mode, (field, outer slot) consecutive. The coordinate changes
     /// run as large GEMMs over every field and mode (E^-1 streamed once per
     /// task).
+    /// Hermitian-symmetric fields in the fast part's coordinates (sources
+    /// outside the space, `field_populations`).
+    pub fn field_coordinates(&mut self,fields:&[&[C]])->Result<FieldCoordinates,String>{
+        if fields.iter().any(|f|f.len()!=self.dimension()){return Err("Estimator: field dimensions differ from the lattice".into());}
+        let(near,outer)=self.coordinates(fields)?;Ok(FieldCoordinates{count:fields.len(),near,outer})
+    }
     fn coordinates(&mut self,fields:&[&[C]])->Result<(Vec<C>,Vec<C>),String>{
         let d=self.d;let execution=Execution::new()?;let basis=self.basis()?;let partner=self.partner()?;
         let(count,near,outer)=(fields.len(),self.near.len(),self.outer_modes.len());

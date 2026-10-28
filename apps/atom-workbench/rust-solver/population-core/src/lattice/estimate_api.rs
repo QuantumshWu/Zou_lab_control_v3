@@ -165,8 +165,19 @@ pub struct EstimateWork{
     pub block_operations:usize,pub block_solves:usize,
     /// Inner steps of steady solves.
     pub inner_steps:usize,
+    /// The fold charge's time (ms): the K^(1) rests and the memory, the
+    /// third order, the slow responses, the models and the fast part.
+    pub fold_ms:[f64;4],
     pub milliseconds:f64,
 }
+
+/// The fold remainders' charges of an estimate (population metric): the
+/// largest computed effect of the built ones over the outputs, the unbuilt
+/// ones' charge (in every output's bound). Zero where the Krylov error
+/// alone rejects the checkpoint: the charges only add, so they are not
+/// computed there.
+#[derive(Clone,Debug,Default)]
+pub struct FoldCharges{pub built:f64,pub unbuilt:f64}
 
 /// Error bounds of one checkpoint's outputs (population metric).
 #[derive(Clone,Debug,Default)]
@@ -177,6 +188,7 @@ pub struct ErrorEstimate{
     pub horizons:Vec<f64>,
     /// The steady state (None when not requested).
     pub steady:Option<f64>,
+    pub fold:FoldCharges,
     pub work:EstimateWork,
 }
 impl ErrorEstimate{

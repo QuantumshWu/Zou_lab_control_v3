@@ -1,7 +1,10 @@
 //! The error ledger: the population tolerance, the error metric, and every
 //! remainder the folded lattice leaves out as a generator-norm bound (closed
-//! form, prepared from the classification); the error estimate turns the
-//! bounds into population charges.
+//! form, prepared from the classification). The error estimate builds two
+//! of them and charges their action on the computed state (`third_order`
+//! and the K^(1) rests the operator leaves out, `k1_rest`:
+//! `estimator::fold_charge`); the others (`unbuilt`) are charged by their
+//! size relative to the fold's own.
 //!
 //! Bounds (rad/us, Schur test over the lattice blocks, for a lattice whose
 //! largest mode frequency is nu_max; d(r) = 1/(|nu_r| - nu_max - ||L0||)
@@ -18,7 +21,9 @@
 //! - `omitted_cross`: far + far groups below the cross-fold floor;
 //! - `non_structural`: near couplings below the structural floor, on their
 //!   edges leaving the lattice;
-//! - `dropped_entries`: fold entries below the storage floor (row sums).
+//! - `dropped_entries`: fold entries below the storage floor (row sums);
+//! - `k1_rest`: the K^(1) rests the lattice operator leaves out but for
+//!   their population rows (`operator::K1_REST_SHARE`), times nu_max.
 use super::*;
 use super::classification::{HarmonicPlan,Treatment};
 
@@ -40,21 +45,23 @@ pub fn metric(a:&[f64],b:&[f64],groups:&[Vec<usize>])->f64{
 #[derive(Clone,Debug,Default)]
 pub struct RemainderLedger{
     pub nu_freeze:f64,pub third_order:f64,pub far_shell:f64,pub tail:f64,
-    pub omitted_cross:f64,pub non_structural:f64,pub dropped_entries:f64,
+    pub omitted_cross:f64,pub non_structural:f64,pub dropped_entries:f64,pub k1_rest:f64,
     /// max |nu_q| ||D_s^-1|| over the folded steps.
     pub expansion_parameter:f64,
     /// The diagonal and cross folds' own bound sum c c' d (the size of K).
     pub fold:f64,
 }
 impl RemainderLedger{
-    pub fn total(&self)->f64{
-        self.nu_freeze+self.third_order+self.far_shell+self.tail+self.omitted_cross+self.non_structural+self.dropped_entries
+    /// The remainders the estimate does not build.
+    pub fn unbuilt(&self)->f64{
+        self.nu_freeze+self.far_shell+self.tail+self.omitted_cross+self.non_structural+self.dropped_entries
     }
     /// Bounds for a lattice with largest |nu_q| = `nu_max`; `dropped` are the
-    /// fold storage's dropped row sums of K^(0) and K^(1).
-    pub fn new(plan:&HarmonicPlan,nu_max:f64,dropped:[f64;2])->Result<Self,String>{
+    /// fold storage's dropped row sums of K^(0) and K^(1), `k1_rest` the
+    /// summed row sums of the K^(1) rests the lattice operator leaves out.
+    pub fn new(plan:&HarmonicPlan,nu_max:f64,dropped:[f64;2],k1_rest:f64)->Result<Self,String>{
         let l0=plan.l0_bound;let cut=plan.cut;
-        let mut ledger=Self{dropped_entries:dropped[0]+nu_max*dropped[1],..Default::default()};
+        let mut ledger=Self{dropped_entries:dropped[0]+nu_max*dropped[1],k1_rest:nu_max*k1_rest,..Default::default()};
         ledger.non_structural=plan.steps.iter().filter(|s|s.treatment==Treatment::Explicit{structural:false}).map(|s|s.size).sum();
         ledger.fold=plan.targets.iter().map(|t|t.size).sum();
         let far=plan.far();
@@ -107,10 +114,10 @@ mod tests{
     #[test]
     fn lattice_ledger_bounds_are_finite_and_split_without_double_counting(){
         let f=fixture();let p=prepared(&f);
-        let ledger=RemainderLedger::new(&p.plan,6.,[0.,0.]).unwrap();
-        assert!(ledger.expansion_parameter<1e-2&&ledger.nu_freeze>0.&&ledger.third_order>0.&&ledger.total().is_finite());
+        let ledger=RemainderLedger::new(&p.plan,6.,[0.,0.],0.).unwrap();
+        assert!(ledger.expansion_parameter<1e-2&&ledger.nu_freeze>0.&&ledger.third_order>0.&&ledger.unbuilt().is_finite());
         // The third-order paths are part of the enumerated three-step returns.
         assert!(ledger.far_shell>=0.&&ledger.tail.is_finite());
-        assert_eq!(RemainderLedger::new(&p.plan,0.,[0.,0.]).unwrap().nu_freeze,0.);
+        assert_eq!(RemainderLedger::new(&p.plan,0.,[0.,0.],0.).unwrap().nu_freeze,0.);
     }
 }

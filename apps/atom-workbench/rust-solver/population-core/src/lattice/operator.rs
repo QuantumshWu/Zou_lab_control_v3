@@ -150,9 +150,10 @@ impl<'a> LatticeOperator<'a>{
     /// Complex multiply-adds of one application: the blocks and edges, the
     /// fold rests.
     pub fn work_split(&self)->[usize;2]{[self.block_work,self.rest_work]}
-    /// Dropped fold entries (largest row sums of K^(0) and K^(1)), the
-    /// K^(1) rests left out included.
-    pub fn dropped(&self)->[f64;2]{let[a,b]=self.prepared.fold.dropped();[a,b+self.dropped_k1_rest]}
+    /// The fold remainders of this lattice as generator-norm bounds.
+    pub fn ledger(&self)->Result<super::ledger::RemainderLedger,String>{
+        super::ledger::RemainderLedger::new(&self.prepared.plan,self.nu_max(),self.prepared.fold.dropped(),self.dropped_k1_rest)
+    }
     /// y = A x for a Hermitian-symmetric field x (x_-q = x_q^dagger).
     pub fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{self.apply_parts(x,y,Parts::Full)}
     /// y = (selected parts of A) x for a Hermitian-symmetric field x.
