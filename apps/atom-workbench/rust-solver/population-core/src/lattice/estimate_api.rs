@@ -76,7 +76,8 @@ pub struct EstimateSetup<'a>{
     pub lattice:&'a LatticeSets,
     pub outputs:Outputs<'a>,
     /// The request's Schrieffer-Wolff / Floquet frame (built for the
-    /// longest output time).
+    /// longest output time; its parts are built on first use, and a steady
+    /// state alone never needs them).
     pub frame:&'a SwFrame<'a>,
     /// The fold remainders as generator-norm bounds (rad/us) for the
     /// lattice's largest |nu_q|: the fold charges.

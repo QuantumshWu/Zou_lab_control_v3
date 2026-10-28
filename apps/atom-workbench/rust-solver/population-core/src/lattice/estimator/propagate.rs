@@ -45,9 +45,9 @@ impl ErrorLattice<'_>{
     /// carry none). The Ritz data must be closed under conjugation.
     pub fn populations(&self,ritz:&RitzSources<'_>,times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
         let(n,d,k)=(self.n,self.d,self.columns);let r=ritz.values.len();
-        if ritz.vectors.len()!=k*r||ritz.coefficients.len()!=r{return Err("Estimator: Ritz data dimensions differ from the basis".into());}
         let t_count=times.len();
         if t_count==0||r==0{return Ok(vec![vec![0.;n];t_count]);}
+        if ritz.vectors.len()!=k*r||ritz.coefficients.len()!=r{return Err("Estimator: Ritz data dimensions differ from the basis".into());}
         // B a and B theta a (column-major k x r).
         let mut ba=vec![ZERO;k*r];let mut bta=vec![ZERO;k*r];
         for m in 0..r{let(a,ta)=(ritz.coefficients[m],mul(ritz.values[m],ritz.coefficients[m]));

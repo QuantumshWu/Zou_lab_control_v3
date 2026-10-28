@@ -262,10 +262,10 @@ fn mean_value(model:&Model,options:&Options,request:&Prepared,run:Result<&Soluti
             "asymptoticAccuracy":{"requestedTolerance":POPULATION_TOLERANCE,"estimatedMaximumError":estimated,"acceptanceFactor":ACCEPTANCE_FACTOR,
                 "projectionCharge":projection,"metric":"max over states and requested F groups"},
             "zeroModeCount":solution.conserved,"conservedQuantities":solution.conserved,
-            "slowestRatePerUs":solution.slowest.map(|s|s.rate),"slowestRelaxationUs":solution.slowest.map(|s|1./s.rate),
+            "slowestRatePerUs":solution.slowest.filter(|s|s.resolved()).map(|s|s.rate),"slowestRelaxationUs":solution.slowest.filter(|s|s.resolved()).map(|s|1./s.rate),
             "slowestRelaxation":solution.slowest.map(|s|json!({"ratePerUs":s.rate,"residualPerUs":s.residual,"resolved":s.resolved(),
                 "relaxationRangeUs":[1./(s.rate+s.residual),if s.rate>s.residual{Some(1./(s.rate-s.residual))}else{None}],
-                "rule":"the decaying Ritz value of least rate outside the kernel; resolved when its residual is within a tenth of the rate, else the range from the residual"})),
+                "rule":"the decaying Ritz value of least rate outside the kernel; resolved when its residual is within a tenth of the rate (then slowestRelaxationUs), else only the range from the residual: at least 1 / (rate + residual), a slower mode the space has not reached included"})),
             "discardedOpticalCoherence":discarded,"horizonRelaxingBound":relaxing,
             "preparationMs":preparation,"lattice":lattice_json(prepared,Some(solution))}}))
 }

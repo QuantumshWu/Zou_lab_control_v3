@@ -2,7 +2,8 @@
 //! of one lattice operator applied to x0, read from one reduced model.
 //!
 //! 1. The explicit set P and its ring Q (`charge_set`); the lattice P u Q
-//!    and its solves at the poles (`poles`).
+//!    and its solves at the poles (`poles`). The request's frame (`frame`,
+//!    the projection's inner product) is built on its own thread meanwhile.
 //! 2. One rational Krylov space from x0 (`space`): the bordered steady
 //!    column first, the translations through the gate active from the start,
 //!    then the ladder's poles by their expected gain, re-ranked at every
@@ -11,18 +12,24 @@
 //!    reduce it loses its turn; one never solved keeps the whole), per real
 //!    solve (a complex pole costs two); a pole that adds no direction leaves
 //!    the ladder. The slowest relaxation is an output too: while it is
-//!    neither resolved (residual within SLOW_ACCURACY of the rate) nor
-//!    bounded far beyond every output time, the real poles near its rate
-//!    gain priority: the best population gain (at least the tolerance) times
-//!    its relative need, by their log distance, and the share of the need
-//!    their last solve removed.
-//! 3. Every CHECKPOINT solves: the reduced model (`reduced`), its outputs
-//!    (trajectory on the grid, horizons, steady state, slowest relaxation,
-//!    conserved count) and the error estimate (`estimate_api`); accepted
-//!    when ACCEPTANCE_FACTOR x the largest bound is within the tolerance; the
-//!    slowest relaxation is then reported resolved, or as the bound its
-//!    residual gives. The ladder exhausted, the solve budget or the basis
-//!    budget (BASIS_BYTES) spent without acceptance is an error.
+//!    neither resolved (residual within SLOW_ACCURACY of the rate) nor, for
+//!    a request without a horizon, bounded far beyond every output time,
+//!    the real poles near its rate gain priority: the best population gain
+//!    (at least the tolerance) times its relative need, by their log
+//!    distance, and the share of the need their last solve removed.
+//! 3. Every CHECKPOINT solves (a steady state alone: also right after the
+//!    steady column): the reduced model (`reduced`), its outputs (trajectory
+//!    on the grid, horizons, steady state, slowest relaxation, conserved
+//!    count) and the error estimate (`estimate_api`); accepted when
+//!    ACCEPTANCE_FACTOR x the largest bound is within the tolerance and, for
+//!    a horizon, the slowest relaxation is resolved (unless a budget is
+//!    spent; otherwise it is reported as the range its residual gives). The
+//!    ladder exhausted, the solve budget or the basis budget (BASIS_BYTES)
+//!    spent without acceptance is an error.
+//!
+//! A steady state alone is the kernel of the space whatever the inner
+//! product (the steady column is in it), so its model is the Euclidean
+//! Galerkin one and the frame is never built.
 //!
 //! The conserved count is the reduced model's kernel (the conserved
 //! quantities x0 reaches), and the folded centre block's when the lattice is
@@ -109,16 +116,19 @@ pub fn simplex(values:&[f64])->Vec<f64>{
 }
 
 /// The slowest relaxation of a model: among the slowest decaying Ritz pairs
-/// (theta, W y) of the reduced model and of the space's Euclidean
-/// Rayleigh-Ritz (whose residual is orthogonal to the space: the frame's
-/// Galerkin vectors keep a fast part with a large image), the least rate
-/// located by its residual |A W y - theta W y| / |W y| (at most the rate;
-/// from the images, which keep its accuracy at slow rates), the smallest
-/// residual among the pairs within that residual of it; else the best
-/// located one.
-fn slowest(model:&Model,galerkin:&Projection,lapack:&Lapack,space:&Space,vectors:&super::krylov::Vectors)->Result<Option<SlowRate>,String>{
+/// (theta, W y) of the reduced model, and with `euclidean` of the space's
+/// Euclidean Rayleigh-Ritz too (whose residual is orthogonal to the space:
+/// the frame's Galerkin vectors keep a fast part with a large image), the
+/// least rate located by its residual |A W y - theta W y| / |W y| (at most
+/// the rate; from the images, which keep its accuracy at slow rates), the
+/// smallest residual among the pairs within that residual of it; else the
+/// best located one. The reported relaxation takes both sets; the poles'
+/// ranking the reduced model's alone (the Euclidean pairs' early
+/// candidates steered five lasers + tweezer at 20 us into a space whose
+/// Galerkin model grew 2-20 modes, not accepted in 39 solves against 12).
+fn slowest(model:&Model,galerkin:&Projection,lapack:&Lapack,space:&Space,vectors:&super::krylov::Vectors,euclidean:bool)->Result<Option<SlowRate>,String>{
     let mut candidates:Vec<(C,Vec<C>)>=model.slow_candidates(SLOW_CANDIDATES).into_iter().map(|(j,_)|(model.theta[j],model.ritz_coordinates(j))).collect();
-    candidates.extend(galerkin.euclidean_slow_pairs(lapack,SLOW_CANDIDATES)?);
+    if euclidean{candidates.extend(galerkin.euclidean_slow_pairs(lapack,SLOW_CANDIDATES)?);}
     if candidates.is_empty(){return Ok(None);}
     let parts:Vec<Vec<f64>>=candidates.iter().flat_map(|(_,y)|[y.iter().map(|z|z.re).collect(),y.iter().map(|z|z.im).collect()]).collect();
     let basis:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();let images:Vec<&[C]>=space.images.iter().map(|v|v.as_slice()).collect();
@@ -198,7 +208,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     let mut queue:Vec<usize>=Vec::new();
     let mut checkpoints:Vec<Checkpoint>=Vec::new();
     let lapack=&prepared.lapack;let ops=super::krylov::Vectors::new(lattice.operator(),1)?;
-    let mut checkpoint=|space:&Space,galerkin:&mut Projection,lattice:&mut Lattice<'_>,timing:&mut Timing,checkpoints:&mut Vec<Checkpoint>,exhausted:bool|->Result<(Model,Checkpoint),String>{
+    let mut checkpoint=|space:&Space,galerkin:&mut Projection,lattice:&mut Lattice<'_>,timing:&mut Timing,checkpoints:&mut Vec<Checkpoint>,exhausted:bool|->Result<(Model,Checkpoint,Option<SlowRate>),String>{
         let clock=Instant::now();
         galerkin.ingest(test,&space.basis,&space.images)?;
         let model=galerkin.model(lapack,space.initial_norm,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
@@ -213,13 +223,13 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
         for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
         // A mean also needs the slowest relaxation resolved (the solve or
         // basis budget spent: reported as its range).
-        let slow=slowest(&model,galerkin,lapack,space,&ops)?;
+        let slow=slowest(&model,galerkin,lapack,space,&ops,true)?;let ranking=slowest(&model,galerkin,lapack,space,&ops,false)?;
         let accepted=ACCEPTANCE_FACTOR*estimate.largest()<=tolerance&&(!resolve||exhausted||slow.is_none_or(|s|s.resolved()));
         let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,accepted,
             growing:model.growing,clipped:model.clipped,projected:model.projected,conserved:model.conserved(),slowest:slow,
             trajectory,horizons,steady,inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
         checkpoints.push(point.clone());
-        Ok((model,point))
+        Ok((model,point,ranking))
     };
     let mut accepted:Option<Model>=None;
     // The last checkpoint's model, reused by the ranking at the same solve.
@@ -235,11 +245,11 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
         let live:Vec<usize>=(0..points.len()).filter(|&i|alive[i]).collect();
         let exhausted=live.is_empty()||space.solves()>=MAXIMUM_SOLVES||space.full();
         if exhausted||space.solves()%CHECKPOINT==0||(steady_only&&space.solves()==1){
-            let(model,point)=checkpoint(&space,&mut galerkin,&mut lattice,&mut timing,&mut checkpoints,exhausted)?;
+            let(model,point,ranking)=checkpoint(&space,&mut galerkin,&mut lattice,&mut timing,&mut checkpoints,exhausted)?;
             if let Some(o)=observer.as_mut(){o(&point);}
             if point.accepted{accepted=Some(model);break;}
             if exhausted{break;}
-            slow_need=point.slowest.filter(|s|!(s.resolved()||(!resolve&&s.beyond(longest))));current=Some((space.solves(),model));queue.clear();
+            slow_need=ranking.filter(|s|!(s.resolved()||(!resolve&&s.beyond(longest))));current=Some((space.solves(),model));queue.clear();
         }
         // The next pole by its expected gain.
         if queue.is_empty(){
@@ -253,7 +263,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
                 if let Some(before)=solved_at[i].take(){remaining[i]=if before>0.{(score[i]/before).min(1.)}else{1.};}
             }
             // Before the first checkpoint, the slowest relaxation of this model.
-            if checkpoints.is_empty(){slow_need=slowest(&model,&galerkin,lapack,&space,&ops)?.filter(|s|!(s.resolved()||(!resolve&&s.beyond(longest))));}
+            if checkpoints.is_empty(){slow_need=slowest(&model,&galerkin,lapack,&space,&ops,false)?.filter(|s|!(s.resolved()||(!resolve&&s.beyond(longest))));}
             let slow=slow_need;
             // The slow relaxation's need and target: its rate once its
             // residual locates it, else the slowest reach (the slow points
