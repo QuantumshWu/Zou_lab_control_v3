@@ -45,6 +45,8 @@ use super::eigenbasis::BlockEigenbasis;
 /// solve (its algebraic error is the steady output's).
 pub const INNER_TOLERANCE:f64=1e-7;
 pub const STEADY_TOLERANCE:f64=1e-9;
+/// Diagnostics: ATOM_DIAG_INNER=tol replaces both (a reference run).
+fn tolerances()->(f64,f64){super::diagnostics::perturbation("INNER").map_or((INNER_TOLERANCE,STEADY_TOLERANCE),|t|(t,t.min(STEADY_TOLERANCE)))}
 /// The bordered solve counts as singular above this true residual.
 const BORDERED_SINGULAR:f64=1e-6;
 /// The pole 0+ (1/us) of a singular bordered system.
@@ -150,32 +152,33 @@ impl Space{
     /// One column at a pole; returns the directions it added.
     pub fn solve(&mut self,lattice:&mut Lattice<'_>,pole:Pole)->Result<usize,String>{
         let clock=Instant::now();let length=self.basis[0].len();let before=lattice.work().block_operations();
+        let(inner,steady)=tolerances();
         let(added,steps,residual)=match pole{
             Pole::Zero=>{
                 let op=lattice.operator();let n=op.n;let c0=op.centre*n*n;let mut u=vec![ZERO;length];for i in 0..n{u[c0+i*n+i]=C{re:1./n as f64,im:0.};}
-                let bordered=lattice.solve(Pole::Zero,&[u],STEADY_TOLERANCE);
+                let bordered=lattice.solve(Pole::Zero,&[u],steady);
                 let(w,steps,residual)=match bordered{Ok((w,steps,residual))if residual<=BORDERED_SINGULAR=>{
                         let w=w.into_iter().next().unwrap_or_default();let trace:f64=(0..n).map(|i|w[c0+i*n+i].re).sum();
                         if trace.abs()>0.{self.steady_baseline=Some((0..n).map(|i|w[c0+i*n+i].re/trace).collect());}
                         (w,steps,residual)},
                     _=>{let x0:Vec<C>=self.krylov[0].iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-                        let(w,steps,residual)=lattice.solve(Pole::Real(ZERO_PLUS),&[x0],INNER_TOLERANCE)?;(w.into_iter().next().unwrap_or_default(),steps,residual)}};
+                        let(w,steps,residual)=lattice.solve(Pole::Real(ZERO_PLUS),&[x0],inner)?;(w.into_iter().next().unwrap_or_default(),steps,residual)}};
                 let floor=self.floor();(usize::from(self.append(lattice,w,floor)?),steps,residual)
             }
             Pole::Real(_)=>{
                 let f:Vec<C>=self.krylov.last().ok_or("Empty Krylov sequence")?.iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-                let(w,steps,residual)=lattice.solve(pole,&[f],INNER_TOLERANCE)?;
+                let(w,steps,residual)=lattice.solve(pole,&[f],inner)?;
                 let mut added=0;for column in w{added+=self.add_krylov(lattice,column)?;}
                 (added,steps,residual)
             }
             Pole::Complex(_)=>{
                 let f:Vec<C>=self.krylov.last().ok_or("Empty Krylov sequence")?.iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-                let(w,steps,residual)=lattice.solve(pole,&[f,vec![ZERO;length]],INNER_TOLERANCE)?;
+                let(w,steps,residual)=lattice.solve(pole,&[f,vec![ZERO;length]],inner)?;
                 let mut added=0;for column in w{added+=self.add_krylov(lattice,column)?;}
                 (added,steps,residual)
             }
         };
-        self.noise_floor=NOISE*INNER_TOLERANCE;
+        self.noise_floor=NOISE*inner;
         self.columns.push(Column{pole,steps,residual,added,milliseconds:clock.elapsed().as_secs_f64()*1e3,blocks:lattice.work().block_operations()-before});
         Ok(added)
     }

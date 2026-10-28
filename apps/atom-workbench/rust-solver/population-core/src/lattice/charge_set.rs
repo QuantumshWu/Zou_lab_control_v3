@@ -182,9 +182,14 @@ pub fn explicit_set(prepared:&LatticePrepared,initial:&[C],tolerance:f64)->Resul
     }
     // 4. Ring closure again.
     promoted.extend(condition.close(&mut explicit)?);
+    // Diagnostics: ATOM_DIAG_RINGS=k enlarges P by its ring k times (a
+    // reference lattice).
+    for _ in 0..super::diagnostics::perturbation("RINGS").map_or(0,|k|k as usize){
+        let set:Vec<Charge>=explicit.iter().cloned().collect();explicit.extend(ring(prepared,&set)?);}
     let mut p:Vec<Charge>=explicit.into_iter().collect();
     p.sort_by_key(|q|(q.iter().map(|&k|k.unsigned_abs()as u64).sum::<u64>(),q.clone()));
     let q=ring(prepared,&p)?;
+    if super::diagnostics::perturbation("RINGS").is_some(){eprintln!("DBG lattice P {} Q {}",p.len(),q.len());}
     let lattice:BTreeSet<&Charge>=p.iter().chain(&q).collect();
     let leak=amplitudes.iter().filter(|(c,_)|!lattice.contains(c)).map(|(_,&a)|a).fold(0.,f64::max);
     let internal=condition.edges(&p.iter().cloned().collect())?;

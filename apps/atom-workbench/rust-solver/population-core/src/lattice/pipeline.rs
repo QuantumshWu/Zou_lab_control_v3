@@ -195,7 +195,13 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     let ledger=lattice.operator().ledger()?;
     if ledger.expansion_parameter>EXPANSION_LIMIT{return Err(format!("Static fold expansion parameter {:e} above {EXPANSION_LIMIT:e}",ledger.expansion_parameter));}
     // 2. The space: translations, the steady column.
-    let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*(op.modes.len()+op.canonical_count()))};
+    // Diagnostics (a reference run): ATOM_DIAG_MAX_SOLVES and
+    // ATOM_DIAG_BASIS_GB replace the budgets, ATOM_DIAG_NO_ESTIMATE=1 skips
+    // the error estimate.
+    let maximum_solves=super::diagnostics::perturbation("MAX_SOLVES").map_or(MAXIMUM_SOLVES,|v|v as usize);
+    let basis_bytes=super::diagnostics::perturbation("BASIS_GB").map_or(BASIS_BYTES,|v|(v*(1u64<<30)as f64)as usize);
+    let no_estimate=super::diagnostics::perturbation("NO_ESTIMATE").is_some();
+    let capacity={let op=lattice.operator();let d=op.n*op.n;basis_bytes/(std::mem::size_of::<C>()*2*d*(op.modes.len()+op.canonical_count()))};
     let mut space=Space::new(&mut lattice,initial,capacity)?;
     for s in charge_set::gated_steps(prepared,tolerance){if lattice.operator().index.contains_key(&s){space.activate(&mut lattice,&s)?;}}
     timing.setup_ms=clock.elapsed().as_secs_f64()*1e3;
@@ -230,7 +236,8 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
         let steady=model.steady_populations(galerkin);
         timing.outputs_ms+=clock3.elapsed().as_secs_f64()*1e3;
         let clock2=Instant::now();
-        let mut estimate=estimator.estimate(&view(space,&model,ModelOutputs{trajectory:&trajectory,horizons:&horizons,steady:&steady},galerkin),lattice)?;
+        let mut estimate=if no_estimate{ErrorEstimate{trajectory:vec![f64::INFINITY;trajectory.len()],horizons:vec![f64::INFINITY;horizons.len()],steady:request.steady.then_some(f64::INFINITY),work:Default::default()}}
+            else{estimator.estimate(&view(space,&model,ModelOutputs{trajectory:&trajectory,horizons:&horizons,steady:&steady},galerkin),lattice)?};
         galerkin.clear_frame();
         timing.estimate_ms+=clock2.elapsed().as_secs_f64()*1e3;
         for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
@@ -258,7 +265,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     let mut slow_need:Option<SlowRate>=None;
     loop{
         let live:Vec<usize>=(0..points.len()).filter(|&i|alive[i]).collect();
-        let exhausted=live.is_empty()||space.solves()>=MAXIMUM_SOLVES||space.full();
+        let exhausted=live.is_empty()||space.solves()>=maximum_solves||space.full();
         if exhausted||space.solves()%CHECKPOINT==0||(!propagates&&space.solves()==1){
             let(model,point,ranking)=checkpoint(&space,&mut galerkin,&mut lattice,&mut timing,&mut checkpoints,exhausted)?;
             if let Some(o)=observer.as_mut(){o(&point);}
