@@ -69,8 +69,9 @@ pub struct Outputs<'a>{
 
 /// Everything fixed for one request.
 pub struct EstimateSetup<'a>{
-    /// Generator, plan, fold, `floquet` (the shared FloquetKernels),
-    /// `eigenbasis()` (the shared real eigenbasis of L0' with exact batched
+    /// Generator, plan, fold, `floquet` (the shared FloquetKernels), the
+    /// shared real eigenbases of L0' (`eigenbasis()` exact, the frame's and
+    /// the error propagation's; `screening_eigenbasis()` for the ring's
     /// block solves), LAPACK.
     pub prepared:&'a LatticePrepared,
     pub lattice:&'a LatticeSets,
