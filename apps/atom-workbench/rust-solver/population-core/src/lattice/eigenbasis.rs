@@ -241,9 +241,31 @@ impl BlockEigenbasis{
         if !(trace.abs()>0.){return Err("The dressed centre's slowest mode has no trace".into());}
         Ok(block.iter().map(|z|scaled(*z,1./trace)).collect())
     }
+    pub fn dimension(&self)->usize{self.d}
+    /// The conjugate partner of eigen-coordinate j: J e_j = e_partner(j) for
+    /// the Hermitian flip J (x -> x^dagger), whose coordinates are the
+    /// complex conjugates; a real eigenvalue's vector is its own partner.
+    pub fn partner(&self,j:usize)->usize{match self.kind[j]{1=>j+1,2=>j-1,_=>j}}
+    /// Population rows of the complex eigenvectors (column-major n x d).
+    pub fn population_rows(&self)->&[C]{&self.readout}
+    /// The complex eigenvectors as row-major n x n blocks, d consecutive
+    /// blocks: v_r + i v_i for the first of a pair, v_r - i v_i for the
+    /// second.
+    pub fn eigenvector_blocks(&self)->Vec<C>{
+        let(n,d)=(self.n,self.d);let mut out=Vec::with_capacity(d*d);
+        for j in 0..d{
+            let column=|k:usize|&self.vectors[d*k..d*(k+1)];
+            let coordinate:Vec<C>=match self.kind[j]{
+                0=>column(j).iter().map(|&v|C{re:v,im:0.}).collect(),
+                1=>column(j).iter().zip(column(j+1)).map(|(&a,&b)|C{re:a,im:b}).collect(),
+                _=>column(j-1).iter().zip(column(j)).map(|(&a,&b)|C{re:a,im:-b}).collect()};
+            out.extend(from_coordinates(&coordinate,n));
+        }
+        out
+    }
     /// Coefficients on the complex eigenvectors of row-major blocks
     /// (column-major d x count): one real GEMM with E_R^-1, then the pair rule.
-    fn coefficients(&self,blocks:&[&[C]])->Result<Vec<C>,String>{
+    pub fn coefficients(&self,blocks:&[&[C]])->Result<Vec<C>,String>{
         let(n,d)=(self.n,self.d);let count=blocks.len();
         let mut parts=vec![0.;d*2*count];
         for(c,block)in blocks.iter().enumerate(){for(k,v)in coordinates(block,n).into_iter().enumerate(){parts[k+d*c]=v.re;parts[k+d*(count+c)]=v.im;}}

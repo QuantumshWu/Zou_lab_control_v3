@@ -30,7 +30,9 @@
 //! - `reduced`: the Galerkin model in the dressed coordinates and every
 //!   output from it;
 //! - `estimate_api`: what the error estimate reads and returns;
-//!   `estimate_placeholder`: the temporary residual bound behind it;
+//! - `estimator`: the error estimate (one error equation for every output,
+//!   the omitted ring slaved, Schrieffer-Wolff propagation of the near
+//!   modes, the slow modes exact by recycled GCRO);
 //! - `pipeline`: the request: lattice, space, checkpoints, acceptance;
 //! - `ledger`: the tolerance, the error metric and the fold's remainder
 //!   bounds.
@@ -57,7 +59,7 @@ pub mod poles;
 pub mod space;
 pub mod reduced;
 pub mod estimate_api;
-pub mod estimate_placeholder;
+pub mod estimator;
 pub mod pipeline;
 pub mod ledger;
 pub use generator::{Component,Generator,Sparse,Superop};
