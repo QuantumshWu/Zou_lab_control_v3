@@ -13,7 +13,7 @@ test('the long-time horizon is a dynamics setting: 1 s by default, saved, migrat
   const old=JSON.parse(JSON.stringify(scene));delete old.dynamics.meanHorizonUs;
   assert.equal(validateScene(old).dynamics.meanHorizonUs,1e6,'a scene from before reads at 1 s');
   for(const horizon of [1e5,1e6,null]){const s=structuredClone(scene);s.dynamics.meanHorizonUs=horizon;assert.equal(validateScene(JSON.parse(JSON.stringify(s))).dynamics.meanHorizonUs,horizon);}
-  assert.throws(()=>validateScene({...old,dynamics:{...old.dynamics,meanHorizonUs:3e6}}),/观察时长/);
+  assert.throws(()=>validateScene({...old,dynamics:{...old.dynamics,meanHorizonUs:3e6}}),/长期布居的时刻 T 无效/);
   assert.equal(resolveMeanHorizon({}),1e6);assert.equal(resolveMeanHorizon({meanHorizonUs:null}),null);
   const other={...scene.dynamics,meanHorizonUs:null};
   assert.notEqual(dynamicsCacheKey(scene,scene.dynamics,true),dynamicsCacheKey(scene,other,true),'the mean depends on it');
@@ -29,5 +29,5 @@ test('the horizon goes to the solver and a solver that echoes it must echo the o
   const data={...nativeResult({states,initialIndex:index,timesUs:[0]}),assumptions:[]};
   assert.equal(normalizeDynamicsResult(data,scene).steady.horizonUs,undefined,'not echoed: t → ∞');
   assert.equal(normalizeDynamicsResult({...data,horizonUs:1e6},scene).steady.horizonUs,1e6);
-  assert.throws(()=>normalizeDynamicsResult({...data,horizonUs:42},scene),/观察时长/);
+  assert.throws(()=>normalizeDynamicsResult({...data,horizonUs:42},scene),/长期布居时刻 T/);
 });

@@ -126,8 +126,8 @@ export interface DynamicsSettings {
    * state is {kind:'state', id: initialStateId}. Scene loading folds a
    * 'state' spec into initialStateId, so this holds only mixed kinds. */
   initialState?: InitialStateSpec;
-  /** The observation horizon T of the long-time population p̄(T), in us: 1e5 (100 ms),
-   * 1e6 (1 s) or null (t → ∞). Absent reads as the 1 s default (resolveMeanHorizon). */
+  /** The time T of the long-time population p̄(T), in us: 1e5 (100 ms), 1e6 (1 s) or null
+   * (t → ∞). Absent reads as the 1 s default (resolveMeanHorizon). */
   meanHorizonUs?: number|null;
   monitorMode?:'auto'|'manual';
   monitoredGroupIds?:string[];
@@ -158,8 +158,9 @@ export function canonicalInitialState(spec:InitialStateSpec):InitialStateSpec {
   if(spec.kind==='weights')return {kind:'weights',weights:Object.fromEntries(Object.entries(spec.weights).sort(([a],[b])=>a<b?-1:a>b?1:0))};
   return spec.kind==='state'?{kind:'state',id:spec.id}:spec.kind==='thermal'?{kind:'thermal',temperatureK:spec.temperatureK}:{kind:'unpolarized',manifold:spec.manifold};
 }
-/** p̄(T): processes faster than T relaxed and fast oscillations averaged out; ∞ is the
- * t → ∞ state, which slow scattering can make forget the initial state. */
+/** p̄(T): the population at t = T with only the fast oscillations around T (beats, optical
+ * micromotion) averaged out -- the zero-frequency Fourier component of the state at T, not an
+ * average over 0–T. ∞ is the limit t → ∞, which slow scattering can make forget the initial state. */
 export const MEAN_HORIZONS_US:readonly (number|null)[]=[1e5,1e6,null];
 export const DEFAULT_MEAN_HORIZON_US=1e6;
 export function resolveMeanHorizon(settings?:{meanHorizonUs?:number|null}):number|null{const h=settings?.meanHorizonUs;return h===undefined?DEFAULT_MEAN_HORIZON_US:h;}

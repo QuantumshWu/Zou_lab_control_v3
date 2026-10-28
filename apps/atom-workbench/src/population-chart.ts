@@ -3,7 +3,9 @@ import type {DurationUnit} from './types.js';
 import {isTimeAverage,type SteadyResult} from './solver-types.js';
 
 export interface PopulationPlot {timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];steady?:SteadyResult;}
-export interface PopulationChartOptions {scale?:'linear'|'log';viewportWidth?:number;initialId?:string;timeUnit?:DurationUnit;showTotalExcited?:boolean;}
+export interface PopulationChartOptions {scale?:'linear'|'log';viewportWidth?:number;initialId?:string;timeUnit?:DurationUnit;showTotalExcited?:boolean;
+  /** The long-time column's name: p̄(T) at the T the result holds (p̄(1 s), p̄(∞)). */
+  meanLabel?:string;}
 // v3 scientific series palette: crates/zlc-plot/src/style.rs, Palette::default.
 const palette=['#517FA6','#B17D4B','#568C79','#99719B','#B36F72','#558F9C','#7E7CA5','#92924F'];
 const esc=(value:unknown)=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
@@ -87,10 +89,11 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     for(const id of ids){const p=result.populations[id]![index]!;cursor.append(element('circle',{cx:String(xx),cy:String(g.y(p)),r:'3',fill:options.scale==='log'&&p<=g.floor?'white':populationColor(id),stroke:'white','stroke-width':'1.5'}));}
     cursor.style.display='';
     const steady=result.steady?.converged&&result.steady.populations?result.steady:undefined,mean=isTimeAverage(steady?.status);
-    const head=steady?`<div class="readout-row readout-head"><span></span><span>p(t)</span><span>${mean?'长期平均':'长期布居'}</span></div>`:'';
+    const meanLabel=options.meanLabel??'p̄(T)';
+    const head=steady?`<div class="readout-row readout-head"><span></span><span>p(t)</span><span>${esc(meanLabel)}</span></div>`:'';
     const asymptotic=(id:string)=>{if(id!=='__excited__')return steady?.populations?.[id]??NaN;const excited=Object.entries(steady?.populations??{}).filter(([state])=>/^(D1|D2)-/.test(state));return excited.length?excited.reduce((sum,[,p])=>sum+p,0):NaN;};
     const row=(id:string,name:string,p:number,color:string)=>`<div class="readout-row${steady?'':' two'}" data-population-readout="${esc(id)}"><span class="readout-name" style="color:${color}">${esc(name)}${id===options.initialId?' · 初态':''}</span><span>${esc(populationValue(p))}</span>${steady?`<span class="readout-steady">${esc(populationValue(asymptotic(id)))}</span>`:''}</div>`;
-    tooltip.innerHTML=`<div class="readout-time">t = ${digits(t*g.unit.factor)} ${g.unit.name}</div>${head}${ids.map(id=>row(id,labels[id]??id,result.populations[id]![index]!,populationColor(id))).join('')}${options.showTotalExcited===false?'':row('__excited__','激发态合计',result.totalExcited[index]!,'#808080')}${mean?'<p class="note wrap">“长期平均”一列是长期时间平均，不是瞬时布居。</p>':''}`;
+    tooltip.innerHTML=`<div class="readout-time">t = ${digits(t*g.unit.factor)} ${g.unit.name}</div>${head}${ids.map(id=>row(id,labels[id]??id,result.populations[id]![index]!,populationColor(id))).join('')}${options.showTotalExcited===false?'':row('__excited__','激发态合计',result.totalExcited[index]!,'#808080')}${mean?`<p class="note wrap">${esc(meanLabel)} 一列是时刻 T 的相位平均布居（只平均掉拍频与光频微运动），不是瞬时布居。</p>`:''}`;
     tooltip.hidden=false;tooltip.dataset.sampleIndex=String(index);tooltip.style.maxHeight=`${Math.max(100,host.clientHeight-35)}px`;
     const bounds=svg.getBoundingClientRect(),parent=host.getBoundingClientRect(),px=(xx/800)*bounds.width+bounds.left-parent.left,tw=tooltip.offsetWidth;
     tooltip.style.left=`${clamp(px<host.clientWidth/2?px+18:px-tw-18,8,Math.max(8,host.clientWidth-tw-8))}px`;tooltip.style.top='27px';

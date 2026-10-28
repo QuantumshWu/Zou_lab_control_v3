@@ -28,7 +28,7 @@ export function readPopulationAccuracy(value:unknown,samples:number):PopulationA
 export const CONVERGED_MEAN_STATUSES=['stationary','population-stationary','initial-dependent','time-average','initial-dependent-time-average'] as const;
 export type SteadyStatus=typeof CONVERGED_MEAN_STATUSES[number]|'not-converged'|'not-requested';
 export const STEADY_STATUSES:readonly SteadyStatus[]=[...CONVERGED_MEAN_STATUSES,'not-converged','not-requested'];
-/** A driven model's mean is a long-time phase average, not a time-independent state. */
+/** A driven model's mean is a phase average at T (its fast oscillations averaged out), not a time-independent state. */
 export function isTimeAverage(status:SteadyStatus|undefined):boolean{return status==='time-average'||status==='initial-dependent-time-average';}
 /** A degenerate null space: the mean depends on the specified initial state. */
 export function isInitialDependent(status:SteadyStatus|undefined):boolean{return status==='initial-dependent'||status==='initial-dependent-time-average';}

@@ -15,7 +15,9 @@ export function patchLevelPopulations(host:HTMLElement,options:{populations?:Rec
     const value=node.querySelector('.steady-population-label');if(value){value.textContent=steady===undefined?'—':populationValue(steady).replace(/%$/,'');const unit=value.nextElementSibling;if(unit?.classList.contains('level-readout-unit'))unit.textContent=steady===undefined?'':'%';}
     const title=node.querySelector('title'),base=node.dataset.baseLabel??(title?.textContent??'').replace(/; (?:稳态布居|长期平均布居|布居|p\([^;]+?\)|p̄\([^;]+?\)|长期布居极限|长期布居) =?[^;]*/g,'');
     node.dataset.baseLabel=base;
-    const label=base+(p===undefined?'':`; ${options.label} = ${populationValue(p)}`)+(id.startsWith('ground-')?`; ${options.steadyLabel} ${steady===undefined?'未知':populationValue(steady)}`:'');
+    // A ground state also reads p̄(T); when the colouring is p̄(T) itself it is said once.
+    const same=p!==undefined&&options.label===options.steadyLabel;
+    const label=base+(p===undefined?'':`; ${options.label} = ${populationValue(p)}`)+(id.startsWith('ground-')&&!same?`; ${options.steadyLabel} = ${steady===undefined?'未知':populationValue(steady)}`:'');
     if(title)title.textContent=label;node.setAttribute('aria-label',label);
   }
 }

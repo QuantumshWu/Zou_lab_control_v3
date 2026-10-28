@@ -94,7 +94,7 @@ export class DynamicsClient {
     try{this.onFailure?.({time:new Date().toISOString(),request:{clientId:this.clientId,sequence:job.id},scene:structuredClone(job.scene),options:{...job.settings,steadyOnly:job.steadyOnly,includeAsymptotic:true},attempt:job.attempt,willRetry,error:error instanceof Error?error.message:String(error),...(error instanceof RequestFailure?{status:error.status,code:error.code}:{}),response,page:globalThis.location?.href});}catch{/* Diagnostics cannot block or replace a physics result. */}
   }
   private checkHorizon(result:DynamicsResult,job:Job):void{
-    if(result.steady.horizonUs!==undefined&&result.steady.horizonUs!==resolveMeanHorizon(job.settings))throw new Error('求解响应的长期布居观察时长与本次请求不匹配。');
+    if(result.steady.horizonUs!==undefined&&result.steady.horizonUs!==resolveMeanHorizon(job.settings))throw new Error('求解响应的长期布居时刻 T 与本次请求不匹配。');
   }
   private abortCurrent(reason:string):void{
     const job=this.current;if(!job)return;this.current=null;clearTimeout(job.timer);job.controller.abort();job.reject(new DOMException(reason,'AbortError'));
@@ -148,7 +148,7 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
     if(!density)invalid('长期复密度矩阵');
     steadyPopulations=Object.fromEntries(states.map((state,i)=>[state.id,mean[i]!]));
   }else if(data.asymptoticPopulations!=null||data.asymptoticDensityReal!=null||data.asymptoticDensityImag!=null)invalid('未收敛结果携带长期布居');
-  const horizon=data.horizonUs;if(horizon!==undefined&&!MEAN_HORIZONS_US.includes(horizon))invalid('长期布居观察时长');
+  const horizon=data.horizonUs;if(horizon!==undefined&&!MEAN_HORIZONS_US.includes(horizon))invalid('长期布居时刻 T');
   const assumptions=data.assumptions;
   if(!Array.isArray(assumptions)||assumptions.some((text:unknown)=>typeof text!=='string'))invalid('模型假设');
   const populations=Object.fromEntries(states.map((state,i)=>[state.id,rows.map((row:number[])=>row[i]!)]));

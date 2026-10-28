@@ -149,7 +149,7 @@ export function validateScene(input:unknown):Scene {
     if(!physicalIds.has(initialStateId)||!Array.isArray(d.monitoredStateIds)||d.monitoredStateIds.length>32||new Set(d.monitoredStateIds).size!==d.monitoredStateIds.length||d.monitoredStateIds.some(v=>typeof v!=='string'||!physicalIds.has(v)))throw new Error('动力学态选择无效：最多 32 个不重复的物理态');
     const samples=val(d,'samples',2,2001);if(!Number.isInteger(samples))throw new Error('samples 必须为整数');
     // Scenes from before the horizon read at the 1 s default.
-    const meanHorizonUs=d.meanHorizonUs===undefined?DEFAULT_MEAN_HORIZON_US:d.meanHorizonUs;if(!MEAN_HORIZONS_US.includes(meanHorizonUs as number|null))throw new Error('长期布居的观察时长无效');
+    const meanHorizonUs=d.meanHorizonUs===undefined?DEFAULT_MEAN_HORIZON_US:d.meanHorizonUs;if(!MEAN_HORIZONS_US.includes(meanHorizonUs as number|null))throw new Error('长期布居的时刻 T 无效');
     if(d.durationUnit!==undefined&&!DURATION_UNITS.includes(d.durationUnit as DurationUnit))throw new Error('时间单位无效');
     const temperatureUnit=unitChoice(d.temperatureUnit,TEMPERATURE_UNITS,'温度');
     if(d.monitorMode!==undefined&&d.monitorMode!=='auto'&&d.monitorMode!=='manual')throw new Error('观察态选择模式无效');

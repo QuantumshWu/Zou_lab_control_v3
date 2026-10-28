@@ -933,10 +933,11 @@ function renderDetailsPage():void{
 // The levels page's population row: what the cards are coloured by, the scale and the F totals.
 const populationMode$=element('select');populationMode$.id='population-mode';populationMode$.setAttribute('aria-label','能级布居着色');
 const populationModeFace=comboFace(populationMode$);populationMode$.append(populationModeFace,new Option('长期布居 p̄','steady'),new Option('指定时刻 p(t)','time'));
-/** p̄(T)'s horizon: ∞ · 1 s · 100 ms (in the toolbar beside the mode). Changing it re-solves the mean only. */
+/** p̄(T)'s time T: ∞ · 1 s · 100 ms (in the toolbar beside the mode). p̄(T) is the population at t = T
+ * with only the fast oscillations around T averaged out, not an average over 0–T. Changing T re-solves the mean only. */
 const HORIZONS:[string,number|null][]=[['inf',null],['1e6',1e6],['1e5',1e5]];
 const meanHorizon=new Segmented(value=>{dynamics().meanHorizonUs=HORIZONS.find(([key])=>key===value)![1];meanHorizon.setCurrent(value);update();});
-meanHorizon.setChoices(HORIZONS.map(([key,us])=>[key,horizonText(us)]));meanHorizon.root.setAttribute('aria-label','长期布居的观察时长');meanHorizon.root.classList.add('mean-horizon');
+meanHorizon.setChoices(HORIZONS.map(([key,us])=>[key,horizonText(us)]));meanHorizon.root.setAttribute('aria-label','长期布居的时刻 T');meanHorizon.root.title='p̄(T)：时刻 T 的布居，只平均掉快振荡，不是 0 到 T 的平均';meanHorizon.root.classList.add('mean-horizon');
 function horizonText(us:number|null|undefined):string{return us==null?'∞':us===1e6?'1 s':us===1e5?'100 ms':durationText(us);}
 /** The name of the long-time population a result holds: p̄ at the horizon it was solved at (the
  * solver's echo; none echoed reads t → ∞). While no converged mean is here (pending, refused or
@@ -1010,9 +1011,9 @@ function renderDynamics(a:Analysis):void{
   renderDynamicsControls(a);const ids=populationDisplayIds(d),result=raw?withPopulationGroups(raw,d.monitoredGroupIds??[]):undefined;
   const labels=Object.fromEntries([...allLevels(a).map(l=>[l.id,stateText(l)]),...POPULATION_GROUPS.map(g=>[g.id,g.label])]);
   unbindPopulation?.();unbindPopulation=undefined;
-  const host=$('population-chart'),plotOptions={showTotalExcited:false,timeUnit:durationUnit(d),scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId()};
+  const host=$('population-chart'),plotOptions={showTotalExcited:false,timeUnit:durationUnit(d),scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw)};
   const stopped=stoppedKey&&stoppedKey===solveKey();
-  host.innerHTML=result&&result.timesUs.length>1?populationChart(result,ids,labels,plotOptions):result?.steady.converged?`<div class="empty-state"><div><p>长期布居</p><div class="form solver-readouts">${ids.map(id=>`<span class="field-label">${esc(labels[id]??id)}</span><span class="readout-edit">${populationValue(result.steady.populations?.[id]??0)}</span>`).join('')}</div><p class="note">${currentSolverError()?'时间演化未完成':stopped?'时间演化已停止':'时间演化计算中…'}</p></div></div>`:`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
+  host.innerHTML=result&&result.timesUs.length>1?populationChart(result,ids,labels,plotOptions):result?.steady.converged?`<div class="empty-state"><div><p>长期布居 ${esc(meanSymbol(raw))}</p><div class="form solver-readouts">${ids.map(id=>`<span class="field-label">${esc(labels[id]??id)}</span><span class="readout-edit">${populationValue(result.steady.populations?.[id]??0)}</span>`).join('')}</div><p class="note">${currentSolverError()?'时间演化未完成':stopped?'时间演化已停止':'时间演化计算中…'}</p></div></div>`:`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
   if(result&&result.timesUs.length>1)unbindPopulation=bindPopulationChart(host,result,ids,labels,plotOptions);
   const legend=ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
   if($('population-caption').innerHTML!==legend)$('population-caption').innerHTML=legend;
