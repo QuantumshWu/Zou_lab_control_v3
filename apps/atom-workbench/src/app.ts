@@ -45,6 +45,7 @@ import {idMappingError} from './population-basis.js';
 import {installWindowChrome} from './window-chrome.js';
 import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,signedInteger,stateLabel,subscript,withUnit} from './format.js';
 import {solverText,steadyStatusText} from './solver-words.js';
+import {errorPercent,outsideRuns,partialSentence,sampleErrors} from './accuracy.js';
 import {definitionNotes,modelNotes} from './model-notes.js';
 import {InlineName} from './inline-name.js';
 import {EXAMPLES,exampleScene} from './examples.js';
@@ -228,17 +229,30 @@ function note(text:string,word:StatusWord='task'):void{notice={text,word,until:p
 /** The solver's line: words, their status, and the solve's wall time, written last so a time of
  * another length moves nothing before it. Computing is automatic; 停止 ends a running solve. */
 function solverStatus():[string,StatusWord,string?]{
-  const result=currentResult(),error=currentSolverError();
+  const result=currentResult(),error=currentSolverError(),checkpoint=displayedCheckpoint();
   if(error)return [result?.steady.converged?`时间演化失败（长期布居已就绪）：${labelStateIds(solverText(error))}`:`布居计算失败：${labelStateIds(solverText(error))}`,'error'];
-  if(currentSolverBusy())return [result?.steady.converged?'长期布居已就绪 · 时间演化计算中…':solverQueued?'布居待计算':'布居计算中…','task'];
+  // A streamed checkpoint stands on the page while the solve goes on.
+  if(currentSolverBusy())return [checkpoint&&result?.populationAccuracy?`计算中：当前估计误差最大 ${errorPercent(result.populationAccuracy.estimatedMaximumError)}`:result?.steady.converged?'长期布居已就绪 · 时间演化计算中…':solverQueued?'布居待计算':'布居计算中…','task'];
   const stopped=stoppedKey!==''&&stoppedKey===solveKey();
   if(view==='space')return ['方向与偏振实时显示','idle'];
   if(!result)return stopped?['计算已停止 · 修改参数后重新计算','warning']:['布居待计算','idle'];
-  const elapsed=formatElapsed(currentRecord()?.wallMs??solverWallMs);
-  if(resultPage()==='dynamics'&&result.timesUs.length>1)return [result.steady?.converged?'轨迹已计算':'轨迹已计算 · 长期布居未解析',result.steady?.converged?'idle':'warning',elapsed];
-  if(resultPage()==='dynamics')return stopped?[`计算已停止 · ${steadyStatusText(result.steady?.status)}已就绪，时间演化未计算`,'warning']:[result.steady?.converged?`${steadyStatusText(result.steady.status)}已收敛 · 时间演化待计算`:'长期布居未解析','idle'];
-  return result.steady?.converged?[`${steadyStatusText(result.steady.status)}已收敛`,'idle',elapsed]:['长期布居未解析','warning'];
+  const elapsed=formatElapsed(currentRecord()?.wallMs??solverWallMs),partial=trajectorySentence(result),mean=meanSentence(result);
+  const trajectory=resultPage()==='dynamics'||populationMode==='time';
+  // 停止 keeps the last checkpoint, marked as any partial result is.
+  if(stopped&&checkpoint&&trajectory)return [`计算已停止 · 显示最后的中间结果${partial?`：${partial}`:'（各时刻 ≤ 0.5%）'}`,'warning'];
+  if(resultPage()==='dynamics'&&result.timesUs.length>1)return [['轨迹已计算',partial,result.steady?.converged?mean:'长期布居未解析'].filter(Boolean).join(' · '),result.steady?.converged&&!partial&&!mean?'idle':'warning',elapsed];
+  if(resultPage()==='dynamics')return stopped?[`计算已停止 · ${steadyStatusText(result.steady?.status)}已就绪，时间演化未计算`,'warning']:[result.steady?.converged?`${steadyStatusText(result.steady.status)}${mean?` · ${mean}`:'已收敛'} · 时间演化待计算`:'长期布居未解析',mean?'warning':'idle'];
+  if(!result.steady?.converged)return ['长期布居未解析','warning'];
+  // The levels chart: p̄(T), or p(t) of the trajectory at the chosen time.
+  const words=[`${steadyStatusText(result.steady.status)}${mean?` · ${mean}`:'已收敛'}`,...(populationMode==='time'&&partial?[partial]:[])];
+  return [words.join(' · '),mean||(populationMode==='time'&&partial)?'warning':'idle',elapsed];
 }
+/** Where the trajectory misses the population tolerance, in one sentence (empty: nowhere, or no trajectory). */
+function trajectorySentence(result:DynamicsResult):string{const errors=sampleErrors(result);return result.timesUs.length>1&&errors?partialSentence(result.timesUs,errors,durationUnit(dynamics())):'';}
+/** A computed p̄(T) outside the tolerance: its estimated error (empty when within). */
+function meanSentence(result:DynamicsResult):string{const s=result.steady;return s.converged&&!s.withinTolerance?`${meanSymbol(result)} 估计误差 ${s.estimatedError===null?'未知':errorPercent(s.estimatedError)}（超过 ${errorPercent(POPULATION_TOLERANCE)}）`:'';}
+/** The trajectory shown is a streamed checkpoint, not a final result. */
+function displayedCheckpoint():boolean{const key=trajectoryKey();return !displayedResults.get(key,'trajectory')&&(displayedResults.get(key,'progress')?.result.timesUs.length??0)>1;}
 function refreshStatus():void{
   if(notice&&performance.now()>notice.until)notice=undefined;
   let [text,word,elapsed]=solverStatus();
@@ -797,11 +811,16 @@ function invalidateObsoletePopulation():void{
     root.dataset.populationFresh='false';if(latestAnalysis&&view==='levels')populationToolbar();
   }
 }
+/** The levels chart's populations and their hover words; a value outside the tolerance says its error. */
+function paintLevelPopulations(snapshot:ReturnType<typeof populationSnapshot>):void{
+  const result=currentResult(),outside=(error:number|null|undefined,over:boolean|undefined)=>over?`（估计误差 ${error==null?'未知':errorPercent(error)}，超过 ${errorPercent(POPULATION_TOLERANCE)}）`:'';
+  patchLevelPopulations($('levels-chart'),{populations:snapshot.populations,steady:steadyPopulationsInView(),label:snapshot.label,steadyLabel:meanSymbol(),initialId:singleInitialId(),
+    note:outside(snapshot.error,snapshot.outside),steadyNote:result?.steady.converged?outside(result.steady.estimatedError,!result.steady.withinTolerance):''});
+}
 function refreshPopulationOnly():void{
   if(analysisError){refreshStatus();return;}
   if(view==='levels'){
-    const snapshot=populationSnapshot(),steady=steadyPopulationsInView();populationToolbar();
-    patchLevelPopulations($('levels-chart'),{populations:snapshot.populations,steady,label:snapshot.label,steadyLabel:meanSymbol(),initialId:singleInitialId()});
+    const snapshot=populationSnapshot();populationToolbar();paintLevelPopulations(snapshot);
     alignLevelReadouts($('levels-chart'));
     // The readout editor and its focusable state chips remain mounted.
     const p=$('selection-readout').querySelector<HTMLElement>('[data-current-population]'),value=stateLabels.second?snapshot.populations?.[stateLabels.second]:undefined;
@@ -830,8 +849,11 @@ function requestSolve():void{
   const stillCurrent=()=>revision===solverRevision&&physicalKey===trajectoryKey()&&horizon===resolveMeanHorizon(dynamics());
   const submittedOptions={steadyOnly,onProgress:(result:DynamicsResult)=>{
     if(!stillCurrent())return;
+    // A computed mean is the long-time result so far; a checkpoint also carries the trajectory
+    // evaluated so far, shown until the next one or the final result replaces it.
     const record={result,wallMs:performance.now()-submittedAt,horizon};
-    displayedResults.set(physicalKey,epoch,'mean',record);displayedResults.set(physicalKey,epoch,'progress',record);
+    if(result.steady.converged)displayedResults.set(physicalKey,epoch,'mean',record);
+    displayedResults.set(physicalKey,epoch,'progress',record);
     refreshPopulationOnly();
   }};
   solverTimer=window.setTimeout(async()=>{
@@ -865,7 +887,7 @@ function currentRecord():SolvedRecord|undefined{
 const mergedRecords=new WeakMap<SolvedRecord,{mean:SolvedRecord|undefined;record:SolvedRecord}>();
 function withMean(trajectory:SolvedRecord,mean:SolvedRecord|undefined):SolvedRecord{
   const saved=mergedRecords.get(trajectory);if(saved&&saved.mean===mean)return saved.record;
-  const steady=mean?.result.steady??{converged:false,status:'not-requested' as const,populations:null,residual:null,initialDependent:false};
+  const steady=mean?.result.steady??{converged:false,status:'not-requested' as const,populations:null,estimatedError:null,withinTolerance:false,residual:null,initialDependent:false};
   const record={...trajectory,result:{...trajectory.result,steady},horizon:resolveMeanHorizon(dynamics())};mergedRecords.set(trajectory,{mean,record});return record;
 }
 function currentResult():DynamicsResult|undefined{return currentRecord()?.result;}
@@ -877,16 +899,19 @@ function steadyPopulationsInView(a=latestAnalysis):Record<string,number>|undefin
   let entries=projectedPopulationCache.get(a);if(!entries){entries=new WeakMap();projectedPopulationCache.set(a,entries);}if(entries.has(steady))return entries.get(steady)??undefined;
   const projected=projectSpectroscopyPopulations(a,{states:result.states.map(state=>state.id),populations:result.states.map(state=>steady.populations![state.id]??0),density:steady.density,basis:result.states});entries.set(steady,projected);return projected??undefined;
 }
-function populationSnapshot():{populations?:Record<string,number>;label:string;timeUs?:number}{
+/** The populations the levels chart is coloured by, what they are, and their estimated error:
+ * p̄(T)'s, or the chosen sample's. */
+function populationSnapshot():{populations?:Record<string,number>;label:string;timeUs?:number;error?:number|null;outside?:boolean}{
   const result=currentResult();
   if(!result)return {label:currentSolverBusy()?'计算中':'待计算'};
-  if(populationMode==='steady'){const populations=steadyPopulationsInView();return result.steady?.converged&&result.steady.populations?{populations,label:populations?meanSymbol(result):'当前背景布居未定义'}:{label:'长期布居未解析'};}
+  if(populationMode==='steady'){const populations=steadyPopulationsInView(),s=result.steady;return s?.converged&&s.populations?{populations,label:populations?meanSymbol(result):'当前背景布居未定义',error:s.estimatedError,outside:!s.withinTolerance}:{label:'长期布居未解析'};}
   const index=populationTimeIndex<0?result.timesUs.length-1:Math.min(populationTimeIndex,result.timesUs.length-1),timeUs=result.timesUs[index]??0;
+  const error=sampleErrors(result)?.[index],accuracy=error===undefined?{}:{error,outside:error>POPULATION_TOLERANCE};
   // p(t) is in the model basis; on the chart's states it reads by id only while the bases'
   // difference stays within the population accuracy (population-basis.ts).
   const basisError=resultPage()==='levels'?timeBasisError(result):0;
   if(!(basisError<=POPULATION_TOLERANCE))return {label:'p(t) 未着色：模型基与能级图的基相差过大',timeUs};
-  return {populations:Object.fromEntries(Object.entries(result.populations).map(([id,values])=>[id,values[index]??0])),label:`p(${formatNumber(timeUs,{digits:4})} μs)${basisError>1e-6?` · 基差 ≤ ${formatNumber(basisError,{digits:2})}`:''}`,timeUs};
+  return {populations:Object.fromEntries(Object.entries(result.populations).map(([id,values])=>[id,values[index]??0])),label:`p(${formatNumber(timeUs,{digits:4})} μs)${basisError>1e-6?` · 基差 ≤ ${formatNumber(basisError,{digits:2})}`:''}`,timeUs,...accuracy};
 }
 /** How much carrying the result's p(t) over to the chart's states by id can change them. */
 const basisErrors=new WeakMap<object,{analysis:Analysis;error:number}>();
@@ -907,7 +932,9 @@ function solverDetails():string{
   const accuracy=result?.populationAccuracy;
   const rows=result?[
     readout('求解耗时',formatElapsed(result.metrics.totalMs)),readout('含通信',formatElapsed(currentRecord()?.wallMs??solverWallMs)),
-    ...(accuracy?[readout('布居误差估计',`≤ ${small(accuracy.estimatedMaximumError)}（目标 ${small(accuracy.requestedTolerance)}）`)]:[]),
+    ...(accuracy?[readout('布居误差估计',accuracy.status==='estimated-partial'?`最大 ${small(accuracy.estimatedMaximumError)}，部分时刻超过目标 ${small(accuracy.requestedTolerance)}`:`≤ ${small(accuracy.estimatedMaximumError)}（目标 ${small(accuracy.requestedTolerance)}）`)]:[]),
+    ...(accuracy?.status==='estimated-partial'?[`<p class="horizon-note">${esc([trajectorySentence(result),accuracy.reason?solverText(accuracy.reason):''].filter(Boolean).join('。'))}</p>`]:[]),
+    ...(result.steady.converged&&result.steady.estimatedError!==null?[readout('长期布居误差估计',result.steady.withinTolerance?`≤ ${small(result.steady.estimatedError)}（目标 ${small(POPULATION_TOLERANCE)}）`:`${small(result.steady.estimatedError)}，超过目标 ${small(POPULATION_TOLERANCE)}`)]:[]),
     readout('概率守恒误差',small(result.validation.maxTraceError)),readout('最小布居',small(result.validation.minPopulation)),
     readout('长期解',`${steadyStatusText(result.steady?.status)}${result.steady?.residual==null?'':` · 残差 ${small(result.steady.residual)}`}`),
     // The limit is reached after a few of these; more than one conserved quantity makes it initial-dependent.
@@ -952,7 +979,9 @@ populationLegend.append(element('span','scale-end','0'),element('span','scale-ba
 const populationTotals=element('span','population-data');populationTotals.id='population-data';
 /** Shown in place of the totals when p(t) cannot colour the chart. */
 const populationNote=element('span','population-note');
-$('population-toolbar').append(populationMode$,meanHorizon.root,populationTime,populationTimeValue,populationLegend,populationTotals,populationNote);
+/** The coloured populations' estimated error when it exceeds the tolerance: they are shown, marked. */
+const populationAccuracy=element('span','population-accuracy');populationAccuracy.hidden=true;
+$('population-toolbar').append(populationMode$,meanHorizon.root,populationTime,populationTimeValue,populationAccuracy,populationLegend,populationTotals,populationNote);
 function populationToolbar():void{
   const snap=populationSnapshot(),result=currentResult(),p=snap.populations;
   if(populationMode$.value!==populationMode)populationMode$.value=populationMode;
@@ -965,6 +994,9 @@ function populationToolbar():void{
   const markup=`<span class="population-total">F=1 <b class="slot percent">${populationPercent(f1)}</b></span><span class="population-total">F=2 <b class="slot percent">${populationPercent(f2)}</b></span><span class="population-total">激发态 <b class="slot percent">${populationPercent(pe)}</b></span>`;
   if(populationTotals.innerHTML!==markup)populationTotals.innerHTML=markup;
   const uncoloured=!!result&&!p&&populationMode==='time';populationNote.textContent=uncoloured?snap.label:'';populationNote.hidden=!uncoloured;
+  const marked=!!p&&snap.outside===true,words=marked?`⚠ 估计误差 ${snap.error==null?'未知':errorPercent(snap.error)}`:'';
+  if(populationAccuracy.textContent!==words)populationAccuracy.textContent=words;populationAccuracy.hidden=!marked;
+  populationAccuracy.title=marked?`${snap.label} 的估计误差超过 ${errorPercent(POPULATION_TOLERANCE)}；能级仍按算出的布居着色`:'';
 }
 
 // ---------------------------------------------------------------- 布居演化
@@ -1010,12 +1042,15 @@ function renderDynamics(a:Analysis):void{
   const d=dynamics(),raw=currentResult();if((d.monitorMode??'auto')==='auto')d.monitoredStateIds=recommendedPopulationStates(raw,d.initialStateId);
   renderDynamicsControls(a);const ids=populationDisplayIds(d),result=raw?withPopulationGroups(raw,d.monitoredGroupIds??[]):undefined;
   const labels=Object.fromEntries([...allLevels(a).map(l=>[l.id,stateText(l)]),...POPULATION_GROUPS.map(g=>[g.id,g.label])]);
+  // A newer checkpoint (or the final result) redraws the same axes; an open readout stays at its sample.
+  const host=$('population-chart'),open=host.querySelector<HTMLElement>('.population-readout:not([hidden])')?.dataset.sampleIndex;
   unbindPopulation?.();unbindPopulation=undefined;
-  const host=$('population-chart'),plotOptions={showTotalExcited:false,timeUnit:durationUnit(d),scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw)};
+  const plotOptions={showTotalExcited:false,timeUnit:durationUnit(d),scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),...(open===undefined?{}:{cursor:Number(open)})};
   const stopped=stoppedKey&&stoppedKey===solveKey();
   host.innerHTML=result&&result.timesUs.length>1?populationChart(result,ids,labels,plotOptions):result?.steady.converged?`<div class="empty-state"><div><p>长期布居 ${esc(meanSymbol(raw))}</p><div class="form solver-readouts">${ids.map(id=>`<span class="field-label">${esc(labels[id]??id)}</span><span class="readout-edit">${populationValue(result.steady.populations?.[id]??0)}</span>`).join('')}</div><p class="note">${currentSolverError()?'时间演化未完成':stopped?'时间演化已停止':'时间演化计算中…'}</p></div></div>`:`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
   if(result&&result.timesUs.length>1)unbindPopulation=bindPopulationChart(host,result,ids,labels,plotOptions);
-  const legend=ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
+  const errors=raw&&raw.timesUs.length>1?sampleErrors(raw):undefined,banded=!!errors&&outsideRuns(errors).length>0;
+  const legend=(banded?`<span class="population-legend accuracy-legend"><span class="accuracy-swatch" aria-hidden="true"></span>估计误差 &gt; ${errorPercent(POPULATION_TOLERANCE)}</span>`:'')+ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
   if($('population-caption').innerHTML!==legend)$('population-caption').innerHTML=legend;
 }
 
@@ -1094,6 +1129,8 @@ function renderResults(allowSolve=true):void{
     const {tag,warning}=shiftTag(a);setText('shift-tag',tag);$('shift-tag').title='能级图背景中的外场';setText('shift-warning',warning);$('shift-warning').hidden=!warning;
     renderSelection(a,laser);
     levelsChart$.innerHTML=levelsChart(scene,a,laser,{line:spectral,labelled:labelled(stateLabels),initialId:singleInitialId(),populations:snapshot.populations,steadyPopulations:steadyPopulationsInView(a),populationLabel:snapshot.label,viewportWidth:levelsChart$.clientWidth});
+    // The cards' hover words say their populations (and an estimated error outside the tolerance) from the start.
+    paintLevelPopulations(snapshot);
     const table=transitionTable(transitions);
     renderDetails('levels-details',`<details class="transition-disclosure"><summary>跃迁矩元 <span>${laser?esc(laser.name):spectral}</span></summary><div class="table-scroll"><table class="transition-table"><thead><tr><th>参考态 → 末态</th><th>分量</th><th class="num">${esc(table.heading)}</th><th class="num">Ω/2π / MHz</th><th title="相对 D2 stretched cycling 跃迁的偶极强度，并乘当前偏振权重">耦合强度</th></tr></thead><tbody>${table.rows}</tbody></table></div></details>`);
   }else if(view==='dynamics'){summary(fieldPart);renderDynamics(a);}

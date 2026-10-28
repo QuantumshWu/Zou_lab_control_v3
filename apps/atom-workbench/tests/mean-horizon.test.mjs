@@ -20,14 +20,15 @@ test('the long-time horizon is a dynamics setting: 1 s by default, saved, migrat
   assert.equal(dynamicsCacheKey(scene,scene.dynamics,false,false),dynamicsCacheKey(scene,other,false,false),'a trajectory does not');
 });
 
-test('the horizon goes to the solver and a solver that echoes it must echo the one asked for',()=>{
+test('the time T goes to the solver, and a computed mean echoes the one asked for',()=>{
   const scene=defaultScene();
   assert.equal(prepareNativeSolve({scene,options:{meanHorizonUs:null}}).payload.options.meanHorizonUs,null);
   assert.equal(prepareNativeSolve({scene,options:{meanHorizonUs:1e5}}).payload.options.meanHorizonUs,1e5);
   assert.equal(Object.hasOwn(prepareNativeSolve({scene,options:{}}).payload.options,'meanHorizonUs'),false);
   const states=buildFullMasterModel(scene,scene.dynamics).states,index=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
   const data={...nativeResult({states,initialIndex:index,timesUs:[0]}),assumptions:[]};
-  assert.equal(normalizeDynamicsResult(data,scene).steady.horizonUs,undefined,'not echoed: t → ∞');
-  assert.equal(normalizeDynamicsResult({...data,horizonUs:1e6},scene).steady.horizonUs,1e6);
+  assert.equal(normalizeDynamicsResult(data,scene).steady.horizonUs,1e6);
+  assert.equal(normalizeDynamicsResult({...data,horizonUs:null},scene).steady.horizonUs,null);
+  const {horizonUs:_,...unechoed}=data;assert.throws(()=>normalizeDynamicsResult(unechoed,scene),/长期布居时刻 T/,'a computed mean says its T');
   assert.throws(()=>normalizeDynamicsResult({...data,horizonUs:42},scene),/长期布居时刻 T/);
 });

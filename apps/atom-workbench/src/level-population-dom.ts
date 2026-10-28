@@ -3,7 +3,9 @@ import {populationValue} from './population-chart.js';
 
 /** Only population presentation is mutable here. Energy coordinates, arrows,
  * detunings and focusable state nodes retain their identity and attributes. */
-export function patchLevelPopulations(host:HTMLElement,options:{populations?:Record<string,number>;steady?:Record<string,number>;label:string;steadyLabel:string;initialId:string}):void {
+export function patchLevelPopulations(host:HTMLElement,options:{populations?:Record<string,number>;steady?:Record<string,number>;label:string;steadyLabel:string;initialId:string;
+  /** After a value outside the population tolerance: its estimated error. */
+  note?:string;steadyNote?:string}):void {
   for(const node of host.querySelectorAll<SVGGElement>('g.level-node:not(.reference-node)')){
     const id=node.dataset.state!,p=options.populations?.[id],steady=options.steady?.[id],appearance=id===options.initialId?{fill:'#c8c6c4',ink:'#323130'}:p===undefined?{fill:'var(--surface, #fff)',ink:'#323130'}:populationAppearance(p);
     (node.querySelector('.state-population-background')??node.querySelector('rect'))?.setAttribute('fill',appearance.fill);
@@ -17,7 +19,7 @@ export function patchLevelPopulations(host:HTMLElement,options:{populations?:Rec
     node.dataset.baseLabel=base;
     // A ground state also reads p̄(T); when the colouring is p̄(T) itself it is said once.
     const same=p!==undefined&&options.label===options.steadyLabel;
-    const label=base+(p===undefined?'':`; ${options.label} = ${populationValue(p)}`)+(id.startsWith('ground-')&&!same?`; ${options.steadyLabel} = ${steady===undefined?'未知':populationValue(steady)}`:'');
+    const label=base+(p===undefined?'':`; ${options.label} = ${populationValue(p)}${options.note??''}`)+(id.startsWith('ground-')&&!same?`; ${options.steadyLabel} = ${steady===undefined?'未知':populationValue(steady)}${steady===undefined?'':options.steadyNote??''}`:'');
     if(title)title.textContent=label;node.setAttribute('aria-label',label);
   }
 }

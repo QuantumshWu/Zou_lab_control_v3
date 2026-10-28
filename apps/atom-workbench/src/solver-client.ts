@@ -49,13 +49,12 @@ export class DynamicsClient {
       const data=await this.readResponse(response,job);if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('求解结果不完整或无效：响应对象。');
       evidence={protocol:data.protocol,modelSchema:data.modelSchema,service:data.service,diagnostics:data.diagnostics,asymptoticStatus:data.asymptoticStatus};if(data.error)throw new Error(data.error);
       if(this.current!==job||job.controller.signal.aborted)return;
+      if(data.progress!==undefined)throw new Error('最终结果带有进度标记。');
       if(data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||
         !Array.isArray(data.service?.capabilities)||!data.service.capabilities.includes(FULL_MODEL_SCHEMA))throw new Error('本机求解服务版本不兼容：需要 rb87-full/2 模型，旧模型结果未显示。');
       if(!data.request||data.request.clientId!==this.clientId||data.request.sequence!==job.id)throw new Error('求解响应与当前请求不匹配。');
       const result=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings,job.scene));
-      this.checkHorizon(result,job);
-      const expected=job.steadyOnly?1:job.settings.samples;
-      if(result.timesUs.length!==expected||(!job.steadyOnly&&Math.abs(result.timesUs.at(-1)!-job.settings.durationUs)>1e-10*Math.max(1,job.settings.durationUs)))throw new Error('求解响应的采样与请求不匹配。');
+      this.checkHorizon(result,job);this.checkSamples(result,job);
       if(!result.steady?.converged)this.recordFailure(job,new Error(result.steady?.reason??'长期布居未解析'),false,evidence);
       this.current=null;this.lastRoundTripMs=performance.now()-job.started;job.resolve(result);
     }catch(error){
@@ -76,25 +75,31 @@ export class DynamicsClient {
     const consume=(line:string)=>{if(!line.trim())return;const event=JSON.parse(line);
       if(event.type==='error')throw new RequestFailure(event.data?.error??'时间演化失败。',event.status??422,event.data?.code??'numerical-failure',false);
       if(final!==undefined)throw new Error('求解流包含多余结果。');
-      if(event.type==='result'){final=event.data;return;}
-      if(event.type!=='asymptotic')throw new Error('未知求解进度。');
+      if(event.type==='result'){if(event.data?.progress!==undefined)throw new Error('最终结果带有进度标记。');final=event.data;return;}
+      if(event.type!=='checkpoint')throw new Error('未知求解进度。');
       if(this.current!==job||job.controller.signal.aborted)return;
+      // A checkpoint: the result evaluated so far -- the trajectory on the requested samples (the
+      // single t = 0 row of a mean request) with its per-sample errors, and the mean when computed.
       const data=event.data;
-      if(data?.request?.clientId!==this.clientId||data.request.sequence!==job.id||data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||!data.service?.capabilities?.includes(FULL_MODEL_SCHEMA))throw new Error('稳态进度与当前请求不匹配。');
-      const mean=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings,job.scene));
-      this.checkHorizon(mean,job);
-      if(mean.timesUs.length!==1||!mean.steady.converged)throw new Error('稳态进度缺少已验证的长期布居。');
-      job.onProgress?.(mean);
+      if(data?.progress!==true||data.request?.clientId!==this.clientId||data.request.sequence!==job.id||data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||!data.service?.capabilities?.includes(FULL_MODEL_SCHEMA))throw new Error('中间结果与当前请求不匹配。');
+      const checkpoint=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings,job.scene));
+      this.checkHorizon(checkpoint,job);this.checkSamples(checkpoint,job);
+      job.onProgress?.(checkpoint);
     };
     try{while(true){const {done,value}=await reader.read();buffer+=decoder.decode(value,{stream:!done});if(buffer.length>64*1024*1024)throw new Error('求解流超过大小限制。');let end;while((end=buffer.indexOf('\n'))>=0){consume(buffer.slice(0,end));buffer=buffer.slice(end+1);}if(done)break;}if(buffer.trim())consume(buffer);}
     finally{reader.releaseLock();}
-    if(final===undefined)throw new Error('时间演化响应提前结束；已收到的稳态结果仍可查看。');return final;
+    if(final===undefined)throw new Error('求解响应提前结束；已收到的中间结果仍可查看。');return final;
   }
   private recordFailure(job:Job,error:unknown,willRetry:boolean,response:unknown):void{
     try{this.onFailure?.({time:new Date().toISOString(),request:{clientId:this.clientId,sequence:job.id},scene:structuredClone(job.scene),options:{...job.settings,steadyOnly:job.steadyOnly,includeAsymptotic:true},attempt:job.attempt,willRetry,error:error instanceof Error?error.message:String(error),...(error instanceof RequestFailure?{status:error.status,code:error.code}:{}),response,page:globalThis.location?.href});}catch{/* Diagnostics cannot block or replace a physics result. */}
   }
+  /** The requested time grid: one sample for a mean, else the requested samples up to the duration. */
+  private checkSamples(result:DynamicsResult,job:Job):void{
+    const expected=job.steadyOnly?1:job.settings.samples;
+    if(result.timesUs.length!==expected||(!job.steadyOnly&&Math.abs(result.timesUs.at(-1)!-job.settings.durationUs)>1e-10*Math.max(1,job.settings.durationUs)))throw new Error('求解响应的采样与请求不匹配。');
+  }
   private checkHorizon(result:DynamicsResult,job:Job):void{
-    if(result.steady.horizonUs!==undefined&&result.steady.horizonUs!==resolveMeanHorizon(job.settings))throw new Error('求解响应的长期布居时刻 T 与本次请求不匹配。');
+    if(result.steady.converged&&result.steady.horizonUs!==resolveMeanHorizon(job.settings))throw new Error('求解响应的长期布居时刻 T 与本次请求不匹配。');
   }
   private abortCurrent(reason:string):void{
     const job=this.current;if(!job)return;this.current=null;clearTimeout(job.timer);job.controller.abort();job.reject(new DOMException(reason,'AbortError'));
@@ -132,13 +137,19 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   // Neither claims a finite-time density.
   if(Object.hasOwn(data,'densityReal')||Object.hasOwn(data,'densityImag'))invalid('布居结果契约');
   let populationAccuracy:PopulationAccuracy|undefined;
-  if(timesUs.length>1){
-    if(typeof d.method!=='string')invalid('时间演化方法');
-    try{populationAccuracy=readPopulationAccuracy(data.populationAccuracy,timesUs.length);}catch{invalid('布居精度元数据');}
-  }else if(Object.hasOwn(data,'populationAccuracy'))invalid('布居精度元数据');
+  if(timesUs.length>1&&typeof d.method!=='string')invalid('时间演化方法');
+  if(timesUs.length>1||data.populationAccuracy!==undefined)try{populationAccuracy=readPopulationAccuracy(data.populationAccuracy,timesUs.length);}catch{invalid('布居精度元数据');}
+  if(data.progress!==undefined&&data.progress!==true)invalid('进度标记');
   const status=data.asymptoticStatus as SteadyStatus,reason=data.asymptoticReason as string|undefined;
   if(!STEADY_STATUSES.includes(status)||(reason!==undefined&&typeof reason!=='string'))invalid('长期布居状态');
+  // A computed long-time result (its status the physics classification), with or without its
+  // estimated error; 'not-converged' means nothing usable was computed.
   const converged=(CONVERGED_MEAN_STATUSES as readonly SteadyStatus[]).includes(status);
+  // A computed result carries its estimated error and whether that is within ε, and its time T.
+  const meanError=data.asymptoticEstimatedError,meanWithin=data.asymptoticWithinTolerance;
+  if(converged&&(!bounded(meanError)||meanWithin!==(meanError<=POPULATION_TOLERANCE)))invalid('长期布居误差估计');
+  if(!converged&&((meanError!==undefined&&!bounded(meanError))||(meanWithin!==undefined&&meanWithin!==false)))invalid('长期布居误差估计');
+  const withinTolerance=converged&&meanWithin===true;
   let steadyPopulations:Record<string,number>|null=null,density;
   if(converged){
     const mean=data.asymptoticPopulations;
@@ -148,7 +159,7 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
     if(!density)invalid('长期复密度矩阵');
     steadyPopulations=Object.fromEntries(states.map((state,i)=>[state.id,mean[i]!]));
   }else if(data.asymptoticPopulations!=null||data.asymptoticDensityReal!=null||data.asymptoticDensityImag!=null)invalid('未收敛结果携带长期布居');
-  const horizon=data.horizonUs;if(horizon!==undefined&&!MEAN_HORIZONS_US.includes(horizon))invalid('长期布居时刻 T');
+  const horizon=data.horizonUs;if((converged||horizon!==undefined)&&!MEAN_HORIZONS_US.includes(horizon))invalid('长期布居时刻 T');
   const assumptions=data.assumptions;
   if(!Array.isArray(assumptions)||assumptions.some((text:unknown)=>typeof text!=='string'))invalid('模型假设');
   const populations=Object.fromEntries(states.map((state,i)=>[state.id,rows.map((row:number[])=>row[i]!)]));
@@ -156,6 +167,7 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   return {states,timesUs,populations,totalExcited:timesUs.map((_,i)=>states.filter(s=>s.manifold!=='ground').reduce((sum,s)=>sum+populations[s.id]![i]!,0)),
     activeLaserIds:active.map(l=>l.id),
     steady:{converged,status,populations:steadyPopulations,density,residual:converged?d.residual:null,method:converged?d.asymptoticMethod:undefined,reason,
+      estimatedError:converged?meanError as number:null,withinTolerance,
       initialDependent:isInitialDependent(status),
       slowestRelaxationUs:converged&&typeof d.slowestRelaxationUs==='number'&&Number.isFinite(d.slowestRelaxationUs)&&d.slowestRelaxationUs>0?d.slowestRelaxationUs:null,
       conservedQuantities:converged&&Number.isSafeInteger(d.conservedQuantities)&&d.conservedQuantities>0?d.conservedQuantities:null,

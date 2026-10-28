@@ -1,11 +1,17 @@
 import {timeDisplayUnit} from './duration.js';
 import type {DurationUnit} from './types.js';
 import {isTimeAverage,type SteadyResult} from './solver-types.js';
+import {POPULATION_TOLERANCE} from './types.js';
+import {errorPercent,outsideRuns,sampleErrors} from './accuracy.js';
 
-export interface PopulationPlot {timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];steady?:SteadyResult;}
+export interface PopulationPlot {timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];steady?:SteadyResult;
+  /** Per-sample error bounds (ui-design.md §6.16): samples above ε are drawn, marked. */
+  populationAccuracy?:{sampleErrors?:number[]};}
 export interface PopulationChartOptions {scale?:'linear'|'log';viewportWidth?:number;initialId?:string;timeUnit?:DurationUnit;showTotalExcited?:boolean;
   /** The long-time column's name: p̄(T) at the T the result holds (p̄(1 s), p̄(∞)). */
-  meanLabel?:string;}
+  meanLabel?:string;
+  /** A sample the readout stands at already: a newer checkpoint of the same trajectory keeps it open there. */
+  cursor?:number;}
 // v3 scientific series palette: crates/zlc-plot/src/style.rs, Palette::default.
 const palette=['#517FA6','#B17D4B','#568C79','#99719B','#B36F72','#558F9C','#7E7CA5','#92924F'];
 const esc=(value:unknown)=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
@@ -61,12 +67,24 @@ export function populationChart(result:PopulationPlot,monitoredIds:string[],labe
   for(let i=0;i<=4;i++){const t=g.minTime+(g.maxTime-g.minTime)*i/4;svg+=text(x(t),bottom+24,digits(t*g.unit.factor),'text-anchor="middle" font-size="12" fill="#6a6866"');}
   svg+=text(left,19,scale==='log'?'布居 p · 对数':'布居 p','font-size="12" fill="#6a6866"')+text(right,bottom+47,`t / ${g.unit.name}`,'text-anchor="end" font-size="12" fill="#6a6866"');
   const series=(id:string,values:number[],color:string,aggregate=false)=>{
-    const points=result.timesUs.map((t,i)=>`${x(t).toFixed(4)},${y(values[i]!).toFixed(4)}`).join(' '),initial=id===options.initialId;
-    const title=`${aggregate?'所有激发态总布居':labels[id]??id}${initial?' · 初态':''}`;
-    let markup=`<polyline data-series-id="${esc(id)}" points="${points}" fill="none" stroke="${color}" stroke-width="${aggregate?1.4:initial?2.5:2}"><title>${esc(title)}</title></polyline>`;
+    const point=(i:number)=>`${x(result.timesUs[i]!).toFixed(4)},${y(values[i]!).toFixed(4)}`,initial=id===options.initialId;
+    const title=`${aggregate?'所有激发态总布居':labels[id]??id}${initial?' · 初态':''}`,width=aggregate?1.4:initial?2.5:2;
+    // One polyline per stretch: a segment touching a sample above ε is dashed and faded.
+    const stretches:{from:number;to:number;outside:boolean}[]=[];
+    for(let i=0;i+1<values.length;i++){const bad=outside(i)||outside(i+1),last=stretches.at(-1);if(last&&last.outside===bad)last.to=i+1;else stretches.push({from:i,to:i+1,outside:bad});}
+    let markup=stretches.map(s=>`<polyline data-series-id="${esc(id)}" points="${Array.from({length:s.to-s.from+1},(_,k)=>point(s.from+k)).join(' ')}" fill="none" stroke="${color}" stroke-width="${width}"${s.outside?' stroke-dasharray="4 3" stroke-opacity="0.55" class="outside-tolerance"':''}><title>${esc(s.outside?`${title}（估计误差超过 ${errorPercent(POPULATION_TOLERANCE)}）`:title)}</title></polyline>`).join('');
     if(scale==='log')for(const i of [0,values.length-1])if(values[i]!<=g.floor)markup+=`<circle cx="${x(result.timesUs[i]!)}" cy="${bottom}" r="2.6" fill="white" stroke="${color}"><title>${esc(`${title}: ${populationValue(values[i]!)}（对数轴下界以下）`)}</title></circle>`;
     return markup;
   };
+  // Samples whose estimated error exceeds ε: a light band behind them (half-way to their
+  // neighbours), and their curve segments dashed and faded.
+  const errors=sampleErrors(result),runs=errors?outsideRuns(errors):[],n=result.timesUs.length;
+  const outside=(i:number)=>!!errors&&errors[i]!>POPULATION_TOLERANCE;
+  for(const [a,b] of runs){
+    const from=a>0?(x(result.timesUs[a-1]!)+x(result.timesUs[a]!))/2:x(result.timesUs[a]!),to=b<n-1?(x(result.timesUs[b]!)+x(result.timesUs[b+1]!))/2:x(result.timesUs[b]!);
+    const worst=Math.max(...errors!.slice(a,b+1));
+    svg+=`<rect class="accuracy-band" x="${from.toFixed(4)}" y="${top}" width="${Math.max(1.5,to-from).toFixed(4)}" height="${bottom-top}" fill="#fbecdc"><title>${esc(`估计误差最大 ${errorPercent(worst)}，超过 ${errorPercent(POPULATION_TOLERANCE)}`)}</title></rect>`;
+  }
   svg+='<g clip-path="url(#population-clip)">';
   if(options.showTotalExcited!==false)svg+=series('__excited__',result.totalExcited,'#808080',true);
   for(const id of monitoredIds)svg+=series(id,result.populations[id]!,populationColor(id));
@@ -89,11 +107,14 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     for(const id of ids){const p=result.populations[id]![index]!;cursor.append(element('circle',{cx:String(xx),cy:String(g.y(p)),r:'3',fill:options.scale==='log'&&p<=g.floor?'white':populationColor(id),stroke:'white','stroke-width':'1.5'}));}
     cursor.style.display='';
     const steady=result.steady?.converged&&result.steady.populations?result.steady:undefined,mean=isTimeAverage(steady?.status);
-    const meanLabel=options.meanLabel??'p̄(T)';
+    const meanLabel=options.meanLabel??'p̄(T)',error=sampleErrors(result)?.[index];
+    // The sample's estimated error (an absolute bound on every population), marked when above ε.
+    const accuracy=error===undefined?'':`<span class="readout-error${error>POPULATION_TOLERANCE?' outside':''}" title="该时刻布居的估计误差（概率的绝对误差）">±${esc(errorPercent(error))}${error>POPULATION_TOLERANCE?`（超过 ${esc(errorPercent(POPULATION_TOLERANCE))}）`:''}</span>`;
+    const meanOutside=steady&&!steady.withinTolerance?`<p class="note wrap readout-outside">${esc(meanLabel)} 估计误差 ${esc(steady.estimatedError===null?'未知':errorPercent(steady.estimatedError))}，超过 ${esc(errorPercent(POPULATION_TOLERANCE))}。</p>`:'';
     const head=steady?`<div class="readout-row readout-head"><span></span><span>p(t)</span><span>${esc(meanLabel)}</span></div>`:'';
     const asymptotic=(id:string)=>{if(id!=='__excited__')return steady?.populations?.[id]??NaN;const excited=Object.entries(steady?.populations??{}).filter(([state])=>/^(D1|D2)-/.test(state));return excited.length?excited.reduce((sum,[,p])=>sum+p,0):NaN;};
     const row=(id:string,name:string,p:number,color:string)=>`<div class="readout-row${steady?'':' two'}" data-population-readout="${esc(id)}"><span class="readout-name" style="color:${color}">${esc(name)}${id===options.initialId?' · 初态':''}</span><span>${esc(populationValue(p))}</span>${steady?`<span class="readout-steady">${esc(populationValue(asymptotic(id)))}</span>`:''}</div>`;
-    tooltip.innerHTML=`<div class="readout-time">t = ${digits(t*g.unit.factor)} ${g.unit.name}</div>${head}${ids.map(id=>row(id,labels[id]??id,result.populations[id]![index]!,populationColor(id))).join('')}${options.showTotalExcited===false?'':row('__excited__','激发态合计',result.totalExcited[index]!,'#808080')}${mean?`<p class="note wrap">${esc(meanLabel)} 一列是时刻 T 的相位平均布居（只平均掉拍频与光频微运动），不是瞬时布居。</p>`:''}`;
+    tooltip.innerHTML=`<div class="readout-time">t = ${digits(t*g.unit.factor)} ${g.unit.name}${accuracy}</div>${head}${ids.map(id=>row(id,labels[id]??id,result.populations[id]![index]!,populationColor(id))).join('')}${options.showTotalExcited===false?'':row('__excited__','激发态合计',result.totalExcited[index]!,'#808080')}${mean?`<p class="note wrap">${esc(meanLabel)} 一列是时刻 T 的相位平均布居（只平均掉拍频与光频微运动），不是瞬时布居。</p>`:''}${meanOutside}`;
     tooltip.hidden=false;tooltip.dataset.sampleIndex=String(index);tooltip.style.maxHeight=`${Math.max(100,host.clientHeight-35)}px`;
     const bounds=svg.getBoundingClientRect(),parent=host.getBoundingClientRect(),px=(xx/800)*bounds.width+bounds.left-parent.left,tw=tooltip.offsetWidth;
     tooltip.style.left=`${clamp(px<host.clientWidth/2?px+18:px-tw-18,8,Math.max(8,host.clientWidth-tw-8))}px`;tooltip.style.top='27px';
@@ -110,5 +131,6 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
   tooltip.addEventListener('focusout',event=>{if(!enters(svg,event.relatedTarget)&&!enters(tooltip,event.relatedTarget))hide();},{signal:abort.signal});
   tooltip.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();hide();svg.focus({preventScroll:true});}},{signal:abort.signal});
   svg.addEventListener('keydown',event=>{let next=index;switch(event.key){case'ArrowLeft':next--;break;case'ArrowRight':next++;break;case'Home':next=0;break;case'End':next=result.timesUs.length-1;break;case'Escape':hide();return;default:return;}event.preventDefault();show(next);},{signal:abort.signal});
+  if(options.cursor!==undefined&&options.cursor<result.timesUs.length)show(options.cursor);
   return ()=>{abort.abort();tooltip.remove();};
 }
