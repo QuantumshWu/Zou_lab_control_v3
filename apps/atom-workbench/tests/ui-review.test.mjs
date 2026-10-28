@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {lineMesh,triangleMesh,rasterizeDepth} from '../dist/js/atom-workbench/src/space-raster.js';
 import {rayDepth} from '../dist/js/atom-workbench/src/space-depth.js';
 import {readoutBaseline} from '../dist/js/atom-workbench/src/readout-alignment.js';
-import {clickState,keepLabels,labelled,readLabels,swapLabels,withLabel} from '../dist/js/atom-workbench/src/transition-choice.js';
+import {clickState,keepLabels,labelled,swapLabels,withLabel} from '../dist/js/atom-workbench/src/transition-choice.js';
 import {referenceFromLaser} from '../dist/js/atom-workbench/src/reference-draft.js';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {analyze,laserFrequencyMHz} from '../dist/js/atom-workbench/src/physics.js';
@@ -30,7 +30,7 @@ test('population and shift ink have the same distance from the energy line',()=>
  assert.equal(readoutBaseline(line,'below',ink)+ink.top-line,8);
 });
 test('state labels: nothing preselected, 1 then 2 in click order, a labelled click removes its label, a third replaces 2',()=>{
- let labels=readLabels(undefined);assert.deepEqual(labels,{},'no state, not even the initial one, is labelled 1');
+ let labels={};
  labels=clickState(labels,'ground-2-0');assert.deepEqual(labels,{first:'ground-2-0'});
  labels=clickState(labels,'D2-3-1');assert.deepEqual(labels,{first:'ground-2-0',second:'D2-3-1'});
  labels=clickState(labels,'D2-2-0');assert.deepEqual(labels,{first:'ground-2-0',second:'D2-2-0'},'a third state replaces 2 and keeps 1');
@@ -48,8 +48,6 @@ test('state labels: a picker sets one label, a state holds one label, the swap i
  assert.deepEqual(swapLabels({first:'a'}),{second:'a'});
  assert.deepEqual(keepLabels({first:'a',second:'reference-gone'},id=>id!=='reference-gone'),{first:'a'});
  assert.deepEqual(withLabel({first:'a',second:'b'},'first',undefined),{second:'b'});
- for(const saved of [null,[],'x',{first:3},{first:'',second:''}])assert.deepEqual(readLabels(saved),{});
- assert.deepEqual(readLabels({first:'a',second:'a'}),{second:'a'});
 });
 test('a photon endpoint from a reference preserves the physical anchor and anchor mode',()=>{
  const scene=defaultScene(),laser={...scene.lasers[0],referenceStateId:'reference-1'};

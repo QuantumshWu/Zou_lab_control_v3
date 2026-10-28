@@ -172,7 +172,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 - **频率读数控件**（`frequency-controls.ts`）由三部分组成：v3 Readout（最多 12 位有效数字，小数两侧三位一组，被舍入时加"≈ "，tooltip 给出完整值）、单位选择器、"相对"基准选择器。没有基准可选的读数（两态读数的 ν₁₂）只有前两部分，读绝对频率。
   - 基准可选：绝对（读作光频，单位族多出 nm / μm）、零场跃迁、参考频率、激光。差值先减大的载频部分再减偏移。
   - 有"自动"的读数，"自动"是读数的使用者给出的一个有名字的参考频率（两态读数为"零场 ν₁₂"），组合框写"自动（零场 ν₁₂）"。
-  - 单位和基准是该读数位置的显示偏好，存在场景的 `display.readouts` 中，随场景保存和导出；它们不算对场景的编辑，也不进入物理请求或缓存键。偏好中的基准若此处已不提供，按默认处理。
+  - 单位和基准是该读数位置的显示偏好，存在场景的 `display.readouts` 中，随场景导出；它们不算对场景的编辑，也不进入物理请求或缓存键。偏好中的基准若此处已不提供，按默认处理。
 - 检查器中，"频率 ν"一行是读数本身，下一行"读数相对"放基准和单位（检查器太窄，12 位读数与单位选择器放不进同一行）。
 
 ### 6.5 两态跃迁读数与跃迁矩元表（§1.8，已实现）
@@ -286,13 +286,13 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 - **布居演化图**：所有曲线照画；误差超过 0.5% 的采样（到相邻采样的一半为止）铺浅橙色背景，曲线在那里画成淡色虚线，图例加一项"估计误差 > 0.5%"。悬停读数在时刻后写该时刻的 ±误差，超出时为橙色并注明。读数放在光标线较宽的一侧，图窄时按那一侧的宽度换行，不盖住光标，指针始终在图上；新的检查点或最终结果替换图时，打开的读数留在原采样上（同一次计算的检查点与最终结果采样相同）。
 - **状态栏**：部分达到时加一句，例如"t ≤ 0.021 μs 估计误差最大 0.61%（超过 0.5%），其余时刻 ≤ 0.5%"（`accuracy.ts`）；p̄(T) 超出时写"p̄(1 s) 估计误差 0.72%（超过 0.5%）"。两者同时出现时状态栏写短句"t ≤ 0.021 μs 误差最大 0.61% · p̄(1 s) 误差 0.72%（均超 0.5%）"，完整的两句在它的悬停提示中，800 px 宽时也放得下一行。
 - **能级图**："指定时刻"的误差超过 0.5%，或 p̄(T) 超出时，仍按算出的布居着色；工具栏时刻旁出现橙色"⚠ 估计误差 x%"，能级的悬停文字在数值后写"（估计误差 x%，超过 0.5%）"。
-- **中间结果**：请求带 `stream: true` 时，求解器每到一个检查点发一个 `checkpoint` 事件，内容与最终结果相同，另加 `progress: true`（只求长期布居时是单行 t = 0）；最后的 `result` 是最好的检查点，不带 `progress`。原来的 `asymptotic`（稳态进度）事件已取消。界面依次显示最新的检查点，状态栏写"计算中：当前估计误差最大 x%"，最终结果到来时替换；图在检查点之间不清空，打开的悬停读数停在原来的采样上。按"停止"后保留最后一个检查点，按部分达到精度的结果标出各时刻的误差，状态栏写"计算已停止 · 显示最后的中间结果：…"。
+- **中间结果**：请求带 `stream: true` 时，求解器每到一个检查点发一个 `checkpoint` 事件，内容与最终结果相同，另加 `progress: true`（只求长期布居时是单行 t = 0）；最后的 `result` 是最好的检查点，不带 `progress`。原来的 `asymptotic`（稳态进度）事件已取消。检查点不画出来（2026-10-28）：计算期间图、能级和读数都不变，状态栏只写"布居计算中… · 当前估计误差最大 x%"；最终结果到来时一次画出全部内容，不会出现先显示、后消失的误差标记。界面在后台保留最后收到的检查点：按"停止"后它成为结果，一次画出，按部分达到精度的结果标出各时刻的误差，状态栏写"计算已停止 · 显示最后的中间结果：t ≤ 0.42 μs 误差最大 1%（超过 0.5%）"（短句；几段时刻时只写段数，如"2 段时刻误差最大 1%"，位置看图中的浅橙色背景；完整的句子在悬停提示中）；求解失败时同样保留它，状态栏写"计算失败 · 显示最后的中间结果：…"。没有收到检查点就停止时，什么也不画，状态栏写"计算已停止 · 修改参数后重新计算"。
 - **详情**：计算详情的"布居误差估计"写最大误差和是否部分超出，其下一行写超出的时刻和求解器给出的原因；有长期布居误差时加"长期布居误差估计"一行。模型说明写明每个时刻的误差和部分达到时的显示方式。
 
 ### 6.17 唯一的场景格式（2026-10-28）
 
 - 场景只有一种格式：`types.ts` 的 `Scene`，`version: 2`（`SCENE_VERSION`）。`scene-file.ts` 严格按它校验：必需字段齐全且在范围内，没有任何其它字段。早先版本写的文件不再读入、也不迁移：导入时拒绝并写明原因（如"场景文件不符合当前格式（version 2）：version 为 1，应为 2"或"lasers[0] 缺少 showLightShift"）。
-- 本机自动保存的场景若不符合当前格式，启动时改用默认场景，状态栏写"已改用默认场景：本地场景不是当前格式（version 为 1，应为 2），原数据可下载"，并提供"下载原本地场景"；界面不会因此出错。
+- 场景只由操作者载入（导入、示例）。界面不自动保存场景，启动时总是默认场景（`scene-file.ts` 的 `startupScene`），早先版本存在本机浏览器存储里的场景、编辑基准和能级标签在启动时删除；本机只保留求解失败的诊断记录，它不是场景数据。能级标签 1、2 只在本次运行中有效。"替换当前场景"的确认只比较本次载入或导出之后的修改。
 - 必需：`name`、`fields`、`lasers`、`referenceFrequencies`、`references`、`marks`、`dynamics`；磁场的 `direction`；激光的 `frequency`、`frequencyUnit`、`line`（派生，读入后按频率重算）、`showLightShift`、`intensityMode`、`intensityMWcm2`、`powerUnit`、`waistUnit`、`intensityUnit`、`direction`、`polarizationAngleDeg`、`ellipticityDeg`、`phaseDeg`，以及所选强度方式的输入（功率与束腰：`powerMW`、`waistUm`；功率与 NA：`powerMW`、`numericalAperture`）；参考频率的 `frequency`、`frequencyUnit`；参考能级的 `anchorId`、`anchorMode`、`offsetMHz`、`offsetUnit`；`dynamics` 的 `initialStateId`、`monitoredStateIds`、`monitorMode`、`monitoredGroupIds`、`durationUs`、`durationUnit`、`samples`、`meanHorizonUs`。
 - 可选（本身就是可有可无的）：`display`（读数偏好）；激光的 `referenceStateId`、`referenceProcess`，以及别的强度方式留下的 `powerMW`、`waistUm`、`numericalAperture`；参考能级的 `photon`；混合初态的 `dynamics.initialState`，热分布时还有 `dynamics.temperatureUnit`（且只在热分布时有）；派生的 `frequencyAnchor`、`intensityAnchor`（没有时由输入算出，有时只在指纹相符时使用）。
 - 取消的旧写法：`initialF/initialM`、`dynamics.laserId`、`dynamics.quality`、`dynamics.populationTolerance`、激光的 `regime`、`detuningMHz/referenceTransition/frequencyMode/wavelengthNm/detuningUnit`、以角度 `thetaDeg/phiDeg` 和 `directionAnchor` 写的方向、预设与跟随标记，以及缺省 `meanHorizonUs`、单位、`showLightShift`、`phaseDeg`、`intensityMode` 时的补齐。

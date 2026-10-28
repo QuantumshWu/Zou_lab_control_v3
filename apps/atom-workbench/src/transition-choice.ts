@@ -29,9 +29,3 @@ export function keepLabels(labels:StateLabels,exists:(id:string)=>boolean):State
 export function labelled(labels:StateLabels):{id:string;label:1|2}[]{
   return [...(labels.first!==undefined?[{id:labels.first,label:1 as const}]:[]),...(labels.second!==undefined?[{id:labels.second,label:2 as const}]:[])];
 }
-/** Saved labels, read back; anything else is no labels. */
-export function readLabels(input:unknown):StateLabels{
-  if(!input||typeof input!=='object'||Array.isArray(input))return {};
-  const o=input as Record<string,unknown>,id=(v:unknown)=>typeof v==='string'&&v?v:undefined;
-  return withLabel(id(o.first)!==undefined?{first:id(o.first)}:{},'second',id(o.second));
-}

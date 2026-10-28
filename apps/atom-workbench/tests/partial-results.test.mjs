@@ -64,7 +64,7 @@ test('the status sentence says where the trajectory misses ε',()=>{
   assert.equal(partialSentence(t,[0,.001,.001,.001,.001,.001],'μs'),'');assert.equal(errorPercent(.0061),'0.61%');
   // Beside p̄(T)'s error the status line says it short; the full sentence stays in its tooltip.
   assert.equal(partialShort(t,[0,.0061,.0052,.004,.001,0],'μs'),'t ≤ 0.021 μs 误差最大 0.61%');
-  assert.equal(partialShort(t,[0,.006,0,0,.009,0],'μs'),'2 段时刻（最早 t = 0.01 μs） 误差最大 0.9%');
+  assert.equal(partialShort(t,[0,.006,0,0,.009,0],'μs'),'2 段时刻误差最大 0.9%','several runs by their number; the band shows where');
   assert.equal(partialShort(t,[0,.001,.001,.001,.001,.001],'μs'),'');
 });
 

@@ -9,7 +9,7 @@ import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-mo
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {nativeResult} from './native-result.mjs';
 import {isTimeAverage} from '../dist/js/atom-workbench/src/solver-types.js';
-import {CurrentDynamicsResults} from '../dist/js/atom-workbench/src/current-dynamics-results.js';
+import {CurrentDynamicsResults,keptCheckpoint} from '../dist/js/atom-workbench/src/current-dynamics-results.js';
 
 /** The HTTP response for this scene: a native result plus transport metadata. */
 function fixture(scene=defaultScene(),settings=scene.dynamics,timesUs=[0,settings.durationUs/2,settings.durationUs]){
@@ -35,7 +35,7 @@ test('a checkpoint arrives before the final result and stays available when evol
  stream.send({type:'error',status:422,data:{error:'unstable evolution',code:'numerical-failure'}});stream.close();await rejected;
  assert.equal(progress[0].steady.converged,true);assert.equal(mock.calls.length,1);
 });
-test('two checkpoints, then the final result: each shown in turn, the final one without a progress flag',async t=>{
+test('two checkpoints, then the final result: each delivered in turn, the final one without a progress flag',async t=>{
  const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-success'});t.after(()=>client.dispose());
  const scene=scenario(),pending=client.solve(scene,scene.dynamics,{onProgress:value=>progress.push(value)});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]),request=mock.calls[0].body.request;
  stream.send({type:'checkpoint',data:checkpoint(scene,request,[0,.02,.009])});stream.send({type:'checkpoint',data:checkpoint(scene,request,[0,.007,.001])});
@@ -49,9 +49,10 @@ test('two checkpoints, then 停止: the solve ends and the last checkpoint is wh
  stream.send({type:'checkpoint',data:checkpoint(scene,request,[0,.03,.004])});stream.send({type:'checkpoint',data:checkpoint(scene,request,[0,.011,.002])});await pause(15);
  client.cancel();assert.equal((await pending).name,'AbortError');
  const last=progress.at(-1);assert.equal(progress.length,2);assert.equal(last.populationAccuracy.status,'estimated-partial');assert.deepEqual(last.populationAccuracy.sampleErrors,[0,.011,.002]);
- // The page keeps it: a stop does not clear the displayed results of the same inputs.
- const shown=new CurrentDynamicsResults(),epoch=shown.activate('inputs');for(const value of progress)shown.set('inputs',epoch,'progress',value);
- shown.activate('inputs');assert.equal(shown.get('inputs','progress'),last);
+ // The page drew neither; on 停止 the last one becomes its result.
+ const shown=new CurrentDynamicsResults(),epoch=shown.activate('inputs');assert.equal(shown.get('inputs','trajectory'),undefined);
+ for(const kind of keptCheckpoint(last,false,false))shown.set('inputs',epoch,kind,last);
+ shown.activate('inputs');assert.equal(shown.get('inputs','trajectory'),last);assert.equal(shown.get('inputs','mean'),last);
 });
 test('the stream speaks checkpoints and one final result only',async t=>{
  const scene=scenario();

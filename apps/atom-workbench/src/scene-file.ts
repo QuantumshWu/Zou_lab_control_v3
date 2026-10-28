@@ -181,10 +181,9 @@ function readScene(input:unknown):Scene {
   return scene;
 }
 
-/** The autosaved scene: the saved one when it is a valid current scene, else the default scene
- * and, briefly, why the saved one was refused (the caller keeps the original for download). */
-export function loadSavedScene(text:string|null):{scene:Scene;failure?:string}{
-  if(text===null)return {scene:defaultScene()};
-  let input:unknown;try{input=JSON.parse(text);}catch{return {scene:defaultScene(),failure:'不是 JSON'};}
-  try{return {scene:readScene(input)};}catch(error){return {scene:defaultScene(),failure:error instanceof Error?error.message:String(error)};}
+/** The scene the app starts with: always the default. Scenes are loaded only by the operator
+ * (导入、示例); scene data an earlier version kept in this browser storage is removed. */
+export function startupScene(storage:Pick<Storage,'removeItem'>|undefined,prefix:string):Scene{
+  for(const suffix of ['','-unreadable','-baseline','-state-labels'])try{storage?.removeItem(prefix+suffix);}catch{/* storage unavailable */}
+  return defaultScene();
 }
