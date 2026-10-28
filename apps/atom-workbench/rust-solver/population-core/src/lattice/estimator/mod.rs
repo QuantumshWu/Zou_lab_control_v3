@@ -146,7 +146,7 @@ impl<'a> UnifiedEstimate<'a>{
         Ok(Self{setup,lattice,pool:None,gate,seeded:0})
     }
     fn pool(&mut self)->Result<&mut SlowPool,String>{
-        if self.pool.is_none(){self.pool=Some(SlowPool::new(self.setup.prepared,&self.lattice)?);}
+        if self.pool.is_none(){self.pool=Some(SlowPool::new(self.setup.prepared,&self.lattice,longest_time(self.setup.outputs.times,self.setup.outputs.horizons))?);}
         Ok(self.pool.as_mut().unwrap())
     }
     /// Seeds the slow modes' pool with directions z and their images A z on
