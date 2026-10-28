@@ -36,11 +36,21 @@
 //! others a CSR remainder above ENTRY_FLOOR times the largest entry. A rest
 //! whose row sums stay below the structural coupling floor (K^(1)'s times
 //! the cut frequency, the largest |nu_q| it meets) is a non-structural
-//! coupling: it is left out but for its population rows, its row sum
-//! charged (without a tweezer the diagonal fold's rest is about 1e-7 rad/us
-//! in 0.57M entries). Population rows are never dropped, so the stored fold
-//! stays exactly trace preserving; the dropped entries' largest row sum is
-//! charged.
+//! coupling: the operator applies it but for its population rows (without a
+//! tweezer the diagonal fold's rest is about 1e-7 rad/us in 0.57M entries),
+//! and the rest is stored whole, so that the error estimate charges what
+//! the operator leaves out by its action (`LatticeOperator::left_out`).
+//! Population rows are never dropped, so the stored fold stays exactly trace
+//! preserving; the dropped entries' (below ENTRY_FLOOR) largest row sum is
+//! charged in the ledger.
+//!
+//! The static expansion's remainder: from a near mode p the far shell acts
+//! exactly as -C_b (D_s - i nu_p)^-1 C_s, of which K^(0) + i nu_p K^(1) is
+//! the expansion to first order; the rest is
+//!   nu_p^2 C_b D_s^-2 (D_s - i nu_p)^-1 C_s
+//! ((D - a)^-1 = D^-1 + a D^-2 + a^2 D^-2 (D - a)^-1), whose action on a
+//! field the far blocks' series give (`nu_remainder`, the shifted block's G
+//! elementwise from G_s).
 use super::*;
 use super::classification::HarmonicPlan;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
@@ -111,19 +121,27 @@ pub struct StoredFold{
     /// The rest's population rows alone (sparse): what keeps a rest exactly
     /// trace preserving when the rest is otherwise left out.
     pub population_rest:[Rest;2],
+    /// Whether the rest is structural (its row sum times its frequency scale
+    /// at least the structural floor): the operator applies it whole, else
+    /// but for its population rows.
+    pub kept:[bool;2],
     /// Largest row sum of the dropped rest entries.
     pub dropped:[f64;2],
     /// Frobenius norms: whole K, absorbed part, rest.
     pub norms:[[f64;3];2],
     pub largest_entry:[f64;2],
-    /// Largest absolute row sum of the stored rest (a generator-norm bound).
+    /// Largest absolute row sum of the rest (a generator-norm bound).
     pub rest_row_sum:[f64;2],
 }
 impl StoredFold{
-    /// out += s K^(o) as a row-major d x d matrix.
+    /// The rest of order o the structural rule applies: whole, or but for
+    /// its population rows (`kept`).
+    pub fn applied(&self,order:usize)->&Rest{if self.kept[order]{&self.rest[order]}else{&self.population_rest[order]}}
+    /// out += s K^(o) as the structural rule applies it (`applied`), a
+    /// row-major d x d matrix.
     pub fn dense_into(&self,n:usize,order:usize,s:C,out:&mut[C]){
         let op=Superop{left:Sparse::from_dense(&self.left[order],n),right:Sparse::from_dense(&self.right[order],n),sandwich:vec![]};
-        op.dense_into(n,s,out);self.rest[order].dense_into(n*n,s,out);
+        op.dense_into(n,s,out);self.applied(order).dense_into(n*n,s,out);
     }
 }
 #[derive(Clone,Debug,Default)]
@@ -197,8 +215,8 @@ pub struct FoldLibrary{
     /// K_0^(0) as a row-major d x d matrix (the static-shift test hook).
     #[cfg(test)]
     pub zero_dense:Option<Vec<C>>,
-    /// L_r and every far step's block (the build's; kept for the tests).
-    #[cfg(test)]rest:RestOperator,#[cfg(test)]blocks:BTreeMap<usize,FarBlock>,
+    /// L_r and every far step's block (the expansion remainder's series).
+    rest:RestOperator,blocks:BTreeMap<usize,FarBlock>,
     pub diagnostics:FoldDiagnostics,
 }
 #[inline]fn squared(z:C)->f64{z.re*z.re+z.im*z.im}
@@ -228,13 +246,14 @@ pub(crate) fn absorbable(k:&[C],n:usize)->(Vec<C>,Vec<C>){
 }
 
 /// Splits a row-major d x d K into its absorbable part and the rest, stored
-/// by sectors (see the module documentation); a rest whose largest row sum
-/// times `scale` is below `rest_floor` keeps its population rows alone. Population
-/// rows (i, i) are never dropped, so the stored K keeps the fold's exact
-/// trace preservation (v^T K = 0); the largest dropped row sum is returned.
+/// by sectors (see the module documentation), and whether the rest is
+/// structural (its largest row sum times `scale` at least `rest_floor`);
+/// the population rows are also stored alone. Population rows (i, i) are
+/// never dropped, so the stored K keeps the fold's exact trace preservation
+/// (v^T K = 0); the largest dropped row sum is returned.
 /// Three passes: the scale, the rest's measures after the absorbable band is
 /// taken out, the storage.
-fn store(k:&mut[C],n:usize,ground:&[bool],scale:f64,rest_floor:f64)->(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64,f64,Rest){
+fn store(k:&mut[C],n:usize,ground:&[bool],scale:f64,rest_floor:f64)->StoredOrder{
     let d=n*n;
     let(largest,total)={let(mut l,mut t)=(0_f64,0_f64);for z in k.iter(){let m=squared(*z);l=l.max(m);t+=m;}(l.sqrt(),t.sqrt())};
     // A X + X B lives on the band ((i,j),(k,j)) <- A[i,k], ((i,j),(i,l)) <- B[l,j].
@@ -246,13 +265,13 @@ fn store(k:&mut[C],n:usize,ground:&[bool],scale:f64,rest_floor:f64)->(Vec<C>,Vec
     let sector:Vec<usize>=(0..d).map(|p|2*usize::from(!ground[p/n])+usize::from(!ground[p%n])).collect();
     let mut members:Vec<Vec<usize>>=vec![Vec::new();4];let mut position=vec![0;d];
     for p in 0..d{position[p]=members[sector[p]].len();members[sector[p]].push(p);}
-    let(mut rest,mut row_sum,mut population_sum,mut filled)=(0_f64,0_f64,0_f64,[[0_usize;4];4]);
+    let(mut rest,mut row_sum,mut filled)=(0_f64,0_f64,[[0_usize;4];4]);
     for r in 0..d{let(row,so)=(&k[r*d..(r+1)*d],sector[r]);let mut sum=0.;
         for(c,z)in row.iter().enumerate(){let m=squared(*z);rest+=m;sum+=m.sqrt();if m>=floor2&&floor>0.{filled[so][sector[c]]+=1;}}
-        row_sum=row_sum.max(sum);if r/n==r%n{population_sum=population_sum.max(sum);}}
+        row_sum=row_sum.max(sum);}
     let kept=scale*row_sum>=rest_floor;
     let mut dense=[[None;4];4];let mut blocks=Vec::new();
-    for so in 0..4{for si in 0..4{if !kept{continue;}
+    for so in 0..4{for si in 0..4{
         let(rows,cols)=(&members[so],&members[si]);if rows.is_empty()||cols.is_empty(){continue;}
         if (filled[so][si] as f64)<DENSE_FILL*(rows.len()*cols.len())as f64{continue;}
         dense[so][si]=Some(blocks.len());
@@ -264,9 +283,9 @@ fn store(k:&mut[C],n:usize,ground:&[bool],scale:f64,rest_floor:f64)->(Vec<C>,Vec
         for(c,&v)in k[r*d..(r+1)*d].iter().enumerate(){let m=squared(v);if m==0.{continue;}
             if population{populations.col.push(c as u32);populations.value.push(v);}
             if let Some(blk)=dense[so][sector[c]]{let h=members[so].len();blocks[blk].values[position[r]+h*position[c]]=v;continue;}
-            if population||(kept&&m>=floor2){csr.col.push(c as u32);csr.value.push(v);}else{lost+=m.sqrt();}}
+            if population||m>=floor2{csr.col.push(c as u32);csr.value.push(v);}else{lost+=m.sqrt();}}
         dropped=dropped.max(lost);csr.row.push(csr.value.len()as u32);populations.row.push(populations.value.len()as u32);}
-    (a,b,Rest{blocks,sparse:csr},dropped,[total,absorbed.sqrt(),rest.sqrt()],largest,if kept{row_sum}else{population_sum},Rest{blocks:vec![],sparse:populations})
+    (a,b,Rest{blocks,sparse:csr},dropped,[total,absorbed.sqrt(),rest.sqrt()],largest,row_sum,Rest{blocks:vec![],sparse:populations},kept)
 }
 
 /// x <- sum_{k <= order} (-G_s L_r)^k G_s x on m consecutive blocks (term,
@@ -286,8 +305,10 @@ fn series(rest:&RestOperator,g:&[C],order:usize,n:usize,x:&mut[C],term:&mut[C],t
     }
     Ok(())
 }
-/// One stored order of a target, as `store` returns it.
-type StoredOrder=(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64,f64,Rest);
+/// One stored order of a target, as `store` returns it: the absorbable
+/// factors, the rest, the dropped row sum, the norms, the largest entry, the
+/// rest's row sum, its population rows and whether it is structural.
+type StoredOrder=(Vec<C>,Vec<C>,Rest,f64,[f64;3],f64,f64,Rest,bool);
 
 impl FoldLibrary{
     pub fn build(generator:&Generator,plan:&HarmonicPlan,lapack:&Arc<Lapack>)->Result<Self,String>{
@@ -301,7 +322,7 @@ impl FoldLibrary{
         let rest=RestOperator{left:off.left.dense(n),right:off.right.dense(n),recycling:Superop{left:Sparse::default(),right:Sparse::default(),sandwich:off.sandwich.clone()},
             scatter:Scatter::new(&off,n),lapack:Arc::clone(lapack)};
         let mut diagnostics=FoldDiagnostics{rest_bound:bound,..Default::default()};
-        if plan.targets.is_empty(){return Ok(Self{targets:vec![],#[cfg(test)]zero_dense:None,#[cfg(test)]rest,#[cfg(test)]blocks:BTreeMap::new(),diagnostics});}
+        if plan.targets.is_empty(){return Ok(Self{targets:vec![],#[cfg(test)]zero_dense:None,rest,blocks:BTreeMap::new(),diagnostics});}
         // Every far block's G_s and rho_s, the couplings' row sums and the
         // targets' sizes in the same norms.
         let couplings:BTreeMap<usize,f64>=plan.steps.iter().enumerate().filter(|(_,s)|s.treatment==classification::Treatment::Fold)
@@ -393,17 +414,39 @@ impl FoldLibrary{
         #[cfg(test)]let mut zero_dense=None;
         for(t,target)in plan.targets.iter().enumerate(){
             let mut fold=StoredFold{charge:target.charge.clone(),nu:target.nu,left:[vec![],vec![]],right:[vec![],vec![]],rest:[Rest::default(),Rest::default()],
-                population_rest:[Rest::default(),Rest::default()],dropped:[0.;2],norms:[[0.;3];2],largest_entry:[0.;2],rest_row_sum:[0.;2]};
+                population_rest:[Rest::default(),Rest::default()],kept:[true;2],dropped:[0.;2],norms:[[0.;3];2],largest_entry:[0.;2],rest_row_sum:[0.;2]};
             for order in 0..2{
-                let((a,b,rest,lost,norms,largest,row,population),_zero)=parts.next().ok_or("Fold storage lost a target")??;
+                let((a,b,rest,lost,norms,largest,row,population,kept),_zero)=parts.next().ok_or("Fold storage lost a target")??;
                 #[cfg(test)]if _zero.is_some(){zero_dense=_zero;}
                 fold.left[order]=a;fold.right[order]=b;fold.rest[order]=rest;fold.dropped[order]=lost+charged[t][order];fold.norms[order]=norms;
-                fold.largest_entry[order]=largest;fold.rest_row_sum[order]=row;fold.population_rest[order]=population;
+                fold.largest_entry[order]=largest;fold.rest_row_sum[order]=row;fold.population_rest[order]=population;fold.kept[order]=kept;
             }
             targets.push(fold);
         }
         diagnostics.milliseconds=clock.elapsed().as_secs_f64()*1e3;diagnostics.phase_ms[1]=diagnostics.milliseconds-diagnostics.phase_ms[0];
-        Ok(Self{targets,#[cfg(test)]zero_dense,#[cfg(test)]rest,#[cfg(test)]blocks,diagnostics})
+        Ok(Self{targets,#[cfg(test)]zero_dense,rest,blocks,diagnostics})
+    }
+    /// The static expansion's remainder from a near mode of frequency nu on
+    /// its block x (row-major d): per far step s that is a fold pair's
+    /// source, y_s = nu^2 D_s^-2 (D_s - i nu)^-1 C_s x, which the pairs' C_b
+    /// complete (`LatticeOperator::left_out`). None at nu = 0.
+    pub fn nu_remainder(&self,generator:&Generator,plan:&HarmonicPlan,nu:f64,x:&[C])->Result<Option<BTreeMap<usize,Vec<C>>>,String>{
+        if nu==0.||self.blocks.is_empty(){return Ok(None);}
+        let n=generator.n;let d=n*n;
+        let sources:BTreeSet<usize>=plan.targets.iter().flat_map(|t|t.pairs.iter().map(|p|p.source)).collect();
+        let(mut term,mut t,mut stack,mut small)=(vec![ZERO;d],vec![ZERO;d],Vec::new(),Vec::new());
+        let mut out=BTreeMap::new();
+        for s in sources{
+            let block=self.blocks.get(&s).ok_or("A fold pair's source without its far block")?;
+            let mut y=vec![ZERO;d];generator.components[&plan.steps[s].charge].op.apply_into(n,ONE,x,&mut y,&mut small);
+            // (D_s - i nu)^-1: G elementwise 1 / (1 / G_s - i nu).
+            let shifted:Vec<C>=block.g.iter().map(|&g|{let m=squared(g);let z=C{re:g.re/m,im:-g.im/m-nu};let w=squared(z);C{re:z.re/w,im:-z.im/w}}).collect();
+            series(&self.rest,&shifted,block.order[1],n,&mut y,&mut term,&mut t,1,false,&mut stack,&mut small)?;
+            for _ in 0..2{series(&self.rest,&block.g,block.order[1],n,&mut y,&mut term,&mut t,1,false,&mut stack,&mut small)?;}
+            for v in y.iter_mut(){*v=scaled(*v,nu*nu);}
+            out.insert(s,y);
+        }
+        Ok(Some(out))
     }
     /// D_s^-1 (order m0) on m consecutive row-major blocks, in place.
     #[cfg(test)]
@@ -446,14 +489,17 @@ mod tests{
         // Far drives weak enough that their cross folds and the diagonal
         // fold's rest fall below the structural floor (a tweezer-free model's
         // counter-rotating terms): the cross targets are omitted and charged,
-        // the diagonal keeps its absorbable part and its rest's population
-        // rows, the rest's row sum charged.
+        // the operator applies the diagonal's absorbable part and its rest's
+        // population rows.
         let mut f=fixture();for v in f.far.iter_mut().chain(f.far2.iter_mut()){*v*=1e-3;}
         let p=prepared(&f);let n=4;
         assert_eq!(p.plan.targets.len(),1);assert!(!p.plan.omitted.is_empty()&&p.plan.omitted.iter().all(|t|t.size<p.plan.structural_floor));
-        let t=&p.fold.targets[0];let s=&t.rest[0].sparse;
-        assert!(t.rest[0].blocks.is_empty()&&(0..n*n).all(|r|r/n==r%n||s.row[r+1]==s.row[r]),"only population rows stored");
-        assert!(t.dropped[0]>0.&&t.dropped[0]<p.plan.structural_floor);
+        // The rest is stored whole (the estimate charges what the operator
+        // leaves out), its population rows apart.
+        let t=&p.fold.targets[0];let s=&t.population_rest[0].sparse;
+        assert!(!t.kept[0]&&t.rest[0].stored()>t.population_rest[0].stored(),"the non-structural rest stored whole");
+        assert!(t.population_rest[0].blocks.is_empty()&&(0..n*n).all(|r|r/n==r%n||s.row[r+1]==s.row[r]),"population rows alone");
+        assert!(std::ptr::eq(t.applied(0),&t.population_rest[0])&&t.dropped[0]<p.plan.structural_floor);
         let ledger=super::super::ledger::RemainderLedger::new(&p.plan,3.,p.fold.dropped(),0.).unwrap();
         assert!(ledger.omitted_cross>0.&&ledger.dropped_entries>=t.dropped[0]);
     }
@@ -485,6 +531,17 @@ mod tests{
                 let charged=stored.dropped[0]+nu.abs()*stored.dropped[1];
                 assert!(error<=ledger.nu_freeze+charged+1e-13*scale,"t {:?} nu {nu}: |exact - folded| {error:e} > bound {:e}",target.charge,ledger.nu_freeze+charged);
                 if nu==0.{assert!(error<=stored.dropped[0]+1e-13*scale,"static fold beyond its charged remainder at nu = 0: {error:e}");}
+                // With the expansion's remainder (`nu_remainder`, completed by
+                // the pairs' C_b) the elimination is exact up to the series'
+                // charged truncation.
+                if nu!=0.{
+                    let(mut remainder,mut small)=(vec![ZERO;d*d],Vec::new());
+                    for c in 0..d{let mut e=vec![ZERO;d];e[c]=ONE;let parts=p.fold.nu_remainder(&p.generator,&p.plan,nu,&e).unwrap().unwrap();
+                        let mut column=vec![ZERO;d];for pair in &target.pairs{p.generator.components[&p.plan.steps[pair.back].charge].op.apply_into(n,ONE,&parts[&pair.source],&mut column,&mut small);}
+                        for r in 0..d{remainder[r*d+c]=column[r];}}
+                    let rest=exact.iter().zip(&folded).zip(&remainder).map(|((a,b),c)|magnitude(C{re:a.re-b.re-c.re,im:a.im-b.im-c.im})).fold(0.,f64::max);
+                    assert!(rest<=charged+1e-13*scale&&rest<1e-3*error.max(f64::MIN_POSITIVE),"t {:?} nu {nu}: {rest:e} with the remainder, {error:e} without",target.charge);
+                }
                 // Trace preservation: the output is traceless for every input.
                 for c in 0..d{let mut t=ZERO;for i in 0..n{add(&mut t,folded[(i*n+i)*d+c]);}assert!(magnitude(t)<1e-13*scale);}
             }

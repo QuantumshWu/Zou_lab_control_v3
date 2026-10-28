@@ -9,9 +9,11 @@
 //! - F_m = (A W - theta_m W) b_m, the Krylov residual;
 //! - g_m, the omitted ring R = ring(P u Q) slaved at z = theta_m and fed back
 //!   (`ErrorLattice::ring_feedback`);
-//! - dA W b_m, the K^(1) rests the lattice operator leaves out
-//!   (`LatticeOperator::left_out`). The other fold remainders are reported
-//!   only (`ledger`: their measured action is at most 6e-6).
+//! - dA W b_m, what the lattice operator leaves out of the folded generator
+//!   (`LatticeOperator::left_out`): the non-structural fold rests but their
+//!   population rows, the K^(1) rests it drops and the static expansion's
+//!   remainder in nu (`fold`). The other fold remainders are reported only
+//!   (`ledger`: their measured action is at most 6e-6).
 //!
 //! - Slow Ritz modes (|theta| < `slow::SLOW`, the kernel included, not
 //!   projected out) are exact (`slow`): e_m(t) = a_m (e^{theta_m t} Y_m - e^{tA} Y_m) with

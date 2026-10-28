@@ -78,8 +78,9 @@ pub struct LatticeOperator<'a>{
     block_work:usize,rest_work:usize,
     pub work:usize,
     /// Whether the K^(1) rests are applied but for their population rows
-    /// (the rest is left out: `left_out`), and their summed row sums.
-    pub drops_k1_rest:bool,k1_rest:f64,
+    /// (the rest is left out: `left_out`), and their summed row sums; whether
+    /// anything of the folded generator is left out (`left_out`).
+    pub drops_k1_rest:bool,k1_rest:f64,leaves_out:bool,
 }
 impl<'a> LatticeOperator<'a>{
     pub fn new(prepared:&'a LatticePrepared,modes:&[Charge])->Result<Self,String>{Self::with_k1_rests(prepared,modes,false)}
@@ -115,13 +116,16 @@ impl<'a> LatticeOperator<'a>{
         let mut edges=vec![Vec::new();modes.len()];
         let mut block_work=targets.len()*(2*n*n*n+recycling.work(n));
         let nu_max=nu.iter().map(|w|w.abs()).fold(0.,f64::max);
-        let k1_rest:f64=prepared.fold.targets.iter().map(|t|t.rest_row_sum[1]).sum();
+        let k1_rest:f64=prepared.fold.targets.iter().filter(|t|t.kept[1]).map(|t|t.rest_row_sum[1]).sum();
         let fold_size:f64=prepared.fold.targets.iter().map(|t|t.norms[0][0]).sum();
         let drops_k1_rest=k1_rest>0.&&nu_max*k1_rest<=K1_REST_SHARE*fold_size&&!keep_k1;
-        let k1=|t:&'a StoredFold|if drops_k1_rest{&t.population_rest[1]}else{&t.rest[1]};
+        // A non-structural rest is applied but for its population rows.
+        let k0=|t:&'a StoredFold|t.applied(0);
+        let k1=|t:&'a StoredFold|if drops_k1_rest{&t.population_rest[1]}else{t.applied(1)};
+        let leaves_out=drops_k1_rest||prepared.fold.targets.iter().any(|t|!t.kept[0]||!t.kept[1])||(nu_max>0.&&!prepared.fold.targets.is_empty());
         let mut terms=Vec::new();
         if let Some(t)=diagonal{let own:Vec<(usize,usize)>=targets.iter().map(|&q|(q,q)).collect();
-            terms.push(Term{rest:&t.rest[0],edges:own.clone(),frequency:false,diagonal:true});
+            terms.push(Term{rest:k0(t),edges:own.clone(),frequency:false,diagonal:true});
             terms.push(Term{rest:k1(t),edges:own,frequency:true,diagonal:true});}
         let mut fold_edges=vec![Vec::new();prepared.fold.targets.len()];
         for &target in &targets{let q=&modes[target];
@@ -135,14 +139,14 @@ impl<'a> LatticeOperator<'a>{
             }
         }
         for(t,list)in fold_edges.into_iter().enumerate(){if list.is_empty(){continue;}let data=&prepared.fold.targets[t];
-            terms.push(Term{rest:&data.rest[0],edges:list.clone(),frequency:false,diagonal:false});
+            terms.push(Term{rest:k0(data),edges:list.clone(),frequency:false,diagonal:false});
             terms.push(Term{rest:k1(data),edges:list,frequency:true,diagonal:false});}
         terms.retain(|t|t.rest.stored()>0);
         let offset:usize=terms.iter().map(|t|d*t.edges.len()).sum();
         let rest_work:usize=terms.iter().map(|t|t.rest.stored()*t.edges.len()).sum();
         Ok(Self{prepared,n,modes:modes.to_vec(),nu,centre,index,mirror,canonical,left,right,recycling,explicit,edges,terms,
             gathered:vec![ZERO;offset],interleaved:vec![ZERO;d*modes.len()],execution:Execution::new()?,scratch:Vec::new(),
-            block_work,rest_work,work:block_work+rest_work,drops_k1_rest,k1_rest})
+            block_work,rest_work,work:block_work+rest_work,drops_k1_rest,k1_rest,leaves_out})
     }
     pub fn dimension(&self)->usize{self.modes.len()*self.n*self.n}
     pub fn nu_max(&self)->f64{self.nu.iter().map(|w|w.abs()).fold(0.,f64::max)}
@@ -245,24 +249,36 @@ impl<'a> LatticeOperator<'a>{
         mirror_field(y,n,canonical,mirror);
         Ok(())
     }
-    /// What the operator leaves out of the true one on a Hermitian-symmetric
-    /// field x: the K^(1) rests but for their population rows when they are
-    /// dropped (`drops_k1_rest`), i nu_p (K_t^(1) rest - its population
-    /// rows) x_p on every fold edge p -> q of the lattice; None when the
-    /// rests are applied.
     /// Whether the operator leaves K^(1) rests out (the estimate charges them).
     pub fn drops_k1_rests(&self)->bool{self.drops_k1_rest}
+    /// What the operator leaves out of the folded generator on a
+    /// Hermitian-symmetric field x, on every fold edge p -> q of the lattice:
+    /// a non-structural rest's entries but its population rows
+    /// (`StoredFold::kept`), the K^(1) rests' when they are dropped
+    /// (`drops_k1_rest`), both times their factor (1, i nu_p), and the
+    /// static expansion's remainder from p, sum over the target's pairs of
+    /// C_b nu_p^2 D_s^-2 (D_s - i nu_p)^-1 C_s x_p (`FoldLibrary::nu_remainder`);
+    /// None when nothing is left out.
     pub fn left_out(&self,x:&[C])->Result<Option<Vec<C>>,String>{
-        if !self.drops_k1_rest{return Ok(None);}
+        if !self.leaves_out{return Ok(None);}
         let(n,d)=(self.n,self.n*self.n);let mut y=vec![ZERO;self.dimension()];
+        let prepared=self.prepared;let(library,plan,generator)=(&prepared.fold,&prepared.plan,&prepared.generator);
+        // The remainder's far parts per source mode (none at nu_p = 0).
+        let remainders:Vec<Option<BTreeMap<usize,Vec<C>>>>=self.execution.map((0..self.modes.len()).collect(),
+            |p|library.nu_remainder(generator,plan,self.nu[p],&x[p*d..(p+1)*d])).into_iter().collect::<Result<_,_>>()?;
         let targets:Vec<usize>=(0..self.modes.len()).filter(|&q|self.canonical[q]).collect();
-        let(fold,modes,index,nu)=(&self.prepared.fold.targets,&self.modes,&self.index,&self.nu);
+        let(fold,modes,index,nu,drops)=(&library.targets,&self.modes,&self.index,&self.nu,self.drops_k1_rest);
+        let remainders=&remainders;
         let blocks=self.execution.map(targets.clone(),|q|->Result<Vec<C>,String>{
-            let mut out=vec![ZERO;d];
-            for data in fold{
+            let mut out=vec![ZERO;d];let mut small=Vec::new();
+            for(t,data)in fold.iter().enumerate(){
                 let source=charge_minus(&modes[q],&data.charge)?;let Some(&p)=index.get(&source)else{continue};
                 let xp=&x[p*d..(p+1)*d];
-                data.rest[1].apply_into(C{re:0.,im:nu[p]},xp,&mut out);data.population_rest[1].apply_into(C{re:0.,im:-nu[p]},xp,&mut out);
+                if !data.kept[0]{data.rest[0].apply_into(ONE,xp,&mut out);data.population_rest[0].apply_into(C{re:-1.,im:0.},xp,&mut out);}
+                if drops||!data.kept[1]{data.rest[1].apply_into(C{re:0.,im:nu[p]},xp,&mut out);data.population_rest[1].apply_into(C{re:0.,im:-nu[p]},xp,&mut out);}
+                if let Some(parts)=&remainders[p]{for pair in &plan.targets[t].pairs{
+                    let part=parts.get(&pair.source).ok_or("Lattice operator: a fold pair without its remainder")?;
+                    generator.components[&plan.steps[pair.back].charge].op.apply_into(n,ONE,part,&mut out,&mut small);}}
             }
             Ok(out)});
         for(&q,block)in targets.iter().zip(blocks){y[q*d..(q+1)*d].copy_from_slice(&block?);}
@@ -276,7 +292,10 @@ impl<'a> LatticeOperator<'a>{
         let generator=&self.prepared.generator;let fold=&self.prepared.fold.targets;
         let mut block=vec![ZERO;d*d];
         let place=|out:&mut Vec<C>,block:&[C],q:usize,p:usize|{for r in 0..d{for c in 0..d{add(&mut out[(q*d+r)*size+p*d+c],block[r*d+c]);}}};
-        let dense_fold=|t:&StoredFold,w:f64,block:&mut Vec<C>|{t.dense_into(n,0,ONE,block);t.dense_into(n,1,C{re:0.,im:w},block);};
+        // K^(0) + i w K^(1) as the operator applies them.
+        let dense_fold=|t:&StoredFold,w:f64,block:&mut Vec<C>|{t.dense_into(n,0,ONE,block);
+            if self.drops_k1_rest{let s=C{re:0.,im:w};Superop{left:Sparse::from_dense(&t.left[1],n),right:Sparse::from_dense(&t.right[1],n),sandwich:vec![]}.dense_into(n,s,block);t.population_rest[1].dense_into(d,s,block);}
+            else{t.dense_into(n,1,C{re:0.,im:w},block);}};
         for q in 0..self.modes.len(){
             block.fill(ZERO);generator.zero_component().op.dense_into(n,ONE,&mut block);for r in 0..d{block[r*d+r].im-=self.nu[q];}
             if let Some(t)=fold.first().filter(|t|t.charge==generator.zero){dense_fold(t,self.nu[q],&mut block);}
