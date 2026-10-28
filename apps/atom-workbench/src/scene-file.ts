@@ -1,11 +1,12 @@
 import type {AxisAngles,AxisName,Direction,FrequencyDisplayUnit,FrequencyExpr,Scene,Laser,MagneticField,ReferenceAxis,ReferenceFrequency} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
 import {DURATION_UNITS} from './duration.js';
-import type {DurationUnit,InitialStateSpec} from './types.js';
+import type {DurationUnit,InitialStateSpec,IntensityMode,TemperatureUnit} from './types.js';
 import {DEFAULT_MEAN_HORIZON_US,MEAN_HORIZONS_US,defaultDynamics} from './types.js';
 import {analyze,resolveSceneFrequencies} from './physics.js';
-import {migrateLaserFrequency,normalizeLaserFrequency} from './laser-frequency.js';
-import {INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,normalizeLaserIntensity} from './laser-intensity.js';
+import {DETUNING_UNITS,migrateLaserFrequency,normalizeLaserFrequency} from './laser-frequency.js';
+import {INTENSITY_MODES,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,checkNumericalAperture,normalizeLaserIntensity} from './laser-intensity.js';
+import {TEMPERATURE_UNITS} from './initial-state.js';
 import {AXIS_NAMES,legacyFieldDirection,legacyLaserDirection,referenceAxis} from './direction.js';
 
 /** Validates a saved initial-state spec; ids must be physical model states. */
@@ -47,6 +48,8 @@ function directionSpec(input:unknown):Direction {
 const unitChoice=<T extends string>(input:unknown,units:readonly T[],what:string):T|undefined=>{if(input===undefined)return undefined;if(!units.includes(input as T))throw new Error(`${what}单位无效`);return input as T;};
 
 const FREQUENCY_UNITS=['Hz','kHz','MHz','GHz','THz','nm','μm'];
+/** A readout's units: a frequency's, and an energy difference read as a temperature. */
+const READOUT_UNITS=[...FREQUENCY_UNITS,'mK'];
 /** A saved frequency expression (ui-design.md §1.2); that its base exists and no cycle
  * forms is checked once every object is known (resolveSceneFrequencies). */
 function frequencyExpr(input:unknown):FrequencyExpr {
@@ -61,8 +64,8 @@ function frequencyExpr(input:unknown):FrequencyExpr {
   if(b!.kind!=='transition'||(b!.line!=='D1'&&b!.line!=='D2')||(b!.Fg!==1&&b!.Fg!==2)||!Number.isInteger(b!.Fe)||(b!.fromManifold!==undefined&&b!.fromManifold!=='ground'&&b!.fromManifold!=='D1'))invalid();
   return {base:{kind:'transition',line:b!.line as 'D1'|'D2',Fg:b!.Fg as 1|2,Fe:b!.Fe as number,...(b!.fromManifold==='D1'?{fromManifold:'D1' as const}:{})},offsetMHz};
 }
-function frequencyUnit(input:unknown):FrequencyDisplayUnit|undefined {
-  if(input===undefined)return undefined;if(!FREQUENCY_UNITS.includes(String(input)))throw new Error('频率单位无效');return input as FrequencyDisplayUnit;
+function frequencyUnit(input:unknown,units=FREQUENCY_UNITS):FrequencyDisplayUnit|undefined {
+  if(input===undefined)return undefined;if(!units.includes(String(input)))throw new Error('频率单位无效');return input as FrequencyDisplayUnit;
 }
 function frequencyAnchor(input:unknown):NonNullable<Laser['frequencyAnchor']> {
   const a=input as Record<string,unknown>;
@@ -111,9 +114,13 @@ export function validateScene(input:unknown):Scene {
     if(!expr&&l.frequencyMode!==undefined){if(l.frequencyMode!=='transition'&&l.frequencyMode!=='wavelength')throw new Error('频率模式无效');result.frequencyMode=l.frequencyMode;}
     if(!expr&&l.wavelengthNm!==undefined)result.wavelengthNm=val(l,'wavelengthNm',Number.MIN_VALUE,Number.MAX_VALUE);
     if(!expr&&l.detuningUnit!==undefined){if(!['Hz','kHz','MHz','GHz','THz'].includes(String(l.detuningUnit)))throw new Error('失谐单位无效');result.detuningUnit=l.detuningUnit as Laser['detuningUnit'];}
-    if(l.intensityMode!==undefined){if(l.intensityMode!=='intensity'&&l.intensityMode!=='power')throw new Error('强度模式无效');result.intensityMode=l.intensityMode;}
+    if(l.intensityMode!==undefined){if(!INTENSITY_MODES.includes(l.intensityMode as IntensityMode))throw new Error('强度模式无效');result.intensityMode=l.intensityMode as IntensityMode;}
     if(l.powerMW!==undefined)result.powerMW=val(l,'powerMW',0,Number.MAX_VALUE);if(l.waistUm!==undefined)result.waistUm=val(l,'waistUm',Number.MIN_VALUE,Number.MAX_VALUE);
-    if(result.frequencyMode==='wavelength'&&result.wavelengthNm===undefined)throw new Error('请指定真空波长');if(result.intensityMode==='power'&&(result.powerMW===undefined||result.waistUm===undefined))throw new Error('请指定功率与束腰');return normalizeLaserIntensity(expr?result:migrateLaserFrequency(normalizeLaserFrequency(result)));
+    if(l.numericalAperture!==undefined){if(typeof l.numericalAperture!=='number')throw new Error('数值孔径无效');result.numericalAperture=checkNumericalAperture(l.numericalAperture);}
+    if(result.frequencyMode==='wavelength'&&result.wavelengthNm===undefined)throw new Error('请指定真空波长');if(result.intensityMode==='power'&&(result.powerMW===undefined||result.waistUm===undefined))throw new Error('请指定功率与束腰');
+    if(result.intensityMode==='na'&&(result.powerMW===undefined||result.numericalAperture===undefined))throw new Error('请指定功率与数值孔径');
+    // The intensity is normalized once every frequency is resolved: in NA mode it follows the wavelength.
+    return expr?result:migrateLaserFrequency(normalizeLaserFrequency(result));
   });
   // Every linked field exists and no link forms a cycle.
   for(const object of [...fields,...lasers])try{referenceAxis(fields,object.direction.reference);}catch(error){throw new Error(`「${object.name}」的参考轴无效：${error instanceof Error?error.message:String(error)}`);}
@@ -123,14 +130,16 @@ export function validateScene(input:unknown):Scene {
   const referenceFrequencies:ReferenceFrequency[]=((s.referenceFrequencies??[]) as unknown[]).map(v=>{const r=obj(v),unit=frequencyUnit(r.frequencyUnit);return {id:id(r),name:string(r,'name',32),frequency:frequencyExpr(r.frequency),...(unit?{frequencyUnit:unit}:{}),...(r.frequencyAnchor!==undefined?{frequencyAnchor:frequencyAnchor(r.frequencyAnchor)}:{})};});
   const next:Scene={version:1,name:string(s,'name',100),fields,lasers,referenceFrequencies,initialF:F,initialM:m,marks:{},references:[],dynamics:{...legacyDefaults,initialStateId:legacyInitial,monitoredStateIds:[legacyInitial,...legacyDefaults.monitoredStateIds.filter(id=>id!==legacyInitial)]}};
   if(s.display!==undefined){const display=obj(s.display),readouts=display.readouts===undefined?{}:obj(display.readouts);if(Object.keys(readouts).length>16)throw new Error('读数显示偏好过多');
-    next.display={readouts:Object.fromEntries(Object.entries(readouts).map(([key,v])=>{const pref=obj(v),unit=frequencyUnit(pref.unit);if(key.length>64||(pref.base!==undefined&&(typeof pref.base!=='string'||pref.base.length>128)))throw new Error('读数显示偏好无效');return [key,{...(unit?{unit}:{}),...(typeof pref.base==='string'?{base:pref.base}:{})}];}))};}
+    next.display={readouts:Object.fromEntries(Object.entries(readouts).map(([key,v])=>{const pref=obj(v),unit=frequencyUnit(pref.unit,READOUT_UNITS);if(key.length>64||(pref.base!==undefined&&(typeof pref.base!=='string'||pref.base.length>128)))throw new Error('读数显示偏好无效');return [key,{...(unit?{unit}:{}),...(typeof pref.base==='string'?{base:pref.base}:{})}];}))};}
   // Every base exists, no frequency follows itself, and every frequency is positive.
   resolveSceneFrequencies(next);
+  for(const laser of lasers)normalizeLaserIntensity(laser);
   const validatedAnalysis=analyze(next),physicalIds=new Set([...validatedAnalysis.ground,...validatedAnalysis.D1,...validatedAnalysis.D2].map(l=>l.id));
 
   if(s.marks!==undefined){const marks=obj(s.marks);for(const [k,v]of Object.entries(marks)){if(!physicalIds.has(k)||typeof v!=='string'||v.length>32)throw new Error('能级标记无效');next.marks![k]=v;}}
   if(s.references!==undefined){if(!Array.isArray(s.references)||s.references.length>12)throw new Error('最多 12 个参考能级');next.references=s.references.map(v=>{const r=obj(v),anchorId=string(r,'anchorId'),referenceId=id(r);if(!physicalIds.has(anchorId))throw new Error('参考能级的锚点无效');if(physicalIds.has(referenceId))throw new Error('参考能级不能使用真实态 ID');if(r.anchorMode!==undefined&&r.anchorMode!=='follow'&&r.anchorMode!=='zero-field')throw new Error('参考能级锚点模式无效');let photon:NonNullable<Scene['references']>[number]['photon'];if(r.photon!==undefined){const p=obj(r.photon),source=obj(p.source);if((source.kind!=='laser'&&source.kind!=='reference')||typeof source.id!=='string'||(p.direction!=='absorb'&&p.direction!=='emit'))throw new Error('参考能级的光子链接无效');if(!(source.kind==='laser'?lasers:referenceFrequencies).some(o=>o.id===source.id))throw new Error('参考能级链接的频率不存在');photon={source:{kind:source.kind,id:source.id},direction:p.direction};}
-    return {id:referenceId,name:string(r,'name',32),anchorId,offsetMHz:val(r,'offsetMHz',-1e12,1e12),anchorMode:r.anchorMode as 'follow'|'zero-field'|undefined,...(photon?{photon}:{})};});}
+    const offsetUnit=unitChoice(r.offsetUnit,DETUNING_UNITS,'偏移');
+    return {id:referenceId,name:string(r,'name',32),anchorId,offsetMHz:val(r,'offsetMHz',-1e12,1e12),...(offsetUnit?{offsetUnit}:{}),anchorMode:r.anchorMode as 'follow'|'zero-field'|undefined,...(photon?{photon}:{})};});}
   for(const laser of lasers)if(laser.referenceStateId!==undefined&&!physicalIds.has(laser.referenceStateId)&&!next.references!.some(r=>r.id===laser.referenceStateId))throw new Error('激光参考态不存在');
   if(s.dynamics!==undefined){
     const d=obj(s.dynamics),laserId=typeof d.laserId==='string'?d.laserId.slice(0,64):'';
@@ -142,9 +151,10 @@ export function validateScene(input:unknown):Scene {
     // Scenes from before the horizon read at the 1 s default.
     const meanHorizonUs=d.meanHorizonUs===undefined?DEFAULT_MEAN_HORIZON_US:d.meanHorizonUs;if(!MEAN_HORIZONS_US.includes(meanHorizonUs as number|null))throw new Error('长期布居的观察时长无效');
     if(d.durationUnit!==undefined&&!DURATION_UNITS.includes(d.durationUnit as DurationUnit))throw new Error('时间单位无效');
+    const temperatureUnit=unitChoice(d.temperatureUnit,TEMPERATURE_UNITS,'温度');
     if(d.monitorMode!==undefined&&d.monitorMode!=='auto'&&d.monitorMode!=='manual')throw new Error('观察态选择模式无效');
     const groups=d.monitoredGroupIds??[];if(!Array.isArray(groups)||groups.length>POPULATION_GROUPS.length||new Set(groups).size!==groups.length||groups.some(id=>!POPULATION_GROUPS.some(g=>g.id===id)))throw new Error('F 布居分组无效');
-    next.dynamics={laserId,initialStateId,...(spec&&spec.kind!=='state'?{initialState:spec}:{}),monitorMode:d.monitorMode==='manual'?'manual':'auto',monitoredGroupIds:[...groups] as string[],monitoredStateIds:[...d.monitoredStateIds] as string[],durationUs:val(d,'durationUs',Number.MIN_VALUE,Number.MAX_VALUE),...(d.durationUnit!==undefined?{durationUnit:d.durationUnit as DurationUnit}:{}),samples,meanHorizonUs:meanHorizonUs as number|null,...(d.quality==='verified'||d.quality==='preview'?{quality:d.quality}:{})};
+    next.dynamics={laserId,initialStateId,...(spec&&spec.kind!=='state'?{initialState:spec}:{}),monitorMode:d.monitorMode==='manual'?'manual':'auto',monitoredGroupIds:[...groups] as string[],monitoredStateIds:[...d.monitoredStateIds] as string[],durationUs:val(d,'durationUs',Number.MIN_VALUE,Number.MAX_VALUE),...(d.durationUnit!==undefined?{durationUnit:d.durationUnit as DurationUnit}:{}),...(temperatureUnit&&spec?.kind==='thermal'?{temperatureUnit:temperatureUnit as TemperatureUnit}:{}),samples,meanHorizonUs:meanHorizonUs as number|null,...(d.quality==='verified'||d.quality==='preview'?{quality:d.quality}:{})};
   }
   const initial=[...validatedAnalysis.ground,...validatedAnalysis.D1,...validatedAnalysis.D2].find(l=>l.id===next.dynamics?.initialStateId);if(initial?.manifold==='ground'){next.initialF=initial.F as 1|2;next.initialM=initial.m;}
   return next;

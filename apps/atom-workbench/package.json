@@ -9,7 +9,7 @@
     "package:single-exe": "node scripts/release-single-exe.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "test:build": "node --test tests/native-dependencies.test.mjs tests/memory-exe-format.test.mjs",
-    "test:ui": "npm run build && node --test tests/choice-trees.test.mjs tests/duration.test.mjs tests/scene-file.test.mjs tests/population-selection.test.mjs tests/space-geometry.test.mjs tests/space-arrow.test.mjs tests/ui-defaults-layout.test.mjs tests/ui-review.test.mjs"
+    "test:ui": "npm run build && node --test tests/choice-trees.test.mjs tests/duration.test.mjs tests/scene-file.test.mjs tests/population-selection.test.mjs tests/space-geometry.test.mjs tests/space-arrow.test.mjs tests/ui-defaults-layout.test.mjs tests/ui-review.test.mjs tests/unit-rule.test.mjs"
   },
   "devDependencies": {
     "esbuild": "0.25.12",

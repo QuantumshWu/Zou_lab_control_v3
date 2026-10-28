@@ -9,14 +9,22 @@ import {formatNumber,TERMS,fSymbol} from './format.js';
 
 export type FrequencyValue={centroidMHz:number;offsetMHz:number};
 export type WavelengthUnit='nm'|'μm';
-export type FrequencyUnit=DetuningUnit|WavelengthUnit;
+/** An energy difference read as a temperature, ΔE/k_B. */
+export type TemperatureEquivalentUnit='mK';
+export type FrequencyUnit=DetuningUnit|WavelengthUnit|TemperatureEquivalentUnit;
 export const FREQUENCY_UNITS:readonly DetuningUnit[]=['Hz','kHz','MHz','GHz','THz'];
 export const WAVELENGTH_UNITS:readonly WavelengthUnit[]=['nm','μm'];
+export const TEMPERATURE_EQUIVALENT_UNITS:readonly TemperatureEquivalentUnit[]=['mK'];
 export const UNIT_MHZ:Readonly<Record<DetuningUnit,number>>={Hz:1e-6,kHz:1e-3,MHz:1,GHz:1e3,THz:1e6};
 export const UNIT_NM:Readonly<Record<WavelengthUnit,number>>={nm:1,'μm':1e3};
 /** c in nm·MHz: λ/nm = C_NM_MHZ / (ν/MHz). */
 export const C_NM_MHZ=299792458000;
+/** k_B/h in MHz per mK, the ratio of the exact SI constants (k_B = 1.380 649 × 10⁻²³ J/K,
+ * h = 6.626 070 15 × 10⁻³⁴ J·s): 1 mK ↔ 20.836 619 MHz. */
+export const MHZ_PER_MK=1.380649e-23/6.62607015e-34/1e9;
 export const isWavelengthUnit=(unit:string):unit is WavelengthUnit=>unit==='nm'||unit==='μm';
+export const isTemperatureEquivalentUnit=(unit:string):unit is TemperatureEquivalentUnit=>unit==='mK';
+export const isDetuningUnit=(unit:string):unit is DetuningUnit=>(FREQUENCY_UNITS as readonly string[]).includes(unit);
 
 const centroid=(line:SpectralLine)=>RB87[line].frequencyHz/1e6;
 export const value=(centroidMHz:number,offsetMHz:number):FrequencyValue=>({centroidMHz,offsetMHz});
@@ -85,9 +93,11 @@ export function baseName(base:FrequencyBase,scene:FrequencyScene):string{
 }
 
 // ------------------------------------------------------------ reading
-/** A frequency in `unit` (a wavelength of an absolute positive frequency; NaN otherwise). */
+/** A frequency in `unit` (a wavelength of an absolute positive frequency, NaN otherwise; a
+ * temperature ΔE/k_B of an energy difference). */
 export function inUnit(mhz:number,unit:FrequencyUnit):number{
   if(isWavelengthUnit(unit))return mhz>0?C_NM_MHZ/mhz/UNIT_NM[unit]:NaN;
+  if(isTemperatureEquivalentUnit(unit))return mhz/MHZ_PER_MK;
   return mhz/UNIT_MHZ[unit];
 }
 /** A readout's words: twelve significant digits at most, grouped in threes on

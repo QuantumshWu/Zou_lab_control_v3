@@ -7,7 +7,7 @@ export const DETUNING_UNITS: readonly DetuningUnit[] = ['Hz','kHz','MHz','GHz','
 export const DETUNING_UNIT_MHZ: Readonly<Record<DetuningUnit,number>> = {
   Hz: 1e-6, kHz: 1e-3, MHz: 1, GHz: 1e3, THz: 1e6,
 };
-/** The scene file's bound on a detuning (±5000 THz); the unit is only how it is read. */
+/** The scene file's bound on a detuning (±5000 THz), in any unit it is written in. */
 export const MAX_DETUNING_MHZ = 5e9;
 const C_NM_MHZ = 299792458000;
 
@@ -51,8 +51,8 @@ export function naturalDetuningUnit(detuningMHz:number):DetuningUnit {
   const magnitude=Math.abs(detuningMHz);
   return magnitude>=1e6?'THz':magnitude>=1e3?'GHz':magnitude>=1||magnitude===0?'MHz':magnitude>=1e-3?'kHz':'Hz';
 }
-/** The operator's unit when there is one (a unit only changes how the value is read,
- * ui-design.md §0.4), else the natural one. Never clamps an optical frequency. */
+/** A legacy beam's detuning unit: its own when there is one, else the natural one. Never
+ * clamps an optical frequency. */
 export function suitableDetuningUnit(detuningMHz:number,preferred?:DetuningUnit):DetuningUnit {
   if(!Number.isFinite(detuningMHz))throw new Error('失谐必须是有限数值。');
   if(preferred===undefined)return naturalDetuningUnit(detuningMHz);
@@ -210,26 +210,21 @@ export function frequencyValue(object:DefinedFrequency):{value:number;unit:Frequ
   const unit=object.frequencyUnit&&!isWavelength(object.frequencyUnit)?object.frequencyUnit:naturalDetuningUnit(f.offsetMHz);
   return {value:f.offsetMHz/DETUNING_UNIT_MHZ[unit],unit};
 }
-/** The operator's value, in the definition's unit. */
-export function setFrequencyValue(scene:FrequencyScene,object:DefinedFrequency,value:number):void {
+/** The operator's number, in `unit` (the definition's own by default). A unit picked for the
+ * number keeps its digits (ui-design.md §0.4): the offset becomes that many of the new unit; on an
+ * absolute base a wavelength unit makes it that vacuum wavelength and a frequency unit that
+ * frequency. A number the scene refuses (a frequency not positive, past ±5000 THz) changes nothing. */
+export function setFrequencyValue(scene:FrequencyScene,object:DefinedFrequency,value:number,unit:FrequencyDisplayUnit=frequencyValue(object).unit):void {
   if(!Number.isFinite(value))throw new Error('频率必须是有限数值。');
-  const f=object.frequency!,{unit}=frequencyValue(object);
-  if('wavelengthNm' in f){if(!(value>0))throw new Error('真空波长必须是正数。');writeExpression(scene,object,{wavelengthNm:value*WAVELENGTH_NM[unit as 'nm'|'μm']},unit);return;}
-  const offset=value*DETUNING_UNIT_MHZ[unit as DetuningUnit];if(Math.abs(offset)>MAX_DETUNING_MHZ)throw new Error('频率超出 ±5000 THz。');
-  writeExpression(scene,object,{base:f.base,offsetMHz:offset},unit);
-}
-/** Reads the definition in another unit. On an absolute base a wavelength unit writes it as a
- * wavelength and a frequency unit as a frequency: the same frequency either way. */
-export function setFrequencyUnit(scene:FrequencyScene,object:DefinedFrequency,unit:FrequencyDisplayUnit):void {
   const f=object.frequency!;
   if(isWavelength(unit)){
-    if('wavelengthNm' in f){object.frequencyUnit=unit;return;}
-    if(f.base.kind!=='absolute')throw new Error('只有绝对频率可以写成波长。');
-    writeExpression(scene,object,{wavelengthNm:C_NM_MHZ/absolute(objectAnchor(scene,object))},unit,true);return;
+    if(!('wavelengthNm' in f)&&f.base.kind!=='absolute')throw new Error('只有绝对频率可以写成波长。');
+    if(!(value>0))throw new Error('真空波长必须是正数。');
+    writeExpression(scene,object,{wavelengthNm:value*WAVELENGTH_NM[unit]},unit);return;
   }
   if(!DETUNING_UNITS.includes(unit))throw new Error('未知的频率单位。');
-  if('wavelengthNm' in f){writeExpression(scene,object,{base:{kind:'absolute'},offsetMHz:absolute(objectAnchor(scene,object))},unit,true);return;}
-  object.frequencyUnit=unit;
+  const offset=value*DETUNING_UNIT_MHZ[unit];if(Math.abs(offset)>MAX_DETUNING_MHZ)throw new Error('频率超出 ±5000 THz。');
+  writeExpression(scene,object,{base:'wavelengthNm' in f?{kind:'absolute'}:f.base,offsetMHz:offset},unit);
 }
 /** What the definition's value is called. */
 export function frequencyValueLabel(object:DefinedFrequency):string {

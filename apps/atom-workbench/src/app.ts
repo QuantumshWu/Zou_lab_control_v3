@@ -14,20 +14,21 @@ import {setMiddle} from '../../desktop/ui/src/fluent/elide.js';
 import {drawBadges} from '../../desktop/ui/src/pulse/widgets.js';
 import {Segmented,setChecked,switchButton,checkBox} from '../../desktop/ui/src/fluent/toggles.js';
 import {clickState,keepLabels,labelled,readLabels,swapLabels,withLabel,type LabelSlot,type StateLabels} from './transition-choice.js';
-import {photonFrequencyMHz} from './reference-energy.js';
+import {offsetReading,photonFrequencyMHz,setReferenceOffset} from './reference-energy.js';
+import {typedDigits,type Reading} from './unit-input.js';
 import {frequencyBaseTree,stateTree} from './choice-trees.js';
 import {alignLevelReadouts} from './readout-alignment.js';
-import {DETUNING_UNIT_MHZ,expressionBase,followers,frequencyValue,frequencyValueLabel,migrateSceneFrequencies,naturalDetuningUnit,objectAnchor,objectKey,objectOf,releaseFollowers,setFrequencyBase,setFrequencyUnit,setFrequencyValue,type DefinedFrequency} from './laser-frequency.js';
-import {FREQUENCY_UNITS,WAVELENGTH_UNITS,anchorValue,baseKey,difference,gap,inUnit,isWavelengthUnit,laserValue,parseBase,photon,readingHeading,readoutText,stateValue,zeroFieldStateValue,type FrequencyValue} from './frequency-value.js';
+import {expressionBase,followers,frequencyValue,frequencyValueLabel,migrateSceneFrequencies,naturalDetuningUnit,objectAnchor,objectKey,objectOf,releaseFollowers,setFrequencyBase,setFrequencyValue,type DefinedFrequency} from './laser-frequency.js';
+import {FREQUENCY_UNITS,WAVELENGTH_UNITS,anchorValue,baseKey,difference,gap,inUnit,isDetuningUnit,laserValue,parseBase,photon,readingHeading,readoutText,stateValue,zeroFieldStateValue,type FrequencyValue} from './frequency-value.js';
 import {FrequencyReadout,ReadoutPreferences,type ReadoutPreference} from './frequency-controls.js';
 import {analyze,dipoleBetweenStates,resolveSceneFrequencies,laserIntensityMWcm2,setPolarizationPreset,type PolarizationPreset} from './physics.js';
 import {AXIS_NAMES,axisWords,directionAxis,linkableFields,linkedTo,referenceAxis,releaseLinks,sameDirection,shortcutDirection,shortcutField,type DirectionShortcut} from './direction.js';
-import {INTENSITY_MWCM2,INTENSITY_UNITS,POWER_MW,POWER_UNITS,WAIST_UM,WAIST_UNITS,intensityUnit,normalizeLaserIntensity,powerUnit,setLaserIntensityMode,setLaserLocalIntensity,setLaserPowerMW,setLaserWaistUm,waistUnit} from './laser-intensity.js';
+import {DEFAULT_NUMERICAL_APERTURE,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,intensityReading,intensityUnit,normalizeLaserIntensity,powerReading,setLaserIntensityMode,setLaserNumericalAperture,waistReading,waistUnit,writeLaserIntensity,writeLaserPower,writeLaserWaist} from './laser-intensity.js';
 import {dynamicsCacheKey} from './dynamics-cache-key.js';
 import {CurrentDynamicsResults} from './current-dynamics-results.js';
 import {STATIC_MIXING_LIMIT,displayMixing,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
 import {defaultDynamics,defaultScene,POPULATION_TOLERANCE,resolveMeanHorizon} from './types.js';
-import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityUnit,MagneticField,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,Transition,WaistUnit} from './types.js';
+import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
 import type {DynamicsResult} from './solver-types.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
 import {validateScene} from './scene-file.js';
@@ -37,7 +38,7 @@ import {math} from './math.js';
 import {renderSpace3D,type SpaceSelection,type SpaceViewName} from './space3d.js';
 import {laserColour} from './identity.js';
 import {POPULATION_GROUPS,recommendedPopulationStates,populationDisplayIds,withPopulationGroups} from './population-selection.js';
-import {durationUnit,durationValue,setDurationUnit,setDurationValue,durationText,timeDisplayUnit,DURATION_UNITS} from './duration.js';
+import {durationReading,durationUnit,setDuration,durationText,timeDisplayUnit,DURATION_UNITS} from './duration.js';
 import type {DurationUnit} from './types.js';
 import {patchLevelPopulations} from './level-population-dom.js';
 import {idMappingError} from './population-basis.js';
@@ -47,7 +48,7 @@ import {solverText,steadyStatusText} from './solver-words.js';
 import {definitionNotes,modelNotes} from './model-notes.js';
 import {InlineName} from './inline-name.js';
 import {EXAMPLES,exampleScene} from './examples.js';
-import {INITIAL_KINDS,TEMPERATURE_K,UNPOLARIZED,initialSpec,initialSummary,naturalTemperatureUnit,setInitialSpec,startingSpec,type InitialKind,type TemperatureUnit,type UnpolarizedManifold} from './initial-state.js';
+import {DEFAULT_TEMPERATURE_K,INITIAL_KINDS,TEMPERATURE_UNITS,UNPOLARIZED,initialSpec,initialSummary,setInitialSpec,setTemperature,startingSpec,temperatureReading,type InitialKind,type UnpolarizedManifold} from './initial-state.js';
 
 installWindowChrome();
 
@@ -209,7 +210,8 @@ function normalizeScene(next:Scene):void{try{migrateSceneFrequencies(next);}catc
 let baseline:string|null=null;
 try{baseline=localStorage.getItem(`${STORAGE}-baseline`);}catch{}
 function editKey(value:Scene=scene):string{
-  // The display unit, derived anchors and the automatic curve choice are not edits.
+  // Readout preferences, derived anchors and the automatic curve choice are not edits; a unit
+  // picked for the duration or the temperature is one through the quantity it changes.
   const d=value.dynamics,settings=d?{initialStateId:d.initialStateId,initialState:d.initialState,durationUs:d.durationUs,samples:d.samples,
     curves:d.monitorMode==='manual'?[d.monitoredStateIds,d.monitoredGroupIds??[]]:'auto'}:null;
   return JSON.stringify({...value,display:undefined,dynamics:settings},(key,item)=>key.endsWith('Anchor')?undefined:item);
@@ -365,27 +367,75 @@ function addObject(kind:ObjectKind):void{
 }
 
 // ---------------------------------------------------------------- inspector
-type BoundField={field:Field;spec:()=>FieldSpec};
+type BoundField={field:Field;refresh():void};
 const inspectorFields=new Map<string,BoundField>(),dynamicsFields=new Map<string,BoundField>(),fieldProblems=new Map<string,string>();
 let fieldRequest=0;
+type BindOptions={unit?:(unit:string)=>void;after?:()=>void;
+  /** Whose row it is (an object's key): its problem and kept draft are its own. */
+  scope?:string;
+  /** Escape drops the row's kept draft with its problem. */
+  cancel?:()=>void;
+  /** The row shows a kept draft its constraints refuse: marked invalid until the next edit. */
+  invalid?:()=>boolean;
+  /** A computed value where an input stands in another mode: the row unavailable, its unit picker live. */
+  computed?:true};
 /** A v3 Field on the scene: `apply` writes the operator's value (or throws its
  * problem, shown under the row); the row is then re-projected from the scene. */
-function bindField(registry:Map<string,BoundField>,parent:HTMLElement,prefix:string,spec:()=>FieldSpec,apply:(value:Value)=>void,options:{unit?:(unit:string)=>void;after?:()=>void}={}):Field{
-  const key=`${prefix}:${spec().name}`,current=():FieldSpec=>({...spec(),problem:fieldProblems.get(key)});
+function bindField(registry:Map<string,BoundField>,parent:HTMLElement,prefix:string,spec:()=>FieldSpec,apply:(value:Value)=>void,options:BindOptions={}):Field{
+  const key=`${prefix}:${options.scope??''}:${spec().name}`,current=():FieldSpec=>({...spec(),problem:fieldProblems.get(key)});
   const after=options.after??(()=>{renderObjects();update();});
+  const show=(response?:number,failed=false):void=>{
+    field.update(current(),response,failed);
+    if(options.computed)field.cell.querySelector<HTMLSelectElement>('select.unit-picker')?.removeAttribute('disabled');
+    if(options.invalid?.()&&field.input instanceof HTMLInputElement)field.input.classList.add('invalid');
+  };
   const field:Field=new Field(prefix,current(),{
     commit:value=>{
       const id=++fieldRequest;
       try{apply(value);fieldProblems.delete(key);}
-      catch(error){fieldProblems.set(key,message(error));queueMicrotask(()=>field.update(current(),id,true));return id;}
-      queueMicrotask(()=>field.update(current(),id));after();return id;
+      catch(error){fieldProblems.set(key,message(error));queueMicrotask(()=>show(id,true));return id;}
+      queueMicrotask(()=>show(id));after();return id;
     },
-    unit:options.unit?unit=>{try{options.unit!(unit);fieldProblems.delete(key);}catch(error){fieldProblems.set(key,message(error));}field.update(current());after();}:undefined,
+    unit:options.unit?unit=>{
+      const id=++fieldRequest;let failed=false;
+      try{options.unit!(unit);fieldProblems.delete(key);}catch(error){failed=true;fieldProblems.set(key,message(error));}
+      queueMicrotask(()=>show(id,failed));after();return id;
+    }:undefined,
+    cancel:()=>{options.cancel?.();fieldProblems.delete(key);show();},
   },false);
-  parent.append(field.root);registry.set(key,{field,spec:current});return field;
+  parent.append(field.root);registry.set(key,{field,refresh:()=>show()});show();return field;
 }
-function refreshFields(registry:Map<string,BoundField>):void{for(const {field,spec} of registry.values())field.update(spec());}
+function refreshFields(registry:Map<string,BoundField>):void{for(const {refresh} of registry.values())refresh();}
 const numberSpec=(name:string,label:string,value:number,unit:string,extra:Partial<FieldSpec>={}):FieldSpec=>({name,label,kind:'number',value,unit,...extra});
+const unitChoices=(units:readonly string[],group:string):NonNullable<FieldSpec['units']>=>units.map(u=>({value:u,label:u,group}));
+/** A number the operator writes in a unit they pick (ui-design.md §0.4): read in its unit, written
+ * with one. Its digits are the operator's: another unit writes the same digits in it -- a real
+ * change, solved like any edit. A unit whose quantity the constraints refuse is kept as a draft,
+ * as Device Control keeps one: those digits in that unit, shown invalid with the reason while the
+ * scene stays as it was, until the next edit; Escape drops it. */
+type Quantity={read():Reading;write(value:number,unit:string):void;units():NonNullable<FieldSpec['units']>};
+const unitDrafts=new Map<string,Reading>();
+function bindQuantity(registry:Map<string,BoundField>,parent:HTMLElement,prefix:string,scope:string,spec:()=>Omit<FieldSpec,'kind'|'value'|'unit'|'units'>,quantity:Quantity,after?:()=>void):Field{
+  const key=`${prefix}:${scope}:${spec().name}`,shown=():Reading=>unitDrafts.get(key)??quantity.read();
+  const field=bindField(registry,parent,prefix,()=>({...spec(),kind:'number',...shown(),units:quantity.units()}),
+    v=>{quantity.write(Number(v),shown().unit);unitDrafts.delete(key);},
+    {scope,after,cancel:()=>unitDrafts.delete(key),invalid:()=>unitDrafts.has(key),unit:unit=>{
+      // The digits in the box -- the operator's, a refused entry's included -- without float dust.
+      const digits=typedDigits(Number(field.value));
+      try{quantity.write(digits,unit);unitDrafts.delete(key);}catch(error){unitDrafts.set(key,{value:digits,unit});throw error;}
+    }});
+  return field;
+}
+/** A computed quantity in an input's place (强度 I from P and w₀, the output waist from NA): its
+ * box disabled (the tooltip says what it follows from), its unit picker live. A display converts:
+ * another unit reads the same quantity. */
+function bindDerived(registry:Map<string,BoundField>,parent:HTMLElement,prefix:string,scope:string,spec:{name:string;label:string;description:string;from:string},reading:()=>Reading,units:NonNullable<FieldSpec['units']>,pick:(unit:string)=>void):Field{
+  const {from,...words}=spec;
+  return bindField(registry,parent,prefix,()=>{const r=reading();return {...words,kind:'number',spin:true,inexact:true,allow_none:true,placeholder:'—',value:Number.isFinite(r.value)?r.value:null,unit:r.unit,units,unavailable_reason:from};},
+    ()=>{throw new Error(from);},{scope,computed:true,unit:pick,after:()=>persist()});
+}
+/** A reading that may not be computable now (a frequency not yet resolved): NaN in its unit. */
+const attempt=(reading:()=>Reading,unit:()=>string):Reading=>{try{return reading();}catch{return {value:NaN,unit:unit()};}};
 
 function group(title:string,parent=$('inspector-controls')):HTMLElement{const section=element('section','control-section');const g=form();g.append(sectionTitle(title));section.append(g);parent.append(section);return g;}
 function selectControl(parent:HTMLElement,label:string,value:string,options:[string,string][],changed:(value:string)=>void):HTMLSelectElement{
@@ -473,17 +523,25 @@ function renderInspector():void{
     frequencySection(f,l,laserReadout);
     const originPicker=selectControl(f,'参考态',l.referenceStateId??'',[['','跟随动力学初态'],...allLevels().map(state=>[state.id,stateText(state)] as [string,string]),...(scene.references??[]).map(ref=>[ref.id,ref.name+' · 参考能级'] as [string,string])],id=>{setLaserReferenceState(scene,l,id||undefined);persist();renderInspector();renderResults(false);});originPicker.id='laser-reference-state';originPicker.setAttribute('aria-label','参考出发态');originPicker.title='只改变这束光的箭头起点和矩元参考；不改变动力学初态或任何驱动。';
     if(scene.references?.some(r=>r.id===l.referenceStateId))selectControl(f,'光子方向',l.referenceProcess??'absorption',[['absorption','吸收 ↑'],['emission','受激辐射 ↓']],v=>{l.referenceProcess=v as 'absorption'|'emission';update();});
-    // Power, waist and intensity in a unit of the operator's choice; the value is kept in mW, μm
-    // and mW/cm², and an entry keeps the unit it was made in.
-    const strength=group('强度');
-    bindField(fields,strength,'inspector',()=>({name:'intensity-mode',label:'指定方式',kind:'choice',segmented:true,choices:[['intensity','局域强度'],['power','功率与束腰']],value:l.intensityMode??'intensity'}),v=>{setLaserIntensityMode(l,v as 'intensity'|'power');},{after:()=>{renderInspector();update();}});
-    if(l.intensityMode==='power'){
-      bindField(fields,strength,'inspector',()=>{const u=powerUnit(l);return {...numberSpec('power','功率 P',(l.powerMW??0)/POWER_MW[u],u,{minimum:0,spin:true,inexact:true}),units:POWER_UNITS.map(x=>({value:x,label:x,group:'功率'}))};},
-        v=>{const u=powerUnit(l);setLaserPowerMW(l,Number(v)*POWER_MW[u]);l.powerUnit=u;},{unit:u=>{l.powerUnit=u as PowerUnit;}});
-      bindField(fields,strength,'inspector',()=>{const u=waistUnit(l);return {...numberSpec('waist','束腰 w₀',(l.waistUm??0)/WAIST_UM[u],u,{minimum:0,spin:true,inexact:true}),units:WAIST_UNITS.map(x=>({value:x,label:x,group:'长度'}))};},
-        v=>{const u=waistUnit(l);setLaserWaistUm(l,Number(v)*WAIST_UM[u]);l.waistUnit=u;},{unit:u=>{l.waistUnit=u as WaistUnit;}});
-    }else bindField(fields,strength,'inspector',()=>{const u=intensityUnit(l);return {...numberSpec('intensity','强度 I',laserIntensityMWcm2(l)/INTENSITY_MWCM2[u],u,{minimum:0,spin:true,inexact:true}),units:INTENSITY_UNITS.map(x=>({value:x,label:x,group:'强度'}))};},
-      v=>{const u=intensityUnit(l);setLaserLocalIntensity(l,Number(v)*INTENSITY_MWCM2[u]);l.intensityUnit=u;},{unit:u=>{l.intensityUnit=u as IntensityUnit;}});
+    // 强度 (laser-intensity.ts): the local intensity itself, or power with a waist or with the NA the
+    // beam fills. The mode's inputs are written in units the operator picks; what follows from
+    // them -- the intensity, the NA mode's waist -- stands disabled in the intensity's place.
+    const strength=group('强度'),scope=`laser:${l.id}`,mode=l.intensityMode??'intensity';
+    bindField(fields,strength,'inspector',()=>({name:'intensity-mode',label:'指定方式',kind:'choice',choices:[['intensity','局域强度'],['power','功率与束腰'],['na','功率与数值孔径']],value:l.intensityMode??'intensity'}),v=>{setLaserIntensityMode(l,v as IntensityMode);},{scope,after:()=>{renderInspector();update();}});
+    if(mode!=='intensity')bindQuantity(fields,strength,'inspector',scope,()=>({name:'power',label:'功率 P',minimum:0,spin:true,inexact:true}),
+      {read:()=>powerReading(l),write:(v,u)=>writeLaserPower(l,v,u as PowerUnit),units:()=>unitChoices(POWER_UNITS,'功率')});
+    if(mode==='power')bindQuantity(fields,strength,'inspector',scope,()=>({name:'waist',label:'束腰 w₀',minimum:0,spin:true,inexact:true}),
+      {read:()=>waistReading(l),write:(v,u)=>writeLaserWaist(l,v,u as WaistUnit),units:()=>unitChoices(WAIST_UNITS,'长度')});
+    if(mode==='na'){
+      bindField(fields,strength,'inspector',()=>numberSpec('numerical-aperture','数值孔径 NA',l.numericalAperture??DEFAULT_NUMERICAL_APERTURE,'',{spin:true,description:'光束充满的物镜数值孔径；原子在真空中，0 < NA ≤ 1'}),
+        v=>setLaserNumericalAperture(l,Number(v)),{scope});
+      bindDerived(fields,strength,'inspector',scope,{name:'output-waist',label:'输出束腰 w₀',description:'w₀ = λ/(π·NA)，λ = c/ν 为这束光的真空波长（傍轴高斯光束）',from:'由数值孔径和这束光的波长算出：w₀ = λ/(π·NA)'},
+        ()=>attempt(()=>waistReading(l),()=>waistUnit(l)),unitChoices(WAIST_UNITS,'长度'),u=>{l.waistUnit=u as WaistUnit;});
+    }
+    if(mode==='intensity')bindQuantity(fields,strength,'inspector',scope,()=>({name:'intensity',label:'强度 I',minimum:0,spin:true,inexact:true}),
+      {read:()=>intensityReading(l),write:(v,u)=>writeLaserIntensity(l,v,u as IntensityUnit),units:()=>unitChoices(INTENSITY_UNITS,'强度')});
+    else bindDerived(fields,strength,'inspector',scope,{name:'intensity',label:'强度 I',description:'原子处的局域强度：高斯光束轴上的 I = 2P/(πw₀²)',from:'由功率和束腰算出：I = 2P/(πw₀²)'},
+      ()=>attempt(()=>intensityReading(l),()=>intensityUnit(l)),unitChoices(INTENSITY_UNITS,'强度'),u=>{l.intensityUnit=u as IntensityUnit;});
     directionSection(group('传播方向'),l,'laser');
     const p=group('光束偏振');
     bindField(fields,p,'inspector',()=>numberSpec('polarization','主轴 ψ',l.polarizationAngleDeg,'°',{minimum:-90,maximum:90,step:1}),v=>{l.polarizationAngleDeg=Number(v);});
@@ -521,7 +579,6 @@ function refreshMixing(l:Laser):void{
   mixingWarning.title=m&&Number.isFinite(m.ratio)?`|Ω/2Δ| 最大 ${populationValue(m.ratio)}，静态光移要求不超过 1%`:'';
 }
 const referenceReadout=new FrequencyReadout('reference-frequency',readoutPrefs,{unitPicker:false,changed:()=>{}});
-const offsetUnits=new Map<string,DetuningUnit>();
 /** 参考能级 (§1.6): E = E(锚点) ± hν(光子) + hδ -- a linked photon follows its laser or reference frequency. */
 function levelSection(f:HTMLElement,r:ReferenceLevel):void{
   const fields=inspectorFields,after=()=>{renderObjects();renderInspector();update();};
@@ -532,9 +589,8 @@ function levelSection(f:HTMLElement,r:ReferenceLevel):void{
     v=>{if(v===null||v===''){if(r.photon){const nu=photonFrequencyMHz(r,scene)??0;r.offsetMHz+=r.photon.direction==='emit'?-nu:nu;delete r.photon;}return;}
       const [kind,...rest]=String(v).split(':'),id=rest.join(':');if((kind!=='laser'&&kind!=='reference')||!objectOf(scene,String(v)))throw new Error('未知的光子来源');r.photon={source:{kind,id},direction:r.photon?.direction??'absorb'};},{after});
   if(r.photon)bindField(fields,f,'inspector',()=>({name:'level-direction',label:'方向',kind:'choice',segmented:true,choices:[['absorb','吸收 +hν'],['emit','受激辐射 −hν']],value:r.photon?.direction??'absorb'}),v=>{if(r.photon)r.photon.direction=v as 'absorb'|'emit';},{after});
-  const unit=()=>offsetUnits.get(r.id)??naturalDetuningUnit(r.offsetMHz);
-  bindField(fields,f,'inspector',()=>({...numberSpec('level-offset','偏移 δ',r.offsetMHz/DETUNING_UNIT_MHZ[unit()],unit(),{spin:true,inexact:true}),units:FREQUENCY_UNITS.map(u=>({value:u,label:u,group:'频率'}))}),
-    v=>{const mhz=Number(v)*DETUNING_UNIT_MHZ[unit()];if(!Number.isFinite(mhz)||Math.abs(mhz)>1e12)throw new Error('偏移必须是有限数值（最大 ±1 000 000 THz）');r.offsetMHz=mhz;},{unit:u=>{offsetUnits.set(r.id,u as DetuningUnit);},after});
+  bindQuantity(fields,f,'inspector',`level:${r.id}`,()=>({name:'level-offset',label:'偏移 δ',spin:true,inexact:true}),
+    {read:()=>offsetReading(r),write:(v,u)=>setReferenceOffset(r,v,u as DetuningUnit),units:()=>unitChoices(FREQUENCY_UNITS,'频率')},after);
   const source=r.photon?objectOf(scene,`${r.photon.source.kind}:${r.photon.source.id}`)?.name:undefined;
   f.append(element('p','note wrap form-note',`E = E(锚点)${source?` ${r.photon!.direction==='emit'?'−':'+'} hν(${source})`:''} + hδ${r.anchorMode==='zero-field'?'，锚点取零场能量':''}`));
 }
@@ -546,9 +602,9 @@ function frequencySection(f:HTMLElement,object:DefinedFrequency,readout:Frequenc
     tree:frequencyBaseTree({absolute:'光频或真空波长',absoluteText:'绝对',follow:true,lasers:offered('laser',scene.lasers),references:offered('reference',scene.referenceFrequencies??[])}),
     value:baseKey(expressionBase(object.frequency!)),description:'换基准不改变光频；跟随另一对象时随它移动'}),
     v=>{const base=parseBase(String(v));if(!base)throw new Error('未知的频率基准');setFrequencyBase(scene,object,base);},{after:()=>{renderInspector();renderObjects();update();}});
-  bindField(fields,f,'inspector',()=>{const {value,unit}=frequencyValue(object),absolute=expressionBase(object.frequency!).kind==='absolute';
-      return {...numberSpec('frequency-value',frequencyValueLabel(object),value,unit,{spin:true,inexact:true}),units:[...FREQUENCY_UNITS.map(u=>({value:u,label:u,group:'频率'})),...(absolute?WAVELENGTH_UNITS.map(u=>({value:u,label:u,group:'波长'})):[])]};},
-    v=>setFrequencyValue(scene,object,Number(v)),{unit:u=>{setFrequencyUnit(scene,object,u as FrequencyDisplayUnit);}});
+  bindQuantity(fields,f,'inspector',key,()=>({name:'frequency-value',label:frequencyValueLabel(object),spin:true,inexact:true}),
+    {read:()=>frequencyValue(object),write:(v,u)=>setFrequencyValue(scene,object,v,u as FrequencyDisplayUnit),
+      units:()=>[...unitChoices(FREQUENCY_UNITS,'频率'),...(expressionBase(object.frequency!).kind==='absolute'?unitChoices(WAVELENGTH_UNITS,'波长'):[])]});
   // The absolute frequency the definition gives, in its natural unit; an absolute definition is it already.
   if(expressionBase(object.frequency!).kind!=='absolute')f.append(fieldRow('频率 ν',readout.readout.root));
   readout.show(anchorValue(objectAnchor(scene,object)),scene);
@@ -563,7 +619,6 @@ initialKind.root.onchange=()=>{const kind=initialKind.root.value as InitialKind,
 const unpolarizedChoice=new Segmented(manifold=>applyInitial({kind:'unpolarized',manifold:manifold as UnpolarizedManifold}));
 unpolarizedChoice.setChoices(UNPOLARIZED);unpolarizedChoice.root.setAttribute('aria-label','未极化的流形');
 const initialFields=new Map<string,BoundField>();
-let temperatureUnit:TemperatureUnit|undefined;
 const weightsSummary=element('span','initial-summary'),editWeights=command('编辑权重…',()=>void editInitialWeights(),{role:'quiet'});
 function renderInitial():void{
   const levels=allLevels(),spec=initialSpec(scene),host=$('initial-state-controls');
@@ -575,21 +630,19 @@ function renderInitial():void{
     }else if(spec.kind==='unpolarized')host.append(unpolarizedChoice.root);
     else if(spec.kind==='thermal'){
       const rows=form('initial-form');host.append(rows);
-      bindField(initialFields,rows,'initial',()=>{const now=initialSpec(scene),kelvin=now.kind==='thermal'?now.temperatureK:0,unit=temperatureUnit??naturalTemperatureUnit(kelvin);
-        return {...numberSpec('temperature','温度 T',kelvin/TEMPERATURE_K[unit],unit,{spin:true,inexact:true,description:'静态哈密顿量 H0 的 8 个基态本征态上的 Boltzmann 分布'}),units:(Object.keys(TEMPERATURE_K) as TemperatureUnit[]).map(u=>({value:u,label:u,group:'温度'}))};},
-        v=>{const kelvin=Number(v)*TEMPERATURE_K[temperatureUnit??naturalTemperatureUnit((initialSpec(scene) as {temperatureK:number}).temperatureK)];if(!Number.isFinite(kelvin)||!(kelvin>0))throw new Error('温度必须是有限正数');setInitialSpec(scene,{kind:'thermal',temperatureK:kelvin},allLevels());},
-        {unit:u=>{temperatureUnit=u as TemperatureUnit;},after:()=>{renderInitial();update();}});
+      bindQuantity(initialFields,rows,'initial','initial',()=>({name:'temperature',label:'温度 T',spin:true,inexact:true,description:'静态哈密顿量 H0 的 8 个基态本征态上的 Boltzmann 分布'}),
+        {read:()=>{const now=initialSpec(scene);return temperatureReading(now.kind==='thermal'?now.temperatureK:DEFAULT_TEMPERATURE_K,dynamics().temperatureUnit);},
+          write:(v,u)=>setTemperature(scene,v,u as TemperatureUnit,allLevels()),units:()=>unitChoices(TEMPERATURE_UNITS,'温度')},()=>{renderInitial();update();});
     }else host.append(weightsSummary,editWeights.root);
   }
   if(spec.kind==='state')initialTree!.setTree(stateTree(levels),spec.id);
   else if(spec.kind==='unpolarized')unpolarizedChoice.setCurrent(spec.manifold);
   else if(spec.kind==='thermal')refreshFields(initialFields);
   else weightsSummary.textContent=initialSummary(spec);
-  initialShortcut.title=`初态：${initialSummary(spec)}`;
+  initialShortcut.title=`初态：${initialSummary(spec,dynamics().temperatureUnit)}`;
 }
 function applyInitial(spec:InitialStateSpec):void{
   try{setInitialSpec(scene,spec,allLevels());}catch(error){note(message(error),'error');return;}
-  if(spec.kind!=='thermal')temperatureUnit=undefined;
   renderInitial();update();
 }
 function setInitialState(id:string):void{const state=getLevel(id);if(!state)return;if(state.manifold!=='ground')spectral=state.manifold;applyInitial({kind:'state',id});}
@@ -642,7 +695,7 @@ function photonValue(fromId:string,toId:string,zeroField=false):FrequencyValue|u
  * frequency chosen beside it; by default the same two states at zero field, so Δν is what the
  * field and the lasers shown (显示光移) move this transition by. */
 let pairValue:FrequencyValue|undefined,pairZeroField:FrequencyValue|undefined;
-const pairFrequency=new FrequencyReadout('pair-frequency',readoutPrefs,{changed:()=>{}});
+const pairFrequency=new FrequencyReadout('pair-frequency',readoutPrefs,{temperature:true,changed:()=>{}});
 const pairReadout=new FrequencyReadout('pair',readoutPrefs,{
   bases:()=>frequencyBaseTree({absolute:'光频',absoluteText:'绝对',lasers:scene.lasers,references:scene.referenceFrequencies}),
   automatic:()=>({name:'零场 ν₁₂',value:pairZeroField}),
@@ -706,7 +759,7 @@ function bindSelection():void{
 function transitionTable(transitions:Transition[]):{heading:string;rows:string}{
   const listed=transitions.filter(t=>t.rabiMHz>0),ends=(t:Transition)=>transitionEndpoints(t,referenceStateId(scene.lasers.find(l=>l.id===t.laserId)))!;
   const fixed=pairReadout.fixedBase(scene),relative=fixed?.base.kind!=='absolute';
-  const pref=pairReadout.chosenUnit(),unit:DetuningUnit=pref&&!isWavelengthUnit(pref)?pref:relative?'MHz':'THz';
+  const pref=pairReadout.chosenUnit(),unit:DetuningUnit=pref&&isDetuningUnit(pref)?pref:relative?'MHz':'THz';
   return {heading:fixed?readingHeading(fixed.base,scene,unit):`ν − ν(零场) / ${unit}`,rows:listed.map(t=>{
   const endpoints=ends(t),mixed=t.mixedPolarization===true,ν=photonValue(endpoints.fromId,endpoints.toId),origin=fixed?.value??photonValue(endpoints.fromId,endpoints.toId,true);
   return `<tr data-transition="${esc(t.id)}" data-from-state="${endpoints.fromId}" data-to-state="${endpoints.toId}" tabindex="0"><td title="${endpoints.emission?'受激辐射':'吸收'}">${stateCell(endpoints.fromId)} → ${stateCell(endpoints.toId)}</td><td class="component" title="${mixed?'混合背景态：多个球分量相干耦合':t.mLabelApproximate?`光场 q=${t.q}；mF 是混合本征态的主成分标签，标签之差不是严格的 ΔmF`:`光场 q=${t.q}；原子 Δm=${endpoints.deltaM}`}" aria-label="${mixed?'混合分量':t.q===-1?'sigma minus':t.q===0?'pi':'sigma plus'}">${mixed?'混合':math(t.q===-1?'\\sigma^-':t.q===0?'\\pi':'\\sigma^+')}</td><td class="num frequency">${ν&&origin?formatNumber(inUnit(difference(ν,origin),unit),{digits:relative?9:12,signed:relative}):'—'}</td><td class="num rabi">${measuredNumber(t.rabiMHz,4)}</td><td><div class="strength-cell"><span style="width:${Math.min(100,t.strength*t.weight*100)}%"></span><small>${measuredNumber(t.strength*t.weight,4)}</small></div></td></tr>`;
@@ -931,7 +984,8 @@ function renderDynamicsControls(a:Analysis):void{
   controlsKey=key;const monitorsWereOpen=parent.querySelector<HTMLDetailsElement>('.monitor-controls')?.open??false;disposeTrees(parent);parent.replaceChildren();dynamicsFields.clear();
   const time=form('dynamics-config'),curves=form('dynamics-config');parent.append(time,curves);
   const after=()=>update();
-  bindField(dynamicsFields,time,'dynamics',()=>({...numberSpec('duration','时长',durationValue(d),durationUnit(d),{spin:true,inexact:true}),units:DURATION_UNITS.map(u=>({value:u,label:u,group:'时间'}))}),v=>setDurationValue(d,Number(v)),{after,unit:unit=>{setDurationUnit(d,unit as DurationUnit);}});
+  bindQuantity(dynamicsFields,time,'dynamics','dynamics',()=>({name:'duration',label:'时长',spin:true,inexact:true}),
+    {read:()=>durationReading(d),write:(v,u)=>setDuration(d,v,u as DurationUnit),units:()=>unitChoices(DURATION_UNITS,'时间')},after);
   bindField(dynamicsFields,time,'dynamics',()=>({name:'samples',label:'采样点数',kind:'integer',value:d.samples,minimum:2,maximum:2001,step:1}),v=>{const n=Number(v);if(!Number.isInteger(n))throw new Error('采样点数必须为整数');d.samples=n;},{after});
   bindField(dynamicsFields,curves,'dynamics',()=>({name:'monitor-mode',label:'显示曲线',kind:'choice',segmented:true,choices:[['auto','初末各 3 态'],['manual','手动选择']],value:d.monitorMode??'auto'}),v=>{d.monitorMode=v as 'auto'|'manual';if(v==='auto')d.monitoredGroupIds=[];else parent.querySelector<HTMLDetailsElement>('.monitor-controls')!.open=true;},{after});
   const monitors=element('details','monitor-controls');monitors.open=monitorsWereOpen;
@@ -1057,7 +1111,7 @@ function renderResults(allowSolve=true):void{
 
 // ---------------------------------------------------------------- the scene as a document
 function replaceScene(next:Scene,text:string):void{
-  loadFailure='';solver.cancel();solverRevision++;clearTimeout(solverTimer);requestedKey='';requestedPhysicalKey='';requestedSteadyOnly=false;stoppedKey='';solverError='';solverBusy=false;controlsKey='';displayedResults.clear();
+  loadFailure='';unitDrafts.clear();fieldProblems.clear();solver.cancel();solverRevision++;clearTimeout(solverTimer);requestedKey='';requestedPhysicalKey='';requestedSteadyOnly=false;stoppedKey='';solverError='';solverBusy=false;controlsKey='';displayedResults.clear();
   disposeTrees($('levels-details'));$('levels-details').replaceChildren();$('selection-readout').dataset.selectionKey='';
   normalizeScene(next);scene=next;stateLabels=keepLabels(stateLabels,id=>!id.startsWith('reference-')||!!scene.references?.some(r=>r.id===id));populationTimeIndex=-1;
   selection=scene.lasers[0]?{kind:'laser',id:scene.lasers[0].id}:scene.fields[0]?{kind:'field',id:scene.fields[0].id}:{kind:'none',id:''};
