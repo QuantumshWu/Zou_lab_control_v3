@@ -440,7 +440,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             if best.as_ref().is_none_or(|b|if within{true}else{b.largest()>tolerance&&answer.largest()<b.largest()}){best=Some(answer.clone());}
             if answer.accepted{break;}
             // 5. Completion, decided at the first checkpoint (see `solve`).
-            if completion.is_none()&&checkpoints.len()==1&&std::env::var("ATOM_DIAG_NO_COMPLETION").is_err(){
+            if completion.is_none()&&checkpoints.len()==1{
                 let e=&answer.estimate;let off=answer.sample_errors.len();let horizons_count=answer.horizon_errors.len();
                 // Per output: its bound and its slow part (bound units); the steady
                 // state's estimate is its slow part.
