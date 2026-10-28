@@ -92,13 +92,19 @@ pub const KERNEL_HORIZON_RATE:f64=1e-2;
 /// step's kernel has 212 entries above 1, the largest 24, near an optical
 /// resonance).
 pub const KERNEL_CAP:f64=1.;
-/// A kernel mode whose source |A W b + ring feedback + dA W b| is below
-/// this fraction of |A| |W b| (|A| the largest image of a basis column) is
-/// invariant to roundoff: its error is zero. Every further conserved
-/// quantity of a drive-free lattice is such a mode, and the bordered system
-/// (one trace row) is singular on it. A deliberate margin of about four
-/// orders over double-precision roundoff; measured on the drive-free model:
-/// solving that mode gave a steady estimate of 1.4e7, skipping it 6e-13.
+/// One of several kernel modes whose source |A W b + ring feedback + dA W b|
+/// is below this fraction of |A| |W b| (|A| the largest image of a basis
+/// column) is invariant to roundoff: its error is zero. Every further
+/// conserved quantity of a drive-free lattice is such a mode, and the
+/// bordered system (one trace row) is singular on it. A deliberate margin of
+/// about four orders over double-precision roundoff; measured on the
+/// drive-free model: solving that mode gave a steady estimate of 1.4e7,
+/// skipping it 6e-13. The one kernel mode of a unique limit is always
+/// solved: the bordered system is regular on it, and a source this small
+/// against |A| is still an error of about the source over the slowest
+/// rates (ex_open at 4 solves: a steady residual of 1.5e-11 /us against
+/// rates of 3.5e-7 /us, an error of 7.0e-7 the skip estimated as zero;
+/// solved, 8.8e-7).
 const INVARIANT:f64=1e-12;
 /// One source of the slow part alone (`UnifiedEstimate::estimate_by_source`).
 #[derive(Clone,Copy,Debug,PartialEq)]
@@ -238,7 +244,7 @@ impl<'a> UnifiedEstimate<'a>{
                 // One source alone: the mode's own Krylov residual is none.
                 let(zb,zax)=(vec![ZERO;k],vec![ZERO;ax.len()]);
                 let(bm,axm):(&[C],&[C])=if self.only.is_some(){(&zb,&zax)}else{(&b[k*m..k*(m+1)],ax)};
-                if kernel.contains(&m){let f:Vec<C>=axm.iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
+                if kernel.len()>1&&kernel.contains(&m){let f:Vec<C>=axm.iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
                     if lattice::norm(&f)<=INVARIANT*scale*lattice::norm(x){invariant.push(m);continue;}}
                 solutions.push(self.pool.as_mut().unwrap().mode(bm,axm,&g,theta,cp.coefficients[m],kernel.contains(&m),steady)?);solved.push(m);
             }
