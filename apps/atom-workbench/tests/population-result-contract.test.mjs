@@ -76,7 +76,7 @@ test('mean trace, positivity and complex-density gates hold in mean and finite r
   // As the writer merges: the mean's asymptotic fields; finite diagnostics win.
   const combined={...f.data,asymptoticStatus:mean.asymptoticStatus,asymptoticReason:mean.asymptoticReason,asymptoticPopulations:mean.asymptoticPopulations,
     asymptoticDensityReal:mean.asymptoticDensityReal,asymptoticDensityImag:mean.asymptoticDensityImag,
-    asymptoticEstimatedError:mean.asymptoticEstimatedError,asymptoticWithinTolerance:mean.asymptoticWithinTolerance,horizonUs:mean.horizonUs,
+    asymptoticEstimatedError:mean.asymptoticEstimatedError,asymptoticWithinTolerance:mean.asymptoticWithinTolerance,horizonUs:mean.horizonUs,asymptoticHorizons:mean.asymptoticHorizons,
     diagnostics:{...mean.diagnostics,...f.data.diagnostics}};
   assert.equal(normalizeDynamicsResult(combined,f.scene).steady.converged,true);
   const missing=structuredClone(combined);delete missing.diagnostics.asymptoticPositivityError;
@@ -92,10 +92,12 @@ test('transport binds population accuracy to the fixed requested accuracy and th
     calls++;const body=JSON.parse(init.body);
     return new Response(JSON.stringify({...reply,request:body.request}),{headers:{'Content-Type':'application/json'}});
   }});t.after(()=>client.dispose());
-  await assert.rejects(client.solve(f.scene,f.scene.dynamics),/不完整或无效/);
+  // The reply is a trajectory alone (no mean): what a request with includeAsymptotic false gets.
+  const alone={includeAsymptotic:false};
+  await assert.rejects(client.solve(f.scene,f.scene.dynamics,alone),/不完整或无效/);
   reply=f.data;
-  assert.equal((await client.solve(f.scene,f.scene.dynamics)).populationAccuracy.requestedTolerance,.005);
+  assert.equal((await client.solve(f.scene,f.scene.dynamics,alone)).populationAccuracy.requestedTolerance,.005);
   const other=f.states.find(state=>state.id!==f.scene.dynamics.initialStateId).id;
-  await assert.rejects(client.solve(f.scene,{...f.scene.dynamics,initialStateId:other}),/布居初态/);
+  await assert.rejects(client.solve(f.scene,{...f.scene.dynamics,initialStateId:other},alone),/布居初态/);
   assert.equal(calls,3);
 });

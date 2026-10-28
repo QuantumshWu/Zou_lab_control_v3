@@ -82,7 +82,10 @@ pub struct LatticeOperator<'a>{
     pub drops_k1_rest:bool,k1_rest:f64,
 }
 impl<'a> LatticeOperator<'a>{
-    pub fn new(prepared:&'a LatticePrepared,modes:&[Charge])->Result<Self,String>{
+    pub fn new(prepared:&'a LatticePrepared,modes:&[Charge])->Result<Self,String>{Self::with_k1_rests(prepared,modes,false)}
+    /// The operator with every K^(1) rest kept when `keep_k1` (a completed
+    /// lattice: `pipeline`'s completion).
+    pub fn with_k1_rests(prepared:&'a LatticePrepared,modes:&[Charge],keep_k1:bool)->Result<Self,String>{
         let n=prepared.generator.n;let d=n*n;
         let index:BTreeMap<Charge,usize>=modes.iter().enumerate().map(|(i,q)|(q.clone(),i)).collect();
         if index.len()!=modes.len(){return Err("Lattice modes must be distinct".into());}
@@ -114,7 +117,7 @@ impl<'a> LatticeOperator<'a>{
         let nu_max=nu.iter().map(|w|w.abs()).fold(0.,f64::max);
         let k1_rest:f64=prepared.fold.targets.iter().map(|t|t.rest_row_sum[1]).sum();
         let fold_size:f64=prepared.fold.targets.iter().map(|t|t.norms[0][0]).sum();
-        let drops_k1_rest=k1_rest>0.&&nu_max*k1_rest<=K1_REST_SHARE*fold_size;
+        let drops_k1_rest=k1_rest>0.&&nu_max*k1_rest<=K1_REST_SHARE*fold_size&&!keep_k1;
         let k1=|t:&'a StoredFold|if drops_k1_rest{&t.population_rest[1]}else{&t.rest[1]};
         let mut terms=Vec::new();
         if let Some(t)=diagonal{let own:Vec<(usize,usize)>=targets.iter().map(|&q|(q,q)).collect();
@@ -247,6 +250,8 @@ impl<'a> LatticeOperator<'a>{
     /// dropped (`drops_k1_rest`), i nu_p (K_t^(1) rest - its population
     /// rows) x_p on every fold edge p -> q of the lattice; None when the
     /// rests are applied.
+    /// Whether the operator leaves K^(1) rests out (the estimate charges them).
+    pub fn drops_k1_rests(&self)->bool{self.drops_k1_rest}
     pub fn left_out(&self,x:&[C])->Result<Option<Vec<C>>,String>{
         if !self.drops_k1_rest{return Ok(None);}
         let(n,d)=(self.n,self.n*self.n);let mut y=vec![ZERO;self.dimension()];

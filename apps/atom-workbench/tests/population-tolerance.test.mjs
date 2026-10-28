@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {POPULATION_TOLERANCE,defaultDynamics,defaultScene} from '../dist/js/atom-workbench/src/types.js';
-import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
+import {trajectoryInputsKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {prepareNativeSolve} from '../scripts/native-protocol.mjs';
 
 // The population accuracy is fixed at 0.5%: no setting, no part of a scene or of a request's identity.
@@ -17,6 +17,6 @@ test('every native request asks for populationTolerance 0.005, whatever the scen
 });
 
 test('a stray tolerance is no part of the request identity',()=>{
-  const scene=defaultScene(),settings=scene.dynamics,before=dynamicsCacheKey(scene,settings,false);
-  for(const stray of [.001,.02,'x'])assert.equal(dynamicsCacheKey(scene,{...settings,populationTolerance:stray},false),before);
+  const scene=defaultScene(),settings=scene.dynamics,before=trajectoryInputsKey(scene,settings);
+  for(const stray of [.001,.02,'x'])assert.equal(trajectoryInputsKey(scene,{...settings,populationTolerance:stray}),before);
 });

@@ -4,7 +4,7 @@ import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {analyze} from '../dist/js/atom-workbench/src/physics.js';
 import {startupScene,validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
-import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
+import {meanInputsKey,trajectoryInputsKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {laserReferenceStateId} from '../dist/js/atom-workbench/src/transition-view.js';
 
 const initial=defaultScene(),analysis=analyze(initial),ids=[...analysis.ground,...analysis.D1,...analysis.D2].map(state=>state.id);
@@ -77,14 +77,14 @@ test('a fresh start always shows the default scene; scene data an earlier versio
 });
 
 test('independent per-laser reference states roundtrip without changing rho0, Hamiltonian or physical cache identity',()=>{
-  const s=roundtrip(defaultScene()),initial=s.dynamics.initialStateId,before=buildFullMasterModel(s),key=dynamicsCacheKey(s,s.dynamics,true);
-  for(const id of ids){s.lasers[0].referenceStateId=id;const loaded=roundtrip(s);assert.equal(loaded.lasers[0].referenceStateId,id);assert.equal(laserReferenceStateId(loaded,loaded.lasers[0]),id);assert.equal(laserReferenceStateId(loaded,loaded.lasers[1]),initial);assert.equal(loaded.dynamics.initialStateId,initial);assert.equal(dynamicsCacheKey(loaded,loaded.dynamics,true),key);const after=buildFullMasterModel(loaded);assert.deepEqual(after.hReal,before.hReal);assert.deepEqual(after.hImag,before.hImag);assert.deepEqual(after.drives,before.drives);assert.equal(after.initialIndex,before.initialIndex);}
+  const s=roundtrip(defaultScene()),initial=s.dynamics.initialStateId,before=buildFullMasterModel(s),key=meanInputsKey(s,s.dynamics);
+  for(const id of ids){s.lasers[0].referenceStateId=id;const loaded=roundtrip(s);assert.equal(loaded.lasers[0].referenceStateId,id);assert.equal(laserReferenceStateId(loaded,loaded.lasers[0]),id);assert.equal(laserReferenceStateId(loaded,loaded.lasers[1]),initial);assert.equal(loaded.dynamics.initialStateId,initial);assert.equal(meanInputsKey(loaded,loaded.dynamics),key);const after=buildFullMasterModel(loaded);assert.deepEqual(after.hReal,before.hReal);assert.deepEqual(after.hImag,before.hImag);assert.deepEqual(after.drives,before.drives);assert.equal(after.initialIndex,before.initialIndex);}
   delete s.lasers[0].referenceStateId;assert.equal(laserReferenceStateId(roundtrip(s),s.lasers[0]),initial);
   for(const invalid of ['reference-1','',42]){s.lasers[0].referenceStateId=invalid;assert.throws(()=>roundtrip(s));}
 });
 
 test('mixed initial states round-trip, a single state is initialStateId alone, and the request identity includes the spec',()=>{
-  const base=roundtrip(defaultScene()),key=s=>dynamicsCacheKey(s,s.dynamics,false);
+  const base=roundtrip(defaultScene()),key=s=>trajectoryInputsKey(s,s.dynamics);
   const asState=structuredClone(base);asState.dynamics.initialState={kind:'state',id:'ground-1-1'};assert.throws(()=>roundtrip(asState),/dynamics\.initialState/);
   const keys=new Set([key(base)]);
   for(const spec of [{kind:'unpolarized',manifold:'ground'},{kind:'unpolarized',manifold:'F1'},{kind:'unpolarized',manifold:'F2'},{kind:'thermal',temperatureK:1e-5},{kind:'thermal',temperatureK:300},{kind:'weights',weights:{'ground-2-0':1,'D2-3-3':0.5}}]){
@@ -102,9 +102,9 @@ test('mixed initial states round-trip, a single state is initialStateId alone, a
 });
 
 test('显示光移 is saved with the scene and is no part of the dynamics request identity',()=>{
-  const s=roundtrip(defaultScene()),key=dynamicsCacheKey(s,s.dynamics,false);
+  const s=roundtrip(defaultScene()),key=trajectoryInputsKey(s,s.dynamics);
   assert.deepEqual(s.lasers.map(l=>l.showLightShift),[false,true]);
-  s.lasers[1].showLightShift=false;assert.equal(dynamicsCacheKey(s,s.dynamics,false),key);
+  s.lasers[1].showLightShift=false;assert.equal(trajectoryInputsKey(s,s.dynamics),key);
   assert.equal(roundtrip(s).lasers[1].showLightShift,false,'the switch survives a save, also for a laser called tweezer');
   s.lasers[1].showLightShift='yes';assert.throws(()=>roundtrip(s),/showLightShift/);
 });

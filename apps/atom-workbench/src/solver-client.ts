@@ -1,4 +1,4 @@
-import type {DynamicsResult,SteadyStatus,PopulationAccuracy} from './solver-types.js';
+import type {DynamicsResult,SteadyResult,SteadyStatus,PopulationAccuracy} from './solver-types.js';
 import {CONVERGED_MEAN_STATUSES,STEADY_STATUSES,isInitialDependent,readPopulationAccuracy} from './solver-types.js';
 import type {DynamicsSettings,InitialStateSpec,Scene,Level} from './types.js';
 import {MEAN_HORIZONS_US,POPULATION_TOLERANCE,canonicalInitialState,resolveInitialState} from './types.js';
@@ -9,7 +9,7 @@ import {readMeanDensity} from './mean-density.js';
 
 export interface SolverFailureRecord {time:string;request:{clientId:string;sequence:number};scene:Scene;options:object;attempt:number;willRetry:boolean;error:string;status?:number;code?:string;response?:unknown;page?:string;}
 class RequestFailure extends Error {constructor(message:string,readonly status:number,readonly code:string,readonly retryable:boolean){super(message);}}
-type Job={id:number;attempt:number;scene:Scene;settings:DynamicsSettings;steadyOnly:boolean;controller:AbortController;
+type Job={id:number;attempt:number;scene:Scene;settings:DynamicsSettings;steadyOnly:boolean;includeAsymptotic:boolean;controller:AbortController;
   resolve:(value:DynamicsResult)=>void;reject:(error:Error)=>void;onProgress?:(value:DynamicsResult)=>void;started:number;timer?:ReturnType<typeof setTimeout>};
 type ClientOptions={baseUrl?:string;debounceMs?:number;fetch?:typeof fetch;clientId?:string;onFailure?:(record:SolverFailureRecord)=>void};
 
@@ -26,12 +26,15 @@ export class DynamicsClient {
     this.clientId=options.clientId??globalThis.crypto.randomUUID();
     if(!Number.isFinite(this.debounceMs)||this.debounceMs<0)throw new Error('Invalid solver debounce interval.');
   }
-  solve(scene:Scene,settings:DynamicsSettings,control:{steadyOnly?:boolean;onProgress?:(value:DynamicsResult)=>void}={}):Promise<DynamicsResult>{
+  /** A solve: the trajectory with its mean (by default), the mean alone (`steadyOnly`), or the
+   * trajectory alone (`includeAsymptotic` false, its mean already at hand). */
+  solve(scene:Scene,settings:DynamicsSettings,control:{steadyOnly?:boolean;includeAsymptotic?:boolean;onProgress?:(value:DynamicsResult)=>void}={}):Promise<DynamicsResult>{
     if(this.disposed)return Promise.reject(new DOMException('Disposed.','AbortError'));
+    if(control.steadyOnly&&control.includeAsymptotic===false)return Promise.reject(new Error('A mean-only solve asks for its mean.'));
     this.abortCurrent('Superseded.');
     const id=++this.sequence;
     return new Promise((resolve,reject)=>{
-      const job:Job={id,attempt:0,scene:structuredClone(scene),settings:structuredClone(settings),steadyOnly:control.steadyOnly??false,
+      const job:Job={id,attempt:0,scene:structuredClone(scene),settings:structuredClone(settings),steadyOnly:control.steadyOnly??false,includeAsymptotic:control.includeAsymptotic??true,
         controller:new AbortController(),resolve,reject,onProgress:control.onProgress,started:performance.now()};
       this.current=job;job.timer=setTimeout(()=>{job.timer=undefined;void this.run(job);},this.debounceMs);
     });
@@ -43,7 +46,7 @@ export class DynamicsClient {
       const response=await this.transport(this.base+'/api/solve',{method:'POST',signal:job.controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({modelSchema:FULL_MODEL_SCHEMA,stream:!!job.onProgress,request:{clientId:this.clientId,sequence:job.id},scene:job.scene,options:{
         initialStateId:job.settings.initialStateId,initialState:canonicalInitialState(resolveInitialState(job.settings)),durationUs:job.settings.durationUs,samples:job.settings.samples,
         populationTolerance:POPULATION_TOLERANCE,meanHorizonUs:job.settings.meanHorizonUs,
-        includeAsymptotic:true,steadyOnly:job.steadyOnly,
+        includeAsymptotic:job.includeAsymptotic,steadyOnly:job.steadyOnly,
       }})}).catch(error=>{if(error instanceof TypeError)throw new RequestFailure('本机 Rust 求解服务连接暂时失败。',0,'network-error',true);throw error;});
       if(!response.ok){const detail=await response.json().catch(()=>({error:''}));evidence=detail;throw new RequestFailure(detail.error||`Local solver: ${response.status}`,response.status,detail.code??'',(response.status===502||response.status===503)&&!/invalid|incompatible|numerical/.test(detail.code??''));}
       const data=await this.readResponse(response,job);if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('求解结果不完整或无效：响应对象。');
@@ -55,7 +58,7 @@ export class DynamicsClient {
       if(!data.request||data.request.clientId!==this.clientId||data.request.sequence!==job.id)throw new Error('求解响应与当前请求不匹配。');
       const result=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings));
       this.checkHorizon(result,job);this.checkSamples(result,job);
-      if(!result.steady?.converged)this.recordFailure(job,new Error(result.steady?.reason??'长期布居未解析'),false,evidence);
+      if(job.includeAsymptotic&&!result.steady?.converged)this.recordFailure(job,new Error(result.steady?.reason??'长期布居未解析'),false,evidence);
       this.current=null;this.lastRoundTripMs=performance.now()-job.started;job.resolve(result);
     }catch(error){
       if(this.current!==job)return;
@@ -91,15 +94,17 @@ export class DynamicsClient {
     if(final===undefined)throw new Error('求解响应提前结束；已收到的中间结果仍可查看。');return final;
   }
   private recordFailure(job:Job,error:unknown,willRetry:boolean,response:unknown):void{
-    try{this.onFailure?.({time:new Date().toISOString(),request:{clientId:this.clientId,sequence:job.id},scene:structuredClone(job.scene),options:{...job.settings,steadyOnly:job.steadyOnly,includeAsymptotic:true},attempt:job.attempt,willRetry,error:error instanceof Error?error.message:String(error),...(error instanceof RequestFailure?{status:error.status,code:error.code}:{}),response,page:globalThis.location?.href});}catch{/* Diagnostics cannot block or replace a physics result. */}
+    try{this.onFailure?.({time:new Date().toISOString(),request:{clientId:this.clientId,sequence:job.id},scene:structuredClone(job.scene),options:{...job.settings,steadyOnly:job.steadyOnly,includeAsymptotic:job.includeAsymptotic},attempt:job.attempt,willRetry,error:error instanceof Error?error.message:String(error),...(error instanceof RequestFailure?{status:error.status,code:error.code}:{}),response,page:globalThis.location?.href});}catch{/* Diagnostics cannot block or replace a physics result. */}
   }
   /** The requested time grid: one sample for a mean, else the requested samples up to the duration. */
   private checkSamples(result:DynamicsResult,job:Job):void{
     const expected=job.steadyOnly?1:job.settings.samples;
     if(result.timesUs.length!==expected||(!job.steadyOnly&&Math.abs(result.timesUs.at(-1)!-job.settings.durationUs)>1e-10*Math.max(1,job.settings.durationUs)))throw new Error('求解响应的采样与请求不匹配。');
   }
+  /** The mean asked for, at the T asked for; none for a trajectory alone. */
   private checkHorizon(result:DynamicsResult,job:Job):void{
-    if(result.steady.converged&&result.steady.horizonUs!==job.settings.meanHorizonUs)throw new Error('求解响应的长期布居时刻 T 与本次请求不匹配。');
+    if((result.steady.status!=='not-requested')!==job.includeAsymptotic)throw new Error('求解响应的长期布居与本次请求不符。');
+    if(job.includeAsymptotic&&result.steady.horizonUs!==job.settings.meanHorizonUs)throw new Error('求解响应的长期布居时刻 T 与本次请求不匹配。');
   }
   private abortCurrent(reason:string):void{
     const job=this.current;if(!job)return;this.current=null;clearTimeout(job.timer);job.controller.abort();job.reject(new DOMException(reason,'AbortError'));
@@ -161,19 +166,53 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
     if(!density)invalid('长期复密度矩阵');
     steadyPopulations=Object.fromEntries(states.map((state,i)=>[state.id,mean[i]!]));
   }else if(data.asymptoticPopulations!=null||data.asymptoticDensityReal!=null||data.asymptoticDensityImag!=null)invalid('未收敛结果携带长期布居');
-  const horizon=data.horizonUs;if((converged||horizon!==undefined)&&!MEAN_HORIZONS_US.includes(horizon))invalid('长期布居时刻 T');
+  // A requested mean, computed or not, says its time T; a trajectory alone has none.
+  const requested=status!=='not-requested',horizon=data.horizonUs;
+  if(requested?!MEAN_HORIZONS_US.includes(horizon):horizon!==undefined)invalid('长期布居时刻 T');
+  const slowest=typeof d.slowestRelaxationUs==='number'&&Number.isFinite(d.slowestRelaxationUs)&&d.slowestRelaxationUs>0?d.slowestRelaxationUs as number:null;
+  const conserved=Number.isSafeInteger(d.conservedQuantities)&&d.conservedQuantities>0?d.conservedQuantities as number:null;
+  const steady:SteadyResult={converged,status,populations:steadyPopulations,density,residual:converged?d.residual:null,method:converged?d.asymptoticMethod:undefined,reason,
+    estimatedError:converged?meanError as number:null,withinTolerance,initialDependent:isInitialDependent(status),
+    slowestRelaxationUs:converged?slowest:null,conservedQuantities:converged?conserved:null,...(requested?{horizonUs:horizon as number|null}:{})};
+  // Every mean run returns every standard T, under the primary mean's rules: one entry per T,
+  // the requested T's the primary mean itself. The run's method and relaxation are each T's;
+  // the residual and the density checks belong to the requested mean.
+  let horizonMeans:SteadyResult[]|undefined;
+  const entries=data.asymptoticHorizons;
+  if(!requested){if(entries!==undefined)invalid('长期布居各时刻 T');}
+  else{
+    if(!Array.isArray(entries)||entries.length!==MEAN_HORIZONS_US.length)invalid('长期布居各时刻 T');
+    horizonMeans=MEAN_HORIZONS_US.map(T=>{
+      const found=(entries as unknown[]).filter((e:any)=>e&&typeof e==='object'&&!Array.isArray(e)&&e.horizonUs===T);
+      if(found.length!==1)invalid('长期布居各时刻 T');
+      const e=found[0] as any,bad=():never=>invalid(`长期布居 T = ${T===null?'∞':`${T} μs`}`);
+      const s=e.status as SteadyStatus;
+      if(!STEADY_STATUSES.includes(s)||s==='not-requested'||(e.reason!==undefined&&typeof e.reason!=='string'))bad();
+      const ok=(CONVERGED_MEAN_STATUSES as readonly SteadyStatus[]).includes(s),error=e.estimatedError,within=e.withinTolerance;
+      if(ok?!bounded(error)||typeof within!=='boolean'||(within&&error>POPULATION_TOLERANCE):(error!=null&&!bounded(error))||(within!==undefined&&within!==false))bad();
+      let mean:Record<string,number>|null=null,meanDensity;
+      if(ok){
+        if(!probabilities(e.populations,5e-6))bad();
+        try{meanDensity=readMeanDensity({asymptoticDensityReal:e.densityReal,asymptoticDensityImag:e.densityImag},32,e.populations);}catch{bad();}
+        if(!meanDensity)bad();
+        mean=Object.fromEntries(states.map((state,i)=>[state.id,e.populations[i]!]));
+      }else if(e.populations!=null||e.densityReal!=null||e.densityImag!=null)bad();
+      if(T===horizon){
+        // The requested T's entry is the primary mean, the same numbers.
+        if(s!==status||(error??undefined)!==(meanError??undefined)||(ok&&within)!==withinTolerance||(ok&&!(e.populations as number[]).every((p,i)=>p===data.asymptoticPopulations[i])))bad();
+        return steady;
+      }
+      return {converged:ok,status:s,populations:mean,density:meanDensity,residual:null,method:ok&&typeof d.asymptoticMethod==='string'?d.asymptoticMethod:undefined,reason:e.reason,
+        estimatedError:ok?error as number:null,withinTolerance:ok&&within===true,initialDependent:isInitialDependent(s),
+        slowestRelaxationUs:ok?slowest:null,conservedQuantities:ok?conserved:null,horizonUs:T};
+    });
+  }
   const assumptions=data.assumptions;
   if(!Array.isArray(assumptions)||assumptions.some((text:unknown)=>typeof text!=='string'))invalid('模型假设');
   const populations=Object.fromEntries(states.map((state,i)=>[state.id,rows.map((row:number[])=>row[i]!)]));
   const active=scene.lasers.filter(l=>l.enabled&&laserIntensityMWcm2(l)>0);
   return {states,timesUs,populations,totalExcited:timesUs.map((_,i)=>states.filter(s=>s.manifold!=='ground').reduce((sum,s)=>sum+populations[s.id]![i]!,0)),
-    activeLaserIds:active.map(l=>l.id),
-    steady:{converged,status,populations:steadyPopulations,density,residual:converged?d.residual:null,method:converged?d.asymptoticMethod:undefined,reason,
-      estimatedError:converged?meanError as number:null,withinTolerance,
-      initialDependent:isInitialDependent(status),
-      slowestRelaxationUs:converged&&typeof d.slowestRelaxationUs==='number'&&Number.isFinite(d.slowestRelaxationUs)&&d.slowestRelaxationUs>0?d.slowestRelaxationUs:null,
-      conservedQuantities:converged&&Number.isSafeInteger(d.conservedQuantities)&&d.conservedQuantities>0?d.conservedQuantities:null,
-      ...(horizon!==undefined?{horizonUs:horizon as number|null}:{})},
+    activeLaserIds:active.map(l=>l.id),steady,...(horizonMeans?{horizonMeans}:{}),
     metrics:{totalMs:d.elapsedMs},validation:{maxTraceError:d.traceError,minPopulation:Math.min(...rows.flat())},
     ...(populationAccuracy?{populationAccuracy,method:d.method}:{}),assumptions};
 }

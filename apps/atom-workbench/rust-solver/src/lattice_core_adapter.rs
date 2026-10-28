@@ -14,15 +14,18 @@
 //! stops improving, or when its budget is spent, and returns its best
 //! checkpoint: a computed result is never withheld. The mean of every
 //! request is the run of the mean alone (the same for a full request and a
-//! mean-only one); a full request runs it on its own thread beside the run
-//! of its trajectory, whose space spans the grid's times only. Every
+//! mean-only one): one joint run for the three standard horizons (100 ms,
+//! 1 s and the t -> infinity mean) and the requested one when it is another;
+//! a full request runs it on its own thread beside the run of its
+//! trajectory, whose space spans the grid's times only, and one with
+//! `includeAsymptotic` false runs no mean. Every
 //! checkpoint of the request's own run (a full request's trajectory, once
 //! its mean is there) is streamed first (`progress`: true) in the same shape.
 //! - `states` (32 ids), `timesUs`, `populations` (one row per time). A mean
 //!   result has the single t = 0 row, the initial populations; a finite result
 //!   has >= 2 projected rows and `populationAccuracy`: `status`
 //!   (`estimated-converged` when the run was accepted: every sample within
-//!   the tolerance and every slow class it needs resolved; else
+//!   the tolerance; else
 //!   `estimated-partial` with its `reason`), `sampleErrors` (per sample: the
 //!   acceptance factor times the estimate, plus the projection's change; an
 //!   absolute population error; the estimate's sources are the Krylov
@@ -43,7 +46,16 @@
 //!   for driven ones) with `asymptoticReason` (a convergence claim only
 //!   within the tolerance); `not-converged` (with its reason, no populations)
 //!   when nothing usable was computed or the bound is 1 or more;
-//!   `not-requested`.
+//!   `not-requested`. These fields are the requested horizon's
+//!   `asymptoticHorizons` entry under these names (`PRIMARY`), the same
+//!   values, an entry's nulls left out (a non-finite bound among them).
+//! - `asymptoticHorizons`, with every mean, computed or not: the three
+//!   standard horizons, `[{horizonUs (1e5, 1e6, null for infinity),
+//!   populations, densityReal, densityImag, estimatedError,
+//!   withinTolerance, status, reason}]`, each under the same contract (its
+//!   own bound and acceptance; not-converged, populations and densities
+//!   null, when the bound is 1 or more; every entry not-converged with the
+//!   run's reason, its error null, when the run computed nothing usable).
 //! - `diagnostics`. The reader gates the rows' `traceError` and
 //!   `initialStateError`, `elapsedMs`, a finite result's `method`, and a mean's
 //!   `asymptoticMethod`, `asymptoticTraceError`, `asymptoticPositivityError` and
@@ -77,7 +89,7 @@ const DISCARDED_COHERENCE:f64=1e-8;
 /// error of 1 bounds nothing): it is reported not converged, unshown.
 const UNINFORMATIVE_BOUND:f64=1.;
 /// The sentence added to a mean's reason when its run was not accepted.
-const OUTSIDE:&str=" Not converged: the run was not accepted (its error bound, asymptoticEstimatedError, is above the tolerance, or a slow class it needs is not resolved), so the populations are an estimate.";
+const OUTSIDE:&str=" Not converged: its error bound (asymptoticEstimatedError) is above the tolerance, so the populations are an estimate.";
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
 /// Stack of the mean's thread (LAPACK on it).
 const MEAN_STACK:usize=1<<26;
@@ -225,14 +237,14 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
         "support":k.support.iter().map(|(q,size)|json!({"charge":q,"kernel":size})).collect::<Vec<_>>(),"belowFloor":k.below});
     let run=run.map(|s|{let e=&s.explicit;let w=&s.work;let t=&s.timing;let l=&s.ledger;
         json!({"explicit":e.sets.explicit,"ring":e.sets.ring,"gated":e.gated,"promoted":e.promoted,"covered":e.covered,"leak":e.leak,
-            "ringInternalEdges":e.internal.len(),"explicitSetMs":e.milliseconds,"translations":s.translations,
+            "ringInternalEdges":e.internal.len(),"completion":s.completion.as_ref().map(|c|json!({"promoted":c.promoted,"keepK1":c.keep_k1,"decidedAt":c.decided_at,"bound":c.bound,"slowPart":c.slow_part,"k1Part":c.k1_part,"ringPart":c.ring_part,"restarted":c.restarted,"attribution":c.attribution.iter().take(8).map(|(q,a)|json!([q,a])).collect::<Vec<_>>()})),"explicitSetMs":e.milliseconds,"translations":s.translations,
             "columns":s.columns.iter().map(|c|json!({"pole":c.pole.to_string(),"innerSteps":c.steps,"residual":c.residual,"added":c.added,"ms":c.milliseconds,"blocks":c.blocks})).collect::<Vec<_>>(),
             "basis":s.images,"dimension":s.dimension,
             "inner":{"solves":w.solves,"steps":w.steps,"appliedBlocks":w.applied_blocks,"preconditionedBlocks":w.preconditioned_blocks,
                 "blockOperations":w.block_operations(),"imageBlocks":s.images*s.answer.modes.len(),"batches":w.batches,"batchMs":w.batch_ms,
                 "applyMs":w.timing.apply_ms,"preconditionMs":w.timing.precondition_ms,"orthogonalizeMs":w.timing.orthogonalize_ms},
             "checkpoints":s.checkpoints.iter().map(|c|json!({"solves":c.solves,"columns":c.columns,"dimension":c.dimension,"accepted":c.accepted,"bound":c.largest,
-                "trajectory":c.estimate.trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"horizons":c.estimate.horizons,"steady":c.estimate.steady,
+                "trajectory":c.estimate.trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"horizons":c.estimate.horizons,"steady":c.estimate.steady,"slowTrajectory":c.estimate.slow_trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"slowHorizons":c.estimate.slow_horizons,
                 "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"conserved":c.conserved,"slowestRate":c.slowest.map(|s|s.rate),
                 "estimateMs":c.estimate.work.milliseconds,"ms":c.milliseconds})).collect::<Vec<_>>(),
             "ledger":{"nuFreeze":l.nu_freeze,"thirdOrder":l.third_order,"farShell":l.far_shell,"tail":l.tail,"omittedCross":l.omitted_cross,
@@ -251,27 +263,75 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
         "floquet":floquet,"eigenbasis":prepared.eigenbasis_built().map(|e|json!({"milliseconds":e.milliseconds,"clusters":e.clusters,"largestCluster":e.largest_cluster,"passes":e.passes,"condition":e.condition})),"run":run})
 }
 
-/// The mean of a request alone: the horizon `meanHorizonUs`, else the
-/// steady state; `observer` sees every checkpoint.
+/// The mean of a request alone: one joint run for the standard horizons
+/// (100 ms, 1 s, the steady state) and the requested `meanHorizonUs` when it
+/// is another; `observer` sees every checkpoint.
 fn mean_run(request:&Prepared,horizon:Option<f64>,observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
-    let horizons:Vec<f64>=horizon.into_iter().collect();
-    pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&horizons,steady:horizon.is_none(),groups:&request.groups,explicit:&request.explicit},Some(observer))
+    let horizons=mean_horizons(horizon);
+    pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&horizons,steady:true,groups:&request.groups,explicit:&request.explicit},Some(observer))
 }
 /// The trajectory of a request alone on its grid.
 fn trajectory_run(request:&Prepared,times:&[f64],observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
     pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&[],steady:false,groups:&request.groups,explicit:&request.explicit},Some(observer))
 }
 
-/// The mean of an answer: the laboratory time average of the steady state,
-/// or of the state at the horizon, projected onto the density matrices (the
-/// change charged), its bound and its physics; top-level fields and
-/// diagnostics.
-fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->Result<(serde_json::Map<String,Value>,serde_json::Map<String,Value>),String>{
+/// The standard horizons every mean run returns (the t -> infinity mean as
+/// None), and the finite horizons of a mean run: the standard ones and the
+/// requested one when it is another.
+const STANDARD_HORIZONS:[Option<f64>;3]=[Some(1e5),Some(1e6),None];
+fn mean_horizons(requested:Option<f64>)->Vec<f64>{
+    let mut horizons:Vec<f64>=STANDARD_HORIZONS.iter().flatten().copied().collect();
+    if let Some(t)=requested{if !horizons.contains(&t){horizons.push(t);}}
+    horizons
+}
+
+/// One mean of an answer (`horizon` T, or None for the steady state): the
+/// laboratory time average projected onto the density matrices (the change
+/// charged), its bound and its physics.
+struct Mean{
+    horizon:Option<f64>,populations:Vec<f64>,density:Vec<Complex64>,estimated:f64,within:bool,
+    status:&'static str,reason:String,relaxing:Option<f64>,discarded:f64,projection:f64,positivity:f64,trace_error:f64,
+}
+impl Mean{
+    /// A bound of 1 or more bounds nothing: the mean is not converged and its
+    /// populations are not shown.
+    fn informative(&self)->bool{self.estimated<UNINFORMATIVE_BOUND}
+    /// The status and reason as reported.
+    fn reported(&self)->(&'static str,String){
+        if self.informative(){(self.status,self.reason.clone())}
+        else{("not-converged",format!("The mean's error bound is {:.2e}, at least 1: it carries no information, so no populations are shown",self.estimated))}
+    }
+    /// An entry of `asymptoticHorizons`.
+    fn entry(&self)->Value{
+        let(status,reason)=self.reported();let shown=self.informative();
+        json!({"horizonUs":self.horizon,"status":status,"reason":reason,"estimatedError":self.estimated,"withinTolerance":self.within&&shown,
+            "populations":shown.then(||self.populations.clone()),
+            "densityReal":shown.then(||self.density.iter().map(|z|z.re).collect::<Vec<_>>()),
+            "densityImag":shown.then(||self.density.iter().map(|z|z.im).collect::<Vec<_>>())})
+    }
+}
+/// The top-level mean fields by their `asymptoticHorizons` entry names.
+const PRIMARY:[(&str,&str);8]=[("horizonUs","horizonUs"),("status","asymptoticStatus"),("reason","asymptoticReason"),
+    ("estimatedError","asymptoticEstimatedError"),("withinTolerance","asymptoticWithinTolerance"),("populations","asymptoticPopulations"),
+    ("densityReal","asymptoticDensityReal"),("densityImag","asymptoticDensityImag")];
+/// The top-level mean fields of an entry: its values under the `PRIMARY`
+/// names, its nulls but the infinite horizon's left out (the reader takes a
+/// missing value, not a null one), so the requested horizon's entry and
+/// the top-level mean are the same values by construction.
+fn primary(entry:&Value)->serde_json::Map<String,Value>{
+    PRIMARY.iter().filter_map(|&(name,field)|entry.get(name).filter(|v|name=="horizonUs"||!v.is_null()).map(|v|(field.to_string(),v.clone()))).collect()
+}
+/// The entry of a mean whose run computed nothing usable.
+fn failed(horizon:Option<f64>,reason:&str)->Value{
+    json!({"horizonUs":horizon,"status":"not-converged","reason":reason,"estimatedError":null,"withinTolerance":false,
+        "populations":null,"densityReal":null,"densityImag":null})
+}
+fn mean_at(model:&Model,request:&Prepared,answer:&Answer,horizons:&[f64],horizon:Option<f64>)->Result<Mean,String>{
     let(prepared,axes)=(&request.lattice,&request.axes);let n=32;
-    let horizon=options.mean_horizon_us;
-    let(field,error)=match horizon{
-        Some(_)=>(&answer.horizon_fields[0],answer.horizon_errors[0]),
-        None=>(&answer.steady_field,answer.steady_error.unwrap_or(f64::INFINITY))};
+    let index=match horizon{Some(t)=>Some(horizons.iter().position(|&h|h==t).ok_or("A mean horizon outside the run")?),None=>None};
+    let(field,error,accepted)=match index{
+        Some(i)=>(&answer.horizon_fields[i],answer.horizon_errors[i],answer.horizon_accepted[i]),
+        None=>(&answer.steady_field,answer.steady_error.unwrap_or(f64::INFINITY),answer.steady_accepted)};
     let(raw,discarded)=lab_density(field,&answer.modes,axes);
     let diagonal=|m:&[Complex64]|(0..n).map(|i|m[i*n+i].re).collect::<Vec<f64>>();
     let density=project_density(&prepared.lapack,&raw)?;let projection=ledger::metric(&diagonal(&raw),&diagonal(&density),&request.groups);
@@ -279,14 +339,14 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
     let populations=diagonal(&density);
     let positivity=(-prepared.lapack.hermitian_eigen(&density,n)?.0[0]).max(0.);
     let trace_error=(populations.iter().sum::<f64>()-1.).abs();
-    // Converged: the run accepted (every bound within the tolerance and every
-    // slow class it needs resolved) and the projected mean within it.
-    let within=answer.accepted&&estimated<=POPULATION_TOLERANCE;
+    // Converged: this output accepted (its bound within the tolerance) and
+    // the projected mean within it.
+    let within=accepted&&estimated<=POPULATION_TOLERANCE;
     // At a horizon, populations still relaxing (the horizon's own reduced
-    // model: its modes alive at T; the steady state a horizon run never
-    // bounds) by more than RELAXING_SHARE of the tolerance, or several
-    // conserved quantities, keep the mean initial-state dependent.
-    let relaxing=horizon.map(|_|answer.horizon_relaxing[0]);
+    // model: its modes alive at T) by more than RELAXING_SHARE of the
+    // tolerance, or several conserved quantities, keep the mean
+    // initial-state dependent.
+    let relaxing=index.map(|i|answer.horizon_relaxing[i]);
     let dependent=answer.conserved>1||relaxing.is_some_and(|r|r>RELAXING_SHARE*POPULATION_TOLERANCE);
     let(status,reason)=match(model.drives.is_empty(),dependent){
         (false,true)=>("initial-dependent-time-average","Long-time phase average at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent."),
@@ -297,22 +357,33 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
         (true,false)=>("stationary",if within{"Unique full-density Lindblad stationary solution (only the trace is conserved)."}else{"Full-density Lindblad stationary solution (only the trace is conserved)."}),
     };
     let reason=if within{reason.to_string()}else{format!("{reason}{OUTSIDE}")};
-    let fields=json!({"horizonUs":horizon,"asymptoticStatus":status,"asymptoticReason":reason,"asymptoticPopulations":populations,
-        "asymptoticDensityReal":density.iter().map(|z|z.re).collect::<Vec<_>>(),
-        "asymptoticDensityImag":density.iter().map(|z|z.im).collect::<Vec<_>>(),
-        "asymptoticEstimatedError":estimated,"asymptoticWithinTolerance":within});
+    Ok(Mean{horizon,populations,density,estimated,within,status,reason,relaxing,discarded,projection,positivity,trace_error})
+}
+
+/// The mean fields of an answer: all three standard horizons in
+/// `asymptoticHorizons`, the requested one's (`meanHorizonUs`, else the
+/// steady state) entry in the top-level fields; and the mean's diagnostics.
+fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->Result<(serde_json::Map<String,Value>,serde_json::Map<String,Value>),String>{
+    let horizons=mean_horizons(options.mean_horizon_us);
+    let mut means=STANDARD_HORIZONS.iter().map(|&h|mean_at(model,request,answer,&horizons,h)).collect::<Result<Vec<_>,_>>()?;
+    // The requested mean: its standard horizon's, else its own (not listed).
+    let requested=match STANDARD_HORIZONS.iter().position(|&h|h==options.mean_horizon_us){Some(i)=>i,
+        None=>{means.push(mean_at(model,request,answer,&horizons,options.mean_horizon_us)?);means.len()-1}};
+    let mean=&means[requested];
+    let mut fields=primary(&mean.entry());
+    fields.insert("asymptoticHorizons".into(),json!(means[..STANDARD_HORIZONS.len()].iter().map(Mean::entry).collect::<Vec<_>>()));
     let slow=answer.slowest.as_ref();let resolved=slow.filter(|s|s.resolved());
     let diagnostics=json!({"asymptoticMethod":METHOD,"meanDensityFrame":MEAN_FRAME,
         "uniquenessScope":if answer.conserved>1{"several conserved quantities: mean of the specified initial density"}else{"unique limit: every mode but the trace relaxes, however slowly"},
-        "asymptoticTraceError":trace_error,"asymptoticPositivityError":positivity,"residual":answer.steady_residual,
+        "asymptoticTraceError":mean.trace_error,"asymptoticPositivityError":mean.positivity,"residual":answer.steady_residual,
         "asymptoticAccuracy":{"requestedTolerance":POPULATION_TOLERANCE,"acceptanceFactor":ACCEPTANCE_FACTOR,
-            "projectionCharge":projection,"metric":"max over states and requested F groups"},
+            "projectionCharge":mean.projection,"metric":"max over states and requested F groups"},
         "conservedQuantities":answer.conserved,"slowestRelaxationUs":resolved.map(|s|1./s.rate),
         "slowestRelaxation":slow.map(|s|json!({"ratePerUs":s.rate,"residualPerUs":s.residual,"classesMatched":s.matched,"resolved":s.resolved(),
             "relaxationRangeUs":[1./(s.rate+s.residual),if s.matched==Some(true)&&s.rate>s.residual{Some(1./(s.rate-s.residual))}else{None}],
             "rule":"the slowest decaying Ritz pair of population weight at least 1% of the tolerance; resolved (slowestRelaxationUs) when its residual is within a tenth of its rate and every slower class of the initial state (the second-order block's eigenvalues) has a pair within 40%, else only the range: at least 1 / (rate + residual)"})),
-        "discardedOpticalCoherence":discarded,"horizonRelaxingBound":relaxing});
-    match(fields,diagnostics){(Value::Object(f),Value::Object(d))=>Ok((f,d)),_=>Err("Mean fields are not an object".into())}
+        "discardedOpticalCoherence":mean.discarded,"horizonRelaxingBound":mean.relaxing});
+    match diagnostics{Value::Object(d)=>Ok((fields,d)),_=>Err("Mean diagnostics are not an object".into())}
 }
 
 /// The request's uniform grid (us).
@@ -338,8 +409,7 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
             "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2],"floquetKernels":prepared.timing[3]}}});
     if let Some((answer,solution))=trajectory{
         let estimated=answer.sample_errors.iter().fold(0_f64,|a,&b|a.max(b));
-        // The run's acceptance, not the bound alone: a slow class the
-        // estimate cannot see may still be missing.
+        // The run's acceptance: every sample within the tolerance.
         let converged=answer.accepted;
         result["populationAccuracy"]=json!({"status":if converged{"estimated-converged"}else{"estimated-partial"},"requestedTolerance":POPULATION_TOLERANCE,
             "sampleErrors":answer.sample_errors,"estimatedMaximumError":estimated,"projectionCharge":answer.projection,
@@ -352,18 +422,13 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
     match mean{
         Some(Ok((answer,solution)))=>{
             let(fields,diagnostics)=mean_fields(model,options,request,answer)?;
-            let bound=fields.get("asymptoticEstimatedError").and_then(Value::as_f64).unwrap_or(f64::INFINITY);
-            if bound>=UNINFORMATIVE_BOUND{
-                // A bound of 1 or more bounds nothing: no populations shown.
-                result["horizonUs"]=json!(options.mean_horizon_us);result["asymptoticStatus"]=json!("not-converged");
-                result["asymptoticReason"]=json!(format!("The mean's error bound is {bound:.2e}, at least 1: it carries no information, so no populations are shown"));
-                result["asymptoticEstimatedError"]=json!(bound);result["asymptoticWithinTolerance"]=json!(false);
-            }else{for(key,value)in fields{result[key.as_str()]=value;}}
+            for(key,value)in fields{result[key.as_str()]=value;}
             if let Value::Object(target)=&mut result["diagnostics"]{for(key,value)in diagnostics{target.insert(key,value);}}
             if let Some(s)=solution{result["diagnostics"][if trajectory.is_some(){"meanLattice"}else{"lattice"}]=lattice_json(prepared,Some(s));}
         }
         // Nothing usable was computed for the mean.
-        Some(Err(e))=>{result["horizonUs"]=json!(options.mean_horizon_us);result["asymptoticStatus"]=json!("not-converged");result["asymptoticReason"]=json!(e);
+        Some(Err(e))=>{for(key,value)in primary(&failed(options.mean_horizon_us,&e)){result[key.as_str()]=value;}
+            result["asymptoticHorizons"]=json!(STANDARD_HORIZONS.iter().map(|&h|failed(h,&e)).collect::<Vec<_>>());
             result["diagnostics"]["asymptoticMethod"]=json!(METHOD);}
         None=>{}
     }
@@ -464,6 +529,64 @@ mod tests{
         let to_steady=|i:usize|metric(&means[i].0,&means[2].0);
         let bounds:f64=means.iter().map(|m|m.1).sum();
         assert!(to_steady(1)<=to_steady(0)+bounds,"p(1 s) {:e} from the steady state, p(100 ms) {:e}",to_steady(1),to_steady(0));
+    }
+    /// One mean request returns all three standard horizons
+    /// (`asymptoticHorizons`: 100 ms, 1 s, infinity), each within its bound
+    /// of the default scene's exact references, and the requested horizon's
+    /// top-level fields are its entry; a full request without the mean
+    /// (includeAsymptotic false) runs no mean and returns none.
+    #[test]
+    fn one_mean_request_returns_the_three_standard_horizons(){
+        let fixture:Value=serde_json::from_str(include_str!("../tests/fixtures/default_scene_horizons.json")).unwrap();
+        let model:Model=serde_json::from_value(fixture["model"].clone()).unwrap();
+        let groups:Vec<Vec<usize>>=serde_json::from_value(fixture["groups"].clone()).unwrap();
+        let read=|v:&Value|->Vec<f64>{v.as_array().unwrap().iter().map(|x|x.as_f64().unwrap()).collect()};
+        let metric=|a:&[f64],b:&[f64]|->f64{let d:Vec<f64>=a.iter().zip(b).map(|(x,y)|x-y).collect();
+            groups.iter().map(|g|g.iter().map(|&i|d[i]).sum::<f64>().abs()).chain(d.iter().map(|x|x.abs())).fold(0.,f64::max)};
+        const FLOOR:f64=1e-5;
+        let mut o=fixture["options"].clone();o["steadyOnly"]=json!(true);o["meanHorizonUs"]=json!(1e6);
+        let out=solve(&model,&serde_json::from_value(o.clone()).unwrap(),&mut |_|{}).unwrap();
+        let entries=out["asymptoticHorizons"].as_array().unwrap();
+        assert_eq!(entries.iter().map(|e|e["horizonUs"].clone()).collect::<Vec<_>>(),vec![json!(1e5),json!(1e6),Value::Null]);
+        for(entry,key)in entries.iter().zip(["100000","1000000","steady"]){
+            let(p,bound)=(read(&entry["populations"]),entry["estimatedError"].as_f64().unwrap());
+            let off=metric(&p,&read(&fixture["exact"][key]));
+            assert_eq!(entry["withinTolerance"],json!(true),"{key}");
+            assert!(off<=bound+FLOOR,"p({key}) {off:e} from the exact, bound {bound:e}");
+        }
+        assert_primary_is(&out,&entries[1]);
+        // The trajectory alone: no mean run, no mean fields.
+        o["steadyOnly"]=json!(false);o["includeAsymptotic"]=json!(false);o["durationUs"]=json!(1.);o["samples"]=json!(11);
+        let alone=solve(&model,&serde_json::from_value(o).unwrap(),&mut |_|{}).unwrap();
+        assert_eq!(alone["asymptoticStatus"],json!("not-requested"));
+        assert!(alone.get("asymptoticHorizons").is_none()&&alone.get("asymptoticPopulations").is_none()&&alone["diagnostics"].get("meanLattice").is_none());
+        assert_eq!(alone["populationAccuracy"]["status"],json!("estimated-converged"));
+    }
+    /// The requested horizon's entry is the top-level mean, value for value
+    /// (an entry's null a missing field there, but the infinite horizon's).
+    fn assert_primary_is(out:&Value,entry:&Value){
+        for(name,field)in PRIMARY{
+            if name!="horizonUs"&&entry[name].is_null(){assert!(out.get(field).is_none(),"{field}: {}",out[field]);}
+            else{assert_eq!(out[field],entry[name],"{field}");}
+        }
+    }
+    /// A mean whose run computed nothing still returns its three standard
+    /// horizons, each not converged with the run's reason and its
+    /// horizonUs, the requested one's entry the top-level mean.
+    #[test]
+    fn a_failed_mean_returns_its_three_horizons_not_converged(){
+        let fixture:Value=serde_json::from_str(include_str!("../tests/fixtures/default_scene_horizons.json")).unwrap();
+        let model:Model=serde_json::from_value(fixture["model"].clone()).unwrap();
+        for horizon in[json!(1e5),json!(1e6),Value::Null]{
+            let mut o=fixture["options"].clone();o["steadyOnly"]=json!(true);o["meanHorizonUs"]=horizon.clone();
+            let options:Options=serde_json::from_value(o).unwrap();
+            let request=prepare_request(&model,&options).unwrap();
+            let out=result(&model,&options,&request,None,Some(Err("no usable mean".into())),true,Instant::now()).unwrap();
+            let entries=out["asymptoticHorizons"].as_array().unwrap();
+            assert_eq!(entries.iter().map(|e|e["horizonUs"].clone()).collect::<Vec<_>>(),vec![json!(1e5),json!(1e6),Value::Null]);
+            assert!(entries.iter().all(|e|e["status"]=="not-converged"&&e["reason"]=="no usable mean"&&e["withinTolerance"]==false&&e["populations"].is_null()));
+            assert_primary_is(&out,entries.iter().find(|e|e["horizonUs"]==horizon).unwrap());
+        }
     }
     /// End-to-end validation of the pipeline against a reference (ignored):
     /// ATOM_VALIDATE_REQUEST=<request.json>, ATOM_VALIDATE_GRID="T:samples"

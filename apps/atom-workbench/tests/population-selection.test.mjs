@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {recommendedPopulationStates,withPopulationGroups,populationDisplayIds} from '../dist/js/atom-workbench/src/population-selection.js';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
-import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
+import {trajectoryInputsKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {populationChart} from '../dist/js/atom-workbench/src/population-chart.js';
 
 test('automatic curves use occupied initial/final top three, not intermediate peaks or steady ranking',()=>{
@@ -25,10 +25,10 @@ test('F curves sum all constituent states, including hidden ones, without modify
 });
 
 test('manual F and individual choices persist and do not trigger a different physical calculation',()=>{
- const scene=defaultScene(),d=scene.dynamics,key=dynamicsCacheKey(scene,d,false);
+ const scene=defaultScene(),d=scene.dynamics,key=trajectoryInputsKey(scene,d);
  d.monitorMode='manual';d.monitoredStateIds=['ground-2-0'];d.monitoredGroupIds=['F:ground:1','F:D2:3'];
  const loaded=validateScene(JSON.parse(JSON.stringify(scene)));
  assert.equal(loaded.dynamics.monitorMode,'manual');assert.deepEqual(populationDisplayIds(loaded.dynamics),['ground-2-0','F:ground:1','F:D2:3']);
- assert.equal(dynamicsCacheKey(loaded,loaded.dynamics,false),key);
+ assert.equal(trajectoryInputsKey(loaded,loaded.dynamics),key);
  for(const groups of [['unknown'],['F:ground:1','F:ground:1']]){d.monitoredGroupIds=groups;assert.throws(()=>validateScene(JSON.parse(JSON.stringify(scene))));}
 });

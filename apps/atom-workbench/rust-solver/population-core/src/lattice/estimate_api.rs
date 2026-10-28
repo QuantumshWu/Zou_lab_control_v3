@@ -89,6 +89,9 @@ pub struct EstimateSetup<'a>{
     /// The fold remainders as generator-norm bounds (rad/us) for the
     /// lattice's largest |nu_q|.
     pub ledger:&'a RemainderLedger,
+    /// Whether the lattice operator keeps every K^(1) rest (a completed
+    /// lattice): the error lattice's outer operator does the same.
+    pub keep_k1:bool,
 }
 
 /// The reduced model of one checkpoint.
@@ -158,6 +161,12 @@ pub struct ErrorEstimate{
     pub horizons:Vec<f64>,
     /// The steady state (None when not requested).
     pub steady:Option<f64>,
+    /// The slow part alone (the ring's feedback and the K^(1) rests the
+    /// lattice leaves out, through the slow modes; the kernel's own residual
+    /// with them), per grid time and per horizon: what a completed lattice
+    /// could remove (`pipeline`'s completion). The steady state's estimate is
+    /// its slow part.
+    pub slow_trajectory:Vec<f64>,pub slow_horizons:Vec<f64>,
     pub work:EstimateWork,
 }
 impl ErrorEstimate{

@@ -4,7 +4,7 @@ import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-mo
 import {spectroscopyAnalysis,spectroscopyCoupling,staticModelBackground} from '../dist/js/atom-workbench/src/spectroscopy.js';
 import {resolveSceneFrequencies} from '../dist/js/atom-workbench/src/physics.js';
 import {levelsChart} from '../dist/js/atom-workbench/src/charts.js';
-import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
+import {trajectoryInputsKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {accurateSum,analyze,laserFrequencyDifferenceMHz,laserFrequencyMHz,laserIntensityMWcm2} from '../dist/js/atom-workbench/src/physics.js';
 import {VIRTUAL_MANIFOLDS} from '../dist/js/atom-workbench/src/spectroscopy-data.js';
 import {along,spherical} from './directions.mjs';
@@ -127,7 +127,7 @@ test('显示光移 is display only: the model, its request identity and its vali
  const flipped={...s,lasers:s.lasers.map(l=>({...l,showLightShift:!l.showLightShift}))},other=buildFullMasterModel(flipped);
  for(const key of ['hReal','hImag','collapse','drives','frequencyCoordinates','initialReal','assumptions'])assert.deepEqual(other[key],model[key],key);
  assert.deepEqual(other.states,model.states);
- assert.equal(dynamicsCacheKey(flipped,s.dynamics,false),dynamicsCacheKey(s,s.dynamics,false));
+ assert.equal(trajectoryInputsKey(flipped,s.dynamics),trajectoryInputsKey(s,s.dynamics));
 });
 
 test('emission: one operator per photon polarization with both D lines and both ground-F channels, static in the frame',()=>{

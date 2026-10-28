@@ -76,9 +76,11 @@ pub struct Lattice<'a>{
     directions:Vec<Vec<C>>,images:Vec<Vec<C>>,recorded:bool,
 }
 impl<'a> Lattice<'a>{
-    pub fn new(prepared:&'a LatticePrepared,sets:LatticeSets)->Result<Self,String>{
+    pub fn new(prepared:&'a LatticePrepared,sets:LatticeSets)->Result<Self,String>{Self::with_k1_rests(prepared,sets,false)}
+    /// The lattice with every K^(1) rest kept in its operator when `keep_k1`.
+    pub fn with_k1_rests(prepared:&'a LatticePrepared,sets:LatticeSets,keep_k1:bool)->Result<Self,String>{
         if sets.centre()!=Some(0){return Err("The explicit set must start with the zero charge".into());}
-        let modes=sets.modes();let op=LatticeOperator::new(prepared,&modes)?;let operator_work=op.work_split();
+        let modes=sets.modes();let op=LatticeOperator::with_k1_rests(prepared,&modes,keep_k1)?;let operator_work=op.work_split();
         Ok(Self{sets,modes,op,preconditioning:Preconditioning::new(prepared)?,batches:Vec::new(),work:InnerWork{operator_work,..InnerWork::default()},directions:Vec::new(),images:Vec::new(),recorded:false})
     }
     /// The preconditioner batch of a pole (built at its first use).

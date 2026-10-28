@@ -9,7 +9,8 @@ import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-mo
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {nativeResult} from './native-result.mjs';
 import {isTimeAverage} from '../dist/js/atom-workbench/src/solver-types.js';
-import {CurrentDynamicsResults,keptCheckpoint} from '../dist/js/atom-workbench/src/current-dynamics-results.js';
+import {CurrentResults} from '../dist/js/atom-workbench/src/current-results.js';
+import {horizonRecords,keptCheckpoint} from '../dist/js/atom-workbench/src/solve-plan.js';
 
 /** The HTTP response for this scene: a native result plus transport metadata. */
 function fixture(scene=defaultScene(),settings=scene.dynamics,timesUs=[0,settings.durationUs/2,settings.durationUs]){
@@ -17,7 +18,9 @@ function fixture(scene=defaultScene(),settings=scene.dynamics,timesUs=[0,setting
   return {...nativeResult({states,initialIndex,timesUs,tolerance:POPULATION_TOLERANCE}),assumptions:['test assumption'],
     service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]}};
 }
-const noMean=data=>{for(const key of ['asymptoticPopulations','asymptoticDensityReal','asymptoticDensityImag','asymptoticEstimatedError','asymptoticWithinTolerance','horizonUs'])delete data[key];return data;};
+const noMean=data=>{for(const key of ['asymptoticPopulations','asymptoticDensityReal','asymptoticDensityImag','asymptoticEstimatedError','asymptoticWithinTolerance','horizonUs','asymptoticHorizons'])delete data[key];return data;};
+/** A trajectory alone (includeAsymptotic false): no mean, no T. */
+const trajectoryOnly=data=>{noMean(data);data.asymptoticStatus='not-requested';delete data.asymptoticReason;return data;};
 function scenario(){const s=defaultScene();s.dynamics.samples=3;s.dynamics.durationUs=.2;return s;}
 
 function streamReply(call){let controller;const body=new ReadableStream({start(c){controller=c;}});call.resolve(new Response(body,{headers:{'Content-Type':'application/x-ndjson'}}));const encoder=new TextEncoder();return {send:event=>controller.enqueue(encoder.encode(JSON.stringify(event)+'\n')),close:()=>controller.close()};}
@@ -49,10 +52,13 @@ test('two checkpoints, then 停止: the solve ends and the last checkpoint is wh
  stream.send({type:'checkpoint',data:checkpoint(scene,request,[0,.03,.004])});stream.send({type:'checkpoint',data:checkpoint(scene,request,[0,.011,.002])});await pause(15);
  client.cancel();assert.equal((await pending).name,'AbortError');
  const last=progress.at(-1);assert.equal(progress.length,2);assert.equal(last.populationAccuracy.status,'estimated-partial');assert.deepEqual(last.populationAccuracy.sampleErrors,[0,.011,.002]);
- // The page drew neither; on 停止 the last one becomes its result.
- const shown=new CurrentDynamicsResults(),epoch=shown.activate('inputs');assert.equal(shown.get('inputs','trajectory'),undefined);
- for(const kind of keptCheckpoint(last,false,false))shown.set('inputs',epoch,kind,last);
- shown.activate('inputs');assert.equal(shown.get('inputs','trajectory'),last);assert.equal(shown.get('inputs','mean'),last);
+ // The page drew neither; on 停止 the last one becomes its result: the trajectory and its mean at every T.
+ const trajectories=new CurrentResults(),means=new CurrentResults(),epochs=[trajectories.activate('trajectory inputs'),means.activate('mean inputs')];
+ assert.equal(trajectories.get('trajectory inputs','trajectory'),undefined);
+ const kept=keptCheckpoint(last,'full',()=>false);assert.deepEqual(kept,{trajectory:true,horizons:[1e5,1e6,null]});
+ trajectories.set('trajectory inputs',epochs[0],'trajectory',last);
+ for(const mean of horizonRecords({result:last,wallMs:1,horizon:1e6}))if(kept.horizons.includes(mean.horizon))means.set('mean inputs',epochs[1],mean.horizon,mean);
+ assert.equal(trajectories.get('trajectory inputs','trajectory'),last);assert.deepEqual([1e5,1e6,null].map(T=>means.get('mean inputs',T)?.result.steady.horizonUs),[1e5,1e6,null]);
 });
 test('the stream speaks checkpoints and one final result only',async t=>{
  const scene=scenario();
@@ -107,7 +113,9 @@ test('numerical failures and unresolved means are recorded without blind retries
  const scene=scenario(),pending=client.solve(scene,scene.dynamics),rejected=assert.rejects(pending,/numerical failure/);await waitCalls(mock,1);
  mock.calls[0].resolve(new Response(JSON.stringify({error:'numerical failure',code:'numerical-failure',service:{binarySha256:'test-binary'}}),{status:422}));await rejected;
  assert.equal(records[0].willRetry,false);assert.equal(records[0].response.service.binarySha256,'test-binary');
- const next=client.solve(scene,scene.dynamics);await waitCalls(mock,2);const data=noMean(fixture(scene));Object.assign(data,{asymptoticStatus:'not-converged',asymptoticReason:'slow modes unresolved'});reply(mock.calls[1],data);
+ const next=client.solve(scene,scene.dynamics);await waitCalls(mock,2);const data=noMean(fixture(scene));
+ Object.assign(data,{asymptoticStatus:'not-converged',asymptoticReason:'slow modes unresolved',horizonUs:scene.dynamics.meanHorizonUs,
+   asymptoticHorizons:[1e5,1e6,null].map(horizonUs=>({horizonUs,status:'not-converged',reason:'slow modes unresolved',populations:null,densityReal:null,densityImag:null,estimatedError:null,withinTolerance:false}))});reply(mock.calls[1],data);
  assert.equal((await next).steady.converged,false);assert.equal(records[1].response.asymptoticStatus,'not-converged');await pause(230);assert.equal(mock.calls.length,2);
 });
 function transport(){const calls=[];return {calls,fetch:async(url,init)=>new Promise((resolve,reject)=>calls.push({url,init,resolve,reject,body:JSON.parse(init.body)}))};}
@@ -148,7 +156,7 @@ test('time averages and initial dependence are separate properties of a converge
   const scene=scenario();
   for(const [status,timeAverage,initialDependent] of [['stationary',false,false],['population-stationary',false,false],['initial-dependent',false,true],
     ['time-average',true,false],['initial-dependent-time-average',true,true]]){
-    const data=fixture(scene);data.asymptoticStatus=status;data.asymptoticReason='reason of '+status;
+    const data=fixture(scene);data.asymptoticStatus=status;data.asymptoticReason='reason of '+status;for(const entry of data.asymptoticHorizons)entry.status=status;
     const result=normalizeDynamicsResult(data,scene);
     assert.equal(result.steady.converged,true,status);assert.equal(result.steady.initialDependent,initialDependent,status);
     assert.equal(isTimeAverage(result.steady.status),timeAverage,status);assert.equal(result.steady.reason,data.asymptoticReason);
@@ -174,12 +182,23 @@ test('the mean residual and both methods each come from one contract key',()=>{
   const result=normalizeDynamicsResult(data,scene);
   assert.equal(result.steady.residual,2e-13);assert.equal(result.method,'test trajectory');assert.equal(result.steady.method,'test mean');
   const mean=normalizeDynamicsResult(meanFixture(scene),scene);assert.equal(mean.method,undefined);assert.equal(mean.steady.method,'test mean');
-  const none=noMean(fixture(scene));none.asymptoticStatus='not-requested';delete none.asymptoticReason;
-  const finiteOnly=normalizeDynamicsResult(none,scene);assert.equal(finiteOnly.steady.residual,null);assert.equal(finiteOnly.steady.converged,false);
+  const finiteOnly=normalizeDynamicsResult(trajectoryOnly(fixture(scene)),scene);assert.equal(finiteOnly.steady.residual,null);assert.equal(finiteOnly.steady.converged,false);
   // Every converged mean reports the relative residual of its null vector.
   for(const residual of [undefined,null,-1,NaN,Infinity]){
     const bad=fixture(scene);bad.diagnostics.residual=residual;assert.throws(()=>normalizeDynamicsResult(bad,scene),/长期密度数值验证信息/);
   }
+});
+
+test('a trajectory alone: includeAsymptotic false is sent, and its answer carries no mean',async t=>{
+ const mock=transport(),client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'trajectory-alone'});t.after(()=>client.dispose());
+ const scene=scenario(),pending=client.solve(scene,scene.dynamics,{includeAsymptotic:false});await waitCalls(mock,1);
+ assert.equal(mock.calls[0].body.options.includeAsymptotic,false);assert.equal(mock.calls[0].body.options.steadyOnly,false);
+ reply(mock.calls[0],trajectoryOnly(fixture(scene)));const result=await pending;
+ assert.equal(result.steady.status,'not-requested');assert.equal(result.horizonMeans,undefined);assert.equal(result.timesUs.length,3);
+ // A mean nobody asked for, or none where one was asked for, is not this request's answer.
+ const extra=client.solve(scene,scene.dynamics,{includeAsymptotic:false}),refused=assert.rejects(extra,/长期布居与本次请求不符/);await waitCalls(mock,2);reply(mock.calls[1],fixture(scene));await refused;
+ const missing=client.solve(scene,scene.dynamics),absent=assert.rejects(missing,/长期布居与本次请求不符/);await waitCalls(mock,3);reply(mock.calls[2],trajectoryOnly(fixture(scene)));await absent;
+ await assert.rejects(client.solve(scene,scene.dynamics,{steadyOnly:true,includeAsymptotic:false}),/mean-only solve asks for its mean/);assert.equal(mock.calls.length,3);
 });
 
 test('rapid edits debounce to only the last immutable scene snapshot',async t=>{
