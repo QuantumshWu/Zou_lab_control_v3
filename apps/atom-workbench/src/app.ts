@@ -18,27 +18,27 @@ import {offsetReading,photonFrequencyMHz,setReferenceOffset} from './reference-e
 import {typedDigits,type Reading} from './unit-input.js';
 import {frequencyBaseTree,stateTree} from './choice-trees.js';
 import {alignLevelReadouts} from './readout-alignment.js';
-import {expressionBase,followers,frequencyValue,frequencyValueLabel,migrateSceneFrequencies,naturalDetuningUnit,objectAnchor,objectKey,objectOf,releaseFollowers,setFrequencyBase,setFrequencyValue,type DefinedFrequency} from './laser-frequency.js';
+import {expressionBase,followers,frequencyValue,frequencyValueLabel,naturalDetuningUnit,objectAnchor,objectKey,objectOf,releaseFollowers,setFrequencyBase,setFrequencyValue,type DefinedFrequency} from './laser-frequency.js';
 import {FREQUENCY_UNITS,WAVELENGTH_UNITS,anchorValue,baseKey,difference,gap,inUnit,isDetuningUnit,laserValue,parseBase,photon,readingHeading,readoutText,stateValue,zeroFieldStateValue,type FrequencyValue} from './frequency-value.js';
 import {FrequencyReadout,ReadoutPreferences,type ReadoutPreference} from './frequency-controls.js';
 import {analyze,dipoleBetweenStates,resolveSceneFrequencies,laserIntensityMWcm2,setPolarizationPreset,type PolarizationPreset} from './physics.js';
 import {AXIS_NAMES,axisWords,directionAxis,linkableFields,linkedTo,referenceAxis,releaseLinks,sameDirection,shortcutDirection,shortcutField,type DirectionShortcut} from './direction.js';
-import {DEFAULT_NUMERICAL_APERTURE,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,intensityReading,intensityUnit,normalizeLaserIntensity,powerReading,setLaserIntensityMode,setLaserNumericalAperture,waistReading,waistUnit,writeLaserIntensity,writeLaserPower,writeLaserWaist} from './laser-intensity.js';
+import {DEFAULT_NUMERICAL_APERTURE,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,intensityReading,normalizeLaserIntensity,powerReading,setLaserIntensityMode,setLaserNumericalAperture,waistReading,writeLaserIntensity,writeLaserPower,writeLaserWaist} from './laser-intensity.js';
 import {dynamicsCacheKey} from './dynamics-cache-key.js';
 import {CurrentDynamicsResults} from './current-dynamics-results.js';
 import {STATIC_MIXING_LIMIT,displayMixing,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
-import {defaultDynamics,defaultScene,POPULATION_TOLERANCE,resolveMeanHorizon} from './types.js';
+import {defaultScene,POPULATION_TOLERANCE} from './types.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
 import type {DynamicsResult} from './solver-types.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
-import {validateScene} from './scene-file.js';
+import {loadSavedScene,validateScene} from './scene-file.js';
 import {incidentTransitions,laserEmits,laserReferenceStateId,setLaserReferenceState,transitionEndpoints} from './transition-view.js';
 import {escapeHtml as esc,levelsChart,number,populationChart,bindPopulationChart,populationColor,populationValue,populationSamplingInfo} from './charts.js';
 import {math} from './math.js';
 import {renderSpace3D,type SpaceSelection,type SpaceViewName} from './space3d.js';
 import {laserColour} from './identity.js';
 import {POPULATION_GROUPS,recommendedPopulationStates,populationDisplayIds,withPopulationGroups} from './population-selection.js';
-import {durationReading,durationUnit,setDuration,durationText,timeDisplayUnit,DURATION_UNITS} from './duration.js';
+import {durationReading,setDuration,durationText,timeDisplayUnit,DURATION_UNITS} from './duration.js';
 import type {DurationUnit} from './types.js';
 import {patchLevelPopulations} from './level-population-dom.js';
 import {idMappingError} from './population-basis.js';
@@ -60,7 +60,7 @@ type Selection={kind:'field'|'laser'|'reference'|'level'|'none';id:string};
 type ObjectKind=Exclude<Selection['kind'],'none'>;
 const APP_TITLE='Rb87 实验工作台';
 const STORAGE='rb87-workbench-demo-v4',root=document.querySelector<HTMLDivElement>('#app')!;
-let scene=migrateSceneFrequencies(defaultScene()),view:View='levels',resultView:ResultView='levels',spectral:SpectralLine='D2',selection:Selection={kind:'laser',id:'probe'};
+let scene=defaultScene(),view:View='levels',resultView:ResultView='levels',spectral:SpectralLine='D2',selection:Selection={kind:'laser',id:'probe'};
 let populationMode:'steady'|'time'='steady',populationTimeIndex=-1,populationScale:'linear'|'log'='linear';let unbindPopulation:(()=>void)|undefined;
 let spaceRenderer:ReturnType<typeof renderSpace3D>|undefined;const spaceMount=document.createElement('div');spaceMount.className='retained-space-view';
 let saveState:'saved'|'pending'|'failed'='saved',saveFailure='',loadFailure='',unreadableScene:string|null=null;
@@ -84,9 +84,9 @@ type SolvedRecord={result:DynamicsResult;wallMs:number;horizon:number|null};cons
 const $=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T;
 const message=(error:unknown)=>error instanceof Error?error.message:String(error);
 
-try{const saved=localStorage.getItem(STORAGE);if(saved){unreadableScene=saved;scene=validateScene(JSON.parse(saved));unreadableScene=null;}}catch(error){loadFailure=message(error);}
+// The autosaved scene, if it is a valid current scene; else the default scene, the original kept to download.
+{let saved:string|null=null;try{saved=localStorage.getItem(STORAGE);}catch{}const loaded=loadSavedScene(saved);scene=loaded.scene;if(loaded.failure){unreadableScene=saved;loadFailure=loaded.failure;}}
 if(!scene.lasers.some(l=>l.id===selection.id))selection=scene.lasers[0]?{kind:'laser',id:scene.lasers[0].id}:{kind:'field',id:scene.fields[0]?.id??''};
-scene.marks??={};scene.references??=[];scene.dynamics??=defaultDynamics();
 try{stateLabels=readLabels(JSON.parse(localStorage.getItem(`${STORAGE}-state-labels`)??'{}'));}catch{/* Ignore malformed presentation state. */}
 
 // ---------------------------------------------------------------- the window
@@ -183,7 +183,7 @@ $('inspector-commands').replaceWith(closeInspector.root);
 // ---------------------------------------------------------------- helpers
 function setText(id:string,value:string):void{const node=$(id);if(node.textContent!==value)node.textContent=value;}
 function populationPercent(p:number|undefined):string{return p===undefined?'—':populationValue(p);}
-function initialId():string{return scene.dynamics?.initialStateId??`ground-${scene.initialF}-${scene.initialM}`;}
+function initialId():string{return scene.dynamics.initialStateId;}
 /** The initial state's card or curve, when it is one state. */
 function singleInitialId():string{const spec=initialSpec(scene);return spec.kind==='state'?spec.id:'';}
 function allLevels(a=latestAnalysis):Level[]{return [...a.ground,...a.D1,...a.D2];}
@@ -192,20 +192,22 @@ function stateText(l:Level):string{return stateLabel(l);}
 function measuredNumber(value:number,places=4):string{if(value!==0&&Number.isFinite(value)&&Math.abs(value)<10**(-places))return formatNumber(value,{digits:3});return number(value,places);}
 function frequencyText(valueMHz:number):string{if(!Number.isFinite(valueMHz))return '—';const unit=naturalDetuningUnit(valueMHz);return `${readoutText(inUnit(valueMHz,unit),false)} ${unit}`;}
 function stateCell(id:string):string{return `<span class="state-label">${esc(idText(id))}</span>`;}
-function idText(id:string):string{const l=getLevel(id);return l?stateText(l):scene.references?.find(r=>r.id===id)?.name??id;}
+function idText(id:string):string{const l=getLevel(id);return l?stateText(l):scene.references.find(r=>r.id===id)?.name??id;}
 function activeLaser(_line?:SpectralLine):Laser|undefined{
-  if(selection.kind==='reference'){const r=scene.referenceFrequencies?.find(r=>r.id===selection.id);return r?referenceBeam(r):undefined;}
+  if(selection.kind==='reference'){const r=scene.referenceFrequencies.find(r=>r.id===selection.id);return r?referenceBeam(r):undefined;}
   return selection.kind==='laser'?scene.lasers.find(l=>l.id===selection.id):undefined;
 }
 /** A reference frequency as the levels chart reads a beam: its frequency, no intensity, no geometry. */
 function referenceBeam(r:ReferenceFrequency):Laser{
-  return {id:r.id,name:r.name,enabled:true,line:r.frequencyAnchor?.line??'D2',frequency:r.frequency,frequencyAnchor:r.frequencyAnchor,intensityMWcm2:0,direction:{reference:{kind:'axis',axis:'+z'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0};
+  return {id:r.id,name:r.name,enabled:true,line:r.frequencyAnchor?.line??'D2',frequency:r.frequency,frequencyUnit:r.frequencyUnit,frequencyAnchor:r.frequencyAnchor,showLightShift:false,
+    intensityMode:'intensity',intensityMWcm2:0,powerUnit:'mW',waistUnit:'μm',intensityUnit:'mW/cm²',direction:{reference:{kind:'axis',axis:'+z'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0};
 }
 /** The selected beam itself, not a reference frequency read as one. */
 function selectedBeam(l:Laser|undefined):boolean{return !!l&&scene.lasers.includes(l);}
 function referenceStateId(laser=activeLaser()):string{return laserReferenceStateId(scene,laser);}
-function dynamics():DynamicsSettings{return scene.dynamics??(scene.dynamics=defaultDynamics());}
-function normalizeScene(next:Scene):void{try{migrateSceneFrequencies(next);}catch{/* The status reports an invalid frequency. */}for(const laser of next.lasers){try{normalizeLaserIntensity(laser);}catch{/* The inspector reports an invalid laser. */}}}
+function dynamics():DynamicsSettings{return scene.dynamics;}
+/** Resolves the scene's frequencies and intensities (a scene built in code: the default and examples). */
+function normalizeScene(next:Scene):void{try{resolveSceneFrequencies(next);}catch{/* The status reports an invalid frequency. */}for(const laser of next.lasers){try{normalizeLaserIntensity(laser);}catch{/* The inspector reports an invalid laser. */}}}
 
 // Edits since the scene was loaded: derived anchors and automatic curve choices are not edits.
 let baseline:string|null=null;
@@ -248,7 +250,7 @@ function solverStatus():[string,StatusWord,string?]{
   return [words.join(' · '),mean||(populationMode==='time'&&partial)?'warning':'idle',elapsed];
 }
 /** Where the trajectory misses the population tolerance, in one sentence (empty: nowhere, or no trajectory). */
-function trajectorySentence(result:DynamicsResult):string{const errors=sampleErrors(result);return result.timesUs.length>1&&errors?partialSentence(result.timesUs,errors,durationUnit(dynamics())):'';}
+function trajectorySentence(result:DynamicsResult):string{const errors=sampleErrors(result);return result.timesUs.length>1&&errors?partialSentence(result.timesUs,errors,dynamics().durationUnit):'';}
 /** A computed p̄(T) outside the tolerance: its estimated error (empty when within). */
 function meanSentence(result:DynamicsResult):string{const s=result.steady;return s.converged&&!s.withinTolerance?`${meanSymbol(result)} 估计误差 ${s.estimatedError===null?'未知':errorPercent(s.estimatedError)}（超过 ${errorPercent(POPULATION_TOLERANCE)}）`:'';}
 /** The trajectory shown is a streamed checkpoint, not a final result. */
@@ -259,7 +261,7 @@ function refreshStatus():void{
   if(analysisError)[text,word,elapsed]=[`能级参数无效：${analysisError}`,'error',undefined];
   if(notice)[text,word,elapsed]=[notice.text,notice.word,undefined];
   if(saveState==='failed')[text,word,elapsed]=[`本地保存失败：${saveFailure}；请导出场景`,'error',undefined];
-  else if(loadFailure&&!notice)[text,word,elapsed]=[`原本地场景无法载入：${loadFailure}。已显示默认场景，原数据已保留`,'warning',undefined];
+  else if(loadFailure&&!notice)[text,word,elapsed]=[`已改用默认场景：本地场景不是当前格式（${loadFailure}），原数据可下载`,'warning',undefined];
   if(word==='idle')text+=saveState==='pending'?' · 正在保存…':' · 场景已保存';
   if(elapsed)text+=` · ${elapsed}`;
   strip.show(text,word);strip.setActionVisible(currentSolverBusy());
@@ -305,7 +307,7 @@ function item(kind:ObjectKind,id:string,index:number,name:string,sub:string,enab
 async function removeObject(kind:ObjectKind,id:string):Promise<void>{
   if(kind==='reference'||kind==='level'){await removeReference(kind,id);return;}
   const object=(kind==='field'?scene.fields:scene.lasers).find(o=>o.id===id);if(!object)return;
-  const noun=kind==='field'?'磁场':'激光',following=kind==='laser'?[...scene.lasers,...(scene.referenceFrequencies??[])].filter(o=>o.frequency&&'base' in o.frequency&&o.frequency.base.kind==='laser'&&o.frequency.base.id===id).map(o=>o.name):[];
+  const noun=kind==='field'?'磁场':'激光',following=kind==='laser'?[...scene.lasers,...scene.referenceFrequencies].filter(o=>o.frequency&&'base' in o.frequency&&o.frequency.base.kind==='laser'&&o.frequency.base.id===id).map(o=>o.name):[];
   const linked=kind==='field'?linkedTo<{name:string;direction:Direction}>([...scene.fields,...scene.lasers],id).map(o=>o.name):[];
   const released=following.length?`跟随它的${following.join('、')}将改为等效的零场或绝对定义，频率不变。`:linked.length?`链接它参考轴的${linked.join('、')}将改为等效的角度参考轴，方向不变。`:'';
   if(!await confirm(`删除${noun}`,`删除${noun}「${object.name}」？${released}它的全部参数将一并删除，无法撤销。`,{confirmText:'删除',cancelText:'取消',kind:'warning'}))return;
@@ -332,12 +334,12 @@ function levelDetail(r:ReferenceLevel):string{
 }
 /** A photon link that goes keeps the level where it was: its frequency joins the offset. */
 function unlinkPhotons(kind:'laser'|'reference',id:string):void{
-  for(const r of scene.references??[])if(r.photon?.source.kind===kind&&r.photon.source.id===id){const nu=photonFrequencyMHz(r,scene)??0;r.offsetMHz+=r.photon.direction==='emit'?-nu:nu;delete r.photon;}
+  for(const r of scene.references)if(r.photon?.source.kind===kind&&r.photon.source.id===id){const nu=photonFrequencyMHz(r,scene)??0;r.offsetMHz+=r.photon.direction==='emit'?-nu:nu;delete r.photon;}
 }
 async function removeReference(kind:'reference'|'level',id:string):Promise<void>{
-  const object=kind==='reference'?scene.referenceFrequencies?.find(r=>r.id===id):scene.references?.find(r=>r.id===id);if(!object)return;
-  const noun=kind==='reference'?'参考频率':'参考能级',following=kind==='reference'?[...scene.lasers,...(scene.referenceFrequencies??[])].filter(o=>o.frequency&&'base' in o.frequency&&o.frequency.base.kind==='reference'&&o.frequency.base.id===id).map(o=>o.name):[];
-  const linked=kind==='reference'?(scene.references??[]).filter(r=>r.photon?.source.kind==='reference'&&r.photon.source.id===id).map(r=>r.name):[];
+  const object=kind==='reference'?scene.referenceFrequencies.find(r=>r.id===id):scene.references.find(r=>r.id===id);if(!object)return;
+  const noun=kind==='reference'?'参考频率':'参考能级',following=kind==='reference'?[...scene.lasers,...scene.referenceFrequencies].filter(o=>o.frequency&&'base' in o.frequency&&o.frequency.base.kind==='reference'&&o.frequency.base.id===id).map(o=>o.name):[];
+  const linked=kind==='reference'?scene.references.filter(r=>r.photon?.source.kind==='reference'&&r.photon.source.id===id).map(r=>r.name):[];
   const consequences=[following.length?`跟随它的${following.join('、')}将改为等效的零场或绝对定义，频率不变`:'',linked.length?`链接它的${linked.join('、')}将改为固定偏移，能量不变`:''].filter(Boolean).join('；');
   if(!await confirm(`删除${noun}`,`删除${noun}「${object.name}」？${consequences?consequences+'。':''}无法撤销。`,{confirmText:'删除',cancelText:'取消',kind:'warning'}))return;
   if(kind==='reference'){
@@ -355,7 +357,7 @@ function renderObjects():void{
   const title=`${scene.name} — ${APP_TITLE}`;if(document.title!==title)document.title=title;
   $('field-list').replaceChildren(...scene.fields.map((f,i)=>item('field',f.id,i+1,f.name,`${withUnit(f.magnitudeG,'G',{digits:4})} · ${directionDetail(f.direction)}`,f.enabled,v=>f.enabled=v)));
   $('laser-list').replaceChildren(...scene.lasers.map((l,i)=>item('laser',l.id,i+1,l.name,laserDetail(l),l.enabled,v=>l.enabled=v)));
-  const references=[...(scene.referenceFrequencies??[]).map((r,i)=>item('reference',r.id,i+1,r.name,frequencyDetail(r),true)),...(scene.references??[]).map((r,i)=>item('level',r.id,i+1,r.name,levelDetail(r),true))];
+  const references=[...scene.referenceFrequencies.map((r,i)=>item('reference',r.id,i+1,r.name,frequencyDetail(r),true)),...scene.references.map((r,i)=>item('level',r.id,i+1,r.name,levelDetail(r),true))];
   $('reference-list').replaceChildren(...references);
   setText('field-count',String(scene.fields.length));setText('laser-count',String(scene.lasers.length));setText('reference-count',String(references.length));
   addField.disabled=scene.fields.length>=8;addLaser.disabled=scene.lasers.length>=8;
@@ -367,15 +369,15 @@ function directionDetail(d:Direction):string{
 }
 function nextObjectName(prefix:string,objects:{name:string}[]):string{const used=new Set(objects.map(o=>o.name));let n=1;while(used.has(`${prefix} ${n}`))n++;return `${prefix} ${n}`;}
 function addObject(kind:ObjectKind):void{
-  if(kind==='reference'){scene.referenceFrequencies??=[];if(scene.referenceFrequencies.length>=8){note('最多 8 个参考频率','warning');return;}const id=`frequency-${Date.now()}`;scene.referenceFrequencies.push({id,name:nextObjectName('参考频率',scene.referenceFrequencies),frequency:{base:{kind:'transition',line:'D2',Fg:2,Fe:3},offsetMHz:0},frequencyUnit:'MHz'});resolveSceneFrequencies(scene);select({kind:'reference',id});update();return;}
+  if(kind==='reference'){if(scene.referenceFrequencies.length>=8){note('最多 8 个参考频率','warning');return;}const id=`frequency-${Date.now()}`;scene.referenceFrequencies.push({id,name:nextObjectName('参考频率',scene.referenceFrequencies),frequency:{base:{kind:'transition',line:'D2',Fg:2,Fe:3},offsetMHz:0},frequencyUnit:'MHz'});resolveSceneFrequencies(scene);select({kind:'reference',id});update();return;}
   if(kind==='level'){
     // From the selected beam's origin, one of its photons up (or down): the old 取激光终点, now a link.
-    scene.references??=[];if(scene.references.length>=12){note('最多 12 个参考能级','warning');return;}const id=`reference-${Date.now()}`,beam=selectedBeam(activeLaser())?activeLaser():undefined,origin=beam?referenceStateId(beam):initialId();
-    scene.references.push({id,name:nextObjectName('参考能级',scene.references),anchorId:getLevel(origin)?origin:initialId(),anchorMode:'follow',offsetMHz:0,...(beam?{photon:{source:{kind:'laser' as const,id:beam.id},direction:laserEmits(scene,beam,allLevels())?'emit' as const:'absorb' as const}}:{})});
+    if(scene.references.length>=12){note('最多 12 个参考能级','warning');return;}const id=`reference-${Date.now()}`,beam=selectedBeam(activeLaser())?activeLaser():undefined,origin=beam?referenceStateId(beam):initialId();
+    scene.references.push({id,name:nextObjectName('参考能级',scene.references),anchorId:getLevel(origin)?origin:initialId(),anchorMode:'follow',offsetMHz:0,offsetUnit:'MHz',...(beam?{photon:{source:{kind:'laser' as const,id:beam.id},direction:laserEmits(scene,beam,allLevels())?'emit' as const:'absorb' as const}}:{})});
     select({kind:'level',id});update();return;
   }
   if(kind==='field'){if(scene.fields.length>=8)return;const id=`field-${Date.now()}`;scene.fields.push({id,name:nextObjectName('磁场',scene.fields),enabled:true,magnitudeG:1,direction:{reference:{kind:'axis',axis:'+x'},thetaDeg:0,phiDeg:0}});select({kind:'field',id});update();}
-  else{if(scene.lasers.length>=8)return;const id=`laser-${Date.now()}`;scene.lasers.push({id,name:nextObjectName('激光',scene.lasers),enabled:true,showLightShift:false,line:spectral,frequency:{base:{kind:'transition',line:spectral,Fg:2,Fe:spectral==='D1'?2:3},offsetMHz:0},frequencyUnit:'MHz',intensityMWcm2:.1,direction:{reference:{kind:'axis',axis:'+x'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0});controlsKey='';select({kind:'laser',id});update();}
+  else{if(scene.lasers.length>=8)return;const id=`laser-${Date.now()}`;scene.lasers.push({id,name:nextObjectName('激光',scene.lasers),enabled:true,showLightShift:false,line:spectral,frequency:{base:{kind:'transition',line:spectral,Fg:2,Fe:spectral==='D1'?2:3},offsetMHz:0},frequencyUnit:'MHz',intensityMode:'intensity',intensityMWcm2:.1,powerUnit:'mW',waistUnit:'μm',intensityUnit:'mW/cm²',direction:{reference:{kind:'axis',axis:'+x'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0});controlsKey='';select({kind:'laser',id});update();}
 
   update();
 }
@@ -519,10 +521,10 @@ function renderInspector():void{
   if(selection.kind==='none'){host.append(element('p','note wrap inspector-empty','点选磁场、激光或参考以编辑。'));return;}
   const fields=inspectorFields;
   if(selection.kind==='reference'){
-    const r=scene.referenceFrequencies?.find(r=>r.id===selection.id);if(!r)return;
+    const r=scene.referenceFrequencies.find(r=>r.id===selection.id);if(!r)return;
     frequencySection(group('频率'),r,referenceReadout);
   }else if(selection.kind==='level'){
-    const r=scene.references?.find(r=>r.id===selection.id);if(!r)return;levelSection(group('定义'),r);
+    const r=scene.references.find(r=>r.id===selection.id);if(!r)return;levelSection(group('定义'),r);
   }else if(selection.kind==='field'){
     const field=scene.fields.find(f=>f.id===selection.id);if(!field)return;
     const g=group('大小与方向');
@@ -535,8 +537,8 @@ function renderInspector():void{
     chart.append(mixingWarning);refreshMixing(l);
     const f=group('频率');
     frequencySection(f,l,laserReadout);
-    const originPicker=selectControl(f,'参考态',l.referenceStateId??'',[['','跟随动力学初态'],...allLevels().map(state=>[state.id,stateText(state)] as [string,string]),...(scene.references??[]).map(ref=>[ref.id,ref.name+' · 参考能级'] as [string,string])],id=>{setLaserReferenceState(scene,l,id||undefined);persist();renderInspector();renderResults(false);});originPicker.id='laser-reference-state';originPicker.setAttribute('aria-label','参考出发态');originPicker.title='只改变这束光的箭头起点和矩元参考；不改变动力学初态或任何驱动。';
-    if(scene.references?.some(r=>r.id===l.referenceStateId))selectControl(f,'光子方向',l.referenceProcess??'absorption',[['absorption','吸收 ↑'],['emission','受激辐射 ↓']],v=>{l.referenceProcess=v as 'absorption'|'emission';update();});
+    const originPicker=selectControl(f,'参考态',l.referenceStateId??'',[['','跟随动力学初态'],...allLevels().map(state=>[state.id,stateText(state)] as [string,string]),...scene.references.map(ref=>[ref.id,ref.name+' · 参考能级'] as [string,string])],id=>{setLaserReferenceState(scene,l,id||undefined);persist();renderInspector();renderResults(false);});originPicker.id='laser-reference-state';originPicker.setAttribute('aria-label','参考出发态');originPicker.title='只改变这束光的箭头起点和矩元参考；不改变动力学初态或任何驱动。';
+    if(scene.references.some(r=>r.id===l.referenceStateId))selectControl(f,'光子方向',l.referenceProcess??'absorption',[['absorption','吸收 ↑'],['emission','受激辐射 ↓']],v=>{l.referenceProcess=v as 'absorption'|'emission';update();});
     // 强度 (laser-intensity.ts): the local intensity itself, or power with a waist or with the NA the
     // beam fills. The mode's inputs are written in units the operator picks; what follows from
     // them -- the intensity, the NA mode's waist -- stands disabled in the intensity's place.
@@ -550,12 +552,12 @@ function renderInspector():void{
       bindField(fields,strength,'inspector',()=>numberSpec('numerical-aperture','数值孔径 NA',l.numericalAperture??DEFAULT_NUMERICAL_APERTURE,'',{spin:true,description:'光束充满的物镜数值孔径；原子在真空中，0 < NA ≤ 1'}),
         v=>setLaserNumericalAperture(l,Number(v)),{scope});
       bindDerived(fields,strength,'inspector',scope,{name:'output-waist',label:'输出束腰 w₀',description:'w₀ = λ/(π·NA)，λ = c/ν 为这束光的真空波长（傍轴高斯光束）',from:'由数值孔径和这束光的波长算出：w₀ = λ/(π·NA)'},
-        ()=>attempt(()=>waistReading(l),()=>waistUnit(l)),unitChoices(WAIST_UNITS,'长度'),u=>{l.waistUnit=u as WaistUnit;});
+        ()=>attempt(()=>waistReading(l),()=>l.waistUnit),unitChoices(WAIST_UNITS,'长度'),u=>{l.waistUnit=u as WaistUnit;});
     }
     if(mode==='intensity')bindQuantity(fields,strength,'inspector',scope,()=>({name:'intensity',label:'强度 I',minimum:0,spin:true,inexact:true}),
       {read:()=>intensityReading(l),write:(v,u)=>writeLaserIntensity(l,v,u as IntensityUnit),units:()=>unitChoices(INTENSITY_UNITS,'强度')});
     else bindDerived(fields,strength,'inspector',scope,{name:'intensity',label:'强度 I',description:'原子处的局域强度：高斯光束轴上的 I = 2P/(πw₀²)',from:'由功率和束腰算出：I = 2P/(πw₀²)'},
-      ()=>attempt(()=>intensityReading(l),()=>intensityUnit(l)),unitChoices(INTENSITY_UNITS,'强度'),u=>{l.intensityUnit=u as IntensityUnit;});
+      ()=>attempt(()=>intensityReading(l),()=>l.intensityUnit),unitChoices(INTENSITY_UNITS,'强度'),u=>{l.intensityUnit=u as IntensityUnit;});
     directionSection(group('传播方向'),l,'laser');
     const p=group('光束偏振');
     bindField(fields,p,'inspector',()=>numberSpec('polarization','主轴 ψ',l.polarizationAngleDeg,'°',{minimum:-90,maximum:90,step:1}),v=>{l.polarizationAngleDeg=Number(v);});
@@ -598,7 +600,7 @@ function levelSection(f:HTMLElement,r:ReferenceLevel):void{
   const fields=inspectorFields,after=()=>{renderObjects();renderInspector();update();};
   bindField(fields,f,'inspector',()=>({name:'level-anchor',label:'锚点',kind:'choice',tree:stateTree(allLevels()),value:r.anchorId}),v=>{if(!getLevel(String(v)))throw new Error('锚点必须是真实原子态');r.anchorId=String(v);},{after});
   bindField(fields,f,'inspector',()=>({name:'level-mode',label:'锚点能量',kind:'choice',segmented:true,choices:[['follow','随锚点'],['zero-field','固定零场']],value:r.anchorMode??'follow',description:'随锚点：跟随当前磁场和背景；固定零场：取锚点的零场能量'}),v=>{r.anchorMode=v as 'follow'|'zero-field';},{after});
-  const sources=[...(scene.lasers.length?[{heading:'激光',leaves:scene.lasers.map(l=>({key:`laser:${l.id}`,label:l.name,text:l.name}))}]:[]),...(scene.referenceFrequencies?.length?[{heading:'参考频率',leaves:scene.referenceFrequencies.map(o=>({key:`reference:${o.id}`,label:o.name,text:o.name}))}]:[])];
+  const sources=[...(scene.lasers.length?[{heading:'激光',leaves:scene.lasers.map(l=>({key:`laser:${l.id}`,label:l.name,text:l.name}))}]:[]),...(scene.referenceFrequencies.length?[{heading:'参考频率',leaves:scene.referenceFrequencies.map(o=>({key:`reference:${o.id}`,label:o.name,text:o.name}))}]:[])];
   bindField(fields,f,'inspector',()=>({name:'level-photon',label:'光子',kind:'choice',tree:sources,allow_none:true,placeholder:'无',value:r.photon?`${r.photon.source.kind}:${r.photon.source.id}`:null,description:'链接后，参考能级随这束光或参考频率移动'}),
     v=>{if(v===null||v===''){if(r.photon){const nu=photonFrequencyMHz(r,scene)??0;r.offsetMHz+=r.photon.direction==='emit'?-nu:nu;delete r.photon;}return;}
       const [kind,...rest]=String(v).split(':'),id=rest.join(':');if((kind!=='laser'&&kind!=='reference')||!objectOf(scene,String(v)))throw new Error('未知的光子来源');r.photon={source:{kind,id},direction:r.photon?.direction??'absorb'};},{after});
@@ -613,7 +615,7 @@ function frequencySection(f:HTMLElement,object:DefinedFrequency,readout:Frequenc
   // No base that is itself or follows it: no cycle can be chosen.
   const offered=<T extends {id:string}>(kind:'laser'|'reference',list:readonly T[])=>list.filter(o=>!following.has(`${kind}:${o.id}`));
   bindField(fields,f,'inspector',()=>({name:'frequency-base',label:'相对',kind:'choice',
-    tree:frequencyBaseTree({absolute:'光频或真空波长',absoluteText:'绝对',follow:true,lasers:offered('laser',scene.lasers),references:offered('reference',scene.referenceFrequencies??[])}),
+    tree:frequencyBaseTree({absolute:'光频或真空波长',absoluteText:'绝对',follow:true,lasers:offered('laser',scene.lasers),references:offered('reference',scene.referenceFrequencies)}),
     value:baseKey(expressionBase(object.frequency!)),description:'换基准不改变光频；跟随另一对象时随它移动'}),
     v=>{const base=parseBase(String(v));if(!base)throw new Error('未知的频率基准');setFrequencyBase(scene,object,base);},{after:()=>{renderInspector();renderObjects();update();}});
   bindQuantity(fields,f,'inspector',key,()=>({name:'frequency-value',label:frequencyValueLabel(object),spin:true,inexact:true}),
@@ -645,7 +647,7 @@ function renderInitial():void{
     else if(spec.kind==='thermal'){
       const rows=form('initial-form');host.append(rows);
       bindQuantity(initialFields,rows,'initial','initial',()=>({name:'temperature',label:'温度 T',spin:true,inexact:true,description:'静态哈密顿量 H0 的 8 个基态本征态上的 Boltzmann 分布'}),
-        {read:()=>{const now=initialSpec(scene);return temperatureReading(now.kind==='thermal'?now.temperatureK:DEFAULT_TEMPERATURE_K,dynamics().temperatureUnit);},
+        {read:()=>{const now=initialSpec(scene);return temperatureReading(now.kind==='thermal'?now.temperatureK:DEFAULT_TEMPERATURE_K,dynamics().temperatureUnit!);},
           write:(v,u)=>setTemperature(scene,v,u as TemperatureUnit,allLevels()),units:()=>unitChoices(TEMPERATURE_UNITS,'温度')},()=>{renderInitial();update();});
     }else host.append(weightsSummary,editWeights.root);
   }
@@ -728,7 +730,7 @@ function selectionReadout(a:Analysis,l:Laser|undefined):string{
   const from=stateLabels.first,to=stateLabels.second,target=labelTarget(),physical=!!target&&!!getLevel(target);
   const badge=(slot:LabelSlot,n:1|2)=>`<span class="selection-index${stateLabels[slot]?' set':''}" data-badge-number="${n}"${stateLabels[slot]?` data-clear-label="${slot}" role="button" tabindex="0" title="取消标记 ${n}"`:''}>${n}</span>`;
   const pickers=`<div class="selection-top"><div class="selection-pair"><div class="selection-endpoint">${badge('first',1)}<div id="label-first"></div></div><div id="label-swap"></div><div class="selection-endpoint">${badge('second',2)}<div id="label-second"></div></div></div><button class="quiet" id="clear-selection"${from||to?'':' disabled'}>清除</button></div>`;
-  const actions=`<div class="selection-actions"><button class="quiet" id="use-as-initial"${physical?'':' disabled'}>设为初态</button><button class="quiet" id="monitor-selected"${[from,to].some(id=>id&&getLevel(id))?'':' disabled'}>观察布居</button><div class="mark-editor"><input id="mark-text" maxlength="32" aria-label="能级标记" placeholder="标记" value="${esc(target&&physical?scene.marks?.[target]??'':'')}"${physical?'':' disabled'}><button id="save-mark"${physical?'':' disabled'}>标记</button></div></div>`;
+  const actions=`<div class="selection-actions"><button class="quiet" id="use-as-initial"${physical?'':' disabled'}>设为初态</button><button class="quiet" id="monitor-selected"${[from,to].some(id=>id&&getLevel(id))?'':' disabled'}>观察布居</button><div class="mark-editor"><input id="mark-text" maxlength="32" aria-label="能级标记" placeholder="标记" value="${esc(target&&physical?scene.marks[target]??'':'')}"${physical?'':' disabled'}><button id="save-mark"${physical?'':' disabled'}>标记</button></div></div>`;
   pairValue=pairZeroField=undefined;
   if(!from||!to)return pickers+actions;
   const defined=a.spectroscopy?.status!=='unresolved';
@@ -744,7 +746,7 @@ function selectionReadout(a:Analysis,l:Laser|undefined):string{
 }
 /** Solver responses update scientific readouts without unmounting an operator's editor. */
 function renderSelection(a:Analysis,l:Laser|undefined):void{
-  const host=$('selection-readout'),key=JSON.stringify([stateLabels,scene.marks,scene.references?.map(r=>[r.id,r.name])]),next=element('div');next.innerHTML=selectionReadout(a,l);
+  const host=$('selection-readout'),key=JSON.stringify([stateLabels,scene.marks,scene.references.map(r=>[r.id,r.name])]),next=element('div');next.innerHTML=selectionReadout(a,l);
   if(host.dataset.selectionKey!==key){disposeTrees(host);host.innerHTML=next.innerHTML;host.dataset.selectionKey=key;bindSelection();$('pair-frequency-slot')?.replaceWith(pairRow);showPair();return;}
   if(!pairRow.isConnected)$('pair-frequency-slot')?.replaceWith(pairRow);
   showPair();
@@ -765,8 +767,8 @@ function bindSelection():void{
   const swap=command('⇄',()=>applyLabels(swapLabels(stateLabels)),{role:'quiet',glyph:true,square:true,title:'交换 1 和 2'});swap.disabled=!stateLabels.first||!stateLabels.second;$('label-swap').append(swap.root);
   if($('clear-selection'))$('clear-selection').onclick=()=>applyLabels({});
   if($('use-as-initial'))$('use-as-initial').onclick=()=>{const l=getLevel(labelTarget()??'');if(l)setInitialState(l.id);};
-  if($('save-mark'))$('save-mark').onclick=()=>{const id=labelTarget();if(id&&getLevel(id)){const v=$<HTMLInputElement>('mark-text').value.trim();if(v)scene.marks![id]=v;else delete scene.marks![id];update();}};
-  if($('monitor-selected'))$('monitor-selected').onclick=()=>{const ids=labelled(stateLabels).map(l=>l.id).filter(id=>getLevel(id));const chosen=getLevel(ids.at(-1)??'');const matching=chosen?.manifold==='D1'||chosen?.manifold==='D2'?scene.lasers.find(l=>l.enabled&&l.line===chosen.manifold):activeLaser();if(matching)dynamics().laserId=matching.id;dynamics().monitoredStateIds=[...new Set([...dynamics().monitoredStateIds,...ids])];dynamics().monitorMode='manual';controlsKey='';showView('dynamics');};
+  if($('save-mark'))$('save-mark').onclick=()=>{const id=labelTarget();if(id&&getLevel(id)){const v=$<HTMLInputElement>('mark-text').value.trim();if(v)scene.marks[id]=v;else delete scene.marks[id];update();}};
+  if($('monitor-selected'))$('monitor-selected').onclick=()=>{const ids=labelled(stateLabels).map(l=>l.id).filter(id=>getLevel(id));dynamics().monitoredStateIds=[...new Set([...dynamics().monitoredStateIds,...ids])];dynamics().monitorMode='manual';controlsKey='';showView('dynamics');};
 }
 /** The table reads the two-state readout's base and unit (ui-design.md §1.8): the chosen base for
  * every row, or under the zero-field default each row against its own two states at zero field. Only components with Ω ≠ 0 are listed. */
@@ -787,9 +789,9 @@ function dynamicsKey(steadyOnly=resultPage()==='levels'&&populationMode==='stead
 function trajectoryKey():string{return dynamicsCacheKey(scene,dynamics(),false,false);}
 /** A solve for these inputs asks only for the mean: in the levels' long-time mode, or when a
  * trajectory is here whose mean was solved at another horizon. Its key is the request's. */
-function meanOnly():boolean{const t=displayedResults.get(trajectoryKey(),'trajectory');return resultPage()==='levels'&&populationMode==='steady'||(!!t&&t.horizon!==resolveMeanHorizon(dynamics()));}
+function meanOnly():boolean{const t=displayedResults.get(trajectoryKey(),'trajectory');return resultPage()==='levels'&&populationMode==='steady'||(!!t&&t.horizon!==dynamics().meanHorizonUs);}
 function solveKey():string{return dynamicsKey(meanOnly());}
-function meanRecord(key=trajectoryKey()):SolvedRecord|undefined{const record=displayedResults.get(key,'mean');return record&&record.horizon===resolveMeanHorizon(dynamics())?record:undefined;}
+function meanRecord(key=trajectoryKey()):SolvedRecord|undefined{const record=displayedResults.get(key,'mean');return record&&record.horizon===dynamics().meanHorizonUs?record:undefined;}
 function cachedAnalysis():Analysis{
   const spectrum=resultPage()==='levels',key=JSON.stringify({kind:spectrum?'spectrum':'bare',fields:scene.fields,lasers:scene.lasers,initial:initialId(),excluded:spectrum?activeLaser()?.id:undefined});
   const cached=analysisCache.get(key);if(cached)return cached;
@@ -804,7 +806,7 @@ function invalidateObsoletePopulation():void{
   // A stop holds for the inputs it stopped; other inputs, even the stopped ones again later, solve.
   if(stoppedKey&&stoppedKey!==solveKey())stoppedKey='';
   // A request for other inputs or another horizon is obsolete; opening another view is not.
-  const key=dynamicsKey();if(requestedPhysicalKey&&(requestedPhysicalKey!==physicalKey||requestedHorizon!==resolveMeanHorizon(dynamics())))cancelObsoleteSolve();
+  const key=dynamicsKey();if(requestedPhysicalKey&&(requestedPhysicalKey!==physicalKey||requestedHorizon!==dynamics().meanHorizonUs))cancelObsoleteSolve();
   if(renderedPopulationKey&&renderedPopulationKey!==key){
     if(view==='levels')patchLevelPopulations($('levels-chart'),{label:'布居待计算',steadyLabel:meanSymbol(undefined),initialId:singleInitialId()});
     const oldReadout=$('selection-readout').querySelector<HTMLElement>('[data-current-population]');if(oldReadout){oldReadout.hidden=true;const value=oldReadout.querySelector('b');if(value)value.textContent='—';}
@@ -834,7 +836,7 @@ function refreshPopulationOnly():void{
 function requestSolve():void{
   // A trajectory already here for these inputs needs only its mean at the new horizon.
   const physicalKey=trajectoryKey(),trajectory=displayedResults.get(physicalKey,'trajectory'),steadyOnly=meanOnly();
-  const key=dynamicsKey(steadyOnly),horizon=resolveMeanHorizon(dynamics());
+  const key=dynamicsKey(steadyOnly),horizon=dynamics().meanHorizonUs;
   if(key===stoppedKey)return;
   displayedResults.activate(physicalKey);
   const completed=steadyOnly?meanRecord(physicalKey):trajectory;
@@ -846,7 +848,7 @@ function requestSolve():void{
   solver.cancel();requestedKey=key;requestedPhysicalKey=physicalKey;requestedSteadyOnly=steadyOnly;requestedHorizon=horizon;
   const revision=++solverRevision;clearTimeout(solverTimer);solverBusy=true;solverQueued=true;solverError='';
   const submittedScene=structuredClone(scene),submittedSettings=structuredClone(dynamics()),submittedAt=performance.now();
-  const stillCurrent=()=>revision===solverRevision&&physicalKey===trajectoryKey()&&horizon===resolveMeanHorizon(dynamics());
+  const stillCurrent=()=>revision===solverRevision&&physicalKey===trajectoryKey()&&horizon===dynamics().meanHorizonUs;
   const submittedOptions={steadyOnly,onProgress:(result:DynamicsResult)=>{
     if(!stillCurrent())return;
     // A computed mean is the long-time result so far; a checkpoint also carries the trajectory
@@ -880,7 +882,7 @@ function currentRecord():SolvedRecord|undefined{
   const key=trajectoryKey();
   if(resultPage()==='levels'&&populationMode==='steady')return meanRecord(key);
   const trajectory=displayedResults.get(key,'trajectory')??displayedResults.get(key,'progress');
-  if(!trajectory||trajectory.horizon===resolveMeanHorizon(dynamics()))return trajectory;
+  if(!trajectory||trajectory.horizon===dynamics().meanHorizonUs)return trajectory;
   // The trajectory stays; its long-time part is the mean at the current horizon, or pending.
   const mean=meanRecord(key);return withMean(trajectory,mean);
 }
@@ -888,11 +890,11 @@ const mergedRecords=new WeakMap<SolvedRecord,{mean:SolvedRecord|undefined;record
 function withMean(trajectory:SolvedRecord,mean:SolvedRecord|undefined):SolvedRecord{
   const saved=mergedRecords.get(trajectory);if(saved&&saved.mean===mean)return saved.record;
   const steady=mean?.result.steady??{converged:false,status:'not-requested' as const,populations:null,estimatedError:null,withinTolerance:false,residual:null,initialDependent:false};
-  const record={...trajectory,result:{...trajectory.result,steady},horizon:resolveMeanHorizon(dynamics())};mergedRecords.set(trajectory,{mean,record});return record;
+  const record={...trajectory,result:{...trajectory.result,steady},horizon:dynamics().meanHorizonUs};mergedRecords.set(trajectory,{mean,record});return record;
 }
 function currentResult():DynamicsResult|undefined{return currentRecord()?.result;}
 function currentSolverError():string{return requestedKey===dynamicsKey(requestedSteadyOnly)?solverError:'';}
-function currentSolverBusy():boolean{return solverBusy&&requestedPhysicalKey===trajectoryKey()&&requestedHorizon===resolveMeanHorizon(dynamics())&&(!requestedSteadyOnly||(resultPage()==='levels'&&populationMode==='steady')||!!displayedResults.get(trajectoryKey(),'trajectory'));}
+function currentSolverBusy():boolean{return solverBusy&&requestedPhysicalKey===trajectoryKey()&&requestedHorizon===dynamics().meanHorizonUs&&(!requestedSteadyOnly||(resultPage()==='levels'&&populationMode==='steady')||!!displayedResults.get(trajectoryKey(),'trajectory'));}
 function steadyPopulationsInView(a=latestAnalysis):Record<string,number>|undefined{
   const result=currentResult(),steady=result?.steady;if(!result||!steady?.converged||!steady.populations)return undefined;
   if(resultPage()!=='levels')return steady.populations;
@@ -921,7 +923,7 @@ function timeBasisError(result:DynamicsResult,a=latestAnalysis):number{
 }
 /** Under 最慢弛豫时间: a relaxation slower than the chosen horizon has not reached t → ∞ by then. */
 function unreachedLine(result:DynamicsResult):string{
-  const horizon=resolveMeanHorizon(dynamics()),slowest=result.steady?.slowestRelaxationUs;if(slowest==null||horizon===null||!(slowest>horizon))return '';
+  const horizon=dynamics().meanHorizonUs,slowest=result.steady?.slowestRelaxationUs;if(slowest==null||horizon===null||!(slowest>horizon))return '';
   const unit=timeDisplayUnit(slowest);return `最慢弛豫约 ${withUnit(slowest*unit.factor,unit.name,{digits:2})}，长于 ${horizonText(horizon)}：尚未到达 t→∞ 的稳态`;
 }
 /** 计算详情 on 详情: the solve's numbers, its methods and assumptions. */
@@ -969,7 +971,7 @@ function horizonText(us:number|null|undefined):string{return us==null?'∞':us==
 /** The name of the long-time population a result holds: p̄ at the horizon it was solved at (the
  * solver's echo; none echoed reads t → ∞). While no converged mean is here (pending, refused or
  * unresolved), the horizon being asked for, never a stale ∞. */
-function meanSymbol(result=currentResult()):string{const steady=result?.steady;return `p̄(${horizonText(steady?.converged?steady.horizonUs:resolveMeanHorizon(dynamics()))})`;}
+function meanSymbol(result=currentResult()):string{const steady=result?.steady;return `p̄(${horizonText(steady?.converged?steady.horizonUs:dynamics().meanHorizonUs)})`;}
 populationMode$.onchange=()=>{populationMode=populationMode$.value as 'steady'|'time';update();};
 const populationTime=element('input');populationTime.type='range';populationTime.id='population-time';populationTime.setAttribute('aria-label','布居时间');
 populationTime.oninput=()=>{populationTimeIndex=Number(populationTime.value);update();};
@@ -985,9 +987,9 @@ $('population-toolbar').append(populationMode$,meanHorizon.root,populationTime,p
 function populationToolbar():void{
   const snap=populationSnapshot(),result=currentResult(),p=snap.populations;
   if(populationMode$.value!==populationMode)populationMode$.value=populationMode;
-  meanHorizon.setCurrent(HORIZONS.find(([,us])=>us===resolveMeanHorizon(dynamics()))![0]);
+  meanHorizon.setCurrent(HORIZONS.find(([,us])=>us===dynamics().meanHorizonUs)![0]);
   const timed=populationMode==='time'&&!!result;populationTime.hidden=!timed;populationTimeValue.hidden=!timed;
-  if(timed){const max=String(result.timesUs.length-1),value=String(populationTimeIndex<0?result.timesUs.length-1:Math.min(populationTimeIndex,result.timesUs.length-1));if(populationTime.max!==max)populationTime.max=max;if(populationTime.value!==value)populationTime.value=value;populationTimeValue.textContent=durationText(snap.timeUs??0,durationUnit(dynamics()));}
+  if(timed){const max=String(result.timesUs.length-1),value=String(populationTimeIndex<0?result.timesUs.length-1:Math.min(populationTimeIndex,result.timesUs.length-1));if(populationTime.max!==max)populationTime.max=max;if(populationTime.value!==value)populationTime.value=value;populationTimeValue.textContent=durationText(snap.timeUs??0,dynamics().durationUnit);}
   const sum=(filter:(id:string)=>boolean)=>p?Object.entries(p).reduce((total,[id,value])=>total+(filter(id)?value:0),0):undefined;
   const f1=sum(id=>/^ground-1-/.test(id)),f2=sum(id=>/^ground-2-/.test(id)),pe=sum(id=>!id.startsWith('ground-'));
   // Each total in a slot as wide as 100.00%, so a total of another length moves nothing.
@@ -1001,7 +1003,7 @@ function populationToolbar():void{
 
 // ---------------------------------------------------------------- 布居演化
 function renderDynamicsControls(a:Analysis):void{
-  const d=dynamics(),enabled=scene.lasers.filter(l=>l.enabled&&laserIntensityMWcm2(l)>0);d.durationUnit??=durationUnit(d);if(!enabled.some(l=>l.id===d.laserId))d.laserId=enabled[0]?.id??'';
+  const d=dynamics(),enabled=scene.lasers.filter(l=>l.enabled&&laserIntensityMWcm2(l)>0);
   const states=allLevels(a);d.monitoredGroupIds??=[];
   if(!states.some(l=>l.id===d.initialStateId))d.initialStateId=initialId();d.monitoredStateIds=d.monitoredStateIds.filter(id=>states.some(l=>l.id===id));
   setText('dynamics-beams',enabled.length?`驱动：${enabled.map(l=>l.name).join(' + ')}`:'驱动：无光束');
@@ -1045,7 +1047,7 @@ function renderDynamics(a:Analysis):void{
   // A newer checkpoint (or the final result) redraws the same axes; an open readout stays at its sample.
   const host=$('population-chart'),open=host.querySelector<HTMLElement>('.population-readout:not([hidden])')?.dataset.sampleIndex;
   unbindPopulation?.();unbindPopulation=undefined;
-  const plotOptions={showTotalExcited:false,timeUnit:durationUnit(d),scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),...(open===undefined?{}:{cursor:Number(open)})};
+  const plotOptions={showTotalExcited:false,timeUnit:d.durationUnit,scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),...(open===undefined?{}:{cursor:Number(open)})};
   const stopped=stoppedKey&&stoppedKey===solveKey();
   host.innerHTML=result&&result.timesUs.length>1?populationChart(result,ids,labels,plotOptions):result?.steady.converged?`<div class="empty-state"><div><p>长期布居 ${esc(meanSymbol(raw))}</p><div class="form solver-readouts">${ids.map(id=>`<span class="field-label">${esc(labels[id]??id)}</span><span class="readout-edit">${populationValue(result.steady.populations?.[id]??0)}</span>`).join('')}</div><p class="note">${currentSolverError()?'时间演化未完成':stopped?'时间演化已停止':'时间演化计算中…'}</p></div></div>`:`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
   if(result&&result.timesUs.length>1)unbindPopulation=bindPopulationChart(host,result,ids,labels,plotOptions);
@@ -1107,7 +1109,7 @@ function renderResults(allowSolve=true):void{
   if(tabs.currentKey!==view)tabs.setCurrent(view);
   invalidateObsoletePopulation();
   let a:Analysis;
-  try{a=cachedAnalysis();latestAnalysis=a;analysisError='';stateLabels=keepLabels(stateLabels,id=>allLevels(a).some(state=>state.id===id)||!!scene.references?.some(ref=>ref.id===id));}
+  try{a=cachedAnalysis();latestAnalysis=a;analysisError='';stateLabels=keepLabels(stateLabels,id=>allLevels(a).some(state=>state.id===id)||!!scene.references.some(ref=>ref.id===id));}
   catch(error){analysisError=message(error);console.error(error);showAnalysisError(analysisError);setText('summary','—');refreshStatus();return;}
   refreshDirectionStates();refreshFields(inspectorFields);
   const laser=activeLaser(view==='levels'?spectral:undefined),pol=laser?a.polarizations[laser.id]:undefined;
@@ -1116,7 +1118,7 @@ function renderResults(allowSolve=true):void{
   if(view!=='dynamics'&&unbindPopulation){unbindPopulation();unbindPopulation=undefined;}
   if($('polarization-bars'))$('polarization-bars').innerHTML=polarizationBars(a,selection.kind==='laser'?scene.lasers.find(l=>l.id===selection.id):laser);
   if(selection.kind==='laser'){const l=scene.lasers.find(l=>l.id===selection.id);if(l&&laserReadout.readout.root.isConnected){try{laserReadout.show(laserValue(l),scene);}catch{laserReadout.show(undefined,scene);}}if(l&&mixingWarning.isConnected)refreshMixing(l);}
-  if(selection.kind==='reference'){const r=scene.referenceFrequencies?.find(r=>r.id===selection.id);if(r&&referenceReadout.readout.root.isConnected){try{referenceReadout.show(anchorValue(objectAnchor(scene,r)),scene);}catch{referenceReadout.show(undefined,scene);}}}
+  if(selection.kind==='reference'){const r=scene.referenceFrequencies.find(r=>r.id===selection.id);if(r&&referenceReadout.readout.root.isConnected){try{referenceReadout.show(anchorValue(objectAnchor(scene,r)),scene);}catch{referenceReadout.show(undefined,scene);}}}
   const field=withUnit(a.fieldMagnitudeG,'G',{digits:4});
   // The header's summary: the field's magnitude last, so a value of another length moves nothing.
   const summary=(...parts:string[])=>setText('summary',parts.join(' · ')),fieldPart=`B ${field}`;
@@ -1151,7 +1153,7 @@ function renderResults(allowSolve=true):void{
 function replaceScene(next:Scene,text:string):void{
   loadFailure='';unitDrafts.clear();fieldProblems.clear();solver.cancel();solverRevision++;clearTimeout(solverTimer);requestedKey='';requestedPhysicalKey='';requestedSteadyOnly=false;stoppedKey='';solverError='';solverBusy=false;controlsKey='';displayedResults.clear();
   disposeTrees($('levels-details'));$('levels-details').replaceChildren();$('selection-readout').dataset.selectionKey='';
-  normalizeScene(next);scene=next;stateLabels=keepLabels(stateLabels,id=>!id.startsWith('reference-')||!!scene.references?.some(r=>r.id===id));populationTimeIndex=-1;
+  normalizeScene(next);scene=next;stateLabels=keepLabels(stateLabels,id=>!id.startsWith('reference-')||!!scene.references.some(r=>r.id===id));populationTimeIndex=-1;
   selection=scene.lasers[0]?{kind:'laser',id:scene.lasers[0].id}:scene.fields[0]?{kind:'field',id:scene.fields[0].id}:{kind:'none',id:''};
   renderInitial();renderObjects();renderInspector();markBaseline();update();note(text);
 }
@@ -1182,7 +1184,7 @@ function renameScene(name:string):string|void{
   if(!name||name.length>100){const problem='场景名称应包含 1 至 100 个字符';note(problem,'warning');return problem;}
   scene.name=name;renderObjects();persist();refreshStatus();
 }
-function selectedObject():{name:string}|undefined{const lists={field:scene.fields,laser:scene.lasers,reference:scene.referenceFrequencies??[],level:scene.references??[]};return selection.kind==='none'?undefined:(lists[selection.kind] as {id:string;name:string}[]).find(o=>o.id===selection.id);}
+function selectedObject():{name:string}|undefined{const lists={field:scene.fields,laser:scene.lasers,reference:scene.referenceFrequencies,level:scene.references};return selection.kind==='none'?undefined:(lists[selection.kind] as {id:string;name:string}[]).find(o=>o.id===selection.id);}
 /** The selected object's name, 1 to 64 characters. */
 function renameSelected(name:string):string|void{
   const object=selectedObject();if(!object)return;

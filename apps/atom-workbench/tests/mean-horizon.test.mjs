@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {defaultScene,resolveMeanHorizon} from '../dist/js/atom-workbench/src/types.js';
+import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
@@ -8,13 +8,12 @@ import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-mo
 import {prepareNativeSolve} from '../scripts/native-protocol.mjs';
 import {nativeResult} from './native-result.mjs';
 
-test('the long-time horizon is a dynamics setting: 1 s by default, saved, migrated and keyed',()=>{
+test('the time T of p̄(T) is a dynamics setting: 1 s by default, saved, required and keyed',()=>{
   const scene=defaultScene();assert.equal(scene.dynamics.meanHorizonUs,1e6);
-  const old=JSON.parse(JSON.stringify(scene));delete old.dynamics.meanHorizonUs;
-  assert.equal(validateScene(old).dynamics.meanHorizonUs,1e6,'a scene from before reads at 1 s');
   for(const horizon of [1e5,1e6,null]){const s=structuredClone(scene);s.dynamics.meanHorizonUs=horizon;assert.equal(validateScene(JSON.parse(JSON.stringify(s))).dynamics.meanHorizonUs,horizon);}
-  assert.throws(()=>validateScene({...old,dynamics:{...old.dynamics,meanHorizonUs:3e6}}),/长期布居的时刻 T 无效/);
-  assert.equal(resolveMeanHorizon({}),1e6);assert.equal(resolveMeanHorizon({meanHorizonUs:null}),null);
+  const file=JSON.parse(JSON.stringify(scene));
+  assert.throws(()=>validateScene({...file,dynamics:{...file.dynamics,meanHorizonUs:3e6}}),/dynamics\.meanHorizonUs/);
+  delete file.dynamics.meanHorizonUs;assert.throws(()=>validateScene(file),/dynamics 缺少 meanHorizonUs/);
   const other={...scene.dynamics,meanHorizonUs:null};
   assert.notEqual(dynamicsCacheKey(scene,scene.dynamics,true),dynamicsCacheKey(scene,other,true),'the mean depends on it');
   assert.equal(dynamicsCacheKey(scene,scene.dynamics,false,false),dynamicsCacheKey(scene,other,false,false),'a trajectory does not');

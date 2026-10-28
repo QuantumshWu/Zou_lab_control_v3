@@ -54,7 +54,7 @@ test('one initial-state description: a single state clears a mixture, a mixture 
   // A single state chosen afterwards is the initial state: no loaded mixture overrides it.
   setInitialSpec(scene,{kind:'state',id:'ground-2-1'},levels);
   assert.deepEqual(initialSpec(scene),{kind:'state',id:'ground-2-1'});assert.equal(scene.dynamics.initialState,undefined);
-  assert.equal(scene.initialF,2);assert.equal(scene.initialM,1);
+  assert.equal('temperatureUnit' in scene.dynamics,false);
   assert.equal(initialAnchor({kind:'weights',weights:{'ground-2-0':1,'D2-3-0':3}},levels),'D2-3-0');
   assert.deepEqual(startingSpec('weights',{kind:'state',id:'ground-2-1'},levels),{kind:'weights',weights:{'ground-2-1':1}});
   assert.deepEqual(startingSpec('state',{kind:'weights',weights:{'ground-1-0':1,'ground-2-2':2}},levels),{kind:'state',id:'ground-2-2'});
@@ -66,7 +66,7 @@ test('one initial-state description: a single state clears a mixture, a mixture 
 
 test('a mixed initial state survives the scene file; a single one is stored as initialStateId',()=>{
   const scene=defaultScene(),a=analyze(scene),levels=[...a.ground,...a.D1,...a.D2];
-  setInitialSpec(scene,{kind:'thermal',temperatureK:3e-4},levels);
+  setInitialSpec(scene,{kind:'thermal',temperatureK:3e-4},levels);assert.equal(scene.dynamics.temperatureUnit,'μK','a new thermal state has its natural unit');
   assert.deepEqual(initialSpec(validateScene(JSON.parse(JSON.stringify(scene)))),{kind:'thermal',temperatureK:3e-4});
   setInitialSpec(scene,{kind:'state',id:'ground-1-1'},levels);
   const back=validateScene(JSON.parse(JSON.stringify(scene)));

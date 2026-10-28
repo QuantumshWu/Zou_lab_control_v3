@@ -1,7 +1,7 @@
 import type {DynamicsResult,SteadyStatus,PopulationAccuracy} from './solver-types.js';
 import {CONVERGED_MEAN_STATUSES,STEADY_STATUSES,isInitialDependent,readPopulationAccuracy} from './solver-types.js';
 import type {DynamicsSettings,InitialStateSpec,Scene,Level} from './types.js';
-import {MEAN_HORIZONS_US,POPULATION_TOLERANCE,canonicalInitialState,resolveInitialState,resolveMeanHorizon} from './types.js';
+import {MEAN_HORIZONS_US,POPULATION_TOLERANCE,canonicalInitialState,resolveInitialState} from './types.js';
 import {initialPopulations} from './full-master-model.js';
 import {laserIntensityMWcm2} from './physics.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from './solver-protocol.js';
@@ -41,8 +41,8 @@ export class DynamicsClient {
     job.attempt++;let evidence:unknown;
     try{
       const response=await this.transport(this.base+'/api/solve',{method:'POST',signal:job.controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({modelSchema:FULL_MODEL_SCHEMA,stream:!!job.onProgress,request:{clientId:this.clientId,sequence:job.id},scene:job.scene,options:{
-        initialStateId:job.settings.initialStateId,initialState:canonicalInitialState(resolveInitialState(job.settings,job.scene)),durationUs:job.settings.durationUs,samples:job.settings.samples,
-        populationTolerance:POPULATION_TOLERANCE,meanHorizonUs:resolveMeanHorizon(job.settings),
+        initialStateId:job.settings.initialStateId,initialState:canonicalInitialState(resolveInitialState(job.settings)),durationUs:job.settings.durationUs,samples:job.settings.samples,
+        populationTolerance:POPULATION_TOLERANCE,meanHorizonUs:job.settings.meanHorizonUs,
         includeAsymptotic:true,steadyOnly:job.steadyOnly,
       }})}).catch(error=>{if(error instanceof TypeError)throw new RequestFailure('本机 Rust 求解服务连接暂时失败。',0,'network-error',true);throw error;});
       if(!response.ok){const detail=await response.json().catch(()=>({error:''}));evidence=detail;throw new RequestFailure(detail.error||`Local solver: ${response.status}`,response.status,detail.code??'',(response.status===502||response.status===503)&&!/invalid|incompatible|numerical/.test(detail.code??''));}
@@ -53,7 +53,7 @@ export class DynamicsClient {
       if(data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||
         !Array.isArray(data.service?.capabilities)||!data.service.capabilities.includes(FULL_MODEL_SCHEMA))throw new Error('本机求解服务版本不兼容：需要 rb87-full/2 模型，旧模型结果未显示。');
       if(!data.request||data.request.clientId!==this.clientId||data.request.sequence!==job.id)throw new Error('求解响应与当前请求不匹配。');
-      const result=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings,job.scene));
+      const result=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings));
       this.checkHorizon(result,job);this.checkSamples(result,job);
       if(!result.steady?.converged)this.recordFailure(job,new Error(result.steady?.reason??'长期布居未解析'),false,evidence);
       this.current=null;this.lastRoundTripMs=performance.now()-job.started;job.resolve(result);
@@ -82,7 +82,7 @@ export class DynamicsClient {
       // single t = 0 row of a mean request) with its per-sample errors, and the mean when computed.
       const data=event.data;
       if(data?.progress!==true||data.request?.clientId!==this.clientId||data.request.sequence!==job.id||data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||!data.service?.capabilities?.includes(FULL_MODEL_SCHEMA))throw new Error('中间结果与当前请求不匹配。');
-      const checkpoint=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings,job.scene));
+      const checkpoint=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings));
       this.checkHorizon(checkpoint,job);this.checkSamples(checkpoint,job);
       job.onProgress?.(checkpoint);
     };
@@ -99,7 +99,7 @@ export class DynamicsClient {
     if(result.timesUs.length!==expected||(!job.steadyOnly&&Math.abs(result.timesUs.at(-1)!-job.settings.durationUs)>1e-10*Math.max(1,job.settings.durationUs)))throw new Error('求解响应的采样与请求不匹配。');
   }
   private checkHorizon(result:DynamicsResult,job:Job):void{
-    if(result.steady.converged&&result.steady.horizonUs!==resolveMeanHorizon(job.settings))throw new Error('求解响应的长期布居时刻 T 与本次请求不匹配。');
+    if(result.steady.converged&&result.steady.horizonUs!==job.settings.meanHorizonUs)throw new Error('求解响应的长期布居时刻 T 与本次请求不匹配。');
   }
   private abortCurrent(reason:string):void{
     const job=this.current;if(!job)return;this.current=null;clearTimeout(job.timer);job.controller.abort();job.reject(new DOMException(reason,'AbortError'));
@@ -111,7 +111,7 @@ export class DynamicsClient {
 /** Reads the one native result contract (documented in
  * rust-solver/src/lattice_core_adapter.rs) and rejects anything else.
  * `initial` is the requested initial state (an id is a single state). */
-export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics,scene)):DynamicsResult{
+export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics)):DynamicsResult{
   const invalid=(detail:string):never=>{throw new Error(`求解结果不完整或无效：${detail}；未绘制替代数据。`);};
   const bounded=(value:unknown,limit=Infinity)=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=limit;
   const probabilities=(row:unknown,slack:number):row is number[]=>Array.isArray(row)&&row.length===32&&

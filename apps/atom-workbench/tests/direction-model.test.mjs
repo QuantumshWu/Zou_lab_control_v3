@@ -87,27 +87,3 @@ test('σ, π are the actual polarization on the total field; at zero field on th
  assert.deepEqual(analyze(s).fieldAxis,{thetaDeg:90,phiDeg:0});
 });
 
-test('old scenes load with the reference axis at the old direction and the same physics, bit for bit',()=>{
- const legacy=JSON.parse(JSON.stringify(defaultScene()));
- const fieldAngles=[[35,-20],[0,45],[90,90]],laserAngles=[[53,19],[90,0],[0,30],[180,30]];
- legacy.fields=fieldAngles.map(([thetaDeg,phiDeg],i)=>({id:`f${i}`,name:`f${i}`,enabled:i===0,magnitudeG:1+i,thetaDeg,phiDeg}));
- legacy.lasers=laserAngles.map(([thetaDeg,phiDeg],i)=>{const l={...legacy.lasers[0],id:`l${i}`,name:`l${i}`,thetaDeg,phiDeg,polarizationAngleDeg:17,ellipticityDeg:11};delete l.direction;return l;});
- legacy.dynamics.autoRun=false;
- const loaded=validateScene(legacy);
- assert.deepEqual(loaded.fields.map(f=>f.direction),[along(35,-20),{reference:{kind:'axis',axis:'+z'},thetaDeg:0,phiDeg:0},{reference:{kind:'axis',axis:'+y'},thetaDeg:0,phiDeg:0}]);
- assert.deepEqual(loaded.lasers.map(l=>l.direction),[{reference:{kind:'angles',thetaDeg:53,phiDeg:19},thetaDeg:0,phiDeg:19},{reference:{kind:'axis',axis:'+x'},thetaDeg:0,phiDeg:0},{reference:{kind:'axis',axis:'+z'},thetaDeg:0,phiDeg:30},{reference:{kind:'angles',thetaDeg:180,phiDeg:30},thetaDeg:0,phiDeg:30}]);
- assert.ok(!('autoRun' in loaded.dynamics),'no setting turns computing off');
- // The same lasers and fields written as plain spherical angles: the model is identical bit for bit.
- const spherically=structuredClone(loaded);spherically.fields.forEach((f,i)=>f.direction=along(...fieldAngles[i]));spherically.lasers.forEach((l,i)=>l.direction=spherical(...laserAngles[i]));
- const a=buildFullMasterModel(loaded,loaded.dynamics),b=buildFullMasterModel(spherically,spherically.dynamics);
- assert.deepEqual([a.hReal,a.hImag,a.drives],[b.hReal,b.hImag,b.drives]);
- // ψ is kept: the transverse frame of each migrated beam is its former e_θ, e_φ.
- for(const [i,[theta,phi]] of laserAngles.entries()){
-  const p=polarization(loaded.lasers[i],loaded.fields),eTheta=[Math.cos(theta*DEG)*Math.cos(phi*DEG),Math.cos(theta*DEG)*Math.sin(phi*DEG),-Math.sin(theta*DEG)],ePhi=[-Math.sin(phi*DEG),Math.cos(phi*DEG),0];
-  close(p.u,eTheta.map((v,k)=>v*Math.cos(17*DEG)+ePhi[k]*Math.sin(17*DEG)),1e-15);close(p.k,direction(theta,phi),1e-15);
- }
- // A saved exact axis (the old 沿 B shortcuts' snapshot) keeps its residual as the reference.
- const anchored=JSON.parse(JSON.stringify(legacy));anchored.lasers[0].directionAnchor={thetaDeg:53,phiDeg:19,thetaResidualDeg:1e-15,viewKey:JSON.stringify([53,19])};
- assert.deepEqual(validateScene(anchored).lasers[0].direction,{reference:{kind:'angles',thetaDeg:53,phiDeg:19,thetaResidualDeg:1e-15},thetaDeg:0,phiDeg:19});
- assert.deepEqual(roundtrip(loaded).lasers.map(l=>l.direction),loaded.lasers.map(l=>l.direction));
-});

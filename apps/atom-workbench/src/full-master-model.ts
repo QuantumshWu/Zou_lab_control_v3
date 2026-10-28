@@ -191,7 +191,8 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  // state rotates at the same carrier and no ground state rotates, so each
  // operator, cross-F terms included, is static.
  const collapse=bare.collapse.map(c=>transformOperator(c,u)).filter(c=>c.real.some(v=>v!==0)||c.imag.some(v=>v!==0));
- const initialState=resolveInitialState(settings,scene),populations=initialPopulations(initialState,states);
+ // The request's initial state when it names one, else the scene's.
+ const initialState=resolveInitialState(settings?.initialState||settings?.initialStateId!==undefined?{initialStateId:settings.initialStateId??scene.dynamics.initialStateId,initialState:settings.initialState}:scene.dynamics),populations=initialPopulations(initialState,states);
  const initialReal=zeros();populations.forEach((p,i)=>initialReal[i*N+i]=p);
  const initialIndex=populations.indexOf(Math.max(...populations));
  return {modelSchema:FULL_MODEL_SCHEMA,dimension:32,states,hReal:h.real,hImag:h.imag,collapse,

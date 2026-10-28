@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { defaultScene } from '../dist/js/atom-workbench/src/types.js';
 import { RB87, analyze, laserFrequencyMHz, zeroFieldTransitionFrequencyMHz } from '../dist/js/atom-workbench/src/physics.js';
 import { spectroscopyAnalysis } from '../dist/js/atom-workbench/src/spectroscopy.js';
-import { setLaserDetuningUnit, setLaserDetuningValue, setLaserTransitionReference,
-  zeroFieldTransitionOptions } from '../dist/js/atom-workbench/src/laser-frequency.js';
+import { zeroFieldTransitionOptions } from '../dist/js/atom-workbench/src/laser-frequency.js';
 import { C_NM_MHZ, baseKey, baseValue, difference, gap, inUnit, laserValue, levelValue, parseBase, photon, readingHeading,
   readoutText, stateValue, total, transitionKey, transitionValue, value, zeroFieldStateValue } from '../dist/js/atom-workbench/src/frequency-value.js';
 import { frequencyBaseTree } from '../dist/js/atom-workbench/src/choice-trees.js';
@@ -14,8 +13,7 @@ const near=(actual,expected,tol)=>assert.ok(Math.abs(actual-expected)<=tol,`${ac
 const leaves=groups=>groups.flatMap(g=>[...g.leaves,...leaves(g.children??[])]);
 
 test('a frequency difference subtracts the carriers first and keeps Hz on an optical carrier',()=>{
-  const laser=structuredClone(defaultScene().lasers[0]);
-  setLaserTransitionReference(laser,{line:'D2',Fg:2,Fe:3});setLaserDetuningUnit(laser,'Hz');setLaserDetuningValue(laser,1);
+  const laser=structuredClone(defaultScene().lasers[0]);laser.frequency={base:{kind:'transition',line:'D2',Fg:2,Fe:3},offsetMHz:1e-6};
   // 1 Hz = 1e-6 MHz on ~384 THz: the plain difference of totals only keeps ~6e-8 MHz.
   near(difference(laserValue(laser),transitionValue({line:'D2',Fg:2,Fe:3})),1e-6,1e-12);
   near(total(laserValue(laser)),laserFrequencyMHz(laser),1e-6);
@@ -72,7 +70,7 @@ test('"自动" reads a pair against the same two states at zero field',()=>{
   near(shift('D2-3-1','ground-2-0'),shift('ground-2-0','D2-3-1'),1e-9);
   near(shift('ground-2-0','D2-3-1'),get('D2-3-1').totalShiftMHz-get('ground-2-0').totalShiftMHz,1e-6);
   // A reference level keeps its photon and δ; only its anchor goes to zero field.
-  scene.references=[{id:'virtual',name:'虚能级',anchorId:'ground-2-0',anchorMode:'follow',offsetMHz:-12,photon:{source:{kind:'laser',id:'probe'},direction:'absorb'}}];
+  scene.references=[{id:'virtual',name:'虚能级',anchorId:'ground-2-0',anchorMode:'follow',offsetMHz:-12,offsetUnit:'MHz',photon:{source:{kind:'laser',id:'probe'},direction:'absorb'}}];
   near(total(pair(zeroFieldStateValue,'ground-2-0','virtual')),laserFrequencyMHz(scene.lasers[0])-12,1e-6);
   near(shift('ground-2-0','virtual'),0,1e-6);
   near(shift('ground-1-0','virtual'),get('ground-2-0').totalShiftMHz-get('ground-1-0').totalShiftMHz,1e-6);

@@ -112,17 +112,6 @@ export function referenceOf(axis:AxisAngles):ReferenceAxis{
   const name=!axis.thetaResidualDeg&&!axis.phiResidualDeg?AXIS_NAMES.find(n=>AXES[n].thetaDeg===axis.thetaDeg&&AXES[n].phiDeg===axis.phiDeg):undefined;
   return name?{kind:'axis',axis:name}:{kind:'angles',...axis};
 }
-/** A field saved as polar and azimuthal angles: the reference axis is that direction, the offset zero. */
-export function legacyFieldDirection(thetaDeg:number,phiDeg:number):Direction{
-  return {reference:referenceOf(thetaDeg===0?{thetaDeg:0,phiDeg:0}:{thetaDeg,phiDeg}),thetaDeg:0,phiDeg:0};
-}
-/** A laser saved as polar and azimuthal angles (or an exact fixed axis): the reference axis is that
- * direction and θ′ = 0. φ′ keeps the old azimuth, so the transverse frame -- and the polarization
- * angle ψ measured in it -- is the beam's former e_θ, e_φ exactly: Rz(φ) Ry(θ) Rz(−φ) Rz(φ) = Rz(φ) Ry(θ). */
-export function legacyLaserDirection(axis:AxisAngles):Direction{
-  return {reference:referenceOf(axis.thetaDeg===0&&!axis.thetaResidualDeg?{thetaDeg:0,phiDeg:0}:axis),thetaDeg:0,phiDeg:axis.phiDeg};
-}
-
 /** Where a field's reference axis link leads: the fields it can name without a cycle. */
 export function linkableFields<T extends FieldReference>(fields:readonly T[],ownerId?:string):T[]{
   const reaches=(field:T,seen=new Set<string>()):boolean=>{const ref=field.direction.reference;if(ref.kind!=='field')return false;if(ref.id===ownerId)return true;if(seen.has(ref.id))return false;const next=fields.find(f=>f.id===ref.id);return !!next&&reaches(next,new Set([...seen,ref.id]));};

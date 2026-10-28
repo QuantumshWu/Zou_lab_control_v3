@@ -18,8 +18,8 @@ function payload(scene){
   return {modelSchema:m.modelSchema,options:{},model:{dimension:m.dimension,states:m.states.map(s=>s.id),hReal:m.hReal,hImag:m.hImag,collapse:m.collapse,
     initialIndex:m.initialIndex,initialReal:m.initialReal,initialImag:m.initialImag,drives:m.drives.map(d=>({omega:d.omega,cos:d.cos,sin:d.sin})),frequencyCoordinates:m.frequencyCoordinates}};
 }
-/** The scene as gen_model.mjs reads it (its durationUnit 'us' is today's 'μs'). */
-function load(raw){const copy=structuredClone(raw);if(copy.dynamics?.durationUnit==='us')copy.dynamics.durationUnit='μs';return validateScene(copy);}
+/** The fixture's scene (in the current scene schema), read as a file. */
+const load=raw=>validateScene(structuredClone(raw));
 
 for(const [name,{scene:raw,request:expected}] of Object.entries(fixture.scenes)){
   test(`${name}: the request is bit for bit the one the lattice core was validated on`,()=>{

@@ -1,6 +1,6 @@
 import { RB87, absoluteEnergyMHz, atomicSystem, laserFrequencyMHz } from './physics.js';
 import type { DetuningUnit, Level, ReferenceLevel, Scene } from './types.js';
-import { DETUNING_UNITS, DETUNING_UNIT_MHZ, naturalDetuningUnit } from './laser-frequency.js';
+import { DETUNING_UNITS, DETUNING_UNIT_MHZ } from './laser-frequency.js';
 import type { Reading } from './unit-input.js';
 
 /** The linked photon's frequency in MHz (0 without a link; undefined when the source is gone
@@ -8,7 +8,7 @@ import type { Reading } from './unit-input.js';
 export function photonFrequencyMHz(reference:ReferenceLevel,scene?:Pick<Scene,'lasers'|'referenceFrequencies'>):number|undefined {
   const link=reference.photon;if(!link)return 0;if(!scene)return undefined;
   if(link.source.kind==='laser'){const laser=scene.lasers.find(l=>l.id===link.source.id);return laser?laserFrequencyMHz(laser):undefined;}
-  const r=scene.referenceFrequencies?.find(r=>r.id===link.source.id);return r?.frequencyAnchor?RB87[r.frequencyAnchor.line].frequencyHz/1e6+r.frequencyAnchor.offsetMHz:undefined;
+  const r=scene.referenceFrequencies.find(r=>r.id===link.source.id);return r?.frequencyAnchor?RB87[r.frequencyAnchor.line].frequencyHz/1e6+r.frequencyAnchor.offsetMHz:undefined;
 }
 
 const zeroFieldLevels=new Map<string,Level>();
@@ -33,7 +33,7 @@ export function referenceEnergyMHz(reference:ReferenceLevel,currentLevels:readon
 
 /** A reference level's offset δ as the operator wrote it: the number in its unit. */
 export function offsetReading(reference:ReferenceLevel):Reading<DetuningUnit>{
-  const unit=reference.offsetUnit??naturalDetuningUnit(reference.offsetMHz);return {value:reference.offsetMHz/DETUNING_UNIT_MHZ[unit],unit};
+  return {value:reference.offsetMHz/DETUNING_UNIT_MHZ[reference.offsetUnit],unit:reference.offsetUnit};
 }
 /** The operator's offset: `value` in `unit`, written with its unit (a unit picked for it keeps its
  * digits, ui-design.md §0.4). A refused number changes nothing. */

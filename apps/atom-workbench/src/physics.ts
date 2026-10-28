@@ -235,14 +235,6 @@ export function zeroFieldTransitionFrequencyMHz(line:SpectralLine,Fg:1|2,Fe:numb
 export function absoluteEnergyMHz(level:Level):number {
   return level.energyMHz+(level.manifold==='ground'?0:RB87[level.manifold].frequencyHz/1e6);
 }
-/** Only physical input fields are fingerprinted, not units, power or geometry. */
-export function laserFrequencyViewKey(laser:Laser):string {
-  if(laser.frequency)return JSON.stringify(['expr',laser.frequency]);
-  const reference=laser.referenceTransition;
-  return JSON.stringify([laser.frequencyMode??'transition',laser.line,reference?.line??laser.line,
-    reference?.Fg??2,reference?.Fe??(laser.line==='D1'?2:3),
-    laser.frequencyMode==='wavelength'?laser.wavelengthNm:laser.detuningMHz,...(reference?.fromManifold==='D1'?['D1']:[])]);
-}
 
 /** A frequency expression's carrier: a D-line centroid and the offset from it. A base
  * frequency is needed for an expression relative to a laser or a reference frequency. */
@@ -257,7 +249,7 @@ export function expressionAnchor(expr:FrequencyExpr,base?:{line:SpectralLine;off
   if(!base)throw new Error('频率基准尚未解析。');
   return {line:base.line,offsetMHz:base.offsetMHz+offset};
 }
-type FrequencyObject={id:string;name:string;frequency?:FrequencyExpr;frequencyAnchor?:LaserFrequencyAnchor};
+type FrequencyObject={id:string;name:string;frequency:FrequencyExpr;frequencyAnchor?:LaserFrequencyAnchor};
 /** An expression's fingerprint, with its base's carrier when it follows another object. A
  * saved carrier of the same fingerprint is kept bit for bit: re-expressing a frequency
  * against another base never re-rounds it. */
@@ -268,14 +260,13 @@ const sameExpression=(viewKey:string,expr:FrequencyExpr):boolean=>{try{const key
  * A base that does not exist, a cycle, or a frequency that is not positive is refused. */
 export function resolveSceneFrequencies(scene:Pick<Scene,'lasers'|'referenceFrequencies'>):void{
   const objects=new Map<string,{object:FrequencyObject;laser?:Laser}>();
-  for(const r of scene.referenceFrequencies??[])objects.set(`reference:${r.id}`,{object:r});
+  for(const r of scene.referenceFrequencies)objects.set(`reference:${r.id}`,{object:r});
   for(const l of scene.lasers)objects.set(`laser:${l.id}`,{object:l,laser:l});
   const done=new Map<string,{line:SpectralLine;offsetMHz:number}>(),visiting=new Set<string>();
   const visit=(key:string):{line:SpectralLine;offsetMHz:number}=>{
     const saved=done.get(key);if(saved)return saved;
     const entry=objects.get(key);if(!entry)throw new Error('频率基准不存在。');
     const {object,laser}=entry;
-    if(!object.frequency){const anchor=captureLaserFrequencyAnchor(laser!);done.set(key,anchor);return anchor;}
     if(visiting.has(key))throw new Error(`「${object.name}」的频率定义成环。`);
     visiting.add(key);
     const b='base' in object.frequency?object.frequency.base:undefined,dependsOn=b&&(b.kind==='laser'||b.kind==='reference')?`${b.kind}:${b.id}`:undefined;
@@ -290,27 +281,12 @@ export function resolveSceneFrequencies(scene:Pick<Scene,'lasers'|'referenceFreq
   for(const key of objects.keys())visit(key);
 }
 export function captureLaserFrequencyAnchor(laser:Laser):LaserFrequencyAnchor {
-  const viewKey=laserFrequencyViewKey(laser),saved=laser.frequencyAnchor;
-  if(laser.frequency){
-    // An expression relative to another object is resolved with the scene (resolveSceneFrequencies).
-    const f=laser.frequency,own='wavelengthNm' in f||f.base.kind==='absolute'||f.base.kind==='transition';
-    const anchor=own?(saved?.viewKey===viewKey?saved:{...expressionAnchor(f),viewKey}):saved&&sameExpression(saved.viewKey,f)?saved:undefined;
-    if(!anchor)throw new Error(`「${laser.name}」的频率跟随其它对象，尚未解析。`);
-    if((anchor.line!=='D1'&&anchor.line!=='D2')||!Number.isFinite(anchor.offsetMHz)||!(RB87[anchor.line].frequencyHz/1e6+anchor.offsetMHz>0))throw new Error('Invalid canonical optical frequency.');
-    return {...anchor};
-  }
-  if(saved?.viewKey===viewKey) {
-    if((saved.line!=='D1'&&saved.line!=='D2')||!Number.isFinite(saved.offsetMHz)
-      ||!(RB87[saved.line].frequencyHz/1e6+saved.offsetMHz>0))throw new Error('Invalid canonical optical frequency.');
-    return {...saved};
-  }
-  if(laser.frequencyMode==='wavelength') {
-    if(!Number.isFinite(laser.wavelengthNm)||!(laser.wavelengthNm!>0))throw new Error('Vacuum wavelength must be positive and finite.');
-    return {line:'D2',offsetMHz:C*1000/laser.wavelengthNm!-RB87.D2.frequencyHz/1e6,viewKey};
-  }
-  const reference=laser.referenceTransition;
-  if(reference&&reference.line!==laser.line)throw new Error('The selected transition reference and laser D line disagree.');
-  return {line:laser.line,offsetMHz:transitionReferenceMHz(laser.line,reference?.Fg,reference?.Fe,reference?.fromManifold)+(laser.detuningMHz??0),viewKey};
+  // An expression relative to another object is resolved with the scene (resolveSceneFrequencies).
+  const f=laser.frequency,saved=laser.frequencyAnchor,viewKey=expressionKey(f),own='wavelengthNm' in f||f.base.kind==='absolute'||f.base.kind==='transition';
+  const anchor=own?(saved?.viewKey===viewKey?saved:{...expressionAnchor(f),viewKey}):saved&&sameExpression(saved.viewKey,f)?saved:undefined;
+  if(!anchor)throw new Error(`「${laser.name}」的频率跟随其它对象，尚未解析。`);
+  if((anchor.line!=='D1'&&anchor.line!=='D2')||!Number.isFinite(anchor.offsetMHz)||!(RB87[anchor.line].frequencyHz/1e6+anchor.offsetMHz>0))throw new Error('Invalid canonical optical frequency.');
+  return {...anchor};
 }
 
 export function laserFrequencyMHz(laser:Laser):number {
@@ -371,8 +347,7 @@ export function couplingBetweenStates(firstId:string,secondId:string,laser:Laser
   const field=composeMagneticField(fields),dipole=dipoleBetweenStates(firstId,secondId,field.fieldMagnitudeG);
   const a=dipole.line?atomicSystem(dipole.line,field.fieldMagnitudeG):null;
   const g=a?.ground.find(s=>s.id===firstId||s.id===secondId),e=a?.excited.find(s=>s.id===firstId||s.id===secondId);
-  const reference=laser.referenceTransition;
-  const offsetMHz=g&&e&&dipole.line?(RB87[dipole.line].frequencyHz-RB87[laser.line].frequencyHz)/1e6+e.energyMHz-g.energyMHz-transitionReferenceMHz(laser.line,reference?.Fg,reference?.Fe,reference?.fromManifold):NaN;
+  const offsetMHz=g&&e&&dipole.line?(RB87[dipole.line].frequencyHz-RB87[laser.line].frequencyHz)/1e6+e.energyMHz-g.energyMHz-transitionReferenceMHz(laser.line):NaN;
   const detuningMHz=g&&e&&dipole.line?laserCarrierOffsetMHz(laser,dipole.line)-(e.energyMHz-g.energyMHz):NaN;
   const pol=polarization(laser,fields,field).amplitudes,p=dipole.q>=-1&&dipole.q<=1?pol[dipole.q+1]!:{re:0,im:0};
   const rabiMHz=Math.abs(dipole.amplitudeCM)*Math.sqrt(2*Math.max(0,laserIntensityMWcm2(laser))*10/(EPS*C))*Math.hypot(p.re,p.im)/H/1e6;
@@ -401,17 +376,15 @@ export function analyze(scene:Scene):Analysis {
     cachedField=fieldMagnitudeG;
   }
   const {ground,D1,D2}=cachedSpectra;
-  // The spectroscopy view follows the same initial state as the density
-  // evolution. Legacy F/m fields are only a fallback for older scene files.
-  const initialId=scene.dynamics?.initialStateId??`ground-${scene.initialF}-${scene.initialM}`;
+  // The spectroscopy view follows the same initial state as the density evolution.
+  const initialId=scene.dynamics.initialStateId;
   const initial=[...ground,...D1,...D2].find(state=>state.id===initialId);
   if(!initial)throw new Error(`Unknown initial state: ${initialId}`);
   const polarizations:Analysis['polarizations']={},transitions:Analysis['transitions']=[];
   for(const laser of scene.lasers) {
     const pol=polarization(laser,scene.fields,field);polarizations[laser.id]=pol;
     if(!laser.enabled) continue;
-    const ref=laser.referenceTransition;
-    const reference=transitionReferenceMHz(laser.line,ref?.Fg,ref?.Fe,ref?.fromManifold);
+    const reference=transitionReferenceMHz(laser.line);
     const intensity=laserIntensityMWcm2(laser);
     // The selected reference is a frequency coordinate, never a selection of
     // which physical dipole manifold the electromagnetic field acts on.

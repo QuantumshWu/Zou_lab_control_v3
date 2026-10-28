@@ -14,7 +14,7 @@ export type FrequencyDisplayUnit=DetuningUnit|'nm'|'μm';
 /** A frequency with no intensity, polarization or direction ("冷却光锁频点"): it can be
  * selected (the chart shows detunings from it) and be a base of other frequencies. */
 export interface ReferenceFrequency {
-  id: string; name: string; frequency: FrequencyExpr; frequencyUnit?: FrequencyDisplayUnit;
+  id: string; name: string; frequency: FrequencyExpr; frequencyUnit: FrequencyDisplayUnit;
   /** Derived: the resolved frequency (resolveSceneFrequencies). */
   frequencyAnchor?: LaserFrequencyAnchor;
 }
@@ -22,8 +22,8 @@ export interface LaserFrequencyAnchor {
   /** A fixed fine-structure centroid plus an offset defines the physical beam.
    * Changing the displayed transition reference must not re-round this value. */
   line: SpectralLine; offsetMHz: number;
-  /** Exact representation fingerprint. Direct edits to legacy frequency fields
-   * invalidate this anchor rather than creating competing sources of truth. */
+  /** The expression (and followed carrier) it was resolved from: an anchor whose fingerprint no
+   * longer matches is resolved again. */
   viewKey: string;
 }
 export interface LaserIntensityAnchor {
@@ -45,9 +45,8 @@ export interface MagneticField {
 export interface Laser {
   /** `line` is derived from the frequency (the nearer D line of its carrier). */
   id: string; name: string; enabled: boolean; line: SpectralLine;
-  /** The laser's frequency (ui-design.md §1.2). Scenes are migrated to it on load; the legacy
-   * fields below are read only from older scenes and fixtures that never were. */
-  frequency?: FrequencyExpr; frequencyUnit?: FrequencyDisplayUnit;
+  /** The laser's frequency (ui-design.md §1.2) and the unit its value is written in. */
+  frequency: FrequencyExpr; frequencyUnit: FrequencyDisplayUnit;
   /** Spectroscopy/diagram origin only. Omitted follows the actual initial state;
    * this does not restrict drive couplings or alter the density initial state. */
   referenceStateId?: string;
@@ -55,55 +54,53 @@ export interface Laser {
    * static light shift (spectroscopy.ts). It never changes the dynamics, where every
    * enabled laser of nonzero intensity is an explicit drive of the master equation,
    * and it is no part of a request or of the dynamics cache key. */
-  showLightShift?: boolean;
+  showLightShift: boolean;
+  /** With a reference level as referenceStateId: whether its photon is absorbed or emitted. */
   referenceProcess?: 'absorption' | 'emission';
-  /** Legacy: detuning from referenceTransition, in MHz (transition mode). Legacy scenes
-   * without a reference use F=2 → F'=3 (D2) or F'=2 (D1). */
-  detuningMHz?: number; intensityMWcm2: number;
-  referenceTransition?: ZeroFieldTransition;
-  frequencyMode?: 'transition' | 'wavelength';
-  /** Vacuum wavelength. Authoritative only in wavelength mode. */
-  wavelengthNm?: number;
-  detuningUnit?: DetuningUnit;
+  /** Derived (resolveSceneFrequencies): the resolved carrier, kept bit for bit while its
+   * expression stands; absent, it is resolved from the expression. */
   frequencyAnchor?: LaserFrequencyAnchor;
   /** How the local intensity is given (laser-intensity.ts): directly, by power and waist, or by
    * power and the numerical aperture the beam fills (its waist then follows from the wavelength). */
-  intensityMode?: IntensityMode;
+  intensityMode: IntensityMode;
+  /** The local intensity: the input in intensity mode, else the value the other inputs give. */
+  intensityMWcm2: number;
+  /** Derived: the exact local intensity for the inputs it was taken at; absent, it is computed. */
   intensityAnchor?: LaserIntensityAnchor;
-  /** Gaussian beam power and 1/e² intensity radius at the atom's axial plane.
-   * Power mode uses the on-axis intensity 2 P / (pi w²). */
+  /** Gaussian beam power and 1/e² intensity radius at the atom's axial plane: inputs of the
+   * power-based modes, kept across mode switches once given. Power mode uses 2 P / (pi w²). */
   powerMW?: number; waistUm?: number;
   /** NA mode: the numerical aperture the beam fills, 0 < NA ≤ 1 (the atoms are in vacuum). */
   numericalAperture?: number;
   /** The units power, waist and local intensity are written or read in (laser-intensity.ts):
    * an input's number keeps its digits when its unit changes; a computed one converts. */
-  powerUnit?: PowerUnit; waistUnit?: WaistUnit; intensityUnit?: IntensityUnit;
+  powerUnit: PowerUnit; waistUnit: WaistUnit; intensityUnit: IntensityUnit;
   /** Propagation direction k; the polarization angle ψ is measured from the x of its frame. */
   direction: Direction; polarizationAngleDeg: number;
   /** Jones vector cos(chi) u + i sin(chi) v in the documented transverse basis. */
   ellipticityDeg: number;
   /** Optical phase at the atom; relevant when coherent beams share a carrier. */
-  phaseDeg?: number;
+  phaseDeg: number;
 }
+/** The one scene schema (scene-file.ts validates files strictly against it). */
+export const SCENE_VERSION=2;
 export interface Scene {
-  version: 1; name: string; fields: MagneticField[]; lasers: Laser[];
-  initialF: 1 | 2; initialM: number;
-  /** Optional fields allow first-demo scene files to remain readable. */
-  marks?: Record<string,string>;
-  references?: ReferenceLevel[];
-  referenceFrequencies?: ReferenceFrequency[];
-  /** Display preferences: never physics, never part of a request or a cache key. */
+  version: typeof SCENE_VERSION; name: string; fields: MagneticField[]; lasers: Laser[];
+  marks: Record<string,string>;
+  references: ReferenceLevel[];
+  referenceFrequencies: ReferenceFrequency[];
+  /** Display preferences, when any were chosen: never physics, never part of a request or a cache key. */
   display?: {readouts?: Record<string,{unit?:string;base?:string}>};
-  dynamics?: DynamicsSettings;
+  dynamics: DynamicsSettings;
 }
 export interface ReferenceLevel {
   id: string; name: string;
   /** Annotation energy = anchor physical state's energy + offsetMHz. Not a dynamical state. */
   anchorId: string; offsetMHz: number;
   /** The unit the operator writes the offset in (its digits stay when it changes). */
-  offsetUnit?: DetuningUnit;
+  offsetUnit: DetuningUnit;
   /** Follow the instantaneous anchor, or hold its zero-field energy fixed. */
-  anchorMode?: 'follow' | 'zero-field';
+  anchorMode: 'follow' | 'zero-field';
   /** A linked photon (ui-design.md §1.6): E = E(anchor) ± hν(source) + h·offset, following
    * the laser or reference frequency when it changes. */
   photon?: {source:{kind:'laser'|'reference';id:string};direction:'absorb'|'emit'};
@@ -121,25 +118,21 @@ export type InitialStateSpec =
   | {kind:'thermal';temperatureK:number}
   | {kind:'weights';weights:Record<string,number>};
 export interface DynamicsSettings {
-  laserId: string; initialStateId: string; monitoredStateIds: string[];
+  initialStateId: string; monitoredStateIds: string[];
   /** When present it defines the initial density; otherwise the initial
    * state is {kind:'state', id: initialStateId}. Scene loading folds a
    * 'state' spec into initialStateId, so this holds only mixed kinds. */
   initialState?: InitialStateSpec;
-  /** The time T of the long-time population p̄(T), in us: 1e5 (100 ms), 1e6 (1 s) or null
-   * (t → ∞). Absent reads as the 1 s default (resolveMeanHorizon). */
-  meanHorizonUs?: number|null;
-  monitorMode?:'auto'|'manual';
-  monitoredGroupIds?:string[];
+  /** The time T of the long-time population p̄(T), in us: 1e5 (100 ms), 1e6 (1 s) or null (t → ∞). */
+  meanHorizonUs: number|null;
+  monitorMode:'auto'|'manual';
+  monitoredGroupIds:string[];
   durationUs: number; samples: number;
   /** The unit the operator writes the duration in: its digits stay when it changes, so a
    * new unit is a new duration. The physical duration and request identity are in μs. */
-  durationUnit?:DurationUnit;
-  /** The unit the operator writes a thermal initial state's temperature in (as durationUnit). */
+  durationUnit:DurationUnit;
+  /** A thermal initial state's temperature unit (as durationUnit); present exactly when it is thermal. */
   temperatureUnit?:TemperatureUnit;
-  /** @deprecated Legacy scene-file metadata only. No UI control, numerical
-   * mode, cache key or native request uses this field. */
-  quality?: 'preview' | 'verified';
 }
 export type DurationUnit='ns'|'μs'|'ms'|'s';
 export type TemperatureUnit='K'|'mK'|'μK';
@@ -148,10 +141,8 @@ export type PowerUnit='W'|'mW'|'μW'|'nW';
 export type WaistUnit='mm'|'μm'|'nm';
 export type IntensityUnit='kW/cm²'|'W/cm²'|'mW/cm²'|'μW/cm²';
 /** The one resolution of the dynamics initial state (see InitialStateSpec). */
-export function resolveInitialState(settings:Partial<DynamicsSettings>|undefined,scene:Scene):InitialStateSpec {
-  if(settings?.initialState)return settings.initialState;
-  if(scene.dynamics?.initialState&&settings?.initialStateId===undefined)return scene.dynamics.initialState;
-  return {kind:'state',id:settings?.initialStateId??scene.dynamics?.initialStateId??`ground-${scene.initialF}-${scene.initialM}`};
+export function resolveInitialState(settings:Pick<DynamicsSettings,'initialState'|'initialStateId'>):InitialStateSpec {
+  return settings.initialState??{kind:'state',id:settings.initialStateId};
 }
 /** Canonical (key-ordered) form for request identity. */
 export function canonicalInitialState(spec:InitialStateSpec):InitialStateSpec {
@@ -163,15 +154,14 @@ export function canonicalInitialState(spec:InitialStateSpec):InitialStateSpec {
  * average over 0–T. ∞ is the limit t → ∞, which slow scattering can make forget the initial state. */
 export const MEAN_HORIZONS_US:readonly (number|null)[]=[1e5,1e6,null];
 export const DEFAULT_MEAN_HORIZON_US=1e6;
-export function resolveMeanHorizon(settings?:{meanHorizonUs?:number|null}):number|null{const h=settings?.meanHorizonUs;return h===undefined?DEFAULT_MEAN_HORIZON_US:h;}
 export const DEFAULT_DYNAMICS_SAMPLES=1000;
 export const DEFAULT_TWEEZER_WAVELENGTH_NM=852;
 /** The population accuracy of every solve: an absolute error of 0.005 in probability
  * units (0.5%), sent with each request. */
 export const POPULATION_TOLERANCE=.005;
 export function defaultDynamics(): DynamicsSettings {
-  return {laserId:'probe',initialStateId:'ground-2-0',monitoredStateIds:['ground-2-0','ground-1--1','ground-1-0','ground-1-1'],
-    durationUs:20,samples:DEFAULT_DYNAMICS_SAMPLES,meanHorizonUs:DEFAULT_MEAN_HORIZON_US,monitorMode:'auto',monitoredGroupIds:[]};
+  return {initialStateId:'ground-2-0',monitoredStateIds:['ground-2-0','ground-1--1','ground-1-0','ground-1-1'],
+    durationUs:20,durationUnit:'μs',samples:DEFAULT_DYNAMICS_SAMPLES,meanHorizonUs:DEFAULT_MEAN_HORIZON_US,monitorMode:'auto',monitoredGroupIds:[]};
 }
 export interface Level {
   id: string; manifold: 'ground' | 'D1' | 'D2'; F: number; m: number;
@@ -236,21 +226,21 @@ export interface Analysis {
 
 export function defaultScene(): Scene {
   return {
-    version: 1, name: `探测光 + ${DEFAULT_TWEEZER_WAVELENGTH_NM} nm 光镊`, initialF: 2, initialM: 0,
-    marks:{},references:[],dynamics:defaultDynamics(),
+    version:SCENE_VERSION,name:`探测光 + ${DEFAULT_TWEEZER_WAVELENGTH_NM} nm 光镊`,
+    marks:{},references:[],referenceFrequencies:[],dynamics:defaultDynamics(),
     fields: [{id:'bias',name:'偏置磁场',enabled:true,magnitudeG:3,direction:{reference:{kind:'axis',axis:'+z'},thetaDeg:0,phiDeg:0}}],
     // The probe runs along the bias field: its reference axis is linked to the field's.
-    lasers: [{id:'probe',name:'探测光',enabled:true,showLightShift:false,line:'D2',detuningMHz:0,intensityMWcm2:1,
-      referenceTransition:{line:'D2',Fg:2,Fe:2},frequencyMode:'transition',detuningUnit:'MHz',
-      direction:{reference:{kind:'field',id:'bias'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0}, defaultTweezer()],
+    lasers: [{id:'probe',name:'探测光',enabled:true,showLightShift:false,line:'D2',
+      frequency:{base:{kind:'transition',line:'D2',Fg:2,Fe:2},offsetMHz:0},frequencyUnit:'MHz',
+      intensityMode:'intensity',intensityMWcm2:1,powerUnit:'mW',waistUnit:'μm',intensityUnit:'mW/cm²',
+      direction:{reference:{kind:'field',id:'bias'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0}, defaultTweezer()],
   };
 }
 
 /** A tweezer is an ordinary enabled laser, with its physical optical frequency.
  * No separate trap approximation, hidden beam exclusion, or effective shift. */
 export function defaultTweezer(): Laser {
-  return {id:'tweezer',name:'光镊',enabled:true,showLightShift:true,line:'D2',frequencyMode:'wavelength',wavelengthNm:DEFAULT_TWEEZER_WAVELENGTH_NM,
-    referenceTransition:{line:'D2',Fg:2,Fe:3},detuningMHz:0,detuningUnit:'THz',
-    intensityMode:'power',powerMW:4,waistUm:1.2,intensityMWcm2:2*4/(Math.PI*1.2**2)*1e8,
+  return {id:'tweezer',name:'光镊',enabled:true,showLightShift:true,line:'D2',frequency:{wavelengthNm:DEFAULT_TWEEZER_WAVELENGTH_NM},frequencyUnit:'nm',
+    intensityMode:'power',powerMW:4,waistUm:1.2,intensityMWcm2:2*4/(Math.PI*1.2**2)*1e8,powerUnit:'mW',waistUnit:'μm',intensityUnit:'kW/cm²',
     direction:{reference:{kind:'axis',axis:'+x'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0};
 }

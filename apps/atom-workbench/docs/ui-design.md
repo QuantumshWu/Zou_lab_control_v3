@@ -39,7 +39,7 @@ type FrequencyExpr =
 
 - 绝对光频用 `accurateSum` 组合（与现有 `captureLaserFrequencyAnchor` 同样的精度保护），不在 THz 量级上丢失 Hz 级偏移。
 - `wavelengthNm` 是"操作者写下的就是波长"，波长输入不被换算成频率存储，避免 852 nm 被写回成 351.86… THz 的十几位小数。
-- 现有字段 `frequencyMode / referenceTransition / detuningMHz / wavelengthNm / frequencyAnchor / detuningUnit / line` 在场景迁移时一次性转换为 `frequency: FrequencyExpr` 加显示单位，旧字段删除（单一真相源）。激光所属 D 线（`line`）不再是输入，而是由频率派生的显示属性。
+- 频率只以 `frequency: FrequencyExpr` 加它的单位描述（单一真相源）。激光所属 D 线（`line`）不是输入，而是由频率派生的显示属性。
 
 ### 1.3 定义行为："锁定"语义
 
@@ -119,7 +119,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
   - 未极化：选择流形（全部基态 / F=1 / F=2）；
   - 热分布：温度 T（v3 Field，单位 K/mK/μK，"≈"规则；换单位保留数字，单位存在 `dynamics.temperatureUnit`），说明"在静态哈密顿量的基态本征态上按 Boltzmann 分布"；
   - 自定义：按 F、m_F 排成网格的权重输入（v3 SelectionGrid 风格），自动归一化，显示归一化后的分数。
-- 场景中旧的 `initialF/initialM` 与 `dynamics.initialStateId` 合并为这一个描述（迁移旧场景）。
+- 场景只用 `dynamics.initialStateId`（和混合态的 `dynamics.initialState`）描述初态。
 
 ## 4. 在能级图中显示光移
 
@@ -130,7 +130,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 ## 5. 验收
 
 - 所有频率输入和读数都走 1.2–1.4 的同一套控件和规则；没有别的频率输入路径。
-- 旧场景（含 `durationUnit:'us'` 之类历史写法）能读入并迁移；导出的新场景能读回且物理频率逐位一致。
+- 导出的场景能读回且物理频率逐位一致；其它格式的文件按 §6.17 拒绝。
 - 能级图标注语义与 1.5 一致，两个已知 bug 有回归测试。
 - 3D 视图与全局选择同步，"沿 k""沿 B"视角正确；1536/1000/900 px 宽度下布局正常。
 - npm test 全部通过；EXE 中逐一截图检查受影响的视图。
@@ -160,7 +160,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 ### 6.4 频率定义与读数（§1.2–1.4，已实现）
 
 - **数据**：每个被定义的频率（激光、参考频率）只有一个 `frequency: FrequencyExpr`，即基准 + 偏移（MHz，规范存储），或者照写的真空波长（`types.ts`）。基准可以是绝对、零场跃迁、参考频率或另一束激光（偏频锁定）。操作者写数值所用的单位存在 `frequencyUnit`。激光所属 D 线 `line` 由频率派生。
-- **迁移**：读入场景时（`scene-file.ts` 与 `migrateSceneFrequencies`），旧字段 `frequencyMode / referenceTransition / detuningMHz / wavelengthNm / detuningUnit / frequencyAnchor` 一次性转换后删除。旧字段只作为输入格式保留在物理层，供旧场景和测试夹具使用；工作台本身从不写它们。
+- **格式**：频率只以表达式描述，没有其它写法（§6.17）。
 - **解析**：`physics.ts` 的 `resolveSceneFrequencies` 按依赖顺序给每个对象算出派生的载频（中心频率 + 偏移）。基准不存在、成环或光频不是有限正数都拒绝，场景文件校验同样执行这一检查。
   - 派生载频带一个指纹（表达式，以及所跟随对象的载频）。指纹不变时，保存的载频按位保留，所以换基准、绝对频率与波长互换都不会重新舍入光频。
   - 导出再导入后光频逐位一致。
@@ -205,7 +205,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
   - 未极化：分段控件"全部基态 / F=1 / F=2"。
   - 热分布：温度 T（v3 Field，K / mK / μK，≈ 规则），下方一句说明"按静态哈密顿量 H0 的基态本征能量取 Boltzmann 分布"。
   - 自定义：面板里显示摘要和"编辑权重…"，权重在 v3 对话框里编辑：32 个态按 F 行、m 列排成网格，空白为 0，每格下方显示归一化后的分数。
-- 数据只有一种描述（`InitialStateSpec`，`initial-state.ts`）：单态只写 `dynamics.initialStateId`（与场景文件一致），混合态写 `dynamics.initialState`，同时把占比最大的态写进 `initialStateId`，作为激光图示参考态的默认值。选回单态时删除混合态描述，所以从场景读入的混合态不会再覆盖之后的选择。`initialF/initialM` 只是 `initialStateId` 的镜像，保留下来是为了兼容旧场景文件。
+- 数据只有一种描述（`InitialStateSpec`，`initial-state.ts`）：单态只写 `dynamics.initialStateId`（与场景文件一致），混合态写 `dynamics.initialState`，同时把占比最大的态写进 `initialStateId`，作为激光图示参考态的默认值。选回单态时删除混合态描述，所以从场景读入的混合态不会再覆盖之后的选择。
 - 混合初态在能级图和布居演化图中不标灰卡片或初态曲线。
 - 求解响应的第一行按所请求初态在返回基中的对角元检查（与模型构建用的是同一个函数）；响应自带的 `initialState` 和 `initialPopulations` 也必须与请求一致。
 
@@ -214,7 +214,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 - 检查器"能级图"一节只有一个开关"显示光移"，绑定激光的 `showLightShift`（新激光默认关，默认场景的光镊为开）。它只决定未选中对象时能级图背景是否含这束光的静态光移：打开的光的 Floquet 准能量，含 D 线旋转与反旋转项、32 态以外能级和 Rb⁺ 芯极化，全阶求解（`floquet-background.ts`），每个能级附数值误差界。它与动力学无关，也不进入请求或求解缓存键。
 - 开关下一行给出提示 `|Ω/2Δ| 最大`（`spectroscopy.ts` 的 `displayMixing`：这束光单独在其载频下的最大混合比，只测量、不报错），用工作台统一的百分数写法。
 - 开关打开时，若它超过 1% 或某个虚跃迁失谐小于下限（D 线 100 MHz、其它能级 10 GHz），检查器在开关下用警告色写"离共振太近，静态光移不能代表它的作用"，能级图图例中这束光的名字后面加"（离共振太近）"。能级图此时不画静态光移：显示裸态位置，徽标写"静态光移未定义"，ⓘ 中写出原因。这只是显示上的说明，从不自动拨动开关，也不阻止求解。
-- 场景文件：开关存为 `showLightShift`。带 `regime` 的旧场景照常读入，按新模型（全部显式驱动）解释：原来"静态光移"（`far`）的光打开开关，其余关闭；两者都没有的旧场景中 id 为 `tweezer` 的光打开。读入时不另行提示。
+- 场景文件：开关存为 `showLightShift`，每束光都必须有。
 
 ### 6.9 模型基与显示基
 
@@ -225,7 +225,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 ### 6.10 T 时刻的长期布居 p̄(T)
 
 - p̄(T) 是时刻 t = T 的布居，只把该时刻附近的快振荡（激光间的拍频与光频微运动）平均掉，即 T 时刻态的零频 Fourier 分量（相位平均，或局部时间平均）。它不是 0 到 T 的时间平均；T = ∞ 是 t → ∞ 的极限。两个求解器都按这个定义计算。界面上统一写"时刻 T""T 时刻的长期布居 p̄(T)""相位平均"，不写"观察时长"或"长期时间平均"。
-- 时刻 T 可选 ∞ · 1 s · 100 ms，默认 1 s。它存在 `dynamics.meanHorizonUs`（1e5 / 1e6 / null），旧场景读入时取 1 s；它参与动力学缓存键，但不影响有限时间轨迹的缓存键。改变它时只重算长期平均，已算好的轨迹保留。
+- 时刻 T 可选 ∞ · 1 s · 100 ms，默认 1 s。它存在 `dynamics.meanHorizonUs`（1e5 / 1e6 / null，必需）；它参与动力学缓存键，但不影响有限时间轨迹的缓存键。改变它时只重算长期平均，已算好的轨迹保留。
 - 控件原本应放在能级图基态处原来写"长期平均 / 长期布居"的位置，但那里与"5S₁/₂"标签同一行，900 px 时只剩约 95 px，放不下三段控件，所以放在工具栏的模式选择旁边。图上该处改为符号 p̄(T)。
 - 模式选择为"长期布居 p̄ / 指定时刻 p(t)"。各处读数和标签写 p̄(1 s)、p̄(100 ms)、p̄(∞)。标签写的是结果实际所在的时刻 T：求解器回传 `horizonUs` 时用回传值，不回传时就是 t→∞（目前的求解器都是这样）。
 - 请求选项为 `meanHorizonUs`。求解器若回传 `horizonUs`，必须与请求一致；`scripts/native-protocol.mjs` 把它原样传给本机求解器。
@@ -249,7 +249,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 ### 6.13 布居精度
 
 - 布居精度固定为 0.5%（概率的绝对误差）：每个请求都发送 `populationTolerance: 0.005`（`types.ts` 的 `POPULATION_TOLERANCE`）。它不是用户设置，不在场景中，也不进入求解缓存键。求解器回传的 `requestedTolerance` 必须是 0.005。
-- 旧场景中的 `populationTolerance`（任何值）读入时直接忽略，不另行提示。
+- 场景中没有 `populationTolerance`；带它的文件按 §6.17 拒绝。
 - 计算详情写"布居误差估计 ≤ x（目标 0.005）"。动力学页的设置为"时长、采样点数"和"显示曲线"两组。
 
 ### 6.14 界面审阅（2026-10-27）
@@ -263,7 +263,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 - **频率**：检查器只保留一个“相对”；下面的“频率 ν”是由此得到的绝对光频（可换单位），定义已是绝对频率时不再重复。
 - **名称**：场景名和对象名点击即在原处编辑，取消 ✎。
 - **计算**：总是自动计算，取消所有“计算”按钮和 `autoRun`；长时间求解时状态栏提供“停止”，停止只对当时的参数有效。
-- **方向**（`direction.ts`）：每个磁场和每束激光的方向 = 参考轴 + 相对偏移 (θ′, φ′)。参考轴为角度、坐标轴 ±x/±y/±z，或链接到某个磁场的参考轴；偏移在把 z 最小转动到参考轴的坐标系中读出，φ′ = 0 为被带过去的 x；参考轴为 z 时即通常球坐标。链接只连接参考轴：磁场自身的偏移不移动链接它的对象。ψ 相对光束坐标系（同一转动携带）的 x 轴。σ/π 分量是实际偏振在总磁场方向上的分解；总磁场为零时取第一个磁场的参考轴。“沿 ±B / 垂直 B”与 σ/π 预设建立链接。旧场景：磁场的参考轴取原方向、偏移为零；激光的参考轴取原方向、θ′ = 0、φ′ = 原 φ，使横向坐标系仍是原来的 e_θ、e_φ，ψ 不变，请求逐位相同。
+- **方向**（`direction.ts`）：每个磁场和每束激光的方向 = 参考轴 + 相对偏移 (θ′, φ′)。参考轴为角度、坐标轴 ±x/±y/±z，或链接到某个磁场的参考轴；偏移在把 z 最小转动到参考轴的坐标系中读出，φ′ = 0 为被带过去的 x；参考轴为 z 时即通常球坐标。链接只连接参考轴：磁场自身的偏移不移动链接它的对象。ψ 相对光束坐标系（同一转动携带）的 x 轴。σ/π 分量是实际偏振在总磁场方向上的分解；总磁场为零时取第一个磁场的参考轴。“沿 ±B / 垂直 B”与 σ/π 预设建立链接（预设是一次性的命令，不存入场景）。
 - **单位**：功率（W/mW/μW/nW）、束腰（mm/μm/nm）、局域强度（kW/cm²…μW/cm²）用与频率相同的带单位数值框，按 §0.4 的规则：输入换单位保留数字，计算值换单位换算（§6.15 取代原来的"单位只改读法"）。
 - **数值不移动布局**：读数放在按最长值定宽的槽内，等宽数字、右对齐（两态读数、F 布居合计、能级卡片的数值与单位、跃迁表数值列、3D 图例、页首摘要），状态栏的耗时写在最后。
 
@@ -273,7 +273,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
   - 输入：总时长、功率、束腰（功率与束腰方式）、局域强度（局域强度方式）、激光与参考频率的失谐/偏频/绝对频率/波长、参考能级的偏移 δ、热分布的温度 T。换单位写入框中的数字（去掉存储单位换算带来的浮点尾数，与 v3 spin box 的 ≈ 规则一致）乘以新单位，作为一次编辑：保存、重新求解。
   - 计算值：激光的"频率 ν"、两态读数 ν₁₂ 与 Δν、跃迁矩元表频率列、能级标注、钟跃迁、图上的时间与弛豫时间、功率方式和 NA 方式下的局域强度、NA 方式下的输出束腰。换单位只换算。
   - 违反物理约束的新单位（例如失谐 −500 MHz 换成 THz 使光频为负、偏移超出 ±1 000 000 THz）：框中保留新单位下的数字，标为无效并写明原因，场景不变，直到下一次编辑；Esc 放弃。
-  - 单位随数值保存：`frequencyUnit`、`powerUnit`、`waistUnit`、`intensityUnit`、`dynamics.durationUnit`、`dynamics.temperatureUnit`（新）、参考能级的 `offsetUnit`（新）。旧场景没有后两项时按自然单位读出，物理量不变。
+  - 单位随数值保存，都是必需的：`frequencyUnit`、`powerUnit`、`waistUnit`、`intensityUnit`、`dynamics.durationUnit`、热分布初态的 `dynamics.temperatureUnit`、参考能级的 `offsetUnit`。
   - 数值框不接受算式（v3 Field 只解析数字）；频率的"表达式"是基准加偏移，换单位时基准不变，只有偏移的单位改变。
 - **按 NA 指定强度**：强度的"指定方式"有三种：局域强度、功率与束腰、功率与 NA。
   - 功率与 NA：输入为功率 P（单位规则同上）和数值孔径 NA（无量纲；原子在真空中，0 < NA ≤ 1，否则标为无效并写明原因）。光束充满物镜的 NA，输出束腰 w₀ = λ/(π·NA)，λ = c/ν 为这束光由其绝对频率得到的真空波长；这是傍轴高斯光束关系，NA 取 1/e² 远场半角的正弦，NA 大时只是近似。局域强度取高斯光束轴上的 I = 2P/(π·w₀²)，与功率与束腰方式相同。
@@ -288,4 +288,12 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 - **能级图**："指定时刻"的误差超过 0.5%，或 p̄(T) 超出时，仍按算出的布居着色；工具栏时刻旁出现橙色"⚠ 估计误差 x%"，能级的悬停文字在数值后写"（估计误差 x%，超过 0.5%）"。
 - **中间结果**：请求带 `stream: true` 时，求解器每到一个检查点发一个 `checkpoint` 事件，内容与最终结果相同，另加 `progress: true`（只求长期布居时是单行 t = 0）；最后的 `result` 是最好的检查点，不带 `progress`。原来的 `asymptotic`（稳态进度）事件已取消。界面依次显示最新的检查点，状态栏写"计算中：当前估计误差最大 x%"，最终结果到来时替换；图在检查点之间不清空，打开的悬停读数停在原来的采样上。按"停止"后保留最后一个检查点，按部分达到精度的结果标出各时刻的误差，状态栏写"计算已停止 · 显示最后的中间结果：…"。
 - **详情**：计算详情的"布居误差估计"写最大误差和是否部分超出，其下一行写超出的时刻和求解器给出的原因；有长期布居误差时加"长期布居误差估计"一行。模型说明写明每个时刻的误差和部分达到时的显示方式。
+
+### 6.17 唯一的场景格式（2026-10-28）
+
+- 场景只有一种格式：`types.ts` 的 `Scene`，`version: 2`（`SCENE_VERSION`）。`scene-file.ts` 严格按它校验：必需字段齐全且在范围内，没有任何其它字段。早先版本写的文件不再读入、也不迁移：导入时拒绝并写明原因（如"场景文件不符合当前格式（version 2）：version 为 1，应为 2"或"lasers[0] 缺少 showLightShift"）。
+- 本机自动保存的场景若不符合当前格式，启动时改用默认场景，状态栏写"已改用默认场景：本地场景不是当前格式（version 为 1，应为 2），原数据可下载"，并提供"下载原本地场景"；界面不会因此出错。
+- 必需：`name`、`fields`、`lasers`、`referenceFrequencies`、`references`、`marks`、`dynamics`；磁场的 `direction`；激光的 `frequency`、`frequencyUnit`、`line`（派生，读入后按频率重算）、`showLightShift`、`intensityMode`、`intensityMWcm2`、`powerUnit`、`waistUnit`、`intensityUnit`、`direction`、`polarizationAngleDeg`、`ellipticityDeg`、`phaseDeg`，以及所选强度方式的输入（功率与束腰：`powerMW`、`waistUm`；功率与 NA：`powerMW`、`numericalAperture`）；参考频率的 `frequency`、`frequencyUnit`；参考能级的 `anchorId`、`anchorMode`、`offsetMHz`、`offsetUnit`；`dynamics` 的 `initialStateId`、`monitoredStateIds`、`monitorMode`、`monitoredGroupIds`、`durationUs`、`durationUnit`、`samples`、`meanHorizonUs`。
+- 可选（本身就是可有可无的）：`display`（读数偏好）；激光的 `referenceStateId`、`referenceProcess`，以及别的强度方式留下的 `powerMW`、`waistUm`、`numericalAperture`；参考能级的 `photon`；混合初态的 `dynamics.initialState`，热分布时还有 `dynamics.temperatureUnit`（且只在热分布时有）；派生的 `frequencyAnchor`、`intensityAnchor`（没有时由输入算出，有时只在指纹相符时使用）。
+- 取消的旧写法：`initialF/initialM`、`dynamics.laserId`、`dynamics.quality`、`dynamics.populationTolerance`、激光的 `regime`、`detuningMHz/referenceTransition/frequencyMode/wavelengthNm/detuningUnit`、以角度 `thetaDeg/phiDeg` 和 `directionAnchor` 写的方向、预设与跟随标记，以及缺省 `meanHorizonUs`、单位、`showLightShift`、`phaseDeg`、`intensityMode` 时的补齐。
 

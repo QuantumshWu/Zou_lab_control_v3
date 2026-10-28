@@ -2,7 +2,7 @@ import test from 'node:test';import assert from 'node:assert/strict';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {spectroscopyAnalysis,spectroscopyCoupling,staticModelBackground} from '../dist/js/atom-workbench/src/spectroscopy.js';
-import {normalizeLaserFrequency} from '../dist/js/atom-workbench/src/laser-frequency.js';
+import {resolveSceneFrequencies} from '../dist/js/atom-workbench/src/physics.js';
 import {levelsChart} from '../dist/js/atom-workbench/src/charts.js';
 import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {accurateSum,analyze,laserFrequencyDifferenceMHz,laserFrequencyMHz,laserIntensityMWcm2} from '../dist/js/atom-workbench/src/physics.js';
@@ -12,10 +12,10 @@ import {along,spherical} from './directions.mjs';
 const N=32,TAU=2*Math.PI;
 function threeNearBeams(){
  const scene=defaultScene(),probe=scene.lasers[0];
- probe.referenceTransition={line:'D2',Fg:2,Fe:3};probe.ellipticityDeg=17;probe.direction=spherical(7,0);normalizeLaserFrequency(probe);
- const repump={...probe,id:'repump',referenceTransition:{line:'D2',Fg:1,Fe:2},phaseDeg:19};normalizeLaserFrequency(repump);
- const third={...probe,id:'third',referenceTransition:{line:'D2',Fg:2,Fe:2},phaseDeg:-31};normalizeLaserFrequency(third);
- scene.lasers.push(repump,third);return scene;
+ const at=(Fg,Fe)=>({base:{kind:'transition',line:'D2',Fg,Fe},offsetMHz:0});
+ Object.assign(probe,{frequency:at(2,3),ellipticityDeg:17,direction:spherical(7,0)});
+ const repump={...structuredClone(probe),id:'repump',frequency:at(1,2),phaseDeg:19},third={...structuredClone(probe),id:'third',frequency:at(2,2),phaseDeg:-31};
+ scene.lasers.push(repump,third);resolveSceneFrequencies(scene);return scene;
 }
 /** Coefficient of e^{+i omega t} of drive j: (Hcos - i Hsin)/2, entry k. */
 function plus(drive,k){return {re:(drive.cos.real[k]+drive.sin.imag[k])/2,im:(drive.cos.imag[k]-drive.sin.real[k])/2};}
@@ -75,9 +75,9 @@ test('the counter-rotating amplitude drives the opposite helicity with the conju
 
 test('a true tiny D1 pair beat survives a remote D2 reference without a phase cutoff',()=>{
  const scene=defaultScene(),probe=scene.lasers[0];
- const first={...probe,id:'D1-a',line:'D1',referenceTransition:{line:'D1',Fg:1,Fe:2},detuningMHz:0};normalizeLaserFrequency(first);
- const second={...first,id:'D1-b',detuningMHz:1e-10,phaseDeg:27};normalizeLaserFrequency(second);
- scene.lasers.push(first,second);
+ const at=offsetMHz=>({base:{kind:'transition',line:'D1',Fg:1,Fe:2},offsetMHz});
+ const first={...structuredClone(probe),id:'D1-a',frequency:at(0)},second={...structuredClone(probe),id:'D1-b',frequency:at(1e-10),phaseDeg:27};
+ scene.lasers.push(first,second);resolveSceneFrequencies(scene);
  const physicalBeat=laserFrequencyDifferenceMHz(second,first);assert.ok(physicalBeat>0&&physicalBeat<1e-9);
  const model=buildFullMasterModel(scene),coordinates=model.frequencyCoordinates;
  const tinyAxis=coordinates.frequencies.indexOf(2*Math.PI*physicalBeat);assert.notEqual(tinyAxis,-1);
@@ -96,7 +96,8 @@ test('exact co-carriers share phase coordinates and cancel exactly in opposite p
 });
 
 test('authoritative MHz tree coordinates retain exact 100 and 300 MHz carrier relations before TAU conversion',()=>{
- const scene=defaultScene(),probe=scene.lasers[0];scene.lasers=[probe,{...probe,id:'plus100',detuningMHz:100},{...probe,id:'plus400',detuningMHz:400}];
+ const scene=defaultScene(),probe=scene.lasers[0],at=offsetMHz=>({base:{kind:'transition',line:'D2',Fg:2,Fe:2},offsetMHz});
+ scene.lasers=[probe,{...probe,id:'plus100',frequency:at(100)},{...probe,id:'plus400',frequency:at(400)}];
  const model=buildFullMasterModel(scene),coordinates=model.frequencyCoordinates;
  assert.deepEqual(coordinates.frequenciesMHz,[100,300,laserFrequencyMHz(probe)]);
  assert.deepEqual(coordinates.frequencies,coordinates.frequenciesMHz.map(f=>2*Math.PI*f));

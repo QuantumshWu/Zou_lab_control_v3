@@ -2,7 +2,7 @@
 // the scene panel only. A single state is stored as dynamics.initialStateId alone (as
 // scene files store it); a mixture as dynamics.initialState, with initialStateId the
 // single state that stands for it where one is needed (a laser's diagram origin).
-import type {DynamicsSettings,InitialStateSpec,Level,Scene,TemperatureUnit} from './types.js';
+import type {InitialStateSpec,Level,Scene,TemperatureUnit} from './types.js';
 import type {Reading} from './unit-input.js';
 import {canonicalInitialState,resolveInitialState} from './types.js';
 import {initialPopulations} from './full-master-model.js';
@@ -16,7 +16,7 @@ export const TEMPERATURE_UNITS:readonly TemperatureUnit[]=['K','mK','μK'];
 export const TEMPERATURE_K:Readonly<Record<TemperatureUnit,number>>={K:1,mK:1e-3,'μK':1e-6};
 export const DEFAULT_TEMPERATURE_K=1e-3;
 
-export function initialSpec(scene:Scene):InitialStateSpec{return resolveInitialState(scene.dynamics,scene);}
+export function initialSpec(scene:Scene):InitialStateSpec{return resolveInitialState(scene.dynamics);}
 
 /** The populations a description puts on these states (normalized), by id. */
 export function initialWeights(spec:InitialStateSpec,levels:readonly Level[]):Record<string,number>{
@@ -29,13 +29,13 @@ export function initialAnchor(spec:InitialStateSpec,levels:readonly Level[]):str
   let best='',most=-1;for(const [id,w] of Object.entries(initialWeights(spec,levels)))if(w>most+1e-12){best=id;most=w;}
   return best||levels[0]!.id;
 }
-/** Writes the description, and nothing else that could contradict it (a temperature's unit
- * goes with a thermal description). */
+/** Writes the description, and nothing else that could contradict it. A thermal description
+ * has its temperature's unit (the natural one when it is new), and only it has one. */
 export function setInitialSpec(scene:Scene,spec:InitialStateSpec,levels:readonly Level[]):void{
-  const d=scene.dynamics!;if(spec.kind!=='thermal')delete d.temperatureUnit;
+  const d=scene.dynamics;
   if(spec.kind==='state'){d.initialStateId=spec.id;delete d.initialState;}
   else{initialPopulations(spec,[...levels]);d.initialState=canonicalInitialState(spec);d.initialStateId=initialAnchor(spec,levels);}
-  const anchor=levels.find(l=>l.id===d.initialStateId);if(anchor?.manifold==='ground'){scene.initialF=anchor.F as 1|2;scene.initialM=anchor.m;}
+  if(spec.kind==='thermal')d.temperatureUnit??=naturalTemperatureUnit(spec.temperatureK);else delete d.temperatureUnit;
 }
 /** What choosing another kind starts from: the current state where it has one. */
 export function startingSpec(kind:InitialKind,current:InitialStateSpec,levels:readonly Level[]):InitialStateSpec{
@@ -48,16 +48,16 @@ export function startingSpec(kind:InitialKind,current:InitialStateSpec,levels:re
 }
 export function naturalTemperatureUnit(kelvin:number):TemperatureUnit{return kelvin>=1?'K':kelvin>=1e-3?'mK':'μK';}
 /** A thermal state's temperature as the operator wrote it: the number in its unit (theirs, else the natural one). */
-export function temperatureReading(kelvin:number,unit:TemperatureUnit=naturalTemperatureUnit(kelvin)):Reading<TemperatureUnit>{return {value:kelvin/TEMPERATURE_K[unit],unit};}
+export function temperatureReading(kelvin:number,unit:TemperatureUnit):Reading<TemperatureUnit>{return {value:kelvin/TEMPERATURE_K[unit],unit};}
 /** The operator's temperature: `value` in `unit`, written with its unit. A unit picked for it keeps
  * its digits, so 1 mK read in K is 1 K (ui-design.md §0.4). */
 export function setTemperature(scene:Scene,value:number,unit:TemperatureUnit,levels:readonly Level[]):void{
   if(!TEMPERATURE_UNITS.includes(unit))throw new Error('温度单位无效');
   const kelvin=value*TEMPERATURE_K[unit];if(!Number.isFinite(kelvin)||!(kelvin>0))throw new Error('温度必须是有限正数');
-  setInitialSpec(scene,{kind:'thermal',temperatureK:kelvin},levels);(scene.dynamics as DynamicsSettings).temperatureUnit=unit;
+  setInitialSpec(scene,{kind:'thermal',temperatureK:kelvin},levels);scene.dynamics.temperatureUnit=unit;
 }
 /** One line saying what the initial state is. */
-export function initialSummary(spec:InitialStateSpec,unit?:TemperatureUnit):string{
+export function initialSummary(spec:InitialStateSpec,unit:TemperatureUnit=naturalTemperatureUnit(spec.kind==='thermal'?spec.temperatureK:1)):string{
   if(spec.kind==='state')return idLabel(spec.id);
   if(spec.kind==='unpolarized')return `未极化 · ${UNPOLARIZED.find(([m])=>m===spec.manifold)![1]}`;
   if(spec.kind==='thermal'){const t=temperatureReading(spec.temperatureK,unit);return `热分布 · T = ${withUnit(t.value,t.unit,{digits:4})}`;}
