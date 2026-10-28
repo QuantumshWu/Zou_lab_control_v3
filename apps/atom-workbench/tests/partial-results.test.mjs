@@ -43,7 +43,7 @@ test('a run the solver did not accept is read too: within ε yet unconfirmed (a 
   const r=read(data);assert.equal(r.populationAccuracy.status,'estimated-partial');assert.equal(r.populationAccuracy.estimatedMaximumError,.002);
   assert.deepEqual(outsideRuns(r.populationAccuracy.sampleErrors),[],'no sample above ε');
   // The mean: a bound within ε from a run not accepted is computed, shown, and not within.
-  const mean=result({timesUs:[0],meanError:.0007});mean.asymptoticWithinTolerance=false;
+  const mean=result({timesUs:[0],meanError:.0007});mean.asymptoticWithinTolerance=false;mean.asymptoticHorizons.find(e=>e.horizonUs===1e6).withinTolerance=false;
   const m=read(mean);assert.equal(m.steady.converged,true);assert.equal(m.steady.withinTolerance,false);assert.equal(m.steady.estimatedError,.0007);
   assert.equal(outsideWords(.0007),'未确认收敛');assert.equal(outsideWords(.0072),'超过 0.5%');assert.equal(outsideWords(null),'超过 0.5%');
   // Within ε is never claimed for a bound above it, nor said other than true or false.
@@ -64,7 +64,9 @@ test('a p̄(T) outside the tolerance is computed and shown, with its estimated e
     const bad=result({timesUs:[0],meanError:.0072});change(bad);assert.throws(()=>read(bad),/长期布居误差估计/);
   }
   // 'not-converged': nothing usable computed -- no populations, never within the tolerance.
-  const none=result({timesUs:[0],mean:false});none.asymptoticStatus='not-converged';assert.equal(read(none).steady.converged,false);
+  const none=result({timesUs:[0],mean:false});
+  Object.assign(none,{asymptoticStatus:'not-converged',horizonUs:1e6,asymptoticHorizons:[1e5,1e6,null].map(horizonUs=>({horizonUs,status:'not-converged',withinTolerance:false}))});
+  assert.equal(read(none).steady.converged,false);
   none.asymptoticWithinTolerance=true;assert.throws(()=>read(none),/长期布居误差估计/);
 });
 

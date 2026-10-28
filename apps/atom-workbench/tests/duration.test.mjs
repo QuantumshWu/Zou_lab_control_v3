@@ -2,15 +2,15 @@ import test from 'node:test';import assert from 'node:assert/strict';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {durationReading,durationText,durationValue,setDuration} from '../dist/js/atom-workbench/src/duration.js';
 import {typedDigits} from '../dist/js/atom-workbench/src/unit-input.js';
-import {dynamicsCacheKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
+import {trajectoryInputsKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {populationLayout} from '../dist/js/atom-workbench/src/population-chart.js';
 test('the duration is an input: a unit picked for it keeps its digits, a new duration solved anew',()=>{
- const s=defaultScene(),d=s.dynamics;setDuration(d,10,'μs');const key=dynamicsCacheKey(s,d,false);
+ const s=defaultScene(),d=s.dynamics;setDuration(d,10,'μs');const key=trajectoryInputsKey(s,d);
  // 总时长 10 μs read in ms is 10 ms: the digits stay, the quantity and the request change.
- setDuration(d,durationReading(d).value,'ms');assert.equal(d.durationUs,1e4);assert.deepEqual(durationReading(d),{value:10,unit:'ms'});assert.notEqual(dynamicsCacheKey(s,d,false),key);
+ setDuration(d,durationReading(d).value,'ms');assert.equal(d.durationUs,1e4);assert.deepEqual(durationReading(d),{value:10,unit:'ms'});assert.notEqual(trajectoryInputsKey(s,d),key);
  for(const [unit,us] of [['s',1e7],['ns',.01],['μs',10]]){setDuration(d,typedDigits(durationValue(d)),unit);assert.equal(d.durationUs,us);assert.equal(d.durationUnit,unit);}
- assert.equal(dynamicsCacheKey(s,d,false),key,'back in μs: the same duration and request');
+ assert.equal(trajectoryInputsKey(s,d),key,'back in μs: the same duration and request');
  // Without a unit the value is written in the duration's own unit.
  setDuration(d,5,'s');setDuration(d,7);assert.equal(d.durationUs,7e6);assert.equal(d.durationUnit,'s');
  const restored=validateScene(JSON.parse(JSON.stringify(s)));assert.equal(restored.dynamics.durationUs,7e6);assert.equal(restored.dynamics.durationUnit,'s');
@@ -22,7 +22,7 @@ test('time displays convert: the same time in another unit',()=>{
  assert.equal(durationText(1500,'ms'),'1.5 ms');assert.equal(durationText(1500,'μs'),'1500 μs');assert.equal(durationText(1500,'s'),'0.0015 s');assert.equal(durationText(2.5e6),'2.5 s');
 });
 test('sample count roundtrips and changes the output request independently of time units',()=>{
- const s=defaultScene(),before=dynamicsCacheKey(s,s.dynamics,false);for(const count of [2,51,1001,2001]){s.dynamics.samples=count;assert.equal(validateScene(JSON.parse(JSON.stringify(s))).dynamics.samples,count);assert.notEqual(dynamicsCacheKey(s,s.dynamics,false),before);}
+ const s=defaultScene(),before=trajectoryInputsKey(s,s.dynamics);for(const count of [2,51,1001,2001]){s.dynamics.samples=count;assert.equal(validateScene(JSON.parse(JSON.stringify(s))).dynamics.samples,count);assert.notEqual(trajectoryInputsKey(s,s.dynamics),before);}
  for(const count of [1,2002,3.5]){s.dynamics.samples=count;assert.throws(()=>validateScene(JSON.parse(JSON.stringify(s))));}
 });
 test('chart axes follow the selected time unit for long simulations',()=>{

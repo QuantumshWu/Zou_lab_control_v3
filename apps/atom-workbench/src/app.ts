@@ -24,8 +24,9 @@ import {FrequencyReadout,ReadoutPreferences,type ReadoutPreference} from './freq
 import {analyze,dipoleBetweenStates,resolveSceneFrequencies,laserIntensityMWcm2,setPolarizationPreset,type PolarizationPreset} from './physics.js';
 import {AXIS_NAMES,axisWords,directionAxis,linkableFields,linkedTo,referenceAxis,releaseLinks,sameDirection,shortcutDirection,shortcutField,type DirectionShortcut} from './direction.js';
 import {DEFAULT_NUMERICAL_APERTURE,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,intensityReading,normalizeLaserIntensity,powerReading,setLaserIntensityMode,setLaserNumericalAperture,waistReading,writeLaserIntensity,writeLaserPower,writeLaserWaist} from './laser-intensity.js';
-import {dynamicsCacheKey} from './dynamics-cache-key.js';
-import {CurrentDynamicsResults,keptCheckpoint} from './current-dynamics-results.js';
+import {meanInputsKey,trajectoryInputsKey} from './dynamics-cache-key.js';
+import {CurrentResults} from './current-results.js';
+import {covers,delivers,horizonRecords,keptCheckpoint,plannedSolve,solveOptions,type SolveInputs,type SolveKind} from './solve-plan.js';
 import {STATIC_MIXING_LIMIT,displayMixing,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
 import {defaultScene,POPULATION_TOLERANCE} from './types.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
@@ -65,8 +66,8 @@ let populationMode:'steady'|'time'='steady',populationTimeIndex=-1,populationSca
 let spaceRenderer:ReturnType<typeof renderSpace3D>|undefined;const spaceMount=document.createElement('div');spaceMount.className='retained-space-view';
 let stateLabels:StateLabels={},dirty=false,renderCount=0;
 let latestAnalysis:Analysis,analysisError='',solverError='',solverBusy=false,solverQueued=false,solverRevision=0,requestedKey='',solverTimer=0,solverWallMs=0,controlsKey='',renderedPopulationKey='';
-let requestedPhysicalKey='',requestedSteadyOnly=false,stoppedKey='';
-let requestedHorizon:number|null|undefined;
+/** The last request's kind (its key is requestedKey), the one running and its inputs, and the request 停止 ended. */
+let requestedKind:SolveKind|undefined,running:(SolveInputs&{kind:SolveKind})|undefined,stoppedKey='';
 let notice:{text:string;word:StatusWord;until:number}|undefined;
 let failureRecords:SolverFailureRecord[]=[];
 try{const saved=JSON.parse(localStorage.getItem(`${STORAGE}-solver-failures`)??'[]');if(Array.isArray(saved))failureRecords=saved.slice(-5);}catch{}
@@ -78,11 +79,16 @@ let initialBody='';
 const directionCommands:{command:Command;mode:DirectionShortcut}[]=[];
 const projectedPopulationCache=new WeakMap<Analysis,WeakMap<object,Record<string,number>|null>>();
 let spectrumBuildCount=0,populationPaintCount=0;
-/** A solve's result and the mean horizon it was asked for; `checkpoint` when it is the last
- * checkpoint of a solve that was stopped or failed, standing as the result. */
-type SolvedRecord={result:DynamicsResult;wallMs:number;horizon:number|null;checkpoint?:'stopped'|'failed'};const displayedResults=new CurrentDynamicsResults<SolvedRecord>();
+/** A solve's result and the time T of its mean; `checkpoint` when it is the last checkpoint of a
+ * solve that was stopped or failed, standing as the result. */
+type SolvedRecord={result:DynamicsResult;wallMs:number;horizon:number|null;checkpoint?:'stopped'|'failed'};
+/** The trajectory of the current trajectory inputs, and the means of the current mean inputs, one
+ * per time T: a horizon switch with its mean here is drawn at once, with no request. */
+const trajectories=new CurrentResults<'trajectory',SolvedRecord>(),means=new CurrentResults<number|null,SolvedRecord>();
+/** A request: what it computes, the inputs it was made for and the stores' epochs then. */
+type Submitted={kind:SolveKind;inputs:SolveInputs;epochs:{trajectory:number;mean:number}};
 /** The running solve's latest checkpoint: never drawn; on 停止 (or a failure) it becomes the result. */
-let lastCheckpoint:{record:SolvedRecord;physicalKey:string;epoch:number;steadyOnly:boolean}|undefined;
+let lastCheckpoint:(Submitted&{record:SolvedRecord})|undefined;
 const $=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T;
 const message=(error:unknown)=>error instanceof Error?error.message:String(error);
 
@@ -225,18 +231,23 @@ function note(text:string,word:StatusWord='task'):void{notice={text,word,until:p
  * another length moves nothing before it, and the full words for the tooltip when the line says
  * them short. Computing is automatic; 停止 ends a running solve. */
 function solverStatus():[string,StatusWord,string?,string?]{
-  const record=currentRecord(),result=record?.result,error=currentSolverError();
-  if(error){const why=labelStateIds(solverText(error));return [record?.checkpoint==='failed'?`计算失败 · 显示最后的中间结果：${why}`:result?.steady.converged?`时间演化失败（长期布居已就绪）：${why}`:`布居计算失败：${why}`,'error'];}
+  const record=currentRecord(),result=record?.result,error=currentSolverError(),cached=cachedMean()?.result;
+  // A cached mean is ready while the trajectory beside it is not.
+  const meanReady=(result??cached)?.steady.converged===true;
+  if(error){const why=labelStateIds(solverText(error));return [record?.checkpoint==='failed'?`计算失败 · 显示最后的中间结果：${why}`:meanReady?`时间演化失败（长期布居已就绪）：${why}`:`布居计算失败：${why}`,'error'];}
   // While a solve runs nothing new is drawn; the status says how far its checkpoints have come.
   if(currentSolverBusy()){
     const last=lastCheckpoint?.record.result,reached=last?.populationAccuracy?.estimatedMaximumError??(last?.steady.converged?last.steady.estimatedError:null);
-    return [reached!=null?`布居计算中… · 当前估计误差最大 ${errorPercent(reached)}`:result?.steady.converged?'长期布居已就绪 · 时间演化计算中…':solverQueued?'布居待计算':'布居计算中…','task'];
+    return [reached!=null?`布居计算中… · 当前估计误差最大 ${errorPercent(reached)}`:meanReady?'长期布居已就绪 · 时间演化计算中…':solverQueued?'布居待计算':'布居计算中…','task'];
   }
-  const stopped=stoppedKey!==''&&stoppedKey===solveKey();
+  const stopped=stoppedHere();
   if(view==='space')return ['方向与偏振实时显示','idle'];
-  if(!result)return stopped?['计算已停止 · 修改参数后重新计算','warning']:['布居待计算','idle'];
+  if(!result){
+    if(cached&&meanReady){const words=meanSentence(cached);return stopped?[`计算已停止 · ${steadyStatusText(cached.steady.status)}已就绪，时间演化未计算`,'warning']:[`${steadyStatusText(cached.steady.status)}${words?` · ${words}`:'已收敛'} · 时间演化待计算`,words?'warning':'idle'];}
+    return stopped?['计算已停止 · 修改参数后重新计算','warning']:['布居待计算','idle'];
+  }
   const elapsed=formatElapsed(record?.wallMs??solverWallMs),partial=trajectorySentence(result),mean=meanSentence(result),both=partial&&mean?bothSentence(result):'';
-  const trajectory=resultPage()==='dynamics'||populationMode==='time';
+  const trajectory=showsTrajectory();
   // 停止 keeps the last checkpoint, marked as any partial result is: where the trajectory misses ε,
   // short (with p̄(T)'s error when that misses it too), or p̄(T)'s error; the full words in the tooltip.
   if(record?.checkpoint){
@@ -244,11 +255,10 @@ function solverStatus():[string,StatusWord,string?,string?]{
     const miss=trajectoryMiss(result),words=trajectory?both||(miss?`${miss.words}（${missWhy(miss.over)}）`:mean):mean,full=trajectory?[partial,mean].filter(Boolean).join(' · '):mean;
     return [`${head}${words?`：${words}`:trajectory?`（各时刻 ≤ ${tolerance}）`:''}`,'warning',undefined,words!==full?`${head}：${full}`:undefined];
   }
-  if(resultPage()==='dynamics'&&result.timesUs.length>1){
+  if(resultPage()==='dynamics'){
     const full=['轨迹已计算',partial,result.steady?.converged?mean:'长期布居未解析'].filter(Boolean).join(' · ');
     return both?[`轨迹已计算 · ${both}`,'warning',elapsed,full]:[full,result.steady?.converged&&!partial&&!mean?'idle':'warning',elapsed];
   }
-  if(resultPage()==='dynamics')return stopped?[`计算已停止 · ${steadyStatusText(result.steady?.status)}已就绪，时间演化未计算`,'warning']:[result.steady?.converged?`${steadyStatusText(result.steady.status)}${mean?` · ${mean}`:'已收敛'} · 时间演化待计算`:'长期布居未解析',mean?'warning':'idle'];
   if(!result.steady?.converged)return ['长期布居未解析','warning'];
   // The levels chart: p̄(T), or p(t) of the trajectory at the chosen time.
   const words=[`${steadyStatusText(result.steady.status)}${mean?` · ${mean}`:'已收敛'}`,...(populationMode==='time'&&partial?[partial]:[])].join(' · ');
@@ -805,14 +815,28 @@ function transitionTable(transitions:Transition[]):{heading:string;rows:string}{
 // ---------------------------------------------------------------- solver
 /** The page whose results are shown: 详情 reads the last analysis page. */
 function resultPage():View{return view==='details'?resultView:view;}
-function dynamicsKey(steadyOnly=resultPage()==='levels'&&populationMode==='steady'):string{return dynamicsCacheKey(scene,dynamics(),steadyOnly);}
-/** What a trajectory depends on: everything but the mean's horizon (the displayed results' key). */
-function trajectoryKey():string{return dynamicsCacheKey(scene,dynamics(),false,false);}
-/** A solve for these inputs asks only for the mean: in the levels' long-time mode, or when a
- * trajectory is here whose mean was solved at another horizon. Its key is the request's. */
-function meanOnly():boolean{const t=displayedResults.get(trajectoryKey(),'trajectory');return resultPage()==='levels'&&populationMode==='steady'||(!!t&&t.horizon!==dynamics().meanHorizonUs);}
-function solveKey():string{return dynamicsKey(meanOnly());}
-function meanRecord(key=trajectoryKey()):SolvedRecord|undefined{const record=displayedResults.get(key,'mean');return record&&record.horizon===dynamics().meanHorizonUs?record:undefined;}
+/** The page shows a trajectory: every page but the levels' long-time mode (p̄ alone). */
+function showsTrajectory():boolean{return !(resultPage()==='levels'&&populationMode==='steady');}
+/** What a mean depends on: the physics and the initial state (not the duration, the samples or T). */
+function meanKey():string{return meanInputsKey(scene,dynamics());}
+/** What a trajectory depends on: the mean's inputs, the duration and the samples (not T). */
+function trajectoryKey():string{return trajectoryInputsKey(scene,dynamics());}
+function currentInputs():SolveInputs{return {trajectoryKey:trajectoryKey(),meanKey:meanKey()};}
+/** The mean at the chosen T, from any result of these mean inputs that carried it (a mean run
+ * returns every T). */
+function cachedMean():SolvedRecord|undefined{return means.get(meanKey(),dynamics().meanHorizonUs);}
+function shownTrajectory():SolvedRecord|undefined{return trajectories.get(trajectoryKey(),'trajectory');}
+/** The request the page needs now: none when its trajectory and its mean at T are here. */
+function neededSolve():SolveKind|undefined{return plannedSolve(showsTrajectory(),{trajectory:!!shownTrajectory(),mean:!!cachedMean()});}
+/** A request's identity: what it computes, for which inputs. */
+function requestKey(kind:SolveKind|undefined):string{
+  const horizon=JSON.stringify(dynamics().meanHorizonUs);
+  return kind==='mean'?`mean|${meanKey()}|${horizon}`:kind==='full'?`full|${trajectoryKey()}|${horizon}`:kind==='trajectory'?`trajectory|${trajectoryKey()}`:'';
+}
+/** What the page shows, to know when what is drawn has gone stale. */
+function shownKey():string{return `${showsTrajectory()?trajectoryKey():meanKey()}|${JSON.stringify(dynamics().meanHorizonUs)}`;}
+/** 停止 holds for the request it stopped, until other inputs are asked for. */
+function stoppedHere():boolean{return stoppedKey!==''&&stoppedKey===requestKey(neededSolve());}
 function cachedAnalysis():Analysis{
   const spectrum=resultPage()==='levels',key=JSON.stringify({kind:spectrum?'spectrum':'bare',fields:scene.fields,lasers:scene.lasers,initial:initialId(),excluded:spectrum?activeLaser()?.id:undefined});
   const cached=analysisCache.get(key);if(cached)return cached;
@@ -822,12 +846,14 @@ function cachedAnalysis():Analysis{
   root.dataset.spectrumBuildCount=String(++spectrumBuildCount);root.dataset.spectrumComputeMs=String(performance.now()-start);return analysis;
 }
 function invalidateObsoletePopulation():void{
-  // Retain the displayed calculation only; revisiting earlier parameters must solve again.
-  const physicalKey=trajectoryKey();displayedResults.activate(physicalKey);
+  // Retain the current inputs' results only: other physics or another initial state drops the
+  // means, another duration or other samples the trajectory; revisiting earlier inputs solves again.
+  trajectories.activate(trajectoryKey());means.activate(meanKey());
   // A stop holds for the inputs it stopped; other inputs, even the stopped ones again later, solve.
-  if(stoppedKey&&stoppedKey!==solveKey())stoppedKey='';
-  // A request for other inputs or another horizon is obsolete; opening another view is not.
-  const key=dynamicsKey();if(requestedPhysicalKey&&(requestedPhysicalKey!==physicalKey||requestedHorizon!==dynamics().meanHorizonUs))cancelObsoleteSolve();
+  if(stoppedKey&&!stoppedHere())stoppedKey='';
+  // A request that brings nothing for these inputs is obsolete; another T or another view is not.
+  if(running){const brings=delivers(running.kind,running,currentInputs());if(!brings.trajectory&&!brings.mean)cancelObsoleteSolve();}
+  const key=shownKey();
   if(renderedPopulationKey&&renderedPopulationKey!==key){
     if(view==='levels')patchLevelPopulations($('levels-chart'),{label:'布居待计算',steadyLabel:meanSymbol(undefined),initialId:singleInitialId()});
     const oldReadout=$('selection-readout').querySelector<HTMLElement>('[data-current-population]');if(oldReadout){oldReadout.hidden=true;const value=oldReadout.querySelector('b');if(value)value.textContent='—';}
@@ -850,76 +876,81 @@ function refreshPopulationOnly():void{
     if(p){p.hidden=value===undefined;const b=p.querySelector('b');if(b)b.textContent=value===undefined?'—':populationValue(value);}
   }else if(view==='dynamics')renderDynamics(latestAnalysis);
   else if(view==='details')renderDetailsPage();
-  renderedPopulationKey=dynamicsKey();root.dataset.populationFresh=String(!!currentResult());root.dataset.populationPaintCount=String(++populationPaintCount);refreshStatus();
+  renderedPopulationKey=shownKey();root.dataset.populationFresh=String(!!currentResult());root.dataset.populationPaintCount=String(++populationPaintCount);refreshStatus();
 }
-/** Every change solves automatically what the page shows: the mean in the levels' long-time
- * mode, else the trajectory and its mean. Nothing is solved twice or after 停止 for those inputs. */
+/** Every change solves automatically what the page shows and is not here: the mean at T in the
+ * levels' long-time mode, else the trajectory, with its mean unless that is cached. A cached
+ * mean is shown at once, with no request; a new duration or new samples with the mean cached ask
+ * for the trajectory alone. Nothing is solved twice, or after 停止 for those inputs. */
 function requestSolve():void{
-  // A trajectory already here for these inputs needs only its mean at the new horizon.
-  const physicalKey=trajectoryKey(),trajectory=displayedResults.get(physicalKey,'trajectory'),steadyOnly=meanOnly();
-  const key=dynamicsKey(steadyOnly),horizon=dynamics().meanHorizonUs;
-  if(key===stoppedKey)return;
-  displayedResults.activate(physicalKey);
-  const completed=steadyOnly?meanRecord(physicalKey):trajectory;
-  if(completed||key===requestedKey)return;
-  // A current full solve already supplies its own mean. Merely opening the
-  // level view must not cancel/restart it or submit a duplicate mean request.
-  if(solverBusy&&requestedPhysicalKey===physicalKey&&requestedHorizon===horizon&&(!requestedSteadyOnly||steadyOnly))return;
-  const epoch=displayedResults.activate(physicalKey);
-  solver.cancel();requestedKey=key;requestedPhysicalKey=physicalKey;requestedSteadyOnly=steadyOnly;requestedHorizon=horizon;
+  const kind=neededSolve(),key=requestKey(kind);
+  if(!kind||key===stoppedKey||key===requestedKey)return;
+  // A running request that brings what is missing goes on: another view or another T must not
+  // cancel or repeat it (a mean run returns every T).
+  const inputs=currentInputs();
+  if(running&&covers(running.kind,running,kind,inputs))return;
+  const submitted:Submitted={kind,inputs,epochs:{trajectory:trajectories.activate(inputs.trajectoryKey),mean:means.activate(inputs.meanKey)}},horizon=dynamics().meanHorizonUs;
+  solver.cancel();requestedKey=key;requestedKind=kind;running={kind,...inputs};
   const revision=++solverRevision;clearTimeout(solverTimer);solverBusy=true;solverQueued=true;solverError='';
   const submittedScene=structuredClone(scene),submittedSettings=structuredClone(dynamics()),submittedAt=performance.now();
-  const stillCurrent=()=>revision===solverRevision&&physicalKey===trajectoryKey()&&horizon===dynamics().meanHorizonUs;
+  const stillCurrent=()=>revision===solverRevision;
   // A checkpoint is kept, not drawn: the page shows the final result, rendered once.
   lastCheckpoint=undefined;
-  const submittedOptions={steadyOnly,onProgress:(result:DynamicsResult)=>{
+  const submittedOptions={...solveOptions(kind),onProgress:(result:DynamicsResult)=>{
     if(!stillCurrent())return;
-    lastCheckpoint={record:{result,wallMs:performance.now()-submittedAt,horizon},physicalKey,epoch,steadyOnly};refreshStatus();
+    lastCheckpoint={...submitted,record:{result,wallMs:performance.now()-submittedAt,horizon}};refreshStatus();
   }};
   solverTimer=window.setTimeout(async()=>{
     if(!stillCurrent())return;solverQueued=false;refreshPopulationOnly();const begin=performance.now();
     try{
       const result=await solver.solve(submittedScene,submittedSettings,submittedOptions);if(!stillCurrent())return;
-      solverWallMs=performance.now()-begin;const record={result,wallMs:solverWallMs,horizon};lastCheckpoint=undefined;
-      displayedResults.set(physicalKey,epoch,steadyOnly?'mean':'trajectory',record);
-      if(result.steady.converged)displayedResults.set(physicalKey,epoch,'mean',record);
-      solverBusy=false;refreshPopulationOnly();
-    }catch(e){if(!stillCurrent())return;keepLastCheckpoint('failed');solverBusy=false;solverError=message(e);refreshPopulationOnly();}
+      solverWallMs=performance.now()-begin;lastCheckpoint=undefined;
+      storeResult({result,wallMs:solverWallMs,horizon},submitted);
+      solverBusy=false;running=undefined;refreshPopulationOnly();
+    }catch(e){if(!stillCurrent())return;keepLastCheckpoint('failed');solverBusy=false;running=undefined;solverError=message(e);refreshPopulationOnly();}
   },16);
   refreshPopulationOnly();
 }
-function cancelObsoleteSolve():void{solver.cancel();solverRevision++;clearTimeout(solverTimer);lastCheckpoint=undefined;requestedKey='';requestedPhysicalKey='';requestedSteadyOnly=false;solverBusy=false;solverQueued=false;solverError='';}
-/** The running solve's last checkpoint becomes the result, rendered once and marked; a final
- * mean already here stays. */
+/** A final result: its trajectory, and its mean at every T (a kept checkpoint's replaced). */
+function storeResult(record:SolvedRecord,{kind,inputs,epochs}:Submitted):void{
+  if(kind!=='mean')trajectories.set(inputs.trajectoryKey,epochs.trajectory,'trajectory',record);
+  if(kind!=='trajectory')for(const mean of horizonRecords(record))means.set(inputs.meanKey,epochs.mean,mean.horizon,mean);
+}
+function cancelObsoleteSolve():void{solver.cancel();solverRevision++;clearTimeout(solverTimer);lastCheckpoint=undefined;requestedKey='';requestedKind=undefined;running=undefined;solverBusy=false;solverQueued=false;solverError='';}
+/** The running solve's last checkpoint becomes the result, rendered once and marked: its
+ * trajectory, and its mean at every T where no final mean is here. */
 function keepLastCheckpoint(cause:'stopped'|'failed'):void{
   const last=lastCheckpoint;lastCheckpoint=undefined;if(!last)return;
-  const record:SolvedRecord={...last.record,checkpoint:cause};
-  for(const kind of keptCheckpoint(record.result,last.steadyOnly,!!meanRecord(last.physicalKey)))displayedResults.set(last.physicalKey,last.epoch,kind,record);
+  const record:SolvedRecord={...last.record,checkpoint:cause},{trajectoryKey:tKey,meanKey:mKey}=last.inputs;
+  const kept=keptCheckpoint(record.result,last.kind,horizon=>{const mean=means.get(mKey,horizon);return !!mean&&!mean.checkpoint;});
+  if(kept.trajectory)trajectories.set(tKey,last.epochs.trajectory,'trajectory',record);
+  for(const mean of horizonRecords(record))if(kept.horizons.includes(mean.horizon))means.set(mKey,last.epochs.mean,mean.horizon,mean);
 }
 /** 停止: the running solve ends here and its last checkpoint stands as the result. Other inputs solve again. */
 function stopSolve():void{
   if(!currentSolverBusy())return;
-  const key=solveKey();keepLastCheckpoint('stopped');cancelObsoleteSolve();stoppedKey=key;requestedKey=key;
+  const key=requestKey(neededSolve());keepLastCheckpoint('stopped');cancelObsoleteSolve();stoppedKey=key;requestedKey=key;
   if(view==='dynamics')renderDynamics(latestAnalysis);else refreshPopulationOnly();
   refreshStatus();
 }
+/** What the page shows: the mean at T alone in the levels' long-time mode, else the trajectory
+ * with the mean at T (or none yet). */
 function currentRecord():SolvedRecord|undefined{
-  const key=trajectoryKey();
-  if(resultPage()==='levels'&&populationMode==='steady')return meanRecord(key);
-  const trajectory=displayedResults.get(key,'trajectory');
-  if(!trajectory||trajectory.horizon===dynamics().meanHorizonUs)return trajectory;
-  // The trajectory stays; its long-time part is the mean at the current horizon, or pending.
-  const mean=meanRecord(key);return withMean(trajectory,mean);
+  const mean=cachedMean();if(!showsTrajectory())return mean;
+  const trajectory=shownTrajectory();return trajectory&&withMean(trajectory,mean);
 }
 const mergedRecords=new WeakMap<SolvedRecord,{mean:SolvedRecord|undefined;record:SolvedRecord}>();
 function withMean(trajectory:SolvedRecord,mean:SolvedRecord|undefined):SolvedRecord{
-  const saved=mergedRecords.get(trajectory);if(saved&&saved.mean===mean)return saved.record;
+  const horizon=dynamics().meanHorizonUs,saved=mergedRecords.get(trajectory);if(saved&&saved.mean===mean&&saved.record.horizon===horizon)return saved.record;
   const steady=mean?.result.steady??{converged:false,status:'not-requested' as const,populations:null,estimatedError:null,withinTolerance:false,residual:null,initialDependent:false};
-  const checkpoint=trajectory.checkpoint??mean?.checkpoint,record={...trajectory,result:{...trajectory.result,steady},horizon:dynamics().meanHorizonUs,...(checkpoint?{checkpoint}:{})};mergedRecords.set(trajectory,{mean,record});return record;
+  const checkpoint=trajectory.checkpoint??mean?.checkpoint,record={...trajectory,result:{...trajectory.result,steady},horizon,...(checkpoint?{checkpoint}:{})};
+  mergedRecords.set(trajectory,{mean,record});return record;
 }
 function currentResult():DynamicsResult|undefined{return currentRecord()?.result;}
-function currentSolverError():string{return requestedKey===dynamicsKey(requestedSteadyOnly)?solverError:'';}
-function currentSolverBusy():boolean{return solverBusy&&requestedPhysicalKey===trajectoryKey()&&requestedHorizon===dynamics().meanHorizonUs&&(!requestedSteadyOnly||(resultPage()==='levels'&&populationMode==='steady')||!!displayedResults.get(trajectoryKey(),'trajectory'));}
+/** The last request's failure, while its inputs stand. */
+function currentSolverError():string{return requestedKind&&requestedKey===requestKey(requestedKind)?solverError:'';}
+/** The running request brings something the page shows and does not have yet. */
+function currentSolverBusy():boolean{const kind=neededSolve();return solverBusy&&!!running&&!!kind&&covers(running.kind,running,kind,currentInputs());}
 function steadyPopulationsInView(a=latestAnalysis):Record<string,number>|undefined{
   const result=currentResult(),steady=result?.steady;if(!result||!steady?.converged||!steady.populations)return undefined;
   if(resultPage()!=='levels')return steady.populations;
@@ -1073,7 +1104,7 @@ function renderDynamics(a:Analysis):void{
   const host=$('population-chart'),open=host.querySelector<HTMLElement>('.population-readout:not([hidden])')?.dataset.sampleIndex;
   unbindPopulation?.();unbindPopulation=undefined;
   const plotOptions={showTotalExcited:false,timeUnit:d.durationUnit,scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),...(open===undefined?{}:{cursor:Number(open)})};
-  const stopped=stoppedKey&&stoppedKey===solveKey();
+  const stopped=stoppedHere();
   host.innerHTML=result&&result.timesUs.length>1?populationChart(result,ids,labels,plotOptions):result?.steady.converged?`<div class="empty-state"><div><p>长期布居 ${esc(meanSymbol(raw))}</p><div class="form solver-readouts">${ids.map(id=>`<span class="field-label">${esc(labels[id]??id)}</span><span class="readout-edit">${populationValue(result.steady.populations?.[id]??0)}</span>`).join('')}</div><p class="note">${currentSolverError()?'时间演化未完成':stopped?'时间演化已停止':'时间演化计算中…'}</p></div></div>`:`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
   if(result&&result.timesUs.length>1)unbindPopulation=bindPopulationChart(host,result,ids,labels,plotOptions);
   const errors=raw&&raw.timesUs.length>1?sampleErrors(raw):undefined,banded=!!errors&&outsideRuns(errors).length>0;
@@ -1170,14 +1201,14 @@ function renderResults(allowSolve=true):void{
     const host=$('space-chart');if(!spaceMount.isConnected)host.replaceChildren(spaceMount);if(!spaceRenderer)spaceRenderer=renderSpace3D(spaceMount,scene,a,spaceSelection,{onViewChange:name=>{spaceView=name;spaceViews.setCurrent(name);}});else spaceRenderer.update(scene,a,spaceSelection);
     renderSpaceLegend(a);
   }
-  paintStateBadges();renderCount++;renderedPopulationKey=dynamicsKey();root.dataset.populationFresh=String(!!currentResult());refreshStatus();root.dataset.renderCount=String(renderCount);root.dataset.energyRenderedAt=String(performance.now());
+  paintStateBadges();renderCount++;renderedPopulationKey=shownKey();root.dataset.populationFresh=String(!!currentResult());refreshStatus();root.dataset.renderCount=String(renderCount);root.dataset.energyRenderedAt=String(performance.now());
   if(focusHost&&focusAttribute&&focusValue)focusHost.querySelector<HTMLElement>(`[${focusAttribute}="${CSS.escape(focusValue)}"]`)?.focus({preventScroll:true});
   if(allowSolve&&view!=='space')requestSolve();
 }
 
 // ---------------------------------------------------------------- the scene as a document
 function replaceScene(next:Scene,text:string):void{
-  unitDrafts.clear();fieldProblems.clear();solver.cancel();solverRevision++;clearTimeout(solverTimer);requestedKey='';requestedPhysicalKey='';requestedSteadyOnly=false;stoppedKey='';solverError='';solverBusy=false;controlsKey='';displayedResults.clear();
+  unitDrafts.clear();fieldProblems.clear();solver.cancel();solverRevision++;clearTimeout(solverTimer);lastCheckpoint=undefined;requestedKey='';requestedKind=undefined;running=undefined;stoppedKey='';solverError='';solverBusy=false;solverQueued=false;controlsKey='';trajectories.clear();means.clear();
   disposeTrees($('levels-details'));$('levels-details').replaceChildren();$('selection-readout').dataset.selectionKey='';
   normalizeScene(next);scene=next;stateLabels=keepLabels(stateLabels,id=>!id.startsWith('reference-')||!!scene.references.some(r=>r.id===id));populationTimeIndex=-1;
   selection=scene.lasers[0]?{kind:'laser',id:scene.lasers[0].id}:scene.fields[0]?{kind:'field',id:scene.fields[0].id}:{kind:'none',id:''};
