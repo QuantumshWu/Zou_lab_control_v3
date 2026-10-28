@@ -62,7 +62,10 @@ const COMPLEX_WEIGHT:f64=0.1;
 
 /// One solve of the space.
 #[derive(Clone,Debug)]
-pub struct Column{pub pole:Pole,pub steps:usize,pub residual:f64,pub added:usize,pub milliseconds:f64}
+/// One solve: its pole, inner steps, true relative residual, directions
+/// added, time (ms) and lattice block operations (operator and
+/// preconditioner applications per block).
+pub struct Column{pub pole:Pole,pub steps:usize,pub residual:f64,pub added:usize,pub milliseconds:f64,pub blocks:usize}
 
 pub struct Space{
     /// Orthonormal basis (real inner product) and its images A W.
@@ -146,7 +149,7 @@ impl Space{
     }
     /// One column at a pole; returns the directions it added.
     pub fn solve(&mut self,lattice:&mut Lattice<'_>,pole:Pole)->Result<usize,String>{
-        let clock=Instant::now();let length=self.basis[0].len();
+        let clock=Instant::now();let length=self.basis[0].len();let before=lattice.work().block_operations();
         let(added,steps,residual)=match pole{
             Pole::Zero=>{
                 let op=lattice.operator();let n=op.n;let c0=op.centre*n*n;let mut u=vec![ZERO;length];for i in 0..n{u[c0+i*n+i]=C{re:1./n as f64,im:0.};}
@@ -173,7 +176,7 @@ impl Space{
             }
         };
         self.noise_floor=NOISE*INNER_TOLERANCE;
-        self.columns.push(Column{pole,steps,residual,added,milliseconds:clock.elapsed().as_secs_f64()*1e3});
+        self.columns.push(Column{pole,steps,residual,added,milliseconds:clock.elapsed().as_secs_f64()*1e3,blocks:lattice.work().block_operations()-before});
         Ok(added)
     }
     pub fn solves(&self)->usize{self.columns.len()}

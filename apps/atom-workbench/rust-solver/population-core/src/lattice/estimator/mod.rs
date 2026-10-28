@@ -157,7 +157,7 @@ impl<'a> UnifiedEstimate<'a>{
     pub fn errors(&mut self,cp:&Checkpoint<'_>,steady:&mut dyn SteadySolves)->Result<Errors,String>{
         let(k,r)=(cp.basis.len(),cp.theta.len());let outputs=self.setup.outputs;
         let mut ms=[0.;5];let clock=Instant::now();
-        // The fast part's columns (a steady state alone has no fast part).
+        // The fast part's columns (none when no output propagates).
         if !(outputs.times.is_empty()&&outputs.horizons.is_empty()){self.lattice.add_columns(cp.basis,cp.images,cp.frame.as_ref())?;}
         ms[0]=clock.elapsed().as_secs_f64()*1e3;
         let mut b=vec![ZERO;k*r];self.setup.prepared.lapack.complex_gemm().multiply(k,r,r,ONE,cp.x,k,cp.s,r,ZERO,&mut b,k)?;
@@ -251,8 +251,8 @@ impl Estimator for UnifiedEstimate<'_>{
         // steady state with the pipeline's own steady solve.
         let current=gate::Outputs{trajectory:reduced.outputs.trajectory.to_vec(),horizons:reduced.outputs.horizons.to_vec(),
             steady:outputs.steady.then(||reduced.outputs.steady.to_vec())};
-        let steady_only=outputs.times.is_empty()&&outputs.horizons.is_empty();
-        let baseline=reduced.steady_baseline.filter(|_|steady_only).map(|b|metric(reduced.outputs.steady,b,groups));
+        let propagates=!outputs.times.is_empty()||!outputs.horizons.is_empty();
+        let baseline=reduced.steady_baseline.filter(|_|!propagates).map(|b|metric(reduced.outputs.steady,b,groups));
         let change=self.gate.change(current,groups).or(baseline);
         let limit=gate::GATE_FACTOR*ledger::POPULATION_TOLERANCE;
         // Closed at the first checkpoint without a baseline (reported as not

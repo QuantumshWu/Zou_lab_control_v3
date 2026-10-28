@@ -17,8 +17,8 @@
 //!    the real poles near its rate gain priority: the best population gain
 //!    (at least the tolerance) times its relative need, by their log
 //!    distance, and the share of the need their last solve removed.
-//! 3. Every CHECKPOINT solves (a steady state alone: also right after the
-//!    steady column): the reduced model (`reduced`), its outputs (trajectory
+//! 3. Every CHECKPOINT solves (a request that propagates nothing: also
+//!    right after the steady column): the reduced model (`reduced`), its outputs (trajectory
 //!    on the grid, horizons, steady state, slowest relaxation, conserved
 //!    count) and the error estimate (`estimate_api`); accepted when
 //!    ACCEPTANCE_FACTOR x the largest bound is within the tolerance and, for
@@ -27,9 +27,12 @@
 //!    ladder exhausted, the solve budget or the basis budget (BASIS_BYTES)
 //!    spent without acceptance is an error.
 //!
-//! A steady state alone is the kernel of the space whatever the inner
-//! product (the steady column is in it), so its model is the Euclidean
-//! Galerkin one and the frame is never built.
+//! The inner product matters only for the outputs that propagate the
+//! reduced model, exp(t G) with t > 0 (the grid, the horizons): the
+//! kernel of G, the steady state, does not depend on it up to the solve
+//! residual (the steady column is in the space). The frame is built only
+//! for a request that propagates; otherwise the model is the Euclidean
+//! Galerkin one.
 //!
 //! The conserved count is the reduced model's kernel (the conserved
 //! quantities x0 reaches), and the folded centre block's when the lattice is
@@ -88,7 +91,7 @@ pub struct Checkpoint{
 }
 
 #[derive(Clone,Debug,Default)]
-pub struct Timing{pub explicit_set_ms:f64,pub setup_ms:f64,pub frame_ms:f64,pub frame_wait_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub projection_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
+pub struct Timing{pub eigenbasis_ms:f64,pub explicit_set_ms:f64,pub setup_ms:f64,pub estimator_build_ms:f64,pub outputs_ms:f64,pub frame_ms:f64,pub frame_wait_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub projection_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
 
 pub struct Solution{
     pub explicit:ExplicitSet,pub modes:Vec<Charge>,pub translations:Vec<Charge>,
@@ -170,19 +173,20 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     let longest=if longest>0.{longest}else{LIMIT_REACH};
     let t1=if times.len()>1{times[1]}else{longest/LADDER_SAMPLES};
     let mut timing=Timing::default();
-    // A horizon needs the slowest relaxation resolved. A steady state alone
-    // is the kernel of the space, whatever the inner product (the steady
-    // column is in it): it is read from the Euclidean Galerkin model, the
-    // frame left unbuilt, and checked right after the steady column.
+    // A horizon needs the slowest relaxation resolved. The frame (the inner
+    // product) matters only when an output propagates the reduced model
+    // (exp(t G), t > 0); without one, every output is the model's kernel,
+    // read from the Euclidean Galerkin model and checked right after the
+    // steady column.
     let resolve=!request.horizons.is_empty();
-    let steady_only=times.is_empty()&&request.horizons.is_empty();
+    let propagates=!times.is_empty()||!request.horizons.is_empty();
     // 1. The lattice, its space's steady column; the request's frame
     // (kernels and the second-order block's eigensystem, the projection's
     // inner product) on its own thread meanwhile.
-    let clock=Instant::now();let eigen=prepared.eigenbasis()?;
+    let clock=Instant::now();let eigen=prepared.eigenbasis()?;timing.eigenbasis_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
     let frame=SwFrame::new(prepared,estimator::longest_time(times,request.horizons));
     std::thread::scope(|scope|->Result<Solution,String>{
-    if !steady_only{std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||frame.build()).map_err(|e|e.to_string())?;}
+    if propagates{std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||frame.build()).map_err(|e|e.to_string())?;}
     let explicit=charge_set::explicit_set(prepared,initial,tolerance)?;timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
     let clock=Instant::now();
     let mut lattice=Lattice::new(prepared,explicit.sets.clone())?;
@@ -196,12 +200,14 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     space.solve(&mut lattice,Pole::Zero)?;
     let modes=lattice.modes.clone();
     let outputs=Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups};
-    let mut estimator=construct(EstimateSetup{prepared,lattice:&explicit.sets,outputs,frame:&frame,ledger:&ledger,initial})?;
-    let(points,slow_points)=space::ladder(eigen,initial,t1,longest,tolerance)?;let mut alive=vec![true;points.len()];
-    // The frame's metric (waiting for the frame's thread), none for a
-    // steady state alone.
     let clock=Instant::now();
-    let metric=if steady_only{None}else{Some(SwMetric::new(&frame,eigen,lattice.operator())?)};
+    let mut estimator=construct(EstimateSetup{prepared,lattice:&explicit.sets,outputs,frame:&frame,ledger:&ledger,initial})?;
+    timing.estimator_build_ms=clock.elapsed().as_secs_f64()*1e3;
+    let(points,slow_points)=space::ladder(eigen,initial,t1,longest,tolerance)?;let mut alive=vec![true;points.len()];
+    // The frame's metric (waiting for the frame's thread), none when no
+    // output propagates.
+    let clock=Instant::now();
+    let metric=if propagates{Some(SwMetric::new(&frame,eigen,lattice.operator())?)}else{None};
     timing.frame_wait_ms=clock.elapsed().as_secs_f64()*1e3;
     let test=metric.as_ref().map(|m|m as &dyn TestSpace);
     let mut galerkin=Projection::new(lattice.operator())?;
@@ -213,9 +219,11 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
         galerkin.ingest(test,&space.basis,&space.images)?;
         let model=galerkin.model(lapack,space.initial_norm,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
         timing.projection_ms=galerkin.milliseconds;timing.images_ms=space.images_ms;
+        let clock3=Instant::now();
         let trajectory=model.trajectory(galerkin,times);
         let horizons:Vec<Vec<f64>>=request.horizons.iter().map(|&t|model.horizon(galerkin,t)).collect();
         let steady=model.steady_populations(galerkin);
+        timing.outputs_ms+=clock3.elapsed().as_secs_f64()*1e3;
         let clock2=Instant::now();
         let mut estimate=estimator.estimate(&view(space,&model,ModelOutputs{trajectory:&trajectory,horizons:&horizons,steady:&steady},galerkin),lattice)?;
         galerkin.clear_frame();
@@ -244,7 +252,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     loop{
         let live:Vec<usize>=(0..points.len()).filter(|&i|alive[i]).collect();
         let exhausted=live.is_empty()||space.solves()>=MAXIMUM_SOLVES||space.full();
-        if exhausted||space.solves()%CHECKPOINT==0||(steady_only&&space.solves()==1){
+        if exhausted||space.solves()%CHECKPOINT==0||(!propagates&&space.solves()==1){
             let(model,point,ranking)=checkpoint(&space,&mut galerkin,&mut lattice,&mut timing,&mut checkpoints,exhausted)?;
             if let Some(o)=observer.as_mut(){o(&point);}
             if point.accepted{accepted=Some(model);break;}
@@ -295,6 +303,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     };
     let last=checkpoints.last().cloned().ok_or("An accepted run has its checkpoint")?;
     // Outputs.
+    let clock=Instant::now();
     let mut trajectory=last.trajectory.clone();
     if let Some(first)=trajectory.first_mut(){*first=(0..n).map(|i|initial[i*n+i].re).collect();}
     let projected:Vec<Vec<f64>>=trajectory.iter().map(|p|simplex(p)).collect();
@@ -305,6 +314,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     let steady_field=field(&model.steady,false)?;let steady_image=field(&model.steady,true)?;
     let steady_residual=ops.norm(&steady_image)/ops.norm(&steady_field).max(f64::MIN_POSITIVE);
     let horizon_fields=request.horizons.iter().map(|&t|field(&model.state(t),false)).collect::<Result<Vec<_>,_>>()?;
+    timing.outputs_ms+=clock.elapsed().as_secs_f64()*1e3;
     let work=lattice.work().clone();
     let conserved=if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{last.conserved};
     timing.solves_ms=work.milliseconds;timing.images_ms=space.images_ms;timing.projection_ms=galerkin.milliseconds;timing.total_ms=started.elapsed().as_secs_f64()*1e3;

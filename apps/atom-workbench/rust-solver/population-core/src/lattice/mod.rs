@@ -138,6 +138,8 @@ impl LatticePrepared{
     /// request (about 0.7 s for 32 states) and shared: the exact block
     /// solves, the eigen-coordinates of the frame and of the error
     /// propagation.
+    /// The eigenbasis when it has been built (never builds it).
+    pub fn eigenbasis_built(&self)->Option<&eigenbasis::BlockEigenbasis>{self.eigenbasis.get().and_then(|r|r.as_ref().ok())}
     pub fn eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
         self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::new(self)).as_ref().map_err(|e|e.clone())
     }
