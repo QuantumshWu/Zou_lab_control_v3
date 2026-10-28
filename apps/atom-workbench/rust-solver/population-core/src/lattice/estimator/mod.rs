@@ -35,8 +35,9 @@
 //!   and the two large terms of the exact form cancel badly: every Ritz mode
 //!   goes through the SW part (always taking the slow part: per-time ratio
 //!   0.03, R2 14.1) but the kernel modes, which always take it. The
-//!   horizons and the steady state always take the slow part, and only it:
-//!   the frame is built for a trajectory alone.
+//!   horizons and the steady state always take the slow part, and only it
+//!   (the fast part, the frame's kernels and classes, serves the trajectory
+//!   alone).
 //!
 //! Outputs: the trajectory on the grid (laboratory readout), each horizon T
 //! (centre readout: the time average) and the steady state, every one
@@ -59,8 +60,10 @@ pub use slow::{SlowPool,SlowSolution};
 /// Kernel support: the first-order entry floor and the horizon floor on an
 /// entry's second-order rate times the longest output time. R2: 5e-3 keeps
 /// 0.3% of the beat kernel's entries and reproduces the full kernels for
-/// the estimate (5e-2 does not); 1e-3 (0.6-2% of the entries) was set for
-/// the frame's metric of the earlier reduced model.
+/// the estimate (5e-2 does not); the reduced model's metric (`frame`) needs
+/// more: five lasers + tweezer at 20 us grew 2-19 pseudo-modes from the
+/// 12th solve at 5e-3 (accepted at 40 solves), none at 1e-3 (0.6-2% of the
+/// entries; accepted at 12), 1e-4 or 1e-5.
 pub const KERNEL_ENTRY:f64=1e-3;
 pub const KERNEL_HORIZON_RATE:f64=1e-2;
 /// Near-resonant entries above this stay couplings: the first-order

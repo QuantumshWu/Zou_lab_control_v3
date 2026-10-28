@@ -29,7 +29,8 @@
 //! i (S_s v - S_-s v) of every Krylov vector join the basis (J-real like v).
 //!
 //! The ladder: sigma log-spaced from LADDER_TOP / t1 down to 1 / T_max
-//! (T_max the longest output time), PER_DECADE per decade; complex poles
+//! (T_max the grid's last time, else the longest horizon: `pipeline`),
+//! PER_DECADE per decade; complex poles
 //! sigma + i omega only at the frequencies omega > sigma of dressed centre
 //! modes slower than sigma (|Re lambda| < sigma) that carry at least
 //! COMPLEX_WEIGHT x tolerance of x0's population weight (merged within

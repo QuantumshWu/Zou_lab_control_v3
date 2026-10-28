@@ -1,13 +1,23 @@
 //! The reduced model of the space and every output from it.
 //!
-//! The projection (N1, round five): the Euclidean (Hilbert-Schmidt)
-//! Galerkin model G = Re W^T A W on the orthonormal basis, x(t) ~ W u(t),
-//! u' = G u, u(0) = c0 = |x0| e_0 (w_0 = x0 / |x0|). Its numerical range
-//! obeys the one provable bound, Re theta <= Gamma/2, and it depends on no
-//! frame (measured: the same block work as the SW frame's metric, without
-//! its per-checkpoint projection). Append-only: G and F = Re (AW)^T AW (the
-//! residual's norm for the error transform) grow by one column and row per
-//! basis column.
+//! The projection (N1, round four): a Galerkin model in the inner product
+//! Re <x, M y> of the Schrieffer-Wolff / Floquet frame's metric
+//! M = T^H T (`frame::SwMetric`): T = V^-1 (I - S~) E^-1 removes the
+//! first-order couplings between the modes and leaves the dissipative
+//! second-order blocks, so the reduced numerical range is pushed right only
+//! at second order (no strict guarantee: the provable bound is the
+//! Hilbert-Schmidt one, Re theta <= Gamma/2). One model for every output
+//! that propagates (the trajectory, the horizons); the Euclidean Galerkin
+//! model (M = I) of N1's round five grew spurious near-zero slow pairs in
+//! the Rust product (`frame`). A request that propagates nothing (the
+//! steady state alone) takes M = I: the kernel does not depend on the
+//! metric (the steady column is in the space). Append-only: per basis
+//! column w_j only M w_j is kept (on the canonical modes), and the Gram
+//! matrices K = Re W^H M W and H = Re (M W)^H A W grow by one column (and
+//! row) each; G = K^-1 H in the coordinates of W (the basis is
+//! Euclidean-orthonormal), x(t) ~ W u(t), u' = G u, u(0) = c0 = |x0| e_0
+//! (w_0 = x0 / |x0|). The Euclidean Grams E = Re W^T A W and
+//! F = Re (AW)^T AW give the residual's norm for the error transform.
 //!
 //! Trace correction: tr x_q evolves by -i nu_q tr x_q exactly; G is replaced
 //! by the Frobenius-closest matrix with the trace rows of W as left
@@ -39,6 +49,7 @@
 //! error near t = 1/sigma at frequency omega.
 use super::*;
 use super::eigenbasis::BlockEigenbasis;
+use super::frame::SwMetric;
 use super::krylov::Vectors;
 use super::operator::LatticeOperator;
 
@@ -85,17 +96,21 @@ pub(crate) fn product(lapack:&Lapack,a:&[f64],b:&[f64],r:usize,k:usize,c:usize)-
 }
 pub(crate) fn transpose_rows(a:&[f64],r:usize,c:usize)->Vec<f64>{let mut t=vec![0.;r*c];for i in 0..r{for j in 0..c{t[j*r+i]=a[i*c+j];}}t}
 
-/// The Gram matrices of the space.
+/// The metric columns M W of the space and the Gram matrices.
 pub struct Projection{
     n:usize,d:usize,
     /// Canonical modes: (mode, weight, nu); the centre's position.
     pub canonical:Vec<(usize,f64,f64)>,centre:usize,
+    /// M w_j on the canonical modes, weighted (`SwMetric::apply`),
+    /// column-major (length L = canonical x d per column).
+    metric:Vec<C>,length:usize,
     /// Per column: the canonical modes' diagonals (canonical x n) and the
     /// trace functionals [centre, then Re and Im per other canonical mode].
     populations:Vec<Vec<C>>,traces:Vec<Vec<f64>>,
-    /// E = Re W^T A W and F = Re (AW)^T A W, row-major over the covered
-    /// columns.
-    e:Vec<f64>,f:Vec<f64>,covered:usize,
+    /// K = Re W^H M W, H = Re (M W)^H A W, E = Re W^T A W and
+    /// F = Re (AW)^T A W, row-major over the covered columns; whether
+    /// M = I (no metric: K = I, H = E).
+    k:Vec<f64>,h:Vec<f64>,e:Vec<f64>,f:Vec<f64>,covered:usize,euclidean:bool,
     vectors:Vectors,
     pub milliseconds:f64,
 }
@@ -106,13 +121,28 @@ impl Projection{
         let n=op.n;let d=n*n;
         let canonical:Vec<(usize,f64,f64)>=(0..op.modes.len()).filter(|&q|op.canonical[q]).map(|q|(q,if op.mirror[q]==q{1.}else{2.},op.nu[q])).collect();
         let centre=canonical.iter().position(|c|c.0==op.centre).unwrap_or(0);
-        Ok(Self{n,d,canonical,centre,populations:vec![],traces:vec![],e:vec![],f:vec![],covered:0,vectors:Vectors::new(op,1)?,milliseconds:0.})
+        let length=canonical.len()*d;
+        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],traces:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,euclidean:true,
+            vectors:Vectors::new(op,1)?,milliseconds:0.})
     }
     pub fn columns(&self)->usize{self.covered}
-    /// Takes the space's columns not yet covered.
-    pub fn ingest(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
+    /// Re <z_a, field_c> on the canonical modes for metric columns z
+    /// (column-major, `count` of them) and fields (row-major |fields| x
+    /// count): one task per field, a fixed order of summation.
+    fn metric_dots(&self,z:&[C],count:usize,fields:&[&[C]])->Result<Vec<f64>,String>{
+        let(d,l)=(self.d,self.length);
+        let rows=Execution::new()?.map(fields.to_vec(),|field|{
+            (0..count).map(|a|{let column=&z[a*l..(a+1)*l];let mut s=0.;
+                for(c,&(q,_,_))in self.canonical.iter().enumerate(){for(x,y)in column[c*d..(c+1)*d].iter().zip(&field[q*d..(q+1)*d]){s+=x.re*y.re+x.im*y.im;}}s}).collect::<Vec<f64>>()});
+        Ok(rows.concat())
+    }
+    /// Takes the space's columns not yet covered; `metric` None: M = I (a
+    /// request that propagates nothing).
+    pub fn ingest(&mut self,metric:Option<&SwMetric<'_>>,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
         let clock=Instant::now();let(old,new)=(self.covered,basis.len());if new==old{return Ok(());}
-        let(n,d)=(self.n,self.d);let width=new-old;
+        let(n,d,l)=(self.n,self.d,self.length);let width=new-old;
+        self.euclidean=metric.is_none();
+        if let Some(metric)=metric{let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();self.metric.extend(metric.apply(&fresh)?);}
         for column in &basis[old..new]{
             let pops:Vec<C>=self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect();
             let mut traces=vec![0.;2*self.canonical.len()-1];let mut at=1;
@@ -123,13 +153,22 @@ impl Projection{
         let all_basis:Vec<&[C]>=basis[..new].iter().map(|v|v.as_slice()).collect();
         let all_images:Vec<&[C]>=images[..new].iter().map(|v|v.as_slice()).collect();
         let new_images=&all_images[old..];
+        let(kb,hc,hr)=if self.euclidean{(vec![],vec![],vec![])}else{
+            let z_new=&self.metric[old*l..new*l];
+            (self.metric_dots(z_new,width,&all_basis)?,                     // K[i, old + c] at i * width + c
+             self.metric_dots(&self.metric,new,new_images)?,               // H[i, old + c] at c * new + i
+             self.metric_dots(z_new,width,&all_images[..old])?)};          // H[old + c, j] at j * width + c
         let ec=self.vectors.gram(&all_basis,new_images)?;                 // E[:, old..new]
         let er=self.vectors.gram(&all_basis[old..],&all_images[..old])?;  // E[old..new, ..old]
         let fc=self.vectors.gram(&all_images,new_images)?;                // F[:, old..new]
-        let(mut e,mut f)=(grow(&self.e,old,new),grow(&self.f,old,new));
-        for i in 0..new{for c in 0..width{let j=old+c;e[i*new+j]=ec[i*width+c];f[i*new+j]=fc[i*width+c];f[j*new+i]=fc[i*width+c];}}
-        for c in 0..width{for j in 0..old{e[(old+c)*new+j]=er[c*old+j];}}
-        self.e=e;self.f=f;self.covered=new;
+        let(mut k,mut h,mut e,mut f)=(grow(&self.k,old,new),grow(&self.h,old,new),grow(&self.e,old,new),grow(&self.f,old,new));
+        for i in 0..new{for c in 0..width{let j=old+c;
+            if !self.euclidean{k[i*new+j]=kb[i*width+c];k[j*new+i]=kb[i*width+c];h[i*new+j]=hc[c*new+i];}
+            e[i*new+j]=ec[i*width+c];
+            f[i*new+j]=fc[i*width+c];f[j*new+i]=fc[i*width+c];}}
+        for c in 0..width{for j in 0..old{if !self.euclidean{h[(old+c)*new+j]=hr[j*width+c];}e[(old+c)*new+j]=er[c*old+j];}}
+        if self.euclidean{k=vec![0.;new*new];for i in 0..new{k[i*new+i]=1.;}h=e.clone();}
+        self.k=k;self.h=h;self.e=e;self.f=f;self.covered=new;
         self.milliseconds+=clock.elapsed().as_secs_f64()*1e3;Ok(())
     }
 }
@@ -158,7 +197,9 @@ impl Projection{
     /// population tolerance.
     pub fn model(&self,lapack:&Lapack,initial_norm:f64,longest:f64,tolerance:f64)->Result<Model,String>{
         let k=self.covered;let n=self.n;let r=k;
-        let g0=self.e.clone();
+        // G0 = K^-1 H (K symmetric: its row-major form is its column-major one).
+        let g0=if self.euclidean{self.h.clone()}else{let(lu,pivots)=lapack.factor(&self.k,k)?;
+            transpose_rows(&lapack.solve_matrix_factored(&lu,&pivots,&transpose_rows(&self.h,k,k),k)?,k,k)};
         let mut c0=vec![0.;k];c0[0]=initial_norm;
         // Trace correction on the significant rows.
         let kt=self.traces[0].len();
