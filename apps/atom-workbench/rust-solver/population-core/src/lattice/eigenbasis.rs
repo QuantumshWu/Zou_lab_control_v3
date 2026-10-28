@@ -23,10 +23,11 @@
 //! each diagonalized exactly, the couplings between them at first
 //! (vectors) and second (values) order, with the mixing and the values'
 //! error over CENTRE_HORIZON bounded (merged clusters otherwise). The
-//! pair (X_ab, X_ba) is the flip pair of the real form. Two controls
-//! (`ClusterControl`): `centre` (mixing 0.05, block solves to about 1e-3;
-//! clusters of 250-280 on the tweezer cases, 0.25-0.3 s) and `exact` (mixing
-//! 1e-8: to roundoff; one cluster on the tweezer cases, the old cost). The
+//! pair (X_ab, X_ba) is the flip pair of the real form. Two eigenbases:
+//! `clustered` (mixing 0.05, block solves to about 1e-3; clusters of
+//! 250-280 on the tweezer cases, 0.25-0.3 s) and `exact` (its exact limit
+//! in the Hermitian basis: the connected blocks of the real form, each
+//! whole; one block of 1024 on the tweezer cases). The
 //! sector grading of the frame does not decouple the centre: the separable
 //! part's eigenvectors mix ground and excited states by 6% (three and five
 //! lasers + tweezer) to 36% (four lasers, no trap) (near drives at charge 0),
@@ -45,7 +46,11 @@
 //! solves give the norm of a block's resolvent (`resolvent_norms`, the ring
 //! condition).
 //!
-//! The basis is request-level (`LatticePrepared::eigenbasis`): computed once,
+//! The bases are request-level (`LatticePrepared::eigenbasis`, exact: the
+//! frame, its metric, the estimator's fast part and the pole ordering of a
+//! request that propagates; `screening_eigenbasis`, the clustered one when
+//! the exact one is not built: the explicit set, the ladder and the ring
+//! solves of a request that propagates nothing), each computed once and
 //! shared by every pipeline that needs it.
 use super::*;
 use super::floquet::{Frames,adjoint,sandwich_batch,transpose};
@@ -120,8 +125,9 @@ fn functional_coordinates(f:&[C],n:usize)->Vec<C>{
 }
 
 impl BlockEigenbasis{
-    /// The eigenbasis to `control` (`ClusterControl::exact` or `centre`).
-    pub fn new(prepared:&LatticePrepared,control:ClusterControl)->Result<Self,String>{
+    /// To the clusters' error control (`ClusterControl::centre`), in the
+    /// separable part's frame.
+    pub fn clustered(prepared:&LatticePrepared)->Result<Self,String>{
         let clock=Instant::now();let lapack=&prepared.lapack;
         let n=prepared.generator.n;let d=n*n;
         // The separable part's frame: X_ab = p_a q_b, Q = P^H (row-major).
@@ -152,41 +158,99 @@ impl BlockEigenbasis{
         drop(right);
         // The eigensystem by clusters, the diagonal as the gaps' reference.
         let reference:Vec<C>=(0..d).map(|j|m[j+d*j]).collect();
-        let system=clustered_eigensystem(lapack,&m,&reference,&first,control)?;drop(m);
-        let(mut kind,mut lambda)=(vec![0_u8;d],system.values.clone());let mut l=0;
-        while l<d{if system.pair[l]{kind[l]=1;kind[l+1]=2;lambda[l+1]=conj(lambda[l]);l+=2;}else{lambda[l].im=0.;l+=1;}}
-        // E_R from the Hermitian-basis coordinates of B V[:, l] = P C_l Q
-        // (the leading column of each value; a pair's second is its flip), and
-        // E_R^-1 from the functionals of V^-1[l, :] B^-1: F = P^-T R_l conj(P^-1).
-        let leading:Vec<usize>=(0..d).filter(|&l|kind[l]!=2).collect();
-        let tasks:Vec<Vec<usize>>=leading.chunks(BASE_CHUNK).map(|c|c.to_vec()).collect();
+        let system=clustered_eigensystem(lapack,&m,&reference,&first,ClusterControl::centre())?;drop(m);
+        // The Hermitian-basis coordinates of B V[:, l] = P C_l Q (the leading
+        // column of each value), and the functionals of V^-1[l, :] B^-1:
+        // F = P^-T R_l conj(P^-1).
         let(pinv_t,pinv_c)=(transpose(pinv,n),pinv.iter().map(|z|conj(*z)).collect::<Vec<C>>());
         let(v,w,slot_ref)=(&system.vectors,&system.inverse,&slot);
-        let parts=execution.map(tasks.clone(),|ls|->Result<(Vec<C>,Vec<C>),String>{
+        let transform=|ls:&[usize]|->Result<(Vec<C>,Vec<C>),String>{
             let count=ls.len();let gemm=lapack.complex_gemm();let mut stack=Vec::new();
             let mut right=vec![ZERO;d*count];let mut left=vec![ZERO;d*count];
             for(c,&l)in ls.iter().enumerate(){for k in 0..d{right[c*d+k]=v[slot_ref[k]+d*l];left[c*d+k]=w[l+d*slot_ref[k]];}}
             sandwich_batch(&gemm,n,p,&q,&mut right,count,&mut stack)?;
             sandwich_batch(&gemm,n,&pinv_t,&pinv_c,&mut left,count,&mut stack)?;
-            let columns:Vec<C>=right.chunks_exact(d).flat_map(|b|coordinates(b,n)).collect();
-            let rows:Vec<C>=left.chunks_exact(d).flat_map(|b|functional_coordinates(b,n)).collect();
-            Ok((columns,rows))});
+            Ok((right.chunks_exact(d).flat_map(|b|coordinates(b,n)).collect(),left.chunks_exact(d).flat_map(|b|functional_coordinates(b,n)).collect()))};
+        Self::assemble(prepared,&system,transform,clock)
+    }
+    /// Exact: the clustered method's exact limit (every coupling joins its
+    /// coordinates) in the Hermitian basis, where the clusters are the
+    /// connected blocks of the real form (exact zeros, for speed only), each
+    /// diagonalized whole in real arithmetic (`real_inverse`).
+    pub fn exact(prepared:&LatticePrepared)->Result<Self,String>{
+        let clock=Instant::now();let lapack=&prepared.lapack;
+        let n=prepared.generator.n;let d=n*n;let l=prepared.centre_generator();
+        // The real form: column k is the coordinate vector of L0' applied to
+        // basis element k.
+        let r=std::f64::consts::FRAC_1_SQRT_2;
+        let column=|k:usize|->Vec<C>{(0..d).map(|row|l[row*d+k]).collect()};
+        let mut real=vec![0_f64;d*d];
+        let mut put=|k:usize,y:Vec<C>|{for(i,v)in coordinates(&y,n).into_iter().enumerate(){real[i+d*k]=v.re;}};
+        for i in 0..n{put(i,column(i*n+i));}
+        let mut k=n;
+        for i in 0..n{for j in i+1..n{
+            let(a,b)=(column(i*n+j),column(j*n+i));
+            put(k,a.iter().zip(&b).map(|(x,y)|C{re:r*(x.re+y.re),im:r*(x.im+y.im)}).collect());
+            put(k+1,a.iter().zip(&b).map(|(x,y)|C{re:-r*(x.im-y.im),im:r*(x.re-y.re)}).collect());
+            k+=2;}}
+        drop(l);
+        // Connected blocks: union-find over the nonzero entries, each block's
+        // elements ascending, the blocks by their first element.
+        fn root(parent:&mut[usize],mut i:usize)->usize{while parent[i]!=i{parent[i]=parent[parent[i]];i=parent[i];}i}
+        let mut parent:Vec<usize>=(0..d).collect();
+        for k in 0..d{for i in 0..d{if i!=k&&real[i+d*k]!=0.{let(a,b)=(root(&mut parent,i),root(&mut parent,k));if a!=b{parent[a.max(b)]=a.min(b);}}}}
+        let mut groups:BTreeMap<usize,Vec<usize>>=BTreeMap::new();
+        for i in 0..d{let r=root(&mut parent,i);groups.entry(r).or_default().push(i);}
+        let(mut re,mut im,mut vectors,mut inverse)=(vec![0.;d],vec![0.;d],vec![0.;d*d],vec![0.;d*d]);
+        let mut column=0;let largest=groups.values().map(|g|g.len()).max().unwrap_or(0);
+        for members in groups.values(){
+            let b=members.len();let mut sub=vec![0.;b*b];
+            for(c,&k)in members.iter().enumerate(){for(i,&row)in members.iter().enumerate(){sub[i+b*c]=real[row+d*k];}}
+            let(br,bi,bv)=lapack.eigen(&sub,b)?;let bw=real_inverse(lapack,&bv,b)?;
+            for c in 0..b{re[column+c]=br[c];im[column+c]=bi[c];
+                for(i,&row)in members.iter().enumerate(){vectors[row+d*(column+c)]=bv[i+b*c];inverse[(column+c)+d*row]=bw[c+b*i];}}
+            column+=b;
+        }
+        drop(real);
+        let mut kind=vec![0_u8;d];let mut lambda=vec![ZERO;d];let mut j=0;
+        while j<d{
+            if im[j]!=0.&&j+1<d{kind[j]=1;kind[j+1]=2;lambda[j]=C{re:re[j],im:im[j]};lambda[j+1]=C{re:re[j],im:-im[j]};j+=2;}
+            else{lambda[j]=C{re:re[j],im:0.};j+=1;}
+        }
+        Self::finish(n,d,lapack,lambda,vectors,inverse,kind,[groups.len(),largest,1],clock)
+    }
+    /// The eigenbasis from an eigensystem and `transform`: for leading
+    /// eigen-indices (each real value, the first of each pair; a pair's
+    /// second is its flip), the Hermitian-basis coordinates of their
+    /// eigenvectors and the functionals of their rows of the inverse.
+    /// Unit eigenvectors (a pair's complex vector), as the frame's metric and
+    /// the kernels' support rule read them.
+    fn assemble(prepared:&LatticePrepared,system:&Clustered,transform:impl Fn(&[usize])->Result<(Vec<C>,Vec<C>),String>+Sync,clock:Instant)->Result<Self,String>{
+        let lapack=&prepared.lapack;let n=prepared.generator.n;let d=n*n;
+        let(mut kind,mut lambda)=(vec![0_u8;d],system.values.clone());let mut l=0;
+        while l<d{if system.pair[l]{kind[l]=1;kind[l+1]=2;lambda[l+1]=conj(lambda[l]);l+=2;}else{lambda[l].im=0.;l+=1;}}
+        let leading:Vec<usize>=(0..d).filter(|&l|kind[l]!=2).collect();
+        let tasks:Vec<Vec<usize>>=leading.chunks(BASE_CHUNK).map(|c|c.to_vec()).collect();
+        let parts=Execution::new()?.map(tasks.clone(),|ls|transform(&ls));
         let(mut vectors,mut inverse)=(vec![0.;d*d],vec![0.;d*d]);
         for(ls,part)in tasks.iter().zip(parts){let(columns,rows)=part?;
             for(c,&l)in ls.iter().enumerate(){let(x,f)=(&columns[c*d..(c+1)*d],&rows[c*d..(c+1)*d]);
-                // Unit eigenvectors in the Hermitian basis (a pair's complex vector),
-                // as the frame's metric and the kernels' support rule read them.
                 let size=x.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();
                 let(x,f):(Vec<C>,Vec<C>)=(x.iter().map(|z|scaled(*z,1./size)).collect(),f.iter().map(|z|scaled(*z,size)).collect());
                 if kind[l]==1{for h in 0..d{vectors[h+d*l]=x[h].re;vectors[h+d*(l+1)]=x[h].im;inverse[l+d*h]=2.*f[h].re;inverse[l+1+d*h]=-2.*f[h].im;}}
                 else{for h in 0..d{vectors[h+d*l]=x[h].re;inverse[l+d*h]=f[h].re;}}}}
+        Self::finish(n,d,lapack,lambda,vectors,inverse,kind,[system.clusters,system.largest,system.passes],clock)
+    }
+    /// The readout and the condition of E_R, E_R^-1 and the values.
+    #[allow(clippy::too_many_arguments)]
+    fn finish(n:usize,d:usize,lapack:&Arc<Lapack>,lambda:Vec<C>,vectors:Vec<f64>,inverse:Vec<f64>,kind:Vec<u8>,clusters:[usize;3],clock:Instant)->Result<Self,String>{
         if vectors.iter().chain(&inverse).any(|v|!v.is_finite()){return Err("Nonfinite centre-generator eigenvectors".into());}
         let mut readout=vec![ZERO;n*d];
         for i in 0..n{for j in 0..d{let v=vectors[i+d*j];
             readout[i+n*j]=match kind[j]{0=>C{re:v,im:0.},1=>C{re:v,im:vectors[i+d*(j+1)]},_=>C{re:vectors[i+d*(j-1)],im:-v}};}}
         let one=|a:&[f64]|(0..d).map(|c|a[c*d..(c+1)*d].iter().map(|x|x.abs()).sum::<f64>()).fold(0.,f64::max);
         let condition=one(&vectors)*one(&inverse);
-        Ok(Self{n,d,lapack:Arc::clone(lapack),lambda,vectors,inverse,kind,readout,condition,clusters:system.clusters,largest_cluster:system.largest,passes:system.passes,
+        Ok(Self{n,d,lapack:Arc::clone(lapack),lambda,vectors,inverse,kind,readout,condition,clusters:clusters[0],largest_cluster:clusters[1],passes:clusters[2],
             milliseconds:clock.elapsed().as_secs_f64()*1e3})
     }
     /// x_k <- (L0' - i nu_k - shift)^-1 x_k for row-major blocks x_k (exact;
@@ -368,10 +432,6 @@ const CLUSTER_ENTRY:f64=1e-2;
 /// (the horizon, or 1 / |Re mu| when shorter), exceeds CLUSTER_PHASE.
 const CLUSTER_MIXING:f64=0.05;
 const CLUSTER_PHASE:f64=1e-2;
-/// The exact control (`ClusterControl::exact`).
-const EXACT_ENTRY:f64=1e-10;
-const EXACT_MIXING:f64=1e-8;
-const EXACT_PHASE:f64=1e-8;
 /// Merge passes before the whole matrix is diagonalized at once.
 const CLUSTER_PASSES:usize=4;
 /// Clusters of at least CLUSTER_SPLIT coordinates run their products over
@@ -393,10 +453,6 @@ impl ClusterControl{
     pub fn blocks(horizon:f64)->Self{Self{entry:CLUSTER_ENTRY,mixing:CLUSTER_MIXING,phase:CLUSTER_PHASE,horizon}}
     /// The centre generator's clustered eigenbasis (over CENTRE_HORIZON).
     pub fn centre()->Self{Self{entry:CLUSTER_ENTRY,mixing:CLUSTER_MIXING,phase:CLUSTER_PHASE,horizon:CENTRE_HORIZON}}
-    /// Exact to roundoff: the mixings between clusters below EXACT_MIXING
-    /// (their square, the vectors' error, below double precision), the
-    /// values' third-order error over CENTRE_HORIZON below EXACT_PHASE.
-    pub fn exact()->Self{Self{entry:EXACT_ENTRY,mixing:EXACT_MIXING,phase:EXACT_PHASE,horizon:CENTRE_HORIZON}}
 }
 
 /// An eigensystem m V = V diag(values) (`clustered_eigensystem`): V and V^-1

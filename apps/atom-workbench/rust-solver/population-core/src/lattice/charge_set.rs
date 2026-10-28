@@ -106,7 +106,7 @@ impl RingCondition<'_>{
         let key=|nu:f64|(nu*1e6).round()as i64;
         let mut missing:Vec<f64>=Vec::new();
         for(q,_,_)in &found{let nu=self.prepared.nu(q)?;if !self.resolvent.contains_key(&key(nu))&&!missing.iter().any(|&m|key(m)==key(nu)){missing.push(nu);}}
-        if !missing.is_empty(){for(nu,v)in missing.iter().zip(self.prepared.clustered_eigenbasis()?.resolvent_norms(&missing)?){self.resolvent.insert(key(*nu),v);}}
+        if !missing.is_empty(){for(nu,v)in missing.iter().zip(self.prepared.screening_eigenbasis()?.resolvent_norms(&missing)?){self.resolvent.insert(key(*nu),v);}}
         found.into_iter().map(|(q,p,t)|{let rho=self.coupling(&t)*self.resolvent[&key(self.prepared.nu(&q)?)];Ok((q,p,rho))}).collect()
     }
     /// While an internal edge has rho above RING_COUPLING: the ring charge
@@ -133,7 +133,7 @@ fn seed_amplitudes(prepared:&LatticePrepared,probes:&[Vec<C>])->Result<BTreeMap<
     let modes=prepared.modes(SEED_DEPTH)?;let index:BTreeMap<&Charge,usize>=modes.iter().enumerate().map(|(i,q)|(q,i)).collect();
     let mut layer=vec![usize::MAX;modes.len()];
     for k in(0..=SEED_DEPTH).rev(){for q in prepared.modes(k)?{layer[index[&q]]=k;}}
-    let eigen=prepared.clustered_eigenbasis()?;
+    let eigen=prepared.screening_eigenbasis()?;
     let mut op=LatticeOperator::new(prepared,&modes)?;
     // Layer k+1 from the layers up to k (disjoint: no diagonal block acts).
     let masks:Vec<(Vec<bool>,Vec<bool>)>=(0..SEED_DEPTH).map(|k|(layer.iter().map(|&l|l==k+1).collect(),layer.iter().map(|&l|l<=k).collect())).collect();
@@ -163,7 +163,7 @@ fn seed_amplitudes(prepared:&LatticePrepared,probes:&[Vec<C>])->Result<BTreeMap<
 pub fn explicit_set(prepared:&LatticePrepared,initial:&[C],tolerance:f64)->Result<ExplicitSet,String>{
     let clock=Instant::now();let zero=prepared.generator.zero.clone();
     let mut probes=vec![initial.to_vec()];
-    if let Ok(block)=prepared.clustered_eigenbasis()?.kernel_block(){probes.push(block);}
+    if let Ok(block)=prepared.screening_eigenbasis()?.kernel_block(){probes.push(block);}
     let amplitudes=seed_amplitudes(prepared,&probes)?;
     let mut condition=RingCondition{prepared,steps:prepared.plan.structural_steps(),coupling:BTreeMap::new(),resolvent:BTreeMap::new()};
     // 1. The gated start.

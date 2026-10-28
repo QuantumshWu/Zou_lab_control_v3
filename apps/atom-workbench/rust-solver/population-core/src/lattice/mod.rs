@@ -151,15 +151,20 @@ impl LatticePrepared{
     /// 4e-6 with 30x tighter clusters) the reduced model grew 11-19
     /// pseudo-modes and took 32 solves or none instead of 12.
     pub fn eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
-        self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::new(self,eigenbasis::ClusterControl::exact())).as_ref().map_err(|e|e.clone())
+        self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::exact(self)).as_ref().map_err(|e|e.clone())
     }
     /// The eigenbasis to the clusters' error control (block solves to about
-    /// 1e-3, 0.25-0.3 s for 32 states): the explicit set, the ladder, the
-    /// error estimate's ring solves (refined) and a request that propagates
-    /// nothing. The explicit sets, the steady poles and their inner steps
-    /// are the exact basis's on every case.
+    /// 1e-3, 0.25-0.3 s for 32 states).
     pub fn clustered_eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
-        self.clustered.get_or_init(||eigenbasis::BlockEigenbasis::new(self,eigenbasis::ClusterControl::centre())).as_ref().map_err(|e|e.clone())
+        self.clustered.get_or_init(||eigenbasis::BlockEigenbasis::clustered(self)).as_ref().map_err(|e|e.clone())
+    }
+    /// The eigenbasis the screening reads (the explicit set, the ladder, the
+    /// error estimate's ring solves, refined): the exact one once built (a
+    /// request that propagates builds it first), else the clustered one. The
+    /// explicit sets, the steady poles and their inner steps are the exact
+    /// basis's on every case.
+    pub fn screening_eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
+        match self.eigenbasis.get(){Some(Ok(e))=>Ok(e),_=>self.clustered_eigenbasis()}
     }
     /// The near ball of order k: every charge reachable from 0 with at most k
     /// structural steps (explicit near steps above the structural floor and

@@ -323,15 +323,15 @@ impl<'p> ErrorLattice<'p>{
         let(oa,ob)=(outflow(self,&xa)?,outflow(self,&xb)?);let source=join(&oa,&ob);let size=norm(&source);
         if size==0.{return Ok(vec![ZERO;inner*d]);}
         // (D_R - z) y = source, then -y.
-        // The clustered basis's block solves, refined against the ring's blocks.
-        let clustered=self.prepared.clustered_eigenbasis()?;
-        let mut y=source.clone();clustered.solve_blocks(&self.ring_nu,shift,&mut y)?;self.work.block_solves+=count;
+        // The screening basis's block solves, refined against the ring's blocks.
+        let screening=self.prepared.screening_eigenbasis()?;
+        let mut y=source.clone();screening.solve_blocks(&self.ring_nu,shift,&mut y)?;self.work.block_solves+=count;
         for _ in 0..RING_REFINEMENTS{
             let mut r=source.clone();
             let applied=self.ring_parts(&y,Parts::Diagonal,true)?;
             for((t,a),v)in r.iter_mut().zip(&applied).zip(&y){let w=mul(shift,*v);t.re-=a.re-w.re;t.im-=a.im-w.im;}
             if norm(&r)<=RING_RESIDUAL*size{break;}
-            clustered.solve_blocks(&self.ring_nu,shift,&mut r)?;self.work.block_solves+=count;
+            screening.solve_blocks(&self.ring_nu,shift,&mut r)?;self.work.block_solves+=count;
             for(a,b)in y.iter_mut().zip(&r){add(a,*b);}
         }
         for v in &mut y{v.re=-v.re;v.im=-v.im;}
