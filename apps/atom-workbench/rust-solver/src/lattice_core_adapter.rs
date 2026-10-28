@@ -1,8 +1,8 @@
 //! The protocol bridge to the population core, the folded Fourier lattice:
 //! every rb87-full/2 request. The TypeScript model is the only owner of
 //! atomic physics; this adapter borrows its H/C, exact phase coordinates and
-//! state metadata, and serves the finite trajectory with the t -> infinity
-//! mean or the mean at the horizon `meanHorizonUs`: the mean from a run of
+//! state metadata, and serves the finite trajectory with the long-time mean
+//! at the standard horizons: the mean from a run of
 //! the pipeline (`lattice::pipeline`) for the mean alone, the trajectory
 //! from a run for the grid alone (see the result contract). The population tolerance is
 //! the fixed `ledger::POPULATION_TOLERANCE`; a request may only restate it.
@@ -15,8 +15,8 @@
 //! checkpoint: a computed result is never withheld. The mean of every
 //! request is the run of the mean alone (the same for a full request and a
 //! mean-only one): one joint run for the three standard horizons (100 ms,
-//! 1 s and the t -> infinity mean) and the requested one when it is another;
-//! a full request runs it on its own thread beside the run of its
+//! 1 s and the t -> infinity mean), `meanHorizonUs` one of them (1e5, 1e6
+//! or null); a full request runs it on its own thread beside the run of its
 //! trajectory, whose space spans the grid's times only, and one with
 //! `includeAsymptotic` false runs no mean. Every
 //! checkpoint of the request's own run (a full request's trajectory, once
@@ -189,7 +189,7 @@ struct Prepared{
 fn prepare_request(model:&Model,options:&Options)->Result<Prepared,String>{
     if options.population_tolerance!=POPULATION_TOLERANCE{
         return Err(format!("populationTolerance is fixed at {POPULATION_TOLERANCE} (requested {})",options.population_tolerance));}
-    if options.mean_horizon_us.is_some_and(|h|!(h.is_finite()&&h>0.)){return Err("meanHorizonUs must be a finite positive time in us, or null".into());}
+    if !STANDARD_HORIZONS.contains(&options.mean_horizon_us){return Err("meanHorizonUs must be 1e5 or 1e6 us, or null for the t -> infinity mean".into());}
     if model.dimension!=32||model.states.len()!=32{return Err("rb87-full/2 requires the complete 32-state Rb87 model".into());}
     let(ground,requested)=groups(model)?;
     let(lattice,axes)=prepare(model,&ground)?;
@@ -265,10 +265,9 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
 }
 
 /// The mean of a request alone: one joint run for the standard horizons
-/// (100 ms, 1 s, the steady state) and the requested `meanHorizonUs` when it
-/// is another; `observer` sees every checkpoint.
-fn mean_run(request:&Prepared,horizon:Option<f64>,observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
-    let horizons=mean_horizons(horizon);
+/// (100 ms, 1 s, the steady state); `observer` sees every checkpoint.
+fn mean_run(request:&Prepared,observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
+    let horizons=mean_horizons();
     pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&horizons,steady:true,groups:&request.groups,explicit:&request.explicit},Some(observer))
 }
 /// The trajectory of a request alone on its grid.
@@ -277,14 +276,10 @@ fn trajectory_run(request:&Prepared,times:&[f64],observer:&mut dyn FnMut(&Checkp
 }
 
 /// The standard horizons every mean run returns (the t -> infinity mean as
-/// None), and the finite horizons of a mean run: the standard ones and the
-/// requested one when it is another.
+/// None), the only ones a request may ask for, and the finite ones of a
+/// mean run.
 const STANDARD_HORIZONS:[Option<f64>;3]=[Some(1e5),Some(1e6),None];
-fn mean_horizons(requested:Option<f64>)->Vec<f64>{
-    let mut horizons:Vec<f64>=STANDARD_HORIZONS.iter().flatten().copied().collect();
-    if let Some(t)=requested{if !horizons.contains(&t){horizons.push(t);}}
-    horizons
-}
+fn mean_horizons()->Vec<f64>{STANDARD_HORIZONS.iter().flatten().copied().collect()}
 
 /// One mean of an answer (`horizon` T, or None for the steady state): the
 /// laboratory time average projected onto the density matrices (the change
@@ -364,14 +359,12 @@ fn mean_at(model:&Model,request:&Prepared,answer:&Answer,horizons:&[f64],horizon
 /// `asymptoticHorizons`, the requested one's (`meanHorizonUs`, else the
 /// steady state) entry in the top-level fields; and the mean's diagnostics.
 fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->Result<(serde_json::Map<String,Value>,serde_json::Map<String,Value>),String>{
-    let horizons=mean_horizons(options.mean_horizon_us);
-    let mut means=STANDARD_HORIZONS.iter().map(|&h|mean_at(model,request,answer,&horizons,h)).collect::<Result<Vec<_>,_>>()?;
-    // The requested mean: its standard horizon's, else its own (not listed).
-    let requested=match STANDARD_HORIZONS.iter().position(|&h|h==options.mean_horizon_us){Some(i)=>i,
-        None=>{means.push(mean_at(model,request,answer,&horizons,options.mean_horizon_us)?);means.len()-1}};
+    let horizons=mean_horizons();
+    let means=STANDARD_HORIZONS.iter().map(|&h|mean_at(model,request,answer,&horizons,h)).collect::<Result<Vec<_>,_>>()?;
+    let requested=STANDARD_HORIZONS.iter().position(|&h|h==options.mean_horizon_us).ok_or("meanHorizonUs outside the standard horizons")?;
     let mean=&means[requested];
     let mut fields=primary(&mean.entry());
-    fields.insert("asymptoticHorizons".into(),json!(means[..STANDARD_HORIZONS.len()].iter().map(Mean::entry).collect::<Vec<_>>()));
+    fields.insert("asymptoticHorizons".into(),json!(means.iter().map(Mean::entry).collect::<Vec<_>>()));
     let slow=answer.slowest.as_ref();let resolved=slow.filter(|s|s.resolved());
     let diagnostics=json!({"asymptoticMethod":METHOD,"meanDensityFrame":MEAN_FRAME,
         "uniquenessScope":if answer.conserved>1{"several conserved quantities: mean of the specified initial density"}else{"unique limit: every mode but the trace relaxes, however slowly"},
@@ -449,7 +442,7 @@ pub fn solve(model:&Model,options:&Options,publish:&mut dyn FnMut(&Value))->Resu
     if options.steady_only{
         let mut observe=|_:&Checkpoint,answer:&Answer|{if failure.is_some(){return;}
             match result(model,options,&request,None,Some(Ok((answer,None))),false,started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
-        let mean=mean_run(&request,options.mean_horizon_us,&mut observe);
+        let mean=mean_run(&request,&mut observe);
         if let Some(e)=failure{return Err(e);}
         return result(model,options,&request,None,Some(mean.as_ref().map(|s|(&s.answer,Some(s))).map_err(|e|e.clone())),true,started);
     }
@@ -460,7 +453,7 @@ pub fn solve(model:&Model,options:&Options,publish:&mut dyn FnMut(&Value))->Resu
     let mean_view=||mean.get().map(|m|m.as_ref().map(|s|(&s.answer,Some(s))).map_err(|e|e.clone()));
     let trajectory=std::thread::scope(|scope|->Result<Solution,String>{
         let worker=if options.include_asymptotic{Some(std::thread::Builder::new().stack_size(MEAN_STACK).spawn_scoped(scope,||{
-            let _=mean.set(mean_run(&request,options.mean_horizon_us,&mut |_:&Checkpoint,_:&Answer|{}));}).map_err(|e|e.to_string())?)}else{None};
+            let _=mean.set(mean_run(&request,&mut |_:&Checkpoint,_:&Answer|{}));}).map_err(|e|e.to_string())?)}else{None};
         let mut observe=|_:&Checkpoint,answer:&Answer|{if failure.is_some()||(options.include_asymptotic&&mean.get().is_none()){return;}
             match result(model,options,&request,Some((answer,None)),mean_view(),false,started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
         let trajectory=trajectory_run(&request,&times,&mut observe);
@@ -533,8 +526,9 @@ mod tests{
     /// One mean request returns all three standard horizons
     /// (`asymptoticHorizons`: 100 ms, 1 s, infinity), each within its bound
     /// of the default scene's exact references, and the requested horizon's
-    /// top-level fields are its entry; a full request without the mean
-    /// (includeAsymptotic false) runs no mean and returns none.
+    /// top-level fields are its entry; another horizon is refused; a full
+    /// request without the mean (includeAsymptotic false) runs no mean and
+    /// returns none.
     #[test]
     fn one_mean_request_returns_the_three_standard_horizons(){
         let fixture:Value=serde_json::from_str(include_str!("../tests/fixtures/default_scene_horizons.json")).unwrap();
@@ -555,6 +549,8 @@ mod tests{
             assert!(off<=bound+FLOOR,"p({key}) {off:e} from the exact, bound {bound:e}");
         }
         assert_primary_is(&out,&entries[1]);
+        // A horizon outside the standard ones is refused.
+        let mut other=o.clone();other["meanHorizonUs"]=json!(3e6);assert!(solve(&model,&serde_json::from_value(other).unwrap(),&mut |_|{}).is_err());
         // The trajectory alone: no mean run, no mean fields.
         o["steadyOnly"]=json!(false);o["includeAsymptotic"]=json!(false);o["durationUs"]=json!(1.);o["samples"]=json!(11);
         let alone=solve(&model,&serde_json::from_value(o).unwrap(),&mut |_|{}).unwrap();
