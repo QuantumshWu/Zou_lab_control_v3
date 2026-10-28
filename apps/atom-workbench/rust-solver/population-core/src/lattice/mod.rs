@@ -18,7 +18,7 @@
 //!   shared by the preconditioner and the error estimate;
 //! - `eigenbasis`: the real eigenbasis of the folded centre generator
 //!   (request-level, `LatticePrepared::eigenbasis`): exact batched block
-//!   solves, the dressed coordinates, propagation through the dressed blocks;
+//!   solves, the eigen- and dressed coordinates;
 //! - `operator`: the lattice operator on a set of charges, whole or
 //!   restricted to target rows and source columns;
 //! - `preconditioner`: the Floquet-frame preconditioner with its centre
@@ -27,11 +27,11 @@
 //! - `charge_set`: the explicit charges P of a request and their ring Q;
 //! - `poles`: the lattice P u Q and its solves at the poles;
 //! - `space`: the one rational Krylov space from x0 (poles, translations);
-//! - `reduced`: the Galerkin model in the dressed coordinates and every
-//!   output from it;
 //! - `frame`: the Schrieffer-Wolff / Floquet frame of a request (first-order
-//!   kernels, the second-order block's eigensystem), shared by the error
-//!   estimate;
+//!   kernels, the second-order block's eigensystem), shared by the reduced
+//!   model's inner product and the error estimate;
+//! - `reduced`: the Galerkin model in the frame's inner product and every
+//!   output from it;
 //! - `estimate_api`: what the error estimate reads and returns;
 //! - `estimator`: the error estimate (one error equation for every output,
 //!   the omitted ring slaved, Schrieffer-Wolff propagation of the near
@@ -135,7 +135,8 @@ impl LatticePrepared{
     }
     /// The real eigenbasis of the folded centre generator, computed once per
     /// request (about 0.7 s for 32 states) and shared: the exact block
-    /// solves, the dressed coordinates and the error propagation.
+    /// solves, the eigen-coordinates of the frame and of the error
+    /// propagation.
     pub fn eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
         self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::new(self)).as_ref().map_err(|e|e.clone())
     }

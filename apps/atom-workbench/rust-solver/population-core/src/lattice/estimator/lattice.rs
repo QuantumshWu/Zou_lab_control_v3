@@ -164,43 +164,57 @@ impl<'p> ErrorLattice<'p>{
     pub fn dimension(&self)->usize{self.modes.len()*self.d}
     /// Process the basis columns not seen yet (columns are append-only).
     pub fn add_columns(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
-        let clock=Instant::now();
-        for j in self.columns..basis.len(){
-            if basis[j].len()!=self.dimension()||images[j].len()!=basis[j].len(){return Err("Estimator: basis column dimensions differ from the lattice".into());}
-            let(zw,ow)=self.coordinates(&basis[j])?;
-            let(za,oa)=if self.ring_in_fast{
-                let g=self.ring_feedback(&basis[j],ZERO)?;let image:Vec<C>=images[j].iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
-                self.coordinates(&image)?}else{self.coordinates(&images[j])?};
-            let d=self.d;
+        let clock=Instant::now();let(old,new)=(self.columns,basis.len());
+        if new<=old{return Ok(());}
+        if basis[old..new].iter().zip(&images[old..new]).any(|(w,a)|w.len()!=self.dimension()||a.len()!=w.len()){return Err("Estimator: basis column dimensions differ from the lattice".into());}
+        // Every new column and image in one batch.
+        let mut fed:Vec<Vec<C>>=Vec::new();
+        if self.ring_in_fast{for j in old..new{let g=self.ring_feedback(&basis[j],ZERO)?;fed.push(images[j].iter().zip(&g).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect());}}
+        let fields:Vec<&[C]>=(old..new).flat_map(|j|[basis[j].as_slice(),if self.ring_in_fast{fed[j-old].as_slice()}else{images[j].as_slice()}]).collect();
+        let coordinates=self.coordinates(&fields)?;
+        let d=self.d;
+        for pair in coordinates.chunks_exact(2){let((zw,ow),(za,oa))=(&pair[0],&pair[1]);
             for(slot,(w,a))in self.basis_coordinates.iter_mut().zip(self.image_coordinates.iter_mut()).enumerate(){
                 w.extend_from_slice(&zw[slot*d..(slot+1)*d]);a.extend_from_slice(&za[slot*d..(slot+1)*d]);}
             for(slot,(w,a))in self.outer_basis.iter_mut().zip(self.outer_image.iter_mut()).enumerate(){
                 w.extend_from_slice(&ow[slot*d..(slot+1)*d]);a.extend_from_slice(&oa[slot*d..(slot+1)*d]);}
-            self.columns+=1;self.work.columns+=1;
         }
+        self.columns=new;self.work.columns+=new-old;
         self.work.column_ms+=clock.elapsed().as_secs_f64()*1e3;
         Ok(())
     }
-    /// Class coordinates V_c^-1 E^-1 (I - S) v of a field on P u Q per near
-    /// mode (in `near` order), and its coordinates E^-1 v per outer mode.
-    fn coordinates(&mut self,v:&[C])->Result<(Vec<C>,Vec<C>),String>{
-        let d=self.d;let execution=Execution::new()?;let basis=self.basis;
-        let chunks:Vec<Vec<usize>>=self.frames.chunks(BLOCKS_PER_TASK).map(|c|c.to_vec()).collect();
-        let parts=execution.map(chunks.clone(),|modes|{let blocks:Vec<&[C]>=modes.iter().map(|&q|&v[q*d..(q+1)*d]).collect();basis.coefficients(&blocks)});
-        let mut c=vec![ZERO;self.modes.len()*d];
-        for(modes,part)in chunks.iter().zip(parts){let part=part?;for(i,&q)in modes.iter().enumerate(){c[q*d..(q+1)*d].copy_from_slice(&part[i*d..(i+1)*d]);}}
-        let mut t:Vec<C>=self.near.iter().flat_map(|&a|c[a*d..(a+1)*d].iter().copied()).collect();
-        for &(a,b,s)in &self.pairs{let slot=self.near.iter().position(|&x|x==a).unwrap();self.kernels.subtract_kernel(s,&c[b*d..(b+1)*d],&mut t[slot*d..(slot+1)*d]);}
-        let(classes,class_of,lapack,near)=(&self.classes,&self.class_of,&self.prepared.lapack,&self.near);
-        let t=&t;
-        let slots:Vec<usize>=(0..near.len()).collect();
+    /// Class coordinates V_c^-1 E^-1 (I - S) v of fields on P u Q per near
+    /// mode (in `near` order), and their coordinates E^-1 v per outer mode:
+    /// the eigen-coordinates of every field's frame modes and the class
+    /// changes of every near mode as GEMMs over the batch.
+    fn coordinates(&mut self,fields:&[&[C]])->Result<Vec<(Vec<C>,Vec<C>)>,String>{
+        let(d,m)=(self.d,fields.len());let execution=Execution::new()?;let basis=self.basis;let frames=self.frames.len();
+        let items:Vec<(usize,usize)>=(0..m).flat_map(|f|(0..frames).map(move|i|(f,i))).collect();
+        let chunks:Vec<Vec<(usize,usize)>>=items.chunks(BLOCKS_PER_TASK).map(|c|c.to_vec()).collect();
+        let parts=execution.map(chunks.clone(),|list|{let blocks:Vec<&[C]>=list.iter().map(|&(f,i)|{let q=self.frames[i];&fields[f][q*d..(q+1)*d]}).collect();basis.coefficients(&blocks)});
+        // c[f][frame slot]
+        let mut c=vec![ZERO;m*frames*d];
+        for(list,part)in chunks.iter().zip(parts){let part=part?;for(k,&(f,i))in list.iter().enumerate(){c[(f*frames+i)*d..(f*frames+i+1)*d].copy_from_slice(&part[k*d..(k+1)*d]);}}
+        let position=|q:usize|self.frames.iter().position(|&x|x==q).unwrap();
+        let near=self.near.len();
+        let mut t=vec![ZERO;m*near*d];
+        for f in 0..m{
+            for(slot,&a)in self.near.iter().enumerate(){let i=position(a);t[(f*near+slot)*d..(f*near+slot+1)*d].copy_from_slice(&c[(f*frames+i)*d..(f*frames+i+1)*d]);}
+            for &(a,b,s)in &self.pairs{let slot=self.near.iter().position(|&x|x==a).unwrap();let i=position(b);
+                let(source,target)=(&c[(f*frames+i)*d..(f*frames+i+1)*d],(f*near+slot)*d);self.kernels.subtract_kernel(s,source,&mut t[target..target+d]);}
+        }
+        // V_c^-1 per near slot over the batch (one GEMM per slot and chunk).
+        let(classes,class_of,lapack)=(&self.classes,&self.class_of,&self.prepared.lapack);
+        let slots:Vec<usize>=(0..near).collect();let t=&t;
         let parts=execution.map(slots,|slot|->Result<Vec<C>,String>{
-            let mut out=vec![ZERO;d];
-            lapack.complex_gemm().multiply(d,1,d,ONE,&classes[class_of[near[slot]]].inverse,d,&t[slot*d..(slot+1)*d],d,ZERO,&mut out,d)?;Ok(out)});
-        let mut z=Vec::with_capacity(near.len()*d);for p in parts{z.extend(p?);}
-        let outer:Vec<C>=self.outer_modes.iter().flat_map(|&q|c[q*d..(q+1)*d].iter().copied()).collect();
-        self.work.frame_blocks+=self.frames.len()+self.near.len();
-        Ok((z,outer))
+            let mut input=vec![ZERO;d*m];for f in 0..m{input[f*d..(f+1)*d].copy_from_slice(&t[(f*near+slot)*d..(f*near+slot+1)*d]);}
+            let mut out=vec![ZERO;d*m];
+            lapack.complex_gemm().multiply(d,m,d,ONE,&classes[class_of[self.near[slot]]].inverse,d,&input,d,ZERO,&mut out,d)?;Ok(out)});
+        let mut z=vec![vec![ZERO;near*d];m];
+        for(slot,part)in parts.into_iter().enumerate(){let part=part?;for f in 0..m{z[f][slot*d..(slot+1)*d].copy_from_slice(&part[f*d..(f+1)*d]);}}
+        let outer:Vec<usize>=self.outer_modes.iter().map(|&q|position(q)).collect();
+        self.work.frame_blocks+=m*(frames+near);
+        Ok(z.into_iter().enumerate().map(|(f,z)|(z,outer.iter().flat_map(|&i|c[(f*frames+i)*d..(f*frames+i+1)*d].iter().copied()).collect())).collect())
     }
     /// The ring's feedback on P u Q of a field x at the shift z:
     /// (B (z - D_R)^-1 C x)|_{P u Q}.

@@ -31,10 +31,10 @@ use super::*;
 use super::charge_set::{self,ExplicitSet};
 use super::estimate_api::{ACCEPTANCE_FACTOR,Construct,ErrorEstimate,EstimateSetup,Outputs,ReducedView};
 use super::ledger::{self,EXPANSION_LIMIT,POPULATION_TOLERANCE,RemainderLedger};
-use super::reduced::{Dressed,Model,SLOW_ACCURACY,SlowRate};
+use super::reduced::{Model,Projection,SLOW_ACCURACY,SlowRate};
 use super::poles::{InnerWork,Lattice,Pole};
 use super::space::{self,Column,SLOW_FLOOR,Space};
-use super::frame::SwFrame;
+use super::frame::{SwFrame,SwMetric};
 use super::estimator;
 
 /// The error estimate in use.
@@ -67,7 +67,7 @@ pub struct Request<'a>{
 pub struct Checkpoint{
     pub solves:usize,pub columns:usize,pub dimension:usize,
     pub estimate:ErrorEstimate,pub accepted:bool,
-    pub growing:usize,pub reflected:usize,pub projected:usize,pub conserved:usize,pub slowest:Option<SlowRate>,
+    pub growing:usize,pub clipped:usize,pub projected:usize,pub conserved:usize,pub slowest:Option<SlowRate>,
     /// Raw outputs: trajectory rows, horizon rows, steady row.
     pub trajectory:Vec<Vec<f64>>,pub horizons:Vec<Vec<f64>>,pub steady:Vec<f64>,
     /// The solves so far (inner steps, block operations, ms) and the run's
@@ -77,7 +77,7 @@ pub struct Checkpoint{
 }
 
 #[derive(Clone,Debug,Default)]
-pub struct Timing{pub explicit_set_ms:f64,pub setup_ms:f64,pub frame_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub dressed_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
+pub struct Timing{pub explicit_set_ms:f64,pub setup_ms:f64,pub frame_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub projection_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
 
 pub struct Solution{
     pub explicit:ExplicitSet,pub modes:Vec<Charge>,pub translations:Vec<Charge>,
@@ -155,7 +155,6 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     let ledger=RemainderLedger::new(&prepared.plan,lattice.operator().nu_max(),lattice.operator().dropped())?;
     if ledger.expansion_parameter>EXPANSION_LIMIT{return Err(format!("Static fold expansion parameter {:e} above {EXPANSION_LIMIT:e}",ledger.expansion_parameter));}
     let modes=lattice.modes.clone();
-    eprintln!("DBG ledger {:?} total {:e} nu_max {:e} dropped {:?}",ledger,ledger.total(),lattice.operator().nu_max(),lattice.operator().dropped());
     // 2. The space: translations, the steady column.
     let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*(op.modes.len()+op.canonical_count()))};
     let mut space=Space::new(&mut lattice,initial,capacity)?;
@@ -164,27 +163,28 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     let frame=SwFrame::new(prepared,estimator::longest_time(times,request.horizons))?;timing.frame_ms=frame.milliseconds[0]+frame.milliseconds[1];
     let mut estimator=construct(EstimateSetup{prepared,lattice:&explicit.sets,outputs,frame:&frame,ledger:&ledger,initial})?;
     let(points,slow_points)=space::ladder(eigen,initial,t1,longest,tolerance)?;let mut alive=vec![true;points.len()];
-    let mut dressed=Dressed::new(lattice.operator());
+    let metric=SwMetric::new(&frame,eigen,lattice.operator())?;
+    let mut galerkin=Projection::new(lattice.operator())?;
     timing.setup_ms=clock.elapsed().as_secs_f64()*1e3;
     space.solve(&mut lattice,Pole::Zero)?;
     let mut queue:Vec<usize>=Vec::new();
     let mut checkpoints:Vec<Checkpoint>=Vec::new();
     let lapack=&prepared.lapack;let ops=super::krylov::Vectors::new(lattice.operator(),1)?;
-    let mut checkpoint=|space:&Space,dressed:&mut Dressed,lattice:&mut Lattice<'_>,timing:&mut Timing,checkpoints:&mut Vec<Checkpoint>|->Result<(Model,Checkpoint),String>{
+    let mut checkpoint=|space:&Space,galerkin:&mut Projection,lattice:&mut Lattice<'_>,timing:&mut Timing,checkpoints:&mut Vec<Checkpoint>|->Result<(Model,Checkpoint),String>{
         let clock=Instant::now();
-        dressed.ingest(lapack,eigen,&space.basis,&space.images)?;
-        let model=dressed.model(lapack,space.initial_norm,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
-        timing.dressed_ms=dressed.milliseconds;timing.images_ms=space.images_ms;
-        let trajectory=model.trajectory(dressed,times);
-        let horizons:Vec<Vec<f64>>=request.horizons.iter().map(|&t|model.horizon(dressed,t)).collect();
-        let steady=model.steady_populations(dressed);
+        galerkin.ingest(&metric,&space.basis,&space.images)?;
+        let model=galerkin.model(lapack,space.initial_norm,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
+        timing.projection_ms=galerkin.milliseconds;timing.images_ms=space.images_ms;
+        let trajectory=model.trajectory(galerkin,times);
+        let horizons:Vec<Vec<f64>>=request.horizons.iter().map(|&t|model.horizon(galerkin,t)).collect();
+        let steady=model.steady_populations(galerkin);
         let clock2=Instant::now();
         let mut estimate=estimator.estimate(&view(space,&model),lattice)?;
         timing.estimate_ms+=clock2.elapsed().as_secs_f64()*1e3;
         for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
         let accepted=ACCEPTANCE_FACTOR*estimate.largest()<=tolerance;
         let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,accepted,
-            growing:model.growing,reflected:model.reflected,projected:model.projected,conserved:model.conserved(),slowest:slowest(&model,space,&ops)?,
+            growing:model.growing,clipped:model.clipped,projected:model.projected,conserved:model.conserved(),slowest:slowest(&model,space,&ops)?,
             trajectory,horizons,steady,inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
         checkpoints.push(point.clone());
         Ok((model,point))
@@ -203,7 +203,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
         let live:Vec<usize>=(0..points.len()).filter(|&i|alive[i]).collect();
         let exhausted=live.is_empty()||space.solves()>=MAXIMUM_SOLVES||space.full();
         if exhausted||space.solves()%CHECKPOINT==0{
-            let(model,point)=checkpoint(&space,&mut dressed,&mut lattice,&mut timing,&mut checkpoints)?;
+            let(model,point)=checkpoint(&space,&mut galerkin,&mut lattice,&mut timing,&mut checkpoints)?;
             if let Some(o)=observer.as_mut(){o(&point);}
             if point.accepted{accepted=Some(model);break;}
             if exhausted{break;}
@@ -213,9 +213,9 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
         if queue.is_empty(){
             let clock=Instant::now();
             let model=match current.take(){Some((solves,model))if solves==space.solves()=>model,_=>{
-                dressed.ingest(lapack,eigen,&space.basis,&space.images)?;dressed.model(lapack,space.initial_norm,longest,tolerance)?}};
+                galerkin.ingest(&metric,&space.basis,&space.images)?;galerkin.model(lapack,space.initial_norm,longest,tolerance)?}};
             let xis:Vec<C>=live.iter().map(|&i|points[i].sigma()).collect();
-            let transform=model.error_transform(&dressed,eigen,lapack,&xis)?;
+            let transform=model.error_transform(&galerkin,&space.basis,&space.images,eigen,lapack,&xis)?;
             for(&i,p)in live.iter().zip(&transform){if slow_points[i]{continue;}
                 score[i]=points[i].sigma().re*p.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
                 if let Some(before)=solved_at[i].take(){remaining[i]=if before>0.{(score[i]/before).min(1.)}else{1.};}
@@ -265,7 +265,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,constru
     let horizon_fields=request.horizons.iter().map(|&t|field(&model.state(t),false)).collect::<Result<Vec<_>,_>>()?;
     let work=lattice.work().clone();
     let conserved=if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{last.conserved};
-    timing.solves_ms=work.milliseconds;timing.images_ms=space.images_ms;timing.dressed_ms=dressed.milliseconds;timing.total_ms=started.elapsed().as_secs_f64()*1e3;
+    timing.solves_ms=work.milliseconds;timing.images_ms=space.images_ms;timing.projection_ms=galerkin.milliseconds;timing.total_ms=started.elapsed().as_secs_f64()*1e3;
     Ok(Solution{modes,translations:space.translations(),trajectory:projected,projection,horizons:last.horizons.clone(),steady:last.steady.clone(),
         horizon_fields,steady_field,steady_residual,estimate:last.estimate.clone(),conserved,slowest:last.slowest,
         columns:space.columns.clone(),dimension:model.r,images:space.basis.len(),work,ledger:ledger.clone(),timing,checkpoints,explicit:explicit.clone()})

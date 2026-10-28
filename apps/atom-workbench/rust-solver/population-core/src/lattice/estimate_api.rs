@@ -93,18 +93,19 @@ pub struct ReducedView<'a>{
     pub basis:&'a[Vec<C>],pub images:&'a[Vec<C>],
     /// Reduced dimension r and the coordinates: x(t) ~ W X u(t) with X
     /// (k x r, row-major, k = basis.len()), u' = G u (r x r, row-major),
-    /// u(0) = c0. G is the Galerkin model in the dressed eigen-coordinates
-    /// with the trace correction (not a pure projection: the residual
-    /// A W X - W X G is what the outputs leave out).
+    /// u(0) = c0. G is the Galerkin model in the Schrieffer-Wolff / Floquet
+    /// frame's inner product with the trace correction (not a pure
+    /// projection: the residual A W X - W X G is what the outputs leave
+    /// out); X = I there.
     pub r:usize,pub x:&'a[f64],pub g:&'a[f64],pub c0:&'a[f64],
     /// Ritz decomposition G S = S diag(theta): theta (r), S (r x r,
     /// row-major, column j the eigenvector of theta_j), a = S^-1 c0 (r).
     pub theta:&'a[C],pub vectors:&'a[C],pub coefficients:&'a[C],
     /// The values and coefficients the outputs use: u(t) = S diag(e^{used_theta t}) used_coefficients.
-    /// They differ from theta, a only on growing modes (negligible growth
-    /// clipped to the axis, small amplitude projected out with its readout
-    /// charged in `growth_charge`, else reflected) and on the kernel
-    /// (theta = 0 exactly).
+    /// They differ from theta, a only on growing modes (small amplitude
+    /// projected out with its readout charged in `growth_charge`, any other
+    /// clipped to the imaginary axis: the residual of the clipped pair, read
+    /// from the images, carries it) and on the kernel (theta = 0 exactly).
     pub used_theta:&'a[C],pub used_coefficients:&'a[C],pub kernel:&'a[bool],
     /// Population size of the modes projected out (charged by the pipeline).
     pub growth_charge:f64,

@@ -48,11 +48,14 @@ pub use propagate::{Readout,RitzSources};
 pub use slow::{SlowPool,SlowSolution};
 pub use gate::OutputGate;
 
-/// Kernel support: the first-order entry floor (R2: 5e-3 keeps 0.3% of the
-/// beat kernel's entries and reproduces the full kernels; 5e-2 does not)
-/// and the horizon floor on an entry's second-order rate times the longest
-/// output time.
-pub const KERNEL_ENTRY:f64=5e-3;
+/// Kernel support: the first-order entry floor and the horizon floor on an
+/// entry's second-order rate times the longest output time. R2: 5e-3 keeps
+/// 0.3% of the beat kernel's entries and reproduces the full kernels for
+/// the estimate (5e-2 does not); the reduced model's frame (`frame`) needs
+/// more: five lasers + tweezer at 20 us grew 2-19 pseudo-modes from the
+/// 12th solve at 5e-3 (accepted at 40 solves), none at 1e-3 (0.6-2% of
+/// the entries; accepted at 12), 1e-4 or 1e-5.
+pub const KERNEL_ENTRY:f64=1e-3;
 pub const KERNEL_HORIZON_RATE:f64=1e-2;
 /// Near-resonant entries above this stay couplings: the first-order
 /// kernel is no small parameter there (N1).
