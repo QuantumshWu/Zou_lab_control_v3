@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
-import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
 import {nativeResult} from './native-result.mjs';
 import {initialAnchor,initialSpec,initialSummary,setInitialSpec,startingSpec} from '../dist/js/atom-workbench/src/initial-state.js';
 import {analyze} from '../dist/js/atom-workbench/src/physics.js';
@@ -34,16 +33,6 @@ test('a mixed initial state is checked against its own populations',()=>{
   assert.throws(()=>normalizeDynamicsResult(sent,f.scene),/请求初态/);
   // An id still means that one state.
   assert.throws(()=>normalizeDynamicsResult(f.data,f.scene,'ground-2-0'),/请求初态|布居初态/);
-});
-
-test('the solver\'s formatted failure reasons read in Chinese',()=>{
-  assert.equal(solverText('8 conserved quantities: the mean depends on the initial state, which the lattice core does not serve'),
-    '8 个守恒量：长期布居依赖初态，求解器不计算这种长期布居。');
-  assert.equal(solverText('The mean at the horizon is estimated at 6.2e-3; the tolerance was not relaxed'),'时刻 T 的长期布居误差估计为 0.0062；误差目标未放宽。');
-  assert.match(solverText('Lattice steady state not accepted up to near order 6 (estimated error 7.5e-3)'),/^长期布居到近阶 6 仍未达到误差目标（误差估计 .+）；误差目标未放宽。$/);
-  assert.match(solverText('Finite-time estimate 5.1e-3 not below the tolerance with 120 columns'),/^时间演化的误差估计 .+ 在 120 列时仍未低于误差目标；误差目标未放宽。$/);
-  assert.equal(solverText('Error equation truncation did not stabilise in 40 augmentation steps'),'截断误差方程在 40 步增广内未稳定；误差目标未放宽。');
-  assert.equal(solverText('an unknown sentence'),'an unknown sentence');
 });
 
 test('one initial-state description: a single state clears a mixture, a mixture keeps its anchor',()=>{

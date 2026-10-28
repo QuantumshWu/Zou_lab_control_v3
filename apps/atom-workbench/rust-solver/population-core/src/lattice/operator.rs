@@ -77,10 +77,9 @@ pub struct LatticeOperator<'a>{
     /// Complex multiply-adds of one application: per-block part, rests.
     block_work:usize,rest_work:usize,
     pub work:usize,
-    /// Edges per kind (canonical targets): explicit steps, cross folds.
-    pub edge_counts:[usize;2],
-    /// Summed row sums of the K^(1) rests left out (0 when they are applied).
-    pub dropped_k1_rest:f64,
+    /// Whether the K^(1) rests are applied but for their population rows
+    /// (the rest is left out: `left_out`), and their summed row sums.
+    pub drops_k1_rest:bool,k1_rest:f64,
 }
 impl<'a> LatticeOperator<'a>{
     pub fn new(prepared:&'a LatticePrepared,modes:&[Charge])->Result<Self,String>{
@@ -110,13 +109,13 @@ impl<'a> LatticeOperator<'a>{
         let explicit_steps:Vec<&classification::HarmonicStep>=prepared.plan.explicit().into_iter().map(|i|&prepared.plan.steps[i]).collect();
         let explicit:Vec<&Superop>=explicit_steps.iter().map(|s|&prepared.generator.components[&s.charge].op).collect();
         let targets:Vec<usize>=(0..modes.len()).filter(|&q|canonical[q]).collect();
-        let mut edges=vec![Vec::new();modes.len()];let mut edge_counts=[0;2];
+        let mut edges=vec![Vec::new();modes.len()];
         let mut block_work=targets.len()*(2*n*n*n+recycling.work(n));
         let nu_max=nu.iter().map(|w|w.abs()).fold(0.,f64::max);
         let k1_rest:f64=prepared.fold.targets.iter().map(|t|t.rest_row_sum[1]).sum();
         let fold_size:f64=prepared.fold.targets.iter().map(|t|t.norms[0][0]).sum();
-        let dropped_k1_rest=if nu_max*k1_rest<=K1_REST_SHARE*fold_size{k1_rest}else{0.};
-        let k1=|t:&'a StoredFold|if dropped_k1_rest>0.{&t.population_rest[1]}else{&t.rest[1]};
+        let drops_k1_rest=k1_rest>0.&&nu_max*k1_rest<=K1_REST_SHARE*fold_size;
+        let k1=|t:&'a StoredFold|if drops_k1_rest{&t.population_rest[1]}else{&t.rest[1]};
         let mut terms=Vec::new();
         if let Some(t)=diagonal{let own:Vec<(usize,usize)>=targets.iter().map(|&q|(q,q)).collect();
             terms.push(Term{rest:&t.rest[0],edges:own.clone(),frequency:false,diagonal:true});
@@ -124,11 +123,11 @@ impl<'a> LatticeOperator<'a>{
         let mut fold_edges=vec![Vec::new();prepared.fold.targets.len()];
         for &target in &targets{let q=&modes[target];
             for(e,s)in explicit_steps.iter().enumerate(){
-                if let Some(&p)=index.get(&charge_minus(q,&s.charge)?){edges[target].push((p,Edge::Explicit(e)));edge_counts[0]+=1;block_work+=explicit[e].work(n);}
+                if let Some(&p)=index.get(&charge_minus(q,&s.charge)?){edges[target].push((p,Edge::Explicit(e)));block_work+=explicit[e].work(n);}
             }
             for(t,data)in prepared.fold.targets.iter().enumerate(){
                 if data.charge==prepared.generator.zero{continue;}
-                if let Some(&p)=index.get(&charge_minus(q,&data.charge)?){edges[target].push((p,Edge::Fold(t)));edge_counts[1]+=1;
+                if let Some(&p)=index.get(&charge_minus(q,&data.charge)?){edges[target].push((p,Edge::Fold(t)));
                     block_work+=4*n*n*n;fold_edges[t].push((p,target));}
             }
         }
@@ -140,17 +139,16 @@ impl<'a> LatticeOperator<'a>{
         let rest_work:usize=terms.iter().map(|t|t.rest.stored()*t.edges.len()).sum();
         Ok(Self{prepared,n,modes:modes.to_vec(),nu,centre,index,mirror,canonical,left,right,recycling,explicit,edges,terms,
             gathered:vec![ZERO;offset],interleaved:vec![ZERO;d*modes.len()],execution:Execution::new()?,scratch:Vec::new(),
-            block_work,rest_work,work:block_work+rest_work,edge_counts,dropped_k1_rest})
+            block_work,rest_work,work:block_work+rest_work,drops_k1_rest,k1_rest})
     }
     pub fn dimension(&self)->usize{self.modes.len()*self.n*self.n}
     pub fn nu_max(&self)->f64{self.nu.iter().map(|w|w.abs()).fold(0.,f64::max)}
-    pub fn canonical_count(&self)->usize{self.canonical.iter().filter(|&&c|c).count()}
     /// Complex multiply-adds of one application: the blocks and edges, the
     /// fold rests.
     pub fn work_split(&self)->[usize;2]{[self.block_work,self.rest_work]}
     /// The fold remainders of this lattice as generator-norm bounds.
     pub fn ledger(&self)->Result<super::ledger::RemainderLedger,String>{
-        super::ledger::RemainderLedger::new(&self.prepared.plan,self.nu_max(),self.prepared.fold.dropped(),self.dropped_k1_rest)
+        super::ledger::RemainderLedger::new(&self.prepared.plan,self.nu_max(),self.prepared.fold.dropped(),if self.drops_k1_rest{self.k1_rest}else{0.})
     }
     /// y = A x for a Hermitian-symmetric field x (x_-q = x_q^dagger).
     pub fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{self.apply_parts(x,y,Parts::Full)}
@@ -246,12 +244,12 @@ impl<'a> LatticeOperator<'a>{
     }
     /// What the operator leaves out of the true one on a Hermitian-symmetric
     /// field x: the K^(1) rests but for their population rows when they are
-    /// dropped (`dropped_k1_rest`), i nu_p (K_t^(1) rest - its population
-    /// rows) x_p on every fold edge p -> q of the lattice; zero when the
+    /// dropped (`drops_k1_rest`), i nu_p (K_t^(1) rest - its population
+    /// rows) x_p on every fold edge p -> q of the lattice; None when the
     /// rests are applied.
-    pub fn left_out(&self,x:&[C])->Result<Vec<C>,String>{
+    pub fn left_out(&self,x:&[C])->Result<Option<Vec<C>>,String>{
+        if !self.drops_k1_rest{return Ok(None);}
         let(n,d)=(self.n,self.n*self.n);let mut y=vec![ZERO;self.dimension()];
-        if self.dropped_k1_rest==0.{return Ok(y);}
         let targets:Vec<usize>=(0..self.modes.len()).filter(|&q|self.canonical[q]).collect();
         let(fold,modes,index,nu)=(&self.prepared.fold.targets,&self.modes,&self.index,&self.nu);
         let blocks=self.execution.map(targets.clone(),|q|->Result<Vec<C>,String>{
@@ -264,7 +262,7 @@ impl<'a> LatticeOperator<'a>{
             Ok(out)});
         for(&q,block)in targets.iter().zip(blocks){y[q*d..(q+1)*d].copy_from_slice(&block?);}
         mirror_field(&mut y,n,&self.canonical,&self.mirror);
-        Ok(y)
+        Ok(Some(y))
     }
     /// The operator as a dense row-major matrix (tests).
     #[cfg(test)]
@@ -307,8 +305,8 @@ mod tests{
     fn lattice_operator_matches_its_dense_assembly_on_hermitian_fields(){
         let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
         let mut op=LatticeOperator::new(&p,&modes).unwrap();let size=op.dimension();let d=16;
-        assert!(op.edge_counts[0]>0&&op.edge_counts[1]>0,"explicit and cross-fold edges");
-        assert_eq!(op.canonical_count(),3,"centre and one of each pair");
+        assert!(op.edges.iter().flatten().any(|e|matches!(e.1,Edge::Explicit(_)))&&op.edges.iter().flatten().any(|e|matches!(e.1,Edge::Fold(_))),"explicit and cross-fold edges");
+        assert_eq!(op.canonical.iter().filter(|&&c|c).count(),3,"centre and one of each pair");
         let x=symmetric_field(&op,0);
         let mut y=vec![ZERO;size];op.apply(&x,&mut y).unwrap();
         let dense=op.dense();let mut scale=0_f64;let mut error=0_f64;

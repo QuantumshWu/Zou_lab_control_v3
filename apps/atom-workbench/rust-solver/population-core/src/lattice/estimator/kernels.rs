@@ -57,25 +57,16 @@ pub struct StepKernel{
     pub entries:Vec<(usize,usize,C)>,
 }
 
-#[derive(Clone,Debug,Default)]
-pub struct KernelDiagnostics{
-    pub milliseconds:f64,
-    /// Per step: kept entries and the largest |X~_ij| (the small parameter).
-    pub entries:Vec<usize>,pub largest:Vec<f64>,
-}
-
 pub struct SwKernels{
     pub steps:Vec<StepKernel>,
     /// K~_s (column-major d x d) of the computed member of each pair, by
     /// step index (None for the mirrored member).
     second_order:Vec<Option<Vec<C>>>,
     partner:Vec<usize>,
-    pub diagnostics:KernelDiagnostics,
 }
 
 impl SwKernels{
     pub fn new(prepared:&LatticePrepared,basis:&BlockEigenbasis,rule:KernelRule)->Result<Self,String>{
-        let clock=Instant::now();
         let(n,d)=(prepared.generator.n,basis.dimension());
         let plan=&prepared.plan;let explicit=plan.explicit();
         let partner:Vec<usize>=(0..d).map(|j|basis.partner(j)).collect();
@@ -115,10 +106,7 @@ impl SwKernels{
             steps[o].entries=entries.iter().map(|&(i,j,x)|(partner[i],partner[j],conj(x))).collect();
             steps[s].entries=entries;second_order[s]=Some(k);
         }
-        let diagnostics=KernelDiagnostics{milliseconds:clock.elapsed().as_secs_f64()*1e3,
-            entries:steps.iter().map(|s|s.entries.len()).collect(),
-            largest:steps.iter().map(|s|s.entries.iter().map(|e|magnitude(e.2)).fold(0.,f64::max)).collect()};
-        Ok(Self{steps,second_order,partner,diagnostics})
+        Ok(Self{steps,second_order,partner})
     }
     /// out += K~_s (column-major d x d).
     pub fn add_second_order(&self,s:usize,out:&mut[C]){

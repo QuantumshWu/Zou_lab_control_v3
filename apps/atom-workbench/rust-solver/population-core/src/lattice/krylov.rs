@@ -1,8 +1,7 @@
 //! GMRES on the lattice systems: the shifted systems (A - sigma) w = b of
 //! the rational Krylov columns (sigma real or complex), the steady trace-row
 //! system M x = f with M = A + u v^T (u = I/n on the centre, v its trace),
-//! on a whole lattice (`System`) or on the explicit charges with the ring
-//! eliminated (`ring`): anything that implements `LinearSystem`.
+//! on the whole lattice P u Q (`System`, the one `LinearSystem`).
 //!
 //! Real coordinates: the fields are Hermitian-symmetric (x_-q = x_q^dagger),
 //! a real vector space that the operators and preconditioners preserve, with
@@ -28,11 +27,27 @@
 //! operator spans 1e-6 to 5e7 rad/us).
 use super::*;
 use super::operator::LatticeOperator;
-use super::preconditioner::{Preconditioner,Shift};
+use super::poles::Pole;
+use super::preconditioner::Preconditioner;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// Blocks per reduction chunk: fixed, so sums do not depend on threads.
 const VECTOR_CHUNK:usize=16;
+/// A candidate whose part outside the span is at most this share of its
+/// squared norm is reorthogonalized explicitly. Derived: above it alpha^2 =
+/// uu - inside loses at most a factor 4 of its accuracy to cancellation.
+const PYTHAGORAS_SHARE:f64=0.25;
+/// The recursive relative residual below this is roundoff: a deliberate
+/// margin of about 4.5x the double-precision unit roundoff (2.2e-16).
+const ROUNDOFF_RESIDUAL:f64=1e-15;
+/// A cycle that stopped and reduced the true residual by less than this
+/// factor marks its floor: a deliberate margin, one that does not halve it
+/// gains nothing from restarting.
+const STALL_FACTOR:f64=0.5;
+/// Tasks of the fused update: fixed, so that its partial norms (summed in
+/// task order) do not depend on the thread count; four per worker of the
+/// desktop app's eight.
+const UPDATE_TASKS:usize=32;
 
 #[derive(Clone,Debug)]
 pub struct KrylovOptions{
@@ -69,7 +84,6 @@ impl Vectors{
     /// Mirrored blocks from their canonical partners, the centre Hermitian.
     pub fn mirror(&self,x:&mut[C]){mirror_field(x,self.n,&self.canonical,&self.mirror);}
     /// Elements of the canonical blocks (what a pass over a vector reads).
-    pub fn canonical_length(&self)->usize{self.weights.iter().filter(|&&w|w>0.).count()*self.d}
     /// One pass: Re <v_i, u> and Re <v_i, w> over the basis, Re <u, u> and
     /// Re <u, w>.
     pub fn fused_dots(&self,basis:&[&[C]],u:&[C],w:&[C])->(Vec<f64>,Vec<f64>,f64,f64){
@@ -87,7 +101,7 @@ impl Vectors{
     /// than the basis, for the new u); both mirrored. Returns |w|^2.
     pub fn fused_update(&self,basis:&[&[C]],u:&mut[C],a:&[f64],alpha:f64,w:&mut[C],c:&[f64])->Result<f64,String>{
         let(d,m)=(self.d,basis.len());let blocks=w.len()/d;let inverse=1./alpha;
-        let tasks=self.execution.tasks(blocks,(2*m+2)*w.len(),MINIMUM_WORK_PER_TASK);let per=blocks.div_ceil(tasks);
+        let tasks=UPDATE_TASKS.min(blocks).min((2*m+2)*w.len()/MINIMUM_WORK_PER_TASK).max(1);let per=blocks.div_ceil(tasks);
         let mut items=Vec::with_capacity(tasks);let(mut ur,mut wr)=(&mut u[..],&mut w[..]);let mut first=0;
         while first<blocks{let count=per.min(blocks-first);let(uc,ut)=ur.split_at_mut(count*d);let(wc,wt)=wr.split_at_mut(count*d);
             items.push((first,uc,wc));ur=ut;wr=wt;first+=count;}
@@ -189,12 +203,12 @@ pub trait LinearSystem{
     fn record(&mut self,_z:&[C],_image:&[C]){}
 }
 
-/// A system on a whole lattice at a shift (`Shift`: A + u v^T, the steady
+/// A system on a whole lattice at a shift (`Pole`: A + u v^T, the steady
 /// trace row, or A - sigma), with its preconditioner.
 pub struct System<'s,'a>{
     pub op:&'s mut LatticeOperator<'a>,
     pub pre:&'s mut dyn Preconditioner,
-    pub shift:Shift,
+    pub shift:Pole,
     vectors:Vectors,
     /// Field indices of the central populations (the first copy).
     watch:Vec<usize>,
@@ -207,7 +221,7 @@ pub struct System<'s,'a>{
     pub recorded:Option<(Vec<(Vec<C>,Vec<C>)>,usize)>,
 }
 impl<'s,'a> System<'s,'a>{
-    pub fn new(op:&'s mut LatticeOperator<'a>,pre:&'s mut dyn Preconditioner,shift:Shift)->Result<Self,String>{
+    pub fn new(op:&'s mut LatticeOperator<'a>,pre:&'s mut dyn Preconditioner,shift:Pole)->Result<Self,String>{
         let n=op.n;let c0=op.centre*n*n;let watch=(0..n).map(|i|c0+i*n+i).collect();let vectors=Vectors::new(op,shift.copies())?;
         Ok(Self{op,pre,shift,vectors,watch,timing:KrylovTiming::default(),applications:0,preconditions:0,recorded:None})
     }
@@ -219,10 +233,10 @@ impl LinearSystem for System<'_,'_>{
     fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{
         let start=Instant::now();
         match self.shift{
-            Shift::Steady=>{self.op.apply(x,y)?;let n=self.watch.len();let t=self.watch.iter().fold(ZERO,|s,&k|C{re:s.re+x[k].re,im:s.im+x[k].im});
+            Pole::Zero=>{self.op.apply(x,y)?;let n=self.watch.len();let t=self.watch.iter().fold(ZERO,|s,&k|C{re:s.re+x[k].re,im:s.im+x[k].im});
                 for &k in &self.watch{add(&mut y[k],scaled(t,1./n as f64));}self.applications+=1;}
-            Shift::Real(sigma)=>{self.op.apply(x,y)?;for(v,a)in y.iter_mut().zip(x){v.re-=sigma*a.re;v.im-=sigma*a.im;}self.applications+=1;}
-            Shift::Complex(sigma)=>{
+            Pole::Real(sigma)=>{self.op.apply(x,y)?;for(v,a)in y.iter_mut().zip(x){v.re-=sigma*a.re;v.im-=sigma*a.im;}self.applications+=1;}
+            Pole::Complex(sigma)=>{
                 let size=self.op.dimension();let(x1,x2)=x.split_at(size);let(y1,y2)=y.split_at_mut(size);
                 self.op.apply(x1,y1)?;self.op.apply(x2,y2)?;self.applications+=2;
                 shift_pair(sigma,x1,x2,y1,y2);
@@ -264,7 +278,7 @@ impl Hessenberg{
 }
 
 pub struct Krylov{
-    pub x:Vec<C>,pub steps:usize,pub restarts:usize,pub stop:&'static str,
+    pub x:Vec<C>,pub steps:usize,
     /// The true relative residual |b - M x| / |b| of the returned iterate.
     pub residual:f64,
 }
@@ -279,22 +293,20 @@ fn givens(rotations:&[(f64,f64)],column:&[f64])->(Vec<f64>,(f64,f64)){
     column[j]=size;column.truncate(j+1);(column,rotation)
 }
 
-/// Solves M x = b from x0 (zero when None). Returns the iterate also when
-/// restarting no longer reduces the true residual (`stop` =
-/// "true-residual-floor"): the caller compares `residual` with its
-/// tolerance.
-pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],x0:Option<Vec<C>>,options:&KrylovOptions)->Result<Krylov,String>{
+/// Solves M x = b from zero. Returns the iterate also when restarting no
+/// longer reduces the true residual (its floor) or the step budget is spent:
+/// the caller compares `residual` with its tolerance.
+pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],options:&KrylovOptions)->Result<Krylov,String>{
     let length=system.length();
     let bnorm=system.vectors().norm(b);
     if !(bnorm>0.){return Err("Lattice GMRES source is zero".into());}
     let fit=(options.basis_bytes/(length*std::mem::size_of::<C>())).saturating_sub(2);
     let restart=options.restart.min(fit).max(8);
-    let mut x=x0.unwrap_or_else(||vec![ZERO;length]);let(mut z,mut w)=(vec![ZERO;length],vec![ZERO;length]);
-    let(mut steps,mut restarts)=(0,0);
+    let mut x=vec![ZERO;length];let(mut z,mut w)=(vec![ZERO;length],vec![ZERO;length]);
+    let mut steps=0;
     let mut r=b.to_vec();
-    if x.iter().any(|v|nonzero(*v)){system.apply(&x,&mut w)?;for((a,&bb),c)in r.iter_mut().zip(b).zip(&w){*a=C{re:bb.re-c.re,im:bb.im-c.im};}}
     let mut last_true=system.vectors().norm(&r)/bnorm;
-    if last_true<=options.tolerance{return Ok(Krylov{x,steps,restarts,stop:"initial",residual:last_true});}
+    if last_true<=options.tolerance{return Ok(Krylov{x,steps,residual:last_true});}
     loop{
         let beta=system.vectors().norm(&r);
         let mut basis:Vec<Vec<C>>=vec![r.iter().map(|v|scaled(*v,1./beta)).collect()];
@@ -304,7 +316,7 @@ pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],x0:Option<Vec<C>>,optio
         // once-orthogonalized coefficients: the last basis vector is then
         // the unnormalized candidate.
         let mut columns:Vec<Vec<f64>>=Vec::new();let mut provisional:Option<Vec<f64>>=None;
-        let mut y=Vec::new();let mut stopped:Option<&'static str>=None;
+        let mut y=Vec::new();let mut stopped=false;
         for j in 0..restart{
             system.precondition(&basis[j],&mut z)?;
             system.apply(&z,&mut w)?;
@@ -317,7 +329,7 @@ pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],x0:Option<Vec<C>>,optio
             // candidate was mostly inside the span (then explicitly).
             let vectors=system.vectors();
             let(mut a,projections,mut uu,mut uw)=vectors.fused_dots(&refs,u,&w);
-            let inside=a.iter().map(|v|v*v).sum::<f64>();let explicit=!(uu-inside>0.25*uu);
+            let inside=a.iter().map(|v|v*v).sum::<f64>();let explicit=!(uu-inside>PYTHAGORAS_SHARE*uu);
             if explicit{
                 vectors.subtract(&refs,&a,u)?;let again=vectors.dots(&refs,u);vectors.subtract(&refs,&again,u)?;
                 for(x,y)in a.iter_mut().zip(again){*x+=y;}uu=vectors.dot(u,u);uw=vectors.dot(u,&w);
@@ -345,10 +357,9 @@ pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],x0:Option<Vec<C>>,optio
             let mut column=h.clone();column.push(hn);
             let(_,(_,s))=givens(&hessenberg.rotations,&column);
             let residual=(s*g[j]).abs()/bnorm;
-            if residual<=options.tolerance{stopped=Some("residual");}
-            else if hn==0.{stopped=Some("exact");}
-            else if residual<=1e-15{stopped=Some("residual-at-roundoff");}
-            let last=stopped.is_some()||steps>=options.maximum_steps||j+1==restart;
+            // Converged, exact (an invariant subspace) or at roundoff.
+            stopped=residual<=options.tolerance||hn==0.||residual<=ROUNDOFF_RESIDUAL;
+            let last=stopped||steps>=options.maximum_steps||j+1==restart;
             if !last{basis.push(w.clone());provisional=Some(h);continue;}
             // The cycle ends: reorthogonalize the image once more, close the
             // relation with column j final.
@@ -374,10 +385,10 @@ pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],x0:Option<Vec<C>>,optio
         for((a,&bb),c)in r.iter_mut().zip(b).zip(&w){*a=C{re:bb.re-c.re,im:bb.im-c.im};}
         let true_residual=system.vectors().norm(&r)/bnorm;
         if !true_residual.is_finite(){return Err("Lattice GMRES iterate is not finite".into());}
-        if true_residual<=options.tolerance{return Ok(Krylov{x,steps,restarts,stop:stopped.unwrap_or("residual"),residual:true_residual});}
+        if true_residual<=options.tolerance{return Ok(Krylov{x,steps,residual:true_residual});}
         // Restarting no longer reduces the true residual: its floor.
-        if stopped.is_some()&&true_residual>0.5*last_true{return Ok(Krylov{x,steps,restarts,stop:"true-residual-floor",residual:true_residual});}
-        if steps>=options.maximum_steps{return Ok(Krylov{x,steps,restarts,stop:"maximum-steps",residual:true_residual});}
-        last_true=true_residual;restarts+=1;
+        if stopped&&true_residual>STALL_FACTOR*last_true{return Ok(Krylov{x,steps,residual:true_residual});}
+        if steps>=options.maximum_steps{return Ok(Krylov{x,steps,residual:true_residual});}
+        last_true=true_residual;
     }
 }

@@ -13,27 +13,27 @@
 //!    its own transform a pole's last solve removed (a pole whose solve did
 //!    not reduce it loses its turn; one never solved keeps the whole), per
 //!    real solve (a complex pole costs two); a pole that adds no direction
-//!    leaves the ladder. (Scores within 2x of the best taken as tied, the
-//!    larger sigma first, N1 round five: the ladder then runs down in sigma
-//!    and three, five and four lasers without the trap at 10 ms ended
-//!    partial, 12-20 solves, against 8-16 accepted by score.) While
-//!    the slowest relaxation needs resolving, the real poles near its rate
-//!    gain priority: the best population gain (at least the tolerance)
+//!    leaves the ladder. While a class of x0 an output needs is not
+//!    resolved, the real poles near its rate gain priority: the best population gain (at least the tolerance)
 //!    times its relative need, by their log distance, and the share of the
 //!    need their last solve removed.
 //! 3. Every CHECKPOINT solves (a request that propagates nothing: also
 //!    right after the steady column): the Galerkin model in the frame's
-//!    metric (`reduced`; M = I for the steady state alone), its outputs (trajectory on the grid, horizons, steady
+//!    metric (`reduced`; a request for the steady state alone takes M = I,
+//!    a speed case: it skips about 1 s of frame build, and its steady
+//!    column makes the kernel independent of the metric), its outputs (trajectory on the grid, horizons, steady
 //!    state, slowest relaxation, conserved count) and the error estimate
 //!    (`estimator`). An output's bound is ACCEPTANCE_FACTOR x its estimate,
 //!    plus, on a trajectory row, the change of its projection onto the
 //!    probability simplex (computed exactly, not estimated). A checkpoint
-//!    is accepted when every bound is within the tolerance and the slowest
-//!    relaxation is resolved where a horizon needs it (`slow_pairs`, and
-//!    every class of x0 a horizon needs: `missing_classes`).
+//!    is accepted when every bound is within the tolerance and every class
+//!    of x0 an output needs is resolved (`missing_classes`): where the
+//!    estimate reads the slow modes through the reduced model itself (every
+//!    horizon; the trajectory once it takes the slow part), it cannot see a
+//!    class the space lacks.
 //! 4. Stopping (deterministic, no wall time): accepted; or the largest
 //!    bound, above the tolerance, did not improve by PLATEAU_GAIN over the
-//!    last PLATEAU checkpoints (likewise the slowest relaxation's need once
+//!    last PLATEAU checkpoints (likewise the missing classes' need once
 //!    every bound is within the tolerance); or the solve budget
 //!    (MAXIMUM_SOLVES) or the basis budget (BASIS_BYTES) is spent. The run
 //!    returns its best checkpoint (`Answer`), converged or partial with the
@@ -50,15 +50,27 @@ use super::reduced::{Model,Projection,SLOW_ACCURACY,SlowRate};
 use super::poles::{InnerWork,Lattice,Pole};
 use super::space::{self,Column,Space};
 use super::frame::{SwFrame,SwMetric};
-use super::estimator::{self,UnifiedEstimate};
+use super::estimator::UnifiedEstimate;
 use super::eigenbasis::BlockEigenbasis;
 
 /// Solves between checkpoints; the ladder is re-ranked at every checkpoint
-/// (from its reduced model) and whenever its queue runs out.
+/// (from its reduced model) and whenever its queue runs out. Measured at
+/// this spacing: the estimates up to acceptance cost 19-35% of the solves on
+/// three to five lasers; acceptance is seen at most three solves late.
 const CHECKPOINT:usize=4;
 /// Most solves of a request, and the basis memory (basis and images).
+/// MAXIMUM_SOLVES is a deliberate margin: twice the 24 solves the slowest
+/// accepted research case takes (16-24 at 20 us).
 const MAXIMUM_SOLVES:usize=48;
 const BASIS_BYTES:usize=1<<30;
+/// Memory guard: a request takes about BASE_BYTES plus MODE_BYTES per lattice
+/// mode (measured, private bytes: D1 + three D2 lasers, 13 modes, 0.62 GB;
+/// six lasers without the trap, 63 modes, 2.0 GB; the pole batches and the
+/// estimator's ring grow with the modes); one whose lattice would need more
+/// than MEMORY_BYTES stops before its first solve, with the reason.
+const BASE_BYTES:f64=5e8;
+const MODE_BYTES:f64=3.2e7;
+const MEMORY_BYTES:f64=5e9;
 /// The plateau: the largest bound (or the slowest relaxation's need) did
 /// not improve by PLATEAU_GAIN over the last PLATEAU checkpoints. Measured
 /// before the rule: four lasers + tweezer at 10 us / 2000 samples held the
@@ -67,22 +79,40 @@ const BASIS_BYTES:usize=1<<30;
 /// solves (bound 1.2e-2), accepted at 20 over three.
 const PLATEAU:usize=3;
 const PLATEAU_GAIN:f64=2.;
-/// The slowest relaxation (N1 round five): its candidates carry population
-/// weight of at least CANDIDATE_WEIGHT x tolerance; a candidate must be
-/// resolved when its weight at a horizon T, weight x e^{-rate T}, is at
-/// least REQUIRED_CONTRIBUTION x tolerance; it is matched when every class
-/// of x0 (weight at least CANDIDATE_WEIGHT x tolerance) slower than its rate
-/// / CLASS_GAP has a candidate within CLASS_MATCH of its rate. A class of
-/// x0 itself must be resolved (`missing_classes`) when its own weight at a
-/// horizon is at least REQUIRED_CONTRIBUTION x tolerance.
+/// The slowest relaxation: its candidates carry population weight of at
+/// least CANDIDATE_WEIGHT x tolerance; a candidate is matched when every
+/// class of x0 (weight at least CANDIDATE_WEIGHT x tolerance) slower than
+/// its rate / CLASS_GAP has a candidate within CLASS_MATCH of its rate. A
+/// class of x0 must be resolved (`missing_classes`) when its own weight at
+/// an output time T the estimate reads through the slow part, weight x
+/// e^{-rate T}, is at least REQUIRED_CONTRIBUTION x tolerance.
+/// CANDIDATE_WEIGHT, measured: the spurious slow pairs of a four-laser case
+/// carried 1.2e-5 and 1.5e-6, the physical one 4e-2; 1e-2 x tolerance =
+/// 5e-5 lies 2-3 orders from both.
 const CANDIDATE_WEIGHT:f64=1e-2;
+/// A deliberate margin: a class contributing less than a tenth of the
+/// tolerance at every output time cannot move an output beyond it.
 const REQUIRED_CONTRIBUTION:f64=0.1;
-const CLASS_GAP:f64=1.4;
+/// Derived: 1 + CLASS_MATCH, so a class slower than rate / CLASS_GAP is
+/// outside the candidate's own match and needs another candidate.
+const CLASS_GAP:f64=1.+CLASS_MATCH;
+/// A deliberate margin over the measured offset between a class (the
+/// frame's second-order block) and its Ritz pair: 18% on a four-laser case
+/// (class 0.0418 /us, pair 0.0344 /us).
 const CLASS_MATCH:f64=0.4;
 /// Grid samples assumed for the ladder's top when a request has no grid,
 /// and the longest time of a request for the limit alone (us).
+/// LADDER_SAMPLES is a deliberate margin: as if the horizon were sampled
+/// like the app's trajectories (161-200 samples on the research scenes).
 const LADDER_SAMPLES:f64=200.;
+/// A deliberate margin: the app's default horizon, 1 s; the steady column
+/// and the slow points (down to `space::SLOW_FLOOR`) serve slower rates.
 const LIMIT_REACH:f64=1e6;
+/// A decaying class of the frame's block carries none of x0's trace; a
+/// class whose trace is at least this share of its weight is the block's
+/// kernel. Measured: decaying classes at most 5e-3 of their weight, the
+/// kernel 1.6 (trace 1.00, weight 0.63): a margin of 100x and 3x.
+const KERNEL_TRACE_SHARE:f64=0.5;
 /// Stack of the frame's thread (LAPACK on it).
 const FRAME_STACK:usize=1<<26;
 
@@ -95,6 +125,9 @@ pub struct Request<'a>{
     /// Whether the steady state (the t -> infinity mean) is reported.
     pub steady:bool,
     pub groups:&'a[Vec<usize>],
+    /// The explicit set shared by the runs of one request from the same rho0
+    /// (the first run to need it builds it).
+    pub explicit:&'a std::sync::OnceLock<Result<ExplicitSet,String>>,
 }
 
 /// One checkpoint, for the diagnostics.
@@ -128,11 +161,17 @@ pub struct Answer{
     pub horizons:Vec<Vec<f64>>,pub steady:Vec<f64>,
     pub horizon_fields:Vec<Vec<C>>,pub steady_field:Vec<C>,
     pub horizon_errors:Vec<f64>,pub steady_error:Option<f64>,
+    /// Per horizon T, the population the reduced model still relaxes at T:
+    /// sum over its decaying modes (neither kernel nor projected) of their
+    /// largest centre population contribution at T (p(T) reads the centre
+    /// block alone), amplitude x e^{Re theta T}: an upper bound on
+    /// |p(T) - p(inf)| as the model holds it.
+    pub horizon_relaxing:Vec<f64>,
     /// |A x| / |x| of the steady field (rad/us).
     pub steady_residual:f64,
     pub estimate:ErrorEstimate,pub conserved:usize,pub slowest:Option<SlowRate>,
-    /// Every bound within the tolerance and the slowest relaxation resolved
-    /// where a horizon needs it.
+    /// Every bound within the tolerance and every class of x0 an output
+    /// needs resolved.
     pub accepted:bool,
 }
 impl Answer{
@@ -167,8 +206,8 @@ pub fn simplex(values:&[f64])->Vec<f64>{
 /// CANDIDATE_WEIGHT x tolerance; (rate, weight), slowest first. The block's
 /// kernel is not a class: the block annihilates the trace, so a decaying class
 /// carries none of x0's trace |c_j sum_i (E V)_ij| (measured: at most 5e-3
-/// of its weight) and a class carrying at least half its weight is the
-/// kernel, its value zero within the eigensystem's error over the horizon
+/// of its weight) and a class carrying at least KERNEL_TRACE_SHARE of its
+/// weight is the kernel, its value zero within the eigensystem's error over the horizon
 /// (three lasers at T = 1 s: 1.4e-8 /us, weight 0.63, trace 1.00; taken as
 /// a class, every candidate was unmatched and a horizon needed it).
 fn class_rates(frame:&SwFrame<'_>,eigen:&BlockEigenbasis,lapack:&Lapack,initial:&[C],tolerance:f64)->Result<Vec<(f64,f64)>,String>{
@@ -180,12 +219,12 @@ fn class_rates(frame:&SwFrame<'_>,eigen:&BlockEigenbasis,lapack:&Lapack,initial:
         let weight=magnitude(c[j])*column.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
         let trace=magnitude(c[j])*magnitude(column.iter().fold(ZERO,|a,z|C{re:a.re+z.re,im:a.im+z.im}));
         let rate=-class.values[j].re;
-        (rate>=super::reduced::KERNEL&&weight>=CANDIDATE_WEIGHT*tolerance&&trace<0.5*weight).then_some((rate,weight))}).collect();
+        (rate>=super::reduced::KERNEL&&weight>=CANDIDATE_WEIGHT*tolerance&&trace<KERNEL_TRACE_SHARE*weight).then_some((rate,weight))}).collect();
     classes.sort_by(|a,b|a.0.total_cmp(&b.0));Ok(classes)
 }
 
-/// The classes of x0 a horizon needs and the space has not resolved,
-/// slowest first: a class whose own weight at a horizon T, weight x
+/// The classes of x0 an output time needs and the space has not resolved,
+/// slowest first: a class whose own weight at a time T, weight x
 /// e^{-rate T}, is at least REQUIRED_CONTRIBUTION x tolerance, without a
 /// resolved candidate within CLASS_MATCH of its rate. A candidate's own
 /// requirement is taken at its rate, so a class slower than every candidate
@@ -194,9 +233,11 @@ fn class_rates(frame:&SwFrame<'_>,eigen:&BlockEigenbasis,lapack:&Lapack,initial:
 /// its classes at 5.6e-7 and 8.7e-7 /us (weights 0.7% and 1.0%) outside a
 /// space whose slowest candidate decayed at 5.1e-5 /us, and p(T) was the
 /// steady state's, off by 7.8e-3 against a bound of 7e-13 (5e-4 with the
-/// horizons' fast part).
-fn missing_classes(classes:&[(f64,f64)],pairs:&[(SlowRate,f64)],horizons:&[f64],tolerance:f64)->Vec<f64>{
-    classes.iter().filter(|&&(rate,weight)|horizons.iter().any(|&t|weight*(-rate*t).exp()>=REQUIRED_CONTRIBUTION*tolerance)
+/// horizons' fast part). The trajectory has the same blind spot once it
+/// takes the slow part: the default scene at 10 ms was accepted at 4 solves
+/// with a bound of 3.8e-3 and an error of 8.5e-3 (every sample from 1 ms on).
+fn missing_classes(classes:&[(f64,f64)],pairs:&[(SlowRate,f64)],times:&[f64],tolerance:f64)->Vec<f64>{
+    classes.iter().filter(|&&(rate,weight)|times.iter().any(|&t|weight*(-rate*t).exp()>=REQUIRED_CONTRIBUTION*tolerance)
         &&!pairs.iter().any(|(p,_)|p.resolved()&&(p.rate-rate).abs()<=CLASS_MATCH*rate)).map(|c|c.0).collect()
 }
 
@@ -223,16 +264,6 @@ fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:
     Ok(found.iter().map(|&(rate,residual,weight)|(SlowRate{rate,residual,matched:matched(rate)},weight)).collect())
 }
 
-/// How far a slow pair is from resolved: its residual against SLOW_ACCURACY
-/// x its rate (at least one while a slower class is missing), times its
-/// rate over the slowest missing class's; and the rate its poles aim at
-/// (the missing class's, else its own).
-fn need(pair:&SlowRate,classes:&[f64])->(f64,f64){
-    let accuracy=pair.residual/(SLOW_ACCURACY*pair.rate);
-    match classes.iter().copied().find(|&class|class<pair.rate/CLASS_GAP&&pair.matched==Some(false)){
-        Some(class)=>(accuracy.max(1.)*pair.rate/class,class),
-        None=>(accuracy,pair.rate)}
-}
 
 /// How far a missing class is from resolved: the nearest candidate's
 /// residual against SLOW_ACCURACY x its rate (at least one) times its rate's
@@ -263,14 +294,22 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     // 1. The lattice; the frame on its own thread for a request that
     // propagates.
     let clock=Instant::now();let eigen=prepared.eigenbasis()?;timing.eigenbasis_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
-    let frame=SwFrame::new(prepared,estimator::longest_time(times,request.horizons));
+    let frame=SwFrame::new(prepared,longest);
     std::thread::scope(|scope|->Result<Solution,String>{
     if propagates{std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||{let _=frame.class();}).map_err(|e|e.to_string())?;}
-    let explicit=charge_set::explicit_set(prepared,initial,tolerance)?;timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
+    let explicit=request.explicit.get_or_init(||charge_set::explicit_set(prepared,initial,tolerance)).clone()?;timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
     let clock=Instant::now();
     let mut lattice=Lattice::new(prepared,explicit.sets.clone())?;
     let ledger=lattice.operator().ledger()?;
-    if ledger.expansion_parameter>EXPANSION_LIMIT{return Err(format!("Static fold expansion parameter {:e} above {EXPANSION_LIMIT:e}",ledger.expansion_parameter));}
+    let planned=BASE_BYTES+MODE_BYTES*lattice.modes.len()as f64;
+    if planned>MEMORY_BYTES{return Err(format!("The lattice of this request has {} modes and would need about {:.1} GB, above the {:.0} GB memory budget: not solved",lattice.modes.len(),planned/1e9,MEMORY_BYTES/1e9));}
+    // A static fold whose expansion parameter p = nu_max / (|nu_far| - ||L0||)
+    // exceeds EXPANSION_LIMIT keeps its K^(1) term and is charged its
+    // remainder (`ledger::nu_freeze`, a generator bound delta): delta min(t, tau)
+    // on every output, tau the slowest relaxation time; at p >= 1 the
+    // expansion diverges and the request is not solved.
+    if ledger.expansion_parameter>=1.{return Err(format!("Static fold expansion parameter {:e}: the fold's frequency expansion diverges on this lattice, not solved",ledger.expansion_parameter));}
+    let freeze=(ledger.expansion_parameter>EXPANSION_LIMIT).then_some(ledger.nu_freeze);
     // 2. The space: translations, the steady column.
     let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*op.modes.len())};
     let mut space=Space::new(&mut lattice,initial,capacity)?;
@@ -279,7 +318,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     space.solve(&mut lattice,Pole::Zero)?;
     let modes=lattice.modes.clone();
     let clock=Instant::now();
-    let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups},frame:&frame,ledger:&ledger,initial})?;
+    let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups},frame:&frame,ledger:&ledger})?;
     timing.estimator_build_ms=clock.elapsed().as_secs_f64()*1e3;
     // The ladder spans the grid's times when there is one (a horizon is
     // served by the steady column, the slow points and the slowest
@@ -290,15 +329,14 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     // accepted at 16-24 solves (four without the trap partial before) and
     // five lasers at 10 us / 2000 samples reached 7.0e-3 against 2.3e-2.
     let(points,slow_points)=space::ladder(eigen,initial,t1,times.last().copied().unwrap_or(longest),tolerance)?;let mut alive=vec![true;points.len()];
-    // The frame's metric (waiting for the frame's thread).
+    // The frame's metric (waiting for the frame's thread). A request that
+    // propagates nothing (the steady state alone) takes M = I instead, a
+    // speed case: it skips about 1 s of frame build (`reduced`).
     let clock=Instant::now();
     let metric=if propagates{Some(SwMetric::new(&frame,eigen,lattice.operator())?)}else{None};
     timing.frame_wait_ms=clock.elapsed().as_secs_f64()*1e3;
-    let mut galerkin=Projection::new(lattice.operator())?;
+    let mut galerkin=Projection::new(lattice.operator(),metric.as_ref())?;
     let lapack=&prepared.lapack;let ops=super::krylov::Vectors::new(lattice.operator(),1)?;
-    // A slow pair must be resolved when it contributes REQUIRED_CONTRIBUTION
-    // x tolerance at a horizon.
-    let required=|pair:&SlowRate,weight:f64|request.horizons.iter().any(|&t|weight*(-pair.rate*t).exp()>=REQUIRED_CONTRIBUTION*tolerance);
     // The classes of x0 (a request that propagates).
     let mut classes:Option<Vec<(f64,f64)>>=None;
     let mut checkpoints:Vec<Checkpoint>=Vec::new();
@@ -320,7 +358,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         if exhausted||space.solves()%CHECKPOINT==0||(!propagates&&space.solves()==1){
             // 3. The checkpoint: model, outputs, estimate, bounds.
             let clock=Instant::now();
-            galerkin.ingest(metric.as_ref(),&space.basis,&space.images)?;
+            galerkin.ingest(&space.basis,&space.images)?;
             let model=galerkin.model(lapack,space.initial_norm,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
             timing.projection_ms=galerkin.milliseconds;timing.images_ms=space.images_ms;
             let outputs_clock=Instant::now();
@@ -331,7 +369,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
             let estimate_clock=Instant::now();
             let mut estimate=estimator.estimate(&ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
-                used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel},&mut lattice)?;
+                used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out},&mut lattice)?;
             timing.estimate_ms+=estimate_clock.elapsed().as_secs_f64()*1e3;
             // The growth charge on every output.
             for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
@@ -339,8 +377,14 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             if classes.is_none()&&propagates{classes=Some(class_rates(&frame,eigen,lapack,initial,tolerance)?);}
             let rates:Option<Vec<f64>>=classes.as_ref().map(|c|c.iter().map(|x|x.0).collect());
             let pairs=slow_pairs(&model,&space,&ops,rates.as_deref(),tolerance)?;
-            let unresolved:Vec<&SlowRate>=pairs.iter().filter(|(p,w)|!p.resolved()&&required(p,*w)).map(|(p,_)|p).collect();
-            let missing=missing_classes(classes.as_deref().unwrap_or(&[]),&pairs,request.horizons,tolerance);
+            if let Some(delta)=freeze{let tau=pairs.first().map_or(f64::INFINITY,|(p,_)|1./p.rate);
+                for(v,&t)in estimate.trajectory.iter_mut().zip(times){*v+=delta*t.min(tau);}
+                for(v,&t)in estimate.horizons.iter_mut().zip(request.horizons){*v+=delta*t.min(tau);}
+                for v in estimate.steady.iter_mut(){*v+=delta*tau;}}
+            // The output times read through the slow part: every horizon, the
+            // grid's last time when the trajectory takes it.
+            let slow_times:Vec<f64>=request.horizons.iter().copied().chain(times.last().copied().filter(|_|estimate.work.slow_trajectory)).collect();
+            let missing=missing_classes(classes.as_deref().unwrap_or(&[]),&pairs,&slow_times,tolerance);
             // The outputs with their bounds.
             let answer={
                 let outputs_clock=Instant::now();
@@ -356,11 +400,13 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
                 timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
                 let mut answer=Answer{solves:space.solves(),modes:modes.clone(),trajectory:projected,sample_errors,projection:changes.iter().fold(0.,|a:f64,&b|a.max(b)),
                     horizons:horizons.clone(),steady:steady.clone(),horizon_fields,steady_field,
-                    horizon_errors:estimate.horizons.iter().map(|e|ACCEPTANCE_FACTOR*e).collect(),steady_error:estimate.steady.map(|e|ACCEPTANCE_FACTOR*e),
+                    horizon_errors:estimate.horizons.iter().map(|e|ACCEPTANCE_FACTOR*e).collect(),
+                    horizon_relaxing:request.horizons.iter().map(|&t|(0..model.r).filter(|&j|!model.kernel[j]&&!model.projected_out[j])
+                        .map(|j|model.centre_amplitudes[j]*(model.used_theta[j].re*t).exp()).sum()).collect(),steady_error:estimate.steady.map(|e|ACCEPTANCE_FACTOR*e),
                     steady_residual,estimate:estimate.clone(),
                     conserved:if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{model.conserved()},
                     slowest:pairs.first().map(|p|p.0),accepted:false};
-                answer.accepted=answer.largest()<=tolerance&&unresolved.is_empty()&&missing.is_empty();
+                answer.accepted=answer.largest()<=tolerance&&missing.is_empty();
                 answer};
             let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,largest:answer.largest(),accepted:answer.accepted,
                 growing:model.growing,clipped:model.clipped,projected:model.projected,conserved:answer.conserved,slowest:answer.slowest,
@@ -373,10 +419,8 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             if best.as_ref().is_none_or(|b|if within{true}else{b.largest()>tolerance&&answer.largest()<b.largest()}){best=Some(answer.clone());}
             if answer.accepted{break;}
             // 4. The stopping rule on the bound above the tolerance, else on
-            // the slowest relaxation's need.
-            // The missing classes first (slowest first), then the candidates.
-            let needs:Vec<(f64,f64)>=missing.iter().map(|&class|class_need(class,&pairs))
-                .chain(unresolved.iter().map(|p|need(p,rates.as_deref().unwrap_or(&[])))).collect();
+            // the missing classes' need (slowest first).
+            let needs:Vec<(f64,f64)>=missing.iter().map(|&class|class_need(class,&pairs)).collect();
             progress.push(if within{needs.iter().map(|x|x.0).fold(0.,f64::max)}else{answer.largest()});
             let phase=|i:usize|checkpoints[i].largest<=tolerance;
             let last=progress.len()-1;
@@ -394,7 +438,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
                     else if space.full(){format!("the basis memory was spent after {} solves",space.solves())}
                     else if live.is_empty(){format!("the pole ladder was exhausted after {} solves",space.solves())}
                     else{format!("the solve budget ({MAXIMUM_SOLVES}) was spent")};
-                reason=Some(if b.largest()<=tolerance{format!("Every output is within the tolerance; the slowest relaxation is not resolved ({why}): it is reported as a range")}
+                reason=Some(if b.largest()<=tolerance{format!("Every output is within the tolerance; a slow class of the initial state an output needs is not resolved ({why})")}
                     else{
                         let over:Vec<usize>=(0..b.sample_errors.len()).filter(|&i|b.sample_errors[i]>tolerance).collect();
                         let samples=match(over.first(),over.last()){(Some(&a),Some(&z))=>format!("; {} of {} samples above it, t = {:.4} to {:.4} us",over.len(),b.sample_errors.len(),times[a],times[z]),_=>String::new()};
@@ -409,7 +453,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         // The next pole by its expected gain.
         let clock=Instant::now();
         let model=match current.take(){Some((solves,model))if solves==space.solves()=>model,_=>{
-            galerkin.ingest(metric.as_ref(),&space.basis,&space.images)?;galerkin.model(lapack,space.initial_norm,longest,tolerance)?}};
+            galerkin.ingest(&space.basis,&space.images)?;galerkin.model(lapack,space.initial_norm,longest,tolerance)?}};
         let xis:Vec<C>=live.iter().map(|&i|points[i].sigma()).collect();
         let transform=model.error_transform(&galerkin,&space.basis,&space.images,eigen,lapack,&xis)?;
         for(&i,p)in live.iter().zip(&transform){if slow_points[i]{continue;}
@@ -463,7 +507,7 @@ mod tests{
         let mut initial=vec![ZERO;d];initial[0]=ONE;
         let times:Vec<f64>=(0..21).map(|i|0.1*i as f64).collect();let horizons=[3.];
         let mut seen=0;let mut observe=|_:&Checkpoint,_:&Answer|{seen+=1;};
-        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,steady:true,groups:&groups},Some(&mut observe)).unwrap();
+        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,steady:true,groups:&groups,explicit:&std::sync::OnceLock::new()},Some(&mut observe)).unwrap();
         assert!(s.converged&&s.reason.is_none()&&seen==s.checkpoints.len(),"{:?}",s.reason);
         let a=&s.answer;
         let op=LatticeOperator::new(&p,&a.modes).unwrap();let dense=op.dense();let size=op.dimension();
@@ -477,7 +521,7 @@ mod tests{
                 for e in 0..size{x[e].re+=h/6.*(k1[e].re+2.*k2[e].re+2.*k3[e].re+k4[e].re);x[e].im+=h/6.*(k1[e].im+2.*k2[e].im+2.*k3[e].im+k4[e].im);}t+=h;}}
             // Every sample within 1 / 0.8 of its own bound (above 2% of the
             // tolerance: the validation's floor; the estimate is no per-time
-            // bound, R2 14.1), the bounds within the tolerance.
+            // bound), the bounds within the tolerance.
             let error=ledger::metric(&readout(&x,t),row,&groups);worst=(worst.0.max(error),worst.1.max(a.sample_errors[i]));
             assert!(0.8*error<=a.sample_errors[i].max(0.02*POPULATION_TOLERANCE)&&a.sample_errors[i]<=POPULATION_TOLERANCE,"sample {i}: {error:e} against {:e}",a.sample_errors[i]);
         }

@@ -12,7 +12,7 @@
 //! apply on every block; the frame here is the superoperator (d x d) one
 //! with the recycling inside L0' (the Raman rates).
 //!
-//! The metric (N1, round four): T = V^-1 (I - S~) E^-1 on a lattice field,
+//! The metric: T = V^-1 (I - S~) E^-1 on a lattice field,
 //! E^-1 the eigen-coordinates of L0' per block, S~ the kernels on every
 //! lattice edge q - s -> q; the inner product Re <T x, T y> summed over
 //! every mode, M = T^H T. The first-order couplings between the modes are
@@ -20,13 +20,12 @@
 //! model's numerical range is pushed right only at second order (and by
 //! the near-resonant elements): no strict guarantee. The only provable
 //! bound is the Hilbert-Schmidt one, Re theta <= Gamma/2 (the couplings are
-//! skew there, the decay of populations is not normal). N1's round five
-//! chose the Euclidean model (in Python, on its own pipeline); in the Rust
-//! product it grew spurious near-zero slow Ritz pairs after the ladder's
-//! poles near 1 / T of a 1 s horizon (rates 1e-8 to 1e-5, residuals 0.2-3),
-//! and four and five lasers + tweezer at 10 ms ended partial (bound about
-//! 1e-2, the p(1 s) error itself 9e-3 to 1.2e-2 at those checkpoints),
-//! where this metric accepted them at 16 and 12 solves.
+//! skew there, the decay of populations is not normal). Why not the
+//! Euclidean model: it grew spurious near-zero slow Ritz pairs after the
+//! ladder's poles near 1 / T of a 1 s horizon (rates 1e-8 to 1e-5,
+//! residuals 0.2-3), and four and five lasers + tweezer at 10 ms ended
+//! partial (bound about 1e-2, the p(1 s) error itself 9e-3 to 1.2e-2 at
+//! those checkpoints), where this metric accepted them at 16 and 12 solves.
 //!
 //! Hermitian symmetry: for x_-q = x_q^dagger the eigen-coordinates satisfy
 //! c_-q = P conj(c_q) (P the conjugate partner of each coordinate), the
@@ -84,7 +83,7 @@ impl<'p> SwFrame<'p>{
     /// The second-order block over every step.
     pub fn class(&self)->Result<&BlockSystem,String>{
         self.class.get_or_init(||{let kernels=self.kernels()?;let clock=Instant::now();let basis=self.prepared.eigenbasis()?;
-            let class=BlockSystem::new(&self.prepared.lapack,basis,kernels,(0..kernels.steps.len()).collect(),self.prepared.generator.n,self.horizon)?;
+            let class=BlockSystem::new(&self.prepared.lapack,basis,kernels,self.prepared.generator.n,self.horizon)?;
             Ok((class,clock.elapsed().as_secs_f64()*1e3))}).as_ref().map(|x|&x.0).map_err(|e|e.clone())
     }
     /// N = V^-H V^-1 by column panels over the workers (`SwMetric`

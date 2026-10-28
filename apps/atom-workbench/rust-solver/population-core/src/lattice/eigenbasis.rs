@@ -58,6 +58,24 @@ const RESOLVENT_ITERATIONS:usize=20;
 const INVERSE_PANEL:usize=64;
 /// Fewest blocks per task of the dressed coordinates.
 const DRESSED_BLOCKS:usize=16;
+/// Tasks of the dressed transform at most: one per worker of the desktop
+/// app's eight (fixed: the chunking does not depend on the thread count).
+const DRESSED_TASKS:usize=8;
+/// The complex coordinates z+- = (a -+ i b)/2 of a conjugate pair from its
+/// real coordinates (a, b): a v_r + b v_i = z+ (v_r + i v_i) + z- (v_r - i v_i).
+pub(crate) fn pair_coordinates(a:C,b:C)->(C,C){(C{re:0.5*(a.re+b.im),im:0.5*(a.im-b.re)},C{re:0.5*(a.re-b.im),im:0.5*(a.im+b.re)})}
+/// LAPACK's real eigenvalues (re, im), each conjugate pair adjacent with its
+/// positive imaginary part first: per value 0 (real), 1 (a pair's first) or
+/// 2 (its second), and the complex values.
+pub(crate) fn conjugate_pairs(re:&[f64],im:&[f64])->(Vec<u8>,Vec<C>){
+    let d=re.len();let mut kind=vec![0_u8;d];let mut values=vec![ZERO;d];let mut j=0;
+    while j<d{
+        if im[j]!=0.&&j+1<d{kind[j]=1;kind[j+1]=2;values[j]=C{re:re[j],im:im[j]};values[j+1]=C{re:re[j],im:-im[j]};j+=2;}
+        else{values[j]=C{re:re[j],im:0.};j+=1;}
+    }
+    (kind,values)
+}
+
 pub struct BlockEigenbasis{
     n:usize,d:usize,lapack:Arc<Lapack>,
     pub lambda:Vec<C>,
@@ -139,11 +157,7 @@ impl BlockEigenbasis{
             column+=b;
         }
         drop(real);
-        let mut kind=vec![0_u8;d];let mut lambda=vec![ZERO;d];let mut j=0;
-        while j<d{
-            if im[j]!=0.&&j+1<d{kind[j]=1;kind[j+1]=2;lambda[j]=C{re:re[j],im:im[j]};lambda[j+1]=C{re:re[j],im:-im[j]};j+=2;}
-            else{lambda[j]=C{re:re[j],im:0.};j+=1;}
-        }
+        let(kind,lambda)=conjugate_pairs(&re,&im);
         Self::finish(n,d,lapack,lambda,vectors,inverse,kind,[groups.len(),largest,1],clock)
     }
     /// The readout and the condition of E_R, E_R^-1 and the values.
@@ -183,7 +197,7 @@ impl BlockEigenbasis{
                     if self.kind[j]==1{
                         // a v_r + b v_i = z+ (v_r + i v_i) + z- (v_r - i v_i), z+- = (a -+ i b)/2.
                         let(a,b)=(at(j,&y),at(j+1,&y));
-                        let plus=divide(C{re:0.5*(a.re+b.im),im:0.5*(a.im-b.re)},self.lambda[j]);let minus=divide(C{re:0.5*(a.re-b.im),im:0.5*(a.im+b.re)},self.lambda[j+1]);
+                        let(plus,minus)=pair_coordinates(a,b);let(plus,minus)=(divide(plus,self.lambda[j]),divide(minus,self.lambda[j+1]));
                         // Back: a' = z+ + z-, b' = i (z+ - z-).
                         let(a2,b2)=(C{re:plus.re+minus.re,im:plus.im+minus.im},C{re:-(plus.im-minus.im),im:plus.re-minus.re});
                         y[j+d*c]=a2.re;y[j+d*(count+c)]=a2.im;y[j+1+d*c]=b2.re;y[j+1+d*(count+c)]=b2.im;j+=2;}
@@ -216,9 +230,10 @@ impl BlockEigenbasis{
     /// One real GEMM over every block, spread over the workers.
     pub fn dressed(&self,blocks:&[C])->Result<Vec<C>,String>{
         let(n,d)=(self.n,self.d);let mut out=blocks.to_vec();let count=blocks.len()/d;
-        // At least DRESSED_BLOCKS blocks per task: the GEMM streams E_R^-1
-        // once per task.
-        let execution=Execution::new()?;let tasks=execution.threads().min(count.div_ceil(DRESSED_BLOCKS)).max(1);
+        // At least DRESSED_BLOCKS blocks per task (the GEMM streams E_R^-1
+        // once per task), at most DRESSED_TASKS tasks: independent of the
+        // thread count.
+        let execution=Execution::new()?;let tasks=DRESSED_TASKS.min(count.div_ceil(DRESSED_BLOCKS)).max(1);
         let work=2*d*d*count;
         execution.for_mode_chunks(&mut out,d,work,work/tasks,&mut Vec::<()>::new(),|_,chunk,_|{
             let count=chunk.len()/d;let mut parts=vec![0.;d*2*count];
@@ -234,8 +249,7 @@ impl BlockEigenbasis{
     pub fn complex_coefficients(&self,y:&[C])->Vec<C>{
         let d=self.d;let mut z=vec![ZERO;d];let mut j=0;
         while j<d{
-            if self.kind[j]==1{let(a,b)=(y[j],y[j+1]);
-                z[j]=C{re:0.5*(a.re+b.im),im:0.5*(a.im-b.re)};z[j+1]=C{re:0.5*(a.re-b.im),im:0.5*(a.im+b.re)};j+=2;}
+            if self.kind[j]==1{(z[j],z[j+1])=pair_coordinates(y[j],y[j+1]);j+=2;}
             else{z[j]=y[j];j+=1;}
         }
         z
@@ -293,9 +307,7 @@ impl BlockEigenbasis{
         let mut z=vec![ZERO;d*count];
         for c in 0..count{let mut j=0;
             while j<d{
-                if self.kind[j]==1{let(a,b)=(at(j,c),at(j+1,c));
-                    // (a -+ i b)/2.
-                    z[j+d*c]=C{re:0.5*(a.re+b.im),im:0.5*(a.im-b.re)};z[j+1+d*c]=C{re:0.5*(a.re-b.im),im:0.5*(a.im+b.re)};j+=2;}
+                if self.kind[j]==1{(z[j+d*c],z[j+1+d*c])=pair_coordinates(at(j,c),at(j+1,c));j+=2;}
                 else{z[j+d*c]=at(j,c);j+=1;}
             }}
         Ok(z)
@@ -335,6 +347,8 @@ const CLUSTER_ENTRY:f64=1e-2;
 /// Two clusters merge when a first-order mixing between them exceeds this,
 /// or when the third-order error of a value, over the time its mode lives
 /// (the horizon, or 1 / |Re mu| when shorter), exceeds CLUSTER_PHASE.
+/// Measured with CLUSTER_ENTRY (above): the estimates within 0.35% of the
+/// whole eigensystem's; the vectors' error is about the mixing squared.
 const CLUSTER_MIXING:f64=0.05;
 const CLUSTER_PHASE:f64=1e-2;
 /// Merge passes before the whole matrix is diagonalized at once.
@@ -523,14 +537,12 @@ fn real_eigensystem(lapack:&Lapack,pairs:&[bool],m:&[C],d:usize)->Result<RealSys
     let(wr,wi,vr)=lapack.eigen(&real,d)?;drop(real);
     if vr.iter().any(|v|!v.is_finite()){return Err("Nonfinite eigenvectors".into());}
     let vri=real_inverse(lapack,&vr,d)?;
-    let mut pair=vec![false;d];let mut l=0;while l<d{if wi[l]!=0.&&l+1<d{pair[l]=true;l+=2;}else{l+=1;}}
-    let values:Vec<C>=(0..d).map(|l|if pair[l]{C{re:wr[l],im:wi[l]}}else if l>0&&pair[l-1]{C{re:wr[l],im:-wi[l-1]}}else{C{re:wr[l],im:0.}}).collect();
+    let(kind,values)=conjugate_pairs(&wr,&wi);let pair:Vec<bool>=kind.iter().map(|&k|k==1).collect();
     // V_c = VR S (columns), V = T V_c (rows).
     let mut vc:Vec<C>=vr.iter().map(|&v|C{re:v,im:0.}).collect();
     for l in(0..d).filter(|&l|pair[l]){for i in 0..d{let(a,b)=(vr[i+d*l],vr[i+d*(l+1)]);vc[i+d*l]=C{re:a,im:b};vc[i+d*(l+1)]=C{re:a,im:-b};}}
     let mut vectors=vc.clone();
-    for c in 0..d{for j in(0..d).filter(|&j|first(j)){let(a,b)=(vc[j+d*c],vc[j+1+d*c]);let ib=i_times(b);
-        vectors[j+d*c]=C{re:0.5*(a.re-ib.re),im:0.5*(a.im-ib.im)};vectors[j+1+d*c]=C{re:0.5*(a.re+ib.re),im:0.5*(a.im+ib.im)};}}
+    for c in 0..d{for j in(0..d).filter(|&j|first(j)){(vectors[j+d*c],vectors[j+1+d*c])=pair_coordinates(vc[j+d*c],vc[j+1+d*c]);}}
     // V^-1 = S^-1 VR^-1 (rows), then T^-1 (columns).
     let mut w:Vec<C>=vri.iter().map(|&v|C{re:v,im:0.}).collect();
     for l in(0..d).filter(|&l|pair[l]){for c in 0..d{let(a,b)=(vri[l+d*c],vri[l+1+d*c]);

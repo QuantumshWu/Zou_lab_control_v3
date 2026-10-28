@@ -29,10 +29,17 @@ use super::*;
 use super::ledger::RemainderLedger;
 use super::frame::SwFrame;
 
-/// An output's bound is ACCEPTANCE_FACTOR x its estimated error (R2: the
-/// smallest measured ratio of the time-maximum estimate to the actual error
-/// is 0.93); a checkpoint is accepted when every bound is within
-/// POPULATION_TOLERANCE.
+/// An output's bound is ACCEPTANCE_FACTOR x its estimated error; a checkpoint
+/// is accepted when every bound is within POPULATION_TOLERANCE. Measured
+/// (`pipeline_against_a_reference`, 20 us / 200 samples, every checkpoint
+/// whose actual error is above 2% of the tolerance): the smallest ratio of
+/// the time-maximum estimate to the actual error is 0.89 over the research
+/// requests (probe + tweezer, two lasers without the trap, three, four and
+/// five lasers; 1 / 0.89 = 1.12 below the factor). Four lasers without the
+/// trap gave 0.77 at its accepted checkpoint (estimate 1.7e-3, "actual"
+/// 2.2e-3), but against its older reference, which is accurate only to about
+/// 1.2-1.5e-3: that actual is within the reference's own uncertainty, so it
+/// is no evidence against the factor.
 pub const ACCEPTANCE_FACTOR:f64=1.25;
 
 /// The lattice of a run: `modes()` = explicit (P) then ring (Q), the centre
@@ -82,8 +89,6 @@ pub struct EstimateSetup<'a>{
     /// The fold remainders as generator-norm bounds (rad/us) for the
     /// lattice's largest |nu_q|.
     pub ledger:&'a RemainderLedger,
-    /// rho0 (n x n row-major); x0 is rho0 on the centre mode.
-    pub initial:&'a[C],
 }
 
 /// The reduced model of one checkpoint.
@@ -103,7 +108,11 @@ pub struct ReducedView<'a>{
     /// axis: the residual of the clipped pair, read from the images, carries
     /// it) and on the kernel (theta = 0 exactly; `kernel`, never a projected
     /// mode).
-    pub r:usize,pub vectors:&'a[C],pub used_theta:&'a[C],pub used_coefficients:&'a[C],pub kernel:&'a[bool],
+    pub r:usize,pub vectors:&'a[C],pub used_theta:&'a[C],pub used_coefficients:&'a[C],
+    /// Per Ritz mode: the kernel, and a growing mode projected out (the
+    /// estimator reads these flags, never theta or a being zero: a clipped
+    /// real growing mode also has theta = 0).
+    pub kernel:&'a[bool],pub projected:&'a[bool],
 }
 
 /// The pipeline's own lattice P u Q at the steady shift: its operator, its
@@ -120,7 +129,11 @@ pub trait SteadySolves{
     /// The pole-0 (steady) solve's inner directions z_j = P^-1 v_j and their
     /// images A z_j (A unbordered) on P u Q, mirror-completed; append-only:
     /// an entry never changes once handed out.
-    fn directions(&self)->(&[Vec<C>],&[Vec<C>]){(&[],&[])}
+    fn directions(&self)->(&[Vec<C>],&[Vec<C>]);
+    /// The K^(1) rests the operator leaves out applied to a
+    /// Hermitian-symmetric field (`LatticeOperator::left_out`; None when it
+    /// leaves none out).
+    fn left_out(&self,x:&[C])->Result<Option<Vec<C>>,String>;
 }
 
 /// Work of one estimate, for the diagnostics.
@@ -129,9 +142,8 @@ pub struct EstimateWork{
     /// Operator or preconditioner applications and exact block solves,
     /// counted per n x n block (one lattice block = 1).
     pub block_operations:usize,pub block_solves:usize,
-    /// Time (ms): the fast part's columns, the pool's columns, the slow
-    /// solves, the fast propagation, the slow propagation; and the whole.
-    pub parts_ms:[f64;5],pub milliseconds:f64,
+    /// Time (ms).
+    pub milliseconds:f64,
     /// Slow modes solved, whether the trajectory took the slow part, and
     /// the slowest decay rate the time rule read (1/us).
     pub slow_modes:usize,pub slow_trajectory:bool,pub lambda_slow:f64,

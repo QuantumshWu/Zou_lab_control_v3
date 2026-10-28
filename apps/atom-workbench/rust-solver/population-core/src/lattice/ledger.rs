@@ -4,7 +4,7 @@
 //! of them, the K^(1) rests the operator leaves out (`k1_rest`), into the
 //! slow modes' sources (`estimator`); the others (`unbuilt`) are reported
 //! only. Their action on the computed state, measured with the third order
-//! and the fold's memory built (R2 section 14.3; two to five lasers, 20 us
+//! and the fold's memory built (two to five lasers, 20 us
 //! to 10 ms, the steady state and the mean over 1 s): third order and memory
 //! at most 6e-6 each, every other remainder at most 2.6e-7, against the
 //! tolerance 5e-3; their generator-norm bounds lie 6-8 orders of magnitude

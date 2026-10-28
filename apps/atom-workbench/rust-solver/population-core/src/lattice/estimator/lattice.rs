@@ -2,7 +2,7 @@
 //! Schrieffer-Wolff blocks of the fast Ritz modes near the centre, and the
 //! omitted ring R = ring(P u Q) for the slow modes' sources.
 //!
-//! Fast part (R2 section 11.2): only the centre, its one-step neighbours and
+//! Fast part: only the centre, its one-step neighbours and
 //! the explicit set P (the near modes) get class coordinates; their sources are transformed by
 //! I - S with the first-order transfer from every lattice neighbour (whose
 //! eigen-coordinates of L0' are therefore read), and their errors are read
@@ -44,7 +44,9 @@ use crate::parallel::Execution;
 /// frequency term i nu_r K^(1) (left out of the eigenbasis), and their
 /// relative residual target: the slaved field enters the sources linearly,
 /// so a few digits beyond the estimate's own are enough (the term is about
-/// 1e-4 of the block, one refinement reaches it).
+/// 1e-4 of the block, one refinement reaches it). RING_REFINEMENTS is a cap,
+/// not a working count: it bounds the passes should the term be a large
+/// share of a block, where each pass gains less.
 const RING_REFINEMENTS:usize=12;
 const RING_RESIDUAL:f64=1e-8;
 /// Blocks per task of the coordinate changes (E^-1 and V^-1 streamed once
@@ -118,14 +120,16 @@ impl<'p> ErrorLattice<'p>{
     /// `explicit`: the explicit set P, whose modes join the near ones.
     pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],explicit:&[Charge],frame:&'p SwFrame<'p>)->Result<Self,String>{
         let n=prepared.generator.n;let d=n*n;
-        let index:BTreeMap<Charge,usize>=modes.iter().enumerate().map(|(i,q)|(q.clone(),i)).collect();
-        let centre=*index.get(&prepared.generator.zero).ok_or("Error lattice without the centre")?;
-        let mirror=modes.iter().map(|q|index.get(&opposite(q)).copied().ok_or("Error lattice not closed under q -> -q")).collect::<Result<Vec<_>,_>>()?;
-        let nu=modes.iter().map(|q|prepared.nu(q)).collect::<Result<Vec<_>,_>>()?;
         let ring=super::super::estimate_api::ring(prepared,modes)?;
-        let ring_nu=ring.iter().map(|q|prepared.nu(q)).collect::<Result<Vec<_>,_>>()?;
         let all:Vec<Charge>=modes.iter().chain(&ring).cloned().collect();
         let outer=LatticeOperator::new(prepared,&all)?;
+        // P u Q comes first in the operator: its index, mirrors (closed on
+        // P u Q) and frequencies, the ring's after them.
+        let count=modes.len();let centre=outer.centre;
+        let index:BTreeMap<Charge,usize>=outer.index.iter().filter(|(_,&i)|i<count).map(|(q,&i)|(q.clone(),i)).collect();
+        let mirror=outer.mirror[..count].to_vec();
+        if mirror.iter().any(|&m|m>=count){return Err("Error lattice not closed under q -> -q".into());}
+        let(nu,ring_nu)=(outer.nu[..count].to_vec(),outer.nu[count..].to_vec());
         let inner_mask:Vec<bool>=(0..all.len()).map(|q|q<modes.len()).collect();let ring_mask:Vec<bool>=inner_mask.iter().map(|&b|!b).collect();
         let structural=prepared.plan.structural_steps();
         let edge_modes=modes.iter().filter(|q|ring.iter().any(|r|charge_minus(r,q).is_ok_and(|s|structural.contains(&s)))).count();
@@ -140,8 +144,8 @@ impl<'p> ErrorLattice<'p>{
                 if let Some(&b)=index.get(&charge_minus(q,step)?){pairs.push((a,b,s));if !frames.contains(&b){frames.push(b);}}
             }
         }
+        let canonical:Vec<bool>=outer.canonical[..count].to_vec();
         let count=near.len();
-        let canonical:Vec<bool>=(0..modes.len()).map(|q|modes[q]>=modes[mirror[q]]).collect();
         let near_canonical:Vec<usize>=(0..count).filter(|&slot|canonical[near[slot]]).collect();
         let outer_modes:Vec<usize>=frames.iter().copied().filter(|&q|!near.contains(&q)&&canonical[q]).collect();let outer_count=outer_modes.len();
         Ok(Self{prepared,n,d,modes:modes.to_vec(),nu,centre,index,mirror,ring,ring_nu,outer,inner_mask,ring_mask,edge_modes,frame,
@@ -152,8 +156,8 @@ impl<'p> ErrorLattice<'p>{
     /// The frame's kernels.
     pub fn kernels(&self)->Result<&'p SwKernels,String>{self.frame.kernels()}
     /// The exact eigenbasis of L0' (the frame's; the fast part's
-    /// coordinates), built on first use (a request that propagates nothing
-    /// reads it not).
+    /// coordinates; the ring's block solves): request-level, built by the
+    /// pipeline for every request (`pipeline::solve`).
     pub fn basis(&self)->Result<&'p BlockEigenbasis,String>{self.prepared.eigenbasis()}
     /// The flip partner of each eigen-coordinate (`BlockEigenbasis::partner`).
     fn partner(&self)->Result<&[usize],String>{

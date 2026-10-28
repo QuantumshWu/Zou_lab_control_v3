@@ -45,10 +45,10 @@ pub struct HarmonicStep{pub charge:Charge,pub nu:f64,pub size:f64,pub treatment:
 /// size bound ||C_back|| ||C_s|| ||D_s^-1||.
 #[derive(Clone,Debug)]
 pub struct FoldPair{pub source:usize,pub back:usize,pub bound:f64}
+/// A cross-fold target charge with its far + far paths and their size (a
+/// kept target or an omitted one).
 #[derive(Clone,Debug)]
 pub struct FoldTarget{pub charge:Charge,pub nu:f64,pub pairs:Vec<FoldPair>,pub size:f64}
-#[derive(Clone,Debug)]
-pub struct OmittedTarget{pub charge:Charge,pub nu:f64,pub pairs:Vec<FoldPair>,pub size:f64}
 pub struct HarmonicPlan{
     pub steps:Vec<HarmonicStep>,
     /// Fastest near and slowest far significant frequency (rad/us).
@@ -57,7 +57,7 @@ pub struct HarmonicPlan{
     pub cut:f64,
     /// Fold targets; the diagonal t = 0 comes first.
     pub targets:Vec<FoldTarget>,
-    pub omitted:Vec<OmittedTarget>,
+    pub omitted:Vec<FoldTarget>,
     /// Upper bound of ||L0|| on the Frobenius space (rad/us).
     pub l0_bound:f64,
     pub structural_floor:f64,
@@ -106,7 +106,7 @@ impl HarmonicPlan{
         for(charge,(nu,pairs))in groups{
             let size=pairs.iter().map(|x|x.bound).sum::<f64>();
             if charge==generator.zero||(size>0.&&size>=(CROSS_FOLD_FLOOR*diagonal).max(structural_floor)){targets.push(FoldTarget{charge,nu,pairs,size});}
-            else{omitted.push(OmittedTarget{charge,nu,pairs,size});}
+            else{omitted.push(FoldTarget{charge,nu,pairs,size});}
         }
         targets.sort_by_key(|t|t.charge!=generator.zero);
         Ok(Self{steps,gap,cut,targets,omitted,l0_bound,structural_floor})

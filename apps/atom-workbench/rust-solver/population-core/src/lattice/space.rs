@@ -19,7 +19,8 @@
 //! Pi0 u = Pi0 x0 when the trace is the only left kernel vector; it is done
 //! first and joins the basis only. When the bordered system is singular
 //! (more conserved quantities) the residue is taken at 0+ on x0
-//! (ZERO_PLUS), where the kernel dominates the column.
+//! (`reduced::KERNEL`, the rate below which a mode is conserved), where the
+//! kernel dominates the column.
 //!
 //! Translations (A S_s = S_s (A - i nu_s) up to the fold's i nu_s K^(1) and
 //! the lattice boundary): S_s K(A, x0; xi) = K(A, S_s x0; xi - i nu_s), the
@@ -46,24 +47,36 @@ use super::eigenbasis::BlockEigenbasis;
 /// solve (its algebraic error is the steady output's).
 pub const INNER_TOLERANCE:f64=1e-7;
 pub const STEADY_TOLERANCE:f64=1e-9;
-/// The bordered solve counts as singular above this true residual.
+/// The bordered solve counts as singular above this true residual: a
+/// deliberate margin of 1000x over STEADY_TOLERANCE, which a regular
+/// bordered system reaches and a singular one (more conserved quantities)
+/// stalls far above.
 const BORDERED_SINGULAR:f64=1e-6;
-/// The pole 0+ (1/us) of a singular bordered system.
-const ZERO_PLUS:f64=1e-9;
 /// A Krylov direction below NOISE x INNER_TOLERANCE of its column is noise.
+/// Measured: without the floor a repeated pole near 1 / T added inner-solve
+/// noise and a spurious mode (Re theta +4.6e-2 /us) on two lasers at 10 ms.
 const NOISE:f64=100.;
 /// A basis vector whose part outside the basis is below this fraction of
 /// its norm is dependent.
 const APPEND_FLOOR:f64=1e-11;
+/// Ladder points per decade: a deliberate choice, not measured (the
+/// reference runs used two to three); the ranking chooses among them.
 const PER_DECADE:f64=2.;
-/// The slow points reach relaxation rates down to SLOW_FLOOR (1/us).
+/// The slow points reach relaxation rates down to SLOW_FLOOR (1/us): a
+/// deliberate margin, a decade below the 1 s horizon's 1e-6 /us and below
+/// the slowest relaxation measured (probe + tweezer, 5.6e-7 /us).
 pub const SLOW_FLOOR:f64=1e-7;
+/// The ladder's top, LADDER_TOP / t1. Measured: three lasers at 20 us
+/// stalled at 3.8-5.8e-3 over 48 solves with 1 / t1, reached 1.9e-3 at 24
+/// solves with 10 / t1 (half the inner steps per solve); 30 / t1 gave the
+/// same errors on five lasers at 10 us.
 const LADDER_TOP:f64=10.;
+/// A deliberate margin: a dressed mode carrying less than a tenth of the
+/// tolerance of x0's population weight gets no complex pole.
 const COMPLEX_WEIGHT:f64=0.1;
 
-/// One solve of the space.
 #[derive(Clone,Debug)]
-/// One solve: its pole, inner steps, true relative residual, directions
+/// One solve of the space: its pole, inner steps, true relative residual, directions
 /// added, time (ms) and lattice block operations (operator and
 /// preconditioner applications per block).
 pub struct Column{pub pole:Pole,pub steps:usize,pub residual:f64,pub added:usize,pub milliseconds:f64,pub blocks:usize}
@@ -155,18 +168,14 @@ impl Space{
                 let bordered=lattice.solve(Pole::Zero,&[u],steady);
                 let(w,steps,residual)=match bordered{Ok((w,steps,residual))if residual<=BORDERED_SINGULAR=>(w.into_iter().next().unwrap_or_default(),steps,residual),
                     _=>{let x0:Vec<C>=self.krylov[0].iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-                        let(w,steps,residual)=lattice.solve(Pole::Real(ZERO_PLUS),&[x0],inner)?;(w.into_iter().next().unwrap_or_default(),steps,residual)}};
+                        let(w,steps,residual)=lattice.solve(Pole::Real(super::reduced::KERNEL),&[x0],inner)?;(w.into_iter().next().unwrap_or_default(),steps,residual)}};
                 let floor=self.floor();(usize::from(self.append(lattice,w,floor)?),steps,residual)
             }
-            Pole::Real(_)=>{
+            Pole::Real(_)|Pole::Complex(_)=>{
+                // A complex pole's real form: the second right-hand side zero.
                 let f:Vec<C>=self.krylov.last().ok_or("Empty Krylov sequence")?.iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-                let(w,steps,residual)=lattice.solve(pole,&[f],inner)?;
-                let mut added=0;for column in w{added+=self.add_krylov(lattice,column)?;}
-                (added,steps,residual)
-            }
-            Pole::Complex(_)=>{
-                let f:Vec<C>=self.krylov.last().ok_or("Empty Krylov sequence")?.iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-                let(w,steps,residual)=lattice.solve(pole,&[f,vec![ZERO;length]],inner)?;
+                let rhs=if pole.copies()==2{vec![f,vec![ZERO;length]]}else{vec![f]};
+                let(w,steps,residual)=lattice.solve(pole,&rhs,inner)?;
                 let mut added=0;for column in w{added+=self.add_krylov(lattice,column)?;}
                 (added,steps,residual)
             }

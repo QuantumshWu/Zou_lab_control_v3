@@ -1,4 +1,4 @@
-//! The slow Ritz modes, exact (R2 section 11.2).
+//! The slow Ritz modes, exact.
 //!
 //! For a Ritz mode k with |theta_k| < SLOW (the kernel included) the error
 //! its source F_k drives is, exactly,
@@ -12,13 +12,11 @@
 //! The space's part of the source is solved exactly away from the kernel:
 //! (theta - A)^-1 of (A - theta) W b is -W b (`mode`), and only the ring's
 //! feedback g_k needs a solve. At the kernel the whole (small) source is
-//! solved. (R2 kept W in the pool, where the
-//! least-squares problem found -W b itself; a pool of seeds and
-//! augmentations alone failed there on two of sixteen solves of the whole
-//! source. For g_k alone W adds little: as directions it saved 4 of 44
-//! steps at the first estimate of three and four lasers at 10 ms, for
-//! 250-940 GEMV of products with Q. The basis columns now enter only
-//! through W^T U.)
+//! solved. Why the closed form: a pool of seeds and augmentations alone
+//! failed on two of sixteen solves of the whole source. Why W is not in the
+//! pool: for g_k alone it adds little (as directions it saved 4 of 44 steps
+//! at the first estimate of three and four lasers at 10 ms, for 250-940
+//! GEMV of products with Q); the basis columns enter only through W^T U.
 //!
 //! One shared pool answers every shift: the trace-row vector u, the seed
 //! directions (the inner directions of the pipeline's own steady solve,
@@ -57,9 +55,12 @@ use super::lattice::{ErrorLattice,split};
 use super::propagate::Readout;
 use crate::parallel::Execution;
 
-/// Ritz modes with |theta| below this (1/us) are answered exactly.
+/// Ritz modes with |theta| below this (1/us) are answered exactly: a
+/// deliberate margin over the research cases' slowest relaxation rates
+/// (2e-3 to 8e-3 /us on three lasers, 3.4e-2 on four), whose far sources'
+/// transport the SW part cannot follow (it is no small parameter there).
 pub const SLOW:f64=0.05;
-/// GCRO stops when the residual is below RESIDUAL |F| (R2 section 12).
+/// GCRO stops when the residual is below RESIDUAL |F|.
 /// With the deflation, measured against solves to 1e-7 on two to five lasers
 /// at 10 ms (first estimates): within 1.2% (3e-5: 2.7%; 1e-4: 5.4% there, but
 /// 42% at a later checkpoint of four lasers; 1e-3: 8%). The residual bounds
@@ -76,10 +77,10 @@ const SETTLE:f64=1e-2;
 const SETTLED_RESIDUAL:f64=1e-3;
 const SETTLE_TIMES:usize=6;
 const MAXIMUM_STEPS:usize=60;
-/// A Ritz value below this is the kernel (theta = 0 exactly in the outputs).
-const KERNEL:f64=1e-12;
-/// Real rows per panel of Q and per task of the block products.
-const PANEL_ROWS:usize=1<<15;
+/// Real rows per panel of Q and per task of the block products: fixed, so
+/// that the partial sums (in panel order) do not depend on the thread count;
+/// 4096 rows (two modes) give the product lattices 4-16 panels to spread.
+const PANEL_ROWS:usize=1<<12;
 /// A block column whose part outside the block's earlier pivots is below
 /// this fraction of its size adds no direction (a Gram matrix resolves
 /// singular values down to about the square root of the roundoff).
@@ -87,6 +88,10 @@ const CHOLESKY_DEPENDENT:f64=1e-7;
 /// A column of the small least-squares problem below this fraction of its
 /// size outside the earlier ones is left out.
 const SMALL_DEPENDENT:f64=1e-12;
+/// A real or imaginary part of the residual field below this fraction of
+/// the residual's norm adds no augmentation direction: a deliberate margin,
+/// the part left is at most a thousandth of the residual.
+const AUGMENT_PART:f64=1e-3;
 
 /// Hermitian-symmetric fields as real vectors: the canonical modes only
 /// (the others are their mirrors' adjoints), real and imaginary parts, a
@@ -96,7 +101,7 @@ const SMALL_DEPENDENT:f64=1e-12;
 struct Packing{d:usize,n:usize,canonical:Vec<usize>,mirror:Vec<usize>,modes:usize}
 impl Packing{
     fn new(lattice:&ErrorLattice<'_>)->Self{
-        let canonical:Vec<usize>=(0..lattice.modes.len()).filter(|&q|lattice.modes[q]>=lattice.modes[lattice.mirror[q]]).collect();
+        let canonical:Vec<usize>=(0..lattice.modes.len()).filter(|&q|lattice.canonical[q]).collect();
         Self{d:lattice.d,n:lattice.n,canonical,mirror:lattice.mirror.clone(),modes:lattice.modes.len()}
     }
     fn length(&self)->usize{2*self.d*self.canonical.len()}
@@ -192,12 +197,10 @@ impl Panels{
         Ok((coordinates,fresh))
     }
 }
-/// Rows per task of the block products: two tasks per worker, at most a panel.
-fn block_rows(execution:&Execution,length:usize)->usize{length.div_ceil(2*execution.threads()).clamp(1<<12,PANEL_ROWS)}
 /// A^T B (ka x mb, column-major) of blocks A (length x ka) and B (length x mb), by row chunks.
 fn block_cross(lapack:&Lapack,execution:&Execution,a:&[f64],ka:usize,b:&[f64],mb:usize,length:usize)->Result<Vec<f64>,String>{
     if ka==0||mb==0{return Ok(vec![0.;ka*mb]);}
-    let chunk=block_rows(execution,length);
+    let chunk=PANEL_ROWS;
     let parts=execution.map((0..length).step_by(chunk).collect(),|s:usize|->Result<Vec<f64>,String>{
         let rows=(s+chunk).min(length)-s;let mut out=vec![0.;ka*mb];
         lapack.gemm(true,false,ka,mb,rows,1.,&a[s..],length,&b[s..],length,0.,&mut out,ka)?;Ok(out)});
@@ -207,7 +210,7 @@ fn block_cross(lapack:&Lapack,execution:&Execution,a:&[f64],ka:usize,b:&[f64],mb
 /// G T (length x m) for G (length x k) and T (k x m), by row chunks.
 fn block_times(lapack:&Lapack,execution:&Execution,g:&[f64],length:usize,k:usize,t:&[f64],m:usize)->Result<Vec<f64>,String>{
     if k==0||m==0{return Ok(vec![0.;length*m]);}
-    let chunk=block_rows(execution,length);let starts:Vec<usize>=(0..length).step_by(chunk).collect();
+    let chunk=PANEL_ROWS;let starts:Vec<usize>=(0..length).step_by(chunk).collect();
     let parts=execution.map(starts.clone(),|s|->Result<Vec<f64>,String>{
         let rows=(s+chunk).min(length)-s;let mut out=vec![0.;rows*m];
         lapack.gemm(false,false,rows,m,k,1.,&g[s..],length,t,k,0.,&mut out,rows)?;Ok(out)});
@@ -287,7 +290,7 @@ pub struct PoolWork{
 /// over the pool's directions) and the deflated amplitudes lambda_j of the
 /// slow Ritz vectors x_j (Ritz index, value, lambda), whose response is in
 /// closed form.
-pub struct SlowSolution{pub theta:C,pub coefficient:C,basis:Vec<C>,x:Vec<C>,deflated:Vec<(usize,C,C)>}
+pub struct SlowSolution{pub theta:C,pub coefficient:C,pub kernel:bool,basis:Vec<C>,x:Vec<C>,deflated:Vec<(usize,C,C)>}
 
 /// The reduced model's slow invariant subspace at one checkpoint: per slow
 /// Ritz mode j its Ritz index and value, b_j = s_j, its left functional
@@ -302,6 +305,8 @@ struct Solved{x:Vec<C>,basis:Vec<C>,deflated:Vec<(usize,C)>}
 pub struct SlowPool{
     dimension:usize,lapack:Arc<Lapack>,execution:Execution,
     n:usize,d:usize,watch:Vec<usize>,mirror:Vec<usize>,near:Vec<usize>,packing:Packing,
+    /// The centre's slot among the near modes.
+    centre_slot:usize,
     q:Panels,
     /// Per direction: its coordinates and its image's (on Q at insertion),
     /// its centre trace and its near-mode blocks (near.len() each); the
@@ -324,7 +329,7 @@ impl SlowPool{
     pub fn new(prepared:&LatticePrepared,lattice:&ErrorLattice<'_>,horizon:f64)->Result<Self,String>{
         let(n,d)=(lattice.n,lattice.d);let c0=lattice.centre*d;let watch:Vec<usize>=(0..n).map(|i|c0+i*n+i).collect();
         let packing=Packing::new(lattice);let length=packing.length();
-        let mut pool=Self{dimension:lattice.dimension(),lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),packing,
+        let mut pool=Self{dimension:lattice.dimension(),lapack:Arc::clone(&prepared.lapack),execution:Execution::new()?,n,d,watch,mirror:lattice.mirror.clone(),near:lattice.near.clone(),packing,centre_slot:lattice.near.iter().position(|&q|q==lattice.centre).unwrap_or(0),
             q:Panels::new(length),cu:Vec::new(),cau:Vec::new(),trace:Vec::new(),near_parts:Vec::new(),u:Vec::new(),
             packed_basis:Vec::new(),wq:Vec::new(),columns:0,deflation:None,horizon,steady_scale:0.,work:PoolWork::default()};
         let packed=pool.packing.pack(&pool.trace_row());let(mut coordinates,_)=pool.extend(packed,1)?;pool.u=coordinates.remove(0);
@@ -407,7 +412,7 @@ impl SlowPool{
     /// the deflated amplitudes lambda and the directions' left functionals
     /// l_j(u_k); without the deflation the centre populations of U c.
     fn contribution(&self,c:&[C],lambda:&[C],ell:&[Vec<C>],deflation:Option<&Deflation>,phi:&[f64],weight:f64)->Vec<C>{
-        let(n,d)=(self.n,self.d);let centre_slot=self.near.iter().position(|&q|q==self.watch[0]/d).unwrap_or(0);
+        let(n,d,centre_slot)=(self.n,self.d,self.centre_slot);
         let mut out=vec![ZERO;n];
         for(k,&v)in c.iter().enumerate(){if !nonzero(v){continue;}for(i,o)in out.iter_mut().enumerate(){mul_add(o,v,self.near_parts[k][centre_slot*d+i*n+i]);}}
         if let Some(d)=deflation{for(i,centre)in d.centre.iter().enumerate(){
@@ -434,14 +439,14 @@ impl SlowPool{
     }
     /// The centre populations of U x (complex: x carries both real parts).
     fn centre_populations(&self,x:&[C])->Vec<C>{
-        let(n,d)=(self.n,self.d);let centre_slot=self.near.iter().position(|&q|q==self.watch[0]/d).unwrap_or(0);
+        let(n,d,centre_slot)=(self.n,self.d,self.centre_slot);
         let mut out=vec![ZERO;n];
         for(j,&c)in x.iter().enumerate(){if !nonzero(c){continue;}for(i,o)in out.iter_mut().enumerate(){mul_add(o,c,self.near_parts[j][centre_slot*d+i*n+i]);}}
         out
     }
     /// Centre populations (real parts) of scale Y.
     fn readout(&self,basis:&[Vec<C>],s:&SlowSolution,scale:C)->Vec<f64>{
-        let(n,d)=(self.n,self.d);let centre_slot=self.near.iter().position(|&q|q==self.watch[0]/d).unwrap_or(0);
+        let(n,d,centre_slot)=(self.n,self.d,self.centre_slot);
         let mut out=vec![0.;n];
         for(j,&c)in s.x.iter().enumerate(){if !nonzero(c){continue;}let c=mul(scale,c);
             for(i,o)in out.iter_mut().enumerate(){*o+=mul(c,self.near_parts[j][centre_slot*d+i*n+i]).re;}}
@@ -457,9 +462,9 @@ impl SlowPool{
     /// its steady limit, -lambda_j x_j / theta_j, would weigh the Ritz
     /// vectors' residuals by 1 / theta_j (measured: the steady estimate moved
     /// by up to a factor 2.7).
-    fn solve(&mut self,f:&[C],theta:C,coefficient:C,deflate:bool,steady:&mut dyn SteadySolves)->Result<Solved,String>{
+    fn solve(&mut self,f:&[C],theta:C,coefficient:C,kernel:bool,deflate:bool,steady:&mut dyn SteadySolves)->Result<Solved,String>{
         let clock=Instant::now();self.work.solves+=1;
-        let kernel=magnitude(theta)<KERNEL;let length=self.q.length;
+        let length=self.q.length;
         let deflation=if deflate&&!kernel{self.deflation.take()}else{None};
         let slow=deflation.as_ref().map_or(0,|d|d.theta.len());
         // f = e^{i phi} (g1 + i g2) with g1, g2 Hermitian-symmetric and
@@ -520,7 +525,7 @@ impl SlowPool{
             let step=Instant::now();
             let mut new=Vec::new();
             for part in r.chunks_exact(length){
-                let size=dot(part,part).sqrt();if !(size>1e-3*rn){continue;}
+                let size=dot(part,part).sqrt();if !(size>AUGMENT_PART*rn){continue;}
                 let field:Vec<C>=self.packing.unpack(part).iter().map(|v|C{re:v.re/size,im:v.im/size}).collect();
                 let mut z=vec![ZERO;field.len()];steady.precondition(&field,&mut z)?;self.work.preconditions+=1;
                 let az=self.apply(steady,&z)?;new.push((z,az));
@@ -562,18 +567,18 @@ impl SlowPool{
     /// Y = -x + tau0(x) x_ss - (A + u tau0^T)^-1 g, whose first two terms (the
     /// reduced and the true steady state) cancel to the steady error itself,
     /// so there the small source A x + g is solved whole.
-    pub fn mode(&mut self,b:&[C],ax:&[C],g:&[C],theta:C,coefficient:C,steady:&mut dyn SteadySolves)->Result<SlowSolution,String>{
-        if magnitude(theta)<KERNEL{
+    pub fn mode(&mut self,b:&[C],ax:&[C],g:&[C],theta:C,coefficient:C,kernel:bool,steady:&mut dyn SteadySolves)->Result<SlowSolution,String>{
+        if kernel{
             let f:Vec<C>=ax.iter().zip(g).map(|(a,v)|C{re:a.re+v.re,im:a.im+v.im}).collect();
-            let s=self.solve(&f,theta,coefficient,false,steady)?;
-            let solution=SlowSolution{theta,coefficient,basis:Vec::new(),x:s.x,deflated:Vec::new()};
+            let s=self.solve(&f,theta,coefficient,true,false,steady)?;
+            let solution=SlowSolution{theta,coefficient,kernel,basis:Vec::new(),x:s.x,deflated:Vec::new()};
             self.steady_scale=self.centre_populations(&solution.x).iter().map(|z|magnitude(*z)).fold(0.,f64::max)*magnitude(coefficient);
             return Ok(solution);
         }
-        let s=self.solve(g,theta,coefficient,true,steady)?;
+        let s=self.solve(g,theta,coefficient,false,true,steady)?;
         let mut basis=s.basis;basis.resize(b.len(),ZERO);for(t,v)in basis.iter_mut().zip(b){t.re-=v.re;t.im-=v.im;}
         let deflated=self.deflation.as_ref().map_or(Vec::new(),|d|s.deflated.iter().map(|&(i,l)|(d.index[i],d.theta[i],l)).collect());
-        Ok(SlowSolution{theta,coefficient,basis,x:s.x,deflated})
+        Ok(SlowSolution{theta,coefficient,kernel,basis,x:s.x,deflated})
     }
     /// The Gram matrix W^T U of the basis against every pool direction
     /// (column-major k x p), from the directions' coordinates and W^T Q.
@@ -602,26 +607,25 @@ impl SlowPool{
     /// (r) the outputs use and its kernel modes `kernel`. A kernel mode's Y
     /// (the steady error) is trace free: the true e^{tA} Y decays, so its
     /// projection on the space is propagated without its kernel coordinates
-    /// (which the reduced model would keep forever; R2 14.4: early
+    /// (which the reduced model would keep forever; measured: early
     /// checkpoints of three and four lasers 0.88 and 2.3 of the actual error
     /// without, 1.00-1.01 with).
     #[allow(clippy::too_many_arguments)]
     pub fn populations(&mut self,lattice:&ErrorLattice<'_>,basis:&[Vec<C>],s:&[C],theta:&[C],kernel:&[usize],solutions:&[SlowSolution],times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
         let(n,d,k,r)=(self.n,self.d,basis.len(),theta.len());let t_count=times.len();
         if solutions.is_empty()||t_count==0{return Ok(vec![vec![0.;n];t_count]);}
-        let lapack=Arc::clone(&self.lapack);let gemm=lapack.complex_gemm();
+        let lapack=Arc::clone(&self.lapack);
         // S factored once; the Ritz vectors B = S over the basis.
         let(lu_s,piv_s)=lapack.complex_factor(s,r)?;let b=s;
         let gram=self.basis_gram(k);
         let modes:Vec<usize>=match readout{Readout::Laboratory=>(0..lattice.modes.len()).collect(),Readout::Centre=>vec![lattice.centre]};
         let phase=|q:usize,t:f64|match readout{Readout::Laboratory=>cexp(C{re:0.,im:lattice.nu[q]},t),Readout::Centre=>ONE};
-        let mut total=vec![ZERO;n*t_count];
         // Per slow mode: r0 = W^T Y (Y's part in the space) and the remainder on the near modes.
         let mut ritz_weights=vec![ZERO;r];let mut in_space:Vec<Vec<C>>=Vec::new();let mut remainders:Vec<(usize,C,C,Vec<C>)>=Vec::new();
         for sol in solutions{
             let(r0,near)=self.parts(basis,&gram,sol);
             let mut cs=lapack.complex_solve_matrix_factored(&lu_s,&piv_s,&r0,r)?;
-            if magnitude(sol.theta)<KERNEL{for &j in kernel{cs[j]=ZERO;}}
+            if sol.kernel{for &j in kernel{cs[j]=ZERO;}}
             for(w,c)in ritz_weights.iter_mut().zip(&cs){mul_add(w,sol.coefficient,*c);}
             let xr=r0;
             for(slot,&q)in self.near.iter().enumerate(){
@@ -635,34 +639,62 @@ impl SlowPool{
         // In the space, per mode: sum_k a_k e^{theta_k t} P_q(W r0_k) - P_q(B (sum_k a_k cS_k) e^{theta t}),
         // and the deflated amplitudes' closed-form response, P_q(B h(t)) with
         // h_j(t) = sum_k a_k lambda_kj (e^{theta_k t} - e^{theta_j t}) / (theta_k - theta_j).
-        let mut ritz_exp:Vec<C>=times.iter().flat_map(|&t|theta.iter().zip(&ritz_weights).map(move|(&z,&w)|mul(w,cexp(z,t)))).collect();
-        for sol in solutions{for &(j,zj,l)in &sol.deflated{let a=mul(sol.coefficient,l);if !nonzero(a){continue;}
-            for(ti,&t)in times.iter().enumerate(){let v=mul(a,secular(sol.theta,zj,t));let e=&mut ritz_exp[j+r*ti];e.re-=v.re;e.im-=v.im;}}}
-        for &q in &modes{
+        // Per mode: P_q(B) and the constants P_q(W r0_k) (time-independent).
+        let per_mode=self.execution.map(modes.clone(),|q|->Result<(usize,Vec<C>,Vec<(C,C,Vec<C>)>),String>{
+            let gemm=lapack.complex_gemm();
             let mut rows=vec![ZERO;n*k];for j in 0..k{for i in 0..n{rows[i+n*j]=basis[j][q*d+i*n+i];}}
             let mut rb=vec![ZERO;n*r];gemm.multiply(n,r,k,ONE,&rows,n,b,k,ZERO,&mut rb,n)?;
-            let mut reduced=vec![ZERO;n*t_count];gemm.multiply(n,t_count,r,ONE,&rb,n,&ritz_exp,r,ZERO,&mut reduced,n)?;
             let mut constants=Vec::with_capacity(solutions.len());
             for(sol,xr)in solutions.iter().zip(&in_space){let mut v=vec![ZERO;n];gemm.multiply(n,1,k,ONE,&rows,n,xr,k,ZERO,&mut v,n)?;constants.push((sol.coefficient,sol.theta,v));}
-            for(ti,&t)in times.iter().enumerate(){let ph=phase(q,t);
-                for i in 0..n{let mut v=C{re:-reduced[i+n*ti].re,im:-reduced[i+n*ti].im};
-                    for(a,th,c)in &constants{mul_add(&mut v,mul(*a,cexp(*th,t)),c[i]);}
-                    mul_add(&mut total[i+n*ti],ph,v);}}
-        }
-        // The remainders on the near modes: e^{i nu_q t} e^{theta_k t} Y_perp - its dressed-block propagation.
+            Ok((q,rb,constants))}).into_iter().collect::<Result<Vec<_>,_>>()?;
+        // The remainders on the near modes: e^{i nu_q t} e^{theta_k t} Y_perp
+        // - its dressed-block propagation R diag(a c) e^{lambda t}, which
+        // carries no phase of its own: every remainder's decay is one
+        // H = R diag(sum a c) for all of them.
+        let lambda:Vec<C>=lattice.basis()?.lambda.iter().map(|z|C{re:z.re.min(0.),im:z.im}).collect();
+        let mut rises:Vec<(usize,C,C,Vec<C>)>=Vec::with_capacity(remainders.len());let mut decay:Option<Vec<C>>=None;
         if !remainders.is_empty(){
-            let lambda:Vec<C>=lattice.basis()?.lambda.iter().map(|z|C{re:z.re.min(0.),im:z.im}).collect();
-            let block:Vec<C>=times.iter().flat_map(|&t|lambda.iter().map(move|&z|cexp(z,t))).collect();
             let readout_rows=lattice.basis()?.population_rows();
             let blocks:Vec<&[C]>=remainders.iter().map(|x|&x.3[..]).collect();
             let coefficients=lattice.basis()?.coefficients(&blocks)?;self.work.frame_blocks+=remainders.len();
+            let mut weights=vec![ZERO;d];
             for(i,(q,a,th,y))in remainders.iter().enumerate(){
-                let mut h=readout_rows.to_vec();for j in 0..d{let c=mul(*a,coefficients[j+d*i]);for row in 0..n{h[row+n*j]=mul(h[row+n*j],c);}}
-                let mut dec=vec![ZERO;n*t_count];gemm.multiply(n,t_count,d,ONE,&h,n,&block,d,ZERO,&mut dec,n)?;
-                for(ti,&t)in times.iter().enumerate(){let ph=mul(phase(*q,t),mul(*a,cexp(*th,t)));
-                    for row in 0..n{let v=mul(ph,y[row*n+row]);total[row+n*ti].re+=v.re-dec[row+n*ti].re;total[row+n*ti].im+=v.im-dec[row+n*ti].im;}}
+                for(j,w)in weights.iter_mut().enumerate(){mul_add(w,*a,coefficients[j+d*i]);}
+                rises.push((*q,*a,*th,(0..n).map(|row|y[row*n+row]).collect()));
             }
+            let mut h=readout_rows.to_vec();for j in 0..d{for row in 0..n{h[row+n*j]=mul(h[row+n*j],weights[j]);}}
+            decay=Some(h);
         }
+        // The time GEMMs by chunks of the grid over the workers: every
+        // output entry is accumulated by one task in the serial order.
+        let per_time=per_mode.len()*n*r+usize::from(decay.is_some())*n*d+rises.len()*n;
+        let width=super::time_chunk(t_count,per_time);
+        let chunks:Vec<(usize,usize)>=(0..t_count).step_by(width).map(|a|(a,(a+width).min(t_count))).collect();
+        let(ritz_weights,per_mode,rises,decay,lambda)=(&ritz_weights,&per_mode,&rises,&decay,&lambda);
+        let parts=self.execution.map(chunks,|(a0,b0)|->Result<Vec<C>,String>{
+            let(gemm,ts,tc)=(lapack.complex_gemm(),&times[a0..b0],b0-a0);
+            let mut total=vec![ZERO;n*tc];
+            let mut ritz_exp:Vec<C>=ts.iter().flat_map(|&t|theta.iter().zip(ritz_weights).map(move|(&z,&w)|mul(w,cexp(z,t)))).collect();
+            for sol in solutions{for &(j,zj,l)in &sol.deflated{let a=mul(sol.coefficient,l);if !nonzero(a){continue;}
+                for(ti,&t)in ts.iter().enumerate(){let v=mul(a,secular(sol.theta,zj,t));let e=&mut ritz_exp[j+r*ti];e.re-=v.re;e.im-=v.im;}}}
+            for(q,rb,constants)in per_mode{
+                let mut reduced=vec![ZERO;n*tc];gemm.multiply(n,tc,r,ONE,rb,n,&ritz_exp,r,ZERO,&mut reduced,n)?;
+                for(ti,&t)in ts.iter().enumerate(){let ph=phase(*q,t);
+                    for i in 0..n{let mut v=C{re:-reduced[i+n*ti].re,im:-reduced[i+n*ti].im};
+                        for(a,th,c)in constants{mul_add(&mut v,mul(*a,cexp(*th,t)),c[i]);}
+                        mul_add(&mut total[i+n*ti],ph,v);}}
+            }
+            for(q,a,th,y)in rises{
+                for(ti,&t)in ts.iter().enumerate(){let ph=mul(phase(*q,t),mul(*a,cexp(*th,t)));
+                    for row in 0..n{mul_add(&mut total[row+n*ti],ph,y[row]);}}
+            }
+            if let Some(h)=decay{
+                let block:Vec<C>=ts.iter().flat_map(|&t|lambda.iter().map(move|&z|cexp(z,t))).collect();
+                let mut dec=vec![ZERO;n*tc];gemm.multiply(n,tc,d,ONE,h,n,&block,d,ZERO,&mut dec,n)?;
+                for(t,v)in total.iter_mut().zip(&dec){t.re-=v.re;t.im-=v.im;}
+            }
+            Ok(total)});
+        let mut total=Vec::with_capacity(n*t_count);for part in parts{total.extend(part?);}
         Ok((0..t_count).map(|ti|(0..n).map(|i|total[i+n*ti].re).collect()).collect())
     }
 }

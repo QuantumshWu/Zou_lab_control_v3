@@ -1,8 +1,8 @@
 //! The explicit charge set P of a request and its ring Q = ring(P): the
-//! lattice the pipeline works on. P's blocks are solved by GMRES, Q is
-//! eliminated exactly at every pole (`ring`), everything beyond P u Q is
-//! omitted (its outflow is the truncation part of the embedded residual the
-//! error estimate propagates).
+//! lattice the pipeline works on. P u Q is solved whole at every pole (GMRES
+//! on every block, `poles`); everything beyond P u Q is omitted (the error
+//! estimate slaves that ring, ring(P u Q), and feeds it back:
+//! `estimator::ErrorLattice::ring_feedback`).
 //!
 //! The rule (`explicit_set`, one function):
 //! 1. start: {0} and every explicit step s whose first-order mixing
@@ -10,13 +10,19 @@
 //!    (the translation gate: a copy along s carries population weight of
 //!    that order);
 //! 2. ring closure: while the ring has an internal edge q <- q - t with
-//!    rho = ||C_t|| ||D_q^-1|| above RING_COUPLING (the contraction of the
-//!    ring's block Jacobi elimination), the ring charge carrying the largest
-//!    summed rho joins P with its mirror, at most PROMOTIONS times;
+//!    rho = ||C_t|| ||D_q^-1|| above RING_COUPLING, the ring charge carrying
+//!    the largest summed rho joins P with its mirror, at most PROMOTIONS
+//!    times. Q is solved whole, so this is no elimination's contraction;
+//!    what it buys is a lattice one shell wider where the ring is strongly
+//!    coupled, which the estimate's slaved outer ring needs: without it four
+//!    lasers + tweezer at 10 ms had a sample at 50 us with an error of
+//!    8.0e-4 against a bound of 3.9e-4 (0.89 of its error at worst with it);
+//!    solves and means were unchanged;
 //! 3. cover: every charge whose seed amplitude is at least SEED_AMPLITUDE x
 //!    tolerance and that P u Q misses joins P (largest first, with its
-//!    mirror);
-//! 4. the ring closure again.
+//!    mirror). A second closure after the cover promoted nothing on any
+//!    research case (three, four, five lasers, four without the trap, probe
+//!    + tweezer; 20 us, 10 ms, means) and is not run.
 //!
 //! Seed amplitudes: the slaved (z = 0) amplitudes layer by layer from the
 //! probe states on the centre, y_r = -D_r^-1 sum_p C_{r-p} y_p over the
@@ -28,15 +34,34 @@ use super::estimate_api::{LatticeSets,ring};
 use super::operator::{LatticeOperator,Mask,Parts};
 use super::classification::HarmonicStep;
 
-/// Translation gate and explicit start (times the tolerance).
+/// Translation gate and explicit start (times the tolerance): a deliberate
+/// margin, a step's copies carry population weight of order its mixing, a
+/// tenth of the tolerance at the gate.
 pub const GATE:f64=0.1;
-/// Largest rho = ||C_t|| ||D_q^-1|| of an edge inside the ring.
+/// Largest rho = ||C_t|| ||D_q^-1|| of an edge inside the ring (the
+/// coupling a block of the ring receives from a ring neighbour, relative to
+/// its own resolvent). Measured:
+/// the gate alone left ring-internal edges up to rho = 54 (the Raman
+/// charges' resolvent); closed at 0.1, no research case's ring keeps one.
 pub const RING_COUPLING:f64=0.1;
+/// A cap on the ring closure's promotions: rho's norm bound is
+/// conservative, and promotion cascades (uncapped, four and five lasers grew
+/// to 47-73 explicit charges as each promoted bridge exposed new edges).
 const PROMOTIONS:usize=4;
+/// A deliberate margin, not measured: the seed amplitudes reach one step
+/// past the ring of a one-step explicit set (P = ball(1), which the closure
+/// builds on the research cases).
 const SEED_DEPTH:usize=3;
 /// Seed amplitude (times the tolerance) a charge must reach to be covered.
+/// A deliberate margin: a charge left out carries at most a fifth of the
+/// tolerance (measured leaks 9e-5 to 7.6e-4 on the research cases).
 pub const SEED_AMPLITUDE:f64=0.2;
 const NORM_ITERATIONS:usize=30;
+/// The ring condition's resolvent norms are cached per frequency rounded to
+/// 1/RESOLVENT_KEY rad/us. Derived: a norm |D_q^-1| moves with nu at most
+/// by |D_q^-1|^2 per rad/us, so frequencies within 1e-6 rad/us share it to a
+/// relative 1e-6 |D_q^-1|.
+const RESOLVENT_KEY:f64=1e6;
 
 #[derive(Clone,Debug)]
 pub struct ExplicitSet{
@@ -103,7 +128,7 @@ impl RingCondition<'_>{
         let set:Vec<Charge>=explicit.iter().cloned().collect();let q_set=ring(self.prepared,&set)?;
         let inside:BTreeSet<&Charge>=q_set.iter().collect();let mut found=Vec::new();
         for q in &q_set{for t in self.steps.clone(){let p=charge_minus(q,&t)?;if inside.contains(&p){found.push((q.clone(),p,t));}}}
-        let key=|nu:f64|(nu*1e6).round()as i64;
+        let key=|nu:f64|(nu*RESOLVENT_KEY).round()as i64;
         let mut missing:Vec<f64>=Vec::new();
         for(q,_,_)in &found{let nu=self.prepared.nu(q)?;if !self.resolvent.contains_key(&key(nu))&&!missing.iter().any(|&m|key(m)==key(nu)){missing.push(nu);}}
         if !missing.is_empty(){for(nu,v)in missing.iter().zip(self.prepared.eigenbasis()?.resolvent_norms(&missing)?){self.resolvent.insert(key(*nu),v);}}
@@ -171,7 +196,7 @@ pub fn explicit_set(prepared:&LatticePrepared,initial:&[C],tolerance:f64)->Resul
     let mut explicit:BTreeSet<Charge>=BTreeSet::from([zero]);
     for s in &gated{explicit.insert(s.clone());explicit.insert(opposite(s));}
     // 2. Ring closure.
-    let mut promoted=condition.close(&mut explicit)?;
+    let promoted=condition.close(&mut explicit)?;
     // 3. Cover.
     let need:Vec<(&Charge,f64)>=amplitudes.iter().filter(|(_,&a)|a>=SEED_AMPLITUDE*tolerance).map(|(q,&a)|(q,a)).collect();
     let mut covered=Vec::new();
@@ -180,8 +205,6 @@ pub fn explicit_set(prepared:&LatticePrepared,initial:&[C],tolerance:f64)->Resul
         let Some((c,_))=need.iter().filter(|(q,_)|!lattice.contains(*q)).max_by(|a,b|a.1.total_cmp(&b.1).then(a.0.cmp(b.0)))else{break};
         let c=(*c).clone();explicit.insert(opposite(&c));explicit.insert(c.clone());covered.push(c);
     }
-    // 4. Ring closure again.
-    promoted.extend(condition.close(&mut explicit)?);
     let mut p:Vec<Charge>=explicit.into_iter().collect();
     p.sort_by_key(|q|(q.iter().map(|&k|k.unsigned_abs()as u64).sum::<u64>(),q.clone()));
     let q=ring(prepared,&p)?;

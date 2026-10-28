@@ -43,6 +43,45 @@ test('solver statuses and known sentences are shown in Chinese; unknown text is 
   assert.equal(steadyStatusText('not-converged'),'未收敛');
   assert.equal(solverText('an unforeseen native message'),'an unforeseen native message');
 });
+// The reasons the solver formats, read from its source: every format
+// string with sample values for its placeholders, in order.
+const pipelineSource=readFileSync(new URL('../rust-solver/population-core/src/lattice/pipeline.rs',import.meta.url),'utf8');
+const adapterSource=readFileSync(new URL('../rust-solver/src/lattice_core_adapter.rs',import.meta.url),'utf8');
+const formatStrings=source=>[...source.matchAll(/format!\("((?:[^"\\]|\\.)*)"/g)].map(m=>m[1]);
+const formatted=(source,start,values)=>{
+  const format=formatStrings(source).find(f=>f.startsWith(start));assert.ok(format,start);
+  let i=0;return format.replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,()=>String(values[i++]));
+};
+const chinese=(english,name)=>{const text=solverText(english);
+  assert.notEqual(text,english,name);assert.match(text,/[\u4e00-\u9fff]/,name);assert.doesNotMatch(text,/\b(the|is|of|above|after)\b/,name);return text;};
+test('the stop and checkpoint reasons the solver formats are shown in Chinese',()=>{
+  const whys=[['the error bound stopped improving',[2,3,48]],['the basis memory was spent',[30]],['the pole ladder was exhausted',[12]],['the solve budget',[48]]]
+    .map(([start,values])=>formatted(pipelineSource,start,values));
+  const samples=formatted(pipelineSource,'; {} of {} samples above it',[5,1000,'0.0200','0.1001']);
+  const means=formatted(pipelineSource,'; {means} mean output(s) above it',[1]);
+  for(const why of whys){
+    for(const tail of [['',''],[samples,''],['',means],[samples,means]]){
+      chinese(formatted(pipelineSource,'Stopped because',[why,24,'1.89e-2','5e-3',...tail]),why);
+    }
+    chinese(formatted(pipelineSource,'Every output is within the tolerance',[why]),why);
+  }
+  chinese(formatted(adapterSource,'Checkpoint at',[8,'1.20e-2','5e-3']),'checkpoint');
+  chinese(formatted(adapterSource,"The mean's error bound is",['3.61e0']),'uninformative mean');
+  // A request stopped before its first solve: nothing computed, the reason alone.
+  chinese(formatted(pipelineSource,'The lattice of this request has',[150,'5.3','5']),'memory guard');
+  chinese(formatted(pipelineSource,'Static fold expansion parameter',['1.2e0']),'diverging fold');
+});
+test('every sentence the pipeline and the adapter format is shown in Chinese (a new one fails here)',()=>{
+  const sentences=[...formatStrings(pipelineSource),...formatStrings(adapterSource)].filter(f=>/^[A-Z][a-z]/.test(f));
+  assert.ok(sentences.length>=6,`${sentences.length} sentences`);
+  for(const format of sentences)chinese(format.replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'),format);
+});
+test('every mean reason the native adapter writes is shown in Chinese, within the tolerance and outside it',()=>{
+  const outside=/const OUTSIDE:&str="([^"]+)";/.exec(adapterSource)?.[1];assert.ok(outside,'OUTSIDE');
+  const reasons=[...adapterSource.matchAll(/"((?:Converged|Long-time|Unique|Full-density|Lindblad mean|Populations converge)[^"]*\.)"/g)].map(m=>m[1]);
+  assert.ok(reasons.length>=7,`${reasons.length} reasons`);
+  for(const reason of reasons){chinese(reason,reason);assert.match(chinese(reason+outside,reason),/未收敛/,reason);}
+});
 test('the method sentences the native adapter writes are shown in Chinese',()=>{
   const adapter=readFileSync(new URL('../rust-solver/src/lattice_core_adapter.rs',import.meta.url),'utf8');
   for(const name of ['METHOD']){

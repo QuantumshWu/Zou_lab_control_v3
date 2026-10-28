@@ -26,8 +26,6 @@
 //! - For the Lindblad form the right data are the conjugates of the left
 //!   (NR'^T = conj NL' + c I, B_t^T = conj A_-t; checked), so
 //!   Q_l = P_-l^dagger and mu = conj(lambda) + c.
-//! Without kernels (`Frames::Block`) the frames are the eigenframes of the
-//! dressed block NL' X + X NR'.
 //!
 //! A `Transform` applies x -> sum P_k x Q_l (forward) or the inverse kernels
 //! (backward) on the Hermitian-symmetric fields of a mode set, in the
@@ -43,7 +41,9 @@ use crate::lapack::ComplexGemm;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// Explicit step pairs mixing (|V_s| / |nu_s|) above this enter the
-/// self-consistent central frames.
+/// self-consistent central frames. A deliberate margin: a pair below it
+/// moves the frames at second order, by about its mixing squared (1e-8),
+/// below the inner tolerance; the frames only precondition.
 const MIXING_FLOOR:f64=1e-4;
 /// Kernels |P_s|_F / |P_0|_F below this stay out of the transforms
 /// (measured: two tiers, 0.08-0.11 for the main beat pair and 0.008-0.011
@@ -57,15 +57,13 @@ const KERNEL_FLOOR:f64=5e-3;
 /// here, as many as with the dense kernels).
 const KERNEL_ENTRY_FLOOR:f64=3e-4;
 /// Kernel elements with |numerator / denominator| above this are near
-/// resonant and left out.
+/// resonant and left out: a deliberate margin below 1, where the first
+/// order stops being a small parameter.
 const RESONANCE_GUARD:f64=0.5;
 /// Relative quasi-energy change at which the self-consistency stops (it
 /// stalls near 1e-9 on eigenvalue pairing noise), and its iteration cap.
 const SELF_CONSISTENT:f64=1e-8;
 const ITERATIONS:usize=12;
-/// Frame pairs whose frequency exceeds this fraction of the frame scale
-/// precess (below it: populations and degenerate coherences).
-const PRECESSING:f64=1e-9;
 
 /// Row-major n x n helpers.
 pub(crate) fn transpose(a:&[C],n:usize)->Vec<C>{(0..n*n).map(|k|a[(k%n)*n+k/n]).collect()}
@@ -107,14 +105,6 @@ fn eigenframe(lapack:&Lapack,m:&[C],n:usize)->Result<Frame,String>{
     Ok(Frame{values,p,pinv,condition})
 }
 
-/// Which frames a transform uses.
-#[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum Frames{
-    /// The eigenframes of the dressed block (no kernels).
-    Block,
-    /// The self-consistent central frames with the kernels of the support.
-    Floquet,
-}
 /// A sparse n x n kernel in frame coordinates: (row, column, value), the
 /// entries from KERNEL_ENTRY_FLOOR up.
 #[derive(Clone,Default)]
@@ -156,7 +146,6 @@ impl Tables{
         let(q0,q0inv)=(adjoint(&p0,n),adjoint(&p0inv,n));
         Ok(Self{charges,lambda,mu,p0,p0inv,q0,q0inv,forward,backward,centre:Kernel::new(&centre,n)})
     }
-    fn scale(&self)->f64{self.lambda.iter().chain(&self.mu).map(|z|magnitude(*z)).fold(0.,f64::max)}
     /// Stored kernel entries.
     fn entries(&self)->usize{self.forward.iter().chain(&self.backward).map(|k|k.entries.len()).sum::<usize>()+self.centre.entries.len()}
 }
@@ -175,9 +164,6 @@ pub struct KernelDiagnostics{
     /// The support: (charge, |P_s|_F / |P_0|_F) per kept kernel; the pairs
     /// below the floor; the kernel entries kept in frame coordinates.
     pub support:Vec<(Charge,f64)>,pub below:usize,pub entries:usize,
-    /// The slowest decay rate (1/us) of the dressed block's precessing pairs
-    /// lambda_a + mu_b: the coherences a shift at zero cannot reach.
-    pub precessing_rate:Option<f64>,
 }
 
 /// The request-level Floquet frames: the block frames, the central frames
@@ -186,10 +172,15 @@ pub struct KernelDiagnostics{
 /// generator.
 pub struct FloquetKernels{
     n:usize,lapack:Arc<Lapack>,
-    block:Tables,floquet:Tables,
-    /// A_eff = P_0 Lambda P_0^-1 (row-major); B_eff^T = conj A_eff + c I.
-    effective:Vec<C>,shift:C,
-    /// Every pair's step charge and kernel P_s (above the mixing floor).
+    floquet:Tables,
+    /// A_eff = P_0 Lambda P_0^-1 (row-major), B_eff^T = conj A_eff + c I,
+    /// and every pair's step charge and kernel P_s (above the mixing floor):
+    /// the tests check the frame equations with them.
+    #[cfg(test)]
+    effective:Vec<C>,
+    #[cfg(test)]
+    shift:C,
+    #[cfg(test)]
     steps:Vec<(Charge,Vec<C>)>,
     pub diagnostics:KernelDiagnostics,
 }
@@ -239,11 +230,15 @@ impl FloquetKernels{
         };
         // The central frame diagonalizes `diagonalized` (A_eff of the
         // previous kernels); the kernels are those of the central frame.
-        let(mut central,mut diagonalized)=(block.clone(),nl.clone());let(mut forward,mut guarded,mut small)=kernels(&central)?;
+        let mut central=block.clone();let(mut forward,mut guarded,mut small)=kernels(&central)?;
+        #[cfg(test)]
+        let mut last=nl.clone();
         let(mut iterations,mut change)=(0,0.);
         let energy=block.values.iter().map(|z|magnitude(*z)).fold(0.,f64::max).max(1.);
         while !steps.is_empty()&&iterations<ITERATIONS{
-            diagonalized=effective(&forward,&central)?;let next=eigenframe(lapack,&diagonalized,n)?;
+            let diagonalized=effective(&forward,&central)?;let next=eigenframe(lapack,&diagonalized,n)?;
+            #[cfg(test)]
+            {last=diagonalized;}
             change=next.values.iter().map(|z|central.values.iter().map(|w|magnitude(C{re:z.re-w.re,im:z.im-w.im})).fold(f64::INFINITY,f64::min)).fold(0.,f64::max)/energy;
             central=next;iterations+=1;(forward,guarded,small)=kernels(&central)?;
             if change<SELF_CONSISTENT{break;}
@@ -254,34 +249,31 @@ impl FloquetKernels{
         let mut charges=vec![generator.zero.clone()];let mut support=Vec::with_capacity(kept.len());
         for &i in &kept{charges.push(steps[i].0.clone());support.push(forward[i].as_slice());}
         let floquet=Tables::new(&gemm,n,charges,central.values.clone(),shift,central.p.clone(),central.pinv.clone(),&support)?;
-        let block_tables=Tables::new(&gemm,n,vec![generator.zero.clone()],block.values.clone(),shift,block.p.clone(),block.pinv.clone(),&[])?;
-        let block_scale=block_tables.scale();
-        let precessing_rate=block_tables.lambda.iter().flat_map(|a|block_tables.mu.iter().map(move|b|C{re:a.re+b.re,im:a.im+b.im}))
-            .filter(|z|z.im.abs()>PRECESSING*block_scale).map(|z|(-z.re).max(0.)).reduce(f64::min);
         let diagnostics=KernelDiagnostics{milliseconds:clock.elapsed().as_secs_f64()*1e3,iterations,change,pairs:steps.len(),guarded,small_parameter:small,
-            condition:[block.condition,central.condition],support:kept.iter().map(|&i|(steps[i].0.clone(),sizes[i])).collect(),below:steps.len()-kept.len(),entries:floquet.entries(),precessing_rate};
+            condition:[block.condition,central.condition],support:kept.iter().map(|&i|(steps[i].0.clone(),sizes[i])).collect(),below:steps.len()-kept.len(),entries:floquet.entries()};
+        #[cfg(test)]
         let steps=steps.into_iter().zip(forward).map(|((q,_,_),p)|(q,p)).collect();
-        Ok(Self{n,lapack:Arc::clone(lapack),block:block_tables,floquet,effective:diagonalized,shift,steps,diagnostics})
+        Ok(Self{n,lapack:Arc::clone(lapack),floquet,#[cfg(test)]effective:last,#[cfg(test)]shift,#[cfg(test)]steps,diagnostics})
     }
-    fn tables(&self,frames:Frames)->&Tables{match frames{Frames::Block=>&self.block,Frames::Floquet=>&self.floquet}}
-    /// The quasi-energies (lambda, mu) of a frame set.
-    pub fn quasi_energies(&self,frames:Frames)->(&[C],&[C]){let t=self.tables(frames);(&t.lambda,&t.mu)}
-    /// The central kernel P_0 and its inverse (row-major) of a frame set.
-    pub fn central(&self,frames:Frames)->(&[C],&[C]){let t=self.tables(frames);(&t.p0,&t.p0inv)}
+    /// The quasi-energies (lambda, mu) of the central frames.
+    pub fn quasi_energies(&self)->(&[C],&[C]){let t=&self.floquet;(&t.lambda,&t.mu)}
+    /// The central kernel P_0 and its inverse (row-major).
+    pub fn central(&self)->(&[C],&[C]){let t=&self.floquet;(&t.p0,&t.p0inv)}
     /// The effective central generators (A_eff, B_eff) of
     /// X -> A_eff X + X B_eff (row-major), B_eff^T = conj A_eff + c I.
+    #[cfg(test)]
     pub fn effective_generators(&self)->[Vec<C>;2]{
         let n=self.n;let mut bt:Vec<C>=self.effective.iter().map(|z|conj(*z)).collect();
         for i in 0..n{add(&mut bt[i*n+i],self.shift);}
         [self.effective.clone(),transpose(&bt,n)]
     }
     /// Every pair's first-order kernel P_s (row-major), above the mixing floor.
+    #[cfg(test)]
     pub fn step_kernels(&self)->&[(Charge,Vec<C>)]{&self.steps}
     /// The two-sided transform on an operator's Hermitian-symmetric fields:
-    /// the outer stage on `computed` (the canonical modes or a subset), the
-    /// kernels on every mode.
-    pub fn transform<'k>(&'k self,op:&LatticeOperator<'_>,frames:Frames,computed:&[bool])->Result<Transform<'k>,String>{
-        let tables=self.tables(frames);let modes=op.modes.len();let slots=tables.charges.len();
+    /// the outer stage on the canonical modes, the kernels on every mode.
+    pub fn transform<'k>(&'k self,op:&LatticeOperator<'_>)->Result<Transform<'k>,String>{
+        let tables=&self.floquet;let computed=&op.canonical;let modes=op.modes.len();let slots=tables.charges.len();
         // Per output mode and support charge k the source mode q - k.
         let mut sources=vec![usize::MAX;modes*slots];
         for q in 0..modes{
@@ -302,14 +294,10 @@ impl FloquetKernels{
     }
 }
 
-/// Mirrored blocks from the computed ones (zero where neither a block nor
-/// its mirror is computed), the centre Hermitian.
-pub(crate) fn mirror_computed(x:&mut[C],n:usize,computed:&[bool],mirror:&[usize]){
-    let d=n*n;
-    for q in 0..computed.len(){if !computed[q]&&!computed[mirror[q]]{x[q*d..(q+1)*d].fill(ZERO);}}
-    mirror_field(x,n,computed,mirror);
-}
 
+/// Tasks of the frame changes at most: one per worker of the desktop app's
+/// eight (fixed: the chunking does not depend on the thread count).
+const FRAME_TASKS:usize=8;
 #[derive(Default)]
 struct FrameScratch{blocks:Vec<C>,stack:Vec<C>}
 /// The two-sided Floquet transform on one mode set's Hermitian-symmetric
@@ -332,8 +320,6 @@ pub struct Transform<'k>{
     execution:Execution,scratch:Vec<FrameScratch>,flipped:Vec<C>,hat:Vec<C>,
 }
 impl Transform<'_>{
-    /// Complex multiply-adds of a backward and a forward transform.
-    pub fn work(&self)->usize{2*self.work[0]+self.work[1]+self.work[2]}
     /// c = sum P~_k x Q~_l on the computed modes (frame coordinates; the
     /// caller mirrors). Reads x on every mode.
     pub fn backward(&mut self,x:&[C],c:&mut[C])->Result<(),String>{
@@ -359,7 +345,7 @@ impl Transform<'_>{
 /// gathered and changed by two GEMMs (`sandwich_batch`).
 #[allow(clippy::too_many_arguments)]
 fn frame(execution:&Execution,lapack:&Lapack,scratch:&mut Vec<FrameScratch>,n:usize,a:&[C],b:&[C],input:&[C],out:&mut[C],computed:&[bool],work:usize)->Result<(),String>{
-    let d=n*n;let minimum=work.div_ceil(execution.threads()).max(MINIMUM_WORK_PER_TASK/8);
+    let d=n*n;let minimum=work.div_ceil(FRAME_TASKS).max(MINIMUM_WORK_PER_TASK/8);
     execution.for_mode_chunks(out,d,work,minimum,scratch,|first,chunk,scratch|{
         let modes:Vec<usize>=(first..first+chunk.len()/d).filter(|&q|computed[q]).collect();if modes.is_empty(){return Ok(());}
         grow(&mut scratch.blocks,modes.len()*d);let blocks=&mut scratch.blocks[..modes.len()*d];
@@ -408,16 +394,14 @@ fn stage(execution:&Execution,n:usize,tables:&Tables,backward:bool,slots:usize,s
 mod tests{
     use super::*;
     use super::super::tests::{fixture,prepared};
-    use super::super::operator::symmetric_field;
     #[test]
     fn lattice_floquet_kernels_solve_their_frame_equations(){
         // The fixture's near pair: P_0 diagonalizes A_eff = A_0 + sum A_-s P_s
         // P_0^-1, the right side is the conjugate of the left, the kernels
-        // solve the first-order equations, and the block transforms are exact
-        // inverses of each other.
+        // solve the first-order equations.
         let f=fixture();let p=prepared(&f);let k=&p.floquet;let n=4;let gemm=p.lapack.complex_gemm();
         assert!(!k.step_kernels().is_empty()&&!k.diagnostics.support.is_empty());
-        let(lambda,_)=k.quasi_energies(Frames::Floquet);let(p0,p0inv)=k.central(Frames::Floquet);
+        let(lambda,_)=k.quasi_energies();let(p0,p0inv)=k.central();
         let[a_eff,b_eff]=k.effective_generators();
         // P_0 diagonalizes A_eff, and P_0^-1 is its inverse.
         let ap=product(&gemm,&a_eff,p0,n).unwrap();let scale=a_eff.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
@@ -440,11 +424,5 @@ mod tests{
                 assert!(magnitude(e)<=1e-10*size,"step {q:?}: {e:?}");}}
         }}
         assert!(k.diagnostics.small_parameter>0.&&k.diagnostics.small_parameter<RESONANCE_GUARD);
-        let modes=p.modes(2).unwrap();let op=LatticeOperator::new(&p,&modes).unwrap();
-        let x=symmetric_field(&op,4);let(mut c,mut y)=(vec![ZERO;x.len()],vec![ZERO;x.len()]);
-        // The block frames: an exact round trip.
-        let mut b=k.transform(&op,Frames::Block,&op.canonical).unwrap();
-        b.backward(&x,&mut c).unwrap();mirror_field(&mut c,n,&op.canonical,&op.mirror);b.forward(&c,&mut y).unwrap();mirror_field(&mut y,n,&op.canonical,&op.mirror);
-        let e=x.iter().zip(&y).map(|(a,b)|magnitude(C{re:a.re-b.re,im:a.im-b.im})).fold(0.,f64::max);assert!(e<1e-12,"block round trip {e:e}");
     }
 }
