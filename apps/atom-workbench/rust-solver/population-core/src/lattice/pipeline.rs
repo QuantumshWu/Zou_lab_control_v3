@@ -95,6 +95,9 @@ pub struct Request<'a>{
     /// Whether the steady state (the t -> infinity mean) is reported.
     pub steady:bool,
     pub groups:&'a[Vec<usize>],
+    /// The explicit set shared by the runs of one request from the same rho0
+    /// (the first run to need it builds it), else built by the run.
+    pub explicit:Option<&'a std::sync::OnceLock<Result<ExplicitSet,String>>>,
 }
 
 /// One checkpoint, for the diagnostics.
@@ -266,7 +269,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     let frame=SwFrame::new(prepared,estimator::longest_time(times,request.horizons));
     std::thread::scope(|scope|->Result<Solution,String>{
     if propagates{std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||{let _=frame.class();}).map_err(|e|e.to_string())?;}
-    let explicit=charge_set::explicit_set(prepared,initial,tolerance)?;timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
+    let explicit=match request.explicit{Some(shared)=>shared.get_or_init(||charge_set::explicit_set(prepared,initial,tolerance)).clone()?,None=>charge_set::explicit_set(prepared,initial,tolerance)?};timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
     let clock=Instant::now();
     let mut lattice=Lattice::new(prepared,explicit.sets.clone())?;
     let ledger=lattice.operator().ledger()?;
@@ -467,7 +470,7 @@ mod tests{
         let mut initial=vec![ZERO;d];initial[0]=ONE;
         let times:Vec<f64>=(0..21).map(|i|0.1*i as f64).collect();let horizons=[3.];
         let mut seen=0;let mut observe=|_:&Checkpoint,_:&Answer|{seen+=1;};
-        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,steady:true,groups:&groups},Some(&mut observe)).unwrap();
+        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,steady:true,groups:&groups,explicit:None},Some(&mut observe)).unwrap();
         assert!(s.converged&&s.reason.is_none()&&seen==s.checkpoints.len(),"{:?}",s.reason);
         let a=&s.answer;
         let op=LatticeOperator::new(&p,&a.modes).unwrap();let dense=op.dense();let size=op.dimension();

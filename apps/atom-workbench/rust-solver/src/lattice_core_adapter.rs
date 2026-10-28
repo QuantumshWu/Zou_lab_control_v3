@@ -49,6 +49,7 @@ use atom_population_core::{Complex64,Lapack};
 use atom_population_core::preparation::{ModelView,MatrixView,DriveView,PhaseBasis,FrequencyParts};
 use atom_population_core::lattice::LatticePrepared;
 use atom_population_core::lattice::classification::Treatment;
+use atom_population_core::lattice::charge_set::ExplicitSet;
 use atom_population_core::lattice::estimate_api::ACCEPTANCE_FACTOR;
 use atom_population_core::lattice::ledger::{self,POPULATION_TOLERANCE};
 use atom_population_core::lattice::pipeline::{self,Answer,Checkpoint,Request,Solution};
@@ -142,6 +143,8 @@ struct Prepared{
     groups:Vec<Vec<usize>>,names:Vec<String>,
     /// rho0 (row-major) and its populations.
     density:Vec<Complex64>,initial:Vec<f64>,
+    /// The explicit set of rho0, built by the first run that needs it.
+    explicit:std::sync::OnceLock<Result<ExplicitSet,String>>,
 }
 fn prepare_request(model:&Model,options:&Options)->Result<Prepared,String>{
     if options.population_tolerance!=POPULATION_TOLERANCE{
@@ -153,7 +156,7 @@ fn prepare_request(model:&Model,options:&Options)->Result<Prepared,String>{
     let n=32;
     let density=initial_density(model,&lattice.lapack)?;
     let initial=(0..n).map(|i|density[i*n+i].re).collect();
-    Ok(Prepared{lattice,axes,groups:requested.iter().map(|g|g.indices.clone()).collect(),names:requested.iter().map(|g|g.name.clone()).collect(),density,initial})
+    Ok(Prepared{lattice,axes,groups:requested.iter().map(|g|g.indices.clone()).collect(),names:requested.iter().map(|g|g.name.clone()).collect(),density,initial,explicit:std::sync::OnceLock::new()})
 }
 
 /// Laboratory time average of a lattice field (row-major density): the
@@ -227,11 +230,11 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
 /// steady state; `observer` sees every checkpoint.
 fn mean_run(request:&Prepared,horizon:Option<f64>,observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
     let horizons:Vec<f64>=horizon.into_iter().collect();
-    pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&horizons,steady:horizon.is_none(),groups:&request.groups},Some(observer))
+    pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&horizons,steady:horizon.is_none(),groups:&request.groups,explicit:Some(&request.explicit)},Some(observer))
 }
 /// The trajectory of a request alone on its grid.
 fn trajectory_run(request:&Prepared,times:&[f64],observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
-    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&[],steady:false,groups:&request.groups},Some(observer))
+    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&[],steady:false,groups:&request.groups,explicit:Some(&request.explicit)},Some(observer))
 }
 
 /// The mean of an answer: the laboratory time average of the steady state,
@@ -489,7 +492,7 @@ mod tests{
             let mut line=line;if let(Value::Object(a),Value::Object(b))=(&mut line,work){a.extend(b);}
             println!("{line}");
         };
-        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,steady,groups:&prepared.groups},Some(&mut observe));
+        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,steady,groups:&prepared.groups,explicit:None},Some(&mut observe));
         let total_ms=started.elapsed().as_secs_f64()*1e3;
         match result{
             Ok(s)=>{let a=&s.answer;
