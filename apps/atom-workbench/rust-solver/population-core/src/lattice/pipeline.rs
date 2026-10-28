@@ -165,9 +165,6 @@ pub struct Answer{
     /// block alone), amplitude x e^{Re theta T}: an upper bound on
     /// |p(T) - p(inf)| as the model holds it.
     pub horizon_relaxing:Vec<f64>,
-    /// Per output its own acceptance: its bound within the tolerance (per
-    /// horizon, and the steady state's).
-    pub horizon_accepted:Vec<bool>,pub steady_accepted:bool,
     /// |A x| / |x| of the steady field (rad/us).
     pub steady_residual:f64,
     pub estimate:ErrorEstimate,pub conserved:usize,pub slowest:Option<SlowRate>,
@@ -409,8 +406,6 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                     horizon_errors:estimate.horizons.iter().map(|e|ACCEPTANCE_FACTOR*e).collect(),
                     horizon_relaxing:request.horizons.iter().map(|&t|(0..model.r).filter(|&j|!model.kernel[j]&&!model.projected_out[j])
                         .map(|j|model.centre_amplitudes[j]*(model.used_theta[j].re*t).exp()).sum()).collect(),steady_error:estimate.steady.map(|e|ACCEPTANCE_FACTOR*e),
-                    horizon_accepted:estimate.horizons.iter().map(|&e|ACCEPTANCE_FACTOR*e<=tolerance).collect(),
-                    steady_accepted:estimate.steady.is_none_or(|e|ACCEPTANCE_FACTOR*e<=tolerance),
                     steady_residual,estimate:estimate.clone(),
                     conserved:if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{model.conserved()},
                     slowest:pairs.first().map(|p|p.0),accepted:false};

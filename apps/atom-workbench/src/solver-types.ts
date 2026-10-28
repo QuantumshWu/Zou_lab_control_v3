@@ -2,9 +2,8 @@ import type {Level} from './types.js';
 import {POPULATION_TOLERANCE} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
 /** A trajectory's estimated population error (ui-design.md §6.16). Every computed trajectory is
- * shown: 'estimated-converged' when the solver accepted the run (every sample within the requested
- * tolerance ε and every slow class it needs resolved), 'estimated-partial' otherwise -- the samples
- * above ε are marked, and a run not accepted with every sample within ε is said unconfirmed. */
+ * shown: 'estimated-converged' when every sample's bound is within the requested tolerance ε,
+ * 'estimated-partial' otherwise -- the samples above ε are marked. */
 export interface PopulationAccuracy {
   status:'estimated-converged'|'estimated-partial';requestedTolerance:number;estimatedMaximumError:number;
   /** One absolute population-error bound per sample; their maximum is estimatedMaximumError. */
@@ -22,7 +21,8 @@ export function readPopulationAccuracy(value:unknown,samples:number):PopulationA
   // Every request asks for POPULATION_TOLERANCE; the echo must be that one.
   if((a.status!=='estimated-converged'&&!partial)||a.includesProjectionCharge!==true||a.requestedTolerance!==POPULATION_TOLERANCE)invalid();
   const error=a.estimatedMaximumError,charge=a.projectionCharge,finite=(v:unknown):v is number=>typeof v==='number'&&Number.isFinite(v)&&v>=0;
-  if(!finite(error)||!finite(charge)||charge>error||(!partial&&error>POPULATION_TOLERANCE))invalid();
+  // Partial exactly when the largest bound is above ε.
+  if(!finite(error)||!finite(charge)||charge>error||partial!==(error>POPULATION_TOLERANCE))invalid();
   // The per-sample bounds: one for each sample, their maximum the trajectory's. A partial result
   // says why the solver stopped short of ε.
   const errors=a.sampleErrors;
@@ -51,8 +51,8 @@ export interface SteadyResult {
   converged:boolean;status:SteadyStatus;populations:Record<string,number>|null;
   /** The computed result's estimated population error (null: nothing computed). */
   estimatedError:number|null;
-  /** Within the requested tolerance: the solver accepted the run and its bound is within ε. A
-   * computed result not within is still shown, with its error: above ε, or unconfirmed. */
+  /** Within the requested tolerance: its bound is within ε. A computed result not within is still
+   * shown, with its error above ε. */
   withinTolerance:boolean;
   /** Native full complex long-time mean, row-major in DynamicsResult.states. */
   density?:{real:number[];imag:number[]};

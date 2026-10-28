@@ -36,7 +36,7 @@ const SENTENCES:Record<string,string>={
     '布居在背景基中收敛；导出的密度矩阵是实验室系的相位平均。',
   'Cancelled.':'计算已取消。',
 };
-/** What a mean's reason adds when its run was not accepted (lattice_core_adapter.rs `OUTSIDE`). */
+/** What a mean's reason adds when its bound is above the tolerance (lattice_core_adapter.rs `OUTSIDE`). */
 const OUTSIDE=' Not converged: its error bound (asymptoticEstimatedError) is above the tolerance, so the populations are an estimate.';
 const OUTSIDE_WORDS='未收敛：误差界高于误差目标，布居只是估计值。';
 /** A number the solver wrote (Rust {:e} or plain), as the workbench writes numbers. */

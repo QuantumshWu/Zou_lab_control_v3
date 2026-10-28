@@ -6,7 +6,7 @@ import {normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-clie
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {populationChart} from '../dist/js/atom-workbench/src/population-chart.js';
-import {errorPercent,outsideRuns,outsideWords,partialSentence,partialShort} from '../dist/js/atom-workbench/src/accuracy.js';
+import {errorPercent,outsideRuns,partialSentence,partialShort} from '../dist/js/atom-workbench/src/accuracy.js';
 import {nativeResult} from './native-result.mjs';
 
 const scene=defaultScene(),states=buildFullMasterModel(scene,scene.dynamics).states,initialIndex=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
@@ -36,17 +36,13 @@ test('a partial trajectory is read, not rejected: where it misses ε, by how muc
   const converged=result({timesUs:times(3)});converged.populationAccuracy.reason='none';assert.throws(()=>read(converged),/布居精度元数据/,'a reason only when partial');
 });
 
-test('a run the solver did not accept is read too: within ε yet unconfirmed (a slow class it needs unresolved)',()=>{
-  // The trajectory: every sample within ε, the run not accepted -- partial, nothing marked.
+test('converged and within ε are the bounds within ε, exactly: a status that disagrees is refused',()=>{
+  // The trajectory: partial with every sample within ε.
   const data=result({timesUs:times(5),sampleErrors:[0,.001,.002,.001,.001]});
-  Object.assign(data.populationAccuracy,{status:'estimated-partial',reason:'a slow class is not resolved'});
-  const r=read(data);assert.equal(r.populationAccuracy.status,'estimated-partial');assert.equal(r.populationAccuracy.estimatedMaximumError,.002);
-  assert.deepEqual(outsideRuns(r.populationAccuracy.sampleErrors),[],'no sample above ε');
-  // The mean: a bound within ε from a run not accepted is computed, shown, and not within.
-  const mean=result({timesUs:[0],meanError:.0007});mean.asymptoticWithinTolerance=false;mean.asymptoticHorizons.find(e=>e.horizonUs===1e6).withinTolerance=false;
-  const m=read(mean);assert.equal(m.steady.converged,true);assert.equal(m.steady.withinTolerance,false);assert.equal(m.steady.estimatedError,.0007);
-  assert.equal(outsideWords(.0007),'未确认收敛');assert.equal(outsideWords(.0072),'超过 0.5%');assert.equal(outsideWords(null),'超过 0.5%');
-  // Within ε is never claimed for a bound above it, nor said other than true or false.
+  Object.assign(data.populationAccuracy,{status:'estimated-partial',reason:'stopped'});assert.throws(()=>read(data),/布居精度元数据/);
+  // The mean: not within for a bound within ε, within for one above it, or said other than true or false.
+  const unclaimed=result({timesUs:[0],meanError:.0007});unclaimed.asymptoticWithinTolerance=false;unclaimed.asymptoticHorizons.find(e=>e.horizonUs===1e6).withinTolerance=false;
+  assert.throws(()=>read(unclaimed),/长期布居误差估计/);
   const claimed=result({timesUs:[0],meanError:.0072});claimed.asymptoticWithinTolerance=true;assert.throws(()=>read(claimed),/长期布居误差估计/);
   const vague=result({timesUs:[0],meanError:.0007});delete vague.asymptoticWithinTolerance;assert.throws(()=>read(vague),/长期布居误差估计/);
 });

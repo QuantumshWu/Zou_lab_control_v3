@@ -24,10 +24,10 @@
 //! - `states` (32 ids), `timesUs`, `populations` (one row per time). A mean
 //!   result has the single t = 0 row, the initial populations; a finite result
 //!   has >= 2 projected rows and `populationAccuracy`: `status`
-//!   (`estimated-converged` when the run was accepted: every sample within
-//!   the tolerance; else
-//!   `estimated-partial` with its `reason`), `sampleErrors` (per sample: the
-//!   acceptance factor times the estimate, plus the projection's change; an
+//!   (`estimated-converged` when every sample's bound is within the
+//!   tolerance, else `estimated-partial` with its `reason`), `sampleErrors`
+//!   (per sample: the acceptance factor times the estimate, plus the
+//!   projection's change; an
 //!   absolute population error; the estimate's sources are the Krylov
 //!   residual, the omitted ring's feedback and the K^(1) rests the lattice
 //!   leaves out, the other fold remainders are reported only, in
@@ -39,8 +39,8 @@
 //! - The mean, whenever it was computed: `asymptoticPopulations`,
 //!   `asymptoticDensityReal/Imag`, `asymptoticEstimatedError` (the
 //!   acceptance factor times the estimate plus the density projection's
-//!   change), `asymptoticWithinTolerance` (its run accepted and the bound
-//!   within the tolerance), and `asymptoticStatus`, its
+//!   change), `asymptoticWithinTolerance` (that bound within the
+//!   tolerance), and `asymptoticStatus`, its
 //!   physics (`stationary`, `population-stationary` and `initial-dependent`
 //!   for static models; `time-average` and `initial-dependent-time-average`
 //!   for driven ones) with `asymptoticReason` (a convergence claim only
@@ -88,7 +88,8 @@ const DISCARDED_COHERENCE:f64=1e-8;
 /// A mean whose bound reaches this carries no information (a population
 /// error of 1 bounds nothing): it is reported not converged, unshown.
 const UNINFORMATIVE_BOUND:f64=1.;
-/// The sentence added to a mean's reason when its run was not accepted.
+/// The sentence added to a mean's reason when its bound is above the
+/// tolerance.
 const OUTSIDE:&str=" Not converged: its error bound (asymptoticEstimatedError) is above the tolerance, so the populations are an estimate.";
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
 /// Stack of the mean's thread (LAPACK on it).
@@ -329,9 +330,9 @@ fn failed(horizon:Option<f64>,reason:&str)->Value{
 fn mean_at(model:&Model,request:&Prepared,answer:&Answer,horizons:&[f64],horizon:Option<f64>)->Result<Mean,String>{
     let(prepared,axes)=(&request.lattice,&request.axes);let n=32;
     let index=match horizon{Some(t)=>Some(horizons.iter().position(|&h|h==t).ok_or("A mean horizon outside the run")?),None=>None};
-    let(field,error,accepted)=match index{
-        Some(i)=>(&answer.horizon_fields[i],answer.horizon_errors[i],answer.horizon_accepted[i]),
-        None=>(&answer.steady_field,answer.steady_error.unwrap_or(f64::INFINITY),answer.steady_accepted)};
+    let(field,error)=match index{
+        Some(i)=>(&answer.horizon_fields[i],answer.horizon_errors[i]),
+        None=>(&answer.steady_field,answer.steady_error.unwrap_or(f64::INFINITY))};
     let(raw,discarded)=lab_density(field,&answer.modes,axes);
     let diagonal=|m:&[Complex64]|(0..n).map(|i|m[i*n+i].re).collect::<Vec<f64>>();
     let density=project_density(&prepared.lapack,&raw)?;let projection=ledger::metric(&diagonal(&raw),&diagonal(&density),&request.groups);
@@ -339,9 +340,8 @@ fn mean_at(model:&Model,request:&Prepared,answer:&Answer,horizons:&[f64],horizon
     let populations=diagonal(&density);
     let positivity=(-prepared.lapack.hermitian_eigen(&density,n)?.0[0]).max(0.);
     let trace_error=(populations.iter().sum::<f64>()-1.).abs();
-    // Converged: this output accepted (its bound within the tolerance) and
-    // the projected mean within it.
-    let within=accepted&&estimated<=POPULATION_TOLERANCE;
+    // Within the tolerance: its bound, the projection's change included.
+    let within=estimated<=POPULATION_TOLERANCE;
     // At a horizon, populations still relaxing (the horizon's own reduced
     // model: its modes alive at T) by more than RELAXING_SHARE of the
     // tolerance, or several conserved quantities, keep the mean
@@ -409,8 +409,8 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
             "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2],"floquetKernels":prepared.timing[3]}}});
     if let Some((answer,solution))=trajectory{
         let estimated=answer.sample_errors.iter().fold(0_f64,|a,&b|a.max(b));
-        // The run's acceptance: every sample within the tolerance.
-        let converged=answer.accepted;
+        // Converged: every sample's bound within the tolerance.
+        let converged=estimated<=POPULATION_TOLERANCE;
         result["populationAccuracy"]=json!({"status":if converged{"estimated-converged"}else{"estimated-partial"},"requestedTolerance":POPULATION_TOLERANCE,
             "sampleErrors":answer.sample_errors,"estimatedMaximumError":estimated,"projectionCharge":answer.projection,
             "includesProjectionCharge":true,"scope":{"states":32,"samples":options.samples,"groups":request.names}});

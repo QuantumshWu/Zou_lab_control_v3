@@ -2,7 +2,7 @@ import {timeDisplayUnit} from './duration.js';
 import type {DurationUnit} from './types.js';
 import {isTimeAverage,type SteadyResult} from './solver-types.js';
 import {POPULATION_TOLERANCE} from './types.js';
-import {errorPercent,outsideRuns,outsideWords,sampleErrors} from './accuracy.js';
+import {errorPercent,outsideRuns,sampleErrors} from './accuracy.js';
 
 export interface PopulationPlot {timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];steady?:SteadyResult;
   /** Per-sample error bounds (ui-design.md §6.16): samples above ε are drawn, marked. */
@@ -110,7 +110,7 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     const meanLabel=options.meanLabel??'p̄(T)',error=sampleErrors(result)?.[index];
     // The sample's estimated error (an absolute bound on every population), marked when above ε.
     const accuracy=error===undefined?'':`<span class="readout-error${error>POPULATION_TOLERANCE?' outside':''}" title="该时刻布居的估计误差（概率的绝对误差）">±${esc(errorPercent(error))}${error>POPULATION_TOLERANCE?`（超过 ${esc(errorPercent(POPULATION_TOLERANCE))}）`:''}</span>`;
-    const meanOutside=steady&&!steady.withinTolerance?`<p class="note wrap readout-outside">${esc(meanLabel)} 估计误差 ${esc(steady.estimatedError===null?'未知':errorPercent(steady.estimatedError))}，${esc(outsideWords(steady.estimatedError))}。</p>`:'';
+    const meanOutside=steady&&!steady.withinTolerance?`<p class="note wrap readout-outside">${esc(meanLabel)} 估计误差 ${esc(steady.estimatedError===null?'未知':errorPercent(steady.estimatedError))}，超过 ${esc(errorPercent(POPULATION_TOLERANCE))}。</p>`:'';
     const head=steady?`<div class="readout-row readout-head"><span></span><span>p(t)</span><span>${esc(meanLabel)}</span></div>`:'';
     const asymptotic=(id:string)=>{if(id!=='__excited__')return steady?.populations?.[id]??NaN;const excited=Object.entries(steady?.populations??{}).filter(([state])=>/^(D1|D2)-/.test(state));return excited.length?excited.reduce((sum,[,p])=>sum+p,0):NaN;};
     // A name too long for a narrow readout wraps after a " · ", never before one, and is never cut.
