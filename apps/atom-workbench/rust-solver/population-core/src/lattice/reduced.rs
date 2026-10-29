@@ -97,12 +97,14 @@ pub struct Projection<'m>{
     /// K = Re W^H M W, H = Re (M W)^H A W, E = Re W^T A W and
     /// F = Re (AW)^T A W, row-major over the covered columns.
     k:Vec<f64>,h:Vec<f64>,e:Vec<f64>,f:Vec<f64>,covered:usize,
+    /// (research, S10) Fm = Re (A W)^T M (A W), row-major (the adjoint ingest only).
+    fm:Vec<f64>,
     /// The frame's metric.
     frame_metric:&'m SwMetric<'m>,
     vectors:Vectors,
     pub milliseconds:f64,
-    /// (research, S9) Petrov-Galerkin with Z = (A - tau) W: tau and W^T A^T x0.
-    pub petrov:Option<(f64,Vec<f64>)>,
+    /// (research, S9/S10) Petrov-Galerkin with Z = (A - tau) W (Euclidean) or M (A - tau) W (metric): tau, metric, Z^T x0.
+    pub petrov:Option<(f64,bool,Vec<f64>)>,
 }
 /// Grows a row-major old x old matrix to new x new (zeros in the new part).
 fn grow(old_matrix:&[f64],old:usize,new:usize)->Vec<f64>{let mut g=vec![0.;new*new];for i in 0..old{for j in 0..old{g[i*new+j]=old_matrix[i*old+j];}}g}
@@ -112,7 +114,7 @@ impl<'m> Projection<'m>{
         let canonical:Vec<(usize,f64,f64)>=(0..op.modes.len()).filter(|&q|op.canonical[q]).map(|q|(q,if op.mirror[q]==q{1.}else{2.},op.nu[q])).collect();
         let centre=canonical.iter().position(|c|c.0==op.centre).unwrap_or(0);
         let length=canonical.len()*d;
-        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,frame_metric:metric,
+        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,fm:vec![],frame_metric:metric,
             vectors:Vectors::new(op,1)?,milliseconds:0.,petrov:None})
     }
     pub fn columns(&self)->usize{self.covered}
@@ -121,6 +123,18 @@ impl<'m> Projection<'m>{
     /// (research, S3) The Euclidean Galerkin matrix (row-major r x r): the
     /// carrier's row zero, the other rows E[1.., ..] = Re W^T A W (W is
     /// Euclidean-orthonormal).
+    /// (research, S10) The Petrov-Galerkin data: Z^T x0 for Z = M (A - tau) W (metric) or (A - tau) W.
+    pub fn set_petrov(&mut self,tau:f64,metric:bool,basis:&[Vec<C>],x0:&[C],lattice:&super::poles::Lattice<'_>)->Result<(),String>{
+        let op=lattice.operator();let(n,d,l)=(self.n,self.d,self.length);let r=self.covered;let refs:Vec<&[C]>=basis[..r].iter().map(|v|v.as_slice()).collect();
+        let zx=if metric{
+            let z=self.frame_metric.apply(&[x0])?;let mut f=vec![ZERO;x0.len()];
+            for(k,&(q,w,_))in self.canonical.iter().enumerate(){for e in 0..d{f[q*d+e]=scaled(z[k*d+e],1./w);}}
+            mirror_field(&mut f,n,&op.canonical,&op.mirror);let _=l;
+            let a=op.apply_adjoint(&f)?;let one=self.vectors.dots(&refs,&a);let two=self.metric_dots(&z,1,&refs)?;
+            one.iter().zip(&two).map(|(a,b)|a-tau*b).collect()
+        }else{let a=op.apply_adjoint(x0)?;let one=self.vectors.dots(&refs,&a);let two=self.vectors.dots(&refs,x0);one.iter().zip(&two).map(|(a,b)|a-tau*b).collect()};
+        self.petrov=Some((tau,metric,zx));Ok(())
+    }
     /// (research, S9) E = W^T A W and F = (A W)^T (A W), row-major.
     pub fn euclidean_parts(&self)->(Vec<f64>,Vec<f64>){(self.e.clone(),self.f.clone())}
     pub fn euclidean_g(&self)->Vec<f64>{let r=self.covered;let mut g=self.e.clone();for j in 0..r{g[j]=0.;}g}
@@ -165,20 +179,22 @@ impl<'m> Projection<'m>{
         let adj=|v:&[C]|op.apply_adjoint(v);
         let mut hr=vec![0.;old*width];let mut er=vec![0.;width*old];let mut fc=vec![0.;new*width];
         // The adjoint applications over the workers, then one Gram each.
-        let sources:Vec<Vec<C>>=(0..width).flat_map(|c|[full(&z_new,c),fresh[c].to_vec(),new_images[c].to_vec()]).collect();
+        let sources:Vec<Vec<C>>=(0..width).flat_map(|c|[full(&z_new,c),fresh[c].to_vec(),new_images[c].to_vec(),full(&za,c)]).collect();
         let adjoints=Execution::new()?.map((0..sources.len()).collect(),|i|adj(&sources[i])).into_iter().collect::<Result<Vec<_>,_>>()?;drop(sources);
-        let refs:Vec<&[C]>=adjoints.iter().map(|v|v.as_slice()).collect();let g=self.vectors.gram(&refs,old_basis)?;   // [(3 c + kind) * old + j]
-        for c in 0..width{for j in 0..old{hr[j*width+c]=g[(3*c)*old+j];er[c*old+j]=g[(3*c+1)*old+j];fc[j*width+c]=g[(3*c+2)*old+j];}}
+        let refs:Vec<&[C]>=adjoints.iter().map(|v|v.as_slice()).collect();let g=self.vectors.gram(&refs,old_basis)?;   // [(4 c + kind) * old + j]
+        let mut fmc=vec![0.;new*width];
+        for c in 0..width{for j in 0..old{hr[j*width+c]=g[(4*c)*old+j];er[c*old+j]=g[(4*c+1)*old+j];fc[j*width+c]=g[(4*c+2)*old+j];fmc[j*width+c]=g[(4*c+3)*old+j];}}
+        let fmnew=self.metric_dots(&za,width,&new_images)?;for a in 0..width{for c in 0..width{fmc[(old+a)*width+c]=fmnew[a*width+c];}}
         let fnew=self.vectors.gram(&new_images,&new_images)?;
         for a in 0..width{for c in 0..width{fc[(old+a)*width+c]=fnew[a*width+c];}}
         let(mut k,mut h)=(grow(&self.k,old,new),grow(&self.h,old,new));
-        let(mut e,mut f)=(grow(&self.e,old,new),grow(&self.f,old,new));
+        let(mut e,mut f)=(grow(&self.e,old,new),grow(&self.f,old,new));let mut fm=grow(&self.fm,old,new);
         for i in 0..new{for c in 0..width{let j=old+c;
             k[i*new+j]=kb[i*width+c];k[j*new+i]=kb[i*width+c];h[i*new+j]=hc[i*width+c];
             e[i*new+j]=ec[i*width+c];
-            f[i*new+j]=fc[i*width+c];f[j*new+i]=fc[i*width+c];}}
+            f[i*new+j]=fc[i*width+c];f[j*new+i]=fc[i*width+c];fm[i*new+j]=fmc[i*width+c];fm[j*new+i]=fmc[i*width+c];}}
         for c in 0..width{for j in 0..old{h[(old+c)*new+j]=hr[j*width+c];e[(old+c)*new+j]=er[c*old+j];}}
-        self.k=k;self.h=h;self.e=e;self.f=f;self.covered=new;
+        self.k=k;self.h=h;self.e=e;self.f=f;self.fm=fm;self.covered=new;
         self.milliseconds+=clock.elapsed().as_secs_f64()*1e3;Ok(())
     }
     /// Takes the space's columns not yet covered.
@@ -259,12 +275,18 @@ impl<'m> Projection<'m>{
         let mut c0=vec![0.;k];for(c,&v)in c0.iter_mut().zip(initial){*c=v;}
         // (research, S9) Petrov-Galerkin, Z = (A - tau) W (W orthonormal): G = (E^T - tau)^-1 (F - tau E),
         // c0 = (E^T - tau)^-1 (W^T A^T x0 - tau W^T x0), the carrier's row zero (trace conservation).
-        if let Some((tau,wa))=&self.petrov{if wa.len()==r&&r>1{
-            let mut m=self.e.clone();for i in 0..r{m[i+r*i]-=tau;}
-            let b:Vec<f64>=(0..r*r).map(|x|{let(i,j)=(x%r,x/r);self.f[i*r+j]-tau*self.e[i*r+j]}).collect();
-            let(lu,piv)=lapack.factor(&m,r)?;let gc=lapack.solve_matrix_factored(&lu,&piv,&b,r)?;
-            let rhs:Vec<f64>=(0..r).map(|i|wa[i]-tau*c0[i]).collect();c0=lapack.solve_matrix_factored(&lu,&piv,&rhs,r)?;
-            for i in 0..r{for j in 0..r{g[i*r+j]=if i==0{0.}else{gc[i+r*j]};}}
+        // The carrier's coefficient is fixed (trace): rows 1.. of S = Z^T W and T = Z^T A W give
+        // G[1.., :] = S'^-1 T[1.., :] and S' c[1..] = Z^T x0 [1..] - S[1.., 0] c_0 (S' = S[1.., 1..]).
+        if let Some((tau,metric,zx))=&self.petrov{if zx.len()==r&&r>1&&(!*metric||self.fm.len()==r*r){
+            let tau=*tau;let m=r-1;
+            let s=|i:usize,j:usize|if *metric{self.h[j*r+i]-tau*self.k[i*r+j]}else{self.e[j*r+i]-if i==j{tau}else{0.}};
+            let tt=|i:usize,j:usize|if *metric{self.fm[i*r+j]-tau*self.h[i*r+j]}else{self.f[i*r+j]-tau*self.e[i*r+j]};
+            let sp:Vec<f64>=(0..m*m).map(|x|s(1+x%m,1+x/m)).collect();
+            let b:Vec<f64>=(0..m*r).map(|x|tt(1+x%m,x/m)).collect();
+            let(lu,piv)=lapack.factor(&sp,m)?;let x=lapack.solve_matrix_factored(&lu,&piv,&b,m)?;
+            for j in 0..r{g[j]=0.;}for i in 1..r{for j in 0..r{g[i*r+j]=x[(i-1)+m*j];}}
+            let rhs:Vec<f64>=(1..r).map(|i|zx[i]-s(i,0)*c0[0]).collect();let c=lapack.solve_matrix_factored(&lu,&piv,&rhs,m)?;
+            for i in 1..r{c0[i]=c[i-1];}
         }}
         // Ritz decomposition.
         let(re,im,ev)=lapack.eigen(&transpose_rows(&g,r,r),r)?;

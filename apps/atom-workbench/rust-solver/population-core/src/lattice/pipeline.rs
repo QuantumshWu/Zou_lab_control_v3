@@ -358,19 +358,22 @@ fn basis_cols(space:&Space)->Vec<&[C]>{space.basis.iter().map(|v|v.as_slice()).c
 const R_LIMIT:f64=0.8;const FLOOR:f64=1e-3;
 fn convergence_estimate(h:&[(Vec<Vec<f64>>,Vec<Vec<f64>>,Vec<f64>)],groups:&[Vec<usize>],tolerance:f64,steady:bool)->ErrorEstimate{
     let k=h.len();let unknown=1./ACCEPTANCE_FACTOR;
-    // One output's estimates from its components' changes (the trajectory
-    // is one output: its ratio from the largest changes over the grid).
-    let output=|d1:&[f64],d2:&[f64]|->Vec<f64>{
-        let(m1,m2)=(d1.iter().copied().fold(0.,f64::max),d2.iter().copied().fold(0.,f64::max));
-        let converged=m2<=FLOOR*tolerance;let r=if m1>0.{m2/m1}else{f64::INFINITY};
+    // The rate from the last two ratios of successive changes (four levels): r = max(|D_k| / |D_k-1|,
+    // |D_k-1| / |D_k-2|), so a level change that has not yet entered the asymptotic regime (a ratio
+    // near or above one) counts as stagnation. One output's estimates from its components' changes
+    // (the trajectory is one output: its ratios from the largest changes over the grid).
+    let output=|d0:&[f64],d1:&[f64],d2:&[f64]|->Vec<f64>{
+        let(m0,m1,m2)=(d0.iter().copied().fold(0.,f64::max),d1.iter().copied().fold(0.,f64::max),d2.iter().copied().fold(0.,f64::max));
+        let converged=m2<=FLOOR*tolerance;let ratio=|a:f64,b:f64|if a>0.{b/a}else if b>0.{f64::INFINITY}else{0.};let r=ratio(m1,m2).max(ratio(m0,m1));
         d2.iter().map(|&x|(if converged{x}else if r<R_LIMIT{x*r/(1.-r)}else{(x*R_LIMIT/(1.-R_LIMIT)).max(2.*tolerance)})/ACCEPTANCE_FACTOR).collect()};
-    let one=|a:&[f64],b:&[f64],c:&[f64]|->f64{output(&[ledger::metric(b,a,groups)],&[ledger::metric(c,b,groups)])[0]};
+    let one=|z:&[f64],a:&[f64],b:&[f64],c:&[f64]|->f64{output(&[ledger::metric(a,z,groups)],&[ledger::metric(b,a,groups)],&[ledger::metric(c,b,groups)])[0]};
     let(t,hz,s)=(&h[k-1].0,&h[k-1].1,&h[k-1].2);
-    if k<3{return ErrorEstimate{trajectory:vec![unknown;t.len()],horizons:vec![unknown;hz.len()],steady:steady.then_some(unknown),..Default::default()};}
-    let(a,b)=(&h[k-3],&h[k-2]);
+    if k<4{return ErrorEstimate{trajectory:vec![unknown;t.len()],horizons:vec![unknown;hz.len()],steady:steady.then_some(unknown),..Default::default()};}
+    let(z,a,b)=(&h[k-4],&h[k-3],&h[k-2]);
+    let d0:Vec<f64>=(0..t.len()).map(|i|ledger::metric(&a.0[i],&z.0[i],groups)).collect();
     let d1:Vec<f64>=(0..t.len()).map(|i|ledger::metric(&b.0[i],&a.0[i],groups)).collect();let d2:Vec<f64>=(0..t.len()).map(|i|ledger::metric(&t[i],&b.0[i],groups)).collect();
-    ErrorEstimate{trajectory:output(&d1,&d2),horizons:(0..hz.len()).map(|i|one(&a.1[i],&b.1[i],&hz[i])).collect(),
-        steady:steady.then(||one(&a.2,&b.2,s)),..Default::default()}
+    ErrorEstimate{trajectory:output(&d0,&d1,&d2),horizons:(0..hz.len()).map(|i|one(&z.1[i],&a.1[i],&b.1[i],&hz[i])).collect(),
+        steady:steady.then(||one(&z.2,&a.2,&b.2,s)),..Default::default()}
 }
 /// (research, S3) E^-1 coordinates of blocks, column-major d x count.
 fn eig_coefficients(eigen:&BlockEigenbasis,blocks:&[&[C]])->Result<Vec<C>,String>{eigen.coefficients(blocks)}
@@ -866,7 +869,9 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             let headroom=((budget-planned)/request.runs.max(1)as f64).max(0.);
             let column=(std::mem::size_of::<C>()*4*d*op.modes.len())as f64;
             let c=((BASIS_BYTES as f64+headroom)/column)as usize;eprintln!("DBG basis capacity {c} columns (budget {:.1} GB, planned {:.1} GB)",budget/1e9,planned/1e9);c
-        }else{BASIS_BYTES/(std::mem::size_of::<C>()*2*d*op.modes.len())}};
+        }else{
+            // The basis and its images; without stored images (ATOM_NO_IMAGES) the basis alone.
+            let per=if std::env::var("ATOM_NO_IMAGES").is_ok(){1}else{2};BASIS_BYTES/(std::mem::size_of::<C>()*per*d*op.modes.len())}};
     let mut space=Space::new(&mut lattice,initial,capacity)?;
     // (research, S3) ATOM_DIAG_ADJOINT: Re <y, A x> against Re <A^H y, x> on
     // random Hermitian-symmetric fields.
@@ -1074,9 +1079,10 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             let clock=Instant::now();
             if no_images{galerkin.ingest_adjoint(&space.basis,&mut lattice)?;}else{galerkin.ingest(&space.basis,&space.images)?;}
             // (research, S9) ATOM_PG: Petrov-Galerkin with Z = (A - tau) W, tau = LADDER_TOP / t1 (ATOM_PG=<tau> overrides).
+            // ATOM_PG_METRIC: Z = M (A - tau) W (the SW metric's Petrov-Galerkin).
             if let Ok(v)=std::env::var("ATOM_PG"){let tau=v.parse::<f64>().unwrap_or(space::LADDER_TOP/t1);
-                let(n0,d0,c0)={let op=lattice.operator();(op.n,op.n*op.n,op.centre)};let mut x0f=vec![ZERO;lattice.operator().dimension()];x0f[c0*d0..(c0+1)*d0].copy_from_slice(initial);let _=n0;
-                let ax=lattice.operator().apply_adjoint(&x0f)?;let refs:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();galerkin.petrov=Some((tau,ops.dots(&refs,&ax)));}
+                let(d0,c0)={let op=lattice.operator();(op.n*op.n,op.centre)};let mut x0f=vec![ZERO;lattice.operator().dimension()];x0f[c0*d0..(c0+1)*d0].copy_from_slice(initial);
+                galerkin.set_petrov(tau,std::env::var("ATOM_PG_METRIC").is_ok(),&space.basis,&x0f,&lattice)?;}
             let model=galerkin.model(lapack,&space.initial,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
             if let Ok(path)=std::env::var("ATOM_DIAG_EXACT"){
                 let at:Vec<usize>=std::env::var("ATOM_DIAG_AT").ok().map(|v|v.split(',').filter_map(|x|x.trim().parse().ok()).collect()).unwrap_or_default();
