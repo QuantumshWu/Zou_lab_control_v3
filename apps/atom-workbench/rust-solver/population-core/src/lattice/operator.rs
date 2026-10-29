@@ -348,6 +348,21 @@ mod tests{
         assert!(error<=1e-13*scale,"diagonal part {error:e} of {scale:e}");
     }
     #[test]
+    fn lattice_block_traces_are_exact_left_eigenvectors(){
+        // B's foundation (`space`): every coupling is a commutator and every
+        // fold term keeps its population rows, so tau_q(A x) = -i nu_q
+        // tau_q(x) on every block, for any field, on the lattice and with what
+        // the operator leaves out added.
+        let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
+        let mut op=LatticeOperator::new(&p,&modes).unwrap();let(n,d)=(op.n,op.n*op.n);
+        let x=symmetric_field(&op,3);let mut y=vec![ZERO;op.dimension()];op.apply(&x,&mut y).unwrap();
+        if let Some(rest)=op.left_out(&x).unwrap(){for(a,b)in y.iter_mut().zip(rest){add(a,b);}}
+        let trace=|v:&[C],q:usize|(0..n).fold(ZERO,|s,i|C{re:s.re+v[q*d+i*n+i].re,im:s.im+v[q*d+i*n+i].im});
+        let scale=y.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
+        for q in 0..op.modes.len(){let(ty,tx)=(trace(&y,q),trace(&x,q));let defect=C{re:ty.re-op.nu[q]*tx.im,im:ty.im+op.nu[q]*tx.re};
+            assert!(magnitude(defect)<=1e-13*scale,"block {q}: {:e} of {scale:e}",magnitude(defect));}
+    }
+    #[test]
     fn lattice_operator_masks_restrict_sources_and_targets(){
         // A masked application equals the full one on the field restricted to
         // the sources, read on the targets (both closed under q -> -q).
