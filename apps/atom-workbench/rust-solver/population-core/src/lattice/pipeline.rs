@@ -612,6 +612,8 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     // (research) ATOM_REF_SOLVES=N: a run to N solves, never accepted, no plateau.
     let reference=std::env::var("ATOM_REF_SOLVES").ok().and_then(|v|v.parse::<usize>().ok());
     let maximum_solves=reference.unwrap_or(MAXIMUM_SOLVES);
+    // (research, S5) ATOM_CHECKPOINT: the checkpoint spacing.
+    let checkpoint=std::env::var("ATOM_CHECKPOINT").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(CHECKPOINT);
     let clock=Instant::now();
     let mut lattice=Lattice::with_k1_rests(prepared,explicit.sets.clone(),keep_k1)?;
     let ledger=lattice.operator().ledger()?;
@@ -740,6 +742,14 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             let c=charges[q].clone();let m=opposite(&c);let active=space.translations();
             if amplitude<=gate||active.contains(&c)||active.contains(&m){continue;}
             space.activate(&mut lattice,&c)?;eprintln!("DBG translation {c:?} a-priori amplitude {amplitude:.2e}");
+            if std::env::var("ATOM_BLOCK_START").is_ok(){
+                // The slip E X~ c0 on mode q and its mirror (Hermitian-symmetric).
+                let blocks=eigen.eigenvector_blocks();let mut f=vec![ZERO;charges.len()*d];
+                for j in 0..d{let a=slip[q][j];if !nonzero(a){continue;}for e in 0..d{mul_add(&mut f[q*d+e],a,blocks[j*d+e]);}}
+                let m=lattice.operator().mirror[q];
+                if m!=q{for i in 0..n{for k in 0..n{f[m*d+i*n+k]=conj(f[q*d+k*n+i]);}}}
+                let added=space.add_start(&mut lattice,f)?;eprintln!("DBG block start {c:?} added {added} (block {})",space.block);
+            }
         }
         if translated_only{
             let all=space.translations();let sh:Vec<f64>=std::iter::once(0.).chain(shifts_of(&all,&lattice)).collect();
@@ -748,12 +758,21 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
         }
     }
     let(mut score,mut solved_at,mut remaining)=(vec![0.;points.len()],vec![None::<f64>;points.len()],vec![0.;points.len()]);
+    let fixed_poles=std::env::var("ATOM_FIXED_POLES").is_ok();
+    let fixed_sequence:Vec<Pole>={
+        let mut real:Vec<f64>=points.iter().filter_map(|p|if let Pole::Real(s)=p{Some(*s)}else{None}).collect();real.sort_by(|a,b|b.total_cmp(a));
+        let m=real.len();
+        // Bit-reversed order over the next power of two, the indices beyond m left out.
+        let p2=m.next_power_of_two();let width=p2.trailing_zeros();
+        let order:Vec<usize>=(0..p2).map(|i|if width==0{0}else{i.reverse_bits()>>(usize::BITS-width)}).filter(|&i|i<m).collect();
+        order.into_iter().map(|i|Pole::Real(real[i])).collect()};
+    let(mut next_fixed,mut last_checkpoint)=(0usize,usize::MAX);
     // The first checkpoint's completion decision when it changed nothing.
     let mut decided:Option<Completion>=None;
     loop{
         let live:Vec<usize>=(0..points.len()).filter(|&i|alive[i]).collect();
         let exhausted=live.is_empty()||space.solves()>=maximum_solves||space.full();
-        if exhausted||space.solves()%CHECKPOINT==0||(times.is_empty()&&space.solves()==1){
+        if exhausted||space.solves()%checkpoint==0||(times.is_empty()&&space.solves()==1){
             // 3. The checkpoint: model, outputs, estimate, bounds.
             let clock=Instant::now();
             if no_images{galerkin.ingest_adjoint(&space.basis,&mut lattice)?;}else{galerkin.ingest(&space.basis,&space.images)?;}
@@ -944,6 +963,16 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             }
             if !grown{current=Some((space.solves(),model));}
         }
+        // (research, S6) ATOM_FIXED_POLES: the fixed cycle of real poles, no ranking.
+        if fixed_poles{
+            while !(space.solves()%checkpoint==0&&space.solves()>0)||space.solves()==last_checkpoint{
+                let pole=fixed_sequence[next_fixed%fixed_sequence.len()];next_fixed+=1;
+                space.solve(&mut lattice,pole)?;
+                if space.solves()>=maximum_solves||space.full(){break;}
+            }
+            last_checkpoint=space.solves();
+            continue;
+        }
         // The next pole by its expected gain.
         let clock=Instant::now();
         let model=match current.take(){Some((solves,model))if solves==space.solves()=>model,_=>{
@@ -963,12 +992,13 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
         for &(i,_)in &ranked{
             if !alive[i]{continue;}
             solved_at[i]=Some(score[i]);
+            if std::env::var("ATOM_DIAG_RANK").is_ok(){let z=points[i].sigma();let best_centre=ranked.iter().filter(|r|centre_poles.iter().any(|p|{let(a,b)=(p.sigma(),points[r.0].sigma());a.re==b.re&&a.im==b.im})).map(|r|r.1).fold(0.,f64::max);eprintln!("DBG rank solve {} pole {:.4e}{:+.4e}i score {:.3e} gain {:.3e} best-centre-gain {:.3e} live {}",space.solves()+1,z.re,z.im,score[i],gain(i),best_centre,ranked.len());}
             // (research, S3) ATOM_LATTICE_POLES_UNTRANSLATED: a lattice-frequency
             // pole's vectors already target a family; translations do not copy them.
             space.untranslated_next=untranslated_lattice&&matches!(points[i],Pole::Complex(_))&&!centre_poles.iter().any(|p|{let(a,b)=(p.sigma(),points[i].sigma());a.re==b.re&&a.im==b.im});
             if space.solve(&mut lattice,points[i])?==0{alive[i]=false;}
             space.untranslated_next=false;
-            if space.solves()%CHECKPOINT==0||space.solves()>=maximum_solves||space.full(){break;}
+            if space.solves()%checkpoint==0||space.solves()>=maximum_solves||space.full(){break;}
         }
     }
     let answer=best.ok_or("A run has its checkpoint")?;

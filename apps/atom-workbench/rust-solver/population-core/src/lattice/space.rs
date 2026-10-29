@@ -101,6 +101,9 @@ pub struct Space{
     /// (research, S3) Per Krylov vector whether translations copy it, and
     /// whether the next solve's vectors are copied.
     copyable:Vec<bool>,pub untranslated_next:bool,
+    /// (research, S6) The block size: a solve takes the last `block` Krylov
+    /// vectors as its right-hand sides.
+    pub block:usize,
     /// Active translations: the step and, per mode, the source modes of
     /// q - s and of q + s.
     translations:Vec<(Charge,Vec<Option<usize>>,Vec<Option<usize>>)>,
@@ -123,7 +126,7 @@ impl Space{
         // The trace carrier u = I / n on the centre (tr u = tr x0 = 1).
         let n=op.n;let mut u=vec![ZERO;op.dimension()];for i in 0..n{u[op.centre*d+i*n+i]=C{re:1./n as f64,im:0.};}
         let carrier=vectors.norm(&u);
-        let mut space=Self{basis:vec![],images:vec![],krylov:vec![],copyable:vec![],untranslated_next:false,translations:vec![],vectors,noise_floor:0.,capacity:capacity.max(2),initial:vec![carrier],columns:vec![],images_ms:0.};
+        let mut space=Self{basis:vec![],images:vec![],krylov:vec![],copyable:vec![],untranslated_next:false,block:1,translations:vec![],vectors,noise_floor:0.,capacity:capacity.max(2),initial:vec![carrier],columns:vec![],images_ms:0.};
         space.append(lattice,u,0.)?;
         // x0's K part (zero when rho0 is I / n).
         let mut k0=x0.clone();project_traces(&mut k0,n);let rest=space.vectors.norm(&k0);
@@ -198,6 +201,12 @@ impl Space{
         let v=self.krylov.last().ok_or("Empty Krylov sequence")?.clone();let mut w=vec![ZERO;v.len()];lattice.apply(&v,&mut w)?;
         self.add_krylov(lattice,w)
     }
+    /// (research, S6) A further starting vector of the block (a family's
+    /// slip): a Krylov vector of its own; the block grows by one when it
+    /// adds a direction.
+    pub fn add_start(&mut self,lattice:&mut Lattice<'_>,v:Vec<C>)->Result<usize,String>{
+        let before=self.krylov.len();let added=self.add_krylov(lattice,v)?;if self.krylov.len()>before{self.block+=1;}Ok(added)
+    }
     /// One column at a pole; returns the directions it added.
     pub fn solve(&mut self,lattice:&mut Lattice<'_>,pole:Pole)->Result<usize,String>{
         let clock=Instant::now();let length=self.basis[0].len();let before=lattice.work().block_operations();
@@ -216,8 +225,13 @@ impl Space{
             Pole::Real(_)|Pole::Complex(_)=>{
                 // A complex pole's real form: the second right-hand side zero.
                 let f:Vec<C>=self.krylov.last().ok_or("Empty Krylov sequence")?.iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-                let rhs=if pole.copies()==2{vec![f,vec![ZERO;length]]}else{vec![f]};
-                let(w,steps,residual)=lattice.solve(pole,&rhs,inner)?;
+                let rhs=if pole.copies()==2{vec![f,vec![ZERO;length]]}
+                    else{let b=self.block.min(self.krylov.len());self.krylov[self.krylov.len()-b..].iter().map(|k|k.iter().map(|v|C{re:-v.re,im:-v.im}).collect()).collect()};
+                let(w,steps,residual)=if pole.copies()==2||rhs.len()==1{lattice.solve(pole,&rhs,inner)?}else{
+                    // (research, S6) a block: one solve per right-hand side.
+                    let(mut w,mut steps,mut residual)=(Vec::new(),0usize,0_f64);
+                    for f in &rhs{let(x,st,re)=lattice.solve(pole,std::slice::from_ref(f),inner)?;w.extend(x);steps+=st;residual=residual.max(re);}
+                    (w,steps,residual)};
                 let mut added=0;for column in w{added+=self.add_krylov(lattice,column)?;}
                 (added,steps,residual)
             }
