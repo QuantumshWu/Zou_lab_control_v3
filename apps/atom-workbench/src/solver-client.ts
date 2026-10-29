@@ -1,5 +1,5 @@
 import type {DynamicsResult,SteadyResult,SteadyStatus,PopulationAccuracy} from './solver-types.js';
-import {CONVERGED_MEAN_STATUSES,STEADY_STATUSES,isInitialDependent,readPopulationAccuracy} from './solver-types.js';
+import {CONVERGED_MEAN_STATUSES,STEADY_STATUSES,readPopulationAccuracy} from './solver-types.js';
 import type {DynamicsSettings,InitialStateSpec,Scene,Level} from './types.js';
 import {MEAN_HORIZONS_US,POPULATION_TOLERANCE,canonicalInitialState,resolveInitialState} from './types.js';
 import {initialPopulations} from './full-master-model.js';
@@ -102,7 +102,7 @@ export class DynamicsClient {
     const expected=job.steadyOnly?1:job.settings.samples;
     if(result.timesUs.length!==expected||(!job.steadyOnly&&Math.abs(result.timesUs.at(-1)!-job.settings.durationUs)>1e-10*Math.max(1,job.settings.durationUs)))throw new Error('求解响应的采样与请求不匹配。');
   }
-  /** The mean asked for (every standard T); none for a trajectory alone. */
+  /** The mean asked for (both standard T); none for a trajectory alone. */
   private checkMean(result:DynamicsResult,job:Job):void{
     if((result.steady.status!=='not-requested')!==job.includeAsymptotic)throw new Error('求解响应的长期布居与本次请求不符。');
   }
@@ -116,8 +116,8 @@ export class DynamicsClient {
 /** Reads the one native result contract (documented in
  * rust-solver/src/lattice_core_adapter.rs) and rejects anything else.
  * `initial` is the requested initial state (an id is a single state), `horizon`
- * the requested time T of the mean (us; null: t → ∞). */
-export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics),horizon:number|null=scene.dynamics.meanHorizonUs):DynamicsResult{
+ * the requested time T of the mean (us: 1e5 or 1e6). */
+export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics),horizon:number=scene.dynamics.meanHorizonUs):DynamicsResult{
   const invalid=(detail:string):never=>{throw new Error(`求解结果不完整或无效：${detail}；未绘制替代数据。`);};
   const bounded=(value:unknown,limit=Infinity)=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=limit;
   const probabilities=(row:unknown,slack:number):row is number[]=>Array.isArray(row)&&row.length===32&&
@@ -146,20 +146,18 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   if(timesUs.length>1&&typeof d.method!=='string')invalid('时间演化方法');
   if(timesUs.length>1||data.populationAccuracy!==undefined)try{populationAccuracy=readPopulationAccuracy(data.populationAccuracy,timesUs.length);}catch{invalid('布居精度元数据');}
   if(data.progress!==undefined&&data.progress!==true)invalid('进度标记');
-  // The mean, when one was asked for: every standard T from the one mean run (`asymptoticHorizons`,
-  // one entry per T, in any order), each a computed long-time result -- its status the physics
-  // classification, with its estimated error and whether that is within ε -- or 'not-converged',
-  // nothing usable computed. The run's method and relaxation are every T's; the residual and the
-  // density checks belong to the requested T, whose mean is `steady`.
+  // The mean, when one was asked for: both standard T from the one mean run (`asymptoticHorizons`,
+  // one entry per T, in any order), each a computed p̄(T) -- with its estimated error and whether
+  // that is within ε -- or 'not-converged', nothing usable computed. The run's method and
+  // relaxation are both T's; the density checks belong to the requested T, whose mean is `steady`.
   const slowest=typeof d.slowestRelaxationUs==='number'&&Number.isFinite(d.slowestRelaxationUs)&&d.slowestRelaxationUs>0?d.slowestRelaxationUs as number:null;
-  const conserved=Number.isSafeInteger(d.conservedQuantities)&&d.conservedQuantities>0?d.conservedQuantities as number:null;
   const entries=data.asymptoticHorizons;let horizonMeans:SteadyResult[]|undefined;
   if(entries!==undefined){
     if(!Array.isArray(entries)||entries.length!==MEAN_HORIZONS_US.length)invalid('长期布居各时刻 T');
     horizonMeans=MEAN_HORIZONS_US.map(T=>{
       const found=(entries as unknown[]).filter((e:any)=>e&&typeof e==='object'&&!Array.isArray(e)&&e.horizonUs===T);
       if(found.length!==1)invalid('长期布居各时刻 T');
-      const e=found[0] as any,requested=T===horizon,bad=(what:string):never=>invalid(`${what}（T = ${T===null?'∞':`${T} μs`}）`);
+      const e=found[0] as any,requested=T===horizon,bad=(what:string):never=>invalid(`${what}（T = ${T} μs）`);
       const status=e.status as SteadyStatus;
       if(!STEADY_STATUSES.includes(status)||status==='not-requested'||(e.reason!==undefined&&typeof e.reason!=='string'))bad('长期布居状态');
       const converged=(CONVERGED_MEAN_STATUSES as readonly SteadyStatus[]).includes(status),error=e.estimatedError,within=e.withinTolerance;
@@ -168,19 +166,18 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
       let populations:Record<string,number>|null=null,density;
       if(converged){
         if(!probabilities(e.populations,5e-6))bad('长期布居矩阵');
-        if(requested&&(!bounded(d.asymptoticTraceError,5e-6)||!bounded(d.asymptoticPositivityError,1e-4)||!bounded(d.residual)||typeof d.asymptoticMethod!=='string'))invalid('长期密度数值验证信息');
+        if(requested&&(!bounded(d.asymptoticTraceError,5e-6)||!bounded(d.asymptoticPositivityError,1e-4)||typeof d.asymptoticMethod!=='string'))invalid('长期密度数值验证信息');
         try{density=readMeanDensity(e,32,e.populations);}catch{bad('长期复密度矩阵');}
         if(!density)bad('长期复密度矩阵');
         populations=Object.fromEntries(states.map((state,i)=>[state.id,e.populations[i]!]));
       }else if(e.populations!=null||e.densityReal!=null||e.densityImag!=null)bad('未收敛结果携带长期布居');
-      return {converged,status,populations,density,residual:converged&&requested?d.residual:null,method:converged&&typeof d.asymptoticMethod==='string'?d.asymptoticMethod:undefined,reason:e.reason,
-        estimatedError:converged?error as number:null,withinTolerance:converged&&within===true,initialDependent:isInitialDependent(status),
-        slowestRelaxationUs:converged?slowest:null,conservedQuantities:converged?conserved:null,horizonUs:T};
+      return {converged,status,populations,density,method:converged&&typeof d.asymptoticMethod==='string'?d.asymptoticMethod:undefined,reason:e.reason,
+        estimatedError:converged?error as number:null,withinTolerance:converged&&within===true,slowestRelaxationUs:converged?slowest:null,horizonUs:T};
     });
   }
   // The requested T's mean, or none requested.
   const steady:SteadyResult=horizonMeans?horizonMeans.find(s=>s.horizonUs===horizon)??invalid('长期布居时刻 T')
-    :{converged:false,status:'not-requested',populations:null,estimatedError:null,withinTolerance:false,residual:null,initialDependent:false};
+    :{converged:false,status:'not-requested',populations:null,estimatedError:null,withinTolerance:false};
   const assumptions=data.assumptions;
   if(!Array.isArray(assumptions)||assumptions.some((text:unknown)=>typeof text!=='string'))invalid('模型假设');
   const populations=Object.fromEntries(states.map((state,i)=>[state.id,rows.map((row:number[])=>row[i]!)]));

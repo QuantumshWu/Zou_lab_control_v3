@@ -1,6 +1,6 @@
 import type {DynamicsResult} from './solver-types.js';
 
-/** What a request computes: the mean alone ('mean': one mean run, every standard time T), the
+/** What a request computes: the mean alone ('mean': one mean run, both standard times T), the
  * trajectory with its mean ('full'), or the trajectory alone ('trajectory', includeAsymptotic
  * false: its mean is already at hand). */
 export type SolveKind='mean'|'full'|'trajectory';
@@ -17,7 +17,7 @@ export function solveOptions(kind:SolveKind):{steadyOnly:boolean;includeAsymptot
   return {steadyOnly:kind==='mean',includeAsymptotic:kind!=='trajectory'};
 }
 /** What a request made for `ran` still brings the current inputs: its trajectory while the
- * trajectory inputs stand, its means (every T) while the mean inputs do. */
+ * trajectory inputs stand, its means (both T) while the mean inputs do. */
 export function delivers(kind:SolveKind,ran:SolveInputs,current:SolveInputs):{trajectory:boolean;mean:boolean}{
   return {trajectory:kind!=='mean'&&ran.trajectoryKey===current.trajectoryKey,mean:kind!=='trajectory'&&ran.meanKey===current.meanKey};
 }
@@ -26,13 +26,13 @@ export function covers(kind:SolveKind,ran:SolveInputs,need:SolveKind,current:Sol
   const brings=delivers(kind,ran,current);
   return (need==='trajectory'||brings.mean)&&(need==='mean'||brings.trajectory);
 }
-/** A result's mean at every standard T, each as a record of its own (the result with that mean). */
-export function horizonRecords<R extends {result:DynamicsResult;horizon:number|null}>(record:R):R[]{
-  return (record.result.horizonMeans??[]).map(steady=>({...record,result:{...record.result,steady},horizon:steady.horizonUs??null}));
+/** A result's mean at each standard T, each as a record of its own (the result with that mean). */
+export function horizonRecords<R extends {result:DynamicsResult;horizon:number}>(record:R):R[]{
+  return (record.result.horizonMeans??[]).map(steady=>({...record,result:{...record.result,steady},horizon:steady.horizonUs!}));
 }
 /** What the last checkpoint of a stopped (or failed) request stands as: the trajectory when it is
  * one, and its mean at each T where no final mean is here. */
-export function keptCheckpoint(checkpoint:DynamicsResult,kind:SolveKind,finalMean:(horizon:number|null)=>boolean):{trajectory:boolean;horizons:(number|null)[]}{
+export function keptCheckpoint(checkpoint:DynamicsResult,kind:SolveKind,finalMean:(horizon:number)=>boolean):{trajectory:boolean;horizons:number[]}{
   return {trajectory:kind!=='mean'&&checkpoint.timesUs.length>1,
-    horizons:kind==='trajectory'?[]:(checkpoint.horizonMeans??[]).map(steady=>steady.horizonUs??null).filter(horizon=>!finalMean(horizon))};
+    horizons:kind==='trajectory'?[]:(checkpoint.horizonMeans??[]).map(steady=>steady.horizonUs!).filter(horizon=>!finalMean(horizon))};
 }

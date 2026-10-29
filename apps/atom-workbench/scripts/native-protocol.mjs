@@ -21,7 +21,7 @@ export function prepareNativeSolve(input){
   // The population accuracy is fixed (POPULATION_TOLERANCE); a value in the scene or the options is not read.
   const options={durationUs:settings.durationUs??5,samples:settings.samples??DEFAULT_DYNAMICS_SAMPLES,populationTolerance:POPULATION_TOLERANCE,
     includeAsymptotic:input.options?.includeAsymptotic??true,steadyOnly:input.options?.steadyOnly??false,
-    // The mean's observation horizon (us; null: t -> infinity), for a solver that reads it.
+    // The time T of the mean the app reads (us: 1e5 or 1e6; the solver's default 1e6 when absent).
     ...(input.options&&Object.hasOwn(input.options,'meanHorizonUs')?{meanHorizonUs:input.options.meanHorizonUs}:{})};
   if(typeof options.steadyOnly!=='boolean'||typeof options.includeAsymptotic!=='boolean')throw requestError('Invalid solver options','invalid-options');
   const payload={modelSchema:model.modelSchema,options,model:{dimension:model.dimension,states:model.states.map(state=>state.id),

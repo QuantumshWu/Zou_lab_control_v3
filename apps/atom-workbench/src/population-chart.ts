@@ -1,6 +1,6 @@
 import {timeDisplayUnit} from './duration.js';
 import type {DurationUnit} from './types.js';
-import {isTimeAverage,type SteadyResult} from './solver-types.js';
+import type {SteadyResult} from './solver-types.js';
 import {POPULATION_TOLERANCE} from './types.js';
 import {errorPercent,outsideRuns,sampleErrors} from './accuracy.js';
 
@@ -8,7 +8,7 @@ export interface PopulationPlot {timesUs:number[];populations:Record<string,numb
   /** Per-sample error bounds (ui-design.md §6.16): samples above ε are drawn, marked. */
   populationAccuracy?:{sampleErrors?:number[]};}
 export interface PopulationChartOptions {scale?:'linear'|'log';viewportWidth?:number;initialId?:string;timeUnit?:DurationUnit;showTotalExcited?:boolean;
-  /** The long-time column's name: p̄(T) at the T the result holds (p̄(1 s), p̄(∞)). */
+  /** The long-time column's name: p̄(T) at the T the result holds (p̄(1 s), p̄(100 ms)). */
   meanLabel?:string;
   /** A sample the readout stands at already: a newer checkpoint of the same trajectory keeps it open there. */
   cursor?:number;}
@@ -106,7 +106,7 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     cursor.replaceChildren(element('line',{x1:String(xx),x2:String(xx),y1:String(g.top),y2:String(g.bottom),stroke:'#a19f9d','stroke-width':'1'}));
     for(const id of ids){const p=result.populations[id]![index]!;cursor.append(element('circle',{cx:String(xx),cy:String(g.y(p)),r:'3',fill:options.scale==='log'&&p<=g.floor?'white':populationColor(id),stroke:'white','stroke-width':'1.5'}));}
     cursor.style.display='';
-    const steady=result.steady?.converged&&result.steady.populations?result.steady:undefined,mean=isTimeAverage(steady?.status);
+    const steady=result.steady?.converged&&result.steady.populations?result.steady:undefined,mean=!!steady;
     const meanLabel=options.meanLabel??'p̄(T)',error=sampleErrors(result)?.[index];
     // The sample's estimated error (an absolute bound on every population), marked when above ε.
     const accuracy=error===undefined?'':`<span class="readout-error${error>POPULATION_TOLERANCE?' outside':''}" title="该时刻布居的估计误差（概率的绝对误差）">±${esc(errorPercent(error))}${error>POPULATION_TOLERANCE?`（超过 ${esc(errorPercent(POPULATION_TOLERANCE))}）`:''}</span>`;

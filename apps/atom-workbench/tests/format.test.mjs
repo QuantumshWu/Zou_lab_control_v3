@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {formatNumber,formatElapsed,stateLabel,idLabel,labelStateIds,signedInteger,MINUS} from '../dist/js/atom-workbench/src/format.js';
-import {solverText,steadyStatusText} from '../dist/js/atom-workbench/src/solver-words.js';
+import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
 import {stateTree} from '../dist/js/atom-workbench/src/choice-trees.js';
 import {POPULATION_GROUPS} from '../dist/js/atom-workbench/src/population-selection.js';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
@@ -38,9 +38,7 @@ test('every state is spelled one way, in trees, groups and labels',()=>{
   assert.equal(ground.leaves[0].text,stateLabel({manifold:'ground',F:1,m:-1}));
   assert.equal(POPULATION_GROUPS.find(g=>g.id==='F:D2:3').label,'5P₃/₂ · F′=3');
 });
-test('solver statuses and known sentences are shown in Chinese; unknown text is kept',()=>{
-  assert.equal(steadyStatusText('time-average'),'长期相位平均');assert.equal(steadyStatusText('initial-dependent-time-average'),'长期相位平均（依赖初态）');
-  assert.equal(steadyStatusText('not-converged'),'未收敛');
+test('known solver sentences are shown in Chinese; unknown text is kept',()=>{
   assert.equal(solverText('an unforeseen native message'),'an unforeseen native message');
 });
 // The reasons the solver formats, read from its source: every format
@@ -77,8 +75,8 @@ test('every sentence the pipeline and the adapter format is shown in Chinese (a 
 });
 test('every mean reason the native adapter writes is shown in Chinese, within the tolerance and outside it',()=>{
   const outside=/const OUTSIDE:&str="([^"]+)";/.exec(adapterSource)?.[1];assert.ok(outside,'OUTSIDE');
-  const reasons=[...adapterSource.matchAll(/"((?:Converged|Long-time|Unique|Full-density|Lindblad mean|Populations converge)[^"]*\.)"/g)].map(m=>m[1]);
-  assert.ok(reasons.length>=7,`${reasons.length} reasons`);
+  const reasons=[...adapterSource.matchAll(/"((?:Phase average|State at)[^"]*\.)"/g)].map(m=>m[1]);
+  assert.equal(reasons.length,2,`${reasons.length} reasons: the driven and the undriven mean at T`);
   for(const reason of reasons){chinese(reason,reason);assert.match(chinese(reason+outside,reason),/未收敛/,reason);}
 });
 test('the method sentences the native adapter writes are shown in Chinese',()=>{

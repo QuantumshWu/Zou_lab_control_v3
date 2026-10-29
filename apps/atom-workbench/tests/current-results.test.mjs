@@ -18,14 +18,14 @@ test('current display survives pure UI edits, but changing physics, duration or 
 /** The app's mean cache: the means of the current mean inputs, one slot per time T. */
 function filled(){
   const scene=defaultScene(),cache=new CurrentResults(),key=()=>meanInputsKey(scene,scene.dynamics),epoch=cache.activate(key());
-  const means=Object.fromEntries([1e5,1e6,null].map(T=>[String(T),{horizon:T}]));
-  for(const T of [1e5,1e6,null])assert.equal(cache.set(key(),epoch,T,means[String(T)]),true);
+  const means=Object.fromEntries([1e5,1e6].map(T=>[String(T),{horizon:T}]));
+  for(const T of [1e5,1e6])assert.equal(cache.set(key(),epoch,T,means[String(T)]),true);
   return {scene,cache,key,epoch,means};
 }
 
 test('mean cache hit: another T, another duration or other samples find the mean already there',()=>{
   const {scene,cache,key,means}=filled();
-  for(const T of [null,1e5,1e6]){scene.dynamics.meanHorizonUs=T;cache.activate(key());assert.strictEqual(cache.get(key(),T),means[String(T)],`T = ${T}`);}
+  for(const T of [1e5,1e6]){scene.dynamics.meanHorizonUs=T;cache.activate(key());assert.strictEqual(cache.get(key(),T),means[String(T)],`T = ${T}`);}
   const trajectory=trajectoryInputsKey(scene,scene.dynamics);
   scene.dynamics.durationUs*=3;scene.dynamics.samples=51;cache.activate(key());
   assert.notEqual(trajectoryInputsKey(scene,scene.dynamics),trajectory,'the trajectory is solved again');
@@ -38,7 +38,7 @@ test('mean cache miss: a T no result carried yet, or other inputs',()=>{
   const scene=defaultScene(),cache=new CurrentResults(),key=meanInputsKey(scene,scene.dynamics),epoch=cache.activate(key);
   assert.equal(cache.get(key,1e6),undefined,'nothing solved yet');
   cache.set(key,epoch,1e6,{horizon:1e6});
-  assert.equal(cache.get(key,null),undefined,'only the T a result carried');
+  assert.equal(cache.get(key,1e5),undefined,'only the T a result carried');
   assert.equal(cache.get('other inputs',1e6),undefined);
 });
 
@@ -49,7 +49,7 @@ test('mean cache invalidation: exactly a change of the physics or of the initial
   ]){
     const {scene,cache,key,epoch}=filled(),original=key(),before=structuredClone(scene);
     change(scene);assert.notEqual(key(),original,label);cache.activate(key());
-    for(const T of [1e5,1e6,null])assert.equal(cache.get(key(),T),undefined,`${label}: T = ${T}`);
+    for(const T of [1e5,1e6])assert.equal(cache.get(key(),T),undefined,`${label}: T = ${T}`);
     // Back to the first inputs: nothing comes back, and a late result of the first visit is refused.
     Object.assign(scene,before);assert.equal(key(),original);cache.activate(key());
     assert.equal(cache.get(original,1e6),undefined,label);assert.equal(cache.set(original,epoch,1e6,{horizon:1e6}),false,label);

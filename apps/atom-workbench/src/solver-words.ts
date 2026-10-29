@@ -1,39 +1,16 @@
 // The solver's words in the workbench's vocabulary.  The native result keeps
 // its own (English) status names and method sentences; only what is shown is
 // translated here, so the result contract and its validation are untouched.
-import type {SteadyStatus} from './solver-types.js';
 import {formatNumber} from './format.js';
-
-const STATUS:Record<SteadyStatus,string>={
-  'stationary':'稳态',
-  'population-stationary':'布居稳态',
-  'initial-dependent':'稳态（依赖初态）',
-  'time-average':'长期相位平均',
-  'initial-dependent-time-average':'长期相位平均（依赖初态）',
-  'not-converged':'未收敛',
-  'not-requested':'未计算',
-};
-/** The long-time result's kind, as a word. */
-export function steadyStatusText(status:SteadyStatus|undefined):string{return status?STATUS[status]??status:STATUS['not-converged'];}
 
 /** Sentences the native solver is known to write (rust-solver/src/lattice_core_adapter.rs), and the client's own. */
 const SENTENCES:Record<string,string>={
   "Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically): one rational Krylov space from the initial state, every output read from one Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, its error estimated per output from the reduced model's residual, the omitted ring and the fold rests the lattice leaves out":
     '完整 32 态密度矩阵在折叠 Fourier 晶格上的 Lindblad 动力学（显式电荷按混合、种子幅度与环条件选取，连同其环；远离的谐波静态折叠）：从初态出发的一个有理 Krylov 空间，每个输出都由 Schrieffer–Wolff/Floquet 框架度量下的同一个 Galerkin 约化模型读出，误差按输出由约化模型的残差、省略的环和晶格留下的折叠余项估计。',
-  'Lindblad mean of the specified initial density: slow modes still relaxing at the horizon (horizonUs), or conserved quantities, keep it initial-state dependent.':
-    '给定初始密度矩阵的 Lindblad 长期布居：到 T 仍在弛豫的慢模式（或守恒量）使结果依赖初态。',
-  'Converged long-time phase average of the full driven Lindblad equation (unique limit: only the trace is conserved); populations are a time average, not a time-independent density.':
-    '完整受驱 Lindblad 方程的长期相位平均已收敛（极限唯一：只有迹守恒）；布居是相位平均（只平均掉快振荡），不是不随时间变化的密度矩阵。',
-  'Long-time phase average of the full driven Lindblad equation (unique limit: only the trace is conserved); populations are a time average, not a time-independent density.':
-    '完整受驱 Lindblad 方程的长期相位平均（极限唯一：只有迹守恒）；布居是相位平均（只平均掉快振荡），不是不随时间变化的密度矩阵。',
-  'Unique full-density Lindblad stationary solution (only the trace is conserved).':
-    '完整密度矩阵的 Lindblad 稳态唯一（只有迹守恒）。',
-  'Full-density Lindblad stationary solution (only the trace is conserved).':
-    '完整密度矩阵的 Lindblad 稳态（只有迹守恒）。',
-  'Long-time phase average at the observation horizon (horizonUs) of the specified initial density: slow modes still relaxing at the horizon (or conserved quantities) keep it initial-state dependent.':
-    '给定初始密度矩阵在时刻 T 的长期相位平均：到 T 仍在弛豫的慢模式（或守恒量）使结果依赖初态。',
-  'Populations converge in the background basis; exported density is the laboratory-frame time average.':
-    '布居在背景基中收敛；导出的密度矩阵是实验室系的相位平均。',
+  'Phase average at the horizon (horizonUs) of the full driven Lindblad equation from the specified initial density: the state at T with only its fast oscillations (beats, optical micromotion) averaged out, not a time-independent density.':
+    '完整受驱 Lindblad 方程从给定初始密度矩阵出发在时刻 T 的相位平均：T 时刻的态只平均掉快振荡（拍频与光频微运动），不是不随时间变化的密度矩阵。',
+  'State at the horizon (horizonUs) of the undriven Lindblad equation from the specified initial density, its optical coherences averaged out in the laboratory frame.':
+    '无驱动 Lindblad 方程从给定初始密度矩阵出发在时刻 T 的态，在实验室系中平均掉光学相干。',
   'Cancelled.':'计算已取消。',
 };
 /** What a mean's reason adds when its bound is above the tolerance (lattice_core_adapter.rs `OUTSIDE`). */
