@@ -13,7 +13,8 @@
 //!    not reduce it loses its turn; one never solved keeps the whole), per
 //!    real solve (a complex pole costs two); a pole that adds no direction
 //!    leaves the ladder.
-//! 3. Every CHECKPOINT solves: the Galerkin model in the frame's metric
+//! 3. Every CHECKPOINT solves (a run without a grid, the mean's, also right
+//!    after the steady column): the Galerkin model in the frame's metric
 //!    (`reduced`), its outputs (trajectory on the grid, horizons, steady
 //!    state, slowest relaxation, conserved count) and the error estimate
 //!    (`estimator`). An output's bound is ACCEPTANCE_FACTOR x its estimate,
@@ -47,6 +48,18 @@ use super::eigenbasis::BlockEigenbasis;
 /// (from its reduced model) and whenever its queue runs out. Measured at
 /// this spacing: the estimates up to acceptance cost 19-35% of the solves on
 /// three to five lasers; acceptance is seen at most three solves late.
+/// A run without a grid (a mean run) takes its first one right after the
+/// steady column and decides the completion there. Measured on the
+/// necessity review's 9 mean runs: three, four, five lasers, four without
+/// the trap and D1 + D2 accepted at 1 solve instead of 4, the errors
+/// measured against references (the steady states, four without the
+/// trap's mean at 1 s) the same to 1e-10 and within their bounds; three
+/// lasers at B = 0 and 1 mG completed as before (the K^(1) rests kept, one
+/// charge promoted) at 2 solves instead of 8 (2.7 and 3.2 -> 1.2 s); the
+/// default scene, still relaxing at 1 s (bound 9.7e-3 at 1 solve), at 4 as
+/// before. Never a trajectory: a trajectory checkpoint at 1 solve accepted
+/// four lasers without the trap at 10 ms falsely (the necessity review:
+/// bound 3.0e-3, error 7.3e-3).
 const CHECKPOINT:usize=4;
 /// Most solves of a request, and the basis memory (basis and images).
 /// MAXIMUM_SOLVES is a deliberate margin: twice the 24 solves the slowest
@@ -380,7 +393,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     loop{
         let live:Vec<usize>=(0..points.len()).filter(|&i|alive[i]).collect();
         let exhausted=live.is_empty()||space.solves()>=MAXIMUM_SOLVES||space.full();
-        if exhausted||space.solves()%CHECKPOINT==0{
+        if exhausted||space.solves()%CHECKPOINT==0||(times.is_empty()&&space.solves()==1){
             // 3. The checkpoint: model, outputs, estimate, bounds.
             let clock=Instant::now();
             galerkin.ingest(&space.basis,&space.images)?;
