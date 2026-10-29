@@ -315,12 +315,17 @@ impl Model{
         let vs:Vec<C>=(0..p*r).map(|e|{let(i,j)=(e/r,e%r);let mut s=ZERO;for m in 0..r{mul_add(&mut s,C{re:v[m*p+i],im:0.},self.vectors[m*r+j]);}mul(s,self.used_coefficients[j])}).collect();
         let modes:Vec<(usize,bool)>=(0..projection.canonical.len()).flat_map(|c|{let mirrored=projection.canonical[c].1>1.;
             std::iter::once((c,false)).chain(mirrored.then_some((c,true)))}).collect();
+        // (research) ATOM_RANK_FLOQUET: mode c's term at the pole in the Floquet
+        // frame (the laboratory transform at xi + i nu_c), where a solve at xi
+        // interpolates every mode's resolvent.
+        let floquet=std::env::var("ATOM_RANK_FLOQUET").is_ok();
         let parts=Execution::new()?.map(modes,|(c,mirror)|->Result<Vec<C>,String>{
             let(_,_,nu)=projection.canonical[c];let nu=if mirror{-nu}else{nu};
+            let shift=if floquet{nu}else{0.};
             // Coefficients of the components per point: (V^T S diag(a)) / (xi - i nu - theta), p x count.
             let mut cm=vec![ZERO;p*count];
             for(q,&xi)in points.iter().enumerate(){
-                let f:Vec<C>=(0..r).map(|j|{let den=C{re:xi.re-self.used_theta[j].re,im:xi.im-nu-self.used_theta[j].im};let s2=den.re*den.re+den.im*den.im;C{re:den.re/s2,im:-den.im/s2}}).collect();
+                let f:Vec<C>=(0..r).map(|j|{let den=C{re:xi.re-self.used_theta[j].re,im:xi.im+shift-nu-self.used_theta[j].im};let s2=den.re*den.re+den.im*den.im;C{re:den.re/s2,im:-den.im/s2}}).collect();
                 for i in 0..p{let mut s=ZERO;for j in 0..r{mul_add(&mut s,vs[i*r+j],f[j]);}
                     // A mirror mode's dressed block is the conjugate: conj(U) c = conj(U conj(c)).
                     cm[i+p*q]=if mirror{conj(s)}else{s};}
@@ -331,7 +336,7 @@ impl Model{
             for(q,&xi)in points.iter().enumerate(){
                 let column:Vec<C>=y[q*d..(q+1)*d].iter().map(|e|if mirror{conj(*e)}else{*e}).collect();
                 for(jj,zj)in eigen.complex_coefficients(&column).into_iter().enumerate(){
-                    let den=C{re:xi.re-eigen.lambda[jj].re,im:xi.im-eigen.lambda[jj].im};let s2=den.re*den.re+den.im*den.im;
+                    let den=C{re:xi.re-eigen.lambda[jj].re,im:xi.im+shift-eigen.lambda[jj].im};let s2=den.re*den.re+den.im*den.im;
                     z[jj+d*q]=mul(zj,C{re:den.re/s2,im:-den.im/s2});}
             }
             let mut out=vec![ZERO;n*count];gemm.multiply(n,count,d,ONE,&eigen.readout,n,&z,d,ZERO,&mut out,n)?;
