@@ -635,7 +635,9 @@ dialog.dialog::backdrop { background: transparent; }
 .info-value { -webkit-user-select: text; user-select: text; }
 /* A branch's count ("4 fields") is a count of what follows, not a value: MUTED_INK. */
 .info-row.branch > .info-value { color: var(--muted-ink); }
-.info-value > button { height: auto; min-height: 0; padding-top: var(--info-pad); padding-bottom: calc(var(--info-pad) + var(--cap-lift)); }
+/* v2 InfoTree._add_action: an ordinary FluentButton, left/vertically centred,
+ * in a holder with no horizontal margins. Only the row adds item padding. */
+.info-value.info-action { padding: var(--info-pad) 0; justify-content: flex-start; }
 .info-name.match, .info-value.match { background: var(--orange-tint); }
 .info-guide {
   position: absolute; top: 0; bottom: 0; width: var(--edge); background: var(--divider);

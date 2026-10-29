@@ -51,6 +51,21 @@ try {
  await check('IME composition waits for the completed value',async()=>{const t=setup();t.type('2',0,new InputEvent('input',{bubbles:true,isComposing:true}));await wait();equal(t.writes().length,0,'composition write');t.input().dispatchEvent(new CompositionEvent('compositionend'));await wait();equal(t.writes().map(c=>c.value),[2],'composition end')});
  await check('Escape discards pending Live edits',async()=>{const t=setup();t.type('2');await Promise.resolve();t.input().dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));await wait();equal(t.writes().length,0,'Escape write');equal(t.input().value,'1','Escape value')});
  await check('step buttons retain Live behavior',async()=>{const t=setup();t.row().querySelector('[aria-label="Increase"]').click();await wait();equal(t.writes().map(c=>c.value),[2],'step')});
+ await check('a focused frequency wheel sends the exact displayed grid value in its selected unit',async()=>{
+   const t=setup({live:false,fields:[{unit:'MHz',current:179.9,desired:179.9,step:.1}]});
+   t.input().focus();t.input().dispatchEvent(new WheelEvent('wheel',{deltaY:-100,bubbles:true,cancelable:true}));
+   equal(t.input().value,'180','focused wheel text');await Promise.resolve();
+   assert(!t.apply().disabled,'accepted wheel draft enables Apply');t.apply().click();
+   equal(t.writes().map(c=>[c.value,c.unit]),[[180,'MHz']],'selected-unit wire value');
+   // A true instrument readback must remain whole, even near a clean grid point.
+   t.ack(t.writes()[0].id,179.9999999997);equal(t.input().value,'179.9999999997','quantized readback was rounded away');
+ });
+ await check('a genuine off-grid readback reaches the next grid point without overshooting',async()=>{
+   const t=setup({live:false,fields:[{unit:'MHz',current:179.9999999997,desired:179.9999999997,step:.1}]});
+   t.input().focus();t.input().dispatchEvent(new WheelEvent('wheel',{deltaY:-100,bubbles:true,cancelable:true}));
+   equal(t.input().value,'180','next grid point');await Promise.resolve();
+   assert(!t.apply().disabled,'accepted off-grid draft enables Apply');t.apply().click();equal(t.writes()[0].value,180,'no false on-grid tolerance');
+ });
  await check('writes to different fields are serialized',async()=>{const t=setup({fields:[{},{}]});t.type('2');await wait();t.type('5',1);await wait();equal(t.writes().length,1,'second field overlapped');t.ack(1,2);equal(t.writes().map(c=>[c.field,c.value]),[['frequency',2],['power',5]],'field queue')});
  await check('a refusal does not erase a newer queued value',async()=>{const t=setup();t.type('2');await wait();t.type('3');await wait();t.ack(1,1,true);equal(t.writes().map(c=>c.value),[2,3],'refused older write');equal(t.input().value,'3','refusal replaced newer draft')});
  await check('readback does not jump to a stale fields snapshot',async()=>{const t=setup();t.type('2');await wait();t.project({},1,false,1.9);equal(t.input().value,'1.9','device readback ignored')});

@@ -310,7 +310,15 @@ quartet's reads as `values` answers them, with the unit of each its field
 declares (`{values, units, provenance}`: the Viewer's Devices tab reads "80 MHz"), else null
 (it does not report its settings). The core asks with a 2 s bound as an
 untracked request: a device busy in another run's call misses it without being
-taken for unresponsive, and its late answer is dropped. `RunRequest.apparatus`
+taken for unresponsive, and its late answer is dropped. The local pipe writer
+is also included in that budget. At most one snapshot per device remains in
+flight; another caller waits only its own budget before reporting it busy.
+An unsent expired request is cancelled. A synchronous pipe write already
+started finishes its frame in the background, then retires on the actual
+answer or process exit, without marking the device unresponsive.
+Explicit host shutdown has an independent close/exit deadline, so a frame
+stuck in a full pipe cannot prevent its already-closing owner from exiting.
+`RunRequest.apparatus`
 carries the result and `run.begin` writes it into the run record:
 
 ```json
@@ -323,8 +331,15 @@ carries the result and `run.begin` writes it into the run record:
 ```
 
 Every live device has an entry (`type_id`, `role`); one that gave no settings
-says why in `unavailable` (still opening, failed, published, served by another
-computer, timed out, or not reporting). A board's `driver` is the run that
+says why in `unavailable` (still opening, failed, published, timed out, or not
+reporting). Fabric devices advertise the owner's `snapshot` capability and
+return that same snapshot, including device-specific fields and units. An
+older publisher that omits the capability is explicitly unavailable until
+updated. `apparatus.device_transports[instance]` records the fabric endpoint
+separately, without replacing a device's own transport or provenance fields.
+If a snapshot uses an apparatus identity field such as `role`, its differing
+value is preserved in the device entry's `snapshot_fields`; the core identity
+stays authoritative. A board's `driver` is the run that
 claims it (`{run, node}`), an outside driver (`{outside: "PulseGUI"}`: On Pulse),
 or null. Values are in each field's own unit, as `values` reads them. A
 processor takes no bench: its sources' records reach it through lineage.
@@ -633,7 +648,7 @@ refused until `take_back`) and answers the using core's instance ops through
 descriptor, endpoint, tunable)`: the instance has the publisher's descriptor,
 its outputs join the using core's Stop all (made safe through the link), its
 commands the catalogue, and runs claim it like a local device. Only the
-instance ops travel (`spi`, `fields`, `tune`, `values`, `command`, `make_safe`,
+instance ops travel (`spi`, `fields`, `tune`, `values`, `snapshot`, `command`, `make_safe`,
 plus `attach`/`detach`/`list`), with the same params and replies as here, and
 what the device says for itself: its `device.notice` and `device.log` go to the
 core using it (`lend_out`'s forward, an `evt` frame with its blocks), which hears
@@ -648,7 +663,18 @@ lands where its node and the Runtime read it without another copy. A
 connection opens with `hello` (version 5 and the machine; another version is
 refused by name); both sides beat every 2 s and a peer silent for 6 s is gone.
 The device attach reply carries its declared `reads` alongside `tunable`;
-the receiving core preserves both for draft and run proxies.
+the receiving core preserves both for draft and run proxies. Its optional
+`snapshot` boolean describes the owner's actual open adapter, rather than
+guessing support from the device type or tunable status. Adding it and the
+snapshot operation is backward compatible with existing fabric version 5
+clients; an absent capability is not mistaken for an unsupported device.
+Snapshot access requires the attached owner, like other instance operations.
+Its total deadline includes waiting for the link, writer and reply, without
+the ordinary response grace. A reply timeout drops only that metadata request;
+so does a write timeout before any request bytes were sent. A failure after a
+partial frame is a broken transport and follows the normal link recovery path.
+The publishing plugin uses an untracked request so it neither fails the device
+nor interrupts the owning run when the device is busy.
 As v2's fabric there is no key: a core accepts other machines only while
 something is published (Remote on). The
 publisher drives an abandoned device's outputs safe (lost user, a user's

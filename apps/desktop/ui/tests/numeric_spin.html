@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Decimal spin grid regressions</title>
+<link rel="stylesheet" href="../style.css">
+<pre id="result">pending</pre>
+<script type="module">
+import {gridStep,spinBox} from '../dist/fluent/spin.js';
+import {Field,shifted} from '../dist/fluent/form.js';
+const assert=(ok,message)=>{if(!ok)throw Error(message)};
+const equal=(a,b,message)=>assert(Object.is(a,b),`${message}: ${a} != ${b}`);
+const checks=[];const check=(name,fn)=>{fn();checks.push(name)};
+try {
+ check('decimal steps produce the same clean Number shown and sent',()=>{
+  let value=179.9;
+  for(let n=0;n<500;n++){value=gridStep(value,.1,1,null,null);value=gridStep(value,.1,-1,null,null)}
+  equal(value,179.9,'back-and-forth grid');equal(gridStep(value,.1,1,null,null),180,'integer grid result');
+ });
+ check('real off-grid hardware values do not skip the next grid point',()=>{
+  equal(gridStep(179.9999999997,.1,1,null,null),180,'up to nearest grid point');
+  equal(gridStep(-179.9999999997,.1,-1,null,null),-180,'down to nearest grid point');
+  equal(gridStep(.1+.2,.1,-1,null,null),.2,'representation-sized dust still means the same grid point');
+ });
+ check('tiny and high-precision steps retain their declared precision',()=>{
+  equal(gridStep(1e-120,1e-120,1,null,null),2e-120,'no toFixed precision floor');
+  equal(gridStep(0,.12345678901234566,2,null,null),.24691357802469132,'authored high-precision step');
+  equal(gridStep(1e-7,1e-7,9,null,null),1e-6,'scientific notation grid');
+ });
+ check('bounds are exact grid fences, including between-grid bounds',()=>{
+  equal(gridStep(0,.1,1,.3000000001,1),.4,'lower bound');
+  equal(gridStep(1,.1,-1,0,.4999999999),.4,'upper bound');
+  equal(gridStep(.4,.1,-1,.3000000001,1),null,'no remaining downward grid point');
+  equal(gridStep(0,Infinity,1,null,null),null,'invalid step');
+ });
+ check('focused wheel and keyboard edits send decimal grid values',()=>{
+  const sent=[];const spin=spinBox({value:179.9,step:()=>.1,bounds:()=>[null,null],decimal:true,commit:v=>sent.push(v)});
+  document.body.append(spin.root);spin.input.focus();
+  spin.input.dispatchEvent(new WheelEvent('wheel',{deltaY:-100,bubbles:true,cancelable:true}));
+  equal(spin.input.value,'180','focused text');equal(sent.at(-1),180,'wheel wire Number');
+  spin.input.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}));
+  equal(spin.input.value,'179.9','keyboard text');equal(sent.at(-1),179.9,'keyboard wire Number');
+  spin.chosenStep=.01;equal(spin.chosenStep,.01,'chosen step');spin.resetStep();equal(spin.chosenStep,null,'owner step restored');
+ });
+ check('ordinary shared form numbers preserve typed high precision until explicitly stepped',()=>{
+  const sent=[];const field=new Field('numeric-regression',{name:'frequency',label:'Frequency',kind:'number',value:179.9999999997,step:.1,unit:'MHz'}, {commit:v=>{sent.push(v);return sent.length}});
+  document.body.append(field.root);const input=field.root.querySelector('input');input.focus();
+  equal(input.value,'179.9999999997','real authored value not rounded');
+  input.dispatchEvent(new WheelEvent('wheel',{deltaY:-100,bubbles:true,cancelable:true}));
+  equal(input.value,'180','stepped field text');equal(sent.at(-1),180,'field wire');
+  equal(shifted(sent.at(-1),6),180000000,'SI prefix wire');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
+}catch(error){document.getElementById('result').textContent=JSON.stringify({passed:false,error:error.stack})}
+</script>

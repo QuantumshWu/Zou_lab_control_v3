@@ -142,7 +142,7 @@ export type EditorIntents = NodeIntents & {
   rename(id: string, name: string): number;
   /** One edited value of the draft: `{values}`, `{source_signal}` or `{device_keys}`. */
   editDraft(id: string, change: Record<string, unknown>, label: string): number;
-  revert(id: string): void;
+  revert(id: string): number;
   check(id: string): void;
   /** The window's dialog for a path the node reads (v2 FluentPathEdit Browse…): the chosen path, or null. */
   choose(ask: PathAsk): Promise<string | null>;
@@ -173,6 +173,7 @@ export class LogicEditorView {
   /** Why the node's editor model could not be had for this draft (`editor_facts_error`). */
   private editorError = element("p", "field-error editor-error");
   private artifactFields = new Map<string, Field>();
+  private revertRequest: number | null = null;
 
   constructor(readonly id: string, private intents: EditorIntents) {
     const header = element("div", "logic-editor-header");
@@ -190,7 +191,7 @@ export class LogicEditorView {
     });
     const footer = this.footer;
     this.remove = command("Remove", () => intents.remove(id), { role: "destructive", confirm: "remove this node" });
-    this.revert = command("Revert", () => intents.revert(id), { role: "destructive",
+    this.revert = command("Revert", () => { this.revertRequest = intents.revert(id); }, { role: "destructive",
       title: "Discard this page's edits and put back the configuration the running node uses; the edits do not come back" });
     this.plot = switchButton(on => intents.preview(id, on), "Plot");
     this.plot.classList.add("row-switch");
@@ -218,9 +219,16 @@ export class LogicEditorView {
   }
   private labelsQueued = false;
 
+  /** Only a successful explicit replacement discards per-axis editor memory. */
+  resetLocalState(): void { this.editors.reset(); }
+
   /** The node's page from its workbench row; `projection` is the row's
    * drawn words, `takeover` the console-wide Task gate. */
   update(row: LogicRow, projection: NodeProjection, takeover: { active: boolean; owns: boolean }, request?: number, failed = false): void {
+    if (request === this.revertRequest) {
+      this.revertRequest = null;
+      if (!failed) this.resetLocalState();
+    }
     this.row = row;
     this.projection = projection;
     this.title.text = projection.name;

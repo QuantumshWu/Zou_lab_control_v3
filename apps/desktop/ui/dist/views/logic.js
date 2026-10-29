@@ -130,6 +130,7 @@ export class LogicEditorView {
     /** Why the node's editor model could not be had for this draft (`editor_facts_error`). */
     editorError = element("p", "field-error editor-error");
     artifactFields = new Map();
+    revertRequest = null;
     constructor(id, intents) {
         this.id = id;
         this.intents = intents;
@@ -148,7 +149,7 @@ export class LogicEditorView {
         });
         const footer = this.footer;
         this.remove = command("Remove", () => intents.remove(id), { role: "destructive", confirm: "remove this node" });
-        this.revert = command("Revert", () => intents.revert(id), { role: "destructive",
+        this.revert = command("Revert", () => { this.revertRequest = intents.revert(id); }, { role: "destructive",
             title: "Discard this page's edits and put back the configuration the running node uses; the edits do not come back" });
         this.plot = switchButton(on => intents.preview(id, on), "Plot");
         this.plot.classList.add("row-switch");
@@ -176,9 +177,16 @@ export class LogicEditorView {
         shareLabelColumn(this.body, this.editors.labelFloor());
     }
     labelsQueued = false;
+    /** Only a successful explicit replacement discards per-axis editor memory. */
+    resetLocalState() { this.editors.reset(); }
     /** The node's page from its workbench row; `projection` is the row's
      * drawn words, `takeover` the console-wide Task gate. */
     update(row, projection, takeover, request, failed = false) {
+        if (request === this.revertRequest) {
+            this.revertRequest = null;
+            if (!failed)
+                this.resetLocalState();
+        }
         this.row = row;
         this.projection = projection;
         this.title.text = projection.name;

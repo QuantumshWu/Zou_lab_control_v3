@@ -137,6 +137,12 @@ export class TaskConsoleView {
     }
     hidden() { this.onScreen = false; this.board.hidden(); }
     update(state) {
+        // Load/New/Clear and recipe replacement may reuse the same node IDs.
+        // The accepted response is the boundary; cancelled/failed dialogs are not.
+        if (!state.error && state.result?.replaced === true) {
+            for (const editor of this.editors.values())
+                editor.resetLocalState();
+        }
         const latest = this.ctx.latest;
         const board = this.boardState();
         const rows = this.nodeRows();

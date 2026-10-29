@@ -1,0 +1,126 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Scan axis editor memory regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+import {NodeEditors} from '../dist/views/node_editors/index.js';
+import {LogicEditorView,projectRow} from '../dist/views/logic.js';
+import {TaskConsoleView} from '../dist/views/task_console.js';
+import {PanelBoard} from '../dist/views/board.js';
+const assert=(value,message)=>{if(!value)throw Error(message)};
+const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const checks=[];const check=async(name,test)=>{await test();checks.push(name)};
+const settle=()=>new Promise(resolve=>setTimeout(resolve,0));
+const families={pulse:'pulse:param:',api:'api:',device:'device:',manual:'manual:'};
+const freq={port:'device:rf:frequency',label:'rf.frequency',group:'rf',leaf:'frequency',unit:'Hz',lo:0,hi:1e10,current:120e6,integer:false,display_unit:null,
+ units:[['Hz',0],['MHz',6]],limits:{},currents:{},families:{Hz:'Hz',MHz:'Hz'}};
+const duration={port:'pulse:param:duration:hold',label:'hold duration',group:'pulse',leaf:'duration:hold',unit:'s',lo:0,hi:10,current:.01,integer:false,display_unit:null,
+ units:[['s',0],['ms',-3],['µs',-6]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s'}};
+const other={...freq,port:'device:other_rf:frequency',group:'other RF',current:800e6};
+const initial={port:freq.port,unit:'MHz',values:[120,125,130],mode:'range',value_text:'121, 127'};
+const model=ports=>({editor:'scan_plan',manages:['plan','api_values'],families,host_advanced:['api:','device:','manual:'],ports,withheld:{},unoffered:{},summary:'',problem:'',api:null});
+const logicRow=()=>({node_id:'scan',name:'Scan',type_id:'task.seamless_scan',node_kind:'task',draft_revision:1,
+ values:{plan:JSON.stringify({axes:[initial]}),api_values:'',pulse_template:'pulse-a.json'},controls:[],source_signal:'camera/frames',source_label:null,source_choices:[],
+ device_keys:{sequencer:'board-a'},device_choices:{},device_labels:{},artifact_inputs:{},artifact_specs:[],auto_preview:false,outputs:[],issues:[],can_start:true,can_stop:true,
+ preview_offered:false,edited:true,state:'draft',status:'',phase:'idle',run:null});
+const choose=(picker,label,heading=null)=>{
+ picker.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+ const list=document.querySelector(':popover-open');assert(list,'picker opened');
+ const up=row=>{assert(row,`choice ${label}`);row.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:0}))};
+ for(let heading;(heading=list.querySelector('.tree-row.heading:not(.open)'));)up(heading);
+ up([...list.querySelectorAll('.tree-row.leaf')].find(row=>{if(row.textContent!==label)return false;if(!heading)return true;let previous=row.previousElementSibling;while(previous&&!previous.classList.contains('heading'))previous=previous.previousElementSibling;return previous?.textContent===heading}));
+};
+function setup(logic=false) {
+ let row=logicRow(),facts=model([freq,duration,other]),serial=0,lastRevert=0;
+ const edits=[];const write=values=>{edits.push(values);row={...row,draft_revision:row.draft_revision+1,values:{...row.values,...values}};return ++serial};
+ let view,manager,root;
+ if(logic){
+  const intents={start(){},stop(){},edit(){},remove(){},preview(){},rename(){return ++serial},editDraft(id,patch){return write(patch.values??{})},
+   revert(){lastRevert=++serial;return lastRevert},check(){},choose:async()=>null};
+  view=new LogicEditorView('scan',intents);root=view.root;
+ }else{
+  manager=new NodeEditors({edit:write,editArtifacts(){return ++serial},choose:async()=>null});
+  root=document.createElement('div');root.append(...manager.reconcile([facts]));
+ }
+ document.body.append(root);
+ const ack=(patch={},nextFacts=facts,request,failed=false)=>{
+  row={...row,...patch};facts=nextFacts;row.editor_facts=facts;
+  if(view)view.update(row,projectRow(row),{active:false,owns:false},request,failed);
+  else{root.replaceChildren(...manager.reconcile([facts]));manager.update(row,'')}
+ };
+ ack();
+ const plan=()=>JSON.parse(row.values.plan).axes[0];
+ const axis=()=>root.querySelector('.axis-port');
+ const port=(label,occurrence=0)=>choose(axis(),label,label==='frequency'?(occurrence===1?'other RF':'rf'):null);
+ const spin=(label,value)=>{const input=root.querySelector(`.range-bank input[aria-label="${label}"]`);input.value=String(value);input.dispatchEvent(new Event('change',{bubbles:true}))};
+ const mode=value=>[...root.querySelectorAll('.scan-axes .segmented button')].find(button=>button.textContent===value)?.click();
+ const values=text=>{const input=root.querySelector('.axis-list');input.value=text;input.dispatchEvent(new Event('change',{bubbles:true}))};
+ const unit=value=>choose(root.querySelector('.axis-unit .unit-picker'),value);
+ return {root,ack,plan,port,spin,mode,values,unit,edits,manager,view,row:()=>row,facts:()=>facts,revertRequest:()=>lastRevert};
+}
+const customize=t=>{t.spin('from',110);t.spin('to',150);t.spin('points',5);t.mode('Values');t.values('110, 113, 149');t.mode('Range')};
+try {
+ await check('returning to a frequency restores both banks and the chosen mode/unit',()=>{
+  const t=setup();customize(t);const kept=t.plan();t.port('hold duration');
+  equal([t.plan().mode,t.plan().value_text,t.plan().unit,t.plan().values.length],['range','','ms',5],'new port has clean defaults');
+  t.spin('from',2);t.spin('to',8);t.spin('points',4);t.unit('µs');t.mode('Values');t.values('2, 3.5, 8');const hold=t.plan();
+  t.port('frequency');equal(t.plan(),kept,'frequency bank');
+  t.port('hold duration');equal(t.plan(),hold,'duration bank');
+  equal(Object.keys(t.plan()).sort(),['mode','port','unit','value_text','values'],'memory never leaks into serialized plan');
+ });
+ await check('edited step chips belong to the axis, not the reused row',async()=>{
+  const t=setup();const chip=()=>t.root.querySelector('.range-bank .step-chip');
+  chip().click();await settle();const dialog=document.querySelector('dialog[open]');assert(dialog,'step dialog');
+  dialog.querySelector('input').value='0.25';[...dialog.querySelectorAll('button')].find(b=>b.textContent==='OK').click();await settle();
+  assert(chip().textContent.includes('0.25'),'frequency chosen step');t.port('hold duration');assert(!chip().textContent.includes('0.25'),'new duration did not inherit frequency step');
+  t.port('frequency');assert(chip().textContent.includes('0.25'),'return restored frequency step');
+ });
+ await check('a custom nonuniform range bank is not regenerated when its axis returns',()=>{
+  const t=setup();const authored={...initial,values:[120,121,129],mode:'values',value_text:'111, 117, 148'};
+  t.ack({values:{...t.row().values,plan:JSON.stringify({axes:[authored]})}});
+  t.port('hold duration');t.port('frequency');equal(t.plan(),authored,'custom coordinates and independent list retained');
+  t.mode('Range');equal(t.plan().values,[120,121,129],'switching banks did not replace custom coordinates with linspace');
+ });
+ await check('run/status refreshes and changed readings preserve cached values and valid row objects',()=>{
+  const t=setup();customize(t);const kept=t.plan();t.port('hold duration');
+  const row=t.root.querySelector('.axis-port');
+  t.ack({state:'running',phase:'running',run:{run:'new-run'}},model([{...freq,current:900e6},duration,other]));
+  assert(t.root.querySelector('.axis-port')===row,'normal refresh keeps widgets');
+  t.ack({state:'idle',phase:'idle',run:null});t.port('frequency');equal(t.plan(),kept,'running/readback did not overwrite frequency authoring');
+ });
+ await check('identical leaf names on different devices have independent banks',()=>{
+  const t=setup();customize(t);const kept=t.plan();t.port('frequency',1);
+  equal(t.plan().port,other.port,'other device selected');assert(t.plan().values[0]>700,'other device defaults');
+  t.spin('from',810);const otherKept=t.plan();t.port('frequency',0);equal(t.plan(),kept,'first device');t.port('frequency',1);equal(t.plan(),otherKept,'second device');
+ });
+ await check('pulse, device mapping, node and replacement revision isolate hidden caches',()=>{
+  for(const change of [row=>({values:{...row.values,pulse_template:'pulse-b.json'}}),()=>({device_keys:{sequencer:'board-b'}}),()=>({node_id:'other-node'}),()=>({draft_revision:0})]){
+   const t=setup();customize(t);t.port('hold duration');t.ack(change(t.row()));t.port('frequency');
+   equal([t.plan().values[0],t.plan().values.at(-1),t.plan().values.length],[119.9,120.1,5],'different authoring context uses first sweep');
+  }
+ });
+ await check('explicit accepted reset drops inactive banks without writing hidden state',()=>{
+  const t=setup();customize(t);t.port('hold duration');const edits=t.edits.length;t.manager.reset();t.ack();equal(t.edits.length,edits,'reset emits no plan');
+  t.port('frequency');equal(t.plan().values[0],119.9,'reset removed hidden frequency bank');
+ });
+ await check('a failed Revert keeps memory; a successful Revert clears it',()=>{
+  const t=setup(true);customize(t);const kept=t.plan();t.port('hold duration');
+  const revert=()=>[...t.root.querySelectorAll('button')].find(b=>b.textContent==='Revert').click();
+  revert();t.ack({},t.facts(),t.revertRequest(),true);t.port('frequency');equal(t.plan(),kept,'failed revert');t.port('hold duration');
+  revert();t.ack({},t.facts(),t.revertRequest(),false);t.port('frequency');equal(t.plan().values[0],119.9,'accepted revert');
+ });
+ await check('layout cancellation/failure retains tab memory and an accepted replacement resets it',()=>{
+  const t=setup(true);customize(t);const kept=t.plan();t.port('hold duration');
+  const transport={pending:new Map(),lastError:'',notice:null,busyText(){return ''},send(){return 1},post(){},report(error){throw error}};
+  const board=new PanelBoard(transport);const ctx={transport,latest:{type:'state',logic:[t.row()],board:{panels:[],paused:false,selectors:true,active_task:null,frozen:{}},panels:[]},show(){}};
+  const consoleView=new TaskConsoleView(ctx,board);document.body.append(consoleView.root);consoleView.editors.set('scan',t.view);
+  const update=(result,error=null)=>{ctx.latest.logic=[t.row()];consoleView.update({type:'state',result,error})};
+  update({replaced:false});t.port('frequency');equal(t.plan(),kept,'cancelled load');t.port('hold duration');
+  update({replaced:true},'Load failed');t.port('frequency');equal(t.plan(),kept,'failed load');t.port('hold duration');
+  update({replaced:true});t.port('frequency');equal(t.plan().values[0],119.9,'accepted load');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
+}catch(error){document.getElementById('result').textContent=JSON.stringify({passed:false,completed:checks,error:error.stack})}
+</script>

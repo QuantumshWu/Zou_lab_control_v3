@@ -122,7 +122,19 @@ class PatternDevice(EchoDevice):
     """A device whose state is more than its knobs (an SLM's pattern) answers its own snapshot."""
 
     def snapshot(self):
+        if getattr(self, "_snapshot_failure", False):
+            self._snapshot_failure = False
+            raise RuntimeError("snapshot readback unavailable")
+        if getattr(self, "_extended_snapshot", False):
+            return {"pattern": "flat", "amplitude": self.amplitude, "transport": {"device": "USB", "channel": 2},
+                    "snapshot": {"phase": [[0.0, 1.5], [None, 2.0]], "mode": "校准"}, "role": "device-owned role"}
         return {"pattern": "flat", "amplitude": self.amplitude}
+
+    def fail_snapshot_once(self):
+        self._snapshot_failure = True
+
+    def extended_snapshot(self):
+        self._extended_snapshot = True
 
 
 SERVED = AuthoringSchema((AuthoringField("port", "int", "Serve on port", 18990, minimum=1, maximum=65535),))

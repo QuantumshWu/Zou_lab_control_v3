@@ -317,6 +317,7 @@ struct Instance {
     descriptor: Arc<TypeDescriptor>,
     serving: Serving,
     tunable: bool,
+    snapshot: bool,
     /// The read-only methods the opened device implements (its open reply): what a draft query may call.
     reads: Vec<String>,
     /// The runs that claim this device, each exclusively or not (v2 DeviceClaim): two
@@ -496,15 +497,16 @@ impl PluginHost {
             }
         };
         let tunable = reply.message["ok"]["tunable"].as_bool().unwrap_or(false);
+        let snapshot = reply.message["ok"]["snapshot"] == true;
         let reads = reply.message["ok"]["reads"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
-        inner.admit(instance, descriptor, Serving::Process(process), tunable, reads)?;
+        inner.admit(instance, descriptor, Serving::Process(process), tunable, snapshot, reads)?;
         Ok(reply.message["ok"].clone())
     }
 
     /// Admit a device instance served by `endpoint` (another core's published
     /// device) under `descriptor`, the type it has there: its outputs join this
     /// core's Stop all (made safe through the endpoint), its commands the catalogue.
-    pub fn attach(&self, instance: &str, descriptor: TypeDescriptor, endpoint: Arc<dyn Endpoint>, tunable: bool, reads: Vec<String>) -> Result<(), CallError> {
+    pub fn attach(&self, instance: &str, descriptor: TypeDescriptor, endpoint: Arc<dyn Endpoint>, tunable: bool, snapshot: bool, reads: Vec<String>) -> Result<(), CallError> {
         if !descriptor.is_device() { return Err(CallError::new(ErrorKind::Invalid, format!("{} is not a device type", descriptor.type_id))); }
         named(instance)?;
         {
@@ -512,7 +514,7 @@ impl PluginHost {
             if state.closed { return Err(CallError::lost("the plugin host is closed")); }
             if state.instances.contains_key(instance) { return Err(CallError::new(ErrorKind::Refused, format!("{instance} is already open"))); }
         }
-        self.inner.admit(instance, Arc::new(descriptor), Serving::Remote(endpoint), tunable, reads)
+        self.inner.admit(instance, Arc::new(descriptor), Serving::Remote(endpoint), tunable, snapshot, reads)
     }
 
     /// The type an open instance has (a remote device's is its publisher's).
@@ -522,6 +524,7 @@ impl PluginHost {
 
     /// Whether an open device speaks the tunable quartet.
     pub fn tunable(&self, instance: &str) -> bool { self.inner.state.lock().unwrap().instances.get(instance).is_some_and(|entry| entry.tunable) }
+    pub fn reports_settings(&self, instance: &str) -> bool { self.inner.state.lock().unwrap().instances.get(instance).is_some_and(|entry| entry.snapshot) }
     pub fn reads(&self, instance: &str) -> Vec<String> {
         self.inner.state.lock().unwrap().instances.get(instance).map(|entry| entry.reads.clone()).unwrap_or_default()
     }
@@ -589,6 +592,15 @@ impl PluginHost {
             entry.serving.clone()
         };
         params["instance"] = json!(instance);
+        if op == "snapshot" {
+            // A busy snapshot is unavailable metadata, never a failed device.
+            // Use the same untracked request as a local Start, after the
+            // fabric has checked that this connection owns the instance.
+            params["plain"] = json!(true);
+            let Serving::Process(process) = serving else { return Err(CallError::new(ErrorKind::Refused, "a published snapshot must come from its owning process")); };
+            return process.snapshot(instance, deadline)
+                .map(|incoming| Reply::new(incoming.message["ok"].clone(), incoming.lends));
+        }
         serving.request(&self.inner.registry, op, params, lends, deadline)
     }
 
@@ -681,8 +693,8 @@ impl PluginHost {
 
     /// The bench at a Start (`snapshot`, §5): an open device's settings as plain JSON, null when it
     /// does not report them. A device busy in another run's call may miss `deadline`, which says
-    /// nothing of its health (untracked: the late answer is dropped). One another core serves or
-    /// holds is not asked.
+    /// nothing of its health (untracked: the late answer is dropped). A remote
+    /// device uses its owner's identical snapshot operation over the fabric.
     pub fn snapshot(&self, instance: &str, deadline: Duration) -> Result<Value, CallError> {
         let _request = self.admit_local(instance, false)?;
         let serving = {
@@ -692,10 +704,11 @@ impl PluginHost {
             if entry.published.is_some() { return Err(published_refusal(instance)); }
             entry.serving.clone()
         };
-        let Serving::Process(process) = serving else {
-            return Err(CallError::new(ErrorKind::Refused, format!("{instance} is served by another computer; the bench fabric does not carry its snapshot")));
-        };
-        process.request_untracked("snapshot", json!({"instance": instance, "plain": true}), deadline).map(|reply| reply.message["ok"].clone())
+        let params = json!({"instance": instance, "plain": true});
+        match serving {
+            Serving::Process(process) => process.snapshot(instance, deadline).map(|reply| reply.message["ok"].clone()),
+            Serving::Remote(endpoint) => endpoint.request("snapshot", params, Vec::new(), deadline).map(|reply| reply.value),
+        }
     }
 
     /// The catalogue entries of every open instance's commands.
@@ -848,6 +861,21 @@ impl PluginHost {
     /// Close everything and end every plugin process.
     pub fn shutdown(&self) {
         let names: Vec<String> = { let mut state = self.inner.state.lock().unwrap(); state.closed = true; state.instances.keys().cloned().collect() };
+        // Shutdown alone may end the owner. A full pipe can hold even close/exit
+        // behind a frame already being written, so the existing close + exit
+        // budget needs an independent timer that does not acquire the writer.
+        let owned: Vec<_> = self.inner.processes.lock().unwrap().values().cloned().collect();
+        let closing = self.inner.clone();
+        let (finished, finish) = std::sync::mpsc::channel::<()>();
+        let watchdog = std::thread::spawn(move || {
+            if matches!(finish.recv_timeout(SHUTDOWN_CLOSE + Duration::from_secs(10)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                for process in &owned { process.retiring.store(true, Ordering::Release); }
+                if let Err(error) = closing.job.terminate() {
+                    eprintln!("Plugin shutdown could not terminate its job: {error}");
+                    for process in owned { if !process.wait_exit(Duration::ZERO) { process.kill(); } }
+                }
+            }
+        });
         // Every instance closes at once and within a bound: a run that does not stop (a scan
         // waiting for an input that will not come) cannot hold the application open.
         let closers: Vec<_> = names.into_iter().map(|name| { let host = self.clone();
@@ -857,6 +885,8 @@ impl PluginHost {
         let retirers: Vec<_> = processes.into_iter().map(|process| { let inner = self.inner.clone();
             std::thread::spawn(move || inner.retire(&process)) }).collect();
         for retirer in retirers { let _ = retirer.join(); }
+        let _ = finished.send(());
+        let _ = watchdog.join();
     }
 }
 
@@ -953,9 +983,9 @@ impl Inner {
     }
 
     /// An opened instance joins the host: its outputs Stop all, its commands the catalogue.
-    fn admit(self: &Arc<Self>, instance: &str, descriptor: Arc<TypeDescriptor>, serving: Serving, tunable: bool, reads: Vec<String>) -> Result<(), CallError> {
+    fn admit(self: &Arc<Self>, instance: &str, descriptor: Arc<TypeDescriptor>, serving: Serving, tunable: bool, snapshot: bool, reads: Vec<String>) -> Result<(), CallError> {
         self.state.lock().unwrap().instances.insert(instance.to_owned(),
-            Instance { display_name: public_instance(instance).to_owned(), descriptor: descriptor.clone(), serving, tunable, reads, claims: Vec::new(), published: None,
+            Instance { display_name: public_instance(instance).to_owned(), descriptor: descriptor.clone(), serving, tunable, snapshot, reads, claims: Vec::new(), published: None,
                 local_requests: Arc::default(), run: None });
         for output in &descriptor.physical_outputs {
             let (weak, name, port) = (Arc::downgrade(self), instance.to_owned(), output.name.clone());

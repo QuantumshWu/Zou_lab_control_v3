@@ -10,7 +10,8 @@
 // as the JSON document) and `api_values` (only what differs from the pulse,
 // in the pulse's units whatever spelling a box is read in; re-read against
 // the pulse when the model says that changes it).  An axis added, or its knob
-// changed, starts as a narrow sweep around where the knob stands (firstSweep);
+// first selected, starts as a narrow sweep around where the knob stands (firstSweep);
+// revisiting a knob in this editor restores its independent input banks.
 // it, and an API value first shown, is read in the unit that shows it between
 // 1 and 1000 (defaultUnit).  A unit picked converts a
 // displayed quantity and keeps a number the operator wrote: an axis's values
@@ -47,6 +48,8 @@ type Facts = EditorFacts & {
 };
 /** One axis as the plan document writes it: both input banks, and which one plays. */
 type Axis = { port: string; values: number[]; unit: string; mode: "range" | "values"; value_text: string };
+type AxisMemory = { entry: Axis; steps: [number | null, number | null, number | null]; nativeUnit: string | null; integer: boolean | null };
+const copyAxis = (entry: Axis): Axis => ({ ...entry, values: [...entry.values] });
 
 /** The word a manual axis carries in the label column: a hand moves it. */
 const BY_HAND = "By hand";
@@ -205,6 +208,11 @@ class AxisRowView {
 
   get cells(): HTMLElement[] { return [this.kind, this.axis, this.values, this.unit, this.mode.root, this.remove, this.notes]; }
 
+  get steps(): AxisMemory["steps"] { return [this.start.chosenStep, this.stop.chosenStep, this.points.chosenStep]; }
+  set steps(values: AxisMemory["steps"]) {
+    for (const [index, spin] of [this.start, this.stop, this.points].entries()) spin.chosenStep = values[index]!;
+  }
+
   private port(): Port | undefined { return this.owner.ports.find(port => port.port === this.entry.port); }
 
   /** The port's limits, read in the unit the axis is authored in. */
@@ -225,6 +233,7 @@ class AxisRowView {
   /** Bring the row to its authored axis; the box under the operator's cursor
    * keeps what they are typing. */
   show(entry: Axis): void {
+    if (this.entry.port !== entry.port) this.steps = this.owner.recall(entry.port)?.steps ?? [null, null, null];
     this.entry = entry;
     if (this.combo) this.combo.setTree(this.owner.portTree(entry.port), entry.port);
     if (this.name && document.activeElement !== this.name) this.name.value = entry.port.slice(this.owner.families.manual.length);
@@ -278,11 +287,15 @@ class AxisRowView {
     this.owner.emitPlan();
   }
 
-  /** Another knob: its first sweep and unit in the boxes (firstSweep). */
+  /** A knob owns its banks, mode, unit and steps; row position owns none of them. */
   private portChanged(port: string): void {
+    if (port === this.entry.port) return;
+    this.owner.remember(this);
     const offered = this.owner.ports.find(item => item.port === port);
+    const kept = this.owner.recall(port);
     this.customValues = null;
-    this.entry = { ...this.entry, port, ...(offered ? firstSweep(offered) : {}) };
+    this.entry = kept?.entry ?? { port, ...(offered ? firstSweep(offered) : { unit: "", values: [0] }), mode: "range", value_text: "" };
+    this.steps = kept?.steps ?? [null, null, null];
     this.show(this.entry);
     this.owner.emitPlan();
   }
@@ -319,6 +332,9 @@ export class ScanPlanEditor implements NodeEditor {
   private tidied: string | null = null;
   private facts: Facts | null = null;
   private locked = "";
+  private context: string | null = null;
+  private lastRevision: number | null = null;
+  private axisMemory = new Map<string, AxisMemory>();
   families: Facts["families"] = { pulse: "pulse:param:", api: "api:", device: "device:", manual: "manual:" };
   ports: Port[] = [];
 
@@ -337,7 +353,48 @@ export class ScanPlanEditor implements NodeEditor {
 
   labelFloor(): number { return token("--api-label-room"); }
 
+  /** Editor-local identity, not run identity: a Start or live read changes
+   * neither the node's selected pulse nor the devices owning its scan ports. */
+  contextKey(row: LogicRow): unknown {
+    const sorted = (items: Record<string, unknown> | undefined): unknown => Object.entries(items ?? {}).sort(([a], [b]) => a.localeCompare(b));
+    return [row.node_id, row.type_id, row.source_signal, row.values.pulse_template ?? null, sorted(row.device_keys), sorted(row.artifact_inputs),
+      this.lastRevision !== null && row.draft_revision < this.lastRevision ? row.draft_revision : null];
+  }
+
+  /** Discard only editor memory; the next accepted draft supplies the rows. */
+  reset(): void {
+    this.axisMemory.clear();
+    this.rows = [];
+    this.axes.replaceChildren();
+    this.planText = null;
+    this.shownUnits.clear();
+    this.apiFields.clear();
+    this.apiForm.replaceChildren();
+    this.pickers = "";
+    this.tidied = null;
+  }
+
+  remember(view: AxisRowView): void {
+    const port = this.ports.find(port => port.port === view.entry.port);
+    const previous = this.axisMemory.get(view.entry.port);
+    this.axisMemory.set(view.entry.port, { entry: copyAxis(view.entry), steps: [...view.steps],
+      nativeUnit: port?.unit ?? previous?.nativeUnit ?? null, integer: port?.integer ?? previous?.integer ?? null });
+  }
+
+  recall(port: string): AxisMemory | undefined {
+    const kept = this.axisMemory.get(port), offered = this.ports.find(item => item.port === port);
+    if (!kept || (offered && (kept.nativeUnit !== offered.unit || kept.integer !== offered.integer))) return undefined;
+    return { ...kept, entry: copyAxis(kept.entry), steps: [...kept.steps] };
+  }
+
   update(row: LogicRow, raw: EditorFacts, locked: string): void {
+    // A backward draft revision also identifies a replaced node loaded under
+    // the same name. Ordinary edits and run-state pushes preserve the memory.
+    const backwards = this.lastRevision !== null && row.draft_revision < this.lastRevision;
+    const identity = JSON.stringify(this.contextKey({ ...row, draft_revision: this.lastRevision ?? row.draft_revision }));
+    if (identity !== this.context || backwards) { this.reset(); this.context = identity; }
+    else for (const view of this.rows) this.remember(view);
+    this.lastRevision = row.draft_revision ?? null;
     const facts = raw as Facts;
     const portsChanged = JSON.stringify([facts.ports, facts.withheld]) !== JSON.stringify([this.facts?.ports, this.facts?.withheld]);
     this.facts = facts;
@@ -349,6 +406,7 @@ export class ScanPlanEditor implements NodeEditor {
       this.planText = text;
       this.reconcileRows(this.ordered(readPlan(text)));
     }
+    for (const view of this.rows) this.remember(view);
     this.add.disabled = !facts.ports.length || Boolean(locked);
     this.addManual.disabled = Boolean(locked);
     for (const view of this.rows) view.locked = Boolean(locked);
@@ -383,6 +441,7 @@ export class ScanPlanEditor implements NodeEditor {
       const manual = axis.port.startsWith(this.families.manual);
       let view = this.rows[index];
       if (!view || view.manual !== manual) view = new AxisRowView(this, manual, axis);
+      view.steps = this.recall(axis.port)?.steps ?? [null, null, null];
       view.show(axis);
       kept.push(view);
     });
@@ -402,7 +461,10 @@ export class ScanPlanEditor implements NodeEditor {
       const used = new Set(this.rows.map(view => view.entry.port));
       const port = this.ports.find(item => !used.has(item.port)) ?? this.ports[0];
       if (!port) return;
-      this.rows.push(new AxisRowView(this, false, { port: port.port, ...firstSweep(port), mode: "range", value_text: "" }));
+      const kept = this.recall(port.port);
+      const view = new AxisRowView(this, false, kept?.entry ?? { port: port.port, ...firstSweep(port), mode: "range", value_text: "" });
+      view.steps = kept?.steps ?? [null, null, null];
+      this.rows.push(view);
     }
     const added = this.rows[this.rows.length - 1]!;
     added.show(added.entry);
@@ -410,12 +472,14 @@ export class ScanPlanEditor implements NodeEditor {
   }
 
   removeRow(view: AxisRowView): void {
+    this.remember(view);
     this.rows = this.rows.filter(item => item !== view);
     this.emitPlan();
   }
 
   /** The plan the rows hold, host axes first, as the draft's `plan`. */
   emitPlan(): void {
+    for (const view of this.rows) this.remember(view);
     const order = this.ordered(this.rows.map(view => view.entry));
     this.rows = order.map(entry => this.rows.find(view => view.entry === entry)!);
     this.axes.replaceChildren(...this.rows.flatMap(view => view.cells));

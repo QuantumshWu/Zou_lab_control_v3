@@ -42,13 +42,15 @@ impl Bench {
         let port = parameters["port"].as_u64().and_then(|port| u16::try_from(port).ok()).unwrap_or(zlc_fabric::DEFAULT_PORT);
         let published = parameters["instance_id"].as_str().map(str::trim).filter(|id| !id.is_empty()).ok_or_else(|| invalid("Published instance is required"))?;
         let (link, attached) = Link::open(address, port, published, self.bench(), host.registry().clone()).map_err(|error| CallError::new(ErrorKind::Failed, error))?;
-        let point = json!({"tunable": attached.tunable, "reads": attached.reads, "descriptor": crate::workbench_host::descriptor(&attached.descriptor),
+        let point = json!({"tunable": attached.tunable, "snapshot": attached.snapshot,
+            "snapshot_unavailable": attached.snapshot.is_none().then_some("the publisher does not advertise snapshots; update the publishing computer"),
+            "reads": attached.reads, "descriptor": crate::workbench_host::descriptor(&attached.descriptor),
             "remote": {"host": address, "port": port, "instance_id": published, "publisher": attached.publisher, "role": attached.role,
                        "type_id": attached.descriptor.type_id, "label": attached.descriptor.label}});
         // What it says for itself (an SLM Editor's draft, its log) is this core's to hear, as a local device's.
         let (told, local) = (host.clone(), instance.to_owned());
         link.on_event(move |op, params, lends| told.remote_event(&local, op, params, lends));
-        if let Err(error) = host.attach(instance, attached.descriptor, Arc::new(link.clone()), attached.tunable, attached.reads) {
+        if let Err(error) = host.attach(instance, attached.descriptor, Arc::new(link.clone()), attached.tunable, attached.snapshot.unwrap_or(false), attached.reads) {
             zlc_plugin_host::Endpoint::close(&link);
             return Err(error);
         }

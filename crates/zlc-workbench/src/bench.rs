@@ -3,7 +3,7 @@
 //! whatever its node chose to write in its own record (v2 kept only that). Asked of
 //! each open device that reports its settings once the start may launch, all at once;
 //! the run launches when every answer is in. A device that cannot answer (busy past
-//! the bound, failed, handed to or served by another computer) is entered as
+//! the bound, failed, or handed to another computer) is entered as
 //! unavailable with why: it never holds or fails the Start. State at Start only.
 use std::collections::BTreeSet;
 
@@ -22,7 +22,11 @@ const PULSE_BOARD: &str = "sequencer.streamer";
 
 /// A bench being taken: the answers still out, the entries so far (instance -> entry).
 #[derive(Clone, Debug, Default)]
-pub struct Bench { taken_at: String, asked: BTreeSet<u64>, devices: Map<String, Value>, sequencer: Map<String, Value> }
+pub struct Bench {
+    taken_at: String, asked: BTreeSet<u64>, devices: Map<String, Value>, sequencer: Map<String, Value>,
+    /// Separate from device answers, which may themselves contain transport fields.
+    device_transports: Map<String, Value>,
+}
 
 impl Bench {
     pub fn complete(&self) -> bool { self.asked.is_empty() }
@@ -33,7 +37,9 @@ impl Bench {
         for (device, entry) in &mut sequencer {
             if entry["driver"].is_null() && claims.iter().any(|claim| &claim.device == device) { entry["driver"] = json!({"run": run, "node": node}); }
         }
-        json!({"taken_at": self.taken_at, "devices": self.devices, "sequencer": sequencer})
+        let mut record = json!({"taken_at": self.taken_at, "devices": self.devices, "sequencer": sequencer});
+        if !self.device_transports.is_empty() { record["device_transports"] = json!(self.device_transports); }
+        record
     }
 
     fn entry(&mut self, device: &str) -> Option<&mut Value> { self.devices.get_mut(device).or_else(|| self.sequencer.get_mut(device)) }
@@ -55,14 +61,16 @@ impl Workbench {
             let kind = self.live_type(live);
             let board = kind.is_some_and(|item| item.capabilities.iter().any(|token| token == PULSE_BOARD));
             let mut entry = json!({"type_id": kind.map_or(live.entry.type_id.as_str(), |item| item.type_id.as_str()), "role": live.entry.role});
+            if let Some(remote) = live.working_point.get("remote").filter(|remote| remote.is_object()) {
+                bench.device_transports.insert(id.clone(), json!({"kind": "fabric", "endpoint": remote}));
+            }
             let unavailable = match live.state {
                 LiveState::Opening => Some("still opening".to_owned()),
                 LiveState::Closing => Some("closing".to_owned()),
                 LiveState::Failed => Some(format!("failed: {}", live.error.as_deref().unwrap_or("unknown error"))),
                 LiveState::Open if live.published => Some("published on the bench fabric: another computer uses it".to_owned()),
-                LiveState::Open if !live.working_point["remote"].is_null() => Some(format!("served by {} on the bench fabric, which does not carry its settings",
-                    live.working_point["remote"]["publisher"].as_str().unwrap_or("another computer"))),
-                LiveState::Open if live.working_point["snapshot"] != true => Some("does not report its settings".to_owned()),
+                LiveState::Open if live.working_point["snapshot"] != true => Some(live.working_point["snapshot_unavailable"].as_str()
+                    .unwrap_or("does not report its settings").to_owned()),
                 LiveState::Open => None,
             };
             if board {
@@ -94,7 +102,21 @@ impl Workbench {
         if !bench.asked.remove(&ticket) { return; }
         if let Some(entry) = bench.entry(device) {
             match result {
-                Ok(Value::Object(answer)) => for (key, value) in answer { if entry.get(&key).is_none_or(Value::is_null) { entry[key] = value; } },
+                Ok(Value::Object(answer)) => {
+                    // Keep the apparatus identity authoritative, but never discard
+                    // a device-owned field merely because it uses the same name.
+                    let mut conflicts = Map::new();
+                    for (key, value) in answer {
+                        if entry.get(&key).is_none_or(Value::is_null) { entry[key] = value; }
+                        else if entry[&key] != value { conflicts.insert(key, value); }
+                    }
+                    if !conflicts.is_empty() {
+                        if let Some(reported) = entry.as_object_mut().and_then(|entry| entry.remove("snapshot_fields")) {
+                            conflicts.insert("snapshot_fields".into(), reported);
+                        }
+                        entry["snapshot_fields"] = Value::Object(conflicts);
+                    }
+                },
                 Ok(Value::Null) => entry["unavailable"] = json!("does not report its settings"),
                 Ok(other) => entry["settings"] = other,
                 Err(error) => entry["unavailable"] = json!(error),

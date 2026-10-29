@@ -14,10 +14,9 @@ adapter's own answer when it has one, else its quartet's reads.
 from __future__ import annotations
 
 from dataclasses import replace
-import math
 from typing import Any
 
-from zlc_data.units import DEFAULT_UNITS
+from zlc_data.units import DEFAULT_UNITS, Scaled
 
 from .capabilities import TUNABLE
 
@@ -51,6 +50,15 @@ def read_tunable_in_unit(device: Any, name: str, unit: str = "") -> Any:
     field = next((item for item in device.tunable_fields() if item.metadata.name == name), None)
     if field is None:
         raise ValueError(f"device has no tunable field {name!r}")
+    return convert_tunable_field(field, unit)
+
+
+def convert_tunable_field(field: Any, unit: str) -> Any:
+    """Re-spell an ordinary field, including its step, through one scalar path.
+
+    Native adapters can use this for knobs whose conversion does not depend
+    on their hardware state, while still owning load-dependent amplitude.
+    """
     source = field.metadata.unit or "1"
     target = unit or source
     if target == source:
@@ -63,8 +71,15 @@ def read_tunable_in_unit(device: Any, name: str, unit: str = "") -> Any:
     # differ by a factor (Hz and MHz), not where a level is a power (dBm and mW).
     step = field.metadata.step
     if step is not None:
-        scaled = converted(step)
-        step = scaled if converted(0.0) == 0.0 and math.isclose(converted(2 * step), 2 * scaled, rel_tol=1e-9) else None
+        origin, destination = DEFAULT_UNITS.resolve(source), DEFAULT_UNITS.resolve(target)
+        own_family, _ = DEFAULT_UNITS.family_and_prefix(origin)
+        target_family, _ = DEFAULT_UNITS.family_and_prefix(destination)
+        linear = own_family == target_family or (
+            isinstance(origin.conversion, Scaled) and isinstance(destination.conversion, Scaled)
+        )
+        # Testing converted(0) can itself fail for W -> dBm. The registry's
+        # conversion types decide whether a constant step exists.
+        step = converted(step) if linear else None
     return replace(
         field,
         metadata=replace(field.metadata, unit=target,
@@ -134,4 +149,4 @@ def snapshot(device: Any) -> Any:
     return None
 
 
-__all__ = ["convert_tunable_value", "read_tunable_in_unit", "refresh_tunable_fields", "reports_settings", "snapshot", "tune_in_unit"]
+__all__ = ["convert_tunable_field", "convert_tunable_value", "read_tunable_in_unit", "refresh_tunable_fields", "reports_settings", "snapshot", "tune_in_unit"]

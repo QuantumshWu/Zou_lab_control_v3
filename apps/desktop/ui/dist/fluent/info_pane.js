@@ -19,6 +19,8 @@ const entriesOf = (value) => Array.isArray(value) ? value.map((item, index) => [
     : isOrdered(value) ? value.$fields.map(([name, item]) => [name, item]) : Object.entries(value);
 /** One value as it reads beside its name (info_pane.value_text). */
 export function valueText(value) {
+    if (isAction(value))
+        return value.text;
     if (value === null)
         return "none";
     if (typeof value === "boolean")
@@ -114,6 +116,9 @@ export class InfoTree {
             const label = element("span", "info-name", name);
             const shown = element("span", "info-value");
             if (isAction(value)) {
+                // v2 embeds a normal FluentButton in a zero-margin holder. Its row
+                // reserves the button height plus the tree's vertical item padding.
+                shown.classList.add("info-action");
                 const action = command(value.text, () => this.actionRequested(value.action));
                 shown.append(action.root);
             }

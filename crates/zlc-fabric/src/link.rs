@@ -24,7 +24,11 @@ const ANSWER_GRACE: Duration = Duration::from_secs(5);
 const LOG_LINES: usize = 400;
 
 /// What the publisher says the device is.
-pub struct Attached { pub descriptor: TypeDescriptor, pub role: String, pub tunable: bool, pub reads: Vec<String>, pub publisher: String }
+pub struct Attached {
+    pub descriptor: TypeDescriptor, pub role: String, pub tunable: bool,
+    /// None identifies an older publisher that does not advertise snapshots.
+    pub snapshot: Option<bool>, pub reads: Vec<String>, pub publisher: String,
+}
 
 type Answer = Result<(Value, Vec<Arc<Lend>>), CallError>;
 type Hook = Box<dyn Fn(&str) + Send + Sync>;
@@ -89,6 +93,7 @@ impl Link {
         let attached = link.connect().and_then(|value| {
             let descriptor: TypeDescriptor = serde_json::from_value(value["descriptor"].clone()).map_err(|error| format!("the publisher's descriptor: {error}"))?;
             Ok(Attached { descriptor, role: value["role"].as_str().unwrap_or("").to_owned(), tunable: value["tunable"] == true,
+                          snapshot: value["snapshot"].as_bool(),
                           reads: serde_json::from_value(value["reads"].clone()).map_err(|error| format!("the publisher's reads: {error}"))?,
                           publisher: value["publisher"].as_str().unwrap_or("").to_owned() })
         });
@@ -278,21 +283,64 @@ impl Link {
     }
 
     fn send_on(&self, generation: u64, writer: &Arc<Mutex<TcpStream>>, op: &str, params: Value, lends: Vec<Arc<Lend>>, deadline: Duration) -> Answer {
+        struct Counted<'a> { stream: &'a mut TcpStream, bytes: usize }
+        impl std::io::Write for Counted<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let count = std::io::Write::write(self.stream, bytes)?;
+                self.bytes += count;
+                Ok(count)
+            }
+            fn flush(&mut self) -> std::io::Result<()> { std::io::Write::flush(self.stream) }
+        }
+        let until = Instant::now() + deadline;
+        let snapshot = op == "snapshot";
+        let timed_out = || CallError::new(ErrorKind::Timeout, format!("snapshot of {} did not answer within {:.1} s", self.0.instance, deadline.as_secs_f64()));
+        // Start's metadata cannot wait behind another request's bulk write.
+        // An expired snapshot is dropped; it does not cancel the owning link.
+        let mut stream = if snapshot {
+            loop {
+                if Instant::now() >= until { return Err(timed_out()); }
+                match writer.try_lock() {
+                    Ok(stream) => break stream,
+                    Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(1)),
+                }
+            }
+        } else { lock(writer) };
+        let previous_timeout = if snapshot {
+            let previous = stream.write_timeout().map_err(|error| CallError::lost(error.to_string()))?;
+            let remaining = until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { return Err(timed_out()); }
+            stream.set_write_timeout(Some(remaining)).map_err(|error| CallError::lost(error.to_string()))?;
+            previous
+        } else { None };
         let id = self.0.next.fetch_add(1, Ordering::Relaxed);
         let (sender, answer) = mpsc::channel();
         lock(&self.0.pending).insert(id, sender);
-        let message = json!({"t": "req", "id": id, "op": op, "p": params, "deadline_ms": deadline.as_millis() as u64});
-        let written = write_frame(&mut *lock(writer), &message, &lends);
+        let remaining = if snapshot { until.saturating_duration_since(Instant::now()) } else { deadline };
+        let message = json!({"t": "req", "id": id, "op": op, "p": params, "deadline_ms": remaining.as_millis() as u64});
+        let mut sink = Counted { stream: &mut stream, bytes: 0 };
+        let mut written = write_frame(&mut sink, &message, &lends);
+        let bytes_written = sink.bytes;
+        if snapshot { if let Err(error) = stream.set_write_timeout(previous_timeout) { written = Err(error); } }
+        drop(stream);
         if let Err(error) = written {
             lock(&self.0.pending).remove(&id);
+            if snapshot && bytes_written == 0 && matches!(error.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) {
+                return Err(timed_out());
+            }
+            // A partial frame cannot be discarded on a shared byte stream.
+            // Only that real transport failure follows the normal recovery path.
             self.broke(generation, &format!("sending {op} failed: {error}"));
             return Err(CallError::lost(format!("the bench link for {} broke while sending {op}", self.0.instance)));
         }
         drop(lends);
-        match answer.recv_timeout(deadline + ANSWER_GRACE) {
+        let wait = if snapshot { until.saturating_duration_since(Instant::now()) } else { deadline + ANSWER_GRACE };
+        match answer.recv_timeout(wait) {
             Ok(answer) => answer,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 lock(&self.0.pending).remove(&id);
+                if snapshot { return Err(timed_out()); }
                 Err(CallError::new(ErrorKind::Timeout, format!("{} did not answer {op} for {} within {:.0} s", self.0.host, self.0.instance,
                                                                (deadline + ANSWER_GRACE).as_secs_f64())))
             }
@@ -304,8 +352,10 @@ impl Link {
 impl Endpoint for Link {
     fn request(&self, op: &str, mut params: Value, lends: Vec<Arc<Lend>>, deadline: Duration) -> Result<Reply, CallError> {
         params["instance"] = json!(self.0.instance);
-        let (generation, writer) = self.current(Instant::now() + deadline)?;
-        self.send_on(generation, &writer, op, params, lends, deadline).map(|(value, lends)| Reply::new(value, lends))
+        let until = Instant::now() + deadline;
+        let (generation, writer) = self.current(until)?;
+        let remaining = if op == "snapshot" { until.saturating_duration_since(Instant::now()) } else { deadline };
+        self.send_on(generation, &writer, op, params, lends, remaining).map(|(value, lends)| Reply::new(value, lends))
     }
 
     fn close(&self) {
@@ -320,5 +370,33 @@ impl Endpoint for Link {
     fn tail(&self, lines: usize) -> Vec<String> {
         let log = lock(&self.0.log);
         log.iter().skip(log.len().saturating_sub(lines)).cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_deadline_includes_a_busy_writer_without_closing_or_sending_late() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        let writer = Arc::new(Mutex::new(stream));
+        let link = Link::new("127.0.0.1", listener.local_addr().unwrap().port(), "camera",
+            ("attach", json!({"instance": "camera"})), Bench::new(), Registry::standalone("snapshot-writer"));
+        { let mut state = lock(&link.0.state); state.writer = Some(writer.clone()); state.status = Status::Up; }
+        let held = lock(&writer);
+        let started = Instant::now();
+        assert_eq!(link.request("snapshot", json!({}), Vec::new(), Duration::from_millis(50)).err().unwrap().kind, ErrorKind::Timeout);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(matches!(lock(&link.0.state).status, Status::Up));
+        assert!(lock(&link.0.pending).is_empty());
+        drop(held);
+        peer.set_read_timeout(Some(Duration::from_millis(30))).unwrap();
+        let error = peer.read(&mut [0u8; 1]).unwrap_err();
+        assert!(matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut));
+        link.shut(Status::Closed);
     }
 }

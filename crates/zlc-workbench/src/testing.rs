@@ -1660,6 +1660,7 @@ mod tests {
             "devices": [{"instance_id": "mot_camera", "role": "mot_camera", "type_id": "camera.virtual_mot", "parameters": {}},
                         {"instance_id": "rf", "role": "Trap RF", "type_id": "rf.virtual", "parameters": {}},
                         {"instance_id": "spare", "role": "spare", "type_id": "camera.virtual_mot", "parameters": {}},
+                        {"instance_id": "old_remote", "role": "old remote", "type_id": "camera.virtual_mot", "parameters": {}},
                         {"instance_id": "sequencer", "role": "sequencer", "type_id": "sequencer.virtual", "parameters": {}},
                         {"instance_id": "basler", "role": "basler", "type_id": "camera.pylon", "parameters": {}}]}"#).unwrap();
         let calls = Rc::new(RefCell::new(Calls::default()));
@@ -1669,6 +1670,11 @@ mod tests {
         for (device, reports) in [("mot_camera", true), ("rf", true), ("spare", false), ("sequencer", true)] {
             event(&mut workbench, Event::Opened { instance: device.into(), working_point: json!({"state": "open", "snapshot": reports}) }, &mut host);
         }
+        let endpoint = json!({"publisher":"camera-pc", "host":"192.0.2.1", "port":18859, "instance_id":"camera"});
+        workbench.devices.get_mut("mot_camera").unwrap().working_point["remote"] = endpoint.clone();
+        let old_endpoint = json!({"publisher":"old-pc", "host":"192.0.2.2", "port":18859, "instance_id":"camera"});
+        event(&mut workbench, Event::Opened { instance: "old_remote".into(), working_point: json!({"state":"open", "snapshot":null,
+            "snapshot_unavailable":"the publisher does not advertise snapshots; update the publishing computer", "remote":old_endpoint}) }, &mut host);
         add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_measurement"}));
         add_open_node(&mut workbench, &mut host, json!({"type_id": "occupancy", "source_signal": "@logic/camera_measurement/frames"}));
         add_open_node(&mut workbench, &mut host, json!({"type_id": "seamless_scan", "values": {"acquisition_logic": "camera_measurement"},
@@ -1688,7 +1694,8 @@ mod tests {
             let ticket = snapshots(&calls).iter().rev().find(|(asked, _)| asked == device).unwrap().1;
             event(workbench, Event::Answered { ticket, result }, host);
         };
-        answer(&mut workbench, &mut host, "mot_camera", Ok(json!({"values": {"exposure": 0.02}, "provenance": {"settings_epoch": 3}, "role": "not the core's"})));
+        answer(&mut workbench, &mut host, "mot_camera", Ok(json!({"values": {"exposure": 0.02}, "provenance": {"settings_epoch": 3},
+            "transport":{"camera_bus":"USB"}, "role": "not the core's"})));
         answer(&mut workbench, &mut host, "rf", Err("timeout: snapshot did not answer within 2.0 s".into()));
         assert!(calls.borrow().1.is_empty());
         let board = json!({"loaded": true, "firing": true, "digest": "5f0c", "snapshot": {"program": {"digest": "5f0c"}, "pulse": {"name": "imaging"}}});
@@ -1699,9 +1706,13 @@ mod tests {
         assert!(bench["taken_at"].as_str().unwrap().ends_with("+00:00"));
         assert_eq!(bench["devices"], json!({
             "basler": {"type_id": "camera.pylon", "role": "basler", "unavailable": format!("failed: {}", workbench.devices["basler"].error.clone().unwrap())},
-            "mot_camera": {"type_id": "camera.virtual_mot", "role": "mot_camera", "values": {"exposure": 0.02}, "provenance": {"settings_epoch": 3}},
+            "mot_camera": {"type_id": "camera.virtual_mot", "role": "mot_camera", "values": {"exposure": 0.02}, "provenance": {"settings_epoch": 3},
+                "transport":{"camera_bus":"USB"}, "snapshot_fields":{"role":"not the core's"}},
+            "old_remote": {"type_id":"camera.virtual_mot", "role":"old remote", "unavailable":"the publisher does not advertise snapshots; update the publishing computer"},
             "rf": {"type_id": "rf.virtual", "role": "Trap RF", "unavailable": "timeout: snapshot did not answer within 2.0 s"},
             "spare": {"type_id": "camera.virtual_mot", "role": "spare", "unavailable": "does not report its settings"}}));
+        assert_eq!(bench["device_transports"], json!({"mot_camera":{"kind":"fabric", "endpoint":endpoint},
+            "old_remote":{"kind":"fabric", "endpoint":old_endpoint}}));
         let mut sequencer = board.clone();
         sequencer["type_id"] = json!("sequencer.virtual");
         sequencer["role"] = json!("sequencer");
