@@ -425,7 +425,8 @@ fn band_vectors(lattice:&mut Lattice<'_>,space:&mut Space,eigen:&BlockEigenbasis
         let mut v:Vec<Vec<C>>=vec![x0.iter().map(|z|C{re:z.re/x0n,im:z.im/x0n}).collect()];let mut h:Vec<Vec<C>>=Vec::new();
         let mut steps=0usize;let mut state=String::new();let mut chosen:Vec<Vec<C>>=Vec::new();
         for m in 1..=most{
-            let(a,b)=split(&v[m-1]);let(w,st,_)=lattice.solve(Pole::Complex(sigma),&[a,b],inner)?;steps+=st;let mut w=join(&w[0],&w[1]);
+            let(a,b)=split(&v[m-1]);let t0=Instant::now();let(w,st,res)=lattice.solve(Pole::Complex(sigma),&[a,b],inner)?;steps+=st;let mut w=join(&w[0],&w[1]);
+            if let Ok(path)=std::env::var("ATOM_BAND_LOG"){use std::io::Write;if let Ok(mut f)=std::fs::OpenOptions::new().create(true).append(true).open(path){let _=writeln!(f,"band {:.3}{:+.3}i m {m} steps {st} residual {res:.1e} {} ms",sigma.re,sigma.im,t0.elapsed().as_millis());}}
             let mut col=vec![ZERO;m+1];
             for _ in 0..2{for i in 0..m{let c=dot(&v[i],&w);col[i].re+=c.re;col[i].im+=c.im;for(x,y)in w.iter_mut().zip(&v[i]){let p=mul(c,*y);x.re-=p.re;x.im-=p.im;}}}
             let beta=norm(&w);col[m]=C{re:beta,im:0.};h.push(col);
