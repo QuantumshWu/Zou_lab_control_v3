@@ -784,6 +784,19 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
         // join the cycle (sorted by real part with the real ones).
         let with_complex=std::env::var("ATOM_FIXED_COMPLEX").is_ok();
         let mut all:Vec<Pole>=points.iter().copied().filter(|p|matches!(p,Pole::Real(_))||(with_complex&&matches!(p,Pole::Complex(_)))).collect();
+        // (research, S7) ATOM_CLUSTER_POLES: a pole on every x0-weighted
+        // dressed centre mode, xi = |Re lambda| + i Im lambda (its mirror
+        // across the imaginary axis: the resolvent resolves the mode at its
+        // own width), merged within half that width, heaviest first.
+        if std::env::var("ATOM_CLUSTER_POLES").is_ok(){
+            let weights=eigen.mode_weights(initial)?;
+            let mut modes:Vec<(f64,C)>=eigen.lambda.iter().zip(&weights).filter(|(l,&w)|l.im>0.&&l.re<0.&&w>=0.1*tolerance).map(|(l,&w)|(w,*l)).collect();
+            modes.sort_by(|a,b|b.0.total_cmp(&a.0));
+            let mut chosen:Vec<C>=Vec::new();
+            for(_,l)in modes{if chosen.iter().all(|c|(c.im-l.im).abs()>0.5*(-l.re)||(c.re-(-l.re)).abs()>0.5*(-l.re)){chosen.push(C{re:-l.re,im:l.im});}}
+            eprintln!("DBG cluster poles {}: {}",chosen.len(),chosen.iter().map(|c|format!("{:.2}{:+.2}i",c.re,c.im)).collect::<Vec<_>>().join(" "));
+            all.extend(chosen.into_iter().map(Pole::Complex));
+        }
         all.sort_by(|a,b|b.sigma().re.total_cmp(&a.sigma().re));let real:Vec<Pole>=all;
         let m=real.len();
         // Bit-reversed order over the next power of two, the indices beyond m left out.
