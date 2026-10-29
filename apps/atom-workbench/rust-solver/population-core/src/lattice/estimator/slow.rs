@@ -451,16 +451,6 @@ impl SlowPool{
         for(j,&c)in x.iter().enumerate(){if !nonzero(c){continue;}for(i,o)in out.iter_mut().enumerate(){mul_add(o,c,self.near_parts[j][centre_slot*d+i*n+i]);}}
         out
     }
-    /// Centre populations (real parts) of scale Y.
-    fn readout(&self,basis:&[Vec<C>],s:&SlowSolution,scale:C)->Vec<f64>{
-        let(n,d,centre_slot)=(self.n,self.d,self.centre_slot);
-        let mut out=vec![0.;n];
-        for(j,&c)in s.x.iter().enumerate(){if !nonzero(c){continue;}let c=mul(scale,c);
-            for(i,o)in out.iter_mut().enumerate(){*o+=mul(c,self.near_parts[j][centre_slot*d+i*n+i]).re;}}
-        for(j,&c)in s.basis.iter().enumerate(){if !nonzero(c){continue;}let c=mul(scale,c);
-            for(i,o)in out.iter_mut().enumerate(){*o+=mul(c,basis[j][self.watch[i]]).re;}}
-        out
-    }
     /// The coefficients of (theta - A)^-1 f (at the kernel of the trace-free
     /// -y, (A + u tau0^T) y = f) by GCRO on the pool. With the deflation (away
     /// from the kernel) the solve is for (theta - A) y + sum_j lambda_j x_j = f
@@ -606,8 +596,6 @@ impl SlowPool{
             for(slot,&q)in self.near.iter().enumerate(){for(t,&v)in near[slot*d..(slot+1)*d].iter_mut().zip(&basis[i][q*d..(q+1)*d]){mul_add(t,c,v);}}}
         (coordinates,near)
     }
-    /// The centre populations of a_k Y_k (a kernel mode's: its steady error).
-    pub fn steady_populations(&self,basis:&[Vec<C>],s:&SlowSolution)->Vec<f64>{self.readout(basis,s,s.coefficient)}
     /// Population errors (one row per time) of the slow modes,
     /// sum_k a_k (e^{theta_k t} Y_k - e^{tA} Y_k), for the reduced model's
     /// eigenvectors S (r x r, column-major, r = basis.len()), the values theta

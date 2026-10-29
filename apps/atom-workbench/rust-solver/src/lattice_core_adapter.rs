@@ -221,15 +221,15 @@ fn project_density(lapack:&atom_population_core::Lapack,density:&[Complex64])->R
 fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
     let plan=&prepared.plan;let f=&prepared.fold.diagnostics;
     let targets:Vec<Value>=prepared.fold.targets.iter().map(|t|json!({"charge":t.charge,"nu":t.nu,
-        "restStored":[t.rest[0].stored(),t.rest[1].stored()],"denseSectors":[t.rest[0].blocks.len(),t.rest[1].blocks.len()],
-        "norms":t.norms,"dropped":t.dropped,"largestEntry":t.largest_entry})).collect();
+        "restStored":t.rest.iter().map(|r|r.stored()).collect::<Vec<_>>(),"denseSectors":t.rest.iter().map(|r|r.blocks.len()).collect::<Vec<_>>(),
+        "whole":t.whole,"norms":t.norms,"largestEntry":t.largest_entry})).collect();
     let k=&prepared.floquet.diagnostics;
     let floquet=json!({"milliseconds":k.milliseconds,"iterations":k.iterations,"change":k.change,
         "pairs":k.pairs,"guarded":k.guarded,"smallParameter":k.small_parameter,"frameCondition":k.condition,
         "support":k.support.iter().map(|(q,size)|json!({"charge":q,"kernel":size})).collect::<Vec<_>>(),"belowFloor":k.below});
-    let run=run.map(|s|{let e=&s.explicit;let w=&s.work;let t=&s.timing;let l=&s.ledger;
+    let run=run.map(|s|{let e=&s.explicit;let w=&s.work;let t=&s.timing;let f=&s.fold;let dropped=&f.dropped;
         json!({"explicit":e.sets.explicit,"ring":e.sets.ring,"gated":e.gated,"promoted":e.promoted,"covered":e.covered,"leak":e.leak,
-            "ringInternalEdges":e.internal.len(),"completion":s.completion.as_ref().map(|c|json!({"promoted":c.promoted,"keepK1":c.keep_k1,"decidedAt":c.decided_at,"bound":c.bound,"slowPart":c.slow_part,"k1Part":c.k1_part,"ringPart":c.ring_part,"restarted":c.restarted,"attribution":c.attribution.iter().take(8).map(|(q,a)|json!([q,a])).collect::<Vec<_>>()})),"explicitSetMs":e.milliseconds,"translations":s.translations,
+            "ringInternalEdges":e.internal.len(),"completion":s.completion.as_ref().map(|c|json!({"promoted":c.promoted,"rings":c.rings,"ringActions":c.ring_actions,"decidedAt":c.decided_at,"bound":c.bound,"slowPart":c.slow_part,"ringPart":c.ring_part,"restarted":c.restarted,"attribution":c.attribution.iter().take(8).map(|(q,a)|json!([q,a])).collect::<Vec<_>>()})),"explicitSetMs":e.milliseconds,"translations":s.translations,
             "columns":s.columns.iter().map(|c|json!({"pole":c.pole.to_string(),"innerSteps":c.steps,"residual":c.residual,"added":c.added,"ms":c.milliseconds,"blocks":c.blocks})).collect::<Vec<_>>(),
             "basis":s.images,"dimension":s.dimension,
             "inner":{"solves":w.solves,"steps":w.steps,"appliedBlocks":w.applied_blocks,"preconditionedBlocks":w.preconditioned_blocks,
@@ -239,8 +239,10 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
                 "trajectory":c.estimate.trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"horizons":c.estimate.horizons,"slowTrajectory":c.estimate.slow_trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"slowHorizons":c.estimate.slow_horizons,
                 "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"slowestRate":c.slowest.map(|s|s.rate),
                 "estimateMs":c.estimate.work.milliseconds,"ms":c.milliseconds})).collect::<Vec<_>>(),
-            "ledger":{"nuFreeze":l.nu_freeze,"thirdOrder":l.third_order,"farShell":l.far_shell,"tail":l.tail,"omittedCross":l.omitted_cross,
-                "nonStructural":l.non_structural,"droppedEntries":l.dropped_entries,"k1Rest":l.k1_rest,"unbuilt":l.unbuilt(),"fold":l.fold,"expansionParameter":l.expansion_parameter},
+            "fold":{"horizonUs":f.rule.map(|r|r.horizon),"nuMax":f.rule.map(|r|r.nu_max),"budget":f.rule.map(|r|r.budget),"orders":f.orders,"targets":f.targets,"rings":f.rings,
+                "dropped":{"entries":dropped.entries,"rests":dropped.rests,"orders":dropped.orders,"targets":dropped.targets,"expansion":dropped.expansion,"total":dropped.total(),
+                    "pieces":dropped.pieces,"keptTargets":dropped.kept_targets,"candidateTargets":dropped.candidate_targets},
+                "posterior":f.posterior,"dressing":f.dressing,"buildMs":f.build_ms,"posteriorMs":f.posterior_ms},
             "timingMs":{"eigenbasis":t.eigenbasis_ms,"explicitSet":t.explicit_set_ms,"setup":t.setup_ms,"estimatorBuild":t.estimator_build_ms,"outputs":t.outputs_ms,"frame":t.frame_ms.iter().sum::<f64>(),"frameParts":t.frame_ms,"frameWait":t.frame_wait_ms,"solves":t.solves_ms,"images":t.images_ms,"projection":t.projection_ms,
                 "model":t.model_ms,"ordering":t.ordering_ms,"estimate":t.estimate_ms,"total":t.total_ms}})});
     json!({
@@ -249,8 +251,8 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
             "steps":plan.steps.iter().map(|s|json!({"charge":s.charge,"nu":s.nu,"size":s.size,"treatment":format!("{:?}",s.treatment)})).collect::<Vec<_>>(),
             "foldTargets":plan.targets.iter().map(|t|json!({"charge":t.charge,"nu":t.nu,"pairs":t.pairs.len(),"size":t.size})).collect::<Vec<_>>(),
             "omittedTargets":plan.omitted.iter().map(|t|json!({"charge":t.charge,"nu":t.nu,"pairs":t.pairs.len(),"size":t.size})).collect::<Vec<_>>()},
-        "fold":{"farSources":f.far_sources,"columns":f.columns,"restBound":f.rest_bound,"chargedTruncation":f.truncation,
-            "series":f.series.iter().map(|(q,rho,order)|json!({"charge":q,"ratio":rho,"orders":order})).collect::<Vec<_>>(),"milliseconds":f.milliseconds,
+        "fold":{"farSources":f.far_sources,"columns":f.columns,"restBound":f.rest_bound,"lambda0":f.lambda0,"orders":f.orders,
+            "series":f.series.iter().map(|(q,rho,terms)|json!({"charge":q,"ratio":rho,"terms":terms})).collect::<Vec<_>>(),"milliseconds":f.milliseconds,
             "phaseMs":{"columns":f.phase_ms[0],"storage":f.phase_ms[1]},"targets":targets},
         "floquet":floquet,"eigenbasis":prepared.eigenbasis_built().map(|e|json!({"milliseconds":e.milliseconds,"clusters":e.clusters,"largestCluster":e.largest_cluster,"passes":e.passes,"condition":e.condition})),"run":run})
 }
@@ -258,11 +260,11 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
 /// The mean of a request alone: one joint run for the standard horizons
 /// (100 ms and 1 s); `observer` sees every checkpoint.
 fn mean_run(request:&Prepared,observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
-    pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&STANDARD_HORIZONS,steady:false,groups:&request.groups,explicit:&request.explicit,runs:request.runs},Some(observer))
+    pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&STANDARD_HORIZONS,groups:&request.groups,explicit:&request.explicit,runs:request.runs},Some(observer))
 }
 /// The trajectory of a request alone on its grid.
 fn trajectory_run(request:&Prepared,times:&[f64],observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
-    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&[],steady:false,groups:&request.groups,explicit:&request.explicit,runs:request.runs},Some(observer))
+    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&[],groups:&request.groups,explicit:&request.explicit,runs:request.runs},Some(observer))
 }
 
 /// The standard horizons (us) every mean run returns, the only ones a
@@ -274,7 +276,7 @@ const STANDARD_HORIZONS:[f64;2]=[1e5,1e6];
 /// what it is.
 struct Mean{
     horizon:f64,populations:Vec<f64>,density:Vec<Complex64>,estimated:f64,within:bool,
-    reason:String,relaxing:f64,discarded:f64,positivity:f64,trace_error:f64,
+    reason:String,discarded:f64,positivity:f64,trace_error:f64,
 }
 impl Mean{
     /// A bound of 1 or more bounds nothing: the mean is not converged and its
@@ -317,7 +319,7 @@ fn mean_at(model:&Model,request:&Prepared,answer:&Answer,horizon:f64)->Result<Me
     let reason=if model.drives.is_empty(){"State at the horizon (horizonUs) of the undriven Lindblad equation from the specified initial density, its optical coherences averaged out in the laboratory frame."}
         else{"Phase average at the horizon (horizonUs) of the full driven Lindblad equation from the specified initial density: the state at T with only its fast oscillations (beats, optical micromotion) averaged out, not a time-independent density."};
     let reason=if within{reason.to_string()}else{format!("{reason}{OUTSIDE}")};
-    Ok(Mean{horizon,populations,density,estimated,within,reason,relaxing:answer.horizon_relaxing[index],discarded,positivity,trace_error})
+    Ok(Mean{horizon,populations,density,estimated,within,reason,discarded,positivity,trace_error})
 }
 
 /// The mean of an answer: its `asymptoticHorizons` (every standard horizon),
@@ -335,7 +337,7 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
         "slowestRelaxation":slow.map(|s|json!({"ratePerUs":s.rate,"residualPerUs":s.residual,"classesMatched":s.matched,"resolved":s.resolved(),
             "relaxationRangeUs":[1./(s.rate+s.residual),if s.matched&&s.rate>s.residual{Some(1./(s.rate-s.residual))}else{None}],
             "rule":"the slowest decaying Ritz pair of population weight at least 1% of the tolerance; resolved (slowestRelaxationUs) when its residual is within a tenth of its rate and every slower class of the initial state (the second-order block's eigenvalues) has a pair within 40%, else only the range: at least 1 / (rate + residual)"})),
-        "discardedOpticalCoherence":mean.discarded,"horizonRelaxingBound":mean.relaxing});
+        "discardedOpticalCoherence":mean.discarded});
     match diagnostics{Value::Object(d)=>Ok((entries,d)),_=>Err("Mean diagnostics are not an object".into())}
 }
 
@@ -609,7 +611,7 @@ mod tests{
             let mut line=line;if let(Value::Object(a),Value::Object(b))=(&mut line,work){a.extend(b);}
             println!("{line}");
         };
-        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,steady:false,groups:&prepared.groups,explicit:&std::sync::OnceLock::new(),runs:1},Some(&mut observe));
+        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,groups:&prepared.groups,explicit:&std::sync::OnceLock::new(),runs:1},Some(&mut observe));
         let total_ms=started.elapsed().as_secs_f64()*1e3;
         match result{
             Ok(s)=>{let a=&s.answer;

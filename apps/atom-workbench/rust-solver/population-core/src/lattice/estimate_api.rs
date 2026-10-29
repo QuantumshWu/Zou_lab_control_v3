@@ -4,9 +4,9 @@
 //! explicit charges P, then their ring Q; every mode set closed under
 //! q -> -q) and, at each checkpoint, one reduced model x(t) ~ W X u(t),
 //! u' = G u, u(0) = c0, from which every output is read: the trajectory on
-//! the grid (lab readout, the local time average), the states at the
-//! horizons (centre readout = the laboratory time average at T) and the
-//! steady state. The estimator receives the space and the reduced model and
+//! the grid (lab readout, the local time average) and the states at the
+//! horizons (centre readout = the laboratory time average at T). The
+//! estimator receives the space and the reduced model and
 //! returns an error estimate per output; ACCEPTANCE_FACTOR times it is the
 //! output's bound, and the pipeline accepts the checkpoint when every bound
 //! is at most `ledger::POPULATION_TOLERANCE`.
@@ -26,7 +26,6 @@
 //! across checkpoints (the translated copies are columns like any other).
 //! X, G, c0 and the Ritz data are recomputed at every checkpoint.
 use super::*;
-use super::ledger::RemainderLedger;
 use super::frame::SwFrame;
 
 /// An output's bound is ACCEPTANCE_FACTOR x its estimated error; a checkpoint
@@ -69,8 +68,6 @@ pub struct Outputs<'a>{
     pub times:&'a[f64],
     /// The horizons T (us) whose time-averaged state is reported.
     pub horizons:&'a[f64],
-    /// Whether the steady state (t -> infinity mean) is reported.
-    pub steady:bool,
     /// Requested population groups (state indices), for `ledger::metric`.
     pub groups:&'a[Vec<usize>],
 }
@@ -85,12 +82,8 @@ pub struct EstimateSetup<'a>{
     /// The request's Schrieffer-Wolff / Floquet frame (built for the
     /// longest output time).
     pub frame:&'a SwFrame<'a>,
-    /// The fold remainders as generator-norm bounds (rad/us) for the
-    /// lattice's largest |nu_q|.
-    pub ledger:&'a RemainderLedger,
-    /// Whether the lattice operator keeps every K^(1) rest (a completed
-    /// lattice): the error lattice's outer operator does the same.
-    pub keep_k1:bool,
+    /// The run's fold (the error lattice's outer operator applies it).
+    pub fold:&'a super::fold::FoldLibrary,
 }
 
 /// The reduced model of one checkpoint.
@@ -134,10 +127,6 @@ pub trait SteadySolves{
     /// images A z_j (A unbordered) on P u Q, mirror-completed; append-only:
     /// an entry never changes once handed out.
     fn directions(&self)->(&[Vec<C>],&[Vec<C>]);
-    /// The K^(1) rests the operator leaves out applied to a
-    /// Hermitian-symmetric field (`LatticeOperator::left_out`; None when it
-    /// leaves none out).
-    fn left_out(&self,x:&[C])->Result<Option<Vec<C>>,String>;
 }
 
 /// Work of one estimate, for the diagnostics.
@@ -159,19 +148,15 @@ pub struct ErrorEstimate{
     pub trajectory:Vec<f64>,
     /// One per horizon.
     pub horizons:Vec<f64>,
-    /// The steady state (None when not requested).
-    pub steady:Option<f64>,
-    /// The slow part alone (the ring's feedback and the K^(1) rests the
-    /// lattice leaves out, through the slow modes; the kernel's own residual
-    /// with them), per grid time and per horizon: what a completed lattice
-    /// could remove (`pipeline`'s completion). The steady state's estimate is
-    /// its slow part.
+    /// The slow part alone (the ring's feedback through the slow modes; the
+    /// kernel's own residual with it), per grid time and per horizon: what a
+    /// completed lattice could remove (`pipeline`'s completion).
     pub slow_trajectory:Vec<f64>,pub slow_horizons:Vec<f64>,
     pub work:EstimateWork,
 }
 impl ErrorEstimate{
     /// The largest estimate over every output.
     pub fn largest(&self)->f64{
-        self.trajectory.iter().chain(&self.horizons).chain(self.steady.iter()).fold(0_f64,|a,&b|a.max(b))
+        self.trajectory.iter().chain(&self.horizons).fold(0_f64,|a,&b|a.max(b))
     }
 }

@@ -253,7 +253,7 @@ mod tests{
         // a real and a complex shift (real form).
         let f=fixture();let p=far_only(&f);let n=4;let d=16;
         assert!(p.floquet.diagnostics.support.is_empty()&&p.fold.targets.len()>1);
-        let pre=Preconditioning::new(&p).unwrap();let op=LatticeOperator::new(&p,&[p.generator.zero.clone()]).unwrap();
+        let pre=Preconditioning::new(&p).unwrap();let op=LatticeOperator::new(&p,&p.fold,&[p.generator.zero.clone()]).unwrap();
         for shift in[Pole::Zero,Pole::Real(0.3),Pole::Complex(C{re:0.5,im:7.})]{
             let mut batch=pre.batch(&op,shift).unwrap();
             let mut x=symmetric_field(&op,5);if shift.copies()==2{x.extend(symmetric_field(&op,9));}
@@ -270,7 +270,7 @@ mod tests{
     /// lattice against a dense LU solve.
     fn shifted_solve(p:&LatticePrepared,shift:Pole)->f64{
         let pre=Preconditioning::new(p).unwrap();
-        let modes=p.modes(2).unwrap();let mut op=LatticeOperator::new(p,&modes).unwrap();let size=op.dimension();let d=16;
+        let modes=p.modes(2).unwrap();let mut op=LatticeOperator::new(p,&p.fold,&modes).unwrap();let size=op.dimension();let d=16;
         let dense=op.dense();let centre=op.centre;
         let mut batch=pre.batch(&op,shift).unwrap();
         let x=symmetric_field(&op,2);

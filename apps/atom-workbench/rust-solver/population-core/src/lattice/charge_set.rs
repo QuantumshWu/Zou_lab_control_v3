@@ -184,7 +184,7 @@ fn seed_amplitudes(prepared:&LatticePrepared,probes:&[Vec<C>])->Result<BTreeMap<
     let mut layer=vec![usize::MAX;modes.len()];
     for k in(0..=SEED_DEPTH).rev(){for q in prepared.modes(k)?{layer[index[&q]]=k;}}
     let eigen=prepared.eigenbasis()?;
-    let mut op=LatticeOperator::new(prepared,&modes)?;
+    let mut op=LatticeOperator::new(prepared,&prepared.fold,&modes)?;
     // Layer k+1 from the layers up to k (disjoint: no diagonal block acts).
     let masks:Vec<(Vec<bool>,Vec<bool>)>=(0..SEED_DEPTH).map(|k|(layer.iter().map(|&l|l==k+1).collect(),layer.iter().map(|&l|l<=k).collect())).collect();
     let mut amplitudes=BTreeMap::new();

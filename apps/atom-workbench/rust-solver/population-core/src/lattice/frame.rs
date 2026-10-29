@@ -195,7 +195,7 @@ mod tests{
         // Re <y, M x> from the canonical modes against |T| computed on every
         // mode directly (no mirror rule): T x_q = V^-1 (c_q - sum X~_s c_{q-s}).
         let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
-        let op=LatticeOperator::new(&p,&modes).unwrap();let d=16;
+        let op=LatticeOperator::new(&p,&p.fold,&modes).unwrap();let d=16;
         let frame=SwFrame::new(&p,10.);let basis=p.eigenbasis().unwrap();let(kernels,class)=(frame.kernels().unwrap(),frame.class().unwrap());
         let metric=SwMetric::new(&frame,basis,&op).unwrap();
         let(x,y)=(symmetric_field(&op,1),symmetric_field(&op,2));
