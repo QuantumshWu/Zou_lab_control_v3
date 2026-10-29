@@ -154,6 +154,9 @@ export function canonicalInitialState(spec:InitialStateSpec):InitialStateSpec {
  * average over 0–T. T is 100 ms or 1 s; there is no t → ∞ mean. */
 export const MEAN_HORIZONS_US:readonly number[]=[1e5,1e6];
 export const DEFAULT_MEAN_HORIZON_US=1e6;
+/** The longest trajectory (10 s, in us) and its most samples: what the solver core solves. */
+export const MAXIMUM_DURATION_US=1e7;
+export const MAXIMUM_SAMPLES=2000;
 export const DEFAULT_DYNAMICS_SAMPLES=1000;
 export const DEFAULT_TWEEZER_WAVELENGTH_NM=852;
 /** The population accuracy of every solve: an absolute error of 0.005 in probability

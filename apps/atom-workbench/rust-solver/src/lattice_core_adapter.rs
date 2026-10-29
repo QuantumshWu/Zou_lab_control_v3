@@ -23,7 +23,8 @@
 //! its mean is there) is streamed first (`progress`: true) in the same shape.
 //! - `states` (32 ids), `timesUs`, `populations` (one row per time). A mean
 //!   result has the single t = 0 row, the initial populations; a finite result
-//!   has >= 2 projected rows and `populationAccuracy`: `status`
+//!   (at most 10 s, 2 to 2000 samples: a longer or denser grid is refused
+//!   with the reason) has >= 2 projected rows and `populationAccuracy`: `status`
 //!   (`estimated-converged` when every sample's bound is within the
 //!   tolerance, else `estimated-partial` with its `reason`), `sampleErrors`
 //!   (per sample: the acceptance factor times the estimate, plus the
@@ -68,6 +69,10 @@ use atom_population_core::lattice::pipeline::{self,Answer,Checkpoint,Request,Sol
 
 const ENGINE:&str="rust-population-core-lattice";
 const METHOD:&str="Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically): one rational Krylov space from the initial state, every output read from one Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, its error estimated per output from the reduced model's residual, the omitted ring and the fold rests the lattice leaves out";
+/// The longest trajectory (us) and its most samples: what the core solves
+/// (it refuses a longer time or more samples).
+const MAXIMUM_DURATION_US:f64=1e7;
+const MAXIMUM_SAMPLES:usize=2000;
 /// A mean whose bound reaches this carries no information (a population
 /// error of 1 bounds nothing): it is reported not converged, unshown.
 const UNINFORMATIVE_BOUND:f64=1.;
@@ -389,7 +394,11 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
 /// request) is published as it is made, the best one returned.
 pub fn solve(model:&Model,options:&Options,publish:&mut dyn FnMut(&Value))->Result<Value,String>{
     let started=Instant::now();
-    if !options.steady_only&&(!options.duration_us.is_finite()||options.duration_us<=0.||!(2..=2001).contains(&options.samples)){return Err("Invalid finite population grid".into());}
+    if !options.steady_only{
+        if !(options.duration_us.is_finite()&&options.duration_us>0.){return Err("The trajectory duration must be a positive finite time".into());}
+        if options.duration_us>MAXIMUM_DURATION_US{return Err(format!("The trajectory duration is limited to 10 s (requested {} s)",options.duration_us/1e6));}
+        if !(2..=MAXIMUM_SAMPLES).contains(&options.samples){return Err(format!("A trajectory has 2 to {MAXIMUM_SAMPLES} samples (requested {})",options.samples));}
+    }
     let request=prepare_request(model,options)?;
     let mut failure:Option<String>=None;
     if options.steady_only{

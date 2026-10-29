@@ -28,7 +28,7 @@ import {meanInputsKey,trajectoryInputsKey} from './dynamics-cache-key.js';
 import {CurrentResults} from './current-results.js';
 import {covers,delivers,horizonRecords,keptCheckpoint,plannedSolve,solveOptions,type SolveInputs,type SolveKind} from './solve-plan.js';
 import {STATIC_MIXING_LIMIT,displayMixing,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
-import {defaultScene,POPULATION_TOLERANCE} from './types.js';
+import {defaultScene,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
 import type {DynamicsResult} from './solver-types.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
@@ -1064,7 +1064,7 @@ function renderDynamicsControls(a:Analysis):void{
   const after=()=>update();
   bindQuantity(dynamicsFields,time,'dynamics','dynamics',()=>({name:'duration',label:'时长',spin:true,inexact:true}),
     {read:()=>durationReading(d),write:(v,u)=>setDuration(d,v,u as DurationUnit),units:()=>unitChoices(DURATION_UNITS,'时间')},after);
-  bindField(dynamicsFields,time,'dynamics',()=>({name:'samples',label:'采样点数',kind:'integer',value:d.samples,minimum:2,maximum:2001,step:1}),v=>{const n=Number(v);if(!Number.isInteger(n))throw new Error('采样点数必须为整数');d.samples=n;},{after});
+  bindField(dynamicsFields,time,'dynamics',()=>({name:'samples',label:'采样点数',kind:'integer',value:d.samples,minimum:2,maximum:MAXIMUM_SAMPLES,step:1}),v=>{const n=Number(v);if(!Number.isInteger(n))throw new Error('采样点数必须为整数');if(n<2||n>MAXIMUM_SAMPLES)throw new Error(`采样点数应为 2 至 ${MAXIMUM_SAMPLES}`);d.samples=n;},{after});
   bindField(dynamicsFields,curves,'dynamics',()=>({name:'monitor-mode',label:'显示曲线',kind:'choice',segmented:true,choices:[['auto','初末各 3 态'],['manual','手动选择']],value:d.monitorMode??'auto'}),v=>{d.monitorMode=v as 'auto'|'manual';if(v==='auto')d.monitoredGroupIds=[];else parent.querySelector<HTMLDetailsElement>('.monitor-controls')!.open=true;},{after});
   const monitors=element('details','monitor-controls');monitors.open=monitorsWereOpen;
   const summary=element('summary');summary.append(element('span','monitor-title','观察曲线'),element('span','monitor-count',`${populationDisplayIds(d).length} 条`),element('span','spacer'),monitorAll.root,monitorNone.root);

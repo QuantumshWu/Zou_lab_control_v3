@@ -250,6 +250,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 - 布居精度固定为 0.5%（概率的绝对误差）：每个请求都发送 `populationTolerance: 0.005`（`types.ts` 的 `POPULATION_TOLERANCE`）。它不是用户设置，不在场景中，也不进入求解缓存键。求解器回传的 `requestedTolerance` 必须是 0.005。
 - 场景中没有 `populationTolerance`；带它的文件按 §6.17 拒绝。
 - 计算详情写"布居误差估计 ≤ x（目标 0.005）"。动力学页的设置为"时长、采样点数"和"显示曲线"两组。
+- 轨迹最长 10 s，至多 2000 个采样点（2026-10-28；求解器核心解的就是这个范围，`types.ts` 的 `MAXIMUM_DURATION_US`、`MAXIMUM_SAMPLES`）。超出的输入不写入场景，输入框下写明原因（"时长不能超过 10 s""采样点数应为 2 至 2000"）。单位仍按 §0.4：输入框里的数字换单位时不变，所以 20 μs 换成 s 是 20 s，同样被拒绝，时长保持 20 μs，输入框标为无效直到下一次编辑。求解器也拒绝更长的时长或更多的采样点并写明原因；场景文件中超出的 `durationUs`、`samples` 导入时拒绝。
 
 ### 6.14 界面审阅（2026-10-27）
 

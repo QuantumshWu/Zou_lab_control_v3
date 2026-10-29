@@ -12,6 +12,8 @@ const SENTENCES:Record<string,string>={
   'State at the horizon (horizonUs) of the undriven Lindblad equation from the specified initial density, its optical coherences averaged out in the laboratory frame.':
     '无驱动 Lindblad 方程从给定初始密度矩阵出发在时刻 T 的态，在实验室系中平均掉光学相干。',
   'Cancelled.':'计算已取消。',
+  'The trajectory duration must be a positive finite time':'轨迹时长必须是正的有限时间。',
+  'meanHorizonUs must be 1e5 or 1e6 us (100 ms or 1 s)':'长期布居的时刻 T 只能是 100 ms 或 1 s。',
 };
 /** What a mean's reason adds when its bound is above the tolerance (lattice_core_adapter.rs `OUTSIDE`). */
 const OUTSIDE=' Not converged: its error bound (estimatedError) is above the tolerance, so the populations are an estimate.';
@@ -37,6 +39,8 @@ const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
     bound=>`长期布居的误差界为 ${num(bound)}（不小于 1），不含任何信息，不显示布居。`],
   [/^The lattice of this request has (\d+) modes and would need about (\S+) GB, above the (\S+) GB memory budget: not solved$/,
     (modes,need,budget)=>`未求解（不收敛）：此请求的晶格有 ${modes} 个模式，约需 ${need} GB 内存，超过 ${budget} GB 的内存预算。`],
+  [/^The trajectory duration is limited to 10 s \(requested (\S+) s\)$/,seconds=>`轨迹时长最长 10 s（请求为 ${num(seconds)} s），未计算。`],
+  [/^A trajectory has 2 to (\d+) samples \(requested (\d+)\)$/,(most,samples)=>`轨迹的采样点数应为 2 至 ${most}（请求为 ${samples}），未计算。`],
   [/^Static fold expansion parameter (\S+) is above (\S+): the fold's frequency expansion is not small on this lattice, not solved$/,
     (parameter,limit)=>`未求解（不收敛）：静态折叠的展开参数为 ${num(parameter)}，高于 ${num(limit)}，折叠的频率展开在此晶格上不够小。`],
 ];

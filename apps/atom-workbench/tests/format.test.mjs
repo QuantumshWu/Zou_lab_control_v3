@@ -67,6 +67,11 @@ test('the stop and checkpoint reasons the solver formats are shown in Chinese',(
   // A request stopped before its first solve: nothing computed, the reason alone.
   chinese(formatted(pipelineSource,'The lattice of this request has',[150,'5.3','5']),'memory guard');
   chinese(formatted(pipelineSource,'Static fold expansion parameter',['2.3e-2','1e-2']),'expansion not small');
+  // A grid the solver does not solve: refused with the reason.
+  assert.match(chinese(formatted(adapterSource,'The trajectory duration is limited',['15']),'too long'),/10 s.*15 s/);
+  assert.match(chinese(formatted(adapterSource,'A trajectory has 2 to',[2000,2001]),'too many samples'),/2 至 2000.*2001/);
+  chinese('The trajectory duration must be a positive finite time','no duration');
+  chinese('meanHorizonUs must be 1e5 or 1e6 us (100 ms or 1 s)','another T');
 });
 test('every sentence the pipeline and the adapter format is shown in Chinese (a new one fails here)',()=>{
   const sentences=[...formatStrings(pipelineSource),...formatStrings(adapterSource)].filter(f=>/^[A-Z][a-z]/.test(f));

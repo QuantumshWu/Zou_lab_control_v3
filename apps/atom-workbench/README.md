@@ -69,7 +69,8 @@ because it is small or labelled forbidden.
   time: at a T shorter than it p̄(T) is still relaxing.
 - Models without lasers are static: the same pipeline on the lattice's
   centre block alone.
-- Finite-time trajectories: rational Krylov with lattice-translation
+- Finite-time trajectories, up to 10 s with at most 2000 samples (a longer
+  or denser grid is refused with the reason): rational Krylov with lattice-translation
   augmentation and a Galerkin reduced model, its basis, near-shell and fold
   errors propagated through the dressed blocks; beyond 1 ms the trajectory
   continues as the expansion in the slow eigenmodes.

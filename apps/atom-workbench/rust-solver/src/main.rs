@@ -215,7 +215,10 @@ mod tests {
         let model = json!({"dimension":1,"states":["a"],"hReal":[0],"hImag":[0],"collapse":[]});
         let solve = |options: Value| request(json!({"id":4,"modelSchema":FULL_MODEL_SCHEMA,"model":model,"options":options}))["error"].as_str().unwrap().to_owned();
         assert!(solve(json!({"steadyOnly":true,"populationTolerance":0.001})).contains("populationTolerance is fixed"));
-        assert!(solve(json!({"samples":1})).contains("Invalid finite population grid"));
-        assert!(solve(json!({"durationUs":0})).contains("Invalid finite population grid"));
+        for samples in [1, 2001] {
+            assert!(solve(json!({"samples":samples})).contains("A trajectory has 2 to 2000 samples"), "{samples}");
+        }
+        assert!(solve(json!({"durationUs":0})).contains("must be a positive finite time"));
+        assert!(solve(json!({"durationUs":1.5e7})).contains("The trajectory duration is limited to 10 s (requested 15 s)"));
     }
 }
