@@ -668,6 +668,39 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let mut current:Option<(usize,Model)>=None;
     // Per point: its last score, the score it had when last solved, and the
     // share of its transform left after that solve.
+    // (research, S3) ATOM_TRANSLATION_APRIORI: the families' amplitudes from
+    // x0 alone - the first- and second-order transfers X~_s c0 and
+    // X~_s2 X~_s1 c0 (the slip each lattice mode's family starts with),
+    // propagated by L0''s decays e^{lambda_j t} to the output times, read as
+    // populations (a pair's weight 2) - against GATE x tolerance; the
+    // translations are activated before the first solve.
+    if std::env::var("ATOM_TRANSLATION_APRIORI").is_ok()&&!times.is_empty(){
+        let kernels=frame.kernels()?;let rows=eigen.population_rows();
+        let(n,d,centre,charges,index)={let op=lattice.operator();(op.n,op.n*op.n,op.centre,op.modes.clone(),op.index.clone())};
+        let c0=eigen.coefficients(&[initial])?;
+        let apply=|s:usize,c:&[C]|->Vec<C>{let mut o=vec![ZERO;d];kernels.subtract_kernel(s,c,&mut o);for v in &mut o{v.re=-v.re;v.im=-v.im;}o};
+        let mut slip:Vec<Vec<C>>=vec![vec![ZERO;d];charges.len()];
+        let first:Vec<(usize,Vec<C>)>=kernels.steps.iter().enumerate().filter_map(|(s,st)|index.get(&st.charge).map(|&q|(s,q))).map(|(s,q)|{let v=apply(s,&c0);for(a,b)in slip[q].iter_mut().zip(&v){add(a,*b);}(q,v)}).collect();
+        for(q1,v1)in &first{for(s2,st2)in kernels.steps.iter().enumerate(){
+            let Ok(target)=charge_plus(&charges[*q1],&st2.charge)else{continue};let Some(&q2)=index.get(&target)else{continue};if q2==centre{continue;}
+            let v=apply(s2,v1);for(a,b)in slip[q2].iter_mut().zip(&v){add(a,*b);}}}
+        let sample:Vec<f64>={let mut idx:Vec<usize>=Vec::new();let mut i=1usize;while i<times.len(){idx.push(i);i=(i*3/2).max(i+1);}idx.into_iter().map(|i|times[i]).collect()};
+        let gate=charge_set::GATE*tolerance;
+        for q in 0..charges.len(){
+            if q==centre{continue;}
+            let mut amplitude=0_f64;
+            for &t in &sample{let decayed:Vec<C>=(0..d).map(|j|mul(slip[q][j],cexp(C{re:eigen.lambda[j].re.min(0.),im:eigen.lambda[j].im},t))).collect();
+                for i in 0..n{let mut v=ZERO;for j in 0..d{mul_add(&mut v,rows[i+n*j],decayed[j]);}amplitude=amplitude.max(2.*magnitude(v));}}
+            let c=charges[q].clone();let m=opposite(&c);let active=space.translations();
+            if amplitude<=gate||active.contains(&c)||active.contains(&m){continue;}
+            space.activate(&mut lattice,&c)?;eprintln!("DBG translation {c:?} a-priori amplitude {amplitude:.2e}");
+        }
+        if translated_only{
+            let all=space.translations();let sh:Vec<f64>=std::iter::once(0.).chain(shifts_of(&all,&lattice)).collect();
+            points=space::ladder(eigen,initial,&sh,t1,times.last().copied().unwrap_or(longest),tolerance)?;alive=vec![true;points.len()];
+            eprintln!("DBG ladder {} points",points.len());
+        }
+    }
     let(mut score,mut solved_at,mut remaining)=(vec![0.;points.len()],vec![None::<f64>;points.len()],vec![0.;points.len()]);
     // The first checkpoint's completion decision when it changed nothing.
     let mut decided:Option<Completion>=None;
