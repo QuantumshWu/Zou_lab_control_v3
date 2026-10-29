@@ -297,6 +297,51 @@ fn rebase_viewport(base: &ResolvedConfiguration, spec: &PlotSpec, schema: Option
     Ok(normalize_viewport(Some((result[0], result[1]))))
 }
 
+/// A cell stays open while editing what is plotted inside it. Its identity
+/// belongs to the facet domain, not to the cell's x/y/group roles. A changed
+/// facet layout (including reordered coordinates) must not reuse an old index.
+fn same_facet_layout(base: &ResolvedConfiguration, spec: &PlotSpec, schema: Option<&PlotSchema>) -> bool {
+    let (PlotSpec::FacetGrid(before), PlotSpec::FacetGrid(after)) = (&base.spec, spec) else { return false };
+    if before.facet != after.facet { return false; }
+    match &after.facet {
+        None => true, // the one cell without a facet axis
+        Some(reference) => {
+            let (Some(old_schema), Some(new_schema)) = (base.schema.as_deref(), schema) else { return false };
+            let (old_domain, new_domain) = (old_schema.domain(reference.domain), new_schema.domain(reference.domain));
+            let (Some(old_axis), Some(new_axis)) = (old_domain.axis(&reference.axis_id), new_domain.axis(&reference.axis_id)) else { return false };
+            if old_axis.unit() != new_axis.unit() || old_axis.coordinate_frame() != new_axis.coordinate_frame()
+                || old_axis.coordinate_of() != new_axis.coordinate_of() { return false; }
+            let scopes = |grid: &super::spec::FacetGridPlot| grid.scope.iter().filter(|(axis, _)| axis.domain == reference.domain).cloned().collect::<Vec<_>>();
+            let (old_scope, new_scope) = (scopes(before), scopes(after));
+            if old_domain == new_domain && old_scope == new_scope { return true; }
+            // Projection numbers facets by their used coordinate indices, in
+            // declaration order. Changes to an unrelated axis or its scope are
+            // harmless precisely when this ordered list keeps the same values.
+            let values = |domain: &zlc_core::schema::Domain, scope: &[super::spec::ScopeTerm]| -> Option<Vec<zlc_core::schema::Coordinate>> {
+                let axis = domain.axis(&reference.axis_id)?;
+                let mapping = domain.mapping(&reference.axis_id)?;
+                let mut used = BTreeSet::new();
+                if scope.is_empty() {
+                    for index in 0..mapping.base_len() { used.insert(mapping.code(index * mapping.inner())?); }
+                } else {
+                    let terms = scope.iter().map(|(reference, value)| {
+                        let axis = domain.axis(&reference.axis_id)?;
+                        Some((domain.mapping(&reference.axis_id)?, super::data_contract::coordinate_position(axis, value)?))
+                    }).collect::<Option<Vec<_>>>()?;
+                    for row in 0..domain.size() {
+                        if terms.iter().all(|(codes, wanted)| codes.code(row) == Some(*wanted)) { used.insert(mapping.code(row)?); }
+                    }
+                }
+                used.into_iter().map(|index| super::data_contract::coordinate_at(axis, index)).collect()
+            };
+            match (values(old_domain, &old_scope), values(new_domain, &new_scope)) {
+                (Some(old), Some(new)) => old == new,
+                _ => false,
+            }
+        }
+    }
+}
+
 /// `schema_preparation_key(schema)`.
 pub fn preparation_key(schema: Option<&Arc<PlotSchema>>) -> Result<PreparationKey> {
     let Some(schema) = schema else { return Ok(PreparationKey::Authored) };
@@ -501,6 +546,21 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
             if updates.focused_facet_index.is_some() { changes.focused_facet_index = updates.focused_facet_index; }
         } else {
             ignored = updates.names();
+            // A captured facet navigation belongs to the grid, even if an
+            // intervening cell-kind/axis edit made captured XY navigation stale.
+            if same_source && presented.is_some_and(|shown| same_facet_layout(shown, &selected_spec, schema_ref)) {
+                if let Some(focus) = updates.recipe.get("facet_focus") {
+                    let mut document = encode_plot_recipe(&selected_spec, &ValueMap::new(), selected_size, &RecipeParts::default())?;
+                    document.insert("facet_focus", focus.clone());
+                    let captured = decode_plot_recipe(&Value::Map(document))?;
+                    changes.facet_focus = Some(captured.facet_focus);
+                    ignored.retain(|name| name != "facet_focus");
+                }
+                if updates.focused_facet_index.is_some() {
+                    changes.focused_facet_index = updates.focused_facet_index;
+                    ignored.retain(|name| name != "focused_facet_index");
+                }
+            }
         }
     }
 
@@ -536,14 +596,18 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
     let candidate_values = resolution.values;
     let is_grid = selected_spec.is_facet_grid();
 
-    // Selectors, viewport and facet focus are coordinates on the base's axes
-    // and source, carried only while both match; authored ones always apply.
+    // Selectors and viewport are coordinates on the cell's axes. Facet focus
+    // instead names a cell of its own domain, which survives a cell-kind or
+    // x/y/group edit. Explicit authored navigation always takes precedence.
+    let facet_matches = same_source && base.is_some_and(|base| same_facet_layout(base, &selected_spec, schema_ref));
     let mut selectors = if roles_match { base.unwrap().selectors.clone() } else { Vec::new() };
     let mut viewport = if roles_match { base.unwrap().viewport } else { None };
-    let mut facet_focus = if roles_match { base.unwrap().facet_focus } else { None };
-    let mut focused = if roles_match { base.unwrap().focused_facet_index } else if is_grid { Some(0) } else { None };
-    let mut interaction = base.map(|base| base.interaction.clone()).unwrap_or_default();
-    let mut presentation = base.map(|base| base.presentation.clone()).unwrap_or_default();
+    let mut facet_focus = if facet_matches { base.unwrap().facet_focus } else { None };
+    let mut focused = if facet_matches { base.unwrap().focused_facet_index } else if is_grid { Some(0) } else { None };
+    let series_context_matches = same_source && base.is_some_and(|base|
+        !(base.spec.is_facet_grid() || is_grid) || facet_matches);
+    let mut interaction = base.filter(|_| series_context_matches).map(|base| base.interaction.clone()).unwrap_or_default();
+    let mut presentation = base.filter(|_| series_context_matches).map(|base| base.presentation.clone()).unwrap_or_default();
     let mut thresholds = base.map(|base| base.classifier_thresholds.clone()).unwrap_or_default();
     let mut fit_target = base.map(|base| base.fit_target.clone()).unwrap_or_default();
     let mut fit_live = base.is_some_and(|base| base.fit_live);
@@ -587,6 +651,12 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
     }
     if let Some(update) = &changes.interaction { interaction = update.applied_to(&interaction); }
     if let Some(update) = &changes.presentation { presentation = update.applied_to(&presentation); }
+    if changes.interaction.as_ref().is_some_and(|update| update.series_lock == Some(None))
+        && presentation.series_readout.as_ref().is_some_and(|readout| &*readout.mode == "locked") {
+        // A stale readout is a description, not authority to recreate a lock
+        // the caller explicitly cleared. An explicitly supplied hover remains.
+        presentation.series_readout = None;
+    }
     if let Some(raw) = &changes.classifier_thresholds { thresholds = normalize_classifier_threshold_targets(raw)?; }
     if !accepts_classifier_thresholds(&selected_spec, &candidate_values) { thresholds.clear(); }
     if let Some(update) = &changes.fit { fit_target = update.clone(); }
