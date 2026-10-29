@@ -92,10 +92,6 @@ pub(crate) struct Scene {
     pub projection: FitProjection,
     pub image_overlay: Option<OverlayHandle>,
     pub viewport: Option<Viewport>,
-    /// Where the wheel last asked the view to be, before an image put it on
-    /// its pixel grid: the next notch goes on from here while the committed
-    /// viewport is still what committing it showed.
-    pub wheel_request: Option<Viewport>,
     pub focused_facet_index: Option<usize>,
     pub facet_focus_index: Option<usize>,
     pub accepted_fit: Option<Arc<AcceptedFit>>,
@@ -234,7 +230,7 @@ impl PlotSession {
         let focused = if spec.is_facet_grid() { Some(0) } else { None };
         let scene = Scene {
             parameter_schema: candidate.parameter_schema.clone(), display, projection: prepared.projection.clone(), image_overlay: None,
-            viewport: candidate.viewport, wheel_request: None,
+            viewport: candidate.viewport,
             focused_facet_index: candidate.focused_facet_index.map(|i| i as usize).or(if spec.is_facet_grid() { focused } else { None }),
             facet_focus_index: candidate.facet_focus.map(|i| i as usize), accepted_fit: None, classifier_results: Arc::from(Vec::new()),
             classifier_overlays: Arc::from(Vec::new()), classifier_thresholds: OrderedMap::new(), classifier_components: OrderedMap::new(),
@@ -591,8 +587,16 @@ impl PlotSession {
             || (held.results.is_empty() && prepared.classifier.results.is_empty()));
         let science_changed = self.scene.accepted_configuration.as_ref().is_none_or(|accepted| accepted.signature != candidate.signature);
         let data_changed = !self.data().same(&prepared.projection.data());
+        let selector_key = |states: &[SelectorState]| states.iter().map(|s| (s.kind(), s.value, s.facet_index)).collect::<Vec<_>>();
+        let selectors_changed = selector_key(&self.scene.selectors.states()) != selector_key(&candidate.selectors);
+        // A waiting panel can preview gestures without changing its accepted
+        // configuration. Re-presenting that configuration must restore its
+        // actual interaction state before the queued gestures are replayed.
         if changed.is_empty() && !spec_changed && !science_changed && !data_changed && same_fit && same_classifier
+            && self.scene.viewport == candidate.viewport && !selectors_changed
+            && self.scene.focused_facet_index == candidate.focused_facet_index.map(|i| i as usize)
             && self.scene.size == candidate.size && old_state.interaction == candidate.interaction
+            && self.renderer.series_presentation() == candidate.presentation
             && self.scene.facet_focus_index == candidate.facet_focus.map(|i| i as usize) && same_overlay(&self.scene.image_overlay, &candidate.image_overlay) {
             self.scene.pending_configuration = Some(candidate.clone());
             if self.scene.fit_expression_failure != prepared.expression_failure {
@@ -620,8 +624,6 @@ impl PlotSession {
         let geometry_changed = !candidate.same_source || spec_changed
             || matches!((&old_schema, &new_schema), (Some(old), Some(new)) if !structure_equal(old, new));
         let topology_changed = facet_cell_count(&self.scene.spec, self.scene.projection.payload()) != facet_cell_count(&candidate.spec, projection.payload());
-        let selector_key = |states: &[SelectorState]| states.iter().map(|s| (s.kind(), s.value, s.facet_index)).collect::<Vec<_>>();
-        let selectors_changed = selector_key(&self.scene.selectors.states()) != selector_key(&candidate.selectors);
         let mut controller = self.scene.selectors.clone();
         if geometry_changed || selectors_changed {
             controller = SelectorController::new();

@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Canvas wheel regression tests</title>
+<pre id="result">pending</pre>
+<canvas id="canvas" style="width:200px;height:100px" tabindex="0"></canvas>
+<script type="module">
+import { CanvasPointer } from '../dist/views/pointer.js';
+const assert=(value,message)=>{if(!value)throw Error(message)};
+const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)}`);
+const close=(a,b)=>assert(Math.abs(a-b)<1e-12,`${a} != ${b}`);
+const jobs=new Map();let next=1;
+window.requestAnimationFrame=callback=>{const id=next++;jobs.set(id,callback);return id};
+window.cancelAnimationFrame=id=>jobs.delete(id);
+const frame=()=>{for(const [id,callback] of [...jobs]){jobs.delete(id);callback(0)}};
+const sent=[];let enabled=true;
+const canvas=document.getElementById('canvas');
+const axis=(role,bounds)=>({role,cell_index:null,bounds,x_limits:[0,1],y_limits:[0,1],x_scale:'linear',y_scale:'linear'});
+const axes=[axis('image',[0,0,.75,1]),axis('distribution',[.75,0,1,1])];
+const pointer=new CanvasPointer(canvas,'panel',command=>sent.push(command),()=>axes,()=>7,()=>enabled);
+const at=(x=.4)=>{const r=canvas.getBoundingClientRect();return {clientX:r.left+x*r.width,clientY:r.top+r.height/2}};
+const wheel=(deltaY,deltaMode=0,x=.4)=>{const event=new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY,deltaMode,...at(x)});canvas.dispatchEvent(event);return event.defaultPrevented};
+const checks=[];
+const check=(name,fn)=>{sent.length=0;pointer.cancel();fn();checks.push(name)};
+try {
+ check('same-axis burst is one command with all fractional travel',()=>{
+  for(let i=0;i<20;i++)assert(wheel(8),'wheel must be consumed');
+  equal(sent.length,0,'wait for one frame');frame();equal(sent.length,1,'one render request');close(sent[0].steps,-1.6);
+ });
+ check('reverse travel remains ordered rather than cancelling at a limit',()=>{
+  wheel(8);wheel(-8);equal(sent.length,1,'first direction is flushed');close(sent[0].steps,-.08);
+  frame();close(sent[1].steps,.08);
+ });
+ check('axes changes keep their own routing',()=>{
+  wheel(8);wheel(8,0,.9);equal(sent.length,1,'image command flushed');frame();
+  equal(sent.map(c=>c.axes.role),['image','distribution'],'axis order');
+ });
+ check('all wheel modes preserve their total travel',()=>{
+  wheel(3,1);wheel(1,2);frame();equal(sent.length,1,'same route combines modes');close(sent[0].steps,-1.48);
+ });
+ check('horizontal-only wheel does not synthesize a zoom',()=>{
+  wheel(0);frame();equal(sent.length,0,'zero vertical travel');
+ });
+ check('wheel and pointer movement stay in arrival order',()=>{
+  wheel(8);canvas.dispatchEvent(new PointerEvent('pointermove',{pointerId:1,...at()}));wheel(8);frame();
+  equal(sent.map(c=>c.event),['scroll','move','scroll'],'event order');
+ });
+ check('Escape flushes travel before cancelling the gesture',()=>{
+  wheel(8);canvas.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',cancelable:true}));frame();
+  equal(sent.map(c=>c.event),['scroll','key'],'event order');
+ });
+ check('cancelling or disabling the canvas leaves no delayed zoom',()=>{
+  wheel(8);pointer.cancel();frame();equal(sent.length,0,'cancelled travel');
+  enabled=false;assert(!wheel(8),'disabled canvas takes no wheel');frame();equal(sent.length,0,'disabled zoom');enabled=true;
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
+} catch(error) { document.getElementById('result').textContent=JSON.stringify({passed:false,error:error.stack}); }
+</script>

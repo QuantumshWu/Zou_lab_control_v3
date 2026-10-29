@@ -177,6 +177,11 @@ fn a_device_with_its_own_server_is_announced_as_the_client_type_another_machine_
     let (sender, lost) = mpsc::channel();
     let sender = Mutex::new(sender);
     watch.on_failure(|_| {}, move |reason| { let _ = sender.lock().unwrap().send(reason.to_owned()); });
+    a.host.spi("served", "fail_withdraw_once", json!([]), json!({}), Duration::from_secs(5)).unwrap();
+    assert!(publisher.withdraw("served").unwrap_err().contains("could not refuse peers"));
+    assert!(publisher.is_published("served"), "Remote stays on when refusing peers fails");
+    assert_eq!(admitted(), json!([true]));
+    assert!(lost.try_recv().is_err(), "a failed withdrawal does not lose its watchers");
     publisher.withdraw("served").unwrap();
     assert_eq!(admitted(), json!([true, false]));
     let reason = lost.recv_timeout(Duration::from_secs(5)).expect("the watch is told");
@@ -184,6 +189,148 @@ fn a_device_with_its_own_server_is_announced_as_the_client_type_another_machine_
     drop(publisher);
     a.host.shutdown();
     b.host.shutdown();
+}
+
+fn spi(link: &Link, method: &str, args: serde_json::Value, deadline: Duration) -> Result<zlc_plugin_host::Reply, zlc_plugin_host::CallError> {
+    link.request("spi", json!({"method": method, "args": args, "kwargs": {}}), Vec::new(), deadline)
+}
+
+/// A real concurrent plugin write reproduces the old release-before-SAFE
+/// race. Test every ownership exit, including a write whose caller timed out.
+#[test]
+fn every_owner_transition_waits_for_hardware_writes_then_safe() {
+    for mode in ["detach", "lost", "reconnect", "withdraw", "timeout"] {
+        let (Some(a), Some(b)) = (core(), core()) else { return };
+        a.host.open("rf", "test.fabric", json!({}), json!({})).unwrap();
+        let publisher = Arc::new(Publisher::start(a.host.clone(), bench("owner"), "127.0.0.1", 0).unwrap());
+        publisher.publish("rf", "RF").unwrap();
+        let (notes, events) = mpsc::channel();
+        publisher.on_note(move |_, line| { let _ = notes.send(line.to_owned()); });
+        let user = bench("operator");
+        let relay = Relay::new(publisher.port());
+        let (link, _) = Link::open("127.0.0.1", relay.port, "rf", user.clone(), b.host.registry().clone()).unwrap();
+        assert!(publisher.publish("rf", "RF").unwrap_err().contains("already published"));
+        assert_eq!(publisher.offers()[0]["in_use_by"], user.client());
+        let directory = std::env::temp_dir().join(format!("zlc-fabric-transition-{}-{mode}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let started = directory.join("started");
+        let released = directory.join("released");
+        let _ = std::fs::remove_file(&started);
+        let _ = std::fs::remove_file(&released);
+        let (writing, start_path, release_path) = (link.clone(), started.clone(), released.clone());
+        let write = std::thread::spawn(move || spi(&writing, "slow_write", json!([start_path, release_path]),
+            if mode == "timeout" { Duration::from_millis(200) } else { Duration::from_secs(10) }));
+        let until = Instant::now() + Duration::from_secs(5);
+        while !started.exists() && Instant::now() < until { std::thread::sleep(Duration::from_millis(10)); }
+        assert!(started.exists(), "{mode}: hardware write started");
+        if mode == "timeout" {
+            let until = Instant::now() + Duration::from_secs(2);
+            while !write.is_finished() && Instant::now() < until { std::thread::sleep(Duration::from_millis(10)); }
+            assert!(write.is_finished(), "the caller timed out while the plugin is still writing");
+        }
+        let (closing, withdrawing, registry, user_again) = (link.clone(), publisher.clone(), b.host.registry().clone(), user.clone());
+        let port = publisher.port();
+        let transition = if mode == "lost" {
+            relay.refusing.store(true, Ordering::Release);
+            relay.cut();
+            None
+        } else { Some(std::thread::spawn(move || match mode {
+            "reconnect" => Some(Link::open("127.0.0.1", port, "rf", user_again, registry).unwrap().0),
+            "withdraw" => { withdrawing.withdraw("rf").unwrap(); None },
+            _ => { closing.close(); None },
+        })) };
+        loop {
+            let line = events.recv_timeout(Duration::from_secs(5)).expect("retirement begins");
+            if line.contains("FABRIC RETIRING") { break; }
+        }
+        assert!(Link::open("127.0.0.1", publisher.port(), "rf", bench("intruder"), b.host.registry().clone()).is_err(),
+            "{mode}: no new owner before old hardware write settles");
+        assert_eq!(publisher.offers()[0]["in_use_by"], user.client());
+        assert!(a.host.spi("rf", "get:output_on", json!([]), json!({}), Duration::from_secs(1)).is_err(), "local control still refused");
+        // A read concurrent with slow_write proves SAFE has not run prematurely.
+        assert!(a.host.requests_pending("rf"));
+        std::fs::write(&released, "release").unwrap();
+        let answer = write.join().unwrap();
+        if mode == "timeout" { assert!(answer.is_err()); }
+        let replacement = transition.and_then(|thread| thread.join().unwrap());
+        if mode == "withdraw" {
+            assert_eq!(a.host.spi("rf", "get:output_on", json!([]), json!({}), Duration::from_secs(2)).unwrap().value, false);
+        } else {
+            let next = if let Some(next) = replacement { next } else {
+                let until = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match Link::open("127.0.0.1", publisher.port(), "rf", bench("next"), b.host.registry().clone()) {
+                        Ok((next, _)) => break next,
+                        Err(error) if Instant::now() < until => { let _ = error; std::thread::sleep(Duration::from_millis(20)); }
+                        Err(error) => panic!("{mode}: {error}"),
+                    }
+                }
+            };
+            assert_eq!(spi(&next, "get:output_on", json!([]), Duration::from_secs(2)).unwrap().value, false, "{mode}: SAFE follows write");
+            next.close();
+            publisher.withdraw("rf").unwrap();
+        }
+        link.close();
+        a.host.shutdown();
+        b.host.shutdown();
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
+fn a_failed_safe_keeps_the_device_reserved_until_withdrawal_retries() {
+    let (Some(a), Some(b)) = (core(), core()) else { return };
+    a.host.open("rf", "test.fabric", json!({}), json!({})).unwrap();
+    let publisher = Publisher::start(a.host.clone(), bench("owner"), "127.0.0.1", 0).unwrap();
+    publisher.publish("rf", "RF").unwrap();
+    let (link, _) = Link::open("127.0.0.1", publisher.port(), "rf", bench("operator"), b.host.registry().clone()).unwrap();
+    spi(&link, "fail_safe_once", json!([]), Duration::from_secs(2)).unwrap();
+    let error = publisher.withdraw("rf").unwrap_err();
+    assert!(error.contains("SAFE failed"), "{error}");
+    assert!(publisher.is_published("rf"));
+    assert!(Link::open("127.0.0.1", publisher.port(), "rf", bench("other"), b.host.registry().clone()).is_err());
+    publisher.withdraw("rf").unwrap();
+    assert!(!publisher.is_published("rf"));
+    link.close();
+    a.host.shutdown();
+    b.host.shutdown();
+}
+
+#[test]
+fn first_publication_waits_for_local_calls_and_duplicate_publish_cannot_replace_it() {
+    let (Some(a), Some(b)) = (core(), core()) else { return };
+    a.host.open("rf", "test.fabric", json!({}), json!({})).unwrap();
+    let publisher = Arc::new(Publisher::start(a.host.clone(), bench("owner"), "127.0.0.1", 0).unwrap());
+    let directory = std::env::temp_dir().join(format!("zlc-fabric-local-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let started = directory.join("started");
+    let released = directory.join("released");
+    let _ = std::fs::remove_file(&started);
+    let _ = std::fs::remove_file(&released);
+    let (host, start_path, release_path) = (a.host.clone(), started.clone(), released.clone());
+    let writing = std::thread::spawn(move || host.spi("rf", "slow_write", json!([start_path, release_path]), json!({}), Duration::from_secs(10)));
+    let until = Instant::now() + Duration::from_secs(5);
+    while !started.exists() && Instant::now() < until { std::thread::sleep(Duration::from_millis(10)); }
+    assert!(started.exists());
+    let (noting, notes) = mpsc::channel();
+    publisher.on_note(move |_, line| { let _ = noting.send(line.to_owned()); });
+    let publishing = publisher.clone();
+    let publish = std::thread::spawn(move || publishing.publish("rf", "RF"));
+    assert!(notes.recv_timeout(Duration::from_secs(3)).unwrap().contains("RETIRING"));
+    assert!(publisher.publish("rf", "duplicate").is_err());
+    assert!(Link::open("127.0.0.1", publisher.port(), "rf", bench("early"), b.host.registry().clone()).is_err());
+    assert!(!publish.is_finished());
+    std::fs::write(&released, "release").unwrap();
+    writing.join().unwrap().unwrap();
+    publish.join().unwrap().unwrap();
+    let (link, _) = Link::open("127.0.0.1", publisher.port(), "rf", bench("operator"), b.host.registry().clone()).unwrap();
+    assert_eq!(spi(&link, "get:output_on", json!([]), Duration::from_secs(2)).unwrap().value, true,
+        "first publication preserves the completed local state");
+    link.close();
+    publisher.withdraw("rf").unwrap();
+    a.host.shutdown();
+    b.host.shutdown();
+    let _ = std::fs::remove_dir_all(directory);
 }
 
 /// A TCP relay the test can cut (a network blip) or refuse (a dead machine).

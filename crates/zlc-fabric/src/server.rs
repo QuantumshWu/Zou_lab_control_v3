@@ -23,7 +23,14 @@ const LONGEST_REQUEST: Duration = Duration::from_secs(600);
 const WITHDRAW_WAIT: Duration = Duration::from_secs(150);
 const INSTANCE_OPS: [&str; 6] = ["spi", "fields", "tune", "values", "command", "make_safe"];
 
-struct Offer { role: String, descriptor: Arc<TypeDescriptor>, attached: Option<(u64, String)> }
+struct Offer {
+    role: String,
+    descriptor: Arc<TypeDescriptor>,
+    attached: Option<(u64, String)>,
+    /// No new request or owner is admitted until the old writes have settled and SAFE answered.
+    retiring: bool,
+    transition: Arc<Mutex<()>>,
+}
 
 /// A device with a server of its own: what it is announced as, and the cores watching it.
 struct Own { role: String, type_id: String, label: String, parameters: Value, watchers: Vec<u64> }
@@ -84,6 +91,7 @@ impl Publisher {
     /// Offer one open device. Refused for a device a run holds or one that
     /// itself came from the fabric (a relay loop).
     pub fn publish(&self, instance: &str, role: &str) -> Result<(), String> {
+        if self.is_published(instance) { return Err(format!("{instance} is already published")); }
         let descriptor = self.shared.host.descriptor(instance).ok_or_else(|| format!("{instance} is not open"))?;
         if !descriptor.announces.is_empty() {
             // A server of its own (v2 announce: a local SLM head): it admits other machines and
@@ -97,7 +105,14 @@ impl Publisher {
         let (shared, name) = (Arc::downgrade(&self.shared), instance.to_owned());
         let forward: Forward = Arc::new(move |op, params, lends| if let Some(shared) = shared.upgrade() { shared.forward(&name, op, params, lends); });
         self.shared.host.lend_out(instance, forward).map_err(|error| error.message)?;
-        lock(&self.shared.offers).insert(instance.to_owned(), Offer { role: role.to_owned(), descriptor, attached: None });
+        // Local calls admitted before lend_out must settle before the first
+        // remote owner can attach, including the admission-to-send interval.
+        if let Err(error) = self.shared.drain(instance) {
+            self.shared.host.take_back(instance);
+            return Err(error.to_string());
+        }
+        lock(&self.shared.offers).insert(instance.to_owned(), Offer { role: role.to_owned(), descriptor, attached: None,
+            retiring: false, transition: Arc::new(Mutex::new(())) });
         self.shared.note(instance, &format!("FABRIC PUBLISH device={instance} port={}", self.shared.port));
         Ok(())
     }
@@ -105,24 +120,33 @@ impl Publisher {
     /// Take a device back: off offer, its user told, its requests in flight
     /// finished, its outputs safe if it was in use, then usable here again.
     pub fn withdraw(&self, instance: &str) -> Result<(), String> {
-        if let Some(own) = lock(&self.shared.own).remove(instance) {
-            // The cores watching it lose it now, as a remote.device's user does.
-            for connection in own.watchers { self.shared.withdrawn(connection, instance); }
+        if lock(&self.shared.own).contains_key(instance) {
             // A plugin device's own server drops the other machines (the pulse board's host does its own).
-            let refused = self.shared.host.descriptor(instance).filter(|descriptor| !descriptor.announces.is_empty())
-                .and_then(|_| self.shared.host.call(instance, "publish", json!({"published": false}), SAFE_DEADLINE).err());
-            self.shared.note(instance, &format!("FABRIC WITHDRAW device={instance}{}", refused.map(|error| format!(" error={:?}", error.message)).unwrap_or_default()));
+            if self.shared.host.descriptor(instance).is_some_and(|descriptor| !descriptor.announces.is_empty()) {
+                self.shared.host.call(instance, "publish", json!({"published": false}), SAFE_DEADLINE).map_err(|error| error.to_string())?;
+            }
+            if let Some(own) = lock(&self.shared.own).remove(instance) {
+                for connection in own.watchers { self.shared.withdrawn(connection, instance); }
+            }
+            self.shared.note(instance, &format!("FABRIC WITHDRAW device={instance}"));
             return Ok(());
         }
-        let offer = lock(&self.shared.offers).remove(instance).ok_or_else(|| format!("{instance} is not published"))?;
-        if let Some((connection, _)) = &offer.attached { self.shared.withdrawn(*connection, instance); }
-        let mut busy = lock(&self.shared.in_flight);
-        let until = Instant::now() + WITHDRAW_WAIT;
-        while busy.get(instance).copied().unwrap_or(0) > 0 && Instant::now() < until {
-            busy = self.shared.settled.wait_timeout(busy, until.saturating_duration_since(Instant::now())).unwrap_or_else(|p| p.into_inner()).0;
+        let transition = self.shared.transition(instance).map_err(|error| error.to_string())?;
+        let _transition = lock(&transition);
+        let (attached, descriptor) = {
+            let mut offers = lock(&self.shared.offers);
+            let offer = offers.get_mut(instance).ok_or_else(|| format!("{instance} is not published"))?;
+            offer.retiring = true;
+            (offer.attached.clone(), offer.descriptor.clone())
+        };
+        if let Some((connection, _)) = &attached { self.shared.withdrawn(*connection, instance); }
+        // Retain the publication on failure: taking it back would admit local writes
+        // while the old remote operation can still be touching the hardware.
+        self.shared.drain(instance).map_err(|error| error.to_string())?;
+        if let Some((_, client)) = &attached {
+            self.shared.make_safe(instance, &descriptor, &format!("withdrawn from {client}")).map_err(|error| error.to_string())?;
         }
-        drop(busy);
-        if let Some((_, client)) = &offer.attached { self.shared.make_safe(instance, &offer.descriptor, &format!("withdrawn from {client}")); }
+        lock(&self.shared.offers).remove(instance);
         self.shared.host.take_back(instance);
         self.shared.note(instance, &format!("FABRIC WITHDRAW device={instance}"));
         Ok(())
@@ -201,12 +225,57 @@ impl Shared {
     }
 
     /// Drive a published device's outputs safe (its user is gone or changed).
-    fn make_safe(&self, instance: &str, descriptor: &TypeDescriptor, reason: &str) {
+    fn make_safe(&self, instance: &str, descriptor: &TypeDescriptor, reason: &str) -> Result<(), CallError> {
+        let mut failed = Vec::new();
         for output in &descriptor.physical_outputs {
             let outcome = self.host.serve(instance, "make_safe", json!({"output": output.name, "plain": true}), Vec::new(), SAFE_DEADLINE);
             self.note(instance, &format!("FABRIC AUTO-SAFE device={instance} output={} reason={reason:?}{}", output.name,
-                outcome.err().map(|error| format!(" error={:?}", error.to_string())).unwrap_or_default()));
+                outcome.as_ref().err().map(|error| format!(" error={:?}", error.to_string())).unwrap_or_default()));
+            if let Err(error) = outcome { failed.push(format!("{}: {error}", output.name)); }
         }
+        if failed.is_empty() { Ok(()) } else {
+            Err(CallError::new(ErrorKind::Refused, format!("{instance} remains reserved: SAFE failed ({})", failed.join("; "))))
+        }
+    }
+
+    fn transition(&self, instance: &str) -> Result<Arc<Mutex<()>>, CallError> {
+        lock(&self.offers).get(instance).map(|offer| offer.transition.clone())
+            .ok_or_else(|| CallError::lost(format!("{instance} is no longer published on {}", self.bench.name)))
+    }
+
+    fn drain(&self, instance: &str) -> Result<(), CallError> {
+        self.note(instance, &format!("FABRIC RETIRING device={instance}"));
+        let mut busy = lock(&self.in_flight);
+        let until = Instant::now() + WITHDRAW_WAIT;
+        while busy.get(instance).copied().unwrap_or(0) > 0 || self.host.requests_pending(instance) {
+            if Instant::now() >= until {
+                return Err(CallError::new(ErrorKind::Timeout, format!("{instance} remains reserved: its previous requests have not settled")));
+            }
+            // Late plugin replies do not have a fabric waiter left to signal us.
+            busy = self.settled.wait_timeout(busy, until.saturating_duration_since(Instant::now()).min(Duration::from_millis(20))).unwrap_or_else(|p| p.into_inner()).0;
+        }
+        Ok(())
+    }
+
+    /// A detach and a lost socket use the same barrier as withdrawal and reconnect.
+    /// Keep the old owner recorded until both its writes and SAFE have finished.
+    fn release(&self, connection: u64, instance: &str, reason: &str) -> Result<(), CallError> {
+        let Ok(transition) = self.transition(instance) else { return Ok(()) };
+        let _transition = lock(&transition);
+        let descriptor = {
+            let mut offers = lock(&self.offers);
+            let Some(offer) = offers.get_mut(instance) else { return Ok(()) };
+            if offer.attached.as_ref().is_none_or(|(held, _)| *held != connection) { return Ok(()) }
+            if offer.retiring { return Err(CallError::new(ErrorKind::Refused,
+                format!("{instance} remains reserved after an incomplete release; withdraw Remote to retry"))); }
+            offer.retiring = true;
+            offer.descriptor.clone()
+        };
+        self.drain(instance)?;
+        self.make_safe(instance, &descriptor, reason)?;
+        if let Some(offer) = lock(&self.offers).get_mut(instance) { offer.attached = None; offer.retiring = false; }
+        self.note(instance, &format!("FABRIC RELEASE device={instance} reason={reason:?}"));
+        Ok(())
     }
 
     fn handle(&self, connection: u64, client: &str, message: &Value, lends: Vec<Arc<Lend>>) -> Result<(Value, Vec<Arc<Lend>>), CallError> {
@@ -236,17 +305,7 @@ impl Shared {
                 Ok((json!({"instance": instance, "publisher": self.bench.name}), Vec::new()))
             }
             "detach" => {
-                let released = {
-                    let mut offers = lock(&self.offers);
-                    match offers.get_mut(&instance) {
-                        Some(offer) if offer.attached.as_ref().is_some_and(|(held, _)| *held == connection) => { offer.attached = None; Some(offer.descriptor.clone()) }
-                        _ => None,
-                    }
-                };
-                if let Some(descriptor) = released {
-                    self.make_safe(&instance, &descriptor, &format!("{client} closed it"));
-                    self.note(&instance, &format!("FABRIC DETACH device={instance} client={client}"));
-                }
+                self.release(connection, &instance, &format!("{client} closed it"))?;
                 Ok((json!({}), Vec::new()))
             }
             op if INSTANCE_OPS.contains(&op) => {
@@ -258,22 +317,42 @@ impl Shared {
     }
 
     fn attach(&self, connection: u64, client: &str, instance: &str) -> Result<Value, CallError> {
+        let transition = self.transition(instance)?;
+        let _transition = transition.try_lock().map_err(|_| CallError::new(ErrorKind::Refused,
+            format!("{instance} is settling its previous owner; retry when release completes")))?;
         let (descriptor, role, takeover) = {
             let mut offers = lock(&self.offers);
             let offer = offers.get_mut(instance)
                 .ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{} publishes no device {instance:?}", self.bench.name)))?;
+            if !lock(&self.peers).contains_key(&connection) { return Err(CallError::lost("the attaching connection has ended")); }
+            if offer.retiring { return Err(CallError::new(ErrorKind::Refused, format!("{instance} remains reserved until its previous requests and SAFE settle; withdraw Remote to retry"))); }
             let takeover = match &offer.attached {
                 Some((held, holder)) if *held != connection && holder != client =>
                     return Err(CallError::new(ErrorKind::Refused, format!("{instance} on {} is in use by {holder}", self.bench.name))),
                 Some((held, _)) => *held != connection,
                 None => false,
             };
-            offer.attached = Some((connection, client.to_owned()));
+            offer.retiring = takeover;
             (offer.descriptor.clone(), offer.role.clone(), takeover)
         };
         // The same core again on a new connection: the old one broke, and what
         // the device drove then is not known to it -- safe before it goes on.
-        if takeover { self.make_safe(instance, &descriptor, "its user reconnected"); }
+        if takeover { self.drain(instance)?; self.make_safe(instance, &descriptor, "its user reconnected")?; }
+        if let Some(offer) = lock(&self.offers).get_mut(instance) {
+            // The reader removes the peer before scanning its offers on EOF.
+            // Record ownership while holding both locks so even a queued attach
+            // worker cannot create an orphan owner after that scan.
+            let peers = lock(&self.peers);
+            if !peers.contains_key(&connection) {
+                // A takeover already drained and made the old owner safe. If
+                // its replacement vanished during that work, leave it free.
+                offer.attached = None;
+                offer.retiring = false;
+                return Err(CallError::lost("the attaching connection has ended"));
+            }
+            offer.attached = Some((connection, client.to_owned()));
+            offer.retiring = false;
+        }
         self.note(instance, &format!("FABRIC ATTACH device={instance} client={client}"));
         Ok(json!({"descriptor": serde_json::to_value(&*descriptor).unwrap_or(Value::Null), "role": role,
                   "tunable": self.host.tunable(instance), "reads": self.host.reads(instance), "publisher": self.bench.name}))
@@ -285,11 +364,12 @@ impl Shared {
         {
             let offers = lock(&self.offers);
             let offer = offers.get(instance).ok_or_else(|| CallError::lost(format!("{instance} is no longer published on {}", self.bench.name)))?;
-            if offer.attached.as_ref().is_none_or(|(held, _)| *held != connection) {
+            if offer.retiring || offer.attached.as_ref().is_none_or(|(held, _)| *held != connection) || !lock(&self.peers).contains_key(&connection) {
                 return Err(CallError::new(ErrorKind::NotClaimed, format!("attach {instance} before using it")));
             }
+            // Admission and registration are atomic with respect to retirement.
+            *lock(&self.in_flight).entry(instance.to_owned()).or_default() += 1;
         }
-        *lock(&self.in_flight).entry(instance.to_owned()).or_default() += 1;
         let answer = self.host.serve(instance, op, params.clone(), lends, deadline);
         {
             let mut busy = lock(&self.in_flight);
@@ -347,11 +427,43 @@ fn connection(shared: Arc<Shared>, mut stream: TcpStream, id: u64) {
     for own in lock(&shared.own).values_mut() { own.watchers.retain(|watcher| *watcher != id); }
     let _ = lock(&writer).shutdown(std::net::Shutdown::Both);
     // What this user held stays on offer for its return; what it drove is made safe now.
-    let released: Vec<(String, Arc<TypeDescriptor>)> = lock(&shared.offers).iter_mut()
+    let released: Vec<String> = lock(&shared.offers).iter()
         .filter(|(_, offer)| offer.attached.as_ref().is_some_and(|(held, _)| *held == id))
-        .map(|(instance, offer)| { offer.attached = None; (instance.clone(), offer.descriptor.clone()) }).collect();
-    for (instance, descriptor) in released {
+        .map(|(instance, _)| instance.clone()).collect();
+    for instance in released {
         shared.note(&instance, &format!("FABRIC LOST client={client} device={instance} reason={reason:?}"));
-        shared.make_safe(&instance, &descriptor, &reason);
+        if let Err(error) = shared.release(id, &instance, &reason) { shared.note(&instance, &format!("FABRIC RELEASE FAILED {error}")); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zlc_core::{control::SafeActions, runtime::Runtime};
+    use zlc_plugin_host::HostConfig;
+
+    #[test]
+    fn queued_requests_of_a_closed_connection_cannot_create_an_owner_or_write() {
+        let Some(python) = std::env::var_os("ZLC_PLUGIN_PYTHON") else { return };
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let host = PluginHost::new(HostConfig { python: python.into(),
+            python_path: vec![root.join("../../science/src"), root.join("../zlc-plugin-host/tests/plugins")],
+            packages: vec!["zlc_test_plugins".into()], memory_limit_mib: Some(3072),
+        }, Runtime::new(), SafeActions::new(), |_| {}).unwrap();
+        host.open("rf", "test.fabric", json!({}), json!({})).unwrap();
+        let publisher = Publisher::start(host.clone(), Bench::new(), "127.0.0.1", 0).unwrap();
+        publisher.publish("rf", "RF").unwrap();
+        // Exactly the state after EOF cleanup but before an already-spawned
+        // request worker starts: no peer entry, still a valid publication.
+        assert_eq!(publisher.shared.attach(42, "gone", "rf").unwrap_err().kind, ErrorKind::Lost);
+        assert!(publisher.offers()[0]["in_use_by"].is_null());
+        // Also reject a worker that had an owner before EOF but has not yet
+        // been visited by the disconnect thread's retirement scan.
+        lock(&publisher.shared.offers).get_mut("rf").unwrap().attached = Some((42, "gone".into()));
+        let error = publisher.shared.instance_op(42, "gone", "rf", "spi",
+            json!({"method": "fire", "args": [], "kwargs": {}}), Vec::new(), Duration::from_secs(2)).err().unwrap();
+        assert_eq!(error.kind, ErrorKind::NotClaimed);
+        publisher.withdraw("rf").unwrap();
+        host.shutdown();
     }
 }

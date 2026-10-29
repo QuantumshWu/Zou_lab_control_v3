@@ -589,6 +589,10 @@ impl PulseHost {
     pub fn pointer(&mut self, command: Value) {
         let gesture_end = matches!(command["event"].as_str(), Some("release" | "cancel" | "leave"));
         if !self.editor.preview_selectors() && !gesture_end { return; }
+        if self.pointers.back_mut().is_some_and(|last| crate::pointer_queue::merge_scroll(last, &command)) {
+            self.next_pointer();
+            return;
+        }
         if command["event"] == "move" && self.pointers.back().is_some_and(|last| last["event"] == "move") { self.pointers.pop_back(); }
         self.pointers.push_back(command);
         self.next_pointer();

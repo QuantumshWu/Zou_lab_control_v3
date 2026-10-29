@@ -132,6 +132,9 @@ impl SlmHost {
     pub fn pointer(&mut self, command: Value) {
         let Some(device) = command["panel"].as_str().and_then(device_of).map(str::to_owned) else { return };
         let Some(editor) = self.editors.get_mut(&device) else { return };
+        if let Some(Work::Panel(last)) = editor.queue.back_mut() {
+            if crate::pointer_queue::merge_scroll(last, &command) { self.next(&device); return; }
+        }
         if command["event"] == "move" {
             if let Some(Work::Panel(last)) = editor.queue.back() { if last["event"] == "move" && last["panel"] == command["panel"] { editor.queue.pop_back(); } }
         }

@@ -11,6 +11,8 @@ export class CanvasPointer {
     pressAxes = null;
     move = null;
     moveFrame = 0;
+    wheel = null;
+    wheelFrame = 0;
     lastPoint = { x: 0.5, y: 0.5 };
     constructor(canvas, panel, send, axes, sequence, enabled = () => true) {
         this.canvas = canvas;
@@ -23,6 +25,10 @@ export class CanvasPointer {
     }
     /** Give up a captured gesture (blur, the canvas going away, Selectors off). */
     cancel() {
+        this.wheel = null;
+        if (this.wheelFrame)
+            cancelAnimationFrame(this.wheelFrame);
+        this.wheelFrame = 0;
         this.move = null;
         if (this.moveFrame)
             cancelAnimationFrame(this.moveFrame);
@@ -46,6 +52,15 @@ export class CanvasPointer {
                 return axis;
         }
         return null;
+    }
+    flushWheel() {
+        if (this.wheelFrame)
+            cancelAnimationFrame(this.wheelFrame);
+        this.wheelFrame = 0;
+        const command = this.wheel;
+        this.wheel = null;
+        if (command)
+            this.send(command);
     }
     bind() {
         const canvas = this.canvas;
@@ -82,6 +97,8 @@ export class CanvasPointer {
             if (!this.enabled() || !placed())
                 return;
             event.preventDefault();
+            this.flushWheel();
+            flushMove();
             canvas.focus({ preventScroll: true });
             this.activePointer = event.pointerId;
             this.activeButton = buttonOf(event);
@@ -93,6 +110,7 @@ export class CanvasPointer {
                 return;
             if ((this.activePointer === null && !this.enabled()) || !placed())
                 return;
+            this.flushWheel();
             this.move = message(event, "move");
             if (!this.moveFrame)
                 this.moveFrame = requestAnimationFrame(flushMove);
@@ -105,6 +123,7 @@ export class CanvasPointer {
                 return;
             }
             event.preventDefault();
+            this.flushWheel();
             flushMove();
             this.send(message(event, "release"));
             this.activePointer = null;
@@ -114,10 +133,11 @@ export class CanvasPointer {
                 canvas.releasePointerCapture(event.pointerId);
         });
         canvas.addEventListener("dblclick", event => { if (!this.enabled() || !placed())
-            return; event.preventDefault(); flushMove(); this.send(message(event, "double_click")); });
+            return; event.preventDefault(); this.flushWheel(); flushMove(); this.send(message(event, "double_click")); });
         canvas.addEventListener("pointerleave", event => {
             if (this.activePointer !== null || !this.enabled() || !placed())
                 return;
+            this.flushWheel();
             flushMove();
             this.send(message(event, "leave"));
         });
@@ -130,12 +150,32 @@ export class CanvasPointer {
             event.preventDefault();
             flushMove();
             const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? canvas.clientHeight : 1;
-            this.send({ ...message(event, "scroll"), steps: -event.deltaY * unit / 100 });
+            const steps = -event.deltaY * unit / 100;
+            if (!Number.isFinite(steps) || steps === 0)
+                return;
+            // These notifications have no individual reply waiter. The native lane
+            // may also combine adjacent travel while an earlier frame is rendering.
+            const command = { ...message(event, "scroll"), steps, _coalesce_scroll: true };
+            const prior = this.wheel;
+            const identity = (value) => {
+                const axis = value.axes;
+                return JSON.stringify([axis?.role, axis?.cell_index, value.modifiers]);
+            };
+            if (prior && identity(prior) === identity(command) && Math.sign(Number(prior.steps)) === Math.sign(steps)) {
+                command.steps += Number(prior.steps);
+            }
+            else {
+                this.flushWheel();
+            }
+            this.wheel = command;
+            if (!this.wheelFrame)
+                this.wheelFrame = requestAnimationFrame(() => this.flushWheel());
         }, { passive: false });
         canvas.addEventListener("keydown", event => {
             if (event.key !== "Escape" || !this.enabled())
                 return;
             event.preventDefault();
+            this.flushWheel();
             flushMove();
             this.send({ action: "pointer", panel: this.panel, event: "key", key: "Escape", axes: null, displayed_sequence: this.sequence(), ...this.lastPoint });
         });

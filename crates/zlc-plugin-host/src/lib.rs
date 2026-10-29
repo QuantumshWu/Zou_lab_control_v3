@@ -325,7 +325,15 @@ struct Instance {
     /// Handed to another core (`lend_out`): nothing here may use it until taken
     /// back, and what it says for itself goes to that core.
     published: Option<Forward>,
+    local_requests: Arc<std::sync::atomic::AtomicUsize>,
     run: Option<RunState>,
+}
+
+/// Registered under the same state lock that hands the device to the fabric,
+/// covering the gap between local admission and sending the plugin request.
+struct LocalRequest(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for LocalRequest {
+    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); }
 }
 
 /// Where a device lent to another core says what it says for itself
@@ -539,6 +547,7 @@ impl PluginHost {
         if matches!(entry.serving, Serving::Remote(_)) {
             return Err(CallError::new(ErrorKind::Refused, format!("{instance} already comes from the bench fabric -- publish it on the machine that owns it")));
         }
+        if entry.published.is_some() { return Err(published_refusal(instance)); }
         if let Some((run, _)) = entry.claims.first() { return Err(CallError::new(ErrorKind::Refused, format!("{instance} is claimed by run {run}"))); }
         entry.published = Some(forward);
         Ok(())
@@ -560,6 +569,14 @@ impl PluginHost {
 
     pub fn take_back(&self, instance: &str) {
         if let Some(entry) = self.inner.state.lock().unwrap().instances.get_mut(instance) { entry.published = None; }
+    }
+
+    /// Actual plugin replies outstanding, including calls whose caller timed
+    /// out. Fabric retirement uses this before making a device safe and reusable.
+    pub fn requests_pending(&self, instance: &str) -> bool {
+        self.inner.state.lock().unwrap().instances.get(instance)
+            .is_some_and(|entry| entry.local_requests.load(Ordering::Acquire) > 0
+                || entry.serving.process().is_some_and(|process| process.requests_pending(instance)))
     }
 
     /// One request of the core a device is lent to: `lends` (blocks it sent,
@@ -641,23 +658,24 @@ impl PluginHost {
     }
 
     /// Refused while a run claims `instance` or another core holds it.
-    fn check_free(&self, instance: &str) -> Result<(), CallError> {
+    fn admit_local(&self, instance: &str, unclaimed: bool) -> Result<LocalRequest, CallError> {
         let state = self.inner.state.lock().unwrap();
         let entry = state.instances.get(instance).ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not open")))?;
         if entry.published.is_some() { return Err(published_refusal(instance)); }
-        if let Some((run, _)) = entry.claims.first() { return Err(CallError::new(ErrorKind::NotClaimed, format!("{instance} is claimed by run {run}"))); }
-        Ok(())
+        if unclaimed { if let Some((run, _)) = entry.claims.first() { return Err(CallError::new(ErrorKind::NotClaimed, format!("{instance} is claimed by run {run}"))); } }
+        entry.local_requests.fetch_add(1, Ordering::AcqRel);
+        Ok(LocalRequest(entry.local_requests.clone()))
     }
 
     /// Call the open device's adapter (the core's own use: plain JSON reply).
     pub fn spi(&self, instance: &str, method: &str, args: Value, kwargs: Value, deadline: Duration) -> Result<Reply, CallError> {
-        self.check_free(instance)?;
+        let _request = self.admit_local(instance, true)?;
         self.inner.call(instance, "spi", json!({"method": method, "args": args, "kwargs": kwargs}), deadline)
     }
 
     /// Any instance operation (`fields`, `tune`, `values`, `query`, `configure`).
     pub fn call(&self, instance: &str, op: &str, params: Value, deadline: Duration) -> Result<Reply, CallError> {
-        if self.inner.state.lock().unwrap().instances.get(instance).is_some_and(|entry| entry.published.is_some()) { return Err(published_refusal(instance)); }
+        let _request = self.admit_local(instance, false)?;
         self.inner.call(instance, op, params, deadline)
     }
 
@@ -666,6 +684,7 @@ impl PluginHost {
     /// nothing of its health (untracked: the late answer is dropped). One another core serves or
     /// holds is not asked.
     pub fn snapshot(&self, instance: &str, deadline: Duration) -> Result<Value, CallError> {
+        let _request = self.admit_local(instance, false)?;
         let serving = {
             let state = self.inner.state.lock().unwrap();
             let entry = state.instances.get(instance).filter(|entry| entry.descriptor.is_device())
@@ -693,9 +712,7 @@ impl PluginHost {
         let command = self.commands().into_iter().find(|command| command.name == name)
             .ok_or_else(|| CallError::new(ErrorKind::UnknownOp, format!("No plugin command {name}")))?;
         schema::validate(params, &command.input_schema).map_err(|error| CallError::new(ErrorKind::Invalid, error))?;
-        if self.inner.state.lock().unwrap().instances.get(&command.instance).is_some_and(|entry| entry.published.is_some()) {
-            return Err(published_refusal(&command.instance));
-        }
+        let _request = self.admit_local(&command.instance, false)?;
         self.inner.call(&command.instance, "command", json!({"name": command.command, "params": params}), CALL_DEADLINE)
     }
 
@@ -938,7 +955,8 @@ impl Inner {
     /// An opened instance joins the host: its outputs Stop all, its commands the catalogue.
     fn admit(self: &Arc<Self>, instance: &str, descriptor: Arc<TypeDescriptor>, serving: Serving, tunable: bool, reads: Vec<String>) -> Result<(), CallError> {
         self.state.lock().unwrap().instances.insert(instance.to_owned(),
-            Instance { display_name: public_instance(instance).to_owned(), descriptor: descriptor.clone(), serving, tunable, reads, claims: Vec::new(), published: None, run: None });
+            Instance { display_name: public_instance(instance).to_owned(), descriptor: descriptor.clone(), serving, tunable, reads, claims: Vec::new(), published: None,
+                local_requests: Arc::default(), run: None });
         for output in &descriptor.physical_outputs {
             let (weak, name, port) = (Arc::downgrade(self), instance.to_owned(), output.name.clone());
             self.safe.register(&format!("{instance}/{}", output.name), Arc::new(move || {
@@ -1665,6 +1683,26 @@ fn watch(weak: Weak<Inner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_admission_is_pending_before_the_request_reaches_the_plugin() {
+        let Some(python) = std::env::var_os("ZLC_PLUGIN_PYTHON") else { return };
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let host = PluginHost::new(HostConfig { python: python.into(),
+            python_path: vec![root.join("../../science/src"), root.join("tests/plugins")],
+            packages: vec!["zlc_test_plugins".into()], memory_limit_mib: Some(3072),
+        }, Runtime::new(), SafeActions::new(), |_| {}).unwrap();
+        host.open("rf", "test.fabric", json!({}), json!({})).unwrap();
+        let request = host.admit_local("rf", true).unwrap();
+        host.lend_out("rf", Arc::new(|_, _, _| {})).unwrap();
+        assert!(host.requests_pending("rf"), "the admitted call has not sent its request yet");
+        assert!(host.admit_local("rf", false).is_err());
+        assert!(host.lend_out("rf", Arc::new(|_, _, _| {})).is_err(), "duplicate lend cannot replace its owner");
+        drop(request);
+        assert!(!host.requests_pending("rf"));
+        host.take_back("rf");
+        host.shutdown();
+    }
 
     #[test]
     fn a_run_is_sent_each_schema_once_then_names_it() {

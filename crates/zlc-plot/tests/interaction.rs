@@ -465,7 +465,83 @@ fn session_pointer_rules_match() {
                     |(x, y)| json!([["viewport", enc_range(Some(x)), enc_range(y)]]))
         };
         let want = if c[11].is_array() { ok(c[11].clone()) } else { c[11].clone() };
-        assert_eq!(got, want, "scroll {c}");
+        let legacy_collapsed = !c[5].as_bool().unwrap() && want["ok"][0][0] == "viewport"
+            && d.wheel_zoom_factor.powf(ticks) < 1.0
+            && [1, 2].into_iter().any(|axis| {
+                let value = &want["ok"][0][axis];
+                value.is_array() && value[0] == value[1] && (axis == 1 || c[6] == true)
+            });
+        if legacy_collapsed {
+            // The v2 oracle lets extreme inward travel collapse both ends
+            // to one float. Navigation now stops at a representable range;
+            // only those degenerate legacy results change their contract.
+            assert_eq!(got["ok"][0][0], "viewport", "scroll {c}");
+            let base = viewport(&c[7]).unwrap_or((None, None));
+            for (index, scale, committed, drawn) in [(1, &xs, base.0, pair(&c[0])), (2, &ys, base.1, pair(&c[1]))] {
+                if index == 2 && c[6] != true {
+                    assert_eq!(got["ok"][0][index], want["ok"][0][index], "unchanged y: {c}");
+                    continue;
+                }
+                let actual = range(&got["ok"][0][index]).expect("finite zoom range");
+                let expected = range(&want["ok"][0][index]).unwrap();
+                let original = committed.unwrap_or(NumericRange { low: drawn.0.min(drawn.1), high: drawn.0.max(drawn.1) });
+                let repeated_coordinate = matches!(scale, AxisScale::Samples(values) if expected.low == expected.high
+                    && values.windows(2).any(|pair| pair[0] == expected.low && pair[1] == expected.low));
+                if original.low == original.high {
+                    // Inward travel cannot shrink an already collapsed input;
+                    // the outward-only one-ULP recovery is checked below.
+                    assert_eq!(actual, expected, "already collapsed base (including its scale round trip): {c}");
+                    continue;
+                }
+                assert!(actual.low.is_finite() && actual.high.is_finite() && (actual.low < actual.high || repeated_coordinate), "scroll {c}");
+                let edge_roundoff = 8.0 * f64::EPSILON * original.low.abs().max(original.high.abs());
+                assert!(actual.low >= original.low - edge_roundoff && actual.high <= original.high + edge_roundoff,
+                    "inward travel must stay inside its base (apart from scale round-trip rounding): {c}");
+                let centre = |r: NumericRange| (scale.space(r.low) + scale.space(r.high)) / 2.0;
+                let expected_centre = centre(expected);
+                if repeated_coordinate {
+                    // A repeated coordinate has an interval of sample indices
+                    // as its inverse image. The clamp must contain that value
+                    // and the original drawn centre; a unique inverse midpoint
+                    // (or an epsilon-wide value interval) is not defined here.
+                    assert!(actual.low <= expected.low && actual.high >= expected.low, "lost repeated coordinate: {c}");
+                    let wanted = centre(original);
+                    let (a, b) = if actual.low == actual.high {
+                        // Synthetic oracle scales include plateaus (real images
+                        // require strictly monotonic coordinates). A zero-width
+                        // value range then legitimately represents many indices.
+                        assert_eq!(actual, expected);
+                        let AxisScale::Samples(values) = scale else { unreachable!() };
+                        let position = |index: usize| if values[0] > values[values.len() - 1] { (values.len() - 1 - index) as f64 } else { index as f64 };
+                        (position(values.iter().position(|value| *value == actual.low).unwrap()),
+                            position(values.iter().rposition(|value| *value == actual.high).unwrap()))
+                    } else { (scale.space(actual.low), scale.space(actual.high)) };
+                    let tolerance = 8.0 * f64::EPSILON * wanted.abs().max(1.0);
+                    assert!(a.min(b) <= wanted + tolerance && a.max(b) >= wanted - tolerance,
+                        "precision clamp must contain the original drawn centre: {c}");
+                } else {
+                    assert!((centre(actual) - expected_centre).abs() <= 8.0 * f64::EPSILON * expected_centre.abs().max(1.0),
+                        "precision clamp must preserve the centre: {c}");
+                }
+            }
+        } else {
+            let mut wanted = want;
+            if !c[5].as_bool().unwrap() && d.wheel_zoom_factor.powf(ticks) > 1.0 && wanted["ok"][0][0] == "viewport" {
+                let base = viewport(&c[7]).unwrap_or((None, None));
+                for (index, committed, drawn) in [(1, base.0, pair(&c[0])), (2, base.1, pair(&c[1]))] {
+                    if index == 2 && c[6] != true { continue; }
+                    let original = committed.unwrap_or(NumericRange { low: drawn.0.min(drawn.1), high: drawn.0.max(drawn.1) });
+                    // A legacy zero-width input used to be trapped forever,
+                    // even scrolling outward. It now advances exactly one ULP
+                    // in each direction; every nondegenerate result stays exact.
+                    if original.low == original.high && range(&wanted["ok"][0][index]) == Some(original)
+                        && original.low.next_down().is_finite() && original.high.next_up().is_finite() {
+                        wanted["ok"][0][index] = enc_range(Some(NumericRange { low: original.low.next_down(), high: original.high.next_up() }));
+                    }
+                }
+            }
+            assert_eq!(got, wanted, "scroll {c}");
+        }
     }
     for c in data["zoom_selection"].as_array().unwrap() {
         let states: Vec<SelectorState> = c[1].as_array().unwrap().iter().map(|v| state(v).unwrap()).collect();

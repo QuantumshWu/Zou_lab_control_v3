@@ -429,20 +429,30 @@ pub fn wheel_camera_zoom(zoom: f64, growth: f64, ticks: f64) -> Result<f64> { Ok
 pub fn wheel_zoom(range: NumericRange, scale: &AxisScale, factor: f64) -> Result<NumericRange> {
     let low = scale.space(range.low);
     let high = scale.space(range.high);
-    let middle = (low + high) / 2.0;
-    let half = (high - low) * factor / 2.0;
-    NumericRange::new(axis_value(scale, middle - half)?, axis_value(scale, middle + half)?)
+    let sum = low + high;
+    let middle = if sum.is_finite() { sum / 2.0 } else { low / 2.0 + high / 2.0 };
+    let span = high - low;
+    let half = span * factor / 2.0;
+    let half = if half.is_finite() { half } else { (high / 2.0 - low / 2.0) * factor };
+    let mut selected = NumericRange::new(axis_value(scale, middle - half)?, axis_value(scale, middle + half)?)?;
+    if factor > 1.0 && selected == range {
+        // At the precision floor a fractional reverse notch can round both
+        // ends back to themselves. Move one representable value outward so
+        // fine wheels cannot get stuck at a numerical limit either.
+        let (low, high) = (range.low.next_down(), range.high.next_up());
+        if low.is_finite() && high.is_finite() { selected = NumericRange::new(low, high)?; }
+    }
+    Ok(selected)
 }
 
 /// The viewport one wheel burst asks for (`_on_scroll` on a 2-D surface).
 ///
-/// Anchored on the view the wheel last asked for, never on the drawn
+/// Anchored on the committed continuous view, never on the drawn
 /// limits (renders lag commits): `base_x` (already mapped to the axes'
 /// coordinates) and `base_y`, each `None` where nothing is asked, when the
-/// drawn limits stand in.  Only an image zooms y.  `fewest` is one source
-/// pixel in each axis' drawn space: the view is never asked to be narrower
-/// (the axis spanning the most pixels stops at one), so the first notch
-/// back out moves it again.
+/// drawn limits stand in. Only an image zooms y. Source pixels impose no
+/// navigation limit. `minimum_span` optionally adds a caller's lower bound
+/// in drawn space; otherwise only floating-point resolution limits zoom.
 #[allow(clippy::too_many_arguments)]
 pub fn wheel_viewport(
     base_x: Option<NumericRange>,
@@ -453,18 +463,42 @@ pub fn wheel_viewport(
     image_like: bool,
     zoom_factor: f64,
     ticks: f64,
-    fewest: Option<(f64, f64)>,
+    minimum_span: Option<(f64, f64)>,
 ) -> Result<(NumericRange, Option<NumericRange>)> {
     let mut factor = pow(zoom_factor, ticks)?;
     let sorted_range = |limits: (f64, f64)| { let (low, high) = sorted2(limits.0, limits.1); NumericRange::new(low, high) };
     let x_axes = match base_x { None => sorted_range(drawn_x)?, Some(x) => x };
     let y_axes = match base_y { None => sorted_range(drawn_y)?, Some(y) => y };
-    if let Some((pixel_x, pixel_y)) = fewest {
-        let floor = |range: NumericRange, scale: &AxisScale, pixel: f64| {
-            let span = (scale.space(range.high) - scale.space(range.low)).abs();
-            if span > 0.0 && span.is_finite() { pixel / span } else { 0.0 }
+    if factor < 1.0 {
+        let floor = |range: NumericRange, scale: &AxisScale, minimum: f64| {
+            let (low, high) = (scale.space(range.low), scale.space(range.high));
+            let span = (high - low).abs();
+            let centre = low / 2.0 + high / 2.0;
+            // Stay above the renderer's nonsingular-range expansion and
+            // leave enough representable values for transforms and ticks.
+            let mut resolution = (centre.abs() * (64.0 * f64::EPSILON))
+                .max(1e22 * f64::MIN_POSITIVE).max(minimum);
+            // A log axis around 1 has its drawn centre at zero. Its inverse
+            // still needs distinct floating-point *values*, as do converted
+            // or sample-lattice axes near their zero in drawn coordinates.
+            // Use the centre's precision, not the old endpoints': otherwise a
+            // large burst towards zero stops earlier than equivalent small steps.
+            let value = scale.value(centre);
+            let position = scale.space(value);
+            let delta = value.abs() * (64.0 * f64::EPSILON);
+            for neighbour in [value - delta, value + delta] {
+                let mapped = (scale.space(neighbour) - position).abs();
+                if mapped.is_finite() { resolution = resolution.max(mapped); }
+            }
+            if span > 0.0 && span.is_finite() { (resolution / span).min(1.0) }
+            else {
+                let half_span = (high / 2.0 - low / 2.0).abs();
+                if half_span > 0.0 && half_span.is_finite() { (resolution / 2.0 / half_span).min(1.0) } else { 1.0 }
+            }
         };
-        factor = py_max(factor, py_min(floor(x_axes, scales.0, pixel_x), floor(y_axes, scales.1, pixel_y)));
+        let (minimum_x, minimum_y) = minimum_span.unwrap_or((0.0, 0.0));
+        factor = py_max(factor, floor(x_axes, scales.0, minimum_x));
+        if image_like { factor = py_max(factor, floor(y_axes, scales.1, minimum_y)); }
     }
     let zoomed_x = wheel_zoom(x_axes, scales.0, factor)?;
     let zoomed_y = if image_like { Some(wheel_zoom(y_axes, scales.1, factor)?) } else { base_y };
@@ -503,8 +537,8 @@ pub fn zoom_to_selection(
 
 /// Follow a pan to the pointer at `pixel` (`_update_pan`): `true` when the
 /// view moved and the gesture holds a new candidate.  `x_from_axes` maps the
-/// axes' x into the viewport's (a pulse timeline's display unit), `snap`
-/// puts an image viewport on its pixel grid, `viewport_y` is the session's
+/// axes' x into the viewport's (a pulse timeline's display unit), `normalize`
+/// completes the continuous viewport, `viewport_y` is the session's
 /// own y override and `committed` its committed viewport.
 pub fn update_pan(
     gesture: &mut PanGesture,
@@ -514,13 +548,13 @@ pub fn update_pan(
     viewport_y: Option<NumericRange>,
     committed: Option<Viewport>,
     x_from_axes: impl FnOnce(NumericRange) -> Result<NumericRange>,
-    snap: impl FnOnce(Option<Viewport>) -> Result<Option<Viewport>>,
+    normalize: impl FnOnce(Option<Viewport>) -> Result<Option<Viewport>>,
 ) -> Result<bool> {
     let Some(point) = gesture.transform.display_point(pixel, canvas)? else { return Ok(false) };
     let Some(moved) = pan_rectangle(gesture.origin, point, gesture.x, gesture.y, image_like, &gesture.transform.x_scale,
                                     &gesture.transform.y_scale)? else { return Ok(false) };
     let selected: Viewport = (Some(x_from_axes(moved.x)?), if image_like { Some(moved.y) } else { viewport_y });
-    let selected = snap(Some(selected))?;
+    let selected = normalize(Some(selected))?;
     let current = gesture.candidate.or(committed);
     if current == selected { return Ok(false); }
     gesture.candidate = selected;

@@ -302,8 +302,9 @@ fn a_run_follows_only_an_exact_input_and_what_ends_early_leaves_with_its_signals
 #[test]
 fn sdk_lifecycle_acknowledgements_and_cleanup_keep_exclusive_ownership() {
     let Some(python) = std::env::var_os("ZLC_PLUGIN_PYTHON") else { return };
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/python_lifecycle.py");
-    let output = std::process::Command::new(python).arg(script).output().unwrap();
+    let tests = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let output = std::process::Command::new(python).args(["-m", "unittest", "discover", "-s"])
+        .arg(tests).args(["-p", "python*py", "-v"]).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
 
