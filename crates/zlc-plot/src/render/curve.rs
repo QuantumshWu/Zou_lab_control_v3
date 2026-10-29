@@ -221,8 +221,9 @@ pub struct CurveTables {
     pub locked: Option<Focus>,
     /// Wheel travel short of a whole notch, and the locked series it was
     /// made on: it counts only while that series is still the locked one.
-    pub wheel: Option<(SeriesId, f64)>,
-    pub press: Option<(f64, f64, Option<SeriesId>)>,
+    pub wheel: Option<(usize, Option<usize>, SeriesId, f64)>,
+    /// Axes and opened facet qualify a press as well as its group identity.
+    pub press: Option<(usize, Option<usize>, f64, f64, Option<SeriesId>)>,
     /// axes -> inspector annotation text id.
     pub annotations: BTreeMap<usize, ChildId>,
     pub focus_applied: BTreeMap<usize, FocusToken>,
@@ -579,6 +580,7 @@ impl Renderer {
 
     /// `restore_series_interaction(interaction, presentation)`.
     pub fn restore_series_interaction(&mut self, interaction: &Interaction, presentation: Option<&Presentation>) {
+        let previous_target = self.series_interaction().series_lock;
         let readout = presentation.and_then(|p| p.series_readout.clone());
         let target = interaction.series_lock.clone();
         let selected = target.clone().or_else(|| readout.as_ref().map(|r| r.target.clone()));
@@ -599,7 +601,7 @@ impl Renderer {
                         if target_key(&identity) == selected.key {
                             let anchor = self.series_start(axes, line).unwrap_or((0.0, 0.0));
                             let text = match &readout {
-                                Some(r) if r.target.key == target_key(&identity) => r.label.to_string(),
+                                Some(r) if r.target == selected => r.label.to_string(),
                                 _ => label.clone(),
                             };
                             let focus = Focus { axes, identity: identity.clone(), label: text, x: anchor.0, y: anchor.1 };
@@ -615,6 +617,10 @@ impl Renderer {
                 }
             }
         }
+        if previous_target != self.series_interaction().series_lock {
+            self.curve.press = None;
+            self.curve.wheel = None;
+        }
         self.apply_series_focus(None);
     }
 
@@ -627,6 +633,17 @@ impl Renderer {
                     && self.curve.series_lines.get(&focus.axes).is_some_and(|e| e.iter().any(|(_, id, _)| *id == focus.identity));
                 if !keep { if locked { self.curve.locked = None } else { self.curve.hover = None } }
             }
+        }
+        if self.curve.press.as_ref().is_some_and(|(axes, facet, _, _, identity)|
+            *facet != self.facet.focus || !self.series_focus_allowed(*axes)
+            || identity.as_ref().is_some_and(|identity| !self.curve.series_lines.get(axes)
+                .is_some_and(|entries| entries.iter().any(|(_, candidate, _)| candidate == identity)))) {
+            self.curve.press = None;
+        }
+        if self.curve.wheel.as_ref().is_some_and(|(axes, facet, identity, _)|
+            *facet != self.facet.focus || self.curve.locked.as_ref()
+                .is_none_or(|locked| locked.axes != *axes || locked.identity != *identity)) {
+            self.curve.wheel = None;
         }
         let locked = self.curve.locked.clone();
         let active = locked.clone().or_else(|| self.curve.hover.clone());
@@ -744,22 +761,24 @@ impl Renderer {
         let reach = radius * self.plan.device_pixel_ratio;
         let mut best = reach * reach;
         let mut hit = None;
-        let current = self.curve.hover.as_ref().map(|f| f.identity.clone());
+        let current = self.curve.hover.as_ref().filter(|f| f.axes == axes).map(|f| f.identity.clone());
         let mut entries = self.curve.series_lines.get(&axes).cloned().unwrap_or_default();
         if let Some(current) = &current {
             let (first, rest): (Vec<_>, Vec<_>) = entries.into_iter().partition(|(_, id, _)| id == current);
             entries = first.into_iter().chain(rest).collect();
         }
         let m = self.fig.axes[axes].trans_data(self.fig.size_inches, self.fig.dpi);
+        let (x_scale, y_scale) = (self.axis_scale(axes, true), self.axis_scale(axes, false));
         let xlim = self.fig.axes[axes].xlim;
         for (line_id, identity, label) in entries {
             if let Some(Child::Bars(bars)) = self.fig.axes[axes].child(line_id) {
                 // A histogram group is hit inside one of its bars.
                 if !bars.visible { continue; }
-                let model = &self.fig.axes[axes];
-                let data_x = (px - m.0[0][2]) / m.0[0][0];
-                let scaled_y = (py - m.0[1][2]) / m.0[1][1];
-                let data_y = if model.yaxis.log { 10f64.powf(scaled_y) } else { scaled_y };
+                // trans_data is only the affine part of transData. Undo both
+                // scales too (including a FuncScale retained from image cells).
+                let data_x = x_scale.value((px - m.0[0][2]) / m.0[0][0]);
+                let data_y = y_scale.value((py - m.0[1][2]) / m.0[1][1]);
+                if !data_x.is_finite() || !data_y.is_finite() { continue; }
                 let index = bars.edges.partition_point(|&edge| edge <= data_x) as i64 - 1;
                 if 0 <= index && (index as usize) < bars.counts.len() && 0.0 < data_y && data_y <= bars.counts[index as usize] {
                     hit = Some(Focus { axes, identity: identity.clone(), label: label.clone(), x: data_x, y: data_y });
@@ -769,9 +788,22 @@ impl Renderer {
                 continue;
             }
             let line = self.fig.axes[axes].line(line_id);
-            if !line.visible { continue; }
-            let (mut x, mut y) = (line.x.clone(), line.y.clone());
-            let mut sources: Option<Vec<usize>> = if line.marker == "_" {
+            // In fit mode the first source line is replaced by a scatter.
+            // v2 keeps that source selectable using exactly the visible dots,
+            // without inventing connecting segments between those dots.
+            let scatter = (!line.visible && self.fit.hidden_source_lines.iter()
+                .any(|&(owner, source, visible)| owner == axes && source == line_id && visible))
+                .then(|| self.fit.source_scatter).flatten()
+                .filter(|(owner, _)| *owner == axes)
+                .and_then(|(_, id)| match self.fig.axes[axes].child(id) {
+                    Some(Child::Scatter(scatter)) if scatter.visible => Some(scatter), _ => None,
+                });
+            if !line.visible && scatter.is_none() { continue; }
+            let (mut x, mut y): (Vec<f64>, Vec<f64>) = match scatter {
+                Some(scatter) => scatter.offsets.iter().map(|point| (point[0], point[1])).unzip(),
+                None => (line.x.clone(), line.y.clone()),
+            };
+            let mut sources: Option<Vec<usize>> = if scatter.is_none() && line.marker == "_" {
                 line.markevery.as_ref().map(|m| m.iter().map(|v| *v as usize).collect())
             } else { None };
             if x.len() > 4096 * 4 && sources.is_none() && x.iter().all(|v| v.is_finite()) && x.windows(2).all(|w| w[1] >= w[0]) {
@@ -781,9 +813,13 @@ impl Renderer {
                 x = x[start..stop].to_vec();
                 y = y[start..stop].to_vec();
             }
-            let finite: Vec<bool> = x.iter().zip(&y).map(|(a, b)| a.is_finite() && b.is_finite()).collect();
+            let mut finite: Vec<bool> = x.iter().zip(&y).map(|(a, b)| a.is_finite() && b.is_finite()).collect();
             let pixels: Vec<(f64, f64)> = x.iter().zip(&y).zip(&finite)
-                .map(|((&a, &b), &f)| if f { m.apply(a, b) } else { (f64::NAN, f64::NAN) }).collect();
+                .map(|((&a, &b), &f)| if f {
+                    let (sx, sy) = self.fig.axes[axes].scaled(a, b);
+                    m.apply(sx, sy)
+                } else { (f64::NAN, f64::NAN) }).collect();
+            for (valid, point) in finite.iter_mut().zip(&pixels) { *valid &= point.0.is_finite() && point.1.is_finite(); }
             let mut low = (f64::INFINITY, f64::INFINITY);
             let mut high = (f64::NEG_INFINITY, f64::NEG_INFINITY);
             for (p, f) in pixels.iter().zip(&finite) {
@@ -794,13 +830,13 @@ impl Renderer {
                 if p.1 > high.1 { high.1 = p.1; }
             }
             let finite_count = finite.iter().filter(|f| **f).count();
-            if sources.is_none() && finite_count == 1 {
+            if scatter.is_some() || sources.is_none() && finite_count == 1 {
                 sources = Some(finite.iter().enumerate().filter(|(_, f)| **f).map(|(i, _)| i).collect());
             }
             let sources = sources.unwrap_or_default();
             if px < low.0 - reach || px > high.0 + reach || py < low.1 - reach || py > high.1 + reach { continue; }
             let adjacent: Vec<usize> = (0..finite.len().saturating_sub(1)).filter(|&i| finite[i] && finite[i + 1]).collect();
-            if !adjacent.is_empty() {
+            if !adjacent.is_empty() && scatter.is_none() {
                 let mut best_local = (f64::INFINITY, 0usize, 0.0f64);
                 for &i in &adjacent {
                     let start = pixels[i];
@@ -839,10 +875,10 @@ impl Renderer {
         hit
     }
 
-    fn focus_state(&self) -> (&'static str, Option<SeriesId>) {
+    fn focus_state(&self) -> (&'static str, Option<(usize, SeriesId)>) {
         let active = self.curve.locked.as_ref().or(self.curve.hover.as_ref());
         (if self.curve.locked.is_some() { "locked" } else if self.curve.hover.is_some() { "hover" } else { "none" },
-         active.map(|f| f.identity.clone()))
+         active.map(|f| (f.axes, f.identity.clone())))
     }
 
     /// `series_focus(action, axes, px, py, hit_radius=..., click_radius=..., redraw=False)`.
@@ -856,29 +892,30 @@ impl Renderer {
             "press" => {
                 if !self.accepts_series_focus(axes) { return false; }
                 let hit = self.series_hit(axes, px, py, hit_radius);
-                self.curve.press = Some((px, py, hit.map(|h| h.identity)));
+                self.curve.press = Some((axes.unwrap(), self.facet.focus, px, py, hit.map(|h| h.identity)));
                 return false;
             }
             "move" => {
                 if self.curve.locked.is_some() { return false; }
                 let hit = if self.accepts_series_focus(axes) { self.series_hit(axes, px, py, hit_radius) } else { None };
-                if before.as_ref().map(|f| &f.identity) == hit.as_ref().map(|f| &f.identity) { return false; }
+                if before.as_ref().map(|f| (f.axes, &f.identity)) == hit.as_ref().map(|f| (f.axes, &f.identity)) { return false; }
                 self.curve.hover = hit;
             }
             "release" => {
                 let press = self.curve.press.take();
                 if !self.accepts_series_focus(axes) { return false; }
                 let Some(press) = press else { return false };
-                if (px - press.0).hypot(py - press.1) > click_radius * self.plan.device_pixel_ratio { return false; }
+                if axes != Some(press.0) || self.facet.focus != press.1 { return false; }
+                if (px - press.2).hypot(py - press.3) > click_radius * self.plan.device_pixel_ratio { return false; }
                 let hit = self.series_hit(axes, px, py, hit_radius);
-                if press.2 != hit.as_ref().map(|h| h.identity.clone()) { return false; }
+                if press.4 != hit.as_ref().map(|h| h.identity.clone()) { return false; }
                 handled = hit.is_some() || before.is_some();
                 self.curve.hover = None;
                 let same = hit.is_some() && self.curve.locked.is_some();
                 self.curve.locked = match hit {
                     None => None,
                     Some(hit) => {
-                        if same && self.curve.locked.as_ref().map(|l| &l.identity) == Some(&hit.identity) { None } else { Some(hit) }
+                        if same && self.curve.locked.as_ref().map(|l| (l.axes, &l.identity)) == Some((hit.axes, &hit.identity)) { None } else { Some(hit) }
                     }
                 };
             }
@@ -889,6 +926,7 @@ impl Renderer {
             }
             "clear" => {
                 self.curve.press = None;
+                self.curve.wheel = None;
                 self.curve.hover = None;
                 self.curve.locked = None;
             }
@@ -911,7 +949,10 @@ impl Renderer {
         // A whole notch is one series: a hi-res wheel or a touchpad sends a
         // notch as many small steps, each of which used to move a series.
         // The travel short of a notch is kept for the series it was made on.
-        let travel = step + match &self.curve.wheel { Some((identity, rest)) if *identity == locked.identity => *rest, _ => 0.0 };
+        let travel = step + match &self.curve.wheel {
+            Some((axes, facet, identity, rest)) if *axes == locked.axes && *facet == self.facet.focus && *identity == locked.identity => *rest,
+            _ => 0.0,
+        };
         // Steps summed in binary land a hair short of a whole notch (0.3 * 3 + 0.1).
         let notches = if (travel - travel.round()).abs() <= 1e-9 { travel.round() } else { travel.trunc() };
         let last = entries.len() as f64 - 1.0;
@@ -921,13 +962,13 @@ impl Renderer {
         let rest = if beyond { 0.0 } else { travel - notches };
         let target = target as usize;
         if target == current {
-            self.curve.wheel = Some((locked.identity, rest));
+            self.curve.wheel = Some((locked.axes, self.facet.focus, locked.identity, rest));
             return true;
         }
         let (line, identity, label) = entries[target].clone();
         let mut anchor = (locked.x, locked.y);
         if let Some(start) = self.series_start(locked.axes, line).filter(|s| s.0.is_finite() && s.1.is_finite()) { anchor = start; }
-        self.curve.wheel = Some((identity.clone(), rest));
+        self.curve.wheel = Some((locked.axes, self.facet.focus, identity.clone(), rest));
         self.curve.locked = Some(Focus { axes: locked.axes, identity, label, x: anchor.0, y: anchor.1 });
         self.apply_series_focus(None);
         true

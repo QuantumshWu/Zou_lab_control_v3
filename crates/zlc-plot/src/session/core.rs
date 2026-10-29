@@ -570,6 +570,14 @@ impl PlotSession {
     }
 
     fn present_body(&mut self, prepared: PreparedPlot, candidate: Arc<ResolvedConfiguration>, live_data: bool) -> Result<Arc<ResolvedConfiguration>> {
+        if !candidate.same_source {
+            // An unfinished press or fractional wheel belongs to its source,
+            // even when the replacement has identical axes and group names.
+            // Ordinary live frames on the same source keep these gestures.
+            let interaction = self.services.interaction;
+            self.renderer.series_focus(super::renderer::SeriesAction::Clear, None, 0.0, 0.0,
+                interaction.selector_handle_radius_px, interaction.double_click_radius_px)?;
+        }
         let previous_focus = self.pending.as_ref().expect("presentation begun").snapshot.facet_focus_index;
         let old_state = self.scene.display.state.clone();
         let changed: Vec<&'static str> = candidate.parameter_schema.names()
@@ -592,7 +600,7 @@ impl PlotSession {
         // A waiting panel can preview gestures without changing its accepted
         // configuration. Re-presenting that configuration must restore its
         // actual interaction state before the queued gestures are replayed.
-        if changed.is_empty() && !spec_changed && !science_changed && !data_changed && same_fit && same_classifier
+        if candidate.same_source && changed.is_empty() && !spec_changed && !science_changed && !data_changed && same_fit && same_classifier
             && self.scene.viewport == candidate.viewport && !selectors_changed
             && self.scene.focused_facet_index == candidate.focused_facet_index.map(|i| i as usize)
             && self.scene.size == candidate.size && old_state.interaction == candidate.interaction
