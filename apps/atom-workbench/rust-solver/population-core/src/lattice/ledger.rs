@@ -2,8 +2,9 @@
 //! remainder the folded lattice leaves out as a generator-norm bound (closed
 //! form, prepared from the classification). The error estimate builds one
 //! of them, the K^(1) rests the operator leaves out (`k1_rest`), into the
-//! slow modes' sources (`estimator`); the others (`unbuilt`) are reported
-//! only. Their action on the computed state, measured with the third order
+//! slow modes' sources (`estimator`), and the pipeline charges `nu_freeze`,
+//! delta min(t, tau), when the expansion parameter exceeds EXPANSION_LIMIT;
+//! the others are reported only (`unbuilt`, with `nu_freeze`). Their action on the computed state, measured with the third order
 //! and the fold's memory built (two to five lasers, 20 us
 //! to 10 ms, the steady state and the mean over 1 s): third order and memory
 //! at most 6e-6 each, every other remainder at most 2.6e-7, against the
