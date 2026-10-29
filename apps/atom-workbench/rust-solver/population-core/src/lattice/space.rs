@@ -235,8 +235,11 @@ pub fn ladder(eigen:&BlockEigenbasis,initial:&[C],t1:f64,longest:f64,tolerance:f
     let sigmas:Vec<f64>=(0..count).map(|i|high*(low/high).powf(i as f64/(count-1)as f64)).collect();
     let weights=eigen.mode_weights(initial)?;
     let mut poles:Vec<Pole>=sigmas.iter().map(|&s|Pole::Real(s)).collect();
+    // (research) ATOM_POLES_ALL: every x0-weighted dressed centre frequency is
+    // a candidate, the fast modes' too (no slowness filter |Re lambda| < s).
+    let every=std::env::var("ATOM_POLES_ALL").is_ok();
     for &s in &sigmas{
-        let mut frequencies:Vec<f64>=eigen.lambda.iter().zip(&weights).filter(|(l,&w)|l.re.abs()<s&&l.im>s&&w>=COMPLEX_WEIGHT*tolerance).map(|(l,_)|l.im).collect();
+        let mut frequencies:Vec<f64>=eigen.lambda.iter().zip(&weights).filter(|(l,&w)|(every||l.re.abs()<s)&&l.im>s&&w>=COMPLEX_WEIGHT*tolerance).map(|(l,_)|l.im).collect();
         frequencies.sort_by(f64::total_cmp);
         let mut chosen=vec![0.];
         for w in frequencies{if chosen.iter().all(|&v|(w-v).abs()>s){chosen.push(w);}}

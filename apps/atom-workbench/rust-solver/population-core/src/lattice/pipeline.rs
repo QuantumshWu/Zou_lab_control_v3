@@ -364,6 +364,9 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
     let mut x=vec![ZERO;size];x[centre*d..(centre+1)*d].copy_from_slice(initial);
     let zero=vec![ZERO;size];let mut inner=0usize;
     let mut exact=vec![x.clone()];
+    static EXACT:std::sync::Mutex<Option<(Vec<f64>,usize,Vec<Vec<C>>)>>=std::sync::Mutex::new(None);
+    let cached=EXACT.lock().ok().and_then(|g|g.as_ref().filter(|(t,s,_)|*t==times&&*s==size).map(|(_,_,e)|e.clone()));
+    if let Some(e)=cached{exact=e;}else{
     for _ in 1..times.len(){
         for _ in 0..sub{
             // x <- x + sum over the pairs 2 Re[(r/h) (A - z/h)^-1 x] (R(inf) = (-1)^8 = 1).
@@ -377,7 +380,28 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
         }
         exact.push(x.clone());
     }
+    if let Ok(mut g)=EXACT.lock(){*g=Some((times.clone(),size,exact.clone()));}
+    }
     let basis:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();
+    // The growing modes: the projected ones' initial mismatch E(0) = x0 - W u(0)
+    // (physical trace norm / 2: a contraction's bound on its contribution at
+    // every time) and the clipped ones' change of the model trajectory,
+    // sum a (e^{theta t} - e^{theta' t}) W s, at the diagnosed times.
+    let growing={
+        let r=model.r;let xm=ops.combinations(&basis,&[model.state(0.)])?.remove(0);
+        let mut e0=vec![ZERO;d];for q in 0..modes{for k in 0..d{e0[k].re-=xm[q*d+k].re;e0[k].im-=xm[q*d+k].im;}}
+        for k in 0..d{e0[k].re+=initial[k].re;e0[k].im+=initial[k].im;}
+        let mut cm=vec![ZERO;d];for i in 0..n{for j in 0..n{cm[i+n*j]=e0[i*n+j];}}
+        let(values,_)=prepared.lapack.complex_eigen_right(&cm,n)?;let half=0.5*values.iter().map(|z|z.re.abs()).sum::<f64>();
+        let clipped:Vec<usize>=(0..r).filter(|&j|!model.kernel[j]&&!model.projected_out[j]&&model.theta[j].re>0.&&model.used_theta[j].re==0.).collect();
+        let change:Vec<f64>=times.iter().map(|&t|->Result<f64,String>{
+            if clipped.is_empty(){return Ok(0.);}
+            let u:Vec<f64>=(0..r).map(|i|clipped.iter().fold(0.,|acc,&j|{let a=model.used_coefficients[j];
+                let dz=C{re:cexp(model.theta[j],t).re-cexp(model.used_theta[j],t).re,im:cexp(model.theta[j],t).im-cexp(model.used_theta[j],t).im};acc+mul(model.vectors[i*r+j],mul(dz,a)).re})).collect();
+            let v=ops.combinations(&basis,&[u])?.remove(0);
+            let p:Vec<f64>=(0..n).map(|i|(0..modes).map(|q|{let z=v[q*d+i*n+i];let(c,s)=((nu[q]*t).cos(),(nu[q]*t).sin());c*z.re-s*z.im}).sum()).collect();
+            Ok(p.iter().map(|x|x.abs()).fold(0.,f64::max))}).collect::<Result<_,_>>()?;
+        format!(",\"projected\":{},\"clipped\":{},\"growthCharge\":{:?},\"projectedTraceNorm\":{half:?},\"clippedChange\":{change:?}",model.projected,model.clipped,model.growth_charge)};
     let mut rows=Vec::new();let mut exact_pops=Vec::new();let mut model_pops=Vec::new();
     for(ti,&t)in times.iter().enumerate(){
         let xm=ops.combinations(&basis,&[model.state(t)])?.remove(0);
@@ -419,7 +443,7 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
     // trace-norm contraction, r(s) = A W u(s) - W u'(s) read physically
     // (sum_q e^{i nu_q s} r_q), by the trapezoid rule on 40 points per grid
     // interval.
-    let residual_integral={
+    let residual_integral=if std::env::var("ATOM_DIAG_RESINT").is_err(){Vec::new()}else{
         let lapack=&prepared.lapack;let r=model.r;let images:Vec<&[C]>=space.images.iter().map(|v|v.as_slice()).collect();
         let derivative=|t:f64|->Vec<f64>{let e:Vec<C>=(0..r).map(|j|mul(model.used_theta[j],mul(cexp(model.used_theta[j],t),model.used_coefficients[j]))).collect();
             (0..r).map(|i|(0..r).fold(0.,|acc,j|acc+mul(model.vectors[i*r+j],e[j]).re)).collect()};
@@ -438,7 +462,7 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
             if step>0&&step%per==0{out.push(acc);}
         }
         out};
-    let line=format!("{{\"solves\":{solves},\"columns\":{},\"times\":{times:?},\"h\":{h:?},\"inner\":{inner},\"seconds\":{:?},\"charges\":{charges:?},\"nu\":{nu:?},\"error\":{rows:?},\"exact\":{exact_pops:?},\"model\":{model_pops:?},\"residualIntegral\":{residual_integral:?}{full}{classes}}}",
+    let line=format!("{{\"solves\":{solves},\"columns\":{},\"times\":{times:?},\"h\":{h:?},\"inner\":{inner},\"seconds\":{:?},\"charges\":{charges:?},\"nu\":{nu:?},\"error\":{rows:?},\"exact\":{exact_pops:?},\"model\":{model_pops:?},\"residualIntegral\":{residual_integral:?}{growing}{full}{classes}}}",
         space.basis.len(),clock.elapsed().as_secs_f64());
     use std::io::Write;let mut f=std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e|e.to_string())?;writeln!(f,"{line}").map_err(|e|e.to_string())?;
     Ok(())
@@ -460,6 +484,9 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let explicit=match completion{Some(c)=>c.explicit.clone(),None=>request.explicit.get_or_init(||charge_set::explicit_set(prepared,initial,tolerance)).clone()?};
     timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
     let keep_k1=completion.is_some_and(|c|c.keep_k1);
+    // (research) ATOM_REF_SOLVES=N: a run to N solves, never accepted, no plateau.
+    let reference=std::env::var("ATOM_REF_SOLVES").ok().and_then(|v|v.parse::<usize>().ok());
+    let maximum_solves=reference.unwrap_or(MAXIMUM_SOLVES);
     let clock=Instant::now();
     let mut lattice=Lattice::with_k1_rests(prepared,explicit.sets.clone(),keep_k1)?;
     let ledger=lattice.operator().ledger()?;
@@ -514,7 +541,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let mut decided:Option<Completion>=None;
     loop{
         let live:Vec<usize>=(0..points.len()).filter(|&i|alive[i]).collect();
-        let exhausted=live.is_empty()||space.solves()>=MAXIMUM_SOLVES||space.full();
+        let exhausted=live.is_empty()||space.solves()>=maximum_solves||space.full();
         if exhausted||space.solves()%CHECKPOINT==0||(times.is_empty()&&space.solves()==1){
             // 3. The checkpoint: model, outputs, estimate, bounds.
             let clock=Instant::now();
@@ -560,7 +587,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                     steady_residual,estimate:estimate.clone(),
                     conserved:if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{model.conserved()},
                     slowest:pairs.first().map(|p|p.0),accepted:false};
-                answer.accepted=answer.largest()<=tolerance;
+                answer.accepted=answer.largest()<=tolerance&&reference.is_none();
                 answer};
             let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,largest:answer.largest(),accepted:answer.accepted,
                 growing:model.growing,clipped:model.clipped,projected:model.projected,conserved:answer.conserved,slowest:answer.slowest,
@@ -623,7 +650,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             // tolerance is accepted).
             progress.push(answer.largest());
             let last=progress.len()-1;
-            let plateau=last>=PLATEAU&&{
+            let plateau=reference.is_none()&&last>=PLATEAU&&{
                 let before=progress[..=last-PLATEAU].iter().copied().fold(f64::INFINITY,f64::min);
                 let recent=progress[last+1-PLATEAU..].iter().copied().fold(f64::INFINITY,f64::min);
                 recent>before/PLATEAU_GAIN};
@@ -662,7 +689,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             if !alive[i]{continue;}
             solved_at[i]=Some(score[i]);
             if space.solve(&mut lattice,points[i])?==0{alive[i]=false;}
-            if space.solves()%CHECKPOINT==0||space.solves()>=MAXIMUM_SOLVES||space.full(){break;}
+            if space.solves()%CHECKPOINT==0||space.solves()>=maximum_solves||space.full(){break;}
         }
     }
     let answer=best.ok_or("A run has its checkpoint")?;
