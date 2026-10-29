@@ -66,7 +66,7 @@ fn woodbury_factors(prepared:&LatticePrepared)->(Vec<C>,Vec<C>,usize){
         if slot[row]!=usize::MAX{add(&mut rows[slot[row]*d+col],v);}};
     for(p,q)in &generator.zero_component().op.sandwich{for &(i,k,a)in &p.entries{for &(l,j,b)in &q.entries{put(i*n+j,k*n+l,mul(a,b));}}}
     if let Some(t)=prepared.fold.targets.first().filter(|t|t.charge==generator.zero){
-        let rest=&t.rest[0];
+        let rest=t.applied(0);
         for block in &rest.blocks{let h=block.rows.len();
             for(c,&col)in block.cols.iter().enumerate(){for(i,&row)in block.rows.iter().enumerate(){put(row as usize,col as usize,block.values[i+h*c]);}}}
         let s=&rest.sparse;
@@ -239,7 +239,7 @@ mod tests{
         for r in 0..d{m[r*d+r].im-=nu;m[r*d+r].re-=sigma.re;m[r*d+r].im-=sigma.im;}
         if woodbury{
             let mut w=vec![ZERO;d*d];Superop{left:Sparse::default(),right:Sparse::default(),sandwich:zero.op.sandwich.clone()}.dense_into(n,ONE,&mut w);
-            t.rest[0].dense_into(d,ONE,&mut w);let ground=|q:usize|p.generator.ground[q/n]&&p.generator.ground[q%n];
+            t.applied(0).dense_into(d,ONE,&mut w);let ground=|q:usize|p.generator.ground[q/n]&&p.generator.ground[q%n];
             for r in 0..d{for c in 0..d{if ground(r)||ground(c){add(&mut m[r*d+c],w[r*d+c]);}}}
         }
         m

@@ -45,10 +45,15 @@
 //! two at 1e-3).
 //!
 //! e^{tA} Y_k: Y's part in the space, W r0 (r0 = W^T Y), is propagated by
-//! the reduced model, W S e^{theta t} S^-1 r0 (a kernel mode's without its
-//! kernel coordinates, `populations`);
-//! the rest decays at the fast rates and is propagated by the dressed blocks
-//! of L0' on the near modes only (its readout elsewhere is micromotion).
+//! the reduced model, W S e^{theta t} S^-1 r0 (`populations`); a kernel
+//! mode's Y is trace free and so is its part in the space (the trace carrier
+//! is the basis' first column, `space`), so the reduced model propagates it
+//! without a conserved trace; the rest, on the near modes only (its readout
+//! elsewhere is micromotion), is propagated by the frame's second-order
+//! block, the fast part's, which carries the near lasers' pumping: with
+//! L0''s blocks alone its slow ground-population parts barely decayed, and
+//! five lasers at 10 ms read 4e-5 at the last sample against a steady error
+//! of 2.2e-4 that the same solve's T = infinity estimate (2.4e-4) covered.
 use super::super::*;
 use super::super::estimate_api::SteadySolves;
 use super::lattice::{ErrorLattice,split};
@@ -604,14 +609,11 @@ impl SlowPool{
     /// Population errors (one row per time) of the slow modes,
     /// sum_k a_k (e^{theta_k t} Y_k - e^{tA} Y_k), for the reduced model's
     /// eigenvectors S (r x r, column-major, r = basis.len()), the values theta
-    /// (r) the outputs use and its kernel modes `kernel`. A kernel mode's Y
-    /// (the steady error) is trace free: the true e^{tA} Y decays, so its
-    /// projection on the space is propagated without its kernel coordinates
-    /// (which the reduced model would keep forever; measured: early
-    /// checkpoints of three and four lasers 0.88 and 2.3 of the actual error
-    /// without, 1.00-1.01 with).
+    /// (r) the outputs use. A kernel mode's Y (the steady error) is trace
+    /// free, and so is its projection on the space (whose trace carrier is the
+    /// first basis column): the reduced model propagates it as it is.
     #[allow(clippy::too_many_arguments)]
-    pub fn populations(&mut self,lattice:&ErrorLattice<'_>,basis:&[Vec<C>],s:&[C],theta:&[C],kernel:&[usize],solutions:&[SlowSolution],times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
+    pub fn populations(&mut self,lattice:&ErrorLattice<'_>,basis:&[Vec<C>],s:&[C],theta:&[C],solutions:&[SlowSolution],times:&[f64],readout:Readout)->Result<Vec<Vec<f64>>,String>{
         let(n,d,k,r)=(self.n,self.d,basis.len(),theta.len());let t_count=times.len();
         if solutions.is_empty()||t_count==0{return Ok(vec![vec![0.;n];t_count]);}
         let lapack=Arc::clone(&self.lapack);
@@ -624,8 +626,7 @@ impl SlowPool{
         let mut ritz_weights=vec![ZERO;r];let mut in_space:Vec<Vec<C>>=Vec::new();let mut remainders:Vec<(usize,C,C,Vec<C>)>=Vec::new();
         for sol in solutions{
             let(r0,near)=self.parts(basis,&gram,sol);
-            let mut cs=lapack.complex_solve_matrix_factored(&lu_s,&piv_s,&r0,r)?;
-            if sol.kernel{for &j in kernel{cs[j]=ZERO;}}
+            let cs=lapack.complex_solve_matrix_factored(&lu_s,&piv_s,&r0,r)?;
             for(w,c)in ritz_weights.iter_mut().zip(&cs){mul_add(w,sol.coefficient,*c);}
             let xr=r0;
             for(slot,&q)in self.near.iter().enumerate(){
@@ -648,15 +649,19 @@ impl SlowPool{
             for(sol,xr)in solutions.iter().zip(&in_space){let mut v=vec![ZERO;n];gemm.multiply(n,1,k,ONE,&rows,n,xr,k,ZERO,&mut v,n)?;constants.push((sol.coefficient,sol.theta,v));}
             Ok((q,rb,constants))}).into_iter().collect::<Result<Vec<_>,_>>()?;
         // The remainders on the near modes: e^{i nu_q t} e^{theta_k t} Y_perp
-        // - its dressed-block propagation R diag(a c) e^{lambda t}, which
-        // carries no phase of its own: every remainder's decay is one
-        // H = R diag(sum a c) for all of them.
-        let lambda:Vec<C>=lattice.basis()?.lambda.iter().map(|z|C{re:z.re.min(0.),im:z.im}).collect();
+        // - its propagation by the frame's second-order block, R diag(a c)
+        // e^{mu t} (class coordinates c = V^-1 E^-1 Y_perp, R the population
+        // rows of E V), which carries no phase of its own: every remainder's
+        // decay is one H = R diag(sum a c) for all of them.
+        let class=lattice.class()?;
+        let mu:Vec<C>=class.values.iter().map(|z|C{re:z.re.min(0.),im:z.im}).collect();
         let mut rises:Vec<(usize,C,C,Vec<C>)>=Vec::with_capacity(remainders.len());let mut decay:Option<Vec<C>>=None;
         if !remainders.is_empty(){
-            let readout_rows=lattice.basis()?.population_rows();
+            let readout_rows=&class.readout[..];
             let blocks:Vec<&[C]>=remainders.iter().map(|x|&x.3[..]).collect();
-            let coefficients=lattice.basis()?.coefficients(&blocks)?;self.work.frame_blocks+=remainders.len();
+            let eigen=lattice.basis()?.coefficients(&blocks)?;self.work.frame_blocks+=2*remainders.len();
+            let mut coefficients=vec![ZERO;eigen.len()];
+            lapack.complex_gemm().multiply(d,remainders.len(),d,ONE,&class.inverse,d,&eigen,d,ZERO,&mut coefficients,d)?;
             let mut weights=vec![ZERO;d];
             for(i,(q,a,th,y))in remainders.iter().enumerate(){
                 for(j,w)in weights.iter_mut().enumerate(){mul_add(w,*a,coefficients[j+d*i]);}
@@ -670,7 +675,7 @@ impl SlowPool{
         let per_time=per_mode.len()*n*r+usize::from(decay.is_some())*n*d+rises.len()*n;
         let width=super::time_chunk(t_count,per_time);
         let chunks:Vec<(usize,usize)>=(0..t_count).step_by(width).map(|a|(a,(a+width).min(t_count))).collect();
-        let(ritz_weights,per_mode,rises,decay,lambda)=(&ritz_weights,&per_mode,&rises,&decay,&lambda);
+        let(ritz_weights,per_mode,rises,decay,mu)=(&ritz_weights,&per_mode,&rises,&decay,&mu);
         let parts=self.execution.map(chunks,|(a0,b0)|->Result<Vec<C>,String>{
             let(gemm,ts,tc)=(lapack.complex_gemm(),&times[a0..b0],b0-a0);
             let mut total=vec![ZERO;n*tc];
@@ -689,7 +694,7 @@ impl SlowPool{
                     for row in 0..n{mul_add(&mut total[row+n*ti],ph,y[row]);}}
             }
             if let Some(h)=decay{
-                let block:Vec<C>=ts.iter().flat_map(|&t|lambda.iter().map(move|&z|cexp(z,t))).collect();
+                let block:Vec<C>=ts.iter().flat_map(|&t|mu.iter().map(move|&z|cexp(z,t))).collect();
                 let mut dec=vec![ZERO;n*tc];gemm.multiply(n,tc,d,ONE,h,n,&block,d,ZERO,&mut dec,n)?;
                 for(t,v)in total.iter_mut().zip(&dec){t.re-=v.re;t.im-=v.im;}
             }

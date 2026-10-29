@@ -123,8 +123,9 @@ const LADDER_SAMPLES:f64=200.;
 /// kernel 1.6 (trace 1.00, weight 0.63): a margin of 100x and 3x.
 const KERNEL_TRACE_SHARE:f64=0.5;
 /// Completion (`solve`): at the first checkpoint, a bound above the
-/// tolerance of which the slow part (the ring's feedback and the K^(1) rests
-/// the lattice leaves out) carries at least COMPLETION_SHARE is completed.
+/// tolerance of which the slow part (the ring's feedback and what the
+/// lattice operator leaves out of the second-order far shell, the K^(1)
+/// rests it drops among it) carries at least COMPLETION_SHARE is completed.
 /// Measured (three lasers at B = 0 and 1 mG, p(1 s)): at the first
 /// checkpoint the Krylov part is 1e-11 of bounds of 7.1-7.4e-3, the ring's
 /// part 3.8-4.3e-3 and the K^(1) rests' 1.1-1.2e-2 (signed parts, partly
@@ -135,8 +136,9 @@ const KERNEL_TRACE_SHARE:f64=0.5;
 /// 1.6e-3.
 const COMPLETION_SHARE:f64=0.5;
 /// A source of the slow part joins the lattice while its part (bound units)
-/// is at least COMPLETION_FLOOR x tolerance: the K^(1) rests the lattice
-/// leaves out, and the ring charges by decreasing attribution while the
+/// is at least COMPLETION_FLOOR x tolerance: the K^(1) rests, kept when the
+/// operator drops them and the part of what it leaves out reaches the floor,
+/// and the ring charges by decreasing attribution while the
 /// ring's part they leave (its unpromoted share of the attribution) reaches
 /// it. Measured: K^(1) rests and ring each alone fail (both lattices' means
 /// stayed 1.3-2.0e-3 off with either change alone, 4e-5 and 1.7e-4 with
@@ -414,7 +416,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             // 3. The checkpoint: model, outputs, estimate, bounds.
             let clock=Instant::now();
             galerkin.ingest(&space.basis,&space.images)?;
-            let model=galerkin.model(lapack,space.initial_norm,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
+            let model=galerkin.model(lapack,&space.initial,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
             timing.projection_ms=galerkin.milliseconds;timing.images_ms=space.images_ms;
             let outputs_clock=Instant::now();
             let mut trajectory=model.trajectory(&galerkin,times);
@@ -478,7 +480,8 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                         used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out};
                     let pick=|x:&ErrorEstimate|ACCEPTANCE_FACTOR*if at<off{x.trajectory[at]}else if at<off+horizons_count{x.horizons[at-off]}else{x.steady.unwrap_or(0.)};
                     let floor=COMPLETION_FLOOR*tolerance;
-                    // The K^(1) rests' part, when the lattice leaves any out.
+                    // The part of what the operator leaves out, when it drops K^(1)
+                    // rests (keeping them is what completes that source).
                     let drops=lattice.operator().drops_k1_rests();
                     let k1_part=if drops{pick(&estimator.estimate_alone(&view,&mut lattice,Source::K1)?)}else{0.};
                     let keep=drops&&k1_part>=floor;
@@ -536,7 +539,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
         // The next pole by its expected gain.
         let clock=Instant::now();
         let model=match current.take(){Some((solves,model))if solves==space.solves()=>model,_=>{
-            galerkin.ingest(&space.basis,&space.images)?;galerkin.model(lapack,space.initial_norm,longest,tolerance)?}};
+            galerkin.ingest(&space.basis,&space.images)?;galerkin.model(lapack,&space.initial,longest,tolerance)?}};
         let xis:Vec<C>=live.iter().map(|&i|points[i].sigma()).collect();
         let transform=model.error_transform(&galerkin,&space.basis,&space.images,eigen,lapack,&xis)?;
         for(&i,p)in live.iter().zip(&transform){

@@ -96,12 +96,14 @@ pub struct EstimateSetup<'a>{
 /// The reduced model of one checkpoint.
 pub struct ReducedView<'a>{
     /// W: orthonormal (Re <w_i, w_j> = delta_ij) fields on the lattice's
-    /// modes, w_0 = x0 / |x0|, and their images A W (computed explicitly with
-    /// the lattice operator on P u Q).
+    /// modes, w_0 = u / |u| the trace carrier and every other column trace
+    /// free (`space`), and their images A W (computed explicitly with the
+    /// lattice operator on P u Q).
     pub basis:&'a[Vec<C>],pub images:&'a[Vec<C>],
-    /// The Ritz decomposition of the Galerkin model G = Re W^T A W (with the
-    /// trace correction; not a pure projection: the residual A W - W G is
-    /// what the outputs leave out): G S = S diag(theta), S (r x r,
+    /// The Ritz decomposition of the Galerkin model G (the carrier's
+    /// coefficient fixed, the trace-free rows by the Galerkin condition on the
+    /// trace-free columns, `reduced`; the residual A W - W G is what the
+    /// outputs leave out): G S = S diag(theta), S (r x r,
     /// row-major, column j the eigenvector of theta_j), r = basis.len(). The
     /// outputs use u(t) = S diag(e^{used_theta t}) used_coefficients: the
     /// values and coefficients differ from theta and S^-1 c0 only on growing
@@ -146,9 +148,8 @@ pub struct EstimateWork{
     pub block_operations:usize,pub block_solves:usize,
     /// Time (ms).
     pub milliseconds:f64,
-    /// Slow modes solved, whether the trajectory (the grid) took the slow
-    /// part, and the slowest decay rate the time rule read (1/us).
-    pub slow_modes:usize,pub slow_grid:bool,pub lambda_slow:f64,
+    /// Slow modes solved.
+    pub slow_modes:usize,
 }
 
 /// Estimated errors of one checkpoint's outputs (population metric).
