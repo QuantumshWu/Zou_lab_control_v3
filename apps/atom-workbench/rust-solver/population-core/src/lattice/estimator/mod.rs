@@ -62,12 +62,21 @@
 //!   0.29-0.72 -> 0.93-1.29, the accepted checkpoints unchanged), but the
 //!   three-laser D2 scenes' trajectories with p(1 s) are lost: ex_three's
 //!   bound 2.7e-3 -> 7.6e-2 (error 4.1e-4, a partial result), b1mG_three
-//!   3.8e-3 -> 1.4e-2, b0_three and both_tweezer at 44 and 20 solves instead
-//!   of 16 and 8. There the slow modes (rates 0.017-0.04 /us, coefficients up
-//!   to 1.4) take the ring's feedback in the exact form, and Y's part outside
-//!   the space goes through L0''s blocks, which lack the pumping: the early
-//!   times read Y's late response (Rust-B's late-time decomposition at 10 ms,
-//!   the same propagation). The rule stays until that propagation is exact.
+//!   3.8e-3 -> 1.5e-2, b0_three and both_tweezer at 44 and 24 solves instead
+//!   of 16 and 8. The cause is the slow modes' own residuals charged apart
+//!   (above): split from the other modes', the Krylov residual loses its
+//!   cancellation across modes. The slow part's propagation of Y is not it:
+//!   with Y's part outside the space on the frame's second-order block the
+//!   four scenes stay lost. Summed signed with the other modes' instead,
+//!   ex_three's 4- and 8-solve bounds fall from 0.16 and 8.1e-2 to 1.7e-2
+//!   and 3.2e-3 and it converges at 8 solves, both_tweezer at 12; but a slow
+//!   mode's own residual responds through (theta - A)^-1 F = -W b, a
+//!   near-resonance the SW part does not hold late (five lasers at 10 ms,
+//!   4 solves: worst per-time ratio 1.31 -> 0.80, 14 samples under near
+//!   0.45 ms), and b0_three and b1mG_three stop on the plateau at 8.4e-3 and
+//!   7.6e-3, their slow parts 6.9e-3 and 6.1e-3 against errors of 1.7e-3 and
+//!   1.9e-3. The rule stays until a slow mode's own residual has one model
+//!   that holds early and late.
 //!   On the trace-corrected basis it had a second reason: the corrected
 //!   kernel vector and slow pairs were no Galerkin vectors, and always taking
 //!   the slow part gave per-time ratios down to 0.03. A horizon always takes
