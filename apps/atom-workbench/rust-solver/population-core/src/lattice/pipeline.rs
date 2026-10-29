@@ -283,12 +283,13 @@ fn class_rates(frame:&SwFrame<'_>,eigen:&BlockEigenbasis,lapack:&Lapack,initial:
 /// slow rates) and whether the classes `classes` slower than its rate /
 /// CLASS_GAP are matched: the residual cannot see a slow class the space
 /// lacks.
-fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:&[f64],tolerance:f64)->Result<Vec<(SlowRate,f64)>,String>{
+fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:&[f64],tolerance:f64,lattice:&mut Lattice<'_>)->Result<Vec<(SlowRate,f64)>,String>{
     let chosen=model.slow_candidates(CANDIDATE_WEIGHT*tolerance);
     if chosen.is_empty(){return Ok(Vec::new());}
     let parts:Vec<Vec<f64>>=chosen.iter().flat_map(|&(j,_)|{let y=model.ritz_coordinates(j);[y.iter().map(|z|z.re).collect(),y.iter().map(|z|z.im).collect()]}).collect();
     let basis:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();let images:Vec<&[C]>=space.images.iter().map(|v|v.as_slice()).collect();
-    let(w,aw)=(vectors.combinations(&basis,&parts)?,vectors.combinations(&images,&parts)?);
+    let w=vectors.combinations(&basis,&parts)?;
+    let aw=if space.images.first().is_some_and(|v|v.is_empty()){w.iter().map(|x|{let mut y=vec![ZERO;x.len()];lattice.apply(x,&mut y).map(|_|y)}).collect::<Result<Vec<_>,_>>()?}else{vectors.combinations(&images,&parts)?};
     let found:Vec<(f64,f64,f64)>=chosen.iter().enumerate().map(|(c,&(j,rate))|{
         let theta=model.theta[j];let(wr,wi,ar,ai)=(&w[2*c],&w[2*c+1],&aw[2*c],&aw[2*c+1]);
         // A W y - theta W y, real and imaginary parts.
@@ -347,6 +348,30 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
 /// populations Re e^{i nu_q t} E_q[ii]. One JSON line per checkpoint.
 fn basis_cols(space:&Space)->Vec<&[C]>{space.basis.iter().map(|v|v.as_slice()).collect()}
 #[allow(clippy::too_many_arguments)]
+/// (research, S4) Acceptance by convergence: per output (trajectory sample,
+/// horizon, steady state), Delta2 = |x_k - x_k-1| and Delta1 = |x_k-1 - x_k-2|
+/// over the last three checkpoints, r = Delta2 / Delta1, the estimate
+/// Delta2 r / (1 - r); r at or above R_LIMIT is stagnation, reported as at
+/// least twice the tolerance (not accepted); Delta2 below FLOOR x tolerance
+/// is converged to roundoff. Fewer than three levels: unknown (1). The
+/// estimates are returned over ACCEPTANCE_FACTOR (the pipeline multiplies).
+const R_LIMIT:f64=0.8;const FLOOR:f64=1e-3;
+fn convergence_estimate(h:&[(Vec<Vec<f64>>,Vec<Vec<f64>>,Vec<f64>)],groups:&[Vec<usize>],tolerance:f64,steady:bool)->ErrorEstimate{
+    let k=h.len();let unknown=1./ACCEPTANCE_FACTOR;
+    // One output's estimates from its components' changes (the trajectory
+    // is one output: its ratio from the largest changes over the grid).
+    let output=|d1:&[f64],d2:&[f64]|->Vec<f64>{
+        let(m1,m2)=(d1.iter().copied().fold(0.,f64::max),d2.iter().copied().fold(0.,f64::max));
+        let converged=m2<=FLOOR*tolerance;let r=if m1>0.{m2/m1}else{f64::INFINITY};
+        d2.iter().map(|&x|(if converged{x}else if r<R_LIMIT{x*r/(1.-r)}else{(x*R_LIMIT/(1.-R_LIMIT)).max(2.*tolerance)})/ACCEPTANCE_FACTOR).collect()};
+    let one=|a:&[f64],b:&[f64],c:&[f64]|->f64{output(&[ledger::metric(b,a,groups)],&[ledger::metric(c,b,groups)])[0]};
+    let(t,hz,s)=(&h[k-1].0,&h[k-1].1,&h[k-1].2);
+    if k<3{return ErrorEstimate{trajectory:vec![unknown;t.len()],horizons:vec![unknown;hz.len()],steady:steady.then_some(unknown),..Default::default()};}
+    let(a,b)=(&h[k-3],&h[k-2]);
+    let d1:Vec<f64>=(0..t.len()).map(|i|ledger::metric(&b.0[i],&a.0[i],groups)).collect();let d2:Vec<f64>=(0..t.len()).map(|i|ledger::metric(&t[i],&b.0[i],groups)).collect();
+    ErrorEstimate{trajectory:output(&d1,&d2),horizons:(0..hz.len()).map(|i|one(&a.1[i],&b.1[i],&hz[i])).collect(),
+        steady:steady.then(||one(&a.2,&b.2,s)),..Default::default()}
+}
 /// (research, S3) E^-1 coordinates of blocks, column-major d x count.
 fn eig_coefficients(eigen:&BlockEigenbasis,blocks:&[&[C]])->Result<Vec<C>,String>{eigen.coefficients(blocks)}
 /// (research, S2) e^A for a real column-major r x r matrix: scaling and
@@ -612,6 +637,17 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             let c=((BASIS_BYTES as f64+headroom)/column)as usize;eprintln!("DBG basis capacity {c} columns (budget {:.1} GB, planned {:.1} GB)",budget/1e9,planned/1e9);c
         }else{BASIS_BYTES/(std::mem::size_of::<C>()*2*d*op.modes.len())}};
     let mut space=Space::new(&mut lattice,initial,capacity)?;
+    // (research, S3) ATOM_DIAG_ADJOINT: Re <y, A x> against Re <A^H y, x> on
+    // random Hermitian-symmetric fields.
+    if std::env::var("ATOM_DIAG_ADJOINT").is_ok(){
+        let(n,size,canonical,mirror)={let op=lattice.operator();(op.n,op.dimension(),op.canonical.clone(),op.mirror.clone())};
+        let field=|seed:u64|->Vec<C>{let mut st=seed;let mut v:Vec<C>=(0..size).map(|_|{st=st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);let a=((st>>11)as f64/(1u64<<53)as f64)-0.5;
+            st=st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);let b=((st>>11)as f64/(1u64<<53)as f64)-0.5;C{re:a,im:b}}).collect();mirror_field(&mut v,n,&canonical,&mirror);v};
+        let(x,y)=(field(7),field(11));let mut ax=vec![ZERO;size];lattice.apply(&x,&mut ax)?;let ay=lattice.operator().apply_adjoint(&y)?;
+        let dot=|a:&[C],b:&[C]|a.iter().zip(b).map(|(u,v)|u.re*v.re+u.im*v.im).sum::<f64>();
+        let(l,r)=(dot(&y,&ax),dot(&ay,&x));let scale=dot(&ax,&ax).sqrt()*dot(&y,&y).sqrt();
+        eprintln!("DBG adjoint <y,Ax> {l:.12e} <A^H y,x> {r:.12e} relative {:.2e}",(l-r).abs()/scale);
+    }
     for s in charge_set::gated_steps(prepared,tolerance){if lattice.operator().index.contains_key(&s){space.activate(&mut lattice,&s)?;}}
     // (research, S3) ATOM_POLE_INFINITY=m: m columns at the pole at infinity
     // (A x0, A^2 x0, ...) right after x0.
@@ -632,7 +668,11 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     space.solve(&mut lattice,Pole::Zero)?;
     let modes=lattice.modes.clone();
     let clock=Instant::now();
-    let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups},frame,ledger:&ledger,keep_k1})?;
+    // (research, S4) ATOM_CONVERGENCE: no error estimator; the history of
+    // the checkpoints' outputs.
+    let convergence=std::env::var("ATOM_CONVERGENCE").is_ok();let no_images=std::env::var("ATOM_NO_IMAGES").is_ok();
+    let mut history:Vec<(Vec<Vec<f64>>,Vec<Vec<f64>>,Vec<f64>)>=Vec::new();
+    let mut estimator=if convergence{None}else{Some(UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups},frame,ledger:&ledger,keep_k1})?)};
     timing.estimator_build_ms=clock.elapsed().as_secs_f64()*1e3;
     // The ladder spans the grid's times when there is one (a horizon is
     // served by the steady column): its poles near 1 / T of a 1 s horizon grew
@@ -678,7 +718,12 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
         let kernels=frame.kernels()?;let rows=eigen.population_rows();
         let(n,d,centre,charges,index)={let op=lattice.operator();(op.n,op.n*op.n,op.centre,op.modes.clone(),op.index.clone())};
         let c0=eigen.coefficients(&[initial])?;
-        let apply=|s:usize,c:&[C]|->Vec<C>{let mut o=vec![ZERO;d];kernels.subtract_kernel(s,c,&mut o);for v in &mut o{v.re=-v.re;v.im=-v.im;}o};
+        // bound: magnitudes (a bound, no cancellation), the near-resonant
+        // pairs (|X~| above the cap) counted as a full transfer.
+        let bound=std::env::var("ATOM_TRANSLATION_APRIORI").map(|v|v=="bound").unwrap_or(false);
+        let apply=|s:usize,c:&[C]|->Vec<C>{let mut o=vec![ZERO;d];
+            if bound{for &(i,j,x)in &kernels.steps[s].entries{o[i].re+=magnitude(x)*magnitude(c[j]);}for &(i,j)in &kernels.steps[s].resonant{o[i].re+=magnitude(c[j]);}}
+            else{kernels.subtract_kernel(s,c,&mut o);for v in &mut o{v.re=-v.re;v.im=-v.im;}}o};
         let mut slip:Vec<Vec<C>>=vec![vec![ZERO;d];charges.len()];
         let first:Vec<(usize,Vec<C>)>=kernels.steps.iter().enumerate().filter_map(|(s,st)|index.get(&st.charge).map(|&q|(s,q))).map(|(s,q)|{let v=apply(s,&c0);for(a,b)in slip[q].iter_mut().zip(&v){add(a,*b);}(q,v)}).collect();
         for(q1,v1)in &first{for(s2,st2)in kernels.steps.iter().enumerate(){
@@ -690,7 +735,8 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             if q==centre{continue;}
             let mut amplitude=0_f64;
             for &t in &sample{let decayed:Vec<C>=(0..d).map(|j|mul(slip[q][j],cexp(C{re:eigen.lambda[j].re.min(0.),im:eigen.lambda[j].im},t))).collect();
-                for i in 0..n{let mut v=ZERO;for j in 0..d{mul_add(&mut v,rows[i+n*j],decayed[j]);}amplitude=amplitude.max(2.*magnitude(v));}}
+                for i in 0..n{let mut v=ZERO;let mut b=0.;for j in 0..d{mul_add(&mut v,rows[i+n*j],decayed[j]);b+=magnitude(rows[i+n*j])*magnitude(decayed[j]);}amplitude=amplitude.max(2.*if bound{b}else{magnitude(v)});}}
+            if std::env::var("ATOM_DIAG_APRIORI").is_ok()&&amplitude>0.1*gate{eprintln!("DBG a-priori {:?} {amplitude:.2e}",charges[q]);}
             let c=charges[q].clone();let m=opposite(&c);let active=space.translations();
             if amplitude<=gate||active.contains(&c)||active.contains(&m){continue;}
             space.activate(&mut lattice,&c)?;eprintln!("DBG translation {c:?} a-priori amplitude {amplitude:.2e}");
@@ -710,7 +756,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
         if exhausted||space.solves()%CHECKPOINT==0||(times.is_empty()&&space.solves()==1){
             // 3. The checkpoint: model, outputs, estimate, bounds.
             let clock=Instant::now();
-            galerkin.ingest(&space.basis,&space.images)?;
+            if no_images{galerkin.ingest_adjoint(&space.basis,&mut lattice)?;}else{galerkin.ingest(&space.basis,&space.images)?;}
             let model=galerkin.model(lapack,&space.initial,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
             if let Ok(path)=std::env::var("ATOM_DIAG_EXACT"){
                 let at:Vec<usize>=std::env::var("ATOM_DIAG_AT").ok().map(|v|v.split(',').filter_map(|x|x.trim().parse().ok()).collect()).unwrap_or_default();
@@ -725,16 +771,16 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
             let estimate_clock=Instant::now();
             // (research, S3) ATOM_DIAG_MEMORY: the footprint per checkpoint.
-            if std::env::var("ATOM_DIAG_MEMORY").is_ok(){let(fast,pool)=estimator.stored_bytes();let(private,peak)=crate::memory::private_bytes();
+            if std::env::var("ATOM_DIAG_MEMORY").is_ok(){let(fast,pool)=estimator.as_ref().map_or((0,0),|e|e.stored_bytes());let(private,peak)=crate::memory::private_bytes();
                 let field=16*space.basis.first().map_or(0,|v|v.len());
                 eprintln!("DBG memory solves {} columns {} krylov {} translations {} | basis {:.0} MB images {:.0} MB metric {:.0} MB estimator fast {:.0} MB pool {:.0} MB | process {:.0} MB peak {:.0} MB",space.solves(),space.basis.len(),space.krylov_count(),space.translations().len(),(field*space.basis.len())as f64/1e6,(field*space.images.len())as f64/1e6,galerkin.stored_bytes()as f64/1e6,fast as f64/1e6,pool as f64/1e6,private/1e6,peak/1e6);}
-            let mut estimate=estimator.estimate(&ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
-                used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out},&mut lattice)?;
+            let mut estimate=if convergence{history.push((trajectory.clone(),horizons.clone(),steady.clone()));convergence_estimate(&history,request.groups,tolerance,request.steady)}else{estimator.as_mut().unwrap().estimate(&ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
+                used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out},&mut lattice)?};
             timing.estimate_ms+=estimate_clock.elapsed().as_secs_f64()*1e3;
             // The growth charge on every output.
             for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
             // The slowest relaxation.
-            let pairs=slow_pairs(&model,&space,&ops,&classes,tolerance)?;
+            let pairs=slow_pairs(&model,&space,&ops,&classes,tolerance,&mut lattice)?;
             // The outputs with their bounds.
             let answer={
                 let outputs_clock=Instant::now();
@@ -744,7 +790,8 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                 let field=|u:&[f64],images:bool|->Result<Vec<C>,String>{
                     let source:Vec<&[C]>=if images{space.images.iter().map(|v|v.as_slice()).collect()}else{space.basis.iter().map(|v|v.as_slice()).collect()};
                     Ok(ops.combinations(&source,&[u.to_vec()])?.remove(0))};
-                let steady_field=field(&model.steady,false)?;let steady_image=field(&model.steady,true)?;
+                let steady_field=field(&model.steady,false)?;
+                let steady_image=if no_images{let mut y=vec![ZERO;steady_field.len()];lattice.apply(&steady_field,&mut y)?;y}else{field(&model.steady,true)?};
                 let steady_residual=ops.norm(&steady_image)/ops.norm(&steady_field).max(f64::MIN_POSITIVE);
                 let horizon_fields=request.horizons.iter().map(|&t|field(&model.state(t),false)).collect::<Result<Vec<_>,_>>()?;
                 timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
@@ -769,7 +816,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             if best.as_ref().is_none_or(|b|if within{true}else{b.largest()>tolerance&&answer.largest()<b.largest()}){best=Some(answer.clone());}
             if answer.accepted{break;}
             // 5. Completion, decided at the first checkpoint (see `solve`).
-            if completion.is_none()&&checkpoints.len()==1{
+            if completion.is_none()&&checkpoints.len()==1&&!convergence{
                 let e=&answer.estimate;let off=answer.sample_errors.len();let horizons_count=answer.horizon_errors.len();
                 // Per output: its bound and its slow part (bound units); the steady
                 // state's estimate is its slow part.
@@ -786,7 +833,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                     // The part of what the operator leaves out, when it drops K^(1)
                     // rests (keeping them is what completes that source).
                     let drops=lattice.operator().drops_k1_rests();
-                    let k1_part=if drops{pick(&estimator.estimate_alone(&view,&mut lattice,Source::K1)?)}else{0.};
+                    let estimator=estimator.as_mut().unwrap();let k1_part=if drops{pick(&estimator.estimate_alone(&view,&mut lattice,Source::K1)?)}else{0.};
                     let keep=drops&&k1_part>=floor;
                     // The ring charges by attribution, a pair together (the canonical
                     // member, the larger charge, stands for it), and the ring's part.
@@ -900,9 +947,10 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
         // The next pole by its expected gain.
         let clock=Instant::now();
         let model=match current.take(){Some((solves,model))if solves==space.solves()=>model,_=>{
-            galerkin.ingest(&space.basis,&space.images)?;galerkin.model(lapack,&space.initial,longest,tolerance)?}};
+            if no_images{galerkin.ingest_adjoint(&space.basis,&mut lattice)?;}else{galerkin.ingest(&space.basis,&space.images)?;}galerkin.model(lapack,&space.initial,longest,tolerance)?}};
         let xis:Vec<C>=live.iter().map(|&i|points[i].sigma()).collect();
-        let transform=model.error_transform(&galerkin,&space.basis,&space.images,eigen,lapack,&xis)?;
+        let mut apply=|x:&[C]|->Result<Vec<C>,String>{let mut y=vec![ZERO;x.len()];lattice.apply(x,&mut y)?;Ok(y)};
+        let transform=model.error_transform(&galerkin,&space.basis,&space.images,eigen,lapack,&xis,if no_images{Some(&mut apply)}else{None})?;
         for(&i,p)in live.iter().zip(&transform){
             score[i]=points[i].sigma().re*p.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
             if let Some(before)=solved_at[i].take(){remaining[i]=if before>0.{(score[i]/before).min(1.)}else{1.};}

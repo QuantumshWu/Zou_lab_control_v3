@@ -136,6 +136,47 @@ impl<'m> Projection<'m>{
                 for(c,&(q,_,_))in self.canonical.iter().enumerate(){for(x,y)in column[c*d..(c+1)*d].iter().zip(&field[q*d..(q+1)*d]){s+=x.re*y.re+x.im*y.im;}}s}).collect::<Vec<f64>>()});
         Ok(rows.concat())
     }
+    /// (research, S4) `ingest` without stored images: the new columns'
+    /// images from the lattice, their Gram rows against the old columns by
+    /// the adjoint apply (Re <z, A w_j> = Re <A^H z, w_j>), the metric
+    /// columns not kept.
+    pub fn ingest_adjoint(&mut self,basis:&[Vec<C>],lattice:&mut super::poles::Lattice<'_>)->Result<(),String>{
+        let clock=Instant::now();let(old,new)=(self.covered,basis.len());if new==old{return Ok(());}
+        let(n,d,l)=(self.n,self.d,self.length);let width=new-old;
+        let(canonical,mirror)={let op=lattice.operator();(op.canonical.clone(),op.mirror.clone())};
+        let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();
+        let images:Vec<Vec<C>>=fresh.iter().map(|w|{let mut a=vec![ZERO;w.len()];lattice.apply(w,&mut a).map(|_|a)}).collect::<Result<_,_>>()?;
+        let new_images:Vec<&[C]>=images.iter().map(|v|v.as_slice()).collect();
+        for column in &basis[old..new]{self.populations.push(self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect());}
+        let all_basis:Vec<&[C]>=basis[..new].iter().map(|v|v.as_slice()).collect();let old_basis=&all_basis[..old];
+        let z_new=self.frame_metric.apply(&fresh)?;
+        // The metric columns as Hermitian-symmetric fields (unweighted).
+        let full=|z:&[C],c:usize|->Vec<C>{let mut f=vec![ZERO;basis[0].len()];
+            for(k,&(q,w,_))in self.canonical.iter().enumerate(){for e in 0..d{f[q*d+e]=scaled(z[c*l+k*d+e],1./w);}}
+            mirror_field(&mut f,n,&canonical,&mirror);f};
+        let kb=self.metric_dots(&z_new,width,&all_basis)?;                                  // K[i, old + c] at i * width + c
+        let za=self.frame_metric.apply(&new_images)?;let hc=self.metric_dots(&za,width,&all_basis)?;   // H[i, old + c] at i * width + c
+        let ec=self.vectors.gram(&all_basis,&new_images)?;                                  // E[i, old + c] at i * width + c
+        let op=lattice.operator();
+        let adj=|v:&[C]|op.apply_adjoint(v);
+        let mut hr=vec![0.;old*width];let mut er=vec![0.;width*old];let mut fc=vec![0.;new*width];
+        // The adjoint applications over the workers, then one Gram each.
+        let sources:Vec<Vec<C>>=(0..width).flat_map(|c|[full(&z_new,c),fresh[c].to_vec(),new_images[c].to_vec()]).collect();
+        let adjoints=Execution::new()?.map((0..sources.len()).collect(),|i|adj(&sources[i])).into_iter().collect::<Result<Vec<_>,_>>()?;drop(sources);
+        let refs:Vec<&[C]>=adjoints.iter().map(|v|v.as_slice()).collect();let g=self.vectors.gram(&refs,old_basis)?;   // [(3 c + kind) * old + j]
+        for c in 0..width{for j in 0..old{hr[j*width+c]=g[(3*c)*old+j];er[c*old+j]=g[(3*c+1)*old+j];fc[j*width+c]=g[(3*c+2)*old+j];}}
+        let fnew=self.vectors.gram(&new_images,&new_images)?;
+        for a in 0..width{for c in 0..width{fc[(old+a)*width+c]=fnew[a*width+c];}}
+        let(mut k,mut h)=(grow(&self.k,old,new),grow(&self.h,old,new));
+        let(mut e,mut f)=(grow(&self.e,old,new),grow(&self.f,old,new));
+        for i in 0..new{for c in 0..width{let j=old+c;
+            k[i*new+j]=kb[i*width+c];k[j*new+i]=kb[i*width+c];h[i*new+j]=hc[i*width+c];
+            e[i*new+j]=ec[i*width+c];
+            f[i*new+j]=fc[i*width+c];f[j*new+i]=fc[i*width+c];}}
+        for c in 0..width{for j in 0..old{h[(old+c)*new+j]=hr[j*width+c];e[(old+c)*new+j]=er[c*old+j];}}
+        self.k=k;self.h=h;self.e=e;self.f=f;self.covered=new;
+        self.milliseconds+=clock.elapsed().as_secs_f64()*1e3;Ok(())
+    }
     /// Takes the space's columns not yet covered.
     pub fn ingest(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
         let clock=Instant::now();let(old,new)=(self.covered,basis.len());if new==old{return Ok(());}
@@ -322,7 +363,7 @@ impl Model{
     /// eigenvectors v_i of R^T R = F - E^T G - G^T E + G^T G (W^T W = I),
     /// each u_i in the dressed coordinates.
     #[allow(clippy::too_many_arguments)]
-    pub fn error_transform(&self,projection:&Projection,basis:&[Vec<C>],images:&[Vec<C>],eigen:&BlockEigenbasis,lapack:&Lapack,points:&[C])->Result<Vec<Vec<C>>,String>{
+    pub fn error_transform(&self,projection:&Projection,basis:&[Vec<C>],images:&[Vec<C>],eigen:&BlockEigenbasis,lapack:&Lapack,points:&[C],apply:Option<&mut dyn FnMut(&[C])->Result<Vec<C>,String>>)->Result<Vec<Vec<C>>,String>{
         let(n,d,r)=(projection.n,projection.d,self.r);let k=projection.covered;let count=points.len();
         if count==0{return Ok(vec![]);}
         let gemm=lapack.complex_gemm();
@@ -340,9 +381,16 @@ impl Model{
             let phase=C{re:pivot.re/s,im:-pivot.im/s};for i in 0..r{v[i*p+c]=mul(col[i],phase).re;}}v};
         // u_i = A W v_i - W G v_i, then its dressed coordinates on every canonical mode (L x p).
         let gv=product(lapack,&self.g,&v,r,r,p)?;
+        let residuals=if let Some(apply)=apply{
+            // (research, S4) without stored images: A (W v) - W (G v).
+            let base:Vec<&[C]>=basis[..k].iter().map(|f|f.as_slice()).collect();
+            let wv=projection.vectors.combinations(&base,&(0..p).map(|i|(0..k).map(|j|v[j*p+i]).collect()).collect::<Vec<Vec<f64>>>())?;
+            let wg=projection.vectors.combinations(&base,&(0..p).map(|i|(0..k).map(|j|-gv[j*p+i]).collect()).collect::<Vec<Vec<f64>>>())?;
+            wv.iter().zip(wg).map(|(x,g)|apply(x).map(|a|a.iter().zip(&g).map(|(u,w)|C{re:u.re+w.re,im:u.im+w.im}).collect::<Vec<C>>())).collect::<Result<Vec<_>,_>>()?
+        }else{
         let fields:Vec<&[C]>=images[..k].iter().chain(&basis[..k]).map(|f|f.as_slice()).collect();
         let coefficients:Vec<Vec<f64>>=(0..p).map(|i|(0..k).map(|j|v[j*p+i]).chain((0..k).map(|j|-gv[j*p+i])).collect()).collect();
-        let residuals=projection.vectors.combinations(&fields,&coefficients)?;
+        projection.vectors.combinations(&fields,&coefficients)?};
         let blocks:Vec<C>=projection.canonical.iter().flat_map(|&(q,_,_)|residuals.iter().flat_map(move|u|u[q*d..(q+1)*d].iter().copied())).collect();
         let u=eigen.dressed(&blocks)?;drop(residuals);
         // V^T S diag(a) (p x r, complex).

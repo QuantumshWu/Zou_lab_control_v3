@@ -249,6 +249,58 @@ impl<'a> LatticeOperator<'a>{
         mirror_field(y,n,canonical,mirror);
         Ok(())
     }
+    /// (research, S3) The adjoint in the real inner product Re <x, y> of the
+    /// Hermitian-symmetric fields (every mode, weight one): per canonical
+    /// target q (its mirror's share folded in, weight 2) every block, edge and
+    /// rest of the forward map transposed and conjugated, accumulated on the
+    /// sources, then the Hermitian-symmetric part (x + J x) / 2. Serial.
+    pub fn apply_adjoint(&self,y:&[C])->Result<Vec<C>,String>{
+        let n=self.n;let d=n*n;let modes=self.modes.len();
+        if y.len()!=self.dimension(){return Err("Lattice operator field dimensions differ".into());}
+        let gemm=self.prepared.lapack.complex_gemm();let fold=&self.prepared.fold.targets;
+        let ct=|m:&[C]|->Vec<C>{let mut o=vec![ZERO;d];for i in 0..n{for j in 0..n{o[i+n*j]=conj(m[j+n*i]);}}o};
+        let adj=|s:&Sparse|->Sparse{let mut e:Vec<(usize,usize,C)>=s.entries.iter().map(|&(i,j,v)|(j,i,conj(v))).collect();e.sort_by_key(|x|(x.0,x.1));Sparse{entries:e}};
+        let adjop=|o:&Superop|->Superop{Superop{left:adj(&o.left),right:adj(&o.right),sandwich:o.sandwich.iter().map(|(p,q)|(adj(p),adj(q))).collect()}};
+        let recycling=adjop(&self.recycling);let explicit:Vec<Superop>=self.explicit.iter().map(|o|adjop(o)).collect();
+        let mut z=vec![ZERO;y.len()];let mut scratch=Vec::new();
+        let weight=|q:usize|if self.mirror[q]==q{1.}else{2.};
+        for q in 0..modes{if !self.canonical[q]{continue;}
+            let yq:Vec<C>=y[q*d..(q+1)*d].iter().map(|v|scaled(*v,weight(q))).collect();
+            // Column-major view Z: forward Z L + R Z, adjoint Z L^H + R^H Z.
+            let(la,ra)=(ct(&self.left[q]),ct(&self.right[q]));
+            let mut t=vec![ZERO;d];gemm.multiply(n,n,n,ONE,&yq,n,&la,n,ZERO,&mut t,n)?;gemm.multiply(n,n,n,ONE,&ra,n,&yq,n,ONE,&mut t,n)?;
+            recycling.apply_into(n,ONE,&yq,&mut t,&mut scratch);
+            for(a,b)in z[q*d..(q+1)*d].iter_mut().zip(&t){add(a,*b);}
+            for &(p,edge)in &self.edges[q]{
+                let mut t=vec![ZERO;d];
+                match edge{
+                    Edge::Explicit(e)=>explicit[e].apply_into(n,ONE,&yq,&mut t,&mut scratch),
+                    Edge::Fold(f)=>{let data=&fold[f];let w=C{re:0.,im:self.nu[p]};
+                        let(mut l,mut r)=(vec![ZERO;d],vec![ZERO;d]);
+                        for k in 0..d{l[k]=data.left[0][k];mul_add(&mut l[k],w,data.left[1][k]);r[k]=data.right[0][k];mul_add(&mut r[k],w,data.right[1][k]);}
+                        let(la,ra)=(ct(&l),ct(&r));
+                        gemm.multiply(n,n,n,ONE,&yq,n,&la,n,ONE,&mut t,n)?;gemm.multiply(n,n,n,ONE,&ra,n,&yq,n,ONE,&mut t,n)?;}
+                }
+                for(a,b)in z[p*d..(p+1)*d].iter_mut().zip(&t){add(a,*b);}
+            }
+        }
+        for term in &self.terms{
+            for &(p,q)in &term.edges{
+                let s=if term.frequency{C{re:0.,im:-self.nu[p]}}else{ONE};let wq=weight(q);
+                for b in &term.rest.blocks{let h=b.rows.len();
+                    for(c,&col)in b.cols.iter().enumerate(){let mut acc=ZERO;
+                        for(r,&row)in b.rows.iter().enumerate(){mul_add(&mut acc,conj(b.values[r+h*c]),y[q*d+row as usize]);}
+                        add(&mut z[p*d+col as usize],scaled(mul(s,acc),wq));}}
+                let m=&term.rest.sparse;
+                for r in 0..d{for at in m.row[r]as usize..m.row[r+1]as usize{
+                    add(&mut z[p*d+m.col[at]as usize],scaled(mul(s,mul(conj(m.value[at]),y[q*d+r])),wq));}}
+            }
+        }
+        // The Hermitian-symmetric part.
+        let mut out=vec![ZERO;z.len()];
+        for q in 0..modes{let m=self.mirror[q];for i in 0..n{for j in 0..n{let(u,v)=(z[q*d+i*n+j],conj(z[m*d+j*n+i]));out[q*d+i*n+j]=C{re:0.5*(u.re+v.re),im:0.5*(u.im+v.im)};}}}
+        Ok(out)
+    }
     /// Whether the operator leaves K^(1) rests out (the estimate charges them).
     pub fn drops_k1_rests(&self)->bool{self.drops_k1_rest}
     /// What the operator leaves out of the second-order far shell on a

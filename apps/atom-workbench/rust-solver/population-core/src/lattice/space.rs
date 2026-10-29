@@ -172,6 +172,9 @@ impl Space{
         if !carrier{project_traces(&mut w,n);}
         let rest=self.vectors.norm(&w);if !(rest>floor*size){return Ok(false);}
         for v in w.iter_mut(){*v=scaled(*v,1./rest);}
+        // (research, S4) ATOM_NO_IMAGES: the image is not kept (the Gram
+        // matrices take it once, from the lattice, `Projection::ingest_adjoint`).
+        if std::env::var("ATOM_NO_IMAGES").is_ok(){self.basis.push(w);self.images.push(Vec::new());return Ok(true);}
         let clock=Instant::now();let mut image=vec![ZERO;w.len()];lattice.apply(&w,&mut image)?;self.images_ms+=clock.elapsed().as_secs_f64()*1e3;
         self.basis.push(w);self.images.push(image);Ok(true)
     }
