@@ -171,7 +171,11 @@ impl Space{
         let n=lattice.operator().n;let carrier=self.basis.is_empty();
         let size=self.vectors.norm(&w);if !(size>0.)||self.full(){return Ok(false);}
         if !carrier{project_traces(&mut w,n);}
-        for _ in 0..2{let refs:Vec<&[C]>=self.basis.iter().map(|v|v.as_slice()).collect();let h=self.vectors.dots(&refs,&w);self.vectors.subtract(&refs,&h,&mut w)?;}
+        // Gram-Schmidt with the Kahan-Parlett reorthogonalization test: a second pass only when the
+        // first removed more than 1 - 1/sqrt(2) of the norm (the first pass is then accurate to roundoff).
+        let before=self.vectors.norm(&w);
+        for pass in 0..2{let refs:Vec<&[C]>=self.basis.iter().map(|v|v.as_slice()).collect();let h=self.vectors.dots(&refs,&w);self.vectors.subtract(&refs,&h,&mut w)?;
+            if pass==0&&self.vectors.norm(&w)>std::f64::consts::FRAC_1_SQRT_2*before{break;}}
         if !carrier{project_traces(&mut w,n);}
         let rest=self.vectors.norm(&w);if !(rest>floor*size){return Ok(false);}
         for v in w.iter_mut(){*v=scaled(*v,1./rest);}

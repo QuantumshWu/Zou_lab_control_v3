@@ -174,19 +174,22 @@ impl<'m> Projection<'m>{
             mirror_field(&mut f,n,&canonical,&mirror);f};
         let kb=self.metric_dots(&z_new,width,&all_basis)?;                                  // K[i, old + c] at i * width + c
         let za=self.frame_metric.apply(&new_images)?;let hc=self.metric_dots(&za,width,&all_basis)?;   // H[i, old + c] at i * width + c
-        let ec=self.vectors.gram(&all_basis,&new_images)?;                                  // E[i, old + c] at i * width + c
+        // (research, S13) The metric Petrov-Galerkin uses K, H and Fm only: E and F are not formed (ATOM_PG_METRIC).
+        let metric_only=std::env::var("ATOM_PG_METRIC").is_ok();
+        let ec=if metric_only{vec![0.;new*width]}else{self.vectors.gram(&all_basis,&new_images)?};                                  // E[i, old + c] at i * width + c
         let op=lattice.operator();
         let adj=|v:&[C]|op.apply_adjoint(v);
         let mut hr=vec![0.;old*width];let mut er=vec![0.;width*old];let mut fc=vec![0.;new*width];
         // The adjoint applications over the workers, then one Gram each.
-        let sources:Vec<Vec<C>>=(0..width).flat_map(|c|[full(&z_new,c),fresh[c].to_vec(),new_images[c].to_vec(),full(&za,c)]).collect();
+        let kinds=if metric_only{2}else{4};
+        let sources:Vec<Vec<C>>=(0..width).flat_map(|c|if metric_only{vec![full(&z_new,c),full(&za,c)]}else{vec![full(&z_new,c),fresh[c].to_vec(),new_images[c].to_vec(),full(&za,c)]}).collect();
         let adjoints=Execution::new()?.map((0..sources.len()).collect(),|i|adj(&sources[i])).into_iter().collect::<Result<Vec<_>,_>>()?;drop(sources);
         let refs:Vec<&[C]>=adjoints.iter().map(|v|v.as_slice()).collect();let g=self.vectors.gram(&refs,old_basis)?;   // [(4 c + kind) * old + j]
         let mut fmc=vec![0.;new*width];
-        for c in 0..width{for j in 0..old{hr[j*width+c]=g[(4*c)*old+j];er[c*old+j]=g[(4*c+1)*old+j];fc[j*width+c]=g[(4*c+2)*old+j];fmc[j*width+c]=g[(4*c+3)*old+j];}}
+        for c in 0..width{for j in 0..old{hr[j*width+c]=g[(kinds*c)*old+j];fmc[j*width+c]=g[(kinds*c+kinds-1)*old+j];if !metric_only{er[c*old+j]=g[(4*c+1)*old+j];fc[j*width+c]=g[(4*c+2)*old+j];}}}
         let fmnew=self.metric_dots(&za,width,&new_images)?;for a in 0..width{for c in 0..width{fmc[(old+a)*width+c]=fmnew[a*width+c];}}
-        let fnew=self.vectors.gram(&new_images,&new_images)?;
-        for a in 0..width{for c in 0..width{fc[(old+a)*width+c]=fnew[a*width+c];}}
+        if !metric_only{let fnew=self.vectors.gram(&new_images,&new_images)?;
+        for a in 0..width{for c in 0..width{fc[(old+a)*width+c]=fnew[a*width+c];}}}
         let(mut k,mut h)=(grow(&self.k,old,new),grow(&self.h,old,new));
         let(mut e,mut f)=(grow(&self.e,old,new),grow(&self.f,old,new));let mut fm=grow(&self.fm,old,new);
         for i in 0..new{for c in 0..width{let j=old+c;
