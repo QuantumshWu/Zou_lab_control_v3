@@ -393,6 +393,44 @@ fn expm_real(lapack:&Lapack,a:&[f64],r:usize)->Result<Vec<f64>,String>{
     Ok(e)
 }
 #[allow(clippy::too_many_arguments)]
+/// (research, S8) ATOM_POLES_GREEDY: the pole sequence of the rational
+/// approximation of e^{t z} on x0's weighted a-priori spectrum (the dressed
+/// centre modes and the families' lambda_j - i nu_q): the space's scalar
+/// model, functions w(z) (z - xi)^-m (a complex pole with its conjugate, the
+/// real form), and per step the candidate whose new directions most lower
+/// the largest weighted least-squares error over the sample times. A
+/// near-normal operator's space error is this scalar error (S8: the fast
+/// cluster's eigenvector condition numbers are 1.0-1.06).
+fn greedy_poles(points:&[(f64,C)],times:&[f64],candidates:&[Pole],count:usize)->(Vec<Pole>,Vec<f64>){
+    let p=points.len();let w:Vec<f64>=points.iter().map(|x|x.0).collect();let z:Vec<C>=points.iter().map(|x|x.1).collect();
+    let dot=|a:&[C],b:&[C]|a.iter().zip(b).fold(ZERO,|s,(x,y)|C{re:s.re+x.re*y.re+x.im*y.im,im:s.im+x.re*y.im-x.im*y.re});
+    let norm2=|a:&[C]|a.iter().map(|x|x.re*x.re+x.im*x.im).sum::<f64>();
+    let orth=|q:&[Vec<C>],mut g:Vec<C>|->Option<Vec<C>>{let start=norm2(&g).sqrt();if start==0.{return None;}
+        for _ in 0..2{for b in q{let c=dot(b,&g);for(x,y)in g.iter_mut().zip(b){let m=mul(c,*y);x.re-=m.re;x.im-=m.im;}}}
+        let s=norm2(&g).sqrt();if s<1e-10*start{return None;}for x in &mut g{x.re/=s;x.im/=s;}Some(g)};
+    // The residuals per sample time, after the constant (b itself).
+    let mut q:Vec<Vec<C>>=Vec::new();q.push(orth(&q,w.iter().map(|&x|C{re:x,im:0.}).collect()).unwrap_or_else(||vec![ZERO;p]));
+    let mut residual:Vec<Vec<C>>=times.iter().map(|&t|{let mut r:Vec<C>=(0..p).map(|k|scaled(cexp(z[k],t),w[k])).collect();
+        let c=dot(&q[0],&r);for(x,y)in r.iter_mut().zip(&q[0]){let m=mul(c,*y);x.re-=m.re;x.im-=m.im;}r}).collect();
+    let directions=|pole:&Pole,power:i32|->Vec<Vec<C>>{let s=pole.sigma();let one=|s:C|->Vec<C>{(0..p).map(|k|{let d=C{re:z[k].re-s.re,im:z[k].im-s.im};
+            let mut v=C{re:w[k],im:0.};for _ in 0..power{let m=d.re*d.re+d.im*d.im;v=mul(v,C{re:d.re/m,im:-d.im/m});}v}).collect()};
+        if matches!(pole,Pole::Complex(_)){vec![one(s),one(conj(s))]}else{vec![one(s)]}};
+    let mut used:Vec<i32>=vec![0;candidates.len()];let mut out=Vec::new();let mut history=Vec::new();
+    for _ in 0..count{
+        let mut best:Option<(f64,usize,Vec<Vec<C>>)>=None;
+        for(c,pole)in candidates.iter().enumerate(){
+            let mut fresh:Vec<Vec<C>>=Vec::new();
+            for g in directions(pole,used[c]+1){let all:Vec<Vec<C>>=q.iter().chain(&fresh).cloned().collect();if let Some(v)=orth(&all,g){fresh.push(v);}}
+            if fresh.is_empty(){continue;}
+            let worst=residual.iter().map(|r|{let mut e=norm2(r);for f in &fresh{let c=dot(f,r);e-=c.re*c.re+c.im*c.im;}e.max(0.)}).fold(0.,f64::max);
+            if best.as_ref().is_none_or(|b|worst<b.0){best=Some((worst,c,fresh));}
+        }
+        let Some((worst,c,fresh))=best else{break};
+        for f in &fresh{for r in &mut residual{let a=dot(f,r);for(x,y)in r.iter_mut().zip(f){let m=mul(a,*y);x.re-=m.re;x.im-=m.im;}}}
+        q.extend(fresh);used[c]+=1;out.push(candidates[c]);history.push(worst.sqrt());
+    }
+    (out,history)
+}
 /// (research, S8) ATOM_DIAG_CLUSTER=path: the true spectrum of the run's
 /// lattice operator near sigma (ATOM_DIAG_CLUSTER_RE/IM) by shift-invert
 /// Arnoldi in the full complex Euclidean product (m solves at inner
@@ -817,6 +855,10 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     // propagated by L0''s decays e^{lambda_j t} to the output times, read as
     // populations (a pair's weight 2) - against GATE x tolerance; the
     // translations are activated before the first solve.
+    // (research, S8) The families' modes from x0 alone: per lattice mode q
+    // and L0' mode j, the slip's population weight and the dressed value
+    // lambda_j - i nu_q.
+    let mut family:Vec<(f64,C,C)>=Vec::new();
     if std::env::var("ATOM_TRANSLATION_APRIORI").is_ok()&&!times.is_empty(){
         let kernels=frame.kernels()?;let rows=eigen.population_rows();
         let(n,d,centre,charges,index)={let op=lattice.operator();(op.n,op.n*op.n,op.centre,op.modes.clone(),op.index.clone())};
@@ -834,6 +876,15 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             let v=apply(s2,v1);for(a,b)in slip[q2].iter_mut().zip(&v){add(a,*b);}}}
         let sample:Vec<f64>={let mut idx:Vec<usize>=Vec::new();let mut i=1usize;while i<times.len(){idx.push(i);i=(i*3/2).max(i+1);}idx.into_iter().map(|i|times[i]).collect()};
         let gate=charge_set::GATE*tolerance;
+        {let nu=lattice.operator().nu.clone();let images=std::env::var("ATOM_CLUSTER_POLES").map(|v|v=="images").unwrap_or(false);
+            // ATOM_CLUSTER_FIELD: a family mode weighs its field amplitude (it returns to the centre's populations through the coupling).
+            let field=std::env::var("ATOM_CLUSTER_FIELD").is_ok();
+            let read=|j:usize|(0..n).map(|i|{let v=rows[i+n*j];v.re*v.re+v.im*v.im}).sum::<f64>().sqrt();
+            // images: the family's mode at its centre value lambda_j (the translated copies place it at lambda_j - i nu_q).
+            let value=|q:usize,j:usize|(C{re:eigen.lambda[j].re,im:eigen.lambda[j].im-nu[q]},if images{eigen.lambda[j]}else{C{re:eigen.lambda[j].re,im:eigen.lambda[j].im-nu[q]}});
+            for q in 0..charges.len(){if q==centre{continue;}for j in 0..d{let a=slip[q][j];if !nonzero(a){continue;}let(v,u)=value(q,j);family.push((magnitude(a)*if field{1.}else{read(j)},v,u));}}
+            // A near-resonant pair (|X~| above the kernels' cap) is a full transfer: its target mode carries the source's weight.
+            for st in &kernels.steps{let Some(&q)=index.get(&st.charge)else{continue};for &(i,j)in &st.resonant{let(v,u)=value(q,i);family.push((magnitude(c0[j])*read(j),v,u));}}}
         for q in 0..charges.len(){
             if q==centre{continue;}
             let mut amplitude=0_f64;
@@ -877,20 +928,40 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
         // across the imaginary axis: the resolvent resolves the mode at its
         // own width), merged within half that width, heaviest first.
         if std::env::var("ATOM_CLUSTER_POLES").is_ok(){
+            // (research, S8) ATOM_CLUSTER_POLES=family: the families' modes
+            // (lambda_j - i nu_q, slip weights) join the centre's; a value
+            // and its conjugate give one pole (Im > 0). ATOM_CLUSTER_RE = f:
+            // Re xi = f |Re lambda|; ATOM_CLUSTER_MERGE = m: merged within
+            // m |Re lambda|.
             let weights=eigen.mode_weights(initial)?;
-            let mut modes:Vec<(f64,C)>=eigen.lambda.iter().zip(&weights).filter(|(l,&w)|l.im>0.&&l.re<0.&&w>=0.1*tolerance).map(|(l,&w)|(w,*l)).collect();
+            let with_family=std::env::var("ATOM_CLUSTER_POLES").map(|v|v=="family"||v=="images").unwrap_or(false);
+            let factor=std::env::var("ATOM_CLUSTER_RE").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(1.);
+            let merge=std::env::var("ATOM_CLUSTER_MERGE").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.5);
+            let mut modes:Vec<(f64,C)>=eigen.lambda.iter().copied().zip(weights.iter().copied()).chain(family.iter().filter(|_|with_family).map(|&(w,_,l)|(l,w)))
+                .filter(|&(l,w)|l.im.abs()>0.&&l.re<0.&&w>=0.1*tolerance).map(|(l,w)|(w,C{re:l.re,im:l.im.abs()})).collect();
             modes.sort_by(|a,b|b.0.total_cmp(&a.0));
-            let mut chosen:Vec<C>=Vec::new();
-            for(_,l)in modes{if chosen.iter().all(|c|(c.im-l.im).abs()>0.5*(-l.re)||(c.re-(-l.re)).abs()>0.5*(-l.re)){chosen.push(C{re:-l.re,im:l.im});}}
+            let mut chosen:Vec<C>=Vec::new();let mut taken:Vec<C>=Vec::new();
+            for(_,l)in modes{let width=-l.re;if taken.iter().all(|c|(c.im-l.im).abs()>merge*width||(c.re-l.re).abs()>merge*width){taken.push(l);chosen.push(C{re:factor*width,im:l.im});}}
             eprintln!("DBG cluster poles {}: {}",chosen.len(),chosen.iter().map(|c|format!("{:.2}{:+.2}i",c.re,c.im)).collect::<Vec<_>>().join(" "));
             all.extend(chosen.into_iter().map(Pole::Complex));
         }
+        if std::env::var("ATOM_POLES_GREEDY").is_ok(){
+            let mut spectrum:Vec<(f64,C)>=eigen.lambda.iter().copied().zip(eigen.mode_weights(initial)?).map(|(l,w)|(w,l)).collect();
+            spectrum.extend(family.iter().map(|&(w,l,_)|(w,l)));let floor=1e-3*tolerance;spectrum.retain(|x|x.0>=floor);
+            // ATOM_GREEDY_SPREAD = f: each value as a small cluster lambda, lambda +- f |Re lambda|, lambda +- i f |Re lambda| (the dressing the a-priori values lack).
+            if let Some(f)=std::env::var("ATOM_GREEDY_SPREAD").ok().and_then(|v|v.parse::<f64>().ok()){
+                spectrum=spectrum.iter().flat_map(|&(w,l)|{let h=f*l.re.abs();[(w,l),(w,C{re:l.re-h,im:l.im}),(w,C{re:(l.re+h).min(0.),im:l.im}),(w,C{re:l.re,im:l.im+h}),(w,C{re:l.re,im:l.im-h})]}).collect();}
+            let sample:Vec<f64>={let mut idx:Vec<usize>=Vec::new();let mut i=1usize;while i<times.len(){idx.push(i);i=(i*5/4).max(i+1);}idx.into_iter().map(|i|times[i]).collect()};
+            let clock=Instant::now();let(sequence,history)=greedy_poles(&spectrum,&sample,&all,maximum_solves);
+            eprintln!("DBG greedy {} points {} candidates {} ms: {}",spectrum.len(),all.len(),clock.elapsed().as_millis(),sequence.iter().zip(&history).map(|(p,e)|format!("{p} ({e:.1e})")).collect::<Vec<_>>().join(", "));
+            sequence
+        }else{
         all.sort_by(|a,b|b.sigma().re.total_cmp(&a.sigma().re));let real:Vec<Pole>=all;
         let m=real.len();
         // Bit-reversed order over the next power of two, the indices beyond m left out.
         let p2=m.next_power_of_two();let width=p2.trailing_zeros();
         let order:Vec<usize>=(0..p2).map(|i|if width==0{0}else{i.reverse_bits()>>(usize::BITS-width)}).filter(|&i|i<m).collect();
-        order.into_iter().map(|i|real[i]).collect()};
+        order.into_iter().map(|i|real[i]).collect()}};
     let(mut next_fixed,mut last_checkpoint)=(0usize,usize::MAX);
     // The first checkpoint's completion decision when it changed nothing.
     let mut decided:Option<Completion>=None;
