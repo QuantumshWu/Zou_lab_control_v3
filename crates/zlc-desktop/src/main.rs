@@ -4,6 +4,7 @@
 #![windows_subsystem = "windows"]
 mod diagnostics;
 mod dialog;
+mod figure_file;
 mod delta;
 mod pixels;
 mod windows;
@@ -1211,7 +1212,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         let shown = match &from { Some(windows::Kind::FigureViewer(number)) => viewers.get(number).and_then(|viewer| viewer.state["document"]["path"].as_str()), _ => None };
                         let home = viewer_folder(workbench.workspace());
                         let start = shown.filter(|path| !path.is_empty()).map_or_else(|| home.clone(), PathBuf::from);
-                        match dialog::file(windows.hwnd(from.as_ref()), "Open a saved figure archive (.npz)", "Saved figure archives (*.npz)", false, &start, &home)? {
+                        match dialog::figure(windows.hwnd(from.as_ref()), &start, &home)? {
                             Some(path) => command["path"] = json!(path),
                             None => { let mut state = accepted.clone(); state["request"] = command["id"].clone(); return windows.send(&state); }
                         }

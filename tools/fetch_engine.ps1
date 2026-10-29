@@ -4,7 +4,7 @@ param(
     [switch]$Status,
     # installation.exe's online check: two JSON lines -- the newest release published on GitHub,
     # whether it is newer than this checkout's (a short timeout), and how this checkout stands
-    # against the branch it follows on GitHub: GitHub's own count, then git's after a fetch (the
+    # against the branch it actually follows, after a bounded git fetch (the
     # working tree is not touched).
     [switch]$Latest,
     # Bring this checkout up to the branch it follows on GitHub: a fetch and a fast-forward only,
@@ -31,8 +31,9 @@ param(
 # by renaming: the live folder aside, the new one in. A folder a program runs from is never
 # replaced; the download waits in bin\engine.next until the four programs next start.
 $ErrorActionPreference = 'Stop'
-trap { Write-Host "ERROR: $($_.Exception.Message)"; if ($Pause) { Read-Host 'Press Enter to close' | Out-Null }; exit 1 }
+trap { Write-Host (Protect-ZlcNetworkText "ERROR: $($_.Exception.Message)"); if ($Pause) { Read-Host 'Press Enter to close' | Out-Null }; exit 1 }
 . (Join-Path $PSScriptRoot 'tools_root.ps1')
+. (Join-Path $PSScriptRoot 'network.ps1')
 $root = Get-ZlcCheckout
 $bin = Join-Path $root 'bin'
 $record = Join-Path $bin 'release.json'
@@ -144,67 +145,24 @@ function Find-Git {
 
 # git -C <checkout> <arguments>, never asking for credentials, ended after $Seconds: its exit code
 # and its output lines (stdout, then stderr).
-function Invoke-Git([string]$Git, [string[]]$Arguments, [int]$Seconds = 60) {
-    $start = New-Object Diagnostics.ProcessStartInfo
-    $start.FileName = $Git
-    $start.Arguments = (@('-C', $root) + $Arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' '
-    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
-    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
-    $start.EnvironmentVariables['GIT_TERMINAL_PROMPT'] = '0'
-    $start.EnvironmentVariables['GCM_INTERACTIVE'] = 'never'
-    $process = [Diagnostics.Process]::Start($start)
-    $out = $process.StandardOutput.ReadToEndAsync(); $err = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit($Seconds * 1000)) {
-        # Its own children (git-remote-https) keep the pipes open: what they wrote is not waited for.
-        try { $process.Kill() } catch {}
-        return [pscustomobject]@{ Code = -1; Lines = @("git $($Arguments[0]) gave no answer in $Seconds s") }
+function Invoke-Git([string]$Git, [string[]]$Arguments, [int]$Seconds = 60, [string]$NetworkUrl = '', [switch]$SayNetwork, [string]$RemoteName = '') {
+    $environment = @{ GIT_TERMINAL_PROMPT = '0'; GCM_INTERACTIVE = 'never' }
+    if ($NetworkUrl -match '^https?://') {
+        $policy = Get-ZlcProxyPolicy $NetworkUrl $Git $RemoteName
+        if ($SayNetwork) { Write-Host "Network route: $($policy.Source) ($(if ($policy.Address) { 'proxy' } else { 'direct' }))." }
+        Add-ZlcGitProxyEnvironment $environment $policy
+        # Fail stalled transfers promptly, without making persistent git changes.
+        $environment['GIT_HTTP_LOW_SPEED_LIMIT'] = '1'
+        $environment['GIT_HTTP_LOW_SPEED_TIME'] = '30'
     }
-    $process.WaitForExit()
-    $lines = @(($out.Result + "`n" + $err.Result) -split "`r?`n" | Where-Object { $_ -ne '' })
-    [pscustomobject]@{ Code = $process.ExitCode; Lines = $lines }
+    Invoke-ZlcCapturedProcess $Git (@('-C', $root) + $Arguments) $Seconds $environment
 }
 
 # Why a git command failed, as git said it: its lines up to its first fatal: or error: one (ssh's
 # own reason comes before git's).
 function Get-GitReason($Answer) {
     $said = foreach ($line in $Answer.Lines) { $line.Trim(); if ($line -match '^(fatal|error):') { break } }
-    @($said) -join ' '
-}
-
-# This checkout's branch and commit as its .git folder records them, read without git, or $null
-# (no branch checked out). A worktree's .git names its folder, whose commondir holds the refs.
-function Read-GitHead {
-    $dir = Join-Path $root '.git'
-    if (Test-Path -LiteralPath $dir -PathType Leaf) {
-        if ((Get-Content -LiteralPath $dir -TotalCount 1) -notmatch '^gitdir:\s*(.+)$') { return $null }
-        $dir = [IO.Path]::GetFullPath([IO.Path]::Combine($root, $Matches[1].Trim()))
-    }
-    $head = Join-Path $dir 'HEAD'
-    if (-not (Test-Path -LiteralPath $head) -or (Get-Content -LiteralPath $head -TotalCount 1) -notmatch '^ref:\s*refs/heads/(\S+)$') { return $null }
-    $branch = $Matches[1]
-    $common = Join-Path $dir 'commondir'
-    $common = if (Test-Path -LiteralPath $common) { [IO.Path]::GetFullPath([IO.Path]::Combine($dir, (Get-Content -LiteralPath $common -TotalCount 1).Trim())) } else { $dir }
-    $loose = Join-Path $common "refs\heads\$branch"
-    $packed = Join-Path $common 'packed-refs'
-    $commit = if (Test-Path -LiteralPath $loose) { (Get-Content -LiteralPath $loose -TotalCount 1).Trim() }
-        elseif (Test-Path -LiteralPath $packed) { "$(Get-Content -LiteralPath $packed | Where-Object { $_ -match " refs/heads/$([regex]::Escape($branch))$" } | Select-Object -First 1)".Split(' ')[0] }
-    if ("$commit" -match '^[0-9a-f]{40}$') { [pscustomobject]@{ branch = $branch; commit = $commit } } else { $null }
-}
-
-# How many commits GitHub's branch of this checkout's branch name has that this checkout does not,
-# asked of GitHub itself (its compare API, no git: a second or two), or $null when GitHub cannot say.
-function Get-BehindOnGitHub {
-    $head = Read-GitHead
-    if (-not $head) { return $null }
-    try {
-        $request = [Net.WebRequest]::Create("https://api.github.com/repos/$ZlcRepository/compare/$($head.commit)...$([Uri]::EscapeDataString($head.branch))")
-        $request.Timeout = 10000
-        $request.UserAgent = 'zlc-fetch-engine'
-        $request.Accept = 'application/vnd.github+json'
-        $response = $request.GetResponse()
-        try { $text = (New-Object IO.StreamReader $response.GetResponseStream()).ReadToEnd() } finally { $response.Dispose() }
-        [int]($text | ConvertFrom-Json).ahead_by
-    } catch { $null }
+    Protect-ZlcNetworkText (@($said) -join ' ')
 }
 
 # How this checkout stands against the branch it follows on GitHub, after fetching it: commits
@@ -222,19 +180,30 @@ function Get-PullState([int]$Seconds, [switch]$Say) {
     $upstream = Invoke-Git $git @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}') 10
     if ($upstream.Code -ne 0) { $state.why = "branch $($state.branch) follows no branch on GitHub: pull with GitHub Desktop"; return $state }
     $state.upstream = $upstream.Lines[0]
-    $remote = (Invoke-Git $git @('config', "branch.$($state.branch).remote") 10).Lines | Select-Object -First 1
-    $state.url = (Invoke-Git $git @('remote', 'get-url', $remote) 10).Lines | Select-Object -First 1
-    if ($Say) { Write-Host "Fetching $($state.url) ..." }
-    $fetch = Invoke-Git $git @('fetch', '--quiet', $remote) $Seconds
+    $remoteAnswer = Invoke-Git $git @('config', "branch.$($state.branch).remote") 10
+    if ($remoteAnswer.Code -ne 0 -or -not $remoteAnswer.Lines.Count) { $state.why = 'Could not read the tracked remote'; return $state }
+    $remote = $remoteAnswer.Lines[0]
+    $urlAnswer = Invoke-Git $git @('remote', 'get-url', $remote) 10
+    if ($urlAnswer.Code -ne 0 -or -not $urlAnswer.Lines.Count) { $state.why = 'Could not read the tracked remote URL'; return $state }
+    $url = $urlAnswer.Lines[0]
+    $state.url = Protect-ZlcNetworkText $url
+    if ($Say) { Write-Host "Git: $git"; Write-Host "Fetching $($state.url) (up to $Seconds s) ..." }
+    $fetch = Invoke-Git $git @('fetch', '--quiet', $remote) $Seconds -NetworkUrl $url -SayNetwork:$Say -RemoteName $remote
     if ($fetch.Code -ne 0) { $state.why = "git could not fetch $($state.url): $(Get-GitReason $fetch); pull with GitHub Desktop"; return $state }
     $counts = Invoke-Git $git @('rev-list', '--left-right', '--count', 'HEAD...@{u}') 10
-    if ("$($counts.Lines | Select-Object -First 1)" -match '^(\d+)\s+(\d+)$') { $state.ahead = [int]$Matches[1]; $state.behind = [int]$Matches[2] }
+    if ($counts.Code -eq 0 -and "$($counts.Lines | Select-Object -First 1)" -match '^(\d+)\s+(\d+)$') { $state.ahead = [int]$Matches[1]; $state.behind = [int]$Matches[2] }
     else { $state.why = "git could not compare this checkout with $($state.upstream): $(Get-GitReason $counts)"; return $state }
     if ($state.behind -eq 0) { return $state }
     if ($state.ahead -gt 0) { $state.why = "this checkout has $($state.ahead) commit(s) of its own that GitHub does not: merge with GitHub Desktop"; return $state }
     # Local edits (staged, unstaged or new files) to paths the update changes would be overwritten.
-    $incoming = @((Invoke-Git $git @('diff', '--name-only', 'HEAD', '@{u}') 30).Lines)
-    $local = @((Invoke-Git $git @('diff', '--name-only', 'HEAD') 30).Lines) + @((Invoke-Git $git @('ls-files', '-o', '--exclude-standard') 30).Lines)
+    $incomingAnswer = Invoke-Git $git @('diff', '--name-only', 'HEAD', '@{u}') 10
+    $localAnswer = Invoke-Git $git @('diff', '--name-only', 'HEAD') 10
+    $newAnswer = Invoke-Git $git @('ls-files', '-o', '--exclude-standard') 10
+    foreach ($answer in @($incomingAnswer, $localAnswer, $newAnswer)) {
+        if ($answer.Code -ne 0) { $state.why = "Could not check local edits: $(Get-GitReason $answer)"; return $state }
+    }
+    $incoming = @($incomingAnswer.Lines)
+    $local = @($localAnswer.Lines) + @($newAnswer.Lines)
     $state.blocked = @($incoming | Where-Object { $local -contains $_ })
     if ($state.blocked.Count) {
         $state.why = "local edits to $($state.blocked.Count) file(s) the update changes ($(($state.blocked | Select-Object -First 3) -join ', ')): commit or discard them first"
@@ -270,37 +239,37 @@ if ($Status) {
     return
 }
 
-# GitHub from PowerShell 5.1: TLS 1.2, and the system proxy with this user's credentials.
+# Git and HTTP use the same destination-specific proxy precedence. No settings
+# are persisted; a Windows system proxy fills only a missing git/env policy.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-if ([Net.WebRequest]::DefaultWebProxy) { [Net.WebRequest]::DefaultWebProxy.Credentials = [Net.CredentialCache]::DefaultNetworkCredentials }
 
 if ($Latest) {
+    [ordered]@{ tag = $null; newer = $false; pull = [ordered]@{ behind = $null; fetching = $true } } | ConvertTo-Json -Compress -Depth 4
     # releases/latest answers with a redirect to releases/tag/<the newest tag>.
     $tag = $null
     try {
-        $request = [Net.WebRequest]::Create("$releases/latest")
-        $request.AllowAutoRedirect = $false
-        $request.Timeout = 5000
-        $request.UserAgent = 'zlc-fetch-engine'
-        $response = $request.GetResponse()
-        try { $location = "$($response.Headers['Location'])" } finally { $response.Dispose() }
+        $policy = Get-ZlcProxyPolicy "$releases/latest" (Find-Git)
+        if ($policy.Address -match '^socks') {
+            $location = (Invoke-ZlcSocksHttp "$releases/latest" $policy -Seconds 5 -HeadersOnly).Location
+        } else {
+            $request = New-ZlcWebRequest "$releases/latest" 5000 $policy
+            $request.AllowAutoRedirect = $false
+            $response = $request.GetResponse()
+            try { $location = "$($response.Headers['Location'])" } finally { $response.Dispose() }
+        }
         if ($location -match '/tag/([^/?#]+)$') { $tag = [Uri]::UnescapeDataString($Matches[1]) }
     } catch {}
     $newer = $tag -and $expected -and (Get-Version ($tag -replace '^v', '')) -gt (Get-Version $expected.version)
-    # GitHub's own count first, while git has yet to fetch (the window says it meanwhile): a first
-    # line marked fetching, then git's answer.
-    $counted = Get-BehindOnGitHub
-    [ordered]@{ tag = $tag; newer = [bool]$newer; pull = [ordered]@{ behind = $counted; fetching = $true } } | ConvertTo-Json -Compress -Depth 4
+    # Only the configured upstream after a successful fetch determines branch state.
     $standing = Get-PullState 30
     # git could not say how this checkout stands (none, no branch it follows, a fetch that failed):
-    # GitHub's count does, so the window never reads up to date when it cannot know.
-    if ($null -eq $standing.behind -and $null -ne $counted) { $standing.behind = $counted; if (-not $counted) { $standing.why = $null } }
+    # The window reports unknown when the fetch fails, never an inferred up-to-date result.
     [ordered]@{ tag = $tag; newer = [bool]$newer; pull = $standing } | ConvertTo-Json -Compress -Depth 4
     return
 }
 
 if ($Pull) {
-    $state = Get-PullState 300 -Say
+    $state = Get-PullState 120 -Say
     if ($null -eq $state.behind) { throw $state.why }
     if ($state.behind -eq 0) { Write-Host "Up to date with $($state.upstream)."; return }
     $log = @((Invoke-Git $state.git @('log', '--oneline', '--no-decorate', '-n', '15', 'HEAD..@{u}') 30).Lines)
@@ -330,7 +299,7 @@ $download = -not (& $current $installed) -and -not (& $current $staged)
 if ($DryRun) {
     Write-Host ''
     Write-Host 'Dry run -- these steps would run:'
-    if ($download) { Write-Host "  download $url ($([math]::Round($asset.size / 1MB, 1)) MB), check its size and sha256 $($asset.sha256), and extract it to $next" }
+    if ($download) { Write-Host (Protect-ZlcNetworkText "  download $url ($([math]::Round($asset.size / 1MB, 1)) MB), check its size and sha256 $($asset.sha256), and extract it to $next") }
     if ((Test-Path -LiteralPath $next) -or $download) { Write-Host '  put bin\engine.next in place of bin\engine and bin\ai (now, or when the four programs next start if one runs from bin)' }
     else { Write-Host '  nothing: the release is in place' }
     return
@@ -340,25 +309,18 @@ if ($download) {
     $downloads = Join-Path $local 'downloads'
     New-Item -ItemType Directory -Force -Path $downloads | Out-Null
     $zip = Join-Path $downloads $asset.name
-    Write-Host "Downloading $url ($([math]::Round($asset.size / 1MB, 1)) MB) ..."
-    $request = [Net.WebRequest]::Create($url)
-    $request.Timeout = 30000
-    if ($request -is [Net.HttpWebRequest]) { $request.UserAgent = 'zlc-fetch-engine'; $request.ReadWriteTimeout = 60000 }
-    $response = $request.GetResponse()
-    $done = 0L
-    try {
-        $in = $response.GetResponseStream()
-        $out = [IO.File]::Create("$zip.part")
-        try {
-            $buffer = New-Object byte[] (1MB)
-            $shown = 0
-            while (($count = $in.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                $out.Write($buffer, 0, $count); $done += $count
-                $tenth = [math]::Floor(10 * $done / [math]::Max(1, $asset.size))
-                if ($tenth -gt $shown) { $shown = $tenth; Write-Host ('  {0,5:N1} of {1:N1} MB' -f ($done / 1MB), ($asset.size / 1MB)) }
-            }
-        } finally { $out.Dispose(); $in.Dispose() }
-    } finally { $response.Dispose() }
+    if (-not (Test-ZlcArchive $zip $asset)) {
+    Write-Host (Protect-ZlcNetworkText "Downloading $url ($([math]::Round($asset.size / 1MB, 1)) MB) ...")
+    $policy = Get-ZlcProxyPolicy $url (Find-Git)
+    Write-Host "Network route: $($policy.Source) ($(if ($policy.Address) { 'proxy' } else { 'direct' }))."
+    if ($policy.Address -match '^socks') {
+        try { Invoke-ZlcSocksHttp $url $policy -Destination "$zip.part" -Seconds 300 }
+        catch { Remove-Item -LiteralPath "$zip.part" -Force -ErrorAction SilentlyContinue; throw }
+        $done = (Get-Item -LiteralPath "$zip.part").Length
+    } else {
+    $request = New-ZlcWebRequest $url 30000 $policy
+    $done = Save-ZlcResponse ($request.GetResponse()) "$zip.part" $asset.size
+    }
     $sha = (Get-FileHash -LiteralPath "$zip.part" -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($done -ne $asset.size -or $sha -ne $asset.sha256) {
         Remove-Item -LiteralPath "$zip.part"
@@ -366,12 +328,12 @@ if ($download) {
     }
     Move-Item -LiteralPath "$zip.part" -Destination $zip -Force
     Write-Host 'Checked: the size and sha256 are the release''s.'
+    } else { Write-Host 'Using the already verified release archive.' }
     # Extracted beside, checked, then renamed to bin\engine.next whole.
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $partial = "$next.partial"
     Remove-Folder $partial
     [IO.Compression.ZipFile]::ExtractToDirectory($zip, $partial)
-    Remove-Item -LiteralPath $zip
     $unpacked = Join-Path $partial 'engine'
     if (-not ((Test-ZlcProducts $unpacked) -and (& $current (Read-Source (Join-Path $unpacked 'SOURCE'))))) {
         Remove-Folder $partial
@@ -380,6 +342,7 @@ if ($download) {
     Copy-Item -LiteralPath (Join-Path $unpacked 'SOURCE') -Destination (Join-Path $partial 'SOURCE')
     Remove-Folder $next
     [IO.Directory]::Move($partial, $next)
+    Remove-Item -LiteralPath $zip
     $staged = Read-Source (Join-Path $next 'SOURCE')
 }
 if (Invoke-Swap 0) { Write-Host "In place: v$($expected.version)." }

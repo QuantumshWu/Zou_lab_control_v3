@@ -58,6 +58,8 @@ export class FigureViewerView implements View {
       browse: () => ctx.transport.send({ action: "open" }),
       refresh: () => { if (this.path) this.openRequest = ctx.transport.send({ action: "open", path: this.path }, `opening ${baseName(this.path)}…`); },
     }, ["schema_fingerprint", "coordinate_frame"], ["Flow"], INFO_TABS);
+    this.info.path.input.placeholder = ".npz archive or matching image preview";
+    this.info.path.browse.root.title = "Browse NPZ archives and image thumbnails. An image opens the same-named NPZ in its folder.";
     this.info.root.classList.add("figure-info");
     // A Devices row offers the pulse a run played: it opens in the Pulse Editor as an unsaved draft.
     this.info.actionRequested = action => { if (action.startsWith("pulse:")) void this.openRecorded(action.slice("pulse:".length)); };
@@ -124,7 +126,7 @@ export class FigureViewerView implements View {
     this.add.disabled = !kinds.length;
     // v2 _sync_monitor_empty: a figure to open until there is data, then a panel to add.
     this.empty.hidden = this.board.size > 0;
-    const next = datasets.length || tabs?.length ? "No panels yet. Choose a Plot above and click Add panel." : "Open a saved figure to begin, or make data with New data.";
+    const next = datasets.length || tabs?.length ? "No panels yet. Choose a Plot above and click Add panel." : "Browse NPZ files and image previews to open saved data, or make data with New data.";
     if (this.empty.textContent !== next) this.empty.textContent = next;
     // v2 add_selected_panel: "added <panel>; choose a signal in Setting".
     const panels = (latest.viewer?.panels ?? []) as (Panel & { caption_id?: string })[];
