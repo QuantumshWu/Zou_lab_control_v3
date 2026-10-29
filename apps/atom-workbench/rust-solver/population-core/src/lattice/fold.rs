@@ -392,21 +392,19 @@ fn store_order(k:&mut[C],n:usize,ground:&[bool],floor:f64,whole:bool)->StoredOrd
     (a,b,rest_stored,population_rest,[total,absorbed,rest.sqrt()],largest)
 }
 
-/// x <- (L0 - i nu_r - z)^-1 x on one block (G the block's elementwise
-/// inverse), the series summed until a term is below the sum's roundoff;
-/// the terms taken.
-fn converged(rest:&RestOperator,g:&[C],n:usize,x:&mut[C],term:&mut[C],t:&mut[C],stack:&mut Vec<C>,small:&mut Vec<C>)->Result<usize,String>{
-    for(v,&gv)in x.iter_mut().zip(g){*v=mul(*v,gv);}
+/// x <- sum_{k <= terms} (-G L_r)^k G x on m consecutive blocks, block i
+/// with its own G (gs[i]): the far shell's blocks of one relative charge.
+#[allow(clippy::too_many_arguments)]
+fn series_blocks(rest:&RestOperator,gs:&[Vec<C>],terms:usize,n:usize,x:&mut[C],term:&mut[C],t:&mut[C],m:usize,stack:&mut Vec<C>,small:&mut Vec<C>)->Result<(),String>{
+    let d=n*n;
+    for(xb,g)in x.chunks_exact_mut(d).zip(gs){for(v,&gv)in xb.iter_mut().zip(g){*v=mul(*v,gv);}}
     term.copy_from_slice(x);
-    let size=|v:&[C]|v.iter().map(|z|squared(*z)).sum::<f64>();
-    let mut terms=0;
-    for _ in 0..CONVERGED_TERMS{
-        terms+=1;t.fill(ZERO);rest.subtract(n,term,t,1,stack,small)?;
-        for((v,&gv),&u)in term.iter_mut().zip(g).zip(t.iter()){*v=mul(u,gv);}
+    for _ in 0..terms{
+        t.fill(ZERO);rest.subtract(n,term,t,m,stack,small)?;
+        for((wb,tb),g)in term.chunks_exact_mut(d).zip(t.chunks_exact(d)).zip(gs){for((v,&gv),&u)in wb.iter_mut().zip(g).zip(tb){*v=mul(u,gv);}}
         for(a,&b)in x.iter_mut().zip(term.iter()){add(a,b);}
-        if size(term)<=f64::EPSILON*f64::EPSILON*size(x){break;}
     }
-    Ok(terms)
+    Ok(())
 }
 /// x <- sum_{k <= terms} (-G L_r)^k G x on m consecutive blocks (term, t
 /// scratch of the same length); with `scattered` the first L_r acts on
@@ -625,158 +623,191 @@ impl FoldLibrary{
     }
 
     /// The far shell's action on a field x on the lattice modes `modes` at
-    /// the shift z, ring by ring to all orders. Every charge r outside the
-    /// lattice at |nu_r| >= cut a step reaches is a far mode; its amplitude
-    /// solves (L0 - i nu_r - z) y_r = -(the steps into r from the lattice and
-    /// from the other far modes), exactly at its own frequency (the series to
-    /// its roundoff), the cross couplings kept: ring k holds the amplitudes
-    /// k + 1 steps out (the Neumann series in the far-far couplings), and its
-    /// landing back on the lattice is the far shell's part of order k + 2.
-    /// The rings stop when what the next one and its descendants can land,
-    /// c gamma_r |b_r| / (1 - rho) (largest entries: c of all steps, gamma_r
-    /// its block's inverse bound, rho = c gamma_max of the slowest far mode
-    /// met), is within `tolerance` (largest entry); a far mode whose own bound
-    /// is below FAR_PRUNE x tolerance per mode of its ring is left out; both go
-    /// to `tail`. Landings on near charges outside the lattice are left out
-    /// (`outside`, trace norms per ring); the far amplitudes' trace norms per
-    /// ring are the dressing.
+    /// the shift z, ring by ring to all orders. A charge outside the lattice
+    /// at |nu| >= cut that a step reaches from a lattice mode p is a far mode
+    /// of p; its amplitude solves (L0 - i nu_r - z) y_r = -(the steps into r
+    /// from the lattice and from the other far modes), exactly at its own
+    /// frequency (the series to RING_SERIES of its sum), the cross couplings
+    /// kept: ring k holds the amplitudes k + 1 steps out (the Neumann series in
+    /// the far-far couplings), and its landing back on the lattice is the far
+    /// shell's part of order k + 2. Translation covariance: every lattice mode
+    /// p meets the same relative far charges w, so ring k is solved per w on
+    /// the blocks of a group of FAR_GROUP source modes at once (the series'
+    /// GEMMs over the blocks, each block its own G at nu_p + nu_w + z), the
+    /// groups spread over the workers. The rings stop when what the next one
+    /// and its descendants can land, c gamma |b|_1 / (1 - rho) in trace norm
+    /// (c the steps' summed trace-norm bounds, gamma = 1 / (|nu_r| - lambda0 -
+    /// |z|) the block inverse's, rho = c gamma_max over the far modes met,
+    /// |b|_1 <= sqrt(n) |b|_F), is within `tolerance` (N_1, summed over the
+    /// blocks); a block whose own bound is below FAR_PRUNE x tolerance per
+    /// block of its ring is left out; both go to `tail`. Landings on near charges outside
+    /// the lattice are the near ring's and are left out; the far amplitudes'
+    /// trace norms per ring are the dressing. Returns per ring the landing on
+    /// every mode (not mirror-completed: at a complex z the response of a
+    /// Hermitian-symmetric field is not Hermitian-symmetric).
     #[allow(clippy::too_many_arguments)]
     pub fn far_shell(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],x:&[C],z:C,tolerance:f64)->Result<FarShell,String>{
-        let clock=Instant::now();let n=generator.n;let d=n*n;
+        let clock=Instant::now();let n=generator.n;let d=n*n;let count=modes.len();
         let index:BTreeMap<&[i32],usize>=modes.iter().enumerate().map(|(i,q)|(q.as_slice(),i)).collect();
-        let steps:Vec<(&[i32],&Superop)>=plan.steps.iter().map(|s|(s.charge.as_slice(),&generator.components[&s.charge].op)).collect();
-        let c_all:f64=plan.steps.iter().map(|s|row_bound(&generator.components[&s.charge].op,n)).sum();
-        let bound=self.diagnostics.rest_bound;let lapack=&*self.rest.lapack;
+        let nu_modes:Vec<f64>=modes.iter().map(|q|nu_of(q)).collect::<Result<_,_>>()?;
+        let steps:Vec<(&Charge,f64,&Superop)>=plan.steps.iter().map(|s|(&s.charge,s.nu,&generator.components[&s.charge].op)).collect();
+        let c_all:f64=plan.steps.iter().map(|s|trace_norm_bound(&generator.components[&s.charge].op,n)).sum();
+        let(bound,lambda0)=(self.diagnostics.rest_bound,self.diagnostics.lambda0);let lapack=&*self.rest.lapack;
         let largest=|v:&[C]|v.iter().map(|z|magnitude(*z)).fold(0_f64,f64::max);
-        // A far charge's G and gamma = |G| / (1 - rho) (None: on the lattice or near).
-        let block=|r:&[i32]|->Result<Option<(Vec<C>,f64)>,String>{
-            if index.contains_key(r){return Ok(None);}let nu=nu_of(r)?;if nu.abs()<plan.cut{return Ok(None);}
-            let(g,gm)=far_g(&self.diagonal,nu,z);let rho=bound*gm;
-            if !(rho<SERIES_LIMIT){return Err(format!("Far shell: charge {r:?} at {nu:e} rad/us is too close to L0's spectrum (series ratio {rho:e})"));}
-            Ok(Some((g,gm/(1.-rho))))};
+        let trace_bound=|v:&[C]|(n as f64).sqrt()*v.iter().map(|z|squared(*z)).sum::<f64>().sqrt();
+        // The source modes in groups; each group's far shell on its own.
+        let groups:Vec<Vec<usize>>=(0..count).filter(|&p|largest(&x[p*d..(p+1)*d])>0.).collect::<Vec<_>>().chunks(FAR_GROUP).map(|g|g.to_vec()).collect();
+        type Ring=BTreeMap<Charge,(f64,BTreeMap<usize,Vec<C>>)>;
+        type Group=(Vec<BTreeMap<usize,Vec<C>>>,Vec<f64>,f64,f64,usize);
         let execution=Execution::new()?;
-        type Part=(Vec<Vec<C>>,Vec<f64>,Vec<f64>,f64,f64,usize);
-        let parts=execution.map((0..modes.len()).collect(),|p|->Result<Part,String>{
-            let xp=&x[p*d..(p+1)*d];let(mut rings,mut dressing,mut outside)=(Vec::new(),Vec::new(),Vec::new());let(mut tail,mut contraction,mut terms)=(0.,0_f64,0);
-            if largest(xp)==0.{return Ok((rings,dressing,outside,tail,contraction,terms));}
-            let(mut term,mut t,mut stack,mut small,mut scratch)=(vec![ZERO;d],vec![ZERO;d],Vec::new(),Vec::new(),vec![ZERO;d]);
-            // The first ring's sources: every step from p to a far charge.
-            let mut sources:BTreeMap<Charge,(Vec<C>,f64,Vec<C>)>=BTreeMap::new();
-            for &(c,op)in &steps{let r=charge_plus(&modes[p],c)?;
-                if !sources.contains_key(&r){let Some((g,gamma))=block(&r)?else{continue};sources.insert(r.clone(),(g,gamma,vec![ZERO;d]));}
-                op.apply_into(n,ONE,xp,&mut sources.get_mut(&r).unwrap().2,&mut small);}
-            let mut gamma_far=sources.values().map(|v|v.1).fold(0_f64,f64::max);
+        let parts=execution.map(groups,|group|->Result<Group,String>{
+            let(mut landings,mut dressing,mut tail,mut contraction,mut terms)=(Vec::new(),Vec::new(),0.,0_f64,0);
+            let(mut small,mut stack)=(Vec::new(),Vec::new());
+            // The first ring's sources: every step from the group's modes to a far charge.
+            let mut sources:Ring=BTreeMap::new();
+            for &(c,nu,op)in &steps{for &p in &group{
+                let r=charge_plus(&modes[p],c)?;if index.contains_key(r.as_slice())||(nu_modes[p]+nu).abs()<plan.cut{continue;}
+                let entry=sources.entry(c.clone()).or_insert_with(||(nu,BTreeMap::new()));
+                op.apply_into(n,ONE,&x[p*d..(p+1)*d],entry.1.entry(p).or_insert_with(||vec![ZERO;d]),&mut small);}}
+            let mut gamma_far=0_f64;
             for ring in 0..FAR_RINGS{
                 if sources.is_empty(){break;}
-                let mut next:BTreeMap<Charge,(Vec<C>,f64,Vec<C>)>=BTreeMap::new();
-                let mut landing=vec![ZERO;modes.len()*d];let(mut dressed,mut lost)=(0.,0.);
-                for(r,(g,_,mut b))in std::mem::take(&mut sources){
-                    // y_r = -(L0 - i nu_r - z)^-1 b_r.
-                    for v in b.iter_mut(){*v=C{re:-v.re,im:-v.im};}
-                    terms+=converged(&self.rest,&g,n,&mut b,&mut term,&mut t,&mut stack,&mut small)?;
-                    dressed+=trace_norm(lapack,&b,n)?;
-                    for &(c,op)in &steps{let r2=charge_plus(&r,c)?;
-                        if let Some(&q)=index.get(r2.as_slice()){op.apply_into(n,ONE,&b,&mut landing[q*d..(q+1)*d],&mut small);continue;}
-                        if !next.contains_key(&r2){match block(&r2)?{Some((g2,gamma))=>{gamma_far=gamma_far.max(gamma);next.insert(r2.clone(),(g2,gamma,vec![ZERO;d]));}
-                            None=>{scratch.fill(ZERO);op.apply_into(n,ONE,&b,&mut scratch,&mut small);lost+=trace_norm(lapack,&scratch,n)?;continue;}}}
-                        op.apply_into(n,ONE,&b,&mut next.get_mut(&r2).unwrap().2,&mut small);
-                    }
+                let(mut landing,mut dressed,mut next):(BTreeMap<usize,Vec<C>>,f64,Ring)=(BTreeMap::new(),0.,BTreeMap::new());
+                for(w,(nu,blocks))in std::mem::take(&mut sources){
+                    // y = -(L0 - i nu_r - z)^-1 b on the blocks of w.
+                    let active:Vec<usize>=blocks.keys().copied().collect();let m=active.len();
+                    let mut y:Vec<C>=Vec::with_capacity(m*d);for p in &active{y.extend(blocks[p].iter().map(|z|C{re:-z.re,im:-z.im}));}
+                    let mut gs:Vec<Vec<C>>=Vec::with_capacity(m);let mut rho=0_f64;
+                    for &p in &active{let(g,gm)=far_g(&self.diagonal,nu_modes[p]+nu,z);let r=bound*gm;
+                        if !(r<SERIES_LIMIT){return Err(format!("Far shell: the relative charge {w:?} from {:?} is too close to L0's spectrum (series ratio {r:e})",modes[p]));}
+                        rho=rho.max(r);gs.push(g);}
+                    let(mut term,mut t)=(vec![ZERO;m*d],vec![ZERO;m*d]);
+                    let k=terms_to(rho,RING_SERIES);terms+=k*m;
+                    series_blocks(&self.rest,&gs,k,n,&mut y,&mut term,&mut t,m,&mut stack,&mut small)?;
+                    for(i,&p)in active.iter().enumerate(){let yp=&y[i*d..(i+1)*d];dressed+=trace_norm(lapack,yp,n)?;
+                        for &(c,step_nu,op)in &steps{
+                            let w2=charge_plus(&w,c)?;let r2=charge_plus(&modes[p],&w2)?;
+                            if let Some(&q)=index.get(r2.as_slice()){op.apply_into(n,ONE,yp,landing.entry(q).or_insert_with(||vec![ZERO;d]),&mut small);continue;}
+                            if (nu_modes[p]+nu+step_nu).abs()<plan.cut{continue;}
+                            let entry=next.entry(w2).or_insert_with(||(nu+step_nu,BTreeMap::new()));
+                            op.apply_into(n,ONE,yp,entry.1.entry(p).or_insert_with(||vec![ZERO;d]),&mut small);
+                        }}
                 }
-                rings.push(landing);dressing.push(dressed);outside.push(lost);
-                // What the next ring and its descendants can land.
+                landings.push(landing);dressing.push(dressed);
+                // What the next ring's blocks and their descendants can land: each
+                // block's gamma, rho over every far mode met.
+                let mut potentials:Vec<(Charge,usize,f64)>=Vec::new();
+                for(w,(nu,blocks))in &next{for(&p,b)in blocks{
+                    let room=(nu_modes[p]+nu).abs()-lambda0-magnitude(z);let gamma=if room>0.{1./room}else{f64::INFINITY};
+                    gamma_far=gamma_far.max(gamma);potentials.push((w.clone(),p,gamma*trace_bound(b)));}}
                 let rho=c_all*gamma_far;contraction=contraction.max(rho);
-                let potential=|v:&(Vec<C>,f64,Vec<C>)|if rho<1.{c_all*v.1*largest(&v.2)/(1.-rho)}else{f64::INFINITY};
-                let total:f64=next.values().map(potential).sum();
+                let scale=if rho<1.{c_all/(1.-rho)}else{f64::INFINITY};
+                let total:f64=potentials.iter().map(|x|scale*x.2).sum();
                 if total<=tolerance{tail+=total;break;}
-                let floor=FAR_PRUNE*tolerance/(next.len()as f64);
-                next.retain(|_,v|{let w=potential(v);if w<=floor{tail+=w;false}else{true}});
+                let floor=FAR_PRUNE*tolerance/(potentials.len()as f64);
+                for(w,p,v)in &potentials{if scale*v<=floor{tail+=scale*v;if let Some(e)=next.get_mut(w){e.1.remove(p);}}}
+                next.retain(|_,v|!v.1.is_empty());
                 sources=next;
-                if ring+1==FAR_RINGS{tail+=sources.values().map(potential).sum::<f64>();}
+                if ring+1==FAR_RINGS{tail+=potentials.iter().filter(|x|sources.get(&x.0).is_some_and(|e|e.1.contains_key(&x.1))).map(|x|scale*x.2).sum::<f64>();}
             }
-            Ok((rings,dressing,outside,tail,contraction,terms))
+            Ok((landings,dressing,tail,contraction,terms))
         });
         let mut shell=FarShell::default();
-        for part in parts{let(rings,dressing,outside,tail,contraction,terms)=part?;
-            for(k,landing)in rings.into_iter().enumerate(){
-                if k==shell.landings.len(){shell.landings.push(vec![ZERO;modes.len()*d]);shell.dressing.push(0.);shell.outside.push(0.);}
-                for(a,&b)in shell.landings[k].iter_mut().zip(&landing){add(a,b);}shell.dressing[k]+=dressing[k];shell.outside[k]+=outside[k];}
+        for part in parts{let(landings,dressing,tail,contraction,terms)=part?;
+            for(k,landing)in landings.into_iter().enumerate(){
+                if k==shell.landings.len(){shell.landings.push(vec![ZERO;count*d]);shell.dressing.push(0.);}
+                for(q,block)in landing{for(a,&b)in shell.landings[k][q*d..(q+1)*d].iter_mut().zip(&block){add(a,b);}}
+                shell.dressing[k]+=dressing[k];}
             shell.tail+=tail;shell.contraction=shell.contraction.max(contraction);shell.terms+=terms;}
         shell.milliseconds=clock.elapsed().as_secs_f64()*1e3;
         Ok(shell)
     }
     /// The far shell's static targets of rings 1 to `rings` (paths of three to
-    /// rings + 2 steps; ring 0, the second order, is K^(0)) at nu_q = 0, one per
-    /// landing charge in `offsets` (the lattice's edges q - p, closed under
-    /// q -> -q), for a run whose first checkpoint found them above its share
-    /// of the rule: per column c the far shell from the unit element e_c,
-    /// every far mode solved exactly, the columns in batches spread over the
-    /// workers. Hermitian pairing halves the columns: the far shell of E_c^dagger
-    /// is the adjoint of E_c's with the landings mirrored, so column c~ of K_t
-    /// is conj K_-t[r~, c] and only the columns c <= c~ are solved.
-    pub fn ring_targets(&self,generator:&Generator,plan:&HarmonicPlan,rings:usize,offsets:&BTreeSet<Charge>)->Result<Vec<StoredFold>,String>{
-        let n=generator.n;let d=n*n;
+    /// rings + 2 steps; ring 0, the second order, is K^(0)) with `orders`
+    /// orders in nu_q, one per landing charge in `offsets` (the lattice's edges
+    /// q - p, closed under q -> -q), for a run whose first checkpoint found
+    /// them above its share of the rule: per column c the far shell from the
+    /// unit element e_c, every far mode solved exactly, the columns in batches
+    /// spread over the workers. The orders in nu_q are a far mode's Taylor
+    /// coefficients, (D - i nu) y = -b giving D y^(o) = y^(o-1) - b^(o). A
+    /// far mode of ring k + 1 whose source is below prune[k] of its ring's
+    /// largest is left out (the run's a-posteriori term measures it).
+    /// Hermitian pairing halves the columns: the far shell of E_c^dagger is
+    /// the adjoint of E_c's with the landings mirrored, so column c~ of K_t^(o)
+    /// is conj K_-t^(o)[r~, c] and only the columns c <= c~ are solved.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ring_targets(&self,generator:&Generator,plan:&HarmonicPlan,rings:usize,orders:usize,prune:&[f64],offsets:&BTreeSet<Charge>)->Result<Vec<StoredFold>,String>{
+        let n=generator.n;let d=n*n;let orders=orders.max(1);
         let landings:Vec<Charge>=offsets.iter().cloned().collect();
         if rings==0||landings.is_empty(){return Ok(Vec::new());}
         let slot:BTreeMap<&Charge,usize>=landings.iter().enumerate().map(|(i,q)|(q,i)).collect();
         let mirror:Vec<usize>=landings.iter().map(|q|slot.get(&opposite(q)).copied().ok_or("Ring targets: the landings are not closed under q -> -q")).collect::<Result<_,_>>()?;
         let steps:Vec<(&Charge,f64,&Superop)>=plan.steps.iter().map(|s|(&s.charge,s.nu,&generator.components[&s.charge].op)).collect();
-        let width=landings.len()*d;let mut out=vec![ZERO;d*width];
+        let width=landings.len()*orders*d;let mut out=vec![ZERO;d*width];
         let execution=Execution::new()?;let mut scratch:Vec<BuildScratch>=Vec::new();
         let(rest,steps,slot,diagonal,bound)=(&self.rest,&steps,&slot,&self.diagonal,self.diagnostics.rest_bound);
         let couplings:Vec<Scatter>=steps.iter().map(|&(_,_,op)|Scatter::new(op,n)).collect();let couplings=&couplings;
-        let work=d*rings*plan.steps.len()*plan.steps.len()*(2*n*n*n);
+        let work=d*rings*orders*plan.steps.len()*plan.steps.len()*(2*n*n*n);
         execution.for_mode_chunks(&mut out,width,work,MINIMUM_WORK_PER_TASK,&mut scratch,|first,chunk,scratch|{
             let BuildScratch{t,w,stack,small,..}=scratch;
             let columns:Vec<usize>=(first..first+chunk.len()/width).filter(|&c|c<=swapped(c,n)).collect();
             for group in columns.chunks(BATCH){
                 let m=group.len();for v in[&mut *t,&mut *w]{grow(v,m*d);}let(t,w)=(&mut t[..m*d],&mut w[..m*d]);
-                // Ring 0: every far step from the unit elements.
-                let mut ring:BTreeMap<Charge,(f64,Vec<C>)>=BTreeMap::new();
+                // Ring 0: every far step from the unit elements; per far mode the
+                // sources' Taylor coefficients in nu_q (order 0 alone here).
+                let mut ring:BTreeMap<Charge,(f64,Vec<Vec<C>>)>=BTreeMap::new();
                 for(e,&(c,nu,_))in steps.iter().enumerate(){if nu.abs()<plan.cut{continue;}
-                    let mut b=vec![ZERO;m*d];
-                    for(k,&col)in group.iter().enumerate(){couplings[e].add(n,col/n,col%n,ONE,&mut b[k*d..(k+1)*d]);}
+                    let mut b=vec![vec![ZERO;m*d];orders];
+                    for(k,&col)in group.iter().enumerate(){couplings[e].add(n,col/n,col%n,ONE,&mut b[0][k*d..(k+1)*d]);}
                     ring.insert(c.clone(),(nu,b));}
                 for k in 0..=rings{
-                    let mut next:BTreeMap<Charge,(f64,Vec<C>)>=BTreeMap::new();
-                    for(r,(nu,mut b))in std::mem::take(&mut ring){
-                        // y_r = -(L0 - i nu_r)^-1 b_r, the series to its roundoff.
-                        let(g,gm)=far_g(diagonal,nu,ZERO);
-                        for v in b.iter_mut(){*v=C{re:-v.re,im:-v.im};}
-                        series(rest,&g,terms_to(bound*gm,RING_SERIES),n,&mut b,w,t,m,false,stack,small)?;
+                    let mut next:BTreeMap<Charge,(f64,Vec<Vec<C>>)>=BTreeMap::new();
+                    for(r,(nu,b))in std::mem::take(&mut ring){
+                        // y^(0) = -D^-1 b^(0), y^(o) = D^-1 (y^(o-1) - b^(o)), the
+                        // series to RING_SERIES.
+                        let(g,gm)=far_g(diagonal,nu,ZERO);let terms=terms_to(bound*gm,RING_SERIES);
+                        let mut y:Vec<Vec<C>>=Vec::with_capacity(orders);
+                        for o in 0..orders{
+                            let mut v:Vec<C>=if o==0{b[0].iter().map(|z|C{re:-z.re,im:-z.im}).collect()}else{y[o-1].iter().zip(&b[o]).map(|(a,c)|C{re:a.re-c.re,im:a.im-c.im}).collect()};
+                            series(rest,&g,terms,n,&mut v,w,t,m,false,stack,small)?;y.push(v);}
                         for &(c,step_nu,op)in steps.iter(){
                             let r2=charge_plus(&r,c)?;let nu2=nu+step_nu;
                             if nu2.abs()<plan.cut{
                                 // A landing: ring k >= 1 is this run's (ring 0 is K^(0)).
                                 if k==0{continue;}let Some(&s)=slot.get(&r2)else{continue};
-                                for(i,&col)in group.iter().enumerate(){let base=(col-first)*width+s*d;
-                                    op.apply_into(n,ONE,&b[i*d..(i+1)*d],&mut chunk[base..base+d],small);}
+                                for(o,yo)in y.iter().enumerate(){for(i,&col)in group.iter().enumerate(){let base=(col-first)*width+(s*orders+o)*d;
+                                    op.apply_into(n,ONE,&yo[i*d..(i+1)*d],&mut chunk[base..base+d],small);}}
                                 continue;}
                             if k==rings{continue;}
-                            let entry=next.entry(r2).or_insert_with(||(nu2,vec![ZERO;m*d]));
-                            for i in 0..m{op.apply_into(n,ONE,&b[i*d..(i+1)*d],&mut entry.1[i*d..(i+1)*d],small);}
+                            let entry=next.entry(r2).or_insert_with(||(nu2,vec![vec![ZERO;m*d];orders]));
+                            for(o,yo)in y.iter().enumerate(){for i in 0..m{op.apply_into(n,ONE,&yo[i*d..(i+1)*d],&mut entry.1[o][i*d..(i+1)*d],small);}}
                         }
                     }
-                    // The next ring's far modes whose sources are below RING_PRUNE of
-                    // the ring's largest are left out (the run's a-posteriori term
-                    // measures what they would have landed).
-                    let top=next.values().map(|v|v.1.iter().map(|z|magnitude(*z)).fold(0_f64,f64::max)).fold(0_f64,f64::max);
-                    next.retain(|_,v|v.1.iter().any(|z|magnitude(*z)>RING_PRUNE*top));
+                    // The next ring's far modes whose sources are below its share of
+                    // the ring's largest are left out.
+                    let top=next.values().map(|v|v.1[0].iter().map(|z|magnitude(*z)).fold(0_f64,f64::max)).fold(0_f64,f64::max);
+                    let floor=prune.get(k).copied().unwrap_or(0.)*top;
+                    next.retain(|_,v|v.1[0].iter().any(|z|magnitude(*z)>floor));
                     ring=next;
                 }
             }
             Ok(())
         })?;
-        // Row-major K per landing: the solved columns, and the others from the
-        // mirror landing's.
+        // Row-major K^(o) per landing: the solved columns, and the others from
+        // the mirror landing's.
         let(out,mirror)=(&out,&mirror);
         let assembled=execution.map((0..landings.len()).collect(),|s|->StoredFold{
-            let column=|slot:usize,r:usize,c:usize|out[c*width+slot*d+r];
-            let mut k=vec![ZERO;d*d];
-            for r in 0..d{for c in 0..d{let cs=swapped(c,n);k[r*d+c]=if c<=cs{column(s,r,c)}else{conj(column(mirror[s],swapped(r,n),cs))};}}
             let charge=landings[s].clone();
             let nu=plan.targets.iter().chain(&plan.omitted).find(|t|t.charge==charge).map_or(0.,|t|t.nu);
-            let(a,b,rest,population,norms,largest)=store_order(&mut k,n,&generator.ground,0.,true);
-            StoredFold{charge,nu,left:vec![a],right:vec![b],rest:vec![rest],population_rest:vec![population],whole:vec![true],norms:vec![norms],largest_entry:vec![largest]}});
+            let mut fold=StoredFold{charge,nu,left:vec![],right:vec![],rest:vec![],population_rest:vec![],whole:vec![],norms:vec![],largest_entry:vec![]};
+            for o in 0..orders{
+                let column=|slot:usize,r:usize,c:usize|out[c*width+(slot*orders+o)*d+r];
+                let mut k=vec![ZERO;d*d];
+                for r in 0..d{for c in 0..d{let cs=swapped(c,n);k[r*d+c]=if c<=cs{column(s,r,c)}else{conj(column(mirror[s],swapped(r,n),cs))};}}
+                let(a,b,rest,population,norms,largest)=store_order(&mut k,n,&generator.ground,0.,true);
+                fold.left.push(a);fold.right.push(b);fold.rest.push(rest);fold.population_rest.push(population);fold.whole.push(true);fold.norms.push(norms);fold.largest_entry.push(largest);
+            }
+            fold});
         Ok(assembled)
     }
 }
@@ -784,22 +815,21 @@ impl FoldLibrary{
 /// caller's tolerance; a far mode whose bound is below FAR_PRUNE of it per
 /// mode of its ring is left out (to the tail); at most FAR_RINGS rings.
 const FAR_PRUNE:f64=1e-2;
+/// Source modes per group of the far shell's action: the blocks one series
+/// solves at once (GEMMs over them), a group's rings held in memory at a
+/// time; the groups spread over the workers.
+pub(crate) const FAR_GROUP:usize=8;
 const FAR_RINGS:usize=16;
-/// A ring target's far modes (`FoldLibrary::ring_targets`) whose sources are
-/// below this share of their ring's largest are left out: a deliberate
-/// margin, the run's a-posteriori term measures what they leave out.
-const RING_PRUNE:f64=1e-6;
 /// A ring target's far blocks are summed until the series' remainder is
 /// within this share of the sum (the a-posteriori term measures the rest).
 const RING_SERIES:f64=1e-12;
 /// One far-shell action (`FoldLibrary::far_shell`): per ring k its landing on
-/// the lattice (a field on the modes: the far shell's part of order k + 2),
-/// its far amplitudes' trace norms summed (the dressing) and the trace norms
-/// of what landed on near charges outside the lattice; the tail bound past
-/// the last ring (largest entry), the largest contraction c gamma met, the
-/// series' terms and the time.
+/// the lattice (a field on the modes: the far shell's part of order k + 2)
+/// and its far amplitudes' trace norms summed (the dressing); the tail bound
+/// past the last ring (N_1 of what the rings left out can land), the largest
+/// contraction c gamma met, the series' terms (per block) and the time.
 #[derive(Clone,Debug,Default)]
-pub struct FarShell{pub landings:Vec<Vec<C>>,pub dressing:Vec<f64>,pub outside:Vec<f64>,pub tail:f64,pub contraction:f64,pub terms:usize,pub milliseconds:f64}
+pub struct FarShell{pub landings:Vec<Vec<C>>,pub dressing:Vec<f64>,pub tail:f64,pub contraction:f64,pub terms:usize,pub milliseconds:f64}
 
 #[cfg(test)]
 mod tests{
@@ -888,7 +918,7 @@ mod tests{
         // unit element as the far shell's rings 1 and 2 at nu_q = 0.
         let f=fixture();let p=prepared(&f);let n=4;let d=16;let fold=&p.fold;
         let zero=vec![p.generator.zero.clone()];let nu_of=|q:&[i32]|p.nu(q);
-        let targets=fold.ring_targets(&p.generator,&p.plan,2,&zero.iter().cloned().collect()).unwrap();
+        let targets=fold.ring_targets(&p.generator,&p.plan,2,1,&[0.,0.,0.],&zero.iter().cloned().collect()).unwrap();
         assert_eq!(targets.len(),1);let mut k=vec![ZERO;d*d];targets[0].dense_into(n,0,ONE,&mut k);
         let scale=k.iter().map(|z|magnitude(*z)).fold(1e-300,f64::max);
         for c in 0..d{let mut e=vec![ZERO;d];e[c]=ONE;let shell=fold.far_shell(&p.generator,&p.plan,&nu_of,&zero,&e,ZERO,0.).unwrap();

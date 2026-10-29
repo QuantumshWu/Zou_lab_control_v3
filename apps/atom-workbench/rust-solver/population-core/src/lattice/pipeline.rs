@@ -273,6 +273,16 @@ const EXPONENT_CAP:f64=700.;
 /// A far-shell action's rings stop when what the next ones can land is
 /// within this share of the rule's budget (over every mode of a model).
 const RING_TOLERANCE_SHARE:f64=1e-3;
+/// The ring targets' orders in nu_q leave at most this share of what the
+/// build left of the budget (the rings' actions times the expansion's
+/// remainder), up to RING_ORDERS_MAX orders.
+const RING_EXPANSION_SHARE:f64=1e-2;
+const RING_ORDERS_MAX:usize=6;
+/// A ring target's far mode of ring k + 1 is left out when its source is
+/// below RING_PRUNE_SHARE x (what the build left) / (ring k + 1's action) of
+/// its ring's largest: the pruned modes of a ring leave a share of the
+/// budget well below this (a ring holds at most a few hundred far modes).
+const RING_PRUNE_SHARE:f64=1e-6;
 
 /// Per ring k >= 1 of the far shell (the parts of order k + 2), its action
 /// on the reduced solution to T, sum_m |a_m| N_1(D_k x_m) phi_m(T) (the
@@ -282,8 +292,10 @@ fn ring_actions(fold:&FoldLibrary,prepared:&LatticePrepared,modes:&[Charge],ritz
     let weights:Vec<f64>=(0..ritz.r).map(|m|magnitude(ritz.coefficients[m])*ritz.weight(m,horizon)).collect();
     let total:f64=weights.iter().sum();let mut actions:Vec<f64>=Vec::new();
     if !(total>0.){return Ok(actions);}
-    let tolerance=RING_TOLERANCE_SHARE*budget/(total*(n as f64).powf(1.5)*modes.len()as f64);
-    let execution=crate::parallel::Execution::new()?;
+    let tolerance=RING_TOLERANCE_SHARE*budget/total;
+    // The Ritz modes in parallel when the lattice is one group of the far
+    // shell (its action then runs on one worker), else one after another.
+    let execution=if modes.len()<=super::fold::FAR_GROUP{crate::parallel::Execution::new()?}else{crate::parallel::Execution::with_threads(1)?};
     let per_mode=execution.map((0..ritz.r).filter(|&m|weights[m]>0.).collect(),|m|->Result<Vec<f64>,String>{
         let x=ritz.field(basis,m);
         let shell=fold.far_shell(&prepared.generator,&prepared.plan,&nu_of,modes,&x,ritz.theta[m],tolerance)?;
@@ -307,12 +319,12 @@ fn posterior(lattice:&Lattice<'_>,prepared:&LatticePrepared,ritz:&RitzModes,basi
     let(mut grid,mut means,mut dressing)=(vec![0.;times.len()],vec![0.;horizons.len()],0.);
     let weights:Vec<f64>=(0..ritz.r).map(|m|magnitude(ritz.coefficients[m])*ritz.weight(m,horizon)).collect();
     let total:f64=weights.iter().sum();if !(total>0.){return Ok((grid,means,dressing));}
-    let tolerance=RING_TOLERANCE_SHARE*budget/(total*(n as f64).powf(1.5)*op.modes.len()as f64);
-    let execution=crate::parallel::Execution::new()?;
+    let tolerance=RING_TOLERANCE_SHARE*budget/total;
+    let execution=if op.modes.len()<=super::fold::FAR_GROUP{crate::parallel::Execution::new()?}else{crate::parallel::Execution::with_threads(1)?};
     let parts=execution.map((0..ritz.r).filter(|&m|nonzero(ritz.coefficients[m])).collect(),|m|->Result<(usize,f64,f64),String>{
         let x=ritz.field(basis,m);
         let(g,shell)=op.left_out_exact(&x,ritz.theta[m],tolerance)?;
-        Ok((m,field_trace_norm(lapack,&g,n)?+shell.tail*(n as f64).powf(1.5),shell.dressing.iter().sum::<f64>()))});
+        Ok((m,field_trace_norm(lapack,&g,n)?+shell.tail,shell.dressing.iter().sum::<f64>()))});
     for part in parts{let(m,size,dressed)=part?;let a=magnitude(ritz.coefficients[m]);
         for(e,&t)in grid.iter_mut().zip(times){*e+=0.5*a*size*ritz.weight(m,t);}
         for(e,&t)in means.iter_mut().zip(horizons){*e+=0.5*a*size*ritz.weight(m,t);}
@@ -442,10 +454,19 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let rings=completion.map_or(0,|c|c.rings);
     if rings>0{
         // The ring targets land on the lattice's edges whose charges the plan
-        // folds (and the diagonal).
+        // folds (and the diagonal); their orders in nu_q and the far modes they
+        // may leave out follow from the rings' actions and what the build left
+        // of the rule's budget.
         let known:BTreeSet<Charge>=prepared.plan.targets.iter().chain(&prepared.plan.omitted).map(|t|t.charge.clone()).chain(std::iter::once(prepared.generator.zero.clone())).collect();
         let mut offsets=BTreeSet::new();for p in &lattice_modes{for q in &lattice_modes{let t=charge_minus(q,p)?;if known.contains(&t){offsets.insert(t);}}}
-        let ring_targets=fold.ring_targets(&prepared.generator,&prepared.plan,rings,&offsets)?;fold.targets.extend(ring_targets);
+        let actions=completion.map_or(&[][..],|c|&c.ring_actions[..]);
+        let left=FOLD_SHARE*POPULATION_TOLERANCE-fold.diagnostics.dropped.total();
+        let built:f64=actions.iter().take(rings).sum();
+        let far_min=prepared.plan.far().iter().map(|&s|prepared.plan.steps[s].nu.abs()).fold(f64::INFINITY,f64::min);
+        let p=nu_max/(far_min-fold.diagnostics.lambda0);
+        let mut orders=1;while nu_max>0.&&orders<RING_ORDERS_MAX&&built*p.powi(orders as i32)/(1.-p)>RING_EXPANSION_SHARE*left{orders+=1;}
+        let prune:Vec<f64>=(0..rings).map(|k|actions.get(k+1).map_or(0.,|&a|if a>0.{RING_PRUNE_SHARE*left/a}else{0.})).collect();
+        let ring_targets=fold.ring_targets(&prepared.generator,&prepared.plan,rings,orders,&prune,&offsets)?;fold.targets.extend(ring_targets);
     }
     let mut report=FoldReport{rule:Some(rule),orders:fold.diagnostics.orders,dropped:fold.diagnostics.dropped.clone(),targets:fold.targets.len(),build_ms:clock.elapsed().as_secs_f64()*1e3,rings,..Default::default()};
     let clock=Instant::now();
