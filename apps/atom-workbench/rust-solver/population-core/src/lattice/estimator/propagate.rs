@@ -19,6 +19,7 @@
 use super::super::*;
 use super::lattice::ErrorLattice;
 use crate::parallel::Execution;
+use std::collections::BTreeMap;
 
 /// How populations are read: the laboratory density at t (the grid), or
 /// the centre alone (the time average at a horizon).
@@ -163,6 +164,66 @@ impl ErrorLattice<'_>{
             Ok(total)});
         let mut total=Vec::with_capacity(n*t_count);for part in parts{total.extend(part?);}
         Ok((0..t_count).map(|ti|(0..n).map(|i|total[i+n*ti].re).collect()).collect())
+    }
+    /// (research, ATOM_DIAG_SPLIT) `populations` split by the lattice mode a
+    /// readout lands on: per target, the particular, homogeneous and resonant
+    /// parts of every item that reads out there (rows of n per time).
+    pub fn populations_by_target(&self,ritz:&RitzSources<'_>,times:&[f64],readout:Readout)->Result<Vec<(usize,Vec<Vec<f64>>)>,String>{
+        let(n,d,k)=(self.n,self.d,self.columns);let r=ritz.values.len();let t_count=times.len();
+        if times.is_empty()||r==0{return Ok(Vec::new());}
+        let mut ba=vec![ZERO;k*r];let mut bta=vec![ZERO;k*r];
+        for m in 0..r{let(a,ta)=(ritz.coefficients[m],mul(ritz.values[m],ritz.coefficients[m]));
+            for i in 0..k{ba[i+k*m]=mul(ritz.vectors[i+k*m],a);bta[i+k*m]=mul(ritz.vectors[i+k*m],ta);}}
+        let theta=ritz.values;let lapack=&self.prepared.lapack;let gemm=lapack.complex_gemm();
+        let class=self.class()?;let outer=self.outer_modes.len();
+        let items:Vec<(usize,bool)>=self.near_canonical.iter().map(|&s|(s,true)).chain((0..outer).map(|s|(s,false))).collect();
+        let mut out:BTreeMap<usize,Vec<C>>=BTreeMap::new();
+        // (research) ATOM_DIAG_OUTER=class: the outer modes propagated by the
+        // frame's second-order block (their sources in its coordinates) in
+        // place of L0''s blocks alone.
+        let outer_class=std::env::var("ATOM_DIAG_OUTER").is_ok_and(|v|v=="class");
+        for(slot,near)in items{
+            let a=if near{self.near[slot]}else{self.outer_modes[slot]};
+            let as_class=near||outer_class;
+            let(values,own):(&[C],&[C])=if as_class{(&class.values,&class.readout)}else{(&self.basis()?.lambda,self.basis()?.population_rows())};
+            let weight=if self.mirror[a]==a{1.}else{2.};
+            let(image,base):(&[C],&[C])=if near{(&self.image_coordinates[slot],&self.basis_coordinates[slot])}else{(&self.outer_image[slot],&self.outer_basis[slot])};
+            let mut beta=vec![ZERO;d*r];
+            gemm.multiply(d,r,k,C{re:weight,im:0.},image,d,&ba,k,ZERO,&mut beta,d)?;
+            gemm.multiply(d,r,k,C{re:-weight,im:0.},base,d,&bta,k,ONE,&mut beta,d)?;
+            if !near&&outer_class{let mut c=vec![ZERO;d*r];gemm.multiply(d,r,d,ONE,&class.inverse,d,&beta,d,ZERO,&mut c,d)?;beta=c;}
+            let zeta:Vec<C>=values.iter().map(|z|C{re:z.re.min(0.),im:z.im-self.nu[a]}).collect();
+            if a==self.centre{
+                let j0=(0..d).min_by(|&x,&y|magnitude(zeta[x]).total_cmp(&magnitude(zeta[y]))).unwrap();
+                if magnitude(zeta[j0])<TRACE_MODE{for m in 0..r{beta[j0+d*m]=ZERO;}}
+            }
+            let mut gamma=vec![ZERO;d];let mut resonant=Vec::new();
+            for m in 0..r{for j in 0..d{
+                let b=beta[j+d*m];if !nonzero(b){continue;}
+                let den=C{re:theta[m].re-zeta[j].re,im:theta[m].im-zeta[j].im};
+                if magnitude(den)<RESONANT*(1.+magnitude(zeta[j])){resonant.push((j,m,b));beta[j+d*m]=ZERO;continue;}
+                let s=den.re*den.re+den.im*den.im;let g=mul(b,C{re:den.re/s,im:-den.im/s});beta[j+d*m]=g;add(&mut gamma[j],g);
+            }}
+            let mut targets:Vec<(usize,f64,&[C])>=vec![(a,0.,own)];
+            if near{for(s,rows)in class.step_readout.iter().enumerate(){
+                let Some(&t)=self.index.get(&charge_plus(&self.modes[a],&self.kernels()?.steps[s].charge)?)else{continue};
+                targets.push((t,self.kernels()?.steps[s].nu,rows));
+            }}
+            if readout==Readout::Centre{targets.retain(|x|x.0==self.centre);}
+            for(t,nu_s,rows)in targets{
+                let mut y=vec![ZERO;n*r];gemm.multiply(n,r,d,ONE,rows,n,&beta,d,ZERO,&mut y,n)?;
+                let acc=out.entry(t).or_insert_with(||vec![ZERO;n*t_count]);
+                for(ti,&time)in times.iter().enumerate(){
+                    let ph=self.phase(t,time,readout);
+                    for m in 0..r{let e=mul(ph,cexp(theta[m],time));for i in 0..n{mul_add(&mut acc[i+n*ti],e,y[i+n*m]);}}
+                    let hp=cexp(C{re:0.,im:nu_s},time);
+                    for j in 0..d{if !nonzero(gamma[j]){continue;}let e=mul(hp,mul(gamma[j],cexp(C{re:values[j].re.min(0.),im:values[j].im},time)));
+                        for i in 0..n{let v=mul(rows[i+n*j],e);acc[i+n*ti].re-=v.re;acc[i+n*ti].im-=v.im;}}
+                    for &(j,m,b)in &resonant{let e=mul(ph,scaled(cexp(theta[m],time),time));for i in 0..n{mul_add(&mut acc[i+n*ti],mul(e,b),rows[i+n*j]);}}
+                }
+            }
+        }
+        Ok(out.into_iter().map(|(t,acc)|(t,(0..t_count).map(|ti|(0..n).map(|i|acc[i+n*ti].re).collect()).collect())).collect())
     }
     fn phase(&self,mode:usize,time:f64,readout:Readout)->C{
         match readout{Readout::Laboratory=>cexp(C{re:0.,im:self.nu[mode]},time),Readout::Centre=>if mode==self.centre{ONE}else{ZERO}}

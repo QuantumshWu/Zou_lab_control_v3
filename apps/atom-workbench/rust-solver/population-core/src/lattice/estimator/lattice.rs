@@ -138,6 +138,9 @@ impl<'p> ErrorLattice<'p>{
         // the explicit set (by construction where the state has weight).
         let mut near=vec![centre];
         for q in frame.steps.iter().chain(explicit){if let Some(&q)=index.get(q){if !near.contains(&q){near.push(q);}}}
+        // (research) ATOM_DIAG_ALLNEAR: every lattice mode a near mode (the
+        // SW treatment everywhere, no outer modes).
+        if std::env::var("ATOM_DIAG_ALLNEAR").is_ok(){for q in 0..count{if !near.contains(&q){near.push(q);}}}
         let mut pairs=Vec::new();let mut frames=near.clone();
         for &a in &near{
             let q=&modes[a];

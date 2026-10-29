@@ -314,10 +314,26 @@ impl<'a> UnifiedEstimate<'a>{
         let(mut own_trajectory,mut slow_trajectory,mut slow_horizons)=(Vec::new(),Vec::new(),Vec::new());
         let trajectory=if outputs.times.is_empty(){Vec::new()}else{
             let count=if modes.grid&&!solutions.is_empty(){taking(modes.last).max(kernels)}else{kernels};
+            let coefficients:Vec<C>=(0..r).map(|m|if solved[..count].contains(&m){ZERO}else{cp.coefficients[m]}).collect();
             let fast=if single{vec![vec![0.;n];outputs.times.len()]}else{
-                let coefficients:Vec<C>=(0..r).map(|m|if solved[..count].contains(&m){ZERO}else{cp.coefficients[m]}).collect();
                 self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&coefficients},outputs.times,Readout::Laboratory)?};
             if count>kernels&&!single{own_trajectory=self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&own(count)},outputs.times,Readout::Laboratory)?;}
+            // (research) ATOM_DIAG_SPLIT=path: the fast part (and the own
+            // residuals' SW part) split by target mode, and the slow part, at
+            // the grid times up to ATOM_DIAG_TMAX (default 0.31 us).
+            if !single{if let Ok(path)=std::env::var("ATOM_DIAG_SPLIT"){
+                let tmax=std::env::var("ATOM_DIAG_TMAX").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.31);
+                let times:Vec<f64>=outputs.times.iter().copied().filter(|&t|t<=tmax).collect();
+                let fast_split=self.lattice.populations_by_target(&RitzSources{vectors:b,values:cp.theta,coefficients:&coefficients},&times,Readout::Laboratory)?;
+                let own_split=if count>kernels{self.lattice.populations_by_target(&RitzSources{vectors:b,values:cp.theta,coefficients:&own(count)},&times,Readout::Laboratory)?}else{Vec::new()};
+                let slow=if count>0{self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,&solutions[..count],&times,Readout::Laboratory)?}else{vec![vec![0.;n];times.len()]};
+                let list=|v:&[(usize,Vec<Vec<f64>>)]|->String{format!("[{}]",v.iter().map(|(t,rows)|format!("[{t},{rows:?}]")).collect::<Vec<_>>().join(","))};
+                let routed:Vec<String>=solved[..count].iter().map(|&m|format!("[{m},{:?},{:?},{:?},{:?}]",cp.theta[m].re,cp.theta[m].im,cp.coefficients[m].re,cp.coefficients[m].im)).collect();
+                let thetas:Vec<String>=(0..r).map(|m|format!("[{:?},{:?},{:?},{:?}]",cp.theta[m].re,cp.theta[m].im,cp.coefficients[m].re,cp.coefficients[m].im)).collect();
+                let line=format!("{{\"columns\":{k},\"times\":{times:?},\"near\":{:?},\"outer\":{:?},\"modes\":{:?},\"kernels\":{kernels},\"routed\":[{}],\"ritz\":[{}],\"fast\":{},\"own\":{},\"slow\":{slow:?}}}",
+                    self.lattice.near,self.lattice.outer_modes,self.lattice.modes,routed.join(","),thetas.join(","),list(&fast_split),list(&own_split));
+                use std::io::Write;if let Ok(mut f)=std::fs::OpenOptions::new().create(true).append(true).open(&path){let _=writeln!(f,"{line}");}
+            }}
             if count>0{
                 let s=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,&solutions[..count],outputs.times,Readout::Laboratory)?;
                 slow_trajectory=s.clone();

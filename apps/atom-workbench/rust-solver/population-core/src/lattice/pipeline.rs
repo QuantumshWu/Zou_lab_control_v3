@@ -339,6 +339,111 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     })
 }
 
+/// (research, ATOM_DIAG_EXACT=path at the checkpoints listed in ATOM_DIAG_AT)
+/// The model's exact error on its own lattice: x(t) = e^{tA} x0 by Pade (8,8)
+/// steps (ATOM_DIAG_SUB per grid interval, default 50; shifted solves to
+/// 1e-11 with the run's preconditioner) at the grid times up to ATOM_DIAG_TMAX
+/// (default 0.31 us), less the model's field W u(t); per lattice mode its
+/// populations Re e^{i nu_q t} E_q[ii]. One JSON line per checkpoint.
+fn basis_cols(space:&Space)->Vec<&[C]>{space.basis.iter().map(|v|v.as_slice()).collect()}
+#[allow(clippy::too_many_arguments)]
+fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mut Lattice<'_>,ops:&super::krylov::Vectors,space:&Space,model:&Model,times:&[f64],initial:&[C],solves:usize)->Result<(),String>{
+    let tmax=std::env::var("ATOM_DIAG_TMAX").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.31);
+    let sub=std::env::var("ATOM_DIAG_SUB").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(50);
+    let times:Vec<f64>=times.iter().copied().filter(|&t|t<=tmax).collect();
+    if times.len()<2{return Ok(());}
+    let clock=Instant::now();
+    let(n,size,modes,nu,centre,charges)={let op=lattice.operator();(op.n,op.dimension(),op.modes.len(),op.nu.clone(),op.centre,op.modes.clone())};let d=n*n;
+    // Pade (8,8): the four roots z (Im z > 0) of the denominator and their residues.
+    let roots:[(C,C);4]=[
+        (C{re:5.67796789779552302e+00,im:1.27078225972098888e+01},C{re:-1.65193072544915026e+02,im:-2.19157995335393480e+02}),
+        (C{re:8.73657843440328818e+00,im:8.82888500094301421e+00},C{re:4.26599883763159505e+03,im:-2.19879464125002841e+02}),
+        (C{re:1.04096815812761267e+01,im:5.23235030528406142e+00},C{re:-1.46726502179980143e+04,im:1.30835546536328566e+04}),
+        (C{re:1.11757720865251144e+01,im:1.73522889070729636e+00},C{re:1.06438444528428354e+04,im:-3.82471699398737619e+04})];
+    let h=(times[1]-times[0])/sub as f64;
+    let mut x=vec![ZERO;size];x[centre*d..(centre+1)*d].copy_from_slice(initial);
+    let zero=vec![ZERO;size];let mut inner=0usize;
+    let mut exact=vec![x.clone()];
+    for _ in 1..times.len(){
+        for _ in 0..sub{
+            // x <- x + sum over the pairs 2 Re[(r/h) (A - z/h)^-1 x] (R(inf) = (-1)^8 = 1).
+            let mut y=x.clone();
+            for &(z,res)in &roots{
+                let(w,steps,_)=lattice.solve(Pole::Complex(C{re:z.re/h,im:z.im/h}),&[x.clone(),zero.clone()],1e-11)?;inner+=steps;
+                let(a,b)=(2.*res.re/h,2.*res.im/h);
+                for((v,p),q)in y.iter_mut().zip(&w[0]).zip(&w[1]){v.re+=a*p.re-b*q.re;v.im+=a*p.im-b*q.im;}
+            }
+            x=y;
+        }
+        exact.push(x.clone());
+    }
+    let basis:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();
+    let mut rows=Vec::new();let mut exact_pops=Vec::new();let mut model_pops=Vec::new();
+    for(ti,&t)in times.iter().enumerate(){
+        let xm=ops.combinations(&basis,&[model.state(t)])?.remove(0);
+        let per_mode=|v:&[C]|->Vec<Vec<f64>>{(0..modes).map(|q|{let(c,s)=((nu[q]*t).cos(),(nu[q]*t).sin());(0..n).map(|i|{let z=v[q*d+i*n+i];c*z.re-s*z.im}).collect()}).collect()};
+        let e:Vec<C>=exact[ti].iter().zip(&xm).map(|(a,b)|C{re:a.re-b.re,im:a.im-b.im}).collect();
+        rows.push(per_mode(&e));
+        let total=|p:&Vec<Vec<f64>>|->Vec<f64>{(0..n).map(|i|p.iter().map(|r|r[i]).sum()).collect()};
+        exact_pops.push(total(&per_mode(&exact[ti])));model_pops.push(total(&per_mode(&xm)));
+    }
+    // ATOM_DIAG_EXACT_FULL: the error fields themselves, per time and mode its
+    // block as [re, im] pairs (the request frame, row-major n x n).
+    let full=if std::env::var("ATOM_DIAG_EXACT_FULL").is_ok(){
+        let mut parts=Vec::new();
+        for(ti,&t)in times.iter().enumerate(){let xm=ops.combinations(&basis,&[model.state(t)])?.remove(0);
+            let blocks:Vec<String>=(0..modes).map(|q|{let v:Vec<String>=(0..d).map(|k|{let z=C{re:exact[ti][q*d+k].re-xm[q*d+k].re,im:exact[ti][q*d+k].im-xm[q*d+k].im};format!("[{:?},{:?}]",z.re,z.im)}).collect();format!("[{}]",v.join(","))}).collect();
+            parts.push(format!("[{}]",blocks.join(",")));}
+        format!(",\"fields\":[{}]",parts.join(","))}else{String::new()};
+    // ATOM_DIAG_CLASSES: the error's populations split by the L0' eigen-
+    // coordinates' SW class: near resonant (in a pair above the kernels'
+    // cap), strongly coupled (a kept |X~| above 0.3), the rest.
+    let classes=if std::env::var("ATOM_DIAG_CLASSES").is_ok(){
+        let kernels=frame.kernels()?;let basis=prepared.eigenbasis()?;let vectors=basis.eigenvector_blocks();
+        let mut class=vec![2u8;d];let mut strength=vec![0_f64;d];
+        for st in &kernels.steps{for &(i,j,x)in &st.entries{let a=magnitude(x);strength[i]=strength[i].max(a);strength[j]=strength[j].max(a);}
+            for &(i,j)in &st.resonant{class[i]=0;class[j]=0;}}
+        for i in 0..d{if class[i]==2&&strength[i]>0.3{class[i]=1;}}
+        let counts=[0u8,1,2].map(|c|class.iter().filter(|&&x|x==c).count());
+        let mut split=vec![vec![vec![0_f64;n];times.len()];3];
+        for(ti,&t)in times.iter().enumerate(){let xm=ops.combinations(&basis_cols(space),&[model.state(t)])?.remove(0);
+            for q in 0..modes{
+                let block:Vec<C>=(0..d).map(|k|C{re:exact[ti][q*d+k].re-xm[q*d+k].re,im:exact[ti][q*d+k].im-xm[q*d+k].im}).collect();
+                let c=basis.coefficients(&[&block])?;let(cs,sn)=((nu[q]*t).cos(),(nu[q]*t).sin());
+                for i in 0..d{if !nonzero(c[i]){continue;}let v=&vectors[i*d..(i+1)*d];
+                    for k in 0..n{let z=mul(c[i],v[k*n+k]);split[class[i]as usize][ti][k]+=cs*z.re-sn*z.im;}}
+            }
+        }
+        format!(",\"classCounts\":{counts:?},\"classes\":{split:?}")}else{String::new()};
+    // The residual integral: |E(t)|_tr <= |E(0)|_tr + int_0^t |r(s)|_tr ds for a
+    // trace-norm contraction, r(s) = A W u(s) - W u'(s) read physically
+    // (sum_q e^{i nu_q s} r_q), by the trapezoid rule on 40 points per grid
+    // interval.
+    let residual_integral={
+        let lapack=&prepared.lapack;let r=model.r;let images:Vec<&[C]>=space.images.iter().map(|v|v.as_slice()).collect();
+        let derivative=|t:f64|->Vec<f64>{let e:Vec<C>=(0..r).map(|j|mul(model.used_theta[j],mul(cexp(model.used_theta[j],t),model.used_coefficients[j]))).collect();
+            (0..r).map(|i|(0..r).fold(0.,|acc,j|acc+mul(model.vectors[i*r+j],e[j]).re)).collect()};
+        let physical=|v:&[C],t:f64|->Vec<C>{let mut m=vec![ZERO;d];for q in 0..modes{let ph=cexp(C{re:0.,im:nu[q]},t);for k in 0..d{mul_add(&mut m[k],ph,v[q*d+k]);}}m};
+        let trace_norm=|m:&[C]|->Result<f64,String>{let mut cm=vec![ZERO;d];for i in 0..n{for j in 0..n{cm[i+n*j]=m[i*n+j];}}
+            let(values,_)=lapack.complex_eigen_right(&cm,n)?;Ok(values.iter().map(|z|z.re.abs()).sum())};
+        let x0m=ops.combinations(&basis_cols(space),&[model.state(0.)])?.remove(0);
+        let mut e0=vec![ZERO;size];e0[centre*d..(centre+1)*d].copy_from_slice(initial);for(a,b)in e0.iter_mut().zip(&x0m){a.re-=b.re;a.im-=b.im;}
+        let start=trace_norm(&physical(&e0,0.))?;
+        let per=40usize;let dt=(times[1]-times[0])/per as f64;let mut acc=start;let mut out=vec![start];let mut prev:Option<f64>=None;
+        for step in 0..=(times.len()-1)*per{let t=step as f64*dt;
+            let v=ops.combinations(&images,&[model.state(t)])?.remove(0);let w=ops.combinations(&basis_cols(space),&[derivative(t)])?.remove(0);
+            let res:Vec<C>=v.iter().zip(&w).map(|(a,b)|C{re:a.re-b.re,im:a.im-b.im}).collect();
+            let norm=trace_norm(&physical(&res,t))?;
+            if let Some(p)=prev{acc+=0.5*dt*(p+norm);}prev=Some(norm);
+            if step>0&&step%per==0{out.push(acc);}
+        }
+        out};
+    let line=format!("{{\"solves\":{solves},\"columns\":{},\"times\":{times:?},\"h\":{h:?},\"inner\":{inner},\"seconds\":{:?},\"charges\":{charges:?},\"nu\":{nu:?},\"error\":{rows:?},\"exact\":{exact_pops:?},\"model\":{model_pops:?},\"residualIntegral\":{residual_integral:?}{full}{classes}}}",
+        space.basis.len(),clock.elapsed().as_secs_f64());
+    use std::io::Write;let mut f=std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e|e.to_string())?;writeln!(f,"{line}").map_err(|e|e.to_string())?;
+    Ok(())
+}
+
 /// One run of `solve` on the request's lattice or on its completion: the
 /// solution, or (Err) the completion its first checkpoint asks for, with
 /// that checkpoint.
@@ -415,6 +520,10 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             let clock=Instant::now();
             galerkin.ingest(&space.basis,&space.images)?;
             let model=galerkin.model(lapack,&space.initial,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
+            if let Ok(path)=std::env::var("ATOM_DIAG_EXACT"){
+                let at:Vec<usize>=std::env::var("ATOM_DIAG_AT").ok().map(|v|v.split(',').filter_map(|x|x.trim().parse().ok()).collect()).unwrap_or_default();
+                if at.contains(&space.solves()){diag_exact(&path,prepared,frame,&mut lattice,&ops,&space,&model,times,initial,space.solves())?;}
+            }
             timing.projection_ms=galerkin.milliseconds;timing.images_ms=space.images_ms;
             let outputs_clock=Instant::now();
             let mut trajectory=model.trajectory(&galerkin,times);
