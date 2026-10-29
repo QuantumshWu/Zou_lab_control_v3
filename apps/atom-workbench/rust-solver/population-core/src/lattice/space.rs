@@ -60,10 +60,16 @@ const APPEND_FLOOR:f64=1e-11;
 /// Ladder points per decade: a deliberate choice, not measured (the
 /// reference runs used two to three); the ranking chooses among them.
 const PER_DECADE:f64=2.;
-/// The ladder's top, LADDER_TOP / t1. Measured: three lasers at 20 us
-/// stalled at 3.8-5.8e-3 over 48 solves with 1 / t1, reached 1.9e-3 at 24
-/// solves with 10 / t1 (half the inner steps per solve); 30 / t1 gave the
-/// same errors on five lasers at 10 us.
+/// The ladder's top, LADDER_TOP / t1: the shift-and-invert rule at the
+/// earliest output time, t1 the first sample time (without a grid T_max /
+/// LADDER_SAMPLES, `pipeline`). Van den Eshof and Hochbruck's choice for
+/// exp(t A) v by (I - gamma A)^-1 is gamma = t / 10, a pole at 1 / gamma =
+/// 10 / t1: a rule, not a measured constant. Measured against it: three
+/// lasers at 20 us stalled at 3.8-5.8e-3 over 48 solves with 1 / t1, reached
+/// 1.9e-3 at 24 solves with 10 / t1 (half the inner steps per solve); 30 / t1
+/// gave the same errors on five lasers at 10 us; twice and four times the
+/// top, points above it and tops from x0's dressed spectrum were none better
+/// across the board (the necessity review).
 const LADDER_TOP:f64=10.;
 /// A deliberate margin: a dressed mode carrying less than a tenth of the
 /// tolerance of x0's population weight gets no complex pole.
