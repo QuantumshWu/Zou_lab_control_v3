@@ -4,9 +4,9 @@
 //! explicit charges P, then their ring Q; every mode set closed under
 //! q -> -q) and, at each checkpoint, one reduced model x(t) ~ W X u(t),
 //! u' = G u, u(0) = c0, from which every output is read: the trajectory on
-//! the grid (lab readout, the local time average), the states at the
-//! horizons (centre readout = the laboratory time average at T) and the
-//! steady state. The estimator receives the space and the reduced model and
+//! the grid (lab readout, the local time average) and the states at the
+//! horizons (centre readout = the laboratory time average at T). The
+//! estimator receives the space and the reduced model and
 //! returns an error estimate per output; ACCEPTANCE_FACTOR times it is the
 //! output's bound, and the pipeline accepts the checkpoint when every bound
 //! is at most `ledger::POPULATION_TOLERANCE`.
@@ -148,10 +148,9 @@ pub struct ErrorEstimate{
     pub trajectory:Vec<f64>,
     /// One per horizon.
     pub horizons:Vec<f64>,
-    /// The slow part alone (the ring's feedback and the K^(1) rests the
-    /// lattice leaves out, through the slow modes; the kernel's own residual
-    /// with them), per grid time and per horizon: what a completed lattice
-    /// could remove (`pipeline`'s completion).
+    /// The slow part alone (the ring's feedback through the slow modes; the
+    /// kernel's own residual with it), per grid time and per horizon: what a
+    /// completed lattice could remove (`pipeline`'s completion).
     pub slow_trajectory:Vec<f64>,pub slow_horizons:Vec<f64>,
     pub work:EstimateWork,
 }

@@ -126,30 +126,24 @@ const LADDER_SAMPLES:f64=200.;
 /// kernel. Measured: decaying classes at most 5e-3 of their weight, the
 /// kernel 1.6 (trace 1.00, weight 0.63): a margin of 100x and 3x.
 const KERNEL_TRACE_SHARE:f64=0.5;
-/// Completion (`solve`): at the first checkpoint, a bound above the
-/// tolerance of which the slow part (the ring's feedback and what the
-/// lattice operator leaves out of the second-order far shell, the K^(1)
-/// rests it drops among it) carries at least COMPLETION_SHARE is completed.
-/// Measured (three lasers at B = 0 and 1 mG, p(1 s)): at the first
-/// checkpoint the Krylov part is 1e-11 of bounds of 7.1-7.4e-3, the ring's
-/// part 3.8-4.3e-3 and the K^(1) rests' 1.1-1.2e-2 (signed parts, partly
-/// cancelling); a trajectory's first checkpoint is the Krylov residual's
-/// (2e-1 against 2-8e-3). Without the share, completing wherever a source
+/// The near ring's completion (`solve`): at the first checkpoint, a bound
+/// above the tolerance of which the slow part (the ring's feedback) carries
+/// at least COMPLETION_SHARE is completed. Measured (three lasers at B = 0
+/// and 1 mG, p(1 s), before the truncation rule): at the first checkpoint
+/// the Krylov part is 1e-11 of bounds of 7.1-7.4e-3, the ring's part
+/// 3.8-4.3e-3; a trajectory's first checkpoint is the Krylov residual's
+/// (2e-1 against 2-8e-3). Without the share, completing wherever the ring
 /// reaches COMPLETION_FLOOR, the same three lasers at 20 us restarted as
 /// well: twice the wall time (1.6 -> 3.5 s), the error at 1 mG 4.5e-4 ->
 /// 1.6e-3.
 const COMPLETION_SHARE:f64=0.5;
-/// A source of the slow part joins the lattice while its part (bound units)
-/// is at least COMPLETION_FLOOR x tolerance: the K^(1) rests, kept when the
-/// operator drops them and the part of what it leaves out reaches the floor,
-/// and the ring charges by decreasing attribution while the
-/// ring's part they leave (its unpromoted share of the attribution) reaches
-/// it. Measured: K^(1) rests and ring each alone fail (both lattices' means
-/// stayed 1.3-2.0e-3 off with either change alone, 4e-5 and 1.7e-4 with
-/// both); the floor on the ring left the decisions of the 20 completing
-/// runs of the necessity review unchanged (every ring part at least
-/// 7.2e-3), and every run without an ablation promotes one pair carrying
-/// its whole attribution, as the earlier rule (90% of the attribution) did.
+/// The ring charges join the lattice by decreasing attribution while the
+/// ring's part they leave (its unpromoted share of the attribution, bound
+/// units) is at least COMPLETION_FLOOR x tolerance. Measured: the floor left
+/// the decisions of the 20 completing runs of the necessity review unchanged
+/// (every ring part at least 7.2e-3), and every run without an ablation
+/// promotes one pair carrying its whole attribution, as the earlier rule
+/// (90% of the attribution) did.
 const COMPLETION_FLOOR:f64=0.25;
 /// Stack of the frame's thread (LAPACK on it).
 const FRAME_STACK:usize=1<<26;
@@ -385,17 +379,18 @@ fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:
 /// Every output of a request from rho0 (row-major n x n); `observer` sees
 /// every checkpoint with its outputs as it is made.
 ///
-/// Completion: at the first checkpoint, when the largest bound is above the
-/// tolerance and its slow part (the omitted ring's feedback and the K^(1)
-/// rests the lattice leaves out) is at least COMPLETION_SHARE of it, each
-/// source is estimated alone and joins while its part reaches
-/// COMPLETION_FLOOR x tolerance: the K^(1) rests the lattice leaves out join
-/// the operator, and the ring charges join P with their mirrors by
-/// decreasing attribution (|a_m| |B y_r| over the kernel and slow modes,
-/// from the ring's feedback) while the ring's part they leave reaches the
-/// floor. The run then restarts once on the completed lattice
-/// (the frame and the eigenbasis are kept), its checkpoints after the first
-/// run's. Every other run is unchanged.
+/// The first checkpoint's decision, one for both lattices around the run's:
+/// the far shell's depth, the fewest rings beyond the second order whose
+/// rest, by its action on the reduced solution to T (`ring_actions`), stays
+/// within what the build left of the truncation rule's budget; and the near
+/// ring's completion, when the largest bound is above the tolerance and its
+/// slow part (the omitted ring's feedback) is at least COMPLETION_SHARE of
+/// it: the ring charges join P with their mirrors by decreasing attribution
+/// (|a_m| |B y_r| over the kernel and slow modes, from the ring's feedback)
+/// while the ring's part they leave reaches COMPLETION_FLOOR x tolerance.
+/// When either asks for more, the run restarts once on the completed lattice
+/// and fold (the frame and the eigenbasis are kept), its checkpoints after
+/// the first run's. Every other run is unchanged.
 pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut observer:Option<&mut dyn FnMut(&Checkpoint,&Answer)>)->Result<Solution,String>{
     let started=Instant::now();
     let times=request.times;
@@ -656,10 +651,10 @@ mod tests{
     use super::super::operator::LatticeOperator;
     #[test]
     fn lattice_pipeline_follows_the_exact_lattice_dynamics(){
-        // The fixture from |0><0|: the trajectory (2 us), the state at a
-        // horizon and the steady state against the same lattice P u Q
-        // propagated densely (RK4, real form) and its dense null vector. The
-        // far drives at 2% of the fixture's.
+        // The fixture from |0><0|: the trajectory (2 us) and the state at a
+        // horizon against the same lattice P u Q propagated densely (RK4, real
+        // form), and the steady column against its dense null vector. The far
+        // drives at 2% of the fixture's.
         let mut f=fixture();for v in f.far.iter_mut().chain(f.far2.iter_mut()){*v*=0.02;}let p=prepared(&f);let n=4;let d=16;let groups=vec![vec![0,1],vec![2,3]];
         let mut initial=vec![ZERO;d];initial[0]=ONE;
         let times:Vec<f64>=(0..21).map(|i|0.1*i as f64).collect();let horizons=[3.];
@@ -691,8 +686,7 @@ mod tests{
         let horizon=ledger::metric(&centre,&a.horizons[0],&groups);assert!(horizon<=POPULATION_TOLERANCE,"horizon {horizon:e}");
         let exact=dense_steady(&p,&dense,op.centre,n);
         // The bordered column at a tight tolerance is the lattice's null
-        // vector; the reported steady state carries the algebraic error of
-        // the bordered solve at STEADY_TOLERANCE.
+        // vector.
         let mut lattice=Lattice::new(&p,&p.fold,s.explicit.sets.clone()).unwrap();let mut u=vec![ZERO;size];for i in 0..n{u[op.centre*d+i*n+i]=C{re:0.25,im:0.};}
         let(w,_,_)=lattice.solve(Pole::Zero,&[u],1e-13).unwrap();let trace:f64=(0..n).map(|i|w[0][op.centre*d+i*n+i].re).sum();
         let column:Vec<f64>=(0..n).map(|i|w[0][op.centre*d+i*n+i].re/trace).collect();

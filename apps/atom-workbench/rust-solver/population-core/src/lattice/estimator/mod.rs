@@ -88,12 +88,11 @@
 //!   with it the bound is 4.8e-4, still short; the slow modes' own
 //!   residuals (above) close the gap (the default scene at 10 ms: rejected
 //!   at 4 solves, accepted at 8 with a bound of 2.1e-5 against an error of
-//!   1.8e-5). The steady state takes the slow part alone (the kernel's
-//!   error).
+//!   1.8e-5).
 //!
-//! Outputs: the trajectory on the grid (laboratory readout), each horizon T
-//! (centre readout: the time average) and the steady state, every one
-//! estimated at every checkpoint. Errors are measured with `ledger::metric`.
+//! Outputs: the trajectory on the grid (laboratory readout) and each horizon
+//! T (centre readout: the time average), every one estimated at every
+//! checkpoint. Errors are measured with `ledger::metric`.
 use super::*;
 use super::estimate_api::{EstimateSetup,ErrorEstimate,EstimateWork,Outputs,ReducedView,SteadySolves};
 use super::ledger::{self,metric};

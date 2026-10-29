@@ -33,12 +33,9 @@
 //!
 //! Outputs from the one G: the trajectory p(t) = sum_q Re e^{i nu_q t}
 //! diag(W u(t))_q (the local time average); the state at a horizon T, its
-//! centre block (the laboratory time average at T); the steady state
-//! (|u|, y) with G[1..,1..] y = -|u| G[1..,0] (a simple kernel), else the
-//! kernel's spectral projection; the slow
-//! Ritz values the slowest relaxation is read from (`pipeline` checks their
-//! residuals against the images and the frame's classes) and the conserved
-//! count.
+//! centre block (the laboratory time average at T); the slow Ritz values the
+//! slowest relaxation is read from (`pipeline` checks their residuals against
+//! the images and the frame's classes).
 //!
 //! The error transform orders the poles: the Laplace transform of the
 //! population error with the residual propagated through the dressed blocks,
