@@ -101,6 +101,8 @@ pub struct Projection<'m>{
     frame_metric:&'m SwMetric<'m>,
     vectors:Vectors,
     pub milliseconds:f64,
+    /// (research, S9) Petrov-Galerkin with Z = (A - tau) W: tau and W^T A^T x0.
+    pub petrov:Option<(f64,Vec<f64>)>,
 }
 /// Grows a row-major old x old matrix to new x new (zeros in the new part).
 fn grow(old_matrix:&[f64],old:usize,new:usize)->Vec<f64>{let mut g=vec![0.;new*new];for i in 0..old{for j in 0..old{g[i*new+j]=old_matrix[i*old+j];}}g}
@@ -111,7 +113,7 @@ impl<'m> Projection<'m>{
         let centre=canonical.iter().position(|c|c.0==op.centre).unwrap_or(0);
         let length=canonical.len()*d;
         Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,frame_metric:metric,
-            vectors:Vectors::new(op,1)?,milliseconds:0.})
+            vectors:Vectors::new(op,1)?,milliseconds:0.,petrov:None})
     }
     pub fn columns(&self)->usize{self.covered}
     /// (research, S3) Bytes of the metric columns kept.
@@ -119,6 +121,8 @@ impl<'m> Projection<'m>{
     /// (research, S3) The Euclidean Galerkin matrix (row-major r x r): the
     /// carrier's row zero, the other rows E[1.., ..] = Re W^T A W (W is
     /// Euclidean-orthonormal).
+    /// (research, S9) E = W^T A W and F = (A W)^T (A W), row-major.
+    pub fn euclidean_parts(&self)->(Vec<f64>,Vec<f64>){(self.e.clone(),self.f.clone())}
     pub fn euclidean_g(&self)->Vec<f64>{let r=self.covered;let mut g=self.e.clone();for j in 0..r{g[j]=0.;}g}
     /// (research, S2) The M-orthogonal coordinates of a field on the covered
     /// columns: K^-1 Re W^H M x.
@@ -253,6 +257,15 @@ impl<'m> Projection<'m>{
             g[r..].copy_from_slice(&rows);
         }
         let mut c0=vec![0.;k];for(c,&v)in c0.iter_mut().zip(initial){*c=v;}
+        // (research, S9) Petrov-Galerkin, Z = (A - tau) W (W orthonormal): G = (E^T - tau)^-1 (F - tau E),
+        // c0 = (E^T - tau)^-1 (W^T A^T x0 - tau W^T x0), the carrier's row zero (trace conservation).
+        if let Some((tau,wa))=&self.petrov{if wa.len()==r&&r>1{
+            let mut m=self.e.clone();for i in 0..r{m[i+r*i]-=tau;}
+            let b:Vec<f64>=(0..r*r).map(|x|{let(i,j)=(x%r,x/r);self.f[i*r+j]-tau*self.e[i*r+j]}).collect();
+            let(lu,piv)=lapack.factor(&m,r)?;let gc=lapack.solve_matrix_factored(&lu,&piv,&b,r)?;
+            let rhs:Vec<f64>=(0..r).map(|i|wa[i]-tau*c0[i]).collect();c0=lapack.solve_matrix_factored(&lu,&piv,&rhs,r)?;
+            for i in 0..r{for j in 0..r{g[i*r+j]=if i==0{0.}else{gc[i+r*j]};}}
+        }}
         // Ritz decomposition.
         let(re,im,ev)=lapack.eigen(&transpose_rows(&g,r,r),r)?;
         let(pair,theta)=conjugate_pairs(&re,&im);let mut s=vec![ZERO;r*r];

@@ -83,7 +83,7 @@ const PER_DECADE:f64=2.;
 /// gave the same errors on five lasers at 10 us; twice and four times the
 /// top, points above it and tops from x0's dressed spectrum were none better
 /// across the board (the necessity review).
-const LADDER_TOP:f64=10.;
+pub const LADDER_TOP:f64=10.;
 /// A deliberate margin: a dressed mode carrying less than a tenth of the
 /// tolerance of x0's population weight gets no complex pole.
 const COMPLEX_WEIGHT:f64=0.1;
@@ -204,6 +204,10 @@ impl Space{
     /// (research, S6) A further starting vector of the block (a family's
     /// slip): a Krylov vector of its own; the block grows by one when it
     /// adds a direction.
+    /// (research, S9) A Krylov direction from outside the solves (a band's Arnoldi vector).
+    pub fn add_direction(&mut self,lattice:&mut Lattice<'_>,v:Vec<C>)->Result<usize,String>{self.add_krylov(lattice,v)}
+    /// (research, S9) A basis column only (not a Krylov vector: the solves continue from theirs).
+    pub fn add_column(&mut self,lattice:&mut Lattice<'_>,v:Vec<C>)->Result<usize,String>{let floor=self.floor();Ok(usize::from(self.append(lattice,v,floor)?))}
     pub fn add_start(&mut self,lattice:&mut Lattice<'_>,v:Vec<C>)->Result<usize,String>{
         let before=self.krylov.len();let added=self.add_krylov(lattice,v)?;if self.krylov.len()>before{self.block+=1;}Ok(added)
     }

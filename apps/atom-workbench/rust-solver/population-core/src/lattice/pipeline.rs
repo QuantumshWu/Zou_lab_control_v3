@@ -393,6 +393,64 @@ fn expm_real(lapack:&Lapack,a:&[f64],r:usize)->Result<Vec<f64>,String>{
     Ok(e)
 }
 #[allow(clippy::too_many_arguments)]
+/// (research, S9) ATOM_BANDS: the x0-weighted dressed modes by shift-invert
+/// Arnoldi on the lattice, one band per x0-weighted L0' mode cluster (the
+/// heaviest mode lambda is the shift, the band radius |Re lambda|; weighted
+/// modes within it join), from x0, in the complex Euclidean product. A band
+/// runs until every Ritz pair within its radius carrying x0 weight >= 0.1 x
+/// tolerance has the shift-invert residual |h_{m+1,m} s_m| / |theta| <= eps
+/// (ATOM_BAND_EPS, default 1e-3), at most ATOM_BAND_MAX steps (default 40).
+/// The Arnoldi vectors join the space as Krylov directions (their J-real
+/// parts, with the translations' copies).
+fn band_vectors(lattice:&mut Lattice<'_>,space:&mut Space,eigen:&BlockEigenbasis,initial:&[C],tolerance:f64,lapack:&Lapack)->Result<(usize,String),String>{
+    let eps=std::env::var("ATOM_BAND_EPS").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(1e-3);
+    let most=std::env::var("ATOM_BAND_MAX").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(40);
+    let inner=std::env::var("ATOM_BAND_TOL").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(1e-9);
+    let(n,size,modes,mirror,centre)={let op=lattice.operator();(op.n,op.dimension(),op.modes.len(),op.mirror.clone(),op.centre)};let d=n*n;
+    let dot=|x:&[C],y:&[C]|x.iter().zip(y).fold(ZERO,|s,(a,b)|C{re:s.re+a.re*b.re+a.im*b.im,im:s.im+a.re*b.im-a.im*b.re});
+    let norm=|x:&[C]|x.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();
+    let split=|z:&[C]|->(Vec<C>,Vec<C>){let mut a=vec![ZERO;size];let mut b=vec![ZERO;size];
+        for q in 0..modes{let mq=mirror[q];for i in 0..n{for j in 0..n{let u=z[q*d+i*n+j];let v=conj(z[mq*d+j*n+i]);let k=q*d+i*n+j;
+            a[k]=C{re:0.5*(u.re+v.re),im:0.5*(u.im+v.im)};let w=C{re:u.re-v.re,im:u.im-v.im};b[k]=C{re:0.5*w.im,im:-0.5*w.re};}}}(a,b)};
+    let join=|a:&[C],b:&[C]|->Vec<C>{a.iter().zip(b).map(|(x,y)|C{re:x.re-y.im,im:x.im+y.re}).collect()};
+    // The bands.
+    let weights=eigen.mode_weights(initial)?;
+    let mut weighted:Vec<(f64,C)>=eigen.lambda.iter().zip(&weights).filter(|(l,&w)|l.im>=0.&&l.re<0.&&w>=0.1*tolerance).map(|(l,&w)|(w,*l)).collect();
+    weighted.sort_by(|a,b|b.0.total_cmp(&a.0));
+    let mut bands:Vec<(C,f64)>=Vec::new();
+    for &(_,l)in &weighted{if bands.iter().all(|(s,r)|magnitude(C{re:l.re-s.re,im:l.im-s.im})>*r){bands.push((l,-l.re));}}
+    let mut x0=vec![ZERO;size];x0[centre*d..(centre+1)*d].copy_from_slice(initial);let x0n=norm(&x0);
+    let mut added=0;let mut report=Vec::new();
+    for &(sigma,radius)in &bands{
+        let mut v:Vec<Vec<C>>=vec![x0.iter().map(|z|C{re:z.re/x0n,im:z.im/x0n}).collect()];let mut h:Vec<Vec<C>>=Vec::new();
+        let mut steps=0usize;let mut state=String::new();let mut chosen:Vec<Vec<C>>=Vec::new();
+        for m in 1..=most{
+            let(a,b)=split(&v[m-1]);let(w,st,_)=lattice.solve(Pole::Complex(sigma),&[a,b],inner)?;steps+=st;let mut w=join(&w[0],&w[1]);
+            let mut col=vec![ZERO;m+1];
+            for _ in 0..2{for i in 0..m{let c=dot(&v[i],&w);col[i].re+=c.re;col[i].im+=c.im;for(x,y)in w.iter_mut().zip(&v[i]){let p=mul(c,*y);x.re-=p.re;x.im-=p.im;}}}
+            let beta=norm(&w);col[m]=C{re:beta,im:0.};h.push(col);
+            // Ritz pairs of H_m (column-major m x m).
+            let hm:Vec<C>=(0..m*m).map(|k|{let(i,j)=(k%m,k/m);if i<=j+1{h[j][i]}else{ZERO}}).collect();
+            let(theta,s)=lapack.complex_eigen_right(&hm,m)?;
+            let(lu,piv)=lapack.complex_factor(&s,m)?;let mut e1=vec![ZERO;m];e1[0]=ONE;let c=lapack.complex_solve_matrix_factored(&lu,&piv,&e1,m)?;
+            let mut open=0usize;let mut inside=0usize;let mut picked:Vec<usize>=Vec::new();
+            for k in 0..m{let t=theta[k];let t2=t.re*t.re+t.im*t.im;if t2==0.{continue;}let mu=C{re:sigma.re+t.re/t2,im:sigma.im-t.im/t2};
+                if magnitude(C{re:mu.re-sigma.re,im:mu.im-sigma.im})>radius{continue;}
+                let sn=(0..m).map(|i|{let z=s[i+k*m];z.re*z.re+z.im*z.im}).sum::<f64>().sqrt();
+                let weight=magnitude(c[k])*sn;if weight<0.1*tolerance{continue;}inside+=1;picked.push(k);
+                let rho=beta*magnitude(s[m-1+k*m])/sn/t2.sqrt();if rho>eps{open+=1;}}
+            state=format!("m {m} inside {inside} open {open}");
+            chosen=picked.iter().map(|&k|{let mut x=vec![ZERO;size];for i in 0..m{let a=s[i+k*m];for(y,z)in x.iter_mut().zip(&v[i]){let p=mul(a,*z);y.re+=p.re;y.im+=p.im;}}x}).collect();
+            if beta>0.{for z in &mut w{z.re/=beta;z.im/=beta;}v.push(w);}
+            if beta==0.||(open==0&&(inside>0||m>=4)){break;}
+        }
+        // ATOM_BAND_ALL: every Arnoldi vector (with the translations' copies); else the band's weighted Ritz vectors, untranslated.
+        let all=std::env::var("ATOM_BAND_ALL").is_ok();let list=if all{&v}else{&chosen};let keep=space.untranslated_next;space.untranslated_next=!all;
+        let mut here=0;for z in list{let(a,b)=split(z);if all{here+=space.add_direction(lattice,a)?;here+=space.add_direction(lattice,b)?;}else{here+=space.add_column(lattice,a)?;here+=space.add_column(lattice,b)?;}}added+=here;space.untranslated_next=keep;
+        report.push(format!("{:.2}{:+.2}i r {:.2}: {state}, {steps} inner steps, {here} columns",sigma.re,sigma.im,radius));
+    }
+    Ok((added,report.join("; ")))
+}
 /// (research, S8) ATOM_POLES_GREEDY: the pole sequence of the rational
 /// approximation of e^{t z} on x0's weighted a-priori spectrum (the dressed
 /// centre modes and the families' lambda_j - i nu_q): the space's scalar
@@ -401,7 +459,7 @@ fn expm_real(lapack:&Lapack,a:&[f64],r:usize)->Result<Vec<f64>,String>{
 /// the largest weighted least-squares error over the sample times. A
 /// near-normal operator's space error is this scalar error (S8: the fast
 /// cluster's eigenvector condition numbers are 1.0-1.06).
-fn greedy_poles(points:&[(f64,C)],times:&[f64],candidates:&[Pole],count:usize)->(Vec<Pole>,Vec<f64>){
+fn greedy_poles(points:&[(f64,C)],times:&[f64],candidates:&[Pole],count:usize,forced:Option<&[Pole]>)->(Vec<Pole>,Vec<f64>,Vec<[f64;3]>){
     let p=points.len();let w:Vec<f64>=points.iter().map(|x|x.0).collect();let z:Vec<C>=points.iter().map(|x|x.1).collect();
     let dot=|a:&[C],b:&[C]|a.iter().zip(b).fold(ZERO,|s,(x,y)|C{re:s.re+x.re*y.re+x.im*y.im,im:s.im+x.re*y.im-x.im*y.re});
     let norm2=|a:&[C]|a.iter().map(|x|x.re*x.re+x.im*x.im).sum::<f64>();
@@ -415,10 +473,11 @@ fn greedy_poles(points:&[(f64,C)],times:&[f64],candidates:&[Pole],count:usize)->
     let directions=|pole:&Pole,power:i32|->Vec<Vec<C>>{let s=pole.sigma();let one=|s:C|->Vec<C>{(0..p).map(|k|{let d=C{re:z[k].re-s.re,im:z[k].im-s.im};
             let mut v=C{re:w[k],im:0.};for _ in 0..power{let m=d.re*d.re+d.im*d.im;v=mul(v,C{re:d.re/m,im:-d.im/m});}v}).collect()};
         if matches!(pole,Pole::Complex(_)){vec![one(s),one(conj(s))]}else{vec![one(s)]}};
-    let mut used:Vec<i32>=vec![0;candidates.len()];let mut out=Vec::new();let mut history=Vec::new();
-    for _ in 0..count{
+    let mut used:Vec<i32>=vec![0;candidates.len()];let mut out=Vec::new();let mut history=Vec::new();let mut windows=Vec::new();
+    for step in 0..count{
         let mut best:Option<(f64,usize,Vec<Vec<C>>)>=None;
         for(c,pole)in candidates.iter().enumerate(){
+            if let Some(f)=forced{if !(f[step%f.len()]==*pole){continue;}}
             let mut fresh:Vec<Vec<C>>=Vec::new();
             for g in directions(pole,used[c]+1){let all:Vec<Vec<C>>=q.iter().chain(&fresh).cloned().collect();if let Some(v)=orth(&all,g){fresh.push(v);}}
             if fresh.is_empty(){continue;}
@@ -428,8 +487,9 @@ fn greedy_poles(points:&[(f64,C)],times:&[f64],candidates:&[Pole],count:usize)->
         let Some((worst,c,fresh))=best else{break};
         for f in &fresh{for r in &mut residual{let a=dot(f,r);for(x,y)in r.iter_mut().zip(f){let m=mul(a,*y);x.re-=m.re;x.im-=m.im;}}}
         q.extend(fresh);used[c]+=1;out.push(candidates[c]);history.push(worst.sqrt());
+        let mut win=[0_f64;3];for(r,&t)in residual.iter().zip(times){let k=if t<=0.1{0}else if t<=0.3{1}else{2};win[k]=win[k].max(norm2(r).sqrt());}windows.push(win);
     }
-    (out,history)
+    (out,history,windows)
 }
 /// (research, S8) ATOM_DIAG_CLUSTER=path: the true spectrum of the run's
 /// lattice operator near sigma (ATOM_DIAG_CLUSTER_RE/IM) by shift-invert
@@ -509,13 +569,30 @@ fn diag_cluster(path:&str,prepared:&LatticePrepared,lattice:&mut Lattice<'_>,spa
     let mut angles=Vec::new();for(mu,x)in &pairs{let mut p=x.clone();for _ in 0..2{for w in basis{let c=dot(w,&p);axpy(&mut p,C{re:-c.re,im:-c.im},w);}}
         let near=model.theta.iter().copied().min_by(|a,b|magnitude(C{re:a.re-mu.re,im:a.im-mu.im}).total_cmp(&magnitude(C{re:b.re-mu.re,im:b.im-mu.im}))).unwrap_or(ZERO);
         angles.push(format!("[{:?},{:?},{:?},{:?},{:?}]",mu.re,mu.im,norm(&p)/norm(x),near.re,near.im));}
+    // Translation images: for an eigenvector x dominated by block q != 0, y = S_-q x (y_p = x_{p+q}) and its
+    // residual as an eigenvector of A at mu + i nu_q, the norm kept, and its largest overlap with the
+    // eigenvectors found (normalised).
+    let(index,nu_all,centre_q)={let op=lattice.operator();(op.index.clone(),op.nu.clone(),op.centre)};
+    let mut images=Vec::new();
+    for(mu,x)in &pairs{
+        let shares:Vec<f64>=(0..modes).map(|q|x[q*d..(q+1)*d].iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>()).collect();
+        let q=(0..modes).max_by(|&a,&b|shares[a].total_cmp(&shares[b])).unwrap_or(centre_q);if q==centre_q{continue;}
+        let mut y=vec![ZERO;size];
+        for p in 0..modes{let Ok(target)=charge_plus(&charges[p],&charges[q])else{continue};if let Some(&t)=index.get(&target){y[p*d..(p+1)*d].copy_from_slice(&x[t*d..(t+1)*d]);}}
+        let kept=norm(&y);if kept==0.{continue;}
+        let lam=C{re:mu.re,im:mu.im+nu_all[q]};let ay=apply(lattice,&y)?;
+        let res:f64=(0..size).map(|e|{let m=mul(lam,y[e]);let r=C{re:ay[e].re-m.re,im:ay[e].im-m.im};r.re*r.re+r.im*r.im}).sum::<f64>().sqrt()/kept;
+        let ycentre=y[centre_q*d..(centre_q+1)*d].iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt()/kept;
+        images.push(format!("[{:?},{:?},{:?},{:?},{:?},{:?},{:?}]",mu.re,mu.im,charges[q],kept,lam.im,res,ycentre));
+    }
+    let active=space.translations();
     // x0's expansion on the eigenvectors found (least squares on their span; exact for an orthogonal rest).
     let centre=lattice.operator().centre;let mut x0=vec![ZERO;size];x0[centre*d..(centre+1)*d].copy_from_slice(initial);
     let kk=pairs.len();let mut gm=vec![ZERO;kk*kk];let mut rhs=vec![ZERO;kk];
     for i in 0..kk{rhs[i]=dot(&pairs[i].1,&x0);for j in 0..kk{gm[i+j*kk]=dot(&pairs[i].1,&pairs[j].1);}}
     let amps=if kk>0{let(lu,piv)=lapack.complex_factor(&gm,kk)?;lapack.complex_solve_matrix_factored(&lu,&piv,&rhs,kk)?}else{vec![]};
     let amp:Vec<String>=pairs.iter().zip(&amps).map(|((mu,_),a)|format!("[{:?},{:?},{:?}]",mu.re,mu.im,magnitude(*a)/norm(&x0))).collect();
-    let line=format!("{{\"solves\":{solves},\"columns\":{},{fixed},\"spaceDistance\":[{}],\"x0Amplitudes\":[{}]}}\n",basis.len(),angles.join(","),amp.join(","));
+    let line=format!("{{\"solves\":{solves},\"columns\":{},{fixed},\"spaceDistance\":[{}],\"x0Amplitudes\":[{}],\"images\":[{}],\"active\":{:?}}}\n",basis.len(),angles.join(","),amp.join(","),images.join(","),active);
     use std::io::Write;let mut f=std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e|e.to_string())?;f.write_all(line.as_bytes()).map_err(|e|e.to_string())?;
     Ok(())
 }
@@ -602,6 +679,18 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
         let mut u=c0.clone();let mut euclid=vec![u.clone()];
         for _ in 1..times.len(){let mut v=vec![0.;r];lapack.gemm(false,false,r,1,r,1.,&eh_e,r,&u,r,0.,&mut v,r)?;u=v;euclid.push(u.clone());}
         let mut euclid_pops=Vec::new();
+        // (research, S9) Petrov-Galerkin with Z = (A - tau) W (ATOM_DIAG_PG_TAU, real): G = (E^T - tau)^-1 (F - tau E),
+        // c = (E^T - tau)^-1 (W^T A^T x0 - tau W^T x0), the carrier row zero.
+        let tau=std::env::var("ATOM_DIAG_PG_TAU").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.);
+        let pg:Vec<Vec<f64>>={let(e,f)=galerkin.euclidean_parts();
+            let mut m=e.clone();for i in 0..r{m[i+r*i]-=tau;}
+            let b:Vec<f64>=(0..r*r).map(|k|{let(i,j)=(k%r,k/r);f[i*r+j]-tau*e[i*r+j]}).collect();
+            let(lu,piv)=lapack.factor(&m,r)?;let mut g=lapack.solve_matrix_factored(&lu,&piv,&b,r)?;for j in 0..r{g[r*j]=0.;}
+            let mut x0f=vec![ZERO;size];x0f[centre*d..(centre+1)*d].copy_from_slice(initial);let ax=lattice.operator().apply_adjoint(&x0f)?;
+            let wa=ops.dots(&basis,&ax);let rhs:Vec<f64>=(0..r).map(|i|wa[i]-tau*c0[i]).collect();let c=lapack.solve_matrix_factored(&lu,&piv,&rhs,r)?;
+            let eh=expm_real(lapack,&g.iter().map(|x|x*spacing).collect::<Vec<f64>>(),r)?;
+            let mut u=c;let mut out=vec![u.clone()];for _ in 1..times.len(){let mut v=vec![0.;r];lapack.gemm(false,false,r,1,r,1.,&eh,r,&u,r,0.,&mut v,r)?;u=v;out.push(u.clone());}out};
+        let mut pg_pops=Vec::new();
         let(_,_,ev)=lapack.eigen(&gcol,r)?;
         let fro=|m:&[f64]|m.iter().map(|x|x*x).sum::<f64>().sqrt();
         let(lu,pivots)=lapack.factor(&ev,r)?;let mut id=vec![0.;r*r];for i in 0..r{id[i+r*i]=1.;}let inv=lapack.solve_matrix_factored(&lu,&pivots,&id,r)?;
@@ -629,9 +718,9 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
             coordinate_gap.push(ue.iter().zip(&stable[ti]).map(|(a,b)|(a-b).abs()).fold(0.,f64::max));
             let ce=ops.gram(&basis,&[exact[ti].as_slice()])?;let cm=galerkin.metric_coordinates(lapack,&basis,&exact[ti])?;
             c_e_norm.push(ce.iter().map(|x|x*x).sum::<f64>().sqrt());
-            let fields=ops.combinations(&basis,&[stable[ti].clone(),ce,cm,euclid[ti].clone()])?;
+            let fields=ops.combinations(&basis,&[stable[ti].clone(),ce,cm,euclid[ti].clone(),pg[ti].clone()])?;
             let read=|v:&[C]|->Vec<f64>{(0..n).map(|i|(0..modes).map(|q|{let z=v[q*d+i*n+i];let(c,s)=((nu[q]*t).cos(),(nu[q]*t).sin());c*z.re-s*z.im}).sum()).collect()};
-            stable_pops.push(read(&fields[0]));best_e.push(read(&fields[1]));best_m.push(read(&fields[2]));euclid_pops.push(read(&fields[3]));
+            stable_pops.push(read(&fields[0]));best_e.push(read(&fields[1]));best_m.push(read(&fields[2]));euclid_pops.push(read(&fields[3]));pg_pops.push(read(&fields[4]));
             let xm=ops.combinations(&basis,&[ue])?.remove(0);let mp=read(&xm);
             if t>0.&&t<=early_limit+1e-12{
                 let mut per=[vec![vec![0.;n];modes],vec![vec![0.;n];modes]];let mut bins=[vec![vec![0.;6];6],vec![vec![0.;6];6]];
@@ -664,7 +753,7 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
             format!("[{}]",out.join(","))};
         let thetas:Vec<[f64;2]>=model.theta.iter().map(|z|[z.re,z.im]).collect();
         let amps:Vec<f64>=model.used_coefficients.iter().map(|z|magnitude(*z)).collect();
-        format!(",\"kappaF\":{kappa:?},\"amplification\":{amplification:?},\"coordinateGap\":{coordinate_gap:?},\"readoutGap\":{readout_gap:?},\"exactCoordinateNorm\":{c_e_norm:?},\"stable\":{stable_pops:?},\"bestE\":{best_e:?},\"bestM\":{best_m:?},\"theta\":{thetas:?},\"amplitudes\":{amps:?},\"ritzCheck\":{ritz_check},\"earlyModes\":{early_modes:?},\"earlyBins\":{early_bins:?},\"euclid\":{euclid_pops:?}")
+        format!(",\"kappaF\":{kappa:?},\"amplification\":{amplification:?},\"coordinateGap\":{coordinate_gap:?},\"readoutGap\":{readout_gap:?},\"exactCoordinateNorm\":{c_e_norm:?},\"stable\":{stable_pops:?},\"bestE\":{best_e:?},\"bestM\":{best_m:?},\"theta\":{thetas:?},\"amplitudes\":{amps:?},\"ritzCheck\":{ritz_check},\"earlyModes\":{early_modes:?},\"earlyBins\":{early_bins:?},\"euclid\":{euclid_pops:?},\"pg\":{pg_pops:?},\"pgTau\":{tau:?}")
     };
     let mut rows=Vec::new();let mut exact_pops=Vec::new();let mut model_pops=Vec::new();
     for(ti,&t)in times.iter().enumerate(){
@@ -952,7 +1041,16 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             if let Some(f)=std::env::var("ATOM_GREEDY_SPREAD").ok().and_then(|v|v.parse::<f64>().ok()){
                 spectrum=spectrum.iter().flat_map(|&(w,l)|{let h=f*l.re.abs();[(w,l),(w,C{re:l.re-h,im:l.im}),(w,C{re:(l.re+h).min(0.),im:l.im}),(w,C{re:l.re,im:l.im+h}),(w,C{re:l.re,im:l.im-h})]}).collect();}
             let sample:Vec<f64>={let mut idx:Vec<usize>=Vec::new();let mut i=1usize;while i<times.len(){idx.push(i);i=(i*5/4).max(i+1);}idx.into_iter().map(|i|times[i]).collect()};
-            let clock=Instant::now();let(sequence,history)=greedy_poles(&spectrum,&sample,&all,maximum_solves);
+            // ATOM_GREEDY_EVAL: the scalar model's per-window errors of the fixed cycle against the greedy sequence.
+            if std::env::var("ATOM_GREEDY_EVAL").is_ok(){
+                let mut cyc=all.clone();cyc.retain(|p|matches!(p,Pole::Real(_)));let base=cyc.clone();let _=base;
+                let mut reals:Vec<Pole>=all.iter().copied().filter(|p|std::env::var("ATOM_GREEDY_EVAL").map(|v|v=="all").unwrap_or(false)||matches!(p,Pole::Real(_))).collect();
+                reals.sort_by(|a,b|b.sigma().re.total_cmp(&a.sigma().re));let m=reals.len();let p2=m.next_power_of_two();let width=p2.trailing_zeros();
+                let cycle:Vec<Pole>=(0..p2).map(|i|if width==0{0}else{i.reverse_bits()>>(usize::BITS-width)}).filter(|&i|i<m).map(|i|reals[i]).collect();
+                let(_,_,wc)=greedy_poles(&spectrum,&sample,&all,48,Some(&cycle));let(_,_,wg)=greedy_poles(&spectrum,&sample,&all,48,None);
+                for k in(3..48).step_by(4){eprintln!("DBG scalar s{} cycle {:.1e} {:.1e} {:.1e} | greedy {:.1e} {:.1e} {:.1e}",k+1,wc[k][0],wc[k][1],wc[k][2],wg[k][0],wg[k][1],wg[k][2]);}
+            }
+            let clock=Instant::now();let(sequence,history,_)=greedy_poles(&spectrum,&sample,&all,maximum_solves,None);
             eprintln!("DBG greedy {} points {} candidates {} ms: {}",spectrum.len(),all.len(),clock.elapsed().as_millis(),sequence.iter().zip(&history).map(|(p,e)|format!("{p} ({e:.1e})")).collect::<Vec<_>>().join(", "));
             sequence
         }else{
@@ -962,6 +1060,8 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
         let p2=m.next_power_of_two();let width=p2.trailing_zeros();
         let order:Vec<usize>=(0..p2).map(|i|if width==0{0}else{i.reverse_bits()>>(usize::BITS-width)}).filter(|&i|i<m).collect();
         order.into_iter().map(|i|real[i]).collect()}};
+    if std::env::var("ATOM_BANDS").is_ok(){let clock=Instant::now();let(added,report)=band_vectors(&mut lattice,&mut space,eigen,initial,tolerance,lapack)?;
+        eprintln!("DBG bands {added} columns in {} ms: {report}",clock.elapsed().as_millis());}
     let(mut next_fixed,mut last_checkpoint)=(0usize,usize::MAX);
     // The first checkpoint's completion decision when it changed nothing.
     let mut decided:Option<Completion>=None;
@@ -972,6 +1072,10 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             // 3. The checkpoint: model, outputs, estimate, bounds.
             let clock=Instant::now();
             if no_images{galerkin.ingest_adjoint(&space.basis,&mut lattice)?;}else{galerkin.ingest(&space.basis,&space.images)?;}
+            // (research, S9) ATOM_PG: Petrov-Galerkin with Z = (A - tau) W, tau = LADDER_TOP / t1 (ATOM_PG=<tau> overrides).
+            if let Ok(v)=std::env::var("ATOM_PG"){let tau=v.parse::<f64>().unwrap_or(space::LADDER_TOP/t1);
+                let(n0,d0,c0)={let op=lattice.operator();(op.n,op.n*op.n,op.centre)};let mut x0f=vec![ZERO;lattice.operator().dimension()];x0f[c0*d0..(c0+1)*d0].copy_from_slice(initial);let _=n0;
+                let ax=lattice.operator().apply_adjoint(&x0f)?;let refs:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();galerkin.petrov=Some((tau,ops.dots(&refs,&ax)));}
             let model=galerkin.model(lapack,&space.initial,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
             if let Ok(path)=std::env::var("ATOM_DIAG_EXACT"){
                 let at:Vec<usize>=std::env::var("ATOM_DIAG_AT").ok().map(|v|v.split(',').filter_map(|x|x.trim().parse().ok()).collect()).unwrap_or_default();
