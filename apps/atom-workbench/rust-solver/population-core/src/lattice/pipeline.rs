@@ -523,9 +523,22 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
             }
             readout_gap=readout_gap.max(mp.iter().zip(&solver[ti]).map(|(a,b)|(a-b).abs()).fold(0.,f64::max));
         }
+        // (research, S6) the Ritz pairs weighing most at the first sample:
+        // value, weight |a_j| |W s_j| e^{Re theta t1}, relative residual.
+        let ritz_check={let t1=times[1];let mut list:Vec<(usize,f64)>=(0..r).map(|j|{let s:Vec<C>=(0..r).map(|i|model.vectors[i*r+j]).collect();
+            let norm=s.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();(j,magnitude(model.used_coefficients[j])*norm*(model.used_theta[j].re*t1).exp())}).collect();
+            list.sort_by(|a,b|b.1.total_cmp(&a.1));let mut out=Vec::new();
+            for &(j,wgt)in list.iter().take(12){let th=model.theta[j];
+                let re:Vec<f64>=(0..r).map(|i|model.vectors[i*r+j].re).collect();let im:Vec<f64>=(0..r).map(|i|model.vectors[i*r+j].im).collect();
+                let f=ops.combinations(&basis,&[re,im])?;let(mut a0,mut a1)=(vec![ZERO;size],vec![ZERO;size]);lattice.apply(&f[0],&mut a0)?;lattice.apply(&f[1],&mut a1)?;
+                let res0:Vec<C>=(0..size).map(|e|C{re:a0[e].re-th.re*f[0][e].re+th.im*f[1][e].re,im:a0[e].im-th.re*f[0][e].im+th.im*f[1][e].im}).collect();
+                let res1:Vec<C>=(0..size).map(|e|C{re:a1[e].re-th.re*f[1][e].re-th.im*f[0][e].re,im:a1[e].im-th.re*f[1][e].im-th.im*f[0][e].im}).collect();
+                let rn=(ops.dot(&res0,&res0)+ops.dot(&res1,&res1)).sqrt()/(ops.dot(&f[0],&f[0])+ops.dot(&f[1],&f[1])).sqrt().max(1e-300);
+                out.push(format!("[{:?},{:?},{:?},{:?}]",th.re,th.im,wgt,rn/magnitude(th).max(1.)));}
+            format!("[{}]",out.join(","))};
         let thetas:Vec<[f64;2]>=model.theta.iter().map(|z|[z.re,z.im]).collect();
         let amps:Vec<f64>=model.used_coefficients.iter().map(|z|magnitude(*z)).collect();
-        format!(",\"kappaF\":{kappa:?},\"amplification\":{amplification:?},\"coordinateGap\":{coordinate_gap:?},\"readoutGap\":{readout_gap:?},\"exactCoordinateNorm\":{c_e_norm:?},\"stable\":{stable_pops:?},\"bestE\":{best_e:?},\"bestM\":{best_m:?},\"theta\":{thetas:?},\"amplitudes\":{amps:?},\"earlyModes\":{early_modes:?},\"earlyBins\":{early_bins:?},\"euclid\":{euclid_pops:?}")
+        format!(",\"kappaF\":{kappa:?},\"amplification\":{amplification:?},\"coordinateGap\":{coordinate_gap:?},\"readoutGap\":{readout_gap:?},\"exactCoordinateNorm\":{c_e_norm:?},\"stable\":{stable_pops:?},\"bestE\":{best_e:?},\"bestM\":{best_m:?},\"theta\":{thetas:?},\"amplitudes\":{amps:?},\"ritzCheck\":{ritz_check},\"earlyModes\":{early_modes:?},\"earlyBins\":{early_bins:?},\"euclid\":{euclid_pops:?}")
     };
     let mut rows=Vec::new();let mut exact_pops=Vec::new();let mut model_pops=Vec::new();
     for(ti,&t)in times.iter().enumerate(){
@@ -748,6 +761,13 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                 for j in 0..d{let a=slip[q][j];if !nonzero(a){continue;}for e in 0..d{mul_add(&mut f[q*d+e],a,blocks[j*d+e]);}}
                 let m=lattice.operator().mirror[q];
                 if m!=q{for i in 0..n{for k in 0..n{f[m*d+i*n+k]=conj(f[q*d+k*n+i]);}}}
+                if std::env::var("ATOM_DIAG_CHECKS").is_ok(){
+                    let(canonical,mirror)={let op=lattice.operator();(op.canonical.clone(),op.mirror.clone())};
+                    let mut g=f.clone();mirror_field(&mut g,n,&canonical,&mirror);
+                    let asym=f.iter().zip(&g).map(|(a,b)|magnitude(C{re:a.re-b.re,im:a.im-b.im})).fold(0.,f64::max);let size=f.iter().map(|a|magnitude(*a)).fold(0.,f64::max);
+                    let traces:f64=(0..charges.len()).map(|p|magnitude((0..n).fold(ZERO,|acc,i|C{re:acc.re+f[p*d+i*n+i].re,im:acc.im+f[p*d+i*n+i].im}))).fold(0.,f64::max);
+                    eprintln!("DBG check slip {c:?}: max |f - J f| {asym:.1e} of {size:.1e}, largest block trace {traces:.1e}");
+                }
                 let added=space.add_start(&mut lattice,f)?;eprintln!("DBG block start {c:?} added {added} (block {})",space.block);
             }
         }
@@ -760,12 +780,16 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let(mut score,mut solved_at,mut remaining)=(vec![0.;points.len()],vec![None::<f64>;points.len()],vec![0.;points.len()]);
     let fixed_poles=std::env::var("ATOM_FIXED_POLES").is_ok();
     let fixed_sequence:Vec<Pole>={
-        let mut real:Vec<f64>=points.iter().filter_map(|p|if let Pole::Real(s)=p{Some(*s)}else{None}).collect();real.sort_by(|a,b|b.total_cmp(a));
+        // (research, S6) ATOM_FIXED_COMPLEX: the ladder's complex centre poles
+        // join the cycle (sorted by real part with the real ones).
+        let with_complex=std::env::var("ATOM_FIXED_COMPLEX").is_ok();
+        let mut all:Vec<Pole>=points.iter().copied().filter(|p|matches!(p,Pole::Real(_))||(with_complex&&matches!(p,Pole::Complex(_)))).collect();
+        all.sort_by(|a,b|b.sigma().re.total_cmp(&a.sigma().re));let real:Vec<Pole>=all;
         let m=real.len();
         // Bit-reversed order over the next power of two, the indices beyond m left out.
         let p2=m.next_power_of_two();let width=p2.trailing_zeros();
         let order:Vec<usize>=(0..p2).map(|i|if width==0{0}else{i.reverse_bits()>>(usize::BITS-width)}).filter(|&i|i<m).collect();
-        order.into_iter().map(|i|Pole::Real(real[i])).collect()};
+        order.into_iter().map(|i|real[i]).collect()};
     let(mut next_fixed,mut last_checkpoint)=(0usize,usize::MAX);
     // The first checkpoint's completion decision when it changed nothing.
     let mut decided:Option<Completion>=None;
@@ -789,6 +813,12 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             let steady=model.steady_populations(&galerkin);
             timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
             let estimate_clock=Instant::now();
+            if std::env::var("ATOM_DIAG_CHECKS").is_ok(){
+                let refs:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();let k=refs.len();let g=ops.gram(&refs,&refs)?;
+                let off=(0..k*k).map(|e|(g[e]-if e/k==e%k{1.}else{0.}).abs()).fold(0.,f64::max);
+                let traces=space.basis.iter().skip(1).map(|v|(0..modes.len()).map(|q|{let d=n*n;magnitude((0..n).fold(ZERO,|acc,i|C{re:acc.re+v[q*d+i*n+i].re,im:acc.im+v[q*d+i*n+i].im}))}).fold(0.,f64::max)).fold(0.,f64::max);
+                eprintln!("DBG check solves {} columns {k} block {}: max |W^T W - I| {off:.1e}, largest block trace of a K column {traces:.1e}",space.solves(),space.block);
+            }
             // (research, S3) ATOM_DIAG_MEMORY: the footprint per checkpoint.
             if std::env::var("ATOM_DIAG_MEMORY").is_ok(){let(fast,pool)=estimator.as_ref().map_or((0,0),|e|e.stored_bytes());let(private,peak)=crate::memory::private_bytes();
                 let field=16*space.basis.first().map_or(0,|v|v.len());

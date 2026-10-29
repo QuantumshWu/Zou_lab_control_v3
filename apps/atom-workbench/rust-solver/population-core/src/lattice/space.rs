@@ -225,12 +225,13 @@ impl Space{
             Pole::Real(_)|Pole::Complex(_)=>{
                 // A complex pole's real form: the second right-hand side zero.
                 let f:Vec<C>=self.krylov.last().ok_or("Empty Krylov sequence")?.iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-                let rhs=if pole.copies()==2{vec![f,vec![ZERO;length]]}
-                    else{let b=self.block.min(self.krylov.len());self.krylov[self.krylov.len()-b..].iter().map(|k|k.iter().map(|v|C{re:-v.re,im:-v.im}).collect()).collect()};
-                let(w,steps,residual)=if pole.copies()==2||rhs.len()==1{lattice.solve(pole,&rhs,inner)?}else{
+                let b=self.block.min(self.krylov.len());
+                let rhs:Vec<Vec<C>>=if b==1{if pole.copies()==2{vec![f,vec![ZERO;length]]}else{vec![f]}}
+                    else{self.krylov[self.krylov.len()-b..].iter().map(|k|k.iter().map(|v|C{re:-v.re,im:-v.im}).collect()).collect()};
+                let(w,steps,residual)=if b==1{lattice.solve(pole,&rhs,inner)?}else{
                     // (research, S6) a block: one solve per right-hand side.
                     let(mut w,mut steps,mut residual)=(Vec::new(),0usize,0_f64);
-                    for f in &rhs{let(x,st,re)=lattice.solve(pole,std::slice::from_ref(f),inner)?;w.extend(x);steps+=st;residual=residual.max(re);}
+                    for f in &rhs{let one=if pole.copies()==2{vec![f.clone(),vec![ZERO;length]]}else{vec![f.clone()]};let(x,st,re)=lattice.solve(pole,&one,inner)?;w.extend(x);steps+=st;residual=residual.max(re);}
                     (w,steps,residual)};
                 let mut added=0;for column in w{added+=self.add_krylov(lattice,column)?;}
                 (added,steps,residual)
