@@ -229,7 +229,7 @@ pub fn project_traces(x:&mut[C],n:usize){
 /// The ladder of a request: real poles from LADDER_TOP / t1 down to
 /// 1 / T_max, and the complex poles at the frequencies of x0's slow dressed
 /// centre modes.
-pub fn ladder(eigen:&BlockEigenbasis,initial:&[C],t1:f64,longest:f64,tolerance:f64)->Result<Vec<Pole>,String>{
+pub fn ladder(eigen:&BlockEigenbasis,initial:&[C],nu:&[f64],t1:f64,longest:f64,tolerance:f64)->Result<Vec<Pole>,String>{
     let(high,low)=(LADDER_TOP/t1,1./longest);
     let count=((high/low).log10()*PER_DECADE).ceil().max(1.)as usize+1;
     let sigmas:Vec<f64>=(0..count).map(|i|high*(low/high).powf(i as f64/(count-1)as f64)).collect();
@@ -237,9 +237,15 @@ pub fn ladder(eigen:&BlockEigenbasis,initial:&[C],t1:f64,longest:f64,tolerance:f
     let mut poles:Vec<Pole>=sigmas.iter().map(|&s|Pole::Real(s)).collect();
     // (research) ATOM_POLES_ALL: every x0-weighted dressed centre frequency is
     // a candidate, the fast modes' too (no slowness filter |Re lambda| < s).
-    let every=std::env::var("ATOM_POLES_ALL").is_ok();
+    // (research) ATOM_POLES_LATTICE: the lattice modes' frequencies by the same
+    // rule, every weighted dressed centre frequency shifted by every lattice
+    // mode's nu_q (the lattice's dressed modes are lambda_j - i nu_q).
+    let lattice_modes=std::env::var("ATOM_POLES_LATTICE").is_ok();
+    let every=lattice_modes||std::env::var("ATOM_POLES_ALL").is_ok();
+    let shifts:Vec<f64>=if lattice_modes{nu.to_vec()}else{vec![0.]};
     for &s in &sigmas{
-        let mut frequencies:Vec<f64>=eigen.lambda.iter().zip(&weights).filter(|(l,&w)|(every||l.re.abs()<s)&&l.im>s&&w>=COMPLEX_WEIGHT*tolerance).map(|(l,_)|l.im).collect();
+        let mut frequencies:Vec<f64>=eigen.lambda.iter().zip(&weights).filter(|(l,&w)|(every||l.re.abs()<s)&&w>=COMPLEX_WEIGHT*tolerance)
+            .flat_map(|(l,_)|shifts.iter().map(move|&v|l.im-v)).filter(|&w|w>s).collect();
         frequencies.sort_by(f64::total_cmp);
         let mut chosen=vec![0.];
         for w in frequencies{if chosen.iter().all(|&v|(w-v).abs()>s){chosen.push(w);}}

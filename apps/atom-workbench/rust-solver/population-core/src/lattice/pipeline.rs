@@ -518,7 +518,8 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     // them three, four, five lasers and four without the trap at 20 us were
     // accepted at 16-24 solves (four without the trap partial before) and
     // five lasers at 10 us / 2000 samples reached 7.0e-3 against 2.3e-2.
-    let points=space::ladder(eigen,initial,t1,times.last().copied().unwrap_or(longest),tolerance)?;let mut alive=vec![true;points.len()];
+    let points=space::ladder(eigen,initial,&lattice.operator().nu,t1,times.last().copied().unwrap_or(longest),tolerance)?;
+    if std::env::var("ATOM_DIAG_LADDER").is_ok(){eprintln!("DBG ladder {} points: {}",points.len(),points.iter().map(|p|{let z=p.sigma();format!("{:.3e}{:+.4e}i",z.re,z.im)}).collect::<Vec<_>>().join(" "));}let mut alive=vec![true;points.len()];
     // The frame's metric (waiting for the frame's thread).
     let clock=Instant::now();
     let metric=SwMetric::new(frame,eigen,lattice.operator())?;
