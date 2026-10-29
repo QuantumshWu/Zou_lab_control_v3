@@ -228,8 +228,8 @@ impl BlockEigenbasis{
     pub fn dressed(&self,blocks:&[C])->Result<Vec<C>,String>{
         let(n,d)=(self.n,self.d);let mut out=blocks.to_vec();let count=blocks.len()/d;
         // At least DRESSED_BLOCKS blocks per task (the GEMM streams E_R^-1
-        // once per task), at most one task per reference worker: independent
-        // of the thread count.
+        // once per task), at most one task per reference worker: the same
+        // chunks for every thread count from two on.
         let execution=Execution::new()?;let tasks=REFERENCE_WORKERS.min(count.div_ceil(DRESSED_BLOCKS)).max(1);
         let work=2*d*d*count;
         execution.for_mode_chunks(&mut out,d,work,work/tasks,&mut Vec::<()>::new(),|_,chunk,_|{

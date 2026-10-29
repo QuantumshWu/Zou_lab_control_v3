@@ -33,8 +33,9 @@
 //! 1024 entries), so every block takes one dense frame change P_0^-1 x Q_0^-1
 //! or P_0 c Q_0 (batched GEMMs) and the kernels act as sparse row
 //! operations. Only the canonical modes are computed (the caller mirrors),
-//! and every output entry is accumulated by one task in a fixed order, so
-//! results do not depend on the thread count.
+//! and every output entry is accumulated by one task in a fixed order (the
+//! same chunks for every thread count from two on: one worker runs a single
+//! task, `parallel`).
 use super::*;
 use super::operator::LatticeOperator;
 use crate::lapack::ComplexGemm;
@@ -340,8 +341,7 @@ impl Transform<'_>{
 }
 /// out_q = A in_q B on the computed modes: per task the computed blocks
 /// gathered and changed by two GEMMs (`sandwich_batch`), at most one task per
-/// reference worker (fixed: the chunking does not depend on the thread
-/// count).
+/// reference worker (the same chunks for every thread count from two on).
 #[allow(clippy::too_many_arguments)]
 fn frame(execution:&Execution,lapack:&Lapack,scratch:&mut Vec<FrameScratch>,n:usize,a:&[C],b:&[C],input:&[C],out:&mut[C],computed:&[bool],work:usize)->Result<(),String>{
     let d=n*n;let minimum=work.div_ceil(REFERENCE_WORKERS).max(MINIMUM_WORK_PER_TASK/8);
