@@ -179,6 +179,9 @@ struct Prepared{
     density:Vec<Complex64>,initial:Vec<f64>,
     /// The explicit set of rho0, built by the first run that needs it.
     explicit:std::sync::OnceLock<Result<ExplicitSet,String>>,
+    /// The runs that execute at once: 2 for a full request (its trajectory
+    /// and mean), else 1.
+    runs:usize,
 }
 fn prepare_request(model:&Model,options:&Options)->Result<Prepared,String>{
     if options.population_tolerance!=POPULATION_TOLERANCE{
@@ -190,7 +193,7 @@ fn prepare_request(model:&Model,options:&Options)->Result<Prepared,String>{
     let n=32;
     let density=initial_density(model,&lattice.lapack)?;
     let initial=(0..n).map(|i|density[i*n+i].re).collect();
-    Ok(Prepared{lattice,axes,groups:requested.iter().map(|g|g.indices.clone()).collect(),names:requested.iter().map(|g|g.name.clone()).collect(),density,initial,explicit:std::sync::OnceLock::new()})
+    Ok(Prepared{lattice,axes,groups:requested.iter().map(|g|g.indices.clone()).collect(),names:requested.iter().map(|g|g.name.clone()).collect(),density,initial,explicit:std::sync::OnceLock::new(),runs:if options.steady_only||!options.include_asymptotic{1}else{2}})
 }
 
 /// Laboratory time average of a lattice field (row-major density): the
@@ -262,11 +265,11 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
 /// (100 ms, 1 s, the steady state); `observer` sees every checkpoint.
 fn mean_run(request:&Prepared,observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
     let horizons=mean_horizons();
-    pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&horizons,steady:true,groups:&request.groups,explicit:&request.explicit},Some(observer))
+    pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&horizons,steady:true,groups:&request.groups,explicit:&request.explicit,runs:request.runs},Some(observer))
 }
 /// The trajectory of a request alone on its grid.
 fn trajectory_run(request:&Prepared,times:&[f64],observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
-    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&[],steady:false,groups:&request.groups,explicit:&request.explicit},Some(observer))
+    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&[],steady:false,groups:&request.groups,explicit:&request.explicit,runs:request.runs},Some(observer))
 }
 
 /// The standard horizons every mean run returns (the t -> infinity mean as
@@ -628,7 +631,7 @@ mod tests{
             let mut line=line;if let(Value::Object(a),Value::Object(b))=(&mut line,work){a.extend(b);}
             println!("{line}");
         };
-        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,steady,groups:&prepared.groups,explicit:&std::sync::OnceLock::new()},Some(&mut observe));
+        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,steady,groups:&prepared.groups,explicit:&std::sync::OnceLock::new(),runs:1},Some(&mut observe));
         let total_ms=started.elapsed().as_secs_f64()*1e3;
         match result{
             Ok(s)=>{let a=&s.answer;

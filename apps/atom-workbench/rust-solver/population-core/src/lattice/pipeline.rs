@@ -66,16 +66,29 @@ const CHECKPOINT:usize=4;
 /// accepted research case takes (16-24 at 20 us).
 const MAXIMUM_SOLVES:usize=48;
 const BASIS_BYTES:usize=1<<30;
-/// Memory guard: a request takes about BASE_BYTES plus MODE_BYTES per lattice
-/// mode (measured, private bytes: D1 + three D2 lasers, 13 modes, 0.62 GB;
-/// six lasers without the trap, 63 modes, 2.0 GB; the pole batches and the
-/// estimator's ring grow with the modes); one whose lattice would need more
-/// than MEMORY_BYTES stops before its first solve, with the reason.
+/// Memory guard: a request takes about BASE_BYTES plus MODE_BYTES per
+/// lattice mode of each run, and its runs execute at once (`Request::runs`:
+/// a full request's trajectory and mean, each with its own lattice, space
+/// and estimator). Measured, private bytes: D1 + three D2 lasers, 13 modes,
+/// 0.62 GB; six lasers without the trap, 63 modes, 2.0 GB (the pole batches
+/// and the estimator's ring grow with the modes); five lasers at 20 us /
+/// 1000 samples, 63 modes: the trajectory alone 1.60 GB, the mean alone
+/// 0.58 GB, both 1.65 GB. A run plans every run of its request on a lattice
+/// of its own size, so the runs together stay within the budget: a request
+/// beyond it stops before its first solve, with the reason, and a
+/// completion beyond it is not taken. The budget is MEMORY_SHARE of the
+/// machine's installed physical memory, not a fixed size: a run beyond the
+/// physical memory pages, and every solve sweeps the lattice and the whole
+/// basis, so it would stall the machine rather than slow down; the
+/// installed memory rather than the free, so whether a request is solved
+/// does not depend on what else runs. MEMORY_SHARE is a deliberate margin:
+/// the other half for the system, the app and the lab PC's other programs.
 const BASE_BYTES:f64=5e8;
 const MODE_BYTES:f64=3.2e7;
-const MEMORY_BYTES:f64=5e9;
-/// The memory a lattice of `modes` modes is planned to take (bytes).
-fn planned_bytes(modes:usize)->f64{BASE_BYTES+MODE_BYTES*modes as f64}
+const MEMORY_SHARE:f64=0.5;
+/// The memory a request of `runs` runs on lattices of `modes` modes is
+/// planned to take (bytes).
+fn planned_bytes(runs:usize,modes:usize)->f64{BASE_BYTES+MODE_BYTES*(runs*modes)as f64}
 /// The plateau: the largest bound did not improve by PLATEAU_GAIN over the
 /// last PLATEAU checkpoints. Measured
 /// before the rule: four lasers + tweezer at 10 us / 2000 samples held the
@@ -148,6 +161,9 @@ pub struct Request<'a>{
     /// The explicit set shared by the runs of one request from the same rho0
     /// (the first run to need it builds it).
     pub explicit:&'a std::sync::OnceLock<Result<ExplicitSet,String>>,
+    /// The runs of the request that execute at once (a full request's
+    /// trajectory and mean: 2), which share the memory budget.
+    pub runs:usize,
 }
 
 /// One checkpoint, for the diagnostics.
@@ -342,8 +358,9 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let clock=Instant::now();
     let mut lattice=Lattice::with_k1_rests(prepared,explicit.sets.clone(),keep_k1)?;
     let ledger=lattice.operator().ledger()?;
-    let planned=planned_bytes(lattice.modes.len());
-    if planned>MEMORY_BYTES{return Err(format!("The lattice of this request has {} modes and would need about {:.1} GB, above the {:.0} GB memory budget: not solved",lattice.modes.len(),planned/1e9,MEMORY_BYTES/1e9));}
+    let budget=MEMORY_SHARE*crate::memory::physical_bytes()?;
+    let planned=planned_bytes(request.runs,lattice.modes.len());
+    if planned>budget{return Err(format!("The lattice of this request has {} modes and would need about {:.1} GB, above the {:.0} GB memory budget: not solved",lattice.modes.len(),planned/1e9,budget/1e9));}
     // The static fold's frequency expansion (K^(0) + i nu K^(1)) holds while
     // its parameter p = nu_max / (|nu_far| - ||L0||) is small: a lattice with
     // p above EXPANSION_LIMIT is not solved, the limit a completion keeps to
@@ -483,7 +500,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                         let nu_max=|modes:&[Charge]|->Result<f64,String>{modes.iter().map(|q|prepared.nu(q).map(f64::abs)).try_fold(0_f64,|a,v|v.map(|v|a.max(v)))};
                         let(before,after)=(nu_max(&explicit.sets.modes())?,nu_max(&set.sets.modes())?);
                         let expansion=if before>0.{ledger.expansion_parameter*after/before}else{ledger.expansion_parameter};
-                        if planned_bytes(set.sets.modes().len())>MEMORY_BYTES||expansion>EXPANSION_LIMIT{promoted.clear();}else{grown=Some(set);}
+                        if planned_bytes(request.runs,set.sets.modes().len())>budget||expansion>EXPANSION_LIMIT{promoted.clear();}else{grown=Some(set);}
                     }
                     let attribution:Vec<(Charge,f64)>=ranked.iter().map(|(c,a)|(c.clone(),if total>0.{a/total}else{0.})).collect();
                     let restarted=keep||!promoted.is_empty();
@@ -562,7 +579,7 @@ mod tests{
         let mut initial=vec![ZERO;d];initial[0]=ONE;
         let times:Vec<f64>=(0..21).map(|i|0.1*i as f64).collect();let horizons=[3.];
         let mut seen=0;let mut observe=|_:&Checkpoint,_:&Answer|{seen+=1;};
-        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,steady:true,groups:&groups,explicit:&std::sync::OnceLock::new()},Some(&mut observe)).unwrap();
+        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,steady:true,groups:&groups,explicit:&std::sync::OnceLock::new(),runs:1},Some(&mut observe)).unwrap();
         assert!(s.converged&&s.reason.is_none()&&seen==s.checkpoints.len(),"{:?}",s.reason);
         let a=&s.answer;
         let op=LatticeOperator::new(&p,&a.modes).unwrap();let dense=op.dense();let size=op.dimension();
