@@ -121,6 +121,10 @@ impl Science {
     }
 
     fn open(&self, path: &str) -> Result<DecodedArchive,String> {
+        // Every entry point (Browse, typed path, refresh, CLI or remote open)
+        // resolves a preview to its data before decoding or replacing a figure.
+        let path = crate::figure_file::archive_path(std::path::Path::new(path))?;
+        let path = path.to_str().ok_or("The figure path is not valid Unicode")?;
         let opened = read_document(path, self.services.fit.clone(), self.services.defaults.clone(), self.services.registry.clone())
             .map_err(|error| error_text(&error))?;
         Ok(DecodedArchive { path: opened.path, info: opened.info, items: opened.items.into_iter().map(|item| ArchiveItem {

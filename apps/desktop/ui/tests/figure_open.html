@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Figure open path regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+import { FigureViewerView } from '../dist/views/figure_viewer.js';
+const assert=(value,message)=>{if(!value)throw Error(message)};
+const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)}`);
+const checks=[],sent=[];
+const transport={pending:new Map(),lastError:'',notice:null,busyText(){return ''},send(command){sent.push(command);return sent.length}};
+const ctx={transport,latest:{type:'state',viewer:{document:{path:''},panels:[],signals:[],plot_kinds:[]}},show(){}};
+const board={root:document.createElement('div'),size:0,presenting:false};
+const viewer=new FigureViewerView(ctx,board);document.body.append(viewer.root);
+const input=viewer.root.querySelector('.path-edit input');
+const buttons=[...viewer.root.querySelectorAll('.path-edit button')];
+const browse=buttons.find(b=>b.textContent.trim()==='Browse…');
+const refresh=buttons.find(b=>b.textContent.trim()==='Refresh');
+const accept=(path,request,error=null)=>{ctx.latest.viewer.document={path};viewer.update({type:'state',request,error})};
+const typed=path=>{input.value=path;input.dispatchEvent(new Event('change',{bubbles:true}))};
+const IMAGE='C:\\data files\\扫描 01.v2.PNG',ARCHIVE='C:\\data files\\扫描 01.v2.npz';
+const check=(name,test)=>{test();checks.push(name)};
+try {
+ accept('',0);
+ check('Browse requests the native visual picker without guessing a path',()=>{
+  assert(browse.title.includes('thumbnails')&&browse.title.includes('same-named'),'visual matching guidance missing');
+  browse.click();equal(sent.at(-1),{action:'open'},'Browse');
+ });
+ check('a pasted image path reaches the shared native pairing resolver intact',()=>{
+  typed(IMAGE);equal(sent.at(-1),{action:'open',path:IMAGE},'image path, including spaces and Unicode');
+  accept(ARCHIVE,sent.length);equal(viewer.info.path.value,ARCHIVE,'accepted data path');
+ });
+ check('Refresh reopens the resolved archive, not the preview',()=>{
+  refresh.click();equal(sent.at(-1),{action:'open',path:ARCHIVE},'refresh');
+ });
+ check('cancelling Browse preserves the current figure',()=>{
+  browse.click();accept(ARCHIVE,sent.length);
+  equal(viewer.info.path.value,ARCHIVE,'cancelled picker kept figure');
+  equal(sent.at(-1),{action:'open'},'cancel does not create another open');
+ });
+ check('missing pairs leave the accepted figure in place',()=>{
+  typed('C:\\other folder\\orphan.jpg');transport.lastError='No matching data archive for orphan.jpg';
+  accept(ARCHIVE,sent.length,transport.lastError);
+  equal(viewer.info.path.value,ARCHIVE,'failed open retained prior archive');
+  assert(viewer.root.textContent.includes('No matching data archive'),'pairing error is visible');
+  transport.lastError='';
+ });
+ check('direct archive opening and empty input still behave normally',()=>{
+  typed(ARCHIVE);equal(sent.at(-1),{action:'open',path:ARCHIVE},'NPZ');
+  const count=sent.length;typed('');equal(sent.length,count,'empty input sends nothing');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,error:error.stack})}
+</script>

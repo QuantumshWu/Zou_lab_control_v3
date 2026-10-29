@@ -85,6 +85,7 @@ class InstallationView implements View {
   private check: Button;
   private missing: Button;
   private install: Button;
+  private installCurrent: Button;
   private strip: StatusStrip;
   private asked = 0;
   private restartAsked = false;
@@ -94,12 +95,14 @@ class InstallationView implements View {
     const header = element("div", "title-row config-header");
     header.append(element("span", "heading", "Installation"), element("span", "spacer"), this.dot, this.logName);
     this.rewarm = command("Re-warm", () => send({ action: "installation_step", step: "rewarm" }, "Starting the SLM GPU warmup…"));
+    this.installCurrent = command("Install checked-out release", () => send({ action: "installation_step", step: "install_current" }, "Installing this checkout's release…"));
+    this.installCurrent.title = "Install the release named by this checkout without pulling GitHub. Use this after updating with GitHub Desktop, or while the online check is unavailable.";
     this.force = checkBox("Force rebuild", on => send({ action: "installation_option", name: "force_build", on }));
     for (const [step, label, vivado] of FPGA) {
       this.fpga.push([step, command(label, () => void this.runFpga(step, label)), vivado]);
     }
     const cards: [string, string, HTMLElement[]][] = [
-      ["program", "Program", []], ["python", "Science environment", []], ["instruments", "Instrument links", []], ["gpu", "SLM GPU", [this.rewarm.root]], ["fpga", "FPGA pulse board", []],
+      ["program", "Program", [this.installCurrent.root]], ["python", "Science environment", []], ["instruments", "Instrument links", []], ["gpu", "SLM GPU", [this.rewarm.root]], ["fpga", "FPGA pulse board", []],
     ];
     for (const [key, title, trailing] of cards) {
       const card = new GroupBox(title, trailing);
@@ -178,6 +181,7 @@ class InstallationView implements View {
       button.title = needsVivado && !vivado ? "Needs Vivado" : "";
     }
     this.rewarm.disabled = waiting || by("slm_gpu")?.state !== "ok";
+    this.installCurrent.disabled = waiting;
     setChecked(this.force, installation.force_build);
     setChecked(this.planOnly, installation.plan_only);
     for (const button of [this.check, this.missing, this.install]) button.disabled = waiting;

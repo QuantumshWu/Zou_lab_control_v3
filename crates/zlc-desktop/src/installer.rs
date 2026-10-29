@@ -24,8 +24,9 @@ use crate::{AppEvent, frame, job};
 
 /// What the background work tells the window's turn.
 pub enum Report {
-    /// A check's JSON line, or why there is none (Online: how this checkout stands against GitHub,
-    /// GitHub's own count first, marked fetching, then git's).
+    /// Provisional online information; the checker has not exited successfully yet.
+    Checking(Value),
+    /// A check's terminal result, after process exit and both pipes have settled.
     Checked(Check, Result<Value, String>),
     /// A line the running step wrote.
     Line(String),
@@ -121,30 +122,115 @@ fn decode_in(bytes: &[u8], page: u32) -> String {
     String::from_utf16_lossy(&wide[..size.max(0) as usize])
 }
 
-/// A check's answer: the last JSON line it printed (unless it failed after it), else why it printed
-/// none. `heard` is told each JSON line as it comes.
+enum CheckOutput { Line(bool, Vec<u8>), Closed(Option<String>) }
+
+/// Never offer Stop for a process we cannot actually stop. Reap an
+/// uncontained child before reporting failure or starting any further work.
+fn require_job(child: &mut std::process::Child, limited: Option<job::Limited>) -> Result<job::Limited, String> {
+    if let Some(limited) = limited { return Ok(limited); }
+    let stopped = child.kill().and_then(|_| child.wait());
+    Err(match stopped {
+        Ok(_) => "Cannot supervise the process tree; the process was stopped and no further step was started".into(),
+        Err(error) => format!("Cannot supervise the process tree; stopping the process also failed: {error}"),
+    })
+}
+
+/// Supervise the whole check, including inherited pipes. Reading either pipe
+/// or waiting for a descendant must never outlive the check's total deadline.
+/// A job is mandatory: cancellation must end every process the script started.
+fn run_check(mut command: Command, timeout: Duration, heard: impl Fn(&Value)) -> Result<Value, String> {
+    let until = Instant::now() + timeout;
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().map_err(|error| format!("Cannot start check: {error}"))?;
+    let limited = job::limit(&child, None);
+    let limited = require_job(&mut child, limited)?;
+    let mut limited = Some(limited);
+    let (send, receive) = std::sync::mpsc::sync_channel(64);
+    for (stderr, stream) in [(false, Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>),
+                            (true, Box::new(child.stderr.take().unwrap()) as Box<dyn std::io::Read + Send>)] {
+        let send = send.clone();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stream).split(b'\n') {
+                match line {
+                    Ok(line) => if send.send(CheckOutput::Line(stderr, line)).is_err() { return; },
+                    Err(error) => { let _ = send.send(CheckOutput::Closed(Some(error.to_string()))); return; }
+                }
+            }
+            let _ = send.send(CheckOutput::Closed(None));
+        });
+    }
+    drop(send);
+    let (mut status, mut streams, mut answer) = (None, 2, None);
+    let (mut lines, mut errors) = (VecDeque::new(), VecDeque::new());
+    let mut pipe_error = None;
+    loop {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(exit)) => {
+                    status = Some(exit);
+                    // A finished parent may leave descendants holding its pipes.
+                    // They belong to this check, so end them before draining EOF.
+                    drop(limited.take());
+                }
+                Ok(None) => {}
+                Err(error) => { drop(limited.take()); let _ = child.kill(); return Err(format!("Cannot wait for check: {error}")); }
+            }
+        }
+        if status.is_some() && streams == 0 { break; }
+        let remaining = until.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drop(limited.take());
+            let _ = child.kill();
+            return Err(format!("Check exceeded its {:.0} s deadline; its process tree was stopped", timeout.as_secs_f64()));
+        }
+        match receive.recv_timeout(remaining.min(Duration::from_millis(25))) {
+            Ok(CheckOutput::Line(stderr, line)) => {
+                let text = decode(&line).trim().to_owned();
+                if !stderr && (text.starts_with('{') || text.starts_with('[')) {
+                    if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                        heard(&value); answer = Some(value); lines.clear(); continue;
+                    }
+                }
+                if !text.is_empty() {
+                    let tail = if stderr { &mut errors } else { &mut lines };
+                    if tail.len() == 32 { tail.pop_front(); }
+                    tail.push_back(text);
+                }
+            }
+            Ok(CheckOutput::Closed(error)) => { streams -= 1; if error.is_some() { pipe_error = error; } }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                if streams != 0 { pipe_error = Some("the check's output reader ended unexpectedly".into()); streams = 0; }
+                // Both pipes can close while the checker is still running.
+                if status.is_none() { std::thread::sleep(remaining.min(Duration::from_millis(25))); }
+            }
+        }
+    }
+    if let Some(error) = pipe_error { return Err(format!("Cannot read check output: {error}")); }
+    let status = status.unwrap();
+    let explicit = lines.iter().chain(errors.iter()).rev().find_map(|line|
+        line.strip_prefix("ERROR:").map(|text| text.trim().to_owned()));
+    if let Some(error) = explicit { return Err(error); }
+    if !status.success() {
+        let reason = errors.back().or_else(|| lines.back()).map(|line| format!(": {line}")).unwrap_or_default();
+        return Err(format!("Check failed with code {}{reason}", status.code().unwrap_or(-1)));
+    }
+    answer.ok_or_else(|| errors.back().or_else(|| lines.back()).cloned().unwrap_or_else(|| "Check answered no JSON status".into()))
+}
+
 fn check(which: Check, heard: impl Fn(&Value)) -> Result<Value, String> {
     let (script, arguments) = which.script();
     let arguments: Vec<String> = arguments.iter().map(|text| (*text).to_owned()).collect();
-    let mut child = powershell(script, &arguments).spawn().map_err(|error| format!("Cannot run tools\\{script}: {error}"))?;
-    let _job = job::limit(&child, None);
-    let errors = child.stderr.take().map(|mut stream| std::thread::spawn(move || { let mut bytes = Vec::new(); let _ = std::io::Read::read_to_end(&mut stream, &mut bytes); bytes }));
-    // The lines since the last JSON one: an ERROR: among them is how it failed.
-    let (mut answer, mut lines) = (None, Vec::<String>::new());
-    for line in child.stdout.take().into_iter().flat_map(|out| std::io::BufReader::new(out).split(b'\n').map_while(Result::ok)) {
-        let text = decode(&line).trim().to_owned();
-        match serde_json::from_str::<Value>(&text) {
-            Ok(value) if text.starts_with('{') || text.starts_with('[') => { heard(&value); answer = Some(value); lines.clear(); }
-            _ if !text.is_empty() => lines.push(text),
-            _ => {}
-        }
-    }
-    let code = child.wait().ok().and_then(|status| status.code());
-    let failed = |lines: &[String]| lines.iter().rev().find(|line| line.starts_with("ERROR:")).map(|line| line.trim_start_matches("ERROR:").trim().to_owned());
-    if let Some(value) = answer { return failed(&lines).map_or(Ok(value), Err); }
-    let errors = errors.and_then(|reader| reader.join().ok()).unwrap_or_default();
-    lines.extend(decode(&errors).lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned));
-    Err(failed(&lines).or_else(|| lines.last().cloned()).unwrap_or_else(|| format!("tools\\{script} answered nothing (code {code:?})")))
+    let timeout = if which == Check::Online { Duration::from_secs(75) } else { Duration::from_secs(120) };
+    run_check(powershell(script, &arguments), timeout, heard).map_err(|error| format!("tools\\{script}: {error}"))
+}
+
+fn completed_online(answer: Result<Value, String>) -> Result<Value, String> {
+    answer.and_then(|value| if !value.get("pull").is_some_and(Value::is_object) {
+        Err("The online check returned no valid pull status".into())
+    } else if value["pull"]["fetching"] == true {
+        Err("The online check ended before reporting its final status".into())
+    } else { Ok(value) })
 }
 
 /// The components a check box installs: the rows its step completes (its own first), and whether
@@ -245,7 +331,7 @@ impl Installer {
     fn update_due(&mut self) -> Option<u64> {
         let Some(Ok(latest)) = &self.online else { return None };
         let idle = self.running.is_none() && self.queue.is_empty() && self.checking == 0 && self.checks.iter().all(Option::is_some);
-        if self.updated || !idle || latest["pull"]["pullable"] != true { return None; }
+        if self.updated || self.asking || !idle || latest["pull"]["pullable"] != true { return None; }
         self.updated = true;
         Some(latest["pull"]["behind"].as_u64().unwrap_or(0))
     }
@@ -269,10 +355,13 @@ impl Installer {
             if which != Check::Online { self.checking += 1; }
             let proxy = self.proxy.clone();
             std::thread::spawn(move || {
-                let tell = |answer| { let _ = proxy.send_event(AppEvent::Installer(Report::Checked(which, answer))); };
                 // Online's lines go as they come: GitHub's own count, then git's answer.
-                let answer = check(which, |value| if which == Check::Online { tell(Ok(value.clone())) });
-                if which != Check::Online || answer.is_err() { tell(answer); }
+                let answer = check(which, |value| if which == Check::Online {
+                    let _ = proxy.send_event(AppEvent::Installer(Report::Checking(value.clone())));
+                });
+                // Exactly one terminal report, even after provisional JSON or
+                // failure. A partial online result must not leave asking set.
+                let _ = proxy.send_event(AppEvent::Installer(Report::Checked(which, answer)));
             });
         }
     }
@@ -451,7 +540,13 @@ impl Installer {
     /// GitHub ahead and nothing pulled -- then the release the checkout names is put in place.
     fn program(&self) -> Vec<Step> {
         let pull = (!level(self.online.as_ref())).then(|| self.step("program", "Pull this checkout from GitHub", "fetch_engine.ps1", &["-Pull"]));
-        pull.into_iter().chain([self.step("program", "Program (this checkout's release)", "fetch_engine.ps1", &[])]).collect()
+        pull.into_iter().chain(self.current_program()).collect()
+    }
+
+    /// Also usable after GitHub Desktop updated this checkout, or when git's
+    /// network is unavailable. Installing this manifest needs no git fetch.
+    fn current_program(&self) -> Vec<Step> {
+        vec![self.step("program", "Program (this checkout's release)", "fetch_engine.ps1", &[])]
     }
 
     /// Install selected (or, `missing_only`, what is missing or broken), in the order they build on.
@@ -524,8 +619,20 @@ impl Installer {
                 return self.next();
             }
         };
-        let job = job::limit(&child, None);
         let mut child = child;
+        let job = job::limit(&child, None);
+        let job = match require_job(&mut child, job) {
+            Ok(job) => Some(job),
+            Err(error) => {
+                let reason = format!("{} did not start safely: {error}", step.title);
+                self.line(reason.clone());
+                if let Some(id) = step.component.filter(|_| !self.plan_only) { self.failed.insert(id, reason.clone()); }
+                self.last = Some((reason, false));
+                self.queue.clear();
+                self.restart_after = false;
+                return;
+            }
+        };
         for stream in [child.stdout.take().map(|out| Box::new(out) as Box<dyn std::io::Read + Send>),
                        child.stderr.take().map(|err| Box::new(err) as Box<dyn std::io::Read + Send>)].into_iter().flatten() {
             let proxy = self.proxy.clone();
@@ -546,7 +653,7 @@ impl Installer {
         // What to do, and what a step's end is checked against, is the status: a check under way decides it.
         if self.checking > 0 { return Err("Checking this PC: wait for the check to finish".into()); }
         // The program's steps follow GitHub's answer (whether the checkout is pulled first).
-        if self.asking && steps.iter().any(|step| step.component == Some("program")) { return Err("Checking GitHub for newer commits: wait for it to finish".into()); }
+        if self.asking && steps.iter().any(|step| step.arguments.iter().any(|arg| arg == "-Pull")) { return Err("Checking GitHub for newer commits: wait for it to finish, or install the checked-out release".into()); }
         self.restart_after = !self.plan_only && steps.iter().any(|step| step.component == Some("program"));
         self.queue = steps.into();
         self.last = None;
@@ -562,10 +669,15 @@ impl Installer {
 
     fn report(&mut self, report: Report) {
         match report {
+            Report::Checking(mut value) => {
+                let Some(pull) = value.get_mut("pull").and_then(Value::as_object_mut) else { return };
+                pull.insert("fetching".into(), json!(true));
+                self.asking = true;
+                self.online = Some(Ok(value));
+            }
             Report::Checked(Check::Online, answer) => {
-                // GitHub's own count comes marked fetching: git's answer is still to come.
-                self.asking = matches!(&answer, Ok(latest) if latest["pull"]["fetching"] == true);
-                self.online = Some(answer);
+                self.asking = false;
+                self.online = Some(completed_online(answer));
             }
             Report::Checked(which, answer) => {
                 self.checking = self.checking.saturating_sub(1);
@@ -612,6 +724,14 @@ impl Installer {
             }
             "installation_step" => {
                 let name = command["step"].as_str().unwrap_or("");
+                if name == "install_current" {
+                    // A late online answer must not turn this explicit choice
+                    // into a second, automatic pull after installation.
+                    let steps = self.current_program();
+                    self.start(steps)?;
+                    self.updated = true;
+                    return Ok(());
+                }
                 let step = if name == "rewarm" { Some(Step::new("SLM GPU warmup", "warm_slm_gpu.ps1", &[], Outcome::Warm)) } else { fpga_step(name, self.force_build) };
                 self.start(vec![step.ok_or_else(|| format!("No step {name:?}"))?])?;
             }
@@ -641,7 +761,7 @@ pub fn run(event_loop: EventLoop<AppEvent>, context: WebContext, setup: Setup, l
                     windows.send_to(&Kind::Installer, &installer.state())?;
                 }
                 Event::UserEvent(AppEvent::Installer(report)) => {
-                    let ended = matches!(report, Report::Ended(_) | Report::Checked(..));
+                    let ended = matches!(report, Report::Ended(_) | Report::Checked(..) | Report::Checking(..));
                     installer.report(report);
                     // A program update that left the new engine waiting: installation.exe again puts it in place.
                     if installer.restart_due() {
@@ -806,7 +926,18 @@ mod tests {
         let mut asking = installer(online(json!({"behind": 3, "fetching": true})));
         asking.asking = true;
         let steps = asking.program();
-        assert_eq!(asking.start(steps), Err("Checking GitHub for newer commits: wait for it to finish".into()));
+        assert_eq!(asking.start(steps), Err("Checking GitHub for newer commits: wait for it to finish, or install the checked-out release".into()));
+    }
+
+    #[test]
+    fn checked_out_release_install_never_pulls_even_when_online_check_failed() {
+        for answer in [None, Some(Err("network timeout".into())), online(json!({"fetching": true})), online(json!({"behind": 4}))] {
+            let steps = installer(answer).current_program();
+            assert_eq!(steps.len(), 1);
+            assert_eq!(steps[0].script, "fetch_engine.ps1");
+            assert!(steps[0].arguments.is_empty());
+            assert_eq!(steps[0].component, Some("program"));
+        }
     }
 
     #[test]
@@ -814,5 +945,99 @@ mod tests {
         assert_eq!(super::decode_in("ZLC 完成".as_bytes(), 936), "ZLC 完成");
         // cmd's "cannot find" on a Chinese Windows: GBK, the console's code page 936.
         assert_eq!(super::decode_in(&[0xD5, 0xD2, 0xB2, 0xBB, 0xB5, 0xBD], 936), "找不到");
+    }
+
+    // These fixtures only print, sleep, or start another sleeping local
+    // process. They never run installer scripts, Git, or any network request.
+    fn fake_check(source: &str) -> std::process::Command {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", source])
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        command
+    }
+
+    #[test]
+    fn a_check_drains_both_busy_pipes_and_accepts_json_only_after_success() {
+        let command = fake_check(r#"
+            for ($i = 0; $i -lt 2048; $i++) {
+                [Console]::Out.WriteLine(('output ' + ('x' * 128)))
+                [Console]::Error.WriteLine(('warning ' + ('y' * 128)))
+            }
+            [Console]::Out.WriteLine('{"ok":true}')
+            exit 0
+        "#);
+        let value = super::run_check(command, std::time::Duration::from_secs(15), |_| {}).unwrap();
+        assert_eq!(value, json!({"ok": true}));
+    }
+
+    #[test]
+    fn provisional_json_cannot_hide_a_check_failure_on_stderr() {
+        let command = fake_check(r#"[Console]::Out.WriteLine('{"pull":{"fetching":true}}'); [Console]::Error.WriteLine('mock transport failed'); exit 7"#);
+        let heard = std::cell::RefCell::new(Vec::new());
+        let error = super::run_check(command, std::time::Duration::from_secs(10), |value| heard.borrow_mut().push(value.clone())).unwrap_err();
+        assert!(error.contains("code 7") && error.contains("mock transport failed"), "{error}");
+        assert_eq!(heard.borrow().len(), 1);
+    }
+
+    #[test]
+    fn an_incomplete_online_check_always_leaves_checking_and_never_auto_updates() {
+        let mut state = installer(None);
+        state.report(super::Report::Checking(json!({"pull":{"behind":2,"pullable":true}})));
+        assert!(state.asking);
+        assert_eq!(state.update_due(), None, "a provisional final-looking JSON is not a successful process exit");
+        state.report(super::Report::Checked(super::Check::Online, Ok(json!({"pull":{"fetching":true}}))));
+        assert!(!state.asking);
+        assert!(state.online.as_ref().unwrap().is_err());
+        assert_eq!(state.update_due(), None);
+        state.report(super::Report::Checking(json!({"pull":{"behind":2,"pullable":true}})));
+        state.report(super::Report::Checked(super::Check::Online, Err("checker failed after JSON".into())));
+        assert!(!state.asking);
+        assert_eq!(state.update_due(), None);
+    }
+
+    #[test]
+    fn a_check_deadline_also_bounds_a_silent_child() {
+        let started = std::time::Instant::now();
+        let command = fake_check("Start-Sleep -Seconds 60");
+        let error = super::run_check(command, std::time::Duration::from_millis(500), |_| {}).unwrap_err();
+        assert!(error.contains("deadline"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_failed_job_assignment_kills_and_reaps_the_child() {
+        let mut child = fake_check("Start-Sleep -Seconds 60").spawn().unwrap();
+        let error = match super::require_job(&mut child, None) {
+            Ok(_) => panic!("an uncontained process was admitted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("Cannot supervise"), "{error}");
+        assert!(child.try_wait().unwrap().is_some(), "the rejected child is still running");
+    }
+
+    #[test]
+    fn a_finished_checker_cannot_leave_descendants_holding_its_pipes() {
+        let command = fake_check(r#"
+            $start = New-Object Diagnostics.ProcessStartInfo
+            $start.FileName = 'powershell.exe'
+            $start.Arguments = '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 60'
+            $start.UseShellExecute = $false
+            $start.CreateNoWindow = $true
+            $child = [Diagnostics.Process]::Start($start)
+            [Console]::Out.WriteLine(('{"child":' + $child.Id + '}'))
+            exit 0
+        "#);
+        let started = std::time::Instant::now();
+        let value = super::run_check(command, std::time::Duration::from_secs(10), |_| {}).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, value["child"].as_u64().unwrap() as u32) };
+        if !process.is_null() {
+            let ended = unsafe { WaitForSingleObject(process, 1000) };
+            unsafe { CloseHandle(process) };
+            assert_eq!(ended, WAIT_OBJECT_0, "a check descendant outlived its job");
+        }
     }
 }

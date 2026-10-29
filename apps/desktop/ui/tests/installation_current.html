@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Install checked-out release regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+import { installation } from '../dist/views/installation.js';
+const assert=(value,message)=>{if(!value)throw Error(message)};
+const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)}`);
+const checks=[],sent=[];
+// This view only talks to this recorder. No native installer, check, Git,
+// network request, or machine configuration is accessed by the fixture.
+const transport={pending:new Map(),lastError:'',notice:null,busyText(){return ''},send(command){sent.push(command);return sent.length}};
+const initial={
+ components:[{id:'program',card:'program',title:'Program',state:'ok',words:'Installed',detail:'This checkout release',selectable:true,selected:false}],
+ checking:false,asking:true,running:null,queue:[],plan_only:false,force_build:false,
+ close_asked:0,log_file:null,last:null,restart:false,
+};
+const ctx={transport,latest:{type:'state',installation:initial},show(){throw Error('The fixture must not open a native window')}};
+const view=installation(ctx);document.body.append(view.root);
+const accept=changes=>{
+ ctx.latest.installation={...ctx.latest.installation,...changes};
+ view.update({type:'state',installation:ctx.latest.installation});
+};
+const button=[...view.root.querySelectorAll('button')].find(button=>button.textContent.trim()==='Install checked-out release');
+const expected={action:'installation_step',step:'install_current'};
+const check=(name,test)=>{sent.length=0;test();checks.push(name)};
+try {
+ assert(button,'The Program card has an Install checked-out release action');
+ accept({});
+ check('an online check does not block installing the already checked-out release',()=>{
+  assert(ctx.latest.installation.asking&&!ctx.latest.installation.checking,'fixture is waiting only for the online check');
+  assert(!button.disabled,'the checked-out release action must be enabled while asking online');
+  button.click();equal(sent,[expected],'the action dispatches install_current without a pull/check request');
+ });
+ check('a running step disables the action and rejects clicks',()=>{
+  accept({running:{title:'Mock install step',stopping:false}});
+  assert(button.disabled,'running step must disable another install');
+  button.click();equal(sent,[],'a disabled running action sends nothing');
+ });
+ check('a stopping step stays disabled until it actually ends',()=>{
+  accept({running:{title:'Mock install step',stopping:true}});
+  assert(button.disabled,'stopping has not released the install slot');
+  button.click();equal(sent,[],'stopping action sends nothing');
+ });
+ check('checking local dependencies blocks the action even with no running step',()=>{
+  accept({running:null,checking:true});
+  assert(button.disabled,'local check must settle before install planning');
+  button.click();equal(sent,[],'a disabled local-check action sends nothing');
+ });
+ check('finishing the local check restores the action while online checking continues',()=>{
+  accept({checking:false,asking:true});
+  assert(!button.disabled,'online progress must not keep the release action disabled');
+  button.click();equal(sent,[expected],'the restored action still dispatches only install_current');
+ });
+ check('an unavailable online result leaves the explicit release action available',()=>{
+  accept({asking:false,last:{text:'Online check unavailable',ok:false}});
+  assert(!button.disabled,'online failure must not block the explicit release action');
+  button.click();equal(sent,[expected],'online failure keeps the same explicit release operation');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,error:error.stack})}
+</script>
