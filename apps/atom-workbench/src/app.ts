@@ -27,7 +27,8 @@ import {DEFAULT_NUMERICAL_APERTURE,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,inten
 import {meanInputsKey,trajectoryInputsKey} from './dynamics-cache-key.js';
 import {CurrentResults} from './current-results.js';
 import {covers,delivers,horizonRecords,keptCheckpoint,plannedSolve,solveOptions,type SolveInputs,type SolveKind} from './solve-plan.js';
-import {STATIC_MIXING_LIMIT,displayMixing,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
+import {STATIC_MIXING_LIMIT,displayMixing,modelScope,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
+import type {ScopeNote} from './spectroscopy.js';
 import {defaultScene,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
 import type {DynamicsResult} from './solver-types.js';
@@ -130,7 +131,9 @@ header.append(identity,summaryLine,inspectorToggle.root,examplesCommand.root,imp
 const strip=new StatusStrip({action:['停止',()=>stopSolve()]});strip.root.id='status';strip.text.id='status-text';
 const detailsCommand=command('详情',()=>showView('details'),{role:'quiet'});detailsCommand.hidden=true;
 strip.trailing.prepend(detailsCommand.root);
-workbench.prepend(header,strip.root);
+// 超出模型范围: under the status line on every page, while a laser's effect is outside the model.
+const scopeLine=element('div','model-scope');scopeLine.id='model-scope';scopeLine.setAttribute('role','note');scopeLine.hidden=true;
+workbench.prepend(header,strip.root,scopeLine);
 
 // The three analysis pages and 详情 (v3 FluentTabWidget); each page's own controls on its title
 // row. The analysis pages hold data only; what it means is on 详情.
@@ -996,7 +999,8 @@ function renderDetailsPage():void{
   const field=!a?'':a.fieldMagnitudeG>0?`量子化轴：总磁场 |B| = ${withUnit(a.fieldMagnitudeG,'G',{digits:6})}，方向 θ ${angle(axis!.thetaDeg)}、φ ${angle(axis!.phiDeg)}。`
     :scene.fields[0]?`总磁场为零：量子化轴取第一个磁场「${scene.fields[0].name}」的参考轴，θ ${angle(axis!.thetaDeg)}、φ ${angle(axis!.phiDeg)}。`:'没有磁场：量子化轴取 +z。';
   const sampling=result&&result.timesUs.length>1?[populationSamplingInfo(result),'布居演化在模型基中：静态 H0 的本征态，标签为重叠最大的磁场本征态。']:[];
-  const markup=`<section class="details-current"><h3>当前计算</h3>${[field,...scope,...sampling].map(line=>`<p>${esc(line)}</p>`).join('')}${solverDetails()}</section>`;
+  const outside=scopeNotes.map(note=>`超出模型范围（结果照常给出）：${note.text}`);
+  const markup=`<section class="details-current"><h3>当前计算</h3>${[field,...outside,...scope,...sampling].map(line=>`<p>${esc(line)}</p>`).join('')}${solverDetails()}</section>`;
   const host=$('details-current');if(host.dataset.markup!==markup){host.dataset.markup=markup;host.innerHTML=markup;}
   const notes=$('details-static');if(!notes.childElementCount)notes.innerHTML=definitionNotes()+modelNotes();
 }
@@ -1125,6 +1129,15 @@ function levelScope():string[]{
   const a=latestAnalysis;if(!a)return [];
   return [a.spectroscopy?.modelScope,...(a.spectroscopy?.warnings??[])].filter((line):line is string=>Boolean(line)).flatMap(line=>line.split('\n'));
 }
+/** The lasers whose effect the model does not hold, each named with the reason (spectroscopy.ts
+ * modelScope): a warning, not a refusal -- every result is computed and shown all the same. */
+let scopeNotes:ScopeNote[]=[];
+function renderScope(a:Analysis):void{
+  try{scopeNotes=modelScope(scene,a);}catch(error){scopeNotes=[{laserIds:[],kind:'outside-resonance',text:message(error)}];}
+  const markup=scopeNotes.length?`<span class="scope-head">超出模型范围（结果照常给出）：</span>${scopeNotes.map(note=>`<span class="scope-note" data-scope-kind="${note.kind}">${esc(note.text)}</span>`).join('')}`:'';
+  if(scopeLine.dataset.markup!==markup){scopeLine.dataset.markup=markup;scopeLine.innerHTML=markup;}
+  scopeLine.hidden=!scopeNotes.length;
+}
 /** 方向与偏振's legend: |B| and each field, every beam in its colour; the selected beam's ∠(k, B)
  * and σ⁻/π/σ⁺ (as in the inspector), each number in a slot as wide as its longest value. */
 function renderSpaceLegend(a:Analysis):void{
@@ -1155,7 +1168,7 @@ function renderResults(allowSolve=true):void{
   let a:Analysis;
   try{a=cachedAnalysis();latestAnalysis=a;analysisError='';stateLabels=keepLabels(stateLabels,id=>allLevels(a).some(state=>state.id===id)||!!scene.references.some(ref=>ref.id===id));}
   catch(error){analysisError=message(error);console.error(error);showAnalysisError(analysisError);setText('summary','—');refreshStatus();return;}
-  refreshDirectionStates();refreshFields(inspectorFields);
+  refreshDirectionStates();refreshFields(inspectorFields);renderScope(a);
   const laser=activeLaser(view==='levels'?spectral:undefined),pol=laser?a.polarizations[laser.id]:undefined;
   manifoldFocus.setCurrent(spectral);root.dataset.view=view;
   if(view!=='space'&&spaceMount.isConnected)spaceMount.remove();
