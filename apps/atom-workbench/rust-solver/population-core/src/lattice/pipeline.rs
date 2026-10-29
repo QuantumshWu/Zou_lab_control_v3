@@ -443,12 +443,29 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
         let c0:Vec<f64>=(0..r).map(|i|space.initial.get(i).copied().unwrap_or(0.)).collect();
         let mut u=c0.clone();let mut stable=vec![u.clone()];
         for _ in 1..times.len(){let mut v=vec![0.;r];lapack.gemm(false,false,r,1,r,1.,&e_h,r,&u,r,0.,&mut v,r)?;u=v;stable.push(u.clone());}
+        // (research, S3) the Euclidean Galerkin model on the same space.
+        let ge=super::reduced::transpose_rows(&galerkin.euclidean_g(),r,r);
+        let eh_e=expm_real(lapack,&ge.iter().map(|x|x*spacing).collect::<Vec<f64>>(),r)?;
+        let mut u=c0.clone();let mut euclid=vec![u.clone()];
+        for _ in 1..times.len(){let mut v=vec![0.;r];lapack.gemm(false,false,r,1,r,1.,&eh_e,r,&u,r,0.,&mut v,r)?;u=v;euclid.push(u.clone());}
+        let mut euclid_pops=Vec::new();
         let(_,_,ev)=lapack.eigen(&gcol,r)?;
         let fro=|m:&[f64]|m.iter().map(|x|x*x).sum::<f64>().sqrt();
         let(lu,pivots)=lapack.factor(&ev,r)?;let mut id=vec![0.;r*r];for i in 0..r{id[i+r*i]=1.;}let inv=lapack.solve_matrix_factored(&lu,&pivots,&id,r)?;
         let kappa=fro(&ev)*fro(&inv);
         let mut amplification=Vec::new();let mut coordinate_gap=Vec::new();let mut stable_pops=Vec::new();let mut best_e=Vec::new();let mut best_m=Vec::new();
         let mut c_e_norm=Vec::new();let mut readout_gap=0_f64;
+        // (research, S3) Early times (t <= ATOM_DIAG_EARLY, default 0.1 us):
+        // the best approximation's and the Galerkin error per lattice mode
+        // (populations), and both split over the L0' eigen-coordinates by
+        // decay rate |Re lambda| and laboratory frequency |Im lambda - nu_q|
+        // (bins: < 1, 1-10, 10-100, 100-1e3, 1e3-1e4, > 1e4 per us), summed
+        // |c_j| max_k |v_j[kk]|.
+        let early_limit=std::env::var("ATOM_DIAG_EARLY").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.1);
+        let eig=prepared.eigenbasis()?;let eblocks=eig.eigenvector_blocks();
+        let pop_of:Vec<f64>=(0..d).map(|j|(0..n).map(|k|magnitude(eblocks[j*d+k*n+k])).fold(0.,f64::max)).collect();
+        let bin=|x:f64|->usize{if x<1.{0}else if x<10.{1}else if x<100.{2}else if x<1e3{3}else if x<1e4{4}else{5}};
+        let mut early_modes:Vec<[Vec<Vec<f64>>;2]>=Vec::new();let mut early_bins:Vec<[Vec<Vec<f64>>;2]>=Vec::new();
         let solver=model.trajectory(galerkin,&times);
         for(ti,&t)in times.iter().enumerate(){
             let ue=model.state(t);
@@ -459,15 +476,29 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
             coordinate_gap.push(ue.iter().zip(&stable[ti]).map(|(a,b)|(a-b).abs()).fold(0.,f64::max));
             let ce=ops.gram(&basis,&[exact[ti].as_slice()])?;let cm=galerkin.metric_coordinates(lapack,&exact[ti])?;
             c_e_norm.push(ce.iter().map(|x|x*x).sum::<f64>().sqrt());
-            let fields=ops.combinations(&basis,&[stable[ti].clone(),ce,cm])?;
+            let fields=ops.combinations(&basis,&[stable[ti].clone(),ce,cm,euclid[ti].clone()])?;
             let read=|v:&[C]|->Vec<f64>{(0..n).map(|i|(0..modes).map(|q|{let z=v[q*d+i*n+i];let(c,s)=((nu[q]*t).cos(),(nu[q]*t).sin());c*z.re-s*z.im}).sum()).collect()};
-            stable_pops.push(read(&fields[0]));best_e.push(read(&fields[1]));best_m.push(read(&fields[2]));
+            stable_pops.push(read(&fields[0]));best_e.push(read(&fields[1]));best_m.push(read(&fields[2]));euclid_pops.push(read(&fields[3]));
             let xm=ops.combinations(&basis,&[ue])?.remove(0);let mp=read(&xm);
+            if t>0.&&t<=early_limit+1e-12{
+                let mut per=[vec![vec![0.;n];modes],vec![vec![0.;n];modes]];let mut bins=[vec![vec![0.;6];6],vec![vec![0.;6];6]];
+                for(w,approx)in[&fields[1],&xm].into_iter().enumerate(){
+                    for q in 0..modes{
+                        let block:Vec<C>=(0..d).map(|k|C{re:exact[ti][q*d+k].re-approx[q*d+k].re,im:exact[ti][q*d+k].im-approx[q*d+k].im}).collect();
+                        let(cs,sn)=((nu[q]*t).cos(),(nu[q]*t).sin());
+                        for i in 0..n{let z=block[i*n+i];per[w][q][i]=cs*z.re-sn*z.im;}
+                        let c=eig.coefficients(&[&block])?;
+                        for j in 0..d{let a=magnitude(c[j])*pop_of[j];if a==0.{continue;}
+                            bins[w][bin(eig.lambda[j].re.abs())][bin((eig.lambda[j].im-nu[q]).abs())]+=a;}
+                    }
+                }
+                early_modes.push(per);early_bins.push(bins);
+            }
             readout_gap=readout_gap.max(mp.iter().zip(&solver[ti]).map(|(a,b)|(a-b).abs()).fold(0.,f64::max));
         }
         let thetas:Vec<[f64;2]>=model.theta.iter().map(|z|[z.re,z.im]).collect();
         let amps:Vec<f64>=model.used_coefficients.iter().map(|z|magnitude(*z)).collect();
-        format!(",\"kappaF\":{kappa:?},\"amplification\":{amplification:?},\"coordinateGap\":{coordinate_gap:?},\"readoutGap\":{readout_gap:?},\"exactCoordinateNorm\":{c_e_norm:?},\"stable\":{stable_pops:?},\"bestE\":{best_e:?},\"bestM\":{best_m:?},\"theta\":{thetas:?},\"amplitudes\":{amps:?}")
+        format!(",\"kappaF\":{kappa:?},\"amplification\":{amplification:?},\"coordinateGap\":{coordinate_gap:?},\"readoutGap\":{readout_gap:?},\"exactCoordinateNorm\":{c_e_norm:?},\"stable\":{stable_pops:?},\"bestE\":{best_e:?},\"bestM\":{best_m:?},\"theta\":{thetas:?},\"amplitudes\":{amps:?},\"earlyModes\":{early_modes:?},\"earlyBins\":{early_bins:?},\"euclid\":{euclid_pops:?}")
     };
     let mut rows=Vec::new();let mut exact_pops=Vec::new();let mut model_pops=Vec::new();
     for(ti,&t)in times.iter().enumerate(){
@@ -572,6 +603,9 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*op.modes.len())};
     let mut space=Space::new(&mut lattice,initial,capacity)?;
     for s in charge_set::gated_steps(prepared,tolerance){if lattice.operator().index.contains_key(&s){space.activate(&mut lattice,&s)?;}}
+    // (research, S3) ATOM_POLE_INFINITY=m: m columns at the pole at infinity
+    // (A x0, A^2 x0, ...) right after x0.
+    if let Some(m)=std::env::var("ATOM_POLE_INFINITY").ok().and_then(|v|v.parse::<usize>().ok()){for _ in 0..m{let added=space.infinite(&mut lattice)?;eprintln!("DBG infinite pole added {added}");}}
     // (research, S2) ATOM_TRANSLATION_SUMS: also the sums and differences of
     // every two gated steps on the lattice (one of each pair).
     if std::env::var("ATOM_TRANSLATION_SUMS").is_ok(){

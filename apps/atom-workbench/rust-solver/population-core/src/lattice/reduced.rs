@@ -114,6 +114,10 @@ impl<'m> Projection<'m>{
             vectors:Vectors::new(op,1)?,milliseconds:0.})
     }
     pub fn columns(&self)->usize{self.covered}
+    /// (research, S3) The Euclidean Galerkin matrix (row-major r x r): the
+    /// carrier's row zero, the other rows E[1.., ..] = Re W^T A W (W is
+    /// Euclidean-orthonormal).
+    pub fn euclidean_g(&self)->Vec<f64>{let r=self.covered;let mut g=self.e.clone();for j in 0..r{g[j]=0.;}g}
     /// (research, S2) The M-orthogonal coordinates of a field on the covered
     /// columns: K^-1 Re W^H M x.
     pub fn metric_coordinates(&self,lapack:&Lapack,field:&[C])->Result<Vec<f64>,String>{

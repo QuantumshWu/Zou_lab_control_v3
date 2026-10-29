@@ -186,6 +186,12 @@ impl Space{
         for t in 0..self.translations.len(){for copy in self.translates(&v,t){added+=usize::from(self.append(lattice,copy,floor)?);}}
         Ok(added)
     }
+    /// (research, S3) A column at the pole at infinity: A v of the last
+    /// Krylov vector (one operator application, no solve).
+    pub fn infinite(&mut self,lattice:&mut Lattice<'_>)->Result<usize,String>{
+        let v=self.krylov.last().ok_or("Empty Krylov sequence")?.clone();let mut w=vec![ZERO;v.len()];lattice.apply(&v,&mut w)?;
+        self.add_krylov(lattice,w)
+    }
     /// One column at a pole; returns the directions it added.
     pub fn solve(&mut self,lattice:&mut Lattice<'_>,pole:Pole)->Result<usize,String>{
         let clock=Instant::now();let length=self.basis[0].len();let before=lattice.work().block_operations();
