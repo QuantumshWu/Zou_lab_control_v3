@@ -393,6 +393,94 @@ fn expm_real(lapack:&Lapack,a:&[f64],r:usize)->Result<Vec<f64>,String>{
     Ok(e)
 }
 #[allow(clippy::too_many_arguments)]
+/// (research, S8) ATOM_DIAG_CLUSTER=path: the true spectrum of the run's
+/// lattice operator near sigma (ATOM_DIAG_CLUSTER_RE/IM) by shift-invert
+/// Arnoldi in the full complex Euclidean product (m solves at inner
+/// tolerance 1e-11): eigenvalues, true residuals, the cluster's Schur block T
+/// with its eigenvector condition numbers and departure from normality, the
+/// Arnoldi-space pseudospectrum (sigma_min((A - z) V), an upper bound of the
+/// true one), each eigenvector's block shares, and its distance from the
+/// pipeline space W (complex span) with the model's nearest Ritz value.
+fn diag_cluster(path:&str,prepared:&LatticePrepared,lattice:&mut Lattice<'_>,space:&Space,model:&Model,initial:&[C],solves:usize)->Result<(),String>{
+    let lapack=&prepared.lapack;
+    let env=|k:&str,d:f64|std::env::var(k).ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(d);
+    let sigma=C{re:env("ATOM_DIAG_CLUSTER_RE",-19.5),im:env("ATOM_DIAG_CLUSTER_IM",256.5)};
+    let m=env("ATOM_DIAG_CLUSTER_M",30.) as usize;let inner=env("ATOM_DIAG_CLUSTER_TOL",1e-11);let radius=env("ATOM_DIAG_CLUSTER_RADIUS",30.);
+    let(n,size,modes,mirror,charges)={let op=lattice.operator();(op.n,op.dimension(),op.modes.len(),op.mirror.clone(),op.modes.clone())};let d=n*n;
+    let dot=|x:&[C],y:&[C]|x.iter().zip(y).fold(ZERO,|s,(a,b)|C{re:s.re+a.re*b.re+a.im*b.im,im:s.im+a.re*b.im-a.im*b.re});
+    let norm=|x:&[C]|x.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt();
+    let axpy=|y:&mut[C],a:C,x:&[C]|{for(u,v)in y.iter_mut().zip(x){let p=mul(a,*v);u.re+=p.re;u.im+=p.im;}};
+    let split=|z:&[C]|->(Vec<C>,Vec<C>){let mut a=vec![ZERO;size];let mut b=vec![ZERO;size];
+        for q in 0..modes{let mq=mirror[q];for i in 0..n{for j in 0..n{let u=z[q*d+i*n+j];let v=conj(z[mq*d+j*n+i]);let k=q*d+i*n+j;
+            a[k]=C{re:0.5*(u.re+v.re),im:0.5*(u.im+v.im)};let w=C{re:u.re-v.re,im:u.im-v.im};b[k]=C{re:0.5*w.im,im:-0.5*w.re};}}}(a,b)};
+    let join=|a:&[C],b:&[C]|->Vec<C>{a.iter().zip(b).map(|(x,y)|C{re:x.re-y.im,im:x.im+y.re}).collect()};
+    let apply=|lattice:&mut Lattice<'_>,z:&[C]|->Result<Vec<C>,String>{let(a,b)=split(z);let(mut ya,mut yb)=(vec![ZERO;size],vec![ZERO;size]);lattice.apply(&a,&mut ya)?;lattice.apply(&b,&mut yb)?;Ok(join(&ya,&yb))};
+    static CACHE:std::sync::Mutex<Option<(String,Vec<(C,Vec<C>)>)>>=std::sync::Mutex::new(None);
+    let cached=CACHE.lock().ok().and_then(|g|g.clone());
+    let(fixed,pairs)=if let Some(c)=cached{c}else{
+        let clock=Instant::now();
+        // A random complex start (no Hermitian symmetry).
+        let mut seed:u64=0x9E3779B97F4A7C15;let mut rnd=||{seed^=seed<<13;seed^=seed>>7;seed^=seed<<17;(seed>>11)as f64/(1u64<<53)as f64-0.5};
+        let mut v0:Vec<C>=(0..size).map(|_|C{re:rnd(),im:rnd()}).collect();let s=1./norm(&v0);for z in &mut v0{z.re*=s;z.im*=s;}
+        let mut v=vec![v0];let mut h=vec![ZERO;(m+1)*m];let mut first_residual=0.;let mut steps=0usize;
+        for j in 0..m{
+            let(a,b)=split(&v[j]);let(w,st,_)=lattice.solve(Pole::Complex(sigma),&[a,b],inner)?;steps+=st;let mut w=join(&w[0],&w[1]);
+            if j==0{let aw=apply(lattice,&w)?;let r:Vec<C>=(0..size).map(|k|C{re:aw[k].re-sigma.re*w[k].re+sigma.im*w[k].im-v[0][k].re,im:aw[k].im-sigma.re*w[k].im-sigma.im*w[k].re-v[0][k].im}).collect();first_residual=norm(&r);}
+            for _ in 0..2{for i in 0..=j{let c=dot(&v[i],&w);h[i+j*(m+1)].re+=c.re;h[i+j*(m+1)].im+=c.im;axpy(&mut w,C{re:-c.re,im:-c.im},&v[i]);}}
+            let beta=norm(&w);h[j+1+j*(m+1)]=C{re:beta,im:0.};let s=1./beta;for z in &mut w{z.re*=s;z.im*=s;}v.push(w);
+        }
+        let hm:Vec<C>=(0..m*m).map(|k|h[(k%m)+(k/m)*(m+1)]).collect();
+        let(theta,right)=lapack.complex_eigen_right(&hm,m)?;
+        let mut found:Vec<(C,f64,Vec<C>)>=Vec::new();
+        for k in 0..m{let t=theta[k];let s2=t.re*t.re+t.im*t.im;if s2==0.{continue;}let mu=C{re:sigma.re+t.re/s2,im:sigma.im-t.im/s2};
+            if magnitude(C{re:mu.re-sigma.re,im:mu.im-sigma.im})>radius{continue;}
+            let mut x=vec![ZERO;size];for i in 0..m{axpy(&mut x,right[i+k*m],&v[i]);}let s=1./norm(&x);for z in &mut x{z.re*=s;z.im*=s;}
+            let ax=apply(lattice,&x)?;let r:Vec<C>=(0..size).map(|e|{let p=mul(mu,x[e]);C{re:ax[e].re-p.re,im:ax[e].im-p.im}}).collect();
+            found.push((mu,norm(&r),x));}
+        found.sort_by(|a,b|magnitude(C{re:a.0.re-sigma.re,im:a.0.im-sigma.im}).total_cmp(&magnitude(C{re:b.0.re-sigma.re,im:b.0.im-sigma.im})));
+        // The converged cluster: Schur block T = U^H A U on its orthonormalised eigenvectors.
+        let conv:Vec<&(C,f64,Vec<C>)>=found.iter().filter(|f|f.1<1e-6*magnitude(f.0)).collect();let k=conv.len();
+        let mut u:Vec<Vec<C>>=Vec::new();for f in &conv{let mut x=f.2.clone();for _ in 0..2{for q in &u{let c=dot(q,&x);axpy(&mut x,C{re:-c.re,im:-c.im},q);}}let s=1./norm(&x);for z in &mut x{z.re*=s;z.im*=s;}u.push(x);}
+        let mut tmat=vec![ZERO;k*k];for j in 0..k{let au=apply(lattice,&u[j])?;for i in 0..k{tmat[i+j*k]=dot(&u[i],&au);}}
+        let(kappas,departure)=if k>0{let(lam,r)=lapack.complex_eigen_right(&tmat,k)?;let(lu,piv)=lapack.complex_factor(&r,k)?;
+            let mut id=vec![ZERO;k*k];for i in 0..k{id[i+i*k]=ONE;}let l=lapack.complex_solve_matrix_factored(&lu,&piv,&id,k)?;
+            let kap:Vec<[f64;3]>=(0..k).map(|j|{let rn=(0..k).map(|i|{let z=r[i+j*k];z.re*z.re+z.im*z.im}).sum::<f64>().sqrt();let ln=(0..k).map(|i|{let z=l[j+i*k];z.re*z.re+z.im*z.im}).sum::<f64>().sqrt();[lam[j].re,lam[j].im,rn*ln]}).collect();
+            let fro=tmat.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>();let ev=lam.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>();(kap,((fro-ev).max(0.)).sqrt()/fro.sqrt())}else{(vec![],0.)};
+        // Pseudospectrum on V_m: sigma_min((A - z) V)^2 = min eig(B^H B - z B^H V - conj(z) V^H B + |z|^2).
+        let mut bv=Vec::with_capacity(m);for i in 0..m{bv.push(apply(lattice,&v[i])?);}
+        let mut gbb=vec![ZERO;m*m];let mut gvb=vec![ZERO;m*m];for i in 0..m{for j in 0..m{gbb[i+j*m]=dot(&bv[i],&bv[j]);gvb[i+j*m]=dot(&v[i],&bv[j]);}}
+        let smin=|z:C|->Result<f64,String>{let g:Vec<C>=(0..m*m).map(|e|{let(i,j)=(e%m,e/m);let vb=gvb[e];let bvh=conj(gvb[j+i*m]);
+            let a=mul(z,bvh);let b=mul(conj(z),vb);let mut x=C{re:gbb[e].re-a.re-b.re,im:gbb[e].im-a.im-b.im};if i==j{x.re+=z.re*z.re+z.im*z.im;}x}).collect();
+            let(w,_)=lapack.hermitian_eigen(&g,m)?;Ok(w.iter().copied().fold(f64::INFINITY,f64::min).max(0.).sqrt())};
+        let mut grid=Vec::new();let(mut re,step)=(sigma.re-radius,1.);while re<=(sigma.re+radius).min(0.){let mut im=sigma.im-radius;while im<=sigma.im+radius{grid.push(format!("[{re},{im},{:?}]",smin(C{re,im})?));im+=step;}re+=step;}
+        // Local condition estimates: delta / sigma_min on a ring of radius delta (a lower bound of kappa).
+        let mut local=Vec::new();for f in &conv{let others=conv.iter().filter(|g|!std::ptr::eq(**g,*f)).map(|g|magnitude(C{re:g.0.re-f.0.re,im:g.0.im-f.0.im})).fold(f64::INFINITY,f64::min);
+            let delta=(0.1*others).min(0.5);let mut worst:f64=0.;for p in 0..8{let a=std::f64::consts::PI*p as f64/4.;let z=C{re:f.0.re+delta*a.cos(),im:f.0.im+delta*a.sin()};worst=worst.max(delta/smin(z)?.max(1e-300));}
+            local.push(format!("[{:?},{:?},{:?},{:?}]",f.0.re,f.0.im,delta,worst));}
+        // Block shares of each eigenvector (the five largest).
+        let shares:Vec<String>=found.iter().map(|f|{let mut s:Vec<(usize,f64)>=(0..modes).map(|q|(q,f.2[q*d..(q+1)*d].iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>())).collect();s.sort_by(|a,b|b.1.total_cmp(&a.1));
+            format!("[{}]",s.iter().take(5).map(|(q,w)|format!("[{:?},{w:?}]",charges[*q])).collect::<Vec<_>>().join(","))}).collect();
+        let eig:Vec<String>=found.iter().map(|f|format!("[{:?},{:?},{:?}]",f.0.re,f.0.im,f.1)).collect();
+        let fixed=format!("\"sigma\":[{:?},{:?}],\"m\":{m},\"innerSteps\":{steps},\"firstSolveResidual\":{first_residual:?},\"seconds\":{:?},\"eigen\":[{}],\"converged\":{k},\"kappaT\":{kappas:?},\"departureT\":{departure:?},\"local\":[{}],\"shares\":[{}],\"pseudo\":[{}]",
+            sigma.re,sigma.im,clock.elapsed().as_secs_f64(),eig.join(","),local.join(","),shares.join(","),grid.join(","));
+        let pairs:Vec<(C,Vec<C>)>=found.into_iter().map(|f|(f.0,f.2)).collect();
+        if let Ok(mut g)=CACHE.lock(){*g=Some((fixed.clone(),pairs.clone()));}
+        (fixed,pairs)};
+    // Distance of each eigenvector from the complex span of W, and the nearest Ritz value of the model.
+    let basis=&space.basis;
+    let mut angles=Vec::new();for(mu,x)in &pairs{let mut p=x.clone();for _ in 0..2{for w in basis{let c=dot(w,&p);axpy(&mut p,C{re:-c.re,im:-c.im},w);}}
+        let near=model.theta.iter().copied().min_by(|a,b|magnitude(C{re:a.re-mu.re,im:a.im-mu.im}).total_cmp(&magnitude(C{re:b.re-mu.re,im:b.im-mu.im}))).unwrap_or(ZERO);
+        angles.push(format!("[{:?},{:?},{:?},{:?},{:?}]",mu.re,mu.im,norm(&p)/norm(x),near.re,near.im));}
+    // x0's expansion on the eigenvectors found (least squares on their span; exact for an orthogonal rest).
+    let centre=lattice.operator().centre;let mut x0=vec![ZERO;size];x0[centre*d..(centre+1)*d].copy_from_slice(initial);
+    let kk=pairs.len();let mut gm=vec![ZERO;kk*kk];let mut rhs=vec![ZERO;kk];
+    for i in 0..kk{rhs[i]=dot(&pairs[i].1,&x0);for j in 0..kk{gm[i+j*kk]=dot(&pairs[i].1,&pairs[j].1);}}
+    let amps=if kk>0{let(lu,piv)=lapack.complex_factor(&gm,kk)?;lapack.complex_solve_matrix_factored(&lu,&piv,&rhs,kk)?}else{vec![]};
+    let amp:Vec<String>=pairs.iter().zip(&amps).map(|((mu,_),a)|format!("[{:?},{:?},{:?}]",mu.re,mu.im,magnitude(*a)/norm(&x0))).collect();
+    let line=format!("{{\"solves\":{solves},\"columns\":{},{fixed},\"spaceDistance\":[{}],\"x0Amplitudes\":[{}]}}\n",basis.len(),angles.join(","),amp.join(","));
+    use std::io::Write;let mut f=std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e|e.to_string())?;f.write_all(line.as_bytes()).map_err(|e|e.to_string())?;
+    Ok(())
+}
 fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mut Lattice<'_>,ops:&super::krylov::Vectors,space:&Space,model:&Model,galerkin:&Projection<'_>,times:&[f64],initial:&[C],solves:usize)->Result<(),String>{
     let tmax=std::env::var("ATOM_DIAG_TMAX").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.31);
     let sub=std::env::var("ATOM_DIAG_SUB").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(50);
@@ -817,6 +905,10 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             if let Ok(path)=std::env::var("ATOM_DIAG_EXACT"){
                 let at:Vec<usize>=std::env::var("ATOM_DIAG_AT").ok().map(|v|v.split(',').filter_map(|x|x.trim().parse().ok()).collect()).unwrap_or_default();
                 if at.contains(&space.solves()){diag_exact(&path,prepared,frame,&mut lattice,&ops,&space,&model,&galerkin,times,initial,space.solves())?;}
+            }
+            if let Ok(path)=std::env::var("ATOM_DIAG_CLUSTER"){
+                let at:Vec<usize>=std::env::var("ATOM_DIAG_CLUSTER_AT").ok().map(|v|v.split(',').filter_map(|x|x.trim().parse().ok()).collect()).unwrap_or_default();
+                if at.contains(&space.solves()){diag_cluster(&path,prepared,&mut lattice,&space,&model,initial,space.solves())?;}
             }
             timing.projection_ms=galerkin.milliseconds;timing.images_ms=space.images_ms;
             let outputs_clock=Instant::now();
