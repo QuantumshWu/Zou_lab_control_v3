@@ -614,6 +614,9 @@ dialog.dialog::backdrop { background: transparent; }
 .flow-empty { color: var(--muted-ink); padding: calc(18 * var(--fluent) * var(--qt)); }
 .info-tree {
   flex: 1; min-height: 0; overflow: auto; display: grid; align-content: start;
+  /* The viewport scrolls; rows keep their full content height, including
+   * embedded buttons, so their hover/selection bounds contain their cells. */
+  grid-auto-rows: max-content;
   /* v2 _fit_name_column: the names as wide as the widest at its depth, up to six tenths of the view
    * (never below the declared label column); the values follow and the tree scrolls sideways. */
   grid-template-columns: max(var(--info-label-w, var(--label-min)), var(--info-name-w, 0px)) minmax(max-content, 1fr);

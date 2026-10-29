@@ -74,6 +74,34 @@ try {
   assert(rows[0].querySelector('.info-value').classList.contains('match'),'matching button value was not highlighted');
   tree.applyFilter('');
  });
+ await check('a crowded scrolling tree keeps text, buttons and hover inside the same full-height rows',async()=>{
+  tree.root.style.cssText='position:fixed;left:20px;top:20px;width:360px;height:2400px;flex:none';
+  tree.setRows([
+   ...Array.from({length:40},(_,i)=>[`Setting ${i}`,`Value ${i}`]),
+   ['remote_sequencer pulse at Start 403',{text:name,action:'pulse:start'}],
+   ['remote_sequencer pulse 403',{text:name,action:'pulse:scan'}],
+  ]);
+  const geometry=()=>[...tree.root.querySelectorAll('.info-row')].map(row=>{
+   const name=row.querySelector('.info-name'),range=document.createRange();range.selectNodeContents(name);
+   return {row:row.getBoundingClientRect(),name:name.getBoundingClientRect(),value:row.querySelector('.info-value').getBoundingClientRect(),text:range.getBoundingClientRect(),button:row.querySelector('button')?.getBoundingClientRect()};
+  });
+  for(const scale of [1,1.25]) {
+   document.documentElement.style.setProperty('--fluent',String(scale));tree.root.style.height='2400px';await settle();
+   const roomy=geometry();
+   for(const height of [140,220]) {
+    tree.root.style.height=`${height}px`;await settle();tree.root.scrollTop=tree.root.scrollHeight;
+    assert(tree.root.scrollHeight>tree.root.clientHeight,'crowded tree does not scroll');
+    geometry().forEach((g,i)=>{
+     near(g.row.height,roomy[i].row.height,`row ${i} height is independent of viewport height`);
+     for(const cell of [g.name,g.value]) {near(cell.top,g.row.top,`row ${i} cell top`);near(cell.bottom,g.row.bottom,`row ${i} cell bottom`)}
+     near((g.text.top+g.text.bottom)/2-g.row.top,(roomy[i].text.top+roomy[i].text.bottom)/2-roomy[i].row.top,`row ${i} text vertical alignment`);
+     if(g.button) near((g.button.top+g.button.bottom)/2,(g.row.top+g.row.bottom)/2,`row ${i} button centered inside hover`);
+    });
+    const last=geometry().at(-1),view=tree.root.getBoundingClientRect();
+    assert(last.row.bottom<=view.top+tree.root.clientTop+tree.root.clientHeight+1,'last action is clipped at scroll end');
+   }
+  }
+ });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
 }catch(error){document.getElementById('result').textContent=JSON.stringify({passed:false,error:error.stack})}
 </script>
