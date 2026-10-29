@@ -51,23 +51,27 @@
 //!   the dressed blocks of L0' alone (five lasers, 20 us: without them the
 //!   estimate is 0.50-0.54 of the actual error). Krylov residual alone. Only
 //!   the canonical member of each mirror pair is transformed and propagated.
-//! - Every output, the trajectory and each horizon, takes the slow part for
-//!   the slow modes it needs and the fast part for the others (the complete
-//!   form): the fast modes' residuals reach the slow classes of the frame's
-//!   block, which carry them to T. There was a time rule (the trajectory took
-//!   the slow part only when T lambda_slow >= 1 at the grid's last time):
-//!   with the trace correction the corrected model's kernel vector and slow
-//!   pairs were no Galerkin vectors (five lasers without the trap, 16 solves:
-//!   a kernel residual of 3.1e-5 against 1e-9, a slow pair at 1.45e-3 /us of
-//!   residual 1.12), the exact form's two large terms cancelled badly, and
-//!   always taking the slow part gave per-time ratios down to 0.03 (forced
-//!   on that basis: 7.3e-2 against an error of 7.3e-4). With the trace
-//!   carried by construction (`space`) the rule only handed the slowest
-//!   relaxation (0.034 /us at 20 us, T lambda = 0.69) to the SW part, which
-//!   does not follow it: at the 4- and 8-solve checkpoints of four and five
-//!   lasers (with and without the trap) at 20 us the worst per-time ratio was
-//!   0.29-0.72 with the rule and 0.93-1.29 without it, the accepted
-//!   checkpoints unchanged. Without the
+//! - Time rule for the trajectory: the slow part runs when T lambda_slow >= 1
+//!   at the grid's last time T (lambda_slow the slowest decay rate of the
+//!   reduced model); before that every Ritz mode goes through the SW part but
+//!   the kernel modes, which always take the slow part. Measured without the
+//!   rule on the B basis: the 4- and 8-solve checkpoints of four and five
+//!   lasers (with and without the trap) at 20 us improve (worst per-time ratio
+//!   0.29-0.72 -> 0.93-1.29, the accepted checkpoints unchanged), but the
+//!   three-laser D2 scenes' trajectories with p(1 s) are lost: ex_three's
+//!   bound 2.7e-3 -> 7.6e-2 (error 4.1e-4, a partial result), b1mG_three
+//!   3.8e-3 -> 1.4e-2, b0_three and both_tweezer at 44 and 20 solves instead
+//!   of 16 and 8. There the slow modes (rates 0.017-0.04 /us, coefficients up
+//!   to 1.4) take the ring's feedback in the exact form, and Y's part outside
+//!   the space goes through L0''s blocks, which lack the pumping: the early
+//!   times read Y's late response (Rust-B's late-time decomposition at 10 ms,
+//!   the same propagation). The rule stays until that propagation is exact.
+//!   On the trace-corrected basis it had a second reason: the corrected
+//!   kernel vector and slow pairs were no Galerkin vectors, and always taking
+//!   the slow part gave per-time ratios down to 0.03. A horizon always takes
+//!   the slow part for the slow modes and the fast part for the others (the
+//!   complete form): the fast modes' residuals reach the slow classes of the
+//!   frame's block, which carry them to T. Without the
 //!   fast part a slow mode the space lacks was invisible: the default scene
 //!   (probe + tweezer) at T = 100 ms was off by 7.8e-3 with a bound of
 //!   7e-13, its slow classes at 5.6e-7 and 8.7e-7 /us outside the space;
@@ -197,16 +201,20 @@ impl<'a> UnifiedEstimate<'a>{
         // is never among them; the kernel is. At an
         // output time T a decaying mode slower than 1/T with a coefficient
         // below the tolerance stays in the SW part and holds no other back
-        // (`set`).
+        // (`set`); the slowest decay rate of the others decides whether the
+        // slow part runs for the trajectory.
         let slow:Vec<usize>=(0..r).filter(|&m|magnitude(cp.theta[m])<slow::SLOW&&!cp.projected[m]).collect();
         let kernel:Vec<usize>=slow.iter().copied().filter(|&m|cp.kernel[m]).collect();
         let negligible=|m:usize,t:f64|t*cp.theta[m].re.abs()<1.&&magnitude(cp.coefficients[m])<ledger::POPULATION_TOLERANCE&&!kernel.contains(&m);
+        let rate=|t:f64|{let l=(0..r).filter(|&m|cp.theta[m].re.abs()>=super::reduced::KERNEL&&!cp.projected[m]&&!negligible(m,t)).map(|m|cp.theta[m].re.abs()).fold(f64::INFINITY,f64::min);
+            if l.is_finite(){l}else{0.}};
         let set=|t:f64|->Vec<usize>{slow.iter().copied().filter(|&m|!negligible(m,t)).collect()};
         let last=outputs.times.last().copied().unwrap_or(0.);
+        let grid=outputs.times.last().is_some_and(|&t|t*rate(t)>=1.);
         // The kernel modes first, then every slow mode an output takes: every
-        // horizon and the grid's last time.
+        // horizon, the grid when it runs the slow part.
         let mut taken:Vec<usize>=Vec::new();
-        for t in outputs.horizons.iter().copied().chain(outputs.times.last().copied()){for m in set(t){if !taken.contains(&m){taken.push(m);}}}
+        for t in outputs.horizons.iter().copied().chain(grid.then_some(last)){for m in set(t){if !taken.contains(&m){taken.push(m);}}}
         // Those an output may leave out last, slowest last: every output time
         // takes a prefix of the solutions.
         let key=|m:usize|(magnitude(cp.coefficients[m])<ledger::POPULATION_TOLERANCE,-cp.theta[m].re.abs());
@@ -260,7 +268,7 @@ impl<'a> UnifiedEstimate<'a>{
         let only=self.only.is_some();
         let(mut own_trajectory,mut slow_trajectory,mut slow_horizons)=(Vec::new(),Vec::new(),Vec::new());
         let trajectory=if outputs.times.is_empty(){Vec::new()}else{
-            let count=taking(last).max(kernels);
+            let count=if grid&&!solutions.is_empty(){taking(last).max(kernels)}else{kernels};
             let coefficients:Vec<C>=(0..r).map(|m|if solved[..count].contains(&m)||only{ZERO}else{cp.coefficients[m]}).collect();
             let fast=self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&coefficients},outputs.times,Readout::Laboratory)?;
             if count>kernels&&!only{own_trajectory=self.lattice.populations(&RitzSources{vectors:b,values:cp.theta,coefficients:&own(count)},outputs.times,Readout::Laboratory)?;}
