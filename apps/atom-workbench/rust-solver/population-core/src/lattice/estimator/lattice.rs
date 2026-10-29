@@ -119,11 +119,11 @@ pub struct ErrorLattice<'p>{
 
 impl<'p> ErrorLattice<'p>{
     /// `explicit`: the explicit set P, whose modes join the near ones.
-    pub fn new(prepared:&'p LatticePrepared,modes:&[Charge],explicit:&[Charge],frame:&'p SwFrame<'p>,keep_k1:bool)->Result<Self,String>{
+    pub fn new(prepared:&'p LatticePrepared,fold:&'p super::super::fold::FoldLibrary,modes:&[Charge],explicit:&[Charge],frame:&'p SwFrame<'p>)->Result<Self,String>{
         let n=prepared.generator.n;let d=n*n;
         let ring=super::super::estimate_api::ring(prepared,modes)?;
         let all:Vec<Charge>=modes.iter().chain(&ring).cloned().collect();
-        let outer=LatticeOperator::with_k1_rests(prepared,&all,keep_k1)?;
+        let outer=LatticeOperator::new(prepared,fold,&all)?;
         // P u Q comes first in the operator: its index, mirrors (closed on
         // P u Q) and frequencies, the ring's after them.
         let count=modes.len();let centre=outer.centre;

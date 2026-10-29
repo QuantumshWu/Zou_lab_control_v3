@@ -30,13 +30,19 @@
 //!    returns its best checkpoint (`Answer`), converged or partial with the
 //!    reason; every checkpoint is reported to the observer as it is made.
 //!
-//! The conserved count is the reduced model's kernel (the conserved
-//! quantities x0 reaches), and the folded centre block's when the lattice is
-//! that one block (a static model: its kernel is known exactly).
+//!
+//! The fold: every run builds its own (`fold::FoldLibrary`, by the truncation
+//! rule at the run's longest output time T and its lattice's largest
+//! |nu_q|); at the first checkpoint the far shell's depth is decided on the
+//! reduced solution with the near ring's completion (one decision, at most
+//! one restart); at the end what the fold leaves out is bounded on the
+//! reduced solution through the true propagator's trace-norm contraction
+//! and added to every bound (`posterior`).
 use super::*;
 use super::charge_set::{self,ExplicitSet};
 use super::estimate_api::{ACCEPTANCE_FACTOR,ErrorEstimate,EstimateSetup,Outputs,ReducedView};
-use super::ledger::{self,EXPANSION_LIMIT,POPULATION_TOLERANCE,RemainderLedger};
+use super::ledger::{self,POPULATION_TOLERANCE};
+use super::fold::{DroppedPieces,FoldLibrary,FoldRule,Storage,FOLD_SHARE,field_trace_norm};
 use super::reduced::{Model,Projection,SlowRate};
 use super::poles::{InnerWork,Lattice,Pole};
 use super::space::{self,Column,Space};
@@ -223,20 +229,102 @@ pub struct Solution{
     /// run restarted, the first run's first).
     pub columns:Vec<Column>,pub checkpoints:Vec<Checkpoint>,
     pub dimension:usize,pub work:InnerWork,pub images:usize,
-    pub ledger:RemainderLedger,pub timing:Timing,
+    pub fold:FoldReport,pub timing:Timing,
 }
 
-/// A lattice completion: the ring charges promoted into P (one of each
-/// pair; their mirrors join with them), the completed explicit set (the
-/// run's own when none is) and whether the operator keeps every K^(1) rest;
-/// where it was decided, the bound there, its slow part and the K^(1)
-/// rests' and the ring's parts (bound units), the ring charges' attribution
-/// shares, and whether the run restarted on the completed lattice.
+/// A run's fold under the truncation rule: its rule, the orders in nu_q it
+/// built and what its build dropped (induced trace norm x T); the far
+/// shell's depth built (rings beyond the second order); at the end the
+/// a-posteriori term at T (population units, 1/2 int_0^T ||D x(s)||_1 ds on
+/// the reduced solution, added to every bound), the dressing (half the far
+/// amplitudes' trace norms at t = 0: the initial slip's first-order bound,
+/// reported) and their time.
+#[derive(Clone,Debug,Default)]
+pub struct FoldReport{
+    pub rule:Option<FoldRule>,pub orders:usize,pub dropped:DroppedPieces,pub targets:usize,pub build_ms:f64,
+    pub rings:usize,pub posterior:f64,pub dressing:f64,pub posterior_ms:f64,
+}
+
+/// The first checkpoint's decision: the near ring's completion (the ring
+/// charges promoted into P, one of each pair, their mirrors joining; the
+/// completed explicit set, the run's own when none is) and the far shell's
+/// depth (`rings` beyond the second order, and per ring its action on the
+/// reduced solution, int_0^T ||D_k x(s)||_1 ds); where it was decided, the
+/// bound there, its slow part and the ring's part (bound units), the ring
+/// charges' attribution shares, and whether the run restarted.
 #[derive(Clone,Debug)]
 pub struct Completion{
-    pub promoted:Vec<Charge>,pub explicit:ExplicitSet,pub keep_k1:bool,pub decided_at:usize,
-    pub bound:f64,pub slow_part:f64,pub k1_part:f64,pub ring_part:f64,
+    pub promoted:Vec<Charge>,pub explicit:ExplicitSet,pub rings:usize,pub ring_actions:Vec<f64>,pub decided_at:usize,
+    pub bound:f64,pub slow_part:f64,pub ring_part:f64,
     pub attribution:Vec<(Charge,f64)>,pub restarted:bool,
+}
+
+/// The Ritz modes of a checkpoint's reduced model, what the fold's rule reads
+/// of them: per mode its value, its coefficient and its Ritz vector's
+/// coordinates on the first `columns` basis vectors (S row-major r x r).
+struct RitzModes{r:usize,theta:Vec<C>,coefficients:Vec<C>,vectors:Vec<C>,columns:usize}
+impl RitzModes{
+    fn of(model:&Model,columns:usize)->Self{Self{r:model.r,theta:model.used_theta.clone(),coefficients:model.used_coefficients.clone(),vectors:model.vectors.clone(),columns}}
+    /// x_m = W s_m on the lattice.
+    fn field(&self,basis:&[Vec<C>],m:usize)->Vec<C>{
+        let mut x=vec![ZERO;basis[0].len()];
+        for j in 0..self.columns{let c=self.vectors[j*self.r+m];if !nonzero(c){continue;}for(v,&w)in x.iter_mut().zip(&basis[j]){mul_add(v,c,w);}}
+        x}
+    /// int_0^t |e^{theta_m s}| ds.
+    fn weight(&self,m:usize,t:f64)->f64{let a=self.theta[m].re;if (a*t).abs()<1e-12{t}else{((a*t).min(EXPONENT_CAP).exp()-1.)/a}}
+}
+/// An exponent above which e^x is taken at e^EXPONENT_CAP (a growing mode's
+/// weight is then infinite in effect: its bound carries no information).
+const EXPONENT_CAP:f64=700.;
+/// A far-shell action's rings stop when what the next ones can land is
+/// within this share of the rule's budget (over every mode of a model).
+const RING_TOLERANCE_SHARE:f64=1e-3;
+
+/// Per ring k >= 1 of the far shell (the parts of order k + 2), its action
+/// on the reduced solution to T, sum_m |a_m| N_1(D_k x_m) phi_m(T) (the
+/// rule's units: trace norm x time).
+fn ring_actions(fold:&FoldLibrary,prepared:&LatticePrepared,modes:&[Charge],ritz:&RitzModes,basis:&[Vec<C>],horizon:f64,budget:f64)->Result<Vec<f64>,String>{
+    let n=prepared.generator.n;let nu_of=|q:&[i32]|prepared.nu(q);
+    let weights:Vec<f64>=(0..ritz.r).map(|m|magnitude(ritz.coefficients[m])*ritz.weight(m,horizon)).collect();
+    let total:f64=weights.iter().sum();let mut actions:Vec<f64>=Vec::new();
+    if !(total>0.){return Ok(actions);}
+    let tolerance=RING_TOLERANCE_SHARE*budget/(total*(n as f64).powf(1.5)*modes.len()as f64);
+    let execution=crate::parallel::Execution::new()?;
+    let per_mode=execution.map((0..ritz.r).filter(|&m|weights[m]>0.).collect(),|m|->Result<Vec<f64>,String>{
+        let x=ritz.field(basis,m);
+        let shell=fold.far_shell(&prepared.generator,&prepared.plan,&nu_of,modes,&x,ritz.theta[m],tolerance)?;
+        shell.landings.iter().skip(1).map(|landing|Ok(weights[m]*field_trace_norm(&prepared.lapack,landing,n)?)).collect()});
+    for rings in per_mode{for(k,a)in rings?.into_iter().enumerate(){if k==actions.len(){actions.push(0.);}actions[k]+=a;}}
+    Ok(actions)
+}
+/// The truncation rule's a-posteriori term (`fold`): what the run's fold
+/// leaves out of the far shell, by its action on the reduced solution
+/// x(s) = sum_m a_m e^{theta_m s} x_m through the true propagator's trace-norm
+/// contraction, the populations moving by at most
+/// 1/2 sum_m |a_m| N_1(g_m) phi_m(t), g_m = (S(theta_m) - K) x_m the far shell's
+/// exact action at the mode's own shift less the applied fold, with the
+/// rings' tail (`LatticeOperator::left_out_exact`); what the far shell lands
+/// on near charges outside the lattice is the near ring's, which the ring's
+/// feedback charges with its detuning (`estimator`), not this bound,
+/// phi_m(t) = int_0^t e^{Re theta_m s} ds; per grid time and per horizon,
+/// with the dressing (half the far amplitudes' trace norms at t = 0).
+fn posterior(lattice:&Lattice<'_>,prepared:&LatticePrepared,ritz:&RitzModes,basis:&[Vec<C>],times:&[f64],horizons:&[f64],horizon:f64,budget:f64)->Result<(Vec<f64>,Vec<f64>,f64),String>{
+    let op=lattice.operator();let n=op.n;let lapack=&prepared.lapack;
+    let(mut grid,mut means,mut dressing)=(vec![0.;times.len()],vec![0.;horizons.len()],0.);
+    let weights:Vec<f64>=(0..ritz.r).map(|m|magnitude(ritz.coefficients[m])*ritz.weight(m,horizon)).collect();
+    let total:f64=weights.iter().sum();if !(total>0.){return Ok((grid,means,dressing));}
+    let tolerance=RING_TOLERANCE_SHARE*budget/(total*(n as f64).powf(1.5)*op.modes.len()as f64);
+    let execution=crate::parallel::Execution::new()?;
+    let parts=execution.map((0..ritz.r).filter(|&m|nonzero(ritz.coefficients[m])).collect(),|m|->Result<(usize,f64,f64),String>{
+        let x=ritz.field(basis,m);
+        let(g,shell)=op.left_out_exact(&x,ritz.theta[m],tolerance)?;
+        Ok((m,field_trace_norm(lapack,&g,n)?+shell.tail*(n as f64).powf(1.5),shell.dressing.iter().sum::<f64>()))});
+    for part in parts{let(m,size,dressed)=part?;let a=magnitude(ritz.coefficients[m]);
+        for(e,&t)in grid.iter_mut().zip(times){*e+=0.5*a*size*ritz.weight(m,t);}
+        for(e,&t)in means.iter_mut().zip(horizons){*e+=0.5*a*size*ritz.weight(m,t);}
+        dressing+=0.5*a*dressed;
+    }
+    Ok((grid,means,dressing))
 }
 
 /// Euclidean projection of real values onto the probability simplex.
@@ -349,21 +437,27 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let clock=Instant::now();let eigen=prepared.eigenbasis()?;timing.eigenbasis_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
     let explicit=match completion{Some(c)=>c.explicit.clone(),None=>request.explicit.get_or_init(||charge_set::explicit_set(prepared,initial,tolerance)).clone()?};
     timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
-    let keep_k1=completion.is_some_and(|c|c.keep_k1);
+    // The run's fold by the truncation rule (T, the lattice's largest
+    // |nu_q|), with the far shell's depth a completion decided.
     let clock=Instant::now();
-    let mut lattice=Lattice::with_k1_rests(prepared,explicit.sets.clone(),keep_k1)?;
-    let ledger=lattice.operator().ledger()?;
+    let lattice_modes=explicit.sets.modes();
+    let nu_max=lattice_modes.iter().map(|q|prepared.nu(q).map(f64::abs)).try_fold(0_f64,|a,v|v.map(|v|a.max(v)))?;
+    let rule=FoldRule::new(longest,nu_max);
+    let mut fold=FoldLibrary::build(&prepared.generator,&prepared.plan,&prepared.lapack,Storage::Rule(rule))?;
+    let rings=completion.map_or(0,|c|c.rings);
+    if rings>0{
+        // The ring targets land on the lattice's edges whose charges the plan
+        // folds (and the diagonal).
+        let known:BTreeSet<Charge>=prepared.plan.targets.iter().chain(&prepared.plan.omitted).map(|t|t.charge.clone()).chain(std::iter::once(prepared.generator.zero.clone())).collect();
+        let mut offsets=BTreeSet::new();for p in &lattice_modes{for q in &lattice_modes{let t=charge_minus(q,p)?;if known.contains(&t){offsets.insert(t);}}}
+        let ring_targets=fold.ring_targets(&prepared.generator,&prepared.plan,rings,&offsets)?;fold.targets.extend(ring_targets);
+    }
+    let mut report=FoldReport{rule:Some(rule),orders:fold.diagnostics.orders,dropped:fold.diagnostics.dropped.clone(),targets:fold.targets.len(),build_ms:clock.elapsed().as_secs_f64()*1e3,rings,..Default::default()};
+    let clock=Instant::now();
+    let mut lattice=Lattice::new(prepared,&fold,explicit.sets.clone())?;
     let budget=MEMORY_SHARE*crate::memory::physical_bytes()?;
     let planned=planned_bytes(request.runs,lattice.modes.len());
     if planned>budget{return Err(format!("The lattice of this request has {} modes and would need about {:.1} GB, above the {:.0} GB memory budget: not solved",lattice.modes.len(),planned/1e9,budget/1e9));}
-    // The static fold's frequency expansion (K^(0) + i nu K^(1)) holds while
-    // its parameter p = nu_max / (|nu_far| - ||L0||) is small: a lattice with
-    // p above EXPANSION_LIMIT is not solved, the limit a completion keeps to
-    // as well. Measured: p at most 9.2e-4 on the research requests (21 runs);
-    // its remainder charged as delta min(t, tau) instead (`ledger::nu_freeze`,
-    // tau the slowest relaxation) was 1.3e-2 to 0.45 and made 3 of 6 runs
-    // partial, whatever tau.
-    if ledger.expansion_parameter>EXPANSION_LIMIT{return Err(format!("Static fold expansion parameter {:e} is above {EXPANSION_LIMIT:e}: the fold's frequency expansion is not small on this lattice, not solved",ledger.expansion_parameter));}
     // 2. The space: translations, the steady column.
     let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*op.modes.len())};
     let mut space=Space::new(&mut lattice,initial,capacity)?;
@@ -372,7 +466,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     space.solve(&mut lattice,Pole::Zero)?;
     let modes=lattice.modes.clone();
     let clock=Instant::now();
-    let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,groups:request.groups},frame,ledger:&ledger,keep_k1})?;
+    let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,groups:request.groups},frame,fold:&fold})?;
     timing.estimator_build_ms=clock.elapsed().as_secs_f64()*1e3;
     // The ladder spans the grid's times when there is one (a horizon is
     // served by the steady column): its poles near 1 / T of a 1 s horizon grew
@@ -394,7 +488,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let mut checkpoints:Vec<Checkpoint>=Vec::new();
     // The best checkpoint so far, the latest model, and per checkpoint the
     // progress measure of the stopping rule.
-    let mut best:Option<Answer>=None;let mut progress:Vec<f64>=Vec::new();
+    let mut best:Option<(Answer,RitzModes)>=None;let mut progress:Vec<f64>=Vec::new();
     let mut reason:Option<String>=None;
     let mut current:Option<(usize,Model)>=None;
     // Per point: its last score, the score it had when last solved, and the
@@ -446,10 +540,16 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             // The best checkpoint: one within the tolerance over any other,
             // the latest of those, else the least largest bound.
             let within=answer.largest()<=tolerance;
-            if best.as_ref().is_none_or(|b|if within{true}else{b.largest()>tolerance&&answer.largest()<b.largest()}){best=Some(answer.clone());}
-            if answer.accepted{break;}
-            // 5. Completion, decided at the first checkpoint (see `solve`).
+            if best.as_ref().is_none_or(|(b,_)|if within{true}else{b.largest()>tolerance&&answer.largest()<b.largest()}){best=Some((answer.clone(),RitzModes::of(&model,space.basis.len())));}
+            // 5. The first checkpoint's decision (see `solve`): the far shell's
+            // depth on the reduced solution, and the near ring's completion.
             if completion.is_none()&&checkpoints.len()==1{
+                let ritz=RitzModes::of(&model,space.basis.len());
+                let left=FOLD_SHARE*tolerance-report.dropped.total();
+                let actions=if prepared.plan.far().is_empty(){Vec::new()}else{ring_actions(&fold,prepared,&modes,&ritz,&space.basis,longest,left)?};
+                // The depth: the fewest rings whose rest stays within what the
+                // build left of the rule's budget.
+                let mut depth=actions.len();while depth>0&&actions[depth-1..].iter().sum::<f64>()<=left{depth-=1;}
                 let e=&answer.estimate;let off=answer.sample_errors.len();
                 // Per output: its bound and its slow part (bound units); the steady
                 // state's estimate is its slow part.
@@ -457,43 +557,35 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                     .map(|(i,&b)|(b,ACCEPTANCE_FACTOR*e.slow_trajectory.get(i).copied().unwrap_or(0.),i)).collect();
                 outputs.extend(answer.horizon_errors.iter().enumerate().map(|(h,&b)|(b,ACCEPTANCE_FACTOR*e.slow_horizons.get(h).copied().unwrap_or(0.),off+h)));
                 let(bound,part,at)=outputs.iter().copied().max_by(|a,b|a.0.total_cmp(&b.0)).unwrap_or((0.,0.,0));
+                let(mut promoted,mut grown,mut ring_part,mut attribution)=(Vec::new(),None,0.,Vec::new());
                 if bound>tolerance&&part>=COMPLETION_SHARE*bound{
                     let view=ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
                         used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out};
                     let pick=|x:&ErrorEstimate|ACCEPTANCE_FACTOR*if at<off{x.trajectory[at]}else{x.horizons[at-off]};
                     let floor=COMPLETION_FLOOR*tolerance;
-                    // The part of what the operator leaves out, when it drops K^(1)
-                    // rests (keeping them is what completes that source).
-                    let drops=lattice.operator().drops_k1_rests();
-                    let k1_part=if drops{pick(&estimator.estimate_alone(&view,&mut lattice,Source::K1)?)}else{0.};
-                    let keep=drops&&k1_part>=floor;
                     // The ring charges by attribution, a pair together (the canonical
                     // member, the larger charge, stands for it), and the ring's part.
                     let mut pairs:BTreeMap<Charge,f64>=BTreeMap::new();
                     for(c,a)in estimator.ring_attribution(&view)?{let m=opposite(&c);let key=if c>m{c}else{m};*pairs.entry(key).or_default()+=a;}
                     let total:f64=pairs.values().sum();
                     let mut ranked:Vec<(Charge,f64)>=pairs.into_iter().collect();ranked.sort_by(|a,b|b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-                    let ring_part=if total>0.{pick(&estimator.estimate_alone(&view,&mut lattice,Source::Ring)?)}else{0.};
-                    let mut promoted=Vec::new();let mut carried=0.;
+                    ring_part=if total>0.{pick(&estimator.estimate_alone(&view,&mut lattice,Source::Ring)?)}else{0.};
+                    let mut carried=0.;
                     if total>0.{for(c,a)in &ranked{if ring_part*(1.-carried/total)<floor{break;}promoted.push(c.clone());carried+=a;}}
-                    // The completed lattice must fit the memory budget and keep the
-                    // fold's frequency expansion small (its parameter scales with the
-                    // largest |nu_q|): else no charge is promoted.
-                    let mut grown=None;
+                    // The completed lattice must fit the memory budget: else no
+                    // charge is promoted.
                     if !promoted.is_empty(){
                         let set=charge_set::completed(prepared,&explicit,&promoted)?;
-                        let nu_max=|modes:&[Charge]|->Result<f64,String>{modes.iter().map(|q|prepared.nu(q).map(f64::abs)).try_fold(0_f64,|a,v|v.map(|v|a.max(v)))};
-                        let(before,after)=(nu_max(&explicit.sets.modes())?,nu_max(&set.sets.modes())?);
-                        let expansion=if before>0.{ledger.expansion_parameter*after/before}else{ledger.expansion_parameter};
-                        if planned_bytes(request.runs,set.sets.modes().len())>budget||expansion>EXPANSION_LIMIT{promoted.clear();}else{grown=Some(set);}
+                        if planned_bytes(request.runs,set.sets.modes().len())>budget{promoted.clear();}else{grown=Some(set);}
                     }
-                    let attribution:Vec<(Charge,f64)>=ranked.iter().map(|(c,a)|(c.clone(),if total>0.{a/total}else{0.})).collect();
-                    let restarted=keep||!promoted.is_empty();
-                    let decision=Completion{promoted,explicit:grown.unwrap_or_else(||explicit.clone()),keep_k1:keep,decided_at:space.solves(),bound,slow_part:part,k1_part,ring_part,attribution,restarted};
-                    if restarted{return Ok(Err((decision,checkpoints)));}
-                    decided=Some(decision);
+                    attribution=ranked.iter().map(|(c,a)|(c.clone(),if total>0.{a/total}else{0.})).collect();
                 }
+                let restarted=depth>rings||!promoted.is_empty();
+                let decision=Completion{promoted,explicit:grown.unwrap_or_else(||explicit.clone()),rings:depth.max(rings),ring_actions:actions,decided_at:space.solves(),bound,slow_part:part,ring_part,attribution,restarted};
+                if restarted{return Ok(Err((decision,checkpoints)));}
+                decided=Some(decision);
             }
+            if answer.accepted{break;}
             // 4. The stopping rule on the bound (a checkpoint within the
             // tolerance is accepted).
             progress.push(answer.largest());
@@ -503,7 +595,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                 let recent=progress[last+1-PLATEAU..].iter().copied().fold(f64::INFINITY,f64::min);
                 recent>before/PLATEAU_GAIN};
             if exhausted||plateau{
-                let b=best.as_ref().ok_or("A run has its checkpoint")?;
+                let b=&best.as_ref().ok_or("A run has its checkpoint")?.0;
                 let why=if plateau{format!("the error bound stopped improving ({PLATEAU_GAIN}x over {PLATEAU} checkpoints) after {} solves",space.solves())}
                     else if space.full(){format!("the basis memory was spent after {} solves",space.solves())}
                     else if live.is_empty(){format!("the pole ladder was exhausted after {} solves",space.solves())}
@@ -540,13 +632,21 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             if space.solves()%CHECKPOINT==0||space.solves()>=MAXIMUM_SOLVES||space.full(){break;}
         }
     }
-    let answer=best.ok_or("A run has its checkpoint")?;
+    let(mut answer,ritz)=best.ok_or("A run has its checkpoint")?;
+    // The a-posteriori term on the best checkpoint's reduced solution.
+    let clock=Instant::now();
+    let(grid,means,dressing)=posterior(&lattice,prepared,&ritz,&space.basis,times,request.horizons,longest,FOLD_SHARE*tolerance)?;
+    for(e,v)in answer.sample_errors.iter_mut().zip(&grid){*e+=v;}
+    for(e,v)in answer.horizon_errors.iter_mut().zip(&means){*e+=v;}
+    answer.accepted=answer.largest()<=tolerance;
+    report.posterior=grid.iter().chain(&means).fold(0_f64,|a,&b|a.max(b));report.dressing=dressing;report.posterior_ms=clock.elapsed().as_secs_f64()*1e3;
+    if !answer.accepted&&reason.is_none(){reason=Some(format!("The fold's a-posteriori term ({:.2e}) took the best checkpoint's bound to {:.2e}, above the tolerance {tolerance:e}",report.posterior,answer.largest()));}
     let work=lattice.work().clone();
     timing.solves_ms=work.milliseconds;timing.images_ms=space.images_ms;timing.projection_ms=galerkin.milliseconds;timing.total_ms=started.elapsed().as_secs_f64()*1e3;
     timing.frame_ms=frame.milliseconds();
     let converged=answer.accepted;
     Ok(Ok(Solution{answer,converged,reason:if converged{None}else{reason},completion:completion.cloned().or(decided),translations:space.translations(),
-        columns:space.columns.clone(),dimension:galerkin.columns(),images:space.basis.len(),work,ledger:ledger.clone(),timing,checkpoints,explicit:explicit.clone()}))
+        columns:space.columns.clone(),dimension:galerkin.columns(),images:space.basis.len(),work,fold:report,timing,checkpoints,explicit:explicit.clone()}))
 }
 
 #[cfg(test)]
@@ -567,7 +667,7 @@ mod tests{
         let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,groups:&groups,explicit:&std::sync::OnceLock::new(),runs:1},Some(&mut observe)).unwrap();
         assert!(s.converged&&s.reason.is_none()&&seen==s.checkpoints.len(),"{:?}",s.reason);
         let a=&s.answer;
-        let op=LatticeOperator::new(&p,&a.modes).unwrap();let dense=op.dense();let size=op.dimension();
+        let op=LatticeOperator::new(&p,&p.fold,&a.modes).unwrap();let dense=op.dense();let size=op.dimension();
         let rate=|x:&[C]|->Vec<C>{(0..size).map(|r|{let mut v=ZERO;for c in 0..size{mul_add(&mut v,dense[r*size+c],x[c]);}v}).collect()};
         let mut x=vec![ZERO;size];x[op.centre*d]=ONE;
         let readout=|x:&[C],t:f64|->Vec<f64>{(0..n).map(|i|(0..a.modes.len()).map(|q|mul(C{re:(op.nu[q]*t).cos(),im:(op.nu[q]*t).sin()},x[q*d+i*n+i]).re).sum()).collect()};
@@ -593,7 +693,7 @@ mod tests{
         // The bordered column at a tight tolerance is the lattice's null
         // vector; the reported steady state carries the algebraic error of
         // the bordered solve at STEADY_TOLERANCE.
-        let mut lattice=Lattice::new(&p,s.explicit.sets.clone()).unwrap();let mut u=vec![ZERO;size];for i in 0..n{u[op.centre*d+i*n+i]=C{re:0.25,im:0.};}
+        let mut lattice=Lattice::new(&p,&p.fold,s.explicit.sets.clone()).unwrap();let mut u=vec![ZERO;size];for i in 0..n{u[op.centre*d+i*n+i]=C{re:0.25,im:0.};}
         let(w,_,_)=lattice.solve(Pole::Zero,&[u],1e-13).unwrap();let trace:f64=(0..n).map(|i|w[0][op.centre*d+i*n+i].re).sum();
         let column:Vec<f64>=(0..n).map(|i|w[0][op.centre*d+i*n+i].re/trace).collect();
         let tight=ledger::metric(&exact,&column,&groups);assert!(tight<1e-10,"bordered column {tight:e}");

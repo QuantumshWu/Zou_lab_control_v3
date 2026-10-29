@@ -8,18 +8,17 @@
 //! times
 //! - F_m = (A W - theta_m W) b_m, the Krylov residual;
 //! - g_m, the omitted ring R = ring(P u Q) slaved at z = theta_m and fed back
-//!   (`ErrorLattice::ring_feedback`);
-//! - dA W b_m, what the lattice operator leaves out of the second-order far
-//!   shell (`LatticeOperator::left_out`): the exact far shell less the stored
-//!   fold, i.e. the static expansion's remainder in nu, the series
-//!   truncation, the entries below the storage floor, the non-structural
-//!   rests, the K^(1) rests it drops and the cross folds below the floor.
-//!   The higher-order far-shell paths are reported only (`ledger`: their
-//!   measured action is at most 6e-6).
+//!   (`ErrorLattice::ring_feedback`).
+//!
+//! What the run's fold leaves out of the far shell is no source here: its
+//! pieces are kept or dropped by the truncation rule (`fold`), and what the
+//! dropped ones do is bounded on the reduced solution through the true
+//! propagator's trace-norm contraction (`pipeline`), with no slow mode's
+//! amplification.
 //!
 //! - Slow Ritz modes (|theta| < `slow::SLOW`, the kernel included, not
 //!   projected out) are exact (`slow`): e_m(t) = a_m (e^{theta_m t} Y_m - e^{tA} Y_m) with
-//!   Y_m = (theta_m - A)^-1 (F_m + g_m + dA W b_m), the space's part of F_m in
+//!   Y_m = (theta_m - A)^-1 (F_m + g_m), the space's part of F_m in
 //!   closed form and the rest by GCRO on one shared pool seeded with the
 //!   pipeline's steady solve, the slow Ritz directions deflated. The kernel
 //!   mode's Y is the steady error, trace free like its projection on the
@@ -36,14 +35,14 @@
 //!   with r = (A - theta) x, e^{tA} x - e^{theta t} x = int_0^t
 //!   e^{(t-s)A} r e^{theta s} ds exactly, and the slow part's in-space -W b,
 //!   propagated by the reduced model, cancels that term exactly: the slow
-//!   part sees the ring's and the K^(1) rests' sources only, an inaccurate
+//!   part sees the ring's source only, an inaccurate
 //!   slow pair not at all. Every non-kernel slow mode the slow part takes
 //!   therefore also goes through the SW part (`propagate`), as a metric of
 //!   its own added to each output's (summed into the same signed error it
 //!   partly cancelled: four lasers at 10 ms, per-time ratio 0.47 against
 //!   0.77 without the charge, 1.85 apart). A source of exactly zero and one
 //!   at roundoff now give the same estimate: a complete lattice (its
-//!   truncated charges promoted, the K^(1) rest kept) left the slow part a
+//!   truncated charges promoted) left the slow part a
 //!   ring source of 1e-26, and its trajectory estimate fell to 7e-27
 //!   against an error of 1.6e-3.
 //! - Fast Ritz modes: second-order Schrieffer-Wolff averaging on the near
@@ -125,11 +124,9 @@ pub const KERNEL_HORIZON_RATE:f64=1e-2;
 /// resonance).
 pub const KERNEL_CAP:f64=1.;
 /// A source of the slow part taken alone (`UnifiedEstimate::estimate_alone`,
-/// the completion's): what the lattice operator leaves out of the
-/// second-order far shell (`LatticeOperator::left_out`, the K^(1) rests it
-/// drops among it), or the omitted ring's feedback.
+/// the completion's): the omitted ring's feedback.
 #[derive(Clone,Copy,Debug,PartialEq)]
-pub enum Source{K1,Ring}
+pub enum Source{Ring}
 /// Rows of the grid per task of the time GEMMs for `per_time` multiply-adds
 /// per time: at most four tasks per reference worker, at least
 /// MINIMUM_WORK_PER_TASK each (fixed: the chunking does not depend on the
@@ -245,27 +242,16 @@ fn left_functionals(lapack:&Lapack,s:&[C],r:usize,modes:&[usize])->Result<Vec<Ve
 impl<'a> UnifiedEstimate<'a>{
     pub fn new(setup:EstimateSetup<'a>)->Result<Self,String>{
         let modes=setup.lattice.modes();
-        let lattice=ErrorLattice::new(setup.prepared,&modes,&setup.lattice.explicit,setup.frame,setup.keep_k1)?;
+        let lattice=ErrorLattice::new(setup.prepared,setup.fold,&modes,&setup.lattice.explicit,setup.frame)?;
         Ok(Self{setup,lattice,pool:None,seeded:0})
     }
     fn pool(&mut self)->Result<&mut SlowPool,String>{
         if self.pool.is_none(){self.pool=Some(SlowPool::new(self.setup.prepared,&self.lattice,self.setup.frame.horizon)?);}
         Ok(self.pool.as_mut().unwrap())
     }
-    /// The slow modes' sources on a field x at the shift theta (x complex:
-    /// its Hermitian-symmetric parts): the ring's feedback and what the
-    /// pipeline's operator leaves out of the second-order far shell (when it
-    /// leaves anything out), or one of them `alone`.
-    fn sources(&mut self,x:&[C],theta:C,steady:&dyn SteadySolves,alone:Option<Source>)->Result<Vec<C>,String>{
-        let mut g=if alone==Some(Source::K1){vec![ZERO;x.len()]}else{self.lattice.ring_feedback(x,theta)?};
-        if alone==Some(Source::Ring){return Ok(g);}
-        let(xa,xb)=lattice::split(x,&self.lattice.mirror,self.lattice.n);
-        if let(Some(a),Some(b))=(steady.left_out(&xa)?,steady.left_out(&xb)?){
-            let rest=lattice::join(&a,&b);
-            for(a,b)in g.iter_mut().zip(rest){add(a,b);}
-        }
-        Ok(g)
-    }
+    /// The slow modes' sources on a field x at the shift theta: the ring's
+    /// feedback.
+    fn sources(&mut self,x:&[C],theta:C)->Result<Vec<C>,String>{self.lattice.ring_feedback(x,theta)}
     /// The population errors of a checkpoint's outputs; with a source
     /// `alone` those of it alone, through the slow modes (no Krylov residual,
     /// no fast part).
@@ -291,7 +277,7 @@ impl<'a> UnifiedEstimate<'a>{
             // In the order of `needed` (an output time takes a prefix).
             for &m in &modes.needed{let(x,ax)=&fields[deflated.iter().position(|&d|d==m).ok_or("Estimator: a needed slow mode outside the deflated ones")?];
                 let theta=cp.theta[m];
-                let g=self.sources(x,theta,steady,alone)?;
+                let g=self.sources(x,theta)?;
                 // One source alone: the mode's own Krylov residual is none.
                 let(zb,zax)=(vec![ZERO;k],vec![ZERO;ax.len()]);
                 let(bm,axm):(&[C],&[C])=if single{(&zb,&zax)}else{(&b[k*m..k*(m+1)],ax)};
@@ -411,7 +397,7 @@ mod tests{
         // fixture's first ball: one estimate per output, zero at t = 0,
         // finite and positive after it.
         let f=fixture();let p=prepared(&f);let modes=p.modes(1).unwrap();
-        let mut op=LatticeOperator::new(&p,&modes).unwrap();let d=16;let size=op.dimension();
+        let mut op=LatticeOperator::new(&p,&p.fold,&modes).unwrap();let d=16;let size=op.dimension();
         let dot=|a:&[C],b:&[C]|a.iter().zip(b).map(|(x,y)|x.re*y.re+x.im*y.im).sum::<f64>();
         let mut w0=vec![ZERO;size];w0[op.centre*d]=ONE;
         let mut a0=vec![ZERO;size];op.apply(&w0,&mut a0).unwrap();
@@ -427,14 +413,13 @@ mod tests{
         let inv=|z:C|{let m=z.re*z.re+z.im*z.im;C{re:z.re/m,im:-z.im/m}};
         let a=[mul(sr[3],inv(det)),mul(C{re:-sr[2].re,im:-sr[2].im},inv(det))];
         let lattice=LatticeSets{explicit:modes.clone(),ring:Vec::new()};
-        let ledger=op.ledger().unwrap();
         let times=[0.,0.5,1.];let horizons=[10.];let groups=vec![vec![0,1]];
         let frame=SwFrame::new(&p,10.);
-        let setup=EstimateSetup{prepared:&p,lattice:&lattice,outputs:Outputs{times:&times,horizons:&horizons,groups:&groups},frame:&frame,ledger:&ledger,keep_k1:false};
+        let setup=EstimateSetup{prepared:&p,lattice:&lattice,outputs:Outputs{times:&times,horizons:&horizons,groups:&groups},frame:&frame,fold:&p.fold};
         let mut estimator=UnifiedEstimate::new(setup).unwrap();
         let flags=[false,false];
         let reduced=ReducedView{basis:&basis,images:&images,r:2,vectors:&sr,used_theta:&theta,used_coefficients:&a,kernel:&flags,projected:&flags};
-        let mut solver=super::super::poles::Lattice::new(&p,lattice.clone()).unwrap();
+        let mut solver=super::super::poles::Lattice::new(&p,&p.fold,lattice.clone()).unwrap();
         let e=estimator.estimate(&reduced,&mut solver).unwrap();
         assert_eq!((e.trajectory.len(),e.horizons.len()),(3,1));
         assert!(e.trajectory[0].abs()<1e-12&&e.trajectory[1..].iter().all(|v|v.is_finite()&&*v>0.)&&e.horizons.iter().all(|v|v.is_finite()),"{e:?}");

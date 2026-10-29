@@ -28,11 +28,9 @@
 //!   (per sample: the acceptance factor times the estimate, plus the
 //!   projection's change; an
 //!   absolute population error; the estimate's sources are the Krylov
-//!   residual, the omitted ring's feedback and what the lattice operator
-//!   leaves out of the second-order far shell (the stored fold's
-//!   remainders), and the higher-order far-shell paths are reported only, in
-//!   `diagnostics.lattice.run.ledger` (a lattice whose static expansion
-//!   parameter exceeds `ledger::EXPANSION_LIMIT` is not solved)),
+//!   residual and the omitted ring's feedback, and what the run's fold drops
+//!   by the truncation rule is bounded on the reduced solution and added,
+//!   `diagnostics.lattice.run.fold`),
 //!   `estimatedMaximumError` (their largest), `requestedTolerance`, `scope`.
 //! - `asymptoticHorizons`, the mean, whenever one was asked for (computed or
 //!   not): the two standard horizons, `[{horizonUs (1e5, 1e6), populations, densityReal, densityImag, estimatedError,
@@ -69,7 +67,7 @@ use atom_population_core::lattice::ledger::{self,POPULATION_TOLERANCE};
 use atom_population_core::lattice::pipeline::{self,Answer,Checkpoint,Request,Solution};
 
 const ENGINE:&str="rust-population-core-lattice";
-const METHOD:&str="Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically): one rational Krylov space from the initial state, every output read from one Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, its error estimated per output from the reduced model's residual, the omitted ring and the fold rests the lattice leaves out";
+const METHOD:&str="Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically): one rational Krylov space from the initial state, every output read from one Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, its error estimated per output from the reduced model's residual and the omitted ring, with what the fold's truncation rule drops bounded on the reduced solution";
 /// A mean whose bound reaches this carries no information (a population
 /// error of 1 bounds nothing): it is reported not converged, unshown.
 const UNINFORMATIVE_BOUND:f64=1.;
@@ -218,15 +216,15 @@ fn project_density(lapack:&atom_population_core::Lapack,density:&[Complex64])->R
 fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
     let plan=&prepared.plan;let f=&prepared.fold.diagnostics;
     let targets:Vec<Value>=prepared.fold.targets.iter().map(|t|json!({"charge":t.charge,"nu":t.nu,
-        "restStored":[t.rest[0].stored(),t.rest[1].stored()],"denseSectors":[t.rest[0].blocks.len(),t.rest[1].blocks.len()],
-        "norms":t.norms,"dropped":t.dropped,"largestEntry":t.largest_entry})).collect();
+        "restStored":t.rest.iter().map(|r|r.stored()).collect::<Vec<_>>(),"denseSectors":t.rest.iter().map(|r|r.blocks.len()).collect::<Vec<_>>(),
+        "whole":t.whole,"norms":t.norms,"largestEntry":t.largest_entry})).collect();
     let k=&prepared.floquet.diagnostics;
     let floquet=json!({"milliseconds":k.milliseconds,"iterations":k.iterations,"change":k.change,
         "pairs":k.pairs,"guarded":k.guarded,"smallParameter":k.small_parameter,"frameCondition":k.condition,
         "support":k.support.iter().map(|(q,size)|json!({"charge":q,"kernel":size})).collect::<Vec<_>>(),"belowFloor":k.below});
-    let run=run.map(|s|{let e=&s.explicit;let w=&s.work;let t=&s.timing;let l=&s.ledger;
+    let run=run.map(|s|{let e=&s.explicit;let w=&s.work;let t=&s.timing;let f=&s.fold;let dropped=&f.dropped;
         json!({"explicit":e.sets.explicit,"ring":e.sets.ring,"gated":e.gated,"promoted":e.promoted,"covered":e.covered,"leak":e.leak,
-            "ringInternalEdges":e.internal.len(),"completion":s.completion.as_ref().map(|c|json!({"promoted":c.promoted,"keepK1":c.keep_k1,"decidedAt":c.decided_at,"bound":c.bound,"slowPart":c.slow_part,"k1Part":c.k1_part,"ringPart":c.ring_part,"restarted":c.restarted,"attribution":c.attribution.iter().take(8).map(|(q,a)|json!([q,a])).collect::<Vec<_>>()})),"explicitSetMs":e.milliseconds,"translations":s.translations,
+            "ringInternalEdges":e.internal.len(),"completion":s.completion.as_ref().map(|c|json!({"promoted":c.promoted,"rings":c.rings,"ringActions":c.ring_actions,"decidedAt":c.decided_at,"bound":c.bound,"slowPart":c.slow_part,"ringPart":c.ring_part,"restarted":c.restarted,"attribution":c.attribution.iter().take(8).map(|(q,a)|json!([q,a])).collect::<Vec<_>>()})),"explicitSetMs":e.milliseconds,"translations":s.translations,
             "columns":s.columns.iter().map(|c|json!({"pole":c.pole.to_string(),"innerSteps":c.steps,"residual":c.residual,"added":c.added,"ms":c.milliseconds,"blocks":c.blocks})).collect::<Vec<_>>(),
             "basis":s.images,"dimension":s.dimension,
             "inner":{"solves":w.solves,"steps":w.steps,"appliedBlocks":w.applied_blocks,"preconditionedBlocks":w.preconditioned_blocks,
@@ -236,8 +234,10 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
                 "trajectory":c.estimate.trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"horizons":c.estimate.horizons,"slowTrajectory":c.estimate.slow_trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"slowHorizons":c.estimate.slow_horizons,
                 "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"slowestRate":c.slowest.map(|s|s.rate),
                 "estimateMs":c.estimate.work.milliseconds,"ms":c.milliseconds})).collect::<Vec<_>>(),
-            "ledger":{"nuFreeze":l.nu_freeze,"thirdOrder":l.third_order,"farShell":l.far_shell,"tail":l.tail,"omittedCross":l.omitted_cross,
-                "nonStructural":l.non_structural,"droppedEntries":l.dropped_entries,"k1Rest":l.k1_rest,"unbuilt":l.unbuilt(),"fold":l.fold,"expansionParameter":l.expansion_parameter},
+            "fold":{"horizonUs":f.rule.map(|r|r.horizon),"nuMax":f.rule.map(|r|r.nu_max),"budget":f.rule.map(|r|r.budget),"orders":f.orders,"targets":f.targets,"rings":f.rings,
+                "dropped":{"entries":dropped.entries,"rests":dropped.rests,"orders":dropped.orders,"targets":dropped.targets,"expansion":dropped.expansion,"total":dropped.total(),
+                    "pieces":dropped.pieces,"keptTargets":dropped.kept_targets,"candidateTargets":dropped.candidate_targets},
+                "posterior":f.posterior,"dressing":f.dressing,"buildMs":f.build_ms,"posteriorMs":f.posterior_ms},
             "timingMs":{"eigenbasis":t.eigenbasis_ms,"explicitSet":t.explicit_set_ms,"setup":t.setup_ms,"estimatorBuild":t.estimator_build_ms,"outputs":t.outputs_ms,"frame":t.frame_ms.iter().sum::<f64>(),"frameParts":t.frame_ms,"frameWait":t.frame_wait_ms,"solves":t.solves_ms,"images":t.images_ms,"projection":t.projection_ms,
                 "model":t.model_ms,"ordering":t.ordering_ms,"estimate":t.estimate_ms,"total":t.total_ms}})});
     json!({
@@ -246,8 +246,8 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
             "steps":plan.steps.iter().map(|s|json!({"charge":s.charge,"nu":s.nu,"size":s.size,"treatment":format!("{:?}",s.treatment)})).collect::<Vec<_>>(),
             "foldTargets":plan.targets.iter().map(|t|json!({"charge":t.charge,"nu":t.nu,"pairs":t.pairs.len(),"size":t.size})).collect::<Vec<_>>(),
             "omittedTargets":plan.omitted.iter().map(|t|json!({"charge":t.charge,"nu":t.nu,"pairs":t.pairs.len(),"size":t.size})).collect::<Vec<_>>()},
-        "fold":{"farSources":f.far_sources,"columns":f.columns,"restBound":f.rest_bound,"chargedTruncation":f.truncation,
-            "series":f.series.iter().map(|(q,rho,order)|json!({"charge":q,"ratio":rho,"orders":order})).collect::<Vec<_>>(),"milliseconds":f.milliseconds,
+        "fold":{"farSources":f.far_sources,"columns":f.columns,"restBound":f.rest_bound,"lambda0":f.lambda0,"orders":f.orders,
+            "series":f.series.iter().map(|(q,rho,terms)|json!({"charge":q,"ratio":rho,"terms":terms})).collect::<Vec<_>>(),"milliseconds":f.milliseconds,
             "phaseMs":{"columns":f.phase_ms[0],"storage":f.phase_ms[1]},"targets":targets},
         "floquet":floquet,"eigenbasis":prepared.eigenbasis_built().map(|e|json!({"milliseconds":e.milliseconds,"clusters":e.clusters,"largestCluster":e.largest_cluster,"passes":e.passes,"condition":e.condition})),"run":run})
 }

@@ -132,7 +132,7 @@ impl LatticePrepared{
         let generator=Generator::new(&source)?;
         let plan=classification::HarmonicPlan::new(&generator)?;
         let plan_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
-        let fold=fold::FoldLibrary::build(&generator,&plan,&lapack)?;
+        let fold=fold::FoldLibrary::build(&generator,&plan,&lapack,fold::Storage::Frame)?;
         let fold_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
         let floquet=floquet::FloquetKernels::new(&generator,&plan,&fold,&lapack)?;
         let kernel_ms=clock.elapsed().as_secs_f64()*1e3;

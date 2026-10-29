@@ -76,11 +76,10 @@ pub struct Lattice<'a>{
     directions:Vec<Vec<C>>,images:Vec<Vec<C>>,recorded:bool,
 }
 impl<'a> Lattice<'a>{
-    pub fn new(prepared:&'a LatticePrepared,sets:LatticeSets)->Result<Self,String>{Self::with_k1_rests(prepared,sets,false)}
-    /// The lattice with every K^(1) rest kept in its operator when `keep_k1`.
-    pub fn with_k1_rests(prepared:&'a LatticePrepared,sets:LatticeSets,keep_k1:bool)->Result<Self,String>{
+    /// The lattice of `sets` with the run's fold `fold`.
+    pub fn new(prepared:&'a LatticePrepared,fold:&'a super::fold::FoldLibrary,sets:LatticeSets)->Result<Self,String>{
         if sets.centre()!=Some(0){return Err("The explicit set must start with the zero charge".into());}
-        let modes=sets.modes();let op=LatticeOperator::with_k1_rests(prepared,&modes,keep_k1)?;let operator_work=op.work_split();
+        let modes=sets.modes();let op=LatticeOperator::new(prepared,fold,&modes)?;let operator_work=op.work_split();
         Ok(Self{sets,modes,op,preconditioning:Preconditioning::new(prepared)?,batches:Vec::new(),work:InnerWork{operator_work,..InnerWork::default()},directions:Vec::new(),images:Vec::new(),recorded:false})
     }
     /// The preconditioner batch of a pole (built at its first use).
@@ -118,7 +117,6 @@ impl SteadySolves for Lattice<'_>{
     fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{self.op.apply(x,y)}
     fn precondition(&mut self,x:&[C],y:&mut[C])->Result<(),String>{let i=self.batch(Pole::Zero)?;self.batches[i].1.apply(x,y)}
     fn directions(&self)->(&[Vec<C>],&[Vec<C>]){(&self.directions,&self.images)}
-    fn left_out(&self,x:&[C])->Result<Option<Vec<C>>,String>{self.op.left_out(x)}
 }
 
 #[cfg(test)]
@@ -136,7 +134,7 @@ mod tests{
         let mut explicit=vec![p.generator.zero.clone(),s.clone(),opposite(&s)];
         explicit.sort_by_key(|q|(q.iter().map(|&k|k.unsigned_abs()).sum::<u32>(),q.clone()));
         let ring=super::super::estimate_api::ring(&p,&explicit).unwrap();
-        let mut lattice=Lattice::new(&p,LatticeSets{explicit,ring}).unwrap();
+        let mut lattice=Lattice::new(&p,&p.fold,LatticeSets{explicit,ring}).unwrap();
         let size=lattice.operator().dimension();let dense=lattice.operator().dense();let centre=lattice.operator().centre;
         let x=symmetric_field(lattice.operator(),1);
         for pole in[Pole::Real(0.7),Pole::Complex(C{re:0.4,im:2.5}),Pole::Zero]{
