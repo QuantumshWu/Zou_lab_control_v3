@@ -35,9 +35,7 @@
 //! sigma + i omega only at the frequencies omega > sigma of dressed centre
 //! modes slower than sigma (|Re lambda| < sigma) that carry at least
 //! COMPLEX_WEIGHT x tolerance of x0's population weight (merged within
-//! sigma). Below the ladder, the slow points (one per decade down to
-//! SLOW_FLOOR) serve the slowest relaxation alone, a rate the outputs'
-//! times do not reach. The pipeline orders the live points.
+//! sigma). The pipeline orders the live points.
 use super::*;
 use super::poles::{Lattice,Pole};
 use super::krylov::Vectors;
@@ -62,10 +60,6 @@ const APPEND_FLOOR:f64=1e-11;
 /// Ladder points per decade: a deliberate choice, not measured (the
 /// reference runs used two to three); the ranking chooses among them.
 const PER_DECADE:f64=2.;
-/// The slow points reach relaxation rates down to SLOW_FLOOR (1/us): a
-/// deliberate margin, a decade below the 1 s horizon's 1e-6 /us and below
-/// the slowest relaxation measured (probe + tweezer, 5.6e-7 /us).
-pub const SLOW_FLOOR:f64=1e-7;
 /// The ladder's top, LADDER_TOP / t1. Measured: three lasers at 20 us
 /// stalled at 3.8-5.8e-3 over 48 solves with 1 / t1, reached 1.9e-3 at 24
 /// solves with 10 / t1 (half the inner steps per solve); 30 / t1 gave the
@@ -189,8 +183,8 @@ impl Space{
 
 /// The ladder of a request: real poles from LADDER_TOP / t1 down to
 /// 1 / T_max, and the complex poles at the frequencies of x0's slow dressed
-/// centre modes; then the slow points below it.
-pub fn ladder(eigen:&BlockEigenbasis,initial:&[C],t1:f64,longest:f64,tolerance:f64)->Result<(Vec<Pole>,Vec<bool>),String>{
+/// centre modes.
+pub fn ladder(eigen:&BlockEigenbasis,initial:&[C],t1:f64,longest:f64,tolerance:f64)->Result<Vec<Pole>,String>{
     let(high,low)=(LADDER_TOP/t1,1./longest);
     let count=((high/low).log10()*PER_DECADE).ceil().max(1.)as usize+1;
     let sigmas:Vec<f64>=(0..count).map(|i|high*(low/high).powf(i as f64/(count-1)as f64)).collect();
@@ -203,8 +197,5 @@ pub fn ladder(eigen:&BlockEigenbasis,initial:&[C],t1:f64,longest:f64,tolerance:f
         for w in frequencies{if chosen.iter().all(|&v|(w-v).abs()>s){chosen.push(w);}}
         poles.extend(chosen.into_iter().skip(1).map(|w|Pole::Complex(C{re:s,im:w})));
     }
-    let mut slow=vec![false;poles.len()];
-    let mut sigma=low/10.;
-    while sigma>=SLOW_FLOOR*(1.-1e-9){poles.push(Pole::Real(sigma));slow.push(true);sigma/=10.;}
-    Ok((poles,slow))
+    Ok(poles)
 }

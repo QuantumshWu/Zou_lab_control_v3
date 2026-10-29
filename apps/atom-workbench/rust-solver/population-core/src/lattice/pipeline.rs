@@ -341,13 +341,13 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups},frame,ledger:&ledger,keep_k1})?;
     timing.estimator_build_ms=clock.elapsed().as_secs_f64()*1e3;
     // The ladder spans the grid's times when there is one (a horizon is
-    // served by the steady column and the slow points): its poles near 1 / T of a 1 s horizon grew
+    // served by the steady column): its poles near 1 / T of a 1 s horizon grew
     // spurious near-zero slow Ritz pairs in both metrics (rates 1e-8 to
     // 1e-5, residuals 0.2-3) whose p(1 s) bounds reached 1e1-1e4; without
     // them three, four, five lasers and four without the trap at 20 us were
     // accepted at 16-24 solves (four without the trap partial before) and
     // five lasers at 10 us / 2000 samples reached 7.0e-3 against 2.3e-2.
-    let(points,slow_points)=space::ladder(eigen,initial,t1,times.last().copied().unwrap_or(longest),tolerance)?;let mut alive=vec![true;points.len()];
+    let points=space::ladder(eigen,initial,t1,times.last().copied().unwrap_or(longest),tolerance)?;let mut alive=vec![true;points.len()];
     // The frame's metric (waiting for the frame's thread).
     let clock=Instant::now();
     let metric=SwMetric::new(frame,eigen,lattice.operator())?;
@@ -502,11 +502,11 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             galerkin.ingest(&space.basis,&space.images)?;galerkin.model(lapack,space.initial_norm,longest,tolerance)?}};
         let xis:Vec<C>=live.iter().map(|&i|points[i].sigma()).collect();
         let transform=model.error_transform(&galerkin,&space.basis,&space.images,eigen,lapack,&xis)?;
-        for(&i,p)in live.iter().zip(&transform){if slow_points[i]{continue;}
+        for(&i,p)in live.iter().zip(&transform){
             score[i]=points[i].sigma().re*p.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
             if let Some(before)=solved_at[i].take(){remaining[i]=if before>0.{(score[i]/before).min(1.)}else{1.};}
         }
-        let gain=|i:usize|->f64{if slow_points[i]{0.}else{score[i]*(1.-remaining[i])/points[i].copies()as f64}};
+        let gain=|i:usize|->f64{score[i]*(1.-remaining[i])/points[i].copies()as f64};
         let mut ranked:Vec<(usize,f64)>=live.iter().map(|&i|(i,gain(i))).collect();
         ranked.sort_by(|a,b|b.1.total_cmp(&a.1));
         timing.ordering_ms+=clock.elapsed().as_secs_f64()*1e3;
