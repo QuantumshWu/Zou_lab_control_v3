@@ -60,8 +60,8 @@ const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
     bound=>`长期布居的误差界为 ${num(bound)}（不小于 1），不含任何信息，不显示布居。`],
   [/^The lattice of this request has (\d+) modes and would need about (\S+) GB, above the (\S+) GB memory budget: not solved$/,
     (modes,need,budget)=>`未求解（不收敛）：此请求的晶格有 ${modes} 个模式，约需 ${need} GB 内存，超过 ${budget} GB 的内存预算。`],
-  [/^Static fold expansion parameter (\S+): the fold's frequency expansion diverges on this lattice, not solved$/,
-    parameter=>`未求解（不收敛）：静态折叠的展开参数为 ${num(parameter)}，折叠的频率展开在此晶格上发散。`],
+  [/^Static fold expansion parameter (\S+) is above (\S+): the fold's frequency expansion is not small on this lattice, not solved$/,
+    (parameter,limit)=>`未求解（不收敛）：静态折叠的展开参数为 ${num(parameter)}，高于 ${num(limit)}，折叠的频率展开在此晶格上不够小。`],
 ];
 /** A solver sentence in Chinese; one this table does not know is shown as written. */
 export function solverText(text:string):string{

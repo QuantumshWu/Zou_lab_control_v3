@@ -11,8 +11,8 @@
 //!   (`ErrorLattice::ring_feedback`);
 //! - dA W b_m, the K^(1) rests the lattice operator leaves out
 //!   (`LatticeOperator::left_out`). The other fold remainders are no
-//!   source (`ledger`: their measured action is at most 6e-6; the pipeline
-//!   charges the static expansion's when its parameter is not small).
+//!   source (`ledger`: their measured action is at most 6e-6; a lattice
+//!   whose static expansion is not small is not solved).
 //!
 //! - Slow Ritz modes (|theta| < `slow::SLOW`, the kernel included, not
 //!   projected out) are exact (`slow`): e_m(t) = a_m (e^{theta_m t} Y_m - e^{tA} Y_m) with

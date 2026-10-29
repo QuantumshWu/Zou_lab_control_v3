@@ -323,13 +323,14 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let ledger=lattice.operator().ledger()?;
     let planned=planned_bytes(lattice.modes.len());
     if planned>MEMORY_BYTES{return Err(format!("The lattice of this request has {} modes and would need about {:.1} GB, above the {:.0} GB memory budget: not solved",lattice.modes.len(),planned/1e9,MEMORY_BYTES/1e9));}
-    // A static fold whose expansion parameter p = nu_max / (|nu_far| - ||L0||)
-    // exceeds EXPANSION_LIMIT keeps its K^(1) term and is charged its
-    // remainder (`ledger::nu_freeze`, a generator bound delta): delta min(t, tau)
-    // on every output, tau the slowest relaxation time; at p >= 1 the
-    // expansion diverges and the request is not solved.
-    if ledger.expansion_parameter>=1.{return Err(format!("Static fold expansion parameter {:e}: the fold's frequency expansion diverges on this lattice, not solved",ledger.expansion_parameter));}
-    let freeze=(ledger.expansion_parameter>EXPANSION_LIMIT).then_some(ledger.nu_freeze);
+    // The static fold's frequency expansion (K^(0) + i nu K^(1)) holds while
+    // its parameter p = nu_max / (|nu_far| - ||L0||) is small: a lattice with
+    // p above EXPANSION_LIMIT is not solved, the limit a completion keeps to
+    // as well. Measured: p at most 9.2e-4 on the research requests (21 runs);
+    // its remainder charged as delta min(t, tau) instead (`ledger::nu_freeze`,
+    // tau the slowest relaxation) was 1.3e-2 to 0.45 and made 3 of 6 runs
+    // partial, whatever tau.
+    if ledger.expansion_parameter>EXPANSION_LIMIT{return Err(format!("Static fold expansion parameter {:e} is above {EXPANSION_LIMIT:e}: the fold's frequency expansion is not small on this lattice, not solved",ledger.expansion_parameter));}
     // 2. The space: translations, the steady column.
     let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*op.modes.len())};
     let mut space=Space::new(&mut lattice,initial,capacity)?;
@@ -391,10 +392,6 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
             // The slowest relaxation.
             let pairs=slow_pairs(&model,&space,&ops,&classes,tolerance)?;
-            if let Some(delta)=freeze{let tau=pairs.first().map_or(f64::INFINITY,|(p,_)|1./p.rate);
-                for(v,&t)in estimate.trajectory.iter_mut().zip(times){*v+=delta*t.min(tau);}
-                for(v,&t)in estimate.horizons.iter_mut().zip(request.horizons){*v+=delta*t.min(tau);}
-                for v in estimate.steady.iter_mut(){*v+=delta*tau;}}
             // The outputs with their bounds.
             let answer={
                 let outputs_clock=Instant::now();

@@ -30,10 +30,9 @@
 //!   projection's change; an
 //!   absolute population error; the estimate's sources are the Krylov
 //!   residual, the omitted ring's feedback and the K^(1) rests the lattice
-//!   leaves out; the static fold's expansion remainder (`nu_freeze`) is
-//!   charged, delta min(t, tau), when the expansion parameter exceeds
-//!   `ledger::EXPANSION_LIMIT`, and the other fold remainders are reported
-//!   only, in `diagnostics.lattice.run.ledger`),
+//!   leaves out, and the other fold remainders are reported only, in
+//!   `diagnostics.lattice.run.ledger` (a lattice whose static expansion
+//!   parameter exceeds `ledger::EXPANSION_LIMIT` is not solved)),
 //!   `estimatedMaximumError` (their largest), `requestedTolerance`, `scope`.
 //! - `asymptoticHorizons`, the mean, whenever one was asked for (computed or
 //!   not): the three standard horizons, `[{horizonUs (1e5, 1e6, null for

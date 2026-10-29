@@ -2,10 +2,10 @@
 //! remainder the folded lattice leaves out as a generator-norm bound (closed
 //! form, prepared from the classification). The error estimate builds one
 //! of them, the K^(1) rests the operator leaves out (`k1_rest`), into the
-//! slow modes' sources (`estimator`), and the pipeline charges `nu_freeze`,
-//! delta min(t, tau), when the expansion parameter exceeds EXPANSION_LIMIT;
-//! the others are reported only (`unbuilt`, with `nu_freeze`). Their action on the computed state, measured with the third order
-//! and the fold's memory built (two to five lasers, 20 us
+//! slow modes' sources (`estimator`); the others (`unbuilt`) are reported
+//! only, and a lattice whose expansion parameter exceeds EXPANSION_LIMIT is
+//! not solved (`pipeline`). Their action on the computed state, measured
+//! with the third order and the fold's memory built (two to five lasers, 20 us
 //! to 10 ms, the steady state and the mean over 1 s): third order and memory
 //! at most 6e-6 each, every other remainder at most 2.6e-7, against the
 //! tolerance 5e-3; their generator-norm bounds lie 6-8 orders of magnitude
@@ -35,7 +35,8 @@ use super::classification::{HarmonicPlan,Treatment};
 /// The population tolerance: absolute, on the probability scale, over every
 /// state and requested group. It is fixed; no other accuracy is served.
 pub const POPULATION_TOLERANCE:f64=5e-3;
-/// Largest accepted static-expansion parameter max |nu_q| ||D_s^-1||.
+/// Largest accepted static-expansion parameter max |nu_q| ||D_s^-1||, of a
+/// request's lattice and of its completion alike (`pipeline`).
 pub const EXPANSION_LIMIT:f64=1e-2;
 /// Far-shell paths enumerated exactly up to this many steps.
 const ENUMERATED_STEPS:usize=6;
