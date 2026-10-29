@@ -198,7 +198,7 @@ impl SlowModes{
         taken.sort_by(|&p,&q|{let(a,b)=(key(p),key(q));a.0.cmp(&b.0).then(a.1.total_cmp(&b.1))});
         let kernel=&modes.kernel;
         let needed:Vec<usize>=if !taken.is_empty(){kernel.iter().chain(taken.iter().filter(|m|!kernel.contains(m))).copied().collect()}
-            else if outputs.steady||!outputs.times.is_empty(){kernel.clone()}else{Vec::new()};
+            else if !outputs.times.is_empty(){kernel.clone()}else{Vec::new()};
         // Every slow mode (the kernel's first) deflates the pool once an
         // output takes one.
         let deflated:Vec<usize>=if !taken.is_empty(){kernel.iter().chain(modes.slow.iter().filter(|m|!kernel.contains(m))).copied().collect()}else{needed.clone()};
@@ -217,7 +217,7 @@ impl SlowModes{
 /// what ran (the slow modes' part of the work).
 #[derive(Clone,Debug,Default)]
 struct Errors{
-    trajectory:Vec<Vec<f64>>,horizons:Vec<Vec<f64>>,steady:Option<Vec<f64>>,
+    trajectory:Vec<Vec<f64>>,horizons:Vec<Vec<f64>>,
     /// The SW part of the non-kernel slow modes the slow part takes (their
     /// own residuals), per trajectory row and horizon: charged apart; and the
     /// slow part alone (rows per grid time and per horizon; empty when it did
@@ -335,11 +335,7 @@ impl<'a> UnifiedEstimate<'a>{
                 let slow=self.pool.as_mut().unwrap().populations(&self.lattice,cp.basis,cp.s,cp.theta,&solutions[..count],&[t],Readout::Centre)?.remove(0);
                 let total=fast.iter().zip(&slow).map(|(a,b)|a+b).collect();slow_horizons.push(slow);total});
         }
-        let steady=outputs.steady.then(||{
-            let mut e=vec![0.;n];
-            if let Some(pool)=self.pool.as_ref(){for sol in solutions.iter().filter(|s|s.kernel){for(a,v)in e.iter_mut().zip(pool.steady_populations(cp.basis,sol)){*a+=v;}}}
-            e});
-        Ok(Errors{trajectory,horizons,steady,own_trajectory,own_horizons,slow_trajectory,slow_horizons,work:EstimateWork{slow_modes:solutions.len(),..Default::default()}})
+        Ok(Errors{trajectory,horizons,own_trajectory,own_horizons,slow_trajectory,slow_horizons,work:EstimateWork{slow_modes:solutions.len(),..Default::default()}})
     }
     /// The work counters so far: the fast part's and the pool's.
     fn counters(&self)->(lattice::ErrorWork,slow::PoolWork){
@@ -382,7 +378,6 @@ impl<'a> UnifiedEstimate<'a>{
         let own=|rows:&[Vec<f64>],i:usize|rows.get(i).map_or(0.,|p|size(p));
         Ok(ErrorEstimate{trajectory:errors.trajectory.iter().enumerate().map(|(i,p)|size(p)+own(&errors.own_trajectory,i)).collect(),
             horizons:errors.horizons.iter().enumerate().map(|(i,p)|size(p)+own(&errors.own_horizons,i)).collect(),
-            steady:errors.steady.as_ref().map(size),
             slow_trajectory:if errors.slow_trajectory.is_empty(){vec![0.;errors.trajectory.len()]}else{errors.slow_trajectory.iter().map(size).collect()},
             slow_horizons:errors.slow_horizons.iter().map(size).collect(),work:errors.work})
     }
@@ -435,7 +430,7 @@ mod tests{
         let ledger=op.ledger().unwrap();
         let times=[0.,0.5,1.];let horizons=[10.];let groups=vec![vec![0,1]];
         let frame=SwFrame::new(&p,10.);
-        let setup=EstimateSetup{prepared:&p,lattice:&lattice,outputs:Outputs{times:&times,horizons:&horizons,steady:false,groups:&groups},frame:&frame,ledger:&ledger,keep_k1:false};
+        let setup=EstimateSetup{prepared:&p,lattice:&lattice,outputs:Outputs{times:&times,horizons:&horizons,groups:&groups},frame:&frame,ledger:&ledger,keep_k1:false};
         let mut estimator=UnifiedEstimate::new(setup).unwrap();
         let flags=[false,false];
         let reduced=ReducedView{basis:&basis,images:&images,r:2,vectors:&sr,used_theta:&theta,used_coefficients:&a,kernel:&flags,projected:&flags};

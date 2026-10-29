@@ -147,16 +147,19 @@ const COMPLETION_SHARE:f64=0.5;
 const COMPLETION_FLOOR:f64=0.25;
 /// Stack of the frame's thread (LAPACK on it).
 const FRAME_STACK:usize=1<<26;
+/// The longest output time a request may ask for (us, 10 s) and the most
+/// samples of its grid: the product's request range.
+pub const LONGEST_TIME_US:f64=1e7;
+pub const MOST_SAMPLES:usize=2000;
 
-/// What a request asks for: a trajectory or horizons (or both), and with
-/// them the steady state.
+/// What a request asks for: a trajectory or horizons (or both).
 pub struct Request<'a>{
-    /// The uniform grid from 0 (empty: no trajectory).
+    /// The uniform grid from 0 (empty: no trajectory), at most MOST_SAMPLES
+    /// times up to LONGEST_TIME_US.
     pub times:&'a[f64],
-    /// Horizons T (us) of the laboratory time average.
+    /// Horizons T (us) of the laboratory time average, each at most
+    /// LONGEST_TIME_US.
     pub horizons:&'a[f64],
-    /// Whether the steady state (the t -> infinity mean) is reported.
-    pub steady:bool,
     pub groups:&'a[Vec<usize>],
     /// The explicit set shared by the runs of one request from the same rho0
     /// (the first run to need it builds it).
@@ -172,9 +175,9 @@ pub struct Checkpoint{
     pub solves:usize,pub columns:usize,pub dimension:usize,
     /// The estimate and the largest bound over every output.
     pub estimate:ErrorEstimate,pub largest:f64,pub accepted:bool,
-    pub growing:usize,pub clipped:usize,pub projected:usize,pub conserved:usize,pub slowest:Option<SlowRate>,
-    /// Raw outputs: trajectory rows (row 0 rho0's), horizon rows, steady row.
-    pub trajectory:Vec<Vec<f64>>,pub horizons:Vec<Vec<f64>>,pub steady:Vec<f64>,
+    pub growing:usize,pub clipped:usize,pub projected:usize,pub slowest:Option<SlowRate>,
+    /// Raw outputs: trajectory rows (row 0 rho0's), horizon rows.
+    pub trajectory:Vec<Vec<f64>>,pub horizons:Vec<Vec<f64>>,
     /// The solves so far (inner steps, block operations, ms) and the run's
     /// timing so far.
     pub inner:InnerWork,pub timing:Timing,
@@ -192,26 +195,16 @@ pub struct Answer{
     /// rho0's) and the bound of each (ACCEPTANCE_FACTOR x the estimate plus
     /// the projection's change).
     pub trajectory:Vec<Vec<f64>>,pub sample_errors:Vec<f64>,
-    /// Horizon and steady populations (laboratory time averages, raw), their
-    /// fields on `modes` (Hermitian-symmetric) and bounds.
-    pub horizons:Vec<Vec<f64>>,pub steady:Vec<f64>,
-    pub horizon_fields:Vec<Vec<C>>,pub steady_field:Vec<C>,
-    pub horizon_errors:Vec<f64>,pub steady_error:Option<f64>,
-    /// Per horizon T, the population the reduced model still relaxes at T:
-    /// sum over its decaying modes (neither kernel nor projected) of their
-    /// largest centre population contribution at T (p(T) reads the centre
-    /// block alone), amplitude x e^{Re theta T}: an upper bound on
-    /// |p(T) - p(inf)| as the model holds it.
-    pub horizon_relaxing:Vec<f64>,
-    /// |A x| / |x| of the steady field (rad/us).
-    pub steady_residual:f64,
-    pub estimate:ErrorEstimate,pub conserved:usize,pub slowest:Option<SlowRate>,
+    /// Horizon populations (laboratory time averages, raw), their fields on
+    /// `modes` (Hermitian-symmetric) and bounds.
+    pub horizons:Vec<Vec<f64>>,pub horizon_fields:Vec<Vec<C>>,pub horizon_errors:Vec<f64>,
+    pub estimate:ErrorEstimate,pub slowest:Option<SlowRate>,
     /// Every bound within the tolerance.
     pub accepted:bool,
 }
 impl Answer{
     /// The largest bound over every output.
-    pub fn largest(&self)->f64{self.sample_errors.iter().chain(&self.horizon_errors).chain(self.steady_error.iter()).fold(0_f64,|a,&b|a.max(b))}
+    pub fn largest(&self)->f64{self.sample_errors.iter().chain(&self.horizon_errors).fold(0_f64,|a,&b|a.max(b))}
 }
 
 #[derive(Clone,Debug,Default)]
@@ -325,7 +318,9 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         if !(end>0.)||times.iter().enumerate().any(|(i,&t)|(t-step*i as f64).abs()>1e-12*end.max(1.)){return Err("A trajectory grid must be uniform".into());}
     }
     if request.horizons.iter().any(|&t|!(t.is_finite()&&t>0.)){return Err("A horizon must be a finite positive time".into());}
+    if times.len()>MOST_SAMPLES{return Err(format!("A trajectory has at most {MOST_SAMPLES} samples (requested {})",times.len()));}
     let longest=times.last().copied().into_iter().chain(request.horizons.iter().copied()).fold(0_f64,f64::max);
+    if longest>LONGEST_TIME_US{return Err(format!("An output time is at most {LONGEST_TIME_US:e} us (10 s; requested {longest:e} us)"));}
     let frame=SwFrame::new(prepared,longest);
     std::thread::scope(|scope|->Result<Solution,String>{
         std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||{let _=frame.class();}).map_err(|e|e.to_string())?;
@@ -377,7 +372,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     space.solve(&mut lattice,Pole::Zero)?;
     let modes=lattice.modes.clone();
     let clock=Instant::now();
-    let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups},frame,ledger:&ledger,keep_k1})?;
+    let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,groups:request.groups},frame,ledger:&ledger,keep_k1})?;
     timing.estimator_build_ms=clock.elapsed().as_secs_f64()*1e3;
     // The ladder spans the grid's times when there is one (a horizon is
     // served by the steady column): its poles near 1 / T of a 1 s horizon grew
@@ -420,14 +415,13 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             let mut trajectory=model.trajectory(&galerkin,times);
             if let Some(first)=trajectory.first_mut(){*first=(0..n).map(|i|initial[i*n+i].re).collect();}
             let horizons:Vec<Vec<f64>>=request.horizons.iter().map(|&t|model.horizon(&galerkin,t)).collect();
-            let steady=model.steady_populations(&galerkin);
             timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
             let estimate_clock=Instant::now();
             let mut estimate=estimator.estimate(&ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
                 used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out},&mut lattice)?;
             timing.estimate_ms+=estimate_clock.elapsed().as_secs_f64()*1e3;
             // The growth charge on every output.
-            for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
+            for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()){*v+=model.growth_charge;}
             // The slowest relaxation.
             let pairs=slow_pairs(&model,&space,&ops,&classes,tolerance)?;
             // The outputs with their bounds.
@@ -436,26 +430,17 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                 let projected:Vec<Vec<f64>>=trajectory.iter().map(|p|simplex(p)).collect();
                 let changes:Vec<f64>=trajectory.iter().zip(&projected).map(|(a,b)|ledger::metric(a,b,request.groups)).collect();
                 let sample_errors:Vec<f64>=estimate.trajectory.iter().zip(&changes).map(|(e,p)|ACCEPTANCE_FACTOR*e+p).collect();
-                let field=|u:&[f64],images:bool|->Result<Vec<C>,String>{
-                    let source:Vec<&[C]>=if images{space.images.iter().map(|v|v.as_slice()).collect()}else{space.basis.iter().map(|v|v.as_slice()).collect()};
-                    Ok(ops.combinations(&source,&[u.to_vec()])?.remove(0))};
-                let steady_field=field(&model.steady,false)?;let steady_image=field(&model.steady,true)?;
-                let steady_residual=ops.norm(&steady_image)/ops.norm(&steady_field).max(f64::MIN_POSITIVE);
-                let horizon_fields=request.horizons.iter().map(|&t|field(&model.state(t),false)).collect::<Result<Vec<_>,_>>()?;
+                let basis:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();
+                let horizon_fields=request.horizons.iter().map(|&t|Ok(ops.combinations(&basis,&[model.state(t)])?.remove(0))).collect::<Result<Vec<_>,String>>()?;
                 timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
                 let mut answer=Answer{solves:space.solves(),modes:modes.clone(),trajectory:projected,sample_errors,
-                    horizons:horizons.clone(),steady:steady.clone(),horizon_fields,steady_field,
-                    horizon_errors:estimate.horizons.iter().map(|e|ACCEPTANCE_FACTOR*e).collect(),
-                    horizon_relaxing:request.horizons.iter().map(|&t|(0..model.r).filter(|&j|!model.kernel[j]&&!model.projected_out[j])
-                        .map(|j|model.centre_amplitudes[j]*(model.used_theta[j].re*t).exp()).sum()).collect(),steady_error:estimate.steady.map(|e|ACCEPTANCE_FACTOR*e),
-                    steady_residual,estimate:estimate.clone(),
-                    conserved:if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{model.conserved()},
-                    slowest:pairs.first().map(|p|p.0),accepted:false};
+                    horizons:horizons.clone(),horizon_fields,horizon_errors:estimate.horizons.iter().map(|e|ACCEPTANCE_FACTOR*e).collect(),
+                    estimate:estimate.clone(),slowest:pairs.first().map(|p|p.0),accepted:false};
                 answer.accepted=answer.largest()<=tolerance;
                 answer};
             let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,largest:answer.largest(),accepted:answer.accepted,
-                growing:model.growing,clipped:model.clipped,projected:model.projected,conserved:answer.conserved,slowest:answer.slowest,
-                trajectory,horizons,steady,inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
+                growing:model.growing,clipped:model.clipped,projected:model.projected,slowest:answer.slowest,
+                trajectory,horizons,inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
             if let Some(o)=observer.as_mut(){o(&point,&answer);}
             checkpoints.push(point);
             // The best checkpoint: one within the tolerance over any other,
@@ -465,18 +450,17 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             if answer.accepted{break;}
             // 5. Completion, decided at the first checkpoint (see `solve`).
             if completion.is_none()&&checkpoints.len()==1{
-                let e=&answer.estimate;let off=answer.sample_errors.len();let horizons_count=answer.horizon_errors.len();
+                let e=&answer.estimate;let off=answer.sample_errors.len();
                 // Per output: its bound and its slow part (bound units); the steady
                 // state's estimate is its slow part.
                 let mut outputs:Vec<(f64,f64,usize)>=answer.sample_errors.iter().enumerate()
                     .map(|(i,&b)|(b,ACCEPTANCE_FACTOR*e.slow_trajectory.get(i).copied().unwrap_or(0.),i)).collect();
                 outputs.extend(answer.horizon_errors.iter().enumerate().map(|(h,&b)|(b,ACCEPTANCE_FACTOR*e.slow_horizons.get(h).copied().unwrap_or(0.),off+h)));
-                if let Some(b)=answer.steady_error{outputs.push((b,b,off+horizons_count));}
                 let(bound,part,at)=outputs.iter().copied().max_by(|a,b|a.0.total_cmp(&b.0)).unwrap_or((0.,0.,0));
                 if bound>tolerance&&part>=COMPLETION_SHARE*bound{
                     let view=ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
                         used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out};
-                    let pick=|x:&ErrorEstimate|ACCEPTANCE_FACTOR*if at<off{x.trajectory[at]}else if at<off+horizons_count{x.horizons[at-off]}else{x.steady.unwrap_or(0.)};
+                    let pick=|x:&ErrorEstimate|ACCEPTANCE_FACTOR*if at<off{x.trajectory[at]}else{x.horizons[at-off]};
                     let floor=COMPLETION_FLOOR*tolerance;
                     // The part of what the operator leaves out, when it drops K^(1)
                     // rests (keeping them is what completes that source).
@@ -527,7 +511,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                 reason=Some({
                         let over:Vec<usize>=(0..b.sample_errors.len()).filter(|&i|b.sample_errors[i]>tolerance).collect();
                         let samples=match(over.first(),over.last()){(Some(&a),Some(&z))=>format!("; {} of {} samples above it, t = {:.4} to {:.4} us",over.len(),b.sample_errors.len(),times[a],times[z]),_=>String::new()};
-                        let means=b.horizon_errors.iter().chain(b.steady_error.iter()).filter(|&&e|e>tolerance).count();
+                        let means=b.horizon_errors.iter().filter(|&&e|e>tolerance).count();
                         let means=if means>0{format!("; {means} mean output(s) above it")}else{String::new()};
                         format!("Stopped because {why}: the best checkpoint ({} solves) has an error bound of {:.2e} against the tolerance {tolerance:e}{samples}{means}",b.solves,b.largest())});
                 break;
@@ -580,7 +564,7 @@ mod tests{
         let mut initial=vec![ZERO;d];initial[0]=ONE;
         let times:Vec<f64>=(0..21).map(|i|0.1*i as f64).collect();let horizons=[3.];
         let mut seen=0;let mut observe=|_:&Checkpoint,_:&Answer|{seen+=1;};
-        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,steady:true,groups:&groups,explicit:&std::sync::OnceLock::new(),runs:1},Some(&mut observe)).unwrap();
+        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,groups:&groups,explicit:&std::sync::OnceLock::new(),runs:1},Some(&mut observe)).unwrap();
         assert!(s.converged&&s.reason.is_none()&&seen==s.checkpoints.len(),"{:?}",s.reason);
         let a=&s.answer;
         let op=LatticeOperator::new(&p,&a.modes).unwrap();let dense=op.dense();let size=op.dimension();
@@ -613,8 +597,7 @@ mod tests{
         let(w,_,_)=lattice.solve(Pole::Zero,&[u],1e-13).unwrap();let trace:f64=(0..n).map(|i|w[0][op.centre*d+i*n+i].re).sum();
         let column:Vec<f64>=(0..n).map(|i|w[0][op.centre*d+i*n+i].re/trace).collect();
         let tight=ledger::metric(&exact,&column,&groups);assert!(tight<1e-10,"bordered column {tight:e}");
-        let steady=ledger::metric(&exact,&a.steady,&groups);assert!(steady<1e-4,"steady {steady:e}");
-        assert!(a.conserved==1&&a.slowest.is_some());
+        assert!(a.slowest.is_some());
         // Projected rows: probabilities, the first one rho0's.
         assert!(a.trajectory.iter().all(|r|r.iter().all(|&v|v>=0.)&&(r.iter().sum::<f64>()-1.).abs()<1e-12)&&a.trajectory[0][0]==1.);
     }

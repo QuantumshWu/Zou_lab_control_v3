@@ -167,8 +167,6 @@ pub struct Model{
     /// and on the centre alone (the laboratory time average's).
     pub amplitudes:Vec<f64>,pub centre_amplitudes:Vec<f64>,
     pub growing:usize,pub projected:usize,pub clipped:usize,pub growth_charge:f64,
-    /// The reduced steady state (kernel part of c0).
-    pub steady:Vec<f64>,
     /// Per canonical mode: populations of W (n x r, row-major complex).
     readout:Vec<Vec<C>>,
 }
@@ -226,20 +224,9 @@ impl<'m> Projection<'m>{
             if amplitudes[jj]<=GROWTH_BUDGET*tolerance{used_theta[jj]=ZERO;used_coefficients[jj]=ZERO;projected_out[jj]=true;projected+=1;growth_charge+=amplitudes[jj];}
             else{used_theta[jj].re=0.;clipped+=1;}
         }
-        // The steady state: (|u|, y), G[1..,1..] y = -|u| G[1..,0] (a simple
-        // kernel), else the kernel's spectral projection.
-        let simple_kernel=kernel.iter().filter(|&&b|b).count()==1;
-        let steady:Vec<f64>=if simple_kernel&&r>1{
-            let m=r-1;let block:Vec<f64>=(1..r).flat_map(|i|(1..r).map(move|j|(i,j))).map(|(i,j)|g[i*r+j]).collect();
-            let rhs:Vec<f64>=(1..r).map(|i|-c0[0]*g[i*r]).collect();
-            let y=lapack.solve(&transpose_rows(&block,m,m),&rhs,m)?;
-            std::iter::once(c0[0]).chain(y).collect()
-        }else if r==1{c0.clone()}else{
-            (0..r).map(|i|(0..r).filter(|&jj|kernel[jj]).fold(0.,|acc,jj|acc+mul(s[i*r+jj],a[jj]).re)).collect()
-        };
-        if steady.iter().chain(&g).any(|v|!v.is_finite()){return Err("Nonfinite reduced model".into());}
+        if g.iter().any(|v|!v.is_finite()){return Err("Nonfinite reduced model".into());}
         Ok(Model{r,g,theta,vectors:s,used_theta,used_coefficients,kernel,projected_out,amplitudes,centre_amplitudes,
-            growing,projected,clipped,growth_charge,steady,readout})
+            growing,projected,clipped,growth_charge,readout})
     }
 }
 
@@ -267,8 +254,6 @@ impl Model{
     }
     /// The laboratory time average at the horizon T (the centre block).
     pub fn horizon(&self,projection:&Projection,t:f64)->Vec<f64>{self.populations(projection,&self.state(t),t,true)}
-    pub fn steady_populations(&self,projection:&Projection)->Vec<f64>{self.populations(projection,&self.steady,0.,true)}
-    pub fn conserved(&self)->usize{self.kernel.iter().filter(|&&b|b).count().max(1)}
     /// The slowest relaxation's candidates: the decaying
     /// Ritz values outside the kernel (rate at least KERNEL: slower ones are
     /// undamped precession; growing ones are projected out or clipped) of

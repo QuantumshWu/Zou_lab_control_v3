@@ -69,8 +69,6 @@ pub struct Outputs<'a>{
     pub times:&'a[f64],
     /// The horizons T (us) whose time-averaged state is reported.
     pub horizons:&'a[f64],
-    /// Whether the steady state (t -> infinity mean) is reported.
-    pub steady:bool,
     /// Requested population groups (state indices), for `ledger::metric`.
     pub groups:&'a[Vec<usize>],
 }
@@ -159,19 +157,16 @@ pub struct ErrorEstimate{
     pub trajectory:Vec<f64>,
     /// One per horizon.
     pub horizons:Vec<f64>,
-    /// The steady state (None when not requested).
-    pub steady:Option<f64>,
     /// The slow part alone (the ring's feedback and the K^(1) rests the
     /// lattice leaves out, through the slow modes; the kernel's own residual
     /// with them), per grid time and per horizon: what a completed lattice
-    /// could remove (`pipeline`'s completion). The steady state's estimate is
-    /// its slow part.
+    /// could remove (`pipeline`'s completion).
     pub slow_trajectory:Vec<f64>,pub slow_horizons:Vec<f64>,
     pub work:EstimateWork,
 }
 impl ErrorEstimate{
     /// The largest estimate over every output.
     pub fn largest(&self)->f64{
-        self.trajectory.iter().chain(&self.horizons).chain(self.steady.iter()).fold(0_f64,|a,&b|a.max(b))
+        self.trajectory.iter().chain(&self.horizons).fold(0_f64,|a,&b|a.max(b))
     }
 }
