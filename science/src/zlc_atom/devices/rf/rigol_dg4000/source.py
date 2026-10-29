@@ -25,7 +25,7 @@ amplitude limiting.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from zlc_atom.devices.rf.contract import (
     FREQUENCY_FIELD,
@@ -45,6 +45,7 @@ from zlc_atom.devices.visa import (
 )
 from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_data.units import DEFAULT_UNITS
+from zlc_plugin.tunable import convert_tunable_field
 
 
 @dataclass(frozen=True)
@@ -475,19 +476,22 @@ class RigolDg4000RfSource(RfSourceBase):
 
     def _convert_amplitude(self, channel: str, value: float, source: str, target: str) -> float:
         """Convert with the channel's load/waveform; prefixes never visit dBm."""
-        source_native, source_scale = self._amplitude_unit_parts(source)
-        target_native, target_scale = self._amplitude_unit_parts(target)
+        source_native, _ = self._amplitude_unit_parts(source)
+        target_native, _ = self._amplitude_unit_parts(target)
         if source == target:
             return float(value)
+        source_family, _ = DEFAULT_UNITS.family_and_prefix(source)
+        target_family, _ = DEFAULT_UNITS.family_and_prefix(target)
+        if source_family == target_family:
+            return float(DEFAULT_UNITS.convert_decimal(value, source, target))
         if source_native is None:
             dbm = float(DEFAULT_UNITS.convert(value, source, "dBm"))
             return self._convert_amplitude(channel, dbm, "dBm", target)
         if target_native is None:
             dbm = self._convert_amplitude(channel, value, source, "dBm")
             return float(DEFAULT_UNITS.convert(dbm, "dBm", target))
-        raw = float(value) * source_scale
-        if source_native == target_native:
-            return raw / target_scale
+        symbols = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}
+        raw = float(DEFAULT_UNITS.convert_decimal(value, source, symbols[source_native]))
         if source_native == _DBM:
             raw = self._volts_from_dbm(channel, raw, target_native)
         elif target_native == _DBM:
@@ -496,7 +500,7 @@ class RigolDg4000RfSource(RfSourceBase):
             raw /= self._vpp_per_vrms(channel)
         else:
             raw *= self._vpp_per_vrms(channel)
-        return raw / target_scale
+        return float(DEFAULT_UNITS.convert_decimal(raw, symbols[target_native], target))
 
     def convert_tunable_value(
         self, name: str, value: float | tuple | list, source_unit: str, target_unit: str
@@ -510,7 +514,7 @@ class RigolDg4000RfSource(RfSourceBase):
             def converted(item):
                 if routed is not None and routed[1] == POWER_FIELD:
                     return self._convert_amplitude(routed[0], float(item), source_unit, target_unit)
-                return float(DEFAULT_UNITS.convert(item, source_unit, target_unit))
+                return float(DEFAULT_UNITS.convert_decimal(item, source_unit, target_unit))
             return tuple(converted(item) for item in value) if isinstance(value, (tuple, list)) else converted(value)
 
     def read_tunable_in_unit(self, name: str, unit: str = "") -> TunableField:
@@ -522,16 +526,7 @@ class RigolDg4000RfSource(RfSourceBase):
                 field = next((item for item in self.tunable_fields() if item.metadata.name == name), None)
                 if field is None:
                     raise ValueError(f"device has no tunable field {name!r}")
-                source = field.metadata.unit or "1"
-                target = unit or source
-                if source == target:
-                    return field
-                def converted(value):
-                    return None if value is None else float(DEFAULT_UNITS.convert(value, source, target))
-                return replace(field, metadata=replace(field.metadata, unit=target,
-                    default=converted(field.metadata.default), minimum=converted(field.metadata.minimum),
-                    maximum=converted(field.metadata.maximum)), current=converted(field.current),
-                    device_limits=None if field.device_limits is None else tuple(converted(v) for v in field.device_limits))
+                return convert_tunable_field(field, unit)
             channel = routed[0]
             held = self._amplitude_state(channel)
             native = held["unit"]
@@ -567,12 +562,12 @@ class RigolDg4000RfSource(RfSourceBase):
         native = field.metadata.unit or "1"
         if unit == native:
             return self.tune(name, value)
-        requested = float(DEFAULT_UNITS.convert(value, unit, native))
+        requested = float(DEFAULT_UNITS.convert_decimal(value, unit, native))
         actual = self.tune(name, requested)
-        return float(DEFAULT_UNITS.convert(actual, native, unit))
+        return float(DEFAULT_UNITS.convert_decimal(actual, native, unit))
 
     def _write_power_in_unit(self, channel: str, value: float, unit: str) -> float:
-        native, scale = self._amplitude_unit_parts(unit)
+        native, _ = self._amplitude_unit_parts(unit)
         if native is None:
             # W/mW have no DG4000 display mode. Keep its mode and use the
             # existing canonical boundary, with this driver's load conversion.
@@ -585,15 +580,16 @@ class RigolDg4000RfSource(RfSourceBase):
         try:
             if native != old_unit:
                 self._link.write(f"{source}:VOLTage:UNIT {native}")
-            self._link.write(f"{source}:VOLTage {float(value) * scale:.17g}{native}")
+            new_symbol = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}[native]
+            requested = float(DEFAULT_UNITS.convert_decimal(value, unit, new_symbol))
+            self._link.write(f"{source}:VOLTage {requested:.17g}{native}")
             actual = float(self._link.query(f"{source}:VOLTage?"))
             old_symbol = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}.get(old_unit, "dBm")
-            new_symbol = {_DBM: "dBm", _VPP: "Vpp", _VRMS: "Vrms"}[native]
             for edge in ("minimum", "maximum"):
                 if held[edge] is not None:
                     held[edge] = self._convert_amplitude(channel, float(held[edge]), old_symbol, new_symbol)
             held.update(unit=native, current=actual)
-            return actual / scale
+            return float(DEFAULT_UNITS.convert_decimal(actual, new_symbol, unit))
         except BaseException as error:
             # Control Apply also owns a complete command: a failed write
             # must not leave its temporary unit behind. Restore raw numbers,

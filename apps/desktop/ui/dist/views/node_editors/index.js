@@ -33,6 +33,10 @@ export class NodeEditors {
     get length() { return this.drawn.length; }
     /** The models an editor draws (a kind this UI does not draw is left to plain rows). */
     get models() { return this.drawn.map(editor => editor.facts); }
+    reset() { for (const editor of this.drawn) {
+        editor.view.reset?.();
+        editor.key = "";
+    } }
     /** Brought to `models`; an editor no model wants leaves the page.  Answers the
      * editors' roots in their models' order, for the page to place. */
     reconcile(models) {
@@ -61,7 +65,7 @@ export class NodeEditors {
         let drew = false;
         for (const editor of this.drawn) {
             const fields = editor.facts.manages.map(name => [row.values[name], row.controls.find(control => control.name === name)]);
-            const key = JSON.stringify([editor.facts, locked, row.name, fields]);
+            const key = JSON.stringify([editor.facts, locked, row.node_id, row.type_id, row.name, fields, editor.view.contextKey?.(row)]);
             if (key === editor.key)
                 continue;
             editor.key = key;

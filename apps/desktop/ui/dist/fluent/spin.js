@@ -11,18 +11,38 @@ export function decimals(value) {
  * of `step` inside [low, high]; off the grid the first notch goes to the
  * nearest grid point in its direction.  null when no grid point lies that way. */
 export function gridStep(value, step, steps, low, high) {
-    if (!(step > 0) || !Number.isFinite(value) || !steps)
+    if (!(step > 0) || !Number.isFinite(step) || !Number.isFinite(value) || !Number.isSafeInteger(steps) || !steps
+        || (low !== null && !Number.isFinite(low)) || (high !== null && !Number.isFinite(high)))
         return null;
-    const places = Math.min(100, decimals(step));
-    const ratio = value / step, nearest = Math.round(ratio);
-    const onGrid = Math.abs(ratio - nearest) <= 1e-9 * Math.max(1, Math.abs(ratio));
-    const index = onGrid ? nearest + steps : steps > 0 ? Math.floor(ratio) + steps : Math.ceil(ratio) + steps;
-    let moved = index * step;
-    if (low !== null && moved < low)
-        moved = Math.ceil(low / step - 1e-9) * step;
-    if (high !== null && moved > high)
-        moved = Math.floor(high / step + 1e-9) * step;
-    moved = Number(moved.toFixed(places));
+    // The step's decimal spelling defines the grid. Compute its integer index
+    // and product exactly, then round once to the wire's Number. Binary division
+    // and multiplication followed by toFixed both lose tiny decimal steps and
+    // can create long tails, especially after an SI unit change.
+    const decimal = (number) => {
+        const [mantissa = "0", exponent = "0"] = String(number).split("e");
+        return [BigInt(mantissa.replace(".", "")), Number(exponent) - (mantissa.split(".")[1]?.length ?? 0)];
+    };
+    const parts = [value, step, ...(low === null ? [] : [low]), ...(high === null ? [] : [high])].map(decimal);
+    const exponent = Math.min(...parts.map(([, exponent]) => exponent));
+    const integer = (number) => { const [digits, power] = decimal(number); return digits * 10n ** BigInt(power - exponent); };
+    const [at, grain] = [integer(value), integer(step)];
+    const floor = (number) => number / grain - (number % grain < 0n ? 1n : 0n);
+    const ceil = (number) => -floor(-number);
+    const asNumber = (number) => Number(`${number}e${exponent}`);
+    const below = floor(at), remainder = at - below * grain;
+    const nearest = below + (remainder * 2n >= grain ? 1n : 0n);
+    // Only representation-sized dust is on-grid. The former 1e-9 * index
+    // tolerance classified genuine hardware offsets as whole grid positions.
+    const distance = asNumber(at - nearest * grain);
+    const onGrid = remainder === 0n || Math.abs(distance) <= Number.EPSILON * Math.abs(value);
+    let index = (onGrid ? nearest : steps > 0 ? below : ceil(at)) + BigInt(steps);
+    if (low !== null && index * grain < integer(low))
+        index = ceil(integer(low));
+    if (high !== null && index * grain > integer(high))
+        index = floor(integer(high));
+    const moved = asNumber(index * grain);
+    if (!Number.isFinite(moved))
+        return null;
     if ((low !== null && moved < low) || (high !== null && moved > high))
         return null;
     if ((steps < 0 && moved >= value) || (steps > 0 && moved <= value))
@@ -183,6 +203,14 @@ export class SpinBox {
     /** What the box holds: the owner's text, whatever rounding it is shown with. */
     get text() { return this.full !== null && this.input.value === this.shown ? this.full : this.input.value; }
     step() { return this.chosen ?? this.options.step(); }
+    /** The operator's explicit step, for an editor that restores each axis' draft. */
+    get chosenStep() { return this.chosen; }
+    set chosenStep(value) {
+        if (value !== null && (!(value > 0) || !Number.isFinite(value)))
+            throw new RangeError("Step must be positive and finite");
+        this.chosen = value;
+        this.refresh();
+    }
     current() {
         const raw = this.text.trim();
         if (this.options.special && raw === this.options.special.text)
@@ -229,7 +257,7 @@ export class SpinBox {
             SpinBox.queue(this);
     }
     /** The owner's step again (its number is read in another unit, where the chosen one means something else). */
-    resetStep() { this.chosen = null; this.refresh(); }
+    resetStep() { this.chosenStep = null; }
     async editStep() {
         if (this.input.readOnly)
             return;

@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Info action button parity</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+import { InfoTree } from '../dist/fluent/info_pane.js';
+import { command } from '../dist/fluent/button.js';
+const assert=(value,message)=>{if(!value)throw Error(message)};
+const near=(a,b,message)=>assert(Math.abs(a-b)<1,`${message}: ${a} != ${b}`);
+const settle=()=>new Promise(resolve=>setTimeout(resolve,75));
+const checks=[];
+const check=async(name,test)=>{await test();checks.push(name)};
+const tree=new InfoTree();tree.root.style.cssText='width:360px;height:280px';
+document.body.append(tree.root);
+const name='blow_away_rabi_copy_from_blow_away';
+const reference=command(name,()=>{});reference.root.style.alignSelf='flex-start';document.body.append(reference.root);
+const sent=[];tree.actionRequested=action=>sent.push(action);
+try {
+ tree.setRows([
+  ['remote_sequencer pulse at Start 403',{text:name,action:'pulse:camera:403:bench:sequencer'}],
+  ['remote_sequencer pulse 403',{text:name,action:'pulse:scan:403:sequencer'}],
+  ['Other action',{text:'Open details',action:'details:record'}],
+  ['Ordinary value','not a button'],
+ ]);
+ await settle();
+ await check('both recorded-pulse entries remain distinct and dispatch their own key',()=>{
+  const buttons=[...tree.root.querySelectorAll('.info-action button')];
+  assert(buttons.length===3,'action rows missing');buttons[0].click();buttons[1].click();
+  assert(JSON.stringify(sent)===JSON.stringify(['pulse:camera:403:bench:sequencer','pulse:scan:403:sequencer']),'wrong pulse dispatch');
+ });
+ for(const scale of [1,1.25,1.5]) await check(`v2 button and action-row geometry at scale ${scale}`,async()=>{
+  document.documentElement.style.setProperty('--fluent',String(scale));await settle();
+  const holder=tree.root.querySelector('.info-action'),button=holder.querySelector('button'),row=holder.parentElement;
+  const h=holder.getBoundingClientRect(),b=button.getBoundingClientRect(),r=row.getBoundingClientRect();
+  const padding=parseFloat(getComputedStyle(holder).paddingTop);
+  near(b.height,reference.root.getBoundingClientRect().height,'normal FluentButton height');
+  near(b.width,reference.root.getBoundingClientRect().width,'normal FluentButton width');
+  near(b.left,h.left,'zero horizontal holder margin');
+  near(b.top-r.top,padding,'top row padding');
+  near(r.bottom-b.bottom,padding,'bottom row padding');
+  assert(getComputedStyle(button).whiteSpace==='nowrap','pulse label wraps');
+ });
+ await check('long pulse names remain accessible through horizontal scrolling',()=>{
+  assert(tree.root.scrollWidth>tree.root.clientWidth,'long action was cut instead of scrollable');
+  const button=tree.root.querySelector('.info-action button');
+  assert(button.textContent===name&&button.scrollWidth<=button.clientWidth+1,'pulse name was truncated');
+ });
+ await check('ordinary values remain text and every info action uses the same presentation',()=>{
+  const rows=[...tree.root.querySelectorAll('.info-row')];
+  assert(!rows[3].querySelector('button'),'ordinary value became an action');
+  const detail=rows[2].querySelector('button');detail.click();assert(sent.at(-1)==='details:record','generic action broke');
+ });
+ await check('the filter searches the visible pulse name, not an opaque action identifier',()=>{
+  tree.applyFilter('blow_away_rabi');
+  const rows=[...tree.root.querySelectorAll('.info-row')];
+  assert(!rows[0].hidden&&!rows[1].hidden&&rows[2].hidden&&rows[3].hidden,'pulse name did not match both entries');
+  assert(rows[0].querySelector('.info-value').classList.contains('match'),'matching button value was not highlighted');
+  tree.applyFilter('');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
+}catch(error){document.getElementById('result').textContent=JSON.stringify({passed:false,error:error.stack})}
+</script>

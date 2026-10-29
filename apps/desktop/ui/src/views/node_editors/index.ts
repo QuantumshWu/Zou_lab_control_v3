@@ -36,6 +36,10 @@ export interface NodeEditor {
   /** The row and its model; `locked` is why nothing may be edited now (a
    * running task owns the console), or empty. */
   update(row: LogicRow, facts: EditorFacts, locked: string): void;
+  /** Extra identity a model needs even when its managed values did not change. */
+  contextKey?(row: LogicRow): unknown;
+  /** Explicit accepted replacement/revert discards editor-only authoring memory. */
+  reset?(): void;
   /** The room (CSS px) the editor keeps in the label column for words that
    * come and go; the column is never narrower. */
   labelFloor?(): number;
@@ -72,6 +76,8 @@ export class NodeEditors {
   /** The models an editor draws (a kind this UI does not draw is left to plain rows). */
   get models(): EditorFacts[] { return this.drawn.map(editor => editor.facts); }
 
+  reset(): void { for (const editor of this.drawn) { editor.view.reset?.(); editor.key = ""; } }
+
   /** Brought to `models`; an editor no model wants leaves the page.  Answers the
    * editors' roots in their models' order, for the page to place. */
   reconcile(models: EditorFacts[]): HTMLElement[] {
@@ -94,7 +100,7 @@ export class NodeEditors {
     let drew = false;
     for (const editor of this.drawn) {
       const fields = editor.facts.manages.map(name => [row.values[name], row.controls.find(control => control.name === name)]);
-      const key = JSON.stringify([editor.facts, locked, row.name, fields]);
+      const key = JSON.stringify([editor.facts, locked, row.node_id, row.type_id, row.name, fields, editor.view.contextKey?.(row)]);
       if (key === editor.key) continue;
       editor.key = key;
       editor.view.update(row, editor.facts, locked);

@@ -140,6 +140,11 @@ export class TaskConsoleView implements View {
   hidden(): void { this.onScreen = false; this.board.hidden(); }
 
   update(state: State): void {
+    // Load/New/Clear and recipe replacement may reuse the same node IDs.
+    // The accepted response is the boundary; cancelled/failed dialogs are not.
+    if (!state.error && (state.result as { replaced?: boolean } | null)?.replaced === true) {
+      for (const editor of this.editors.values()) editor.resetLocalState();
+    }
     const latest = this.ctx.latest;
     const board = this.boardState();
     const rows = this.nodeRows();

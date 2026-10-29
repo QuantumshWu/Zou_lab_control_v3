@@ -21,7 +21,7 @@ const SAFE_DEADLINE: Duration = Duration::from_secs(2);
 const LONGEST_REQUEST: Duration = Duration::from_secs(600);
 /// How long a withdrawal waits for a request that reached the device before it.
 const WITHDRAW_WAIT: Duration = Duration::from_secs(150);
-const INSTANCE_OPS: [&str; 6] = ["spi", "fields", "tune", "values", "command", "make_safe"];
+const INSTANCE_OPS: [&str; 7] = ["spi", "fields", "tune", "values", "snapshot", "command", "make_safe"];
 
 struct Offer {
     role: String,
@@ -355,7 +355,8 @@ impl Shared {
         }
         self.note(instance, &format!("FABRIC ATTACH device={instance} client={client}"));
         Ok(json!({"descriptor": serde_json::to_value(&*descriptor).unwrap_or(Value::Null), "role": role,
-                  "tunable": self.host.tunable(instance), "reads": self.host.reads(instance), "publisher": self.bench.name}))
+                  "tunable": self.host.tunable(instance), "snapshot": self.host.reports_settings(instance),
+                  "reads": self.host.reads(instance), "publisher": self.bench.name}))
     }
 
     #[allow(clippy::too_many_arguments)]
