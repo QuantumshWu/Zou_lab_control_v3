@@ -33,7 +33,9 @@
 //!   D_s^-1 = sum_k (-G_s L_r)^k G_s,  rho_s = |L_r| |G_s|
 //! (largest row sums): the series is summed to the roundoff of its sum (rho_s
 //! is small: 3e-6 for the tweezer, 1e-7 for counter-rotating terms); a far
-//! block with rho_s >= SERIES_LIMIT is no far block (the step is not folded).
+//! block with rho_s >= SERIES_LIMIT, or an expansion in nu_q whose ratio
+//! nu_max gamma_s reaches it, is refused (such a step is not far from the
+//! lattice's modes).
 //! A K column c is Y_0 = D_s^-1 C_s e_c, whose first L_r acts on the
 //! coupling's few elements of e_c (scattered), Y_o = D_s^-1 Y_(o-1), and
 //! -C_s' Y_o; the further L_r act by GEMM over batches of columns (L_r's
