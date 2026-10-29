@@ -347,7 +347,26 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
 /// populations Re e^{i nu_q t} E_q[ii]. One JSON line per checkpoint.
 fn basis_cols(space:&Space)->Vec<&[C]>{space.basis.iter().map(|v|v.as_slice()).collect()}
 #[allow(clippy::too_many_arguments)]
-fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mut Lattice<'_>,ops:&super::krylov::Vectors,space:&Space,model:&Model,times:&[f64],initial:&[C],solves:usize)->Result<(),String>{
+/// (research, S2) e^A for a real column-major r x r matrix: scaling and
+/// squaring with the (13,13) Pade approximant (Higham 2005).
+fn expm_real(lapack:&Lapack,a:&[f64],r:usize)->Result<Vec<f64>,String>{
+    const B:[f64;14]=[64764752532480000.,32382376266240000.,7771770303897600.,1187353796428800.,129060195264000.,10559470521600.,670442572800.,33522128640.,1323241920.,40840800.,960960.,16380.,182.,1.];
+    let norm=(0..r).map(|j|(0..r).map(|i|a[i+r*j].abs()).sum::<f64>()).fold(0.,f64::max);
+    let s=if norm>5.371920351148152{(norm/5.371920351148152).log2().ceil()as i32}else{0};
+    let scale=0.5_f64.powi(s);let a:Vec<f64>=a.iter().map(|x|x*scale).collect();
+    let mm=|x:&[f64],y:&[f64]|->Result<Vec<f64>,String>{let mut z=vec![0.;r*r];lapack.gemm(false,false,r,r,r,1.,x,r,y,r,0.,&mut z,r)?;Ok(z)};
+    let a2=mm(&a,&a)?;let a4=mm(&a2,&a2)?;let a6=mm(&a2,&a4)?;
+    let comb=|c6:f64,c4:f64,c2:f64,c0:f64|->Vec<f64>{let mut z:Vec<f64>=(0..r*r).map(|e|c6*a6[e]+c4*a4[e]+c2*a2[e]).collect();for i in 0..r{z[i+r*i]+=c0;}z};
+    let inner_u=mm(&a6,&comb(B[13],B[11],B[9],0.))?;let mut tu=comb(B[7],B[5],B[3],B[1]);for(x,y)in tu.iter_mut().zip(&inner_u){*x+=y;}
+    let u=mm(&a,&tu)?;
+    let inner_v=mm(&a6,&comb(B[12],B[10],B[8],0.))?;let mut v=comb(B[6],B[4],B[2],B[0]);for(x,y)in v.iter_mut().zip(&inner_v){*x+=y;}
+    let p:Vec<f64>=v.iter().zip(&u).map(|(x,y)|x+y).collect();let q:Vec<f64>=v.iter().zip(&u).map(|(x,y)|x-y).collect();
+    let(lu,pivots)=lapack.factor(&q,r)?;let mut e=lapack.solve_matrix_factored(&lu,&pivots,&p,r)?;
+    for _ in 0..s{e=mm(&e,&e)?;}
+    Ok(e)
+}
+#[allow(clippy::too_many_arguments)]
+fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mut Lattice<'_>,ops:&super::krylov::Vectors,space:&Space,model:&Model,galerkin:&Projection<'_>,times:&[f64],initial:&[C],solves:usize)->Result<(),String>{
     let tmax=std::env::var("ATOM_DIAG_TMAX").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.31);
     let sub=std::env::var("ATOM_DIAG_SUB").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(50);
     let times:Vec<f64>=times.iter().copied().filter(|&t|t<=tmax).collect();
@@ -366,6 +385,15 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
     let mut exact=vec![x.clone()];
     static EXACT:std::sync::Mutex<Option<(Vec<f64>,usize,Vec<Vec<C>>)>>=std::sync::Mutex::new(None);
     let cached=EXACT.lock().ok().and_then(|g|g.as_ref().filter(|(t,s,_)|*t==times&&*s==size).map(|(_,_,e)|e.clone()));
+    // (research, S2) ATOM_DIAG_EXACT_CACHE=path: the exact fields on disk
+    // (f64: times, size, the times, then every field's re/im).
+    let cache_path=std::env::var("ATOM_DIAG_EXACT_CACHE").ok();
+    let from_disk=cached.is_none().then(||cache_path.as_ref().and_then(|p|std::fs::read(p).ok())).flatten().and_then(|bytes|{
+        let v:Vec<f64>=bytes.chunks_exact(8).map(|c|f64::from_le_bytes(c.try_into().unwrap())).collect();
+        if v.len()<2{return None;}let(count,length)=(v[0]as usize,v[1]as usize);
+        if count!=times.len()||length!=size||v.len()!=2+count+2*count*length||v[2..2+count].iter().zip(&times).any(|(a,b)|(a-b).abs()>1e-12){return None;}
+        Some((0..count).map(|i|{let o=2+count+2*i*length;(0..length).map(|k|C{re:v[o+2*k],im:v[o+2*k+1]}).collect::<Vec<C>>()}).collect::<Vec<Vec<C>>>())});
+    let cached=cached.or(from_disk);
     if let Some(e)=cached{exact=e;}else{
     for _ in 1..times.len(){
         for _ in 0..sub{
@@ -380,8 +408,12 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
         }
         exact.push(x.clone());
     }
-    if let Ok(mut g)=EXACT.lock(){*g=Some((times.clone(),size,exact.clone()));}
+    if let Some(p)=&cache_path{
+        let mut v:Vec<f64>=vec![times.len()as f64,size as f64];v.extend(&times);for f in &exact{for z in f{v.push(z.re);v.push(z.im);}}
+        let bytes:Vec<u8>=v.iter().flat_map(|x|x.to_le_bytes()).collect();std::fs::write(p,bytes).map_err(|e|e.to_string())?;
     }
+    }
+    if let Ok(mut g)=EXACT.lock(){*g=Some((times.clone(),size,exact.clone()));}
     let basis:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();
     // The growing modes: the projected ones' initial mismatch E(0) = x0 - W u(0)
     // (physical trace norm / 2: a contraction's bound on its contribution at
@@ -402,6 +434,41 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
             let p:Vec<f64>=(0..n).map(|i|(0..modes).map(|q|{let z=v[q*d+i*n+i];let(c,s)=((nu[q]*t).cos(),(nu[q]*t).sin());c*z.re-s*z.im}).sum()).collect();
             Ok(p.iter().map(|x|x.abs()).fold(0.,f64::max))}).collect::<Result<_,_>>()?;
         format!(",\"projected\":{},\"clipped\":{},\"growthCharge\":{:?},\"projectedTraceNorm\":{half:?},\"clippedChange\":{change:?}",model.projected,model.clipped,model.growth_charge)};
+    // (research, S2) Best approximations, stable evaluation, conditioning.
+    let s2={
+        let lapack=&prepared.lapack;let r=model.r;
+        let gcol=super::reduced::transpose_rows(&model.g,r,r);
+        let spacing=times[1]-times[0];
+        let e_h=expm_real(lapack,&gcol.iter().map(|x|x*spacing).collect::<Vec<f64>>(),r)?;
+        let c0:Vec<f64>=(0..r).map(|i|space.initial.get(i).copied().unwrap_or(0.)).collect();
+        let mut u=c0.clone();let mut stable=vec![u.clone()];
+        for _ in 1..times.len(){let mut v=vec![0.;r];lapack.gemm(false,false,r,1,r,1.,&e_h,r,&u,r,0.,&mut v,r)?;u=v;stable.push(u.clone());}
+        let(_,_,ev)=lapack.eigen(&gcol,r)?;
+        let fro=|m:&[f64]|m.iter().map(|x|x*x).sum::<f64>().sqrt();
+        let(lu,pivots)=lapack.factor(&ev,r)?;let mut id=vec![0.;r*r];for i in 0..r{id[i+r*i]=1.;}let inv=lapack.solve_matrix_factored(&lu,&pivots,&id,r)?;
+        let kappa=fro(&ev)*fro(&inv);
+        let mut amplification=Vec::new();let mut coordinate_gap=Vec::new();let mut stable_pops=Vec::new();let mut best_e=Vec::new();let mut best_m=Vec::new();
+        let mut c_e_norm=Vec::new();let mut readout_gap=0_f64;
+        let solver=model.trajectory(galerkin,&times);
+        for(ti,&t)in times.iter().enumerate(){
+            let ue=model.state(t);
+            let e:Vec<C>=(0..r).map(|j|mul(cexp(model.used_theta[j],t),model.used_coefficients[j])).collect();
+            let sum_abs=(0..r).map(|i|(0..r).map(|j|magnitude(mul(model.vectors[i*r+j],e[j]))).sum::<f64>()).fold(0.,f64::max);
+            let top=ue.iter().map(|x|x.abs()).fold(0.,f64::max).max(f64::MIN_POSITIVE);
+            amplification.push(sum_abs/top);
+            coordinate_gap.push(ue.iter().zip(&stable[ti]).map(|(a,b)|(a-b).abs()).fold(0.,f64::max));
+            let ce=ops.gram(&basis,&[exact[ti].as_slice()])?;let cm=galerkin.metric_coordinates(lapack,&exact[ti])?;
+            c_e_norm.push(ce.iter().map(|x|x*x).sum::<f64>().sqrt());
+            let fields=ops.combinations(&basis,&[stable[ti].clone(),ce,cm])?;
+            let read=|v:&[C]|->Vec<f64>{(0..n).map(|i|(0..modes).map(|q|{let z=v[q*d+i*n+i];let(c,s)=((nu[q]*t).cos(),(nu[q]*t).sin());c*z.re-s*z.im}).sum()).collect()};
+            stable_pops.push(read(&fields[0]));best_e.push(read(&fields[1]));best_m.push(read(&fields[2]));
+            let xm=ops.combinations(&basis,&[ue])?.remove(0);let mp=read(&xm);
+            readout_gap=readout_gap.max(mp.iter().zip(&solver[ti]).map(|(a,b)|(a-b).abs()).fold(0.,f64::max));
+        }
+        let thetas:Vec<[f64;2]>=model.theta.iter().map(|z|[z.re,z.im]).collect();
+        let amps:Vec<f64>=model.used_coefficients.iter().map(|z|magnitude(*z)).collect();
+        format!(",\"kappaF\":{kappa:?},\"amplification\":{amplification:?},\"coordinateGap\":{coordinate_gap:?},\"readoutGap\":{readout_gap:?},\"exactCoordinateNorm\":{c_e_norm:?},\"stable\":{stable_pops:?},\"bestE\":{best_e:?},\"bestM\":{best_m:?},\"theta\":{thetas:?},\"amplitudes\":{amps:?}")
+    };
     let mut rows=Vec::new();let mut exact_pops=Vec::new();let mut model_pops=Vec::new();
     for(ti,&t)in times.iter().enumerate(){
         let xm=ops.combinations(&basis,&[model.state(t)])?.remove(0);
@@ -462,7 +529,7 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
             if step>0&&step%per==0{out.push(acc);}
         }
         out};
-    let line=format!("{{\"solves\":{solves},\"columns\":{},\"times\":{times:?},\"h\":{h:?},\"inner\":{inner},\"seconds\":{:?},\"charges\":{charges:?},\"nu\":{nu:?},\"error\":{rows:?},\"exact\":{exact_pops:?},\"model\":{model_pops:?},\"residualIntegral\":{residual_integral:?}{growing}{full}{classes}}}",
+    let line=format!("{{\"solves\":{solves},\"columns\":{},\"times\":{times:?},\"h\":{h:?},\"inner\":{inner},\"seconds\":{:?},\"charges\":{charges:?},\"nu\":{nu:?},\"error\":{rows:?},\"exact\":{exact_pops:?},\"model\":{model_pops:?},\"residualIntegral\":{residual_integral:?}{growing}{s2}{full}{classes}}}",
         space.basis.len(),clock.elapsed().as_secs_f64());
     use std::io::Write;let mut f=std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e|e.to_string())?;writeln!(f,"{line}").map_err(|e|e.to_string())?;
     Ok(())
@@ -505,6 +572,18 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*op.modes.len())};
     let mut space=Space::new(&mut lattice,initial,capacity)?;
     for s in charge_set::gated_steps(prepared,tolerance){if lattice.operator().index.contains_key(&s){space.activate(&mut lattice,&s)?;}}
+    // (research, S2) ATOM_TRANSLATION_SUMS: also the sums and differences of
+    // every two gated steps on the lattice (one of each pair).
+    if std::env::var("ATOM_TRANSLATION_SUMS").is_ok(){
+        let gated:Vec<Charge>=charge_set::gated_steps(prepared,tolerance).into_iter().filter(|s|lattice.operator().index.contains_key(s)).collect();
+        let mut active:Vec<Charge>=space.translations();
+        for i in 0..gated.len(){for j in i+1..gated.len(){for sign in[1i32,-1]{
+            let c:Charge=gated[i].iter().zip(&gated[j]).map(|(&a,&b)|a+sign*b).collect();
+            let m=opposite(&c);let c=if c>m{c}else{m};
+            if active.contains(&c)||!lattice.operator().index.contains_key(&c){continue;}
+            space.activate(&mut lattice,&c)?;active.push(c);
+        }}}
+    }
     timing.setup_ms=clock.elapsed().as_secs_f64()*1e3;
     space.solve(&mut lattice,Pole::Zero)?;
     let modes=lattice.modes.clone();
@@ -550,7 +629,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             let model=galerkin.model(lapack,&space.initial,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
             if let Ok(path)=std::env::var("ATOM_DIAG_EXACT"){
                 let at:Vec<usize>=std::env::var("ATOM_DIAG_AT").ok().map(|v|v.split(',').filter_map(|x|x.trim().parse().ok()).collect()).unwrap_or_default();
-                if at.contains(&space.solves()){diag_exact(&path,prepared,frame,&mut lattice,&ops,&space,&model,times,initial,space.solves())?;}
+                if at.contains(&space.solves()){diag_exact(&path,prepared,frame,&mut lattice,&ops,&space,&model,&galerkin,times,initial,space.solves())?;}
             }
             timing.projection_ms=galerkin.milliseconds;timing.images_ms=space.images_ms;
             let outputs_clock=Instant::now();
@@ -669,7 +748,25 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                         format!("Stopped because {why}: the best checkpoint ({} solves) has an error bound of {:.2e} against the tolerance {tolerance:e}{samples}{means}",b.solves,b.largest())});
                 break;
             }
-            current=Some((space.solves(),model));
+            // (research, S2) ATOM_TRANSLATION_AMPLITUDE: a translation along
+            // every lattice mode whose population amplitude in the reduced
+            // solution exceeds GATE x tolerance (the translation gate's
+            // principle, measured), activated retroactively (copies, no solves).
+            let mut grown=false;
+            if std::env::var("ATOM_TRANSLATION_AMPLITUDE").is_ok()&&!times.is_empty(){
+                let sample:Vec<f64>=times.iter().copied().step_by((times.len()/100).max(1)).collect();
+                let amplitudes=model.mode_amplitudes(&galerkin,&sample);
+                let gate=charge_set::GATE*tolerance;
+                let(centre,charges)={let op=lattice.operator();(op.centre,op.modes.clone())};
+                for(q,a)in amplitudes{
+                    if q==centre||a<=gate{continue;}
+                    let c=charges[q].clone();let m=opposite(&c);
+                    let active=space.translations();if active.contains(&c)||active.contains(&m){continue;}
+                    space.activate(&mut lattice,&c)?;grown=true;
+                    eprintln!("DBG translation {c:?} amplitude {a:.2e} at {} solves",space.solves());
+                }
+            }
+            if !grown{current=Some((space.solves(),model));}
         }
         // The next pole by its expected gain.
         let clock=Instant::now();

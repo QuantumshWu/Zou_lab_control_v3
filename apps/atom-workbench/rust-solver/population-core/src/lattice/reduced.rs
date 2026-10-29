@@ -114,6 +114,12 @@ impl<'m> Projection<'m>{
             vectors:Vectors::new(op,1)?,milliseconds:0.})
     }
     pub fn columns(&self)->usize{self.covered}
+    /// (research, S2) The M-orthogonal coordinates of a field on the covered
+    /// columns: K^-1 Re W^H M x.
+    pub fn metric_coordinates(&self,lapack:&Lapack,field:&[C])->Result<Vec<f64>,String>{
+        let r=self.covered;let dots=self.metric_dots(&self.metric,r,&[field])?;
+        let(lu,pivots)=lapack.factor(&self.k,r)?;lapack.solve_matrix_factored(&lu,&pivots,&dots,r)
+    }
     /// Re <z_a, field_c> on the canonical modes for metric columns z
     /// (column-major, `count` of them) and fields (row-major |fields| x
     /// count): one task per field, a fixed order of summation.
@@ -264,6 +270,19 @@ impl Model{
     pub fn trajectory(&self,projection:&Projection,times:&[f64])->Vec<Vec<f64>>{
         Execution::new().map(|e|e.map(times.to_vec(),|t|self.populations(projection,&self.state(t),t,false)))
             .unwrap_or_else(|_|times.iter().map(|&t|self.populations(projection,&self.state(t),t,false)).collect())
+    }
+    /// (research, S2) Per canonical mode (its lattice index) the largest
+    /// population contribution of the reduced solution at the given times
+    /// (laboratory, a mirror pair's weight).
+    pub fn mode_amplitudes(&self,projection:&Projection,times:&[f64])->Vec<(usize,f64)>{
+        let(n,r)=(projection.n,self.r);
+        let states:Vec<Vec<f64>>=times.iter().map(|&t|self.state(t)).collect();
+        projection.canonical.iter().enumerate().map(|(c,&(q,w,nu))|{
+            let block=&self.readout[c];let mut largest=0_f64;
+            for(&t,u)in times.iter().zip(&states){let phase=cexp(C{re:0.,im:nu},t);
+                for i in 0..n{let mut v=ZERO;for(col,&uc)in u.iter().enumerate(){let b=block[i*r+col];v.re+=b.re*uc;v.im+=b.im*uc;}
+                    largest=largest.max((w*mul(phase,v).re).abs());}}
+            (q,largest)}).collect()
     }
     /// The laboratory time average at the horizon T (the centre block).
     pub fn horizon(&self,projection:&Projection,t:f64)->Vec<f64>{self.populations(projection,&self.state(t),t,true)}

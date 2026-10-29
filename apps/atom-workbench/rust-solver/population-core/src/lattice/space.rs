@@ -189,7 +189,9 @@ impl Space{
     /// One column at a pole; returns the directions it added.
     pub fn solve(&mut self,lattice:&mut Lattice<'_>,pole:Pole)->Result<usize,String>{
         let clock=Instant::now();let length=self.basis[0].len();let before=lattice.work().block_operations();
-        let(inner,steady)=(INNER_TOLERANCE,STEADY_TOLERANCE);
+        // (research, S2) ATOM_INNER_TOL: the shifted solves' relative residual.
+        let inner=std::env::var("ATOM_INNER_TOL").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(INNER_TOLERANCE);
+        let steady=STEADY_TOLERANCE;
         let(added,steps,residual)=match pole{
             Pole::Zero=>{
                 let op=lattice.operator();let n=op.n;let c0=op.centre*n*n;let mut u=vec![ZERO;length];for i in 0..n{u[c0+i*n+i]=C{re:1./n as f64,im:0.};}
