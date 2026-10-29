@@ -465,7 +465,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
         let far_min=prepared.plan.far().iter().map(|&s|prepared.plan.steps[s].nu.abs()).fold(f64::INFINITY,f64::min);
         let p=nu_max/(far_min-fold.diagnostics.lambda0);
         let mut orders=1;while nu_max>0.&&orders<RING_ORDERS_MAX&&built*p.powi(orders as i32)/(1.-p)>RING_EXPANSION_SHARE*left{orders+=1;}
-        let prune:Vec<f64>=(0..rings).map(|k|actions.get(k+1).map_or(0.,|&a|if a>0.{RING_PRUNE_SHARE*left/a}else{0.})).collect();
+        let prune:Vec<f64>=(0..rings).map(|k|actions.get(k).map_or(0.,|&a|if a>0.{RING_PRUNE_SHARE*left/a}else{0.})).collect();
         let ring_targets=fold.ring_targets(&prepared.generator,&prepared.plan,rings,orders,&prune,&offsets)?;fold.targets.extend(ring_targets);
     }
     let mut report=FoldReport{rule:Some(rule),orders:fold.diagnostics.orders,dropped:fold.diagnostics.dropped.clone(),targets:fold.targets.len(),build_ms:clock.elapsed().as_secs_f64()*1e3,rings,..Default::default()};
