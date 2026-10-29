@@ -19,11 +19,8 @@
 //! charged. The structural steps and the kept fold targets generate the near
 //! ball and the rings of the explicit charges (`charge_set`).
 use super::*;
-use crate::preparation::STRUCTURAL_COUPLING_FLOOR;
+use crate::preparation::{FOLD_GAP_RATIO,STRUCTURAL_COUPLING_FLOOR};
 
-/// Smallest ratio between the slowest far and the fastest near significant
-/// frequency that makes the far side a folded shell.
-pub const FOLD_GAP_RATIO:f64=100.;
 /// A far step must be faster than this multiple of ||L0||, so that
 /// ||(L0 - i nu)^-1|| <= 1/(|nu| - ||L0||) holds with room to spare.
 pub const FOLD_DISTANCE:f64=2.;

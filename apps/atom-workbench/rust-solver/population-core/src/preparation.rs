@@ -58,14 +58,21 @@ pub struct Source{
     pub frame_shift:Vec<Charge>,
 }
 
+/// Smallest ratio between the slowest far and the fastest near significant
+/// frequency that makes the far side a folded shell
+/// (`lattice::classification`), and the ratio at which an excited manifold
+/// takes a frame of its own (`manifold_frames`): the frame is there so that
+/// the fold finds its gap. Measured: half and twice the ratio change nothing,
+/// at the fold (7 runs) or at the manifolds (3 runs).
+pub const FOLD_GAP_RATIO:f64=100.;
 /// An excited manifold is a set of excited levels (H0's diagonal, sorted)
-/// split from the rest at a gap of at least MANIFOLD_GAP times the larger
+/// split from the rest at a gap of at least FOLD_GAP_RATIO times the larger
 /// spread beside it; it takes its own frame when a drive charge g brings its
-/// centre E within 1/MANIFOLD_GAP of |E| and |E| is at least MANIFOLD_GAP
-/// times its own spread and the ground levels' (a manifold within the fold
-/// gap of the request frame, every model with a single optical line, keeps
-/// it exactly: its offset is a detuning, not a fine-structure splitting).
-const MANIFOLD_GAP:f64=100.;
+/// centre E within 1/FOLD_GAP_RATIO of |E| and |E| is at least
+/// FOLD_GAP_RATIO times its own spread and the ground levels' (a manifold
+/// within the fold gap of the request frame, every model with a single
+/// optical line, keeps it exactly: its offset is a detuning, not a
+/// fine-structure splitting).
 /// The excited manifolds (state indices) and the frame charge of each.
 fn manifold_frames(n:usize,ground:&[bool],h0:&[C],phases:&PhaseBasis)->Result<Vec<Charge>,String>{
     let axes=phases.axes.len();let mut shift=vec![vec![0;axes];n];
@@ -79,7 +86,7 @@ fn manifold_frames(n:usize,ground:&[bool],h0:&[C],phases:&PhaseBasis)->Result<Ve
     while let Some(part)=stack.pop(){
         let spread=|p:&[(f64,usize)]|p.last().map_or(0.,|l|l.0-p[0].0);
         let split=(1..part.len()).map(|k|(part[k].0-part[k-1].0,k)).max_by(|a,b|a.0.total_cmp(&b.0))
-            .filter(|&(gap,k)|gap>=MANIFOLD_GAP*spread(&part[..k]).max(spread(&part[k..])));
+            .filter(|&(gap,k)|gap>=FOLD_GAP_RATIO*spread(&part[..k]).max(spread(&part[k..])));
         match split{Some((_,k))=>{stack.push(part[k..].to_vec());stack.push(part[..k].to_vec());},None=>manifolds.push(part)}
     }
     let mut candidates:Vec<(Charge,f64)>=Vec::new();
@@ -87,7 +94,7 @@ fn manifold_frames(n:usize,ground:&[bool],h0:&[C],phases:&PhaseBasis)->Result<Ve
     for m in &manifolds{
         let(low,high)=(m[0].0,m[m.len()-1].0);let(centre,spread)=(0.5*(low+high),high-low);
         let Some((g,nu))=candidates.iter().min_by(|a,b|(centre+a.1).abs().total_cmp(&(centre+b.1).abs()))else{continue};
-        if centre.abs()>=MANIFOLD_GAP*spread.max(ground_spread)&&MANIFOLD_GAP*(centre+nu).abs()<=centre.abs(){for &(_,i)in m{shift[i]=g.clone();}}
+        if centre.abs()>=FOLD_GAP_RATIO*spread.max(ground_spread)&&FOLD_GAP_RATIO*(centre+nu).abs()<=centre.abs(){for &(_,i)in m{shift[i]=g.clone();}}
     }
     Ok(shift)
 }
