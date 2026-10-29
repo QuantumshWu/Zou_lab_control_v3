@@ -40,7 +40,7 @@ use super::reduced::{Model,Projection,SlowRate};
 use super::poles::{InnerWork,Lattice,Pole};
 use super::space::{self,Column,Space};
 use super::frame::{SwFrame,SwMetric};
-use super::estimator::UnifiedEstimate;
+use super::estimator::{Source,UnifiedEstimate};
 use super::eigenbasis::BlockEigenbasis;
 
 /// Solves between checkpoints; the ladder is re-ranked at every checkpoint
@@ -103,15 +103,22 @@ const KERNEL_TRACE_SHARE:f64=0.5;
 /// checkpoint the Krylov part is 1e-11 of bounds of 7.1-7.4e-3, the ring's
 /// part 3.8-4.3e-3 and the K^(1) rests' 1.1-1.2e-2 (signed parts, partly
 /// cancelling); a trajectory's first checkpoint is the Krylov residual's
-/// (2e-1 against 2-8e-3).
+/// (2e-1 against 2-8e-3). Without the share, completing wherever a source
+/// reaches COMPLETION_FLOOR, the same three lasers at 20 us restarted as
+/// well: twice the wall time (1.6 -> 3.5 s), the error at 1 mG 4.5e-4 ->
+/// 1.6e-3.
 const COMPLETION_SHARE:f64=0.5;
-/// The K^(1) rests join the operator when their part is at least this
-/// share of the tolerance (each alone fails: both lattices' means stayed
-/// 1.3-2.0e-3 off with either change alone, 4e-5 and 1.7e-4 with both).
-const K1_COMPLETION:f64=0.25;
-/// The ring charges promoted: by decreasing attribution until they carry
-/// this share of the ring total.
-const RING_COMPLETION:f64=0.9;
+/// A source of the slow part joins the lattice while its part (bound units)
+/// is at least COMPLETION_FLOOR x tolerance: the K^(1) rests the lattice
+/// leaves out, and the ring charges by decreasing attribution while the
+/// ring's part they leave (its unpromoted share of the attribution) reaches
+/// it. Measured: K^(1) rests and ring each alone fail (both lattices' means
+/// stayed 1.3-2.0e-3 off with either change alone, 4e-5 and 1.7e-4 with
+/// both); the floor on the ring left the decisions of the 20 completing
+/// runs of the necessity review unchanged (every ring part at least
+/// 7.2e-3), and every run without an ablation promotes one pair carrying
+/// its whole attribution, as the earlier rule (90% of the attribution) did.
+const COMPLETION_FLOOR:f64=0.25;
 /// Stack of the frame's thread (LAPACK on it).
 const FRAME_STACK:usize=1<<26;
 
@@ -201,12 +208,12 @@ pub struct Solution{
 /// pair; their mirrors join with them), the completed explicit set (the
 /// run's own when none is) and whether the operator keeps every K^(1) rest;
 /// where it was decided, the bound there, its slow part and the K^(1)
-/// rests' part (bound units), the ring charges' attribution shares, and
-/// whether the run restarted on the completed lattice.
+/// rests' and the ring's parts (bound units), the ring charges' attribution
+/// shares, and whether the run restarted on the completed lattice.
 #[derive(Clone,Debug)]
 pub struct Completion{
     pub promoted:Vec<Charge>,pub explicit:ExplicitSet,pub keep_k1:bool,pub decided_at:usize,
-    pub bound:f64,pub slow_part:f64,pub k1_part:f64,
+    pub bound:f64,pub slow_part:f64,pub k1_part:f64,pub ring_part:f64,
     pub attribution:Vec<(Charge,f64)>,pub restarted:bool,
 }
 
@@ -270,12 +277,13 @@ fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:
 ///
 /// Completion: at the first checkpoint, when the largest bound is above the
 /// tolerance and its slow part (the omitted ring's feedback and the K^(1)
-/// rests the lattice leaves out) is at least COMPLETION_SHARE of it, the
-/// K^(1) rests the lattice leaves out join the operator when the estimate
-/// with them alone is at least K1_COMPLETION x tolerance, and the ring
-/// charges carrying RING_COMPLETION of the ring's attribution (|a_m| |B y_r|
-/// over the kernel and slow modes, from the ring's feedback alone) join P
-/// with their mirrors. The run then restarts once on the completed lattice
+/// rests the lattice leaves out) is at least COMPLETION_SHARE of it, each
+/// source is estimated alone and joins while its part reaches
+/// COMPLETION_FLOOR x tolerance: the K^(1) rests the lattice leaves out join
+/// the operator, and the ring charges join P with their mirrors by
+/// decreasing attribution (|a_m| |B y_r| over the kernel and slow modes,
+/// from the ring's feedback) while the ring's part they leave reaches the
+/// floor. The run then restarts once on the completed lattice
 /// (the frame and the eigenbasis are kept), its checkpoints after the first
 /// run's. Every other run is unchanged.
 pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut observer:Option<&mut dyn FnMut(&Checkpoint,&Answer)>)->Result<Solution,String>{
@@ -439,18 +447,20 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                     let view=ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
                         used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out};
                     let pick=|x:&ErrorEstimate|ACCEPTANCE_FACTOR*if at<off{x.trajectory[at]}else if at<off+horizons_count{x.horizons[at-off]}else{x.steady.unwrap_or(0.)};
+                    let floor=COMPLETION_FLOOR*tolerance;
                     // The K^(1) rests' part, when the lattice leaves any out.
                     let drops=lattice.operator().drops_k1_rests();
-                    let k1_part=if drops{pick(&estimator.k1_estimate(&view,&mut lattice)?)}else{0.};
-                    let keep=drops&&k1_part>=K1_COMPLETION*tolerance;
+                    let k1_part=if drops{pick(&estimator.estimate_alone(&view,&mut lattice,Source::K1)?)}else{0.};
+                    let keep=drops&&k1_part>=floor;
                     // The ring charges by attribution, a pair together (the canonical
-                    // member, the larger charge, stands for it).
+                    // member, the larger charge, stands for it), and the ring's part.
                     let mut pairs:BTreeMap<Charge,f64>=BTreeMap::new();
                     for(c,a)in estimator.ring_attribution(&view)?{let m=opposite(&c);let key=if c>m{c}else{m};*pairs.entry(key).or_default()+=a;}
                     let total:f64=pairs.values().sum();
                     let mut ranked:Vec<(Charge,f64)>=pairs.into_iter().collect();ranked.sort_by(|a,b|b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                    let ring_part=if total>0.{pick(&estimator.estimate_alone(&view,&mut lattice,Source::Ring)?)}else{0.};
                     let mut promoted=Vec::new();let mut carried=0.;
-                    if total>0.{for(c,a)in &ranked{if carried>=RING_COMPLETION*total{break;}promoted.push(c.clone());carried+=a;}}
+                    if total>0.{for(c,a)in &ranked{if ring_part*(1.-carried/total)<floor{break;}promoted.push(c.clone());carried+=a;}}
                     // The completed lattice must fit the memory budget and keep the
                     // fold's frequency expansion small (its parameter scales with the
                     // largest |nu_q|): else no charge is promoted.
@@ -464,7 +474,7 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                     }
                     let attribution:Vec<(Charge,f64)>=ranked.iter().map(|(c,a)|(c.clone(),if total>0.{a/total}else{0.})).collect();
                     let restarted=keep||!promoted.is_empty();
-                    let decision=Completion{promoted,explicit:grown.unwrap_or_else(||explicit.clone()),keep_k1:keep,decided_at:space.solves(),bound,slow_part:part,k1_part,attribution,restarted};
+                    let decision=Completion{promoted,explicit:grown.unwrap_or_else(||explicit.clone()),keep_k1:keep,decided_at:space.solves(),bound,slow_part:part,k1_part,ring_part,attribution,restarted};
                     if restarted{return Ok(Err((decision,checkpoints)));}
                     decided=Some(decision);
                 }
