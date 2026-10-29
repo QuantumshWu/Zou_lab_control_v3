@@ -62,19 +62,15 @@ because it is small or labelled forbidden.
   tweezer and every counter-rotating harmonic) are folded statically at
   second order into the near couplings, and every remainder of the fold is
   charged as a bound.
-- Long-time means: the null vector of the lattice operator, by GMRES with a
-  dressed-block preconditioner, its near-shell truncation and fold errors
-  estimated by error equations in the solver's Krylov space. The slowest
-  eigenpairs give the uniqueness check and the slowest relaxation time. For
-  several lasers with incommensurate frequencies the mean is the time
-  average of the quasi-periodic long-time state; a mean at a finite horizon
-  propagates the initial state to it, or is the limit once the slowest
-  relaxation has passed. A driven mean with several conserved quantities is
-  reported as not converged.
-- Models without lasers are static: the mean is exact, the spectral
-  projectors of the static generator applied to the initial state
-  (initial-dependent when several quantities are conserved).
-- Finite-time trajectories: rational Krylov with lattice-translation
+- Long-time means p̄(T) at T = 100 ms and 1 s (there is no t -> infinity
+  mean): the state at T of the initial density with only its fast
+  oscillations averaged out, from one run for both horizons, each with its
+  own estimated error. The slowest eigenpairs give the slowest relaxation
+  time: at a T shorter than it p̄(T) is still relaxing.
+- Models without lasers are static: the same pipeline on the lattice's
+  centre block alone.
+- Finite-time trajectories, up to 10 s with at most 2000 samples (a longer
+  or denser grid is refused with the reason): rational Krylov with lattice-translation
   augmentation and a Galerkin reduced model, its basis, near-shell and fold
   errors propagated through the dressed blocks; beyond 1 ms the trajectory
   continues as the expansion in the slow eigenmodes.

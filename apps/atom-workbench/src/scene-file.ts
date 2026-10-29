@@ -3,7 +3,7 @@
 // earlier version is refused with the reason -- nothing is migrated.
 import type {AxisName,Direction,DynamicsSettings,FrequencyDisplayUnit,FrequencyExpr,InitialStateSpec,Laser,LaserFrequencyAnchor,LaserIntensityAnchor,
   MagneticField,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Scene} from './types.js';
-import {MEAN_HORIZONS_US,SCENE_VERSION,defaultScene} from './types.js';
+import {MAXIMUM_DURATION_US,MAXIMUM_SAMPLES,MEAN_HORIZONS_US,SCENE_VERSION,defaultScene} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
 import {DURATION_UNITS} from './duration.js';
 import {analyze,resolveSceneFrequencies} from './physics.js';
@@ -142,7 +142,7 @@ function readScene(input:unknown):Scene {
   if(!marks||typeof marks!=='object'||Array.isArray(marks))fail('marks','应为对象');
   const scene:Scene={version:SCENE_VERSION,name:s.text('name',100),fields,lasers,referenceFrequencies,references,marks:{},
     dynamics:{initialStateId:d.text('initialStateId'),monitoredStateIds:[],monitorMode:d.choice('monitorMode',['auto','manual'] as const),monitoredGroupIds:[],
-      durationUs:d.number('durationUs',Number.MIN_VALUE),durationUnit:d.choice('durationUnit',DURATION_UNITS),samples:d.integer('samples',2,2001),
+      durationUs:d.number('durationUs',Number.MIN_VALUE,MAXIMUM_DURATION_US),durationUnit:d.choice('durationUnit',DURATION_UNITS),samples:d.integer('samples',2,MAXIMUM_SAMPLES),
       meanHorizonUs:d.choice('meanHorizonUs',MEAN_HORIZONS_US)}};
   if(s.has('display')){
     const display=Reader.of(s.o.display,'display',['readouts']),readouts=display.o.readouts;

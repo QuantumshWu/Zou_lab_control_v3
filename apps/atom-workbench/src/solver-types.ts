@@ -34,18 +34,14 @@ export function readPopulationAccuracy(value:unknown,samples:number):PopulationA
     sampleErrors:[...(errors as number[])],...(partial?{reason:a.reason as string}:{}),
     scope:{states:32,samples,groups:[...(groups as string[])]}};
 }
-/** The native mean `status` values (`asymptoticHorizons`): a converged long-time mean (static:
- * stationary / population-stationary / initial-dependent; driven:
- * time-average / initial-dependent-time-average), or none. */
-export const CONVERGED_MEAN_STATUSES=['stationary','population-stationary','initial-dependent','time-average','initial-dependent-time-average'] as const;
+/** The native mean `status` values (`asymptoticHorizons`): a computed mean p̄(T), the phase
+ * average at T ('time-average'), or none. */
+export const CONVERGED_MEAN_STATUSES=['time-average'] as const;
 export type SteadyStatus=typeof CONVERGED_MEAN_STATUSES[number]|'not-converged'|'not-requested';
 export const STEADY_STATUSES:readonly SteadyStatus[]=[...CONVERGED_MEAN_STATUSES,'not-converged','not-requested'];
-/** A driven model's mean is a phase average at T (its fast oscillations averaged out), not a time-independent state. */
-export function isTimeAverage(status:SteadyStatus|undefined):boolean{return status==='time-average'||status==='initial-dependent-time-average';}
-/** A degenerate null space: the mean depends on the specified initial state. */
-export function isInitialDependent(status:SteadyStatus|undefined):boolean{return status==='initial-dependent'||status==='initial-dependent-time-average';}
+/** The long-time mean p̄(T) at one time T. */
 export interface SteadyResult {
-  /** A long-time result was computed (its status one of CONVERGED_MEAN_STATUSES). */
+  /** A mean was computed (its status one of CONVERGED_MEAN_STATUSES). */
   converged:boolean;status:SteadyStatus;populations:Record<string,number>|null;
   /** The computed result's estimated population error (null: nothing computed). */
   estimatedError:number|null;
@@ -54,15 +50,12 @@ export interface SteadyResult {
   withinTolerance:boolean;
   /** Native full complex long-time mean, row-major in DynamicsResult.states. */
   density?:{real:number[];imag:number[]};
-  residual:number|null;method?:string;reason?:string;initialDependent:boolean;
-  /** Slowest relaxation time (us) of a converged mean's decaying modes: the
-   * limit is reached after a few of them (null: none resolved or reported). */
+  method?:string;reason?:string;
+  /** Slowest relaxation time (us) of the mean run's decaying modes (null: none resolved or
+   * reported): p̄(T) is still relaxing at a T shorter than it. */
   slowestRelaxationUs?:number|null;
-  /** Conserved quantities (trace included) found by the slow generator; more
-   * than one makes the mean initial-dependent (null: not reported). */
-  conservedQuantities?:number|null;
-  /** The time T of p̄(T) (us; null: t → ∞); undefined when no mean was requested. */
-  horizonUs?:number|null;
+  /** The time T of p̄(T) (us); undefined when no mean was requested. */
+  horizonUs?:number;
 }
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];

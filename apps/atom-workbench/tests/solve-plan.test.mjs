@@ -36,16 +36,16 @@ test('a running request goes on while it brings what the page needs: a mean run 
   assert.deepEqual(delivers('trajectory',here,longer),{trajectory:false,mean:false});
 });
 
-const steady=(T,error)=>({converged:true,status:'stationary',populations:{},estimatedError:error,withinTolerance:error<=POPULATION_TOLERANCE,residual:null,initialDependent:false,horizonUs:T});
+const steady=(T,error)=>({converged:true,status:'time-average',populations:{},estimatedError:error,withinTolerance:error<=POPULATION_TOLERANCE,horizonUs:T});
 test('a result\'s means become one record per T; 停止 keeps a checkpoint\'s where no final mean is',()=>{
-  const result={timesUs:[0,1,2],steady:steady(1e6,.001),horizonMeans:[steady(1e5,.002),steady(1e6,.001),steady(null,.003)]};
+  const result={timesUs:[0,1,2],steady:steady(1e6,.001),horizonMeans:[steady(1e5,.002),steady(1e6,.001)]};
   const records=horizonRecords({result,wallMs:5,horizon:1e6});
-  assert.deepEqual(records.map(r=>[r.horizon,r.result.steady.estimatedError,r.wallMs]),[[1e5,.002,5],[1e6,.001,5],[null,.003,5]]);
+  assert.deepEqual(records.map(r=>[r.horizon,r.result.steady.estimatedError,r.wallMs]),[[1e5,.002,5],[1e6,.001,5]]);
   assert.deepEqual(horizonRecords({result:{...result,horizonMeans:undefined},wallMs:5,horizon:1e6}),[],'a trajectory alone carries none');
-  assert.deepEqual(keptCheckpoint(result,'full',()=>false),{trajectory:true,horizons:[1e5,1e6,null]});
-  assert.deepEqual(keptCheckpoint(result,'full',T=>T===null),{trajectory:true,horizons:[1e5,1e6]},'a final mean already here stays');
+  assert.deepEqual(keptCheckpoint(result,'full',()=>false),{trajectory:true,horizons:[1e5,1e6]});
+  assert.deepEqual(keptCheckpoint(result,'full',T=>T===1e6),{trajectory:true,horizons:[1e5]},'a final mean already here stays');
   assert.deepEqual(keptCheckpoint(result,'trajectory',()=>false),{trajectory:true,horizons:[]});
-  assert.deepEqual(keptCheckpoint({timesUs:[0],steady:steady(1e6,.001),horizonMeans:result.horizonMeans},'mean',()=>false),{trajectory:false,horizons:[1e5,1e6,null]},'a mean run\'s checkpoint is never a trajectory');
+  assert.deepEqual(keptCheckpoint({timesUs:[0],steady:steady(1e6,.001),horizonMeans:result.horizonMeans},'mean',()=>false),{trajectory:false,horizons:[1e5,1e6]},'a mean run\'s checkpoint is never a trajectory');
 });
 
 /** The mock solver: every call is answered by the test. */
@@ -56,7 +56,7 @@ function answer(scene,options){
   const settings=scene.dynamics,timesUs=options.steadyOnly?[0]:[0,settings.durationUs/2,settings.durationUs];
   const states=buildFullMasterModel(scene,settings).states,initialIndex=states.findIndex(s=>s.id===settings.initialStateId);
   // Each T its own error, so the test sees which T it is shown.
-  return {...nativeResult({states,initialIndex,timesUs,mean:options.includeAsymptotic,horizonUs:options.meanHorizonUs,meanError:.0011,horizonErrors:{'100000':.0012,'1000000':.0011,'null':.0013}}),
+  return {...nativeResult({states,initialIndex,timesUs,mean:options.includeAsymptotic,horizonUs:options.meanHorizonUs,meanError:.0011,horizonErrors:{'100000':.0012,'1000000':.0011}}),
     assumptions:['test assumption'],service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]}};
 }
 
@@ -83,8 +83,8 @@ test('request flow: a horizon switch makes no request; a new duration asks for t
   assert.equal(plan(),'full');
   assert.deepEqual((({steadyOnly,includeAsymptotic,meanHorizonUs})=>({steadyOnly,includeAsymptotic,meanHorizonUs}))(await solve('full')),{steadyOnly:false,includeAsymptotic:true,meanHorizonUs:1e6});
   assert.equal(shownError(),.0011);
-  // ∞, then 1 s, then 100 ms: each mean is here already.
-  for(const [T,error] of [[null,.0013],[1e6,.0011],[1e5,.0012]]){scene.dynamics.meanHorizonUs=T;assert.equal(plan(),undefined,`T = ${T}`);assert.equal(shownError(),error,`T = ${T}`);}
+  // 100 ms, then 1 s, then 100 ms again: each mean is here already.
+  for(const [T,error] of [[1e5,.0012],[1e6,.0011],[1e5,.0012]]){scene.dynamics.meanHorizonUs=T;assert.equal(plan(),undefined,`T = ${T}`);assert.equal(shownError(),error,`T = ${T}`);}
   assert.equal(mock.calls.length,1,'no request for a horizon switch');
   // A longer trajectory: asked for alone; its mean is the cached one, the very same.
   const cached=means.get(inputs().meanKey,1e5);scene.dynamics.durationUs=.4;

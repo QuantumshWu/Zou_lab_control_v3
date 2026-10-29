@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
+import {MAXIMUM_SAMPLES,defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {durationReading,durationText,durationValue,setDuration} from '../dist/js/atom-workbench/src/duration.js';
 import {typedDigits} from '../dist/js/atom-workbench/src/unit-input.js';
 import {trajectoryInputsKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
@@ -18,12 +18,24 @@ test('the duration is an input: a unit picked for it keeps its digits, a new dur
  for(const value of [0,-1,Infinity,NaN])assert.throws(()=>setDuration(d,value),/正的有限/);
  assert.throws(()=>setDuration(d,1e308,'s'),/正的有限/);assert.throws(()=>setDuration(d,1,'min'),/单位/);assert.equal(d.durationUs,7e6);assert.equal(d.durationUnit,'s');
 });
+test('a trajectory runs to at most 10 s: a longer one is refused, a unit that makes the digits longer too',()=>{
+ const s=defaultScene(),d=s.dynamics;
+ setDuration(d,10,'s');assert.equal(d.durationUs,1e7,'10 s is the limit itself');
+ for(const [value,unit] of [[15,'s'],[10.5,'s'],[10001,'ms'],[1.1e7,'μs']])assert.throws(()=>setDuration(d,value,unit),/时长不能超过 10 s/,`${value} ${unit}`);
+ assert.equal(d.durationUs,1e7);assert.equal(d.durationUnit,'s');
+ // The digits stay with a new unit (ui-design.md §0.4): 20 μs read in s is 20 s, refused, and the duration stays 20 μs.
+ setDuration(d,20,'μs');assert.throws(()=>setDuration(d,typedDigits(durationValue(d)),'s'),/10 s/);assert.equal(d.durationUs,20);assert.equal(d.durationUnit,'μs');
+ // A scene file holds no longer trajectory.
+ const file=JSON.parse(JSON.stringify(s));file.dynamics.durationUs=1.5e7;file.dynamics.durationUnit='s';
+ assert.throws(()=>validateScene(file),/dynamics\.durationUs/);
+});
 test('time displays convert: the same time in another unit',()=>{
  assert.equal(durationText(1500,'ms'),'1.5 ms');assert.equal(durationText(1500,'μs'),'1500 μs');assert.equal(durationText(1500,'s'),'0.0015 s');assert.equal(durationText(2.5e6),'2.5 s');
 });
 test('sample count roundtrips and changes the output request independently of time units',()=>{
- const s=defaultScene(),before=trajectoryInputsKey(s,s.dynamics);for(const count of [2,51,1001,2001]){s.dynamics.samples=count;assert.equal(validateScene(JSON.parse(JSON.stringify(s))).dynamics.samples,count);assert.notEqual(trajectoryInputsKey(s,s.dynamics),before);}
- for(const count of [1,2002,3.5]){s.dynamics.samples=count;assert.throws(()=>validateScene(JSON.parse(JSON.stringify(s))));}
+ const s=defaultScene(),before=trajectoryInputsKey(s,s.dynamics);for(const count of [2,51,1001,2000]){s.dynamics.samples=count;assert.equal(validateScene(JSON.parse(JSON.stringify(s))).dynamics.samples,count);assert.notEqual(trajectoryInputsKey(s,s.dynamics),before);}
+ assert.equal(MAXIMUM_SAMPLES,2000);
+ for(const count of [1,2001,2002,3.5]){s.dynamics.samples=count;assert.throws(()=>validateScene(JSON.parse(JSON.stringify(s))),/dynamics\.samples/,String(count));}
 });
 test('chart axes follow the selected time unit for long simulations',()=>{
  const data={timesUs:[0,2.5e6,5e6],populations:{g:[1,1,1]},totalExcited:[0,0,0]};

@@ -145,6 +145,9 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 .page-title > .summary { flex: 1; min-width: 0; color: var(--muted-ink); padding-bottom: var(--cap-lift); font-variant-numeric: tabular-nums; }
 /* The levels chart's one tag: what its shift includes (B + 光镊); a warning only when it is undefined. */
 .shift-tag { flex: 0 1 auto; min-width: 0; height: var(--control); align-content: center; padding: 0 var(--chip-pad-x) var(--cap-lift); border-radius: var(--radius); background: var(--bg); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.model-scope { flex: none; display: flex; flex-wrap: wrap; gap: 0 var(--row-gap); padding: 0 var(--window-pad); color: var(--orange-dark); white-space: normal; overflow-wrap: anywhere; }
+.model-scope[hidden] { display: none; }
+.model-scope > .scope-head { font-weight: 600; }
 .shift-warning { flex: 0 1 auto; min-width: 0; padding-bottom: var(--cap-lift); color: var(--orange-dark); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chart-surface { position: relative; flex: none; min-width: 0; overflow-x: auto; overflow-y: hidden; }
 .chart-surface > svg.chart-svg { display: block; width: 100%; max-width: calc(36 * var(--control)); height: auto; margin: auto; }

@@ -8,7 +8,6 @@ import {POPULATION_TOLERANCE,defaultScene} from '../dist/js/atom-workbench/src/t
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {HORIZONS,entryAt,nativeResult} from './native-result.mjs';
-import {isTimeAverage} from '../dist/js/atom-workbench/src/solver-types.js';
 import {CurrentResults} from '../dist/js/atom-workbench/src/current-results.js';
 import {horizonRecords,keptCheckpoint} from '../dist/js/atom-workbench/src/solve-plan.js';
 
@@ -54,10 +53,10 @@ test('two checkpoints, then 停止: the solve ends and the last checkpoint is wh
  // The page drew neither; on 停止 the last one becomes its result: the trajectory and its mean at every T.
  const trajectories=new CurrentResults(),means=new CurrentResults(),epochs=[trajectories.activate('trajectory inputs'),means.activate('mean inputs')];
  assert.equal(trajectories.get('trajectory inputs','trajectory'),undefined);
- const kept=keptCheckpoint(last,'full',()=>false);assert.deepEqual(kept,{trajectory:true,horizons:[1e5,1e6,null]});
+ const kept=keptCheckpoint(last,'full',()=>false);assert.deepEqual(kept,{trajectory:true,horizons:[1e5,1e6]});
  trajectories.set('trajectory inputs',epochs[0],'trajectory',last);
  for(const mean of horizonRecords({result:last,wallMs:1,horizon:1e6}))if(kept.horizons.includes(mean.horizon))means.set('mean inputs',epochs[1],mean.horizon,mean);
- assert.equal(trajectories.get('trajectory inputs','trajectory'),last);assert.deepEqual([1e5,1e6,null].map(T=>means.get('mean inputs',T)?.result.steady.horizonUs),[1e5,1e6,null]);
+ assert.equal(trajectories.get('trajectory inputs','trajectory'),last);assert.deepEqual([1e5,1e6].map(T=>means.get('mean inputs',T)?.result.steady.horizonUs),[1e5,1e6]);
 });
 test('the stream speaks checkpoints and one final result only',async t=>{
  const scene=scenario();
@@ -142,7 +141,7 @@ test('malformed native payloads never become fabricated populations',()=>{
     data=>{entryAt(data).populations=null;},data=>{delete entryAt(data).densityReal;},
     data=>{entryAt(data).status='not-converged';},data=>{entryAt(data).status='periodic-mean';},data=>{entryAt(data).reason=7;},
     data=>{data.diagnostics.traceError=NaN;},data=>{delete data.diagnostics.asymptoticPositivityError;},data=>{data.diagnostics.asymptoticPositivityError=.1;},
-    data=>{data.diagnostics.asymptoticTraceError=6e-6;},data=>{data.diagnostics.residual=NaN;},data=>{delete data.diagnostics.asymptoticMethod;},
+    data=>{data.diagnostics.asymptoticTraceError=6e-6;},data=>{delete data.diagnostics.asymptoticMethod;},
     data=>{delete data.diagnostics.method;},data=>{delete data.populationAccuracy;},data=>{delete data.diagnostics.elapsedMs;},
     data=>{data.assumptions={text:'not an array'};},data=>{delete data.assumptions;},
   ];
@@ -150,16 +149,11 @@ test('malformed native payloads never become fabricated populations',()=>{
   for(const data of [null,undefined,[],{}])assert.throws(()=>normalizeDynamicsResult(data,scene),/不完整或无效/);
 });
 
-test('time averages and initial dependence are separate properties of a converged mean',()=>{
-  const scene=scenario();
-  for(const [status,timeAverage,initialDependent] of [['stationary',false,false],['population-stationary',false,false],['initial-dependent',false,true],
-    ['time-average',true,false],['initial-dependent-time-average',true,true]]){
-    const data=fixture(scene);for(const entry of data.asymptoticHorizons)Object.assign(entry,{status,reason:'reason of '+status});
-    const result=normalizeDynamicsResult(data,scene);
-    assert.equal(result.steady.converged,true,status);assert.equal(result.steady.initialDependent,initialDependent,status);
-    assert.equal(isTimeAverage(result.steady.status),timeAverage,status);assert.equal(result.steady.reason,'reason of '+status);
-  }
-  for(const status of ['initial-dependent-mean','nonunique-initial-dependent','periodic-mean']){
+test('a computed mean is the phase average at T, and nothing else: the statuses of the t → ∞ limit are refused',()=>{
+  const scene=scenario(),data=fixture(scene);for(const entry of data.asymptoticHorizons)entry.reason='its reason';
+  const result=normalizeDynamicsResult(data,scene);
+  assert.equal(result.steady.converged,true);assert.equal(result.steady.status,'time-average');assert.equal(result.steady.reason,'its reason');
+  for(const status of ['stationary','population-stationary','initial-dependent','initial-dependent-time-average','initial-dependent-mean','nonunique-initial-dependent','periodic-mean']){
     const data=fixture(scene);entryAt(data).status=status;assert.throws(()=>normalizeDynamicsResult(data,scene),/不完整或无效/,status);
   }
 });
@@ -175,16 +169,15 @@ test('old atomic models and unnegotiated or missing service capabilities are rej
   }
 });
 
-test('the mean residual and both methods each come from one contract key',()=>{
-  const scene=scenario(),data=fixture(scene);data.diagnostics.residual=2e-13;
+test('both methods each come from one contract key; no steady residual or conserved count is read',()=>{
+  const scene=scenario(),data=fixture(scene);
   const result=normalizeDynamicsResult(data,scene);
-  assert.equal(result.steady.residual,2e-13);assert.equal(result.method,'test trajectory');assert.equal(result.steady.method,'test mean');
+  assert.equal(result.method,'test trajectory');assert.equal(result.steady.method,'test mean');
   const mean=normalizeDynamicsResult(meanFixture(scene),scene);assert.equal(mean.method,undefined);assert.equal(mean.steady.method,'test mean');
-  const finiteOnly=normalizeDynamicsResult(trajectoryOnly(fixture(scene)),scene);assert.equal(finiteOnly.steady.residual,null);assert.equal(finiteOnly.steady.converged,false);
-  // Every converged mean reports the relative residual of its null vector.
-  for(const residual of [undefined,null,-1,NaN,Infinity]){
-    const bad=fixture(scene);bad.diagnostics.residual=residual;assert.throws(()=>normalizeDynamicsResult(bad,scene),/长期密度数值验证信息/);
-  }
+  const finiteOnly=normalizeDynamicsResult(trajectoryOnly(fixture(scene)),scene);assert.equal(finiteOnly.steady.converged,false);
+  // The t → ∞ fields are not part of the contract: present or not, the mean reads the same.
+  const extra=fixture(scene);Object.assign(extra.diagnostics,{residual:NaN,conservedQuantities:3});
+  const read=normalizeDynamicsResult(extra,scene);assert.equal(Object.hasOwn(read.steady,'residual'),false);assert.equal(Object.hasOwn(read.steady,'conservedQuantities'),false);
 });
 
 test('a trajectory alone: includeAsymptotic false is sent, and its answer carries no mean',async t=>{

@@ -68,11 +68,11 @@ struct Options {
     /// Only the long-time mean (no finite-time trajectory).
     #[serde(default)]
     steady_only: bool,
-    /// Observation horizon of the long-time mean: 1e5 or 1e6 us, or absent or
-    /// null for the t -> infinity mean (the standard horizons, every one of
-    /// which a mean run returns).
-    #[serde(default)]
-    mean_horizon_us: Option<f64>,
+    /// The time T (us) of the mean the app reads: 1e5 or 1e6 (100 ms or 1 s,
+    /// the standard horizons, both of which a mean run returns); 1 s when
+    /// absent.
+    #[serde(default = "default_mean_horizon")]
+    mean_horizon_us: f64,
 }
 fn default_duration() -> f64 {
     5.
@@ -86,6 +86,9 @@ fn default_population_tolerance() -> f64 {
 fn default_true() -> bool {
     true
 }
+fn default_mean_horizon() -> f64 {
+    1e6
+}
 impl Default for Options {
     fn default() -> Self {
         Self {
@@ -94,7 +97,7 @@ impl Default for Options {
             population_tolerance: default_population_tolerance(),
             include_asymptotic: true,
             steady_only: false,
-            mean_horizon_us: None,
+            mean_horizon_us: default_mean_horizon(),
         }
     }
 }
@@ -212,7 +215,10 @@ mod tests {
         let model = json!({"dimension":1,"states":["a"],"hReal":[0],"hImag":[0],"collapse":[]});
         let solve = |options: Value| request(json!({"id":4,"modelSchema":FULL_MODEL_SCHEMA,"model":model,"options":options}))["error"].as_str().unwrap().to_owned();
         assert!(solve(json!({"steadyOnly":true,"populationTolerance":0.001})).contains("populationTolerance is fixed"));
-        assert!(solve(json!({"samples":1})).contains("Invalid finite population grid"));
-        assert!(solve(json!({"durationUs":0})).contains("Invalid finite population grid"));
+        for samples in [1, 2001] {
+            assert!(solve(json!({"samples":samples})).contains("A trajectory has 2 to 2000 samples"), "{samples}");
+        }
+        assert!(solve(json!({"durationUs":0})).contains("must be a positive finite time"));
+        assert!(solve(json!({"durationUs":1.5e7})).contains("The trajectory duration is limited to 10 s (requested 15 s)"));
     }
 }
