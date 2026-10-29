@@ -1,17 +1,12 @@
-//! The bench at a Start (PLUGIN_PROTOCOL §5 `snapshot`): a measurement or task run
-//! records every device of the apparatus and the pulse board as the core's fact,
-//! whatever its node chose to write in its own record (v2 kept only that). Asked of
-//! each open device that reports its settings once the start may launch, all at once;
-//! the run launches when every answer is in. A device that cannot answer (busy past
-//! the bound, failed, or handed to another computer) is entered as
-//! unavailable with why: it never holds or fails the Start. State at Start only.
+//! The acquisition's device state, requested after configuration and before data.
+//! A task and its ready acquisition share one observation. Missing device answers
+//! are recorded as unavailable; recording never takes another device's owner.
 use std::collections::BTreeSet;
 
 use serde_json::{Map, Value, json};
 
 use crate::apparatus::LiveState;
-use crate::logic::Claim;
-use crate::{Host, Ticket, Workbench, workspace};
+use crate::{Ticket, Workbench, workspace};
 
 /// How long a device's `snapshot` may take: `Plugins::call` answers it within this (one
 /// busy in another run's long call is recorded as not answering, never marked failed).
@@ -24,20 +19,18 @@ const PULSE_BOARD: &str = "sequencer.streamer";
 #[derive(Clone, Debug, Default)]
 pub struct Bench {
     taken_at: String, asked: BTreeSet<u64>, devices: Map<String, Value>, sequencer: Map<String, Value>,
+    completed_at: String,
+    pub(crate) waiting: Vec<(String, u64)>,
     /// Separate from device answers, which may themselves contain transport fields.
     device_transports: Map<String, Value>,
 }
 
 impl Bench {
-    pub fn complete(&self) -> bool { self.asked.is_empty() }
+    pub fn complete(&self) -> bool { !self.taken_at.is_empty() && self.asked.is_empty() }
 
-    /// The record's `apparatus`; a board nobody drove at Start is driven by the run that claims it.
-    pub(crate) fn record(&self, run: &str, node: &str, claims: &[Claim]) -> Value {
-        let mut sequencer = self.sequencer.clone();
-        for (device, entry) in &mut sequencer {
-            if entry["driver"].is_null() && claims.iter().any(|claim| &claim.device == device) { entry["driver"] = json!({"run": run, "node": node}); }
-        }
-        let mut record = json!({"taken_at": self.taken_at, "devices": self.devices, "sequencer": sequencer});
+    pub(crate) fn record(&self, context: &str) -> Value {
+        let mut record = json!({"phase": "acquisition", "context": context, "taken_at": self.taken_at,
+            "completed_at": self.completed_at, "devices": self.devices, "sequencer": self.sequencer});
         if !self.device_transports.is_empty() { record["device_transports"] = json!(self.device_transports); }
         record
     }
@@ -53,7 +46,7 @@ impl Workbench {
 
     /// Every live device entered as it stands (instance -> `{type_id, role}`), each that reports
     /// its settings asked; the board's entry also says whether a run or an outside driver holds it.
-    pub(crate) fn take_bench(&mut self, node: &str) -> Bench {
+    fn take_bench(&mut self, run: &str) -> Bench {
         let mut bench = Bench { taken_at: workspace::utc_now(), ..Bench::default() };
         let ids: Vec<String> = self.devices.keys().cloned().collect();
         for id in ids {
@@ -84,7 +77,7 @@ impl Workbench {
             match unavailable {
                 Some(why) => entry["unavailable"] = json!(why),
                 None => {
-                    let ticket = self.ticket(Ticket::Snapshot { node: node.to_owned(), device: id.clone() });
+                    let ticket = self.ticket(Ticket::Snapshot { run: run.to_owned(), device: id.clone() });
                     bench.asked.insert(ticket);
                     self.plugins.call(&id, ticket, "snapshot", &json!({}));
                 }
@@ -94,11 +87,63 @@ impl Workbench {
         bench
     }
 
-    /// One device's answer for the bench of `node`'s pending start: its settings beside its
-    /// identity (which they never replace), or why it gave none. The last answer launches the start.
-    pub(crate) fn bench_answered(&mut self, node: &str, device: &str, ticket: u64, result: Result<Value, String>, host: &mut dyn Host) {
-        let Some(bench) = self.nodes.iter_mut().find(|item| item.id == node).and_then(|item| item.pending.as_mut())
-            .and_then(|pending| pending.bench.as_mut()) else { return };
+    /// The first configured caller records the acquisition context. A ready child
+    /// and the task that triggers it share that observation in their saved sources.
+    pub(crate) fn run_snapshot(&mut self, run: &str, ticket: u64, wait: bool) {
+        let Some(active) = self.run(run).filter(|run| !run.terminal() && run.state != "stopping") else {
+            self.plugins.acquired(run, ticket, Err("the recording run has ended".into())); return;
+        };
+        let context = active.snapshot_owner.clone();
+        if !self.node(&active.node).is_some_and(|node| self.takes_bench(&node.type_id)) {
+            self.plugins.acquired(run, ticket, Ok(Value::Null)); return;
+        }
+        let Some(owner) = self.run(&context).filter(|run| !run.terminal() && run.state != "stopping") else {
+            self.plugins.acquired(run, ticket, Err("the acquisition context has ended".into())); return;
+        };
+        if let Some(bench) = owner.bench.as_ref().filter(|bench| bench.complete()) {
+            self.plugins.recorded(run, ticket, Ok(bench.record(&context))); return;
+        }
+        if owner.bench.is_none() {
+            // A consumer with no capture of its own keeps its source records;
+            // publication never creates a retrospective or all-empty observation.
+            if wait { self.plugins.acquired(run, ticket, Ok(Value::Null)); return; }
+            let bench = self.take_bench(&context);
+            self.run_mut(&context).unwrap().bench = Some(bench);
+        }
+        self.run_mut(&context).unwrap().bench.as_mut().unwrap().waiting.push((run.to_owned(), ticket));
+        self.finish_bench(&context);
+    }
+
+    fn finish_bench(&mut self, context: &str) {
+        let Some(bench) = self.run_mut(context).and_then(|run| run.bench.as_mut()).filter(|bench| bench.complete()) else { return };
+        if bench.completed_at.is_empty() { bench.completed_at = workspace::utc_now(); }
+        let record = bench.record(context);
+        let waiting = std::mem::take(&mut bench.waiting);
+        for (run, ticket) in waiting {
+            let result = if self.run(&run).is_some_and(|run| !run.terminal() && run.state != "stopping") {
+                Ok(record.clone())
+            } else { Err("the recording run has ended".into()) };
+            self.plugins.recorded(&run, ticket, result);
+        }
+    }
+
+    pub(crate) fn cancel_bench(&mut self, context: &str) {
+        let mut waiting = Vec::new();
+        for owner in &mut self.runs {
+            if let Some(bench) = &mut owner.bench {
+                for (run, ticket) in std::mem::take(&mut bench.waiting) {
+                    if owner.id == context || run == context { waiting.push((run, ticket)); }
+                    else { bench.waiting.push((run, ticket)); }
+                }
+            }
+        }
+        for (run, ticket) in waiting { self.plugins.acquired(&run, ticket, Err("the acquisition context ended before recording device state".into())); }
+    }
+
+    /// One device's answer preserves the apparatus identity and its own fields;
+    /// the last answer releases the acquisition's waiting callers.
+    pub(crate) fn bench_answered(&mut self, run: &str, device: &str, ticket: u64, result: Result<Value, String>) {
+        let Some(bench) = self.run_mut(run).and_then(|run| run.bench.as_mut()) else { return };
         if !bench.asked.remove(&ticket) { return; }
         if let Some(entry) = bench.entry(device) {
             match result {
@@ -122,6 +167,6 @@ impl Workbench {
                 Err(error) => entry["unavailable"] = json!(error),
             }
         }
-        if bench.complete() { self.launch_pending(host); }
+        self.finish_bench(run);
     }
 }

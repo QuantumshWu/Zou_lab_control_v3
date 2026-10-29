@@ -85,7 +85,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     host.set_node_name("counter", "Imaging camera");
     let run = host.start_run("counter", RunRequest { prepared: Some(prepared), device_labels: Default::default(), values: json!({"count": 3, "size": 128}),
         devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
-        source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into(), apparatus: None }).unwrap();
+        source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into(), record_devices: false }).unwrap();
     assert!(host.call("counter","query",prepare(13),Duration::from_secs(20)).err().unwrap().message.contains("unsupported test frame shape"));
     assert_eq!(host.spi("echo", "frame", json!([2, 1]), json!({}), Duration::from_secs(5)).err().unwrap().kind, ErrorKind::NotClaimed);
     let finished = |run: &str| {
@@ -137,7 +137,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     let doubled_signal = "@logic/doubler/doubled";
     let run = host.start_run("doubler", RunRequest { prepared: None, device_labels: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: Some(frames_signal.to_owned()), run_directory: None,
-        outputs: [("doubled".to_owned(), doubled_signal.to_owned())].into(), apparatus: None }).unwrap();
+        outputs: [("doubled".to_owned(), doubled_signal.to_owned())].into(), record_devices: false }).unwrap();
     let (outcome, result, error, ..) = finished(&run);
     assert_eq!((outcome.as_str(), &result), ("completed", &json!({"evaluated": 1})), "{error:?}");
     let doubled = runtime.signals().into_iter().find(|item| item.signal.as_ref() == doubled_signal).expect("processor output");
@@ -161,7 +161,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     assert_eq!(host.registry().holds(&lent), 1, "only Runtime holds the last frame");
     let run = host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), values: json!({"count": 1, "size": 128}),
         devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
-        source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into(), apparatus: None }).unwrap();
+        source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into(), record_devices: false }).unwrap();
     let (outcome, _, error, ..) = finished(&run);
     assert_eq!(outcome, "completed", "{error:?}");
     assert_eq!(host.registry().holds(&lent), 1);
@@ -171,11 +171,11 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     host.follow("doubler", Some(frames_signal));
     let run = host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), values: json!({"count": 3, "size": 128}),
         devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
-        source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into(), apparatus: None }).unwrap();
+        source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into(), record_devices: false }).unwrap();
     assert_eq!(finished(&run).0, "completed");
     let run = host.start_run("doubler", RunRequest { prepared: None, device_labels: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: Some(frames_signal.to_owned()), run_directory: None,
-        outputs: [("doubled".to_owned(), doubled_signal.to_owned())].into(), apparatus: None }).unwrap();
+        outputs: [("doubled".to_owned(), doubled_signal.to_owned())].into(), record_devices: false }).unwrap();
     let (outcome, result, error, ..) = finished(&run);
     assert_eq!((outcome.as_str(), &result), ("completed", &json!({"evaluated": 3})), "{error:?}");
     // Its block went back to its owner; in the one plugin process the doubler's next
@@ -236,7 +236,7 @@ fn a_run_follows_only_an_exact_input_and_what_ends_early_leaves_with_its_signals
         }
     };
     let request = |values, source: Option<&str>, output: (&str, &str)| RunRequest { prepared: None, device_labels: Default::default(), values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
-        resources: json!({}), source_signal: source.map(str::to_owned), run_directory: None, outputs: [(output.0.to_owned(), output.1.to_owned())].into(), apparatus: None };
+        resources: json!({}), source_signal: source.map(str::to_owned), run_directory: None, outputs: [(output.0.to_owned(), output.1.to_owned())].into(), record_devices: false };
     let published = |signal: &str| {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
@@ -368,18 +368,23 @@ fn a_start_records_the_bench_its_devices_report_and_a_busy_one_is_not_lost() {
     assert!(events.try_iter().all(|event| !matches!(event, HostEvent::Failed { .. })), "a missed snapshot never fails its device");
     assert_eq!(snapshot("slow", 5000).unwrap()["values"]["amplitude"], 0.0);
 
-    // run.begin writes the bench the start was given into the record; a plugin's own key of
-    // that name is never shown as the core's, given or not.
+    // A configured observation is installed before publication; a plugin's own
+    // key of that name is never shown as the core's, recorded or not.
     host.open("counter", "counter", json!({}), json!({})).unwrap();
     let frames = "@logic/counter/frames";
     let bench = json!({"taken_at": "2026-10-25T12:00:00.000+00:00", "devices": {"echo": {"type_id": "test.echo", "role": "echo", "values": {"amplitude": 0.0}}},
                        "sequencer": {}});
-    let start = |apparatus: Option<serde_json::Value>| host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(),
+    let start = |record_devices: bool| host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(),
         values: json!({"count": 1, "size": 128}), devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator,
-        resources: json!({}), source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames.to_owned())].into(), apparatus }).unwrap();
+        resources: json!({}), source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames.to_owned())].into(), record_devices }).unwrap();
     let recorded = |run: String| {
         loop {
             match events.recv_timeout(Duration::from_secs(60)).expect("run events") {
+                HostEvent::Request { instance, run, ticket, op, params, .. } if op == "run.snapshot" => {
+                    assert_eq!(params["wait"], false, "recorded at the explicit pre-acquisition boundary");
+                    host.record_devices(&instance, &run, bench.clone()).unwrap();
+                    host.respond(ticket, Ok(bench.clone()));
+                }
                 HostEvent::Request { ticket, .. } => host.respond(ticket, Ok(json!({}))),
                 HostEvent::RunFinished { run: id, outcome, error, .. } if id == run => { assert_eq!(outcome, "completed", "{error:?}"); break; }
                 HostEvent::Failed { reason, .. } => panic!("plugin failed: {reason}"),
@@ -389,8 +394,8 @@ fn a_start_records_the_bench_its_devices_report_and_a_busy_one_is_not_lost() {
         let signal = runtime.signals().into_iter().rev().find(|item| item.signal.as_ref() == frames).unwrap();
         runtime.read_latest(&signal.generation, frames).unwrap().run().metadata.clone()
     };
-    assert_eq!(recorded(start(Some(bench.clone())))["apparatus"], bench);
-    assert!(recorded(start(None)).get("apparatus").is_none());
+    assert_eq!(recorded(start(true))["apparatus"], bench);
+    assert!(recorded(start(false)).get("apparatus").is_none());
     host.shutdown();
 }
 

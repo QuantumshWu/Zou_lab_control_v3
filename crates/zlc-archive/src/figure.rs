@@ -19,6 +19,9 @@ const INFO_KEY: &str = "info";
 const PROBE_BYTES: usize = 1 << 20;
 const MIN_SAVINGS: f64 = 0.20;
 const WRITE_BUFFER: usize = 16 * 1024 * 1024;
+const APPARATUS_TABLE: &str = "apparatus_table";
+const APPARATUS_SCHEMA: &str = "zlc.figure.apparatus-table/1";
+const APPARATUS_REF: &str = "$apparatus";
 /// How deep `_jsonable` recurses, from the sections root (1), before the
 /// interpreter's recursion limit stops it (`write_figure_archive` from a script).
 const MAX_METADATA_DEPTH: usize = 996;
@@ -38,6 +41,97 @@ fn check_metadata(value: &Json) -> Result<()> {
             _ => {}
         }
     }
+    Ok(())
+}
+
+/// Only run/event records and the saved source own apparatus observations.
+/// User metadata elsewhere, including similarly named keys, stays literal.
+fn apparatus_records(sections: &mut Json, mut visit: impl FnMut(&mut Json) -> Result<()>) -> Result<()> {
+    fn record(value: &mut Json, visit: &mut impl FnMut(&mut Json) -> Result<()>) -> Result<()> {
+        if let Json::Object(pairs) = value {
+            if let Some((_, apparatus)) = pairs.iter_mut().find(|(name, _)| name == "apparatus") { visit(apparatus)?; }
+            if let Some((_, Json::Object(acquisition))) = pairs.iter_mut().find(|(name, _)| name == "acquisition") {
+                if let Some((_, Json::Array(runs))) = acquisition.iter_mut().find(|(name, _)| name == "runs") {
+                    for run in runs {
+                        if let Json::Object(fields) = run {
+                            if let Some((_, Json::Object(record))) = fields.iter_mut().find(|(name, _)| name == "record") {
+                                if let Some((_, apparatus)) = record.iter_mut().find(|(name, _)| name == "apparatus") { visit(apparatus)?; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    let Json::Object(sections) = sections else { return Ok(()) };
+    for name in ["lineage", "source"] {
+        let Some((_, section)) = sections.iter_mut().find(|(key, _)| key == name) else { continue };
+        if name == "lineage" {
+            if let Json::Object(fields) = section {
+                if let Some((_, Json::Array(nodes))) = fields.iter_mut().find(|(name, _)| name == "nodes") {
+                    for node in nodes {
+                        if let Json::Object(fields) = node {
+                            for name in ["record", "event_record"] {
+                                if let Some((_, value)) = fields.iter_mut().find(|(key, _)| key == name) { record(value, &mut visit)?; }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if name == "source" {
+            if let Json::Object(fields) = section {
+                if let Some((_, value)) = fields.iter_mut().find(|(name, _)| name == "run_record") { record(value, &mut visit)?; }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Share exactly identical observations, including their context and timestamps.
+/// Canonical JSON preserves numeric types that Python-style equality conflates.
+fn pack_apparatus(sections: &mut Json) -> Result<Option<Json>> {
+    let mut indices = HashMap::new();
+    let mut records = Vec::new();
+    let mut repeated = false;
+    apparatus_records(sections, |value| {
+        let key = dumps(value, Style::Figure)?;
+        if indices.contains_key(&key) { repeated = true; }
+        else { indices.insert(key, records.len()); records.push(value.clone()); }
+        Ok(())
+    })?;
+    if !repeated { return Ok(None); }
+    apparatus_records(sections, |value| {
+        let index = indices[&dumps(value, Style::Figure)?];
+        *value = Json::object([(APPARATUS_REF, Json::Int(index as i128))]);
+        Ok(())
+    })?;
+    Ok(Some(Json::object([("schema", Json::str(APPARATUS_SCHEMA)), ("records", Json::Array(records))])))
+}
+
+fn unpack_apparatus(info: &mut Json) -> Result<()> {
+    let Some(table) = info.remove(APPARATUS_TABLE) else { return Ok(()) };
+    if table.as_object().is_none() { return Err(ArchiveError::value("figure apparatus table must be an object")); }
+    exact_keys(&table, &["schema", "records"], "figure apparatus table")?;
+    if table.get("schema").and_then(Json::as_str) != Some(APPARATUS_SCHEMA) {
+        return Err(ArchiveError::value("unsupported figure apparatus table schema"));
+    }
+    let records = table.get("records").and_then(Json::as_array).filter(|records| !records.is_empty())
+        .ok_or_else(|| ArchiveError::value("figure apparatus table records must be a non-empty array"))?;
+    let Json::Object(fields) = info else { unreachable!() };
+    let sections = &mut fields.iter_mut().find(|(name, _)| name == "sections").unwrap().1;
+    let mut used = HashSet::new();
+    apparatus_records(sections, |value| {
+        if value.as_object().is_none_or(|fields| fields.len() != 1 || fields[0].0 != APPARATUS_REF) {
+            return Err(ArchiveError::value("figure apparatus reference must contain only $apparatus"));
+        }
+        let index = value.get(APPARATUS_REF).and_then(Json::as_int).and_then(|index| usize::try_from(index).ok())
+            .filter(|index| *index < records.len()).ok_or_else(|| ArchiveError::value("figure apparatus reference is out of range"))?;
+        used.insert(index);
+        *value = records[index].clone();
+        Ok(())
+    })?;
+    if used.len() != records.len() { return Err(ArchiveError::value("figure apparatus table contains unused records")); }
     Ok(())
 }
 
@@ -105,7 +199,10 @@ pub fn write_figure_archive<W: Write + Seek>(stream: W, name: &str, arrays: &[(S
         ("dtype", Json::Str(array.dtype.str())),
         ("shape", Json::Array(array.shape.iter().map(|size| Json::Int(*size as i128)).collect())),
     ]))).collect());
-    let info = dumps(&Json::object([("schema", Json::str(FIGURE_SCHEMA)), ("name", Json::str(name)), ("members", members), ("sections", sections)]), Style::Figure)?;
+    let apparatus = pack_apparatus(&mut sections)?;
+    let mut info = Json::object([("schema", Json::str(FIGURE_SCHEMA)), ("name", Json::str(name)), ("members", members), ("sections", sections)]);
+    if let Some(table) = apparatus { info.insert(APPARATUS_TABLE, table); }
+    let info = dumps(&info, Style::Figure)?;
     let io = |error: std::io::Error| ArchiveError::os(&error, None);
     let mut zip = ZipWriter::new(stream).map_err(io)?;
     write_member(&mut zip, INFO_KEY, &NpyArray::unicode(vec![info], Vec::new())).map_err(io)?;
@@ -159,9 +256,11 @@ fn parse_info(array: &NpyArray) -> Result<Json> {
     if !array.shape.is_empty() || array.dtype.kind != crate::npdtype::Kind::Unicode {
         return Err(ArchiveError::value("figure info must be one scalar Unicode JSON document"));
     }
-    let info = parse_metadata(&array.text(0)?)?;
+    let mut info = parse_metadata(&array.text(0)?)?;
     if info.as_object().is_none() { return Err(ArchiveError::value("figure metadata root must be an object")); }
-    exact_keys(&info, &["schema", "name", "members", "sections"], "figure metadata")?;
+    let keys: &[&str] = if info.get(APPARATUS_TABLE).is_some() { &["schema", "name", "members", "sections", APPARATUS_TABLE] }
+        else { &["schema", "name", "members", "sections"] };
+    exact_keys(&info, keys, "figure metadata")?;
     let schema = info.get("schema").unwrap();
     if schema.as_str() != Some(FIGURE_SCHEMA) { return Err(ArchiveError::value(format!("unsupported figure format {}", crate::json::py_repr(schema)))); }
     match info.get("name").unwrap() { Json::Str(name) if !name.is_empty() && !stripped(name) => {} _ => return Err(ArchiveError::value("figure metadata name must be non-empty text")) }
@@ -183,6 +282,7 @@ fn parse_info(array: &NpyArray) -> Result<Json> {
             if sizes.iter().all(|size| matches!(size, Json::Int(value) if *value >= 0) || matches!(size, Json::BigInt(text) if !text.starts_with('-'))));
         if !valid_shape { return Err(ArchiveError::value(format!("figure member {} shape must be nonnegative integers", py_repr_str(key)))); }
     }
+    unpack_apparatus(&mut info)?;
     Ok(info)
 }
 

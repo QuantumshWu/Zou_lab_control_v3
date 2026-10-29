@@ -1215,12 +1215,14 @@ class CalibrationTask:
                 ),
                 producer=f"{self.request.camera_key}:calibration",
             )
+            self._board.load(self.pulse_path, api_values=self._driven_values())
             capture = measurement.prepare(
                 # The capture asks this between reads, which is the only
                 # place a blocking one can be interrupted: checking it
                 # between CYCLES leaves the operator waiting out the
                 # camera's whole timeout after pressing Stop.
                 should_stop=context.cancel_requested,
+                after_arm=context.record_devices,
             )
             armed = True
             actual = measurement.actual_working_point
@@ -1250,11 +1252,9 @@ class CalibrationTask:
             # the flag on the way out left that board firing with nobody
             # coming back to SAFE it.
             firing = True
-            # The board resolves the document with these API values, checks
-            # its ABI against the board, compiles, loads and fires it.
-            receipt = self._board.run(
+            # Fire the program loaded before the configured apparatus was recorded.
+            receipt = self._board.fire_loaded(
                 self.pulse_path,
-                api_values=self._driven_values(),
                 run_repeats=self.request.repeats,
                 scan_repeats=1,
             )

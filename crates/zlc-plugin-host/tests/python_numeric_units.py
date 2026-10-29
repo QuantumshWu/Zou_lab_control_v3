@@ -4,6 +4,7 @@ import sys
 import threading
 import types
 import unittest
+from dataclasses import replace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'science' / 'src'))
 from zlc_atom.authoring import AuthoringField, TunableField
@@ -85,6 +86,72 @@ class NumericUnits(unittest.TestCase):
         self.assertEqual(float(commands[0].split()[-1].removesuffix('VPP')), 0.043)
         device._link.query = lambda _: '0.1799999999997'
         self.assertEqual(device._write_power_in_unit('ch1', 180, 'mVpp'), 179.9999999997)
+
+    def test_scan_records_applied_settings_and_each_readback_but_restores_original_value(self):
+        import numpy as np
+        from zlc_atom.nodes.scan.plan import ScanAxis, ScanPlan, ScanPort
+        from zlc_atom.nodes.scan.seamless import SeamlessScanMeasurement
+        from zlc_data import AxisId, AxisSpec, DomainSpec, SPATIAL_X, ValueSchema, ValidityContract, ValidityMode, owned_snapshot_from_arrays
+
+        class Knob(Device):
+            def __init__(self):
+                super().__init__(field(current=1234000.0)); self.epoch = 0; self.snapshot_reads = []
+            def tune(self, name, value):
+                self.writes.append(value); actual = round(value / 1000) * 1000.0
+                self.entry = replace(self.entry, current=actual); self.epoch += 1
+                return actual
+            def tunable_values(self):
+                self.snapshot_reads.append(self.entry.current)
+                return {'frequency': self.entry.current}
+            def settings_provenance(self): return {'device_session_id': 'rf-test', 'settings_epoch': self.epoch}
+
+        schema = ValueSchema(ValidityContract(ValidityMode.VALUE), np.dtype('<f8'), 'count')
+        source = types.SimpleNamespace(snapshot=owned_snapshot_from_arrays(schema, np.ones((1, 1, 1)), 0,
+                                                                         cell_domain=DomainSpec((1,), (AxisSpec(AxisId('x'), 'x', SPATIAL_X, 1),))),
+                                       event_record={'source_fact': 'kept'})
+        for fail_second in (False, True):
+            with self.subTest(fail_second=fail_second):
+                knob = Knob(); outputs = []; ordering = []; run_record = {}
+                def core(command, **params):
+                    ordering.append((command, params.get('stage', 'run')))
+                    if command == 'pulse_run':
+                        if fail_second and params.get('stage') is None: raise RuntimeError('second fire failed')
+                        return {'command_id': 1, 'applied': {'config': {'clock': 50e6}}}
+                    return {'done': True, 'status': 'done'}
+                context = types.SimpleNamespace(core=core, cancel_requested=lambda: False,
+                    discard_inputs=lambda: None, next_input=lambda timeout: source,
+                    acquire=lambda node, **kwargs: ordering.append(('acquire', knob.entry.current)),
+                    report_progress=lambda *args, **kwargs: None,
+                    record_devices=lambda: ordering.append(('snapshot', knob.entry.current)),
+                    set_run_record=lambda record: run_record.update(record),
+                    commit_live=lambda records, **kwargs: outputs.append(records['scan']))
+                scan = SeamlessScanMeasurement(pulse={'path': 'test.zpulse', 'api_fields': []},
+                    plan=ScanPlan((ScanAxis('device:rf:frequency', (1.0004, 2.0006), 'MHz'),)),
+                    ports=(ScanPort('device:rf:frequency', 'RF frequency', 'Hz', 1e3, 2e8),),
+                    source_signal='source', tunables={'rf': knob}, repeats=1, shots_per_point=1, sequencer_key='board',
+                    acquisition_logic='camera')
+                if fail_second:
+                    with self.assertRaisesRegex(RuntimeError, 'second fire failed'): scan.execute(context)
+                else:
+                    self.assertEqual(scan.execute(context), {'points': 2, 'shots': 2})
+                baseline = run_record['device_snapshots']['tunable:rf']
+                self.assertEqual(baseline, {'values': {'frequency': 1000000.0}, 'units': {'frequency': 'Hz'},
+                    'provenance': {'device_session_id': 'rf-test', 'settings_epoch': 1}})
+                self.assertEqual(knob.snapshot_reads, [1000000.0])
+                self.assertEqual(knob.entry.current, 1234000.0)
+                self.assertEqual(knob.writes, [1000400.0, 2000600.0, 1234000.0])
+                self.assertLess(ordering.index(('pulse_run', 'load')), ordering.index(('acquire', 1000000.0)))
+                self.assertLess(ordering.index(('acquire', 1000000.0)), ordering.index(('snapshot', 1000000.0)))
+                self.assertLess(ordering.index(('snapshot', 1000000.0)), ordering.index(('pulse_run', 'fire')))
+                self.assertEqual(sum(op == 'acquire' for op, _ in ordering), 1)
+                self.assertEqual(run_record['plan']['axes'][0]['values'], [1.0004, 2.0006])
+                for index, output in enumerate(outputs):
+                    recorded = output.event_record['actual_devices']['rf']
+                    self.assertEqual(recorded['values']['frequency'], [1.0, 2.001][index])
+                    self.assertEqual(recorded['units']['frequency'], 'MHz')
+                    self.assertEqual(recorded['provenance']['settings_epoch'], index + 1)
+                    self.assertEqual(output.cell_origin, (0, index))
+                    self.assertEqual(output.event_record['source_fact'], 'kept')
 
 
 if __name__ == '__main__': unittest.main()

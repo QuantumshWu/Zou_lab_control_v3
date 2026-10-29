@@ -190,3 +190,102 @@ fn regression_archives_end_like_python() {
 
 #[test]
 fn malformed_archives_are_refused_like_python() { check_all("invalid", 150); }
+
+fn apparatus_document(path: &Path) -> serde_json::Value {
+    let mut zip = ZipReader::open(path).unwrap();
+    let array = zlc_archive::npy::read_array(&mut zip.open_member("info.npy").unwrap()).unwrap();
+    serde_json::from_str(&array.text(0).unwrap()).unwrap()
+}
+
+fn write_apparatus_document(path: &Path, info: &serde_json::Value) {
+    let info = zlc_archive::NpyArray::unicode(vec![info.to_string()], Vec::new());
+    let data = zlc_archive::NpyArray::unicode(vec!["sample".into()], vec![1]);
+    let mut zip = zlc_archive::zip::ZipWriter::new(std::fs::File::create(path).unwrap()).unwrap();
+    for (name, array) in [("info.npy", info), ("data.npy", data)] {
+        zip.write_member(name, true, &[&array.header(), &array.data_bytes()]).unwrap();
+    }
+    zip.finish().unwrap();
+}
+
+#[test]
+fn shared_apparatus_is_stored_once_and_public_reader_restores_every_record() {
+    let path = std::env::temp_dir().join(format!("zlc-shared-apparatus-{}.npz", std::process::id()));
+    let shared = serde_json::json!({"context": "capture-a", "taken_at": "2026-10-29T12:03:23Z",
+        "devices": {"rf": {"values": {"frequency": 80000000.0}, "units": {"frequency": "Hz"}}}});
+    let mut other = shared.clone(); other["context"] = serde_json::json!("capture-b");
+    let sections = serde_json::json!({"lineage": {"nodes": [
+        {"record": {"apparatus": shared}, "event_record": {"apparatus": shared,
+            "acquisition": {"runs": [{"stream":"camera", "generation":"capture-a", "record":{"apparatus":shared}}], "events":[], "ranges":[]}}},
+        {"record": {"apparatus": other}},
+        {"record": {"apparatus": {"$apparatus": 0}}}], "custom": {"apparatus": {"$apparatus": 99}}},
+        "source": {"run_record": {"apparatus": shared}},
+        "custom": {"record": {"apparatus": {"$apparatus": 100}}}});
+    let original = Json::from_serde(&sections);
+    let entries = [("data".to_owned(), Entry::Array(zlc_archive::NpyArray::unicode(vec!["sample".into()], vec![1])))];
+    let bytes = write_figure_archive(Cursor::new(Vec::new()), "shared", &entries, &original).unwrap().into_inner();
+    std::fs::write(&path, &bytes).unwrap();
+    let stored = apparatus_document(&path);
+    assert_eq!(stored["apparatus_table"]["schema"], "zlc.figure.apparatus-table/1");
+    assert_eq!(stored["apparatus_table"]["records"].as_array().unwrap().len(), 3);
+    assert_eq!(stored["sections"]["lineage"]["nodes"][0]["record"]["apparatus"], serde_json::json!({"$apparatus": 0}));
+    assert_eq!(stored["sections"]["lineage"]["nodes"][1]["record"]["apparatus"], serde_json::json!({"$apparatus": 1}));
+    assert_eq!(stored["sections"]["source"]["run_record"]["apparatus"], serde_json::json!({"$apparatus": 0}));
+    assert_eq!(stored["sections"]["lineage"]["nodes"][0]["event_record"]["acquisition"]["runs"][0]["record"]["apparatus"], serde_json::json!({"$apparatus":0}));
+    assert_eq!(stored["sections"]["custom"], sections["custom"], "unrelated metadata is literal");
+    let decoded = read_archive(&path).unwrap();
+    assert!(decoded.info.get("apparatus_table").is_none());
+    assert_eq!(dumps(decoded.info.get("sections").unwrap(), Style::Figure).unwrap(), dumps(&original, Style::Figure).unwrap());
+    assert_eq!(rewrite(&path, &decoded).unwrap(), bytes, "restored sections encode deterministically");
+    // An uncompressed historical file remains literal, including reference-shaped user values.
+    write_apparatus_document(&path, &decoded.info.to_serde());
+    assert_eq!(read_archive(&path).unwrap().info, decoded.info);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn shared_apparatus_refuses_malformed_tables_and_references() {
+    let path = std::env::temp_dir().join(format!("zlc-shared-apparatus-invalid-{}.npz", std::process::id()));
+    let document = serde_json::json!({"schema":"zlc.figure", "name":"shared", "members":{"data":{"dtype":"<U6","shape":[1]}},
+        "sections":{"source":{"run_record":{"apparatus":{"$apparatus":0}}}},
+        "apparatus_table":{"schema":"zlc.figure.apparatus-table/1","records":[{"context":"one"}]}});
+    let mut cases = Vec::new();
+    for reference in [serde_json::json!({"$apparatus": -1}), serde_json::json!({"$apparatus": 1}),
+        serde_json::json!({"$apparatus": true}), serde_json::json!({"$apparatus": 0.0}), serde_json::json!({"$apparatus": "0"})] {
+        let mut bad = document.clone(); bad["sections"]["source"]["run_record"]["apparatus"] = reference;
+        cases.push((bad, "figure apparatus reference is out of range"));
+    }
+    let mut bad = document.clone(); bad["sections"]["source"]["run_record"]["apparatus"]["extra"] = true.into();
+    cases.push((bad, "figure apparatus reference must contain only $apparatus"));
+    let mut bad = document.clone(); bad["apparatus_table"]["schema"] = "unknown".into();
+    cases.push((bad, "unsupported figure apparatus table schema"));
+    let mut bad = document.clone(); bad["apparatus_table"]["records"] = serde_json::json!([]);
+    cases.push((bad, "figure apparatus table records must be a non-empty array"));
+    let mut bad = document.clone(); bad["apparatus_table"]["records"] = serde_json::json!([{}, {}]);
+    cases.push((bad, "figure apparatus table contains unused records"));
+    for (info, expected) in cases {
+        write_apparatus_document(&path, &info);
+        let error = read_archive(&path).err().expect("malformed apparatus storage was accepted");
+        assert_eq!(error.message, expected);
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn finite_acquisition_provenance_survives_figure_archive_without_extra_logic_nodes() {
+    let path = std::env::temp_dir().join(format!("zlc-acquisition-ranges-{}.npz",std::process::id()));
+    let acquired = serde_json::json!({"runs":[{"stream":"scan","generation":"g","record":{"node":"scan"}}],
+        "events":[
+            {"run":0,"signal":"scan","revision":1,"ordinal":0,"record":{"records":{"scan":{"actual_devices":{"rf":{"frequency":80}}}}},"parents":[]},
+            {"run":0,"signal":"scan","revision":2,"ordinal":1,"record":{"records":{"scan":{"actual_devices":{"rf":{"frequency":81}}}}},"parents":[]}],
+        "ranges":[{"event":0,"origin":[0,0],"extent":[1,1]},{"event":1,"origin":[0,1],"extent":[1,1]}]});
+    let native = Json::from_serde(&serde_json::json!({"publication":{"stream":"scan","generation":"g","signal":"scan","revision":2,"ordinal":1},
+        "run":{"node":"scan"},"event":{"records":{"scan":{"actual_devices":{"rf":{"frequency":81}}}}},"parents":[],"acquisition":acquired}));
+    let (lineage,source) = zlc_archive::provenance::capture_figure_provenance(Some(&native)).unwrap();
+    assert_eq!(lineage.get("nodes").unwrap().as_array().unwrap().len(),1);
+    let sections = Json::object([("lineage",lineage),("source",source)]);
+    let entries = [("data".to_owned(),Entry::Array(zlc_archive::NpyArray::unicode(vec!["a".into(),"b".into()],vec![2])))];
+    std::fs::write(&path,write_figure_archive(Cursor::new(Vec::new()),"scan",&entries,&sections).unwrap().into_inner()).unwrap();
+    let decoded = read_archive(&path).unwrap().info.to_serde();
+    assert_eq!(decoded["sections"]["lineage"]["nodes"][0]["event_record"]["acquisition"],acquired);
+    std::fs::remove_file(path).unwrap();
+}

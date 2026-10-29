@@ -24,10 +24,9 @@ pub struct Draft {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Instance { Opening, Open, Failed(String) }
 
-/// A start that waits for the runs holding its devices (or its own last run) to end,
-/// then for the bench it records (`bench`: taken once it may launch).
+/// A start that waits for the runs holding its devices (or its own last run) to end.
 #[derive(Clone, Debug)]
-pub struct PendingStart { pub origin: String, pub acquisition: Option<(String, u64, String)>, pub prepared: Option<String>, pub bench: Option<crate::bench::Bench> }
+pub struct PendingStart { pub origin: String, pub acquisition: Option<(String, u64, String)>, pub prepared: Option<String> }
 
 pub struct Node {
     pub id: String,
@@ -123,6 +122,8 @@ pub struct Run {
     pub acquisition: Option<(String, u64, String)>,
     /// Acquisition run IDs started by this run.
     pub children: Vec<String>,
+    pub snapshot_owner: String,
+    pub bench: Option<crate::bench::Bench>,
 }
 
 impl Run {
@@ -1029,7 +1030,7 @@ impl Workbench {
         let node = self.node_mut(id).unwrap();
         node.error = None; node.running = Some(frozen.draft.clone()); node.frozen = Some(frozen);
         node.follow = processor; node.follow_attempted = None;
-        node.pending = Some(PendingStart { origin, acquisition, prepared: Some(token), bench: None });
+        node.pending = Some(PendingStart { origin, acquisition, prepared: Some(token) });
         let mut holders = self.conflicting_nodes(&claims);
         if self.active_run(self.node(id).unwrap()).is_some() { holders.insert(id.to_owned()); }
         for holder in holders { self.stop_run_of(&holder, "another start needs its devices"); }
@@ -1100,8 +1101,6 @@ impl Workbench {
                 continue;
             }
             if !self.conflicting_nodes(&claims).is_empty() || claims.iter().any(|claim| !self.device_open(&claim.device)) {
-                // A bench taken before another run took its devices is no longer the one it starts on.
-                if let Some(pending) = self.node_mut(&id).unwrap().pending.as_mut() { pending.bench = None; }
                 if claims.iter().any(|claim| !self.device_open(&claim.device) && self.claiming_nodes(&claim.device).is_empty()) {
                     let missing: Vec<&str> = claims.iter().filter(|claim| !self.device_open(&claim.device)).map(|claim| claim.device.as_str()).collect();
                     let error = format!("{} is not open", missing.join(", "));
@@ -1109,15 +1108,6 @@ impl Workbench {
                     self.node_mut(&id).unwrap().error = Some(error);
                 }
                 continue;
-            }
-            // A measurement or task records the bench it starts on: every device asked now, the
-            // run launched once each has answered or said why it cannot (bench.rs).
-            if self.takes_bench(&self.node(&id).unwrap().type_id) {
-                if self.node(&id).unwrap().pending.as_ref().is_some_and(|pending| pending.bench.is_none()) {
-                    let bench = self.take_bench(&id);
-                    self.node_mut(&id).unwrap().pending.as_mut().unwrap().bench = Some(bench);
-                }
-                if self.node(&id).unwrap().pending.as_ref().and_then(|pending| pending.bench.as_ref()).is_some_and(|bench| !bench.complete()) { continue; }
             }
             let pending = self.node_mut(&id).unwrap().pending.take().unwrap();
             let parent = pending.acquisition.clone();
@@ -1160,7 +1150,7 @@ impl Workbench {
         let outputs = frozen.outputs.clone();
         Ok(RunSpec { node_name: node.name.clone(), run: String::new(), node_id: id.to_owned(), instance: node_instance(id), type_id: node.type_id.clone(),
             values, source_signal: draft.source_signal.clone(), device_labels: devices.values().map(|key| (key.clone(), self.device_role(key).to_owned())).collect(),
-            devices, shared, artifacts, resources, directory: None, outputs, origin: origin.to_owned(), prepared: None, apparatus: None })
+            devices, shared, artifacts, resources, directory: None, outputs, origin: origin.to_owned(), prepared: None, record_devices: self.takes_bench(&node.type_id) })
     }
 
     fn frozen_claims(&self, type_id: &str, frozen: &Frozen) -> Vec<Claim> {
@@ -1207,14 +1197,15 @@ impl Workbench {
         spec.run = run_id.clone();
         spec.directory = directory.clone();
         spec.prepared = pending.prepared.clone();
-        spec.apparatus = pending.bench.as_ref().map(|bench| bench.record(&run_id, &node.name, &claims));
+        let snapshot_owner = pending.acquisition.as_ref().filter(|(_, _, completion)| completion == "ready")
+            .and_then(|(parent, _, _)| self.run(parent)).map(|parent| parent.snapshot_owner.clone()).unwrap_or_else(|| run_id.clone());
         if let Some((parent, _, _)) = &pending.acquisition { if let Some(parent) = self.run_mut(parent) { parent.children.push(run_id.clone()); } }
         let follow_generation = self.source_published(&signals, &draft.source_signal).map(|signal| signal.generation.clone());
         self.run_sequences.insert(id.to_owned(), sequence);
         self.runs.push(Run { id: run_id.clone(), node: id.to_owned(), state: "starting".into(), ready: false,
             started_at, ended_at: None, progress: None, request: None, directory, artifacts: Vec::new(), generation: None, stop_reason: None,
             error: None, claims, frozen: frozen.clone(), start_record, previewed: BTreeSet::new(), preview_baseline, preview_panels: Vec::new(),
-            acquisition: pending.acquisition.clone(), children: Vec::new() });
+            acquisition: pending.acquisition.clone(), children: Vec::new(), snapshot_owner, bench: None });
         self.trim_runs();
         // v2 _activate_candidate: what a run starts with is its producer's own; a region that
         // wrote it no longer gives it back.
@@ -1248,6 +1239,7 @@ impl Workbench {
         let id = run.id.clone();
         // The operator's request it waits on is cancelled with it (v2: Stop wakes the wait).
         let request = run.request.take().and_then(|request| request["request"].as_str().map(str::to_owned));
+        self.cancel_bench(&id);
         // Every Stop is sent (v2 cancelled the host each time): one asked again is never a no-op.
         self.plugins.stop(&id);
         if let Some((parent, ticket, _)) = acquisition { self.plugins.acquired(&parent, ticket, Err("the acquisition was stopped".into())); }
@@ -1464,6 +1456,7 @@ impl Workbench {
     }
 
     pub(crate) fn run_finished(&mut self, id: &str, outcome: &str, error: Option<Value>, generation: Option<String>, host: &mut dyn Host) {
+        self.cancel_bench(id);
         let Some(run) = self.run_mut(id) else { return };
         if run.terminal() { return; }
         run.state = match outcome { "completed" | "stopped" | "failed" => outcome.to_owned(), _ => "failed".to_owned() };
@@ -1632,8 +1625,6 @@ impl Workbench {
             ("waiting", "running", "building the candidate run".to_owned())
         } else if node.start_after_check.is_some() {
             ("waiting", "running", "starting once the draft is checked".to_owned())
-        } else if node.pending.as_ref().and_then(|pending| pending.bench.as_ref()).is_some_and(|bench| !bench.complete()) {
-            ("waiting", "running", "reading the bench's settings".to_owned())
         } else if node.pending.is_some() {
             let holders: BTreeSet<String> = self.conflicting_nodes(&node.frozen.as_ref().map(|frozen| self.frozen_claims(&node.type_id, frozen)).unwrap_or_default())
                 .into_iter().filter(|holder| *holder != node.id).filter_map(|holder| self.node(&holder).map(|other| other.name.clone())).collect();

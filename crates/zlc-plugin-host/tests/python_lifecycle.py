@@ -2,6 +2,7 @@
 import pathlib
 import sys
 import threading
+import types
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'science' / 'src'))
@@ -32,6 +33,80 @@ class Owner:
             instance.shutdown()
 
 class Lifecycle(unittest.TestCase):
+    def test_device_record_precedes_ready_and_publication_and_is_cached(self):
+        import numpy as np
+        from zlc_data import AxisId, AxisSpec, DomainSpec, SPATIAL_X, ValueSchema, ValidityContract, ValidityMode, owned_snapshot_from_arrays
+        from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput
+        from zlc_plugin.context import RunContext
+
+        calls = []
+        def request(op, params):
+            calls.append((op, params))
+            if op == 'run.snapshot': return {'devices': {'rf': {}}}
+            return {}
+        process = types.SimpleNamespace(request=request, event=lambda op, params: calls.append((op, params)))
+        run = types.SimpleNamespace(instance=types.SimpleNamespace(name='camera', process=process), run_id='run-1', params={})
+        context = RunContext(run)
+        self.assertIsNone(context.record_devices())
+        self.assertEqual(calls, [], 'direct SDK runs do not request desktop device recording')
+        run.params['record_devices'] = True
+        self.assertEqual(context.record_devices(), {'devices': {'rf': {}}})
+        context.set_run_record({'configured': True})
+        context.report_ready()
+        schema = ValueSchema(ValidityContract(ValidityMode.VALUE), np.dtype('<f8'), 'count')
+        snapshot = owned_snapshot_from_arrays(schema, np.ones((1, 1, 1)), 0,
+            cell_domain=DomainSpec((1,), (AxisSpec(AxisId('x'), 'x', SPATIAL_X, 1),)))
+        output = LiveDatasetOutput(DatasetOutputDeclaration('reading', 'test.reading'), snapshot)
+        context.commit_live({'reading': output})
+        self.assertEqual([op for op, _ in calls], ['run.snapshot', 'run.ready', 'run.begin', 'run.commit'])
+        self.assertFalse(calls[0][1]['wait'])
+        self.assertEqual(context.record_devices(), {'devices': {'rf': {}}})
+        context.commit_live({'reading': output})
+        self.assertEqual([op for op, _ in calls].count('run.snapshot'), 1)
+        context = RunContext(run)
+        process.request = lambda op, params: calls.append((op, params))
+        self.assertIsNone(context.record_devices())
+        self.assertIsNone(context.record_devices(wait=True))
+        self.assertTrue(calls[-1][1]['wait'], 'null answers must not be cached as device records')
+
+    def test_device_recording_follows_accepted_armed_settings_and_keeps_cleanup(self):
+        from zlc_atom.nodes.camera.measurement import CameraMeasurementNode
+        from zlc_atom.nodes.waveform_measurement.measurement import WaveformMeasurementNode
+
+        for kind in ('camera', 'camera monitor', 'waveform'):
+            with self.subTest(kind=kind):
+                events = []
+                if kind.startswith('camera'):
+                    node = object.__new__(CameraMeasurementNode)
+                    node._request = types.SimpleNamespace(repeat=1 if kind == 'camera' else 0, frames_per_cycle=1)
+                    node.camera = types.SimpleNamespace(finish_record_capture=lambda: events.append('close'))
+                    if kind == 'camera':
+                        node._configure_capture = lambda: events.append('configure')
+                        node._arm_configured = lambda **kwargs: events.extend(['arm', 'accepted'])
+                        prepare = node.prepare
+                    else:
+                        node._configure_for_run = lambda: events.append('configure')
+                        node._buffer_frame_count = lambda point: 2
+                        node.camera.timeout = 1
+                        node.camera.arm = lambda *args, **kwargs: events.append('arm')
+                        node.camera.working_point = lambda: None
+                        node._freeze_working_point = lambda point: events.append('accepted')
+                        node._run_record = {}
+                        prepare = lambda **kwargs: node.monitor(commit_live=lambda outputs: None, **kwargs)
+                else:
+                    node = object.__new__(WaveformMeasurementNode)
+                    node.sampler = types.SimpleNamespace(finish_record_capture=lambda: events.append('close'))
+                    node._configure = lambda: events.append('configure')
+                    node._arm = lambda: events.extend(['arm', 'accepted'])
+                    prepare = node._armed
+                prepare(after_arm=lambda: events.append('snapshot'))
+                self.assertEqual(events, ['configure', 'arm', 'accepted', 'snapshot'])
+                events.clear()
+                def refused():
+                    events.append('snapshot'); raise RuntimeError('run cancelled')
+                with self.assertRaisesRegex(RuntimeError, 'run cancelled'): prepare(after_arm=refused)
+                self.assertEqual(events, ['configure', 'arm', 'accepted', 'snapshot', 'close'])
+
     def test_close_waits_for_concurrent_sdk_calls_and_rejects_new_ones(self):
         owner = Owner(); instance = host.Instance(owner, 'camera'); owner.instances['camera'] = instance
         entered = threading.Event(); release = threading.Event(); closed = threading.Event()

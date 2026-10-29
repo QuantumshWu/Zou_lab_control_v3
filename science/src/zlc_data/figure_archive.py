@@ -7,6 +7,7 @@ land. Arrays stay NPZ members; explanatory metadata is one strict JSON tree.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 import json
 import math
 from typing import Any, BinaryIO
@@ -37,6 +38,9 @@ __all__ = [
 FIGURE_SCHEMA = "zlc.figure"
 _INFO_KEY = "info"
 _ROOT_KEYS = {"schema", "name", "members", "sections"}
+_APPARATUS_TABLE = "apparatus_table"
+_APPARATUS_SCHEMA = "zlc.figure.apparatus-table/1"
+_APPARATUS_REF = "$apparatus"
 
 # Deflate is valuable for structured scientific arrays and disastrously slow
 # for large camera noise it barely shrinks.  Probe at most one MiB; a large
@@ -86,6 +90,77 @@ def _jsonable(value: Any, path: str = "metadata", memo: dict[int, Any] | None = 
             "not inside metadata"
         )
     raise TypeError(f"{path} contains unsupported metadata type {type(value).__name__}")
+
+
+def _apparatus_records(sections: dict[str, Any]):
+    """Only run/event records and the saved source own apparatus observations."""
+    def records(value):
+        if not isinstance(value, dict):
+            return
+        if "apparatus" in value:
+            yield value
+        acquisition = value.get("acquisition")
+        runs = acquisition.get("runs") if isinstance(acquisition, dict) else None
+        if isinstance(runs, list):
+            for run in runs:
+                record = run.get("record") if isinstance(run, dict) else None
+                if isinstance(record, dict) and "apparatus" in record:
+                    yield record
+
+    lineage = sections.get("lineage")
+    nodes = lineage.get("nodes") if isinstance(lineage, dict) else None
+    if isinstance(nodes, list):
+        for node in nodes:
+            if isinstance(node, dict):
+                for name in ("record", "event_record"):
+                    yield from records(node.get(name))
+    source = sections.get("source")
+    record = source.get("run_record") if isinstance(source, dict) else None
+    yield from records(record)
+
+
+def _pack_apparatus(sections: dict[str, Any]) -> dict[str, Any] | None:
+    """Share exact observations, including context, timestamps and numeric types."""
+    records, indices, entries = [], {}, []
+    for record in _apparatus_records(sections):
+        value = record["apparatus"]
+        key = json.dumps(value, ensure_ascii=False, allow_nan=False,
+                         separators=(",", ":"), sort_keys=True)
+        if key not in indices:
+            indices[key] = len(records)
+            records.append(value)
+        entries.append((record, indices[key]))
+    if len(entries) == len(records):
+        return None
+    for record, index in entries:
+        record["apparatus"] = {_APPARATUS_REF: index}
+    return {"schema": _APPARATUS_SCHEMA, "records": records}
+
+
+def _unpack_apparatus(info: dict[str, Any]) -> None:
+    if _APPARATUS_TABLE not in info:
+        return
+    table = info.pop(_APPARATUS_TABLE)
+    if not isinstance(table, dict):
+        raise ValueError("figure apparatus table must be an object")
+    exact_keys(table, {"schema", "records"}, "figure apparatus table")
+    if table["schema"] != _APPARATUS_SCHEMA:
+        raise ValueError("unsupported figure apparatus table schema")
+    records = table["records"]
+    if not isinstance(records, list) or not records:
+        raise ValueError("figure apparatus table records must be a non-empty array")
+    used = set()
+    for record in _apparatus_records(info["sections"]):
+        reference = record["apparatus"]
+        if not isinstance(reference, dict) or set(reference) != {_APPARATUS_REF}:
+            raise ValueError("figure apparatus reference must contain only $apparatus")
+        index = reference[_APPARATUS_REF]
+        if type(index) is not int or not 0 <= index < len(records):
+            raise ValueError("figure apparatus reference is out of range")
+        used.add(index)
+        record["apparatus"] = deepcopy(records[index])
+    if len(used) != len(records):
+        raise ValueError("figure apparatus table contains unused records")
 
 
 def _snapshot_members(key: str, snapshot: OwnedSnapshot) -> dict[str, str]:
@@ -241,13 +316,13 @@ def write_figure_archive(
     members = {
         key: _member_descriptor(array) for key, array in sorted(stored.items())
     }
+    apparatus = _pack_apparatus(plain_sections)
+    document = {"schema": FIGURE_SCHEMA, "name": name, "members": members,
+                "sections": plain_sections}
+    if apparatus is not None:
+        document[_APPARATUS_TABLE] = apparatus
     info = json.dumps(
-        {
-            "schema": FIGURE_SCHEMA,
-            "name": name,
-            "members": members,
-            "sections": plain_sections,
-        },
+        document,
         ensure_ascii=False,
         allow_nan=False,
         separators=(",", ":"),
@@ -295,7 +370,8 @@ def _parse_info(array: np.ndarray) -> dict[str, Any]:
 
 
 def _validate_current_info(info: dict[str, Any]) -> dict[str, Any]:
-    exact_keys(info, _ROOT_KEYS, "figure metadata")
+    keys = _ROOT_KEYS | {_APPARATUS_TABLE} if _APPARATUS_TABLE in info else _ROOT_KEYS
+    exact_keys(info, keys, "figure metadata")
     if info["schema"] != FIGURE_SCHEMA:
         raise ValueError(f"unsupported figure format {info['schema']!r}")
     if (
@@ -338,6 +414,7 @@ def _validate_current_info(info: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 f"figure member {key!r} shape must be nonnegative integers"
             )
+    _unpack_apparatus(info)
     return info
 
 

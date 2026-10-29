@@ -866,7 +866,8 @@ class SlmRearrangementTask:
                         request=CameraMeasurementRequest(camera_key=self.camera_key, exposure_seconds=self.exposure_seconds,
                             roi_xywh=self.roi, repeat=2, frames_per_cycle=1, photoelectrons=bool(photoelectron)),
                         producer=f"{self.instance_id}/camera")
-                    start = perf_counter(); capture = node.prepare(should_stop=context.cancel_requested)
+                    start = perf_counter(); capture = node.prepare(should_stop=context.cancel_requested,
+                                                                  after_arm=context.record_devices)
                     self._timings["camera_arm"] = (perf_counter()-start)*1000
                     self._device_snapshots["camera"] = dict(node.run_record["device_snapshots"]["camera"])
                     if self._overlay_geometry is None:

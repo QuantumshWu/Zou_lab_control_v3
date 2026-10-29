@@ -233,6 +233,7 @@ class RunContext:
         self._begun = False
         self._ordinals: dict[str, int] = {}
         self._sent_schema: dict[str, str] = {}
+        self._device_record: dict[str, Any] | None = None
 
     # ---------------------------------------------------------- identity
 
@@ -413,6 +414,16 @@ class RunContext:
 
     # ---------------------------------------------------------- publication
 
+    def record_devices(self, *, wait: bool = False) -> dict[str, Any] | None:
+        """Record the configured apparatus before publication. Runs in one
+        acquisition context reuse its first explicitly captured state."""
+
+        if not self._run.params.get("record_devices", False):
+            return None
+        if self._device_record is None:
+            self._device_record = self._request("run.snapshot", {"wait": bool(wait)})
+        return self._device_record
+
     def set_run_record(self, record: Mapping[str, Any]) -> Mapping[str, Any]:
         """Declare this run's prepared facts before its first event."""
 
@@ -471,6 +482,7 @@ class RunContext:
             if output.shot_time_seconds is not None:
                 times[name] = float(output.shot_time_seconds)
         if not self._begun:
+            self.record_devices(wait=True)
             self._request("run.begin", {"record": self._record, "outputs": [
                 {"name": name, "schema": _tree(schema), "storage": storage, "index_by_source": index}
                 for name, (schema, storage, index) in self._declared.items()]})

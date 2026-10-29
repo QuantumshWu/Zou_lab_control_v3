@@ -34,7 +34,7 @@ fn the_virtual_mot_camera_and_camera_measurement_run_through_the_host() {
         host.start_run("camera_measurement1", RunRequest { prepared: Some(token), device_labels: Default::default(), values,
         devices: [("camera".to_owned(), "mot".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None,
-        outputs: [("frames".to_owned(), "@logic/camera_measurement1/frames".to_owned())].into(), apparatus: None }).unwrap() };
+        outputs: [("frames".to_owned(), "@logic/camera_measurement1/frames".to_owned())].into(), record_devices: false }).unwrap() };
     let wait = |run: &str, stop_after: Option<u64>| loop {
         match events.recv_timeout(Duration::from_secs(120)).expect("run events") {
             HostEvent::RunProgress { run: id, current, .. } if id == run && current.is_some() => {}
@@ -92,7 +92,7 @@ fn the_virtual_mot_camera_and_camera_measurement_run_through_the_host() {
         Duration::from_secs(30)).unwrap().value["prepared"].as_str().unwrap().to_owned();
     let derive = host.start_run("derive1", RunRequest { prepared: Some(token), device_labels: Default::default(), values: json!({"variables": variables}), devices: Default::default(),
         shared: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: Some(frames.to_owned()), run_directory: None,
-        outputs: [("doubled".to_owned(), "@logic/derive1/doubled".to_owned())].into(), apparatus: None }).unwrap();
+        outputs: [("doubled".to_owned(), "@logic/derive1/doubled".to_owned())].into(), record_devices: false }).unwrap();
     std::thread::sleep(Duration::from_secs(2));
     host.stop_run("camera_measurement1", &camera).unwrap();
     let (mut camera_done, mut derive_done) = (None, None);

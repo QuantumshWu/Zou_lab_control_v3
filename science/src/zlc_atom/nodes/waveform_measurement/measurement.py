@@ -485,10 +485,12 @@ class WaveformMeasurementNode:
         )
 
     # ------------------------------------------------------------- capture
-    def _armed(self) -> None:
+    def _armed(self, *, after_arm: Callable[[], object] | None = None) -> None:
         try:
             self._configure()
             self._arm()
+            if after_arm is not None:
+                after_arm()
         except BaseException as error:
             # A sampler still holding the last capture's failure raises it
             # from finish: noted, never in place of this one.
@@ -505,7 +507,7 @@ class WaveformMeasurementNode:
         self.instance_id = context.instance_id
         self._generation = context.generation
         if self.repeat == 0:
-            self._armed()
+            self._armed(after_arm=context.record_devices)
             capture = MonitorCapture(self, commit_live=context.commit_live)
             try:
                 context.set_run_record(self.run_record)
@@ -520,7 +522,7 @@ class WaveformMeasurementNode:
                 raise
             capture.close()
             return {"shots": capture.revision}
-        self._armed()
+        self._armed(after_arm=context.record_devices)
         capture = FiniteCapture(self, should_stop=context.cancel_requested)
         try:
             context.set_run_record(self.run_record)

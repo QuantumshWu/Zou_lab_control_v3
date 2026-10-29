@@ -12,8 +12,8 @@ import { queueStatus, saveImage } from "../shell.js";
 import { DataEditorView, saveDataAs } from "./data_editor.js";
 import { PanelEditView } from "./panel_edit.js";
 const baseName = (path) => path.split(/[\\/]/).pop() ?? path;
-/** The record's tabs v2 declares on its InfoPane (they bound its width; until the host sends them, they stand empty). */
-const INFO_TABS = ["Plot", "Logic", "Devices", "Flow", "Raw"];
+/** The record's tabs bound the InfoPane width and stand empty until the host sends them. */
+const INFO_TABS = ["Plot", "Logic", "Devices", "Flow"];
 export class FigureViewerView {
     ctx;
     board;
@@ -104,8 +104,7 @@ export class FigureViewerView {
         this.path = doc?.path ?? "";
         this.info.setPath(this.path);
         const tabs = doc?.info;
-        // The record's tabs as the archive gives them; until the host sends them,
-        // the five v2 declares, empty.
+        // The record's tabs as the archive gives them, empty before a file opens.
         this.info.setTabs(tabs?.length ? tabs : INFO_TABS.map(title => [title, []]));
         const flow = doc?.flow;
         const signature = JSON.stringify(flow ?? null);

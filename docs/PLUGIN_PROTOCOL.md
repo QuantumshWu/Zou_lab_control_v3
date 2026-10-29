@@ -226,9 +226,8 @@ also offers `tune_in_unit`; the device-side SDK applies its native conversion
 when available, with the same rules as Device Control. Draft queries cannot tune.
 At `run.begin` the host stamps `node` with the instance ID and `node_name` with
 the current operator name, overriding plugin-supplied identity. Later renames
-do not change this historical record. It also writes `apparatus`, the bench at
-Start the core took (`RunRequest.apparatus`, section 5); a plugin's own key of
-that name is dropped, given or not.
+do not change this historical record. It also writes the core's configured
+acquisition `apparatus` (section 5); a plugin's own key of that name is dropped.
 
 A run ends with event `run.finished {run, outcome: completed|stopped|failed,
 result, error}`. The core seals the run's Runtime generation with that outcome
@@ -287,7 +286,7 @@ Core -> plugin requests (each names its `instance`): `hello`, `open`, `configure
 `close`, `exit`, `ping`, `spi {method, args, kwargs}` (call the open device's
 adapter; `get:<name>` reads a property), `command {name, params}` (section 8),
 `fields {units?}` / `tune {field, value, unit?}` / `values` (the tunable quartet), `snapshot`
-(the device's settings for the bench a Start records, below), `make_safe
+(the device's configured state for an acquisition, below), `make_safe
 {output}`, `publish {published}` (Remote of a type that `announces`: section 10), `query {name, values?, devices?, resources?, source?, output_name?,
 installation?}` (the facts by name; the SDK calls the v2 callable with them in v2's
 positional order, `zlc_plugin.declare.QUERY_PARAMETERS`; `devices` become proxies), `run.start`. Events: `release
@@ -296,53 +295,60 @@ plain JSON (dataclasses as objects, tuples as lists, dtypes and enums as their
 values, arrays still as references); the core always asks for that, while a
 plugin-to-plugin call keeps the tagged types of section 6.
 
-**The bench at Start.** A measurement or task run records the apparatus it
-started on as the core's fact, whatever its node writes in its own record (a
-camera measurement claims only its camera; a scan records only the RF it
-scans). When its start may launch, the workbench asks `snapshot` of every open
-device whose `open` answer said `snapshot: true`, all at once, and launches the
-run once each has answered; the pulse board (native) answers whether it is
-`loaded` and `firing`, its program's `digest` and `snapshot` (v2
-`sequencer_archive_snapshot`: board facts, state, program, pulse). The SDK
-answers through `zlc_plugin.tunable.snapshot`: the adapter's own `snapshot()`
-when it has one (a device whose state is more than its knobs), else its
-quartet's reads as `values` answers them, with the unit of each its field
-declares (`{values, units, provenance}`: the Viewer's Devices tab reads "80 MHz"), else null
-(it does not report its settings). The core asks with a 2 s bound as an
-untracked request: a device busy in another run's call misses it without being
-taken for unresponsive, and its late answer is dropped. The local pipe writer
-is also included in that budget. At most one snapshot per device remains in
-flight; another caller waits only its own budget before reporting it busy.
-An unsent expired request is cancelled. A synchronous pipe write already
-started finishes its frame in the background, then retires on the actual
-answer or process exit, without marking the device unresponsive.
-Explicit host shutdown has an independent close/exit deadline, so a frame
-stuck in a full pipe cannot prevent its already-closing owner from exiting.
-`RunRequest.apparatus`
-carries the result and `run.begin` writes it into the run record:
+**Device state at acquisition.** Workbench Start prepares and launches a node without
+reading the whole bench. A measurement/task run opts into the application's capture
+through `RunRequest.record_devices`; the SDK's `context.record_devices()` sends
+`run.snapshot {wait: false}` at the configured acquisition boundary. Cameras and
+waveform sources call it after arm and accepted working-point readback, before their
+read/publish loop. A scan sets its first device point and loads its pulse before
+starting its acquisition source, then reuses that capture before FIRE. Restoration
+backups stay inside the device-knob owner; saved scan state is the applied first point.
+Each point additionally keeps actual readbacks, units and provenance with its data.
 
-```json
-{"taken_at": "2026-10-25T13:02:11.512+00:00",
- "devices": {"trap_rf": {"type_id": "rf.vaunix_lms", "role": "Trap RF", "values": {"frequency": 80000000.0, "power": -3.0, "output_enabled": true}, "units": {"frequency": "Hz", "power": "dBm"}, "provenance": {"device_session_id": "39379c…", "settings_epoch": 4}},
-             "mot_camera": {"type_id": "camera.virtual_mot", "role": "mot_camera", "unavailable": "timeout: snapshot did not answer within 2.0 s"},
-             "spare": {"type_id": "camera.pylon", "role": "spare", "unavailable": "does not report its settings"}},
- "sequencer": {"sequencer": {"type_id": "sequencer.virtual", "role": "sequencer", "driver": {"outside": "PulseGUI"},
-                             "loaded": true, "firing": true, "digest": "5f0c…", "snapshot": {"description": {}, "config": {}, "state": {}, "program": {}, "pulse": {}}}}}
-```
+A task and a child acquired with `completion: ready` share one capture context.
+The first explicit caller records it; subsequent callers receive the same record.
+A `terminal` acquisition has its own context. Before a run's first publication the
+SDK requests `run.snapshot {wait: true}` if it has no record yet. This joins an
+in-flight capture, or returns no additional apparatus when there was no explicit capture (a task
+that only consumes another acquisition keeps its source records). It never reads
+later hardware state and calls it the earlier acquisition state.
+Stop, failure and context completion release waiting requests. Processor runs
+inherit their sources' records and do not collect the bench themselves.
 
-Every live device has an entry (`type_id`, `role`); one that gave no settings
-says why in `unavailable` (still opening, failed, published, timed out, or not
-reporting). Fabric devices advertise the owner's `snapshot` capability and
-return that same snapshot, including device-specific fields and units. An
-older publisher that omits the capability is explicitly unavailable until
-updated. `apparatus.device_transports[instance]` records the fabric endpoint
-separately, without replacing a device's own transport or provenance fields.
-If a snapshot uses an apparatus identity field such as `role`, its differing
-value is preserved in the device entry's `snapshot_fields`; the core identity
-stays authoritative. A board's `driver` is the run that
-claims it (`{run, node}`), an outside driver (`{outside: "PulseGUI"}`: On Pulse),
-or null. Values are in each field's own unit, as `values` reads them. A
-processor takes no bench: its sources' records reach it through lineage.
+The workbench asks every open device that advertises `snapshot: true` concurrently,
+including static devices that a node does not directly call. The SDK uses the
+adapter's own `snapshot()` when provided, otherwise the tunable quartet returns
+`{values, units, provenance}`. The native sequencer includes its loaded program
+and pulse. Missing support, busy devices, read errors and timeouts remain explicit
+`unavailable` values. The 2 s budget includes the local pipe writer; at most one
+snapshot per device is in flight. Expired unsent requests are cancelled; a partially
+written local frame completes and its late answer is dropped. Snapshot timeouts
+never mark an otherwise responsive device failed or take its owner. Explicit host
+shutdown retains its own close/exit deadline.
+
+The core installs the observation before acknowledging `run.snapshot`; `run.begin`
+writes it as `apparatus`. Plugin-supplied `apparatus` cannot replace this record.
+The envelope contains `phase: "acquisition"`, `context`, `taken_at`, `completed_at`,
+`devices`, `sequencer`, and optional `device_transports`. The timestamps bound the
+read interval, not an assertion that every device was sampled simultaneously.
+Each device includes its identity and complete original payload. Identity conflicts
+are retained in `snapshot_fields`; remote endpoints live in `device_transports`
+and never overwrite device-owned provenance. Remote snapshots forward the owner's
+same complete payload. An old publisher without the capability is unavailable.
+
+Figure archives store identical shared apparatus records once when they occur in
+multiple lineage/source records. The optional root `apparatus_table` has schema
+`zlc.figure.apparatus-table/1` and a `records` array; only designated record.apparatus
+positions use exact `{"$apparatus": index}` references. Rust and Python readers
+expand these references and remove the table before exposing the document. The
+public metadata structure is unchanged; records with different context, timestamps
+or payloads are never conflated. Files without a table retain their existing format.
+Finite dataset provenance includes all acquired ranges, not only the last event.
+Its `acquisition` projection contains deduplicated `runs`, `events` and placed
+`ranges`; event parents retain the source's settings epochs. Publication prefixes
+hold immutable backward metadata chains, so later commits cannot change a saved
+prefix or make an old read retain future facts. Viewer groups these records under
+their actual Logic runs and device states rather than adding a Flow node per point.
 
 Plugin -> core events: `release {blocks, leases}`, `run.ready`, `run.progress`,
 `run.finished {run, outcome, result, error}`, `device.log {instance, line}` (one line of
@@ -360,13 +366,14 @@ Plugin -> core (only during a run, bound to its run id):
 
 | op | Meaning |
 |---|---|
-| `run.begin {outputs: [{name, schema, storage, index_by_source}], record}` | Declare the run's outputs and run record. `Runtime::begin` under owner `<instance>` with the record (plus the host's `node`, `node_name` and `apparatus`, section 3) as the run's metadata (who started it goes in the seal); a run consuming a source (a processor, or a run following its source signal) begins with `Runtime::begin_consuming`, a same-shot route of that signal, so a result is shown with the source event its `parents` name (v2 `source_name`); signals are the names the run's start gave (`RunRequest.outputs`, e.g. `@logic/<node>/<output>`), else `<instance>/<output>`. Storage `latest | finite`. |
+| `run.begin {outputs: [{name, schema, storage, index_by_source}], record}` | Declare the run's outputs and run record. `Runtime::begin` under owner `<instance>` with the record (plus the host's `node`, `node_name` and acquisition `apparatus`, section 3) as the run's metadata (who started it goes in the seal); a run consuming a source (a processor, or a run following its source signal) begins with `Runtime::begin_consuming`, a same-shot route of that signal, so a result is shown with the source event its `parents` name (v2 `source_name`); signals are the names the run's start gave (`RunRequest.outputs`, e.g. `@logic/<node>/<output>`), else `<instance>/<output>`. Storage `latest | finite`. |
 | `run.commit {inputs: [{output, ordinal, origin, data, schema?}], metadata, parents}` | One atomic bundle (`Runtime::commit`): siblings commit together or not at all. `origin` is the finite `(repeat, point)` placement; a finite event carries its chunk `schema` when it differs from the last one sent. `parents` are read leases the node consumed. Metadata is `{records: {output: event_record}, shot_time_seconds: {output: t}}`. Returns each output's publication key. |
 | `run.operator_input {kind, title, message, payload}` | Blocks the run thread until the operator answers or the run stops. |
 | `run.artifact {name, path, role, contract_id}` | Register a completed run-contained artifact. |
 | `run.figure {path, data, overlay, recipe, source, lineage, image}` | Save one figure (`RunContext.save_figure`, `zlc_plugin.figures`): the core writes the `zlc.figure` archive `<path stem>.npz` and, when `image`, renders `path` (`.png`/`.pdf`/`.svg`; no suffix = `.png`). `data` is one complete dataset `{schema, data: {values, validity, sigma}, block_id, revision, generation}` (`validity` true/false or its storage mask). `recipe` is `{spec, parameters, size}` plus any of `viewport, classifier_thresholds, facet_focus, fit, selectors, interaction, presentation`: `spec` is the archive recipe's spec tree; the core completes `parameters` with the kind's defaults, validates `size` and normalizes `classifier_thresholds` as a plot session keeps them (v2 `encode_plot_recipe`). `overlay` is null or `{revision, coordinates (N,2), point_ids, labels, static_statuses, status (a dataset), paths_xy (N,K,2)}`. `source`/`lineage` go into the archive's sections as v2's `save_figure_artifact` put them. Answers `{archive, image}` (`image` null when not drawn). Registering them as artifacts stays the plugin's. |
 | `run.animation {path, images, frame_ms}` | A looping GIF of the run's images (its figure previews, inside the run directory), `frame_ms` each, each frame on its own palette (v2's Pillow save of the recording previews); answers `{path}`. `RunContext.save_animation`. |
 | `run.acquire {node, completion}` | Start the acquisition node this run drives (v2's `restart_logic`); answered at `ready` or `terminal`. |
+| `run.snapshot {wait}` | Record configured acquisition state (`wait: false`) or join an existing observation before publication (`wait: true`). A ready parent/child context shares one observation; without an explicit capture, publication adds no empty or retrospective record. |
 | `core {command, params}` | Run one catalogue command (e.g. a Pulse operation) under the run's origin; the run's claims apply (a `pulse_*` command needs the sequencer claimed). From a draft query (`zlc_plugin.core`, `run: null`) only a `read` command is answered: an estimate's `pulse_estimate`. |
 | `device {argument, method, args, kwargs}` | Call a claimed device's SPI (section 7 checks apply). `tunable_fields` answers the same rows as the `fields` op, as data. |
 | `runtime.read {signal, mode, width}` | Read a Runtime signal: `event | dataset | window` (the event of a dataset publication, e.g. a Fit over a finite run, is its dataset). Returns `{lease, key, schema, window, segments: [{origin, extent, data}], metadata, run_record, placement, lineage}`, `lineage` its ancestry nearest first, each publication once: `[{key, run_record, event_record}]`; the lease is released (event `release {leases}`) when the SDK's `Read` is garbage. |

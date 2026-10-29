@@ -557,7 +557,7 @@ def _open(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
         instance.process.device_log.listen(_LOG_SOURCES + declared.log_channels)
         # What a draft query may call on it: the core refuses every other method then.
         # `narrates`: whether anything is its device log (v2 says so when not).
-        # `snapshot`: whether it reports its settings for the bench a Start records.
+        # `snapshot`: whether it reports its configured state for an acquisition.
         return {"state": "open", "tunable": _tunable(instance.adapter), "reads": list(capabilities.reads(instance.adapter)),
                 "narrates": bool(declared.log_channels or instance.log_token), "snapshot": tunable.reports_settings(instance.adapter)}
     instance.values = dict(params.get("parameters") or {})
@@ -719,7 +719,7 @@ def _values(instance: Instance, params: dict[str, Any]) -> Any:
 
 
 def _snapshot(instance: Instance, params: dict[str, Any]) -> Any:
-    """The bench at a Start: the device's settings as plain JSON, or None when it does not report them."""
+    """The device's configured state as plain JSON, or None when it does not report it."""
     instance.device()
     return plain(tunable.snapshot(instance.adapter))
 

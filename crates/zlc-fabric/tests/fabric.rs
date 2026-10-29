@@ -108,7 +108,7 @@ fn a_published_device_serves_another_core_through_its_blocks_claims_and_safe_act
     b.host.open("counter", "counter", json!({}), json!({})).unwrap();
     let signal = "@logic/counter/frames";
     let run = b.host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), values: json!({"count": 3, "size": 128}), devices: [("echo".to_owned(), "remote_echo".to_owned())].into(),
-        shared: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: None, run_directory: None, outputs: [("frames".to_owned(), signal.to_owned())].into(), apparatus: None }).unwrap();
+        shared: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: None, run_directory: None, outputs: [("frames".to_owned(), signal.to_owned())].into(), record_devices: false }).unwrap();
     let (outcome, result, error) = loop {
         match b.events.recv_timeout(Duration::from_secs(60)).expect("run events") {
             HostEvent::Request { run: id, ticket, params, .. } if id == run => b.host.respond(ticket, Ok(json!({"pong": params["params"]["value"]}))),

@@ -10,13 +10,27 @@
 能力位向后兼容：旧发布端没有 snapshot 能力时明确提示需要更新，不伪造数据。
 使用端和发布端都需要更新程序，新的采集记录才能保存远端状态。旧 NPZ 中未采集的历史设置不能补造。
 
-Start 的快照等待有总时限。普通快照超时不触发 watchdog、SAFE 或夺取 owner；
+配置完成后的快照等待有总时限。普通快照超时不触发 watchdog、SAFE 或夺取 owner；
 尚未发送的过期请求会取消，已开始的本地管道写入会完成帧并丢弃迟到结果，每设备最多一项在途。
 TCP 已写出部分帧后失败属于真实连接损坏，仍需断开以保护协议；零字节写入超时保留连接。
 显式关闭 host 时，超出原有关闭预算才结束本 host 所属的残留进程。
 
-SLM 本机 head 和网络 head 当前使用同一个 adapter，都未提供 Start snapshot，仍如实显示 unavailable。
+SLM 本机 head 和网络 head 当前使用同一个 adapter，都未提供 采集 snapshot，仍如实显示 unavailable。
 Sequencer 已有专用完整 snapshot，未改变。两个记录的 Pulse 入口及其语义均保留。
+
+## 采集记录与 Figure Viewer
+
+Start 不读取整台设备。实际采集源在 arm 和硬件接受参数确认之后、读取循环之前记录设备状态；
+扫描先设置首点、加载 Pulse，再启动采集源并复用同一份记录，最后触发。
+ready 子采集和父任务共享 context，独立 terminal 采集使用自己的 context。
+未显式采集的节点不附加空环境记录，沿用自身与来源事实；不在首份数据提交后补读并冒充之前状态。
+停止和结束会解除等候；静态设备仍包含在环境记录中，超时和不支持保留原因。
+
+相同 context 的完整 apparatus 在 NPZ 内只保存一次，由 Rust/Python reader 恢复完整公共结构。
+扫描的恢复备份只用于运行内部；首点记录保存实际设置，逐点读数保留硬件量化结果和单位。
+Figure Viewer 移除 Raw 标签：Logic 展示 run/event 事实，Plot 展示归档绘图配置，
+Devices 以有意义的状态与来源名称替代数组下标，严格相同状态合并来源。
+原始文件元数据保持完整，旧文件的启动前记录仍如实标记，不能改称实际采集状态。
 
 ## Pulse 文件按钮
 
@@ -45,9 +59,11 @@ DG4000 和通用 tunable 的标量单位转换共用精确前缀转换，step �
 
 ## 验证范围
 
-- 144 项相关 Rust 回归通过；交互式原生 picker 用例保持 ignored，本次没有运行。
-- 142 项 headless DOM 回归、21 项 Python 数值/生命周期回归通过。
-- 本地 TCP/mock 设备比较完整 local/remote snapshot，覆盖专用数据、字段冲突、unsupported、非 owner、失败及超时。
-- 本地假进程覆盖堵塞 writer、迟到 snapshot、重复请求与显式 shutdown；没有访问实际实验设备。
-- Python 数值/生命周期回归，DOM 数值控件、Pulse 按钮布局与 scan cache 回归。
+- 175 项 Rust 回归通过；交互式原生 picker 用例保持 ignored。
+- 17 项 Python 生命周期／扫描／数值回归、16 项相关 headless UI 回归通过。
+- 配置与 arm 后采集、首点 load/acquire/record/fire 顺序、真实量化读数、异常恢复、
+  parent/child 共享、取消和迟到回复均使用 fake 或模拟设备验证，没有访问实际硬件。
+- 有限数据的全部事件范围、父相机设置和冻结前缀保真；旧前缀不持有后续事件。
+- Rust/Python archive codec 验证共享记录的物理去重、完整解码、旧文件及错误引用拒绝。
+- 只读检查用户提供的旧 NPZ：相同远端状态合并来源，旧状态阶段如实保留，两个 Pulse 入口保留。
 - 没有使用 computer use，没有修改本机 VPN、系统代理或 Git 网络配置。

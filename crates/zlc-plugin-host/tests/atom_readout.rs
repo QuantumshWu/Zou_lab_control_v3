@@ -31,7 +31,7 @@ fn occupancy_and_frame_survival_follow_a_finite_site_frame_run() {
     let request = |values: serde_json::Value, resources: serde_json::Value, source: Option<&str>, outputs: &[(&str, &str)]| {
         RunRequest { prepared: None, device_labels: Default::default(), values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator, resources,
             source_signal: source.map(str::to_owned), run_directory: None,
-            outputs: outputs.iter().map(|(output, signal)| (output.to_string(), signal.to_string())).collect(), apparatus: None }
+            outputs: outputs.iter().map(|(output, signal)| (output.to_string(), signal.to_string())).collect(), record_devices: false }
     };
     let published = |name: &str| loop {
         if let Some(item) = runtime.signals().into_iter().rev().find(|item| item.signal.as_ref() == name && item.published) {

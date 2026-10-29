@@ -477,6 +477,7 @@ impl Builtin {
             }
             "run.acquire" => vec![Event::RunAcquire { run, ticket, node: params["node"].as_str().unwrap_or("").to_owned(),
                 completion: params["completion"].as_str().unwrap_or("ready").to_owned() }],
+            "run.snapshot" => vec![Event::RunSnapshot { run, ticket, wait: params["wait"].as_bool().unwrap_or(false) }],
             "core" => {
                 // The same command a client would send, under the run's origin.
                 let (reply, answer) = std::sync::mpsc::channel();
@@ -671,7 +672,7 @@ impl Plugins for Builtin {
         let request = RunRequest { prepared: run.prepared.clone(), values: Value::Object(run.values.clone()), devices: devices.into_iter().collect(), device_labels: run.device_labels.clone(), shared: run.shared.clone(), origin: origin(&run.origin),
             // Build arguments beside the values: chosen artifacts and resolved workspace resources.
             resources: Value::Object(run.artifacts.iter().chain(&run.resources).map(|(key, value)| (key.clone(), value.clone())).chain(keys).collect()), source_signal: (!run.source_signal.is_empty()).then(|| run.source_signal.clone()),
-            run_directory: run.directory.clone(), outputs: run.outputs.clone(), apparatus: run.apparatus.clone() };
+            run_directory: run.directory.clone(), outputs: run.outputs.clone(), record_devices: run.record_devices };
         let prepared = run.prepared.clone();
         let started = self.spawn("start", move |host| match host.start_run(&node, request) {
             Ok(hosted) => {
@@ -718,6 +719,16 @@ impl Plugins for Builtin {
         if let (Some(ticket), Some(host)) = (ticket, &self.0.borrow().host) { host.respond(ticket, result); }
     }
     fn acquired(&mut self, _run: &str, ticket: u64, result: Result<Value, String>) { self.respond(ticket, result); }
+    fn recorded(&mut self, run: &str, ticket: u64, result: Result<Value, String>) {
+        let result = result.and_then(|record| {
+            let stand = self.0.borrow();
+            let (hosted, instance) = stand.runs.lock().unwrap().hosted(run).ok_or("the recording run has ended")?;
+            stand.host.as_ref().ok_or("the plugin host is unavailable")?.record_devices(&instance, &hosted, record.clone())
+                .map_err(|error| error.to_string())?;
+            Ok(record)
+        });
+        self.respond(ticket, result);
+    }
     fn discover(&mut self, ticket: u64, type_id: &str, excluded: &[String]) {
         let (type_id, excluded) = (type_id.to_owned(), excluded.to_vec());
         // The bench part of the scan: what other computers publish (v2's remote family).

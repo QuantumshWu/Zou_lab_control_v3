@@ -7,7 +7,7 @@ native adapter owns conversions that depend on its state (an RF amplitude
 into the channel's load), every other one goes through the shared registry,
 an exact decimal shift within a unit family.  The SDK's ``fields`` and
 ``tune`` ops serve these; the plugin package re-exports them for its own use.
-The ``snapshot`` op (the bench at a Start) answers through the same rule: the
+The ``snapshot`` op (configured acquisition state) answers through the same rule: the
 adapter's own answer when it has one, else its quartet's reads.
 """
 
@@ -131,7 +131,7 @@ def reports_settings(device: Any) -> bool:
 
 
 def snapshot(device: Any) -> Any:
-    """The device's settings as a Start records them (PROTOCOL §5), never a device command.
+    """The device's settings at acquisition (PROTOCOL §5), never a device command.
 
     A device whose state is more than its knobs answers for itself (its own
     ``snapshot()``); a tunable one answers what the ``values`` op does, its

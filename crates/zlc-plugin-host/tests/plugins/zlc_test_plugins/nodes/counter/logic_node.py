@@ -25,6 +25,7 @@ class Counter:
         knobs.move("device:echo:amplitude", 1.0, "Vpp")
         tuned = self.echo.tunable_values()["amplitude"]
         knobs.restore()
+        context.record_devices()
         context.set_run_record({"count": self.count, "opened_with": self.echo.opened_with,
                                 "converted": list(self.echo.convert_tunable_value("gain", [1.0, 2.0], "1", "1")),
                                 "tuned_dbm": tuned, "restored_dbm": self.echo.tunable_values()["amplitude"],

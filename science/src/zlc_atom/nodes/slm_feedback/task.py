@@ -2376,7 +2376,8 @@ class SlmFeedbackTask:
         completed = False
         cycles: list[tuple[CameraFrameRecord, ...]] = []
         try:
-            capture = node.prepare(should_stop=context.cancel_requested)
+            self._board.load(self.pulse_path)
+            capture = node.prepare(should_stop=context.cancel_requested, after_arm=context.record_devices)
             actual = node.actual_working_point
             if actual is None:
                 raise RuntimeError("camera did not freeze its actual working point")
@@ -2417,10 +2418,8 @@ class SlmFeedbackTask:
                 current=0,
                 total=requested,
             )
-            # The board resolves the document, checks its ABI against the
-            # board, compiles, loads and fires it; ``applied`` is its archive
-            # snapshot of this FIRE.
-            receipt = self._board.run(self.pulse_path, run_repeats=requested, scan_repeats=1)
+            # The armed apparatus is recorded before FIRE supplies its execution facts.
+            receipt = self._board.fire_loaded(self.pulse_path, run_repeats=requested, scan_repeats=1)
             command_id = int(receipt["command_id"])
             applied = dict(receipt["applied"])
             digest = str(applied["program"]["digest"])

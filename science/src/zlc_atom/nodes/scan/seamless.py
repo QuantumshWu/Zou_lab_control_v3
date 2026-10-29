@@ -24,10 +24,12 @@ from __future__ import annotations
 import itertools
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 
 from zlc_data.units import DEFAULT_UNITS, figure_padded
+from zlc_plugin.tunable import snapshot as device_snapshot
 
 from zlc_atom.nodes._framework.pulse import STATUS_DONE, PulseBoard, check_cancelled, pulse_description
 
@@ -277,7 +279,8 @@ class SeamlessScanMeasurement:
         return values
 
     def _apply_device_setting(self, context: object, knobs: ScanDeviceKnobs, *,
-                              changed: Sequence[tuple[str, float, int, int]]) -> None:
+                              changed: Sequence[tuple[str, float, int, int]],
+                              readbacks: dict[str, dict[str, object]]) -> None:
         """Move the installed knobs this row names, through the one owner
         of the device-axis law.  The board has completed its previous run
         before any device is moved."""
@@ -287,7 +290,15 @@ class SeamlessScanMeasurement:
             axis = next(axis for axis in self.outer_axes if axis.port == port)
             bound = next(bound for bound in self.ports if bound.port == port)
             context.report_progress(f"Setting {bound.label} ({figure_padded(index + 1, points)}/{points})")
-            knobs.move(port, value, axis.unit or bound.unit)
+            unit = axis.unit or bound.unit
+            actual = knobs.move(port, value, unit)
+            key, field = device_port_parts(port)
+            previous = readbacks.get(key, {})
+            readbacks[key] = {
+                "values": {**previous.get("values", {}), field: actual},
+                "units": {**previous.get("units", {}), field: unit},
+                "provenance": dict(self.tunables[key].settings_provenance()),
+            }
 
     def _ask_for_setting(self, context: object, *, changed: Sequence[tuple[str, float, int, int]]) -> None:
         """Stop for the hand, and only for what the hand has to move."""
@@ -333,8 +344,18 @@ class SeamlessScanMeasurement:
             # Everything published so far belongs to the world before this point.
             context.discard_inputs()
             check_cancelled(context)
-            receipt = board.run(self.pulse_path, api_values=self._api_values_for(outer_row),
-                                run_repeats=shots, scan_repeats=sweeps, scan=table)
+            if "writer" not in state:
+                # The first point is configured; restoration values stay in ScanDeviceKnobs.
+                state["tunables"] = {key: device_snapshot(device) for key, device in sorted(self.tunables.items())}
+                board.load(self.pulse_path, api_values=self._api_values_for(outer_row), scan=table)
+                if self.acquisition_logic:
+                    context.report_progress("Preparing the acquisition")
+                    context.acquire(self.acquisition_logic, completion="ready")
+                context.record_devices()
+                receipt = board.fire_loaded(self.pulse_path, run_repeats=shots, scan_repeats=sweeps)
+            else:
+                receipt = board.run(self.pulse_path, api_values=self._api_values_for(outer_row),
+                                    run_repeats=shots, scan_repeats=sweeps, scan=table)
             command_id = int(receipt["command_id"])
             applied = dict(receipt["applied"])
             config = applied.get("config")
@@ -387,11 +408,13 @@ class SeamlessScanMeasurement:
                             "leaves every later frame without its shot"
                         )
                 last_delivery = monotonic()
-                context.commit_live(
-                    {SCAN_OUTPUT.name: writer.write(value, row=row_offset + row_index,
-                                                    scan_repeat=scan_repeat_base + sweep, run_repeat=shot)},
-                    source_publication=value,
-                )
+                output = writer.write(value, row=row_offset + row_index,
+                                      scan_repeat=scan_repeat_base + sweep, run_repeat=shot)
+                if state["readbacks"]:
+                    event = dict(output.event_record or {})
+                    event["actual_devices"] = {**event.get("actual_devices", {}), **state["readbacks"]}
+                    output = replace(output, event_record=event)
+                context.commit_live({SCAN_OUTPUT.name: output}, source_publication=value)
                 context.report_progress(
                     f"Scanning point {figure_padded(progress_base + delivered // shots + 1, progress_total)}"
                     f"/{progress_total}; shots",
@@ -457,29 +480,17 @@ class SeamlessScanMeasurement:
         # each shot.
         table = self._table(inner_rows)
         outer_rows = tuple(itertools.product(*(axis.values for axis in self.outer_axes)))
-        state: dict[str, object] = {"inner_rows": inner_rows, "outer_rows": outer_rows}
+        state: dict[str, object] = {"inner_rows": inner_rows, "outer_rows": outer_rows, "readbacks": {}}
         inner_count = len(inner_rows)
         segment = dict(table=table, state=state, inner_count=inner_count,
                        progress_total=self.repeats * len(outer_rows) * inner_count)
         knobs = ScanDeviceKnobs(self.tunables)
-        # The devices' settings as the scan found them: the run record states
-        # them, though it is completed only by the first fire, after the
-        # first point's knobs have moved.
-        state["tunables"] = {
-            key: {"settings": dict(device.tunable_values()), **dict(device.settings_provenance())}
-            for key, device in sorted(self.tunables.items())
-        }
         # The board is released per fire, inside ``_play_table``; what the
         # whole plan owes the bench is the knobs back where they were,
         # however it ended.
         try:
             board.stop()
             check_cancelled(context)
-            if self.acquisition_logic:
-                # Its own row says which node it is; a node's status never
-                # names another, whose name only the console knows.
-                context.report_progress("Preparing the acquisition")
-                context.acquire(self.acquisition_logic, completion="ready")
             if not self.outer_axes:
                 self._play_table(context, board, outer_row=(), sweeps=self.repeats, row_offset=0,
                                  scan_repeat_base=0, progress_base=0, **segment)
@@ -500,7 +511,8 @@ class SeamlessScanMeasurement:
                         self._ask_for_setting(context, changed=tuple(
                             entry for entry in changed if entry[0].startswith(MANUAL_PARAM_FAMILY)))
                         self._apply_device_setting(context, knobs, changed=tuple(
-                            entry for entry in changed if entry[0].startswith(DEVICE_PARAM_FAMILY)))
+                            entry for entry in changed if entry[0].startswith(DEVICE_PARAM_FAMILY)),
+                            readbacks=state["readbacks"])
                         for port, _value, point, points in changed:
                             if port.startswith(API_PARAM_FAMILY):
                                 check_cancelled(context)

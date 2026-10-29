@@ -116,6 +116,7 @@ impl Capture {
         let run = self.run_records[&run_key].clone();
         let mut event_record = field(current, "event")?.clone();
         if let Some(window) = current.get("window") { event_record.insert("window", window.clone()); }
+        if let Some(acquisition) = current.get("acquisition") { event_record.insert("acquisition", acquisition.clone()); }
         self.add_node(node_id.clone(), Json::object([
             ("id", Json::Str(node_id.clone())), ("event", event), ("parents", Json::Array(parents.into_iter().map(Json::Str).collect())),
             ("signals", Json::Array(vec![signal])), ("record", run), ("event_record", event_record),

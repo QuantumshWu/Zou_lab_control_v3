@@ -290,10 +290,8 @@ pub struct RunRequest {
     pub run_directory: Option<PathBuf>,
     /// Runtime signal name per output; an output not named here is `<instance>/<output>`.
     pub outputs: BTreeMap<String, String>,
-    /// The bench at Start (each open device's settings, the pulse board), the core's fact:
-    /// run.begin writes it into the run record as `apparatus`. None for a processor (its
-    /// sources' records reach it through lineage).
-    pub apparatus: Option<Value>,
+    /// The application answers explicit acquisition-state requests for this run.
+    pub record_devices: bool,
 }
 
 struct OutputState { signal: Arc<str>, schema: Arc<DatasetSchema>, finite: bool, chunk: Option<Arc<DatasetSchema>> }
@@ -803,13 +801,13 @@ impl PluginHost {
             }
             state.instances.get_mut(instance).unwrap().run = Some(RunState { id: run.clone(), origin: request.origin.clone(),
                 devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, route, outputs: HashMap::new(),
-                histories: Vec::new(), apparatus: request.apparatus.clone() });
+                histories: Vec::new(), apparatus: None });
             let following = following.map(|(follower, received)| { state.followers.push(follower); received });
             (process, devices, source, following)
         };
         let started = process.request("run.start", json!({"instance": instance, "run": run, "values": request.values,
             "devices": devices, "resources": request.resources, "source_signal": request.source_signal, "prepared": request.prepared,
-            "run_directory": request.run_directory, "origin": request.origin.to_string()}), CALL_DEADLINE);
+            "run_directory": request.run_directory, "origin": request.origin.to_string(), "record_devices": request.record_devices}), CALL_DEADLINE);
         if let Err(error) = started {
             inner.end_run(instance, &run, "failed", &json!({"error": error.message}));
             return Err(error);
@@ -831,6 +829,15 @@ impl PluginHost {
     pub fn respond(&self, ticket: u64, result: Result<Value, CallError>) {
         let waiting = self.inner.state.lock().unwrap().requests.remove(&ticket);
         if let Some((process, id)) = waiting { self.inner.answer(&process, &id, result.map(|value| (value, Vec::new()))); }
+    }
+
+    /// Freeze the application's configured device state before this run publishes.
+    pub fn record_devices(&self, instance: &str, run: &str, apparatus: Value) -> Result<(), CallError> {
+        let mut state = self.inner.state.lock().unwrap();
+        let current = Inner::run_of(&mut state, &json!({"instance": instance, "run": run}))?;
+        if current.generation.is_some() { return Err(CallError::new(ErrorKind::Refused, "device state must be recorded before the first publication")); }
+        current.apparatus = Some(apparatus);
+        Ok(())
     }
 
     /// Ask a run to stop; it ends with `RunFinished`.
@@ -1180,7 +1187,7 @@ impl Inner {
             "run.begin" => self.run_begin(&message["p"]).map(|value| (value, Vec::new())),
             "run.commit" => self.run_commit(&message["p"], &lends).map(|value| (value, Vec::new())),
             "runtime.read" => self.runtime_read(process, &message["p"]),
-            "run.operator_input" | "run.artifact" | "run.figure" | "run.animation" | "run.acquire" | "core" => {
+            "run.operator_input" | "run.artifact" | "run.figure" | "run.animation" | "run.acquire" | "run.snapshot" | "core" => {
                 // The application answers these (respond); the run's thread waits.
                 let params = &message["p"];
                 let (instance, run) = (params["instance"].as_str().unwrap_or("").to_owned(), params["run"].as_str().unwrap_or("").to_owned());
@@ -1244,7 +1251,7 @@ impl Inner {
             Declaration { signal, schema, storage: if finite { Storage::Finite } else { Storage::Latest } }
         }).collect();
         // Scientific facts belong to the plugin; identity and the name at declaration belong to the host,
-        // and the bench at Start to the core: a plugin's own `apparatus` is dropped, never shown as the core's.
+        // and the acquisition state to the core: plugin-authored `apparatus` is not authoritative.
         let mut record = if params["record"].is_object() { params["record"].clone() } else { json!({}) };
         record["node"] = json!(public_instance(&instance));
         record["node_name"] = json!(display_name);

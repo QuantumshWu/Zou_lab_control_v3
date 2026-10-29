@@ -15,8 +15,8 @@ import { DataEditorView, saveDataAs, type DataProjection } from "./data_editor.j
 import { PanelEditView, type EditInfo } from "./panel_edit.js";
 
 const baseName = (path: string): string => path.split(/[\\/]/).pop() ?? path;
-/** The record's tabs v2 declares on its InfoPane (they bound its width; until the host sends them, they stand empty). */
-const INFO_TABS = ["Plot", "Logic", "Devices", "Flow", "Raw"];
+/** The record's tabs bound the InfoPane width and stand empty until the host sends them. */
+const INFO_TABS = ["Plot", "Logic", "Devices", "Flow"];
 
 /** One data working copy as the host lists it: its tab's title, whether it holds unsaved work, what it shows. */
 type DataTab = { id: string; title: string; dirty: boolean; projection: DataProjection };
@@ -102,8 +102,7 @@ export class FigureViewerView implements View {
     this.path = doc?.path ?? "";
     this.info.setPath(this.path);
     const tabs = (doc as { info?: InfoTab[] } | undefined)?.info;
-    // The record's tabs as the archive gives them; until the host sends them,
-    // the five v2 declares, empty.
+    // The record's tabs as the archive gives them, empty before a file opens.
     this.info.setTabs(tabs?.length ? tabs : INFO_TABS.map(title => [title, []] as InfoTab));
     const flow = (doc as { flow?: Graph } | undefined)?.flow;
     const signature = JSON.stringify(flow ?? null);

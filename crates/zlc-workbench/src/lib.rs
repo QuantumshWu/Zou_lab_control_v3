@@ -36,7 +36,7 @@ pub trait Plugins {
     fn query(&mut self, instance: &str, ticket: u64, name: &str, args: &Value);
     /// A standard device op (`fields`, `values`, `tune`, `snapshot`) on an open instance. `snapshot`
     /// is answered within [`SNAPSHOT_WAIT`]: a device that has not answered by then is answered as
-    /// not answering (a Start waits for it), and its late answer is dropped.
+    /// not answering (the acquisition record waits for it), and its late answer is dropped.
     fn call(&mut self, instance: &str, ticket: u64, op: &str, params: &Value);
     fn start(&mut self, run: &RunSpec);
     fn rename(&mut self, _instance: &str, _name: &str) {}
@@ -48,6 +48,8 @@ pub trait Plugins {
     fn answer(&mut self, run: &str, request: &str, response: Option<&Value>);
     /// The reply to a run's `RunAcquire`: at the child's ready or terminal.
     fn acquired(&mut self, run: &str, ticket: u64, result: Result<Value, String>);
+    /// Install the core's acquisition record before answering the run's waiting request.
+    fn recorded(&mut self, run: &str, ticket: u64, result: Result<Value, String>) { self.acquired(run, ticket, result); }
     /// A device type's hardware scan, no instance opened: `{found: [{instance_id, role, parameters}], notes}`.
     /// `excluded`: the physical resources bound now (`serial:COM3`), which the scan touches none of.
     fn discover(&mut self, ticket: u64, type_id: &str, excluded: &[String]);
@@ -79,6 +81,7 @@ pub enum Event {
     RunRequest { run: String, request: Value },
     RunArtifact { run: String, artifact: Value },
     RunAcquire { run: String, ticket: u64, node: String, completion: String },
+    RunSnapshot { run: String, ticket: u64, wait: bool },
     /// `outcome`: completed, stopped or failed.
     RunFinished { run: String, outcome: String, error: Option<Value>, generation: Option<String> },
 }
@@ -109,8 +112,7 @@ pub struct RunSpec {
     /// Output name -> the signal the run publishes it as.
     pub outputs: BTreeMap<String, String>,
     pub origin: String,
-    /// The bench at Start (a measurement's or task's, `bench.rs`): its record's `apparatus`.
-    pub apparatus: Option<Value>,
+    pub record_devices: bool,
 }
 
 /// A Runtime signal as the board sees it.
@@ -154,8 +156,8 @@ pub(crate) enum Ticket {
     Publish { device: String, published: bool, request: u64 },
     /// A panel's region asked its producer what it sets (`selection_patch`).
     Selection { node: String, panel: String, selection: Value },
-    /// One device's settings for the bench a pending start records.
-    Snapshot { node: String, device: String },
+    /// One device's settings for an acquisition observation in flight.
+    Snapshot { run: String, device: String },
 }
 
 pub struct Workbench {
@@ -437,6 +439,7 @@ impl Workbench {
             Event::RunRequest { run, request } => self.run_requested(&run, request),
             Event::RunArtifact { run, artifact } => { if let Some(record) = self.run_mut(&run) { record.artifacts.push(artifact); } }
             Event::RunAcquire { run, ticket, node, completion } => self.run_acquire(&run, ticket, &node, &completion, host),
+            Event::RunSnapshot { run, ticket, wait } => self.run_snapshot(&run, ticket, wait),
             Event::RunFinished { run, outcome, error, generation } => self.run_finished(&run, &outcome, error, generation, host),
         }
         self.poll_recipe(host);
@@ -465,7 +468,7 @@ impl Workbench {
             Ticket::Resolve { device } => self.resolved(ticket, &device, result),
             Ticket::Publish { device, published, request } => self.published(&device, published, request, result),
             Ticket::Selection { node, panel, selection } => self.selection_patched(&node, &panel, &selection, result),
-            Ticket::Snapshot { node, device } => self.bench_answered(&node, &device, ticket, result, host),
+            Ticket::Snapshot { run, device } => self.bench_answered(&run, &device, ticket, result),
             Ticket::Tune { device, request } => {
                 let reply = result.clone().map(|readback| json!({"device": device, "readback": readback}));
                 self.replies.push((request, reply));

@@ -23,6 +23,9 @@ const IMAGE='C:\\data files\\扫描 01.v2.PNG',ARCHIVE='C:\\data files\\扫描 0
 const check=(name,test)=>{test();checks.push(name)};
 try {
  accept('',0);
+ check('the information pane has no duplicate Raw metadata page',()=>{
+  equal([...viewer.info.tabs.strip.querySelectorAll('.tab-label')].map(label=>label.textContent),['Plot','Logic','Devices','Flow'],'info tabs');
+ });
  check('Browse requests the native visual picker without guessing a path',()=>{
   assert(browse.title.includes('thumbnails')&&browse.title.includes('same-named'),'visual matching guidance missing');
   browse.click();equal(sent.at(-1),{action:'open'},'Browse');

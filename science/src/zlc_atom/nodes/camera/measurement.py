@@ -965,6 +965,7 @@ class CameraMeasurementNode:
         self,
         *,
         should_stop: Callable[[], bool] | None = None,
+        after_arm: Callable[[], object] | None = None,
     ) -> FiniteCapture:
         """Arm the camera for one finite acquisition.
 
@@ -978,7 +979,10 @@ class CameraMeasurementNode:
             raise ValueError("finite prepare requires request.repeat greater than zero")
         try:
             self._configure_capture()
-            return self._arm_configured(should_stop=should_stop)
+            capture = self._arm_configured(should_stop=should_stop)
+            if after_arm is not None:
+                after_arm()
+            return capture
         except BaseException as error:
             try:
                 self.camera.finish_record_capture()
@@ -993,7 +997,7 @@ class CameraMeasurementNode:
         self.instance_id = context.instance_id
         self._generation = context.generation
         if self.repeat == 0:
-            capture = self.monitor(commit_live=context.commit_live)
+            capture = self.monitor(commit_live=context.commit_live, after_arm=context.record_devices)
             try:
                 self._run_record = context.set_run_record(self.run_record)
                 context.report_ready()
@@ -1007,7 +1011,7 @@ class CameraMeasurementNode:
                 raise
             capture.close()
             return {"cycles": capture._revision}
-        capture = self.prepare(should_stop=context.cancel_requested)
+        capture = self.prepare(should_stop=context.cancel_requested, after_arm=context.record_devices)
         try:
             self._run_record = context.set_run_record(self.run_record)
             context.report_ready()
@@ -1029,7 +1033,7 @@ class CameraMeasurementNode:
         capture.read_cycles(commit_cycle)
         return {"cycles": capture.completed_cycles}
 
-    def monitor(self, *, commit_live: Callable[..., object]) -> MonitorCapture:
+    def monitor(self, *, commit_live: Callable[..., object], after_arm: Callable[[], object] | None = None) -> MonitorCapture:
         """Arm a repeat-zero capture that publishes every complete cycle."""
 
         cycle_size = self.frames_per_cycle
@@ -1049,6 +1053,8 @@ class CameraMeasurementNode:
             )
             self._freeze_working_point(self.camera.working_point())
             self._run_record["acquisition"] = {"buffer_frame_count": buffer_frames}
+            if after_arm is not None:
+                after_arm()
             return MonitorCapture(self.camera, node=self, commit_live=commit_live)
         except BaseException as error:
             try:

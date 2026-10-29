@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::{Host, PanelContent, Plugins, RunSpec, SignalInfo, TypeCatalog};
 
 #[derive(Default)]
-pub struct Calls(pub Vec<String>, pub Vec<RunSpec>, pub Vec<(String, u64, Value)>);
+pub struct Calls(pub Vec<String>, pub Vec<RunSpec>, pub Vec<(String, u64, Value)>, pub Vec<(String, u64, Result<Value, String>)>);
 
 pub struct FakePlugins { pub calls: Rc<RefCell<Calls>>, pub catalog: Value }
 
@@ -49,7 +49,11 @@ impl Plugins for FakePlugins {
     fn start(&mut self, run: &RunSpec) { let mut calls = self.calls.borrow_mut(); calls.0.push(format!("start {}", run.run)); calls.1.push(run.clone()); }
     fn stop(&mut self, run: &str) { self.calls.borrow_mut().0.push(format!("stop {run}")); }
     fn answer(&mut self, run: &str, request: &str, response: Option<&Value>) { self.calls.borrow_mut().0.push(format!("answer {run} {request} {}", response.is_some())); }
-    fn acquired(&mut self, run: &str, ticket: u64, result: Result<Value, String>) { self.calls.borrow_mut().0.push(format!("acquired {run} {ticket} {}", result.is_ok())); }
+    fn acquired(&mut self, run: &str, ticket: u64, result: Result<Value, String>) {
+        let mut calls = self.calls.borrow_mut();
+        calls.0.push(format!("acquired {run} {ticket} {}", result.is_ok()));
+        calls.3.push((run.to_owned(), ticket, result));
+    }
     fn discover(&mut self, ticket: u64, type_id: &str, excluded: &[String]) {
         let mut calls = self.calls.borrow_mut();
         calls.0.push(format!("discover {ticket} {type_id}"));
@@ -1644,12 +1648,20 @@ mod tests {
         assert!(wb.devices["mot_camera"].close_failed);
     }
 
-    /// The bench at a Start: a measurement asks every open device that reports its settings,
-    /// all at once, and launches once each has answered; a device that answers late, has failed
-    /// or reports nothing is entered with why. The pulse board's entry says who drives it -- the
-    /// Pulse Editor's On Pulse, or the run that claims it. A processor takes no bench.
+    fn snapshot_calls(calls: &Rc<RefCell<Calls>>) -> Vec<(String, u64)> {
+        calls.borrow().0.iter().filter_map(|call| {
+            let words: Vec<&str> = call.split(' ').collect();
+            (words.len() == 4 && words[0] == "call" && words[3] == "snapshot").then(|| (words[1].to_owned(), words[2].parse().unwrap()))
+        }).collect()
+    }
+
+    fn snapshot_reply(calls: &Rc<RefCell<Calls>>, run: &str, ticket: u64) -> Option<Result<Value, String>> {
+        calls.borrow().3.iter().rev().find(|(owner, id, _)| owner == run && *id == ticket).map(|(_, _, value)| value.clone())
+    }
+
+    /// Configuration owns the capture boundary; failed/missing readbacks remain explicit.
     #[test]
-    fn a_start_records_the_bench_it_starts_on() {
+    fn acquisition_snapshot_reads_only_after_configuration_and_keeps_readback_errors() {
         let root = scratch("bench");
         let mut catalog = catalog();
         catalog["types"][3]["node"]["artifact_inputs"] = json!([]);
@@ -1681,29 +1693,31 @@ mod tests {
             "source_signal": "@logic/camera_measurement/frames"}));
         // The Pulse Editor plays its own pulse (On Pulse) while the camera measurement starts.
         workbench.device_users().lock().unwrap().insert("sequencer".into(), "PulseGUI".into());
-        let snapshots = |calls: &Rc<RefCell<Calls>>| -> Vec<(String, u64)> { calls.borrow().0.iter().filter_map(|call| {
-            let words: Vec<&str> = call.split(' ').collect();
-            (words.len() == 4 && words[0] == "call" && words[3] == "snapshot").then(|| (words[1].to_owned(), words[2].parse().unwrap()))
-        }).collect() };
         apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
-        let asked: Vec<String> = snapshots(&calls).into_iter().map(|(device, _)| device).collect();
+        assert!(snapshot_calls(&calls).is_empty(), "Start must not record the pre-configuration bench");
+        let spec = calls.borrow().1.last().cloned().unwrap();
+        assert_eq!(spec.run, "camera_measurement#1");
+        assert!(spec.record_devices);
+        event(&mut workbench, Event::RunStarted { run: spec.run.clone() }, &mut host);
+        event(&mut workbench, Event::RunSnapshot { run: spec.run.clone(), ticket: 101, wait: false }, &mut host);
+        let asked: Vec<String> = snapshot_calls(&calls).into_iter().map(|(device, _)| device).collect();
         assert_eq!(asked, ["mot_camera", "rf", "sequencer"], "each device that reports, at once");
-        assert!(calls.borrow().1.is_empty(), "the run waits for the bench");
-        assert_eq!(workbench.state(&host)["logic"][0]["status"], "reading the bench's settings");
+        assert!(snapshot_reply(&calls, &spec.run, 101).is_none(), "capture waits for each readback");
         let answer = |workbench: &mut Workbench, host: &mut FakeHost, device: &str, result: Result<Value, String>| {
-            let ticket = snapshots(&calls).iter().rev().find(|(asked, _)| asked == device).unwrap().1;
+            let ticket = snapshot_calls(&calls).iter().rev().find(|(asked, _)| asked == device).unwrap().1;
             event(workbench, Event::Answered { ticket, result }, host);
         };
         answer(&mut workbench, &mut host, "mot_camera", Ok(json!({"values": {"exposure": 0.02}, "provenance": {"settings_epoch": 3},
             "transport":{"camera_bus":"USB"}, "role": "not the core's"})));
         answer(&mut workbench, &mut host, "rf", Err("timeout: snapshot did not answer within 2.0 s".into()));
-        assert!(calls.borrow().1.is_empty());
+        assert!(snapshot_reply(&calls, &spec.run, 101).is_none());
         let board = json!({"loaded": true, "firing": true, "digest": "5f0c", "snapshot": {"program": {"digest": "5f0c"}, "pulse": {"name": "imaging"}}});
         answer(&mut workbench, &mut host, "sequencer", Ok(board.clone()));
-        let spec = calls.borrow().1.last().cloned().expect("launched once every answer is in");
-        assert_eq!(spec.run, "camera_measurement#1");
-        let bench = spec.apparatus.unwrap();
+        let bench = snapshot_reply(&calls, &spec.run, 101).unwrap().unwrap();
+        assert_eq!(bench["phase"], "acquisition");
+        assert_eq!(bench["context"], spec.run);
         assert!(bench["taken_at"].as_str().unwrap().ends_with("+00:00"));
+        assert!(bench["completed_at"].as_str().unwrap() >= bench["taken_at"].as_str().unwrap());
         assert_eq!(bench["devices"], json!({
             "basler": {"type_id": "camera.pylon", "role": "basler", "unavailable": format!("failed: {}", workbench.devices["basler"].error.clone().unwrap())},
             "mot_camera": {"type_id": "camera.virtual_mot", "role": "mot_camera", "values": {"exposure": 0.02}, "provenance": {"settings_epoch": 3},
@@ -1718,17 +1732,17 @@ mod tests {
         sequencer["role"] = json!("sequencer");
         sequencer["driver"] = json!({"outside": "PulseGUI"});
         assert_eq!(bench["sequencer"], json!({"sequencer": sequencer}));
-        event(&mut workbench, Event::RunStarted { run: "camera_measurement#1".into() }, &mut host);
-
-        // A late answer to a start that has launched changes nothing; a processor takes no bench.
+        // Publication and later requests reuse exactly the same observation.
         answer(&mut workbench, &mut host, "rf", Ok(json!({"values": {}})));
-        let before = snapshots(&calls).len();
+        let before = snapshot_calls(&calls).len();
+        event(&mut workbench, Event::RunSnapshot { run: spec.run.clone(), ticket: 102, wait: true }, &mut host);
+        assert_eq!(snapshot_reply(&calls, &spec.run, 102).unwrap().unwrap(), bench);
         host.signals.push(SignalInfo { name: "@logic/camera_measurement/frames".into(), generation: "g1".into(), owner: "camera_measurement".into(),
             published: true, sealed: false, shape: String::new() });
         apply(&mut workbench, &mut host, "start_node", json!({"node": "occupancy"})).unwrap();
         assert_eq!(calls.borrow().1.last().unwrap().run, "occupancy#1");
-        assert!(calls.borrow().1.last().unwrap().apparatus.is_none());
-        assert_eq!(snapshots(&calls).len(), before);
+        assert!(!calls.borrow().1.last().unwrap().record_devices);
+        assert_eq!(snapshot_calls(&calls).len(), before);
 
         // The board a run claims, driven by nobody at its Start, is driven by that run.
         for run in ["camera_measurement#1", "occupancy#1"] {
@@ -1737,10 +1751,91 @@ mod tests {
         apply(&mut workbench, &mut host, "stop_node", json!({"node": "occupancy"})).unwrap();
         workbench.device_users().lock().unwrap().clear();
         apply(&mut workbench, &mut host, "start_node", json!({"node": "seamless_scan"})).unwrap();
-        for (device, _) in snapshots(&calls).into_iter().skip(before) { answer(&mut workbench, &mut host, &device, Ok(json!({}))); }
         let spec = calls.borrow().1.last().cloned().unwrap();
         assert_eq!(spec.run, "seamless_scan#1");
-        assert_eq!(spec.apparatus.unwrap()["sequencer"]["sequencer"]["driver"], json!({"run": "seamless_scan#1", "node": "seamless_scan"}));
+        event(&mut workbench, Event::RunSnapshot { run: spec.run.clone(), ticket: 103, wait: false }, &mut host);
+        for (device, _) in snapshot_calls(&calls).into_iter().skip(before) { answer(&mut workbench, &mut host, &device, Ok(json!({}))); }
+        let bench = snapshot_reply(&calls, &spec.run, 103).unwrap().unwrap();
+        assert_eq!(bench["sequencer"]["sequencer"]["driver"], json!({"run": "seamless_scan#1", "node": "seamless_scan"}));
+    }
+
+    #[test]
+    fn acquisition_snapshot_is_shared_with_ready_children_and_cancelled_with_waiters() {
+        let (mut wb, calls, mut host) = acquisition_pair(false);
+        for device in ["mot_camera", "sequencer"] { wb.devices.get_mut(device).unwrap().working_point["snapshot"] = json!(true); }
+        assert!(snapshot_calls(&calls).is_empty(), "Start does not read device state");
+        event(&mut wb, Event::RunSnapshot { run: "camera_measurement#1".into(), ticket: 101, wait: false }, &mut host);
+        assert!(snapshot_reply(&calls, "camera_measurement#1", 101).is_none(), "the child must finish capture before arming and Ready");
+        assert_eq!(snapshot_calls(&calls).len(), 2, "the first explicit boundary captures the shared context");
+        event(&mut wb, Event::RunSnapshot { run: "seamless_scan#1".into(), ticket: 102, wait: true }, &mut host);
+        event(&mut wb, Event::RunSnapshot { run: "camera_measurement#1".into(), ticket: 103, wait: true }, &mut host);
+        assert!(snapshot_reply(&calls, "seamless_scan#1", 102).is_none());
+        assert!(snapshot_reply(&calls, "camera_measurement#1", 103).is_none());
+        assert_eq!(snapshot_calls(&calls).len(), 2, "concurrent parent/child requests join the same capture");
+        for (_, ticket) in snapshot_calls(&calls) { event(&mut wb, Event::Answered { ticket, result: Ok(json!({"values": {"configured": true}})) }, &mut host); }
+        let record = snapshot_reply(&calls, "camera_measurement#1", 101).unwrap().unwrap();
+        assert_eq!(record["context"], "seamless_scan#1");
+        assert_eq!(snapshot_reply(&calls, "seamless_scan#1", 102).unwrap().unwrap(), record);
+        assert_eq!(snapshot_reply(&calls, "camera_measurement#1", 103).unwrap().unwrap(), record);
+        event(&mut wb, Event::RunReady { run: "camera_measurement#1".into() }, &mut host);
+        for run in ["camera_measurement#1", "seamless_scan#1"] {
+            event(&mut wb, Event::RunSnapshot { run: run.into(), ticket: 104, wait: true }, &mut host);
+            assert_eq!(snapshot_reply(&calls, run, 104).unwrap().unwrap(), record);
+        }
+        assert_eq!(snapshot_calls(&calls).len(), 2, "both publications reuse the same observation");
+
+        for cancelled in ["child", "parent", "finished"] {
+            let (mut wb, calls, mut host) = acquisition_pair(false);
+            for device in ["mot_camera", "sequencer"] { wb.devices.get_mut(device).unwrap().working_point["snapshot"] = json!(true); }
+            event(&mut wb, Event::RunSnapshot { run: "camera_measurement#1".into(), ticket: 201, wait: false }, &mut host);
+            event(&mut wb, Event::RunSnapshot { run: "seamless_scan#1".into(), ticket: 202, wait: true }, &mut host);
+            if cancelled == "finished" {
+                event(&mut wb, Event::RunFinished { run: "seamless_scan#1".into(), outcome: "completed".into(), error: None, generation: None }, &mut host);
+            } else {
+                let node = if cancelled == "child" { "camera_measurement" } else { "seamless_scan" };
+                apply(&mut wb, &mut host, "stop_node", json!({"node": node})).unwrap();
+            }
+            assert!(snapshot_reply(&calls, "camera_measurement#1", 201).unwrap().is_err(), "{cancelled}: child waiter must wake");
+            if cancelled != "child" { assert!(snapshot_reply(&calls, "seamless_scan#1", 202).unwrap().is_err(), "{cancelled}: parent waiter must wake"); }
+            for (_, ticket) in snapshot_calls(&calls) { event(&mut wb, Event::Answered { ticket, result: Ok(json!({})) }, &mut host); }
+            assert!(snapshot_reply(&calls, "camera_measurement#1", 201).unwrap().is_err(), "late readbacks cannot revive a cancelled waiter");
+            assert_eq!(snapshot_reply(&calls, "seamless_scan#1", 202).unwrap().is_ok(), cancelled == "child", "stopping only the child preserves the parent's capture");
+        }
+    }
+
+    #[test]
+    fn acquisition_snapshot_contexts_are_independent_and_a_missed_boundary_is_not_backfilled() {
+        let mut catalog = catalog();
+        catalog["types"][4]["node"]["acquisition_completion"] = json!("terminal");
+        let (_root, mut wb, calls, mut host) = rig("terminal-snapshots", catalog);
+        for device in ["mot_camera", "sequencer"] { wb.devices.get_mut(device).unwrap().working_point["snapshot"] = json!(true); }
+        add_open_node(&mut wb, &mut host, json!({"type_id": "camera_measurement"}));
+        add_open_node(&mut wb, &mut host, json!({"type_id": "seamless_scan", "values": {"acquisition_logic": "camera_measurement"}, "source_signal": "@logic/camera_measurement/frames"}));
+        apply(&mut wb, &mut host, "start_node", json!({"node": "seamless_scan"})).unwrap();
+        event(&mut wb, Event::RunStarted { run: "seamless_scan#1".into() }, &mut host);
+        event(&mut wb, Event::RunAcquire { run: "seamless_scan#1".into(), ticket: 55, node: "camera_measurement".into(), completion: "terminal".into() }, &mut host);
+        for (index, run) in ["seamless_scan#1", "camera_measurement#1"].into_iter().enumerate() {
+            let before = snapshot_calls(&calls).len();
+            event(&mut wb, Event::RunSnapshot { run: run.into(), ticket: 301, wait: false }, &mut host);
+            assert_eq!(snapshot_calls(&calls).len(), before + 2, "a terminal acquisition has its own configuration boundary");
+            for (_, ticket) in snapshot_calls(&calls).into_iter().skip(before) {
+                event(&mut wb, Event::Answered { ticket, result: Ok(json!({"values": {"working_point": index}})) }, &mut host);
+            }
+            let record = snapshot_reply(&calls, run, 301).unwrap().unwrap();
+            assert_eq!(record["context"], run);
+            assert_eq!(record["devices"]["mot_camera"]["values"]["working_point"], index);
+        }
+
+        for first in ["camera_measurement#1", "seamless_scan#1"] {
+            let (mut wb, calls, mut host) = acquisition_pair(false);
+            for device in ["mot_camera", "sequencer"] { wb.devices.get_mut(device).unwrap().working_point["snapshot"] = json!(true); }
+            event(&mut wb, Event::RunSnapshot { run: first.into(), ticket: 401, wait: true }, &mut host);
+            assert_eq!(snapshot_reply(&calls, first, 401).unwrap().unwrap(), Value::Null);
+            assert!(snapshot_calls(&calls).is_empty(), "publication must not read hardware or wait indefinitely for a missed boundary");
+            event(&mut wb, Event::RunSnapshot { run: "seamless_scan#1".into(), ticket: 402, wait: true }, &mut host);
+            assert_eq!(snapshot_reply(&calls, "seamless_scan#1", 402).unwrap().unwrap(), Value::Null);
+            assert!(snapshot_calls(&calls).is_empty(), "no capture means no empty apparatus record or later hardware read");
+        }
     }
 
 }

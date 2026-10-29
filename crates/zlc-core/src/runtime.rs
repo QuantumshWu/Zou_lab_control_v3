@@ -47,6 +47,23 @@ pub struct ParentRecord {
     pub event: Arc<EventRecord>,
 }
 pub struct EventRecord { pub metadata: Value, pub parents: Arc<[ParentRecord]> }
+struct FiniteEvent {
+    previous: Option<Arc<FiniteEvent>>,
+    revision: u64,
+    ordinal: Option<u64>,
+    event: Arc<EventRecord>,
+}
+impl Drop for FiniteEvent {
+    fn drop(&mut self) {
+        let mut previous = self.previous.take();
+        while let Some(entry) = previous {
+            match Arc::try_unwrap(entry) {
+                Ok(mut entry) => previous = entry.previous.take(),
+                Err(_) => break,
+            }
+        }
+    }
+}
 
 pub struct Publication {
     key: PublicationKey,
@@ -54,6 +71,9 @@ pub struct Publication {
     run: Arc<RunRecord>,
     event: Arc<EventRecord>,
     canonical: Option<Snapshot>,
+    // An immutable prefix of the finite store's facts, pointing only into
+    // the past: an old read cannot retain later events or their ancestors.
+    events: Option<Arc<FiniteEvent>>,
     storage: Storage,
     // History owns event pixels, not every upstream camera buffer. Only a
     // current head or an acquired Read pins this short-lived causal payloads.
@@ -231,8 +251,47 @@ impl Read {
                 "revision":key.revision,"ordinal":key.ordinal},"run":run.metadata,"event":event.metadata,
                 "parents":event.parents.iter().map(|parent|record(&parent.key,&parent.run,&parent.event)).collect::<Vec<_>>()})
         }
+        fn acquisition(entries: impl IntoIterator<Item=(PublicationKey, Arc<RunRecord>, Arc<EventRecord>, [usize;2], [usize;2])>) -> Value {
+            fn add_event(key: &PublicationKey, run: &RunRecord, event: &EventRecord,
+                         runs: &mut Vec<Value>, run_indices: &mut HashMap<GenerationId,usize>,
+                         events: &mut Vec<Value>, event_indices: &mut HashMap<PublicationKey,usize>) -> usize {
+                if let Some(index) = event_indices.get(key) { return *index; }
+                let run_index = *run_indices.entry(key.generation).or_insert_with(|| {
+                    let index = runs.len();
+                    runs.push(serde_json::json!({"stream":run.owner.as_ref(), "generation":key.generation.as_uuid().to_string(), "record":run.metadata}));
+                    index
+                });
+                let parents: Vec<_> = event.parents.iter().map(|parent|
+                    add_event(&parent.key,&parent.run,&parent.event,runs,run_indices,events,event_indices)).collect();
+                let index = events.len();
+                events.push(serde_json::json!({"run":run_index, "signal":key.signal.as_ref(), "revision":key.revision,
+                    "ordinal":key.ordinal, "record":event.metadata, "parents":parents}));
+                event_indices.insert(key.clone(),index);
+                index
+            }
+            let (mut runs, mut events, mut ranges) = (Vec::new(),Vec::new(),Vec::new());
+            let (mut run_indices, mut event_indices) = (HashMap::new(),HashMap::new());
+            for (key,run,event,origin,extent) in entries {
+                let index = add_event(&key,&run,&event,&mut runs,&mut run_indices,&mut events,&mut event_indices);
+                ranges.push(serde_json::json!({"event":index, "origin":origin, "extent":extent}));
+            }
+            serde_json::json!({"runs":runs,"events":events,"ranges":ranges})
+        }
         match &self.kind {
-            ReadKind::Event(event)|ReadKind::Canonical(event) => record(&event.key,&event.run,&event.event),
+            ReadKind::Event(event) => record(&event.key,&event.run,&event.event),
+            ReadKind::Canonical(event) => {
+                let mut value = record(&event.key,&event.run,&event.event);
+                if let Some(canonical) = event.canonical.as_ref().filter(|_|event.storage == Storage::Finite) {
+                    let mut facts = Vec::with_capacity(canonical.segment_count());
+                    let mut head = event.events.as_deref();
+                    while let Some(fact) = head { facts.push(fact); head = fact.previous.as_deref(); }
+                    let entries: Vec<_> = canonical.segments().zip(facts.into_iter().rev())
+                        .map(|(segment,fact)| (PublicationKey {generation:event.key.generation,
+                            signal:event.key.signal.clone(),revision:fact.revision,ordinal:fact.ordinal}, event.run.clone(),fact.event.clone(),segment.origin(),segment.extent())).collect();
+                    value["acquisition"] = acquisition(entries);
+                }
+                value
+            },
             ReadKind::Window(window) => {
                 let latest = window.entries.last().expect("window has an anchor");
                 let mut value = record(&latest.key,&latest.run,&latest.event);
@@ -283,7 +342,7 @@ struct Signal {
     window_schemas: HashMap<usize, Arc<DatasetSchema>>, history_axis: Arc<str>,
     store: Option<DatasetStore>, history_capable: bool,
     /// Each event the finite store holds, in its segment order: what a replay delivers.
-    events: Vec<(u64, Option<u64>, Arc<EventRecord>)>,
+    events: Vec<Arc<FiniteEvent>>,
 }
 impl Signal {
     fn capacity(&self) -> usize { self.demands.values().copied().max().unwrap_or(0) }
@@ -291,10 +350,10 @@ impl Signal {
     /// record (v2 replayed its commit chunks); the canonical layout is the run's now.
     fn replay(&self, generation: GenerationId, name: &Arc<str>, run: &Arc<RunRecord>) -> Vec<Arc<Publication>> {
         let Some(canonical) = self.store.as_ref().map(DatasetStore::snapshot) else { return Vec::new() };
-        canonical.segments().zip(&self.events).map(|(segment, (revision, ordinal, event))| Arc::new(Publication {
-            key: PublicationKey { generation, signal: name.clone(), revision: *revision, ordinal: *ordinal },
-            data: Some(segment.data().clone()), run: run.clone(), event: event.clone(), canonical: Some(canonical.clone()),
-            storage: Storage::Finite, lineage: Weak::new() })).collect()
+        canonical.segments().zip(&self.events).map(|(segment, fact)| Arc::new(Publication {
+            key: PublicationKey { generation, signal: name.clone(), revision: fact.revision, ordinal: fact.ordinal },
+            data: Some(segment.data().clone()), run: run.clone(), event: fact.event.clone(), canonical: Some(canonical.clone()),
+            events: self.events.last().cloned(), storage: Storage::Finite, lineage: Weak::new() })).collect()
     }
     fn keep_recent(&mut self, publication: &Arc<Publication>, garbage: &mut Vec<Arc<Publication>>) {
         let Some(recent) = &mut self.recent else { return };
@@ -929,9 +988,14 @@ impl Runtime {
                     Some(placement)=>store.commit(vec![placement]).expect("finite store preflight under Runtime lock"),
                     None=>store.snapshot(),
                 }));
+                if signal.store.is_some() && data.is_some() {
+                    signal.events.push(Arc::new(FiniteEvent {previous:signal.events.last().cloned(),
+                        revision,ordinal:input.ordinal(),event:event.clone()}));
+                }
                 prepared_publications.push(Publication {
                     key: PublicationKey { generation: generation.id, signal: input.signal().clone(), revision, ordinal: input.ordinal() },
                     data, run: run.record.clone(), event: event.clone(), canonical,
+                    events: signal.events.last().cloned(),
                     storage: if signal.store.is_some() { Storage::Finite }
                         else if signal.history_capable { Storage::Latest } else { Storage::Snapshot },
                     lineage:Weak::new(),
@@ -962,9 +1026,6 @@ impl Runtime {
             for publication in publications.iter() {
                 let signal = run.signals.get_mut(&publication.key.signal).unwrap();
                 if let Some(ordinal)=publication.key.ordinal {signal.last_ordinal=Some(ordinal);}
-                if publication.storage==Storage::Finite && publication.data.is_some() {
-                    signal.events.push((revision,publication.key.ordinal,publication.event.clone()));
-                }
                 if let Some(previous)=signal.head.replace(head.clone()) {heads.push(previous);}
                 if let Some(previous) = signal.latest.replace(publication.clone()) { garbage.push(previous); }
                 signal.keep_recent(publication,&mut garbage);
@@ -1377,6 +1438,71 @@ mod tests {
     fn bundle(schema: &Arc<DatasetSchema>, signals: &[&str], ordinal: u64) -> Bundle {
         Bundle { inputs: signals.iter().map(|name| Input::Event { signal: (*name).into(), ordinal,
             data: block(schema, ordinal as u16), origin: None }).collect(), metadata: json!({}), parents: vec![] }
+    }
+
+    #[test]
+    fn finite_acquisition_provenance_keeps_frozen_ranges_and_shared_parent_facts() {
+        let plane = Runtime::new();
+        let sample = schema();
+        let axis = Axis::new("scan".into(),"scan".into(),"coordinate".into(),
+            Coordinates::Index {origin:0,len:3},None,None,None,None).unwrap();
+        let full = DatasetSchema::new(sample.domain(DomainRole::Repeat).clone(),Domain::dense(vec![3],vec![axis]).unwrap(),
+            sample.domain(DomainRole::Cell).clone(),sample.value().clone()).unwrap();
+        let camera = plane.begin("camera",vec![Declaration {signal:"image".into(),schema:sample.clone(),storage:Storage::Latest}],json!({"kind":"camera"})).unwrap();
+        let scan = plane.begin("scan",vec![Declaration {signal:"scan".into(),schema:full.clone(),storage:Storage::Finite}],json!({"kind":"scan"})).unwrap();
+        let mut source = bundle(&sample,&["image"],0);
+        source.metadata = json!({"records":{"image":{"device_settings":{"epoch":0}}}});
+        let mut parent = plane.commit(&camera,&source).unwrap().publications[0].clone();
+        let mut frozen: Option<(Read,Value)> = None;
+        let mut later_facts = None;
+        for point in 0..3 {
+            if point == 2 {
+                source = bundle(&sample,&["image"],1);
+                source.metadata = json!({"records":{"image":{"device_settings":{"epoch":1}}}});
+                parent = plane.commit(&camera,&source).unwrap().publications[0].clone();
+            }
+            let mut parents = vec![parent.clone()];
+            if point == 2 { parents.push(frozen.as_ref().unwrap().0.anchor().clone()); }
+            let delivery = plane.commit(&scan,&Bundle {inputs:vec![Input::Event {signal:"scan".into(),ordinal:point,
+                data:block(&sample,point as u16),origin:Some([0,point as usize])}],
+                metadata:json!({"records":{"scan":{"actual_devices":{"rf":{"values":{"frequency":point},"units":{"frequency":"Hz"}}}}}}),
+                parents}).unwrap();
+            if point == 2 { later_facts = Some((Arc::downgrade(delivery.publications[0].event()),Arc::downgrade(parent.event()))); }
+            assert!(Read::from_event(delivery.publications[0].clone()).unwrap().provenance().get("acquisition").is_none());
+            if point == 0 {
+                let read = Read::from_canonical(delivery.publications[0].clone());
+                let provenance = read.provenance();
+                frozen = Some((read,provenance));
+            }
+        }
+        let before = plane.read_views(&[(scan.clone(),"scan".into(),None)]).pop().unwrap().unwrap().provenance();
+        let acquired = &before["acquisition"];
+        assert_eq!(acquired["runs"].as_array().unwrap().len(),2);
+        assert_eq!(acquired["events"].as_array().unwrap().len(),5,"the shared parent occurs once");
+        for (point,range) in acquired["ranges"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(range["origin"],json!([0,point])); assert_eq!(range["extent"],json!([1,1]));
+            let event = &acquired["events"][range["event"].as_u64().unwrap() as usize];
+            assert_eq!(event["record"]["records"]["scan"]["actual_devices"]["rf"]["values"]["frequency"],json!(point));
+            let parent = &acquired["events"][event["parents"][0].as_u64().unwrap() as usize];
+            assert_eq!(parent["record"]["records"]["image"]["device_settings"]["epoch"],json!(usize::from(point == 2)));
+        }
+        assert!(matches!(plane.commit(&scan,&Bundle {inputs:vec![Input::Event {signal:"scan".into(),ordinal:3,
+            data:block(&sample,9),origin:Some([0,0])}],metadata:json!({"bad":true}),parents:vec![]}),Err(RuntimeError::InvalidLayout(_))));
+        plane.commit(&scan,&Bundle {inputs:vec![Input::FiniteSnapshot {signal:"scan".into()}],metadata:json!({}),parents:vec![]}).unwrap();
+        let complete = plane.read_views(&[(scan.clone(),"scan".into(),None)]).pop().unwrap().unwrap();
+        assert_eq!(complete.provenance()["acquisition"],before["acquisition"]);
+        plane.retire(&scan).unwrap(); plane.retire(&camera).unwrap();
+        let restarted = plane.begin("scan",vec![Declaration {signal:"scan".into(),schema:full,storage:Storage::Finite}],json!({"new":true})).unwrap();
+        plane.commit(&restarted,&Bundle {inputs:vec![Input::Event {signal:"scan".into(),ordinal:0,
+            data:block(&sample,99),origin:Some([0,0])}],metadata:json!({"new":true}),parents:vec![]}).unwrap();
+        let (frozen,expected) = frozen.unwrap();
+        assert_eq!(frozen.provenance(),expected,"append, failed overwrite and restart cannot change a saved prefix");
+        assert_eq!(complete.provenance()["acquisition"],before["acquisition"]);
+        drop((complete,parent));
+        let (later,late_parent) = later_facts.unwrap();
+        assert!(later.upgrade().is_none(),"an old prefix must not keep future event facts alive");
+        assert!(late_parent.upgrade().is_none(),"an old prefix must not keep a future event's ancestors alive");
+        assert_eq!(frozen.provenance(),expected);
     }
 
     #[test]
