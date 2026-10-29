@@ -30,17 +30,32 @@ try {
   assert(buttons.length===3,'action rows missing');buttons[0].click();buttons[1].click();
   assert(JSON.stringify(sent)===JSON.stringify(['pulse:camera:403:bench:sequencer','pulse:scan:403:sequencer']),'wrong pulse dispatch');
  });
- for(const scale of [1,1.25,1.5]) await check(`v2 button and action-row geometry at scale ${scale}`,async()=>{
+ for(const [scale,lead] of [[1,3],[1.25,4],[1.5,5]]) await check(`button and action-row geometry at scale ${scale}`,async()=>{
   document.documentElement.style.setProperty('--fluent',String(scale));await settle();
   const holder=tree.root.querySelector('.info-action'),button=holder.querySelector('button'),row=holder.parentElement;
   const h=holder.getBoundingClientRect(),b=button.getBoundingClientRect(),r=row.getBoundingClientRect();
   const padding=parseFloat(getComputedStyle(holder).paddingTop);
   near(b.height,reference.root.getBoundingClientRect().height,'normal FluentButton height');
   near(b.width,reference.root.getBoundingClientRect().width,'normal FluentButton width');
-  near(b.left,h.left,'zero horizontal holder margin');
+  const qt=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--qt'));
+  near(b.left-h.left,lead*qt,'QTreeView item content inset before the zero-margin holder');
+  near(parseFloat(getComputedStyle(holder).paddingRight),padding,'right item padding');
   near(b.top-r.top,padding,'top row padding');
   near(r.bottom-b.bottom,padding,'bottom row padding');
   assert(getComputedStyle(button).whiteSpace==='nowrap','pulse label wraps');
+ });
+ await check('action presses preserve row selection while names and holder whitespace select their row',()=>{
+  const rows=[...tree.root.querySelectorAll('.info-row')];
+  const press=target=>target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0}));
+  press(rows[3].querySelector('.info-name'));
+  for(const row of rows.slice(0,3)) {
+   const button=row.querySelector('button');press(button);button.click();
+   assert(rows[3].classList.contains('selected')&&!row.classList.contains('selected'),'action press changed row selection and hover colour');
+  }
+  press(rows[0].querySelector('.info-name'));
+  assert(rows[0].classList.contains('selected')&&!rows[3].classList.contains('selected'),'name did not select its row');
+  press(rows[1].querySelector('.info-action'));
+  assert(rows[1].classList.contains('selected')&&!rows[0].classList.contains('selected'),'holder whitespace did not select its row');
  });
  await check('long pulse names remain accessible through horizontal scrolling',()=>{
   assert(tree.root.scrollWidth>tree.root.clientWidth,'long action was cut instead of scrollable');

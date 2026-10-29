@@ -635,9 +635,12 @@ dialog.dialog::backdrop { background: transparent; }
 .info-value { -webkit-user-select: text; user-select: text; }
 /* A branch's count ("4 fields") is a count of what follows, not a value: MUTED_INK. */
 .info-row.branch > .info-value { color: var(--muted-ink); }
-/* v2 InfoTree._add_action: an ordinary FluentButton, left/vertically centred,
- * in a holder with no horizontal margins. Only the row adds item padding. */
-.info-value.info-action { padding: var(--info-pad) 0; justify-content: flex-start; }
+/* v2 embeds the zero-margin button holder inside the item's padded contents;
+ * an embedded widget has no delegate text margin (PM_FocusFrameHMargin + 1). */
+.info-value.info-action {
+  padding: var(--info-pad) var(--info-pad) var(--info-pad) max(0px, calc(var(--field-text-pad) - 3 * var(--q)));
+  justify-content: flex-start;
+}
 .info-name.match, .info-value.match { background: var(--orange-tint); }
 .info-guide {
   position: absolute; top: 0; bottom: 0; width: var(--edge); background: var(--divider);

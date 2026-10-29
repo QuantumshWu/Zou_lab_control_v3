@@ -116,10 +116,12 @@ export class InfoTree {
             const label = element("span", "info-name", name);
             const shown = element("span", "info-value");
             if (isAction(value)) {
-                // v2 embeds a normal FluentButton in a zero-margin holder. Its row
-                // reserves the button height plus the tree's vertical item padding.
+                // v2's embedded FluentButton consumes its left press; opening the
+                // action preserves the tree's selection and its separate hover wash.
                 shown.classList.add("info-action");
                 const action = command(value.text, () => this.actionRequested(value.action));
+                action.root.addEventListener("mousedown", event => { if (event.button === 0)
+                    event.stopPropagation(); });
                 shown.append(action.root);
             }
             else
