@@ -29,8 +29,9 @@
 //!   (per sample: the acceptance factor times the estimate, plus the
 //!   projection's change; an
 //!   absolute population error; the estimate's sources are the Krylov
-//!   residual, the omitted ring's feedback and the K^(1) rests the lattice
-//!   leaves out, and the other fold remainders are reported only, in
+//!   residual, the omitted ring's feedback and what the lattice operator
+//!   leaves out of the second-order far shell (the stored fold's
+//!   remainders), and the higher-order far-shell paths are reported only, in
 //!   `diagnostics.lattice.run.ledger` (a lattice whose static expansion
 //!   parameter exceeds `ledger::EXPANSION_LIMIT` is not solved)),
 //!   `estimatedMaximumError` (their largest), `requestedTolerance`, `scope`.

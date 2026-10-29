@@ -51,15 +51,13 @@ use super::eigenbasis::BlockEigenbasis;
 /// A run without a grid (a mean run) takes its first one right after the
 /// steady column and decides the completion there. Measured on the
 /// necessity review's 9 mean runs: three, four, five lasers, four without
-/// the trap and D1 + D2 accepted at 1 solve instead of 4, the errors
-/// measured against references (the steady states, four without the
-/// trap's mean at 1 s) the same to 1e-10 and within their bounds; three
-/// lasers at B = 0 and 1 mG completed as before (the K^(1) rests kept, one
-/// charge promoted) at 2 solves instead of 8 (2.7 and 3.2 -> 1.2 s); the
-/// default scene, still relaxing at 1 s (bound 9.7e-3 at 1 solve), at 4 as
-/// before. Never a trajectory: a trajectory checkpoint at 1 solve accepted
-/// four lasers without the trap at 10 ms falsely (the necessity review:
-/// bound 3.0e-3, error 7.3e-3).
+/// the trap, D1 + D2 and three lasers at B = 0 and 1 mG accepted at 1 solve
+/// instead of 4, the errors against references (the steady states, four
+/// without the trap's mean at 1 s; 1.3e-3 and 2.2e-3 at B = 0 and 1 mG)
+/// the same and within their bounds; the default scene, still relaxing at
+/// 1 s (bound 9.7e-3 at 1 solve), at 4 as before. Never a trajectory: a
+/// trajectory checkpoint at 1 solve accepted four lasers without the trap
+/// at 10 ms falsely (the necessity review: bound 3.0e-3, error 7.3e-3).
 const CHECKPOINT:usize=4;
 /// Most solves of a request, and the basis memory (basis and images).
 /// MAXIMUM_SOLVES is a deliberate margin: twice the 24 solves the slowest
