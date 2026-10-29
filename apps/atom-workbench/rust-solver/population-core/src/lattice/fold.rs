@@ -44,13 +44,16 @@
 //! preserving; the dropped entries' (below ENTRY_FLOOR) largest row sum is
 //! charged in the ledger.
 //!
-//! The static expansion's remainder: from a near mode p the far shell acts
-//! exactly as -C_b (D_s - i nu_p)^-1 C_s, of which K^(0) + i nu_p K^(1) is
-//! the expansion to first order; the rest is
-//!   nu_p^2 C_b D_s^-2 (D_s - i nu_p)^-1 C_s
-//! ((D - a)^-1 = D^-1 + a D^-2 + a^2 D^-2 (D - a)^-1), whose action on a
-//! field the far blocks' series give (`nu_remainder`, the shifted block's G
-//! elementwise from G_s).
+//! What the stored fold leaves out of the second-order far shell: from a
+//! near mode p the far shell acts exactly as -C_b (D_s - i nu_p)^-1 C_s on
+//! every far + far pair, of which the operator applies K^(0) + i nu_p K^(1)
+//! with the series truncated, the entries below ENTRY_FLOOR dropped, a
+//! non-structural rest but its population rows, and the kept targets only.
+//! `far_responses` gives the exact action on a field (the series summed to
+//! convergence, the shifted block's G elementwise from G_s), and the error
+//! estimate charges the difference (`LatticeOperator::left_out`): the
+//! expansion's remainder in nu_p, the truncation, the dropped entries, the
+//! rests and the omitted cross folds, by their action.
 use super::*;
 use super::classification::HarmonicPlan;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
@@ -63,14 +66,17 @@ const ENTRY_FLOOR:f64=1e-12;
 /// A sector pair with at least this share of its entries above the floor is
 /// stored as a dense block.
 const DENSE_FILL:f64=0.2;
-/// Each far block's Neumann remainders (charged with the dropped entries),
-/// relative to its targets' sizes: for K^(0) far below every remainder the
-/// ledger carries, for K^(1), which enters times nu_q, about the accuracy
-/// it needs.
+/// Each far block's Neumann remainders, relative to its targets' sizes: for
+/// K^(0) far below every remainder the ledger carries, for K^(1), which
+/// enters times nu_q, about the accuracy it needs (what is left the error
+/// estimate charges by its action, `far_responses`).
 const K0_FLOOR:f64=1e-10;
 const K1_FLOOR:f64=1e-8;
 /// Columns per batch of the far-block series.
 const BATCH:usize=32;
+/// Terms of a far block's series summed to convergence: every far block has
+/// rho_s < SERIES_LIMIT, so 64 terms take any remainder below 2^-64.
+const CONVERGED_TERMS:usize=64;
 /// The series ratio rho_s up to which a far block is folded.
 const SERIES_LIMIT:f64=0.5;
 const MINUS_ONE:C=C{re:-1.,im:0.};
@@ -305,6 +311,21 @@ fn series(rest:&RestOperator,g:&[C],order:usize,n:usize,x:&mut[C],term:&mut[C],t
     }
     Ok(())
 }
+/// x <- (L0 - i nu_s - i nu)^-1 x on one block (G the shifted block's
+/// elementwise inverse), the series summed until a term is below the sum's
+/// roundoff.
+fn converged(rest:&RestOperator,g:&[C],n:usize,x:&mut[C],term:&mut[C],t:&mut[C],stack:&mut Vec<C>,small:&mut Vec<C>)->Result<(),String>{
+    for(v,&gv)in x.iter_mut().zip(g){*v=mul(*v,gv);}
+    term.copy_from_slice(x);
+    let size=|v:&[C]|v.iter().map(|z|squared(*z)).sum::<f64>();
+    for _ in 0..CONVERGED_TERMS{
+        t.fill(ZERO);rest.subtract(n,term,t,1,stack,small)?;
+        for((v,&gv),&u)in term.iter_mut().zip(g).zip(t.iter()){*v=mul(u,gv);}
+        for(a,&b)in x.iter_mut().zip(term.iter()){add(a,b);}
+        if size(term)<=f64::EPSILON*f64::EPSILON*size(x){break;}
+    }
+    Ok(())
+}
 /// One stored order of a target, as `store` returns it: the absorbable
 /// factors, the rest, the dropped row sum, the norms, the largest entry, the
 /// rest's row sum, its population rows and whether it is structural.
@@ -426,27 +447,25 @@ impl FoldLibrary{
         diagnostics.milliseconds=clock.elapsed().as_secs_f64()*1e3;diagnostics.phase_ms[1]=diagnostics.milliseconds-diagnostics.phase_ms[0];
         Ok(Self{targets,#[cfg(test)]zero_dense,rest,blocks,diagnostics})
     }
-    /// The static expansion's remainder from a near mode of frequency nu on
-    /// its block x (row-major d): per far step s that is a fold pair's
-    /// source, y_s = nu^2 D_s^-2 (D_s - i nu)^-1 C_s x, which the pairs' C_b
-    /// complete (`LatticeOperator::left_out`). None at nu = 0.
-    pub fn nu_remainder(&self,generator:&Generator,plan:&HarmonicPlan,nu:f64,x:&[C])->Result<Option<BTreeMap<usize,Vec<C>>>,String>{
-        if nu==0.||self.blocks.is_empty(){return Ok(None);}
+    /// The far shell's exact second-order action from a near mode of
+    /// frequency nu on its block x (row-major d): per far step s that is the
+    /// source of a far + far pair (of a kept or an omitted target),
+    /// y_s = -(D_s - i nu)^-1 C_s x, the series summed to convergence; the
+    /// pairs' C_b complete it (`LatticeOperator::left_out`).
+    pub fn far_responses(&self,generator:&Generator,plan:&HarmonicPlan,nu:f64,x:&[C])->Result<BTreeMap<usize,Vec<C>>,String>{
         let n=generator.n;let d=n*n;
-        let sources:BTreeSet<usize>=plan.targets.iter().flat_map(|t|t.pairs.iter().map(|p|p.source)).collect();
+        let sources:BTreeSet<usize>=plan.targets.iter().chain(&plan.omitted).flat_map(|t|t.pairs.iter().map(|p|p.source)).collect();
         let(mut term,mut t,mut stack,mut small)=(vec![ZERO;d],vec![ZERO;d],Vec::new(),Vec::new());
         let mut out=BTreeMap::new();
         for s in sources{
             let block=self.blocks.get(&s).ok_or("A fold pair's source without its far block")?;
-            let mut y=vec![ZERO;d];generator.components[&plan.steps[s].charge].op.apply_into(n,ONE,x,&mut y,&mut small);
+            let mut y=vec![ZERO;d];generator.components[&plan.steps[s].charge].op.apply_into(n,MINUS_ONE,x,&mut y,&mut small);
             // (D_s - i nu)^-1: G elementwise 1 / (1 / G_s - i nu).
             let shifted:Vec<C>=block.g.iter().map(|&g|{let m=squared(g);let z=C{re:g.re/m,im:-g.im/m-nu};let w=squared(z);C{re:z.re/w,im:-z.im/w}}).collect();
-            series(&self.rest,&shifted,block.order[1],n,&mut y,&mut term,&mut t,1,false,&mut stack,&mut small)?;
-            for _ in 0..2{series(&self.rest,&block.g,block.order[1],n,&mut y,&mut term,&mut t,1,false,&mut stack,&mut small)?;}
-            for v in y.iter_mut(){*v=scaled(*v,nu*nu);}
+            converged(&self.rest,&shifted,n,&mut y,&mut term,&mut t,&mut stack,&mut small)?;
             out.insert(s,y);
         }
-        Ok(Some(out))
+        Ok(out)
     }
     /// D_s^-1 (order m0) on m consecutive row-major blocks, in place.
     #[cfg(test)]
@@ -531,17 +550,14 @@ mod tests{
                 let charged=stored.dropped[0]+nu.abs()*stored.dropped[1];
                 assert!(error<=ledger.nu_freeze+charged+1e-13*scale,"t {:?} nu {nu}: |exact - folded| {error:e} > bound {:e}",target.charge,ledger.nu_freeze+charged);
                 if nu==0.{assert!(error<=stored.dropped[0]+1e-13*scale,"static fold beyond its charged remainder at nu = 0: {error:e}");}
-                // With the expansion's remainder (`nu_remainder`, completed by
-                // the pairs' C_b) the elimination is exact up to the series'
-                // charged truncation.
-                if nu!=0.{
-                    let(mut remainder,mut small)=(vec![ZERO;d*d],Vec::new());
-                    for c in 0..d{let mut e=vec![ZERO;d];e[c]=ONE;let parts=p.fold.nu_remainder(&p.generator,&p.plan,nu,&e).unwrap().unwrap();
-                        let mut column=vec![ZERO;d];for pair in &target.pairs{p.generator.components[&p.plan.steps[pair.back].charge].op.apply_into(n,ONE,&parts[&pair.source],&mut column,&mut small);}
-                        for r in 0..d{remainder[r*d+c]=column[r];}}
-                    let rest=exact.iter().zip(&folded).zip(&remainder).map(|((a,b),c)|magnitude(C{re:a.re-b.re-c.re,im:a.im-b.im-c.im})).fold(0.,f64::max);
-                    assert!(rest<=charged+1e-13*scale&&rest<1e-3*error.max(f64::MIN_POSITIVE),"t {:?} nu {nu}: {rest:e} with the remainder, {error:e} without",target.charge);
-                }
+                // The far responses (`far_responses`, completed by the pairs'
+                // C_b) are the exact elimination, to roundoff.
+                let(mut responses,mut small)=(vec![ZERO;d*d],Vec::new());
+                for c in 0..d{let mut e=vec![ZERO;d];e[c]=ONE;let parts=p.fold.far_responses(&p.generator,&p.plan,nu,&e).unwrap();
+                    let mut column=vec![ZERO;d];for pair in &target.pairs{p.generator.components[&p.plan.steps[pair.back].charge].op.apply_into(n,ONE,&parts[&pair.source],&mut column,&mut small);}
+                    for r in 0..d{responses[r*d+c]=column[r];}}
+                let rest=exact.iter().zip(&responses).map(|(a,b)|magnitude(C{re:a.re-b.re,im:a.im-b.im})).fold(0.,f64::max);
+                assert!(rest<=1e-12*scale,"t {:?} nu {nu}: the far responses {rest:e} from the exact elimination",target.charge);
                 // Trace preservation: the output is traceless for every input.
                 for c in 0..d{let mut t=ZERO;for i in 0..n{add(&mut t,folded[(i*n+i)*d+c]);}assert!(magnitude(t)<1e-13*scale);}
             }

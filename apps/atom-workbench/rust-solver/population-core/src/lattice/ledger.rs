@@ -1,12 +1,14 @@
 //! The error ledger: the population tolerance, the error metric, and every
 //! remainder the folded lattice leaves out as a generator-norm bound (closed
-//! form, prepared from the classification). The error estimate builds three
-//! of them into the slow modes' sources by their action
-//! (`LatticeOperator::left_out`, `estimator`): the K^(1) rests the operator
-//! leaves out (`k1_rest`), the non-structural fold rests (applied but for
-//! their population rows; their row sums are no longer dropped entries) and
-//! the static expansion's remainder (`nu_freeze`). The others (`unbuilt`) are
-//! reported only. Their action on the computed state, measured with the third
+//! form, prepared from the classification). The error estimate builds every
+//! second-order one into the slow modes' sources by its action, the exact
+//! far shell less the stored fold (`LatticeOperator::left_out`, `estimator`):
+//! the static expansion's remainder (`nu_freeze`), the series truncation and
+//! the entries below the storage floor (`dropped_entries`), the non-structural
+//! rests, the K^(1) rests the operator leaves out (`k1_rest`) and the cross
+//! folds below the floor (`omitted_cross`). The higher-order far-shell paths
+//! and the near couplings below the structural floor (`unbuilt`) are reported
+//! only. Their action on the computed state, measured with the third
 //! order and the fold's memory built (two to five lasers, 20 us
 //! to 10 ms, the steady state and the mean over 1 s): third order and memory
 //! at most 6e-6 each, every other remainder at most 2.6e-7, against the
@@ -62,7 +64,7 @@ impl RemainderLedger{
     /// The remainders the estimate does not build (reported only; see the
     /// module documentation for their measured action).
     pub fn unbuilt(&self)->f64{
-        self.third_order+self.far_shell+self.tail+self.omitted_cross+self.non_structural+self.dropped_entries
+        self.third_order+self.far_shell+self.tail+self.non_structural
     }
     /// Bounds for a lattice with largest |nu_q| = `nu_max`; `dropped` are the
     /// fold storage's dropped row sums of K^(0) and K^(1), `k1_rest` the

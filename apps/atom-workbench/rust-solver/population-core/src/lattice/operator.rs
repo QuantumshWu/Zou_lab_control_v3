@@ -122,7 +122,7 @@ impl<'a> LatticeOperator<'a>{
         // A non-structural rest is applied but for its population rows.
         let k0=|t:&'a StoredFold|t.applied(0);
         let k1=|t:&'a StoredFold|if drops_k1_rest{&t.population_rest[1]}else{t.applied(1)};
-        let leaves_out=drops_k1_rest||prepared.fold.targets.iter().any(|t|!t.kept[0]||!t.kept[1])||(nu_max>0.&&!prepared.fold.targets.is_empty());
+        let leaves_out=!(prepared.fold.targets.is_empty()&&prepared.plan.omitted.is_empty());
         let mut terms=Vec::new();
         if let Some(t)=diagonal{let own:Vec<(usize,usize)>=targets.iter().map(|&q|(q,q)).collect();
             terms.push(Term{rest:k0(t),edges:own.clone(),frequency:false,diagonal:true});
@@ -251,34 +251,39 @@ impl<'a> LatticeOperator<'a>{
     }
     /// Whether the operator leaves K^(1) rests out (the estimate charges them).
     pub fn drops_k1_rests(&self)->bool{self.drops_k1_rest}
-    /// What the operator leaves out of the folded generator on a
-    /// Hermitian-symmetric field x, on every fold edge p -> q of the lattice:
-    /// a non-structural rest's entries but its population rows
-    /// (`StoredFold::kept`), the K^(1) rests' when they are dropped
-    /// (`drops_k1_rest`), both times their factor (1, i nu_p), and the
-    /// static expansion's remainder from p, sum over the target's pairs of
-    /// C_b nu_p^2 D_s^-2 (D_s - i nu_p)^-1 C_s x_p (`FoldLibrary::nu_remainder`);
-    /// None when nothing is left out.
+    /// What the operator leaves out of the second-order far shell on a
+    /// Hermitian-symmetric field x, on every fold edge p -> q of the lattice
+    /// (kept and omitted targets): the exact action, sum over the target's
+    /// pairs of -C_b (D_s - i nu_p)^-1 C_s x_p (`FoldLibrary::far_responses`),
+    /// less the fold the operator applies there, (K^(0) + i nu_p K^(1)) x_p as
+    /// stored (the series truncated, entries below the storage floor dropped,
+    /// a non-structural rest but its population rows, the K^(1) rests but
+    /// their population rows when dropped). None without a far shell.
     pub fn left_out(&self,x:&[C])->Result<Option<Vec<C>>,String>{
         if !self.leaves_out{return Ok(None);}
         let(n,d)=(self.n,self.n*self.n);let mut y=vec![ZERO;self.dimension()];
         let prepared=self.prepared;let(library,plan,generator)=(&prepared.fold,&prepared.plan,&prepared.generator);
-        // The remainder's far parts per source mode (none at nu_p = 0).
-        let remainders:Vec<Option<BTreeMap<usize,Vec<C>>>>=self.execution.map((0..self.modes.len()).collect(),
-            |p|library.nu_remainder(generator,plan,self.nu[p],&x[p*d..(p+1)*d])).into_iter().collect::<Result<_,_>>()?;
+        // The far shell's exact parts per source mode.
+        let responses:Vec<BTreeMap<usize,Vec<C>>>=self.execution.map((0..self.modes.len()).collect(),
+            |p|library.far_responses(generator,plan,self.nu[p],&x[p*d..(p+1)*d])).into_iter().collect::<Result<_,_>>()?;
         let targets:Vec<usize>=(0..self.modes.len()).filter(|&q|self.canonical[q]).collect();
         let(fold,modes,index,nu,drops)=(&library.targets,&self.modes,&self.index,&self.nu,self.drops_k1_rest);
-        let remainders=&remainders;
+        let responses=&responses;
         let blocks=self.execution.map(targets.clone(),|q|->Result<Vec<C>,String>{
             let mut out=vec![ZERO;d];let mut small=Vec::new();
-            for(t,data)in fold.iter().enumerate(){
-                let source=charge_minus(&modes[q],&data.charge)?;let Some(&p)=index.get(&source)else{continue};
+            for target in plan.targets.iter().chain(&plan.omitted){
+                let Some(&p)=index.get(&charge_minus(&modes[q],&target.charge)?)else{continue};
+                for pair in &target.pairs{
+                    let part=responses[p].get(&pair.source).ok_or("Lattice operator: a fold pair without its far response")?;
+                    generator.components[&plan.steps[pair.back].charge].op.apply_into(n,ONE,part,&mut out,&mut small);}
+            }
+            for data in fold{
+                let Some(&p)=index.get(&charge_minus(&modes[q],&data.charge)?)else{continue};
                 let xp=&x[p*d..(p+1)*d];
-                if !data.kept[0]{data.rest[0].apply_into(ONE,xp,&mut out);data.population_rest[0].apply_into(C{re:-1.,im:0.},xp,&mut out);}
-                if drops||!data.kept[1]{data.rest[1].apply_into(C{re:0.,im:nu[p]},xp,&mut out);data.population_rest[1].apply_into(C{re:0.,im:-nu[p]},xp,&mut out);}
-                if let Some(parts)=&remainders[p]{for pair in &plan.targets[t].pairs{
-                    let part=parts.get(&pair.source).ok_or("Lattice operator: a fold pair without its remainder")?;
-                    generator.components[&plan.steps[pair.back].charge].op.apply_into(n,ONE,part,&mut out,&mut small);}}
+                for(order,s)in[(0,C{re:-1.,im:0.}),(1,C{re:0.,im:-nu[p]})]{
+                    absorbed_into(&data.left[order],&data.right[order],n,s,xp,&mut out);
+                    let rest=if order==1&&drops{&data.population_rest[1]}else{data.applied(order)};rest.apply_into(s,xp,&mut out);
+                }
             }
             Ok(out)});
         for(&q,block)in targets.iter().zip(blocks){y[q*d..(q+1)*d].copy_from_slice(&block?);}
@@ -309,6 +314,13 @@ impl<'a> LatticeOperator<'a>{
         }
         out
     }
+}
+
+/// out += s (A X + X B) for row-major n x n A, B and the block X.
+fn absorbed_into(a:&[C],b:&[C],n:usize,s:C,x:&[C],out:&mut[C]){
+    for i in 0..n{for j in 0..n{let mut v=ZERO;
+        for k in 0..n{mul_add(&mut v,a[i*n+k],x[k*n+j]);mul_add(&mut v,x[i*n+k],b[k*n+j]);}
+        mul_add(&mut out[i*n+j],s,v);}}
 }
 
 /// A Hermitian-symmetric test field: x_-q = x_q^dagger, the centre Hermitian.
@@ -346,6 +358,39 @@ mod tests{
             for r in 0..d{let mut v=ZERO;for c in 0..d{mul_add(&mut v,dense[(q*d+r)*size+q*d+c],z[q*d+c]);}blocks[q*d+r]=v;}}
         let error=diagonal.iter().zip(&blocks).map(|(a,b)|magnitude(C{re:a.re-b.re,im:a.im-b.im})).fold(0.,f64::max);
         assert!(error<=1e-13*scale,"diagonal part {error:e} of {scale:e}");
+    }
+    #[test]
+    fn lattice_left_out_is_the_exact_far_shell_less_the_applied_fold(){
+        // On every fold edge p -> q: the exact second-order elimination of the
+        // far modes at the source's frequency, sum over the pairs of
+        // -C_b (L0 - i (nu_s + nu_p))^-1 C_s from dense LU solves, less the fold
+        // the operator applies (its dense assembly), is what `left_out` returns.
+        let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
+        let op=LatticeOperator::new(&p,&modes).unwrap();let(n,d)=(op.n,op.n*op.n);let size=op.dimension();
+        let x=symmetric_field(&op,5);let left=op.left_out(&x).unwrap().expect("a far shell");
+        let dense=|q:&[i32]|{let mut m=vec![ZERO;d*d];p.generator.components[q].op.dense_into(n,ONE,&mut m);m};
+        let mut l0=vec![ZERO;d*d];p.generator.zero_component().op.dense_into(n,ONE,&mut l0);
+        let lap=&p.lapack;let mut expected=vec![ZERO;size];
+        for q in 0..op.modes.len(){if !op.canonical[q]{continue;}
+            for target in p.plan.targets.iter().chain(&p.plan.omitted){
+                let Ok(source)=charge_minus(&op.modes[q],&target.charge)else{continue};let Some(&s)=op.index.get(&source)else{continue};
+                for pair in &target.pairs{let step=&p.plan.steps[pair.source];
+                    let mut block=l0.clone();for i in 0..d{block[i*d+i].im-=step.nu+op.nu[s];}
+                    let c=dense(&step.charge);let cx:Vec<C>=(0..d).map(|r|(0..d).fold(ZERO,|v,k|{let mut v=v;mul_add(&mut v,c[r*d+k],x[s*d+k]);v})).collect();
+                    let t=|m:&[C]|(0..d*d).map(|e|m[(e%d)*d+e/d]).collect::<Vec<C>>();
+                    let(lu,piv)=lap.complex_factor(&t(&block),d).unwrap();let y=lap.complex_solve_matrix_factored(&lu,&piv,&cx,d).unwrap();
+                    let b=dense(&p.plan.steps[pair.back].charge);
+                    for r in 0..d{let mut v=ZERO;for k in 0..d{mul_add(&mut v,b[r*d+k],y[k]);}expected[q*d+r].re-=v.re;expected[q*d+r].im-=v.im;}}
+            }
+            for data in &p.fold.targets{
+                let Ok(source)=charge_minus(&op.modes[q],&data.charge)else{continue};let Some(&s)=op.index.get(&source)else{continue};
+                let mut folded=vec![ZERO;d*d];data.dense_into(n,0,ONE,&mut folded);data.dense_into(n,1,C{re:0.,im:op.nu[s]},&mut folded);
+                for r in 0..d{let mut v=ZERO;for k in 0..d{mul_add(&mut v,folded[r*d+k],x[s*d+k]);}expected[q*d+r].re-=v.re;expected[q*d+r].im-=v.im;}
+            }
+        }
+        let scale=x.iter().map(|z|magnitude(*z)).fold(0.,f64::max)*p.fold.targets.iter().map(|t|t.norms[0][0]).fold(0.,f64::max);
+        let error=(0..op.modes.len()).filter(|&q|op.canonical[q]).flat_map(|q|(0..d).map(move|r|q*d+r)).map(|e|magnitude(C{re:left[e].re-expected[e].re,im:left[e].im-expected[e].im})).fold(0.,f64::max);
+        assert!(error<=1e-12*scale,"left out {error:e} from the exact far shell less the fold (scale {scale:e})");
     }
     #[test]
     fn lattice_block_traces_are_exact_left_eigenvectors(){
