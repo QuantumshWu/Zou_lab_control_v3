@@ -448,14 +448,14 @@ mod tests{
         assert_eq!(full["populationAccuracy"]["status"],json!("estimated-converged"));
         assert_eq!(full_mean["withinTolerance"],json!(true));
     }
-    /// The default scene's mean at T = 100 ms, 1 s and infinity against
-    /// exact references (tests/fixtures/default_scene_horizons.json), each
+    /// The default scene's mean at T = 100 ms and 1 s against exact
+    /// references (tests/fixtures/default_scene_horizons.json), each
     /// within its bound above the comparison floor (both solvers agree with
     /// them to 7e-7, inside the references' own accuracy: their two
     /// cross-check methods differ by 3e-5 and more; the release returned the
     /// steady state for 100 ms, off by 7.8e-3 with a bound of 7e-13), and
-    /// p(T) moving toward
-    /// the steady state as T grows (exact: 7.8e-3 at 100 ms, 4.0e-3 at 1 s;
+    /// p(T) moving toward the fixture's exact steady state as T grows
+    /// (exact: 7.8e-3 at 100 ms, 4.0e-3 at 1 s;
     /// the scene's two slow classes decay monotonically).
     #[test]
     fn the_default_scene_means_follow_their_horizons(){
@@ -482,13 +482,13 @@ mod tests{
         let bounds:f64=means.iter().map(|m|m.1).sum();
         assert!(to_steady(1)<=to_steady(0)+bounds,"p(1 s) {:e} from the steady state, p(100 ms) {:e}",to_steady(1),to_steady(0));
     }
-    /// One mean request returns all three standard horizons
-    /// (`asymptoticHorizons`: 100 ms, 1 s, infinity), each within its bound
+    /// One mean request returns both standard horizons
+    /// (`asymptoticHorizons`: 100 ms and 1 s), each within its bound
     /// of the default scene's exact references; another horizon is refused; a
     /// full request without the mean (includeAsymptotic false) runs no mean
     /// and returns none.
     #[test]
-    fn one_mean_request_returns_the_three_standard_horizons(){
+    fn one_mean_request_returns_the_two_standard_horizons(){
         let fixture:Value=serde_json::from_str(include_str!("../tests/fixtures/default_scene_horizons.json")).unwrap();
         let model:Model=serde_json::from_value(fixture["model"].clone()).unwrap();
         let groups:Vec<Vec<usize>>=serde_json::from_value(fixture["groups"].clone()).unwrap();
@@ -514,15 +514,15 @@ mod tests{
         assert!(alone.get("asymptoticHorizons").is_none()&&alone["diagnostics"].get("meanLattice").is_none());
         assert_eq!(alone["populationAccuracy"]["status"],json!("estimated-converged"));
     }
-    /// The `asymptoticHorizons` entry of a result at a horizon (us, or null).
+    /// The `asymptoticHorizons` entry of a result at a horizon (us).
     fn entry<'v>(out:&'v Value,horizon:&Value)->&'v Value{
         out["asymptoticHorizons"].as_array().unwrap().iter().find(|e|&e["horizonUs"]==horizon).unwrap()
     }
-    /// A mean whose run computed nothing still returns its three standard
+    /// A mean whose run computed nothing still returns its two standard
     /// horizons, each not converged with the run's reason and its
     /// horizonUs.
     #[test]
-    fn a_failed_mean_returns_its_three_horizons_not_converged(){
+    fn a_failed_mean_returns_its_two_horizons_not_converged(){
         let fixture:Value=serde_json::from_str(include_str!("../tests/fixtures/default_scene_horizons.json")).unwrap();
         let model:Model=serde_json::from_value(fixture["model"].clone()).unwrap();
         for horizon in[json!(1e5),json!(1e6)]{
@@ -556,7 +556,7 @@ mod tests{
         let horizons:Vec<f64>=var("ATOM_VALIDATE_HORIZONS").map_or(vec![],|h|h.split(',').map(|x|x.parse().unwrap()).collect());
         assert!(!times.is_empty()||!horizons.is_empty(),"ATOM_VALIDATE_GRID or ATOM_VALIDATE_HORIZONS: a request has a trajectory or a horizon");
         let started=Instant::now();
-        let options=Options::default();let prepared=prepare_request(&model,&options).unwrap();let prepare_ms=started.elapsed().as_secs_f64()*1e3;
+        let options=Options{mean_horizon_us:Some(1e6),..Options::default()};let prepared=prepare_request(&model,&options).unwrap();let prepare_ms=started.elapsed().as_secs_f64()*1e3;
         println!("{}",json!({"preparation":lattice_json(&prepared.lattice,None)}));
         let rows=|v:&Value|->Option<Vec<Vec<f64>>>{v.as_array().map(|a|a.iter().map(|r|r.as_array().unwrap().iter().map(|x|x.as_f64().unwrap()).collect()).collect())};
         let reference_pops=rows(&reference["pops"]).filter(|p|p.len()==times.len());

@@ -68,9 +68,9 @@ struct Options {
     /// Only the long-time mean (no finite-time trajectory).
     #[serde(default)]
     steady_only: bool,
-    /// Observation horizon of the long-time mean: 1e5 or 1e6 us, or absent or
-    /// null for the t -> infinity mean (the standard horizons, every one of
-    /// which a mean run returns).
+    /// Observation horizon of the long-time mean whose diagnostics a run
+    /// reports: 1e5 or 1e6 us (the standard horizons, every one of which a
+    /// mean run returns); there is no t -> infinity mean.
     #[serde(default)]
     mean_horizon_us: Option<f64>,
 }
