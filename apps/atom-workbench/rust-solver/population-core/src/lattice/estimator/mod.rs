@@ -375,6 +375,8 @@ impl<'a> UnifiedEstimate<'a>{
     /// The estimated errors of a checkpoint's outputs; `steady` is the
     /// pipeline's own lattice (its operator, steady preconditioner and
     /// steady-solve directions).
+    /// (research, S3) Bytes kept per column by the fast part and the pool.
+    pub fn stored_bytes(&self)->(usize,usize){(self.lattice.stored_bytes(),self.pool.as_ref().map_or(0,|p|p.stored_bytes()))}
     pub fn estimate(&mut self,reduced:&ReducedView<'_>,steady:&mut dyn SteadySolves)->Result<ErrorEstimate,String>{self.estimate_with(reduced,steady,None)}
     /// The estimate with one source of the slow part alone, through the slow
     /// modes (no Krylov residual, no fast part): what completing that source

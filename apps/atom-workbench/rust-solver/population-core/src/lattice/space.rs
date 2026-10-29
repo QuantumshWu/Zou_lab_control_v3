@@ -98,6 +98,9 @@ pub struct Space{
     /// Orthonormal basis (real inner product) and its images A W.
     pub basis:Vec<Vec<C>>,pub images:Vec<Vec<C>>,
     krylov:Vec<Vec<C>>,
+    /// (research, S3) Per Krylov vector whether translations copy it, and
+    /// whether the next solve's vectors are copied.
+    copyable:Vec<bool>,pub untranslated_next:bool,
     /// Active translations: the step and, per mode, the source modes of
     /// q - s and of q + s.
     translations:Vec<(Charge,Vec<Option<usize>>,Vec<Option<usize>>)>,
@@ -120,7 +123,7 @@ impl Space{
         // The trace carrier u = I / n on the centre (tr u = tr x0 = 1).
         let n=op.n;let mut u=vec![ZERO;op.dimension()];for i in 0..n{u[op.centre*d+i*n+i]=C{re:1./n as f64,im:0.};}
         let carrier=vectors.norm(&u);
-        let mut space=Self{basis:vec![],images:vec![],krylov:vec![],translations:vec![],vectors,noise_floor:0.,capacity:capacity.max(2),initial:vec![carrier],columns:vec![],images_ms:0.};
+        let mut space=Self{basis:vec![],images:vec![],krylov:vec![],copyable:vec![],untranslated_next:false,translations:vec![],vectors,noise_floor:0.,capacity:capacity.max(2),initial:vec![carrier],columns:vec![],images_ms:0.};
         space.append(lattice,u,0.)?;
         // x0's K part (zero when rho0 is I / n).
         let mut k0=x0.clone();project_traces(&mut k0,n);let rest=space.vectors.norm(&k0);
@@ -142,7 +145,7 @@ impl Space{
         self.translations.push((step.clone(),source(1),source(-1)));
         let t=self.translations.len()-1;let mut added=0;
         let floor=self.floor();
-        for v in self.krylov.clone(){for copy in self.translates(&v,t){added+=usize::from(self.append(lattice,copy,floor)?);}}
+        for(v,ok)in self.krylov.clone().into_iter().zip(self.copyable.clone()){if !ok{continue;}for copy in self.translates(&v,t){added+=usize::from(self.append(lattice,copy,floor)?);}}
         Ok(added)
     }
     /// S_s v + S_-s v and i (S_s v - S_-s v) of translation t.
@@ -179,11 +182,11 @@ impl Space{
         for _ in 0..2{let refs:Vec<&[C]>=self.krylov.iter().map(|x|x.as_slice()).collect();let h=self.vectors.dots(&refs,&v);self.vectors.subtract(&refs,&h,&mut v)?;}
         let rest=self.vectors.norm(&v);if !(rest>self.noise_floor*size)||!(rest>0.){return Ok(0);}
         for x in v.iter_mut(){*x=scaled(*x,1./rest);}
-        self.krylov.push(v.clone());
+        self.krylov.push(v.clone());self.copyable.push(!self.untranslated_next);
         let floor=self.floor();
         if !self.append(lattice,v.clone(),floor)?{return Ok(0);}
         let mut added=1;
-        for t in 0..self.translations.len(){for copy in self.translates(&v,t){added+=usize::from(self.append(lattice,copy,floor)?);}}
+        if !self.untranslated_next{for t in 0..self.translations.len(){for copy in self.translates(&v,t){added+=usize::from(self.append(lattice,copy,floor)?);}}}
         Ok(added)
     }
     /// (research, S3) A column at the pole at infinity: A v of the last
@@ -221,6 +224,7 @@ impl Space{
         Ok(added)
     }
     pub fn solves(&self)->usize{self.columns.len()}
+    pub fn krylov_count(&self)->usize{self.krylov.len()}
 }
 
 /// Projects a Hermitian-symmetric field into K: every block x_q loses its

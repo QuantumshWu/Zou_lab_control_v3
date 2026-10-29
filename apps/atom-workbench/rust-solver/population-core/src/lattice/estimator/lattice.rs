@@ -176,6 +176,8 @@ impl<'p> ErrorLattice<'p>{
     /// 1.0-1.2 s.
     pub fn class(&self)->Result<&'p BlockSystem,String>{self.frame.class()}
     pub fn dimension(&self)->usize{self.modes.len()*self.d}
+    /// (research, S3) Bytes of the per-column coordinates kept.
+    pub fn stored_bytes(&self)->usize{16*self.basis_coordinates.iter().chain(&self.image_coordinates).chain(&self.outer_basis).chain(&self.outer_image).map(|v|v.len()).sum::<usize>()}
     /// Process the basis columns not seen yet (columns are append-only):
     /// every new column and its image, transformed together.
     pub fn add_columns(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{

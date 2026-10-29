@@ -347,6 +347,8 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
 /// populations Re e^{i nu_q t} E_q[ii]. One JSON line per checkpoint.
 fn basis_cols(space:&Space)->Vec<&[C]>{space.basis.iter().map(|v|v.as_slice()).collect()}
 #[allow(clippy::too_many_arguments)]
+/// (research, S3) E^-1 coordinates of blocks, column-major d x count.
+fn eig_coefficients(eigen:&BlockEigenbasis,blocks:&[&[C]])->Result<Vec<C>,String>{eigen.coefficients(blocks)}
 /// (research, S2) e^A for a real column-major r x r matrix: scaling and
 /// squaring with the (13,13) Pade approximant (Higham 2005).
 fn expm_real(lapack:&Lapack,a:&[f64],r:usize)->Result<Vec<f64>,String>{
@@ -474,7 +476,7 @@ fn diag_exact(path:&str,prepared:&LatticePrepared,frame:&SwFrame<'_>,lattice:&mu
             let top=ue.iter().map(|x|x.abs()).fold(0.,f64::max).max(f64::MIN_POSITIVE);
             amplification.push(sum_abs/top);
             coordinate_gap.push(ue.iter().zip(&stable[ti]).map(|(a,b)|(a-b).abs()).fold(0.,f64::max));
-            let ce=ops.gram(&basis,&[exact[ti].as_slice()])?;let cm=galerkin.metric_coordinates(lapack,&exact[ti])?;
+            let ce=ops.gram(&basis,&[exact[ti].as_slice()])?;let cm=galerkin.metric_coordinates(lapack,&basis,&exact[ti])?;
             c_e_norm.push(ce.iter().map(|x|x*x).sum::<f64>().sqrt());
             let fields=ops.combinations(&basis,&[stable[ti].clone(),ce,cm,euclid[ti].clone()])?;
             let read=|v:&[C]|->Vec<f64>{(0..n).map(|i|(0..modes).map(|q|{let z=v[q*d+i*n+i];let(c,s)=((nu[q]*t).cos(),(nu[q]*t).sin());c*z.re-s*z.im}).sum()).collect()};
@@ -600,7 +602,15 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     // partial, whatever tau.
     if ledger.expansion_parameter>EXPANSION_LIMIT{return Err(format!("Static fold expansion parameter {:e} is above {EXPANSION_LIMIT:e}: the fold's frequency expansion is not small on this lattice, not solved",ledger.expansion_parameter));}
     // 2. The space: translations, the steady column.
-    let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*op.modes.len())};
+    let capacity={let op=lattice.operator();let d=op.n*op.n;
+        if std::env::var("ATOM_BASIS_FROM_GUARD").is_ok(){
+            // (research, S3) the guard's headroom over the planned request,
+            // shared by its runs; a column: basis, image and the estimator's
+            // coordinates (about as large again).
+            let headroom=((budget-planned)/request.runs.max(1)as f64).max(0.);
+            let column=(std::mem::size_of::<C>()*4*d*op.modes.len())as f64;
+            let c=((BASIS_BYTES as f64+headroom)/column)as usize;eprintln!("DBG basis capacity {c} columns (budget {:.1} GB, planned {:.1} GB)",budget/1e9,planned/1e9);c
+        }else{BASIS_BYTES/(std::mem::size_of::<C>()*2*d*op.modes.len())}};
     let mut space=Space::new(&mut lattice,initial,capacity)?;
     for s in charge_set::gated_steps(prepared,tolerance){if lattice.operator().index.contains_key(&s){space.activate(&mut lattice,&s)?;}}
     // (research, S3) ATOM_POLE_INFINITY=m: m columns at the pole at infinity
@@ -631,7 +641,15 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
     // them three, four, five lasers and four without the trap at 20 us were
     // accepted at 16-24 solves (four without the trap partial before) and
     // five lasers at 10 us / 2000 samples reached 7.0e-3 against 2.3e-2.
-    let points=space::ladder(eigen,initial,&lattice.operator().nu,t1,times.last().copied().unwrap_or(longest),tolerance)?;
+    // (research, S3) ATOM_POLES_TRANSLATED: lattice candidates only on the
+    // translated modes.
+    let translated_only=std::env::var("ATOM_POLES_TRANSLATED").is_ok();
+    let shifts_of=|steps:&[Charge],lattice:&Lattice<'_>|->Vec<f64>{let op=lattice.operator();
+        steps.iter().filter_map(|s|op.index.get(s).map(|&q|op.nu[q])).flat_map(|v|[v,-v]).collect()};
+    let shifts:Vec<f64>=if translated_only{std::iter::once(0.).chain(shifts_of(&space.translations(),&lattice)).collect()}else{lattice.operator().nu.clone()};
+    let mut points=space::ladder(eigen,initial,&shifts,t1,times.last().copied().unwrap_or(longest),tolerance)?;
+    let untranslated_lattice=std::env::var("ATOM_LATTICE_POLES_UNTRANSLATED").is_ok();
+    let centre_poles=space::ladder(eigen,initial,&[0.],t1,times.last().copied().unwrap_or(longest),tolerance)?;
     if std::env::var("ATOM_DIAG_LADDER").is_ok(){eprintln!("DBG ladder {} points: {}",points.len(),points.iter().map(|p|{let z=p.sigma();format!("{:.3e}{:+.4e}i",z.re,z.im)}).collect::<Vec<_>>().join(" "));}let mut alive=vec![true;points.len()];
     // The frame's metric (waiting for the frame's thread).
     let clock=Instant::now();
@@ -673,6 +691,10 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             let steady=model.steady_populations(&galerkin);
             timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
             let estimate_clock=Instant::now();
+            // (research, S3) ATOM_DIAG_MEMORY: the footprint per checkpoint.
+            if std::env::var("ATOM_DIAG_MEMORY").is_ok(){let(fast,pool)=estimator.stored_bytes();let(private,peak)=crate::memory::private_bytes();
+                let field=16*space.basis.first().map_or(0,|v|v.len());
+                eprintln!("DBG memory solves {} columns {} krylov {} translations {} | basis {:.0} MB images {:.0} MB metric {:.0} MB estimator fast {:.0} MB pool {:.0} MB | process {:.0} MB peak {:.0} MB",space.solves(),space.basis.len(),space.krylov_count(),space.translations().len(),(field*space.basis.len())as f64/1e6,(field*space.images.len())as f64/1e6,galerkin.stored_bytes()as f64/1e6,fast as f64/1e6,pool as f64/1e6,private/1e6,peak/1e6);}
             let mut estimate=estimator.estimate(&ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
                 used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out},&mut lattice)?;
             timing.estimate_ms+=estimate_clock.elapsed().as_secs_f64()*1e3;
@@ -786,7 +808,39 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             // every lattice mode whose population amplitude in the reduced
             // solution exceeds GATE x tolerance (the translation gate's
             // principle, measured), activated retroactively (copies, no solves).
-            let mut grown=false;
+            let mut grown=false;let before_translations=space.translations();
+            // (research, S3) ATOM_TRANSLATION_TRANSFER: the a-priori trigger,
+            // the first-order transfer of the reduced solution's blocks into
+            // every untranslated mode.
+            if std::env::var("ATOM_TRANSLATION_TRANSFER").is_ok()&&!times.is_empty(){
+                let kernels=frame.kernels()?;let rows=eigen.population_rows();
+                let(n,d,centre,charges,nu,index)={let op=lattice.operator();(op.n,op.n*op.n,op.centre,op.modes.clone(),op.nu.clone(),op.index.clone())};
+                let basis_refs:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();
+                let sample:Vec<f64>={let mut idx:Vec<usize>=Vec::new();let mut i=1usize;while i<times.len(){idx.push(i);i=(i*3/2).max(i+1);}idx.into_iter().map(|i|times[i]).collect()};
+                let fields=ops.combinations(&basis_refs,&sample.iter().map(|&t|model.state(t)).collect::<Vec<_>>())?;
+                let gate=charge_set::GATE*tolerance;
+                let mut amplitude=vec![0_f64;charges.len()];
+                for(f,&t)in fields.iter().zip(&sample){
+                    let blocks:Vec<&[C]>=(0..charges.len()).map(|q|&f[q*d..(q+1)*d]).collect();let c=eig_coefficients(eigen,&blocks)?;
+                    let active=space.translations();
+                    for q in 0..charges.len(){
+                        if q==centre||active.contains(&charges[q])||active.contains(&opposite(&charges[q])){continue;}
+                        let mut est=vec![ZERO;d];
+                        for(s,st)in kernels.steps.iter().enumerate(){
+                            let Ok(src)=charge_minus(&charges[q],&st.charge)else{continue};let Some(&b)=index.get(&src)else{continue};
+                            kernels.subtract_kernel(s,&c[b*d..(b+1)*d],&mut est);}
+                        let ph=cexp(C{re:0.,im:nu[q]},t);
+                        for i in 0..n{let mut v=ZERO;for j in 0..d{mul_add(&mut v,rows[i+n*j],est[j]);}amplitude[q]=amplitude[q].max(2.*mul(ph,v).re.abs());}
+                    }
+                }
+                for q in 0..charges.len(){
+                    if q==centre||amplitude[q]<=gate{continue;}
+                    let c=charges[q].clone();let m=opposite(&c);
+                    let active=space.translations();if active.contains(&c)||active.contains(&m){continue;}
+                    space.activate(&mut lattice,&c)?;grown=true;
+                    eprintln!("DBG translation {c:?} transfer amplitude {:.2e} at {} solves",amplitude[q],space.solves());
+                }
+            }
             if std::env::var("ATOM_TRANSLATION_AMPLITUDE").is_ok()&&!times.is_empty(){
                 let sample:Vec<f64>=times.iter().copied().step_by((times.len()/100).max(1)).collect();
                 let amplitudes=model.mode_amplitudes(&galerkin,&sample);
@@ -799,6 +853,14 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                     space.activate(&mut lattice,&c)?;grown=true;
                     eprintln!("DBG translation {c:?} amplitude {a:.2e} at {} solves",space.solves());
                 }
+            }
+            if grown&&translated_only{
+                // The new translations' lattice candidates join the ladder.
+                let fresh:Vec<Charge>=space.translations().into_iter().filter(|c|!before_translations.contains(c)).collect();
+                let extra:Vec<Pole>=space::ladder(eigen,initial,&shifts_of(&fresh,&lattice),t1,times.last().copied().unwrap_or(longest),tolerance)?
+                    .into_iter().filter(|p|matches!(p,Pole::Complex(_))).collect();
+                let added=extra.len();points.extend(extra);alive.extend(vec![true;added]);score.extend(vec![0.;added]);solved_at.extend(vec![None;added]);remaining.extend(vec![0.;added]);
+                eprintln!("DBG ladder +{added} points ({} in all)",points.len());
             }
             if !grown{current=Some((space.solves(),model));}
         }
@@ -820,7 +882,11 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
         for &(i,_)in &ranked{
             if !alive[i]{continue;}
             solved_at[i]=Some(score[i]);
+            // (research, S3) ATOM_LATTICE_POLES_UNTRANSLATED: a lattice-frequency
+            // pole's vectors already target a family; translations do not copy them.
+            space.untranslated_next=untranslated_lattice&&matches!(points[i],Pole::Complex(_))&&!centre_poles.iter().any(|p|{let(a,b)=(p.sigma(),points[i].sigma());a.re==b.re&&a.im==b.im});
             if space.solve(&mut lattice,points[i])?==0{alive[i]=false;}
+            space.untranslated_next=false;
             if space.solves()%CHECKPOINT==0||space.solves()>=maximum_solves||space.full(){break;}
         }
     }

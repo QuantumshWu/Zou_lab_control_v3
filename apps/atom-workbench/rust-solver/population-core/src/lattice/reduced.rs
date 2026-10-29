@@ -114,14 +114,16 @@ impl<'m> Projection<'m>{
             vectors:Vectors::new(op,1)?,milliseconds:0.})
     }
     pub fn columns(&self)->usize{self.covered}
+    /// (research, S3) Bytes of the metric columns kept.
+    pub fn stored_bytes(&self)->usize{16*self.metric.len()}
     /// (research, S3) The Euclidean Galerkin matrix (row-major r x r): the
     /// carrier's row zero, the other rows E[1.., ..] = Re W^T A W (W is
     /// Euclidean-orthonormal).
     pub fn euclidean_g(&self)->Vec<f64>{let r=self.covered;let mut g=self.e.clone();for j in 0..r{g[j]=0.;}g}
     /// (research, S2) The M-orthogonal coordinates of a field on the covered
     /// columns: K^-1 Re W^H M x.
-    pub fn metric_coordinates(&self,lapack:&Lapack,field:&[C])->Result<Vec<f64>,String>{
-        let r=self.covered;let dots=self.metric_dots(&self.metric,r,&[field])?;
+    pub fn metric_coordinates(&self,lapack:&Lapack,basis:&[&[C]],field:&[C])->Result<Vec<f64>,String>{
+        let r=self.covered;let z=self.frame_metric.apply(&[field])?;let dots=self.metric_dots(&z,1,&basis[..r])?;
         let(lu,pivots)=lapack.factor(&self.k,r)?;lapack.solve_matrix_factored(&lu,&pivots,&dots,r)
     }
     /// Re <z_a, field_c> on the canonical modes for metric columns z
@@ -137,17 +139,26 @@ impl<'m> Projection<'m>{
     /// Takes the space's columns not yet covered.
     pub fn ingest(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
         let clock=Instant::now();let(old,new)=(self.covered,basis.len());if new==old{return Ok(());}
-        let(n,d,l)=(self.n,self.d,self.length);let width=new-old;
-        let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();self.metric.extend(self.frame_metric.apply(&fresh)?);
+        let(n,d)=(self.n,self.d);let width=new-old;
+        let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();
+        // (research, S3) ATOM_NO_METRIC_STORE: M w is not kept; K and H's
+        // new columns from M w_new and M A w_new against the basis (M is
+        // self-adjoint in the real inner product).
+        let unstored=std::env::var("ATOM_NO_METRIC_STORE").is_ok();
+        let z_fresh=self.frame_metric.apply(&fresh)?;
+        if !unstored{self.metric.extend_from_slice(&z_fresh);}
         for column in &basis[old..new]{
             self.populations.push(self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect());
         }
         let all_basis:Vec<&[C]>=basis[..new].iter().map(|v|v.as_slice()).collect();
         let all_images:Vec<&[C]>=images[..new].iter().map(|v|v.as_slice()).collect();
         let new_images=&all_images[old..];
-        let z_new=&self.metric[old*l..new*l];
+        let z_new=&z_fresh[..];
         let kb=self.metric_dots(z_new,width,&all_basis)?;                 // K[i, old + c] at i * width + c
-        let hc=self.metric_dots(&self.metric,new,new_images)?;           // H[i, old + c] at c * new + i
+        let hc=if unstored{
+            let za=self.frame_metric.apply(new_images)?;let rows=self.metric_dots(&za,width,&all_basis)?;   // [i * width + c]
+            let mut t=vec![0.;width*new];for i in 0..new{for c in 0..width{t[c*new+i]=rows[i*width+c];}}t
+        }else{self.metric_dots(&self.metric,new,new_images)?};           // H[i, old + c] at c * new + i
         let hr=self.metric_dots(z_new,width,&all_images[..old])?;        // H[old + c, j] at j * width + c
         let ec=self.vectors.gram(&all_basis,new_images)?;                 // E[:, old..new]
         let er=self.vectors.gram(&all_basis[old..],&all_images[..old])?;  // E[old..new, ..old]

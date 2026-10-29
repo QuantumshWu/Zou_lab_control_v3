@@ -374,6 +374,8 @@ impl SlowPool{
     /// Seed directions z with their images A z (A on P u Q, unbordered):
     /// Hermitian-symmetric fields, such as the inner directions of the
     /// pipeline's steady solve.
+    /// (research, S3) Bytes kept: Q's panels, the directions' parts, the packed basis and its products.
+    pub fn stored_bytes(&self)->usize{8*(self.q.q.iter().map(|v|v.len()).sum::<usize>()+self.cu.iter().chain(&self.cau).map(|v|v.len()).sum::<usize>()+self.packed_basis.len()+self.wq.iter().map(|v|v.len()).sum::<usize>())+16*self.near_parts.iter().map(|v|v.len()).sum::<usize>()}
     pub fn seed(&mut self,directions:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
         if directions.len()!=images.len(){return Err("Slow pool: seed directions and images differ in number".into());}
         self.work.seeds+=directions.len();
