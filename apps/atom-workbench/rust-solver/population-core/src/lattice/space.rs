@@ -258,9 +258,14 @@ pub fn ladder(eigen:&BlockEigenbasis,initial:&[C],nu:&[f64],t1:f64,longest:f64,t
     let lattice_modes=std::env::var("ATOM_POLES_LATTICE").is_ok();
     let every=lattice_modes||std::env::var("ATOM_POLES_ALL").is_ok();
     let shifts:Vec<f64>=if lattice_modes{nu.to_vec()}else{vec![0.]};
+    let fast_only=std::env::var("ATOM_LATTICE_FAST_ONLY").is_ok();
     for &s in &sigmas{
         let mut frequencies:Vec<f64>=eigen.lambda.iter().zip(&weights).filter(|(l,&w)|(every||l.re.abs()<s)&&w>=COMPLEX_WEIGHT*tolerance)
-            .flat_map(|(l,_)|shifts.iter().map(move|&v|l.im-v)).filter(|&w|w>s).collect();
+            // (research, S5) ATOM_LATTICE_FAST_ONLY: on a lattice mode (shift
+            // nu != 0) only the modes decaying faster than sigma (the
+            // switch-on transients, whose weights translated copies lack);
+            // the slower families come with the translated copies.
+            .flat_map(|(l,_)|shifts.iter().filter(move|&&v|!fast_only||v==0.||l.re.abs()>=s).map(move|&v|l.im-v)).filter(|&w|w>s).collect();
         frequencies.sort_by(f64::total_cmp);
         let mut chosen=vec![0.];
         for w in frequencies{if chosen.iter().all(|&v|(w-v).abs()>s){chosen.push(w);}}
