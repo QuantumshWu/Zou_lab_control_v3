@@ -28,7 +28,7 @@
 //!   (`estimated-converged` when every sample's bound is within the
 //!   tolerance, else `estimated-partial` with its `reason`), `sampleErrors`
 //!   (per sample, an absolute population error: the sample's convergence
-//!   estimate over the last four checkpoints, plus the growth charge and the
+//!   estimate over whole pole cycles, plus the growth charge and the
 //!   change of its projection onto the probability simplex),
 //!   `estimatedMaximumError` (their largest), `requestedTolerance`, `scope`.
 //! - `meanHorizons`, the mean, whenever one was asked for (computed or not):
@@ -63,7 +63,7 @@ use atom_population_core::lattice::accuracy::{self,POPULATION_TOLERANCE};
 use atom_population_core::lattice::pipeline::{self,Answer,Checkpoint,LONGEST_TIME_US,MOST_SAMPLES,Request,Solution};
 
 const ENGINE:&str="rust-population-core-lattice";
-const METHOD:&str="Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude, ring condition and the initial state's a-priori transfers, and their ring; far harmonics folded statically by a truncation rule): one block rational Krylov space from the initial state and its translations, every output read from one Petrov-Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, each output's error estimated from its convergence over the last four checkpoints";
+const METHOD:&str="Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude, ring condition and the initial state's a-priori transfers, and their ring; far harmonics folded statically by a truncation rule): one block rational Krylov space from the initial state and its translations, every output read from one Petrov-Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, each output's error estimated from its convergence over whole pole cycles";
 /// A mean whose bound reaches this carries no information (a population
 /// error of 1 bounds nothing): it is reported not converged, unshown.
 const UNINFORMATIVE_BOUND:f64=1.;

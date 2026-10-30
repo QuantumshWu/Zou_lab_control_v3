@@ -19,8 +19,8 @@
 //! 4. Every CHECKPOINT solves (a run without a grid, the mean's, also right
 //!    after the steady column): the metric Petrov-Galerkin model (`reduced`),
 //!    its outputs (trajectory on the grid, horizons, slowest relaxation).
-//!    An output's error estimate is its convergence over the last four
-//!    checkpoints (`convergence`); its bound is that estimate plus the growth
+//!    An output's error estimate is its convergence over whole pole cycles
+//!    (`convergence`); its bound is that estimate plus the growth
 //!    charge, and on a trajectory row the change of its projection onto the
 //!    probability simplex (computed exactly). A checkpoint is accepted when
 //!    every bound is within the tolerance.
@@ -81,11 +81,11 @@ fn planned_bytes(runs:usize,modes:usize)->f64{BASE_BYTES+MODE_BYTES*(runs*modes)
 /// at 10 us / 2000 samples held the bound at 5.0-5.7e-3 over 20 solves.
 const PLATEAU:usize=3;
 const PLATEAU_GAIN:f64=2.;
-/// The convergence estimate (`convergence`): a ratio of successive changes
-/// at or above STAGNATION is no convergence (the output is not accepted);
-/// a last change below ROUNDOFF x tolerance is converged to roundoff.
-/// STAGNATION is a deliberate margin: at r = 0.8 the geometric tail r / (1 -
-/// r) is 4 changes, beyond which four levels cannot tell a slow geometric
+/// The convergence estimate (`convergence`): a ratio of successive cycles'
+/// largest changes at or above STAGNATION is no convergence (the output is
+/// not accepted); a largest change below ROUNDOFF x tolerance is converged
+/// to roundoff. STAGNATION is a deliberate margin: at r = 0.8 the estimate
+/// is 5 changes, beyond which two cycles cannot tell a slow geometric
 /// convergence from a stall.
 const STAGNATION:f64=0.8;
 const ROUNDOFF:f64=1e-3;
@@ -268,28 +268,36 @@ fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:
     Ok(found.iter().map(|&(rate,residual)|SlowRate{rate,residual,matched:matched(rate)}).collect())
 }
 
-/// Acceptance by convergence: the outputs of the last four checkpoints x_k,
-/// their changes D_k = |x_k - x_k-1| (`accuracy::metric`), the rate r =
-/// max(|D_k| / |D_k-1|, |D_k-1| / |D_k-2|) (two ratios: a level that has not
-/// entered the asymptotic regime, a ratio near or above one, counts as
-/// stagnation) and the geometric tail D_k r / (1 - r) as the estimate. The
-/// trajectory is one output (its ratios from its largest changes over the
-/// grid; each sample's estimate from its own last change), every horizon
-/// another. r at or above STAGNATION is no convergence: the estimate is at
-/// least twice the tolerance. A last change below ROUNDOFF x tolerance is
-/// converged to roundoff (the change itself). Fewer than four checkpoints:
-/// unknown (1).
-fn convergence(history:&[(Vec<Vec<f64>>,Vec<Vec<f64>>)],groups:&[Vec<usize>],tolerance:f64)->Estimate{
-    let k=history.len();let(t,hz)=(&history[k-1].0,&history[k-1].1);
-    if k<4{return Estimate{trajectory:vec![1.;t.len()],horizons:vec![1.;hz.len()]};}
-    let output=|d0:&[f64],d1:&[f64],d2:&[f64]|->Vec<f64>{
-        let(m0,m1,m2)=(d0.iter().copied().fold(0.,f64::max),d1.iter().copied().fold(0.,f64::max),d2.iter().copied().fold(0.,f64::max));
-        let converged=m2<=ROUNDOFF*tolerance;let ratio=|a:f64,b:f64|if a>0.{b/a}else if b>0.{f64::INFINITY}else{0.};let r=ratio(m1,m2).max(ratio(m0,m1));
-        d2.iter().map(|&x|if converged{x}else if r<STAGNATION{x*r/(1.-r)}else{(x*STAGNATION/(1.-STAGNATION)).max(2.*tolerance)}).collect()};
-    let changes=|level:usize|->Vec<f64>{(0..t.len()).map(|i|accuracy::metric(&history[level].0[i],&history[level-1].0[i],groups)).collect()};
-    let horizon=|i:usize|->f64{let change=|level:usize|accuracy::metric(&history[level].1[i],&history[level-1].1[i],groups);
-        output(&[change(k-3)],&[change(k-2)],&[change(k-1)])[0]};
-    Estimate{trajectory:output(&changes(k-3),&changes(k-2),&changes(k-1)),horizons:(0..hz.len()).map(horizon).collect()}
+/// Acceptance by convergence over whole pole cycles: the outputs x_k of the
+/// checkpoints, their changes |x_k - x_k-1| (`accuracy::metric`), and per
+/// window of the last `window` changes (the checkpoints spanning one cycle
+/// of the ladder) their largest, D. The rate r = max D_k / max D_k-w (the
+/// largest over the grid for the trajectory, each horizon on its own) and
+/// the estimate D_k / (1 - r): the geometric tail of the cycles to come plus
+/// the current cycle's largest change once more, since within a cycle the
+/// level is not monotone (a pole's visit can undo part of a change; measured
+/// on three, four and five lasers at 20 us: the first sample's error held at
+/// 2.5-3e-3 over 16 solves while single changes fell to 4e-4). Comparing
+/// whole cycles keeps a change between two visits of one pole from hiding.
+/// r at or above STAGNATION is no convergence: the estimate is at least
+/// twice the tolerance. A largest change below ROUNDOFF x tolerance is
+/// converged to roundoff (the change itself). Fewer than 2 window + 1
+/// checkpoints: unknown (1).
+fn convergence(history:&[(Vec<Vec<f64>>,Vec<Vec<f64>>)],groups:&[Vec<usize>],tolerance:f64,window:usize)->Estimate{
+    let k=history.len();let(t,hz)=(&history[k-1].0,&history[k-1].1);let w=window.max(1);
+    if k<2*w+1{return Estimate{trajectory:vec![1.;t.len()],horizons:vec![1.;hz.len()]};}
+    let output=|previous:&[f64],current:&[f64]|->Vec<f64>{
+        let(m0,m1)=(previous.iter().copied().fold(0.,f64::max),current.iter().copied().fold(0.,f64::max));
+        let converged=m1<=ROUNDOFF*tolerance;let r=if m0>0.{m1/m0}else if m1>0.{f64::INFINITY}else{0.};
+        current.iter().map(|&x|if converged{x}else if r<STAGNATION{x/(1.-r)}else{(x/(1.-STAGNATION)).max(2.*tolerance)}).collect()};
+    // The largest change per output over the window ending at `end`.
+    let largest=|end:usize,change:&dyn Fn(usize,usize)->f64,count:usize|->Vec<f64>{
+        (0..count).map(|i|(end+1-w..=end).map(|level|change(level,i)).fold(0.,f64::max)).collect()};
+    let sample=|level:usize,i:usize|accuracy::metric(&history[level].0[i],&history[level-1].0[i],groups);
+    let mean=|level:usize,i:usize|accuracy::metric(&history[level].1[i],&history[level-1].1[i],groups);
+    let trajectory=output(&largest(k-1-w,&sample,t.len()),&largest(k-1,&sample,t.len()));
+    let(before,now)=(largest(k-1-w,&mean,hz.len()),largest(k-1,&mean,hz.len()));
+    Estimate{trajectory,horizons:(0..hz.len()).map(|i|output(&[before[i]],&[now[i]])[0]).collect()}
 }
 
 /// The responses of the far shell's rings beyond the second order: per
@@ -408,6 +416,9 @@ fn run<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,observ
         ladder.sort_by(|a,b|b.sigma().total_cmp(&a.sigma()));
         let m=ladder.len();let p2=m.next_power_of_two();let width=p2.trailing_zeros();
         (0..p2).map(|i|if width==0{0}else{i.reverse_bits()>>(usize::BITS-width)}).filter(|&i|i<m).map(|i|ladder[i]).collect()};
+    // The checkpoints spanning one cycle: the convergence compares whole
+    // cycles (`convergence`).
+    let window=cycle.len().div_ceil(CHECKPOINT);
     // The frame's metric (waiting for the frame's thread) and the projection.
     let clock=Instant::now();
     let metric=SwMetric::new(frame,eigen,lattice.operator())?;
@@ -438,7 +449,7 @@ fn run<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,observ
             timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
             let estimate_clock=Instant::now();
             history.push((trajectory.clone(),horizons.clone()));
-            let mut estimate=convergence(&history,request.groups,tolerance);
+            let mut estimate=convergence(&history,request.groups,tolerance,window);
             // The growth charge on every output.
             for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()){*v+=model.growth_charge;}
             timing.estimate_ms+=estimate_clock.elapsed().as_secs_f64()*1e3;
@@ -468,10 +479,11 @@ fn run<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,observ
             let within=answer.largest()<=tolerance;
             if best.as_ref().is_none_or(|b|if within{true}else{b.largest()>tolerance&&answer.largest()<b.largest()}){best=Some(answer.clone());}
             if answer.accepted{break;}
-            // 5. The stopping rule on the bound.
-            progress.push(answer.largest());
-            let last=progress.len()-1;
-            let plateau=last>=PLATEAU&&{
+            // 5. The stopping rule on the bound, from the first checkpoint
+            // with an estimate (before it the bound is unknown, no progress).
+            if history.len()>=2*window+1{progress.push(answer.largest());}
+            let last=progress.len().saturating_sub(1);
+            let plateau=progress.len()>PLATEAU&&{
                 let before=progress[..=last-PLATEAU].iter().copied().fold(f64::INFINITY,f64::min);
                 let recent=progress[last+1-PLATEAU..].iter().copied().fold(f64::INFINITY,f64::min);
                 recent>before/PLATEAU_GAIN};
@@ -553,17 +565,21 @@ mod tests{
     }
     #[test]
     fn convergence_estimates_geometric_changes_and_refuses_stagnation(){
-        // Changes halving each level: r = 1/2, the estimate the last change.
-        // Changes shrinking by 0.9: stagnation, at least twice the tolerance.
-        // Fewer than four levels: unknown.
+        // Changes halving each level, windows of one and two levels: r = 1/2
+        // per level (1/4 per window of two), the estimate the window's
+        // largest change / (1 - r). Changes shrinking by 0.9: stagnation, at
+        // least twice the tolerance. Fewer than 2 window + 1 levels: unknown.
         let groups:Vec<Vec<usize>>=vec![];
-        let levels=|ratio:f64|->Vec<(Vec<Vec<f64>>,Vec<Vec<f64>>)>{let mut x=0.;let mut step=0.08;
-            (0..5).map(|_|{let row=vec![vec![x,1.-x]];x+=step;step*=ratio;(row.clone(),row)}).collect()};
+        let levels=|ratio:f64,count:usize|->Vec<(Vec<Vec<f64>>,Vec<Vec<f64>>)>{let mut x=0.;let mut step=0.08;
+            (0..count).map(|_|{let row=vec![vec![x,1.-x]];x+=step;step*=ratio;(row.clone(),row)}).collect()};
         let tolerance=POPULATION_TOLERANCE;
-        let halving=levels(0.5);let e=convergence(&halving,&groups,tolerance);let last=0.08*0.5_f64.powi(3);
-        assert!((e.trajectory[0]-last).abs()<=1e-12&&(e.horizons[0]-last).abs()<=1e-12,"{:?} against {last:e}",e);
-        let slow=levels(0.9);let e=convergence(&slow,&groups,tolerance);
+        let halving=levels(0.5,5);let e=convergence(&halving,&groups,tolerance,1);let last=0.08*0.5_f64.powi(3);
+        assert!((e.trajectory[0]-2.*last).abs()<=1e-12&&(e.horizons[0]-2.*last).abs()<=1e-12,"{:?} against {last:e}",e);
+        let e=convergence(&halving,&groups,tolerance,2);let(window,before)=(0.08*0.5_f64.powi(2),0.08);
+        let expected=window/(1.-window/before);
+        assert!((e.trajectory[0]-expected).abs()<=1e-12&&(e.horizons[0]-expected).abs()<=1e-12,"{:?} against {expected:e}",e);
+        let slow=levels(0.9,5);let e=convergence(&slow,&groups,tolerance,1);
         assert!(e.trajectory[0]>=2.*tolerance&&e.horizons[0]>=2.*tolerance,"{e:?}");
-        let e=convergence(&halving[..3],&groups,tolerance);assert!(e.trajectory[0]==1.&&e.horizons[0]==1.);
+        let e=convergence(&halving[..4],&groups,tolerance,2);assert!(e.trajectory[0]==1.&&e.horizons[0]==1.);
     }
 }
