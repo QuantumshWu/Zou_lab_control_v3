@@ -263,8 +263,8 @@ unsafe extern "system" fn hit_proc(hwnd: HWND, message: u32, wparam: WPARAM, lpa
                 // SAFETY: the parent is live; each is what the system's own caption button does.
                 unsafe {
                     match button {
-                        Button::Minimize => { ShowWindow(frame.parent, SW_MINIMIZE); }
-                        Button::Maximize => { ShowWindow(frame.parent, if zoomed(frame.parent) { SW_RESTORE } else { SW_MAXIMIZE }); }
+                        Button::Minimize => { PostMessageW(frame.parent, WM_SYSCOMMAND, SC_MINIMIZE as usize, 0); }
+                        Button::Maximize => { PostMessageW(frame.parent, WM_SYSCOMMAND, if zoomed(frame.parent) { SC_RESTORE } else { SC_MAXIMIZE } as usize, 0); }
                         Button::Close => { PostMessageW(frame.parent, WM_SYSCOMMAND, SC_CLOSE as usize, 0); }
                     }
                 }

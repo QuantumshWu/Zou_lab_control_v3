@@ -191,9 +191,7 @@ impl Windows {
         crate::trace::point("window.show", || serde_json::json!({"window": kind.key(), "made": self.get(kind).is_some()}));
         self.make(kind, target, true)?;
         let window = &self.get(kind).expect("made").window;
-        if window.is_minimized() { window.set_minimized(false); }
-        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_SHOWNA, ShowWindow};
-        unsafe { ShowWindow(window.hwnd() as _, SW_SHOWNA); }
+        chrome::set_visible(window, true);
         let _ = self.proxy.send_event(AppEvent::Activate(kind.clone()));
         Ok(())
     }
@@ -201,7 +199,6 @@ impl Windows {
     /// The second half of `show`, unless the window was hidden again meanwhile.
     pub fn activate(&self, kind: &Kind) {
         if let Some(window) = self.get(kind).map(|window| &window.window).filter(|window| window.is_visible()) {
-            window.set_visible(true);
             window.set_focus();
         }
     }
@@ -209,7 +206,7 @@ impl Windows {
     /// Whether any window is on screen (the application ends with its last, as v2's did).
     pub fn any_visible(&self) -> bool { self.open.iter().any(|window| window.window.is_visible()) }
 
-    pub fn hide(&self, kind: &Kind) { if let Some(window) = self.get(kind) { window.window.set_visible(false); } }
+    pub fn hide(&self, kind: &Kind) { if let Some(window) = self.get(kind) { chrome::set_visible(&window.window, false); } }
     /// v2's review dialog was application modal: while `modal` is open the other windows take no input.
     pub fn set_modal(&self, modal: &Kind, on: bool) {
         for window in self.open.iter().filter(|window| window.kind != *modal) { window.window.set_enable(!on); }

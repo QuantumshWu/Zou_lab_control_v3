@@ -16,6 +16,15 @@ pub fn icon() -> Option<Icon> {
     Icon::from_resource(1, None).ok()
 }
 
+/// Synchronize native minimize state before Tao changes visibility/styles.
+/// Otherwise hiding a natively minimized window can save its iconic rectangle
+/// as the normal restore position. Keep the same window and page alive.
+pub fn set_visible(window: &Window, visible: bool) {
+    window.set_minimized(window.is_minimized());
+    window.set_visible(visible);
+    if visible && window.is_minimized() { window.set_minimized(false); }
+}
+
 fn work_area() -> Option<(i32, i32, i32, i32)> {
     use windows_sys::Win32::{Foundation::RECT, UI::WindowsAndMessaging::{SPI_GETWORKAREA, SystemParametersInfoW}};
     let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
@@ -140,5 +149,43 @@ fn visible_frame(window: &Window) -> Option<(i32, i32, i32, i32)> {
     // SAFETY: a live window handle and a RECT-sized output, as the attribute documents.
     let status = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS as u32, (&mut rect as *mut RECT).cast(), std::mem::size_of::<RECT>() as u32) };
     (status == 0 && rect.right > rect.left).then_some((rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "requires a Windows desktop session; uses an isolated offscreen window"]
+    fn native_minimize_hide_reopen_preserves_normal_rectangle() {
+        use super::*;
+        use std::time::{Duration, Instant};
+        use tao::{event::Event, event_loop::{ControlFlow, EventLoopBuilder},
+            platform::{run_return::EventLoopExtRunReturn, windows::{EventLoopBuilderExtWindows, WindowBuilderExtWindows}},
+            window::WindowBuilder, dpi::LogicalSize};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWMINNOACTIVE};
+        let mut events = EventLoopBuilder::new().with_any_thread(true).build();
+        let window = WindowBuilder::new().with_visible(false).with_focused(false).with_skip_taskbar(true)
+            .with_inner_size(LogicalSize::new(900.0, 650.0)).build(&events).unwrap();
+        crate::frame::install(&window, |_| {}).unwrap();
+        window.set_outer_position(PhysicalPosition::new(-20000, -20000));
+        let original = window.inner_size();
+        let mut step = 0;
+        let mut next = Instant::now();
+        let mut wrong = Vec::new();
+        events.run_return(|event, _, flow| {
+            *flow = ControlFlow::WaitUntil(next);
+            if !matches!(event, Event::MainEventsCleared) || Instant::now() < next { return; }
+            match step % 5 {
+                0 => set_visible(&window, true),
+                1 => { unsafe { ShowWindow(window.hwnd() as _, SW_SHOWMINNOACTIVE); } },
+                2 => set_visible(&window, false),
+                3 => set_visible(&window, true),
+                _ => { if window.is_minimized() || !window.is_visible() || window.inner_size() != original { wrong.push(window.inner_size()); } },
+            }
+            step += 1;
+            next = Instant::now() + Duration::from_millis(20);
+            if step == 50 { set_visible(&window, false); *flow = ControlFlow::Exit; }
+        });
+        assert!(wrong.is_empty(), "normal rectangle {original:?} changed to {wrong:?}");
+    }
 }
 
