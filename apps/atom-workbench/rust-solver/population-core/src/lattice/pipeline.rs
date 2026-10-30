@@ -1,78 +1,94 @@
 //! The population pipeline: every output of a request is a matrix function
 //! of one lattice operator applied to x0, read from one reduced model.
 //!
-//! 1. The explicit set P and its ring Q (`charge_set`); the lattice P u Q
-//!    and its solves at the poles (`poles`). A request that propagates (a
-//!    trajectory or a horizon) builds its frame (`frame`: the reduced
-//!    model's metric, the estimate's fast part, the slowest relaxation's
-//!    classes) on its own thread meanwhile.
-//! 2. One rational Krylov space from x0 (`space`): the bordered steady
-//!    column first, the translations through the gate active from the start,
-//!    then the ladder's poles by their expected gain, re-ranked at every
-//!    checkpoint: sigma |p_err(xi)| (the error transform) times the share of
-//!    its own transform a pole's last solve removed (a pole whose solve did
-//!    not reduce it loses its turn; one never solved keeps the whole), per
-//!    real solve (a complex pole costs two); a pole that adds no direction
-//!    leaves the ladder.
-//! 3. Every CHECKPOINT solves (a request that propagates nothing: also
-//!    right after the steady column): the Galerkin model in the frame's
-//!    metric (`reduced`; a request for the steady state alone takes M = I,
-//!    a speed case: it skips about 1 s of frame build, and its steady
-//!    column makes the kernel independent of the metric), its outputs (trajectory on the grid, horizons, steady
-//!    state, slowest relaxation, conserved count) and the error estimate
-//!    (`estimator`). An output's bound is ACCEPTANCE_FACTOR x its estimate,
-//!    plus, on a trajectory row, the change of its projection onto the
-//!    probability simplex (computed exactly, not estimated). A checkpoint
-//!    is accepted when every bound is within the tolerance: the estimate
-//!    charges every slow mode's own residual (`estimator`), so a slow class
-//!    the space lacks or resolves badly enters the bound itself.
-//! 4. Stopping (deterministic, no wall time): accepted; or the largest
+//! 1. The lattice: the explicit set P and its ring Q (`charge_set`), and the
+//!    a-priori amplitudes of x0 (`apriori`): every charge they carry above
+//!    the gate that P u Q misses joins the lattice (the completion). The
+//!    request's frame (`frame`: the kernels, the metric's block, the
+//!    slowest relaxation's classes) is built on its own thread meanwhile.
+//! 2. The fold: the run's own (`fold::FoldLibrary`), one truncation rule for
+//!    every piece, the far shell's rings beyond the second order among them:
+//!    pieces dropped smallest first while their first-order Duhamel responses
+//!    on x0's evolution up to the run's longest output time T
+//!    (`apriori::Duhamel`) sum within the fold's budget; the rings kept become
+//!    static ring targets (`ring_targets`).
+//! 3. One block rational Krylov space (`space`): the start [x0, the slip of
+//!    every translation the a-priori rule activates], the translations (the
+//!    gated steps, then the a-priori ones, with no solve), the bordered
+//!    steady column, then the real ladder in a fixed bit-reversed cycle.
+//! 4. Every CHECKPOINT solves (a run without a grid, the mean's, also right
+//!    after the steady column): the metric Petrov-Galerkin model (`reduced`),
+//!    its outputs (trajectory on the grid, horizons, slowest relaxation).
+//!    An output's error estimate is its convergence over whole pole cycles
+//!    (`convergence`); its bound is that estimate plus the growth
+//!    charge, and on a trajectory row the change of its projection onto the
+//!    probability simplex (computed exactly). A checkpoint is accepted when
+//!    every bound is within the tolerance.
+//! 5. Stopping (deterministic, no wall time): accepted; or the largest
 //!    bound, above the tolerance, did not improve by PLATEAU_GAIN over the
-//!    last PLATEAU checkpoints; or the solve budget
-//!    (MAXIMUM_SOLVES) or the basis budget (BASIS_BYTES) is spent. The run
-//!    returns its best checkpoint (`Answer`), converged or partial with the
-//!    reason; every checkpoint is reported to the observer as it is made.
-//!
-//! The conserved count is the reduced model's kernel (the conserved
-//! quantities x0 reaches), and the folded centre block's when the lattice is
-//! that one block (a static model: its kernel is known exactly).
+//!    last PLATEAU checkpoints; or the solve budget (MAXIMUM_SOLVES) or the
+//!    basis budget (BASIS_BYTES) is spent. The run returns its best
+//!    checkpoint (`Answer`), converged or partial with the reason and every
+//!    sample's own bound; every checkpoint is reported to the observer as it
+//!    is made.
 use super::*;
-use super::charge_set::{self,ExplicitSet};
-use super::estimate_api::{ACCEPTANCE_FACTOR,ErrorEstimate,EstimateSetup,Outputs,ReducedView};
-use super::ledger::{self,EXPANSION_LIMIT,POPULATION_TOLERANCE,RemainderLedger};
+use super::accuracy::{self,POPULATION_TOLERANCE};
+use super::apriori::{self,Apriori,Duhamel};
+use super::charge_set::{self,ExplicitSet,LatticeSets};
+use super::fold::{DroppedPieces,FoldLibrary,FoldRule,ResponseRule,Storage};
 use super::reduced::{Model,Projection,SlowRate};
 use super::poles::{InnerWork,Lattice,Pole};
 use super::space::{self,Column,Space};
 use super::frame::{SwFrame,SwMetric};
-use super::estimator::{Source,UnifiedEstimate};
 use super::eigenbasis::BlockEigenbasis;
 
-/// Solves between checkpoints; the ladder is re-ranked at every checkpoint
-/// (from its reduced model) and whenever its queue runs out. Measured at
-/// this spacing: the estimates up to acceptance cost 19-35% of the solves on
-/// three to five lasers; acceptance is seen at most three solves late.
+/// Solves between checkpoints. A run without a grid (a mean run) takes its
+/// first one right after the steady column as well (measured on the
+/// necessity review's 9 mean runs: accepted at 1 solve instead of 4 where the
+/// mean had settled, the errors the same). Never a trajectory: a trajectory
+/// checkpoint at 1 solve accepted four lasers without the trap at 10 ms
+/// falsely (bound 3.0e-3, error 7.3e-3).
 const CHECKPOINT:usize=4;
-/// Most solves of a request, and the basis memory (basis and images).
-/// MAXIMUM_SOLVES is a deliberate margin: twice the 24 solves the slowest
-/// accepted research case takes (16-24 at 20 us).
+/// Most solves of a request, and the basis memory (the basis alone: no
+/// image is stored). MAXIMUM_SOLVES is a deliberate margin: twice the 24
+/// solves the slowest accepted research case takes.
 const MAXIMUM_SOLVES:usize=48;
 const BASIS_BYTES:usize=1<<30;
-/// Memory guard: a request takes about BASE_BYTES plus MODE_BYTES per lattice
-/// mode (measured, private bytes: D1 + three D2 lasers, 13 modes, 0.62 GB;
-/// six lasers without the trap, 63 modes, 2.0 GB; the pole batches and the
-/// estimator's ring grow with the modes); one whose lattice would need more
-/// than MEMORY_BYTES stops before its first solve, with the reason.
+/// Memory guard: a request takes about BASE_BYTES plus MODE_BYTES per
+/// lattice mode of each run, and its runs execute at once (`Request::runs`:
+/// a full request's trajectory and mean, each with its own lattice and
+/// space). Measured (private bytes, with the former error estimator, which
+/// took about as much as the basis: an upper estimate now): D1 + three D2
+/// lasers, 13 modes, 0.62 GB; six lasers without the trap, 63 modes, 2.0 GB.
+/// A run plans every run of its request on a lattice of its own size, so the
+/// runs together stay within the budget: a request beyond it stops before
+/// its first solve, with the reason, and a completion beyond it is not
+/// taken. The budget is MEMORY_SHARE of the machine's installed physical
+/// memory: a run beyond the physical memory pages, and every solve sweeps
+/// the lattice and the whole basis, so it would stall the machine rather
+/// than slow down; the installed memory rather than the free, so whether a
+/// request is solved does not depend on what else runs. MEMORY_SHARE is a
+/// deliberate margin: the other half for the system, the app and the lab
+/// PC's other programs.
 const BASE_BYTES:f64=5e8;
 const MODE_BYTES:f64=3.2e7;
-const MEMORY_BYTES:f64=5e9;
+const MEMORY_SHARE:f64=0.5;
+/// The memory a request of `runs` runs on lattices of `modes` modes is
+/// planned to take (bytes).
+fn planned_bytes(runs:usize,modes:usize)->f64{BASE_BYTES+MODE_BYTES*(runs*modes)as f64}
 /// The plateau: the largest bound did not improve by PLATEAU_GAIN over the
-/// last PLATEAU checkpoints. Measured
-/// before the rule: four lasers + tweezer at 10 us / 2000 samples held the
-/// bound at 5.0-5.7e-3 over 20 solves, five lasers at about 1e-2 over 24.
-/// Over two checkpoints four lasers without the trap at 20 us stopped at 16
-/// solves (bound 1.2e-2), accepted at 20 over three.
+/// last PLATEAU checkpoints. Measured before the rule: four lasers + tweezer
+/// at 10 us / 2000 samples held the bound at 5.0-5.7e-3 over 20 solves.
 const PLATEAU:usize=3;
 const PLATEAU_GAIN:f64=2.;
+/// The convergence estimate (`convergence`): a ratio of successive cycles'
+/// largest changes at or above STAGNATION is no convergence (the output is
+/// not accepted); a largest change below ROUNDOFF x tolerance is converged
+/// to roundoff. STAGNATION is a deliberate margin: at r = 0.8 the estimate
+/// is 5 changes, beyond which two cycles cannot tell a slow geometric
+/// convergence from a stall.
+const STAGNATION:f64=0.8;
+const ROUNDOFF:f64=1e-3;
 /// The reported slowest relaxation (`slowestRelaxationUs`, no part of the
 /// acceptance): its candidates carry population weight of at least
 /// CANDIDATE_WEIGHT x tolerance; a candidate is matched when every class of
@@ -89,61 +105,61 @@ const CLASS_GAP:f64=1.+CLASS_MATCH;
 /// frame's second-order block) and its Ritz pair: 18% on a four-laser case
 /// (class 0.0418 /us, pair 0.0344 /us).
 const CLASS_MATCH:f64=0.4;
-/// Grid samples assumed for the ladder's top when a request has no grid,
-/// and the longest time of a request for the limit alone (us).
+/// Grid samples assumed for the ladder's top when a request has no grid.
 /// LADDER_SAMPLES is a deliberate margin: as if the horizon were sampled
 /// like the app's trajectories (161-200 samples on the research scenes).
 const LADDER_SAMPLES:f64=200.;
-/// A deliberate margin: the app's default horizon, 1 s; the steady column
-/// and the slow points (down to `space::SLOW_FLOOR`) serve slower rates.
-const LIMIT_REACH:f64=1e6;
 /// A decaying class of the frame's block carries none of x0's trace; a
 /// class whose trace is at least this share of its weight is the block's
 /// kernel. Measured: decaying classes at most 5e-3 of their weight, the
 /// kernel 1.6 (trace 1.00, weight 0.63): a margin of 100x and 3x.
 const KERNEL_TRACE_SHARE:f64=0.5;
-/// Completion (`solve`): at the first checkpoint, a bound above the
-/// tolerance of which the slow part (the ring's feedback and the K^(1) rests
-/// the lattice leaves out) carries at least COMPLETION_SHARE is completed.
-/// Measured (three lasers at B = 0 and 1 mG, p(1 s)): at the first
-/// checkpoint the Krylov part is 1e-11 of bounds of 7.1-7.4e-3, the ring's
-/// part 3.8-4.3e-3 and the K^(1) rests' 1.1-1.2e-2 (signed parts, partly
-/// cancelling); a trajectory's first checkpoint is the Krylov residual's
-/// (2e-1 against 2-8e-3).
-const COMPLETION_SHARE:f64=0.5;
-/// The K^(1) rests join the operator when their part is at least this
-/// share of the tolerance (each alone fails: both lattices' means stayed
-/// 1.3-2.0e-3 off with either change alone, 4e-5 and 1.7e-4 with both).
-const K1_COMPLETION:f64=0.25;
-/// The ring charges promoted: by decreasing attribution until they carry
-/// this share of the ring total.
-const RING_COMPLETION:f64=0.9;
+/// The far shell's rings stop when what the next ones can land (trace norm),
+/// times T, is within this share of the fold's budget.
+const RING_TOLERANCE_SHARE:f64=1e-3;
+/// A ring target's far mode of ring k + 1 is left out when its source is
+/// below RING_PRUNE_SHARE x budget / (ring k + 1's response) of its ring's
+/// largest: the pruned modes leave a share of the budget well below this (a
+/// ring holds at most a few hundred far modes).
+const RING_PRUNE_SHARE:f64=1e-6;
 /// Stack of the frame's thread (LAPACK on it).
 const FRAME_STACK:usize=1<<26;
+/// The longest output time a request may ask for (us, 10 s) and the most
+/// samples of its grid: the product's request range.
+pub const LONGEST_TIME_US:f64=1e7;
+pub const MOST_SAMPLES:usize=2000;
 
-/// What a request asks for.
+/// What a request asks for: a trajectory or horizons (or both).
 pub struct Request<'a>{
-    /// The uniform grid from 0 (empty: no trajectory).
+    /// The uniform grid from 0 (empty: no trajectory), at most MOST_SAMPLES
+    /// times up to LONGEST_TIME_US.
     pub times:&'a[f64],
-    /// Horizons T (us) of the laboratory time average.
+    /// Horizons T (us) of the laboratory time average, each at most
+    /// LONGEST_TIME_US.
     pub horizons:&'a[f64],
-    /// Whether the steady state (the t -> infinity mean) is reported.
-    pub steady:bool,
     pub groups:&'a[Vec<usize>],
     /// The explicit set shared by the runs of one request from the same rho0
     /// (the first run to need it builds it).
     pub explicit:&'a std::sync::OnceLock<Result<ExplicitSet,String>>,
+    /// The runs of the request that execute at once (a full request's
+    /// trajectory and mean: 2), which share the memory budget.
+    pub runs:usize,
 }
+
+/// The error estimate of every output at one checkpoint (population units):
+/// per trajectory sample and per horizon.
+#[derive(Clone,Debug,Default)]
+pub struct Estimate{pub trajectory:Vec<f64>,pub horizons:Vec<f64>}
 
 /// One checkpoint, for the diagnostics.
 #[derive(Clone,Debug)]
 pub struct Checkpoint{
     pub solves:usize,pub columns:usize,pub dimension:usize,
     /// The estimate and the largest bound over every output.
-    pub estimate:ErrorEstimate,pub largest:f64,pub accepted:bool,
-    pub growing:usize,pub clipped:usize,pub projected:usize,pub conserved:usize,pub slowest:Option<SlowRate>,
-    /// Raw outputs: trajectory rows (row 0 rho0's), horizon rows, steady row.
-    pub trajectory:Vec<Vec<f64>>,pub horizons:Vec<Vec<f64>>,pub steady:Vec<f64>,
+    pub estimate:Estimate,pub largest:f64,pub accepted:bool,
+    pub growing:usize,pub clipped:usize,pub projected:usize,pub slowest:Option<SlowRate>,
+    /// Raw outputs: trajectory rows (row 0 rho0's), horizon rows.
+    pub trajectory:Vec<Vec<f64>>,pub horizons:Vec<Vec<f64>>,
     /// The solves so far (inner steps, block operations, ms) and the run's
     /// timing so far.
     pub inner:InnerWork,pub timing:Timing,
@@ -158,62 +174,46 @@ pub struct Answer{
     /// The lattice's modes (the fields' layout).
     pub modes:Vec<Charge>,
     /// Trajectory rows projected onto the probability simplex (row 0 is
-    /// rho0's), the bound of each (ACCEPTANCE_FACTOR x the estimate plus the
-    /// projection's change), and the largest projection change.
-    pub trajectory:Vec<Vec<f64>>,pub sample_errors:Vec<f64>,pub projection:f64,
-    /// Horizon and steady populations (laboratory time averages, raw), their
-    /// fields on `modes` (Hermitian-symmetric) and bounds.
-    pub horizons:Vec<Vec<f64>>,pub steady:Vec<f64>,
-    pub horizon_fields:Vec<Vec<C>>,pub steady_field:Vec<C>,
-    pub horizon_errors:Vec<f64>,pub steady_error:Option<f64>,
-    /// Per horizon T, the population the reduced model still relaxes at T:
-    /// sum over its decaying modes (neither kernel nor projected) of their
-    /// largest centre population contribution at T (p(T) reads the centre
-    /// block alone), amplitude x e^{Re theta T}: an upper bound on
-    /// |p(T) - p(inf)| as the model holds it.
-    pub horizon_relaxing:Vec<f64>,
-    /// Per output its own acceptance: its bound within the tolerance (per
-    /// horizon, and the steady state's).
-    pub horizon_accepted:Vec<bool>,pub steady_accepted:bool,
-    /// |A x| / |x| of the steady field (rad/us).
-    pub steady_residual:f64,
-    pub estimate:ErrorEstimate,pub conserved:usize,pub slowest:Option<SlowRate>,
+    /// rho0's) and the bound of each (the estimate plus the growth charge
+    /// plus the projection's change).
+    pub trajectory:Vec<Vec<f64>>,pub sample_errors:Vec<f64>,
+    /// Horizon populations (laboratory time averages, raw), their fields on
+    /// `modes` (Hermitian-symmetric) and bounds.
+    pub horizons:Vec<Vec<f64>>,pub horizon_fields:Vec<Vec<C>>,pub horizon_errors:Vec<f64>,
+    pub estimate:Estimate,pub slowest:Option<SlowRate>,
     /// Every bound within the tolerance.
     pub accepted:bool,
 }
 impl Answer{
     /// The largest bound over every output.
-    pub fn largest(&self)->f64{self.sample_errors.iter().chain(&self.horizon_errors).chain(self.steady_error.iter()).fold(0_f64,|a,&b|a.max(b))}
+    pub fn largest(&self)->f64{self.sample_errors.iter().chain(&self.horizon_errors).fold(0_f64,|a,&b|a.max(b))}
 }
 
 #[derive(Clone,Debug,Default)]
-pub struct Timing{pub eigenbasis_ms:f64,pub explicit_set_ms:f64,pub setup_ms:f64,pub estimator_build_ms:f64,pub outputs_ms:f64,pub frame_ms:[f64;3],pub frame_wait_ms:f64,pub solves_ms:f64,pub images_ms:f64,pub projection_ms:f64,pub model_ms:f64,pub ordering_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
+pub struct Timing{pub eigenbasis_ms:f64,pub explicit_set_ms:f64,pub apriori_ms:f64,pub setup_ms:f64,pub outputs_ms:f64,pub frame_ms:[f64;3],pub frame_wait_ms:f64,pub solves_ms:f64,pub projection_ms:f64,pub model_ms:f64,pub estimate_ms:f64,pub total_ms:f64}
 
 pub struct Solution{
     /// The best checkpoint's outputs; `converged` when it was accepted, else
     /// the reason the run stopped.
     pub answer:Answer,pub converged:bool,pub reason:Option<String>,
-    /// The completion decided at the first checkpoint (also when it changed
-    /// nothing: `restarted` false), and the first run's solves when it
-    /// restarted the run.
-    pub completion:Option<Completion>,
-    pub explicit:ExplicitSet,pub translations:Vec<Charge>,
+    /// The request's explicit set, the run's lattice (the set and the
+    /// charges its completion added, one of each pair) and translations.
+    pub explicit:ExplicitSet,pub lattice:LatticeSets,pub completed:Vec<Charge>,pub translations:Vec<Charge>,
+    /// The solves, and every checkpoint reported.
     pub columns:Vec<Column>,pub checkpoints:Vec<Checkpoint>,
-    pub dimension:usize,pub work:InnerWork,pub images:usize,
-    pub ledger:RemainderLedger,pub timing:Timing,
+    pub dimension:usize,pub work:InnerWork,pub basis:usize,pub block:usize,
+    pub fold:FoldReport,pub timing:Timing,
 }
 
-/// A lattice completion: the ring charges promoted into P (one of each
-/// pair; their mirrors join with them) and whether the operator keeps every
-/// K^(1) rest; where it was decided, the bound there, its slow part and the
-/// K^(1) rests' and the ring's parts (bound units), the ring charges'
-/// attribution shares, and whether the run restarted on the completed
-/// lattice.
+/// A run's fold under the truncation rule: its rule, the orders in nu_q it
+/// built and what it dropped (responses, populations); the far shell's
+/// depth (rings beyond the second order kept) and the rings' responses; the
+/// rings' responses', the build's (theirs included) and the ring targets'
+/// time.
 #[derive(Clone,Debug,Default)]
-pub struct Completion{
-    pub promoted:Vec<Charge>,pub keep_k1:bool,pub decided_at:usize,
-    pub bound:f64,pub slow_part:f64,pub k1_part:f64,pub ring_part:f64,
-    pub attribution:Vec<(Charge,f64)>,pub restarted:bool,
+pub struct FoldReport{
+    pub rule:Option<FoldRule>,pub orders:usize,pub dropped:DroppedPieces,pub targets:usize,
+    pub rings:usize,pub ring_responses:Vec<f64>,pub responses_ms:f64,pub build_ms:f64,pub rings_ms:f64,
 }
 
 /// Euclidean projection of real values onto the probability simplex.
@@ -227,211 +227,251 @@ pub fn simplex(values:&[f64])->Vec<f64>{
 /// The decaying classes of x0: the eigenvalues of the frame's second-order
 /// block (L0' + sum_s K_s, the Raman rates included) on which x0 carries
 /// population weight |c_j| max_i |(E V)_ij| (c = V^-1 E^-1 x0) of at least
-/// CANDIDATE_WEIGHT x tolerance; (rate, weight), slowest first. The block's
-/// kernel is not a class: the block annihilates the trace, so a decaying class
-/// carries none of x0's trace |c_j sum_i (E V)_ij| (measured: at most 5e-3
-/// of its weight) and a class carrying at least KERNEL_TRACE_SHARE of its
-/// weight is the kernel, its value zero within the eigensystem's error over the horizon
-/// (three lasers at T = 1 s: 1.4e-8 /us, weight 0.63, trace 1.00; taken as
-/// a class, every candidate was unmatched and a horizon needed it).
-fn class_rates(frame:&SwFrame<'_>,eigen:&BlockEigenbasis,lapack:&Lapack,initial:&[C],tolerance:f64)->Result<Vec<(f64,f64)>,String>{
+/// CANDIDATE_WEIGHT x tolerance; slowest first. The block's kernel is not a
+/// class: the block annihilates the trace, so a decaying class carries none
+/// of x0's trace |c_j sum_i (E V)_ij| (measured: at most 5e-3 of its weight)
+/// and a class carrying at least KERNEL_TRACE_SHARE of its weight is the
+/// kernel.
+fn class_rates(frame:&SwFrame<'_>,eigen:&BlockEigenbasis,lapack:&Lapack,initial:&[C],tolerance:f64)->Result<Vec<f64>,String>{
     let class=frame.class()?;let d=initial.len();let n=class.readout.len()/d.max(1);
     let coordinates=eigen.coefficients(&[initial])?;
     let mut c=vec![ZERO;d];lapack.complex_gemm().multiply(d,1,d,ONE,&class.inverse,d,&coordinates,d,ZERO,&mut c,d)?;
-    let mut classes:Vec<(f64,f64)>=(0..d).filter_map(|j|{
+    let mut classes:Vec<f64>=(0..d).filter_map(|j|{
         let column=&class.readout[n*j..n*(j+1)];
         let weight=magnitude(c[j])*column.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
         let trace=magnitude(c[j])*magnitude(column.iter().fold(ZERO,|a,z|C{re:a.re+z.re,im:a.im+z.im}));
         let rate=-class.values[j].re;
-        (rate>=super::reduced::KERNEL&&weight>=CANDIDATE_WEIGHT*tolerance&&trace<KERNEL_TRACE_SHARE*weight).then_some((rate,weight))}).collect();
-    classes.sort_by(|a,b|a.0.total_cmp(&b.0));Ok(classes)
+        (rate>=super::reduced::KERNEL&&weight>=CANDIDATE_WEIGHT*tolerance&&trace<KERNEL_TRACE_SHARE*weight).then_some(rate)}).collect();
+    classes.sort_by(f64::total_cmp);Ok(classes)
 }
 
 /// The slowest relaxation's candidates of a model (`Model::slow_candidates`),
-/// slowest first, each with its population weight and its rate, residual
-/// |A W y - theta W y| / |W y| (from the images, which keep its accuracy at
-/// slow rates) and whether the classes `classes` slower than its rate /
-/// CLASS_GAP are matched (None: not checked): the residual cannot see a
-/// slow class the space lacks.
-fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:Option<&[f64]>,tolerance:f64)->Result<Vec<(SlowRate,f64)>,String>{
+/// slowest first, each with its rate, residual |A W y - theta W y| / |W y|
+/// (the Ritz vector's image from the lattice) and whether the classes
+/// `classes` slower than its rate / CLASS_GAP are matched: the residual
+/// cannot see a slow class the space lacks.
+fn slow_pairs(model:&Model,space:&Space,vectors:&super::krylov::Vectors,classes:&[f64],tolerance:f64,lattice:&mut Lattice<'_>)->Result<Vec<SlowRate>,String>{
     let chosen=model.slow_candidates(CANDIDATE_WEIGHT*tolerance);
     if chosen.is_empty(){return Ok(Vec::new());}
     let parts:Vec<Vec<f64>>=chosen.iter().flat_map(|&(j,_)|{let y=model.ritz_coordinates(j);[y.iter().map(|z|z.re).collect(),y.iter().map(|z|z.im).collect()]}).collect();
-    let basis:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();let images:Vec<&[C]>=space.images.iter().map(|v|v.as_slice()).collect();
-    let(w,aw)=(vectors.combinations(&basis,&parts)?,vectors.combinations(&images,&parts)?);
-    let found:Vec<(f64,f64,f64)>=chosen.iter().enumerate().map(|(c,&(j,rate))|{
+    let basis:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();
+    let w=vectors.combinations(&basis,&parts)?;
+    let aw=w.iter().map(|x|{let mut y=vec![ZERO;x.len()];lattice.apply(x,&mut y).map(|_|y)}).collect::<Result<Vec<_>,_>>()?;
+    let found:Vec<(f64,f64)>=chosen.iter().enumerate().map(|(c,&(j,rate))|{
         let theta=model.theta[j];let(wr,wi,ar,ai)=(&w[2*c],&w[2*c+1],&aw[2*c],&aw[2*c+1]);
         // A W y - theta W y, real and imaginary parts.
         let re:Vec<C>=(0..wr.len()).map(|e|C{re:ar[e].re-theta.re*wr[e].re+theta.im*wi[e].re,im:ar[e].im-theta.re*wr[e].im+theta.im*wi[e].im}).collect();
         let im:Vec<C>=(0..wr.len()).map(|e|C{re:ai[e].re-theta.re*wi[e].re-theta.im*wr[e].re,im:ai[e].im-theta.re*wi[e].im-theta.im*wr[e].im}).collect();
         let residual=(vectors.dot(&re,&re)+vectors.dot(&im,&im)).max(0.).sqrt()/(vectors.dot(wr,wr)+vectors.dot(wi,wi)).max(f64::MIN_POSITIVE).sqrt();
-        (rate,residual,model.amplitudes[j])}).collect();
-    let matched=|rate:f64|classes.map(|classes|classes.iter().filter(|&&class|class<rate/CLASS_GAP).all(|&class|found.iter().any(|f|(f.0-class).abs()<=CLASS_MATCH*class)));
-    Ok(found.iter().map(|&(rate,residual,weight)|(SlowRate{rate,residual,matched:matched(rate)},weight)).collect())
+        (rate,residual)}).collect();
+    let matched=|rate:f64|classes.iter().filter(|&&class|class<rate/CLASS_GAP).all(|&class|found.iter().any(|f|(f.0-class).abs()<=CLASS_MATCH*class));
+    Ok(found.iter().map(|&(rate,residual)|SlowRate{rate,residual,matched:matched(rate)}).collect())
 }
 
+/// Acceptance by convergence over whole pole cycles: the outputs x_k of the
+/// checkpoints, their changes |x_k - x_k-1| (`accuracy::metric`), and per
+/// window of the last `window` changes (the checkpoints spanning one cycle
+/// of the ladder) their largest, D. The rate r = max D_k / max D_k-w (the
+/// largest over the grid for the trajectory, each horizon on its own) and
+/// the estimate D_k / (1 - r): the geometric tail of the cycles to come plus
+/// the current cycle's largest change once more, since within a cycle the
+/// level is not monotone (a pole's visit can undo part of a change; measured
+/// on three, four and five lasers at 20 us: the first sample's error held at
+/// 2.5-3e-3 over 16 solves while single changes fell to 4e-4). Comparing
+/// whole cycles keeps a change between two visits of one pole from hiding.
+/// r at or above STAGNATION is no convergence: the estimate is at least
+/// twice the tolerance. A largest change below ROUNDOFF x tolerance is
+/// converged to roundoff (the change itself). Fewer than 2 window + 1
+/// checkpoints: unknown (1).
+fn convergence(history:&[(Vec<Vec<f64>>,Vec<Vec<f64>>)],groups:&[Vec<usize>],tolerance:f64,window:usize)->Estimate{
+    let k=history.len();let(t,hz)=(&history[k-1].0,&history[k-1].1);let w=window.max(1);
+    if k<2*w+1{return Estimate{trajectory:vec![1.;t.len()],horizons:vec![1.;hz.len()]};}
+    let output=|previous:&[f64],current:&[f64]|->Vec<f64>{
+        let(m0,m1)=(previous.iter().copied().fold(0.,f64::max),current.iter().copied().fold(0.,f64::max));
+        let converged=m1<=ROUNDOFF*tolerance;let r=if m0>0.{m1/m0}else if m1>0.{f64::INFINITY}else{0.};
+        current.iter().map(|&x|if converged{x}else if r<STAGNATION{x/(1.-r)}else{(x/(1.-STAGNATION)).max(2.*tolerance)}).collect()};
+    // The largest change per output over the window ending at `end`.
+    let largest=|end:usize,change:&dyn Fn(usize,usize)->f64,count:usize|->Vec<f64>{
+        (0..count).map(|i|(end+1-w..=end).map(|level|change(level,i)).fold(0.,f64::max)).collect()};
+    let sample=|level:usize,i:usize|accuracy::metric(&history[level].0[i],&history[level-1].0[i],groups);
+    let mean=|level:usize,i:usize|accuracy::metric(&history[level].1[i],&history[level-1].1[i],groups);
+    let trajectory=output(&largest(k-1-w,&sample,t.len()),&largest(k-1,&sample,t.len()));
+    let(before,now)=(largest(k-1-w,&mean,hz.len()),largest(k-1,&mean,hz.len()));
+    Estimate{trajectory,horizons:(0..hz.len()).map(|i|output(&[before[i]],&[now[i]])[0]).collect()}
+}
+
+/// The responses of the far shell's rings beyond the second order: per
+/// source E_j of x0 (`Duhamel::sources`) the far shell's landing on the
+/// lattice (`FoldLibrary::far_shell`, the run's fold and the frame's share
+/// L0's split), per ring its Duhamel response summed over the landing modes.
+fn ring_responses(prepared:&LatticePrepared,modes:&[Charge],nu:&[f64],duhamel:&Duhamel<'_>,horizon:f64,budget:f64)->Result<Vec<f64>,String>{
+    if prepared.plan.far().is_empty()||duhamel.count()==0{return Ok(Vec::new());}
+    let d=prepared.generator.n*prepared.generator.n;let nu_of=|q:&[i32]|prepared.nu(q);
+    let centre=modes.iter().position(|q|*q==prepared.generator.zero).ok_or("Lattice modes must contain the zero charge")?;
+    // Per ring and landing mode the images of every source ([j * d + e]).
+    let sources:Vec<(usize,&[C])>=duhamel.sources().map(|e|(centre,e)).collect();let count=sources.len();
+    let(landings,_,_)=prepared.fold.far_shell_sources(&prepared.generator,&prepared.plan,&nu_of,modes,&sources,RING_TOLERANCE_SHARE*budget/horizon)?;
+    landings.iter().skip(1).map(|ring|{let mut per:BTreeMap<usize,Vec<C>>=BTreeMap::new();
+        for(&(jj,q),block)in ring{per.entry(q).or_insert_with(||vec![ZERO;count*d])[jj*d..(jj+1)*d].copy_from_slice(block);}
+        per.iter().map(|(&q,v)|duhamel.response(nu[q],1.,v)).sum()}).collect()
+}
 
 /// Every output of a request from rho0 (row-major n x n); `observer` sees
 /// every checkpoint with its outputs as it is made.
-///
-/// Completion: at the first checkpoint, when the largest bound is above the
-/// tolerance and its slow part (the omitted ring's feedback and the K^(1)
-/// rests the lattice leaves out) is at least COMPLETION_SHARE of it, the
-/// estimate is taken again with each source alone: the K^(1) rests join the
-/// operator when their part is at least K1_COMPLETION x tolerance, and the
-/// ring charges carrying RING_COMPLETION of the ring's attribution
-/// (|a_m| |B y_r| over the kernel and slow modes) join P with their mirrors.
-/// The run then restarts once on the completed lattice (the frame and the
-/// eigenbasis are kept). Every other run is unchanged.
 pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut observer:Option<&mut dyn FnMut(&Checkpoint,&Answer)>)->Result<Solution,String>{
     let started=Instant::now();
-    let longest=request.times.last().copied().into_iter().chain(request.horizons.iter().copied()).fold(0_f64,f64::max);
-    let longest=if longest>0.{longest}else{LIMIT_REACH};
-    let propagates=!request.times.is_empty()||!request.horizons.is_empty();
-    let frame=SwFrame::new(prepared,longest);
-    std::thread::scope(|scope|->Result<Solution,String>{
-        if propagates{std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||{let _=frame.class();}).map_err(|e|e.to_string())?;}
-        match attempt(prepared,initial,request,&mut observer,&frame,None,started)?{
-            Ok(solution)=>Ok(solution),
-            Err(completion)=>attempt(prepared,initial,request,&mut observer,&frame,Some(&completion),started)?
-                .map_err(|_|"A completed lattice asked for another completion".to_string()),
-        }
-    })
-}
-
-/// One run of `solve` on the request's lattice or on its completion: the
-/// solution, or (Err) the completion its first checkpoint asks for.
-fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,observer:&mut Option<&mut dyn FnMut(&Checkpoint,&Answer)>,
-    frame:&'a SwFrame<'a>,completion:Option<&Completion>,started:Instant)->Result<Result<Solution,Completion>,String>{
-    let tolerance=POPULATION_TOLERANCE;let n=prepared.generator.n;
-    if initial.len()!=n*n{return Err("Initial density dimension differs".into());}
     let times=request.times;
+    if times.is_empty()&&request.horizons.is_empty(){return Err("A request asks for a trajectory or a horizon".into());}
     if !times.is_empty(){
         if times.len()<2||times[0]!=0.{return Err("A trajectory grid starts at zero with at least two times".into());}
         let(step,end)=(times[1],times[times.len()-1]);
         if !(end>0.)||times.iter().enumerate().any(|(i,&t)|(t-step*i as f64).abs()>1e-12*end.max(1.)){return Err("A trajectory grid must be uniform".into());}
     }
     if request.horizons.iter().any(|&t|!(t.is_finite()&&t>0.)){return Err("A horizon must be a finite positive time".into());}
+    if times.len()>MOST_SAMPLES{return Err(format!("A trajectory has at most {MOST_SAMPLES} samples (requested {})",times.len()));}
     let longest=times.last().copied().into_iter().chain(request.horizons.iter().copied()).fold(0_f64,f64::max);
-    let longest=if longest>0.{longest}else{LIMIT_REACH};
+    if longest>LONGEST_TIME_US{return Err(format!("An output time is at most {LONGEST_TIME_US:e} us (10 s; requested {longest:e} us)"));}
+    let frame=SwFrame::new(prepared,longest);
+    std::thread::scope(|scope|->Result<Solution,String>{
+        std::thread::Builder::new().stack_size(FRAME_STACK).spawn_scoped(scope,||{let _=frame.class();}).map_err(|e|e.to_string())?;
+        run(prepared,initial,request,&mut observer,&frame,started)
+    })
+}
+
+/// One run of `solve` (see the module documentation).
+fn run<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,observer:&mut Option<&mut dyn FnMut(&Checkpoint,&Answer)>,
+    frame:&'a SwFrame<'a>,started:Instant)->Result<Solution,String>{
+    let tolerance=POPULATION_TOLERANCE;let n=prepared.generator.n;let d=n*n;
+    if initial.len()!=d{return Err("Initial density dimension differs".into());}
+    let(times,longest)=(request.times,frame.horizon);
     let t1=if times.len()>1{times[1]}else{longest/LADDER_SAMPLES};
-    let propagates=!times.is_empty()||!request.horizons.is_empty();
+    let gate=charge_set::GATE*tolerance;
     let mut timing=Timing::default();
-    // 1. The lattice; the frame on its own thread for a request that
-    // propagates.
+    // 1. The lattice: the explicit set, completed by the a-priori rule.
     let clock=Instant::now();let eigen=prepared.eigenbasis()?;timing.eigenbasis_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
-    let base=request.explicit.get_or_init(||charge_set::explicit_set(prepared,initial,tolerance)).clone()?;
-    let explicit=match completion{Some(c)=>charge_set::completed(prepared,&base,&c.promoted)?,None=>base};
+    let explicit=request.explicit.get_or_init(||charge_set::explicit_set(prepared,initial,tolerance)).clone()?;
     timing.explicit_set_ms=clock.elapsed().as_secs_f64()*1e3;
-    let keep_k1=completion.is_some_and(|c|c.keep_k1);
     let clock=Instant::now();
-    let mut lattice=Lattice::with_k1_rests(prepared,explicit.sets.clone(),keep_k1)?;
-    let ledger=lattice.operator().ledger()?;
-    let planned=BASE_BYTES+MODE_BYTES*lattice.modes.len()as f64;
-    if planned>MEMORY_BYTES{return Err(format!("The lattice of this request has {} modes and would need about {:.1} GB, above the {:.0} GB memory budget: not solved",lattice.modes.len(),planned/1e9,MEMORY_BYTES/1e9));}
-    // A static fold whose expansion parameter p = nu_max / (|nu_far| - ||L0||)
-    // exceeds EXPANSION_LIMIT keeps its K^(1) term and is charged its
-    // remainder (`ledger::nu_freeze`, a generator bound delta): delta min(t, tau)
-    // on every output, tau the slowest relaxation time; at p >= 1 the
-    // expansion diverges and the request is not solved.
-    if ledger.expansion_parameter>=1.{return Err(format!("Static fold expansion parameter {:e}: the fold's frequency expansion diverges on this lattice, not solved",ledger.expansion_parameter));}
-    let freeze=(ledger.expansion_parameter>EXPANSION_LIMIT).then_some(ledger.nu_freeze);
-    // 2. The space: translations, the steady column.
-    let capacity={let op=lattice.operator();let d=op.n*op.n;BASIS_BYTES/(std::mem::size_of::<C>()*2*d*op.modes.len())};
+    let samples=apriori::sample_times(times,request.horizons);
+    let apriori=Apriori::new(prepared,frame.kernels()?,eigen,initial,&samples)?;
+    let budget=MEMORY_SHARE*crate::memory::physical_bytes()?;
+    let base=explicit.sets.modes();
+    let planned=planned_bytes(request.runs,base.len());
+    if planned>budget{return Err(format!("The lattice of this request has {} modes and would need about {:.1} GB, above the {:.0} GB memory budget: not solved",base.len(),planned/1e9,budget/1e9));}
+    let mut completed=apriori.missing(&base,gate);
+    let mut sets=explicit.sets.completed(&completed);
+    if planned_bytes(request.runs,sets.modes().len())>budget{completed.clear();sets=explicit.sets.clone();}
+    timing.apriori_ms=clock.elapsed().as_secs_f64()*1e3;
+    // 2. The run's fold by the truncation rule, the far shell's rings among
+    // its pieces.
+    let clock=Instant::now();
+    let modes=sets.modes();
+    let rule=FoldRule::new(longest);
+    let nu:Vec<f64>=modes.iter().map(|q|prepared.nu(q)).collect::<Result<_,_>>()?;
+    let duhamel=Duhamel::new(eigen,initial,&samples)?;
+    let responses_clock=Instant::now();
+    let rings=ring_responses(prepared,&modes,&nu,&duhamel,longest,rule.budget)?;
+    let responses_ms=responses_clock.elapsed().as_secs_f64()*1e3;
+    let input=ResponseRule{modes:modes.clone(),nu,duhamel:&duhamel,rings};
+    let mut fold=FoldLibrary::build(&prepared.generator,&prepared.plan,&prepared.lapack,Storage::Rule(rule,&input))?;
+    let build_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
+    let depth=fold.diagnostics.dropped.kept_rings;
+    if depth>0{
+        // The ring targets land on the lattice's edges whose charges the plan
+        // folds (and the diagonal), K^(0) alone; a far mode of ring k + 1 is
+        // pruned below its share of the budget.
+        let known:BTreeSet<Charge>=prepared.plan.targets.iter().chain(&prepared.plan.omitted).map(|t|t.charge.clone()).chain(std::iter::once(prepared.generator.zero.clone())).collect();
+        let mut offsets=BTreeSet::new();for p in &modes{for q in &modes{let t=charge_minus(q,p)?;if known.contains(&t){offsets.insert(t);}}}
+        let prune:Vec<f64>=(0..depth).map(|k|input.rings.get(k).map_or(0.,|&a|if a>0.{RING_PRUNE_SHARE*rule.budget/a}else{0.})).collect();
+        let targets=fold.ring_targets(&prepared.generator,&prepared.plan,depth,1,&prune,&offsets)?;fold.targets.extend(targets);
+    }
+    let report=FoldReport{rule:Some(rule),orders:fold.diagnostics.orders,dropped:fold.diagnostics.dropped.clone(),targets:fold.targets.len(),rings:depth,ring_responses:input.rings.clone(),responses_ms,build_ms,rings_ms:clock.elapsed().as_secs_f64()*1e3};
+    drop(input);
+    // 3. The space: the gated translations, the steady column, the a-priori
+    // translations with their slips in the block start.
+    let clock=Instant::now();
+    let mut lattice=Lattice::new(prepared,&fold,sets.clone())?;
+    let capacity=BASIS_BYTES/(std::mem::size_of::<C>()*d*lattice.modes.len());
     let mut space=Space::new(&mut lattice,initial,capacity)?;
-    for s in charge_set::gated_steps(prepared,tolerance){if lattice.operator().index.contains_key(&s){space.activate(&mut lattice,&s)?;}}
+    for s in charge_set::gated_steps(prepared,tolerance){if lattice.operator().index.contains_key(&s){space.activate(&lattice,&s)?;}}
     timing.setup_ms=clock.elapsed().as_secs_f64()*1e3;
     space.solve(&mut lattice,Pole::Zero)?;
-    let modes=lattice.modes.clone();
-    let clock=Instant::now();
-    let mut estimator=UnifiedEstimate::new(EstimateSetup{prepared,lattice:&explicit.sets,outputs:Outputs{times,horizons:request.horizons,steady:request.steady,groups:request.groups},frame,ledger:&ledger,keep_k1})?;
-    timing.estimator_build_ms=clock.elapsed().as_secs_f64()*1e3;
+    {
+        let(centre,mirror)={let op=lattice.operator();(op.centre,op.mirror.clone())};
+        for q in 0..modes.len(){
+            if q==centre||apriori.amplitude(&modes[q])<=gate{continue;}
+            let(c,m)=(modes[q].clone(),opposite(&modes[q]));let active=space.translations();
+            if active.contains(&c)||active.contains(&m){continue;}
+            space.activate(&lattice,&c)?;
+            space.add_start(&lattice,apriori.slip_field(eigen,&modes,&mirror,q))?;
+        }
+    }
     // The ladder spans the grid's times when there is one (a horizon is
-    // served by the steady column and the slow points): its poles near 1 / T of a 1 s horizon grew
-    // spurious near-zero slow Ritz pairs in both metrics (rates 1e-8 to
-    // 1e-5, residuals 0.2-3) whose p(1 s) bounds reached 1e1-1e4; without
-    // them three, four, five lasers and four without the trap at 20 us were
-    // accepted at 16-24 solves (four without the trap partial before) and
-    // five lasers at 10 us / 2000 samples reached 7.0e-3 against 2.3e-2.
-    let(points,slow_points)=space::ladder(eigen,initial,t1,times.last().copied().unwrap_or(longest),tolerance)?;let mut alive=vec![true;points.len()];
-    // The frame's metric (waiting for the frame's thread). A request that
-    // propagates nothing (the steady state alone) takes M = I instead, a
-    // speed case: it skips about 1 s of frame build (`reduced`).
+    // served by the steady column), in a fixed cycle: sorted by sigma, the
+    // bit-reversed order over the next power of two (the indices beyond the
+    // ladder left out), so that every stretch of the cycle spreads over the
+    // whole ladder.
+    let cycle:Vec<Pole>={
+        let mut ladder=space::ladder(t1,times.last().copied().unwrap_or(longest));
+        ladder.sort_by(|a,b|b.sigma().total_cmp(&a.sigma()));
+        let m=ladder.len();let p2=m.next_power_of_two();let width=p2.trailing_zeros();
+        (0..p2).map(|i|if width==0{0}else{i.reverse_bits()>>(usize::BITS-width)}).filter(|&i|i<m).map(|i|ladder[i]).collect()};
+    // The checkpoints spanning one cycle: the convergence compares whole
+    // cycles (`convergence`).
+    let window=cycle.len().div_ceil(CHECKPOINT);
+    // The frame's metric (waiting for the frame's thread) and the projection.
     let clock=Instant::now();
-    let metric=if propagates{Some(SwMetric::new(frame,eigen,lattice.operator())?)}else{None};
+    let metric=SwMetric::new(frame,eigen,lattice.operator())?;
     timing.frame_wait_ms=clock.elapsed().as_secs_f64()*1e3;
-    let mut galerkin=Projection::new(lattice.operator(),metric.as_ref())?;
-    let lapack=&prepared.lapack;let ops=super::krylov::Vectors::new(lattice.operator(),1)?;
-    // The classes of x0 (a request that propagates).
-    let mut classes:Option<Vec<(f64,f64)>>=None;
-    let mut checkpoints:Vec<Checkpoint>=Vec::new();
-    // The best checkpoint so far, the latest model, and per checkpoint the
-    // progress measure of the stopping rule.
+    let x0={let op=lattice.operator();let mut x=vec![ZERO;op.dimension()];x[op.centre*d..(op.centre+1)*d].copy_from_slice(initial);x};
+    let mut galerkin=Projection::new(&lattice,&metric,space::LADDER_TOP/t1,&x0)?;
+    let lapack=&prepared.lapack;let ops=super::krylov::Vectors::new(lattice.operator())?;
+    // The decaying classes of x0, which the slowest relaxation is checked
+    // against (the frame's block).
+    let classes=class_rates(frame,eigen,lapack,initial,tolerance)?;
+    let mut checkpoints:Vec<Checkpoint>=Vec::new();let mut history=Vec::new();
+    // The best checkpoint so far and per checkpoint the stopping rule's
+    // progress measure.
     let mut best:Option<Answer>=None;let mut progress:Vec<f64>=Vec::new();
-    let mut reason:Option<String>=None;
-    let mut current:Option<(usize,Model)>=None;
-    // Per point: its last score, the score it had when last solved, and the
-    // share of its transform left after that solve.
-    let(mut score,mut solved_at,mut remaining)=(vec![0.;points.len()],vec![None::<f64>;points.len()],vec![0.;points.len()]);
-    // The first checkpoint's completion decision when it changed nothing.
-    let mut decided:Option<Completion>=None;
+    let mut reason:Option<String>=None;let mut next=0usize;
     loop{
-        let live:Vec<usize>=(0..points.len()).filter(|&i|alive[i]).collect();
-        let exhausted=live.is_empty()||space.solves()>=MAXIMUM_SOLVES||space.full();
-        if exhausted||space.solves()%CHECKPOINT==0||(!propagates&&space.solves()==1){
-            // 3. The checkpoint: model, outputs, estimate, bounds.
+        let exhausted=space.solves()>=MAXIMUM_SOLVES||space.full();
+        if exhausted||space.solves()%CHECKPOINT==0||(times.is_empty()&&space.solves()==1){
+            // 4. The checkpoint: model, outputs, estimate, bounds.
             let clock=Instant::now();
-            galerkin.ingest(&space.basis,&space.images)?;
-            let model=galerkin.model(lapack,space.initial_norm,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
-            timing.projection_ms=galerkin.milliseconds;timing.images_ms=space.images_ms;
+            galerkin.ingest(&space.basis,&mut lattice)?;
+            let model=galerkin.model(lapack,&space.initial,longest,tolerance)?;timing.model_ms+=clock.elapsed().as_secs_f64()*1e3;
+            timing.projection_ms=galerkin.milliseconds;
             let outputs_clock=Instant::now();
             let mut trajectory=model.trajectory(&galerkin,times);
             if let Some(first)=trajectory.first_mut(){*first=(0..n).map(|i|initial[i*n+i].re).collect();}
             let horizons:Vec<Vec<f64>>=request.horizons.iter().map(|&t|model.horizon(&galerkin,t)).collect();
-            let steady=model.steady_populations(&galerkin);
             timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
             let estimate_clock=Instant::now();
-            let mut estimate=estimator.estimate(&ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
-                used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out},&mut lattice)?;
-            timing.estimate_ms+=estimate_clock.elapsed().as_secs_f64()*1e3;
+            history.push((trajectory.clone(),horizons.clone()));
+            let mut estimate=convergence(&history,request.groups,tolerance,window);
             // The growth charge on every output.
-            for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()).chain(estimate.steady.iter_mut()){*v+=model.growth_charge;}
-            // The slowest relaxation (the classes from the frame's block).
-            if classes.is_none()&&propagates{classes=Some(class_rates(frame,eigen,lapack,initial,tolerance)?);}
-            let rates:Option<Vec<f64>>=classes.as_ref().map(|c|c.iter().map(|x|x.0).collect());
-            let pairs=slow_pairs(&model,&space,&ops,rates.as_deref(),tolerance)?;
-            if let Some(delta)=freeze{let tau=pairs.first().map_or(f64::INFINITY,|(p,_)|1./p.rate);
-                for(v,&t)in estimate.trajectory.iter_mut().zip(times){*v+=delta*t.min(tau);}
-                for(v,&t)in estimate.horizons.iter_mut().zip(request.horizons){*v+=delta*t.min(tau);}
-                for v in estimate.steady.iter_mut(){*v+=delta*tau;}}
+            for v in estimate.trajectory.iter_mut().chain(estimate.horizons.iter_mut()){*v+=model.growth_charge;}
+            timing.estimate_ms+=estimate_clock.elapsed().as_secs_f64()*1e3;
+            // The slowest relaxation.
+            let pairs=slow_pairs(&model,&space,&ops,&classes,tolerance,&mut lattice)?;
             // The outputs with their bounds.
             let answer={
                 let outputs_clock=Instant::now();
                 let projected:Vec<Vec<f64>>=trajectory.iter().map(|p|simplex(p)).collect();
-                let changes:Vec<f64>=trajectory.iter().zip(&projected).map(|(a,b)|ledger::metric(a,b,request.groups)).collect();
-                let sample_errors:Vec<f64>=estimate.trajectory.iter().zip(&changes).map(|(e,p)|ACCEPTANCE_FACTOR*e+p).collect();
-                let field=|u:&[f64],images:bool|->Result<Vec<C>,String>{
-                    let source:Vec<&[C]>=if images{space.images.iter().map(|v|v.as_slice()).collect()}else{space.basis.iter().map(|v|v.as_slice()).collect()};
-                    Ok(ops.combinations(&source,&[u.to_vec()])?.remove(0))};
-                let steady_field=field(&model.steady,false)?;let steady_image=field(&model.steady,true)?;
-                let steady_residual=ops.norm(&steady_image)/ops.norm(&steady_field).max(f64::MIN_POSITIVE);
-                let horizon_fields=request.horizons.iter().map(|&t|field(&model.state(t),false)).collect::<Result<Vec<_>,_>>()?;
+                let changes:Vec<f64>=trajectory.iter().zip(&projected).map(|(a,b)|accuracy::metric(a,b,request.groups)).collect();
+                let sample_errors:Vec<f64>=estimate.trajectory.iter().zip(&changes).map(|(e,p)|e+p).collect();
+                let basis:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();
+                let horizon_fields=request.horizons.iter().map(|&t|Ok(ops.combinations(&basis,&[model.state(t)])?.remove(0))).collect::<Result<Vec<_>,String>>()?;
                 timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
-                let mut answer=Answer{solves:space.solves(),modes:modes.clone(),trajectory:projected,sample_errors,projection:changes.iter().fold(0.,|a:f64,&b|a.max(b)),
-                    horizons:horizons.clone(),steady:steady.clone(),horizon_fields,steady_field,
-                    horizon_errors:estimate.horizons.iter().map(|e|ACCEPTANCE_FACTOR*e).collect(),
-                    horizon_relaxing:request.horizons.iter().map(|&t|(0..model.r).filter(|&j|!model.kernel[j]&&!model.projected_out[j])
-                        .map(|j|model.centre_amplitudes[j]*(model.used_theta[j].re*t).exp()).sum()).collect(),steady_error:estimate.steady.map(|e|ACCEPTANCE_FACTOR*e),
-                    horizon_accepted:estimate.horizons.iter().map(|&e|ACCEPTANCE_FACTOR*e<=tolerance).collect(),
-                    steady_accepted:estimate.steady.is_none_or(|e|ACCEPTANCE_FACTOR*e<=tolerance),
-                    steady_residual,estimate:estimate.clone(),
-                    conserved:if modes.len()==1{eigen.kernel_count(super::reduced::KERNEL).max(1)}else{model.conserved()},
-                    slowest:pairs.first().map(|p|p.0),accepted:false};
+                let mut answer=Answer{solves:space.solves(),modes:modes.clone(),trajectory:projected,sample_errors,
+                    horizons:horizons.clone(),horizon_fields,horizon_errors:estimate.horizons.clone(),
+                    estimate:estimate.clone(),slowest:pairs.first().copied(),accepted:false};
                 answer.accepted=answer.largest()<=tolerance;
                 answer};
             let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),dimension:model.r,estimate,largest:answer.largest(),accepted:answer.accepted,
-                growing:model.growing,clipped:model.clipped,projected:model.projected,conserved:answer.conserved,slowest:answer.slowest,
-                trajectory,horizons,steady,inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
+                growing:model.growing,clipped:model.clipped,projected:model.projected,slowest:answer.slowest,
+                trajectory,horizons,inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
             if let Some(o)=observer.as_mut(){o(&point,&answer);}
             checkpoints.push(point);
             // The best checkpoint: one within the tolerance over any other,
@@ -439,55 +479,11 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
             let within=answer.largest()<=tolerance;
             if best.as_ref().is_none_or(|b|if within{true}else{b.largest()>tolerance&&answer.largest()<b.largest()}){best=Some(answer.clone());}
             if answer.accepted{break;}
-            // 5. Completion, decided at the first checkpoint (see `solve`).
-            if completion.is_none()&&checkpoints.len()==1{
-                let e=&answer.estimate;let off=answer.sample_errors.len();let horizons_count=answer.horizon_errors.len();
-                // Per output: its bound and its slow part (bound units); the steady
-                // state's estimate is its slow part.
-                let mut outputs:Vec<(f64,f64,usize)>=answer.sample_errors.iter().enumerate()
-                    .map(|(i,&b)|(b,ACCEPTANCE_FACTOR*e.slow_trajectory.get(i).copied().unwrap_or(0.),i)).collect();
-                outputs.extend(answer.horizon_errors.iter().enumerate().map(|(h,&b)|(b,ACCEPTANCE_FACTOR*e.slow_horizons.get(h).copied().unwrap_or(0.),off+h)));
-                if let Some(b)=answer.steady_error{outputs.push((b,b,off+horizons_count));}
-                let(bound,part,at)=outputs.iter().copied().max_by(|a,b|a.0.total_cmp(&b.0)).unwrap_or((0.,0.,0));
-                if bound>tolerance&&part>=COMPLETION_SHARE*bound{
-                    let view=ReducedView{basis:&space.basis,images:&space.images,r:model.r,vectors:&model.vectors,
-                        used_theta:&model.used_theta,used_coefficients:&model.used_coefficients,kernel:&model.kernel,projected:&model.projected_out};
-                    let pick=|x:&ErrorEstimate|ACCEPTANCE_FACTOR*if at<off{x.trajectory[at]}else if at<off+horizons_count{x.horizons[at-off]}else{x.steady.unwrap_or(0.)};
-                    let k1=estimator.estimate_by_source(&view,&mut lattice,Source::K1,false)?;
-                    let ring=estimator.estimate_by_source(&view,&mut lattice,Source::Ring,true)?;
-                    let(k1_part,ring_part)=(pick(&k1),pick(&ring));
-                    let keep=lattice.operator().drops_k1_rests()&&k1_part>=K1_COMPLETION*tolerance;
-                    // The ring charges by attribution, a pair together (the canonical
-                    // member, the larger charge, stands for it).
-                    let charges=&estimator.lattice.ring;let shares=&estimator.ring_attribution;
-                    let mut pairs:BTreeMap<Charge,f64>=BTreeMap::new();
-                    for(c,&a)in charges.iter().zip(shares){let m=opposite(c);let key=if *c>m{c.clone()}else{m};*pairs.entry(key).or_default()+=a;}
-                    let total:f64=pairs.values().sum();
-                    let mut ranked:Vec<(Charge,f64)>=pairs.into_iter().collect();ranked.sort_by(|a,b|b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-                    let mut promoted=Vec::new();let mut carried=0.;
-                    if total>0.{for(c,a)in &ranked{if carried>=RING_COMPLETION*total{break;}promoted.push(c.clone());carried+=a;}}
-                    // The completed lattice must fit the memory budget and keep the
-                    // fold's frequency expansion small (its parameter scales with the
-                    // largest |nu_q|): else no charge is promoted.
-                    if !promoted.is_empty(){
-                        let grown=charge_set::completed(prepared,&explicit,&promoted)?;let size=grown.sets.modes().len()as f64;
-                        let nu_max=|modes:&[Charge]|->Result<f64,String>{modes.iter().map(|q|prepared.nu(q).map(f64::abs)).try_fold(0_f64,|a,v|v.map(|v|a.max(v)))};
-                        let(before,after)=(nu_max(&explicit.sets.modes())?,nu_max(&grown.sets.modes())?);
-                        let expansion=if before>0.{ledger.expansion_parameter*after/before}else{ledger.expansion_parameter};
-                        if BASE_BYTES+MODE_BYTES*size>MEMORY_BYTES||expansion>EXPANSION_LIMIT{promoted.clear();}
-                    }
-                    let attribution:Vec<(Charge,f64)>=ranked.iter().map(|(c,a)|(c.clone(),if total>0.{a/total}else{0.})).collect();
-                    let restarted=keep||!promoted.is_empty();
-                    let decision=Completion{promoted,keep_k1:keep,decided_at:space.solves(),bound,slow_part:part,k1_part,ring_part,attribution,restarted};
-                    if restarted{return Ok(Err(decision));}
-                    decided=Some(decision);
-                }
-            }
-            // 4. The stopping rule on the bound (a checkpoint within the
-            // tolerance is accepted).
-            progress.push(answer.largest());
-            let last=progress.len()-1;
-            let plateau=last>=PLATEAU&&{
+            // 5. The stopping rule on the bound, from the first checkpoint
+            // with an estimate (before it the bound is unknown, no progress).
+            if history.len()>=2*window+1{progress.push(answer.largest());}
+            let last=progress.len().saturating_sub(1);
+            let plateau=progress.len()>PLATEAU&&{
                 let before=progress[..=last-PLATEAU].iter().copied().fold(f64::INFINITY,f64::min);
                 let recent=progress[last+1-PLATEAU..].iter().copied().fold(f64::INFINITY,f64::min);
                 recent>before/PLATEAU_GAIN};
@@ -495,47 +491,29 @@ fn attempt<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,ob
                 let b=best.as_ref().ok_or("A run has its checkpoint")?;
                 let why=if plateau{format!("the error bound stopped improving ({PLATEAU_GAIN}x over {PLATEAU} checkpoints) after {} solves",space.solves())}
                     else if space.full(){format!("the basis memory was spent after {} solves",space.solves())}
-                    else if live.is_empty(){format!("the pole ladder was exhausted after {} solves",space.solves())}
                     else{format!("the solve budget ({MAXIMUM_SOLVES}) was spent")};
-                reason=Some({
-                        let over:Vec<usize>=(0..b.sample_errors.len()).filter(|&i|b.sample_errors[i]>tolerance).collect();
-                        let samples=match(over.first(),over.last()){(Some(&a),Some(&z))=>format!("; {} of {} samples above it, t = {:.4} to {:.4} us",over.len(),b.sample_errors.len(),times[a],times[z]),_=>String::new()};
-                        let means=b.horizon_errors.iter().chain(b.steady_error.iter()).filter(|&&e|e>tolerance).count();
-                        let means=if means>0{format!("; {means} mean output(s) above it")}else{String::new()};
-                        format!("Stopped because {why}: the best checkpoint ({} solves) has an error bound of {:.2e} against the tolerance {tolerance:e}{samples}{means}",b.solves,b.largest())});
+                let over:Vec<usize>=(0..b.sample_errors.len()).filter(|&i|b.sample_errors[i]>tolerance).collect();
+                let samples=match(over.first(),over.last()){(Some(&a),Some(&z))=>format!("; {} of {} samples above it, t = {:.4} to {:.4} us",over.len(),b.sample_errors.len(),times[a],times[z]),_=>String::new()};
+                let means=b.horizon_errors.iter().filter(|&&e|e>tolerance).count();
+                let means=if means>0{format!("; {means} mean output(s) above it")}else{String::new()};
+                reason=Some(format!("Stopped because {why}: the best checkpoint ({} solves) has an error bound of {:.2e} against the tolerance {tolerance:e}{samples}{means}",b.solves,b.largest()));
                 break;
             }
-            current=Some((space.solves(),model));
         }
-        // The next pole by its expected gain.
-        let clock=Instant::now();
-        let model=match current.take(){Some((solves,model))if solves==space.solves()=>model,_=>{
-            galerkin.ingest(&space.basis,&space.images)?;galerkin.model(lapack,space.initial_norm,longest,tolerance)?}};
-        let xis:Vec<C>=live.iter().map(|&i|points[i].sigma()).collect();
-        let transform=model.error_transform(&galerkin,&space.basis,&space.images,eigen,lapack,&xis)?;
-        for(&i,p)in live.iter().zip(&transform){if slow_points[i]{continue;}
-            score[i]=points[i].sigma().re*p.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
-            if let Some(before)=solved_at[i].take(){remaining[i]=if before>0.{(score[i]/before).min(1.)}else{1.};}
-        }
-        let gain=|i:usize|->f64{if slow_points[i]{0.}else{score[i]*(1.-remaining[i])/points[i].copies()as f64}};
-        let mut ranked:Vec<(usize,f64)>=live.iter().map(|&i|(i,gain(i))).collect();
-        ranked.sort_by(|a,b|b.1.total_cmp(&a.1));
-        timing.ordering_ms+=clock.elapsed().as_secs_f64()*1e3;
-        // Solve the queue up to the next checkpoint.
-        for &(i,_)in &ranked{
-            if !alive[i]{continue;}
-            solved_at[i]=Some(score[i]);
-            if space.solve(&mut lattice,points[i])?==0{alive[i]=false;}
+        // The fixed cycle of real poles up to the next checkpoint.
+        loop{
+            let pole=cycle[next%cycle.len()];next+=1;
+            space.solve(&mut lattice,pole)?;
             if space.solves()%CHECKPOINT==0||space.solves()>=MAXIMUM_SOLVES||space.full(){break;}
         }
     }
     let answer=best.ok_or("A run has its checkpoint")?;
     let work=lattice.work().clone();
-    timing.solves_ms=work.milliseconds;timing.images_ms=space.images_ms;timing.projection_ms=galerkin.milliseconds;timing.total_ms=started.elapsed().as_secs_f64()*1e3;
+    timing.solves_ms=work.milliseconds;timing.projection_ms=galerkin.milliseconds;timing.total_ms=started.elapsed().as_secs_f64()*1e3;
     timing.frame_ms=frame.milliseconds();
     let converged=answer.accepted;
-    Ok(Ok(Solution{answer,converged,reason:if converged{None}else{reason},completion:completion.cloned().or(decided),translations:space.translations(),
-        columns:space.columns.clone(),dimension:galerkin.columns(),images:space.basis.len(),work,ledger:ledger.clone(),timing,checkpoints,explicit:explicit.clone()}))
+    Ok(Solution{answer,converged,reason:if converged{None}else{reason},explicit,lattice:sets,completed,translations:space.translations(),
+        columns:space.columns.clone(),dimension:galerkin.columns(),basis:space.basis.len(),block:space.block,work,fold:report,timing,checkpoints})
 }
 
 #[cfg(test)]
@@ -545,50 +523,63 @@ mod tests{
     use super::super::operator::LatticeOperator;
     #[test]
     fn lattice_pipeline_follows_the_exact_lattice_dynamics(){
-        // The fixture from |0><0|: the trajectory (2 us), the state at a
-        // horizon and the steady state against the same lattice P u Q
-        // propagated densely (RK4, real form) and its dense null vector. The
-        // far drives at 2% of the fixture's.
+        // The fixture from |0><0|: the trajectory (2 us) and the state at a
+        // horizon against the same lattice propagated densely (RK4, real
+        // form), and the bordered steady column against the lattice's dense
+        // null vector. The far drives at 2% of the fixture's.
         let mut f=fixture();for v in f.far.iter_mut().chain(f.far2.iter_mut()){*v*=0.02;}let p=prepared(&f);let n=4;let d=16;let groups=vec![vec![0,1],vec![2,3]];
         let mut initial=vec![ZERO;d];initial[0]=ONE;
         let times:Vec<f64>=(0..21).map(|i|0.1*i as f64).collect();let horizons=[3.];
         let mut seen=0;let mut observe=|_:&Checkpoint,_:&Answer|{seen+=1;};
-        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,steady:true,groups:&groups,explicit:&std::sync::OnceLock::new()},Some(&mut observe)).unwrap();
+        let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,groups:&groups,explicit:&std::sync::OnceLock::new(),runs:1},Some(&mut observe)).unwrap();
         assert!(s.converged&&s.reason.is_none()&&seen==s.checkpoints.len(),"{:?}",s.reason);
         let a=&s.answer;
-        let op=LatticeOperator::new(&p,&a.modes).unwrap();let dense=op.dense();let size=op.dimension();
+        let op=LatticeOperator::new(&p,&p.fold,&a.modes).unwrap();let dense=op.dense();let size=op.dimension();
         let rate=|x:&[C]|->Vec<C>{(0..size).map(|r|{let mut v=ZERO;for c in 0..size{mul_add(&mut v,dense[r*size+c],x[c]);}v}).collect()};
         let mut x=vec![ZERO;size];x[op.centre*d]=ONE;
         let readout=|x:&[C],t:f64|->Vec<f64>{(0..n).map(|i|(0..a.modes.len()).map(|q|mul(C{re:(op.nu[q]*t).cos(),im:(op.nu[q]*t).sin()},x[q*d+i*n+i]).re).sum()).collect()};
-        let steps=400;let h=0.1/steps as f64;let mut t=0.;let mut worst=(0_f64,0_f64);
+        let steps=400;let h=0.1/steps as f64;let mut t=0.;
         let axpy=|x:&[C],k:&[C],s:f64|->Vec<C>{x.iter().zip(k).map(|(a,b)|C{re:a.re+s*b.re,im:a.im+s*b.im}).collect()};
         for(i,row)in a.trajectory.iter().enumerate(){
             if i>0{for _ in 0..steps{let k1=rate(&x);let k2=rate(&axpy(&x,&k1,h/2.));let k3=rate(&axpy(&x,&k2,h/2.));let k4=rate(&axpy(&x,&k3,h));
                 for e in 0..size{x[e].re+=h/6.*(k1[e].re+2.*k2[e].re+2.*k3[e].re+k4[e].re);x[e].im+=h/6.*(k1[e].im+2.*k2[e].im+2.*k3[e].im+k4[e].im);}t+=h;}}
-            // Every sample within 1 / 0.8 of its own bound (above 2% of the
-            // tolerance: the validation's floor; the estimate is no per-time
-            // bound), the bounds within the tolerance.
-            let error=ledger::metric(&readout(&x,t),row,&groups);worst=(worst.0.max(error),worst.1.max(a.sample_errors[i]));
-            assert!(0.8*error<=a.sample_errors[i].max(0.02*POPULATION_TOLERANCE)&&a.sample_errors[i]<=POPULATION_TOLERANCE,"sample {i}: {error:e} against {:e}",a.sample_errors[i]);
+            // Every sample within the tolerance of the exact lattice dynamics,
+            // and its bound within the tolerance.
+            let error=accuracy::metric(&readout(&x,t),row,&groups);
+            assert!(error<=POPULATION_TOLERANCE&&a.sample_errors[i]<=POPULATION_TOLERANCE,"sample {i}: {error:e} against {:e}",a.sample_errors[i]);
         }
-        // The time maximum within 1 / 0.9 of the largest bound (measured:
-        // 0.95 in the frame's metric, the errors at 4% of the tolerance).
-        assert!(0.9*worst.0<=worst.1,"trajectory {:e} against {:e}",worst.0,worst.1);
         for _ in 0..10*steps{let k1=rate(&x);let k2=rate(&axpy(&x,&k1,h/2.));let k3=rate(&axpy(&x,&k2,h/2.));let k4=rate(&axpy(&x,&k3,h));
             for e in 0..size{x[e].re+=h/6.*(k1[e].re+2.*k2[e].re+2.*k3[e].re+k4[e].re);x[e].im+=h/6.*(k1[e].im+2.*k2[e].im+2.*k3[e].im+k4[e].im);}}
         let centre:Vec<f64>=(0..n).map(|i|x[op.centre*d+i*n+i].re).collect();
-        let horizon=ledger::metric(&centre,&a.horizons[0],&groups);assert!(horizon<=POPULATION_TOLERANCE,"horizon {horizon:e}");
+        let horizon=accuracy::metric(&centre,&a.horizons[0],&groups);assert!(horizon<=POPULATION_TOLERANCE,"horizon {horizon:e}");
         let exact=dense_steady(&p,&dense,op.centre,n);
         // The bordered column at a tight tolerance is the lattice's null
-        // vector; the reported steady state carries the algebraic error of
-        // the bordered solve at STEADY_TOLERANCE.
-        let mut lattice=Lattice::new(&p,s.explicit.sets.clone()).unwrap();let mut u=vec![ZERO;size];for i in 0..n{u[op.centre*d+i*n+i]=C{re:0.25,im:0.};}
-        let(w,_,_)=lattice.solve(Pole::Zero,&[u],1e-13).unwrap();let trace:f64=(0..n).map(|i|w[0][op.centre*d+i*n+i].re).sum();
-        let column:Vec<f64>=(0..n).map(|i|w[0][op.centre*d+i*n+i].re/trace).collect();
-        let tight=ledger::metric(&exact,&column,&groups);assert!(tight<1e-10,"bordered column {tight:e}");
-        let steady=ledger::metric(&exact,&a.steady,&groups);assert!(steady<1e-4,"steady {steady:e}");
-        assert!(a.conserved==1&&a.slowest.is_some());
+        // vector.
+        let mut lattice=Lattice::new(&p,&p.fold,s.lattice.clone()).unwrap();let mut u=vec![ZERO;size];for i in 0..n{u[op.centre*d+i*n+i]=C{re:0.25,im:0.};}
+        let(w,_,_)=lattice.solve(Pole::Zero,&u,1e-13).unwrap();let trace:f64=(0..n).map(|i|w[op.centre*d+i*n+i].re).sum();
+        let column:Vec<f64>=(0..n).map(|i|w[op.centre*d+i*n+i].re/trace).collect();
+        let tight=accuracy::metric(&exact,&column,&groups);assert!(tight<1e-10,"bordered column {tight:e}");
+        assert!(a.slowest.is_some());
         // Projected rows: probabilities, the first one rho0's.
         assert!(a.trajectory.iter().all(|r|r.iter().all(|&v|v>=0.)&&(r.iter().sum::<f64>()-1.).abs()<1e-12)&&a.trajectory[0][0]==1.);
+    }
+    #[test]
+    fn convergence_estimates_geometric_changes_and_refuses_stagnation(){
+        // Changes halving each level, windows of one and two levels: r = 1/2
+        // per level (1/4 per window of two), the estimate the window's
+        // largest change / (1 - r). Changes shrinking by 0.9: stagnation, at
+        // least twice the tolerance. Fewer than 2 window + 1 levels: unknown.
+        let groups:Vec<Vec<usize>>=vec![];
+        let levels=|ratio:f64,count:usize|->Vec<(Vec<Vec<f64>>,Vec<Vec<f64>>)>{let mut x=0.;let mut step=0.08;
+            (0..count).map(|_|{let row=vec![vec![x,1.-x]];x+=step;step*=ratio;(row.clone(),row)}).collect()};
+        let tolerance=POPULATION_TOLERANCE;
+        let halving=levels(0.5,5);let e=convergence(&halving,&groups,tolerance,1);let last=0.08*0.5_f64.powi(3);
+        assert!((e.trajectory[0]-2.*last).abs()<=1e-12&&(e.horizons[0]-2.*last).abs()<=1e-12,"{:?} against {last:e}",e);
+        let e=convergence(&halving,&groups,tolerance,2);let(window,before)=(0.08*0.5_f64.powi(2),0.08);
+        let expected=window/(1.-window/before);
+        assert!((e.trajectory[0]-expected).abs()<=1e-12&&(e.horizons[0]-expected).abs()<=1e-12,"{:?} against {expected:e}",e);
+        let slow=levels(0.9,5);let e=convergence(&slow,&groups,tolerance,1);
+        assert!(e.trajectory[0]>=2.*tolerance&&e.horizons[0]>=2.*tolerance,"{e:?}");
+        let e=convergence(&halving[..4],&groups,tolerance,2);assert!(e.trajectory[0]==1.&&e.horizons[0]==1.);
     }
 }

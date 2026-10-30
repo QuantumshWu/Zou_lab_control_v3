@@ -1,14 +1,14 @@
 import {timeDisplayUnit} from './duration.js';
 import type {DurationUnit} from './types.js';
-import {isTimeAverage,type SteadyResult} from './solver-types.js';
+import type {MeanResult} from './solver-types.js';
 import {POPULATION_TOLERANCE} from './types.js';
-import {errorPercent,outsideRuns,outsideWords,sampleErrors} from './accuracy.js';
+import {errorPercent,outsideRuns,sampleErrors} from './accuracy.js';
 
-export interface PopulationPlot {timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];steady?:SteadyResult;
+export interface PopulationPlot {timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];mean?:MeanResult;
   /** Per-sample error bounds (ui-design.md §6.16): samples above ε are drawn, marked. */
   populationAccuracy?:{sampleErrors?:number[]};}
 export interface PopulationChartOptions {scale?:'linear'|'log';viewportWidth?:number;initialId?:string;timeUnit?:DurationUnit;showTotalExcited?:boolean;
-  /** The long-time column's name: p̄(T) at the T the result holds (p̄(1 s), p̄(∞)). */
+  /** The long-time column's name: p̄(T) at the T the result holds (p̄(1 s), p̄(100 ms)). */
   meanLabel?:string;
   /** A sample the readout stands at already: a newer checkpoint of the same trajectory keeps it open there. */
   cursor?:number;}
@@ -106,15 +106,15 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     cursor.replaceChildren(element('line',{x1:String(xx),x2:String(xx),y1:String(g.top),y2:String(g.bottom),stroke:'#a19f9d','stroke-width':'1'}));
     for(const id of ids){const p=result.populations[id]![index]!;cursor.append(element('circle',{cx:String(xx),cy:String(g.y(p)),r:'3',fill:options.scale==='log'&&p<=g.floor?'white':populationColor(id),stroke:'white','stroke-width':'1.5'}));}
     cursor.style.display='';
-    const steady=result.steady?.converged&&result.steady.populations?result.steady:undefined,mean=isTimeAverage(steady?.status);
+    const mean=result.mean?.converged&&result.mean.populations?result.mean:undefined;
     const meanLabel=options.meanLabel??'p̄(T)',error=sampleErrors(result)?.[index];
     // The sample's estimated error (an absolute bound on every population), marked when above ε.
     const accuracy=error===undefined?'':`<span class="readout-error${error>POPULATION_TOLERANCE?' outside':''}" title="该时刻布居的估计误差（概率的绝对误差）">±${esc(errorPercent(error))}${error>POPULATION_TOLERANCE?`（超过 ${esc(errorPercent(POPULATION_TOLERANCE))}）`:''}</span>`;
-    const meanOutside=steady&&!steady.withinTolerance?`<p class="note wrap readout-outside">${esc(meanLabel)} 估计误差 ${esc(steady.estimatedError===null?'未知':errorPercent(steady.estimatedError))}，${esc(outsideWords(steady.estimatedError))}。</p>`:'';
-    const head=steady?`<div class="readout-row readout-head"><span></span><span>p(t)</span><span>${esc(meanLabel)}</span></div>`:'';
-    const asymptotic=(id:string)=>{if(id!=='__excited__')return steady?.populations?.[id]??NaN;const excited=Object.entries(steady?.populations??{}).filter(([state])=>/^(D1|D2)-/.test(state));return excited.length?excited.reduce((sum,[,p])=>sum+p,0):NaN;};
+    const meanOutside=mean&&!mean.withinTolerance?`<p class="note wrap readout-outside">${esc(meanLabel)} 估计误差 ${esc(mean.estimatedError===null?'未知':errorPercent(mean.estimatedError))}，超过 ${esc(errorPercent(POPULATION_TOLERANCE))}。</p>`:'';
+    const head=mean?`<div class="readout-row readout-head"><span></span><span>p(t)</span><span>${esc(meanLabel)}</span></div>`:'';
+    const meanOf=(id:string)=>{if(id!=='__excited__')return mean?.populations?.[id]??NaN;const excited=Object.entries(mean?.populations??{}).filter(([state])=>/^(D1|D2)-/.test(state));return excited.length?excited.reduce((sum,[,p])=>sum+p,0):NaN;};
     // A name too long for a narrow readout wraps after a " · ", never before one, and is never cut.
-    const row=(id:string,name:string,p:number,color:string)=>`<div class="readout-row${steady?'':' two'}" data-population-readout="${esc(id)}"><span class="readout-name" style="color:${color}">${esc(`${name}${id===options.initialId?' · 初态':''}`).replaceAll(' · ',' · ')}</span><span>${esc(populationValue(p))}</span>${steady?`<span class="readout-steady">${esc(populationValue(asymptotic(id)))}</span>`:''}</div>`;
+    const row=(id:string,name:string,p:number,color:string)=>`<div class="readout-row${mean?'':' two'}" data-population-readout="${esc(id)}"><span class="readout-name" style="color:${color}">${esc(`${name}${id===options.initialId?' · 初态':''}`).replaceAll(' · ',' · ')}</span><span>${esc(populationValue(p))}</span>${mean?`<span class="readout-mean">${esc(populationValue(meanOf(id)))}</span>`:''}</div>`;
     tooltip.innerHTML=`<div class="readout-time">t = ${digits(t*g.unit.factor)} ${g.unit.name}${accuracy}</div>${head}${ids.map(id=>row(id,labels[id]??id,result.populations[id]![index]!,populationColor(id))).join('')}${options.showTotalExcited===false?'':row('__excited__','激发态合计',result.totalExcited[index]!,'#808080')}${mean?`<p class="note wrap">${esc(meanLabel)} 一列是时刻 T 的相位平均布居（只平均掉拍频与光频微运动），不是瞬时布居。</p>`:''}${meanOutside}`;
     tooltip.hidden=false;tooltip.dataset.sampleIndex=String(index);tooltip.style.maxHeight=`${Math.max(100,host.clientHeight-35)}px`;
     // Beside the cursor, on its wider side, never over it: in a narrow chart the readout wraps

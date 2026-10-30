@@ -63,7 +63,7 @@ export function combinedLevelsChart(scene:Scene,a:Analysis,laser:Laser|undefined
  svg+=`<g class="level-node${selected?' selected':''}" data-state="${s.id}" data-base-label="${escapeHtml(label)}" role="button" tabindex="0" aria-pressed="${selected}" aria-label="${escapeHtml(label)}"><title>${escapeHtml(label)}</title><rect class="state-population-background" x="${xx-38}" y="${yy-(ground?26:9)}" width="76" rx="6" height="${ground?52:35}" fill="${initial?'#c8c6c4':style.fill}" stroke="none"/>`;
  svg+=ln(xx-29,yy,xx+29,yy,`class="state-energy" stroke="${initial?'#323130':style.ink}" stroke-width="2"`);
  if(mark!==undefined)svg+=selectionNumber(xx,yy,mark);
- if(ground)svg+=readout(xx,yy,'above',percent(o.steadyPopulations?.[s.id]),'steady-population-label',`data-state-id="${s.id}"`);
+ if(ground)svg+=readout(xx,yy,'above',percent(o.meanPopulations?.[s.id]),'mean-population-label',`data-state-id="${s.id}"`);
  svg+=readout(xx,yy,'below',reading(read),'level-value-label',`data-state-id="${s.id}" data-quantity="${laser?'detuning':'total-shift'}" data-value-mhz="${read??''}"`);
  if(scene.marks[s.id])svg+=t(xx,yy-(ground?31:14),scene.marks[s.id]!, 'text-anchor="middle" font-size="10"');svg+='</g>';}
  svg+='</g>';}

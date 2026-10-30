@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {formatNumber,formatElapsed,stateLabel,idLabel,labelStateIds,signedInteger,MINUS} from '../dist/js/atom-workbench/src/format.js';
-import {solverText,steadyStatusText} from '../dist/js/atom-workbench/src/solver-words.js';
+import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
 import {stateTree} from '../dist/js/atom-workbench/src/choice-trees.js';
 import {POPULATION_GROUPS} from '../dist/js/atom-workbench/src/population-selection.js';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
@@ -38,9 +38,7 @@ test('every state is spelled one way, in trees, groups and labels',()=>{
   assert.equal(ground.leaves[0].text,stateLabel({manifold:'ground',F:1,m:-1}));
   assert.equal(POPULATION_GROUPS.find(g=>g.id==='F:D2:3').label,'5P₃/₂ · F′=3');
 });
-test('solver statuses and known sentences are shown in Chinese; unknown text is kept',()=>{
-  assert.equal(steadyStatusText('time-average'),'长期相位平均');assert.equal(steadyStatusText('initial-dependent-time-average'),'长期相位平均（依赖初态）');
-  assert.equal(steadyStatusText('not-converged'),'未收敛');
+test('known solver sentences are shown in Chinese; unknown text is kept',()=>{
   assert.equal(solverText('an unforeseen native message'),'an unforeseen native message');
 });
 // The reasons the solver formats, read from its source: every format
@@ -55,7 +53,7 @@ const formatted=(source,start,values)=>{
 const chinese=(english,name)=>{const text=solverText(english);
   assert.notEqual(text,english,name);assert.match(text,/[\u4e00-\u9fff]/,name);assert.doesNotMatch(text,/\b(the|is|of|above|after)\b/,name);return text;};
 test('the stop and checkpoint reasons the solver formats are shown in Chinese',()=>{
-  const whys=[['the error bound stopped improving',[2,3,48]],['the basis memory was spent',[30]],['the pole ladder was exhausted',[12]],['the solve budget',[48]]]
+  const whys=[['the error bound stopped improving',[2,3,48]],['the basis memory was spent',[30]],['the solve budget',[48]]]
     .map(([start,values])=>formatted(pipelineSource,start,values));
   const samples=formatted(pipelineSource,'; {} of {} samples above it',[5,1000,'0.0200','0.1001']);
   const means=formatted(pipelineSource,'; {means} mean output(s) above it',[1]);
@@ -68,7 +66,12 @@ test('the stop and checkpoint reasons the solver formats are shown in Chinese',(
   chinese(formatted(adapterSource,"The mean's error bound is",['3.61e0']),'uninformative mean');
   // A request stopped before its first solve: nothing computed, the reason alone.
   chinese(formatted(pipelineSource,'The lattice of this request has',[150,'5.3','5']),'memory guard');
-  chinese(formatted(pipelineSource,'Static fold expansion parameter',['1.2e0']),'diverging fold');
+  chinese(formatted(pipelineSource,'An output time is at most',['1e7','1.5e7']),'an output time beyond 10 s');
+  // A grid the solver does not solve: refused with the reason.
+  assert.match(chinese(formatted(adapterSource,'The trajectory duration is limited',['15']),'too long'),/10 s.*15 s/);
+  assert.match(chinese(formatted(adapterSource,'A trajectory has 2 to',[2000,2001]),'too many samples'),/2 至 2000.*2001/);
+  chinese('The trajectory duration must be a positive finite time','no duration');
+  chinese('meanHorizonUs must be 1e5 or 1e6 us (100 ms or 1 s)','another T');
 });
 test('every sentence the pipeline and the adapter format is shown in Chinese (a new one fails here)',()=>{
   const sentences=[...formatStrings(pipelineSource),...formatStrings(adapterSource)].filter(f=>/^[A-Z][a-z]/.test(f));
@@ -77,8 +80,8 @@ test('every sentence the pipeline and the adapter format is shown in Chinese (a 
 });
 test('every mean reason the native adapter writes is shown in Chinese, within the tolerance and outside it',()=>{
   const outside=/const OUTSIDE:&str="([^"]+)";/.exec(adapterSource)?.[1];assert.ok(outside,'OUTSIDE');
-  const reasons=[...adapterSource.matchAll(/"((?:Converged|Long-time|Unique|Full-density|Lindblad mean|Populations converge)[^"]*\.)"/g)].map(m=>m[1]);
-  assert.ok(reasons.length>=7,`${reasons.length} reasons`);
+  const reasons=[...adapterSource.matchAll(/"((?:Phase average|State at)[^"]*\.)"/g)].map(m=>m[1]);
+  assert.equal(reasons.length,2,`${reasons.length} reasons: the driven and the undriven mean at T`);
   for(const reason of reasons){chinese(reason,reason);assert.match(chinese(reason+outside,reason),/未收敛/,reason);}
 });
 test('the method sentences the native adapter writes are shown in Chinese',()=>{

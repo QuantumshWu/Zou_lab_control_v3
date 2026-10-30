@@ -1,5 +1,6 @@
-//! The Schrieffer-Wolff kernels of the error propagation, in the shared
-//! eigenbasis of L0' (`eigenbasis`, complex eigen-coordinates).
+//! The Schrieffer-Wolff kernels of the request's frame (`frame`), in the
+//! shared eigenbasis of L0' (`eigenbasis`, complex eigen-coordinates): the
+//! reduced model's metric and the a-priori amplitudes (`apriori`) read them.
 //!
 //! Every explicit near step s couples mode q - s to q through C_s. The
 //! first-order generator S of the lattice's block-diagonalization has the
@@ -28,10 +29,23 @@
 //! whose eigen-coordinates are conjugated and permuted (`partner`), so the
 //! kernels of -s are C~_-s[i, j] = conj C~_s[i*, j*] and likewise X~, K~;
 //! only one step of each pair is computed.
-use super::super::*;
-use super::super::eigenbasis::BlockEigenbasis;
+use super::*;
+use super::eigenbasis::BlockEigenbasis;
 use crate::parallel::Execution;
 
+/// Kernel support: the first-order entry floor and the horizon floor on an
+/// entry's second-order rate times the longest output time. Measured: the
+/// reduced model's metric (`frame`) on five lasers + tweezer at 20 us grew
+/// 2-19 pseudo-modes from the 12th solve at 5e-3 (accepted at 40 solves),
+/// none at 1e-3 (0.6-2% of the entries; accepted at 12), 1e-4 or 1e-5.
+pub const KERNEL_ENTRY:f64=1e-3;
+pub const KERNEL_HORIZON_RATE:f64=1e-2;
+/// Near-resonant entries above this stay couplings: the first-order
+/// kernel is no small parameter there. Derived: |X~| = 1 is where the
+/// expansion stops being small (measured without the trap: the 1675 rad/us
+/// step's kernel has 212 entries above 1, the largest 24, near an optical
+/// resonance).
+pub const KERNEL_CAP:f64=1.;
 /// Columns of C~_s and K~_s per task: a step's coordinate change is a
 /// d x d x d product, spread over the workers even when the steps are
 /// fewer.
@@ -74,7 +88,7 @@ impl SwKernels{
         // Steps in plan order, each with its opposite.
         let mut steps=Vec::with_capacity(explicit.len());
         for &i in &explicit{let st=&plan.steps[i];
-            let opposite=position(&opposite(&st.charge)).ok_or("Estimator kernels: an explicit step without its opposite")?;
+            let opposite=position(&opposite(&st.charge)).ok_or("Frame kernels: an explicit step without its opposite")?;
             steps.push(StepKernel{charge:st.charge.clone(),nu:st.nu,opposite,entries:Vec::new()});}
         let vectors=basis.eigenvector_blocks();let lambda=&basis.lambda;
         let execution=Execution::new()?;
@@ -151,11 +165,11 @@ fn second_order_block(execution:&Execution,c:&[C],entries:&[(usize,usize,C)],par
 #[cfg(test)]
 mod tests{
     use super::*;
-    use super::super::super::tests::{fixture,prepared};
+    use super::super::tests::{fixture,prepared};
     /// Dense d x d helpers (row-major).
     fn product(a:&[C],b:&[C],d:usize)->Vec<C>{let mut c=vec![ZERO;d*d];for i in 0..d{for k in 0..d{let x=a[i*d+k];if !nonzero(x){continue;}for j in 0..d{mul_add(&mut c[i*d+j],x,b[k*d+j]);}}}c}
     #[test]
-    fn estimator_kernels_solve_the_lattice_sylvester_equation(){
+    fn frame_kernels_solve_the_lattice_sylvester_equation(){
         // Every entry kept: X_s = E X~_s E^-1 solves L0' X - X L0' - i nu_s X
         // = -C_s in density coordinates, the mirrored step's kernel is the
         // flip of the computed one, and K~_s is 1/2 (C_-s X_s - X_-s C_s).

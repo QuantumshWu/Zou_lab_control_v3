@@ -35,4 +35,8 @@ export const VIRTUAL_MANIFOLDS:Record<'ground'|'D1'|'D2',readonly VirtualManifol
  * work lists static valence tails of 0.11 (5s), 12.6 (5p1/2) and 13.4 (5p3/2)
  * that are NOT included (they are strongly frequency dependent for 5p). */
 export const CORE_POLARIZABILITY_AU:Record<'ground'|'D1'|'D2',number>={ground:9.1-0.26,D1:9.1,D2:9.1};
+/** The Rb I ionization energy above 5S, in cm⁻¹ (NIST ASD; Sansonetti, J. Phys. Chem. Ref. Data 35,
+ * 301 (2006)): a photon above it less the 5P energy ionizes 5P, which the model does not hold
+ * (5P₃/₂ below 479.1 nm, 5P₁/₂ below 473.7 nm). */
+export const IONIZATION_ENERGY_CM=33690.8048;
 export const SPECTROSCOPY_SOURCES = ['https://steck.us/alkalidata/rubidium87numbers.pdf','https://arxiv.org/abs/1209.0613','https://github.com/nikolasibalic/ARC-Alkali-Rydberg-Calculator/blob/master/arc/data/rb_NIST_level_data.ascii'];

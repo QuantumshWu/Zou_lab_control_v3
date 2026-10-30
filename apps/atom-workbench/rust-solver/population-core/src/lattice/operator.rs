@@ -1,9 +1,11 @@
-//! The lattice operator on a set of near charges (modes). For every target
-//! mode q,
-//!   y_q = (L0 - i nu_q + K_0^(0) + i nu_q K_0^(1)) x_q
+//! The lattice operator on a set of near charges (modes) and a run's fold
+//! (`fold::FoldLibrary`). For every target mode q,
+//!   y_q = (L0 - i nu_q + sum_o (i nu_q)^o K_0^(o)) x_q
 //!       + sum_{explicit t} L_t x_{q-t}
-//!       + sum_{fold targets t != 0} (K_t^(0) + i nu_{q-t} K_t^(1)) x_{q-t},
-//! with sources restricted to the set (the Fourier truncation). The block
+//!       + sum_{fold targets t != 0} sum_o (i nu_{q-t})^o K_t^(o) x_{q-t},
+//! with sources restricted to the set (the Fourier truncation); the far
+//! shell's ring targets (`FoldLibrary::ring_targets`) are fold targets like
+//! the others. The block
 //! factor NL'_q X + X NR'_q carries L0's left/right factors, -i nu_q and the
 //! diagonal fold's absorbable part as two dense n x n GEMMs; recycling and
 //! explicit steps act through their sparse factors. Every fold rest is
@@ -22,16 +24,11 @@
 //! (`mirror_field`). Every output entry is accumulated by one task in a fixed
 //! order, so results do not depend on the thread count.
 use super::*;
-use super::fold::{Rest,StoredFold};
+use super::fold::{FoldLibrary,Rest,StoredFold};
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// Rows of a dense sector block per task.
 const SECTOR_ROWS:usize=64;
-/// The K^(1) rests are left out, but for their population rows (which keep
-/// the fold exactly trace preserving), and charged as dropped fold entries
-/// when nu_max times their summed row sums is below this fraction of the
-/// fold's size: about half of a research model's operator work.
-const K1_REST_SHARE:f64=1e-3;
 
 #[derive(Clone,Copy,Debug)]
 enum Edge{Explicit(usize),Fold(usize)}
@@ -50,13 +47,17 @@ pub struct Mask<'m>{pub targets:&'m[bool],pub sources:&'m[bool]}
 #[derive(Default)]
 pub struct OperatorScratch{small:Vec<C>,left:Vec<C>,right:Vec<C>}
 /// One stored fold rest on all of its lattice edges (source, target);
-/// sources are scaled by i nu_source for K^(1).
-struct Term<'a>{rest:&'a Rest,edges:Vec<(usize,usize)>,frequency:bool,diagonal:bool}
+/// sources are scaled by (i nu_source)^power for K^(power).
+struct Term<'a>{rest:&'a Rest,edges:Vec<(usize,usize)>,power:usize,diagonal:bool}
 /// A rest term on the edges one application selects, with its offset in the
 /// gathered sources.
-struct Selected<'a>{rest:&'a Rest,edges:Vec<(usize,usize)>,frequency:bool,offset:usize}
+struct Selected<'a>{rest:&'a Rest,edges:Vec<(usize,usize)>,power:usize,offset:usize}
+/// (i nu)^power.
+fn frequency_power(nu:f64,power:usize)->C{let mut s=ONE;for _ in 0..power{s=C{re:-s.im*nu,im:s.re*nu};}s}
 pub struct LatticeOperator<'a>{
     pub prepared:&'a LatticePrepared,
+    /// The run's fold.
+    pub fold:&'a FoldLibrary,
     pub n:usize,pub modes:Vec<Charge>,pub nu:Vec<f64>,pub centre:usize,
     pub index:BTreeMap<Charge,usize>,
     /// The mode of -q, and whether q is computed (the others are mirrored).
@@ -77,15 +78,22 @@ pub struct LatticeOperator<'a>{
     /// Complex multiply-adds of one application: per-block part, rests.
     block_work:usize,rest_work:usize,
     pub work:usize,
-    /// Whether the K^(1) rests are applied but for their population rows
-    /// (the rest is left out: `left_out`), and their summed row sums.
-    pub drops_k1_rest:bool,k1_rest:f64,
+    /// The adjoint's conjugate-transposed factors, built at its first use.
+    adjoint:std::sync::OnceLock<Adjoint>,
+}
+/// The adjoint's data: per mode L^H and R^H of its block factor; per
+/// canonical target and edge the fold edge's conjugate-transposed factors;
+/// the explicit steps' and the recycling's adjoints; per source mode the
+/// edges (target, edge) and rest terms (term, target) it feeds.
+struct Adjoint{
+    left:Vec<Vec<C>>,right:Vec<Vec<C>>,
+    fold:Vec<Vec<Option<(Vec<C>,Vec<C>)>>>,
+    explicit:Vec<Superop>,recycling:Superop,
+    incoming:Vec<Vec<(usize,usize)>>,rests:Vec<Vec<(usize,usize)>>,
 }
 impl<'a> LatticeOperator<'a>{
-    pub fn new(prepared:&'a LatticePrepared,modes:&[Charge])->Result<Self,String>{Self::with_k1_rests(prepared,modes,false)}
-    /// The operator with every K^(1) rest kept when `keep_k1` (a completed
-    /// lattice: `pipeline`'s completion).
-    pub fn with_k1_rests(prepared:&'a LatticePrepared,modes:&[Charge],keep_k1:bool)->Result<Self,String>{
+    /// The operator on `modes` with the fold `fold` (a run's, or the frame's).
+    pub fn new(prepared:&'a LatticePrepared,fold:&'a FoldLibrary,modes:&[Charge])->Result<Self,String>{
         let n=prepared.generator.n;let d=n*n;
         let index:BTreeMap<Charge,usize>=modes.iter().enumerate().map(|(i,q)|(q.clone(),i)).collect();
         if index.len()!=modes.len(){return Err("Lattice modes must be distinct".into());}
@@ -96,13 +104,12 @@ impl<'a> LatticeOperator<'a>{
         let nu=modes.iter().map(|q|prepared.nu(q)).collect::<Result<Vec<_>,_>>()?;
         let zero=prepared.generator.zero_component();
         let(nl,nr)=(zero.op.left.dense(n),zero.op.right.dense(n));
-        let diagonal=prepared.fold.targets.first().filter(|t|t.charge==prepared.generator.zero);
+        let diagonals:Vec<&StoredFold>=fold.targets.iter().filter(|t|t.charge==prepared.generator.zero).collect();
         let(mut left,mut right)=(vec![],vec![]);
         for &w in &nu{
             let(mut a,mut b)=(vec![ZERO;d],vec![ZERO;d]);
-            if let Some(t)=diagonal{for k in 0..d{
-                a[k]=t.left[0][k];mul_add(&mut a[k],C{re:0.,im:w},t.left[1][k]);
-                b[k]=t.right[0][k];mul_add(&mut b[k],C{re:0.,im:w},t.right[1][k]);}}
+            for t in &diagonals{for o in 0..t.orders(){let s=frequency_power(w,o);for k in 0..d{
+                mul_add(&mut a[k],s,t.left[o][k]);mul_add(&mut b[k],s,t.right[o][k]);}}}
             let mut l:Vec<C>=nl.iter().zip(&a).map(|(x,y)|C{re:x.re+y.re,im:x.im+y.im}).collect();
             let r:Vec<C>=nr.iter().zip(&b).map(|(x,y)|C{re:x.re+y.re,im:x.im+y.im}).collect();
             for i in 0..n{l[i*n+i].im-=w;}
@@ -114,45 +121,34 @@ impl<'a> LatticeOperator<'a>{
         let targets:Vec<usize>=(0..modes.len()).filter(|&q|canonical[q]).collect();
         let mut edges=vec![Vec::new();modes.len()];
         let mut block_work=targets.len()*(2*n*n*n+recycling.work(n));
-        let nu_max=nu.iter().map(|w|w.abs()).fold(0.,f64::max);
-        let k1_rest:f64=prepared.fold.targets.iter().map(|t|t.rest_row_sum[1]).sum();
-        let fold_size:f64=prepared.fold.targets.iter().map(|t|t.norms[0][0]).sum();
-        let drops_k1_rest=k1_rest>0.&&nu_max*k1_rest<=K1_REST_SHARE*fold_size&&!keep_k1;
-        let k1=|t:&'a StoredFold|if drops_k1_rest{&t.population_rest[1]}else{&t.rest[1]};
         let mut terms=Vec::new();
-        if let Some(t)=diagonal{let own:Vec<(usize,usize)>=targets.iter().map(|&q|(q,q)).collect();
-            terms.push(Term{rest:&t.rest[0],edges:own.clone(),frequency:false,diagonal:true});
-            terms.push(Term{rest:k1(t),edges:own,frequency:true,diagonal:true});}
-        let mut fold_edges=vec![Vec::new();prepared.fold.targets.len()];
+        for t in &diagonals{let own:Vec<(usize,usize)>=targets.iter().map(|&q|(q,q)).collect();
+            for o in 0..t.orders(){terms.push(Term{rest:t.applied(o),edges:own.clone(),power:o,diagonal:true});}}
+        let mut fold_edges=vec![Vec::new();fold.targets.len()];
         for &target in &targets{let q=&modes[target];
             for(e,s)in explicit_steps.iter().enumerate(){
                 if let Some(&p)=index.get(&charge_minus(q,&s.charge)?){edges[target].push((p,Edge::Explicit(e)));block_work+=explicit[e].work(n);}
             }
-            for(t,data)in prepared.fold.targets.iter().enumerate(){
+            for(t,data)in fold.targets.iter().enumerate(){
                 if data.charge==prepared.generator.zero{continue;}
                 if let Some(&p)=index.get(&charge_minus(q,&data.charge)?){edges[target].push((p,Edge::Fold(t)));
-                    block_work+=4*n*n*n;fold_edges[t].push((p,target));}
+                    block_work+=2*(data.orders()+1)*n*n*n;fold_edges[t].push((p,target));}
             }
         }
-        for(t,list)in fold_edges.into_iter().enumerate(){if list.is_empty(){continue;}let data=&prepared.fold.targets[t];
-            terms.push(Term{rest:&data.rest[0],edges:list.clone(),frequency:false,diagonal:false});
-            terms.push(Term{rest:k1(data),edges:list,frequency:true,diagonal:false});}
+        for(t,list)in fold_edges.into_iter().enumerate(){if list.is_empty(){continue;}let data=&fold.targets[t];
+            for o in 0..data.orders(){terms.push(Term{rest:data.applied(o),edges:list.clone(),power:o,diagonal:false});}}
         terms.retain(|t|t.rest.stored()>0);
         let offset:usize=terms.iter().map(|t|d*t.edges.len()).sum();
         let rest_work:usize=terms.iter().map(|t|t.rest.stored()*t.edges.len()).sum();
-        Ok(Self{prepared,n,modes:modes.to_vec(),nu,centre,index,mirror,canonical,left,right,recycling,explicit,edges,terms,
+        Ok(Self{prepared,fold,n,modes:modes.to_vec(),nu,centre,index,mirror,canonical,left,right,recycling,explicit,edges,terms,
             gathered:vec![ZERO;offset],interleaved:vec![ZERO;d*modes.len()],execution:Execution::new()?,scratch:Vec::new(),
-            block_work,rest_work,work:block_work+rest_work,drops_k1_rest,k1_rest})
+            block_work,rest_work,work:block_work+rest_work,adjoint:std::sync::OnceLock::new()})
     }
     pub fn dimension(&self)->usize{self.modes.len()*self.n*self.n}
     pub fn nu_max(&self)->f64{self.nu.iter().map(|w|w.abs()).fold(0.,f64::max)}
     /// Complex multiply-adds of one application: the blocks and edges, the
     /// fold rests.
     pub fn work_split(&self)->[usize;2]{[self.block_work,self.rest_work]}
-    /// The fold remainders of this lattice as generator-norm bounds.
-    pub fn ledger(&self)->Result<super::ledger::RemainderLedger,String>{
-        super::ledger::RemainderLedger::new(&self.prepared.plan,self.nu_max(),self.prepared.fold.dropped(),if self.drops_k1_rest{self.k1_rest}else{0.})
-    }
     /// y = A x for a Hermitian-symmetric field x (x_-q = x_q^dagger).
     pub fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{self.apply_parts(x,y,Parts::Full)}
     /// y = (selected parts of A) x for a Hermitian-symmetric field x.
@@ -164,8 +160,8 @@ impl<'a> LatticeOperator<'a>{
         let n=self.n;let d=n*n;let modes=self.modes.len();
         if x.len()!=self.dimension()||y.len()!=x.len(){return Err("Lattice operator field dimensions differ".into());}
         if mask.is_some_and(|m|m.targets.len()!=modes||m.sources.len()!=modes){return Err("Lattice operator mask dimensions differ".into());}
-        let Self{prepared,left,right,recycling,explicit,edges,terms,gathered,interleaved,execution,scratch,block_work,rest_work,nu,canonical,mirror,..}=self;
-        let gemm=prepared.lapack.complex_gemm();let fold=&prepared.fold.targets;let canonical=&*canonical;let mirror=&*mirror;
+        let Self{prepared,fold,left,right,recycling,explicit,edges,terms,gathered,interleaved,execution,scratch,block_work,rest_work,nu,canonical,mirror,..}=self;
+        let gemm=prepared.lapack.complex_gemm();let fold=&fold.targets;let canonical=&*canonical;let mirror=&*mirror;
         let computed=|q:usize|canonical[q]&&mask.is_none_or(|m|m.targets[q]||m.targets[mirror[q]]);
         let reads=|p:usize|mask.is_none_or(|m|m.sources[p]);
         execution.for_mode_chunks(y,d,*block_work,MINIMUM_WORK_PER_TASK,scratch,|first,chunk,scratch|{
@@ -186,10 +182,11 @@ impl<'a> LatticeOperator<'a>{
                     match edge{
                         Edge::Explicit(e)=>explicit[e].apply_into(n,ONE,xp,yq,&mut scratch.small),
                         Edge::Fold(t)=>{
-                            let data=&fold[t];let w=C{re:0.,im:nu[p]};
+                            let data=&fold[t];
                             grow(&mut scratch.left,d);grow(&mut scratch.right,d);
-                            for k in 0..d{scratch.left[k]=data.left[0][k];mul_add(&mut scratch.left[k],w,data.left[1][k]);
-                                scratch.right[k]=data.right[0][k];mul_add(&mut scratch.right[k],w,data.right[1][k]);}
+                            scratch.left[..d].fill(ZERO);scratch.right[..d].fill(ZERO);
+                            for o in 0..data.orders(){let w=frequency_power(nu[p],o);for k in 0..d{
+                                mul_add(&mut scratch.left[k],w,data.left[o][k]);mul_add(&mut scratch.right[k],w,data.right[o][k]);}}
                             gemm.multiply(n,n,n,ONE,xp,n,&scratch.left[..d],n,ONE,yq,n)?;
                             gemm.multiply(n,n,n,ONE,&scratch.right[..d],n,xp,n,ONE,yq,n)?;
                         }
@@ -204,7 +201,7 @@ impl<'a> LatticeOperator<'a>{
         for t in terms.iter().filter(|t|parts!=Parts::Diagonal||t.diagonal){
             let chosen:Vec<(usize,usize)>=t.edges.iter().copied().filter(|&(p,q)|reads(p)&&computed(q)).collect();
             if chosen.is_empty(){continue;}
-            let count=chosen.len();active.push(Selected{rest:t.rest,edges:chosen,frequency:t.frequency,offset});offset+=d*count;
+            let count=chosen.len();active.push(Selected{rest:t.rest,edges:chosen,power:t.power,offset});offset+=d*count;
         }
         if !active.is_empty(){
             interleaved.fill(ZERO);grow(gathered,offset);
@@ -213,7 +210,7 @@ impl<'a> LatticeOperator<'a>{
             for(k,term)in active.iter().enumerate(){let count=term.edges.len();
                 for(b,block)in term.rest.blocks.iter().enumerate(){
                     let mut xs=vec![ZERO;block.cols.len()*count];
-                    for(e,&(p,_))in term.edges.iter().enumerate(){let s=if term.frequency{C{re:0.,im:nu[p]}}else{ONE};
+                    for(e,&(p,_))in term.edges.iter().enumerate(){let s=frequency_power(nu[p],term.power);
                         for(c,&col)in block.cols.iter().enumerate(){xs[c+block.cols.len()*e]=mul(s,x[p*d+col as usize]);}}
                     sources.push(xs);
                     for start in(0..block.rows.len()).step_by(SECTOR_ROWS){items.push((k,b,sources.len()-1,start,(start+SECTOR_ROWS).min(block.rows.len())));}
@@ -227,7 +224,7 @@ impl<'a> LatticeOperator<'a>{
                 for(e,&(_,q))in term.edges.iter().enumerate(){for i in 0..h{add(&mut interleaved[block.rows[start+i]as usize*modes+q],out[i+h*e]);}}}
             // Sparse remainders, by rows.
             for term in &active{let count=term.edges.len();
-                for(e,&(p,_))in term.edges.iter().enumerate(){let s=if term.frequency{C{re:0.,im:nu[p]}}else{ONE};
+                for(e,&(p,_))in term.edges.iter().enumerate(){let s=frequency_power(nu[p],term.power);
                     for c in 0..d{gathered[term.offset+c*count+e]=mul(s,x[p*d+c]);}}}
             let gathered=&*gathered;let active=&active;
             execution.for_mode_chunks(interleaved,modes,*rest_work,MINIMUM_WORK_PER_TASK,&mut Vec::<()>::new(),|first,chunk,_|{
@@ -245,41 +242,80 @@ impl<'a> LatticeOperator<'a>{
         mirror_field(y,n,canonical,mirror);
         Ok(())
     }
-    /// What the operator leaves out of the true one on a Hermitian-symmetric
-    /// field x: the K^(1) rests but for their population rows when they are
-    /// dropped (`drops_k1_rest`), i nu_p (K_t^(1) rest - its population
-    /// rows) x_p on every fold edge p -> q of the lattice; None when the
-    /// rests are applied.
-    /// Whether the operator leaves K^(1) rests out (the estimate charges them).
-    pub fn drops_k1_rests(&self)->bool{self.drops_k1_rest}
-    pub fn left_out(&self,x:&[C])->Result<Option<Vec<C>>,String>{
-        if !self.drops_k1_rest{return Ok(None);}
-        let(n,d)=(self.n,self.n*self.n);let mut y=vec![ZERO;self.dimension()];
-        let targets:Vec<usize>=(0..self.modes.len()).filter(|&q|self.canonical[q]).collect();
-        let(fold,modes,index,nu)=(&self.prepared.fold.targets,&self.modes,&self.index,&self.nu);
-        let blocks=self.execution.map(targets.clone(),|q|->Result<Vec<C>,String>{
-            let mut out=vec![ZERO;d];
-            for data in fold{
-                let source=charge_minus(&modes[q],&data.charge)?;let Some(&p)=index.get(&source)else{continue};
-                let xp=&x[p*d..(p+1)*d];
-                data.rest[1].apply_into(C{re:0.,im:nu[p]},xp,&mut out);data.population_rest[1].apply_into(C{re:0.,im:-nu[p]},xp,&mut out);
+    /// The adjoint's data (`Adjoint`).
+    fn adjoint_data(&self)->&Adjoint{
+        self.adjoint.get_or_init(||{
+            let(n,d)=(self.n,self.n*self.n);let modes=self.modes.len();
+            let ct=|m:&[C]|->Vec<C>{let mut o=vec![ZERO;d];for i in 0..n{for j in 0..n{o[i+n*j]=conj(m[j+n*i]);}}o};
+            let adj=|s:&Sparse|->Sparse{let mut e:Vec<(usize,usize,C)>=s.entries.iter().map(|&(i,j,v)|(j,i,conj(v))).collect();e.sort_by_key(|x|(x.0,x.1));Sparse{entries:e}};
+            let adjop=|o:&Superop|->Superop{Superop{left:adj(&o.left),right:adj(&o.right),sandwich:o.sandwich.iter().map(|(p,q)|(adj(p),adj(q))).collect()}};
+            let fold=self.edges.iter().map(|list|list.iter().map(|&(p,edge)|match edge{
+                Edge::Explicit(_)=>None,
+                Edge::Fold(f)=>{let data=&self.fold.targets[f];let(mut l,mut r)=(vec![ZERO;d],vec![ZERO;d]);
+                    for o in 0..data.orders(){let w=frequency_power(self.nu[p],o);for k in 0..d{mul_add(&mut l[k],w,data.left[o][k]);mul_add(&mut r[k],w,data.right[o][k]);}}
+                    Some((ct(&l),ct(&r)))}}).collect()).collect();
+            let mut incoming=vec![Vec::new();modes];
+            for(q,list)in self.edges.iter().enumerate(){for(k,&(p,_))in list.iter().enumerate(){incoming[p].push((q,k));}}
+            let mut rests=vec![Vec::new();modes];
+            for(t,term)in self.terms.iter().enumerate(){for &(p,q)in &term.edges{rests[p].push((t,q));}}
+            Adjoint{left:self.left.iter().map(|m|ct(m)).collect(),right:self.right.iter().map(|m|ct(m)).collect(),fold,
+                explicit:self.explicit.iter().map(|o|adjop(o)).collect(),recycling:adjop(&self.recycling),incoming,rests}
+        })
+    }
+    /// The adjoint in the real inner product Re <x, y> of Hermitian-symmetric
+    /// fields (every mode, weight one): every canonical target q (its
+    /// mirror's share folded in, weight 2) feeds the transposed and
+    /// conjugated blocks, edges and rests of the forward map into their
+    /// sources, each source mode accumulated by one task in a fixed order;
+    /// then the Hermitian-symmetric part (x + J x) / 2.
+    pub fn apply_adjoint(&self,y:&[C])->Result<Vec<C>,String>{
+        let n=self.n;let d=n*n;let modes=self.modes.len();
+        if y.len()!=self.dimension(){return Err("Lattice operator field dimensions differ".into());}
+        let data=self.adjoint_data();let gemm=self.prepared.lapack.complex_gemm();
+        let weight=|q:usize|C{re:if self.mirror[q]==q{1.}else{2.},im:0.};
+        let mut z=vec![ZERO;y.len()];
+        self.execution.for_mode_chunks(&mut z,d,self.work,MINIMUM_WORK_PER_TASK,&mut Vec::<Vec<C>>::new(),|first,chunk,small|{
+            for(m,zp)in chunk.chunks_exact_mut(d).enumerate(){let p=first+m;
+                // Column-major view Y: forward Y L + R Y, adjoint Y L^H + R^H Y.
+                if self.canonical[p]{let(yp,w)=(&y[p*d..(p+1)*d],weight(p));
+                    gemm.multiply(n,n,n,w,yp,n,&data.left[p],n,ONE,zp,n)?;gemm.multiply(n,n,n,w,&data.right[p],n,yp,n,ONE,zp,n)?;
+                    data.recycling.apply_into(n,w,yp,zp,small);}
+                for &(q,k)in &data.incoming[p]{let(yq,w)=(&y[q*d..(q+1)*d],weight(q));
+                    match(self.edges[q][k].1,&data.fold[q][k]){
+                        (Edge::Explicit(e),_)=>data.explicit[e].apply_into(n,w,yq,zp,small),
+                        (Edge::Fold(_),Some((l,r)))=>{gemm.multiply(n,n,n,w,yq,n,l,n,ONE,zp,n)?;gemm.multiply(n,n,n,w,r,n,yq,n,ONE,zp,n)?;}
+                        (Edge::Fold(_),None)=>return Err("Lattice operator adjoint: a fold edge without its factors".into()),
+                    }}
+                for &(t,q)in &data.rests[p]{let term=&self.terms[t];
+                    let s=mul(conj(frequency_power(self.nu[p],term.power)),weight(q));let yq=&y[q*d..(q+1)*d];
+                    for b in &term.rest.blocks{let h=b.rows.len();
+                        for(c,&col)in b.cols.iter().enumerate(){let mut acc=ZERO;
+                            for(r,&row)in b.rows.iter().enumerate(){mul_add(&mut acc,conj(b.values[r+h*c]),yq[row as usize]);}
+                            mul_add(&mut zp[col as usize],s,acc);}}
+                    let sp=&term.rest.sparse;
+                    for r in 0..d{let v=yq[r];if !nonzero(v){continue;}let sv=mul(s,v);
+                        for at in sp.row[r]as usize..sp.row[r+1]as usize{mul_add(&mut zp[sp.col[at]as usize],conj(sp.value[at]),sv);}}
+                }
             }
-            Ok(out)});
-        for(&q,block)in targets.iter().zip(blocks){y[q*d..(q+1)*d].copy_from_slice(&block?);}
-        mirror_field(&mut y,n,&self.canonical,&self.mirror);
-        Ok(Some(y))
+            Ok(())
+        })?;
+        // The Hermitian-symmetric part.
+        let mut out=vec![ZERO;z.len()];
+        for q in 0..modes{let m=self.mirror[q];for i in 0..n{for j in 0..n{let(u,v)=(z[q*d+i*n+j],conj(z[m*d+j*n+i]));out[q*d+i*n+j]=C{re:0.5*(u.re+v.re),im:0.5*(u.im+v.im)};}}}
+        Ok(out)
     }
     /// The operator as a dense row-major matrix (tests).
     #[cfg(test)]
     pub fn dense(&self)->Vec<C>{
         let n=self.n;let d=n*n;let size=self.dimension();let mut out=vec![ZERO;size*size];
-        let generator=&self.prepared.generator;let fold=&self.prepared.fold.targets;
+        let generator=&self.prepared.generator;let fold=&self.fold.targets;
         let mut block=vec![ZERO;d*d];
         let place=|out:&mut Vec<C>,block:&[C],q:usize,p:usize|{for r in 0..d{for c in 0..d{add(&mut out[(q*d+r)*size+p*d+c],block[r*d+c]);}}};
-        let dense_fold=|t:&StoredFold,w:f64,block:&mut Vec<C>|{t.dense_into(n,0,ONE,block);t.dense_into(n,1,C{re:0.,im:w},block);};
+        // sum_o (i w)^o K^(o) as the operator applies them.
+        let dense_fold=|t:&StoredFold,w:f64,block:&mut Vec<C>|{for o in 0..t.orders(){t.dense_into(n,o,frequency_power(w,o),block);}};
         for q in 0..self.modes.len(){
             block.fill(ZERO);generator.zero_component().op.dense_into(n,ONE,&mut block);for r in 0..d{block[r*d+r].im-=self.nu[q];}
-            if let Some(t)=fold.first().filter(|t|t.charge==generator.zero){dense_fold(t,self.nu[q],&mut block);}
+            for t in fold.iter().filter(|t|t.charge==generator.zero){dense_fold(t,self.nu[q],&mut block);}
             place(&mut out,&block,q,q);
             for(t,data)in fold.iter().enumerate(){if data.charge==generator.zero{continue;}
                 let Ok(source)=charge_minus(&self.modes[q],&data.charge)else{continue};let Some(&p)=self.index.get(&source)else{continue};
@@ -309,7 +345,7 @@ mod tests{
     #[test]
     fn lattice_operator_matches_its_dense_assembly_on_hermitian_fields(){
         let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
-        let mut op=LatticeOperator::new(&p,&modes).unwrap();let size=op.dimension();let d=16;
+        let mut op=LatticeOperator::new(&p,&p.fold,&modes).unwrap();let size=op.dimension();let d=16;
         assert!(op.edges.iter().flatten().any(|e|matches!(e.1,Edge::Explicit(_)))&&op.edges.iter().flatten().any(|e|matches!(e.1,Edge::Fold(_))),"explicit and cross-fold edges");
         assert_eq!(op.canonical.iter().filter(|&&c|c).count(),3,"centre and one of each pair");
         let x=symmetric_field(&op,0);
@@ -329,11 +365,79 @@ mod tests{
         assert!(error<=1e-13*scale,"diagonal part {error:e} of {scale:e}");
     }
     #[test]
+    fn lattice_operator_adjoint_matches_the_forward_map_and_the_dense_adjoint(){
+        // Re <y, A x> = Re <A^H y, x> on Hermitian-symmetric fields, to
+        // roundoff; and A^H y is the Hermitian-symmetric part of the dense
+        // conjugate transpose applied to y (the adjoint on the J-real fields).
+        let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
+        let mut op=LatticeOperator::new(&p,&p.fold,&modes).unwrap();let(n,d,size)=(op.n,16,op.dimension());
+        assert!(p.fold.targets.iter().any(|t|t.orders()>1)&&op.terms.iter().any(|t|t.power>0)&&op.terms.iter().any(|t|!t.diagonal),"orders in nu_q and cross-fold rests");
+        let dense=op.dense();
+        for(a,b)in[(1,2),(4,7),(9,3)]{
+            let(x,y)=(symmetric_field(&op,a),symmetric_field(&op,b));
+            let mut ax=vec![ZERO;size];op.apply(&x,&mut ax).unwrap();let ay=op.apply_adjoint(&y).unwrap();
+            let dot=|u:&[C],v:&[C]|u.iter().zip(v).map(|(s,t)|s.re*t.re+s.im*t.im).sum::<f64>();
+            let(l,r)=(dot(&y,&ax),dot(&ay,&x));let scale=dot(&ax,&ax).sqrt()*dot(&y,&y).sqrt();
+            assert!((l-r).abs()<=1e-13*scale,"<y,Ax> {l:e} against <A^H y,x> {r:e} (scale {scale:e})");
+            let mut z=vec![ZERO;size];for c in 0..size{for r in 0..size{mul_add(&mut z[c],conj(dense[r*size+c]),y[r]);}}
+            let mut sym=vec![ZERO;size];
+            for q in 0..op.modes.len(){let m=op.mirror[q];for i in 0..n{for j in 0..n{let(u,v)=(z[q*d+i*n+j],conj(z[m*d+j*n+i]));sym[q*d+i*n+j]=C{re:0.5*(u.re+v.re),im:0.5*(u.im+v.im)};}}}
+            let top=sym.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
+            let gap=sym.iter().zip(&ay).map(|(u,v)|magnitude(C{re:u.re-v.re,im:u.im-v.im})).fold(0.,f64::max);
+            assert!(gap<=1e-13*top,"against the dense adjoint {gap:e} of {top:e}");
+        }
+    }
+    #[test]
+    fn lattice_far_shell_first_ring_is_the_exact_elimination(){
+        // The far shell's first ring on every fold edge p -> q is the exact
+        // second-order elimination of the far modes at the source's frequency,
+        // sum over the pairs of -C_b (L0 - i (nu_s + nu_p))^-1 C_s from dense LU
+        // solves.
+        let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
+        let op=LatticeOperator::new(&p,&p.fold,&modes).unwrap();let(n,d)=(op.n,op.n*op.n);let size=op.dimension();
+        let x=symmetric_field(&op,5);let nu_of=|q:&[i32]|p.nu(q);
+        let shell=p.fold.far_shell(&p.generator,&p.plan,&nu_of,&op.modes,&x,0.).unwrap();
+        let dense=|q:&[i32]|{let mut m=vec![ZERO;d*d];p.generator.components[q].op.dense_into(n,ONE,&mut m);m};
+        let mut l0=vec![ZERO;d*d];p.generator.zero_component().op.dense_into(n,ONE,&mut l0);
+        let lap=&p.lapack;let mut second=vec![ZERO;size];
+        for q in 0..op.modes.len(){
+            for target in p.plan.targets.iter().chain(&p.plan.omitted){
+                let Ok(source)=charge_minus(&op.modes[q],&target.charge)else{continue};let Some(&s)=op.index.get(&source)else{continue};
+                for pair in &target.pairs{let step=&p.plan.steps[pair.source];
+                    let mut block=l0.clone();for i in 0..d{block[i*d+i].im-=step.nu+op.nu[s];}
+                    let c=dense(&step.charge);let cx:Vec<C>=(0..d).map(|r|(0..d).fold(ZERO,|v,k|{let mut v=v;mul_add(&mut v,c[r*d+k],x[s*d+k]);v})).collect();
+                    let t=|m:&[C]|(0..d*d).map(|e|m[(e%d)*d+e/d]).collect::<Vec<C>>();
+                    let(lu,piv)=lap.complex_factor(&t(&block),d).unwrap();let y=lap.complex_solve_matrix_factored(&lu,&piv,&cx,d).unwrap();
+                    let b=dense(&p.plan.steps[pair.back].charge);
+                    for r in 0..d{let mut v=ZERO;for k in 0..d{mul_add(&mut v,b[r*d+k],y[k]);}second[q*d+r].re-=v.re;second[q*d+r].im-=v.im;}}
+            }
+        }
+        let scale=x.iter().map(|z|magnitude(*z)).fold(0.,f64::max)*p.fold.targets.iter().map(|t|t.norms[0][0]).fold(0.,f64::max);
+        let gap=shell.landings[0].iter().zip(&second).map(|(u,v)|magnitude(C{re:u.re-v.re,im:u.im-v.im})).fold(0.,f64::max);
+        assert!(gap<=1e-12*scale,"the first ring {gap:e} from the exact second order (scale {scale:e})");
+    }
+    #[test]
+    fn lattice_block_traces_are_exact_left_eigenvectors(){
+        // The trace carrier's foundation (`space`): every coupling is a
+        // commutator and every fold term keeps its population rows, so
+        // tau_q(A x) = -i nu_q tau_q(x) on every block, for any field, on the
+        // lattice and with the far shell's rings (the ring targets) added.
+        let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
+        let mut op=LatticeOperator::new(&p,&p.fold,&modes).unwrap();let(n,d)=(op.n,op.n*op.n);
+        let x=symmetric_field(&op,3);let mut y=vec![ZERO;op.dimension()];op.apply(&x,&mut y).unwrap();
+        let nu_of=|q:&[i32]|p.nu(q);let shell=p.fold.far_shell(&p.generator,&p.plan,&nu_of,&op.modes,&x,0.).unwrap();
+        for ring in shell.landings.iter().skip(1){for(a,&b)in y.iter_mut().zip(ring){add(a,b);}}
+        let trace=|v:&[C],q:usize|(0..n).fold(ZERO,|s,i|C{re:s.re+v[q*d+i*n+i].re,im:s.im+v[q*d+i*n+i].im});
+        let scale=y.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
+        for q in 0..op.modes.len(){let(ty,tx)=(trace(&y,q),trace(&x,q));let defect=C{re:ty.re-op.nu[q]*tx.im,im:ty.im+op.nu[q]*tx.re};
+            assert!(magnitude(defect)<=1e-13*scale,"block {q}: {:e} of {scale:e}",magnitude(defect));}
+    }
+    #[test]
     fn lattice_operator_masks_restrict_sources_and_targets(){
         // A masked application equals the full one on the field restricted to
         // the sources, read on the targets (both closed under q -> -q).
         let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
-        let mut op=LatticeOperator::new(&p,&modes).unwrap();let size=op.dimension();let d=16;
+        let mut op=LatticeOperator::new(&p,&p.fold,&modes).unwrap();let size=op.dimension();let d=16;
         let x=symmetric_field(&op,3);let count=modes.len();
         let inner:Vec<bool>=modes.iter().map(|q|q.iter().map(|k|k.unsigned_abs()).sum::<u32>()<=1).collect();
         let outer:Vec<bool>=inner.iter().map(|&b|!b).collect();

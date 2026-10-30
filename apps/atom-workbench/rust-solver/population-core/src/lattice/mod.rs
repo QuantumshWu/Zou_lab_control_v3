@@ -2,46 +2,43 @@
 //! the request's own frame (its per-F rotating frames). Every near-resonant
 //! charge step is an explicit lattice coupling; every far step (the tweezer
 //! and every counter-rotating harmonic) is folded statically into
-//! K_t^(0) + i nu K_t^(1), built with the exact (L0 - i nu_s)^-1, so far
-//! charges never enter the lattice; what the fold leaves out is a charged
-//! bound. Decisions are made by contribution size; exact zeros are exploited
-//! for speed only. The population tolerance is the fixed
-//! `ledger::POPULATION_TOLERANCE`.
+//! sum_o (i nu)^o K_t^(o), built with the exact (L0 - i nu_s)^-1, so far
+//! charges never enter the lattice; a run's fold keeps or drops its pieces by
+//! one truncation rule. Decisions are made by contribution size; exact zeros
+//! are exploited for speed only. The population tolerance is the fixed
+//! `accuracy::POPULATION_TOLERANCE`.
 //!
 //! Pipeline, by module:
 //! - `generator`: the frame's Fourier components L_t;
 //! - `classification`: explicit / fold for every nonzero charge step, and the
 //!   far + far pairs that land on near charges;
-//! - `fold`: the folded couplings K_t (closed form: diagonal inverse and
-//!   Neumann series of every far block);
+//! - `fold`: the folded couplings K_t^(o) (diagonal inverse and Neumann
+//!   series of every far block), the truncation rule, the far shell's rings;
 //! - `floquet`: the Floquet frames of the lattice, the micromotion kernels
-//!   shared by the preconditioner and the error estimate;
+//!   of the preconditioner;
 //! - `eigenbasis`: the real eigenbasis of the folded centre generator
-//!   (request-level, `LatticePrepared::eigenbasis`), and the eigensystem by
-//!   clusters of the estimator's second-order blocks: batched block solves,
-//!   the eigen- and dressed coordinates;
-//! - `operator`: the lattice operator on a set of charges, whole or
-//!   restricted to target rows and source columns;
+//!   (request-level, `LatticePrepared::eigenbasis`), and the clustered
+//!   eigensystem of the frame's second-order block;
+//! - `operator`: the lattice operator on a set of charges, its adjoint, whole
+//!   or restricted to target rows and source columns;
 //! - `preconditioner`: the Floquet-frame preconditioner with its centre
-//!   Woodbury term, for the steady trace row, real and complex shifts;
+//!   Woodbury term, for the steady trace row and real shifts;
 //! - `krylov`: GMRES on the lattice systems (DCGS2 orthogonalization);
 //! - `charge_set`: the explicit charges P of a request and their ring Q;
+//! - `kernels`, `blocks`: the Schrieffer-Wolff kernels X~_s and the
+//!   second-order block of the request's frame;
+//! - `frame`: the frame of a request (kernels and block, each built on first
+//!   use) and the reduced model's metric;
+//! - `apriori`: the a-priori amplitudes of x0 (the lattice completion, the
+//!   translations, the far shell's depth);
 //! - `poles`: the lattice P u Q and its solves at the poles;
-//! - `space`: the one rational Krylov space from x0 (poles, translations);
-//! - `frame`: the Schrieffer-Wolff / Floquet frame of a request (first-order
-//!   kernels, the second-order block's eigensystem, each built on first
-//!   use): the error estimate's fast part, and the classes the slowest
-//!   relaxation is checked against;
-//! - `reduced`: the Euclidean Galerkin model of the space and every output
-//!   from it;
-//! - `estimate_api`: what the error estimate reads and returns;
-//! - `estimator`: the error estimate (one error equation for every output,
-//!   the omitted ring slaved, Schrieffer-Wolff propagation of the near
-//!   modes, the slow modes exact by recycled GCRO);
-//! - `pipeline`: the request: lattice, space, checkpoints, acceptance and
-//!   the stopping rule;
-//! - `ledger`: the tolerance, the error metric and the fold's remainder
-//!   bounds.
+//! - `space`: the one block rational Krylov space from x0 (poles,
+//!   translations);
+//! - `reduced`: the metric Petrov-Galerkin model of the space and every
+//!   output from it;
+//! - `pipeline`: the request: lattice, fold, space, checkpoints, acceptance
+//!   by convergence and the stopping rule;
+//! - `accuracy`: the tolerance and the error metric.
 //!
 //! Layout: an n x n block is row-major (entry (i, j) at i*n+j); a field on N
 //! modes is N consecutive blocks; a superoperator as a d x d matrix (d = n^2)
@@ -64,11 +61,12 @@ pub mod charge_set;
 pub mod poles;
 pub mod space;
 pub mod reduced;
+pub mod kernels;
+pub mod blocks;
 pub mod frame;
-pub mod estimate_api;
-pub mod estimator;
+pub mod apriori;
 pub mod pipeline;
-pub mod ledger;
+pub mod accuracy;
 pub use generator::{Component,Generator,Sparse,Superop};
 
 pub(crate) const ZERO:C=C{re:0.,im:0.};
@@ -132,7 +130,7 @@ impl LatticePrepared{
         let generator=Generator::new(&source)?;
         let plan=classification::HarmonicPlan::new(&generator)?;
         let plan_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
-        let fold=fold::FoldLibrary::build(&generator,&plan,&lapack)?;
+        let fold=fold::FoldLibrary::build(&generator,&plan,&lapack,fold::Storage::Frame)?;
         let fold_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
         let floquet=floquet::FloquetKernels::new(&generator,&plan,&fold,&lapack)?;
         let kernel_ms=clock.elapsed().as_secs_f64()*1e3;

@@ -1,7 +1,7 @@
 import type {Analysis,Laser,Level,Scene,SpectralLine} from './types.js';
 import {RB87,accurateSum,analyze,atomicSystem,laserCarrierOffsetMHz,laserFrequencyDifferenceMHz,laserFrequencyMHz,laserIntensityMWcm2,sinCosDegrees,transitionReferenceMHz,wigner3j as rawWigner3j} from './physics.js';
 import type {Eigenstate} from './physics.js';
-import {CORE_POLARIZABILITY_AU,SPECTROSCOPY_SOURCES,VIRTUAL_MANIFOLDS} from './spectroscopy-data.js';
+import {CORE_POLARIZABILITY_AU,IONIZATION_ENERGY_CM,SPECTROSCOPY_SOURCES,VIRTUAL_MANIFOLDS} from './spectroscopy-data.js';
 import {cmatrix,solveStaticBackground} from './floquet-background.js';
 import {withUnit} from './format.js';
 import type {BackgroundProblem,BackgroundSolution,FarCarrier,Manifold,OutsideState} from './floquet-background.js';
@@ -31,6 +31,11 @@ const ASSUMPTIONS=[
 ];
 /** The largest mixing |Ω/2Δ| for which a laser's static light shift represents its effect. */
 export const STATIC_MIXING_LIMIT=.01;
+/** The smallest detuning (MHz) of a virtual transition to a state outside the model for which its
+ * second-order (van Vleck) term represents it. With STATIC_MIXING_LIMIT the one rule for the states
+ * outside the model: the levels chart draws no static shift beyond it, and the dynamics, which
+ * keeps the term, states the laser outside the model's scope (`modelScope`). */
+export const OUTSIDE_GAP_MHZ=10000;
 
 type AtomicSystem=ReturnType<typeof atomicSystem>;
 const atomicCache=new Map<number,{D1:AtomicSystem;D2:AtomicSystem;states:Eigenstate[]}>();
@@ -111,7 +116,7 @@ function staticMixing(problem:BackgroundProblem):{ratio:number;withinGap:boolean
       // E_i ± ω − E_v, with E_i absolute.
       const omega=sign*(cD2+offset);let sum=0;
       for(let k=0;k<size;k++){let re=0,im=0;for(let q=0;q<3;q++){const d=state.dipoles[k*3+q]!;re+=d*field[q]!.re;im+=d*field[q]!.im;}
-        sum=add(sum,re,im,(start+k<8?e[start+k]!:cD2+relative[start+k]!)+omega-state.energyMHz,10000,()=>`${state.name} 高态 / ${name}`);}
+        sum=add(sum,re,im,(start+k<8?e[start+k]!:cD2+relative[start+k]!)+omega-state.energyMHz,OUTSIDE_GAP_MHZ,()=>`${state.name} 高态 / ${name}`);}
       ratio=Math.max(ratio,Math.sqrt(sum));}
     if(failure===undefined&&!(ratio<=STATIC_MIXING_LIMIT))failure=`${name}：静态光移的混合比 |Ω/2Δ| = ${(100*ratio).toPrecision(3)}%，超过 ${100*STATIC_MIXING_LIMIT}% 的适用范围。`;
   }
@@ -148,46 +153,56 @@ const zero=(n:number):Matrix=>({real:Array(n*n).fill(0),imag:Array(n*n).fill(0)}
 const entry=(m:Matrix,k:number):Z=>({re:m.real[k]!,im:m.imag[k]!});
 const amplitude=(d:number[],field:Z[]):Z=>({re:accurateSum(d.map((v,q)=>v*field[q]!.re))/(2*H*1e6),im:accurateSum(d.map((v,q)=>v*field[q]!.im))/(2*H*1e6)});
 const centroid=(manifold:Level['manifold']):number=>manifold==='ground'?0:RB87[manifold].frequencyHz/1e6;
-/** Adds one virtual state's symmetric second-order term and returns its mixing ratio. Every
- * represented amplitude is kept; a coupling within minimumGap of resonance or a mixing above
- * 1% is refused. */
-function addVirtual(matrix:Matrix,indices:number[],values:Z[],denominators:number[],minimumGap:number,label:string):number{
-  const magnitudes=values.map(norm),active=magnitudes.flatMap((value,i)=>value!==0?[i]:[]);let ratio2=0;
+/** Adds one virtual state's symmetric second-order term; returns its mixing ratio sqrt(Σ |V/Δ|²)
+ * and its smallest detuning (MHz) over the couplings it has. Every represented amplitude is kept.
+ * Near resonance the term no longer represents the state, which `modelScope` states; the result is
+ * not withheld. Only an exact resonance, where the term is undefined, is refused. */
+function addVirtual(matrix:Matrix,indices:number[],values:Z[],denominators:number[],label:string):{ratio:number;gap:number}{
+  const magnitudes=values.map(norm),active=magnitudes.flatMap((value,i)=>value!==0?[i]:[]);let ratio2=0,gap=Infinity;
   for(const a of active){
-    const gap=Math.abs(denominators[a]!);if(!(gap>=minimumGap))throw new Error(`${label}：虚跃迁失谐小于 ${minimumGap} MHz，超出静态色散光移模型。`);
-    ratio2+=(magnitudes[a]!/gap)**2;
+    const detuning=Math.abs(denominators[a]!);if(!(detuning>0))throw new Error(`${label}：与 32 态以外的能级恰好共振，二阶光移无定义。`);
+    gap=Math.min(gap,detuning);ratio2+=(magnitudes[a]!/detuning)**2;
   }
-  const ratio=Math.sqrt(ratio2);if(!(ratio<=.01))throw new Error(`${label}：光耦合/失谐比 ${ratio.toPrecision(3)} 超过二阶色散模型范围。`);
+  const ratio=Math.sqrt(ratio2);
   for(let ai=0;ai<active.length;ai++)for(let bi=ai;bi<active.length;bi++){
     const a=active[ai]!,b=active[bi]!;
     const ab=mul(conj(values[a]!),values[b]!),factor=.5*(1/denominators[a]!+1/denominators[b]!),i=indices[a]!,j=indices[b]!,k=i*N+j;
     matrix.real[k]!+=factor*ab.re;matrix.imag[k]!+=factor*ab.im;
     if(i!==j){matrix.real[j*N+i]=matrix.real[k]!;matrix.imag[j*N+i]=-matrix.imag[k]!;}
   }
-  return ratio;
+  return {ratio,gap};
 }
-type ModelCorrection={matrix:Matrix;maximumMixingRatio:number};
+/** One carrier's (the enabled lasers of one frequency) couplings to the states outside the model:
+ * its largest mixing ratio and its smallest detuning, each with the state it is to. */
+type OutsideReach={laserIds:string[];names:string;ratio:number;ratioState:string;gapMHz:number;gapState:string};
+type ModelCorrection={matrix:Matrix;maximumMixingRatio:number;carriers:OutsideReach[]};
 const modelCorrectionCache=new Map<string,ModelCorrection>();
 /** The static correction in the magnetic eigenbasis (MHz): every carrier's co- and
  * counter-rotating coupling to each state outside the model, then its core shift; with the
- * largest mixing ratio of those couplings. */
+ * largest mixing ratio of those couplings and, per carrier, how close it comes to them. */
 function modelCorrection(analysis:Analysis,beams:Group[]):ModelCorrection{
   const key=JSON.stringify([analysis.fieldMagnitudeG,beams.map(g=>[laserCarrierOffsetMHz(g.beams[0]!,'D1'),laserCarrierOffsetMHz(g.beams[0]!,'D2'),g.field])]);
   const cached=modelCorrectionCache.get(key);if(cached)return cached;
   const states=cachedAtom(analysis.fieldMagnitudeG).states,outside=outsideStates(states,analysis.fieldMagnitudeG),matrix=zero(N);let maximumMixingRatio=0;
+  const carriers:OutsideReach[]=[];
   for(const group of beams){
     const reverse=reversedField(group.field),frequency=laserFrequencyMHz(group.beams[0]!),names=group.beams.map(b=>b.name).join(' + ');
+    const reach:OutsideReach={laserIds:group.beams.map(b=>b.id),names,ratio:0,ratioState:'',gapMHz:Infinity,gapState:''};
     for(const {name:manifold,start,size} of MANIFOLDS){const indices=Array.from({length:size},(_,k)=>start+k);
       for(const state of outside[manifold])for(const counter of [false,true]){
         const values=indices.map((_,k)=>amplitude([state.dipoles[k*3]!,state.dipoles[k*3+1]!,state.dipoles[k*3+2]!],counter?reverse:group.field));
         const delta=indices.map(i=>centroid(states[i]!.manifold)+states[i]!.energyMHz-state.energyMHz+(counter?-frequency:frequency));
-        maximumMixingRatio=Math.max(maximumMixingRatio,addVirtual(matrix,indices,values,delta,10000,`${state.name} 高态 / ${names}`));
+        const {ratio,gap}=addVirtual(matrix,indices,values,delta,`${state.name} 高态 / ${names}`);
+        maximumMixingRatio=Math.max(maximumMixingRatio,ratio);
+        if(ratio>reach.ratio){reach.ratio=ratio;reach.ratioState=state.name;}
+        if(gap<reach.gapMHz){reach.gapMHz=gap;reach.gapState=state.name;}
       }}
+    carriers.push(reach);
     // Rb+ core: the scalar shift −α|E|²/4 of every state of a manifold, per carrier.
     const squared=accurateSum(group.field.flatMap(q=>[q.re*q.re,q.im*q.im]));
     states.forEach((state,i)=>{matrix.real[i*N+i]!+=-CORE_POLARIZABILITY_AU[state.manifold]*POLARIZABILITY_AU*squared/(4*H*1e6);});
   }
-  const result={matrix,maximumMixingRatio};modelCorrectionCache.set(key,result);if(modelCorrectionCache.size>12)modelCorrectionCache.delete(modelCorrectionCache.keys().next().value!);return result;
+  const result={matrix,maximumMixingRatio,carriers};modelCorrectionCache.set(key,result);if(modelCorrectionCache.size>12)modelCorrectionCache.delete(modelCorrectionCache.keys().next().value!);return result;
 }
 /** Cyclic complex-Hermitian Jacobi. No amplitude pruning; a rotation is skipped only when
  * its off-diagonal entry is exactly zero. The residual is checked against the input. */
@@ -236,6 +251,31 @@ export function staticModelBackground(scene:Scene):{analysis:Analysis;levels:Lev
   return {analysis,levels,maximumMixingRatio};
 }
 
+/** A statement of the model's scope about lasers whose effect the 32-state model does not hold:
+ * a carrier near a resonance of a state outside the model, which enters only as a second-order
+ * (van Vleck) shift (beyond OUTSIDE_GAP_MHZ or STATIC_MIXING_LIMIT, the levels chart's rule for
+ * a static shift too), or a laser that ionizes 5P (not modelled). A warning, not a refusal: the
+ * result is computed and shown all the same. */
+export interface ScopeNote{laserIds:string[];kind:'outside-resonance'|'photoionization';text:string}
+/** 5P's photoionization thresholds (MHz): the ionization energy less each 5P level's. */
+const IONIZATION_MHZ=IONIZATION_ENERGY_CM*C*1e-4,IONIZATION_THRESHOLD_MHZ={D2:IONIZATION_MHZ-RB87.D2.frequencyHz/1e6,D1:IONIZATION_MHZ-RB87.D1.frequencyHz/1e6};
+const nanometres=(mhz:number)=>withUnit(C*1000/mhz,'nm',{digits:4});
+/** The scope notes of a scene's enabled lasers (`analysis` its analysis). */
+export function modelScope(scene:Scene,analysis:Analysis=analyze(scene)):ScopeNote[]{
+  const notes:ScopeNote[]=[];
+  for(const carrier of modelCorrection(analysis,groups(scene,analysis)).carriers){
+    const close=carrier.gapMHz<OUTSIDE_GAP_MHZ,strong=carrier.ratio>STATIC_MIXING_LIMIT;if(!close&&!strong)continue;
+    const reason=close?`离 ${carrier.gapState} 的虚跃迁失谐只有 ${withUnit(carrier.gapMHz/1000,'GHz',{digits:3})}（不足 ${OUTSIDE_GAP_MHZ/1000} GHz）`
+      :`对 ${carrier.ratioState} 的混合比 |Ω/2Δ| 为 ${(100*carrier.ratio).toPrecision(3)}%（超过 ${100*STATIC_MIXING_LIMIT}%）`;
+    notes.push({laserIds:carrier.laserIds,kind:'outside-resonance',text:`「${carrier.names}」${reason}：32 态以外的能级（6P、nS、nD）只作为二阶静态光移进入模型，这里超出它的适用范围。`});
+  }
+  for(const laser of scene.lasers)if(laser.enabled&&laserIntensityMWcm2(laser)>0){
+    const nu=laserFrequencyMHz(laser),lines=(['D2','D1'] as const).filter(line=>nu>IONIZATION_THRESHOLD_MHZ[line]);if(!lines.length)continue;
+    const levels=lines.map(line=>line==='D2'?'5P₃/₂':'5P₁/₂').join(' 和 '),thresholds=lines.map(line=>nanometres(IONIZATION_THRESHOLD_MHZ[line])).join('、');
+    notes.push({laserIds:[laser.id],kind:'photoionization',text:`「${laser.name}」的波长 ${nanometres(nu)} 短于 ${levels} 的光电离阈值${lines.length>1?`（${thresholds}）`:` ${thresholds}`}：光电离不在模型内。`});
+  }
+  return notes;
+}
 /** A laser's largest mixing amplitude |Ω/2Δ|, alone at its own carrier -- the ratio above
  * which the levels chart does not draw a static light shift (STATIC_MIXING_LIMIT, 1%) --
  * and whether each of its virtual transitions keeps the minimum detuning. The hint beside

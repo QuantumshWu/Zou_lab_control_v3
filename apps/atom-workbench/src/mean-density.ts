@@ -2,8 +2,8 @@ export interface MeanDensity { real:number[]; imag:number[] }
 
 /** Preserve the native complex mean, including coherences needed for a change
  * of measurement basis. The native solver checks positivity of the full matrix. */
-export function readMeanDensity(data:{asymptoticDensityReal?:unknown;asymptoticDensityImag?:unknown},n:number,populations:number[]):MeanDensity|undefined {
-  const real=data.asymptoticDensityReal,imag=data.asymptoticDensityImag;
+export function readMeanDensity(mean:{densityReal?:unknown;densityImag?:unknown},n:number,populations:number[]):MeanDensity|undefined {
+  const real=mean.densityReal,imag=mean.densityImag;
   if(real==null&&imag==null)return undefined;
   if(populations.length!==n||populations.some(p=>!Number.isFinite(p)))throw new Error('Mean density requires its population diagonal');
   if(!Array.isArray(real)||!Array.isArray(imag)||real.length!==n*n||imag.length!==n*n||

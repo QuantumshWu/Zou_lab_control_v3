@@ -123,8 +123,8 @@ export interface DynamicsSettings {
    * state is {kind:'state', id: initialStateId}. Scene loading folds a
    * 'state' spec into initialStateId, so this holds only mixed kinds. */
   initialState?: InitialStateSpec;
-  /** The time T of the long-time population p̄(T), in us: 1e5 (100 ms), 1e6 (1 s) or null (t → ∞). */
-  meanHorizonUs: number|null;
+  /** The time T of the long-time population p̄(T), in us: 1e5 (100 ms) or 1e6 (1 s). */
+  meanHorizonUs: number;
   monitorMode:'auto'|'manual';
   monitoredGroupIds:string[];
   durationUs: number; samples: number;
@@ -151,9 +151,12 @@ export function canonicalInitialState(spec:InitialStateSpec):InitialStateSpec {
 }
 /** p̄(T): the population at t = T with only the fast oscillations around T (beats, optical
  * micromotion) averaged out -- the zero-frequency Fourier component of the state at T, not an
- * average over 0–T. ∞ is the limit t → ∞, which slow scattering can make forget the initial state. */
-export const MEAN_HORIZONS_US:readonly (number|null)[]=[1e5,1e6,null];
+ * average over 0–T. T is 100 ms or 1 s; there is no t → ∞ mean. */
+export const MEAN_HORIZONS_US:readonly number[]=[1e5,1e6];
 export const DEFAULT_MEAN_HORIZON_US=1e6;
+/** The longest trajectory (10 s, in us) and its most samples: what the solver core solves. */
+export const MAXIMUM_DURATION_US=1e7;
+export const MAXIMUM_SAMPLES=2000;
 export const DEFAULT_DYNAMICS_SAMPLES=1000;
 export const DEFAULT_TWEEZER_WAVELENGTH_NM=852;
 /** The population accuracy of every solve: an absolute error of 0.005 in probability

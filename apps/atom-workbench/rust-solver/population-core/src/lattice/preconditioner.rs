@@ -16,15 +16,13 @@
 //!
 //! Shifts (`poles::Pole`): the steady trace row and real sigma act on
 //! Hermitian-symmetric fields (only canonical modes computed, the rest
-//! mirrored); a complex sigma acts on the real form of a complex field, a
-//! pair of Hermitian-symmetric fields (x_1, x_2) for x_1 + i x_2, through the
-//! complex inverse on every mode.
+//! mirrored).
 
 use super::*;
 use super::floquet::{FloquetKernels,Transform,adjoint,inverse,sandwich_batch,transpose};
 use super::operator::LatticeOperator;
 use super::poles::Pole;
-use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
+use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK,REFERENCE_WORKERS};
 
 /// Centre denominators below this fraction of the frame scale are at
 /// roundoff (a deliberate margin of about 500x over double precision);
@@ -34,10 +32,6 @@ const TINY_DENOMINATOR:f64=1e-13;
 /// A deliberate margin: ten orders above TINY_DENOMINATOR; the exact
 /// rank-one correction (Woodbury) removes the move up to roundoff.
 const MOVED_FRACTION:f64=1e-3;
-/// Column ranges of the centre factor's z = G^-1 V^T c0: fixed, so that the
-/// partial sums do not depend on the thread count; one per worker of the
-/// desktop app's eight.
-const CENTRE_RANGES:usize=8;
 
 
 /// A lattice preconditioner as the Krylov solver sees it.
@@ -70,7 +64,7 @@ fn woodbury_factors(prepared:&LatticePrepared)->(Vec<C>,Vec<C>,usize){
         if slot[row]!=usize::MAX{add(&mut rows[slot[row]*d+col],v);}};
     for(p,q)in &generator.zero_component().op.sandwich{for &(i,k,a)in &p.entries{for &(l,j,b)in &q.entries{put(i*n+j,k*n+l,mul(a,b));}}}
     if let Some(t)=prepared.fold.targets.first().filter(|t|t.charge==generator.zero){
-        let rest=&t.rest[0];
+        let rest=t.applied(0);
         for block in &rest.blocks{let h=block.rows.len();
             for(c,&col)in block.cols.iter().enumerate(){for(i,&row)in block.rows.iter().enumerate(){put(row as usize,col as usize,block.values[i+h*c]);}}}
         let s=&rest.sparse;
@@ -116,31 +110,29 @@ impl<'p> Preconditioning<'p>{
 struct CentreFactor{total:usize,du:Vec<C>,gv:Vec<C>}
 pub struct FloquetBatch<'p>{
     n:usize,lapack:Arc<Lapack>,
-    shift:Pole,centre:usize,
-    /// The modes the transforms compute (canonical or a subset of them),
-    /// and those divided (every mode for a complex shift).
-    canonical:Vec<bool>,divided:Vec<bool>,mirror:Vec<usize>,
+    centre:usize,
+    /// The modes the transforms compute and divide (the canonical ones).
+    canonical:Vec<bool>,mirror:Vec<usize>,
     transform:Transform<'p>,
-    /// 1 / (lambda_a + mu_b - i nu_q - sigma) per divided mode.
+    /// 1 / (lambda_a + mu_b - i nu_q - sigma) per canonical mode.
     reciprocal:Vec<C>,
-    factor:Option<CentreFactor>,
-    execution:Execution,buffers:[Vec<C>;3],
+    factor:CentreFactor,
+    execution:Execution,buffer:Vec<C>,
 }
 impl<'p> FloquetBatch<'p>{
     fn new(woodbury:&Preconditioning<'p>,op:&LatticeOperator<'_>,shift:Pole,transform:Transform<'p>)->Result<Self,String>{
         let(kernels,canonical)=(woodbury.kernels,op.canonical.clone());
         let n=op.n;let d=n*n;let modes=op.modes.len();let sigma=shift.sigma();let centre=op.centre;
         let(lambda,mu)=kernels.quasi_energies();
-        let divided=if shift.copies()==2{vec![true;modes]}else{canonical.clone()};
         let mut reciprocal=vec![ZERO;modes*d];let mut moved=Vec::new();
-        for q in(0..modes).filter(|&q|divided[q]){for a in 0..n{for b in 0..n{
-            let z=C{re:lambda[a].re+mu[b].re-sigma.re,im:lambda[a].im+mu[b].im-op.nu[q]-sigma.im};
+        for q in(0..modes).filter(|&q|canonical[q]){for a in 0..n{for b in 0..n{
+            let z=C{re:lambda[a].re+mu[b].re-sigma,im:lambda[a].im+mu[b].im-op.nu[q]};
             let z=if q==centre&&magnitude(z)<woodbury.tiny{moved.push((a*n+b,z));C{re:-woodbury.moved,im:0.}}else{z};
             let s=z.re*z.re+z.im*z.im;if !(s>0.&&s.is_finite()){return Err("Unresolved Floquet frame denominator".into());}
             reciprocal[q*d+a*n+b]=C{re:z.re/s,im:-z.im/s};}}}
         // Centre factor: the Woodbury columns, the trace row, the moved
         // denominators (true z for -moved: add (z + moved) e_k e_k^T).
-        let factor=if divided[centre]{let w=woodbury;
+        let factor={let w=woodbury;
                 let rank=w.rank;let trace=usize::from(shift.steady());let total=rank+trace+moved.len();
                 let mut u=vec![ZERO;d*total];let mut v=vec![ZERO;total*d];
                 u[..d*rank].copy_from_slice(&w.uhat);for c in 0..d{for k in 0..rank{v[k+total*c]=w.vhat[k+rank*c];}}
@@ -153,25 +145,24 @@ impl<'p> FloquetBatch<'p>{
                 w.lapack.complex_gemm().multiply(total,total,d,ONE,&v,total,&du,d,ONE,&mut g,total)?;
                 let ginv=inverse(&w.lapack,&g,total)?;let mut gv=vec![ZERO;total*d];
                 w.lapack.complex_gemm().multiply(total,d,total,ONE,&ginv,total,&v,total,ZERO,&mut gv,total)?;
-                Some(CentreFactor{total,du,gv})}
-            else{None};
-        Ok(Self{n,lapack:Arc::clone(&op.prepared.lapack),shift,centre,canonical,divided,mirror:op.mirror.clone(),transform,reciprocal,factor,
-            execution:Execution::new()?,buffers:[vec![],vec![],vec![]]})
+                CentreFactor{total,du,gv}};
+        Ok(Self{n,lapack:Arc::clone(&op.prepared.lapack),centre,canonical,mirror:op.mirror.clone(),transform,reciprocal,factor,
+            execution:Execution::new()?,buffer:vec![]})
     }
     /// The mirror modes from the canonical ones, the centre Hermitian.
     fn mirror(&self,x:&mut[C]){mirror_field(x,self.n,&self.canonical,&self.mirror);}
-    /// Divides by the denominators on the divided modes and applies the
+    /// Divides by the denominators on the canonical modes and applies the
     /// centre factor.
     fn divide(&self,c:&mut[C])->Result<(),String>{
         let d=self.n*self.n;
-        for q in(0..self.divided.len()).filter(|&q|self.divided[q]){for(v,&r)in c[q*d..(q+1)*d].iter_mut().zip(&self.reciprocal[q*d..(q+1)*d]){*v=mul(*v,r);}}
-        if let Some(f)=&self.factor{
+        for q in(0..self.canonical.len()).filter(|&q|self.canonical[q]){for(v,&r)in c[q*d..(q+1)*d].iter_mut().zip(&self.reciprocal[q*d..(q+1)*d]){*v=mul(*v,r);}}
+        {let f=&self.factor;
             // Two memory-bound products, split over the workers: z = G^-1 V^T c0
-            // by CENTRE_RANGES column ranges (partial sums added in range
-            // order, independent of the thread count), then c0 -= D^-1 U z by
-            // row ranges.
+            // by one column range per reference worker (partial sums added in
+            // range order, independent of the thread count), then
+            // c0 -= D^-1 U z by row ranges.
             let c0=&mut c[self.centre*d..(self.centre+1)*d];let t=f.total;let lapack=&self.lapack;
-            let width=d.div_ceil(CENTRE_RANGES);let starts:Vec<usize>=(0..d).step_by(width).collect();let view:&[C]=c0;
+            let width=d.div_ceil(REFERENCE_WORKERS);let starts:Vec<usize>=(0..d).step_by(width).collect();let view:&[C]=c0;
             let parts=self.execution.map(starts,|start|->Result<Vec<C>,String>{let end=(start+width).min(d);let mut z=vec![ZERO;t];
                 lapack.complex_gemm().multiply(t,1,end-start,ONE,&f.gv[start*t..],t,&view[start..end],end-start,ZERO,&mut z,t)?;Ok(z)});
             let mut z=vec![ZERO;t];for part in parts{for(a,b)in z.iter_mut().zip(part?){add(a,b);}}
@@ -181,38 +172,19 @@ impl<'p> FloquetBatch<'p>{
         }
         Ok(())
     }
-    fn solve(&mut self,x:&[C],y:&mut[C],buffers:&mut[Vec<C>;3])->Result<(),String>{
-        let(n,d)=(self.n,self.n*self.n);let modes=self.canonical.len();let size=modes*d;
-        let[a,b,c]=buffers;let(a,b,c)=(&mut a[..size],&mut b[..size],&mut c[..size]);
-        if self.shift.copies()==2{
-            // The transforms are complex-linear and keep Hermitian symmetry:
-            // c = backward(x_1) + i backward(x_2), divided on every mode, then
-            // forward of its Hermitian-symmetric parts (c + c^dagger)/2 and
-            // (c - c^dagger)/2i, (c^dagger)_q = (c_-q)^dagger.
-            let(x1,x2)=x.split_at(size);let(y1,y2)=y.split_at_mut(size);
-            self.transform.backward(x1,a)?;self.mirror(a);
-            self.transform.backward(x2,b)?;self.mirror(b);
-            for(u,v)in a.iter_mut().zip(b.iter()){*u=C{re:u.re-v.im,im:u.im+v.re};}
-            self.divide(a)?;
-            for q in 0..modes{let p=self.mirror[q];
-                for i in 0..n{for j in 0..n{let(z,m)=(a[q*d+i*n+j],conj(a[p*d+j*n+i]));
-                    b[q*d+i*n+j]=C{re:0.5*(z.re+m.re),im:0.5*(z.im+m.im)};c[q*d+i*n+j]=C{re:0.5*(z.im-m.im),im:-0.5*(z.re-m.re)};}}}
-            self.transform.forward(b,y1)?;self.mirror(y1);
-            self.transform.forward(c,y2)?;self.mirror(y2);
-        }else{
-            self.transform.backward(x,b)?;self.divide(b)?;
-            self.transform.forward(b,y)?;self.mirror(y);
-        }
+    fn solve(&mut self,x:&[C],y:&mut[C],buffer:&mut [C])->Result<(),String>{
+        self.transform.backward(x,buffer)?;self.divide(buffer)?;
+        self.transform.forward(buffer,y)?;self.mirror(y);
         Ok(())
     }
 }
 impl Preconditioner for FloquetBatch<'_>{
     fn apply(&mut self,x:&[C],y:&mut[C])->Result<(),String>{
         let size=self.canonical.len()*self.n*self.n;
-        if x.len()!=size*self.shift.copies()||y.len()!=x.len(){return Err("Floquet preconditioner field dimensions differ".into());}
-        let mut buffers=std::mem::take(&mut self.buffers);for b in &mut buffers{grow(b,size);}
-        let result=self.solve(x,y,&mut buffers);
-        self.buffers=buffers;result?;
+        if x.len()!=size||y.len()!=x.len(){return Err("Floquet preconditioner field dimensions differ".into());}
+        let mut buffer=std::mem::take(&mut self.buffer);grow(&mut buffer,size);
+        let result=self.solve(x,y,&mut buffer[..size]);
+        self.buffer=buffer;result?;
         if y.iter().any(|v|!v.re.is_finite()||!v.im.is_finite()){return Err("Nonfinite Floquet preconditioner action".into());}
         Ok(())
     }
@@ -236,14 +208,14 @@ mod tests{
     }
     /// The dense block model of one mode: NL' X + X NR' - i nu - sigma, with
     /// R0 and the rest on ground-pair rows and columns when `woodbury`.
-    fn block_model(p:&LatticePrepared,nu:f64,sigma:C,woodbury:bool)->Vec<C>{
+    fn block_model(p:&LatticePrepared,nu:f64,sigma:f64,woodbury:bool)->Vec<C>{
         let n=p.generator.n;let d=n*n;let zero=p.generator.zero_component();let t=&p.fold.targets[0];
         let mut nl=zero.op.left.dense(n);let mut nr=zero.op.right.dense(n);for k in 0..d{add(&mut nl[k],t.left[0][k]);add(&mut nr[k],t.right[0][k]);}
         let mut m=vec![ZERO;d*d];Superop{left:Sparse::from_dense(&nl,n),right:Sparse::from_dense(&nr,n),sandwich:vec![]}.dense_into(n,ONE,&mut m);
-        for r in 0..d{m[r*d+r].im-=nu;m[r*d+r].re-=sigma.re;m[r*d+r].im-=sigma.im;}
+        for r in 0..d{m[r*d+r].im-=nu;m[r*d+r].re-=sigma;}
         if woodbury{
             let mut w=vec![ZERO;d*d];Superop{left:Sparse::default(),right:Sparse::default(),sandwich:zero.op.sandwich.clone()}.dense_into(n,ONE,&mut w);
-            t.rest[0].dense_into(d,ONE,&mut w);let ground=|q:usize|p.generator.ground[q/n]&&p.generator.ground[q%n];
+            t.applied(0).dense_into(d,ONE,&mut w);let ground=|q:usize|p.generator.ground[q/n]&&p.generator.ground[q%n];
             for r in 0..d{for c in 0..d{if ground(r)||ground(c){add(&mut m[r*d+c],w[r*d+c]);}}}
         }
         m
@@ -253,17 +225,16 @@ mod tests{
     fn lattice_centre_factor_inverts_its_woodbury_model_for_every_shift(){
         // Without kernels (far drives only) on the centre alone: the batch is
         // the exact inverse of the block with the recycling and rest on the
-        // ground pairs (+ the trace row for the steady shift), for the steady,
-        // a real and a complex shift (real form).
+        // ground pairs (+ the trace row for the steady shift), for the steady
+        // and a real shift.
         let f=fixture();let p=far_only(&f);let n=4;let d=16;
         assert!(p.floquet.diagnostics.support.is_empty()&&p.fold.targets.len()>1);
-        let pre=Preconditioning::new(&p).unwrap();let op=LatticeOperator::new(&p,&[p.generator.zero.clone()]).unwrap();
-        for shift in[Pole::Zero,Pole::Real(0.3),Pole::Complex(C{re:0.5,im:7.})]{
+        let pre=Preconditioning::new(&p).unwrap();let op=LatticeOperator::new(&p,&p.fold,&[p.generator.zero.clone()]).unwrap();
+        for shift in[Pole::Zero,Pole::Real(0.3)]{
             let mut batch=pre.batch(&op,shift).unwrap();
-            let mut x=symmetric_field(&op,5);if shift.copies()==2{x.extend(symmetric_field(&op,9));}
+            let x=symmetric_field(&op,5);
             let mut y=vec![ZERO;x.len()];batch.apply(&x,&mut y).unwrap();
-            let join=|v:&[C]|->Vec<C>{if shift.copies()==2{(0..d).map(|k|C{re:v[k].re-v[d+k].im,im:v[k].im+v[d+k].re}).collect()}else{v.to_vec()}};
-            let(yc,xc)=(join(&y),join(&x));
+            let(yc,xc)=(y,x);
             let m=block_model(&p,0.,shift.sigma(),true);let mut back=vec![ZERO;d];for r in 0..d{for c in 0..d{mul_add(&mut back[r],m[r*d+c],yc[c]);}}
             if shift.steady(){let tr=(0..n).fold(ZERO,|s,i|C{re:s.re+yc[i*n+i].re,im:s.im+yc[i*n+i].im});for i in 0..n{add(&mut back[i*n+i],scaled(tr,1./n as f64));}}
             let scale=xc.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
@@ -274,32 +245,30 @@ mod tests{
     /// lattice against a dense LU solve.
     fn shifted_solve(p:&LatticePrepared,shift:Pole)->f64{
         let pre=Preconditioning::new(p).unwrap();
-        let modes=p.modes(2).unwrap();let mut op=LatticeOperator::new(p,&modes).unwrap();let size=op.dimension();let d=16;
+        let modes=p.modes(2).unwrap();let mut op=LatticeOperator::new(p,&p.fold,&modes).unwrap();let size=op.dimension();let d=16;
         let dense=op.dense();let centre=op.centre;
         let mut batch=pre.batch(&op,shift).unwrap();
         let x=symmetric_field(&op,2);
-        let mut b:Vec<C>=x.iter().map(|v|C{re:-v.re,im:-v.im}).collect();if shift.copies()==2{b.extend(vec![ZERO;size]);}
+        let b:Vec<C>=x.iter().map(|v|C{re:-v.re,im:-v.im}).collect();
         let mut system=System::new(&mut op,&mut batch,shift).unwrap();
         let solve=krylov::gmres(&mut system,&b,&KrylovOptions::new(1e-11)).unwrap();
         // Dense: (A - sigma) w = b, the steady system with the trace row u v^T.
-        let sigma=shift.sigma();let mut m=dense;for r in 0..size{m[r*size+r].re-=sigma.re;m[r*size+r].im-=sigma.im;}
+        let sigma=shift.sigma();let mut m=dense;for r in 0..size{m[r*size+r].re-=sigma;}
         if shift.steady(){let c=centre*d;for i in 0..4{for j in 0..4{m[(c+i*4+i)*size+c+j*4+j].re+=0.25;}}}
         let mut column=vec![ZERO;size*size];for r in 0..size{for c in 0..size{column[r+size*c]=m[r*size+c];}}
         let(lu,piv)=p.lapack.complex_factor(&column,size).unwrap();
-        let exact=p.lapack.complex_solve_matrix_factored(&lu,&piv,&b[..size],size).unwrap();
-        let w:Vec<C>=if shift.copies()==2{(0..size).map(|k|C{re:solve.x[k].re-solve.x[size+k].im,im:solve.x[k].im+solve.x[size+k].re}).collect()}else{solve.x};
+        let exact=p.lapack.complex_solve_matrix_factored(&lu,&piv,&b,size).unwrap();
+        let w=solve.x;
         let scale=exact.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
         deviation(&w,&exact)/scale
     }
     #[test]
     fn lattice_floquet_preconditioner_solves_every_shift_class(){
-        // The steady trace row, small and large real poles, a complex pole and
-        // a translated pole sigma + i nu_s: GMRES with the Floquet frames
-        // reaches the dense solution.
+        // The steady trace row, small and large real poles: GMRES with the
+        // Floquet frames reaches the dense solution.
         let f=fixture();let p=prepared(&f);
         assert!(!p.floquet.diagnostics.support.is_empty(),"the fixture's near pair enters the support");
-        let nu=p.plan.steps[p.plan.explicit()[0]].nu.abs();
-        for shift in[Pole::Zero,Pole::Real(1e-3),Pole::Real(20.),Pole::Complex(C{re:0.5,im:13.}),Pole::Complex(C{re:2.,im:nu})]{
+        for shift in[Pole::Zero,Pole::Real(1e-3),Pole::Real(20.)]{
             let error=shifted_solve(&p,shift);
             assert!(error<1e-8,"{shift:?}: error {error:e}");
         }

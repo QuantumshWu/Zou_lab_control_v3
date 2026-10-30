@@ -28,10 +28,10 @@ test('IPC lane preserves handshake, cancellation and stale-generation isolation'
   lane.receive({kind:'closed',generation:2});await lane.close();
 });
 
-const fakeResult=({model,options})=>nativeResult({states:model.states,initialIndex:model.initialIndex,tolerance:options.populationTolerance,mean:options.includeAsymptotic,
-  timesUs:options.steadyOnly?[0]:Array.from({length:options.samples},(_,i)=>options.durationUs*i/(options.samples-1))});
+const fakeResult=({model,options})=>nativeResult({states:model.states,initialIndex:model.initialIndex,tolerance:options.populationTolerance,mean:options.includeMean,
+  timesUs:options.meanOnly?[0]:Array.from({length:options.samples},(_,i)=>options.durationUs*i/(options.samples-1))});
 
-test('Worker sends the identical complete model, finite jobs to the trajectory lane and means to the steady lane',async()=>{
+test('Worker sends the identical complete model, finite jobs to the trajectory lane and means to the mean lane',async()=>{
   const events=[],requests=[];let worker;
   const host=command=>{
     const event=message=>queueMicrotask(()=>void worker.receive({kind:'native',event:{lane:command.lane,generation:command.generation,...message}}));
@@ -49,13 +49,13 @@ test('Worker sends the identical complete model, finite jobs to the trajectory l
   await worker.receive({kind:'native',event:{kind:'configuration',binarySha256:'binary',buildSha256:'build',defaults:{ATOM_SOLVER_THREADS:'8'}}});
   await tick();assert.equal(events.find(e=>e.channel==='invalid').status,400);
   const scene=defaultScene();scene.lasers[1].enabled=false;scene.lasers.push({...scene.lasers[0],id:'second',frequency:{base:{kind:'transition',line:'D2',Fg:2,Fe:2},offsetMHz:100}});
-  const options={durationUs:0.1,samples:3,populationTolerance:.003731,steadyOnly:false,includeAsymptotic:true};const request={scene,modelSchema:FULL_MODEL_SCHEMA,stream:true,request:{clientId:'worker-test',sequence:1},options};
+  const options={durationUs:0.1,samples:3,populationTolerance:.003731,meanOnly:false,includeMean:true};const request={scene,modelSchema:FULL_MODEL_SCHEMA,stream:true,request:{clientId:'worker-test',sequence:1},options};
   await worker.receive({kind:'solve',channel:'valid',request});
   for(let i=0;i<50&&!events.some(e=>e.channel==='valid'&&e.event?.type==='result');i++)await tick();
   const messages=events.filter(e=>e.channel==='valid');assert.deepEqual(messages.map(e=>e.event?.type),['result']);
   // One native job: the finite trajectory carries its own inline mean.
   assert.equal(requests.length,1);assert.deepEqual(requests.map(r=>r.lane),['trajectory']);
-  assert.equal(requests[0].options.includeAsymptotic,true);assert.equal(requests[0].progress,true);
+  assert.equal(requests[0].options.includeMean,true);assert.equal(requests[0].progress,true);
   const model=buildFullMasterModel(scene,{...scene.dynamics,...options});
   for(const sent of requests){
     // A tolerance in the options is not read: every native request asks for 0.005.
@@ -69,18 +69,18 @@ test('Worker sends the identical complete model, finite jobs to the trajectory l
     assert.deepEqual(sent.model.states,model.states.map(s=>s.id));
   }
   assert.equal(messages.at(-1).event.data.service.lane,'trajectory');
-  assert.equal(messages.at(-1).event.data.service.asymptoticCacheHit,false);
+  assert.equal(messages.at(-1).event.data.service.meanCacheHit,false);
   // The Worker's response is exactly what the UI reader accepts.
   const finite=normalizeDynamicsResult(messages.at(-1).event.data,scene);
-  assert.equal(finite.timesUs.length,3);assert.equal(finite.steady.converged,true);assert.deepEqual(finite.assumptions,model.assumptions);
+  assert.equal(finite.timesUs.length,3);assert.equal(finite.mean.converged,true);assert.deepEqual(finite.assumptions,model.assumptions);
   // A scene that still carries a tolerance of its own: the mean asks for 0.005 too.
   const old=structuredClone(scene);old.dynamics.populationTolerance=.021;
   await worker.receive({kind:'solve',channel:'mean',request:{scene:old,modelSchema:FULL_MODEL_SCHEMA,
-    request:{clientId:'worker-test',sequence:2},options:{durationUs:.1,samples:3,steadyOnly:true,includeAsymptotic:true}}});
+    request:{clientId:'worker-test',sequence:2},options:{durationUs:.1,samples:3,meanOnly:true,includeMean:true}}});
   for(let i=0;i<50&&!events.some(e=>e.channel==='mean'&&e.kind==='response');i++)await tick();
-  assert.equal(requests.at(-1).options.populationTolerance,.005);assert.equal(requests.at(-1).lane,'steady');
+  assert.equal(requests.at(-1).options.populationTolerance,.005);assert.equal(requests.at(-1).lane,'mean');
   const mean=normalizeDynamicsResult(events.find(e=>e.channel==='mean'&&e.kind==='response').data,old);
-  assert.equal(mean.timesUs.length,1);assert.equal(mean.steady.converged,true);
+  assert.equal(mean.timesUs.length,1);assert.equal(mean.mean.converged,true);
   await worker.receive({kind:'shutdown'});assert.equal(events.at(-1).kind,'shutdown-complete');
 });
 

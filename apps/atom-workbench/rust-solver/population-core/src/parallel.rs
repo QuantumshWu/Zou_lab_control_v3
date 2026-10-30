@@ -8,6 +8,15 @@
 //! Every output entry is accumulated by exactly one task. Small stages run
 //! serially on the calling thread.
 //!
+//! Results agree across thread counts at roundoff, not bit for bit: the
+//! stages with a fixed chunking (REFERENCE_WORKERS) sum their partial results
+//! in an order no thread count changes, the others split by the pool's size.
+//! Measured between 3 and 6 threads: solves, poles and acceptance the same
+//! on every run; 4 of 21 runs differed at all (the necessity review, bounds
+//! 1e-11 to 2.4e-8 relative; the benchmark matrix, the largest bound up to
+//! 2.2e-7 relative, five lasers at 10 ms). Comparisons of outputs keep one
+//! thread count.
+//!
 //! ATOM_SOLVER_THREADS sets the pool size (1..=32). When it is unset the
 //! pool uses the available hardware threads, capped at 8.
 use rayon::prelude::*;
@@ -22,6 +31,10 @@ pub const MINIMUM_WORK_PER_TASK: usize = 262_144;
 /// Tasks per worker, so work stealing evens out uneven chunks and workers
 /// that are preempted or run on slower cores.
 const TASKS_PER_THREAD: usize = 4;
+/// The desktop app's workers. A stage whose partial sums must not depend on
+/// the thread count splits into a fixed number of tasks, set per worker of
+/// this reference.
+pub const REFERENCE_WORKERS: usize = 8;
 const DEFAULT_THREAD_CAP: usize = 8;
 
 pub struct Execution {

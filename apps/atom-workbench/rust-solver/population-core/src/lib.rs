@@ -6,5 +6,6 @@ mod lapack;
 pub use lapack::{Complex64, Lapack};
 use lapack::Complex64 as C;
 mod parallel;
+mod memory;
 pub mod preparation;
 pub mod lattice;

@@ -1,13 +1,11 @@
-//! The second-order block of the error propagation and of the frame:
-//! D'_q = L0' - i nu_q + sum_s K_s over every step s (`kernels`), one block
-//! for every near mode (their blocks differ by -i nu_q only), built once
-//! (`frame::SwFrame::class`).
+//! The second-order block of the frame: D'_q = L0' - i nu_q + sum_s K_s over
+//! every step s (`kernels`), one block for every near mode (their blocks
+//! differ by -i nu_q only), built once (`frame::SwFrame::class`): the
+//! metric's V^-1 and the slowest relaxation's classes.
 //!
 //! In eigen-coordinates of L0' a class is diag(lambda) + sum_s K~_s, whose
-//! eigendecomposition V diag(mu) V^-1 propagates any source exactly. The
-//! class also stores its readouts: the population rows of E V (the mode's
-//! own populations) and, per step s, of E X~_s V (what the first-order
-//! transform I + S carries from the mode to its neighbour q + s).
+//! eigendecomposition V diag(mu) V^-1 diagonalizes it; the class also stores
+//! the population rows of E V (each class's populations).
 //!
 //! A class whose steps come in pairs (s, -s) is invariant under the flip J,
 //! so its matrix is real in the real eigen-coordinates of L0' (the pair
@@ -17,8 +15,8 @@
 //! coordinates, exact within each and perturbative between them, with the
 //! mixing and the values' error over the request's horizon bounded
 //! (`eigenbasis::clustered_eigensystem`, the centre's own method).
-use super::super::*;
-use super::super::eigenbasis::{BlockEigenbasis,ClusterControl,clustered_eigensystem};
+use super::*;
+use super::eigenbasis::{BlockEigenbasis,ClusterControl,clustered_eigensystem};
 use super::kernels::SwKernels;
 
 #[derive(Clone)]
@@ -26,8 +24,8 @@ pub struct BlockSystem{
     /// Eigenvalues mu (the mode's own -i nu_q not included), the
     /// eigenvectors V and V^-1 (column-major d x d, eigen-coordinates of L0').
     pub values:Vec<C>,pub vectors:Vec<C>,pub inverse:Vec<C>,
-    /// Population rows (column-major n x d) of E V, and of E X~_s V per step.
-    pub readout:Vec<C>,pub step_readout:Vec<Vec<C>>,
+    /// Population rows (column-major n x d) of E V.
+    pub readout:Vec<C>,
 }
 
 impl BlockSystem{
@@ -45,14 +43,7 @@ impl BlockSystem{
         let(values,vectors,inv)=(c.values,c.vectors,c.inverse);
         let gemm=lapack.complex_gemm();let rows=basis.population_rows();
         let mut readout=vec![ZERO;n*d];gemm.multiply(n,d,d,ONE,rows,n,&vectors,d,ZERO,&mut readout,n)?;
-        let mut step_readout=Vec::with_capacity(kernels.steps.len());
-        for step in &kernels.steps{
-            let mut rx=vec![ZERO;n*d];
-            for &(i,j,x)in &step.entries{for r in 0..n{mul_add(&mut rx[r+n*j],rows[r+n*i],x);}}
-            let mut out=vec![ZERO;n*d];gemm.multiply(n,d,d,ONE,&rx,n,&vectors,d,ZERO,&mut out,n)?;
-            step_readout.push(out);
-        }
-        Ok(Self{values,vectors,inverse:inv,readout,step_readout})
+        Ok(Self{values,vectors,inverse:inv,readout})
     }
 }
 
@@ -60,9 +51,9 @@ impl BlockSystem{
 mod tests{
     use super::*;
     use super::super::kernels::KernelRule;
-    use super::super::super::tests::{fixture,prepared};
+    use super::super::tests::{fixture,prepared};
     #[test]
-    fn estimator_class_eigensystems_diagonalize_their_blocks(){
+    fn frame_class_eigensystems_diagonalize_their_blocks(){
         // The class of every step (the clustered real path, to its error
         // control over a short and a long horizon): m V = V diag(mu),
         // V^-1 V = I.

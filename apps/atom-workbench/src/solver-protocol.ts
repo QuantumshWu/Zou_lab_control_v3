@@ -1,4 +1,4 @@
-export const NATIVE_PROTOCOL = 'atom-lindblad-jsonl/2' as const;
+export const NATIVE_PROTOCOL = 'atom-lindblad-jsonl/3' as const;
 export const HTTP_PROTOCOL = 'atom-workbench-http/2' as const;
 
 /** The one model schema the native worker serves. v2 carries laser-derived

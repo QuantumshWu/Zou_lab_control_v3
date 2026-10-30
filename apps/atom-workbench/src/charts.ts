@@ -19,7 +19,7 @@ export interface LevelChartOptions {
   line:SpectralLine; labelled:{id:string;label:1|2}[]; initialId:string;
   populations?:Record<string,number>; populationLabel?:string;
   /** Only a verified long-time result; never reuse a finite-time population. */
-  steadyPopulations?:Record<string,number>|null;
+  meanPopulations?:Record<string,number>|null;
   /** Actual SVG viewport width, preserving readable text in narrow panels. */
   viewportWidth?:number;
 }

@@ -1,79 +1,52 @@
 //! The reduced model of the space and every output from it.
 //!
-//! The projection: a Galerkin model in the inner product
-//! Re <x, M y> of the Schrieffer-Wolff / Floquet frame's metric
-//! M = T^H T (`frame::SwMetric`): T = V^-1 (I - S~) E^-1 removes the
-//! first-order couplings between the modes and leaves the dissipative
-//! second-order blocks, so the reduced numerical range is pushed right only
-//! at second order (no strict guarantee: the provable bound is the
-//! Hilbert-Schmidt one, Re theta <= Gamma/2). One model for every output
-//! that propagates (the trajectory, the horizons); the Euclidean Galerkin
-//! model (M = I) grew spurious near-zero slow pairs there (`frame`). A
-//! request that propagates nothing (the steady state alone) takes M = I as
-//! a speed case: it skips about 1 s of frame build, and its kernel does not
-//! depend on the metric (the steady column is in the space). Append-only: per basis
-//! column w_j only M w_j is kept (on the canonical modes), and the Gram
-//! matrices K = Re W^H M W and H = Re (M W)^H A W grow by one column (and
-//! row) each; G = K^-1 H in the coordinates of W (the basis is
-//! Euclidean-orthonormal), x(t) ~ W u(t), u' = G u, u(0) = c0 = |x0| e_0
-//! (w_0 = x0 / |x0|). The Euclidean Grams E = Re W^T A W and
-//! F = Re (AW)^T AW give the residual's norm for the error transform.
+//! The projection: a metric Petrov-Galerkin model. The trial space is the
+//! basis W (Euclidean-orthonormal, its first column the trace carrier w_0 =
+//! u / |u| and every other in K: `space`), the test space Z = M (A - tau) W
+//! with M = T^H T the Schrieffer-Wolff / Floquet frame's metric
+//! (`frame::SwMetric`: T = V^-1 (I - S~) E^-1 removes the first-order
+//! couplings between the modes and leaves the dissipative second-order
+//! blocks) and tau = LADDER_TOP / t1, the ladder's top (`space`): the
+//! residual A W u - W u' is made M-orthogonal to (A - tau) W, which weighs
+//! the fast part of the residual (|A w| large) as the shift-and-invert rule
+//! weighs the earliest output time. x(t) ~ W u(t) with u_0 fixed at |u| (the
+//! trace, exactly) and the K coordinates by the condition on the K columns
+//! of Z alone: with S = Z^T W and R = Z^T A W, the rows 1.. of u' = G u are
+//! S'^-1 R[1.., ..] (S' = S[1.., 1..]) and G's first row is zero (A W lies
+//! in K, so no image leaks into the carrier); u(0) = (|u|, c), S' c = Z^T x0
+//! [1..] - S[1.., 0] |u|. Every block trace is conserved by construction: no
+//! trace correction.
 //!
-//! Trace correction: tr x_q evolves by -i nu_q tr x_q exactly; G is replaced
-//! by the Frobenius-closest matrix with the trace rows of W as left
-//! eigenvectors, on the significant rows only (above TRACE_ROWS of the
-//! largest): the other rows are inner-solve roundoff, and fitting them
-//! turns roundoff into O(1) changes of G.
+//! Only three Gram matrices are formed: K = Re W^H M W, H = Re (M W)^H A W
+//! and Fm = Re (A W)^H M (A W), so S = H^T - tau K and R = Fm - tau H. They
+//! grow by one column (and row) per basis column; no image A w and no M w is
+//! stored: a new column's image is applied once, and its rows against the
+//! old columns come from the adjoint apply, Re <z, A w_j> = Re <A^H z, w_j>
+//! (`LatticeOperator::apply_adjoint`). Z^T x0 = W^T (A^H - tau) M x0 takes
+//! one adjoint application for the whole run.
 //!
-//! Ritz decomposition G S = S diag(theta), a = S^-1 c0. The kernel holds
-//! |theta| < KERNEL and always the value of least modulus (the trace
-//! correction pins one exact zero). Growing modes (Re theta > 0) are never
-//! reflected: a mode of amplitude (its largest population contribution) up
-//! to GROWTH_BUDGET x tolerance is projected out and charged; any other is
-//! clipped to the imaginary axis, the minimal change of the residual
-//! (|Re theta| |W y|), which the error estimate reads from the images.
+//! Ritz decomposition G S = S diag(theta), a = S^-1 u(0). G's zero first row
+//! makes 0 an eigenvalue, its eigenvector the one carrying the trace (its
+//! carrier coordinate nonzero, every other eigenvector's zero): that mode is
+//! the kernel, with every further |theta| < KERNEL (more conserved
+//! quantities). Growing modes (Re theta > 0) are never reflected: a mode of
+//! amplitude (its largest population contribution) up to GROWTH_BUDGET x
+//! tolerance is projected out and charged to every output; any other is
+//! clipped to the imaginary axis.
 //!
 //! Outputs from the one G: the trajectory p(t) = sum_q Re e^{i nu_q t}
 //! diag(W u(t))_q (the local time average); the state at a horizon T, its
-//! centre block (the laboratory time average at T); the steady state from
-//! the bordered small system (G + c0 tau^T) r = c0 (tau the centre trace
-//! row; a simple kernel), else the kernel's spectral projection; the slow
-//! Ritz values the slowest relaxation is read from (`pipeline` checks their
-//! residuals against the images and the frame's classes) and the conserved
-//! count.
-//!
-//! The error transform orders the poles: the Laplace transform of the
-//! population error with the residual propagated through the dressed blocks,
-//! p_err(xi) = sum_q W_d (xi - Lambda)^-1 Z_q (xi - i nu_q - Theta)^-1 1,
-//! Z_q = W^-1 (R S diag a)_q; sigma |p_err(sigma + i omega)| is the mean
-//! error near t = 1/sigma at frequency omega.
+//! centre block (the laboratory time average at T); the slow Ritz values the
+//! slowest relaxation is read from (`pipeline` checks their residuals and the
+//! frame's classes).
 use super::*;
-use super::eigenbasis::{BlockEigenbasis,conjugate_pairs};
+use super::eigenbasis::conjugate_pairs;
 use super::frame::SwMetric;
 use super::krylov::Vectors;
-use super::operator::LatticeOperator;
+use super::poles::Lattice;
 
 use crate::parallel::Execution;
 
-/// Trace rows below this fraction of the largest are left unconstrained.
-const TRACE_ROWS:f64=1e-6;
-/// A direction of the trace rows is enforced while its share of the
-/// correction, |u_j^T D| / s_j (D the defect T G0 - Omega T, s_j its
-/// singular value), stays below this fraction of |G0| (the correction stays
-/// a correction), and always while s_j is at least the population
-/// tolerance times the largest (a trace the space carries above the
-/// tolerance). Measured with the runs continued to 40 solves (five lasers
-/// + tweezer at 20 us, five lasers without the trap at 10 ms, four lasers
-/// without the trap at 20 us with a 1 s horizon): the determined directions
-/// take shares of 1e-6 to 8.6e-3 (singular values down to 5e-4 of the
-/// largest), the directions of inner-solve roundoff (at most 1.6e-5 of the
-/// largest) 0.18 to 4e4; 3e-2 lies 3.5x above the first and 6x below the
-/// second. A direction inverted at roundoff turned the defect into a
-/// correction of up to 1e6 |G0|: spurious growing modes (Re theta up to
-/// 3e4 /us) once the space reached new modes' trace rows.
-const TRACE_CORRECTION:f64=3e-2;
-/// Singular values below this fraction of the largest are roundoff.
-const TRACE_ROUNDOFF:f64=1e-14;
 /// |theta| below this (1/us) is a conserved quantity.
 pub const KERNEL:f64=1e-9;
 /// The largest exponent of a growth factor e^{theta T} (e^700 ~ 1e304,
@@ -91,53 +64,54 @@ const GROWTH_BUDGET:f64=0.1;
 /// is below this share of its rate (and no slower class is missing,
 /// `SlowRate`): a deliberate margin, the relaxation time within about 10%.
 pub const SLOW_ACCURACY:f64=0.1;
-/// Residual components of the error transform: at most TRANSFORM_RANK,
-/// down to TRANSFORM_COMPONENT of the largest singular value. Margins: the
-/// residual's rank in exact arithmetic is at most 2 + 2 per translation pair
-/// (14 for six pairs), below TRANSFORM_RANK; the transform only ranks the
-/// poles, so components below 1e-3 of the largest are left out.
-const TRANSFORM_RANK:usize=24;
-const TRANSFORM_COMPONENT:f64=1e-3;
 
-/// Row-major (r x k) (k x c), the column-major (A B)^T = B^T A^T.
-pub(crate) fn product(lapack:&Lapack,a:&[f64],b:&[f64],r:usize,k:usize,c:usize)->Result<Vec<f64>,String>{
-    let mut out=vec![0.;r*c];if r*k*c>0{lapack.gemm(false,false,c,r,k,1.,b,c,a,k,0.,&mut out,c)?;}Ok(out)
-}
 pub(crate) fn transpose_rows(a:&[f64],r:usize,c:usize)->Vec<f64>{let mut t=vec![0.;r*c];for i in 0..r{for j in 0..c{t[j*r+i]=a[i*c+j];}}t}
 
-/// The metric columns M W of the space and the Gram matrices.
+/// The Gram matrices of the space.
 pub struct Projection<'m>{
     n:usize,d:usize,
     /// Canonical modes: (mode, weight, nu); the centre's position.
     pub canonical:Vec<(usize,f64,f64)>,centre:usize,
-    /// M w_j on the canonical modes, weighted (`SwMetric::apply`),
-    /// column-major (length L = canonical x d per column).
-    metric:Vec<C>,length:usize,
-    /// Per column: the canonical modes' diagonals (canonical x n) and the
-    /// trace functionals [centre, then Re and Im per other canonical mode].
-    populations:Vec<Vec<C>>,traces:Vec<Vec<f64>>,
-    /// K = Re W^H M W, H = Re (M W)^H A W, E = Re W^T A W and
-    /// F = Re (AW)^T A W, row-major over the covered columns; whether
-    /// M = I (no metric: G0 = E, K and H are not built).
-    k:Vec<f64>,h:Vec<f64>,e:Vec<f64>,f:Vec<f64>,covered:usize,euclidean:bool,
-    /// The frame's metric (None: M = I, a request that propagates nothing).
-    frame_metric:Option<&'m SwMetric<'m>>,
+    /// Length of a metric column (canonical x d).
+    length:usize,
+    /// Per column: the canonical modes' diagonals (canonical x n).
+    populations:Vec<Vec<C>>,
+    /// K = Re W^H M W, H = Re (M W)^H A W and Fm = Re (A W)^H M (A W),
+    /// row-major over the covered columns.
+    k:Vec<f64>,h:Vec<f64>,fm:Vec<f64>,covered:usize,
+    /// The Petrov-Galerkin shift tau and Z^T x0 per covered column.
+    tau:f64,zx:Vec<f64>,
+    /// (A^H - tau) M x0 as the dot products take it: A^H M x0 (a field) and
+    /// M x0 (its weighted canonical blocks).
+    adjoint_x0:Vec<C>,metric_x0:Vec<C>,
+    frame_metric:&'m SwMetric<'m>,
     vectors:Vectors,
     pub milliseconds:f64,
 }
 /// Grows a row-major old x old matrix to new x new (zeros in the new part).
 fn grow(old_matrix:&[f64],old:usize,new:usize)->Vec<f64>{let mut g=vec![0.;new*new];for i in 0..old{for j in 0..old{g[i*new+j]=old_matrix[i*old+j];}}g}
 impl<'m> Projection<'m>{
-    /// `metric` None: M = I (a request that propagates nothing).
-    pub fn new(op:&LatticeOperator<'_>,metric:Option<&'m SwMetric<'m>>)->Result<Self,String>{
-        let n=op.n;let d=n*n;
+    /// The projection of the lattice's fields with the shift tau, from x0 (a
+    /// field on the lattice).
+    pub fn new(lattice:&Lattice<'_>,metric:&'m SwMetric<'m>,tau:f64,x0:&[C])->Result<Self,String>{
+        let op=lattice.operator();let n=op.n;let d=n*n;
         let canonical:Vec<(usize,f64,f64)>=(0..op.modes.len()).filter(|&q|op.canonical[q]).map(|q|(q,if op.mirror[q]==q{1.}else{2.},op.nu[q])).collect();
         let centre=canonical.iter().position(|c|c.0==op.centre).unwrap_or(0);
         let length=canonical.len()*d;
-        Ok(Self{n,d,canonical,centre,metric:vec![],length,populations:vec![],traces:vec![],k:vec![],h:vec![],e:vec![],f:vec![],covered:0,euclidean:metric.is_none(),frame_metric:metric,
-            vectors:Vectors::new(op,1)?,milliseconds:0.})
+        let mut projection=Self{n,d,canonical,centre,length,populations:vec![],k:vec![],h:vec![],fm:vec![],covered:0,tau,zx:vec![],
+            adjoint_x0:vec![],metric_x0:vec![],frame_metric:metric,vectors:Vectors::new(op)?,milliseconds:0.};
+        projection.metric_x0=metric.apply(&[x0])?;
+        let field=projection.field(&projection.metric_x0,0,lattice);projection.adjoint_x0=op.apply_adjoint(&field)?;
+        Ok(projection)
     }
     pub fn columns(&self)->usize{self.covered}
+    /// Metric column c of `z` (weighted canonical blocks) as a
+    /// Hermitian-symmetric field (unweighted, mirrored).
+    fn field(&self,z:&[C],c:usize,lattice:&Lattice<'_>)->Vec<C>{
+        let op=lattice.operator();let(n,d,l)=(self.n,self.d,self.length);let mut f=vec![ZERO;op.dimension()];
+        for(k,&(q,w,_))in self.canonical.iter().enumerate(){for e in 0..d{f[q*d+e]=scaled(z[c*l+k*d+e],1./w);}}
+        mirror_field(&mut f,n,&op.canonical,&op.mirror);f
+    }
     /// Re <z_a, field_c> on the canonical modes for metric columns z
     /// (column-major, `count` of them) and fields (row-major |fields| x
     /// count): one task per field, a fixed order of summation.
@@ -148,105 +122,84 @@ impl<'m> Projection<'m>{
                 for(c,&(q,_,_))in self.canonical.iter().enumerate(){for(x,y)in column[c*d..(c+1)*d].iter().zip(&field[q*d..(q+1)*d]){s+=x.re*y.re+x.im*y.im;}}s}).collect::<Vec<f64>>()});
         Ok(rows.concat())
     }
-    /// Takes the space's columns not yet covered.
-    pub fn ingest(&mut self,basis:&[Vec<C>],images:&[Vec<C>])->Result<(),String>{
+    /// Takes the space's columns not yet covered: their images from the
+    /// lattice, K, H and Fm's new columns against every column and the new
+    /// rows of H against the old columns by the adjoint apply, Z^T x0's new
+    /// entries.
+    pub fn ingest(&mut self,basis:&[Vec<C>],lattice:&mut Lattice<'_>)->Result<(),String>{
         let clock=Instant::now();let(old,new)=(self.covered,basis.len());if new==old{return Ok(());}
-        let(n,d,l)=(self.n,self.d,self.length);let width=new-old;
-        if let Some(metric)=self.frame_metric{let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();self.metric.extend(metric.apply(&fresh)?);}
-        for column in &basis[old..new]{
-            let pops:Vec<C>=self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect();
-            let mut traces=vec![0.;2*self.canonical.len()-1];let mut at=1;
-            for(c,_)in self.canonical.iter().enumerate(){let t=(0..n).fold(ZERO,|s,i|{let v=pops[c*n+i];C{re:s.re+v.re,im:s.im+v.im}});
-                if c==self.centre{traces[0]=t.re;}else{traces[at]=t.re;traces[at+1]=t.im;at+=2;}}
-            self.populations.push(pops);self.traces.push(traces);
-        }
+        let(n,d)=(self.n,self.d);let width=new-old;
+        let fresh:Vec<&[C]>=basis[old..new].iter().map(|v|v.as_slice()).collect();
+        let images:Vec<Vec<C>>=fresh.iter().map(|w|{let mut a=vec![ZERO;w.len()];lattice.apply(w,&mut a).map(|_|a)}).collect::<Result<_,_>>()?;
+        let new_images:Vec<&[C]>=images.iter().map(|v|v.as_slice()).collect();
+        for column in &basis[old..new]{self.populations.push(self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect());}
         let all_basis:Vec<&[C]>=basis[..new].iter().map(|v|v.as_slice()).collect();
-        let all_images:Vec<&[C]>=images[..new].iter().map(|v|v.as_slice()).collect();
-        let new_images=&all_images[old..];
-        let(kb,hc,hr)=if self.euclidean{(vec![],vec![],vec![])}else{
-            let z_new=&self.metric[old*l..new*l];
-            (self.metric_dots(z_new,width,&all_basis)?,                     // K[i, old + c] at i * width + c
-             self.metric_dots(&self.metric,new,new_images)?,               // H[i, old + c] at c * new + i
-             self.metric_dots(z_new,width,&all_images[..old])?)};          // H[old + c, j] at j * width + c
-        let ec=self.vectors.gram(&all_basis,new_images)?;                 // E[:, old..new]
-        let er=self.vectors.gram(&all_basis[old..],&all_images[..old])?;  // E[old..new, ..old]
-        let fc=self.vectors.gram(&all_images,new_images)?;                // F[:, old..new]
-        let(mut k,mut h)=if self.euclidean{(Vec::new(),Vec::new())}else{(grow(&self.k,old,new),grow(&self.h,old,new))};
-        let(mut e,mut f)=(grow(&self.e,old,new),grow(&self.f,old,new));
+        let z_new=self.frame_metric.apply(&fresh)?;let za=self.frame_metric.apply(&new_images)?;
+        // M w_c and M A w_c as fields, their adjoint applications over the
+        // workers, then one Gram of all four against the basis (one sweep of
+        // the basis, one GEMM per canonical block): K[i, old + c] =
+        // Re <M w_c, w_i>, H[i, old + c] = Re <M A w_c, w_i>, and on the old
+        // columns H[old + c, j] = Re <A^H M w_c, w_j>, Fm[old + c, j] =
+        // Re <A^H M A w_c, w_j>.
+        let lattice_ref=&*lattice;
+        let mut rows:Vec<Vec<C>>=(0..width).flat_map(|c|[self.field(&z_new,c,lattice_ref),self.field(&za,c,lattice_ref)]).collect();
+        let op=lattice.operator();
+        let adjoints=Execution::new()?.map((0..rows.len()).collect(),|i|op.apply_adjoint(&rows[i])).into_iter().collect::<Result<Vec<_>,_>>()?;
+        rows.extend(adjoints);
+        let refs:Vec<&[C]>=rows.iter().map(|v|v.as_slice()).collect();let g=self.vectors.gram(&refs,&all_basis)?;drop(refs);drop(rows);
+        let at=|row:usize,j:usize|g[row*new+j];
+        let kb:Vec<f64>=(0..new*width).map(|x|at(2*(x%width),x/width)).collect();
+        let hc:Vec<f64>=(0..new*width).map(|x|at(2*(x%width)+1,x/width)).collect();
+        let mut hr=vec![0.;old*width];let mut fmc=vec![0.;new*width];
+        for c in 0..width{for j in 0..old{hr[j*width+c]=at(2*width+2*c,j);fmc[j*width+c]=at(2*width+2*c+1,j);}}
+        let fmnew=self.metric_dots(&za,width,&new_images)?;for a in 0..width{for c in 0..width{fmc[(old+a)*width+c]=fmnew[a*width+c];}}
+        let(mut k,mut h,mut fm)=(grow(&self.k,old,new),grow(&self.h,old,new),grow(&self.fm,old,new));
         for i in 0..new{for c in 0..width{let j=old+c;
-            if !self.euclidean{k[i*new+j]=kb[i*width+c];k[j*new+i]=kb[i*width+c];h[i*new+j]=hc[c*new+i];}
-            e[i*new+j]=ec[i*width+c];
-            f[i*new+j]=fc[i*width+c];f[j*new+i]=fc[i*width+c];}}
-        for c in 0..width{for j in 0..old{if !self.euclidean{h[(old+c)*new+j]=hr[j*width+c];}e[(old+c)*new+j]=er[c*old+j];}}
-        self.k=k;self.h=h;self.e=e;self.f=f;self.covered=new;
+            k[i*new+j]=kb[i*width+c];k[j*new+i]=kb[i*width+c];h[i*new+j]=hc[i*width+c];
+            fm[i*new+j]=fmc[i*width+c];fm[j*new+i]=fmc[i*width+c];}}
+        for c in 0..width{for j in 0..old{h[(old+c)*new+j]=hr[j*width+c];}}
+        // Z^T x0 = Re <w, A^H M x0> - tau Re <w, M x0>.
+        let one=self.vectors.dots(&fresh,&self.adjoint_x0);let two=self.metric_dots(&self.metric_x0,1,&fresh)?;
+        self.zx.extend(one.iter().zip(&two).map(|(a,b)|a-self.tau*b));
+        self.k=k;self.h=h;self.fm=fm;self.covered=new;
         self.milliseconds+=clock.elapsed().as_secs_f64()*1e3;Ok(())
     }
 }
 
 /// The reduced model of one checkpoint.
 pub struct Model{
-    /// Reduced dimension (the basis' columns: W is orthonormal), G (r x r).
-    pub r:usize,pub g:Vec<f64>,
+    /// Reduced dimension (the basis' columns: W is orthonormal).
+    pub r:usize,
     /// Ritz values and eigenvectors (r x r row-major, complex), the values
-    /// and coefficients the outputs use; per mode the kernel and a growing
-    /// mode projected out (used theta = a = 0).
+    /// and coefficients the outputs use; per mode the kernel.
     pub theta:Vec<C>,pub vectors:Vec<C>,
-    pub used_theta:Vec<C>,pub used_coefficients:Vec<C>,pub kernel:Vec<bool>,pub projected_out:Vec<bool>,
-    /// Mode amplitudes: the largest population contribution on any mode,
-    /// and on the centre alone (the laboratory time average's).
-    pub amplitudes:Vec<f64>,pub centre_amplitudes:Vec<f64>,
+    pub used_theta:Vec<C>,pub used_coefficients:Vec<C>,pub kernel:Vec<bool>,
+    /// Mode amplitudes: the largest population contribution on any mode.
+    pub amplitudes:Vec<f64>,
     pub growing:usize,pub projected:usize,pub clipped:usize,pub growth_charge:f64,
-    /// The reduced steady state (kernel part of c0).
-    pub steady:Vec<f64>,
     /// Per canonical mode: populations of W (n x r, row-major complex).
     readout:Vec<Vec<C>>,
 }
 
 impl<'m> Projection<'m>{
-    /// The reduced model over the covered columns; `initial_norm` = |x0|,
-    /// `longest` the longest output time (growth), `tolerance` the
-    /// population tolerance.
-    pub fn model(&self,lapack:&Lapack,initial_norm:f64,longest:f64,tolerance:f64)->Result<Model,String>{
+    /// The reduced model over the covered columns; `initial` x0's leading
+    /// coordinates (`Space::initial`: the carrier's |u| fixed), `longest` the
+    /// longest output time (growth), `tolerance` the population tolerance.
+    pub fn model(&self,lapack:&Lapack,initial:&[f64],longest:f64,tolerance:f64)->Result<Model,String>{
         let k=self.covered;let n=self.n;let r=k;
-        // G0 = K^-1 H (K symmetric: its row-major form is its column-major one).
-        let g0=if self.euclidean{self.e.clone()}else{let(lu,pivots)=lapack.factor(&self.k,k)?;
-            transpose_rows(&lapack.solve_matrix_factored(&lu,&pivots,&transpose_rows(&self.h,k,k),k)?,k,k)};
-        let mut c0=vec![0.;k];c0[0]=initial_norm;
-        // Trace correction on the significant rows.
-        let kt=self.traces[0].len();
-        let tw:Vec<f64>=(0..kt).flat_map(|t|(0..k).map(move|j|(t,j))).map(|(t,j)|self.traces[j][t]).collect();
-        let row_norm=|t:usize|tw[t*r..(t+1)*r].iter().map(|v|v*v).sum::<f64>();
-        let charge_norm:Vec<f64>=(0..self.canonical.len()).map(|c|if c==self.centre{row_norm(0)}else{let a=1+2*(c-usize::from(c>self.centre));row_norm(a)+row_norm(a+1)}).map(f64::sqrt).collect();
-        let largest=charge_norm.iter().fold(0_f64,|a,&b|a.max(b));
-        let mut kept:Vec<(usize,usize,f64)>=Vec::new();// (row, partner row or usize::MAX, nu)
-        for(c,&(_,_,nu))in self.canonical.iter().enumerate(){if !(charge_norm[c]>TRACE_ROWS*largest){continue;}
-            if c==self.centre{kept.push((0,usize::MAX,0.));}else{let a=1+2*(c-usize::from(c>self.centre));kept.push((a,a+1,nu));kept.push((a+1,a,-nu));}}
-        let mut g=g0.clone();
-        if !kept.is_empty(){
-            let rows=kept.len();let t:Vec<f64>=kept.iter().flat_map(|&(row,_,_)|tw[row*r..(row+1)*r].iter().copied()).collect();
-            // Omega: d(re)/dt = nu im, d(im)/dt = -nu re; rows in kept order.
-            let position=|row:usize|kept.iter().position(|e|e.0==row);
-            let tg=product(lapack,&t,&g0,rows,r,r)?;let mut defect=tg;
-            for(i,&(_,partner,nu))in kept.iter().enumerate(){if partner==usize::MAX{continue;}let Some(p)=position(partner)else{continue};
-                for c in 0..r{defect[i*r+c]-=nu*t[p*r+c];}}
-            let gram=product(lapack,&t,&transpose_rows(&t,rows,r),rows,r,rows)?;
-            let complex:Vec<C>=gram.iter().map(|&v|C{re:v,im:0.}).collect();
-            let(values,vectors)=lapack.hermitian_eigen(&complex,rows)?;let top=values.iter().fold(0_f64,|a,&v|a.max(v));
-            // Per direction j of the rows (T T^T u_j = s_j^2 u_j) its share of
-            // the correction, T^T u_j (u_j^T D) / s_j^2, of Frobenius norm
-            // |u_j^T D| / s_j: kept while that stays below TRACE_CORRECTION |G0|
-            // or while its trace content s_j is at least the tolerance times
-            // the largest (a space too small to conserve a trace it carries
-            // needs an O(1) correction: two columns of no laser, share 1).
-            let size=|m:&[f64]|m.iter().map(|v|v*v).sum::<f64>().sqrt();let g0_size=size(&g0);
-            let singular:Vec<f64>=values.iter().map(|v|v.max(0.).sqrt()).collect();let largest_singular=top.max(0.).sqrt();
-            let share:Vec<f64>=(0..rows).map(|j|{let mut p=vec![ZERO;r];for a in 0..rows{let u=conj(vectors[a+rows*j]);for c in 0..r{mul_add(&mut p[c],u,C{re:defect[a*r+c],im:0.});}}
-                p.iter().map(|z|z.re*z.re+z.im*z.im).sum::<f64>().sqrt()/singular[j].max(f64::MIN_POSITIVE)}).collect();
-            let keep:Vec<bool>=(0..rows).map(|j|singular[j]>TRACE_ROUNDOFF*largest_singular&&(share[j]<=TRACE_CORRECTION*g0_size||singular[j]>=tolerance*largest_singular)).collect();
-            let mut pseudo=vec![0.;rows*rows];
-            for j in 0..rows{if keep[j]{for a in 0..rows{for b in 0..rows{pseudo[a*rows+b]+=mul(vectors[a+rows*j],conj(vectors[b+rows*j])).re/values[j];}}}}
-            let correction=product(lapack,&product(lapack,&transpose_rows(&t,rows,r),&pseudo,r,rows,rows)?,&defect,r,rows,r)?;
-            for(a,b)in g.iter_mut().zip(&correction){*a-=b;}
+        let mut g=vec![0.;r*r];let mut c0=vec![0.;k];for(c,&v)in c0.iter_mut().zip(initial){*c=v;}
+        if r>1{
+            // S = Z^T W = H^T - tau K, R = Z^T A W = Fm - tau H; rows 1.. of G
+            // are S'^-1 R[1.., :] and S' c[1..] = Z^T x0 [1..] - S[1.., 0] c_0.
+            let(tau,m)=(self.tau,r-1);
+            let s=|i:usize,j:usize|self.h[j*r+i]-tau*self.k[i*r+j];
+            let t=|i:usize,j:usize|self.fm[i*r+j]-tau*self.h[i*r+j];
+            let sp:Vec<f64>=(0..m*m).map(|x|s(1+x%m,1+x/m)).collect();
+            let b:Vec<f64>=(0..m*r).map(|x|t(1+x%m,x/m)).collect();
+            let(lu,piv)=lapack.factor(&sp,m)?;let x=lapack.solve_matrix_factored(&lu,&piv,&b,m)?;
+            for i in 1..r{for j in 0..r{g[i*r+j]=x[(i-1)+m*j];}}
+            let rhs:Vec<f64>=(1..r).map(|i|self.zx[i]-s(i,0)*c0[0]).collect();let c=lapack.solve_matrix_factored(&lu,&piv,&rhs,m)?;
+            c0[1..r].copy_from_slice(&c);
         }
         // Ritz decomposition.
         let(re,im,ev)=lapack.eigen(&transpose_rows(&g,r,r),r)?;
@@ -261,39 +214,27 @@ impl<'m> Projection<'m>{
         // Readout of W per canonical mode, and the modes' amplitudes.
         let readout:Vec<Vec<C>>=(0..self.canonical.len()).map(|c|{
             let mut out=vec![ZERO;n*r];for i in 0..n{for jj in 0..k{out[i*r+jj]=self.populations[jj][c*n+i];}}out}).collect();
-        let amplitude=|jj:usize,blocks:&[&Vec<C>]|->f64{let mut largest=0_f64;
-            for block in blocks{for i in 0..n{let mut v=ZERO;for col in 0..r{mul_add(&mut v,block[i*r+col],s[col*r+jj]);}largest=largest.max(magnitude(v));}}
-            magnitude(a[jj])*largest};
-        let every:Vec<&Vec<C>>=readout.iter().collect();
-        let amplitudes:Vec<f64>=(0..r).map(|jj|amplitude(jj,&every)).collect();
-        let centre_amplitudes:Vec<f64>=(0..r).map(|jj|amplitude(jj,&[&readout[self.centre]])).collect();
-        // Kernel and growing modes.
-        let least=(0..r).min_by(|&p,&q|magnitude(theta[p]).total_cmp(&magnitude(theta[q]))).ok_or("Empty reduced model")?;
-        let kernel:Vec<bool>=(0..r).map(|jj|jj==least||magnitude(theta[jj])<KERNEL).collect();
+        let amplitudes:Vec<f64>=(0..r).map(|jj|{let mut largest=0_f64;
+            for block in &readout{for i in 0..n{let mut v=ZERO;for col in 0..r{mul_add(&mut v,block[i*r+col],s[col*r+jj]);}largest=largest.max(magnitude(v));}}
+            magnitude(a[jj])*largest}).collect();
+        // Kernel and growing modes: the eigenvector carrying the trace (the
+        // largest carrier coordinate; every other eigenvector's is zero) and
+        // every further conserved quantity.
+        let carrying=(0..r).max_by(|&p,&q|magnitude(s[p]).total_cmp(&magnitude(s[q]))).ok_or("Empty reduced model")?;
+        let kernel:Vec<bool>=(0..r).map(|jj|jj==carrying||magnitude(theta[jj])<KERNEL).collect();
         let(mut used_theta,mut used_coefficients)=(theta.clone(),a.clone());
-        let(mut growing,mut projected,mut clipped,mut growth_charge)=(0,0,0,0.);let mut projected_out=vec![false;r];
+        let(mut growing,mut projected,mut clipped,mut growth_charge)=(0,0,0,0.);
         for jj in 0..r{
             if kernel[jj]{used_theta[jj]=ZERO;continue;}
             if !(theta[jj].re>0.){continue;}
             let growth=((theta[jj].re*longest).min(EXPONENT_LIMIT).exp()-1.)*amplitudes[jj];
             if growth<=GROWTH_NEGLIGIBLE{used_theta[jj].re=0.;continue;}
             growing+=1;
-            if amplitudes[jj]<=GROWTH_BUDGET*tolerance{used_theta[jj]=ZERO;used_coefficients[jj]=ZERO;projected_out[jj]=true;projected+=1;growth_charge+=amplitudes[jj];}
+            if amplitudes[jj]<=GROWTH_BUDGET*tolerance{used_theta[jj]=ZERO;used_coefficients[jj]=ZERO;projected+=1;growth_charge+=amplitudes[jj];}
             else{used_theta[jj].re=0.;clipped+=1;}
         }
-        // The steady state.
-        let simple_kernel=kernel.iter().filter(|&&b|b).count()==1;
-        let tau:Vec<f64>=tw[..r].to_vec();
-        let steady:Vec<f64>=if simple_kernel{
-            let mut bordered=g.clone();for i in 0..r{for c in 0..r{bordered[i*r+c]+=c0[i]*tau[c];}}
-            let solution=lapack.solve(&transpose_rows(&bordered,r,r),&c0,r)?;
-            let trace:f64=tau.iter().zip(&c0).map(|(a,b)|a*b).sum();solution.iter().map(|v|v*trace).collect()
-        }else{
-            (0..r).map(|i|(0..r).filter(|&jj|kernel[jj]).fold(0.,|acc,jj|acc+mul(s[i*r+jj],a[jj]).re)).collect()
-        };
-        if steady.iter().chain(&g).any(|v|!v.is_finite()){return Err("Nonfinite reduced model".into());}
-        Ok(Model{r,g,theta,vectors:s,used_theta,used_coefficients,kernel,projected_out,amplitudes,centre_amplitudes,
-            growing,projected,clipped,growth_charge,steady,readout})
+        if g.iter().any(|v|!v.is_finite()){return Err("Nonfinite reduced model".into());}
+        Ok(Model{r,theta,vectors:s,used_theta,used_coefficients,kernel,amplitudes,growing,projected,clipped,growth_charge,readout})
     }
 }
 
@@ -321,8 +262,6 @@ impl Model{
     }
     /// The laboratory time average at the horizon T (the centre block).
     pub fn horizon(&self,projection:&Projection,t:f64)->Vec<f64>{self.populations(projection,&self.state(t),t,true)}
-    pub fn steady_populations(&self,projection:&Projection)->Vec<f64>{self.populations(projection,&self.steady,0.,true)}
-    pub fn conserved(&self)->usize{self.kernel.iter().filter(|&&b|b).count().max(1)}
     /// The slowest relaxation's candidates: the decaying
     /// Ritz values outside the kernel (rate at least KERNEL: slower ones are
     /// undamped precession; growing ones are projected out or clipped) of
@@ -335,76 +274,15 @@ impl Model{
     }
     /// Basis coefficients s_j of a Ritz vector (complex).
     pub fn ritz_coordinates(&self,j:usize)->Vec<C>{let r=self.r;(0..r).map(|i|self.vectors[i*r+j]).collect()}
-    /// The error transform per pole xi (populations, n each): see the module
-    /// documentation. The residual R = A W - W G enters through its leading
-    /// singular components (TRANSFORM_RANK, down to TRANSFORM_COMPONENT of
-    /// the largest): R = sum_i u_i v_i^T with u_i = R v_i, from the
-    /// eigenvectors v_i of R^T R = F - E^T G - G^T E + G^T G (W^T W = I),
-    /// each u_i in the dressed coordinates.
-    #[allow(clippy::too_many_arguments)]
-    pub fn error_transform(&self,projection:&Projection,basis:&[Vec<C>],images:&[Vec<C>],eigen:&BlockEigenbasis,lapack:&Lapack,points:&[C])->Result<Vec<Vec<C>>,String>{
-        let(n,d,r)=(projection.n,projection.d,self.r);let k=projection.covered;let count=points.len();
-        if count==0{return Ok(vec![]);}
-        let gemm=lapack.complex_gemm();
-        // The residual's leading components.
-        let(et,gt)=(transpose_rows(&projection.e,k,k),transpose_rows(&self.g,k,k));
-        let(a1,a2,a3)=(product(lapack,&et,&self.g,k,k,k)?,product(lapack,&gt,&projection.e,k,k,k)?,product(lapack,&gt,&self.g,k,k,k)?);
-        let gram:Vec<C>=(0..k*k).map(|e|C{re:projection.f[e]-a1[e]-a2[e]+a3[e],im:0.}).collect();
-        let(values,vectors)=lapack.hermitian_eigen(&gram,r)?;
-        let top=values.iter().fold(0_f64,|a,&v|a.max(v));
-        let chosen:Vec<usize>=(0..r).rev().filter(|&j|values[j]>TRANSFORM_COMPONENT*TRANSFORM_COMPONENT*top).take(TRANSFORM_RANK).collect();
-        let p=chosen.len();if p==0{return Ok(vec![vec![ZERO;n];count]);}
-        // Real singular vectors (up to a phase per column), V (r x p).
-        let v:Vec<f64>={let mut v=vec![0.;r*p];for(c,&j)in chosen.iter().enumerate(){let col=&vectors[r*j..r*(j+1)];
-            let pivot=col.iter().copied().max_by(|a,b|magnitude(*a).total_cmp(&magnitude(*b))).unwrap_or(ONE);let s=magnitude(pivot).max(f64::MIN_POSITIVE);
-            let phase=C{re:pivot.re/s,im:-pivot.im/s};for i in 0..r{v[i*p+c]=mul(col[i],phase).re;}}v};
-        // u_i = A W v_i - W G v_i, then its dressed coordinates on every canonical mode (L x p).
-        let gv=product(lapack,&self.g,&v,r,r,p)?;
-        let fields:Vec<&[C]>=images[..k].iter().chain(&basis[..k]).map(|f|f.as_slice()).collect();
-        let coefficients:Vec<Vec<f64>>=(0..p).map(|i|(0..k).map(|j|v[j*p+i]).chain((0..k).map(|j|-gv[j*p+i])).collect()).collect();
-        let residuals=projection.vectors.combinations(&fields,&coefficients)?;
-        let blocks:Vec<C>=projection.canonical.iter().flat_map(|&(q,_,_)|residuals.iter().flat_map(move|u|u[q*d..(q+1)*d].iter().copied())).collect();
-        let u=eigen.dressed(&blocks)?;drop(residuals);
-        // V^T S diag(a) (p x r, complex).
-        let vs:Vec<C>=(0..p*r).map(|e|{let(i,j)=(e/r,e%r);let mut s=ZERO;for m in 0..r{mul_add(&mut s,C{re:v[m*p+i],im:0.},self.vectors[m*r+j]);}mul(s,self.used_coefficients[j])}).collect();
-        let modes:Vec<(usize,bool)>=(0..projection.canonical.len()).flat_map(|c|{let mirrored=projection.canonical[c].1>1.;
-            std::iter::once((c,false)).chain(mirrored.then_some((c,true)))}).collect();
-        let parts=Execution::new()?.map(modes,|(c,mirror)|->Result<Vec<C>,String>{
-            let(_,_,nu)=projection.canonical[c];let nu=if mirror{-nu}else{nu};
-            // Coefficients of the components per point: (V^T S diag(a)) / (xi - i nu - theta), p x count.
-            let mut cm=vec![ZERO;p*count];
-            for(q,&xi)in points.iter().enumerate(){
-                let f:Vec<C>=(0..r).map(|j|{let den=C{re:xi.re-self.used_theta[j].re,im:xi.im-nu-self.used_theta[j].im};let s2=den.re*den.re+den.im*den.im;C{re:den.re/s2,im:-den.im/s2}}).collect();
-                for i in 0..p{let mut s=ZERO;for j in 0..r{mul_add(&mut s,vs[i*r+j],f[j]);}
-                    // A mirror mode's dressed block is the conjugate: conj(U) c = conj(U conj(c)).
-                    cm[i+p*q]=if mirror{conj(s)}else{s};}
-            }
-            let mut y=vec![ZERO;d*count];gemm.multiply(d,count,p,ONE,&u[c*d*p..],d,&cm,p,ZERO,&mut y,d)?;
-            // Complex eigen-coefficients scaled by 1/(xi - lambda), then the readout (n x d) by GEMM.
-            let mut z=vec![ZERO;d*count];
-            for(q,&xi)in points.iter().enumerate(){
-                let column:Vec<C>=y[q*d..(q+1)*d].iter().map(|e|if mirror{conj(*e)}else{*e}).collect();
-                for(jj,zj)in eigen.complex_coefficients(&column).into_iter().enumerate(){
-                    let den=C{re:xi.re-eigen.lambda[jj].re,im:xi.im-eigen.lambda[jj].im};let s2=den.re*den.re+den.im*den.im;
-                    z[jj+d*q]=mul(zj,C{re:den.re/s2,im:-den.im/s2});}
-            }
-            let mut out=vec![ZERO;n*count];gemm.multiply(n,count,d,ONE,&eigen.readout,n,&z,d,ZERO,&mut out,n)?;
-            Ok(out)
-        });
-        let mut total=vec![vec![ZERO;n];count];
-        for part in parts{let part=part?;for(q,row)in total.iter_mut().enumerate(){for(i,v)in row.iter_mut().enumerate(){add(v,part[i+n*q]);}}}
-        Ok(total)
-    }
 }
 
 /// A slow relaxation rate (1/us), its residual (rad/us) and whether every
 /// class of the frame's second-order block slower than it is matched by a
-/// Ritz pair (`pipeline`; None: not checked): resolved when it is and the
-/// residual is
-/// within SLOW_ACCURACY of the rate, else only the range rate +- residual
-/// (a slower class the space has not reached included).
+/// Ritz pair (`pipeline`): resolved when it is and the residual is within
+/// SLOW_ACCURACY of the rate, else only the range rate +- residual (a
+/// slower class the space has not reached included).
 #[derive(Clone,Copy,Debug)]
-pub struct SlowRate{pub rate:f64,pub residual:f64,pub matched:Option<bool>}
+pub struct SlowRate{pub rate:f64,pub residual:f64,pub matched:bool}
 impl SlowRate{
-    pub fn resolved(&self)->bool{self.matched==Some(true)&&self.residual<=SLOW_ACCURACY*self.rate}
+    pub fn resolved(&self)->bool{self.matched&&self.residual<=SLOW_ACCURACY*self.rate}
 }

@@ -8,7 +8,7 @@ use std::io::{self, BufRead, Write};
 
 mod harmonics;
 mod lattice_core_adapter;
-const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/2";
+const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/3";
 const FULL_MODEL_SCHEMA: &str = "rb87-full/2";
 
 #[derive(Clone, Deserialize)]
@@ -63,15 +63,18 @@ struct Options {
     /// core's fixed tolerance, which a request may only restate.
     #[serde(default = "default_population_tolerance")]
     population_tolerance: f64,
+    /// The mean p̄(T) with the trajectory (a mean-only request has it
+    /// always).
     #[serde(default = "default_true")]
-    include_asymptotic: bool,
-    /// Only the long-time mean (no finite-time trajectory).
+    include_mean: bool,
+    /// Only the mean p̄(T) (no trajectory).
     #[serde(default)]
-    steady_only: bool,
-    /// Observation horizon of the long-time mean (us); absent or null is the
-    /// t -> infinity mean.
-    #[serde(default)]
-    mean_horizon_us: Option<f64>,
+    mean_only: bool,
+    /// The time T (us) of the mean the app reads: 1e5 or 1e6 (100 ms or 1 s,
+    /// the standard horizons, both of which a mean run returns); 1 s when
+    /// absent.
+    #[serde(default = "default_mean_horizon")]
+    mean_horizon_us: f64,
 }
 fn default_duration() -> f64 {
     5.
@@ -80,10 +83,13 @@ fn default_samples() -> usize {
     200
 }
 fn default_population_tolerance() -> f64 {
-    atom_population_core::lattice::ledger::POPULATION_TOLERANCE
+    atom_population_core::lattice::accuracy::POPULATION_TOLERANCE
 }
 fn default_true() -> bool {
     true
+}
+fn default_mean_horizon() -> f64 {
+    1e6
 }
 impl Default for Options {
     fn default() -> Self {
@@ -91,9 +97,9 @@ impl Default for Options {
             duration_us: 5.,
             samples: default_samples(),
             population_tolerance: default_population_tolerance(),
-            include_asymptotic: true,
-            steady_only: false,
-            mean_horizon_us: None,
+            include_mean: true,
+            mean_only: false,
+            mean_horizon_us: default_mean_horizon(),
         }
     }
 }
@@ -199,7 +205,7 @@ mod tests {
     fn solves_require_the_full_model_schema() {
         let model = json!({"dimension":1,"states":["a"],"hReal":[0],"hImag":[0],"collapse":[]});
         for schema in [Value::Null, json!("generic-lindblad/1")] {
-            let out = request(json!({"id":2,"modelSchema":schema,"model":model,"options":{"steadyOnly":true}}));
+            let out = request(json!({"id":2,"modelSchema":schema,"model":model,"options":{"meanOnly":true}}));
             assert!(out["error"].as_str().unwrap().contains("Unsupported native model schema"), "{out}");
         }
         let out = request(json!({"id":3,"modelSchema":FULL_MODEL_SCHEMA,"model":model}));
@@ -210,8 +216,11 @@ mod tests {
         assert_eq!(serde_json::from_value::<Options>(json!({})).unwrap().population_tolerance, 0.005);
         let model = json!({"dimension":1,"states":["a"],"hReal":[0],"hImag":[0],"collapse":[]});
         let solve = |options: Value| request(json!({"id":4,"modelSchema":FULL_MODEL_SCHEMA,"model":model,"options":options}))["error"].as_str().unwrap().to_owned();
-        assert!(solve(json!({"steadyOnly":true,"populationTolerance":0.001})).contains("populationTolerance is fixed"));
-        assert!(solve(json!({"samples":1})).contains("Invalid finite population grid"));
-        assert!(solve(json!({"durationUs":0})).contains("Invalid finite population grid"));
+        assert!(solve(json!({"meanOnly":true,"populationTolerance":0.001})).contains("populationTolerance is fixed"));
+        for samples in [1, 2001] {
+            assert!(solve(json!({"samples":samples})).contains("A trajectory has 2 to 2000 samples"), "{samples}");
+        }
+        assert!(solve(json!({"durationUs":0})).contains("must be a positive finite time"));
+        assert!(solve(json!({"durationUs":1.5e7})).contains("The trajectory duration is limited to 10 s (requested 15 s)"));
     }
 }

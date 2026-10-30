@@ -7,12 +7,6 @@ import {timeDisplayUnit} from './duration.js';
 /** A population error (an absolute probability) as a percentage: "0.61%". */
 export function errorPercent(error:number):string{return `${formatNumber(error*100,{digits:2})}%`;}
 
-/** Why a computed result is not within ε: its error bound above ε ("超过 0.5%"), or a bound within
- * ε from a run the solver did not accept -- a slow class it needs unresolved ("未确认收敛"). */
-export function outsideWords(error:number|null|undefined,tolerance=POPULATION_TOLERANCE):string{
-  return error!=null&&error<=tolerance?'未确认收敛':`超过 ${errorPercent(tolerance)}`;
-}
-
 /** A trajectory's per-sample error bounds, when its solver sent them. */
 export function sampleErrors(result:{timesUs:readonly number[];populationAccuracy?:{sampleErrors?:number[]}}):number[]|undefined{
   const errors=result.populationAccuracy?.sampleErrors;return errors&&errors.length===result.timesUs.length?errors:undefined;

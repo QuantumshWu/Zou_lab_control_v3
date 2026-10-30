@@ -71,7 +71,7 @@ fn supervisor(backend:Backend,data:PathBuf,test_mode:bool,proxy:EventLoopProxy<U
             if op=="close-all"{close_all(&mut lanes,&proxy);continue;}
             if op=="self-test"&&test_mode{close_all(&mut lanes,&proxy);let mut result=value["result"].clone();result["nativeProcesses"]=json!(process_ids);result["capturedRequests"]=json!(captures);result["nodeRuntime"]=json!(false);result["binarySha256"]=json!(binary_hash);let _=proxy.send_event(UiEvent::Report(result));continue;}
             let lane=value["lane"].as_str().unwrap_or("").to_owned();let generation=value["generation"].as_u64().unwrap_or(0);
-            if !["steady","trajectory"].contains(&lane.as_str())||generation==0{continue;}
+            if !["mean","trajectory"].contains(&lane.as_str())||generation==0{continue;}
             if op=="close"{if lanes.get(&lane).is_some_and(|w|w.generation==generation){close_lane(&mut lanes,&lane,&proxy);}else{emit(&proxy,&session,json!({"kind":"closed","lane":lane,"generation":generation}));}continue;}
             if op=="open"{
                 if lanes.get(&lane).is_some_and(|w|w.generation>=generation){continue;}

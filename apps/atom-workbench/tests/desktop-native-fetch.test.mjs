@@ -89,7 +89,7 @@ test('dispose closes the host directly, suppresses late opens, and bounds a stuc
  const f=fixture({shutdownTimeoutMs:8});f.worker.autoAck=false;
  const pending=solve(f.adapter),rejected=assert.rejects(pending,{name:'AbortError'});await posted(f.worker);
  const closing=f.adapter.dispose();assert.equal(f.commands[0].op,'close-all');
- f.worker.emit({kind:'native',command:{op:'open',lane:'steady',generation:7}});
+ f.worker.emit({kind:'native',command:{op:'open',lane:'mean',generation:7}});
  f.worker.emit({kind:'native',command:{op:'write',lane:'trajectory',generation:2,line:'old'}});
  assert.equal(f.commands.length,1);await rejected;await closing;assert.equal(f.worker.terminated,1);
  await f.adapter.dispose();assert.equal(f.worker.terminated,1);
