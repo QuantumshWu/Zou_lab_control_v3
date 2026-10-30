@@ -1,8 +1,8 @@
 //! The explicit charge set P of a request and its ring Q = ring(P): the
 //! lattice the pipeline works on. P u Q is solved whole at every pole (GMRES
-//! on every block, `poles`); everything beyond P u Q is omitted (the error
-//! estimate slaves that ring, ring(P u Q), and feeds it back:
-//! `estimator::ErrorLattice::ring_feedback`).
+//! on every block, `poles`); a run's lattice adds the charges x0's a-priori
+//! amplitudes carry beyond it (`apriori`, `LatticeSets::completed`), and
+//! everything beyond is omitted.
 //!
 //! The rule (`explicit_set`, one function):
 //! 1. start: {0} and every explicit step s whose first-order mixing
@@ -12,7 +12,7 @@
 //! 2. ring closure: while the ring has an internal edge q <- q - t with
 //!    rho = ||C_t|| ||D_q^-1|| above RING_COUPLING, the ring charge carrying
 //!    the largest summed rho joins P with its mirror, at most PROMOTIONS
-//!    times. It protects the solution, not the estimate. A ring charge q on
+//!    times. It protects the solution. A ring charge q on
 //!    such an edge is near resonant (||D_q^-1|| large); left at the lattice's
 //!    edge it couples to the omitted charges r beyond, whose second-order
 //!    self-energy Sigma_q = sum_r C_qr (z - D_r)^-1 C_rq acts relative to its
@@ -20,12 +20,9 @@
 //!    natural criterion, of which rho is the first-order proxy). Promoting q
 //!    puts those neighbours in Q, solved whole. Measured without the
 //!    closure, four lasers + tweezer at 10 ms: partial, bound 6.7e-3, error
-//!    2.3e-3 against 4.6e-4 with it, per-sample coverage 0.10. Neither the
-//!    estimate's slaved outer ring explains it (rho inside ring(P u Q) at
-//!    most 1.8e-3 without the closure, no internal edge with it) nor the
-//!    estimate's near modes (the strong ring charges added to them, P
-//!    unchanged: the same 6.7e-3); three and five lasers and every mean were
-//!    unchanged;
+//!    2.3e-3 against 4.6e-4 with it (rho inside ring(P u Q) at most 1.8e-3
+//!    without the closure, no internal edge with it); three and five lasers
+//!    and every mean were unchanged;
 //! 3. cover: every charge whose seed amplitude is at least SEED_AMPLITUDE x
 //!    tolerance and that P u Q misses joins P (largest first, with its
 //!    mirror). A second closure after the cover promoted nothing on any
@@ -38,7 +35,6 @@
 //! centre's steady state (unit norm); a charge's amplitude is the largest
 //! |y_r| over the probes.
 use super::*;
-use super::estimate_api::{LatticeSets,ring};
 use super::operator::{LatticeOperator,Mask,Parts};
 use super::classification::HarmonicStep;
 
@@ -72,6 +68,30 @@ const NORM_ITERATIONS:usize=30;
 /// relative 1e-6 |D_q^-1|.
 const RESOLVENT_KEY:f64=1e6;
 
+/// The lattice of a run: `modes()` = explicit (P) then ring (Q, with the
+/// charges a run's completion adds), the centre in P. The space lives on
+/// these modes; everything beyond them is omitted.
+#[derive(Clone,Debug)]
+pub struct LatticeSets{pub explicit:Vec<Charge>,pub ring:Vec<Charge>}
+impl LatticeSets{
+    pub fn modes(&self)->Vec<Charge>{self.explicit.iter().chain(&self.ring).cloned().collect()}
+    /// The lattice with `extra` charges (each with its mirror) in the ring.
+    pub fn completed(&self,extra:&[Charge])->Self{
+        let mut ring=self.ring.clone();
+        for c in extra{for q in[c.clone(),opposite(c)]{if !self.explicit.contains(&q)&&!ring.contains(&q){ring.push(q);}}}
+        Self{explicit:self.explicit.clone(),ring}
+    }
+}
+/// The charges one structural step (`HarmonicPlan::structural_steps`)
+/// outside `set`, sorted by (|q|_1, q): the ring of P is Q.
+pub fn ring(prepared:&LatticePrepared,set:&[Charge])->Result<Vec<Charge>,String>{
+    let inside:BTreeSet<&Charge>=set.iter().collect();let mut out=BTreeSet::new();
+    for q in set{for s in &prepared.plan.structural_steps(){let r=charge_plus(q,s)?;if !inside.contains(&r){out.insert(r);}}}
+    let mut out:Vec<Charge>=out.into_iter().collect();
+    out.sort_by_key(|q|(q.iter().map(|&k|k.unsigned_abs()as u64).sum::<u64>(),q.clone()));
+    Ok(out)
+}
+
 #[derive(Clone,Debug)]
 pub struct ExplicitSet{
     pub sets:LatticeSets,
@@ -83,22 +103,6 @@ pub struct ExplicitSet{
     /// The ring's internal edges left (target, source, rho).
     pub internal:Vec<(Charge,Charge,f64)>,
     pub milliseconds:f64,
-}
-
-/// The explicit set completed by `extra` ring charges, each with its mirror:
-/// P grows, its ring Q is rebuilt (the lattice completion, `pipeline`).
-pub fn completed(prepared:&LatticePrepared,base:&ExplicitSet,extra:&[Charge])->Result<ExplicitSet,String>{
-    let clock=Instant::now();
-    let mut explicit:BTreeSet<Charge>=base.sets.explicit.iter().cloned().collect();
-    for c in extra{explicit.insert(opposite(c));explicit.insert(c.clone());}
-    let mut p:Vec<Charge>=explicit.into_iter().collect();
-    p.sort_by_key(|q|(q.iter().map(|&k|k.unsigned_abs()as u64).sum::<u64>(),q.clone()));
-    let q=ring(prepared,&p)?;
-    let mut condition=RingCondition{prepared,steps:prepared.plan.structural_steps(),coupling:BTreeMap::new(),resolvent:BTreeMap::new()};
-    let internal=condition.edges(&p.iter().cloned().collect())?;
-    let mut set=base.clone();set.sets=LatticeSets{explicit:p,ring:q};set.internal=internal;
-    set.milliseconds+=clock.elapsed().as_secs_f64()*1e3;
-    Ok(set)
 }
 
 /// The largest element of a superoperator's matrix (row (i, j), column

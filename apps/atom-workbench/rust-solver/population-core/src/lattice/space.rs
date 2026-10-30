@@ -14,19 +14,22 @@
 //! the carrier's coefficient fixed and conserves every block trace exactly
 //! (`reduced`).
 //!
-//! Columns: w = (xi - A)^-1 v with v the last vector of the Krylov sequence
-//! (orthonormalized within the sequence only, so the continuation stays in
-//! the rational Krylov space of x0: a continuation carrying translated
-//! copies or the steady vector would solve for other poles). Every column
-//! is a Hermitian-symmetric (J-real, (J x)_q = x_-q^dagger) field: a real
-//! pole's solve stays in that real space (its J-odd part, inner-solve error,
-//! is never formed); a complex pole's solve is the real form w_1 + i w_2,
-//! whose parts are both J-real, so the conjugate pole comes free. A
-//! direction below NOISE x the inner tolerance of its column is noise and
-//! is not added (a nearly repeated pole would add only roundoff); the same
-//! floor applies to its part outside the whole basis, and only a Krylov
-//! vector that adds a direction is translated. The basis is capped by a
-//! memory budget (`Space::new`).
+//! The block start: the Krylov sequence starts from x0 and, per translation
+//! the a-priori rule activates (`apriori`), the slip X~_s x0 that translation
+//! carries (`Space::add_start`); a solve at a pole takes the last `block`
+//! Krylov vectors as its right-hand sides, one GMRES solve each. Columns: w =
+//! (xi - A)^-1 v with v a vector of the Krylov sequence (orthonormalized
+//! within the sequence only, so the continuation stays in the block rational
+//! Krylov space of the start: a continuation carrying translated copies or
+//! the steady vector would solve for other poles). Every column is a
+//! Hermitian-symmetric (J-real, (J x)_q = x_-q^dagger) field: a real pole's
+//! solve stays in that real space. A direction below NOISE x the inner
+//! tolerance of its column is noise and is not added (a nearly repeated pole
+//! would add only roundoff); the same floor applies to its part outside the
+//! whole basis, and only a Krylov vector that adds a direction is
+//! translated. The basis alone is capped by a memory budget (`Space::new`):
+//! no images A W are stored (the reduced model's Gram matrices take them
+//! once, `reduced::Projection::ingest`).
 //!
 //! Pole 0 is the residue at 0: the bordered solve (A + u tau0^T) w = u gives
 //! Pi0 u = Pi0 x0 when the trace is the only left kernel vector; it is done
@@ -35,27 +38,21 @@
 //! (`reduced::KERNEL`, the rate below which a mode is conserved), where the
 //! kernel dominates the column.
 //!
-//! Translations (A S_s = S_s (A - i nu_s) up to the fold's i nu_s K^(1) and
+//! Translations (A S_s = S_s (A - i nu_s) up to the fold's orders in nu and
 //! the lattice boundary): S_s K(A, x0; xi) = K(A, S_s x0; xi - i nu_s), the
 //! space of the translated initial state at the poles xi - i nu_s, with no
-//! solve. Every explicit step through the translation gate is active from
-//! the start (`charge_set::gated_steps`); its copies S_s v + S_-s v and
-//! i (S_s v - S_-s v) of every Krylov vector join the basis (J-real like v).
+//! solve. The copies S_s v + S_-s v and i (S_s v - S_-s v) of every Krylov
+//! vector join the basis (J-real like v).
 //!
-//! The ladder: sigma log-spaced from LADDER_TOP / t1 down to 1 / T_max
+//! The ladder: real sigma log-spaced from LADDER_TOP / t1 down to 1 / T_max
 //! (T_max the grid's last time, else the longest horizon: `pipeline`),
-//! PER_DECADE per decade; complex poles
-//! sigma + i omega only at the frequencies omega > sigma of dressed centre
-//! modes slower than sigma (|Re lambda| < sigma) that carry at least
-//! COMPLEX_WEIGHT x tolerance of x0's population weight (merged within
-//! sigma). The pipeline orders the live points.
+//! PER_DECADE per decade, solved in a fixed bit-reversed cycle (`pipeline`).
 use super::*;
 use super::poles::{Lattice,Pole};
 use super::krylov::Vectors;
-use super::eigenbasis::BlockEigenbasis;
 
 /// Relative residual of the shifted solves, and of the bordered steady
-/// solve (its algebraic error is the steady output's).
+/// solve (the steady column's algebraic error).
 pub const INNER_TOLERANCE:f64=1e-7;
 pub const STEADY_TOLERANCE:f64=1e-9;
 /// The bordered solve counts as singular above this true residual: a
@@ -71,7 +68,7 @@ const NOISE:f64=100.;
 /// its norm is dependent.
 const APPEND_FLOOR:f64=1e-11;
 /// Ladder points per decade: a deliberate choice, not measured (the
-/// reference runs used two to three); the ranking chooses among them.
+/// reference runs used two to three).
 const PER_DECADE:f64=2.;
 /// The ladder's top, LADDER_TOP / t1: the shift-and-invert rule at the
 /// earliest output time, t1 the first sample time (without a grid T_max /
@@ -80,29 +77,23 @@ const PER_DECADE:f64=2.;
 /// 10 / t1: a rule, not a measured constant. Measured against it: three
 /// lasers at 20 us stalled at 3.8-5.8e-3 over 48 solves with 1 / t1, reached
 /// 1.9e-3 at 24 solves with 10 / t1 (half the inner steps per solve); 30 / t1
-/// gave the same errors on five lasers at 10 us; twice and four times the
-/// top, points above it and tops from x0's dressed spectrum were none better
-/// across the board (the necessity review).
+/// gave the same errors on five lasers at 10 us. The Petrov-Galerkin shift
+/// tau is the same LADDER_TOP / t1 (`reduced`).
 pub const LADDER_TOP:f64=10.;
-/// A deliberate margin: a dressed mode carrying less than a tenth of the
-/// tolerance of x0's population weight gets no complex pole.
-const COMPLEX_WEIGHT:f64=0.1;
 
 #[derive(Clone,Debug)]
-/// One solve of the space: its pole, inner steps, true relative residual, directions
-/// added, time (ms) and lattice block operations (operator and
-/// preconditioner applications per block).
+/// One solve of the space: its pole, inner steps (over its right-hand
+/// sides), largest true relative residual, directions added, time (ms) and
+/// lattice block operations (operator and preconditioner applications per
+/// block).
 pub struct Column{pub pole:Pole,pub steps:usize,pub residual:f64,pub added:usize,pub milliseconds:f64,pub blocks:usize}
 
 pub struct Space{
-    /// Orthonormal basis (real inner product) and its images A W.
-    pub basis:Vec<Vec<C>>,pub images:Vec<Vec<C>>,
+    /// Orthonormal basis (real inner product).
+    pub basis:Vec<Vec<C>>,
     krylov:Vec<Vec<C>>,
-    /// (research, S3) Per Krylov vector whether translations copy it, and
-    /// whether the next solve's vectors are copied.
-    copyable:Vec<bool>,pub untranslated_next:bool,
-    /// (research, S6) The block size: a solve takes the last `block` Krylov
-    /// vectors as its right-hand sides.
+    /// The block size: a solve takes the last `block` Krylov vectors as its
+    /// right-hand sides.
     pub block:usize,
     /// Active translations: the step and, per mode, the source modes of
     /// q - s and of q + s.
@@ -114,19 +105,18 @@ pub struct Space{
     /// (the further columns are orthogonal to both).
     pub initial:Vec<f64>,
     pub columns:Vec<Column>,
-    pub images_ms:f64,
 }
 impl Space{
     /// The space of x0 = rho0 on the centre, at most `capacity` columns.
     pub fn new(lattice:&mut Lattice<'_>,initial:&[C],capacity:usize)->Result<Self,String>{
         let op=lattice.operator();let d=op.n*op.n;let mut x0=vec![ZERO;op.dimension()];
         x0[op.centre*d..(op.centre+1)*d].copy_from_slice(initial);
-        let vectors=Vectors::new(op,1)?;
+        let vectors=Vectors::new(op)?;
         if !(vectors.norm(&x0)>0.){return Err("Zero initial density".into());}
         // The trace carrier u = I / n on the centre (tr u = tr x0 = 1).
         let n=op.n;let mut u=vec![ZERO;op.dimension()];for i in 0..n{u[op.centre*d+i*n+i]=C{re:1./n as f64,im:0.};}
         let carrier=vectors.norm(&u);
-        let mut space=Self{basis:vec![],images:vec![],krylov:vec![],copyable:vec![],untranslated_next:false,block:1,translations:vec![],vectors,noise_floor:0.,capacity:capacity.max(2),initial:vec![carrier],columns:vec![],images_ms:0.};
+        let mut space=Self{basis:vec![],krylov:vec![],block:1,translations:vec![],vectors,noise_floor:0.,capacity:capacity.max(2),initial:vec![carrier],columns:vec![]};
         space.append(lattice,u,0.)?;
         // x0's K part (zero when rho0 is I / n).
         let mut k0=x0.clone();project_traces(&mut k0,n);let rest=space.vectors.norm(&k0);
@@ -140,15 +130,15 @@ impl Space{
     /// The floor of a new direction (relative to its norm).
     fn floor(&self)->f64{self.noise_floor.max(APPEND_FLOOR)}
     /// Activates the translation along s: the copies of every Krylov vector.
-    pub fn activate(&mut self,lattice:&mut Lattice<'_>,step:&Charge)->Result<usize,String>{
+    pub fn activate(&mut self,lattice:&Lattice<'_>,step:&Charge)->Result<usize,String>{
         let op=lattice.operator();
         let source=|sign:i32|->Vec<Option<usize>>{op.modes.iter().map(|q|{
             let shifted:Option<Charge>=q.iter().zip(step).map(|(&a,&b)|a.checked_sub(sign*b)).collect();
             shifted.and_then(|c|op.index.get(&c).copied())}).collect()};
         self.translations.push((step.clone(),source(1),source(-1)));
         let t=self.translations.len()-1;let mut added=0;
-        let floor=self.floor();
-        for(v,ok)in self.krylov.clone().into_iter().zip(self.copyable.clone()){if !ok{continue;}for copy in self.translates(&v,t){added+=usize::from(self.append(lattice,copy,floor)?);}}
+        let floor=self.floor();let n=op.n;
+        for v in self.krylov.clone(){for copy in self.translates(&v,t){added+=usize::from(self.append_projected(n,copy,floor)?);}}
         Ok(added)
     }
     /// S_s v + S_-s v and i (S_s v - S_-s v) of translation t.
@@ -162,85 +152,70 @@ impl Space{
         }
         [sum,difference]
     }
-    /// Appends a vector orthonormalized against the basis, with its image,
-    /// when its part outside the basis is above `floor` of its norm and the
-    /// basis has room. Every column but the first (the trace carrier) is
+    /// Appends a vector orthonormalized against the basis when its part
+    /// outside the basis is above `floor` of its norm and the basis has
+    /// room; the first column (the trace carrier) as it is, every other one
     /// projected into K first, and again after the orthogonalization (which
     /// leaves K only at roundoff).
-    fn append(&mut self,lattice:&mut Lattice<'_>,mut w:Vec<C>,floor:f64)->Result<bool,String>{
-        let n=lattice.operator().n;let carrier=self.basis.is_empty();
+    fn append(&mut self,lattice:&Lattice<'_>,w:Vec<C>,floor:f64)->Result<bool,String>{
+        let n=lattice.operator().n;
+        if self.basis.is_empty(){
+            let size=self.vectors.norm(&w);if !(size>0.){return Ok(false);}
+            self.basis.push(w.iter().map(|v|scaled(*v,1./size)).collect());return Ok(true);
+        }
+        self.append_projected(n,w,floor)
+    }
+    fn append_projected(&mut self,n:usize,mut w:Vec<C>,floor:f64)->Result<bool,String>{
         let size=self.vectors.norm(&w);if !(size>0.)||self.full(){return Ok(false);}
-        if !carrier{project_traces(&mut w,n);}
+        project_traces(&mut w,n);
         // Gram-Schmidt with the Kahan-Parlett reorthogonalization test: a second pass only when the
         // first removed more than 1 - 1/sqrt(2) of the norm (the first pass is then accurate to roundoff).
         let before=self.vectors.norm(&w);
         for pass in 0..2{let refs:Vec<&[C]>=self.basis.iter().map(|v|v.as_slice()).collect();let h=self.vectors.dots(&refs,&w);self.vectors.subtract(&refs,&h,&mut w)?;
             if pass==0&&self.vectors.norm(&w)>std::f64::consts::FRAC_1_SQRT_2*before{break;}}
-        if !carrier{project_traces(&mut w,n);}
+        project_traces(&mut w,n);
         let rest=self.vectors.norm(&w);if !(rest>floor*size){return Ok(false);}
         for v in w.iter_mut(){*v=scaled(*v,1./rest);}
-        // (research, S4) ATOM_NO_IMAGES: the image is not kept (the Gram
-        // matrices take it once, from the lattice, `Projection::ingest_adjoint`).
-        if std::env::var("ATOM_NO_IMAGES").is_ok(){self.basis.push(w);self.images.push(Vec::new());return Ok(true);}
-        let clock=Instant::now();let mut image=vec![ZERO;w.len()];lattice.apply(&w,&mut image)?;self.images_ms+=clock.elapsed().as_secs_f64()*1e3;
-        self.basis.push(w);self.images.push(image);Ok(true)
+        self.basis.push(w);Ok(true)
     }
     /// A Krylov vector: orthonormalized within the sequence (dropped below
     /// the noise floor), appended to the basis with its translated copies.
-    fn add_krylov(&mut self,lattice:&mut Lattice<'_>,p:Vec<C>)->Result<usize,String>{
+    fn add_krylov(&mut self,lattice:&Lattice<'_>,p:Vec<C>)->Result<usize,String>{
         let size=self.vectors.norm(&p);let mut v=p;
         for _ in 0..2{let refs:Vec<&[C]>=self.krylov.iter().map(|x|x.as_slice()).collect();let h=self.vectors.dots(&refs,&v);self.vectors.subtract(&refs,&h,&mut v)?;}
         let rest=self.vectors.norm(&v);if !(rest>self.noise_floor*size)||!(rest>0.){return Ok(0);}
         for x in v.iter_mut(){*x=scaled(*x,1./rest);}
-        self.krylov.push(v.clone());self.copyable.push(!self.untranslated_next);
+        self.krylov.push(v.clone());
         let floor=self.floor();
         if !self.append(lattice,v.clone(),floor)?{return Ok(0);}
-        let mut added=1;
-        if !self.untranslated_next{for t in 0..self.translations.len(){for copy in self.translates(&v,t){added+=usize::from(self.append(lattice,copy,floor)?);}}}
+        let mut added=1;let n=lattice.operator().n;
+        for t in 0..self.translations.len(){for copy in self.translates(&v,t){added+=usize::from(self.append_projected(n,copy,floor)?);}}
         Ok(added)
     }
-    /// (research, S3) A column at the pole at infinity: A v of the last
-    /// Krylov vector (one operator application, no solve).
-    pub fn infinite(&mut self,lattice:&mut Lattice<'_>)->Result<usize,String>{
-        let v=self.krylov.last().ok_or("Empty Krylov sequence")?.clone();let mut w=vec![ZERO;v.len()];lattice.apply(&v,&mut w)?;
-        self.add_krylov(lattice,w)
-    }
-    /// (research, S6) A further starting vector of the block (a family's
-    /// slip): a Krylov vector of its own; the block grows by one when it
-    /// adds a direction.
-    /// (research, S9) A Krylov direction from outside the solves (a band's Arnoldi vector).
-    pub fn add_direction(&mut self,lattice:&mut Lattice<'_>,v:Vec<C>)->Result<usize,String>{self.add_krylov(lattice,v)}
-    /// (research, S9) A basis column only (not a Krylov vector: the solves continue from theirs).
-    pub fn add_column(&mut self,lattice:&mut Lattice<'_>,v:Vec<C>)->Result<usize,String>{let floor=self.floor();Ok(usize::from(self.append(lattice,v,floor)?))}
-    pub fn add_start(&mut self,lattice:&mut Lattice<'_>,v:Vec<C>)->Result<usize,String>{
+    /// A further starting vector of the block (a translation's slip): a
+    /// Krylov vector of its own; the block grows by one when it adds a
+    /// direction.
+    pub fn add_start(&mut self,lattice:&Lattice<'_>,v:Vec<C>)->Result<usize,String>{
         let before=self.krylov.len();let added=self.add_krylov(lattice,v)?;if self.krylov.len()>before{self.block+=1;}Ok(added)
     }
-    /// One column at a pole; returns the directions it added.
+    /// One column at a pole (a solve per right-hand side of the block);
+    /// returns the directions it added.
     pub fn solve(&mut self,lattice:&mut Lattice<'_>,pole:Pole)->Result<usize,String>{
         let clock=Instant::now();let length=self.basis[0].len();let before=lattice.work().block_operations();
-        // (research, S2) ATOM_INNER_TOL: the shifted solves' relative residual.
-        let inner=std::env::var("ATOM_INNER_TOL").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(INNER_TOLERANCE);
-        let steady=STEADY_TOLERANCE;
+        let inner=INNER_TOLERANCE;
         let(added,steps,residual)=match pole{
             Pole::Zero=>{
                 let op=lattice.operator();let n=op.n;let c0=op.centre*n*n;let mut u=vec![ZERO;length];for i in 0..n{u[c0+i*n+i]=C{re:1./n as f64,im:0.};}
-                let bordered=lattice.solve(Pole::Zero,&[u],steady);
-                let(w,steps,residual)=match bordered{Ok((w,steps,residual))if residual<=BORDERED_SINGULAR=>(w.into_iter().next().unwrap_or_default(),steps,residual),
-                    _=>{let x0:Vec<C>=self.krylov[0].iter().map(|v|C{re:-v.re,im:-v.im}).collect();
-                        let(w,steps,residual)=lattice.solve(Pole::Real(super::reduced::KERNEL),&[x0],inner)?;(w.into_iter().next().unwrap_or_default(),steps,residual)}};
+                let bordered=lattice.solve(Pole::Zero,&u,STEADY_TOLERANCE);
+                let(w,steps,residual)=match bordered{Ok((w,steps,residual))if residual<=BORDERED_SINGULAR=>(w,steps,residual),
+                    _=>{let x0:Vec<C>=self.krylov[0].iter().map(|v|C{re:-v.re,im:-v.im}).collect();lattice.solve(Pole::Real(super::reduced::KERNEL),&x0,inner)?}};
                 let floor=self.floor();(usize::from(self.append(lattice,w,floor)?),steps,residual)
             }
-            Pole::Real(_)|Pole::Complex(_)=>{
-                // A complex pole's real form: the second right-hand side zero.
-                let f:Vec<C>=self.krylov.last().ok_or("Empty Krylov sequence")?.iter().map(|v|C{re:-v.re,im:-v.im}).collect();
+            Pole::Real(_)=>{
                 let b=self.block.min(self.krylov.len());
-                let rhs:Vec<Vec<C>>=if b==1{if pole.copies()==2{vec![f,vec![ZERO;length]]}else{vec![f]}}
-                    else{self.krylov[self.krylov.len()-b..].iter().map(|k|k.iter().map(|v|C{re:-v.re,im:-v.im}).collect()).collect()};
-                let(w,steps,residual)=if b==1{lattice.solve(pole,&rhs,inner)?}else{
-                    // (research, S6) a block: one solve per right-hand side.
-                    let(mut w,mut steps,mut residual)=(Vec::new(),0usize,0_f64);
-                    for f in &rhs{let one=if pole.copies()==2{vec![f.clone(),vec![ZERO;length]]}else{vec![f.clone()]};let(x,st,re)=lattice.solve(pole,&one,inner)?;w.extend(x);steps+=st;residual=residual.max(re);}
-                    (w,steps,residual)};
+                let rhs:Vec<Vec<C>>=self.krylov[self.krylov.len()-b..].iter().map(|k|k.iter().map(|v|C{re:-v.re,im:-v.im}).collect()).collect();
+                let(mut w,mut steps,mut residual)=(Vec::with_capacity(b),0usize,0_f64);
+                for f in &rhs{let(x,st,re)=lattice.solve(pole,f,inner)?;w.push(x);steps+=st;residual=residual.max(re);}
                 let mut added=0;for column in w{added+=self.add_krylov(lattice,column)?;}
                 (added,steps,residual)
             }
@@ -250,7 +225,6 @@ impl Space{
         Ok(added)
     }
     pub fn solves(&self)->usize{self.columns.len()}
-    pub fn krylov_count(&self)->usize{self.krylov.len()}
 }
 
 /// Projects a Hermitian-symmetric field into K: every block x_q loses its
@@ -264,35 +238,10 @@ pub fn project_traces(x:&mut[C],n:usize){
     }
 }
 
-/// The ladder of a request: real poles from LADDER_TOP / t1 down to
-/// 1 / T_max, and the complex poles at the frequencies of x0's slow dressed
-/// centre modes.
-pub fn ladder(eigen:&BlockEigenbasis,initial:&[C],nu:&[f64],t1:f64,longest:f64,tolerance:f64)->Result<Vec<Pole>,String>{
+/// The ladder of a run: real poles from LADDER_TOP / t1 down to 1 / T_max,
+/// PER_DECADE per decade.
+pub fn ladder(t1:f64,longest:f64)->Vec<Pole>{
     let(high,low)=(LADDER_TOP/t1,1./longest);
     let count=((high/low).log10()*PER_DECADE).ceil().max(1.)as usize+1;
-    let sigmas:Vec<f64>=(0..count).map(|i|high*(low/high).powf(i as f64/(count-1)as f64)).collect();
-    let weights=eigen.mode_weights(initial)?;
-    let mut poles:Vec<Pole>=sigmas.iter().map(|&s|Pole::Real(s)).collect();
-    // (research) ATOM_POLES_ALL: every x0-weighted dressed centre frequency is
-    // a candidate, the fast modes' too (no slowness filter |Re lambda| < s).
-    // (research) ATOM_POLES_LATTICE: the lattice modes' frequencies by the same
-    // rule, every weighted dressed centre frequency shifted by every lattice
-    // mode's nu_q (the lattice's dressed modes are lambda_j - i nu_q).
-    let lattice_modes=std::env::var("ATOM_POLES_LATTICE").is_ok();
-    let every=lattice_modes||std::env::var("ATOM_POLES_ALL").is_ok();
-    let shifts:Vec<f64>=if lattice_modes{nu.to_vec()}else{vec![0.]};
-    let fast_only=std::env::var("ATOM_LATTICE_FAST_ONLY").is_ok();
-    for &s in &sigmas{
-        let mut frequencies:Vec<f64>=eigen.lambda.iter().zip(&weights).filter(|(l,&w)|(every||l.re.abs()<s)&&w>=COMPLEX_WEIGHT*tolerance)
-            // (research, S5) ATOM_LATTICE_FAST_ONLY: on a lattice mode (shift
-            // nu != 0) only the modes decaying faster than sigma (the
-            // switch-on transients, whose weights translated copies lack);
-            // the slower families come with the translated copies.
-            .flat_map(|(l,_)|shifts.iter().filter(move|&&v|!fast_only||v==0.||l.re.abs()>=s).map(move|&v|l.im-v)).filter(|&w|w>s).collect();
-        frequencies.sort_by(f64::total_cmp);
-        let mut chosen=vec![0.];
-        for w in frequencies{if chosen.iter().all(|&v|(w-v).abs()>s){chosen.push(w);}}
-        poles.extend(chosen.into_iter().skip(1).map(|w|Pole::Complex(C{re:s,im:w})));
-    }
-    Ok(poles)
+    (0..count).map(|i|Pole::Real(high*(low/high).powf(i as f64/(count-1)as f64))).collect()
 }

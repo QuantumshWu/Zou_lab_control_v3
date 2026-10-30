@@ -50,7 +50,7 @@ export class IpcNativeLane {
     const convert=()=>{
       const result=message.result;
       validateAtomicResult(result,job.payload);
-      return {...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:this.owner.binarySha256,buildSha256:this.owner.build.sha256,asymptoticCacheHit:false,startup:{...w.startup}}};
+      return {...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:this.owner.binarySha256,buildSha256:this.owner.build.sha256,meanCacheHit:false,startup:{...w.startup}}};
     };
     if(message.progress!==undefined){
       try{if(message.progress!=='checkpoint'||!job.onProgress)throw Error('Unexpected native progress message.');job.onProgress(convert());}

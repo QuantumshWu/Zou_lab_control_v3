@@ -27,47 +27,47 @@ test('the time T goes to the solver, and the reader takes that T\'s mean',()=>{
   assert.equal(Object.hasOwn(prepareNativeSolve({scene,options:{}}).payload.options,'meanHorizonUs'),false);
   const states=buildFullMasterModel(scene,scene.dynamics).states,index=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
   const data={...nativeResult({states,initialIndex:index,timesUs:[0]}),assumptions:[]};
-  assert.equal(normalizeDynamicsResult(data,scene).steady.horizonUs,1e6,'the scene\'s T unless said');
-  assert.equal(normalizeDynamicsResult(data,scene,undefined,1e5).steady.horizonUs,1e5);
+  assert.equal(normalizeDynamicsResult(data,scene).mean.horizonUs,1e6,'the scene\'s T unless said');
+  assert.equal(normalizeDynamicsResult(data,scene,undefined,1e5).mean.horizonUs,1e5);
   assert.throws(()=>normalizeDynamicsResult(data,scene,undefined,42),/长期布居时刻 T/,'no mean at another T');
 });
 
-/** A mean result at T `horizonUs` with the mean at both T (asymptoticHorizons). */
+/** A mean result at T `horizonUs` with the mean at both T (meanHorizons). */
 function meanData(options={}){
   const scene=defaultScene(),states=buildFullMasterModel(scene,scene.dynamics).states,index=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
   return {scene,data:{...nativeResult({states,initialIndex:index,timesUs:[0],...options}),assumptions:[]}};
 }
-const entry=(data,T)=>data.asymptoticHorizons.find(e=>e.horizonUs===T);
+const entry=(data,T)=>data.meanHorizons.find(e=>e.horizonUs===T);
 
 test('every mean run returns the mean at both standard T: the requested T\'s is the mean itself',()=>{
   const {scene,data}=meanData({horizonUs:1e5,meanError:.001,horizonErrors:{'1000000':.009}});
   const result=normalizeDynamicsResult(data,scene,undefined,1e5);
   assert.deepEqual(result.horizonMeans.map(s=>s.horizonUs),HORIZONS,'one per T, in order');
   assert.deepEqual(HORIZONS,[1e5,1e6],'100 ms and 1 s: no t → ∞');
-  assert.strictEqual(result.horizonMeans[0],result.steady,'the requested T\'s is the primary mean, its diagnostics and all');
+  assert.strictEqual(result.horizonMeans[0],result.mean,'the requested T\'s is the primary mean, its diagnostics and all');
   assert.deepEqual(result.horizonMeans.map(s=>[s.estimatedError,s.withinTolerance]),[[.001,true],[.009,false]]);
   assert.equal(result.horizonMeans[1].converged,true,'outside ε is still computed, and shown with its error');
   assert.equal(result.horizonMeans[1].method,'test mean');
   assert.ok(result.horizonMeans[1].density,'each T keeps its complex density');
   // The order of the list is the solver's; the reader keys it by T.
-  assert.equal(normalizeDynamicsResult({...data,asymptoticHorizons:[...data.asymptoticHorizons].reverse()},scene,undefined,1e5).steady.estimatedError,.001);
+  assert.equal(normalizeDynamicsResult({...data,meanHorizons:[...data.meanHorizons].reverse()},scene,undefined,1e5).mean.estimatedError,.001);
   // A trajectory alone carries no mean, and no list.
   const {data:none}=meanData({mean:false});assert.equal(normalizeDynamicsResult(none,scene).horizonMeans,undefined);
 });
 
-test('asymptoticHorizons is read strictly, every T under the same rules',()=>{
+test('meanHorizons is read strictly, every T under the same rules',()=>{
   const {scene,data}=meanData({horizonUs:1e6,meanError:.001});
   const variants=[
-    ['a T missing',d=>{d.asymptoticHorizons.pop();}],
-    ['a T twice',d=>{d.asymptoticHorizons[1]={...d.asymptoticHorizons[0]};}],
-    ['a third entry',d=>{d.asymptoticHorizons.push({...d.asymptoticHorizons[0],horizonUs:3e6});}],
-    ['a t → ∞ entry beside them',d=>{d.asymptoticHorizons.push({...d.asymptoticHorizons[0],horizonUs:null});}],
+    ['a T missing',d=>{d.meanHorizons.pop();}],
+    ['a T twice',d=>{d.meanHorizons[1]={...d.meanHorizons[0]};}],
+    ['a third entry',d=>{d.meanHorizons.push({...d.meanHorizons[0],horizonUs:3e6});}],
+    ['a t → ∞ entry beside them',d=>{d.meanHorizons.push({...d.meanHorizons[0],horizonUs:null});}],
     ['an entry at t → ∞ for a T',d=>{entry(d,1e6).horizonUs=null;}],
     ['another T',d=>{entry(d,1e6).horizonUs=3e6;}],
     ['T absent',d=>{delete entry(d,1e6).horizonUs;}],
     ['a status of the t → ∞ limit',d=>{entry(d,1e5).status='initial-dependent-time-average';}],
     ['a stationary state',d=>{entry(d,1e5).status='stationary';}],
-    ['not an object',d=>{d.asymptoticHorizons[0]=[1];}],
+    ['not an object',d=>{d.meanHorizons[0]=[1];}],
     ['an unknown status',d=>{entry(d,1e5).status='periodic-mean';}],
     ['not requested in the list',d=>{entry(d,1e5).status='not-requested';}],
     ['a reason that is no text',d=>{entry(d,1e5).reason=7;}],
@@ -93,5 +93,5 @@ test('a T the run did not resolve is said so, and the requested mean may be that
   result=normalizeDynamicsResult(data,scene);assert.equal(result.horizonMeans[0].estimatedError,null,'absent and null are the same here');
   // The mean asked for at 100 ms, not resolved: the requested mean says so, and 1 s stands.
   result=normalizeDynamicsResult(data,scene,undefined,1e5);
-  assert.equal(result.steady.converged,false);assert.strictEqual(result.horizonMeans[0],result.steady);assert.equal(result.horizonMeans[1].converged,true);
+  assert.equal(result.mean.converged,false);assert.strictEqual(result.horizonMeans[0],result.mean);assert.equal(result.horizonMeans[1].converged,true);
 });

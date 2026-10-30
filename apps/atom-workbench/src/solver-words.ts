@@ -5,8 +5,8 @@ import {formatNumber} from './format.js';
 
 /** Sentences the native solver is known to write (rust-solver/src/lattice_core_adapter.rs), and the client's own. */
 const SENTENCES:Record<string,string>={
-  "Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically): one rational Krylov space from the initial state, every output read from one Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, its error estimated per output from the reduced model's residual, the omitted ring and the fold rests the lattice leaves out":
-    '完整 32 态密度矩阵在折叠 Fourier 晶格上的 Lindblad 动力学（显式电荷按混合、种子幅度与环条件选取，连同其环；远离的谐波静态折叠）：从初态出发的一个有理 Krylov 空间，每个输出都由 Schrieffer–Wolff/Floquet 框架度量下的同一个 Galerkin 约化模型读出，误差按输出由约化模型的残差、省略的环和晶格留下的折叠余项估计。',
+  "Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude, ring condition and the initial state's a-priori transfers, and their ring; far harmonics folded statically by a truncation rule): one block rational Krylov space from the initial state and its translations, every output read from one Petrov-Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, each output's error estimated from its convergence over the last four checkpoints":
+    '完整 32 态密度矩阵在折叠 Fourier 晶格上的 Lindblad 动力学（显式电荷按混合、种子幅度、环条件与初态的先验转移选取，连同其环；远离的谐波按截断规则静态折叠）：从初态及其平移出发的一个分块有理 Krylov 空间，每个输出都由 Schrieffer–Wolff/Floquet 框架度量下的同一个 Petrov–Galerkin 约化模型读出，误差按输出由它在最近四个检查点上的收敛估计。',
   'Phase average at the horizon (horizonUs) of the full driven Lindblad equation from the specified initial density: the state at T with only its fast oscillations (beats, optical micromotion) averaged out, not a time-independent density.':
     '完整受驱 Lindblad 方程从给定初始密度矩阵出发在时刻 T 的相位平均：T 时刻的态只平均掉快振荡（拍频与光频微运动），不是不随时间变化的密度矩阵。',
   'State at the horizon (horizonUs) of the undriven Lindblad equation from the specified initial density, its optical coherences averaged out in the laboratory frame.':
@@ -24,7 +24,6 @@ const num=(text:string):string=>{const value=Number(text);return Number.isFinite
 const WHY:readonly [RegExp,(...groups:string[])=>string][]=[
   [/^the error bound stopped improving \((\S+)x over (\d+) checkpoints\) after (\d+) solves$/,(gain,k,n)=>`误差界在最近 ${k} 个检查点内没有改善到 1/${gain}（共 ${n} 次求解）`],
   [/^the basis memory was spent after (\d+) solves$/,n=>`基的内存在 ${n} 次求解后用尽`],
-  [/^the pole ladder was exhausted after (\d+) solves$/,n=>`极点阶梯在 ${n} 次求解后用尽`],
   [/^the solve budget \((\d+)\) was spent$/,n=>`求解次数预算（${n} 次）已用完`],
 ];
 const why=(text:string):string=>{for(const [pattern,words] of WHY){const match=pattern.exec(text);if(match)return words(...match.slice(1));}return text;};
@@ -41,8 +40,7 @@ const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
     (modes,need,budget)=>`未求解（不收敛）：此请求的晶格有 ${modes} 个模式，约需 ${need} GB 内存，超过 ${budget} GB 的内存预算。`],
   [/^The trajectory duration is limited to 10 s \(requested (\S+) s\)$/,seconds=>`轨迹时长最长 10 s（请求为 ${num(seconds)} s），未计算。`],
   [/^A trajectory has 2 to (\d+) samples \(requested (\d+)\)$/,(most,samples)=>`轨迹的采样点数应为 2 至 ${most}（请求为 ${samples}），未计算。`],
-  [/^Static fold expansion parameter (\S+) is above (\S+): the fold's frequency expansion is not small on this lattice, not solved$/,
-    (parameter,limit)=>`未求解（不收敛）：静态折叠的展开参数为 ${num(parameter)}，高于 ${num(limit)}，折叠的频率展开在此晶格上不够小。`],
+  [/^An output time is at most (\S+) us \(10 s; requested (\S+) us\)$/,(most,requested)=>`输出时刻最长 10 s（${num(most)} µs；请求为 ${num(requested)} µs），未计算。`],
 ];
 /** A solver sentence in Chinese; one this table does not know is shown as written. */
 export function solverText(text:string):string{

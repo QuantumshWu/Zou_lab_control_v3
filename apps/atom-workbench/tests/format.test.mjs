@@ -53,7 +53,7 @@ const formatted=(source,start,values)=>{
 const chinese=(english,name)=>{const text=solverText(english);
   assert.notEqual(text,english,name);assert.match(text,/[\u4e00-\u9fff]/,name);assert.doesNotMatch(text,/\b(the|is|of|above|after)\b/,name);return text;};
 test('the stop and checkpoint reasons the solver formats are shown in Chinese',()=>{
-  const whys=[['the error bound stopped improving',[2,3,48]],['the basis memory was spent',[30]],['the pole ladder was exhausted',[12]],['the solve budget',[48]]]
+  const whys=[['the error bound stopped improving',[2,3,48]],['the basis memory was spent',[30]],['the solve budget',[48]]]
     .map(([start,values])=>formatted(pipelineSource,start,values));
   const samples=formatted(pipelineSource,'; {} of {} samples above it',[5,1000,'0.0200','0.1001']);
   const means=formatted(pipelineSource,'; {means} mean output(s) above it',[1]);
@@ -66,7 +66,7 @@ test('the stop and checkpoint reasons the solver formats are shown in Chinese',(
   chinese(formatted(adapterSource,"The mean's error bound is",['3.61e0']),'uninformative mean');
   // A request stopped before its first solve: nothing computed, the reason alone.
   chinese(formatted(pipelineSource,'The lattice of this request has',[150,'5.3','5']),'memory guard');
-  chinese(formatted(pipelineSource,'Static fold expansion parameter',['2.3e-2','1e-2']),'expansion not small');
+  chinese(formatted(pipelineSource,'An output time is at most',['1e7','1.5e7']),'an output time beyond 10 s');
   // A grid the solver does not solve: refused with the reason.
   assert.match(chinese(formatted(adapterSource,'The trajectory duration is limited',['15']),'too long'),/10 s.*15 s/);
   assert.match(chinese(formatted(adapterSource,'A trajectory has 2 to',[2000,2001]),'too many samples'),/2 至 2000.*2001/);

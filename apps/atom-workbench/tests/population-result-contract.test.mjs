@@ -17,7 +17,7 @@ function fixture(){
 }
 function meanFixture(f){
   const mean=response(nativeResult({states:f.states,initialIndex:f.index,timesUs:[0]}));
-  Object.assign(mean.diagnostics,{asymptoticTraceError:2e-7,asymptoticPositivityError:1e-5});
+  Object.assign(mean.diagnostics,{meanTraceError:2e-7,meanPositivityError:1e-5});
   return mean;
 }
 
@@ -26,7 +26,7 @@ test('a finite result accepts complete all-group accuracy without claiming a den
   const result=normalizeDynamicsResult(f.data,f.scene);
   assert.equal(result.populationAccuracy.requestedTolerance,.005);
   assert.equal(result.populationAccuracy.scope.groups.length,POPULATION_GROUPS.length);
-  assert.equal(result.steady.density,undefined);
+  assert.equal(result.mean.density,undefined);
   f.data.populationAccuracy.scope.groups.pop();
   assert.equal(result.populationAccuracy.scope.groups.length,POPULATION_GROUPS.length);
 });
@@ -65,15 +65,15 @@ test('a finite result retains finite, probability, trace, initial and no-density
 
 test('mean trace, positivity and complex-density gates hold in mean and finite results alike',()=>{
   const f=fixture(),mean=meanFixture(f);
-  assert.equal(normalizeDynamicsResult(mean,f.scene).steady.converged,true);
-  for(const [key,value] of [['asymptoticPositivityError',undefined],['asymptoticPositivityError',.0002],['asymptoticPositivityError',NaN],['asymptoticTraceError',6e-6]]){
+  assert.equal(normalizeDynamicsResult(mean,f.scene).mean.converged,true);
+  for(const [key,value] of [['meanPositivityError',undefined],['meanPositivityError',.0002],['meanPositivityError',NaN],['meanTraceError',6e-6]]){
     const bad=structuredClone(mean);bad.diagnostics[key]=value;
     assert.throws(()=>normalizeDynamicsResult(bad,f.scene),/长期密度数值验证信息/);
   }
   // As the writer merges: the mean's entries; finite diagnostics win.
-  const combined={...f.data,asymptoticHorizons:mean.asymptoticHorizons,diagnostics:{...mean.diagnostics,...f.data.diagnostics}};
-  assert.equal(normalizeDynamicsResult(combined,f.scene).steady.converged,true);
-  const missing=structuredClone(combined);delete missing.diagnostics.asymptoticPositivityError;
+  const combined={...f.data,meanHorizons:mean.meanHorizons,diagnostics:{...mean.diagnostics,...f.data.diagnostics}};
+  assert.equal(normalizeDynamicsResult(combined,f.scene).mean.converged,true);
+  const missing=structuredClone(combined);delete missing.diagnostics.meanPositivityError;
   assert.throws(()=>normalizeDynamicsResult(missing,f.scene),/长期密度/);
   const invalid=structuredClone(combined);entryAt(invalid).densityImag[f.index*32+f.index]=.01;
   assert.throws(()=>normalizeDynamicsResult(invalid,f.scene),/长期复密度/);
@@ -86,8 +86,8 @@ test('transport binds population accuracy to the fixed requested accuracy and th
     calls++;const body=JSON.parse(init.body);
     return new Response(JSON.stringify({...reply,request:body.request}),{headers:{'Content-Type':'application/json'}});
   }});t.after(()=>client.dispose());
-  // The reply is a trajectory alone (no mean): what a request with includeAsymptotic false gets.
-  const alone={includeAsymptotic:false};
+  // The reply is a trajectory alone (no mean): what a request with includeMean false gets.
+  const alone={includeMean:false};
   await assert.rejects(client.solve(f.scene,f.scene.dynamics,alone),/不完整或无效/);
   reply=f.data;
   assert.equal((await client.solve(f.scene,f.scene.dynamics,alone)).populationAccuracy.requestedTolerance,.005);

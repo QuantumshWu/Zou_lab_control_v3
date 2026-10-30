@@ -26,8 +26,8 @@ export function installSelfTest({adapter,postNative}){
  }
  function validateRequest(body){
   if(!body?.scene||!body.request||!body.options)throw Error('The real app sent an incomplete solve request.');
-  if(body.options.steadyOnly!==false)throw Error('Full-app test expected finite evolution, not the initial levels-tab mean.');
-  if(body.options.includeAsymptotic!==true)throw Error('Full-app test must exercise the complete mean + trajectory result.');
+  if(body.options.meanOnly!==false)throw Error('Full-app test expected finite evolution, not the initial levels-tab mean.');
+  if(body.options.includeMean!==true)throw Error('Full-app test must exercise the complete mean + trajectory result.');
   if(expected?.modelSchema!==undefined&&body.modelSchema!==expected.modelSchema)throw Error('UI model schema differs from test input.');
   for(const key of ['durationUs','samples','initialStateId']){
    if(expected?.options?.[key]!==undefined&&body.options[key]!==expected.options[key])throw Error(`UI ${key} differs from the seeded reference request.`);

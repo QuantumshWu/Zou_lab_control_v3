@@ -101,7 +101,7 @@ class NativeLane {
         try{
           if(message.progress!=='checkpoint'||!job.onProgress)throw Error('Unexpected native progress message.');
           const result=message.result;validateAtomicResult(result,job.payload);
-          job.onProgress({...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:w.identity.sha256,buildSha256:this.owner.build.sha256,asymptoticCacheHit:false}});
+          job.onProgress({...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:w.identity.sha256,buildSha256:this.owner.build.sha256,meanCacheHit:false}});
         }catch(error){this.failWorker(w,failure(error.message,502,'invalid-native-response'));return;}
         continue;
       }
@@ -113,7 +113,7 @@ class NativeLane {
           const result=message.result;
           validateAtomicResult(result,job.payload);
           this.owner.finish(job,null,{...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:w.identity.sha256,buildSha256:this.owner.build.sha256,
-            asymptoticCacheHit:false}});
+            meanCacheHit:false}});
         }catch(error){this.owner.finish(job,failure(error.message,502,'invalid-native-response'));this.retire();}
       }
       this.schedule(0);
@@ -189,7 +189,7 @@ export async function createAtomServer(options={}){
       const negotiated=workers.find(worker=>worker.status==='ready'||worker.status==='busy');
       send(ready?200:503,{ready,accepting:!service.closed,engine:'Rust master equation',protocol:HTTP_PROTOCOL,
         nativeProtocol:negotiated?.nativeProtocol??null,capabilities:negotiated?.capabilities??[],requiredNativeProtocol:NATIVE_PROTOCOL,
-        modelSchema:FULL_MODEL_SCHEMA,configuredBinary,build,workers,pending:service.current.size,asymptoticCache:{enabled:false,size:0}});return;
+        modelSchema:FULL_MODEL_SCHEMA,configuredBinary,build,workers,pending:service.current.size,meanCache:{enabled:false,size:0}});return;
     }
     if(pathname==='/api/solve'&&request.method==='POST'){
       if(!request.headers['content-type']?.startsWith('application/json')){send(415,{error:'JSON required'});return;}
@@ -207,8 +207,8 @@ export async function createAtomServer(options={}){
         const native=prepareNativeSolve(payload),options=native.payload.options;
         task=service.submit(native.payload,token,streaming?result=>streamEvent({type:'checkpoint',data:native.respond(result,token)}):undefined);
         const result=await task.promise;
-        const mean=result.asymptoticHorizons?.find(entry=>entry.horizonUs===(options.meanHorizonUs??1e6));
-        if(options.includeAsymptotic&&!mean?.populations)await recordFailure({time:new Date().toISOString(),request:token,scene:payload.scene,options,buildSha256:build.sha256,binarySha256:result.service?.binarySha256??configuredBinary.sha256,status:mean?.status,diagnostics:result.diagnostics}).catch(()=>{});
+        const mean=result.meanHorizons?.find(entry=>entry.horizonUs===(options.meanHorizonUs??1e6));
+        if(options.includeMean&&!mean?.populations)await recordFailure({time:new Date().toISOString(),request:token,scene:payload.scene,options,buildSha256:build.sha256,binarySha256:result.service?.binarySha256??configuredBinary.sha256,status:mean?.status,diagnostics:result.diagnostics}).catch(()=>{});
         send(200,native.respond(result,token));
       }catch(error){const evidence={time:new Date().toISOString(),request:submitted?.request,scene:submitted?.scene,options:submitted?.options,buildSha256:build.sha256,binarySha256:configuredBinary.sha256,error:error.message,code:error.code??'invalid-request',httpStatus:error.status??400};if(submitted?.scene&&error.code!=='superseded')await recordFailure(evidence).catch(()=>{});send(error.status??400,{error:error.message,code:error.code??'invalid-request',service:{buildSha256:build.sha256,binarySha256:configuredBinary.sha256}});}
       finally{response.removeListener('close',disconnected);}return;
@@ -222,7 +222,7 @@ export async function createAtomServer(options={}){
   server.requestTimeout=15000;
   let closing;
   const close=()=>closing??=Promise.all([service.close(),new Promise(accept=>{server.close(accept);server.closeAllConnections();})]).then(()=>{});
-  await Promise.all([service.lanes.steady.start(),service.lanes.trajectory.start()]);
+  await Promise.all([service.lanes.mean.start(),service.lanes.trajectory.start()]);
   return {server,service,close};
 }
 

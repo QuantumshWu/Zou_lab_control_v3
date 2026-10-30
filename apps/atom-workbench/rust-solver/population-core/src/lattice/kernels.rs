@@ -1,5 +1,6 @@
-//! The Schrieffer-Wolff kernels of the error propagation, in the shared
-//! eigenbasis of L0' (`eigenbasis`, complex eigen-coordinates).
+//! The Schrieffer-Wolff kernels of the request's frame (`frame`), in the
+//! shared eigenbasis of L0' (`eigenbasis`, complex eigen-coordinates): the
+//! reduced model's metric and the a-priori amplitudes (`apriori`) read them.
 //!
 //! Every explicit near step s couples mode q - s to q through C_s. The
 //! first-order generator S of the lattice's block-diagonalization has the
@@ -28,10 +29,23 @@
 //! whose eigen-coordinates are conjugated and permuted (`partner`), so the
 //! kernels of -s are C~_-s[i, j] = conj C~_s[i*, j*] and likewise X~, K~;
 //! only one step of each pair is computed.
-use super::super::*;
-use super::super::eigenbasis::BlockEigenbasis;
+use super::*;
+use super::eigenbasis::BlockEigenbasis;
 use crate::parallel::Execution;
 
+/// Kernel support: the first-order entry floor and the horizon floor on an
+/// entry's second-order rate times the longest output time. Measured: the
+/// reduced model's metric (`frame`) on five lasers + tweezer at 20 us grew
+/// 2-19 pseudo-modes from the 12th solve at 5e-3 (accepted at 40 solves),
+/// none at 1e-3 (0.6-2% of the entries; accepted at 12), 1e-4 or 1e-5.
+pub const KERNEL_ENTRY:f64=1e-3;
+pub const KERNEL_HORIZON_RATE:f64=1e-2;
+/// Near-resonant entries above this stay couplings: the first-order
+/// kernel is no small parameter there. Derived: |X~| = 1 is where the
+/// expansion stops being small (measured without the trap: the 1675 rad/us
+/// step's kernel has 212 entries above 1, the largest 24, near an optical
+/// resonance).
+pub const KERNEL_CAP:f64=1.;
 /// Columns of C~_s and K~_s per task: a step's coordinate change is a
 /// d x d x d product, spread over the workers even when the steps are
 /// fewer.
@@ -55,9 +69,6 @@ pub struct StepKernel{
     /// The index of -s.
     pub opposite:usize,
     pub entries:Vec<(usize,usize,C)>,
-    /// (research) The near-resonant pairs (|X~_ij| above the cap), left as
-    /// couplings: (row, column).
-    pub resonant:Vec<(usize,usize)>,
 }
 
 pub struct SwKernels{
@@ -77,49 +88,38 @@ impl SwKernels{
         // Steps in plan order, each with its opposite.
         let mut steps=Vec::with_capacity(explicit.len());
         for &i in &explicit{let st=&plan.steps[i];
-            let opposite=position(&opposite(&st.charge)).ok_or("Estimator kernels: an explicit step without its opposite")?;
-            steps.push(StepKernel{charge:st.charge.clone(),nu:st.nu,opposite,entries:Vec::new(),resonant:Vec::new()});}
+            let opposite=position(&opposite(&st.charge)).ok_or("Frame kernels: an explicit step without its opposite")?;
+            steps.push(StepKernel{charge:st.charge.clone(),nu:st.nu,opposite,entries:Vec::new()});}
         let vectors=basis.eigenvector_blocks();let lambda=&basis.lambda;
         let execution=Execution::new()?;
         let computed:Vec<usize>=(0..steps.len()).filter(|&s|steps[s].charge>steps[steps[s].opposite].charge).collect();
         // C~_s (column j = coordinates of C_s e_j) and the kept entries of
         // X~_s, by column panels.
         let tasks:Vec<(usize,usize)>=(0..computed.len()).flat_map(|slot|(0..d).step_by(KERNEL_PANEL).map(move|start|(slot,start))).collect();
-        let panels=execution.map(tasks.clone(),|(slot,start)|->Result<(Vec<C>,Vec<(usize,usize,C)>,Vec<(usize,usize)>),String>{
+        let panels=execution.map(tasks.clone(),|(slot,start)|->Result<(Vec<C>,Vec<(usize,usize,C)>),String>{
             let step=&steps[computed[slot]];let op=&prepared.generator.components[&step.charge].op;let end=(start+KERNEL_PANEL).min(d);
             let mut image=vec![ZERO;d*(end-start)];let mut scratch=Vec::new();
             for j in start..end{op.apply_into(n,ONE,&vectors[j*d..(j+1)*d],&mut image[(j-start)*d..(j-start+1)*d],&mut scratch);}
             let blocks:Vec<&[C]>=image.chunks_exact(d).collect();
             let c=basis.coefficients(&blocks)?;drop(image);
-            let mut entries=Vec::new();let mut resonant=Vec::new();
+            let mut entries=Vec::new();
             for j in start..end{for i in 0..d{
                 let den=C{re:lambda[i].re-lambda[j].re,im:lambda[i].im-lambda[j].im-step.nu};
                 let num=c[i+d*(j-start)];let s2=den.re*den.re+den.im*den.im;if s2==0.{continue;}
                 let x=C{re:-(num.re*den.re+num.im*den.im)/s2,im:-(num.im*den.re-num.re*den.im)/s2};
                 let size=magnitude(x);
                 if size<=rule.cap&&(size>=rule.entry||(rule.horizon_rate>0.&&size*magnitude(num)*rule.horizon>=rule.horizon_rate)){entries.push((i,j,x));}
-                else if size>rule.cap{resonant.push((i,j));}
-                if size>rule.cap&&std::env::var("ATOM_DIAG_KERNELS").is_ok(){eprintln!("DBG kernel-cap step {:?} nu {:.4e} i {i} j {j} |X| {size:.3e} |C| {:.3e} den {:.3e}{:+.3e}i lambda_i {:.3e}{:+.3e}i lambda_j {:.3e}{:+.3e}i",step.charge,step.nu,magnitude(num),den.re,den.im,lambda[i].re,lambda[i].im,lambda[j].re,lambda[j].im);}
             }}
-            Ok((c,entries,resonant))
+            Ok((c,entries))
         });
         let mut whole:Vec<(Vec<C>,Vec<(usize,usize,C)>)>=computed.iter().map(|_|(Vec::with_capacity(d*d),Vec::new())).collect();
-        let mut resonant:Vec<Vec<(usize,usize)>>=computed.iter().map(|_|Vec::new()).collect();
-        for(&(slot,_),panel)in tasks.iter().zip(panels){let(part,entries,res)=panel?;whole[slot].0.extend(part);whole[slot].1.extend(entries);resonant[slot].extend(res);}
+        for(&(slot,_),panel)in tasks.iter().zip(panels){let(part,entries)=panel?;whole[slot].0.extend(part);whole[slot].1.extend(entries);}
         let mut second_order:Vec<Option<Vec<C>>>=(0..steps.len()).map(|_|None).collect();
         for(&s,(c,entries))in computed.iter().zip(whole){
-            if std::env::var("ATOM_DIAG_KERNELS").is_ok(){
-                let sizes:Vec<f64>=entries.iter().map(|e|magnitude(e.2)).collect();let max=sizes.iter().copied().fold(0.,f64::max);
-                let above=|a:f64|sizes.iter().filter(|&&x|x>a).count();
-                let cmax=entries.iter().map(|&(i,j,_)|magnitude(c[i+d*j])).fold(0.,f64::max);
-                eprintln!("DBG kernel-kept step {:?} nu {:.4e} entries {} max|X| {max:.3e} >0.1 {} >0.3 {} >0.5 {} max|C| of kept {cmax:.3e}",steps[s].charge,steps[s].nu,entries.len(),above(0.1),above(0.3),above(0.5));
-            }
             let k=second_order_block(&execution,&c,&entries,&partner,d);let o=steps[s].opposite;
             steps[o].entries=entries.iter().map(|&(i,j,x)|(partner[i],partner[j],conj(x))).collect();
             steps[s].entries=entries;second_order[s]=Some(k);
         }
-        for(slot,&s)in computed.iter().enumerate(){let o=steps[s].opposite;
-            steps[o].resonant=resonant[slot].iter().map(|&(i,j)|(partner[i],partner[j])).collect();steps[s].resonant=std::mem::take(&mut resonant[slot]);}
         Ok(Self{steps,second_order,partner})
     }
     /// out += K~_s (column-major d x d).
@@ -165,11 +165,11 @@ fn second_order_block(execution:&Execution,c:&[C],entries:&[(usize,usize,C)],par
 #[cfg(test)]
 mod tests{
     use super::*;
-    use super::super::super::tests::{fixture,prepared};
+    use super::super::tests::{fixture,prepared};
     /// Dense d x d helpers (row-major).
     fn product(a:&[C],b:&[C],d:usize)->Vec<C>{let mut c=vec![ZERO;d*d];for i in 0..d{for k in 0..d{let x=a[i*d+k];if !nonzero(x){continue;}for j in 0..d{mul_add(&mut c[i*d+j],x,b[k*d+j]);}}}c}
     #[test]
-    fn estimator_kernels_solve_the_lattice_sylvester_equation(){
+    fn frame_kernels_solve_the_lattice_sylvester_equation(){
         // Every entry kept: X_s = E X~_s E^-1 solves L0' X - X L0' - i nu_s X
         // = -C_s in density coordinates, the mirrored step's kernel is the
         // flip of the computed one, and K~_s is 1/2 (C_-s X_s - X_-s C_s).

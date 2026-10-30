@@ -9,15 +9,16 @@
 //! them are far). Far steps are folded at second order; a far + far pair with
 //! a nonzero near sum t joins the fold target K_t when its group is at least
 //! CROSS_FOLD_FLOOR of the diagonal (t = 0) fold and at least the structural
-//! coupling floor, otherwise it is omitted and its bound charged (`ledger`):
-//! below the floor it would be a non-structural coupling at best, while a
-//! fold edge carries dense sector blocks (without a tweezer the
-//! counter-rotating cross folds land on near charges at about 1e-9 of the
-//! near couplings, each with some 0.6M stored entries). Near steps below the
-//! structural coupling floor do not grow the near ball; they still act
-//! exactly on every lattice edge, and their edges leaving the lattice are
-//! charged. The structural steps and the kept fold targets generate the near
-//! ball and the rings of the explicit charges (`charge_set`).
+//! coupling floor, otherwise it is an omitted target, which a run's fold
+//! keeps or drops by the truncation rule (`fold`): below the floor it would
+//! be a non-structural coupling at best, while a fold edge carries dense
+//! sector blocks (without a tweezer the counter-rotating cross folds land on
+//! near charges at about 1e-9 of the near couplings, each with some 0.6M
+//! stored entries). Near steps below the structural coupling floor do not
+//! grow the near ball; they still act exactly on every lattice edge, and a
+//! charge they carry x0 to beyond the lattice joins it by the a-priori rule
+//! (`apriori`). The structural steps and the kept fold targets generate the
+//! near ball and the rings of the explicit charges (`charge_set`).
 use super::*;
 use crate::preparation::{FOLD_GAP_RATIO,STRUCTURAL_COUPLING_FLOOR};
 
@@ -25,7 +26,7 @@ use crate::preparation::{FOLD_GAP_RATIO,STRUCTURAL_COUPLING_FLOOR};
 /// ||(L0 - i nu)^-1|| <= 1/(|nu| - ||L0||) holds with room to spare.
 pub const FOLD_DISTANCE:f64=2.;
 /// Relative size (to the diagonal fold) below which a far + far group
-/// landing on a nonzero near charge is omitted and charged.
+/// landing on a nonzero near charge is an omitted target (`fold`).
 pub const CROSS_FOLD_FLOOR:f64=1e-6;
 
 #[derive(Clone,Debug,PartialEq)]

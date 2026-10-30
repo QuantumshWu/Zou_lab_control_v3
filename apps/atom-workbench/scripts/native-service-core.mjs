@@ -4,7 +4,7 @@ const cancelled=()=>failure("已取消被更新参数替代的求解。",409,"su
 
 export function createNativeServiceClass(NativeLane){
 return class NativeService {
-  constructor(options){Object.assign(this,options);this.sequence=0;this.closed=false;this.verified=false;this.current=new Map();this.seen=new Map();this.lanes={steady:new NativeLane(this,'steady'),trajectory:new NativeLane(this,'trajectory')};}
+  constructor(options){Object.assign(this,options);this.sequence=0;this.closed=false;this.verified=false;this.current=new Map();this.seen=new Map();this.lanes={mean:new NativeLane(this,'mean'),trajectory:new NativeLane(this,'trajectory')};}
   submit(payload,token,onProgress){
     if(this.closed)return {promise:Promise.reject(failure('Service is shutting down.')),cancel:()=>{}};
     const previousSequence=this.seen.get(token.clientId);
@@ -13,9 +13,9 @@ return class NativeService {
     if(this.current.size>=8)return {promise:Promise.reject(failure('求解请求过多，请稍后重试。',429,'queue-full')),cancel:()=>{}};
     this.seen.delete(token.clientId);this.seen.set(token.clientId,token.sequence);
     if(this.seen.size>128)for(const id of this.seen.keys())if(!this.current.has(id)){this.seen.delete(id);break;}
-    // Requests are serial per lane: steadyOnly means run on the steady lane,
+    // Requests are serial per lane: meanOnly means run on the mean lane,
     // finite trajectories (with their inline mean) on the trajectory lane.
-    const lane=this.lanes[payload.options.steadyOnly?'steady':'trajectory'];
+    const lane=this.lanes[payload.options.meanOnly?'mean':'trajectory'];
     let job;const promise=new Promise((resolve,reject)=>{
       job={token,nativeId:++this.sequence,payload,lane,resolve,reject,onProgress,settled:false,timer:null};this.current.set(token.clientId,job);
       job.timer=setTimeout(()=>lane.cancel(job,failure('求解超时，已终止对应 Rust 进程；可修改参数后重试。',504,'solver-timeout')),this.solveTimeoutMs);

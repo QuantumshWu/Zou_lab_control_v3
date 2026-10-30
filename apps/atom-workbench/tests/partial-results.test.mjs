@@ -53,14 +53,14 @@ test('the old format, with no per-sample errors or mean error, is no longer read
 
 test('a p̄(T) outside the tolerance is computed and shown, with its estimated error',()=>{
   const r=read(result({timesUs:[0],meanError:.0072}));
-  assert.equal(r.steady.converged,true);assert.equal(r.steady.withinTolerance,false);assert.equal(r.steady.estimatedError,.0072);assert.ok(r.steady.populations);
-  const within=read(result({timesUs:[0],meanError:.001}));assert.equal(within.steady.withinTolerance,true);
+  assert.equal(r.mean.converged,true);assert.equal(r.mean.withinTolerance,false);assert.equal(r.mean.estimatedError,.0072);assert.ok(r.mean.populations);
+  const within=read(result({timesUs:[0],meanError:.001}));assert.equal(within.mean.withinTolerance,true);
   for(const change of [e=>{e.withinTolerance=true;},e=>{e.estimatedError=NaN;},e=>{e.withinTolerance='no';}]){
     const bad=result({timesUs:[0],meanError:.0072});change(entryAt(bad));assert.throws(()=>read(bad),/长期布居误差估计/);
   }
   // 'not-converged': nothing usable computed -- no populations, never within the tolerance.
-  const none=result({timesUs:[0],mean:false});none.asymptoticHorizons=HORIZONS.map(horizonUs=>({horizonUs,status:'not-converged',withinTolerance:false}));
-  assert.equal(read(none).steady.converged,false);
+  const none=result({timesUs:[0],mean:false});none.meanHorizons=HORIZONS.map(horizonUs=>({horizonUs,status:'not-converged',withinTolerance:false}));
+  assert.equal(read(none).mean.converged,false);
   entryAt(none).withinTolerance=true;assert.throws(()=>read(none),/长期布居误差估计/);
 });
 

@@ -34,15 +34,15 @@ export function readPopulationAccuracy(value:unknown,samples:number):PopulationA
     sampleErrors:[...(errors as number[])],...(partial?{reason:a.reason as string}:{}),
     scope:{states:32,samples,groups:[...(groups as string[])]}};
 }
-/** The native mean `status` values (`asymptoticHorizons`): a computed mean p̄(T), the phase
+/** The native mean `status` values (`meanHorizons`): a computed mean p̄(T), the phase
  * average at T ('time-average'), or none. */
 export const CONVERGED_MEAN_STATUSES=['time-average'] as const;
-export type SteadyStatus=typeof CONVERGED_MEAN_STATUSES[number]|'not-converged'|'not-requested';
-export const STEADY_STATUSES:readonly SteadyStatus[]=[...CONVERGED_MEAN_STATUSES,'not-converged','not-requested'];
+export type MeanStatus=typeof CONVERGED_MEAN_STATUSES[number]|'not-converged'|'not-requested';
+export const MEAN_STATUSES:readonly MeanStatus[]=[...CONVERGED_MEAN_STATUSES,'not-converged','not-requested'];
 /** The long-time mean p̄(T) at one time T. */
-export interface SteadyResult {
+export interface MeanResult {
   /** A mean was computed (its status one of CONVERGED_MEAN_STATUSES). */
-  converged:boolean;status:SteadyStatus;populations:Record<string,number>|null;
+  converged:boolean;status:MeanStatus;populations:Record<string,number>|null;
   /** The computed result's estimated population error (null: nothing computed). */
   estimatedError:number|null;
   /** Within the requested tolerance: its bound is within ε. A computed result not within is still
@@ -59,10 +59,10 @@ export interface SteadyResult {
 }
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];
-  activeLaserIds:string[];steady:SteadyResult;
+  activeLaserIds:string[];mean:MeanResult;
   /** The mean at every standard time T (MEAN_HORIZONS_US order), all from the one mean run;
-   * the requested T's is `steady` itself. Absent when no mean was requested. */
-  horizonMeans?:SteadyResult[];
+   * the requested T's is `mean` itself. Absent when no mean was requested. */
+  horizonMeans?:MeanResult[];
   metrics:{totalMs:number};
   validation:{maxTraceError:number;minPopulation:number};
   /** Estimated error of returned populations and all declared groups only. */

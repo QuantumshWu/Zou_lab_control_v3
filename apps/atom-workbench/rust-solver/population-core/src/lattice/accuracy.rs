@@ -1,7 +1,5 @@
-//! The population tolerance and the error metric. What the fold leaves out
-//! is no ledger entry: the truncation rule keeps or drops every piece by its
-//! induced trace norm times the run's longest output time, and bounds what it
-//! dropped on the reduced solution (`fold`, `pipeline`).
+//! The population tolerance and the error metric every output is accepted
+//! by.
 
 /// The population tolerance: absolute, on the probability scale, over every
 /// state and requested group. It is fixed; no other accuracy is served.

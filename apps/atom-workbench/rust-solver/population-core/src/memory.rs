@@ -37,12 +37,3 @@ pub fn physical_bytes() -> Result<f64, String> {
     }
     Ok(status.total_physical as f64)
 }
-
-/// (research, S3) PROCESS_MEMORY_COUNTERS_EX.
-#[repr(C)]
-struct Counters{cb:u32,faults:u32,peak_ws:usize,ws:usize,a:usize,b:usize,c:usize,e:usize,pagefile:usize,peak_pagefile:usize,private:usize}
-#[link(name = "kernel32")]
-extern "system" {fn GetCurrentProcess()->isize;fn K32GetProcessMemoryInfo(p:isize,c:*mut Counters,cb:u32)->i32;}
-/// (research, S3) The process's private bytes and their peak.
-pub fn private_bytes()->(f64,f64){let mut c=Counters{cb:std::mem::size_of::<Counters>() as u32,faults:0,peak_ws:0,ws:0,a:0,b:0,c:0,e:0,pagefile:0,peak_pagefile:0,private:0};
-    if unsafe{K32GetProcessMemoryInfo(GetCurrentProcess(),&mut c,c.cb)}==0{return(0.,0.);}(c.private as f64,c.peak_pagefile as f64)}

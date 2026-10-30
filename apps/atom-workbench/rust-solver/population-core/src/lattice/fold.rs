@@ -15,17 +15,15 @@
 //! (across every kind: the storage of small rest entries, a rest but for its
 //! population rows, an order in nu_q, a cross fold) while the sum of the
 //! dropped pieces' induced trace norms times T, the run's longest output
-//! time, stays within BUILD_SHARE x FOLD_SHARE x tolerance; the far shell's
-//! depth (`ring_targets`) takes the rest of the share at the first checkpoint,
-//! on the reduced solution (`pipeline`). The norms are rigorous: a
+//! time, stays within FOLD_SHARE x tolerance; the far shell's depth
+//! (`ring_targets`) follows the a-priori amplitude rule (`pipeline`, `apriori`:
+//! the far shell's rings landing from x0's a-priori field). The norms are rigorous: a
 //! superoperator X -> A X + X B + sum P X Q is bounded by |A|_2 + |B|_2 +
 //! sum |P|_2 |Q|_2, a stored d x d piece by sqrt(n) sqrt(r c) (r, c its
 //! largest row and column sums: ||Y||_1 <= sqrt(n) ||Y||_F), a far block's
 //! inverse by gamma_s = 1 / (|nu_s| - lambda0) (lambda0 the trace-norm bound
 //! of L0 with its Hamiltonian centred), and the orders in nu_q beyond the
-//! built ones by sum c' c gamma (nu_max gamma)^M / (1 - nu_max gamma). Whatever
-//! is dropped is computed again, by its action on the reduced solution, at
-//! the end of a run (`LatticeOperator::left_out_exact`, `pipeline`).
+//! built ones by sum c' c gamma (nu_max gamma)^M / (1 - nu_max gamma).
 //!
 //! Closed form: L0 = L_c + L_r with L_c the diagonal of L0 (the left and
 //! right factors' diagonals) and L_r the rest (their off-diagonal entries and
@@ -58,19 +56,12 @@ use super::*;
 use super::classification::HarmonicPlan;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
-/// The truncation rule's share eta of the tolerance: the dropped pieces'
+/// The truncation rule's share of the tolerance: the dropped pieces'
 /// trace-norm actions times T sum to at most FOLD_SHARE x tolerance, so they
-/// move the populations by at most half of it, 5% of the tolerance (the
-/// a-posteriori term at the end measures it again on the solution). A
-/// deliberate margin: the reduced model's estimate keeps the other 95%.
-pub const FOLD_SHARE:f64=0.1;
-/// The share of the rule's budget a run's build may spend; the far shell's
-/// depth, decided at the first checkpoint on the reduced solution, takes the
-/// rest. The build cannot know the depth's share (the rings' actions on the
-/// solution), so it may not spend the whole budget: half, so that the depth
-/// needs no restart of the build's choices.
-pub const BUILD_SHARE:f64=0.5;
-/// The never-built orders in nu_q may take at most this share of the build's
+/// move the populations by at most half of it, 2.5% of the tolerance. A
+/// deliberate margin: the reduced model's convergence keeps the rest.
+pub const FOLD_SHARE:f64=0.05;
+/// The never-built orders in nu_q may take at most this share of the rule's
 /// budget (the orders are chosen so).
 const EXPANSION_SHARE:f64=1e-2;
 /// Orders in nu_q a fold builds at most.
@@ -179,7 +170,7 @@ pub struct FoldDiagnostics{
     /// far step (charge, rho_s, the series' terms).
     pub rest_bound:f64,pub lambda0:f64,pub series:Vec<(Charge,f64,usize)>,
     /// The rule (None: the frame's fold, every piece kept): T (us), the
-    /// lattice's largest |nu_q|, the build's budget (trace norm x T); the
+    /// lattice's largest |nu_q|, the rule's budget (trace norm x T); the
     /// orders built; what was dropped.
     pub rule:Option<FoldRule>,pub orders:usize,pub dropped:DroppedPieces,
     pub milliseconds:f64,
@@ -192,8 +183,8 @@ pub struct FoldDiagnostics{
 #[derive(Clone,Copy,Debug)]
 pub struct FoldRule{pub horizon:f64,pub nu_max:f64,pub budget:f64}
 impl FoldRule{
-    /// The rule of a run: T, nu_max and the build's share of the budget.
-    pub fn new(horizon:f64,nu_max:f64)->Self{Self{horizon,nu_max,budget:BUILD_SHARE*FOLD_SHARE*super::ledger::POPULATION_TOLERANCE}}
+    /// The rule of a run: T, nu_max and the rule's budget.
+    pub fn new(horizon:f64,nu_max:f64)->Self{Self{horizon,nu_max,budget:FOLD_SHARE*super::accuracy::POPULATION_TOLERANCE}}
 }
 /// What a fold library stores: the frame's (every target of the plan, K^(0)
 /// and K^(1), every piece; the eigenbasis, the Floquet frames, the
@@ -298,20 +289,6 @@ pub(crate) fn trace_norm_bound(op:&Superop,n:usize)->f64{
 /// A stored d x d piece's induced trace norm from its largest row and column
 /// sums: ||E(X)||_1 <= sqrt(n) ||E(X)||_F <= sqrt(n) sqrt(r c) ||X||_1.
 fn piece_bound(row:f64,col:f64,n:usize)->f64{(n as f64).sqrt()*(row*col).sqrt()}
-/// The trace norm of a row-major n x n block (its singular values summed,
-/// from the eigenvalues of X^dagger X).
-pub(crate) fn trace_norm(lapack:&Lapack,x:&[C],n:usize)->Result<f64,String>{
-    if x.iter().all(|z|!nonzero(*z)){return Ok(0.);}
-    // (X^dagger X) column-major: entry (i, j) at i + n j.
-    let mut g=vec![ZERO;n*n];
-    for i in 0..n{for j in 0..n{let mut v=ZERO;for k in 0..n{mul_add(&mut v,conj(x[k*n+i]),x[k*n+j]);}g[i+n*j]=v;}}
-    Ok(lapack.hermitian_eigen(&g,n)?.0.iter().map(|&l|l.max(0.).sqrt()).sum())
-}
-/// The trace norm of a lattice field: its blocks' trace norms summed (N_1).
-pub(crate) fn field_trace_norm(lapack:&Lapack,x:&[C],n:usize)->Result<f64,String>{
-    x.chunks_exact(n*n).map(|b|trace_norm(lapack,b,n)).sum()
-}
-
 /// What the rule reads of one order of a target before storing it: the
 /// trace-norm bounds of its absorbable part, of its whole
 /// rest and of the rest's part outside the population rows, and per storage
@@ -434,10 +411,10 @@ fn terms_to(rho:f64,share:f64)->usize{
     if !(rho>0.){return 0;}
     let mut m=0;while m<CONVERGED_TERMS&&rho.powi(m as i32+1)/(1.-rho)>share{m+=1;}m
 }
-/// G of a far charge at frequency nu and shift z: (L_c - i nu - z)^-1
+/// G of a far charge at frequency nu: (L_c - i nu)^-1
 /// elementwise, with its largest entry.
-fn far_g(diagonal:&[C],nu:f64,z:C)->(Vec<C>,f64){
-    let g:Vec<C>=diagonal.iter().map(|&l|{let w=C{re:l.re-z.re,im:l.im-nu-z.im};let m=squared(w);C{re:w.re/m,im:-w.im/m}}).collect();
+fn far_g(diagonal:&[C],nu:f64)->(Vec<C>,f64){
+    let g:Vec<C>=diagonal.iter().map(|&l|{let w=C{re:l.re,im:l.im-nu};let m=squared(w);C{re:w.re/m,im:-w.im/m}}).collect();
     let largest=g.iter().map(|z|magnitude(*z)).fold(0_f64,f64::max);(g,largest)
 }
 pub struct FoldLibrary{
@@ -478,7 +455,7 @@ impl FoldLibrary{
         // Every far block's G_s, its series' terms and gamma_s.
         let mut blocks=BTreeMap::new();let mut gamma=BTreeMap::new();
         for s in plan.far(){
-            let step=&plan.steps[s];let(g,largest)=far_g(&diagonal,step.nu,ZERO);let rho=bound*largest;
+            let step=&plan.steps[s];let(g,largest)=far_g(&diagonal,step.nu);let rho=bound*largest;
             if !(rho<SERIES_LIMIT){return Err(format!("Far step {:?} is too close to L0's spectrum to fold (series ratio {rho:e})",step.charge));}
             let room=step.nu.abs()-lambda0;
             if !(room>0.){return Err(format!("Far step {:?} at {:e} rad/us does not clear L0's trace-norm bound {lambda0:e}: no far block",step.charge,step.nu));}
@@ -624,10 +601,10 @@ impl FoldLibrary{
         Ok(Self{targets,#[cfg(test)]zero_dense,rest,diagonal,diagnostics})
     }
 
-    /// The far shell's action on a field x on the lattice modes `modes` at
-    /// the shift z, ring by ring to all orders. A charge outside the lattice
+    /// The far shell's action on a field x on the lattice modes `modes`, ring
+    /// by ring to all orders. A charge outside the lattice
     /// at |nu| >= cut that a step reaches from a lattice mode p is a far mode
-    /// of p; its amplitude solves (L0 - i nu_r - z) y_r = -(the steps into r
+    /// of p; its amplitude solves (L0 - i nu_r) y_r = -(the steps into r
     /// from the lattice and from the other far modes), exactly at its own
     /// frequency (the series to RING_SERIES of its sum), the cross couplings
     /// kept: ring k holds the amplitudes k + 1 steps out (the Neumann series in
@@ -635,35 +612,33 @@ impl FoldLibrary{
     /// shell's part of order k + 2. Translation covariance: every lattice mode
     /// p meets the same relative far charges w, so ring k is solved per w on
     /// the blocks of a group of FAR_GROUP source modes at once (the series'
-    /// GEMMs over the blocks, each block its own G at nu_p + nu_w + z), the
+    /// GEMMs over the blocks, each block its own G at nu_p + nu_w), the
     /// groups spread over the workers. The rings stop when what the next one
     /// and its descendants can land, c gamma |b|_1 / (1 - rho) in trace norm
-    /// (c the steps' summed trace-norm bounds, gamma = 1 / (|nu_r| - lambda0 -
-    /// |z|) the block inverse's, rho = c gamma_max over the far modes met,
+    /// (c the steps' summed trace-norm bounds, gamma = 1 / (|nu_r| - lambda0)
+    /// the block inverse's, rho = c gamma_max over the far modes met,
     /// |b|_1 <= sqrt(n) |b|_F), is within `tolerance` (N_1, summed over the
     /// blocks); a block whose own bound is below FAR_PRUNE x tolerance per
-    /// block of its ring is left out; both go to `tail`. Landings on near charges outside
-    /// the lattice are the near ring's and are left out; the far amplitudes'
-    /// trace norms per ring are the dressing. Returns per ring the landing on
-    /// every mode (not mirror-completed: at a complex z the response of a
-    /// Hermitian-symmetric field is not Hermitian-symmetric).
+    /// block of its ring is left out. Landings on near charges outside the
+    /// lattice are left out (the lattice's own truncation, `apriori`).
+    /// Returns per ring the landing on every mode.
     #[allow(clippy::too_many_arguments)]
-    pub fn far_shell(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],x:&[C],z:C,tolerance:f64)->Result<FarShell,String>{
+    pub fn far_shell(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],x:&[C],tolerance:f64)->Result<FarShell,String>{
         let clock=Instant::now();let n=generator.n;let d=n*n;let count=modes.len();
         let index:BTreeMap<&[i32],usize>=modes.iter().enumerate().map(|(i,q)|(q.as_slice(),i)).collect();
         let nu_modes:Vec<f64>=modes.iter().map(|q|nu_of(q)).collect::<Result<_,_>>()?;
         let steps:Vec<(&Charge,f64,&Superop)>=plan.steps.iter().map(|s|(&s.charge,s.nu,&generator.components[&s.charge].op)).collect();
         let c_all:f64=plan.steps.iter().map(|s|trace_norm_bound(&generator.components[&s.charge].op,n)).sum();
-        let(bound,lambda0)=(self.diagnostics.rest_bound,self.diagnostics.lambda0);let lapack=&*self.rest.lapack;
+        let(bound,lambda0)=(self.diagnostics.rest_bound,self.diagnostics.lambda0);
         let largest=|v:&[C]|v.iter().map(|z|magnitude(*z)).fold(0_f64,f64::max);
         let trace_bound=|v:&[C]|(n as f64).sqrt()*v.iter().map(|z|squared(*z)).sum::<f64>().sqrt();
         // The source modes in groups; each group's far shell on its own.
         let groups:Vec<Vec<usize>>=(0..count).filter(|&p|largest(&x[p*d..(p+1)*d])>0.).collect::<Vec<_>>().chunks(FAR_GROUP).map(|g|g.to_vec()).collect();
         type Ring=BTreeMap<Charge,(f64,BTreeMap<usize,Vec<C>>)>;
-        type Group=(Vec<BTreeMap<usize,Vec<C>>>,Vec<f64>,f64,f64,usize);
+        type Group=(Vec<BTreeMap<usize,Vec<C>>>,f64,usize);
         let execution=Execution::new()?;
         let parts=execution.map(groups,|group|->Result<Group,String>{
-            let(mut landings,mut dressing,mut tail,mut contraction,mut terms)=(Vec::new(),Vec::new(),0.,0_f64,0);
+            let(mut landings,mut contraction,mut terms)=(Vec::new(),0_f64,0);
             let(mut small,mut stack)=(Vec::new(),Vec::new());
             // The first ring's sources: every step from the group's modes to a far charge.
             let mut sources:Ring=BTreeMap::new();
@@ -672,21 +647,21 @@ impl FoldLibrary{
                 let entry=sources.entry(c.clone()).or_insert_with(||(nu,BTreeMap::new()));
                 op.apply_into(n,ONE,&x[p*d..(p+1)*d],entry.1.entry(p).or_insert_with(||vec![ZERO;d]),&mut small);}}
             let mut gamma_far=0_f64;
-            for ring in 0..FAR_RINGS{
+            for _ in 0..FAR_RINGS{
                 if sources.is_empty(){break;}
-                let(mut landing,mut dressed,mut next):(BTreeMap<usize,Vec<C>>,f64,Ring)=(BTreeMap::new(),0.,BTreeMap::new());
+                let(mut landing,mut next):(BTreeMap<usize,Vec<C>>,Ring)=(BTreeMap::new(),BTreeMap::new());
                 for(w,(nu,blocks))in std::mem::take(&mut sources){
                     // y = -(L0 - i nu_r - z)^-1 b on the blocks of w.
                     let active:Vec<usize>=blocks.keys().copied().collect();let m=active.len();
                     let mut y:Vec<C>=Vec::with_capacity(m*d);for p in &active{y.extend(blocks[p].iter().map(|z|C{re:-z.re,im:-z.im}));}
                     let mut gs:Vec<Vec<C>>=Vec::with_capacity(m);let mut rho=0_f64;
-                    for &p in &active{let(g,gm)=far_g(&self.diagonal,nu_modes[p]+nu,z);let r=bound*gm;
+                    for &p in &active{let(g,gm)=far_g(&self.diagonal,nu_modes[p]+nu);let r=bound*gm;
                         if !(r<SERIES_LIMIT){return Err(format!("Far shell: the relative charge {w:?} from {:?} is too close to L0's spectrum (series ratio {r:e})",modes[p]));}
                         rho=rho.max(r);gs.push(g);}
                     let(mut term,mut t)=(vec![ZERO;m*d],vec![ZERO;m*d]);
                     let k=terms_to(rho,RING_SERIES);terms+=k*m;
                     series_blocks(&self.rest,&gs,k,n,&mut y,&mut term,&mut t,m,&mut stack,&mut small)?;
-                    for(i,&p)in active.iter().enumerate(){let yp=&y[i*d..(i+1)*d];dressed+=trace_norm(lapack,yp,n)?;
+                    for(i,&p)in active.iter().enumerate(){let yp=&y[i*d..(i+1)*d];
                         for &(c,step_nu,op)in &steps{
                             let w2=charge_plus(&w,c)?;let r2=charge_plus(&modes[p],&w2)?;
                             if let Some(&q)=index.get(r2.as_slice()){op.apply_into(n,ONE,yp,landing.entry(q).or_insert_with(||vec![ZERO;d]),&mut small);continue;}
@@ -695,45 +670,43 @@ impl FoldLibrary{
                             op.apply_into(n,ONE,yp,entry.1.entry(p).or_insert_with(||vec![ZERO;d]),&mut small);
                         }}
                 }
-                landings.push(landing);dressing.push(dressed);
+                landings.push(landing);
                 // What the next ring's blocks and their descendants can land: each
                 // block's gamma, rho over every far mode met.
                 let mut potentials:Vec<(Charge,usize,f64)>=Vec::new();
                 for(w,(nu,blocks))in &next{for(&p,b)in blocks{
-                    let room=(nu_modes[p]+nu).abs()-lambda0-magnitude(z);let gamma=if room>0.{1./room}else{f64::INFINITY};
+                    let room=(nu_modes[p]+nu).abs()-lambda0;let gamma=if room>0.{1./room}else{f64::INFINITY};
                     gamma_far=gamma_far.max(gamma);potentials.push((w.clone(),p,gamma*trace_bound(b)));}}
                 let rho=c_all*gamma_far;contraction=contraction.max(rho);
                 let scale=if rho<1.{c_all/(1.-rho)}else{f64::INFINITY};
                 let total:f64=potentials.iter().map(|x|scale*x.2).sum();
-                if total<=tolerance{tail+=total;break;}
+                if total<=tolerance{break;}
                 let floor=FAR_PRUNE*tolerance/(potentials.len()as f64);
-                for(w,p,v)in &potentials{if scale*v<=floor{tail+=scale*v;if let Some(e)=next.get_mut(w){e.1.remove(p);}}}
+                for(w,p,v)in &potentials{if scale*v<=floor{if let Some(e)=next.get_mut(w){e.1.remove(p);}}}
                 next.retain(|_,v|!v.1.is_empty());
                 sources=next;
-                if ring+1==FAR_RINGS{tail+=potentials.iter().filter(|x|sources.get(&x.0).is_some_and(|e|e.1.contains_key(&x.1))).map(|x|scale*x.2).sum::<f64>();}
             }
-            Ok((landings,dressing,tail,contraction,terms))
+            Ok((landings,contraction,terms))
         });
         let mut shell=FarShell::default();
-        for part in parts{let(landings,dressing,tail,contraction,terms)=part?;
+        for part in parts{let(landings,contraction,terms)=part?;
             for(k,landing)in landings.into_iter().enumerate(){
-                if k==shell.landings.len(){shell.landings.push(vec![ZERO;count*d]);shell.dressing.push(0.);}
-                for(q,block)in landing{for(a,&b)in shell.landings[k][q*d..(q+1)*d].iter_mut().zip(&block){add(a,b);}}
-                shell.dressing[k]+=dressing[k];}
-            shell.tail+=tail;shell.contraction=shell.contraction.max(contraction);shell.terms+=terms;}
+                if k==shell.landings.len(){shell.landings.push(vec![ZERO;count*d]);}
+                for(q,block)in landing{for(a,&b)in shell.landings[k][q*d..(q+1)*d].iter_mut().zip(&block){add(a,b);}}}
+            shell.contraction=shell.contraction.max(contraction);shell.terms+=terms;}
         shell.milliseconds=clock.elapsed().as_secs_f64()*1e3;
         Ok(shell)
     }
     /// The far shell's static targets of rings 1 to `rings` (paths of three to
     /// rings + 2 steps; ring 0, the second order, is K^(0)) with `orders`
     /// orders in nu_q, one per landing charge in `offsets` (the lattice's edges
-    /// q - p, closed under q -> -q), for a run whose first checkpoint found
+    /// q - p, closed under q -> -q), for a run whose a-priori field found
     /// them above its share of the rule: per column c the far shell from the
     /// unit element e_c, every far mode solved exactly, the columns in batches
     /// spread over the workers. The orders in nu_q are a far mode's Taylor
     /// coefficients, (D - i nu) y = -b giving D y^(o) = y^(o-1) - b^(o). A
     /// far mode of ring k + 1 whose source is below prune[k] of its ring's
-    /// largest is left out (the run's a-posteriori term measures it).
+    /// largest is left out.
     /// Hermitian pairing halves the columns: the far shell of E_c^dagger is
     /// the adjoint of E_c's with the landings mirrored, so column c~ of K_t^(o)
     /// is conj K_-t^(o)[r~, c] and only the columns c <= c~ are solved.
@@ -767,7 +740,7 @@ impl FoldLibrary{
                     for(r,(nu,b))in std::mem::take(&mut ring){
                         // y^(0) = -D^-1 b^(0), y^(o) = D^-1 (y^(o-1) - b^(o)), the
                         // series to RING_SERIES.
-                        let(g,gm)=far_g(diagonal,nu,ZERO);let terms=terms_to(bound*gm,RING_SERIES);
+                        let(g,gm)=far_g(diagonal,nu);let terms=terms_to(bound*gm,RING_SERIES);
                         let mut y:Vec<Vec<C>>=Vec::with_capacity(orders);
                         for o in 0..orders{
                             let mut v:Vec<C>=if o==0{b[0].iter().map(|z|C{re:-z.re,im:-z.im}).collect()}else{y[o-1].iter().zip(&b[o]).map(|(a,c)|C{re:a.re-c.re,im:a.im-c.im}).collect()};
@@ -815,7 +788,7 @@ impl FoldLibrary{
 }
 /// The far shell's rings stop when the next one can land within the
 /// caller's tolerance; a far mode whose bound is below FAR_PRUNE of it per
-/// mode of its ring is left out (to the tail); at most FAR_RINGS rings.
+/// mode of its ring is left out; at most FAR_RINGS rings.
 const FAR_PRUNE:f64=1e-2;
 /// Source modes per group of the far shell's action: the blocks one series
 /// solves at once (GEMMs over them), a group's rings held in memory at a
@@ -823,15 +796,14 @@ const FAR_PRUNE:f64=1e-2;
 pub(crate) const FAR_GROUP:usize=8;
 const FAR_RINGS:usize=16;
 /// A ring target's far blocks are summed until the series' remainder is
-/// within this share of the sum (the a-posteriori term measures the rest).
+/// within this share of the sum.
 const RING_SERIES:f64=1e-12;
 /// One far-shell action (`FoldLibrary::far_shell`): per ring k its landing on
-/// the lattice (a field on the modes: the far shell's part of order k + 2)
-/// and its far amplitudes' trace norms summed (the dressing); the tail bound
-/// past the last ring (N_1 of what the rings left out can land), the largest
-/// contraction c gamma met, the series' terms (per block) and the time.
+/// the lattice (a field on the modes: the far shell's part of order k + 2),
+/// the largest contraction c gamma met, the series' terms (per block) and
+/// the time.
 #[derive(Clone,Debug,Default)]
-pub struct FarShell{pub landings:Vec<Vec<C>>,pub dressing:Vec<f64>,pub tail:f64,pub contraction:f64,pub terms:usize,pub milliseconds:f64}
+pub struct FarShell{pub landings:Vec<Vec<C>>,pub contraction:f64,pub terms:usize,pub milliseconds:f64}
 
 #[cfg(test)]
 mod tests{
@@ -847,7 +819,7 @@ mod tests{
         assert!(!p.plan.far().is_empty());
         for s in p.plan.far(){
             let nu=p.plan.steps[s].nu;let mut m=l0.clone();for i in 0..d{m[i*d+i].im-=nu;}
-            let(g,largest)=far_g(&fold.diagonal,nu,ZERO);let terms=converged_terms(fold.diagnostics.rest_bound*largest);
+            let(g,largest)=far_g(&fold.diagonal,nu);let terms=converged_terms(fold.diagnostics.rest_bound*largest);
             let y:Vec<C>=(0..2*d).map(|k|C{re:((k*37+11)%97)as f64/97.-0.5,im:((k*53+7)%89)as f64/89.-0.5}).collect();
             let(mut x,mut w,mut t)=(y.clone(),vec![ZERO;2*d],vec![ZERO;2*d]);
             series(&fold.rest,&g,terms,4,&mut x,&mut w,&mut t,2,false,&mut Vec::new(),&mut Vec::new()).unwrap();
@@ -891,7 +863,7 @@ mod tests{
         let zero=vec![p.generator.zero.clone()];let nu_of=|q:&[i32]|p.nu(q);
         let mut k0=vec![ZERO;d*d];fold.targets[0].dense_into(n,0,ONE,&mut k0);
         let scale=p.plan.targets[0].size;
-        for c in 0..d{let mut e=vec![ZERO;d];e[c]=ONE;let shell=fold.far_shell(&p.generator,&p.plan,&nu_of,&zero,&e,ZERO,0.).unwrap();
+        for c in 0..d{let mut e=vec![ZERO;d];e[c]=ONE;let shell=fold.far_shell(&p.generator,&p.plan,&nu_of,&zero,&e,0.).unwrap();
             for r in 0..d{let gap=magnitude(C{re:shell.landings[0][r].re-k0[r*d+c].re,im:shell.landings[0][r].im-k0[r*d+c].im});
                 assert!(gap<=1e-12*scale,"K_0[{r},{c}]: the far shell's first ring {gap:e} off");}}
     }
@@ -923,7 +895,7 @@ mod tests{
         let targets=fold.ring_targets(&p.generator,&p.plan,2,1,&[0.,0.,0.],&zero.iter().cloned().collect()).unwrap();
         assert_eq!(targets.len(),1);let mut k=vec![ZERO;d*d];targets[0].dense_into(n,0,ONE,&mut k);
         let scale=k.iter().map(|z|magnitude(*z)).fold(1e-300,f64::max);
-        for c in 0..d{let mut e=vec![ZERO;d];e[c]=ONE;let shell=fold.far_shell(&p.generator,&p.plan,&nu_of,&zero,&e,ZERO,0.).unwrap();
+        for c in 0..d{let mut e=vec![ZERO;d];e[c]=ONE;let shell=fold.far_shell(&p.generator,&p.plan,&nu_of,&zero,&e,0.).unwrap();
             for r in 0..d{let want=shell.landings.iter().skip(1).take(2).fold(ZERO,|a,l|C{re:a.re+l[r].re,im:a.im+l[r].im});
                 // The diagonal ring target is made Hermitian: on unit elements the
                 // far shell's own landing is Hermitian to roundoff as well.

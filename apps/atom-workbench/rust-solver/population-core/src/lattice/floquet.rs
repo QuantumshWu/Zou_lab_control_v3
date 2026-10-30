@@ -1,5 +1,5 @@
-//! Floquet frames of the lattice: the micromotion kernels, shared by the
-//! preconditioner (`preconditioner`) and the error estimate.
+//! Floquet frames of the lattice: the micromotion kernels of the
+//! preconditioner (`preconditioner`).
 //!
 //! The separable part of the lattice operator (every left/right factor: L0's
 //! and the diagonal fold's absorbable part with -i nu_q, and the left/right

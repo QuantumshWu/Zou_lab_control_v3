@@ -1,8 +1,8 @@
 //! The eigenbasis of the folded centre generator L0' = L0 + K_0^(0): the
-//! dressed blocks B_q = L0' - i nu_q of every mode and their solves, the
+//! dressed blocks B_q = L0' - i nu_q of every mode and their solves (the
+//! explicit set's seed amplitudes and ring condition), and the
 //! eigen-coordinates of the Schrieffer-Wolff frame (`frame`) and of the
-//! error estimate's propagation (`estimator`), and the dressed coordinates
-//! of the pole ordering's error transform (`reduced`).
+//! a-priori amplitudes (`apriori`).
 //!
 //! L0' maps Hermitian matrices to Hermitian matrices, so in the orthonormal
 //! Hermitian basis (E_ii; (E_ij + E_ji)/sqrt2 and i (E_ij - E_ji)/sqrt2 for
@@ -12,8 +12,8 @@
 //! eigenvector columns v_r, v_i has the eigenvectors v_r +- i v_i, and a
 //! vector a v_r + b v_i has the coefficients (a -+ i b)/2 on them.
 //!
-//! The eigensystem by clusters (`clustered_eigensystem`, shared with the
-//! estimator's second-order blocks): L0' X = NL' X + X NR' + J X, the
+//! The eigensystem by clusters (`clustered_eigensystem`, which the frame's
+//! second-order block uses): L0' X = NL' X + X NR' + J X, the
 //! separable part diagonal on X_ab = p_a p_b^H (the Floquet block frame,
 //! NL' = P diag(lambda) P^-1, NR' = NL'^H + c: the value lambda_a + mu_b),
 //! J the rest (the recycling, the fold's scattering). In the coordinates of
@@ -26,38 +26,32 @@
 //! pair (X_ab, X_ba) is the flip pair of the real form. The centre's
 //! eigenbasis is its exact limit (`exact`) in the Hermitian basis: the
 //! connected blocks of the real form, each whole (one block of 1024 on the
-//! tweezer cases); the clusters serve the estimator's second-order blocks
-//! (`estimator::blocks`). The
+//! tweezer cases); the clusters serve the frame's second-order block
+//! (`blocks`). The
 //! sector grading of the frame does not decouple the centre: the separable
 //! part's eigenvectors mix ground and excited states by 6% (three and five
 //! lasers + tweezer) to 36% (four lasers, no trap) (near drives at charge 0),
 //! and couplings between the sectors reach 0.04-1 of their gaps.
 //!
 //! Block solves: (L0' - i nu_q - xi)^-1 on any blocks, for every mode and
-//! shift (real or complex), to the eigensystem's accuracy (the clusters'
-//! mixing squared; exact with one cluster): the blocks' coordinates, E_R^-1
+//! shift, exactly: the blocks' coordinates, E_R^-1
 //! (one real GEMM over every block's real and imaginary parts), the pair
 //! rule, the division by lambda_j - i nu_q - xi, the pair rule back, E_R (one
 //! GEMM), about 4 d^2 real multiply-adds per block.
 //!
-//! Dressed coordinates: E_R^-1 applied to a block's Hermitian-basis
-//! coordinates (`dressed`), where the block-diagonal part of the lattice is
-//! diagonal (2 x 2 rotations for complex pairs) with Re <= 0. The adjoint
-//! solves give the norm of a block's resolvent (`resolvent_norms`, the ring
-//! condition).
+//! The adjoint solves give the norm of a block's resolvent
+//! (`resolvent_norms`, the ring condition).
 //!
 //! The basis is request-level (`LatticePrepared::eigenbasis`: the
-//! screening, the frame, the estimator and the pole ordering), computed
-//! once and shared.
+//! screening, the frame and the a-priori amplitudes), computed once and
+//! shared.
 use super::*;
-use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK,REFERENCE_WORKERS};
+use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// Power iterations of `resolvent_norms`.
 const RESOLVENT_ITERATIONS:usize=20;
 /// Columns per task of a large eigenvector matrix's inverse.
 const INVERSE_PANEL:usize=64;
-/// Fewest blocks per task of the dressed coordinates.
-const DRESSED_BLOCKS:usize=16;
 /// The complex coordinates z+- = (a -+ i b)/2 of a conjugate pair from its
 /// real coordinates (a, b): a v_r + b v_i = z+ (v_r + i v_i) + z- (v_r - i v_i).
 pub(crate) fn pair_coordinates(a:C,b:C)->(C,C){(C{re:0.5*(a.re+b.im),im:0.5*(a.im-b.re)},C{re:0.5*(a.re-b.im),im:0.5*(a.im+b.re)})}
@@ -221,42 +215,6 @@ impl BlockEigenbasis{
         }
         Ok(value.iter().map(|v|v.sqrt()).collect())
     }
-    /// Dressed coordinates of row-major blocks: E_R^-1 applied to each
-    /// block's Hermitian-basis coordinates (complex entries; the blocks of a
-    /// Hermitian-symmetric field's mirror modes have the conjugate ones).
-    /// One real GEMM over every block, spread over the workers.
-    pub fn dressed(&self,blocks:&[C])->Result<Vec<C>,String>{
-        let(n,d)=(self.n,self.d);let mut out=blocks.to_vec();let count=blocks.len()/d;
-        // At least DRESSED_BLOCKS blocks per task (the GEMM streams E_R^-1
-        // once per task), at most one task per reference worker: the same
-        // chunks for every thread count from two on.
-        let execution=Execution::new()?;let tasks=REFERENCE_WORKERS.min(count.div_ceil(DRESSED_BLOCKS)).max(1);
-        let work=2*d*d*count;
-        execution.for_mode_chunks(&mut out,d,work,work/tasks,&mut Vec::<()>::new(),|_,chunk,_|{
-            let count=chunk.len()/d;let mut parts=vec![0.;d*2*count];
-            for(c,block)in chunk.chunks_exact(d).enumerate(){for(k,v)in coordinates(block,n).into_iter().enumerate(){parts[k+d*c]=v.re;parts[k+d*(count+c)]=v.im;}}
-            let mut y=vec![0.;d*2*count];self.lapack.gemm(false,false,d,2*count,d,1.,&self.inverse,d,&parts,d,0.,&mut y,d)?;
-            for(c,block)in chunk.chunks_exact_mut(d).enumerate(){for(k,v)in block.iter_mut().enumerate(){*v=C{re:y[k+d*c],im:y[k+d*(count+c)]};}}
-            Ok(())
-        })?;
-        Ok(out)
-    }
-    /// Coefficients on the complex eigenvectors from dressed coordinates
-    /// (the pair rule).
-    pub fn complex_coefficients(&self,y:&[C])->Vec<C>{
-        let d=self.d;let mut z=vec![ZERO;d];let mut j=0;
-        while j<d{
-            if self.kind[j]==1{(z[j],z[j+1])=pair_coordinates(y[j],y[j+1]);j+=2;}
-            else{z[j]=y[j];j+=1;}
-        }
-        z
-    }
-    /// The population weight of each dressed centre mode in a block:
-    /// |coefficient| times the norm of the mode's population rows.
-    pub fn mode_weights(&self,block:&[C])->Result<Vec<f64>,String>{
-        let(n,d)=(self.n,self.d);let z=self.coefficients(&[block])?;
-        Ok((0..d).map(|j|magnitude(z[j])*(0..n).map(|i|{let v=self.readout[i+n*j];v.re*v.re+v.im*v.im}).sum::<f64>().sqrt()).collect())
-    }
     /// The block of the eigenvalue of least modulus (the dressed centre's
     /// steady state when it is unique), trace one.
     pub fn kernel_block(&self)->Result<Vec<C>,String>{
@@ -332,17 +290,17 @@ impl BlockEigenbasis{
 /// Couplings below CLUSTER_ENTRY times their gap, |m_ij| < CLUSTER_ENTRY
 /// |base_i - base_j|, leave coordinates i, j in different clusters; the
 /// clusters are diagonalized exactly and the couplings between them at first
-/// order (vectors) and second order (values). Measured on the estimator's
-/// second-order blocks against the whole eigensystem on three, four and five
-/// lasers (20 us, 10 ms): the estimates within 0.35%, the largest cluster
+/// order (vectors) and second order (values). Measured on the second-order
+/// blocks against the whole eigensystem on three, four and five lasers (20
+/// us, 10 ms; with the former error estimate): its estimates within 0.35%, the largest cluster
 /// 156-362 of 1024 (1e-3: 330-552), the block built in 0.2-0.33 s instead
 /// of 0.55-1.2 s.
 const CLUSTER_ENTRY:f64=1e-2;
 /// Two clusters merge when a first-order mixing between them exceeds this,
 /// or when the third-order error of a value, over the time its mode lives
 /// (the horizon, or 1 / |Re mu| when shorter), exceeds CLUSTER_PHASE.
-/// Measured with CLUSTER_ENTRY (above): the estimates within 0.35% of the
-/// whole eigensystem's; the vectors' error is about the mixing squared.
+/// Measured with CLUSTER_ENTRY (above): the former estimates within 0.35% of
+/// the whole eigensystem's; the vectors' error is about the mixing squared.
 const CLUSTER_MIXING:f64=0.05;
 const CLUSTER_PHASE:f64=1e-2;
 /// Merge passes before the whole matrix is diagonalized at once.
@@ -362,7 +320,7 @@ const CHECK_TILE:usize=64;
 #[derive(Clone,Copy,Debug)]
 pub struct ClusterControl{pub entry:f64,pub mixing:f64,pub phase:f64,pub horizon:f64}
 impl ClusterControl{
-    /// The estimator's second-order blocks over a request's horizon.
+    /// The frame's second-order block over a request's horizon.
     pub fn blocks(horizon:f64)->Self{Self{entry:CLUSTER_ENTRY,mixing:CLUSTER_MIXING,phase:CLUSTER_PHASE,horizon}}
 }
 

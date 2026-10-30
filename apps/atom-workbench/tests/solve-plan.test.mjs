@@ -1,5 +1,5 @@
 // What the app asks the solver for (solve-plan.ts): a cached mean at the chosen T is shown with no
-// request; a trajectory whose mean is cached is asked for alone (includeAsymptotic false).
+// request; a trajectory whose mean is cached is asked for alone (includeMean false).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {setTimeout as pause} from 'node:timers/promises';
@@ -19,9 +19,9 @@ test('the planned request: nothing when the page has its trajectory and its mean
   assert.equal(plannedSolve(true,{trajectory:true,mean:true}),undefined);
   assert.equal(plannedSolve(false,{trajectory:false,mean:true}),undefined,'the levels\' long-time mode needs the mean alone');
   assert.equal(plannedSolve(false,{trajectory:false,mean:false}),'mean');
-  assert.deepEqual(solveOptions('full'),{steadyOnly:false,includeAsymptotic:true});
-  assert.deepEqual(solveOptions('trajectory'),{steadyOnly:false,includeAsymptotic:false});
-  assert.deepEqual(solveOptions('mean'),{steadyOnly:true,includeAsymptotic:true});
+  assert.deepEqual(solveOptions('full'),{meanOnly:false,includeMean:true});
+  assert.deepEqual(solveOptions('trajectory'),{meanOnly:false,includeMean:false});
+  assert.deepEqual(solveOptions('mean'),{meanOnly:true,includeMean:true});
 });
 
 test('a running request goes on while it brings what the page needs: a mean run brings every T',()=>{
@@ -36,16 +36,16 @@ test('a running request goes on while it brings what the page needs: a mean run 
   assert.deepEqual(delivers('trajectory',here,longer),{trajectory:false,mean:false});
 });
 
-const steady=(T,error)=>({converged:true,status:'time-average',populations:{},estimatedError:error,withinTolerance:error<=POPULATION_TOLERANCE,horizonUs:T});
+const meanAt=(T,error)=>({converged:true,status:'time-average',populations:{},estimatedError:error,withinTolerance:error<=POPULATION_TOLERANCE,horizonUs:T});
 test('a result\'s means become one record per T; 停止 keeps a checkpoint\'s where no final mean is',()=>{
-  const result={timesUs:[0,1,2],steady:steady(1e6,.001),horizonMeans:[steady(1e5,.002),steady(1e6,.001)]};
+  const result={timesUs:[0,1,2],mean:meanAt(1e6,.001),horizonMeans:[meanAt(1e5,.002),meanAt(1e6,.001)]};
   const records=horizonRecords({result,wallMs:5,horizon:1e6});
-  assert.deepEqual(records.map(r=>[r.horizon,r.result.steady.estimatedError,r.wallMs]),[[1e5,.002,5],[1e6,.001,5]]);
+  assert.deepEqual(records.map(r=>[r.horizon,r.result.mean.estimatedError,r.wallMs]),[[1e5,.002,5],[1e6,.001,5]]);
   assert.deepEqual(horizonRecords({result:{...result,horizonMeans:undefined},wallMs:5,horizon:1e6}),[],'a trajectory alone carries none');
   assert.deepEqual(keptCheckpoint(result,'full',()=>false),{trajectory:true,horizons:[1e5,1e6]});
   assert.deepEqual(keptCheckpoint(result,'full',T=>T===1e6),{trajectory:true,horizons:[1e5]},'a final mean already here stays');
   assert.deepEqual(keptCheckpoint(result,'trajectory',()=>false),{trajectory:true,horizons:[]});
-  assert.deepEqual(keptCheckpoint({timesUs:[0],steady:steady(1e6,.001),horizonMeans:result.horizonMeans},'mean',()=>false),{trajectory:false,horizons:[1e5,1e6]},'a mean run\'s checkpoint is never a trajectory');
+  assert.deepEqual(keptCheckpoint({timesUs:[0],mean:meanAt(1e6,.001),horizonMeans:result.horizonMeans},'mean',()=>false),{trajectory:false,horizons:[1e5,1e6]},'a mean run\'s checkpoint is never a trajectory');
 });
 
 /** The mock solver: every call is answered by the test. */
@@ -53,10 +53,10 @@ function transport(){const calls=[];return {calls,fetch:async(url,init)=>new Pro
 const reply=(call,data)=>call.resolve(new Response(JSON.stringify({...data,request:call.body.request}),{status:200,headers:{'Content-Type':'application/json'}}));
 async function waitCalls(mock,count){for(let i=0;i<100&&mock.calls.length<count;i++)await pause(2);assert.equal(mock.calls.length,count);}
 function answer(scene,options){
-  const settings=scene.dynamics,timesUs=options.steadyOnly?[0]:[0,settings.durationUs/2,settings.durationUs];
+  const settings=scene.dynamics,timesUs=options.meanOnly?[0]:[0,settings.durationUs/2,settings.durationUs];
   const states=buildFullMasterModel(scene,settings).states,initialIndex=states.findIndex(s=>s.id===settings.initialStateId);
   // Each T its own error, so the test sees which T it is shown.
-  return {...nativeResult({states,initialIndex,timesUs,mean:options.includeAsymptotic,horizonUs:options.meanHorizonUs,meanError:.0011,horizonErrors:{'100000':.0012,'1000000':.0011}}),
+  return {...nativeResult({states,initialIndex,timesUs,mean:options.includeMean,horizonUs:options.meanHorizonUs,meanError:.0011,horizonErrors:{'100000':.0012,'1000000':.0011}}),
     assumptions:['test assumption'],service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]}};
 }
 
@@ -78,10 +78,10 @@ test('request flow: a horizon switch makes no request; a new duration asks for t
     if(kind!=='trajectory')for(const mean of horizonRecords(record))means.set(i.meanKey,epochs.mean,mean.horizon,mean);
     return call.body.options;
   };
-  const shownError=()=>means.get(inputs().meanKey,scene.dynamics.meanHorizonUs)?.result.steady.estimatedError;
+  const shownError=()=>means.get(inputs().meanKey,scene.dynamics.meanHorizonUs)?.result.mean.estimatedError;
 
   assert.equal(plan(),'full');
-  assert.deepEqual((({steadyOnly,includeAsymptotic,meanHorizonUs})=>({steadyOnly,includeAsymptotic,meanHorizonUs}))(await solve('full')),{steadyOnly:false,includeAsymptotic:true,meanHorizonUs:1e6});
+  assert.deepEqual((({meanOnly,includeMean,meanHorizonUs})=>({meanOnly,includeMean,meanHorizonUs}))(await solve('full')),{meanOnly:false,includeMean:true,meanHorizonUs:1e6});
   assert.equal(shownError(),.0011);
   // 100 ms, then 1 s, then 100 ms again: each mean is here already.
   for(const [T,error] of [[1e5,.0012],[1e6,.0011],[1e5,.0012]]){scene.dynamics.meanHorizonUs=T;assert.equal(plan(),undefined,`T = ${T}`);assert.equal(shownError(),error,`T = ${T}`);}
@@ -90,8 +90,8 @@ test('request flow: a horizon switch makes no request; a new duration asks for t
   const cached=means.get(inputs().meanKey,1e5);scene.dynamics.durationUs=.4;
   assert.equal(plan(),'trajectory');
   const sent=await solve('trajectory');
-  assert.equal(sent.includeAsymptotic,false);assert.equal(sent.steadyOnly,false);assert.equal(sent.durationUs,.4);
-  assert.equal(trajectories.get(inputs().trajectoryKey,'trajectory').result.steady.status,'not-requested','the trajectory alone');
+  assert.equal(sent.includeMean,false);assert.equal(sent.meanOnly,false);assert.equal(sent.durationUs,.4);
+  assert.equal(trajectories.get(inputs().trajectoryKey,'trajectory').result.mean.status,'not-requested','the trajectory alone');
   assert.equal(plan(),undefined);assert.strictEqual(means.get(inputs().meanKey,1e5),cached,'the mean unchanged');
   // New samples: the same.
   scene.dynamics.samples=5;assert.equal(plan(),'trajectory');

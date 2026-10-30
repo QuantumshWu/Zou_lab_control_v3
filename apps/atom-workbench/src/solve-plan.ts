@@ -1,7 +1,7 @@
 import type {DynamicsResult} from './solver-types.js';
 
 /** What a request computes: the mean alone ('mean': one mean run, both standard times T), the
- * trajectory with its mean ('full'), or the trajectory alone ('trajectory', includeAsymptotic
+ * trajectory with its mean ('full'), or the trajectory alone ('trajectory', includeMean
  * false: its mean is already at hand). */
 export type SolveKind='mean'|'full'|'trajectory';
 /** The inputs a request was made for: its trajectory's key and its mean's key. */
@@ -13,8 +13,8 @@ export function plannedSolve(showsTrajectory:boolean,have:{trajectory:boolean;me
   return !showsTrajectory||have.trajectory?(have.mean?undefined:'mean'):have.mean?'trajectory':'full';
 }
 /** The client options of a request. */
-export function solveOptions(kind:SolveKind):{steadyOnly:boolean;includeAsymptotic:boolean}{
-  return {steadyOnly:kind==='mean',includeAsymptotic:kind!=='trajectory'};
+export function solveOptions(kind:SolveKind):{meanOnly:boolean;includeMean:boolean}{
+  return {meanOnly:kind==='mean',includeMean:kind!=='trajectory'};
 }
 /** What a request made for `ran` still brings the current inputs: its trajectory while the
  * trajectory inputs stand, its means (both T) while the mean inputs do. */
@@ -28,11 +28,11 @@ export function covers(kind:SolveKind,ran:SolveInputs,need:SolveKind,current:Sol
 }
 /** A result's mean at each standard T, each as a record of its own (the result with that mean). */
 export function horizonRecords<R extends {result:DynamicsResult;horizon:number}>(record:R):R[]{
-  return (record.result.horizonMeans??[]).map(steady=>({...record,result:{...record.result,steady},horizon:steady.horizonUs!}));
+  return (record.result.horizonMeans??[]).map(mean=>({...record,result:{...record.result,mean},horizon:mean.horizonUs!}));
 }
 /** What the last checkpoint of a stopped (or failed) request stands as: the trajectory when it is
  * one, and its mean at each T where no final mean is here. */
 export function keptCheckpoint(checkpoint:DynamicsResult,kind:SolveKind,finalMean:(horizon:number)=>boolean):{trajectory:boolean;horizons:number[]}{
   return {trajectory:kind!=='mean'&&checkpoint.timesUs.length>1,
-    horizons:kind==='trajectory'?[]:(checkpoint.horizonMeans??[]).map(steady=>steady.horizonUs!).filter(horizon=>!finalMean(horizon))};
+    horizons:kind==='trajectory'?[]:(checkpoint.horizonMeans??[]).map(mean=>mean.horizonUs!).filter(horizon=>!finalMean(horizon))};
 }

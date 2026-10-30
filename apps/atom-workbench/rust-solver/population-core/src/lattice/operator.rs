@@ -4,8 +4,8 @@
 //!       + sum_{explicit t} L_t x_{q-t}
 //!       + sum_{fold targets t != 0} sum_o (i nu_{q-t})^o K_t^(o) x_{q-t},
 //! with sources restricted to the set (the Fourier truncation); the far
-//! shell's ring targets (`FoldLibrary::ring_targets`) are fold targets of
-//! order 0 like the others. The block
+//! shell's ring targets (`FoldLibrary::ring_targets`) are fold targets like
+//! the others. The block
 //! factor NL'_q X + X NR'_q carries L0's left/right factors, -i nu_q and the
 //! diagonal fold's absorbable part as two dense n x n GEMMs; recycling and
 //! explicit steps act through their sparse factors. Every fold rest is
@@ -78,6 +78,18 @@ pub struct LatticeOperator<'a>{
     /// Complex multiply-adds of one application: per-block part, rests.
     block_work:usize,rest_work:usize,
     pub work:usize,
+    /// The adjoint's conjugate-transposed factors, built at its first use.
+    adjoint:std::sync::OnceLock<Adjoint>,
+}
+/// The adjoint's data: per mode L^H and R^H of its block factor; per
+/// canonical target and edge the fold edge's conjugate-transposed factors;
+/// the explicit steps' and the recycling's adjoints; per source mode the
+/// edges (target, edge) and rest terms (term, target) it feeds.
+struct Adjoint{
+    left:Vec<Vec<C>>,right:Vec<Vec<C>>,
+    fold:Vec<Vec<Option<(Vec<C>,Vec<C>)>>>,
+    explicit:Vec<Superop>,recycling:Superop,
+    incoming:Vec<Vec<(usize,usize)>>,rests:Vec<Vec<(usize,usize)>>,
 }
 impl<'a> LatticeOperator<'a>{
     /// The operator on `modes` with the fold `fold` (a run's, or the frame's).
@@ -130,7 +142,7 @@ impl<'a> LatticeOperator<'a>{
         let rest_work:usize=terms.iter().map(|t|t.rest.stored()*t.edges.len()).sum();
         Ok(Self{prepared,fold,n,modes:modes.to_vec(),nu,centre,index,mirror,canonical,left,right,recycling,explicit,edges,terms,
             gathered:vec![ZERO;offset],interleaved:vec![ZERO;d*modes.len()],execution:Execution::new()?,scratch:Vec::new(),
-            block_work,rest_work,work:block_work+rest_work})
+            block_work,rest_work,work:block_work+rest_work,adjoint:std::sync::OnceLock::new()})
     }
     pub fn dimension(&self)->usize{self.modes.len()*self.n*self.n}
     pub fn nu_max(&self)->f64{self.nu.iter().map(|w|w.abs()).fold(0.,f64::max)}
@@ -230,82 +242,67 @@ impl<'a> LatticeOperator<'a>{
         mirror_field(y,n,canonical,mirror);
         Ok(())
     }
+    /// The adjoint's data (`Adjoint`).
+    fn adjoint_data(&self)->&Adjoint{
+        self.adjoint.get_or_init(||{
+            let(n,d)=(self.n,self.n*self.n);let modes=self.modes.len();
+            let ct=|m:&[C]|->Vec<C>{let mut o=vec![ZERO;d];for i in 0..n{for j in 0..n{o[i+n*j]=conj(m[j+n*i]);}}o};
+            let adj=|s:&Sparse|->Sparse{let mut e:Vec<(usize,usize,C)>=s.entries.iter().map(|&(i,j,v)|(j,i,conj(v))).collect();e.sort_by_key(|x|(x.0,x.1));Sparse{entries:e}};
+            let adjop=|o:&Superop|->Superop{Superop{left:adj(&o.left),right:adj(&o.right),sandwich:o.sandwich.iter().map(|(p,q)|(adj(p),adj(q))).collect()}};
+            let fold=self.edges.iter().map(|list|list.iter().map(|&(p,edge)|match edge{
+                Edge::Explicit(_)=>None,
+                Edge::Fold(f)=>{let data=&self.fold.targets[f];let(mut l,mut r)=(vec![ZERO;d],vec![ZERO;d]);
+                    for o in 0..data.orders(){let w=frequency_power(self.nu[p],o);for k in 0..d{mul_add(&mut l[k],w,data.left[o][k]);mul_add(&mut r[k],w,data.right[o][k]);}}
+                    Some((ct(&l),ct(&r)))}}).collect()).collect();
+            let mut incoming=vec![Vec::new();modes];
+            for(q,list)in self.edges.iter().enumerate(){for(k,&(p,_))in list.iter().enumerate(){incoming[p].push((q,k));}}
+            let mut rests=vec![Vec::new();modes];
+            for(t,term)in self.terms.iter().enumerate(){for &(p,q)in &term.edges{rests[p].push((t,q));}}
+            Adjoint{left:self.left.iter().map(|m|ct(m)).collect(),right:self.right.iter().map(|m|ct(m)).collect(),fold,
+                explicit:self.explicit.iter().map(|o|adjop(o)).collect(),recycling:adjop(&self.recycling),incoming,rests}
+        })
+    }
     /// The adjoint in the real inner product Re <x, y> of Hermitian-symmetric
-    /// fields (every mode, weight one): per canonical target q (its mirror's
-    /// share folded in, weight 2) every block, edge and rest of the forward map
-    /// conjugate-transposed and accumulated on the sources, then the
-    /// Hermitian-symmetric part (x + J x) / 2. Serial.
+    /// fields (every mode, weight one): every canonical target q (its
+    /// mirror's share folded in, weight 2) feeds the transposed and
+    /// conjugated blocks, edges and rests of the forward map into their
+    /// sources, each source mode accumulated by one task in a fixed order;
+    /// then the Hermitian-symmetric part (x + J x) / 2.
     pub fn apply_adjoint(&self,y:&[C])->Result<Vec<C>,String>{
         let n=self.n;let d=n*n;let modes=self.modes.len();
         if y.len()!=self.dimension(){return Err("Lattice operator field dimensions differ".into());}
-        let gemm=self.prepared.lapack.complex_gemm();let fold=&self.fold.targets;
-        let ct=|m:&[C]|->Vec<C>{let mut o=vec![ZERO;d];for i in 0..n{for j in 0..n{o[i+n*j]=conj(m[j+n*i]);}}o};
-        let adj=|s:&Sparse|->Sparse{let mut e:Vec<(usize,usize,C)>=s.entries.iter().map(|&(i,j,v)|(j,i,conj(v))).collect();e.sort_by_key(|x|(x.0,x.1));Sparse{entries:e}};
-        let adjop=|o:&Superop|->Superop{Superop{left:adj(&o.left),right:adj(&o.right),sandwich:o.sandwich.iter().map(|(p,q)|(adj(p),adj(q))).collect()}};
-        let recycling=adjop(&self.recycling);let explicit:Vec<Superop>=self.explicit.iter().map(|o|adjop(o)).collect();
-        let mut z=vec![ZERO;y.len()];let mut scratch=Vec::new();
-        let weight=|q:usize|if self.mirror[q]==q{1.}else{2.};
-        for q in 0..modes{if !self.canonical[q]{continue;}
-            let yq:Vec<C>=y[q*d..(q+1)*d].iter().map(|v|scaled(*v,weight(q))).collect();
-            // Column-major view Z: forward Z L + R Z, adjoint Z L^H + R^H Z.
-            let(la,ra)=(ct(&self.left[q]),ct(&self.right[q]));
-            let mut t=vec![ZERO;d];gemm.multiply(n,n,n,ONE,&yq,n,&la,n,ZERO,&mut t,n)?;gemm.multiply(n,n,n,ONE,&ra,n,&yq,n,ONE,&mut t,n)?;
-            recycling.apply_into(n,ONE,&yq,&mut t,&mut scratch);
-            for(a,b)in z[q*d..(q+1)*d].iter_mut().zip(&t){add(a,*b);}
-            for &(p,edge)in &self.edges[q]{
-                let mut t=vec![ZERO;d];
-                match edge{
-                    Edge::Explicit(e)=>explicit[e].apply_into(n,ONE,&yq,&mut t,&mut scratch),
-                    Edge::Fold(f)=>{let data=&fold[f];
-                        let(mut l,mut r)=(vec![ZERO;d],vec![ZERO;d]);
-                        for o in 0..data.orders(){let w=frequency_power(self.nu[p],o);
-                            for k in 0..d{mul_add(&mut l[k],w,data.left[o][k]);mul_add(&mut r[k],w,data.right[o][k]);}}
-                        let(la,ra)=(ct(&l),ct(&r));
-                        gemm.multiply(n,n,n,ONE,&yq,n,&la,n,ONE,&mut t,n)?;gemm.multiply(n,n,n,ONE,&ra,n,&yq,n,ONE,&mut t,n)?;}
+        let data=self.adjoint_data();let gemm=self.prepared.lapack.complex_gemm();
+        let weight=|q:usize|C{re:if self.mirror[q]==q{1.}else{2.},im:0.};
+        let mut z=vec![ZERO;y.len()];
+        self.execution.for_mode_chunks(&mut z,d,self.work,MINIMUM_WORK_PER_TASK,&mut Vec::<Vec<C>>::new(),|first,chunk,small|{
+            for(m,zp)in chunk.chunks_exact_mut(d).enumerate(){let p=first+m;
+                // Column-major view Y: forward Y L + R Y, adjoint Y L^H + R^H Y.
+                if self.canonical[p]{let(yp,w)=(&y[p*d..(p+1)*d],weight(p));
+                    gemm.multiply(n,n,n,w,yp,n,&data.left[p],n,ONE,zp,n)?;gemm.multiply(n,n,n,w,&data.right[p],n,yp,n,ONE,zp,n)?;
+                    data.recycling.apply_into(n,w,yp,zp,small);}
+                for &(q,k)in &data.incoming[p]{let(yq,w)=(&y[q*d..(q+1)*d],weight(q));
+                    match(self.edges[q][k].1,&data.fold[q][k]){
+                        (Edge::Explicit(e),_)=>data.explicit[e].apply_into(n,w,yq,zp,small),
+                        (Edge::Fold(_),Some((l,r)))=>{gemm.multiply(n,n,n,w,yq,n,l,n,ONE,zp,n)?;gemm.multiply(n,n,n,w,r,n,yq,n,ONE,zp,n)?;}
+                        (Edge::Fold(_),None)=>return Err("Lattice operator adjoint: a fold edge without its factors".into()),
+                    }}
+                for &(t,q)in &data.rests[p]{let term=&self.terms[t];
+                    let s=mul(conj(frequency_power(self.nu[p],term.power)),weight(q));let yq=&y[q*d..(q+1)*d];
+                    for b in &term.rest.blocks{let h=b.rows.len();
+                        for(c,&col)in b.cols.iter().enumerate(){let mut acc=ZERO;
+                            for(r,&row)in b.rows.iter().enumerate(){mul_add(&mut acc,conj(b.values[r+h*c]),yq[row as usize]);}
+                            mul_add(&mut zp[col as usize],s,acc);}}
+                    let sp=&term.rest.sparse;
+                    for r in 0..d{let v=yq[r];if !nonzero(v){continue;}let sv=mul(s,v);
+                        for at in sp.row[r]as usize..sp.row[r+1]as usize{mul_add(&mut zp[sp.col[at]as usize],conj(sp.value[at]),sv);}}
                 }
-                for(a,b)in z[p*d..(p+1)*d].iter_mut().zip(&t){add(a,*b);}
             }
-        }
-        for term in &self.terms{
-            for &(p,q)in &term.edges{
-                let s=conj(frequency_power(self.nu[p],term.power));let wq=weight(q);
-                for b in &term.rest.blocks{let h=b.rows.len();
-                    for(c,&col)in b.cols.iter().enumerate(){let mut acc=ZERO;
-                        for(r,&row)in b.rows.iter().enumerate(){mul_add(&mut acc,conj(b.values[r+h*c]),y[q*d+row as usize]);}
-                        add(&mut z[p*d+col as usize],scaled(mul(s,acc),wq));}}
-                let m=&term.rest.sparse;
-                for r in 0..d{for at in m.row[r]as usize..m.row[r+1]as usize{
-                    add(&mut z[p*d+m.col[at]as usize],scaled(mul(s,mul(conj(m.value[at]),y[q*d+r])),wq));}}
-            }
-        }
+            Ok(())
+        })?;
         // The Hermitian-symmetric part.
         let mut out=vec![ZERO;z.len()];
         for q in 0..modes{let m=self.mirror[q];for i in 0..n{for j in 0..n{let(u,v)=(z[q*d+i*n+j],conj(z[m*d+j*n+i]));out[q*d+i*n+j]=C{re:0.5*(u.re+v.re),im:0.5*(u.im+v.im)};}}}
         Ok(out)
-    }
-    /// What the operator leaves out of the far shell on a field x at the
-    /// shift z, to all orders: the far shell's exact landing on every mode
-    /// (`FoldLibrary::far_shell`, rings until the next one can land within
-    /// `tolerance`, largest entry) less the fold the operator applies there
-    /// (every order and rest as the rule keeps it), not mirror-completed (at a
-    /// complex z the response of a Hermitian-symmetric field is not
-    /// Hermitian-symmetric); with the far shell's rings.
-    pub fn left_out_exact(&self,x:&[C],z:C,tolerance:f64)->Result<(Vec<C>,super::fold::FarShell),String>{
-        let(n,d)=(self.n,self.n*self.n);let prepared=self.prepared;
-        let nu_of=|q:&[i32]|prepared.nu(q);
-        let shell=self.fold.far_shell(&prepared.generator,&prepared.plan,&nu_of,&self.modes,x,z,tolerance)?;
-        let mut y=vec![ZERO;self.dimension()];for ring in &shell.landings{for(a,&b)in y.iter_mut().zip(ring){add(a,b);}}
-        for q in 0..self.modes.len(){
-            let out=&mut y[q*d..(q+1)*d];
-            for data in &self.fold.targets{
-                let Ok(source)=charge_minus(&self.modes[q],&data.charge)else{continue};
-                let Some(&p)=self.index.get(&source)else{continue};
-                let xp=&x[p*d..(p+1)*d];
-                for o in 0..data.orders(){let w=frequency_power(self.nu[p],o);let s=C{re:-w.re,im:-w.im};
-                    absorbed_into(&data.left[o],&data.right[o],n,s,xp,out);data.applied(o).apply_into(s,xp,out);}
-            }
-        }
-        Ok((y,shell))
     }
     /// The operator as a dense row-major matrix (tests).
     #[cfg(test)]
@@ -329,13 +326,6 @@ impl<'a> LatticeOperator<'a>{
         }
         out
     }
-}
-
-/// out += s (A X + X B) for row-major n x n A, B and the block X.
-fn absorbed_into(a:&[C],b:&[C],n:usize,s:C,x:&[C],out:&mut[C]){
-    for i in 0..n{for j in 0..n{let mut v=ZERO;
-        for k in 0..n{mul_add(&mut v,a[i*n+k],x[k*n+j]);mul_add(&mut v,x[i*n+k],b[k*n+j]);}
-        mul_add(&mut out[i*n+j],s,v);}}
 }
 
 /// A Hermitian-symmetric test field: x_-q = x_q^dagger, the centre Hermitian.
@@ -398,18 +388,18 @@ mod tests{
         }
     }
     #[test]
-    fn lattice_far_shell_is_the_exact_elimination_and_left_out_its_rest(){
+    fn lattice_far_shell_first_ring_is_the_exact_elimination(){
         // The far shell's first ring on every fold edge p -> q is the exact
         // second-order elimination of the far modes at the source's frequency,
         // sum over the pairs of -C_b (L0 - i (nu_s + nu_p))^-1 C_s from dense LU
-        // solves; `left_out_exact` is every ring less the fold the operator
-        // applies (its dense assembly).
+        // solves.
         let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
         let op=LatticeOperator::new(&p,&p.fold,&modes).unwrap();let(n,d)=(op.n,op.n*op.n);let size=op.dimension();
-        let x=symmetric_field(&op,5);let(left,shell)=op.left_out_exact(&x,ZERO,0.).unwrap();
+        let x=symmetric_field(&op,5);let nu_of=|q:&[i32]|p.nu(q);
+        let shell=p.fold.far_shell(&p.generator,&p.plan,&nu_of,&op.modes,&x,0.).unwrap();
         let dense=|q:&[i32]|{let mut m=vec![ZERO;d*d];p.generator.components[q].op.dense_into(n,ONE,&mut m);m};
         let mut l0=vec![ZERO;d*d];p.generator.zero_component().op.dense_into(n,ONE,&mut l0);
-        let lap=&p.lapack;let(mut second,mut applied)=(vec![ZERO;size],vec![ZERO;size]);
+        let lap=&p.lapack;let mut second=vec![ZERO;size];
         for q in 0..op.modes.len(){
             for target in p.plan.targets.iter().chain(&p.plan.omitted){
                 let Ok(source)=charge_minus(&op.modes[q],&target.charge)else{continue};let Some(&s)=op.index.get(&source)else{continue};
@@ -421,29 +411,22 @@ mod tests{
                     let b=dense(&p.plan.steps[pair.back].charge);
                     for r in 0..d{let mut v=ZERO;for k in 0..d{mul_add(&mut v,b[r*d+k],y[k]);}second[q*d+r].re-=v.re;second[q*d+r].im-=v.im;}}
             }
-            for data in &p.fold.targets{
-                let Ok(source)=charge_minus(&op.modes[q],&data.charge)else{continue};let Some(&s)=op.index.get(&source)else{continue};
-                let mut folded=vec![ZERO;d*d];for o in 0..data.orders(){data.dense_into(n,o,frequency_power(op.nu[s],o),&mut folded);}
-                for r in 0..d{let mut v=ZERO;for k in 0..d{mul_add(&mut v,folded[r*d+k],x[s*d+k]);}applied[q*d+r]=C{re:applied[q*d+r].re+v.re,im:applied[q*d+r].im+v.im};}
-            }
         }
         let scale=x.iter().map(|z|magnitude(*z)).fold(0.,f64::max)*p.fold.targets.iter().map(|t|t.norms[0][0]).fold(0.,f64::max);
-        let gap=|a:&[C],b:&[C]|a.iter().zip(b).map(|(u,v)|magnitude(C{re:u.re-v.re,im:u.im-v.im})).fold(0.,f64::max);
-        assert!(gap(&shell.landings[0],&second)<=1e-12*scale,"the first ring {:e} from the exact second order (scale {scale:e})",gap(&shell.landings[0],&second));
-        let mut rings=vec![ZERO;size];for ring in &shell.landings{for(a,&b)in rings.iter_mut().zip(ring){add(a,b);}}
-        let expected:Vec<C>=rings.iter().zip(&applied).map(|(a,b)|C{re:a.re-b.re,im:a.im-b.im}).collect();
-        assert!(gap(&left,&expected)<=1e-12*scale,"left out {:e} from every ring less the fold (scale {scale:e})",gap(&left,&expected));
+        let gap=shell.landings[0].iter().zip(&second).map(|(u,v)|magnitude(C{re:u.re-v.re,im:u.im-v.im})).fold(0.,f64::max);
+        assert!(gap<=1e-12*scale,"the first ring {gap:e} from the exact second order (scale {scale:e})");
     }
     #[test]
     fn lattice_block_traces_are_exact_left_eigenvectors(){
-        // B's foundation (`space`): every coupling is a commutator and every
-        // fold term keeps its population rows, so tau_q(A x) = -i nu_q
-        // tau_q(x) on every block, for any field, on the lattice and with what
-        // the operator leaves out added.
+        // The trace carrier's foundation (`space`): every coupling is a
+        // commutator and every fold term keeps its population rows, so
+        // tau_q(A x) = -i nu_q tau_q(x) on every block, for any field, on the
+        // lattice and with the far shell's rings (the ring targets) added.
         let f=fixture();let p=prepared(&f);let modes=p.modes(2).unwrap();
         let mut op=LatticeOperator::new(&p,&p.fold,&modes).unwrap();let(n,d)=(op.n,op.n*op.n);
         let x=symmetric_field(&op,3);let mut y=vec![ZERO;op.dimension()];op.apply(&x,&mut y).unwrap();
-        let(rest,_)=op.left_out_exact(&x,ZERO,0.).unwrap();for(a,b)in y.iter_mut().zip(rest){add(a,b);}
+        let nu_of=|q:&[i32]|p.nu(q);let shell=p.fold.far_shell(&p.generator,&p.plan,&nu_of,&op.modes,&x,0.).unwrap();
+        for ring in shell.landings.iter().skip(1){for(a,&b)in y.iter_mut().zip(ring){add(a,b);}}
         let trace=|v:&[C],q:usize|(0..n).fold(ZERO,|s,i|C{re:s.re+v[q*d+i*n+i].re,im:s.im+v[q*d+i*n+i].im});
         let scale=y.iter().map(|z|magnitude(*z)).fold(0.,f64::max);
         for q in 0..op.modes.len(){let(ty,tx)=(trace(&y,q),trace(&x,q));let defect=C{re:ty.re-op.nu[q]*tx.im,im:ty.im+op.nu[q]*tx.re};

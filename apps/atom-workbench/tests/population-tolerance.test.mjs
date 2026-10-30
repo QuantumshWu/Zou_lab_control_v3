@@ -9,7 +9,7 @@ test('every native request asks for populationTolerance 0.005, whatever the scen
   assert.equal(POPULATION_TOLERANCE,.005);assert.ok(!('populationTolerance' in defaultDynamics()));
   for(const stray of [undefined,.001,.02,.05,'0.005',null]){
     const scene=defaultScene();scene.lasers=scene.lasers.slice(0,1);if(stray!==undefined)scene.dynamics.populationTolerance=stray;
-    for(const options of [{},{populationTolerance:stray},{steadyOnly:true}]){
+    for(const options of [{},{populationTolerance:stray},{meanOnly:true}]){
       const {payload}=prepareNativeSolve({scene,options});
       assert.equal(payload.options.populationTolerance,.005,`${stray} ${JSON.stringify(options)}`);
     }

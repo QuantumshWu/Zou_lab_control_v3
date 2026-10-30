@@ -1,11 +1,11 @@
 //! The Schrieffer-Wolff / Floquet frame of a request, built once and shared
-//! by the reduced model's inner product (`SwMetric`), the error estimate's
-//! fast part (`estimator`) and the slowest relaxation's classes
-//! (`pipeline`): the first-order kernels X~_s of the explicit near steps in
-//! the eigen-coordinates of L0' (`estimator::kernels`; elements above
-//! KERNEL_CAP are near resonant and stay couplings) and one eigensystem
-//! D' = V diag(mu) V^-1 of the second-order block L0' + sum_s K_s over every
-//! step (`estimator::blocks`), the same for every charge.
+//! by the reduced model's inner product (`SwMetric`), the a-priori amplitudes
+//! (`apriori`) and the slowest relaxation's classes (`pipeline`): the
+//! first-order kernels X~_s of the explicit near steps in the
+//! eigen-coordinates of L0' (`kernels`; elements above KERNEL_CAP are near
+//! resonant and stay couplings) and one eigensystem D' = V diag(mu) V^-1 of
+//! the second-order block L0' + sum_s K_s over every step (`blocks`), the
+//! same for every charge.
 //!
 //! The preconditioner's Floquet kernels (`floquet`) are a different object:
 //! separable n x n left/right frames without the recycling term, cheap to
@@ -35,9 +35,8 @@
 use super::*;
 use super::eigenbasis::BlockEigenbasis;
 use super::operator::LatticeOperator;
-use super::estimator::{KERNEL_CAP,KERNEL_ENTRY,KERNEL_HORIZON_RATE};
-use super::estimator::blocks::BlockSystem;
-use super::estimator::kernels::{KernelRule,SwKernels};
+use super::blocks::BlockSystem;
+use super::kernels::{KERNEL_CAP,KERNEL_ENTRY,KERNEL_HORIZON_RATE,KernelRule,SwKernels};
 use crate::parallel::Execution;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize,Ordering};
@@ -59,8 +58,6 @@ pub struct SwFrame<'p>{
     prepared:&'p LatticePrepared,rule:KernelRule,
     /// The longest output time it is built for (us).
     pub horizon:f64,
-    /// The explicit steps' charges in plan order: the kernels' steps.
-    pub steps:Vec<Charge>,
     /// The kernels; the second-order block over every step; N = V^-H V^-1
     /// (column-major d x d, eigen-coordinates of L0'); each with its build
     /// time (ms).
@@ -73,8 +70,7 @@ impl<'p> SwFrame<'p>{
     /// whose second-order rate matters over it).
     pub fn new(prepared:&'p LatticePrepared,horizon:f64)->Self{
         let rule=KernelRule{entry:KERNEL_ENTRY,horizon_rate:KERNEL_HORIZON_RATE,horizon,cap:KERNEL_CAP};
-        let plan=&prepared.plan;let steps=plan.explicit().into_iter().map(|i|plan.steps[i].charge.clone()).collect();
-        Self{prepared,rule,horizon,steps,kernels:OnceLock::new(),class:OnceLock::new(),normal:OnceLock::new()}
+        Self{prepared,rule,horizon,kernels:OnceLock::new(),class:OnceLock::new(),normal:OnceLock::new()}
     }
     pub fn kernels(&self)->Result<&SwKernels,String>{
         self.kernels.get_or_init(||{let clock=Instant::now();let basis=self.prepared.eigenbasis()?;

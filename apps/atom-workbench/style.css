@@ -258,7 +258,7 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .readout-row.two { grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)); }
 .readout-row > span:not(.readout-name) { text-align: right; }
 .readout-name { min-width: 0; word-break: keep-all; }
-.readout-head, .readout-steady { color: var(--muted-ink); }
+.readout-head, .readout-mean { color: var(--muted-ink); }
 
 /* ---------- 方向与偏振 ---------------------------------------------------- */
 .space-title { flex-wrap: wrap; height: auto; }

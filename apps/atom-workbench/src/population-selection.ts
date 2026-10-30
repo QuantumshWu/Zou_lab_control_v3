@@ -18,10 +18,10 @@ export function recommendedPopulationStates(result:DynamicsResult|undefined,init
 }
 export function populationDisplayIds(settings:DynamicsSettings):string[]{return [...new Set([...settings.monitoredStateIds,...(settings.monitoredGroupIds??[])])];}
 export function withPopulationGroups(result:DynamicsResult,groups:readonly string[]):DynamicsResult{
- const populations={...result.populations},steady=result.steady.populations?{...result.steady.populations}:null;
+ const populations={...result.populations},mean=result.mean.populations?{...result.mean.populations}:null;
  for(const id of groups){const group=POPULATION_GROUPS.find(g=>g.id===id);if(!group)continue;
   populations[id]=result.timesUs.map((_,i)=>group.members.reduce((sum,state)=>sum+(result.populations[state]?.[i]??0),0));
-  if(steady)steady[id]=group.members.reduce((sum,state)=>sum+(result.steady.populations?.[state]??0),0);
+  if(mean)mean[id]=group.members.reduce((sum,state)=>sum+(result.mean.populations?.[state]??0),0);
  }
- return {...result,populations,steady:{...result.steady,populations:steady}};
+ return {...result,populations,mean:{...result.mean,populations:mean}};
 }
