@@ -133,19 +133,25 @@ impl<'m> Projection<'m>{
         let images:Vec<Vec<C>>=fresh.iter().map(|w|{let mut a=vec![ZERO;w.len()];lattice.apply(w,&mut a).map(|_|a)}).collect::<Result<_,_>>()?;
         let new_images:Vec<&[C]>=images.iter().map(|v|v.as_slice()).collect();
         for column in &basis[old..new]{self.populations.push(self.canonical.iter().flat_map(|&(q,_,_)|(0..n).map(move|i|column[q*d+i*n+i])).collect());}
-        let all_basis:Vec<&[C]>=basis[..new].iter().map(|v|v.as_slice()).collect();let old_basis=&all_basis[..old];
-        let z_new=self.frame_metric.apply(&fresh)?;
-        let kb=self.metric_dots(&z_new,width,&all_basis)?;                                  // K[i, old + c] at i * width + c
-        let za=self.frame_metric.apply(&new_images)?;let hc=self.metric_dots(&za,width,&all_basis)?;   // H[i, old + c] at i * width + c
-        // The adjoint applications over the workers, then one Gram: H[old + c, j]
-        // from A^H (M w_c) and Fm[old + c, j] from A^H (M A w_c).
+        let all_basis:Vec<&[C]>=basis[..new].iter().map(|v|v.as_slice()).collect();
+        let z_new=self.frame_metric.apply(&fresh)?;let za=self.frame_metric.apply(&new_images)?;
+        // M w_c and M A w_c as fields, their adjoint applications over the
+        // workers, then one Gram of all four against the basis (one sweep of
+        // the basis, one GEMM per canonical block): K[i, old + c] =
+        // Re <M w_c, w_i>, H[i, old + c] = Re <M A w_c, w_i>, and on the old
+        // columns H[old + c, j] = Re <A^H M w_c, w_j>, Fm[old + c, j] =
+        // Re <A^H M A w_c, w_j>.
         let lattice_ref=&*lattice;
-        let sources:Vec<Vec<C>>=(0..width).flat_map(|c|[self.field(&z_new,c,lattice_ref),self.field(&za,c,lattice_ref)]).collect();
+        let mut rows:Vec<Vec<C>>=(0..width).flat_map(|c|[self.field(&z_new,c,lattice_ref),self.field(&za,c,lattice_ref)]).collect();
         let op=lattice.operator();
-        let adjoints=Execution::new()?.map((0..sources.len()).collect(),|i|op.apply_adjoint(&sources[i])).into_iter().collect::<Result<Vec<_>,_>>()?;drop(sources);
-        let refs:Vec<&[C]>=adjoints.iter().map(|v|v.as_slice()).collect();let g=self.vectors.gram(&refs,old_basis)?;   // [(2 c + kind) * old + j]
+        let adjoints=Execution::new()?.map((0..rows.len()).collect(),|i|op.apply_adjoint(&rows[i])).into_iter().collect::<Result<Vec<_>,_>>()?;
+        rows.extend(adjoints);
+        let refs:Vec<&[C]>=rows.iter().map(|v|v.as_slice()).collect();let g=self.vectors.gram(&refs,&all_basis)?;drop(refs);drop(rows);
+        let at=|row:usize,j:usize|g[row*new+j];
+        let kb:Vec<f64>=(0..new*width).map(|x|at(2*(x%width),x/width)).collect();
+        let hc:Vec<f64>=(0..new*width).map(|x|at(2*(x%width)+1,x/width)).collect();
         let mut hr=vec![0.;old*width];let mut fmc=vec![0.;new*width];
-        for c in 0..width{for j in 0..old{hr[j*width+c]=g[(2*c)*old+j];fmc[j*width+c]=g[(2*c+1)*old+j];}}
+        for c in 0..width{for j in 0..old{hr[j*width+c]=at(2*width+2*c,j);fmc[j*width+c]=at(2*width+2*c+1,j);}}
         let fmnew=self.metric_dots(&za,width,&new_images)?;for a in 0..width{for c in 0..width{fmc[(old+a)*width+c]=fmnew[a*width+c];}}
         let(mut k,mut h,mut fm)=(grow(&self.k,old,new),grow(&self.h,old,new),grow(&self.fm,old,new));
         for i in 0..new{for c in 0..width{let j=old+c;

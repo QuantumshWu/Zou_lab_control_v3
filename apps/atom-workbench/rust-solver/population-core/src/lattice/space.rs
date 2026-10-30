@@ -70,16 +70,21 @@ const APPEND_FLOOR:f64=1e-11;
 /// Ladder points per decade: a deliberate choice, not measured (the
 /// reference runs used two to three).
 const PER_DECADE:f64=2.;
-/// The ladder's top, LADDER_TOP / t1: the shift-and-invert rule at the
-/// earliest output time, t1 the first sample time (without a grid T_max /
-/// LADDER_SAMPLES, `pipeline`). Van den Eshof and Hochbruck's choice for
-/// exp(t A) v by (I - gamma A)^-1 is gamma = t / 10, a pole at 1 / gamma =
-/// 10 / t1: a rule, not a measured constant. Measured against it: three
-/// lasers at 20 us stalled at 3.8-5.8e-3 over 48 solves with 1 / t1, reached
-/// 1.9e-3 at 24 solves with 10 / t1 (half the inner steps per solve); 30 / t1
-/// gave the same errors on five lasers at 10 us. The Petrov-Galerkin shift
-/// tau is the same LADDER_TOP / t1 (`reduced`).
-pub const LADDER_TOP:f64=10.;
+/// The ladder's top, LADDER_TOP / t1, t1 the first sample time (without a
+/// grid T_max / LADDER_SAMPLES, `pipeline`). Van den Eshof and Hochbruck's
+/// shift-and-invert choice for exp(t A) v, gamma = t / 10 (a pole at 10 / t1),
+/// assumes a spectrum near the negative axis; the lattice's spectrum reaches
+/// far up the imaginary axis (the occupied modes' frequencies nu_q, 1e3
+/// rad/us on four lasers, nu_q t1 ~ 100), and a real pole resolves the
+/// spectrum up to about its own size. Measured (four lasers at 20 us against
+/// a Pade reference, 48 solves): with 10 / t1 the first sample's error held
+/// at 2.5-3.1e-3 until 32 solves; with 30, 100, 300 and 1000 / t1 it fell to
+/// 3-5e-4 by 28 solves, the same for every top from 30 up: 30 / t1, the
+/// smallest of them, the fewest poles per cycle. Earlier: three lasers at 20
+/// us stalled at 3.8-5.8e-3 over 48 solves with 1 / t1. The Petrov-Galerkin
+/// shift tau is the same LADDER_TOP / t1 (`reduced`; measured: tau from 0 to
+/// 1e5 gave the same errors).
+pub const LADDER_TOP:f64=30.;
 
 #[derive(Clone,Debug)]
 /// One solve of the space: its pole, inner steps (over its right-hand
@@ -120,7 +125,7 @@ impl Space{
         space.append(lattice,u,0.)?;
         // x0's K part (zero when rho0 is I / n).
         let mut k0=x0.clone();project_traces(&mut k0,n);let rest=space.vectors.norm(&k0);
-        space.add_krylov(lattice,x0)?;
+        space.add_krylov(lattice,vec![x0])?;
         if space.basis.len()>1{space.initial.push(rest);}
         Ok(space)
     }
@@ -138,7 +143,7 @@ impl Space{
         self.translations.push((step.clone(),source(1),source(-1)));
         let t=self.translations.len()-1;let mut added=0;
         let floor=self.floor();let n=op.n;
-        for v in self.krylov.clone(){for copy in self.translates(&v,t){added+=usize::from(self.append_projected(n,copy,floor)?);}}
+        for v in self.krylov.clone(){added+=self.append_block(n,self.translates(&v,t).into(),floor)?;}
         Ok(added)
     }
     /// S_s v + S_-s v and i (S_s v - S_-s v) of translation t.
@@ -165,38 +170,75 @@ impl Space{
         }
         self.append_projected(n,w,floor)
     }
-    fn append_projected(&mut self,n:usize,mut w:Vec<C>,floor:f64)->Result<bool,String>{
-        let size=self.vectors.norm(&w);if !(size>0.)||self.full(){return Ok(false);}
-        project_traces(&mut w,n);
-        // Gram-Schmidt with the Kahan-Parlett reorthogonalization test: a second pass only when the
-        // first removed more than 1 - 1/sqrt(2) of the norm (the first pass is then accurate to roundoff).
-        let before=self.vectors.norm(&w);
-        for pass in 0..2{let refs:Vec<&[C]>=self.basis.iter().map(|v|v.as_slice()).collect();let h=self.vectors.dots(&refs,&w);self.vectors.subtract(&refs,&h,&mut w)?;
-            if pass==0&&self.vectors.norm(&w)>std::f64::consts::FRAC_1_SQRT_2*before{break;}}
-        project_traces(&mut w,n);
-        let rest=self.vectors.norm(&w);if !(rest>floor*size){return Ok(false);}
-        for v in w.iter_mut(){*v=scaled(*v,1./rest);}
-        self.basis.push(w);Ok(true)
-    }
-    /// A Krylov vector: orthonormalized within the sequence (dropped below
-    /// the noise floor), appended to the basis with its translated copies.
-    fn add_krylov(&mut self,lattice:&Lattice<'_>,p:Vec<C>)->Result<usize,String>{
-        let size=self.vectors.norm(&p);let mut v=p;
-        for _ in 0..2{let refs:Vec<&[C]>=self.krylov.iter().map(|x|x.as_slice()).collect();let h=self.vectors.dots(&refs,&v);self.vectors.subtract(&refs,&h,&mut v)?;}
-        let rest=self.vectors.norm(&v);if !(rest>self.noise_floor*size)||!(rest>0.){return Ok(0);}
-        for x in v.iter_mut(){*x=scaled(*x,1./rest);}
-        self.krylov.push(v.clone());
-        let floor=self.floor();
-        if !self.append(lattice,v.clone(),floor)?{return Ok(0);}
-        let mut added=1;let n=lattice.operator().n;
-        for t in 0..self.translations.len(){for copy in self.translates(&v,t){added+=usize::from(self.append_projected(n,copy,floor)?);}}
+    fn append_projected(&mut self,n:usize,w:Vec<C>,floor:f64)->Result<bool,String>{Ok(self.append_block(n,vec![w],floor)?>0)}
+    /// Appends a block of vectors in order, each as `append_projected`
+    /// would: block classical Gram-Schmidt against the basis (one Gram and
+    /// one combination per pass, a GEMM per canonical block: one sweep of
+    /// the basis for the whole block), the Kahan-Parlett test per vector (a
+    /// second pass for the vectors whose first removed more than 1 -
+    /// 1/sqrt(2) of the norm), then each against the block's vectors taken
+    /// before it, the floor test and the normalization. Returns the
+    /// directions added.
+    fn append_block(&mut self,n:usize,block:Vec<Vec<C>>,floor:f64)->Result<usize,String>{self.append_groups(n,block.into_iter().map(|w|vec![w]).collect(),floor)}
+    /// `append_block` over groups [v, its translated copies]: a group's
+    /// copies are taken only when its first vector adds a direction.
+    fn append_groups(&mut self,n:usize,groups:Vec<Vec<Vec<C>>>,floor:f64)->Result<usize,String>{
+        let block:Vec<(Vec<C>,usize,bool)>=groups.into_iter().enumerate().flat_map(|(g,group)|group.into_iter().enumerate().map(move|(k,w)|(w,g,k==0))).collect();
+        let sizes:Vec<f64>=block.iter().map(|w|self.vectors.norm(&w.0)).collect();
+        let mut block:Vec<(Vec<C>,f64,usize,bool)>=block.into_iter().zip(sizes).filter(|(w,size)|*size>0.||w.2).map(|((w,g,lead),size)|(w,size,g,lead)).collect();
+        if block.is_empty()||self.full(){return Ok(0);}
+        for(w,..)in &mut block{project_traces(w,n);}
+        let before:Vec<f64>=block.iter().map(|(w,..)|self.vectors.norm(w)).collect();
+        let mut pending:Vec<usize>=(0..block.len()).collect();
+        for pass in 0..2{
+            if pending.is_empty()||self.basis.is_empty(){break;}
+            let refs:Vec<&[C]>=self.basis.iter().map(|v|v.as_slice()).collect();
+            let rows:Vec<&[C]>=pending.iter().map(|&i|block[i].0.as_slice()).collect();
+            let r=refs.len();let h=self.vectors.gram(&rows,&refs)?;drop(rows);
+            let coefficients:Vec<Vec<f64>>=(0..pending.len()).map(|k|h[k*r..(k+1)*r].to_vec()).collect();
+            let parts=self.vectors.combinations(&refs,&coefficients)?;drop(refs);
+            for(&i,part)in pending.iter().zip(&parts){for(t,x)in block[i].0.iter_mut().zip(part){t.re-=x.re;t.im-=x.im;}}
+            if pass==0{pending.retain(|&i|!(self.vectors.norm(&block[i].0)>std::f64::consts::FRAC_1_SQRT_2*before[i]));}
+        }
+        let mut added=0;let start=self.basis.len();let mut skipped=None;
+        for(mut w,size,group,lead)in block{
+            if self.full(){break;}
+            if skipped==Some(group){continue;}
+            if lead&&!(size>0.){skipped=Some(group);continue;}
+            // Against the block's vectors appended before it (twice).
+            for _ in 0..2{let refs:Vec<&[C]>=self.basis[start..].iter().map(|v|v.as_slice()).collect();if refs.is_empty(){break;}
+                let h=self.vectors.dots(&refs,&w);self.vectors.subtract(&refs,&h,&mut w)?;}
+            project_traces(&mut w,n);
+            let rest=self.vectors.norm(&w);if !(rest>floor*size){if lead{skipped=Some(group);}continue;}
+            for v in w.iter_mut(){*v=scaled(*v,1./rest);}
+            self.basis.push(w);added+=1;
+        }
         Ok(added)
+    }
+    /// Krylov vectors: each orthonormalized within the sequence (dropped
+    /// below the noise floor), then appended to the basis with its
+    /// translated copies, all as one block (`append_groups`).
+    fn add_krylov(&mut self,lattice:&Lattice<'_>,vectors:Vec<Vec<C>>)->Result<usize,String>{
+        let mut accepted=Vec::new();
+        for p in vectors{
+            let size=self.vectors.norm(&p);let mut v=p;
+            for _ in 0..2{let refs:Vec<&[C]>=self.krylov.iter().map(|x|x.as_slice()).collect();let h=self.vectors.dots(&refs,&v);self.vectors.subtract(&refs,&h,&mut v)?;}
+            let rest=self.vectors.norm(&v);if !(rest>self.noise_floor*size)||!(rest>0.){continue;}
+            for x in v.iter_mut(){*x=scaled(*x,1./rest);}
+            self.krylov.push(v.clone());accepted.push(v);
+        }
+        // The carrier is the basis' first column (`new`): every Krylov vector
+        // is projected into K.
+        let groups:Vec<Vec<Vec<C>>>=accepted.into_iter().map(|v|{let copies:Vec<Vec<C>>=(0..self.translations.len()).flat_map(|t|self.translates(&v,t)).collect();
+            std::iter::once(v).chain(copies).collect()}).collect();
+        let(floor,n)=(self.floor(),lattice.operator().n);
+        self.append_groups(n,groups,floor)
     }
     /// A further starting vector of the block (a translation's slip): a
     /// Krylov vector of its own; the block grows by one when it adds a
     /// direction.
     pub fn add_start(&mut self,lattice:&Lattice<'_>,v:Vec<C>)->Result<usize,String>{
-        let before=self.krylov.len();let added=self.add_krylov(lattice,v)?;if self.krylov.len()>before{self.block+=1;}Ok(added)
+        let before=self.krylov.len();let added=self.add_krylov(lattice,vec![v])?;if self.krylov.len()>before{self.block+=1;}Ok(added)
     }
     /// One column at a pole (a solve per right-hand side of the block);
     /// returns the directions it added.
@@ -216,8 +258,7 @@ impl Space{
                 let rhs:Vec<Vec<C>>=self.krylov[self.krylov.len()-b..].iter().map(|k|k.iter().map(|v|C{re:-v.re,im:-v.im}).collect()).collect();
                 let(mut w,mut steps,mut residual)=(Vec::with_capacity(b),0usize,0_f64);
                 for f in &rhs{let(x,st,re)=lattice.solve(pole,f,inner)?;w.push(x);steps+=st;residual=residual.max(re);}
-                let mut added=0;for column in w{added+=self.add_krylov(lattice,column)?;}
-                (added,steps,residual)
+                (self.add_krylov(lattice,w)?,steps,residual)
             }
         };
         self.noise_floor=NOISE*inner;
