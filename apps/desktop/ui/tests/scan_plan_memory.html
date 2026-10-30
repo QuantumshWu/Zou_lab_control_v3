@@ -121,6 +121,32 @@ try {
   update({replaced:true},'Load failed');t.port('frequency');equal(t.plan(),kept,'failed load');t.port('hold duration');
   update({replaced:true});t.port('frequency');equal(t.plan().values[0],119.9,'accepted load');
  });
+ await check('linked rows retain numeric formulas, independent units and disabled edits',()=>{
+  const t=setup();
+  const plan=()=>JSON.parse(t.row().values.plan).axes[0];
+  const toggle=()=>t.root.querySelector('.axis-link');
+  assert(toggle().getAttribute('aria-checked')==='false','link defaults off');
+  toggle().click();assert(plan().link_enabled&&plan().links.length===1,'link adds first parameter');
+  assert(t.root.querySelector('.linked-marker')?.textContent==='','group marker has no arrow text');
+  const formula=t.root.querySelector('input[aria-label="Linked formula"]');formula.value='120 - x';formula.dispatchEvent(new Event('change',{bubbles:true}));
+  const values=[...plan().links[0].values];choose(t.root.querySelector('.linked-unit'),'ms');
+  equal(plan().links[0].formula,'120 - x','unit switch preserves formula');equal(plan().links[0].values,values,'unit switch preserves numbers');
+  const kept=JSON.stringify(plan().links);toggle().click();assert(!plan().link_enabled&&!t.root.querySelector('.linked-port'),'off hides linked controls');
+  equal(JSON.stringify(plan().links),kept,'off preserves edits');toggle().click();equal(JSON.stringify(plan().links),kept,'on restores edits');
+  t.root.querySelector('button[aria-label="Add linked parameter"]').click();equal(plan().links.length,2,'add another parameter');
+  t.root.querySelector('button[aria-label="Remove linked parameter"]').click();equal(plan().links.length,1,'delete linked parameter');
+  t.ack({},t.facts());equal(plan().links.length,1,'accepted re-render retains links');
+  t.root.style.cssText='width:1450px;position:fixed;left:0;top:0;--label-width:110px';
+  const linked=t.root.querySelector('.linked-port').getBoundingClientRect();
+  for(const selector of ['.linked-values','.linked-unit','.linked-mode','.linked-add','.linked-remove']) {
+   const box=t.root.querySelector(selector).getBoundingClientRect();
+   assert(Math.abs(box.top-linked.top)<1,`${selector} wraps onto another row`);
+  }
+  for(const [parent,child] of [['.axis-port','.linked-port'],['.axis-values','.linked-values'],['.axis-unit','.linked-unit']]) {
+   assert(Math.abs(t.root.querySelector(parent).getBoundingClientRect().left-t.root.querySelector(child).getBoundingClientRect().left)<1,`${child} is not aligned`);
+  }
+
+ });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
 }catch(error){document.getElementById('result').textContent=JSON.stringify({passed:false,completed:checks,error:error.stack})}
 </script>

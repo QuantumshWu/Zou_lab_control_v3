@@ -29,7 +29,7 @@
 /* ---------- ScanPlanEditor: every axis a line of one column set ---------- */
 .scan-axes {
   display: grid; align-items: center; column-gap: var(--row-gap); row-gap: var(--row-gap);
-  grid-template-columns: var(--label-width, var(--label-min)) minmax(0, 1fr) auto auto auto auto;
+  grid-template-columns: var(--label-width, var(--label-min)) minmax(0, 1fr) auto auto auto auto auto;
 }
 .scan-axes:empty { display: none; }
 /* "By hand" in the label column; nothing before a port's row. */
@@ -48,7 +48,8 @@
 .axis-unit > .unit-picker { width: 100%; }
 .unit-word { padding: 0 0 var(--cap-lift) var(--field-text-inset); white-space: nowrap; }
 .scan-axes > .segmented { grid-column: 5; }
-.scan-axes > button.glyph { grid-column: 6; }
+.scan-axes > .axis-link { grid-column: 6; }
+.scan-axes > button.glyph { grid-column: 7; }
 /* What a row's values are, and what is wrong with them, under the row from the axis's text. */
 .axis-notes { grid-column: 2 / -1; display: flex; flex-direction: column; padding-left: var(--field-text-inset); margin-top: calc(-1 * var(--row-gap) / 2); }
 .axis-notes:not(:has(> :not([hidden]))) { display: none; }
@@ -109,3 +110,15 @@
 .post-condition { display: flex; align-items: center; gap: var(--row-gap); flex-wrap: wrap; }
 .post-slot { display: flex; align-items: center; gap: calc(var(--row-gap) / 2); }
 .post-slot > select { flex: none; }
+
+/* Linked parameters use the parent's columns; the thin bracket indicates membership. */
+.scan-axes.has-links > .segmented { min-width: calc(230px * var(--fluent) * var(--qt)); }
+.linked-marker { grid-column: 1; justify-self: end; align-self: stretch; border-right: var(--edge) solid var(--divider); margin-top: calc(-1 * var(--row-gap)); width: var(--row-gap); }
+.linked-marker.last { border-bottom: var(--edge) solid var(--divider); border-radius: 0 0 var(--radius) 0; }
+.linked-port { grid-column: 2; min-width: 0; width: 100%; }
+.linked-values { grid-column: 3; display: flex; min-width: 0; }
+.linked-values > input { width: 100%; min-width: 0; }
+.linked-unit { grid-column: 4; width: 100%; min-width: 0; }
+.linked-mode { grid-column: 5; }
+.scan-axes > button.linked-add { grid-column: 6; justify-self: center; }
+.scan-axes > button.linked-remove { grid-column: 7; }

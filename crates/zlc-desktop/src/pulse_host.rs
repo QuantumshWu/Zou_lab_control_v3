@@ -933,6 +933,16 @@ impl PulseHost {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scan_program_keeps_dependent_numeric_columns_paired() {
+        let Some(python) = std::env::var_os("ZLC_PLUGIN_PYTHON").map(std::path::PathBuf::from) else { return };
+        let table = super::run_scan_program(Some(&python), "import numpy as np\na=np.array([1.,2.,3.])\nb=5-a\nscan_table={'a':a,'b':b}").unwrap().unwrap();
+        match table {
+            zlc_pulse::scan::ScanTable::Columns(columns) => assert_eq!(columns, vec![("a".into(), vec![1.,2.,3.]), ("b".into(),vec![4.,3.,2.])]),
+            _ => panic!("expected named columns"),
+        }
+    }
+
     use super::*;
     use std::sync::mpsc::{Receiver, channel};
 

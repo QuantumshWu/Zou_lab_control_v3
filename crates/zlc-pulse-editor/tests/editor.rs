@@ -282,3 +282,42 @@ fn the_session_board_keeps_its_own_config() {
     assert_eq!(editor.state()["config"]["active_path"], "device row");
     let _ = std::fs::remove_dir_all(&folder);
 }
+
+#[test]
+fn infinite_scan_cycles_advance_after_program_generation_and_from_held_point() {
+    use zlc_pulse::scan::ScanTable;
+    let (folder, mut editor) = connected("infinite_scan");
+    for period in ["period1", "period2"] {
+        command(&mut editor, "pulse_edit", json!({"edit":"binding", "field_kind":"duration", "period_id":period, "scan":true, "source":"default"}));
+    }
+    command(&mut editor, "pulse_scan", json!({"op":"repeats", "repeats":0}));
+    command(&mut editor, "pulse_scan", json!({"op":"edit_source", "source":"a = [1000, 2000, 3000]\nb = [5000 - x for x in a]\nscan_table = {'duration:period1': a, 'duration:period2': b}"}));
+    editor.command("pulse_scan", &args(json!({"op":"run"})), true).unwrap();
+    for job in editor.take_jobs() {
+        if let Job::Program { source, fields } = job {
+            editor.deliver(Outcome::Program {source, fields, table:Ok(Some(ScanTable::Columns(vec![
+                ("duration:period1".into(), vec![1000.,2000.,3000.]),
+                ("duration:period2".into(), vec![4000.,3000.,2000.])])))});
+        } else { panic!("expected scan program"); }
+    }
+    assert_eq!(editor.state()["scan"]["points"], 3);
+    for runs in [0, 4] {
+        command(&mut editor, "pulse_step", json!({"delta":1}));
+        command(&mut editor, "pulse_edit", json!({"edit":"run_repeats", "repeats":runs}));
+        command(&mut editor, "pulse_fire", json!({}));
+        let board=editor.board().unwrap().clone();
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(2);
+        let mut advanced=false;
+        while std::time::Instant::now()<deadline {
+            let snapshot=board.snapshot().unwrap();
+            if snapshot.get("cursor").and_then(|v| v.as_int()).unwrap_or(0)>0 {advanced=true;break;}
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        editor.poll();settle(&mut editor);
+        assert_eq!(editor.state()["board"]["run_repeats"], if runs==0 {1} else {runs});
+        assert_eq!(editor.state()["board"]["scan_repeats"],0);
+        assert!(advanced,"On Pulse must advance the cursor with infinite whole-table repeats");
+        command(&mut editor,"pulse_stop",json!({}));
+    }
+    let _=std::fs::remove_dir_all(folder);
+}

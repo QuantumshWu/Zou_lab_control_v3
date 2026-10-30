@@ -50,6 +50,7 @@ from .plan import (
     port_label,
     resolve_api_overrides,
     split_outer_axes,
+    scan_rows,
     unscannable_api_ports,
 )
 
@@ -102,7 +103,7 @@ def estimate_scan_time(
     ports = bind_plan(ScanPlan(pulse_axes), (*hardware_scan_ports_for(description), *api_scan_ports_for(description)),
                       withheld=unscannable_api_ports(description)) if pulse_axes else ()
     outer_axes, board_axes = split_outer_axes(plan)
-    outer_count = math.prod(len(axis.values) for axis in outer_axes)
+    outer_count = len(scan_rows(outer_axes))
     estimate = _pulse_seconds(description, ports, outer_axes, board_axes, outer_count, repeats, shots_per_point, board_estimate)
     return {
         "points_per_sweep": plan.point_count,
@@ -135,6 +136,8 @@ def _pulse_seconds(description, ports, outer_axes, board_axes, outer_count, repe
                "first_sweep_output_delay_bound_seconds": None, "total_output_delay_bound_seconds": None}
     if board_estimate is None:
         return {**unknown, "reason": "Pulse seconds need the program compiled for this plan, which is the board's."}
+    if any(axis.coordinate_of for axis in (*outer_axes, *board_axes)):
+        return {**unknown, "reason": "Linked scan timing requires the paired table; point and shot counts are exact."}
     by_port = {port.port: port for port in ports}
     fields = {str(field["field_id"]): field for field in (*description["api_fields"], *description.get("scan_fields", ()))}
     api_axes = tuple(axis for axis in outer_axes if axis.port.startswith(API_PARAM_FAMILY))
@@ -239,18 +242,20 @@ class SeamlessScanMeasurement:
     def dataset_output_declarations(self):
         return (SCAN_OUTPUT,)
 
-    def _table(self, rows: Sequence[Sequence[float]]) -> dict[str, object] | None:
+    def _table(self, rows: Sequence[Sequence[float]], outer_row: Sequence[float] = ()) -> dict[str, object] | None:
         """The board axes' table as ``pulse_run`` takes it: the planned slots
         (plan order) and every row in each slot's own unit. Slots the plan
         does not name play their authored value; no table at all without
         board axes."""
 
-        if not self.board_axes:
+        carried = [(axis, port, value) for axis, port, value in zip(self.outer_axes, self.outer_ports, outer_row)
+                   if axis.port.startswith(PULSE_PARAM_FAMILY)]
+        if not self.board_axes and not carried:
             return None
         return {
-            "fields": [port.port[len(PULSE_PARAM_FAMILY):] for port in self.board_ports],
+            "fields": [port.port[len(PULSE_PARAM_FAMILY):] for port in self.board_ports] + [port.port[len(PULSE_PARAM_FAMILY):] for _, port, _ in carried],
             "rows": [[axis.native_value(port, value) for axis, port, value in zip(self.board_axes, self.board_ports, row)]
-                     for row in rows],
+                     + [axis.native_value(port, value) for axis, port, value in carried] for row in rows],
         }
 
     def _plan_ordered_rows(self, played: Sequence[Sequence[float]]) -> tuple[tuple[float, ...], ...]:
@@ -341,6 +346,7 @@ class SeamlessScanMeasurement:
         shots = self.shots_per_point
         readouts = sweeps * inner_count * shots
         try:
+            table = self._table(state["inner_rows"], outer_row)
             # Everything published so far belongs to the world before this point.
             context.discard_inputs()
             check_cancelled(context)
@@ -457,7 +463,8 @@ class SeamlessScanMeasurement:
         applied = dict(receipt["applied"])
         state.update(
             writer=ScanDatasetWriter(effective_rows, axes, scan_repeats=self.repeats,
-                                     run_repeats=self.shots_per_point, axis_names=axis_names),
+                                     run_repeats=self.shots_per_point, axis_names=axis_names,
+                                     coordinate_of=[self.plan.axes.index(next(a for a in self.plan.axes if a.port == axis.coordinate_of)) if axis.coordinate_of else None for axis in self.plan.axes]),
             config=applied.get("config"),
         )
         context.set_run_record(self.run_record(effective_rows=effective_rows, sequencer=applied,
@@ -474,12 +481,12 @@ class SeamlessScanMeasurement:
         """
 
         board = PulseBoard(context)
-        inner_rows = tuple(itertools.product(*(axis.values for axis in self.board_axes)))
+        inner_rows = scan_rows(self.board_axes)
         # The board holds one row while Run repeats supplies its shots, then
         # advances the row; the independent PulseBracket remains wholly inside
         # each shot.
         table = self._table(inner_rows)
-        outer_rows = tuple(itertools.product(*(axis.values for axis in self.outer_axes)))
+        outer_rows = scan_rows(self.outer_axes)
         state: dict[str, object] = {"inner_rows": inner_rows, "outer_rows": outer_rows, "readbacks": {}}
         inner_count = len(inner_rows)
         segment = dict(table=table, state=state, inner_count=inner_count,
@@ -554,7 +561,7 @@ class SeamlessScanMeasurement:
                 if previous != float(played[index]):
                     raise ValueError("one authored scan value quantized two different ways")
             axes.append({"port": axis.port, "values": [mapping[float(value)] for value in axis.values],
-                         "unit": axis.unit})
+                         "unit": axis.unit, **({"coordinate_of": axis.coordinate_of} if axis.coordinate_of else {})})
 
         named_devices = {"sequencer": self.sequencer_key}
         for axis in self.outer_axes:

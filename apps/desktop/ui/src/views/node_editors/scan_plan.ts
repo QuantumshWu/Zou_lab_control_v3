@@ -17,7 +17,7 @@
 // displayed quantity and keeps a number the operator wrote: an axis's values
 // and an API override keep their digits, read in the new unit; an API box
 // still at the pulse's own number is that number re-read in it.
-import { Field, Segmented, SpinBox, TreeCombo, alignUnitPickers, button, choiceTree, defaultUnit, element, sectionTitle, setText, shifted, token, unitTree, type FieldSpec, type Value } from "../../fluent/index.js";
+import { Field, Segmented, SpinBox, TreeCombo, switchButton, setChecked, alignUnitPickers, button, choiceTree, defaultUnit, element, sectionTitle, setText, shifted, token, unitTree, type FieldSpec, type Value } from "../../fluent/index.js";
 import type { EditorFacts, LogicRow } from "../../workbench.js";
 import type { DraftEdit, NodeEditor } from "./index.js";
 
@@ -47,9 +47,10 @@ type Facts = EditorFacts & {
     tidy: string | null } | null;
 };
 /** One axis as the plan document writes it: both input banks, and which one plays. */
-type Axis = { port: string; values: number[]; unit: string; mode: "range" | "values"; value_text: string };
+type Linked = { port: string; values: number[]; unit: string; mode: "range" | "values" | "formula"; value_text: string; formula: string };
+type Axis = { port: string; values: number[]; unit: string; mode: "range" | "values"; value_text: string; link_enabled?: boolean; links?: Linked[] };
 type AxisMemory = { entry: Axis; steps: [number | null, number | null, number | null]; nativeUnit: string | null; integer: boolean | null };
-const copyAxis = (entry: Axis): Axis => ({ ...entry, values: [...entry.values] });
+const copyAxis = (entry: Axis): Axis => ({ ...entry, values: [...entry.values], ...(entry.links ? { links: entry.links.map(link => ({ ...link, values: [...link.values] })) } : {}) });
 
 /** The word a manual axis carries in the label column: a hand moves it. */
 const BY_HAND = "By hand";
@@ -78,7 +79,7 @@ function readPlan(text: Value | unknown): Axis[] {
   try {
     const tree = JSON.parse(String(text ?? "")) as { axes?: Partial<Axis>[] };
     return (tree.axes ?? []).map(axis => ({ port: String(axis.port ?? ""), values: (axis.values ?? []).map(Number), unit: String(axis.unit ?? ""),
-      mode: axis.mode === "values" ? "values" : "range", value_text: String(axis.value_text ?? "") }));
+      mode: axis.mode === "values" ? "values" : "range", value_text: String(axis.value_text ?? ""), ...(axis.links || axis.link_enabled ? { link_enabled: axis.link_enabled === true, links: (axis.links ?? []).map(link => ({ ...link, values: [...link.values] })) } : {}) }));
   } catch { return []; }
 }
 
@@ -163,6 +164,8 @@ class AxisRowView {
   private list = element("input", "axis-list");
   private bank = element("div", "range-bank");
   entry: Axis;
+  private linkLocked = false;
+  private linkControls: HTMLElement[] = [];
   /** A list nobody's ends describe, kept until a spin is edited. */
   private customValues: number[] | null = null;
 
@@ -206,7 +209,54 @@ class AxisRowView {
     this.notes.append(this.custom);
   }
 
-  get cells(): HTMLElement[] { return [this.kind, this.axis, this.values, this.unit, this.mode.root, this.remove, this.notes]; }
+  get cells(): HTMLElement[] {
+    this.linkControls = [];
+    const toggle = switchButton(on => { this.entry.link_enabled = on; if (on && !this.entry.links?.length) this.addLink(); else this.owner.emitPlan(); }, "Link");
+    toggle.classList.add("axis-link"); toggle.disabled = this.linkLocked; setChecked(toggle, this.entry.link_enabled === true);
+    const cells = [this.kind, this.axis, this.values, this.unit, this.mode.root, toggle, this.remove, this.notes];
+    this.linkControls.push(toggle);
+    if (this.entry.link_enabled) for (const [index, link] of (this.entry.links ?? []).entries()) {
+      const marker = element("span", "linked-marker");
+      const picker = new TreeCombo(value => { link.port = value; const port = this.owner.ports.find(p => p.port === value); if (port) link.unit = firstSweep(port).unit; this.owner.emitPlan(); });
+      picker.root.classList.add("linked-port"); picker.setTree(this.owner.portTree(link.port), link.port);
+      const holder = element("div", "linked-values");
+      if (link.mode === "range") {
+        const bank = element("div", "range-bank");
+        const start = rangeSpin("linked from", () => 1, () => [null, null], value => { link.values[0] = value; this.owner.emitPlan(); });
+        const stop = rangeSpin("linked to", () => 1, () => [null, null], value => { link.values[link.values.length - 1] = value; this.owner.emitPlan(); });
+        start.input.value = String(link.values[0] ?? 0); stop.input.value = String(link.values.at(-1) ?? 1); start.refresh(); stop.refresh();
+        bank.append(element("span", "bank-word", "from"), start.root, element("span", "bank-word", "to"), stop.root);
+        holder.append(bank); this.linkControls.push(start.input, stop.input);
+      } else {
+        const input = element("input"); input.type = "text"; input.spellcheck = false;
+        input.value = link.mode === "formula" ? link.formula : link.value_text;
+        input.setAttribute("aria-label", link.mode === "formula" ? "Linked formula" : "Linked values");
+        input.placeholder = link.mode === "formula" ? "120 - x" : "1, 2, 3";
+        input.title = link.mode === "formula" ? "x is this axis's number; write numeric constants directly" : LIST_TIP;
+        input.addEventListener("change", () => { if (link.mode === "formula") link.formula = input.value; else link.value_text = input.value; this.owner.emitPlan(); });
+        holder.append(input); this.linkControls.push(input);
+      }
+      const unit = new TreeCombo(value => { link.unit = value; this.owner.emitPlan(); }); unit.root.classList.add("linked-unit");
+      const port = this.owner.ports.find(p => p.port === link.port);
+      unit.setTree(unitTree((port?.units.length ? port.units : [[link.unit, 0] as const]).map(([symbol]) => ({ value: symbol, label: symbol || "1", group: port?.families[symbol] })), link.unit), link.unit);
+      const mode = new Segmented(value => { link.mode = value as Linked["mode"]; this.owner.emitPlan(); });
+      mode.root.classList.add("linked-mode"); mode.setChoices([["range", "Range"], ["values", "Values"], ["formula", "Formula"]]); mode.setCurrent(link.mode);
+      const add = button("+", () => this.addLink(), "quiet glyph square linked-add"); add.title = "Add linked parameter"; add.setAttribute("aria-label", add.title);
+      const remove = button("×", () => { this.entry.links!.splice(index, 1); if (!this.entry.links!.length) this.entry.link_enabled = false; this.owner.emitPlan(); }, "destructive glyph square linked-remove"); remove.title = "Remove linked parameter"; remove.setAttribute("aria-label", remove.title);
+      const nodes = [marker, picker.root, holder, unit.root, mode.root, add, remove];
+      nodes.forEach(node => node.classList.add("linked-row-cell")); if (index === (this.entry.links?.length ?? 0)-1) marker.classList.add("last");
+      this.linkControls.push(picker.root, unit.root, ...mode.root.querySelectorAll<HTMLButtonElement>("button"), add, remove);
+      cells.push(...nodes);
+    }
+    for (const control of this.linkControls) if ("disabled" in control) (control as HTMLInputElement).disabled = this.linkLocked;
+    return cells;
+  }
+
+  private addLink(): void {
+    const port = this.owner.unusedPort(); if (!port) { this.owner.emitPlan(); return; }
+    (this.entry.links ??= []).push({ port: port.port, values: [0, 1], unit: firstSweep(port).unit, mode: "formula", formula: "x", value_text: "" });
+    this.owner.emitPlan();
+  }
 
   get steps(): AxisMemory["steps"] { return [this.start.chosenStep, this.stop.chosenStep, this.points.chosenStep]; }
   set steps(values: AxisMemory["steps"]) {
@@ -275,6 +325,8 @@ class AxisRowView {
   }
 
   set locked(locked: boolean) {
+    this.linkLocked = locked;
+    for (const node of this.linkControls) if ("disabled" in node) (node as HTMLInputElement).disabled = locked;
     for (const node of [this.combo?.root, this.name, this.start.input, this.stop.input, this.points.input, this.list, this.unitPicker.root, this.remove]) if (node) node.disabled = locked;
     this.mode.disabled = locked;
     for (const spin of [this.start, this.stop, this.points]) spin.refresh();
@@ -429,7 +481,7 @@ export class ScanPlanEditor implements NodeEditor {
 
   /** The host's axes (manual, device, API) stand outside the board's, in their order. */
   private ordered(axes: Axis[]): Axis[] {
-    const host = (axis: Axis): boolean => this.facts!.host_advanced.some(prefix => axis.port.startsWith(prefix));
+    const host = (axis: Axis): boolean => [axis.port, ...(axis.link_enabled ? (axis.links ?? []).map(link => link.port) : [])].some(port => this.facts!.host_advanced.some(prefix => port.startsWith(prefix)));
     return [...axes.filter(host), ...axes.filter(axis => !host(axis))];
   }
 
@@ -448,6 +500,12 @@ export class ScanPlanEditor implements NodeEditor {
     this.rows = kept;
     this.axes.replaceChildren(...kept.flatMap(view => view.cells));
     this.axes.classList.toggle("has-manual", kept.some(view => view.manual));
+    this.axes.classList.toggle("has-links", kept.some(view => view.entry.link_enabled));
+  }
+
+  unusedPort(): Port | undefined {
+    const used = new Set(this.rows.flatMap(view => [view.entry.port, ...(view.entry.links ?? []).map(link => link.port)]));
+    return this.ports.find(port => !used.has(port.port));
   }
 
   private addRow(manual: boolean): void {
@@ -459,7 +517,7 @@ export class ScanPlanEditor implements NodeEditor {
     } else {
       // The first knob the plan does not sweep yet (a port may stand on one axis only).
       const used = new Set(this.rows.map(view => view.entry.port));
-      const port = this.ports.find(item => !used.has(item.port)) ?? this.ports[0];
+      const port = this.unusedPort();
       if (!port) return;
       const kept = this.recall(port.port);
       const view = new AxisRowView(this, false, kept?.entry ?? { port: port.port, ...firstSweep(port), mode: "range", value_text: "" });
@@ -484,7 +542,8 @@ export class ScanPlanEditor implements NodeEditor {
     this.rows = order.map(entry => this.rows.find(view => view.entry === entry)!);
     this.axes.replaceChildren(...this.rows.flatMap(view => view.cells));
     this.axes.classList.toggle("has-manual", this.rows.some(view => view.manual));
-    this.planText = JSON.stringify({ axes: order.map(axis => ({ port: axis.port, unit: axis.unit, values: axis.values, mode: axis.mode, value_text: axis.value_text })) });
+    this.axes.classList.toggle("has-links", this.rows.some(view => view.entry.link_enabled));
+    this.planText = JSON.stringify({ axes: order.map(axis => ({ port: axis.port, unit: axis.unit, values: axis.values, mode: axis.mode, value_text: axis.value_text, ...(axis.links || axis.link_enabled ? { link_enabled: axis.link_enabled === true, links: axis.links ?? [] } : {}) })) });
     this.edit({ plan: this.planText }, "Scan plan");
   }
 

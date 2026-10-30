@@ -24,6 +24,8 @@ port needs -- the plugin decodes no pulse.
 
 from __future__ import annotations
 
+import ast
+import operator
 import itertools
 import json
 import math
@@ -406,6 +408,7 @@ class ScanAxis:
     port: str
     values: tuple[float, ...]
     unit: str = ""
+    coordinate_of: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "port", str(self.port))
@@ -446,12 +449,12 @@ class ScanPlan:
         if len(set(names)) != len(names):
             raise ValueError("a port may appear on one axis only")
         object.__setattr__(self, "axes", tuple(sorted(
-            axes, key=lambda axis: host_advanced_port(axis.port), reverse=True,
+            axes, key=lambda axis: any(host_advanced_port(item.port) for item in axes if (item.coordinate_of or item.port) == (axis.coordinate_of or axis.port)), reverse=True,
         )))
 
     @property
     def shape(self) -> tuple[int, ...]:
-        return tuple(len(axis.values) for axis in self.axes)
+        return tuple(len(axis.values) for axis in self.axes if axis.coordinate_of is None)
 
     @property
     def point_count(self) -> int:
@@ -464,12 +467,12 @@ class ScanPlan:
         outermost loop, exactly as an operator reads the plan.
         """
 
-        return tuple(itertools.product(*(axis.values for axis in self.axes)))
+        return scan_rows(self.axes)
 
     def to_tree(self) -> dict:
         return {
             "axes": [
-                {"port": axis.port, "values": list(axis.values), "unit": axis.unit}
+                {"port": axis.port, "values": list(axis.values), "unit": axis.unit, **({"coordinate_of": axis.coordinate_of} if axis.coordinate_of else {})}
                 for axis in self.axes
             ]
         }
@@ -488,10 +491,65 @@ class ScanPlan:
                     parse_scan_values(entry["value_text"])
                     if entry["mode"] == "values" else entry["values"]
                 )
-                axes.append(ScanAxis(entry["port"], tuple(values), entry["unit"]))
+                axes.append(ScanAxis(entry["port"], tuple(values), entry["unit"], entry.get("coordinate_of")))
+                if entry.get("link_enabled"):
+                    for linked in entry.get("links", ()):
+                        if linked["mode"] == "formula":
+                            played = formula_values(linked["formula"], values)
+                        elif linked["mode"] == "values":
+                            played = parse_scan_values(linked["value_text"])
+                        else:
+                            ends = linked["values"]
+                            if not ends:
+                                raise ValueError("linked Range needs endpoints")
+                            played = tuple(ends[0] + (ends[-1] - ends[0]) * i / max(1, len(values)-1) for i in range(len(values)))
+                        if len(played) != len(values):
+                            raise ValueError(f"linked parameter {linked['port']!r} needs {len(values)} values")
+                        if linked["port"].startswith(MANUAL_PARAM_FAMILY):
+                            raise ValueError("a linked parameter must be a scan slot, API or device parameter")
+                        axes.append(ScanAxis(linked["port"], tuple(played), linked["unit"], entry["port"]))
             except (TypeError, ValueError) as error:
                 raise ValueError(f"scan axis {index} ({entry['port']!r}): {error}") from None
         return cls(tuple(axes))
+
+
+def formula_values(source: str, values: Sequence[float]) -> tuple[float, ...]:
+    """Numeric arithmetic only: x is the parent number; units belong to the result."""
+    if len(source) > 2048:
+        raise ValueError("formula is too long")
+    try:
+        tree = ast.parse(source, mode="eval")
+    except SyntaxError as error:
+        raise ValueError("invalid formula") from error
+    operations = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv, ast.Pow: operator.pow}
+    if len(list(ast.walk(tree))) > 128:
+        raise ValueError("formula is too complex")
+    def read(node, x):
+        if isinstance(node, ast.Constant) and type(node.value) in (int, float): return float(node.value)
+        if isinstance(node, ast.Name) and node.id == "x": return float(x)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            return read(node.operand, x) * (-1 if isinstance(node.op, ast.USub) else 1)
+        if isinstance(node, ast.BinOp) and type(node.op) in operations:
+            a, b = read(node.left, x), read(node.right, x)
+            if isinstance(node.op, ast.Pow) and abs(b) > 64: raise ValueError("formula exponent exceeds 64")
+            return operations[type(node.op)](a, b)
+        raise ValueError("formula accepts numbers, x, parentheses and + - * / **")
+    try:
+        result = tuple(float(read(tree.body, x)) for x in values)
+        if not all(math.isfinite(x) for x in result): raise ValueError("formula must produce finite numbers")
+        return result
+    except (ArithmeticError, TypeError, OverflowError) as error:
+        raise ValueError(f"cannot evaluate formula: {error}") from error
+
+
+def scan_rows(axes: Sequence[ScanAxis]) -> tuple[tuple[float, ...], ...]:
+    """Independent groups form a product; parameters of one group advance together."""
+    groups = tuple(dict.fromkeys(axis.coordinate_of or axis.port for axis in axes))
+    lengths = {group: len(next(axis for axis in axes if (axis.coordinate_of or axis.port) == group).values) for group in groups}
+    for axis in axes:
+        if len(axis.values) != lengths[axis.coordinate_of or axis.port]: raise ValueError("linked parameters must have equal lengths")
+    return tuple(tuple(axis.values[indices[groups.index(axis.coordinate_of or axis.port)]] for axis in axes)
+                 for indices in itertools.product(*(range(lengths[group]) for group in groups)))
 
 
 def manual_axis_name(port: str) -> str:
@@ -519,7 +577,7 @@ def split_outer_axes(plan: ScanPlan) -> tuple[tuple[ScanAxis, ...], tuple[ScanAx
     """
 
     axes = plan.axes
-    outer = tuple(axis for axis in axes if host_advanced_port(axis.port))
+    outer = tuple(axis for axis in axes if any(host_advanced_port(item.port) for item in axes if (item.coordinate_of or item.port) == (axis.coordinate_of or axis.port)))
     return outer, axes[len(outer):]
 
 
@@ -676,11 +734,33 @@ def plan_input_rows(payload: object) -> tuple[dict, ...]:
         raise TypeError("scan plan axes must be a list")
     rows = []
     for index, entry in enumerate(entries, 1):
-        allowed = {"port", "values", "unit", "mode", "value_text"}
+        allowed = {"port", "values", "unit", "mode", "value_text", "formula", "links", "link_enabled", "coordinate_of"}
         if not isinstance(entry, Mapping) or not {"port", "values"} <= set(entry) or set(entry) - allowed:
             raise ValueError("scan axis fields must be port, values, and optional unit, mode, value_text")
         row = {"port": entry["port"], "values": entry["values"], "unit": entry.get("unit", ""),
                "mode": entry.get("mode", "range"), "value_text": entry.get("value_text", "")}
+        if "coordinate_of" in entry:
+            row["coordinate_of"] = entry["coordinate_of"]
+        if "links" in entry or "link_enabled" in entry:
+            if not isinstance(entry.get("link_enabled", False), bool):
+                raise TypeError("link_enabled must be boolean")
+            row["link_enabled"] = entry.get("link_enabled", False)
+            raw_links = entry.get("links", [])
+            if not isinstance(raw_links, list):
+                raise TypeError("linked parameters must be a list")
+            row["links"] = []
+            for linked in raw_links:
+                if not isinstance(linked, Mapping) or set(linked) - {"port", "values", "unit", "mode", "value_text", "formula"}:
+                    raise ValueError("invalid linked parameter fields")
+                mode = linked.get("mode", "formula")
+                if mode not in ("range", "values", "formula"):
+                    raise ValueError("linked mode must be range, values or formula")
+                clean = plan_input_rows({"axes": [{**{k:v for k,v in linked.items() if k != "formula"}, "mode": "range" if mode == "formula" else mode}]})[0]
+                clean["mode"] = mode
+                clean["formula"] = linked.get("formula", "x")
+                if not isinstance(clean["formula"], str):
+                    raise TypeError("formula must be text")
+                row["links"].append(clean)
         if any(not isinstance(row[key], str) for key in ("port", "unit", "mode", "value_text")):
             raise TypeError(f"scan axis {index}: port, unit, mode and value_text must be text")
         if row["mode"] not in ("range", "values"):
@@ -691,7 +771,7 @@ def plan_input_rows(payload: object) -> tuple[dict, ...]:
             raise TypeError(f"scan axis {index} ({row['port']!r}): Range values must be a numeric list")
         row["values"] = list(values)
         rows.append(row)
-    return tuple(sorted(rows, key=lambda row: host_advanced_port(row["port"]), reverse=True))
+    return tuple(sorted(rows, key=lambda row: any(host_advanced_port(item["port"]) for item in (row, *(row.get("links", ()) if row.get("link_enabled") else ()))), reverse=True))
 
 
 def parse_scan_values(text: str) -> tuple[float, ...]:

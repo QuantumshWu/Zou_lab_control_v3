@@ -192,7 +192,7 @@ def _summary(plan: object) -> tuple[str, str]:
     by_device = "" if not device else (
         f" {_counted(calls, 'device setting')} {'is' if calls == 1 else 'are'} applied and read back between fires.")
     shape = " × ".join(str(count) for count in parsed.shape)
-    return (f"{_counted(len(parsed.axes), 'axis', 'axes')}, {shape} = {_counted(parsed.point_count, 'point')}, "
+    return (f"{_counted(len(parsed.shape), 'axis', 'axes')}, {shape} = {_counted(parsed.point_count, 'point')}, "
             "outermost first; each point resolves the template, plays it, and captures one measurement."
             f"{by_hand}{by_device}"), ""
 
@@ -227,6 +227,7 @@ def _api(pulse: Mapping[str, object], rows: Sequence[Mapping], text: object) -> 
     override and is dropped, a label is written as the field id it names, and
     everything else is kept.  Text that does not read decides nothing."""
 
+    rows = tuple(item for row in rows for item in (row, *(row.get("links", ()) if row.get("link_enabled") else ())))
     fields = list(pulse.get("api_fields") or ())
     scanned = {row["port"][len(PULSE_PARAM_FAMILY):] for row in rows if row["port"].startswith(PULSE_PARAM_FAMILY)}
     walked = {row["port"][len(API_PARAM_FAMILY):] for row in rows if row["port"].startswith(API_PARAM_FAMILY)}
@@ -313,7 +314,7 @@ def scan_editor_facts(values: Mapping[str, object], pulse: Mapping[str, object] 
     # a device closed) keeps saying what was authored, under its owner.
     offered = {port.port for port in ports}
     unoffered = {}
-    for row in _rows(values.get("plan")):
+    for row in (item for axis in _rows(values.get("plan")) for item in (axis, *axis.get("links", ()))):
         name = row["port"]
         if name in offered or name.startswith(MANUAL_PARAM_FAMILY):
             continue

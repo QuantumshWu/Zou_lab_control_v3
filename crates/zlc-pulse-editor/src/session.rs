@@ -410,6 +410,12 @@ impl Editor {
         self.device_available()?;
         if self.state.sequence.is_none() { return Err("No pulse is open".into()); }
         let board = self.require_board()?;
+        // Infinite Run repeats holds the first point. A multi-point scan uses
+        // Scan repeats for indefinite cycling; reflect the finite point dwell in the draft.
+        if self.scan_armed() && self.state.section.scan_rows.len() > 1 && self.state.sequence.as_ref().is_some_and(|s| s.run_repeats == 0) {
+            let sequence = self.state.sequence.as_ref().unwrap().with(|parts| parts.run_repeats = 1).map_err(|error| error.message)?;
+            self.edit_state(Some(Arc::new(sequence)), |_| {});
+        }
         let (source, rows, sweeps) = self.execution_request().map_err(|error| format!("Cannot load this pulse: {}", error.message))?;
         let (geometry, clock) = self.compiler_target().map_err(|e| e.message)?;
         let run_repeats = source.run_repeats;

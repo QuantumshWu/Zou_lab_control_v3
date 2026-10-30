@@ -154,4 +154,64 @@ class NumericUnits(unittest.TestCase):
                     self.assertEqual(output.event_record['source_fact'], 'kept')
 
 
+class LinkedScan(unittest.TestCase):
+    def plan(self, enabled=True):
+        from zlc_atom.nodes.scan.plan import ScanPlan
+        return ScanPlan.from_tree({'axes': [
+            {'port':'pulse:param:B','values':[1,2,3],'unit':'us','link_enabled':enabled,'links':[
+                {'port':'pulse:param:A','values':[0,1],'unit':'ms','mode':'formula','formula':'5 - x'},
+                {'port':'api:delay','values':[10,30],'unit':'us','mode':'range'}]},
+            {'port':'pulse:param:D','values':[7,8],'unit':'us'}]})
+
+    def test_numeric_formula_pairing_and_disabled_memory(self):
+        from zlc_atom.nodes.scan.plan import formula_values, split_outer_axes, scan_rows
+        plan=self.plan()
+        self.assertEqual(plan.shape,(3,2));self.assertEqual(plan.point_count,6)
+        self.assertEqual(plan.rows()[0],(1,4,10,7))
+        self.assertEqual(plan.rows()[-1],(3,2,30,8))
+        outer,inner=split_outer_axes(plan)
+        self.assertEqual(len(scan_rows(outer)),3);self.assertEqual(len(scan_rows(inner)),2)
+        self.assertEqual(self.plan(False).shape,(3,2))
+        self.assertEqual(len(self.plan(False).axes),2)
+        self.assertEqual(formula_values('120 - x * 2',(1,3)),(118,114))
+        for bad in ('api.C - x','__import__("os")','1 / (x-x)','x ** 100000'):
+            with self.assertRaises(ValueError):formula_values(bad,(1,2))
+
+    def test_linked_schema_uses_one_coordinate_dimension(self):
+        import numpy as np
+        from zlc_data import AxisSpec,AxisId,SPATIAL_X,DomainSpec,owned_snapshot_from_arrays,ValueSchema,ValidityContract,ValidityMode
+        from zlc_atom.nodes.scan.dataset import scan_dataset_schema
+        plan=self.plan();source=owned_snapshot_from_arrays(ValueSchema(ValidityContract(ValidityMode.VALUE),np.dtype('<f8'),'1'),np.ones((1,1,1)),0,cell_domain=DomainSpec((1,),(AxisSpec(AxisId("x"),"x",SPATIAL_X,1),))).block.schema
+        schema=scan_dataset_schema(source,plan.rows(),[(axis.port,axis.unit) for axis in plan.axes],coordinate_of=[None,0,0,None])
+        axes=schema.point_domain.axes
+        self.assertEqual(schema.point_domain.size,6)
+        self.assertEqual(axes[1].coordinate_of,axes[0].axis_id)
+        self.assertEqual(axes[2].coordinate_of,axes[0].axis_id)
+        self.assertEqual(tuple(schema.point_domain.codes(axes[1].axis_id)),tuple(schema.point_domain.codes(axes[0].axis_id)))
+
+    def test_mixed_group_loads_paired_slots_and_api_before_fire(self):
+        import numpy as np
+        from zlc_data import AxisSpec,AxisId,SPATIAL_X,DomainSpec,ValueSchema,ValidityContract,ValidityMode,owned_snapshot_from_arrays
+        from zlc_atom.nodes.scan.plan import ScanPort
+        from zlc_atom.nodes.scan.seamless import SeamlessScanMeasurement
+        plan=self.plan();calls=[];records=[];outputs=[];held={}
+        source=types.SimpleNamespace(snapshot=owned_snapshot_from_arrays(ValueSchema(ValidityContract(ValidityMode.VALUE),np.dtype('<f8'),'1'),np.ones((1,1,1)),0,cell_domain=DomainSpec((1,),(AxisSpec(AxisId("x"),"x",SPATIAL_X,1),))),event_record={})
+        def core(command,**params):
+            calls.append((command,params))
+            if command=='pulse_run':
+                if 'scan' in params:held.update(scan=params['scan'])
+                return {'command_id':1,'applied':{'config':{}},'scan':held['scan']}
+            return {'done':True,'status':'done'}
+        context=types.SimpleNamespace(core=core,cancel_requested=lambda:False,discard_inputs=lambda:None,next_input=lambda t:source,
+            report_progress=lambda *a,**k:None,record_devices=lambda:None,set_run_record=records.append,commit_live=lambda data,**k:outputs.append(data['scan']))
+        scan=SeamlessScanMeasurement(pulse={'path':'test.json','api_fields':[]},plan=plan,
+            ports=tuple(ScanPort(a.port,a.port,a.unit,0,1000) for a in plan.axes),source_signal='source',repeats=1,shots_per_point=1)
+        self.assertEqual(scan.execute(context),{'points':6,'shots':6})
+        programs=[p for command,p in calls if command=='pulse_run' and p.get('stage')!='fire']
+        self.assertEqual([p['api_values']['delay'][0] for p in programs],[10,20,30])
+        self.assertEqual(programs[0]['scan']['fields'],['D','B','A'])
+        self.assertEqual(programs[0]['scan']['rows'],[[7,1,4],[8,1,4]])
+        self.assertEqual(programs[-1]['scan']['rows'],[[7,3,2],[8,3,2]])
+        self.assertEqual([o.cell_origin for o in outputs],[(0,i) for i in range(6)])
+
 if __name__ == '__main__': unittest.main()

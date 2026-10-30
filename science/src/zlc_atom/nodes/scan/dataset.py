@@ -132,6 +132,7 @@ def scan_dataset_schema(
     scan_repeats: int = 1,
     run_repeats: int = 1,
     axis_names: Sequence[str] | None = None,
+    coordinate_of: Sequence[int | None] | None = None,
 ) -> DatasetSchema:
     """The scan dataset's schema: the plan's axes layered over the source's.
 
@@ -186,12 +187,19 @@ def scan_dataset_schema(
             + ", ".join(sorted(axis_id.value for axis_id in taken))
         )
 
-    axis_domains: list[tuple[float, ...]] = []
-    per_axis_indices: list[tuple[int, ...]] = []
-    for index in range(len(axes)):
-        domain, indices = _unique_domain(tuple(row[index] for row in rows))
-        axis_domains.append(domain)
-        per_axis_indices.append(indices)
+    parents = tuple(coordinate_of or (None,) * len(axes))
+    axis_domains = [()] * len(axes)
+    per_axis_indices = [()] * len(axes)
+    for primary in range(len(axes)):
+        if parents[primary] is not None: continue
+        members = [primary] + [i for i, parent in enumerate(parents) if parent == primary]
+        if len(members) == 1:
+            axis_domains[primary], per_axis_indices[primary] = _unique_domain(tuple(row[primary] for row in rows))
+            continue
+        domain, codes = _unique_domain(tuple(tuple(row[i] for i in members) for row in rows))
+        for offset, member in enumerate(members):
+            axis_domains[member] = tuple(value[offset] for value in domain)
+            per_axis_indices[member] = codes
     names = tuple(name for name, _unit in axes) if axis_names is None else tuple(axis_names)
     scan_axes = tuple(
         AxisSpec(
@@ -203,10 +211,11 @@ def scan_dataset_schema(
             # None is how a dataset spells "no unit"; the plot treats it
             # the same way.  An empty string is neither layer's spelling.
             unit=str(unit) if unit else None,
+            coordinate_of=axis_ids[parents[index]] if parents[index] is not None else None,
         )
-        for axis_id, domain, (_identity, unit), name in zip(
+        for index, (axis_id, domain, (_identity, unit), name) in enumerate(zip(
             axis_ids, axis_domains, axes, names, strict=True
-        )
+        ))
     )
     scan_cells = tuple(
         tuple(indices[row_index] for indices in per_axis_indices)
@@ -261,12 +270,14 @@ class ScanDatasetWriter:
         scan_repeats: int = 1,
         run_repeats: int = 1,
         axis_names: Sequence[str] | None = None,
+    coordinate_of: Sequence[int | None] | None = None,
     ) -> None:
         self._rows = tuple(tuple(float(value) for value in row) for row in rows)
         if not self._rows:
             raise ValueError("a scan writes at least one point")
         self._axes = tuple((str(name), str(unit)) for name, unit in axes)
         self._axis_names = None if axis_names is None else tuple(axis_names)
+        self._coordinate_of = coordinate_of
         self._scan_repeats = int(scan_repeats)
         self._run_repeats = int(run_repeats)
         if self._scan_repeats < 1:
@@ -330,6 +341,7 @@ class ScanDatasetWriter:
             scan_repeats=self._scan_repeats,
             run_repeats=self._run_repeats,
             axis_names=self._axis_names,
+            coordinate_of=self._coordinate_of,
         )
         self._source_points = source_schema.point_domain.size
 

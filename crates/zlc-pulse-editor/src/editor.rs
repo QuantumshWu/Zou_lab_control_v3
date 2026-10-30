@@ -1075,7 +1075,10 @@ impl Editor {
         let count = rows.len();
         let scan_fields: Vec<(String, String)> = scanned.scan_bindings().iter().map(|b| (b.field_id(), b.unit.clone())).collect();
         let dirty = source.map(|source| self.state.section.scan_source != source);
-        self.edit_state(None, |section| {
+        let repeats = if count > 1 && sequence.run_repeats == 0 {
+            Some(Arc::new(sequence.with(|parts| parts.run_repeats = 1)?))
+        } else { None };
+        self.edit_state(repeats, |section| {
             section.scan_rows = rows;
             section.scan_fields = scan_fields;
             if let Some(dirty) = dirty { section.scan_source_dirty = dirty; }
