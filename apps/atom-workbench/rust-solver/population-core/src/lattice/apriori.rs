@@ -16,16 +16,27 @@
 //!
 //! What a carried charge gets: on the lattice it is a translation of the
 //! space, its slip a start vector of the block (`space`); off the lattice it
-//! joins it (the completion). The far shell's depth reads the same rule: a
-//! ring's landing on x0's a-priori field (x0 on the centre and every lattice
-//! charge's slip, `field`) is a source on the lattice, its amplitude the
-//! response that source drives through each mode's own block, sum_j
-//! (e^{mu_j t} - 1) / mu_j (c_q)_j with mu_j = lambda_j - i nu_q (Re clipped at
-//! zero) and c_q = E^-1 (the landing on q), read as populations
-//! (`response`).
+//! joins it (the completion).
+//!
+//! The fold's pieces (`Duhamel`, `fold`): a static piece D the operator might
+//! leave out acts on x0's own evolution as the first-order Duhamel response
+//! dx(t) = int_0^t e^{(t - s) L0'} D e^{s L0'} x0 ds, closed form in L0''s
+//! eigenbasis: (e^{mu_i t} - e^{lambda_j t}) / (mu_i - lambda_j) (t e^{mu t}
+//! when they coincide), mu_i = lambda_i - i nu_q on the target mode q; read
+//! as populations at the run's sample times. L0' = L0 + K_0^(0) is the folded
+//! centre generator: the slow optical pumping and the trap's weak scattering
+//! that amplify small pieces at long T are inside it.
 use super::*;
 use super::eigenbasis::BlockEigenbasis;
 use super::kernels::SwKernels;
+
+/// x0's eigen-components below this share of the largest (|c_j| times the
+/// eigenvector's largest entry) are not sources of the Duhamel response: the
+/// responses are compared with a budget, not summed to roundoff. Measured on
+/// three lasers at 20 us: the dropped pieces' responses 1.236e-5 with this
+/// floor (17 sources) against 1.249e-5 at 1e-6 (182 sources, the fold's
+/// build 8x slower).
+const SOURCE_FLOOR:f64=1e-3;
 
 /// A trajectory's sample times for the amplitudes: grid index 1, then each
 /// index GEOMETRIC x the last (at least one more), to the grid's end.
@@ -85,33 +96,78 @@ impl Apriori{
         let m=mirror[q];if m!=q{for i in 0..n{for k in 0..n{f[m*d+i*n+k]=conj(f[q*d+k*n+i]);}}}
         f
     }
-    /// The a-priori field on the modes: x0 on the centre and every mode's
-    /// slip (each canonical one with its mirror).
-    pub fn field(&self,eigen:&BlockEigenbasis,modes:&[Charge],canonical:&[bool],mirror:&[usize],centre:usize,initial:&[C])->Vec<C>{
-        let d=eigen.dimension();let mut f=vec![ZERO;modes.len()*d];
-        f[centre*d..(centre+1)*d].copy_from_slice(initial);
-        for q in(0..modes.len()).filter(|&q|q!=centre&&canonical[q]){for(a,b)in f.iter_mut().zip(self.slip_field(eigen,modes,mirror,q)){add(a,b);}}
-        f
+}
+
+/// The first-order Duhamel response of x0's evolution under L0' to a static
+/// piece (module documentation): x0's significant eigen-components (their
+/// indices, coefficients and eigenvector blocks) and the sample times.
+pub struct Duhamel<'e>{eigen:&'e BlockEigenbasis,columns:Vec<usize>,c:Vec<C>,blocks:Vec<C>,samples:Vec<f64>}
+impl<'e> Duhamel<'e>{
+    pub fn new(eigen:&'e BlockEigenbasis,initial:&[C],samples:&[f64])->Result<Self,String>{
+        let d=eigen.dimension();let c0=eigen.coefficients(&[initial])?;let all=eigen.eigenvector_blocks();
+        let size:Vec<f64>=(0..d).map(|j|magnitude(c0[j])*all[j*d..(j+1)*d].iter().map(|z|magnitude(*z)).fold(0_f64,f64::max)).collect();
+        let top=size.iter().copied().fold(0_f64,f64::max);
+        let columns:Vec<usize>=(0..d).filter(|&j|size[j]>SOURCE_FLOOR*top).collect();
+        let blocks=columns.iter().flat_map(|&j|all[j*d..(j+1)*d].iter().copied()).collect();
+        Ok(Self{eigen,c:columns.iter().map(|&j|c0[j]).collect(),columns,blocks,samples:samples.to_vec()})
     }
-    /// The amplitude of a source field f on the lattice modes (`modes` with
-    /// their frequencies `nu`, the canonical ones read, a pair's weight 2):
-    /// the largest over the sample times and states of sum_q w_q |sum_j
-    /// rows_ij (e^{mu_j t} - 1) / mu_j (c_q)_j|, mu_j = lambda_j - i nu_q (Re
-    /// clipped at zero), c_q = E^-1 f_q: the populations the constant source
-    /// drives through each mode's own block.
-    pub fn response(eigen:&BlockEigenbasis,nu:&[f64],canonical:&[bool],mirror:&[usize],field:&[C],samples:&[f64])->Result<f64,String>{
-        let d=eigen.dimension();let n=(d as f64).sqrt().round()as usize;let rows=eigen.population_rows();
-        let read:Vec<usize>=(0..nu.len()).filter(|&q|canonical[q]&&field[q*d..(q+1)*d].iter().any(|z|nonzero(*z))).collect();
-        if read.is_empty(){return Ok(0.);}
-        let blocks:Vec<&[C]>=read.iter().map(|&q|&field[q*d..(q+1)*d]).collect();let c=eigen.coefficients(&blocks)?;
+    /// The source blocks: the eigenvectors E_j of x0's significant components.
+    pub fn sources(&self)->std::slice::ChunksExact<'_,C>{self.blocks.chunks_exact(self.eigen.dimension())}
+    pub fn count(&self)->usize{self.columns.len()}
+    /// The response of a piece on a target mode of frequency nu (a mirror
+    /// pair's `weight` 2): `images` holds D E_j on the target block for every
+    /// source (`sources`, in order); the largest population over the sample
+    /// times and states, weight x |rows (sum_j E^-1 D E_j c_j phi_ij(t))|.
+    pub fn response(&self,nu:f64,weight:f64,images:&[C])->Result<f64,String>{
+        let d=self.eigen.dimension();let n=(d as f64).sqrt().round()as usize;let count=self.columns.len();
+        if count==0||images.iter().all(|z|!nonzero(*z)){return Ok(0.);}
+        let blocks:Vec<&[C]>=images.chunks_exact(d).collect();let m=self.eigen.coefficients(&blocks)?;
+        let(lambda,rows)=(&self.eigen.lambda,self.eigen.population_rows());
+        let mu:Vec<C>=lambda.iter().map(|l|C{re:l.re,im:l.im-nu}).collect();
         let mut amplitude=0_f64;
-        for &t in samples{let mut populations=vec![0_f64;n];
-            for(k,&q)in read.iter().enumerate(){let w=if mirror[q]==q{1.}else{2.};
-                let r:Vec<C>=(0..d).map(|j|{let mu=C{re:eigen.lambda[j].re.min(0.),im:eigen.lambda[j].im-nu[q]};
-                    let factor=if magnitude(mu)*t<1e-8{C{re:t,im:0.}}else{let e=cexp(mu,t);let a=C{re:e.re-1.,im:e.im};let m=mu.re*mu.re+mu.im*mu.im;mul(a,C{re:mu.re/m,im:-mu.im/m})};
-                    mul(factor,c[k*d+j])}).collect();
-                for(i,p)in populations.iter_mut().enumerate(){let mut v=ZERO;for j in 0..d{mul_add(&mut v,rows[i+n*j],r[j]);}*p+=w*magnitude(v);}}
-            amplitude=amplitude.max(populations.into_iter().fold(0.,f64::max));}
+        for &t in &self.samples{
+            let ea:Vec<C>=mu.iter().map(|&z|cexp(z,t)).collect();
+            let eb:Vec<C>=self.columns.iter().map(|&j|cexp(lambda[j],t)).collect();
+            let delta:Vec<C>=(0..d).map(|i|{let mut v=ZERO;
+                for jj in 0..count{let a=m[i+d*jj];if !nonzero(a){continue;}
+                    let k=lambda[self.columns[jj]];let gap=C{re:mu[i].re-k.re,im:mu[i].im-k.im};
+                    let phi=if magnitude(gap)*t<1e-6{let mid=C{re:0.5*(mu[i].re+k.re),im:0.5*(mu[i].im+k.im)};scaled(cexp(mid,t),t)}
+                        else{let num=C{re:ea[i].re-eb[jj].re,im:ea[i].im-eb[jj].im};let g2=gap.re*gap.re+gap.im*gap.im;mul(num,C{re:gap.re/g2,im:-gap.im/g2})};
+                    mul_add(&mut v,mul(a,self.c[jj]),phi);}
+                v}).collect();
+            for i in 0..n{let mut v=ZERO;for j in 0..d{mul_add(&mut v,rows[i+n*j],delta[j]);}amplitude=amplitude.max(weight*magnitude(v));}
+        }
         Ok(amplitude)
+    }
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    use super::super::tests::{fixture,prepared};
+    #[test]
+    fn duhamel_response_is_the_first_order_population_change(){
+        // A small static piece D added to the folded centre generator L0': the
+        // populations' change at t against dense RK4 propagation of L0' + D and
+        // L0', to first order in D.
+        let f=fixture();let p=prepared(&f);let(n,d)=(4,16);let eigen=p.eigenbasis().unwrap();
+        let l0=p.centre_generator();let scale=1e-6;
+        let piece:Vec<C>=(0..d*d).map(|k|C{re:scale*(((k*37+11)%97)as f64/97.-0.5),im:scale*(((k*53+7)%89)as f64/89.-0.5)}).collect();
+        let mut x0=vec![ZERO;d];x0[0]=ONE;
+        for t in[0.5,3.,40.]{
+            let duhamel=Duhamel::new(eigen,&x0,&[t]).unwrap();
+            let images:Vec<C>=duhamel.sources().flat_map(|e|(0..d).map(|r|(0..d).fold(ZERO,|v,c|{let mut v=v;mul_add(&mut v,piece[r*d+c],e[c]);v})).collect::<Vec<C>>()).collect();
+            let predicted=duhamel.response(0.,1.,&images).unwrap();
+            let propagate=|m:&[C]|->Vec<f64>{let steps=(t*400.)as usize;let h=t/steps as f64;let mut x=x0.clone();
+                let rate=|x:&[C]|->Vec<C>{(0..d).map(|r|(0..d).fold(ZERO,|v,c|{let mut v=v;mul_add(&mut v,m[r*d+c],x[c]);v})).collect()};
+                let axpy=|x:&[C],k:&[C],s:f64|->Vec<C>{x.iter().zip(k).map(|(a,b)|C{re:a.re+s*b.re,im:a.im+s*b.im}).collect()};
+                for _ in 0..steps{let k1=rate(&x);let k2=rate(&axpy(&x,&k1,h/2.));let k3=rate(&axpy(&x,&k2,h/2.));let k4=rate(&axpy(&x,&k3,h));
+                    for e in 0..d{x[e].re+=h/6.*(k1[e].re+2.*k2[e].re+2.*k3[e].re+k4[e].re);x[e].im+=h/6.*(k1[e].im+2.*k2[e].im+2.*k3[e].im+k4[e].im);}}
+                (0..n).map(|i|x[i*n+i].re).collect()};
+            let perturbed:Vec<C>=l0.iter().zip(&piece).map(|(a,b)|C{re:a.re+b.re,im:a.im+b.im}).collect();
+            let(a,b)=(propagate(&perturbed),propagate(&l0));
+            let measured=a.iter().zip(&b).map(|(u,v)|(u-v).abs()).fold(0.,f64::max);
+            assert!(measured<=predicted*(1.+1e-3)+1e-15&&predicted<=measured*1.5+1e-12,"t {t}: predicted {predicted:e}, measured {measured:e}");
+        }
     }
 }

@@ -6,12 +6,12 @@
 //!    the gate that P u Q misses joins the lattice (the completion). The
 //!    request's frame (`frame`: the kernels, the metric's block, the
 //!    slowest relaxation's classes) is built on its own thread meanwhile.
-//! 2. The fold: the run's own (`fold::FoldLibrary`, by the truncation rule at
-//!    the run's longest output time T and its lattice's largest |nu_q|), its
-//!    far shell's depth by the same a-priori rule: the rings beyond the
-//!    second order landing from x0's a-priori field, each ring's amplitude
-//!    (`apriori::Apriori::response`), the fewest rings whose rest is within
-//!    the gate (`ring_targets`).
+//! 2. The fold: the run's own (`fold::FoldLibrary`), one truncation rule for
+//!    every piece, the far shell's rings beyond the second order among them:
+//!    pieces dropped smallest first while their first-order Duhamel responses
+//!    on x0's evolution up to the run's longest output time T
+//!    (`apriori::Duhamel`) sum within the fold's budget; the rings kept become
+//!    static ring targets (`ring_targets`).
 //! 3. One block rational Krylov space (`space`): the start [x0, the slip of
 //!    every translation the a-priori rule activates], the translations (the
 //!    gated steps, then the a-priori ones, with no solve), the bordered
@@ -33,9 +33,9 @@
 //!    is made.
 use super::*;
 use super::accuracy::{self,POPULATION_TOLERANCE};
-use super::apriori::{self,Apriori};
+use super::apriori::{self,Apriori,Duhamel};
 use super::charge_set::{self,ExplicitSet,LatticeSets};
-use super::fold::{DroppedPieces,FoldLibrary,FoldRule,Storage};
+use super::fold::{DroppedPieces,FoldLibrary,FoldRule,ResponseRule,Storage};
 use super::reduced::{Model,Projection,SlowRate};
 use super::poles::{InnerWork,Lattice,Pole};
 use super::space::{self,Column,Space};
@@ -115,16 +115,11 @@ const LADDER_SAMPLES:f64=200.;
 /// kernel 1.6 (trace 1.00, weight 0.63): a margin of 100x and 3x.
 const KERNEL_TRACE_SHARE:f64=0.5;
 /// The far shell's rings stop when what the next ones can land (trace norm),
-/// times T, is within this share of the gate.
+/// times T, is within this share of the fold's budget.
 const RING_TOLERANCE_SHARE:f64=1e-3;
-/// The ring targets' orders in nu_q leave at most this share of the gate
-/// (the rings' amplitudes times the expansion's remainder), up to
-/// RING_ORDERS_MAX orders.
-const RING_EXPANSION_SHARE:f64=1e-2;
-const RING_ORDERS_MAX:usize=6;
 /// A ring target's far mode of ring k + 1 is left out when its source is
-/// below RING_PRUNE_SHARE x gate / (ring k + 1's amplitude) of its ring's
-/// largest: the pruned modes leave a share of the gate well below this (a
+/// below RING_PRUNE_SHARE x budget / (ring k + 1's response) of its ring's
+/// largest: the pruned modes leave a share of the budget well below this (a
 /// ring holds at most a few hundred far modes).
 const RING_PRUNE_SHARE:f64=1e-6;
 /// Stack of the frame's thread (LAPACK on it).
@@ -211,14 +206,14 @@ pub struct Solution{
 }
 
 /// A run's fold under the truncation rule: its rule, the orders in nu_q it
-/// built and what its build dropped (induced trace norm x T); the far
-/// shell's depth (rings beyond the second order), the rings' a-priori
-/// amplitudes (populations) and the ring targets' orders in nu_q; the
-/// build's and the depth's (the far shell and its ring targets) time.
+/// built and what it dropped (responses, populations); the far shell's
+/// depth (rings beyond the second order kept) and the rings' responses; the
+/// rings' responses', the build's (theirs included) and the ring targets'
+/// time.
 #[derive(Clone,Debug,Default)]
 pub struct FoldReport{
     pub rule:Option<FoldRule>,pub orders:usize,pub dropped:DroppedPieces,pub targets:usize,
-    pub rings:usize,pub ring_amplitudes:Vec<f64>,pub ring_orders:usize,pub build_ms:f64,pub depth_ms:f64,
+    pub rings:usize,pub ring_responses:Vec<f64>,pub responses_ms:f64,pub build_ms:f64,pub rings_ms:f64,
 }
 
 /// Euclidean projection of real values onto the probability simplex.
@@ -297,19 +292,20 @@ fn convergence(history:&[(Vec<Vec<f64>>,Vec<Vec<f64>>)],groups:&[Vec<usize>],tol
     Estimate{trajectory:output(&changes(k-3),&changes(k-2),&changes(k-1)),horizons:(0..hz.len()).map(horizon).collect()}
 }
 
-/// The far shell's depth by the a-priori rule: the rings beyond the second
-/// order (`FoldLibrary::far_shell`) landing from the a-priori field x (x0 and
-/// the lattice charges' slips), each ring's amplitude the response its
-/// landing drives (`apriori::Apriori::response`), and the fewest rings whose
-/// rest is within `gate`; with the rings' amplitudes.
-#[allow(clippy::too_many_arguments)]
-fn far_shell_depth(fold:&FoldLibrary,prepared:&LatticePrepared,eigen:&BlockEigenbasis,modes:&[Charge],shape:&Shape,x:&[C],samples:&[f64],horizon:f64,gate:f64)->Result<(usize,Vec<f64>),String>{
-    if prepared.plan.far().is_empty(){return Ok((0,Vec::new()));}
-    let nu_of=|q:&[i32]|prepared.nu(q);let nu:Vec<f64>=modes.iter().map(|q|prepared.nu(q)).collect::<Result<_,_>>()?;
-    let shell=fold.far_shell(&prepared.generator,&prepared.plan,&nu_of,modes,x,RING_TOLERANCE_SHARE*gate/horizon)?;
-    let amplitudes:Vec<f64>=shell.landings.iter().skip(1).map(|landing|Apriori::response(eigen,&nu,&shape.canonical,&shape.mirror,landing,samples)).collect::<Result<_,String>>()?;
-    let mut depth=amplitudes.len();while depth>0&&amplitudes[depth-1..].iter().sum::<f64>()<=gate{depth-=1;}
-    Ok((depth,amplitudes))
+/// The responses of the far shell's rings beyond the second order: per
+/// source E_j of x0 (`Duhamel::sources`) the far shell's landing on the
+/// lattice (`FoldLibrary::far_shell`, the run's fold and the frame's share
+/// L0's split), per ring its Duhamel response summed over the landing modes.
+fn ring_responses(prepared:&LatticePrepared,modes:&[Charge],nu:&[f64],duhamel:&Duhamel<'_>,horizon:f64,budget:f64)->Result<Vec<f64>,String>{
+    if prepared.plan.far().is_empty()||duhamel.count()==0{return Ok(Vec::new());}
+    let d=prepared.generator.n*prepared.generator.n;let nu_of=|q:&[i32]|prepared.nu(q);
+    let centre=modes.iter().position(|q|*q==prepared.generator.zero).ok_or("Lattice modes must contain the zero charge")?;
+    // Per ring and landing mode the images of every source ([j * d + e]).
+    let sources:Vec<(usize,&[C])>=duhamel.sources().map(|e|(centre,e)).collect();let count=sources.len();
+    let(landings,_,_)=prepared.fold.far_shell_sources(&prepared.generator,&prepared.plan,&nu_of,modes,&sources,RING_TOLERANCE_SHARE*budget/horizon)?;
+    landings.iter().skip(1).map(|ring|{let mut per:BTreeMap<usize,Vec<C>>=BTreeMap::new();
+        for(&(jj,q),block)in ring{per.entry(q).or_insert_with(||vec![ZERO;count*d])[jj*d..(jj+1)*d].copy_from_slice(block);}
+        per.iter().map(|(&q,v)|duhamel.response(nu[q],1.,v)).sum()}).collect()
 }
 
 /// Every output of a request from rho0 (row-major n x n); `observer` sees
@@ -358,35 +354,31 @@ fn run<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,observ
     let mut sets=explicit.sets.completed(&completed);
     if planned_bytes(request.runs,sets.modes().len())>budget{completed.clear();sets=explicit.sets.clone();}
     timing.apriori_ms=clock.elapsed().as_secs_f64()*1e3;
-    // 2. The run's fold by the truncation rule (T, the lattice's largest
-    // |nu_q|) and the far shell's depth on the a-priori field.
+    // 2. The run's fold by the truncation rule, the far shell's rings among
+    // its pieces.
     let clock=Instant::now();
     let modes=sets.modes();
-    let nu_max=modes.iter().map(|q|prepared.nu(q).map(f64::abs)).try_fold(0_f64,|a,v|v.map(|v|a.max(v)))?;
-    let rule=FoldRule::new(longest,nu_max);
-    let mut fold=FoldLibrary::build(&prepared.generator,&prepared.plan,&prepared.lapack,Storage::Rule(rule))?;
+    let rule=FoldRule::new(longest);
+    let nu:Vec<f64>=modes.iter().map(|q|prepared.nu(q)).collect::<Result<_,_>>()?;
+    let duhamel=Duhamel::new(eigen,initial,&samples)?;
+    let responses_clock=Instant::now();
+    let rings=ring_responses(prepared,&modes,&nu,&duhamel,longest,rule.budget)?;
+    let responses_ms=responses_clock.elapsed().as_secs_f64()*1e3;
+    let input=ResponseRule{modes:modes.clone(),nu,duhamel:&duhamel,rings};
+    let mut fold=FoldLibrary::build(&prepared.generator,&prepared.plan,&prepared.lapack,Storage::Rule(rule,&input))?;
     let build_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
-    let(rings,amplitudes,ring_orders)={
-        let shape=Shape::of(prepared,&modes)?;
-        let field=apriori.field(eigen,&modes,&shape.canonical,&shape.mirror,shape.centre,initial);
-        let(rings,amplitudes)=far_shell_depth(&fold,prepared,eigen,&modes,&shape,&field,&samples,longest,gate)?;
-        let mut orders=0;
-        if rings>0{
-            // The ring targets land on the lattice's edges whose charges the
-            // plan folds (and the diagonal); their orders in nu_q and the far
-            // modes they may leave out follow from the rings' amplitudes and
-            // the gate.
-            let known:BTreeSet<Charge>=prepared.plan.targets.iter().chain(&prepared.plan.omitted).map(|t|t.charge.clone()).chain(std::iter::once(prepared.generator.zero.clone())).collect();
-            let mut offsets=BTreeSet::new();for p in &modes{for q in &modes{let t=charge_minus(q,p)?;if known.contains(&t){offsets.insert(t);}}}
-            let built:f64=amplitudes.iter().take(rings).sum();
-            let far_min=prepared.plan.far().iter().map(|&s|prepared.plan.steps[s].nu.abs()).fold(f64::INFINITY,f64::min);
-            let p=nu_max/(far_min-fold.diagnostics.lambda0);
-            orders=1;while nu_max>0.&&orders<RING_ORDERS_MAX&&built*p.powi(orders as i32)/(1.-p)>RING_EXPANSION_SHARE*gate{orders+=1;}
-            let prune:Vec<f64>=(0..rings).map(|k|amplitudes.get(k).map_or(0.,|&a|if a>0.{RING_PRUNE_SHARE*gate/a}else{0.})).collect();
-            let targets=fold.ring_targets(&prepared.generator,&prepared.plan,rings,orders,&prune,&offsets)?;fold.targets.extend(targets);
-        }
-        (rings,amplitudes,orders)};
-    let report=FoldReport{rule:Some(rule),orders:fold.diagnostics.orders,dropped:fold.diagnostics.dropped.clone(),targets:fold.targets.len(),rings,ring_amplitudes:amplitudes,ring_orders,build_ms,depth_ms:clock.elapsed().as_secs_f64()*1e3};
+    let depth=fold.diagnostics.dropped.kept_rings;
+    if depth>0{
+        // The ring targets land on the lattice's edges whose charges the plan
+        // folds (and the diagonal), K^(0) alone; a far mode of ring k + 1 is
+        // pruned below its share of the budget.
+        let known:BTreeSet<Charge>=prepared.plan.targets.iter().chain(&prepared.plan.omitted).map(|t|t.charge.clone()).chain(std::iter::once(prepared.generator.zero.clone())).collect();
+        let mut offsets=BTreeSet::new();for p in &modes{for q in &modes{let t=charge_minus(q,p)?;if known.contains(&t){offsets.insert(t);}}}
+        let prune:Vec<f64>=(0..depth).map(|k|input.rings.get(k).map_or(0.,|&a|if a>0.{RING_PRUNE_SHARE*rule.budget/a}else{0.})).collect();
+        let targets=fold.ring_targets(&prepared.generator,&prepared.plan,depth,1,&prune,&offsets)?;fold.targets.extend(targets);
+    }
+    let report=FoldReport{rule:Some(rule),orders:fold.diagnostics.orders,dropped:fold.diagnostics.dropped.clone(),targets:fold.targets.len(),rings:depth,ring_responses:input.rings.clone(),responses_ms,build_ms,rings_ms:clock.elapsed().as_secs_f64()*1e3};
+    drop(input);
     // 3. The space: the gated translations, the steady column, the a-priori
     // translations with their slips in the block start.
     let clock=Instant::now();
@@ -510,19 +502,6 @@ fn run<'a>(prepared:&'a LatticePrepared,initial:&[C],request:&Request<'_>,observ
     let converged=answer.accepted;
     Ok(Solution{answer,converged,reason:if converged{None}else{reason},explicit,lattice:sets,completed,translations:space.translations(),
         columns:space.columns.clone(),dimension:galerkin.columns(),basis:space.basis.len(),block:space.block,work,fold:report,timing,checkpoints})
-}
-
-/// The mode layout of a lattice (its canonical half, mirrors and centre)
-/// before its operator is built: the a-priori field is laid out on it.
-struct Shape{canonical:Vec<bool>,mirror:Vec<usize>,centre:usize}
-impl Shape{
-    fn of(prepared:&LatticePrepared,modes:&[Charge])->Result<Self,String>{
-        let index:BTreeMap<&Charge,usize>=modes.iter().enumerate().map(|(i,q)|(q,i)).collect();
-        let centre=*index.get(&prepared.generator.zero).ok_or("Lattice modes must contain the zero charge")?;
-        let mirror=modes.iter().map(|q|index.get(&opposite(q)).copied().ok_or("Lattice modes must be closed under q -> -q")).collect::<Result<Vec<_>,_>>()?;
-        let canonical=(0..modes.len()).map(|q|modes[q]>=modes[mirror[q]]).collect();
-        Ok(Self{canonical,mirror,centre})
-    }
 }
 
 #[cfg(test)]

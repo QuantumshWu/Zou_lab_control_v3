@@ -7,23 +7,17 @@
 //! is the diagonal dressing (light shifts and scattering); t != 0 are the
 //! cross folds of far steps whose sum is a near charge.
 //!
-//! The truncation rule. The true propagator is CPTP, a trace-norm contraction
-//! phase by phase on the lattice (every set of laser phases is a physical
-//! evolution), so a static piece D the operator leaves out moves the state by
-//! at most int_0^T ||D x(s)||_1 ds and the populations by half of that. A
-//! run's fold therefore keeps every piece but those it drops smallest first
-//! (across every kind: the storage of small rest entries, a rest but for its
-//! population rows, an order in nu_q, a cross fold) while the sum of the
-//! dropped pieces' induced trace norms times T, the run's longest output
-//! time, stays within FOLD_SHARE x tolerance; the far shell's depth
-//! (`ring_targets`) follows the a-priori amplitude rule (`pipeline`, `apriori`:
-//! the far shell's rings landing from x0's a-priori field). The norms are rigorous: a
-//! superoperator X -> A X + X B + sum P X Q is bounded by |A|_2 + |B|_2 +
-//! sum |P|_2 |Q|_2, a stored d x d piece by sqrt(n) sqrt(r c) (r, c its
-//! largest row and column sums: ||Y||_1 <= sqrt(n) ||Y||_F), a far block's
-//! inverse by gamma_s = 1 / (|nu_s| - lambda0) (lambda0 the trace-norm bound
-//! of L0 with its Hamiltonian centred), and the orders in nu_q beyond the
-//! built ones by sum c' c gamma (nu_max gamma)^M / (1 - nu_max gamma).
+//! The truncation rule, one for every piece (the storage of small rest
+//! entries by magnitude band, a rest but for its population rows, a whole
+//! cross fold, a ring of the far shell beyond the second order): a run's fold
+//! drops the pieces smallest first while the sum of their responses stays
+//! within FOLD_SHARE x tolerance. A piece's response is the first-order
+//! Duhamel response of x0's own evolution under the folded centre generator
+//! L0', read as populations at the run's sample times (`apriori::Duhamel`).
+//! x0 sits on the centre, nu_0 = 0, so every order in nu_q beyond K^(0)
+//! responds with zero: a run's fold is K^(0) alone, the ring targets of the
+//! rings kept included. The rule is a-priori and applied once, when the run's
+//! operator is built.
 //!
 //! Closed form: L0 = L_c + L_r with L_c the diagonal of L0 (the left and
 //! right factors' diagonals) and L_r the rest (their off-diagonal entries and
@@ -54,18 +48,13 @@
 //! piece stays exactly trace preserving.
 use super::*;
 use super::classification::HarmonicPlan;
+use super::apriori::Duhamel;
 use crate::parallel::{Execution,MINIMUM_WORK_PER_TASK};
 
 /// The truncation rule's share of the tolerance: the dropped pieces'
-/// trace-norm actions times T sum to at most FOLD_SHARE x tolerance, so they
-/// move the populations by at most half of it, 2.5% of the tolerance. A
+/// responses (populations) sum to at most FOLD_SHARE x tolerance. A
 /// deliberate margin: the reduced model's convergence keeps the rest.
 pub const FOLD_SHARE:f64=0.05;
-/// The never-built orders in nu_q may take at most this share of the rule's
-/// budget (the orders are chosen so).
-const EXPANSION_SHARE:f64=1e-2;
-/// Orders in nu_q a fold builds at most.
-const ORDERS_MAX:usize=8;
 /// Storage bands: a rest's CSR entries (outside its population rows) by
 /// magnitude, one band per decade below 1e-4 of the target's largest entry
 /// down to 1e-16; each band is one piece of the rule.
@@ -151,16 +140,15 @@ impl StoredFold{
         op.dense_into(n,s,out);self.applied(order).dense_into(n*n,s,out);
     }
 }
-/// The pieces a run's fold dropped by the truncation rule, as their bounds
-/// (induced trace norm x T, the rule's units): storage bands, rests but for
-/// their population rows, orders in nu_q, cross folds, and the never-built
-/// orders' remainder; the pieces counted and the targets kept of the
-/// candidates.
+/// The pieces a run's fold dropped by the truncation rule, as their responses
+/// (populations): storage bands, rests but for their population rows, cross
+/// folds and rings of the far shell; the pieces counted, the targets kept of
+/// the candidates and the rings kept.
 #[derive(Clone,Debug,Default)]
-pub struct DroppedPieces{pub entries:f64,pub rests:f64,pub orders:f64,pub targets:f64,pub expansion:f64,pub pieces:usize,pub kept_targets:usize,pub candidate_targets:usize}
+pub struct DroppedPieces{pub entries:f64,pub rests:f64,pub targets:f64,pub rings:f64,pub pieces:usize,pub kept_targets:usize,pub candidate_targets:usize,pub kept_rings:usize}
 impl DroppedPieces{
-    /// The dropped pieces' bound (induced trace norm x T).
-    pub fn total(&self)->f64{self.entries+self.rests+self.orders+self.targets+self.expansion}
+    /// The dropped pieces' response.
+    pub fn total(&self)->f64{self.entries+self.rests+self.targets+self.rings}
 }
 #[derive(Clone,Debug,Default)]
 pub struct FoldDiagnostics{
@@ -170,28 +158,31 @@ pub struct FoldDiagnostics{
     /// far step (charge, rho_s, the series' terms).
     pub rest_bound:f64,pub lambda0:f64,pub series:Vec<(Charge,f64,usize)>,
     /// The rule (None: the frame's fold, every piece kept): T (us), the
-    /// lattice's largest |nu_q|, the rule's budget (trace norm x T); the
-    /// orders built; what was dropped.
+    /// rule's budget (populations); the orders built; what was dropped.
     pub rule:Option<FoldRule>,pub orders:usize,pub dropped:DroppedPieces,
     pub milliseconds:f64,
     /// Milliseconds: the far columns, the storage.
     pub phase_ms:[f64;2],
 }
-/// A run's truncation rule: its longest output time T (us), the largest
-/// |nu_q| of its lattice and the budget of the pieces its fold may drop
-/// (their induced trace norms times T summed).
+/// A run's truncation rule: its longest output time T (us) and the budget
+/// of the pieces its fold may drop (their responses summed).
 #[derive(Clone,Copy,Debug)]
-pub struct FoldRule{pub horizon:f64,pub nu_max:f64,pub budget:f64}
+pub struct FoldRule{pub horizon:f64,pub budget:f64}
 impl FoldRule{
-    /// The rule of a run: T, nu_max and the rule's budget.
-    pub fn new(horizon:f64,nu_max:f64)->Self{Self{horizon,nu_max,budget:FOLD_SHARE*super::accuracy::POPULATION_TOLERANCE}}
+    /// The rule of a run up to T.
+    pub fn new(horizon:f64)->Self{Self{horizon,budget:FOLD_SHARE*super::accuracy::POPULATION_TOLERANCE}}
 }
+/// What the rule reads of a run (`pipeline`): the lattice's modes and their
+/// frequencies, x0's Duhamel response, and the responses of the far shell's
+/// rings beyond the second order.
+pub struct ResponseRule<'a>{pub modes:Vec<Charge>,pub nu:Vec<f64>,pub duhamel:&'a Duhamel<'a>,pub rings:Vec<f64>}
 /// What a fold library stores: the frame's (every target of the plan, K^(0)
 /// and K^(1), every piece; the eigenbasis, the Floquet frames, the
 /// preconditioner and the explicit set read it), or a run's operator fold by
-/// its rule (every candidate target, the omitted cross folds among them).
-#[derive(Clone,Copy,Debug)]
-pub enum Storage{Frame,Rule(FoldRule)}
+/// its rule on the run's lattice (every candidate target, the omitted cross
+/// folds among them, K^(0) alone).
+#[derive(Clone,Copy)]
+pub enum Storage<'a>{Frame,Rule(FoldRule,&'a ResponseRule<'a>)}
 /// One far block's inverse (L0 - i nu_s)^-1: the series' terms to its
 /// roundoff and G_s = (L_c - i nu_s)^-1, elementwise on a row-major block.
 struct FarBlock{terms:usize,g:Vec<C>}
@@ -286,15 +277,11 @@ pub(crate) fn trace_norm_bound(op:&Superop,n:usize)->f64{
     sparse_spectral_bound(&op.left,n)+sparse_spectral_bound(&op.right,n)
         +op.sandwich.iter().map(|(p,q)|sparse_spectral_bound(p,n)*sparse_spectral_bound(q,n)).sum::<f64>()
 }
-/// A stored d x d piece's induced trace norm from its largest row and column
-/// sums: ||E(X)||_1 <= sqrt(n) ||E(X)||_F <= sqrt(n) sqrt(r c) ||X||_1.
-fn piece_bound(row:f64,col:f64,n:usize)->f64{(n as f64).sqrt()*(row*col).sqrt()}
-/// What the rule reads of one order of a target before storing it: the
-/// trace-norm bounds of its absorbable part, of its whole
-/// rest and of the rest's part outside the population rows, and per storage
-/// band (`BANDS`) that part's bound.
-#[derive(Clone,Debug)]
-struct OrderStats{absorbable:f64,rest:f64,outside:f64,bands:[f64;BANDS]}
+/// What the rule reads of a target's K^(0) before storing it: the responses
+/// of the whole, of its rest's part outside the population rows, and per
+/// storage band (`BANDS`) that part's response.
+#[derive(Clone,Debug,Default)]
+struct OrderStats{whole:f64,outside:f64,bands:[f64;BANDS]}
 /// The band of an entry of magnitude m below the target's largest entry
 /// (BANDS: at or above the top threshold).
 fn band(m:f64,largest:f64)->usize{
@@ -315,23 +302,29 @@ fn take_absorbable(k:&mut[C],n:usize)->(Vec<C>,Vec<C>,f64){
         for l in(0..n).filter(|&l|l!=j){let v=b[l*n+j];let e=&mut row[i*n+l];e.re-=v.re;e.im-=v.im;}}}
     (a,b,largest)
 }
-/// The rule's measures of one order (`OrderStats`); K is consumed.
-fn order_stats(k:&mut[C],n:usize)->OrderStats{
-    let d=n*n;let(a,b,largest)=take_absorbable(k,n);
-    let(mut row_all,mut col_all)=(vec![0_f64;d],vec![0_f64;d]);
-    let(mut row_out,mut col_out)=(vec![0_f64;d],vec![0_f64;d]);
-    let(mut row_band,mut col_band)=(vec![[0_f64;BANDS];d],vec![[0_f64;BANDS];d]);
-    for r in 0..d{let population=r/n==r%n;
+/// The rule's measures of a target's K^(0) on its edge from the centre to
+/// mode q (`OrderStats`), K consumed: per source E_j of x0 the images of the
+/// absorbable part, of each band and of the population rows on block q, and
+/// their Duhamel responses (`apriori::Duhamel`).
+fn order_stats(k:&mut[C],n:usize,rule:&ResponseRule<'_>,q:Option<usize>)->Result<OrderStats,String>{
+    let Some(q)=q else{return Ok(OrderStats::default())};
+    let d=n*n;let(a,b,largest)=take_absorbable(k,n);let count=rule.duhamel.count();
+    let(nu,weight)=(rule.nu[q],if rule.modes[q].iter().all(|&x|x==0){1.}else{2.});
+    // Slots: the bands (BANDS the top one), the population rows, the absorbable part.
+    let(population,absorbed)=(BANDS+1,BANDS+2);let mut images=vec![vec![ZERO;count*d];BANDS+3];
+    for(jj,e)in rule.duhamel.sources().enumerate(){let out=&mut images[absorbed][jj*d..(jj+1)*d];
+        for i in 0..n{for j in 0..n{let mut v=ZERO;for l in 0..n{mul_add(&mut v,a[i*n+l],e[l*n+j]);mul_add(&mut v,e[i*n+l],b[l*n+j]);}out[i*n+j]=v;}}}
+    let sources:Vec<&[C]>=rule.duhamel.sources().collect();
+    for r in 0..d{let pop=r/n==r%n;
         for(c,z)in k[r*d..(r+1)*d].iter().enumerate(){let m=magnitude(*z);if m==0.{continue;}
-            row_all[r]+=m;col_all[c]+=m;if population{continue;}
-            row_out[r]+=m;col_out[c]+=m;let j=band(m,largest);if j<BANDS{row_band[r][j]+=m;col_band[c][j]+=m;}}}
-    let top=|v:&[f64]|v.iter().copied().fold(0_f64,f64::max);
-    let mut bands=[0.;BANDS];
-    for(j,value)in bands.iter_mut().enumerate(){
-        let(r,c)=(row_band.iter().map(|x|x[j]).fold(0_f64,f64::max),col_band.iter().map(|x|x[j]).fold(0_f64,f64::max));
-        *value=piece_bound(r,c,n);}
-    OrderStats{absorbable:spectral_bound(&a,n)+spectral_bound(&b,n),rest:piece_bound(top(&row_all),top(&col_all),n),
-        outside:piece_bound(top(&row_out),top(&col_out),n),bands}
+            let slot=if pop{population}else{band(m,largest)};let image=&mut images[slot];
+            for(jj,e)in sources.iter().enumerate(){mul_add(&mut image[jj*d+r],*z,e[c]);}}}
+    let sum=|slots:&[usize]|->Vec<C>{let mut v=vec![ZERO;count*d];for &s in slots{for(a,b)in v.iter_mut().zip(&images[s]){add(a,*b);}}v};
+    let response=|v:&[C]|rule.duhamel.response(nu,weight,v);
+    let mut bands=[0.;BANDS];for(j,value)in bands.iter_mut().enumerate(){*value=response(&images[j])?;}
+    let outside:Vec<usize>=(0..=BANDS).collect();
+    let whole:Vec<usize>=(0..BANDS+3).collect();
+    Ok(OrderStats{whole:response(&sum(&whole))?,outside:response(&sum(&outside))?,bands})
 }
 /// One stored order: the absorbable factors, the rest (whole, its entries
 /// outside the population rows below `floor` dropped; with `whole` false
@@ -445,12 +438,11 @@ impl FoldLibrary{
         let mu=if high.is_finite(){0.5*(high+low)}else{0.};
         let(mut a0,mut b0)=(zero.op.left.dense(n),zero.op.right.dense(n));for i in 0..n{a0[i*n+i].im-=mu;b0[i*n+i].im+=mu;}
         let lambda0=spectral_bound(&a0,n)+spectral_bound(&b0,n)+zero.op.sandwich.iter().map(|(p,q)|sparse_spectral_bound(p,n)*sparse_spectral_bound(q,n)).sum::<f64>();
-        let couplings:Vec<f64>=plan.steps.iter().map(|s|trace_norm_bound(&generator.components[&s.charge].op,n)).collect();
-        let rule=match storage{Storage::Rule(r)=>Some(r),Storage::Frame=>None};
+        let(rule,input)=match storage{Storage::Rule(r,i)=>(Some(r),Some(i)),Storage::Frame=>(None,None)};
         let mut diagnostics=FoldDiagnostics{rest_bound:bound,lambda0,rule,..Default::default()};
         // The candidate targets: the plan's, and for a run's fold its omitted
         // cross folds as well.
-        let candidates:Vec<&classification::FoldTarget>=match storage{Storage::Frame=>plan.targets.iter().collect(),Storage::Rule(_)=>plan.targets.iter().chain(&plan.omitted).collect()};
+        let candidates:Vec<&classification::FoldTarget>=match storage{Storage::Frame=>plan.targets.iter().collect(),Storage::Rule(..)=>plan.targets.iter().chain(&plan.omitted).collect()};
         if candidates.is_empty(){return Ok(Self{targets:vec![],#[cfg(test)]zero_dense:None,rest,diagonal,diagnostics});}
         // Every far block's G_s, its series' terms and gamma_s.
         let mut blocks=BTreeMap::new();let mut gamma=BTreeMap::new();
@@ -462,18 +454,9 @@ impl FoldLibrary{
             gamma.insert(s,1./room);
             let terms=converged_terms(rho);blocks.insert(s,FarBlock{terms,g});diagnostics.series.push((step.charge.clone(),rho,terms));
         }
-        // The orders in nu_q: the frame's two; a run's until the never-built
-        // orders' remainder, sum c' c gamma (nu_max gamma)^M / (1 - nu_max gamma),
-        // times T is within EXPANSION_SHARE of the budget.
-        let remainder=|target:&classification::FoldTarget,nu_max:f64,orders:usize|->Result<f64,String>{
-            let mut r=0.;for pair in &target.pairs{let g=gamma[&pair.source];let p=nu_max*g;
-                if !(p<SERIES_LIMIT){return Err(format!("The static expansion in nu_q does not converge on this lattice (|nu_q| gamma = {p:e} for the far step {:?}): the step is not far from the lattice's modes",plan.steps[pair.source].charge));}
-                r+=couplings[pair.back]*couplings[pair.source]*g*p.powi(orders as i32)/(1.-p);}
-            Ok(r)};
-        let orders=match rule{None=>2,Some(rule)=>{
-            let mut m=1;
-            if rule.nu_max>0.{while m<ORDERS_MAX&&candidates.iter().map(|t|remainder(t,rule.nu_max,m)).sum::<Result<f64,String>>()?*rule.horizon>EXPANSION_SHARE*rule.budget{m+=1;}}
-            m}};
+        // The orders in nu_q: the frame's two; a run's K^(0) alone (x0's
+        // response to every higher order vanishes, the module documentation).
+        let orders=if rule.is_some(){1}else{2};
         diagnostics.orders=orders;
         // The targets built here (the diagonal one and canonical t != 0) and
         // the far steps solved for them (for the diagonal target, the pairs
@@ -529,50 +512,42 @@ impl FoldLibrary{
             for cb in(0..d).step_by(64){for rb in(0..d).step_by(64){for c in cb..(cb+64).min(d){let cs=swapped(c,n);for r in rb..(rb+64).min(d){
                 k[r*d+c]=if flip{conj(h(swapped(r,n),cs))}else if diagonal{let(u,v)=(h(r,c),h(swapped(r,n),cs));C{re:u.re+v.re,im:u.im-v.im}}else{h(r,c)};}}}}
             Ok(k)};
-        // The rule: per target and order, its pieces and their bounds; dropped
-        // smallest first while the sum stays within the budget.
-        let(mut floors,mut whole,mut kept_orders,mut kept_target)=(vec![vec![0_usize;orders];candidates.len()],vec![vec![true;orders];candidates.len()],vec![orders;candidates.len()],vec![true;candidates.len()]);
-        if let Some(rule)=rule{
-            let stats=execution.map(items.clone(),|(t,o)|->Result<OrderStats,String>{let mut k=assemble(t,o)?;Ok(order_stats(&mut k,n))});
-            let mut table=vec![vec![None;orders];candidates.len()];
-            for(&(t,o),s)in items.iter().zip(stats){table[t][o]=Some(s?);}
-            let table:Vec<Vec<OrderStats>>=table.into_iter().map(|v|v.into_iter().map(|s|s.ok_or("Fold storage lost an order")).collect::<Result<_,_>>()).collect::<Result<_,_>>()?;
-            let scale=|o:usize|rule.horizon*rule.nu_max.powi(o as i32);
-            let whole_order=|t:usize,o:usize|(table[t][o].absorbable+table[t][o].rest)*scale(o);
-            let expansion:Vec<f64>=candidates.iter().map(|t|Ok(remainder(t,rule.nu_max,orders)?*rule.horizon)).collect::<Result<_,String>>()?;
-            // Pieces: (cost, kind, target, order, band): 0 a storage band, 1 a
-            // rest but its population rows, 2 an order, 3 a target.
-            let mut pieces:Vec<(f64,u8,usize,usize,usize)>=Vec::new();
-            for t in 0..candidates.len(){
-                for o in 0..orders{let s=&table[t][o];
-                    for(j,&b)in s.bands.iter().enumerate(){pieces.push((b*scale(o),0,t,o,j));}
-                    if s.outside>0.{pieces.push((s.outside*scale(o),1,t,o,0));}
-                    if o>0{pieces.push((whole_order(t,o),2,t,o,0));}}
-                pieces.push(((0..orders).map(|o|whole_order(t,o)).sum::<f64>()+expansion[t],3,t,0,0));
+        // The rule: per target its pieces and their responses, and the far
+        // shell's rings; dropped smallest first while the sum stays within
+        // the budget.
+        let(mut floors,mut whole,kept_orders,mut kept_target)=(vec![vec![0_usize;orders];candidates.len()],vec![vec![true;orders];candidates.len()],vec![orders;candidates.len()],vec![true;candidates.len()]);
+        if let(Some(rule),Some(input))=(rule,input){
+            let index:BTreeMap<&Charge,usize>=input.modes.iter().enumerate().map(|(i,q)|(q,i)).collect();
+            let stats=execution.map((0..candidates.len()).collect(),|t|->Result<OrderStats,String>{let mut k=assemble(t,0)?;
+                order_stats(&mut k,n,input,index.get(&candidates[t].charge).copied())});
+            let table:Vec<OrderStats>=stats.into_iter().collect::<Result<_,_>>()?;
+            // Pieces: (response, kind, index, band): 0 a storage band, 1 a rest
+            // but its population rows, 3 a target, 4 a ring and those beyond.
+            let mut pieces:Vec<(f64,u8,usize,usize)>=Vec::new();
+            for(t,s)in table.iter().enumerate(){
+                for(j,&b)in s.bands.iter().enumerate(){pieces.push((b,0,t,j));}
+                pieces.push((s.outside,1,t,0));pieces.push((s.whole,3,t,0));
             }
-            pieces.sort_by(|a,b|a.0.total_cmp(&b.0).then((a.1,a.2,a.3,a.4).cmp(&(b.1,b.2,b.3,b.4))));
+            // A ring is dropped with every ring beyond it: its piece is the tail.
+            for k in 0..input.rings.len(){pieces.push((input.rings[k..].iter().sum(),4,k,0));}
+            pieces.sort_by(|a,b|a.0.total_cmp(&b.0).then((a.1,a.2,a.3).cmp(&(b.1,b.2,b.3))));
             // What a dropped piece already contains of another dropped one.
-            let(mut spent,mut contained)=(0_f64,vec![vec![0_f64;orders];candidates.len()]);
+            let(mut spent,mut contained,mut depth)=(0_f64,vec![0_f64;candidates.len()],input.rings.len());
             let mut dropped=DroppedPieces{candidate_targets:candidates.len(),..Default::default()};
-            let budget=rule.budget-expansion.iter().sum::<f64>();
-            for &(cost,kind,t,o,j)in &pieces{
-                if !kept_target[t]{continue;}
+            for &(cost,kind,t,j)in &pieces{
                 match kind{
-                    0=>{if o>=kept_orders[t]||!whole[t][o]||floors[t][o]!=j||spent+cost>budget{continue;}
-                        floors[t][o]=j+1;contained[t][o]+=cost;spent+=cost;dropped.entries+=cost;}
-                    1=>{if o>=kept_orders[t]||!whole[t][o]{continue;}let extra=(cost-contained[t][o]).max(0.);if spent+extra>budget{continue;}
-                        whole[t][o]=false;dropped.entries-=contained[t][o];dropped.rests+=cost;spent+=extra;contained[t][o]=cost;}
-                    2=>{if kept_orders[t]!=o+1{continue;}let extra=(cost-contained[t][o]).max(0.);if spent+extra>budget{continue;}
-                        kept_orders[t]=o;spent+=extra;dropped.orders+=cost;
-                        if whole[t][o]{dropped.entries-=contained[t][o];}else{dropped.rests-=contained[t][o];}contained[t][o]=cost;}
-                    _=>{let inside:f64=contained[t].iter().sum();let extra=(cost-inside).max(0.);if spent+extra>budget{continue;}
+                    0=>{if !kept_target[t]||!whole[t][0]||floors[t][0]!=j||spent+cost>rule.budget{continue;}
+                        floors[t][0]=j+1;contained[t]+=cost;spent+=cost;dropped.entries+=cost;}
+                    1=>{if !kept_target[t]||!whole[t][0]{continue;}let extra=(cost-contained[t]).max(0.);if spent+extra>rule.budget{continue;}
+                        whole[t][0]=false;dropped.entries-=contained[t];dropped.rests+=cost;spent+=extra;contained[t]=cost;}
+                    3=>{if !kept_target[t]{continue;}let extra=(cost-contained[t]).max(0.);if spent+extra>rule.budget{continue;}
                         kept_target[t]=false;spent+=extra;dropped.targets+=cost;
-                        for o in 0..orders{if o>=kept_orders[t]{dropped.orders-=contained[t][o];}else if whole[t][o]{dropped.entries-=contained[t][o];}else{dropped.rests-=contained[t][o];}}}
+                        if whole[t][0]{dropped.entries-=contained[t];}else{dropped.rests-=contained[t];}}
+                    _=>{let extra=input.rings[t];if t+1!=depth||spent+extra>rule.budget{continue;}depth=t;spent+=extra;dropped.rings+=extra;}
                 }
                 dropped.pieces+=1;
             }
-            dropped.expansion=(0..candidates.len()).filter(|&t|kept_target[t]).map(|t|expansion[t]).sum();
-            dropped.kept_targets=kept_target.iter().filter(|&&k|k).count();
+            dropped.kept_targets=kept_target.iter().filter(|&&k|k).count();dropped.kept_rings=depth;
             diagnostics.dropped=dropped;
         }
         // The storage of what the rule keeps.
@@ -624,78 +599,88 @@ impl FoldLibrary{
     /// Returns per ring the landing on every mode.
     #[allow(clippy::too_many_arguments)]
     pub fn far_shell(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],x:&[C],tolerance:f64)->Result<FarShell,String>{
-        let clock=Instant::now();let n=generator.n;let d=n*n;let count=modes.len();
+        let clock=Instant::now();let d=generator.n*generator.n;let count=modes.len();
+        let sources:Vec<(usize,&[C])>=(0..count).map(|p|(p,&x[p*d..(p+1)*d])).filter(|(_,b)|b.iter().any(|z|nonzero(*z))).collect();
+        let(rings,contraction,terms)=self.far_shell_sources(generator,plan,nu_of,modes,&sources,tolerance)?;
+        let mut shell=FarShell{contraction,terms,..FarShell::default()};
+        for ring in rings{let mut landing=vec![ZERO;count*d];
+            for((_,q),block)in ring{for(a,&b)in landing[q*d..(q+1)*d].iter_mut().zip(&block){add(a,b);}}
+            shell.landings.push(landing);}
+        shell.milliseconds=clock.elapsed().as_secs_f64()*1e3;
+        Ok(shell)
+    }
+    /// The far shell of separate source blocks (`far_shell`): each source a
+    /// block on a lattice mode, landed apart; per ring the landings keyed by
+    /// (source, mode), the largest contraction met and the series' terms.
+    #[allow(clippy::too_many_arguments)]
+    pub fn far_shell_sources(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],sources:&[(usize,&[C])],tolerance:f64)->Result<(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize),String>{
+        let n=generator.n;let d=n*n;
         let index:BTreeMap<&[i32],usize>=modes.iter().enumerate().map(|(i,q)|(q.as_slice(),i)).collect();
         let nu_modes:Vec<f64>=modes.iter().map(|q|nu_of(q)).collect::<Result<_,_>>()?;
         let steps:Vec<(&Charge,f64,&Superop)>=plan.steps.iter().map(|s|(&s.charge,s.nu,&generator.components[&s.charge].op)).collect();
         let c_all:f64=plan.steps.iter().map(|s|trace_norm_bound(&generator.components[&s.charge].op,n)).sum();
         let(bound,lambda0)=(self.diagnostics.rest_bound,self.diagnostics.lambda0);
-        let largest=|v:&[C]|v.iter().map(|z|magnitude(*z)).fold(0_f64,f64::max);
         let trace_bound=|v:&[C]|(n as f64).sqrt()*v.iter().map(|z|squared(*z)).sum::<f64>().sqrt();
-        // The source modes in groups; each group's far shell on its own.
-        let groups:Vec<Vec<usize>>=(0..count).filter(|&p|largest(&x[p*d..(p+1)*d])>0.).collect::<Vec<_>>().chunks(FAR_GROUP).map(|g|g.to_vec()).collect();
+        // The sources in groups; each group's far shell on its own.
+        let groups:Vec<Vec<usize>>=(0..sources.len()).collect::<Vec<_>>().chunks(FAR_GROUP).map(|g|g.to_vec()).collect();
         type Ring=BTreeMap<Charge,(f64,BTreeMap<usize,Vec<C>>)>;
-        type Group=(Vec<BTreeMap<usize,Vec<C>>>,f64,usize);
+        type Group=(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize);
         let execution=Execution::new()?;
         let parts=execution.map(groups,|group|->Result<Group,String>{
             let(mut landings,mut contraction,mut terms)=(Vec::new(),0_f64,0);
             let(mut small,mut stack)=(Vec::new(),Vec::new());
-            // The first ring's sources: every step from the group's modes to a far charge.
-            let mut sources:Ring=BTreeMap::new();
-            for &(c,nu,op)in &steps{for &p in &group{
+            // The first ring's sources: every step from the group's blocks to a far charge.
+            let mut ring:Ring=BTreeMap::new();
+            for &(c,nu,op)in &steps{for &s in &group{let(p,x)=sources[s];
                 let r=charge_plus(&modes[p],c)?;if index.contains_key(r.as_slice())||(nu_modes[p]+nu).abs()<plan.cut{continue;}
-                let entry=sources.entry(c.clone()).or_insert_with(||(nu,BTreeMap::new()));
-                op.apply_into(n,ONE,&x[p*d..(p+1)*d],entry.1.entry(p).or_insert_with(||vec![ZERO;d]),&mut small);}}
+                let entry=ring.entry(c.clone()).or_insert_with(||(nu,BTreeMap::new()));
+                op.apply_into(n,ONE,x,entry.1.entry(s).or_insert_with(||vec![ZERO;d]),&mut small);}}
             let mut gamma_far=0_f64;
             for _ in 0..FAR_RINGS{
-                if sources.is_empty(){break;}
-                let(mut landing,mut next):(BTreeMap<usize,Vec<C>>,Ring)=(BTreeMap::new(),BTreeMap::new());
-                for(w,(nu,blocks))in std::mem::take(&mut sources){
-                    // y = -(L0 - i nu_r - z)^-1 b on the blocks of w.
+                if ring.is_empty(){break;}
+                let(mut landing,mut next):(BTreeMap<(usize,usize),Vec<C>>,Ring)=(BTreeMap::new(),BTreeMap::new());
+                for(w,(nu,blocks))in std::mem::take(&mut ring){
+                    // y = -(L0 - i nu_r)^-1 b on the blocks of w.
                     let active:Vec<usize>=blocks.keys().copied().collect();let m=active.len();
-                    let mut y:Vec<C>=Vec::with_capacity(m*d);for p in &active{y.extend(blocks[p].iter().map(|z|C{re:-z.re,im:-z.im}));}
+                    let mut y:Vec<C>=Vec::with_capacity(m*d);for s in &active{y.extend(blocks[s].iter().map(|z|C{re:-z.re,im:-z.im}));}
                     let mut gs:Vec<Vec<C>>=Vec::with_capacity(m);let mut rho=0_f64;
-                    for &p in &active{let(g,gm)=far_g(&self.diagonal,nu_modes[p]+nu);let r=bound*gm;
+                    for &s in &active{let p=sources[s].0;let(g,gm)=far_g(&self.diagonal,nu_modes[p]+nu);let r=bound*gm;
                         if !(r<SERIES_LIMIT){return Err(format!("Far shell: the relative charge {w:?} from {:?} is too close to L0's spectrum (series ratio {r:e})",modes[p]));}
                         rho=rho.max(r);gs.push(g);}
                     let(mut term,mut t)=(vec![ZERO;m*d],vec![ZERO;m*d]);
                     let k=terms_to(rho,RING_SERIES);terms+=k*m;
                     series_blocks(&self.rest,&gs,k,n,&mut y,&mut term,&mut t,m,&mut stack,&mut small)?;
-                    for(i,&p)in active.iter().enumerate(){let yp=&y[i*d..(i+1)*d];
+                    for(i,&s)in active.iter().enumerate(){let p=sources[s].0;let ys=&y[i*d..(i+1)*d];
                         for &(c,step_nu,op)in &steps{
                             let w2=charge_plus(&w,c)?;let r2=charge_plus(&modes[p],&w2)?;
-                            if let Some(&q)=index.get(r2.as_slice()){op.apply_into(n,ONE,yp,landing.entry(q).or_insert_with(||vec![ZERO;d]),&mut small);continue;}
+                            if let Some(&q)=index.get(r2.as_slice()){op.apply_into(n,ONE,ys,landing.entry((s,q)).or_insert_with(||vec![ZERO;d]),&mut small);continue;}
                             if (nu_modes[p]+nu+step_nu).abs()<plan.cut{continue;}
                             let entry=next.entry(w2).or_insert_with(||(nu+step_nu,BTreeMap::new()));
-                            op.apply_into(n,ONE,yp,entry.1.entry(p).or_insert_with(||vec![ZERO;d]),&mut small);
+                            op.apply_into(n,ONE,ys,entry.1.entry(s).or_insert_with(||vec![ZERO;d]),&mut small);
                         }}
                 }
                 landings.push(landing);
                 // What the next ring's blocks and their descendants can land: each
                 // block's gamma, rho over every far mode met.
                 let mut potentials:Vec<(Charge,usize,f64)>=Vec::new();
-                for(w,(nu,blocks))in &next{for(&p,b)in blocks{
-                    let room=(nu_modes[p]+nu).abs()-lambda0;let gamma=if room>0.{1./room}else{f64::INFINITY};
-                    gamma_far=gamma_far.max(gamma);potentials.push((w.clone(),p,gamma*trace_bound(b)));}}
+                for(w,(nu,blocks))in &next{for(&s,b)in blocks{
+                    let room=(nu_modes[sources[s].0]+nu).abs()-lambda0;let gamma=if room>0.{1./room}else{f64::INFINITY};
+                    gamma_far=gamma_far.max(gamma);potentials.push((w.clone(),s,gamma*trace_bound(b)));}}
                 let rho=c_all*gamma_far;contraction=contraction.max(rho);
                 let scale=if rho<1.{c_all/(1.-rho)}else{f64::INFINITY};
                 let total:f64=potentials.iter().map(|x|scale*x.2).sum();
                 if total<=tolerance{break;}
                 let floor=FAR_PRUNE*tolerance/(potentials.len()as f64);
-                for(w,p,v)in &potentials{if scale*v<=floor{if let Some(e)=next.get_mut(w){e.1.remove(p);}}}
+                for(w,s,v)in &potentials{if scale*v<=floor{if let Some(e)=next.get_mut(w){e.1.remove(s);}}}
                 next.retain(|_,v|!v.1.is_empty());
-                sources=next;
+                ring=next;
             }
             Ok((landings,contraction,terms))
         });
-        let mut shell=FarShell::default();
-        for part in parts{let(landings,contraction,terms)=part?;
-            for(k,landing)in landings.into_iter().enumerate(){
-                if k==shell.landings.len(){shell.landings.push(vec![ZERO;count*d]);}
-                for(q,block)in landing{for(a,&b)in shell.landings[k][q*d..(q+1)*d].iter_mut().zip(&block){add(a,b);}}}
-            shell.contraction=shell.contraction.max(contraction);shell.terms+=terms;}
-        shell.milliseconds=clock.elapsed().as_secs_f64()*1e3;
-        Ok(shell)
+        let(mut rings,mut contraction,mut terms):(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize)=(Vec::new(),0.,0);
+        for part in parts{let(landings,c,t)=part?;contraction=contraction.max(c);terms+=t;
+            for(k,landing)in landings.into_iter().enumerate(){if k==rings.len(){rings.push(BTreeMap::new());}rings[k].extend(landing);}}
+        Ok((rings,contraction,terms))
     }
     /// The far shell's static targets of rings 1 to `rings` (paths of three to
     /// rings + 2 steps; ring 0, the second order, is K^(0)) with `orders`
@@ -869,22 +854,26 @@ mod tests{
     }
     #[test]
     fn lattice_rule_drops_within_its_budget_and_less_for_longer_times(){
-        // A run's fold drops pieces only within its budget; at a longer horizon
-        // the dropped pieces' norm is no larger (every piece costs more), and
-        // every candidate target is kept at a long enough horizon.
+        // A run's fold drops pieces only within its budget (x0 = |0><0|'s
+        // Duhamel responses on the order-1 lattice), keeps no fewer targets
+        // at a longer horizon, and stores K^(0) alone.
         let mut f=fixture();for v in f.far.iter_mut().chain(f.far2.iter_mut()){*v*=1e-3;}
-        let p=prepared(&f);
-        let mut previous=f64::INFINITY;let mut kept=0;
+        let p=prepared(&f);let d=16;let eigen=p.eigenbasis().unwrap();
+        let modes=p.modes(1).unwrap();let nu:Vec<f64>=modes.iter().map(|q|p.nu(q).unwrap()).collect();
+        let mut initial=vec![ZERO;d];initial[0]=ONE;
+        let mut kept=0;
         for horizon in[1e-3,1.,1e3,1e9]{
-            let rule=FoldRule::new(horizon,6.);
-            let fold=FoldLibrary::build(&p.generator,&p.plan,&p.lapack,Storage::Rule(rule)).unwrap();
+            let rule=FoldRule::new(horizon);
+            let samples=[0.25*horizon,horizon];
+            let duhamel=Duhamel::new(eigen,&initial,&samples).unwrap();
+            let input=ResponseRule{modes:modes.clone(),nu:nu.clone(),duhamel:&duhamel,rings:vec![]};
+            let fold=FoldLibrary::build(&p.generator,&p.plan,&p.lapack,Storage::Rule(rule,&input)).unwrap();
             let dropped=&fold.diagnostics.dropped;
             assert!(dropped.total()<=rule.budget*(1.+1e-12),"T {horizon}: dropped {:e} > budget {:e}",dropped.total(),rule.budget);
             assert!(dropped.kept_targets>=kept,"T {horizon}: fewer targets kept");kept=dropped.kept_targets;
-            let norm=dropped.total()/horizon;assert!(norm<=previous*(1.+1e-12),"T {horizon}: the dropped norm grew ({norm:e} > {previous:e})");previous=norm;
             assert_eq!(dropped.candidate_targets,p.plan.targets.len()+p.plan.omitted.len());
+            assert!(fold.targets.iter().all(|t|t.orders()==1),"K^(0) alone");
         }
-        assert_eq!(kept,p.plan.targets.len()+p.plan.omitted.len(),"a long horizon keeps every cross fold");
     }
     #[test]
     fn lattice_ring_targets_are_the_far_shells_higher_rings(){
