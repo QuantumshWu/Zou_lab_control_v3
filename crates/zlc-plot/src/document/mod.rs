@@ -638,6 +638,7 @@ fn restore<V: Clone>(map: &mut OrderedMap<String, V>, saved: &OrderedMap<String,
 
 /// `_pointer(session, command, at)`: the pointer message of a command.
 pub fn pointer_event(command: &Json, time: Option<f64>) -> Result<PointerEvent> {
+    let time = command.get("time").and_then(Json::as_f64).filter(|value| value.is_finite() && *value >= 0.0).or(time);
     let event = command.get("event").and_then(Json::as_str).ok_or_else(|| json_key_error("event"))?;
     let axes = match command.get("axes") { None | Some(Json::Null) => None, Some(wire) => Some(axis_from_wire(wire)?) };
     let number = |name: &str| command.get(name).map_or(Some(0.0), Json::as_f64).unwrap_or(f64::NAN);

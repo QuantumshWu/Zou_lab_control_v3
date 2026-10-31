@@ -52,6 +52,11 @@ try {
   wheel(8);pointer.cancel();frame();equal(sent.length,0,'cancelled travel');
   enabled=false;assert(!wheel(8),'disabled canvas takes no wheel');frame();equal(sent.length,0,'disabled zoom');enabled=true;
  });
+ check('pointer messages carry occurrence time rather than render delivery time',()=>{
+  const event=new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:100,...at()});
+  Object.defineProperty(event,'timeStamp',{value:1234});canvas.dispatchEvent(event);frame();
+  close(sent[0].time,1.234);
+ });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
 } catch(error) { document.getElementById('result').textContent=JSON.stringify({passed:false,error:error.stack}); }
 </script>

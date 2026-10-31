@@ -355,7 +355,7 @@ impl Renderer {
         self.payload_kept = !payload_changed;
         if state_changed && any(effects, RenderEffect::AXIS_TRANSFORM) { base_changed = true; }
         // An image front is viewport-sized: a view edit changes its crop.
-        if any(effects, RenderEffect::AXIS_TRANSFORM) && matches!(self.spec, PlotSpec::Image(_)) { base_changed = true; }
+        if any(effects, RenderEffect::AXIS_TRANSFORM) && matches!(self.spec.semantic(), Surface::Image(_)) { base_changed = true; }
         let style_only = !base_changed && state_changed && any(effects, RenderEffect::BASE_STYLE);
         let visible_cells = match &*frame.payload { Payload::Facet(facet) if self.is_facet() => Some(facet.cells.len()), _ => self.is_facet().then_some(0) };
         self.consume_facet_presentation(frame.facet_index, frame.facet_focus_index, visible_cells);
@@ -417,7 +417,7 @@ impl Renderer {
 
     fn capture_home_limits(&mut self, axes: usize) {
         // An image registered its whole source extent before the frame's viewport.
-        if matches!(self.spec, PlotSpec::Image(_)) && self.home_limits.contains_key(&axes) { return; }
+        if matches!(self.spec.semantic(), Surface::Image(_)) && self.home_limits.contains_key(&axes) { return; }
         let a = &self.fig.axes[axes];
         self.home_limits.insert(axes, (a.xlim, a.ylim));
     }

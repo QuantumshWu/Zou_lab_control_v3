@@ -78,7 +78,7 @@ export class CanvasPointer {
         : this.axesAt(this.lastPoint.x, this.lastPoint.y);
       return { action: "pointer", panel: this.panel, event: kind, ...this.lastPoint, axes,
         button: kind === "move" ? this.activeButton : buttonOf(event),
-        displayed_sequence: this.sequence(),
+        displayed_sequence: this.sequence(), time: event.timeStamp / 1000,
         buttons: [event.buttons & 1 ? "left" : "", event.buttons & 4 ? "middle" : "", event.buttons & 2 ? "right" : ""].filter(Boolean), modifiers: modifiers(event) };
     };
     const flushMove = (): void => {

@@ -141,7 +141,7 @@ impl Editor {
             config_loaded_path: String::new(), config_loaded_values: Vec::new(), config_read_error: String::new(), config_error: String::new(),
             component_context: String::new(), selected_subpulse: String::new(), subpulse_draft: None, subpulse_saved: None,
             subpulse_path: String::new(), subpulse_visible: None, scan_progress: (String::new(), "task"), scan_running: false,
-            target_feedback: (String::new(), "idle"), target_feedback_at: 0, include_off: false, pinned_size: None, selectors: false, page: "Edit".into(),
+            target_feedback: (String::new(), "idle"), target_feedback_at: 0, include_off: false, pinned_size: None, selectors: true, page: "Edit".into(),
             preview_status: (String::new(), "task"), message: None, messages: 0, last_warning: String::new(), summary_note: None,
             jobs: Vec::new(), operator: false, cards: Default::default(),
         }

@@ -81,3 +81,11 @@ Range 联动项按父轴点数生成，Values 必须等长；关闭 Link 保留�
 Pulse Editor 的 Python Run 负责生成扫描表，On Pulse 执行它。Run repeats=∞ 表示永久停在第一点，
 Scan repeats=∞ 才表示整表循环；生成/加载多点表及 On Pulse 时，仍为∞的 Run repeats 明确改为1并显示在草稿中。
 有限 Run repeats、单点/无表无限播放、Hold 和 Step 的语义不变。
+
+## 默认交互与范围恢复
+
+Task Console 和 Pulse Preview 的 Selectors 默认开启；用户主动关闭的状态保留。
+Image 的完整 home limits 由原始图像范围给出，独立图像与 Facet 内图像使用同一规则；
+缩放中的数据更新不能把当前 viewport 记为新的完整范围。
+指针消息携带浏览器事件发生时刻，避免中/右键双击识别依赖渲染队列延迟。
+Scan Plan 主轴及联动输入在值更新时保留 DOM 身份和焦点，连续滚轮以及小幅滚轮累积不会因重挂载中断。

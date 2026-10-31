@@ -166,6 +166,9 @@ class AxisRowView {
   entry: Axis;
   private linkLocked = false;
   private linkControls: HTMLElement[] = [];
+  private linkedSignature = "";
+  private linkedCells: HTMLElement[] = [];
+  private linkedUpdates: (() => void)[] = [];
   /** A list nobody's ends describe, kept until a spin is edited. */
   private customValues: number[] | null = null;
 
@@ -210,6 +213,13 @@ class AxisRowView {
   }
 
   get cells(): HTMLElement[] {
+    const signature = JSON.stringify([this.entry.link_enabled, (this.entry.links ?? []).map(link => [link.port, link.unit, link.mode, this.owner.portTree(link.port), this.owner.ports.find(port => port.port === link.port)?.units])]);
+    if (signature === this.linkedSignature && this.linkedCells.length) {
+      this.linkedUpdates.forEach(update => update());
+      return [this.kind, this.axis, this.values, this.unit, this.mode.root, this.linkedCells[0]!, this.remove, this.notes, ...this.linkedCells.slice(1)];
+    }
+    this.linkedSignature = signature;
+    this.linkedUpdates = [];
     this.linkControls = [];
     const toggle = switchButton(on => { this.entry.link_enabled = on; if (on && !this.entry.links?.length) this.addLink(); else this.owner.emitPlan(); }, "Link");
     toggle.classList.add("axis-link"); toggle.disabled = this.linkLocked; setChecked(toggle, this.entry.link_enabled === true);
@@ -224,12 +234,18 @@ class AxisRowView {
         const bank = element("div", "range-bank");
         const start = rangeSpin("linked from", () => 1, () => [null, null], value => { link.values[0] = value; this.owner.emitPlan(); });
         const stop = rangeSpin("linked to", () => 1, () => [null, null], value => { link.values[link.values.length - 1] = value; this.owner.emitPlan(); });
-        start.input.value = String(link.values[0] ?? 0); stop.input.value = String(link.values.at(-1) ?? 1); start.refresh(); stop.refresh();
+        const update = (): void => {
+          if (document.activeElement !== start.input) start.input.value = String(link.values[0] ?? 0);
+          if (document.activeElement !== stop.input) stop.input.value = String(link.values.at(-1) ?? 1);
+          start.refresh(); stop.refresh();
+        };
+        update(); this.linkedUpdates.push(update);
         bank.append(element("span", "bank-word", "from"), start.root, element("span", "bank-word", "to"), stop.root);
         holder.append(bank); this.linkControls.push(start.input, stop.input);
       } else {
         const input = element("input"); input.type = "text"; input.spellcheck = false;
-        input.value = link.mode === "formula" ? link.formula : link.value_text;
+        const update = (): void => { if (document.activeElement !== input) input.value = link.mode === "formula" ? link.formula : link.value_text; };
+        update(); this.linkedUpdates.push(update);
         input.setAttribute("aria-label", link.mode === "formula" ? "Linked formula" : "Linked values");
         input.placeholder = link.mode === "formula" ? "120 - x" : "1, 2, 3";
         input.title = link.mode === "formula" ? "x is this axis's number; write numeric constants directly" : LIST_TIP;
@@ -249,6 +265,7 @@ class AxisRowView {
       cells.push(...nodes);
     }
     for (const control of this.linkControls) if ("disabled" in control) (control as HTMLInputElement).disabled = this.linkLocked;
+    this.linkedCells = [toggle, ...cells.slice(8)];
     return cells;
   }
 
@@ -284,6 +301,9 @@ class AxisRowView {
    * keeps what they are typing. */
   show(entry: Axis): void {
     if (this.entry.port !== entry.port) this.steps = this.owner.recall(entry.port)?.steps ?? [null, null, null];
+    if (this.entry.links && entry.links && this.entry.links.length === entry.links.length) {
+      entry = { ...entry, links: entry.links.map((link, i) => Object.assign(this.entry.links![i]!, link)) };
+    }
     this.entry = entry;
     if (this.combo) this.combo.setTree(this.owner.portTree(entry.port), entry.port);
     if (this.name && document.activeElement !== this.name) this.name.value = entry.port.slice(this.owner.families.manual.length);
@@ -498,9 +518,20 @@ export class ScanPlanEditor implements NodeEditor {
       kept.push(view);
     });
     this.rows = kept;
-    this.axes.replaceChildren(...kept.flatMap(view => view.cells));
+    this.placeRows(kept);
     this.axes.classList.toggle("has-manual", kept.some(view => view.manual));
     this.axes.classList.toggle("has-links", kept.some(view => view.entry.link_enabled));
+  }
+
+  /** Leave existing controls mounted: removing a focused input ends its wheel gesture. */
+  private placeRows(rows: AxisRowView[]): void {
+    const cells = rows.flatMap(view => view.cells), alive = new Set(cells);
+    for (const child of [...this.axes.children]) if (!alive.has(child as HTMLElement)) child.remove();
+    let cursor = this.axes.firstElementChild;
+    for (const cell of cells) {
+      if (cell === cursor) cursor = cursor.nextElementSibling;
+      else this.axes.insertBefore(cell, cursor);
+    }
   }
 
   unusedPort(): Port | undefined {
@@ -540,7 +571,7 @@ export class ScanPlanEditor implements NodeEditor {
     for (const view of this.rows) this.remember(view);
     const order = this.ordered(this.rows.map(view => view.entry));
     this.rows = order.map(entry => this.rows.find(view => view.entry === entry)!);
-    this.axes.replaceChildren(...this.rows.flatMap(view => view.cells));
+    this.placeRows(this.rows);
     this.axes.classList.toggle("has-manual", this.rows.some(view => view.manual));
     this.axes.classList.toggle("has-links", this.rows.some(view => view.entry.link_enabled));
     this.planText = JSON.stringify({ axes: order.map(axis => ({ port: axis.port, unit: axis.unit, values: axis.values, mode: axis.mode, value_text: axis.value_text, ...(axis.links || axis.link_enabled ? { link_enabled: axis.link_enabled === true, links: axis.links ?? [] } : {}) })) });

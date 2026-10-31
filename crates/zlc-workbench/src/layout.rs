@@ -35,7 +35,6 @@ pub struct BoardPanel {
     pub loaded_selectors: Option<Value>,
 }
 
-#[derive(Default)]
 pub struct Board {
     pub panels: Vec<BoardPanel>,
     pub paused: bool,
@@ -46,6 +45,10 @@ pub struct Board {
     pub pending: Option<(Loaded, &'static str)>,
     /// A recipe's nodes waiting to start, and who ran it (their runs act for that client).
     pub recipe_start: Option<(Vec<String>, String)>,
+}
+
+impl Default for Board {
+    fn default() -> Self { Self { panels: Vec::new(), paused: false, selectors: true, path: None, dirty: false, pending: None, recipe_start: None } }
 }
 
 impl Board {
@@ -667,5 +670,14 @@ impl Workbench {
         for id in order {
             if let Err(error) = self.start_node(&id, None, &origin, None, host) { self.notes.push(format!("recipe: {id}: {error}")); break; }
         }
+    }
+}
+
+#[cfg(test)]
+mod interaction_defaults_test {
+    #[test]
+    fn selectors_start_on_and_can_be_disabled() {
+        let mut board=super::Board::default(); assert!(board.selectors);
+        board.selectors=false; board.add("one"); assert!(!board.selectors);
     }
 }

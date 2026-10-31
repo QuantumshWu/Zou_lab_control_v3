@@ -352,6 +352,8 @@ pub struct ScopeStep {
 #[serde(deny_unknown_fields)]
 pub struct Pointer {
     pub panel: String,
+    /// Monotonic browser event time in seconds, unaffected by rendering queues.
+    pub time: Option<f64>,
     /// press, move, release, double_click, scroll, leave, key or cancel.
     pub event: String,
     /// Canvas position as a fraction of its width (0 = left).

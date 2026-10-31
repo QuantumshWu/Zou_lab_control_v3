@@ -477,3 +477,17 @@ fn a_small_valued_axis_keeps_its_selector_reach() {
     assert_eq!(hit(8.2e-14), Some("high"));
     assert_eq!(hit(5.0e-14), Some("body"));
 }
+
+#[test]
+fn input_timestamps_keep_middle_double_clicks_independent_of_render_latency() {
+    use zlc_plot::document::pointer_event;
+    use zlc_plot::interaction::ClickHistory;
+    let mut history=ClickHistory::new();
+    let first=pointer_event(&json!({"event":"press","button":"middle","time":1.0}),Some(100.0)).unwrap();
+    let second=pointer_event(&json!({"event":"press","button":"middle","time":1.2}),Some(103.0)).unwrap();
+    let defaults=InteractionDefaults::default();
+    assert!(!history.is_double_click(2,false,None,Some((20.,20.)),first.time.unwrap(),&defaults));
+    assert!(history.is_double_click(2,false,None,Some((20.,20.)),second.time.unwrap(),&defaults));
+    assert!(!history.is_double_click(2,false,None,Some((20.,20.)),10.,&defaults));
+    assert!(!history.is_double_click(2,false,None,Some((20.,20.)),1.,&defaults),"reloaded browser clock must not synthesize a double click");
+}

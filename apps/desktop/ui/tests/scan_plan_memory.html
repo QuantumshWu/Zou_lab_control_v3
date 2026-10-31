@@ -140,12 +140,25 @@ try {
   const linked=t.root.querySelector('.linked-port').getBoundingClientRect();
   for(const selector of ['.linked-values','.linked-unit','.linked-mode','.linked-add','.linked-remove']) {
    const box=t.root.querySelector(selector).getBoundingClientRect();
-   assert(Math.abs(box.top-linked.top)<1,`${selector} wraps onto another row`);
+   assert(Math.abs((box.top+box.bottom)-(linked.top+linked.bottom))<2,`${selector} wraps onto another row`);
   }
   for(const [parent,child] of [['.axis-port','.linked-port'],['.axis-values','.linked-values'],['.axis-unit','.linked-unit']]) {
    assert(Math.abs(t.root.querySelector(parent).getBoundingClientRect().left-t.root.querySelector(child).getBoundingClientRect().left)<1,`${child} is not aligned`);
   }
 
+ });
+ await check('wheel focus and fractional travel survive plan edits and accepted refreshes',()=>{
+  const t=setup(true);t.root.style.cssText='position:fixed;left:0;top:0;width:1450px';
+  const wheel=input=>{const event=new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:-50});input.dispatchEvent(event);assert(event.defaultPrevented,'focused wheel consumed')};
+  const primary=t.root.querySelector('.range-bank input[aria-label="from"]');primary.focus();
+  const before=Number(primary.value);
+  for(let i=0;i<8;i++){wheel(primary);t.ack();assert(document.activeElement===primary,'main spin lost focus');}
+  equal(Number(primary.value),before+4,'all primary notches applied');
+  t.root.querySelector('.axis-link').click();
+  const mode=[...t.root.querySelectorAll('.linked-mode button')].find(b=>b.textContent==='Range');mode.click();
+  const linked=t.root.querySelector('input[aria-label="linked from"]');linked.focus();const first=Number(linked.value);
+  for(let i=0;i<8;i++){wheel(linked);t.ack();assert(document.activeElement===linked,'linked spin was replaced');}
+  equal(Number(linked.value),first+4,'all linked notches applied');
  });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
 }catch(error){document.getElementById('result').textContent=JSON.stringify({passed:false,completed:checks,error:error.stack})}

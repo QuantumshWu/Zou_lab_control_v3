@@ -44,6 +44,7 @@ fn author_save_reopen_connect_fire_and_stop() {
     let state = editor.state();
     assert_eq!(state["schedule"]["periods"].as_array().unwrap().len(), 2);
     assert_eq!(state["title"], "PulseGUI · untitled");
+    assert_eq!(state["preview"]["selectors"], true, "selectors default on");
     assert_eq!(state["status"], "idle", "no board: nothing runs yet");
     command(&mut editor, "pulse_edit", json!({"edit": "duration", "period_id": "period1", "value": "2.5", "unit": "µs"}));
     command(&mut editor, "pulse_edit", json!({"edit": "digital", "period_id": "period2", "port_key": "probe", "high": true}));

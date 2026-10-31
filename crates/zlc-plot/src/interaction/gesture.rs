@@ -285,7 +285,7 @@ impl ClickHistory {
         };
         let interval = defaults.double_click_interval_ms as f64 / 1000.0;
         if let Some((then, previous_x, previous_y)) = self.clicks.get(&button).copied() {
-            if now - then <= interval && hypot(x - previous_x, y - previous_y) <= defaults.double_click_radius_px {
+            if now >= then && now - then <= interval && hypot(x - previous_x, y - previous_y) <= defaults.double_click_radius_px {
                 self.clicks.remove(&button);
                 return true;
             }

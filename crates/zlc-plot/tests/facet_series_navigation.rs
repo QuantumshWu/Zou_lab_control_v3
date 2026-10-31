@@ -204,3 +204,20 @@ fn saved_scan_cell_curve_and_dipole_group_remain_interactive() {
     let target=Value::from_json(&item.target).as_map().unwrap().clone();
     curve_group_edit_and_interact(mounted(item.plane),target,"scan.dac:period8:da_dipole",None);
 }
+
+#[test]
+fn focused_image_home_survives_zoom_and_data_refresh() {
+    let input=synthetic_input(); let mut plot=open(&input,&target(PAIR,RF,DIPOLE));
+    let axes=|plot:&PlotSession|plot.raster_axes_snapshot().unwrap().into_iter().find(|a|a.cell_index==Some(0)).unwrap();
+    let original=axes(&plot);
+    let (l,t,r,b)=original.bounds;
+    plot.raster_pointer_event(&PointerEvent {action:PointerAction::Scroll,x:(l+r)/2.,y:(t+b)/2.,button:None,double:false,step:-8.,key:None,axes:Some(original.clone()),time:Some(1.)}).unwrap();
+    let candidate=plot.resolve_configuration(input.schema(),None,None,None,None,true,None,None,None,None).unwrap();
+    let prepared=plot.prepare_data(&input,None,Some(candidate.clone())).unwrap();
+    plot.present_prepared(prepared,Some(candidate),true).unwrap();
+    let current=axes(&plot); let (l,t,r,b)=current.bounds;
+    plot.raster_pointer_event(&PointerEvent {action:PointerAction::Press,x:(l+r)/2.,y:(t+b)/2.,button:Some(2),double:true,step:0.,key:None,axes:Some(current),time:Some(2.)}).unwrap();
+    let home=axes(&plot);
+    assert_eq!(home.x_limits,original.x_limits,"reset must use the full image extent, not the last zoomed frame");
+    assert_eq!(home.y_limits,original.y_limits);
+}
