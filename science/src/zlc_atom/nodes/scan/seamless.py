@@ -440,9 +440,18 @@ class SeamlessScanMeasurement:
 
         inner_rows = state["inner_rows"]
         if self.board_axes:
-            played = tuple(tuple(float(value) for value in row) for row in receipt["scan"]["rows"])
+            table = receipt.get("scan")
+            if not isinstance(table, Mapping) or not isinstance(table.get("fields"), (list, tuple)) or not isinstance(table.get("rows"), (list, tuple)):
+                raise RuntimeError("Scan cannot start: the sequencer FIRE receipt is missing its loaded scan table (fields and quantized rows)")
+            fields = tuple(table["fields"])
+            required = tuple(port.port[len(PULSE_PARAM_FAMILY):] for port in self.board_ports)
+            if len(set(fields)) != len(fields) or any(field not in fields for field in required):
+                raise RuntimeError("Scan cannot start: the sequencer FIRE receipt names different scan fields than the plan")
+            if any(len(row) != len(fields) for row in table["rows"]):
+                raise RuntimeError("Scan cannot start: the sequencer FIRE receipt has inconsistent scan row widths")
+            played = tuple(tuple(float(row[fields.index(field)]) for field in required) for row in table["rows"])
             if len(played) != len(inner_rows):
-                raise RuntimeError("the board played another table than the plan's")
+                raise RuntimeError("Scan cannot start: the sequencer FIRE receipt has a different point count than the plan")
             effective_inner = self._plan_ordered_rows(played)
         else:
             effective_inner = inner_rows

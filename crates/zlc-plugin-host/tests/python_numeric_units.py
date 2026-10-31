@@ -214,4 +214,40 @@ class LinkedScan(unittest.TestCase):
         self.assertEqual(programs[-1]['scan']['rows'],[[7,3,2],[8,3,2]])
         self.assertEqual([o.cell_origin for o in outputs],[(0,i) for i in range(6)])
 
+    def test_real_native_load_fire_receipt_completes_scan(self):
+        import os, json, numpy as np
+        from zlc_data import AxisSpec,AxisId,SPATIAL_X,DomainSpec,ValueSchema,ValidityContract,ValidityMode,owned_snapshot_from_arrays
+        from zlc_atom.nodes.scan.plan import ScanAxis,ScanPlan,ScanPort
+        from zlc_atom.nodes.scan.seamless import SeamlessScanMeasurement
+        fixture=os.environ.get('ZLC_SCAN_RECEIPT_FIXTURE')
+        if not fixture:self.skipTest('run with the fixture emitted by the real native pulse-host test')
+        receipt=json.loads(pathlib.Path(fixture).read_text())
+        fields=['duration:long_after','duration:long_before']
+        values=[(.000400003,.000500003),(.000200007,.000300007)]
+        plan=ScanPlan(tuple(ScanAxis('pulse:param:'+field,tuple(column),'s') for field,column in zip(fields,values)))
+        # Two independent axes: take the actual two-row table as a paired scan instead.
+        plan=ScanPlan((plan.axes[0],ScanAxis(plan.axes[1].port,plan.axes[1].values,'s',plan.axes[0].port)))
+        source=types.SimpleNamespace(snapshot=owned_snapshot_from_arrays(ValueSchema(ValidityContract(ValidityMode.VALUE),np.dtype('<f8'),'1'),np.ones((1,1,1)),0,
+            cell_domain=DomainSpec((1,),(AxisSpec(AxisId('x'),'x',SPATIAL_X,1),))),event_record={})
+        outputs=[];records=[];stops=[]
+        def core(command,**params):
+            if command=='pulse_stop':stops.append(True);return {}
+            if command=='pulse_run':return receipt['loaded' if params.get('stage')=='load' else 'fired']
+            return receipt['done']
+        context=types.SimpleNamespace(core=core,cancel_requested=lambda:False,discard_inputs=lambda:None,next_input=lambda t:source,
+            report_progress=lambda *a,**k:None,record_devices=lambda:None,set_run_record=records.append,commit_live=lambda data,**k:outputs.append(data['scan']))
+        scan=SeamlessScanMeasurement(pulse={'path':'test.json','api_fields':[]},plan=plan,
+            ports=tuple(ScanPort(a.port,a.port,'s',0,1) for a in plan.axes),source_signal='source',repeats=1,shots_per_point=1)
+        self.assertEqual(scan.execute(context),{'points':2,'shots':2})
+        self.assertEqual(len(outputs),2)
+        self.assertEqual(records[0]['plan']['axes'][0]['values'],[row[0] for row in receipt['loaded']['scan']['rows']])
+        table=receipt['fired']['scan']
+        receipt['fired']['scan']={'fields':table['fields'][::-1],'rows':[row[::-1] for row in table['rows']]}
+        self.assertEqual(scan.execute(context),{'points':2,'shots':2})
+        self.assertEqual(records[-1]['plan']['axes'][0]['values'],[row[0] for row in receipt['loaded']['scan']['rows']])
+        missing={**receipt['fired']};missing.pop('scan');receipt['fired']=missing
+        with self.assertRaisesRegex(RuntimeError,'FIRE receipt is missing'):
+            scan.execute(context)
+        self.assertGreaterEqual(len(stops),3)
+
 if __name__ == '__main__': unittest.main()

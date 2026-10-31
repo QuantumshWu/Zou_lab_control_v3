@@ -89,28 +89,42 @@ pub enum Handled { Now(Result<Value, String>), Later }
 
 /// What one of a run's `pulse_run`s leaves the run holding: the document it
 /// read (pinned at the first), the FIRE it sent, the program a `load` stage
-/// put on the board (its digest).
-pub struct RunReply { run: String, pinned: Option<(PathBuf, Arc<Sequence>)>, fired: Option<u32>, loaded: Option<String> }
+/// put on the board (its accepted receipt).
+pub struct RunReply { run: String, pinned: Option<(PathBuf, Arc<Sequence>)>, fired: Option<u32>, loaded: Option<Value> }
 
 /// A plugin run's use of the board: each pulse document as its first fire read
 /// it (a later fire of a changed file is refused: a run's record names one
 /// pulse), the FIRE it sent last, the program its `load` stage put on the board,
 /// and its `pulse_run`s still on the lane.
 #[derive(Default)]
-struct RunUse { pinned: BTreeMap<PathBuf, Arc<Sequence>>, fire: Option<u32>, loaded: Option<String>, in_flight: usize, ended: bool }
+struct RunUse { pinned: BTreeMap<PathBuf, Arc<Sequence>>, fire: Option<u32>, loaded: Option<Value>, in_flight: usize, ended: bool }
 
 /// The words a refused fire of a changed pulse file says (a node ends its batch on them).
 pub const PULSE_CHANGED: &str = "changed during this run";
 
 /// One `pulse_run` stage of a run (or a client): `load` (LOAD only, v2
 /// `arm_sequencer`), `fire` (FIRE what that LOAD put on the board) or both.
-fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Sequence>, loaded: Option<&str>, values: &[(String, (f64, String))],
-        scan: Option<&ScanRows>, runs: u64, sweeps: u64) -> (Result<Value, String>, Option<(PathBuf, Arc<Sequence>)>, Option<u32>, Option<String>) {
+fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Sequence>, loaded: Option<&Value>, values: &[(String, (f64, String))],
+        scan: Option<&ScanRows>, runs: u64, sweeps: u64) -> (Result<Value, String>, Option<(PathBuf, Arc<Sequence>)>, Option<u32>, Option<Value>) {
     let fired = |receipt: &Json| receipt.get("command_id").and_then(Json::as_int).map(|id| id as u32);
     if stage == "fire" {
         let Some(loaded) = loaded else { return (Err("stage fire plays what this run's stage load put on the board; load it first".into()), None, None, None) };
-        return match fire_loaded(board, loaded, runs, sweeps) {
-            Ok(receipt) => { let id = fired(&receipt); (Ok(to_value(&receipt)), None, id, None) }
+        let expected = &loaded["applied"]["program"];
+        let digest = expected["digest"].as_str().expect("native LOAD receipt has a digest");
+        let held = match board.applied() { Ok(Some(held)) => held, Ok(None) => return (Err("the board no longer holds the loaded pulse".into()), None, None, None),
+            Err(error) => return (Err(error.message), None, None, None) };
+        if held.program.digest() != digest || json!(&*held.rows) != expected["rows"] {
+            return (Err("the board no longer holds the program and scan table this run loaded; load it again".into()), None, None, None);
+        }
+        return match fire_loaded(board, digest, runs, sweeps) {
+            Ok(receipt) => {
+                let id = fired(&receipt);
+                let mut receipt = to_value(&receipt);
+                // Named columns and API inputs belong to the accepted LOAD; FIRE
+                // supplies its own execution identity, applied state and timing.
+                for field in ["scan", "api_values"] { if let Some(value) = loaded.get(field) { receipt[field] = value.clone(); } }
+                (Ok(receipt), None, id, None)
+            }
             Err(error) => (Err(error.message), None, None, None),
         };
     }
@@ -124,10 +138,9 @@ fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Sequence>, 
     match played {
         Err(error) => (Err(error.message), None, None, None),
         Ok(receipt) => {
-            let digest = (stage == "load").then(|| receipt.get("applied").and_then(|applied| applied.get("program"))
-                .and_then(|program| program.get("digest")).and_then(Json::as_str).map(str::to_owned)).flatten();
+            let loaded = (stage == "load").then(|| to_value(&receipt));
             let id = fired(&receipt);
-            (Ok(to_value(&receipt)), Some((path, Arc::new(sequence))), id, digest)
+            (Ok(to_value(&receipt)), Some((path, Arc::new(sequence))), id, loaded)
         }
     }
 }
@@ -707,7 +720,7 @@ impl PulseHost {
                 });
                 let post = self.post.clone();
                 self.device.run(move || {
-                    let (result, pin, fired, loaded) = play(&board, &stage, &document, pinned.as_deref(), loaded.as_deref(), &values, scan.as_ref(), runs, sweeps);
+                    let (result, pin, fired, loaded) = play(&board, &stage, &document, pinned.as_deref(), loaded.as_ref(), &values, scan.as_ref(), runs, sweeps);
                     let run = owner.map(|run| RunReply { run, pinned: pin, fired, loaded });
                     post(PulseEvent::Reply { request, result, touched: true, run });
                 });
@@ -779,9 +792,8 @@ impl PulseHost {
         if let Some(RunReply { run, pinned, fired, loaded }) = run {
             let used = self.runs.entry(run.clone()).or_default();
             used.in_flight = used.in_flight.saturating_sub(1);
-            if let Some((path, sequence)) = pinned { used.pinned.entry(path).or_insert(sequence); }
+            if let Some((path, sequence)) = pinned { used.pinned.entry(path).or_insert(sequence); used.loaded = loaded; }
             if fired.is_some() { used.fire = fired; }
-            if loaded.is_some() { used.loaded = loaded; }
             if used.ended && used.in_flight == 0 { self.settle_run(&run); }
         }
         if touched { self.editor.board_touched(); self.dispatch(); }
@@ -1074,4 +1086,43 @@ mod tests {
         let done = ask(&mut host, &events, "pulse_wait_done", json!({"command_id": id, "timeout_seconds": 30, "_run": "rearrangement#1"}), None).unwrap();
         assert_eq!(done["status"], "done");
     }
+    #[test]
+    fn split_scan_receipt_preserves_loaded_columns_and_api_values() {
+        let (mut host, events, document) = host("scan_receipt");
+        let mut load=played(&document,"scan#1",1);
+        load["stage"]=json!("load");
+        load["api_values"]=json!({"duration:short":[0.000100003,"s"]});
+        load["scan"]=json!({"fields":["duration:long_after","duration:long_before"],
+            "rows":[[0.000400003,0.000200007],[0.000500003,0.000300007]]});
+        let loaded=ask(&mut host,&events,"pulse_run",load,None).unwrap();
+        let mut fire=played(&document,"scan#1",1);fire["stage"]=json!("fire");
+        let fired=ask(&mut host,&events,"pulse_run",fire.clone(),None).unwrap();
+        let done=ask(&mut host,&events,"pulse_wait_done",json!({"command_id":fired["command_id"],"timeout_seconds":30,"_run":"scan#1"}),None).unwrap();
+        assert_eq!(done["status"],"done");
+        assert_eq!(fired["scan"],loaded["scan"],"FIRE must retain LOAD's named, quantized table");
+        assert_eq!(fired["api_values"],loaded["api_values"],"calibration consumes these too");
+        assert!(fired["scan"]["rows"].is_array());
+        assert_ne!(fired["scan"]["rows"][0][0],json!(0.000400003),"test must exercise hardware quantization");
+        if let Some(path)=std::env::var_os("ZLC_SCAN_RECEIPT_FIXTURE") {
+            std::fs::write(path,json!({"loaded":loaded,"fired":fired,"done":done}).to_string()).unwrap();
+        }
+        // Replacing only the table also invalidates the staged load.
+        let board=board(&host);let held=board.applied().unwrap().unwrap();
+        let mut rows=(*held.rows).clone();rows.reverse();
+        board.load(held.program.clone(),held.source.clone(),rows).unwrap();
+        let refused=ask(&mut host,&events,"pulse_run",fire,None).unwrap_err();
+        assert!(refused.contains("loaded"),"{refused}");
+        let mut load=played(&document,"scan#1",1);load["stage"]=json!("load");
+        load["api_values"]=json!({"duration:short":[0.0002,"s"]});
+        let loaded=ask(&mut host,&events,"pulse_run",load,None).unwrap();
+        let mut fire=played(&document,"scan#1",1);fire["stage"]=json!("fire");
+        let again=ask(&mut host,&events,"pulse_run",fire.clone(),None).unwrap();
+        assert!(again.get("scan").is_none(),"an API-only LOAD must not retain an earlier scan table");
+        assert_eq!(again["api_values"],loaded["api_values"]);
+        ask(&mut host,&events,"pulse_wait_done",json!({"command_id":again["command_id"],"timeout_seconds":30,"_run":"scan#1"}),None).unwrap();
+        let direct=ask(&mut host,&events,"pulse_run",played(&document,"scan#1",1),None).unwrap();
+        ask(&mut host,&events,"pulse_wait_done",json!({"command_id":direct["command_id"],"timeout_seconds":30,"_run":"scan#1"}),None).unwrap();
+        assert!(ask(&mut host,&events,"pulse_run",fire,None).unwrap_err().contains("load it first"),"a combined run supersedes any staged LOAD");
+    }
+
 }

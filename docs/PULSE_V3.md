@@ -161,3 +161,17 @@ answered at once.
   screenshots beside v2's.
 - No real hardware is touched by any of this.
 
+
+### Staged LOAD / FIRE receipts
+
+The existing per-run board owner retains the accepted LOAD receipt, including named
+quantized scan rows and API inputs. Before FIRE it checks both the program digest and
+wire table against the board. The reply combines that LOAD's `scan` / `api_values`
+with the current FIRE's command ID, applied snapshot and timing; it does not reread
+or recompile the pulse file. A successful new LOAD replaces this record, and a combined
+run supersedes it. Table columns retain their declared names and order.
+
+Seamless Scan resolves returned columns by field identity and reports a descriptive
+protocol error if its required table is absent or malformed, then follows normal Stop
+cleanup. The regression uses real PulseHost/virtual-board LOAD and FIRE responses,
+including reversed column order and quantization, as input to Python Scan execution.

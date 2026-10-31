@@ -142,7 +142,8 @@ class PulseBoard:
 
     def fire_loaded(self, document: str | Path, *, run_repeats: int = 1, scan_repeats: int = 1) -> Mapping[str, Any]:
         """FIRE what :meth:`load` left on the board (refused if it no longer
-        holds it); the receipt has ``command_id``, ``applied`` and ``timing``."""
+        holds that program and table); the receipt keeps LOAD's named ``scan``
+        and ``api_values`` and adds the FIRE's ``command_id``, ``applied`` and ``timing``."""
 
         return self._core("pulse_run", document=str(document), stage="fire",
                           run_repeats=int(run_repeats), scan_repeats=int(scan_repeats))
