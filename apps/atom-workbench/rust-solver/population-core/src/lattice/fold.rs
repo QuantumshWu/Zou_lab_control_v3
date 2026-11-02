@@ -529,7 +529,7 @@ impl FoldLibrary{
     pub fn far_shell(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],x:&[C],tolerance:f64)->Result<FarShell,String>{
         let clock=Instant::now();let d=generator.n*generator.n;let count=modes.len();
         let sources:Vec<(usize,&[C],f64)>=(0..count).map(|p|(p,&x[p*d..(p+1)*d],1.)).filter(|(_,b,_)|b.iter().any(|z|nonzero(*z))).collect();
-        let(rings,contraction,terms)=self.far_shell_sources(generator,plan,nu_of,modes,&sources,tolerance,f64::INFINITY)?;
+        let(rings,contraction,terms)=self.far_shell_sources(generator,plan,nu_of,modes,&sources,tolerance,f64::INFINITY,&mut |_,_|Ok(true))?;
         let mut shell=FarShell{contraction,terms,..FarShell::default()};
         for ring in rings{let mut landing=vec![ZERO;count*d];
             for((_,q),block)in ring{for(a,&b)in landing[q*d..(q+1)*d].iter_mut().zip(&block){add(a,b);}}
@@ -540,10 +540,15 @@ impl FoldLibrary{
     /// The far shell of separate source blocks (`far_shell`): each source a
     /// block on a lattice mode with its weight, landed apart; per ring the
     /// landings keyed by (source, mode), the largest contraction met and the
-    /// series' terms. A ring whose far blocks would take more than `bytes`
-    /// (the groups together) stops the request with the reason.
+    /// series' terms. The groups advance ring by ring together: after each
+    /// ring is solved, `ring_done` sees its landing and says whether to go
+    /// on, before the next ring's far blocks are formed; a next ring whose
+    /// far blocks would take more than `bytes` stops the request with the
+    /// reason.
     #[allow(clippy::too_many_arguments)]
-    pub fn far_shell_sources(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],sources:&[(usize,&[C],f64)],tolerance:f64,bytes:f64)->Result<(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize),String>{
+    pub fn far_shell_sources(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],
+        sources:&[(usize,&[C],f64)],tolerance:f64,bytes:f64,ring_done:&mut dyn FnMut(usize,&BTreeMap<(usize,usize),Vec<C>>)->Result<bool,String>)
+        ->Result<(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize),String>{
         let n=generator.n;let d=n*n;
         let index:BTreeMap<&[i32],usize>=modes.iter().enumerate().map(|(i,q)|(q.as_slice(),i)).collect();
         let nu_modes:Vec<f64>=modes.iter().map(|q|nu_of(q)).collect::<Result<_,_>>()?;
@@ -551,48 +556,64 @@ impl FoldLibrary{
         let c_all:f64=plan.steps.iter().map(|s|trace_norm_bound(&generator.components[&s.charge].op,n)).sum();
         let(bound,lambda0)=(self.diagnostics.rest_bound,self.diagnostics.lambda0);
         let trace_bound=|v:&[C]|(n as f64).sqrt()*v.iter().map(|z|squared(*z)).sum::<f64>().sqrt();
-        // The sources in groups; each group's far shell on its own.
-        let groups:Vec<Vec<usize>>=(0..sources.len()).collect::<Vec<_>>().chunks(FAR_GROUP).map(|g|g.to_vec()).collect();
-        let weight:f64=sources.iter().map(|s|s.2).sum();let groups_count=groups.len();
-        type Ring=BTreeMap<Charge,(f64,BTreeMap<usize,Vec<C>>)>;
-        type Group=(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize);
-        let execution=Execution::new()?;
-        let parts=execution.map(groups,|group|->Result<Group,String>{
-            let(mut landings,mut contraction,mut terms)=(Vec::new(),0_f64,0);
-            let(mut small,mut stack)=(Vec::new(),Vec::new());
+        // The sources in groups, each group's shell with its share of the
+        // tolerance and what is left of it.
+        let weight:f64=sources.iter().map(|s|s.2).sum();
+        let mut shells:Vec<Shell>=Vec::new();
+        for group in(0..sources.len()).collect::<Vec<_>>().chunks(FAR_GROUP){
             // The first ring's sources: every step from the group's blocks to a far charge.
-            let mut ring:Ring=BTreeMap::new();
-            for &(c,nu,op)in &steps{for &s in &group{let(p,x,_)=sources[s];
+            let(mut ring,mut small):(Ring,Vec<C>)=(BTreeMap::new(),Vec::new());
+            for &(c,nu,op)in &steps{for &s in group{let(p,x,_)=sources[s];
                 let r=charge_plus(&modes[p],c)?;if index.contains_key(r.as_slice())||(nu_modes[p]+nu).abs()<plan.cut{continue;}
                 let entry=ring.entry(c.clone()).or_insert_with(||(nu,BTreeMap::new()));
                 op.apply_into(n,ONE,x,entry.1.entry(s).or_insert_with(||vec![ZERO;d]),&mut small);}}
-            // The group's share of the tolerance, and what is left of it.
-            let mut left=if weight>0.{tolerance*group.iter().map(|&s|sources[s].2).sum::<f64>()/weight}else{0.};
-            let mut gamma_far=0_f64;
-            for _ in 0..FAR_RINGS{
-                if ring.is_empty(){break;}
-                let(mut landing,mut next):(BTreeMap<(usize,usize),Vec<C>>,Ring)=(BTreeMap::new(),BTreeMap::new());
-                for(w,(nu,blocks))in std::mem::take(&mut ring){
-                    // y = -(L0 - i nu_r)^-1 b on the blocks of w.
+            let left=if weight>0.{tolerance*group.iter().map(|&s|sources[s].2).sum::<f64>()/weight}else{0.};
+            shells.push(Shell{ring,solved:Vec::new(),left,gamma_far:0.,contraction:0.,terms:0});
+        }
+        let execution=Execution::new()?;let mut rings=Vec::new();
+        for k in 0..FAR_RINGS{
+            if shells.iter().all(|shell|shell.ring.is_empty()){break;}
+            // Every group's ring solved, y = -(L0 - i nu_r)^-1 b per far mode,
+            // and landed.
+            let parts=execution.map(shells,|mut shell|->Result<(Shell,BTreeMap<(usize,usize),Vec<C>>),String>{
+                let(mut small,mut stack)=(Vec::new(),Vec::new());let mut landing=BTreeMap::new();
+                for(w,(nu,blocks))in std::mem::take(&mut shell.ring){
                     let active:Vec<usize>=blocks.keys().copied().collect();let m=active.len();
                     let mut y:Vec<C>=Vec::with_capacity(m*d);for s in &active{y.extend(blocks[s].iter().map(|z|C{re:-z.re,im:-z.im}));}
+                    drop(blocks);
                     let mut gs:Vec<Vec<C>>=Vec::with_capacity(m);let mut rho=0_f64;
                     for &s in &active{let p=sources[s].0;let(g,gm)=far_g(&self.diagonal,nu_modes[p]+nu);let r=bound*gm;
                         if !(r<SERIES_LIMIT){return Err(format!("Far shell: the relative charge {w:?} from {:?} is too close to L0's spectrum (series ratio {r:e})",modes[p]));}
                         rho=rho.max(r);gs.push(g);}
                     let(mut term,mut t)=(vec![ZERO;m*d],vec![ZERO;m*d]);
-                    let k=terms_to(rho,RING_SERIES);terms+=k*m;
-                    series_blocks(&self.rest,&gs,k,n,&mut y,&mut term,&mut t,m,&mut stack,&mut small)?;
+                    let terms=terms_to(rho,RING_SERIES);shell.terms+=terms*m;
+                    series_blocks(&self.rest,&gs,terms,n,&mut y,&mut term,&mut t,m,&mut stack,&mut small)?;
+                    for(i,&s)in active.iter().enumerate(){let p=sources[s].0;let ys=&y[i*d..(i+1)*d];
+                        for &(c,_,op)in &steps{let r2=charge_plus(&modes[p],&charge_plus(&w,c)?)?;
+                            if let Some(&q)=index.get(r2.as_slice()){op.apply_into(n,ONE,ys,landing.entry((s,q)).or_insert_with(||vec![ZERO;d]),&mut small);}}}
+                    shell.solved.push((w,nu,active,y));
+                }
+                Ok((shell,landing))
+            });
+            let mut landing=BTreeMap::new();shells=Vec::new();
+            for part in parts{let(shell,l)=part?;landing.extend(l);shells.push(shell);}
+            let more=ring_done(k,&landing)?;rings.push(landing);
+            if !more||k+1==FAR_RINGS{break;}
+            // Every group's next ring: the far modes one step on, those whose
+            // descendants can land within what is left of the share left
+            // out (the smallest within half of it), or the whole ring when
+            // all of them can.
+            let parts=execution.map(shells,|mut shell|->Result<Shell,String>{
+                let mut small=Vec::new();let mut next:Ring=BTreeMap::new();
+                for(w,nu,active,y)in std::mem::take(&mut shell.solved){
                     for(i,&s)in active.iter().enumerate(){let p=sources[s].0;let ys=&y[i*d..(i+1)*d];
                         for &(c,step_nu,op)in &steps{
                             let w2=charge_plus(&w,c)?;let r2=charge_plus(&modes[p],&w2)?;
-                            if let Some(&q)=index.get(r2.as_slice()){op.apply_into(n,ONE,ys,landing.entry((s,q)).or_insert_with(||vec![ZERO;d]),&mut small);continue;}
-                            if (nu_modes[p]+nu+step_nu).abs()<plan.cut{continue;}
+                            if index.contains_key(r2.as_slice())||(nu_modes[p]+nu+step_nu).abs()<plan.cut{continue;}
                             let entry=next.entry(w2).or_insert_with(||(nu+step_nu,BTreeMap::new()));
                             op.apply_into(n,ONE,ys,entry.1.entry(s).or_insert_with(||vec![ZERO;d]),&mut small);
                         }}
                 }
-                landings.push(landing);
                 // What the next ring's blocks and their descendants can land: each
                 // block's gamma, rho over every far mode met.
                 let mut potentials:Vec<(Charge,usize,f64)>=Vec::new();
@@ -602,26 +623,23 @@ impl FoldLibrary{
                     let at=nu_modes[sources[s].0]+nu;let room=at.abs()-lambda0;
                     if !(room>0.){return Err(format!("Far shell at {at:e} rad/us is not separated from L0's spectrum (|L0| <= {lambda0:e} rad/us): not solved"));}
                     let gamma=1./room;
-                    gamma_far=gamma_far.max(gamma);potentials.push((w.clone(),s,sources[s].2*gamma*trace_bound(b)));}}
-                let rho=c_all*gamma_far;contraction=contraction.max(rho);
+                    shell.gamma_far=shell.gamma_far.max(gamma);potentials.push((w.clone(),s,sources[s].2*gamma*trace_bound(b)));}}
+                let rho=c_all*shell.gamma_far;shell.contraction=shell.contraction.max(rho);
                 let scale=if rho<1.{c_all/(1.-rho)}else{f64::INFINITY};
                 let total:f64=potentials.iter().map(|x|scale*x.2).sum();
-                if total<=left{break;}
-                // The smallest blocks left out within half of what is left.
+                if total<=shell.left{return Ok(shell);}
                 potentials.sort_by(|a,b|a.2.total_cmp(&b.2));let mut pruned=0.;
-                for(w,s,v)in &potentials{if pruned+scale*v>0.5*left{break;}pruned+=scale*v;if let Some(e)=next.get_mut(w){e.1.remove(s);}}
-                left-=pruned;
+                for(w,s,v)in &potentials{if pruned+scale*v>0.5*shell.left{break;}pruned+=scale*v;if let Some(e)=next.get_mut(w){e.1.remove(s);}}
+                shell.left-=pruned;
                 next.retain(|_,v|!v.1.is_empty());
-                let held=(next.values().map(|v|v.1.len()).sum::<usize>()*d*std::mem::size_of::<C>()*groups_count)as f64;
-                if held>bytes{return Err(format!("The far shell of this request would need about {:.1} GB, above its {:.1} GB share of the memory budget: not solved",held/1e9,bytes/1e9));}
-                ring=next;
-            }
-            Ok((landings,contraction,terms))
-        });
-        let(mut rings,mut contraction,mut terms):(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize)=(Vec::new(),0.,0);
-        for part in parts{let(landings,c,t)=part?;contraction=contraction.max(c);terms+=t;
-            for(k,landing)in landings.into_iter().enumerate(){if k==rings.len(){rings.push(BTreeMap::new());}rings[k].extend(landing);}}
-        Ok((rings,contraction,terms))
+                shell.ring=next;
+                Ok(shell)
+            });
+            shells=parts.into_iter().collect::<Result<_,_>>()?;
+            let held=(shells.iter().map(|shell|shell.ring.values().map(|v|v.1.len()).sum::<usize>()).sum::<usize>()*d*std::mem::size_of::<C>())as f64;
+            if held>bytes{return Err(format!("The far shell of this request would need about {:.1} GB, above its {:.1} GB share of the memory budget: not solved",held/1e9,bytes/1e9));}
+        }
+        Ok((rings,shells.iter().map(|shell|shell.contraction).fold(0.,f64::max),shells.iter().map(|shell|shell.terms).sum()))
     }
     /// The far shell's static targets of rings 1 to `rings` (paths of three to
     /// rings + 2 steps; ring 0, the second order, is K^(0)) with `orders`
@@ -722,6 +740,14 @@ const FAR_RINGS:usize=16;
 /// A ring target's far blocks are summed until the series' remainder is
 /// within this share of the sum.
 const RING_SERIES:f64=1e-12;
+/// The far modes of one ring per far charge relative to its source mode
+/// (their frequency and their blocks per source).
+type Ring=BTreeMap<Charge,(f64,BTreeMap<usize,Vec<C>>)>;
+/// One group of sources in the far shell: its next ring, its last ring's
+/// solved far modes (charge, frequency, sources, y), what is left of its
+/// share of the tolerance, the largest gamma met, the contraction and the
+/// series' terms.
+struct Shell{ring:Ring,solved:Vec<(Charge,f64,Vec<usize>,Vec<C>)>,left:f64,gamma_far:f64,contraction:f64,terms:usize}
 /// One far-shell action (`FoldLibrary::far_shell`): per ring k its landing on
 /// the lattice (a field on the modes: the far shell's part of order k + 2),
 /// the largest contraction c gamma met, the series' terms (per block) and

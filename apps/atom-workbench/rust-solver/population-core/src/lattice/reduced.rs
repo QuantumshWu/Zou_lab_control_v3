@@ -14,7 +14,10 @@
 //! model's modes x(t) = sum_j a_j e^{theta_j t} v_j, v_j = W s_j. A mode with
 //! |theta_j| T within the a-priori share of the tolerance is conserved over
 //! the run (theta_j = 0); a growing one (Re theta_j > 0, an artefact of the
-//! projection) is clipped to the imaginary axis.
+//! projection: the generator's spectrum is in the left half plane) is
+//! reflected, Re theta_j -> -Re theta_j. Clipped to the imaginary axis it
+//! would live undamped to the horizon (r21's mean at 1 s: 2.0e-2 off with
+//! two clipped modes, 1.6e-8 reflected).
 //!
 //! Outputs from the modes: the trajectory p(t) = sum_q Re e^{i nu_q t}
 //! diag(x_q(t)) (the local time average), the state at a horizon T and its
@@ -107,11 +110,11 @@ fn transpose_rows(a:&[f64],r:usize,c:usize)->Vec<f64>{let mut t=vec![0.;r*c];for
 /// The modes of one checkpoint: x(t) = sum_j a_j e^{theta_j t} v_j.
 pub struct Model{
     pub r:usize,
-    /// Ritz values, and as the outputs use them (conserved and clipped).
+    /// Ritz values, and as the outputs use them (conserved and reflected).
     pub theta:Vec<C>,pub used:Vec<C>,
     /// a_j, and per mode its largest population contribution |a_j| max|v_j|.
     pub coefficients:Vec<C>,pub amplitudes:Vec<f64>,
-    /// Growing modes (Re theta > 0), each clipped to the imaginary axis.
+    /// Growing modes (Re theta > 0), each reflected into the left half plane.
     pub growing:usize,
     /// Per canonical mode (weight, nu) the population rows of every v_j
     /// (column-major n x r); the centre's position.
@@ -128,7 +131,7 @@ impl Model{
         let mut growing=0;
         let used:Vec<C>=theta.iter().map(|&t|{
             if magnitude(t)<=conserved{return ZERO;}
-            if t.re>0.{growing+=1;return C{re:0.,im:t.im};}
+            if t.re>0.{growing+=1;return C{re:-t.re,im:t.im};}
             t}).collect();
         Self{r,theta,used,coefficients,amplitudes,growing,readout,modes,centre,vectors}
     }

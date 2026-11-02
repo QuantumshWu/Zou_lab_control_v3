@@ -9,8 +9,9 @@
 //!    rings beyond the second order (the other half): their first-order
 //!    Duhamel responses on x0's evolution at the run's sample times
 //!    (`fold::Duhamel`), followed until what the next rings can land is
-//!    within half of it, the outermost dropped and the far modes of the
-//!    others pruned within the rest; the rings kept become ring targets.
+//!    within a quarter of the share, or two rings in a row respond within an
+//!    eighth; the outermost dropped and the far modes of the others pruned
+//!    within the rest; the rings kept become ring targets.
 //! 3. One rational Krylov space (`space`): x0, the gated steps'
 //!    translations (with no solve), the bordered steady column, then the
 //!    real ladder from the fastest scale the outputs need down to 1 / T in a
@@ -31,8 +32,9 @@
 //!    bound). A trajectory sample's bound adds the change of its projection
 //!    onto the probability simplex.
 //! 5. A checkpoint is accepted when every bound is within the tolerance, its
-//!    cycle added directions and its solves converged (a failed solve leaves
-//!    its scale unvisited: r07's small shifts, accepted 5.7e-3 off). The run
+//!    cycle added directions and its solves converged to the a-priori share
+//!    (a failed solve leaves its scale unvisited: r07's small shifts,
+//!    accepted 5.7e-3 off). The run
 //!    stops there, or when a cycle added
 //!    no direction, or the largest change did not shrink over a cycle, or
 //!    the basis budget is spent, and returns its best checkpoint (`Answer`):
@@ -194,23 +196,31 @@ fn slowest(model:&Model,space:&Space,vectors:&Vectors,weight:f64,lattice:&mut La
 
 /// The responses of the far shell's rings beyond the second order: per
 /// source E_j of x0 (`Duhamel::sources`, weighed by |c_j|) the far shell's
-/// landing on the lattice (`FoldLibrary::far_shell_sources`), with what it
-/// leaves out (trace norm) times T within `tail` and its far blocks within
-/// `bytes`; per ring its Duhamel response summed over the landing modes; and
-/// the landings' time.
-fn ring_responses(prepared:&LatticePrepared,modes:&[Charge],nu:&[f64],duhamel:&Duhamel<'_>,horizon:f64,tail:f64,bytes:f64)->Result<(Vec<f64>,f64),String>{
+/// landing on the lattice (`FoldLibrary::far_shell_sources`), ring by ring,
+/// and per ring its Duhamel response summed over the landing modes. The
+/// rings stop when what is left out (trace norm, times T) is within `tail`,
+/// or when two rings in a row respond within `negligible` (two: a ring's
+/// landings alternate between charge sets, and one ring responded 27x more
+/// than the one before it, three lasers at 20 us: 2.4e-7 after 8.9e-9); the
+/// next ring's far blocks within `bytes`. Returns the responses and the
+/// landings' time.
+#[allow(clippy::too_many_arguments)]
+fn ring_responses(prepared:&LatticePrepared,modes:&[Charge],nu:&[f64],duhamel:&Duhamel<'_>,horizon:f64,tail:f64,negligible:f64,bytes:f64)->Result<(Vec<f64>,f64),String>{
     if prepared.plan.far().is_empty()||duhamel.count()==0{return Ok((Vec::new(),0.));}
     let d=prepared.generator.n*prepared.generator.n;let nu_of=|q:&[i32]|prepared.nu(q);
     let centre=modes.iter().position(|q|*q==prepared.generator.zero).ok_or("Lattice modes must contain the zero charge")?;
     // Per ring and landing mode the images of every source ([j * d + e]).
     let sources:Vec<(usize,&[C],f64)>=duhamel.sources().zip(duhamel.weights()).map(|(e,w)|(centre,e,w)).collect();let count=sources.len();
-    let clock=Instant::now();
-    let(landings,_,_)=prepared.fold.far_shell_sources(&prepared.generator,&prepared.plan,&nu_of,modes,&sources,tail/horizon,bytes)?;
-    let landings_ms=clock.elapsed().as_secs_f64()*1e3;
-    let responses=landings.iter().skip(1).map(|ring|{let mut per:BTreeMap<usize,Vec<C>>=BTreeMap::new();
+    let clock=Instant::now();let mut responses:Vec<f64>=Vec::new();let mut response_ms=0.;
+    let mut ring_done=|k:usize,ring:&BTreeMap<(usize,usize),Vec<C>>|->Result<bool,String>{
+        if k==0{return Ok(true);}
+        let started=Instant::now();let mut per:BTreeMap<usize,Vec<C>>=BTreeMap::new();
         for(&(jj,q),block)in ring{per.entry(q).or_insert_with(||vec![ZERO;count*d])[jj*d..(jj+1)*d].copy_from_slice(block);}
-        per.iter().map(|(&q,v)|duhamel.response(nu[q],1.,v)).sum()}).collect::<Result<Vec<f64>,String>>()?;
-    Ok((responses,landings_ms))
+        let response:f64=per.iter().map(|(&q,v)|duhamel.response(nu[q],1.,v)).sum::<Result<f64,String>>()?;
+        responses.push(response);response_ms+=started.elapsed().as_secs_f64()*1e3;
+        Ok(responses.len()<2||responses[responses.len()-2..].iter().any(|&r|r>negligible))};
+    prepared.fold.far_shell_sources(&prepared.generator,&prepared.plan,&nu_of,modes,&sources,tail/horizon,bytes,&mut ring_done)?;
+    Ok((responses,clock.elapsed().as_secs_f64()*1e3-response_ms))
 }
 
 /// Every output of a request from rho0 (row-major n x n); `observer` sees
@@ -247,7 +257,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     let clock=Instant::now();
     let nu:Vec<f64>=modes.iter().map(|q|prepared.nu(q)).collect::<Result<_,_>>()?;
     let duhamel=Duhamel::new(eigen,initial,&fold::sample_times(times,request.horizons))?;
-    let(responses,landings_ms)=ring_responses(prepared,&modes,&nu,&duhamel,longest,0.25*share,(budget-planned)/request.runs.max(1)as f64)?;
+    let(responses,landings_ms)=ring_responses(prepared,&modes,&nu,&duhamel,longest,0.25*share,0.125*share,(budget-planned)/request.runs.max(1)as f64)?;
     let mut depth=responses.len();
     while depth>0&&responses[depth-1..].iter().sum::<f64>()<=0.25*share{depth-=1;}
     let mut report=FoldReport{ring_responses:responses,rings:depth,landings_ms,responses_ms:clock.elapsed().as_secs_f64()*1e3,..FoldReport::default()};
