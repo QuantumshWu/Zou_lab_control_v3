@@ -36,13 +36,16 @@
 //! levels both ways), so the local step streams d² numbers per point: it is bound by memory
 //! bandwidth, and the kick's operators are stored the same way.
 //!
-//! The first order in the Doppler and recoil shifts (`Ground::moving`) is an Euler kick at the
-//! middle of each quarter of the radial period T_r: S += T_r/4 L1 S. With κ̂₁ = κ + Q/2 the ket's
-//! momentum and ρκ̂₂ (κ̂₂ = κ − Q/2) the bra's, and as (κ̂₁ρ)(x2, x1)† = (ρκ̂₂)(x1, x2),
+//! The first order in the Doppler and recoil shifts (`Ground::moving`) is an Euler kick once per
+//! radial period T_r, S += T_r L1 S, at the middle of one quarter, the quarters taken in turn: over
+//! four periods the kicks sit at the four quarter midpoints, the midpoint rule of a period, while the
+//! state drifts by ≲ 4 T_r/τ of the slow relaxation (TW2: 4 × 10 μs against ≈ 2 ms; T moved 3e-4
+//! relative in TW1 and 3e-3 in TW2's continuation against a kick at every quarter). With κ̂₁ = κ + Q/2
+//! the ket's momentum and ρκ̂₂ (κ̂₂ = κ − Q/2) the bra's, and as (κ̂₁ρ)(x2, x1)† = (ρκ̂₂)(x1, x2),
 //! L1 = Y + Y† = 𝓐 ρ + 𝓑 κ̂₁ρ + 𝓒 ρκ̂₂ at every point: three superoperators per point (`Engine::point`),
 //! from Y = (i G_0 + G_L′) ρ + i(G_R + G_L)(κ̂₁ρ) − Σ_j K_j (F_j ρ + M_j κ̂₁ρ) L_j(x2)† (κ̂₁ G_L(x1) =
 //! G_L(x1) κ̂₁ − i G_L′(x1), G_L′ by central differences on the lattice). The midpoint rule over the
-//! quarters integrates the motion's harmonics up to the third exactly over a period; two kicks per
+//! quarters integrates the motion's harmonics up to the third exactly over a period; two nodes per
 //! period would alias the 2ω one onto the mean.
 //!
 //! # Box
@@ -124,8 +127,9 @@ const LAYER:f64=0.8;
 const ESCAPE:f64=20.;
 /// Radial periods between checkpoints.
 const CHECKPOINT_PERIODS:usize=25;
-/// First-order kicks per radial period: the midpoint rule misses (2π/4)²/24 ≈ 10 % of the term
-/// (of a few per cent of T), within its share.
+/// The first-order kick's nodes per radial period, one per quarter: the midpoint rule over a period
+/// then integrates the motion's harmonics up to the third exactly. One node is taken per period, in
+/// turn (`Engine::period_run`).
 const KICKS:usize=4;
 /// The coarsest time step, steps per radial period: the Strang phase error of the harmonic trap,
 /// (2π/n)²/24, within the share of the T tolerance.
@@ -665,15 +669,19 @@ impl StepError{
 
 impl<'a> Engine<'a>{
     /// One radial period from the synchronized state at t (`double`: steps/2 steps of 2 dt, E applied
-    /// twice), kicked eight times, read out at the boundaries `wanted` asks for and at its end;
-    /// returns the y edge share measured in its last step.
+    /// twice), kicked once, read out at the boundaries `wanted` asks for and at its end; returns the y
+    /// edge share measured in its last step. The kick sits at the middle of quarter (period index mod 4)
+    /// with the whole period's span, so that over four periods the kicks take the four quarter
+    /// midpoints; a period the end cuts short is kicked at each of its quarters' midpoints instead.
     fn period_run(&mut self,t:f64,double:bool,wanted:&dyn Fn(f64,f64)->bool,readings:&mut Vec<Reading>,end:f64)->f64{
         let(n,tau,times)=if double{(self.steps/2,2.*self.dt,2)}else{(self.steps,self.dt,1)};
         let per_kick=(n/KICKS).max(1);let mut pending=tau/2.;let mut edge=0.;
+        let(quarter,whole)=(((t/self.period).round() as usize)%KICKS,t+n as f64*tau<=end+1e-9*tau);
         for s in 0..n{
             let now=t+s as f64*tau;if now>=end-1e-9*tau{break;}
             // The kick acts on the synchronized state.
-            if s%per_kick==per_kick/2{if pending>tau*0.75{self.timed(0,|e|e.kinetic(tau/2.));}self.timed(2,|e|e.kick(per_kick as f64*tau));pending=tau/2.;}
+            let(kicked,span)=if whole{(s==quarter*per_kick+per_kick/2,n as f64*tau)}else{(s%per_kick==per_kick/2,per_kick as f64*tau)};
+            if kicked{if pending>tau*0.75{self.timed(0,|e|e.kinetic(tau/2.));}self.timed(2,|e|e.kick(span));pending=tau/2.;}
             self.timed(0,|e|e.kinetic(pending));edge=self.timed(1,|e|e.local(times,s+1==n));
             let after=t+(s+1) as f64*tau;
             if s+1==n||after>=end-1e-9*tau||wanted(after,tau){self.timed(0,|e|e.kinetic(tau/2.));let r=self.timed(3,|e|e.readout(after));readings.push(r);pending=tau/2.;}else{pending=tau;}
