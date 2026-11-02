@@ -222,9 +222,11 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
         solution.reason=if met{None}else{Some(format!("{run} 条轨迹后：布居的标准误差 {population:.1e}（目标 {tolerance}），温度的相对标准误差 {:.1}%（目标 {:.0}%）",
             100.*temperature_error,100.*TEMPERATURE_TOLERANCE))};
         if met{break;}
-        // The trajectories the targets need, the errors falling as 1/√n: the next batch at most
-        // the rest (a short one is topped up by the next).
-        let need=(run as f64*(population/tolerance).max(temperature_error/TEMPERATURE_TOLERANCE).powi(2)).ceil() as usize;
+        // The trajectories the targets need, the errors falling as 1/√n, with two standard errors
+        // of the errors' own estimate on top (relative √(1/(2(n−1))), doubled in the squares): the
+        // next batch at most the rest.
+        let ratio=(population/tolerance).max(temperature_error/TEMPERATURE_TOLERANCE);
+        let need=(run as f64*ratio*ratio*(1.+2.*(2./(run.max(2)-1) as f64).sqrt())).ceil() as usize;
         size=size.min(need.saturating_sub(run).div_ceil(FEWEST)*FEWEST).max(FEWEST);
         if run<MOST_TRAJECTORIES&&!checkpoint(&solution){break;}
     }
