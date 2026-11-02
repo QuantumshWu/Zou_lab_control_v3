@@ -261,6 +261,10 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 /* A 1D motion result's continuation (its prediction from the simulated history): the band's colour. */
 .continuation-swatch { display: inline-block; width: 18px; height: 10px; border-radius: 2px; background: #eef3f7; box-shadow: inset 0 0 0 1px #c9d6e3; }
 .readout-continued { font-weight: 400; color: #5d7891; }
+/* A 3D motion result's sample outside the validated regime, in a readout: a reference only. */
+.readout-reference { font-weight: 400; color: #8a8886; }
+/* A 3D motion result's samples outside the validated regime: the band's colour. */
+.accuracy-swatch.reference-swatch { background: #ecebea; box-shadow: inset 0 0 0 1px #d6d4d2; }
 .readout-row { display: grid; grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)) calc(2.6 * var(--control)); gap: var(--row-gap); align-items: center; font-variant-numeric: tabular-nums; }
 .readout-row.two { grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)); }
 .readout-row > span:not(.readout-name) { text-align: right; }

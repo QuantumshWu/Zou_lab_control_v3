@@ -1,5 +1,5 @@
 import type {DynamicsResult,MeanResult,MeanStatus,MotionResult,PopulationAccuracy,RunningReport} from './solver-types.js';
-import {CONVERGED_MEAN_STATUSES,MEAN_STATUSES,readMotionResult,readPopulationAccuracy,readRunningReport} from './solver-types.js';
+import {CONVERGED_MEAN_STATUSES,MEAN_STATUSES,SEMICLASSICAL_POPULATION_TARGET,readMotionResult,readPopulationAccuracy,readRunningReport} from './solver-types.js';
 import type {DynamicsSettings,InitialStateSpec,Scene,Level} from './types.js';
 import {MEAN_HORIZONS_US,POPULATION_TOLERANCE,canonicalInitialState,resolveInitialState} from './types.js';
 import {initialPopulations} from './full-master-model.js';
@@ -154,7 +154,9 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   if(Object.hasOwn(data,'densityReal')||Object.hasOwn(data,'densityImag'))invalid('布居结果契约');
   let populationAccuracy:PopulationAccuracy|undefined;
   if(timesUs.length>1&&typeof d.method!=='string')invalid('时间演化方法');
-  if(timesUs.length>1||data.populationAccuracy!==undefined)try{populationAccuracy=readPopulationAccuracy(data.populationAccuracy,timesUs.length);}catch{invalid('布居精度元数据');}
+  // A semiclassical 3D motion result states its own target; every other the population tolerance.
+  const tolerance=motion?.axis==='3d'?SEMICLASSICAL_POPULATION_TARGET:POPULATION_TOLERANCE;
+  if(timesUs.length>1||data.populationAccuracy!==undefined)try{populationAccuracy=readPopulationAccuracy(data.populationAccuracy,timesUs.length,tolerance);}catch{invalid('布居精度元数据');}
   if(data.progress!==undefined&&data.progress!==true)invalid('进度标记');
   // A checkpoint may carry its run's estimate of the wall time left (ms, finite, ≥ 0); a final
   // result never does.
@@ -195,7 +197,7 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   // The requested T's mean, or none requested.
   const mean:MeanResult=horizonMeans?horizonMeans.find(s=>s.horizonUs===horizon)??invalid('长期布居时刻 T')
     :{converged:false,status:'not-requested',populations:null,estimatedError:null,withinTolerance:false};
-  // A motion solve's result carries its motion along the requested axis; any other result none.
+  // A motion solve's result carries its motion as requested (1D along its axis, or 3D); any other result none.
   let motionResult:MotionResult|undefined;
   if(motion)try{motionResult=readMotionResult(data.motion,timesUs,motion.axis);}catch{invalid('运动结果');}
   else if(data.motion!==undefined)invalid('运动结果');

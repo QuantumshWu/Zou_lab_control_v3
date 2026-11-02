@@ -1,10 +1,11 @@
 //! Atom Workbench native worker: JSONL requests on stdin, one response line
 //! per request on stdout. Every rb87-full/2 solve is served by the population
 //! core through `lattice_core_adapter`; one whose model carries motion along an
-//! axis (1D) by the motion core through `motion_core_adapter`, and one whose
-//! model carries motion in a plane (2D) by the GPU engine through
-//! `motion_gpu_adapter`. Matrices in the public protocol are row-major,
-//! frequencies are rad/us, collapse amplitudes are sqrt(1/us).
+//! axis (1D) by the motion core through `motion_core_adapter`, in a plane (2D)
+//! by the GPU engine through `motion_gpu_adapter`, and 3D motion by the
+//! semiclassical engine through `motion3d_adapter`. Matrices in the public
+//! protocol are row-major, frequencies are rad/us, collapse amplitudes are
+//! sqrt(1/us).
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -13,6 +14,7 @@ mod harmonics;
 mod lattice_core_adapter;
 mod motion_core_adapter;
 mod motion_gpu_adapter;
+mod motion3d_adapter;
 const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/3";
 const FULL_MODEL_SCHEMA: &str = "rb87-full/2";
 
@@ -56,8 +58,8 @@ struct Model {
     drives: Vec<Drive>,
     #[serde(default)]
     frequency_coordinates:Option<FrequencyCoordinates>,
-    /// Radial motion: the atom in a tweezer moving along one lab axis (motion_core_adapter) or in
-    /// the plane perpendicular to the tweezer (motion_gpu_adapter).
+    /// Motion: the atom in a tweezer moving radially along one lab axis (motion_core_adapter), in
+    /// the plane perpendicular to the tweezer (motion_gpu_adapter) or in 3D (motion3d_adapter).
     #[serde(default)]
     motion:Option<motion_core_adapter::MotionModel>,
 }
@@ -166,6 +168,7 @@ fn respond(request: Request) -> Value {
     };
     let result = match (request.model_schema.as_deref(), request.model.as_ref()) {
         (Some(FULL_MODEL_SCHEMA), Some(model)) => match &model.motion {
+            Some(motion) if motion.three_dimensional() => motion3d_adapter::solve(model, motion, &request.options, &mut publish),
             Some(motion) if motion.is_plane() => motion_gpu_adapter::solve(model, motion, &request.options, &mut publish),
             Some(motion) => motion_core_adapter::solve(model, motion, &request.options, &mut publish),
             None => lattice_core_adapter::solve(model, &request.options, &mut publish),

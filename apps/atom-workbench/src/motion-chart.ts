@@ -1,27 +1,29 @@
-// Radial motion's charts (ui-design.md §6.20, §6.21). Against time, two panels sharing one time
-// axis -- the temperature and the mean velocity, or n̄ and the loss probability -- with a curve per
-// axis of the motion: one along a line (1D), one per axis of a plane (2D, coloured by axis, the
-// temperature's standard error a band). At the last time and, when asked, another listed time: the
-// distribution of the velocity along each axis, or of the position along the line, as a density;
-// in a plane the position's map, as a density. Each reads actual samples only.
-import type {DurationUnit} from './types.js';
-import type {Distributions,MotionResult,PlaneMotionResult,PositionMaps} from './solver-types.js';
-import {isPlaneMotion} from './solver-types.js';
+// Motion's charts (ui-design.md §6.20–§6.22): two panels against time sharing one time axis -- the
+// temperature and the mean velocity, or n̄ and the loss probability -- each with a line per axis the
+// atom moves along (one in 1D, the plane's two in 2D, x, y and z in 3D), and a distribution along
+// one axis -- of the velocity or of the position, as a density -- at the last time and, when asked,
+// at another listed time; a 2D result's positions as maps of the plane. Each reads actual samples
+// only. A 1D result's continuation (the samples after its last simulated time) lies on its band; a
+// 3D result's samples outside the method's validated regime lie on a light grey band: a reference
+// only.
+import type {DurationUnit,MotionAxis} from './types.js';
+import type {Distributions,MotionResult,PositionMaps} from './solver-types.js';
 import {RB87} from './physics.js';
 import {timeDisplayUnit} from './duration.js';
 import {formatNumber} from './format.js';
-import {CONTINUATION_WORDS,continuationBand} from './population-chart.js';
+import {continuationBand,referenceBands,sampleMark} from './population-chart.js';
 
 /** k_B (J/K), exact in the SI. */
 const BOLTZMANN=1.380649e-23;
 const SVG='http://www.w3.org/2000/svg';
 const esc=(value:unknown)=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 const clamp=(n:number,a:number,b:number)=>Math.min(b,Math.max(a,n));
-/** The v3 series palette's first three (population-chart.ts). Along a line: the top panel's series
- * and the last time, then the bottom panel's and the compared time. In a plane: its first axis, its
- * second, then the loss beside their n̄. */
-export const MOTION_INKS=['#517FA6','#B17D4B','#568C79'] as const;
-const GRID='#e1dfdd',INK='#6a6866',CURSOR='#a19f9d',LEFT=64,RIGHT=778;
+/** The v3 series palette's first two (population-chart.ts): the top panel's series and the last
+ * time, then the bottom panel's and the compared time. */
+export const MOTION_INKS=['#517FA6','#B17D4B'] as const;
+/** The palette's first three, one per lab axis x, y, z of a 3D result's lines. */
+export const AXIS_INKS:Readonly<Record<MotionAxis,string>>={x:'#517FA6',y:'#B17D4B',z:'#568C79'};
+const GRID='#e1dfdd',INK='#6a6866',LEFT=64,RIGHT=778;
 
 /** A display unit: its name and the factor from the base unit. */
 interface Unit {name:string;factor:number}
@@ -46,40 +48,29 @@ function ticksWithin(low:number,high:number,intervals:number):number[]{
 }
 const digits=(n:number)=>formatNumber(n,{digits:4});
 
-/** A curve's name: its symbol and, in a plane, the axis it is along (Tₓ). */
-export interface Name {symbol:string;axis?:string}
-/** A name in a readout or a legend: the axis as a subscript. */
-export function nameMarkup(name:Name):string{return esc(name.symbol)+(name.axis?`<sub>${esc(name.axis)}</sub>`:'');}
-/** A name in words, for an accessible label. */
-function nameWords(name:Name):string{return name.axis?`沿 ${name.axis} 轴的 ${name.symbol}`:name.symbol;}
-
-/** A panel's curve: its name, ink and values (base units) and, for a temperature in a plane, the
- * standard error of each value (drawn as a band). */
-export interface Curve {name:Name;ink:string;values:readonly number[];errors?:readonly number[]}
-/** One panel: its id, axis title, curves and display unit; its axis runs from 0 to the top of its
- * ticks, or symmetrically about 0 out to `reach` (base units). */
-export interface Series {id:string;title:string;curves:readonly Curve[];unit:Unit;reach?:number}
+/** A line of a panel: its name, its values (base units) and its ink. */
+export interface Line {name:string;values:readonly number[];ink:string}
+/** One panel: its name, its axis title, its lines and display unit; its axis runs from 0 to the top
+ * of its ticks, or symmetrically about 0 out to `reach` (base units). */
+export interface Series {id:string;name:string;title:string;lines:Line[];unit:Unit;reach?:number}
 export type SeriesKind='temperature'|'trap';
+/** The lines of per-axis values: one in the panel's ink for 1D, one per axis in its ink for 2D and 3D. */
+function axisLines(motion:MotionResult,values:readonly (readonly number[])[],name:string,ink:string):Line[]{
+  return motion.axes.length===1?[{name,values:values[0]!,ink}]:motion.axes.map((axis,k)=>({name:`${name}${subscript(axis)}`,values:values[k]!,ink:AXIS_INKS[axis]}));
+}
+const subscript=(axis:MotionAxis)=>`（${axis} 轴）`;
 /** The two panels of a motion result's time chart: T above ⟨v⟩ -- the drift read against the
  * thermal width it moves in, its axis as wide as the larger of the two -- or n̄ (relative to the
- * trap frequency the engine used) above the loss probability; in a plane, a curve per axis. */
+ * trap frequency the engine used along each axis) above the loss probability. */
 export function motionSeries(motion:MotionResult,kind:SeriesKind):[Series,Series]{
-  if(isPlaneMotion(motion)){
-    const axes=motion.axes,curves=(symbol:string,values:readonly (readonly number[])[],errors?:readonly (readonly number[])[]):Curve[]=>
-      axes.map((axis,d)=>({name:{symbol,axis},ink:MOTION_INKS[d]!,values:values[d]!,...(errors?{errors:errors[d]!}:{})}));
-    if(kind==='trap')return [
-      {id:'occupation',title:`平均振动量子数 n̄（ω/2π：${axes.map((axis,d)=>`${axis} 轴 ${digits(motion.trapFrequencyKHz[d])} kHz`).join('，')}）`,curves:curves('n̄',motion.meanOccupation),unit:{name:'',factor:1}},
-      {id:'loss',title:'累计损失概率 / %',curves:[{name:{symbol:'损失概率'},ink:MOTION_INKS[2],values:motion.lossProbability}],unit:{name:'%',factor:100}}];
-    const reach=Math.max(...motion.meanVelocityMps.flat().map(Math.abs),...motion.temperatureUK.flat().map(thermalVelocity)),velocity=unitFor(VELOCITY_UNITS,reach);
-    return [{id:'temperature',title:'温度 T / μK',curves:curves('T',motion.temperatureUK,motion.temperatureErrorUK),unit:{name:'μK',factor:1}},
-      {id:'mean-velocity',title:`平均速度 ⟨v⟩ / ${velocity.name}`,curves:curves('⟨v⟩',motion.meanVelocityMps),unit:velocity,reach}];
-  }
   if(kind==='trap')return [
-    {id:'occupation',title:`平均振动量子数 n̄（ω/2π = ${digits(motion.trapFrequencyKHz)} kHz）`,curves:[{name:{symbol:'n̄'},ink:MOTION_INKS[0],values:motion.meanOccupation}],unit:{name:'',factor:1}},
-    {id:'loss',title:'累计损失概率 / %',curves:[{name:{symbol:'损失概率'},ink:MOTION_INKS[1],values:motion.lossProbability}],unit:{name:'%',factor:100}}];
-  const reach=Math.max(...motion.meanVelocityMps.map(Math.abs),...motion.temperatureUK.map(thermalVelocity)),velocity=unitFor(VELOCITY_UNITS,reach);
-  return [{id:'temperature',title:'温度 T / μK',curves:[{name:{symbol:'温度 T'},ink:MOTION_INKS[0],values:motion.temperatureUK}],unit:{name:'μK',factor:1}},
-    {id:'mean-velocity',title:`平均速度 ⟨v⟩ / ${velocity.name}`,curves:[{name:{symbol:'⟨v⟩'},ink:MOTION_INKS[1],values:motion.meanVelocityMps}],unit:velocity,reach}];
+    {id:'occupation',name:'n̄',title:motion.axes.length===1?`平均振动量子数 n̄（ω/2π = ${digits(motion.trapFrequencyKHz[0]!)} kHz）`:`平均振动量子数 n̄（相对各轴焦点处的阱频 ω/2π：${motion.axes.map((axis,k)=>`${axis} ${digits(motion.trapFrequencyKHz[k]!)}`).join('、')} kHz）`,lines:axisLines(motion,motion.meanOccupation,'n̄',MOTION_INKS[0]),unit:{name:'',factor:1}},
+    {id:'loss',name:'损失概率',title:'累计损失概率 / %',lines:[{name:'损失概率',values:motion.lossProbability,ink:motion.axes.length===1?MOTION_INKS[1]:INK}],unit:{name:'%',factor:100}}];
+  const reach=Math.max(...motion.meanVelocityMps.flat().map(Math.abs),...motion.temperatureUK.flat().map(thermalVelocity)),velocity=unitFor(VELOCITY_UNITS,reach);
+  // A 3D result's T and ⟨v⟩ are each axis's means over one trap period around the sample.
+  const period=motion.axis==='3d'?'（各轴一个阱周期内的平均）':'';
+  return [{id:'temperature',name:'温度 T',title:`温度 T / μK${period}`,lines:axisLines(motion,motion.temperatureUK,'T',MOTION_INKS[0]),unit:{name:'μK',factor:1}},
+    {id:'mean-velocity',name:'⟨v⟩',title:`平均速度 ⟨v⟩ / ${velocity.name}${period}`,lines:axisLines(motion,motion.meanVelocityMps,'⟨v⟩',MOTION_INKS[1]),unit:velocity,reach}];
 }
 /** A panel: its series, its vertical span and ticks (display units), and where a value goes. */
 interface Panel {series:Series;top:number;bottom:number;ticks:number[];y:(value:number)=>number}
@@ -89,8 +80,7 @@ function panel(series:Series,top:number,bottom:number):Panel{
     const reach=ticks(series.reach*factor,2).at(-1)!;
     return {series,top,bottom,ticks:ticks(reach,2).flatMap(v=>v?[-v,v]:[0]),y:v=>(top+bottom)/2-v*factor/reach*(bottom-top)/2};
   }
-  const peak=Math.max(0,...series.curves.flatMap(c=>c.values.map((v,i)=>v+(c.errors?.[i]??0))));
-  const highest=ticks(peak*factor||1).at(-1)!;
+  const highest=ticks(Math.max(0,...series.lines.flatMap(l=>l.values))*factor||1).at(-1)!;
   return {series,top,bottom,ticks:ticks(highest),y:v=>bottom-v*factor/highest*(bottom-top)};
 }
 interface SeriesLayout {panels:[Panel,Panel];unit:{name:DurationUnit;factor:number};x:(t:number)=>number}
@@ -100,27 +90,23 @@ function seriesLayout(timesUs:readonly number[],series:readonly [Series,Series],
 }
 const line=(x1:number,y1:number,x2:number,y2:number,attrs='')=>`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" ${attrs}/>`;
 const text=(x:number,y:number,label:string,attrs='')=>`<text x="${x}" y="${y}" font-size="12" fill="${INK}" ${attrs}>${esc(label)}</text>`;
-const points=(xs:readonly number[],ys:readonly number[])=>xs.map((x,i)=>`${x.toFixed(4)},${ys[i]!.toFixed(4)}`).join(' ');
-const polyline=(xs:readonly number[],ys:readonly number[],ink:string,attrs='')=>`<polyline points="${points(xs,ys)}" fill="none" stroke="${ink}" stroke-width="2" ${attrs}/>`;
-/** A band between an upper and a lower edge, in the curve's ink. */
-const band=(xs:readonly number[],upper:readonly number[],lower:readonly number[],ink:string)=>
-  `<polygon points="${points([...xs,...xs.slice().reverse()],[...upper,...lower.slice().reverse()])}" fill="${ink}" fill-opacity="0.18" stroke="none"/>`;
+const polyline=(xs:readonly number[],ys:readonly number[],ink:string,attrs='')=>`<polyline points="${xs.map((x,i)=>`${x.toFixed(4)},${ys[i]!.toFixed(4)}`).join(' ')}" fill="none" stroke="${ink}" stroke-width="2" ${attrs}/>`;
 const svg=(cls:string,label:string,body:string)=>`<svg class="chart-svg ${cls}" viewBox="0 0 800 355" xmlns="${SVG}" role="img" tabindex="0" aria-label="${esc(label)}" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" style="fill:#323130;outline:none">${body}</svg>`;
 
-/** The two panels on the result's samples: each curve, behind them the bands of the standard
- * errors; a 1D result's continuation samples, after the last simulated time `continuedFromUs`, on
- * their band across both. */
-export function seriesChart(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit,continuedFromUs?:number):string{
-  const g=seriesLayout(timesUs,series,timeUnit),xs=timesUs.map(g.x);
-  let body=continuedFromUs===undefined?'':continuationBand(g.x(continuedFromUs),RIGHT,g.panels[0].top,g.panels[1].bottom,`${formatNumber(continuedFromUs*g.unit.factor,{digits:3})} ${g.unit.name}`);
+/** What a series chart marks on its samples: a 1D result's continuation (the samples after its last
+ * simulated time) and a 3D result's samples outside its validated regime (a reference only). */
+export interface SeriesMarks {continuedFromUs?:number;reference?:readonly boolean[]}
+/** The panels on the result's samples, a line per series line; the continuation's samples on their
+ * band across both panels, those outside the validated regime on theirs behind each. */
+export function seriesChart(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit,marks:SeriesMarks={}):string{
+  const g=seriesLayout(timesUs,series,timeUnit),xs=timesUs.map(g.x),from=marks.continuedFromUs;
+  let body=referenceBands(xs,marks.reference,g.panels.map(p=>[p.top,p.bottom] as const));
+  if(from!==undefined)body+=continuationBand(g.x(from),RIGHT,g.panels[0].top,g.panels[1].bottom,`${formatNumber(from*g.unit.factor,{digits:3})} ${g.unit.name}`);
   for(const p of g.panels)for(const v of p.ticks){const y=p.y(v/p.series.unit.factor);body+=line(LEFT,y,RIGHT,y,`stroke="${GRID}"`)+text(LEFT-12,y+4,digits(v),'text-anchor="end"');}
   for(let i=0;i<=4;i++){const t=timesUs[0]!+(timesUs.at(-1)!-timesUs[0]!)*i/4;body+=text(g.x(t),g.panels[1].bottom+24,digits(t*g.unit.factor),'text-anchor="middle"');}
   body+=text(LEFT,19,g.panels[0].series.title)+text(LEFT,g.panels[1].top-8,g.panels[1].series.title)+text(RIGHT,g.panels[1].bottom+47,`t / ${g.unit.name}`,'text-anchor="end"');
-  // A temperature is never below 0: its band stops there.
-  for(const p of g.panels)for(const c of p.series.curves)if(c.errors)body+=band(xs,c.values.map((v,i)=>p.y(v+c.errors![i]!)),c.values.map((v,i)=>p.y(Math.max(0,v-c.errors![i]!))),c.ink);
-  for(const p of g.panels)for(const c of p.series.curves)body+=polyline(xs,c.values.map(p.y),c.ink,`data-series-id="${p.series.id}${c.name.axis?`-${c.name.axis}`:''}"`);
-  const names=series.flatMap(s=>s.curves.map(c=>nameWords(c.name)));
-  return svg('motion-series-svg',`${names.join('、')}随时间的变化。移动指针读取采样值，方向键逐点查看。`,body+'<g class="motion-cursor" pointer-events="none" style="display:none"></g>');
+  g.panels.forEach(p=>p.series.lines.forEach((l,k)=>{body+=polyline(xs,l.values.map(p.y),l.ink,`data-series-id="${p.series.id}${p.series.lines.length>1?`-${k}`:''}"`);}));
+  return svg('motion-series-svg',`${series.map(s=>s.name).join('与')}随时间的变化。移动指针读取采样值，方向键逐点查看。`,body+'<g class="motion-cursor" pointer-events="none" style="display:none"></g>');
 }
 
 /** The distribution kinds: the velocity (grid in m/s) and the position from the focus (grid in μm). */
@@ -128,48 +114,32 @@ export type DistributionKind='momentum'|'position';
 const DISTRIBUTIONS:Readonly<Record<DistributionKind,{units:readonly (readonly [string,number])[];symbol:string;words:string}>>={
   momentum:{units:VELOCITY_UNITS,symbol:'v',words:'速度'},position:{units:LENGTH_UNITS,symbol:'x',words:'位置'},
 };
-/** The sample indices a kind's distributions are listed at. */
-export function listedSamples(motion:MotionResult,kind:DistributionKind):readonly number[]{
-  return isPlaneMotion(motion)?(kind==='momentum'?motion.momentum[0]:motion.position).samples:motion[kind].samples;
-}
+/** A result's distributions of a kind along its axis number `axis` (an index into `motion.axes`). */
+export function distributions(motion:MotionResult,kind:DistributionKind,axis=0):Distributions{return (kind==='momentum'?motion.momentum:motion.position)[axis]!;}
 /** A grid point's share of the axis: half the way to each neighbour (the whole way at an end). */
 function cellWidths(v:readonly number[]):number[]{return v.map((_,i)=>((v[Math.min(i+1,v.length-1)]!-v[Math.max(i-1,0)]!)/(i===0||i===v.length-1?1:2)));}
 /** A listed distribution as a density on its grid (per base unit). */
 export function density(d:Distributions,listed:number):number[]{const widths=cellWidths(d.grid);return d.probabilities[listed]!.map((p,i)=>p/widths[i]!);}
-/** A drawn distribution along an axis: its name, the listed time it is at (an index into the
- * distributions' samples), its ink and dash -- the compared time's dashed -- and its density on the
- * grid (per base unit). */
-export interface DistributionCurve {name:Name;listed:number;ink:string;dashed:boolean;density:number[]}
-/** The distributions along an axis drawn at the listed times -- the last first, then the compared:
- * along a line one per time, its ink the time's; the velocity in a plane one per axis and time, its
- * ink the axis' (a plane's positions are maps: mapChart). Their one grid: a plane's two velocity
- * marginals are on one. */
-export function distributionCurves(motion:MotionResult,kind:DistributionKind,listed:readonly number[]):{grid:readonly number[];curves:DistributionCurve[]}{
-  const symbol=DISTRIBUTIONS[kind].symbol;
-  if(isPlaneMotion(motion)){
-    if(kind!=='momentum')throw new Error('A plane\'s positions are maps');
-    return {grid:motion.momentum[0].grid,curves:listed.flatMap((at,k)=>motion.axes.map((axis,d)=>
-      ({name:{symbol,axis},listed:at,ink:MOTION_INKS[d]!,dashed:k>0,density:density(motion.momentum[d]!,at)})))};
-  }
-  const d=motion[kind];
-  return {grid:d.grid,curves:listed.map((at,k)=>({name:{symbol},listed:at,ink:MOTION_INKS[k]!,dashed:k>0,density:density(d,at)}))};
-}
 /** The distribution chart's axes: the grid's whole span; densities from 0 to the top of their ticks. */
-function distributionLayout(grid:readonly number[],curves:readonly DistributionCurve[],kind:DistributionKind){
-  const unit=unitFor(DISTRIBUTIONS[kind].units,Math.max(Math.abs(grid[0]!),Math.abs(grid.at(-1)!)));
-  const top=ticks(Math.max(...curves.flatMap(c=>c.density))/unit.factor).at(-1)!;
-  return {unit,top,x:(w:number)=>LEFT+(w-grid[0]!)/(grid.at(-1)!-grid[0]!)*(RIGHT-LEFT),y:(value:number)=>300-value/unit.factor/top*(300-32)};
+function distributionLayout(motion:MotionResult,kind:DistributionKind,listed:readonly number[],axis:number){
+  const d=distributions(motion,kind,axis),grid=d.grid,unit=unitFor(DISTRIBUTIONS[kind].units,Math.max(Math.abs(grid[0]!),Math.abs(grid.at(-1)!)));
+  const curves=listed.map(i=>density(d,i)),top=ticks(Math.max(...curves.flat())/unit.factor).at(-1)!;
+  return {grid,unit,curves,top,x:(w:number)=>LEFT+(w-grid[0]!)/(grid.at(-1)!-grid[0]!)*(RIGHT-LEFT),y:(value:number)=>300-value/unit.factor/top*(300-32)};
 }
-/** The distributions drawn, the compared time's (dashed) behind the last time's. */
-export function distributionChart(grid:readonly number[],curves:readonly DistributionCurve[],kind:DistributionKind):string{
-  const {unit,top,x,y}=distributionLayout(grid,curves,kind),{symbol,words}=DISTRIBUTIONS[kind];
+/** The distributions drawn: the last listed time's and, when asked, another listed one's. */
+export function distributionChart(motion:MotionResult,kind:DistributionKind,listed:readonly number[],axis=0):string{
+  const {grid,unit,curves,top,x,y}=distributionLayout(motion,kind,listed,axis),{words}=DISTRIBUTIONS[kind],symbol=axisSymbol(motion,kind,axis);
   let body='';
   for(const d of ticks(top))body+=line(LEFT,y(d*unit.factor),RIGHT,y(d*unit.factor),`stroke="${GRID}"`)+text(LEFT-12,y(d*unit.factor)+4,digits(d),'text-anchor="end"');
   for(const w of ticksWithin(grid[0]!*unit.factor,grid.at(-1)!*unit.factor,8))body+=text(x(w/unit.factor),324,digits(w),'text-anchor="middle"');
   body+=text(LEFT,19,`概率密度 / (${unit.name})⁻¹`)+text(RIGHT,347,`${symbol} / ${unit.name}`,'text-anchor="end"');
-  for(const dashed of [true,false])curves.forEach((c,k)=>{if(c.dashed===dashed)body+=polyline(grid.map(x),c.density.map(y),c.ink,`data-series-id="${kind}-${k}"${dashed?' stroke-dasharray="6 4"':''}`);});
-  const along=curves.some(c=>c.name.axis)?'沿各轴':'沿运动轴';
-  return svg('distribution-svg',`${along}的${words}分布。移动指针读取各${words}的概率密度。`,body+'<g class="motion-cursor" pointer-events="none" style="display:none"></g>');
+  // The compared time behind, dashed; the last time on top.
+  curves.slice().reverse().forEach((values,k)=>{const index=curves.length-1-k;body+=polyline(grid.map(x),values.map(y),MOTION_INKS[index]!,`data-series-id="${kind}-${index}"${index?' stroke-dasharray="6 4"':''}`);});
+  return svg('distribution-svg',`沿${motion.axes[axis]} 轴的${words}分布。移动指针读取各${words}的概率密度。`,body+'<g class="motion-cursor" pointer-events="none" style="display:none"></g>');
+}
+/** The variable a distribution chart reads: v or x, with its axis in 3D (vₓ, x …). */
+function axisSymbol(motion:MotionResult,kind:DistributionKind,axis:number):string{
+  const a=motion.axes[axis]!;return motion.axes.length===1?DISTRIBUTIONS[kind].symbol:kind==='momentum'?`v${subscript(a)}`:a;
 }
 /** √⟨x²⟩ of a listed distribution (its grid's unit): for positions, the root-mean-square distance from the focus. */
 export function rootMeanSquare(d:Distributions,listed:number):number{return Math.sqrt(d.probabilities[listed]!.reduce((sum,p,i)=>sum+p*d.grid[i]!**2,0));}
@@ -210,8 +180,8 @@ function mapImage(values:readonly number[],n:number,top:number):string{
   context.putImageData(image,0,0);return canvas.toDataURL('image/png');
 }
 /** The maps at the listed times (in time order), each with its title above it. */
-export function mapChart(motion:PlaneMotionResult,listed:readonly number[],titles:readonly string[]):string{
-  const maps=motion.position,g=mapLayout(maps,listed.length),[a,b]=motion.axes,values=listed.map(at=>mapDensity(maps,at,g.step));
+export function mapChart(maps:PositionMaps,axes:readonly MotionAxis[],listed:readonly number[],titles:readonly string[]):string{
+  const g=mapLayout(maps,listed.length),[a,b]=axes,values=listed.map(at=>mapDensity(maps,at,g.step));
   const top=ticks(Math.max(...values.flat())).at(-1)!;
   let body=`<defs><linearGradient id="map-ramp" x1="0" y1="1" x2="0" y2="0">${RAMP.map((c,k)=>`<stop offset="${k/(RAMP.length-1)}" stop-color="rgb(${c.join(',')})"/>`).join('')}</linearGradient></defs>`;
   g.lefts.forEach((left,k)=>{
@@ -239,17 +209,13 @@ function placeCard(host:HTMLElement,svg:SVGSVGElement,card:HTMLElement,xx:number
   card.style.maxWidth=`${Math.max(0,right?host.clientWidth-px-26:px-26)}px`;
   const width=card.offsetWidth;card.style.left=`${clamp(right?px+18:px-width-18,8,Math.max(8,host.clientWidth-width-8))}px`;card.style.top='27px';
 }
-/** The pointer's position in the chart's coordinates, when the chart has them. */
-function chartPoint(svg:SVGSVGElement,event:PointerEvent):DOMPoint|undefined{
-  const transform=svg.getScreenCTM();return transform?new DOMPoint(event.clientX,event.clientY).matrixTransform(transform.inverse()):undefined;
-}
 /** A cursor that follows the pointer (and the arrow keys) over `count` points at plot x `at(i)`. */
 function bindCursor(host:HTMLElement,svg:SVGSVGElement,count:number,at:(i:number)=>number,show:(i:number,cursor:SVGGElement)=>void,hide:()=>void):()=>void{
   const cursor=svg.querySelector<SVGGElement>('.motion-cursor')!,abort=new AbortController();let index=count-1;
   const go=(next:number)=>{index=clamp(next,0,count-1);cursor.replaceChildren();cursor.style.display='';show(index,cursor);};
   const off=()=>{cursor.style.display='none';hide();};
   svg.addEventListener('pointermove',event=>{
-    const p=chartPoint(svg,event);if(!p)return;
+    const transform=svg.getScreenCTM();if(!transform)return;const p=new DOMPoint(event.clientX,event.clientY).matrixTransform(transform.inverse());
     if(p.x<LEFT||p.x>RIGHT||p.y<32||p.y>300){off();return;}
     let best=0;for(let i=1;i<count;i++)if(Math.abs(at(i)-p.x)<Math.abs(at(best)-p.x))best=i;go(best);
   },{signal:abort.signal});
@@ -258,44 +224,40 @@ function bindCursor(host:HTMLElement,svg:SVGSVGElement,count:number,at:(i:number
   return ()=>abort.abort();
 }
 const mark=(name:string,attrs:Record<string,string>)=>{const node=document.createElementNS(SVG,name);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,value);return node;};
-/** A readout row: a name (markup) in its ink and a value (markup). */
-const row=(ink:string,name:string,value:string)=>`<div class="readout-row two"><span class="readout-name" style="color:${ink}">${name}</span><span>${value}</span></div>`;
 
-/** The time cursor of a series chart: every curve at the sample, a temperature with its standard
- * error, a continuation's sample marked. */
-export function bindSeries(host:HTMLElement,timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit,continuedFromUs?:number):()=>void{
+/** The time cursor of a series chart: every line of both panels at the sample, a continuation's
+ * sample or one outside the validated regime marked. */
+export function bindSeries(host:HTMLElement,timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit,marks:SeriesMarks={}):()=>void{
   const svg=host.querySelector<SVGSVGElement>('svg.motion-series-svg');if(!svg)return ()=>{};
-  const g=seriesLayout(timesUs,series,timeUnit),card=readoutCard(host,`所选时刻的${series.flatMap(s=>s.curves.map(c=>nameWords(c.name))).join('与')}`);
+  const g=seriesLayout(timesUs,series,timeUnit),card=readoutCard(host,`所选时刻的${series.map(s=>s.name).join('与')}`);
   const unbind=bindCursor(host,svg,timesUs.length,i=>g.x(timesUs[i]!),(i,cursor)=>{
-    const xx=g.x(timesUs[i]!),continued=continuedFromUs!==undefined&&timesUs[i]!>continuedFromUs;
-    cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:String(g.panels[0].top),y2:String(g.panels[1].bottom),stroke:CURSOR,'stroke-width':'1'}),
-      ...g.panels.flatMap(p=>p.series.curves.map(c=>mark('circle',{cx:String(xx),cy:String(p.y(c.values[i]!)),r:'3',fill:c.ink,stroke:'white','stroke-width':'1.5'}))));
-    card.innerHTML=`<div class="readout-time">t = ${esc(digits(timesUs[i]!*g.unit.factor))} ${esc(g.unit.name)}${continued?` · <span class="readout-continued" title="${esc(CONTINUATION_WORDS)}">延拓</span>`:''}</div>`+g.panels.flatMap(p=>p.series.curves.map(c=>{
-      const unit=p.series.unit,error=c.errors?` ± ${formatNumber(c.errors[i]!*unit.factor,{digits:2})}`:'';
-      return row(c.ink,nameMarkup(c.name),esc(`${formatNumber(c.values[i]!*unit.factor,{digits:4})}${error}${unit.name?` ${unit.name}`:''}`));
-    })).join('');
+    const xx=g.x(timesUs[i]!),from=marks.continuedFromUs,marked=sampleMark(from!==undefined&&timesUs[i]!>from,!!marks.reference?.[i]);
+    cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:String(g.panels[0].top),y2:String(g.panels[1].bottom),stroke:'#a19f9d','stroke-width':'1'}),
+      ...g.panels.flatMap(p=>p.series.lines.map(l=>mark('circle',{cx:String(xx),cy:String(p.y(l.values[i]!)),r:'3',fill:l.ink,stroke:'white','stroke-width':'1.5'}))));
+    card.innerHTML=`<div class="readout-time">t = ${esc(digits(timesUs[i]!*g.unit.factor))} ${esc(g.unit.name)}${marked}</div>`+g.panels.flatMap(p=>p.series.lines.map(l=>
+      `<div class="readout-row two"><span class="readout-name" style="color:${l.ink}">${esc(l.name)}</span><span>${esc(formatNumber(l.values[i]!*p.series.unit.factor,{digits:4}))}${p.series.unit.name?` ${esc(p.series.unit.name)}`:''}</span></div>`)).join('');
     placeCard(host,svg,card,xx);
   },()=>{card.hidden=true;});
   return ()=>{unbind();card.remove();};
 }
-/** The grid cursor of a distribution chart: each drawn distribution's density there, named by `labels` (markup). */
-export function bindDistribution(host:HTMLElement,grid:readonly number[],curves:readonly DistributionCurve[],kind:DistributionKind,labels:readonly string[]):()=>void{
+/** The grid cursor of a distribution chart: each drawn distribution's density there. */
+export function bindDistribution(host:HTMLElement,motion:MotionResult,kind:DistributionKind,listed:readonly number[],names:readonly string[],axis=0):()=>void{
   const svg=host.querySelector<SVGSVGElement>('svg.distribution-svg');if(!svg)return ()=>{};
-  const {unit,x,y}=distributionLayout(grid,curves,kind),{symbol,words}=DISTRIBUTIONS[kind],card=readoutCard(host,`所选${words}的概率密度`);
+  const {grid,unit,curves,x,y}=distributionLayout(motion,kind,listed,axis),{words}=DISTRIBUTIONS[kind],symbol=axisSymbol(motion,kind,axis),card=readoutCard(host,`所选${words}的概率密度`);
   const unbind=bindCursor(host,svg,grid.length,i=>x(grid[i]!),(i,cursor)=>{
-    const xx=x(grid[i]!);cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:'32',y2:'300',stroke:CURSOR,'stroke-width':'1'}));
-    curves.forEach(c=>cursor.append(mark('circle',{cx:String(xx),cy:String(y(c.density[i]!)),r:'3',fill:c.ink,stroke:'white','stroke-width':'1.5'})));
-    card.innerHTML=`<div class="readout-time">${symbol} = ${esc(digits(grid[i]!*unit.factor))} ${esc(unit.name)}</div>`+curves.map((c,k)=>
-      row(c.ink,labels[k]??'',esc(`${formatNumber(c.density[i]!/unit.factor,{digits:4})} (${unit.name})⁻¹`))).join('');
+    const xx=x(grid[i]!);cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:'32',y2:'300',stroke:'#a19f9d','stroke-width':'1'}));
+    curves.forEach((values,k)=>cursor.append(mark('circle',{cx:String(xx),cy:String(y(values[i]!)),r:'3',fill:MOTION_INKS[k]!,stroke:'white','stroke-width':'1.5'})));
+    card.innerHTML=`<div class="readout-time">${symbol} = ${esc(digits(grid[i]!*unit.factor))} ${esc(unit.name)}</div>`+curves.map((values,k)=>
+      `<div class="readout-row two"><span class="readout-name" style="color:${MOTION_INKS[k]}">${esc(names[k]??'')}</span><span>${esc(formatNumber(values[i]!/unit.factor,{digits:4}))} (${esc(unit.name)})⁻¹</span></div>`).join('');
     placeCard(host,svg,card,xx);
   },()=>{card.hidden=true;});
   return ()=>{unbind();card.remove();};
 }
 /** The cell cursor of the maps: the cell under the pointer (the arrow keys move it) outlined on
  * every map, its position and each map's density there, the maps named by `labels` (markup). */
-export function bindMap(host:HTMLElement,motion:PlaneMotionResult,listed:readonly number[],labels:readonly string[]):()=>void{
+export function bindMap(host:HTMLElement,maps:PositionMaps,axes:readonly MotionAxis[],listed:readonly number[],labels:readonly string[]):()=>void{
   const svg=host.querySelector<SVGSVGElement>('svg.map-svg');if(!svg)return ()=>{};
-  const maps=motion.position,g=mapLayout(maps,listed.length),values=listed.map(at=>mapDensity(maps,at,g.step)),[a,b]=motion.axes,size=MAP/g.n;
+  const g=mapLayout(maps,listed.length),values=listed.map(at=>mapDensity(maps,at,g.step)),[a,b]=axes,size=MAP/g.n;
   const cursor=svg.querySelector<SVGGElement>('.motion-cursor')!,card=readoutCard(host,'所选位置的概率密度'),abort=new AbortController();
   // The cell and the map it is read on (the card stands beside that map; the keys read the last).
   let cell={i:g.n>>1,j:g.n>>1,map:listed.length-1};
@@ -303,12 +265,12 @@ export function bindMap(host:HTMLElement,motion:PlaneMotionResult,listed:readonl
     cell={i:clamp(next.i,0,g.n-1),j:clamp(next.j,0,g.n-1),map:next.map};cursor.replaceChildren();cursor.style.display='';
     for(const left of g.lefts)cursor.append(mark('rect',{x:String(left+cell.i*size),y:String(g.top+(g.n-1-cell.j)*size),width:String(size),height:String(size),fill:'none',stroke:'#323130','stroke-width':'1.5'}));
     card.innerHTML=`<div class="readout-time">${esc(`${a} = ${digits(maps.grid[cell.i]!)} μm · ${b} = ${digits(maps.grid[cell.j]!)} μm`)}</div>`+values.map((v,k)=>
-      row('inherit',labels[k]??'',esc(`${formatNumber(v[cell.j*g.n+cell.i]!,{digits:4})} μm⁻²`))).join('');
+      `<div class="readout-row two"><span class="readout-name">${labels[k]??''}</span><span>${esc(`${formatNumber(v[cell.j*g.n+cell.i]!,{digits:4})} μm⁻²`)}</span></div>`).join('');
     placeCard(host,svg,card,g.lefts[cell.map]!+(cell.i+.5)*size);
   };
   const off=()=>{cursor.style.display='none';card.hidden=true;};
   svg.addEventListener('pointermove',event=>{
-    const p=chartPoint(svg,event);if(!p)return;
+    const transform=svg.getScreenCTM();if(!transform)return;const p=new DOMPoint(event.clientX,event.clientY).matrixTransform(transform.inverse());
     const map=g.lefts.findIndex(left=>p.x>=left&&p.x<left+MAP);if(map<0||p.y<g.top||p.y>=g.bottom){off();return;}
     show({i:Math.floor((p.x-g.lefts[map]!)/size),j:g.n-1-Math.floor((p.y-g.top)/size),map});
   },{signal:abort.signal});
