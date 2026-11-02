@@ -128,6 +128,9 @@ impl Ensemble{
         }
         for c in 0..self.classes.len(){if let Some(e)=self.classes[c].as_mut(){e.active=self.occupant[c].iter().rposition(|x|x.is_some()).map_or(0,|i|i+1).max(e.active);}}
         let(rows,cols,state)=(self.gpu.function("move_rows")?,self.gpu.function("move_cols")?,self.gpu.function("move_state")?);
+        // The moves run on the shared stream: the engines' own (the slots packed after the
+        // records) done first.
+        if !pairs.is_empty(){for e in self.classes.iter().flatten(){e.synchronize()?;}}
         for((from,to),moves)in pairs{
             let(a,b)=(self.ladder[from],self.ladder[to]);
             if !self.matrices.contains_key(&(from,to)){

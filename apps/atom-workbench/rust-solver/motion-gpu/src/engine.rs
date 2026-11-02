@@ -316,6 +316,8 @@ impl Engine{
     fn seed(&self,stream:u64)->Seed{let s=self.settings.seed^stream.wrapping_mul(0x9E3779B97F4A7C15);Seed{lo:s as u32,hi:(s>>32) as u32}}
     /// Trajectories moved in or out on the device: the derivatives no longer match.
     pub(crate) fn touched(&mut self){self.derived=false;}
+    /// Waits for the engine's stream (its slot copies) before work on another stream reads it.
+    pub(crate) fn synchronize(&self)->Result<(),String>{self.stream.synchronize()}
     /// The device addresses the move kernels take: the trajectories' state, their planes and weights.
     pub(crate) fn device(&self)->(TrajectoriesArg,u64,u64,u64){(self.trajectories_arg(),self.state.pointer,self.weights.pointer,self.components.pointer)}
     pub(crate) fn trajectories_arg(&self)->TrajectoriesArg{
