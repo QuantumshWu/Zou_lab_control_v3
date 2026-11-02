@@ -74,9 +74,11 @@ pub struct Beam{
 impl Beam{
     /// d²|a(x)|²/dx² at the focus (1/um²): −4 ρ̂²/w² − 2 n_axis²/z_R² for the Gaussian beam, ρ̂² the
     /// squared share of the line across the beam; 0 for a plane wave.
-    pub fn intensity_curvature(&self)->f64{
-        let[across_1,across_2,along]=self.direction;
-        self.waist_um.map_or(0.,|w|{let rayleigh=self.wave_number_per_um*w*w/2.;-4.*(across_1*across_1+across_2*across_2)/(w*w)-2.*along*along/(rayleigh*rayleigh)})
+    pub fn intensity_curvature(&self)->f64{self.intensity_curvature_along(2)}
+    /// The same along any axis of the motion frame (0, 1 or 2): −4 (1 − n_a²)/w² − 2 n_a²/z_R².
+    pub fn intensity_curvature_along(&self,axis:usize)->f64{
+        let along=self.direction[axis];
+        self.waist_um.map_or(0.,|w|{let rayleigh=self.wave_number_per_um*w*w/2.;-4.*(1.-along*along)/(w*w)-2.*along*along/(rayleigh*rayleigh)})
     }
     /// The wave number along the motion axis, k·axis (rad/um).
     pub fn axial_wave_number(&self)->f64{self.wave_number_per_um*self.direction[2]}
@@ -84,13 +86,16 @@ impl Beam{
     /// atom: a plane wave e^{ikζ}, or the paraxial Gaussian beam focused at the atom,
     /// e^{ikζ} exp(−ρ²/(w² q))/q with q = 1 + iζ/z_R, z_R = k w²/2; ζ = x n_axis is the distance
     /// along the beam from the focus and ρ the distance from the beam's axis.
-    pub fn amplitude(&self,x:f64)->Complex{
-        let[across_1,across_2,along]=self.direction;let(k,zeta)=(self.wave_number_per_um,x*along);
+    pub fn amplitude(&self,x:f64)->Complex{self.amplitude_at([0.,0.,x])}
+    /// The amplitude at any point r (um) of the motion frame, relative to the atom's at the origin
+    /// (2D motion takes r in the plane of the frame's first two axes).
+    pub fn amplitude_at(&self,r:[f64;3])->Complex{
+        let(k,zeta)=(self.wave_number_per_um,r[0]*self.direction[0]+r[1]*self.direction[1]+r[2]*self.direction[2]);
         let wave=Complex::cis(k*zeta);
         match self.waist_um{
             None=>wave,
             Some(w)=>{
-                let q=Complex::new(1.,zeta/(k*w*w/2.));let radial=x*x*(across_1*across_1+across_2*across_2)/(w*w);
+                let q=Complex::new(1.,zeta/(k*w*w/2.));let radial=(r[0]*r[0]+r[1]*r[1]+r[2]*r[2]-zeta*zeta).max(0.)/(w*w);
                 wave*(Complex::new(-radial,0.)/q).exp()/q
             }
         }
