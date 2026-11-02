@@ -38,6 +38,10 @@ pub struct Solution{
     /// Velocity marginals along each axis, and the position distribution in the plane.
     pub velocity:[Distributions;2],
     pub position:Map,
+    /// The grids (points per axis) and, per output time, how many trajectories of the last batch
+    /// each held.
+    pub grids:Vec<usize>,
+    pub census:Vec<Vec<usize>>,
     /// The trajectories the estimates rest on, and the method in one sentence.
     pub trajectories:usize,
     pub method:String,

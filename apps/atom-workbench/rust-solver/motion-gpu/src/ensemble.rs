@@ -98,10 +98,15 @@ impl Ensemble{
         }
         // The planes of each move, resampled in parallel.
         let mut taken:Vec<(usize,usize,Carried)>=vec![];
+        // Each grid's free slots, counted as the moves are decided (a slot freed by a move out is
+        // reused only after this round's moves).
+        let mut free:Vec<Option<usize>>=vec![None;self.ladder.len()];
         for &(t,from,to)in &wanted{
             let Place::Held{slot,..}=self.place[t]else{continue};
             self.engine(to,model)?;
-            if self.occupant[to].iter().all(|o|o.is_some()){self.refused+=1;continue;}
+            let f=free[to].get_or_insert_with(||self.occupant[to].iter().filter(|x|x.is_none()).count());
+            if *f==0{self.refused+=1;continue;}
+            *f-=1;
             let carried=self.classes[from].as_ref().unwrap().take(slot)?;self.occupant[from][slot]=None;
             taken.push((t,to,carried));
             self.place[t]=Place::Lost; // until put
@@ -124,6 +129,18 @@ impl Ensemble{
     pub fn engines(&self)->impl Iterator<Item=&Engine>{self.classes.iter().flatten()}
     pub fn engines_mut(&mut self)->impl Iterator<Item=&mut Engine>{self.classes.iter_mut().flatten()}
     pub fn template(&self)->&Settings{&self.template}
+    pub fn reseed(&mut self,seed:u64)->Result<(),String>{self.template.seed=seed;for e in self.classes.iter_mut().flatten(){e.reseed(seed);}Ok(())}
+    /// Scales the trajectories' weights (a stratified initial state's).
+    pub fn scale_weights(&mut self,factors:&[f64])->Result<(),String>{
+        for(t,f)in factors.iter().enumerate(){self.weights[t]*=f;}
+        for c in 0..self.classes.len(){
+            let Some(engine)=self.classes[c].as_mut()else{continue};
+            let mut w=engine.trajectory_weights.clone();
+            for(slot,o)in self.occupant[c].iter().enumerate(){if let Some(t)=*o{w[slot]=self.weights[t];}}
+            engine.set_weights(&w)?;
+        }
+        Ok(())
+    }
 }
 
 /// The ladder for a trap of frequency ω (rad/us) and ħ/m (um²/us): N = 16 .. 256.

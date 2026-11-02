@@ -13,3 +13,4 @@ pub mod stats;
 pub mod regrid;
 pub mod ensemble;
 pub mod solution;
+pub mod solve;

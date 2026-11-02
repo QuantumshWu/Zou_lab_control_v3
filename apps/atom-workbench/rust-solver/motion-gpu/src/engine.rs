@@ -187,6 +187,7 @@ pub struct Engine{
     /// The weight of each trajectory (thermal states' norms), and the steps made.
     pub trajectory_weights:Vec<f64>,
     pub steps:u64,
+    hbar_over_mass:f64,
     /// With profiling on: events after each phase of a step, and the milliseconds per phase.
     profile:Option<(Vec<Event>,usize,Vec<(&'static str,f64)>)>,
 }
@@ -268,7 +269,7 @@ impl Engine{
             f_jump_back:gpu.function("jump_back")?,f_jump_rates:gpu.function("jump_rates")?,f_jump_choose:gpu.function("jump_choose")?,
             f_jump_apply:gpu.function("jump_apply")?,f_jump_finish:gpu.function("jump_finish")?,f_observe_points:gpu.function("observe_points")?,
             f_thresholds:gpu.function("thresholds")?,
-            points,tiles,trajectory_weights:vec![1.;b],steps:0,profile:None,gpu,settings,
+            points,tiles,trajectory_weights:vec![1.;b],steps:0,hbar_over_mass:model.hbar_over_mass,profile:None,gpu,settings,
         })
     }
 
@@ -437,6 +438,13 @@ impl Engine{
     }
 
     pub fn capacity(&self)->usize{self.settings.trajectories}
+    pub fn hbar_over_mass(&self)->f64{self.hbar_over_mass}
+    /// A new random seed for the trajectories' streams.
+    pub fn reseed(&mut self,seed:u64){self.settings.seed=seed;}
+    /// The trajectories' weights (the distributions' sums use them).
+    pub fn set_weights(&mut self,weights:&[f64])->Result<(),String>{
+        self.gpu.stream.upload(&self.weights,&weights.iter().map(|&w|w as f32).collect::<Vec<f32>>())?;self.trajectory_weights=weights.to_vec();Ok(())
+    }
     /// The trajectory each slot holds (its random streams).
     pub fn set_ids(&self,ids:&[u32])->Result<(),String>{self.gpu.stream.upload(&self.ids,ids)}
     /// A slot's trajectory, its slot left empty.
