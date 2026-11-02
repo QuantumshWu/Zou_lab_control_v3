@@ -187,7 +187,6 @@ pub struct Internal{pub block:usize,pub amplitudes:Vec<Complex>}
 pub struct Engine{
     /// The engine's own stream: the grids' engines run side by side.
     stream:Rc<Stream>,
-    pub gpu:Rc<Gpu>,
     pub settings:Settings,
     points:usize,tiles:usize,
     state:Buffer,dx:Buffer,dy:Buffer,
@@ -215,6 +214,8 @@ pub struct Engine{
     hbar_over_mass:f64,
     /// With profiling on: the step's events after each phase, and the milliseconds per phase.
     profile:Option<Profile>,
+    /// Last: fields drop in order, and the device's context must outlive the graphs and buffers.
+    pub gpu:Rc<Gpu>,
 }
 
 impl Engine{

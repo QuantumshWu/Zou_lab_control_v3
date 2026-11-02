@@ -20,7 +20,6 @@ use std::rc::Rc;
 pub enum Place{Held{class:usize,slot:usize},Lost}
 
 pub struct Ensemble{
-    gpu:Rc<Gpu>,
     template:Settings,
     pub ladder:Vec<Grid>,
     classes:Vec<Option<Engine>>,
@@ -41,6 +40,8 @@ pub struct Ensemble{
     /// The moves' scratch on the device (the list, the half-resampled planes, the norms), grown
     /// as needed.
     scratch:[Option<Buffer>;3],
+    /// Last: the device's context outlives the engines and the scratch (fields drop in order).
+    gpu:Rc<Gpu>,
 }
 
 impl Ensemble{
