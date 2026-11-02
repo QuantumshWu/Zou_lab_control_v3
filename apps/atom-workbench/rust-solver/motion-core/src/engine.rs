@@ -617,7 +617,8 @@ impl<'a> Engine<'a>{
         let steps=((end-t)/self.period-1e-9).ceil().max(0.) as usize;
         if used.len()<3||steps==0{return Ok(None);}
         let x:Vec<Vec<f64>>=used.iter().map(|s|s.features(&last.kappa,&last.z)).collect();
-        let future=dmd(&x,steps,self.lapack)?;
+        // A decomposition that does not resolve leaves this checkpoint without a continuation.
+        let future=match dmd(&x,steps,self.lapack){Ok(f)=>f,Err(e)=>{trace!("t {t:.1} continuation: {e}");return Ok(None);}};
         let mut prediction=Prediction{t,times:vec![],outputs:vec![],errors:vec![],kappa:last.kappa.clone(),z:last.z.clone(),p_kappa:vec![],p_z:vec![]};
         for(k,f)in future.iter().enumerate(){
             let(o,pk,pz)=self.predicted(f,&last.kappa,&last.z);
@@ -679,25 +680,38 @@ fn rotate(m:&mut [Vec<f64>],p:usize,q:usize,c:f64,s:f64){
     for(a,b)in left[p].iter_mut().zip(right[0].iter_mut()){let(u,w)=(*a,*b);*a=c*u-s*w;*b=s*u+c*w;}
 }
 /// The dynamic mode decomposition of equally spaced snapshots x_0 … x_n: x_{n+k} for k = 1..=steps,
-/// growing modes put on the unit circle.
+/// growing modes put on the unit circle. The reduced operator Ã = Uᵀ X1 V Σ⁻¹ (singular values
+/// above 1e-10 σ_max, the pipeline study's) is diagonalized as Σ^{-1/2} Uᵀ X1 V Σ^{-1/2}, similar to
+/// it and balanced; when that does not resolve, the smallest singular directions are dropped.
 fn dmd(x:&[Vec<f64>],steps:usize,lapack:&Lapack)->Result<Vec<Vec<f64>>,String>{
-    let n=x.len();let(u,sigma,v)=svd(x[..n-1].to_vec(),1e-10);let r=sigma.len();let m=x[0].len();
-    let mut a=vec![Complex64::default();r*r];
-    for j in 0..r{let mut column=vec![0.;m];for(i,w)in v[j].iter().enumerate(){for(c,y)in column.iter_mut().zip(&x[i+1]){*c+=w*y;}}
-        for i in 0..r{a[j*r+i].re=dot(&u[i],&column)/sigma[j];}}
-    let(values,vectors)=lapack.complex_eigen_right(&a,r)?;
-    let mu:Vec<Complex>=values.iter().map(|z|{let w=Complex::new(z.re,z.im);let size=w.abs();if size>1.{w*(1./size)}else{w}}).collect();
-    let modes=Dense::from_fn(r,r,|i,k|Complex::new(vectors[k*r+i].re,vectors[k*r+i].im));
-    let mut b:Vec<Complex>=(0..r).map(|i|Complex::new(dot(&u[i],&x[n-1]),0.)).collect();
-    Lu::new(&modes).ok_or("The continuation's modes are singular")?.solve(&mut b);
-    let mut power=b.clone();let mut out=vec![];
-    for _ in 0..steps{
-        for(p,z)in power.iter_mut().zip(&mu){*p=*p**z;}
-        let mut f=vec![0.;m];
-        for i in 0..r{let c:f64=(0..r).map(|k|(modes[(i,k)]*power[k]).re).sum();for(y,w)in f.iter_mut().zip(&u[i]){*y+=c*w;}}
-        out.push(f);
+    let n=x.len();let(u,sigma,v)=svd(x[..n-1].to_vec(),1e-10);let m=x[0].len();
+    // Uᵀ X1 V, once.
+    let full=sigma.len();let mut core=vec![0.;full*full];
+    for j in 0..full{let mut column=vec![0.;m];for(i,w)in v[j].iter().enumerate(){for(c,y)in column.iter_mut().zip(&x[i+1]){*c+=w*y;}}
+        for i in 0..full{core[i*full+j]=dot(&u[i],&column);}}
+    let mut r=full;
+    loop{
+        let mut a=vec![Complex64::default();r*r];
+        for j in 0..r{for i in 0..r{a[j*r+i].re=core[i*full+j]/(sigma[i]*sigma[j]).sqrt();}}
+        match lapack.complex_eigen_right(&a,r){
+            Ok((values,vectors))=>{
+                let mu:Vec<Complex>=values.iter().map(|z|{let w=Complex::new(z.re,z.im);let size=w.abs();if size>1.{w*(1./size)}else{w}}).collect();
+                let modes=Dense::from_fn(r,r,|i,k|Complex::new(vectors[k*r+i].re,vectors[k*r+i].im));
+                // W = Σ^{1/2} W_s; b = W⁻¹ Uᵀ x_n.
+                let mut b:Vec<Complex>=(0..r).map(|i|Complex::new(dot(&u[i],&x[n-1])/sigma[i].sqrt(),0.)).collect();
+                let Some(lu)=Lu::new(&modes)else{if r<=2{return Err("The continuation's modes are singular".into());}r=r*3/4;continue;};lu.solve(&mut b);
+                let mut power=b;let mut out=vec![];
+                for _ in 0..steps{
+                    for(p,z)in power.iter_mut().zip(&mu){*p=*p**z;}
+                    let mut f=vec![0.;m];
+                    for i in 0..r{let c:f64=(0..r).map(|k|(modes[(i,k)]*power[k]).re).sum::<f64>()*sigma[i].sqrt();for(y,w)in f.iter_mut().zip(&u[i]){*y+=c*w;}}
+                    out.push(f);
+                }
+                return Ok(out);
+            }
+            Err(e)=>{if r<=2{return Err(e);}r=r*3/4;}
+        }
     }
-    Ok(out)
 }
 
 /// The samples filled so far: their outputs, and the readings of the listed ones.
