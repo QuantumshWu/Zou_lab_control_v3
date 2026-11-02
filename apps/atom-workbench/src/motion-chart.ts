@@ -63,7 +63,7 @@ const subscript=(axis:MotionAxis)=>`（${axis} 轴）`;
  * trap frequency the engine used along each axis) above the loss probability. */
 export function motionSeries(motion:MotionResult,kind:SeriesKind):[Series,Series]{
   if(kind==='trap')return [
-    {id:'occupation',name:'n̄',title:motion.axes.length===1?`平均振动量子数 n̄（ω/2π = ${digits(motion.trapFrequencyKHz[0]!)} kHz）`:'平均振动量子数 n̄（各轴相对其阱频）',lines:axisLines(motion,motion.meanOccupation,'n̄',MOTION_INKS[0]),unit:{name:'',factor:1}},
+    {id:'occupation',name:'n̄',title:motion.axes.length===1?`平均振动量子数 n̄（ω/2π = ${digits(motion.trapFrequencyKHz[0]!)} kHz）`:`平均振动量子数 n̄（相对各轴焦点处的阱频 ω/2π：${motion.axes.map((axis,k)=>`${axis} ${digits(motion.trapFrequencyKHz[k]!)}`).join('、')} kHz）`,lines:axisLines(motion,motion.meanOccupation,'n̄',MOTION_INKS[0]),unit:{name:'',factor:1}},
     {id:'loss',name:'损失概率',title:'累计损失概率 / %',lines:[{name:'损失概率',values:motion.lossProbability,ink:motion.axes.length===1?MOTION_INKS[1]:INK}],unit:{name:'%',factor:100}}];
   const reach=Math.max(...motion.meanVelocityMps.flat().map(Math.abs),...motion.temperatureUK.flat().map(thermalVelocity)),velocity=unitFor(VELOCITY_UNITS,reach);
   return [{id:'temperature',name:'温度 T',title:'温度 T / μK',lines:axisLines(motion,motion.temperatureUK,'T',MOTION_INKS[0]),unit:{name:'μK',factor:1}},

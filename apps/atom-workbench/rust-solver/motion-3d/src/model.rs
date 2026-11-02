@@ -47,6 +47,8 @@ pub const HBAR:f64=1.0545718176461565e-34;
 pub const BOLTZMANN:f64=1.380649e-23;
 /// The most focused beams the tables span (one axis of intensity each).
 pub const MOST_FOCUSED:usize=3;
+/// The ground manifold's states (5S₁/₂, F = 1 and 2): a photon's amplitude on each.
+pub const GROUND:usize=8;
 /// The most states of a hyperfine block (F = 2) and the largest rank of a carrier's couplings
 /// (the dipole operator's three components).
 pub const MOST_STATES:usize=5;
@@ -241,6 +243,7 @@ impl Model{
         let blocks:Vec<Block>=ground.blocks.iter().map(|b|Block{f:b.f,states:b.states.clone()}).collect();
         if blocks.iter().any(|b|b.states.len()>MOST_STATES){return Err("A hyperfine block has more than five states".into());}
         let ng=ground.ground_states.len();
+        if ng!=GROUND{return Err(format!("The ground manifold has {ng} states, not {GROUND}"));}
         let ranks:Vec<usize>=carriers.iter().map(|c|c.rank).collect();
         let ne=ground.excited_states.len();let layouts:Vec<Layout>=blocks.iter().map(|b|Layout::new(b.states.len(),ng,ne,&ranks)).collect();
         let hbar_over_mass=HBAR/request.mass_kg*1e6;
@@ -454,11 +457,11 @@ impl Model{
     /// beams' shares are made of (`Photons::gradient`, `Photons::beams`).
     pub fn photons(&self,block:usize,p:&Point,psi:&[Complex])->Photons{
         let nb=self.dimension(block);let layout=&self.layouts[block];let ng=self.ground.ground_states.len();
-        let mut out=Photons{block,amplitude:vec![[[Complex::ZERO;8];3];self.carriers.len()],responses:vec![],derivatives:vec![]};
+        let mut out=Photons{block,amplitude:vec![[[Complex::ZERO;GROUND];3];self.carriers.len()],responses:vec![],derivatives:vec![]};
         let mut buf=vec![Complex::ZERO;ng*nb];
         for(c,cl)in layout.carriers.iter().enumerate(){
             let r=self.carriers[c].rank;let fl=&p.fields[c];
-            let(mut responses,mut derivatives)=([[[Complex::ZERO;8];3];MOST_RANK],[[[Complex::ZERO;8];3];MOST_RANK]);
+            let(mut responses,mut derivatives)=([[[Complex::ZERO;GROUND];3];MOST_RANK],[[[Complex::ZERO;GROUND];3];MOST_RANK]);
             for k in 0..r{for a in 0..3{
                 let at=(k*3+a)*ng*nb;
                 self.interpolate(block,&p.stencil,None,cl.j+at,&mut buf);responses[k][a]=apply(&buf,psi,ng,nb);
@@ -525,20 +528,20 @@ impl Model{
 }
 
 /// M ψ for an ng × nb matrix M (row-major) and a block state ψ.
-fn apply(m:&[Complex],psi:&[Complex],ng:usize,nb:usize)->[Complex;8]{
-    let mut v=[Complex::ZERO;8];for row in 0..ng{let mut s=Complex::ZERO;for y in 0..nb{s+=m[row*nb+y]*psi[y];}v[row]=s;}v
+fn apply(m:&[Complex],psi:&[Complex],ng:usize,nb:usize)->[Complex;GROUND]{
+    let mut v=[Complex::ZERO;GROUND];for row in 0..ng{let mut s=Complex::ZERO;for y in 0..nb{s+=m[row*nb+y]*psi[y];}v[row]=s;}v
 }
 
 /// The photon amplitudes C_a R_c ψ of every carrier c and axis a (over all ground states), and per
 /// carrier, rank k and axis C_a T_k ψ and C_a T2_k ψ.
 #[derive(Clone,Debug)]
-pub struct Photons{pub block:usize,pub amplitude:Vec<[[Complex;8];3]>,responses:Vec<[[[Complex;8];3];MOST_RANK]>,derivatives:Vec<[[[Complex;8];3];MOST_RANK]>}
+pub struct Photons{pub block:usize,pub amplitude:Vec<[[Complex;GROUND];3]>,responses:Vec<[[[Complex;GROUND];3];MOST_RANK]>,derivatives:Vec<[[[Complex;GROUND];3];MOST_RANK]>}
 impl Photons{
     /// ∇(C_a R_c ψ) [a][axis] of carrier c: the fields' and the intensities' dependence on r (the
     /// Doppler term's own gradient left out).
-    pub fn gradient(&self,model:&Model,p:&Point,psi:&[Complex],c:usize)->[[[Complex;8];3];3]{
+    pub fn gradient(&self,model:&Model,p:&Point,psi:&[Complex],c:usize)->[[[Complex;GROUND];3];3]{
         let nb=model.dimension(self.block);let ng=model.ground.ground_states.len();let cl=model.layouts[self.block].carriers[c];
-        let r=model.carriers[c].rank;let fl=&p.fields[c];let mut out=[[[Complex::ZERO;8];3];3];let mut buf=vec![Complex::ZERO;ng*nb];
+        let r=model.carriers[c].rank;let fl=&p.fields[c];let mut out=[[[Complex::ZERO;GROUND];3];3];let mut buf=vec![Complex::ZERO;ng*nb];
         for k in 0..r{for a in 0..3{
             for row in 0..ng{for x in 0..3{out[a][x][row]+=fl.grad[k][x]*self.responses[c][k][a][row];}}
             for f in 0..model.focused.len(){
@@ -549,10 +552,10 @@ impl Photons{
         out
     }
     /// Each beam l of carrier c: its share C_a a_l (R_l − w_l R2_l) ψ [beam][a].
-    pub fn beams(&self,model:&Model,p:&Point,c:usize)->Vec<[[Complex;8];3]>{
+    pub fn beams(&self,model:&Model,p:&Point,c:usize)->Vec<[[Complex;GROUND];3]>{
         let carrier=&model.carriers[c];let ng=model.ground.ground_states.len();
         carrier.beams.iter().enumerate().map(|(j,&l)|{
-            let(amplitude,w)=(model.geometry[l].field(p.r).0,model.kinetic_shift(l,p.kappa));let mut v=[[Complex::ZERO;8];3];
+            let(amplitude,w)=(model.geometry[l].field(p.r).0,model.kinetic_shift(l,p.kappa));let mut v=[[Complex::ZERO;GROUND];3];
             for k in 0..carrier.rank{let z=amplitude*carrier.coefficients[j][k];
                 for a in 0..3{for row in 0..ng{v[a][row]+=z*(self.responses[c][k][a][row]-self.derivatives[c][k][a][row]*w);}}}
             v

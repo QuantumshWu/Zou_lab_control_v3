@@ -24,13 +24,17 @@
 //! - the step's light impulse, relative, within η of the temperature target.
 //! Both scale as dt², so a step that misses is shrunk by the square root of its excess and checked
 //! again; one that meets them with room is grown the same way.
-
+//!
 //! # Regime
 //! A point particle has no zero-point motion: below a few vibrational quanta per axis the method
-//! cools too far. Against the 1D GMW references (the tweezer PGC TW2) T is within 3 % down to
-//! k_B T ≈ 4.5 ħω, within 10 % at 3.5 ħω and 13 % low at 3 ħω; against the 2D quantum trajectories
-//! of the same scene (x and y free) within 8 % at 4.6 ħω and 15 % low at 3.1 ħω. Each output time
-//! says whether it is in the regime k_B T ≥ `CLASSICAL` ħω on every axis.
+//! cools too far. Against the 1D GMW references of the tweezer PGC (the atom on the line through
+//! the focus): heating (TW1, k_B T from 6 to 16 ħω over 10 ms) T within 6 % (mean +2 %) and the
+//! populations within 0.03; cooling (TW2) T within 3 % down to k_B T ≈ 5 ħω, 6 % low at 4.6 ħω,
+//! 10 % low at 4 ħω and 15-55 % low below 3 ħω, the populations within 0.045 but for the first
+//! 50 µs of optical pumping (up to 0.066). Against the 2D quantum trajectories of the same scene
+//! (x and y free) within 8 % at 4.6 ħω and 15 % low at 3.1 ħω. Each output time says whether it
+//! is in the regime k_B T ≥ `CLASSICAL` ħω on every axis (with T the engine's own, which lies below
+//! the quantum T where the method cools too far, so the mark comes early rather than late).
 use crate::engine::{Engine,Settings,Trajectory};
 use crate::model::Model;
 use crate::stats::{summarize,Estimate,Scales,KT_PER_UK};
@@ -87,12 +91,15 @@ pub struct Solution{
     pub reason:Option<String>,
 }
 
+/// An estimate in the validated regime: k_B T ≥ CLASSICAL ħω along every axis (ω per axis).
+fn classical(e:&Estimate,frequencies:[f64;3])->bool{(0..3).all(|a|KT_PER_UK*e.temperature[a]>=CLASSICAL*frequencies[a])}
+
 /// The largest ratio of CONFIDENCE standard errors to the targets over every output: the
-/// populations and the loss everywhere, the temperatures where the method holds (`classical`).
-fn worst_ratio(estimates:&[Estimate],classical:&dyn Fn(&Estimate)->bool)->f64{
+/// populations and the loss everywhere, the temperatures where the method holds.
+fn worst_ratio(estimates:&[Estimate],frequencies:[f64;3])->f64{
     estimates.iter().map(|e|{
         // The temperature to its target where the method holds; outside, a reference only.
-        let t=if classical(e){(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/(TEMPERATURE_TARGET*e.temperature[a])}else{0.}).fold(0.,f64::max)}else{0.};
+        let t=if classical(e,frequencies){(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/(TEMPERATURE_TARGET*e.temperature[a])}else{0.}).fold(0.,f64::max)}else{0.};
         let p=e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x))/POPULATION_TARGET;
         CONFIDENCE*t.max(p)
     }).fold(0.,f64::max)
@@ -103,9 +110,9 @@ fn listed(outputs:usize)->Vec<usize>{
     let count=outputs.min(21);let mut v:Vec<usize>=(0..count).map(|i|((i*(outputs-1)) as f64/(count-1).max(1) as f64).round() as usize).collect();v.dedup();v
 }
 
-/// Histograms of one axis of the samples at the listed times on one grid symmetric about 0 that
-/// holds all of them (the bins' centres; an odd count, 0 at the centre).
-fn histograms(samples:&[Vec<([f64;3],[f64;3])>],listed:&[usize],axis:usize,value:&dyn Fn(&([f64;3],[f64;3]))->f64)->Distributions{
+/// Histograms of a value of the samples (a coordinate along one axis) at the listed times on one
+/// grid symmetric about 0 that holds all of them (the bins' centres; an odd count, 0 at the centre).
+fn histograms(samples:&[Vec<([f64;3],[f64;3])>],listed:&[usize],value:&dyn Fn(&([f64;3],[f64;3]))->f64)->Distributions{
     let reach=samples.iter().flatten().map(|s|value(s).abs()).fold(0.,f64::max).max(f64::MIN_POSITIVE);
     let count=samples.iter().map(|s|s.len()).max().unwrap_or(0);
     // Bins: about the square root of the samples, odd, at least 21.
@@ -115,7 +122,7 @@ fn histograms(samples:&[Vec<([f64;3],[f64;3])>],listed:&[usize],axis:usize,value
         let mut p=vec![0.;bins];if s.is_empty(){p[bins/2]=1.;return p;}
         for x in s{let i=((value(x)/width).round() as isize+(bins/2) as isize).clamp(0,bins as isize-1) as usize;p[i]+=1./s.len() as f64;}p
     }).collect();
-    let _=axis;Distributions{grid,samples:listed.to_vec(),probabilities}
+    Distributions{grid,samples:listed.to_vec(),probabilities}
 }
 
 /// Solves a request. `checkpoint` receives every batch's complete result and the estimated wall
@@ -157,12 +164,11 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     let clock=Instant::now();
     let first=simulate(&model,&settings,&initial,seed,0,pilot,group(pilot,threads),steps,outputs,&listed);
     let wall=clock.elapsed().as_secs_f64();
-    let classical=|e:&Estimate|(0..3).all(|a|KT_PER_UK*e.temperature[a]>=CLASSICAL*frequencies[a]);
     // Batches until the targets are met.
     let mut outcome=first;let mut done=pilot;let mut per_trajectory=wall/pilot as f64;
     loop{
         let estimates=summarize(&outcome.groups,&scales);
-        let ratio=worst_ratio(&estimates,&classical);
+        let ratio=worst_ratio(&estimates,frequencies);
         let needed=((done as f64*ratio*ratio).ceil() as u64).min(MOST_TRAJECTORIES);
         let mut solution=assemble(&model,&estimates,&outcome,&listed,frequencies,done,dt,&request.initial_density);
         if needed<=done{
@@ -196,8 +202,8 @@ fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64)->f64{
 /// At t = 0 the populations are the initial state's, as the request gives them (the light acts after).
 fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex])->Solution{
     let hm=model.hbar_over_mass;
-    let velocity=std::array::from_fn(|a|histograms(&outcome.samples,listed,a,&|s|s.1[a]*hm));
-    let position=std::array::from_fn(|a|histograms(&outcome.samples,listed,a,&|s|s.0[a]));
+    let velocity=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.1[a]*hm));
+    let position=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.0[a]));
     let first:Vec<f64>=(0..STATES).map(|i|initial[i*STATES+i].re).collect();
     Solution{
         populations:estimates.iter().enumerate().map(|(i,e)|if i==0{first.clone()}else{e.populations.clone()}).collect(),
@@ -209,7 +215,7 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
         mean_occupation:estimates.iter().map(|e|e.occupation).collect(),
         loss_probability:{let mut worst=0.;estimates.iter().map(|e|{worst=e.loss.max(worst);worst}).collect()},
         velocity,position,
-        classical:estimates.iter().map(|e|(0..3).all(|a|KT_PER_UK*e.temperature[a]>=CLASSICAL*frequencies[a])).collect(),
+        classical:estimates.iter().map(|e|classical(e,frequencies)).collect(),
         trajectories,time_step_us:dt,
         method:format!("半经典 3D：经典质点（位置、动量）携带消去激发态后的基态内态，量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），{trajectories} 条轨迹，步长 {dt:.3} μs"),
         reason:None,

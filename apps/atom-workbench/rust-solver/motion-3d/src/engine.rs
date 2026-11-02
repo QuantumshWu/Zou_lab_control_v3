@@ -31,7 +31,7 @@
 //! # Randomness
 //! Every jump draws from its own stream (the trajectory's and the jump's number), so runs that
 //! differ only in the time step make the same choices: the step-doubling check compares them.
-use crate::model::{Model,MOST_STATES};
+use crate::model::{Model,GROUND,MOST_STATES};
 use crate::rng::Rng;
 use atom_motion_core::Complex;
 
@@ -122,7 +122,6 @@ pub fn jump_stream(seed:u64,index:u64,jump:u64)->Rng{Rng::new(seed^0x6A75_6D70_5
 pub struct Engine<'a>{pub model:&'a Model,pub settings:Settings}
 
 impl<'a> Engine<'a>{
-    /// One step of dt.
     /// One step's flow, kick and internal evolution of length dt without jumps: the norms of ψ at
     /// the start, the middle and the end, ψ at the start, the generator and point of the middle,
     /// and the kick's momentum (the light's and the trap's anharmonic part).
@@ -155,6 +154,8 @@ impl<'a> Engine<'a>{
         ([dk,impulse],[dp,((n1/n0).ln()-(n2/n0).ln()).abs(),(n1/n0).ln().abs()])
     }
 
+    /// One step of dt: flow, kick and flow (`advance`); a jump where ‖ψ‖² crosses the threshold,
+    /// the rest of the step after it; the escape.
     pub fn step(&self,t:&mut Trajectory){
         let(m,s)=(self.model,&self.settings);let dt=s.dt;
         let r0=t.r;
@@ -194,7 +195,7 @@ impl<'a> Engine<'a>{
         let mut x=rng.uniform()*total;let mut pick=options[options.len()-1];
         for o in &options{if x<o.2{pick=*o;break;}x-=o.2;}
         let(c,b,_)=pick;let states=&m.blocks[b].states;let nb=states.len();
-        let rows=|v:&[Complex;8]|->[Complex;MOST_STATES]{let mut out=[Complex::ZERO;MOST_STATES];for(i,&row)in states.iter().enumerate(){out[i]=v[row];}out};
+        let rows=|v:&[Complex;GROUND]|->[Complex;MOST_STATES]{let mut out=[Complex::ZERO;MOST_STATES];for(i,&row)in states.iter().enumerate(){out[i]=v[row];}out};
         let u:[[Complex;MOST_STATES];3]=std::array::from_fn(|a|rows(&photons.amplitude[c][a]));
         let gram:[[Complex;3];3]=std::array::from_fn(|a|std::array::from_fn(|b2|(0..nb).fold(Complex::ZERO,|acc,i|acc+u[a][i].conj()*u[b2][i])));
         let direction=dipole_direction(&mut rng,&gram);
@@ -224,7 +225,7 @@ impl<'a> Engine<'a>{
 
 /// Im⟨f|∇f⟩/⟨f|f⟩ of the emitted photon f = Σ_a ε_a P_F' C_a R_c ψ (`gradient` the carrier's
 /// ∇(C_a R_c ψ) [a][axis]): the exact mean momentum (1/um) the absorbed light gives with it.
-fn absorption_mean(gradient:&[[[Complex;8];3];3],states:&[usize],e:&[f64;3],f:&[Complex;MOST_STATES],size:f64)->[f64;3]{
+fn absorption_mean(gradient:&[[[Complex;GROUND];3];3],states:&[usize],e:&[f64;3],f:&[Complex;MOST_STATES],size:f64)->[f64;3]{
     std::array::from_fn(|x|{
         let mut s=0.;
         for(i,&row)in states.iter().enumerate(){let mut g=Complex::ZERO;for a in 0..3{g+=gradient[a][x][row]*e[a];}s+=(f[i].conj()*g).im;}

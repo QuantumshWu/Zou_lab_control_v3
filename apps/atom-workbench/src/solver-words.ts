@@ -15,7 +15,7 @@ const SENTENCES:Record<string,string>={
   'Cancelled.':'计算已取消。',
   'The trajectory duration must be a positive finite time':'轨迹时长必须是正的有限时间。',
   'meanHorizonUs must be 1e5 or 1e6 us (100 ms or 1 s)':'长期布居的时刻 T 只能是 100 ms 或 1 s。',
-  'A motion request is a trajectory alone: meanOnly and includeMean are false':'1D 运动只计算时间演化，不计算长期布居。',
+  'A motion request is a trajectory alone: meanOnly and includeMean are false':'运动只计算时间演化，不计算长期布居。',
 };
 /** What a mean's reason adds when its bound is above the tolerance (lattice_core_adapter.rs `OUTSIDE`). */
 const OUTSIDE=' Not converged: its error estimate (estimatedError) is above the tolerance, so the populations are an estimate.';
