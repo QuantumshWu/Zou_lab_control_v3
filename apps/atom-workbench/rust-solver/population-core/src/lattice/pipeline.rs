@@ -34,10 +34,9 @@
 //! 5. A checkpoint is accepted when every bound is within the tolerance, its
 //!    cycle added directions and its solves converged to the a-priori share
 //!    (a failed solve leaves its scale unvisited: r07's small shifts,
-//!    accepted 5.7e-3 off). The run
-//!    stops there, or when a cycle added
-//!    no direction, or the largest change did not shrink over a cycle, or
-//!    the basis budget is spent, and returns its best checkpoint (`Answer`):
+//!    accepted 5.7e-3 off). The run stops there, or when a cycle added no
+//!    direction, or the largest change did not shrink over a cycle, or the
+//!    basis budget is spent, and returns its best checkpoint (`Answer`):
 //!    converged, or partial with the reason and every sample's own estimate.
 //!    Every checkpoint is reported to the observer as it is made.
 use super::*;
