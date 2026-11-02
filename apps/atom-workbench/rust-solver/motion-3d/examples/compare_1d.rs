@@ -1,7 +1,9 @@
 //! The semiclassical engine on the line through the focus (the beams' axis free, the others held
 //! at 0) against the 1D GMW references LONGREF_TW1/TW2: T, n̄, the ground populations, the
 //! excited population and the loss.
-//! `cargo run --profile iterate -p atom-motion-3d --example compare_1d -- <TW1|TW2> <label> [trajectories] [t_end_us] [dt] [seed] [flow|drift]`
+//! `cargo run --profile iterate -p atom-motion-3d --example compare_1d -- <TW1|TW2> <label> [trajectories] [t_end_us] [dt] [seed] [flow|drift] [truncation] [group]`
+//! (the exponentials' truncation bound, double precision by default, and the Latin hypercube's
+//! group, eight by default: a solve's are its share of the step budget and a batch over 2 threads.)
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_3d::engine::Settings;
 use atom_motion_3d::model::Model;
@@ -27,13 +29,13 @@ fn main(){
     let(block22,state22)=model.blocks.iter().enumerate().find_map(|(k,blk)|blk.states.iter().position(|&x|x==b22).map(|x|(k,x))).unwrap();
     let frequencies=model.trap_frequencies(block22,state22);
     // The trap's harmonic part moved exactly (flow), or free flight with the whole trap as kicks (drift).
-    let flow=arg(7,"flow")=="flow";
-    let settings=Settings{dt,free,escape_intensity:(-2.*cap*cap/(w*w)).exp(),frequencies:if flow{frequencies}else{[0.;3]}};
+    let flow=arg(7,"flow")=="flow";let truncation:f64=arg(8,"2.2e-16").parse().unwrap();let group:u64=arg(9,"8").parse().unwrap();
+    let settings=Settings{dt,free,escape_intensity:(-2.*cap*cap/(w*w)).exp(),frequencies:if flow{frequencies}else{[0.;3]},truncation};
     let initial=Initial::new(&model,&request).unwrap();
     println!("trap {:?} kHz",frequencies.map(|f|f/std::f64::consts::TAU*1e3));
     let interval=10.;let steps=(interval/dt).round() as usize;let outputs=(t_end/interval).round() as usize+1;
     let run=std::time::Instant::now();
-    let outcome=simulate(&model,&settings,&initial,seed,0,count,8,steps,outputs,&[outputs-1]);
+    let outcome=simulate(&model,&settings,&initial,seed,0,count,group,steps,outputs,&[outputs-1]);
     let wall=run.elapsed().as_secs_f64();
     let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies});
     let labels=["ground-1--1","ground-1-0","ground-1-1","ground-2--2","ground-2--1","ground-2-0","ground-2-1","ground-2-2"];

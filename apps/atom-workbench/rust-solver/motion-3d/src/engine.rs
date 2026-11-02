@@ -61,6 +61,9 @@ pub struct Settings{
     pub escape_intensity:f64,
     /// ω_a (rad/us): the trap's harmonic part along each axis, moved exactly.
     pub frequencies:[f64;3],
+    /// The bound on each exponential's truncated Taylor remainder relative to ‖ψ‖ (`propagate`):
+    /// a share of the step's own error budget in a solve, f64::EPSILON for double precision.
+    pub truncation:f64,
 }
 
 /// The harmonic flow along one axis for τ: (x, κ) turned by ωτ in phase space (x in um, κ in 1/um,
@@ -74,16 +77,18 @@ fn norm2(psi:&[Complex],n:usize)->f64{psi[..n].iter().map(|z|z.norm_sqr()).sum()
 
 /// ψ ← exp(−i H τ) ψ for an n × n matrix H (row-major in a 5 × 5 array): Taylor series on the vector
 /// in sub-steps of ‖H‖τ ≤ ½ (‖H‖ the largest column sum of |re| + |im|, above the 1-norm), each
-/// summed through the term whose bound (‖H‖τ)^m/m! falls below double precision.
-pub fn propagate(h:&[Complex;25],n:usize,tau:f64,psi:&mut [Complex;MOST_STATES]){
-    macro_rules! sized{($($n:literal)*)=>{match n{$($n=>propagate_sized::<$n>(h,tau,psi),)*_=>unreachable!("a hyperfine block has 1 to 5 states")}}}
+/// summed through the term whose bound (‖H‖τ)^m/m! falls below its share of `truncation` (relative
+/// to ‖ψ‖; the remainder past it is at most half that bound).
+pub fn propagate(h:&[Complex;25],n:usize,tau:f64,psi:&mut [Complex;MOST_STATES],truncation:f64){
+    macro_rules! sized{($($n:literal)*)=>{match n{$($n=>propagate_sized::<$n>(h,tau,psi,truncation),)*_=>unreachable!("a hyperfine block has 1 to 5 states")}}}
     sized!(1 2 3 4 5)
 }
-fn propagate_sized<const N:usize>(h:&[Complex;25],tau:f64,psi:&mut [Complex;MOST_STATES]){
+fn propagate_sized<const N:usize>(h:&[Complex;25],tau:f64,psi:&mut [Complex;MOST_STATES],truncation:f64){
     let mut norm=0_f64;for b in 0..N{let mut column=0.;for a in 0..N{column+=h[a*N+b].re.abs()+h[a*N+b].im.abs();}norm=norm.max(column);}
     let x=norm*tau.abs();let parts=((x/0.5).ceil() as usize).max(1);let step=tau/parts as f64;
-    // The terms to double precision for this step's ‖H‖τ/parts ≤ ½: y^m/m! ≤ 1e-17.
-    let y=x/parts as f64;let mut terms=1;let mut size=y;while size>1e-17&&terms<40{terms+=1;size*=y/terms as f64;}
+    // The terms for this step's y = ‖H‖τ/parts ≤ ½: through the first whose bound y^m/m! is within
+    // the sub-step's share of the truncation bound.
+    let y=x/parts as f64;let share=truncation/parts as f64;let mut terms=1;let mut size=y;while size>share&&terms<40{terms+=1;size*=y/terms as f64;}
     let mut v=[Complex::ZERO;N];v.copy_from_slice(&psi[..N]);
     for _ in 0..parts{
         let mut term=v;let mut sum=v;
@@ -131,10 +136,10 @@ impl<'a> Engine<'a>{
         let point=m.point(t.r,t.kappa);
         let n=m.dimension(t.block);let local=m.local(t.block,&point);
         let psi0=t.psi;let n0=norm2(&t.psi,n);
-        let mut psi=t.psi;propagate(&local.hamiltonian,n,0.5*dt,&mut psi);let nh=norm2(&psi,n);
+        let mut psi=t.psi;propagate(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let nh=norm2(&psi,n);
         let force=m.force(t.block,&point,&local,&psi);let mut kick=[0.;3];
         for a in 0..3{if s.free[a]{let w=s.frequencies[a];kick[a]=dt*(force[a]+w*w/hm*t.r[a]);t.kappa[a]+=kick[a];}}
-        propagate(&local.hamiltonian,n,0.5*dt,&mut psi);let n1=norm2(&psi,n);
+        propagate(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let n1=norm2(&psi,n);
         t.psi=psi;
         for a in 0..3{if s.free[a]{(t.r[a],t.kappa[a])=flow(t.r[a],t.kappa[a],s.frequencies[a],hm,0.5*dt);}}
         (n0,nh,n1,psi0,local,point,kick)
@@ -164,13 +169,13 @@ impl<'a> Engine<'a>{
             // The crossing on ln‖ψ‖², linear on the half where it lies.
             let(ta,tb,la,lb)=if nh<=t.threshold{(0.,0.5*dt,n0.ln(),nh.ln())}else{(0.5*dt,dt,nh.ln(),n1.ln())};
             let at=if lb<la{(ta+(t.threshold.ln()-la)/(lb-la)*(tb-ta)).clamp(ta,tb)}else{tb};
-            let mut before=psi0;propagate(&local.hamiltonian,n,at,&mut before);
+            let mut before=psi0;propagate(&local.hamiltonian,n,at,&mut before,s.truncation);
             let rj:[f64;3]=std::array::from_fn(|a|r0[a]+(t.r[a]-r0[a])*at/dt);
             let block=t.block;t.psi=before;self.jump(t,rj);
             // The rest of the step in the block the jump left the atom in.
             let rest=dt-at;
             if rest>0.{let nb=m.dimension(t.block);let l2=if t.block==block{local}else{m.local(t.block,&point)};
-                propagate(&l2.hamiltonian,nb,rest,&mut t.psi);
+                propagate(&l2.hamiltonian,nb,rest,&mut t.psi,s.truncation);
                 // A second crossing within the step (rare): made at the step's end.
                 if norm2(&t.psi,nb)<=t.threshold{self.jump(t,t.r);}}
         }

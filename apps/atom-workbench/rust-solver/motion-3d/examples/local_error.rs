@@ -5,7 +5,7 @@
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_3d::engine::{Engine,Settings};
 use atom_motion_3d::model::Model;
-use atom_motion_3d::{initial_trajectory,Initial};
+use atom_motion_3d::{initial_trajectory,Initial,Stratum};
 
 fn main(){
     let args:Vec<String>=std::env::args().collect();let arg=|i:usize,d:&str|args.get(i).cloned().unwrap_or(d.into());
@@ -14,10 +14,10 @@ fn main(){
     let model=Model::new(&request).unwrap();let initial=Initial::new(&model,&request).unwrap();
     let(block,state,_)=*initial.states.iter().max_by(|a,b|a.2.total_cmp(&b.2)).unwrap();
     let frequencies=model.trap_frequencies(block,state);
-    let settings=Settings{dt:0.1,free:[true;3],escape_intensity:1./20.,frequencies};let engine=Engine{model:&model,settings:settings.clone()};
+    let settings=Settings{dt:0.1,free:[true;3],escape_intensity:1./20.,frequencies,truncation:f64::EPSILON};let engine=Engine{model:&model,settings:settings.clone()};
     // States along trajectories (dt 0.1), every 10 us.
     let mut states=vec![];
-    for index in 0..count{let mut t=initial_trajectory(&model,&settings,&initial,3,index);
+    for index in 0..count{let mut t=initial_trajectory(&model,&settings,&initial,3,index,Stratum::single(index));
         for _ in 0..(t_end/10.) as usize{for _ in 0..100{if t.alive{engine.step(&mut t);}}if t.alive{states.push(t.clone());}}}
     println!("{name}: {} sampled states",states.len());
     for dt in [0.05,0.1,0.2,0.3,0.5,1.0]{

@@ -31,7 +31,7 @@ fn main(){
         for(k,w)in [(k1,1.),(k2,2.),(k3,2.),(k4,1.)]{rho.add_scaled(Complex::new(dt*w/6.,0.),&k);}
     }exact.push(g.populations(&local,&rho));}
     // The engine with the atom held at r: every trajectory starts there (no axis free).
-    let settings=Settings{dt:0.2,free:[false;3],escape_intensity:0.,frequencies:[0.;3]};
+    let settings=Settings{dt:0.2,free:[false;3],escape_intensity:0.,frequencies:[0.;3],truncation:f64::EPSILON};
     let initial=Initial::new(&model,&request).unwrap();
     let mut model_at=model.clone();let _=&mut model_at;
     let outcome=atom_motion_3d::simulate_from(&model,&settings,&initial,7,0,count,8,(interval/0.2).round() as usize,outputs,&[],r);

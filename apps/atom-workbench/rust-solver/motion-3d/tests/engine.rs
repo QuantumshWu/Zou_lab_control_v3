@@ -1,12 +1,13 @@
 //! The 3D engine's checks on the app's tweezer PGC example (tests/fixtures/tweezer_pgc.json: its
 //! motion block along x, the frame y, z, x): the generator's consistency at random points, the
-//! Ehrenfest force against the energy's gradient, the dipole pattern's moments, the trap, and a
-//! thermal state that stays thermal with the light off.
+//! Ehrenfest force against the energy's gradient, the dipole pattern's moments, the trap, a
+//! thermal state that stays thermal with the light off, and a group's Latin hypercube of initial
+//! momenta.
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
 use atom_motion_3d::model::Model;
-use atom_motion_3d::rng::Rng;
-use atom_motion_3d::stats::{summarize,Scales};
-use atom_motion_3d::{initial_trajectory,simulate,Initial};
+use atom_motion_3d::rng::{normal_quantile,Rng};
+use atom_motion_3d::stats::{summarize,Scales,KT_PER_UK};
+use atom_motion_3d::{initial_trajectory,simulate,Initial,Stratum};
 use atom_motion_core::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 
@@ -110,7 +111,7 @@ fn the_trap_is_the_tweezer_s(){
 fn a_thermal_state_stays_thermal_with_the_light_off(){
     let r=request(&|b|b["waistUm"].is_number());let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let(b,x,_)=initial.states[0];let frequencies=model.trap_frequencies(b,x);assert_eq!(model.focused.len(),1);
-    let settings=Settings{dt:0.25,free:[true;3],escape_intensity:1./20.,frequencies};
+    let settings=Settings{dt:0.25,free:[true;3],escape_intensity:1./20.,frequencies,truncation:f64::EPSILON};
     let outcome=simulate(&model,&settings,&initial,5,0,1024,8,40,21,&[]);assert_eq!(outcome.jumps,0);
     let e=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies});
     for a in 0..3{let start=e[0].temperature[a];for x in &e{
@@ -118,4 +119,32 @@ fn a_thermal_state_stays_thermal_with_the_light_off(){
         assert!((x.temperature[a]-r.temperature_uk).abs()<=4.*x.temperature_error[a],"axis {a}: {} against {}",x.temperature[a],r.temperature_uk);
     }}
     let _=(Engine{model:&model,settings},initial_trajectory);
+}
+
+#[test]
+fn the_normal_quantile_is_the_inverse_distribution(){
+    // Reference quantiles of the standard normal, and its symmetry.
+    for(p,x)in [(0.5,0.),(0.975,1.959963984540054),(0.99,2.3263478740408408),(0.999,3.090232306167813),(1e-10,-6.361340902404056)]{
+        assert!((normal_quantile(p)-x).abs()<=1e-13*x.abs().max(1.),"{p}: {} against {x}",normal_quantile(p));
+        // 1 − p is exact in double precision for these p but the deepest tail's.
+        if p>=1e-3{assert!((normal_quantile(1.-p)+normal_quantile(p)).abs()<=1e-13*x.abs().max(1.),"{p}");}
+    }
+}
+
+#[test]
+fn a_group_s_initial_momenta_take_one_stratum_each(){
+    // In a group of eight, each momentum component of the members lies in another eighth of the
+    // Maxwell distribution (its strata bounded by the normal's quantiles at k/8).
+    let r=request(&|_|true);let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let(b,x,_)=initial.states[0];let frequencies=model.trap_frequencies(b,x);
+    let settings=Settings{dt:0.25,free:[true;3],escape_intensity:1./20.,frequencies,truncation:f64::EPSILON};
+    let(size,kt,hm)=(8_u64,KT_PER_UK*r.temperature_uk,model.hbar_over_mass);
+    for first in [0,8,96]{
+        let group:Vec<[f64;3]>=(first..first+size).map(|i|initial_trajectory(&model,&settings,&initial,3,i,Stratum{first,size}).kappa).collect();
+        for a in 0..3{
+            let half=frequencies[a]/(2.*kt);let width=(kt/hm).sqrt()*(half/half.tanh()).sqrt();
+            let mut strata:Vec<usize>=group.iter().map(|k|(1..size as usize).filter(|&j|k[a]/width>=normal_quantile(j as f64/size as f64)).count()).collect();
+            strata.sort();assert_eq!(strata,(0..size as usize).collect::<Vec<_>>(),"group {first}, axis {a}");
+        }
+    }
 }

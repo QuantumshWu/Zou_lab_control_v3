@@ -34,6 +34,8 @@ impl Group{
     pub fn new(outputs:usize,trajectories:usize)->Group{
         let mut s=Sums::zero();s.trajectories=trajectories as f64;Group{sums:vec![s;outputs]}
     }
+    /// Another group's sums added in: the two as one group.
+    pub fn merge(&mut self,o:&Group){for(s,x)in self.sums.iter_mut().zip(&o.sums){*s=s.combine(x,1.);}}
     /// One held atom at output i.
     pub fn add(&mut self,i:usize,r:[f64;3],kappa:[f64;3],populations:&[f64;STATES]){
         let s=&mut self.sums[i];s.held+=1.;

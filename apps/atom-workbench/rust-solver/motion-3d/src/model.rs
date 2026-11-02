@@ -27,6 +27,10 @@
 //! H_eff = H0g − Herm Σ_c Σ_k'k E_k'* E_k A_k'k − (i/2) Σ_c Σ_k'k E_k'* E_k Q_k'k
 //! ```
 //!
+//! Only the Hermitian part of the light shift acts (the generator's and the force's), and
+//! Herm Σ_k'k E_k'* E_k A_k'k = Σ_k'k E_k'* E_k S_k'k with S_k'k = (A_k'k + A_kk'†)/2, so S_kk' = S_k'k†
+//! as Q_kk' = Q_k'k†: the tables hold S and Q for k' ≤ k only, the pairs k' < k standing for both.
+//!
 //! # The photons and the Doppler term
 //! The photon of axis a scattered from carrier c leaves the atom in C_a R_c ψ, from the jump
 //! tables J_ak = C_a T_k (all ground rows: the to-block is chosen there). Absorbing from beam l
@@ -106,12 +110,16 @@ struct CarrierLayout{a:usize,q:usize,j:usize,j2:usize,t:usize}
 impl Layout{
     fn new(nb:usize,ng:usize,ne:usize,ranks:&[usize])->Layout{
         let mut size=nb*nb;let h0=0;
-        let carriers=ranks.iter().map(|&r|{let square=r*r*nb*nb;let jump=3*r*ng*nb;let response=r*ne*nb;
+        let carriers=ranks.iter().map(|&r|{let square=pairs(r)*nb*nb;let jump=3*r*ng*nb;let response=r*ne*nb;
             let l=CarrierLayout{a:size,q:size+square,j:size+2*square,j2:size+2*square+jump,t:size+2*square+2*jump};
             size+=2*square+2*jump+response;l}).collect();
         Layout{size,h0,carriers}
     }
 }
+
+/// The pairs k' ≤ k of a carrier of rank r, and pair (k', k)'s place among them.
+fn pairs(r:usize)->usize{r*(r+1)/2}
+fn pair(k1:usize,k:usize,r:usize)->usize{k1*r-k1*(k1.max(1)-1)/2+(k-k1)}
 
 /// The interpolation stencil at s: per focused beam the first of its four nodes, their cubic
 /// weights and the weights' derivatives in s_f; the nodes are their tensor product.
@@ -279,11 +287,12 @@ impl Model{
             for x in 0..nb{for y in 0..nb{out[layout.h0+x*nb+y]=e.hamiltonian[(states[x],states[y])];}}
             for(c,cl)in layout.carriers.iter().enumerate(){
                 let r=self.carriers[c].rank;
-                for k1 in 0..r{for k in 0..r{
-                    let base=(k1*r+k)*nb*nb;
+                for k1 in 0..r{for k in k1..r{
+                    let base=pair(k1,k,r)*nb*nb;
                     for x in 0..nb{for y in 0..nb{
+                        // S_k1k = (A_k1k + A_kk1†)/2, Q_k1k.
                         let(bx,by)=(states[x],states[y]);let(mut a,mut q)=(Complex::ZERO,Complex::ZERO);
-                        for i in 0..ne{a+=u[c][k1][(i,bx)].conj()*t[c][k][(i,by)];}
+                        for i in 0..ne{a+=(u[c][k1][(i,bx)].conj()*t[c][k][(i,by)]+(u[c][k][(i,by)].conj()*t[c][k1][(i,bx)]).conj())*0.5;}
                         for jj in 0..ng{for ax in 0..3{q+=j[c][k1][ax][(jj,bx)].conj()*j[c][k][ax][(jj,by)];}}
                         out[cl.a+base+x*nb+y]=a;out[cl.q+base+x*nb+y]=q;
                     }}
@@ -313,7 +322,7 @@ impl Model{
         let(ng,ne)=(self.ground.ground_states.len(),self.ground.excited_states.len());let points=self.grid(fine.nodes);let mut worst=0_f64;
         for(b,layout)in self.layouts.iter().enumerate(){
             let nb=self.blocks[b].states.len();let mut kinds:Vec<(usize,usize)>=vec![(layout.h0,layout.h0+nb*nb)];
-            for(c,cl)in layout.carriers.iter().enumerate(){let r=self.carriers[c].rank;let(square,jump,response)=(r*r*nb*nb,3*r*ng*nb,r*ne*nb);
+            for(c,cl)in layout.carriers.iter().enumerate(){let r=self.carriers[c].rank;let(square,jump,response)=(pairs(r)*nb*nb,3*r*ng*nb,r*ne*nb);
                 kinds.extend([(cl.a,cl.a+square),(cl.q,cl.q+square),(cl.j,cl.j+jump),(cl.j2,cl.j2+jump),(cl.t,cl.t+response)]);}
             for(start,end)in kinds{
                 let exact=|i:usize|&fine.data[b][2*(i*layout.size+start)..2*(i*layout.size+end)];
@@ -411,18 +420,17 @@ impl Model{
         let layout=&self.layouts[block];let n2=N*N;let d=self.focused.len();
         let mut out=Local{hamiltonian:[Complex::ZERO;25],scalar:0.,potential:[[0.;50];MOST_FOCUSED],shift:[[0.;50];MOST_FOCUSED],field:[[0.;50];3]};
         let mut buf=[0.;50];let(mut m,mut gamma)=([0.;50],[0.;50]);
+        // The pair (k, k1)'s tables are (k1, k)'s adjoints: c X + (c X)† for k1 < k. The force reads
+        // only Re⟨ψ|·|ψ⟩, so its matrices take 2 c X for the two.
+        let adjoint=|c:Complex,x:&[f64;50],acc:&mut [f64;50]|{for a in 0..N{for b in 0..N{let(i,j)=(2*(a*N+b),2*(b*N+a));let(u,v)=(x[j],-x[j+1]);acc[i]+=c.re*u+c.im*v;acc[i+1]+=c.re*v-c.im*u;}}};
         for(c,cl)in layout.carriers.iter().enumerate(){
             let r=self.carriers[c].rank;let f=&p.fields[c];
-            for k1 in 0..r{for k in 0..r{
-                let pair=(k1*r+k)*n2;let ee=f.e[k1].conj()*f.e[k];
-                self.gather::<W>(block,&p.stencil,None,cl.a+pair,&mut buf);caxpy::<W>(ee,&buf,&mut m);
-                for a in 0..3{caxpy::<W>(f.grad[k1][a].conj()*f.e[k]+f.e[k1].conj()*f.grad[k][a],&buf,&mut out.field[a]);}
-                for g in 0..d{self.gather::<W>(block,&p.stencil,Some(g),cl.a+pair,&mut buf);caxpy::<W>(ee,&buf,&mut out.shift[g]);}
-                if k1<=k{
-                    self.gather::<W>(block,&p.stencil,None,cl.q+pair,&mut buf);caxpy::<W>(ee,&buf,&mut gamma);
-                    // The pair (k, k1)'s table is this one's adjoint: ee Q + (ee Q)†.
-                    if k1<k{for a in 0..N{for b in 0..N{let(i,j)=(2*(a*N+b),2*(b*N+a));let(u,v)=(buf[j],-buf[j+1]);gamma[i]+=ee.re*u+ee.im*v;gamma[i+1]+=ee.re*v-ee.im*u;}}}
-                }
+            for k1 in 0..r{for k in k1..r{
+                let at=pair(k1,k,r)*n2;let ee=f.e[k1].conj()*f.e[k];let both=if k1<k{2.}else{1.};
+                self.gather::<W>(block,&p.stencil,None,cl.a+at,&mut buf);caxpy::<W>(ee,&buf,&mut m);if k1<k{adjoint(ee,&buf,&mut m);}
+                for a in 0..3{caxpy::<W>((f.grad[k1][a].conj()*f.e[k]+f.e[k1].conj()*f.grad[k][a])*both,&buf,&mut out.field[a]);}
+                for g in 0..d{self.gather::<W>(block,&p.stencil,Some(g),cl.a+at,&mut buf);caxpy::<W>(ee*both,&buf,&mut out.shift[g]);}
+                self.gather::<W>(block,&p.stencil,None,cl.q+at,&mut buf);caxpy::<W>(ee,&buf,&mut gamma);if k1<k{adjoint(ee,&buf,&mut gamma);}
             }}
         }
         self.gather::<W>(block,&p.stencil,None,layout.h0,&mut buf);
@@ -430,7 +438,7 @@ impl Model{
         let at=|v:&[f64;50],a:usize,b:usize|Complex::new(v[2*(a*N+b)],v[2*(a*N+b)+1]);
         let mut scalar=0.;for a in 0..N{scalar+=buf[2*(a*N+a)]-m[2*(a*N+a)];}scalar/=N as f64;out.scalar=scalar;
         for a in 0..N{for b in 0..N{
-            let herm=at(&buf,a,b)-(at(&m,a,b)+at(&m,b,a).conj())*0.5;
+            let herm=at(&buf,a,b)-at(&m,a,b);
             out.hamiltonian[a*N+b]=herm-at(&gamma,a,b)*Complex::new(0.,0.5)-if a==b{Complex::new(scalar,0.)}else{Complex::ZERO};
         }}
         out
@@ -515,9 +523,9 @@ impl Model{
                 let carrier=&self.carriers[c];let rank=carrier.rank;
                 for(j,&l)in carrier.beams.iter().enumerate(){
                     let intensity=self.geometry[l].field(r).0.norm_sqr();let coefficient=&carrier.coefficients[j];
-                    for k1 in 0..rank{for k in 0..rank{
-                        self.interpolate(block,&stencil,None,cl.a+(k1*rank+k)*n2,&mut buf[..n2]);
-                        u-=intensity*(coefficient[k1].conj()*coefficient[k]*buf[x*nb+x]).re;
+                    for k1 in 0..rank{for k in k1..rank{
+                        self.interpolate(block,&stencil,None,cl.a+pair(k1,k,rank)*n2,&mut buf[..n2]);
+                        u-=intensity*(coefficient[k1].conj()*coefficient[k]*buf[x*nb+x]).re*if k1<k{2.}else{1.};
                     }}
                 }
             }

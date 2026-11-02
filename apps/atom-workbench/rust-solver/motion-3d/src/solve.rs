@@ -23,7 +23,14 @@
 //!   carries the friction, so this also keeps the temperature's step error near η of its target;
 //! - the step's light impulse, relative, within η of the temperature target.
 //! Both scale as dt², so a step that misses is shrunk by the square root of its excess and checked
-//! again; one that meets them with room is grown the same way.
+//! again; one that meets them with room is grown the same way. The step's exponentials are summed
+//! to a share η of its own population budget, η ε dt/waiting, instead of to double precision.
+//!
+//! # Batches
+//! A batch is cut into two groups per thread (lib.rs `Stratum`): each group's initial states are a
+//! Latin hypercube, so its mean of the initial energies, and of what they leave at early times,
+//! varies far less than independent draws'; the groups are independent, so the jackknife over them
+//! measures the error.
 //!
 //! # Regime
 //! A point particle has no zero-point motion: below a few vibrational quanta per axis the method
@@ -55,10 +62,10 @@ pub const ESCAPE:f64=20.;
 pub const CLASSICAL:f64=4.;
 /// The most trajectories a solve runs; a solve stopped there returns its result with the reason.
 pub const MOST_TRAJECTORIES:u64=1<<14;
-/// The most trajectories of a group (a task and a jackknife group): a batch is cut into at least
-/// two groups per thread, so a small batch fills the threads and the jackknife has enough groups.
-const GROUP:u64=8;
-fn group(count:u64,threads:u64)->u64{(count/(2*threads)).clamp(1,GROUP)}
+/// A batch's group: a batch is cut into two groups per thread (jackknife groups and Latin
+/// hypercubes of initial states, lib.rs `Stratum`), so a batch's groups are as large as its size
+/// allows while the jackknife keeps at least that many.
+fn group(count:u64,threads:u64)->u64{(count/(2*threads)).max(1)}
 
 pub const NOT_CONFINED:&str="沿某个方向没有约束原子的势阱：3D 运动计算光镊中的单个原子，需要聚焦在原子处的光（光镊）";
 
@@ -149,10 +156,12 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     let rate=if pattern>0.{pattern}else{frequencies.iter().copied().fold(0.,f64::max)};
     let mut steps=((interval*rate/(A_PRIORI_SHARE*TEMPERATURE_TARGET).sqrt()).ceil() as usize).max(1);
     let threads=rayon::current_num_threads() as u64;let pilot=2*threads;
-    let settings=|steps:usize|Settings{dt:interval/steps as f64,free:[true;3],escape_intensity:escape,frequencies};
+    let settings=|steps:usize,truncation:f64|Settings{dt:interval/steps as f64,free:[true;3],escape_intensity:escape,frequencies,truncation};
     let duration=times[outputs-1];
-    let(states,jumps)=sample_states(&model,&settings(steps),&initial,seed,pilot,steps,outputs);
+    let(states,jumps)=sample_states(&model,&settings(steps,f64::EPSILON),&initial,seed,pilot,steps,outputs);
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);
+    // The exponentials are summed to a share η of the step's own population budget, η ε dt/waiting.
+    let settings=|steps:usize|{let dt=interval/steps as f64;settings(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TOLERANCE*dt/waiting)};
     for _ in 0..8{
         let engine=Engine{model:&model,settings:settings(steps)};let excess=step_excess(&engine,&states,waiting);
         let next=((steps as f64*excess.sqrt()).ceil() as usize).max(1);
