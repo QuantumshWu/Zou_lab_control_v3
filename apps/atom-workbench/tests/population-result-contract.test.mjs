@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
-import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
+import {POPULATION_TOLERANCE,defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {POPULATION_GROUPS} from '../dist/js/atom-workbench/src/population-selection.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
@@ -24,7 +24,7 @@ function meanFixture(f){
 test('a finite result accepts complete all-group accuracy without claiming a density',()=>{
   const f=fixture();f.data.diagnostics.rawDensityPositivityError=.2;
   const result=normalizeDynamicsResult(f.data,f.scene);
-  assert.equal(result.populationAccuracy.requestedTolerance,.005);
+  assert.equal(result.populationAccuracy.requestedTolerance,POPULATION_TOLERANCE);
   assert.equal(result.populationAccuracy.scope.groups.length,POPULATION_GROUPS.length);
   assert.equal(result.mean.density,undefined);
   f.data.populationAccuracy.scope.groups.pop();
@@ -35,9 +35,9 @@ test('a finite trajectory cannot bypass complete accuracy qualification',()=>{
   const f=fixture();
   for(const change of [
     d=>delete d.populationAccuracy,d=>d.populationAccuracy=null,
-    d=>d.populationAccuracy.status='unresolved',d=>d.populationAccuracy.estimatedMaximumError=.006,
+    d=>d.populationAccuracy.status='unresolved',d=>d.populationAccuracy.estimatedMaximumError=1.2*POPULATION_TOLERANCE,
     d=>d.populationAccuracy.estimatedMaximumError=NaN,d=>d.populationAccuracy.requestedTolerance=0,
-    d=>d.populationAccuracy.requestedTolerance=.021,d=>d.populationAccuracy.requestedTolerance='0.005',
+    d=>d.populationAccuracy.requestedTolerance=.021,d=>d.populationAccuracy.requestedTolerance=String(POPULATION_TOLERANCE),
     d=>d.populationAccuracy.requestedTolerance=.001,
     d=>d.populationAccuracy.scope.states=31,d=>d.populationAccuracy.scope.samples=2,
     d=>d.populationAccuracy.scope.groups.pop(),d=>d.populationAccuracy.scope.groups[0]=d.populationAccuracy.scope.groups[1],
@@ -90,7 +90,7 @@ test('transport binds population accuracy to the fixed requested accuracy and th
   const alone={includeMean:false};
   await assert.rejects(client.solve(f.scene,f.scene.dynamics,alone),/不完整或无效/);
   reply=f.data;
-  assert.equal((await client.solve(f.scene,f.scene.dynamics,alone)).populationAccuracy.requestedTolerance,.005);
+  assert.equal((await client.solve(f.scene,f.scene.dynamics,alone)).populationAccuracy.requestedTolerance,POPULATION_TOLERANCE);
   const other=f.states.find(state=>state.id!==f.scene.dynamics.initialStateId).id;
   await assert.rejects(client.solve(f.scene,{...f.scene.dynamics,initialStateId:other},alone),/布居初态/);
   assert.equal(calls,3);

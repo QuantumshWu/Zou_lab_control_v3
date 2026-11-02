@@ -53,17 +53,16 @@ const formatted=(source,start,values)=>{
 const chinese=(english,name)=>{const text=solverText(english);
   assert.notEqual(text,english,name);assert.match(text,/[\u4e00-\u9fff]/,name);assert.doesNotMatch(text,/\b(the|is|of|above|after)\b/,name);return text;};
 test('the stop and checkpoint reasons the solver formats are shown in Chinese',()=>{
-  const whys=[['the last cycle of the ladder added no direction',[27]],['the largest change did not shrink',[36]],['the basis memory was spent',[30]]]
+  const whys=[['the space stopped growing',[27]],['the basis memory was spent',[30]],['the solve budget',[48]]]
     .map(([start,values])=>formatted(pipelineSource,start,values));
   const samples=formatted(pipelineSource,'; {} of {} samples above it',[5,1000,'0.0200','0.1001']);
   const means=formatted(pipelineSource,'; {means} mean output(s) above it',[1]);
-  const unresolved=formatted(pipelineSource,'; {unresolved} of {} inner solves did not converge',[3,40]);
   for(const why of whys){
-    for(const tail of [['','',''],[samples,'',''],['',means,''],[samples,means,''],[samples,means,unresolved],['','',unresolved]]){
-      chinese(formatted(pipelineSource,'Stopped because',[why,24,'1.89e-2','5e-3',...tail]),why);
+    for(const tail of [['',''],[samples,''],['',means],[samples,means]]){
+      chinese(formatted(pipelineSource,'Stopped because',[why,24,'1.89e-2','1e-2',...tail]),why);
     }
   }
-  chinese(formatted(adapterSource,'Checkpoint at',[8,'1.20e-2','5e-3']),'checkpoint');
+  chinese(formatted(adapterSource,'Checkpoint at',[8,'1.20e-2','1e-2']),'checkpoint');
   chinese(formatted(adapterSource,"The mean's error estimate is",['3.61e0']),'uninformative mean');
   // A request stopped before its first solve: nothing computed, the reason alone.
   chinese(formatted(pipelineSource,'The lattice of this request has',[150,'5.3','5']),'memory guard');

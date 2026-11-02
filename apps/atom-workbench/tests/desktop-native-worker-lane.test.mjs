@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createModelWorker} from '../desktop-native/ui/model-worker.mjs';
 import {IpcNativeLane} from '../desktop-native/ui/ipc-lane.mjs';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
-import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
+import {POPULATION_TOLERANCE,defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {FULL_MODEL_SCHEMA,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {nativeResult} from './native-result.mjs';
@@ -58,8 +58,8 @@ test('Worker sends the identical complete model, finite jobs to the trajectory l
   assert.equal(requests[0].options.includeMean,true);assert.equal(requests[0].progress,true);
   const model=buildFullMasterModel(scene,{...scene.dynamics,...options});
   for(const sent of requests){
-    // A tolerance in the options is not read: every native request asks for 0.005.
-    assert.equal(sent.options.populationTolerance,.005);
+    // A tolerance in the options is not read: every native request asks for POPULATION_TOLERANCE.
+    assert.equal(sent.options.populationTolerance,POPULATION_TOLERANCE);
     assert.equal(sent.modelSchema,FULL_MODEL_SCHEMA);
     // Exactly the fields the worker reads; e.g. no frameFrequenciesMHz: the
     // native solver returns the laboratory-frame mean itself.
@@ -73,12 +73,12 @@ test('Worker sends the identical complete model, finite jobs to the trajectory l
   // The Worker's response is exactly what the UI reader accepts.
   const finite=normalizeDynamicsResult(messages.at(-1).event.data,scene);
   assert.equal(finite.timesUs.length,3);assert.equal(finite.mean.converged,true);assert.deepEqual(finite.assumptions,model.assumptions);
-  // A scene that still carries a tolerance of its own: the mean asks for 0.005 too.
+  // A scene that still carries a tolerance of its own: the mean asks for POPULATION_TOLERANCE too.
   const old=structuredClone(scene);old.dynamics.populationTolerance=.021;
   await worker.receive({kind:'solve',channel:'mean',request:{scene:old,modelSchema:FULL_MODEL_SCHEMA,
     request:{clientId:'worker-test',sequence:2},options:{durationUs:.1,samples:3,meanOnly:true,includeMean:true}}});
   for(let i=0;i<50&&!events.some(e=>e.channel==='mean'&&e.kind==='response');i++)await tick();
-  assert.equal(requests.at(-1).options.populationTolerance,.005);assert.equal(requests.at(-1).lane,'mean');
+  assert.equal(requests.at(-1).options.populationTolerance,POPULATION_TOLERANCE);assert.equal(requests.at(-1).lane,'mean');
   const mean=normalizeDynamicsResult(events.find(e=>e.channel==='mean'&&e.kind==='response').data,old);
   assert.equal(mean.timesUs.length,1);assert.equal(mean.mean.converged,true);
   await worker.receive({kind:'shutdown'});assert.equal(events.at(-1).kind,'shutdown-complete');

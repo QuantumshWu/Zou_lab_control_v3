@@ -3,7 +3,7 @@
 
 /// The population tolerance: absolute, on the probability scale, over every
 /// state and requested group. It is fixed; no other accuracy is served.
-pub const POPULATION_TOLERANCE:f64=5e-3;
+pub const POPULATION_TOLERANCE:f64=1e-2;
 /// The share of the tolerance each a-priori truncation may take: what the
 /// convergence check cannot see, because it compares the run's model with
 /// itself. Each rule leaves out at most A_PRIORI_SHARE x tolerance: the

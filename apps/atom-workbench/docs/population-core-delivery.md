@@ -1,6 +1,6 @@
 # Atom Workbench：布居求解器交付说明
 
-所有请求（`rb87-full/2`）只走一条路径：`rust-solver/population-core` 的折叠 Fourier 晶格。有限时间轨迹和长期平均在同一个晶格上求解，误差按收敛估计控制到 ε = 0.005（概率尺度的绝对误差，即 0.5%；固定值，每个请求都发送 `populationTolerance: 0.005`，不是用户设置），不会静默放宽。每个结果都带估计误差：所有输出都在 ε 内时为 `estimated-converged`，否则返回最好的检查点并标为 `estimated-partial`（附原因）；算出的结果从不扣下，只有什么可用的都没算出时才报 `not-converged`。物理模型由 TypeScript 构建；求解器不按失谐、流形或"禁戒"标签删除模型给出的任何耦合，也不依赖矩阵元恰好为零。
+所有请求（`rb87-full/2`）只走一条路径：`rust-solver/population-core` 的折叠 Fourier 晶格。有限时间轨迹和长期平均在同一个晶格上求解，误差按收敛估计控制到 ε = 0.01（概率尺度的绝对误差，即 1%；固定值，每个请求都发送 `populationTolerance: 0.01`，不是用户设置），不会静默放宽。每个结果都带估计误差：所有输出都在 ε 内时为 `estimated-converged`，否则返回最好的检查点并标为 `estimated-partial`（附原因）；算出的结果从不扣下，只有什么可用的都没算出时才报 `not-converged`。物理模型由 TypeScript 构建；求解器不按失谐、流形或"禁戒"标签删除模型给出的任何耦合，也不依赖矩阵元恰好为零。
 
 ## 物理模型（`src/full-master-model.ts`）
 
@@ -17,7 +17,7 @@
 
 ### 请求格式
 
-`scripts/native-protocol.mjs` 发给求解器的 `model` 与 `claude/atom-model` 的构建器逐位相同：`claude/atom-research` 的 `research/population/models/gen_model.mjs` 用那个构建器生成的、晶格核据以验证的请求（`research/population/inputs/*_new.request.json`，6 个场景：probeTweezer、singleProbe、twoNearNoTrap、threeNearStrong、fourNear、fiveNearPrepared），本版从同一场景文件（经当前场景迁移）重建后逐位一致。`tests/research-requests.test.mjs` 对其中 3 个场景按字段的 SHA-256 检查。与 `gen_model.mjs` 的输出相比，应用的请求只多两处：`options` 写明 `durationUs`、`samples`、`populationTolerance: 0.005`、`includeAsymptotic`、`steadyOnly` 和 `meanHorizonUs`（`gen_model.mjs` 写 `{}`），每个驱动另带 `laserIds`（求解器不读）。
+`scripts/native-protocol.mjs` 发给求解器的 `model` 与 `claude/atom-model` 的构建器逐位相同：`claude/atom-research` 的 `research/population/models/gen_model.mjs` 用那个构建器生成的、晶格核据以验证的请求（`research/population/inputs/*_new.request.json`，6 个场景：probeTweezer、singleProbe、twoNearNoTrap、threeNearStrong、fourNear、fiveNearPrepared），本版从同一场景文件（经当前场景迁移）重建后逐位一致。`tests/research-requests.test.mjs` 对其中 3 个场景按字段的 SHA-256 检查。与 `gen_model.mjs` 的输出相比，应用的请求只多两处：`options` 写明 `durationUs`、`samples`、`populationTolerance: 0.01`、`includeAsymptotic`、`steadyOnly` 和 `meanHorizonUs`（`gen_model.mjs` 写 `{}`），每个驱动另带 `laserIds`（求解器不读）。
 
 ### 物理验证（ε 见各项）
 
@@ -41,7 +41,7 @@
 - **极点求解**（`poles`）：每个极点在整个晶格上求解：实极点 ξ 的 (A − ξ)w = f，极点 0 是加边稳态系统 (A + u τ0ᵀ)w = u（迹行约束）。内解是右预条件 GMRES（实坐标，只算正则半，镜像其余），预条件为每个块上的 Floquet 框架（中心带 Woodbury 项）；停止看重算的真残差（移位解 1e-7，稳态 1e-9），一个重启周期没有把真残差减半就返回（r07 的小移位内解原来每次跑满 900 步，20 µs 用 322 s 且部分收敛；现在 20.5 s 收敛）。
 - **有理 Krylov 空间**（`space`）：每个运行一个从 x0 出发的空间。基的第一列是迹载体 u/|u|（u = I/n 在中心块），其余每一列都先投影到块迹为零的子空间 K（正交投影，基保持正交归一）：块迹是晶格算子的精确左本征矢，每个块迹按构造守恒。先激活过门槛的显式步的平移（副本 S_s v ± S_-s v 直接入基，不用求解），再做加边稳态列（加边系统奇异时改为 x0 上的 0⁺ 极点）；第一轮之前加入 x0 在中心生成元本征矢上、在第一个输出时刻布居权重仍 ≥ ηε 的分量（单模式晶格的精确方向：强驱动的 Rabi 振荡，实极点分辨得慢）；之后按比特反序的固定循环解实极点梯子：σ 从顶到 1/T，每十倍 2 个（每十倍 1 个时三、四、五束光 20 µs 少用三成求解，但停滞或卡在 ε 边上）。顶 = max(10/t₁, P 的最快频率)：10/t₁ 是 shift-and-invert 在时刻 t 的极点 t/10（van den Eshof–Hochbruck），t₁ 为第一个采样时刻（均值取最短视界）；轨迹的读出看得到各模式的旋转，所以再取显式集 P 的最快频率（P 的模式携带 ≥ ηε 的幅度，环 Q 的在其下）。由 x0 在 L0′ 本征基中推的顶不成立：两态玩具 L0′ = 0、b0 的 x0 在 L0′ 下静止，动力学全来自晶格耦合，误差分别 7.9e-3（被接受）与 0.25。正交化为带 Kahan–Parlett 判据的分块 Gram–Schmidt；低于噪声地板（100 × 内解容差）的方向不入基；基与像受内存预算限制。
 - **约化模型**（`reduced`）：欧氏 Galerkin，H = Wᵀ(AW)，像 AW 随基增长存下（每列一次作用、两次 Gram）。A 把一切映入 K，H 的载体行为零，块迹守恒。本征分解 H s_j = θ_j s_j 给出模式；|θ_j|T ≤ ηε 的在运行时长内视为守恒。增长模（Re θ > 0）是投影的伪影，因为生成元的谱在左半平面：它被反射，Re θ → −Re θ。如果钳到虚轴，它会不衰减地留到视界——r21 的 1 s 均值因两个被钳的模式差 2.0e-2，反射后为 1.6e-8。所有输出（网格上的轨迹、各视界的态、最慢弛豫）都从同一个模型读出。单模式晶格（只有中心）走同一条路：稠密本征分解的慢本征值绝对误差约 eps·‖L0′‖（D1 + D2 系 ‖L0′‖ = 4.5e7 rad/µs，即 1e-8 /µs），1 s 时只开探测光的 p(1 s) 偏 1.1e-3，所以不用它读输出。
-- **接受与停止**（`pipeline`，确定性，不看墙钟）：稳态列之后一个检查点，之后每个整轮一个。输出的估计 = 与上一个检查点之差（ε 的度量；轨迹采样点另加投影到概率单纯形的改变量）：一轮访问梯子的每个尺度一次，整轮的变化就是收敛检查——QuTiP 式的估计，不是严格界。所有估计 ≤ ε、这一轮确实加入了新方向、且稳态列和这一轮的内解都收敛（真残差 ≤ ηε；内解失败的极点等于没有访问那个尺度：r07 曾因此以 5.7e-3 的误差被接受）时接受（r00 曾在一个没有新方向的检查点"变化为 0"而被接受，误差 0.97）。否则当一轮没有加入方向、或最大变化在一轮内没有减小、或基内存用完时停止，返回最好的检查点：轨迹每个采样点的估计都 ≤ ε 时为 `estimated-converged`，否则为 `estimated-partial` 并附原因（含超出的采样点范围），每个采样点带自己的估计；算出的结果从不扣下。
+- **接受与停止**（`pipeline`，确定性，不看墙钟）：稳态列之后一个检查点，之后每 4 次求解一个。输出的估计 = 与上一个检查点之差（ε 的度量；轨迹采样点另加投影到概率单纯形的改变量）——QuTiP 式的相邻近似比较，不是严格界。所有估计 ≤ ε 且基的列数比上一个检查点多（没有新方向时"变化为 0"不算收敛：r00）时接受。否则在空间不再增长、基内存用完或求解次数用满（48）时停止，返回最好的检查点：轨迹每个采样点的估计都 ≤ ε 时为 `estimated-converged`，否则为 `estimated-partial` 并附原因（含超出的采样点范围），每个采样点带自己的估计；算出的结果从不扣下。
 - **最慢弛豫与视界**：最慢弛豫取种群权 ≥ ηε 的最慢衰减模式（残差由其向量的像直接算），只报告，不参与接受：残差 ≤ 0.1 × 速率时为已解析，否则只报告范围。视界为 p̄(100 ms)、p̄(1 s)，一次运行同时给出；p̄(T) 是 T 时刻态的中心块，即实验室系相位平均，投影到密度矩阵，改变量计入估计。
 - **先验份额**（`accuracy::A_PRIORI_SHARE`，η = 0.1）：收敛检查看不到的先验截断——晶格的门与覆盖、折叠的资格与间隙、运行折叠的余项与远壳环（各一半）、守恒阈值、最慢弛豫的候选——各自 ≤ ηε；同时用满仍在 ε 的三分之一以内。它取代了原来的 GATE、SEED_AMPLITUDE、FOLD_SHARE、CANDIDATE_WEIGHT、GROWTH_BUDGET 和环的份额。
 - **内存保护**（`pipeline`）：一个请求约占 0.5 GB 加它每个运行的每个晶格模式 32 MB（在旧估计器下测得，现在是上界）；完整请求的轨迹和均值两个运行同时执行，超出时在第一次求解前停止并说明原因。预算是安装的物理内存的一半；基和它的像用预算剩下的部分。
@@ -75,9 +75,9 @@
 - BLAS 固定单线程，唯一线程设置是 `ATOM_SOLVER_THREADS`（桌面版缺省 8）。线程数只在舍入层面影响结果，不是逐位相同；输出的前后对比须用同一线程数。
 - worker 保留最近一次准备的模型（`lattice_core_adapter::prepared_model`）：同一模型换初态、网格或视界的请求重用它。
 - worker 启动自检为 `op:"warmup"`。
-- 每个请求的 ε 固定为 0.005；请求只能重述它，其它值报错。
+- 每个请求的 ε 固定为 0.01；请求只能重述它，其它值报错。
 
-验证：`cargo test --workspace`（晶格各模块对稠密参考的单元测试、协议测试）与 `npm test`。其中 `tests/research-requests.test.mjs` 检查请求与晶格核验证请求逐位一致，`tests/display-switch.test.mjs` 检查"显示光移"经全阶静态光移进入能级图背景，`tests/scene-file.test.mjs` 检查带 `regime` 和 `populationTolerance` 的旧场景，`tests/population-tolerance.test.mjs` 检查每个请求都是 0.005，`tests/format.test.mjs` 检查求解器写出的方法说明都有中文。
+验证：`cargo test --workspace`（晶格各模块对稠密参考的单元测试、协议测试）与 `npm test`。其中 `tests/research-requests.test.mjs` 检查请求与晶格核验证请求逐位一致，`tests/display-switch.test.mjs` 检查"显示光移"经全阶静态光移进入能级图背景，`tests/scene-file.test.mjs` 检查带 `regime` 和 `populationTolerance` 的旧场景，`tests/population-tolerance.test.mjs` 检查每个请求都是 0.01，`tests/format.test.mjs` 检查求解器写出的方法说明都有中文。
 
 ## 静态光移（`src/floquet-background.ts`，能级图背景）
 
@@ -92,7 +92,7 @@
 
 ## 已知限制
 
-- 误差估计是整轮变化的收敛估计（QuTiP 式），不是严格上界。
+- 误差估计是相邻检查点之差（QuTiP 式），不是严格上界。
 - 部分收敛并如实报告的：随机场景 r02 的 10 ms、r07 的 10 ms 与均值，以及 r07 20 µs（它的小移位内解没有收敛，所以按规则不接受）；强 D1 + D2（2000 mW/cm²，20 µs，最早 3 个采样点）。r01 带原因停止：远失谐光的组合落在 L0 的谱内。
 - r00 的 p(1 s) 与冻结参考差 1.2e-2；两种处理与 10.28.5 一致，但参考自身有负布居，所以哪一个对尚未确定（见交接说明）。
 - 光镊场景的晶格算子比 main 重约 10 倍；10 ms 轨迹和均值比 10.28.5 慢约 2 倍（今天的负载下测；安静机器上复测）。

@@ -281,7 +281,7 @@ function trajectoryMiss(result:DynamicsResult):string{
   const errors=sampleErrors(result);return result.timesUs.length>1&&errors?partialShort(result.timesUs,errors,dynamics().durationUnit):'';
 }
 /** Both not within the tolerance, said short enough for one line at the narrowest window:
- * "t ≤ 0.42 μs 误差最大 0.61% · p̄(1 s) 误差 0.72%（均超 0.5%）". */
+ * "t ≤ 0.42 μs 误差最大 1.2% · p̄(1 s) 误差 1.4%（均超 1%）". */
 function bothSentence(result:DynamicsResult):string{
   const s=result.mean;
   return `${trajectoryMiss(result)} · ${meanSymbol(result)} 误差 ${errorPercent(s.estimatedError!)}（均超 ${errorPercent(POPULATION_TOLERANCE)}）`;

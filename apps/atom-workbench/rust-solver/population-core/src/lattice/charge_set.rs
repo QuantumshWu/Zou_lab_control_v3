@@ -238,10 +238,10 @@ mod tests{
         // P = {0, +-s}; the ring holds the next shell, and every charge with a
         // seed amplitude above the cover threshold is inside P u Q.
         let f=fixture();let p=prepared(&f);let n=4;let mut initial=vec![ZERO;n*n];initial[0]=ONE;
-        let set=explicit_set(&p,&initial,5e-3).unwrap();
+        let tolerance=super::super::accuracy::POPULATION_TOLERANCE;let set=explicit_set(&p,&initial,tolerance).unwrap();
         let s=p.plan.steps[p.plan.explicit()[0]].charge.clone();
         assert!(set.sets.explicit.contains(&s)&&set.sets.explicit.contains(&opposite(&s))&&set.sets.explicit[0]==p.generator.zero);
-        assert!(set.leak<=A_PRIORI_SHARE*5e-3,"leak {:e}",set.leak);
+        assert!(set.leak<=A_PRIORI_SHARE*tolerance,"leak {:e}",set.leak);
         assert!(set.internal.iter().all(|e|e.2<=RING_COUPLING)||set.promoted.len()==2*PROMOTIONS);
         // The superoperator norm against the dense matrix's power iteration.
         let op=&p.generator.components[&s].op;let d=16;let mut m=vec![ZERO;d*d];op.dense_into(n,ONE,&mut m);

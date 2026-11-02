@@ -245,11 +245,6 @@ impl Space{
     }
     pub fn solves(&self)->usize{self.columns.len()}
 }
-/// Whether a column's solve converged: its true relative residual within
-/// the a-priori share of the tolerance. Failed solves sit at 0.6-1 (r07's
-/// stagnating small shifts); a residual of 2e-5 at sigma = 1e-6 (r00's mean)
-/// is still the pole's column.
-pub fn resolved(column:&Column)->bool{column.residual<=super::accuracy::A_PRIORI_SHARE*super::accuracy::POPULATION_TOLERANCE}
 
 /// Projects a Hermitian-symmetric field into K: every block x_q loses its
 /// trace along I / n (x_q - tr(x_q) I / n; a mirror block's trace is the

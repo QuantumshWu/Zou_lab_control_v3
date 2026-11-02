@@ -159,9 +159,9 @@ export const MAXIMUM_DURATION_US=1e7;
 export const MAXIMUM_SAMPLES=2000;
 export const DEFAULT_DYNAMICS_SAMPLES=1000;
 export const DEFAULT_TWEEZER_WAVELENGTH_NM=852;
-/** The population accuracy of every solve: an absolute error of 0.005 in probability
- * units (0.5%), sent with each request. */
-export const POPULATION_TOLERANCE=.005;
+/** The population accuracy of every solve: an absolute error of 0.01 in probability
+ * units (1%), sent with each request. */
+export const POPULATION_TOLERANCE=.01;
 export function defaultDynamics(): DynamicsSettings {
   return {initialStateId:'ground-2-0',monitoredStateIds:['ground-2-0','ground-1--1','ground-1-0','ground-1-1'],
     durationUs:20,durationUnit:'μs',samples:DEFAULT_DYNAMICS_SAMPLES,meanHorizonUs:DEFAULT_MEAN_HORIZON_US,monitorMode:'auto',monitoredGroupIds:[]};

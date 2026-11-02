@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
+import {POPULATION_TOLERANCE} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {prepareNativeSolve} from '../scripts/native-protocol.mjs';
 
@@ -37,6 +38,6 @@ for(const [name,{scene:raw,request:expected}] of Object.entries(fixture.scenes))
     // The app's drives also name their lasers; omega, cos and sin are the validated ones.
     assert.equal(sha(JSON.stringify(m.drives.map(d=>({omega:d.omega,cos:d.cos,sin:d.sin})))),expected.fieldSha256.drives);
     assert.ok(m.drives.every(d=>Array.isArray(d.laserIds)&&d.laserIds.length>0));
-    assert.equal(native.options.populationTolerance,.005);
+    assert.equal(native.options.populationTolerance,POPULATION_TOLERANCE);
   });
 }

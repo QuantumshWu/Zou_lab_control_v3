@@ -15,8 +15,8 @@ atomic constants or remove physical couplings.
   its time is negligible whatever the initial state. Every output of a run
   (the trajectory on its grid, the means at the standard horizons, the
   slowest relaxation) is read from one Galerkin model of one rational Krylov
-  space, accepted when its change over a whole cycle of poles is within the
-  fixed tolerance 0.005.
+  space, accepted when its change between consecutive checkpoints (every 4
+  solves) is within the fixed tolerance 0.01 and the space grew.
 - `lapack`, `parallel`, `memory`: the LAPACK/BLAS wrappers, the worker pool
   and the installed memory the memory guard reads.
 

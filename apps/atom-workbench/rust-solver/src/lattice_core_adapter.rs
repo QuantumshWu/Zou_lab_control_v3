@@ -10,10 +10,11 @@
 //! # Result contract
 //! The one result shape, read by `normalizeDynamicsResult` in
 //! src/solver-client.ts; main.rs adds `protocol` and `modelSchema`. A run
-//! stops when every output has converged within the tolerance, when a cycle
-//! of its poles adds nothing or no longer improves it, or when its memory is
-//! spent, and returns its best checkpoint: a computed result is never
-//! withheld. The mean of every
+//! stops when every output's change between consecutive checkpoints is
+//! within the tolerance (its space grown since the previous one), when its
+//! space stops growing, or when its memory or solve budget is spent, and
+//! returns its best checkpoint: a computed result is never withheld. The
+//! mean of every
 //! request is the run of the mean alone (the same for a full request and a
 //! mean-only one, `meanOnly`): one joint run for the two standard horizons,
 //! 100 ms and 1 s, `meanHorizonUs` one of them (1e5 or 1e6; there is no t ->
@@ -28,8 +29,8 @@
 //!   with the reason) has >= 2 projected rows and `populationAccuracy`: `status`
 //!   (`estimated-converged` when every sample's estimate is within the
 //!   tolerance, else `estimated-partial` with its `reason`), `sampleErrors`
-//!   (per sample, an absolute population error: the sample's change over the
-//!   last whole cycle of poles plus the change of its projection onto the
+//!   (per sample, an absolute population error: the sample's change since
+//!   the previous checkpoint plus the change of its projection onto the
 //!   probability simplex; an estimate, not a bound),
 //!   `estimatedMaximumError` (their largest), `requestedTolerance`, `scope`.
 //! - `meanHorizons`, the mean, whenever one was asked for (computed or not):
@@ -38,8 +39,8 @@
 //!   reason}]`. A computed entry is the mean at T, the laboratory time
 //!   average at T (the state at T with its fast oscillations averaged out)
 //!   projected onto the density matrices, with `estimatedError` (its change
-//!   over the last whole cycle of poles plus the density projection's
-//!   change), `withinTolerance` (that estimate within the tolerance),
+//!   since the previous checkpoint plus the density projection's change),
+//!   `withinTolerance` (that estimate within the tolerance),
 //!   `status` `time-average` and its `reason`. An entry is `not-converged`,
 //!   populations and densities null, when its estimate is 1 or more; when
 //!   the run computed nothing usable, every entry is, with the run's reason
@@ -65,7 +66,7 @@ use atom_population_core::lattice::accuracy::{self,POPULATION_TOLERANCE};
 use atom_population_core::lattice::pipeline::{self,Answer,Checkpoint,LONGEST_TIME_US,MOST_SAMPLES,Request,Solution};
 
 const ENGINE:&str="rust-population-core-lattice";
-const METHOD:&str="Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically, the pieces negligible over the run left out): one rational Krylov space from the initial state and its translations, every output read from one Galerkin reduced model, each output's error estimated by its change over the last whole cycle of poles";
+const METHOD:&str="Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically, the pieces negligible over the run left out): one rational Krylov space from the initial state and its translations, every output read from one Galerkin reduced model, each output's error estimated by its change between consecutive checkpoints";
 /// A mean whose estimate reaches this carries no information (a population
 /// error of 1): it is reported not converged, unshown.
 const UNINFORMATIVE_BOUND:f64=1.;
@@ -265,7 +266,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
                 "applyMs":w.timing.apply_ms,"preconditionMs":w.timing.precondition_ms,"orthogonalizeMs":w.timing.orthogonalize_ms},
             "checkpoints":s.checkpoints.iter().map(|c|json!({"solves":c.solves,"columns":c.columns,"accepted":c.accepted,"bound":c.largest,
                 "trajectory":c.estimate.trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"horizons":c.estimate.horizons,
-                "growing":c.growing,"slowestRate":c.slowest.map(|s|s.rate),"ms":c.milliseconds})).collect::<Vec<_>>(),
+                "growing":c.growing,"slowestRate":c.slowest,"ms":c.milliseconds})).collect::<Vec<_>>(),
             "fold":{"budget":f.screened.budget,"screenedPieces":f.screened.pieces,"screenedTargets":f.screened.targets,"screenedBound":f.screened.spent,
                 "rings":f.rings,"ringResponses":f.ring_responses,"ringTargets":f.ring_targets,"dropped":f.dropped(),"landingsMs":f.landings_ms,"responsesMs":f.responses_ms,"ringsMs":f.rings_ms},
             "timingMs":{"eigenbasis":t.eigenbasis_ms,"explicitSet":t.explicit_set_ms,"fold":t.fold_ms,"setup":t.setup_ms,"solves":t.solves_ms,"projection":t.projection_ms,
@@ -354,14 +355,12 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
     let requested=STANDARD_HORIZONS.iter().position(|&h|h==options.mean_horizon_us).ok_or("meanHorizonUs outside the standard horizons")?;
     let mean=&means[requested];
     let entries=json!(means.iter().map(Mean::entry).collect::<Vec<_>>());
-    let slow=answer.slowest.as_ref();let resolved=slow.filter(|s|s.resolved());
     let diagnostics=json!({"meanMethod":METHOD,"meanDensityFrame":MEAN_FRAME,
         "meanTraceError":mean.trace_error,"meanPositivityError":mean.positivity,
         "meanAccuracy":{"requestedTolerance":POPULATION_TOLERANCE,"metric":"max over states and requested F groups"},
-        "slowestRelaxationUs":resolved.map(|s|1./s.rate),
-        "slowestRelaxation":slow.map(|s|json!({"ratePerUs":s.rate,"residualPerUs":s.residual,"resolved":s.resolved(),
-            "relaxationRangeUs":[1./(s.rate+s.residual),if s.rate>s.residual{Some(1./(s.rate-s.residual))}else{None}],
-            "rule":"the slowest decaying mode of the reduced model with population weight at least a tenth of the tolerance; resolved (slowestRelaxationUs) when its residual is within a tenth of its rate, else only the range"})),
+        "slowestRelaxationUs":answer.slowest.map(|rate|1./rate),
+        "slowestRelaxation":answer.slowest.map(|rate|json!({"ratePerUs":rate,
+            "rule":"the Ritz estimate: 1 / rate of the reduced model's slowest decaying mode (a growing one reflected) with population weight at least a tenth of the tolerance"})),
         "discardedOpticalCoherence":mean.discarded});
     match diagnostics{Value::Object(d)=>Ok((entries,d)),_=>Err("Mean diagnostics are not an object".into())}
 }
@@ -653,7 +652,7 @@ mod tests{
                 "errTraj":at.map(|e|e.0),"errTrajAt":at.map(|e|e.1),"errH":error_h,"estOverErrQuantiles":quantiles,
                 "perTimeMin":coverage.map(|c|c.0),"perTimeViolations":coverage.map(|c|c.1),"perTimeMinAll":coverage.map(|c|c.2),
                 "returnedErrTraj":returned.as_ref().map(|e|e.iter().fold(0_f64,|x,&y|x.max(y))),
-                "growing":c.growing,"slowestRate":c.slowest.map(|s|s.rate),"slowestResidual":c.slowest.map(|s|s.residual),"ms":c.milliseconds});
+                "growing":c.growing,"slowestRate":c.slowest,"ms":c.milliseconds});
             let work=json!({"operatorWork":c.inner.operator_work,"innerSteps":c.inner.steps,"innerMs":c.inner.milliseconds,"applyMs":c.inner.timing.apply_ms,"preconditionMs":c.inner.timing.precondition_ms,"orthogonalizeMs":c.inner.timing.orthogonalize_ms,"batchMs":c.inner.batch_ms,"blockOperations":c.inner.block_operations(),
                 "timingMs":{"explicitSet":c.timing.explicit_set_ms,"fold":c.timing.fold_ms,"setup":c.timing.setup_ms,"projection":c.timing.projection_ms,"model":c.timing.model_ms,"outputs":c.timing.outputs_ms},
                 "elapsedMs":started.elapsed().as_secs_f64()*1e3,"trajectoryNorm":c.trajectory.iter().map(|p|accuracy::metric(p,&zero,&groups)).fold(0_f64,f64::max)});
@@ -669,7 +668,7 @@ mod tests{
                 println!("{}",json!({"summary":true,"prepareMs":prepare_ms,"totalMs":total_ms,"lattice":lattice_json(prepared.lattice(),Some(&s))["run"],
                     "converged":s.converged,"reason":s.reason,"solves":a.solves,"bound":a.largest(),
                     "perTimeMin":coverage.map(|c|c.0),"perTimeViolations":coverage.map(|c|c.1),"perTimeMinAll":coverage.map(|c|c.2),
-                    "slowestRate":a.slowest.map(|x|x.rate),"slowestResidual":a.slowest.map(|x|x.residual),"slowestResolved":a.slowest.map(|x|x.resolved())}))},
+                    "slowestRate":a.slowest}))},
             Err(e)=>println!("{}",json!({"summary":true,"error":e,"totalMs":total_ms})),
         }
     }

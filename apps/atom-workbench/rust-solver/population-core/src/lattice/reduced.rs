@@ -21,18 +21,14 @@
 //!
 //! Outputs from the modes: the trajectory p(t) = sum_q Re e^{i nu_q t}
 //! diag(x_q(t)) (the local time average), the state at a horizon T and its
-//! centre block (the laboratory time average at T), the slow modes the
-//! slowest relaxation is read from (`pipeline`).
+//! centre block (the laboratory time average at T), and the slowest
+//! relaxation: the slowest decaying Ritz value of the outputs' modes.
 use super::*;
 use super::eigenbasis::conjugate_pairs;
 use super::krylov::Vectors;
 use super::poles::Lattice;
 use super::accuracy::{A_PRIORI_SHARE,POPULATION_TOLERANCE};
 use crate::parallel::Execution;
-
-/// A slow mode is resolved when its residual |A v - theta v| / |v| is within
-/// this share of its rate: the reported relaxation time within about 10%.
-pub const SLOW_ACCURACY:f64=0.1;
 
 /// The Galerkin projection of the space: the images and H.
 pub struct Galerkin{
@@ -159,20 +155,10 @@ impl Model{
     }
     /// The laboratory time average at the horizon T (the centre block).
     pub fn horizon(&self,t:f64)->Vec<f64>{self.populations(self.centre,&self.weights(t)).iter().map(|z|z.re).collect()}
-    /// The slowest relaxation's candidates: decaying modes (not conserved
-    /// over the run) of population weight at least `weight`, one of each
-    /// conjugate pair, slowest first: (index, rate).
-    pub fn slow_candidates(&self,weight:f64)->Vec<(usize,f64)>{
-        let mut out:Vec<(usize,f64)>=(0..self.r).filter(|&j|self.used[j].re<0.&&self.theta[j].im>=0.&&self.amplitudes[j]>=weight)
-            .map(|j|(j,-self.theta[j].re)).collect();
-        out.sort_by(|a,b|a.1.total_cmp(&b.1));out
+    /// The slowest relaxation rate (1/us): the slowest decaying mode as the
+    /// outputs use it (not conserved over the run, a growing one reflected)
+    /// of population weight at least `weight`.
+    pub fn slowest(&self,weight:f64)->Option<f64>{
+        (0..self.r).filter(|&j|self.used[j].re<0.&&self.amplitudes[j]>=weight).map(|j|-self.used[j].re).min_by(f64::total_cmp)
     }
-}
-
-/// A slow relaxation rate (1/us) and its residual (rad/us): resolved when the
-/// residual is within SLOW_ACCURACY of the rate.
-#[derive(Clone,Copy,Debug)]
-pub struct SlowRate{pub rate:f64,pub residual:f64}
-impl SlowRate{
-    pub fn resolved(&self)->bool{self.residual<=SLOW_ACCURACY*self.rate}
 }

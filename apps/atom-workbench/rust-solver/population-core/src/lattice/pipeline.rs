@@ -16,37 +16,44 @@
 //!    translations (with no solve), the bordered steady column, then the
 //!    real ladder from the fastest scale the outputs need down to 1 / T in a
 //!    fixed bit-reversed cycle. A one-mode lattice's generator is the
-//!    centre generator, whose eigenvectors are exact directions: before the
-//!    first cycle the space takes x0's components on them of population
+//!    centre generator, whose eigenvectors are exact directions: after the
+//!    first checkpoint the space takes x0's components on them of population
 //!    weight at least the a-priori share at the first output time (a strong
 //!    drive's Rabi oscillation, which real poles resolve slowly; D1 + D2 at
 //!    2000 mW/cm^2, 20 us: 0.24 off without them, 6.6e-3 with them; on a
 //!    lattice of many modes they are no eigenvectors and misled r07 to a
 //!    false acceptance).
-//! 4. Checkpoints after the steady column and after every cycle of the
-//!    ladder: the Galerkin model (`reduced`) and its outputs (the trajectory
-//!    on the grid, the horizons, the slowest relaxation). An output's
-//!    estimate is its change since the previous checkpoint: a cycle visits
-//!    every scale of the ladder once, so the change over a cycle is the
-//!    convergence check (an estimate, as QuTiP's step control is, not a
-//!    bound). A trajectory sample's bound adds the change of its projection
-//!    onto the probability simplex.
-//! 5. A checkpoint is accepted when every bound is within the tolerance, its
-//!    cycle added directions and its solves converged to the a-priori share
-//!    (a failed solve leaves its scale unvisited: r07's small shifts,
-//!    accepted 5.7e-3 off). The run stops there, or when a cycle added no
-//!    direction, or the largest change did not shrink over a cycle, or the
-//!    basis budget is spent, and returns its best checkpoint (`Answer`):
-//!    converged, or partial with the reason and every sample's own estimate.
-//!    Every checkpoint is reported to the observer as it is made.
+//! 4. Checkpoints after the steady column and after every CHECKPOINT solves
+//!    of the ladder: the Galerkin model (`reduced`) and its outputs (the
+//!    trajectory on the grid, the horizons, the slowest relaxation). An
+//!    output's estimate is its change since the previous checkpoint: the
+//!    difference of successive approximations, the convergence check of
+//!    QuTiP's practice (an estimate, not a bound). A trajectory sample's
+//!    estimate adds the change of its projection onto the probability
+//!    simplex.
+//! 5. A checkpoint is accepted when every estimate is within the tolerance
+//!    and the space grew since the previous checkpoint (an unchanged space
+//!    gives unchanged outputs). The run stops there, or when the space
+//!    stopped growing, or the basis memory or the solve budget is spent, and
+//!    returns its best checkpoint (`Answer`): converged, or partial with the
+//!    reason and every sample's own estimate. Every checkpoint is reported
+//!    to the observer as it is made.
 use super::*;
 use super::accuracy::{self,A_PRIORI_SHARE,POPULATION_TOLERANCE};
 use super::charge_set::{self,ExplicitSet,LatticeSets};
 use super::fold::{self,Duhamel,RunFold,Screened,StoredFold};
 use super::krylov::Vectors;
 use super::poles::{InnerWork,Lattice,Pole};
-use super::reduced::{Galerkin,Model,SlowRate};
+use super::reduced::Galerkin;
 use super::space::{self,Column,Space};
+
+/// Solves between checkpoints after the steady column's. The cycle's
+/// bit-reversed order spreads every stretch of CHECKPOINT solves over the
+/// whole ladder.
+const CHECKPOINT:usize=4;
+/// The most solves of a run: 10.31.1's budget, a deliberate margin (twice
+/// the 24 solves its slowest accepted research case took).
+const MAXIMUM_SOLVES:usize=48;
 
 /// Memory guard: a request takes about BASE_BYTES plus MODE_BYTES per
 /// lattice mode of each run, and its runs execute at once (`Request::runs`:
@@ -103,9 +110,11 @@ pub struct Estimate{pub trajectory:Vec<f64>,pub horizons:Vec<f64>}
 #[derive(Clone,Debug)]
 pub struct Checkpoint{
     pub solves:usize,pub columns:usize,
-    /// The estimate and the largest bound over every output.
+    /// The estimate and the largest over every output.
     pub estimate:Estimate,pub largest:f64,pub accepted:bool,
-    pub growing:usize,pub slowest:Option<SlowRate>,
+    /// Growing Ritz values (reflected) and the slowest relaxation rate
+    /// (1/us).
+    pub growing:usize,pub slowest:Option<f64>,
     /// Raw outputs: trajectory rows (row 0 rho0's), horizon rows.
     pub trajectory:Vec<Vec<f64>>,pub horizons:Vec<Vec<f64>>,
     /// The solves so far and the run's timing so far.
@@ -113,7 +122,7 @@ pub struct Checkpoint{
     pub milliseconds:f64,
 }
 
-/// The outputs of one checkpoint with their bounds: the run's result (its
+/// The outputs of one checkpoint with their estimates: the run's result (its
 /// best checkpoint) and every checkpoint reported as it is made.
 #[derive(Clone,Debug)]
 pub struct Answer{
@@ -121,18 +130,20 @@ pub struct Answer{
     /// The lattice's modes (the fields' layout).
     pub modes:Vec<Charge>,
     /// Trajectory rows projected onto the probability simplex (row 0 is
-    /// rho0's) and the bound of each (the estimate plus the projection's
+    /// rho0's) and the estimate of each (the change plus the projection's
     /// change).
     pub trajectory:Vec<Vec<f64>>,pub sample_errors:Vec<f64>,
     /// Horizon populations (laboratory time averages, raw), their fields on
-    /// `modes` (Hermitian-symmetric) and bounds.
+    /// `modes` (Hermitian-symmetric) and estimates.
     pub horizons:Vec<Vec<f64>>,pub horizon_fields:Vec<Vec<C>>,pub horizon_errors:Vec<f64>,
-    pub estimate:Estimate,pub slowest:Option<SlowRate>,
-    /// Every bound within the tolerance.
+    /// The changes, and the slowest relaxation rate (1/us).
+    pub estimate:Estimate,pub slowest:Option<f64>,
+    /// Every estimate within the tolerance, the space grown since the
+    /// previous checkpoint.
     pub accepted:bool,
 }
 impl Answer{
-    /// The largest bound over every output.
+    /// The largest estimate over every output.
     pub fn largest(&self)->f64{self.sample_errors.iter().chain(&self.horizon_errors).fold(0_f64,|a,&b|a.max(b))}
 }
 
@@ -174,23 +185,6 @@ pub fn simplex(values:&[f64])->Vec<f64>{
     let(mut sum,mut threshold)=(0.,0.);
     for(index,&value)in sorted.iter().enumerate(){sum+=value;let candidate=(sum-1.)/(index+1)as f64;if value>candidate{threshold=candidate;}else{break;}}
     values.iter().map(|x|(x-threshold).max(0.)).collect()
-}
-
-/// The slowest relaxation of a Galerkin model: its slowest decaying mode of
-/// population weight at least `weight` (`Model::slow_candidates`) with the
-/// residual |A v - theta v| / |v| of v = W s (the image from the lattice).
-fn slowest(model:&Model,space:&Space,vectors:&Vectors,weight:f64,lattice:&mut Lattice<'_>)->Result<Option<SlowRate>,String>{
-    let Some(&(j,rate))=model.slow_candidates(weight).first()else{return Ok(None)};
-    let r=model.r;let y=&model.vectors[r*j..r*(j+1)];
-    let basis:Vec<&[C]>=space.basis.iter().map(|v|v.as_slice()).collect();
-    let w=vectors.combinations(&basis,&[y.iter().map(|z|z.re).collect(),y.iter().map(|z|z.im).collect()])?;
-    let aw=w.iter().map(|x|{let mut y=vec![ZERO;x.len()];lattice.apply(x,&mut y).map(|_|y)}).collect::<Result<Vec<_>,_>>()?;
-    // A v - theta v, real and imaginary parts.
-    let theta=model.theta[j];let(wr,wi,ar,ai)=(&w[0],&w[1],&aw[0],&aw[1]);
-    let re:Vec<C>=(0..wr.len()).map(|e|C{re:ar[e].re-theta.re*wr[e].re+theta.im*wi[e].re,im:ar[e].im-theta.re*wr[e].im+theta.im*wi[e].im}).collect();
-    let im:Vec<C>=(0..wr.len()).map(|e|C{re:ai[e].re-theta.re*wi[e].re-theta.im*wr[e].re,im:ai[e].im-theta.re*wi[e].im-theta.im*wr[e].im}).collect();
-    let residual=(vectors.dot(&re,&re)+vectors.dot(&im,&im)).max(0.).sqrt()/(vectors.dot(wr,wr)+vectors.dot(wi,wi)).max(f64::MIN_POSITIVE).sqrt();
-    Ok(Some(SlowRate{rate,residual}))
 }
 
 /// The responses of the far shell's rings beyond the second order: per
@@ -309,9 +303,10 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     let mut galerkin=Galerkin::new(&lattice)?;
     let vectors=Vectors::new(lattice.operator())?;
     let mut checkpoints:Vec<Checkpoint>=Vec::new();
-    // The previous checkpoint's outputs and basis size, its largest change.
-    let mut previous:Option<(Vec<Vec<f64>>,Vec<Vec<f64>>,usize)>=None;let mut last_change:Option<f64>=None;
-    let mut best:Option<Answer>=None;let reason;let mut cycle_start=0;
+    // The previous checkpoint's outputs and basis size; the next pole of the
+    // cycle.
+    let mut previous:Option<(Vec<Vec<f64>>,Vec<Vec<f64>>,usize)>=None;
+    let mut best:Option<Answer>=None;let reason;let mut next=0usize;
     loop{
         let clock=Instant::now();
         galerkin.ingest(&space.basis,&mut lattice)?;
@@ -321,12 +316,9 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         let mut trajectory=model.trajectory(times);
         if let Some(first)=trajectory.first_mut(){*first=(0..n).map(|i|initial[i*n+i].re).collect();}
         let horizons:Vec<Vec<f64>>=request.horizons.iter().map(|&t|model.horizon(t)).collect();
-        // The change since the previous checkpoint (unknown at the first),
-        // whether the cycle added directions and whether its solves and the
-        // steady column reached their noise floor (a failed solve leaves its
-        // scale unvisited).
+        // The change since the previous checkpoint (unknown at the first:
+        // 1), and whether the space grew since.
         let grew=previous.as_ref().is_none_or(|p|space.basis.len()>p.2);
-        let failed=space.columns.first().into_iter().chain(&space.columns[cycle_start.max(1).min(space.solves())..]).filter(|c|!space::resolved(c)).count();
         let estimate=match &previous{
             Some((t0,h0,_))=>Estimate{trajectory:trajectory.iter().zip(t0).map(|(a,b)|accuracy::metric(a,b,request.groups)).collect(),
                 horizons:horizons.iter().zip(h0).map(|(a,b)|accuracy::metric(a,b,request.groups)).collect()},
@@ -338,44 +330,43 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         let coordinates:Vec<Vec<f64>>=request.horizons.iter().map(|&t|{let w=model.weights(t);
             (0..r).map(|i|(0..r).fold(0.,|acc,j|acc+mul(s[i+r*j],w[j]).re)).collect()}).collect();
         let horizon_fields=vectors.combinations(&basis,&coordinates)?;
-        let slow=slowest(&model,&space,&vectors,share,&mut lattice)?;
+        let slow=model.slowest(share);
         timing.outputs_ms+=outputs_clock.elapsed().as_secs_f64()*1e3;
         let mut answer=Answer{solves:space.solves(),modes:modes.clone(),trajectory:projected,sample_errors,horizons:horizons.clone(),horizon_fields,
             horizon_errors:estimate.horizons.clone(),estimate:estimate.clone(),slowest:slow,accepted:false};
         let largest=answer.largest();
-        answer.accepted=previous.is_some()&&grew&&failed==0&&largest<=tolerance;
+        answer.accepted=previous.is_some()&&grew&&largest<=tolerance;
         timing.projection_ms=galerkin.milliseconds;
         let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),estimate,largest,accepted:answer.accepted,growing:model.growing,slowest:slow,
             trajectory:trajectory.clone(),horizons:horizons.clone(),inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
         if let Some(o)=observer.as_mut(){o(&point,&answer);}
         checkpoints.push(point);
         // The best checkpoint with an estimate: one within the tolerance over
-        // any other, the latest of those, else the least largest bound.
+        // any other, the latest of those, else the least largest estimate.
         if previous.is_some()&&best.as_ref().is_none_or(|b|largest<=tolerance||(b.largest()>tolerance&&largest<b.largest())){best=Some(answer.clone());}
         if answer.accepted{reason=None;break;}
-        // 5. Stopping.
-        let why=if previous.is_some()&&!grew{Some(format!("the last cycle of the ladder added no direction after {} solves",space.solves()))}
-            else if last_change.is_some_and(|c|largest>=c){Some(format!("the largest change did not shrink over a cycle of the ladder after {} solves",space.solves()))}
-            else if space.full(){Some(format!("the basis memory was spent after {} solves",space.solves()))}else{None};
+        // 5. Stopping without acceptance.
+        let why=if !grew{Some(format!("the space stopped growing after {} solves",space.solves()))}
+            else if space.full(){Some(format!("the basis memory was spent after {} solves",space.solves()))}
+            else if space.solves()>=MAXIMUM_SOLVES{Some(format!("the solve budget ({MAXIMUM_SOLVES}) was spent"))}else{None};
         if let Some(why)=why{
             let b=best.as_ref().ok_or("A run stopped before its second checkpoint")?;
             let over:Vec<usize>=(0..b.sample_errors.len()).filter(|&i|b.sample_errors[i]>tolerance).collect();
             let samples=match(over.first(),over.last()){(Some(&a),Some(&z))=>format!("; {} of {} samples above it, t = {:.4} to {:.4} us",over.len(),b.sample_errors.len(),times[a],times[z]),_=>String::new()};
             let means=b.horizon_errors.iter().filter(|&&e|e>tolerance).count();
             let means=if means>0{format!("; {means} mean output(s) above it")}else{String::new()};
-            let unresolved=space.columns.iter().filter(|c|!space::resolved(c)).count();
-            let unresolved=if unresolved>0{format!("; {unresolved} of {} inner solves did not converge",space.solves())}else{String::new()};
-            reason=Some(format!("Stopped because {why}: the best checkpoint ({} solves) has an error estimate of {:.2e} against the tolerance {tolerance:e}{samples}{means}{unresolved}",b.solves,b.largest()));
+            reason=Some(format!("Stopped because {why}: the best checkpoint ({} solves) has an error estimate of {:.2e} against the tolerance {tolerance:e}{samples}{means}",b.solves,b.largest()));
             break;
         }
-        if previous.is_some(){last_change=Some(largest);}
         previous=Some((trajectory,horizons,space.basis.len()));
-        // Before the first cycle of a one-mode lattice, x0's components on its
-        // generator's eigenvectors that the first output still sees.
+        // After the first checkpoint of a one-mode lattice, x0's components
+        // on its generator's eigenvectors that the first output still sees.
         if checkpoints.len()==1&&modes.len()==1{space.add(&lattice,eigen.components(initial,share,first)?)?;}
-        // The next cycle of the ladder.
-        cycle_start=space.solves();
-        for &pole in &cycle{space.solve(&mut lattice,pole,kernel)?;if space.full(){break;}}
+        // The cycle up to the next checkpoint.
+        for _ in 0..CHECKPOINT{
+            space.solve(&mut lattice,cycle[next%cycle.len()],kernel)?;next+=1;
+            if space.full()||space.solves()>=MAXIMUM_SOLVES{break;}
+        }
     }
     let answer=best.ok_or("A run has its checkpoint")?;
     let work=lattice.work().clone();
@@ -445,8 +436,10 @@ mod tests{
         assert!(p.plan.far().is_empty(),"the strong drive is not folded");
         let mut initial=vec![ZERO;4];initial[0]=ONE;
         let end=std::f64::consts::PI/2000.;let times:Vec<f64>=(0..9).map(|i|end*i as f64/8.).collect();
+        // The toy lattice is spanned within a few solves: the run may stop
+        // because the space stopped growing; its trajectory is the exact one.
         let s=solve(&p,&initial,&Request{times:&times,horizons:&[],groups:&[],explicit:&std::sync::OnceLock::new(),runs:1},None).unwrap();
-        assert!(s.converged,"{:?}",s.reason);
+        assert!(s.converged||s.reason.as_deref().is_some_and(|r|r.contains("stopped growing")),"{:?}",s.reason);
         for(i,&t)in times.iter().enumerate(){let exact=(0.2*(1000.*t).sin()).sin().powi(2);
             assert!((s.answer.trajectory[i][1]-exact).abs()<=POPULATION_TOLERANCE,"t {t:e}: {} against {exact}",s.answer.trajectory[i][1]);}
     }

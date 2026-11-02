@@ -5,8 +5,8 @@ import {formatNumber} from './format.js';
 
 /** Sentences the native solver is known to write (rust-solver/src/lattice_core_adapter.rs), and the client's own. */
 const SENTENCES:Record<string,string>={
-  "Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically, the pieces negligible over the run left out): one rational Krylov space from the initial state and its translations, every output read from one Galerkin reduced model, each output's error estimated by its change over the last whole cycle of poles":
-    '完整 32 态密度矩阵在折叠 Fourier 晶格上的 Lindblad 动力学（显式电荷按混合、种子幅度与环条件选取，连同其环；远离的谐波静态折叠，在本次计算时长内可忽略的部分略去）：从初态及其平移出发的一个有理 Krylov 空间，每个输出都由同一个 Galerkin 约化模型读出，误差按输出在最近一整轮极点上的变化估计。',
+  "Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically, the pieces negligible over the run left out): one rational Krylov space from the initial state and its translations, every output read from one Galerkin reduced model, each output's error estimated by its change between consecutive checkpoints":
+    '完整 32 态密度矩阵在折叠 Fourier 晶格上的 Lindblad 动力学（显式电荷按混合、种子幅度与环条件选取，连同其环；远离的谐波静态折叠，在本次计算时长内可忽略的部分略去）：从初态及其平移出发的一个有理 Krylov 空间，每个输出都由同一个 Galerkin 约化模型读出，误差按输出在相邻两个检查点之间的变化估计。',
   'Phase average at the horizon (horizonUs) of the full driven Lindblad equation from the specified initial density: the state at T with only its fast oscillations (beats, optical micromotion) averaged out, not a time-independent density.':
     '完整受驱 Lindblad 方程从给定初始密度矩阵出发在时刻 T 的相位平均：T 时刻的态只平均掉快振荡（拍频与光频微运动），不是不随时间变化的密度矩阵。',
   'State at the horizon (horizonUs) of the undriven Lindblad equation from the specified initial density, its optical coherences averaged out in the laboratory frame.':
@@ -22,17 +22,16 @@ const OUTSIDE_WORDS='未收敛：误差估计高于误差目标，布居只是�
 const num=(text:string):string=>{const value=Number(text);return Number.isFinite(value)?formatNumber(value,{digits:3}):text;};
 /** Why a run stopped (rust-solver population-core lattice/pipeline.rs). */
 const WHY:readonly [RegExp,(...groups:string[])=>string][]=[
-  [/^the last cycle of the ladder added no direction after (\d+) solves$/,n=>`最近一整轮极点没有加入新的方向（共 ${n} 次求解）`],
-  [/^the largest change did not shrink over a cycle of the ladder after (\d+) solves$/,n=>`最大变化在一整轮极点内没有减小（共 ${n} 次求解）`],
+  [/^the space stopped growing after (\d+) solves$/,n=>`空间在 ${n} 次求解后不再增长`],
   [/^the basis memory was spent after (\d+) solves$/,n=>`基的内存在 ${n} 次求解后用尽`],
+  [/^the solve budget \((\d+)\) was spent$/,n=>`求解次数用满（${n} 次）`],
 ];
 const why=(text:string):string=>{for(const [pattern,words] of WHY){const match=pattern.exec(text);if(match)return words(...match.slice(1));}return text;};
 /** Reasons the native solver formats (pipeline.rs, lattice_core_adapter.rs). */
 const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
-  [/^Stopped because (.+?): the best checkpoint \((\d+) solves\) has an error estimate of (\S+) against the tolerance (\S+?)(?:; (\d+) of (\d+) samples above it, t = (\S+) to (\S+) us)?(?:; (\d+) mean output\(s\) above it)?(?:; (\d+) of (\d+) inner solves did not converge)?$/,
-    (reason,n,bound,tolerance,over,samples,from,to,means,failed,total)=>[`${why(reason)}，计算停止：最好的检查点（${n} 次求解）误差估计为 ${num(bound)}，误差目标 ${num(tolerance)}`,
-      ...(over?[`${samples} 个采样点中有 ${over} 个超过误差目标（t = ${from===to?num(from):`${num(from)} 到 ${num(to)}`} µs）`]:[]),...(means?[`${means} 个长期布居输出超过误差目标`]:[]),
-      ...(failed?[`${total} 次内解中有 ${failed} 次没有收敛`]:[])].join('；')+'。'],
+  [/^Stopped because (.+?): the best checkpoint \((\d+) solves\) has an error estimate of (\S+) against the tolerance (\S+?)(?:; (\d+) of (\d+) samples above it, t = (\S+) to (\S+) us)?(?:; (\d+) mean output\(s\) above it)?$/,
+    (reason,n,bound,tolerance,over,samples,from,to,means)=>[`${why(reason)}，计算停止：最好的检查点（${n} 次求解）误差估计为 ${num(bound)}，误差目标 ${num(tolerance)}`,
+      ...(over?[`${samples} 个采样点中有 ${over} 个超过误差目标（t = ${from===to?num(from):`${num(from)} 到 ${num(to)}`} µs）`]:[]),...(means?[`${means} 个长期布居输出超过误差目标`]:[])].join('；')+'。'],
   [/^Checkpoint at (\d+) solves: the error estimate is (\S+) against the tolerance (\S+); the run continues$/,
     (n,bound,tolerance)=>`第 ${n} 次求解的检查点：误差估计 ${num(bound)}，误差目标 ${num(tolerance)}；计算继续。`],
   [/^The mean's error estimate is (\S+), at least 1: it carries no information, so no populations are shown$/,

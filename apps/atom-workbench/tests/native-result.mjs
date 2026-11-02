@@ -2,6 +2,7 @@
 // for the transport and reader tests: populations stay in the initial state.
 import {POPULATION_GROUPS} from '../dist/js/atom-workbench/src/population-selection.js';
 import {FULL_MODEL_SCHEMA,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {POPULATION_TOLERANCE} from '../dist/js/atom-workbench/src/types.js';
 
 /** The standard times T of a mean run, in the order the reader returns them. */
 export const HORIZONS=[1e5,1e6];
@@ -10,7 +11,7 @@ export const HORIZONS=[1e5,1e6];
  * (`sampleErrors`, else `error` after t = 0); `mean` adds a computed long-time mean p̄(T) at
  * both standard T (`meanHorizons`): its estimated error `meanError` at the requested T
  * `horizonUs`, and `horizonErrors` maps another T to its own. */
-export function nativeResult({states,initialIndex,timesUs,tolerance=.005,error=0,mean=true,sampleErrors=timesUs.map((_,i)=>i?error:0),meanError=0,horizonUs=1e6,horizonErrors={}}){
+export function nativeResult({states,initialIndex,timesUs,tolerance=POPULATION_TOLERANCE,error=0,mean=true,sampleErrors=timesUs.map((_,i)=>i?error:0),meanError=0,horizonUs=1e6,horizonErrors={}}){
   const row=Array.from({length:32},(_,i)=>+(i===initialIndex)),real=Array(32*32).fill(0),finite=timesUs.length>1;
   real[initialIndex*33]=1;
   const entry=T=>{const e=T===horizonUs?meanError:horizonErrors[String(T)]??meanError;
