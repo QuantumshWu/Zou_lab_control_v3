@@ -187,7 +187,14 @@ class WaveformSource(Protocol):
 
     def read_records(
         self, n: int, *, timeout: float, exact: bool
-    ) -> Sequence[WaveformRecord]: ...
+    ) -> Sequence[WaveformRecord]:
+        """The oldest queued records, in order.
+
+        ``exact``: all ``n`` within ``timeout``, else ``TimeoutError``. Not
+        exact: up to ``n`` as soon as one is queued (none at the timeout), so
+        a reader takes a backlog in one call.
+        """
+        ...
 
     def finish_record_capture(self) -> WaveformCaptureTerminalRecord: ...
 
