@@ -34,11 +34,15 @@
 //!
 //! Every output but `lossProbability` describes the atom still held.
 //!
-//! Every batch's merged result is streamed first (`progress`: true) in the same shape.
+//! Every batch's merged result is streamed first (`progress`: true) in the same shape, with the
+//! run's estimate of the wall time left (`diagnostics.estimatedRemainingMs`, ms) once its errors
+//! project the trajectories needed. Between them, at least every `BEAT_SECONDS` however long a
+//! batch runs, a `running` message (main.rs): `simulatedUs` of `durationUs` in the running batch,
+//! the `trajectories` finished and, once there is one, `estimatedRemainingMs`.
 use crate::motion_core_adapter::{self,MotionModel};
 use crate::{Model,lattice_core_adapter,Options};
 use atom_motion_core::{Request,STATES};
-use atom_motion_gpu::solution::Solution;
+use atom_motion_gpu::solution::{Running,Solution};
 use atom_population_core::lattice::accuracy::{self,POPULATION_TOLERANCE};
 use atom_population_core::lattice::pipeline;
 use serde_json::{json,Value};
@@ -94,8 +98,18 @@ fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,g
             "position":{"positionsUm":x.grid,"samples":x.samples,"probabilities":x.probabilities},"trajectories":solution.trajectories}});
     // A result above the tolerance says why the run stopped there.
     if !converged{result["populationAccuracy"]["reason"]=json!(motion_core_adapter::above_tolerance(solution.reason.as_ref(),estimated));}
-    if !last{result["progress"]=json!(true);}
+    if !last{
+        result["progress"]=json!(true);
+        if let Some(ms)=solution.remaining_ms.filter(|ms|ms.is_finite()){result["diagnostics"]["estimatedRemainingMs"]=json!(ms.max(0.));}
+    }
     Ok(result)
+}
+
+/// A running batch's report as the `running` message's body (main.rs sends it as such).
+fn running(report:&Running)->Value{
+    let mut body=json!({"simulatedUs":report.simulated_us,"durationUs":report.duration_us,"trajectories":report.trajectories});
+    if let Some(ms)=report.remaining_ms.filter(|ms|ms.is_finite()){body["estimatedRemainingMs"]=json!(ms.max(0.));}
+    json!({"running":body})
 }
 
 /// A 2D motion request through the GPU engine: every batch's merged result is published as it is
@@ -104,10 +118,11 @@ fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,g
 pub fn solve(model:&Model,motion:&MotionModel,options:&Options,publish:&mut dyn FnMut(&Value))->Result<Value,String>{
     let started=Instant::now();
     let(request,groups)=motion_core_adapter::prepare(model,motion,options)?;
-    let mut failure:Option<String>=None;
+    let mut failure:Option<String>=None;let publish=std::cell::RefCell::new(publish);
     let mut observe=|checkpoint:&Solution|match result(model,motion,&request,checkpoint,&groups,false,started){
-        Ok(value)=>{publish(&value);true},Err(e)=>{failure=Some(e);false}};
-    let solution=atom_motion_gpu::solve::solve(&request,&mut observe)?;
+        Ok(value)=>{(publish.borrow_mut())(&value);true},Err(e)=>{failure=Some(e);false}};
+    let mut beat=|report:&Running|(publish.borrow_mut())(&running(report));
+    let solution=atom_motion_gpu::solve::solve(&request,&mut observe,&mut beat)?;
     if let Some(e)=failure{return Err(e);}
     result(model,motion,&request,&solution,&groups,true,started)
 }

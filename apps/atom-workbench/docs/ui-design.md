@@ -361,7 +361,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 - **几何**：聚焦光都沿同一坐标轴 w 时（径向轴有两条），原子还可以在穿过焦点、垂直于光镊的平面内运动。平面按 w 的运动坐标系 `MOTION_FRAME[w]` 的前两个轴依次命名：w = x 为 yz，w = y 为 zx，w = z 为 xy（示例"光镊 · 径向 1D PGC"的光镊沿 z，平面为 xy）。场景中存的平面不再可选时，场景有平面就用它，否则用第一条径向轴（1D）。
 - **设置**：开关改名"径向运动"（1D 与 2D 都是径向运动），"运动轴"改为"运动方向"：先列可选的径向轴，聚焦光都沿同一坐标轴时再列"2D 径向"。"初始温度"在 2D 时两轴相同。状态栏写"2D 运动已计算"。
 - **请求**：`motion: {axis, temperatureUK}`，axis 为平面（yz、zx、xy）。模型的 `motion` 块与 1D 相同，只是坐标系为 `MOTION_FRAME[w]`：光束方向与笛卡尔辐射算符先是平面的两个轴，再是光镊轴；平面不垂直于每束聚焦光时拒绝。
-- **求解**：rust-solver/motion-gpu（NVIDIA 显卡上的量子轨迹，激发态按位置绝热消去），经 motion_gpu_adapter.rs 转接，与 1D 共用请求的构造与检查。没有合适的显卡或驱动时，引擎的说明（"2D 径向运动需要 NVIDIA 显卡……"）作为计算失败的原因显示在状态栏、图区与详情中。
+- **求解**：rust-solver/motion-gpu（NVIDIA 显卡上的量子轨迹，激发态按位置绝热消去），经 motion_gpu_adapter.rs 转接，与 1D 共用请求的构造与检查。每批轨迹算完是一个检查点（带剩余时间的估计）；一批运行中至少每 10 s 有一条运行报告（`running`：本批已模拟的时间、已完成的轨迹数、有估计时的剩余时间），求解期限从每个检查点和运行报告重新计时，状态栏的剩余时间随之更新，所以再长的批次也不会因期限中断。没有合适的显卡或驱动时，引擎的说明（"2D 径向运动需要 NVIDIA 显卡……"）作为计算失败的原因显示在状态栏、图区与详情中。
 - **结果契约**：`motion` 块为 `{axis, axes, temperatureUK, temperatureErrorUK, meanVelocityMps, trapFrequencyKHz, meanOccupation, lossProbability, momentum, position, trajectories}`，严格读取（solver-types.ts `readMotionResult`）：
   - `axes` 是平面的两个轴 [a, b]；温度、它的标准误差、平均速度与 n̄ 每轴每采样一个值，`trapFrequencyKHz` 每轴一个；
   - `momentum` 是两轴的速度分布，在同一网格、同一组采样上；

@@ -50,4 +50,13 @@ pub struct Solution{
     pub method:String,
     /// Why the run stopped above its targets (none when it reached them).
     pub reason:Option<String>,
+    /// At a checkpoint, the wall time (ms) the errors so far project to the final result; none on
+    /// the final result.
+    pub remaining_ms:Option<f64>,
 }
+
+/// What a solve reports while a batch runs, at least every `solve::BEAT_SECONDS`: the batch's
+/// simulated time of the request's duration, the trajectories finished, and the wall time (ms) to
+/// the final result once the errors so far project it.
+#[derive(Clone,Debug,Default,PartialEq)]
+pub struct Running{pub simulated_us:f64,pub duration_us:f64,pub trajectories:usize,pub remaining_ms:Option<f64>}

@@ -10,7 +10,7 @@ use crate::engine::{Cap,Internal,Settings,REC_EXCITED,REC_GROUND,REC_KX,REC_TAIL
 use crate::ensemble::{ladder,Ensemble,Place};
 use crate::gpu::Gpu;
 use crate::model::{Model,BOLTZMANN,HBAR};
-use crate::solution::{Distributions,Map,Solution};
+use crate::solution::{Distributions,Map,Running,Solution};
 use atom_motion_core::linear::Dense;
 use atom_motion_core::{Complex,Request,STATES};
 use std::rc::Rc;
@@ -27,6 +27,9 @@ const FEWEST:usize=8;
 /// A batch's planned duration (s): checkpoints come about this often while the cost holds (the
 /// app ends a solve whose checkpoints stop for two minutes).
 const BATCH_SECONDS:f64=30.;
+/// How often a running solve says so between its checkpoints (s): well within the app's
+/// two-minute deadline, however long a batch runs.
+pub const BEAT_SECONDS:f64=10.;
 /// The distributions' sample times.
 const DISTRIBUTION_SAMPLES:usize=11;
 /// The absorbing boundary's rate (1/us): an atom crossing it at the escape speed is absorbed
@@ -147,7 +150,7 @@ fn bin(to:&[f64],from:&[f64],values:&[f64],out:&mut [f64]){
     for(&x,&v)in from.iter().zip(values){for(i,f)in overlaps(to,x,w){out[i]+=v*f;}}
 }
 
-pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Result<Solution,String>{
+pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool,running:&mut dyn FnMut(&Running))->Result<Solution,String>{
     let gpu=Rc::new(Gpu::new()?);
     let mut model=Model::new(request)?;
     let initial=initial_states(&model,request)?;
@@ -192,6 +195,11 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
     let mut solution=Solution::default();
     let mut run=0usize;let mut census=vec![vec![];n_times];
     let mut size=FEWEST;
+    // The last batch's wall time per trajectory (the tables aside; batches grow, so the latest is
+    // the next ones' best guide), the trajectories the targets are projected to need, and the last
+    // message's time.
+    let(mut cost,mut need,mut said)=(0f64,None::<usize>,std::time::Instant::now());
+    let(steps,duration)=((n_times-1)*per,times[n_times-1]);
     for batch in 0..{
         if run>=MOST_TRAJECTORIES{break;}
         let batch_size=size.min(MOST_TRAJECTORIES-run).min(ensemble.capacity(first));
@@ -213,7 +221,20 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
         }
         for i in 1..n_times{
             let distributions=samples.contains(&i);
-            for s in 0..per{ensemble.step(s+1==per,distributions&&s+1==per)?;}
+            for s in 0..per{
+                ensemble.step(s+1==per,distributions&&s+1==per)?;
+                // Between checkpoints, a word at least every BEAT_SECONDS: how far the batch is,
+                // and the time left once the errors so far project the trajectories needed.
+                if s%64==63&&said.elapsed().as_secs_f64()>=BEAT_SECONDS{
+                    let done=((i-1)*per+s+1) as f64/steps as f64;
+                    let remaining_ms=need.map(|n|{
+                        let elapsed=begun.elapsed().as_secs_f64()-(ensemble.seconds[3]-built);
+                        let this=if done>0.05{elapsed/done}else{batch_size as f64*cost};
+                        ((1.-done)*this+n.saturating_sub(run+batch_size) as f64*cost).max(0.)*1e3
+                    });
+                    running(&Running{simulated_us:done*duration,duration_us:duration,trajectories:run,remaining_ms});said=std::time::Instant::now();
+                }
+            }
             let records=ensemble.records()?;
             accumulate(&model,&groups,&ensemble,&records,&mut sums[i]);census[i]=ensemble.census();
             if let Some(k)=samples.iter().position(|&s|s==i){collect(&mut ensemble,&positions,&velocities,&mut vbins[k],&mut pbins[k])?;}
@@ -222,7 +243,7 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
         // The next batch: this one's size scaled to BATCH_SECONDS (the grids' tables, built once, aside).
         let wall=begun.elapsed().as_secs_f64()-(ensemble.seconds[3]-built);
         size=((batch_size as f64*BATCH_SECONDS/wall.max(1e-3)) as usize/FEWEST*FEWEST).clamp(FEWEST,BATCH);
-        run+=batch_size;
+        run+=batch_size;cost=wall/batch_size as f64;
         solution=assemble(&model,&sums,omega,&samples,&velocities,&vbins,&positions,&pbins,run,ensemble.refused);
         solution.grids=steps_ladder.iter().map(|q|q.nx).collect();solution.census=census.clone();solution.seconds=ensemble.seconds;
         let(population,temperature_error)=(solution.sample_errors.iter().fold(0.,|a:f64,&b|a.max(b)),
@@ -235,10 +256,13 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
         // of the errors' own estimate on top (relative √(1/(2(n−1))), doubled in the squares): the
         // next batch at most the rest.
         let ratio=(population/tolerance).max(temperature_error/TEMPERATURE_TOLERANCE);
-        let need=(run as f64*ratio*ratio*(1.+2.*(2./(run.max(2)-1) as f64).sqrt())).ceil() as usize;
-        size=size.min(need.saturating_sub(run).div_ceil(FEWEST)*FEWEST).max(FEWEST);
+        let projected=((run as f64*ratio*ratio*(1.+2.*(2./(run.max(2)-1) as f64).sqrt())).ceil() as usize).min(MOST_TRAJECTORIES);
+        size=size.min(projected.saturating_sub(run).div_ceil(FEWEST)*FEWEST).max(FEWEST);need=Some(projected);
+        solution.remaining_ms=Some(projected.saturating_sub(run) as f64*cost*1e3);
         if run<MOST_TRAJECTORIES&&!checkpoint(&solution){break;}
+        said=std::time::Instant::now();
     }
+    solution.remaining_ms=None;
     Ok(solution)
 }
 

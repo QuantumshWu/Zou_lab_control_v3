@@ -137,7 +137,9 @@ fn write_line(message: &Value) -> bool {
 /// One protocol response. `capabilities` and `warmup` (the worker start-up
 /// LAPACK self-check) are operations; anything else is an rb87-full/2 solve,
 /// which with `progress` first streams every checkpoint's result as
-/// `checkpoint` progress (the same contract, marked `progress`).
+/// `checkpoint` progress (the same contract, marked `progress`) and, from a
+/// 2D motion solve between its checkpoints, `running` progress (its batch's
+/// simulated time, the trajectories done and the time left once estimated).
 fn respond(request: Request) -> Value {
     let id = request.id;
     match request.op.as_deref() {
@@ -156,7 +158,10 @@ fn respond(request: Request) -> Value {
     };
     let mut publish = |checkpoint: &Value| {
         if request.progress {
-            write_line(&json!({"id":id,"protocol":NATIVE_PROTOCOL,"progress":"checkpoint","result":stamp(checkpoint.clone())}));
+            match checkpoint.get("running") {
+                Some(running) => write_line(&json!({"id":id,"protocol":NATIVE_PROTOCOL,"progress":"running","running":running})),
+                None => write_line(&json!({"id":id,"protocol":NATIVE_PROTOCOL,"progress":"checkpoint","result":stamp(checkpoint.clone())})),
+            };
         }
     };
     let result = match (request.model_schema.as_deref(), request.model.as_ref()) {

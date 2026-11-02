@@ -22,7 +22,8 @@ fn main(){
         println!("{label}: {} trajectories, {:.1} s (steps {:.1} s, observations {:.1} s, moves {:.1} s, tables {:.1} s); {}",s.trajectories,started.elapsed().as_secs_f64(),
             s.seconds[0],s.seconds[1],s.seconds[2],s.seconds[3],s.reason.clone().unwrap_or("targets met".into()));
     };
-    let solution=solve(&request,&mut |s|{report(s,"checkpoint");true}).unwrap();
+    let solution=solve(&request,&mut |s|{report(s,"checkpoint");true},&mut |r|{
+        println!("running: {:.0} of {:.0} us, {} trajectories done, {}",r.simulated_us,r.duration_us,r.trajectories,r.remaining_ms.map_or("no estimate yet".into(),|ms|format!("about {:.0} s left",ms/1e3)));}).unwrap();
     report(&solution,"final");
     println!("{}",solution.method);
 }

@@ -141,6 +141,18 @@ export function readMotionResult(value:unknown,timesUs:readonly number[],axis:Mo
     trapFrequencyKHz:frequency(m.trapFrequencyKHz),meanOccupation:series(m.meanOccupation,samples,()=>true),lossProbability:loss(m.lossProbability),
     momentum:distributions(m.momentum,'velocitiesMps'),position:distributions(m.position,'positionsUm'),...(from===undefined?{}:{continuedFromUs:from as number})};
 }
+/** A running solve's report between its checkpoints (a 2D motion solve's): the running batch's
+ * simulated time of the duration (us), the trajectories done and, once estimated, the wall time
+ * left (ms). */
+export interface RunningReport {simulatedUs:number;durationUs:number;trajectories:number;estimatedRemainingMs?:number}
+/** A running report, read strictly. */
+export function readRunningReport(value:unknown):RunningReport{
+  const v=value as Record<string,unknown>|null,finite=(x:unknown):x is number=>typeof x==='number'&&Number.isFinite(x)&&x>=0;
+  if(!v||typeof v!=='object'||Array.isArray(v)||!Object.keys(v).every(k=>['simulatedUs','durationUs','trajectories','estimatedRemainingMs'].includes(k))
+    ||!finite(v.simulatedUs)||!finite(v.durationUs)||!Number.isSafeInteger(v.trajectories)||(v.trajectories as number)<0
+    ||(v.estimatedRemainingMs!==undefined&&!finite(v.estimatedRemainingMs)))throw new Error('Invalid running report');
+  return {simulatedUs:v.simulatedUs,durationUs:v.durationUs,trajectories:v.trajectories as number,...(v.estimatedRemainingMs===undefined?{}:{estimatedRemainingMs:v.estimatedRemainingMs as number})};
+}
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];
   activeLaserIds:string[];mean:MeanResult;
