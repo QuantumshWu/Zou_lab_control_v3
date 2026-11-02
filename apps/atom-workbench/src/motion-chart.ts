@@ -66,8 +66,10 @@ export function motionSeries(motion:MotionResult,kind:SeriesKind):[Series,Series
     {id:'occupation',name:'n̄',title:motion.axes.length===1?`平均振动量子数 n̄（ω/2π = ${digits(motion.trapFrequencyKHz[0]!)} kHz）`:`平均振动量子数 n̄（相对各轴焦点处的阱频 ω/2π：${motion.axes.map((axis,k)=>`${axis} ${digits(motion.trapFrequencyKHz[k]!)}`).join('、')} kHz）`,lines:axisLines(motion,motion.meanOccupation,'n̄',MOTION_INKS[0]),unit:{name:'',factor:1}},
     {id:'loss',name:'损失概率',title:'累计损失概率 / %',lines:[{name:'损失概率',values:motion.lossProbability,ink:motion.axes.length===1?MOTION_INKS[1]:INK}],unit:{name:'%',factor:100}}];
   const reach=Math.max(...motion.meanVelocityMps.flat().map(Math.abs),...motion.temperatureUK.flat().map(thermalVelocity)),velocity=unitFor(VELOCITY_UNITS,reach);
-  return [{id:'temperature',name:'温度 T',title:'温度 T / μK',lines:axisLines(motion,motion.temperatureUK,'T',MOTION_INKS[0]),unit:{name:'μK',factor:1}},
-    {id:'mean-velocity',name:'⟨v⟩',title:`平均速度 ⟨v⟩ / ${velocity.name}`,lines:axisLines(motion,motion.meanVelocityMps,'⟨v⟩',MOTION_INKS[1]),unit:velocity,reach}];
+  // A 3D result's T and ⟨v⟩ are each axis's means over one trap period around the sample.
+  const period=motion.axes.length===1?'':'（各轴一个阱周期内的平均）';
+  return [{id:'temperature',name:'温度 T',title:`温度 T / μK${period}`,lines:axisLines(motion,motion.temperatureUK,'T',MOTION_INKS[0]),unit:{name:'μK',factor:1}},
+    {id:'mean-velocity',name:'⟨v⟩',title:`平均速度 ⟨v⟩ / ${velocity.name}${period}`,lines:axisLines(motion,motion.meanVelocityMps,'⟨v⟩',MOTION_INKS[1]),unit:velocity,reach}];
 }
 /** A panel: its series, its vertical span and ticks (display units), and where a value goes. */
 interface Panel {series:Series;top:number;bottom:number;ticks:number[];y:(value:number)=>number}
