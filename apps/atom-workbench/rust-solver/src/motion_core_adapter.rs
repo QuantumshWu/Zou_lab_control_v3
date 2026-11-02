@@ -68,10 +68,16 @@ fn matrix(operator:&Operator,what:&str)->Result<Matrix,String>{
     Ok(Matrix{real:operator.real.clone(),imag:operator.imag.clone()})
 }
 
-/// The core's request: the model's motion block, its initial density and the request's grid.
-fn request(model:&Model,motion:&MotionModel,options:&Options)->Result<Request,String>{
+impl MotionModel{
+    /// 3D motion (motion3d_adapter.rs): the axis "3d", the frame the lab's.
+    pub(crate) fn three_dimensional(&self)->bool{self.axis=="3d"}
+}
+
+/// The core's request: the model's motion block, its initial density and the request's grid (the
+/// 3D engine's as well).
+pub(crate) fn request(model:&Model,motion:&MotionModel,options:&Options)->Result<Request,String>{
     let finite=|x:f64|x.is_finite();
-    if !matches!(motion.axis.as_str(),"x"|"y"|"z"){return Err("The motion axis is x, y or z".into());}
+    if !matches!(motion.axis.as_str(),"x"|"y"|"z"|"3d"){return Err("The motion axis is x, y, z or 3d".into());}
     if !(finite(motion.temperature_uk)&&motion.temperature_uk>0.&&finite(motion.mass_kg)&&motion.mass_kg>0.&&motion.field_vector_g.iter().all(|&x|finite(x))){
         return Err("The motion block needs a positive temperature and mass and a finite field".into());}
     if motion.frame_frequencies_mhz.len()!=STATES||!motion.frame_frequencies_mhz.iter().all(|&x|finite(x)){return Err("The motion block needs the 32 states' frame frequencies".into());}

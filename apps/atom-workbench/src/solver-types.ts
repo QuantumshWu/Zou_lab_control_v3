@@ -1,6 +1,9 @@
-import type {Level,MotionAxis} from './types.js';
+import type {Level,MotionAxis,MotionChoice} from './types.js';
 import {POPULATION_TOLERANCE} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
+/** The semiclassical 3D motion's population accuracy target (absolute): its statistics are run
+ * until two standard errors of every population lie within it (rust-solver/motion-3d solve.rs). */
+export const SEMICLASSICAL_POPULATION_TARGET=0.05;
 /** A trajectory's estimated population error (ui-design.md §6.16). Every computed trajectory is
  * shown: 'estimated-converged' when every sample's bound is within the requested tolerance ε,
  * 'estimated-partial' otherwise -- the samples above ε are marked. */
@@ -12,16 +15,18 @@ export interface PopulationAccuracy {
   reason?:string;
   scope:{states:32;samples:number;groups:string[]};
 }
-/** Explicit population-output qualification; never a density/PSD claim. */
-export function readPopulationAccuracy(value:unknown,samples:number):PopulationAccuracy {
+/** Explicit population-output qualification; never a density/PSD claim. `tolerance` is the
+ * target the solve was run to: POPULATION_TOLERANCE, or the semiclassical 3D motion's own
+ * (SEMICLASSICAL_POPULATION_TARGET), against which it reports two standard errors per sample. */
+export function readPopulationAccuracy(value:unknown,samples:number,tolerance=POPULATION_TOLERANCE):PopulationAccuracy {
   const invalid=():never=>{throw new Error('Invalid complete populationAccuracy contract');};
   if(!value||typeof value!=='object'||Array.isArray(value))invalid();
   const a=value as Record<string,unknown>,partial=a.status==='estimated-partial';
-  // Every request asks for POPULATION_TOLERANCE; the echo must be that one.
-  if((a.status!=='estimated-converged'&&!partial)||a.requestedTolerance!==POPULATION_TOLERANCE)invalid();
+  // The echo is the tolerance asked for.
+  if((a.status!=='estimated-converged'&&!partial)||a.requestedTolerance!==tolerance)invalid();
   const error=a.estimatedMaximumError,finite=(v:unknown):v is number=>typeof v==='number'&&Number.isFinite(v)&&v>=0;
-  // Partial exactly when the largest bound is above ε.
-  if(!finite(error)||partial!==(error>POPULATION_TOLERANCE))invalid();
+  // Partial exactly when the largest bound is above it.
+  if(!finite(error)||partial!==(error>tolerance))invalid();
   // The per-sample bounds: one for each sample, their maximum the trajectory's. A partial result
   // says why the solver stopped short of ε.
   const errors=a.sampleErrors;
@@ -30,7 +35,7 @@ export function readPopulationAccuracy(value:unknown,samples:number):PopulationA
   if(!a.scope||typeof a.scope!=='object'||Array.isArray(a.scope))invalid();
   const scope=a.scope as Record<string,unknown>,groups=scope.groups;
   if(scope.states!==32||scope.samples!==samples||!Number.isSafeInteger(samples)||samples<1||!Array.isArray(groups)||groups.length!==POPULATION_GROUPS.length||new Set(groups).size!==groups.length||groups.some(id=>typeof id!=='string'||!POPULATION_GROUPS.some(group=>group.id===id)))invalid();
-  return {status:partial?'estimated-partial':'estimated-converged',requestedTolerance:POPULATION_TOLERANCE,estimatedMaximumError:error as number,
+  return {status:partial?'estimated-partial':'estimated-converged',requestedTolerance:tolerance,estimatedMaximumError:error as number,
     sampleErrors:[...(errors as number[])],...(partial?{reason:a.reason as string}:{}),
     scope:{states:32,samples,groups:[...(groups as string[])]}};
 }
@@ -57,22 +62,27 @@ export interface MeanResult {
   /** The time T of p̄(T) (us); undefined when no mean was requested. */
   horizonUs?:number;
 }
-/** A motion result's distributions along the axis: on one grid (strictly increasing), at some of
+/** A motion result's distributions along one axis: on one grid (strictly increasing), at some of
  * the sample times -- `samples`, increasing indices into timesUs, the last sample among them --
  * each the probability at every grid point, summing to one. */
 export interface Distributions {grid:number[];samples:number[];probabilities:number[][]}
-/** The motion of a 1D motion result (ui-design.md §6.20): a single atom in the tweezer moving
- * radially along its axis. At every sample the temperature T = m·Var(v)/k_B (μK), the mean
- * velocity (m/s), n̄ relative to the trap frequency at the focus (`trapFrequencyKHz`, ω/2π, the one
- * the engine used) and the probability that the atom has left the trap by then; the momentum
- * distributions (grid: velocities, m/s) and the position distributions (grid: positions from the
- * focus, μm). Everything but the loss describes the atom still held. */
+/** The motion of a motion result (ui-design.md §6.20): a single atom in the tweezer, along one lab
+ * axis (1D) or in 3D, its series per axis (`axes`: the motion axis, or x, y and z). At every sample
+ * per axis the temperature T = m·Var(v)/k_B (μK), the mean velocity (m/s), n̄ relative to that
+ * axis's trap frequency at the focus (`trapFrequencyKHz`, ω/2π, the one the engine used); the
+ * probability that the atom has left the trap by then; per axis the momentum distributions (grid:
+ * velocities, m/s) and the position distributions (grid: positions from the focus, μm).
+ * Everything but the loss describes the atom still held. A 3D result (semiclassical) gives T's
+ * standard error, whether each sample lies in the method's validated regime (`classical`: k_B T ≥
+ * 3ħω on every axis; outside it the result is a reference only), its trajectories and time step. */
 export interface MotionResult {
-  axis:MotionAxis;temperatureUK:number[];meanVelocityMps:number[];trapFrequencyKHz:number;meanOccupation:number[];lossProbability:number[];
-  momentum:Distributions;position:Distributions;
+  axis:MotionChoice;axes:MotionAxis[];temperatureUK:number[][];meanVelocityMps:number[][];trapFrequencyKHz:number[];meanOccupation:number[][];lossProbability:number[];
+  momentum:Distributions[];position:Distributions[];
+  temperatureErrorUK?:number[][];classical?:boolean[];trajectories?:number;timeStepUs?:number;
 }
-/** The motion block of a result with `samples` samples, read strictly (rust-solver/src/motion_core_adapter.rs). */
-export function readMotionResult(value:unknown,samples:number,axis:MotionAxis):MotionResult {
+/** The motion block of a result with `samples` samples, read strictly (rust-solver/src/motion_core_adapter.rs,
+ * and for 3D motion3d_adapter.rs). */
+export function readMotionResult(value:unknown,samples:number,axis:MotionChoice):MotionResult {
   const invalid=():never=>{throw new Error('Invalid motion result');};
   const object=(v:unknown,keys:readonly string[]):Record<string,unknown>=>{if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).length!==keys.length||!keys.every(key=>Object.hasOwn(v,key)))invalid();return v as Record<string,unknown>;};
   const series=(v:unknown,length:number,admits:(x:number)=>boolean):number[]=>{if(!Array.isArray(v)||v.length!==length||!v.every(x=>typeof x==='number'&&Number.isFinite(x)&&admits(x)))invalid();return [...(v as number[])];};
@@ -86,17 +96,30 @@ export function readMotionResult(value:unknown,samples:number,axis:MotionAxis):M
     if(rows.some(row=>Math.abs(row.reduce((a,b)=>a+b,0)-1)>5e-6))invalid();
     return {grid,samples:at,probabilities:rows};
   };
+  const loss=(v:unknown)=>{const l=series(v,samples,x=>x>=0&&x<=1);if(l.some((p,i)=>i>0&&p<l[i-1]!))invalid();return l;};
+  const frequency=(v:unknown):number=>typeof v==='number'&&Number.isFinite(v)&&v>0?v:invalid();
+  if(axis==='3d'){
+    const axes:MotionAxis[]=['x','y','z'];
+    const m=object(value,['axis','temperatureUK','temperatureErrorUK','meanVelocityMps','meanOccupation','trapFrequencyKHz','lossProbability','classical','momentum','position','trajectories','timeStepUs']);
+    function perAxis<T>(v:unknown,read:(x:unknown)=>T):T[]{const o=object(v,axes);return axes.map(a=>read(o[a]));}
+    if(m.axis!=='3d'||!Array.isArray(m.classical)||m.classical.length!==samples||!m.classical.every(x=>typeof x==='boolean'))invalid();
+    if(!Number.isSafeInteger(m.trajectories)||!((m.trajectories as number)>0)||typeof m.timeStepUs!=='number'||!(m.timeStepUs>0))invalid();
+    return {axis,axes,temperatureUK:perAxis(m.temperatureUK,v=>series(v,samples,x=>x>=0)),temperatureErrorUK:perAxis(m.temperatureErrorUK,v=>series(v,samples,x=>x>=0)),
+      meanVelocityMps:perAxis(m.meanVelocityMps,v=>series(v,samples,()=>true)),meanOccupation:perAxis(m.meanOccupation,v=>series(v,samples,()=>true)),
+      trapFrequencyKHz:perAxis(m.trapFrequencyKHz,frequency),lossProbability:loss(m.lossProbability),classical:[...(m.classical as boolean[])],
+      momentum:perAxis(m.momentum,v=>distributions(v,'velocitiesMps')),position:perAxis(m.position,v=>distributions(v,'positionsUm')),
+      trajectories:m.trajectories as number,timeStepUs:m.timeStepUs as number};
+  }
   const m=object(value,['axis','temperatureUK','meanVelocityMps','trapFrequencyKHz','meanOccupation','lossProbability','momentum','position']);
-  if(m.axis!==axis||typeof m.trapFrequencyKHz!=='number'||!Number.isFinite(m.trapFrequencyKHz)||!(m.trapFrequencyKHz>0))invalid();
-  const loss=series(m.lossProbability,samples,x=>x>=0&&x<=1);if(loss.some((p,i)=>i>0&&p<loss[i-1]!))invalid();
-  return {axis,temperatureUK:series(m.temperatureUK,samples,x=>x>=0),meanVelocityMps:series(m.meanVelocityMps,samples,()=>true),
-    trapFrequencyKHz:m.trapFrequencyKHz as number,meanOccupation:series(m.meanOccupation,samples,()=>true),lossProbability:loss,
-    momentum:distributions(m.momentum,'velocitiesMps'),position:distributions(m.position,'positionsUm')};
+  if(m.axis!==axis)invalid();
+  return {axis,axes:[axis],temperatureUK:[series(m.temperatureUK,samples,x=>x>=0)],meanVelocityMps:[series(m.meanVelocityMps,samples,()=>true)],
+    trapFrequencyKHz:[frequency(m.trapFrequencyKHz)],meanOccupation:[series(m.meanOccupation,samples,()=>true)],lossProbability:loss(m.lossProbability),
+    momentum:[distributions(m.momentum,'velocitiesMps')],position:[distributions(m.position,'positionsUm')]};
 }
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];
   activeLaserIds:string[];mean:MeanResult;
-  /** A 1D motion solve's motion; a motion result has no long-time mean. */
+  /** A motion solve's motion; a motion result has no long-time mean. */
   motion?:MotionResult;
   /** The mean at every standard time T (MEAN_HORIZONS_US order), all from the one mean run;
    * the requested T's is `mean` itself. Absent when no mean was requested. */

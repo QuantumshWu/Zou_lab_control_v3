@@ -1,9 +1,9 @@
-import type {ComplexAmplitude,Scene,DynamicsSettings,Laser,Level,InitialStateSpec,MotionAxis,Vec3} from './types.js';
+import type {ComplexAmplitude,Scene,DynamicsSettings,Laser,Level,InitialStateSpec,MotionChoice,Vec3} from './types.js';
 import {resolveInitialState} from './types.js';
 import {laserModelCorrection,staticModelBackground} from './spectroscopy.js';
 import {atomicSystem,composeMagneticField,drivingLasers,laserIntensityMWcm2,laserCarrierOffsetMHz,laserFrequencyMHz,captureLaserFrequencyAnchor,RB87,sinCosDegrees,accurateSum} from './physics.js';
 import {directionVector,invert,rotate,type Frame} from './direction.js';
-import {MOTION_FRAME,radialAxes,type MotionRequest} from './motion.js';
+import {MOTION_FRAME,focusedBeams,radialAxes,type MotionRequest} from './motion.js';
 import {laserWaistUm} from './laser-intensity.js';
 import {withUnit} from './format.js';
 import {FULL_MODEL_SCHEMA} from './solver-protocol.js';
@@ -22,11 +22,12 @@ import {FULL_MODEL_SCHEMA} from './solver-protocol.js';
  * polarizability (spectroscopy.ts staticModelBackground). */
 export interface MasterMatrix {real:number[];imag:number[]}
 interface MasterDrive {omega:number;cos:MasterMatrix;sin:MasterMatrix;laserIds:string[]}
-/** The 1D motion block of the model (ui-design.md §6.20), sent with a solve that has motion: a
- * single atom in the tweezer moving along `axis`, the lab axis through the focus -- the atom --
- * perpendicular to every focused beam (motion.ts radialAxes). It keeps the beams apart: two
+/** The motion block of the model (ui-design.md §6.20), sent with a solve that has motion: a single
+ * atom in the tweezer moving along `axis`, the lab axis through the focus -- the atom --
+ * perpendicular to every focused beam (motion.ts radialAxes), or with `axis` "3d" in all three
+ * directions (the motion frame then the lab's x, y, z). It keeps the beams apart: two
  * counter-propagating beams of one frequency, one drive in `drives`, are two beams here, each with
- * its own amplitude along the axis.
+ * its own amplitude at the atom's position.
  * - `hamiltonian`: H0 in the frame (rad/us) without any beam: the field and the beams' static
  *   shifts at the atom. The model's hReal/hImag holds besides the static couplings of the beams at
  *   the frame's carrier, taken at the atom; a moving atom has them from `beams`.
@@ -51,7 +52,7 @@ interface MasterDrive {omega:number;cos:MasterMatrix;sin:MasterMatrix;laserIds:s
  * - `axis`, `temperatureUK` (the initial motion, thermal along the axis), `massKg` and the lab
  *   field `fieldVectorG` (G). */
 export interface MotionModel {
-  axis:MotionAxis;temperatureUK:number;massKg:number;fieldVectorG:Vec3;
+  axis:MotionChoice;temperatureUK:number;massKg:number;fieldVectorG:Vec3;
   hamiltonian:MasterMatrix;frameFrequenciesMHz:number[];beams:MotionModelBeam[];emission:[MasterMatrix,MasterMatrix,MasterMatrix];
 }
 export interface MotionModelBeam {
@@ -175,6 +176,8 @@ function cartesianEmission(n:Vec3,frame:Frame,spherical:readonly MasterMatrix[])
  return out;
 }
 function motionText(motion:MotionRequest):string[] {
+ if(motion.axis==='3d')return [`3D 运动（半经典）：光镊中的单个原子在三维中运动，初态为上述内态，运动为温度 ${withUnit(motion.temperatureUK,'μK',{digits:6})} 的热分布；各轴温度 T = m·Var(v)/k_B。`,
+  '半经典方法：原子是经典质点（位置、动量），携带消去激发态后的基态内态，按量子跳跃演化：自发辐射的反冲按偶极辐射的方向图抽样，吸收的反冲取所吸收光束的 ħk，并使每次跳跃带有精确的平均动量；力是内态上的平均力。点粒子没有零点运动：各轴 k_B T 不小于 3ħω 时与 1D 量子参考相符（T 约 10% 以内），更冷时偏冷，仅供参考。'];
  return [`1D 运动：光镊中单个原子沿 ${motion.axis} 轴（穿过焦点、与聚焦光垂直）径向运动，初态为上述内态，运动为温度 ${withUnit(motion.temperatureUK,'μK',{digits:6})} 的热分布；温度 T = m·Var(v)/k_B，v 为沿 ${motion.axis} 轴的速度。`,
   '光束分开保留（同频的对射光不合并）：每束光在运动轴上的振幅由它的方向、波数和束腰给出——聚焦在原子处的光是焦点在原子处的高斯光束，按局域强度给出的光是平面波；自发辐射的反冲按偶极辐射的方向图投影到运动轴。'];
 }
@@ -185,11 +188,12 @@ function initialText(spec:InitialStateSpec):string {
  return '初态：按给定权重（归一化）在模型基中的对角混合。';
 }
 
-/** `motion`: the model of a solve with 1D motion carries its block (MotionModel); an axis that is
- * not radial -- through the focus, perpendicular to every focused beam -- is refused here (motion.ts
- * radialAxes). */
+/** `motion`: the model of a solve with motion carries its block (MotionModel); an axis that is not
+ * radial -- through the focus, perpendicular to every focused beam -- is refused here (motion.ts
+ * radialAxes), and 3D without a beam focused at the atom. */
 export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSettings>,motion?:MotionRequest){
- if(motion){const axes=radialAxes(scene);if(!axes.includes(motion.axis))throw new Error(`1D 运动的运动轴 ${motion.axis} 不与每束聚焦光都垂直（可选：${axes.join('、')}）。`);}
+ if(motion?.axis==='3d'){if(!focusedBeams(scene).length)radialAxes(scene);}
+ else if(motion){const axes=radialAxes(scene);if(!axes.includes(motion.axis))throw new Error(`1D 运动的运动轴 ${motion.axis} 不与每束聚焦光都垂直（可选：${axes.join('、')}）。`);}
  // One basis for H0, C, the initial density and the returned populations:
  // eigenstates of the static H0 (B field + second-order shifts from states
  // outside the model and the Rb+ core). No D-line dressing: those couplings

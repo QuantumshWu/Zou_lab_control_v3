@@ -35,11 +35,21 @@ dependencies = [
 name = "atom-lindblad-embedded"
 version = "0.1.0"
 dependencies = [
+ "atom-motion-3d",
  "atom-motion-core",
  "atom-population-core",
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "atom-motion-3d"
+version = "0.1.0"
+dependencies = [
+ "atom-motion-core",
+ "atom-population-core",
+ "rayon",
 ]
 
 [[package]]

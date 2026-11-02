@@ -5,13 +5,16 @@ import {POPULATION_TOLERANCE} from './types.js';
 import {errorPercent,outsideRuns,sampleErrors} from './accuracy.js';
 
 export interface PopulationPlot {timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];mean?:MeanResult;
-  /** Per-sample error bounds (ui-design.md §6.16): samples above ε are drawn, marked. */
-  populationAccuracy?:{sampleErrors?:number[]};}
+  /** Per-sample error bounds (ui-design.md §6.16): samples above the solve's tolerance (ε, or the
+   * semiclassical 3D motion's own target) are drawn, marked. */
+  populationAccuracy?:{sampleErrors?:number[];requestedTolerance?:number};}
 export interface PopulationChartOptions {scale?:'linear'|'log';viewportWidth?:number;initialId?:string;timeUnit?:DurationUnit;showTotalExcited?:boolean;
   /** The long-time column's name: p̄(T) at the T the result holds (p̄(1 s), p̄(100 ms)). */
   meanLabel?:string;
   /** A sample the readout stands at already: a newer checkpoint of the same trajectory keeps it open there. */
-  cursor?:number;}
+  cursor?:number;
+  /** Per sample, outside a 3D motion's validated regime: a light band, a reference only. */
+  reference?:readonly boolean[];}
 // v3 scientific series palette: crates/zlc-plot/src/style.rs, Palette::default.
 const palette=['#517FA6','#B17D4B','#568C79','#99719B','#B36F72','#558F9C','#7E7CA5','#92924F'];
 const esc=(value:unknown)=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
@@ -72,18 +75,26 @@ export function populationChart(result:PopulationPlot,monitoredIds:string[],labe
     // One polyline per stretch: a segment touching a sample above ε is dashed and faded.
     const stretches:{from:number;to:number;outside:boolean}[]=[];
     for(let i=0;i+1<values.length;i++){const bad=outside(i)||outside(i+1),last=stretches.at(-1);if(last&&last.outside===bad)last.to=i+1;else stretches.push({from:i,to:i+1,outside:bad});}
-    let markup=stretches.map(s=>`<polyline data-series-id="${esc(id)}" points="${Array.from({length:s.to-s.from+1},(_,k)=>point(s.from+k)).join(' ')}" fill="none" stroke="${color}" stroke-width="${width}"${s.outside?' stroke-dasharray="4 3" stroke-opacity="0.55" class="outside-tolerance"':''}><title>${esc(s.outside?`${title}（估计误差超过 ${errorPercent(POPULATION_TOLERANCE)}）`:title)}</title></polyline>`).join('');
+    let markup=stretches.map(s=>`<polyline data-series-id="${esc(id)}" points="${Array.from({length:s.to-s.from+1},(_,k)=>point(s.from+k)).join(' ')}" fill="none" stroke="${color}" stroke-width="${width}"${s.outside?' stroke-dasharray="4 3" stroke-opacity="0.55" class="outside-tolerance"':''}><title>${esc(s.outside?`${title}（估计误差超过 ${errorPercent(tolerance)}）`:title)}</title></polyline>`).join('');
     if(scale==='log')for(const i of [0,values.length-1])if(values[i]!<=g.floor)markup+=`<circle cx="${x(result.timesUs[i]!)}" cy="${bottom}" r="2.6" fill="white" stroke="${color}"><title>${esc(`${title}: ${populationValue(values[i]!)}（对数轴下界以下）`)}</title></circle>`;
     return markup;
   };
-  // Samples whose estimated error exceeds ε: a light band behind them (half-way to their
-  // neighbours), and their curve segments dashed and faded.
-  const errors=sampleErrors(result),runs=errors?outsideRuns(errors):[],n=result.timesUs.length;
-  const outside=(i:number)=>!!errors&&errors[i]!>POPULATION_TOLERANCE;
+  const tolerance=result.populationAccuracy?.requestedTolerance??POPULATION_TOLERANCE;
+  // Samples outside a 3D motion's validated regime: a grey band behind them.
+  const n=result.timesUs.length,half=(i:number,j:number)=>(x(result.timesUs[i]!)+x(result.timesUs[j]!))/2;
+  if(options.reference)for(let i=0;i<n;i++){
+    if(!options.reference[i]||(i>0&&options.reference[i-1]))continue;let j=i;while(j+1<n&&options.reference[j+1])j++;
+    const from=i>0?half(i-1,i):x(result.timesUs[i]!),to=j<n-1?half(j,j+1):x(result.timesUs[j]!);
+    svg+=`<rect class="reference-band" x="${from.toFixed(4)}" y="${top}" width="${Math.max(1.5,to-from).toFixed(4)}" height="${bottom-top}" fill="#ecebea"><title>半经典方法的验证范围之外（各轴 k_BT ≥ 3ħω 才验证过）：仅供参考</title></rect>`;
+  }
+  // Samples whose estimated error exceeds the tolerance: a light band behind them (half-way to
+  // their neighbours), and their curve segments dashed and faded.
+  const errors=sampleErrors(result),runs=errors?outsideRuns(errors,tolerance):[];
+  const outside=(i:number)=>!!errors&&errors[i]!>tolerance;
   for(const [a,b] of runs){
     const from=a>0?(x(result.timesUs[a-1]!)+x(result.timesUs[a]!))/2:x(result.timesUs[a]!),to=b<n-1?(x(result.timesUs[b]!)+x(result.timesUs[b+1]!))/2:x(result.timesUs[b]!);
     const worst=Math.max(...errors!.slice(a,b+1));
-    svg+=`<rect class="accuracy-band" x="${from.toFixed(4)}" y="${top}" width="${Math.max(1.5,to-from).toFixed(4)}" height="${bottom-top}" fill="#fbecdc"><title>${esc(`估计误差最大 ${errorPercent(worst)}，超过 ${errorPercent(POPULATION_TOLERANCE)}`)}</title></rect>`;
+    svg+=`<rect class="accuracy-band" x="${from.toFixed(4)}" y="${top}" width="${Math.max(1.5,to-from).toFixed(4)}" height="${bottom-top}" fill="#fbecdc"><title>${esc(`估计误差最大 ${errorPercent(worst)}，超过 ${errorPercent(tolerance)}`)}</title></rect>`;
   }
   svg+='<g clip-path="url(#population-clip)">';
   if(options.showTotalExcited!==false)svg+=series('__excited__',result.totalExcited,'#808080',true);
@@ -109,7 +120,8 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     const mean=result.mean?.converged&&result.mean.populations?result.mean:undefined;
     const meanLabel=options.meanLabel??'p̄(T)',error=sampleErrors(result)?.[index];
     // The sample's estimated error (an absolute bound on every population), marked when above ε.
-    const accuracy=error===undefined?'':`<span class="readout-error${error>POPULATION_TOLERANCE?' outside':''}" title="该时刻布居的估计误差（概率的绝对误差）">±${esc(errorPercent(error))}${error>POPULATION_TOLERANCE?`（超过 ${esc(errorPercent(POPULATION_TOLERANCE))}）`:''}</span>`;
+    const tolerance=result.populationAccuracy?.requestedTolerance??POPULATION_TOLERANCE;
+    const accuracy=error===undefined?'':`<span class="readout-error${error>tolerance?' outside':''}" title="该时刻布居的估计误差（概率的绝对误差）">±${esc(errorPercent(error))}${error>tolerance?`（超过 ${esc(errorPercent(tolerance))}）`:''}</span>`;
     const meanOutside=mean&&!mean.withinTolerance?`<p class="note wrap readout-outside">${esc(meanLabel)} 估计误差 ${esc(mean.estimatedError===null?'未知':errorPercent(mean.estimatedError))}，超过 ${esc(errorPercent(POPULATION_TOLERANCE))}。</p>`:'';
     const head=mean?`<div class="readout-row readout-head"><span></span><span>p(t)</span><span>${esc(meanLabel)}</span></div>`:'';
     const meanOf=(id:string)=>{if(id!=='__excited__')return mean?.populations?.[id]??NaN;const excited=Object.entries(mean?.populations??{}).filter(([state])=>/^(D1|D2)-/.test(state));return excited.length?excited.reduce((sum,[,p])=>sum+p,0):NaN;};

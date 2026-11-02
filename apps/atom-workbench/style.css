@@ -258,6 +258,7 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .readout-error { margin-left: var(--section-gap); font-weight: 400; color: var(--muted-ink); font-variant-numeric: tabular-nums; }
 .readout-error.outside, .readout-outside { color: var(--orange-dark); }
 .accuracy-swatch { display: inline-block; width: 18px; height: 10px; border-radius: 2px; background: #fbecdc; box-shadow: inset 0 0 0 1px #f0d3b4; }
+.accuracy-swatch.reference-swatch { background: #ecebea; box-shadow: inset 0 0 0 1px #d6d4d2; }
 .readout-row { display: grid; grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)) calc(2.6 * var(--control)); gap: var(--row-gap); align-items: center; font-variant-numeric: tabular-nums; }
 .readout-row.two { grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)); }
 .readout-row > span:not(.readout-name) { text-align: right; }

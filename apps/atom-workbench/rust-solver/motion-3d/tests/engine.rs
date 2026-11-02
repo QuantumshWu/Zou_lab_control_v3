@@ -1,0 +1,121 @@
+//! The 3D engine's checks on the app's tweezer PGC example (tests/fixtures/tweezer_pgc.json: its
+//! motion block along x, the frame y, z, x): the generator's consistency at random points, the
+//! Ehrenfest force against the energy's gradient, the dipole pattern's moments, the trap, and a
+//! thermal state that stays thermal with the light off.
+use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
+use atom_motion_3d::model::Model;
+use atom_motion_3d::rng::Rng;
+use atom_motion_3d::stats::{summarize,Scales};
+use atom_motion_3d::{initial_trajectory,simulate,Initial};
+use atom_motion_core::{Beam,Complex,Matrix,Request,STATES};
+use serde_json::Value;
+
+fn fixture()->Value{serde_json::from_str(include_str!("fixtures/tweezer_pgc.json")).unwrap()}
+fn matrix(v:&Value)->Matrix{
+    let mut m=Matrix{real:vec![0.;STATES*STATES],imag:vec![0.;STATES*STATES]};
+    for e in v.as_array().unwrap(){let(i,j)=(e[0].as_u64().unwrap() as usize,e[1].as_u64().unwrap() as usize);m.real[i*STATES+j]=e[2].as_f64().unwrap();m.imag[i*STATES+j]=e[3].as_f64().unwrap();}
+    m
+}
+fn floats(v:&Value)->Vec<f64>{v.as_array().unwrap().iter().map(|x|x.as_f64().unwrap()).collect()}
+/// The fixture's request, its beams kept by `keep`.
+fn request(keep:&dyn Fn(&Value)->bool)->Request{
+    let r=&fixture()["request"];let states:Vec<String>=r["states"].as_array().unwrap().iter().map(|s|s.as_str().unwrap().into()).collect();
+    let initial=states.iter().position(|s|s==r["initialStateId"].as_str().unwrap()).unwrap();
+    let mut density=vec![Complex::ZERO;STATES*STATES];density[initial*STATES+initial]=Complex::ONE;
+    let beams=r["beams"].as_array().unwrap().iter().filter(|b|keep(b)).map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
+        direction:[d[0],d[1],d[2]],wave_number_per_um:b["waveNumberPerUm"].as_f64().unwrap(),waist_um:b["waistUm"].as_f64(),intensity_mw_cm2:b["intensityMWcm2"].as_f64().unwrap(),
+        frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),
+        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"])}}).collect();
+    let e=r["emission"].as_array().unwrap();
+    Request{states,hamiltonian:matrix(&r["hamiltonian"]),frame_frequencies_mhz:floats(&r["frameFrequenciesMHz"]),frequencies_mhz:floats(&r["frequenciesMHz"]),beams,
+        emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],field_vector_g:[0.;3],mass_kg:r["massKg"].as_f64().unwrap(),initial_density:density,
+        temperature_uk:r["temperatureUK"].as_f64().unwrap(),times_us:vec![],tolerance:0.01}
+}
+/// A reproducible uniform stream in [−½, ½).
+fn uniform(seed:u64)->impl FnMut()->f64{let mut rng=Rng::new(seed,0);move||rng.uniform()-0.5}
+/// Random points within the trap and normalized states of each block.
+fn samples(model:&Model,seed:u64)->Vec<(usize,[f64;3],[f64;3],[Complex;5])>{
+    let mut next=uniform(seed);
+    (0..12).map(|i|{let block=i%model.blocks.len();let n=model.dimension(block);
+        let r=[0.3*next(),0.8*next(),0.3*next()];let kappa=[60.*next(),60.*next(),60.*next()];
+        let mut psi=[Complex::ZERO;5];for z in psi[..n].iter_mut(){*z=Complex::new(next(),next());}
+        let norm:f64=psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();for z in psi[..n].iter_mut(){*z=*z*(1./norm);}
+        (block,r,kappa,psi)}).collect()
+}
+
+/// At any point the photons carry the whole decay of the norm: ⟨ψ|Γ|ψ⟩ (the anti-Hermitian part of
+/// H_eff) is Σ_c Σ_a ‖C_a R_c ψ‖² over every ground state (the kinetic shift off, so both are the
+/// responses at rest).
+#[test]
+fn the_photons_carry_the_whole_decay(){
+    let mut model=Model::new(&request(&|_|true)).unwrap();model.doppler=false;
+    for(block,r,kappa,psi)in samples(&model,1){
+        let n=model.dimension(block);let p=model.point(r,kappa);let local=model.local(block,&p);
+        let mut decay=0.;for a in 0..n{for b in 0..n{decay+=(psi[a].conj()*local.hamiltonian[a*n+b]*psi[b]).im;}}let decay=-2.*decay;
+        let photons=model.photons(block,&p,&psi);
+        let total:f64=photons.amplitude.iter().map(|c|c.iter().map(|axis|axis.iter().map(|z|z.norm_sqr()).sum::<f64>()).sum::<f64>()).sum();
+        assert!((decay-total).abs()<=1e-6*total.max(1e-12),"block {block} at {r:?}: {decay:e} against {total:e}");
+    }
+}
+
+/// The Ehrenfest force is minus the gradient of the energy ⟨ψ|H_herm|ψ⟩ (central differences),
+/// the trap's and the light's, the Doppler term's own gradient aside (the kinetic shift off).
+#[test]
+fn the_force_is_the_energy_s_gradient(){
+    let mut model=Model::new(&request(&|_|true)).unwrap();model.doppler=false;
+    let energy=|block:usize,r:[f64;3],psi:&[Complex;5]|->f64{
+        let n=model.dimension(block);let local=model.local(block,&model.point(r,[0.;3]));let mut e=local.scalar;
+        for a in 0..n{for b in 0..n{e+=(psi[a].conj()*local.hamiltonian[a*n+b]*psi[b]).re;}}e
+    };
+    for(block,r,_,psi)in samples(&model,2){
+        let p=model.point(r,[0.;3]);let local=model.local(block,&p);let force=model.force(block,&p,&local,&psi);let h=1e-5;
+        for a in 0..3{
+            let(mut plus,mut minus)=(r,r);plus[a]+=h;minus[a]-=h;let numeric=-(energy(block,plus,&psi)-energy(block,minus,&psi))/(2.*h);
+            assert!((force[a]-numeric).abs()<=1e-5*numeric.abs().max(1.),"block {block} at {r:?}, axis {a}: {} against {numeric}",force[a]);
+        }
+    }
+}
+
+/// The photon's direction follows the dipole pattern: ⟨n_i n_j⟩ = ((2/5) δ_ij tr G − (1/5) Re G_ij)/tr G
+/// for a σ dipole about z with a linear admixture (a Hermitian G of rank 2).
+#[test]
+fn the_emission_follows_the_dipole_pattern(){
+    let u=[[Complex::new(0.6,0.),Complex::new(0.,0.2)],[Complex::new(0.,0.6),Complex::new(0.1,0.)],[Complex::new(0.3,0.1),Complex::new(0.,0.)]];
+    let gram:[[Complex;3];3]=std::array::from_fn(|a|std::array::from_fn(|b|u[a].iter().zip(&u[b]).fold(Complex::ZERO,|s,(x,y)|s+x.conj()**y)));
+    let trace=gram[0][0].re+gram[1][1].re+gram[2][2].re;let mut rng=Rng::new(7,1);let count=400_000;let mut second=[[0.;3];3];
+    for _ in 0..count{let n=dipole_direction(&mut rng,&gram);for i in 0..3{for j in 0..3{second[i][j]+=n[i]*n[j]/count as f64;}}}
+    for i in 0..3{for j in 0..3{
+        let expected=((if i==j{0.4*trace}else{0.})-0.2*gram[i][j].re)/trace;
+        assert!((second[i][j]-expected).abs()<=4e-3,"<n{i} n{j}> {} against {expected}",second[i][j]);
+    }}
+}
+
+/// The trap: the tweezer's frequencies at the focus, 100.4 kHz across it and 19.3 kHz along it (the
+/// pipeline study's 100.55 kHz radial with the tweezer alone; the cooling light's own trap lowers
+/// it), the same with the tweezer as the only light -- then the frame's carrier, a near beam, not
+/// a fold.
+#[test]
+fn the_trap_is_the_tweezer_s(){
+    let khz=|model:&Model|{let initial=Initial::new(model,&request(&|_|true)).unwrap();let(b,x,_)=initial.states[0];
+        model.trap_frequencies(b,x).map(|w|w/std::f64::consts::TAU*1e3)};
+    let all=khz(&Model::new(&request(&|_|true)).unwrap());
+    assert!((all[0]-100.41).abs()<0.05&&(all[2]-100.41).abs()<0.05&&(all[1]-19.26).abs()<0.05,"{all:?}");
+    let alone=Model::new(&request(&|b|b["waistUm"].is_number())).unwrap();
+    let only=khz(&alone);assert!((only[0]-100.55).abs()<0.05&&(only[1]-19.28).abs()<0.05,"{only:?}");
+}
+
+/// With the light off the thermal state stays thermal: T on every axis keeps its initial value (no
+/// jumps), within three standard errors at every sample over 200 us.
+#[test]
+fn a_thermal_state_stays_thermal_with_the_light_off(){
+    let r=request(&|b|b["waistUm"].is_number());let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let(b,x,_)=initial.states[0];let frequencies=model.trap_frequencies(b,x);assert_eq!(model.focused.len(),1);
+    let settings=Settings{dt:0.25,free:[true;3],escape_intensity:1./20.,frequencies};
+    let outcome=simulate(&model,&settings,&initial,5,0,1024,8,40,21,&[]);assert_eq!(outcome.jumps,0);
+    let e=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies});
+    for a in 0..3{let start=e[0].temperature[a];for x in &e{
+        assert!((x.temperature[a]-start).abs()<=3.*(x.temperature_error[a].hypot(e[0].temperature_error[a])),"axis {a}: {} against {start}",x.temperature[a]);
+        assert!((x.temperature[a]-r.temperature_uk).abs()<=4.*x.temperature_error[a],"axis {a}: {} against {}",x.temperature[a],r.temperature_uk);
+    }}
+    let _=(Engine{model:&model,settings},initial_trajectory);
+}
