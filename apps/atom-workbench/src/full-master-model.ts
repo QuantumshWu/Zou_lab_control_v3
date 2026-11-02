@@ -1,7 +1,11 @@
-import type {ComplexAmplitude,Scene,DynamicsSettings,Laser,Level,InitialStateSpec} from './types.js';
+import type {ComplexAmplitude,Scene,DynamicsSettings,Laser,Level,InitialStateSpec,MotionAxis,Vec3} from './types.js';
 import {resolveInitialState} from './types.js';
-import {staticModelBackground} from './spectroscopy.js';
-import {atomicSystem,laserIntensityMWcm2,laserCarrierOffsetMHz,laserFrequencyMHz,captureLaserFrequencyAnchor,RB87,sinCosDegrees,accurateSum} from './physics.js';
+import {laserModelCorrection,staticModelBackground} from './spectroscopy.js';
+import {atomicSystem,composeMagneticField,drivingLasers,laserIntensityMWcm2,laserCarrierOffsetMHz,laserFrequencyMHz,captureLaserFrequencyAnchor,RB87,sinCosDegrees,accurateSum} from './physics.js';
+import {directionVector,invert,rotate,type Frame} from './direction.js';
+import {MOTION_FRAME,radialAxes,type MotionRequest} from './motion.js';
+import {laserWaistUm} from './laser-intensity.js';
+import {withUnit} from './format.js';
 import {FULL_MODEL_SCHEMA} from './solver-protocol.js';
 
 /** The rb87-full/2 model sent to the Rust worker: 32 states, complex row-major
@@ -16,8 +20,44 @@ import {FULL_MODEL_SCHEMA} from './solver-protocol.js';
  * ground F. Static in H0: the magnetic field, and every laser's second-order
  * shift through the states outside the 32-state model and its Rb+ core
  * polarizability (spectroscopy.ts staticModelBackground). */
-interface MasterMatrix {real:number[];imag:number[]}
+export interface MasterMatrix {real:number[];imag:number[]}
 interface MasterDrive {omega:number;cos:MasterMatrix;sin:MasterMatrix;laserIds:string[]}
+/** The 1D motion block of the model (ui-design.md §6.20), sent with a solve that has motion: a
+ * single atom in the tweezer moving along `axis`, the lab axis through the focus -- the atom --
+ * perpendicular to every focused beam (motion.ts radialAxes). It keeps the beams apart: two
+ * counter-propagating beams of one frequency, one drive in `drives`, are two beams here, each with
+ * its own amplitude along the axis.
+ * - `hamiltonian`: H0 in the frame (rad/us) without any beam: the field and the beams' static
+ *   shifts at the atom. The model's hReal/hImag holds besides the static couplings of the beams at
+ *   the frame's carrier, taken at the atom; a moving atom has them from `beams`.
+ * - `frameFrequenciesMHz`: the frequency each state's frame rotates at -- 0 for the ground states,
+ *   the reference carrier for the excited ones. A photon emitted e → g has the frequency
+ *   (H0_ee − H0_gg)/2π + frame_e − frame_g.
+ * - `beams`, every driving laser: `name`; `direction`, its unit wave vector in the motion frame
+ *   (motion.ts MOTION_FRAME: two axes perpendicular to the motion axis, then the axis);
+ *   `waveNumberPerUm`, |k| = 2πν/c (rad/um); `waistUm`, for a beam focused at the atom (given by
+ *   power and waist or by NA) the 1/e² intensity radius at its focus, the atom; a laser given by its
+ *   local intensity has none, a plane wave; `intensityMWcm2`, the intensity at the atom, a focused
+ *   beam's peak; `frequencyIndex`, ν − ν_frame = Σ_k index_k frequencyCoordinates.frequenciesMHz_k;
+ *   `coupling` X and `counterCoupling` R, the co- and counter-rotating excited ← ground couplings
+ *   at the atom (rad/us): with a(x) the beam's amplitude at x on the axis relative to the atom's,
+ *   the beam drives a(x) X e^{−i 2π (ν − ν_frame) t} + a(x)* R e^{+i 2π (ν + ν_frame) t} + h.c.;
+ *   `outsideShift`, its static shift through the states outside the model and the Rb⁺ core at the
+ *   atom (rad/us, Hermitian, in the model basis): its share of `hamiltonian`, which scales with
+ *   |a(x)|² along the axis.
+ * - `emission`: the lowering dipole operator's Cartesian components (1/sqrt(us)) on the motion
+ *   frame's axes: Σ_a D[C_a] is the model's spontaneous emission, and the photon of C_a has the
+ *   angular pattern of a dipole along a, so its recoil along the axis follows from that pattern.
+ * - `axis`, `temperatureUK` (the initial motion, thermal along the axis), `massKg` and the lab
+ *   field `fieldVectorG` (G). */
+export interface MotionModel {
+  axis:MotionAxis;temperatureUK:number;massKg:number;fieldVectorG:Vec3;
+  hamiltonian:MasterMatrix;frameFrequenciesMHz:number[];beams:MotionModelBeam[];emission:[MasterMatrix,MasterMatrix,MasterMatrix];
+}
+export interface MotionModelBeam {
+  id:string;name:string;direction:Vec3;waveNumberPerUm:number;waistUm?:number;intensityMWcm2:number;frequencyIndex:number[];coupling:MasterMatrix;counterCoupling:MasterMatrix;
+  outsideShift:MasterMatrix;
+}
 const N=32,TAU=2*Math.PI,HBAR=1.0545718176461565e-34,H_PLANCK=6.62607015e-34,EPS=8.8541878128e-12,C=299792458,zeros=()=>Array(N*N).fill(0),matrix=():MasterMatrix=>({real:zeros(),imag:zeros()});
 /** h * 1 MHz / k_B, in kelvin. */
 const MHZ_KELVIN=6.62607015e-34*1e6/1.380649e-23;
@@ -88,6 +128,7 @@ function laserPhaseCoordinates(lasers:readonly Laser[]):{frequenciesMHz:number[]
  return {frequenciesMHz,laserIndices};
 }
 /** U† A U, with columns U being the model eigenstates in the bare-B basis. */
+const scaled=(a:MasterMatrix,factor:number):MasterMatrix=>({real:a.real.map(x=>x*factor),imag:a.imag.map(x=>x*factor)});
 function transformOperator(a:MasterMatrix,u:MasterMatrix):MasterMatrix {
  const tmp=matrix(),out=matrix();
  for(let i=0;i<N;i++)for(let k=0;k<N;k++){const ar=a.real[i*N+k]!,ai=a.imag[i*N+k]!;if(ar===0&&ai===0)continue;for(let j=0;j<N;j++){const br=u.real[k*N+j]!,bi=u.imag[k*N+j]!;tmp.real[i*N+j]+=ar*br-ai*bi;tmp.imag[i*N+j]+=ar*bi+ai*br;}}
@@ -124,6 +165,19 @@ export function initialPopulations(spec:InitialStateSpec,states:Level[]):number[
  const total=accurateSum(weights);if(!(total>0)||!Number.isFinite(total))throw new Error('初态权重之和必须为正');
  return weights.map(w=>w/total);
 }
+/** The lowering dipole's Cartesian component along the lab unit vector n: n·D = Σ_q (n·e_q) C_q,
+ * with C_q its spherical components on the quantization axis (bareFieldModel) and e_q the
+ * spherical basis there. A laser's amplitudes are ε_q = e_q*·ε in the same basis (physics.ts
+ * polarization), so the emission and the drives share one convention. */
+function cartesianEmission(n:Vec3,frame:Frame,spherical:readonly MasterMatrix[]):MasterMatrix {
+ const [x,y,z]=rotate(invert(frame),n),half=Math.SQRT1_2,weights=[{re:x*half,im:-y*half},{re:z,im:0},{re:-x*half,im:-y*half}],out=matrix();
+ spherical.forEach((c,q)=>{const w=weights[q]!;for(let k=0;k<N*N;k++){out.real[k]+=w.re*c.real[k]!-w.im*c.imag[k]!;out.imag[k]+=w.re*c.imag[k]!+w.im*c.real[k]!;}});
+ return out;
+}
+function motionText(motion:MotionRequest):string[] {
+ return [`1D 运动：光镊中单个原子沿 ${motion.axis} 轴（穿过焦点、与聚焦光垂直）径向运动，初态为上述内态，运动为温度 ${withUnit(motion.temperatureUK,'μK',{digits:6})} 的热分布；温度 T = m·Var(v)/k_B，v 为沿 ${motion.axis} 轴的速度。`,
+  '光束分开保留（同频的对射光不合并）：每束光在运动轴上的振幅由它的方向、波数和束腰给出——聚焦在原子处的光是焦点在原子处的高斯光束，按局域强度给出的光是平面波；自发辐射的反冲按偶极辐射的方向图投影到运动轴。'];
+}
 function initialText(spec:InitialStateSpec):string {
  if(spec.kind==='state')return `初态：模型基中的单一本征态 ${spec.id}。`;
  if(spec.kind==='unpolarized')return spec.manifold==='ground'?'初态：8 个基态等权混合（非极化）。':`初态：F=${spec.manifold==='F1'?1:2} 的基态等权混合（非极化）。`;
@@ -131,14 +185,18 @@ function initialText(spec:InitialStateSpec):string {
  return '初态：按给定权重（归一化）在模型基中的对角混合。';
 }
 
-export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSettings>){
+/** `motion`: the model of a solve with 1D motion carries its block (MotionModel); an axis that is
+ * not radial -- through the focus, perpendicular to every focused beam -- is refused here (motion.ts
+ * radialAxes). */
+export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSettings>,motion?:MotionRequest){
+ if(motion){const axes=radialAxes(scene);if(!axes.includes(motion.axis))throw new Error(`1D 运动的运动轴 ${motion.axis} 不与每束聚焦光都垂直（可选：${axes.join('、')}）。`);}
  // One basis for H0, C, the initial density and the returned populations:
  // eigenstates of the static H0 (B field + second-order shifts from states
  // outside the model and the Rb+ core). No D-line dressing: those couplings
  // are explicit below, so nothing is counted twice.
  const background=staticModelBackground(scene),a=background.analysis,states=background.levels;
  const bare=bareFieldModel(a.fieldMagnitudeG),u=matrix();states.forEach((s,j)=>{for(let i=0;i<N;i++){u.real[i*N+j]=s.backgroundState?.real[i]??(i===j?1:0);u.imag[i*N+j]=s.backgroundState?.imag[i]??0;}});
- const enabled=scene.lasers.filter(l=>l.enabled&&laserIntensityMWcm2(l)>0);
+ const enabled=drivingLasers(scene);
  let referenceIndex=0,best=-1;enabled.forEach((l,i)=>{const value=mixing(l,bare,a.polarizations[l.id]!.amplitudes);if(value>best){best=value;referenceIndex=i;}});
  const reference=enabled[referenceIndex],lasers=reference?[reference,...enabled.filter((_,i)=>i!==referenceIndex)]:[];
  // Frequency axes: the tree of laser beats, then the reference optical
@@ -153,6 +211,8 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  const opticalFrameMHz=RB87.D2.frequencyHz/1e6+offsets.D2;
  const h=matrix(),groundReference=states.find(s=>s.id==='ground-2-0')!.energyMHz;
  states.forEach((s,i)=>h.real[i*N+i]=TAU*(s.energyMHz-groundReference-(s.manifold==='ground'?0:offsets[s.manifold])));
+ // H0 before the static couplings of the beams at the reference carrier join it: a moving atom has those per beam.
+ const staticHamiltonian={real:h.real.slice(),imag:h.imag.slice()},couplings:{laser:Laser;beat:number[];A:MasterMatrix;R:MasterMatrix}[]=[];
  const drives:MasterDrive[]=[],driveIndices:number[][]=[],driveByKey=new Map<string,MasterDrive>(),terms=new Map<number[],Map<number,number[]>>();
  const put=(m:number[],i:number,v:number)=>{let entries=terms.get(m);if(!entries){entries=new Map();terms.set(m,entries);}let values=entries.get(i);if(!values){values=[];entries.set(i,values);}values.push(v);};
  /** Adds X e^{+i q.omega t} + h.c. with X_ij = value. */
@@ -180,6 +240,7 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
    for(const line of ['D1','D2'] as const){const sys=bare.systems[line],start=line==='D1'?8:16;for(let e=0;e<sys.excited.length;e++)for(let g=0;g<8;g++){const q=sys.excited[e]!.m-sys.ground[g]!.m;if(q< -1||q>1)continue;const p=field[q+1]!,v=-.5*sys.dipoles[e*8+g]!*RB87.D2.dipole*E/HBAR*1e-6;out.real[(start+e)*N+g]=v*p.re;out.imag[(start+e)*N+g]=v*p.im;}}
    return transformOperator(out,u);};
   const A=absorption(co),R=absorption(counter),beat=beatIndex(laserIndex),coIndex=beat.map(n=>n===0?0:-n),counterIndex=beat.map((n,k)=>k===axes-1?n+2:n);
+  if(motion)couplings.push({laser:l,beat,A,R});
   for(let e=8;e<N;e++)for(let g=0;g<8;g++){const k=e*N+g;harmonic(coIndex,e,g,A.real[k]!,A.imag[k]!,l.id);harmonic(counterIndex,e,g,R.real[k]!,R.imag[k]!,l.id);}
  }
  for(const [m,entries]of terms)for(const [i,v]of entries)m[i]=accurateSum([m[i]!,...v]);
@@ -190,7 +251,8 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  // Spontaneous emission in the model basis. In this frame every excited
  // state rotates at the same carrier and no ground state rotates, so each
  // operator, cross-F terms included, is static.
- const collapse=bare.collapse.map(c=>transformOperator(c,u)).filter(c=>c.real.some(v=>v!==0)||c.imag.some(v=>v!==0));
+ const spherical=bare.collapse.map(c=>transformOperator(c,u)),collapse=spherical.filter(c=>c.real.some(v=>v!==0)||c.imag.some(v=>v!==0));
+ const frameFrequenciesMHz=states.map(s=>s.manifold==='ground'?0:opticalFrameMHz);
  // The request's initial state when it names one, else the scene's.
  const initialState=resolveInitialState(settings?.initialState||settings?.initialStateId!==undefined?{initialStateId:settings.initialStateId??scene.dynamics.initialStateId,initialState:settings.initialState}:scene.dynamics),populations=initialPopulations(initialState,states);
  const initialReal=zeros();populations.forEach((p,i)=>initialReal[i*N+i]=p);
@@ -204,7 +266,13 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  // TAU must not decide whether an integer relation exists between them.
  frequencyCoordinates:{frequenciesMHz,frequencies,driveIndices:sentIndices,frameIndices:states.map(()=>Array(axes).fill(0)),frameSectors:states.map(s=>s.manifold==='ground'?0:1)},
  fieldVector:a.fieldVector,fieldMagnitudeG:a.fieldMagnitudeG,laserCount:lasers.length,referenceLaserId:reference?.id,carrierMHz,
- frameFrequenciesMHz:states.map(s=>s.manifold==='ground'?0:opticalFrameMHz),staticMixingRatio:background.maximumMixingRatio,
+ frameFrequenciesMHz,staticMixingRatio:background.maximumMixingRatio,
+ ...(motion?{motion:{axis:motion.axis,temperatureUK:motion.temperatureUK,massKg:RB87.massKg,fieldVectorG:a.fieldVector,hamiltonian:staticHamiltonian,frameFrequenciesMHz,
+  beams:couplings.map(({laser,beat,A,R})=>{const k=directionVector(scene.fields,laser.direction);return {id:laser.id,name:laser.name,
+   direction:MOTION_FRAME[motion.axis].map(n=>n[0]*k[0]+n[1]*k[1]+n[2]*k[2]) as Vec3,waveNumberPerUm:TAU*laserFrequencyMHz(laser)/C,
+   ...(laser.intensityMode==='intensity'?{}:{waistUm:laserWaistUm(laser)}),intensityMWcm2:laserIntensityMWcm2(laser),frequencyIndex:beat,coupling:A,counterCoupling:R,
+   outsideShift:scaled(transformOperator(laserModelCorrection(scene,laser),u),TAU)};}),
+  emission:MOTION_FRAME[motion.axis].map(n=>cartesianEmission(n,composeMagneticField(scene.fields).frame,spherical)) as MotionModel['emission']} satisfies MotionModel}:{}),
  assumptions:[
   `每束开启且强度非零的激光（${lasers.length} 束）都是 32 态主方程中的显式光学驱动：保留 D1、D2 全部允许电偶极耦合，旋转项与反旋转项都保留（不作 RWA），不按近/远失谐区分。`,
   `统一光学旋转系：激发态以参考光${reference?`「${reference.name}」`:''}的载频旋转，基态不旋转；激光间拍频和反旋转项（频率 ω_L+ω_ref，参考载频是独立频率轴）都以精确整数相位坐标进入。`,
@@ -213,5 +281,6 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
   '基矢：H0 静态部分（磁场 + 上述 32 态外静态光移）的本征基，初态与返回布居都在此基中；态标签 F、mF 指与之重叠最大的磁场本征态。D 线光学缀饰不进入基矢，而由动力学显式给出。',
   initialText(initialState),
   '返回瞬时布居（含反旋转项引起的光频微运动，幅度约 (Ω/ω)²）；长期布居 p̄(T) 是时刻 T 的相位平均，只平均掉这些快振荡，不是 0 到 T 的时间平均。',
+  ...(motion?motionText(motion):[]),
  ]};
 }

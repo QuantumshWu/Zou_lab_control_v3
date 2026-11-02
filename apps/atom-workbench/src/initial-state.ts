@@ -3,17 +3,15 @@
 // scene files store it); a mixture as dynamics.initialState, with initialStateId the
 // single state that stands for it where one is needed (a laser's diagram origin).
 import type {InitialStateSpec,Level,Scene,TemperatureUnit} from './types.js';
-import type {Reading} from './unit-input.js';
 import {canonicalInitialState,resolveInitialState} from './types.js';
 import {initialPopulations} from './full-master-model.js';
 import {formatNumber,idLabel,withUnit} from './format.js';
+import {TEMPERATURE_K,TEMPERATURE_UNITS,naturalTemperatureUnit,temperatureReading} from './temperature.js';
 
 export type InitialKind=InitialStateSpec['kind'];
 export type UnpolarizedManifold=Extract<InitialStateSpec,{kind:'unpolarized'}>['manifold'];
 export const INITIAL_KINDS:[InitialKind,string][]=[['state','单态'],['unpolarized','未极化'],['thermal','热分布'],['weights','自定义']];
 export const UNPOLARIZED:[UnpolarizedManifold,string][]=[['ground','全部基态'],['F1','F=1'],['F2','F=2']];
-export const TEMPERATURE_UNITS:readonly TemperatureUnit[]=['K','mK','μK'];
-export const TEMPERATURE_K:Readonly<Record<TemperatureUnit,number>>={K:1,mK:1e-3,'μK':1e-6};
 export const DEFAULT_TEMPERATURE_K=1e-3;
 
 export function initialSpec(scene:Scene):InitialStateSpec{return resolveInitialState(scene.dynamics);}
@@ -46,9 +44,6 @@ export function startingSpec(kind:InitialKind,current:InitialStateSpec,levels:re
   // A mixture's populations, as weights one can read and edit: six digits, none below 1e-9.
   return {kind:'weights',weights:Object.fromEntries(Object.entries(initialWeights(current,levels)).filter(([,w])=>w>=1e-9).map(([id,w])=>[id,Number(w.toPrecision(6))]))};
 }
-export function naturalTemperatureUnit(kelvin:number):TemperatureUnit{return kelvin>=1?'K':kelvin>=1e-3?'mK':'μK';}
-/** A thermal state's temperature as the operator wrote it: the number in its unit (theirs, else the natural one). */
-export function temperatureReading(kelvin:number,unit:TemperatureUnit):Reading<TemperatureUnit>{return {value:kelvin/TEMPERATURE_K[unit],unit};}
 /** The operator's temperature: `value` in `unit`, written with its unit. A unit picked for it keeps
  * its digits, so 1 mK read in K is 1 K (ui-design.md §0.4). */
 export function setTemperature(scene:Scene,value:number,unit:TemperatureUnit,levels:readonly Level[]):void{

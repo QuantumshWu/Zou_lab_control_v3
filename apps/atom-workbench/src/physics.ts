@@ -12,6 +12,8 @@ export {accurateSum,direction,sinCosDegrees} from './angles.js';
  * coupling between fine-structure manifolds, optical dressing, or magnetic octupole term.
  */
 export const RB87 = {
+  /** 86.909 180 531 u (Steck Table 1) in kg, with the CODATA 2018 atomic mass unit. */
+  massKg: 86.909180531*1.66053906660e-27,
   I: 1.5, groundA: 3417.341305452145, muBOverH: 1.39962449361,
   gI: -0.0009951414, groundGJ: 2.002331070,
   D1: { J: 0.5, A: 407.25, B: 0, gJ: 0.666, frequencyHz: 377.107463380e12, gammaHz: 36.129e6, dipole: 2.5377e-29 },
@@ -288,6 +290,9 @@ export function captureLaserFrequencyAnchor(laser:Laser):LaserFrequencyAnchor {
   if((anchor.line!=='D1'&&anchor.line!=='D2')||!Number.isFinite(anchor.offsetMHz)||!(RB87[anchor.line].frequencyHz/1e6+anchor.offsetMHz>0))throw new Error('Invalid canonical optical frequency.');
   return {...anchor};
 }
+
+/** The lasers that drive the dynamics: every enabled laser of nonzero intensity. */
+export function drivingLasers(scene:Pick<Scene,'lasers'>):Laser[]{return scene.lasers.filter(l=>l.enabled&&laserIntensityMWcm2(l)>0);}
 
 export function laserFrequencyMHz(laser:Laser):number {
   const coordinate=captureLaserFrequencyAnchor(laser);

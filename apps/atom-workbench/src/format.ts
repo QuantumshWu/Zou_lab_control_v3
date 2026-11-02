@@ -68,6 +68,24 @@ export function formatElapsed(ms:number):string{
   return ms<1000?withUnit(ms,'ms',{digits:4}):withUnit(ms/1000,'s',{digits:4});
 }
 
+/** A running solve's remaining time in the status line (ui-design.md §6.16), counted down from the
+ * checkpoint that estimated it: `estimateMs` the solver's estimate then, `sinceMs` the time since.
+ * "预计剩余约 7 s": whole seconds below 10 s (never 0 s), 5 s steps below a minute, whole minutes
+ * beyond; "预计剩余不超过 3 min" when the estimate is an upper bound (`atMost`: the run may stop
+ * earlier); "即将完成" when the solver said its run stops there (0); nothing once the countdown has
+ * run out (the next checkpoint brings a new estimate). `changesInMs`: when the words next change,
+ * absent when they do not change by themselves. */
+export function remainingWords(estimateMs:number,sinceMs:number,atMost=false):{words:string;changesInMs?:number}{
+  if(estimateMs===0)return {words:'即将完成'};
+  const left=estimateMs-sinceMs;if(!(left>0))return {words:''};
+  // The value shown and the time (s) below which it is another: its rounding's half step or the
+  // edge of its range; below 1.5 s the countdown's end.
+  const s=left/1000,seconds=Math.round(s),fives=5*Math.round(s/5),minutes=Math.round(s/60);
+  const [shown,below]:[string,number]=s<9.5?[`${Math.max(1,seconds)} s`,seconds>1?seconds-.5:0]
+    :s<57.5?[`${fives} s`,Math.max(9.5,fives-2.5)]:[`${minutes} min`,Math.max(57.5,60*(minutes-.5))];
+  return {words:`预计剩余${atMost?'不超过':'约'} ${shown}`,changesInMs:left-1000*below+1};
+}
+
 /** Typed numbers keep the ASCII minus; shown ones the true minus. */
 export function signedInteger(n:number):string{return n>0?`+${n}`:n<0?`${MINUS}${-n}`:'0';}
 

@@ -1,13 +1,16 @@
 //! Atom Workbench native worker: JSONL requests on stdin, one response line
 //! per request on stdout. Every rb87-full/2 solve is served by the population
-//! core through `lattice_core_adapter`. Matrices in the public protocol are
-//! row-major, frequencies are rad/us, collapse amplitudes are sqrt(1/us).
+//! core through `lattice_core_adapter`, one whose model carries 1D motion by
+//! the motion core through `motion_core_adapter`. Matrices in the public
+//! protocol are row-major, frequencies are rad/us, collapse amplitudes are
+//! sqrt(1/us).
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
 mod harmonics;
 mod lattice_core_adapter;
+mod motion_core_adapter;
 const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/3";
 const FULL_MODEL_SCHEMA: &str = "rb87-full/2";
 
@@ -51,6 +54,9 @@ struct Model {
     drives: Vec<Drive>,
     #[serde(default)]
     frequency_coordinates:Option<FrequencyCoordinates>,
+    /// 1D motion: the atom in a tweezer moving radially along one lab axis (motion_core_adapter).
+    #[serde(default)]
+    motion:Option<motion_core_adapter::MotionModel>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -151,7 +157,10 @@ fn respond(request: Request) -> Value {
         }
     };
     let result = match (request.model_schema.as_deref(), request.model.as_ref()) {
-        (Some(FULL_MODEL_SCHEMA), Some(model)) => lattice_core_adapter::solve(model, &request.options, &mut publish),
+        (Some(FULL_MODEL_SCHEMA), Some(model)) => match &model.motion {
+            Some(motion) => motion_core_adapter::solve(model, motion, &request.options, &mut publish),
+            None => lattice_core_adapter::solve(model, &request.options, &mut publish),
+        },
         (Some(FULL_MODEL_SCHEMA), None) => Err("A solve request requires a model".into()),
         _ => Err(format!("Unsupported native model schema; this worker serves {FULL_MODEL_SCHEMA}")),
     };
@@ -222,5 +231,34 @@ mod tests {
         }
         assert!(solve(json!({"durationUs":0})).contains("must be a positive finite time"));
         assert!(solve(json!({"durationUs":1.5e7})).contains("The trajectory duration is limited to 10 s (requested 15 s)"));
+    }
+    /// The probe-only fixture without its probe, with a motion block: no
+    /// beam, H0 the fixture's diagonal, the spherical collapse operators
+    /// standing in for the Cartesian ones; the atom starts in a ground state.
+    fn motion_model() -> Value {
+        let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/probe_only_short.json")).unwrap();
+        let mut model = fixture["model"].clone();
+        let diagonal: Vec<Value> = model["hReal"].as_array().unwrap().iter().enumerate().map(|(k, x)| if k % 33 == 0 { x.clone() } else { json!(0.) }).collect();
+        model["hReal"] = json!(diagonal);
+        model["hImag"] = json!(vec![0.; 1024]);
+        model["drives"] = json!([]);
+        model["motion"] = json!({"axis":"z","temperatureUK":30.,"massKg":1.4431608951791763e-25,"fieldVectorG":[0.,0.,3.],
+            "hamiltonian":{"real":diagonal,"imag":vec![0.;1024]},"frameFrequenciesMHz":(0..32).map(|i| if i < 8 { 0. } else { 3.8e8 }).collect::<Vec<_>>(),
+            "beams":[],"emission":model["collapse"].clone()});
+        model
+    }
+    /// A motion request is a trajectory alone. Without light nothing confines the atom; with
+    /// light the engine is not implemented yet.
+    #[test]
+    fn a_motion_request_without_a_confining_potential_is_refused() {
+        let mut model = motion_model();
+        let solve = |model: &Value, options: Value| request(json!({"id":6,"modelSchema":FULL_MODEL_SCHEMA,"model":model,"options":options}))["error"].as_str().unwrap_or("").to_owned();
+        assert!(solve(&model, json!({"durationUs":10.,"samples":5})).contains("a trajectory alone"));
+        let trajectory = json!({"durationUs":10.,"samples":5,"includeMean":false});
+        assert_eq!(solve(&model, trajectory.clone()), atom_motion_core::NO_TRAP);
+        let zero = json!({"real":vec![0.;1024],"imag":vec![0.;1024]});
+        model["motion"]["beams"] = json!([{"id":"tweezer","name":"光镊","direction":[0.,1.,0.],"waveNumberPerUm":7.37,"waistUm":1.2,"intensityMWcm2":1.77e8,
+            "frequencyIndex":[0],"coupling":zero,"counterCoupling":zero,"outsideShift":zero}]);
+        assert_eq!(solve(&model, trajectory), atom_motion_core::NOT_CONFINED);
     }
 }

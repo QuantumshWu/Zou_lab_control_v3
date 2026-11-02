@@ -1,11 +1,12 @@
-import type {DynamicsResult,MeanResult,MeanStatus,PopulationAccuracy} from './solver-types.js';
-import {CONVERGED_MEAN_STATUSES,MEAN_STATUSES,readPopulationAccuracy} from './solver-types.js';
+import type {DynamicsResult,MeanResult,MeanStatus,MotionResult,PopulationAccuracy} from './solver-types.js';
+import {CONVERGED_MEAN_STATUSES,MEAN_STATUSES,readMotionResult,readPopulationAccuracy} from './solver-types.js';
 import type {DynamicsSettings,InitialStateSpec,Scene,Level} from './types.js';
 import {MEAN_HORIZONS_US,POPULATION_TOLERANCE,canonicalInitialState,resolveInitialState} from './types.js';
 import {initialPopulations} from './full-master-model.js';
-import {laserIntensityMWcm2} from './physics.js';
+import {drivingLasers} from './physics.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from './solver-protocol.js';
 import {readMeanDensity} from './mean-density.js';
+import {motionRequest,type MotionRequest} from './motion.js';
 
 export interface SolverFailureRecord {time:string;request:{clientId:string;sequence:number};scene:Scene;options:object;attempt:number;willRetry:boolean;error:string;status?:number;code?:string;response?:unknown;page?:string;}
 class RequestFailure extends Error {constructor(message:string,readonly status:number,readonly code:string,readonly retryable:boolean){super(message);}}
@@ -41,12 +42,12 @@ export class DynamicsClient {
   }
   private async run(job:Job):Promise<void>{
     if(this.current!==job||job.controller.signal.aborted)return;
-    job.attempt++;let evidence:unknown;
+    job.attempt++;let evidence:unknown;const motion=motionRequest(job.scene,job.settings);
     try{
       const response=await this.transport(this.base+'/api/solve',{method:'POST',signal:job.controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({modelSchema:FULL_MODEL_SCHEMA,stream:!!job.onProgress,request:{clientId:this.clientId,sequence:job.id},scene:job.scene,options:{
         initialStateId:job.settings.initialStateId,initialState:canonicalInitialState(resolveInitialState(job.settings)),durationUs:job.settings.durationUs,samples:job.settings.samples,
         populationTolerance:POPULATION_TOLERANCE,meanHorizonUs:job.settings.meanHorizonUs,
-        includeMean:job.includeMean,meanOnly:job.meanOnly,
+        includeMean:job.includeMean,meanOnly:job.meanOnly,...(motion?{motion}:{}),
       }})}).catch(error=>{if(error instanceof TypeError)throw new RequestFailure('本机 Rust 求解服务连接暂时失败。',0,'network-error',true);throw error;});
       if(!response.ok){const detail=await response.json().catch(()=>({error:''}));evidence=detail;throw new RequestFailure(detail.error||`Local solver: ${response.status}`,response.status,detail.code??'',(response.status===502||response.status===503)&&!/invalid|incompatible|numerical/.test(detail.code??''));}
       const data=await this.readResponse(response,job);if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('求解结果不完整或无效：响应对象。');
@@ -57,7 +58,7 @@ export class DynamicsClient {
       if(data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||
         !Array.isArray(data.service?.capabilities)||!data.service.capabilities.includes(FULL_MODEL_SCHEMA))throw new Error('本机求解服务版本不兼容：需要 rb87-full/2 模型，旧模型结果未显示。');
       if(!data.request||data.request.clientId!==this.clientId||data.request.sequence!==job.id)throw new Error('求解响应与当前请求不匹配。');
-      const result=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings),job.settings.meanHorizonUs);
+      const result=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings),job.settings.meanHorizonUs,motion);
       this.checkMean(result,job);this.checkSamples(result,job);
       if(job.includeMean&&!result.mean?.converged)this.recordFailure(job,new Error(result.mean?.reason??'长期布居未解析'),false,evidence);
       this.current=null;this.lastRoundTripMs=performance.now()-job.started;job.resolve(result);
@@ -83,11 +84,12 @@ export class DynamicsClient {
       if(event.type!=='checkpoint')throw new Error('未知求解进度。');
       if(this.current!==job||job.controller.signal.aborted)return;
       // A checkpoint: the result evaluated so far -- the trajectory on the requested samples (the
-      // single t = 0 row of a mean request) with its per-sample errors, and the mean when computed.
+      // single t = 0 row of a mean request) with its per-sample errors, and the mean as far as it
+      // has come (a full request's none before its mean's first checkpoint).
       const data=event.data;
       if(data?.progress!==true||data.request?.clientId!==this.clientId||data.request.sequence!==job.id||data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||!data.service?.capabilities?.includes(FULL_MODEL_SCHEMA))throw new Error('中间结果与当前请求不匹配。');
-      const checkpoint=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings),job.settings.meanHorizonUs);
-      this.checkMean(checkpoint,job);this.checkSamples(checkpoint,job);
+      const checkpoint=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings),job.settings.meanHorizonUs,motionRequest(job.scene,job.settings));
+      this.checkMean(checkpoint,job,true);this.checkSamples(checkpoint,job);
       job.onProgress?.(checkpoint);
     };
     try{while(true){const {done,value}=await reader.read();buffer+=decoder.decode(value,{stream:!done});if(buffer.length>64*1024*1024)throw new Error('求解流超过大小限制。');let end;while((end=buffer.indexOf('\n'))>=0){consume(buffer.slice(0,end));buffer=buffer.slice(end+1);}if(done)break;}if(buffer.trim())consume(buffer);}
@@ -102,9 +104,11 @@ export class DynamicsClient {
     const expected=job.meanOnly?1:job.settings.samples;
     if(result.timesUs.length!==expected||(!job.meanOnly&&Math.abs(result.timesUs.at(-1)!-job.settings.durationUs)>1e-10*Math.max(1,job.settings.durationUs)))throw new Error('求解响应的采样与请求不匹配。');
   }
-  /** The mean asked for (both standard T); none for a trajectory alone. */
-  private checkMean(result:DynamicsResult,job:Job):void{
-    if((result.mean.status!=='not-requested')!==job.includeMean)throw new Error('求解响应的长期布居与本次请求不符。');
+  /** The mean asked for (both standard T); none for a trajectory alone. A full request's
+   * checkpoint has none until its mean has made its first checkpoint. */
+  private checkMean(result:DynamicsResult,job:Job,checkpoint=false):void{
+    const carried=result.mean.status!=='not-requested',pending=checkpoint&&!carried&&job.includeMean&&!job.meanOnly;
+    if(carried!==job.includeMean&&!pending)throw new Error('求解响应的长期布居与本次请求不符。');
   }
   private abortCurrent(reason:string):void{
     const job=this.current;if(!job)return;this.current=null;clearTimeout(job.timer);job.controller.abort();job.reject(new DOMException(reason,'AbortError'));
@@ -114,10 +118,10 @@ export class DynamicsClient {
 }
 
 /** Reads the one native result contract (documented in
- * rust-solver/src/lattice_core_adapter.rs) and rejects anything else.
- * `initial` is the requested initial state (an id is a single state), `horizon`
- * the requested time T of the mean (us: 1e5 or 1e6). */
-export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics),horizon:number=scene.dynamics.meanHorizonUs):DynamicsResult{
+ * rust-solver/src/lattice_core_adapter.rs, and its motion block in motion_core_adapter.rs) and
+ * rejects anything else. `initial` is the requested initial state (an id is a single state),
+ * `horizon` the requested time T of the mean (us: 1e5 or 1e6), `motion` the requested motion. */
+export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics),horizon:number=scene.dynamics.meanHorizonUs,motion?:MotionRequest):DynamicsResult{
   const invalid=(detail:string):never=>{throw new Error(`求解结果不完整或无效：${detail}；未绘制替代数据。`);};
   const bounded=(value:unknown,limit=Infinity)=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=limit;
   const probabilities=(row:unknown,slack:number):row is number[]=>Array.isArray(row)&&row.length===32&&
@@ -146,6 +150,13 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   if(timesUs.length>1&&typeof d.method!=='string')invalid('时间演化方法');
   if(timesUs.length>1||data.populationAccuracy!==undefined)try{populationAccuracy=readPopulationAccuracy(data.populationAccuracy,timesUs.length);}catch{invalid('布居精度元数据');}
   if(data.progress!==undefined&&data.progress!==true)invalid('进度标记');
+  // A checkpoint may carry its run's estimate of the wall time left (ms, finite, ≥ 0); a final
+  // result never does.
+  const remaining=d.estimatedRemainingMs,atMost=d.estimatedRemainingAtMost;
+  if(remaining!==undefined&&data.progress!==true)invalid('最终结果带有剩余时间估计');
+  if(remaining!==undefined&&!bounded(remaining))invalid('剩余时间估计');
+  // It may be an upper bound: the run may stop earlier (a motion run's continuation, not yet projected).
+  if(atMost!==undefined&&(atMost!==true||remaining===undefined))invalid('剩余时间估计');
   // The mean, when one was asked for: both standard T from the one mean run (`meanHorizons`,
   // one entry per T, in any order), each a computed p̄(T) -- with its estimated error and whether
   // that is within ε -- or 'not-converged', nothing usable computed. The run's method and
@@ -178,12 +189,16 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   // The requested T's mean, or none requested.
   const mean:MeanResult=horizonMeans?horizonMeans.find(s=>s.horizonUs===horizon)??invalid('长期布居时刻 T')
     :{converged:false,status:'not-requested',populations:null,estimatedError:null,withinTolerance:false};
+  // A motion solve's result carries its motion along the requested axis; any other result none.
+  let motionResult:MotionResult|undefined;
+  if(motion)try{motionResult=readMotionResult(data.motion,timesUs,motion.axis);}catch{invalid('运动结果');}
+  else if(data.motion!==undefined)invalid('运动结果');
   const assumptions=data.assumptions;
   if(!Array.isArray(assumptions)||assumptions.some((text:unknown)=>typeof text!=='string'))invalid('模型假设');
   const populations=Object.fromEntries(states.map((state,i)=>[state.id,rows.map((row:number[])=>row[i]!)]));
-  const active=scene.lasers.filter(l=>l.enabled&&laserIntensityMWcm2(l)>0);
+  const active=drivingLasers(scene);
   return {states,timesUs,populations,totalExcited:timesUs.map((_,i)=>states.filter(s=>s.manifold!=='ground').reduce((sum,s)=>sum+populations[s.id]![i]!,0)),
     activeLaserIds:active.map(l=>l.id),mean,...(horizonMeans?{horizonMeans}:{}),
-    metrics:{totalMs:d.elapsedMs},validation:{maxTraceError:d.traceError,minPopulation:Math.min(...rows.flat())},
-    ...(populationAccuracy?{populationAccuracy,method:d.method}:{}),assumptions};
+    metrics:{totalMs:d.elapsedMs,...(remaining!==undefined?{estimatedRemainingMs:remaining as number}:{}),...(atMost===true?{estimatedRemainingAtMost:true}:{})},validation:{maxTraceError:d.traceError,minPopulation:Math.min(...rows.flat())},
+    ...(populationAccuracy?{populationAccuracy,method:d.method}:{}),...(motionResult?{motion:motionResult}:{}),assumptions};
 }

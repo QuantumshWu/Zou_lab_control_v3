@@ -1,8 +1,8 @@
 // 示例…: ready-made scenes. Loading one replaces the whole scene; the caller
 // asks first when the current scene holds edits.
-import {defaultDynamics,defaultScene} from './types.js';
-import type {Direction,FrequencyExpr,Scene,SpectralLine} from './types.js';
-import {resolveSceneFrequencies} from './physics.js';
+import {defaultDynamics,defaultMotion,defaultScene,defaultTweezer} from './types.js';
+import type {AxisName,Direction,FrequencyExpr,Laser,Scene,SpectralLine} from './types.js';
+import {RB87,resolveSceneFrequencies} from './physics.js';
 import {normalizeLaserIntensity} from './laser-intensity.js';
 
 export type ExampleView='levels'|'dynamics'|'space';
@@ -15,9 +15,14 @@ export const EXAMPLES:readonly {key:string;label:string}[]=[
   {key:'dark',label:'D1 · F=2 → F=1 光抽运'},
   {key:'both',label:'D1 + D2 · 同时驱动'},
   {key:'tilted',label:'倾斜磁场'},
+  {key:'pgc',label:'光镊 · 径向 1D PGC'},
 ];
+/** The tweezer PGC example (typical in-trap PGC): the tweezer's power (mW) and waist (μm); the
+ * cooling pair's detuning from F=2 → F′=3 and the repump pair's from F=1 → F′=2 (in units of the D2
+ * Γ, as in free space), and each beam's intensity (mW/cm²); the duration (μs). */
+export const TWEEZER_PGC={tweezerMW:3.5,tweezerWaistUm:1,coolingDetuningGamma:-6,repumpDetuningGamma:0,coolingMWcm2:3,repumpMWcm2:.5,durationUs:1e4};
 
-const axis=(name:'+x'|'+z'):Direction=>({reference:{kind:'axis',axis:name},thetaDeg:0,phiDeg:0});
+const axis=(name:AxisName):Direction=>({reference:{kind:'axis',axis:name},thetaDeg:0,phiDeg:0});
 const angles=(thetaDeg:number,phiDeg:number):Direction=>({reference:{kind:'angles',thetaDeg,phiDeg},thetaDeg:0,phiDeg:0});
 
 /** A detuning from a zero-field transition (by default the line's F=2 → F′=3, or F″=2 on D1). */
@@ -63,6 +68,21 @@ export function exampleScene(key:string):{scene:Scene;view:ExampleView;line:Spec
     view='dynamics';
   }
   if(key==='tilted'){next.fields[0]!.direction=angles(67,35);Object.assign(probe,{ellipticityDeg:28,direction:axis('+z')});view='space';}
+  if(key==='pgc'){
+    // Polarization-gradient cooling of one atom in the 852 nm tweezer, which runs along z polarized
+    // along x: the atom moves radially along x. Along ±x a lin⊥lin D2 cooling pair below F=2 → F′=3
+    // and a repump pair on F=1 → F′=2 (TWEEZER_PGC). No field; its reference axis, the quantization
+    // axis, along x makes the tweezer π-polarized. The atom starts in |2,+2⟩ at 30 μK.
+    Object.assign(next.fields[0]!,{magnitudeG:0,direction:axis('+x')});
+    const gamma=RB87.D2.gammaHz/(2*Math.PI*1e6),cooling=detuned('D2',TWEEZER_PGC.coolingDetuningGamma*gamma),repump=detuned('D2',TWEEZER_PGC.repumpDetuningGamma*gamma,1,2);
+    const beam=(id:string,name:string,frequency:FrequencyExpr,intensityMWcm2:number,along:AxisName,polarizationAngleDeg:number):Laser=>
+      ({...structuredClone(probe),id,name,frequency,intensityMWcm2,direction:axis(along),polarizationAngleDeg,ellipticityDeg:0,phaseDeg:0});
+    next.lasers=[{...defaultTweezer(),direction:axis('+z'),powerMW:TWEEZER_PGC.tweezerMW,waistUm:TWEEZER_PGC.tweezerWaistUm},
+      beam('cool-plus','冷却光 +x',cooling,TWEEZER_PGC.coolingMWcm2,'+x',0),beam('cool-minus','冷却光 −x',cooling,TWEEZER_PGC.coolingMWcm2,'-x',90),
+      beam('repump-plus','回泵光 +x',repump,TWEEZER_PGC.repumpMWcm2,'+x',0),beam('repump-minus','回泵光 −x',repump,TWEEZER_PGC.repumpMWcm2,'-x',90)];
+    next.dynamics={...defaultDynamics(),initialStateId:'ground-2-2',durationUs:TWEEZER_PGC.durationUs,durationUnit:'ms',samples:1001,motion:{...defaultMotion(),axis:'x'}};
+    view='dynamics';
+  }
   resolveSceneFrequencies(next);next.lasers.forEach(normalizeLaserIntensity);
   return {scene:next,view,line};
 }

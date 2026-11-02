@@ -237,6 +237,12 @@ function labels(v:Matrix,n:number):number[]{
   }
   const result=Array(n).fill(0);for(let j=1;j<=n;j++)result[p[j]-1]=j-1;return result;
 }
+/** One laser's static correction alone (MHz, in the magnetic eigenbasis): its co- and
+ * counter-rotating couplings to the states outside the model and its core shift, the share of
+ * staticModelBackground's correction that scales with its intensity (1D motion, full-master-model.ts). */
+export function laserModelCorrection(scene:Scene,laser:Laser):Matrix{
+  const analysis=analyze(scene);return modelCorrection(analysis,groups({...scene,lasers:[laser]},analysis)).matrix;
+}
 /** The static part of the master-model H0 and its eigenbasis (the model basis): each
  * fine-structure manifold's bare energies plus the static correction, diagonalized, each
  * eigenvector labelled by the magnetic eigenstate it overlaps most; and the largest mixing

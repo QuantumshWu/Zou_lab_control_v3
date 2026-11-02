@@ -13,6 +13,8 @@ import {POPULATION_TOLERANCE,defaultScene} from '../dist/js/atom-workbench/src/t
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {FULL_MODEL_SCHEMA} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {exampleScene} from '../dist/js/atom-workbench/src/examples.js';
+import {motionRequest} from '../dist/js/atom-workbench/src/motion.js';
 
 const option=name=>{const i=process.argv.indexOf(name);return i<0?undefined:process.argv[i+1];};
 if(process.argv.includes('--help')){
@@ -39,7 +41,7 @@ const baseEnv={...process.env};
 for(const key of Object.keys(baseEnv))if(key.toUpperCase().startsWith('ATOM_'))delete baseEnv[key];
 Object.assign(baseEnv,DESKTOP_SOLVER_DEFAULTS);
 const report={status:'starting',executable:exe,binarySha256,bytes:binary.length,windowOpened:false,
-  scope:'Candidate EXE/backend-info plus normal Worker/IPC/JSONL finite and mean requests; no independent physics oracle',
+  scope:'Candidate EXE/backend-info plus normal Worker/IPC/JSONL finite and mean requests, and the tweezer 1D-motion example (refused until the motion engine is implemented); no independent physics oracle',
   requestSource:option('--request')?resolve(option('--request')):'Generated probe-only smoke fixture',
   requestSha256:sha(JSON.stringify({scene,settings})),options:settings,processes:[],workerRequests:[],historicalAnswerRead:false};
 const children=new Map(),pending=new Map();let worker,sequence=0;
@@ -76,12 +78,12 @@ function host(command){
   else if(command.op==='close-all')for(const child of children.values())child.kill();
   else throw Error('Unknown native host command: '+command.op);
 }
-function request(kind,options){
+function request(kind,options,requestScene=scene){
   const channel=`smoke-${kind}-${++sequence}`,token={clientId:'candidate-exe-smoke',sequence};
   return new Promise((resolveReply,reject)=>{
     const timer=setTimeout(()=>{void worker.receive({kind:'cancel',channel});pending.delete(channel);reject(Error(`${kind} smoke request timed out; no retry started`));},timeout);
     pending.set(channel,{resolve:data=>{clearTimeout(timer);pending.delete(channel);resolveReply(data);},reject:error=>{clearTimeout(timer);pending.delete(channel);reject(error);}});
-    void worker.receive({kind:'solve',channel,request:{scene,modelSchema:FULL_MODEL_SCHEMA,request:token,options,stream:false}});
+    void worker.receive({kind:'solve',channel,request:{scene:requestScene,modelSchema:FULL_MODEL_SCHEMA,request:token,options,stream:false}});
   });
 }
 const began=performance.now();
@@ -106,14 +108,21 @@ try{
   const mean=await request('mean',{...settings,meanOnly:true,includeMean:true});
   const meanParsed=normalizeDynamicsResult(mean,scene,settings.initialStateId,settings.meanHorizonUs);
   assert.equal(meanParsed.mean.converged,true,'Smoke mean must be qualified, never the finite endpoint');
-  assert.equal(report.workerRequests.length,2);assert.deepEqual(report.workerRequests.map(r=>r.lane),['trajectory','mean']);
+  // 1D motion: the tweezer example's motion request, its first 50 us, through the same path.
+  const tweezer=exampleScene('pgc').scene,motion=motionRequest(tweezer,tweezer.dynamics);
+  const motionSettings={...tweezer.dynamics,durationUs:50,samples:6,meanOnly:false,includeMean:false,motion};
+  const moving=await request('motion',motionSettings,tweezer);
+  const movingParsed=normalizeDynamicsResult(moving,tweezer,motionSettings.initialStateId,motionSettings.meanHorizonUs,motion);
+  assert.equal(movingParsed.timesUs.length,6);assert.ok(movingParsed.motion&&movingParsed.motion.temperatureUK.every(Number.isFinite),'The motion core answers with temperatures');
+  assert.equal(report.workerRequests.length,3);assert.deepEqual(report.workerRequests.map(r=>r.lane),['trajectory','mean','trajectory']);
   assert.equal(report.workerRequests[0].modelSha256,report.workerRequests[1].modelSha256,'Both fresh results must use the identical current Model');
   // Both means are p(T) of the same equation, each within its own bound.
   const meanDelta=Math.max(...parsed.states.map(s=>Math.abs(parsed.mean.populations[s.id]-meanParsed.mean.populations[s.id])));
   const meanBounds=parsed.mean.estimatedError+meanParsed.mean.estimatedError;
   assert.ok(Number.isFinite(meanBounds)&&meanDelta<=meanBounds,`Inline and meanOnly means agree within their bounds (difference ${meanDelta}, bounds ${meanBounds})`);
   report.status='passed';report.validation={backendStatic:true,normalIpcAndJsonl:true,finitePopulationAccuracy:parsed.populationAccuracy,
-    meanStatus:meanParsed.mean.status,finiteNativeMs:finite.diagnostics.elapsedMs,meanNativeMs:mean.diagnostics.elapsedMs};
+    meanStatus:meanParsed.mean.status,finiteNativeMs:finite.diagnostics.elapsedMs,meanNativeMs:mean.diagnostics.elapsedMs,
+    motionNativeMs:moving.diagnostics.elapsedMs};
 }catch(error){report.status='failed';report.error=error.stack??error.message;process.exitCode=1;}
 finally{
   await worker?.receive({kind:'shutdown'});

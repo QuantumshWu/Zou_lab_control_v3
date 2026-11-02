@@ -1,4 +1,4 @@
-import type {Level} from './types.js';
+import type {Level,MotionAxis} from './types.js';
 import {POPULATION_TOLERANCE} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
 /** A trajectory's estimated population error (ui-design.md §6.16). Every computed trajectory is
@@ -57,13 +57,63 @@ export interface MeanResult {
   /** The time T of p̄(T) (us); undefined when no mean was requested. */
   horizonUs?:number;
 }
+/** A motion result's distributions along the axis: on one grid (strictly increasing), at some of
+ * the sample times -- `samples`, increasing indices into timesUs, the last sample among them --
+ * each the probability at every grid point, summing to one. */
+export interface Distributions {grid:number[];samples:number[];probabilities:number[][]}
+/** The motion of a 1D motion result (ui-design.md §6.20): a single atom in the tweezer moving
+ * radially along its axis. At every sample the temperature T = m·Var(v)/k_B (μK), the mean
+ * velocity (m/s), n̄ relative to the trap frequency at the focus (`trapFrequencyKHz`, ω/2π, the one
+ * the engine used) and the probability that the atom has left the trap by then; the momentum
+ * distributions (grid: velocities, m/s) and the position distributions (grid: positions from the
+ * focus, μm). Everything but the loss describes the atom still held. */
+export interface MotionResult {
+  axis:MotionAxis;temperatureUK:number[];meanVelocityMps:number[];trapFrequencyKHz:number;meanOccupation:number[];lossProbability:number[];
+  momentum:Distributions;position:Distributions;
+  /** The last simulated time (us) when the samples after it are the engine's continuation (its
+   * prediction from the simulated history), not simulated; absent when every sample was. */
+  continuedFromUs?:number;
+}
+/** A sample time the continuation's: after the last simulated one. */
+export function continuedAt(motion:Pick<MotionResult,'continuedFromUs'>,timeUs:number):boolean{return motion.continuedFromUs!==undefined&&timeUs>motion.continuedFromUs;}
+/** The motion block of a result on the grid `timesUs`, read strictly (rust-solver/src/motion_core_adapter.rs). */
+export function readMotionResult(value:unknown,timesUs:readonly number[],axis:MotionAxis):MotionResult {
+  const invalid=():never=>{throw new Error('Invalid motion result');};
+  const samples=timesUs.length;
+  const object=(v:unknown,keys:readonly string[],optional:readonly string[]=[]):Record<string,unknown>=>{
+    if(!v||typeof v!=='object'||Array.isArray(v)||!keys.every(key=>Object.hasOwn(v,key))||!Object.keys(v).every(key=>keys.includes(key)||optional.includes(key)))invalid();return v as Record<string,unknown>;};
+  const series=(v:unknown,length:number,admits:(x:number)=>boolean):number[]=>{if(!Array.isArray(v)||v.length!==length||!v.every(x=>typeof x==='number'&&Number.isFinite(x)&&admits(x)))invalid();return [...(v as number[])];};
+  const distributions=(v:unknown,gridKey:string):Distributions=>{
+    const p=object(v,[gridKey,'samples','probabilities']),values=p[gridKey];
+    const grid=Array.isArray(values)?series(values,values.length,()=>true):invalid();
+    const at=Array.isArray(p.samples)?series(p.samples,p.samples.length,i=>Number.isInteger(i)&&i>=0&&i<samples):invalid();
+    if(grid.length<2||grid.some((x,i)=>i>0&&x<=grid[i-1]!)||!at.length||at.some((i,k)=>k>0&&i<=at[k-1]!)||at.at(-1)!==samples-1)invalid();
+    // Each distribution is a probability vector, its sum one as the population rows' are.
+    const rows=Array.isArray(p.probabilities)&&p.probabilities.length===at.length?p.probabilities.map(row=>series(row,grid.length,x=>x>=0&&x<=1)):invalid();
+    if(rows.some(row=>Math.abs(row.reduce((a,b)=>a+b,0)-1)>5e-6))invalid();
+    return {grid,samples:at,probabilities:rows};
+  };
+  const m=object(value,['axis','temperatureUK','meanVelocityMps','trapFrequencyKHz','meanOccupation','lossProbability','momentum','position'],['continuedFromUs']);
+  if(m.axis!==axis||typeof m.trapFrequencyKHz!=='number'||!Number.isFinite(m.trapFrequencyKHz)||!(m.trapFrequencyKHz>0))invalid();
+  const loss=series(m.lossProbability,samples,x=>x>=0&&x<=1);if(loss.some((p,i)=>i>0&&p<loss[i-1]!))invalid();
+  // The continuation starts at a time of the run before its last sample: some samples are its.
+  const from=m.continuedFromUs;if(from!==undefined&&!(typeof from==='number'&&Number.isFinite(from)&&from>=0&&from<timesUs.at(-1)!))invalid();
+  return {axis,temperatureUK:series(m.temperatureUK,samples,x=>x>=0),meanVelocityMps:series(m.meanVelocityMps,samples,()=>true),
+    trapFrequencyKHz:m.trapFrequencyKHz as number,meanOccupation:series(m.meanOccupation,samples,()=>true),lossProbability:loss,
+    momentum:distributions(m.momentum,'velocitiesMps'),position:distributions(m.position,'positionsUm'),...(from===undefined?{}:{continuedFromUs:from as number})};
+}
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];
   activeLaserIds:string[];mean:MeanResult;
+  /** A 1D motion solve's motion; a motion result has no long-time mean. */
+  motion?:MotionResult;
   /** The mean at every standard time T (MEAN_HORIZONS_US order), all from the one mean run;
    * the requested T's is `mean` itself. Absent when no mean was requested. */
   horizonMeans?:MeanResult[];
-  metrics:{totalMs:number};
+  /** The solve's wall time so far (ms), and on a checkpoint its run's estimate of the wall time
+   * left until the final result (ms; absent before the run's history supports one), with
+   * `estimatedRemainingAtMost` when it is an upper bound (the run may stop earlier). */
+  metrics:{totalMs:number;estimatedRemainingMs?:number;estimatedRemainingAtMost?:true};
   validation:{maxTraceError:number;minPopulation:number};
   /** Estimated error of returned populations and all declared groups only. */
   populationAccuracy?:PopulationAccuracy;

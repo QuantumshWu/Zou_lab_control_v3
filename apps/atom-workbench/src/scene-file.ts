@@ -9,7 +9,8 @@ import {DURATION_UNITS} from './duration.js';
 import {analyze,resolveSceneFrequencies} from './physics.js';
 import {DETUNING_UNITS} from './laser-frequency.js';
 import {INTENSITY_MODES,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,checkNumericalAperture,normalizeLaserIntensity} from './laser-intensity.js';
-import {TEMPERATURE_UNITS} from './initial-state.js';
+import {TEMPERATURE_UNITS} from './temperature.js';
+import {MOTION_AXES} from './motion.js';
 import {AXIS_NAMES,referenceAxis} from './direction.js';
 import {initialPopulations} from './full-master-model.js';
 
@@ -138,7 +139,7 @@ function readScene(input:unknown):Scene {
   const references=s.list('references',12).map((v,i)=>referenceLevel(v,`references[${i}]`,id));
   // Every linked field exists and no link forms a cycle.
   for(const object of [...fields,...lasers])try{referenceAxis(fields,object.direction.reference);}catch(error){throw new Error(`「${object.name}」的参考轴无效：${(error as Error).message}`);}
-  const d=Reader.of(s.o.dynamics,'dynamics',DYNAMICS_REQUIRED,['initialState','temperatureUnit']),marks=s.o.marks;
+  const d=Reader.of(s.o.dynamics,'dynamics',DYNAMICS_REQUIRED,['initialState','temperatureUnit','motion']),marks=s.o.marks;
   if(!marks||typeof marks!=='object'||Array.isArray(marks))fail('marks','应为对象');
   const scene:Scene={version:SCENE_VERSION,name:s.text('name',100),fields,lasers,referenceFrequencies,references,marks:{},
     dynamics:{initialStateId:d.text('initialStateId'),monitoredStateIds:[],monitorMode:d.choice('monitorMode',['auto','manual'] as const),monitoredGroupIds:[],
@@ -178,6 +179,11 @@ function readScene(input:unknown):Scene {
   // A thermal initial state has its temperature's unit, and only it has one.
   if((dynamics.initialState?.kind==='thermal')!==d.has('temperatureUnit'))fail('dynamics.temperatureUnit',dynamics.initialState?.kind==='thermal'?'热分布初态缺少温度单位':'只用于热分布初态');
   if(d.has('temperatureUnit'))dynamics.temperatureUnit=d.choice('temperatureUnit',TEMPERATURE_UNITS);
+  // 1D motion, on or off: its axis and its initial temperature with the unit it is written in.
+  if(d.has('motion')){
+    const m=Reader.of(d.o.motion,'dynamics.motion',['enabled','axis','temperatureUK','temperatureUnit']);
+    dynamics.motion={enabled:m.boolean('enabled'),axis:m.choice('axis',MOTION_AXES),temperatureUK:m.number('temperatureUK',Number.MIN_VALUE),temperatureUnit:m.choice('temperatureUnit',TEMPERATURE_UNITS)};
+  }
   return scene;
 }
 

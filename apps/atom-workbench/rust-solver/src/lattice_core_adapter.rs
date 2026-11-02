@@ -20,9 +20,13 @@
 //! 100 ms and 1 s, `meanHorizonUs` one of them (1e5 or 1e6; there is no t ->
 //! infinity mean); a full request runs it on its own thread beside the run
 //! of its trajectory, whose space spans the grid's times only, and one with
-//! `includeMean` false runs no mean. Every checkpoint of the request's own
-//! run (a full request's trajectory, once its mean is there) is streamed
-//! first (`progress`: true) in the same shape.
+//! `includeMean` false runs no mean. Every checkpoint is streamed first
+//! (`progress`: true) in the same shape: a request of one run, the mean's or
+//! the trajectory's, at its run's every checkpoint; a full request at every
+//! checkpoint of its trajectory, with its mean as far as it has come (its
+//! latest checkpoint, its result once done, none before its first), and once
+//! its trajectory is done at every further checkpoint of its mean, with the
+//! trajectory's result. A stopped request keeps the last.
 //! - `states` (32 ids), `timesUs`, `populations` (one row per time). A mean
 //!   result has the single t = 0 row, the initial populations; a finite result
 //!   (at most 10 s, 2 to 2000 samples: a longer or denser grid is refused
@@ -33,7 +37,8 @@
 //!   the previous checkpoint plus the change of its projection onto the
 //!   probability simplex; an estimate, not a bound),
 //!   `estimatedMaximumError` (their largest), `requestedTolerance`, `scope`.
-//! - `meanHorizons`, the mean, whenever one was asked for (computed or not):
+//! - `meanHorizons`, the mean, whenever one was asked for (computed or not;
+//!   on a full request's checkpoint once its mean has made its first):
 //!   the two standard horizons, `[{horizonUs (1e5, 1e6), populations,
 //!   densityReal, densityImag, estimatedError, withinTolerance, status,
 //!   reason}]`. A computed entry is the mean at T, the laboratory time
@@ -50,7 +55,13 @@
 //! - `diagnostics`. The reader gates the rows' `traceError` and
 //!   `initialStateError`, `elapsedMs`, a finite result's `method`, and a mean's
 //!   `meanMethod`, `meanTraceError` and `meanPositivityError`, and shows
-//!   `slowestRelaxationUs`; every other key is profiling (the lattice's under
+//!   `slowestRelaxationUs` and a streamed checkpoint's `estimatedRemainingMs`:
+//!   the wall time (ms, finite, >= 0) the request is estimated to have left
+//!   until its final result, its run's (`pipeline::Progress`; 0 where the run
+//!   stops) or a full request's larger of its two runs', each counted down
+//!   from its latest checkpoint; absent while a run still going has none (a
+//!   full request's mean before its first checkpoint) and on the final
+//!   result. Every other key is profiling (the lattice's under
 //!   `diagnostics.lattice`, on the final result).
 use crate::{Model,Options,harmonics};
 use serde_json::{json,Value};
@@ -87,10 +98,10 @@ pub fn warmup()->Result<(),String>{
 }
 
 /// A requested population group: the eight F manifolds and all excited states.
-struct Group{name:String,indices:Vec<usize>}
+pub(crate) struct Group{pub(crate) name:String,indices:Vec<usize>}
 /// The ground flags and the requested groups, from the 32 state labels
 /// `manifold-F-m`.
-fn groups(model:&Model)->Result<(Vec<bool>,Vec<Group>),String>{
+pub(crate) fn groups(model:&Model)->Result<(Vec<bool>,Vec<Group>),String>{
     let mut grouped=BTreeMap::<String,Vec<usize>>::new();let mut excited=Vec::new();let mut ground=Vec::new();
     for(i,label)in model.states.iter().enumerate(){
         let mut fields=label.splitn(3,'-');let manifold=fields.next().ok_or("Missing atomic manifold label")?;
@@ -106,19 +117,21 @@ fn groups(model:&Model)->Result<(Vec<bool>,Vec<Group>),String>{
     Ok((ground,grouped.into_iter().map(|(name,indices)|Group{name,indices}).collect()))
 }
 
+/// The largest |sum - 1| a returned probability vector may have.
+pub(crate) const TRACE_LIMIT:f64=1e-7;
 /// The row gates every result reports: the largest |row sum - 1| and the
 /// first row's largest deviation from the initial populations.
-fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
+pub(crate) fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
     let trace=rows.iter().map(|p|(p.iter().sum::<f64>()-1.).abs()).fold(0_f64,f64::max);
     let initial_error=rows[0].iter().zip(initial).map(|(a,b)|(a-b).abs()).fold(0_f64,f64::max);
-    if trace>1e-7||initial_error>1e-10{return Err("Returned population probabilities failed fixed trace/initial checks".into());}
+    if trace>TRACE_LIMIT||initial_error>1e-10{return Err("Returned population probabilities failed fixed trace/initial checks".into());}
     Ok((trace,initial_error))
 }
 
 /// rho0 (row-major): `initialReal/initialImag` when given, else the state
 /// `initialIndex`. A given density must be Hermitian with trace one and
 /// positive semidefinite (to 1e-10).
-fn initial_density(model:&Model,lapack:&Lapack)->Result<Vec<Complex64>,String>{
+pub(crate) fn initial_density(model:&Model,lapack:&Lapack)->Result<Vec<Complex64>,String>{
     let n=model.dimension;let d=n*n;
     let density:Vec<Complex64>=match(&model.initial_real,&model.initial_imag){
         (Some(re),Some(im))=>{
@@ -366,17 +379,21 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
 }
 
 /// The request's uniform grid (us).
-fn grid(options:&Options)->Vec<f64>{(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect()}
+pub(crate) fn grid(options:&Options)->Vec<f64>{(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect()}
 
 /// The mean of a request as computed: its answer and run, or why nothing
 /// usable was computed.
 type MeanRun<'a>=Result<(&'a Answer,Option<&'a Solution>),String>;
 
+/// What a result is: a streamed checkpoint, with its run's estimate of the
+/// remaining wall time (ms) when there is one, or the final result.
+enum Stage{Checkpoint(Option<f64>),Final}
+
 /// The result in the one contract: the trajectory with its per-sample
 /// bounds (`trajectory`; none for a mean alone) and the mean when one was
-/// asked for; `solutions` (the final result) add the runs' diagnostics, their
-/// absence marks a streamed checkpoint (`progress`).
-fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&Answer,Option<&Solution>)>,mean:Option<MeanRun<'_>>,last:bool,started:Instant)->Result<Value,String>{
+/// asked for; `solutions` (the final result) add the runs' diagnostics; a
+/// streamed checkpoint is marked (`progress`) and carries its estimate.
+fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&Answer,Option<&Solution>)>,mean:Option<MeanRun<'_>>,stage:Stage,started:Instant)->Result<Value,String>{
     let prepared=request.lattice();
     let rows=match trajectory{Some((answer,_))=>answer.trajectory.clone(),None=>vec![request.initial.clone()]};
     let(row_trace,initial_error)=row_errors(&rows,&request.initial)?;
@@ -409,15 +426,35 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
             result["diagnostics"]["meanMethod"]=json!(METHOD);}
         None=>{}
     }
-    if !last{result["progress"]=json!(true);}
+    if let Stage::Checkpoint(remaining)=stage{
+        result["progress"]=json!(true);
+        if let Some(ms)=remaining{result["diagnostics"]["estimatedRemainingMs"]=json!(ms);}
+    }
     if result["diagnostics"].get("lattice").is_none(){result["diagnostics"]["lattice"]=lattice_json(prepared,None);}
     Ok(result)
 }
 
-/// A request through the lattice core: the mean alone (meanOnly), or the
-/// mean on its own thread beside the trajectory; every checkpoint of the request's own run
-/// (the mean's for a mean alone, the trajectory's with the mean for a full
-/// request) is published as it is made, the best one returned.
+/// A checkpoint of a full request's mean as its thread hands it over: its
+/// outputs, its estimate of the wall time its run has left (ms) and when it
+/// was made.
+struct MeanPoint{answer:Answer,remaining:Option<f64>,at:Instant}
+impl MeanPoint{
+    /// What the mean has left now: its estimate counted down since, zero when
+    /// it stops there; none once the countdown has run out (the run goes on,
+    /// its end no longer estimated).
+    fn left(&self)->Option<f64>{
+        let ms=self.remaining?;if ms==0.{return Some(0.);}
+        let left=ms-self.at.elapsed().as_secs_f64()*1e3;(left>0.).then_some(left)
+    }
+}
+/// What a request of two runs has left: the larger of theirs, none while
+/// either has none.
+fn larger(a:Option<f64>,b:Option<f64>)->Option<f64>{Some(a?.max(b?))}
+
+/// A request through the lattice core: the mean alone (meanOnly), the
+/// trajectory alone (includeMean false), or the mean on its own thread beside
+/// the trajectory; every checkpoint is published as the result contract says,
+/// the best one returned.
 pub fn solve(model:&Model,options:&Options,publish:&mut dyn FnMut(&Value))->Result<Value,String>{
     let started=Instant::now();
     if !options.mean_only{
@@ -428,27 +465,48 @@ pub fn solve(model:&Model,options:&Options,publish:&mut dyn FnMut(&Value))->Resu
     let request=prepare_request(model,options)?;
     let mut failure:Option<String>=None;
     if options.mean_only{
-        let mut observe=|_:&Checkpoint,answer:&Answer|{if failure.is_some(){return;}
-            match result(model,options,&request,None,Some(Ok((answer,None))),false,started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
+        let mut observe=|c:&Checkpoint,answer:&Answer|{if failure.is_some(){return;}
+            match result(model,options,&request,None,Some(Ok((answer,None))),Stage::Checkpoint(c.remaining_ms),started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
         let mean=mean_run(&request,&mut observe);
         if let Some(e)=failure{return Err(e);}
-        return result(model,options,&request,None,Some(mean.as_ref().map(|s|(&s.answer,Some(s))).map_err(|e|e.clone())),true,started);
+        return result(model,options,&request,None,Some(mean.as_ref().map(|s|(&s.answer,Some(s))).map_err(|e|e.clone())),Stage::Final,started);
     }
     let times=grid(options);
-    // The mean runs on its own thread while the trajectory runs: a
-    // trajectory checkpoint is published once the mean is there.
+    // The mean runs on its own thread beside the trajectory and hands every
+    // checkpoint over. The request's checkpoint is published at every
+    // checkpoint of the trajectory, with the mean as far as it has come, and
+    // once the trajectory is done at every further checkpoint of the mean.
     let mean:std::sync::OnceLock<Result<Solution,String>>=std::sync::OnceLock::new();
     let mean_view=||mean.get().map(|m|m.as_ref().map(|s|(&s.answer,Some(s))).map_err(|e|e.clone()));
+    let(handover,points)=std::sync::mpsc::channel::<MeanPoint>();
     let trajectory=std::thread::scope(|scope|->Result<Solution,String>{
-        let worker=if options.include_mean{Some(std::thread::Builder::new().stack_size(MEAN_STACK).spawn_scoped(scope,||{
-            let _=mean.set(mean_run(&request,&mut |_:&Checkpoint,_:&Answer|{}));}).map_err(|e|e.to_string())?)}else{None};
-        let mut observe=|_:&Checkpoint,answer:&Answer|{if failure.is_some()||(options.include_mean&&mean.get().is_none()){return;}
-            match result(model,options,&request,Some((answer,None)),mean_view(),false,started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
+        let(mean_cell,shared)=(&mean,&request);
+        let worker=if options.include_mean{Some(std::thread::Builder::new().stack_size(MEAN_STACK).spawn_scoped(scope,move||{
+            let _=mean_cell.set(mean_run(shared,&mut |c:&Checkpoint,answer:&Answer|{
+                let _=handover.send(MeanPoint{answer:answer.clone(),remaining:c.remaining_ms,at:Instant::now()});}));}).map_err(|e|e.to_string())?)}
+            else{drop(handover);None};
+        // The mean as far as it has come, with what it has left: its result
+        // once done, else its latest checkpoint, none before its first.
+        let mut latest:Option<MeanPoint>=None;
+        let mut observe=|c:&Checkpoint,answer:&Answer|{if failure.is_some(){return;}
+            if let Some(point)=points.try_iter().last(){latest=Some(point);}
+            let(part,left)=match(mean_view(),&latest){(Some(done),_)=>(Some(done),Some(0.)),(None,Some(point))=>(Some(Ok((&point.answer,None))),point.left()),(None,None)=>(None,None)};
+            let remaining=if options.include_mean{larger(c.remaining_ms,left)}else{c.remaining_ms};
+            match result(model,options,&request,Some((answer,None)),part,Stage::Checkpoint(remaining),started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
         let trajectory=trajectory_run(&request,&times,&mut observe);
+        // The trajectory done: the mean's further checkpoints (the latest of
+        // those waiting), with the trajectory's result, until the mean is done.
+        if let Ok(done)=&trajectory{
+            while let Ok(first)=points.recv(){
+                let point=points.try_iter().last().unwrap_or(first);if failure.is_some(){continue;}
+                match result(model,options,&request,Some((&done.answer,Some(done))),Some(Ok((&point.answer,None))),Stage::Checkpoint(point.left()),started){
+                    Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}
+            }
+        }
         if let Some(worker)=worker{worker.join().map_err(|_|"The mean's thread failed".to_string())?;}
         trajectory})?;
     if let Some(e)=failure{return Err(e);}
-    result(model,options,&request,Some((&trajectory.answer,Some(&trajectory))),mean_view(),true,started)
+    result(model,options,&request,Some((&trajectory.answer,Some(&trajectory))),mean_view(),Stage::Final,started)
 }
 
 #[cfg(test)]
@@ -552,6 +610,48 @@ mod tests{
         assert!(alone.get("meanHorizons").is_none()&&alone["diagnostics"].get("meanLattice").is_none());
         assert_eq!(alone["populationAccuracy"]["status"],json!("estimated-converged"));
     }
+    /// A request's final result, its streamed checkpoints and their
+    /// estimates: finite and nonnegative, zero on the last, none on the final.
+    fn streamed_estimates(model:&Model,options:Value)->(Value,Vec<Value>,Vec<Option<f64>>){
+        let mut streamed=Vec::new();
+        let last=solve(model,&serde_json::from_value(options).unwrap(),&mut |v|streamed.push(v.clone())).unwrap();
+        assert!(last.get("progress").is_none()&&last["diagnostics"].get("estimatedRemainingMs").is_none(),"the final result");
+        let remaining:Vec<Option<f64>>=streamed.iter().map(|v|{assert_eq!(v["progress"],json!(true));
+            v["diagnostics"].get("estimatedRemainingMs").map(|ms|ms.as_f64().unwrap())}).collect();
+        assert!(remaining.last()==Some(&Some(0.)),"the last checkpoint stops its runs: {remaining:?}");
+        assert!(remaining.iter().flatten().all(|ms|ms.is_finite()&&*ms>=0.),"{remaining:?}");
+        (last,streamed,remaining)
+    }
+    /// A request of one run streams its run's estimate from the first
+    /// checkpoint on (before a rate, the ladder's first pass): the default
+    /// scene's mean alone and its trajectory alone.
+    #[test]
+    fn a_checkpoint_carries_its_runs_remaining_time(){
+        let fixture:Value=serde_json::from_str(include_str!("../tests/fixtures/default_scene_horizons.json")).unwrap();
+        let model:Model=serde_json::from_value(fixture["model"].clone()).unwrap();
+        for(mean_only,include_mean)in[(true,true),(false,false)]{
+            let mut o=fixture["options"].clone();o["meanOnly"]=json!(mean_only);o["includeMean"]=json!(include_mean);
+            let(_,streamed,remaining)=streamed_estimates(&model,o);
+            assert!(streamed.len()>=2&&remaining.iter().all(Option::is_some),"{remaining:?}");
+        }
+    }
+    /// A full request streams its trajectory's checkpoints whether its mean
+    /// is done or not: with no `meanHorizons` and no estimate before the
+    /// mean's first checkpoint, with the mean as far as it has come after;
+    /// the final result has the mean's. The default scene, 20 us.
+    #[test]
+    fn a_full_request_streams_before_its_mean_is_done(){
+        let fixture:Value=serde_json::from_str(include_str!("../tests/fixtures/default_scene_horizons.json")).unwrap();
+        let model:Model=serde_json::from_value(fixture["model"].clone()).unwrap();
+        let mut o=fixture["options"].clone();o["meanOnly"]=json!(false);o["includeMean"]=json!(true);
+        let(last,streamed,remaining)=streamed_estimates(&model,o);
+        assert!(!streamed.is_empty());
+        for(checkpoint,ms)in streamed.iter().zip(&remaining){
+            assert!(checkpoint["timesUs"].as_array().unwrap().len()==1000&&checkpoint["populationAccuracy"].is_object(),"the trajectory's rows");
+            if checkpoint.get("meanHorizons").is_none(){assert!(ms.is_none()&&checkpoint["diagnostics"].get("meanMethod").is_none(),"no mean, no estimate");}
+        }
+        assert_eq!(last["meanHorizons"].as_array().unwrap().len(),2);
+    }
     /// A request on the last prepared model (another initial state) reuses its
     /// preparation, not its explicit set; one ULP of the model is another
     /// model; the initial state is no part of the key.
@@ -587,7 +687,7 @@ mod tests{
             let mut o=fixture["options"].clone();o["meanOnly"]=json!(true);o["meanHorizonUs"]=horizon.clone();
             let options:Options=serde_json::from_value(o).unwrap();
             let request=prepare_request(&model,&options).unwrap();
-            let out=result(&model,&options,&request,None,Some(Err("no usable mean".into())),true,Instant::now()).unwrap();
+            let out=result(&model,&options,&request,None,Some(Err("no usable mean".into())),Stage::Final,Instant::now()).unwrap();
             let entries=out["meanHorizons"].as_array().unwrap();
             assert_eq!(entries.iter().map(|e|e["horizonUs"].clone()).collect::<Vec<_>>(),vec![json!(1e5),json!(1e6)]);
             assert!(entries.iter().all(|e|e["status"]=="not-converged"&&e["reason"]=="no usable mean"&&e["withinTolerance"]==false&&e["populations"].is_null()));
