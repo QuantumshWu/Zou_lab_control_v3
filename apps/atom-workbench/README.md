@@ -86,8 +86,10 @@ the atom, and the emission is resolved on the axis. The engine
 with the excited states eliminated at every position (GMW-o1 in a box): Strang
 steps with exact per-point exponentials, grids and time step chosen for 1%
 populations and 10% in T and n̄, continued by dynamic mode decomposition once
-consecutive checkpoints agree. A request without light, or whose light does
-not confine the initial state along the axis, is refused.
+its prediction agrees with the one made at half the run (the decomposition's
+eigen-solver is the engine's own, so every build gives the same continuation).
+A request without light, or whose light does not confine the initial state
+along the axis, is refused.
 
 Every request asks for the same absolute population error,
 `populationTolerance: 0.01` on the probability scale (1%); it is not a user
