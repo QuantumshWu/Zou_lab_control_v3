@@ -8,8 +8,11 @@ export type SolveKind='mean'|'full'|'trajectory';
 export interface SolveInputs{trajectoryKey:string;meanKey:string}
 
 /** The request a page needs now, none when what it shows is here: the mean at T on every page,
- * the trajectory on all but the levels' long-time mode. */
-export function plannedSolve(showsTrajectory:boolean,have:{trajectory:boolean;mean:boolean}):SolveKind|undefined{
+ * the trajectory on all but the levels' long-time mode. A page showing a 1D motion trajectory
+ * (`motion`) needs it alone: the motion has no long-time mean, and the internal p̄(T) is no part
+ * of a motion result. */
+export function plannedSolve(showsTrajectory:boolean,have:{trajectory:boolean;mean:boolean},motion=false):SolveKind|undefined{
+  if(motion&&showsTrajectory)return have.trajectory?undefined:'trajectory';
   return !showsTrajectory||have.trajectory?(have.mean?undefined:'mean'):have.mean?'trajectory':'full';
 }
 /** The client options of a request. */

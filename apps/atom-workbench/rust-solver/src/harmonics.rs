@@ -417,7 +417,7 @@ mod declared_coordinate_tests{
             initial_index:0,initial_real:None,initial_imag:None,
             drives:omegas.into_iter().map(|omega|Drive{omega,cos:zero.clone(),sin:zero.clone()}).collect(),
             frequency_coordinates:Some(FrequencyCoordinates{frequencies,frequencies_mhz:None,drive_indices:indices,
-                frame_indices:vec![vec![0;axes];2],frame_sectors:vec![0,1]})}
+                frame_indices:vec![vec![0;axes];2],frame_sectors:vec![0,1]}),motion:None}
     }
     #[test]
     fn declared_triangle_uses_two_source_axes_despite_redundant_omega_rounding(){

@@ -1,6 +1,7 @@
 import {FULL_MODEL_SCHEMA,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {DEFAULT_DYNAMICS_SAMPLES,POPULATION_TOLERANCE} from '../dist/js/atom-workbench/src/types.js';
+import {readMotionRequest} from '../dist/js/atom-workbench/src/motion.js';
 
 const requestError=(message,code)=>Object.assign(new Error(message),{status:400,code});
 
@@ -13,20 +14,24 @@ export function nativeCapabilities(message){
 }
 
 /** The one mapping from an HTTP/IPC solve request (scene + options) to the
- * native payload, and from the native result back to the client response. */
+ * native payload, and from the native result back to the client response. A
+ * request with `options.motion` (1D motion) is a trajectory alone, and its model
+ * carries the motion block (full-master-model.ts MotionModel). */
 export function prepareNativeSolve(input){
   if(input.modelSchema!==undefined&&input.modelSchema!==FULL_MODEL_SCHEMA)throw requestError('Unsupported atomic model schema.','incompatible-model-schema');
   const settings={...input.scene.dynamics,...input.options};
-  const started=performance.now(),model=buildFullMasterModel(input.scene,settings),modelBuildMs=performance.now()-started;
+  let motion;if(input.options?.motion!==undefined)try{motion=readMotionRequest(input.options.motion);}catch(error){throw requestError(error.message,'invalid-options');}
+  const started=performance.now(),model=buildFullMasterModel(input.scene,settings,motion),modelBuildMs=performance.now()-started;
   // The population accuracy is fixed (POPULATION_TOLERANCE); a value in the scene or the options is not read.
   const options={durationUs:settings.durationUs??5,samples:settings.samples??DEFAULT_DYNAMICS_SAMPLES,populationTolerance:POPULATION_TOLERANCE,
     includeMean:input.options?.includeMean??true,meanOnly:input.options?.meanOnly??false,
     // The time T of the mean the app reads (us: 1e5 or 1e6; the solver's default 1e6 when absent).
     ...(input.options&&Object.hasOwn(input.options,'meanHorizonUs')?{meanHorizonUs:input.options.meanHorizonUs}:{})};
   if(typeof options.meanOnly!=='boolean'||typeof options.includeMean!=='boolean')throw requestError('Invalid solver options','invalid-options');
+  if(motion&&(options.meanOnly||options.includeMean))throw requestError('A motion solve is a trajectory alone: meanOnly and includeMean are false','invalid-options');
   const payload={modelSchema:model.modelSchema,options,model:{dimension:model.dimension,states:model.states.map(state=>state.id),
     hReal:model.hReal,hImag:model.hImag,collapse:model.collapse,initialIndex:model.initialIndex,initialReal:model.initialReal,initialImag:model.initialImag,
-    drives:model.drives,frequencyCoordinates:model.frequencyCoordinates}};
+    drives:model.drives,frequencyCoordinates:model.frequencyCoordinates,...(model.motion?{motion:model.motion}:{})}};
   // The response carries the full level metadata in place of the native state
   // ids, and the requested initial state with its populations (the first row).
   const respond=(result,request)=>({...result,request,states:model.states,assumptions:model.assumptions,initialState:model.initialState,initialPopulations:model.initialPopulations,service:{...result.service,modelBuildMs}});

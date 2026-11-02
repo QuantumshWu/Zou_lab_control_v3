@@ -12,7 +12,8 @@ import {typedDigits} from '../dist/js/atom-workbench/src/unit-input.js';
 import {expressionBase,frequencyValue,setFrequencyBase,setFrequencyValue} from '../dist/js/atom-workbench/src/laser-frequency.js';
 import {MHZ_PER_MK,inUnit} from '../dist/js/atom-workbench/src/frequency-value.js';
 import {offsetReading,setReferenceOffset} from '../dist/js/atom-workbench/src/reference-energy.js';
-import {initialSpec,initialSummary,setInitialSpec,setTemperature,temperatureReading} from '../dist/js/atom-workbench/src/initial-state.js';
+import {initialSpec,initialSummary,setInitialSpec,setTemperature} from '../dist/js/atom-workbench/src/initial-state.js';
+import {temperatureReading} from '../dist/js/atom-workbench/src/temperature.js';
 import {analyze} from '../dist/js/atom-workbench/src/physics.js';
 import {INTENSITY_MWCM2,WAIST_UM,intensityReading,laserIntensityMWcm2,laserWaistUm,laserWavelengthUm,powerReading,setLaserIntensityMode,setLaserNumericalAperture,
   waistReading,writeLaserIntensity,writeLaserPower,writeLaserWaist} from '../dist/js/atom-workbench/src/laser-intensity.js';

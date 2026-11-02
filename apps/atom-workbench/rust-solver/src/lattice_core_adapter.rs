@@ -84,10 +84,10 @@ pub fn warmup()->Result<(),String>{
 }
 
 /// A requested population group: the eight F manifolds and all excited states.
-struct Group{name:String,indices:Vec<usize>}
+pub(crate) struct Group{pub(crate) name:String,indices:Vec<usize>}
 /// The ground flags and the requested groups, from the 32 state labels
 /// `manifold-F-m`.
-fn groups(model:&Model)->Result<(Vec<bool>,Vec<Group>),String>{
+pub(crate) fn groups(model:&Model)->Result<(Vec<bool>,Vec<Group>),String>{
     let mut grouped=BTreeMap::<String,Vec<usize>>::new();let mut excited=Vec::new();let mut ground=Vec::new();
     for(i,label)in model.states.iter().enumerate(){
         let mut fields=label.splitn(3,'-');let manifold=fields.next().ok_or("Missing atomic manifold label")?;
@@ -103,19 +103,21 @@ fn groups(model:&Model)->Result<(Vec<bool>,Vec<Group>),String>{
     Ok((ground,grouped.into_iter().map(|(name,indices)|Group{name,indices}).collect()))
 }
 
+/// The largest |sum - 1| a returned probability vector may have.
+pub(crate) const TRACE_LIMIT:f64=1e-7;
 /// The row gates every result reports: the largest |row sum - 1| and the
 /// first row's largest deviation from the initial populations.
-fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
+pub(crate) fn row_errors(rows:&[Vec<f64>],initial:&[f64])->Result<(f64,f64),String>{
     let trace=rows.iter().map(|p|(p.iter().sum::<f64>()-1.).abs()).fold(0_f64,f64::max);
     let initial_error=rows[0].iter().zip(initial).map(|(a,b)|(a-b).abs()).fold(0_f64,f64::max);
-    if trace>1e-7||initial_error>1e-10{return Err("Returned population probabilities failed fixed trace/initial checks".into());}
+    if trace>TRACE_LIMIT||initial_error>1e-10{return Err("Returned population probabilities failed fixed trace/initial checks".into());}
     Ok((trace,initial_error))
 }
 
 /// rho0 (row-major): `initialReal/initialImag` when given, else the state
 /// `initialIndex`. A given density must be Hermitian with trace one and
 /// positive semidefinite (to 1e-10).
-fn initial_density(model:&Model,lapack:&Lapack)->Result<Vec<Complex64>,String>{
+pub(crate) fn initial_density(model:&Model,lapack:&Lapack)->Result<Vec<Complex64>,String>{
     let n=model.dimension;let d=n*n;
     let density:Vec<Complex64>=match(&model.initial_real,&model.initial_imag){
         (Some(re),Some(im))=>{
@@ -332,7 +334,7 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
 }
 
 /// The request's uniform grid (us).
-fn grid(options:&Options)->Vec<f64>{(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect()}
+pub(crate) fn grid(options:&Options)->Vec<f64>{(0..options.samples).map(|i|options.duration_us*i as f64/(options.samples-1)as f64).collect()}
 
 /// The mean of a request as computed: its answer and run, or why nothing
 /// usable was computed.

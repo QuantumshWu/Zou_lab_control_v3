@@ -133,7 +133,23 @@ export interface DynamicsSettings {
   durationUnit:DurationUnit;
   /** A thermal initial state's temperature unit (as durationUnit); present exactly when it is thermal. */
   temperatureUnit?:TemperatureUnit;
+  /** 1D motion (ui-design.md §6.20): absent, or off, the trajectory is the internal state's alone.
+   * Kept while off, as an inactive mode's inputs are. */
+  motion?:MotionSettings;
 }
+/** A lab coordinate axis the atom moves along. */
+export type MotionAxis='x'|'y'|'z';
+/** The atom moves along `axis`; it starts in the internal initial state with a Maxwellian
+ * momentum distribution at temperatureUK and a uniform position. The trajectory is then the
+ * joint evolution of the internal state and this motion. */
+export interface MotionSettings {
+  enabled:boolean; axis:MotionAxis;
+  /** The initial temperature (μK, canonical) and the unit the operator writes it in (as durationUnit). */
+  temperatureUK:number; temperatureUnit:TemperatureUnit;
+}
+export const DEFAULT_MOTION_TEMPERATURE_UK=30;
+/** The motion settings 1D 运动 starts with. */
+export function defaultMotion():MotionSettings{return {enabled:true,axis:'z',temperatureUK:DEFAULT_MOTION_TEMPERATURE_UK,temperatureUnit:'μK'};}
 export type DurationUnit='ns'|'μs'|'ms'|'s';
 export type TemperatureUnit='K'|'mK'|'μK';
 export type IntensityMode='intensity'|'power'|'na';

@@ -2,6 +2,7 @@ import {captureLaserFrequencyAnchor,composeMagneticField,laserIntensityMWcm2} fr
 import {directionFrame} from './direction.js';
 import type {DynamicsSettings,Scene} from './types.js';
 import {canonicalInitialState,resolveInitialState} from './types.js';
+import {motionRequest} from './motion.js';
 
 /** What a long-time mean depends on, besides its time T: every physical input of the master
  * model and the initial state. The explicit quantization axis and frame are part of the
@@ -13,7 +14,9 @@ export function meanInputsKey(scene:Scene,settings:DynamicsSettings):string {
   const {fieldVector,fieldAxis,frame}=composeMagneticField(scene.fields);
   return JSON.stringify({field:fieldVector,fieldAxis,frame,lasers:scene.lasers.filter(l=>l.enabled).map(l=>{const anchor=captureLaserFrequencyAnchor(l);return [l.id,anchor.line,anchor.offsetMHz,laserIntensityMWcm2(l),directionFrame(scene.fields,l.direction),l.polarizationAngleDeg,l.ellipticityDeg,l.phaseDeg??0];}),initialState:canonicalInitialState(resolveInitialState(settings))});
 }
-/** What a finite trajectory depends on: the mean's inputs, the duration and the samples (not T). */
+/** What a finite trajectory depends on: the mean's inputs, the duration and the samples (not T),
+ * and with 1D motion on its axis and initial temperature. A motion that is off is no part of it. */
 export function trajectoryInputsKey(scene:Scene,settings:DynamicsSettings):string {
-  return JSON.stringify({mean:meanInputsKey(scene,settings),durationUs:settings.durationUs,samples:settings.samples});
+  const motion=motionRequest(settings);
+  return JSON.stringify({mean:meanInputsKey(scene,settings),durationUs:settings.durationUs,samples:settings.samples,...(motion?{motion}:{})});
 }

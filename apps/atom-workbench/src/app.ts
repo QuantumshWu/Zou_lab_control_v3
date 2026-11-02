@@ -21,7 +21,7 @@ import {alignLevelReadouts} from './readout-alignment.js';
 import {expressionBase,followers,frequencyValue,frequencyValueLabel,naturalDetuningUnit,objectAnchor,objectKey,objectOf,releaseFollowers,setFrequencyBase,setFrequencyValue,type DefinedFrequency} from './laser-frequency.js';
 import {FREQUENCY_UNITS,WAVELENGTH_UNITS,anchorValue,baseKey,difference,gap,inUnit,isDetuningUnit,laserValue,parseBase,photon,readingHeading,readoutText,stateValue,zeroFieldStateValue,type FrequencyValue} from './frequency-value.js';
 import {FrequencyReadout,ReadoutPreferences,type ReadoutPreference} from './frequency-controls.js';
-import {analyze,dipoleBetweenStates,resolveSceneFrequencies,laserIntensityMWcm2,setPolarizationPreset,type PolarizationPreset} from './physics.js';
+import {analyze,dipoleBetweenStates,drivingLasers,resolveSceneFrequencies,setPolarizationPreset,type PolarizationPreset} from './physics.js';
 import {AXIS_NAMES,axisWords,directionAxis,linkableFields,linkedTo,referenceAxis,releaseLinks,sameDirection,shortcutDirection,shortcutField,type DirectionShortcut} from './direction.js';
 import {DEFAULT_NUMERICAL_APERTURE,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,intensityReading,normalizeLaserIntensity,powerReading,setLaserIntensityMode,setLaserNumericalAperture,waistReading,writeLaserIntensity,writeLaserPower,writeLaserWaist} from './laser-intensity.js';
 import {meanInputsKey,trajectoryInputsKey} from './dynamics-cache-key.js';
@@ -51,7 +51,8 @@ import {errorPercent,outsideRuns,partialSentence,partialShort,sampleErrors} from
 import {definitionNotes,modelNotes} from './model-notes.js';
 import {InlineName} from './inline-name.js';
 import {EXAMPLES,exampleScene} from './examples.js';
-import {DEFAULT_TEMPERATURE_K,INITIAL_KINDS,TEMPERATURE_UNITS,UNPOLARIZED,initialSpec,initialSummary,setInitialSpec,setTemperature,startingSpec,temperatureReading,type InitialKind,type UnpolarizedManifold} from './initial-state.js';
+import {DEFAULT_TEMPERATURE_K,INITIAL_KINDS,UNPOLARIZED,initialSpec,initialSummary,setInitialSpec,setTemperature,startingSpec,type InitialKind,type UnpolarizedManifold} from './initial-state.js';
+import {TEMPERATURE_UNITS,temperatureReading} from './temperature.js';
 
 installWindowChrome();
 
@@ -1050,7 +1051,7 @@ function populationToolbar():void{
 
 // ---------------------------------------------------------------- 布居演化
 function renderDynamicsControls(a:Analysis):void{
-  const d=dynamics(),enabled=scene.lasers.filter(l=>l.enabled&&laserIntensityMWcm2(l)>0);
+  const d=dynamics(),enabled=drivingLasers(scene);
   const states=allLevels(a);d.monitoredGroupIds??=[];
   if(!states.some(l=>l.id===d.initialStateId))d.initialStateId=initialId();d.monitoredStateIds=d.monitoredStateIds.filter(id=>states.some(l=>l.id===id));
   setText('dynamics-beams',enabled.length?`驱动：${enabled.map(l=>l.name).join(' + ')}`:'驱动：无光束');
