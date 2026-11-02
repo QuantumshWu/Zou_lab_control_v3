@@ -16,7 +16,9 @@ atomic constants or remove physical couplings.
   (the trajectory on its grid, the means at the standard horizons, the
   slowest relaxation) is read from one Galerkin model of one rational Krylov
   space, accepted when its change between consecutive checkpoints (every 4
-  solves) is within the fixed tolerance 0.01 and the space grew.
+  solves) is within the fixed tolerance 0.01 and the space grew. Every
+  checkpoint carries the run's estimate of its remaining wall time from its
+  own history (`pipeline::remaining_ms`), reported only.
 - `lapack`, `parallel`, `memory`: the LAPACK/BLAS wrappers, the worker pool
   and the installed memory the memory guard reads.
 

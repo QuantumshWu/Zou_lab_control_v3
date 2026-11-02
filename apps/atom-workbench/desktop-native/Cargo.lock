@@ -45,6 +45,9 @@ dependencies = [
 [[package]]
 name = "atom-motion-core"
 version = "0.1.0"
+dependencies = [
+ "atom-population-core",
+]
 
 [[package]]
 name = "atom-population-core"
