@@ -32,12 +32,14 @@ import type {ScopeNote} from './spectroscopy.js';
 import {defaultMotion,defaultScene,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionChoice,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
 import type {Distributions,DynamicsResult} from './solver-types.js';
+import {SEMICLASSICAL_REGIME,continuedAt} from './solver-types.js';
 import {focusedBeams,motionAxis,motionRefusal,motionTemperatureReading,radialAxes,setMotionTemperature} from './motion.js';
 import {AXIS_INKS,MOTION_INKS,bindDistribution,bindSeries,distributionChart,distributions,lengthText,motionSeries,rootMeanSquare,seriesChart} from './motion-chart.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
 import {startupScene,validateScene} from './scene-file.js';
 import {incidentTransitions,laserEmits,laserReferenceStateId,setLaserReferenceState,transitionEndpoints} from './transition-view.js';
 import {escapeHtml as esc,levelsChart,number,populationChart,bindPopulationChart,populationColor,populationValue,populationSamplingInfo} from './charts.js';
+import {CONTINUATION_WORDS,REFERENCE_WORDS} from './population-chart.js';
 import {math} from './math.js';
 import {renderSpace3D,type SpaceSelection,type SpaceViewName} from './space3d.js';
 import {laserColour} from './identity.js';
@@ -280,9 +282,12 @@ function solverStatus():[string,StatusWord,string?,string?]{
     const miss=trajectoryMiss(result),words=trajectory?both||(miss?`${miss}（超过 ${tolerance}）`:mean):mean,full=trajectory?[partial,mean].filter(Boolean).join(' · '):mean;
     return [`${head}${words?`：${words}`:trajectory?`（各时刻 ≤ ${tolerance}）`:''}`,'warning',undefined,words!==full?`${head}：${full}`:undefined];
   }
+  // A 1D motion result whose later samples are the continuation's says from when, what that is in
+  // the tooltip; a 3D one where it lies outside its validated regime.
   if(motion){
-    const reference=referenceSentence(result),words=[result.motion?.axis==='3d'?'3D 运动（半经典）已计算':'1D 运动已计算',partial,reference].filter(Boolean).join(' · ');
-    return [words,partial||reference?'warning':'idle',elapsed];
+    const from=result.motion?.continuedFromUs,since=from===undefined?'':`t > ${continuedSince(from)} 为延拓`,reference=referenceSentence(result);
+    const done=result.motion?.axis==='3d'?'3D 运动（半经典）已计算':'1D 运动已计算';
+    return [[done,since,partial,reference].filter(Boolean).join(' · '),partial||reference?'warning':'idle',elapsed,since?[done,`${since}（${CONTINUATION_WORDS}）`,partial].filter(Boolean).join(' · '):undefined];
   }
   if(resultPage()==='dynamics'){
     const full=['轨迹已计算',partial,result.mean?.converged?mean:'长期布居未解析'].filter(Boolean).join(' · ');
@@ -301,12 +306,12 @@ function trajectorySentence(result:DynamicsResult):string{
 }
 /** The tolerance a result's populations were solved to: ε, or a 3D motion's own target. */
 function resultTolerance(result:DynamicsResult):number{return result.populationAccuracy?.requestedTolerance??POPULATION_TOLERANCE;}
-/** Where a 3D motion lies outside the semiclassical method's validated regime (k_B T ≥ 3ħω on
- * every axis): a reference only there (empty: nowhere). */
+/** Where a 3D motion lies outside the semiclassical method's validated regime (k_B T ≥
+ * SEMICLASSICAL_REGIME ħω on every axis): a reference only there (empty: nowhere). */
 function referenceSentence(result:DynamicsResult):string{
   const reference=result.motion?.classical?.map(inside=>!inside);if(!reference?.some(Boolean))return '';
-  const first=reference.indexOf(true),unit=dynamics().durationUnit,all=reference.every(Boolean);
-  return all?'全程低于验证范围（k_BT < 3ħω），仅供参考':`t ≥ ${durationText(result.timesUs[first]!,unit)} 起有时刻低于验证范围（k_BT < 3ħω），仅供参考`;
+  const first=reference.indexOf(true),unit=dynamics().durationUnit,all=reference.every(Boolean),below=`低于验证范围（k_BT < ${SEMICLASSICAL_REGIME}ħω），仅供参考`;
+  return all?`全程${below}`:`t ≥ ${durationText(result.timesUs[first]!,unit)} 起有时刻${below}`;
 }
 /** A computed p̄(T) not within the tolerance: its estimated error, above ε (empty when within). */
 function meanSentence(result:DynamicsResult):string{const s=result.mean;return s.converged&&!s.withinTolerance?`${meanSymbol(result)} 估计误差 ${errorPercent(s.estimatedError!)}（超过 ${errorPercent(POPULATION_TOLERANCE)}）`:'';}
@@ -972,10 +977,12 @@ function keepLastCheckpoint(cause:'stopped'|'failed'):void{
   if(kept.trajectory)trajectories.set(tKey,last.epochs.trajectory,'trajectory',record);
   for(const mean of horizonRecords(record))if(kept.horizons.includes(mean.horizon))means.set(mKey,last.epochs.mean,mean.horizon,mean);
 }
-/** 停止: the running solve ends here and its last checkpoint stands as the result. Other inputs solve again. */
+/** 停止: the running solve ends here and its last checkpoint stands as the result. What that leaves
+ * missing (a full request's mean before its first checkpoint) is not asked for while these inputs
+ * stand; other inputs solve again. */
 function stopSolve():void{
   if(!currentSolverBusy())return;
-  const key=requestKey(neededSolve());keepLastCheckpoint('stopped');cancelObsoleteSolve();stoppedKey=key;requestedKey=key;
+  keepLastCheckpoint('stopped');cancelObsoleteSolve();const key=requestKey(neededSolve());stoppedKey=key;requestedKey=key;
   if(view==='dynamics')renderDynamics(latestAnalysis);else refreshPopulationOnly();
   refreshStatus();
 }
@@ -1054,7 +1061,7 @@ function renderDetailsPage():void{
   const motion=dynamics().motion,temperature=motion&&motionTemperatureReading(motion);
   const choice=motion?motionAxis(scene,motion):undefined,initialWords=temperature?`初始温度 ${withUnit(temperature.value,temperature.unit,{digits:6})}`:'';
   const motionLines=motion?.enabled&&temperature?[motionRefusal(scene)||(choice==='3d'
-    ?`3D 运动（半经典）：光镊中的单个原子在三维中运动，${initialWords}；原子是经典质点，携带内态按量子跳跃演化。各轴 k_BT ≥ 3ħω 时与量子参考相符（T 约 10% 以内），更冷时偏冷，仅供参考；布居演化中的轨迹含运动，长期布居 p̄(T) 只是内态的。`
+    ?`3D 运动（半经典）：光镊中的单个原子在三维中运动，${initialWords}；原子是经典质点，携带内态按量子跳跃演化。各轴 k_BT ≥ ${SEMICLASSICAL_REGIME}ħω 时与量子参考相符（T 约 10% 以内），更冷时偏冷，仅供参考；布居演化中的轨迹含运动，长期布居 p̄(T) 只是内态的。`
     :`1D 运动：光镊中单个原子沿 ${choice} 轴（穿过焦点、与聚焦光垂直）径向运动，${initialWords}；布居演化中的轨迹含运动，长期布居 p̄(T) 只是内态的。`)]:[];
   const markup=`<section class="details-current"><h3>当前计算</h3>${[field,...motionLines,...outside,...scope,...sampling].map(line=>`<p>${esc(line)}</p>`).join('')}${solverDetails()}</section>`;
   const host=$('details-current');if(host.dataset.markup!==markup){host.dataset.markup=markup;host.innerHTML=markup;}
@@ -1133,7 +1140,7 @@ function renderDynamicsControls(a:Analysis):void{
   if(motionOn()){
     const settings=()=>dynamics().motion!;
     if(axes.length)bindField(dynamicsFields,motion,'motion',()=>({name:'axis',label:'运动轴',kind:'choice',segmented:true,choices:axes.map(axis=>[axis,axis==='3d'?'3D（半经典）':axis]),value:motionAxis(scene,settings()),
-      description:'1D：沿穿过焦点、与每束聚焦光垂直的坐标轴；3D（半经典）：原子作为经典质点在三维中运动，各轴 k_BT ≥ 3ħω 时验证过'}),v=>{settings().axis=v as MotionChoice;},{after});
+      description:`1D：沿穿过焦点、与每束聚焦光垂直的坐标轴；3D（半经典）：原子作为经典质点在三维中运动，各轴 k_BT ≥ ${SEMICLASSICAL_REGIME}ħω 时验证过`}),v=>{settings().axis=v as MotionChoice;},{after});
     bindQuantity(dynamicsFields,motion,'motion','motion',()=>({name:'temperature',label:'初始温度',spin:true,inexact:true,description:'初态的运动温度：动量为 Maxwell 分布，位置为该温度下势阱中的热分布（3D 时各轴相同）；内态为场景的初态'}),
       {read:()=>motionTemperatureReading(settings()),write:(v,u)=>setMotionTemperature(settings(),v,u as TemperatureUnit),units:()=>unitChoices(TEMPERATURE_UNITS,'温度')},after);
   }
@@ -1197,30 +1204,36 @@ function renderDynamics(a:Analysis):void{
   // A redraw of the same result (a resize, another scale or curve) keeps an open readout at its sample.
   const host=$('population-chart'),open=host.querySelector<HTMLElement>('.population-readout:not([hidden])')?.dataset.sampleIndex;
   unbindPopulation?.();unbindPopulation=undefined;
-  const plotOptions={showTotalExcited:false,timeUnit:d.durationUnit,scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),...(open===undefined?{}:{cursor:Number(open)})};
-  const stopped=stoppedHere(),waiting=`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
-  // With motion: its refusal, or the chart its view asks for.
+  // With motion: its refusal, or the chart its view asks for; every time view marks a 1D result's
+  // continuation (the samples after its last simulated time) and a 3D result's samples outside its
+  // validated regime (a reference only).
   const shown=motionOn()?motionView:'populations',refusal=motionOn()?motionRefusal(scene):'',motion=raw&&raw.timesUs.length>1?raw.motion:undefined;
+  const from=motion?.continuedFromUs,continuation=from===undefined?'':continuationLegend(from);
+  const plotOptions={showTotalExcited:false,timeUnit:d.durationUnit,scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),
+    ...(open===undefined?{}:{cursor:Number(open)}),...(from===undefined?{}:{continuedFromUs:from})};
+  const stopped=stoppedHere(),waiting=`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
   motionViewControl.root.hidden=!motionOn();motionViewControl.setCurrent(shown);populationScaleControl.root.hidden=shown!=='populations';
   if(motion)distributionAxis=Math.min(distributionAxis,motion.axes.length-1);
   distributionToolbar(!refusal&&motion&&(shown==='momentum'||shown==='position')?distributions(motion,shown,distributionAxis):undefined,raw?.timesUs??[],motion&&(shown==='momentum'||shown==='position')?motion.axes.length:1);
-  // A 3D result's samples outside its validated regime: banded, a reference only.
-  const reference=motion?.classical?.map(inside=>!inside),referenceLegend=reference?.some(Boolean)?'<span class="population-legend accuracy-legend"><span class="accuracy-swatch reference-swatch" aria-hidden="true"></span>验证范围之外（k_BT &lt; 3ħω），仅供参考</span>':'';
+  const reference=motion?.classical?.map(inside=>!inside),referenceLegend=reference?.some(Boolean)?`<span class="population-legend accuracy-legend" title="${esc(REFERENCE_WORDS)}"><span class="accuracy-swatch reference-swatch" aria-hidden="true"></span>验证范围之外（k_BT &lt; ${SEMICLASSICAL_REGIME}ħω），仅供参考</span>`:'';
+  const marks={...(from===undefined?{}:{continuedFromUs:from}),...(reference?{reference}:{})};
   const caption=(markup:string)=>{if($('population-caption').innerHTML!==markup)$('population-caption').innerHTML=markup;};
   if(refusal){host.innerHTML=`<div class="empty-state error" role="alert">${esc(refusal)}</div>`;caption('');return;}
   if(shown==='temperature'||shown==='trap'){
     const series=motion&&motionSeries(motion,shown);
-    host.innerHTML=series?seriesChart(raw!.timesUs,series,d.durationUnit,reference):waiting;if(series)unbindPopulation=bindSeries(host,raw!.timesUs,series,d.durationUnit);
+    host.innerHTML=series?seriesChart(raw!.timesUs,series,d.durationUnit,marks):waiting;if(series)unbindPopulation=bindSeries(host,raw!.timesUs,series,d.durationUnit,marks);
     const kHz=(f:number)=>`${formatNumber(f,{digits:4})} kHz`,threeD=motion?.axes.length===3;
-    caption(!motion?'':threeD?(shown==='temperature'
+    caption(!motion?'':(threeD?(shown==='temperature'
         ?motion.axes.map(a=>legendEntry(AXIS_INKS[a],`${a} 轴`)).join('')+'<span class="population-legend">上：温度 T = m·Var(v)/k_B；下：平均速度 ⟨v⟩</span>'
-        :motion.axes.map((a,k)=>legendEntry(AXIS_INKS[a],`${a} 轴 n̄（ω/2π = ${kHz(motion.trapFrequencyKHz[k]!)}）`)).join('')+legendEntry('#6a6866','累计损失概率'))+referenceLegend
+        :motion.axes.map((a,k)=>legendEntry(AXIS_INKS[a],`${a} 轴 n̄（ω/2π = ${kHz(motion.trapFrequencyKHz[k]!)}）`)).join('')+legendEntry('#6a6866','累计损失概率'))
       :shown==='temperature'?legendEntry(MOTION_INKS[0],`温度 T = m·Var(v)/k_B（沿 ${motion.axis} 轴）`)+legendEntry(MOTION_INKS[1],'平均速度 ⟨v⟩')
-      :legendEntry(MOTION_INKS[0],`平均振动量子数 n̄（相对焦点处的阱频 ω/2π = ${kHz(motion.trapFrequencyKHz[0]!)}）`)+legendEntry(MOTION_INKS[1],'累计损失概率（原子离开光阱）'));return;
+      :legendEntry(MOTION_INKS[0],`平均振动量子数 n̄（相对焦点处的阱频 ω/2π = ${kHz(motion.trapFrequencyKHz[0]!)}）`)+legendEntry(MOTION_INKS[1],'累计损失概率（原子离开光阱）'))+referenceLegend+continuation);return;
   }
   if(shown==='momentum'||shown==='position'){
+    // A listed time after the last simulated one is the continuation's, one outside the validated
+    // regime a reference only: said in its legend.
     const listing=motion&&distributions(motion,shown,distributionAxis),last=listing?listing.samples.length-1:0,listed=listing?[last,...(motionCompare===undefined?[]:[motionCompare])]:[];
-    const names=listing?listed.map(i=>{const sample=listing.samples[i]!,time=`t = ${durationText(raw!.timesUs[sample]!,d.durationUnit)}`;
+    const names=listing?listed.map(i=>{const sample=listing.samples[i]!,at=raw!.timesUs[sample]!,time=`t = ${durationText(at,d.durationUnit)}${continuedAt(motion!,at)?'（延拓）':reference?.[sample]?'（仅供参考）':''}`;
       return shown==='momentum'?`${time} · T = ${formatNumber(motion!.temperatureUK[distributionAxis]![sample]!,{digits:4})} μK`:`${time} · 均方根位置 ${lengthText(rootMeanSquare(listing,i))}`;}):[];
     host.innerHTML=motion?distributionChart(motion,shown,listed,distributionAxis):waiting;if(motion)unbindPopulation=bindDistribution(host,motion,shown,listed,names,distributionAxis);
     caption(names.map((words,k)=>legendEntry(MOTION_INKS[k]!,words,k>0)).join(''));return;
@@ -1230,8 +1243,14 @@ function renderDynamics(a:Analysis):void{
   if(result&&result.timesUs.length>1)unbindPopulation=bindPopulationChart(host,result,ids,labels,populationOptions);
   const tolerance=raw?resultTolerance(raw):POPULATION_TOLERANCE,errors=raw&&raw.timesUs.length>1?sampleErrors(raw):undefined,banded=!!errors&&outsideRuns(errors,tolerance).length>0;
   // The legend names the curves drawn: none until a result is here.
-  const legend=!(result&&result.timesUs.length>1)?'':referenceLegend+(banded?`<span class="population-legend accuracy-legend"><span class="accuracy-swatch" aria-hidden="true"></span>估计误差 &gt; ${errorPercent(tolerance)}</span>`:'')+ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
+  const legend=!(result&&result.timesUs.length>1)?'':referenceLegend+continuation+(banded?`<span class="population-legend accuracy-legend"><span class="accuracy-swatch" aria-hidden="true"></span>估计误差 &gt; ${errorPercent(tolerance)}</span>`:'')+ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
   caption(legend);
+}
+/** A continuation's last simulated time (us): a computed time, three digits, in the duration's unit. */
+function continuedSince(us:number):string{const unit=timeDisplayUnit(us,dynamics().durationUnit);return `${formatNumber(us*unit.factor,{digits:3})} ${unit.name}`;}
+/** The legend entry of a 1D motion result's continuation, after the last simulated time `from` (us). */
+function continuationLegend(from:number):string{
+  return `<span class="population-legend continuation-legend" title="${esc(CONTINUATION_WORDS)}"><span class="continuation-swatch" aria-hidden="true"></span>t &gt; ${esc(continuedSince(from))} 延拓（由模拟历史预测）</span>`;
 }
 
 /** The 沿 B shortcut the selected light's direction is now wears the active face. */

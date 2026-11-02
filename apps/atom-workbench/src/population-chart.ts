@@ -1,6 +1,6 @@
 import {timeDisplayUnit} from './duration.js';
 import type {DurationUnit} from './types.js';
-import type {MeanResult} from './solver-types.js';
+import {SEMICLASSICAL_REGIME,type MeanResult} from './solver-types.js';
 import {POPULATION_TOLERANCE} from './types.js';
 import {errorPercent,outsideRuns,sampleErrors} from './accuracy.js';
 
@@ -13,11 +13,43 @@ export interface PopulationChartOptions {scale?:'linear'|'log';viewportWidth?:nu
   meanLabel?:string;
   /** A sample the readout stands at already: a newer checkpoint of the same trajectory keeps it open there. */
   cursor?:number;
+  /** A 1D motion result's last simulated time (us): the samples after it are the continuation's. */
+  continuedFromUs?:number;
   /** Per sample, outside a 3D motion's validated regime: a light band, a reference only. */
   reference?:readonly boolean[];}
 // v3 scientific series palette: crates/zlc-plot/src/style.rs, Palette::default.
 const palette=['#517FA6','#B17D4B','#568C79','#99719B','#B36F72','#558F9C','#7E7CA5','#92924F'];
 const esc=(value:unknown)=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
+/** What a 1D motion result's continuation is (ui-design.md §6.20). */
+export const CONTINUATION_WORDS='延拓，由模拟历史预测，不是逐步模拟';
+/** The continuation's part of a time chart, from plot x `from` (the last simulated time, written
+ * `since`: a computed time, three digits) to `to`: a light translucent band behind the curves (the
+ * grid shows through), its edge dashed, labelled 延拓 (inside it when it has room, else before its
+ * edge), its tooltip what it is. */
+export function continuationBand(from:number,to:number,top:number,bottom:number,since:string):string{
+  const room=to-from>=32,x=from.toFixed(4);
+  return `<g class="continuation"><rect class="continuation-band" x="${x}" y="${top}" width="${Math.max(0,to-from).toFixed(4)}" height="${bottom-top}" fill="#5d87b0" fill-opacity="0.09"><title>${esc(`t > ${since}：${CONTINUATION_WORDS}`)}</title></rect>`+
+    `<line x1="${x}" y1="${top}" x2="${x}" y2="${bottom}" stroke="#8aa4bd" stroke-width="1" stroke-dasharray="3 3"/>`+
+    `<text x="${(room?from+5:from-5).toFixed(4)}" y="${top+13}" font-size="11" fill="#5d7891"${room?'':' text-anchor="end"'}>延拓</text></g>`;
+}
+/** What a 3D motion result's samples outside its validated regime are (ui-design.md §6.20). */
+export const REFERENCE_WORDS=`半经典方法的验证范围之外（各轴 k_BT ≥ ${SEMICLASSICAL_REGIME}ħω 才验证过）：仅供参考`;
+/** The runs of samples marked `reference` (a 3D result's samples outside its validated regime) on a
+ * time chart whose samples lie at plot x `xs`: a light grey band behind each run (half-way to its
+ * neighbours) over every vertical span `spans`, its tooltip what it is. */
+export function referenceBands(xs:readonly number[],reference:readonly boolean[]|undefined,spans:readonly (readonly [number,number])[]):string{
+  if(!reference)return '';let body='';const n=xs.length;
+  for(let i=0;i<n;i++){
+    if(!reference[i]||(i>0&&reference[i-1]))continue;let j=i;while(j+1<n&&reference[j+1])j++;
+    const from=i>0?(xs[i-1]!+xs[i]!)/2:xs[i]!,to=j<n-1?(xs[j]!+xs[j+1]!)/2:xs[j]!;
+    for(const [top,bottom] of spans)body+=`<rect class="reference-band" x="${from.toFixed(4)}" y="${top}" width="${Math.max(1.5,to-from).toFixed(4)}" height="${bottom-top}" fill="#ecebea"><title>${esc(REFERENCE_WORDS)}</title></rect>`;
+  }
+  return body;
+}
+/** A readout's mark of a sample: the continuation's (延拓) or outside the validated regime (仅供参考). */
+export function sampleMark(continued:boolean,reference:boolean):string{
+  return continued?` · <span class="readout-continued" title="${esc(CONTINUATION_WORDS)}">延拓</span>`:reference?` · <span class="readout-reference" title="${esc(REFERENCE_WORDS)}">仅供参考</span>`:'';
+}
 const clamp=(n:number,a:number,b:number)=>Math.min(b,Math.max(a,n));
 const SVG='http://www.w3.org/2000/svg';
 function stateIndex(id:string):number {
@@ -80,17 +112,14 @@ export function populationChart(result:PopulationPlot,monitoredIds:string[],labe
     return markup;
   };
   const tolerance=result.populationAccuracy?.requestedTolerance??POPULATION_TOLERANCE;
-  // Samples outside a 3D motion's validated regime: a grey band behind them.
-  const n=result.timesUs.length,half=(i:number,j:number)=>(x(result.timesUs[i]!)+x(result.timesUs[j]!))/2;
-  if(options.reference)for(let i=0;i<n;i++){
-    if(!options.reference[i]||(i>0&&options.reference[i-1]))continue;let j=i;while(j+1<n&&options.reference[j+1])j++;
-    const from=i>0?half(i-1,i):x(result.timesUs[i]!),to=j<n-1?half(j,j+1):x(result.timesUs[j]!);
-    svg+=`<rect class="reference-band" x="${from.toFixed(4)}" y="${top}" width="${Math.max(1.5,to-from).toFixed(4)}" height="${bottom-top}" fill="#ecebea"><title>半经典方法的验证范围之外（各轴 k_BT ≥ 3ħω 才验证过）：仅供参考</title></rect>`;
-  }
+  // A 3D motion result's samples outside its validated regime: a grey band behind them.
+  svg+=referenceBands(result.timesUs.map(x),options.reference,[[top,bottom]]);
   // Samples whose estimated error exceeds the tolerance: a light band behind them (half-way to
   // their neighbours), and their curve segments dashed and faded.
-  const errors=sampleErrors(result),runs=errors?outsideRuns(errors,tolerance):[];
+  const errors=sampleErrors(result),runs=errors?outsideRuns(errors,tolerance):[],n=result.timesUs.length;
   const outside=(i:number)=>!!errors&&errors[i]!>tolerance;
+  // A 1D motion result's continuation: the samples after the last simulated time, on their band.
+  const from=options.continuedFromUs;if(from!==undefined)svg+=continuationBand(x(from),right,top,bottom,`${Number((from*g.unit.factor).toPrecision(3))} ${g.unit.name}`);
   for(const [a,b] of runs){
     const from=a>0?(x(result.timesUs[a-1]!)+x(result.timesUs[a]!))/2:x(result.timesUs[a]!),to=b<n-1?(x(result.timesUs[b]!)+x(result.timesUs[b+1]!))/2:x(result.timesUs[b]!);
     const worst=Math.max(...errors!.slice(a,b+1));
@@ -127,7 +156,8 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     const meanOf=(id:string)=>{if(id!=='__excited__')return mean?.populations?.[id]??NaN;const excited=Object.entries(mean?.populations??{}).filter(([state])=>/^(D1|D2)-/.test(state));return excited.length?excited.reduce((sum,[,p])=>sum+p,0):NaN;};
     // A name too long for a narrow readout wraps after a " · ", never before one, and is never cut.
     const row=(id:string,name:string,p:number,color:string)=>`<div class="readout-row${mean?'':' two'}" data-population-readout="${esc(id)}"><span class="readout-name" style="color:${color}">${esc(`${name}${id===options.initialId?' · 初态':''}`).replaceAll(' · ',' · ')}</span><span>${esc(populationValue(p))}</span>${mean?`<span class="readout-mean">${esc(populationValue(meanOf(id)))}</span>`:''}</div>`;
-    tooltip.innerHTML=`<div class="readout-time">t = ${digits(t*g.unit.factor)} ${g.unit.name}${accuracy}</div>${head}${ids.map(id=>row(id,labels[id]??id,result.populations[id]![index]!,populationColor(id))).join('')}${options.showTotalExcited===false?'':row('__excited__','激发态合计',result.totalExcited[index]!,'#808080')}${mean?`<p class="note wrap">${esc(meanLabel)} 一列是时刻 T 的相位平均布居（只平均掉拍频与光频微运动），不是瞬时布居。</p>`:''}${meanOutside}`;
+    const marked=sampleMark(options.continuedFromUs!==undefined&&t>options.continuedFromUs,!!options.reference?.[index]);
+    tooltip.innerHTML=`<div class="readout-time">t = ${digits(t*g.unit.factor)} ${g.unit.name}${marked}${accuracy}</div>${head}${ids.map(id=>row(id,labels[id]??id,result.populations[id]![index]!,populationColor(id))).join('')}${options.showTotalExcited===false?'':row('__excited__','激发态合计',result.totalExcited[index]!,'#808080')}${mean?`<p class="note wrap">${esc(meanLabel)} 一列是时刻 T 的相位平均布居（只平均掉拍频与光频微运动），不是瞬时布居。</p>`:''}${meanOutside}`;
     tooltip.hidden=false;tooltip.dataset.sampleIndex=String(index);tooltip.style.maxHeight=`${Math.max(100,host.clientHeight-35)}px`;
     // Beside the cursor, on its wider side, never over it: in a narrow chart the readout wraps
     // to that side's width, so the pointer stays on the plot and keeps moving the cursor.

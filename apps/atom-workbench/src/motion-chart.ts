@@ -2,13 +2,15 @@
 // temperature and the mean velocity, or n̄ and the loss probability -- each with a line per axis the
 // atom moves along (one in 1D, x, y and z in 3D), and a distribution along one axis -- of the
 // velocity or of the position, as a density -- at the last time and, when asked, at another listed
-// time. Each reads actual samples only. A 3D result's samples outside the method's validated
-// regime lie on a light band: a reference only.
+// time. Each reads actual samples only. A 1D result's continuation (the samples after its last
+// simulated time) lies on its band; a 3D result's samples outside the method's validated regime lie
+// on a light grey band: a reference only.
 import type {DurationUnit,MotionAxis} from './types.js';
 import type {Distributions,MotionResult} from './solver-types.js';
 import {RB87} from './physics.js';
 import {timeDisplayUnit} from './duration.js';
 import {formatNumber} from './format.js';
+import {continuationBand,referenceBands,sampleMark} from './population-chart.js';
 
 /** k_B (J/K), exact in the SI. */
 const BOLTZMANN=1.380649e-23;
@@ -20,7 +22,7 @@ const clamp=(n:number,a:number,b:number)=>Math.min(b,Math.max(a,n));
 export const MOTION_INKS=['#517FA6','#B17D4B'] as const;
 /** The palette's first three, one per lab axis x, y, z of a 3D result's lines. */
 export const AXIS_INKS:Readonly<Record<MotionAxis,string>>={x:'#517FA6',y:'#B17D4B',z:'#568C79'};
-const GRID='#e1dfdd',INK='#6a6866',LEFT=64,RIGHT=778,REFERENCE_BAND='#ecebea';
+const GRID='#e1dfdd',INK='#6a6866',LEFT=64,RIGHT=778;
 
 /** A display unit: its name and the factor from the base unit. */
 interface Unit {name:string;factor:number}
@@ -88,22 +90,15 @@ const text=(x:number,y:number,label:string,attrs='')=>`<text x="${x}" y="${y}" f
 const polyline=(xs:readonly number[],ys:readonly number[],ink:string,attrs='')=>`<polyline points="${xs.map((x,i)=>`${x.toFixed(4)},${ys[i]!.toFixed(4)}`).join(' ')}" fill="none" stroke="${ink}" stroke-width="2" ${attrs}/>`;
 const svg=(cls:string,label:string,body:string)=>`<svg class="chart-svg ${cls}" viewBox="0 0 800 355" xmlns="${SVG}" role="img" tabindex="0" aria-label="${esc(label)}" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" style="fill:#323130;outline:none">${body}</svg>`;
 
-/** The runs of samples outside a 3D result's validated regime, as plot x spans (half-way to their
- * neighbours), and the band markup behind the panels. */
-function referenceBands(timesUs:readonly number[],reference:readonly boolean[]|undefined,x:(t:number)=>number,spans:readonly [number,number][]):string{
-  if(!reference)return '';let body='';const n=timesUs.length;
-  for(let i=0;i<n;i++){
-    if(!reference[i]||(i>0&&reference[i-1]))continue;let j=i;while(j+1<n&&reference[j+1])j++;
-    const from=i>0?(x(timesUs[i-1]!)+x(timesUs[i]!))/2:x(timesUs[i]!),to=j<n-1?(x(timesUs[j]!)+x(timesUs[j+1]!))/2:x(timesUs[j]!);
-    for(const [top,bottom] of spans)body+=`<rect class="reference-band" x="${from.toFixed(4)}" y="${top}" width="${Math.max(1.5,to-from).toFixed(4)}" height="${bottom-top}" fill="${REFERENCE_BAND}"><title>半经典方法的验证范围之外（各轴 k_BT ≥ 3ħω 才验证过）：仅供参考</title></rect>`;
-  }
-  return body;
-}
-/** The panels on the result's samples, a line per series line; `reference` marks the samples of a
- * 3D result outside its validated regime. */
-export function seriesChart(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit,reference?:readonly boolean[]):string{
-  const g=seriesLayout(timesUs,series,timeUnit),xs=timesUs.map(g.x);
-  let body=referenceBands(timesUs,reference,g.x,g.panels.map(p=>[p.top,p.bottom]));
+/** What a series chart marks on its samples: a 1D result's continuation (the samples after its last
+ * simulated time) and a 3D result's samples outside its validated regime (a reference only). */
+export interface SeriesMarks {continuedFromUs?:number;reference?:readonly boolean[]}
+/** The panels on the result's samples, a line per series line; the continuation's samples on their
+ * band across both panels, those outside the validated regime on theirs behind each. */
+export function seriesChart(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit,marks:SeriesMarks={}):string{
+  const g=seriesLayout(timesUs,series,timeUnit),xs=timesUs.map(g.x),from=marks.continuedFromUs;
+  let body=referenceBands(xs,marks.reference,g.panels.map(p=>[p.top,p.bottom] as const));
+  if(from!==undefined)body+=continuationBand(g.x(from),RIGHT,g.panels[0].top,g.panels[1].bottom,`${formatNumber(from*g.unit.factor,{digits:3})} ${g.unit.name}`);
   for(const p of g.panels)for(const v of p.ticks){const y=p.y(v/p.series.unit.factor);body+=line(LEFT,y,RIGHT,y,`stroke="${GRID}"`)+text(LEFT-12,y+4,digits(v),'text-anchor="end"');}
   for(let i=0;i<=4;i++){const t=timesUs[0]!+(timesUs.at(-1)!-timesUs[0]!)*i/4;body+=text(g.x(t),g.panels[1].bottom+24,digits(t*g.unit.factor),'text-anchor="middle"');}
   body+=text(LEFT,19,g.panels[0].series.title)+text(LEFT,g.panels[1].top-8,g.panels[1].series.title)+text(RIGHT,g.panels[1].bottom+47,`t / ${g.unit.name}`,'text-anchor="end"');
@@ -174,15 +169,16 @@ function bindCursor(host:HTMLElement,svg:SVGSVGElement,count:number,at:(i:number
 }
 const mark=(name:string,attrs:Record<string,string>)=>{const node=document.createElementNS(SVG,name);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,value);return node;};
 
-/** The time cursor of a series chart: every line of both panels at the sample. */
-export function bindSeries(host:HTMLElement,timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit):()=>void{
+/** The time cursor of a series chart: every line of both panels at the sample, a continuation's
+ * sample or one outside the validated regime marked. */
+export function bindSeries(host:HTMLElement,timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit,marks:SeriesMarks={}):()=>void{
   const svg=host.querySelector<SVGSVGElement>('svg.motion-series-svg');if(!svg)return ()=>{};
   const g=seriesLayout(timesUs,series,timeUnit),card=readoutCard(host,`所选时刻的${series.map(s=>s.name).join('与')}`);
   const unbind=bindCursor(host,svg,timesUs.length,i=>g.x(timesUs[i]!),(i,cursor)=>{
-    const xx=g.x(timesUs[i]!);
+    const xx=g.x(timesUs[i]!),from=marks.continuedFromUs,marked=sampleMark(from!==undefined&&timesUs[i]!>from,!!marks.reference?.[i]);
     cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:String(g.panels[0].top),y2:String(g.panels[1].bottom),stroke:'#a19f9d','stroke-width':'1'}),
       ...g.panels.flatMap(p=>p.series.lines.map(l=>mark('circle',{cx:String(xx),cy:String(p.y(l.values[i]!)),r:'3',fill:l.ink,stroke:'white','stroke-width':'1.5'}))));
-    card.innerHTML=`<div class="readout-time">t = ${esc(digits(timesUs[i]!*g.unit.factor))} ${esc(g.unit.name)}</div>`+g.panels.flatMap(p=>p.series.lines.map(l=>
+    card.innerHTML=`<div class="readout-time">t = ${esc(digits(timesUs[i]!*g.unit.factor))} ${esc(g.unit.name)}${marked}</div>`+g.panels.flatMap(p=>p.series.lines.map(l=>
       `<div class="readout-row two"><span class="readout-name" style="color:${l.ink}">${esc(l.name)}</span><span>${esc(formatNumber(l.values[i]!*p.series.unit.factor,{digits:4}))}${p.series.unit.name?` ${esc(p.series.unit.name)}`:''}</span></div>`)).join('');
     placeCard(host,svg,card,xx);
   },()=>{card.hidden=true;});

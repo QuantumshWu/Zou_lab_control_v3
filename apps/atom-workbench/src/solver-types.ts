@@ -4,6 +4,9 @@ import {POPULATION_GROUPS} from './population-selection.js';
 /** The semiclassical 3D motion's population accuracy target (absolute): its statistics are run
  * until two standard errors of every population lie within it (rust-solver/motion-3d solve.rs). */
 export const SEMICLASSICAL_POPULATION_TARGET=0.05;
+/** The semiclassical 3D motion's validated regime: k_B T ≥ SEMICLASSICAL_REGIME ħω on every axis
+ * (rust-solver/motion-3d solve.rs CLASSICAL); its result marks each sample (`classical`). */
+export const SEMICLASSICAL_REGIME=4;
 /** A trajectory's estimated population error (ui-design.md §6.16). Every computed trajectory is
  * shown: 'estimated-converged' when every sample's bound is within the requested tolerance ε,
  * 'estimated-partial' otherwise -- the samples above ε are marked. */
@@ -74,17 +77,25 @@ export interface Distributions {grid:number[];samples:number[];probabilities:num
  * velocities, m/s) and the position distributions (grid: positions from the focus, μm).
  * Everything but the loss describes the atom still held. A 3D result (semiclassical) gives T's
  * standard error, whether each sample lies in the method's validated regime (`classical`: k_B T ≥
- * 3ħω on every axis; outside it the result is a reference only), its trajectories and time step. */
+ * SEMICLASSICAL_REGIME ħω on every axis; outside it the result is a reference only), its
+ * trajectories and time step. A 1D result may end in its engine's continuation (`continuedFromUs`). */
 export interface MotionResult {
   axis:MotionChoice;axes:MotionAxis[];temperatureUK:number[][];meanVelocityMps:number[][];trapFrequencyKHz:number[];meanOccupation:number[][];lossProbability:number[];
   momentum:Distributions[];position:Distributions[];
   temperatureErrorUK?:number[][];classical?:boolean[];trajectories?:number;timeStepUs?:number;
+  /** The last simulated time (us) when the samples after it are the engine's continuation (its
+   * prediction from the simulated history), not simulated; absent when every sample was (1D only). */
+  continuedFromUs?:number;
 }
-/** The motion block of a result with `samples` samples, read strictly (rust-solver/src/motion_core_adapter.rs,
+/** A sample time the continuation's: after the last simulated one. */
+export function continuedAt(motion:Pick<MotionResult,'continuedFromUs'>,timeUs:number):boolean{return motion.continuedFromUs!==undefined&&timeUs>motion.continuedFromUs;}
+/** The motion block of a result on the grid `timesUs`, read strictly (rust-solver/src/motion_core_adapter.rs,
  * and for 3D motion3d_adapter.rs). */
-export function readMotionResult(value:unknown,samples:number,axis:MotionChoice):MotionResult {
+export function readMotionResult(value:unknown,timesUs:readonly number[],axis:MotionChoice):MotionResult {
   const invalid=():never=>{throw new Error('Invalid motion result');};
-  const object=(v:unknown,keys:readonly string[]):Record<string,unknown>=>{if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).length!==keys.length||!keys.every(key=>Object.hasOwn(v,key)))invalid();return v as Record<string,unknown>;};
+  const samples=timesUs.length;
+  const object=(v:unknown,keys:readonly string[],optional:readonly string[]=[]):Record<string,unknown>=>{
+    if(!v||typeof v!=='object'||Array.isArray(v)||!keys.every(key=>Object.hasOwn(v,key))||!Object.keys(v).every(key=>keys.includes(key)||optional.includes(key)))invalid();return v as Record<string,unknown>;};
   const series=(v:unknown,length:number,admits:(x:number)=>boolean):number[]=>{if(!Array.isArray(v)||v.length!==length||!v.every(x=>typeof x==='number'&&Number.isFinite(x)&&admits(x)))invalid();return [...(v as number[])];};
   const distributions=(v:unknown,gridKey:string):Distributions=>{
     const p=object(v,[gridKey,'samples','probabilities']),values=p[gridKey];
@@ -110,11 +121,13 @@ export function readMotionResult(value:unknown,samples:number,axis:MotionChoice)
       momentum:perAxis(m.momentum,v=>distributions(v,'velocitiesMps')),position:perAxis(m.position,v=>distributions(v,'positionsUm')),
       trajectories:m.trajectories as number,timeStepUs:m.timeStepUs as number};
   }
-  const m=object(value,['axis','temperatureUK','meanVelocityMps','trapFrequencyKHz','meanOccupation','lossProbability','momentum','position']);
+  const m=object(value,['axis','temperatureUK','meanVelocityMps','trapFrequencyKHz','meanOccupation','lossProbability','momentum','position'],['continuedFromUs']);
   if(m.axis!==axis)invalid();
+  // The continuation starts at a time of the run before its last sample: some samples are its.
+  const from=m.continuedFromUs;if(from!==undefined&&!(typeof from==='number'&&Number.isFinite(from)&&from>=0&&from<timesUs.at(-1)!))invalid();
   return {axis,axes:[axis],temperatureUK:[series(m.temperatureUK,samples,x=>x>=0)],meanVelocityMps:[series(m.meanVelocityMps,samples,()=>true)],
     trapFrequencyKHz:[frequency(m.trapFrequencyKHz)],meanOccupation:[series(m.meanOccupation,samples,()=>true)],lossProbability:loss(m.lossProbability),
-    momentum:[distributions(m.momentum,'velocitiesMps')],position:[distributions(m.position,'positionsUm')]};
+    momentum:[distributions(m.momentum,'velocitiesMps')],position:[distributions(m.position,'positionsUm')],...(from===undefined?{}:{continuedFromUs:from as number})};
 }
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];

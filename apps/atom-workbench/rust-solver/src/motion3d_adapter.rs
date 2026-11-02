@@ -6,7 +6,7 @@
 //! # Result contract
 //! As motion_core_adapter.rs's (`states`, `timesUs`, `populations`, `populationAccuracy`,
 //! `diagnostics`), with `populationAccuracy` against the method's own target (`POPULATION_TARGET`,
-//! two standard errors per sample), and `motion`, read by `readMotion3dResult` in
+//! two standard errors per sample), and `motion`, read by `readMotionResult` in
 //! src/solver-types.ts:
 //! - `axis`: "3d";
 //! - per lab axis ("x", "y", "z"): `temperatureUK` and `temperatureErrorUK` (μK, one per sample:
@@ -14,8 +14,8 @@
 //!   that axis's `trapFrequencyKHz`, ω/2π at the focus), `momentum` (`velocitiesMps`, `samples`,
 //!   `probabilities`) and `position` (`positionsUm`, ...) as the 1D block's distributions;
 //! - `lossProbability`, one per sample, never decreasing;
-//! - `classical`, one per sample: whether it lies in the validated regime (k_B T ≥ 3ħω on every
-//!   axis); outside it the result is a reference only;
+//! - `classical`, one per sample: whether it lies in the validated regime (k_B T ≥ `CLASSICAL` ħω
+//!   on every axis, motion-3d solve.rs); outside it the result is a reference only;
 //! - `trajectories` and `timeStepUs`.
 //!
 //! Every batch's result is streamed first (`progress`: true) with the engine's estimate of the

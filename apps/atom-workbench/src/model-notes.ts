@@ -3,6 +3,9 @@
 import {math} from './math.js';
 import {POPULATION_TOLERANCE} from './types.js';
 import {errorPercent} from './accuracy.js';
+import {SEMICLASSICAL_REGIME} from './solver-types.js';
+import {formatNumber} from './format.js';
+import {MHZ_PER_MK} from './frequency-value.js';
 
 /** The population tolerance as the notes write it ("1%"). */
 const TOLERANCE=errorPercent(POPULATION_TOLERANCE);
@@ -33,6 +36,6 @@ export function modelNotes():string{
 `<section id="notes-motion"><h3>1D 运动</h3><p>布居演化页打开“1D 运动”后，计算光镊中单个原子的径向运动：原子沿穿过焦点、与每束聚焦光垂直的坐标轴运动，内态与运动一起演化。聚焦光是按功率与束腰或按数值孔径给出强度的光，焦点在原子处；没有聚焦光，或没有与它们都垂直的坐标轴时不计算并写明原因。初态是场景的初态，运动为“初始温度”下的热分布（动量为 Maxwell 分布，位置为势阱中的热分布）。光束分开保留：其它光可以任意方向、任意波长，每束光在运动轴上的振幅由它的方向、波数和束腰给出（按局域强度给出的光是平面波）。自发辐射的反冲按偶极辐射的方向图投影到运动轴。原子是否被约束由运动引擎判断：沿运动轴没有约束势时引擎写明原因。</p>`+
 `<p>结果：温度 T = m·Var(v)/k<sub>B</sub> 与平均速度 ⟨v⟩（v 为沿轴的速度），相对焦点处阱频（引擎给出所用的 ω/2π）的平均振动量子数 n̄，原子离开光阱的累计概率，末时刻（可另选一个时刻对比）的速度分布与位置分布，以及对位置平均的 32 态布居；损失概率以外的量都是仍在光阱中的原子的。运动没有长期布居：能级图的 p̄(T) 只是内态的。</p>`+
 `<h4>3D（半经典）</h4><p>“运动轴”选 3D（半经典）时，单个原子在三维中运动（需要聚焦在原子处的光）：原子是经典质点（位置与动量），携带消去激发态后的基态内态，按量子跳跃（蒙特卡罗波函数）演化。自发辐射光子的方向按该次跃迁的偶极辐射方向图精确抽样，反冲 −ħk n；吸收的反冲取所吸收那束光的 ħk（按各束光在该光子中的份额抽样），并使每次跳跃带有精确的平均动量（含多普勒频移与激发态在光阱中受的力）；两次跳跃之间的力是内态上的平均力。光阱的谐振部分精确积分，步长由步长减半检验给出，轨迹分批计算，直到各时刻温度（各轴，相对）与布居的两倍标准误差落在目标内（T 10%，布居 5%）。结果给出各轴的 T、⟨v⟩、n̄（相对该轴焦点处的阱频）、损失概率与各轴的速度、位置分布。</p>`+
-`<p>适用范围：点粒子没有零点运动。与 1D 量子参考（同一光镊 PGC 场景）相比，各轴 k<sub>B</sub>T ≥ 3ħω（径向 100 kHz 时约 15 μK 以上）时 T 在约 10% 以内、布居在约 0.03 以内；更冷时原子被冷却到零点运动以下，T 偏低 20–45%。图上以灰色带标出低于这一范围的时刻，那里的结果仅供参考。</p></section>`+
+`<p>适用范围：点粒子没有零点运动。与 1D 量子参考（同一光镊 PGC 场景）相比，各轴 k<sub>B</sub>T ≥ ${SEMICLASSICAL_REGIME}ħω（径向阱频 100 kHz 时约 ${formatNumber(SEMICLASSICAL_REGIME*0.1/MHZ_PER_MK*1e3,{digits:2})} μK 以上）时 T 在约 10% 以内、布居在约 0.03 以内；更冷时原子被冷却到零点运动以下，T 偏低 20–45%。图上以灰色带标出低于这一范围的时刻，那里的结果仅供参考。</p></section>`+
 `<section id="notes-data"><h3>数据</h3><p>原子数据：<a href="https://steck.us/alkalidata/rubidium87numbers.pdf" target="_blank" rel="noopener noreferrer">Steck · Rubidium 87 Data</a>；独立校验：<a href="https://qutip.readthedocs.io/en/stable/guide/dynamics/dynamics-master.html" target="_blank" rel="noopener noreferrer">QuTiP</a>。</p></section>`;
 }

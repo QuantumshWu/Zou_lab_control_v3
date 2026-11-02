@@ -7,6 +7,7 @@ import {MOTION_FRAME,focusedBeams,radialAxes,type MotionRequest} from './motion.
 import {laserWaistUm} from './laser-intensity.js';
 import {withUnit} from './format.js';
 import {FULL_MODEL_SCHEMA} from './solver-protocol.js';
+import {SEMICLASSICAL_REGIME} from './solver-types.js';
 
 /** The rb87-full/2 model sent to the Rust worker: 32 states, complex row-major
  * matrices, H in rad/us, collapse amplitudes in 1/sqrt(us), and
@@ -177,7 +178,7 @@ function cartesianEmission(n:Vec3,frame:Frame,spherical:readonly MasterMatrix[])
 }
 function motionText(motion:MotionRequest):string[] {
  if(motion.axis==='3d')return [`3D 运动（半经典）：光镊中的单个原子在三维中运动，初态为上述内态，运动为温度 ${withUnit(motion.temperatureUK,'μK',{digits:6})} 的热分布；各轴温度 T = m·Var(v)/k_B。`,
-  '半经典方法：原子是经典质点（位置、动量），携带消去激发态后的基态内态，按量子跳跃演化：自发辐射的反冲按偶极辐射的方向图抽样，吸收的反冲取所吸收光束的 ħk，并使每次跳跃带有精确的平均动量；力是内态上的平均力。点粒子没有零点运动：各轴 k_B T 不小于 3ħω 时与 1D 量子参考相符（T 约 10% 以内），更冷时偏冷，仅供参考。'];
+  `半经典方法：原子是经典质点（位置、动量），携带消去激发态后的基态内态，按量子跳跃演化：自发辐射的反冲按偶极辐射的方向图抽样，吸收的反冲取所吸收光束的 ħk，并使每次跳跃带有精确的平均动量；力是内态上的平均力。点粒子没有零点运动：各轴 k_B T 不小于 ${SEMICLASSICAL_REGIME}ħω 时与 1D 量子参考相符（T 约 10% 以内），更冷时偏冷，仅供参考。`];
  return [`1D 运动：光镊中单个原子沿 ${motion.axis} 轴（穿过焦点、与聚焦光垂直）径向运动，初态为上述内态，运动为温度 ${withUnit(motion.temperatureUK,'μK',{digits:6})} 的热分布；温度 T = m·Var(v)/k_B，v 为沿 ${motion.axis} 轴的速度。`,
   '光束分开保留（同频的对射光不合并）：每束光在运动轴上的振幅由它的方向、波数和束腰给出——聚焦在原子处的光是焦点在原子处的高斯光束，按局域强度给出的光是平面波；自发辐射的反冲按偶极辐射的方向图投影到运动轴。'];
 }

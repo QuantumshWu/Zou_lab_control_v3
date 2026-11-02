@@ -18,6 +18,8 @@ import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
 import {typedDigits} from '../dist/js/atom-workbench/src/unit-input.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {prepareNativeSolve} from '../scripts/native-protocol.mjs';
+import {populationChart} from '../dist/js/atom-workbench/src/population-chart.js';
+import {motionSeries,seriesChart} from '../dist/js/atom-workbench/src/motion-chart.js';
 import {nativeResult} from './native-result.mjs';
 import {spherical} from './directions.mjs';
 import {readFileSync} from 'node:fs';
@@ -238,6 +240,16 @@ test('3D motion (semiclassical): asked for with a tweezer, its block on the lab 
   assert.deepEqual(result.motion.axes,['x','y','z']);assert.deepEqual(result.motion.trapFrequencyKHz,[100.5,100.5,19.3]);
   assert.deepEqual(result.motion.classical,[true,true,false]);assert.equal(result.populationAccuracy.requestedTolerance,.05);
   assert.deepEqual(result.motion.temperatureErrorUK,[[1.5,1.5,1.5],[1.5,1.5,1.5],[1.5,1.5,1.5]]);
+  // A sample outside the validated regime lies on the grey band of every time view (from half-way
+  // to its neighbour), a reference only.
+  const reference=result.motion.classical.map(inside=>!inside),bands=svg=>[...svg.matchAll(/<rect class="reference-band" x="([\d.]+)" y="(\d+)" width="([\d.]+)" height="(\d+)"/g)].map(m=>m.slice(1).map(Number));
+  for(const kind of ['temperature','trap']){
+    const chart=seriesChart(timesUs,motionSeries(result.motion,kind),'ms',{reference});
+    assert.deepEqual(bands(chart).map(([x,y,w,h])=>[x,x+w,y,y+h]),[[599.5,778,32,176],[599.5,778,212,300]],kind);assert.match(chart,/k_BT ≥ 4ħω 才验证过/);
+    assert.deepEqual(bands(seriesChart(timesUs,motionSeries(result.motion,kind),'ms')),[],`${kind}: none unmarked`);
+  }
+  const id=scene.dynamics.initialStateId;
+  assert.deepEqual(bands(populationChart(result,[id],{[id]:'初态'},{showTotalExcited:false,reference})).map(([x,y,w,h])=>[x,x+w,y,y+h]),[[599.5,778,32,300]]);
   for(const [label,change] of [
     ['one axis missing',m=>{delete m.temperatureUK.z;}],['no regime',m=>{delete m.classical;}],['a regime short of a sample',m=>{m.classical.pop();}],
     ['no trajectories',m=>{m.trajectories=0;}],['a 1D block',m=>{Object.assign(m,motionBlock(3));}],
@@ -296,5 +308,5 @@ test('the motion core\'s sentences are shown in Chinese',()=>{
   assert.match(solverText('A motion request is a trajectory alone: meanOnly and includeMean are false'),/1D 运动/);
   // The core's refusals are written in Chinese.
   const core=readFileSync(new URL('../rust-solver/motion-core/src/lib.rs',import.meta.url),'utf8');
-  for(const name of ['NOT_IMPLEMENTED','NO_TRAP'])assert.match(new RegExp(`pub const ${name}:&str="([^"]+)";`).exec(core)?.[1]??'',/^[一-鿿]/,name);
+  for(const name of ['NO_TRAP','NOT_CONFINED'])assert.match(new RegExp(`pub const ${name}:&str="([^"]+)";`).exec(core)?.[1]??'',/^[一-鿿]/,name);
 });
