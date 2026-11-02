@@ -81,9 +81,15 @@ perpendicular to every focused beam. A request whose model carries the
 `motion` block is a trajectory alone, served by the motion core in
 `rust-solver/motion-core` (`motion_core_adapter.rs`). In that block the beams
 are kept apart, each with its direction, wave number, waist and intensity at
-the atom, and the emission is resolved on the axis. Its engine is not
-implemented yet: a request with light is refused (运动引擎尚未实现), one
-without has nothing to confine the atom.
+the atom, and the emission is resolved on the axis. The engine
+(`motion-core/src/engine.rs`) evolves the ground manifold's density ρ(x1, x2)
+with the excited states eliminated at every position (GMW-o1 in a box): Strang
+steps with exact per-point exponentials, grids and time step chosen for 1%
+populations and 10% in T and n̄, continued by dynamic mode decomposition once
+its prediction agrees with the one made at half the run (the decomposition's
+eigen-solver is the engine's own, so every build gives the same continuation).
+A request without light, or whose light does not confine the initial state
+along the axis, is refused.
 
 Every request asks for the same absolute population error,
 `populationTolerance: 0.01` on the probability scale (1%); it is not a user

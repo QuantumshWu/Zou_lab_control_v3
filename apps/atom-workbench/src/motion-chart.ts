@@ -10,6 +10,7 @@ import {isPlaneMotion} from './solver-types.js';
 import {RB87} from './physics.js';
 import {timeDisplayUnit} from './duration.js';
 import {formatNumber} from './format.js';
+import {CONTINUATION_WORDS,continuationBand} from './population-chart.js';
 
 /** k_B (J/K), exact in the SI. */
 const BOLTZMANN=1.380649e-23;
@@ -106,10 +107,12 @@ const band=(xs:readonly number[],upper:readonly number[],lower:readonly number[]
   `<polygon points="${points([...xs,...xs.slice().reverse()],[...upper,...lower.slice().reverse()])}" fill="${ink}" fill-opacity="0.18" stroke="none"/>`;
 const svg=(cls:string,label:string,body:string)=>`<svg class="chart-svg ${cls}" viewBox="0 0 800 355" xmlns="${SVG}" role="img" tabindex="0" aria-label="${esc(label)}" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" style="fill:#323130;outline:none">${body}</svg>`;
 
-/** The two panels on the result's samples: each curve, behind them the bands of the standard errors. */
-export function seriesChart(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit):string{
+/** The two panels on the result's samples: each curve, behind them the bands of the standard
+ * errors; a 1D result's continuation samples, after the last simulated time `continuedFromUs`, on
+ * their band across both. */
+export function seriesChart(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit,continuedFromUs?:number):string{
   const g=seriesLayout(timesUs,series,timeUnit),xs=timesUs.map(g.x);
-  let body='';
+  let body=continuedFromUs===undefined?'':continuationBand(g.x(continuedFromUs),RIGHT,g.panels[0].top,g.panels[1].bottom,`${formatNumber(continuedFromUs*g.unit.factor,{digits:3})} ${g.unit.name}`);
   for(const p of g.panels)for(const v of p.ticks){const y=p.y(v/p.series.unit.factor);body+=line(LEFT,y,RIGHT,y,`stroke="${GRID}"`)+text(LEFT-12,y+4,digits(v),'text-anchor="end"');}
   for(let i=0;i<=4;i++){const t=timesUs[0]!+(timesUs.at(-1)!-timesUs[0]!)*i/4;body+=text(g.x(t),g.panels[1].bottom+24,digits(t*g.unit.factor),'text-anchor="middle"');}
   body+=text(LEFT,19,g.panels[0].series.title)+text(LEFT,g.panels[1].top-8,g.panels[1].series.title)+text(RIGHT,g.panels[1].bottom+47,`t / ${g.unit.name}`,'text-anchor="end"');
@@ -258,15 +261,16 @@ const mark=(name:string,attrs:Record<string,string>)=>{const node=document.creat
 /** A readout row: a name (markup) in its ink and a value (markup). */
 const row=(ink:string,name:string,value:string)=>`<div class="readout-row two"><span class="readout-name" style="color:${ink}">${name}</span><span>${value}</span></div>`;
 
-/** The time cursor of a series chart: every curve at the sample, a temperature with its standard error. */
-export function bindSeries(host:HTMLElement,timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit):()=>void{
+/** The time cursor of a series chart: every curve at the sample, a temperature with its standard
+ * error, a continuation's sample marked. */
+export function bindSeries(host:HTMLElement,timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit,continuedFromUs?:number):()=>void{
   const svg=host.querySelector<SVGSVGElement>('svg.motion-series-svg');if(!svg)return ()=>{};
   const g=seriesLayout(timesUs,series,timeUnit),card=readoutCard(host,`所选时刻的${series.flatMap(s=>s.curves.map(c=>nameWords(c.name))).join('与')}`);
   const unbind=bindCursor(host,svg,timesUs.length,i=>g.x(timesUs[i]!),(i,cursor)=>{
-    const xx=g.x(timesUs[i]!);
+    const xx=g.x(timesUs[i]!),continued=continuedFromUs!==undefined&&timesUs[i]!>continuedFromUs;
     cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:String(g.panels[0].top),y2:String(g.panels[1].bottom),stroke:CURSOR,'stroke-width':'1'}),
       ...g.panels.flatMap(p=>p.series.curves.map(c=>mark('circle',{cx:String(xx),cy:String(p.y(c.values[i]!)),r:'3',fill:c.ink,stroke:'white','stroke-width':'1.5'}))));
-    card.innerHTML=`<div class="readout-time">t = ${esc(digits(timesUs[i]!*g.unit.factor))} ${esc(g.unit.name)}</div>`+g.panels.flatMap(p=>p.series.curves.map(c=>{
+    card.innerHTML=`<div class="readout-time">t = ${esc(digits(timesUs[i]!*g.unit.factor))} ${esc(g.unit.name)}${continued?` · <span class="readout-continued" title="${esc(CONTINUATION_WORDS)}">延拓</span>`:''}</div>`+g.panels.flatMap(p=>p.series.curves.map(c=>{
       const unit=p.series.unit,error=c.errors?` ± ${formatNumber(c.errors[i]!*unit.factor,{digits:2})}`:'';
       return row(c.ink,nameMarkup(c.name),esc(`${formatNumber(c.values[i]!*unit.factor,{digits:4})}${error}${unit.name?` ${unit.name}`:''}`));
     })).join('');

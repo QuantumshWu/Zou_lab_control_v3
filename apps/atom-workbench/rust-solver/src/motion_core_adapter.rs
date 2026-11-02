@@ -18,6 +18,9 @@
 //!   (kHz, positive), and `meanOccupation`, one n̄ per sample relative to it;
 //! - `lossProbability`, one per sample: the probability that the atom has left
 //!   the trap by then, from 0 to 1 and never decreasing;
+//! - `continuedFromUs`, present when the samples after it are the core's
+//!   continuation (its prediction from the simulated history), not simulated:
+//!   the last simulated time (us);
 //! - `momentum`: `velocitiesMps` (the grid, strictly increasing), `samples`
 //!   (increasing sample indices, the last sample among them) and
 //!   `probabilities` (one distribution per listed sample: the probability at
@@ -27,9 +30,12 @@
 //! Every output but `lossProbability` describes the atom still held.
 //!
 //! Every checkpoint of the core's run is streamed first (`progress`: true) in
-//! the same shape.
+//! the same shape, with the core's estimate of the remaining wall time
+//! (`diagnostics.estimatedRemainingMs`, ms) when it has one, and
+//! `diagnostics.estimatedRemainingAtMost`: true while that is the time to the end
+//! and the continuation may still stop the run earlier.
 use crate::{Model,Operator,Options,lattice_core_adapter};
-use atom_motion_core::{Beam,Complex,Matrix,Request,Solution,STATES};
+use atom_motion_core::{Beam,Complex,Matrix,Remaining,Request,Solution,STATES};
 use atom_population_core::Lapack;
 use atom_population_core::lattice::accuracy::POPULATION_TOLERANCE;
 use atom_population_core::lattice::pipeline::{LONGEST_TIME_US,MOST_SAMPLES};
@@ -137,6 +143,7 @@ fn check(solution:&Solution,times:usize)->Result<(),String>{
     if !series(&solution.sample_errors,true)||!series(&solution.temperature_uk,true)||!series(&solution.mean_velocity_mps,false)||!series(&solution.mean_occupation,false){
         return bad("per-time errors, temperatures, mean velocities or occupations that are not one finite value per time");}
     if !(solution.trap_frequency_khz.is_finite()&&solution.trap_frequency_khz>0.){return bad("a trap frequency that is not positive");}
+    if solution.continued_from_us.is_some_and(|t|!(t.is_finite()&&t>=0.)){return bad("a continuation start that is not a time of the run");}
     let loss=&solution.loss_probability;
     if !series(loss,true)||loss.iter().any(|&p|p>1.)||loss.windows(2).any(|w|w[1]<w[0]){return bad("loss probabilities that are not probabilities never decreasing in time");}
     for(m,what)in [(&solution.momentum,"momentum"),(&solution.position,"position")]{
@@ -145,8 +152,9 @@ fn check(solution:&Solution,times:usize)->Result<(),String>{
     Ok(())
 }
 
-/// The result in the one contract; `last` false marks a streamed checkpoint.
-fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,groups:&[String],last:bool,started:Instant)->Result<Value,String>{
+/// The result in the one contract; `remaining` marks a streamed checkpoint (with the core's
+/// estimate of the wall time to the final result when it has one).
+fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,groups:&[String],remaining:Option<Option<Remaining>>,started:Instant)->Result<Value,String>{
     let times=request.times_us.len();check(solution,times)?;
     let initial:Vec<f64>=(0..STATES).map(|i|request.initial_density[i*STATES+i].re).collect();
     let(trace,initial_error)=lattice_core_adapter::row_errors(&solution.populations,&initial)?;
@@ -160,9 +168,14 @@ fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,g
             "trapFrequencyKHz":solution.trap_frequency_khz,"meanOccupation":solution.mean_occupation,"lossProbability":solution.loss_probability,
             "momentum":{"velocitiesMps":m.grid,"samples":m.samples,"probabilities":m.probabilities},
             "position":{"positionsUm":x.grid,"samples":x.samples,"probabilities":x.probabilities}}});
+    if let Some(t)=solution.continued_from_us{result["motion"]["continuedFromUs"]=json!(t);}
     // A result above the tolerance says why it stopped there.
     if !converged{result["populationAccuracy"]["reason"]=json!(above_tolerance(solution.reason.as_ref(),estimated));}
-    if !last{result["progress"]=json!(true);}
+    if let Some(remaining)=remaining{
+        result["progress"]=json!(true);
+        if let Some(r)=remaining.filter(|r|r.ms.is_finite()){result["diagnostics"]["estimatedRemainingMs"]=json!(r.ms.max(0.));
+            if r.at_most{result["diagnostics"]["estimatedRemainingAtMost"]=json!(true);}}
+    }
     Ok(result)
 }
 
@@ -172,9 +185,9 @@ pub fn solve(model:&Model,motion:&MotionModel,options:&Options,publish:&mut dyn 
     let started=Instant::now();
     let(request,groups)=prepare(model,motion,options)?;let names:Vec<String>=groups.into_iter().map(|g|g.name).collect();
     let mut failure:Option<String>=None;
-    let mut observe=|checkpoint:&Solution|{if failure.is_some(){return;}
-        match result(model,motion,&request,checkpoint,&names,false,started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
+    let mut observe=|checkpoint:&Solution,remaining:Option<Remaining>|{if failure.is_some(){return;}
+        match result(model,motion,&request,checkpoint,&names,Some(remaining),started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
     let solution=atom_motion_core::solve(&request,&mut observe)?;
     if let Some(e)=failure{return Err(e);}
-    result(model,motion,&request,&solution,&names,true,started)
+    result(model,motion,&request,&solution,&names,None,started)
 }

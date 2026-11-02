@@ -10,6 +10,8 @@ import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-w
 import {HORIZONS,entryAt,nativeResult} from './native-result.mjs';
 import {CurrentResults} from '../dist/js/atom-workbench/src/current-results.js';
 import {horizonRecords,keptCheckpoint} from '../dist/js/atom-workbench/src/solve-plan.js';
+import {exampleScene} from '../dist/js/atom-workbench/src/examples.js';
+import {motionRequest} from '../dist/js/atom-workbench/src/motion.js';
 
 /** The HTTP response for this scene: a native result plus transport metadata. */
 function fixture(scene=defaultScene(),settings=scene.dynamics,timesUs=[0,settings.durationUs/2,settings.durationUs]){
@@ -35,6 +37,27 @@ test('a checkpoint arrives before the final result and stays available when evol
  assert.equal(progress.length,1);assert.equal(progress[0].timesUs.length,3);assert.equal(progress[0].populationAccuracy.status,'estimated-partial');assert.deepEqual(progress[0].populationAccuracy.sampleErrors,[0,.012,.003]);assert.equal(finished,false);
  stream.send({type:'error',status:422,data:{error:'unstable evolution',code:'numerical-failure'}});stream.close();await rejected;
  assert.equal(progress[0].mean.converged,true);assert.equal(mock.calls.length,1);
+});
+test('a full request streams its trajectory before its mean: a checkpoint without the mean is read, the final one never',async t=>{
+ const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-before-mean'});t.after(()=>client.dispose());
+ const scene=scenario(),pending=client.solve(scene,scene.dynamics,{onProgress:value=>progress.push(value)});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]),request=mock.calls[0].body.request;
+ const early=checkpoint(scene,request,[0,.02,.009]);delete early.meanHorizons;stream.send({type:'checkpoint',data:early});
+ const later=checkpoint(scene,request,[0,.007,.001]);later.diagnostics.estimatedRemainingMs=1200;stream.send({type:'checkpoint',data:later});
+ const final=checkpoint(scene,request,[0,.002,.001]);delete final.progress;stream.send({type:'result',data:final});stream.close();
+ const result=await pending;
+ assert.deepEqual(progress.map(p=>p.mean.status),['not-requested','time-average'],'the mean once it has come');
+ assert.deepEqual(progress.map(p=>p.metrics.estimatedRemainingMs),[undefined,1200]);assert.equal(result.mean.converged,true);
+ // Strict elsewhere: a final full result without its mean, a trajectory alone's checkpoint with one, a mean request's without one.
+ for(const [label,options,data] of [
+   ['a final result without its mean',{},request=>{const d=checkpoint(scene,request,[0,.002,.001]);delete d.progress;delete d.meanHorizons;return [{type:'result',data:d}];}],
+   ['a trajectory alone with a mean',{includeMean:false},request=>[{type:'checkpoint',data:checkpoint(scene,request,[0,.002,.001])}]],
+   ['a mean request without its mean',{meanOnly:true},request=>{const d={...meanFixture(scene,request),progress:true};delete d.meanHorizons;return [{type:'checkpoint',data:d}];}],
+ ]){
+   const mock=transport(),client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-mean-contract'});
+   const pending=client.solve(scene,scene.dynamics,{...options,onProgress:()=>{}});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]);
+   for(const event of data(mock.calls[0].body.request))stream.send(event);stream.close();
+   await assert.rejects(pending,/长期布居与本次请求不符/,label);client.dispose();
+ }
 });
 test('two checkpoints, then the final result: each delivered in turn, the final one without a progress flag',async t=>{
  const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-success'});t.after(()=>client.dispose());
@@ -70,6 +93,28 @@ test('the stream speaks checkpoints and one final result only',async t=>{
    const pending=client.solve(scene,scene.dynamics,{onProgress:()=>{}});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]);
    for(const event of events(mock.calls[0].body.request))stream.send(event);stream.close();
    await assert.rejects(pending,/未知求解进度|不匹配|进度标记/,label);client.dispose();
+ }
+});
+test('a checkpoint may carry its run\'s estimate of the time left; a final result, or anything but a finite number ≥ 0, is refused',()=>{
+ // One reader for both: a population checkpoint and a 1D motion checkpoint.
+ const scene=scenario(),request={clientId:'eta',sequence:1},population=()=>checkpoint(scene,request,[0,.02,.01]);
+ const pgc=exampleScene('pgc').scene;pgc.dynamics.samples=3;const motion=motionRequest(pgc,pgc.dynamics),p=[.1,.2,.4,.2,.1];
+ const moving=()=>{const states=buildFullMasterModel(pgc,pgc.dynamics).states,timesUs=[0,pgc.dynamics.durationUs/2,pgc.dynamics.durationUs];
+   return {...nativeResult({states,initialIndex:states.findIndex(s=>s.id===pgc.dynamics.initialStateId),timesUs,mean:false}),assumptions:['test assumption'],progress:true,
+     motion:{axis:motion.axis,temperatureUK:[30,30,30],meanVelocityMps:[0,0,0],trapFrequencyKHz:120,meanOccupation:[4,4,4],lossProbability:[0,0,.01],
+       momentum:{velocitiesMps:[-.1,-.05,0,.05,.1],samples:[0,2],probabilities:[p,p]},position:{positionsUm:[-.4,-.2,0,.2,.4],samples:[0,2],probabilities:[p,p]}}};};
+ const left=(data,ms)=>{data.diagnostics.estimatedRemainingMs=ms;return data;};
+ for(const [what,make,read] of [['population',population,data=>normalizeDynamicsResult(data,scene)],['motion',moving,data=>normalizeDynamicsResult(data,pgc,undefined,undefined,motion)]]){
+   assert.equal(read(make()).metrics.estimatedRemainingMs,undefined,`${what}: none before the run's history supports one`);
+   assert.equal(read(left(make(),1234.5)).metrics.estimatedRemainingMs,1234.5,what);
+   assert.equal(read(left(make(),0)).metrics.estimatedRemainingMs,0,`${what}: the run stops there`);
+   const final=left(make(),800);delete final.progress;assert.throws(()=>read(final),/最终结果带有剩余时间估计/,`${what}: a final result`);
+   for(const bad of [-1,NaN,Infinity,null,'800'])assert.throws(()=>read(left(make(),bad)),/求解结果不完整或无效：剩余时间估计/,`${what}: ${bad}`);
+   // An upper bound (the run may stop earlier) is marked, only with an estimate.
+   const bound=left(make(),90000);bound.diagnostics.estimatedRemainingAtMost=true;assert.equal(read(bound).metrics.estimatedRemainingAtMost,true,`${what}: an upper bound`);
+   assert.equal(read(left(make(),900)).metrics.estimatedRemainingAtMost,undefined,`${what}: an estimate`);
+   for(const bad of [false,1,'true'])assert.throws(()=>read(Object.assign(left(make(),900),{diagnostics:{...left(make(),900).diagnostics,estimatedRemainingAtMost:bad}})),/剩余时间估计/,`${what}: at most ${bad}`);
+   const alone=make();alone.diagnostics.estimatedRemainingAtMost=true;assert.throws(()=>read(alone),/剩余时间估计/,`${what}: a bound without an estimate`);
  }
 });
 test('a mean request streams checkpoints of its single t = 0 row',async t=>{

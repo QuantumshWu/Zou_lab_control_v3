@@ -326,7 +326,7 @@ test('the motion engines\' sentences are shown in Chinese',()=>{
   assert.match(solverText('A motion request is a trajectory alone: meanOnly and includeMean are false'),/径向运动/);
   // The cores' refusals are written in Chinese: the 1D core's, and the 2D engine's without a trap or a GPU.
   const core=readFileSync(new URL('../rust-solver/motion-core/src/lib.rs',import.meta.url),'utf8');
-  for(const name of ['NOT_IMPLEMENTED','NO_TRAP'])assert.match(new RegExp(`pub const ${name}:&str="([^"]+)";`).exec(core)?.[1]??'',/^[一-鿿]/,name);
+  for(const name of ['NO_TRAP','NOT_CONFINED'])assert.match(new RegExp(`pub const ${name}:&str="([^"]+)";`).exec(core)?.[1]??'',/^[一-鿿]/,name);
   const gpu=readFileSync(new URL('../rust-solver/motion-gpu/src/solve.rs',import.meta.url),'utf8'),device=readFileSync(new URL('../rust-solver/motion-gpu/src/gpu.rs',import.meta.url),'utf8');
   assert.match(/pub const NO_TRAP:&str="([^"]+)";/.exec(gpu)?.[1]??'',/^[一-鿿]/);assert.match(/format!\("(2D 径向运动需要 NVIDIA 显卡[^"]*)"/.exec(device)?.[1]??'',/^2D 径向运动需要 NVIDIA 显卡/);
 });

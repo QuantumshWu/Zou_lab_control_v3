@@ -32,13 +32,14 @@ import type {ScopeNote} from './spectroscopy.js';
 import {defaultMotion,defaultScene,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionAxis,MotionPlane,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
 import type {DynamicsResult,MotionResult} from './solver-types.js';
-import {isPlaneMotion} from './solver-types.js';
+import {continuedAt,isPlaneMotion} from './solver-types.js';
 import {isPlane,motionAxis,motionChoices,motionRefusal,motionTemperatureReading,planeAxes,setMotionTemperature} from './motion.js';
 import {MOTION_INKS,bindDistribution,bindMap,bindSeries,distributionChart,distributionCurves,lengthText,listedSamples,mapChart,mapRootMeanSquare,motionSeries,nameMarkup,rootMeanSquare,seriesChart} from './motion-chart.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
 import {startupScene,validateScene} from './scene-file.js';
 import {incidentTransitions,laserEmits,laserReferenceStateId,setLaserReferenceState,transitionEndpoints} from './transition-view.js';
 import {escapeHtml as esc,levelsChart,number,populationChart,bindPopulationChart,populationColor,populationValue,populationSamplingInfo} from './charts.js';
+import {CONTINUATION_WORDS} from './population-chart.js';
 import {math} from './math.js';
 import {renderSpace3D,type SpaceSelection,type SpaceViewName} from './space3d.js';
 import {laserColour} from './identity.js';
@@ -48,7 +49,7 @@ import type {DurationUnit} from './types.js';
 import {patchLevelPopulations} from './level-population-dom.js';
 import {idMappingError} from './population-basis.js';
 import {installWindowChrome} from './window-chrome.js';
-import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,signedInteger,stateLabel,subscript,withUnit} from './format.js';
+import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,remainingWords,signedInteger,stateLabel,subscript,withUnit} from './format.js';
 import {solverText} from './solver-words.js';
 import {errorPercent,outsideRuns,partialSentence,partialShort,sampleErrors} from './accuracy.js';
 import {definitionNotes,modelNotes} from './model-notes.js';
@@ -96,8 +97,11 @@ type SolvedRecord={result:DynamicsResult;wallMs:number;horizon:number;checkpoint
 const trajectories=new CurrentResults<'trajectory',SolvedRecord>(),means=new CurrentResults<number,SolvedRecord>();
 /** A request: what it computes, the inputs it was made for and the stores' epochs then. */
 type Submitted={kind:SolveKind;inputs:SolveInputs;epochs:{trajectory:number;mean:number}};
-/** The running solve's latest checkpoint: never drawn; on 停止 (or a failure) it becomes the result. */
-let lastCheckpoint:(Submitted&{record:SolvedRecord})|undefined;
+/** The running solve's latest checkpoint and when it arrived (the status line counts its estimate of
+ * the time left down from then): never drawn; on 停止 (or a failure) it becomes the result. */
+let lastCheckpoint:(Submitted&{record:SolvedRecord;arrived:number})|undefined;
+/** The status line's next re-render while it counts a running solve's remaining time down. */
+let countdownTimer=0;
 const $=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T;
 const message=(error:unknown)=>error instanceof Error?error.message:String(error);
 
@@ -256,10 +260,12 @@ function solverStatus():[string,StatusWord,string?,string?]{
   // A cached mean is ready while the trajectory beside it is not (a motion trajectory has none).
   const meanReady=!motion&&(result??cached)?.mean.converged===true,subject=motion?'运动':'布居';
   if(error){const why=labelStateIds(solverText(error));return [record?.checkpoint==='failed'?`计算失败 · 显示最后的中间结果：${why}`:meanReady?`时间演化失败（长期布居已就绪）：${why}`:`${subject}计算失败：${why}`,'error'];}
-  // While a solve runs nothing new is drawn; the status says how far its checkpoints have come.
+  // While a solve runs nothing new is drawn; the status says how far its checkpoints have come and,
+  // last, the time its latest estimate leaves, counted down.
   if(currentSolverBusy()){
     const last=lastCheckpoint?.record.result,reached=last?.populationAccuracy?.estimatedMaximumError??(last?.mean.converged?last.mean.estimatedError:null);
-    return [reached!=null?`${subject}计算中… · 当前估计误差最大 ${errorPercent(reached)}`:meanReady?'长期布居已就绪 · 时间演化计算中…':solverQueued?`${subject}待计算`:`${subject}计算中…`,'task'];
+    const words=reached!=null?`${subject}计算中… · 当前估计误差最大 ${errorPercent(reached)}`:meanReady?'长期布居已就绪 · 时间演化计算中…':solverQueued?`${subject}待计算`:`${subject}计算中…`,left=remainingTime()?.words;
+    return [left?`${words} · ${left}`:words,'task'];
   }
   const stopped=stoppedHere();
   if(view==='space')return ['方向与偏振实时显示','idle'];
@@ -276,7 +282,12 @@ function solverStatus():[string,StatusWord,string?,string?]{
     const miss=trajectoryMiss(result),words=trajectory?both||(miss?`${miss}（超过 ${tolerance}）`:mean):mean,full=trajectory?[partial,mean].filter(Boolean).join(' · '):mean;
     return [`${head}${words?`：${words}`:trajectory?`（各时刻 ≤ ${tolerance}）`:''}`,'warning',undefined,words!==full?`${head}：${full}`:undefined];
   }
-  if(motion)return [[`${result.motion&&isPlaneMotion(result.motion)?'2D':'1D'} 运动已计算`,partial].filter(Boolean).join(' · '),partial?'warning':'idle',elapsed];
+  // A motion result whose later samples are the continuation's (1D) says from when; what that is, in the tooltip.
+  if(motion){
+    const plane=!!result.motion&&isPlaneMotion(result.motion),done=`${plane?'2D':'1D'} 运动已计算`;
+    const from=result.motion&&!isPlaneMotion(result.motion)?result.motion.continuedFromUs:undefined,since=from===undefined?'':`t > ${continuedSince(from)} 为延拓`;
+    return [[done,since,partial].filter(Boolean).join(' · '),partial?'warning':'idle',elapsed,since?[done,`${since}（${CONTINUATION_WORDS}）`,partial].filter(Boolean).join(' · '):undefined];
+  }
   if(resultPage()==='dynamics'){
     const full=['轨迹已计算',partial,result.mean?.converged?mean:'长期布居未解析'].filter(Boolean).join(' · ');
     return both?[`轨迹已计算 · ${both}`,'warning',elapsed,full]:[full,result.mean?.converged&&!partial&&!mean?'idle':'warning',elapsed];
@@ -305,6 +316,12 @@ function bothSentence(result:DynamicsResult):string{
   const s=result.mean;
   return `${trajectoryMiss(result)} · ${meanSymbol(result)} 误差 ${errorPercent(s.estimatedError!)}（均超 ${errorPercent(POPULATION_TOLERANCE)}）`;
 }
+/** The running solve's remaining time: its latest checkpoint's estimate counted down since that
+ * checkpoint arrived; none before the first estimate. */
+function remainingTime():ReturnType<typeof remainingWords>|undefined{
+  const last=lastCheckpoint,metrics=last?.record.result.metrics,estimate=metrics?.estimatedRemainingMs;
+  return last&&estimate!==undefined?remainingWords(estimate,performance.now()-last.arrived,metrics?.estimatedRemainingAtMost):undefined;
+}
 function refreshStatus():void{
   if(notice&&performance.now()>notice.until)notice=undefined;
   let [text,word,elapsed,full]=solverStatus();
@@ -312,8 +329,12 @@ function refreshStatus():void{
   if(notice)[text,word,elapsed,full]=[notice.text,notice.word,undefined,undefined];
   const tail=elapsed?` · ${elapsed}`:'';
   // A line said short keeps the full words in its tooltip.
-  strip.show(text+tail,word);if(full)setTitle(strip.root,full+tail);strip.setActionVisible(currentSolverBusy());
+  const busy=currentSolverBusy();
+  strip.show(text+tail,word);if(full)setTitle(strip.root,full+tail);strip.setActionVisible(busy);
   detailsCommand.hidden=!currentSolverError();
+  // The countdown says its next value when it changes, at least once a second.
+  clearTimeout(countdownTimer);const next=busy?remainingTime()?.changesInMs:undefined;
+  if(next!==undefined)countdownTimer=window.setTimeout(refreshStatus,Math.min(1000,next));
 }
 
 // ---------------------------------------------------------------- selection
@@ -917,7 +938,7 @@ function requestSolve():void{
   lastCheckpoint=undefined;
   const submittedOptions={...solveOptions(kind),onProgress:(result:DynamicsResult)=>{
     if(!stillCurrent())return;
-    lastCheckpoint={...submitted,record:{result,wallMs:performance.now()-submittedAt,horizon}};refreshStatus();
+    lastCheckpoint={...submitted,record:{result,wallMs:performance.now()-submittedAt,horizon},arrived:performance.now()};refreshStatus();
   }};
   solverTimer=window.setTimeout(async()=>{
     if(!stillCurrent())return;solverQueued=false;refreshPopulationOnly();const begin=performance.now();
@@ -945,10 +966,12 @@ function keepLastCheckpoint(cause:'stopped'|'failed'):void{
   if(kept.trajectory)trajectories.set(tKey,last.epochs.trajectory,'trajectory',record);
   for(const mean of horizonRecords(record))if(kept.horizons.includes(mean.horizon))means.set(mKey,last.epochs.mean,mean.horizon,mean);
 }
-/** 停止: the running solve ends here and its last checkpoint stands as the result. Other inputs solve again. */
+/** 停止: the running solve ends here and its last checkpoint stands as the result. What that leaves
+ * missing (a full request's mean before its first checkpoint) is not asked for while these inputs
+ * stand; other inputs solve again. */
 function stopSolve():void{
   if(!currentSolverBusy())return;
-  const key=requestKey(neededSolve());keepLastCheckpoint('stopped');cancelObsoleteSolve();stoppedKey=key;requestedKey=key;
+  keepLastCheckpoint('stopped');cancelObsoleteSolve();const key=requestKey(neededSolve());stoppedKey=key;requestedKey=key;
   if(view==='dynamics')renderDynamics(latestAnalysis);else refreshPopulationOnly();
   refreshStatus();
 }
@@ -1175,7 +1198,8 @@ function seriesLegend(motion:MotionResult,kind:'temperature'|'trap'):string{
  * and its temperature or root-mean-square distance from the focus. */
 function renderDistributions(host:HTMLElement,motion:MotionResult,kind:'momentum'|'position',timesUs:readonly number[]):string{
   const unit=dynamics().durationUnit,samples=listedSamples(motion,kind),listed=[samples.length-1,...(motionCompare===undefined?[]:[motionCompare])];
-  const time=(at:number)=>`t = ${durationText(timesUs[samples[at]!]!,unit)}`,kelvin=(t:number)=>`T = ${formatNumber(t,{digits:4})} μK`;
+  // A listed time after the last simulated one is a 1D continuation's: said with its time.
+  const time=(at:number)=>{const t=timesUs[samples[at]!]!;return `t = ${durationText(t,unit)}${!isPlaneMotion(motion)&&continuedAt(motion,t)?'（延拓）':''}`;},kelvin=(t:number)=>`T = ${formatNumber(t,{digits:4})} μK`;
   if(isPlaneMotion(motion)&&kind==='position'){
     const order=listed.slice().reverse();
     host.innerHTML=mapChart(motion,order,order.map(time));unbindPopulation=bindMap(host,motion,order,order.map(at=>esc(time(at))));
@@ -1197,18 +1221,21 @@ function renderDynamics(a:Analysis):void{
   // A redraw of the same result (a resize, another scale or curve) keeps an open readout at its sample.
   const host=$('population-chart'),open=host.querySelector<HTMLElement>('.population-readout:not([hidden])')?.dataset.sampleIndex;
   unbindPopulation?.();unbindPopulation=undefined;
-  const plotOptions={showTotalExcited:false,timeUnit:d.durationUnit,scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),...(open===undefined?{}:{cursor:Number(open)})};
-  const stopped=stoppedHere(),waiting=`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
-  // With motion: its refusal, or the chart its view asks for.
+  // With motion: its refusal, or the chart its view asks for; every time view of a 1D result marks
+  // the continuation's samples (after the last simulated time).
   const shown=motionOn()?motionView:'populations',refusal=motionOn()?motionRefusal(scene):'',motion=raw&&raw.timesUs.length>1?raw.motion:undefined;
+  const from=motion&&!isPlaneMotion(motion)?motion.continuedFromUs:undefined,continuation=from===undefined?'':continuationLegend(from);
+  const plotOptions={showTotalExcited:false,timeUnit:d.durationUnit,scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),
+    ...(open===undefined?{}:{cursor:Number(open)}),...(from===undefined?{}:{continuedFromUs:from})};
+  const stopped=stoppedHere(),waiting=`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
   motionViewControl.root.hidden=!motionOn();motionViewControl.setCurrent(shown);populationScaleControl.root.hidden=shown!=='populations';
   distributionToolbar(!refusal&&motion&&(shown==='momentum'||shown==='position')?listedSamples(motion,shown):undefined,raw?.timesUs??[]);
   const caption=(markup:string)=>{if($('population-caption').innerHTML!==markup)$('population-caption').innerHTML=markup;};
   if(refusal){host.innerHTML=`<div class="empty-state error" role="alert">${esc(refusal)}</div>`;caption('');return;}
   if(shown==='temperature'||shown==='trap'){
     const series=motion&&motionSeries(motion,shown);
-    host.innerHTML=series?seriesChart(raw!.timesUs,series,d.durationUnit):waiting;if(series)unbindPopulation=bindSeries(host,raw!.timesUs,series,d.durationUnit);
-    caption(motion?seriesLegend(motion,shown):'');return;
+    host.innerHTML=series?seriesChart(raw!.timesUs,series,d.durationUnit,from):waiting;if(series)unbindPopulation=bindSeries(host,raw!.timesUs,series,d.durationUnit,from);
+    caption(motion?seriesLegend(motion,shown)+continuation:'');return;
   }
   if(shown==='momentum'||shown==='position'){
     if(!motion){host.innerHTML=waiting;caption('');return;}
@@ -1218,8 +1245,14 @@ function renderDynamics(a:Analysis):void{
   if(result&&result.timesUs.length>1)unbindPopulation=bindPopulationChart(host,result,ids,labels,plotOptions);
   const errors=raw&&raw.timesUs.length>1?sampleErrors(raw):undefined,banded=!!errors&&outsideRuns(errors).length>0;
   // The legend names the curves drawn: none until a result is here.
-  const legend=!(result&&result.timesUs.length>1)?'':(banded?`<span class="population-legend accuracy-legend"><span class="accuracy-swatch" aria-hidden="true"></span>估计误差 &gt; ${errorPercent(POPULATION_TOLERANCE)}</span>`:'')+ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
+  const legend=!(result&&result.timesUs.length>1)?'':continuation+(banded?`<span class="population-legend accuracy-legend"><span class="accuracy-swatch" aria-hidden="true"></span>估计误差 &gt; ${errorPercent(POPULATION_TOLERANCE)}</span>`:'')+ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
   caption(legend);
+}
+/** A continuation's last simulated time (us): a computed time, three digits, in the duration's unit. */
+function continuedSince(us:number):string{const unit=timeDisplayUnit(us,dynamics().durationUnit);return `${formatNumber(us*unit.factor,{digits:3})} ${unit.name}`;}
+/** The legend entry of a 1D motion result's continuation, after the last simulated time `from` (us). */
+function continuationLegend(from:number):string{
+  return `<span class="population-legend continuation-legend" title="${esc(CONTINUATION_WORDS)}"><span class="continuation-swatch" aria-hidden="true"></span>t &gt; ${esc(continuedSince(from))} 延拓（由模拟历史预测）</span>`;
 }
 
 /** The 沿 B shortcut the selected light's direction is now wears the active face. */

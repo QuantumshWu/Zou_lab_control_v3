@@ -22,19 +22,22 @@
 //! to the axis and (3/4)(1 − u²) for the one along it; k_eg = 2π ν_eg / c, ν_eg the photon
 //! frequency of the transition (`Request::frame_frequencies_mhz`).
 //!
-//! `solve` is the engine. It is not implemented yet: it refuses every request, with
-//! `NOT_IMPLEMENTED` when light acts and `NO_TRAP` when none does. Its front end is `ground`: the
-//! ground manifold's generator with the excited states eliminated, evaluated at any position on
-//! the line, on the small dense linear algebra of `linear`.
+//! `solve` runs the engine (`engine`: GMW-o1 in a box, continued by dynamic mode decomposition).
+//! Its front end is `ground`: the ground manifold's generator with the excited states eliminated,
+//! evaluated at any position on the line, on the small dense linear algebra of `linear`. A
+//! request without light is refused with `NO_TRAP`, one whose initial state the light does not
+//! confine along the axis with `NOT_CONFINED`.
+pub mod engine;
 pub mod ground;
 pub mod linear;
 
 /// The internal states: the 32 Rb87 states of the model basis.
 pub const STATES:usize=32;
-/// Why a request with light is refused, until the engine is implemented.
-pub const NOT_IMPLEMENTED:&str="运动引擎尚未实现";
 /// Why a request without light is refused: nothing confines the atom along the axis.
 pub const NO_TRAP:&str="沿运动轴没有约束原子的势阱（没有光束）：1D 运动计算光镊中单个原子的径向运动";
+/// Why a request is refused whose light does not confine the initial state along the axis: the
+/// potential's curvature at the focus is not positive, or it has no depth.
+pub const NOT_CONFINED:&str="初态沿运动轴不受约束（焦点处的势阱曲率或深度不为正）：1D 运动计算光镊中单个原子的径向运动";
 
 #[derive(Clone,Copy,Debug,Default,PartialEq)]
 pub struct Complex{pub re:f64,pub im:f64}
@@ -190,14 +193,24 @@ pub struct Solution{
     pub method:String,
     /// Why the run stopped with errors above the tolerance (none when it reached it).
     pub reason:Option<String>,
+    /// The last simulated time (us) when the later samples are the continuation's (its prediction
+    /// from the simulated history); none when every sample was simulated.
+    pub continued_from_us:Option<f64>,
 }
 
+/// The estimated wall time to the final solution (ms); `at_most` while the run may still stop
+/// earlier than the estimate assumes (its continuation not yet projected to an acceptance).
+#[derive(Clone,Copy,Debug,PartialEq)]
+pub struct Remaining{pub ms:f64,pub at_most:bool}
+
 /// Solves a request. `checkpoint` is given each intermediate solution as it is made -- complete,
-/// at every time of the request, as the final one -- so that a stopped run keeps the last; an
-/// engine without such intermediates gives none. The engine is not implemented yet: a request
-/// with light is refused with `NOT_IMPLEMENTED`, one without with `NO_TRAP`.
-pub fn solve(request:&Request,_checkpoint:&mut dyn FnMut(&Solution))->Result<Solution,String>{
-    Err(if request.beams.is_empty(){NO_TRAP}else{NOT_IMPLEMENTED}.into())
+/// at every time of the request, as the final one -- so that a stopped run keeps the last, with
+/// the estimated wall time to the final one.
+pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<Remaining>))->Result<Solution,String>{
+    if request.beams.is_empty(){return Err(NO_TRAP.into());}
+    let ground=ground::Ground::new(request)?;
+    let lapack=atom_population_core::Lapack::load()?;
+    engine::Engine::new(&ground,request,&lapack)?.run(request,checkpoint)
 }
 
 #[cfg(test)]
@@ -214,9 +227,10 @@ mod tests{
         Beam{id:"beam".into(),name:"光".into(),direction,wave_number_per_um:7.37,waist_um,intensity_mw_cm2:1.,frequency_index:vec![],coupling:zero(),counter_coupling:zero(),outside_shift:zero()}
     }
     #[test]
-    fn without_light_nothing_confines_the_atom_and_with_light_the_engine_is_not_implemented_yet(){
-        let mut r=request();assert_eq!(solve(&r,&mut |_|{}),Err(NO_TRAP.to_string()));
-        r.beams.push(beam([0.,1.,0.],Some(1.2)));assert_eq!(solve(&r,&mut |_|{}),Err(NOT_IMPLEMENTED.to_string()));
+    fn without_light_or_a_potential_nothing_confines_the_atom(){
+        let mut r=request();assert_eq!(solve(&r,&mut |_,_|{}),Err(NO_TRAP.to_string()));
+        r.beams.push(beam([0.,1.,0.],Some(1.2)));r.initial_density[0]=Complex{re:1.,im:0.};
+        assert_eq!(solve(&r,&mut |_,_|{}),Err(NOT_CONFINED.to_string()));
     }
     /// A plane wave's amplitude on the line is its axial phase; a beam focused at the atom and
     /// perpendicular to the line falls off as exp(−x²/w²) (intensity exp(−2x²/w²)) with no phase;

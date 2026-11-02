@@ -108,9 +108,12 @@ try{
   const mean=await request('mean',{...settings,meanOnly:true,includeMean:true});
   const meanParsed=normalizeDynamicsResult(mean,scene,settings.initialStateId,settings.meanHorizonUs);
   assert.equal(meanParsed.mean.converged,true,'Smoke mean must be qualified, never the finite endpoint');
-  // 1D motion: the tweezer example's motion request through the same path, refused by the motion core until its engine is implemented.
+  // 1D motion: the tweezer example's motion request, its first 50 us, through the same path.
   const tweezer=exampleScene('pgc').scene,motion=motionRequest(tweezer,tweezer.dynamics);
-  await assert.rejects(request('motion',{...settings,meanOnly:false,includeMean:false,motion},tweezer),/运动引擎尚未实现/);
+  const motionSettings={...tweezer.dynamics,durationUs:50,samples:6,meanOnly:false,includeMean:false,motion};
+  const moving=await request('motion',motionSettings,tweezer);
+  const movingParsed=normalizeDynamicsResult(moving,tweezer,motionSettings.initialStateId,motionSettings.meanHorizonUs,motion);
+  assert.equal(movingParsed.timesUs.length,6);assert.ok(movingParsed.motion&&movingParsed.motion.temperatureUK.every(Number.isFinite),'The motion core answers with temperatures');
   assert.equal(report.workerRequests.length,3);assert.deepEqual(report.workerRequests.map(r=>r.lane),['trajectory','mean','trajectory']);
   assert.equal(report.workerRequests[0].modelSha256,report.workerRequests[1].modelSha256,'Both fresh results must use the identical current Model');
   // Both means are p(T) of the same equation, each within its own bound.
@@ -119,7 +122,7 @@ try{
   assert.ok(Number.isFinite(meanBounds)&&meanDelta<=meanBounds,`Inline and meanOnly means agree within their bounds (difference ${meanDelta}, bounds ${meanBounds})`);
   report.status='passed';report.validation={backendStatic:true,normalIpcAndJsonl:true,finitePopulationAccuracy:parsed.populationAccuracy,
     meanStatus:meanParsed.mean.status,finiteNativeMs:finite.diagnostics.elapsedMs,meanNativeMs:mean.diagnostics.elapsedMs,
-    motionRefusal:'运动引擎尚未实现'};
+    motionNativeMs:moving.diagnostics.elapsedMs};
 }catch(error){report.status='failed';report.error=error.stack??error.message;process.exitCode=1;}
 finally{
   await worker?.receive({kind:'shutdown'});
