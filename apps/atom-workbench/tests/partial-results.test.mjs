@@ -7,6 +7,7 @@ import {POPULATION_TOLERANCE as E,defaultScene} from '../dist/js/atom-workbench/
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {populationChart} from '../dist/js/atom-workbench/src/population-chart.js';
 import {errorPercent,outsideRuns,partialSentence,partialShort} from '../dist/js/atom-workbench/src/accuracy.js';
+import {remainingWords} from '../dist/js/atom-workbench/src/format.js';
 import {HORIZONS,entryAt,nativeResult} from './native-result.mjs';
 
 // Every error is written relative to the tolerance E.
@@ -79,6 +80,23 @@ test('the status sentence says where the trajectory misses ε',()=>{
   assert.equal(partialShort(t,[0,1.22*E,1.04*E,.8*E,.2*E,0],'μs'),`t ≤ 0.021 μs 误差最大 ${P(1.22*E)}`);
   assert.equal(partialShort(t,[0,1.2*E,0,0,1.8*E,0],'μs'),`2 段时刻误差最大 ${P(1.8*E)}`,'several runs by their number; the band shows where');
   assert.equal(partialShort(t,[0,.2*E,.2*E,.2*E,.2*E,.2*E],'μs'),'');
+});
+
+test('while a solve runs the status line counts its latest estimate of the time left down',()=>{
+  // Whole seconds below 10 s (never 0 s), 5 s steps below a minute, whole minutes beyond; each
+  // with the time until it says the next value.
+  assert.deepEqual(remainingWords(7400,0),{words:'预计剩余约 7 s',changesInMs:901});
+  assert.deepEqual(remainingWords(7400,1000),{words:'预计剩余约 6 s',changesInMs:901},'counted down since the checkpoint arrived');
+  assert.deepEqual(remainingWords(1200,0),{words:'预计剩余约 1 s',changesInMs:1201});
+  assert.deepEqual(remainingWords(300,0),{words:'预计剩余约 1 s',changesInMs:301});
+  assert.deepEqual(remainingWords(12400,0),{words:'预计剩余约 10 s',changesInMs:2901},'below 9.5 s it says seconds');
+  assert.deepEqual(remainingWords(13000,0),{words:'预计剩余约 15 s',changesInMs:501});
+  assert.deepEqual(remainingWords(58000,0),{words:'预计剩余约 1 min',changesInMs:501});
+  assert.deepEqual(remainingWords(100000,0),{words:'预计剩余约 2 min',changesInMs:10001});
+  // The run stops at its checkpoint: the result is on its way.
+  assert.deepEqual(remainingWords(0,5000),{words:'即将完成'});
+  // A countdown that has run out says nothing until the next checkpoint brings an estimate.
+  assert.deepEqual(remainingWords(5000,5000),{words:''});assert.deepEqual(remainingWords(5000,6000),{words:''});
 });
 
 test('the chart draws every curve, its samples above ε on a light band, dashed and faded there',()=>{

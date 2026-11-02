@@ -10,6 +10,8 @@ import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-w
 import {HORIZONS,entryAt,nativeResult} from './native-result.mjs';
 import {CurrentResults} from '../dist/js/atom-workbench/src/current-results.js';
 import {horizonRecords,keptCheckpoint} from '../dist/js/atom-workbench/src/solve-plan.js';
+import {exampleScene} from '../dist/js/atom-workbench/src/examples.js';
+import {motionRequest} from '../dist/js/atom-workbench/src/motion.js';
 
 /** The HTTP response for this scene: a native result plus transport metadata. */
 function fixture(scene=defaultScene(),settings=scene.dynamics,timesUs=[0,settings.durationUs/2,settings.durationUs]){
@@ -70,6 +72,23 @@ test('the stream speaks checkpoints and one final result only',async t=>{
    const pending=client.solve(scene,scene.dynamics,{onProgress:()=>{}});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]);
    for(const event of events(mock.calls[0].body.request))stream.send(event);stream.close();
    await assert.rejects(pending,/未知求解进度|不匹配|进度标记/,label);client.dispose();
+ }
+});
+test('a checkpoint may carry its run\'s estimate of the time left; a final result, or anything but a finite number ≥ 0, is refused',()=>{
+ // One reader for both: a population checkpoint and a 1D motion checkpoint.
+ const scene=scenario(),request={clientId:'eta',sequence:1},population=()=>checkpoint(scene,request,[0,.02,.01]);
+ const pgc=exampleScene('pgc').scene;pgc.dynamics.samples=3;const motion=motionRequest(pgc,pgc.dynamics),p=[.1,.2,.4,.2,.1];
+ const moving=()=>{const states=buildFullMasterModel(pgc,pgc.dynamics).states,timesUs=[0,pgc.dynamics.durationUs/2,pgc.dynamics.durationUs];
+   return {...nativeResult({states,initialIndex:states.findIndex(s=>s.id===pgc.dynamics.initialStateId),timesUs,mean:false}),assumptions:['test assumption'],progress:true,
+     motion:{axis:motion.axis,temperatureUK:[30,30,30],meanVelocityMps:[0,0,0],trapFrequencyKHz:120,meanOccupation:[4,4,4],lossProbability:[0,0,.01],
+       momentum:{velocitiesMps:[-.1,-.05,0,.05,.1],samples:[0,2],probabilities:[p,p]},position:{positionsUm:[-.4,-.2,0,.2,.4],samples:[0,2],probabilities:[p,p]}}};};
+ const left=(data,ms)=>{data.diagnostics.estimatedRemainingMs=ms;return data;};
+ for(const [what,make,read] of [['population',population,data=>normalizeDynamicsResult(data,scene)],['motion',moving,data=>normalizeDynamicsResult(data,pgc,undefined,undefined,motion)]]){
+   assert.equal(read(make()).metrics.estimatedRemainingMs,undefined,`${what}: none before the run's history supports one`);
+   assert.equal(read(left(make(),1234.5)).metrics.estimatedRemainingMs,1234.5,what);
+   assert.equal(read(left(make(),0)).metrics.estimatedRemainingMs,0,`${what}: the run stops there`);
+   const final=left(make(),800);delete final.progress;assert.throws(()=>read(final),/最终结果带有剩余时间估计/,`${what}: a final result`);
+   for(const bad of [-1,NaN,Infinity,null,'800'])assert.throws(()=>read(left(make(),bad)),/求解结果不完整或无效：剩余时间估计/,`${what}: ${bad}`);
  }
 });
 test('a mean request streams checkpoints of its single t = 0 row',async t=>{

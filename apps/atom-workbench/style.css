@@ -45,6 +45,9 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 .header .document-name { flex: 0 1 auto; min-width: 0; max-width: var(--document-name-max); }
 .header .document-name > .inline-name-text { flex: 0 1 var(--whole-width, auto); width: var(--whole-width, auto); }
 .header > .summary { flex: 1; min-width: 0; height: var(--control); align-content: center; padding-bottom: var(--cap-lift); color: var(--muted-ink); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The status line's numbers in tabular digits: the wall time and the countdown, each written last,
+ * change in place. */
+#status .strip-text { font-variant-numeric: tabular-nums; }
 
 /* ---------- a name edited where it stands (inline-name.ts) -------------- */
 /* The name and its edit share one box -- the field's edge and inner padding -- so editing moves nothing. */

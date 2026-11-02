@@ -47,7 +47,7 @@ import type {DurationUnit} from './types.js';
 import {patchLevelPopulations} from './level-population-dom.js';
 import {idMappingError} from './population-basis.js';
 import {installWindowChrome} from './window-chrome.js';
-import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,signedInteger,stateLabel,subscript,withUnit} from './format.js';
+import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,remainingWords,signedInteger,stateLabel,subscript,withUnit} from './format.js';
 import {solverText} from './solver-words.js';
 import {errorPercent,outsideRuns,partialSentence,partialShort,sampleErrors} from './accuracy.js';
 import {definitionNotes,modelNotes} from './model-notes.js';
@@ -95,8 +95,11 @@ type SolvedRecord={result:DynamicsResult;wallMs:number;horizon:number;checkpoint
 const trajectories=new CurrentResults<'trajectory',SolvedRecord>(),means=new CurrentResults<number,SolvedRecord>();
 /** A request: what it computes, the inputs it was made for and the stores' epochs then. */
 type Submitted={kind:SolveKind;inputs:SolveInputs;epochs:{trajectory:number;mean:number}};
-/** The running solve's latest checkpoint: never drawn; on 停止 (or a failure) it becomes the result. */
-let lastCheckpoint:(Submitted&{record:SolvedRecord})|undefined;
+/** The running solve's latest checkpoint and when it arrived (the status line counts its estimate of
+ * the time left down from then): never drawn; on 停止 (or a failure) it becomes the result. */
+let lastCheckpoint:(Submitted&{record:SolvedRecord;arrived:number})|undefined;
+/** The status line's next re-render while it counts a running solve's remaining time down. */
+let countdownTimer=0;
 const $=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T;
 const message=(error:unknown)=>error instanceof Error?error.message:String(error);
 
@@ -255,10 +258,12 @@ function solverStatus():[string,StatusWord,string?,string?]{
   // A cached mean is ready while the trajectory beside it is not (a motion trajectory has none).
   const meanReady=!motion&&(result??cached)?.mean.converged===true,subject=motion?'运动':'布居';
   if(error){const why=labelStateIds(solverText(error));return [record?.checkpoint==='failed'?`计算失败 · 显示最后的中间结果：${why}`:meanReady?`时间演化失败（长期布居已就绪）：${why}`:`${subject}计算失败：${why}`,'error'];}
-  // While a solve runs nothing new is drawn; the status says how far its checkpoints have come.
+  // While a solve runs nothing new is drawn; the status says how far its checkpoints have come and,
+  // last, the time its latest estimate leaves, counted down.
   if(currentSolverBusy()){
     const last=lastCheckpoint?.record.result,reached=last?.populationAccuracy?.estimatedMaximumError??(last?.mean.converged?last.mean.estimatedError:null);
-    return [reached!=null?`${subject}计算中… · 当前估计误差最大 ${errorPercent(reached)}`:meanReady?'长期布居已就绪 · 时间演化计算中…':solverQueued?`${subject}待计算`:`${subject}计算中…`,'task'];
+    const words=reached!=null?`${subject}计算中… · 当前估计误差最大 ${errorPercent(reached)}`:meanReady?'长期布居已就绪 · 时间演化计算中…':solverQueued?`${subject}待计算`:`${subject}计算中…`,left=remainingTime()?.words;
+    return [left?`${words} · ${left}`:words,'task'];
   }
   const stopped=stoppedHere();
   if(view==='space')return ['方向与偏振实时显示','idle'];
@@ -304,6 +309,12 @@ function bothSentence(result:DynamicsResult):string{
   const s=result.mean;
   return `${trajectoryMiss(result)} · ${meanSymbol(result)} 误差 ${errorPercent(s.estimatedError!)}（均超 ${errorPercent(POPULATION_TOLERANCE)}）`;
 }
+/** The running solve's remaining time: its latest checkpoint's estimate counted down since that
+ * checkpoint arrived; none before the first estimate. */
+function remainingTime():ReturnType<typeof remainingWords>|undefined{
+  const last=lastCheckpoint,estimate=last?.record.result.metrics.estimatedRemainingMs;
+  return last&&estimate!==undefined?remainingWords(estimate,performance.now()-last.arrived):undefined;
+}
 function refreshStatus():void{
   if(notice&&performance.now()>notice.until)notice=undefined;
   let [text,word,elapsed,full]=solverStatus();
@@ -311,8 +322,12 @@ function refreshStatus():void{
   if(notice)[text,word,elapsed,full]=[notice.text,notice.word,undefined,undefined];
   const tail=elapsed?` · ${elapsed}`:'';
   // A line said short keeps the full words in its tooltip.
-  strip.show(text+tail,word);if(full)setTitle(strip.root,full+tail);strip.setActionVisible(currentSolverBusy());
+  const busy=currentSolverBusy();
+  strip.show(text+tail,word);if(full)setTitle(strip.root,full+tail);strip.setActionVisible(busy);
   detailsCommand.hidden=!currentSolverError();
+  // The countdown says its next value when it changes, at least once a second.
+  clearTimeout(countdownTimer);const next=busy?remainingTime()?.changesInMs:undefined;
+  if(next!==undefined)countdownTimer=window.setTimeout(refreshStatus,Math.min(1000,next));
 }
 
 // ---------------------------------------------------------------- selection
@@ -916,7 +931,7 @@ function requestSolve():void{
   lastCheckpoint=undefined;
   const submittedOptions={...solveOptions(kind),onProgress:(result:DynamicsResult)=>{
     if(!stillCurrent())return;
-    lastCheckpoint={...submitted,record:{result,wallMs:performance.now()-submittedAt,horizon}};refreshStatus();
+    lastCheckpoint={...submitted,record:{result,wallMs:performance.now()-submittedAt,horizon},arrived:performance.now()};refreshStatus();
   }};
   solverTimer=window.setTimeout(async()=>{
     if(!stillCurrent())return;solverQueued=false;refreshPopulationOnly();const begin=performance.now();

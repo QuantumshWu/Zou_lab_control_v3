@@ -101,7 +101,9 @@ export interface DynamicsResult {
   /** The mean at every standard time T (MEAN_HORIZONS_US order), all from the one mean run;
    * the requested T's is `mean` itself. Absent when no mean was requested. */
   horizonMeans?:MeanResult[];
-  metrics:{totalMs:number};
+  /** The solve's wall time so far (ms), and on a checkpoint its run's estimate of the wall time
+   * left until the final result (ms; absent before the run's history supports one). */
+  metrics:{totalMs:number;estimatedRemainingMs?:number};
   validation:{maxTraceError:number;minPopulation:number};
   /** Estimated error of returned populations and all declared groups only. */
   populationAccuracy?:PopulationAccuracy;
