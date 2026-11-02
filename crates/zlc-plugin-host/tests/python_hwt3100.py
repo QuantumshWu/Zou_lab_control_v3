@@ -6,6 +6,8 @@ import threading
 import time
 import unittest
 
+import numpy as np
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'science' / 'src'))
 from zlc_atom.authoring import TuneRefused
 from zlc_atom.devices.waveform.witmotion_hwt3100 import modbus
@@ -30,14 +32,26 @@ class Sensor:
         self.refuse_baud_write = False  # Modbus exception on 0xD2
         self.ignore_baud_write = False  # echo, but stay on the old rate
         self.writes = []                # (register, value)
+        self.drop = 0                   # leave the next n requests unanswered
+        self.corrupt = 0                # corrupt the CRC of the next n replies
+        self.misaddress = 0             # answer the next n from address 0x50
+
+    def _once(self, name):
+        if getattr(self, name):
+            setattr(self, name, getattr(self, name) - 1)
+            return True
+        return False
 
     def answer(self, frame):
         if self.silent or len(frame) != 8 or modbus.crc16(frame[:-2]) != struct.unpack('<H', frame[-2:])[0]:
             return b''
         address, function, register, value = struct.unpack('>BBHH', frame[:6])
-        if address != self.address:
+        if address != self.address or self._once('drop'):
             return b''
         source = self.address if self.reply_from is None else self.reply_from
+        misaddressed = self._once('misaddress')
+        if misaddressed:
+            source = 0x50
         if function == 0x03:
             words = [self.registers.get(register + i, 0) & 0xFFFF for i in range(value)]
             reply = modbus.with_crc(struct.pack('>BBB', source, 3, 2 * value) + b''.join(struct.pack('>H', w) for w in words))
@@ -50,7 +64,7 @@ class Sensor:
                 self.baud = {v: k for k, v in modbus.BAUD_CODES.items()}[value]
         else:
             return b''
-        if self.corrupt_crc:
+        if self.corrupt_crc or (not misaddressed and self._once('corrupt')):
             reply = reply[:-1] + bytes([reply[-1] ^ 0xFF])
         return reply
 
@@ -240,33 +254,73 @@ class Source(unittest.TestCase):
         finally:
             device.close()
 
-    def test_lost_reply_during_capture_fails_it(self):
-        sensor = Sensor(baud=115200)
-        device = source(sensor)
+    def capture_around(self, sensor, upset, *, settle=20, timeout=1.0):
+        """Records of a capture in which ``upset(sensor)`` strikes after ``settle`` valid ones."""
+        device = source(sensor, timeout=timeout)
         try:
             device.arm(None, buffer_record_count=1000)
-            device.read_records(3, timeout=1.0, exact=True)
+            records = device.read_records(settle, timeout=1.0, exact=True)
+            upset(sensor)
+            records += device.read_records(30, timeout=2.0, exact=True)
+            device.finish_record_capture()
+            return records, device.capture_gaps, device.working_point().settings
+        finally:
+            device.close()
+
+    def invalid(self, records):
+        return [i for i, r in enumerate(records) if np.isnan(r.samples).all()]
+
+    def test_lost_replies_are_invalid_samples_and_the_capture_goes_on(self):
+        records, gaps, settings = self.capture_around(Sensor(baud=115200), lambda s: setattr(s, 'drop', 2))
+        missing = self.invalid(records)
+        self.assertEqual(missing, [20, 21])
+        self.assertEqual([r.source_ordinal for r in records], list(range(50)))
+        times = [r.time_seconds for r in records]
+        self.assertTrue(all(b > a for a, b in zip(times, times[1:])), 'real receive times, still advancing')
+        # each missing reply cost its 0.1 s timeout: the hole shows in time
+        self.assertGreater(times[21] - times[19], 0.19)
+        self.assertTrue(np.isfinite(records[22].samples).all(), 'valid again after the hole')
+        self.assertEqual(gaps['invalid'], {'no_reply': 2})
+        self.assertGreater(gaps['skipped_slots'], 0, 'slots spent waiting are counted, not invented')
+        self.assertEqual(settings['invalid_polls'].get('no_reply'), 2)
+
+    def test_crc_and_address_errors_are_invalid_samples(self):
+        def upset(sensor):
+            sensor.corrupt, sensor.misaddress = 1, 1
+        records, gaps, _ = self.capture_around(Sensor(baud=115200), upset)
+        self.assertEqual(len(self.invalid(records)), 2)
+        self.assertEqual(gaps['invalid'], {'crc': 1, 'address': 1})
+
+    def test_silent_beyond_the_record_timeout_fails_with_the_reason(self):
+        sensor = Sensor(baud=115200)
+        device = source(sensor, timeout=0.5)
+        try:
+            device.arm(None, buffer_record_count=1000)
+            device.read_records(5, timeout=1.0, exact=True)
             sensor.silent = True
-            with self.assertRaisesRegex(RuntimeError, 'poll failed during capture: no reply'):
-                device.read_records(1000, timeout=1.0, exact=True)
+            with self.assertRaisesRegex(RuntimeError, r'gave no valid reply for 0\.\d+ s, longer than the 0\.5 s record timeout; last: no reply'):
+                device.read_records(1000, timeout=3.0, exact=True)
             with self.assertRaises(RuntimeError):
                 device.finish_record_capture()
         finally:
             sensor.silent = False
             device.close()
 
-    def test_crc_error_during_capture_fails_it(self):
-        sensor = Sensor(baud=115200)
-        device = source(sensor)
-        try:
-            device.arm(None, buffer_record_count=1000)
-            sensor.corrupt_crc = True
-            with self.assertRaisesRegex(RuntimeError, 'CRC'):
-                device.read_records(1000, timeout=1.0, exact=True)
-            with self.assertRaisesRegex(RuntimeError, "CRC"):
-                device.finish_record_capture()
-        finally:
-            device.close()
+    def test_measurement_publishes_nan_samples_as_invalid(self):
+        from zlc_atom.devices.waveform.contract import WaveformRecord
+        from zlc_atom.devices.waveform.witmotion_hwt3100 import HWT3100_OUTPUTS
+        from zlc_atom.nodes.waveform_measurement.measurement import shot_snapshot
+        def published(values):
+            record = WaveformRecord(np.asarray([values], dtype=np.float32), 0, 1.0)
+            return [shot_snapshot(record, output=o, producer='hwt', generation='g', revision=1,
+                                  sample_interval_seconds=0.01, continuous=True) for o in HWT3100_OUTPUTS]
+        valid_field, valid_heading = published([1.0, 2.0, 3.0, 4.0])
+        lost_field, lost_heading = published([np.nan] * 4)
+        from zlc_data import expand_dataset_validity
+        mask = lambda snapshot: expand_dataset_validity(snapshot.block.validity, snapshot.block.schema)
+        self.assertTrue(mask(valid_field).all() and mask(valid_heading).all())
+        self.assertFalse(mask(lost_field).any() or mask(lost_heading).any())
+        self.assertEqual(valid_field.block.schema, lost_field.block.schema, 'a missing sample does not change the schema')
 
     def test_no_sensor_fails_open_cleanly(self):
         sensor = Sensor(baud=9600, address=0x50)

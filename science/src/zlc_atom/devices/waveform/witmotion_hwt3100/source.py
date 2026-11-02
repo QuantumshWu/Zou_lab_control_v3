@@ -15,13 +15,21 @@ switched if needed, or left where it answers with the reason recorded.
 
 The rate is a Device Control setting (default 100 Hz).  A rate the line
 cannot carry at the baud the sensor is on is refused with the arithmetic;
-it is never quietly slowed.  During a capture a missed reply, a damaged
-reply or a poll that fell behind its schedule fails the capture instead of
-leaving a hole in a record stream stamped at a fixed interval.
+it is never quietly slowed.
+
+A poll that gets no valid answer -- no reply, a CRC or address error, a
+Modbus exception -- is still a record: its values are NaN, which the waveform
+measurement publishes as INVALID (the Data validity mask), stamped when the
+poll gave up, so the hole is visible in time and in validity.  The schedule
+is kept: a poll that runs late is published late, with its real receive
+time, and slots the schedule had to skip to catch up are counted, not
+invented.  Only a sensor that gives no valid reply for longer than the
+record timeout fails a capture.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import logging
 import math
@@ -71,6 +79,9 @@ HWT3100_OUTPUTS = (
     WaveformOutput("heading", "deg", ("heading",), (3,)),
 )
 _COLUMNS = 4
+#: A poll with no valid answer: every column NaN.  The waveform measurement
+#: publishes non-finite samples as invalid (``shot_snapshot``'s validity).
+_MISSING = (math.nan,) * _COLUMNS
 
 
 @dataclass(frozen=True)
@@ -141,6 +152,14 @@ class Hwt3100WaveformSource:
         self._last_error = ""
         self._round_trip_max = 0.0
         self._reschedule = threading.Event()
+        #: Polls that gave no valid sample, by ``ModbusError.kind``, and
+        #: schedule slots skipped to catch up: since open, and in the
+        #: current (or last) capture.
+        self._invalid: Counter[str] = Counter()
+        self._skipped = 0
+        self._capture_invalid: Counter[str] = Counter()
+        self._capture_skipped = 0
+        self._last_valid_at = 0.0
         try:
             try:
                 outcome = establish(self._serial, config.address, config.baud)
@@ -186,14 +205,12 @@ class Hwt3100WaveformSource:
         request = modbus.read_request(self.config.address)
         period = 1.0 / self._rate
         due = time.perf_counter()
-        last_stamp: float | None = None
         try:
             while not self._stop.is_set():
                 if self._reschedule.is_set():
                     self._reschedule.clear()
                     period = 1.0 / self._rate
                     due = time.perf_counter()
-                    last_stamp = None
                 wait = due - time.perf_counter()
                 if wait > 0:
                     # time.sleep, not Event.wait: on Windows only sleep uses
@@ -207,35 +224,46 @@ class Hwt3100WaveformSource:
                         timeout=REPLY_TIMEOUT_SECONDS,
                     )
                     values = modbus.decode_field(data)
+                    failure = None
                 except ModbusError as error:
-                    self._last_error = str(error)
-                    if self._records.accepting:
-                        self._records.fail(RuntimeError(f"HWT3100 poll failed during capture: {error}"))
-                    due = max(due + period, time.perf_counter())
-                    last_stamp = None
-                    continue
+                    values = _MISSING
+                    failure = error
                 stamp = time.perf_counter()
                 received = time.time_ns()
-                self._round_trip_max = max(self._round_trip_max, stamp - sent)
-                self._first_reply.set()
                 with self._capture_lock:
-                    if self._records.accepting:
-                        if last_stamp is not None and stamp - last_stamp > 1.5 * period:
+                    capturing = self._records.accepting
+                    if failure is None:
+                        self._round_trip_max = max(self._round_trip_max, stamp - sent)
+                        self._last_valid_at = stamp
+                        self._first_reply.set()
+                    else:
+                        self._last_error = str(failure)
+                        self._invalid[failure.kind] += 1
+                        if capturing:
+                            self._capture_invalid[failure.kind] += 1
+                    if capturing:
+                        self._records.push(WaveformRecord(
+                            np.asarray(values, dtype=np.float32).reshape(1, _COLUMNS),
+                            self._records.produced_count, stamp, received,
+                        ))
+                        silent = stamp - self._last_valid_at
+                        if failure is not None and silent > self.config.timeout_seconds:
                             self._records.fail(RuntimeError(
-                                f"HWT3100 poll gap: {stamp - last_stamp:.4f} s between samples at "
-                                f"{self._rate:g} Hz (slowest round trip {self._round_trip_max * 1e3:.1f} ms)"
+                                f"the HWT3100 on {self.config.port} gave no valid reply for "
+                                f"{silent:.2f} s, longer than the {self.config.timeout_seconds:g} s "
+                                f"record timeout; last: {failure}"
                             ))
-                        else:
-                            self._records.push(WaveformRecord(
-                                np.asarray(values, dtype=np.float32).reshape(1, _COLUMNS),
-                                self._records.produced_count, stamp, received,
-                            ))
-                last_stamp = stamp
                 due += period
-                if time.perf_counter() - due > period:
-                    # Fell a whole period behind: resynchronise; a capture
-                    # sees it as a gap on the next sample.
-                    due = time.perf_counter()
+                behind = time.perf_counter() - due
+                if behind > period:
+                    # A whole slot or more behind: catch up to now rather than
+                    # firing the missed polls back to back; count what was skipped.
+                    skipped = int(behind // period)
+                    with self._capture_lock:
+                        self._skipped += skipped
+                        if self._records.accepting:
+                            self._capture_skipped += skipped
+                    due += skipped * period
         except BaseException as error:  # noqa: BLE001 -- surfaced to the reader of records
             self._last_error = str(error)
             self._records.fail(error)
@@ -274,6 +302,8 @@ class Hwt3100WaveformSource:
                 "rate_note": self._rate_note,
                 "max_poll_rate_hz": round(max_poll_rate_hz(self._baud), 3),
                 "slowest_round_trip_ms": round(self._round_trip_max * 1e3, 3),
+                "invalid_polls": dict(self._invalid),
+                "skipped_slots": self._skipped,
             },
             time_basis="host_receive",
         )
@@ -348,6 +378,8 @@ class Hwt3100WaveformSource:
         with self._settings_lock:
             with self._capture_lock:
                 self._records.arm(records, buffer_record_count=buffer_record_count)
+                self._capture_invalid = Counter()
+                self._capture_skipped = 0
                 if self._reader is None or not self._reader.is_alive():
                     self._records.fail(RuntimeError(
                         f"the HWT3100 poll thread is not running: {self._last_error}"
@@ -365,8 +397,22 @@ class Hwt3100WaveformSource:
 
     def finish_record_capture(self) -> WaveformCaptureTerminalRecord:
         with self._capture_lock:
-            produced = self._records.finish()
+            try:
+                produced = self._records.finish()
+            finally:
+                _LOG.info(
+                    "HWT3100 CAPTURE %d records, %d invalid %s, %d skipped slots device=%s",
+                    self._records.produced_count, sum(self._capture_invalid.values()),
+                    dict(self._capture_invalid), self._capture_skipped, self.identity,
+                )
             return WaveformCaptureTerminalRecord(produced, True, not self._records.pending_count, True)
+
+    @property
+    def capture_gaps(self) -> dict[str, object]:
+        """Invalid polls by kind and skipped slots in the current (or last) capture."""
+
+        with self._capture_lock:
+            return {"invalid": dict(self._capture_invalid), "skipped_slots": self._capture_skipped}
 
     def capture_state(self) -> bool:
         return self._records.armed

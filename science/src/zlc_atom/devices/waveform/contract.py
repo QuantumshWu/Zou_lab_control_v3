@@ -111,6 +111,9 @@ class WaveformRecord:
     device packet clock, continuous sample-clock count, or host receipt.
     A host receipt timestamp is not the instrument's trigger time. Only
     differences within one capture share a clock origin.
+
+    A sample the source could not obtain is NaN; the waveform measurement
+    publishes every non-finite sample as invalid.
     """
 
     samples: np.ndarray

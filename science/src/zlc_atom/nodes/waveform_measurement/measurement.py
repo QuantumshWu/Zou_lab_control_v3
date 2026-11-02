@@ -12,6 +12,8 @@ from functools import lru_cache
 from math import ceil
 from time import monotonic, time_ns
 
+import numpy as np
+
 from zlc_data import COMPONENT, READOUT_EVENT, SAMPLE_TIME, AxisSpec, DatasetSchema, DomainSpec, OwnedSnapshot
 from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput
 
@@ -88,7 +90,14 @@ def shot_snapshot(
     sample_interval_seconds: float,
     continuous: bool = False,
 ) -> OwnedSnapshot:
-    """Continuous samples are Point rows; triggered samples stay in the cell."""
+    """Continuous samples are Point rows; triggered samples stay in the cell.
+
+    A non-finite sample is one the source could not obtain (a polled sensor
+    that did not answer writes NaN): it is published INVALID through the
+    Data validity mask, as other producers mark theirs (``np.isfinite``).
+    The mask is always present, so a run's schema does not change on the
+    first missing sample.
+    """
 
     columns = output.columns
     first = columns[0]
@@ -122,6 +131,7 @@ def shot_snapshot(
         value_unit=output.unit,
         generation=str(getattr(generation, "value", generation)),
         revision=int(revision),
+        validity=np.isfinite(values),
     )
 
 
