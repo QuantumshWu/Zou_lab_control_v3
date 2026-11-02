@@ -30,9 +30,11 @@
 //!
 //! Every checkpoint of the core's run is streamed first (`progress`: true) in
 //! the same shape, with the core's estimate of the remaining wall time
-//! (`diagnostics.estimatedRemainingMs`, ms) when it has one.
+//! (`diagnostics.estimatedRemainingMs`, ms) when it has one, and
+//! `diagnostics.estimatedRemainingAtMost`: true while that is the time to the end
+//! and the continuation may still stop the run earlier.
 use crate::{Model,Operator,Options,lattice_core_adapter};
-use atom_motion_core::{Beam,Complex,Matrix,Request,Solution,STATES};
+use atom_motion_core::{Beam,Complex,Matrix,Remaining,Request,Solution,STATES};
 use atom_population_core::Lapack;
 use atom_population_core::lattice::accuracy::POPULATION_TOLERANCE;
 use atom_population_core::lattice::pipeline::{LONGEST_TIME_US,MOST_SAMPLES};
@@ -124,8 +126,8 @@ fn check(solution:&Solution,times:usize)->Result<(),String>{
 }
 
 /// The result in the one contract; `remaining` marks a streamed checkpoint (with the core's
-/// estimate of the wall time to the final result, ms, when it has one).
-fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,groups:&[String],remaining:Option<Option<f64>>,started:Instant)->Result<Value,String>{
+/// estimate of the wall time to the final result when it has one).
+fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,groups:&[String],remaining:Option<Option<Remaining>>,started:Instant)->Result<Value,String>{
     let times=request.times_us.len();check(solution,times)?;
     let initial:Vec<f64>=(0..STATES).map(|i|request.initial_density[i*STATES+i].re).collect();
     let(trace,initial_error)=lattice_core_adapter::row_errors(&solution.populations,&initial)?;
@@ -145,7 +147,8 @@ fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,g
         .unwrap_or_else(||format!("The error bound is {estimated:.2e} against the tolerance {POPULATION_TOLERANCE:e}")));}
     if let Some(remaining)=remaining{
         result["progress"]=json!(true);
-        if let Some(ms)=remaining.filter(|ms|ms.is_finite()){result["diagnostics"]["estimatedRemainingMs"]=json!(ms.max(0.));}
+        if let Some(r)=remaining.filter(|r|r.ms.is_finite()){result["diagnostics"]["estimatedRemainingMs"]=json!(r.ms.max(0.));
+            if r.at_most{result["diagnostics"]["estimatedRemainingAtMost"]=json!(true);}}
     }
     Ok(result)
 }
@@ -163,7 +166,7 @@ pub fn solve(model:&Model,motion:&MotionModel,options:&Options,publish:&mut dyn 
     let(_,groups)=lattice_core_adapter::groups(model)?;let names:Vec<String>=groups.into_iter().map(|g|g.name).collect();
     let request=request(model,motion,options)?;
     let mut failure:Option<String>=None;
-    let mut observe=|checkpoint:&Solution,remaining:Option<f64>|{if failure.is_some(){return;}
+    let mut observe=|checkpoint:&Solution,remaining:Option<Remaining>|{if failure.is_some(){return;}
         match result(model,motion,&request,checkpoint,&names,Some(remaining),started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
     let solution=atom_motion_core::solve(&request,&mut observe)?;
     if let Some(e)=failure{return Err(e);}

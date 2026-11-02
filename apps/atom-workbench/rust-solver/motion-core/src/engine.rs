@@ -85,16 +85,17 @@
 //! the change it measures is mostly the older prediction's error, the newer one's being smaller.
 //!
 //! # Remaining time
-//! A cost model: the run's wall time per simulated us and grid point at the current dt (the
-//! companion's apart), measured from the first period, times the grid and the simulated time left,
-//! plus each checkpoint's own; the time left runs to the end, or to the acceptance the changes'
-//! geometric decrease since their largest projects (they rise while the continuation learns the
-//! slow modes, then fall; a least-squares line through their logarithms, from two changes after the
-//! largest on). Replayed on TW2 and TW1, the projection is 0.4-1.8× the time actually left; before
-//! it, the estimate to the end is 2-4×.
+//! A cost model: the run's wall time per simulated us and grid point at the current dt over the last
+//! checkpoint interval (the companion's apart; from the first period on), times the grid and the
+//! simulated time left, plus each checkpoint's own. The time left runs to the end, or to the
+//! acceptance the changes' geometric decrease since their largest projects (they rise while the
+//! continuation learns the slow modes, then fall; a least-squares line through their logarithms,
+//! from two changes after the largest on). Replayed on TW2 and TW1, the projection is 0.4-1.8× the
+//! time actually left. Before it the estimate runs to the end, an upper bound (`Remaining::at_most`;
+//! the time actually left was a quarter to a half of it).
 use crate::ground::{Ground,Local,dipole_kernel};
 use crate::linear::{Dense,Lu};
-use crate::{Complex,Distributions,Request,Solution,STATES};
+use crate::{Complex,Distributions,Remaining,Request,Solution,STATES};
 use atom_population_core::{Complex64,Lapack};
 use rayon::prelude::*;
 use rustfft::{Fft,FftPlanner};
@@ -977,7 +978,7 @@ impl<'a> Engine<'a>{
     /// first checkpoint interval a companion runs with 2 dt; at its end the two runs' outputs and
     /// continuations give dt's error over the run (Richardson): above the share dt halves and the
     /// run starts again, below an eighth of it dt doubles.
-    pub fn run(&mut self,request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,String>{
+    pub fn run(&mut self,request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<Remaining>))->Result<Solution,String>{
         let started=Instant::now();
         let times=&request.times_us;let n=times.len();let end=times[n-1];let tolerance=request.tolerance;let period=self.period;
         let groups=groups(&request.states);let listed=listed(n);
@@ -1004,8 +1005,8 @@ impl<'a> Engine<'a>{
             // Every checkpoint's prediction of the outputs (without its distributions).
             let mut history:Vec<Prediction>=vec![];
             let mut bias=StepError::default();let mut periods=0;
-            // The cost model of the remaining time: the run's wall time per simulated us and grid point at
-            // the current dt (the companion's apart), and a checkpoint's own.
+            // The cost model of the remaining time: the run's wall time per simulated us and grid point over
+            // the last interval at the current dt (the companion's apart), and a checkpoint's own.
             let(mut rate,mut rate_steps,mut per_checkpoint)=((0_f64,0_f64),self.steps,0_f64);
             while last.t<end-1e-9*period{
                 let(began,from)=(Instant::now(),last.t);
@@ -1026,11 +1027,13 @@ impl<'a> Engine<'a>{
                 if grid!=self.grid{trace!("t {t:.1} regrid {:?} -> {grid:?} (edge {edge:.2e})",self.grid);
                     match companion.as_mut(){Some((state,_))=>self.resize(grid,&mut [state])?,None=>self.resize(grid,&mut [])?}}
                 let finished=last.t>=end-1e-9*period;
-                // The remaining wall time to `expected` (us): the periods at the measured rate, the checkpoints at theirs.
-                let remaining=move|engine:&Self,expected:f64,t:f64|(expected-t).max(0.)*(rate.0/rate.1.max(f64::MIN_POSITIVE)*engine.grid.points() as f64
-                    +per_checkpoint/(CHECKPOINT_PERIODS as f64*period));
+                // The remaining wall time to `expected` (us): the periods at the measured rate, the checkpoints at
+                // theirs; at most that while it is the end and an acceptance (two checkpoints on) may come first.
+                let remaining=move|engine:&Self,expected:f64,t:f64|Remaining{
+                    ms:(expected-t).max(0.)*(rate.0/rate.1.max(f64::MIN_POSITIVE)*engine.grid.points() as f64+per_checkpoint/(CHECKPOINT_PERIODS as f64*period))*1e3,
+                    at_most:expected>=end&&end-t>2.*CHECKPOINT_PERIODS as f64*period};
                 // An estimate from the start: after the first period, to the end.
-                if periods==1&&!finished{let solution=self.assemble(request,&record,&last,None,1.,&listed,&method);checkpoint(&solution,Some(remaining(self,end,last.t)*1e3));}
+                if periods==1&&!finished{let solution=self.assemble(request,&record,&last,None,1.,&listed,&method);checkpoint(&solution,Some(remaining(self,end,last.t)));}
                 if !finished&&periods%CHECKPOINT_PERIODS!=0{continue;}
                 let checkpoint_began=Instant::now();
                 // A checkpoint: the continuation, compared with the previous one and with the outputs since.
@@ -1083,7 +1086,9 @@ impl<'a> Engine<'a>{
                     if slope<0.{let now=ym+slope*(n-1.-xm);(t+(now.max(0.)/-slope).ceil()*CHECKPOINT_PERIODS as f64*period).min(end)}else{end}
                 }else{end};
                 per_checkpoint=checkpoint_began.elapsed().as_secs_f64();
-                checkpoint(&solution,Some(remaining(self,expected,t)*1e3));
+                checkpoint(&solution,Some(remaining(self,expected,t)));
+                // The next estimate from the next interval's periods alone: the machine's load moves.
+                rate=(0.,0.);
             }
             let prediction=if accepted{previous.as_ref()}else{None};
             return Ok(self.assemble(request,&record,&last,prediction,bias.populations,&listed,&method));

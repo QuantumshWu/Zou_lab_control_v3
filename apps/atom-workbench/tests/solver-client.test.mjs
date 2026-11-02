@@ -110,6 +110,11 @@ test('a checkpoint may carry its run\'s estimate of the time left; a final resul
    assert.equal(read(left(make(),0)).metrics.estimatedRemainingMs,0,`${what}: the run stops there`);
    const final=left(make(),800);delete final.progress;assert.throws(()=>read(final),/最终结果带有剩余时间估计/,`${what}: a final result`);
    for(const bad of [-1,NaN,Infinity,null,'800'])assert.throws(()=>read(left(make(),bad)),/求解结果不完整或无效：剩余时间估计/,`${what}: ${bad}`);
+   // An upper bound (the run may stop earlier) is marked, only with an estimate.
+   const bound=left(make(),90000);bound.diagnostics.estimatedRemainingAtMost=true;assert.equal(read(bound).metrics.estimatedRemainingAtMost,true,`${what}: an upper bound`);
+   assert.equal(read(left(make(),900)).metrics.estimatedRemainingAtMost,undefined,`${what}: an estimate`);
+   for(const bad of [false,1,'true'])assert.throws(()=>read(Object.assign(left(make(),900),{diagnostics:{...left(make(),900).diagnostics,estimatedRemainingAtMost:bad}})),/剩余时间估计/,`${what}: at most ${bad}`);
+   const alone=make();alone.diagnostics.estimatedRemainingAtMost=true;assert.throws(()=>read(alone),/剩余时间估计/,`${what}: a bound without an estimate`);
  }
 });
 test('a mean request streams checkpoints of its single t = 0 row',async t=>{
