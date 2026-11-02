@@ -54,7 +54,7 @@ struct Model {
     drives: Vec<Drive>,
     #[serde(default)]
     frequency_coordinates:Option<FrequencyCoordinates>,
-    /// 1D motion: the atom moving along one lab axis (motion_core_adapter).
+    /// 1D motion: the atom in a tweezer moving radially along one lab axis (motion_core_adapter).
     #[serde(default)]
     motion:Option<motion_core_adapter::MotionModel>,
 }
@@ -235,7 +235,7 @@ mod tests {
     /// The probe-only fixture without its probe, with a motion block: no
     /// beam, H0 the fixture's diagonal, the spherical collapse operators
     /// standing in for the Cartesian ones; the atom starts in a ground state.
-    fn free_flight_model() -> Value {
+    fn motion_model() -> Value {
         let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/probe_only_short.json")).unwrap();
         let mut model = fixture["model"].clone();
         let diagonal: Vec<Value> = model["hReal"].as_array().unwrap().iter().enumerate().map(|(k, x)| if k % 33 == 0 { x.clone() } else { json!(0.) }).collect();
@@ -247,32 +247,18 @@ mod tests {
             "beams":[],"emission":model["collapse"].clone()});
         model
     }
+    /// A motion request is a trajectory alone. Without light nothing confines the atom; with
+    /// light the engine is not implemented yet.
     #[test]
-    fn a_motion_request_without_beams_is_exact_free_flight() {
-        let model = free_flight_model();
-        let initial: Vec<f64> = (0..32).map(|i| model["initialReal"][i * 33].as_f64().unwrap()).collect();
-        let out = request(json!({"id":5,"modelSchema":FULL_MODEL_SCHEMA,"model":model,"options":{"durationUs":10.,"samples":5,"includeMean":false}}));
-        let result = &out["result"];
-        assert!(out["error"].is_null(), "{out}");
-        assert_eq!(result["timesUs"], json!([0., 2.5, 5., 7.5, 10.]));
-        assert!(result["populations"].as_array().unwrap().iter().all(|row| row == &json!(initial)));
-        assert_eq!(result["populationAccuracy"]["status"], json!("estimated-converged"));
-        assert_eq!(result["diagnostics"]["engine"], json!("rust-motion-core"));
-        assert!(result.get("meanHorizons").is_none());
-        let motion = &result["motion"];
-        assert_eq!((motion["axis"].clone(), motion["temperatureUK"].clone(), motion["meanVelocityMps"].clone()), (json!("z"), json!(vec![30.; 5]), json!(vec![0.; 5])));
-        assert_eq!(motion["momentum"]["samples"], json!([0, 4]));
-        for p in motion["momentum"]["probabilities"].as_array().unwrap() {
-            assert!((p.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).sum::<f64>() - 1.).abs() < 1e-12);
-        }
-    }
-    #[test]
-    fn a_motion_request_with_a_beam_or_a_mean_is_refused() {
-        let mut model = free_flight_model();
+    fn a_motion_request_is_refused_until_the_engine_is_implemented() {
+        let mut model = motion_model();
         let solve = |model: &Value, options: Value| request(json!({"id":6,"modelSchema":FULL_MODEL_SCHEMA,"model":model,"options":options}))["error"].as_str().unwrap_or("").to_owned();
         assert!(solve(&model, json!({"durationUs":10.,"samples":5})).contains("a trajectory alone"));
+        let trajectory = json!({"durationUs":10.,"samples":5,"includeMean":false});
+        assert_eq!(solve(&model, trajectory.clone()), atom_motion_core::NO_TRAP);
         let zero = json!({"real":vec![0.;1024],"imag":vec![0.;1024]});
-        model["motion"]["beams"] = json!([{"id":"cooling","axial":1,"waveNumberPerUm":8.05,"frequencyIndex":[0],"coupling":zero,"counterCoupling":zero}]);
-        assert_eq!(solve(&model, json!({"durationUs":10.,"samples":5,"includeMean":false})), atom_motion_core::NOT_IMPLEMENTED);
+        model["motion"]["beams"] = json!([{"id":"tweezer","name":"光镊","direction":[0.,1.,0.],"waveNumberPerUm":7.37,"waistUm":1.2,"intensityMWcm2":1.77e8,
+            "frequencyIndex":[0],"coupling":zero,"counterCoupling":zero}]);
+        assert_eq!(solve(&model, trajectory), atom_motion_core::NOT_IMPLEMENTED);
     }
 }

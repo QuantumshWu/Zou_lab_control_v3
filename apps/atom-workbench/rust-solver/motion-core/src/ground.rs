@@ -1,35 +1,40 @@
-//! The moving atom's ground manifold with the excited states eliminated: the generator of the
-//! ground-manifold matrix Wigner method, to first order in the Doppler and recoil shifts (GMW-o1).
+//! The atom's ground manifold with the excited states eliminated: the generator of its internal
+//! state at any position x on the motion line, to first order in the Doppler and recoil shifts.
 //!
 //! # Elimination
-//! The lattice phase is θ = k_ref x, k_ref the wave number of the first beam along the axis (of the
-//! first beam when none is), and a beam's direction is s = `Beam::axial`. The beams of one frequency
-//! (equal `Beam::frequency_index`) form a carrier c at δ_c = 2π(ν_c − ν_frame); V_{c,s} sums its
-//! couplings of direction s, which drive V_{c,s} e^{isθ} e^{−iδ_c t} + h.c. With the ground energies
-//! E_b (H0 is diagonal in the model basis) and the excited states' non-Hermitian Hamiltonian
-//! K = H0_ee − (i/2) D, D = Σ_a C_a†C_a|_ee, the excited states and the optical coherences follow the
-//! ground states adiabatically, column by column:
+//! The beams of one frequency (equal `Beam::frequency_index`) form a carrier c at
+//! δ_c = 2π(ν_c − ν_frame). Each beam l keeps its own coupling V_l at the atom and its own
+//! amplitude a_l(x) on the line (`Beam::amplitude`: its axial wave number, and a focused beam's
+//! Gaussian profile), so carrier c drives V_c(x) = Σ_{l∈c} a_l(x) V_l e^{−iδ_c t} + h.c. With the
+//! ground energies E_b (H0 is diagonal on them) and the excited states' non-Hermitian
+//! Hamiltonian K = H0_ee − (i/2) D, D = Σ_a C_a†C_a|_ee, the excited states and the optical
+//! coherences follow the ground states adiabatically, beam by beam and column by column
+//! (`Elimination`):
 //!
 //! ```text
-//! R_{c,s}[:,b] = (K − E_b − δ_c)⁻¹ V_{c,s}[:,b]        R2_{c,s}[:,b] = (K − E_b − δ_c)⁻² V_{c,s}[:,b]
+//! R_l[:,b] = (K − E_b − δ_c)⁻¹ V_l[:,b]        R2_l[:,b] = (K − E_b − δ_c)⁻² V_l[:,b]        R_c(x) = Σ_{l∈c} a_l(x) R_l
 //! ```
 //!
-//! and the ground density evolves under the Reiter–Sørensen Lindblad generator, a function of θ:
+//! and the ground density evolves at x under the Reiter–Sørensen Lindblad generator (`Local`)
 //!
 //! ```text
 //! dρ/dt = −i(H_eff ρ − ρ H_eff†) + Σ_j L_j ρ L_j†,     H_eff = H0g + H_ls − (i/2) Γ,
-//! H_ls = −Herm Σ_c V_c(θ)† R_c(θ),   Γ = Σ_c R_c(θ)† D R_c(θ) = Σ_j L_j† L_j,   L_{a,c} = C_a R_c(θ),
+//! H_ls = −Herm Σ_c V_c(x)† R_c(x),   Γ = Σ_c R_c(x)† D R_c(x) = Σ_j L_j† L_j,   L_{a,c} = C_a R_c(x).
 //! ```
 //!
-//! R_c(θ) = Σ_s R_{c,s} e^{isθ}, V_c(θ) likewise. The photon of jump (a, c) is polarized along a and
-//! kicks the atom by −u κ_c ħk_ref along the axis, κ_c = k_c/k_ref and u distributed by the dipole
-//! pattern of a (lib.rs). Readout: the bare ground density is ρ − ½{Y, ρ}, Y = Σ_c R_c†R_c, and an
-//! excited state's population is tr(E_i ρ), E_i = Σ_c R_c†|i⟩⟨i|R_c (Σ_i E_i = Y).
+//! The photon of jump (a, c) is polarized along a and has carrier c's wave number: it kicks the
+//! atom by −u ħk_c along the axis, u distributed by the dipole pattern of a (lib.rs). Readout:
+//! the bare ground density is ρ − ½{Y, ρ}, Y = Σ_c R_c†R_c, and an excited state's population is
+//! tr(E_i ρ), E_i = Σ_c R_c†|i⟩⟨i|R_c (Σ_i E_i = Y).
+//!
+//! An `Elimination` belongs to one H0 -- K and E_b -- and the generator at x is evaluated with any
+//! of them, so a position-dependent H0 needs only its own eliminations.
 //!
 //! # First order in the Doppler and recoil shifts
-//! A ground momentum q (ħk_ref) shifts carrier c's excited state of direction s by the kinetic energy
-//! w_{c,s}(q) = w_r (2 s κ_c q + s² κ_c²), w_r = ħk_ref²/2m; to first order R_{c,s} → R_{c,s} − w_{c,s} R2_{c,s}
-//! (`Ground::first_order`), and `Ground::response` gives the shifted response to all orders.
+//! Absorbing from beam l raises the atom's momentum by ħk_l along the axis (k_l its axial wave
+//! number), which shifts the excited state by the kinetic energy w_l = k_l p/m + ħk_l²/2m; to
+//! first order R_l → R_l − w_l R2_l (`Ground::first_order`), and `Ground::response` gives the
+//! shifted response to all orders.
 //!
 //! # Secular step
 //! In the frames of the hyperfine blocks, each rotating at its centroid ν_F, a term absorbing from
@@ -40,43 +45,19 @@
 //! A dropped term of coupling |g| leaves a micromotion of relative size ε = |g|/|Ω|; the step is
 //! taken when every ε is at most the elimination's own expansion parameter
 //! η = ‖H_ls − iΓ/2‖ / min σ_min(K − E_b − δ_c), so it is never the dominant error. Otherwise the beams
-//! form a Raman-resonant Λ scheme (gray molasses, EIT) and are refused by name. A norm over θ is
-//! bounded by the sum of its harmonics' spectral norms.
+//! form a Raman-resonant Λ scheme (gray molasses, EIT) and are refused by name. Norms over the
+//! line are bounded by the sums of the beams' terms, as |a_l(x)| ≤ 1.
 //!
 //! # Approximations and their criteria
 //! - The zeroth-order elimination: η ≪ 1. Its error is the saturation, ≈ 2 p_e locally (the
 //!   scattering rate +1 to +2.4 % in 1D PGC).
 //! - First order in the Doppler shift: (kv / σ_min)² ≪ 1; `response` is exact.
 //! - The secular step: ε ≤ η, enforced.
-//! - One lattice wave number: the beams along the axis are on the D2 line, |Δk|/k ≤ 2e-5; κ_c keeps
-//!   each carrier's photon momentum.
 //! - An emitted photon has its carrier's wave number: ≤ 1e-7 on the D2 line.
-//! - The counter-rotating couplings are dropped (optical RWA): Ω/ω ≈ 3e-9.
+//! - The counter-rotating couplings are dropped (optical RWA).
 use crate::linear::{Dense,Lu};
-use crate::{Complex,Request,STATES};
+use crate::{Beam,Complex,Matrix,Request,STATES};
 use std::f64::consts::TAU;
-
-/// ħ (J s): h/2π, h exact in the SI.
-const HBAR:f64=1.0545718176461565e-34;
-
-/// An operator on the ground states as a function of the lattice phase: Σ_m terms[m + 2] e^{imθ},
-/// m = −2..=2, the difference of two directions. A jump's L(θ) = Σ_s L[s] e^{isθ} has m = s.
-#[derive(Clone,Debug,PartialEq)]
-pub struct Harmonics(pub [Dense;5]);
-impl Harmonics{
-    fn zeros(n:usize)->Harmonics{Harmonics(std::array::from_fn(|_|Dense::zeros(n,n)))}
-    pub fn get(&self,m:i8)->&Dense{&self.0[(m+2) as usize]}
-    fn add(&mut self,m:i8,z:Complex,term:&Dense){self.0[(m+2) as usize].add_scaled(z,term);}
-    /// The operator at θ.
-    pub fn at(&self,theta:f64)->Dense{
-        let mut out=Dense::zeros(self.0[0].rows,self.0[0].cols);
-        for m in -2..=2{out.add_scaled(Complex::cis(m as f64*theta),self.get(m));}
-        out
-    }
-    /// Σ_m ‖term_m‖₂, a bound on ‖op(θ)‖₂ at every θ.
-    pub fn bound(&self)->f64{self.0.iter().map(Dense::spectral_norm).sum()}
-    fn map(&self,f:impl Fn(&Dense)->Dense)->Harmonics{Harmonics(std::array::from_fn(|k|f(&self.0[k])))}
-}
 
 /// A hyperfine block of the ground manifold.
 #[derive(Clone,Debug)]
@@ -84,61 +65,69 @@ pub struct Block{
     pub f:u8,
     /// Its states, as positions in `Ground::ground_states`.
     pub states:Vec<usize>,
-    /// ν_F, the centroid of its energies: the block's frame (rad/us).
+    /// ν_F, the centroid of its energies in the request's H0: the block's frame (rad/us).
     pub frame:f64,
 }
-
 /// The beams of one frequency.
 #[derive(Clone,Debug)]
 pub struct Carrier{
-    /// Its beams (indices into `Request::beams`).
+    /// Its beams (indices into `Ground::beams`).
     pub beams:Vec<usize>,
     /// δ_c = 2π(ν_c − ν_frame) (rad/us).
     pub detuning:f64,
-    /// κ_c = k_c/k_ref.
-    pub kappa:f64,
-    /// Its travelling waves, one per direction, by increasing s.
-    pub waves:Vec<Wave>,
-    /// Absorption from one wave and stimulated emission into another, every ordered pair.
-    pub pairs:Vec<Pair>,
+    /// Its photons' wave number |k| (rad/um).
+    pub wave_number:f64,
 }
-/// The beams of one carrier and direction s.
-#[derive(Clone,Debug)]
-pub struct Wave{
-    pub axial:i8,
-    /// V_{c,s}, excited ← ground (rad/us).
-    pub coupling:Dense,
-    /// R_{c,s} and R2_{c,s}, excited ← ground (dimensionless and us).
-    pub response:Dense,
-    pub derivative:Dense,
-}
-/// The secular parts of X = V_{c,s′}† R_{c,s} and P = V_{c,s′}† R2_{c,s} (harmonic m = s − s′):
-/// H_ls = −Herm Σ X e^{imθ}, and its first-order shift +Herm Σ w_{c,s} P e^{imθ}.
-#[derive(Clone,Debug)]
-pub struct Pair{pub emitted:i8,pub absorbed:i8,pub x:Dense,pub p:Dense}
-
 /// A quantum jump: a photon polarized along `axis` scattered from carrier `carrier`, the atom going
-/// from block `from` to block `to`.
-#[derive(Clone,Debug)]
+/// from block `from` to block `to`. Its operator at x is `Local::jumps`.
+#[derive(Clone,Debug,PartialEq)]
 pub struct Jump{
     /// 0 and 1, the axes perpendicular to the motion axis; 2, the motion axis (`Request::emission`).
     pub axis:usize,
     pub carrier:usize,
     pub from:usize,
     pub to:usize,
-    /// κ_c: the photon carries κ_c ħk_ref.
-    pub kappa:f64,
-    /// L[s] = P_to C_a R_{c,s} P_from and its first-order derivative P_to C_a R2_{c,s} P_from (harmonic s).
-    pub operator:Harmonics,
-    pub derivative:Harmonics,
 }
+
+/// The elimination for one H0: K and E_b, and every beam's excited response.
+#[derive(Clone,Debug)]
+pub struct Elimination{
+    /// E_b, the ground states' energies (rad/us), and H0g = diag(E_b − ν_F(b)) in the blocks' frames.
+    pub energies:Vec<f64>,
+    pub hamiltonian:Dense,
+    /// K, the excited states' non-Hermitian Hamiltonian (rad/us).
+    pub excited_hamiltonian:Dense,
+    /// Per beam, R_l and R2_l, excited ← ground (dimensionless and us).
+    pub responses:Vec<Dense>,
+    pub derivatives:Vec<Dense>,
+}
+
+/// The generator at one position: the secular parts of H_ls, Γ, Y and E_i (per excited state, in
+/// the order of `Ground::excited_states`), and the jumps L_j (in the order of `Ground::jumps`).
+#[derive(Clone,Debug)]
+pub struct Local{
+    pub light_shift:Dense,
+    pub scattering:Dense,
+    pub admixture:Dense,
+    pub excited_readout:Vec<Dense>,
+    pub jumps:Vec<Dense>,
+}
+impl Local{
+    /// H_eff = H0g + H_ls − (i/2) Γ, with the elimination's H0g.
+    pub fn effective_hamiltonian(&self,elimination:&Elimination)->Dense{
+        let mut h=elimination.hamiltonian.clone();h.add_scaled(Complex::ONE,&self.light_shift);h.add_scaled(Complex::new(0.,-0.5),&self.scattering);h
+    }
+}
+/// The first-order increments of the generator at one position for excited-energy shifts w_l.
+#[derive(Clone,Debug)]
+pub struct FirstOrder{pub light_shift:Dense,pub scattering:Dense,pub jumps:Vec<Dense>}
 
 /// The secular step's report.
 #[derive(Clone,Debug)]
 pub struct Secular{
     /// η = scale / pole, the elimination's expansion parameter.
     pub eta:f64,
-    /// Σ_m ‖H_ls[m] − (i/2) Γ[m]‖₂, the scale of the light-induced ground dynamics (rad/us).
+    /// A bound on ‖H_ls − (i/2) Γ‖ over the line, the scale of the light-induced ground dynamics (rad/us).
     pub scale:f64,
     /// The nearest excited pole: min σ_min(K − E_b − δ_c) over the coupled (c, b) (rad/us).
     pub pole:f64,
@@ -164,40 +153,26 @@ pub struct Rotating{
     pub micromotion:f64,
 }
 
-/// The first-order increments of the generator for excited-energy shifts w_{c,s}.
-#[derive(Clone,Debug)]
-pub struct FirstOrder{pub light_shift:Harmonics,pub scattering:Harmonics,pub jumps:Vec<Harmonics>}
-
-/// The eliminated ground-manifold generator of a request: the operators act on the ground states in
-/// the order of `ground_states`, the excited ones in the order of `excited_states`; rates in rad/us,
-/// jumps in 1/sqrt(us).
+/// The eliminated ground-manifold generator of a request, apart from H0: the operators act on the
+/// ground states in the order of `ground_states`, the excited ones in the order of
+/// `excited_states`; rates in rad/us, jumps in 1/sqrt(us).
 #[derive(Clone,Debug)]
 pub struct Ground{
     /// The request's ground and excited states (indices into `Request::states`).
     pub ground_states:Vec<usize>,
     pub excited_states:Vec<usize>,
-    /// E_b, the ground states' energies in the frame (rad/us).
-    pub energies:Vec<f64>,
     /// The hyperfine blocks, by increasing F, and each ground state's block.
     pub blocks:Vec<Block>,
     pub block:Vec<usize>,
-    /// H0g = diag(E_b − ν_F(b)), the ground Hamiltonian in the blocks' frames.
-    pub hamiltonian:Dense,
-    /// K, the excited states' non-Hermitian Hamiltonian, and C_a (ground ← excited) on the request's axes.
-    pub excited_hamiltonian:Dense,
+    /// D = Σ_a C_a†C_a on the excited states, and C_a (ground ← excited) on the request's axes.
+    pub decay:Dense,
     pub emission:[Dense;3],
-    /// k_ref (rad/um) and w_r = ħk_ref²/2m (rad/us).
-    pub wave_number:f64,
-    pub recoil:f64,
+    /// The request's beams, and each one's V_l (excited ← ground at the atom, rad/us).
+    pub beams:Vec<Beam>,
+    pub couplings:Vec<Dense>,
     pub carriers:Vec<Carrier>,
-    /// H_ls, Γ and Y: their secular parts.
-    pub light_shift:Harmonics,
-    pub scattering:Harmonics,
-    pub admixture:Harmonics,
-    /// E_i per excited state (in the order of `excited_states`): their secular parts.
-    pub excited_readout:Vec<Harmonics>,
+    /// Every jump: per carrier, axis and pair of blocks.
     pub jumps:Vec<Jump>,
-    pub secular:Secular,
 }
 
 /// The manifold and F of a state label `manifold-F-m`.
@@ -218,187 +193,185 @@ fn denominator(k:&Dense,shift:f64)->Result<Lu,String>{
     let mut a=k.clone();for i in 0..a.rows{a[(i,i)]+=Complex::new(shift,0.);}
     Lu::new(&a).ok_or_else(||"The excited states' resolvent is singular".to_string())
 }
+/// Σ_l weight_l m_l over the given beams.
+fn combine(beams:&[usize],weights:&[Complex],matrices:&[Dense])->Dense{
+    let mut out=Dense::zeros(matrices[0].rows,matrices[0].cols);for &l in beams{out.add_scaled(weights[l],&matrices[l]);}out
+}
+/// −Herm(m) = −(m + m†)/2.
+fn negative_hermitian_part(m:&Dense)->Dense{let mut h=m.scaled(Complex::new(-0.5,0.));h.add_scaled(Complex::new(-0.5,0.),&m.adjoint());h}
 
 impl Ground{
-    /// The generator of a request, or why it has none: a Raman-resonant Λ scheme is refused (secular step).
+    /// The generator of a request, or why it has none: a Raman-resonant Λ scheme is refused (the
+    /// secular step at the request's H0).
     pub fn new(request:&Request)->Result<Ground,String>{
         let levels=request.states.iter().map(|s|level(s)).collect::<Result<Vec<_>,_>>()?;
         let ground_states:Vec<usize>=(0..STATES).filter(|&i|levels[i].0=="ground").collect();
         let excited_states:Vec<usize>=(0..STATES).filter(|&i|levels[i].0!="ground").collect();
         let(ng,ne)=(ground_states.len(),excited_states.len());
-        let h0=Dense::block(&request.hamiltonian,&ground_states,&ground_states);
-        if (0..ng).any(|i|(0..ng).any(|j|i!=j&&h0[(i,j)]!=Complex::ZERO)){return Err("H0 must be diagonal on the ground states".into());}
-        let energies:Vec<f64>=(0..ng).map(|b|h0[(b,b)].re).collect();
+        let driven=|k:usize|levels[k/STATES].0!="ground"&&levels[k%STATES].0=="ground";
         for beam in &request.beams{
-            let outside=(0..STATES*STATES).any(|k|{let(i,j)=(k/STATES,k%STATES);
-                !(excited_states.contains(&i)&&ground_states.contains(&j))&&(beam.coupling.real[k]!=0.||beam.coupling.imag[k]!=0.)});
-            if outside{return Err(format!("Beam {}'s coupling must be excited ← ground",beam.id));}
+            if (0..STATES*STATES).any(|k|!driven(k)&&(beam.coupling.real[k]!=0.||beam.coupling.imag[k]!=0.)){return Err(format!("Beam {}'s coupling must be excited ← ground",beam.id));}
         }
         let all:Vec<usize>=(0..STATES).collect();
         let mut decay=Dense::zeros(ne,ne);
         for c in &request.emission{let c=Dense::block(c,&all,&excited_states);decay.add_scaled(Complex::ONE,&c.adjoint_product(&c));}
-        let mut excited_hamiltonian=Dense::block(&request.hamiltonian,&excited_states,&excited_states);excited_hamiltonian.add_scaled(Complex::new(0.,-0.5),&decay);
         let emission:[Dense;3]=std::array::from_fn(|a|Dense::block(&request.emission[a],&ground_states,&excited_states));
-        // The hyperfine blocks and their frames.
+        // The hyperfine blocks and their frames, from the request's H0.
+        let h0=Dense::block(&request.hamiltonian,&ground_states,&ground_states);
         let mut fs:Vec<u8>=ground_states.iter().map(|&i|levels[i].1).collect();fs.sort();fs.dedup();
         let blocks:Vec<Block>=fs.into_iter().map(|f|{
             let states:Vec<usize>=(0..ng).filter(|&b|levels[ground_states[b]].1==f).collect();
-            let frame=states.iter().map(|&b|energies[b]).sum::<f64>()/states.len() as f64;Block{f,states,frame}
+            let frame=states.iter().map(|&b|h0[(b,b)].re).sum::<f64>()/states.len() as f64;Block{f,states,frame}
         }).collect();
         let block:Vec<usize>=(0..ng).map(|b|blocks.iter().position(|x|x.states.contains(&b)).unwrap()).collect();
-        let hamiltonian=Dense::from_fn(ng,ng,|i,j|if i==j{Complex::new(energies[i]-blocks[block[i]].frame,0.)}else{Complex::ZERO});
-        // One lattice wave number; the carriers.
-        let lead=request.beams.iter().find(|b|b.axial!=0).or(request.beams.first()).ok_or("The ground generator needs a beam")?;
-        let wave_number=lead.wave_number_per_um;let recoil=HBAR/request.mass_kg*1e6*(wave_number*wave_number)/2.;
+        // The carriers, and every jump.
         let mut groups:Vec<Vec<usize>>=vec![];
         for(l,beam)in request.beams.iter().enumerate(){
             match groups.iter_mut().find(|g|request.beams[g[0]].frequency_index==beam.frequency_index){Some(g)=>g.push(l),None=>groups.push(vec![l])}
         }
-        // The elimination, column by column; the nearest pole seen by a coupled ground state.
-        let mut pole=f64::INFINITY;
-        let mut carriers=Vec::with_capacity(groups.len());
-        for beams in groups{
+        let carriers:Vec<Carrier>=groups.into_iter().map(|beams|{
             let first=&request.beams[beams[0]];
             let detuning=TAU*first.frequency_index.iter().zip(&request.frequencies_mhz).map(|(&n,&f)|n as f64*f).sum::<f64>();
-            let mut waves:Vec<Wave>=(-1..=1).filter_map(|s|{
-                let members:Vec<usize>=beams.iter().copied().filter(|&l|request.beams[l].axial==s).collect();
-                if members.is_empty(){return None;}
-                let mut coupling=Dense::zeros(ne,ng);
-                for &l in &members{coupling.add_scaled(Complex::ONE,&Dense::block(&request.beams[l].coupling,&excited_states,&ground_states));}
-                Some(Wave{axial:s,response:Dense::zeros(ne,ng),derivative:Dense::zeros(ne,ng),coupling})
-            }).collect();
-            let mut column=vec![Complex::ZERO;ne];
-            for b in 0..ng{
-                let lu=denominator(&excited_hamiltonian,-energies[b]-detuning)?;
-                for wave in &mut waves{
-                    for i in 0..ne{column[i]=wave.coupling[(i,b)];}lu.solve(&mut column);for i in 0..ne{wave.response[(i,b)]=column[i];}
-                    lu.solve(&mut column);for i in 0..ne{wave.derivative[(i,b)]=column[i];}
-                }
-                if waves.iter().any(|w|(0..ne).any(|i|w.coupling[(i,b)]!=Complex::ZERO)){
-                    let mut identity=Dense::zeros(ne,ne);for i in 0..ne{identity[(i,i)]=Complex::ONE;}
-                    pole=pole.min(1./lu.solve_columns(&identity).spectral_norm());
-                }
-            }
-            let pairs=waves.iter().flat_map(|emitted|waves.iter().map(move|absorbed|(emitted,absorbed))).map(|(emitted,absorbed)|Pair{
-                emitted:emitted.axial,absorbed:absorbed.axial,x:secular_part(&block,&emitted.coupling.adjoint_product(&absorbed.response)),
-                p:secular_part(&block,&emitted.coupling.adjoint_product(&absorbed.derivative))}).collect();
-            carriers.push(Carrier{beams,detuning,kappa:first.wave_number_per_um/wave_number,waves,pairs});
-        }
-        // The generator's harmonics and the readout.
-        let(mut light_shift,mut scattering,mut admixture)=(Harmonics::zeros(ng),Harmonics::zeros(ng),Harmonics::zeros(ng));
-        let mut excited_readout=vec![Harmonics::zeros(ng);ne];
-        for carrier in &carriers{
-            for pair in &carrier.pairs{
-                let m=pair.absorbed-pair.emitted;
-                light_shift.add(m,Complex::new(-0.5,0.),&pair.x);light_shift.add(-m,Complex::new(-0.5,0.),&pair.x.adjoint());
-            }
-            for emitted in &carrier.waves{for absorbed in &carrier.waves{
-                let m=absorbed.axial-emitted.axial;let(rp,r)=(&emitted.response,&absorbed.response);
-                scattering.add(m,Complex::ONE,&rp.adjoint_product(&decay.product(r)));admixture.add(m,Complex::ONE,&rp.adjoint_product(r));
-                for(i,readout)in excited_readout.iter_mut().enumerate(){readout.add(m,Complex::ONE,&Dense::from_fn(ng,ng,|j,k|rp[(i,j)].conj()*r[(i,k)]));}
-            }}
-        }
-        let(scattering,admixture)=(scattering.map(|m|secular_part(&block,m)),admixture.map(|m|secular_part(&block,m)));
-        let excited_readout:Vec<Harmonics>=excited_readout.iter().map(|e|e.map(|m|secular_part(&block,m))).collect();
-        // The jumps, split into blocks.
-        let nb=blocks.len();let mut jumps=vec![];
-        for(c,carrier)in carriers.iter().enumerate(){for(a,emission)in emission.iter().enumerate(){
-            let whole:Vec<(i8,Dense,Dense)>=carrier.waves.iter().map(|w|(w.axial,emission.product(&w.response),emission.product(&w.derivative))).collect();
-            for to in 0..nb{for from in 0..nb{
-                let(mut operator,mut derivative)=(Harmonics::zeros(ng),Harmonics::zeros(ng));
-                for(s,l,d)in &whole{operator.add(*s,Complex::ONE,&between(&block,l,to,from));derivative.add(*s,Complex::ONE,&between(&block,d,to,from));}
-                if operator.0.iter().chain(&derivative.0).all(Dense::is_zero){continue;}
-                jumps.push(Jump{axis:a,carrier:c,from,to,kappa:carrier.kappa,operator,derivative});
-            }}
-        }}
-        let secular=Secular::new(&carriers,&blocks,&block,&jumps,&light_shift,&scattering,pole);
-        let ground=Ground{ground_states,excited_states,energies,blocks,block,hamiltonian,excited_hamiltonian,emission,wave_number,recoil,
-            carriers,light_shift,scattering,admixture,excited_readout,jumps,secular};
-        match ground.secular.largest(){Some(term)if term.micromotion>ground.secular.eta=>Err(ground.raman_resonance(request,term)),_=>Ok(ground)}
-    }
-
-    /// Why a Raman-resonant scheme is refused, naming its beams.
-    fn raman_resonance(&self,request:&Request,term:&Rotating)->String{
-        let named=|c:usize|self.carriers[c].beams.iter().map(|&l|format!("「{}」",request.beams[l].id)).collect::<Vec<_>>().join("、");
-        let[c,d]=term.carriers;let beams=if c==d{named(c)}else{format!("{}与{}",named(c),named(d))};
-        let[f,g]=term.blocks.map(|b|self.blocks[b].f);
-        let what=if f==g{format!("F={f} 内由两组光的拍频驱动的相干")}else{format!("F={} 与 F={} 之间的相干",f.min(g),f.max(g))};
-        format!("所选光束之间存在拉曼共振（{beams}，拉曼失谐 {:.3} MHz），{what}不能忽略，1D 运动暂不支持",term.frequency.abs()/TAU)
-    }
-
-    /// H_eff(θ) = H0g + H_ls(θ) − (i/2) Γ(θ).
-    pub fn effective_hamiltonian(&self,theta:f64)->Dense{
-        let mut h=self.hamiltonian.clone();h.add_scaled(Complex::ONE,&self.light_shift.at(theta));h.add_scaled(Complex::new(0.,-0.5),&self.scattering.at(theta));h
-    }
-
-    /// The 32 populations (in the request's order) at lattice phase θ of a block-diagonal ground density
-    /// ρ: the bare ground ones, of ρ − ½{Y(θ), ρ}, and the excited ones, tr(E_i(θ) ρ).
-    pub fn populations(&self,rho:&Dense,theta:f64)->Vec<f64>{
-        let y=self.admixture.at(theta);let(left,right)=(y.product(rho),rho.product(&y));
-        let mut out=vec![0.;STATES];
-        for(b,&state)in self.ground_states.iter().enumerate(){out[state]=rho[(b,b)].re-0.5*(left[(b,b)].re+right[(b,b)].re);}
-        for(i,&state)in self.excited_states.iter().enumerate(){
-            let e=self.excited_readout[i].at(theta);out[state]=(0..rho.rows).map(|j|(0..rho.rows).map(|k|(e[(j,k)]*rho[(k,j)]).re).sum::<f64>()).sum();
-        }
-        out
-    }
-
-    /// The first-order increments of H_ls, Γ and the jumps (in the order of `jumps`) for the excited-energy
-    /// shifts `shift(c, s)` = w_{c,s} (rad/us): R_{c,s} → R_{c,s} − w_{c,s} R2_{c,s}.
-    pub fn first_order(&self,shift:impl Fn(usize,i8)->f64)->FirstOrder{
-        let ng=self.ground_states.len();let mut light_shift=Harmonics::zeros(ng);
-        for(c,carrier)in self.carriers.iter().enumerate(){for pair in &carrier.pairs{
-            let(m,w)=(pair.absorbed-pair.emitted,Complex::new(0.5*shift(c,pair.absorbed),0.));
-            light_shift.add(m,w,&pair.p);light_shift.add(-m,w,&pair.p.adjoint());
-        }}
-        let mut scattering=Harmonics::zeros(ng);
-        let jumps=self.jumps.iter().map(|jump|{
-            let mut d=Harmonics::zeros(ng);for s in -1..=1{d.add(s,Complex::new(-shift(jump.carrier,s),0.),jump.derivative.get(s));}
-            for s in -1..=1{for t in -1..=1{
-                let(l,dl)=(jump.operator.get(s),d.get(t));
-                scattering.add(t-s,Complex::ONE,&l.adjoint_product(dl));scattering.add(s-t,Complex::ONE,&dl.adjoint_product(l));
-            }}
-            d
+            Carrier{beams,detuning,wave_number:first.wave_number_per_um}
         }).collect();
-        FirstOrder{light_shift,scattering,jumps}
+        let nb=blocks.len();
+        let jumps=(0..carriers.len()).flat_map(|carrier|(0..3).flat_map(move|axis|(0..nb).flat_map(move|to|(0..nb).map(move|from|Jump{axis,carrier,from,to})))).collect();
+        let couplings=request.beams.iter().map(|b|Dense::block(&b.coupling,&excited_states,&ground_states)).collect();
+        let ground=Ground{ground_states,excited_states,blocks,block,decay,emission,beams:request.beams.clone(),couplings,carriers,jumps};
+        let report=ground.secular(&ground.eliminate(&request.hamiltonian)?)?;
+        match report.largest(){Some(term)if term.micromotion>report.eta=>Err(ground.raman_resonance(term)),_=>Ok(ground)}
     }
 
-    /// R_{c,s} of carrier `carrier`'s wave `wave` to all orders in an excited-energy shift w (rad/us):
-    /// column b solved with (K − E_b − δ_c + w)⁻¹. R − w R2 is its first order.
-    pub fn response(&self,carrier:usize,wave:usize,shift:f64)->Result<Dense,String>{
-        let(carrier,ng)=(&self.carriers[carrier],self.ground_states.len());let coupling=&carrier.waves[wave].coupling;
-        let mut out=Dense::zeros(coupling.rows,ng);let mut column=vec![Complex::ZERO;coupling.rows];
-        for b in 0..ng{
-            let lu=denominator(&self.excited_hamiltonian,shift-self.energies[b]-carrier.detuning)?;
+    /// The elimination for an H0 (rad/us, in the frame; diagonal on the ground states): E_b, H0g in
+    /// the blocks' frames, K, and every beam's R_l and R2_l, column by column.
+    pub fn eliminate(&self,hamiltonian:&Matrix)->Result<Elimination,String>{
+        let(ng,ne)=(self.ground_states.len(),self.excited_states.len());
+        let h0=Dense::block(hamiltonian,&self.ground_states,&self.ground_states);
+        if (0..ng).any(|i|(0..ng).any(|j|i!=j&&h0[(i,j)]!=Complex::ZERO)){return Err("H0 must be diagonal on the ground states".into());}
+        let energies:Vec<f64>=(0..ng).map(|b|h0[(b,b)].re).collect();
+        let ground_hamiltonian=Dense::from_fn(ng,ng,|i,j|if i==j{Complex::new(energies[i]-self.blocks[self.block[i]].frame,0.)}else{Complex::ZERO});
+        let mut excited_hamiltonian=Dense::block(hamiltonian,&self.excited_states,&self.excited_states);excited_hamiltonian.add_scaled(Complex::new(0.,-0.5),&self.decay);
+        let(mut responses,mut derivatives)=(vec![Dense::zeros(ne,ng);self.beams.len()],vec![Dense::zeros(ne,ng);self.beams.len()]);
+        let mut column=vec![Complex::ZERO;ne];
+        for carrier in &self.carriers{for b in 0..ng{
+            let lu=denominator(&excited_hamiltonian,-energies[b]-carrier.detuning)?;
+            for &l in &carrier.beams{
+                for i in 0..ne{column[i]=self.couplings[l][(i,b)];}lu.solve(&mut column);for i in 0..ne{responses[l][(i,b)]=column[i];}
+                lu.solve(&mut column);for i in 0..ne{derivatives[l][(i,b)]=column[i];}
+            }
+        }}
+        Ok(Elimination{energies,hamiltonian:ground_hamiltonian,excited_hamiltonian,responses,derivatives})
+    }
+
+    /// Every beam's amplitude a_l(x) at x (um) on the line.
+    pub fn amplitudes(&self,x:f64)->Vec<Complex>{self.beams.iter().map(|b|b.amplitude(x)).collect()}
+
+    /// The generator at x (um) on the line, with an elimination's K, E_b and responses.
+    pub fn local(&self,elimination:&Elimination,x:f64)->Local{
+        let(ng,ne)=(self.ground_states.len(),self.excited_states.len());let a=self.amplitudes(x);
+        let(mut light_shift,mut scattering,mut admixture)=(Dense::zeros(ng,ng),Dense::zeros(ng,ng),Dense::zeros(ng,ng));
+        let mut excited_readout=vec![Dense::zeros(ng,ng);ne];
+        let responses:Vec<Dense>=self.carriers.iter().map(|c|combine(&c.beams,&a,&elimination.responses)).collect();
+        for(carrier,r)in self.carriers.iter().zip(&responses){
+            light_shift.add_scaled(Complex::ONE,&negative_hermitian_part(&combine(&carrier.beams,&a,&self.couplings).adjoint_product(r)));
+            scattering.add_scaled(Complex::ONE,&r.adjoint_product(&self.decay.product(r)));admixture.add_scaled(Complex::ONE,&r.adjoint_product(r));
+            for(i,readout)in excited_readout.iter_mut().enumerate(){readout.add_scaled(Complex::ONE,&Dense::from_fn(ng,ng,|j,k|r[(i,j)].conj()*r[(i,k)]));}
+        }
+        let secular=|m:&Dense|secular_part(&self.block,m);
+        Local{light_shift:secular(&light_shift),scattering:secular(&scattering),admixture:secular(&admixture),
+            excited_readout:excited_readout.iter().map(secular).collect(),jumps:self.split(&responses)}
+    }
+
+    /// The jumps of per-carrier responses r_c: P_to C_a r_c P_from.
+    fn split(&self,responses:&[Dense])->Vec<Dense>{
+        let whole:Vec<[Dense;3]>=responses.iter().map(|r|std::array::from_fn(|a|self.emission[a].product(r))).collect();
+        self.jumps.iter().map(|j|between(&self.block,&whole[j.carrier][j.axis],j.to,j.from)).collect()
+    }
+
+    /// The first-order increments of H_ls, Γ and the jumps at x for the excited-energy shifts
+    /// `shift(l)` = w_l (rad/us) of absorbing from beam l: R_l → R_l − w_l R2_l.
+    pub fn first_order(&self,elimination:&Elimination,x:f64,shift:impl Fn(usize)->f64)->FirstOrder{
+        let ng=self.ground_states.len();let a=self.amplitudes(x);
+        let weights:Vec<Complex>=a.iter().enumerate().map(|(l,&z)|z*(-shift(l))).collect();
+        let responses:Vec<Dense>=self.carriers.iter().map(|c|combine(&c.beams,&a,&elimination.responses)).collect();
+        let increments:Vec<Dense>=self.carriers.iter().map(|c|combine(&c.beams,&weights,&elimination.derivatives)).collect();
+        let mut light_shift=Dense::zeros(ng,ng);
+        for(carrier,dr)in self.carriers.iter().zip(&increments){
+            light_shift.add_scaled(Complex::ONE,&negative_hermitian_part(&combine(&carrier.beams,&a,&self.couplings).adjoint_product(dr)));
+        }
+        let(jumps,increments)=(self.split(&responses),self.split(&increments));
+        let mut scattering=Dense::zeros(ng,ng);
+        for(l,d)in jumps.iter().zip(&increments){scattering.add_scaled(Complex::ONE,&l.adjoint_product(d));scattering.add_scaled(Complex::ONE,&d.adjoint_product(l));}
+        FirstOrder{light_shift:secular_part(&self.block,&light_shift),scattering,jumps:increments}
+    }
+
+    /// Beam l's response R_l to all orders in an excited-energy shift w (rad/us): column b solved
+    /// with (K − E_b − δ_c + w)⁻¹. R_l − w R2_l is its first order.
+    pub fn response(&self,elimination:&Elimination,beam:usize,shift:f64)->Result<Dense,String>{
+        let carrier=self.carriers.iter().find(|c|c.beams.contains(&beam)).unwrap();let coupling=&self.couplings[beam];
+        let mut out=Dense::zeros(coupling.rows,coupling.cols);let mut column=vec![Complex::ZERO;coupling.rows];
+        for b in 0..coupling.cols{
+            let lu=denominator(&elimination.excited_hamiltonian,shift-elimination.energies[b]-carrier.detuning)?;
             for i in 0..coupling.rows{column[i]=coupling[(i,b)];}lu.solve(&mut column);for i in 0..coupling.rows{out[(i,b)]=column[i];}
         }
         Ok(out)
     }
-}
 
-impl Secular{
-    /// Every rotating term of the eliminated generator, with the expansion parameter η: the
+    /// The 32 populations (in the request's order) of a block-diagonal ground density ρ at a
+    /// position: the bare ground ones, of ρ − ½{Y, ρ}, and the excited ones, tr(E_i ρ).
+    pub fn populations(&self,local:&Local,rho:&Dense)->Vec<f64>{
+        let y=&local.admixture;let(left,right)=(y.product(rho),rho.product(y));
+        let mut out=vec![0.;STATES];
+        for(b,&state)in self.ground_states.iter().enumerate(){out[state]=rho[(b,b)].re-0.5*(left[(b,b)].re+right[(b,b)].re);}
+        for(e,&state)in local.excited_readout.iter().zip(&self.excited_states){
+            out[state]=(0..rho.rows).map(|j|(0..rho.rows).map(|k|(e[(j,k)]*rho[(k,j)]).re).sum::<f64>()).sum();
+        }
+        out
+    }
+
+    /// The secular step for an elimination: every rotating term of the eliminated generator -- the
     /// stimulated terms V_{c′}†R_c between blocks, and the cross terms L_{a,c} ρ L_{a,c′}† of jumps
-    /// from one block into two.
-    fn new(carriers:&[Carrier],blocks:&[Block],block:&[usize],jumps:&[Jump],light_shift:&Harmonics,scattering:&Harmonics,pole:f64)->Secular{
-        let(nb,ng,nc)=(blocks.len(),block.len(),carriers.len());let mut terms:Vec<([usize;2],[usize;2],f64)>=vec![];
-        for(c,absorbing)in carriers.iter().enumerate(){for(d,emitting)in carriers.iter().enumerate(){
-            let mut cross=Harmonics::zeros(ng);
-            for emitted in &emitting.waves{for absorbed in &absorbing.waves{cross.add(absorbed.axial-emitted.axial,Complex::ONE,&emitted.coupling.adjoint_product(&absorbed.response));}}
-            for from in 0..nb{for to in 0..nb{if c!=d||to!=from{terms.push(([c,d],[from,to],cross.map(|m|between(block,m,to,from)).bound()));}}}
+    /// from one block into two -- with the expansion parameter η.
+    pub fn secular(&self,elimination:&Elimination)->Result<Secular,String>{
+        let(nb,nc,ne)=(self.blocks.len(),self.carriers.len(),self.excited_states.len());let mut terms:Vec<([usize;2],[usize;2],f64)>=vec![];
+        let(r,v,block)=(&elimination.responses,&self.couplings,&self.block[..]);
+        for(c,absorbing)in self.carriers.iter().enumerate(){for(d,emitting)in self.carriers.iter().enumerate(){
+            let products:Vec<Dense>=emitting.beams.iter().flat_map(|&e|absorbing.beams.iter().map(move|&l|v[e].adjoint_product(&r[l]))).collect();
+            for from in 0..nb{for to in 0..nb{if c!=d||to!=from{terms.push(([c,d],[from,to],products.iter().map(|m|between(block,m,to,from).spectral_norm()).sum()));}}}
         }}
-        let norms:Vec<f64>=jumps.iter().map(|j|j.operator.bound()).collect();
-        let norm=|a:usize,c:usize,to:usize,from:usize|jumps.iter().position(|j|(j.axis,j.carrier,j.to,j.from)==(a,c,to,from)).map_or(0.,|j|norms[j]);
+        // Per carrier, axis and pair of blocks: the sum of its beams' jump norms.
+        let norms:Vec<f64>=self.jumps.iter().map(|j|self.carriers[j.carrier].beams.iter().map(|&l|between(block,&self.emission[j.axis].product(&r[l]),j.to,j.from).spectral_norm()).sum()).collect();
+        let norm=|axis:usize,carrier:usize,to:usize,from:usize|norms[self.jumps.iter().position(|j|*j==Jump{axis,carrier,from,to}).unwrap()];
         for c in 0..nc{for d in 0..nc{for x in 0..nb{for y in 0..nb{if c!=d||x!=y{for from in 0..nb{
             terms.push(([c,d],[y,x],(0..3).map(|a|norm(a,c,x,from)*norm(a,d,y,from)).sum()));
         }}}}}}
         let dropped=terms.into_iter().filter(|term|term.2>0.).map(|([c,d],[from,to],coupling)|{
-            let frequency=(blocks[to].frame-blocks[from].frame)-(carriers[c].detuning-carriers[d].detuning);
+            let frequency=(self.blocks[to].frame-self.blocks[from].frame)-(self.carriers[c].detuning-self.carriers[d].detuning);
             Rotating{carriers:[c,d],blocks:[from,to],frequency,coupling,micromotion:coupling/frequency.abs()}
         }).collect();
-        let mut generator=light_shift.clone();for m in -2..=2{generator.add(m,Complex::new(0.,-0.5),scattering.get(m));}
-        let scale=generator.bound();
-        Secular{eta:scale/pole,scale,pole,dropped}
+        // H_ls − iΓ/2 = Σ_c Σ_{l′,l∈c} a_l′* a_l [−½(V_l′†R_l + R_l′†V_l) − (i/2) R_l′† D R_l], each |a| ≤ 1.
+        let mut scale=0.;
+        for carrier in &self.carriers{for &e in &carrier.beams{for &l in &carrier.beams{
+            let mut term=v[e].adjoint_product(&r[l]).scaled(Complex::new(-0.5,0.));term.add_scaled(Complex::new(-0.5,0.),&r[e].adjoint_product(&v[l]));
+            term.add_scaled(Complex::new(0.,-0.5),&r[e].adjoint_product(&self.decay.product(&r[l])));scale+=secular_part(block,&term).spectral_norm();
+        }}}
+        // The nearest pole any coupled ground state sees.
+        let mut pole=f64::INFINITY;let mut identity=Dense::zeros(ne,ne);for i in 0..ne{identity[(i,i)]=Complex::ONE;}
+        for carrier in &self.carriers{for b in 0..self.ground_states.len(){
+            if carrier.beams.iter().all(|&l|(0..ne).all(|i|v[l][(i,b)]==Complex::ZERO)){continue;}
+            let lu=denominator(&elimination.excited_hamiltonian,-elimination.energies[b]-carrier.detuning)?;
+            pole=pole.min(1./lu.solve_columns(&identity).spectral_norm());
+        }}
+        Ok(Secular{eta:scale/pole,scale,pole,dropped})
+    }
+
+    /// Why a Raman-resonant scheme is refused, naming its beams.
+    fn raman_resonance(&self,term:&Rotating)->String{
+        let named=|c:usize|self.carriers[c].beams.iter().map(|&l|format!("「{}」",self.beams[l].name)).collect::<Vec<_>>().join("、");
+        let[c,d]=term.carriers;let beams=if c==d{named(c)}else{format!("{}与{}",named(c),named(d))};
+        let[f,g]=term.blocks.map(|b|self.blocks[b].f);
+        let what=if f==g{format!("F={f} 内由两组光的拍频驱动的相干")}else{format!("F={} 与 F={} 之间的相干",f.min(g),f.max(g))};
+        format!("所选光束之间存在拉曼共振（{beams}，拉曼失谐 {:.3} MHz），{what}不能忽略，1D 运动暂不支持",term.frequency.abs()/TAU)
     }
 }
 
@@ -406,10 +379,10 @@ impl Secular{
 mod tests{
     use super::*;
     use crate::linear::uniform;
-    use crate::{Beam,Matrix};
     use serde_json::Value;
 
-    /// The PGC example's request as the app sends it, and gme.py's numbers for it (tests/fixtures/ground_gme.json).
+    /// The free-space 1D PGC (the PGC example before the tweezer example) as the app sent it, and
+    /// gme.py's numbers for it (tests/fixtures/ground_gme.json).
     fn fixture()->Value{serde_json::from_str(include_str!("../tests/fixtures/ground_gme.json")).unwrap()}
     fn index(v:&Value)->usize{v.as_u64().unwrap() as usize}
     fn float(v:&Value)->f64{v.as_f64().unwrap()}
@@ -420,104 +393,118 @@ mod tests{
         m
     }
     fn matrix(v:&Value)->Matrix{let m=entries(v,STATES,STATES);Matrix{real:m.entries.iter().map(|z|z.re).collect(),imag:m.entries.iter().map(|z|z.im).collect()}}
+    fn floats(v:&Value)->Vec<f64>{v.as_array().unwrap().iter().map(float).collect()}
     fn request(v:&Value)->Request{
         let zero=Matrix{real:vec![0.;STATES*STATES],imag:vec![0.;STATES*STATES]};
-        let beams=v["beams"].as_array().unwrap().iter().map(|b|Beam{id:b["id"].as_str().unwrap().into(),axial:b["axial"].as_i64().unwrap() as i8,
-            wave_number_per_um:float(&b["waveNumberPerUm"]),frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),
-            coupling:matrix(&b["coupling"]),counter_coupling:zero.clone()}).collect();
+        let beams=v["beams"].as_array().unwrap().iter().map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
+            direction:[d[0],d[1],d[2]],wave_number_per_um:float(&b["waveNumberPerUm"]),waist_um:None,intensity_mw_cm2:float(&b["intensityMWcm2"]),
+            frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),counter_coupling:zero.clone()}}).collect();
         let e=&v["emission"];
         Request{states:v["states"].as_array().unwrap().iter().map(|s|s.as_str().unwrap().into()).collect(),hamiltonian:matrix(&v["hamiltonian"]),
-            frame_frequencies_mhz:vec![0.;STATES],frequencies_mhz:v["frequenciesMHz"].as_array().unwrap().iter().map(float).collect(),beams,
+            frame_frequencies_mhz:vec![0.;STATES],frequencies_mhz:floats(&v["frequenciesMHz"]),beams,
             emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],field_vector_g:[0.;3],mass_kg:float(&v["massKg"]),
             initial_density:vec![Complex::ZERO;STATES*STATES],temperature_uk:30.,times_us:vec![],tolerance:5e-3}
     }
     fn row(values:&[f64])->Dense{Dense::from_fn(1,values.len(),|_,j|Complex::new(values[j],0.))}
-    fn values(v:&Value)->Vec<f64>{v.as_array().unwrap().iter().map(float).collect()}
-    /// The harmonics of h paired with the reference's {m: entries} (absent: zero).
-    fn harmonics<'a>(h:&'a Harmonics,v:&Value)->Vec<(&'a Dense,Dense)>{
-        let n=h.get(0).rows;(-2..=2).map(|m|(h.get(m),v.get(m.to_string()).map_or_else(||Dense::zeros(n,n),|e|entries(e,n,n)))).collect()
+    /// Σ_m op[m] e^{imθ} of the reference's harmonics {m: entries}.
+    fn at(v:&Value,theta:f64,n:usize)->Dense{
+        let mut out=Dense::zeros(n,n);for(m,e)in v.as_object().unwrap(){out.add_scaled(Complex::cis(m.parse::<f64>().unwrap()*theta),&entries(e,n,n));}out
     }
     /// max |a − b| / max |b| over the pairs.
-    fn relative<'a>(pairs:impl IntoIterator<Item=(&'a Dense,Dense)>)->f64{
+    fn relative(pairs:impl IntoIterator<Item=(Dense,Dense)>)->f64{
         let(mut difference,mut scale)=(0_f64,0_f64);
         for(a,b)in pairs{for(x,y)in a.entries.iter().zip(&b.entries){difference=difference.max((*x-*y).abs());scale=scale.max(y.abs());}}
         difference/scale
     }
 
-    /// The PGC example's generator is gme.py's -- the research module GMW-o1 was validated with -- to
-    /// round-off, operator by operator (the reference has 12 significant digits).
+    /// With plane waves of one shared wave number k (the lattice phase θ = kx), the generator at x is
+    /// gme.py's harmonic form at θ -- the research module GMW-o1 was validated with -- to round-off,
+    /// operator by operator (the reference has 12 significant digits).
     #[test]
-    fn the_pgc_example_has_the_operators_of_gme(){
-        let f=fixture();let(r,g)=(&f["reference"],Ground::new(&request(&f["request"])).unwrap());
+    fn plane_waves_of_one_wave_number_have_the_operators_of_gme(){
+        let f=fixture();let r=&f["reference"];let k=float(&r["kref"]);
+        let mut pgc=request(&f["request"]);for beam in &mut pgc.beams{beam.wave_number_per_um=k;}
+        let g=Ground::new(&pgc).unwrap();let e=g.eliminate(&pgc.hamiltonian).unwrap();
         let(ng,ne)=(g.ground_states.len(),g.excited_states.len());
-        let pairs=|which:&str|->Vec<(&Dense,Dense)>{r[which].as_object().unwrap().iter().map(|(key,v)|{
-            let k:Vec<i64>=key.split(',').map(|x|x.parse().unwrap()).collect();
-            let pair=g.carriers[k[0] as usize].pairs.iter().find(|p|(p.emitted as i64,p.absorbed as i64)==(k[1],k[2])).unwrap();
-            (if which=="X"{&pair.x}else{&pair.p},entries(v,ng,ng))
+        // The beam of a reference carrier and direction.
+        let beam=|c:usize,s:i64|*g.carriers[c].beams.iter().find(|&&l|g.beams[l].direction[2] as i64==s).unwrap();
+        let pairs=|which:&str,responses:&[Dense]|->Vec<(Dense,Dense)>{r[which].as_object().unwrap().iter().map(|(key,v)|{
+            let k:Vec<i64>=key.split(',').map(|x|x.parse().unwrap()).collect();let c=k[0] as usize;
+            (secular_part(&g.block,&g.couplings[beam(c,k[1])].adjoint_product(&responses[beam(c,k[2])])),entries(v,ng,ng))
         }).collect()};
-        let jumps=r["jumps"].as_array().unwrap();assert_eq!(g.jumps.len(),jumps.len());
-        let jump=|j:&Value|g.jumps.iter().find(|x|(x.axis,x.carrier,x.to,x.from)==(index(&j["axis"]),index(&j["carrier"]),index(&j["to"]),index(&j["from"]))).unwrap();
-        let kv=float(&r["firstOrder"]["kv"]);let first=g.first_order(|_,s|s as f64*kv);
-        let exact=&r["response"];let c=index(&exact["carrier"]);
-        let wave=g.carriers[c].waves.iter().position(|w|w.axial as i64==exact["axial"].as_i64().unwrap()).unwrap();
-        let readout=&r["readout"];let p=g.populations(&entries(&readout["rho"],ng,ng),float(&readout["theta"]));
-        let(ground,excited):(Vec<f64>,Vec<f64>)=(g.ground_states.iter().map(|&i|p[i]).collect(),g.excited_states.iter().map(|&i|p[i]).collect());
-        let carriers:Vec<f64>=g.carriers.iter().flat_map(|c|[c.detuning,c.kappa]).collect();
-        let carriers_gme:Vec<f64>=r["carriers"].as_array().unwrap().iter().flat_map(|c|[float(&c["delta"]),float(&c["kappa"])]).collect();
-        let checks=[
-            ("k_ref and w_r",relative([(&row(&[g.wave_number,g.recoil]),row(&[float(&r["kref"]),float(&r["wr"])]))])),
-            ("carriers: δ and κ",relative([(&row(&carriers),row(&carriers_gme))])),
-            ("H_ls",relative(harmonics(&g.light_shift,&r["Hls"]))),("Γ",relative(harmonics(&g.scattering,&r["Gam"]))),("Y",relative(harmonics(&g.admixture,&r["Y"]))),
-            ("X",relative(pairs("X"))),("P",relative(pairs("P"))),
-            ("jumps L",relative(jumps.iter().flat_map(|j|harmonics(&jump(j).operator,&j["L"])))),
-            ("jumps D2",relative(jumps.iter().flat_map(|j|harmonics(&jump(j).derivative,&j["D2"])))),
-            ("first order",relative(harmonics(&first.light_shift,&r["firstOrder"]["dHls"]).into_iter().chain(harmonics(&first.scattering,&r["firstOrder"]["dGam"])))),
-            ("exact response",relative([(&g.response(c,wave,float(&exact["shift"])).unwrap(),entries(&exact["R"],ne,ng))])),
-            ("populations",relative([(&row(&ground),row(&values(&readout["ground"]))),(&row(&excited),row(&values(&readout["excited"])))])),
+        let jumps=r["jumps"].as_array().unwrap();
+        let jump=|j:&Value|g.jumps.iter().position(|x|*x==Jump{axis:index(&j["axis"]),carrier:index(&j["carrier"]),to:index(&j["to"]),from:index(&j["from"])}).unwrap();
+        let detunings=|v:&Value|row(&v.as_array().unwrap().iter().map(|c|float(&c["delta"])).collect::<Vec<_>>());
+        let kv=float(&r["firstOrder"]["kv"]);let mut checks=vec![
+            ("X",relative(pairs("X",&e.responses))),("P",relative(pairs("P",&e.derivatives))),
+            ("carriers: δ",relative([(row(&g.carriers.iter().map(|c|c.detuning).collect::<Vec<_>>()),detunings(&r["carriers"]))])),
         ];
+        for theta in [0.,0.7,2.3,-4.1]{
+            let(local,first)=(g.local(&e,theta/k),g.first_order(&e,theta/k,|l|g.beams[l].direction[2]*kv));
+            // gme's first-order jumps are −s kv D2[s] in harmonic s.
+            let derivative=|j:&Value|{let mut d=Dense::zeros(ng,ng);for(s,m)in j["D2"].as_object().unwrap(){let s:f64=s.parse().unwrap();d.add_scaled(Complex::cis(s*theta)*(-s*kv),&entries(m,ng,ng));}d};
+            checks.extend([("H_ls",relative([(local.light_shift.clone(),at(&r["Hls"],theta,ng))])),("Γ",relative([(local.scattering.clone(),at(&r["Gam"],theta,ng))])),
+                ("Y",relative([(local.admixture.clone(),at(&r["Y"],theta,ng))])),
+                ("jumps L",relative(jumps.iter().map(|j|(local.jumps[jump(j)].clone(),at(&j["L"],theta,ng))))),
+                ("jumps D2",relative(jumps.iter().map(|j|(first.jumps[jump(j)].clone(),derivative(j))))),
+                ("first order",relative([(first.light_shift.clone(),at(&r["firstOrder"]["dHls"],theta,ng)),(first.scattering.clone(),at(&r["firstOrder"]["dGam"],theta,ng))]))]);
+        }
+        let exact=&r["response"];let shifted=g.response(&e,beam(index(&exact["carrier"]),exact["axial"].as_i64().unwrap()),float(&exact["shift"])).unwrap();
+        checks.push(("exact response",relative([(shifted,entries(&exact["R"],ne,ng))])));
+        let readout=&r["readout"];let p=g.populations(&g.local(&e,float(&readout["theta"])/k),&entries(&readout["rho"],ng,ng));
+        let(ground,excited):(Vec<f64>,Vec<f64>)=(g.ground_states.iter().map(|&i|p[i]).collect(),g.excited_states.iter().map(|&i|p[i]).collect());
+        checks.push(("populations",relative([(row(&ground),row(&floats(&readout["ground"]))),(row(&excited),row(&floats(&readout["excited"])))])));
         assert!(checks.iter().all(|(_,x)|*x<=1e-10),"{checks:?}");
     }
 
-    /// The PGC example perturbed at random: the ground energies split as by a field, every beam's
-    /// coupling scaled by a complex factor, and one more cooling beam across the axis (harmonics ±1).
+    /// The free-space PGC perturbed at random: the ground energies split as by a field, every beam's
+    /// coupling scaled by a complex factor, an oblique plane wave added to the cooling carrier and a
+    /// beam focused at the atom across the line, at a frequency of its own.
     fn perturbed(seed:u64)->Request{
         let mut next=uniform(seed);let mut r=request(&fixture()["request"]);
         let scale=|m:&mut Matrix,z:Complex|for(re,im)in m.real.iter_mut().zip(m.imag.iter_mut()){let x=z*Complex::new(*re,*im);(*re,*im)=(x.re,x.im);};
         for i in (0..STATES).filter(|&i|r.states[i].starts_with("ground-")){r.hamiltonian.real[i*STATES+i]+=next();}
         for beam in &mut r.beams{scale(&mut beam.coupling,Complex::new(1.+next(),next()));}
-        let mut side=r.beams.iter().find(|b|b.id=="cool-plus").unwrap().clone();(side.id,side.axial)=("cool-side".into(),0);
-        scale(&mut side.coupling,Complex::new(next(),next()));r.beams.push(side);r
+        let cooling=r.beams.iter().find(|b|b.id=="cool-plus").unwrap().clone();
+        let mut oblique=cooling.clone();(oblique.id,oblique.name,oblique.direction)=("oblique".into(),"斜光".into(),[0.6,0.,0.8]);
+        scale(&mut oblique.coupling,Complex::new(next(),next()));
+        let mut focused=cooling;(focused.id,focused.name,focused.direction,focused.waist_um)=("focused".into(),"聚焦光".into(),[0.,1.,0.],Some(1.5));
+        focused.frequency_index=focused.frequency_index.iter().map(|n|2*n).collect();scale(&mut focused.coupling,Complex::new(3.+next(),next()));
+        r.beams.extend([oblique,focused]);r
     }
-    /// Σ_m ‖a_m − b_m‖ over the harmonics, against the largest of b.
-    fn mismatch(a:&Harmonics,b:&Harmonics)->(f64,f64){
-        (-2..=2).map(|m|{let mut d=a.get(m).clone();d.add_scaled(-Complex::ONE,b.get(m));(d.largest(),b.get(m).largest())}).fold((0.,0.),|(x,y),(d,s)|(x.max(d),y.max(s)))
-    }
+    /// Positions spread over a few wavelengths and the focused beam's waist (um).
+    fn positions(seed:u64)->Vec<f64>{let mut next=uniform(seed);(0..3).map(|_|4.*next()).collect()}
+    fn mismatch(a:&Dense,b:&Dense)->(f64,f64){let mut d=a.clone();d.add_scaled(-Complex::ONE,b);(d.largest(),b.largest())}
 
-    /// The trace is kept: the jumps, split into blocks, carry the whole scattering, Σ_j L_j†L_j = Γ
-    /// harmonic by harmonic.
+    /// The trace is kept: at every position the jumps, split into blocks, carry the whole
+    /// scattering, Σ_j L_j†L_j = Γ.
     #[test]
     fn the_jumps_carry_the_whole_scattering(){
         for seed in 1..=4{
-            let g=Ground::new(&perturbed(seed)).unwrap();let mut sum=Harmonics::zeros(g.ground_states.len());
-            for j in &g.jumps{for s in -1..=1{for t in -1..=1{sum.add(t-s,Complex::ONE,&j.operator.get(s).adjoint_product(j.operator.get(t)));}}}
-            let(error,scale)=mismatch(&sum,&g.scattering);assert!(error<=1e-13*scale,"seed {seed}: {error:e} of {scale:e}");
+            let r=perturbed(seed);let g=Ground::new(&r).unwrap();let e=g.eliminate(&r.hamiltonian).unwrap();
+            for x in positions(seed){
+                let local=g.local(&e,x);let mut sum=Dense::zeros(g.ground_states.len(),g.ground_states.len());
+                for l in &local.jumps{sum.add_scaled(Complex::ONE,&l.adjoint_product(l));}
+                let(error,scale)=mismatch(&sum,&local.scattering);assert!(error<=1e-13*scale,"seed {seed}, x {x}: {error:e} of {scale:e}");
+            }
         }
     }
 
-    /// Γ is the decay of the second-order shift X = V†R: Γ = −i(X − X†) + i[Y, H0g] (harmonic m of X† is
-    /// X[−m]†; the commutator, from the column-wise resolvents, vanishes for degenerate ground states).
-    /// So the decay inside K and the emission operators agree, and R solves its column equations.
+    /// Γ is the decay of the second-order shift X = Σ_c V_c†R_c: Γ = −i(X − X†) + i[Y, H0g] (the
+    /// commutator, from the column-wise resolvents, vanishes for degenerate ground states). So the
+    /// decay inside K and the emission operators agree, and R solves its column equations.
     #[test]
     fn the_scattering_is_the_decay_of_the_second_order_shift(){
         for seed in 1..=4{
-            let g=Ground::new(&perturbed(seed)).unwrap();let n=g.ground_states.len();
-            let mut x=Harmonics::zeros(n);for c in &g.carriers{for p in &c.pairs{x.add(p.absorbed-p.emitted,Complex::ONE,&p.x);}}
-            let mut decay=Harmonics::zeros(n);
-            for m in -2..=2{
-                decay.add(m,-Complex::I,x.get(m));decay.add(m,Complex::I,&x.get(-m).adjoint());
-                let y=g.admixture.get(m);decay.add(m,Complex::I,&y.product(&g.hamiltonian));decay.add(m,-Complex::I,&g.hamiltonian.product(y));
+            let r=perturbed(seed);let g=Ground::new(&r).unwrap();let e=g.eliminate(&r.hamiltonian).unwrap();let n=g.ground_states.len();
+            for x in positions(seed){
+                let(local,a)=(g.local(&e,x),g.amplitudes(x));let mut shift=Dense::zeros(n,n);
+                for c in &g.carriers{shift.add_scaled(Complex::ONE,&combine(&c.beams,&a,&g.couplings).adjoint_product(&combine(&c.beams,&a,&e.responses)));}
+                let shift=secular_part(&g.block,&shift);let y=&local.admixture;
+                let mut decay=shift.scaled(-Complex::I);decay.add_scaled(Complex::I,&shift.adjoint());
+                decay.add_scaled(Complex::I,&y.product(&e.hamiltonian));decay.add_scaled(-Complex::I,&e.hamiltonian.product(y));
+                let(error,scale)=mismatch(&decay,&local.scattering);assert!(error<=1e-12*scale,"seed {seed}, x {x}: {error:e} of {scale:e}");
             }
-            let(error,scale)=mismatch(&decay,&g.scattering);assert!(error<=1e-12*scale,"seed {seed}: {error:e} of {scale:e}");
         }
     }
 
@@ -525,12 +512,14 @@ mod tests{
     #[test]
     fn the_populations_sum_to_one(){
         for seed in 1..=4{
-            let g=Ground::new(&perturbed(seed)).unwrap();let n=g.ground_states.len();
-            let mut total=Harmonics::zeros(n);for e in &g.excited_readout{for m in -2..=2{total.add(m,Complex::ONE,e.get(m));}}
-            let(error,scale)=mismatch(&total,&g.admixture);assert!(error<=1e-13*scale,"seed {seed}: {error:e} of {scale:e}");
+            let r=perturbed(seed);let g=Ground::new(&r).unwrap();let e=g.eliminate(&r.hamiltonian).unwrap();let n=g.ground_states.len();
             let mut next=uniform(seed);let a=Dense::from_fn(n,n,|i,j|if g.block[i]==g.block[j]{Complex::new(next(),next())}else{Complex::ZERO});
             let mut rho=a.product(&a.adjoint());let trace:f64=(0..n).map(|i|rho[(i,i)].re).sum();rho=rho.scaled(Complex::new(1./trace,0.));
-            let sum:f64=g.populations(&rho,TAU*next()).iter().sum();assert!((sum-1.).abs()<=1e-14,"seed {seed}: {sum}");
+            for x in positions(seed){
+                let local=g.local(&e,x);let mut total=Dense::zeros(n,n);for readout in &local.excited_readout{total.add_scaled(Complex::ONE,readout);}
+                let(error,scale)=mismatch(&total,&local.admixture);assert!(error<=1e-13*scale,"seed {seed}, x {x}: {error:e} of {scale:e}");
+                let sum:f64=g.populations(&local,&rho).iter().sum();assert!((sum-1.).abs()<=1e-14,"seed {seed}, x {x}: {sum}");
+            }
         }
     }
 
@@ -538,32 +527,32 @@ mod tests{
     /// at most (w/pole)² of R(w)_b. At w = 0 the exact response is R itself.
     #[test]
     fn the_first_order_response_leaves_a_second_order_remainder(){
-        let g=Ground::new(&perturbed(1)).unwrap();let pole=g.secular.pole;
+        let r=perturbed(1);let g=Ground::new(&r).unwrap();let e=g.eliminate(&r.hamiltonian).unwrap();let pole=g.secular(&e).unwrap().pole;
         let norm=|m:&Dense,b:usize|(0..m.rows).map(|i|m[(i,b)].norm_sqr()).sum::<f64>().sqrt();
-        for(c,carrier)in g.carriers.iter().enumerate(){for(k,wave)in carrier.waves.iter().enumerate(){
-            assert_eq!(g.response(c,k,0.).unwrap(),wave.response);
+        for l in 0..g.beams.len(){
+            assert_eq!(g.response(&e,l,0.).unwrap(),e.responses[l]);
             for w in [pole/8.,-pole/3.]{
-                let exact=g.response(c,k,w).unwrap();let mut remainder=exact.clone();
-                remainder.add_scaled(-Complex::ONE,&wave.response);remainder.add_scaled(Complex::new(w,0.),&wave.derivative);
+                let exact=g.response(&e,l,w).unwrap();let mut remainder=exact.clone();
+                remainder.add_scaled(-Complex::ONE,&e.responses[l]);remainder.add_scaled(Complex::new(w,0.),&e.derivatives[l]);
                 for b in 0..g.ground_states.len(){
-                    let bound=(w/pole).powi(2)*norm(&exact,b)+f64::EPSILON*(norm(&wave.response,b)+w.abs()*norm(&wave.derivative,b));
-                    assert!(norm(&remainder,b)<=bound,"carrier {c}, wave {k}, w {w}, column {b}: {} > {bound}",norm(&remainder,b));
+                    let bound=(w/pole).powi(2)*norm(&exact,b)+f64::EPSILON*(norm(&e.responses[l],b)+w.abs()*norm(&e.derivatives[l],b));
+                    assert!(norm(&remainder,b)<=bound,"beam {l}, w {w}, column {b}: {} > {bound}",norm(&remainder,b));
                 }
             }
-        }}
+        }
     }
 
     /// The cooler moved to a Raman resonance with the repumper (both on F′ = 2: a Λ scheme) is refused,
-    /// naming the beams and the Raman detuning. In the PGC example the cooler is −f0 from the repumper
+    /// naming the beams and the Raman detuning. In the PGC the cooler is −f0 from the repumper
     /// (frequency axis 0), so f0 = (ν_2 − ν_1)/2π − δ_R puts the Raman detuning at δ_R.
     #[test]
     fn a_raman_resonant_lambda_scheme_is_refused(){
         let pgc=request(&fixture()["request"]);let g=Ground::new(&pgc).unwrap();
         let hyperfine=(g.blocks[1].frame-g.blocks[0].frame)/TAU;
-        for detuning in [0.,1.]{
+        for detuning in [0.,0.1]{
             let mut lambda=pgc.clone();lambda.frequencies_mhz[0]=hyperfine-detuning;
             let error=Ground::new(&lambda).unwrap_err();
-            assert!(error.starts_with("所选光束之间存在拉曼共振（")&&error.contains("「cool-plus」、「cool-minus」")&&error.contains("「repump-plus」、「repump-minus」")
+            assert!(error.starts_with("所选光束之间存在拉曼共振（")&&error.contains("「冷却光 +z」、「冷却光 −z」")&&error.contains("「回泵光 +z」、「回泵光 −z」")
                 &&error.contains(&format!("拉曼失谐 {detuning:.3} MHz"))&&error.ends_with("F=1 与 F=2 之间的相干不能忽略，1D 运动暂不支持"),"{error}");
         }
     }

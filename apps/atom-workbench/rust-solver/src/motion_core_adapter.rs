@@ -1,8 +1,8 @@
 //! The protocol bridge to the motion core (`atom_motion_core`): an rb87-full/2
 //! request whose model carries the motion block (src/full-master-model.ts
-//! `MotionModel`), the atom moving along one lab axis. It is a trajectory
-//! alone -- no long-time mean -- on the request's grid, at the fixed population
-//! tolerance.
+//! `MotionModel`), the atom in a tweezer moving radially along one lab axis. It
+//! is a trajectory alone -- no long-time mean -- on the request's grid, at the
+//! fixed population tolerance.
 //!
 //! # Result contract
 //! The lattice adapter's for a trajectory (lattice_core_adapter.rs): `states`,
@@ -13,10 +13,17 @@
 //! - `axis`, the request's;
 //! - `temperatureUK` (T = m Var(v)/k_B along the axis, uK) and
 //!   `meanVelocityMps` (m/s), one per sample;
+//! - `trapFrequencyKHz`, the trap frequency ω/2π at the focus along the axis
+//!   (kHz, positive), and `meanOccupation`, one n̄ per sample relative to it;
+//! - `lossProbability`, one per sample: the probability that the atom has left
+//!   the trap by then, from 0 to 1 and never decreasing;
 //! - `momentum`: `velocitiesMps` (the grid, strictly increasing), `samples`
 //!   (increasing sample indices, the last sample among them) and
 //!   `probabilities` (one distribution per listed sample: the probability at
-//!   each grid velocity, nonnegative, summing to one).
+//!   each grid velocity, nonnegative, summing to one); `position` likewise,
+//!   with `positionsUm` (from the focus).
+//!
+//! Every output but `lossProbability` describes the atom still held.
 //!
 //! Every checkpoint of the core's run is streamed first (`progress`: true) in
 //! the same shape.
@@ -49,7 +56,9 @@ pub struct MotionModel{
 #[derive(Clone,Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 struct MotionBeam{
-    id:String,axial:i8,wave_number_per_um:f64,frequency_index:Vec<i32>,coupling:Operator,counter_coupling:Operator,
+    id:String,name:String,direction:[f64;3],wave_number_per_um:f64,#[serde(default)] waist_um:Option<f64>,
+    #[serde(rename="intensityMWcm2")]
+    intensity_mw_cm2:f64,frequency_index:Vec<i32>,coupling:Operator,counter_coupling:Operator,
 }
 
 /// A 32 × 32 matrix of the model, its entries finite.
@@ -68,10 +77,11 @@ fn request(model:&Model,motion:&MotionModel,options:&Options)->Result<Request,St
     if motion.frame_frequencies_mhz.len()!=STATES||!motion.frame_frequencies_mhz.iter().all(|&x|finite(x)){return Err("The motion block needs the 32 states' frame frequencies".into());}
     let frequencies=model.frequency_coordinates.as_ref().and_then(|c|c.frequencies_mhz.clone()).unwrap_or_default();
     let beams=motion.beams.iter().map(|b|{
-        if !matches!(b.axial,-1|0|1)||!(finite(b.wave_number_per_um)&&b.wave_number_per_um>0.)||b.frequency_index.len()!=frequencies.len(){
-            return Err(format!("Beam {} needs an axial projection of -1, 0 or 1, a positive wave number and an index on the {} frequency axes",b.id,frequencies.len()));}
-        Ok(Beam{id:b.id.clone(),axial:b.axial,wave_number_per_um:b.wave_number_per_um,frequency_index:b.frequency_index.clone(),
-            coupling:matrix(&b.coupling,"A beam's coupling")?,counter_coupling:matrix(&b.counter_coupling,"A beam's counter-rotating coupling")?})
+        if !b.direction.iter().all(|&x|finite(x))||!(finite(b.wave_number_per_um)&&b.wave_number_per_um>0.)||b.waist_um.is_some_and(|w|!(finite(w)&&w>0.))
+            ||!(finite(b.intensity_mw_cm2)&&b.intensity_mw_cm2>=0.)||b.frequency_index.len()!=frequencies.len(){
+            return Err(format!("Beam {} needs a finite direction, a positive wave number, a positive waist if focused, a nonnegative intensity and an index on the {} frequency axes",b.id,frequencies.len()));}
+        Ok(Beam{id:b.id.clone(),name:b.name.clone(),direction:b.direction,wave_number_per_um:b.wave_number_per_um,waist_um:b.waist_um,intensity_mw_cm2:b.intensity_mw_cm2,
+            frequency_index:b.frequency_index.clone(),coupling:matrix(&b.coupling,"A beam's coupling")?,counter_coupling:matrix(&b.counter_coupling,"A beam's counter-rotating coupling")?})
     }).collect::<Result<Vec<_>,String>>()?;
     let [a,b,c]=motion.emission.as_slice()else{return Err("The motion block has three emission operators: two perpendicular to the axis, then the one along it".into())};
     let density=lattice_core_adapter::initial_density(model,&Lapack::load()?)?;
@@ -86,13 +96,18 @@ fn check(solution:&Solution,times:usize)->Result<(),String>{
     let bad=|what:&str|->Result<(),String>{Err(format!("The motion core returned {what}"))};
     let series=|v:&[f64],nonnegative:bool|v.len()==times&&v.iter().all(|&x|x.is_finite()&&(!nonnegative||x>=0.));
     if solution.populations.len()!=times||solution.populations.iter().any(|row|row.len()!=STATES||row.iter().any(|x|!x.is_finite())){return bad("populations that are not 32 finite values per time");}
-    if !series(&solution.sample_errors,true)||!series(&solution.temperature_uk,true)||!series(&solution.mean_velocity_mps,false){
-        return bad("per-time errors, temperatures or mean velocities that are not one finite value per time");}
-    let m=&solution.momentum;
-    if m.velocities_mps.len()<2||m.velocities_mps.iter().any(|v|!v.is_finite())||m.velocities_mps.windows(2).any(|w|w[1]<=w[0]){return bad("a momentum grid that is not strictly increasing");}
-    if m.samples.last()!=Some(&(times-1))||m.samples.windows(2).any(|w|w[1]<=w[0])||m.probabilities.len()!=m.samples.len(){return bad("momentum distributions not at increasing times ending with the last");}
-    if m.probabilities.iter().any(|p|p.len()!=m.velocities_mps.len()||p.iter().any(|&x|!(0. ..=1.).contains(&x))||(p.iter().sum::<f64>()-1.).abs()>lattice_core_adapter::TRACE_LIMIT){
-        return bad("a momentum distribution that is not a probability on its grid");}
+    if !series(&solution.sample_errors,true)||!series(&solution.temperature_uk,true)||!series(&solution.mean_velocity_mps,false)||!series(&solution.mean_occupation,false){
+        return bad("per-time errors, temperatures, mean velocities or occupations that are not one finite value per time");}
+    if !(solution.trap_frequency_khz.is_finite()&&solution.trap_frequency_khz>0.){return bad("a trap frequency that is not positive");}
+    let loss=&solution.loss_probability;
+    if !series(loss,true)||loss.iter().any(|&p|p>1.)||loss.windows(2).any(|w|w[1]<w[0]){return bad("loss probabilities that are not probabilities never decreasing in time");}
+    for(m,what)in [(&solution.momentum,"momentum"),(&solution.position,"position")]{
+        if m.grid.len()<2||m.grid.iter().any(|v|!v.is_finite())||m.grid.windows(2).any(|w|w[1]<=w[0]){return bad(&format!("a {what} grid that is not strictly increasing"));}
+        if m.samples.last()!=Some(&(times-1))||m.samples.windows(2).any(|w|w[1]<=w[0])||m.probabilities.len()!=m.samples.len(){
+            return bad(&format!("{what} distributions not at increasing times ending with the last"));}
+        if m.probabilities.iter().any(|p|p.len()!=m.grid.len()||p.iter().any(|&x|!(0. ..=1.).contains(&x))||(p.iter().sum::<f64>()-1.).abs()>lattice_core_adapter::TRACE_LIMIT){
+            return bad(&format!("a {what} distribution that is not a probability on its grid"));}
+    }
     Ok(())
 }
 
@@ -102,13 +117,15 @@ fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,g
     let initial:Vec<f64>=(0..STATES).map(|i|request.initial_density[i*STATES+i].re).collect();
     let(trace,initial_error)=lattice_core_adapter::row_errors(&solution.populations,&initial)?;
     let estimated=solution.sample_errors.iter().fold(0_f64,|a,&b|a.max(b));let converged=estimated<=POPULATION_TOLERANCE;
-    let m=&solution.momentum;
+    let(m,x)=(&solution.momentum,&solution.position);
     let mut result=json!({"states":model.states,"timesUs":request.times_us,"populations":solution.populations,
         "populationAccuracy":{"status":if converged{"estimated-converged"}else{"estimated-partial"},"requestedTolerance":POPULATION_TOLERANCE,
             "sampleErrors":solution.sample_errors,"estimatedMaximumError":estimated,"scope":{"states":STATES,"samples":times,"groups":groups}},
         "diagnostics":{"engine":ENGINE,"traceError":trace,"initialStateError":initial_error,"elapsedMs":started.elapsed().as_secs_f64()*1000.,"method":solution.method},
         "motion":{"axis":motion.axis,"temperatureUK":solution.temperature_uk,"meanVelocityMps":solution.mean_velocity_mps,
-            "momentum":{"velocitiesMps":m.velocities_mps,"samples":m.samples,"probabilities":m.probabilities}}});
+            "trapFrequencyKHz":solution.trap_frequency_khz,"meanOccupation":solution.mean_occupation,"lossProbability":solution.loss_probability,
+            "momentum":{"velocitiesMps":m.grid,"samples":m.samples,"probabilities":m.probabilities},
+            "position":{"positionsUm":x.grid,"samples":x.samples,"probabilities":x.probabilities}}});
     // A result above the tolerance says why it stopped there.
     if !converged{result["populationAccuracy"]["reason"]=json!(solution.reason.clone()
         .unwrap_or_else(||format!("The error bound is {estimated:.2e} against the tolerance {POPULATION_TOLERANCE:e}")));}

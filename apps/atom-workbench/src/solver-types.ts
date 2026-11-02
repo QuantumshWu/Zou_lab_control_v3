@@ -57,28 +57,41 @@ export interface MeanResult {
   /** The time T of p̄(T) (us); undefined when no mean was requested. */
   horizonUs?:number;
 }
-/** A motion result's momentum distributions: on one grid of velocities along the axis (m/s,
- * strictly increasing), at some of the sample times -- `samples`, increasing indices into timesUs,
- * the last sample among them -- each the probability at every grid velocity, summing to one. */
-export interface MomentumDistributions {velocitiesMps:number[];samples:number[];probabilities:number[][]}
-/** The motion of a 1D motion result (ui-design.md §6.20) along its axis, at every sample: the
- * temperature T = m·Var(v)/k_B (μK) and the mean velocity (m/s); and its momentum distributions. */
-export interface MotionResult {axis:MotionAxis;temperatureUK:number[];meanVelocityMps:number[];momentum:MomentumDistributions}
+/** A motion result's distributions along the axis: on one grid (strictly increasing), at some of
+ * the sample times -- `samples`, increasing indices into timesUs, the last sample among them --
+ * each the probability at every grid point, summing to one. */
+export interface Distributions {grid:number[];samples:number[];probabilities:number[][]}
+/** The motion of a 1D motion result (ui-design.md §6.20): a single atom in the tweezer moving
+ * radially along its axis. At every sample the temperature T = m·Var(v)/k_B (μK), the mean
+ * velocity (m/s), n̄ relative to the trap frequency at the focus (`trapFrequencyKHz`, ω/2π, the one
+ * the engine used) and the probability that the atom has left the trap by then; the momentum
+ * distributions (grid: velocities, m/s) and the position distributions (grid: positions from the
+ * focus, μm). Everything but the loss describes the atom still held. */
+export interface MotionResult {
+  axis:MotionAxis;temperatureUK:number[];meanVelocityMps:number[];trapFrequencyKHz:number;meanOccupation:number[];lossProbability:number[];
+  momentum:Distributions;position:Distributions;
+}
 /** The motion block of a result with `samples` samples, read strictly (rust-solver/src/motion_core_adapter.rs). */
 export function readMotionResult(value:unknown,samples:number,axis:MotionAxis):MotionResult {
   const invalid=():never=>{throw new Error('Invalid motion result');};
   const object=(v:unknown,keys:readonly string[]):Record<string,unknown>=>{if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).length!==keys.length||!keys.every(key=>Object.hasOwn(v,key)))invalid();return v as Record<string,unknown>;};
   const series=(v:unknown,length:number,admits:(x:number)=>boolean):number[]=>{if(!Array.isArray(v)||v.length!==length||!v.every(x=>typeof x==='number'&&Number.isFinite(x)&&admits(x)))invalid();return [...(v as number[])];};
-  const m=object(value,['axis','temperatureUK','meanVelocityMps','momentum']);
-  if(m.axis!==axis)invalid();
-  const p=object(m.momentum,['velocitiesMps','samples','probabilities']);
-  const velocities=Array.isArray(p.velocitiesMps)?series(p.velocitiesMps,p.velocitiesMps.length,()=>true):invalid();
-  const at=Array.isArray(p.samples)?series(p.samples,p.samples.length,i=>Number.isInteger(i)&&i>=0&&i<samples):invalid();
-  if(velocities.length<2||velocities.some((v,i)=>i>0&&v<=velocities[i-1]!)||!at.length||at.some((i,k)=>k>0&&i<=at[k-1]!)||at.at(-1)!==samples-1)invalid();
-  // Each distribution is a probability vector, its sum one as the population rows' are.
-  const rows=Array.isArray(p.probabilities)&&p.probabilities.length===at.length?p.probabilities.map(row=>series(row,velocities.length,x=>x>=0&&x<=1)):invalid();
-  if(rows.some(row=>Math.abs(row.reduce((a,b)=>a+b,0)-1)>5e-6))invalid();
-  return {axis,temperatureUK:series(m.temperatureUK,samples,x=>x>=0),meanVelocityMps:series(m.meanVelocityMps,samples,()=>true),momentum:{velocitiesMps:velocities,samples:at,probabilities:rows}};
+  const distributions=(v:unknown,gridKey:string):Distributions=>{
+    const p=object(v,[gridKey,'samples','probabilities']),values=p[gridKey];
+    const grid=Array.isArray(values)?series(values,values.length,()=>true):invalid();
+    const at=Array.isArray(p.samples)?series(p.samples,p.samples.length,i=>Number.isInteger(i)&&i>=0&&i<samples):invalid();
+    if(grid.length<2||grid.some((x,i)=>i>0&&x<=grid[i-1]!)||!at.length||at.some((i,k)=>k>0&&i<=at[k-1]!)||at.at(-1)!==samples-1)invalid();
+    // Each distribution is a probability vector, its sum one as the population rows' are.
+    const rows=Array.isArray(p.probabilities)&&p.probabilities.length===at.length?p.probabilities.map(row=>series(row,grid.length,x=>x>=0&&x<=1)):invalid();
+    if(rows.some(row=>Math.abs(row.reduce((a,b)=>a+b,0)-1)>5e-6))invalid();
+    return {grid,samples:at,probabilities:rows};
+  };
+  const m=object(value,['axis','temperatureUK','meanVelocityMps','trapFrequencyKHz','meanOccupation','lossProbability','momentum','position']);
+  if(m.axis!==axis||typeof m.trapFrequencyKHz!=='number'||!Number.isFinite(m.trapFrequencyKHz)||!(m.trapFrequencyKHz>0))invalid();
+  const loss=series(m.lossProbability,samples,x=>x>=0&&x<=1);if(loss.some((p,i)=>i>0&&p<loss[i-1]!))invalid();
+  return {axis,temperatureUK:series(m.temperatureUK,samples,x=>x>=0),meanVelocityMps:series(m.meanVelocityMps,samples,()=>true),
+    trapFrequencyKHz:m.trapFrequencyKHz as number,meanOccupation:series(m.meanOccupation,samples,()=>true),lossProbability:loss,
+    momentum:distributions(m.momentum,'velocitiesMps'),position:distributions(m.position,'positionsUm')};
 }
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];

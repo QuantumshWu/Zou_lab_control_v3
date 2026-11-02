@@ -1,8 +1,9 @@
-// 1D motion's charts (ui-design.md §6.20): the temperature and the mean velocity along the axis
-// against time, sharing one time axis, and the momentum distribution -- as a velocity density --
-// at the last time and, when asked, at another listed time. Each reads actual samples only.
+// 1D motion's charts (ui-design.md §6.20): two series against time in two panels sharing one time
+// axis -- the temperature and the mean velocity, or n̄ and the loss probability -- and a
+// distribution along the axis -- of the velocity or of the position, as a density -- at the last
+// time and, when asked, at another listed time. Each reads actual samples only.
 import type {DurationUnit} from './types.js';
-import type {MotionResult} from './solver-types.js';
+import type {Distributions,MotionResult} from './solver-types.js';
 import {RB87} from './physics.js';
 import {timeDisplayUnit} from './duration.js';
 import {formatNumber} from './format.js';
@@ -12,15 +13,19 @@ const BOLTZMANN=1.380649e-23;
 const SVG='http://www.w3.org/2000/svg';
 const esc=(value:unknown)=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 const clamp=(n:number,a:number,b:number)=>Math.min(b,Math.max(a,n));
-/** The v3 series palette's first two (population-chart.ts): the last time, then the compared one. */
+/** The v3 series palette's first two (population-chart.ts): the top panel's series and the last
+ * time, then the bottom panel's and the compared time. */
 export const MOTION_INKS=['#517FA6','#B17D4B'] as const;
 const GRID='#e1dfdd',INK='#6a6866',LEFT=64,RIGHT=778;
 
-/** Velocity units, largest first. */
+/** A display unit: its name and the factor from the base unit. */
+interface Unit {name:string;factor:number}
+/** Velocity units (in m/s) and length units (in μm), largest first. */
 const VELOCITY_UNITS:readonly (readonly [string,number])[]=[['m/s',1],['cm/s',1e-2],['mm/s',1e-3],['μm/s',1e-6]];
-/** The largest velocity unit in which `magnitude` (m/s) reads at least 1. */
-export function velocityUnit(magnitude:number):{name:string;factor:number}{
-  const [name,size]=VELOCITY_UNITS.find(([,size])=>magnitude>=size)??VELOCITY_UNITS.at(-1)!;return {name,factor:1/size};
+const LENGTH_UNITS:readonly (readonly [string,number])[]=[['μm',1],['nm',1e-3]];
+/** The largest of `units` in which `magnitude` (base units) reads at least 1. */
+function unitFor(units:readonly (readonly [string,number])[],magnitude:number):Unit{
+  const [name,size]=units.find(([,size])=>magnitude>=size)??units.at(-1)!;return {name,factor:1/size};
 }
 /** The thermal width of the velocity along one axis, sqrt(k_B T/m) (m/s), at T (μK). */
 export function thermalVelocity(temperatureUK:number):number{return Math.sqrt(BOLTZMANN*temperatureUK*1e-6/RB87.massKg);}
@@ -36,61 +41,84 @@ function ticksWithin(low:number,high:number,intervals:number):number[]{
 }
 const digits=(n:number)=>formatNumber(n,{digits:4});
 
-/** A grid point's share of the velocity axis: half the way to each neighbour (the whole way at an end). */
-function cellWidths(v:readonly number[]):number[]{return v.map((_,i)=>((v[Math.min(i+1,v.length-1)]!-v[Math.max(i-1,0)]!)/(i===0||i===v.length-1?1:2)));}
-/** A listed distribution as a density on the velocity axis (per m/s). */
-export function momentumDensity(result:MotionResult,listed:number):number[]{
-  const widths=cellWidths(result.momentum.velocitiesMps);return result.momentum.probabilities[listed]!.map((p,i)=>p/widths[i]!);
+/** One panel's series: its name, its axis title, its values (base units) and display unit; its axis
+ * runs from 0 to the top of its ticks, or symmetrically about 0 out to `reach` (base units). */
+export interface Series {id:string;name:string;title:string;values:readonly number[];unit:Unit;reach?:number}
+export type SeriesKind='temperature'|'trap';
+/** The two series of a motion result's time chart: T above ⟨v⟩ -- the drift read against the
+ * thermal width it moves in, its axis as wide as the larger of the two -- or n̄ (relative to the
+ * trap frequency the engine used) above the loss probability. */
+export function motionSeries(motion:MotionResult,kind:SeriesKind):[Series,Series]{
+  if(kind==='trap')return [
+    {id:'occupation',name:'n̄',title:`平均振动量子数 n̄（ω/2π = ${digits(motion.trapFrequencyKHz)} kHz）`,values:motion.meanOccupation,unit:{name:'',factor:1}},
+    {id:'loss',name:'损失概率',title:'累计损失概率 / %',values:motion.lossProbability,unit:{name:'%',factor:100}}];
+  const reach=Math.max(...motion.meanVelocityMps.map(Math.abs),...motion.temperatureUK.map(thermalVelocity)),velocity=unitFor(VELOCITY_UNITS,reach);
+  return [{id:'temperature',name:'温度 T',title:'温度 T / μK',values:motion.temperatureUK,unit:{name:'μK',factor:1}},
+    {id:'mean-velocity',name:'⟨v⟩',title:`平均速度 ⟨v⟩ / ${velocity.name}`,values:motion.meanVelocityMps,unit:velocity,reach}];
 }
-
-export interface MotionSeriesLayout {top:{top:number;bottom:number};bottom:{top:number;bottom:number};unit:{name:DurationUnit;factor:number};
-  velocity:{name:string;factor:number};temperatureTop:number;velocityTop:number;x:(t:number)=>number;yT:(T:number)=>number;yV:(v:number)=>number}
-/** The two panels: T from 0 to the top of its ticks; ⟨v⟩ symmetric about 0, as wide as the larger
- * of its own reach and the thermal width -- a drift is read against the spread it moves in. */
-export function motionSeriesLayout(timesUs:readonly number[],motion:MotionResult,timeUnit?:DurationUnit):MotionSeriesLayout{
-  const top={top:32,bottom:176},bottom={top:212,bottom:300},span=timesUs.at(-1)!-timesUs[0]!;
-  const temperatureTop=ticks(Math.max(...motion.temperatureUK)).at(-1)!;
-  const reach=Math.max(...motion.meanVelocityMps.map(Math.abs),...motion.temperatureUK.map(thermalVelocity)),velocity=velocityUnit(reach);
-  const velocityTop=ticks(reach*velocity.factor,2).at(-1)!/velocity.factor;
-  return {top,bottom,unit:timeDisplayUnit(timesUs.at(-1)!,timeUnit),velocity,temperatureTop,velocityTop,
-    x:t=>LEFT+(t-timesUs[0]!)/span*(RIGHT-LEFT),yT:T=>top.bottom-T/temperatureTop*(top.bottom-top.top),
-    yV:v=>(bottom.top+bottom.bottom)/2-v/velocityTop*(bottom.bottom-bottom.top)/2};
+/** A panel: its series, its vertical span and ticks (display units), and where a value goes. */
+interface Panel {series:Series;top:number;bottom:number;ticks:number[];y:(value:number)=>number}
+function panel(series:Series,top:number,bottom:number):Panel{
+  const factor=series.unit.factor;
+  if(series.reach!==undefined){
+    const reach=ticks(series.reach*factor,2).at(-1)!;
+    return {series,top,bottom,ticks:ticks(reach,2).flatMap(v=>v?[-v,v]:[0]),y:v=>(top+bottom)/2-v*factor/reach*(bottom-top)/2};
+  }
+  const highest=ticks(Math.max(0,...series.values)*factor||1).at(-1)!;
+  return {series,top,bottom,ticks:ticks(highest),y:v=>bottom-v*factor/highest*(bottom-top)};
+}
+interface SeriesLayout {panels:[Panel,Panel];unit:{name:DurationUnit;factor:number};x:(t:number)=>number}
+function seriesLayout(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit):SeriesLayout{
+  const span=timesUs.at(-1)!-timesUs[0]!;
+  return {panels:[panel(series[0],32,176),panel(series[1],212,300)],unit:timeDisplayUnit(timesUs.at(-1)!,timeUnit),x:t=>LEFT+(t-timesUs[0]!)/span*(RIGHT-LEFT)};
 }
 const line=(x1:number,y1:number,x2:number,y2:number,attrs='')=>`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" ${attrs}/>`;
 const text=(x:number,y:number,label:string,attrs='')=>`<text x="${x}" y="${y}" font-size="12" fill="${INK}" ${attrs}>${esc(label)}</text>`;
 const polyline=(xs:readonly number[],ys:readonly number[],ink:string,attrs='')=>`<polyline points="${xs.map((x,i)=>`${x.toFixed(4)},${ys[i]!.toFixed(4)}`).join(' ')}" fill="none" stroke="${ink}" stroke-width="2" ${attrs}/>`;
 const svg=(cls:string,label:string,body:string)=>`<svg class="chart-svg ${cls}" viewBox="0 0 800 355" xmlns="${SVG}" role="img" tabindex="0" aria-label="${esc(label)}" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" style="fill:#323130;outline:none">${body}</svg>`;
 
-/** T(t) above ⟨v⟩(t), on the result's samples. */
-export function motionSeriesChart(timesUs:readonly number[],motion:MotionResult,timeUnit?:DurationUnit):string{
-  const g=motionSeriesLayout(timesUs,motion,timeUnit),xs=timesUs.map(g.x);
+/** The two series on the result's samples, one per panel. */
+export function seriesChart(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit):string{
+  const g=seriesLayout(timesUs,series,timeUnit),xs=timesUs.map(g.x);
   let body='';
-  for(const T of ticks(g.temperatureTop))body+=line(LEFT,g.yT(T),RIGHT,g.yT(T),`stroke="${GRID}"`)+text(LEFT-12,g.yT(T)+4,digits(T),'text-anchor="end"');
-  const top=g.velocityTop*g.velocity.factor;
-  for(const v of ticks(top,2).flatMap(v=>v?[-v,v]:[0]))body+=line(LEFT,g.yV(v/g.velocity.factor),RIGHT,g.yV(v/g.velocity.factor),`stroke="${GRID}"`)+text(LEFT-12,g.yV(v/g.velocity.factor)+4,digits(v),'text-anchor="end"');
-  for(let i=0;i<=4;i++){const t=timesUs[0]!+(timesUs.at(-1)!-timesUs[0]!)*i/4;body+=text(g.x(t),g.bottom.bottom+24,digits(t*g.unit.factor),'text-anchor="middle"');}
-  body+=text(LEFT,19,'温度 T / μK')+text(LEFT,g.bottom.top-8,`平均速度 ⟨v⟩ / ${g.velocity.name}`)+text(RIGHT,g.bottom.bottom+47,`t / ${g.unit.name}`,'text-anchor="end"');
-  body+=polyline(xs,motion.temperatureUK.map(g.yT),MOTION_INKS[0],'data-series-id="temperature"')+polyline(xs,motion.meanVelocityMps.map(g.yV),MOTION_INKS[1],'data-series-id="mean-velocity"');
-  return svg('motion-series-svg','沿运动轴的温度与平均速度随时间的变化。移动指针读取采样值，方向键逐点查看。',body+'<g class="motion-cursor" pointer-events="none" style="display:none"></g>');
+  for(const p of g.panels)for(const v of p.ticks){const y=p.y(v/p.series.unit.factor);body+=line(LEFT,y,RIGHT,y,`stroke="${GRID}"`)+text(LEFT-12,y+4,digits(v),'text-anchor="end"');}
+  for(let i=0;i<=4;i++){const t=timesUs[0]!+(timesUs.at(-1)!-timesUs[0]!)*i/4;body+=text(g.x(t),g.panels[1].bottom+24,digits(t*g.unit.factor),'text-anchor="middle"');}
+  body+=text(LEFT,19,g.panels[0].series.title)+text(LEFT,g.panels[1].top-8,g.panels[1].series.title)+text(RIGHT,g.panels[1].bottom+47,`t / ${g.unit.name}`,'text-anchor="end"');
+  g.panels.forEach((p,k)=>{body+=polyline(xs,p.series.values.map(p.y),MOTION_INKS[k],`data-series-id="${p.series.id}"`);});
+  return svg('motion-series-svg',`${series.map(s=>s.name).join('与')}随时间的变化。移动指针读取采样值，方向键逐点查看。`,body+'<g class="motion-cursor" pointer-events="none" style="display:none"></g>');
 }
 
-/** The momentum chart's axes: the grid's whole span; densities from 0 to the top of their ticks. */
-function momentumLayout(motion:MotionResult,listed:readonly number[]){
-  const v=motion.momentum.velocitiesMps,unit=velocityUnit(Math.max(Math.abs(v[0]!),Math.abs(v.at(-1)!)));
-  const curves=listed.map(i=>momentumDensity(motion,i)),top=ticks(Math.max(...curves.flat())/unit.factor).at(-1)!;
-  return {v,unit,curves,top,x:(w:number)=>LEFT+(w-v[0]!)/(v.at(-1)!-v[0]!)*(RIGHT-LEFT),y:(density:number)=>300-density/unit.factor/top*(300-32)};
+/** The distribution kinds: the velocity (grid in m/s) and the position from the focus (grid in μm). */
+export type DistributionKind='momentum'|'position';
+const DISTRIBUTIONS:Readonly<Record<DistributionKind,{units:readonly (readonly [string,number])[];symbol:string;words:string}>>={
+  momentum:{units:VELOCITY_UNITS,symbol:'v',words:'速度'},position:{units:LENGTH_UNITS,symbol:'x',words:'位置'},
+};
+export function distributions(motion:MotionResult,kind:DistributionKind):Distributions{return kind==='momentum'?motion.momentum:motion.position;}
+/** A grid point's share of the axis: half the way to each neighbour (the whole way at an end). */
+function cellWidths(v:readonly number[]):number[]{return v.map((_,i)=>((v[Math.min(i+1,v.length-1)]!-v[Math.max(i-1,0)]!)/(i===0||i===v.length-1?1:2)));}
+/** A listed distribution as a density on its grid (per base unit). */
+export function density(d:Distributions,listed:number):number[]{const widths=cellWidths(d.grid);return d.probabilities[listed]!.map((p,i)=>p/widths[i]!);}
+/** The distribution chart's axes: the grid's whole span; densities from 0 to the top of their ticks. */
+function distributionLayout(motion:MotionResult,kind:DistributionKind,listed:readonly number[]){
+  const d=distributions(motion,kind),grid=d.grid,unit=unitFor(DISTRIBUTIONS[kind].units,Math.max(Math.abs(grid[0]!),Math.abs(grid.at(-1)!)));
+  const curves=listed.map(i=>density(d,i)),top=ticks(Math.max(...curves.flat())/unit.factor).at(-1)!;
+  return {grid,unit,curves,top,x:(w:number)=>LEFT+(w-grid[0]!)/(grid.at(-1)!-grid[0]!)*(RIGHT-LEFT),y:(value:number)=>300-value/unit.factor/top*(300-32)};
 }
-/** The momentum distributions drawn: the last listed time's and, when asked, another listed one's. */
-export function momentumChart(motion:MotionResult,listed:readonly number[]):string{
-  const {v,unit,curves,top,x,y}=momentumLayout(motion,listed);
+/** The distributions drawn: the last listed time's and, when asked, another listed one's. */
+export function distributionChart(motion:MotionResult,kind:DistributionKind,listed:readonly number[]):string{
+  const {grid,unit,curves,top,x,y}=distributionLayout(motion,kind,listed),{symbol,words}=DISTRIBUTIONS[kind];
   let body='';
   for(const d of ticks(top))body+=line(LEFT,y(d*unit.factor),RIGHT,y(d*unit.factor),`stroke="${GRID}"`)+text(LEFT-12,y(d*unit.factor)+4,digits(d),'text-anchor="end"');
-  for(const w of ticksWithin(v[0]!*unit.factor,v.at(-1)!*unit.factor,8))body+=text(x(w/unit.factor),324,digits(w),'text-anchor="middle"');
-  body+=text(LEFT,19,`概率密度 / (${unit.name})⁻¹`)+text(RIGHT,347,`v / ${unit.name}`,'text-anchor="end"');
+  for(const w of ticksWithin(grid[0]!*unit.factor,grid.at(-1)!*unit.factor,8))body+=text(x(w/unit.factor),324,digits(w),'text-anchor="middle"');
+  body+=text(LEFT,19,`概率密度 / (${unit.name})⁻¹`)+text(RIGHT,347,`${symbol} / ${unit.name}`,'text-anchor="end"');
   // The compared time behind, dashed; the last time on top.
-  curves.slice().reverse().forEach((density,k)=>{const index=curves.length-1-k;body+=polyline(v.map(x),density.map(y),MOTION_INKS[index]!,`data-series-id="momentum-${index}"${index?' stroke-dasharray="6 4"':''}`);});
-  return svg('momentum-svg','沿运动轴的速度分布。移动指针读取各速度的概率密度。',body+'<g class="motion-cursor" pointer-events="none" style="display:none"></g>');
+  curves.slice().reverse().forEach((values,k)=>{const index=curves.length-1-k;body+=polyline(grid.map(x),values.map(y),MOTION_INKS[index]!,`data-series-id="${kind}-${index}"${index?' stroke-dasharray="6 4"':''}`);});
+  return svg('distribution-svg',`沿运动轴的${words}分布。移动指针读取各${words}的概率密度。`,body+'<g class="motion-cursor" pointer-events="none" style="display:none"></g>');
 }
+/** √⟨x²⟩ of a listed distribution (its grid's unit): for positions, the root-mean-square distance from the focus. */
+export function rootMeanSquare(d:Distributions,listed:number):number{return Math.sqrt(d.probabilities[listed]!.reduce((sum,p,i)=>sum+p*d.grid[i]!**2,0));}
+/** A length (μm) in the unit that fits it. */
+export function lengthText(um:number):string{const unit=unitFor(LENGTH_UNITS,Math.abs(um));return `${formatNumber(um*unit.factor,{digits:4})} ${unit.name}`;}
 
 /** A readout card beside a cursor, on its wider side (as the population chart's). */
 function readoutCard(host:HTMLElement,label:string):HTMLDivElement{
@@ -118,30 +146,29 @@ function bindCursor(host:HTMLElement,svg:SVGSVGElement,count:number,at:(i:number
 }
 const mark=(name:string,attrs:Record<string,string>)=>{const node=document.createElementNS(SVG,name);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,value);return node;};
 
-/** The time cursor of the T and ⟨v⟩ chart: the sample's T and ⟨v⟩. */
-export function bindMotionSeries(host:HTMLElement,timesUs:readonly number[],motion:MotionResult,timeUnit?:DurationUnit):()=>void{
+/** The time cursor of a series chart: both series at the sample. */
+export function bindSeries(host:HTMLElement,timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit):()=>void{
   const svg=host.querySelector<SVGSVGElement>('svg.motion-series-svg');if(!svg)return ()=>{};
-  const g=motionSeriesLayout(timesUs,motion,timeUnit),card=readoutCard(host,'所选时刻的温度与平均速度');
+  const g=seriesLayout(timesUs,series,timeUnit),card=readoutCard(host,`所选时刻的${series.map(s=>s.name).join('与')}`);
   const unbind=bindCursor(host,svg,timesUs.length,i=>g.x(timesUs[i]!),(i,cursor)=>{
-    const xx=g.x(timesUs[i]!),T=motion.temperatureUK[i]!,v=motion.meanVelocityMps[i]!;
-    cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:String(g.top.top),y2:String(g.bottom.bottom),stroke:'#a19f9d','stroke-width':'1'}),
-      mark('circle',{cx:String(xx),cy:String(g.yT(T)),r:'3',fill:MOTION_INKS[0],stroke:'white','stroke-width':'1.5'}),mark('circle',{cx:String(xx),cy:String(g.yV(v)),r:'3',fill:MOTION_INKS[1],stroke:'white','stroke-width':'1.5'}));
-    card.innerHTML=`<div class="readout-time">t = ${esc(digits(timesUs[i]!*g.unit.factor))} ${esc(g.unit.name)}</div>`+
-      `<div class="readout-row two"><span class="readout-name" style="color:${MOTION_INKS[0]}">温度 T</span><span>${esc(formatNumber(T,{digits:4}))} μK</span></div>`+
-      `<div class="readout-row two"><span class="readout-name" style="color:${MOTION_INKS[1]}">⟨v⟩</span><span>${esc(formatNumber(v*g.velocity.factor,{digits:4}))} ${esc(g.velocity.name)}</span></div>`;
+    const xx=g.x(timesUs[i]!);
+    cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:String(g.panels[0].top),y2:String(g.panels[1].bottom),stroke:'#a19f9d','stroke-width':'1'}),
+      ...g.panels.map((p,k)=>mark('circle',{cx:String(xx),cy:String(p.y(p.series.values[i]!)),r:'3',fill:MOTION_INKS[k],stroke:'white','stroke-width':'1.5'})));
+    card.innerHTML=`<div class="readout-time">t = ${esc(digits(timesUs[i]!*g.unit.factor))} ${esc(g.unit.name)}</div>`+g.panels.map((p,k)=>
+      `<div class="readout-row two"><span class="readout-name" style="color:${MOTION_INKS[k]}">${esc(p.series.name)}</span><span>${esc(formatNumber(p.series.values[i]!*p.series.unit.factor,{digits:4}))}${p.series.unit.name?` ${esc(p.series.unit.name)}`:''}</span></div>`).join('');
     placeCard(host,svg,card,xx);
   },()=>{card.hidden=true;});
   return ()=>{unbind();card.remove();};
 }
-/** The velocity cursor of the momentum chart: each drawn distribution's density there. */
-export function bindMomentum(host:HTMLElement,motion:MotionResult,listed:readonly number[],names:readonly string[]):()=>void{
-  const svg=host.querySelector<SVGSVGElement>('svg.momentum-svg');if(!svg)return ()=>{};
-  const {v,unit,curves,x,y}=momentumLayout(motion,listed),card=readoutCard(host,'所选速度的概率密度');
-  const unbind=bindCursor(host,svg,v.length,i=>x(v[i]!),(i,cursor)=>{
-    const xx=x(v[i]!);cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:'32',y2:'300',stroke:'#a19f9d','stroke-width':'1'}));
-    curves.forEach((density,k)=>cursor.append(mark('circle',{cx:String(xx),cy:String(y(density[i]!)),r:'3',fill:MOTION_INKS[k]!,stroke:'white','stroke-width':'1.5'})));
-    card.innerHTML=`<div class="readout-time">v = ${esc(digits(v[i]!*unit.factor))} ${esc(unit.name)}</div>`+curves.map((density,k)=>
-      `<div class="readout-row two"><span class="readout-name" style="color:${MOTION_INKS[k]}">${esc(names[k]??'')}</span><span>${esc(formatNumber(density[i]!/unit.factor,{digits:4}))} (${esc(unit.name)})⁻¹</span></div>`).join('');
+/** The grid cursor of a distribution chart: each drawn distribution's density there. */
+export function bindDistribution(host:HTMLElement,motion:MotionResult,kind:DistributionKind,listed:readonly number[],names:readonly string[]):()=>void{
+  const svg=host.querySelector<SVGSVGElement>('svg.distribution-svg');if(!svg)return ()=>{};
+  const {grid,unit,curves,x,y}=distributionLayout(motion,kind,listed),{symbol,words}=DISTRIBUTIONS[kind],card=readoutCard(host,`所选${words}的概率密度`);
+  const unbind=bindCursor(host,svg,grid.length,i=>x(grid[i]!),(i,cursor)=>{
+    const xx=x(grid[i]!);cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:'32',y2:'300',stroke:'#a19f9d','stroke-width':'1'}));
+    curves.forEach((values,k)=>cursor.append(mark('circle',{cx:String(xx),cy:String(y(values[i]!)),r:'3',fill:MOTION_INKS[k]!,stroke:'white','stroke-width':'1.5'})));
+    card.innerHTML=`<div class="readout-time">${symbol} = ${esc(digits(grid[i]!*unit.factor))} ${esc(unit.name)}</div>`+curves.map((values,k)=>
+      `<div class="readout-row two"><span class="readout-name" style="color:${MOTION_INKS[k]}">${esc(names[k]??'')}</span><span>${esc(formatNumber(values[i]!/unit.factor,{digits:4}))} (${esc(unit.name)})⁻¹</span></div>`).join('');
     placeCard(host,svg,card,xx);
   },()=>{card.hidden=true;});
   return ()=>{unbind();card.remove();};

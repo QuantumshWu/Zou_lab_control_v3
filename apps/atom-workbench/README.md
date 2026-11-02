@@ -75,12 +75,15 @@ because it is small or labelled forbidden.
   errors propagated through the dressed blocks; beyond 1 ms the trajectory
   continues as the expansion in the slow eigenmodes.
 
-1D motion (布居演化 · 1D 运动, docs/ui-design.md §6.20): a request whose model
-carries the `motion` block -- the beams kept apart with their axial
-projections and wave numbers, the emission resolved on the axis -- is a
-trajectory alone, served by the motion core in `rust-solver/motion-core`
-(`motion_core_adapter.rs`). Its engine is not implemented yet: exact free
-flight is served, anything else is refused (运动引擎尚未实现).
+1D motion (布居演化 · 1D 运动, docs/ui-design.md §6.20): a single atom in an
+optical tweezer moving radially, along a lab axis through the focus
+perpendicular to every focused beam. A request whose model carries the
+`motion` block is a trajectory alone, served by the motion core in
+`rust-solver/motion-core` (`motion_core_adapter.rs`). In that block the beams
+are kept apart, each with its direction, wave number, waist and intensity at
+the atom, and the emission is resolved on the axis. Its engine is not
+implemented yet: a request with light is refused (运动引擎尚未实现), one
+without has nothing to confine the atom.
 
 Every request asks for the same absolute population error,
 `populationTolerance: 0.005` on the probability scale (0.5%); it is not a user

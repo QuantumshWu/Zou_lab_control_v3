@@ -42,7 +42,7 @@ export class DynamicsClient {
   }
   private async run(job:Job):Promise<void>{
     if(this.current!==job||job.controller.signal.aborted)return;
-    job.attempt++;let evidence:unknown;const motion=motionRequest(job.settings);
+    job.attempt++;let evidence:unknown;const motion=motionRequest(job.scene,job.settings);
     try{
       const response=await this.transport(this.base+'/api/solve',{method:'POST',signal:job.controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({modelSchema:FULL_MODEL_SCHEMA,stream:!!job.onProgress,request:{clientId:this.clientId,sequence:job.id},scene:job.scene,options:{
         initialStateId:job.settings.initialStateId,initialState:canonicalInitialState(resolveInitialState(job.settings)),durationUs:job.settings.durationUs,samples:job.settings.samples,
@@ -87,7 +87,7 @@ export class DynamicsClient {
       // single t = 0 row of a mean request) with its per-sample errors, and the mean when computed.
       const data=event.data;
       if(data?.progress!==true||data.request?.clientId!==this.clientId||data.request.sequence!==job.id||data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||!data.service?.capabilities?.includes(FULL_MODEL_SCHEMA))throw new Error('中间结果与当前请求不匹配。');
-      const checkpoint=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings),job.settings.meanHorizonUs,motionRequest(job.settings));
+      const checkpoint=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings),job.settings.meanHorizonUs,motionRequest(job.scene,job.settings));
       this.checkMean(checkpoint,job);this.checkSamples(checkpoint,job);
       job.onProgress?.(checkpoint);
     };

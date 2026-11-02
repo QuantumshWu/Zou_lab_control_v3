@@ -15,8 +15,6 @@ const SENTENCES:Record<string,string>={
   'Cancelled.':'计算已取消。',
   'The trajectory duration must be a positive finite time':'轨迹时长必须是正的有限时间。',
   'meanHorizonUs must be 1e5 or 1e6 us (100 ms or 1 s)':'长期布居的时刻 T 只能是 100 ms 或 1 s。',
-  'Exact free flight: no beam acts and the internal state is stationary under the model, so the populations and the Maxwellian momentum distribution keep their initial values':
-    '精确的自由飞行：没有光束作用，内态在模型下保持不变，所以布居与 Maxwell 动量分布保持初值。',
   'A motion request is a trajectory alone: meanOnly and includeMean are false':'1D 运动只计算时间演化，不计算长期布居。',
 };
 /** What a mean's reason adds when its bound is above the tolerance (lattice_core_adapter.rs `OUTSIDE`). */

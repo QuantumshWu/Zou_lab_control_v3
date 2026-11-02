@@ -2,8 +2,9 @@ import type {ComplexAmplitude,Scene,DynamicsSettings,Laser,Level,InitialStateSpe
 import {resolveInitialState} from './types.js';
 import {staticModelBackground} from './spectroscopy.js';
 import {atomicSystem,composeMagneticField,drivingLasers,laserIntensityMWcm2,laserCarrierOffsetMHz,laserFrequencyMHz,captureLaserFrequencyAnchor,RB87,sinCosDegrees,accurateSum} from './physics.js';
-import {invert,rotate,type Frame} from './direction.js';
-import {MOTION_FRAME,motionBeams,type MotionBeam,type MotionRequest} from './motion.js';
+import {directionVector,invert,rotate,type Frame} from './direction.js';
+import {MOTION_FRAME,radialAxes,type MotionRequest} from './motion.js';
+import {laserWaistUm} from './laser-intensity.js';
 import {withUnit} from './format.js';
 import {FULL_MODEL_SCHEMA} from './solver-protocol.js';
 
@@ -21,32 +22,38 @@ import {FULL_MODEL_SCHEMA} from './solver-protocol.js';
  * polarizability (spectroscopy.ts staticModelBackground). */
 export interface MasterMatrix {real:number[];imag:number[]}
 interface MasterDrive {omega:number;cos:MasterMatrix;sin:MasterMatrix;laserIds:string[]}
-/** The 1D motion block of the model (ui-design.md §6.20), sent with a solve that has motion. It
- * keeps the beams apart: two counter-propagating beams of one frequency, one drive in `drives`,
- * are two beams here, each with its own spatial phase along the axis.
- * - `hamiltonian`: H0 in the frame (rad/us) without any beam. The model's hReal/hImag holds
- *   besides the static couplings of the beams at the frame's carrier, taken at x = 0; a moving
- *   atom has them from `beams`.
+/** The 1D motion block of the model (ui-design.md §6.20), sent with a solve that has motion: a
+ * single atom in the tweezer moving along `axis`, the lab axis through the focus -- the atom --
+ * perpendicular to every focused beam (motion.ts radialAxes). It keeps the beams apart: two
+ * counter-propagating beams of one frequency, one drive in `drives`, are two beams here, each with
+ * its own amplitude along the axis.
+ * - `hamiltonian`: H0 in the frame (rad/us) without any beam: the field and the beams' static
+ *   shifts at the atom. The model's hReal/hImag holds besides the static couplings of the beams at
+ *   the frame's carrier, taken at the atom; a moving atom has them from `beams`.
  * - `frameFrequenciesMHz`: the frequency each state's frame rotates at -- 0 for the ground states,
  *   the reference carrier for the excited ones. A photon emitted e → g has the frequency
  *   (H0_ee − H0_gg)/2π + frame_e − frame_g.
- * - `beams`, every driving laser: `axial`, k·axis/|k| (±1 a travelling wave along or against
- *   the axis, 0 perpendicular to it: uniform along the axis); `waveNumberPerUm`, |k| = 2πν/c
- *   (rad/um); `frequencyIndex`, ν − ν_frame = Σ_k index_k frequencyCoordinates.frequenciesMHz_k;
- *   `coupling` X, the co-rotating excited ← ground coupling (rad/us): the beam drives
- *   X e^{+i axial |k| x} e^{−i 2π (ν − ν_frame) t} + h.c.; `counterCoupling` R, the
- *   counter-rotating one: R e^{−i axial |k| x} e^{+i 2π (ν + ν_frame) t} + h.c.
- * - `emission`: the lowering dipole operator's Cartesian components (1/sqrt(us)) on two axes
- *   perpendicular to the motion axis and on the axis itself (motion.ts MOTION_FRAME):
- *   Σ_a D[C_a] is the model's spontaneous emission, and the photon of C_a has the angular
- *   pattern of a dipole along a, so its recoil along the axis follows from that pattern.
- * - `axis`, `temperatureUK` (the initial Maxwellian, uniform in position), `massKg` and the
- *   lab field `fieldVectorG` (G). */
+ * - `beams`, every driving laser: `name`; `direction`, its unit wave vector in the motion frame
+ *   (motion.ts MOTION_FRAME: two axes perpendicular to the motion axis, then the axis);
+ *   `waveNumberPerUm`, |k| = 2πν/c (rad/um); `waistUm`, for a beam focused at the atom (given by
+ *   power and waist or by NA) the 1/e² intensity radius at its focus, the atom; a laser given by its
+ *   local intensity has none, a plane wave; `intensityMWcm2`, the intensity at the atom, a focused
+ *   beam's peak; `frequencyIndex`, ν − ν_frame = Σ_k index_k frequencyCoordinates.frequenciesMHz_k;
+ *   `coupling` X and `counterCoupling` R, the co- and counter-rotating excited ← ground couplings
+ *   at the atom (rad/us): with a(x) the beam's amplitude at x on the axis relative to the atom's,
+ *   the beam drives a(x) X e^{−i 2π (ν − ν_frame) t} + a(x)* R e^{+i 2π (ν + ν_frame) t} + h.c.
+ * - `emission`: the lowering dipole operator's Cartesian components (1/sqrt(us)) on the motion
+ *   frame's axes: Σ_a D[C_a] is the model's spontaneous emission, and the photon of C_a has the
+ *   angular pattern of a dipole along a, so its recoil along the axis follows from that pattern.
+ * - `axis`, `temperatureUK` (the initial motion, thermal along the axis), `massKg` and the lab
+ *   field `fieldVectorG` (G). */
 export interface MotionModel {
   axis:MotionAxis;temperatureUK:number;massKg:number;fieldVectorG:Vec3;
   hamiltonian:MasterMatrix;frameFrequenciesMHz:number[];beams:MotionModelBeam[];emission:[MasterMatrix,MasterMatrix,MasterMatrix];
 }
-export interface MotionModelBeam {id:string;axial:MotionBeam['axial'];waveNumberPerUm:number;frequencyIndex:number[];coupling:MasterMatrix;counterCoupling:MasterMatrix}
+export interface MotionModelBeam {
+  id:string;name:string;direction:Vec3;waveNumberPerUm:number;waistUm?:number;intensityMWcm2:number;frequencyIndex:number[];coupling:MasterMatrix;counterCoupling:MasterMatrix;
+}
 const N=32,TAU=2*Math.PI,HBAR=1.0545718176461565e-34,H_PLANCK=6.62607015e-34,EPS=8.8541878128e-12,C=299792458,zeros=()=>Array(N*N).fill(0),matrix=():MasterMatrix=>({real:zeros(),imag:zeros()});
 /** h * 1 MHz / k_B, in kelvin. */
 const MHZ_KELVIN=6.62607015e-34*1e6/1.380649e-23;
@@ -162,10 +169,9 @@ function cartesianEmission(n:Vec3,frame:Frame,spherical:readonly MasterMatrix[])
  spherical.forEach((c,q)=>{const w=weights[q]!;for(let k=0;k<N*N;k++){out.real[k]+=w.re*c.real[k]!-w.im*c.imag[k]!;out.imag[k]+=w.re*c.imag[k]!+w.im*c.real[k]!;}});
  return out;
 }
-function motionText(motion:MotionRequest,beams:readonly MotionBeam[]):string[] {
- const way=(b:MotionBeam)=>b.axial>0?`沿 +${motion.axis}`:b.axial<0?`沿 −${motion.axis}`:`垂直于 ${motion.axis} 轴（沿轴均匀）`;
- return [`1D 运动：原子沿 ${motion.axis} 轴运动，初态为上述内态 × 温度 ${withUnit(motion.temperatureUK,'μK',{digits:6})} 的 Maxwell 动量分布 × 均匀分布的位置；温度 T = m·Var(v)/k_B，v 为沿 ${motion.axis} 轴的速度。`,
-  beams.length?`光束分开保留（同频的对射光不合并）：${beams.map(b=>`「${b.laser.name}」${way(b)}`).join('，')}；沿轴传播的光带空间相位 e^{±ikx}，自发辐射的反冲按偶极辐射的方向图投影到运动轴。`:'没有激光：原子自由飞行。'];
+function motionText(motion:MotionRequest):string[] {
+ return [`1D 运动：光镊中单个原子沿 ${motion.axis} 轴（穿过焦点、与聚焦光垂直）径向运动，初态为上述内态，运动为温度 ${withUnit(motion.temperatureUK,'μK',{digits:6})} 的热分布；温度 T = m·Var(v)/k_B，v 为沿 ${motion.axis} 轴的速度。`,
+  '光束分开保留（同频的对射光不合并）：每束光在运动轴上的振幅由它的方向、波数和束腰给出——聚焦在原子处的光是焦点在原子处的高斯光束，按局域强度给出的光是平面波；自发辐射的反冲按偶极辐射的方向图投影到运动轴。'];
 }
 function initialText(spec:InitialStateSpec):string {
  if(spec.kind==='state')return `初态：模型基中的单一本征态 ${spec.id}。`;
@@ -174,10 +180,11 @@ function initialText(spec:InitialStateSpec):string {
  return '初态：按给定权重（归一化）在模型基中的对角混合。';
 }
 
-/** `motion`: the model of a solve with 1D motion carries its block (MotionModel); beams that have
- * no 1D form refuse it here (motion.ts motionBeams). */
+/** `motion`: the model of a solve with 1D motion carries its block (MotionModel); an axis that is
+ * not radial -- through the focus, perpendicular to every focused beam -- is refused here (motion.ts
+ * radialAxes). */
 export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSettings>,motion?:MotionRequest){
- const motionBeamList=motion?motionBeams(scene,motion.axis):undefined;
+ if(motion){const axes=radialAxes(scene);if(!axes.includes(motion.axis))throw new Error(`1D 运动的运动轴 ${motion.axis} 不与每束聚焦光都垂直（可选：${axes.join('、')}）。`);}
  // One basis for H0, C, the initial density and the returned populations:
  // eigenstates of the static H0 (B field + second-order shifts from states
  // outside the model and the Rb+ core). No D-line dressing: those couplings
@@ -255,8 +262,10 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  frequencyCoordinates:{frequenciesMHz,frequencies,driveIndices:sentIndices,frameIndices:states.map(()=>Array(axes).fill(0)),frameSectors:states.map(s=>s.manifold==='ground'?0:1)},
  fieldVector:a.fieldVector,fieldMagnitudeG:a.fieldMagnitudeG,laserCount:lasers.length,referenceLaserId:reference?.id,carrierMHz,
  frameFrequenciesMHz,staticMixingRatio:background.maximumMixingRatio,
- ...(motion&&motionBeamList?{motion:{axis:motion.axis,temperatureUK:motion.temperatureUK,massKg:RB87.massKg,fieldVectorG:a.fieldVector,hamiltonian:staticHamiltonian,frameFrequenciesMHz,
-  beams:couplings.map(({laser,beat,A,R})=>({id:laser.id,axial:motionBeamList.find(b=>b.laser.id===laser.id)!.axial,waveNumberPerUm:TAU*laserFrequencyMHz(laser)/C,frequencyIndex:beat,coupling:A,counterCoupling:R})),
+ ...(motion?{motion:{axis:motion.axis,temperatureUK:motion.temperatureUK,massKg:RB87.massKg,fieldVectorG:a.fieldVector,hamiltonian:staticHamiltonian,frameFrequenciesMHz,
+  beams:couplings.map(({laser,beat,A,R})=>{const k=directionVector(scene.fields,laser.direction);return {id:laser.id,name:laser.name,
+   direction:MOTION_FRAME[motion.axis].map(n=>n[0]*k[0]+n[1]*k[1]+n[2]*k[2]) as Vec3,waveNumberPerUm:TAU*laserFrequencyMHz(laser)/C,
+   ...(laser.intensityMode==='intensity'?{}:{waistUm:laserWaistUm(laser)}),intensityMWcm2:laserIntensityMWcm2(laser),frequencyIndex:beat,coupling:A,counterCoupling:R};}),
   emission:MOTION_FRAME[motion.axis].map(n=>cartesianEmission(n,composeMagneticField(scene.fields).frame,spherical)) as MotionModel['emission']} satisfies MotionModel}:{}),
  assumptions:[
   `每束开启且强度非零的激光（${lasers.length} 束）都是 32 态主方程中的显式光学驱动：保留 D1、D2 全部允许电偶极耦合，旋转项与反旋转项都保留（不作 RWA），不按近/远失谐区分。`,
@@ -266,6 +275,6 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
   '基矢：H0 静态部分（磁场 + 上述 32 态外静态光移）的本征基，初态与返回布居都在此基中；态标签 F、mF 指与之重叠最大的磁场本征态。D 线光学缀饰不进入基矢，而由动力学显式给出。',
   initialText(initialState),
   '返回瞬时布居（含反旋转项引起的光频微运动，幅度约 (Ω/ω)²）；长期布居 p̄(T) 是时刻 T 的相位平均，只平均掉这些快振荡，不是 0 到 T 的时间平均。',
-  ...(motion&&motionBeamList?motionText(motion,motionBeamList):[]),
+  ...(motion?motionText(motion):[]),
  ]};
 }

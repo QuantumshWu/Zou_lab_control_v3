@@ -13,6 +13,8 @@ import {POPULATION_TOLERANCE,defaultScene} from '../dist/js/atom-workbench/src/t
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {FULL_MODEL_SCHEMA} from '../dist/js/atom-workbench/src/solver-protocol.js';
+import {exampleScene} from '../dist/js/atom-workbench/src/examples.js';
+import {motionRequest} from '../dist/js/atom-workbench/src/motion.js';
 
 const option=name=>{const i=process.argv.indexOf(name);return i<0?undefined:process.argv[i+1];};
 if(process.argv.includes('--help')){
@@ -39,7 +41,7 @@ const baseEnv={...process.env};
 for(const key of Object.keys(baseEnv))if(key.toUpperCase().startsWith('ATOM_'))delete baseEnv[key];
 Object.assign(baseEnv,DESKTOP_SOLVER_DEFAULTS);
 const report={status:'starting',executable:exe,binarySha256,bytes:binary.length,windowOpened:false,
-  scope:'Candidate EXE/backend-info plus normal Worker/IPC/JSONL finite, mean and 1D-motion free-flight requests; no independent physics oracle',
+  scope:'Candidate EXE/backend-info plus normal Worker/IPC/JSONL finite and mean requests, and the tweezer 1D-motion example (refused until the motion engine is implemented); no independent physics oracle',
   requestSource:option('--request')?resolve(option('--request')):'Generated probe-only smoke fixture',
   requestSha256:sha(JSON.stringify({scene,settings})),options:settings,processes:[],workerRequests:[],historicalAnswerRead:false};
 const children=new Map(),pending=new Map();let worker,sequence=0;
@@ -106,12 +108,9 @@ try{
   const mean=await request('mean',{...settings,meanOnly:true,includeMean:true});
   const meanParsed=normalizeDynamicsResult(mean,scene,settings.initialStateId,settings.meanHorizonUs);
   assert.equal(meanParsed.mean.converged,true,'Smoke mean must be qualified, never the finite endpoint');
-  // 1D motion in free flight: the scene without its lasers, the atom moving along z at 30 μK.
-  const freeScene={...structuredClone(scene),lasers:[]},motion={axis:'z',temperatureUK:30};
-  const moving=await request('motion',{...settings,meanOnly:false,includeMean:false,motion},freeScene);
-  const motionParsed=normalizeDynamicsResult(moving,freeScene,settings.initialStateId,settings.meanHorizonUs,motion);
-  assert.deepEqual(motionParsed.motion.temperatureUK,Array(settings.samples).fill(motion.temperatureUK),'Free flight keeps its temperature');
-  assert.ok(motionParsed.timesUs.every((_,i)=>motionParsed.states.every(s=>motionParsed.populations[s.id][i]===motionParsed.populations[s.id][0])),'Free flight keeps its populations');
+  // 1D motion: the tweezer example's motion request through the same path, refused by the motion core until its engine is implemented.
+  const tweezer=exampleScene('pgc').scene,motion=motionRequest(tweezer,tweezer.dynamics);
+  await assert.rejects(request('motion',{...settings,meanOnly:false,includeMean:false,motion},tweezer),/运动引擎尚未实现/);
   assert.equal(report.workerRequests.length,3);assert.deepEqual(report.workerRequests.map(r=>r.lane),['trajectory','mean','trajectory']);
   assert.equal(report.workerRequests[0].modelSha256,report.workerRequests[1].modelSha256,'Both fresh results must use the identical current Model');
   // Both means are p(T) of the same equation, each within its own bound.
@@ -120,7 +119,7 @@ try{
   assert.ok(Number.isFinite(meanBounds)&&meanDelta<=meanBounds,`Inline and meanOnly means agree within their bounds (difference ${meanDelta}, bounds ${meanBounds})`);
   report.status='passed';report.validation={backendStatic:true,normalIpcAndJsonl:true,finitePopulationAccuracy:parsed.populationAccuracy,
     meanStatus:meanParsed.mean.status,finiteNativeMs:finite.diagnostics.elapsedMs,meanNativeMs:mean.diagnostics.elapsedMs,
-    motionMethod:motionParsed.method,motionNativeMs:moving.diagnostics.elapsedMs};
+    motionRefusal:'运动引擎尚未实现'};
 }catch(error){report.status='failed';report.error=error.stack??error.message;process.exitCode=1;}
 finally{
   await worker?.receive({kind:'shutdown'});

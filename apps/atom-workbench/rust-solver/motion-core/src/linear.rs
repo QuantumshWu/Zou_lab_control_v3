@@ -13,6 +13,7 @@ impl Complex{
     pub fn abs(self)->f64{self.re.hypot(self.im)}
     /// e^{iφ}.
     pub fn cis(phase:f64)->Complex{let(sin,cos)=phase.sin_cos();Complex{re:cos,im:sin}}
+    pub fn exp(self)->Complex{Complex::cis(self.im)*self.re.exp()}
 }
 impl Add for Complex{type Output=Complex;fn add(self,b:Complex)->Complex{Complex{re:self.re+b.re,im:self.im+b.im}}}
 impl Sub for Complex{type Output=Complex;fn sub(self,b:Complex)->Complex{Complex{re:self.re-b.re,im:self.im-b.im}}}
@@ -106,12 +107,13 @@ pub fn hermitian_eigenvalues(matrix:&Dense)->Vec<f64>{
     let mut previous=f64::INFINITY;
     loop{
         let off:f64=(0..n).map(|i|(0..n).filter(|&j|j!=i).map(|j|a[(i,j)].norm_sqr()).sum::<f64>()).sum();
-        if off<=f64::EPSILON*f64::EPSILON*total||off>=previous{break;}
+        if off<=f64::EPSILON*f64::EPSILON*total||!(off<previous){break;}
         previous=off;
         for p in 0..n{for q in p+1..n{
             let modulus=a[(p,q)].abs();if modulus==0.{continue;}
             // A unitary phase on q makes a_pq real and positive; a real rotation in (p, q) then zeroes it.
-            let phase=a[(p,q)]*(1./modulus);
+            // The phase divides by the modulus, whose reciprocal overflows when it is subnormal.
+            let phase=Complex::new(a[(p,q)].re/modulus,a[(p,q)].im/modulus);
             for k in 0..n{a[(k,q)]=a[(k,q)]*phase.conj();a[(q,k)]=a[(q,k)]*phase;}
             let tau=(a[(q,q)].re-a[(p,p)].re)/(2.*modulus);
             let t=tau.signum()/(tau.abs()+(1.+tau*tau).sqrt());let c=1./(1.+t*t).sqrt();let s=t*c;
@@ -149,5 +151,8 @@ mod tests{
         let mut expected=d.to_vec();expected.sort_by(f64::total_cmp);
         assert!(eigen.iter().zip(&expected).all(|(x,y)|(x-y).abs()<=1e-13),"{eigen:?}");
         assert!((u.product(&diagonal).spectral_norm()-4.).abs()<=1e-13);
+        // A subnormal off-diagonal element, whose reciprocal overflows: rotated away, no NaN.
+        let tiny=Dense::from_fn(2,2,|i,j|if i==j{Complex::new(1.+i as f64,0.)}else{Complex::new(5e-320,if i<j{3e-320}else{-3e-320})});
+        assert_eq!(hermitian_eigenvalues(&tiny),vec![1.,2.]);
     }
 }

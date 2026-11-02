@@ -31,9 +31,9 @@ import {STATIC_MIXING_LIMIT,displayMixing,modelScope,spectroscopyAnalysis,spectr
 import type {ScopeNote} from './spectroscopy.js';
 import {defaultMotion,defaultScene,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionAxis,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
-import type {DynamicsResult,MotionResult} from './solver-types.js';
-import {MOTION_AXES,motionRefusal,motionTemperatureReading,setMotionTemperature} from './motion.js';
-import {MOTION_INKS,bindMomentum,bindMotionSeries,momentumChart,motionSeriesChart} from './motion-chart.js';
+import type {Distributions,DynamicsResult} from './solver-types.js';
+import {motionAxis,motionRefusal,motionTemperatureReading,radialAxes,setMotionTemperature} from './motion.js';
+import {MOTION_INKS,bindDistribution,bindSeries,distributionChart,distributions,lengthText,motionSeries,rootMeanSquare,seriesChart} from './motion-chart.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
 import {startupScene,validateScene} from './scene-file.js';
 import {incidentTransitions,laserEmits,laserReferenceStateId,setLaserReferenceState,transitionEndpoints} from './transition-view.js';
@@ -67,9 +67,9 @@ const APP_TITLE='Rb87 实验工作台';
 const STORAGE='rb87-workbench-demo-v4',root=document.querySelector<HTMLDivElement>('#app')!;
 let scene=startupScene((()=>{try{return localStorage;}catch{return undefined;}})(),STORAGE),view:View='levels',resultView:ResultView='levels',spectral:SpectralLine='D2',selection:Selection={kind:'laser',id:'probe'};
 let populationMode:'mean'|'time'='mean',populationTimeIndex=-1,populationScale:'linear'|'log'='linear';let unbindPopulation:(()=>void)|undefined;
-/** 布居演化 with 1D motion: what its chart shows, and the listed time (an index into the result's
- * momentum samples) the momentum distribution is compared at, if any. */
-type MotionView='populations'|'temperature'|'momentum';
+/** 布居演化 with 1D motion: what its chart shows, and the listed time (an index into the shown
+ * distribution's samples) a distribution is compared at, if any. */
+type MotionView='populations'|'temperature'|'trap'|'momentum'|'position';
 let motionView:MotionView='populations',motionCompare:number|undefined;
 let spaceRenderer:ReturnType<typeof renderSpace3D>|undefined;const spaceMount=document.createElement('div');spaceMount.className='retained-space-view';
 let stateLabels:StateLabels={},dirty=false,renderCount=0;
@@ -168,9 +168,10 @@ manifoldFocus.setChoices([['D2','D2 · 5P₃/₂'],['D1','D1 · 5P₁/₂']]);ma
 $('levels-commands').replaceWith(manifoldFocus.root);
 const populationScaleControl=new Segmented(value=>{populationScale=value as 'linear'|'log';populationScaleControl.setCurrent(populationScale);update();});
 populationScaleControl.setChoices([['linear','线性'],['log','对数']]);populationScaleControl.setCurrent(populationScale);populationScaleControl.root.setAttribute('aria-label','布居坐标');
-// With 1D motion the chart shows the populations, the temperature and mean velocity, or the momentum distribution.
+// With 1D motion the chart shows the populations, the temperature and mean velocity, n̄ and the loss,
+// or the momentum or position distribution.
 const motionViewControl=new Segmented(value=>{motionView=value as MotionView;update();});
-motionViewControl.setChoices([['populations','布居'],['temperature','温度与速度'],['momentum','动量分布']]);motionViewControl.root.id='motion-view';motionViewControl.root.setAttribute('aria-label','运动结果');
+motionViewControl.setChoices([['populations','布居'],['temperature','温度与速度'],['trap','n̄ 与损失'],['momentum','动量分布'],['position','位置分布']]);motionViewControl.root.id='motion-view';motionViewControl.root.setAttribute('aria-label','运动结果');
 $('dynamics-commands').replaceWith(motionViewControl.root,populationScaleControl.root);
 // 方向与偏振: where the camera looks, the field animation, the reference plane and the zoom.
 let spaceView:SpaceViewName='free';
@@ -249,7 +250,7 @@ function note(text:string,word:StatusWord='task'):void{notice={text,word,until:p
  * them short. Computing is automatic; 停止 ends a running solve. */
 function solverStatus():[string,StatusWord,string?,string?]{
   const record=currentRecord(),result=record?.result,error=currentSolverError(),cached=cachedMean()?.result,motion=moving();
-  // 1D motion the beams have no 1D form for is not solved: the reason, naming the lasers.
+  // 1D motion without a radial axis is not solved: the reason, naming the lasers.
   const refusal=motion?motionRefusal(scene):'';if(refusal)return [refusal,'error',undefined,refusal];
   // A cached mean is ready while the trajectory beside it is not (a motion trajectory has none).
   const meanReady=!motion&&(result??cached)?.mean.converged===true,subject=motion?'运动':'布居';
@@ -841,7 +842,7 @@ function cachedMean():SolvedRecord|undefined{return means.get(meanKey(),dynamics
 function shownTrajectory():SolvedRecord|undefined{return trajectories.get(trajectoryKey(),'trajectory');}
 /** The request the page needs now: none when its trajectory and its mean at T are here. */
 function neededSolve():SolveKind|undefined{
-  // A motion trajectory the beams refuse is not asked for (motion.ts motionBeams).
+  // A motion without a radial axis is not asked for (motion.ts radialAxes).
   if(moving()&&motionRefusal(scene))return undefined;
   return plannedSolve(showsTrajectory(),{trajectory:!!shownTrajectory(),mean:!!cachedMean()},motionOn());
 }
@@ -1023,7 +1024,7 @@ function renderDetailsPage():void{
   const sampling=result&&result.timesUs.length>1?[populationSamplingInfo(result),'布居演化在模型基中：静态 H0 的本征态，标签为重叠最大的磁场本征态。']:[];
   const outside=scopeNotes.map(note=>`超出模型范围（结果照常给出）：${note.text}`);
   const motion=dynamics().motion,temperature=motion&&motionTemperatureReading(motion);
-  const motionLines=motion?.enabled&&temperature?[motionRefusal(scene)||`1D 运动：原子沿 ${motion.axis} 轴运动，初始温度 ${withUnit(temperature.value,temperature.unit,{digits:6})}；布居演化中的轨迹含运动，长期布居 p̄(T) 只是内态的。`]:[];
+  const motionLines=motion?.enabled&&temperature?[motionRefusal(scene)||`1D 运动：光镊中单个原子沿 ${motionAxis(scene,motion)} 轴（穿过焦点、与聚焦光垂直）径向运动，初始温度 ${withUnit(temperature.value,temperature.unit,{digits:6})}；布居演化中的轨迹含运动，长期布居 p̄(T) 只是内态的。`]:[];
   const markup=`<section class="details-current"><h3>当前计算</h3>${[field,...motionLines,...outside,...scope,...sampling].map(line=>`<p>${esc(line)}</p>`).join('')}${solverDetails()}</section>`;
   const host=$('details-current');if(host.dataset.markup!==markup){host.dataset.markup=markup;host.innerHTML=markup;}
   const notes=$('details-static');if(!notes.childElementCount)notes.innerHTML=definitionNotes()+modelNotes();
@@ -1078,7 +1079,7 @@ function renderDynamicsControls(a:Analysis):void{
   const states=allLevels(a);d.monitoredGroupIds??=[];
   if(!states.some(l=>l.id===d.initialStateId))d.initialStateId=initialId();d.monitoredStateIds=d.monitoredStateIds.filter(id=>states.some(l=>l.id===id));
   setText('dynamics-beams',enabled.length?`驱动：${enabled.map(l=>l.name).join(' + ')}`:'驱动：无光束');
-  const key=JSON.stringify({states:states.map(l=>l.id),motion:motionOn()}),parent=$('dynamics-controls');
+  const axes=motionOn()?radialChoices():[],key=JSON.stringify({states:states.map(l=>l.id),motion:motionOn(),axes}),parent=$('dynamics-controls');
   if(key===controlsKey){
     refreshFields(dynamicsFields);fitDynamicsForms(parent);
     parent.querySelectorAll<HTMLButtonElement>('[data-monitor-group]').forEach(input=>setChecked(input,d.monitoredGroupIds!.includes(input.dataset.monitorGroup!)));
@@ -1094,15 +1095,15 @@ function renderDynamicsControls(a:Analysis):void{
     {read:()=>durationReading(d),write:(v,u)=>setDuration(d,v,u as DurationUnit),units:()=>unitChoices(DURATION_UNITS,'时间')},after);
   bindField(dynamicsFields,time,'dynamics',()=>({name:'samples',label:'采样点数',kind:'integer',value:d.samples,minimum:2,maximum:MAXIMUM_SAMPLES,step:1}),v=>{const n=Number(v);if(!Number.isInteger(n))throw new Error('采样点数必须为整数');if(n<2||n>MAXIMUM_SAMPLES)throw new Error(`采样点数应为 2 至 ${MAXIMUM_SAMPLES}`);d.samples=n;},{after});
   bindField(dynamicsFields,curves,'dynamics',()=>({name:'monitor-mode',label:'显示曲线',kind:'choice',segmented:true,choices:[['auto','初末各 3 态'],['manual','手动选择']],value:d.monitorMode??'auto'}),v=>{d.monitorMode=v as 'auto'|'manual';if(v==='auto')d.monitoredGroupIds=[];else parent.querySelector<HTMLDetailsElement>('.monitor-controls')!.open=true;},{after});
-  // 1D 运动: off, or on with its axis and initial temperature (kept while off).
+  // 1D 运动: off, or on with its radial axis and initial temperature (kept while off).
   bindField(dynamicsFields,motion,'motion',()=>({name:'motion',label:'1D 运动',kind:'boolean',value:motionOn(),
-    description:'原子沿一个坐标轴运动，内态与运动一起演化：给出温度、平均速度和动量分布。光须沿该轴（正向或反向）传播或与它垂直，沿轴传播的光都在 D2 线上。'}),
+    description:'光镊中单个原子沿径向运动（穿过焦点、与每束聚焦光垂直的坐标轴），内态与运动一起演化：给出温度、平均速度、n̄、损失概率以及动量与位置分布。'}),
     v=>{const current=dynamics();if(v)current.motion={...(current.motion??defaultMotion()),enabled:true};else if(current.motion)current.motion.enabled=false;},{after});
   if(motionOn()){
     const settings=()=>dynamics().motion!;
-    bindField(dynamicsFields,motion,'motion',()=>({name:'axis',label:'运动轴',kind:'choice',segmented:true,choices:MOTION_AXES.map(axis=>[axis,axis]),value:settings().axis,description:'原子运动所沿的坐标轴'}),
-      v=>{settings().axis=v as MotionAxis;},{after});
-    bindQuantity(dynamicsFields,motion,'motion','motion',()=>({name:'temperature',label:'初始温度',spin:true,inexact:true,description:'初态 Maxwell 动量分布沿运动轴的温度；位置均匀分布，内态为场景的初态'}),
+    if(axes.length)bindField(dynamicsFields,motion,'motion',()=>({name:'axis',label:'运动轴',kind:'choice',segmented:true,choices:axes.map(axis=>[axis,axis]),value:motionAxis(scene,settings()),
+      description:'穿过焦点、与每束聚焦光垂直的坐标轴'}),v=>{settings().axis=v as MotionAxis;},{after});
+    bindQuantity(dynamicsFields,motion,'motion','motion',()=>({name:'temperature',label:'初始温度',spin:true,inexact:true,description:'初态沿运动轴的温度：动量为 Maxwell 分布，位置为该温度下势阱中的热分布；内态为场景的初态'}),
       {read:()=>motionTemperatureReading(settings()),write:(v,u)=>setMotionTemperature(settings(),v,u as TemperatureUnit),units:()=>unitChoices(TEMPERATURE_UNITS,'温度')},after);
   }
   const monitors=element('details','monitor-controls');monitors.open=monitorsWereOpen;
@@ -1127,21 +1128,23 @@ function fitDynamicsForms(parent:HTMLElement):void{
 }
 const monitorAll=command('全部磁子能级',()=>{const d=dynamics();d.monitorMode='manual';d.monitoredStateIds=allLevels().map(state=>state.id);update();},{role:'quiet'});monitorAll.root.id='monitor-all';
 const monitorNone=command('清空',()=>{const d=dynamics();d.monitorMode='manual';d.monitoredStateIds=[];d.monitoredGroupIds=[];update();},{role:'quiet'});monitorNone.root.id='monitor-none';
-/** 动量分布: the last time is always drawn; 对比时刻 adds one of the listed times before it. */
-const momentumCompare=checkBox('对比时刻',on=>{motionCompare=on?0:undefined;update();});momentumCompare.id='momentum-compare';
-const momentumTime=element('input');momentumTime.type='range';momentumTime.id='momentum-time';momentumTime.setAttribute('aria-label','对比的时刻');
-momentumTime.oninput=()=>{motionCompare=Number(momentumTime.value);update();};
-const momentumTimeValue=element('span','population-time-value');momentumTimeValue.id='momentum-time-value';
-$('motion-toolbar').append(momentumCompare,momentumTime,momentumTimeValue);
-/** The momentum toolbar of a motion result's distributions: shown when one is drawn and a time before the last is listed. */
-function momentumToolbar(motion:MotionResult|undefined,timesUs:readonly number[]):void{
-  const earlier=motion?motion.momentum.samples.length-1:0,toolbar=$('motion-toolbar');toolbar.hidden=earlier<1;
+/** The lab axes the motion may run along, or none when the scene has no radial axis (motion.ts radialAxes). */
+function radialChoices():MotionAxis[]{try{return radialAxes(scene);}catch{return [];}}
+/** 动量分布 and 位置分布: the last time is always drawn; 对比时刻 adds one of the listed times before it. */
+const distributionCompare=checkBox('对比时刻',on=>{motionCompare=on?0:undefined;update();});distributionCompare.id='distribution-compare';
+const distributionTime=element('input');distributionTime.type='range';distributionTime.id='distribution-time';distributionTime.setAttribute('aria-label','对比的时刻');
+distributionTime.oninput=()=>{motionCompare=Number(distributionTime.value);update();};
+const distributionTimeValue=element('span','population-time-value');distributionTimeValue.id='distribution-time-value';
+$('motion-toolbar').append(distributionCompare,distributionTime,distributionTimeValue);
+/** The toolbar of the distributions drawn: shown when a time before the last is listed. */
+function distributionToolbar(listed:Distributions|undefined,timesUs:readonly number[]):void{
+  const earlier=listed?listed.samples.length-1:0,toolbar=$('motion-toolbar');toolbar.hidden=earlier<1;
   if(earlier<1)return;
   if(motionCompare!==undefined)motionCompare=Math.min(motionCompare,earlier-1);
-  setChecked(momentumCompare,motionCompare!==undefined);
-  momentumTime.hidden=motionCompare===undefined||earlier<2;momentumTimeValue.hidden=motionCompare===undefined;
-  if(momentumTime.max!==String(earlier-1))momentumTime.max=String(earlier-1);if(momentumTime.value!==String(motionCompare??0))momentumTime.value=String(motionCompare??0);
-  momentumTimeValue.textContent=motionCompare===undefined?'':durationText(timesUs[motion!.momentum.samples[motionCompare]!]!,dynamics().durationUnit);
+  setChecked(distributionCompare,motionCompare!==undefined);
+  distributionTime.hidden=motionCompare===undefined||earlier<2;distributionTimeValue.hidden=motionCompare===undefined;
+  if(distributionTime.max!==String(earlier-1))distributionTime.max=String(earlier-1);if(distributionTime.value!==String(motionCompare??0))distributionTime.value=String(motionCompare??0);
+  distributionTimeValue.textContent=motionCompare===undefined?'':durationText(timesUs[listed!.samples[motionCompare]!]!,dynamics().durationUnit);
 }
 /** A legend entry: a line in its colour (dashed when asked) and its words. */
 function legendEntry(colour:string,words:string,dashed=false):string{
@@ -1159,17 +1162,20 @@ function renderDynamics(a:Analysis):void{
   // With 1D motion: its refusal, or the chart its view asks for.
   const shown=motionOn()?motionView:'populations',refusal=motionOn()?motionRefusal(scene):'',motion=raw&&raw.timesUs.length>1?raw.motion:undefined;
   motionViewControl.root.hidden=!motionOn();motionViewControl.setCurrent(shown);populationScaleControl.root.hidden=shown!=='populations';
-  momentumToolbar(!refusal&&shown==='momentum'?motion:undefined,raw?.timesUs??[]);
+  distributionToolbar(!refusal&&motion&&(shown==='momentum'||shown==='position')?distributions(motion,shown):undefined,raw?.timesUs??[]);
   const caption=(markup:string)=>{if($('population-caption').innerHTML!==markup)$('population-caption').innerHTML=markup;};
   if(refusal){host.innerHTML=`<div class="empty-state error" role="alert">${esc(refusal)}</div>`;caption('');return;}
-  if(shown==='temperature'){
-    host.innerHTML=motion?motionSeriesChart(raw!.timesUs,motion,d.durationUnit):waiting;if(motion)unbindPopulation=bindMotionSeries(host,raw!.timesUs,motion,d.durationUnit);
-    caption(motion?legendEntry(MOTION_INKS[0],`温度 T = m·Var(v)/k_B（沿 ${motion.axis} 轴）`)+legendEntry(MOTION_INKS[1],'平均速度 ⟨v⟩'):'');return;
+  if(shown==='temperature'||shown==='trap'){
+    const series=motion&&motionSeries(motion,shown);
+    host.innerHTML=series?seriesChart(raw!.timesUs,series,d.durationUnit):waiting;if(series)unbindPopulation=bindSeries(host,raw!.timesUs,series,d.durationUnit);
+    caption(!motion?'':shown==='temperature'?legendEntry(MOTION_INKS[0],`温度 T = m·Var(v)/k_B（沿 ${motion.axis} 轴）`)+legendEntry(MOTION_INKS[1],'平均速度 ⟨v⟩')
+      :legendEntry(MOTION_INKS[0],`平均振动量子数 n̄（相对焦点处的阱频 ω/2π = ${formatNumber(motion.trapFrequencyKHz,{digits:4})} kHz）`)+legendEntry(MOTION_INKS[1],'累计损失概率（原子离开光阱）'));return;
   }
-  if(shown==='momentum'){
-    const last=motion?motion.momentum.samples.length-1:0,listed=motion?[last,...(motionCompare===undefined?[]:[motionCompare])]:[];
-    const names=motion?listed.map(i=>{const sample=motion.momentum.samples[i]!;return `t = ${durationText(raw!.timesUs[sample]!,d.durationUnit)} · T = ${formatNumber(motion.temperatureUK[sample]!,{digits:4})} μK`;}):[];
-    host.innerHTML=motion?momentumChart(motion,listed):waiting;if(motion)unbindPopulation=bindMomentum(host,motion,listed,names);
+  if(shown==='momentum'||shown==='position'){
+    const listing=motion&&distributions(motion,shown),last=listing?listing.samples.length-1:0,listed=listing?[last,...(motionCompare===undefined?[]:[motionCompare])]:[];
+    const names=listing?listed.map(i=>{const sample=listing.samples[i]!,time=`t = ${durationText(raw!.timesUs[sample]!,d.durationUnit)}`;
+      return shown==='momentum'?`${time} · T = ${formatNumber(motion!.temperatureUK[sample]!,{digits:4})} μK`:`${time} · 均方根位置 ${lengthText(rootMeanSquare(listing,i))}`;}):[];
+    host.innerHTML=motion?distributionChart(motion,shown,listed):waiting;if(motion)unbindPopulation=bindDistribution(host,motion,shown,listed,names);
     caption(names.map((words,k)=>legendEntry(MOTION_INKS[k]!,words,k>0)).join(''));return;
   }
   host.innerHTML=result&&result.timesUs.length>1?populationChart(result,ids,labels,plotOptions):result?.mean.converged?`<div class="empty-state"><div><p>长期布居 ${esc(meanSymbol(raw))}</p><div class="form solver-readouts">${ids.map(id=>`<span class="field-label">${esc(labels[id]??id)}</span><span class="readout-edit">${populationValue(result.mean.populations?.[id]??0)}</span>`).join('')}</div><p class="note">${currentSolverError()?'时间演化未完成':stopped?'时间演化已停止':'时间演化计算中…'}</p></div></div>`:waiting;
