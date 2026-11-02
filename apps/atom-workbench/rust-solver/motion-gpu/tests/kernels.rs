@@ -22,18 +22,22 @@ fn spectral(plane:&[Complex],nx:usize,ny:usize,fx:&[Complex],fy:&[Complex])->Vec
 }
 fn to_f32(v:&[Complex])->Vec<[f32;2]>{v.iter().map(|z|[z.re as f32,z.im as f32]).collect()}
 
+/// The driver lists the devices, and a kernel round trip works: `thermal_potential` scales a
+/// trajectory's first plane point by point and leaves its other planes.
 #[test]
-fn gpu_devices_and_the_probe_kernel(){
+fn gpu_devices_and_a_kernel_round_trip(){
     println!("driver CUDA {}",driver::driver_version().unwrap());
     for d in driver::devices().unwrap(){println!("{d:?}");}
     let gpu=Gpu::new().unwrap();
-    let f=gpu.function("probe_scale").unwrap();
-    let input:Vec<f32>=(0..1000).map(|i|i as f32).collect();
-    let(a,b)=(Buffer::new(4000).unwrap(),Buffer::new(4000).unwrap());
-    gpu.stream.upload(&a,&input).unwrap();
-    gpu.stream.launch(&f,(4,1,1),256,0,&[&a.pointer,&b.pointer,&2.5f32,&1000i32]).unwrap();
-    let mut out=vec![0f32;1000];gpu.stream.download(&b,&mut out).unwrap();
-    assert!(out.iter().enumerate().all(|(i,&x)|x==2.5*i as f32));
+    let f=gpu.function("thermal_potential").unwrap();
+    let points=1000usize;
+    let input:Vec<[f32;2]>=(0..5*points).map(|i|[i as f32,-(i as f32)]).collect();
+    let state=Buffer::new(5*points*8).unwrap();gpu.stream.upload(&state,&input).unwrap();
+    let factors=Buffer::new(points*4).unwrap();gpu.stream.upload(&factors,&vec![2.5f32;points]).unwrap();
+    let kind=Buffer::new(4).unwrap();gpu.stream.upload(&kind,&[0i32]).unwrap();
+    gpu.stream.launch(&f,(points.div_ceil(256) as u32,1,1),256,0,&[&state.pointer,&(points as i32),&1i32,&factors.pointer,&kind.pointer]).unwrap();
+    let mut out=vec![[0f32;2];5*points];gpu.stream.download(&state,&mut out).unwrap();
+    assert!(out.iter().enumerate().all(|(i,z)|{let s=if i<points{2.5}else{1.};z[0]==s*i as f32&&z[1]==-s*i as f32}));
 }
 
 /// The kinetic pass multiplies each plane's spectrum by its tables -- here arbitrary unit phases
