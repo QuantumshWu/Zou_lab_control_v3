@@ -161,6 +161,45 @@ frames of the 5x7 virtual array: the 7 the oracle left unconverged converge,
 the cost tolerance leaves); 2 reach a different, lower minimum; 1 lands on a
 neighbouring atom of equal cost (+4.5e-6).
 
+## The Lorentzian doublet (a deliberate departure)
+
+The oracle's symmetric Lorentzian doublet (one width and one height for both
+lines) is gone from v3; its golden records are skipped by name
+(`RETIRED_MODEL` in the fit tests).  In its place the Lorentzian doublet fits
+two lines of independent width and height on one offset, line B at
+`x_0 + splitting` (`splitting >= 0`, which orders the lines; the headline),
+and is settled against the single Lorentzian by BIC as the bimodal histogram
+models are.  For a series the evidence is the Gaussian likelihood with the
+scale profiled out, `n ln(chi2_one / chi2_two) - k ln n` (chi-square weighted
+by a known sigma), or the Student-t likelihood's `2 (cost_one - cost_two) -
+k ln n` (below).  It has no oracle; `tests/lorentzian_doublet.rs` holds it to
+recovered lines (exact without noise), its analytic Jacobian, the single-line
+reduction, the BIC formulas and the threshold.
+
+## Means of few repeats: the Student-t likelihood (a deliberate departure)
+
+The oracle weights a curve fit by the standard error of each mean point,
+`1/sem`, as if it were the known sigma -- also where that sem was estimated
+from the point's own `n` repeats (`_sem_of_mean`).  With few repeats the
+estimate scatters by factors of a few and the smallest ones dominate: on a
+single line with four repeats the BIC then often preferred two lines.  v3
+reads such points by the likelihood they actually have: `(mean - f)/sem` is
+Student-t with `n - 1` degrees of freedom (`CurveSeries::sem_dof`,
+`FitCell::sigma_dof`).  The solve maximises that likelihood (cost
+`sum (nu+1)/2 ln(1 + t^2/nu)`, iteratively reweighted by `(nu+1)/(nu+t^2)`);
+the covariance is the M-estimator sandwich (its expected-information form
+understates the spread, because a point's residual and its estimated sigma
+are not independent given the sigma); the BIC evidence is twice the cost
+difference.  As `n` grows every term tends to the Gaussian weighting's
+(infinite dof gives its exact solution).  A point of one repeat has no own
+scatter: a stated sigma is used as known (infinite dof), and a point with no
+sigma at all keeps the oracle's rule (the largest usable sigma, Gaussian
+term).  A known sigma alone, counts (Poisson deviance), a robust loss the
+caller chose, and custom models (fallback lane) are unchanged.  No golden
+record carries degrees of freedom, so every golden comparison is unchanged
+(bit-exact); live sessions whose curves are means of repeats fit differently
+from the oracle, which is the point.
+
 ## CPU dependence (decision)
 
 Python's own answers are a per-CPU fact.  OpenBLAS picks its kernel family

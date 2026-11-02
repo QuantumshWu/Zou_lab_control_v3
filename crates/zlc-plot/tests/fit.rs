@@ -10,6 +10,11 @@ use zlc_plot::fit::linalg;
 use zlc_plot::fit::*;
 use zlc_plot::ticks::compact_number;
 
+/// The v2 oracle's symmetric Lorentzian doublet (one width, one height)
+/// that v3 replaced by the Lorentzian doublet of independent lines; the
+/// golden records naming it have no v3 model to compare against.
+const RETIRED_MODEL: &str = "symmetric_lorentzian_doublet";
+
 fn float(value: &Value) -> f64 { f64::from_bits(value.as_u64().expect("float bits")) }
 
 fn base64(text: &str) -> Vec<u8> {
@@ -296,7 +301,7 @@ fn compare_result(name: &str, local: usize, want: &Value, got: &FitResult, repor
 fn run_cases(data: &Value) -> Report {
     let engine = FitEngine::default();
     let mut report = Report::default();
-    for case in data["cases"].as_array().unwrap() {
+    for case in data["cases"].as_array().unwrap().iter().filter(|c| c["model"] != RETIRED_MODEL) {
         let name = case["name"].as_str().unwrap();
         let model = engine.registry.get(case["model"].as_str().unwrap()).unwrap();
         let cells: Vec<FitCell> = case["cells"].as_array().unwrap().iter().map(cell).collect();
@@ -397,7 +402,7 @@ fn large_fits_match_the_oracle() {
 fn run_evaluations(data: &Value) -> Report {
     let engine = FitEngine::default();
     let mut report = Report::default();
-    for record in data["evaluations"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+    for record in data["evaluations"].as_array().map(Vec::as_slice).unwrap_or(&[]).iter().filter(|r| r["model"] != RETIRED_MODEL) {
         let name = record["name"].as_str().unwrap();
         let model = engine.registry.get(record["model"].as_str().unwrap()).unwrap();
         let units: Vec<(String, String)> = record["units"].as_array().unwrap().iter().map(|u| (u[0].as_str().unwrap().to_string(), u[1].as_str().unwrap().to_string())).collect();

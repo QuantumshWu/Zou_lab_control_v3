@@ -83,6 +83,18 @@ impl FitLayer for EngineFitLayer {
     }
 
     fn resolve_target(&self, query: &FitTargetQuery<'_>) -> Result<FitResolution> {
+        // A target (a saved figure, a restored panel) naming a model this
+        // catalogue does not have is not an error of the panel: its fit is
+        // inactive, and the panel says which model and that it was not applied.
+        if let Some(model) = query.target.get("model").filter(|model| !model.is_none()) {
+            let model = model.py_str();
+            if !model.trim().is_empty() && self.engine.registry.get(&model).is_err() {
+                return Ok(FitResolution {
+                    unavailable: Some(format!("Fit not applied: this version has no fit model '{}'. Choose a model in Setting \u{2192} Fit.", model.trim())),
+                    ..FitResolution::default()
+                });
+            }
+        }
         let units = parameter_units(query.units);
         let previous = query.previous_request.and_then(live_request);
         let (request, failure) = resolve_fit_target(&self.engine, &Value::Map(query.target.clone()).to_json(),
@@ -93,7 +105,7 @@ impl FitLayer for EngineFitLayer {
             FitRequest { model: Arc::new(model_info(&request.model)), target: target.as_map().cloned().unwrap_or_default(),
                          native: Some(Arc::new(request)) }
         });
-        Ok(FitResolution { request, expression_failure: failure })
+        Ok(FitResolution { request, expression_failure: failure, unavailable: None })
     }
 
     fn expression_text(&self, units: &FitUnits, model: &FitModelInfo, target: &ValueMap) -> Result<String> {

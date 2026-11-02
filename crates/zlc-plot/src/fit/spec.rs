@@ -1,5 +1,5 @@
 //! Model declarations: parameter specs, presentation, reductions, the model
-//! spec and its registry, and the thirteen built-in models
+//! spec and its registry, and the built-in models
 //! (`zlc_plot.fit.FitModelSpec` / `FitModelRegistry` /
 //! `builtin_fit_models`).
 
@@ -265,6 +265,16 @@ pub enum ComponentKind {
     LowerPopulation,
     /// `amplitude*ratio` population of a two-population model.
     UpperPopulation,
+    /// The first line of a two-line model, drawn on the shared offset.
+    FirstLine,
+    /// The second line of a two-line model, drawn on the shared offset.
+    SecondLine,
+}
+
+impl ComponentKind {
+    /// Whether the component carries the model's offset (a line drawn on
+    /// the baseline), so the components do not add up to the model.
+    pub fn on_baseline(self) -> bool { matches!(self, ComponentKind::FirstLine | ComponentKind::SecondLine) }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -444,8 +454,11 @@ impl FitModelSpec {
             if reduction.wide_names() != name_set {
                 return refuse(format!("fit model {}: its reduction must account for every parameter, shared or pinned", str_repr(&model_id)));
             }
-            if targets != [FitTarget::Histogram] {
-                return refuse(format!("fit model {}: a reduction is weighed by the Poisson deviance of counts; only a histogram model has one", str_repr(&model_id)));
+            if targets != [FitTarget::Histogram] && targets != [FitTarget::Series] {
+                return refuse(format!(
+                    "fit model {}: a reduction is weighed by the Poisson deviance of a histogram's counts or the Gaussian likelihood of a series; a model with a reduction fits exactly one of those",
+                    str_repr(&model_id)
+                ));
             }
         }
         let formula = match formula {
@@ -586,6 +599,16 @@ fn reduction(nested: &str, shared: &[(&str, &str)], pinned: Vec<(&str, Pin)>) ->
         nested_model_id: nested.into(),
         shared: shared.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
         pinned: pinned.into_iter().map(|(n, p)| (n.to_string(), p)).collect(),
+    }
+}
+
+fn two_lines() -> FitPresentationSpec {
+    FitPresentationSpec {
+        components: vec![
+            FitComponentSpec { component_id: "A".into(), kind: ComponentKind::FirstLine },
+            FitComponentSpec { component_id: "B".into(), kind: ComponentKind::SecondLine },
+        ],
+        ellipse_glyph: None,
     }
 }
 
@@ -754,25 +777,35 @@ fn build_builtins() -> Vec<Arc<FitModelSpec>> {
             )),
         ),
         FitModelSpec::new(
-            "symmetric_lorentzian_doublet",
-            "Symmetric Lorentzian doublet",
+            "lorentzian_doublet",
+            "Lorentzian doublet",
             1,
             vec![
                 parameter("center", Axis0, Real, r"$x_0$", true),
-                parameter("common_fwhm", Axis0, Positive, r"$\mathrm{FWHM}$", false),
-                parameter("component_amplitude", Value, Real, r"$H$", false),
+                parameter("fwhm", Axis0, Positive, r"$\mathrm{FWHM}$", false),
+                parameter("amplitude", Value, Real, r"$H$", false),
                 parameter("offset", Value, Real, r"$B$", true),
-                parameter("center_splitting", Axis0, Nonnegative, r"$\delta$", false),
+                parameter("splitting", Axis0, Nonnegative, r"$\delta$", false),
+                parameter("fwhm_B", Axis0, Positive, r"$\mathrm{FWHM_B}$", false),
+                parameter("amplitude_B", Value, Real, r"$H_B$", false),
             ],
-            "center",
-            Evaluator::Builtin(Kernel::Doublet),
+            "splitting",
+            Evaluator::Builtin(Kernel::LorentzianDoublet),
             series.clone(),
-            Some(r"$f(x)=H[L(x;x_0-\delta/2,\mathrm{FWHM})+L(x;x_0+\delta/2,\mathrm{FWHM})]+B$"),
-            FitPresentationSpec::default(),
+            Some(concat!(
+                r"$f(x)=H\,L(x;x_0,\mathrm{FWHM})+H_B\,L(x;x_0+\delta,\mathrm{FWHM_B})+B$",
+                "\n",
+                r"$L(x;c,w)=\frac{(w/2)^2}{(x-c)^2+(w/2)^2},\ \delta\geq 0$"
+            )),
+            two_lines(),
             None,
             vec![],
             &[],
-            None,
+            Some(reduction(
+                "lorentzian",
+                &[("center", "center"), ("fwhm", "fwhm"), ("amplitude", "amplitude"), ("offset", "offset")],
+                vec![("splitting", Pin::Value(0.0)), ("fwhm_B", Pin::Shared("fwhm".into())), ("amplitude_B", Pin::Value(0.0))],
+            )),
         ),
         FitModelSpec::new(
             "damped_sine",
@@ -785,7 +818,7 @@ fn build_builtins() -> Vec<Arc<FitModelSpec>> {
                 parameter("decay_time", Axis0, Positive, r"$\tau$", false),
                 parameter("phase", Radian, PhaseRadians, r"$\phi$", false),
             ],
-            "decay_time",
+            "baseband_frequency",
             Evaluator::Builtin(Kernel::Damped),
             series.clone(),
             Some(r"$f(t)=A\sin(2\pi f (t-t_0)+\phi)e^{-(t-t_0)/\tau}+B$"),

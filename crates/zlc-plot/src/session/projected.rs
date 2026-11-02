@@ -165,6 +165,7 @@ pub struct FitSelection {
     pub observations: Arc<[f64]>,
     pub selected_indices: Option<Arc<[i64]>>,
     pub observation_sigma: Option<Arc<[f64]>>,
+    pub observation_dof: Option<Arc<[f64]>>,
     pub facet_index: Option<usize>,
     pub selector_kind: Option<SelectorKind>,
     pub regular_image: Option<Arc<RegularImageFitInput>>,
@@ -730,15 +731,23 @@ impl FitProjection {
         };
         let coordinates = [dense];
         let presentation = &result.model.presentation;
-        if presentation.components.is_empty() {
+        // Lines drawn on the baseline do not add up to the model: the total
+        // is the model itself, and a fit settled on one line is drawn as one.
+        let on_baseline = presentation.components.iter().any(|component| component.kind.on_baseline());
+        if presentation.components.is_empty() || (on_baseline && result.reduced) {
             let fitted = evaluate_model(&result.model, &coordinates, &result.parameter_values).map_err(fit_error)?;
             return Ok(vec![FitPolyline { x: display_x, y: shown(fitted), role: if histogram { "total" } else { "primary" }, component_index: 0 }]);
         }
         let components = presentation.components.iter().map(|component|
             evaluate_component(&result.model, &component.component_id, &coordinates, &result.parameter_values).map_err(fit_error))
             .collect::<Result<Vec<_>>>()?;
-        let mut total = components[0].clone();
-        for values in &components[1..] { for (sum, value) in total.iter_mut().zip(values) { *sum += value; } }
+        let total = if on_baseline {
+            evaluate_model(&result.model, &coordinates, &result.parameter_values).map_err(fit_error)?
+        } else {
+            let mut total = components[0].clone();
+            for values in &components[1..] { for (sum, value) in total.iter_mut().zip(values) { *sum += value; } }
+            total
+        };
         let mut lines: Vec<FitPolyline> = components.into_iter().enumerate()
             .map(|(index, values)| FitPolyline { x: display_x.clone(), y: shown(values), role: "component", component_index: index }).collect();
         lines.push(FitPolyline { x: display_x, y: shown(total), role: "total", component_index: 0 });
@@ -836,7 +845,8 @@ impl PreparedSelection {
         Ok(FitSelection {
             data_revision: selected.data_revision, scope: selected.scope, coordinates: selected.coordinates.iter().map(floats).collect(),
             observations: floats(&selected.observations), selected_indices: selected.selected_indices.as_ref().map(|indices| indices.slice::<i64>().into()),
-            observation_sigma: selected.observation_sigma.as_ref().map(floats), facet_index: selected.facet_index,
+            observation_sigma: selected.observation_sigma.as_ref().map(floats), observation_dof: selected.observation_dof.as_ref().map(floats),
+            facet_index: selected.facet_index,
             selector_kind: selected.selector_kind.map(selector_kind_of_fit), regular_image, group_key: selected.group_key,
         })
     }

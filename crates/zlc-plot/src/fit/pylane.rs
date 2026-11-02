@@ -269,116 +269,6 @@ fn init_poisson_bimodal(x_in: &[f64], y: &[f64]) -> Vec<f64> {
     best.map(|(_, s)| s).unwrap_or_else(fallback)
 }
 
-/// `_find_peaks(signal, prominence=, width=)`.
-fn find_peaks(values: &[f64], prominence: f64, width: f64) -> (Vec<usize>, Vec<f64>) {
-    let steps: Vec<f64> = values.windows(2).map(|w| w[1] - w[0]).collect();
-    let changes: Vec<usize> = (0..steps.len()).filter(|&i| steps[i] != 0.0).collect();
-    if changes.len() < 2 {
-        return (Vec::new(), Vec::new());
-    }
-    let signs: Vec<bool> = changes.iter().map(|&c| steps[c] > 0.0).collect();
-    let mut peaks = Vec::new();
-    for r in 0..signs.len() - 1 {
-        if signs[r] && !signs[r + 1] {
-            peaks.push((changes[r] + 1 + changes[r + 1]) / 2);
-        }
-    }
-    let last = values.len() as isize - 1;
-    let mut kept = Vec::new();
-    let mut widths = Vec::new();
-    for peak in peaks {
-        let top = values[peak];
-        let (mut left_base, mut index) = (peak as isize, peak as isize);
-        let mut left_min = top;
-        while index >= 0 && values[index as usize] <= top {
-            if values[index as usize] < left_min {
-                left_min = values[index as usize];
-                left_base = index;
-            }
-            index -= 1;
-        }
-        let mut right_base = peak as isize;
-        index = peak as isize;
-        let mut right_min = top;
-        while index <= last && values[index as usize] <= top {
-            if values[index as usize] < right_min {
-                right_min = values[index as usize];
-                right_base = index;
-            }
-            index += 1;
-        }
-        let rise = top - pmax(left_min, right_min);
-        if rise < prominence {
-            continue;
-        }
-        let level = top - 0.5 * rise;
-        let mut i = peak as isize;
-        while left_base < i && level < values[i as usize] {
-            i -= 1;
-        }
-        let mut left_crossing = i as f64;
-        if values[i as usize] < level {
-            left_crossing += (level - values[i as usize]) / (values[i as usize + 1] - values[i as usize]);
-        }
-        i = peak as isize;
-        while i < right_base && level < values[i as usize] {
-            i += 1;
-        }
-        let mut right_crossing = i as f64;
-        if values[i as usize] < level {
-            right_crossing -= (level - values[i as usize]) / (values[i as usize - 1] - values[i as usize]);
-        }
-        let extent = right_crossing - left_crossing;
-        if extent < width {
-            continue;
-        }
-        kept.push(peak);
-        widths.push(extent);
-    }
-    (kept, widths)
-}
-
-fn doublet_candidates(x_in: &[f64], y_in: &[f64]) -> Vec<Vec<f64>> {
-    let order = stable_order(x_in);
-    let x: Vec<f64> = order.iter().map(|&i| x_in[i]).collect();
-    let ordered_y: Vec<f64> = order.iter().map(|&i| y_in[i]).collect();
-    let x_span = span(&x);
-    let y_range = value_range(&ordered_y);
-    let unique = unique_sorted(&x);
-    let mut step = if unique.len() > 1 { numpy_median(&unique.windows(2).map(|w| (w[1] - w[0]).abs()).collect::<Vec<f64>>()) } else { x_span };
-    step = pmax(step, EPSILON);
-    let (ylow, yhigh) = min_max(&ordered_y);
-    let mut seeds = Vec::new();
-    for sign in [1.0, -1.0] {
-        let signed: Vec<f64> = ordered_y.iter().map(|v| sign * v).collect();
-        let (peaks, widths) = find_peaks(&signed, y_range / 8.0, 1.0);
-        if peaks.is_empty() {
-            continue;
-        }
-        // np.argsort(signed[peaks])[::-1][:4] (quicksort; distinct heights).
-        let mut by_height: Vec<usize> = (0..peaks.len()).collect();
-        by_height.sort_by(|&a, &b| signed[peaks[a]].partial_cmp(&signed[peaks[b]]).unwrap_or(std::cmp::Ordering::Equal));
-        by_height.reverse();
-        let strongest: Vec<usize> = by_height.iter().take(4).map(|&i| peaks[i]).collect();
-        let width_of = |peak: usize| {
-            let index = peaks.iter().position(|&p| p == peak).expect("peak");
-            pmax(widths[index] * step, step)
-        };
-        let first = strongest[0];
-        for &second in &strongest {
-            seeds.push(vec![(x[first] + x[second]) / 2.0, width_of(first), sign * y_range, if sign > 0.0 { ylow } else { yhigh }, (x[second] - x[first]).abs()]);
-        }
-    }
-    if !seeds.is_empty() {
-        return seeds;
-    }
-    let width = x_span / 8.0;
-    vec![
-        vec![x[argmax(&ordered_y)], width, y_range, ylow, width * 2.0],
-        vec![x[argmin(&ordered_y)], width, -y_range, yhigh, width * 2.0],
-    ]
-}
-
 fn init_damped_sine(x: &[f64], y: &[f64]) -> Vec<f64> {
     let mut order: Vec<usize> = (0..x.len()).collect();
     order.sort_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap_or(std::cmp::Ordering::Equal));
@@ -576,7 +466,15 @@ pub fn builtin_candidates(model: &FitModelSpec, coords: &[Vec<f64>], values: &[f
             vec![vec![total * step, rate, sigma]]
         }
         Kernel::PoissonBimodal => vec![init_poisson_bimodal(x, values)],
-        Kernel::Doublet => doublet_candidates(x, values),
+        Kernel::LorentzianDoublet => {
+            let mut lower = vec![f64::NEG_INFINITY; 7];
+            let mut upper = vec![f64::INFINITY; 7];
+            let (seeds, count) = compiled_prepare(*kernel, &[x.clone()], values, kernel.max_candidates(), &mut lower, &mut upper)?;
+            if count == 0 {
+                return Err(FitError::value("Lorentzian doublet fit requires finite data"));
+            }
+            seeds
+        }
         Kernel::Damped => {
             let base = init_damped_sine(x, values);
             if first_only {
@@ -636,7 +534,7 @@ pub fn has_candidates(model: &FitModelSpec) -> bool {
     match &model.evaluator {
         Evaluator::Builtin(kernel) => matches!(
             kernel,
-            Kernel::Lorentzian | Kernel::Doublet | Kernel::Damped | Kernel::Exponential | Kernel::Saturation | Kernel::ReleaseRecapture | Kernel::Radial | Kernel::Anisotropic
+            Kernel::Lorentzian | Kernel::LorentzianDoublet | Kernel::Damped | Kernel::Exponential | Kernel::Saturation | Kernel::ReleaseRecapture | Kernel::Radial | Kernel::Anisotropic
         ),
         Evaluator::Custom(custom) => custom.candidates(&[], &[]).is_some(),
     }

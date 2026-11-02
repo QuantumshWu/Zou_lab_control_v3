@@ -410,7 +410,7 @@ pub fn rolling_payload(view: &DataView, history: &RollingHistory, along: Option<
         };
         let label = if key.is_empty() { value_label.clone() } else { key.iter().map(|v| v.label.as_str()).collect::<Vec<_>>().join(", ") };
         CurveSeries { x: x.clone(), y: QuantityArray::new(Array::vector(canonical), canonical_unit.clone(), unit.clone(), value_label.clone()),
-            valid: Array::vector(valid), sem: sem.map(Array::vector), x_labels: None, group_key: key.clone(), label }
+            valid: Array::vector(valid), sem: sem.map(Array::vector), sem_dof: None, x_labels: None, group_key: key.clone(), label }
     }).collect();
     Ok(CurveData { revision: history.revision, generation: history.generation.clone(), x_ref: None,
         group_by: group.into_iter().cloned().collect(), series, x_role: Some(role.into()) })
