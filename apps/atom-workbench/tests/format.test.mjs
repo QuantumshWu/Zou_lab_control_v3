@@ -66,6 +66,9 @@ test('the stop and checkpoint reasons the solver formats are shown in Chinese',(
   chinese(formatted(adapterSource,"The mean's error estimate is",['3.61e0']),'uninformative mean');
   // A request stopped before its first solve: nothing computed, the reason alone.
   chinese(formatted(pipelineSource,'The lattice of this request has',[150,'5.3','5']),'memory guard');
+  const foldSource=readFileSync(new URL('../rust-solver/population-core/src/lattice/fold.rs',import.meta.url),'utf8');
+  chinese(formatted(foldSource,'Far shell at',['-1.104e7','4.48e7']),'far shell within L0');
+  chinese(formatted(foldSource,'The far shell of this request',['6.1','7.5']),'far shell memory');
   chinese(formatted(pipelineSource,'An output time is at most',['1e7','1.5e7']),'an output time beyond 10 s');
   // A grid the solver does not solve: refused with the reason.
   assert.match(chinese(formatted(adapterSource,'The trajectory duration is limited',['15']),'too long'),/10 s.*15 s/);

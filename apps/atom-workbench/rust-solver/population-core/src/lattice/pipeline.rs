@@ -191,16 +191,17 @@ fn slowest(model:&Model,space:&Space,vectors:&Vectors,weight:f64,lattice:&mut La
 /// The responses of the far shell's rings beyond the second order: per
 /// source E_j of x0 (`Duhamel::sources`, weighed by |c_j|) the far shell's
 /// landing on the lattice (`FoldLibrary::far_shell_sources`), with what it
-/// leaves out (trace norm) times T within `tail`; per ring its Duhamel
-/// response summed over the landing modes; and the landings' time.
-fn ring_responses(prepared:&LatticePrepared,modes:&[Charge],nu:&[f64],duhamel:&Duhamel<'_>,horizon:f64,tail:f64)->Result<(Vec<f64>,f64),String>{
+/// leaves out (trace norm) times T within `tail` and its far blocks within
+/// `bytes`; per ring its Duhamel response summed over the landing modes; and
+/// the landings' time.
+fn ring_responses(prepared:&LatticePrepared,modes:&[Charge],nu:&[f64],duhamel:&Duhamel<'_>,horizon:f64,tail:f64,bytes:f64)->Result<(Vec<f64>,f64),String>{
     if prepared.plan.far().is_empty()||duhamel.count()==0{return Ok((Vec::new(),0.));}
     let d=prepared.generator.n*prepared.generator.n;let nu_of=|q:&[i32]|prepared.nu(q);
     let centre=modes.iter().position(|q|*q==prepared.generator.zero).ok_or("Lattice modes must contain the zero charge")?;
     // Per ring and landing mode the images of every source ([j * d + e]).
     let sources:Vec<(usize,&[C],f64)>=duhamel.sources().zip(duhamel.weights()).map(|(e,w)|(centre,e,w)).collect();let count=sources.len();
     let clock=Instant::now();
-    let(landings,_,_)=prepared.fold.far_shell_sources(&prepared.generator,&prepared.plan,&nu_of,modes,&sources,tail/horizon)?;
+    let(landings,_,_)=prepared.fold.far_shell_sources(&prepared.generator,&prepared.plan,&nu_of,modes,&sources,tail/horizon,bytes)?;
     let landings_ms=clock.elapsed().as_secs_f64()*1e3;
     let responses=landings.iter().skip(1).map(|ring|{let mut per:BTreeMap<usize,Vec<C>>=BTreeMap::new();
         for(&(jj,q),block)in ring{per.entry(q).or_insert_with(||vec![ZERO;count*d])[jj*d..(jj+1)*d].copy_from_slice(block);}
@@ -242,7 +243,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     let clock=Instant::now();
     let nu:Vec<f64>=modes.iter().map(|q|prepared.nu(q)).collect::<Result<_,_>>()?;
     let duhamel=Duhamel::new(eigen,initial,&fold::sample_times(times,request.horizons))?;
-    let(responses,landings_ms)=ring_responses(prepared,&modes,&nu,&duhamel,longest,0.25*share)?;
+    let(responses,landings_ms)=ring_responses(prepared,&modes,&nu,&duhamel,longest,0.25*share,(budget-planned)/request.runs.max(1)as f64)?;
     let mut depth=responses.len();
     while depth>0&&responses[depth-1..].iter().sum::<f64>()<=0.25*share{depth-=1;}
     let mut report=FoldReport{ring_responses:responses,rings:depth,landings_ms,responses_ms:clock.elapsed().as_secs_f64()*1e3,..FoldReport::default()};

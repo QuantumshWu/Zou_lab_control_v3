@@ -529,7 +529,7 @@ impl FoldLibrary{
     pub fn far_shell(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],x:&[C],tolerance:f64)->Result<FarShell,String>{
         let clock=Instant::now();let d=generator.n*generator.n;let count=modes.len();
         let sources:Vec<(usize,&[C],f64)>=(0..count).map(|p|(p,&x[p*d..(p+1)*d],1.)).filter(|(_,b,_)|b.iter().any(|z|nonzero(*z))).collect();
-        let(rings,contraction,terms)=self.far_shell_sources(generator,plan,nu_of,modes,&sources,tolerance)?;
+        let(rings,contraction,terms)=self.far_shell_sources(generator,plan,nu_of,modes,&sources,tolerance,f64::INFINITY)?;
         let mut shell=FarShell{contraction,terms,..FarShell::default()};
         for ring in rings{let mut landing=vec![ZERO;count*d];
             for((_,q),block)in ring{for(a,&b)in landing[q*d..(q+1)*d].iter_mut().zip(&block){add(a,b);}}
@@ -540,9 +540,10 @@ impl FoldLibrary{
     /// The far shell of separate source blocks (`far_shell`): each source a
     /// block on a lattice mode with its weight, landed apart; per ring the
     /// landings keyed by (source, mode), the largest contraction met and the
-    /// series' terms.
+    /// series' terms. A ring whose far blocks would take more than `bytes`
+    /// (the groups together) stops the request with the reason.
     #[allow(clippy::too_many_arguments)]
-    pub fn far_shell_sources(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],sources:&[(usize,&[C],f64)],tolerance:f64)->Result<(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize),String>{
+    pub fn far_shell_sources(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],sources:&[(usize,&[C],f64)],tolerance:f64,bytes:f64)->Result<(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize),String>{
         let n=generator.n;let d=n*n;
         let index:BTreeMap<&[i32],usize>=modes.iter().enumerate().map(|(i,q)|(q.as_slice(),i)).collect();
         let nu_modes:Vec<f64>=modes.iter().map(|q|nu_of(q)).collect::<Result<_,_>>()?;
@@ -552,7 +553,7 @@ impl FoldLibrary{
         let trace_bound=|v:&[C]|(n as f64).sqrt()*v.iter().map(|z|squared(*z)).sum::<f64>().sqrt();
         // The sources in groups; each group's far shell on its own.
         let groups:Vec<Vec<usize>>=(0..sources.len()).collect::<Vec<_>>().chunks(FAR_GROUP).map(|g|g.to_vec()).collect();
-        let weight:f64=sources.iter().map(|s|s.2).sum();
+        let weight:f64=sources.iter().map(|s|s.2).sum();let groups_count=groups.len();
         type Ring=BTreeMap<Charge,(f64,BTreeMap<usize,Vec<C>>)>;
         type Group=(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize);
         let execution=Execution::new()?;
@@ -596,7 +597,11 @@ impl FoldLibrary{
                 // block's gamma, rho over every far mode met.
                 let mut potentials:Vec<(Charge,usize,f64)>=Vec::new();
                 for(w,(nu,blocks))in &next{for(&s,b)in blocks{
-                    let room=(nu_modes[sources[s].0]+nu).abs()-lambda0;let gamma=if room>0.{1./room}else{f64::INFINITY};
+                    // A far mode within L0's spectrum: the far shell is no
+                    // shell (a resonant path through far steps).
+                    let at=nu_modes[sources[s].0]+nu;let room=at.abs()-lambda0;
+                    if !(room>0.){return Err(format!("Far shell at {at:e} rad/us is not separated from L0's spectrum (|L0| <= {lambda0:e} rad/us): not solved"));}
+                    let gamma=1./room;
                     gamma_far=gamma_far.max(gamma);potentials.push((w.clone(),s,sources[s].2*gamma*trace_bound(b)));}}
                 let rho=c_all*gamma_far;contraction=contraction.max(rho);
                 let scale=if rho<1.{c_all/(1.-rho)}else{f64::INFINITY};
@@ -607,6 +612,8 @@ impl FoldLibrary{
                 for(w,s,v)in &potentials{if pruned+scale*v>0.5*left{break;}pruned+=scale*v;if let Some(e)=next.get_mut(w){e.1.remove(s);}}
                 left-=pruned;
                 next.retain(|_,v|!v.1.is_empty());
+                let held=(next.values().map(|v|v.1.len()).sum::<usize>()*d*std::mem::size_of::<C>()*groups_count)as f64;
+                if held>bytes{return Err(format!("The far shell of this request would need about {:.1} GB, above its {:.1} GB share of the memory budget: not solved",held/1e9,bytes/1e9));}
                 ring=next;
             }
             Ok((landings,contraction,terms))

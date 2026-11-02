@@ -11,16 +11,16 @@ atomic constants or remove physical couplings.
 - `lattice`: the folded Fourier lattice (its module documentation lists the
   pipeline). Near charge steps are explicit lattice couplings; far ones (the
   tweezer, every counter-rotating harmonic) are folded statically at second
-  order and every remainder is charged. On it: the long-time mean (`steady`),
-  the slow eigenpairs (`slow`) and the finite-time trajectory (`finite`),
-  each accepted by its a-posteriori error ledger (`ledger`) at the fixed
-  tolerance 0.005.
-- `lapack`, `dense_expm`, `parallel`: the LAPACK/BLAS wrappers, the dense
-  exponential of the reduced model and the worker pool.
+  order, and a run leaves out only the pieces of the fold whose action over
+  its time is negligible whatever the initial state. Every output of a run
+  (the trajectory on its grid, the means at the standard horizons, the
+  slowest relaxation) is read from one Galerkin model of one rational Krylov
+  space, accepted when its change over a whole cycle of poles is within the
+  fixed tolerance 0.005.
+- `lapack`, `parallel`, `memory`: the LAPACK/BLAS wrappers, the worker pool
+  and the installed memory the memory guard reads.
 
 The parent build forwards `static-numerics` to link the OpenBLAS archive into
 the single EXE; otherwise `ATOM_OPENBLAS_DLL` names a SciPy OpenBLAS DLL. BLAS
-runs single-threaded; `ATOM_SOLVER_THREADS` sizes the worker pool. The
-`validation` feature adds the exact dense dressed preconditioner that the
-structured one is measured against. No test or solve loads a saved trajectory
-as an initial guess or answer.
+runs single-threaded; `ATOM_SOLVER_THREADS` sizes the worker pool. No test or
+solve loads a saved trajectory as an initial guess or answer.
