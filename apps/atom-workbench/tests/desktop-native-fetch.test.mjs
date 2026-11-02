@@ -74,6 +74,22 @@ test('timeout cancels only its channel and ignores the late terminal response',a
  }finally{await f.adapter.dispose();}
 });
 
+test('the running reports of a motion solve stream on and restart its deadline; a stream may not end on one',async()=>{
+ const f=fixture({timeoutMs:60});try{
+  const body={...input(1,true),options:{...input().options,motion:{axis:'xy',temperatureUK:30}}};
+  const pending=solve(f.adapter,body),message=await posted(f.worker);
+  const beat=()=>f.worker.emit({kind:'stream',channel:message.channel,event:{type:'running',data:{request:input().request,running:{simulatedUs:1,durationUs:2,trajectories:0}}}});
+  beat();const response=await pending,reader=response.body.getReader();assert.equal(line((await reader.read()).value).type,'running');
+  // Reports 40 ms apart keep a 60 ms deadline from expiring for 160 ms.
+  for(let k=0;k<4;k++){await new Promise(resolve=>setTimeout(resolve,40));beat();assert.equal(line((await reader.read()).value).type,'running');}
+  f.worker.emit({kind:'stream',channel:message.channel,event:{type:'result',data:{request:input().request,populations:[[1,0]]}},done:true});
+  assert.equal(line((await reader.read()).value).type,'result');assert.equal((await reader.read()).done,true);
+  const ended=solve(f.adapter,input(2,true)),next=await posted(f.worker);
+  f.worker.emit({kind:'stream',channel:next.channel,event:{type:'running',data:{request:input(2).request,running:{simulatedUs:1,durationUs:2,trajectories:0}}},done:true});
+  await assert.rejects(ended);
+ }finally{await f.adapter.dispose();}
+});
+
 test('Worker failure rejects pending fetch/body and synchronously closes native children',async()=>{
  const f=fixture();try{
   const pending=solve(f.adapter),waiting=assert.rejects(pending,/Worker crashed/);await posted(f.worker);

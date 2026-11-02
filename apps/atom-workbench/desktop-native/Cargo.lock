@@ -37,6 +37,7 @@ version = "0.1.0"
 dependencies = [
  "atom-motion-3d",
  "atom-motion-core",
+ "atom-motion-gpu",
  "atom-population-core",
  "serde",
  "serde_json",
@@ -59,6 +60,14 @@ dependencies = [
  "atom-population-core",
  "rayon",
  "rustfft",
+]
+
+[[package]]
+name = "atom-motion-gpu"
+version = "0.1.0"
+dependencies = [
+ "atom-motion-core",
+ "rayon",
 ]
 
 [[package]]

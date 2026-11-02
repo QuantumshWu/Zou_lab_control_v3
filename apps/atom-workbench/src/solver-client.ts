@@ -1,5 +1,5 @@
-import type {DynamicsResult,MeanResult,MeanStatus,MotionResult,PopulationAccuracy} from './solver-types.js';
-import {CONVERGED_MEAN_STATUSES,MEAN_STATUSES,SEMICLASSICAL_POPULATION_TARGET,readMotionResult,readPopulationAccuracy} from './solver-types.js';
+import type {DynamicsResult,MeanResult,MeanStatus,MotionResult,PopulationAccuracy,RunningReport} from './solver-types.js';
+import {CONVERGED_MEAN_STATUSES,MEAN_STATUSES,SEMICLASSICAL_POPULATION_TARGET,readMotionResult,readPopulationAccuracy,readRunningReport} from './solver-types.js';
 import type {DynamicsSettings,InitialStateSpec,Scene,Level} from './types.js';
 import {MEAN_HORIZONS_US,POPULATION_TOLERANCE,canonicalInitialState,resolveInitialState} from './types.js';
 import {initialPopulations} from './full-master-model.js';
@@ -11,7 +11,7 @@ import {motionRequest,type MotionRequest} from './motion.js';
 export interface SolverFailureRecord {time:string;request:{clientId:string;sequence:number};scene:Scene;options:object;attempt:number;willRetry:boolean;error:string;status?:number;code?:string;response?:unknown;page?:string;}
 class RequestFailure extends Error {constructor(message:string,readonly status:number,readonly code:string,readonly retryable:boolean){super(message);}}
 type Job={id:number;attempt:number;scene:Scene;settings:DynamicsSettings;meanOnly:boolean;includeMean:boolean;controller:AbortController;
-  resolve:(value:DynamicsResult)=>void;reject:(error:Error)=>void;onProgress?:(value:DynamicsResult)=>void;started:number;timer?:ReturnType<typeof setTimeout>};
+  resolve:(value:DynamicsResult)=>void;reject:(error:Error)=>void;onProgress?:(value:DynamicsResult)=>void;onRunning?:(value:RunningReport)=>void;started:number;timer?:ReturnType<typeof setTimeout>};
 type ClientOptions={baseUrl?:string;debounceMs?:number;fetch?:typeof fetch;clientId?:string;onFailure?:(record:SolverFailureRecord)=>void};
 
 /** The production solver is a native Rust process. QuTiP is an offline oracle only. */
@@ -29,14 +29,14 @@ export class DynamicsClient {
   }
   /** A solve: the trajectory with its mean (by default), the mean alone (`meanOnly`), or the
    * trajectory alone (`includeMean` false, its mean already at hand). */
-  solve(scene:Scene,settings:DynamicsSettings,control:{meanOnly?:boolean;includeMean?:boolean;onProgress?:(value:DynamicsResult)=>void}={}):Promise<DynamicsResult>{
+  solve(scene:Scene,settings:DynamicsSettings,control:{meanOnly?:boolean;includeMean?:boolean;onProgress?:(value:DynamicsResult)=>void;onRunning?:(value:RunningReport)=>void}={}):Promise<DynamicsResult>{
     if(this.disposed)return Promise.reject(new DOMException('Disposed.','AbortError'));
     if(control.meanOnly&&control.includeMean===false)return Promise.reject(new Error('A mean-only solve asks for its mean.'));
     this.abortCurrent('Superseded.');
     const id=++this.sequence;
     return new Promise((resolve,reject)=>{
       const job:Job={id,attempt:0,scene:structuredClone(scene),settings:structuredClone(settings),meanOnly:control.meanOnly??false,includeMean:control.includeMean??true,
-        controller:new AbortController(),resolve,reject,onProgress:control.onProgress,started:performance.now()};
+        controller:new AbortController(),resolve,reject,onProgress:control.onProgress,onRunning:control.onRunning,started:performance.now()};
       this.current=job;job.timer=setTimeout(()=>{job.timer=undefined;void this.run(job);},this.debounceMs);
     });
   }
@@ -81,8 +81,14 @@ export class DynamicsClient {
       if(event.type==='error')throw new RequestFailure(event.data?.error??'时间演化失败。',event.status??422,event.data?.code??'numerical-failure',false);
       if(final!==undefined)throw new Error('求解流包含多余结果。');
       if(event.type==='result'){if(event.data?.progress!==undefined)throw new Error('最终结果带有进度标记。');final=event.data;return;}
-      if(event.type!=='checkpoint')throw new Error('未知求解进度。');
+      if(event.type!=='checkpoint'&&event.type!=='running')throw new Error('未知求解进度。');
       if(this.current!==job||job.controller.signal.aborted)return;
+      // A running report between checkpoints (a 2D motion solve's): how far its batch is and the
+      // time left once estimated.
+      if(event.type==='running'){
+        if(event.data?.request?.clientId!==this.clientId||event.data.request.sequence!==job.id)throw new Error('进度与当前请求不匹配。');
+        job.onRunning?.(readRunningReport(event.data.running));return;
+      }
       // A checkpoint: the result evaluated so far -- the trajectory on the requested samples (the
       // single t = 0 row of a mean request) with its per-sample errors, and the mean as far as it
       // has come (a full request's none before its mean's first checkpoint).

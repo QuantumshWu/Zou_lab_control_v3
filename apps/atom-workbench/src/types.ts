@@ -133,19 +133,24 @@ export interface DynamicsSettings {
   durationUnit:DurationUnit;
   /** A thermal initial state's temperature unit (as durationUnit); present exactly when it is thermal. */
   temperatureUnit?:TemperatureUnit;
-  /** Motion (ui-design.md §6.20): absent, or off, the trajectory is the internal state's alone.
-   * Kept while off, as an inactive mode's inputs are. */
+  /** Motion (ui-design.md §6.20–§6.22): absent, or off, the trajectory is the internal state's
+   * alone. Kept while off, as an inactive mode's inputs are. */
   motion?:MotionSettings;
 }
-/** A lab coordinate axis the atom moves along. */
+/** A lab coordinate axis: the line of 1D motion, or the tweezer axis 2D motion is across. */
 export type MotionAxis='x'|'y'|'z';
-/** The motion a solve computes: 1D along a lab axis, or '3d', the atom moving in all three
- * (semiclassical). */
-export type MotionChoice=MotionAxis|'3d';
+/** The plane of 2D motion through the tweezer focus perpendicular to the tweezer: named by its two
+ * lab axes in the order of the frame of the tweezer's axis (motion.ts MOTION_PLANES). */
+export type MotionPlane='yz'|'zx'|'xy';
+/** The motion a solve computes: 1D along a lab axis, 2D in a plane (2D 径向), or '3d', the atom
+ * moving in all three (semiclassical). */
+export type MotionChoice=MotionAxis|MotionPlane|'3d';
 /** A single atom in the tweezer: along `axis`, a lab axis through the focus perpendicular to every
- * focused beam (the first such axis when this one is not; motion.ts motionAxis), or in 3D. It
- * starts in the internal initial state, its motion thermal at temperatureUK. The trajectory is
- * the joint evolution of the internal state and this motion. */
+ * focused beam (1D); in the plane `axis` through the focus perpendicular to the tweezer when every
+ * focused beam runs along one lab axis (2D 径向); or in 3D. A choice the scene does not allow gives
+ * way (motion.ts motionAxis). It starts in the internal initial state, its motion thermal at
+ * temperatureUK (along each axis). The trajectory is the joint evolution of the internal state and
+ * this motion. */
 export interface MotionSettings {
   enabled:boolean; axis:MotionChoice;
   /** The initial temperature (μK, canonical) and the unit the operator writes it in (as durationUnit). */

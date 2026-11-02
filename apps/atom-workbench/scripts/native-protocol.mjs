@@ -15,7 +15,7 @@ export function nativeCapabilities(message){
 
 /** The one mapping from an HTTP/IPC solve request (scene + options) to the
  * native payload, and from the native result back to the client response. A
- * request with `options.motion` (1D motion) is a trajectory alone, and its model
+ * request with `options.motion` (1D or 2D motion) is a trajectory alone, and its model
  * carries the motion block (full-master-model.ts MotionModel). */
 export function prepareNativeSolve(input){
   if(input.modelSchema!==undefined&&input.modelSchema!==FULL_MODEL_SCHEMA)throw requestError('Unsupported atomic model schema.','incompatible-model-schema');
@@ -38,6 +38,16 @@ export function prepareNativeSolve(input){
   return {payload,respond};
 }
 
+/** A running solve's report between its checkpoints (a 2D motion solve's, main.rs): the running
+ * batch's simulated time of the duration (us), the trajectories done and, once estimated, the
+ * wall time left (ms). Returned without any other key. */
+export function readRunning(value){
+  const finite=x=>typeof x==='number'&&Number.isFinite(x)&&x>=0;
+  if(!value||typeof value!=='object'||Array.isArray(value)||!finite(value.simulatedUs)||!finite(value.durationUs)||value.simulatedUs>value.durationUs*(1+1e-9)
+    ||!Number.isSafeInteger(value.trajectories)||value.trajectories<0||(value.estimatedRemainingMs!==undefined&&!finite(value.estimatedRemainingMs)))throw new Error('Invalid native running report.');
+  const{simulatedUs,durationUs,trajectories,estimatedRemainingMs}=value;
+  return {simulatedUs,durationUs,trajectories,...(estimatedRemainingMs===undefined?{}:{estimatedRemainingMs})};
+}
 export function validateAtomicResult(result,request){
   if(request.modelSchema!==FULL_MODEL_SCHEMA||request.model?.dimension!==32||!Array.isArray(request.model?.collapse))throw new Error('Atomic request is missing required physical model metadata.');
   if(result?.modelSchema!==request.modelSchema||result.protocol!==NATIVE_PROTOCOL)throw new Error('Native atomic response has missing or incompatible model identity.');

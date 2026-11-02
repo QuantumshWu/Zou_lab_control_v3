@@ -1,12 +1,13 @@
-// Motion's charts (ui-design.md §6.20): two panels against time sharing one time axis -- the
+// Motion's charts (ui-design.md §6.20–§6.22): two panels against time sharing one time axis -- the
 // temperature and the mean velocity, or n̄ and the loss probability -- each with a line per axis the
-// atom moves along (one in 1D, x, y and z in 3D), and a distribution along one axis -- of the
-// velocity or of the position, as a density -- at the last time and, when asked, at another listed
-// time. Each reads actual samples only. A 1D result's continuation (the samples after its last
-// simulated time) lies on its band; a 3D result's samples outside the method's validated regime lie
-// on a light grey band: a reference only.
+// atom moves along (one in 1D, the plane's two in 2D, x, y and z in 3D), and a distribution along
+// one axis -- of the velocity or of the position, as a density -- at the last time and, when asked,
+// at another listed time; a 2D result's positions as maps of the plane. Each reads actual samples
+// only. A 1D result's continuation (the samples after its last simulated time) lies on its band; a
+// 3D result's samples outside the method's validated regime lie on a light grey band: a reference
+// only.
 import type {DurationUnit,MotionAxis} from './types.js';
-import type {Distributions,MotionResult} from './solver-types.js';
+import type {Distributions,MotionResult,PositionMaps} from './solver-types.js';
 import {RB87} from './physics.js';
 import {timeDisplayUnit} from './duration.js';
 import {formatNumber} from './format.js';
@@ -53,7 +54,7 @@ export interface Line {name:string;values:readonly number[];ink:string}
  * of its ticks, or symmetrically about 0 out to `reach` (base units). */
 export interface Series {id:string;name:string;title:string;lines:Line[];unit:Unit;reach?:number}
 export type SeriesKind='temperature'|'trap';
-/** The lines of per-axis values: one in the panel's ink for 1D, one per axis in its ink for 3D. */
+/** The lines of per-axis values: one in the panel's ink for 1D, one per axis in its ink for 2D and 3D. */
 function axisLines(motion:MotionResult,values:readonly (readonly number[])[],name:string,ink:string):Line[]{
   return motion.axes.length===1?[{name,values:values[0]!,ink}]:motion.axes.map((axis,k)=>({name:`${name}${subscript(axis)}`,values:values[k]!,ink:AXIS_INKS[axis]}));
 }
@@ -67,7 +68,7 @@ export function motionSeries(motion:MotionResult,kind:SeriesKind):[Series,Series
     {id:'loss',name:'损失概率',title:'累计损失概率 / %',lines:[{name:'损失概率',values:motion.lossProbability,ink:motion.axes.length===1?MOTION_INKS[1]:INK}],unit:{name:'%',factor:100}}];
   const reach=Math.max(...motion.meanVelocityMps.flat().map(Math.abs),...motion.temperatureUK.flat().map(thermalVelocity)),velocity=unitFor(VELOCITY_UNITS,reach);
   // A 3D result's T and ⟨v⟩ are each axis's means over one trap period around the sample.
-  const period=motion.axes.length===1?'':'（各轴一个阱周期内的平均）';
+  const period=motion.axis==='3d'?'（各轴一个阱周期内的平均）':'';
   return [{id:'temperature',name:'温度 T',title:`温度 T / μK${period}`,lines:axisLines(motion,motion.temperatureUK,'T',MOTION_INKS[0]),unit:{name:'μK',factor:1}},
     {id:'mean-velocity',name:'⟨v⟩',title:`平均速度 ⟨v⟩ / ${velocity.name}${period}`,lines:axisLines(motion,motion.meanVelocityMps,'⟨v⟩',MOTION_INKS[1]),unit:velocity,reach}];
 }
@@ -142,8 +143,61 @@ function axisSymbol(motion:MotionResult,kind:DistributionKind,axis:number):strin
 }
 /** √⟨x²⟩ of a listed distribution (its grid's unit): for positions, the root-mean-square distance from the focus. */
 export function rootMeanSquare(d:Distributions,listed:number):number{return Math.sqrt(d.probabilities[listed]!.reduce((sum,p,i)=>sum+p*d.grid[i]!**2,0));}
+/** The root-mean-square distance from the focus √⟨r²⟩ (μm) of a listed map. */
+export function mapRootMeanSquare(maps:PositionMaps,listed:number):number{
+  const n=maps.grid.length;return Math.sqrt(maps.probabilities[listed]!.reduce((sum,p,k)=>sum+p*(maps.grid[k%n]!**2+maps.grid[Math.floor(k/n)]!**2),0));
+}
 /** A length (μm) in the unit that fits it. */
 export function lengthText(um:number):string{const unit=unitFor(LENGTH_UNITS,Math.abs(um));return `${formatNumber(um*unit.factor,{digits:4})} ${unit.name}`;}
+
+/** A plane's position maps are drawn side by side in time order on one density scale (μm⁻²): each
+ * square on the grid's span, its first axis across and its second up, the colour bar beside them. */
+const MAP=268,MAP_GAP=96,BAR=12;
+/** The maps' sequential ramp, one hue light to dark: the levels' population ramp (--population-0,
+ * --population-1 in style.css) continued to the series blue and beyond. */
+const RAMP:readonly (readonly [number,number,number])[]=[[247,249,251],[134,179,216],[81,127,166],[38,66,94]];
+/** The ramp's colour at s ∈ [0, 1], linear between its stops (as an SVG gradient through them). */
+function shade(s:number):[number,number,number]{
+  const x=clamp(s,0,1)*(RAMP.length-1),k=Math.min(Math.floor(x),RAMP.length-2),f=x-k,a=RAMP[k]!,b=RAMP[k+1]!;
+  return [0,1,2].map(c=>Math.round(a[c]!+(b[c]!-a[c]!)*f)) as [number,number,number];
+}
+/** The maps' layout: the grid's step and cell edges (μm), each map's left edge, the colour bar's,
+ * and where a position goes across (from a map's left edge) and up. */
+function mapLayout(maps:PositionMaps,count:number){
+  const grid=maps.grid,n=grid.length,step=(grid[n-1]!-grid[0]!)/(n-1),low=grid[0]!-step/2,high=grid[n-1]!+step/2;
+  const width=count*MAP+(count-1)*MAP_GAP+24+BAR+56,first=Math.max(LEFT,(800-width)/2);
+  return {n,step,low,high,top:32,bottom:32+MAP,lefts:Array.from({length:count},(_,k)=>first+k*(MAP+MAP_GAP)),bar:first+count*MAP+(count-1)*MAP_GAP+24,
+    x:(left:number,w:number)=>left+(w-low)/(high-low)*MAP,y:(w:number)=>32+MAP-(w-low)/(high-low)*MAP};
+}
+/** A listed map as densities (μm⁻²), row-major as the map. */
+function mapDensity(maps:PositionMaps,listed:number,step:number):number[]{return maps.probabilities[listed]!.map(p=>p/(step*step));}
+/** A map as a PNG of one pixel per grid point coloured by its density over `top`, its rows down
+ * the second axis from the highest position. */
+function mapImage(values:readonly number[],n:number,top:number):string{
+  const canvas=document.createElement('canvas');canvas.width=n;canvas.height=n;
+  const context=canvas.getContext('2d')!,image=context.createImageData(n,n);
+  for(let j=0;j<n;j++)for(let i=0;i<n;i++){const [r,g,b]=shade(values[j*n+i]!/top),k=((n-1-j)*n+i)*4;image.data[k]=r;image.data[k+1]=g;image.data[k+2]=b;image.data[k+3]=255;}
+  context.putImageData(image,0,0);return canvas.toDataURL('image/png');
+}
+/** The maps at the listed times (in time order), each with its title above it. */
+export function mapChart(maps:PositionMaps,axes:readonly MotionAxis[],listed:readonly number[],titles:readonly string[]):string{
+  const g=mapLayout(maps,listed.length),[a,b]=axes,values=listed.map(at=>mapDensity(maps,at,g.step));
+  const top=ticks(Math.max(...values.flat())).at(-1)!;
+  let body=`<defs><linearGradient id="map-ramp" x1="0" y1="1" x2="0" y2="0">${RAMP.map((c,k)=>`<stop offset="${k/(RAMP.length-1)}" stop-color="rgb(${c.join(',')})"/>`).join('')}</linearGradient></defs>`;
+  g.lefts.forEach((left,k)=>{
+    body+=`<image x="${left}" y="${g.top}" width="${MAP}" height="${MAP}" preserveAspectRatio="none" style="image-rendering:pixelated" href="${mapImage(values[k]!,g.n,top)}"/>`;
+    body+=`<rect x="${left}" y="${g.top}" width="${MAP}" height="${MAP}" fill="none" stroke="${GRID}"/>`;
+    for(const w of ticksWithin(g.low,g.high,6)){
+      const x=g.x(left,w),y=g.y(w);
+      body+=line(x,g.bottom,x,g.bottom+4,`stroke="${INK}"`)+line(left-4,y,left,y,`stroke="${INK}"`)+text(x,g.bottom+20,digits(w),'text-anchor="middle"')+text(left-8,y+4,digits(w),'text-anchor="end"');
+    }
+    body+=text(left+MAP/2,19,titles[k]??'','text-anchor="middle"')+text(left+MAP,g.bottom+47,`${a} / μm`,'text-anchor="end"')+text(left-10,19,`${b} / μm`,'text-anchor="end"');
+  });
+  body+=`<rect x="${g.bar}" y="${g.top}" width="${BAR}" height="${MAP}" fill="url(#map-ramp)" stroke="${GRID}"/>`;
+  for(const d of ticks(top)){const y=g.bottom-d/top*MAP;body+=line(g.bar+BAR,y,g.bar+BAR+3,y,`stroke="${INK}"`)+text(g.bar+BAR+6,y+4,digits(d));}
+  body+=text(g.bar+BAR+58,19,'概率密度 / μm⁻²','text-anchor="end"');
+  return svg('map-svg',`${a}${b} 平面内的位置分布（概率密度）。移动指针读取各位置的概率密度，方向键逐格查看。`,body+'<g class="motion-cursor" pointer-events="none" style="display:none"></g>');
+}
 
 /** A readout card beside a cursor, on its wider side (as the population chart's). */
 function readoutCard(host:HTMLElement,label:string):HTMLDivElement{
@@ -198,4 +252,33 @@ export function bindDistribution(host:HTMLElement,motion:MotionResult,kind:Distr
     placeCard(host,svg,card,xx);
   },()=>{card.hidden=true;});
   return ()=>{unbind();card.remove();};
+}
+/** The cell cursor of the maps: the cell under the pointer (the arrow keys move it) outlined on
+ * every map, its position and each map's density there, the maps named by `labels` (markup). */
+export function bindMap(host:HTMLElement,maps:PositionMaps,axes:readonly MotionAxis[],listed:readonly number[],labels:readonly string[]):()=>void{
+  const svg=host.querySelector<SVGSVGElement>('svg.map-svg');if(!svg)return ()=>{};
+  const g=mapLayout(maps,listed.length),values=listed.map(at=>mapDensity(maps,at,g.step)),[a,b]=axes,size=MAP/g.n;
+  const cursor=svg.querySelector<SVGGElement>('.motion-cursor')!,card=readoutCard(host,'所选位置的概率密度'),abort=new AbortController();
+  // The cell and the map it is read on (the card stands beside that map; the keys read the last).
+  let cell={i:g.n>>1,j:g.n>>1,map:listed.length-1};
+  const show=(next:{i:number;j:number;map:number})=>{
+    cell={i:clamp(next.i,0,g.n-1),j:clamp(next.j,0,g.n-1),map:next.map};cursor.replaceChildren();cursor.style.display='';
+    for(const left of g.lefts)cursor.append(mark('rect',{x:String(left+cell.i*size),y:String(g.top+(g.n-1-cell.j)*size),width:String(size),height:String(size),fill:'none',stroke:'#323130','stroke-width':'1.5'}));
+    card.innerHTML=`<div class="readout-time">${esc(`${a} = ${digits(maps.grid[cell.i]!)} μm · ${b} = ${digits(maps.grid[cell.j]!)} μm`)}</div>`+values.map((v,k)=>
+      `<div class="readout-row two"><span class="readout-name">${labels[k]??''}</span><span>${esc(`${formatNumber(v[cell.j*g.n+cell.i]!,{digits:4})} μm⁻²`)}</span></div>`).join('');
+    placeCard(host,svg,card,g.lefts[cell.map]!+(cell.i+.5)*size);
+  };
+  const off=()=>{cursor.style.display='none';card.hidden=true;};
+  svg.addEventListener('pointermove',event=>{
+    const transform=svg.getScreenCTM();if(!transform)return;const p=new DOMPoint(event.clientX,event.clientY).matrixTransform(transform.inverse());
+    const map=g.lefts.findIndex(left=>p.x>=left&&p.x<left+MAP);if(map<0||p.y<g.top||p.y>=g.bottom){off();return;}
+    show({i:Math.floor((p.x-g.lefts[map]!)/size),j:g.n-1-Math.floor((p.y-g.top)/size),map});
+  },{signal:abort.signal});
+  svg.addEventListener('pointerleave',off,{signal:abort.signal});svg.addEventListener('blur',off,{signal:abort.signal});
+  svg.addEventListener('keydown',event=>{
+    if(event.key==='Escape'){off();return;}
+    const step=({ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,1],ArrowDown:[0,-1]} as Record<string,[number,number]>)[event.key];if(!step)return;
+    event.preventDefault();show({i:cell.i+step[0],j:cell.j+step[1],map:cell.map});
+  },{signal:abort.signal});
+  return ()=>{abort.abort();card.remove();};
 }

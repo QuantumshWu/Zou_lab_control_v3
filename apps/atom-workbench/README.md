@@ -104,6 +104,16 @@ are validated for k_B T >= 4 hbar omega on every axis and marked reference-only
 below. The example 光镊 · 3D PGC cools the same atom with sigma+sigma- pairs along
 x, y and z.
 
+2D motion (运动轴 2D 径向, docs/ui-design.md §6.22): the same atom moving in the
+plane across the tweezer when every focused beam runs along one lab axis,
+served on an NVIDIA GPU by `rust-solver/motion-gpu` (`motion_gpu_adapter.rs`).
+Quantum trajectories of the eliminated ground manifold run on a grid of the
+plane (Strang steps, waiting-time jumps with dipole-pattern emission recoil) in
+batches until the standard errors meet 1% in the populations and 10% in T, as
+QuTiP's mcsolve with a target tolerance. A running batch reports its progress
+at least every 10 s, which restarts the app's deadline. Without a suitable GPU
+or driver the engine's reason is shown.
+
 Every request asks for the same absolute population error,
 `populationTolerance: 0.01` on the probability scale (1%); it is not a user
 setting. The estimates are calibrated a-posteriori estimates (checked against

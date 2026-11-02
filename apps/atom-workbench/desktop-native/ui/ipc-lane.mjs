@@ -1,4 +1,4 @@
-import {nativeCapabilities,validateAtomicResult} from '../../scripts/native-protocol.mjs';
+import {nativeCapabilities,readRunning,validateAtomicResult} from '../../scripts/native-protocol.mjs';
 import {HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../../dist/js/atom-workbench/src/solver-protocol.js';
 
 const failure=(message,status=503,code='solver-unavailable')=>Object.assign(new Error(message),{status,code});
@@ -53,8 +53,11 @@ export class IpcNativeLane {
       return {...result,service:{protocol:HTTP_PROTOCOL,nativeProtocol:w.capabilities.protocol,capabilities:w.capabilities.capabilities,lane:this.name,generation:w.generation,binarySha256:this.owner.binarySha256,buildSha256:this.owner.build.sha256,meanCacheHit:false,startup:{...w.startup}}};
     };
     if(message.progress!==undefined){
-      try{if(message.progress!=='checkpoint'||!job.onProgress)throw Error('Unexpected native progress message.');job.onProgress(convert());}
-      catch(error){this.failWorker(w,failure(error.message,502,'invalid-native-response'));}return;
+      try{
+        if(message.progress==='running'&&job.onRunning)job.onRunning(readRunning(message.running));
+        else if(message.progress==='checkpoint'&&job.onProgress)job.onProgress(convert());
+        else throw Error('Unexpected native progress message.');
+      }catch(error){this.failWorker(w,failure(error.message,502,'invalid-native-response'));}return;
     }
     this.active=null;
     if(message.error)this.owner.finish(job,failure(message.error,422,'numerical-failure'));

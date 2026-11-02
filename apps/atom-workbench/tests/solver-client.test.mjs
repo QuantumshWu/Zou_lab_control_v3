@@ -117,6 +117,24 @@ test('a checkpoint may carry its run\'s estimate of the time left; a final resul
    const alone=make();alone.diagnostics.estimatedRemainingAtMost=true;assert.throws(()=>read(alone),/剩余时间估计/,`${what}: a bound without an estimate`);
  }
 });
+test('a running report between checkpoints is read strictly and handed on; one for another request, or malformed, is refused',async t=>{
+ const mock=transport(),reports=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-running'});t.after(()=>client.dispose());
+ const scene=scenario(),pending=client.solve(scene,scene.dynamics,{onProgress:()=>{},onRunning:value=>reports.push(value)});await waitCalls(mock,1);
+ const stream=streamReply(mock.calls[0]),request=mock.calls[0].body.request;
+ stream.send({type:'running',data:{request,running:{simulatedUs:40,durationUs:200,trajectories:0}}});
+ stream.send({type:'running',data:{request,running:{simulatedUs:120,durationUs:200,trajectories:8,estimatedRemainingMs:3500}}});
+ const final=checkpoint(scene,request,[0,.002,.001]);delete final.progress;stream.send({type:'result',data:final});stream.close();
+ await pending;
+ assert.deepEqual(reports,[{simulatedUs:40,durationUs:200,trajectories:0},{simulatedUs:120,durationUs:200,trajectories:8,estimatedRemainingMs:3500}]);
+ for(const [label,data] of [['another request',r=>({request:{...r,sequence:r.sequence+1},running:{simulatedUs:1,durationUs:2,trajectories:0}})],
+   ['a negative estimate',r=>({request:r,running:{simulatedUs:1,durationUs:2,trajectories:0,estimatedRemainingMs:-1}})],
+   ['an unknown key',r=>({request:r,running:{simulatedUs:1,durationUs:2,trajectories:0,extra:1}})]]){
+   const mock=transport(),client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-running-bad'});
+   const pending=client.solve(scene,scene.dynamics,{onProgress:()=>{},onRunning:()=>{}});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]);
+   stream.send({type:'running',data:data(mock.calls[0].body.request)});stream.close();
+   await assert.rejects(pending,/不匹配|Invalid running report/,label);client.dispose();
+ }
+});
 test('a mean request streams checkpoints of its single t = 0 row',async t=>{
  const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-mean'});t.after(()=>client.dispose());
  const scene=scenario(),pending=client.solve(scene,scene.dynamics,{meanOnly:true,onProgress:value=>progress.push(value)});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]),request=mock.calls[0].body.request;

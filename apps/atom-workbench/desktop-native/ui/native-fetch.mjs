@@ -57,8 +57,11 @@ export function installNativeFetch({worker,postNative,originalFetch=globalThis.f
     release(job);job.resolve(response);return;
    }
    if(value.kind==='stream'){
-    const event=value.event;if(!event||!['checkpoint','result','error'].includes(event.type))throw new Error('Unknown native Worker stream event.');
-    if(value.done&&event.type==='checkpoint')throw new Error('Native Worker ended a stream without a final result.');
+    const event=value.event;if(!event||!['checkpoint','running','result','error'].includes(event.type))throw new Error('Unknown native Worker stream event.');
+    if(value.done&&(event.type==='checkpoint'||event.type==='running'))throw new Error('Native Worker ended a stream without a final result.');
+    // A motion solve runs as long as its checkpoints and running reports keep coming: each one
+    // restarts its deadline.
+    if((event.type==='checkpoint'||event.type==='running')&&job.motion){clearTimeout(job.timer);job.timer=setTimeout(()=>fail(job,expired()),timeoutMs);}
     if(!job.responded)streamResponse(job);
     job.controller.enqueue(encoder.encode(JSON.stringify(event)+'\n'));
     if(event.type==='result'||event.type==='error'){release(job);job.controller.close();}return;
@@ -87,7 +90,7 @@ export function installNativeFetch({worker,postNative,originalFetch=globalThis.f
     try{body=JSON.parse(text);}catch{
      release(job);resolve(new Response(JSON.stringify({error:'Invalid JSON solve request.',code:'invalid-request'}),{status:400,headers:{'Content-Type':'application/json'}}));return;
     }
-    job.dispatched=true;worker.postMessage({kind:'solve',channel:job.channel,request:body});
+    job.dispatched=true;job.motion=!!body?.options?.motion;worker.postMessage({kind:'solve',channel:job.channel,request:body});
    }).catch(error=>fail(job,error instanceof Error?error:new Error(String(error))));
   });
  }

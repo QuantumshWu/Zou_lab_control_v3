@@ -98,7 +98,7 @@ pub fn warmup()->Result<(),String>{
 }
 
 /// A requested population group: the eight F manifolds and all excited states.
-pub(crate) struct Group{pub(crate) name:String,indices:Vec<usize>}
+pub(crate) struct Group{pub(crate) name:String,pub(crate) indices:Vec<usize>}
 /// The ground flags and the requested groups, from the 32 state labels
 /// `manifold-F-m`.
 pub(crate) fn groups(model:&Model)->Result<(Vec<bool>,Vec<Group>),String>{
