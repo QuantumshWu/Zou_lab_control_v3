@@ -133,23 +133,28 @@ export interface DynamicsSettings {
   durationUnit:DurationUnit;
   /** A thermal initial state's temperature unit (as durationUnit); present exactly when it is thermal. */
   temperatureUnit?:TemperatureUnit;
-  /** 1D motion (ui-design.md §6.20): absent, or off, the trajectory is the internal state's alone.
-   * Kept while off, as an inactive mode's inputs are. */
+  /** Radial motion (ui-design.md §6.20, §6.21): absent, or off, the trajectory is the internal
+   * state's alone. Kept while off, as an inactive mode's inputs are. */
   motion?:MotionSettings;
 }
-/** A lab coordinate axis the atom moves along. */
+/** A lab coordinate axis: the line of 1D motion, or the tweezer axis 2D motion is across. */
 export type MotionAxis='x'|'y'|'z';
+/** The plane of 2D motion through the tweezer focus perpendicular to the tweezer: named by its two
+ * lab axes in the order of the frame of the tweezer's axis (motion.ts MOTION_PLANES). */
+export type MotionPlane='yz'|'zx'|'xy';
 /** A single atom in the tweezer moves radially: along `axis`, a lab axis through the focus
- * perpendicular to every focused beam (the first such axis when this one is not; motion.ts
- * motionAxis). It starts in the internal initial state, its motion along the axis thermal at
- * temperatureUK. The trajectory is the joint evolution of the internal state and this motion. */
+ * perpendicular to every focused beam (1D), or in the plane `axis` through the focus perpendicular
+ * to the tweezer when every focused beam runs along one lab axis (2D 径向). One the scene does not
+ * allow gives way to the scene's plane or its first radial axis (motion.ts motionAxis). It starts
+ * in the internal initial state, its motion thermal at temperatureUK (along each axis of a plane).
+ * The trajectory is the joint evolution of the internal state and this motion. */
 export interface MotionSettings {
-  enabled:boolean; axis:MotionAxis;
+  enabled:boolean; axis:MotionAxis|MotionPlane;
   /** The initial temperature (μK, canonical) and the unit the operator writes it in (as durationUnit). */
   temperatureUK:number; temperatureUnit:TemperatureUnit;
 }
 export const DEFAULT_MOTION_TEMPERATURE_UK=30;
-/** The motion settings 1D 运动 starts with. */
+/** The motion settings 径向运动 starts with: 1D along x. */
 export function defaultMotion():MotionSettings{return {enabled:true,axis:'x',temperatureUK:DEFAULT_MOTION_TEMPERATURE_UK,temperatureUnit:'μK'};}
 export type DurationUnit='ns'|'μs'|'ms'|'s';
 export type TemperatureUnit='K'|'mK'|'μK';

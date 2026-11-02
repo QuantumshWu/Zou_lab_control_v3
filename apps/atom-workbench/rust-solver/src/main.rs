@@ -1,9 +1,10 @@
 //! Atom Workbench native worker: JSONL requests on stdin, one response line
 //! per request on stdout. Every rb87-full/2 solve is served by the population
-//! core through `lattice_core_adapter`, one whose model carries 1D motion by
-//! the motion core through `motion_core_adapter`. Matrices in the public
-//! protocol are row-major, frequencies are rad/us, collapse amplitudes are
-//! sqrt(1/us).
+//! core through `lattice_core_adapter`; one whose model carries motion along an
+//! axis (1D) by the motion core through `motion_core_adapter`, and one whose
+//! model carries motion in a plane (2D) by the GPU engine through
+//! `motion_gpu_adapter`. Matrices in the public protocol are row-major,
+//! frequencies are rad/us, collapse amplitudes are sqrt(1/us).
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -11,6 +12,7 @@ use std::io::{self, BufRead, Write};
 mod harmonics;
 mod lattice_core_adapter;
 mod motion_core_adapter;
+mod motion_gpu_adapter;
 const NATIVE_PROTOCOL: &str = "atom-lindblad-jsonl/3";
 const FULL_MODEL_SCHEMA: &str = "rb87-full/2";
 
@@ -54,7 +56,8 @@ struct Model {
     drives: Vec<Drive>,
     #[serde(default)]
     frequency_coordinates:Option<FrequencyCoordinates>,
-    /// 1D motion: the atom in a tweezer moving radially along one lab axis (motion_core_adapter).
+    /// Radial motion: the atom in a tweezer moving along one lab axis (motion_core_adapter) or in
+    /// the plane perpendicular to the tweezer (motion_gpu_adapter).
     #[serde(default)]
     motion:Option<motion_core_adapter::MotionModel>,
 }
@@ -158,6 +161,7 @@ fn respond(request: Request) -> Value {
     };
     let result = match (request.model_schema.as_deref(), request.model.as_ref()) {
         (Some(FULL_MODEL_SCHEMA), Some(model)) => match &model.motion {
+            Some(motion) if motion.is_plane() => motion_gpu_adapter::solve(model, motion, &request.options, &mut publish),
             Some(motion) => motion_core_adapter::solve(model, motion, &request.options, &mut publish),
             None => lattice_core_adapter::solve(model, &request.options, &mut publish),
         },
@@ -260,5 +264,17 @@ mod tests {
         model["motion"]["beams"] = json!([{"id":"tweezer","name":"光镊","direction":[0.,1.,0.],"waveNumberPerUm":7.37,"waistUm":1.2,"intensityMWcm2":1.77e8,
             "frequencyIndex":[0],"coupling":zero,"counterCoupling":zero,"outsideShift":zero}]);
         assert_eq!(solve(&model, trajectory), atom_motion_core::NOT_IMPLEMENTED);
+    }
+    /// A plane's motion goes to the 2D engine, a trajectory alone as an axis' does. Without light
+    /// nothing confines the atom in the plane; on a computer without an NVIDIA GPU the engine says
+    /// that instead.
+    #[test]
+    fn a_plane_s_motion_request_goes_to_the_gpu_engine() {
+        let mut model = motion_model();
+        model["motion"]["axis"] = json!("xy");
+        let solve = |options: Value| request(json!({"id":7,"modelSchema":FULL_MODEL_SCHEMA,"model":model,"options":options}))["error"].as_str().unwrap_or("").to_owned();
+        assert!(solve(json!({"durationUs":10.,"samples":5})).contains("a trajectory alone"));
+        let refusal = solve(json!({"durationUs":10.,"samples":5,"includeMean":false}));
+        assert!(refusal == atom_motion_gpu::solve::NO_TRAP || refusal.starts_with(&atom_motion_gpu::gpu::unavailable("")), "{refusal}");
     }
 }

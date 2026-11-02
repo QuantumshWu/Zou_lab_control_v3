@@ -15,7 +15,7 @@ export function nativeCapabilities(message){
 
 /** The one mapping from an HTTP/IPC solve request (scene + options) to the
  * native payload, and from the native result back to the client response. A
- * request with `options.motion` (1D motion) is a trajectory alone, and its model
+ * request with `options.motion` (1D or 2D motion) is a trajectory alone, and its model
  * carries the motion block (full-master-model.ts MotionModel). */
 export function prepareNativeSolve(input){
   if(input.modelSchema!==undefined&&input.modelSchema!==FULL_MODEL_SCHEMA)throw requestError('Unsupported atomic model schema.','incompatible-model-schema');
