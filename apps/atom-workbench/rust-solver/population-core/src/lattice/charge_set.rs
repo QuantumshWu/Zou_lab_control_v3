@@ -1,14 +1,12 @@
 //! The explicit charge set P of a request and its ring Q = ring(P): the
 //! lattice the pipeline works on. P u Q is solved whole at every pole (GMRES
-//! on every block, `poles`); a run's lattice adds the charges x0's a-priori
-//! amplitudes carry beyond it (`apriori`, `LatticeSets::completed`), and
-//! everything beyond is omitted.
+//! on every block, `poles`); everything beyond is omitted.
 //!
 //! The rule (`explicit_set`, one function):
 //! 1. start: {0} and every explicit step s whose first-order mixing
-//!    |L_s| / |nu_s| (largest element) is above GATE x tolerance, with -s
-//!    (the translation gate: a copy along s carries population weight of
-//!    that order);
+//!    |L_s| / |nu_s| (largest element) is above the a-priori share of the
+//!    tolerance, with -s (the translation gate: a copy along s carries
+//!    population weight of that order);
 //! 2. ring closure: while the ring has an internal edge q <- q - t with
 //!    rho = ||C_t|| ||D_q^-1|| above RING_COUPLING, the ring charge carrying
 //!    the largest summed rho joins P with its mirror, at most PROMOTIONS
@@ -23,8 +21,8 @@
 //!    2.3e-3 against 4.6e-4 with it (rho inside ring(P u Q) at most 1.8e-3
 //!    without the closure, no internal edge with it); three and five lasers
 //!    and every mean were unchanged;
-//! 3. cover: every charge whose seed amplitude is at least SEED_AMPLITUDE x
-//!    tolerance and that P u Q misses joins P (largest first, with its
+//! 3. cover: every charge whose seed amplitude is above the a-priori share
+//!    of the tolerance and that P u Q misses joins P (largest first, with its
 //!    mirror). A second closure after the cover promoted nothing on any
 //!    research case (three, four, five lasers, four without the trap, probe
 //!    + tweezer; 20 us, 10 ms, means) and is not run.
@@ -35,13 +33,11 @@
 //! centre's steady state (unit norm); a charge's amplitude is the largest
 //! |y_r| over the probes.
 use super::*;
+use super::accuracy::A_PRIORI_SHARE;
+use super::fold::RunFold;
 use super::operator::{LatticeOperator,Mask,Parts};
 use super::classification::HarmonicStep;
 
-/// Translation gate and explicit start (times the tolerance): a deliberate
-/// margin, a step's copies carry population weight of order its mixing, a
-/// tenth of the tolerance at the gate.
-pub const GATE:f64=0.1;
 /// Largest rho = ||C_t|| ||D_q^-1|| of an edge inside the ring: the coupling
 /// a ring block receives from a ring neighbour relative to its own
 /// resolvent, the first-order proxy for a near-resonant charge at the
@@ -57,10 +53,6 @@ const PROMOTIONS:usize=4;
 /// past the ring of a one-step explicit set (P = ball(1), which the closure
 /// builds on the research cases).
 const SEED_DEPTH:usize=3;
-/// Seed amplitude (times the tolerance) a charge must reach to be covered.
-/// A deliberate margin: a charge left out carries at most a fifth of the
-/// tolerance (measured leaks 9e-5 to 7.6e-4 on the research cases).
-pub const SEED_AMPLITUDE:f64=0.2;
 const NORM_ITERATIONS:usize=30;
 /// The ring condition's resolvent norms are cached per frequency rounded to
 /// 1/RESOLVENT_KEY rad/us. Derived: a norm |D_q^-1| moves with nu at most
@@ -68,19 +60,12 @@ const NORM_ITERATIONS:usize=30;
 /// relative 1e-6 |D_q^-1|.
 const RESOLVENT_KEY:f64=1e6;
 
-/// The lattice of a run: `modes()` = explicit (P) then ring (Q, with the
-/// charges a run's completion adds), the centre in P. The space lives on
-/// these modes; everything beyond them is omitted.
+/// The lattice: `modes()` = explicit (P) then ring (Q), the centre in P.
+/// The space lives on these modes; everything beyond them is omitted.
 #[derive(Clone,Debug)]
 pub struct LatticeSets{pub explicit:Vec<Charge>,pub ring:Vec<Charge>}
 impl LatticeSets{
     pub fn modes(&self)->Vec<Charge>{self.explicit.iter().chain(&self.ring).cloned().collect()}
-    /// The lattice with `extra` charges (each with its mirror) in the ring.
-    pub fn completed(&self,extra:&[Charge])->Self{
-        let mut ring=self.ring.clone();
-        for c in extra{for q in[c.clone(),opposite(c)]{if !self.explicit.contains(&q)&&!ring.contains(&q){ring.push(q);}}}
-        Self{explicit:self.explicit.clone(),ring}
-    }
 }
 /// The charges one structural step (`HarmonicPlan::structural_steps`)
 /// outside `set`, sorted by (|q|_1, q): the ring of P is Q.
@@ -119,7 +104,7 @@ pub fn mixing(prepared:&LatticePrepared,step:&HarmonicStep)->f64{
 /// The explicit steps passing the translation gate, one of each pair (the
 /// larger charge).
 pub fn gated_steps(prepared:&LatticePrepared,tolerance:f64)->Vec<Charge>{
-    prepared.plan.explicit().into_iter().map(|s|&prepared.plan.steps[s]).filter(|st|st.charge>opposite(&st.charge)&&mixing(prepared,st)>GATE*tolerance)
+    prepared.plan.explicit().into_iter().map(|s|&prepared.plan.steps[s]).filter(|st|st.charge>opposite(&st.charge)&&mixing(prepared,st)>A_PRIORI_SHARE*tolerance)
         .map(|st|st.charge.clone()).collect()
 }
 
@@ -188,7 +173,7 @@ fn seed_amplitudes(prepared:&LatticePrepared,probes:&[Vec<C>])->Result<BTreeMap<
     let mut layer=vec![usize::MAX;modes.len()];
     for k in(0..=SEED_DEPTH).rev(){for q in prepared.modes(k)?{layer[index[&q]]=k;}}
     let eigen=prepared.eigenbasis()?;
-    let mut op=LatticeOperator::new(prepared,&prepared.fold,&modes)?;
+    let mut op=LatticeOperator::new(prepared,RunFold::whole(&prepared.fold),&modes)?;
     // Layer k+1 from the layers up to k (disjoint: no diagonal block acts).
     let masks:Vec<(Vec<bool>,Vec<bool>)>=(0..SEED_DEPTH).map(|k|(layer.iter().map(|&l|l==k+1).collect(),layer.iter().map(|&l|l<=k).collect())).collect();
     let mut amplitudes=BTreeMap::new();
@@ -227,7 +212,7 @@ pub fn explicit_set(prepared:&LatticePrepared,initial:&[C],tolerance:f64)->Resul
     // 2. Ring closure.
     let promoted=condition.close(&mut explicit)?;
     // 3. Cover.
-    let need:Vec<(&Charge,f64)>=amplitudes.iter().filter(|(_,&a)|a>=SEED_AMPLITUDE*tolerance).map(|(q,&a)|(q,a)).collect();
+    let need:Vec<(&Charge,f64)>=amplitudes.iter().filter(|(_,&a)|a>A_PRIORI_SHARE*tolerance).map(|(q,&a)|(q,a)).collect();
     let mut covered=Vec::new();
     loop{
         let set:Vec<Charge>=explicit.iter().cloned().collect();let lattice:BTreeSet<Charge>=set.iter().cloned().chain(ring(prepared,&set)?).collect();
@@ -253,10 +238,10 @@ mod tests{
         // P = {0, +-s}; the ring holds the next shell, and every charge with a
         // seed amplitude above the cover threshold is inside P u Q.
         let f=fixture();let p=prepared(&f);let n=4;let mut initial=vec![ZERO;n*n];initial[0]=ONE;
-        let set=explicit_set(&p,&initial,5e-3).unwrap();
+        let tolerance=super::super::accuracy::POPULATION_TOLERANCE;let set=explicit_set(&p,&initial,tolerance).unwrap();
         let s=p.plan.steps[p.plan.explicit()[0]].charge.clone();
         assert!(set.sets.explicit.contains(&s)&&set.sets.explicit.contains(&opposite(&s))&&set.sets.explicit[0]==p.generator.zero);
-        assert!(set.leak<SEED_AMPLITUDE*5e-3,"leak {:e}",set.leak);
+        assert!(set.leak<=A_PRIORI_SHARE*tolerance,"leak {:e}",set.leak);
         assert!(set.internal.iter().all(|e|e.2<=RING_COUPLING)||set.promoted.len()==2*PROMOTIONS);
         // The superoperator norm against the dense matrix's power iteration.
         let op=&p.generator.components[&s].op;let d=16;let mut m=vec![ZERO;d*d];op.dense_into(n,ONE,&mut m);

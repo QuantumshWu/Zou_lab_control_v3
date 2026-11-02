@@ -38,9 +38,11 @@ const PYTHAGORAS_SHARE:f64=0.25;
 /// The recursive relative residual below this is roundoff: a deliberate
 /// margin of about 4.5x the double-precision unit roundoff (2.2e-16).
 const ROUNDOFF_RESIDUAL:f64=1e-15;
-/// A cycle that stopped and reduced the true residual by less than this
-/// factor marks its floor: a deliberate margin, one that does not halve it
-/// gains nothing from restarting.
+/// A cycle that reduced the true residual by less than this factor marks its
+/// floor (the cycle stopped on its recursive residual) or its stagnation
+/// (the restart length was spent): one that does not halve it gains nothing
+/// from restarting, and a solve that needs its 15 cycles of the step budget
+/// needs at least a factor (tolerance)^(1/15), 0.34 at 1e-7, per cycle.
 const STALL_FACTOR:f64=0.5;
 
 #[derive(Clone,Debug)]
@@ -284,7 +286,7 @@ pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],options:&KrylovOptions)
         // once-orthogonalized coefficients: the last basis vector is then
         // the unnormalized candidate.
         let mut columns:Vec<Vec<f64>>=Vec::new();let mut provisional:Option<Vec<f64>>=None;
-        let mut y=Vec::new();let mut stopped=false;
+        let mut y=Vec::new();
         for j in 0..restart{
             system.precondition(&basis[j],&mut z)?;
             system.apply(&z,&mut w)?;
@@ -325,7 +327,7 @@ pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],options:&KrylovOptions)
             let(_,(_,s))=givens(&hessenberg.rotations,&column);
             let residual=(s*g[j]).abs()/bnorm;
             // Converged, exact (an invariant subspace) or at roundoff.
-            stopped=residual<=options.tolerance||hn==0.||residual<=ROUNDOFF_RESIDUAL;
+            let stopped=residual<=options.tolerance||hn==0.||residual<=ROUNDOFF_RESIDUAL;
             let last=stopped||steps>=options.maximum_steps||j+1==restart;
             if !last{basis.push(w.clone());provisional=Some(h);continue;}
             // The cycle ends: reorthogonalize the image once more, close the
@@ -353,8 +355,9 @@ pub fn gmres<S:LinearSystem+?Sized>(system:&mut S,b:&[C],options:&KrylovOptions)
         let true_residual=system.vectors().norm(&r)/bnorm;
         if !true_residual.is_finite(){return Err("Lattice GMRES iterate is not finite".into());}
         if true_residual<=options.tolerance{return Ok(Krylov{x,steps,residual:true_residual});}
-        // Restarting no longer reduces the true residual: its floor.
-        if stopped&&true_residual>STALL_FACTOR*last_true{return Ok(Krylov{x,steps,residual:true_residual});}
+        // Restarting no longer reduces the true residual: its floor, or
+        // stagnation.
+        if true_residual>STALL_FACTOR*last_true{return Ok(Krylov{x,steps,residual:true_residual});}
         if steps>=options.maximum_steps{return Ok(Krylov{x,steps,residual:true_residual});}
         last_true=true_residual;
     }

@@ -76,7 +76,7 @@ because it is small or labelled forbidden.
   continues as the expansion in the slow eigenmodes.
 
 Every request asks for the same absolute population error,
-`populationTolerance: 0.005` on the probability scale (0.5%); it is not a user
+`populationTolerance: 0.01` on the probability scale (1%); it is not a user
 setting. The estimates are calibrated a-posteriori estimates (checked against
 independent references), not certified bounds; a safety factor of 1.5 is
 applied. A result that does not reach the target is reported as a failure,

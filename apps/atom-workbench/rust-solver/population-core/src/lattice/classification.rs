@@ -3,28 +3,36 @@
 //! size and frequency only (never by exact zeros), together with the far +
 //! far pairs that land on near charges.
 //!
-//! Near / far: the significant step frequencies are sorted and cut at their
-//! largest ratio gap of at least FOLD_GAP_RATIO whose far side is beyond
-//! FOLD_DISTANCE ||L0|| (or, when every significant step is that fast, all of
-//! them are far). Far steps are folded at second order; a far + far pair with
+//! A step may fold when its block is beyond FOLD_DISTANCE ||L0|| and its
+//! mixing m = |L_s| / (|nu_s| - ||L0||) has m^2 within A_PRIORI_SHARE x
+//! tolerance: the fold drops the far mode's slaved amplitude (the
+//! micromotion), first order in m on the coherences and second order on the
+//! populations. Near / far: the significant step frequencies are sorted and
+//! cut at their largest ratio gap of at least `fold_gap` above every
+//! frequency with a step that may not fold (or below all of them when every
+//! one may fold). Far steps are folded at second order; a far + far pair with
 //! a nonzero near sum t joins the fold target K_t when its group is at least
 //! CROSS_FOLD_FLOOR of the diagonal (t = 0) fold and at least the structural
-//! coupling floor, otherwise it is an omitted target, which a run's fold
-//! keeps or drops by the truncation rule (`fold`): below the floor it would
-//! be a non-structural coupling at best, while a fold edge carries dense
-//! sector blocks (without a tweezer the counter-rotating cross folds land on
-//! near charges at about 1e-9 of the near couplings, each with some 0.6M
-//! stored entries). Near steps below the structural coupling floor do not
-//! grow the near ball; they still act exactly on every lattice edge, and a
-//! charge they carry x0 to beyond the lattice joins it by the a-priori rule
-//! (`apriori`). The structural steps and the kept fold targets generate the
-//! near ball and the rings of the explicit charges (`charge_set`).
+//! coupling floor, otherwise it is omitted: below the floor it would be a
+//! non-structural coupling at best, while a fold edge carries dense sector
+//! blocks (without a tweezer the counter-rotating cross folds land on near
+//! charges at about 1e-9 of the near couplings, each with some 0.6M stored
+//! entries). Near steps below the structural coupling floor do not grow the
+//! near ball; they still act exactly on every lattice edge. The structural
+//! steps and the kept fold targets generate the near ball and the rings of
+//! the explicit charges (`charge_set`).
 use super::*;
-use crate::preparation::{FOLD_GAP_RATIO,STRUCTURAL_COUPLING_FLOOR};
+use super::accuracy::{A_PRIORI_SHARE,POPULATION_TOLERANCE};
+use crate::preparation::STRUCTURAL_COUPLING_FLOOR;
 
 /// A far step must be faster than this multiple of ||L0||, so that
 /// ||(L0 - i nu)^-1|| <= 1/(|nu| - ||L0||) holds with room to spare.
 pub const FOLD_DISTANCE:f64=2.;
+/// The smallest ratio of the fold's gap, far side over near side: the fold
+/// keeps the orders 0 and 1 in nu_q (`fold`), so the first order it leaves
+/// out is (nu_q / nu_s)^2 of the fold at the near side's frequencies, within
+/// the a-priori share: 1 / sqrt(A_PRIORI_SHARE x tolerance), 44.7.
+pub fn fold_gap()->f64{1./(A_PRIORI_SHARE*POPULATION_TOLERANCE).sqrt()}
 /// Relative size (to the diagonal fold) below which a far + far group
 /// landing on a nonzero near charge is an omitted target (`fold`).
 pub const CROSS_FOLD_FLOOR:f64=1e-6;
@@ -75,19 +83,26 @@ impl HarmonicPlan{
         let others:Vec<(&Charge,&Component)>=generator.components.iter().filter(|(q,_)|**q!=generator.zero).collect();
         let largest=others.iter().map(|(_,c)|c.size).fold(0_f64,f64::max);
         let structural_floor=STRUCTURAL_COUPLING_FLOOR*largest;
-        let mut frequencies:Vec<f64>=others.iter().filter(|(_,c)|c.size>0.&&c.size>=structural_floor).map(|(_,c)|c.nu.abs()).collect();
-        frequencies.sort_by(f64::total_cmp);frequencies.dedup_by(|a,b|(*a-*b).abs()<=1e-12*b.abs());
+        // Whether a step may fold: far from L0's spectrum, its micromotion
+        // within the a-priori share.
+        let foldable=|c:&Component|c.nu.abs()>=FOLD_DISTANCE*l0_bound&&{
+            let m=c.size/(c.nu.abs()-l0_bound).max(f64::MIN_POSITIVE);m*m<=A_PRIORI_SHARE*POPULATION_TOLERANCE};
+        // The significant frequencies, each with whether every step at it may
+        // fold; the far side starts above the last one that may not.
+        let mut frequencies:Vec<(f64,bool)>=others.iter().filter(|(_,c)|c.size>0.&&c.size>=structural_floor).map(|(_,c)|(c.nu.abs(),foldable(c))).collect();
+        frequencies.sort_by(|a,b|a.0.total_cmp(&b.0));
+        frequencies.dedup_by(|a,b|{let same=(a.0-b.0).abs()<=1e-12*b.0.abs();if same{b.1&=a.1;}same});
+        let first=frequencies.iter().rposition(|f|!f.1).map_or(0,|i|i+1);
         let mut best:Option<(f64,usize)>=None;
-        for i in 0..frequencies.len(){
-            if frequencies[i]<FOLD_DISTANCE*l0_bound{continue;}
-            let ratio=if i==0{f64::INFINITY}else{frequencies[i]/frequencies[i-1]};
-            if i>0&&ratio<FOLD_GAP_RATIO{continue;}
+        for i in first..frequencies.len(){
+            let ratio=if i==0{f64::INFINITY}else{frequencies[i].0/frequencies[i-1].0};
+            if i>0&&ratio<fold_gap(){continue;}
             if best.is_none_or(|(r,_)|ratio>r){best=Some((ratio,i));}
         }
-        let gap=best.map(|(_,i)|(if i==0{0.}else{frequencies[i-1]},frequencies[i]));
+        let gap=best.map(|(_,i)|(if i==0{0.}else{frequencies[i-1].0},frequencies[i].0));
         let cut=match gap{None=>f64::INFINITY,Some((0.,far))=>(FOLD_DISTANCE*l0_bound).min(far),Some((near,far))=>(near*far).sqrt()};
         let steps:Vec<HarmonicStep>=others.iter().map(|(q,c)|{
-            let far=c.nu.abs()>=cut&&c.nu.abs()>=FOLD_DISTANCE*l0_bound;
+            let far=c.nu.abs()>=cut&&foldable(c);
             HarmonicStep{charge:(*q).clone(),nu:c.nu,size:c.size,
                 treatment:if far{Treatment::Fold}else{Treatment::Explicit{structural:c.size>0.&&c.size>=structural_floor}}}
         }).collect();

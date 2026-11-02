@@ -213,7 +213,7 @@ mod tests {
     }
     #[test]
     fn a_request_restates_the_fixed_tolerance_and_names_a_finite_grid() {
-        assert_eq!(serde_json::from_value::<Options>(json!({})).unwrap().population_tolerance, 0.005);
+        assert_eq!(serde_json::from_value::<Options>(json!({})).unwrap().population_tolerance, atom_population_core::lattice::accuracy::POPULATION_TOLERANCE);
         let model = json!({"dimension":1,"states":["a"],"hReal":[0],"hImag":[0],"collapse":[]});
         let solve = |options: Value| request(json!({"id":4,"modelSchema":FULL_MODEL_SCHEMA,"model":model,"options":options}))["error"].as_str().unwrap().to_owned();
         assert!(solve(json!({"meanOnly":true,"populationTolerance":0.001})).contains("populationTolerance is fixed"));
