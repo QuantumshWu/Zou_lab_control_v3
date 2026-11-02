@@ -128,9 +128,9 @@ impl LatticePrepared{
     /// The eigenbasis when it has been built (never builds it).
     pub fn eigenbasis_built(&self)->Option<&eigenbasis::BlockEigenbasis>{self.eigenbasis.get().and_then(|r|r.as_ref().ok())}
     /// The real eigenbasis of the folded centre generator, exact (0.7 s for
-    /// 32 states), computed once per request and shared: the explicit set
-    /// (seed amplitudes, ring condition), the far shell's responses, the
-    /// ladder's top and a one-mode lattice's model.
+    /// 32 states), computed once per prepared model and shared: the explicit
+    /// set (seed amplitudes, ring condition), the far shell's responses and
+    /// x0's components in the space.
     pub fn eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
         self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::of(&self.lapack,self.generator.n,&self.centre_generator())).as_ref().map_err(|e|e.clone())
     }

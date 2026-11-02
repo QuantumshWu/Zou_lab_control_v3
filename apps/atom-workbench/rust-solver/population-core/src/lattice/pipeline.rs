@@ -14,7 +14,12 @@
 //! 3. One rational Krylov space (`space`): x0, the gated steps'
 //!    translations (with no solve), the bordered steady column, then the
 //!    real ladder from the fastest scale the outputs need down to 1 / T in a
-//!    fixed bit-reversed cycle.
+//!    fixed bit-reversed cycle; before the first cycle, x0's components on
+//!    the centre generator's eigenvectors of population weight at least the
+//!    a-priori share at the first output time (exact directions of a
+//!    one-mode lattice: a strong drive's Rabi oscillation, which real poles
+//!    resolve slowly; measured on D1 + D2 at 2000 mW/cm^2, 20 us: 0.24 off
+//!    without them, 6.6e-3 with them, the standard set unchanged).
 //! 4. Checkpoints after the steady column and after every cycle of the
 //!    ladder: the Galerkin model (`reduced`) and its outputs (the trajectory
 //!    on the grid, the horizons, the slowest relaxation). An output's
@@ -346,6 +351,13 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         }
         if previous.is_some(){last_change=Some(largest);}
         previous=Some((trajectory,horizons,space.basis.len()));
+        // Before the first cycle, x0's components on the centre generator's
+        // eigenvectors that the first output still sees.
+        if checkpoints.len()==1{
+            let(centre,size)={let op=lattice.operator();(op.centre,op.dimension())};
+            let fields:Vec<Vec<C>>=eigen.components(initial,share,first)?.into_iter().map(|b|{let mut x=vec![ZERO;size];x[centre*n*n..(centre+1)*n*n].copy_from_slice(&b);x}).collect();
+            space.add(&lattice,fields)?;
+        }
         // The next cycle of the ladder.
         for &pole in &cycle{space.solve(&mut lattice,pole,kernel)?;if space.full(){break;}}
     }

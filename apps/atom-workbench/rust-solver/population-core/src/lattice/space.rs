@@ -214,6 +214,11 @@ impl Space{
         let(floor,n)=(self.floor(),lattice.operator().n);
         self.append_groups(n,groups,floor)
     }
+    /// Fields joining the basis as they are (J-real, no translation): one
+    /// block; returns the directions added.
+    pub fn add(&mut self,lattice:&Lattice<'_>,fields:Vec<Vec<C>>)->Result<usize,String>{
+        let(floor,n)=(self.floor(),lattice.operator().n);self.append_block(n,fields,floor)
+    }
     /// One column at a pole; returns the directions it added.
     /// `kernel`: the rate below which a mode is conserved over the run, the
     /// 0+ pole when the bordered system is singular.

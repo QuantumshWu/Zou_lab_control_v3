@@ -2,7 +2,8 @@
 //! (`LatticePrepared::eigenbasis`, request-level): the dressed blocks
 //! B_q = L0' - i nu_q of every mode and their solves (the explicit set's
 //! seed amplitudes and ring condition), and x0's coordinates (the far
-//! shell's Duhamel responses, the ladder's top). It is no model of a run's
+//! shell's Duhamel responses, the components that join the space before
+//! its first cycle, `components`). It is no model of a run's
 //! evolution: a slow eigenvalue's absolute error is about eps |L0'|, 1e-8
 //! /us with the optical detunings of a D1 + D2 frame (|L0'| 4.5e7 rad/us),
 //! which a horizon of 1 s turns into population errors of 1e-3 (measured on
@@ -203,6 +204,17 @@ impl BlockEigenbasis{
         Ok(block.iter().map(|z|scaled(*z,1./trace)).collect())
     }
     pub fn dimension(&self)->usize{self.d}
+    /// The real eigenvector columns (row-major Hermitian blocks; both of a
+    /// pair) of the components of `x` whose population weight at time t,
+    /// |c_j| max_i |(E_j)_ii| e^{Re lambda_j t}, is at least `weight`.
+    pub fn components(&self,x:&[C],weight:f64,t:f64)->Result<Vec<Vec<C>>,String>{
+        let(n,d)=(self.n,self.d);let c=self.coefficients(&[x])?;
+        let significant=|j:usize|magnitude(c[j])*self.readout[n*j..n*(j+1)].iter().map(|z|magnitude(*z)).fold(0.,f64::max)*(self.lambda[j].re*t).exp()>=weight;
+        let mut columns:Vec<usize>=Vec::new();
+        for j in 0..d{if !significant(j){continue;}match self.kind[j]{0=>columns.push(j),1=>{columns.push(j);columns.push(j+1);}
+            _=>if !significant(j-1){columns.push(j-1);columns.push(j);}}}
+        Ok(columns.into_iter().map(|k|from_coordinates(&self.vectors[d*k..d*(k+1)].iter().map(|&v|C{re:v,im:0.}).collect::<Vec<C>>(),n)).collect())
+    }
     /// Population rows of the complex eigenvectors (column-major n x d).
     pub fn population_rows(&self)->&[C]{&self.readout}
     /// The complex eigenvectors as row-major n x n blocks, d consecutive
