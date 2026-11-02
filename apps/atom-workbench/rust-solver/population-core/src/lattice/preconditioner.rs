@@ -64,7 +64,7 @@ fn woodbury_factors(prepared:&LatticePrepared)->(Vec<C>,Vec<C>,usize){
         if slot[row]!=usize::MAX{add(&mut rows[slot[row]*d+col],v);}};
     for(p,q)in &generator.zero_component().op.sandwich{for &(i,k,a)in &p.entries{for &(l,j,b)in &q.entries{put(i*n+j,k*n+l,mul(a,b));}}}
     if let Some(t)=prepared.fold.targets.first().filter(|t|t.charge==generator.zero){
-        let rest=t.applied(0);
+        let rest=&t.rest[0];
         for block in &rest.blocks{let h=block.rows.len();
             for(c,&col)in block.cols.iter().enumerate(){for(i,&row)in block.rows.iter().enumerate(){put(row as usize,col as usize,block.values[i+h*c]);}}}
         let s=&rest.sparse;
@@ -195,6 +195,7 @@ mod tests{
     use super::*;
     use super::super::tests::{Fixture,fixture,prepared};
     use super::super::operator::symmetric_field;
+    use super::super::fold::RunFold;
     use super::super::krylov::{self,KrylovOptions,System};
     use crate::preparation::{DriveView,MatrixView,ModelView,PhaseBasis};
     /// The fixture with its far drives only: no explicit step, so no kernel
@@ -215,7 +216,7 @@ mod tests{
         for r in 0..d{m[r*d+r].im-=nu;m[r*d+r].re-=sigma;}
         if woodbury{
             let mut w=vec![ZERO;d*d];Superop{left:Sparse::default(),right:Sparse::default(),sandwich:zero.op.sandwich.clone()}.dense_into(n,ONE,&mut w);
-            t.applied(0).dense_into(d,ONE,&mut w);let ground=|q:usize|p.generator.ground[q/n]&&p.generator.ground[q%n];
+            t.rest[0].dense_into(d,ONE,&mut w);let ground=|q:usize|p.generator.ground[q/n]&&p.generator.ground[q%n];
             for r in 0..d{for c in 0..d{if ground(r)||ground(c){add(&mut m[r*d+c],w[r*d+c]);}}}
         }
         m
@@ -229,7 +230,7 @@ mod tests{
         // and a real shift.
         let f=fixture();let p=far_only(&f);let n=4;let d=16;
         assert!(p.floquet.diagnostics.support.is_empty()&&p.fold.targets.len()>1);
-        let pre=Preconditioning::new(&p).unwrap();let op=LatticeOperator::new(&p,&p.fold,&[p.generator.zero.clone()]).unwrap();
+        let pre=Preconditioning::new(&p).unwrap();let op=LatticeOperator::new(&p,RunFold::whole(&p.fold),&[p.generator.zero.clone()]).unwrap();
         for shift in[Pole::Zero,Pole::Real(0.3)]{
             let mut batch=pre.batch(&op,shift).unwrap();
             let x=symmetric_field(&op,5);
@@ -245,7 +246,7 @@ mod tests{
     /// lattice against a dense LU solve.
     fn shifted_solve(p:&LatticePrepared,shift:Pole)->f64{
         let pre=Preconditioning::new(p).unwrap();
-        let modes=p.modes(2).unwrap();let mut op=LatticeOperator::new(p,&p.fold,&modes).unwrap();let size=op.dimension();let d=16;
+        let modes=p.modes(2).unwrap();let mut op=LatticeOperator::new(p,RunFold::whole(&p.fold),&modes).unwrap();let size=op.dimension();let d=16;
         let dense=op.dense();let centre=op.centre;
         let mut batch=pre.batch(&op,shift).unwrap();
         let x=symmetric_field(&op,2);

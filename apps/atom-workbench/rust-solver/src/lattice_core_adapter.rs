@@ -10,9 +10,10 @@
 //! # Result contract
 //! The one result shape, read by `normalizeDynamicsResult` in
 //! src/solver-client.ts; main.rs adds `protocol` and `modelSchema`. A run
-//! stops when every output has converged within the tolerance, when its
-//! error bound stops improving, or when its budget is spent, and returns its
-//! best checkpoint: a computed result is never withheld. The mean of every
+//! stops when every output has converged within the tolerance, when a cycle
+//! of its poles adds nothing or no longer improves it, or when its memory is
+//! spent, and returns its best checkpoint: a computed result is never
+//! withheld. The mean of every
 //! request is the run of the mean alone (the same for a full request and a
 //! mean-only one, `meanOnly`): one joint run for the two standard horizons,
 //! 100 ms and 1 s, `meanHorizonUs` one of them (1e5 or 1e6; there is no t ->
@@ -25,24 +26,24 @@
 //!   result has the single t = 0 row, the initial populations; a finite result
 //!   (at most 10 s, 2 to 2000 samples: a longer or denser grid is refused
 //!   with the reason) has >= 2 projected rows and `populationAccuracy`: `status`
-//!   (`estimated-converged` when every sample's bound is within the
+//!   (`estimated-converged` when every sample's estimate is within the
 //!   tolerance, else `estimated-partial` with its `reason`), `sampleErrors`
-//!   (per sample, an absolute population error: the sample's convergence
-//!   estimate over whole pole cycles, plus the growth charge and the
-//!   change of its projection onto the probability simplex),
+//!   (per sample, an absolute population error: the sample's change over the
+//!   last whole cycle of poles plus the change of its projection onto the
+//!   probability simplex; an estimate, not a bound),
 //!   `estimatedMaximumError` (their largest), `requestedTolerance`, `scope`.
 //! - `meanHorizons`, the mean, whenever one was asked for (computed or not):
 //!   the two standard horizons, `[{horizonUs (1e5, 1e6), populations,
 //!   densityReal, densityImag, estimatedError, withinTolerance, status,
 //!   reason}]`. A computed entry is the mean at T, the laboratory time
 //!   average at T (the state at T with its fast oscillations averaged out)
-//!   projected onto the density matrices, with `estimatedError` (its
-//!   convergence estimate plus the growth charge and the density
-//!   projection's change), `withinTolerance` (that bound within the
-//!   tolerance), `status` `time-average` and its `reason`. An entry is
-//!   `not-converged`, populations and densities null, when its bound is 1 or
-//!   more; when the run computed nothing usable, every entry is, with the
-//!   run's reason and its error null. The request's `meanHorizonUs` names the
+//!   projected onto the density matrices, with `estimatedError` (its change
+//!   over the last whole cycle of poles plus the density projection's
+//!   change), `withinTolerance` (that estimate within the tolerance),
+//!   `status` `time-average` and its `reason`. An entry is `not-converged`,
+//!   populations and densities null, when its estimate is 1 or more; when
+//!   the run computed nothing usable, every entry is, with the run's reason
+//!   and its error null. The request's `meanHorizonUs` names the
 //!   entry the app reads as its mean; the mean's diagnostics below are that
 //!   entry's.
 //! - `diagnostics`. The reader gates the rows' `traceError` and
@@ -63,13 +64,13 @@ use atom_population_core::lattice::accuracy::{self,POPULATION_TOLERANCE};
 use atom_population_core::lattice::pipeline::{self,Answer,Checkpoint,LONGEST_TIME_US,MOST_SAMPLES,Request,Solution};
 
 const ENGINE:&str="rust-population-core-lattice";
-const METHOD:&str="Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude, ring condition and the initial state's a-priori transfers, and their ring; far harmonics folded statically by a truncation rule): one block rational Krylov space from the initial state and its translations, every output read from one Petrov-Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, each output's error estimated from its convergence over whole pole cycles";
-/// A mean whose bound reaches this carries no information (a population
-/// error of 1 bounds nothing): it is reported not converged, unshown.
+const METHOD:&str="Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically, the pieces negligible over the run left out): one rational Krylov space from the initial state and its translations, every output read from one Galerkin reduced model, each output's error estimated by its change over the last whole cycle of poles";
+/// A mean whose estimate reaches this carries no information (a population
+/// error of 1): it is reported not converged, unshown.
 const UNINFORMATIVE_BOUND:f64=1.;
 /// The sentence added to a mean's reason when its bound is above the
 /// tolerance.
-const OUTSIDE:&str=" Not converged: its error bound (estimatedError) is above the tolerance, so the populations are an estimate.";
+const OUTSIDE:&str=" Not converged: its error estimate (estimatedError) is above the tolerance, so the populations are an estimate.";
 const MEAN_FRAME:&str="laboratory time average in the background eigenbasis";
 /// Stack of the mean's thread (LAPACK on it).
 const MEAN_STACK:usize=1<<26;
@@ -213,28 +214,26 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
     let plan=&prepared.plan;let f=&prepared.fold.diagnostics;
     let targets:Vec<Value>=prepared.fold.targets.iter().map(|t|json!({"charge":t.charge,"nu":t.nu,
         "restStored":t.rest.iter().map(|r|r.stored()).collect::<Vec<_>>(),"denseSectors":t.rest.iter().map(|r|r.blocks.len()).collect::<Vec<_>>(),
-        "whole":t.whole,"norms":t.norms,"largestEntry":t.largest_entry})).collect();
+        "bounds":t.bounds})).collect();
     let k=&prepared.floquet.diagnostics;
     let floquet=json!({"milliseconds":k.milliseconds,"iterations":k.iterations,"change":k.change,
         "pairs":k.pairs,"guarded":k.guarded,"smallParameter":k.small_parameter,"frameCondition":k.condition,
         "support":k.support.iter().map(|(q,size)|json!({"charge":q,"kernel":size})).collect::<Vec<_>>(),"belowFloor":k.below});
-    let run=run.map(|s|{let e=&s.explicit;let w=&s.work;let t=&s.timing;let f=&s.fold;let dropped=&f.dropped;
-        json!({"explicit":e.sets.explicit,"ring":s.lattice.ring,"completed":s.completed,"gated":e.gated,"promoted":e.promoted,"covered":e.covered,"leak":e.leak,
-            "ringInternalEdges":e.internal.len(),"explicitSetMs":e.milliseconds,"translations":s.translations,"block":s.block,
+    let run=run.map(|s|{let e=&s.explicit;let w=&s.work;let t=&s.timing;let f=&s.fold;
+        json!({"explicit":e.sets.explicit,"ring":s.lattice.ring,"gated":e.gated,"promoted":e.promoted,"covered":e.covered,"leak":e.leak,
+            "ringInternalEdges":e.internal.len(),"explicitSetMs":e.milliseconds,"translations":s.translations,
             "columns":s.columns.iter().map(|c|json!({"pole":c.pole.to_string(),"innerSteps":c.steps,"residual":c.residual,"added":c.added,"ms":c.milliseconds,"blocks":c.blocks})).collect::<Vec<_>>(),
-            "basis":s.basis,"dimension":s.dimension,
+            "dimension":s.dimension,"ladder":{"top":s.ladder.top,"bottom":s.ladder.bottom,"poles":s.ladder.poles},
             "inner":{"solves":w.solves,"steps":w.steps,"appliedBlocks":w.applied_blocks,"preconditionedBlocks":w.preconditioned_blocks,
-                "blockOperations":w.block_operations(),"batches":w.batches,"batchMs":w.batch_ms,
+                "blockOperations":w.block_operations(),"batches":w.batches,"batchMs":w.batch_ms,"operatorWork":w.operator_work,
                 "applyMs":w.timing.apply_ms,"preconditionMs":w.timing.precondition_ms,"orthogonalizeMs":w.timing.orthogonalize_ms},
-            "checkpoints":s.checkpoints.iter().map(|c|json!({"solves":c.solves,"columns":c.columns,"dimension":c.dimension,"accepted":c.accepted,"bound":c.largest,
+            "checkpoints":s.checkpoints.iter().map(|c|json!({"solves":c.solves,"columns":c.columns,"accepted":c.accepted,"bound":c.largest,
                 "trajectory":c.estimate.trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"horizons":c.estimate.horizons,
-                "growing":c.growing,"clipped":c.clipped,"projected":c.projected,"slowestRate":c.slowest.map(|s|s.rate),"ms":c.milliseconds})).collect::<Vec<_>>(),
-            "fold":{"horizonUs":f.rule.map(|r|r.horizon),"budget":f.rule.map(|r|r.budget),"orders":f.orders,"targets":f.targets,
-                "rings":f.rings,"ringResponses":f.ring_responses,
-                "dropped":{"entries":dropped.entries,"rests":dropped.rests,"targets":dropped.targets,"rings":dropped.rings,"total":dropped.total(),
-                    "pieces":dropped.pieces,"keptTargets":dropped.kept_targets,"candidateTargets":dropped.candidate_targets,"keptRings":dropped.kept_rings},"responsesMs":f.responses_ms,"buildMs":f.build_ms,"ringsMs":f.rings_ms},
-            "timingMs":{"eigenbasis":t.eigenbasis_ms,"explicitSet":t.explicit_set_ms,"apriori":t.apriori_ms,"setup":t.setup_ms,"outputs":t.outputs_ms,"frame":t.frame_ms.iter().sum::<f64>(),"frameParts":t.frame_ms,"frameWait":t.frame_wait_ms,"solves":t.solves_ms,"projection":t.projection_ms,
-                "model":t.model_ms,"estimate":t.estimate_ms,"total":t.total_ms}})});
+                "growing":c.growing,"slowestRate":c.slowest.map(|s|s.rate),"ms":c.milliseconds})).collect::<Vec<_>>(),
+            "fold":{"budget":f.screened.budget,"screenedPieces":f.screened.pieces,"screenedTargets":f.screened.targets,"screenedBound":f.screened.spent,
+                "rings":f.rings,"ringResponses":f.ring_responses,"ringTargets":f.ring_targets,"dropped":f.dropped(),"responsesMs":f.responses_ms,"ringsMs":f.rings_ms},
+            "timingMs":{"eigenbasis":t.eigenbasis_ms,"explicitSet":t.explicit_set_ms,"fold":t.fold_ms,"setup":t.setup_ms,"solves":t.solves_ms,"projection":t.projection_ms,
+                "model":t.model_ms,"outputs":t.outputs_ms,"total":t.total_ms}})});
     json!({
         "harmonicPlan":{"explicit":plan.count(&Treatment::Explicit{structural:true}),"nonStructural":plan.count(&Treatment::Explicit{structural:false}),
             "folded":plan.count(&Treatment::Fold),"gap":plan.gap,"cut":plan.cut,"l0Bound":plan.l0_bound,"structuralFloor":plan.structural_floor,
@@ -244,7 +243,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
         "fold":{"farSources":f.far_sources,"columns":f.columns,"restBound":f.rest_bound,"lambda0":f.lambda0,"orders":f.orders,
             "series":f.series.iter().map(|(q,rho,terms)|json!({"charge":q,"ratio":rho,"terms":terms})).collect::<Vec<_>>(),"milliseconds":f.milliseconds,
             "phaseMs":{"columns":f.phase_ms[0],"storage":f.phase_ms[1]},"targets":targets},
-        "floquet":floquet,"eigenbasis":prepared.eigenbasis_built().map(|e|json!({"milliseconds":e.milliseconds,"clusters":e.clusters,"largestCluster":e.largest_cluster,"passes":e.passes,"condition":e.condition})),"run":run})
+        "floquet":floquet,"eigenbasis":prepared.eigenbasis_built().map(|e|json!({"milliseconds":e.milliseconds,"blocks":e.blocks,"largestBlock":e.largest_block,"condition":e.condition})),"run":run})
 }
 
 /// The mean of a request alone: one joint run for the standard horizons
@@ -275,7 +274,7 @@ impl Mean{
     /// The status and reason as reported.
     fn reported(&self)->(&'static str,String){
         if self.informative(){("time-average",self.reason.clone())}
-        else{("not-converged",format!("The mean's error bound is {:.2e}, at least 1: it carries no information, so no populations are shown",self.estimated))}
+        else{("not-converged",format!("The mean's error estimate is {:.2e}, at least 1: it carries no information, so no populations are shown",self.estimated))}
     }
     /// An entry of `meanHorizons`.
     fn entry(&self)->Value{
@@ -324,9 +323,9 @@ fn mean_fields(model:&Model,options:&Options,request:&Prepared,answer:&Answer)->
         "meanTraceError":mean.trace_error,"meanPositivityError":mean.positivity,
         "meanAccuracy":{"requestedTolerance":POPULATION_TOLERANCE,"metric":"max over states and requested F groups"},
         "slowestRelaxationUs":resolved.map(|s|1./s.rate),
-        "slowestRelaxation":slow.map(|s|json!({"ratePerUs":s.rate,"residualPerUs":s.residual,"classesMatched":s.matched,"resolved":s.resolved(),
-            "relaxationRangeUs":[1./(s.rate+s.residual),if s.matched&&s.rate>s.residual{Some(1./(s.rate-s.residual))}else{None}],
-            "rule":"the slowest decaying Ritz pair of population weight at least 1% of the tolerance; resolved (slowestRelaxationUs) when its residual is within a tenth of its rate and every slower class of the initial state (the second-order block's eigenvalues) has a pair within 40%, else only the range: at least 1 / (rate + residual)"})),
+        "slowestRelaxation":slow.map(|s|json!({"ratePerUs":s.rate,"residualPerUs":s.residual,"resolved":s.resolved(),
+            "relaxationRangeUs":[1./(s.rate+s.residual),if s.rate>s.residual{Some(1./(s.rate-s.residual))}else{None}],
+            "rule":"the slowest decaying mode of the reduced model with population weight at least a tenth of the tolerance; resolved (slowestRelaxationUs) when its residual is within a tenth of its rate, else only the range"})),
         "discardedOpticalCoherence":mean.discarded});
     match diagnostics{Value::Object(d)=>Ok((entries,d)),_=>Err("Mean diagnostics are not an object".into())}
 }
@@ -354,12 +353,12 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
             "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2],"floquetKernels":prepared.timing[3]}}});
     if let Some((answer,solution))=trajectory{
         let estimated=answer.sample_errors.iter().fold(0_f64,|a,&b|a.max(b));
-        // Converged: every sample's bound within the tolerance.
+        // Converged: every sample's estimate within the tolerance.
         let converged=estimated<=POPULATION_TOLERANCE;
         result["populationAccuracy"]=json!({"status":if converged{"estimated-converged"}else{"estimated-partial"},"requestedTolerance":POPULATION_TOLERANCE,
             "sampleErrors":answer.sample_errors,"estimatedMaximumError":estimated,"scope":{"states":32,"samples":options.samples,"groups":request.names}});
         if !converged{result["populationAccuracy"]["reason"]=json!(solution.and_then(|s|s.reason.clone())
-            .unwrap_or_else(||format!("Checkpoint at {} solves: the error bound is {estimated:.2e} against the tolerance {POPULATION_TOLERANCE:e}; the run continues",answer.solves)));}
+            .unwrap_or_else(||format!("Checkpoint at {} solves: the error estimate is {estimated:.2e} against the tolerance {POPULATION_TOLERANCE:e}; the run continues",answer.solves)));}
         result["diagnostics"]["method"]=json!(METHOD);
         if let Some(s)=solution{result["diagnostics"]["lattice"]=lattice_json(prepared,Some(s));}
     }
@@ -460,7 +459,7 @@ mod tests{
     /// by 8e-5, and the reduced model saturates at 13 to 24 columns, so its
     /// convergence sees no change).
     const FLOOR:f64=1e-4;
-    fn allowed(out:&Value,bound:f64)->f64{bound+out["diagnostics"]["lattice"]["run"]["fold"]["dropped"]["total"].as_f64().unwrap()+FLOOR}
+    fn allowed(out:&Value,bound:f64)->f64{bound+out["diagnostics"]["lattice"]["run"]["fold"]["dropped"].as_f64().unwrap()+FLOOR}
     #[test]
     fn the_default_scene_means_follow_their_horizons(){
         let fixture:Value=serde_json::from_str(include_str!("../tests/fixtures/default_scene_horizons.json")).unwrap();
@@ -592,16 +591,15 @@ mod tests{
             let quantiles=raw.as_ref().map(|e|{let mut r:Vec<f64>=e.iter().zip(&c.estimate.trajectory).filter(|(a,_)|**a>1e-4).map(|(a,b)|b/a).collect();
                 r.sort_by(f64::total_cmp);if r.is_empty(){vec![]}else{vec![r[0],r[r.len()/20],r[r.len()/2],r[(r.len()*19)/20]]}});
             let coverage=returned.as_ref().map(|e|ratios(&a.sample_errors,e));
-            let line=json!({"solves":c.solves,"columns":c.columns,"dimension":c.dimension,"accepted":c.accepted,"largest":c.largest,
+            let line=json!({"solves":c.solves,"columns":c.columns,"accepted":c.accepted,"largest":c.largest,
                 "estTraj":est_traj,"estH":c.estimate.horizons,
                 "boundTraj":a.sample_errors.iter().fold(0_f64,|x,&y|x.max(y)),"boundH":a.horizon_errors,
                 "errTraj":at.map(|e|e.0),"errTrajAt":at.map(|e|e.1),"errH":error_h,"estOverErrQuantiles":quantiles,
                 "perTimeMin":coverage.map(|c|c.0),"perTimeViolations":coverage.map(|c|c.1),"perTimeMinAll":coverage.map(|c|c.2),
                 "returnedErrTraj":returned.as_ref().map(|e|e.iter().fold(0_f64,|x,&y|x.max(y))),
-                "growing":c.growing,"clipped":c.clipped,"projected":c.projected,
-                "slowestRate":c.slowest.map(|s|s.rate),"slowestResidual":c.slowest.map(|s|s.residual),"slowestMatched":c.slowest.map(|s|s.matched),"ms":c.milliseconds});
+                "growing":c.growing,"slowestRate":c.slowest.map(|s|s.rate),"slowestResidual":c.slowest.map(|s|s.residual),"ms":c.milliseconds});
             let work=json!({"operatorWork":c.inner.operator_work,"innerSteps":c.inner.steps,"innerMs":c.inner.milliseconds,"applyMs":c.inner.timing.apply_ms,"preconditionMs":c.inner.timing.precondition_ms,"orthogonalizeMs":c.inner.timing.orthogonalize_ms,"batchMs":c.inner.batch_ms,"blockOperations":c.inner.block_operations(),
-                "timingMs":{"explicitSet":c.timing.explicit_set_ms,"apriori":c.timing.apriori_ms,"setup":c.timing.setup_ms,"frame":c.timing.frame_ms.iter().sum::<f64>(),"frameWait":c.timing.frame_wait_ms,"projection":c.timing.projection_ms,"model":c.timing.model_ms,"estimate":c.timing.estimate_ms,"outputs":c.timing.outputs_ms},
+                "timingMs":{"explicitSet":c.timing.explicit_set_ms,"fold":c.timing.fold_ms,"setup":c.timing.setup_ms,"projection":c.timing.projection_ms,"model":c.timing.model_ms,"outputs":c.timing.outputs_ms},
                 "elapsedMs":started.elapsed().as_secs_f64()*1e3,"trajectoryNorm":c.trajectory.iter().map(|p|accuracy::metric(p,&zero,&groups)).fold(0_f64,f64::max)});
             let mut line=line;if let(Value::Object(a),Value::Object(b))=(&mut line,work){a.extend(b);}
             println!("{line}");

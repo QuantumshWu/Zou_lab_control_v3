@@ -3,9 +3,10 @@
 //! charge step is an explicit lattice coupling; every far step (the tweezer
 //! and every counter-rotating harmonic) is folded statically into
 //! sum_o (i nu)^o K_t^(o), built with the exact (L0 - i nu_s)^-1, so far
-//! charges never enter the lattice; a run's fold keeps or drops its pieces by
-//! one truncation rule. Decisions are made by contribution size; exact zeros
-//! are exploited for speed only. The population tolerance is the fixed
+//! charges never enter the lattice; a run's operator leaves out the pieces
+//! of the fold whose action over the run is negligible, whatever the initial
+//! state. Decisions are made by contribution size; exact zeros are exploited
+//! for speed only. The population tolerance is the fixed
 //! `accuracy::POPULATION_TOLERANCE`.
 //!
 //! Pipeline, by module:
@@ -13,32 +14,24 @@
 //! - `classification`: explicit / fold for every nonzero charge step, and the
 //!   far + far pairs that land on near charges;
 //! - `fold`: the folded couplings K_t^(o) (diagonal inverse and Neumann
-//!   series of every far block), the truncation rule, the far shell's rings;
+//!   series of every far block), a run's screen, the far shell's rings;
 //! - `floquet`: the Floquet frames of the lattice, the micromotion kernels
 //!   of the preconditioner;
 //! - `eigenbasis`: the real eigenbasis of the folded centre generator
-//!   (request-level, `LatticePrepared::eigenbasis`), and the clustered
-//!   eigensystem of the frame's second-order block;
-//! - `operator`: the lattice operator on a set of charges, its adjoint, whole
-//!   or restricted to target rows and source columns;
+//!   (request-level, `LatticePrepared::eigenbasis`);
+//! - `operator`: the lattice operator on a set of charges, whole or
+//!   restricted to target rows and source columns;
 //! - `preconditioner`: the Floquet-frame preconditioner with its centre
 //!   Woodbury term, for the steady trace row and real shifts;
 //! - `krylov`: GMRES on the lattice systems (DCGS2 orthogonalization);
 //! - `charge_set`: the explicit charges P of a request and their ring Q;
-//! - `kernels`, `blocks`: the Schrieffer-Wolff kernels X~_s and the
-//!   second-order block of the request's frame;
-//! - `frame`: the frame of a request (kernels and block, each built on first
-//!   use) and the reduced model's metric;
-//! - `apriori`: the a-priori amplitudes of x0 (the lattice completion, the
-//!   translations, the far shell's depth);
 //! - `poles`: the lattice P u Q and its solves at the poles;
-//! - `space`: the one block rational Krylov space from x0 (poles,
-//!   translations);
-//! - `reduced`: the metric Petrov-Galerkin model of the space and every
-//!   output from it;
-//! - `pipeline`: the request: lattice, fold, space, checkpoints, acceptance
-//!   by convergence and the stopping rule;
-//! - `accuracy`: the tolerance and the error metric.
+//! - `space`: the rational Krylov space from x0 (poles, translations);
+//! - `reduced`: the Galerkin model of the space (or a one-mode lattice's
+//!   exact one) and every output from it;
+//! - `pipeline`: the request: lattice, the run's fold, space, checkpoints,
+//!   acceptance by convergence and the stopping rule;
+//! - `accuracy`: the tolerance, the a-priori share and the error metric.
 //!
 //! Layout: an n x n block is row-major (entry (i, j) at i*n+j); a field on N
 //! modes is N consecutive blocks; a superoperator as a d x d matrix (d = n^2)
@@ -61,10 +54,6 @@ pub mod charge_set;
 pub mod poles;
 pub mod space;
 pub mod reduced;
-pub mod kernels;
-pub mod blocks;
-pub mod frame;
-pub mod apriori;
 pub mod pipeline;
 pub mod accuracy;
 pub use generator::{Component,Generator,Sparse,Superop};
@@ -130,7 +119,7 @@ impl LatticePrepared{
         let generator=Generator::new(&source)?;
         let plan=classification::HarmonicPlan::new(&generator)?;
         let plan_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
-        let fold=fold::FoldLibrary::build(&generator,&plan,&lapack,fold::Storage::Frame)?;
+        let fold=fold::FoldLibrary::build(&generator,&plan,&lapack)?;
         let fold_ms=clock.elapsed().as_secs_f64()*1e3;let clock=Instant::now();
         let floquet=floquet::FloquetKernels::new(&generator,&plan,&fold,&lapack)?;
         let kernel_ms=clock.elapsed().as_secs_f64()*1e3;
@@ -139,14 +128,11 @@ impl LatticePrepared{
     /// The eigenbasis when it has been built (never builds it).
     pub fn eigenbasis_built(&self)->Option<&eigenbasis::BlockEigenbasis>{self.eigenbasis.get().and_then(|r|r.as_ref().ok())}
     /// The real eigenbasis of the folded centre generator, exact (0.7 s for
-    /// 32 states), computed once per request and shared: the screening (the
-    /// explicit set, the ladder), the frame (its kernels and block), the
-    /// error propagation, the ring's block solves and the pole ordering.
-    /// One basis for every reader: a clustered one (block solves to about
-    /// 1e-3, 0.25-0.3 s) would save about 0.4 s where nothing else needs
-    /// the exact one.
+    /// 32 states), computed once per request and shared: the explicit set
+    /// (seed amplitudes, ring condition), the far shell's responses, the
+    /// ladder's top and a one-mode lattice's model.
     pub fn eigenbasis(&self)->Result<&eigenbasis::BlockEigenbasis,String>{
-        self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::exact(self)).as_ref().map_err(|e|e.clone())
+        self.eigenbasis.get_or_init(||eigenbasis::BlockEigenbasis::of(&self.lapack,self.generator.n,&self.centre_generator())).as_ref().map_err(|e|e.clone())
     }
     /// The near ball of order k: every charge reachable from 0 with at most k
     /// structural steps (explicit near steps above the structural floor and
@@ -170,7 +156,7 @@ impl LatticePrepared{
     pub fn centre_generator(&self)->Vec<C>{
         let n=self.generator.n;let d=n*n;
         let mut l=vec![ZERO;d*d];self.generator.zero_component().op.dense_into(n,ONE,&mut l);
-        if let Some(t)=self.fold.targets.first().filter(|t|t.charge==self.generator.zero){t.dense_into(n,0,ONE,&mut l);}
+        if let Some(t)=self.fold.targets.first().filter(|t|t.charge==self.generator.zero){t.dense_into(n,0,&t.rest[0],ONE,&mut l);}
         l
     }
     /// Test hook for the static-shift consistency check (the all-order static
@@ -201,15 +187,16 @@ pub(crate) mod tests{
     use crate::preparation::{DriveView,MatrixView};
     /// A 4-level fixture (ground 0, 1; excited 2, 3) with a near-resonant
     /// static coupling in H0, one near drive (beat 3 rad/us), two far drives
-    /// (2000 and 2003 rad/us, so far + far pairs land on the near charge too)
-    /// and a non-secular decay channel.
+    /// (2000 and 2003 rad/us, so far + far pairs land on the near charge too;
+    /// mixing about 1e-2, within the fold's qualification) and a non-secular
+    /// decay channel.
     pub(crate) struct Fixture{pub h:Vec<f64>,pub zero:Vec<f64>,pub near:Vec<f64>,pub far:Vec<f64>,pub far2:Vec<f64>,pub c:Vec<f64>}
     pub(crate) fn fixture()->Fixture{
         let n=4;let mut h=vec![0.;16];for(i,v)in[0.,0.7,1.3,-0.4].iter().enumerate(){h[i*n+i]=*v;}
         for(i,j,v)in[(0,2,0.6),(1,3,0.25)]{h[i*n+j]=v;h[j*n+i]=v;}
         let mut near=vec![0.;16];for(i,j,v)in[(1,2,0.4),(0,3,0.15)]{near[i*n+j]=v;near[j*n+i]=v;}
-        let mut far=vec![0.;16];for(i,j,v)in[(0,2,40.),(1,3,25.),(0,3,10.)]{far[i*n+j]=v;far[j*n+i]=v;}
-        let mut far2=vec![0.;16];for(i,j,v)in[(0,2,30.),(1,2,12.)]{far2[i*n+j]=v;far2[j*n+i]=v;}
+        let mut far=vec![0.;16];for(i,j,v)in[(0,2,20.),(1,3,12.5),(0,3,5.)]{far[i*n+j]=v;far[j*n+i]=v;}
+        let mut far2=vec![0.;16];for(i,j,v)in[(0,2,15.),(1,2,6.)]{far2[i*n+j]=v;far2[j*n+i]=v;}
         let mut c=vec![0.;16];c[2]=0.8;c[3]=0.3;c[n+2]=0.2;c[n+3]=0.9;
         Fixture{h,zero:vec![0.;16],near,far,far2,c}
     }
