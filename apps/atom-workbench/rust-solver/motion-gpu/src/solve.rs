@@ -9,7 +9,7 @@
 use crate::engine::{Cap,Internal,Settings,REC_EXCITED,REC_GROUND,REC_KX,REC_TAIL,REC_X};
 use crate::ensemble::{ladder,Ensemble,Place};
 use crate::gpu::Gpu;
-use crate::model::{Grid,Model,BOLTZMANN,HBAR};
+use crate::model::{Model,BOLTZMANN,HBAR};
 use crate::solution::{Distributions,Map,Solution};
 use atom_motion_core::linear::Dense;
 use atom_motion_core::{Complex,Request,STATES};
@@ -132,10 +132,19 @@ fn half_depth(model:&Model,b:usize,reach:f64)->f64{
     0.5*(lo+hi)
 }
 
-/// Bins `values` (with their positions `from`) into the display grid `to` (nearest bin; outside dropped).
+/// The display cells a source cell of width `w` around x overlaps, with the fraction of the source
+/// cell in each (display cell i: `to[i]` ± half the display step; beyond the display grid dropped).
+fn overlaps(to:&[f64],x:f64,w:f64)->impl Iterator<Item=(usize,f64)>+'_{
+    let s=to[1]-to[0];let(lo,hi)=(x-w/2.,x+w/2.);
+    let first=((lo-to[0])/s+0.5).floor().max(0.) as usize;let last=(((hi-to[0])/s+0.5).ceil().max(0.) as usize).min(to.len());
+    (first..last).filter_map(move|i|{let o=(hi.min(to[i]+s/2.)-lo.max(to[i]-s/2.)).max(0.);(o>0.).then_some((i,o/w))})
+}
+/// Bins `values` (on the uniform points `from`) into the display grid `to`, each value spread
+/// over its cell: the probability is kept whatever the two grids' steps (a grid coarser or finer
+/// than the display's leaves no empty or doubled bins).
 fn bin(to:&[f64],from:&[f64],values:&[f64],out:&mut [f64]){
-    let step=to[1]-to[0];
-    for(x,&v)in from.iter().zip(values){let i=((x-to[0])/step).round();if i>=0.&&(i as usize)<to.len(){out[i as usize]+=v;}}
+    let w=(from[1]-from[0]).abs();
+    for(&x,&v)in from.iter().zip(values){for(i,f)in overlaps(to,x,w){out[i]+=v*f;}}
 }
 
 pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Result<Solution,String>{
@@ -198,7 +207,7 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
             if records.iter().flatten().any(|r|{let s=|t:usize,m:usize|if r[m]>0.{(r[t]/r[m]) as f64}else{0.};
                 (0..2).any(|d|s(REC_TAIL+d,REC_X+2+d)>tolerance||s(REC_TAIL+2+d,REC_KX+2+d)>tolerance)})&&first+1<steps_ladder.len(){first+=1;continue;}
             accumulate(&model,&groups,&ensemble,&records,&mut sums[0]);census[0]=ensemble.census();
-            if let Some(i)=samples.iter().position(|&s|s==0){collect(&mut ensemble,&display,&positions,&velocities,&mut vbins[i],&mut pbins[i])?;}
+            if let Some(i)=samples.iter().position(|&s|s==0){collect(&mut ensemble,&positions,&velocities,&mut vbins[i],&mut pbins[i])?;}
             ensemble.migrate(&records,&model)?;
             break;
         }
@@ -207,7 +216,7 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
             for s in 0..per{ensemble.step(s+1==per,distributions&&s+1==per)?;}
             let records=ensemble.records()?;
             accumulate(&model,&groups,&ensemble,&records,&mut sums[i]);census[i]=ensemble.census();
-            if let Some(k)=samples.iter().position(|&s|s==i){collect(&mut ensemble,&display,&positions,&velocities,&mut vbins[k],&mut pbins[k])?;}
+            if let Some(k)=samples.iter().position(|&s|s==i){collect(&mut ensemble,&positions,&velocities,&mut vbins[k],&mut pbins[k])?;}
             ensemble.migrate(&records,&model)?;
         }
         // The next batch: this one's size scaled to BATCH_SECONDS (the grids' tables, built once, aside).
@@ -252,7 +261,7 @@ fn stratified(initial:&[(usize,Vec<Complex>,f64)],n:usize)->(Vec<Internal>,Vec<f
     (internal,weights)
 }
 /// Bins the engines' distributions of the last observation into the display grids, and clears them.
-fn collect(ensemble:&mut Ensemble,display:&Grid,positions:&[f64],velocities:&[f64],vbins:&mut [Vec<f64>;2],pbins:&mut [f64])->Result<(),String>{
+fn collect(ensemble:&mut Ensemble,positions:&[f64],velocities:&[f64],vbins:&mut [Vec<f64>;2],pbins:&mut [f64])->Result<(),String>{
     let n=positions.len();
     for engine in ensemble.engines(){
         let g=engine.grid();let hm=engine.hbar_over_mass();
@@ -260,10 +269,11 @@ fn collect(ensemble:&mut Ensemble,display:&Grid,positions:&[f64],velocities:&[f6
         let v:Vec<f64>=(0..g.nx).map(|m|hm*g.wave_number(m,g.nx)).collect();
         bin(velocities,&v,&mx.iter().map(|&x|x as f64).collect::<Vec<_>>(),&mut vbins[0]);
         bin(velocities,&v,&my.iter().map(|&x|x as f64).collect::<Vec<_>>(),&mut vbins[1]);
-        let step=display.dx;
-        for p in 0..g.points(){let r=g.position(p);
-            let(i,j)=(((r[0]-positions[0])/step).round(),((r[1]-positions[0])/step).round());
-            if i>=0.&&j>=0.&&(i as usize)<n&&(j as usize)<n{pbins[j as usize*n+i as usize]+=density[p] as f64;}}
+        for p in 0..g.points(){
+            let(r,d)=(g.position(p),density[p] as f64);if d==0.{continue;}
+            let rows:Vec<(usize,f64)>=overlaps(positions,r[1],g.dx).collect();
+            for(i,fx)in overlaps(positions,r[0],g.dx){for &(j,fy)in &rows{pbins[j*n+i]+=d*fx*fy;}}
+        }
         engine.clear_distributions()?;
     }
     Ok(())
@@ -294,4 +304,21 @@ fn assemble(model:&Model,sums:&[Sums],omega:[f64;2],samples:&[usize],velocities:
     s.method=format!("量子轨迹（蒙特卡洛波函数，{run} 条，GPU）：激发态按位置绝热消去，含一阶多普勒与反冲；Strang 分裂，局部指数精确，跃迁在步中点，光子方向按偶极辐射图样抽样；每条轨迹在能容纳它的最小网格上运行{}",
         if refused>0{format!("（{refused} 次因显存不足未能升到更大网格）")}else{String::new()});
     s
+}
+
+#[cfg(test)]
+mod tests{
+    use super::bin;
+    /// A flat distribution from a grid coarser, finer or as fine as the display's stays flat on
+    /// the display inside its span and keeps its total.
+    #[test]
+    fn binning_keeps_a_flat_distribution_flat_and_its_total(){
+        let to:Vec<f64>=(0..64).map(|i|i as f64-32.).collect();
+        for step in [std::f64::consts::SQRT_2,std::f64::consts::FRAC_1_SQRT_2,1.]{
+            let n=(40./step) as usize;let from:Vec<f64>=(0..n).map(|i|(i as f64-(n/2) as f64)*step).collect();
+            let values=vec![step;n];let mut out=vec![0.;to.len()];bin(&to,&from,&values,&mut out);
+            let total:f64=out.iter().sum();assert!((total-values.iter().sum::<f64>()).abs()<1e-9,"{step}: {total}");
+            for(i,&x)in to.iter().enumerate(){if x.abs()<15.{assert!((out[i]-1.).abs()<1e-9,"{step}: bin {i} holds {}",out[i]);}}
+        }
+    }
 }
