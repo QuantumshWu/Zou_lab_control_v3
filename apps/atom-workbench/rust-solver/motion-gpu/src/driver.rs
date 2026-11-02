@@ -26,7 +26,7 @@ macro_rules! api{
             unsafe fn load(library:Handle)->Result<Api,String>{
                 Ok(Api{$($name:{
                     let symbol=GetProcAddress(library,concat!(stringify!($name),"\0").as_ptr() as *const c_char);
-                    if symbol.is_null(){return Err(format!("nvcuda.dll lacks {}: the NVIDIA driver is too old",stringify!($name)));}
+                    if symbol.is_null(){return Err(format!("NVIDIA 驱动太旧（nvcuda.dll 缺少 {}）",stringify!($name)));}
                     std::mem::transmute::<Handle,unsafe extern "system" fn($($arg),*)->CuResult>(symbol)
                 },)*})
             }
@@ -90,13 +90,13 @@ fn driver()->Result<&'static Driver,String>{
         let api=Api::load(library)?;
         let mut version=0;
         let result=(api.cuInit)(0);
-        if result!=0{return Err(format!("cuInit failed ({}): no usable NVIDIA GPU",error_name(&api,result)));}
+        if result!=0{return Err(format!("CUDA 初始化失败（{}）：没有可用的 NVIDIA 显卡",error_name(&api,result)));}
         if (api.cuDriverGetVersion)(&mut version)!=0{return Err("cuDriverGetVersion failed".into());}
         Ok(Driver{api,version})
     }).as_ref().map_err(|e|e.clone())
 }
 /// Why the GPU engine cannot run on a machine without the NVIDIA driver.
-pub const NO_DRIVER:&str="nvcuda.dll not found: no NVIDIA driver";
+pub const NO_DRIVER:&str="找不到 nvcuda.dll（没有安装 NVIDIA 驱动）";
 
 fn error_name(api:&Api,result:CuResult)->String{
     let mut name:*const c_char=std::ptr::null();

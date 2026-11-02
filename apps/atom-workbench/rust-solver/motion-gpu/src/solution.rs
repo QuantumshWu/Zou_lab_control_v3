@@ -42,6 +42,9 @@ pub struct Solution{
     /// each held.
     pub grids:Vec<usize>,
     pub census:Vec<Vec<usize>>,
+    /// Wall seconds: launching the steps, waiting for the observations, moving trajectories between
+    /// grids, building the grids' tables.
+    pub seconds:[f64;4],
     /// The trajectories the estimates rest on, and the method in one sentence.
     pub trajectories:usize,
     pub method:String,

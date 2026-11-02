@@ -1,7 +1,8 @@
 //! The 2D solve: batches of trajectories through every output time until the standard errors
-//! meet their targets -- as QuTiP's mcsolve with a target tolerance: the populations' errors at
-//! most ε absolute, the temperatures' at most `TEMPERATURE_TOLERANCE` relative -- each batch's
-//! merged estimates published as a checkpoint.
+//! meet their targets -- as QuTiP's mcsolve with a target tolerance: the populations' and the
+//! population groups' errors at most ε absolute, the temperatures' at most
+//! `TEMPERATURE_TOLERANCE` relative -- each batch's merged estimates published as a checkpoint.
+//! A batch is sized from the first steps' cost so that it takes about `BATCH_SECONDS`.
 use crate::engine::{Cap,Internal,Settings,REC_EXCITED,REC_GROUND,REC_KX,REC_TAIL,REC_X};
 use crate::ensemble::{ladder,Ensemble,Place};
 use crate::gpu::Gpu;
@@ -13,11 +14,15 @@ use std::rc::Rc;
 
 /// The temperatures' relative standard error the run aims at.
 pub const TEMPERATURE_TOLERANCE:f64=0.1;
-/// The step's largest size (us): the splitting's error in T stays near 1 % (the 1D study).
-const LARGEST_STEP:f64=0.2;
-/// Trajectories per batch, and the most batches a run makes.
+/// The step's largest size (us): the splitting's error in T is about 1.5 % at it (against the 1D
+/// reference over 2 ms: −5 % at 0.8 us, within the 2 % statistics at 0.4 and 0.2 us).
+const LARGEST_STEP:f64=0.4;
+/// The most trajectories per batch and per run, and the fewest per batch.
 const BATCH:usize=512;
-const MOST_BATCHES:usize=16;
+const MOST_TRAJECTORIES:usize=8192;
+const FEWEST:usize=64;
+/// A batch's planned duration (s): checkpoints come at least this often while the cost holds.
+const BATCH_SECONDS:f64=30.;
 /// The distributions' sample times.
 const DISTRIBUTION_SAMPLES:usize=11;
 /// The absorbing boundary's rate (1/us): an atom crossing it at the escape speed is absorbed
@@ -30,8 +35,10 @@ pub const NO_TRAP:&str="运动平面内没有约束原子的势阱：2D 径向�
 /// Σw, and per quantity Σw v, Σw² v², Σw² v; Σw² and per axis Σw² κ κ²; the lost weight.
 #[derive(Clone)]
 struct Sums{w:f64,w2:f64,wv:Vec<f64>,w2v2:Vec<f64>,w2v:Vec<f64>,w2k12:[f64;2],lost:f64,total:f64,lost2:Vec<(f64,bool)>}
-/// The quantities per trajectory: 32 populations, the two ground F groups, then per axis κ, κ², x².
-const POPULATION_GROUPS:usize=STATES+2;
+/// The quantities per trajectory: 32 populations, the population groups (`groups`), then per axis
+/// κ, κ², x².
+const GROUPS:usize=9;
+const POPULATION_GROUPS:usize=STATES+GROUPS;
 const Q_KAPPA:usize=POPULATION_GROUPS;
 const Q_KAPPA2:usize=Q_KAPPA+2;
 const Q_X2:usize=Q_KAPPA2+2;
@@ -50,13 +57,25 @@ impl Sums{
     fn error(&self,q:usize)->f64{let m=self.mean(q);((self.w2v2[q]-2.*m*self.w2v[q]+m*m*self.w2).max(0.)).sqrt()/self.w}
 }
 
+/// The population groups the app reports with the states (src/population-selection.ts
+/// POPULATION_GROUPS): every hyperfine manifold of the ground state and the D lines, and all the
+/// excited states together.
+fn groups(states:&[String])->Result<Vec<Vec<usize>>,String>{
+    let mut named:std::collections::BTreeMap<String,Vec<usize>>=Default::default();let mut excited=vec![];
+    for(i,label)in states.iter().enumerate(){
+        let mut f=label.splitn(3,'-');let(m,level)=(f.next().unwrap_or(""),f.next().unwrap_or(""));
+        named.entry(format!("{m}:{level}")).or_default().push(i);if m!="ground"{excited.push(i);}
+    }
+    let mut out:Vec<Vec<usize>>=named.into_values().collect();out.push(excited);
+    if out.len()!=GROUPS{return Err("2D 运动需要完整的 Rb87 32 态模型".into());}
+    Ok(out)
+}
 /// A trajectory's quantities from its record.
-fn quantities(model:&Model,r:&[f32])->Vec<f64>{
+fn quantities(model:&Model,groups:&[Vec<usize>],r:&[f32])->Vec<f64>{
     let g=&model.ground;let mut v=vec![0.;QUANTITIES];
     for(k,&b)in model.block_states[0].iter().chain(&model.block_states[1]).enumerate(){v[g.ground_states[b]]=r[REC_GROUND+k] as f64;}
     for(k,&state)in g.excited_states.iter().enumerate(){v[state]=r[REC_EXCITED+k] as f64;}
-    v[STATES]=model.block_states[0].iter().map(|&b|v[g.ground_states[b]]).sum();
-    v[STATES+1]=model.block_states[1].iter().map(|&b|v[g.ground_states[b]]).sum();
+    for(k,members)in groups.iter().enumerate(){v[STATES+k]=members.iter().map(|&i|v[i]).sum();}
     for d in 0..2{v[Q_KAPPA+d]=r[REC_KX+d] as f64;v[Q_KAPPA2+d]=r[REC_KX+2+d] as f64;v[Q_X2+d]=r[REC_X+2+d] as f64;}
     v
 }
@@ -141,13 +160,15 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
     let template=Settings{grid:steps_ladder[0],dt,doppler_every:((1./dt).round() as usize).max(1),trajectories:BATCH,seed:0x5EED_2D,cap:Some(Cap{start,rate:CAP_RATE})};
     let(free,_)=gpu.context.memory()?;
     let tolerance=request.tolerance;
+    let groups=groups(&request.states)?;
     let mut ensemble=Ensemble::new(gpu.clone(),template,steps_ladder.clone(),BATCH,free/2,tolerance);
     // The initial grid: the smallest whose half width and largest momentum are five thermal widths.
     let temperature=request.temperature_uk;
     let kt=BOLTZMANN*temperature*1e-6/HBAR*1e-6; // k_B T in rad/us
     let x_t=(kt*hm).sqrt()/omega[0].min(omega[1]);let k_t=(kt/hm).sqrt();
-    let mut first=steps_ladder.iter().position(|q|q.half_width()>=5.*x_t&&std::f64::consts::PI/q.dx>=5.*k_t)
-        .ok_or_else(||format!("初始温度 {temperature} μK 太高：超出 2D 网格的范围"))?;
+    // (Beyond the top grid's reach the thermal state's tail is above half the trap's depth: the top
+    // grid takes it and its absorbing boundary the tail.)
+    let mut first=steps_ladder.iter().position(|q|q.half_width()>=5.*x_t&&std::f64::consts::PI/q.dx>=5.*k_t).unwrap_or(steps_ladder.len()-1);
     // Display grids: the first grid's positions and velocities.
     let display=steps_ladder[first];
     let positions:Vec<f64>=(0..display.nx).map(|i|display.x(i)).collect();
@@ -157,11 +178,11 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
     let mut pbins:Vec<Vec<f64>>=samples.iter().map(|_|vec![0.;positions.len()*positions.len()]).collect();
     let mut solution=Solution::default();
     let mut run=0usize;let mut census=vec![vec![];n_times];
-    for batch in 0..MOST_BATCHES{
-        // This batch's internal states, stratified over the initial density's eigenstates.
-        let mut internal=vec![];let mut weights=vec![];
-        for(k,v,p)in &initial{let n=((p*BATCH as f64).round() as usize).max(1);for _ in 0..n{internal.push(Internal{block:*k,amplitudes:v.clone()});weights.push(p*BATCH as f64/n as f64);}}
-        internal.truncate(BATCH);weights.truncate(BATCH);while internal.len()<BATCH{internal.push(internal[0].clone());weights.push(weights[0]);}
+    let mut size=BATCH;
+    for batch in 0..{
+        if run>=MOST_TRAJECTORIES{break;}
+        let batch_size=size.min(MOST_TRAJECTORIES-run).min(ensemble.capacity(first));
+        let(internal,weights)=stratified(&initial,batch_size);
         ensemble.reseed(0x5EED_2D^((batch as u64+1)*0x9E37_79B9_7F4A_7C15))?;
         loop{
             ensemble.start(first,&internal,temperature,&model)?;
@@ -171,38 +192,56 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
             // Tails beyond the start grid: start one higher.
             if records.iter().flatten().any(|r|{let s=|t:usize,m:usize|if r[m]>0.{(r[t]/r[m]) as f64}else{0.};
                 (0..2).any(|d|s(REC_TAIL+d,REC_X+2+d)>tolerance||s(REC_TAIL+2+d,REC_KX+2+d)>tolerance)})&&first+1<steps_ladder.len(){first+=1;continue;}
-            accumulate(&model,&ensemble,&records,&mut sums[0]);census[0]=ensemble.census();
+            accumulate(&model,&groups,&ensemble,&records,&mut sums[0]);census[0]=ensemble.census();
             if let Some(i)=samples.iter().position(|&s|s==0){collect(&mut ensemble,&display,&positions,&velocities,&mut vbins[i],&mut pbins[i])?;}
             ensemble.migrate(&records,&model)?;
             break;
         }
+        let begun=std::time::Instant::now();
         for i in 1..n_times{
             let distributions=samples.contains(&i);
             for s in 0..per{ensemble.step(s+1==per,distributions&&s+1==per)?;}
             let records=ensemble.records()?;
-            accumulate(&model,&ensemble,&records,&mut sums[i]);census[i]=ensemble.census();
+            accumulate(&model,&groups,&ensemble,&records,&mut sums[i]);census[i]=ensemble.census();
             if let Some(k)=samples.iter().position(|&s|s==i){collect(&mut ensemble,&display,&positions,&velocities,&mut vbins[k],&mut pbins[k])?;}
             ensemble.migrate(&records,&model)?;
+            // The first output interval's cost sizes this and the next batches.
+            if i==1&&batch==0{
+                let projected=begun.elapsed().as_secs_f64()*(n_times-1) as f64;
+                size=((batch_size as f64*BATCH_SECONDS/projected.max(1e-3)) as usize/FEWEST*FEWEST).clamp(FEWEST,BATCH);
+            }
         }
-        run+=BATCH;
+        run+=batch_size;
         solution=assemble(&model,&sums,omega,&samples,&velocities,&vbins,&positions,&pbins,run,ensemble.refused);
-        solution.grids=steps_ladder.iter().map(|q|q.nx).collect();solution.census=census.clone();
+        solution.grids=steps_ladder.iter().map(|q|q.nx).collect();solution.census=census.clone();solution.seconds=ensemble.seconds;
         let(population,temperature_error)=(solution.sample_errors.iter().fold(0.,|a:f64,&b|a.max(b)),
             solution.temperature_uk.iter().zip(&solution.temperature_errors_uk).map(|(t,e)|(0..2).map(|d|if t[d]>0.{e[d]/t[d]}else{0.}).fold(0.,f64::max)).fold(0.,f64::max));
         let met=population<=tolerance&&temperature_error<=TEMPERATURE_TOLERANCE;
         solution.reason=if met{None}else{Some(format!("{run} 条轨迹后：布居的标准误差 {population:.1e}（目标 {tolerance}），温度的相对标准误差 {:.1}%（目标 {:.0}%）",
             100.*temperature_error,100.*TEMPERATURE_TOLERANCE))};
         if met{break;}
-        if batch+1<MOST_BATCHES&&!checkpoint(&solution){break;}
+        if run<MOST_TRAJECTORIES&&!checkpoint(&solution){break;}
     }
     Ok(solution)
 }
 
 /// Adds the held trajectories' quantities (and the lost weight) of one output time.
-fn accumulate(model:&Model,ensemble:&Ensemble,records:&[Option<Vec<f32>>],sums:&mut Sums){
+fn accumulate(model:&Model,groups:&[Vec<usize>],ensemble:&Ensemble,records:&[Option<Vec<f32>>],sums:&mut Sums){
     for(t,r)in records.iter().enumerate(){
-        match(r,ensemble.place[t]){(Some(r),_)=>sums.add(ensemble.weights[t],&quantities(model,r)),(None,Place::Lost)=>sums.add_lost(ensemble.weights[t]),_=>{}}
+        match(r,ensemble.place[t]){(Some(r),_)=>sums.add(ensemble.weights[t],&quantities(model,groups,r)),(None,Place::Lost)=>sums.add_lost(ensemble.weights[t]),_=>{}}
     }
+}
+/// `n` trajectories' internal states over the initial density's eigenstates (block, amplitudes,
+/// probability): each eigenstate's count its share rounded by the largest remainders, its weight
+/// probability × n / count.
+fn stratified(initial:&[(usize,Vec<Complex>,f64)],n:usize)->(Vec<Internal>,Vec<f64>){
+    let exact:Vec<f64>=initial.iter().map(|x|x.2*n as f64).collect();
+    let mut counts:Vec<usize>=exact.iter().map(|&e|e.floor() as usize).collect();
+    let mut order:Vec<usize>=(0..initial.len()).collect();order.sort_by(|&a,&b|(exact[b]-exact[b].floor()).total_cmp(&(exact[a]-exact[a].floor())));
+    let mut left=n-counts.iter().sum::<usize>();for &i in order.iter().cycle(){if left==0{break;}counts[i]+=1;left-=1;}
+    let(mut internal,mut weights)=(vec![],vec![]);
+    for(i,(k,v,_))in initial.iter().enumerate(){for _ in 0..counts[i]{internal.push(Internal{block:*k,amplitudes:v.clone()});weights.push(exact[i]/counts[i] as f64);}}
+    (internal,weights)
 }
 /// Bins the engines' distributions of the last observation into the display grids, and clears them.
 fn collect(ensemble:&mut Ensemble,display:&Grid,positions:&[f64],velocities:&[f64],vbins:&mut [Vec<f64>;2],pbins:&mut [f64])->Result<(),String>{

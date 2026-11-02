@@ -1,12 +1,13 @@
 //! The 2D solve end to end on the app's tweezer PGC example in the radial plane:
-//! `cargo run --profile iterate --example solve_pgc -- [t_end_us] [spacing_us] [temperature_uK]`
+//! `cargo run --profile iterate --example solve_pgc -- [t_end_us] [spacing_us] [temperature_uK] [payload.json]` -- a payload already in
+//! the plane's frame (default: the example with beams along x, turned into the plane).
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_gpu::solve::solve;
 
 fn main(){
     let args:Vec<String>=std::env::args().collect();let arg=|i:usize,d:f64|args.get(i).map_or(d,|s|s.parse().unwrap());
     let(t_end,spacing,temperature)=(arg(1,1000.),arg(2,50.),arg(3,30.));
-    let mut request=scene::turned(scene::load(scene::PGC));
+    let mut request=match args.get(4){Some(path)=>scene::load(path),None=>scene::turned(scene::load(scene::PGC))};
     request.temperature_uk=temperature;request.tolerance=0.01;
     request.times_us=(0..=((t_end/spacing).round() as usize)).map(|i|i as f64*spacing).collect();
     let started=std::time::Instant::now();
@@ -18,7 +19,8 @@ fn main(){
                 i as f64*spacing,s.temperature_uk[i][0],s.temperature_errors_uk[i][0],s.temperature_uk[i][1],s.temperature_errors_uk[i][1],
                 s.mean_occupation[i][0],s.mean_occupation[i][1],s.loss_probability[i],pf1,s.sample_errors[i],s.census[i]);
         }
-        println!("{label}: {} trajectories, {:.1} s; {}",s.trajectories,started.elapsed().as_secs_f64(),s.reason.clone().unwrap_or("targets met".into()));
+        println!("{label}: {} trajectories, {:.1} s (steps {:.1} s, observations {:.1} s, moves {:.1} s, tables {:.1} s); {}",s.trajectories,started.elapsed().as_secs_f64(),
+            s.seconds[0],s.seconds[1],s.seconds[2],s.seconds[3],s.reason.clone().unwrap_or("targets met".into()));
     };
     let solution=solve(&request,&mut |s|{report(s,"checkpoint");true}).unwrap();
     report(&solution,"final");

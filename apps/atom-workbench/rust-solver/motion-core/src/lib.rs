@@ -100,6 +100,24 @@ impl Beam{
             }
         }
     }
+    /// The amplitude's gradient ∂a/∂r_j at r (1/um), exact: ln a = ikζ − s/q − ln q with
+    /// s = ρ²/w², so ∂_j a = a (ik n_j − ∂_j s/q + (s/q − 1) ∂_j q/q), ∂_j s = 2(r_j − ζ n_j)/w²,
+    /// ∂_j q = i n_j/z_R; ik n_j a for the plane wave.
+    pub fn gradient_at(&self,r:[f64;3])->[Complex;3]{
+        let(a,k,n)=(self.amplitude_at(r),self.wave_number_per_um,self.direction);let zeta=r[0]*n[0]+r[1]*n[1]+r[2]*n[2];
+        std::array::from_fn(|j|{
+            let phase=Complex::new(0.,k*n[j]);
+            match self.waist_um{
+                None=>a*phase,
+                Some(w)=>{
+                    let rayleigh=k*w*w/2.;let q=Complex::new(1.,zeta/rayleigh);
+                    let s=Complex::new((r[0]*r[0]+r[1]*r[1]+r[2]*r[2]-zeta*zeta).max(0.)/(w*w),0.);
+                    let(ds,dq)=(Complex::new(2.*(r[j]-zeta*n[j])/(w*w),0.),Complex::new(0.,n[j]/rayleigh));
+                    a*(phase-ds/q+(s/q-Complex::ONE)*dq/q)
+                }
+            }
+        })
+    }
 }
 
 /// A motion solve: the model, the initial state and the times.
@@ -213,5 +231,19 @@ mod tests{
         let rayleigh=k*1.44/2.;let along=beam([0.,0.,1.],Some(1.2)).amplitude(x);
         let gouy=(x/rayleigh).atan();let size=1./(1.+(x/rayleigh).powi(2)).sqrt();
         assert!((along-Complex::cis(k*x-gouy)*size).abs()<=1e-15,"{along:?}");
+    }
+    /// The amplitude's gradient agrees with fourth-order central differences of the amplitude, for
+    /// a plane wave and Gaussian beams along, across and oblique to the axes, off their foci.
+    #[test]
+    fn a_beam_s_gradient_matches_differences_of_its_amplitude(){
+        let r=[0.31,-0.47,0.83];let h=1e-3;
+        for b in [beam([0.6,0.,0.8],None),beam([0.,1.,0.],Some(1.2)),beam([0.,0.,1.],Some(0.9)),beam([0.48,0.6,0.64],Some(1.1))]{
+            let g=b.gradient_at(r);
+            for j in 0..3{
+                let at=|s:f64|{let mut p=r;p[j]+=s;b.amplitude_at(p)};
+                let difference=(at(-2.*h)-at(-h)*8.+at(h)*8.-at(2.*h))*(1./(12.*h));
+                assert!((g[j]-difference).abs()<=1e-9*(1.+g[j].abs()),"{j}: {:?} vs {difference:?}",g[j]);
+            }
+        }
     }
 }

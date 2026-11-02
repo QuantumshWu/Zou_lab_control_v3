@@ -17,8 +17,11 @@ return class NativeService {
     // finite trajectories (with their inline mean) on the trajectory lane.
     const lane=this.lanes[payload.options.meanOnly?'mean':'trajectory'];
     let job;const promise=new Promise((resolve,reject)=>{
-      job={token,nativeId:++this.sequence,payload,lane,resolve,reject,onProgress,settled:false,timer:null};this.current.set(token.clientId,job);
-      job.timer=setTimeout(()=>lane.cancel(job,failure('求解超时，已终止对应 Rust 进程；可修改参数后重试。',504,'solver-timeout')),this.solveTimeoutMs);
+      const expire=()=>lane.cancel(job,failure('求解超时，已终止对应 Rust 进程；可修改参数后重试。',504,'solver-timeout'));
+      // A motion solve runs as long as its checkpoints keep coming: each one restarts its deadline.
+      const progress=onProgress&&payload.model?.motion?value=>{clearTimeout(job.timer);job.timer=setTimeout(expire,this.solveTimeoutMs);onProgress(value);}:onProgress;
+      job={token,nativeId:++this.sequence,payload,lane,resolve,reject,onProgress:progress,settled:false,timer:null};this.current.set(token.clientId,job);
+      job.timer=setTimeout(expire,this.solveTimeoutMs);
       lane.enqueue(job);
     });
     return {promise,cancel:()=>{if(!job.settled)lane.cancel(job,cancelled());}};

@@ -26,9 +26,12 @@
 //! W_d κ̂_d − (i/2) ∂_d Q_d,     W_d = (P_d + Q_d)/2 = ΔH_ls^d − (i/2) ΔΓ^d   (ground.rs `first_order_at`)
 //! ```
 //!
-//! The local part, the recoil increment and −(i/2)∂_dQ_d (central differences), joins H_eff in
-//! the local step's exponential; W_d κ̂_d is applied with the spectral derivative (`engine`). The
-//! jumps carry their increments, ΔR_c, in the same order.
+//! The local part, the recoil increment and −(i/2)∂_dQ_d, joins H_eff in the local step's
+//! exponential; W_d κ̂_d is applied with the spectral derivative (`engine`). The jumps carry their
+//! increments, ΔR_c, in the same order. As Σ_a C_a†C_a = D (the excited states' decay) the jumps'
+//! part of Q_d sums to P(ΔR^d†D R), so Q_d = −Σ_c P(ΔR_c^d†(V_c + i D R_c)) (P: within the
+//! hyperfine blocks), and ∂_dQ_d is exact: the beams' gradients and the radial interpolation's
+//! slope.
 //!
 //! # Along the radius
 //! Every focused beam runs along the plane's normal, so the intensities -- and with them H(r), the
@@ -44,9 +47,6 @@ use rayon::prelude::*;
 
 pub const HBAR:f64=1.0545718176461565e-34;
 pub const BOLTZMANN:f64=1.380649e-23;
-/// The step of the central differences of Q_d (um): its truncation (h k)² ≈ 1e-6 relative for
-/// the beams' standing waves, its roundoff 1e-12.
-const DIFFERENCE_STEP:f64=1e-4;
 /// The radial interpolation's largest error relative to the responses' scale, below single
 /// precision.
 pub const RADIAL_TOLERANCE:f64=1e-8;
@@ -66,7 +66,7 @@ impl Grid{
     /// Half the box (um).
     pub fn half_width(&self)->f64{self.nx as f64*self.dx/2.}
     /// The farthest any point (and its difference stencil) lies from the focus (um).
-    pub fn reach(&self)->f64{let x=self.half_width();let y=if self.ny==1{0.}else{x};(x*x+y*y).sqrt()+2.*DIFFERENCE_STEP}
+    pub fn reach(&self)->f64{let x=self.half_width();let y=if self.ny==1{0.}else{x};(x*x+y*y).sqrt()}
 }
 
 /// The 2D model of a request: its front end and the plane's constants.
@@ -83,14 +83,21 @@ pub struct Model{
 
 /// The eliminations along the radius: at ρ_k = k `step`, k = 0..=K (um).
 pub struct Radial{pub step:f64,pub eliminations:Vec<Elimination>}
-/// Catmull-Rom weights of the samples k − 1 .. k + 2 at t ∈ [0, 1) past sample k.
+/// Catmull-Rom weights of the samples k − 1 .. k + 2 at t ∈ [0, 1) past sample k, and their
+/// slopes d/dt.
 pub fn catmull_rom(t:f64)->[f64;4]{let(t2,t3)=(t*t,t*t*t);[(-t3+2.*t2-t)/2.,(3.*t3-5.*t2+2.)/2.,(-3.*t3+4.*t2+t)/2.,(t3-t2)/2.]}
-fn mix(parts:&[(&Elimination,f64)])->Elimination{
-    let(e0,_)=parts[0];
-    let dense=|f:&dyn Fn(&Elimination)->&Dense|{let mut m=Dense::zeros(f(e0).rows,f(e0).cols);for(e,w)in parts{m.add_scaled(Complex::new(*w,0.),f(e));}m};
-    Elimination{energies:(0..e0.energies.len()).map(|b|parts.iter().map(|(e,w)|w*e.energies[b]).sum()).collect(),
-        hamiltonian:dense(&|e|&e.hamiltonian),coupling:parts.iter().map(|(e,w)|w*e.coupling).sum(),excited_hamiltonian:dense(&|e|&e.excited_hamiltonian),
-        responses:(0..e0.responses.len()).map(|l|dense(&|e|&e.responses[l])).collect(),derivatives:(0..e0.derivatives.len()).map(|l|dense(&|e|&e.derivatives[l])).collect()}
+fn catmull_rom_slope(t:f64)->[f64;4]{let t2=t*t;[(-3.*t2+4.*t-1.)/2.,(9.*t2-10.*t)/2.,(-9.*t2+8.*t+1.)/2.,(3.*t2-2.*t)/2.]}
+fn weighted(samples:&[&Elimination;4],w:&[f64;4],f:&dyn Fn(&Elimination)->&Dense)->Dense{
+    let mut m=Dense::zeros(f(samples[0]).rows,f(samples[0]).cols);for(e,&x)in samples.iter().zip(w){m.add_scaled(Complex::new(x,0.),f(e));}m
+}
+/// The weighted sum of four eliminations: E_b, H0g, the coupling's norm and the responses. It
+/// carries no K: nothing on the plane solves with it.
+fn mix(samples:&[&Elimination;4],w:[f64;4])->Elimination{
+    let first=samples[0];
+    Elimination{energies:(0..first.energies.len()).map(|b|samples.iter().zip(&w).map(|(e,x)|x*e.energies[b]).sum()).collect(),
+        hamiltonian:weighted(samples,&w,&|e|&e.hamiltonian),coupling:samples.iter().zip(&w).map(|(e,x)|x*e.coupling).sum(),excited_hamiltonian:Dense::zeros(0,0),
+        responses:(0..first.responses.len()).map(|l|weighted(samples,&w,&|e|&e.responses[l])).collect(),
+        derivatives:(0..first.derivatives.len()).map(|l|weighted(samples,&w,&|e|&e.derivatives[l])).collect()}
 }
 impl Radial{
     /// The eliminations of `ground` out to `reach` (um), the grid refined from w/64 (w the
@@ -113,12 +120,19 @@ impl Radial{
             step/=2.;
         }
     }
-    /// The elimination at radius ρ, interpolated (even in ρ about the focus).
-    pub fn at(&self,rho:f64)->Elimination{
-        let x=rho.abs()/self.step;let k=(x.floor() as usize).min(self.eliminations.len()-3);let t=x-k as f64;
-        let w=catmull_rom(t);
+    /// The four samples around radius ρ (mirrored about the focus) and ρ's place t past the second.
+    fn around(&self,rho:f64)->([&Elimination;4],f64){
+        let x=rho.abs()/self.step;let k=(x.floor() as usize).min(self.eliminations.len()-3);
         let sample=|j:isize|->&Elimination{&self.eliminations[(k as isize+j).unsigned_abs()]};
-        mix(&[(sample(-1),w[0]),(sample(0),w[1]),(sample(1),w[2]),(sample(2),w[3])])
+        ([sample(-1),sample(0),sample(1),sample(2)],x-k as f64)
+    }
+    /// The elimination at radius ρ, interpolated (even in ρ about the focus).
+    pub fn at(&self,rho:f64)->Elimination{let(samples,t)=self.around(rho);mix(&samples,catmull_rom(t))}
+    /// The interpolation's slopes d/dρ at ρ ≥ 0: per beam dR_l/dρ and dR2_l/dρ.
+    pub fn slope(&self,rho:f64)->(Vec<Dense>,Vec<Dense>){
+        let(samples,t)=self.around(rho);let w=catmull_rom_slope(t).map(|x|x/self.step);
+        ((0..samples[0].responses.len()).map(|l|weighted(&samples,&w,&|e|&e.responses[l])).collect(),
+         (0..samples[0].derivatives.len()).map(|l|weighted(&samples,&w,&|e|&e.derivatives[l])).collect())
     }
     /// The largest radius tabulated with all four samples around it.
     pub fn reach(&self)->f64{(self.eliminations.len()-3) as f64*self.step}
@@ -132,9 +146,6 @@ pub struct Point{
     pub energies:Vec<f64>,
 }
 
-fn combine(beams:&[usize],weights:&[Complex],matrices:&[Dense])->Dense{
-    let mut out=Dense::zeros(matrices[0].rows,matrices[0].cols);for &l in beams{out.add_scaled(weights[l],&matrices[l]);}out
-}
 fn block_of(m:&Dense,states:&[usize])->Dense{Dense::from_fn(states.len(),states.len(),|i,j|m[(states[i],states[j])])}
 
 impl Model{
@@ -161,36 +172,40 @@ impl Model{
         let k=self.in_plane[l];
         if d<2{self.hbar_over_mass*k[d]}else{self.hbar_over_mass*(k[0]*k[0]+k[1]*k[1])/2.}
     }
-    /// Q_d at r: −Σ_c secular(ΔR_c^d†V_c) − i Σ_j ΔL_j^d†L_j.
-    fn ordering(&self,e:&Elimination,r:[f64;3],d:usize)->Dense{
-        let g=&self.ground;let a=g.amplitudes_at(r);let ng=g.ground_states.len();
-        let weights:Vec<Complex>=a.iter().enumerate().map(|(l,&z)|z*(-self.shift(d,l))).collect();
-        let mut q=Dense::zeros(ng,ng);
+    /// ∂_dQ_d at r (`e` and `slopes` the elimination and its slopes at |r|), Q_d =
+    /// −Σ_c P(ΔR_c^d†(V_c + i D R_c)), ΔR_c^d = −Σ_{l∈c} (ħk_{l,d}/m) a_l R2_l, V_c = Σ a_l V_l,
+    /// R_c = Σ a_l R_l, each factor differentiated through a_l(r) and R_l(|r|), R2_l(|r|).
+    fn ordering_slope(&self,e:&Elimination,slopes:&(Vec<Dense>,Vec<Dense>),r:[f64;3],d:usize)->Dense{
+        let g=&self.ground;let(ng,ne)=(g.ground_states.len(),g.excited_states.len());
+        let rho=(r[0]*r[0]+r[1]*r[1]+r[2]*r[2]).sqrt();let along=if rho>0.{r[d]/rho}else{0.};
+        let a=g.amplitudes_at(r);let da:Vec<Complex>=g.beams.iter().map(|b|b.gradient_at(r)[d]).collect();
+        let mut out=Dense::zeros(ng,ng);
         for c in &g.carriers{
-            let dr=combine(&c.beams,&weights,&e.derivatives);let v=combine(&c.beams,&a,&g.couplings);
-            q.add_scaled(-Complex::ONE,&dr.adjoint_product(&v));
+            let zero=||Dense::zeros(ne,ng);let(mut dr,mut ddr,mut v,mut dv,mut rc,mut drc)=(zero(),zero(),zero(),zero(),zero(),zero());
+            for &l in &c.beams{
+                let s=-self.shift(d,l);
+                dr.add_scaled(a[l]*s,&e.derivatives[l]);ddr.add_scaled(da[l]*s,&e.derivatives[l]);ddr.add_scaled(a[l]*(s*along),&slopes.1[l]);
+                v.add_scaled(a[l],&g.couplings[l]);dv.add_scaled(da[l],&g.couplings[l]);
+                rc.add_scaled(a[l],&e.responses[l]);drc.add_scaled(da[l],&e.responses[l]);drc.add_scaled(a[l]*along,&slopes.0[l]);
+            }
+            let(mut right,mut slope)=(v,dv);right.add_scaled(Complex::I,&g.decay.product(&rc));slope.add_scaled(Complex::I,&g.decay.product(&drc));
+            out.add_scaled(-Complex::ONE,&ddr.adjoint_product(&right));out.add_scaled(-Complex::ONE,&dr.adjoint_product(&slope));
         }
-        let q=Dense::from_fn(ng,ng,|i,j|if g.block[i]==g.block[j]{q[(i,j)]}else{Complex::ZERO});
-        let local=g.local_at(e,r);let first=g.first_order_at(e,r,|l|self.shift(d,l));
-        let mut out=q;for(l,dl)in local.jumps.iter().zip(&first.jumps){out.add_scaled(-Complex::I,&dl.adjoint_product(l));}
-        out
+        Dense::from_fn(ng,ng,|i,j|if g.block[i]==g.block[j]{out[(i,j)]}else{Complex::ZERO})
     }
     /// The operators at r, with the absorbing potential `cap` (1/us) there.
     pub fn point(&self,r:[f64;3],cap:f64)->Point{
         let g=&self.ground;
-        let e=self.elimination(r);
+        let rho=(r[0]*r[0]+r[1]*r[1]+r[2]*r[2]).sqrt();let e=self.radial.at(rho);
         let local=g.local_at(&e,r);
         let mut generator=local.effective_hamiltonian(&e);
-        let increment=|e:&Elimination,d:usize|{let f=g.first_order_at(e,r,|l|self.shift(d,l));let mut m=f.light_shift;m.add_scaled(Complex::new(0.,-0.5),&f.scattering);m};
-        generator.add_scaled(Complex::ONE,&increment(&e,2));
-        // −(i/2) Σ_d ∂_d Q_d, by central differences.
-        for d in 0..2{
-            let mut plus=r;plus[d]+=DIFFERENCE_STEP;let mut minus=r;minus[d]-=DIFFERENCE_STEP;
-            let mut derivative=self.ordering(&self.elimination(plus),plus,d);derivative.add_scaled(-Complex::ONE,&self.ordering(&self.elimination(minus),minus,d));
-            generator.add_scaled(Complex::new(0.,-0.5/(2.*DIFFERENCE_STEP)),&derivative);
-        }
+        let increment=|d:usize|{let f=g.first_order_at(&e,r,|l|self.shift(d,l));let mut m=f.light_shift;m.add_scaled(Complex::new(0.,-0.5),&f.scattering);m};
+        generator.add_scaled(Complex::ONE,&increment(2));
+        // −(i/2) Σ_d ∂_d Q_d.
+        let slopes=self.radial.slope(rho);
+        for d in 0..2{generator.add_scaled(Complex::new(0.,-0.5),&self.ordering_slope(&e,&slopes,r,d));}
         for b in 0..generator.rows{generator[(b,b)]+=Complex::new(0.,-0.5*cap);}
-        let doppler=[increment(&e,0),increment(&e,1)];
+        let doppler=[increment(0),increment(1)];
         Point{generator:std::array::from_fn(|k|block_of(&generator,&self.block_states[k])),
             doppler:std::array::from_fn(|k|[block_of(&doppler[0],&self.block_states[k]),block_of(&doppler[1],&self.block_states[k])]),
             energies:e.energies}
