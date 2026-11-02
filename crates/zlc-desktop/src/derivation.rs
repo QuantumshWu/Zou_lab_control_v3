@@ -139,7 +139,8 @@ impl RoiWorker {
                             Err(RuntimeError::Closed)=>return Ok(()),Err(error)=>return Err(error.to_string()),
                         }
                     };
-                    if current.schema()!=&source_schema {notify();return Ok(());}
+                    // A window whose coordinates only moved keeps its plan (cut anew from them).
+                    if !source_schema.holds(current.schema()) {notify();return Ok(());}
                     last=Some(current.clone());answered=Some(wanted.clone());answered_at=Some(Instant::now());
                     // Nothing published: the region's signals go (their names are free again).
                     if wanted.is_empty() {output=roi_output(&runtime,&panel);continue;}
