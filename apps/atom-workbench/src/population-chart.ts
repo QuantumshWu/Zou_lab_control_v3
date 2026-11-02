@@ -11,10 +11,23 @@ export interface PopulationChartOptions {scale?:'linear'|'log';viewportWidth?:nu
   /** The long-time column's name: p̄(T) at the T the result holds (p̄(1 s), p̄(100 ms)). */
   meanLabel?:string;
   /** A sample the readout stands at already: a newer checkpoint of the same trajectory keeps it open there. */
-  cursor?:number;}
+  cursor?:number;
+  /** A 1D motion result's last simulated time (us): the samples after it are the continuation's. */
+  continuedFromUs?:number;}
 // v3 scientific series palette: crates/zlc-plot/src/style.rs, Palette::default.
 const palette=['#517FA6','#B17D4B','#568C79','#99719B','#B36F72','#558F9C','#7E7CA5','#92924F'];
 const esc=(value:unknown)=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
+/** What a 1D motion result's continuation is (ui-design.md §6.20). */
+export const CONTINUATION_WORDS='延拓，由模拟历史预测，不是逐步模拟';
+/** The continuation's part of a time chart, from plot x `from` (the last simulated time, written
+ * `since`) to `to`: a light translucent band behind the curves (the grid shows through), its edge
+ * dashed, labelled 延拓 (inside it when it has room, else before its edge), its tooltip what it is. */
+export function continuationBand(from:number,to:number,top:number,bottom:number,since:string):string{
+  const room=to-from>=32,x=from.toFixed(4);
+  return `<g class="continuation"><rect class="continuation-band" x="${x}" y="${top}" width="${Math.max(0,to-from).toFixed(4)}" height="${bottom-top}" fill="#5d87b0" fill-opacity="0.09"><title>${esc(`t > ${since}：${CONTINUATION_WORDS}`)}</title></rect>`+
+    `<line x1="${x}" y1="${top}" x2="${x}" y2="${bottom}" stroke="#8aa4bd" stroke-width="1" stroke-dasharray="3 3"/>`+
+    `<text x="${(room?from+5:from-5).toFixed(4)}" y="${top+13}" font-size="11" fill="#5d7891"${room?'':' text-anchor="end"'}>延拓</text></g>`;
+}
 const clamp=(n:number,a:number,b:number)=>Math.min(b,Math.max(a,n));
 const SVG='http://www.w3.org/2000/svg';
 function stateIndex(id:string):number {
@@ -80,6 +93,8 @@ export function populationChart(result:PopulationPlot,monitoredIds:string[],labe
   // neighbours), and their curve segments dashed and faded.
   const errors=sampleErrors(result),runs=errors?outsideRuns(errors):[],n=result.timesUs.length;
   const outside=(i:number)=>!!errors&&errors[i]!>POPULATION_TOLERANCE;
+  // A 1D motion result's continuation: the samples after the last simulated time, on their band.
+  const from=options.continuedFromUs;if(from!==undefined)svg+=continuationBand(x(from),right,top,bottom,`${digits(from*g.unit.factor)} ${g.unit.name}`);
   for(const [a,b] of runs){
     const from=a>0?(x(result.timesUs[a-1]!)+x(result.timesUs[a]!))/2:x(result.timesUs[a]!),to=b<n-1?(x(result.timesUs[b]!)+x(result.timesUs[b+1]!))/2:x(result.timesUs[b]!);
     const worst=Math.max(...errors!.slice(a,b+1));
@@ -115,7 +130,8 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     const meanOf=(id:string)=>{if(id!=='__excited__')return mean?.populations?.[id]??NaN;const excited=Object.entries(mean?.populations??{}).filter(([state])=>/^(D1|D2)-/.test(state));return excited.length?excited.reduce((sum,[,p])=>sum+p,0):NaN;};
     // A name too long for a narrow readout wraps after a " · ", never before one, and is never cut.
     const row=(id:string,name:string,p:number,color:string)=>`<div class="readout-row${mean?'':' two'}" data-population-readout="${esc(id)}"><span class="readout-name" style="color:${color}">${esc(`${name}${id===options.initialId?' · 初态':''}`).replaceAll(' · ',' · ')}</span><span>${esc(populationValue(p))}</span>${mean?`<span class="readout-mean">${esc(populationValue(meanOf(id)))}</span>`:''}</div>`;
-    tooltip.innerHTML=`<div class="readout-time">t = ${digits(t*g.unit.factor)} ${g.unit.name}${accuracy}</div>${head}${ids.map(id=>row(id,labels[id]??id,result.populations[id]![index]!,populationColor(id))).join('')}${options.showTotalExcited===false?'':row('__excited__','激发态合计',result.totalExcited[index]!,'#808080')}${mean?`<p class="note wrap">${esc(meanLabel)} 一列是时刻 T 的相位平均布居（只平均掉拍频与光频微运动），不是瞬时布居。</p>`:''}${meanOutside}`;
+    const continuation=options.continuedFromUs!==undefined&&t>options.continuedFromUs?` · <span class="readout-continued" title="${esc(CONTINUATION_WORDS)}">延拓</span>`:'';
+    tooltip.innerHTML=`<div class="readout-time">t = ${digits(t*g.unit.factor)} ${g.unit.name}${continuation}${accuracy}</div>${head}${ids.map(id=>row(id,labels[id]??id,result.populations[id]![index]!,populationColor(id))).join('')}${options.showTotalExcited===false?'':row('__excited__','激发态合计',result.totalExcited[index]!,'#808080')}${mean?`<p class="note wrap">${esc(meanLabel)} 一列是时刻 T 的相位平均布居（只平均掉拍频与光频微运动），不是瞬时布居。</p>`:''}${meanOutside}`;
     tooltip.hidden=false;tooltip.dataset.sampleIndex=String(index);tooltip.style.maxHeight=`${Math.max(100,host.clientHeight-35)}px`;
     // Beside the cursor, on its wider side, never over it: in a narrow chart the readout wraps
     // to that side's width, so the pointer stays on the plot and keeps moving the cursor.

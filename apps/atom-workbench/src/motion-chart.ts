@@ -7,6 +7,7 @@ import type {Distributions,MotionResult} from './solver-types.js';
 import {RB87} from './physics.js';
 import {timeDisplayUnit} from './duration.js';
 import {formatNumber} from './format.js';
+import {CONTINUATION_WORDS,continuationBand} from './population-chart.js';
 
 /** k_B (J/K), exact in the SI. */
 const BOLTZMANN=1.380649e-23;
@@ -77,10 +78,11 @@ const text=(x:number,y:number,label:string,attrs='')=>`<text x="${x}" y="${y}" f
 const polyline=(xs:readonly number[],ys:readonly number[],ink:string,attrs='')=>`<polyline points="${xs.map((x,i)=>`${x.toFixed(4)},${ys[i]!.toFixed(4)}`).join(' ')}" fill="none" stroke="${ink}" stroke-width="2" ${attrs}/>`;
 const svg=(cls:string,label:string,body:string)=>`<svg class="chart-svg ${cls}" viewBox="0 0 800 355" xmlns="${SVG}" role="img" tabindex="0" aria-label="${esc(label)}" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" style="fill:#323130;outline:none">${body}</svg>`;
 
-/** The two series on the result's samples, one per panel. */
-export function seriesChart(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit):string{
+/** The two series on the result's samples, one per panel; the continuation's samples, after the
+ * last simulated time `continuedFromUs`, on their band across both. */
+export function seriesChart(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit,continuedFromUs?:number):string{
   const g=seriesLayout(timesUs,series,timeUnit),xs=timesUs.map(g.x);
-  let body='';
+  let body=continuedFromUs===undefined?'':continuationBand(g.x(continuedFromUs),RIGHT,g.panels[0].top,g.panels[1].bottom,`${digits(continuedFromUs*g.unit.factor)} ${g.unit.name}`);
   for(const p of g.panels)for(const v of p.ticks){const y=p.y(v/p.series.unit.factor);body+=line(LEFT,y,RIGHT,y,`stroke="${GRID}"`)+text(LEFT-12,y+4,digits(v),'text-anchor="end"');}
   for(let i=0;i<=4;i++){const t=timesUs[0]!+(timesUs.at(-1)!-timesUs[0]!)*i/4;body+=text(g.x(t),g.panels[1].bottom+24,digits(t*g.unit.factor),'text-anchor="middle"');}
   body+=text(LEFT,19,g.panels[0].series.title)+text(LEFT,g.panels[1].top-8,g.panels[1].series.title)+text(RIGHT,g.panels[1].bottom+47,`t / ${g.unit.name}`,'text-anchor="end"');
@@ -146,15 +148,15 @@ function bindCursor(host:HTMLElement,svg:SVGSVGElement,count:number,at:(i:number
 }
 const mark=(name:string,attrs:Record<string,string>)=>{const node=document.createElementNS(SVG,name);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,value);return node;};
 
-/** The time cursor of a series chart: both series at the sample. */
-export function bindSeries(host:HTMLElement,timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit):()=>void{
+/** The time cursor of a series chart: both series at the sample, a continuation's marked. */
+export function bindSeries(host:HTMLElement,timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit,continuedFromUs?:number):()=>void{
   const svg=host.querySelector<SVGSVGElement>('svg.motion-series-svg');if(!svg)return ()=>{};
   const g=seriesLayout(timesUs,series,timeUnit),card=readoutCard(host,`所选时刻的${series.map(s=>s.name).join('与')}`);
   const unbind=bindCursor(host,svg,timesUs.length,i=>g.x(timesUs[i]!),(i,cursor)=>{
-    const xx=g.x(timesUs[i]!);
+    const xx=g.x(timesUs[i]!),continued=continuedFromUs!==undefined&&timesUs[i]!>continuedFromUs;
     cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:String(g.panels[0].top),y2:String(g.panels[1].bottom),stroke:'#a19f9d','stroke-width':'1'}),
       ...g.panels.map((p,k)=>mark('circle',{cx:String(xx),cy:String(p.y(p.series.values[i]!)),r:'3',fill:MOTION_INKS[k],stroke:'white','stroke-width':'1.5'})));
-    card.innerHTML=`<div class="readout-time">t = ${esc(digits(timesUs[i]!*g.unit.factor))} ${esc(g.unit.name)}</div>`+g.panels.map((p,k)=>
+    card.innerHTML=`<div class="readout-time">t = ${esc(digits(timesUs[i]!*g.unit.factor))} ${esc(g.unit.name)}${continued?` · <span class="readout-continued" title="${esc(CONTINUATION_WORDS)}">延拓</span>`:''}</div>`+g.panels.map((p,k)=>
       `<div class="readout-row two"><span class="readout-name" style="color:${MOTION_INKS[k]}">${esc(p.series.name)}</span><span>${esc(formatNumber(p.series.values[i]!*p.series.unit.factor,{digits:4}))}${p.series.unit.name?` ${esc(p.series.unit.name)}`:''}</span></div>`).join('');
     placeCard(host,svg,card,xx);
   },()=>{card.hidden=true;});

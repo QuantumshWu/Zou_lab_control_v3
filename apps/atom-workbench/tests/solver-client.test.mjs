@@ -38,6 +38,27 @@ test('a checkpoint arrives before the final result and stays available when evol
  stream.send({type:'error',status:422,data:{error:'unstable evolution',code:'numerical-failure'}});stream.close();await rejected;
  assert.equal(progress[0].mean.converged,true);assert.equal(mock.calls.length,1);
 });
+test('a full request streams its trajectory before its mean: a checkpoint without the mean is read, the final one never',async t=>{
+ const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-before-mean'});t.after(()=>client.dispose());
+ const scene=scenario(),pending=client.solve(scene,scene.dynamics,{onProgress:value=>progress.push(value)});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]),request=mock.calls[0].body.request;
+ const early=checkpoint(scene,request,[0,.02,.009]);delete early.meanHorizons;stream.send({type:'checkpoint',data:early});
+ const later=checkpoint(scene,request,[0,.007,.001]);later.diagnostics.estimatedRemainingMs=1200;stream.send({type:'checkpoint',data:later});
+ const final=checkpoint(scene,request,[0,.002,.001]);delete final.progress;stream.send({type:'result',data:final});stream.close();
+ const result=await pending;
+ assert.deepEqual(progress.map(p=>p.mean.status),['not-requested','time-average'],'the mean once it has come');
+ assert.deepEqual(progress.map(p=>p.metrics.estimatedRemainingMs),[undefined,1200]);assert.equal(result.mean.converged,true);
+ // Strict elsewhere: a final full result without its mean, a trajectory alone's checkpoint with one, a mean request's without one.
+ for(const [label,options,data] of [
+   ['a final result without its mean',{},request=>{const d=checkpoint(scene,request,[0,.002,.001]);delete d.progress;delete d.meanHorizons;return [{type:'result',data:d}];}],
+   ['a trajectory alone with a mean',{includeMean:false},request=>[{type:'checkpoint',data:checkpoint(scene,request,[0,.002,.001])}]],
+   ['a mean request without its mean',{meanOnly:true},request=>{const d={...meanFixture(scene,request),progress:true};delete d.meanHorizons;return [{type:'checkpoint',data:d}];}],
+ ]){
+   const mock=transport(),client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-mean-contract'});
+   const pending=client.solve(scene,scene.dynamics,{...options,onProgress:()=>{}});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]);
+   for(const event of data(mock.calls[0].body.request))stream.send(event);stream.close();
+   await assert.rejects(pending,/长期布居与本次请求不符/,label);client.dispose();
+ }
+});
 test('two checkpoints, then the final result: each delivered in turn, the final one without a progress flag',async t=>{
  const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-success'});t.after(()=>client.dispose());
  const scene=scenario(),pending=client.solve(scene,scene.dynamics,{onProgress:value=>progress.push(value)});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]),request=mock.calls[0].body.request;

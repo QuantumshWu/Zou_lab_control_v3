@@ -38,7 +38,7 @@
 //!    returns its best checkpoint (`Answer`): converged, or partial with the
 //!    reason and every sample's own estimate. Every checkpoint is reported
 //!    to the observer as it is made, with the run's remaining wall time
-//!    estimated from its own history (`remaining_ms`).
+//!    estimated from the run itself (`Progress`).
 use super::*;
 use super::accuracy::{self,A_PRIORI_SHARE,POPULATION_TOLERANCE};
 use super::charge_set::{self,ExplicitSet,LatticeSets};
@@ -122,8 +122,7 @@ pub struct Checkpoint{
     pub inner:InnerWork,pub timing:Timing,
     pub milliseconds:f64,
     /// The estimated wall time from this checkpoint to the run's end (ms;
-    /// `remaining_ms`): zero when the run stops here, none while its history
-    /// supports no estimate.
+    /// `Progress::remaining_ms`): zero when the run stops here.
     pub remaining_ms:Option<f64>,
 }
 
@@ -189,30 +188,50 @@ pub struct Solution{
 #[derive(Clone,Copy,Debug)]
 pub struct Pace{pub ms:f64,pub solves:usize,pub largest:f64}
 
-/// The wall time (ms) from the latest checkpoint of a run's `history` to the
-/// run's end, from that history alone: zero when the run stops there
-/// (`stops`); none before its third checkpoint (the first checkpoint's
-/// estimate is no measurement and one change gives no rate). The
-/// checkpoints left bring the largest estimate from its value to the
-/// tolerance at the run's mean rate since its first measured estimate (the
-/// geometric mean of its decrease per checkpoint), CHECKPOINT solves each,
-/// within the solves the budget leaves; every one of those when the
-/// estimate has not decreased since. A solve takes the run's mean time per
-/// solve since its first checkpoint (its checkpoints' work included). An
-/// estimate, not a bound: a run whose decrease slows near the tolerance
-/// takes longer, one stopped otherwise (its space no longer growing, its
-/// basis memory spent) ends sooner. Measured on trajectories of 4 to 9
-/// checkpoints (1 to 14 s): predicted / actual 0.2 to 1.9, median 0.74; the
-/// mean rate is stable where the latest one is not (a plateau, one step of
-/// ratio 1, asked for the whole budget: six times what was left).
-pub fn remaining_ms(history:&[Pace],stops:bool)->Option<f64>{
-    if stops{return Some(0.);}
-    let[first,measured,..,last]=history else{return None};
-    let left=MAXIMUM_SOLVES.saturating_sub(last.solves)as f64;
-    let rate=(last.largest/measured.largest).powf(1./(history.len()-2)as f64);
-    let solves=if rate<1.{(CHECKPOINT as f64*((POPULATION_TOLERANCE/last.largest).ln()/rate.ln()).ceil().max(0.)).min(left)}else{left};
-    let pace=(last.ms-first.ms)/(last.solves-first.solves)as f64;
-    (pace.is_finite()&&pace>=0.).then(||solves*pace)
+/// What a run's remaining time is read from: the run's wall time when its
+/// solves began (ms), the poles of its ladder's cycle and every checkpoint
+/// so far.
+#[derive(Clone,Debug,Default)]
+pub struct Progress{pub solving_ms:f64,pub cycle:usize,pub history:Vec<Pace>}
+impl Progress{
+    /// The wall time (ms) from the latest checkpoint to the run's end, from
+    /// the run itself: zero when the run stops there (`stops`), else the
+    /// solves left at the run's mean time per solve since its solves began
+    /// (its checkpoints' work included). The solves left, within those the
+    /// budget leaves:
+    /// - from its third checkpoint (two measured estimates), the checkpoints,
+    ///   CHECKPOINT solves each, that bring the largest estimate from its
+    ///   value to the tolerance at the run's mean rate since its first
+    ///   measured estimate (the geometric mean of its decrease per
+    ///   checkpoint); every solve the budget leaves when it has not decreased
+    ///   since;
+    /// - before (the first checkpoint's estimate is no measurement and one
+    ///   change gives no rate), those to the checkpoint that completes the
+    ///   ladder's first pass, the steady column and every pole once (the
+    ///   first space that holds every time scale the outputs need), and at
+    ///   least the next checkpoint's.
+    ///
+    /// An estimate, not a bound: a run whose decrease slows near the
+    /// tolerance takes longer, one accepted within its first pass or stopped
+    /// otherwise (its space no longer growing, its basis memory spent) ends
+    /// sooner. Measured on trajectories of 4 to 9 checkpoints (1 to 14 s):
+    /// predicted / actual 0.2 to 1.9, median 0.74 from the third checkpoint,
+    /// 0.7 to 2.5 before it (sub-second runs up to 3.6); the mean rate is
+    /// stable where the latest one is not (a plateau, one step of ratio 1,
+    /// asked for the whole budget: six times what was left).
+    pub fn remaining_ms(&self,stops:bool)->Option<f64>{
+        if stops{return Some(0.);}
+        let last=self.history.last()?;let left=MAXIMUM_SOLVES.saturating_sub(last.solves)as f64;
+        let solves=match self.history.as_slice(){
+            [_,measured,..,_]=>{
+                let rate=(last.largest/measured.largest).powf(1./(self.history.len()-2)as f64);
+                if rate<1.{CHECKPOINT as f64*((POPULATION_TOLERANCE/last.largest).ln()/rate.ln()).ceil().max(0.)}else{left}
+            }
+            _=>(1+CHECKPOINT*self.cycle.div_ceil(CHECKPOINT)).saturating_sub(last.solves).max(CHECKPOINT)as f64,
+        }.min(left);
+        let pace=(last.ms-self.solving_ms)/last.solves as f64;
+        (pace.is_finite()&&pace>=0.).then(||solves*pace)
+    }
 }
 
 /// Euclidean projection of real values onto the probability simplex.
@@ -316,6 +335,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     timing.setup_ms=clock.elapsed().as_secs_f64()*1e3;
     // Below this rate a mode is conserved over the run.
     let kernel=share/longest;
+    let solving_ms=started.elapsed().as_secs_f64()*1e3;
     space.solve(&mut lattice,Pole::Zero,kernel)?;
     // The ladder: from the fastest scale the outputs need down to 1 / T. That
     // is RESOLUTION / t1 at the earliest output time t1 (the grid's step, or
@@ -338,7 +358,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     // 4. Checkpoints.
     let mut galerkin=Galerkin::new(&lattice)?;
     let vectors=Vectors::new(lattice.operator())?;
-    let mut checkpoints:Vec<Checkpoint>=Vec::new();let mut history:Vec<Pace>=Vec::new();
+    let mut checkpoints:Vec<Checkpoint>=Vec::new();let mut progress=Progress{solving_ms,cycle:cycle.len(),history:Vec::new()};
     // The previous checkpoint's outputs and basis size; the next pole of the
     // cycle.
     let mut previous:Option<(Vec<Vec<f64>>,Vec<Vec<f64>>,usize)>=None;
@@ -376,11 +396,11 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         let why=if answer.accepted{None}else if !grew{Some(format!("the space stopped growing after {} solves",space.solves()))}
             else if space.full(){Some(format!("the basis memory was spent after {} solves",space.solves()))}
             else if space.solves()>=MAXIMUM_SOLVES{Some(format!("the solve budget ({MAXIMUM_SOLVES}) was spent"))}else{None};
-        history.push(Pace{ms:started.elapsed().as_secs_f64()*1e3,solves:space.solves(),largest});
+        progress.history.push(Pace{ms:started.elapsed().as_secs_f64()*1e3,solves:space.solves(),largest});
         timing.projection_ms=galerkin.milliseconds;
         let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),estimate,largest,accepted:answer.accepted,growing:model.growing,slowest:slow,
             trajectory:trajectory.clone(),horizons:horizons.clone(),inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3,
-            remaining_ms:remaining_ms(&history,answer.accepted||why.is_some())};
+            remaining_ms:progress.remaining_ms(answer.accepted||why.is_some())};
         if let Some(o)=observer.as_mut(){o(&point,&answer);}
         checkpoints.push(point);
         // The best checkpoint with an estimate: one within the tolerance over
@@ -430,10 +450,10 @@ mod tests{
         let mut seen=Vec::new();let mut observe=|c:&Checkpoint,_:&Answer|{seen.push(c.remaining_ms);};
         let s=solve(&p,&initial,&Request{times:&times,horizons:&horizons,groups:&groups,explicit:&std::sync::OnceLock::new(),runs:1},Some(&mut observe)).unwrap();
         assert!(s.converged&&s.reason.is_none()&&seen.len()==s.checkpoints.len(),"{:?}",s.reason);
-        // Every checkpoint carries the run's remaining time: none on the first
-        // two, an estimate on the later ones, zero on the accepted last one.
+        // Every checkpoint carries the run's remaining time, zero on the
+        // accepted last one.
         let(last,before)=seen.split_last().unwrap();
-        assert!(*last==Some(0.)&&before.iter().enumerate().all(|(i,r)|(i<2)==r.is_none()),"{seen:?}");
+        assert!(*last==Some(0.)&&before.iter().all(|r|r.is_some_and(|ms|ms.is_finite()&&ms>=0.)),"{seen:?}");
         let a=&s.answer;
         let op=LatticeOperator::new(&p,RunFold::whole(&p.fold),&a.modes).unwrap();let dense=op.dense();let size=op.dimension();
         let rate=|x:&[C]|->Vec<C>{(0..size).map(|r|{let mut v=ZERO;for c in 0..size{mul_add(&mut v,dense[r*size+c],x[c]);}v}).collect()};
@@ -464,33 +484,44 @@ mod tests{
         // Projected rows: probabilities, the first one rho0's.
         assert!(a.trajectory.iter().all(|r|r.iter().all(|&v|v>=0.)&&(r.iter().sum::<f64>()-1.).abs()<1e-12)&&a.trajectory[0][0]==1.);
     }
-    /// The remaining time from a run's own history: none before two measured
-    /// estimates, zero where the run stops, else the checkpoints its mean rate
-    /// since the first measured estimate needs to reach the tolerance (not its
-    /// latest rate), at its mean time per solve, within the solve budget.
+    /// The remaining time from the run itself: zero where it stops; before two
+    /// measured estimates the solves to the checkpoint that completes the
+    /// ladder's first pass (at least the next checkpoint's), after them the
+    /// checkpoints its mean rate since the first measured estimate needs to
+    /// reach the tolerance (not its latest rate); at its mean time per solve,
+    /// within the solve budget.
     #[test]
-    fn the_remaining_time_follows_the_runs_own_history(){
-        // Checkpoints every CHECKPOINT solves after the first, 100 ms a solve.
-        let run=|largest:&[f64]|->Vec<Pace>{largest.iter().enumerate().map(|(k,&largest)|{let solves=if k==0{1}else{1+CHECKPOINT*k};
-            Pace{ms:1000.+100.*(solves-1)as f64,solves,largest}}).collect()};
+    fn the_remaining_time_follows_the_run_itself(){
+        // Solves from 900 ms, 100 ms each; checkpoints every CHECKPOINT solves
+        // after the first; a ladder of `cycle` poles.
+        let run=|cycle:usize,largest:&[f64]|Progress{solving_ms:900.,cycle,history:largest.iter().enumerate().map(|(k,&largest)|{
+            let solves=1+CHECKPOINT*k;Pace{ms:900.+100.*solves as f64,solves,largest}}).collect()};
         let close=|a:Option<f64>,b:f64|a.is_some_and(|a|(a-b).abs()<=1e-9*b.max(1.));
-        assert_eq!(remaining_ms(&run(&[1.]),false),None);
-        assert_eq!(remaining_ms(&run(&[1.,0.5]),false),None,"one change gives no rate");
-        assert_eq!(remaining_ms(&run(&[1.,0.5]),true),Some(0.),"a run that stops here has nothing left");
-        // 0.5 -> 0.1: a fifth a checkpoint; 0.1 -> 0.01 takes two more, 800 ms.
-        assert!(close(remaining_ms(&run(&[1.,0.5,0.1]),false),800.));
+        assert_eq!(Progress::default().remaining_ms(false),None,"no checkpoint yet");
+        assert_eq!(run(13,&[1.,0.5]).remaining_ms(true),Some(0.),"a run that stops here has nothing left");
+        // Before a rate: a ladder of 13 poles is through its first pass at the
+        // checkpoint of 17 solves; 5 poles at 9 solves; 3 at 5, so at the
+        // second checkpoint the next one is all there is to expect.
+        assert!(close(run(13,&[1.]).remaining_ms(false),1600.));
+        assert!(close(run(13,&[1.,0.5]).remaining_ms(false),1200.));
+        assert!(close(run(5,&[1.]).remaining_ms(false),800.));
+        assert!(close(run(5,&[1.,0.5]).remaining_ms(false),400.));
+        assert!(close(run(3,&[1.,0.5]).remaining_ms(false),400.));
+        // 0.5 -> 0.1: a fifth a checkpoint; 0.1 -> 0.01 takes two more, 800 ms
+        // (whatever the ladder).
+        assert!(close(run(13,&[1.,0.5,0.1]).remaining_ms(false),800.));
         // 0.5 -> 0.05 -> 0.04: the mean rate (0.04 / 0.5)^(1/2) takes two
         // more checkpoints to 0.01, where the latest rate (0.8) would take seven.
-        assert!(close(remaining_ms(&run(&[1.,0.5,0.05,0.04]),false),800.));
+        assert!(close(run(13,&[1.,0.5,0.05,0.04]).remaining_ms(false),800.));
         // No decrease since the first measured estimate: the run may take the
         // whole budget, the 39 solves left after 9.
-        assert!(close(remaining_ms(&run(&[1.,0.3,0.3]),false),3900.));
+        assert!(close(run(13,&[1.,0.3,0.3]).remaining_ms(false),3900.));
         // Within the budget: after 45 solves 3 are left, however slow the rate.
-        let late=run(&[1.,0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5,0.45,0.4]);assert_eq!(late.last().unwrap().solves,45);
-        assert!(close(remaining_ms(&late,false),300.));
+        let late=run(13,&[1.,0.9,0.85,0.8,0.75,0.7,0.65,0.6,0.55,0.5,0.45,0.4]);assert_eq!(late.history.last().unwrap().solves,45);
+        assert!(close(late.remaining_ms(false),300.));
         // The pace is the run's own: twice as slow, twice as long.
-        let slow:Vec<Pace>=run(&[1.,0.5,0.1]).into_iter().map(|p|Pace{ms:2.*p.ms,..p}).collect();
-        assert!(close(remaining_ms(&slow,false),1600.));
+        let mut slow=run(13,&[1.,0.5,0.1]);slow.solving_ms*=2.;for p in &mut slow.history{p.ms*=2.;}
+        assert!(close(slow.remaining_ms(false),1600.));
     }
     #[test]
     fn a_strong_far_drive_stays_explicit_with_its_micromotion(){

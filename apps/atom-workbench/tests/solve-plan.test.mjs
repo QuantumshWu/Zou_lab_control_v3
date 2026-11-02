@@ -45,6 +45,7 @@ test('a result\'s means become one record per T; 停止 keeps a checkpoint\'s wh
   assert.deepEqual(keptCheckpoint(result,'full',()=>false),{trajectory:true,horizons:[1e5,1e6]});
   assert.deepEqual(keptCheckpoint(result,'full',T=>T===1e6),{trajectory:true,horizons:[1e5]},'a final mean already here stays');
   assert.deepEqual(keptCheckpoint(result,'trajectory',()=>false),{trajectory:true,horizons:[]});
+  assert.deepEqual(keptCheckpoint({...result,horizonMeans:undefined},'full',()=>false),{trajectory:true,horizons:[]},'a full request stopped before its mean\'s first checkpoint');
   assert.deepEqual(keptCheckpoint({timesUs:[0],mean:meanAt(1e6,.001),horizonMeans:result.horizonMeans},'mean',()=>false),{trajectory:false,horizons:[1e5,1e6]},'a mean run\'s checkpoint is never a trajectory');
 });
 
