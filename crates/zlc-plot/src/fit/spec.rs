@@ -785,7 +785,7 @@ fn build_builtins() -> Vec<Arc<FitModelSpec>> {
                 parameter("decay_time", Axis0, Positive, r"$\tau$", false),
                 parameter("phase", Radian, PhaseRadians, r"$\phi$", false),
             ],
-            "decay_time",
+            "baseband_frequency",
             Evaluator::Builtin(Kernel::Damped),
             series.clone(),
             Some(r"$f(t)=A\sin(2\pi f (t-t_0)+\phi)e^{-(t-t_0)/\tau}+B$"),
