@@ -87,7 +87,7 @@ fn runtime_source(dataset: &ReadDataset) -> Source {
     let generation = runtime.begin("figure", vec![Declaration { signal: "data".into(), schema: dataset.snapshot.schema().clone(), storage }],
         serde_json::json!({})).unwrap();
     let input = match dataset.source() {
-        Planes::Dense(block) => Input::Event { signal: "data".into(), ordinal: 1, data: block, origin: None },
+        Planes::Dense(block) => Input::Event { signal: "data".into(), ordinal: 1, data: block, origin: None, shot_time: None },
         Planes::Placed { .. } => Input::Dataset { signal: "data".into(), ordinal: Some(1), snapshot: dataset.snapshot.clone() },
     };
     runtime.commit(&generation, &Bundle { inputs: vec![input], metadata: serde_json::json!({}), parents: vec![] }).unwrap();

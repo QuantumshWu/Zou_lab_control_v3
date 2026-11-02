@@ -284,11 +284,11 @@ fn runtime_reads_agree_with_fresh_conversion() {
         ordinal += if shot % 17 == 5 { 3 } else { 1 };
         let values: Vec<u16> = (0..2).map(|_| (next() % 97) as u16).collect();
         let mut inputs = vec![Input::Event { signal: "shots".into(), ordinal,
-            data: DataBlock::new(shots.clone(), OwnedBuffer::from_vec(values).into(), Validity::Uniform(true), None).unwrap(), origin: None }];
+            data: DataBlock::new(shots.clone(), OwnedBuffer::from_vec(values).into(), Validity::Uniform(true), None).unwrap(), origin: None, shot_time: None }];
         if shot < 30 {
             let values: Vec<f64> = (0..2).map(|_| (next() % 1000) as f64 / 7.0).collect();
             inputs.push(Input::Event { signal: "run".into(), ordinal: shot as u64,
-                data: DataBlock::new(row.clone(), OwnedBuffer::from_vec(values).into(), Validity::Uniform(true), None).unwrap(), origin: Some([shot, 0]) });
+                data: DataBlock::new(row.clone(), OwnedBuffer::from_vec(values).into(), Validity::Uniform(true), None).unwrap(), origin: Some([shot, 0]), shot_time: None });
         }
         runtime.commit(&generation, &Bundle { inputs, metadata: json!({}), parents: vec![] }).unwrap();
         let reads = runtime.read_views(&[(generation.clone(), Arc::from("shots"), Some(width)), (generation.clone(), Arc::from("run"), None)]);
@@ -307,6 +307,65 @@ fn runtime_reads_agree_with_fresh_conversion() {
         }
     }
     eprintln!("runtime reads: {checked} carried projections agree with fresh conversions");
+}
+
+/// A source that stamps its shots (v2's waveform measurement) rolls along
+/// either coordinate of its record axis: the source index (shots from latest)
+/// or the shot time in seconds. Skipped ordinals are holes on both, and the
+/// carried rows agree with a fresh conversion bit for bit on both.
+#[test]
+fn stamped_window_rolls_along_shot_time_or_source_index() {
+    use std::sync::Arc;
+    use serde_json::json;
+    use zlc_core::dataset::{DataBlock, Validity};
+    use zlc_core::runtime::{Bundle, Declaration, Input, Runtime, Storage};
+    use zlc_core::schema::{Axis, Coordinates, DatasetSchema, Domain, DomainRole, ValidityContract, ValueSchema};
+    use zlc_core::{DType, OwnedBuffer};
+    use zlc_plot::projection::output::Payload;
+
+    let axis = |id: &str, role: &str, len: usize| Axis::new(id.into(), id.into(), role.into(), Coordinates::Index { origin: 0, len }, None, None, None, None).unwrap();
+    let one = |id: &str, role: &str| Domain::dense(vec![1], vec![axis(id, role, 1)]).unwrap();
+    let shots = DatasetSchema::new(one("repeat", "repeat"), one("frame", "readout-event"), one("zlc_data.scalar", "scalar"),
+        ValueSchema::new(DType::F64, Some("V".into()), None, ValidityContract::Value).unwrap()).unwrap();
+    let runtime = Runtime::new();
+    let generation = runtime.begin("imu", vec![Declaration { signal: "field".into(), schema: shots.clone(), storage: Storage::Latest }], json!({})).unwrap();
+    let width = 20;
+    let _lease = runtime.retain_history(&generation, "field", width).unwrap();
+    let plan = |x: serde_json::Value| -> ProjectionPlan { serde_json::from_value(json!({"spec": {"kind": "rolling", "x": x, "group": null, "reduction": "mean"},
+        "display": {"window": width, "uncertainty": true, "trailing": 1}})).unwrap() };
+    let mut owners: Vec<Projection> = (0..2).map(|_| Projection::new()).collect();
+    let mut ordinal = 0u64;
+    for shot in 0..60u64 {
+        ordinal += if shot % 9 == 4 { 2 } else { 1 };
+        let time = 0.0025 * ordinal as f64;
+        runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "field".into(), ordinal,
+            data: DataBlock::new(shots.clone(), OwnedBuffer::from_vec(vec![(shot % 7) as f64]).into(), Validity::Uniform(true), None).unwrap(),
+            origin: None, shot_time: Some(time) }], metadata: json!({}), parents: vec![] }).unwrap();
+        let read = runtime.read_views(&[(generation.clone(), Arc::from("field"), Some(width))]).pop().unwrap().unwrap();
+        let point = read.schema().domain(DomainRole::Point);
+        let index = point.axes().iter().find(|axis| axis.role() == "primary-index").unwrap();
+        let stamp = point.axes().iter().find(|axis| axis.role() == "shot-time").unwrap();
+        let along = [json!({"domain": "point", "axis_id": index.id()}), json!({"domain": "point", "axis_id": stamp.id()})];
+        for (x, live) in along.iter().zip(owners.iter_mut()) {
+            let plan = plan(x.clone());
+            let carried = live.project_read(&read, &plan).unwrap();
+            let fresh = Projection::new().project(&Source::from_read(&read).unwrap(), &plan).unwrap();
+            let (mut a, mut b) = (GoldenArrays::default(), GoldenArrays::default());
+            assert_eq!(carried.payload.golden(&mut a), fresh.payload.golden(&mut b), "shot {shot}: {x}");
+            assert!(a.0.iter().zip(&b.0).all(|(x, y)| x.bytes() == y.bytes()));
+            let Payload::Curve(curve) = &carried.payload else { panic!("a rolling plot draws a curve") };
+            let series = &curve.series[0];
+            let latest = series.x.canonical.to_f64().last().copied().unwrap();
+            if x == &along[1] {
+                assert_eq!(series.x.canonical_unit, zlc_core::units::resolve_unit("s", None).unwrap(), "time is in seconds");
+                assert_eq!(series.x.label, "shot time");
+                assert_eq!(latest, time);
+            } else {
+                assert_eq!(series.x.label, "Shots from latest");
+                assert_eq!(latest, 0.0);
+            }
+        }
+    }
 }
 
 /// A finite run drawn as it grows: each revision reduces only the shots it
@@ -358,7 +417,7 @@ fn growing_run_reduces_only_the_shots_it_brought() {
         let validity = if index % 7 == 3 { Validity::Mask(OwnedBuffer::from_vec((0..shot.component_mask_len()).map(|k| k != 1).collect())) }
                        else { Validity::Uniform(true) };
         let data = DataBlock::new(shot.clone(), OwnedBuffer::from_vec(values).into(), validity, None).unwrap();
-        runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "frames".into(), ordinal: index as u64, data, origin: Some([index, 0]) }],
+        runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "frames".into(), ordinal: index as u64, data, origin: Some([index, 0]), shot_time: None }],
             metadata: json!({}), parents: vec![] }).unwrap();
         let read = runtime.read_views(&[(generation.clone(), Arc::from("frames"), None)]).pop().unwrap().unwrap();
         let source = Source::from_read(&read).unwrap();
@@ -451,7 +510,7 @@ fn growing_run_histograms_count_only_the_shots_they_brought() {
             if dtype == DType::U16 { OwnedBuffer::from_vec(integers.clone()).into() } else { OwnedBuffer::from_vec(floats.clone()).into() } };
         let blocks: Vec<(AnyBuffer, Validity, DType)> = shots.iter().zip(&signals).map(|(shot, (_, dtype))| (block(shot, *dtype), validity(&shot.2), *dtype)).collect();
         let inputs = signals.iter().zip(blocks).map(|((name, _), (values, validity, dtype))| Input::Event { signal: (*name).into(), ordinal: index as u64,
-            data: DataBlock::new(schema(1, dtype), values, validity, None).unwrap(), origin: Some([index, 0]) }).collect();
+            data: DataBlock::new(schema(1, dtype), values, validity, None).unwrap(), origin: Some([index, 0]), shot_time: None }).collect();
         runtime.commit(&generation, &Bundle { inputs, metadata: json!({}), parents: vec![] }).unwrap();
         for (((name, dtype), owners), history) in signals.iter().zip(owners.iter_mut()).zip(&merged) {
             let read = runtime.read_views(&[(generation.clone(), Arc::from(*name), None)]).pop().unwrap().unwrap();

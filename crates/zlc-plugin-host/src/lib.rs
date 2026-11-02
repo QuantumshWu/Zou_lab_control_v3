@@ -1310,8 +1310,13 @@ impl Inner {
                     Value::Null => None,
                     value => Some(serde_json::from_value::<[usize; 2]>(value.clone()).map_err(|error| invalid(format!("{name} origin: {error}")))?),
                 };
+                // The protocol stamps a shot by output name in the bundle's metadata.
+                let shot_time = match &params["metadata"]["shot_time_seconds"][name] {
+                    Value::Null => None,
+                    value => Some(value.as_f64().ok_or_else(|| invalid(format!("{name}: a shot time is a number of seconds")))?),
+                };
                 names.insert(output.signal.clone(), name.to_owned());
-                inputs.push(Input::Event { signal: output.signal.clone(), ordinal, data, origin });
+                inputs.push(Input::Event { signal: output.signal.clone(), ordinal, data, origin, shot_time });
             }
             (generation, inputs, parents)
         };

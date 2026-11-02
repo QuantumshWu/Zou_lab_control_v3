@@ -36,7 +36,7 @@ fn begin(runtime: &Runtime, schema: Arc<DatasetSchema>) -> Generation {
 /// Commit one frame as the camera's latest event and read it back.
 fn publish(runtime: &Runtime, generation: &Generation, shape: [usize; 2], values: AnyBuffer) -> Read {
     let data = DataBlock::new(camera_schema(shape, values.dtype()), values, Validity::Uniform(true), None).unwrap();
-    runtime.commit(generation, &Bundle { inputs: vec![Input::Event { signal: "frames".into(), ordinal: 0, data, origin: None }],
+    runtime.commit(generation, &Bundle { inputs: vec![Input::Event { signal: "frames".into(), ordinal: 0, data, origin: None, shot_time: None }],
         metadata: json!({}), parents: vec![] }).unwrap();
     runtime.read_coherent_views(&[(generation.clone(), Arc::from("frames"), None)], &mut Default::default()).pop().unwrap().unwrap()
 }
@@ -168,7 +168,7 @@ fn panel_header_tracks_the_accepted_finite_repeat_counts() {
     let mut target=json!(null);
     for index in 0..3 {
         let block=DataBlock::new(chunk.clone(),OwnedBuffer::from_vec(vec![index as u8;6]).into(),Validity::Uniform(false),None).unwrap();
-        let delivery=runtime.commit(&generation,&Bundle{inputs:vec![Input::Event{signal:"frames".into(),ordinal:index as u64,data:block,origin:Some([index,0])}],metadata:json!({}),parents:vec![]}).unwrap();
+        let delivery=runtime.commit(&generation,&Bundle{inputs:vec![Input::Event{signal:"frames".into(),ordinal:index as u64,data:block,origin:Some([index,0]),shot_time:None}],metadata:json!({}),parents:vec![]}).unwrap();
         let read=HostRead{source:Arc::new(Source::from_read(&Read::from_canonical(delivery.publications[0].clone())).unwrap())};
         reads.push(read);
     }
