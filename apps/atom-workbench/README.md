@@ -75,7 +75,7 @@ because it is small or labelled forbidden.
   errors propagated through the dressed blocks; beyond 1 ms the trajectory
   continues as the expansion in the slow eigenmodes.
 
-1D motion (布居演化 · 1D 运动, docs/ui-design.md §6.20): a single atom in an
+1D motion (布居演化 · 运动, docs/ui-design.md §6.20): a single atom in an
 optical tweezer moving radially, along a lab axis through the focus
 perpendicular to every focused beam. A request whose model carries the
 `motion` block is a trajectory alone, served by the motion core in
@@ -90,6 +90,19 @@ its prediction agrees with the one made at half the run (the decomposition's
 eigen-solver is the engine's own, so every build gives the same continuation).
 A request without light, or whose light does not confine the initial state
 along the axis, is refused.
+
+3D motion (运动轴 3D（半经典）, docs/ui-design.md §6.21): the same atom moving in
+3D, semiclassically, whenever a beam is focused at the atom, served by
+`rust-solver/motion-3d` (`motion3d_adapter.rs`). Each trajectory is a classical
+point carrying the internal state of the eliminated ground manifold, evolved by
+quantum jumps: dipole-pattern emission recoil, beam-resolved absorption recoil
+with the exact mean force, the Ehrenfest force between jumps. The trap's
+harmonic part is moved exactly, the time step comes from step doubling, and
+trajectories run in batches until two standard errors meet 5% in the
+populations and 10% in T. A point particle has no zero-point motion: results
+are validated for k_B T >= 4 hbar omega on every axis and marked reference-only
+below. The example 光镊 · 3D PGC cools the same atom with sigma+sigma- pairs along
+x, y and z.
 
 Every request asks for the same absolute population error,
 `populationTolerance: 0.01` on the probability scale (1%); it is not a user

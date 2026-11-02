@@ -363,10 +363,12 @@ impl Ground{
     }
 
     /// H(x) at x (um) on the line: H0 with each beam's outside shift and fold at its intensity there.
-    pub fn hamiltonian(&self,x:f64)->Dense{
+    pub fn hamiltonian(&self,x:f64)->Dense{self.hamiltonian_at([0.,0.,x])}
+    /// H at any point r (um) of the motion frame.
+    pub fn hamiltonian_at(&self,r:[f64;3])->Dense{
         let mut h=self.hamiltonian.clone();
         for(l,beam)in self.beams.iter().enumerate(){
-            let intensity=beam.amplitude(x).norm_sqr();
+            let intensity=beam.amplitude_at(r).norm_sqr();
             if intensity!=1.{h.add_scaled(Complex::new(intensity-1.,0.),&self.outside[l]);}
             h.add_scaled(Complex::new(intensity,0.),&self.folds[l]);
         }
@@ -374,9 +376,11 @@ impl Ground{
     }
 
     /// d²U/dx² at the focus (rad/us per um²) of ground state b's potential, its energy in H(x).
-    pub fn curvature(&self,b:usize)->f64{
+    pub fn curvature(&self,b:usize)->f64{self.curvature_along(b,2)}
+    /// The same along any axis of the motion frame (0, 1 or 2).
+    pub fn curvature_along(&self,b:usize,axis:usize)->f64{
         let i=self.ground_states[b];
-        self.beams.iter().enumerate().map(|(l,beam)|beam.intensity_curvature()*(self.outside[l][(i,i)].re+self.folds[l][(i,i)].re)).sum()
+        self.beams.iter().enumerate().map(|(l,beam)|beam.intensity_curvature_along(axis)*(self.outside[l][(i,i)].re+self.folds[l][(i,i)].re)).sum()
     }
 
     /// The elimination for H (32 × 32, rad/us, in the frame): E_b, H0g in the blocks' frames, K, and every
@@ -419,11 +423,15 @@ impl Ground{
     }
 
     /// Every beam's amplitude a_l(x) at x (um) on the line.
-    pub fn amplitudes(&self,x:f64)->Vec<Complex>{self.beams.iter().map(|b|b.amplitude(x)).collect()}
+    pub fn amplitudes(&self,x:f64)->Vec<Complex>{self.amplitudes_at([0.,0.,x])}
+    /// Every beam's amplitude at any point r (um) of the motion frame.
+    pub fn amplitudes_at(&self,r:[f64;3])->Vec<Complex>{self.beams.iter().map(|b|b.amplitude_at(r)).collect()}
 
     /// The generator at x (um) on the line, with an elimination's K, E_b and responses.
-    pub fn local(&self,elimination:&Elimination,x:f64)->Local{
-        let(ng,ne)=(self.ground_states.len(),self.excited_states.len());let a=self.amplitudes(x);
+    pub fn local(&self,elimination:&Elimination,x:f64)->Local{self.local_at(elimination,[0.,0.,x])}
+    /// The generator at any point r (um) of the motion frame.
+    pub fn local_at(&self,elimination:&Elimination,r:[f64;3])->Local{
+        let(ng,ne)=(self.ground_states.len(),self.excited_states.len());let a=self.amplitudes_at(r);
         let(mut light_shift,mut scattering,mut admixture)=(Dense::zeros(ng,ng),Dense::zeros(ng,ng),Dense::zeros(ng,ng));
         let mut excited_readout=vec![Dense::zeros(ng,ng);ne];
         let responses:Vec<Dense>=self.carriers.iter().map(|c|combine(&c.beams,&a,&elimination.responses)).collect();
@@ -452,8 +460,10 @@ impl Ground{
 
     /// The first-order increments of H_ls, Γ and the jumps at x for the excited-energy shifts
     /// `shift(l)` = w_l (rad/us) of absorbing from beam l: R_l → R_l − w_l R2_l.
-    pub fn first_order(&self,elimination:&Elimination,x:f64,shift:impl Fn(usize)->f64)->FirstOrder{
-        let ng=self.ground_states.len();let a=self.amplitudes(x);
+    pub fn first_order(&self,elimination:&Elimination,x:f64,shift:impl Fn(usize)->f64)->FirstOrder{self.first_order_at(elimination,[0.,0.,x],shift)}
+    /// The same at any point r (um) of the motion frame.
+    pub fn first_order_at(&self,elimination:&Elimination,r:[f64;3],shift:impl Fn(usize)->f64)->FirstOrder{
+        let ng=self.ground_states.len();let a=self.amplitudes_at(r);
         let weights:Vec<Complex>=a.iter().enumerate().map(|(l,&z)|z*(-shift(l))).collect();
         let responses:Vec<Dense>=self.carriers.iter().map(|c|combine(&c.beams,&a,&elimination.responses)).collect();
         let increments:Vec<Dense>=self.carriers.iter().map(|c|combine(&c.beams,&weights,&elimination.derivatives)).collect();

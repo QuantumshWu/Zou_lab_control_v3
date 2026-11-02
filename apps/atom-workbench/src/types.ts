@@ -133,23 +133,26 @@ export interface DynamicsSettings {
   durationUnit:DurationUnit;
   /** A thermal initial state's temperature unit (as durationUnit); present exactly when it is thermal. */
   temperatureUnit?:TemperatureUnit;
-  /** 1D motion (ui-design.md §6.20): absent, or off, the trajectory is the internal state's alone.
+  /** Motion (ui-design.md §6.20): absent, or off, the trajectory is the internal state's alone.
    * Kept while off, as an inactive mode's inputs are. */
   motion?:MotionSettings;
 }
 /** A lab coordinate axis the atom moves along. */
 export type MotionAxis='x'|'y'|'z';
-/** A single atom in the tweezer moves radially: along `axis`, a lab axis through the focus
- * perpendicular to every focused beam (the first such axis when this one is not; motion.ts
- * motionAxis). It starts in the internal initial state, its motion along the axis thermal at
- * temperatureUK. The trajectory is the joint evolution of the internal state and this motion. */
+/** The motion a solve computes: 1D along a lab axis, or '3d', the atom moving in all three
+ * (semiclassical). */
+export type MotionChoice=MotionAxis|'3d';
+/** A single atom in the tweezer: along `axis`, a lab axis through the focus perpendicular to every
+ * focused beam (the first such axis when this one is not; motion.ts motionAxis), or in 3D. It
+ * starts in the internal initial state, its motion thermal at temperatureUK. The trajectory is
+ * the joint evolution of the internal state and this motion. */
 export interface MotionSettings {
-  enabled:boolean; axis:MotionAxis;
+  enabled:boolean; axis:MotionChoice;
   /** The initial temperature (μK, canonical) and the unit the operator writes it in (as durationUnit). */
   temperatureUK:number; temperatureUnit:TemperatureUnit;
 }
 export const DEFAULT_MOTION_TEMPERATURE_UK=30;
-/** The motion settings 1D 运动 starts with. */
+/** The motion settings 运动 starts with. */
 export function defaultMotion():MotionSettings{return {enabled:true,axis:'x',temperatureUK:DEFAULT_MOTION_TEMPERATURE_UK,temperatureUnit:'μK'};}
 export type DurationUnit='ns'|'μs'|'ms'|'s';
 export type TemperatureUnit='K'|'mK'|'μK';

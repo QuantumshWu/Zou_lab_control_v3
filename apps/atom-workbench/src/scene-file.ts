@@ -10,7 +10,7 @@ import {analyze,resolveSceneFrequencies} from './physics.js';
 import {DETUNING_UNITS} from './laser-frequency.js';
 import {INTENSITY_MODES,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,checkNumericalAperture,normalizeLaserIntensity} from './laser-intensity.js';
 import {TEMPERATURE_UNITS} from './temperature.js';
-import {MOTION_AXES} from './motion.js';
+import {MOTION_CHOICES} from './motion.js';
 import {AXIS_NAMES,referenceAxis} from './direction.js';
 import {initialPopulations} from './full-master-model.js';
 
@@ -179,10 +179,10 @@ function readScene(input:unknown):Scene {
   // A thermal initial state has its temperature's unit, and only it has one.
   if((dynamics.initialState?.kind==='thermal')!==d.has('temperatureUnit'))fail('dynamics.temperatureUnit',dynamics.initialState?.kind==='thermal'?'热分布初态缺少温度单位':'只用于热分布初态');
   if(d.has('temperatureUnit'))dynamics.temperatureUnit=d.choice('temperatureUnit',TEMPERATURE_UNITS);
-  // 1D motion, on or off: its axis and its initial temperature with the unit it is written in.
+  // Motion, on or off: its axis (or 3D) and its initial temperature with the unit it is written in.
   if(d.has('motion')){
     const m=Reader.of(d.o.motion,'dynamics.motion',['enabled','axis','temperatureUK','temperatureUnit']);
-    dynamics.motion={enabled:m.boolean('enabled'),axis:m.choice('axis',MOTION_AXES),temperatureUK:m.number('temperatureUK',Number.MIN_VALUE),temperatureUnit:m.choice('temperatureUnit',TEMPERATURE_UNITS)};
+    dynamics.motion={enabled:m.boolean('enabled'),axis:m.choice('axis',MOTION_CHOICES),temperatureUK:m.number('temperatureUK',Number.MIN_VALUE),temperatureUnit:m.choice('temperatureUnit',TEMPERATURE_UNITS)};
   }
   return scene;
 }

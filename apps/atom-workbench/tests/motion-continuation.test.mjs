@@ -45,7 +45,7 @@ test('every time view shades the continuation from the last simulated time to th
   assert.equal(band(populationChart(r,[id],{[id]:'初态'},{showTotalExcited:false})),null,'none without a continuation');
   // T and ⟨v⟩, n̄ and the loss: across both panels.
   for(const kind of ['temperature','trap']){
-    const chart=seriesChart(timesUs,motionSeries(r.motion,kind),'ms',r.motion.continuedFromUs),[sx,sy,sw,sh]=band(chart);
+    const chart=seriesChart(timesUs,motionSeries(r.motion,kind),'ms',{continuedFromUs:r.motion.continuedFromUs}),[sx,sy,sw,sh]=band(chart);
     assert.ok(Math.abs(sx-(64+714*.25))<1e-3&&Math.abs(sx+sw-778)<1e-3&&sy===32&&sh===268,kind);
     assert.equal(band(seriesChart(timesUs,motionSeries(r.motion,kind),'ms')),null,`${kind}: none without`);
   }
