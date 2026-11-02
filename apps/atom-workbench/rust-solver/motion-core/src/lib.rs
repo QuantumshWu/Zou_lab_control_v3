@@ -170,6 +170,9 @@ pub struct Solution{
     pub method:String,
     /// Why the run stopped with errors above the tolerance (none when it reached it).
     pub reason:Option<String>,
+    /// The last simulated time (us) when the later samples are the continuation's (its prediction
+    /// from the simulated history); none when every sample was simulated.
+    pub continued_from_us:Option<f64>,
 }
 
 /// Solves a request. `checkpoint` is given each intermediate solution as it is made -- complete,

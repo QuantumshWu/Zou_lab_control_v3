@@ -17,6 +17,9 @@
 //!   (kHz, positive), and `meanOccupation`, one n̄ per sample relative to it;
 //! - `lossProbability`, one per sample: the probability that the atom has left
 //!   the trap by then, from 0 to 1 and never decreasing;
+//! - `continuedFromUs`, present when the samples after it are the core's
+//!   continuation (its prediction from the simulated history), not simulated:
+//!   the last simulated time (us);
 //! - `momentum`: `velocitiesMps` (the grid, strictly increasing), `samples`
 //!   (increasing sample indices, the last sample among them) and
 //!   `probabilities` (one distribution per listed sample: the probability at
@@ -101,6 +104,7 @@ fn check(solution:&Solution,times:usize)->Result<(),String>{
     if !series(&solution.sample_errors,true)||!series(&solution.temperature_uk,true)||!series(&solution.mean_velocity_mps,false)||!series(&solution.mean_occupation,false){
         return bad("per-time errors, temperatures, mean velocities or occupations that are not one finite value per time");}
     if !(solution.trap_frequency_khz.is_finite()&&solution.trap_frequency_khz>0.){return bad("a trap frequency that is not positive");}
+    if solution.continued_from_us.is_some_and(|t|!(t.is_finite()&&t>=0.)){return bad("a continuation start that is not a time of the run");}
     let loss=&solution.loss_probability;
     if !series(loss,true)||loss.iter().any(|&p|p>1.)||loss.windows(2).any(|w|w[1]<w[0]){return bad("loss probabilities that are not probabilities never decreasing in time");}
     for(m,what)in [(&solution.momentum,"momentum"),(&solution.position,"position")]{
@@ -129,6 +133,7 @@ fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,g
             "trapFrequencyKHz":solution.trap_frequency_khz,"meanOccupation":solution.mean_occupation,"lossProbability":solution.loss_probability,
             "momentum":{"velocitiesMps":m.grid,"samples":m.samples,"probabilities":m.probabilities},
             "position":{"positionsUm":x.grid,"samples":x.samples,"probabilities":x.probabilities}}});
+    if let Some(t)=solution.continued_from_us{result["motion"]["continuedFromUs"]=json!(t);}
     // A result above the tolerance says why it stopped there.
     if !converged{result["populationAccuracy"]["reason"]=json!(solution.reason.clone()
         .unwrap_or_else(||format!("The error bound is {estimated:.2e} against the tolerance {POPULATION_TOLERANCE:e}")));}

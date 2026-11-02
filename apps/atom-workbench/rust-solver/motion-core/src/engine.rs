@@ -812,7 +812,7 @@ impl<'a> Engine<'a>{
             loss_probability:rows.iter().map(|o|{loss=loss.max(o.loss.clamp(0.,1.));loss}).collect(),
             momentum:Distributions{grid:kappa.iter().map(|k|self.hbar_over_m*k).collect(),samples:listed.to_vec(),probabilities:pk},
             position:Distributions{grid:z.clone(),samples:listed.to_vec(),probabilities:pz},
-            method:method.into(),reason:None,
+            method:method.into(),reason:None,continued_from_us:prediction.map(|p|p.t).filter(|&t|t<times[times.len()-1]),
         }
     }
 
