@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use uuid::Uuid;
 use crate::dataset::DataBlock;
-use crate::schema::{Axis, CodeBase, CodeMapping, Coordinates, DatasetSchema, Domain, DomainRole};
+use crate::OwnedBuffer;
+use crate::schema::{Axis, CodeBase, CodeMapping, Coordinate, Coordinates, DatasetSchema, Domain, DomainRole};
+use crate::units::resolve_unit;
 use crate::store::{DatasetStore, Placement, Snapshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -75,6 +77,8 @@ pub struct Publication {
     // the past: an old read cannot retain later events or their ancestors.
     events: Option<Arc<FiniteEvent>>,
     storage: Storage,
+    /// The run-relative time of this shot, when its source stamps one.
+    shot_time: Option<f64>,
     // History owns event pixels, not every upstream camera buffer. Only a
     // current head or an acquired Read pins this short-lived causal payloads.
     lineage: Weak<PayloadLineage>,
@@ -89,6 +93,7 @@ impl Publication {
     /// publication. Scientific event consumers still use data().
     pub fn canonical(&self) -> Option<&Snapshot> { self.canonical.as_ref() }
     pub fn storage(&self) -> Storage { self.storage }
+    pub fn shot_time(&self) -> Option<f64> { self.shot_time }
 }
 
 pub enum Input {
@@ -96,6 +101,10 @@ pub enum Input {
         signal: Arc<str>, ordinal: u64, data: Arc<DataBlock>,
         /// Finite acquisition placement in flat Repeat and Point carriers.
         origin: Option<[usize; 2]>,
+        /// The shot's run-relative time in seconds (v2's `shot_time_seconds`).
+        /// A signal stamps every shot or none; a stamped history window carries
+        /// these as its shot-time coordinate of the source index.
+        shot_time: Option<f64>,
     },
     /// Publish the store as it stands, without writing data or sampling an
     /// ordinal. Dataset readers observe it; raw event readers do not.
@@ -340,6 +349,10 @@ struct Signal {
     recent: Option<VecDeque<Arc<Publication>>>,
     views: HashMap<usize, Weak<WindowRead>>, view_epoch: u64,
     window_schemas: HashMap<usize, Arc<DatasetSchema>>, history_axis: Arc<str>,
+    /// The shot-time coordinate of `history_axis` in a stamped window.
+    time_axis: Arc<str>,
+    /// Whether this signal's shots carry their time, fixed by its first event.
+    stamped: Option<bool>,
     store: Option<DatasetStore>, history_capable: bool,
     /// Each event the finite store holds, in its segment order: what a replay delivers.
     events: Vec<Arc<FiniteEvent>>,
@@ -353,7 +366,7 @@ impl Signal {
         canonical.segments().zip(&self.events).map(|(segment, fact)| Arc::new(Publication {
             key: PublicationKey { generation, signal: name.clone(), revision: fact.revision, ordinal: fact.ordinal },
             data: Some(segment.data().clone()), run: run.clone(), event: fact.event.clone(), canonical: Some(canonical.clone()),
-            events: self.events.last().cloned(), storage: Storage::Finite, lineage: Weak::new() })).collect()
+            events: self.events.last().cloned(), storage: Storage::Finite, shot_time: None, lineage: Weak::new() })).collect()
     }
     fn keep_recent(&mut self, publication: &Arc<Publication>, garbage: &mut Vec<Arc<Publication>>) {
         let Some(recent) = &mut self.recent else { return };
@@ -381,32 +394,105 @@ impl Signal {
     }
 }
 
+/// A latest event under its declaration: the declared schema object when equal,
+/// else its own when the generation holds it (`DatasetSchema::holds`).
+fn admit_block(data: &Arc<DataBlock>, declared: &Arc<DatasetSchema>) -> Option<Arc<DataBlock>> {
+    data.with_schema(declared.clone()).ok().or_else(|| declared.holds(data.schema()).then(|| data.clone()))
+}
+
+/// The schema of an unstamped window of `width` shots, built once per width.
 fn history_schema(signal: &mut Signal, width: usize) -> Result<Arc<DatasetSchema>> {
     if let Some(schema) = signal.window_schemas.get(&width) { return Ok(schema.clone()); }
-    let build = || -> std::result::Result<Arc<DatasetSchema>, String> {
-        let source = &signal.schema;
-        let point = source.domain(DomainRole::Point);
-        let size = point.size().checked_mul(width).ok_or("History point carrier size overflows")?;
-        let index = Axis::new(signal.history_axis.clone(), "source index".into(), "primary-index".into(),
-            Coordinates::Index { origin: 1 - width as i128, len: width }, None, None, None, None)?;
-        let mut axes = vec![index];
-        axes.extend(point.axes().iter().cloned());
-        let mut mappings = vec![CodeMapping::new(CodeBase::Range {start:0,step:1,len:width},point.size(),1)?];
-        for axis in point.axes() {
-            let mapping = point.mapping(axis.id()).ok_or("Source axis lacks its mapping")?;
-            let base = match mapping.base() {
-                CodeBase::Range {start,step,len} => CodeBase::Range {start:*start,step:*step,len:*len},
-                CodeBase::Explicit(values) => CodeBase::Explicit(values.clone()),
-            };
-            mappings.push(CodeMapping::new(base, mapping.inner(),
-                mapping.outer().checked_mul(width).ok_or("History mapping size overflows")?)?);
-        }
-        DatasetSchema::new(source.domain(DomainRole::Repeat).clone(), Domain::new(vec![size],axes,mappings)?,
-            source.domain(DomainRole::Cell).clone(), source.value().clone())
-    };
-    let schema = build().map_err(RuntimeError::InvalidLayout)?;
+    let schema = indexed_schema(signal, width, None).map_err(RuntimeError::InvalidLayout)?;
     signal.window_schemas.insert(width,schema.clone());
     Ok(schema)
+}
+
+/// The schema of this window: a stamped signal's window IS its shot times
+/// (v2's `_indexed_schema`), so it is built anew for each window it reads.
+fn window_schema_of(signal: &mut Signal, width: usize, latest: u64, entries: &[Arc<Publication>]) -> Result<Arc<DatasetSchema>> {
+    if signal.stamped != Some(true) { return history_schema(signal,width); }
+    let times = slot_times(width, latest, entries).map_err(RuntimeError::InvalidLayout)?;
+    indexed_schema(signal, width, Some(&times)).map_err(RuntimeError::InvalidLayout)
+}
+
+/// v2's `_row_times`: a distinct, ordered time for every slot of a stamped
+/// window. A held shot has its own; a hole between two held shots lies on the
+/// line between them, and a hole before the first held shot one representable
+/// double before it. A hole's rows are invalid and never drawn, so its time
+/// only has to be what an axis coordinate must be: unique and in order.
+fn slot_times(width: usize, latest: u64, entries: &[Arc<Publication>]) -> std::result::Result<Vec<f64>, String> {
+    let mut times = vec![None; width];
+    for entry in entries {
+        let behind = entry.key.ordinal.and_then(|ordinal| latest.checked_sub(ordinal)).ok_or("A window member lies after its anchor")?;
+        let slot = (width - 1).checked_sub(usize::try_from(behind).map_err(|_| "Window offset overflows")?).ok_or("A window member lies outside its window")?;
+        times[slot] = Some(entry.shot_time.ok_or("A stamped signal holds an unstamped shot")?);
+    }
+    let held: Vec<usize> = (0..width).filter(|slot| times[*slot].is_some()).collect();
+    let first = *held.first().ok_or("A stamped window holds at least its newest shot")?;
+    let mut filled: Vec<f64> = times.iter().map(|time| time.unwrap_or(0.0)).collect();
+    for slot in (0..first).rev() { filled[slot] = filled[slot + 1].next_down(); }
+    for pair in held.windows(2) {
+        let (before, after) = (pair[0], pair[1]);
+        let span = (after - before) as f64;
+        for slot in before + 1..after {
+            filled[slot] = filled[before] + (filled[after] - filled[before]) * (slot - before) as f64 / span;
+        }
+    }
+    Ok(filled)
+}
+
+/// v2's `_indexed_schema`: `width` source events side by side on the Point
+/// carrier, keyed by their relative source index. A stamped window adds the
+/// shot time as an alternative coordinate of that index, and places each
+/// shot's own sample-time axis at its shot time, so a waveform's samples read
+/// on one continuous time axis across the window.
+fn indexed_schema(signal: &Signal, width: usize, times: Option<&[f64]>) -> std::result::Result<Arc<DatasetSchema>, String> {
+    let source = &signal.schema;
+    let point = source.domain(DomainRole::Point);
+    let size = point.size().checked_mul(width).ok_or("History point carrier size overflows")?;
+    let index = Axis::new(signal.history_axis.clone(), "source index".into(), "primary-index".into(),
+        Coordinates::Index { origin: 1 - width as i128, len: width }, None, None, None, None)?;
+    let shots = CodeMapping::new(CodeBase::Range {start:0,step:1,len:width},point.size(),1)?;
+    let mut axes = vec![index];
+    let mut mappings = vec![shots.clone()];
+    if let Some(times) = times {
+        axes.push(Axis::new(signal.time_axis.clone(), "shot time".into(), "shot-time".into(),
+            Coordinates::Numeric(OwnedBuffer::from_vec(times.to_vec()).into()), Some("s".into()), None, None,
+            Some(signal.history_axis.clone()))?);
+        mappings.push(shots);
+    }
+    for axis in point.axes() {
+        let mapping = point.mapping(axis.id()).ok_or("Source axis lacks its mapping")?;
+        if let Some(times) = times.filter(|_| axis.role() == "sample-time") {
+            let codes: Vec<usize> = (0..point.size()).map(|row| mapping.code(row).ok_or("Source axis code lies outside its carrier"))
+                .collect::<std::result::Result<_, _>>()?;
+            let offsets = codes.iter().map(|code| match axis.coordinate(*code) {
+                Some(Coordinate::Integer(value)) => Ok(value as f64),
+                Some(Coordinate::Real(value)) => Ok(value),
+                _ => Err("Sample-time coordinates must be real numbers"),
+            }).collect::<std::result::Result<Vec<f64>, _>>()?;
+            let second = resolve_unit("s", None).map_err(|error| error.to_string())?;
+            let unit = resolve_unit(axis.unit().ok_or("A sample-time axis needs a time unit")?, None).map_err(|error| error.to_string())?;
+            let origins = times.iter().map(|time| second.convert_value_to(*time, &unit))
+                .collect::<std::result::Result<Vec<f64>, _>>().map_err(|error| error.to_string())?;
+            let labels = axis.labels().map(|labels| (0..width).flat_map(|_| codes.iter().map(|code| labels[*code].clone())).collect());
+            axes.push(Axis::new(axis.id().into(), axis.name().into(), axis.role().into(),
+                Coordinates::OriginsAndOffsets { origins: OwnedBuffer::from_vec(origins), offsets: OwnedBuffer::from_vec(offsets) },
+                axis.unit().map(Arc::from), axis.coordinate_frame().map(Arc::from), labels, None)?);
+            mappings.push(CodeMapping::new(CodeBase::Range {start:0,step:1,len:size},1,1)?);
+            continue;
+        }
+        axes.push(axis.clone());
+        let base = match mapping.base() {
+            CodeBase::Range {start,step,len} => CodeBase::Range {start:*start,step:*step,len:*len},
+            CodeBase::Explicit(values) => CodeBase::Explicit(values.clone()),
+        };
+        mappings.push(CodeMapping::new(base, mapping.inner(),
+            mapping.outer().checked_mul(width).ok_or("History mapping size overflows")?)?);
+    }
+    DatasetSchema::new(source.domain(DomainRole::Repeat).clone(), Domain::new(vec![size],axes,mappings)?,
+        source.domain(DomainRole::Cell).clone(), source.value().clone())
 }
 
 fn validate_retention(signal: &Signal, width: usize) -> Result<()> {
@@ -420,7 +506,7 @@ fn validate_retention(signal: &Signal, width: usize) -> Result<()> {
         return Err(RuntimeError::InvalidLayout("History shape overflows addressable storage".into()));
     }
     if [DomainRole::Repeat,DomainRole::Point,DomainRole::Cell].iter().any(|role|
-        signal.schema.domain(*role).axis(&signal.history_axis).is_some()) {
+        [&signal.history_axis, &signal.time_axis].iter().any(|id| signal.schema.domain(*role).axis(id).is_some())) {
         return Err(RuntimeError::InvalidLayout("History axis identity collides with a declared source axis".into()));
     }
     Ok(())
@@ -433,9 +519,9 @@ fn window_read(signal: &mut Signal, width: usize) -> Result<Arc<WindowRead>> {
     if let Some(view) = signal.views.get(&width).and_then(Weak::upgrade) { return Ok(view); }
     let latest = signal.latest.as_ref().ok_or(RuntimeError::NoData)?.key.clone();
     let start = Some(latest.ordinal.ok_or(RuntimeError::NoData)?.saturating_sub(width as u64 - 1));
-    let schema = history_schema(signal,width)?;
-    let entries = if width == 1 { signal.latest.iter().cloned().collect() }
+    let entries: Arc<[_]> = if width == 1 { signal.latest.iter().cloned().collect() }
         else { signal.history.iter().filter(|p| p.key.ordinal >= start).cloned().collect() };
+    let schema = window_schema_of(signal, width, latest.ordinal.ok_or(RuntimeError::NoData)?, &entries)?;
     let view = Arc::new(WindowRead { latest, width, view_epoch: signal.view_epoch, schema, entries });
     signal.views.insert(width, Arc::downgrade(&view));
     Ok(view)
@@ -450,11 +536,11 @@ fn window_read_at(signal:&mut Signal,width:usize,anchor:&Arc<Publication>) -> Re
     // The historical anchor itself must still be materializable. A retained
     // display picture is not permission to silently substitute a newer shot.
     if width>1 && !signal.history.iter().any(|event|event.key==anchor.key) {return Err(RuntimeError::PublicationExpired);}
-    let entries=if width==1 {vec![anchor.clone()]} else {
+    let entries:Vec<_>=if width==1 {vec![anchor.clone()]} else {
         signal.history.iter().filter(|event|event.key.ordinal>=start && event.key.ordinal<=anchor.key.ordinal).cloned().collect()
     };
-    Ok(Arc::new(WindowRead {latest:anchor.key.clone(),width,view_epoch:signal.view_epoch,
-        schema:history_schema(signal,width)?,entries:entries.into()}))
+    let schema=window_schema_of(signal,width,anchor.key.ordinal.ok_or(RuntimeError::NoData)?,&entries)?;
+    Ok(Arc::new(WindowRead {latest:anchor.key.clone(),width,view_epoch:signal.view_epoch,schema,entries:entries.into()}))
 }
 
 fn dataset_read(event:Arc<Publication>) -> Read {
@@ -892,11 +978,12 @@ impl Runtime {
                 // A deterministic namespace needs no forever-growing registry.
                 let history_axis: Arc<str> = format!("history.{}", Uuid::new_v5(
                     &Uuid::NAMESPACE_URL, format!("zlc:history:{}",output.signal).as_bytes())).into();
+                let time_axis: Arc<str> = format!("{history_axis}.time").into();
                 state.signals.insert(output.signal.clone(), token.id);
                 let store = matches!(output.storage,Storage::Finite).then(|| DatasetStore::new(output.schema.clone()));
                 (output.signal, Signal { schema: output.schema, latest: None, last_ordinal:None, head:None, history: VecDeque::new(),
                     demands: BTreeMap::new(), recent: source.as_ref().filter(|source|source.coherent).map(|_|VecDeque::new()), views: HashMap::new(), view_epoch: 0,
-                    window_schemas: HashMap::new(), history_axis, store,
+                    window_schemas: HashMap::new(), history_axis, time_axis, stamped: None, store,
                     history_capable: matches!(output.storage,Storage::Latest), events: Vec::new() })
             }).collect();
             state.owners.insert(owner.clone(), token.id);
@@ -950,9 +1037,21 @@ impl Runtime {
                 if !names.insert(name.clone()) { return Err(RuntimeError::DuplicateSignal(name.to_string())); }
                 let signal = run.signals.get(name).ok_or_else(|| RuntimeError::UnknownSignal(name.to_string()))?;
                 let (data, placement, snapshot) = match input {
-                    Input::Event {data,origin,..} => match (&signal.store,origin) {
-                        (None,None) => (Some(data.with_schema(signal.schema.clone())
-                            .map_err(|_| RuntimeError::SchemaChanged(name.to_string()))?), None,None),
+                    Input::Event {data,origin,shot_time,ordinal,..} => {
+                        if shot_time.is_some_and(|time| !time.is_finite()) {
+                            return Err(RuntimeError::InvalidLayout("A shot time must be finite".into()));
+                        }
+                        if signal.stamped.is_some_and(|stamped| stamped != shot_time.is_some()) {
+                            return Err(RuntimeError::InvalidLayout("A signal stamps every shot with its time or none".into()));
+                        }
+                        // A later shot is later in time; a revised one keeps its place.
+                        if let (Some(time), Some(latest)) = (shot_time, signal.latest.as_ref()) {
+                            if latest.key.ordinal.is_some_and(|last| *ordinal > last) && latest.shot_time.is_some_and(|last| *time <= last) {
+                                return Err(RuntimeError::OutOfOrder(name.to_string()));
+                            }
+                        }
+                        match (&signal.store,origin) {
+                        (None,None) => (Some(admit_block(data,&signal.schema).ok_or_else(|| RuntimeError::SchemaChanged(name.to_string()))?), None,None),
                         (Some(store),Some(origin)) => {
                             let extent = [data.schema().domain(DomainRole::Repeat).size(),
                                 data.schema().domain(DomainRole::Point).size()];
@@ -961,7 +1060,7 @@ impl Runtime {
                             (Some(data.clone()),Some(placement),None)
                         }
                         _ => return Err(RuntimeError::InvalidLayout("Only finite outputs require a Repeat/Point placement".into())),
-                    },
+                    }},
                     Input::FiniteSnapshot {..} => {
                         if signal.store.is_none() {return Err(RuntimeError::InvalidLayout("A prefix publication requires a finite dataset store".into()));}
                         (None,None,None)
@@ -970,8 +1069,9 @@ impl Runtime {
                         if signal.store.is_some() || signal.history_capable {
                             return Err(RuntimeError::InvalidLayout("Complete datasets require a Snapshot declaration".into()));
                         }
-                        (None,None,Some(snapshot.with_schema(signal.schema.clone())
-                            .map_err(|_|RuntimeError::SchemaChanged(name.to_string()))?))
+                        (None,None,Some(snapshot.with_schema(signal.schema.clone()).ok()
+                            .or_else(|| signal.schema.holds(snapshot.schema()).then(|| snapshot.clone()))
+                            .ok_or_else(|| RuntimeError::SchemaChanged(name.to_string()))?))
                     }
                 };
                 if input.ordinal().is_some_and(|ordinal|signal.last_ordinal.is_some_and(|last|last>ordinal)) {
@@ -992,9 +1092,11 @@ impl Runtime {
                     signal.events.push(Arc::new(FiniteEvent {previous:signal.events.last().cloned(),
                         revision,ordinal:input.ordinal(),event:event.clone()}));
                 }
+                let shot_time = match input { Input::Event {shot_time,..} => *shot_time, _ => None };
+                if matches!(input, Input::Event {..}) { signal.stamped = Some(shot_time.is_some()); }
                 prepared_publications.push(Publication {
                     key: PublicationKey { generation: generation.id, signal: input.signal().clone(), revision, ordinal: input.ordinal() },
-                    data, run: run.record.clone(), event: event.clone(), canonical,
+                    data, run: run.record.clone(), event: event.clone(), canonical, shot_time,
                     events: signal.events.last().cloned(),
                     storage: if signal.store.is_some() { Storage::Finite }
                         else if signal.history_capable { Storage::Latest } else { Storage::Snapshot },
@@ -1137,6 +1239,8 @@ impl Runtime {
         let signal = signal_mut(&mut state,generation.id,signal)?;
         if width > 1 && !signal.demands.values().any(|value| *value == width) { return Err(RuntimeError::HistoryNotRetained); }
         validate_retention(signal,width)?;
+        // A stamped window's axes are its shots' times: the current window's.
+        if signal.stamped == Some(true) && signal.latest.is_some() { return Ok(window_read(signal,width)?.schema.clone()); }
         history_schema(signal,width)
     }
 
@@ -1437,7 +1541,7 @@ mod tests {
     }
     fn bundle(schema: &Arc<DatasetSchema>, signals: &[&str], ordinal: u64) -> Bundle {
         Bundle { inputs: signals.iter().map(|name| Input::Event { signal: (*name).into(), ordinal,
-            data: block(schema, ordinal as u16), origin: None }).collect(), metadata: json!({}), parents: vec![] }
+            data: block(schema, ordinal as u16), origin: None, shot_time: None }).collect(), metadata: json!({}), parents: vec![] }
     }
 
     #[test]
@@ -1464,7 +1568,7 @@ mod tests {
             let mut parents = vec![parent.clone()];
             if point == 2 { parents.push(frozen.as_ref().unwrap().0.anchor().clone()); }
             let delivery = plane.commit(&scan,&Bundle {inputs:vec![Input::Event {signal:"scan".into(),ordinal:point,
-                data:block(&sample,point as u16),origin:Some([0,point as usize])}],
+                data:block(&sample,point as u16),origin:Some([0,point as usize]),shot_time:None}],
                 metadata:json!({"records":{"scan":{"actual_devices":{"rf":{"values":{"frequency":point},"units":{"frequency":"Hz"}}}}}}),
                 parents}).unwrap();
             if point == 2 { later_facts = Some((Arc::downgrade(delivery.publications[0].event()),Arc::downgrade(parent.event()))); }
@@ -1487,14 +1591,14 @@ mod tests {
             assert_eq!(parent["record"]["records"]["image"]["device_settings"]["epoch"],json!(usize::from(point == 2)));
         }
         assert!(matches!(plane.commit(&scan,&Bundle {inputs:vec![Input::Event {signal:"scan".into(),ordinal:3,
-            data:block(&sample,9),origin:Some([0,0])}],metadata:json!({"bad":true}),parents:vec![]}),Err(RuntimeError::InvalidLayout(_))));
+            data:block(&sample,9),origin:Some([0,0]),shot_time:None}],metadata:json!({"bad":true}),parents:vec![]}),Err(RuntimeError::InvalidLayout(_))));
         plane.commit(&scan,&Bundle {inputs:vec![Input::FiniteSnapshot {signal:"scan".into()}],metadata:json!({}),parents:vec![]}).unwrap();
         let complete = plane.read_views(&[(scan.clone(),"scan".into(),None)]).pop().unwrap().unwrap();
         assert_eq!(complete.provenance()["acquisition"],before["acquisition"]);
         plane.retire(&scan).unwrap(); plane.retire(&camera).unwrap();
         let restarted = plane.begin("scan",vec![Declaration {signal:"scan".into(),schema:full,storage:Storage::Finite}],json!({"new":true})).unwrap();
         plane.commit(&restarted,&Bundle {inputs:vec![Input::Event {signal:"scan".into(),ordinal:0,
-            data:block(&sample,99),origin:Some([0,0])}],metadata:json!({"new":true}),parents:vec![]}).unwrap();
+            data:block(&sample,99),origin:Some([0,0]),shot_time:None}],metadata:json!({"new":true}),parents:vec![]}).unwrap();
         let (frozen,expected) = frozen.unwrap();
         assert_eq!(frozen.provenance(),expected,"append, failed overwrite and restart cannot change a saved prefix");
         assert_eq!(complete.provenance()["acquisition"],before["acquisition"]);
@@ -1831,7 +1935,7 @@ mod tests {
         assert!(matches!(frozen_empty.reads[0].kind(),ReadKind::Canonical(_)));
         let invalid=DataBlock::new(schema.clone(),OwnedBuffer::from_vec(vec![1u16;6]).into(),Validity::Uniform(false),None).unwrap();
         let actual=plane.commit(&declared,&Bundle {inputs:vec![Input::Event {signal:"scan".into(),ordinal:0,
-            data:invalid,origin:Some([0,0])}],metadata:json!({}),parents:vec![]}).unwrap();
+            data:invalid,origin:Some([0,0]),shot_time:None}],metadata:json!({}),parents:vec![]}).unwrap();
         assert_eq!(actual.publications[0].key.ordinal,Some(0));
         assert_eq!(actual.publications[0].canonical().unwrap().written_cells(),1);
         assert_eq!(events.next(Duration::ZERO).unwrap().unwrap().publications[0].key.ordinal,Some(0));
@@ -2160,6 +2264,67 @@ mod tests {
         plane.commit(&occupancy,&Bundle {parents:vec![shots[1].clone()],..bundle(&schema,&["survival"],1)}).unwrap();
         let fresh=plane.read_coherent_views(&[(camera.clone(),"frames".into(),None),(occupancy,"survival".into(),None)],&mut Front::default());
         assert!(fresh.iter().all(|read|read.as_ref().unwrap().key().ordinal==Some(1)));
+    }
+
+    /// v2's stamped history: the shot time is an alternative coordinate of the
+    /// source index, holes get unique ordered times, and a waveform's sample
+    /// time continues across the window from each shot's own time.
+    #[test]
+    fn stamped_window_carries_shot_time_and_sample_time_origins() {
+        let stamped = |schema: &Arc<DatasetSchema>, ordinal: u64, time: Option<f64>| Bundle { inputs: vec![Input::Event {
+            signal: if schema.domain(DomainRole::Point).size() == 1 { "value".into() } else { "wave".into() }, ordinal, data: DataBlock::new(schema.clone(), OwnedBuffer::from_vec(vec![ordinal as u16; schema.value_len()]).into(),
+            Validity::Uniform(true), None).unwrap(), origin: None, shot_time: time }], metadata: json!({}), parents: vec![] };
+        let plane = Runtime::new(); let schema = schema();
+        let generation = plane.begin("source", vec![Declaration {signal:"value".into(),schema:schema.clone(),storage:Storage::Latest}],json!({})).unwrap();
+        let _history = plane.retain_history(&generation,"value",4).unwrap();
+        plane.commit(&generation,&stamped(&schema,0,Some(1.5))).unwrap();
+        // A later shot is later in time, and a stamped signal stamps every shot.
+        assert!(matches!(plane.commit(&generation,&stamped(&schema,1,Some(1.5))),Err(RuntimeError::OutOfOrder(_))));
+        assert!(matches!(plane.commit(&generation,&stamped(&schema,1,None)),Err(RuntimeError::InvalidLayout(_))));
+        plane.commit(&generation,&stamped(&schema,2,Some(2.5))).unwrap(); // ordinal 1 is a hole
+        let window = plane.read_window(&generation,"value",4).unwrap();
+        let point = window.schema.domain(DomainRole::Point);
+        let index = point.axes().iter().find(|axis| axis.role() == "primary-index").unwrap();
+        let time = point.axes().iter().find(|axis| axis.role() == "shot-time").unwrap();
+        assert_eq!((time.name(), time.unit(), time.coordinate_of()), ("shot time", Some("s"), Some(index.id())));
+        let times: Vec<f64> = (0..4).map(|i| match time.coordinate(i) { Some(Coordinate::Real(t)) => t, _ => panic!() }).collect();
+        assert_eq!(&times[1..], &[1.5, 2.0, 2.5]);
+        assert!(times[0] < 1.5 && times[0] == 1.5_f64.next_down());
+        assert!(Arc::ptr_eq(&plane.window_schema(&generation,"value",4).unwrap(), &window.schema));
+        // A result cut from the window keeps its generation while only its coordinates move.
+        plane.commit(&generation,&stamped(&schema,3,Some(3.0))).unwrap();
+        let moved = plane.read_window(&generation,"value",4).unwrap().schema.clone();
+        assert!(*moved != *window.schema && window.schema.holds(&moved) && !window.schema.holds(&schema));
+        let cut = |schema: &Arc<DatasetSchema>, ordinal| Bundle { inputs: vec![Input::Event { signal: "cut".into(), ordinal,
+            data: DataBlock::new(schema.clone(), OwnedBuffer::from_vec(vec![0u16; schema.value_len()]).into(), Validity::Uniform(true), None).unwrap(),
+            origin: None, shot_time: None }], metadata: json!({}), parents: vec![] };
+        let region = plane.begin("region", vec![Declaration {signal:"cut".into(),schema:window.schema.clone(),storage:Storage::Latest}],json!({})).unwrap();
+        plane.commit(&region,&cut(&moved,0)).unwrap();
+        assert!(Arc::ptr_eq(plane.read_latest(&region,"cut").unwrap().data().unwrap().schema(), &moved), "the event keeps its own coordinates");
+        assert!(matches!(plane.commit(&region,&cut(&schema,1)),Err(RuntimeError::SchemaChanged(_))));
+        // An unstamped signal's window keeps its one cached index-only schema.
+        let plain = plane.begin("plain", vec![Declaration {signal:"plain".into(),schema:schema.clone(),storage:Storage::Latest}],json!({})).unwrap();
+        plane.commit(&plain,&bundle(&schema,&["plain"],0)).unwrap();
+        let read = plane.read_window(&plain,"plain",1).unwrap();
+        assert!(read.schema.domain(DomainRole::Point).axes().iter().all(|axis| axis.role() != "shot-time"));
+
+        // A continuous waveform: its sample time starts at each shot's time.
+        let singleton = Domain::new(vec![1], vec![], vec![]).unwrap();
+        let samples = Axis::new("sample".into(), "sample time".into(), "sample-time".into(),
+            Coordinates::Numeric(OwnedBuffer::from_vec(vec![0.0, 1.0, 2.0]).into()), Some("ms".into()), None, None, None).unwrap();
+        let wave = DatasetSchema::new(singleton.clone(), Domain::dense(vec![3], vec![samples]).unwrap(), singleton,
+            ValueSchema::new(DType::U16, None, None, ValidityContract::Value).unwrap()).unwrap();
+        let waves = plane.begin("wave", vec![Declaration {signal:"wave".into(),schema:wave.clone(),storage:Storage::Latest}],json!({})).unwrap();
+        let _held = plane.retain_history(&waves,"wave",2).unwrap();
+        plane.commit(&waves,&stamped(&wave,0,Some(0.25))).unwrap();
+        plane.commit(&waves,&stamped(&wave,1,Some(0.5))).unwrap();
+        let window = plane.read_window(&waves,"wave",2).unwrap();
+        let point = window.schema.domain(DomainRole::Point);
+        let sample = point.axis("sample").unwrap();
+        let coordinates: Vec<f64> = (0..sample.len()).map(|i| match sample.coordinate(i) { Some(Coordinate::Real(t)) => t, _ => panic!() }).collect();
+        assert_eq!(coordinates, vec![250.0, 251.0, 252.0, 500.0, 501.0, 502.0]);
+        assert_eq!(sample.unit(), Some("ms"));
+        assert_eq!((0..6).map(|row| point.mapping("sample").unwrap().code(row).unwrap()).collect::<Vec<_>>(), (0..6).collect::<Vec<_>>());
     }
 }
 impl Drop for Subscription {

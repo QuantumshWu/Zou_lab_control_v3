@@ -163,7 +163,7 @@ impl Kernel {
             Kernel::Bimodal => prepare_bimodal(coords, observations, valid, seeds),
             Kernel::Poisson => prepare_poisson_histogram(coords, observations, valid, seeds),
             Kernel::PoissonBimodal => prepare_poisson_bimodal(coords, observations, valid, seeds),
-            Kernel::Doublet => prepare_doublet(coords, observations, valid, seeds, lower, upper),
+            Kernel::LorentzianDoublet => prepare_lorentzian_doublet(coords, observations, valid, seeds, lower, upper),
             Kernel::Damped => prepare_damped(coords, observations, valid, seeds),
             Kernel::Exponential => prepare_exponential(coords, observations, valid, seeds),
             Kernel::Saturation => prepare_saturation(coords, observations, valid, seeds, lower, upper),
@@ -665,51 +665,64 @@ fn peak_properties(values: &[f64], threshold: f64, peaks: &mut Vec<usize>, width
     Ok(peaks.len())
 }
 
-fn append_doublet_sign(x: &[f64], values: &[f64], sign: f64, value_range: f64, step: f64, seeds: &mut Seeds, start: usize) -> Zr<usize> {
-    let signed: Vec<f64> = values.iter().map(|&v| sign * v).collect();
-    let mut peaks = Vec::new();
-    let mut widths = Vec::new();
-    let count = peak_properties(&signed, value_range / 8.0, &mut peaks, &mut widths)?;
-    if count == 0 {
-        return Ok(start);
+/// The full width at half `height` of the bump of `values` at `peak`
+/// (linear interpolation at each crossing; a side that never falls to half
+/// height mirrors the other; neither side: `span`).
+fn half_height_width(x: &[f64], values: &[f64], peak: usize, height: f64, span: f64) -> f64 {
+    let level = 0.5 * height;
+    let mut left = peak;
+    while left > 0 && values[left] > level {
+        left -= 1;
     }
-    let chosen_count = 4.min(count);
-    let mut chosen = vec![0usize; chosen_count];
-    let mut used = vec![false; count];
-    for slot in chosen.iter_mut() {
-        let mut best: isize = -1;
-        let mut best_value = f64::NEG_INFINITY;
-        for candidate in 0..count {
-            let value = signed[peaks[candidate]];
-            if !used[candidate] && (value > best_value || (value == best_value && candidate as isize > best)) {
-                best = candidate as isize;
-                best_value = value;
-            }
-        }
-        let best = if best < 0 { count - 1 } else { best as usize };
-        used[best] = true;
-        *slot = best;
+    let left_x = (values[left] <= level && left < peak)
+        .then(|| x[left] + (level - values[left]) / (values[left + 1] - values[left]) * (x[left + 1] - x[left]));
+    let mut right = peak;
+    while right + 1 < values.len() && values[right] > level {
+        right += 1;
     }
-    let first = peaks[chosen[0]];
-    let width = pmax(widths[chosen[0]] * step, step);
-    let (low, high) = minimum_maximum(values);
-    let offset = if sign > 0.0 { low } else { high };
-    for (output, &which) in chosen.iter().enumerate() {
-        let second = peaks[which];
-        let row = start + output;
-        if row >= seeds.rows {
-            break;
-        }
-        seeds.set(row, 0, 0.5 * (x[first] + x[second]));
-        seeds.set(row, 1, width);
-        seeds.set(row, 2, sign * value_range);
-        seeds.set(row, 3, offset);
-        seeds.set(row, 4, (x[second] - x[first]).abs());
+    let right_x = (values[right] <= level && right > peak)
+        .then(|| x[right - 1] + (values[right - 1] - level) / (values[right - 1] - values[right]) * (x[right] - x[right - 1]));
+    match (left_x, right_x) {
+        (Some(low), Some(high)) => high - low,
+        (Some(low), None) => 2.0 * (x[peak] - low),
+        (None, Some(high)) => 2.0 * (high - x[peak]),
+        (None, None) => span,
     }
-    Ok((start + chosen_count).min(seeds.rows))
 }
 
-fn prepare_doublet(coords: &Axes, observations: &[f64], valid: &[bool], seeds: &mut Seeds, lower: &mut [f64], upper: &mut [f64]) -> Zr<i64> {
+/// A running mean over `2 * half + 1` samples (fewer at the ends): peaks
+/// are located on it, so one noisy sample does not pass for a line.
+fn running_mean(values: &[f64], half: usize) -> Vec<f64> {
+    let count = values.len();
+    (0..count)
+        .map(|index| {
+            let low = index.saturating_sub(half);
+            let high = (index + half + 1).min(count);
+            values[low..high].iter().sum::<f64>() / (high - low) as f64
+        })
+        .collect()
+}
+
+/// `(L(x_i; center, width))_i`, the unit-height Lorentzian.
+fn unit_lorentzian(x: &[f64], center: f64, width: f64) -> impl Iterator<Item = f64> + '_ {
+    let half_squared = 0.25 * width * width;
+    x.iter().map(move |&v| half_squared / ((v - center) * (v - center) + half_squared))
+}
+
+/// The Lorentzian doublet's cold seeds and data bounds. Bounds: each
+/// line's as the single Lorentzian's (x_0 on the data, width a tenth to
+/// ten times a quarter of the span, height within ten value ranges; the
+/// splitting from zero to the span), so the single model is the doublet
+/// with its second line switched off.
+/// Seeds, for peaks (+) and dips (-), the side with the larger excursion
+/// from the edge baseline first: the strongest line from its half-height
+/// width, then for the second line (a) the strongest same-signed bump left
+/// once the first is subtracted (separated or unequal lines, shoulders),
+/// (b) the first bump split in two (lines closer than their widths),
+/// (c) the strongest opposite-signed bump left (a peak beside a dip), and
+/// (d) the next prominent separate peak of the data. Every seed lists its
+/// lines by center, line B at `x_0 + splitting`.
+fn prepare_lorentzian_doublet(coords: &Axes, observations: &[f64], valid: &[bool], seeds: &mut Seeds, lower: &mut [f64], upper: &mut [f64]) -> Zr<i64> {
     let (x, values) = sorted_compact(coords, observations, valid);
     if values.is_empty() {
         return Ok(0);
@@ -718,51 +731,79 @@ fn prepare_doublet(coords: &Axes, observations: &[f64], valid: &[bool], seeds: &
     let (ylow, yhigh) = minimum_maximum(&values);
     let xspan = pmax(xhigh - xlow, EPSILON);
     let value_range = yhigh - ylow;
-    let step = unique_step(&x);
-    let mut scratch = [0.0_f64; 5];
-    let requested = seeds.rows;
-    let (count, width) = {
-        let mut candidates = if requested > 0 {
-            Seeds { data: &mut *seeds.data, rows: requested, cols: 5 }
-        } else {
-            Seeds { data: &mut scratch, rows: 1, cols: 5 }
-        };
-        let mut count = append_doublet_sign(&x, &values, 1.0, value_range, step, &mut candidates, 0)?;
-        if count < candidates.rows {
-            count = append_doublet_sign(&x, &values, -1.0, value_range, step, &mut candidates, count)?;
-        }
-        if count == 0 {
-            (0usize, xspan / 8.0)
-        } else {
-            (count, candidates.get(0, 1))
-        }
-    };
-    let mut count = count as i64;
-    if count == 0 && requested > 0 {
-        if requested < 2 {
-            return Ok(0);
-        }
-        let high_index = array_argmax(&values);
-        let low_index = array_argmin(&values);
-        let row0 = [x[high_index], width, value_range, ylow, 2.0 * width];
-        let row1 = [x[low_index], width, -value_range, yhigh, 2.0 * width];
-        for column in 0..5 {
-            seeds.set(0, column, row0[column]);
-            seeds.set(1, column, row1[column]);
-        }
-        count = 2;
-    }
+    let (width_low, width_high) = (xspan / 40.0, xspan * 2.5);
     lower[0] = pmax(lower[0], xlow);
     upper[0] = pmin(upper[0], xhigh);
-    lower[1] = pmax(lower[1], width / 10.0);
-    upper[1] = pmin(upper[1], width * 10.0);
-    lower[2] = pmax(lower[2], -10.0 * value_range);
-    upper[2] = pmin(upper[2], 10.0 * value_range);
+    lower[4] = pmax(lower[4], 0.0);
+    upper[4] = pmin(upper[4], xspan);
+    for line in [0, 4] {
+        lower[line + 1] = pmax(lower[line + 1], width_low);
+        upper[line + 1] = pmin(upper[line + 1], width_high);
+        lower[line + 2] = pmax(lower[line + 2], -10.0 * value_range);
+        upper[line + 2] = pmin(upper[line + 2], 10.0 * value_range);
+    }
     lower[3] = pmax(lower[3], ylow - 10.0 * value_range);
     upper[3] = pmin(upper[3], yhigh + 10.0 * value_range);
-    lower[4] = pmax(lower[4], 0.0);
-    upper[4] = pmin(upper[4], 2.0 * xspan);
-    Ok(if requested > 0 { count } else { 0 })
+    if seeds.rows == 0 {
+        return Ok(0);
+    }
+    let count = values.len();
+    let edge_count = 1.max((count / 10).min(20));
+    let mut edge: Vec<f64> = values[..edge_count].to_vec();
+    edge.extend_from_slice(&values[count - edge_count..]);
+    let baseline = numba_median(&edge);
+    let smoothing = (count / 100).max(1);
+    let clamp_width = |width: f64| pmin(pmax(width, width_low), width_high);
+    let mut rows: Vec<[f64; 7]> = Vec::new();
+    let mut push = |first: (f64, f64, f64), second: (f64, f64, f64)| {
+        let (a, b) = if second.0 < first.0 { (second, first) } else { (first, second) };
+        rows.push([a.0, clamp_width(a.1), a.2, baseline, b.0 - a.0, clamp_width(b.1), b.2]);
+    };
+    let excursion = |sign: f64| values.iter().map(|&v| sign * (v - baseline)).fold(f64::NEG_INFINITY, f64::max);
+    let signs = if excursion(1.0) >= excursion(-1.0) { [1.0, -1.0] } else { [-1.0, 1.0] };
+    for sign in signs {
+        let signed: Vec<f64> = values.iter().map(|&v| sign * (v - baseline)).collect();
+        let smooth = running_mean(&signed, smoothing);
+        let first = array_argmax(&smooth);
+        let height = smooth[first];
+        if !(height > 0.0) {
+            continue;
+        }
+        let width = clamp_width(half_height_width(&x, &smooth, first, height, xspan));
+        let line = (x[first], width, sign * height);
+        let rest: Vec<f64> = smooth.iter().zip(unit_lorentzian(&x, x[first], width)).map(|(v, l)| v - height * l).collect();
+        // (a) the strongest same-signed bump left.
+        let second = array_argmax(&rest);
+        if rest[second] > 0.0 {
+            let second_width = half_height_width(&x, &rest, second, rest[second], xspan);
+            push(line, (x[second], second_width, sign * rest[second]));
+        }
+        // (b) the bump as two lines closer than their widths.
+        push((x[first] - 0.25 * width, 0.6 * width, 0.7 * sign * height), (x[first] + 0.25 * width, 0.6 * width, 0.7 * sign * height));
+        // (c) the strongest opposite-signed bump left.
+        let opposite = array_argmin(&rest);
+        if rest[opposite] < 0.0 {
+            let negated: Vec<f64> = rest.iter().map(|v| -v).collect();
+            let opposite_width = half_height_width(&x, &negated, opposite, negated[opposite], xspan);
+            push(line, (x[opposite], opposite_width, sign * rest[opposite]));
+        }
+        // (d) the next prominent separate peak.
+        let mut peaks = Vec::new();
+        let mut widths = Vec::new();
+        peak_properties(&smooth, value_range / 8.0, &mut peaks, &mut widths)?;
+        let separate = peaks.iter().copied().filter(|&p| (x[p] - x[first]).abs() > 0.5 * width && (x[p] - x[second]).abs() > 0.5 * width);
+        if let Some(peak) = separate.max_by(|&a, &b| smooth[a].total_cmp(&smooth[b])) {
+            let peak_width = half_height_width(&x, &smooth, peak, smooth[peak], xspan);
+            push(line, (x[peak], peak_width, sign * smooth[peak]));
+        }
+    }
+    let written = rows.len().min(seeds.rows);
+    for (row, seed) in rows.iter().take(written).enumerate() {
+        for (column, &value) in seed.iter().enumerate() {
+            seeds.set(row, column, value);
+        }
+    }
+    Ok(written as i64)
 }
 
 fn prepare_damped(coords: &Axes, observations: &[f64], valid: &[bool], seeds: &mut Seeds) -> Zr<i64> {

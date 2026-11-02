@@ -48,7 +48,7 @@ fn curves(rolling: bool, ratio: f64) -> (Renderer, Arc<Payload>, Arc<DisplayStat
     let (mut renderer, state) = make_renderer(spec, if rolling { Kind::Rolling } else { Kind::Curve }, ratio);
     let series = [[100.0, 200.0, 100.0], [400.0, 500.0, 400.0], [800.0, 900.0, 800.0]].into_iter().enumerate()
         .map(|(index, y)| CurveSeries { x: quantity(&[1.0, 10.0, 100.0], "MHz"), y: quantity(&y, "count"),
-            valid: Array::full(true, vec![3]), sem: None, x_labels: None, group_key: group(index), label: format!("group {index}") }).collect();
+            valid: Array::full(true, vec![3]), sem: None, sem_dof: None, x_labels: None, group_key: group(index), label: format!("group {index}") }).collect();
     let payload = Arc::new(Payload::Curve(CurveData { revision: 0, generation: "series-hit".into(), x_ref: Some(x_ref),
         group_by: vec![group_ref], series, x_role: None }));
     renderer.last_payload = Some(payload.clone());

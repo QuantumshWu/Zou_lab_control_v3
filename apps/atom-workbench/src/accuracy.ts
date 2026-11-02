@@ -28,13 +28,13 @@ function partialSummary(timesUs:readonly number[],errors:readonly number[],unit?
   return {worst,runs:runs.length,where:runs.length>1?`${runs.length} 段时刻（最早 t = ${at(a)}）`:a<=1?`t ≤ ${at(b)}`:b===last?`t ≥ ${at(a)}`:a===b?`t = ${at(a)}`:`t = ${at(a)}–${at(b)}`};
 }
 /** One sentence for a trajectory some of whose samples miss ε: where, its largest error, and that
- * the rest are within ε ("t ≤ 0.021 μs 估计误差最大 0.61%（超过 0.5%），其余时刻 ≤ 0.5%"); empty when none does. */
+ * the rest are within ε ("t ≤ 0.021 μs 估计误差最大 1.2%（超过 1%），其余时刻 ≤ 1%"); empty when none does. */
 export function partialSentence(timesUs:readonly number[],errors:readonly number[],unit?:DurationUnit,tolerance=POPULATION_TOLERANCE):string{
   const s=partialSummary(timesUs,errors,unit,tolerance);
   return s?`${s.where} 估计误差最大 ${errorPercent(s.worst)}（超过 ${errorPercent(tolerance)}），其余时刻 ≤ ${errorPercent(tolerance)}`:'';
 }
 /** The same, short, for a line that says more (p̄(T)'s error, a stopped solve): "t ≤ 0.021 μs 误差最大
- * 0.61%"; several runs only by their number ("2 段时刻误差最大 0.9%"), the chart's band shows where. */
+ * 1.2%"; several runs only by their number ("2 段时刻误差最大 1.8%"), the chart's band shows where. */
 export function partialShort(timesUs:readonly number[],errors:readonly number[],unit?:DurationUnit,tolerance=POPULATION_TOLERANCE):string{
   const s=partialSummary(timesUs,errors,unit,tolerance);return s?`${s.runs>1?`${s.runs} 段时刻`:`${s.where} `}误差最大 ${errorPercent(s.worst)}`:'';
 }

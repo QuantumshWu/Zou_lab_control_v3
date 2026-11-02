@@ -76,6 +76,10 @@ pub struct CurveSeries {
     pub valid: Array,
     /// Standard error of each MEAN point, canonical unit.
     pub sem: Option<Array>,
+    /// The degrees of freedom of each `sem`: `n - 1` where the point's own
+    /// `n` repeats estimated it, infinite where a stated sigma did (one
+    /// repeat). The fit reads it (the Student-t likelihood).
+    pub sem_dof: Option<Array>,
     pub x_labels: Option<Vec<String>>,
     pub group_key: Vec<AxisValue>,
     pub label: String,

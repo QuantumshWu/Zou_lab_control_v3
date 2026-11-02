@@ -121,7 +121,7 @@ pub fn describe_panel(configuration: &ResolvedConfiguration, live_window: bool) 
     let structure = configuration.schema.as_deref().map(|schema| {
         Json::Array(schema_structure(schema).iter().map(|group| Json::Array(group.iter().map(|(name, size)| json!([name, size])).collect())).collect())
     });
-    Ok(json!({
+    let mut described = json!({
         "kind": configuration.kind().value(),
         "structure": structure,
         "target": Value::Map(configuration.target()?).to_json(),
@@ -136,7 +136,11 @@ pub fn describe_panel(configuration: &ResolvedConfiguration, live_window: bool) 
             "expression": expression,
             "error": configuration.fit_expression_error(),
         },
-    }))
+    });
+    if let Some(unavailable) = &configuration.fit_unavailable {
+        described["fit"]["unavailable"] = Json::String(unavailable.clone());
+    }
+    Ok(described)
 }
 
 /// Describe a blank authored kind without data or a host: its schema's

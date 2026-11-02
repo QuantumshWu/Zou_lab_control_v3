@@ -156,9 +156,17 @@ class RecordQueue:
             self._condition.notify_all()
 
     def read(self, n: int, *, timeout: float, exact: bool) -> list[object]:
+        """``exact``: wait up to ``timeout`` for all ``n`` records, else raise.
+
+        Not exact: up to ``n`` records, as soon as there is one -- what a
+        reader that drains the queue in batches needs, so a backlog is taken
+        in one call instead of one call per record.
+        """
+
         requested = int(n)
         if requested <= 0:
             raise ValueError("n must be positive")
+        wanted = requested if exact else 1
         deadline = time.monotonic() + max(0.0, float(timeout))
         with self._condition:
             while True:
@@ -166,7 +174,7 @@ class RecordQueue:
                     raise RuntimeError(
                         f"{self._what} failed while producing records: {self._failure}"
                     ) from self._failure
-                if len(self._queue) >= requested:
+                if len(self._queue) >= wanted:
                     break
                 if not self._armed or not self._accepting:
                     break

@@ -78,12 +78,15 @@ pub struct FitTargetQuery<'a> {
     pub previous_expression_failure: Option<&'a (String, String)>,
 }
 
-/// `resolve_fit_target`'s answer: the request (none for no model) and the
-/// `(expression, reason)` an unparsable expression left.
+/// `resolve_fit_target`'s answer: the request (none for no model), the
+/// `(expression, reason)` an unparsable expression left, and why a fit the
+/// target names was not applied (a model this catalogue no longer has: the
+/// panel opens with its fit inactive and says so).
 #[derive(Clone, Debug, Default)]
 pub struct FitResolution {
     pub request: Option<FitRequest>,
     pub expression_failure: Option<(String, String)>,
+    pub unavailable: Option<String>,
 }
 
 /// The fit layer, as configuration sees it.

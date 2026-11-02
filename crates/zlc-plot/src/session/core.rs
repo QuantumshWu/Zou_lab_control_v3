@@ -32,8 +32,7 @@ use crate::projection::{Payload, SchemaCache};
 use crate::pulse::PulseTimelineData;
 use crate::render::scale::AxisScale;
 use crate::units::UnitRegistry;
-use zlc_core::schema::{CodeBase, Coordinates, DatasetSchema, DomainRole, ValidityContract};
-use crate::projection::model::PRIMARY_INDEX;
+use zlc_core::schema::DatasetSchema;
 
 use super::evaluation::{ClassifierEvaluation, FitEvaluation, ThresholdKey};
 use super::fit_layer::EngineFitLayer;
@@ -828,57 +827,7 @@ pub(crate) fn facet_cell_count(spec: &PlotSpec, payload: &Payload) -> Option<usi
     Some(match payload { Payload::Facet(facet) => facet.cells.len(), _ => 0 })
 }
 
-/// What a schema IS without what its coordinates currently read
-/// (`structure_fingerprint`): two schemas with equal keys have one geometry.
-pub(crate) fn structure_key(schema: &DatasetSchema) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-    for (role, coded) in [(DomainRole::Repeat, true), (DomainRole::Point, true), (DomainRole::Cell, false)] {
-        let domain = schema.domain(role);
-        let sliding: Vec<&str> = domain.axes().iter().filter(|axis| axis.role() == PRIMARY_INDEX).map(|axis| axis.id()).collect();
-        for axis in domain.axes() {
-            let (coordinates, origin, origins) = match axis.coordinates() {
-                Coordinates::Index { origin, .. } => (None, *origin, None),
-                Coordinates::Numeric(buffer) => (Some(buffer.len()), 0, None),
-                Coordinates::Values(values) => (Some(values.len()), 0, None),
-                Coordinates::OriginsAndOffsets { origins, offsets } => (Some(offsets.len()), 0, Some(origins.len())),
-            };
-            let slides = !sliding.is_empty() && (sliding.contains(&axis.id()) || axis.coordinate_of().is_some_and(|of| sliding.contains(&of))
-                                                  || origins.is_some());
-            let labels = axis.labels().map(<[_]>::len);
-            if slides {
-                let coordinates = if origins.is_none() && coordinates.is_some() { "sliding".to_owned() } else { format!("{coordinates:?}") };
-                let _ = write!(out, "[{} {} {} sliding {coordinates} sliding {:?} {:?}]", axis.id(), axis.name(), axis.role(),
-                               labels.map(|_| "sliding"), origins.map(|_| "sliding"));
-            } else {
-                let _ = write!(out, "[{} {} {} {} {coordinates:?} {origin} {labels:?} {origins:?}]", axis.id(), axis.name(), axis.role(), axis.len());
-            }
-            let _ = write!(out, "{:?} {:?} {:?};", axis.unit(), axis.coordinate_frame(), axis.coordinate_of());
-        }
-        for (index, size) in domain.physical_shape().iter().enumerate() {
-            let slides = !sliding.is_empty() && (coded || domain.axes().get(index).is_some_and(|axis| sliding.contains(&axis.id())));
-            if slides { out.push_str("shape sliding;") } else { let _ = write!(out, "shape {size};"); }
-        }
-        if !coded { out.push_str("codes none;"); }
-        else if !sliding.is_empty() { out.push_str("codes sliding;"); }
-        else {
-            for axis in domain.axes() {
-                let mapping = domain.mapping(axis.id()).expect("mapped axis");
-                let base = match mapping.base() {
-                    CodeBase::Range { start, step, len } => format!("range {start} {step} {len}"),
-                    CodeBase::Explicit(values) => format!("{:?}", values.as_slice()),
-                };
-                let _ = write!(out, "code {base} {} {};", mapping.inner(), mapping.outer());
-            }
-        }
-    }
-    let value = schema.value();
-    let validity = match value.validity() { ValidityContract::Value => "value".to_owned(), ValidityContract::Components(ids) => format!("{ids:?}") };
-    let _ = write!(out, "value {:?} {:?} {:?} {validity}", schema.dtype(), value.unit(), value.name());
-    out
-}
-
-fn structure_equal(a: &Arc<DatasetSchema>, b: &Arc<DatasetSchema>) -> bool { Arc::ptr_eq(a, b) || structure_key(a) == structure_key(b) }
+fn structure_equal(a: &Arc<DatasetSchema>, b: &Arc<DatasetSchema>) -> bool { Arc::ptr_eq(a, b) || a.structure_key() == b.structure_key() }
 
 /// `_surface_plan_for(spec, payload, state)`.
 pub(crate) fn surface_plan_for(scene: &Scene, services: &SessionServices, device_pixel_ratio: f64) -> Result<SurfacePlan> {

@@ -285,6 +285,7 @@ impl FitLayer for RecordedFit {
                 model: self.model(request["model"].as_str().unwrap()), target: dec_map(&request["target"]), native: None,
             }),
             expression_failure: answer["failure"].as_array().map(|pair| (pair[0].as_str().unwrap().into(), pair[1].as_str().unwrap().into())),
+            unavailable: None,
         })
     }
     fn expression_text(&self, units: &FitUnits, model: &FitModelInfo, target: &ValueMap) -> Result<String> {

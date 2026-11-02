@@ -133,9 +133,12 @@ pub fn selection_outputs(subject: &SelectionSubject) -> &'static [(&'static str,
 
 /// One region's cut, and what it derives: `region` the axis terms, `band` a value
 /// band (a bound on the measured value restricts which samples count, v2
-/// `_FILTER_DOMAINS`), `outputs` its catalogue.
+/// `_FILTER_DOMAINS`), `outputs` its catalogue. `drawn` is the operator's region a
+/// plan came from: on a history window whose coordinates moved with its records it
+/// is cut anew from them.
 #[derive(Clone)]
-pub struct RoiPlan { restriction: Restriction, band: Option<(f64, f64)>, frame: Arc<DatasetSchema>, outputs: &'static [(&'static str, &'static str)] }
+pub struct RoiPlan { restriction: Restriction, band: Option<(f64, f64)>, frame: Arc<DatasetSchema>, outputs: &'static [(&'static str, &'static str)],
+                     drawn: Option<Arc<(SelectionSubject, SelectorState)>> }
 
 impl RoiPlan {
     /// v2 `PlotSelectionSource._translate` + `SelectionBridge._build_selection`: the
@@ -161,7 +164,8 @@ impl RoiPlan {
         if let (Some(y), Some(bounds)) = (&subject.y, y_bounds) {
             intersect(&mut terms, coordinate_term(schema, y, &Coordinate::Real(bounds.low), &Coordinate::Real(bounds.high), subject.y_coordinate_frame.as_deref())?)?;
         }
-        Self::scoped(schema, subject, terms, band, if y_bounds.is_some() { &AREA_OUTPUTS } else { &RANGE_OUTPUTS }).map(Some)
+        let plan = Self::scoped(schema, subject, terms, band, if y_bounds.is_some() { &AREA_OUTPUTS } else { &RANGE_OUTPUTS })?;
+        Ok(Some(Self { drawn: Some(Arc::new((subject.clone(), *selector))), ..plan }))
     }
 
     /// The subject's explicit scope and source window joined to `terms`.
@@ -185,7 +189,7 @@ impl RoiPlan {
         let selection = if terms.is_empty() { None } else { Some(Selection::new(terms)?) };
         let restriction = Restriction::new(schema, selection.as_ref())?;
         let frame = match band { Some(_) => banded_schema(restriction.schema())?, None => restriction.schema().clone() };
-        Ok(Self { restriction, band, frame, outputs })
+        Ok(Self { restriction, band, frame, outputs, drawn: None })
     }
 
     /// The names and labels this region derives.
@@ -238,9 +242,14 @@ impl RoiPlan {
     }
 
     /// The same, for planes already in hand.
+    /// A drawn region on a history window whose coordinates have since moved with
+    /// its records (`DatasetSchema::holds`) is cut anew from the moved coordinates;
+    /// any other change of schema needs a new plan.
     pub fn apply_source(&self, source: &Source) -> Result<Snapshot> {
         if **source.schema() != **self.restriction.source() {
-            return Err(RoiError::new(RoiErrorKind::Replan, "ROI source schema changed; create a new plan from the accepted subject"));
+            let replan = || RoiError::new(RoiErrorKind::Replan, "ROI source schema changed; create a new plan from the accepted subject");
+            let drawn = self.drawn.as_ref().filter(|_| self.restriction.source().holds(source.schema())).ok_or_else(replan)?;
+            return Self::for_region(source.schema(), &drawn.0, &drawn.1)?.ok_or_else(replan)?.apply_source(source);
         }
         let cut = self.restriction.apply(source).map_err(|message| RoiError::new(RoiErrorKind::Value, message))?;
         match self.band { Some(band) => banded(&cut, &self.frame, band), None => Ok(cut) }
@@ -420,4 +429,33 @@ pub fn plan_from_metadata(schema: &Arc<DatasetSchema>, metadata: &str) -> Result
     let revision = count(&field(&selector, "revision")).ok_or_else(|| malformed("selector revision"))?;
     let selector = SelectorState::new(selected, revision, count(&field(&selector, "facet_index"))).map_err(refused)?;
     RoiPlan::create(schema, &subject, &selector)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::configuration::selectors::NumericRange;
+
+    fn planes(snapshot: &Snapshot) -> Vec<u8> { snapshot.segments().flat_map(|part| part.data().values().as_bytes().to_vec()).collect() }
+
+    /// A region drawn on a sliding stamped window keeps its plan: each later record's
+    /// window is cut anew from its moved coordinates, exactly as a fresh plan cuts it;
+    /// a window of another structure asks for a new plan.
+    #[test]
+    fn a_drawn_region_follows_a_sliding_window() {
+        let (_runtime, reads, plain) = crate::document::stamped_waveform_windows();
+        let sample = AxisRef::new(AxisDomain::Point, "sample").unwrap();
+        let subject = SelectionSubject { plot_kind: PlotKind::Curve, x: Some(sample), y: None, x_coordinate_frame: None, y_coordinate_frame: None,
+                                         scope: Vec::new(), source_window: None };
+        // 25-41 ms: the newest record's samples in the first window, older ones later.
+        let selector = SelectorState::new(SelectorValue::XRange(NumericRange::new(0.0195, 0.0415).unwrap()), 1, None).unwrap();
+        let plan = RoiPlan::for_region(reads[0].schema(), &subject, &selector).unwrap().unwrap();
+        for read in &reads {
+            let fresh = RoiPlan::for_region(read.schema(), &subject, &selector).unwrap().unwrap();
+            let (kept, made) = (plan.apply(read).unwrap(), fresh.apply(read).unwrap());
+            assert!(**kept.schema() == **made.schema() && planes(&kept) == planes(&made));
+            assert!(!planes(&kept).is_empty());
+        }
+        assert!(plan.apply(&plain).is_err_and(|error| error.kind == RoiErrorKind::Replan));
+    }
 }

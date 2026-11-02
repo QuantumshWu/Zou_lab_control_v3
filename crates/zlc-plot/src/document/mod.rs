@@ -120,10 +120,18 @@ pub(crate) enum StagedScene { Display, Prepared(PreparedPlot), Shown }
 #[derive(Clone)]
 pub(crate) struct Staged<R> { pub read: R, pub scene: StagedScene, pub configuration: Arc<ResolvedConfiguration>, pub live_data: bool }
 
-/// The ROI a panel's selection planned, with its identity.
-#[derive(Clone, PartialEq)]
+/// The ROI a panel's selection planned, with its identity. The dataset is one by its
+/// structure (`DatasetSchema::holds`): a history window's shot times and sample-time
+/// origins move with every record without asking for a new plan.
+#[derive(Clone)]
 pub(crate) struct RoiKey {
     pub signal: Option<String>, pub window: i64, pub schema: Arc<zlc_core::schema::DatasetSchema>, pub subject: Json, pub kind: String, pub value: Json,
+}
+impl PartialEq for RoiKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.signal == other.signal && self.window == other.window && self.subject == other.subject && self.kind == other.kind
+            && self.value == other.value && (Arc::ptr_eq(&self.schema, &other.schema) || self.schema.holds(&other.schema))
+    }
 }
 
 /// The document as it stood when a command began (`_begin_presentation`).
@@ -663,4 +671,55 @@ pub(crate) fn gesture_updates(before: &ValueMap, after: &ValueMap) -> ValueMap {
     }
     if !parameters.is_empty() { recipe.insert("parameters", Value::Map(parameters)); }
     recipe
+}
+
+/// A stamped continuous waveform (three records of 4 samples, 1 ms apart, records
+/// 10 ms apart) and an unstamped one of the same shape, each read as a 3-record window.
+#[cfg(test)]
+pub(crate) fn stamped_waveform_windows() -> (zlc_core::runtime::Runtime, Vec<zlc_core::runtime::Read>, zlc_core::runtime::Read) {
+    use serde_json::json;
+    use zlc_core::dataset::{DataBlock, Validity};
+    use zlc_core::runtime::{Bundle, Declaration, Input, Runtime, Storage};
+    use zlc_core::schema::{Axis, Coordinates, DatasetSchema, Domain, ValidityContract, ValueSchema};
+    use zlc_core::{DType, OwnedBuffer};
+    let one = |id: &str, role: &str| Domain::dense(vec![1], vec![Axis::new(id.into(), id.into(), role.into(), Coordinates::Index { origin: 0, len: 1 }, None, None, None, None).unwrap()]).unwrap();
+    let samples = Axis::new("sample".into(), "sample time".into(), "sample-time".into(),
+        Coordinates::Numeric(OwnedBuffer::from_vec(vec![0.0, 0.001, 0.002, 0.003]).into()), Some("s".into()), None, None, None).unwrap();
+    let wave = DatasetSchema::new(one("repeat", "repeat"), Domain::dense(vec![4], vec![samples]).unwrap(), one("zlc_data.scalar", "scalar"),
+        ValueSchema::new(DType::F64, Some("V".into()), None, ValidityContract::Value).unwrap()).unwrap();
+    let runtime = Runtime::new();
+    let generation = runtime.begin("scope", vec![Declaration { signal: "wave".into(), schema: wave.clone(), storage: Storage::Latest },
+        Declaration { signal: "plain".into(), schema: wave.clone(), storage: Storage::Latest }], json!({})).unwrap();
+    let leases = [runtime.retain_history(&generation, "wave", 3).unwrap(), runtime.retain_history(&generation, "plain", 3).unwrap()];
+    let block = |shot: u64| DataBlock::new(wave.clone(), OwnedBuffer::from_vec((0..4).map(|k| (shot * 4 + k) as f64).collect()).into(), Validity::Uniform(true), None).unwrap();
+    let mut reads = Vec::new();
+    for shot in 0..5u64 {
+        runtime.commit(&generation, &Bundle { inputs: vec![
+            Input::Event { signal: "wave".into(), ordinal: shot, data: block(shot), origin: None, shot_time: Some(0.01 * shot as f64) },
+            Input::Event { signal: "plain".into(), ordinal: shot, data: block(shot), origin: None, shot_time: None },
+        ], metadata: json!({}), parents: vec![] }).unwrap();
+        if shot >= 2 { reads.push(runtime.read_views(&[(generation.clone(), "wave".into(), Some(3))]).pop().unwrap().unwrap()); }
+    }
+    let plain = runtime.read_views(&[(generation.clone(), "plain".into(), Some(3))]).pop().unwrap().unwrap();
+    drop(leases);
+    (runtime, reads, plain)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A region's identity holds while a sliding window's shot times move under it,
+    /// and changes with the dataset's structure.
+    #[test]
+    fn region_identity_follows_structure_not_sliding_coordinates() {
+        let (_runtime, reads, plain) = stamped_waveform_windows();
+        let key = |schema: &Arc<zlc_core::schema::DatasetSchema>| RoiKey { signal: Some("wave".into()), window: 3, schema: schema.clone(),
+            subject: serde_json::json!({}), kind: "x_range".into(), value: serde_json::json!([0.0, 1.0]) };
+        let first = key(reads[0].schema());
+        assert!(reads.windows(2).all(|pair| **pair[0].schema() != **pair[1].schema()), "each record moves the window's coordinates");
+        assert!(reads.iter().all(|read| key(read.schema()) == first), "no re-plan while the window slides");
+        assert!(key(plain.schema()) != first, "another structure re-plans");
+        assert!(RoiKey { value: serde_json::json!([0.0, 2.0]), ..key(reads[1].schema()) } != first, "another selector re-plans");
+    }
 }

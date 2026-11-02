@@ -16,6 +16,7 @@
 //! frames precondition the P-Q edges the Schur complement leaves to GMRES.
 use super::*;
 use super::charge_set::LatticeSets;
+use super::fold::RunFold;
 use super::operator::LatticeOperator;
 use super::preconditioner::{FloquetBatch,Preconditioning};
 use super::krylov::{self,KrylovOptions,KrylovTiming,System};
@@ -61,7 +62,7 @@ pub struct Lattice<'a>{
 }
 impl<'a> Lattice<'a>{
     /// The lattice of `sets` with the run's fold `fold`.
-    pub fn new(prepared:&'a LatticePrepared,fold:&'a super::fold::FoldLibrary,sets:LatticeSets)->Result<Self,String>{
+    pub fn new(prepared:&'a LatticePrepared,fold:RunFold<'a>,sets:LatticeSets)->Result<Self,String>{
         if sets.explicit.first()!=Some(&prepared.generator.zero){return Err("The explicit set must start with the zero charge".into());}
         let modes=sets.modes();let op=LatticeOperator::new(prepared,fold,&modes)?;let operator_work=op.work_split();
         Ok(Self{modes,op,preconditioning:Preconditioning::new(prepared)?,batches:Vec::new(),work:InnerWork{operator_work,..InnerWork::default()}})
@@ -108,7 +109,7 @@ mod tests{
         let mut explicit=vec![p.generator.zero.clone(),s.clone(),opposite(&s)];
         explicit.sort_by_key(|q|(q.iter().map(|&k|k.unsigned_abs()).sum::<u32>(),q.clone()));
         let ring=super::super::charge_set::ring(&p,&explicit).unwrap();
-        let mut lattice=Lattice::new(&p,&p.fold,LatticeSets{explicit,ring}).unwrap();
+        let mut lattice=Lattice::new(&p,RunFold::whole(&p.fold),LatticeSets{explicit,ring}).unwrap();
         let size=lattice.operator().dimension();let dense=lattice.operator().dense();let centre=lattice.operator().centre;
         let x=symmetric_field(lattice.operator(),1);
         for pole in[Pole::Real(0.7),Pole::Zero]{

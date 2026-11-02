@@ -73,10 +73,13 @@ impl DataView {
                 None => counts_column.iter().zip(&y_column).map(|(c, v)| *c > 0 && v.is_finite()).collect(),
             };
             let label = self.key_label(&key);
+            // `sem_from_moments`: a bucket of n > 1 repeats estimates its own
+            // variance; one repeat takes the stated sigma, if any.
+            let sem_dof = sem_column.as_ref().map(|_| counts_column.iter().map(|&n| if n > 1 { (n - 1) as f64 } else { f64::INFINITY }).collect::<Vec<f64>>());
             CurveSeries {
                 x: shown_x, x_labels: shown_labels,
                 y: QuantityArray::new(Array::vector(y_column), self.value_unit.clone(), self.value_display_unit.clone(), self.value_label()),
-                valid: Array::vector(valid_column), sem: sem_column.map(Array::vector), group_key: key, label,
+                valid: Array::vector(valid_column), sem: sem_column.map(Array::vector), sem_dof: sem_dof.map(Array::vector), group_key: key, label,
             }
         }).collect()
     }

@@ -48,11 +48,11 @@ impl FitEvaluation {
 
 fn cell(selection: &FitSelection, warm_start: Seed) -> FitCell {
     match &selection.regular_image {
-        Some(image) => FitCell { data: CellData::Image(image.clone()), sigma: None, selected_indices: None,
+        Some(image) => FitCell { data: CellData::Image(image.clone()), sigma: None, sigma_dof: None, selected_indices: None,
                                  data_revision: selection.data_revision as i64, warm_start },
         None => FitCell {
             data: CellData::Points { coordinates: selection.coordinates.clone(), observations: Some(selection.observations.clone()) },
-            sigma: selection.observation_sigma.clone(), selected_indices: selection.selected_indices.clone(),
+            sigma: selection.observation_sigma.clone(), sigma_dof: selection.observation_dof.clone(), selected_indices: selection.selected_indices.clone(),
             data_revision: selection.data_revision as i64, warm_start,
         },
     }

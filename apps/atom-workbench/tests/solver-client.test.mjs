@@ -124,7 +124,7 @@ test('every POST asks for the fixed population accuracy, whatever the settings c
  for(const [index,stray] of [undefined,.003731,.02,'0.005'].entries()){
   const scene=scenario();if(stray!==undefined)scene.dynamics.populationTolerance=stray;
   const pending=client.solve(scene,scene.dynamics);await waitCalls(mock,index+1);
-  assert.equal(mock.calls[index].body.options.populationTolerance,.005);
+  assert.equal(mock.calls[index].body.options.populationTolerance,POPULATION_TOLERANCE);
   reply(mock.calls[index],fixture(scene));await pending;
  }
 });

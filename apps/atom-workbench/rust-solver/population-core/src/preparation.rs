@@ -58,12 +58,11 @@ pub struct Source{
     pub frame_shift:Vec<Charge>,
 }
 
-/// Smallest ratio between the slowest far and the fastest near significant
-/// frequency that makes the far side a folded shell
-/// (`lattice::classification`), and the ratio at which an excited manifold
-/// takes a frame of its own (`manifold_frames`): the frame is there so that
-/// the fold finds its gap. Measured: half and twice the ratio change nothing,
-/// at the fold (7 runs) or at the manifolds (3 runs).
+/// The ratio at which an excited manifold takes a frame of its own
+/// (`manifold_frames`): the frame is there so that the fold finds its gap
+/// (`lattice::classification::fold_gap`, which this ratio exceeds). An exact
+/// change of frame: the ratio decides efficiency only. Measured: half and
+/// twice the ratio change nothing (3 runs).
 pub const FOLD_GAP_RATIO:f64=100.;
 /// An excited manifold is a set of excited levels (H0's diagonal, sorted)
 /// split from the rest at a gap of at least FOLD_GAP_RATIO times the larger

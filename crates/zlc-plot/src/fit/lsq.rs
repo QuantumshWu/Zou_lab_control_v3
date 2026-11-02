@@ -297,7 +297,7 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
     )?;
     let nested_cell = FitCell { warm_start: None, ..cell.clone() };
     let nested = engine.nested_population_fit(spec_in, std::slice::from_ref(&nested_cell), request.bounds.as_ref(), opts, request.cancelled)?;
-    engine.settle_population(&spec, result, nested.into_iter().next().flatten().as_ref(), opts)
+    engine.settle_population(&spec, result, nested.into_iter().next().flatten().as_ref(), opts, false)
 }
 
 /// `_covariance(jac, reduced)`: the rank-tested inverse information of the
