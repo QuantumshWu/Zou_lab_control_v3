@@ -38,6 +38,9 @@ pub struct Ensemble{
     pub seconds:[f64;4],
     /// Per pair of grids (from, to), the interpolation matrices along x and y on the device.
     matrices:HashMap<(usize,usize),(Buffer,Buffer)>,
+    /// The moves' scratch on the device (the list, the half-resampled planes, the norms), grown
+    /// as needed.
+    scratch:[Option<Buffer>;3],
 }
 
 impl Ensemble{
@@ -47,7 +50,7 @@ impl Ensemble{
         // State and the two derivative planes per trajectory.
         let limit=ladder.iter().map(|g|(memory/2/(3*5*g.points()*8)).clamp(1,trajectories)).collect();
         Ensemble{gpu,template,classes:ladder.iter().map(|_|None).collect(),occupant:ladder.iter().map(|_|vec![]).collect(),limit,ladder,
-            place:vec![Place::Lost;trajectories],weights:vec![1.;trajectories],tolerance,moves:0,refused:0,seconds:[0.;4],matrices:HashMap::new()}
+            place:vec![Place::Lost;trajectories],weights:vec![1.;trajectories],tolerance,moves:0,refused:0,seconds:[0.;4],matrices:HashMap::new(),scratch:[None,None,None]}
     }
     fn engine(&mut self,class:usize,model:&Model)->Result<&mut Engine,String>{
         if self.classes[class].is_none(){
@@ -132,9 +135,12 @@ impl Ensemble{
                 let pair=(up(interpolation(a.nx,a.dx,b.nx,b.dx))?,up(interpolation(a.ny,a.dx,b.ny,b.dx))?);self.matrices.insert((from,to),pair);
             }
             let(ax,ay)=&self.matrices[&(from,to)];
-            let s=&self.gpu.stream;let count=moves.len();
-            let list=Buffer::new(count*8)?;s.upload(&list,&moves)?;
-            let tmp=Buffer::new(count*5*a.ny*b.nx*8)?;let norm=Buffer::new(count*4)?;s.zero(&norm)?;
+            let count=moves.len();
+            for(k,bytes)in [count*8,count*5*a.ny*b.nx*8,count*4].into_iter().enumerate(){
+                if self.scratch[k].as_ref().is_none_or(|x|x.bytes<bytes){self.scratch[k]=Some(Buffer::new(bytes)?);}
+            }
+            let s=&self.gpu.stream;let[Some(list),Some(tmp),Some(norm)]=&self.scratch else{unreachable!()};
+            s.upload(list,&moves)?;s.zero_at(norm,0,count*4)?;
             let(source,target)=(self.classes[from].as_ref().unwrap(),self.classes[to].as_ref().unwrap());
             let(src_traj,src_state,src_weights,src_components)=source.device();let(dst_traj,dst_state,dst_weights,_)=target.device();
             let n=count as i32;let blocks=|total:usize|(total.div_ceil(256) as u32,1,1);
@@ -169,8 +175,6 @@ impl Ensemble{
     /// How many trajectories each grid holds.
     pub fn census(&self)->Vec<usize>{self.occupant.iter().map(|o|o.iter().filter(|x|x.is_some()).count()).collect()}
     pub fn engines(&self)->impl Iterator<Item=&Engine>{self.classes.iter().flatten()}
-    pub fn engines_mut(&mut self)->impl Iterator<Item=&mut Engine>{self.classes.iter_mut().flatten()}
-    pub fn template(&self)->&Settings{&self.template}
     pub fn reseed(&mut self,seed:u64)->Result<(),String>{self.template.seed=seed;for e in self.classes.iter_mut().flatten(){e.reseed(seed);}Ok(())}
     /// Scales the trajectories' weights (a stratified initial state's).
     pub fn scale_weights(&mut self,factors:&[f64])->Result<(),String>{

@@ -2,7 +2,9 @@
 //! meet their targets -- as QuTiP's mcsolve with a target tolerance: the populations' and the
 //! population groups' errors at most ε absolute, the temperatures' at most
 //! `TEMPERATURE_TOLERANCE` relative -- each batch's merged estimates published as a checkpoint.
-//! A batch is sized from the first steps' cost so that it takes about `BATCH_SECONDS`.
+//! The first batch is the fewest trajectories; each next one is sized from the last one's wall
+//! time so that it takes about `BATCH_SECONDS` (a batch's cost per trajectory falls with its size,
+//! so the estimate from a smaller batch is an upper bound).
 use crate::engine::{Cap,Internal,Settings,REC_EXCITED,REC_GROUND,REC_KX,REC_TAIL,REC_X};
 use crate::ensemble::{ladder,Ensemble,Place};
 use crate::gpu::Gpu;
@@ -17,11 +19,12 @@ pub const TEMPERATURE_TOLERANCE:f64=0.1;
 /// The step's largest size (us): the splitting's error in T is about 1.5 % at it (against the 1D
 /// reference over 2 ms: −5 % at 0.8 us, within the 2 % statistics at 0.4 and 0.2 us).
 const LARGEST_STEP:f64=0.4;
-/// The most trajectories per batch and per run, and the fewest per batch.
+/// The most trajectories per batch and per run, and the fewest per batch (the kernels' unit).
 const BATCH:usize=512;
 const MOST_TRAJECTORIES:usize=8192;
-const FEWEST:usize=64;
-/// A batch's planned duration (s): checkpoints come at least this often while the cost holds.
+const FEWEST:usize=8;
+/// A batch's planned duration (s): checkpoints come about this often while the cost holds (the
+/// app ends a solve whose checkpoints stop for two minutes).
 const BATCH_SECONDS:f64=30.;
 /// The distributions' sample times.
 const DISTRIBUTION_SAMPLES:usize=11;
@@ -178,11 +181,12 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
     let mut pbins:Vec<Vec<f64>>=samples.iter().map(|_|vec![0.;positions.len()*positions.len()]).collect();
     let mut solution=Solution::default();
     let mut run=0usize;let mut census=vec![vec![];n_times];
-    let mut size=BATCH;
+    let mut size=FEWEST;
     for batch in 0..{
         if run>=MOST_TRAJECTORIES{break;}
         let batch_size=size.min(MOST_TRAJECTORIES-run).min(ensemble.capacity(first));
         let(internal,weights)=stratified(&initial,batch_size);
+        let(begun,built)=(std::time::Instant::now(),ensemble.seconds[3]);
         ensemble.reseed(0x5EED_2D^((batch as u64+1)*0x9E37_79B9_7F4A_7C15))?;
         loop{
             ensemble.start(first,&internal,temperature,&model)?;
@@ -197,7 +201,6 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
             ensemble.migrate(&records,&model)?;
             break;
         }
-        let begun=std::time::Instant::now();
         for i in 1..n_times{
             let distributions=samples.contains(&i);
             for s in 0..per{ensemble.step(s+1==per,distributions&&s+1==per)?;}
@@ -205,12 +208,10 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
             accumulate(&model,&groups,&ensemble,&records,&mut sums[i]);census[i]=ensemble.census();
             if let Some(k)=samples.iter().position(|&s|s==i){collect(&mut ensemble,&display,&positions,&velocities,&mut vbins[k],&mut pbins[k])?;}
             ensemble.migrate(&records,&model)?;
-            // The first output interval's cost sizes this and the next batches.
-            if i==1&&batch==0{
-                let projected=begun.elapsed().as_secs_f64()*(n_times-1) as f64;
-                size=((batch_size as f64*BATCH_SECONDS/projected.max(1e-3)) as usize/FEWEST*FEWEST).clamp(FEWEST,BATCH);
-            }
         }
+        // The next batch: this one's size scaled to BATCH_SECONDS (the grids' tables, built once, aside).
+        let wall=begun.elapsed().as_secs_f64()-(ensemble.seconds[3]-built);
+        size=((batch_size as f64*BATCH_SECONDS/wall.max(1e-3)) as usize/FEWEST*FEWEST).clamp(FEWEST,BATCH);
         run+=batch_size;
         solution=assemble(&model,&sums,omega,&samples,&velocities,&vbins,&positions,&pbins,run,ensemble.refused);
         solution.grids=steps_ladder.iter().map(|q|q.nx).collect();solution.census=census.clone();solution.seconds=ensemble.seconds;

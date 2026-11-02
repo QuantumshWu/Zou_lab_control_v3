@@ -231,6 +231,11 @@ impl Stream{
         call!("cuMemcpyDtoDAsync",cuMemcpyDtoDAsync_v2(to.pointer+to_at as u64,from.pointer+from_at as u64,bytes,self.stream))
     }
     pub fn zero(&self,buffer:&Buffer)->Result<(),String>{call!("cuMemsetD8Async",cuMemsetD8Async(buffer.pointer,0,buffer.bytes,self.stream))}
+    /// Zeroes `bytes` of the buffer from byte offset `at`.
+    pub fn zero_at(&self,buffer:&Buffer,at:usize,bytes:usize)->Result<(),String>{
+        assert!(at+bytes<=buffer.bytes,"zeroing beyond the buffer");
+        call!("cuMemsetD8Async",cuMemsetD8Async(buffer.pointer+at as u64,0,bytes,self.stream))
+    }
     pub fn synchronize(&self)->Result<(),String>{call!("cuStreamSynchronize",cuStreamSynchronize(self.stream))}
     pub fn record(&self,event:&Event)->Result<(),String>{call!("cuEventRecord",cuEventRecord(event.event,self.stream))}
     /// Records the launches made by `body` on this stream as a graph, to replay them at one launch's cost.

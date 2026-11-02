@@ -715,28 +715,29 @@ extern "C" __global__ void __launch_bounds__(256,2) jump_apply(float2* state,con
 }
 
 // A real symmetric 3 x 3 matrix's eigen-decomposition by cyclic Jacobi rotations: a becomes
-// diagonal (the eigenvalues), the columns of v the eigenvectors.
-__device__ void jacobi3(double a[3][3],double v[3][3]){
-    for(int i=0;i<3;i++)for(int j=0;j<3;j++)v[i][j]=i==j?1.:0.;
-    for(int sweep=0;sweep<50;sweep++){
-        const double off=a[0][1]*a[0][1]+a[0][2]*a[0][2]+a[1][2]*a[1][2];
-        if(off<=1e-30*(a[0][0]*a[0][0]+a[1][1]*a[1][1]+a[2][2]*a[2][2])+1e-300)break;
+// diagonal (the eigenvalues), the columns of v the eigenvectors. Single precision, as the states
+// (consumer GPUs run double precision at a small fraction of the rate).
+__device__ void jacobi3(float a[3][3],float v[3][3]){
+    for(int i=0;i<3;i++)for(int j=0;j<3;j++)v[i][j]=i==j?1.f:0.f;
+    for(int sweep=0;sweep<20;sweep++){
+        const float off=a[0][1]*a[0][1]+a[0][2]*a[0][2]+a[1][2]*a[1][2];
+        if(off<=1e-14f*(a[0][0]*a[0][0]+a[1][1]*a[1][1]+a[2][2]*a[2][2])+1e-30f)break;
         for(int p=0;p<2;p++)for(int q=p+1;q<3;q++){
-            if(a[p][q]==0.)continue;
-            const double theta=(a[q][q]-a[p][p])/(2.*a[p][q]);
-            const double t=(theta>=0.?1.:-1.)/(fabs(theta)+sqrt(theta*theta+1.)),c=1./sqrt(t*t+1.),s=t*c;
-            for(int k=0;k<3;k++){const double x=a[k][p],y=a[k][q];a[k][p]=c*x-s*y;a[k][q]=s*x+c*y;}
-            for(int k=0;k<3;k++){const double x=a[p][k],y=a[q][k];a[p][k]=c*x-s*y;a[q][k]=s*x+c*y;}
-            for(int k=0;k<3;k++){const double x=v[k][p],y=v[k][q];v[k][p]=c*x-s*y;v[k][q]=s*x+c*y;}
+            if(a[p][q]==0.f)continue;
+            const float theta=(a[q][q]-a[p][p])/(2.f*a[p][q]);
+            const float t=(theta>=0.f?1.f:-1.f)/(fabsf(theta)+sqrtf(theta*theta+1.f)),c=rsqrtf(t*t+1.f),s=t*c;
+            for(int k=0;k<3;k++){const float x=a[k][p],y=a[k][q];a[k][p]=c*x-s*y;a[k][q]=s*x+c*y;}
+            for(int k=0;k<3;k++){const float x=a[p][k],y=a[q][k];a[p][k]=c*x-s*y;a[q][k]=s*x+c*y;}
+            for(int k=0;k<3;k++){const float x=v[k][p],y=v[k][q];v[k][p]=c*x-s*y;v[k][q]=s*x+c*y;}
         }
     }
 }
 // Two unit vectors completing u to a right-handed orthonormal frame.
-__device__ void perpendicular(const double u[3],double p[3],double q[3]){
-    const int i=fabs(u[0])<=fabs(u[1])?(fabs(u[0])<=fabs(u[2])?0:2):(fabs(u[1])<=fabs(u[2])?1:2);
-    double e[3]={0.,0.,0.};e[i]=1.;
-    double d=u[0]*e[0]+u[1]*e[1]+u[2]*e[2];for(int k=0;k<3;k++)p[k]=e[k]-d*u[k];
-    d=rsqrt(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]);for(int k=0;k<3;k++)p[k]*=d;
+__device__ void perpendicular(const float u[3],float p[3],float q[3]){
+    const int i=fabsf(u[0])<=fabsf(u[1])?(fabsf(u[0])<=fabsf(u[2])?0:2):(fabsf(u[1])<=fabsf(u[2])?1:2);
+    float e[3]={0.f,0.f,0.f};e[i]=1.f;
+    float d=u[0]*e[0]+u[1]*e[1]+u[2]*e[2];for(int k=0;k<3;k++)p[k]=e[k]-d*u[k];
+    d=rsqrtf(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]);for(int k=0;k<3;k++)p[k]*=d;
     q[0]=u[1]*p[2]-u[2]*p[1];q[1]=u[2]*p[0]-u[0]*p[2];q[2]=u[0]*p[1]-u[1]*p[0];
 }
 // The choice of a jump: carrier, to-block (-1: lost to the absorbing boundary), the photon's plane
@@ -763,23 +764,25 @@ extern "C" __global__ void jump_choose(Trajectories tr,const int* jumpers,const 
     int pick=-1;
     for(int c=0;c<J.carriers&&pick<0;c++)for(int to=0;to<2&&pick<0;to++){const double* m=g+(c*2+to)*6;const double w=m[0]+m[1]+m[2];if(u<w)pick=c*2+to;else u-=w;}
     if(pick<0){out[0]=0.f;out[1]=-1.f;return;}
-    const double* m=g+pick*6;
-    double a[3][3]={{m[0],m[3],m[4]},{m[3],m[1],m[5]},{m[4],m[5],m[2]}},v[3][3];
+    // The pick's Re G scaled to unit trace, in single precision.
+    const double* m=g+pick*6;const double trace=m[0]+m[1]+m[2];
+    float r[6];for(int k=0;k<6;k++)r[k]=(float)(m[k]/trace);
+    float a[3][3]={{r[0],r[3],r[4]},{r[3],r[1],r[5]},{r[4],r[5],r[2]}},v[3][3];
     jacobi3(a,v);
-    double w[3];for(int k=0;k<3;k++)w[k]=fmax(a[k][k],0.);
-    const double x=open_uniform(r1.z,r1.w)*(w[0]+w[1]+w[2]);const int axis=x<w[0]?0:x<w[0]+w[1]?1:2;
-    const double e[3]={v[0][axis],v[1][axis],v[2][axis]};double p[3],q[3];perpendicular(e,p,q);
+    float w[3];for(int k=0;k<3;k++)w[k]=fmaxf(a[k][k],0.f);
+    const float x=(float)open_uniform(r1.z,r1.w)*(w[0]+w[1]+w[2]);const int axis=x<w[0]?0:x<w[0]+w[1]?1:2;
+    const float e[3]={v[0][axis],v[1][axis],v[2][axis]};float p[3],q[3];perpendicular(e,p,q);
     // The cosine to the dipole, density (3/4)(1 - u^2): u^3 - 3u + 2t = 0 with t = 2F - 1.
-    const double tt=2.*open_uniform(r2.x,r2.y)-1.,cu=2.*cos((2.*PI-acos(-tt))/3.),su=sqrt(fmax(0.,1.-cu*cu));
-    double sphi,cphi;sincospi(2.*open_uniform(r2.z,r2.w),&sphi,&cphi);
-    double n[3];for(int k=0;k<3;k++)n[k]=cu*e[k]+su*(cphi*p[k]+sphi*q[k]);
-    double e1[3],e2[3];perpendicular(n,e1,e2);
-    double p1=0.,p2=0.;
-    for(int i=0;i<3;i++)for(int j=0;j<3;j++){const double mij=i==j?m[i]:m[2+i+j];p1+=e1[i]*mij*e1[j];p2+=e2[i]*mij*e2[j];}
-    p1=fmax(p1,0.);p2=fmax(p2,0.);
-    const bool second=open_uniform(r3.x,r3.y)*(p1+p2)>=p1;const double* eps=second?e2:e1;
-    out[0]=(float)(pick/2);out[1]=(float)(pick%2);out[2]=(float)n[0];out[3]=(float)n[1];
-    out[4]=(float)eps[0];out[5]=(float)eps[1];out[6]=(float)eps[2];out[7]=(float)rsqrt(fmax(second?p2:p1,1e-300));
+    const float tt=2.f*(float)open_uniform(r2.x,r2.y)-1.f,cu=2.f*cosf((2.f*(float)PI-acosf(-tt))/3.f),su=sqrtf(fmaxf(0.f,1.f-cu*cu));
+    float sphi,cphi;sincospif(2.f*(float)open_uniform(r2.z,r2.w),&sphi,&cphi);
+    float n[3];for(int k=0;k<3;k++)n[k]=cu*e[k]+su*(cphi*p[k]+sphi*q[k]);
+    float e1[3],e2[3];perpendicular(n,e1,e2);
+    float p1=0.f,p2=0.f;
+    for(int i=0;i<3;i++)for(int j=0;j<3;j++){const float mij=i==j?r[i]:r[2+i+j];p1+=e1[i]*mij*e1[j];p2+=e2[i]*mij*e2[j];}
+    p1=fmaxf(p1,0.f);p2=fmaxf(p2,0.f);
+    const bool second=(float)open_uniform(r3.x,r3.y)*(p1+p2)>=p1;const float* eps=second?e2:e1;
+    out[0]=(float)(pick/2);out[1]=(float)(pick%2);out[2]=n[0];out[3]=n[1];
+    out[4]=eps[0];out[5]=eps[1];out[6]=eps[2];out[7]=(float)rsqrt(fmax((double)(second?p2:p1)*trace,1e-300));
 }
 
 // Each jumper's new waiting period: its block, norm and threshold; the lost are marked.
