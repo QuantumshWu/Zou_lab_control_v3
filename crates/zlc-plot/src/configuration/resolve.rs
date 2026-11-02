@@ -180,6 +180,8 @@ pub struct ResolvedConfiguration {
     pub discard_unmatched_classifier: bool,
     pub fit_request: Option<FitRequest>,
     pub expression_failure: Option<(String, String)>,
+    /// Why the authored fit was not applied (`FitResolution::unavailable`).
+    pub fit_unavailable: Option<String>,
 }
 
 impl ResolvedConfiguration {
@@ -191,7 +193,7 @@ impl ResolvedConfiguration {
     /// Whether a fit model or a threshold classifier needs numerical work.
     pub fn has_numerical_work(&self) -> bool {
         let model = self.fit_target.get("model").filter(|model| !model.is_none()).is_some_and(|model| !model.py_str().trim().is_empty());
-        model || accepts_classifier_thresholds(&self.spec, &self.display_state.values)
+        (model && self.fit_unavailable.is_none()) || accepts_classifier_thresholds(&self.spec, &self.display_state.values)
     }
     pub fn fit_expression(&self) -> Result<String> {
         if let Some((expression, _)) = &self.expression_failure { return Ok(expression.clone()); }
@@ -676,7 +678,12 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
         previous_request: base.and_then(|base| base.fit_request.as_ref()),
         previous_expression_failure: base.and_then(|base| base.expression_failure.as_ref()),
     })?;
-    let fit_target = resolution.request.as_ref().map(|request| request.target.clone()).unwrap_or_default();
+    // A fit that could not be applied keeps its authored target, so the
+    // panel keeps saying so and a saved figure keeps what it named.
+    let fit_target = match &resolution.unavailable {
+        Some(_) => fit_target,
+        None => resolution.request.as_ref().map(|request| request.target.clone()).unwrap_or_default(),
+    };
     // Live is a property of a fit request: without one it names no science,
     // so the same scene has the same signature whoever asks.
     let fit_live = fit_live && resolution.request.is_some();
@@ -703,6 +710,7 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
         defaults, fit: engine, unit_registry: registry, ignored_interaction: ignored, semantics, authored_semantics, metadata, signature, science_changed,
         cancellation, same_source, image_overlay, discard_unmatched_classifier, fit_request: resolution.request,
         expression_failure: resolution.expression_failure,
+        fit_unavailable: resolution.unavailable,
     }))
 }
 

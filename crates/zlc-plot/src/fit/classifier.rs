@@ -129,7 +129,7 @@ pub fn evaluate_component(model: &FitModelSpec, component_id: &str, coords: &[Ve
         }
         // Each line on the shared offset: a single Lorentzian.
         (Kernel::LorentzianDoublet, ComponentKind::FirstLine) => (Kernel::Lorentzian, vec![p[0], p[1], p[2], p[3]]),
-        (Kernel::LorentzianDoublet, ComponentKind::SecondLine) => (Kernel::Lorentzian, vec![p[4], p[5], p[6], p[3]]),
+        (Kernel::LorentzianDoublet, ComponentKind::SecondLine) => (Kernel::Lorentzian, vec![p[0] + p[4], p[5], p[6], p[3]]),
         _ => return Err(FitError::value(format!("unknown fit component: {}", super::num::str_repr(component_id)))),
     };
     let first = model.anchored_axis(&coords[0]);

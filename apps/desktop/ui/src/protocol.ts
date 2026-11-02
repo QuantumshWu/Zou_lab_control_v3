@@ -23,7 +23,7 @@ export type Panel = {
   structure?: [string, number][][];
   axes?: Axis[];
   controls?: Control[];
-  fit?: { models: { key: string; label: string; parameters?: [string, string][] }[]; selected: string | null; expression: string; configuration: Record<string, unknown>; error?: string };
+  fit?: { models: { key: string; label: string; parameters?: [string, string][] }[]; selected: string | null; expression: string; configuration: Record<string, unknown>; error?: string; unavailable?: string };
   error?: string;
   message?: string;
   authoring_pending?: boolean;

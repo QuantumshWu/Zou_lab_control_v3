@@ -60,29 +60,6 @@ impl Kernel {
         }
     }
 
-    /// The solution's canonical labelling. A two-line model is symmetric
-    /// under exchanging its lines, so the solver may return either order;
-    /// the lines are ordered by center (`x_0 <= x_B`) whenever the
-    /// exchange is a symmetry of the solved problem too, i.e. each
-    /// exchanged pair of parameters has the same bounds (a caller who
-    /// bounds or fixes one line differently has named the lines already).
-    pub fn canonical_order(self, parameters: &mut [f64], lower: &[f64], upper: &[f64]) {
-        let Some(pairs) = self.line_exchange() else { return };
-        let symmetric = pairs.iter().all(|&(a, b)| lower[a] == lower[b] && upper[a] == upper[b]);
-        if symmetric && parameters[pairs[0].1] < parameters[pairs[0].0] {
-            exchange_lines(pairs, parameters);
-        }
-    }
-
-    /// The parameter pairs exchanging a two-line model's lines (centers
-    /// first), if the model has two interchangeable lines.
-    pub fn line_exchange(self) -> Option<&'static [(usize, usize)]> {
-        match self {
-            Kernel::LorentzianDoublet => Some(&[(0, 4), (1, 5), (2, 6)]),
-            _ => None,
-        }
-    }
-
     pub fn arity(self) -> usize {
         match self {
             Kernel::Radial | Kernel::Anisotropic => 2,
@@ -99,13 +76,6 @@ impl Kernel {
             Kernel::ReleaseRecapture => 4,
             Kernel::LorentzianDoublet => 8,
         }
-    }
-}
-
-/// Exchange the lines of one parameter row.
-pub fn exchange_lines(pairs: &[(usize, usize)], parameters: &mut [f64]) {
-    for &(a, b) in pairs {
-        parameters.swap(a, b);
     }
 }
 
@@ -478,14 +448,18 @@ impl Kernel {
             }
             Kernel::LorentzianDoublet => {
                 let x = coords.at(0, point);
+                // Line B sits at x_0 + splitting: its center derivative is
+                // the splitting's and adds to x_0's.
+                let center_b = p[0] + p[4];
                 let (value_a, value_b) = if want {
                     let (head, tail) = row.split_at_mut(4);
                     let a = lorentzian_line(x, p[0], p[1], p[2], &mut head[..3])?;
-                    let b = lorentzian_line(x, p[4], p[5], p[6], tail)?;
+                    let b = lorentzian_line(x, center_b, p[5], p[6], tail)?;
+                    head[0] += tail[0];
                     head[3] = 1.0;
                     (a, b)
                 } else {
-                    (lorentzian_line(x, p[0], p[1], p[2], &mut [])?, lorentzian_line(x, p[4], p[5], p[6], &mut [])?)
+                    (lorentzian_line(x, p[0], p[1], p[2], &mut [])?, lorentzian_line(x, center_b, p[5], p[6], &mut [])?)
                 };
                 Ok(value_a + value_b + p[3])
             }
@@ -687,6 +661,50 @@ pub fn rho(z: f64, loss_code: i64) -> Zr<(f64, f64, f64)> {
     })
 }
 
+/// One point of the Student-t likelihood: the point is a mean of repeats
+/// whose standard error `1/weight` was estimated from them, so
+/// `t = (observed - predicted) * weight` is Student-t with `dof` degrees of
+/// freedom (`n - 1`; infinite for a known sigma, where this is the plain
+/// squared residual). `-2 ln L = (dof + 1) ln(1 + t^2/dof)`, half of which
+/// is the cost; the information factor is the iteratively reweighted
+/// least-squares weight `(dof + 1)/(dof + t^2)`, positive everywhere, so a
+/// point far off the model pulls as hard as its few repeats warrant, not as
+/// its (possibly tiny) estimated sigma says. Same tuple as `point_terms`.
+#[inline(always)]
+pub fn student_terms(predicted: f64, observed: f64, weight: f64, dof: f64) -> (f64, f64, f64, f64, f64, bool) {
+    let raw = (predicted - observed) * weight;
+    if !raw.is_finite() {
+        return (raw, f64::INFINITY, f64::INFINITY, 0.0, 0.0, false);
+    }
+    let squared = raw * raw;
+    let (rho0, rho1) = student_rho(squared, dof);
+    (raw, squared, 0.5 * rho0, raw * rho1 * weight, weight * weight * rho1, true)
+}
+
+/// `(rho, rho')` of the Student-t point: `(dof+1) ln(1 + z/dof)`, its
+/// derivative `(dof+1)/(dof+z)`; `(z, 1)` for an infinite `dof`.
+#[inline(always)]
+pub fn student_rho(z: f64, dof: f64) -> (f64, f64) {
+    if dof.is_infinite() {
+        (z, 1.0)
+    } else {
+        ((dof + 1.0) * (z / dof).ln_1p(), (dof + 1.0) / (dof + z))
+    }
+}
+
+/// The Student-t point's score `psi(t) = t rho'(t^2)` and its slope
+/// `psi'(t) = (dof+1)(dof-t^2)/(dof+t^2)^2` (`t` and 1 for infinite `dof`).
+#[inline(always)]
+pub fn student_score(t: f64, dof: f64) -> (f64, f64) {
+    if dof.is_infinite() {
+        (t, 1.0)
+    } else {
+        let z = t * t;
+        let denominator = dof + z;
+        (t * (dof + 1.0) / denominator, (dof + 1.0) * (dof - z) / (denominator * denominator))
+    }
+}
+
 /// `compiled_point_terms`: `(raw, squared, cost, gradient_factor,
 /// information_factor, finite)`.
 #[inline(always)]
@@ -765,6 +783,9 @@ pub struct ObjectiveData<'a> {
     pub use_weights: bool,
     pub poisson: bool,
     pub loss_code: i64,
+    /// Per point, the degrees of freedom of its sigma (the Student-t
+    /// likelihood, `student_terms`); empty for the loss above.
+    pub dof: &'a [f64],
 }
 
 impl Kernel {
@@ -854,7 +875,11 @@ fn objective_loop<const N: usize, const PLAIN: bool, F: FnMut(usize, &mut [f64])
             point_terms(predicted, observations[point], false, 1.0, false, LOSS_LINEAR)?
         } else {
             let weight = if data.use_weights { data.weights[point] } else { 1.0 };
-            point_terms(predicted, observations[point], data.poisson, weight, data.use_weights, data.loss_code)?
+            if data.dof.is_empty() {
+                point_terms(predicted, observations[point], data.poisson, weight, data.use_weights, data.loss_code)?
+            } else {
+                student_terms(predicted, observations[point], weight, data.dof[point])
+            }
         };
         if !finite || !predicted.is_finite() {
             return Ok((f64::INFINITY, f64::INFINITY, false));

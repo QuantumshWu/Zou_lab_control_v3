@@ -710,9 +710,10 @@ fn unit_lorentzian(x: &[f64], center: f64, width: f64) -> impl Iterator<Item = f
 }
 
 /// The Lorentzian doublet's cold seeds and data bounds. Bounds: each
-/// line's as the single Lorentzian's (center on the data, width a tenth to
-/// ten times a quarter of the span, height within ten value ranges), so
-/// the single model is the doublet with its second line switched off.
+/// line's as the single Lorentzian's (x_0 on the data, width a tenth to
+/// ten times a quarter of the span, height within ten value ranges; the
+/// splitting from zero to the span), so the single model is the doublet
+/// with its second line switched off.
 /// Seeds, for peaks (+) and dips (-), the side with the larger excursion
 /// from the edge baseline first: the strongest line from its half-height
 /// width, then for the second line (a) the strongest same-signed bump left
@@ -720,7 +721,7 @@ fn unit_lorentzian(x: &[f64], center: f64, width: f64) -> impl Iterator<Item = f
 /// (b) the first bump split in two (lines closer than their widths),
 /// (c) the strongest opposite-signed bump left (a peak beside a dip), and
 /// (d) the next prominent separate peak of the data. Every seed lists its
-/// lines by center.
+/// lines by center, line B at `x_0 + splitting`.
 fn prepare_lorentzian_doublet(coords: &Axes, observations: &[f64], valid: &[bool], seeds: &mut Seeds, lower: &mut [f64], upper: &mut [f64]) -> Zr<i64> {
     let (x, values) = sorted_compact(coords, observations, valid);
     if values.is_empty() {
@@ -731,9 +732,11 @@ fn prepare_lorentzian_doublet(coords: &Axes, observations: &[f64], valid: &[bool
     let xspan = pmax(xhigh - xlow, EPSILON);
     let value_range = yhigh - ylow;
     let (width_low, width_high) = (xspan / 40.0, xspan * 2.5);
+    lower[0] = pmax(lower[0], xlow);
+    upper[0] = pmin(upper[0], xhigh);
+    lower[4] = pmax(lower[4], 0.0);
+    upper[4] = pmin(upper[4], xspan);
     for line in [0, 4] {
-        lower[line] = pmax(lower[line], xlow);
-        upper[line] = pmin(upper[line], xhigh);
         lower[line + 1] = pmax(lower[line + 1], width_low);
         upper[line + 1] = pmin(upper[line + 1], width_high);
         lower[line + 2] = pmax(lower[line + 2], -10.0 * value_range);
@@ -754,7 +757,7 @@ fn prepare_lorentzian_doublet(coords: &Axes, observations: &[f64], valid: &[bool
     let mut rows: Vec<[f64; 7]> = Vec::new();
     let mut push = |first: (f64, f64, f64), second: (f64, f64, f64)| {
         let (a, b) = if second.0 < first.0 { (second, first) } else { (first, second) };
-        rows.push([a.0, clamp_width(a.1), a.2, baseline, b.0, clamp_width(b.1), b.2]);
+        rows.push([a.0, clamp_width(a.1), a.2, baseline, b.0 - a.0, clamp_width(b.1), b.2]);
     };
     let excursion = |sign: f64| values.iter().map(|&v| sign * (v - baseline)).fold(f64::NEG_INFINITY, f64::max);
     let signs = if excursion(1.0) >= excursion(-1.0) { [1.0, -1.0] } else { [-1.0, 1.0] };

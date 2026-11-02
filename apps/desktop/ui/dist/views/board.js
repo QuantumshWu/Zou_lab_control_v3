@@ -832,7 +832,8 @@ export class PanelView {
         this.updateHeader(this.state);
         // The card body reserves no status row: the dot rides the title strip and
         // the message travels as its tooltip, and in full in the Setting frame.
-        const message = panel.error || panel.message || "";
+        // A fit the panel names but could not apply (a model this version lacks) is said here too.
+        const message = panel.error || panel.message || this.state.fit?.unavailable || "";
         this.statusDot.hidden = !message;
         this.statusDot.title = message;
         setState(this.statusDot, panel.error ? "error" : "task");
@@ -1190,7 +1191,8 @@ export class PanelView {
         this.showSection("fit", rows.length > 1);
         this.place(title, rows);
         // v2 fit_expression_refusal: what the operator typed that the model would not take.
-        const refused = fitState.error ? `Parameter expression ignored; automatic fit is active: ${fitState.error}` : "";
+        const refused = fitState.unavailable ? fitState.unavailable
+            : fitState.error ? `Parameter expression ignored; automatic fit is active: ${fitState.error}` : "";
         this.fitError.textContent = refused;
         this.fitError.hidden = !refused;
     }

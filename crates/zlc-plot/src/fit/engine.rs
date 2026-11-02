@@ -37,6 +37,11 @@ pub enum CellData {
 pub struct FitCell {
     pub data: CellData,
     pub sigma: Option<Arc<[f64]>>,
+    /// The degrees of freedom of each sigma: `n - 1` for the standard error
+    /// of a mean estimated from its own `n` repeats, infinite for a sigma
+    /// known otherwise. With any finite one (and the linear loss) the fit
+    /// is the Student-t likelihood's (`student_dof`).
+    pub sigma_dof: Option<Arc<[f64]>>,
     pub selected_indices: Option<Arc<[i64]>>,
     pub data_revision: i64,
     /// A previous solution, one value per parameter.
@@ -48,13 +53,14 @@ impl FitCell {
         FitCell {
             data: CellData::Points { coordinates: coordinates.into_iter().map(Into::into).collect(), observations: Some(observations.into()) },
             sigma: None,
+            sigma_dof: None,
             selected_indices: None,
             data_revision: 0,
             warm_start: None,
         }
     }
     pub fn image(input: RegularImageFitInput) -> Self {
-        FitCell { data: CellData::Image(Arc::new(input)), sigma: None, selected_indices: None, data_revision: 0, warm_start: None }
+        FitCell { data: CellData::Image(Arc::new(input)), sigma: None, sigma_dof: None, selected_indices: None, data_revision: 0, warm_start: None }
     }
 }
 
@@ -114,6 +120,8 @@ struct Prepared {
     compiled_coords: Vec<Vec<f64>>,
     solver_values: Vec<f64>,
     weights: Option<Vec<f64>>,
+    /// The Student-t degrees of freedom beside `weights` (`student_dof`).
+    dof: Option<Vec<f64>>,
     binned: bool,
     revision: u64,
     origin: f64,
@@ -197,7 +205,7 @@ impl FitEngine {
                 let outcomes = self.fit_compiled_batch(model, kernel, std::slice::from_ref(cell), request, &options)?;
                 let result = outcomes.into_iter().next().expect("one cell").map_err(|m| FitError::value(if m.is_empty() { "compiled fit failed".to_string() } else { m }))?;
                 let nested = self.nested_population_fit(model, std::slice::from_ref(cell), request.bounds.as_ref(), &options, request.cancelled)?;
-                self.settle_population(model, result, nested.into_iter().next().flatten().as_ref(), &options)
+                self.settle_population(model, result, nested.into_iter().next().flatten().as_ref(), &options, student_dof(model, cell, &options).is_some())
             }
             None => super::lsq::fit_fallback(self, model, cell, request, &options),
         }
@@ -278,7 +286,8 @@ impl FitEngine {
             let outcome = match outcome {
                 Ok(result) if model.reduction.is_some() => {
                     let nested = nested_by_local.get(&local).cloned().flatten();
-                    match self.settle_population(model, result, nested.as_ref(), &options) {
+                    let student = student_dof(model, &compiled[local], &options).is_some();
+                    match self.settle_population(model, result, nested.as_ref(), &options, student) {
                         Ok(settled) => Ok(settled),
                         Err(FitError::Cancelled) => return Err(FitError::Cancelled),
                         Err(error) => Err(error.failure_text()),
@@ -318,8 +327,9 @@ impl FitEngine {
         Ok(solved.into_iter().map(Result::ok).collect())
     }
 
-    /// `_settle_population(spec, result, nested, options)`.
-    pub fn settle_population(&self, spec: &Arc<FitModelSpec>, result: FitResult, nested: Option<&FitResult>, options: &FitOptions) -> Result<FitResult, FitError> {
+    /// `_settle_population(spec, result, nested, options)`; `student`: both
+    /// were solved with the Student-t likelihood (`student_dof`).
+    pub fn settle_population(&self, spec: &Arc<FitModelSpec>, result: FitResult, nested: Option<&FitResult>, options: &FitOptions, student: bool) -> Result<FitResult, FitError> {
         let (Some(reduction), Some(threshold)) = (&spec.reduction, options.min_bic_gain) else { return Ok(result) };
         if !result.success {
             return Ok(result);
@@ -344,6 +354,15 @@ impl FitEngine {
             let clipped: Vec<f64> = wide_observed.iter().map(|&v| if v < 0.0 { 0.0 } else { v }).collect();
             let shots = numpy_sum(&clipped);
             (deviance_narrow - deviance_wide) - extra as f64 * pmax(shots, 1.0).ln()
+        } else if student {
+            // Means of repeats with their own standard errors: -2 ln L is
+            // twice each solve's cost (the Student-t likelihood carries
+            // its scales, nothing is profiled), so BIC = 2 cost + k ln n.
+            let points = result.residuals().len().max(1) as f64;
+            match (result.diagnostics, nested.diagnostics) {
+                (Some(wide), Some(narrow)) => 2.0 * (narrow.cost - wide.cost) - extra as f64 * points.ln(),
+                _ => f64::NAN,
+            }
         } else {
             // A series: Gaussian errors of one unknown scale (relative to
             // the observation sigma when there is one), the scale profiled
@@ -483,6 +502,7 @@ impl FitEngine {
                     None => (0..values.len() as i64).zip(&finite).filter(|(_, f)| **f).map(|(v, _)| v).collect(),
                 };
                 let sigma_kept = cell.sigma.as_ref().map(|s| keep(s));
+                let dof_kept = student_dof(model, cell, opts).map(|d| keep(&d));
                 let cell_bounds = if counted {
                     let key: Vec<u64> = coords[0].iter().map(|v| v.to_bits()).collect();
                     match histogram_cache.get(&key) {
@@ -551,6 +571,7 @@ impl FitEngine {
                     compiled_coords,
                     solver_values,
                     weights,
+                    dof: dof_kept,
                     binned,
                     revision: cell.data_revision as u64,
                     origin,
@@ -665,6 +686,23 @@ fn pmax_np(a: f64, b: f64) -> f64 {
     } else {
         b
     }
+}
+
+/// The per-point Student-t degrees of freedom a compiled solve uses, if it
+/// uses that likelihood: a series cell (not counts) with the linear loss
+/// whose sigma has usable weights and at least one finite degree of
+/// freedom. A point whose sigma is not usable (none was estimated: one
+/// repeat and no stated sigma) keeps today's weight -- the largest usable
+/// sigma, `sigma_weights` -- with a Gaussian term (infinite dof), as does a
+/// stated sigma.
+pub(crate) fn student_dof(model: &FitModelSpec, cell: &FitCell, options: &FitOptions) -> Option<Vec<f64>> {
+    let (Some(sigma), Some(dof)) = (&cell.sigma, &cell.sigma_dof) else { return None };
+    if model.counted() || options.loss != "linear" || dof.len() != sigma.len() || sigma_weights(sigma).is_none() {
+        return None;
+    }
+    let usable = |s: f64| s.is_finite() && s > 0.0;
+    let student: Vec<f64> = sigma.iter().zip(dof.iter()).map(|(&s, &d)| if (usable(s) || s == 0.0) && d.is_finite() && d >= 1.0 { d } else { f64::INFINITY }).collect();
+    student.iter().any(|d| d.is_finite()).then_some(student)
 }
 
 /// `model.evaluate(coordinates, values)` (anchored axis included).
@@ -793,12 +831,13 @@ fn solve_bucket(kernel: Kernel, prepared: &[Option<Prepared>], bucket: &Bucket, 
 fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, base_lower: &[f64], base_upper: &[f64], counted: bool, loss: i64, use_weights: bool, max_nfev: i64) -> Result<Solved, String> {
     // The coordinates and observations the kernel sees: the cell's own, or
     // the union grid with this cell's points marked valid.
-    let (grid_coords, grid_values, grid_valid, grid_weights): (Vec<Vec<f64>>, Vec<f64>, Vec<bool>, Vec<f64>) = match layout {
+    let (grid_coords, grid_values, grid_valid, grid_weights, grid_dof): (Vec<Vec<f64>>, Vec<f64>, Vec<bool>, Vec<f64>, Vec<f64>) = match layout {
         Layout::Shared => (
             item.compiled_coords.clone(),
             item.solver_values.clone(),
             vec![true; item.solver_values.len()],
             item.weights.clone().unwrap_or_else(|| vec![1.0; item.solver_values.len()]),
+            item.dof.clone().unwrap_or_default(),
         ),
         Layout::Masked { grid, positions, .. } => {
             let mut values = vec![0.0; grid.len()];
@@ -812,33 +851,27 @@ fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, bas
             if item.weights.is_none() && !use_weights {
                 weights.clear();
             }
-            (vec![grid.clone()], values, valid, weights)
+            let dof = match &item.dof {
+                Some(dof) => {
+                    let mut grid_dof = vec![f64::INFINITY; grid.len()];
+                    for (k, &p) in positions[local].iter().enumerate() {
+                        grid_dof[p] = dof[k];
+                    }
+                    grid_dof
+                }
+                None => Vec::new(),
+            };
+            (vec![grid.clone()], values, valid, weights, dof)
         }
     };
     let axes = if grid_coords.len() == 1 { Axes::one(&grid_coords[0]) } else { Axes::two(&grid_coords[0], &grid_coords[1]) };
     let free_mask: Vec<bool> = (0..base_lower.len()).map(|i| item.free_indices.contains(&i)).collect();
-    // A caller who bounds a two-line model's lines differently has made the
-    // labels mean something: each cold seed is then tried both ways round.
-    let requested_alike = |a: usize, b: usize| {
-        item.requested_mask[a] == item.requested_mask[b]
-            && (!item.requested_mask[a] || (item.requested_lower[a] == item.requested_lower[b] && item.requested_upper[a] == item.requested_upper[b]))
-    };
-    let exchange = kernel.line_exchange().filter(|pairs| !pairs.iter().all(|&(a, b)| requested_alike(a, b)));
-    let max_candidates = kernel.max_candidates() * if exchange.is_some() { 2 } else { 1 };
+    let max_candidates = kernel.max_candidates();
     let seed_capacity = 1 + max_candidates.max(1);
     let authored_rows = item.authored.as_ref().map(|row| vec![row.clone()]);
     let mut prepare = |block: &mut [f64], rows: usize, lower: &mut [f64], upper: &mut [f64]| -> Zr<i64> {
-        let cols = base_lower.len();
-        let cold_rows = if exchange.is_some() { rows / 2 } else { rows };
-        let count = kernel.prepare(&axes, &grid_values, &grid_valid, &mut Seeds { data: &mut *block, rows: cold_rows, cols }, lower, upper)?;
-        let Some(pairs) = exchange else { return Ok(count) };
-        let count = count.max(0) as usize;
-        for row in 0..count {
-            let (written, free) = block.split_at_mut((count + row) * cols);
-            free[..cols].copy_from_slice(&written[row * cols..(row + 1) * cols]);
-            super::models::exchange_lines(pairs, &mut free[..cols]);
-        }
-        Ok(2 * count as i64)
+        let mut seeds = Seeds { data: block, rows, cols: base_lower.len() };
+        kernel.prepare(&axes, &grid_values, &grid_valid, &mut seeds, lower, upper)
     };
     let prepared = trf::prepare_one(
         &mut prepare,
@@ -858,16 +891,15 @@ fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, bas
     let objective = PointObjective {
         kernel,
         coords: axes,
-        data: ObjectiveData { observations: &grid_values, valid: &grid_valid, weights: weights_slice, use_weights, poisson: counted, loss_code: loss },
+        data: ObjectiveData { observations: &grid_values, valid: &grid_valid, weights: weights_slice, use_weights, poisson: counted, loss_code: loss, dof: &grid_dof },
         selected: grid_valid.iter().filter(|&&v| v).count(),
     };
-    let mut solution = trf::solve_cell(&objective, &prepared.seeds, &prepared.lower, &prepared.upper, &item.free_indices, max_nfev, 1.0e-8, 1.0e-8, 1.0e-8, item.warm.is_some(), prepared.status);
-    kernel.canonical_order(&mut solution.parameters, &prepared.lower, &prepared.upper);
+    let solution = trf::solve_cell(&objective, &prepared.seeds, &prepared.lower, &prepared.upper, &item.free_indices, max_nfev, 1.0e-8, 1.0e-8, 1.0e-8, item.warm.is_some(), prepared.status);
     // Finalize on the cell's selected points.
     let selected_coords: Vec<Vec<f64>> = grid_coords.iter().map(|axis| axis.iter().zip(&grid_valid).filter(|(_, v)| **v).map(|(&x, _)| x).collect()).collect();
     let selected_axes = if selected_coords.len() == 1 { Axes::one(&selected_coords[0]) } else { Axes::two(&selected_coords[0], &selected_coords[1]) };
     let value_jacobian = |with_jacobian: bool| kernel.value_jacobian(&selected_axes, &solution.parameters, with_jacobian);
-    let finalized = trf::finalize_one(&value_jacobian, &grid_values, &grid_valid, &solution.parameters, &item.free_indices, weights_slice, use_weights, counted, loss).map_err(|e| bucket_failure(&e))?;
+    let finalized = trf::finalize_one(&value_jacobian, &grid_values, &grid_valid, &solution.parameters, &item.free_indices, weights_slice, use_weights, counted, loss, &grid_dof).map_err(|e| bucket_failure(&e))?;
     let covariance_valid = finalized.covariance_valid && solution.status >= STATUS_MAX_NFEV;
     // Back from the grid to the cell's own points.
     let (fitted, residuals) = match layout {

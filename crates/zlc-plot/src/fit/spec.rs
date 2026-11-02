@@ -785,17 +785,17 @@ fn build_builtins() -> Vec<Arc<FitModelSpec>> {
                 parameter("fwhm", Axis0, Positive, r"$\mathrm{FWHM}$", false),
                 parameter("amplitude", Value, Real, r"$H$", false),
                 parameter("offset", Value, Real, r"$B$", true),
-                parameter("center_B", Axis0, Real, r"$x_B$", true),
+                parameter("splitting", Axis0, Nonnegative, r"$\delta$", false),
                 parameter("fwhm_B", Axis0, Positive, r"$\mathrm{FWHM_B}$", false),
                 parameter("amplitude_B", Value, Real, r"$H_B$", false),
             ],
-            "center",
+            "splitting",
             Evaluator::Builtin(Kernel::LorentzianDoublet),
             series.clone(),
             Some(concat!(
-                r"$f(x)=H\,L(x;x_0,\mathrm{FWHM})+H_B\,L(x;x_B,\mathrm{FWHM_B})+B$",
+                r"$f(x)=H\,L(x;x_0,\mathrm{FWHM})+H_B\,L(x;x_0+\delta,\mathrm{FWHM_B})+B$",
                 "\n",
-                r"$L(x;c,w)=\frac{(w/2)^2}{(x-c)^2+(w/2)^2},\ x_0\leq x_B$"
+                r"$L(x;c,w)=\frac{(w/2)^2}{(x-c)^2+(w/2)^2},\ \delta\geq 0$"
             )),
             two_lines(),
             None,
@@ -804,7 +804,7 @@ fn build_builtins() -> Vec<Arc<FitModelSpec>> {
             Some(reduction(
                 "lorentzian",
                 &[("center", "center"), ("fwhm", "fwhm"), ("amplitude", "amplitude"), ("offset", "offset")],
-                vec![("center_B", Pin::Shared("center".into())), ("fwhm_B", Pin::Shared("fwhm".into())), ("amplitude_B", Pin::Value(0.0))],
+                vec![("splitting", Pin::Value(0.0)), ("fwhm_B", Pin::Shared("fwhm".into())), ("amplitude_B", Pin::Value(0.0))],
             )),
         ),
         FitModelSpec::new(

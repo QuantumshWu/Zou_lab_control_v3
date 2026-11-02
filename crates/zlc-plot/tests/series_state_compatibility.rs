@@ -56,7 +56,7 @@ fn rendered(configuration: &ResolvedConfiguration) -> (Interaction, Presentation
     let group = AxisRef::cell_data("probe.group").unwrap();
     let series = (0..3).map(|index| CurveSeries {
         x: quantity(vec![0.0, 1.0, 2.0]), y: quantity(vec![index as f64; 3]), valid: Array::full(true, vec![3]),
-        sem: None, x_labels: None,
+        sem: None, sem_dof: None, x_labels: None,
         group_key: vec![AxisValue { axis: group.clone(), index: Some(index), canonical: Scalar::Int(index as i128),
             display: Scalar::Int(index as i128), label: format!("group {index}") }],
         label: format!("group {index}"),

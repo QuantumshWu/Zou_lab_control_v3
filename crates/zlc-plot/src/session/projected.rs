@@ -165,6 +165,7 @@ pub struct FitSelection {
     pub observations: Arc<[f64]>,
     pub selected_indices: Option<Arc<[i64]>>,
     pub observation_sigma: Option<Arc<[f64]>>,
+    pub observation_dof: Option<Arc<[f64]>>,
     pub facet_index: Option<usize>,
     pub selector_kind: Option<SelectorKind>,
     pub regular_image: Option<Arc<RegularImageFitInput>>,
@@ -844,7 +845,8 @@ impl PreparedSelection {
         Ok(FitSelection {
             data_revision: selected.data_revision, scope: selected.scope, coordinates: selected.coordinates.iter().map(floats).collect(),
             observations: floats(&selected.observations), selected_indices: selected.selected_indices.as_ref().map(|indices| indices.slice::<i64>().into()),
-            observation_sigma: selected.observation_sigma.as_ref().map(floats), facet_index: selected.facet_index,
+            observation_sigma: selected.observation_sigma.as_ref().map(floats), observation_dof: selected.observation_dof.as_ref().map(floats),
+            facet_index: selected.facet_index,
             selector_kind: selected.selector_kind.map(selector_kind_of_fit), regular_image, group_key: selected.group_key,
         })
     }
