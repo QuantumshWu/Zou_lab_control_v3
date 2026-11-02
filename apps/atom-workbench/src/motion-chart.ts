@@ -214,7 +214,10 @@ export function mapChart(motion:PlaneMotionResult,listed:readonly number[],title
   g.lefts.forEach((left,k)=>{
     body+=`<image x="${left}" y="${g.top}" width="${MAP}" height="${MAP}" preserveAspectRatio="none" style="image-rendering:pixelated" href="${mapImage(values[k]!,g.n,top)}"/>`;
     body+=`<rect x="${left}" y="${g.top}" width="${MAP}" height="${MAP}" fill="none" stroke="${GRID}"/>`;
-    for(const w of ticksWithin(g.low,g.high,4))body+=text(g.x(left,w),g.bottom+24,digits(w),'text-anchor="middle"')+text(left-10,g.y(w)+4,digits(w),'text-anchor="end"');
+    for(const w of ticksWithin(g.low,g.high,6)){
+      const x=g.x(left,w),y=g.y(w);
+      body+=line(x,g.bottom,x,g.bottom+4,`stroke="${INK}"`)+line(left-4,y,left,y,`stroke="${INK}"`)+text(x,g.bottom+20,digits(w),'text-anchor="middle"')+text(left-8,y+4,digits(w),'text-anchor="end"');
+    }
     body+=text(left+MAP/2,19,titles[k]??'','text-anchor="middle"')+text(left+MAP,g.bottom+47,`${a} / μm`,'text-anchor="end"')+text(left-10,19,`${b} / μm`,'text-anchor="end"');
   });
   body+=`<rect x="${g.bar}" y="${g.top}" width="${BAR}" height="${MAP}" fill="url(#map-ramp)" stroke="${GRID}"/>`;
@@ -290,25 +293,26 @@ export function bindMap(host:HTMLElement,motion:PlaneMotionResult,listed:readonl
   const svg=host.querySelector<SVGSVGElement>('svg.map-svg');if(!svg)return ()=>{};
   const maps=motion.position,g=mapLayout(maps,listed.length),values=listed.map(at=>mapDensity(maps,at,g.step)),[a,b]=motion.axes,size=MAP/g.n;
   const cursor=svg.querySelector<SVGGElement>('.motion-cursor')!,card=readoutCard(host,'所选位置的概率密度'),abort=new AbortController();
-  let cell={i:g.n>>1,j:g.n>>1};
-  const show=(next:{i:number;j:number})=>{
-    cell={i:clamp(next.i,0,g.n-1),j:clamp(next.j,0,g.n-1)};cursor.replaceChildren();cursor.style.display='';
+  // The cell and the map it is read on (the card stands beside that map; the keys read the last).
+  let cell={i:g.n>>1,j:g.n>>1,map:listed.length-1};
+  const show=(next:{i:number;j:number;map:number})=>{
+    cell={i:clamp(next.i,0,g.n-1),j:clamp(next.j,0,g.n-1),map:next.map};cursor.replaceChildren();cursor.style.display='';
     for(const left of g.lefts)cursor.append(mark('rect',{x:String(left+cell.i*size),y:String(g.top+(g.n-1-cell.j)*size),width:String(size),height:String(size),fill:'none',stroke:'#323130','stroke-width':'1.5'}));
     card.innerHTML=`<div class="readout-time">${esc(`${a} = ${digits(maps.grid[cell.i]!)} μm · ${b} = ${digits(maps.grid[cell.j]!)} μm`)}</div>`+values.map((v,k)=>
       row('inherit',labels[k]??'',esc(`${formatNumber(v[cell.j*g.n+cell.i]!,{digits:4})} μm⁻²`))).join('');
-    placeCard(host,svg,card,g.lefts.at(-1)!+(cell.i+.5)*size);
+    placeCard(host,svg,card,g.lefts[cell.map]!+(cell.i+.5)*size);
   };
   const off=()=>{cursor.style.display='none';card.hidden=true;};
   svg.addEventListener('pointermove',event=>{
     const p=chartPoint(svg,event);if(!p)return;
-    const k=g.lefts.findIndex(left=>p.x>=left&&p.x<left+MAP);if(k<0||p.y<g.top||p.y>=g.bottom){off();return;}
-    show({i:Math.floor((p.x-g.lefts[k]!)/size),j:g.n-1-Math.floor((p.y-g.top)/size)});
+    const map=g.lefts.findIndex(left=>p.x>=left&&p.x<left+MAP);if(map<0||p.y<g.top||p.y>=g.bottom){off();return;}
+    show({i:Math.floor((p.x-g.lefts[map]!)/size),j:g.n-1-Math.floor((p.y-g.top)/size),map});
   },{signal:abort.signal});
   svg.addEventListener('pointerleave',off,{signal:abort.signal});svg.addEventListener('blur',off,{signal:abort.signal});
   svg.addEventListener('keydown',event=>{
     if(event.key==='Escape'){off();return;}
-    const step={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,1],ArrowDown:[0,-1]}[event.key];if(!step)return;
-    event.preventDefault();show({i:cell.i+step[0]!,j:cell.j+step[1]!});
+    const step=({ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,1],ArrowDown:[0,-1]} as Record<string,[number,number]>)[event.key];if(!step)return;
+    event.preventDefault();show({i:cell.i+step[0],j:cell.j+step[1],map:cell.map});
   },{signal:abort.signal});
   return ()=>{abort.abort();card.remove();};
 }

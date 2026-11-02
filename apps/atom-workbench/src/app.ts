@@ -1155,9 +1155,10 @@ function distributionToolbar(samples:readonly number[]|undefined,timesUs:readonl
   if(distributionTime.max!==String(earlier-1))distributionTime.max=String(earlier-1);if(distributionTime.value!==String(motionCompare??0))distributionTime.value=String(motionCompare??0);
   distributionTimeValue.textContent=motionCompare===undefined?'':durationText(timesUs[samples![motionCompare]!]!,dynamics().durationUnit);
 }
-/** A legend entry: a line in its colour (dashed when asked) and its words (markup). */
+/** A legend entry: a line in its colour (dashed when asked) and its words (markup, one run of text
+ * however it is marked up: a subscript does not split it). */
 function legendEntry(colour:string,words:string,dashed=false):string{
-  return `<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${colour}" stroke-width="2"${dashed?' stroke-dasharray="4 3"':''}/></svg>${words}</span>`;
+  return `<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${colour}" stroke-width="2"${dashed?' stroke-dasharray="4 3"':''}/></svg><span>${words}</span></span>`;
 }
 /** The legend of a motion's time chart: its curves, by axis in a plane, with the temperature's band. */
 function seriesLegend(motion:MotionResult,kind:'temperature'|'trap'):string{
