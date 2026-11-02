@@ -6,11 +6,14 @@ Each native record is published in order, preserving its samples and timestamp.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from math import ceil
 from time import monotonic, time_ns
+
+import numpy as np
 
 from zlc_data import COMPONENT, READOUT_EVENT, SAMPLE_TIME, AxisSpec, DatasetSchema, DomainSpec, OwnedSnapshot
 from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput
@@ -33,6 +36,8 @@ from zlc_atom.nodes._framework.descriptor import NodePreviewSpec
 #: the read length is the cancel latency, and it belongs to the loop.
 _CANCEL_RESPONSE_SECONDS = 0.05
 _RECEIVE_BUFFER_SECONDS = 2.0
+#: Sample bytes one read of a backlog may carry (a channel frame holds 16 MiB of JSON).
+_BATCH_BYTES = 2 << 20
 
 WAVEFORM_MEASUREMENT_SCHEMA = AuthoringSchema((
     AuthoringField("repeat", "int", "Records (0 = continuous)", 0, minimum=0),
@@ -88,7 +93,14 @@ def shot_snapshot(
     sample_interval_seconds: float,
     continuous: bool = False,
 ) -> OwnedSnapshot:
-    """Continuous samples are Point rows; triggered samples stay in the cell."""
+    """Continuous samples are Point rows; triggered samples stay in the cell.
+
+    A non-finite sample is one the source could not obtain (a polled sensor
+    that did not answer writes NaN): it is published INVALID through the
+    Data validity mask, as other producers mark theirs (``np.isfinite``).
+    The mask is always present, so a run's schema does not change on the
+    first missing sample.
+    """
 
     columns = output.columns
     first = columns[0]
@@ -122,11 +134,8 @@ def shot_snapshot(
         value_unit=output.unit,
         generation=str(getattr(generation, "value", generation)),
         revision=int(revision),
+        validity=np.isfinite(values),
     )
-
-
-def _record_seconds(node: "WaveformMeasurementNode") -> float:
-    return int(node.sampler.record_samples) * node.working_point.sample_interval_seconds
 
 
 def _stopped_terminal(
@@ -195,6 +204,8 @@ class FiniteCapture:
         self.closed = False
         self.completed_shots = 0
         self.terminal: WaveformCaptureTerminalRecord | None = None
+        #: Records already taken from the source, not yet handed out.
+        self._taken: deque[WaveformRecord] = deque()
 
     def collect(
         self,
@@ -213,10 +224,12 @@ class FiniteCapture:
                 commit_shot(record, index)
             terminal = self.close()
             # Stop freezes the receive count before draining. No subsequent
-            # read can pull a sample acquired after this capture stopped.
-            for index in range(self.completed_shots, min(self.node.repeat, terminal.produced_count)):
-                record, = self.node.sampler.read_records(1, timeout=0.0, exact=True)
-                commit_shot(record, index)
+            # read can pull a sample acquired after this capture stopped:
+            # what is left is what was taken and what the source still holds.
+            left = min(self.node.repeat, terminal.produced_count) - self.completed_shots
+            self._taken.extend(self.node.drain_records(left - len(self._taken)))
+            for index in range(self.completed_shots, self.completed_shots + left):
+                commit_shot(self._taken.popleft(), index)
                 self.completed_shots += 1
             self.terminal = replace(terminal, no_more_records=self.completed_shots == terminal.produced_count)
         except BaseException as error:
@@ -236,12 +249,14 @@ class FiniteCapture:
         if self.closed:
             raise RuntimeError("finite capture is closed")
         node = self.node
-        deadline = monotonic() + _record_seconds(node) + node.sampler.timeout
+        deadline = monotonic() + node.silence_seconds
         while self.should_stop is None or not self.should_stop():
-            records = node.sampler.read_records(1, timeout=_CANCEL_RESPONSE_SECONDS, exact=False)
-            if records:
+            if not self._taken:
+                # Everything the source holds, up to this capture's rest, in one read.
+                self._taken.extend(node.take_records(node.repeat - self.completed_shots))
+            if self._taken:
                 self.completed_shots += 1
-                return records[0]
+                return self._taken.popleft()
             if monotonic() >= deadline:
                 raise TimeoutError("waveform source stopped delivering records")
         return None
@@ -272,7 +287,7 @@ class MonitorCapture:
         self.closed = False
         self.terminal: WaveformCaptureTerminalRecord | None = None
         self._revision = 0
-        self._deadline = monotonic() + _record_seconds(node) + node.sampler.timeout
+        self._deadline = monotonic() + node.silence_seconds
         #: Silence is a fault only for a source that samples on its own
         #: clock; a triggered one waits for its trigger, however long the
         #: pulse that fires it is stopped or being edited.
@@ -287,17 +302,23 @@ class MonitorCapture:
         return self._revision
 
     def poll(self) -> int:
-        """Consume the next record, independently of display cadence."""
+        """Publish every record the source holds, each its own event, in order.
+
+        One read takes them all: the cost of reaching the source is paid
+        once per poll, not once per record, so a backlog shrinks instead of
+        growing whenever publishing a record is cheaper than the record period.
+        """
         if self.closed:
             raise RuntimeError("monitor capture is closed")
-        records = self.node.sampler.read_records(1, timeout=_CANCEL_RESPONSE_SECONDS, exact=False)
+        records = self.node.take_records()
         if not records:
             if self._free_running and monotonic() >= self._deadline:
                 raise TimeoutError("waveform source stopped delivering records")
             return 0
-        self._publish(records[0])
-        self._deadline = monotonic() + _record_seconds(self.node) + self.node.sampler.timeout
-        return 1
+        for record in records:
+            self._publish(record)
+        self._deadline = monotonic() + self.node.silence_seconds
+        return len(records)
 
     def _publish(self, record: WaveformRecord) -> None:
         self._revision += 1
@@ -309,8 +330,7 @@ class MonitorCapture:
         self.closed = True
         terminal = _stopped_terminal(self.node.sampler.finish_record_capture())
         if drain:
-            for _ in range(self._revision, terminal.produced_count):
-                record, = self.node.sampler.read_records(1, timeout=0.0, exact=True)
+            for record in self.node.drain_records(terminal.produced_count - self._revision):
                 self._publish(record)
             terminal = replace(terminal, no_more_records=True)
         self.terminal = terminal
@@ -349,6 +369,11 @@ class WaveformMeasurementNode:
         #: cached object for the whole run, so the canonical one is built once
         #: rather than from an O(repeat) code vector on every record.
         self._canonical: dict[str, tuple[DatasetSchema, DatasetSchema]] = {}
+        #: The source's facts, read once per run: the sampler is a device
+        #: reached through the core, and every attribute read is a round trip.
+        self._record_samples = 0
+        self._source_timeout = 0.0
+        self._batch_records = 1
 
     @property
     def request(self) -> WaveformMeasurementRequest:
@@ -390,6 +415,8 @@ class WaveformMeasurementNode:
         if not isinstance(point, WaveformWorkingPoint):
             raise TypeError("waveform source working_point must return WaveformWorkingPoint")
         self._working_point = point
+        self._record_samples = int(self.sampler.record_samples)
+        self._source_timeout = float(self.sampler.timeout)
         self._time_origin = None
         self._last_time = None
         self._next_ordinal = 0
@@ -408,7 +435,7 @@ class WaveformMeasurementNode:
     def _shot_time(self, record: WaveformRecord) -> float:
         if record.source_ordinal != self._next_ordinal:
             raise RuntimeError(f"waveform record gap: expected {self._next_ordinal}, got {record.source_ordinal}")
-        if record.samples.shape[0] != self.sampler.record_samples:
+        if record.samples.shape[0] != self._record_samples:
             raise ValueError("waveform record sample count changed during capture")
         if self._last_time is not None and record.time_seconds <= self._last_time:
             raise RuntimeError("waveform record clock did not advance")
@@ -472,9 +499,40 @@ class WaveformMeasurementNode:
             )
         return outputs
 
+    @property
+    def silence_seconds(self) -> float:
+        """How long a capture waits for the next record before calling the source silent."""
+
+        return self._record_samples * self.working_point.sample_interval_seconds + self._source_timeout
+
+    def take_records(self, limit: int | None = None) -> list[WaveformRecord]:
+        """Every record the source holds (up to ``limit``), waiting a cancel slice for one.
+
+        One read per batch, not per record: a capture that falls behind
+        catches up at the cost of publishing alone, because reaching the
+        source (a round trip through the core) is paid once for the backlog.
+        """
+
+        count = self._batch_records if limit is None else max(1, min(int(limit), self._batch_records))
+        return list(self.sampler.read_records(count, timeout=_CANCEL_RESPONSE_SECONDS, exact=False))
+
+    def drain_records(self, count: int) -> list[WaveformRecord]:
+        """Exactly the ``count`` records a stopped source still holds, a batch per read."""
+
+        records: list[WaveformRecord] = []
+        while len(records) < count:
+            records.extend(self.sampler.read_records(
+                min(count - len(records), self._batch_records), timeout=0.0, exact=True))
+        return records
+
     def _arm(self) -> None:
         # Capacity absorbs stalls; it never sets sample/record/plot cadence.
-        capacity = max(2, ceil(_RECEIVE_BUFFER_SECONDS / _record_seconds(self)))
+        capacity = max(2, ceil(_RECEIVE_BUFFER_SECONDS / (
+            self._record_samples * self.working_point.sample_interval_seconds)))
+        # A batch is the whole buffer, bounded so that its samples stay well
+        # inside one channel frame however long the records are.
+        columns = 1 + max(column for output in self._quantities.values() for column in output.columns)
+        self._batch_records = max(1, min(capacity, _BATCH_BYTES // (4 * columns * self._record_samples)))
         self.sampler.arm(self.repeat or None, buffer_record_count=capacity)
         self._run_record["acquisition"] = {"buffer_record_count": capacity}
         # Hardware may quantize the requested rate at arm (notably DAQ).

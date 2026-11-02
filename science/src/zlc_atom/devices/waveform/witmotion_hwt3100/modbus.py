@@ -63,11 +63,22 @@ FIXED_SILENCE_ABOVE_BAUD = 19200
 
 
 class ModbusError(RuntimeError):
-    """A reply that is not a valid answer to the request just sent."""
+    """A reply that is not a valid answer to the request just sent.
+
+    ``kind`` names which check failed, so a poller can count them apart:
+    ``no_reply``, ``crc``, ``address``, ``exception`` or ``malformed``.
+    """
+
+    def __init__(self, message: str, kind: str = "malformed") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class ModbusTimeout(ModbusError):
     """No (complete) reply within the allowed time."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "no_reply")
 
 
 def crc16(data: bytes) -> int:
@@ -114,13 +125,14 @@ def check_reply(reply: bytes, *, address: int, function: int) -> bytes:
     if len(reply) < 5:
         raise ModbusError(f"reply too short ({len(reply)} bytes): {shown}")
     if crc16(reply[:-2]) != struct.unpack("<H", reply[-2:])[0]:
-        raise ModbusError(f"reply failed its CRC: {shown}")
+        raise ModbusError(f"reply failed its CRC: {shown}", "crc")
     if reply[0] != address:
         raise ModbusError(
-            f"reply came from address 0x{reply[0]:02X}, not the configured 0x{address:02X}: {shown}"
+            f"reply came from address 0x{reply[0]:02X}, not the configured 0x{address:02X}: {shown}",
+            "address",
         )
     if reply[1] == function | 0x80:
-        raise ModbusError(f"the sensor refused the request with Modbus exception {reply[2]}: {shown}")
+        raise ModbusError(f"the sensor refused the request with Modbus exception {reply[2]}: {shown}", "exception")
     if reply[1] != function:
         raise ModbusError(f"reply is for function 0x{reply[1]:02X}, not 0x{function:02X}: {shown}")
     if function == READ_HOLDING:
