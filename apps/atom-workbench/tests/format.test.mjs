@@ -57,8 +57,9 @@ test('the stop and checkpoint reasons the solver formats are shown in Chinese',(
     .map(([start,values])=>formatted(pipelineSource,start,values));
   const samples=formatted(pipelineSource,'; {} of {} samples above it',[5,1000,'0.0200','0.1001']);
   const means=formatted(pipelineSource,'; {means} mean output(s) above it',[1]);
+  const unresolved=formatted(pipelineSource,'; {unresolved} of {} inner solves did not converge',[3,40]);
   for(const why of whys){
-    for(const tail of [['',''],[samples,''],['',means],[samples,means]]){
+    for(const tail of [['','',''],[samples,'',''],['',means,''],[samples,means,''],[samples,means,unresolved],['','',unresolved]]){
       chinese(formatted(pipelineSource,'Stopped because',[why,24,'1.89e-2','5e-3',...tail]),why);
     }
   }

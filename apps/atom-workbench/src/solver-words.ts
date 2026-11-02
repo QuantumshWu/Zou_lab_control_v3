@@ -29,9 +29,10 @@ const WHY:readonly [RegExp,(...groups:string[])=>string][]=[
 const why=(text:string):string=>{for(const [pattern,words] of WHY){const match=pattern.exec(text);if(match)return words(...match.slice(1));}return text;};
 /** Reasons the native solver formats (pipeline.rs, lattice_core_adapter.rs). */
 const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
-  [/^Stopped because (.+?): the best checkpoint \((\d+) solves\) has an error estimate of (\S+) against the tolerance (\S+?)(?:; (\d+) of (\d+) samples above it, t = (\S+) to (\S+) us)?(?:; (\d+) mean output\(s\) above it)?$/,
-    (reason,n,bound,tolerance,over,samples,from,to,means)=>[`${why(reason)}，计算停止：最好的检查点（${n} 次求解）误差估计为 ${num(bound)}，误差目标 ${num(tolerance)}`,
-      ...(over?[`${samples} 个采样点中有 ${over} 个超过误差目标（t = ${from===to?num(from):`${num(from)} 到 ${num(to)}`} µs）`]:[]),...(means?[`${means} 个长期布居输出超过误差目标`]:[])].join('；')+'。'],
+  [/^Stopped because (.+?): the best checkpoint \((\d+) solves\) has an error estimate of (\S+) against the tolerance (\S+?)(?:; (\d+) of (\d+) samples above it, t = (\S+) to (\S+) us)?(?:; (\d+) mean output\(s\) above it)?(?:; (\d+) of (\d+) inner solves did not converge)?$/,
+    (reason,n,bound,tolerance,over,samples,from,to,means,failed,total)=>[`${why(reason)}，计算停止：最好的检查点（${n} 次求解）误差估计为 ${num(bound)}，误差目标 ${num(tolerance)}`,
+      ...(over?[`${samples} 个采样点中有 ${over} 个超过误差目标（t = ${from===to?num(from):`${num(from)} 到 ${num(to)}`} µs）`]:[]),...(means?[`${means} 个长期布居输出超过误差目标`]:[]),
+      ...(failed?[`${total} 次内解中有 ${failed} 次没有收敛`]:[])].join('；')+'。'],
   [/^Checkpoint at (\d+) solves: the error estimate is (\S+) against the tolerance (\S+); the run continues$/,
     (n,bound,tolerance)=>`第 ${n} 次求解的检查点：误差估计 ${num(bound)}，误差目标 ${num(tolerance)}；计算继续。`],
   [/^The mean's error estimate is (\S+), at least 1: it carries no information, so no populations are shown$/,

@@ -245,6 +245,9 @@ impl Space{
     }
     pub fn solves(&self)->usize{self.columns.len()}
 }
+/// Whether a column's solve reached the noise floor of its directions
+/// (NOISE x INNER_TOLERANCE): below it the column is the pole's.
+pub fn resolved(column:&Column)->bool{column.residual<=NOISE*INNER_TOLERANCE}
 
 /// Projects a Hermitian-symmetric field into K: every block x_q loses its
 /// trace along I / n (x_q - tr(x_q) I / n; a mirror block's trace is the

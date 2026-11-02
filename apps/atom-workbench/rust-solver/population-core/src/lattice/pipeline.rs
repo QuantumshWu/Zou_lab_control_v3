@@ -14,12 +14,14 @@
 //! 3. One rational Krylov space (`space`): x0, the gated steps'
 //!    translations (with no solve), the bordered steady column, then the
 //!    real ladder from the fastest scale the outputs need down to 1 / T in a
-//!    fixed bit-reversed cycle; before the first cycle, x0's components on
-//!    the centre generator's eigenvectors of population weight at least the
-//!    a-priori share at the first output time (exact directions of a
-//!    one-mode lattice: a strong drive's Rabi oscillation, which real poles
-//!    resolve slowly; measured on D1 + D2 at 2000 mW/cm^2, 20 us: 0.24 off
-//!    without them, 6.6e-3 with them, the standard set unchanged).
+//!    fixed bit-reversed cycle. A one-mode lattice's generator is the
+//!    centre generator, whose eigenvectors are exact directions: before the
+//!    first cycle the space takes x0's components on them of population
+//!    weight at least the a-priori share at the first output time (a strong
+//!    drive's Rabi oscillation, which real poles resolve slowly; D1 + D2 at
+//!    2000 mW/cm^2, 20 us: 0.24 off without them, 6.6e-3 with them; on a
+//!    lattice of many modes they are no eigenvectors and misled r07 to a
+//!    false acceptance).
 //! 4. Checkpoints after the steady column and after every cycle of the
 //!    ladder: the Galerkin model (`reduced`) and its outputs (the trajectory
 //!    on the grid, the horizons, the slowest relaxation). An output's
@@ -28,8 +30,10 @@
 //!    convergence check (an estimate, as QuTiP's step control is, not a
 //!    bound). A trajectory sample's bound adds the change of its projection
 //!    onto the probability simplex.
-//! 5. A checkpoint is accepted when every bound is within the tolerance and
-//!    its cycle added directions. The run stops there, or when a cycle added
+//! 5. A checkpoint is accepted when every bound is within the tolerance, its
+//!    cycle added directions and its solves converged (a failed solve leaves
+//!    its scale unvisited: r07's small shifts, accepted 5.7e-3 off). The run
+//!    stops there, or when a cycle added
 //!    no direction, or the largest change did not shrink over a cycle, or
 //!    the basis budget is spent, and returns its best checkpoint (`Answer`):
 //!    converged, or partial with the reason and every sample's own estimate.
@@ -298,7 +302,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
     let mut checkpoints:Vec<Checkpoint>=Vec::new();
     // The previous checkpoint's outputs and basis size, its largest change.
     let mut previous:Option<(Vec<Vec<f64>>,Vec<Vec<f64>>,usize)>=None;let mut last_change:Option<f64>=None;
-    let mut best:Option<Answer>=None;let reason;
+    let mut best:Option<Answer>=None;let reason;let mut cycle_start=0;
     loop{
         let clock=Instant::now();
         galerkin.ingest(&space.basis,&mut lattice)?;
@@ -309,8 +313,11 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         if let Some(first)=trajectory.first_mut(){*first=(0..n).map(|i|initial[i*n+i].re).collect();}
         let horizons:Vec<Vec<f64>>=request.horizons.iter().map(|&t|model.horizon(t)).collect();
         // The change since the previous checkpoint (unknown at the first),
-        // and whether the cycle added directions.
+        // whether the cycle added directions and whether its solves and the
+        // steady column reached their noise floor (a failed solve leaves its
+        // scale unvisited).
         let grew=previous.as_ref().is_none_or(|p|space.basis.len()>p.2);
+        let failed=space.columns.first().into_iter().chain(&space.columns[cycle_start.max(1).min(space.solves())..]).filter(|c|!space::resolved(c)).count();
         let estimate=match &previous{
             Some((t0,h0,_))=>Estimate{trajectory:trajectory.iter().zip(t0).map(|(a,b)|accuracy::metric(a,b,request.groups)).collect(),
                 horizons:horizons.iter().zip(h0).map(|(a,b)|accuracy::metric(a,b,request.groups)).collect()},
@@ -327,7 +334,7 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
         let mut answer=Answer{solves:space.solves(),modes:modes.clone(),trajectory:projected,sample_errors,horizons:horizons.clone(),horizon_fields,
             horizon_errors:estimate.horizons.clone(),estimate:estimate.clone(),slowest:slow,accepted:false};
         let largest=answer.largest();
-        answer.accepted=previous.is_some()&&grew&&largest<=tolerance;
+        answer.accepted=previous.is_some()&&grew&&failed==0&&largest<=tolerance;
         timing.projection_ms=galerkin.milliseconds;
         let point=Checkpoint{solves:space.solves(),columns:space.basis.len(),estimate,largest,accepted:answer.accepted,growing:model.growing,slowest:slow,
             trajectory:trajectory.clone(),horizons:horizons.clone(),inner:lattice.work().clone(),timing:timing.clone(),milliseconds:clock.elapsed().as_secs_f64()*1e3};
@@ -347,19 +354,18 @@ pub fn solve(prepared:&LatticePrepared,initial:&[C],request:&Request<'_>,mut obs
             let samples=match(over.first(),over.last()){(Some(&a),Some(&z))=>format!("; {} of {} samples above it, t = {:.4} to {:.4} us",over.len(),b.sample_errors.len(),times[a],times[z]),_=>String::new()};
             let means=b.horizon_errors.iter().filter(|&&e|e>tolerance).count();
             let means=if means>0{format!("; {means} mean output(s) above it")}else{String::new()};
-            reason=Some(format!("Stopped because {why}: the best checkpoint ({} solves) has an error estimate of {:.2e} against the tolerance {tolerance:e}{samples}{means}",b.solves,b.largest()));
+            let unresolved=space.columns.iter().filter(|c|!space::resolved(c)).count();
+            let unresolved=if unresolved>0{format!("; {unresolved} of {} inner solves did not converge",space.solves())}else{String::new()};
+            reason=Some(format!("Stopped because {why}: the best checkpoint ({} solves) has an error estimate of {:.2e} against the tolerance {tolerance:e}{samples}{means}{unresolved}",b.solves,b.largest()));
             break;
         }
         if previous.is_some(){last_change=Some(largest);}
         previous=Some((trajectory,horizons,space.basis.len()));
-        // Before the first cycle, x0's components on the centre generator's
-        // eigenvectors that the first output still sees.
-        if checkpoints.len()==1{
-            let(centre,size)={let op=lattice.operator();(op.centre,op.dimension())};
-            let fields:Vec<Vec<C>>=eigen.components(initial,share,first)?.into_iter().map(|b|{let mut x=vec![ZERO;size];x[centre*n*n..(centre+1)*n*n].copy_from_slice(&b);x}).collect();
-            space.add(&lattice,fields)?;
-        }
+        // Before the first cycle of a one-mode lattice, x0's components on its
+        // generator's eigenvectors that the first output still sees.
+        if checkpoints.len()==1&&modes.len()==1{space.add(&lattice,eigen.components(initial,share,first)?)?;}
         // The next cycle of the ladder.
+        cycle_start=space.solves();
         for &pole in &cycle{space.solve(&mut lattice,pole,kernel)?;if space.full(){break;}}
     }
     let answer=best.ok_or("A run has its checkpoint")?;
