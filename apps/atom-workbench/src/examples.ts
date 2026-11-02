@@ -16,6 +16,7 @@ export const EXAMPLES:readonly {key:string;label:string}[]=[
   {key:'both',label:'D1 + D2 · 同时驱动'},
   {key:'tilted',label:'倾斜磁场'},
   {key:'pgc',label:'光镊 · 径向 1D PGC'},
+  {key:'pgc3d',label:'光镊 · 3D PGC'},
 ];
 /** The tweezer PGC example (typical in-trap PGC): the tweezer's power (mW) and waist (μm); the
  * cooling pair's detuning from F=2 → F′=3 and the repump pair's from F=1 → F′=2 (in units of the D2
@@ -81,6 +82,25 @@ export function exampleScene(key:string):{scene:Scene;view:ExampleView;line:Spec
       beam('cool-plus','冷却光 +x',cooling,TWEEZER_PGC.coolingMWcm2,'+x',0),beam('cool-minus','冷却光 −x',cooling,TWEEZER_PGC.coolingMWcm2,'-x',90),
       beam('repump-plus','回泵光 +x',repump,TWEEZER_PGC.repumpMWcm2,'+x',0),beam('repump-minus','回泵光 −x',repump,TWEEZER_PGC.repumpMWcm2,'-x',90)];
     next.dynamics={...defaultDynamics(),initialStateId:'ground-2-2',durationUs:TWEEZER_PGC.durationUs,durationUnit:'ms',samples:1001,motion:{...defaultMotion(),axis:'x'}};
+    view='dynamics';
+  }
+  if(key==='pgc3d'){
+    // The same tweezer and atom cooled in 3D: the MOT's six beams kept on for PGC, a σ+σ− D2
+    // cooling pair along each of x, y and z (both beams of a pair of one helicity about their own
+    // k; the z pair, along the quadrupole axis, of the other helicity than the x and y pairs), each
+    // beam at the 1D example's detuning and intensity. A pair's two circular beams make a
+    // polarization turning along the pair at constant intensity, so the three pairs need no choice
+    // of linear axes. One repump beam along +x carries the 1D example's repump pair's intensity (a
+    // scene holds eight lasers). The atom moves in 3D.
+    Object.assign(next.fields[0]!,{magnitudeG:0,direction:axis('+x')});
+    const gamma=RB87.D2.gammaHz/(2*Math.PI*1e6),cooling=detuned('D2',TWEEZER_PGC.coolingDetuningGamma*gamma),repump=detuned('D2',TWEEZER_PGC.repumpDetuningGamma*gamma,1,2);
+    const beam=(id:string,name:string,frequency:FrequencyExpr,intensityMWcm2:number,along:AxisName,polarizationAngleDeg:number,ellipticityDeg:number):Laser=>
+      ({...structuredClone(probe),id,name,frequency,intensityMWcm2,direction:axis(along),polarizationAngleDeg,ellipticityDeg,phaseDeg:0});
+    const pair=(name:'x'|'y'|'z',helicity:1|-1)=>(['+','-'] as const).map(sign=>
+      beam(`cool-${sign==='+'?'plus':'minus'}-${name}`,`冷却光 ${sign==='+'?'+':'−'}${name}`,cooling,TWEEZER_PGC.coolingMWcm2,`${sign}${name}` as AxisName,0,45*helicity));
+    next.lasers=[{...defaultTweezer(),direction:axis('+z'),powerMW:TWEEZER_PGC.tweezerMW,waistUm:TWEEZER_PGC.tweezerWaistUm},
+      ...pair('x',1),...pair('y',1),...pair('z',-1),beam('repump','回泵光 +x',repump,2*TWEEZER_PGC.repumpMWcm2,'+x',0,0)];
+    next.dynamics={...defaultDynamics(),initialStateId:'ground-2-2',durationUs:TWEEZER_PGC.durationUs,durationUnit:'ms',samples:1001,motion:{...defaultMotion(),axis:'3d'}};
     view='dynamics';
   }
   resolveSceneFrequencies(next);next.lasers.forEach(normalizeLaserIntensity);

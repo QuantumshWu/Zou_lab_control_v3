@@ -301,6 +301,27 @@ test('the tweezer PGC example: the 852 nm tweezer along z (π to the x quantizat
   assert.deepEqual(radialAxes(loaded),['x','y']);
 });
 
+test('the 3D tweezer PGC example: the same tweezer, σ+σ− cooling pairs along x, y and z at the 1D example\'s detuning and intensity, one repump beam, motion in 3D',()=>{
+  const {scene,view}=exampleScene('pgc3d');assert.equal(view,'dynamics');
+  const loaded=validateScene(JSON.parse(JSON.stringify(scene))),one=exampleScene('pgc').scene;
+  assert.deepEqual(loaded.dynamics.motion,{enabled:true,axis:'3d',temperatureUK:30,temperatureUnit:'μK'});assert.equal(motionAxis(loaded,loaded.dynamics.motion),'3d');
+  assert.deepEqual([loaded.fields[0].magnitudeG,loaded.dynamics.initialStateId,loaded.dynamics.durationUs,loaded.dynamics.samples],[0,'ground-2-2',TWEEZER_PGC.durationUs,1001]);
+  assert.equal(motionRefusal(loaded),'');
+  // The 1D example's tweezer; its repump pair's light in one beam along +x (a scene holds eight lasers).
+  const strip=l=>({...l,id:'',name:''});assert.equal(loaded.lasers.length,8);
+  assert.deepEqual(strip(loaded.lasers[0]),strip(one.lasers[0]));
+  const light=l=>[l.frequency,l.direction,l.polarizationAngleDeg,l.ellipticityDeg];
+  assert.deepEqual([...light(loaded.lasers.at(-1)),loaded.lasers.at(-1).intensityMWcm2],[...light(one.lasers.at(-2)),2*TWEEZER_PGC.repumpMWcm2]);
+  // Six cooling beams along ±x, ±y, ±z, each at the 1D cooling beam's frequency and intensity.
+  const cooling=loaded.lasers.filter(l=>l.id.startsWith('cool-')),k=l=>directionVector(loaded.fields,l.direction);
+  assert.deepEqual(cooling.map(k),[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]);
+  for(const l of cooling)assert.deepEqual([l.frequency,l.intensityMWcm2],[one.lasers[1].frequency,TWEEZER_PGC.coolingMWcm2]);
+  // σ+σ−: both beams of a pair circular of one helicity about their own k, the z pair of the other;
+  // about the x quantization axis the x pair is σ+ along +x and σ− along −x.
+  assert.deepEqual(cooling.map(l=>l.ellipticityDeg),[45,45,45,45,-45,-45]);
+  const [plus,minus]=cooling.map(l=>polarization(l,loaded.fields));
+  assert.ok(Math.abs(plus.plus-1)<1e-12&&Math.abs(minus.minus-1)<1e-12,`${plus.plus} ${minus.minus}`);
+});
 test('the motion core\'s sentences are shown in Chinese',()=>{
   const adapter=readFileSync(new URL('../rust-solver/src/motion_core_adapter.rs',import.meta.url),'utf8');
   const partial=[...adapter.matchAll(/format!\("(The error bound is[^"]*)"/g)].map(m=>m[1].replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'));
