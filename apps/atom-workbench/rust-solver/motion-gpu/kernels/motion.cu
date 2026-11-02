@@ -562,6 +562,9 @@ struct Jumps{
     const float* wave_number;// per carrier (rad/um)
     int carriers;
     int nx;float dx;         // the grid: point x is at ((x % nx) - nx/2, (x / nx) - ny/2) dx
+    // The points by radius: the threads of a warp take points of about the same radius, so their
+    // reads of the radial tables fall on the same few cache lines.
+    const int* order;
 };
 #define EXCITED 24
 #define BEAM 8
@@ -648,7 +651,7 @@ __device__ void rates_point(const Jumps& J,float2 r,float rho2,const float2 (&ps
 extern "C" __global__ void __launch_bounds__(256,2) jump_rates(const float2* state,const float2* dxs,const float2* dys,int points,const int* components,
         const int* jumpers,const int* count,Jumps J,float* rates){
     __shared__ float sums[8][G_SLOTS];
-    const int x=blockIdx.x*blockDim.x+threadIdx.x;const bool ok=x<points;
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;const bool ok=i<points;const int x=ok?__ldg(J.order+i):0;
     const float2 r=position(ok?x:0,points,J.nx,J.dx);const float rho2=r.x*r.x+r.y*r.y;
     for(int s=blockIdx.y;s<*count;s+=gridDim.y){
         const int t=jumpers[s],n=components[t];
@@ -689,7 +692,7 @@ __device__ void apply_point(const Jumps& J,int c,float2 r,float rho2,const float
 extern "C" __global__ void __launch_bounds__(256,2) jump_apply(float2* state,const float2* dxs,const float2* dys,int points,
         const int* components,const int* jumpers,const int* count,Jumps J,const float* choices,Local forward,float* partial){
     __shared__ float scratch[32];
-    const int x=blockIdx.x*blockDim.x+threadIdx.x;const bool ok=x<points;
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;const bool ok=i<points;const int x=ok?__ldg(J.order+i):0;
     const float2 r=position(ok?x:0,points,J.nx,J.dx);const float rho2=r.x*r.x+r.y*r.y;
     for(int s=blockIdx.y;s<*count;s+=gridDim.y){
         const int t=jumpers[s];const float* ch=choices+(u64)t*CHOICE;const int to=(int)ch[1];
@@ -840,7 +843,7 @@ __device__ void observe_point(const Jumps& J,float2 r,float rho2,const float2 (&
 extern "C" __global__ void __launch_bounds__(256,2) observe_points(const float2* state,int points,int trajectories,const int* components,
         Jumps J,float tail_x,float tail_y,float* records,const float* weights,float* density){
     __shared__ float sums[8][REC_KX+4];
-    const int x=blockIdx.x*blockDim.x+threadIdx.x;const bool ok=x<points;
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;const bool ok=i<points;const int x=ok?__ldg(J.order+i):0;
     const float2 r=position(ok?x:0,points,J.nx,J.dx);const float rho2=r.x*r.x+r.y*r.y;
     for(int s=0;s<SUB;s++){
         const int t=blockIdx.y*SUB+s;if(t>=trajectories)break;

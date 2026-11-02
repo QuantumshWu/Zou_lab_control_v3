@@ -140,7 +140,7 @@ pub(crate) struct TrajectoriesArg{ids:u64,components:u64,scale:u64,log_norm:u64,
 #[repr(C)]#[derive(Clone,Copy)]
 struct LocalArg{m5:u64,m3:u64}
 #[repr(C)]#[derive(Clone,Copy)]
-struct JumpsArg{jump:u64,response:u64,step:f32,radii:i32,beams:u64,beam_count:i32,cap:u64,wave_number:u64,carriers:i32,nx:i32,dx:f32}
+struct JumpsArg{jump:u64,response:u64,step:f32,radii:i32,beams:u64,beam_count:i32,cap:u64,wave_number:u64,carriers:i32,nx:i32,dx:f32,order:u64}
 #[repr(C)]#[derive(Clone,Copy)]
 struct Seed{lo:u32,hi:u32}
 macro_rules! arg_struct{($($t:ty),*)=>{$(impl crate::driver::Arg for $t{fn pointer(&self)->*mut std::ffi::c_void{self as *const $t as *mut std::ffi::c_void}})*};}
@@ -190,7 +190,7 @@ pub struct Engine{
     partial:Buffer,jumpers:Buffer,count:Buffer,rates:Buffer,choices:Buffer,
     pub records:Buffer,marginal_x:Buffer,marginal_y:Buffer,density:Buffer,scratch_x:Buffer,scratch_y:Buffer,
     step_v:Local,back_v:Local,forward_v:Local,doppler_x:Local,doppler_y:Local,
-    jump_table:Buffer,response_table:Buffer,radial_step:f32,radii:usize,beams:Buffer,beam_count:usize,cap:Buffer,wave_number:Buffer,carriers:usize,
+    jump_table:Buffer,response_table:Buffer,radial_step:f32,radii:usize,beams:Buffer,beam_count:usize,cap:Buffer,wave_number:Buffer,carriers:usize,order:Buffer,
     energies:Vec<Vec<f64>>,
     kinetic_full:[Buffer;2],kinetic_half:[Buffer;2],derivative:[Buffer;2],kappa:[Buffer;2],
     tails:[f32;4],
@@ -266,6 +266,10 @@ impl Engine{
         let jump_table=up(&bytes(&jump_table))?;let response_table=up(&bytes(&response_table))?;
         let beams=up(&beam_table.iter().flat_map(|x|x.to_le_bytes()).collect::<Vec<u8>>())?;
         let cap_buffer=up(&caps.iter().flat_map(|x|x.to_le_bytes()).collect::<Vec<u8>>())?;
+        // The points by radius (kernels reading the radial tables take them in this order).
+        let radius2=|p:usize|{let r=g.position(p);r[0]*r[0]+r[1]*r[1]};
+        let mut order:Vec<i32>=(0..points as i32).collect();order.sort_by(|&a,&b|radius2(a as usize).total_cmp(&radius2(b as usize)).then(a.cmp(&b)));
+        let order=up(&order.iter().flat_map(|x|x.to_le_bytes()).collect::<Vec<u8>>())?;
         let wave_number=up(&wave_numbers.iter().chain([0f32].iter()).flat_map(|x|x.to_le_bytes()).collect::<Vec<u8>>())?;
         // Kinetic factors per frequency position (bit-reversed), with each inverse transform's 1/N.
         let factors=|n:usize,f:&dyn Fn(f64)->Complex|->Vec<[f32;2]>{(0..n).map(|j|{let k=if n==1{0.}else{g.wave_number(bitrev(j,n),n)};complex32(f(k)*(1./n as f64))}).collect()};
@@ -287,7 +291,7 @@ impl Engine{
             partial:zeroed(b*tiles*4)?,jumpers:zeroed(b*4)?,count:zeroed(4)?,rates:zeroed(b*tiles*G_SLOTS*4)?,choices:zeroed(b*CHOICE*4)?,
             records:zeroed(b*RECORD*4)?,marginal_x:zeroed(nx*4)?,marginal_y:zeroed(ny*4)?,density:zeroed(points*4)?,scratch_x:zeroed(nx*4)?,scratch_y:zeroed(ny*4)?,
             step_v,back_v,forward_v,doppler_x,doppler_y,jump_table,response_table,radial_step:step as f32,radii,beams,beam_count:near.len(),
-            cap:cap_buffer,wave_number,carriers,energies,
+            cap:cap_buffer,wave_number,carriers,order,energies,
             kinetic_full,kinetic_half,derivative,kappa,tails,
             planes,
             f_local:gpu.function("local_step")?,f_kick_local:gpu.function("kick_local_step")?,f_epilogue:gpu.function("epilogue")?,derived:false,
@@ -309,7 +313,7 @@ impl Engine{
     fn jumps_arg(&self)->JumpsArg{
         let g=self.settings.grid;
         JumpsArg{jump:self.jump_table.pointer,response:self.response_table.pointer,step:self.radial_step,radii:self.radii as i32,beams:self.beams.pointer,beam_count:self.beam_count as i32,
-            cap:self.cap.pointer,wave_number:self.wave_number.pointer,carriers:self.carriers as i32,nx:g.nx as i32,dx:g.dx as f32}
+            cap:self.cap.pointer,wave_number:self.wave_number.pointer,carriers:self.carriers as i32,nx:g.nx as i32,dx:g.dx as f32,order:self.order.pointer}
     }
 
     /// The thermal initial states of the first slots (one per given internal state; the others
