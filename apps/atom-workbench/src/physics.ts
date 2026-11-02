@@ -291,6 +291,11 @@ export function captureLaserFrequencyAnchor(laser:Laser):LaserFrequencyAnchor {
   return {...anchor};
 }
 
+/** The D line a laser's frequency is nearer to. A laser's `line` is the centroid its carrier is
+ * written from, which for a vacuum wavelength is D2 whatever the wavelength. */
+export function nearestLine(laser:Laser):SpectralLine{
+  const nu=laserFrequencyMHz(laser);return Math.abs(nu-RB87.D1.frequencyHz/1e6)<Math.abs(nu-RB87.D2.frequencyHz/1e6)?'D1':'D2';
+}
 /** The lasers that drive the dynamics: every enabled laser of nonzero intensity. */
 export function drivingLasers(scene:Pick<Scene,'lasers'>):Laser[]{return scene.lasers.filter(l=>l.enabled&&laserIntensityMWcm2(l)>0);}
 

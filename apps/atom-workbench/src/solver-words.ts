@@ -3,7 +3,8 @@
 // translated here, so the result contract and its validation are untouched.
 import {formatNumber} from './format.js';
 
-/** Sentences the native solver is known to write (rust-solver/src/lattice_core_adapter.rs), and the client's own. */
+/** Sentences the native solver is known to write (rust-solver/src/lattice_core_adapter.rs, motion_core_adapter.rs
+ * and the motion core), and the client's own. */
 const SENTENCES:Record<string,string>={
   "Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude, ring condition and the initial state's a-priori transfers, and their ring; far harmonics folded statically by a truncation rule): one block rational Krylov space from the initial state and its translations, every output read from one Petrov-Galerkin reduced model in the Schrieffer-Wolff/Floquet frame's metric, each output's error estimated from its convergence over whole pole cycles":
     '完整 32 态密度矩阵在折叠 Fourier 晶格上的 Lindblad 动力学（显式电荷按混合、种子幅度、环条件与初态的先验转移选取，连同其环；远离的谐波按截断规则静态折叠）：从初态及其平移出发的一个分块有理 Krylov 空间，每个输出都由 Schrieffer–Wolff/Floquet 框架度量下的同一个 Petrov–Galerkin 约化模型读出，误差按输出由它在最近四个检查点上的收敛估计。',
@@ -14,6 +15,9 @@ const SENTENCES:Record<string,string>={
   'Cancelled.':'计算已取消。',
   'The trajectory duration must be a positive finite time':'轨迹时长必须是正的有限时间。',
   'meanHorizonUs must be 1e5 or 1e6 us (100 ms or 1 s)':'长期布居的时刻 T 只能是 100 ms 或 1 s。',
+  'Exact free flight: no beam acts and the internal state is stationary under the model, so the populations and the Maxwellian momentum distribution keep their initial values':
+    '精确的自由飞行：没有光束作用，内态在模型下保持不变，所以布居与 Maxwell 动量分布保持初值。',
+  'A motion request is a trajectory alone: meanOnly and includeMean are false':'1D 运动只计算时间演化，不计算长期布居。',
 };
 /** What a mean's reason adds when its bound is above the tolerance (lattice_core_adapter.rs `OUTSIDE`). */
 const OUTSIDE=' Not converged: its error bound (estimatedError) is above the tolerance, so the populations are an estimate.';
@@ -40,6 +44,7 @@ const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
     (modes,need,budget)=>`未求解（不收敛）：此请求的晶格有 ${modes} 个模式，约需 ${need} GB 内存，超过 ${budget} GB 的内存预算。`],
   [/^The trajectory duration is limited to 10 s \(requested (\S+) s\)$/,seconds=>`轨迹时长最长 10 s（请求为 ${num(seconds)} s），未计算。`],
   [/^A trajectory has 2 to (\d+) samples \(requested (\d+)\)$/,(most,samples)=>`轨迹的采样点数应为 2 至 ${most}（请求为 ${samples}），未计算。`],
+  [/^The error bound is (\S+) against the tolerance (\S+)$/,(bound,tolerance)=>`误差界为 ${num(bound)}，误差目标 ${num(tolerance)}。`],
   [/^An output time is at most (\S+) us \(10 s; requested (\S+) us\)$/,(most,requested)=>`输出时刻最长 10 s（${num(most)} µs；请求为 ${num(requested)} µs），未计算。`],
 ];
 /** A solver sentence in Chinese; one this table does not know is shown as written. */

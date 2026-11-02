@@ -29,9 +29,11 @@ import {CurrentResults} from './current-results.js';
 import {covers,delivers,horizonRecords,keptCheckpoint,plannedSolve,solveOptions,type SolveInputs,type SolveKind} from './solve-plan.js';
 import {STATIC_MIXING_LIMIT,displayMixing,modelScope,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
 import type {ScopeNote} from './spectroscopy.js';
-import {defaultScene,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
-import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
-import type {DynamicsResult} from './solver-types.js';
+import {defaultMotion,defaultScene,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
+import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionAxis,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
+import type {DynamicsResult,MotionResult} from './solver-types.js';
+import {MOTION_AXES,motionRefusal,motionTemperatureReading,setMotionTemperature} from './motion.js';
+import {MOTION_INKS,bindMomentum,bindMotionSeries,momentumChart,motionSeriesChart} from './motion-chart.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
 import {startupScene,validateScene} from './scene-file.js';
 import {incidentTransitions,laserEmits,laserReferenceStateId,setLaserReferenceState,transitionEndpoints} from './transition-view.js';
@@ -65,6 +67,10 @@ const APP_TITLE='Rb87 实验工作台';
 const STORAGE='rb87-workbench-demo-v4',root=document.querySelector<HTMLDivElement>('#app')!;
 let scene=startupScene((()=>{try{return localStorage;}catch{return undefined;}})(),STORAGE),view:View='levels',resultView:ResultView='levels',spectral:SpectralLine='D2',selection:Selection={kind:'laser',id:'probe'};
 let populationMode:'mean'|'time'='mean',populationTimeIndex=-1,populationScale:'linear'|'log'='linear';let unbindPopulation:(()=>void)|undefined;
+/** 布居演化 with 1D motion: what its chart shows, and the listed time (an index into the result's
+ * momentum samples) the momentum distribution is compared at, if any. */
+type MotionView='populations'|'temperature'|'momentum';
+let motionView:MotionView='populations',motionCompare:number|undefined;
 let spaceRenderer:ReturnType<typeof renderSpace3D>|undefined;const spaceMount=document.createElement('div');spaceMount.className='retained-space-view';
 let stateLabels:StateLabels={},dirty=false,renderCount=0;
 let latestAnalysis:Analysis,analysisError='',solverError='',solverBusy=false,solverQueued=false,solverRevision=0,requestedKey='',solverTimer=0,solverWallMs=0,controlsKey='',renderedPopulationKey='';
@@ -144,7 +150,7 @@ const levelsPage=page('levels',`<div class="title-row page-title"><span class="s
 <div class="population-toolbar" id="population-toolbar"></div><div class="chart-surface" id="levels-chart"></div>
 <div id="selection-readout" class="state-selection-panel"></div><section class="details-card" id="levels-details"></section>`);
 const dynamicsPage=page('dynamics',`<div class="title-row page-title"><span class="summary" id="dynamics-beams"></span><span id="dynamics-commands"></span></div>
-<div id="dynamics-controls" class="dynamics-controls"></div><div class="chart-surface" id="population-chart"></div><div class="chart-caption" id="population-caption"></div>`);
+<div id="dynamics-controls" class="dynamics-controls"></div><div class="population-toolbar" id="motion-toolbar" hidden></div><div class="chart-surface" id="population-chart"></div><div class="chart-caption" id="population-caption"></div>`);
 const spacePage=page('space',`<div class="title-row page-title space-title"><span id="space-commands"></span></div><div class="chart-surface space-surface" id="space-chart"></div><div class="space-legend" id="space-legend"></div>`);
 const detailsPage=page('details',`<div class="details-notes model-notes"><div id="details-current"></div><div id="details-static"></div></div>`);
 tabs.addPermanent('levels','能级与跃迁',levelsPage);tabs.addPermanent('dynamics','布居演化',dynamicsPage);tabs.addPermanent('space','方向与偏振',spacePage);tabs.addPermanent('details','详情',detailsPage);
@@ -162,7 +168,10 @@ manifoldFocus.setChoices([['D2','D2 · 5P₃/₂'],['D1','D1 · 5P₁/₂']]);ma
 $('levels-commands').replaceWith(manifoldFocus.root);
 const populationScaleControl=new Segmented(value=>{populationScale=value as 'linear'|'log';populationScaleControl.setCurrent(populationScale);update();});
 populationScaleControl.setChoices([['linear','线性'],['log','对数']]);populationScaleControl.setCurrent(populationScale);populationScaleControl.root.setAttribute('aria-label','布居坐标');
-$('dynamics-commands').replaceWith(populationScaleControl.root);
+// With 1D motion the chart shows the populations, the temperature and mean velocity, or the momentum distribution.
+const motionViewControl=new Segmented(value=>{motionView=value as MotionView;update();});
+motionViewControl.setChoices([['populations','布居'],['temperature','温度与速度'],['momentum','动量分布']]);motionViewControl.root.id='motion-view';motionViewControl.root.setAttribute('aria-label','运动结果');
+$('dynamics-commands').replaceWith(motionViewControl.root,populationScaleControl.root);
 // 方向与偏振: where the camera looks, the field animation, the reference plane and the zoom.
 let spaceView:SpaceViewName='free';
 const spaceViews=new Segmented(value=>{spaceView=value as SpaceViewName;spaceViews.setCurrent(spaceView);spaceRenderer?.setView(spaceView);});
@@ -212,6 +221,10 @@ function referenceBeam(r:ReferenceFrequency):Laser{
 function selectedBeam(l:Laser|undefined):boolean{return !!l&&scene.lasers.includes(l);}
 function referenceStateId(laser=activeLaser()):string{return laserReferenceStateId(scene,laser);}
 function dynamics():DynamicsSettings{return scene.dynamics;}
+/** 1D 运动 is on. */
+function motionOn():boolean{return !!scene.dynamics.motion?.enabled;}
+/** The page shows a 1D motion trajectory: motion is on and the page shows a trajectory. */
+function moving():boolean{return motionOn()&&showsTrajectory();}
 /** Resolves the scene's frequencies and intensities (a scene built in code: the default and examples). */
 function normalizeScene(next:Scene):void{try{resolveSceneFrequencies(next);}catch{/* The status reports an invalid frequency. */}for(const laser of next.lasers){try{normalizeLaserIntensity(laser);}catch{/* The inspector reports an invalid laser. */}}}
 
@@ -221,7 +234,7 @@ function editKey(value:Scene=scene):string{
   // Readout preferences, derived anchors and the automatic curve choice are not edits; a unit
   // picked for the duration or the temperature is one through the quantity it changes.
   const d=value.dynamics,settings=d?{initialStateId:d.initialStateId,initialState:d.initialState,durationUs:d.durationUs,samples:d.samples,
-    curves:d.monitorMode==='manual'?[d.monitoredStateIds,d.monitoredGroupIds??[]]:'auto'}:null;
+    curves:d.monitorMode==='manual'?[d.monitoredStateIds,d.monitoredGroupIds??[]]:'auto',motion:d.motion}:null;
   return JSON.stringify({...value,display:undefined,dynamics:settings},(key,item)=>key.endsWith('Anchor')?undefined:item);
 }
 function markBaseline():void{baseline=editKey();}
@@ -235,20 +248,22 @@ function note(text:string,word:StatusWord='task'):void{notice={text,word,until:p
  * another length moves nothing before it, and the full words for the tooltip when the line says
  * them short. Computing is automatic; 停止 ends a running solve. */
 function solverStatus():[string,StatusWord,string?,string?]{
-  const record=currentRecord(),result=record?.result,error=currentSolverError(),cached=cachedMean()?.result;
-  // A cached mean is ready while the trajectory beside it is not.
-  const meanReady=(result??cached)?.mean.converged===true;
-  if(error){const why=labelStateIds(solverText(error));return [record?.checkpoint==='failed'?`计算失败 · 显示最后的中间结果：${why}`:meanReady?`时间演化失败（长期布居已就绪）：${why}`:`布居计算失败：${why}`,'error'];}
+  const record=currentRecord(),result=record?.result,error=currentSolverError(),cached=cachedMean()?.result,motion=moving();
+  // 1D motion the beams have no 1D form for is not solved: the reason, naming the lasers.
+  const refusal=motion?motionRefusal(scene):'';if(refusal)return [refusal,'error',undefined,refusal];
+  // A cached mean is ready while the trajectory beside it is not (a motion trajectory has none).
+  const meanReady=!motion&&(result??cached)?.mean.converged===true,subject=motion?'运动':'布居';
+  if(error){const why=labelStateIds(solverText(error));return [record?.checkpoint==='failed'?`计算失败 · 显示最后的中间结果：${why}`:meanReady?`时间演化失败（长期布居已就绪）：${why}`:`${subject}计算失败：${why}`,'error'];}
   // While a solve runs nothing new is drawn; the status says how far its checkpoints have come.
   if(currentSolverBusy()){
     const last=lastCheckpoint?.record.result,reached=last?.populationAccuracy?.estimatedMaximumError??(last?.mean.converged?last.mean.estimatedError:null);
-    return [reached!=null?`布居计算中… · 当前估计误差最大 ${errorPercent(reached)}`:meanReady?'长期布居已就绪 · 时间演化计算中…':solverQueued?'布居待计算':'布居计算中…','task'];
+    return [reached!=null?`${subject}计算中… · 当前估计误差最大 ${errorPercent(reached)}`:meanReady?'长期布居已就绪 · 时间演化计算中…':solverQueued?`${subject}待计算`:`${subject}计算中…`,'task'];
   }
   const stopped=stoppedHere();
   if(view==='space')return ['方向与偏振实时显示','idle'];
   if(!result){
     if(cached&&meanReady){const words=meanSentence(cached);return stopped?[`计算已停止 · 长期布居 ${meanSymbol(cached)} 已就绪，时间演化未计算`,'warning']:[`${meanWords(cached)} · 时间演化待计算`,words?'warning':'idle'];}
-    return stopped?['计算已停止 · 修改参数后重新计算','warning']:['布居待计算','idle'];
+    return stopped?['计算已停止 · 修改参数后重新计算','warning']:[`${subject}待计算`,'idle'];
   }
   const elapsed=formatElapsed(record?.wallMs??solverWallMs),partial=trajectorySentence(result),mean=meanSentence(result),both=partial&&mean?bothSentence(result):'';
   const trajectory=showsTrajectory();
@@ -259,6 +274,7 @@ function solverStatus():[string,StatusWord,string?,string?]{
     const miss=trajectoryMiss(result),words=trajectory?both||(miss?`${miss}（超过 ${tolerance}）`:mean):mean,full=trajectory?[partial,mean].filter(Boolean).join(' · '):mean;
     return [`${head}${words?`：${words}`:trajectory?`（各时刻 ≤ ${tolerance}）`:''}`,'warning',undefined,words!==full?`${head}：${full}`:undefined];
   }
+  if(motion)return [['1D 运动已计算',partial].filter(Boolean).join(' · '),partial?'warning':'idle',elapsed];
   if(resultPage()==='dynamics'){
     const full=['轨迹已计算',partial,result.mean?.converged?mean:'长期布居未解析'].filter(Boolean).join(' · ');
     return both?[`轨迹已计算 · ${both}`,'warning',elapsed,full]:[full,result.mean?.converged&&!partial&&!mean?'idle':'warning',elapsed];
@@ -824,7 +840,11 @@ function currentInputs():SolveInputs{return {trajectoryKey:trajectoryKey(),meanK
 function cachedMean():SolvedRecord|undefined{return means.get(meanKey(),dynamics().meanHorizonUs);}
 function shownTrajectory():SolvedRecord|undefined{return trajectories.get(trajectoryKey(),'trajectory');}
 /** The request the page needs now: none when its trajectory and its mean at T are here. */
-function neededSolve():SolveKind|undefined{return plannedSolve(showsTrajectory(),{trajectory:!!shownTrajectory(),mean:!!cachedMean()});}
+function neededSolve():SolveKind|undefined{
+  // A motion trajectory the beams refuse is not asked for (motion.ts motionBeams).
+  if(moving()&&motionRefusal(scene))return undefined;
+  return plannedSolve(showsTrajectory(),{trajectory:!!shownTrajectory(),mean:!!cachedMean()},motionOn());
+}
 /** A request's identity: what it computes, for which inputs. */
 function requestKey(kind:SolveKind|undefined):string{
   const horizon=JSON.stringify(dynamics().meanHorizonUs);
@@ -934,7 +954,8 @@ function stopSolve():void{
  * with the mean at T (or none yet). */
 function currentRecord():SolvedRecord|undefined{
   const mean=cachedMean();if(!showsTrajectory())return mean;
-  const trajectory=shownTrajectory();return trajectory&&withMean(trajectory,mean);
+  // A motion trajectory carries no long-time mean (solve-plan.ts plannedSolve).
+  const trajectory=shownTrajectory();return trajectory&&(trajectory.result.motion?trajectory:withMean(trajectory,mean));
 }
 const mergedRecords=new WeakMap<SolvedRecord,{mean:SolvedRecord|undefined;record:SolvedRecord}>();
 function withMean(trajectory:SolvedRecord,mean:SolvedRecord|undefined):SolvedRecord{
@@ -1001,7 +1022,9 @@ function renderDetailsPage():void{
     :scene.fields[0]?`总磁场为零：量子化轴取第一个磁场「${scene.fields[0].name}」的参考轴，θ ${angle(axis!.thetaDeg)}、φ ${angle(axis!.phiDeg)}。`:'没有磁场：量子化轴取 +z。';
   const sampling=result&&result.timesUs.length>1?[populationSamplingInfo(result),'布居演化在模型基中：静态 H0 的本征态，标签为重叠最大的磁场本征态。']:[];
   const outside=scopeNotes.map(note=>`超出模型范围（结果照常给出）：${note.text}`);
-  const markup=`<section class="details-current"><h3>当前计算</h3>${[field,...outside,...scope,...sampling].map(line=>`<p>${esc(line)}</p>`).join('')}${solverDetails()}</section>`;
+  const motion=dynamics().motion,temperature=motion&&motionTemperatureReading(motion);
+  const motionLines=motion?.enabled&&temperature?[motionRefusal(scene)||`1D 运动：原子沿 ${motion.axis} 轴运动，初始温度 ${withUnit(temperature.value,temperature.unit,{digits:6})}；布居演化中的轨迹含运动，长期布居 p̄(T) 只是内态的。`]:[];
+  const markup=`<section class="details-current"><h3>当前计算</h3>${[field,...motionLines,...outside,...scope,...sampling].map(line=>`<p>${esc(line)}</p>`).join('')}${solverDetails()}</section>`;
   const host=$('details-current');if(host.dataset.markup!==markup){host.dataset.markup=markup;host.innerHTML=markup;}
   const notes=$('details-static');if(!notes.childElementCount)notes.innerHTML=definitionNotes()+modelNotes();
 }
@@ -1055,9 +1078,9 @@ function renderDynamicsControls(a:Analysis):void{
   const states=allLevels(a);d.monitoredGroupIds??=[];
   if(!states.some(l=>l.id===d.initialStateId))d.initialStateId=initialId();d.monitoredStateIds=d.monitoredStateIds.filter(id=>states.some(l=>l.id===id));
   setText('dynamics-beams',enabled.length?`驱动：${enabled.map(l=>l.name).join(' + ')}`:'驱动：无光束');
-  const key=JSON.stringify(states.map(l=>l.id)),parent=$('dynamics-controls');
+  const key=JSON.stringify({states:states.map(l=>l.id),motion:motionOn()}),parent=$('dynamics-controls');
   if(key===controlsKey){
-    refreshFields(dynamicsFields);
+    refreshFields(dynamicsFields);fitDynamicsForms(parent);
     parent.querySelectorAll<HTMLButtonElement>('[data-monitor-group]').forEach(input=>setChecked(input,d.monitoredGroupIds!.includes(input.dataset.monitorGroup!)));
     parent.querySelectorAll<HTMLButtonElement>('[data-monitor]').forEach(input=>setChecked(input,d.monitoredStateIds.includes(input.dataset.monitor!)));
     const count=parent.querySelector('.monitor-count');if(count)count.textContent=`${populationDisplayIds(d).length} 条`;
@@ -1065,12 +1088,23 @@ function renderDynamicsControls(a:Analysis):void{
     return;
   }
   controlsKey=key;const monitorsWereOpen=parent.querySelector<HTMLDetailsElement>('.monitor-controls')?.open??false;disposeTrees(parent);parent.replaceChildren();dynamicsFields.clear();
-  const time=form('dynamics-config'),curves=form('dynamics-config');parent.append(time,curves);
+  const time=form('dynamics-config'),curves=form('dynamics-config'),motion=form('dynamics-config');parent.append(time,curves,motion);
   const after=()=>update();
   bindQuantity(dynamicsFields,time,'dynamics','dynamics',()=>({name:'duration',label:'时长',spin:true,inexact:true}),
     {read:()=>durationReading(d),write:(v,u)=>setDuration(d,v,u as DurationUnit),units:()=>unitChoices(DURATION_UNITS,'时间')},after);
   bindField(dynamicsFields,time,'dynamics',()=>({name:'samples',label:'采样点数',kind:'integer',value:d.samples,minimum:2,maximum:MAXIMUM_SAMPLES,step:1}),v=>{const n=Number(v);if(!Number.isInteger(n))throw new Error('采样点数必须为整数');if(n<2||n>MAXIMUM_SAMPLES)throw new Error(`采样点数应为 2 至 ${MAXIMUM_SAMPLES}`);d.samples=n;},{after});
   bindField(dynamicsFields,curves,'dynamics',()=>({name:'monitor-mode',label:'显示曲线',kind:'choice',segmented:true,choices:[['auto','初末各 3 态'],['manual','手动选择']],value:d.monitorMode??'auto'}),v=>{d.monitorMode=v as 'auto'|'manual';if(v==='auto')d.monitoredGroupIds=[];else parent.querySelector<HTMLDetailsElement>('.monitor-controls')!.open=true;},{after});
+  // 1D 运动: off, or on with its axis and initial temperature (kept while off).
+  bindField(dynamicsFields,motion,'motion',()=>({name:'motion',label:'1D 运动',kind:'boolean',value:motionOn(),
+    description:'原子沿一个坐标轴运动，内态与运动一起演化：给出温度、平均速度和动量分布。光须沿该轴（正向或反向）传播或与它垂直，沿轴传播的光都在 D2 线上。'}),
+    v=>{const current=dynamics();if(v)current.motion={...(current.motion??defaultMotion()),enabled:true};else if(current.motion)current.motion.enabled=false;},{after});
+  if(motionOn()){
+    const settings=()=>dynamics().motion!;
+    bindField(dynamicsFields,motion,'motion',()=>({name:'axis',label:'运动轴',kind:'choice',segmented:true,choices:MOTION_AXES.map(axis=>[axis,axis]),value:settings().axis,description:'原子运动所沿的坐标轴'}),
+      v=>{settings().axis=v as MotionAxis;},{after});
+    bindQuantity(dynamicsFields,motion,'motion','motion',()=>({name:'temperature',label:'初始温度',spin:true,inexact:true,description:'初态 Maxwell 动量分布沿运动轴的温度；位置均匀分布，内态为场景的初态'}),
+      {read:()=>motionTemperatureReading(settings()),write:(v,u)=>setMotionTemperature(settings(),v,u as TemperatureUnit),units:()=>unitChoices(TEMPERATURE_UNITS,'温度')},after);
+  }
   const monitors=element('details','monitor-controls');monitors.open=monitorsWereOpen;
   const summary=element('summary');summary.append(element('span','monitor-title','观察曲线'),element('span','monitor-count',`${populationDisplayIds(d).length} 条`),element('span','spacer'),monitorAll.root,monitorNone.root);
   monitors.append(summary);const list=element('div','monitor-tree');monitors.append(list);parent.append(monitors);
@@ -1084,10 +1118,35 @@ function renderDynamicsControls(a:Analysis):void{
       rowNode.append(choices);section.append(rowNode);
     }list.append(section);
   }
-  requestAnimationFrame(()=>{shareLabelColumn(time);shareLabelColumn(curves);alignUnitPickers(time);});
+  fitDynamicsForms(parent);
+}
+/** The settings forms' label columns and unit pickers, measured at the window's scale now: a window
+ * that grows across a scale step widens its labels' words. */
+function fitDynamicsForms(parent:HTMLElement):void{
+  requestAnimationFrame(()=>{for(const settings of parent.querySelectorAll<HTMLElement>('.dynamics-config')){shareLabelColumn(settings);alignUnitPickers(settings);}});
 }
 const monitorAll=command('全部磁子能级',()=>{const d=dynamics();d.monitorMode='manual';d.monitoredStateIds=allLevels().map(state=>state.id);update();},{role:'quiet'});monitorAll.root.id='monitor-all';
 const monitorNone=command('清空',()=>{const d=dynamics();d.monitorMode='manual';d.monitoredStateIds=[];d.monitoredGroupIds=[];update();},{role:'quiet'});monitorNone.root.id='monitor-none';
+/** 动量分布: the last time is always drawn; 对比时刻 adds one of the listed times before it. */
+const momentumCompare=checkBox('对比时刻',on=>{motionCompare=on?0:undefined;update();});momentumCompare.id='momentum-compare';
+const momentumTime=element('input');momentumTime.type='range';momentumTime.id='momentum-time';momentumTime.setAttribute('aria-label','对比的时刻');
+momentumTime.oninput=()=>{motionCompare=Number(momentumTime.value);update();};
+const momentumTimeValue=element('span','population-time-value');momentumTimeValue.id='momentum-time-value';
+$('motion-toolbar').append(momentumCompare,momentumTime,momentumTimeValue);
+/** The momentum toolbar of a motion result's distributions: shown when one is drawn and a time before the last is listed. */
+function momentumToolbar(motion:MotionResult|undefined,timesUs:readonly number[]):void{
+  const earlier=motion?motion.momentum.samples.length-1:0,toolbar=$('motion-toolbar');toolbar.hidden=earlier<1;
+  if(earlier<1)return;
+  if(motionCompare!==undefined)motionCompare=Math.min(motionCompare,earlier-1);
+  setChecked(momentumCompare,motionCompare!==undefined);
+  momentumTime.hidden=motionCompare===undefined||earlier<2;momentumTimeValue.hidden=motionCompare===undefined;
+  if(momentumTime.max!==String(earlier-1))momentumTime.max=String(earlier-1);if(momentumTime.value!==String(motionCompare??0))momentumTime.value=String(motionCompare??0);
+  momentumTimeValue.textContent=motionCompare===undefined?'':durationText(timesUs[motion!.momentum.samples[motionCompare]!]!,dynamics().durationUnit);
+}
+/** A legend entry: a line in its colour (dashed when asked) and its words. */
+function legendEntry(colour:string,words:string,dashed=false):string{
+  return `<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${colour}" stroke-width="2"${dashed?' stroke-dasharray="4 3"':''}/></svg>${esc(words)}</span>`;
+}
 function renderDynamics(a:Analysis):void{
   const d=dynamics(),raw=currentResult();if((d.monitorMode??'auto')==='auto')d.monitoredStateIds=recommendedPopulationStates(raw,d.initialStateId);
   renderDynamicsControls(a);const ids=populationDisplayIds(d),result=raw?withPopulationGroups(raw,d.monitoredGroupIds??[]):undefined;
@@ -1096,13 +1155,29 @@ function renderDynamics(a:Analysis):void{
   const host=$('population-chart'),open=host.querySelector<HTMLElement>('.population-readout:not([hidden])')?.dataset.sampleIndex;
   unbindPopulation?.();unbindPopulation=undefined;
   const plotOptions={showTotalExcited:false,timeUnit:d.durationUnit,scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),...(open===undefined?{}:{cursor:Number(open)})};
-  const stopped=stoppedHere();
-  host.innerHTML=result&&result.timesUs.length>1?populationChart(result,ids,labels,plotOptions):result?.mean.converged?`<div class="empty-state"><div><p>长期布居 ${esc(meanSymbol(raw))}</p><div class="form solver-readouts">${ids.map(id=>`<span class="field-label">${esc(labels[id]??id)}</span><span class="readout-edit">${populationValue(result.mean.populations?.[id]??0)}</span>`).join('')}</div><p class="note">${currentSolverError()?'时间演化未完成':stopped?'时间演化已停止':'时间演化计算中…'}</p></div></div>`:`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
+  const stopped=stoppedHere(),waiting=`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
+  // With 1D motion: its refusal, or the chart its view asks for.
+  const motionView$=motionOn()?motionView:'populations',refusal=motionOn()?motionRefusal(scene):'',motion=raw&&raw.timesUs.length>1?raw.motion:undefined;
+  motionViewControl.root.hidden=!motionOn();motionViewControl.setCurrent(motionView$);populationScaleControl.root.hidden=motionView$!=='populations';
+  momentumToolbar(!refusal&&motionView$==='momentum'?motion:undefined,raw?.timesUs??[]);
+  const caption=(markup:string)=>{if($('population-caption').innerHTML!==markup)$('population-caption').innerHTML=markup;};
+  if(refusal){host.innerHTML=`<div class="empty-state error" role="alert">${esc(refusal)}</div>`;caption('');return;}
+  if(motionView$==='temperature'){
+    host.innerHTML=motion?motionSeriesChart(raw!.timesUs,motion,d.durationUnit):waiting;if(motion)unbindPopulation=bindMotionSeries(host,raw!.timesUs,motion,d.durationUnit);
+    caption(motion?legendEntry(MOTION_INKS[0],`温度 T = m·Var(v)/k_B（沿 ${motion.axis} 轴）`)+legendEntry(MOTION_INKS[1],'平均速度 ⟨v⟩'):'');return;
+  }
+  if(motionView$==='momentum'){
+    const last=motion?motion.momentum.samples.length-1:0,listed=motion?[last,...(motionCompare===undefined?[]:[motionCompare])]:[];
+    const names=motion?listed.map(i=>{const sample=motion.momentum.samples[i]!;return `t = ${durationText(raw!.timesUs[sample]!,d.durationUnit)} · T = ${formatNumber(motion.temperatureUK[sample]!,{digits:4})} μK`;}):[];
+    host.innerHTML=motion?momentumChart(motion,listed):waiting;if(motion)unbindPopulation=bindMomentum(host,motion,listed,names);
+    caption(names.map((words,k)=>legendEntry(MOTION_INKS[k]!,words,k>0)).join(''));return;
+  }
+  host.innerHTML=result&&result.timesUs.length>1?populationChart(result,ids,labels,plotOptions):result?.mean.converged?`<div class="empty-state"><div><p>长期布居 ${esc(meanSymbol(raw))}</p><div class="form solver-readouts">${ids.map(id=>`<span class="field-label">${esc(labels[id]??id)}</span><span class="readout-edit">${populationValue(result.mean.populations?.[id]??0)}</span>`).join('')}</div><p class="note">${currentSolverError()?'时间演化未完成':stopped?'时间演化已停止':'时间演化计算中…'}</p></div></div>`:waiting;
   if(result&&result.timesUs.length>1)unbindPopulation=bindPopulationChart(host,result,ids,labels,plotOptions);
   const errors=raw&&raw.timesUs.length>1?sampleErrors(raw):undefined,banded=!!errors&&outsideRuns(errors).length>0;
   // The legend names the curves drawn: none until a result is here.
   const legend=!(result&&result.timesUs.length>1)?'':(banded?`<span class="population-legend accuracy-legend"><span class="accuracy-swatch" aria-hidden="true"></span>估计误差 &gt; ${errorPercent(POPULATION_TOLERANCE)}</span>`:'')+ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
-  if($('population-caption').innerHTML!==legend)$('population-caption').innerHTML=legend;
+  caption(legend);
 }
 
 /** The 沿 B shortcut the selected light's direction is now wears the active face. */
@@ -1157,7 +1232,7 @@ function renderSpaceLegend(a:Analysis):void{
 function showAnalysisError(text:string):void{
   const markup=`<div class="empty-state error" role="alert">能级参数无效：${esc(text)}</div>`;
   if(view==='levels'){$('levels-chart').innerHTML=markup;$('selection-readout').hidden=true;$('population-toolbar').hidden=true;$('levels-details').replaceChildren();}
-  else if(view==='dynamics'){unbindPopulation?.();unbindPopulation=undefined;$('population-chart').innerHTML=markup;$('population-caption').replaceChildren();}
+  else if(view==='dynamics'){unbindPopulation?.();unbindPopulation=undefined;$('population-chart').innerHTML=markup;$('population-caption').replaceChildren();$('motion-toolbar').hidden=true;}
   else if(view==='space'){spaceMount.remove();$('space-chart').innerHTML=markup;}
 }
 

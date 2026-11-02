@@ -3,8 +3,8 @@
 // for, and the initial temperature as the operator writes it (§0.4).
 import type {DynamicsSettings,Laser,MotionAxis,MotionSettings,Scene,TemperatureUnit,Vec3} from './types.js';
 import {directionVector} from './direction.js';
-import {captureLaserFrequencyAnchor,drivingLasers,laserFrequencyMHz} from './physics.js';
-import {TEMPERATURE_K,TEMPERATURE_UNITS} from './temperature.js';
+import {drivingLasers,laserFrequencyMHz,nearestLine} from './physics.js';
+import {TEMPERATURE_UK,TEMPERATURE_UNITS} from './temperature.js';
 import {formatNumber} from './format.js';
 import type {Reading} from './unit-input.js';
 
@@ -36,7 +36,8 @@ export interface MotionBeam {laser:Laser;axial:-1|0|1}
 /** The beams of a motion solve: every laser that drives the dynamics (drivingLasers). Each runs
  * along the axis, against it or perpendicular to it -- decided exactly, as directions are exact
  * rotations (direction.ts): no angle tolerance. Any other angle has no 1D form, and the beams with
- * an axial component are travelling waves of one photon momentum ħk: each is on the D2 line.
+ * an axial component are travelling waves of one photon momentum ħk: each is on the D2 line, its
+ * frequency nearer to D2 than to D1.
  * Otherwise the motion is refused with the reason, naming the lasers. */
 export function motionBeams(scene:Scene,axis:MotionAxis):MotionBeam[]{
   const along=COMPONENT[axis],oblique:string[]=[],offLine:string[]=[];
@@ -44,7 +45,7 @@ export function motionBeams(scene:Scene,axis:MotionAxis):MotionBeam[]{
     const k=directionVector(scene.fields,laser.direction),transverse=k.filter((_,i)=>i!==along);
     if(transverse.every(c=>c===0)){
       const axial=Math.sign(k[along]!) as -1|1;
-      if(captureLaserFrequencyAnchor(laser).line!=='D2')offLine.push(`「${laser.name}」（${formatNumber(299792458e3/laserFrequencyMHz(laser),{digits:4})} nm）`);
+      if(nearestLine(laser)!=='D2')offLine.push(`「${laser.name}」（${formatNumber(299792458e3/laserFrequencyMHz(laser),{digits:4})} nm）`);
       return {laser,axial};
     }
     if(k[along]!==0)oblique.push(`「${laser.name}」（与 ${axis} 轴成 ${formatNumber(Math.acos(Math.max(-1,Math.min(1,k[along]!)))*180/Math.PI,{digits:4})}°）`);
@@ -61,14 +62,12 @@ export function motionRefusal(scene:Scene):string{
   try{motionBeams(scene,request.axis);return '';}catch(error){return error instanceof Error?error.message:String(error);}
 }
 
-/** The unit factor: how many μK one `unit` is. */
-const microkelvin=(unit:TemperatureUnit):number=>TEMPERATURE_K[unit]/TEMPERATURE_K['μK'];
 /** The initial temperature as the operator wrote it: the number in its unit. */
-export function motionTemperatureReading(motion:MotionSettings):Reading<TemperatureUnit>{return {value:motion.temperatureUK/microkelvin(motion.temperatureUnit),unit:motion.temperatureUnit};}
+export function motionTemperatureReading(motion:MotionSettings):Reading<TemperatureUnit>{return {value:motion.temperatureUK/TEMPERATURE_UK[motion.temperatureUnit],unit:motion.temperatureUnit};}
 /** The operator's initial temperature: `value` in `unit`, written with its unit. A unit picked for
  * it keeps its digits, so 30 μK read in mK is 30 mK (§0.4). */
 export function setMotionTemperature(motion:MotionSettings,value:number,unit:TemperatureUnit):void{
   if(!TEMPERATURE_UNITS.includes(unit))throw new Error('温度单位无效');
-  const uK=value*microkelvin(unit);if(!Number.isFinite(uK)||!(uK>0))throw new Error('温度必须是有限正数');
+  const uK=value*TEMPERATURE_UK[unit];if(!Number.isFinite(uK)||!(uK>0))throw new Error('温度必须是有限正数');
   motion.temperatureUK=uK;motion.temperatureUnit=unit;
 }

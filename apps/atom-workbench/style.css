@@ -229,7 +229,8 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 
 /* ---------- 布居演化 ------------------------------------------------------ */
 .dynamics-controls { flex: none; display: flex; flex-wrap: wrap; align-items: start; gap: var(--row-gap) var(--section-gap); }
-.dynamics-config.form { flex: 1 1 calc(10 * var(--control)); min-width: 0; max-width: calc(14 * var(--control)); }
+/* Each settings form as wide as a number with its unit picker needs: forms that do not fit side by side wrap. */
+.dynamics-config.form { flex: 1 1 calc(12 * var(--control)); min-width: 0; max-width: calc(14 * var(--control)); }
 .monitor-controls { flex: 1 1 100%; border-top: var(--edge) solid var(--divider); }
 .monitor-controls > summary .spacer { flex: 1; }
 .monitor-controls > summary .monitor-count { color: var(--muted-ink); }
@@ -259,6 +260,8 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .readout-row > span:not(.readout-name) { text-align: right; }
 .readout-name { min-width: 0; word-break: keep-all; }
 .readout-head, .readout-mean { color: var(--muted-ink); }
+/* 1D 运动 (ui-design.md §6.20): a motion readout's values carry their units, so its value column takes their width. */
+.motion-readout .readout-row.two { grid-template-columns: minmax(calc(3 * var(--control)), 1fr) auto; }
 
 /* ---------- 方向与偏振 ---------------------------------------------------- */
 .space-title { flex-wrap: wrap; height: auto; }
