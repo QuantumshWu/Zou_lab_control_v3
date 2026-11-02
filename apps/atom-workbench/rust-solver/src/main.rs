@@ -250,7 +250,7 @@ mod tests {
     /// A motion request is a trajectory alone. Without light nothing confines the atom; with
     /// light the engine is not implemented yet.
     #[test]
-    fn a_motion_request_is_refused_until_the_engine_is_implemented() {
+    fn a_motion_request_without_a_confining_potential_is_refused() {
         let mut model = motion_model();
         let solve = |model: &Value, options: Value| request(json!({"id":6,"modelSchema":FULL_MODEL_SCHEMA,"model":model,"options":options}))["error"].as_str().unwrap_or("").to_owned();
         assert!(solve(&model, json!({"durationUs":10.,"samples":5})).contains("a trajectory alone"));
@@ -259,6 +259,6 @@ mod tests {
         let zero = json!({"real":vec![0.;1024],"imag":vec![0.;1024]});
         model["motion"]["beams"] = json!([{"id":"tweezer","name":"光镊","direction":[0.,1.,0.],"waveNumberPerUm":7.37,"waistUm":1.2,"intensityMWcm2":1.77e8,
             "frequencyIndex":[0],"coupling":zero,"counterCoupling":zero,"outsideShift":zero}]);
-        assert_eq!(solve(&model, trajectory), atom_motion_core::NOT_IMPLEMENTED);
+        assert_eq!(solve(&model, trajectory), atom_motion_core::NOT_CONFINED);
     }
 }

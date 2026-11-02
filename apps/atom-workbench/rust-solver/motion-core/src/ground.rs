@@ -147,6 +147,15 @@ impl Local{
 /// The first-order increments of the generator at one position for excited-energy shifts w_l.
 #[derive(Clone,Debug)]
 pub struct FirstOrder{pub light_shift:Dense,pub scattering:Dense,pub jumps:Vec<Dense>}
+/// The first-order operators of the moving atom at one position, the order of its momentum kept
+/// (`Ground::moving`). Absorbing from beam l shifts the excited state by w_l = (ħ/m)(k_l κ + k_l²/2),
+/// κ the ground ket's momentum (rad/um) before the absorption and k_l the beam's axial wave
+/// number, so R_c → R_c − A_c κ̂ − B_c with A_c = Σ_l a_l(x)(ħ/m)k_l R2_l and
+/// B_c = Σ_l a_l(x)(ħ/m)(k_l²/2) R2_l, κ̂ acting first. The effective Hamiltonian gains
+/// −(`right` κ̂ + κ̂ `left` + `constant`) and jump j gains −(`jumps_momentum`[j] κ̂ + `jumps_constant`[j]);
+/// for a number κ these are `first_order`'s increments.
+#[derive(Clone,Debug)]
+pub struct Moving{pub right:Dense,pub left:Dense,pub constant:Dense,pub jumps_momentum:Vec<Dense>,pub jumps_constant:Vec<Dense>}
 
 /// The secular step's report.
 #[derive(Clone,Debug)]
@@ -428,6 +437,13 @@ impl Ground{
             excited_readout:excited_readout.iter().map(secular).collect(),jumps:self.split(&responses)}
     }
 
+    /// The jumps some beam drives at an elimination: P_to C_a R_l P_from ≠ 0 for a beam l of the carrier.
+    /// The others vanish on the whole line, every beam's amplitude scaling its own response.
+    pub fn driven_jumps(&self,elimination:&Elimination)->Vec<usize>{
+        (0..self.jumps.len()).filter(|&j|{let jump=&self.jumps[j];
+            self.carriers[jump.carrier].beams.iter().any(|&l|!between(&self.block,&self.emission[jump.axis].product(&elimination.responses[l]),jump.to,jump.from).is_zero())}).collect()
+    }
+
     /// The jumps of per-carrier responses r_c: P_to C_a r_c P_from.
     fn split(&self,responses:&[Dense])->Vec<Dense>{
         let whole:Vec<[Dense;3]>=responses.iter().map(|r|std::array::from_fn(|a|self.emission[a].product(r))).collect();
@@ -449,6 +465,29 @@ impl Ground{
         let mut scattering=Dense::zeros(ng,ng);
         for(l,d)in jumps.iter().zip(&increments){scattering.add_scaled(Complex::ONE,&l.adjoint_product(d));scattering.add_scaled(Complex::ONE,&d.adjoint_product(l));}
         FirstOrder{light_shift:secular_part(&self.block,&light_shift),scattering,jumps:increments}
+    }
+
+    /// The moving atom's first-order operators at x (um), ħ/m in um²/us. With
+    /// G_c = −½V_c† − (i/2)R_c†D and F_c = −½V_c − (i/2)D R_c, the effective Hamiltonian's increment
+    /// Σ_c (G_c ΔR_c + ΔR_c† F_c) for ΔR_c = −A_c κ̂ − B_c gives right = Σ_c G_c A_c,
+    /// left = Σ_c A_c† F_c and constant = Σ_c (G_c B_c + B_c† F_c), each secular.
+    pub fn moving(&self,elimination:&Elimination,x:f64,hbar_over_m:f64)->Moving{
+        let ng=self.ground_states.len();let a=self.amplitudes(x);
+        let slope:Vec<Complex>=self.beams.iter().zip(&a).map(|(b,&z)|z*(hbar_over_m*b.axial_wave_number())).collect();
+        let recoil:Vec<Complex>=self.beams.iter().zip(&a).map(|(b,&z)|z*(hbar_over_m*b.axial_wave_number().powi(2)/2.)).collect();
+        let(mut right,mut left,mut constant)=(Dense::zeros(ng,ng),Dense::zeros(ng,ng),Dense::zeros(ng,ng));
+        let(mut momentum,mut fixed)=(vec![],vec![]);
+        for c in &self.carriers{
+            let(v,r)=(combine(&c.beams,&a,&self.couplings),combine(&c.beams,&a,&elimination.responses));
+            let(am,bm)=(combine(&c.beams,&slope,&elimination.derivatives),combine(&c.beams,&recoil,&elimination.derivatives));
+            let mut g=v.adjoint().scaled(Complex::new(-0.5,0.));g.add_scaled(Complex::new(0.,-0.5),&r.adjoint_product(&self.decay));
+            let mut f=v.scaled(Complex::new(-0.5,0.));f.add_scaled(Complex::new(0.,-0.5),&self.decay.product(&r));
+            right.add_scaled(Complex::ONE,&g.product(&am));left.add_scaled(Complex::ONE,&am.adjoint_product(&f));
+            constant.add_scaled(Complex::ONE,&g.product(&bm));constant.add_scaled(Complex::ONE,&bm.adjoint_product(&f));
+            momentum.push(am);fixed.push(bm);
+        }
+        let secular=|m:&Dense|secular_part(&self.block,m);
+        Moving{right:secular(&right),left:secular(&left),constant:secular(&constant),jumps_momentum:self.split(&momentum),jumps_constant:self.split(&fixed)}
     }
 
     /// Beam l's response R_l to all orders in an excited-energy shift w (rad/us): column b solved
@@ -524,7 +563,7 @@ impl Ground{
 }
 
 #[cfg(test)]
-mod tests{
+pub(crate) mod tests{
     use super::*;
     use crate::linear::uniform;
     use crate::Matrix;
@@ -544,7 +583,7 @@ mod tests{
     fn matrix(v:&Value)->Matrix{let m=entries(v,STATES,STATES);Matrix{real:m.entries.iter().map(|z|z.re).collect(),imag:m.entries.iter().map(|z|z.im).collect()}}
     fn floats(v:&Value)->Vec<f64>{v.as_array().unwrap().iter().map(float).collect()}
     /// A request from a fixture: the matrices its beams lack (the counter-rotating coupling, the outside shift) are zero.
-    fn request(v:&Value)->Request{
+    pub(crate) fn request(v:&Value)->Request{
         let or_zero=|m:&Value|if m.is_null(){Matrix{real:vec![0.;STATES*STATES],imag:vec![0.;STATES*STATES]}}else{matrix(m)};
         let beams=v["beams"].as_array().unwrap().iter().map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
             direction:[d[0],d[1],d[2]],wave_number_per_um:float(&b["waveNumberPerUm"]),waist_um:b["waistUm"].as_f64(),intensity_mw_cm2:float(&b["intensityMWcm2"]),
@@ -689,6 +728,27 @@ mod tests{
                 for b in 0..g.ground_states.len(){
                     let bound=(w/pole).powi(2)*norm(&exact,b)+f64::EPSILON*(norm(&e.responses[l],b)+w.abs()*norm(&e.derivatives[l],b));
                     assert!(norm(&remainder,b)<=bound,"beam {l}, w {w}, column {b}: {} > {bound}",norm(&remainder,b));
+                }
+            }
+        }
+    }
+
+    /// The moving atom's operators with κ a number are the first-order increments: the effective
+    /// Hamiltonian's, −(right + left)κ − constant = H_ls′ − (i/2)Γ′, and every jump's.
+    #[test]
+    fn the_moving_atom_s_operators_are_the_first_order_increments(){
+        for seed in 1..=3{
+            let r=perturbed(seed);let g=Ground::new(&r).unwrap();let e=g.eliminate(&g.hamiltonian).unwrap();let hbar_over_m=7.3e-4;
+            let mut next=uniform(seed+10);
+            for x in positions(seed){
+                let kappa=20.*next();let moving=g.moving(&e,x,hbar_over_m);
+                let first=g.first_order(&e,x,|l|{let k=g.beams[l].axial_wave_number();hbar_over_m*(k*kappa+k*k/2.)});
+                let mut expected=first.light_shift.clone();expected.add_scaled(Complex::new(0.,-0.5),&first.scattering);
+                let mut got=moving.right.scaled(Complex::new(-kappa,0.));got.add_scaled(Complex::new(-kappa,0.),&moving.left);got.add_scaled(-Complex::ONE,&moving.constant);
+                let(error,scale)=mismatch(&got,&expected);assert!(error<=1e-13*scale,"seed {seed}, x {x}: {error:e} of {scale:e}");
+                for(j,increment)in first.jumps.iter().enumerate(){
+                    let mut got=moving.jumps_momentum[j].scaled(Complex::new(-kappa,0.));got.add_scaled(-Complex::ONE,&moving.jumps_constant[j]);
+                    let(error,scale)=mismatch(&got,increment);assert!(error<=1e-13*scale.max(f64::MIN_POSITIVE)||scale==0.&&error==0.,"seed {seed}, x {x}, jump {j}: {error:e} of {scale:e}");
                 }
             }
         }

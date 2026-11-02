@@ -256,5 +256,5 @@ test('the motion core\'s sentences are shown in Chinese',()=>{
   assert.match(solverText('A motion request is a trajectory alone: meanOnly and includeMean are false'),/1D 运动/);
   // The core's refusals are written in Chinese.
   const core=readFileSync(new URL('../rust-solver/motion-core/src/lib.rs',import.meta.url),'utf8');
-  for(const name of ['NOT_IMPLEMENTED','NO_TRAP'])assert.match(new RegExp(`pub const ${name}:&str="([^"]+)";`).exec(core)?.[1]??'',/^[一-鿿]/,name);
+  for(const name of ['NO_TRAP','NOT_CONFINED'])assert.match(new RegExp(`pub const ${name}:&str="([^"]+)";`).exec(core)?.[1]??'',/^[一-鿿]/,name);
 });
