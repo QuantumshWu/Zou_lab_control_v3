@@ -59,6 +59,12 @@ fn relation(text: &str) -> UnitRelation {
     }
 }
 
+/// The v2 oracle's symmetric Lorentzian doublet (one width, one height)
+/// that v3 replaced by the Lorentzian doublet of independent lines; the
+/// golden records naming it have no v3 model to compare against.
+const RETIRED_MODEL: &str = "symmetric_lorentzian_doublet";
+const RETIRED_REPLACEMENT: &str = "lorentzian_doublet";
+
 fn data() -> Value { serde_json::from_str(include_str!("data/fit_api.json")).unwrap() }
 
 #[test]
@@ -68,6 +74,10 @@ fn catalogue_matches() {
     let want = data["catalogue"].as_array().unwrap();
     assert_eq!(models.len(), want.len());
     for (model, want) in models.iter().zip(want) {
+        if want["model_id"] == RETIRED_MODEL {
+            assert_eq!(model.model_id, RETIRED_REPLACEMENT);
+            continue;
+        }
         assert_eq!(model.model_id, want["model_id"].as_str().unwrap());
         assert_eq!(model.display_name, want["display_name"].as_str().unwrap());
         assert_eq!(model.independent_arity as u64, want["arity"].as_u64().unwrap());
@@ -124,7 +134,7 @@ fn catalogue_matches() {
     let registry = default_fit_registry();
     for (target, name) in [(FitTarget::Series, "series"), (FitTarget::Histogram, "histogram"), (FitTarget::Image, "image")] {
         let got: Vec<String> = registry.models_for(target).iter().map(|m| m.model_id.clone()).collect();
-        let want: Vec<String> = data["models_for"][name].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        let want: Vec<String> = data["models_for"][name].as_array().unwrap().iter().map(|v| v.as_str().unwrap().replace(RETIRED_MODEL, RETIRED_REPLACEMENT)).collect();
         assert_eq!(got, want, "{name}");
     }
 }
@@ -227,7 +237,7 @@ fn parameter_units_and_expressions_match() {
     for case in data["units"].as_array().unwrap() {
         let units = units_for(&case["context"]);
         let context = case["context"]["name"].as_str().unwrap();
-        for model_case in case["models"].as_array().unwrap() {
+        for model_case in case["models"].as_array().unwrap().iter().filter(|m| m["model"] != RETIRED_MODEL) {
             let model = registry.get(model_case["model"].as_str().unwrap()).unwrap();
             for (parameter, want) in model.parameters.iter().zip(model_case["parameters"].as_array().unwrap()) {
                 let tag = format!("{context}/{}/{}", model.model_id, parameter.name);

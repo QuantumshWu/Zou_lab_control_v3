@@ -161,6 +161,21 @@ frames of the 5x7 virtual array: the 7 the oracle left unconverged converge,
 the cost tolerance leaves); 2 reach a different, lower minimum; 1 lands on a
 neighbouring atom of equal cost (+4.5e-6).
 
+## The Lorentzian doublet (a deliberate departure)
+
+The oracle's symmetric Lorentzian doublet (one width and one height for both
+lines, a center and a splitting) is gone from v3; its golden records are
+skipped by name (`RETIRED_MODEL` in the fit tests).  In its place the
+Lorentzian doublet fits two lines of independent center, width and height on
+one offset, and is settled against the single Lorentzian by BIC as the
+bimodal histogram models are -- with the Gaussian likelihood of a series
+instead of the Poisson deviance of counts: `n ln(chi2_one / chi2_two) - k ln n`
+(chi-square weighted by the observation sigma when there is one, `k` the
+extra free parameters).  It has no oracle; `tests/lorentzian_doublet.rs`
+holds it to recovered lines (exact without noise), the single-line
+reduction, the BIC formula and the threshold.  Its solution lists the lines
+by center unless the caller bounds the two differently.
+
 ## CPU dependence (decision)
 
 Python's own answers are a per-CPU fact.  OpenBLAS picks its kernel family

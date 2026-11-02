@@ -1,4 +1,4 @@
-//! The thirteen built-in model kernels of `_fit_compiled`: one point value
+//! The built-in model kernels of `_fit_compiled`: one point value
 //! and analytic Jacobian row per model, the objective accumulation every
 //! descriptor shares, and the value/Jacobian evaluation of the finaliser.
 //!
@@ -8,6 +8,8 @@
 use super::num::{div, pmax, pmin, KernelError, Zr, ALLOCATION_LIMIT, EPSILON, PI};
 
 pub const COUNT_FLOOR: f64 = 1.0e-9;
+/// The most parameters a built-in kernel has (the Lorentzian doublet's).
+pub const MAX_PARAMETERS: usize = 7;
 pub const SQRT_TWO_PI: f64 = 2.5066282746310002;
 pub const MAD_TO_SIGMA: f64 = 1.4826;
 
@@ -38,7 +40,7 @@ pub enum Kernel {
     Bimodal,
     Poisson,
     PoissonBimodal,
-    Doublet,
+    LorentzianDoublet,
     Damped,
     Exponential,
     Saturation,
@@ -52,8 +54,32 @@ impl Kernel {
         match self {
             Kernel::Histogram | Kernel::Poisson | Kernel::Exponential | Kernel::Saturation => 3,
             Kernel::Lorentzian | Kernel::Gaussian | Kernel::ReleaseRecapture => 4,
-            Kernel::Doublet | Kernel::Damped | Kernel::Radial => 5,
+            Kernel::Damped | Kernel::Radial => 5,
             Kernel::Bimodal | Kernel::PoissonBimodal | Kernel::Anisotropic => 6,
+            Kernel::LorentzianDoublet => 7,
+        }
+    }
+
+    /// The solution's canonical labelling. A two-line model is symmetric
+    /// under exchanging its lines, so the solver may return either order;
+    /// the lines are ordered by center (`x_0 <= x_B`) whenever the
+    /// exchange is a symmetry of the solved problem too, i.e. each
+    /// exchanged pair of parameters has the same bounds (a caller who
+    /// bounds or fixes one line differently has named the lines already).
+    pub fn canonical_order(self, parameters: &mut [f64], lower: &[f64], upper: &[f64]) {
+        let Some(pairs) = self.line_exchange() else { return };
+        let symmetric = pairs.iter().all(|&(a, b)| lower[a] == lower[b] && upper[a] == upper[b]);
+        if symmetric && parameters[pairs[0].1] < parameters[pairs[0].0] {
+            exchange_lines(pairs, parameters);
+        }
+    }
+
+    /// The parameter pairs exchanging a two-line model's lines (centers
+    /// first), if the model has two interchangeable lines.
+    pub fn line_exchange(self) -> Option<&'static [(usize, usize)]> {
+        match self {
+            Kernel::LorentzianDoublet => Some(&[(0, 4), (1, 5), (2, 6)]),
+            _ => None,
         }
     }
 
@@ -71,8 +97,15 @@ impl Kernel {
             Kernel::Lorentzian | Kernel::Exponential | Kernel::Radial | Kernel::Anisotropic => 2,
             Kernel::Damped | Kernel::Saturation => 3,
             Kernel::ReleaseRecapture => 4,
-            Kernel::Doublet => 8,
+            Kernel::LorentzianDoublet => 8,
         }
+    }
+}
+
+/// Exchange the lines of one parameter row.
+pub fn exchange_lines(pairs: &[(usize, usize)], parameters: &mut [f64]) {
+    for &(a, b) in pairs {
+        parameters.swap(a, b);
     }
 }
 
@@ -443,29 +476,18 @@ impl Kernel {
                 }
                 Ok(amplitude_a * shape_a + amplitude_b * shape_b)
             }
-            Kernel::Doublet => {
-                let (center, width, amplitude, offset, splitting) = (p[0], p[1], p[2], p[3], p[4]);
+            Kernel::LorentzianDoublet => {
                 let x = coords.at(0, point);
-                let half = 0.5 * width;
-                let half_squared = half * half;
-                let left_delta = x - (center - 0.5 * splitting);
-                let right_delta = x - (center + 0.5 * splitting);
-                let left_den = left_delta * left_delta + half_squared;
-                let right_den = right_delta * right_delta + half_squared;
-                let left_shape = div(half_squared, left_den)?;
-                let right_shape = div(half_squared, right_den)?;
-                if want {
-                    let left_den2 = left_den * left_den;
-                    let right_den2 = right_den * right_den;
-                    let left_center_d = div(amplitude * half_squared * 2.0 * left_delta, left_den2)?;
-                    let right_center_d = div(amplitude * half_squared * 2.0 * right_delta, right_den2)?;
-                    row[0] = left_center_d + right_center_d;
-                    row[1] = amplitude * half * (div(left_delta * left_delta, left_den2)? + div(right_delta * right_delta, right_den2)?);
-                    row[2] = left_shape + right_shape;
-                    row[3] = 1.0;
-                    row[4] = -0.5 * left_center_d + 0.5 * right_center_d;
-                }
-                Ok(amplitude * (left_shape + right_shape) + offset)
+                let (value_a, value_b) = if want {
+                    let (head, tail) = row.split_at_mut(4);
+                    let a = lorentzian_line(x, p[0], p[1], p[2], &mut head[..3])?;
+                    let b = lorentzian_line(x, p[4], p[5], p[6], tail)?;
+                    head[3] = 1.0;
+                    (a, b)
+                } else {
+                    (lorentzian_line(x, p[0], p[1], p[2], &mut [])?, lorentzian_line(x, p[4], p[5], p[6], &mut [])?)
+                };
+                Ok(value_a + value_b + p[3])
             }
             Kernel::Damped => {
                 let (amplitude, offset, frequency, decay, phase) = (p[0], p[1], p[2], p[3], p[4]);
@@ -611,6 +633,25 @@ impl Kernel {
         }
         Ok((output, jacobian))
     }
+}
+
+/// One line of the Lorentzian doublet: `H (w/2)^2 / ((x-c)^2 + (w/2)^2)`
+/// and, if `row` is not empty, its derivatives by `c`, `w`, `H` (the
+/// single Lorentzian's expressions).
+#[inline(always)]
+fn lorentzian_line(x: f64, center: f64, width: f64, amplitude: f64, row: &mut [f64]) -> Zr<f64> {
+    let delta = x - center;
+    let half = 0.5 * width;
+    let half_squared = half * half;
+    let denominator = delta * delta + half_squared;
+    let shape = div(half_squared, denominator)?;
+    if !row.is_empty() {
+        let denominator_squared = denominator * denominator;
+        row[0] = div(amplitude * half_squared * 2.0 * delta, denominator_squared)?;
+        row[1] = div(amplitude * half * delta * delta, denominator_squared)?;
+        row[2] = shape;
+    }
+    Ok(amplitude * shape)
 }
 
 // --------------------------------------------------------------------------
@@ -766,7 +807,7 @@ impl Kernel {
             Kernel::Bimodal => run!(Kernel::Bimodal, 6),
             Kernel::Poisson => run!(Kernel::Poisson, 3),
             Kernel::PoissonBimodal => run!(Kernel::PoissonBimodal, 6),
-            Kernel::Doublet => run!(Kernel::Doublet, 5),
+            Kernel::LorentzianDoublet => run!(Kernel::LorentzianDoublet, 7),
             Kernel::Damped => run!(Kernel::Damped, 5),
             Kernel::Exponential => run!(Kernel::Exponential, 3),
             Kernel::Saturation => run!(Kernel::Saturation, 3),
@@ -795,12 +836,12 @@ fn objective_loop<const N: usize, const PLAIN: bool, F: FnMut(usize, &mut [f64])
 ) -> Zr<(f64, f64, bool)> {
     let nfree = if N > 0 { N } else { free.len() };
     let count = if N > 0 { N } else { count };
-    let mut g = [0.0_f64; 6];
-    let mut info = [0.0_f64; 36];
-    let mut projected = [0.0_f64; 6];
+    let mut g = [0.0_f64; MAX_PARAMETERS];
+    let mut info = [0.0_f64; MAX_PARAMETERS * MAX_PARAMETERS];
+    let mut projected = [0.0_f64; MAX_PARAMETERS];
     let mut cost = 0.0;
     let mut rss = 0.0;
-    let mut full = [0.0_f64; 6];
+    let mut full = [0.0_f64; MAX_PARAMETERS];
     let observations = data.observations;
     let valid = &data.valid[..observations.len()];
     for point in 0..observations.len() {
@@ -839,7 +880,7 @@ fn objective_loop<const N: usize, const PLAIN: bool, F: FnMut(usize, &mut [f64])
                 let value = projected[r];
                 g[r] += value * gradient_factor;
                 for c in 0..=r {
-                    info[r * 6 + c] += value * projected[c] * information_factor;
+                    info[r * MAX_PARAMETERS + c] += value * projected[c] * information_factor;
                 }
             }
         }
@@ -851,8 +892,8 @@ fn objective_loop<const N: usize, const PLAIN: bool, F: FnMut(usize, &mut [f64])
         for r in 0..nfree {
             gradient[r] = g[r];
             for c in 0..=r {
-                information[r * nfree + c] = info[r * 6 + c];
-                information[c * nfree + r] = info[r * 6 + c];
+                information[r * nfree + c] = info[r * MAX_PARAMETERS + c];
+                information[c * nfree + r] = info[r * MAX_PARAMETERS + c];
             }
         }
     }

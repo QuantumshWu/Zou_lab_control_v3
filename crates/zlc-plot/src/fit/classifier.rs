@@ -115,15 +115,22 @@ pub fn evaluate_component(model: &FitModelSpec, component_id: &str, coords: &[Ve
         return Err(FitError::value("fit parameter count does not match model"));
     }
     let Evaluator::Builtin(kernel) = &model.evaluator else { return Err(FitError::runtime("custom components are evaluated by the caller")) };
-    let (single, p) = match kernel {
-        Kernel::Bimodal => (Kernel::Histogram, params),
-        Kernel::PoissonBimodal => (Kernel::Poisson, params),
+    let p = params;
+    let (single, component_parameters): (Kernel, Vec<f64>) = match (kernel, component.kind) {
+        (Kernel::Bimodal | Kernel::PoissonBimodal, ComponentKind::LowerPopulation | ComponentKind::UpperPopulation) => {
+            let single = if *kernel == Kernel::Bimodal { Kernel::Histogram } else { Kernel::Poisson };
+            let (amplitude, location, sigma, delta, sigma_b, ratio) = (p[0], p[1], p[2], p[3], p[4], p[5]);
+            let parameters = if component.kind == ComponentKind::LowerPopulation {
+                vec![amplitude * (1.0 - ratio), location, sigma]
+            } else {
+                vec![amplitude * ratio, location + delta, sigma_b]
+            };
+            (single, parameters)
+        }
+        // Each line on the shared offset: a single Lorentzian.
+        (Kernel::LorentzianDoublet, ComponentKind::FirstLine) => (Kernel::Lorentzian, vec![p[0], p[1], p[2], p[3]]),
+        (Kernel::LorentzianDoublet, ComponentKind::SecondLine) => (Kernel::Lorentzian, vec![p[4], p[5], p[6], p[3]]),
         _ => return Err(FitError::value(format!("unknown fit component: {}", super::num::str_repr(component_id)))),
-    };
-    let (amplitude, location, sigma, delta, sigma_b, ratio) = (p[0], p[1], p[2], p[3], p[4], p[5]);
-    let component_parameters = match component.kind {
-        ComponentKind::LowerPopulation => [amplitude * (1.0 - ratio), location, sigma],
-        ComponentKind::UpperPopulation => [amplitude * ratio, location + delta, sigma_b],
     };
     let first = model.anchored_axis(&coords[0]);
     Ok(single.value_jacobian(&Axes::one(&first), &component_parameters, false)?.0)

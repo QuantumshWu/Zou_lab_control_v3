@@ -730,15 +730,23 @@ impl FitProjection {
         };
         let coordinates = [dense];
         let presentation = &result.model.presentation;
-        if presentation.components.is_empty() {
+        // Lines drawn on the baseline do not add up to the model: the total
+        // is the model itself, and a fit settled on one line is drawn as one.
+        let on_baseline = presentation.components.iter().any(|component| component.kind.on_baseline());
+        if presentation.components.is_empty() || (on_baseline && result.reduced) {
             let fitted = evaluate_model(&result.model, &coordinates, &result.parameter_values).map_err(fit_error)?;
             return Ok(vec![FitPolyline { x: display_x, y: shown(fitted), role: if histogram { "total" } else { "primary" }, component_index: 0 }]);
         }
         let components = presentation.components.iter().map(|component|
             evaluate_component(&result.model, &component.component_id, &coordinates, &result.parameter_values).map_err(fit_error))
             .collect::<Result<Vec<_>>>()?;
-        let mut total = components[0].clone();
-        for values in &components[1..] { for (sum, value) in total.iter_mut().zip(values) { *sum += value; } }
+        let total = if on_baseline {
+            evaluate_model(&result.model, &coordinates, &result.parameter_values).map_err(fit_error)?
+        } else {
+            let mut total = components[0].clone();
+            for values in &components[1..] { for (sum, value) in total.iter_mut().zip(values) { *sum += value; } }
+            total
+        };
         let mut lines: Vec<FitPolyline> = components.into_iter().enumerate()
             .map(|(index, values)| FitPolyline { x: display_x.clone(), y: shown(values), role: "component", component_index: index }).collect();
         lines.push(FitPolyline { x: display_x, y: shown(total), role: "total", component_index: 0 });

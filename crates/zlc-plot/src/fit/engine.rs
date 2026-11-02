@@ -326,20 +326,34 @@ impl FitEngine {
         }
         let Some(nested) = nested.filter(|n| n.success) else { return Ok(result) };
         let nested_spec = self.registry.get(&reduction.nested_model_id)?;
-        let wide_fitted = result.fitted_values();
-        let wide_residuals = result.residuals();
-        let wide_observed: Vec<f64> = wide_fitted.iter().zip(wide_residuals.iter()).map(|(f, r)| f + r).collect();
-        let narrow_fitted = nested.fitted_values();
-        let narrow_residuals = nested.residuals();
-        let narrow_observed: Vec<f64> = narrow_fitted.iter().zip(narrow_residuals.iter()).map(|(f, r)| f + r).collect();
-        let wide_root = poisson_deviance_residual(&wide_fitted, &wide_observed);
-        let narrow_root = poisson_deviance_residual(&narrow_fitted, &narrow_observed);
-        let deviance_wide = super::blas::ddot(&wide_root, &wide_root);
-        let deviance_narrow = super::blas::ddot(&narrow_root, &narrow_root);
-        let clipped: Vec<f64> = wide_observed.iter().map(|&v| if v < 0.0 { 0.0 } else { v }).collect();
-        let shots = numpy_sum(&clipped);
-        let extra = (spec.parameters.len() as i64 - result.fixed_parameter_names.len() as i64) - (nested_spec.parameters.len() as i64 - nested.fixed_parameter_names.len() as i64);
-        let evidence = (deviance_narrow - deviance_wide) - extra as f64 * pmax(shots, 1.0).ln();
+        let wide_free = spec.parameters.len() as i64 - result.fixed_parameter_names.len() as i64;
+        let narrow_free = nested_spec.parameters.len() as i64 - nested.fixed_parameter_names.len() as i64;
+        let extra = wide_free - narrow_free;
+        let evidence = if spec.counted() {
+            // Counts: the Poisson deviance, with the shots as the sample size.
+            let wide_fitted = result.fitted_values();
+            let wide_residuals = result.residuals();
+            let wide_observed: Vec<f64> = wide_fitted.iter().zip(wide_residuals.iter()).map(|(f, r)| f + r).collect();
+            let narrow_fitted = nested.fitted_values();
+            let narrow_residuals = nested.residuals();
+            let narrow_observed: Vec<f64> = narrow_fitted.iter().zip(narrow_residuals.iter()).map(|(f, r)| f + r).collect();
+            let wide_root = poisson_deviance_residual(&wide_fitted, &wide_observed);
+            let narrow_root = poisson_deviance_residual(&narrow_fitted, &narrow_observed);
+            let deviance_wide = super::blas::ddot(&wide_root, &wide_root);
+            let deviance_narrow = super::blas::ddot(&narrow_root, &narrow_root);
+            let clipped: Vec<f64> = wide_observed.iter().map(|&v| if v < 0.0 { 0.0 } else { v }).collect();
+            let shots = numpy_sum(&clipped);
+            (deviance_narrow - deviance_wide) - extra as f64 * pmax(shots, 1.0).ln()
+        } else {
+            // A series: Gaussian errors of one unknown scale (relative to
+            // the observation sigma when there is one), the scale profiled
+            // out: BIC = n ln(chi^2/n) + k ln n, chi^2 the (weighted) sum of
+            // squares each solve reports as reduced chi-square x dof.
+            let points = result.residuals().len() as i64;
+            let chi_square = |fit: &FitResult, free: i64| fit.reduced_chi_square * (points - free).max(1) as f64;
+            let (wide, narrow) = (chi_square(&result, wide_free), chi_square(nested, narrow_free));
+            points as f64 * (narrow / wide).ln() - extra as f64 * (points.max(1) as f64).ln()
+        };
         if !evidence.is_finite() {
             return Ok(result);
         }
@@ -803,12 +817,28 @@ fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, bas
     };
     let axes = if grid_coords.len() == 1 { Axes::one(&grid_coords[0]) } else { Axes::two(&grid_coords[0], &grid_coords[1]) };
     let free_mask: Vec<bool> = (0..base_lower.len()).map(|i| item.free_indices.contains(&i)).collect();
-    let max_candidates = kernel.max_candidates();
+    // A caller who bounds a two-line model's lines differently has made the
+    // labels mean something: each cold seed is then tried both ways round.
+    let requested_alike = |a: usize, b: usize| {
+        item.requested_mask[a] == item.requested_mask[b]
+            && (!item.requested_mask[a] || (item.requested_lower[a] == item.requested_lower[b] && item.requested_upper[a] == item.requested_upper[b]))
+    };
+    let exchange = kernel.line_exchange().filter(|pairs| !pairs.iter().all(|&(a, b)| requested_alike(a, b)));
+    let max_candidates = kernel.max_candidates() * if exchange.is_some() { 2 } else { 1 };
     let seed_capacity = 1 + max_candidates.max(1);
     let authored_rows = item.authored.as_ref().map(|row| vec![row.clone()]);
     let mut prepare = |block: &mut [f64], rows: usize, lower: &mut [f64], upper: &mut [f64]| -> Zr<i64> {
-        let mut seeds = Seeds { data: block, rows, cols: base_lower.len() };
-        kernel.prepare(&axes, &grid_values, &grid_valid, &mut seeds, lower, upper)
+        let cols = base_lower.len();
+        let cold_rows = if exchange.is_some() { rows / 2 } else { rows };
+        let count = kernel.prepare(&axes, &grid_values, &grid_valid, &mut Seeds { data: &mut *block, rows: cold_rows, cols }, lower, upper)?;
+        let Some(pairs) = exchange else { return Ok(count) };
+        let count = count.max(0) as usize;
+        for row in 0..count {
+            let (written, free) = block.split_at_mut((count + row) * cols);
+            free[..cols].copy_from_slice(&written[row * cols..(row + 1) * cols]);
+            super::models::exchange_lines(pairs, &mut free[..cols]);
+        }
+        Ok(2 * count as i64)
     };
     let prepared = trf::prepare_one(
         &mut prepare,
@@ -831,7 +861,8 @@ fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, bas
         data: ObjectiveData { observations: &grid_values, valid: &grid_valid, weights: weights_slice, use_weights, poisson: counted, loss_code: loss },
         selected: grid_valid.iter().filter(|&&v| v).count(),
     };
-    let solution = trf::solve_cell(&objective, &prepared.seeds, &prepared.lower, &prepared.upper, &item.free_indices, max_nfev, 1.0e-8, 1.0e-8, 1.0e-8, item.warm.is_some(), prepared.status);
+    let mut solution = trf::solve_cell(&objective, &prepared.seeds, &prepared.lower, &prepared.upper, &item.free_indices, max_nfev, 1.0e-8, 1.0e-8, 1.0e-8, item.warm.is_some(), prepared.status);
+    kernel.canonical_order(&mut solution.parameters, &prepared.lower, &prepared.upper);
     // Finalize on the cell's selected points.
     let selected_coords: Vec<Vec<f64>> = grid_coords.iter().map(|axis| axis.iter().zip(&grid_valid).filter(|(_, v)| **v).map(|(&x, _)| x).collect()).collect();
     let selected_axes = if selected_coords.len() == 1 { Axes::one(&selected_coords[0]) } else { Axes::two(&selected_coords[0], &selected_coords[1]) };
