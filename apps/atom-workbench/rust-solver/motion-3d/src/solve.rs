@@ -30,7 +30,9 @@
 //! A batch is cut into two groups per thread (lib.rs `Stratum`): each group's initial states are a
 //! Latin hypercube, so its mean of the initial energies, and of what they leave at early times,
 //! varies far less than independent draws'; the groups are independent, so the jackknife over them
-//! measures the error.
+//! measures the error. T, ⟨v⟩, n̄ and ⟨r²⟩ are each atom's means over one trap period of the axis
+//! around each output (lib.rs `simulate`): its kinetic energy sloshes into potential energy and back
+//! twice a period, so over a period the spread of T between atoms is their energies' alone.
 //!
 //! # Regime
 //! A point particle has no zero-point motion: below a few vibrational quanta per axis the method
@@ -101,10 +103,11 @@ pub struct Solution{
 /// An estimate in the validated regime: k_B T ≥ CLASSICAL ħω along every axis (ω per axis).
 fn classical(e:&Estimate,frequencies:[f64;3])->bool{(0..3).all(|a|KT_PER_UK*e.temperature[a]>=CLASSICAL*frequencies[a])}
 
-/// The largest ratio of CONFIDENCE standard errors to the targets over every output: the
-/// populations and the loss everywhere, the temperatures where the method holds.
+/// The largest ratio of CONFIDENCE standard errors to the targets over every output after t = 0
+/// (the request's initial state, `start`): the populations and the loss everywhere, the
+/// temperatures where the method holds.
 fn worst_ratio(estimates:&[Estimate],frequencies:[f64;3])->f64{
-    estimates.iter().map(|e|{
+    estimates.iter().skip(1).map(|e|{
         // The temperature to its target where the method holds; outside, a reference only.
         let t=if classical(e,frequencies){(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/(TEMPERATURE_TARGET*e.temperature[a])}else{0.}).fold(0.,f64::max)}else{0.};
         let p=e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x))/POPULATION_TARGET;
@@ -156,7 +159,7 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     let rate=if pattern>0.{pattern}else{frequencies.iter().copied().fold(0.,f64::max)};
     let mut steps=((interval*rate/(A_PRIORI_SHARE*TEMPERATURE_TARGET).sqrt()).ceil() as usize).max(1);
     let threads=rayon::current_num_threads() as u64;let pilot=2*threads;
-    let settings=|steps:usize,truncation:f64|Settings{dt:interval/steps as f64,free:[true;3],escape_intensity:escape,frequencies,truncation};
+    let settings=|steps:usize,truncation:f64|Settings{dt:interval/steps as f64,free:[true;3],escape_intensity:escape,frequencies,truncation,average:true};
     let duration=times[outputs-1];
     let(states,jumps)=sample_states(&model,&settings(steps,f64::EPSILON),&initial,seed,pilot,steps,outputs);
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);
@@ -176,7 +179,7 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     // Batches until the targets are met.
     let mut outcome=first;let mut done=pilot;let mut per_trajectory=wall/pilot as f64;
     loop{
-        let estimates=summarize(&outcome.groups,&scales);
+        let mut estimates=summarize(&outcome.groups,&scales);start(&mut estimates[0],&model,&initial);
         let ratio=worst_ratio(&estimates,frequencies);
         let needed=((done as f64*ratio*ratio).ceil() as u64).min(MOST_TRAJECTORIES);
         let mut solution=assemble(&model,&estimates,&outcome,&listed,frequencies,done,dt,&request.initial_density);
@@ -207,8 +210,21 @@ fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64)->f64{
     (accumulated/(A_PRIORI_SHARE*POPULATION_TOLERANCE)).max(relative/(A_PRIORI_SHARE*TEMPERATURE_TARGET))
 }
 
+/// t = 0 is the request's initial state, exactly: per axis T is its thermal Wigner temperature
+/// T* = (ħω/2k_B) coth(ħω/2k_B T) in each initial state's trap (lib.rs `initial_trajectory`), the
+/// mean velocity zero -- the trajectories' estimates there carry only the sampling's error.
+fn start(e:&mut Estimate,model:&Model,initial:&Initial){
+    let kt=KT_PER_UK*initial.temperature_uk;let mut t=[0.;3];
+    for&(block,state,p)in &initial.states{
+        let w=model.trap_frequencies(block,state);
+        for a in 0..3{let half=w[a]/(2.*kt);t[a]+=p*if half>0.{initial.temperature_uk*half/half.tanh()}else{initial.temperature_uk};}
+    }
+    e.temperature=t;e.temperature_error=[0.;3];e.mean_velocity=[0.;3];
+}
+
 /// The solution of the estimates so far.
-/// At t = 0 the populations are the initial state's, as the request gives them (the light acts after).
+/// At t = 0 the populations are the initial state's, as the request gives them (the light acts
+/// after), and so are T and the mean velocity (`start`).
 fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex])->Solution{
     let hm=model.hbar_over_mass;
     let velocity=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.1[a]*hm));

@@ -1,13 +1,15 @@
 //! The 3D engine's checks on the app's tweezer PGC example (tests/fixtures/tweezer_pgc.json: its
 //! motion block along x, the frame y, z, x): the generator's consistency at random points, the
 //! Ehrenfest force against the energy's gradient, the dipole pattern's moments, the trap, a
-//! thermal state that stays thermal with the light off, and a group's Latin hypercube of initial
-//! momenta.
+//! thermal state that stays thermal with the light off (its T over a trap period as well, with
+//! smaller errors), a group's Latin hypercube of initial momenta, and a short solve whose t = 0 is
+//! the request's initial state.
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
 use atom_motion_3d::model::Model;
 use atom_motion_3d::rng::{normal_quantile,Rng};
 use atom_motion_3d::stats::{summarize,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,simulate,Initial,Stratum};
+use atom_motion_3d::solve::solve;
 use atom_motion_core::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 
@@ -111,7 +113,7 @@ fn the_trap_is_the_tweezer_s(){
 fn a_thermal_state_stays_thermal_with_the_light_off(){
     let r=request(&|b|b["waistUm"].is_number());let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let(b,x,_)=initial.states[0];let frequencies=model.trap_frequencies(b,x);assert_eq!(model.focused.len(),1);
-    let settings=Settings{dt:0.25,free:[true;3],escape_intensity:1./20.,frequencies,truncation:f64::EPSILON};
+    let settings=Settings{dt:0.25,free:[true;3],escape_intensity:1./20.,frequencies,truncation:f64::EPSILON,average:false};
     let outcome=simulate(&model,&settings,&initial,5,0,1024,8,40,21,&[]);assert_eq!(outcome.jumps,0);
     let e=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies});
     for a in 0..3{let start=e[0].temperature[a];for x in &e{
@@ -137,7 +139,7 @@ fn a_group_s_initial_momenta_take_one_stratum_each(){
     // Maxwell distribution (its strata bounded by the normal's quantiles at k/8).
     let r=request(&|_|true);let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let(b,x,_)=initial.states[0];let frequencies=model.trap_frequencies(b,x);
-    let settings=Settings{dt:0.25,free:[true;3],escape_intensity:1./20.,frequencies,truncation:f64::EPSILON};
+    let settings=Settings{dt:0.25,free:[true;3],escape_intensity:1./20.,frequencies,truncation:f64::EPSILON,average:false};
     let(size,kt,hm)=(8_u64,KT_PER_UK*r.temperature_uk,model.hbar_over_mass);
     for first in [0,8,96]{
         let group:Vec<[f64;3]>=(first..first+size).map(|i|initial_trajectory(&model,&settings,&initial,3,i,Stratum{first,size}).kappa).collect();
@@ -147,4 +149,36 @@ fn a_group_s_initial_momenta_take_one_stratum_each(){
             strata.sort();assert_eq!(strata,(0..size as usize).collect::<Vec<_>>(),"group {first}, axis {a}");
         }
     }
+}
+
+#[test]
+fn a_thermal_state_s_temperature_over_a_trap_period_is_its_temperature_with_smaller_errors(){
+    // The light off: T over one trap period of each axis against T at the time, the same atoms.
+    let r=request(&|b|b["waistUm"].is_number());let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let(b,x,_)=initial.states[0];let frequencies=model.trap_frequencies(b,x);
+    let settings=|average:bool|Settings{dt:0.25,free:[true;3],escape_intensity:1./20.,frequencies,truncation:f64::EPSILON,average};
+    let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies};
+    let run=|average:bool|summarize(&simulate(&model,&settings(average),&initial,5,0,1024,1,40,21,&[]).groups,&scales);
+    let(at,over)=(run(false),run(true));let mut ratio=0.;
+    for i in 1..at.len(){for a in 0..3{
+        let(x,y)=(&at[i],&over[i]);
+        assert!((x.temperature[a]-y.temperature[a]).abs()<=4.*x.temperature_error[a],"output {i}, axis {a}: {} against {}",y.temperature[a],x.temperature[a]);
+        ratio+=y.temperature_error[a]/x.temperature_error[a]/(3*(at.len()-1)) as f64;
+    }}
+    // An oscillator's mean kinetic energy over a period is half its energy: the variance of T halves.
+    assert!(ratio<0.85,"standard errors over a period / at the time: {ratio:.2}");
+}
+
+#[test]
+fn a_solve_starts_from_the_request_s_initial_state(){
+    // Ten microseconds of the tweezer PGC: t = 0 holds the initial populations and, per axis, the
+    // thermal Wigner temperature of the initial trap, without error; the targets are met after it.
+    let mut r=request(&|_|true);r.times_us=vec![0.,5.,10.];
+    let s=solve(&r,&mut |_,_|{}).unwrap();assert!(s.reason.is_none());
+    let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();let(b,x,_)=initial.states[0];
+    let(frequencies,kt)=(model.trap_frequencies(b,x),KT_PER_UK*r.temperature_uk);
+    for a in 0..3{let half=frequencies[a]/(2.*kt);assert_eq!(s.temperature_uk[0][a],r.temperature_uk*half/half.tanh());assert_eq!(s.temperature_errors_uk[0][a],0.);}
+    assert_eq!(s.mean_velocity_mps[0],[0.;3]);assert_eq!(s.sample_errors[0],0.);
+    for i in 0..STATES{assert_eq!(s.populations[0][i],r.initial_density[i*STATES+i].re);}
+    for e in &s.temperature_errors_uk[1..]{for a in 0..3{assert!(e[a]>0.);}}
 }

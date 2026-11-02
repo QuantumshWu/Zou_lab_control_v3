@@ -1224,7 +1224,7 @@ function renderDynamics(a:Analysis):void{
     host.innerHTML=series?seriesChart(raw!.timesUs,series,d.durationUnit,marks):waiting;if(series)unbindPopulation=bindSeries(host,raw!.timesUs,series,d.durationUnit,marks);
     const kHz=(f:number)=>`${formatNumber(f,{digits:4})} kHz`,threeD=motion?.axes.length===3;
     caption(!motion?'':(threeD?(shown==='temperature'
-        ?motion.axes.map(a=>legendEntry(AXIS_INKS[a],`${a} 轴`)).join('')+'<span class="population-legend">上：温度 T = m·Var(v)/k_B；下：平均速度 ⟨v⟩</span>'
+        ?motion.axes.map(a=>legendEntry(AXIS_INKS[a],`${a} 轴`)).join('')+'<span class="population-legend">上：T = m·Var(v)/k_B，下：⟨v⟩，各取一个阱周期内的平均</span>'
         :motion.axes.map(a=>legendEntry(AXIS_INKS[a],`${a} 轴`)).join('')+legendEntry('#6a6866','累计损失概率'))
       :shown==='temperature'?legendEntry(MOTION_INKS[0],`温度 T = m·Var(v)/k_B（沿 ${motion.axis} 轴）`)+legendEntry(MOTION_INKS[1],'平均速度 ⟨v⟩')
       :legendEntry(MOTION_INKS[0],`平均振动量子数 n̄（相对焦点处的阱频 ω/2π = ${kHz(motion.trapFrequencyKHz[0]!)}）`)+legendEntry(MOTION_INKS[1],'累计损失概率（原子离开光阱）'))+referenceLegend+continuation);return;

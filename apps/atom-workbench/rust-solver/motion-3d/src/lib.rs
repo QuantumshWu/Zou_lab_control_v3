@@ -106,6 +106,13 @@ const TASK:u64=8;
 /// `outputs` output times (the first at t = 0), in groups of `group` (each a Latin hypercube of
 /// initial states, `Stratum`, and a jackknife group), run as tasks of at most `TASK` trajectories
 /// inside a group; (r, κ) kept at `listed`.
+///
+/// With `Settings::average` an atom's κ, κ², r and r² along each axis are its means over the steps
+/// within half a trap period of each output time (a window cut at t = 0 to stay centred, and the
+/// trajectory run half a period past the last output): an atom's kinetic energy along a trap axis
+/// sloshes into potential energy and back twice a period, and over a period its mean is half its
+/// energy on that axis -- the spread of T between atoms then comes from their energies alone, not
+/// from where each is in its oscillation. T stays m Var(v)/k_B, averaged over one trap period.
 pub fn simulate(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize])->Outcome{
     run(model,settings,initial,seed,first,count,group,steps,outputs,listed,None)
 }
@@ -121,19 +128,24 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
     let results:Vec<(u64,Group,Vec<Vec<([f64;3],[f64;3])>>,u64)>=tasks.par_iter().map(|&(g,from,to)|{
         let(start,end)=bounds(g);
         let mut sums=Group::new(outputs,(to-from) as usize);let mut samples=vec![vec![];listed.len()];let mut jumps=0;
+        let mut windows=Windows::new(settings,steps,outputs);let mut held=vec![None;outputs];
         for index in from..to{
             let mut t=initial_trajectory(model,settings,initial,seed,index,Stratum{first:start,size:end-start});
             if let Some(r)=origin{t.r=r;t.kappa=[0.;3];}
-            let mut record=|t:&Trajectory,i:usize|{
+            windows.clear();held.fill(None);
+            let mut record=|t:&Trajectory,i:usize,held:&mut Vec<Option<[f64;STATES]>>|{
                 if !t.alive{return;}
-                let point=model.point(t.r,t.kappa);let p=model.populations(t.block,&point,&t.psi);sums.add(i,t.r,t.kappa,&p);
+                let point=model.point(t.r,t.kappa);held[i]=Some(model.populations(t.block,&point,&t.psi));
                 if let Some(k)=listed.iter().position(|&l|l==i){samples[k].push((t.r,t.kappa));}
             };
-            record(&t,0);
+            record(&t,0,&mut held);windows.add(0,&t);
             for i in 1..outputs{
-                for _ in 0..steps{if t.alive{engine.step(&mut t);}}
-                record(&t,i);
+                for k in 1..=steps{if t.alive{engine.step(&mut t);if t.alive{windows.add((i-1)*steps+k,&t);}}}
+                record(&t,i,&mut held);
             }
+            // Half a period past the last output: its windows' far halves.
+            for k in 1..=windows.reach{if t.alive{engine.step(&mut t);if t.alive{windows.add((outputs-1)*steps+k,&t);}}}
+            for(i,p)in held.iter().enumerate(){if let Some(p)=p{sums.add(i,&windows.means(i),p);}}
             jumps+=t.jumps;
         }
         (g,sums,samples,jumps)
@@ -145,6 +157,30 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
         for(k,v)in s.into_iter().enumerate(){samples[k].extend(v);}jumps+=j;
     }
     Outcome{groups:out,samples,jumps}
+}
+
+/// One trajectory's motion sums about every output time: per output and axis the steps counted and
+/// Σκ, Σκ², Σr, Σr² over its window -- the steps within `half` of the output's (at most as many as
+/// the output's own, so a window stays centred), one step without averaging.
+struct Windows{half:[usize;3],steps:usize,reach:usize,sums:Vec<[[f64;5];3]>}
+impl Windows{
+    fn new(settings:&Settings,steps:usize,outputs:usize)->Windows{
+        let half:[usize;3]=std::array::from_fn(|a|{let w=settings.frequencies[a];if settings.average&&w>0.{(std::f64::consts::PI/w/settings.dt).round() as usize}else{0}});
+        Windows{half,steps,reach:half.into_iter().max().unwrap(),sums:vec![[[0.;5];3];outputs]}
+    }
+    fn clear(&mut self){for s in &mut self.sums{*s=[[0.;5];3];}}
+    /// The trajectory at step k (from t = 0) into every window holding it.
+    fn add(&mut self,k:usize,t:&Trajectory){
+        let last=self.sums.len()-1;
+        for a in 0..3{
+            let h=self.half[a];let(x,q)=(t.r[a],t.kappa[a]);
+            for i in k.saturating_sub(h).div_ceil(self.steps)..=((k+h)/self.steps).min(last){
+                let at=i*self.steps;if k.abs_diff(at)<=h.min(at){let s=&mut self.sums[i][a];s[0]+=1.;s[1]+=q;s[2]+=q*q;s[3]+=x;s[4]+=x*x;}
+            }
+        }
+    }
+    /// Output i's means: κ, κ², r, r² per axis.
+    fn means(&self,i:usize)->[[f64;4];3]{std::array::from_fn(|a|{let s=&self.sums[i][a];[s[1]/s[0],s[2]/s[0],s[3]/s[0],s[4]/s[0]]})}
 }
 
 /// A pilot: `count` trajectories over the outputs, the held atoms' states at every output kept (at

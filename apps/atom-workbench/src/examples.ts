@@ -91,7 +91,10 @@ export function exampleScene(key:string):{scene:Scene;view:ExampleView;line:Spec
     // beam at the 1D example's detuning and intensity. A pair's two circular beams make a
     // polarization turning along the pair at constant intensity, so the three pairs need no choice
     // of linear axes. One repump beam along +x carries the 1D example's repump pair's intensity (a
-    // scene holds eight lasers). The atom moves in 3D.
+    // scene holds eight lasers). The atom moves in 3D. Every beam's phase is zero at the focus: the
+    // six beams' fixed interference there sets how well each axis cools (with these phases x the
+    // least; another phase on one beam moves the pattern), as a frozen snapshot of the drifting
+    // phases of an experiment's beams.
     Object.assign(next.fields[0]!,{magnitudeG:0,direction:axis('+x')});
     const gamma=RB87.D2.gammaHz/(2*Math.PI*1e6),cooling=detuned('D2',TWEEZER_PGC.coolingDetuningGamma*gamma),repump=detuned('D2',TWEEZER_PGC.repumpDetuningGamma*gamma,1,2);
     const beam=(id:string,name:string,frequency:FrequencyExpr,intensityMWcm2:number,along:AxisName,polarizationAngleDeg:number,ellipticityDeg:number):Laser=>

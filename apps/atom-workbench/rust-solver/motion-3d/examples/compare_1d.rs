@@ -1,9 +1,10 @@
 //! The semiclassical engine on the line through the focus (the beams' axis free, the others held
 //! at 0) against the 1D GMW references LONGREF_TW1/TW2: T, n̄, the ground populations, the
 //! excited population and the loss.
-//! `cargo run --profile iterate -p atom-motion-3d --example compare_1d -- <TW1|TW2> <label> [trajectories] [t_end_us] [dt] [seed] [flow|drift] [truncation] [group]`
-//! (the exponentials' truncation bound, double precision by default, and the Latin hypercube's
-//! group, eight by default: a solve's are its share of the step budget and a batch over 2 threads.)
+//! `cargo run --profile iterate -p atom-motion-3d --example compare_1d -- <TW1|TW2> <label> [trajectories] [t_end_us] [dt] [seed] [flow|drift] [truncation] [group] [average|instant]`
+//! (the exponentials' truncation bound, double precision by default, the Latin hypercube's group,
+//! eight by default -- a solve's are its share of the step budget and a batch over 2 threads -- and
+//! T over one trap period, as a solve takes it, or at the output time.)
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_3d::engine::Settings;
 use atom_motion_3d::model::Model;
@@ -29,8 +30,8 @@ fn main(){
     let(block22,state22)=model.blocks.iter().enumerate().find_map(|(k,blk)|blk.states.iter().position(|&x|x==b22).map(|x|(k,x))).unwrap();
     let frequencies=model.trap_frequencies(block22,state22);
     // The trap's harmonic part moved exactly (flow), or free flight with the whole trap as kicks (drift).
-    let flow=arg(7,"flow")=="flow";let truncation:f64=arg(8,"2.2e-16").parse().unwrap();let group:u64=arg(9,"8").parse().unwrap();
-    let settings=Settings{dt,free,escape_intensity:(-2.*cap*cap/(w*w)).exp(),frequencies:if flow{frequencies}else{[0.;3]},truncation};
+    let flow=arg(7,"flow")=="flow";let truncation:f64=arg(8,"2.2e-16").parse().unwrap();let group:u64=arg(9,"8").parse().unwrap();let average=arg(10,"average")=="average";
+    let settings=Settings{dt,free,escape_intensity:(-2.*cap*cap/(w*w)).exp(),frequencies:if flow{frequencies}else{[0.;3]},truncation,average};
     let initial=Initial::new(&model,&request).unwrap();
     println!("trap {:?} kHz",frequencies.map(|f|f/std::f64::consts::TAU*1e3));
     let interval=10.;let steps=(interval/dt).round() as usize;let outputs=(t_end/interval).round() as usize+1;

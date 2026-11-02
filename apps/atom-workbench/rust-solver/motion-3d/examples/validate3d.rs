@@ -31,7 +31,7 @@ fn main(){
     // Optional: the free axes (a mask "yzx" of 0/1) and the harmonic flow (flow|drift).
     let mask:Vec<bool>=arg(6,"111").chars().map(|c|c=='1').collect();let free=[mask[0],mask[1],mask[2]];
     let flow=arg(7,"flow")=="flow";
-    let settings=Settings{dt,free,escape_intensity:1./20.,frequencies:if flow{frequencies}else{[0.;3]},truncation:f64::EPSILON};
+    let settings=Settings{dt,free,escape_intensity:1./20.,frequencies:if flow{frequencies}else{[0.;3]},truncation:f64::EPSILON,average:false};
     let initial=Initial::new(&model,&request).unwrap();
     let interval=10.;let steps=(interval/dt).round() as usize;let outputs=(t_end/interval).round() as usize+1;
     let clock=std::time::Instant::now();

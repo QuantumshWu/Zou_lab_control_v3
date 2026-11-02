@@ -36,10 +36,11 @@ impl Group{
     }
     /// Another group's sums added in: the two as one group.
     pub fn merge(&mut self,o:&Group){for(s,x)in self.sums.iter_mut().zip(&o.sums){*s=s.combine(x,1.);}}
-    /// One held atom at output i.
-    pub fn add(&mut self,i:usize,r:[f64;3],kappa:[f64;3],populations:&[f64;STATES]){
+    /// One atom held at output i: its populations there and its motion's means about it -- κ, κ², r
+    /// and r² per axis, at the output time or over a window around it.
+    pub fn add(&mut self,i:usize,motion:&[[f64;4];3],populations:&[f64;STATES]){
         let s=&mut self.sums[i];s.held+=1.;
-        for a in 0..3{s.kappa[a]+=kappa[a];s.kappa2[a]+=kappa[a]*kappa[a];s.position[a]+=r[a];s.position2[a]+=r[a]*r[a];}
+        for a in 0..3{s.kappa[a]+=motion[a][0];s.kappa2[a]+=motion[a][1];s.position[a]+=motion[a][2];s.position2[a]+=motion[a][3];}
         for(x,p)in s.populations.iter_mut().zip(populations){*x+=p;}
     }
 }

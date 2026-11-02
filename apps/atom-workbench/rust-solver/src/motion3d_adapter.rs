@@ -10,7 +10,8 @@
 //! src/solver-types.ts:
 //! - `axis`: "3d";
 //! - per lab axis ("x", "y", "z"): `temperatureUK` and `temperatureErrorUK` (μK, one per sample:
-//!   T = m Var(v)/k_B and its standard error), `meanVelocityMps`, `meanOccupation` (n̄ relative to
+//!   T = m Var(v)/k_B over one trap period of the axis around the sample, and its standard error),
+//!   `meanVelocityMps`, `meanOccupation` (both over the same period; n̄ relative to
 //!   that axis's `trapFrequencyKHz`, ω/2π at the focus), `momentum` (`velocitiesMps`, `samples`,
 //!   `probabilities`) and `position` (`positionsUm`, ...) as the 1D block's distributions;
 //! - `lossProbability`, one per sample, never decreasing;

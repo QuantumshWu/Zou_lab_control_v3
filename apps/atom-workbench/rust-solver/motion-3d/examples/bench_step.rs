@@ -14,7 +14,7 @@ fn main(){
     let dt:f64=args.get(3).map_or(0.2,|s|s.parse().unwrap());let truncation:f64=args.get(4).map_or(f64::EPSILON,|s|s.parse().unwrap());
     let request=scene::scene(&name);
     let model=Model::new(&request).unwrap();
-    let settings=Settings{dt,free:[true;3],escape_intensity:1e-2,frequencies:[0.;3],truncation};
+    let settings=Settings{dt,free:[true;3],escape_intensity:1e-2,frequencies:[0.;3],truncation,average:false};
     let initial=Initial::new(&model,&request).unwrap();
     let mut t=initial_trajectory(&model,&settings,&initial,1,0,Stratum::single(0));
     let n=model.dimension(t.block);
