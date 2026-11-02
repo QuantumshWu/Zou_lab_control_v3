@@ -85,13 +85,13 @@
 //! the change it measures is mostly the older prediction's error, the newer one's being smaller.
 //!
 //! # Remaining time
-//! A cost model: the run's wall time per simulated us and grid point at the current dt (the
-//! companion's apart), measured from the first period, times the grid and the simulated time left,
-//! plus each checkpoint's own; the time left runs to the end, or to the acceptance the changes'
-//! geometric decrease since their largest projects (they rise while the continuation learns the
-//! slow modes, then fall; a least-squares line through their logarithms, from two changes after the
-//! largest on). Replayed on TW2 and TW1, the projection is 0.4-1.8× the time actually left; before
-//! it, the estimate to the end is 2-4×.
+//! A cost model: the run's wall time per simulated us and grid point at the current dt over the last
+//! checkpoint interval (the companion's apart; from the first period on), times the grid and the
+//! simulated time left, plus each checkpoint's own. The time left runs to the end, or to the
+//! acceptance the changes' geometric decrease since their largest projects (they rise while the
+//! continuation learns the slow modes, then fall; a least-squares line through their logarithms,
+//! from two changes after the largest on). Replayed on TW2 and TW1, the projection is 0.4-1.8× the
+//! time actually left; before it, the estimate to the end is 2-4×.
 use crate::ground::{Ground,Local,dipole_kernel};
 use crate::linear::{Dense,Lu};
 use crate::{Complex,Distributions,Request,Solution,STATES};
@@ -1004,8 +1004,8 @@ impl<'a> Engine<'a>{
             // Every checkpoint's prediction of the outputs (without its distributions).
             let mut history:Vec<Prediction>=vec![];
             let mut bias=StepError::default();let mut periods=0;
-            // The cost model of the remaining time: the run's wall time per simulated us and grid point at
-            // the current dt (the companion's apart), and a checkpoint's own.
+            // The cost model of the remaining time: the run's wall time per simulated us and grid point over
+            // the last interval at the current dt (the companion's apart), and a checkpoint's own.
             let(mut rate,mut rate_steps,mut per_checkpoint)=((0_f64,0_f64),self.steps,0_f64);
             while last.t<end-1e-9*period{
                 let(began,from)=(Instant::now(),last.t);
@@ -1084,6 +1084,8 @@ impl<'a> Engine<'a>{
                 }else{end};
                 per_checkpoint=checkpoint_began.elapsed().as_secs_f64();
                 checkpoint(&solution,Some(remaining(self,expected,t)*1e3));
+                // The next estimate from the next interval's periods alone: the machine's load moves.
+                rate=(0.,0.);
             }
             let prediction=if accepted{previous.as_ref()}else{None};
             return Ok(self.assemble(request,&record,&last,prediction,bias.populations,&listed,&method));
