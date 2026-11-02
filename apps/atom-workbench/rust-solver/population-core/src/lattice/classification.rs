@@ -8,7 +8,7 @@
 //! tolerance: the fold drops the far mode's slaved amplitude (the
 //! micromotion), first order in m on the coherences and second order on the
 //! populations. Near / far: the significant step frequencies are sorted and
-//! cut at their largest ratio gap of at least FOLD_GAP_RATIO above every
+//! cut at their largest ratio gap of at least `fold_gap` above every
 //! frequency with a step that may not fold (or below all of them when every
 //! one may fold). Far steps are folded at second order; a far + far pair with
 //! a nonzero near sum t joins the fold target K_t when its group is at least
@@ -23,11 +23,16 @@
 //! the explicit charges (`charge_set`).
 use super::*;
 use super::accuracy::{A_PRIORI_SHARE,POPULATION_TOLERANCE};
-use crate::preparation::{FOLD_GAP_RATIO,STRUCTURAL_COUPLING_FLOOR};
+use crate::preparation::STRUCTURAL_COUPLING_FLOOR;
 
 /// A far step must be faster than this multiple of ||L0||, so that
 /// ||(L0 - i nu)^-1|| <= 1/(|nu| - ||L0||) holds with room to spare.
 pub const FOLD_DISTANCE:f64=2.;
+/// The smallest ratio of the fold's gap, far side over near side: the fold
+/// keeps the orders 0 and 1 in nu_q (`fold`), so the first order it leaves
+/// out is (nu_q / nu_s)^2 of the fold at the near side's frequencies, within
+/// the a-priori share: 1 / sqrt(A_PRIORI_SHARE x tolerance), 44.7.
+pub fn fold_gap()->f64{1./(A_PRIORI_SHARE*POPULATION_TOLERANCE).sqrt()}
 /// Relative size (to the diagonal fold) below which a far + far group
 /// landing on a nonzero near charge is an omitted target (`fold`).
 pub const CROSS_FOLD_FLOOR:f64=1e-6;
@@ -91,7 +96,7 @@ impl HarmonicPlan{
         let mut best:Option<(f64,usize)>=None;
         for i in first..frequencies.len(){
             let ratio=if i==0{f64::INFINITY}else{frequencies[i].0/frequencies[i-1].0};
-            if i>0&&ratio<FOLD_GAP_RATIO{continue;}
+            if i>0&&ratio<fold_gap(){continue;}
             if best.is_none_or(|(r,_)|ratio>r){best=Some((ratio,i));}
         }
         let gap=best.map(|(_,i)|(if i==0{0.}else{frequencies[i-1].0},frequencies[i].0));

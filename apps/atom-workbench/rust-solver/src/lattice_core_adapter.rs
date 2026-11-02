@@ -231,7 +231,7 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
                 "trajectory":c.estimate.trajectory.iter().fold(0_f64,|a,&b|a.max(b)),"horizons":c.estimate.horizons,
                 "growing":c.growing,"slowestRate":c.slowest.map(|s|s.rate),"ms":c.milliseconds})).collect::<Vec<_>>(),
             "fold":{"budget":f.screened.budget,"screenedPieces":f.screened.pieces,"screenedTargets":f.screened.targets,"screenedBound":f.screened.spent,
-                "rings":f.rings,"ringResponses":f.ring_responses,"ringTargets":f.ring_targets,"dropped":f.dropped(),"responsesMs":f.responses_ms,"ringsMs":f.rings_ms},
+                "rings":f.rings,"ringResponses":f.ring_responses,"ringTargets":f.ring_targets,"dropped":f.dropped(),"landingsMs":f.landings_ms,"responsesMs":f.responses_ms,"ringsMs":f.rings_ms},
             "timingMs":{"eigenbasis":t.eigenbasis_ms,"explicitSet":t.explicit_set_ms,"fold":t.fold_ms,"setup":t.setup_ms,"solves":t.solves_ms,"projection":t.projection_ms,
                 "model":t.model_ms,"outputs":t.outputs_ms,"total":t.total_ms}})});
     json!({
