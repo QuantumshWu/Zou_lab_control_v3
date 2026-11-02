@@ -152,9 +152,11 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   if(data.progress!==undefined&&data.progress!==true)invalid('进度标记');
   // A checkpoint may carry its run's estimate of the wall time left (ms, finite, ≥ 0); a final
   // result never does.
-  const remaining=d.estimatedRemainingMs;
+  const remaining=d.estimatedRemainingMs,atMost=d.estimatedRemainingAtMost;
   if(remaining!==undefined&&data.progress!==true)invalid('最终结果带有剩余时间估计');
   if(remaining!==undefined&&!bounded(remaining))invalid('剩余时间估计');
+  // It may be an upper bound: the run may stop earlier (a motion run's continuation, not yet projected).
+  if(atMost!==undefined&&(atMost!==true||remaining===undefined))invalid('剩余时间估计');
   // The mean, when one was asked for: both standard T from the one mean run (`meanHorizons`,
   // one entry per T, in any order), each a computed p̄(T) -- with its estimated error and whether
   // that is within ε -- or 'not-converged', nothing usable computed. The run's method and
@@ -197,6 +199,6 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   const active=drivingLasers(scene);
   return {states,timesUs,populations,totalExcited:timesUs.map((_,i)=>states.filter(s=>s.manifold!=='ground').reduce((sum,s)=>sum+populations[s.id]![i]!,0)),
     activeLaserIds:active.map(l=>l.id),mean,...(horizonMeans?{horizonMeans}:{}),
-    metrics:{totalMs:d.elapsedMs,...(remaining!==undefined?{estimatedRemainingMs:remaining as number}:{})},validation:{maxTraceError:d.traceError,minPopulation:Math.min(...rows.flat())},
+    metrics:{totalMs:d.elapsedMs,...(remaining!==undefined?{estimatedRemainingMs:remaining as number}:{}),...(atMost===true?{estimatedRemainingAtMost:true}:{})},validation:{maxTraceError:d.traceError,minPopulation:Math.min(...rows.flat())},
     ...(populationAccuracy?{populationAccuracy,method:d.method}:{}),...(motionResult?{motion:motionResult}:{}),assumptions};
 }

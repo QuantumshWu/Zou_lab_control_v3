@@ -175,10 +175,15 @@ pub struct Solution{
     pub continued_from_us:Option<f64>,
 }
 
+/// The estimated wall time to the final solution (ms); `at_most` while the run may still stop
+/// earlier than the estimate assumes (its continuation not yet projected to an acceptance).
+#[derive(Clone,Copy,Debug,PartialEq)]
+pub struct Remaining{pub ms:f64,pub at_most:bool}
+
 /// Solves a request. `checkpoint` is given each intermediate solution as it is made -- complete,
 /// at every time of the request, as the final one -- so that a stopped run keeps the last, with
-/// the estimated wall time to the final one (ms).
-pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,String>{
+/// the estimated wall time to the final one.
+pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<Remaining>))->Result<Solution,String>{
     if request.beams.is_empty(){return Err(NO_TRAP.into());}
     let ground=ground::Ground::new(request)?;
     let lapack=atom_population_core::Lapack::load()?;

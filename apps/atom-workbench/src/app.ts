@@ -318,8 +318,8 @@ function bothSentence(result:DynamicsResult):string{
 /** The running solve's remaining time: its latest checkpoint's estimate counted down since that
  * checkpoint arrived; none before the first estimate. */
 function remainingTime():ReturnType<typeof remainingWords>|undefined{
-  const last=lastCheckpoint,estimate=last?.record.result.metrics.estimatedRemainingMs;
-  return last&&estimate!==undefined?remainingWords(estimate,performance.now()-last.arrived):undefined;
+  const last=lastCheckpoint,metrics=last?.record.result.metrics,estimate=metrics?.estimatedRemainingMs;
+  return last&&estimate!==undefined?remainingWords(estimate,performance.now()-last.arrived,metrics?.estimatedRemainingAtMost):undefined;
 }
 function refreshStatus():void{
   if(notice&&performance.now()>notice.until)notice=undefined;
