@@ -67,8 +67,17 @@ pub struct Beam{
     pub coupling:Matrix,
     /// R, the counter-rotating coupling at the atom (rad/us).
     pub counter_coupling:Matrix,
+    /// O, the beam's static shift through the states outside the model and the Rb⁺ core at the atom
+    /// (rad/us, Hermitian): its share of `Request::hamiltonian`, which scales with |a(x)|².
+    pub outside_shift:Matrix,
 }
 impl Beam{
+    /// d²|a(x)|²/dx² at the focus (1/um²): −4 ρ̂²/w² − 2 n_axis²/z_R² for the Gaussian beam, ρ̂² the
+    /// squared share of the line across the beam; 0 for a plane wave.
+    pub fn intensity_curvature(&self)->f64{
+        let[across_1,across_2,along]=self.direction;
+        self.waist_um.map_or(0.,|w|{let rayleigh=self.wave_number_per_um*w*w/2.;-4.*(across_1*across_1+across_2*across_2)/(w*w)-2.*along*along/(rayleigh*rayleigh)})
+    }
     /// The wave number along the motion axis, k·axis (rad/um).
     pub fn axial_wave_number(&self)->f64{self.wave_number_per_um*self.direction[2]}
     /// The beam's complex amplitude at x (um) on the motion line, relative to its amplitude at the
@@ -179,7 +188,7 @@ mod tests{
             times_us:vec![0.,5.,10.],tolerance:0.005}
     }
     fn beam(direction:[f64;3],waist_um:Option<f64>)->Beam{
-        Beam{id:"beam".into(),name:"光".into(),direction,wave_number_per_um:7.37,waist_um,intensity_mw_cm2:1.,frequency_index:vec![],coupling:zero(),counter_coupling:zero()}
+        Beam{id:"beam".into(),name:"光".into(),direction,wave_number_per_um:7.37,waist_um,intensity_mw_cm2:1.,frequency_index:vec![],coupling:zero(),counter_coupling:zero(),outside_shift:zero()}
     }
     #[test]
     fn without_light_nothing_confines_the_atom_and_with_light_the_engine_is_not_implemented_yet(){

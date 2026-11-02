@@ -76,7 +76,7 @@ test('the motion block keeps the beams apart with their geometry; at the atom th
     // Only excited ← ground entries.
     assert.ok(b.coupling.real.every((x,k)=>x===0&&b.coupling.imag[k]===0||(Math.floor(k/N)>=8&&k%N<8)),b.id);
   }
-  assert.deepEqual(m.beams.filter(b=>b.waistUm!==undefined).map(b=>[b.id,b.direction,b.waistUm]),[['tweezer',[0,1,0],1.2]]);
+  assert.deepEqual(m.beams.filter(b=>b.waistUm!==undefined).map(b=>[b.id,b.direction,b.waistUm]),[['tweezer',[0,1,0],1]]);
   assert.deepEqual(m.beams.find(b=>b.id==='cool-minus').direction,[0,0,-1]);
   // H0 without beams is diagonal; the excited states' frame is the reference carrier.
   assert.ok(m.hamiltonian.real.every((x,k)=>x===0||k%(N+1)===0)&&m.hamiltonian.imag.every(x=>x===0));
@@ -118,7 +118,7 @@ test('the Cartesian emission operators are the model\'s spontaneous emission, in
     expected.forEach((e,q)=>assert.ok(Math.hypot(e.re-p.amplitudes[q].re,e.im-p.amplitudes[q].im)<1e-12,`${theta},${phi},${psi},${chi}: q=${q-1}`));
   }
   // Along the field (here z, at B along z; the tweezer along x) the axial component is the π operator itself.
-  const along=pgc();along.fields[0].magnitudeG=3;along.lasers[0].direction=axis('+x');
+  const along=pgc();Object.assign(along.fields[0],{magnitudeG:3,direction:axis('+z')});along.lasers[0].direction=axis('+x');
   const model=buildFullMasterModel(along,along.dynamics,{axis:'z',temperatureUK:30});
   const pi=model.collapse[1],axial=model.motion.emission[2];
   assert.ok(axial.real.every((x,k)=>x===pi.real[k])&&axial.imag.every((x,k)=>x===pi.imag[k]));
@@ -211,7 +211,12 @@ test('the native payload of a motion solve carries the motion block; a malformed
   assert.deepEqual(Object.keys(payload.model.motion).sort(),['axis','beams','emission','fieldVectorG','frameFrequenciesMHz','hamiltonian','massKg','temperatureUK']);
   assert.equal(payload.model.motion.beams.length,5);assert.equal(payload.model.motion.emission.length,3);
   assert.deepEqual(Object.keys(payload.model.motion.beams.find(b=>b.id==='tweezer')).sort(),
-    ['counterCoupling','coupling','direction','frequencyIndex','id','intensityMWcm2','name','waistUm','waveNumberPerUm']);
+    ['counterCoupling','coupling','direction','frequencyIndex','id','intensityMWcm2','name','outsideShift','waistUm','waveNumberPerUm']);
+  // Each beam's static shift through the states outside the model: Hermitian; the tweezer's on |2,+2⟩ about −0.11 MHz at its focus.
+  const shift=payload.model.motion.beams.find(b=>b.id==='tweezer').outsideShift,two=payload.model.states.indexOf('ground-2-2');
+  const size=Math.max(...shift.real.map(Math.abs)),transposed=k=>(k%N)*N+Math.floor(k/N);
+  assert.ok(shift.real.every((x,k)=>Math.abs(x-shift.real[transposed(k)])<=1e-12*size)&&shift.imag.every((x,k)=>Math.abs(x+shift.imag[transposed(k)])<=1e-12*size));
+  assert.ok(Math.abs(shift.real[two*N+two]/(2*Math.PI)+.113)<.01,`${shift.real[two*N+two]/(2*Math.PI)} MHz`);
   assert.equal(prepareNativeSolve({scene,options:{...options,motion:undefined}}).payload.model.motion,undefined);
   for(const motion of [{axis:'w',temperatureUK:30},{axis:'x',temperatureUK:-1},{axis:'x',temperatureUK:30,trajectories:64},null]){
     assert.throws(()=>prepareNativeSolve({scene,options:{...options,motion}}),error=>error.code==='invalid-options');
@@ -223,16 +228,18 @@ test('the native payload of a motion solve carries the motion block; a malformed
   oblique.lasers[0].direction=spherical(40,30);assert.throws(()=>prepareNativeSolve({scene:oblique,options}),/没有垂直于「光镊」的坐标轴/);
 });
 
-test('the tweezer PGC example: the 852 nm tweezer along z, lin⊥lin cooling and repump pairs along ±x, B = 0, |2,+2⟩ at 30 μK for 1 ms, motion along x',()=>{
+test('the tweezer PGC example: the 852 nm tweezer along z (π to the x quantization axis), lin⊥lin cooling and repump pairs along ±x, B = 0, |2,+2⟩ at 30 μK, motion along x',()=>{
   const {scene,view}=exampleScene('pgc');assert.equal(view,'dynamics');
   const loaded=validateScene(JSON.parse(JSON.stringify(scene)));
   assert.equal(loaded.fields[0].magnitudeG,0);assert.equal(loaded.dynamics.initialStateId,'ground-2-2');
-  assert.deepEqual([loaded.dynamics.durationUs,loaded.dynamics.durationUnit,loaded.dynamics.samples],[1000,'ms',201]);
+  assert.deepEqual(directionVector(loaded.fields,loaded.fields[0].direction),[1,0,0],'the quantization axis is the motion axis');
+  assert.deepEqual([loaded.dynamics.durationUs,loaded.dynamics.durationUnit,loaded.dynamics.samples],[TWEEZER_PGC.durationUs,'ms',1001]);
   assert.deepEqual(loaded.dynamics.motion,{enabled:true,axis:'x',temperatureUK:30,temperatureUnit:'μK'});
   const [trap,plus,minus,repumpPlus,repumpMinus]=loaded.lasers;
-  assert.deepEqual([trap.id,trap.frequency,trap.intensityMode,trap.powerMW,trap.waistUm,directionVector(loaded.fields,trap.direction)],['tweezer',{wavelengthNm:852},'power',4,1.2,[0,0,1]]);
+  assert.deepEqual([trap.id,trap.frequency,trap.intensityMode,trap.powerMW,trap.waistUm,directionVector(loaded.fields,trap.direction)],['tweezer',{wavelengthNm:852},'power',3.5,1,[0,0,1]]);
+  assert.deepEqual(polarization(trap,loaded.fields).u.map(x=>Math.round(x*1e12)/1e12+0),[1,0,0]);
   assert.deepEqual([plus,minus,repumpPlus,repumpMinus].map(l=>directionVector(loaded.fields,l.direction)[0]),[1,-1,1,-1]);
-  assert.deepEqual([plus.intensityMWcm2,minus.intensityMWcm2,repumpPlus.intensityMWcm2,repumpMinus.intensityMWcm2],[.7,.7,.1,.1]);
+  assert.deepEqual([plus.intensityMWcm2,minus.intensityMWcm2,repumpPlus.intensityMWcm2,repumpMinus.intensityMWcm2],[3,3,.5,.5]);
   const gamma=RB87.D2.gammaHz/(2*Math.PI*1e6);
   assert.deepEqual(plus.frequency,{base:{kind:'transition',line:'D2',Fg:2,Fe:3},offsetMHz:TWEEZER_PGC.coolingDetuningGamma*gamma});
   assert.deepEqual(repumpPlus.frequency,{base:{kind:'transition',line:'D2',Fg:1,Fe:2},offsetMHz:0});

@@ -1,15 +1,28 @@
 //! The atom's ground manifold with the excited states eliminated: the generator of its internal
 //! state at any position x on the motion line, to first order in the Doppler and recoil shifts.
 //!
+//! # Fold
+//! Every beam drives a co-rotating component, V_l e^{−iδ_l t} with δ_l = 2π(ν_l − ν_frame), and a
+//! counter-rotating one, R_l e^{+i2π(ν_l + ν_frame)t}, each with its amplitude on the line. They are
+//! classified by the population core's rule (`Component`): a component is folded when it is far,
+//! |ν| ≥ FOLD_DISTANCE ‖L0‖ with its mixing m = size/(|ν| − ‖L0‖) within m² ≤ η ε, beyond the largest
+//! frequency gap of at least fold_gap = 1/√(η ε) above every component that may not fold. A
+//! folded component enters as its second-order (van Vleck) shift F on the ground and the excited
+//! states, with the exact bare-energy denominators; the others are near carriers. On the line,
+//! with each beam's static shift through the states outside the model O_l (in H0 at the atom),
+//!
+//! ```text
+//! H(x) = H0 + Σ_l (|a_l(x)|² − 1) O_l + Σ_l |a_l(x)|² F_l      (`Ground::hamiltonian`)
+//! ```
+//!
 //! # Elimination
-//! The beams of one frequency (equal `Beam::frequency_index`) form a carrier c at
-//! δ_c = 2π(ν_c − ν_frame). Each beam l keeps its own coupling V_l at the atom and its own
-//! amplitude a_l(x) on the line (`Beam::amplitude`: its axial wave number, and a focused beam's
-//! Gaussian profile), so carrier c drives V_c(x) = Σ_{l∈c} a_l(x) V_l e^{−iδ_c t} + h.c. With the
-//! ground energies E_b (H0 is diagonal on them) and the excited states' non-Hermitian
-//! Hamiltonian K = H0_ee − (i/2) D, D = Σ_a C_a†C_a|_ee, the excited states and the optical
-//! coherences follow the ground states adiabatically, beam by beam and column by column
-//! (`Elimination`):
+//! The near components of one frequency (equal `Beam::frequency_index`) form a carrier c at
+//! δ_c. Each beam l keeps its own coupling V_l at the atom and its own amplitude a_l(x) on the line
+//! (`Beam::amplitude`: its axial wave number, and a focused beam's Gaussian profile), so carrier c
+//! drives V_c(x) = Σ_{l∈c} a_l(x) V_l e^{−iδ_c t} + h.c. With the ground energies E_b, the diagonal
+//! of H(x)'s ground block, and the excited states' non-Hermitian Hamiltonian
+//! K = H(x)_ee − (i/2) D, D = Σ_a C_a†C_a|_ee, the excited states and the optical coherences follow
+//! the ground states adiabatically, beam by beam and column by column (`Elimination`):
 //!
 //! ```text
 //! R_l[:,b] = (K − E_b − δ_c)⁻¹ V_l[:,b]        R2_l[:,b] = (K − E_b − δ_c)⁻² V_l[:,b]        R_c(x) = Σ_{l∈c} a_l(x) R_l
@@ -23,12 +36,14 @@
 //! ```
 //!
 //! The photon of jump (a, c) is polarized along a and has carrier c's wave number: it kicks the
-//! atom by −u ħk_c along the axis, u distributed by the dipole pattern of a (lib.rs). Readout:
+//! atom by −u ħk_c along the axis, u distributed by the dipole pattern of a (lib.rs;
+//! `dipole_kernel` is its characteristic function). Readout:
 //! the bare ground density is ρ − ½{Y, ρ}, Y = Σ_c R_c†R_c, and an excited state's population is
 //! tr(E_i ρ), E_i = Σ_c R_c†|i⟩⟨i|R_c (Σ_i E_i = Y).
 //!
-//! An `Elimination` belongs to one H0 -- K and E_b -- and the generator at x is evaluated with any
-//! of them, so a position-dependent H0 needs only its own eliminations.
+//! An `Elimination` belongs to one H(x) -- K and E_b -- and the generator at x is evaluated with
+//! it. The ground block's static couplings within a hyperfine block are kept in H0g; the
+//! elimination's denominators take its diagonal.
 //!
 //! # First order in the Doppler and recoil shifts
 //! Absorbing from beam l raises the atom's momentum by ħk_l along the axis (k_l its axial wave
@@ -46,7 +61,8 @@
 //! taken when every ε is at most the elimination's own expansion parameter
 //! η = ‖H_ls − iΓ/2‖ / min σ_min(K − E_b − δ_c), so it is never the dominant error. Otherwise the beams
 //! form a Raman-resonant Λ scheme (gray molasses, EIT) and are refused by name. Norms over the
-//! line are bounded by the sums of the beams' terms, as |a_l(x)| ≤ 1.
+//! line are bounded by the sums of the beams' terms, as |a_l(x)| ≤ 1, and the check runs over
+//! positions across the focused beams (`Ground::report`), with the near carriers only.
 //!
 //! # Approximations and their criteria
 //! - The zeroth-order elimination: η ≪ 1. Its error is the saturation, ≈ 2 p_e locally (the
@@ -54,9 +70,11 @@
 //! - First order in the Doppler shift: (kv / σ_min)² ≪ 1; `response` is exact.
 //! - The secular step: ε ≤ η, enforced.
 //! - An emitted photon has its carrier's wave number: ≤ 1e-7 on the D2 line.
-//! - The counter-rotating couplings are dropped (optical RWA).
+//! - The fold: second order, within the population core's a-priori share (m² ≤ η ε).
 use crate::linear::{Dense,Lu};
-use crate::{Beam,Complex,Matrix,Request,STATES};
+use crate::{Beam,Complex,Request,STATES};
+use atom_population_core::lattice::accuracy::{A_PRIORI_SHARE,POPULATION_TOLERANCE};
+use atom_population_core::lattice::classification::{FOLD_DISTANCE,fold_gap};
 use std::f64::consts::TAU;
 
 /// A hyperfine block of the ground manifold.
@@ -68,7 +86,12 @@ pub struct Block{
     /// ν_F, the centroid of its energies in the request's H0: the block's frame (rad/us).
     pub frame:f64,
 }
-/// The beams of one frequency.
+/// A beam's co-rotating component (`counter` false: V e^{−iνt}, ν = δ = 2π(ν_beam − ν_frame)) or its
+/// counter-rotating one (R e^{−iνt}, ν = −2π(ν_beam + ν_frame)), each with its Hermitian conjugate;
+/// its size 2‖V‖_F bounds its commutator, and `folded` is the population core's verdict.
+#[derive(Clone,Debug)]
+pub struct Component{pub beam:usize,pub counter:bool,pub nu:f64,pub size:f64,pub folded:bool}
+/// The near components of one frequency.
 #[derive(Clone,Debug)]
 pub struct Carrier{
     /// Its beams (indices into `Ground::beams`).
@@ -89,12 +112,15 @@ pub struct Jump{
     pub to:usize,
 }
 
-/// The elimination for one H0: K and E_b, and every beam's excited response.
+/// The elimination for one H(x): K and E_b, and every near beam's excited response.
 #[derive(Clone,Debug)]
 pub struct Elimination{
-    /// E_b, the ground states' energies (rad/us), and H0g = diag(E_b − ν_F(b)) in the blocks' frames.
+    /// E_b, the diagonal of the ground block (rad/us), and H0g, the ground block within the hyperfine
+    /// blocks less their frames ν_F; `coupling`, the spectral norm of the ground block between the
+    /// hyperfine blocks, which the secular step drops (rad/us).
     pub energies:Vec<f64>,
     pub hamiltonian:Dense,
+    pub coupling:f64,
     /// K, the excited states' non-Hermitian Hamiltonian (rad/us).
     pub excited_hamiltonian:Dense,
     /// Per beam, R_l and R2_l, excited ← ground (dimensionless and us).
@@ -133,6 +159,10 @@ pub struct Secular{
     pub pole:f64,
     /// Every rotating term the step drops.
     pub dropped:Vec<Rotating>,
+    /// The micromotion of the static ground couplings between hyperfine blocks the step drops,
+    /// ‖coupling‖ / |ν_F′ − ν_F|: dropped within the population core's a-priori share, as a far
+    /// component's.
+    pub static_micromotion:f64,
 }
 impl Secular{
     /// The dropped term of the largest micromotion.
@@ -153,9 +183,9 @@ pub struct Rotating{
     pub micromotion:f64,
 }
 
-/// The eliminated ground-manifold generator of a request, apart from H0: the operators act on the
-/// ground states in the order of `ground_states`, the excited ones in the order of
-/// `excited_states`; rates in rad/us, jumps in 1/sqrt(us).
+/// The eliminated ground-manifold generator of a request: the operators act on the ground states
+/// in the order of `ground_states`, the excited ones in the order of `excited_states`; rates in
+/// rad/us, jumps in 1/sqrt(us).
 #[derive(Clone,Debug)]
 pub struct Ground{
     /// The request's ground and excited states (indices into `Request::states`).
@@ -167,9 +197,16 @@ pub struct Ground{
     /// D = Σ_a C_a†C_a on the excited states, and C_a (ground ← excited) on the request's axes.
     pub decay:Dense,
     pub emission:[Dense;3],
-    /// The request's beams, and each one's V_l (excited ← ground at the atom, rad/us).
+    /// The request's beams, and each one's co-rotating V_l (excited ← ground at the atom, rad/us).
     pub beams:Vec<Beam>,
     pub couplings:Vec<Dense>,
+    /// H0 at the atom (32 × 32, rad/us); per beam its shift through the states outside the model O_l
+    /// and the fold F_l of its folded components (both 32 × 32, at its intensity at the atom).
+    pub hamiltonian:Dense,
+    pub outside:Vec<Dense>,
+    pub folds:Vec<Dense>,
+    /// Every beam's two components, classified.
+    pub components:Vec<Component>,
     pub carriers:Vec<Carrier>,
     /// Every jump: per carrier, axis and pair of blocks.
     pub jumps:Vec<Jump>,
@@ -199,58 +236,149 @@ fn combine(beams:&[usize],weights:&[Complex],matrices:&[Dense])->Dense{
 }
 /// −Herm(m) = −(m + m†)/2.
 fn negative_hermitian_part(m:&Dense)->Dense{let mut h=m.scaled(Complex::new(-0.5,0.));h.add_scaled(Complex::new(-0.5,0.),&m.adjoint());h}
+/// The rows × cols block of a square matrix.
+fn sub(m:&Dense,rows:&[usize],cols:&[usize])->Dense{Dense::from_fn(rows.len(),cols.len(),|i,j|m[(rows[i],cols[j])])}
+fn frobenius(m:&Dense)->f64{m.entries.iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt()}
+/// The second-order (van Vleck) shift of a coupling V e^{−iνt} + h.c. (V excited ← ground) with the
+/// exact bare-energy denominators: on the ground states ½ Σ_e V_ea* V_ea′ [1/(E_a + ν − E_e) + 1/(E_a′ + ν − E_e)],
+/// on the excited ones ½ Σ_a V_ea V_e′a* [1/(E_e − ν − E_a) + 1/(E_e′ − ν − E_a)].
+fn van_vleck(energies:&[f64],v:&Dense,nu:f64,ground:&[usize],excited:&[usize])->Dense{
+    let mut out=Dense::zeros(STATES,STATES);
+    for(i,&a)in ground.iter().enumerate(){for(j,&b)in ground.iter().enumerate(){let mut z=Complex::ZERO;
+        for(e,&x)in excited.iter().enumerate(){z+=v[(e,i)].conj()*v[(e,j)]*(0.5*(1./(energies[a]+nu-energies[x])+1./(energies[b]+nu-energies[x])));}
+        out[(a,b)]=z;}}
+    for(e,&x)in excited.iter().enumerate(){for(f,&y)in excited.iter().enumerate(){let mut z=Complex::ZERO;
+        for(i,&a)in ground.iter().enumerate(){z+=v[(e,i)]*v[(f,i)].conj()*(0.5*(1./(energies[x]-nu-energies[a])+1./(energies[y]-nu-energies[a])));}
+        out[(x,y)]=z;}}
+    out
+}
+/// The population core's classification (population-core lattice/classification.rs): a component
+/// may fold when it is beyond FOLD_DISTANCE ‖L0‖ with m² ≤ A_PRIORI_SHARE × tolerance; the
+/// significant frequencies are cut at their largest ratio gap of at least fold_gap() above every one
+/// that may not fold, and the components that may fold beyond the cut are folded.
+fn classify(components:&mut [Component],l0:f64){
+    let foldable=|c:&Component|c.nu.abs()>=FOLD_DISTANCE*l0&&{let m=c.size/(c.nu.abs()-l0).max(f64::MIN_POSITIVE);m*m<=A_PRIORI_SHARE*POPULATION_TOLERANCE};
+    let mut frequencies:Vec<(f64,bool)>=components.iter().filter(|c|c.size>0.).map(|c|(c.nu.abs(),foldable(c))).collect();
+    frequencies.sort_by(|a,b|a.0.total_cmp(&b.0));
+    frequencies.dedup_by(|a,b|{let same=a.0==b.0;if same{b.1&=a.1;}same});
+    let first=frequencies.iter().rposition(|f|!f.1).map_or(0,|i|i+1);
+    let mut best:Option<(f64,usize)>=None;
+    for i in first..frequencies.len(){
+        let ratio=if i==0{f64::INFINITY}else{frequencies[i].0/frequencies[i-1].0};
+        if i>0&&ratio<fold_gap(){continue;}
+        if best.is_none_or(|(r,_)|ratio>r){best=Some((ratio,i));}
+    }
+    let cut=match best{None=>f64::INFINITY,Some((_,0))=>(FOLD_DISTANCE*l0).min(frequencies[0].0),Some((_,i))=>(frequencies[i-1].0*frequencies[i].0).sqrt()};
+    for c in components.iter_mut(){c.folded=c.nu.abs()>=cut&&foldable(c);}
+}
+/// The characteristic function E[e^{−iuξ}] of the cosine u of a photon's angle to the axis, for a
+/// dipole along the axis ((3/4)(1 − u²): 3 j1(ξ)/ξ) or across it ((3/8)(1 + u²): (3/2)(j0(ξ) − j1(ξ)/ξ)).
+/// Below |ξ| = 1 the series, summed to double precision, avoids the closed form's cancellation.
+pub fn dipole_kernel(along:bool,xi:f64)->f64{
+    let(j0,j1x)=if xi.abs()<1.{
+        // j0 = Σ_k (−1)^k t_k, t_k = ξ^{2k}/(2k+1)!; j1(ξ)/ξ = Σ_{k≥1} (−1)^{k+1} 2k u_k, u_k = ξ^{2k−2}/(2k+1)!.
+        let x2=xi*xi;let(mut j0,mut j1x,mut t,mut u,mut k,mut sign)=(1.,0.,1.,1./6.,1.,-1.);
+        loop{
+            t*=x2/((2.*k)*(2.*k+1.));j0+=sign*t;j1x-=sign*2.*k*u;
+            if t<=f64::EPSILON*j0.abs()&&2.*k*u<=f64::EPSILON*j1x.abs(){break;}
+            u*=x2/((2.*k+2.)*(2.*k+3.));k+=1.;sign=-sign;
+        }
+        (j0,j1x)
+    }else{let(s,c)=xi.sin_cos();(s/xi,(s-xi*c)/(xi*xi*xi))};
+    if along{3.*j1x}else{1.5*(j0-j1x)}
+}
 
 impl Ground{
-    /// The generator of a request, or why it has none: a Raman-resonant Λ scheme is refused (the
-    /// secular step at the request's H0).
+    /// The generator of a request, or why it has none: a component that may not fold yet is no near
+    /// carrier, or a Raman-resonant Λ scheme (the secular step over the line, `report`).
     pub fn new(request:&Request)->Result<Ground,String>{
         let levels=request.states.iter().map(|s|level(s)).collect::<Result<Vec<_>,_>>()?;
         let ground_states:Vec<usize>=(0..STATES).filter(|&i|levels[i].0=="ground").collect();
         let excited_states:Vec<usize>=(0..STATES).filter(|&i|levels[i].0!="ground").collect();
         let(ng,ne)=(ground_states.len(),excited_states.len());
         let driven=|k:usize|levels[k/STATES].0!="ground"&&levels[k%STATES].0=="ground";
-        for beam in &request.beams{
-            if (0..STATES*STATES).any(|k|!driven(k)&&(beam.coupling.real[k]!=0.||beam.coupling.imag[k]!=0.)){return Err(format!("Beam {}'s coupling must be excited ← ground",beam.id));}
-        }
+        for beam in &request.beams{for m in [&beam.coupling,&beam.counter_coupling]{
+            if (0..STATES*STATES).any(|k|!driven(k)&&(m.real[k]!=0.||m.imag[k]!=0.)){return Err(format!("Beam {}'s couplings must be excited ← ground",beam.id));}
+        }}
         let all:Vec<usize>=(0..STATES).collect();
         let mut decay=Dense::zeros(ne,ne);
         for c in &request.emission{let c=Dense::block(c,&all,&excited_states);decay.add_scaled(Complex::ONE,&c.adjoint_product(&c));}
         let emission:[Dense;3]=std::array::from_fn(|a|Dense::block(&request.emission[a],&ground_states,&excited_states));
-        // The hyperfine blocks and their frames, from the request's H0.
-        let h0=Dense::block(&request.hamiltonian,&ground_states,&ground_states);
+        let hamiltonian=Dense::block(&request.hamiltonian,&all,&all);
+        if (0..STATES).any(|i|(0..STATES).any(|j|i!=j&&hamiltonian[(i,j)]!=Complex::ZERO)){return Err("H0 must be diagonal in the model basis".into());}
+        let energies:Vec<f64>=(0..STATES).map(|i|hamiltonian[(i,i)].re).collect();
+        // The hyperfine blocks and their frames, from H0 at the atom.
         let mut fs:Vec<u8>=ground_states.iter().map(|&i|levels[i].1).collect();fs.sort();fs.dedup();
         let blocks:Vec<Block>=fs.into_iter().map(|f|{
             let states:Vec<usize>=(0..ng).filter(|&b|levels[ground_states[b]].1==f).collect();
-            let frame=states.iter().map(|&b|h0[(b,b)].re).sum::<f64>()/states.len() as f64;Block{f,states,frame}
+            let frame=states.iter().map(|&b|energies[ground_states[b]]).sum::<f64>()/states.len() as f64;Block{f,states,frame}
         }).collect();
         let block:Vec<usize>=(0..ng).map(|b|blocks.iter().position(|x|x.states.contains(&b)).unwrap()).collect();
-        // The carriers, and every jump.
+        // Every component, classified by the population core's rule. ‖L0‖ with H0's diagonal centred:
+        // its spread, the decay and the emission.
+        let frame=request.frame_frequencies_mhz[excited_states[0]];
+        let spread=energies.iter().copied().fold(f64::NEG_INFINITY,f64::max)-energies.iter().copied().fold(f64::INFINITY,f64::min);
+        let l0=spread+frobenius(&decay)+emission.iter().map(|c|frobenius(c).powi(2)).sum::<f64>();
+        let couplings:Vec<Dense>=request.beams.iter().map(|b|Dense::block(&b.coupling,&excited_states,&ground_states)).collect();
+        let counters:Vec<Dense>=request.beams.iter().map(|b|Dense::block(&b.counter_coupling,&excited_states,&ground_states)).collect();
+        let detuning=|beam:&Beam|beam.frequency_index.iter().zip(&request.frequencies_mhz).map(|(&n,&f)|n as f64*f).sum::<f64>();
+        let mut components:Vec<Component>=request.beams.iter().enumerate().flat_map(|(l,beam)|{let delta=detuning(beam);
+            [Component{beam:l,counter:false,nu:TAU*delta,size:2.*frobenius(&couplings[l]),folded:false},
+             Component{beam:l,counter:true,nu:-TAU*(delta+2.*frame),size:2.*frobenius(&counters[l]),folded:false}]}).collect();
+        classify(&mut components,l0);
+        if let Some(c)=components.iter().find(|c|c.counter&&!c.folded&&c.size>0.){
+            return Err(format!("The counter-rotating coupling of 「{}」 is too strong to fold (population core's rule): 1D motion cannot take it",request.beams[c.beam].name));}
+        let mut folds=vec![Dense::zeros(STATES,STATES);request.beams.len()];
+        for c in components.iter().filter(|c|c.folded){
+            let v=if c.counter{&counters[c.beam]}else{&couplings[c.beam]};folds[c.beam].add_scaled(Complex::ONE,&van_vleck(&energies,v,c.nu,&ground_states,&excited_states));
+        }
+        let outside=request.beams.iter().map(|b|Dense::block(&b.outside_shift,&all,&all)).collect();
+        // The near carriers: the near co-rotating components of one frequency.
         let mut groups:Vec<Vec<usize>>=vec![];
-        for(l,beam)in request.beams.iter().enumerate(){
-            match groups.iter_mut().find(|g|request.beams[g[0]].frequency_index==beam.frequency_index){Some(g)=>g.push(l),None=>groups.push(vec![l])}
+        for c in components.iter().filter(|c|!c.counter&&!c.folded&&c.size>0.){
+            let beam=&request.beams[c.beam];
+            match groups.iter_mut().find(|g|request.beams[g[0]].frequency_index==beam.frequency_index){Some(g)=>g.push(c.beam),None=>groups.push(vec![c.beam])}
         }
         let carriers:Vec<Carrier>=groups.into_iter().map(|beams|{
-            let first=&request.beams[beams[0]];
-            let detuning=TAU*first.frequency_index.iter().zip(&request.frequencies_mhz).map(|(&n,&f)|n as f64*f).sum::<f64>();
-            Carrier{beams,detuning,wave_number:first.wave_number_per_um}
+            let first=&request.beams[beams[0]];Carrier{beams,detuning:TAU*detuning(first),wave_number:first.wave_number_per_um}
         }).collect();
         let nb=blocks.len();
         let jumps=(0..carriers.len()).flat_map(|carrier|(0..3).flat_map(move|axis|(0..nb).flat_map(move|to|(0..nb).map(move|from|Jump{axis,carrier,from,to})))).collect();
-        let couplings=request.beams.iter().map(|b|Dense::block(&b.coupling,&excited_states,&ground_states)).collect();
-        let ground=Ground{ground_states,excited_states,blocks,block,decay,emission,beams:request.beams.clone(),couplings,carriers,jumps};
-        let report=ground.secular(&ground.eliminate(&request.hamiltonian)?)?;
+        let ground=Ground{ground_states,excited_states,blocks,block,decay,emission,beams:request.beams.clone(),couplings,hamiltonian,outside,folds,components,carriers,jumps};
+        let report=ground.report()?;
+        // A static ground coupling between blocks rotates at their frames' difference: it is dropped as
+        // the population core drops a far component's micromotion, m² within the a-priori share.
+        if report.static_micromotion.powi(2)>A_PRIORI_SHARE*POPULATION_TOLERANCE{
+            return Err(format!("光束在 F=1 与 F=2 之间的静态耦合不能忽略（微运动 {:.1e}），1D 运动暂不支持",report.static_micromotion));}
         match report.largest(){Some(term)if term.micromotion>report.eta=>Err(ground.raman_resonance(term)),_=>Ok(ground)}
     }
 
-    /// The elimination for an H0 (rad/us, in the frame; diagonal on the ground states): E_b, H0g in
-    /// the blocks' frames, K, and every beam's R_l and R2_l, column by column.
-    pub fn eliminate(&self,hamiltonian:&Matrix)->Result<Elimination,String>{
+    /// H(x) at x (um) on the line: H0 with each beam's outside shift and fold at its intensity there.
+    pub fn hamiltonian(&self,x:f64)->Dense{
+        let mut h=self.hamiltonian.clone();
+        for(l,beam)in self.beams.iter().enumerate(){
+            let intensity=beam.amplitude(x).norm_sqr();
+            if intensity!=1.{h.add_scaled(Complex::new(intensity-1.,0.),&self.outside[l]);}
+            h.add_scaled(Complex::new(intensity,0.),&self.folds[l]);
+        }
+        h
+    }
+
+    /// d²U/dx² at the focus (rad/us per um²) of ground state b's potential, its energy in H(x).
+    pub fn curvature(&self,b:usize)->f64{
+        let i=self.ground_states[b];
+        self.beams.iter().enumerate().map(|(l,beam)|beam.intensity_curvature()*(self.outside[l][(i,i)].re+self.folds[l][(i,i)].re)).sum()
+    }
+
+    /// The elimination for H (32 × 32, rad/us, in the frame): E_b, H0g in the blocks' frames, K, and every
+    /// near beam's R_l and R2_l, column by column.
+    pub fn eliminate(&self,hamiltonian:&Dense)->Result<Elimination,String>{
         let(ng,ne)=(self.ground_states.len(),self.excited_states.len());
-        let h0=Dense::block(hamiltonian,&self.ground_states,&self.ground_states);
-        if (0..ng).any(|i|(0..ng).any(|j|i!=j&&h0[(i,j)]!=Complex::ZERO)){return Err("H0 must be diagonal on the ground states".into());}
+        let h0=sub(hamiltonian,&self.ground_states,&self.ground_states);
         let energies:Vec<f64>=(0..ng).map(|b|h0[(b,b)].re).collect();
-        let ground_hamiltonian=Dense::from_fn(ng,ng,|i,j|if i==j{Complex::new(energies[i]-self.blocks[self.block[i]].frame,0.)}else{Complex::ZERO});
-        let mut excited_hamiltonian=Dense::block(hamiltonian,&self.excited_states,&self.excited_states);excited_hamiltonian.add_scaled(Complex::new(0.,-0.5),&self.decay);
+        let mut ground_hamiltonian=secular_part(&self.block,&h0);for b in 0..ng{ground_hamiltonian[(b,b)]=Complex::new(energies[b]-self.blocks[self.block[b]].frame,0.);}
+        let mut across=h0.clone();across.add_scaled(-Complex::ONE,&secular_part(&self.block,&h0));
+        let mut excited_hamiltonian=sub(hamiltonian,&self.excited_states,&self.excited_states);excited_hamiltonian.add_scaled(Complex::new(0.,-0.5),&self.decay);
         let(mut responses,mut derivatives)=(vec![Dense::zeros(ne,ng);self.beams.len()],vec![Dense::zeros(ne,ng);self.beams.len()]);
         let mut column=vec![Complex::ZERO;ne];
         for carrier in &self.carriers{for b in 0..ng{
@@ -260,7 +388,25 @@ impl Ground{
                 lu.solve(&mut column);for i in 0..ne{derivatives[l][(i,b)]=column[i];}
             }
         }}
-        Ok(Elimination{energies,hamiltonian:ground_hamiltonian,excited_hamiltonian,responses,derivatives})
+        Ok(Elimination{energies,hamiltonian:ground_hamiltonian,coupling:across.spectral_norm(),excited_hamiltonian,responses,derivatives})
+    }
+
+    /// The secular step over the line: its report at positions spanning the focused beams (the focus,
+    /// half the smallest waist, the waist and twice it), η the largest and the dropped terms those of
+    /// the position with the largest micromotion.
+    pub fn report(&self)->Result<Secular,String>{
+        let waist=self.beams.iter().filter_map(|b|b.waist_um).fold(f64::INFINITY,f64::min);
+        let positions:Vec<f64>=if waist.is_finite(){vec![0.,waist/2.,waist,2.*waist]}else{vec![0.]};
+        let mut out:Option<Secular>=None;
+        for x in positions{
+            let e=self.eliminate(&self.hamiltonian(x))?;let report=self.secular(&e)?;
+            out=Some(match out{None=>report,Some(o)=>{
+                let worse=report.largest().map_or(0.,|t|t.micromotion)>o.largest().map_or(0.,|t|t.micromotion);
+                let(eta,scale,pole)=if report.eta>o.eta{(report.eta,report.scale,report.pole)}else{(o.eta,o.scale,o.pole)};
+                Secular{eta,scale,pole,static_micromotion:o.static_micromotion.max(report.static_micromotion),dropped:if worse{report.dropped}else{o.dropped}}
+            }});
+        }
+        Ok(out.unwrap())
     }
 
     /// Every beam's amplitude a_l(x) at x (um) on the line.
@@ -362,7 +508,9 @@ impl Ground{
             let lu=denominator(&elimination.excited_hamiltonian,-elimination.energies[b]-carrier.detuning)?;
             pole=pole.min(1./lu.solve_columns(&identity).spectral_norm());
         }}
-        Ok(Secular{eta:scale/pole,scale,pole,dropped})
+        // The static ground couplings between blocks rotate at the frames' differences.
+        let gap=(0..nb).flat_map(|f|(0..nb).filter(move|&g|g!=f).map(move|g|(f,g))).map(|(f,g)|(self.blocks[f].frame-self.blocks[g].frame).abs()).fold(f64::INFINITY,f64::min);
+        Ok(Secular{eta:scale/pole,scale,pole,dropped,static_micromotion:elimination.coupling/gap})
     }
 
     /// Why a Raman-resonant scheme is refused, naming its beams.
@@ -379,6 +527,7 @@ impl Ground{
 mod tests{
     use super::*;
     use crate::linear::uniform;
+    use crate::Matrix;
     use serde_json::Value;
 
     /// The free-space 1D PGC (the PGC example before the tweezer example) as the app sent it, and
@@ -394,14 +543,17 @@ mod tests{
     }
     fn matrix(v:&Value)->Matrix{let m=entries(v,STATES,STATES);Matrix{real:m.entries.iter().map(|z|z.re).collect(),imag:m.entries.iter().map(|z|z.im).collect()}}
     fn floats(v:&Value)->Vec<f64>{v.as_array().unwrap().iter().map(float).collect()}
+    /// A request from a fixture: the matrices its beams lack (the counter-rotating coupling, the outside shift) are zero.
     fn request(v:&Value)->Request{
-        let zero=Matrix{real:vec![0.;STATES*STATES],imag:vec![0.;STATES*STATES]};
+        let or_zero=|m:&Value|if m.is_null(){Matrix{real:vec![0.;STATES*STATES],imag:vec![0.;STATES*STATES]}}else{matrix(m)};
         let beams=v["beams"].as_array().unwrap().iter().map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
-            direction:[d[0],d[1],d[2]],wave_number_per_um:float(&b["waveNumberPerUm"]),waist_um:None,intensity_mw_cm2:float(&b["intensityMWcm2"]),
-            frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),counter_coupling:zero.clone()}}).collect();
+            direction:[d[0],d[1],d[2]],wave_number_per_um:float(&b["waveNumberPerUm"]),waist_um:b["waistUm"].as_f64(),intensity_mw_cm2:float(&b["intensityMWcm2"]),
+            frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),
+            counter_coupling:or_zero(&b["counterCoupling"]),outside_shift:or_zero(&b["outsideShift"])}}).collect();
         let e=&v["emission"];
+        let frames=if v["frameFrequenciesMHz"].is_null(){vec![0.;STATES]}else{floats(&v["frameFrequenciesMHz"])};
         Request{states:v["states"].as_array().unwrap().iter().map(|s|s.as_str().unwrap().into()).collect(),hamiltonian:matrix(&v["hamiltonian"]),
-            frame_frequencies_mhz:vec![0.;STATES],frequencies_mhz:floats(&v["frequenciesMHz"]),beams,
+            frame_frequencies_mhz:frames,frequencies_mhz:floats(&v["frequenciesMHz"]),beams,
             emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],field_vector_g:[0.;3],mass_kg:float(&v["massKg"]),
             initial_density:vec![Complex::ZERO;STATES*STATES],temperature_uk:30.,times_us:vec![],tolerance:5e-3}
     }
@@ -424,7 +576,7 @@ mod tests{
     fn plane_waves_of_one_wave_number_have_the_operators_of_gme(){
         let f=fixture();let r=&f["reference"];let k=float(&r["kref"]);
         let mut pgc=request(&f["request"]);for beam in &mut pgc.beams{beam.wave_number_per_um=k;}
-        let g=Ground::new(&pgc).unwrap();let e=g.eliminate(&pgc.hamiltonian).unwrap();
+        let g=Ground::new(&pgc).unwrap();let e=g.eliminate(&g.hamiltonian).unwrap();
         let(ng,ne)=(g.ground_states.len(),g.excited_states.len());
         // The beam of a reference carrier and direction.
         let beam=|c:usize,s:i64|*g.carriers[c].beams.iter().find(|&&l|g.beams[l].direction[2] as i64==s).unwrap();
@@ -481,7 +633,7 @@ mod tests{
     #[test]
     fn the_jumps_carry_the_whole_scattering(){
         for seed in 1..=4{
-            let r=perturbed(seed);let g=Ground::new(&r).unwrap();let e=g.eliminate(&r.hamiltonian).unwrap();
+            let r=perturbed(seed);let g=Ground::new(&r).unwrap();let e=g.eliminate(&g.hamiltonian).unwrap();
             for x in positions(seed){
                 let local=g.local(&e,x);let mut sum=Dense::zeros(g.ground_states.len(),g.ground_states.len());
                 for l in &local.jumps{sum.add_scaled(Complex::ONE,&l.adjoint_product(l));}
@@ -496,7 +648,7 @@ mod tests{
     #[test]
     fn the_scattering_is_the_decay_of_the_second_order_shift(){
         for seed in 1..=4{
-            let r=perturbed(seed);let g=Ground::new(&r).unwrap();let e=g.eliminate(&r.hamiltonian).unwrap();let n=g.ground_states.len();
+            let r=perturbed(seed);let g=Ground::new(&r).unwrap();let e=g.eliminate(&g.hamiltonian).unwrap();let n=g.ground_states.len();
             for x in positions(seed){
                 let(local,a)=(g.local(&e,x),g.amplitudes(x));let mut shift=Dense::zeros(n,n);
                 for c in &g.carriers{shift.add_scaled(Complex::ONE,&combine(&c.beams,&a,&g.couplings).adjoint_product(&combine(&c.beams,&a,&e.responses)));}
@@ -512,7 +664,7 @@ mod tests{
     #[test]
     fn the_populations_sum_to_one(){
         for seed in 1..=4{
-            let r=perturbed(seed);let g=Ground::new(&r).unwrap();let e=g.eliminate(&r.hamiltonian).unwrap();let n=g.ground_states.len();
+            let r=perturbed(seed);let g=Ground::new(&r).unwrap();let e=g.eliminate(&g.hamiltonian).unwrap();let n=g.ground_states.len();
             let mut next=uniform(seed);let a=Dense::from_fn(n,n,|i,j|if g.block[i]==g.block[j]{Complex::new(next(),next())}else{Complex::ZERO});
             let mut rho=a.product(&a.adjoint());let trace:f64=(0..n).map(|i|rho[(i,i)].re).sum();rho=rho.scaled(Complex::new(1./trace,0.));
             for x in positions(seed){
@@ -527,7 +679,7 @@ mod tests{
     /// at most (w/pole)² of R(w)_b. At w = 0 the exact response is R itself.
     #[test]
     fn the_first_order_response_leaves_a_second_order_remainder(){
-        let r=perturbed(1);let g=Ground::new(&r).unwrap();let e=g.eliminate(&r.hamiltonian).unwrap();let pole=g.secular(&e).unwrap().pole;
+        let r=perturbed(1);let g=Ground::new(&r).unwrap();let e=g.eliminate(&g.hamiltonian).unwrap();let pole=g.secular(&e).unwrap().pole;
         let norm=|m:&Dense,b:usize|(0..m.rows).map(|i|m[(i,b)].norm_sqr()).sum::<f64>().sqrt();
         for l in 0..g.beams.len(){
             assert_eq!(g.response(&e,l,0.).unwrap(),e.responses[l]);
@@ -540,6 +692,24 @@ mod tests{
                 }
             }
         }
+    }
+
+    /// The app example's tweezer alone (tests/fixtures/tweezer_focus.json): its co- and counter-rotating
+    /// components both fold, so it is no carrier, and at the focus its fold and outside shift give the
+    /// pipeline study's numbers: |2,+2⟩ 21.733 MHz deep, the D2 stretched resonance 24.04 MHz up, the
+    /// radial trap frequency 100.55 kHz.
+    #[test]
+    fn the_tweezer_folds_into_the_study_s_trap(){
+        let f:Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_focus.json")).unwrap();
+        let r=request(&f["request"]);let g=Ground::new(&r).unwrap();
+        assert!(g.components.iter().all(|c|c.folded)&&g.carriers.is_empty(),"{:?}",g.components);
+        let(focus,far)=(g.hamiltonian(0.),g.hamiltonian(1e6));
+        let state=|label:&str|r.states.iter().position(|s|s==label).unwrap();
+        let shift=|i:usize|(focus[(i,i)].re-far[(i,i)].re)/TAU;
+        let(depth,resonance)=(shift(state("ground-2-2")),shift(state("D2-3-3"))-shift(state("ground-2-2")));
+        let b=g.ground_states.iter().position(|&i|i==state("ground-2-2")).unwrap();
+        let trap=(g.curvature(b)*1.0545718176461565e-34/r.mass_kg*1e6).sqrt()/TAU*1e3;
+        assert!((depth+21.733).abs()<=1e-3&&(resonance-24.04).abs()<=1e-2&&(trap-100.55).abs()<=1e-2,"depth {depth} MHz, resonance {resonance} MHz, trap {trap} kHz");
     }
 
     /// The cooler moved to a Raman resonance with the repumper (both on F′ = 2: a Λ scheme) is refused,

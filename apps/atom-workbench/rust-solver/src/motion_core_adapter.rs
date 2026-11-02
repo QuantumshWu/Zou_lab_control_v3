@@ -56,7 +56,7 @@ pub struct MotionModel{
 #[derive(Clone,Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 struct MotionBeam{
-    id:String,name:String,direction:[f64;3],wave_number_per_um:f64,#[serde(default)] waist_um:Option<f64>,
+    id:String,name:String,direction:[f64;3],wave_number_per_um:f64,#[serde(default)] waist_um:Option<f64>,outside_shift:Operator,
     #[serde(rename="intensityMWcm2")]
     intensity_mw_cm2:f64,frequency_index:Vec<i32>,coupling:Operator,counter_coupling:Operator,
 }
@@ -81,7 +81,8 @@ fn request(model:&Model,motion:&MotionModel,options:&Options)->Result<Request,St
             ||!(finite(b.intensity_mw_cm2)&&b.intensity_mw_cm2>=0.)||b.frequency_index.len()!=frequencies.len(){
             return Err(format!("Beam {} needs a finite direction, a positive wave number, a positive waist if focused, a nonnegative intensity and an index on the {} frequency axes",b.id,frequencies.len()));}
         Ok(Beam{id:b.id.clone(),name:b.name.clone(),direction:b.direction,wave_number_per_um:b.wave_number_per_um,waist_um:b.waist_um,intensity_mw_cm2:b.intensity_mw_cm2,
-            frequency_index:b.frequency_index.clone(),coupling:matrix(&b.coupling,"A beam's coupling")?,counter_coupling:matrix(&b.counter_coupling,"A beam's counter-rotating coupling")?})
+            frequency_index:b.frequency_index.clone(),coupling:matrix(&b.coupling,"A beam's coupling")?,counter_coupling:matrix(&b.counter_coupling,"A beam's counter-rotating coupling")?,
+            outside_shift:matrix(&b.outside_shift,"A beam's outside shift")?})
     }).collect::<Result<Vec<_>,String>>()?;
     let [a,b,c]=motion.emission.as_slice()else{return Err("The motion block has three emission operators: two perpendicular to the axis, then the one along it".into())};
     let density=lattice_core_adapter::initial_density(model,&Lapack::load()?)?;

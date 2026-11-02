@@ -1,6 +1,6 @@
 import type {ComplexAmplitude,Scene,DynamicsSettings,Laser,Level,InitialStateSpec,MotionAxis,Vec3} from './types.js';
 import {resolveInitialState} from './types.js';
-import {staticModelBackground} from './spectroscopy.js';
+import {laserModelCorrection,staticModelBackground} from './spectroscopy.js';
 import {atomicSystem,composeMagneticField,drivingLasers,laserIntensityMWcm2,laserCarrierOffsetMHz,laserFrequencyMHz,captureLaserFrequencyAnchor,RB87,sinCosDegrees,accurateSum} from './physics.js';
 import {directionVector,invert,rotate,type Frame} from './direction.js';
 import {MOTION_FRAME,radialAxes,type MotionRequest} from './motion.js';
@@ -41,7 +41,10 @@ interface MasterDrive {omega:number;cos:MasterMatrix;sin:MasterMatrix;laserIds:s
  *   beam's peak; `frequencyIndex`, ν − ν_frame = Σ_k index_k frequencyCoordinates.frequenciesMHz_k;
  *   `coupling` X and `counterCoupling` R, the co- and counter-rotating excited ← ground couplings
  *   at the atom (rad/us): with a(x) the beam's amplitude at x on the axis relative to the atom's,
- *   the beam drives a(x) X e^{−i 2π (ν − ν_frame) t} + a(x)* R e^{+i 2π (ν + ν_frame) t} + h.c.
+ *   the beam drives a(x) X e^{−i 2π (ν − ν_frame) t} + a(x)* R e^{+i 2π (ν + ν_frame) t} + h.c.;
+ *   `outsideShift`, its static shift through the states outside the model and the Rb⁺ core at the
+ *   atom (rad/us, Hermitian, in the model basis): its share of `hamiltonian`, which scales with
+ *   |a(x)|² along the axis.
  * - `emission`: the lowering dipole operator's Cartesian components (1/sqrt(us)) on the motion
  *   frame's axes: Σ_a D[C_a] is the model's spontaneous emission, and the photon of C_a has the
  *   angular pattern of a dipole along a, so its recoil along the axis follows from that pattern.
@@ -53,6 +56,7 @@ export interface MotionModel {
 }
 export interface MotionModelBeam {
   id:string;name:string;direction:Vec3;waveNumberPerUm:number;waistUm?:number;intensityMWcm2:number;frequencyIndex:number[];coupling:MasterMatrix;counterCoupling:MasterMatrix;
+  outsideShift:MasterMatrix;
 }
 const N=32,TAU=2*Math.PI,HBAR=1.0545718176461565e-34,H_PLANCK=6.62607015e-34,EPS=8.8541878128e-12,C=299792458,zeros=()=>Array(N*N).fill(0),matrix=():MasterMatrix=>({real:zeros(),imag:zeros()});
 /** h * 1 MHz / k_B, in kelvin. */
@@ -124,6 +128,7 @@ function laserPhaseCoordinates(lasers:readonly Laser[]):{frequenciesMHz:number[]
  return {frequenciesMHz,laserIndices};
 }
 /** U† A U, with columns U being the model eigenstates in the bare-B basis. */
+const scaled=(a:MasterMatrix,factor:number):MasterMatrix=>({real:a.real.map(x=>x*factor),imag:a.imag.map(x=>x*factor)});
 function transformOperator(a:MasterMatrix,u:MasterMatrix):MasterMatrix {
  const tmp=matrix(),out=matrix();
  for(let i=0;i<N;i++)for(let k=0;k<N;k++){const ar=a.real[i*N+k]!,ai=a.imag[i*N+k]!;if(ar===0&&ai===0)continue;for(let j=0;j<N;j++){const br=u.real[k*N+j]!,bi=u.imag[k*N+j]!;tmp.real[i*N+j]+=ar*br-ai*bi;tmp.imag[i*N+j]+=ar*bi+ai*br;}}
@@ -265,7 +270,8 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  ...(motion?{motion:{axis:motion.axis,temperatureUK:motion.temperatureUK,massKg:RB87.massKg,fieldVectorG:a.fieldVector,hamiltonian:staticHamiltonian,frameFrequenciesMHz,
   beams:couplings.map(({laser,beat,A,R})=>{const k=directionVector(scene.fields,laser.direction);return {id:laser.id,name:laser.name,
    direction:MOTION_FRAME[motion.axis].map(n=>n[0]*k[0]+n[1]*k[1]+n[2]*k[2]) as Vec3,waveNumberPerUm:TAU*laserFrequencyMHz(laser)/C,
-   ...(laser.intensityMode==='intensity'?{}:{waistUm:laserWaistUm(laser)}),intensityMWcm2:laserIntensityMWcm2(laser),frequencyIndex:beat,coupling:A,counterCoupling:R};}),
+   ...(laser.intensityMode==='intensity'?{}:{waistUm:laserWaistUm(laser)}),intensityMWcm2:laserIntensityMWcm2(laser),frequencyIndex:beat,coupling:A,counterCoupling:R,
+   outsideShift:scaled(transformOperator(laserModelCorrection(scene,laser),u),TAU)};}),
   emission:MOTION_FRAME[motion.axis].map(n=>cartesianEmission(n,composeMagneticField(scene.fields).frame,spherical)) as MotionModel['emission']} satisfies MotionModel}:{}),
  assumptions:[
   `每束开启且强度非零的激光（${lasers.length} 束）都是 32 态主方程中的显式光学驱动：保留 D1、D2 全部允许电偶极耦合，旋转项与反旋转项都保留（不作 RWA），不按近/远失谐区分。`,

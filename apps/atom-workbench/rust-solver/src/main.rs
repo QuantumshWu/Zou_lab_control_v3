@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(solve(&model, trajectory.clone()), atom_motion_core::NO_TRAP);
         let zero = json!({"real":vec![0.;1024],"imag":vec![0.;1024]});
         model["motion"]["beams"] = json!([{"id":"tweezer","name":"光镊","direction":[0.,1.,0.],"waveNumberPerUm":7.37,"waistUm":1.2,"intensityMWcm2":1.77e8,
-            "frequencyIndex":[0],"coupling":zero,"counterCoupling":zero}]);
+            "frequencyIndex":[0],"coupling":zero,"counterCoupling":zero,"outsideShift":zero}]);
         assert_eq!(solve(&model, trajectory), atom_motion_core::NOT_IMPLEMENTED);
     }
 }
