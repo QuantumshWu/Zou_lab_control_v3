@@ -54,6 +54,7 @@
 use crate::{Model,Options,harmonics};
 use serde_json::{json,Value};
 use std::collections::BTreeMap;
+use std::sync::{Arc,Mutex};
 use std::time::Instant;
 use atom_population_core::{Complex64,Lapack};
 use atom_population_core::preparation::{ModelView,MatrixView,DriveView,PhaseBasis,FrequencyParts};
@@ -156,9 +157,39 @@ fn prepare(model:&Model,ground:&[bool])->Result<(LatticePrepared,harmonics::Phas
     Ok((lattice,axes))
 }
 
+/// The bytes of everything the preparation reads from a model (every number
+/// by its bits, so a signed zero or one ULP counts): the key of the last
+/// prepared model. The initial state and the options are no part of it.
+fn model_key(model:&Model)->Vec<u8>{
+    fn numbers(key:&mut Vec<u8>,v:&[f64]){key.extend((v.len()as u64).to_le_bytes());for x in v{key.extend(x.to_bits().to_le_bytes());}}
+    fn integers(key:&mut Vec<u8>,v:&[i32]){key.extend((v.len()as u64).to_le_bytes());for x in v{key.extend(x.to_le_bytes());}}
+    let mut key=Vec::new();key.extend((model.dimension as u64).to_le_bytes());
+    for state in &model.states{key.extend((state.len()as u64).to_le_bytes());key.extend(state.as_bytes());}
+    numbers(&mut key,&model.h_real);numbers(&mut key,&model.h_imag);
+    for c in &model.collapse{numbers(&mut key,&c.real);numbers(&mut key,&c.imag);}
+    for d in &model.drives{numbers(&mut key,&[d.omega]);for m in[&d.cos,&d.sin]{numbers(&mut key,&m.real);numbers(&mut key,&m.imag);}}
+    match &model.frequency_coordinates{None=>key.push(0),Some(f)=>{key.push(1);numbers(&mut key,&f.frequencies);
+        match &f.frequencies_mhz{None=>key.push(0),Some(v)=>{key.push(1);numbers(&mut key,v);}}
+        for v in f.drive_indices.iter().chain(&f.frame_indices){integers(&mut key,v);}integers(&mut key,&f.frame_sectors);}}
+    key
+}
+/// The last prepared model (the worker serves its requests one after the
+/// other): a request on the same model (another initial state, grid or
+/// horizon) reuses its preparation and the eigenbasis built on it.
+type Compiled=(Vec<u8>,Arc<(LatticePrepared,harmonics::PhaseAxes)>);
+static LAST_MODEL:Mutex<Option<Compiled>>=Mutex::new(None);
+fn prepared_model(model:&Model,ground:&[bool],cache:&Mutex<Option<Compiled>>)->Result<(Arc<(LatticePrepared,harmonics::PhaseAxes)>,bool),String>{
+    let key=model_key(model);
+    let mut last=cache.lock().map_err(|_|"The prepared model's lock was poisoned".to_string())?;
+    if let Some((k,p))=last.as_ref(){if *k==key{return Ok((Arc::clone(p),true));}}
+    let prepared=Arc::new(prepare(model,ground)?);
+    *last=Some((key,Arc::clone(&prepared)));
+    Ok((prepared,false))
+}
+
 /// One request's lattice preparation, shared by its mean and its trajectory.
 struct Prepared{
-    lattice:LatticePrepared,axes:harmonics::PhaseAxes,
+    model:Arc<(LatticePrepared,harmonics::PhaseAxes)>,cache_hit:bool,
     /// Requested groups (indices and names).
     groups:Vec<Vec<usize>>,names:Vec<String>,
     /// rho0 (row-major) and its populations.
@@ -169,17 +200,22 @@ struct Prepared{
     /// and mean), else 1.
     runs:usize,
 }
-fn prepare_request(model:&Model,options:&Options)->Result<Prepared,String>{
+fn prepare_request(model:&Model,options:&Options)->Result<Prepared,String>{prepare_request_in(model,options,&LAST_MODEL)}
+fn prepare_request_in(model:&Model,options:&Options,cache:&Mutex<Option<Compiled>>)->Result<Prepared,String>{
     if options.population_tolerance!=POPULATION_TOLERANCE{
         return Err(format!("populationTolerance is fixed at {POPULATION_TOLERANCE} (requested {})",options.population_tolerance));}
     if !STANDARD_HORIZONS.contains(&options.mean_horizon_us){return Err("meanHorizonUs must be 1e5 or 1e6 us (100 ms or 1 s)".into());}
     if model.dimension!=32||model.states.len()!=32{return Err("rb87-full/2 requires the complete 32-state Rb87 model".into());}
     let(ground,requested)=groups(model)?;
-    let(lattice,axes)=prepare(model,&ground)?;
+    let(model_prepared,cache_hit)=prepared_model(model,&ground,cache)?;
     let n=32;
-    let density=initial_density(model,&lattice.lapack)?;
+    let density=initial_density(model,&model_prepared.0.lapack)?;
     let initial=(0..n).map(|i|density[i*n+i].re).collect();
-    Ok(Prepared{lattice,axes,groups:requested.iter().map(|g|g.indices.clone()).collect(),names:requested.iter().map(|g|g.name.clone()).collect(),density,initial,explicit:std::sync::OnceLock::new(),runs:if options.mean_only||!options.include_mean{1}else{2}})
+    Ok(Prepared{model:model_prepared,cache_hit,groups:requested.iter().map(|g|g.indices.clone()).collect(),names:requested.iter().map(|g|g.name.clone()).collect(),density,initial,explicit:std::sync::OnceLock::new(),runs:if options.mean_only||!options.include_mean{1}else{2}})
+}
+impl Prepared{
+    fn lattice(&self)->&LatticePrepared{&self.model.0}
+    fn axes(&self)->&harmonics::PhaseAxes{&self.model.1}
 }
 
 /// Laboratory time average of a lattice field (row-major density): the
@@ -249,11 +285,11 @@ fn lattice_json(prepared:&LatticePrepared,run:Option<&Solution>)->Value{
 /// The mean of a request alone: one joint run for the standard horizons
 /// (100 ms and 1 s); `observer` sees every checkpoint.
 fn mean_run(request:&Prepared,observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
-    pipeline::solve(&request.lattice,&request.density,&Request{times:&[],horizons:&STANDARD_HORIZONS,groups:&request.groups,explicit:&request.explicit,runs:request.runs},Some(observer))
+    pipeline::solve(request.lattice(),&request.density,&Request{times:&[],horizons:&STANDARD_HORIZONS,groups:&request.groups,explicit:&request.explicit,runs:request.runs},Some(observer))
 }
 /// The trajectory of a request alone on its grid.
 fn trajectory_run(request:&Prepared,times:&[f64],observer:&mut dyn FnMut(&Checkpoint,&Answer))->Result<Solution,String>{
-    pipeline::solve(&request.lattice,&request.density,&Request{times,horizons:&[],groups:&request.groups,explicit:&request.explicit,runs:request.runs},Some(observer))
+    pipeline::solve(request.lattice(),&request.density,&Request{times,horizons:&[],groups:&request.groups,explicit:&request.explicit,runs:request.runs},Some(observer))
 }
 
 /// The standard horizons (us) every mean run returns, the only ones a
@@ -291,7 +327,7 @@ fn failed(horizon:f64,reason:&str)->Value{
         "populations":null,"densityReal":null,"densityImag":null})
 }
 fn mean_at(model:&Model,request:&Prepared,answer:&Answer,horizon:f64)->Result<Mean,String>{
-    let(prepared,axes)=(&request.lattice,&request.axes);let n=32;
+    let(prepared,axes)=(request.lattice(),request.axes());let n=32;
     let index=STANDARD_HORIZONS.iter().position(|&h|h==horizon).ok_or("A mean horizon outside the run")?;
     let(field,error)=(&answer.horizon_fields[index],answer.horizon_errors[index]);
     let(raw,discarded)=lab_density(field,&answer.modes,axes);
@@ -342,14 +378,14 @@ type MeanRun<'a>=Result<(&'a Answer,Option<&'a Solution>),String>;
 /// asked for; `solutions` (the final result) add the runs' diagnostics, their
 /// absence marks a streamed checkpoint (`progress`).
 fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&Answer,Option<&Solution>)>,mean:Option<MeanRun<'_>>,last:bool,started:Instant)->Result<Value,String>{
-    let prepared=&request.lattice;
+    let prepared=request.lattice();
     let rows=match trajectory{Some((answer,_))=>answer.trajectory.clone(),None=>vec![request.initial.clone()]};
     let(row_trace,initial_error)=row_errors(&rows,&request.initial)?;
     let times:Vec<f64>=if trajectory.is_some(){grid(options)}else{vec![0.]};
     let solves=trajectory.map(|t|t.0.solves).or_else(||mean.as_ref().and_then(|m|m.as_ref().ok().map(|m|m.0.solves))).unwrap_or(0);
     let mut result=json!({"states":model.states,"timesUs":times,"populations":rows,
         "diagnostics":{"engine":ENGINE,"traceError":row_trace,"initialStateError":initial_error,
-            "elapsedMs":started.elapsed().as_secs_f64()*1000.,"carrierSourceToBasis":request.axes.source_to_basis,"solves":solves,
+            "elapsedMs":started.elapsed().as_secs_f64()*1000.,"carrierSourceToBasis":request.axes().source_to_basis,"solves":solves,"modelPreparationCached":request.cache_hit,
             "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2],"floquetKernels":prepared.timing[3]}}});
     if let Some((answer,solution))=trajectory{
         let estimated=answer.sample_errors.iter().fold(0_f64,|a,&b|a.max(b));
@@ -517,6 +553,26 @@ mod tests{
         assert!(alone.get("meanHorizons").is_none()&&alone["diagnostics"].get("meanLattice").is_none());
         assert_eq!(alone["populationAccuracy"]["status"],json!("estimated-converged"));
     }
+    /// A request on the last prepared model (another initial state) reuses its
+    /// preparation, not its explicit set; one ULP of the model is another
+    /// model; the initial state is no part of the key.
+    #[test]
+    fn a_request_on_the_same_model_reuses_its_preparation(){
+        let fixture:Value=serde_json::from_str(include_str!("../tests/fixtures/probe_only_short.json")).unwrap();
+        let model:Model=serde_json::from_value(fixture["model"].clone()).unwrap();
+        let options:Options=serde_json::from_value(fixture["options"].clone()).unwrap();
+        let cache=Mutex::new(None);
+        let first=prepare_request_in(&model,&options,&cache).unwrap();assert!(!first.cache_hit);
+        let mut other=model.clone();other.initial_index=0;other.initial_real=None;other.initial_imag=None;
+        assert!(model_key(&other)==model_key(&model));
+        let second=prepare_request_in(&other,&options,&cache).unwrap();
+        assert!(second.cache_hit&&Arc::ptr_eq(&first.model,&second.model)&&second.explicit.get().is_none());
+        assert!(first.initial!=second.initial);
+        let mut changed=model.clone();changed.h_real[0]=changed.h_real[0].next_up();
+        let third=prepare_request_in(&changed,&options,&cache).unwrap();assert!(!third.cache_hit&&!Arc::ptr_eq(&first.model,&third.model));
+        let mut sign=model.clone();let k=sign.h_imag.iter().position(|&x|x==0.).unwrap();sign.h_imag[k]=-sign.h_imag[k];
+        assert!(model_key(&sign)!=model_key(&model),"a signed zero is another model");
+    }
     /// The `meanHorizons` entry of a result at a horizon (us).
     fn entry<'v>(out:&'v Value,horizon:&Value)->&'v Value{
         out["meanHorizons"].as_array().unwrap().iter().find(|e|&e["horizonUs"]==horizon).unwrap()
@@ -560,7 +616,7 @@ mod tests{
         assert!(!times.is_empty()||!horizons.is_empty(),"ATOM_VALIDATE_GRID or ATOM_VALIDATE_HORIZONS: a request has a trajectory or a horizon");
         let started=Instant::now();
         let options=Options::default();let prepared=prepare_request(&model,&options).unwrap();let prepare_ms=started.elapsed().as_secs_f64()*1e3;
-        println!("{}",json!({"preparation":lattice_json(&prepared.lattice,None)}));
+        println!("{}",json!({"preparation":lattice_json(prepared.lattice(),None)}));
         let rows=|v:&Value|->Option<Vec<Vec<f64>>>{v.as_array().map(|a|a.iter().map(|r|r.as_array().unwrap().iter().map(|x|x.as_f64().unwrap()).collect()).collect())};
         let reference_pops=rows(&reference["pops"]).filter(|p|p.len()==times.len());
         let reference_horizons:Vec<Option<Vec<f64>>>=horizons.iter().map(|t|{let key=format!("{:.1}",t);
@@ -604,13 +660,13 @@ mod tests{
             let mut line=line;if let(Value::Object(a),Value::Object(b))=(&mut line,work){a.extend(b);}
             println!("{line}");
         };
-        let result=pipeline::solve(&prepared.lattice,&prepared.density,&Request{times:&times,horizons:&horizons,groups:&prepared.groups,explicit:&std::sync::OnceLock::new(),runs:1},Some(&mut observe));
+        let result=pipeline::solve(prepared.lattice(),&prepared.density,&Request{times:&times,horizons:&horizons,groups:&prepared.groups,explicit:&std::sync::OnceLock::new(),runs:1},Some(&mut observe));
         let total_ms=started.elapsed().as_secs_f64()*1e3;
         match result{
             Ok(s)=>{let a=&s.answer;
                 let returned:Option<Vec<f64>>=reference_pops.as_ref().map(|r|a.trajectory.iter().zip(r).map(|(x,y)|accuracy::metric(x,y,&groups)).collect());
                 let coverage=returned.as_ref().map(|e|ratios(&a.sample_errors,e));
-                println!("{}",json!({"summary":true,"prepareMs":prepare_ms,"totalMs":total_ms,"lattice":lattice_json(&prepared.lattice,Some(&s))["run"],
+                println!("{}",json!({"summary":true,"prepareMs":prepare_ms,"totalMs":total_ms,"lattice":lattice_json(prepared.lattice(),Some(&s))["run"],
                     "converged":s.converged,"reason":s.reason,"solves":a.solves,"bound":a.largest(),
                     "perTimeMin":coverage.map(|c|c.0),"perTimeViolations":coverage.map(|c|c.1),"perTimeMinAll":coverage.map(|c|c.2),
                     "slowestRate":a.slowest.map(|x|x.rate),"slowestResidual":a.slowest.map(|x|x.residual),"slowestResolved":a.slowest.map(|x|x.resolved())}))},

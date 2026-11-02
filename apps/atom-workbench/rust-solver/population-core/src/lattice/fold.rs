@@ -514,19 +514,21 @@ impl FoldLibrary{
     /// p meets the same relative far charges w, so ring k is solved per w on
     /// the blocks of a group of FAR_GROUP source modes at once (the series'
     /// GEMMs over the blocks, each block its own G at nu_p + nu_w), the
-    /// groups spread over the workers. The rings stop when what the next one
-    /// and its descendants can land, c gamma |b|_1 / (1 - rho) in trace norm
-    /// (c the steps' summed trace-norm bounds, gamma = 1 / (|nu_r| - lambda0)
-    /// the block inverse's, rho = c gamma_max over the far modes met,
-    /// |b|_1 <= sqrt(n) |b|_F), is within `tolerance` (N_1, summed over the
-    /// blocks); a block whose own bound is below FAR_PRUNE x tolerance per
-    /// block of its ring is left out. Landings on near charges outside the
-    /// lattice are left out (the lattice's own truncation).
-    /// Returns per ring the landing on every mode.
+    /// groups spread over the workers. What a far block b and its descendants
+    /// can land is c gamma |b|_1 / (1 - rho) in trace norm (c the steps'
+    /// summed trace-norm bounds, gamma = 1 / (|nu_r| - lambda0) the block
+    /// inverse's, rho = c gamma_max over the far modes met, |b|_1 <= sqrt(n)
+    /// |b|_F), times its source's weight; the sum over every block left out
+    /// stays within `tolerance` (each group its sources' share): the rings
+    /// stop when the next one's sum is within what is left, and before that
+    /// the next ring's smallest blocks are left out while their sum stays
+    /// within half of it. Landings on near charges outside the lattice are
+    /// left out (the lattice's own truncation). Returns per ring the landing
+    /// on every mode (field blocks weigh one).
     #[allow(clippy::too_many_arguments)]
     pub fn far_shell(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],x:&[C],tolerance:f64)->Result<FarShell,String>{
         let clock=Instant::now();let d=generator.n*generator.n;let count=modes.len();
-        let sources:Vec<(usize,&[C])>=(0..count).map(|p|(p,&x[p*d..(p+1)*d])).filter(|(_,b)|b.iter().any(|z|nonzero(*z))).collect();
+        let sources:Vec<(usize,&[C],f64)>=(0..count).map(|p|(p,&x[p*d..(p+1)*d],1.)).filter(|(_,b,_)|b.iter().any(|z|nonzero(*z))).collect();
         let(rings,contraction,terms)=self.far_shell_sources(generator,plan,nu_of,modes,&sources,tolerance)?;
         let mut shell=FarShell{contraction,terms,..FarShell::default()};
         for ring in rings{let mut landing=vec![ZERO;count*d];
@@ -536,10 +538,11 @@ impl FoldLibrary{
         Ok(shell)
     }
     /// The far shell of separate source blocks (`far_shell`): each source a
-    /// block on a lattice mode, landed apart; per ring the landings keyed by
-    /// (source, mode), the largest contraction met and the series' terms.
+    /// block on a lattice mode with its weight, landed apart; per ring the
+    /// landings keyed by (source, mode), the largest contraction met and the
+    /// series' terms.
     #[allow(clippy::too_many_arguments)]
-    pub fn far_shell_sources(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],sources:&[(usize,&[C])],tolerance:f64)->Result<(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize),String>{
+    pub fn far_shell_sources(&self,generator:&Generator,plan:&HarmonicPlan,nu_of:&(dyn Fn(&[i32])->Result<f64,String>+Sync),modes:&[Charge],sources:&[(usize,&[C],f64)],tolerance:f64)->Result<(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize),String>{
         let n=generator.n;let d=n*n;
         let index:BTreeMap<&[i32],usize>=modes.iter().enumerate().map(|(i,q)|(q.as_slice(),i)).collect();
         let nu_modes:Vec<f64>=modes.iter().map(|q|nu_of(q)).collect::<Result<_,_>>()?;
@@ -549,6 +552,7 @@ impl FoldLibrary{
         let trace_bound=|v:&[C]|(n as f64).sqrt()*v.iter().map(|z|squared(*z)).sum::<f64>().sqrt();
         // The sources in groups; each group's far shell on its own.
         let groups:Vec<Vec<usize>>=(0..sources.len()).collect::<Vec<_>>().chunks(FAR_GROUP).map(|g|g.to_vec()).collect();
+        let weight:f64=sources.iter().map(|s|s.2).sum();
         type Ring=BTreeMap<Charge,(f64,BTreeMap<usize,Vec<C>>)>;
         type Group=(Vec<BTreeMap<(usize,usize),Vec<C>>>,f64,usize);
         let execution=Execution::new()?;
@@ -557,10 +561,12 @@ impl FoldLibrary{
             let(mut small,mut stack)=(Vec::new(),Vec::new());
             // The first ring's sources: every step from the group's blocks to a far charge.
             let mut ring:Ring=BTreeMap::new();
-            for &(c,nu,op)in &steps{for &s in &group{let(p,x)=sources[s];
+            for &(c,nu,op)in &steps{for &s in &group{let(p,x,_)=sources[s];
                 let r=charge_plus(&modes[p],c)?;if index.contains_key(r.as_slice())||(nu_modes[p]+nu).abs()<plan.cut{continue;}
                 let entry=ring.entry(c.clone()).or_insert_with(||(nu,BTreeMap::new()));
                 op.apply_into(n,ONE,x,entry.1.entry(s).or_insert_with(||vec![ZERO;d]),&mut small);}}
+            // The group's share of the tolerance, and what is left of it.
+            let mut left=if weight>0.{tolerance*group.iter().map(|&s|sources[s].2).sum::<f64>()/weight}else{0.};
             let mut gamma_far=0_f64;
             for _ in 0..FAR_RINGS{
                 if ring.is_empty(){break;}
@@ -591,13 +597,15 @@ impl FoldLibrary{
                 let mut potentials:Vec<(Charge,usize,f64)>=Vec::new();
                 for(w,(nu,blocks))in &next{for(&s,b)in blocks{
                     let room=(nu_modes[sources[s].0]+nu).abs()-lambda0;let gamma=if room>0.{1./room}else{f64::INFINITY};
-                    gamma_far=gamma_far.max(gamma);potentials.push((w.clone(),s,gamma*trace_bound(b)));}}
+                    gamma_far=gamma_far.max(gamma);potentials.push((w.clone(),s,sources[s].2*gamma*trace_bound(b)));}}
                 let rho=c_all*gamma_far;contraction=contraction.max(rho);
                 let scale=if rho<1.{c_all/(1.-rho)}else{f64::INFINITY};
                 let total:f64=potentials.iter().map(|x|scale*x.2).sum();
-                if total<=tolerance{break;}
-                let floor=FAR_PRUNE*tolerance/(potentials.len()as f64);
-                for(w,s,v)in &potentials{if scale*v<=floor{if let Some(e)=next.get_mut(w){e.1.remove(s);}}}
+                if total<=left{break;}
+                // The smallest blocks left out within half of what is left.
+                potentials.sort_by(|a,b|a.2.total_cmp(&b.2));let mut pruned=0.;
+                for(w,s,v)in &potentials{if pruned+scale*v>0.5*left{break;}pruned+=scale*v;if let Some(e)=next.get_mut(w){e.1.remove(s);}}
+                left-=pruned;
                 next.retain(|_,v|!v.1.is_empty());
                 ring=next;
             }
@@ -698,10 +706,7 @@ impl FoldLibrary{
         Ok(assembled)
     }
 }
-/// The far shell's rings stop when the next one can land within the
-/// caller's tolerance; a far mode whose bound is below FAR_PRUNE of it per
-/// mode of its ring is left out; at most FAR_RINGS rings.
-const FAR_PRUNE:f64=1e-2;
+/// At most FAR_RINGS rings of the far shell (`FoldLibrary::far_shell`).
 /// Source modes per group of the far shell's action: the blocks one series
 /// solves at once (GEMMs over them), a group's rings held in memory at a
 /// time; the groups spread over the workers.
@@ -742,6 +747,8 @@ impl<'e> Duhamel<'e>{
     }
     /// The source blocks: the eigenvectors E_j of x0's significant components.
     pub fn sources(&self)->std::slice::ChunksExact<'_,C>{self.blocks.chunks_exact(self.eigen.dimension())}
+    /// The sources' weights |c_j|.
+    pub fn weights(&self)->impl Iterator<Item=f64>+'_{self.c.iter().map(|z|magnitude(*z))}
     pub fn count(&self)->usize{self.columns.len()}
     /// The response of a piece on a target mode of frequency nu (a mirror
     /// pair's `weight` 2): `images` holds D E_j on the target block for every

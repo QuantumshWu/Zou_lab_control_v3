@@ -63,8 +63,10 @@ const NOISE:f64=100.;
 /// A basis vector whose part outside the basis is below this fraction of
 /// its norm is dependent.
 const APPEND_FLOOR:f64=1e-11;
-/// Ladder points per decade: a deliberate choice (the reference runs used
-/// two to three).
+/// Ladder points per decade. Measured against one: one per decade took
+/// 22-29 solves instead of 40 on three, four and five lasers at 20 us but
+/// stalled or ended at the tolerance's edge (four lasers 3.1e-3 against
+/// 7.7e-4; five without the trap, 1000 samples and 10 us / 2000 partial).
 const PER_DECADE:f64=2.;
 
 #[derive(Clone,Debug)]
