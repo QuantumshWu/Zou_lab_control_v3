@@ -26,7 +26,7 @@ fn to_f32(v:&[Complex])->Vec<[f32;2]>{v.iter().map(|z|[z.re as f32,z.im as f32])
 fn gpu_devices_and_the_probe_kernel(){
     println!("driver CUDA {}",driver::driver_version().unwrap());
     for d in driver::devices().unwrap(){println!("{d:?}");}
-    let mut gpu=Gpu::new().unwrap();
+    let gpu=Gpu::new().unwrap();
     let f=gpu.function("probe_scale").unwrap();
     let input:Vec<f32>=(0..1000).map(|i|i as f32).collect();
     let(a,b)=(Buffer::new(4000).unwrap(),Buffer::new(4000).unwrap());
@@ -41,7 +41,7 @@ fn gpu_devices_and_the_probe_kernel(){
 /// last two components: against the exact transform, to single precision.
 #[test]
 fn gpu_kinetic_pass_matches_the_exact_spectral_product(){
-    let mut gpu=Gpu::new().unwrap();
+    let gpu=Gpu::new().unwrap();
     for(nx,ny)in [(16,16),(32,32),(64,64),(64,1),(128,1),(512,1)]{
         let f=gpu.function(&format!("kinetic_{nx}x{ny}")).unwrap();
         let shared=ny*(nx+1)*8;f.allow_shared(shared).unwrap();
@@ -69,5 +69,36 @@ fn gpu_kinetic_pass_matches_the_exact_spectral_product(){
         }
         println!("{nx}x{ny}: largest error {worst:.2e} of the largest value");
         assert!(worst<2e-6,"{nx}x{ny}: {worst:e}");
+    }
+}
+
+/// The large grids' two passes (rows, then a tile of columns): the same spectral product.
+#[test]
+fn gpu_large_grid_passes_match_the_exact_spectral_product(){
+    let gpu=Gpu::new().unwrap();
+    for n in [128usize,256]{
+        let rows=gpu.function(&format!("kinetic_rows_{n}")).unwrap();let cols=gpu.function(&format!("kinetic_cols_{n}")).unwrap();
+        let shared=n*9*8;cols.allow_shared(shared).unwrap();
+        let mut next=uniform(n as u64);
+        let components=[3i32];let scales=[1.5f32];let planes=5;let points=n*n;
+        let data:Vec<Complex>=(0..planes*points).map(|_|Complex::new(next(),next())).collect();
+        let phase=|next:&mut dyn FnMut()->f64|->Vec<Complex>{(0..n).map(|_|Complex::cis(20.*next())).collect()};
+        let(fx,fy)=(phase(&mut next),phase(&mut next));
+        let table=|f:&[Complex]|->Vec<[f32;2]>{(0..n).map(|j|{let z=f[bitrev(j,n)]*(1./n as f64);[z.re as f32,z.im as f32]}).collect()};
+        let state=Buffer::new(planes*points*8).unwrap();gpu.stream.upload(&state,&to_f32(&data)).unwrap();
+        let(cb,sb,xb,yb)=(Buffer::new(4).unwrap(),Buffer::new(4).unwrap(),Buffer::new(n*8).unwrap(),Buffer::new(n*8).unwrap());
+        gpu.stream.upload(&cb,&components).unwrap();gpu.stream.upload(&sb,&scales).unwrap();gpu.stream.upload(&xb,&table(&fx)).unwrap();gpu.stream.upload(&yb,&table(&fy)).unwrap();
+        gpu.stream.launch(&rows,((planes*n/8) as u32,1,1),256,0,&[&state.pointer,&cb.pointer,&sb.pointer,&xb.pointer]).unwrap();
+        gpu.stream.launch(&cols,((planes*n/8) as u32,1,1),256,shared,&[&state.pointer,&cb.pointer,&yb.pointer]).unwrap();
+        let mut out=vec![[0f32;2];planes*points];gpu.stream.download(&state,&mut out).unwrap();
+        let mut worst=0f64;
+        for p in 0..planes{
+            let plane=&data[p*points..(p+1)*points];
+            let expected:Vec<Complex>=if (p as i32)<components[0]{spectral(plane,n,n,&fx,&fy).iter().map(|&z|z*1.5).collect()}else{plane.to_vec()};
+            let scale=expected.iter().fold(0f64,|a,z|a.max(z.abs()));
+            for(z,o)in expected.iter().zip(&out[p*points..(p+1)*points]){worst=worst.max((Complex::new(o[0] as f64,o[1] as f64)-*z).abs()/scale);}
+        }
+        println!("{n}x{n}: largest error {worst:.2e} of the largest value");
+        assert!(worst<2e-6,"{n}x{n}: {worst:e}");
     }
 }

@@ -3,7 +3,7 @@ use atom_motion_gpu::driver::{Buffer,Event};
 use atom_motion_gpu::gpu::Gpu;
 
 fn main(){
-    let mut gpu=Gpu::new().unwrap();
+    let gpu=Gpu::new().unwrap();
     println!("{} ({} SMs, L2 {} MiB)",gpu.context.info.name,gpu.context.info.multiprocessors,gpu.context.info.l2_cache>>20);
     for(n,trajectories)in [(64usize,1000usize),(64,100),(32,1000),(32,400),(16,1000)]{
         let points=n*n;let planes=trajectories*5;let bytes=planes*points*8;

@@ -14,26 +14,93 @@
 //! forward by V(dt/2) -- so the timing error averages out to second order in dt. The channel
 //! (carrier and target block, or the absorbing boundary) is chosen by its rate, the photon's
 //! direction and polarization exactly from the dipole patterns (kernels `jump_*`).
-use crate::driver::{Buffer,Event,Function};
+use crate::driver::{Buffer,Event,Function,Stream};
 use crate::gpu::Gpu;
+use std::rc::Rc;
 use crate::model::{propagator,Grid,Model,Point};
 use atom_motion_core::linear::Dense;
 use atom_motion_core::Complex;
 
 pub const COMPONENTS:usize=5;
-pub const RECORD:usize=48;
+pub const RECORD:usize=52;
 pub const REC_GROUND:usize=0;
 pub const REC_EXCITED:usize=8;
 pub const REC_NORM:usize=32;
 pub const REC_X:usize=33;
 pub const REC_KX:usize=37;
 pub const REC_TAIL:usize=41;
+pub const REC_TAIL2:usize=45;
 const THREADS:usize=256;
 const SUB:usize=8;
 const CHOICE:usize=8;
 const G_SLOTS:usize=25;
-/// Grids the kernels are compiled for (nx, ny).
-pub const GRIDS:&[(usize,usize)]=&[(16,16),(32,32),(64,64),(64,1),(128,1),(256,1),(512,1),(1024,1)];
+/// Grids the kernels are compiled for (nx, ny): planes in shared memory, and the large ones
+/// (N x N, N >= 128) in two passes.
+pub const GRIDS:&[(usize,usize)]=&[(16,16),(32,32),(64,64),(64,1),(128,1),(256,1),(512,1),(1024,1),(128,128),(256,256)];
+const TILE:usize=8;
+
+/// The passes over the planes of one grid: in shared memory, one block per plane, or for a large
+/// grid as a rows pass and a columns pass.
+enum Planes{
+    Small{kinetic:Function,observe:Function,derive:Function,shared:usize,observe_shared:usize,threads:u32},
+    Big{n:usize,kinetic:[Function;2],observe:[Function;2],derive:[Function;2]},
+}
+impl Planes{
+    fn new(gpu:&Gpu,nx:usize,ny:usize)->Result<Planes,String>{
+        if nx==ny&&nx>=128{
+            let f=|gpu:&Gpu,s:&str|->Result<Function,String>{gpu.function(&format!("{s}_{nx}"))};
+            let shared=nx*(TILE+1)*8;
+            let out=Planes::Big{n:nx,kinetic:[f(gpu,"kinetic_rows")?,f(gpu,"kinetic_cols")?],observe:[f(gpu,"observe_rows")?,f(gpu,"observe_cols")?],
+                derive:[f(gpu,"derive_rows")?,f(gpu,"derive_cols")?]};
+            if let Planes::Big{kinetic,observe,derive,..}=&out{kinetic[1].allow_shared(shared)?;observe[1].allow_shared(shared)?;derive[1].allow_shared(shared)?;}
+            return Ok(out);
+        }
+        let name=|s:&str|format!("{s}_{nx}x{ny}");
+        let shared=ny*(nx+1)*8;let observe_shared=shared+(nx+ny+32)*4;
+        let kinetic=gpu.function(&name("kinetic"))?;kinetic.allow_shared(shared)?;
+        let observe=gpu.function(&name("observe_kinetic"))?;observe.allow_shared(observe_shared)?;
+        let derive=gpu.function(&name("derive"))?;derive.allow_shared(shared)?;
+        Ok(Planes::Small{kinetic,observe,derive,shared,observe_shared,threads:if ny==1{32}else{THREADS as u32}})
+    }
+    /// K on every plane of `b` trajectory slots, renormalizing by `scale`.
+    fn kinetic(&self,s:&Stream,state:&Buffer,components:&Buffer,scale:&Buffer,tables:&[Buffer;2],b:usize)->Result<(),String>{
+        match self{
+            Planes::Small{kinetic,shared,threads,..}=>s.launch(kinetic,((b*COMPONENTS) as u32,1,1),*threads,*shared,&[&state.pointer,&components.pointer,&scale.pointer,&tables[0].pointer,&tables[1].pointer]),
+            Planes::Big{n,kinetic,..}=>{
+                s.launch(&kinetic[0],((b*COMPONENTS*n/8) as u32,1,1),THREADS as u32,0,&[&state.pointer,&components.pointer,&scale.pointer,&tables[0].pointer])?;
+                s.launch(&kinetic[1],((b*COMPONENTS*n/TILE) as u32,1,1),THREADS as u32,n*(TILE+1)*8,&[&state.pointer,&components.pointer,&tables[1].pointer])
+            }
+        }
+    }
+    /// K with the momentum observables added to the records (and, non-null, the marginals).
+    #[allow(clippy::too_many_arguments)]
+    fn observe(&self,s:&Stream,state:&Buffer,components:&Buffer,scale:&Buffer,tables:&[Buffer;2],kappa:&[Buffer;2],tails:[f32;2],records:&Buffer,weights:&Buffer,marginals:[u64;2],b:usize)->Result<(),String>{
+        match self{
+            Planes::Small{observe,observe_shared,threads,..}=>s.launch(observe,((b*COMPONENTS) as u32,1,1),*threads,*observe_shared,&[&state.pointer,&components.pointer,&scale.pointer,
+                &tables[0].pointer,&tables[1].pointer,&kappa[0].pointer,&kappa[1].pointer,&tails[0],&tails[1],&records.pointer,&weights.pointer,&marginals[0],&marginals[1]]),
+            Planes::Big{n,observe,..}=>{
+                s.launch(&observe[0],((b*COMPONENTS*n/8) as u32,1,1),THREADS as u32,0,&[&state.pointer,&components.pointer,&scale.pointer,&tables[0].pointer,&kappa[0].pointer,&tails[0],&records.pointer,&weights.pointer,&marginals[0]])?;
+                s.launch(&observe[1],((b*COMPONENTS*n/TILE) as u32,1,1),THREADS as u32,n*(TILE+1)*8,&[&state.pointer,&components.pointer,&tables[1].pointer,&kappa[1].pointer,&tails[1],&records.pointer,&weights.pointer,&marginals[1]])
+            }
+        }
+    }
+    /// κ_x ψ into dx and κ_y ψ into dy for every trajectory (list None), or for the `count` listed
+    /// ones, at most `b`.
+    #[allow(clippy::too_many_arguments)]
+    fn derive(&self,s:&Stream,state:&Buffer,components:&Buffer,list:Option<(&Buffer,&Buffer)>,b:usize,dx:&Buffer,dy:&Buffer,tables:&[Buffer;2])->Result<(),String>{
+        let(l,c)=list.map_or((0u64,0u64),|(l,c)|(l.pointer,c.pointer));
+        match self{
+            Planes::Small{derive,shared,threads,..}=>{
+                let blocks=if list.is_some(){b.min(64)*COMPONENTS}else{b*COMPONENTS};
+                s.launch(derive,(blocks as u32,1,1),*threads,*shared,&[&state.pointer,&components.pointer,&l,&c,&(b as i32),&dx.pointer,&dy.pointer,&tables[0].pointer,&tables[1].pointer])
+            }
+            Planes::Big{n,derive,..}=>{
+                s.launch(&derive[0],((b*COMPONENTS*n/8) as u32,1,1),THREADS as u32,0,&[&state.pointer,&components.pointer,&l,&c,&dx.pointer,&tables[0].pointer])?;
+                s.launch(&derive[1],((b*COMPONENTS*n/TILE) as u32,1,1),THREADS as u32,n*(TILE+1)*8,&[&state.pointer,&components.pointer,&l,&c,&dy.pointer,&tables[1].pointer])
+            }
+        }
+    }
+}
 
 fn bitrev(j:usize,n:usize)->usize{let bits=n.trailing_zeros();if bits==0{0}else{j.reverse_bits()>>(usize::BITS-bits)}}
 
@@ -58,7 +125,7 @@ impl Local{
 
 /// The kernels' `Trajectories`, `Local` and `Jumps` structs as launch arguments.
 #[repr(C)]#[derive(Clone,Copy)]
-struct TrajectoriesArg{components:u64,scale:u64,log_norm:u64,threshold:u64,jumps:u64}
+struct TrajectoriesArg{ids:u64,components:u64,scale:u64,log_norm:u64,threshold:u64,jumps:u64}
 #[repr(C)]#[derive(Clone,Copy)]
 struct LocalArg{m5:u64,m3:u64}
 #[repr(C)]#[derive(Clone,Copy)]
@@ -79,20 +146,34 @@ pub struct Settings{
     pub doppler_every:usize,
     pub trajectories:usize,
     pub seed:u64,
-    /// The absorbing potential's rate (1/us) at each point.
-    pub cap:fn(&Grid,[f64;3])->f64,
+    /// The absorbing boundary, if any.
+    pub cap:Option<Cap>,
 }
+
+/// An absorbing potential: rate × min(((ρ − start)/(half − start)), 1.5)² beyond the radius `start`
+/// (um), `half` the grid's half width; an atom it absorbs is lost.
+#[derive(Clone,Copy,Debug)]
+pub struct Cap{pub start:f64,pub rate:f64}
+impl Cap{
+    pub fn at(&self,grid:&Grid,r:[f64;3])->f64{
+        let rho=(r[0]*r[0]+r[1]*r[1]).sqrt();let u=((rho-self.start)/(grid.half_width()-self.start)).max(0.);self.rate*u.min(1.5).powi(2)
+    }
+}
+
+/// One trajectory as it moves between engines: its per-trajectory state and its planes.
+#[derive(Clone,Debug)]
+pub struct Carried{pub id:u32,pub components:i32,pub scale:f32,pub log_norm:f64,pub threshold:f64,pub jumps:u32,pub weight:f32,pub planes:Vec<Vec<[f32;2]>>}
 
 /// A trajectory's initial internal state: its block (0: F = 1, 1: F = 2) and components.
 #[derive(Clone,Debug)]
 pub struct Internal{pub block:usize,pub amplitudes:Vec<Complex>}
 
 pub struct Engine{
-    pub gpu:Gpu,
+    pub gpu:Rc<Gpu>,
     pub settings:Settings,
     points:usize,tiles:usize,
     state:Buffer,dx:Buffer,dy:Buffer,
-    components:Buffer,scale:Buffer,log_norm:Buffer,threshold:Buffer,jumps:Buffer,weights:Buffer,
+    ids:Buffer,components:Buffer,scale:Buffer,log_norm:Buffer,threshold:Buffer,jumps:Buffer,weights:Buffer,
     partial:Buffer,jumpers:Buffer,count:Buffer,rates:Buffer,choices:Buffer,
     pub records:Buffer,marginal_x:Buffer,marginal_y:Buffer,density:Buffer,scratch_x:Buffer,scratch_y:Buffer,
     step_v:Local,back_v:Local,forward_v:Local,doppler_x:Local,doppler_y:Local,
@@ -100,12 +181,9 @@ pub struct Engine{
     energies:Vec<Vec<f64>>,
     kinetic_full:[Buffer;2],kinetic_half:[Buffer;2],derivative:[Buffer;2],kappa:[Buffer;2],
     tails:[f32;4],
-    f_kinetic:Function,f_observe_kinetic:Function,f_derive:Function,f_local:Function,f_doppler:Function,f_epilogue:Function,
+    planes:Planes,f_local:Function,f_doppler:Function,f_epilogue:Function,
     f_jump_back:Function,f_jump_rates:Function,f_jump_choose:Function,f_jump_apply:Function,f_jump_finish:Function,
     f_observe_points:Function,f_thresholds:Function,
-    plane_shared:usize,observe_shared:usize,
-    /// The plane kernels' block size: one warp for a single row, else 256 threads.
-    plane_threads:u32,
     /// The weight of each trajectory (thermal states' norms), and the steps made.
     pub trajectory_weights:Vec<f64>,
     pub steps:u64,
@@ -114,13 +192,14 @@ pub struct Engine{
 }
 
 impl Engine{
-    pub fn new(mut gpu:Gpu,model:&Model,settings:Settings)->Result<Engine,String>{
+    pub fn new(gpu:Rc<Gpu>,model:&Model,settings:Settings)->Result<Engine,String>{
         let g=settings.grid;let(nx,ny)=(g.nx,g.ny);
         if !GRIDS.contains(&(nx,ny)){return Err(format!("no kernels for a {nx} x {ny} grid"));}
         let points=g.points();let tiles=points.div_ceil(THREADS);let b=settings.trajectories;
         if model.radial.eliminations.is_empty()||model.radial.reach()<g.reach(){return Err("Model::tabulate must reach the grid's corners".into());}
         let cap=settings.cap;
-        let table=model.points(&g,&|r|cap(&g,r));
+        let cap_at=|r:[f64;3]|cap.map_or(0.,|c|c.at(&g,r));
+        let table=model.points(&g,&cap_at);
         let dt=settings.dt;
         let step_v=Local::new(&gpu,&table,|p,k|propagator(&p.generator[k],dt))?;
         let back_v=Local::new(&gpu,&table,|p,k|propagator(&p.generator[k],-dt/2.))?;
@@ -154,7 +233,7 @@ impl Engine{
             beam_table[slot*8..slot*8+7].copy_from_slice(&[c as f32,k[0] as f32,k[1] as f32,beam.waist_um.map_or(0.,|w|1./(w*w)) as f32,
                 (hm*(k[0]*k[0]+k[1]*k[1])/2.) as f32,(hm*k[0]) as f32,(hm*k[1]) as f32]);
         }
-        let caps:Vec<f32>=(0..points).map(|p|cap(&g,g.position(p)) as f32).collect();
+        let caps:Vec<f32>=(0..points).map(|p|cap_at(g.position(p)) as f32).collect();
         let wave_numbers:Vec<f32>=ground.carriers.iter().map(|c|c.wave_number as f32).collect();
         let up=|data:&[u8]|->Result<Buffer,String>{let b=Buffer::new(data.len())?;gpu.stream.upload(&b,data)?;Ok(b)};
         let bytes=|v:&[[f32;2]]|->Vec<u8>{v.iter().flat_map(|z|[z[0].to_le_bytes(),z[1].to_le_bytes()].concat()).collect()};
@@ -173,33 +252,29 @@ impl Engine{
         let reach=0.7;let kmax=std::f64::consts::PI/g.dx;
         let tails=[(reach*g.half_width()) as f32,(reach*g.half_width()) as f32,(reach*kmax) as f32,(reach*kmax) as f32];
         let energies:Vec<Vec<f64>>=(0..ng).map(|b|table.iter().map(|p|p.energies[b]).collect()).collect();
-        let name=|s:&str|format!("{s}_{nx}x{ny}");
-        let plane_shared=ny*(nx+1)*8;let observe_shared=plane_shared+(nx+ny+32)*4;
-        let f_kinetic=gpu.function(&name("kinetic"))?;f_kinetic.allow_shared(plane_shared)?;
-        let f_observe_kinetic=gpu.function(&name("observe_kinetic"))?;f_observe_kinetic.allow_shared(observe_shared)?;
-        let f_derive=gpu.function(&name("derive"))?;f_derive.allow_shared(plane_shared)?;
+        let planes=Planes::new(&gpu,nx,ny)?;
         let zeroed=|bytes:usize|->Result<Buffer,String>{let b=Buffer::new(bytes)?;gpu.stream.zero(&b)?;Ok(b)};
         let state_bytes=b*COMPONENTS*points*8;
         Ok(Engine{
             state:zeroed(state_bytes)?,dx:zeroed(state_bytes)?,dy:zeroed(state_bytes)?,
-            components:zeroed(b*4)?,scale:zeroed(b*4)?,log_norm:zeroed(b*8)?,threshold:zeroed(b*8)?,jumps:zeroed(b*4)?,weights:zeroed(b*4)?,
+            ids:{let v:Vec<u32>=(0..b as u32).collect();let x=Buffer::new(b*4)?;gpu.stream.upload(&x,&v)?;x},components:zeroed(b*4)?,scale:zeroed(b*4)?,log_norm:zeroed(b*8)?,threshold:zeroed(b*8)?,jumps:zeroed(b*4)?,weights:zeroed(b*4)?,
             partial:zeroed(b*tiles*4)?,jumpers:zeroed(b*4)?,count:zeroed(4)?,rates:zeroed(b*tiles*G_SLOTS*4)?,choices:zeroed(b*CHOICE*4)?,
             records:zeroed(b*RECORD*4)?,marginal_x:zeroed(nx*4)?,marginal_y:zeroed(ny*4)?,density:zeroed(points*4)?,scratch_x:zeroed(nx*4)?,scratch_y:zeroed(ny*4)?,
             step_v,back_v,forward_v,doppler_x,doppler_y,jump_table,response_table,radial_step:step as f32,radii,beams,beam_count:near.len(),
             cap:cap_buffer,wave_number,carriers,energies,
             kinetic_full,kinetic_half,derivative,kappa,tails,
-            f_kinetic,f_observe_kinetic,f_derive,
+            planes,
             f_local:gpu.function("local_step")?,f_doppler:gpu.function("doppler_kick")?,f_epilogue:gpu.function("epilogue")?,
             f_jump_back:gpu.function("jump_back")?,f_jump_rates:gpu.function("jump_rates")?,f_jump_choose:gpu.function("jump_choose")?,
             f_jump_apply:gpu.function("jump_apply")?,f_jump_finish:gpu.function("jump_finish")?,f_observe_points:gpu.function("observe_points")?,
             f_thresholds:gpu.function("thresholds")?,
-            plane_shared,observe_shared,plane_threads:if ny==1{32}else{THREADS as u32},points,tiles,trajectory_weights:vec![1.;b],steps:0,profile:None,gpu,settings,
+            points,tiles,trajectory_weights:vec![1.;b],steps:0,profile:None,gpu,settings,
         })
     }
 
     fn seed(&self,stream:u64)->Seed{let s=self.settings.seed^stream.wrapping_mul(0x9E3779B97F4A7C15);Seed{lo:s as u32,hi:(s>>32) as u32}}
     fn trajectories_arg(&self)->TrajectoriesArg{
-        TrajectoriesArg{components:self.components.pointer,scale:self.scale.pointer,log_norm:self.log_norm.pointer,threshold:self.threshold.pointer,jumps:self.jumps.pointer}
+        TrajectoriesArg{ids:self.ids.pointer,components:self.components.pointer,scale:self.scale.pointer,log_norm:self.log_norm.pointer,threshold:self.threshold.pointer,jumps:self.jumps.pointer}
     }
     fn jumps_arg(&self)->JumpsArg{
         let g=self.settings.grid;
@@ -235,12 +310,12 @@ impl Engine{
         s.upload(&self.components,&vec![1i32;b])?;s.upload(&self.scale,&vec![1f32;b])?;
         let hm=model.hbar_over_mass;
         let real=|n:usize|->Vec<[f32;2]>{(0..n).map(|j|{let k=if n==1{0.}else{g.wave_number(bitrev(j,n),n)};[((-hm*k*k*h/2.).exp()/n as f64) as f32,0.]}).collect()};
-        let(kx,ky)=(Buffer::new(g.nx*8)?,Buffer::new(g.ny*8)?);s.upload(&kx,&real(g.nx))?;s.upload(&ky,&real(g.ny))?;
+        let imaginary=[Buffer::new(g.nx*8)?,Buffer::new(g.ny*8)?];s.upload(&imaginary[0],&real(g.nx))?;s.upload(&imaginary[1],&real(g.ny))?;
         let grid2=(self.tiles as u32,b as u32,1);
-        s.launch(&noise,grid2,THREADS as u32,0,&[&self.state.pointer,&(points as i32),&(b as i32),&self.seed(1)])?;
+        s.launch(&noise,grid2,THREADS as u32,0,&[&self.state.pointer,&(points as i32),&(b as i32),&self.ids.pointer,&self.seed(1)])?;
         for _ in 0..steps{
             s.launch(&potential,grid2,THREADS as u32,0,&[&self.state.pointer,&(points as i32),&(b as i32),&factor_buffer.pointer,&kind_buffer.pointer])?;
-            s.launch(&self.f_kinetic,((b*COMPONENTS) as u32,1,1),self.plane_threads,self.plane_shared,&[&self.state.pointer,&self.components.pointer,&self.scale.pointer,&kx.pointer,&ky.pointer])?;
+            self.planes.kinetic(s,&self.state,&self.components,&self.scale,&imaginary,b)?;
             s.launch(&potential,grid2,THREADS as u32,0,&[&self.state.pointer,&(points as i32),&(b as i32),&factor_buffer.pointer,&kind_buffer.pointer])?;
         }
         s.launch(&norms,grid2,THREADS as u32,0,&[&self.state.pointer,&(points as i32),&self.partial.pointer])?;
@@ -262,13 +337,12 @@ impl Engine{
         s.upload(&self.weights,&weights.iter().map(|&w|w as f32).collect::<Vec<f32>>())?;
         self.trajectory_weights=weights;
         s.zero(&self.log_norm)?;s.zero(&self.jumps)?;s.upload(&self.scale,&vec![1f32;b])?;
-        s.launch(&self.f_thresholds,(b.div_ceil(THREADS) as u32,1,1),THREADS as u32,0,&[&self.threshold.pointer,&self.jumps.pointer,&(b as i32),&self.seed(0)])?;
+        s.launch(&self.f_thresholds,(b.div_ceil(THREADS) as u32,1,1),THREADS as u32,0,&[&self.threshold.pointer,&self.ids.pointer,&self.jumps.pointer,&(b as i32),&self.seed(0)])?;
         s.synchronize()
     }
 
     fn launch_kinetic(&self,tables:&[Buffer;2])->Result<(),String>{
-        let b=self.settings.trajectories;
-        self.gpu.stream.launch(&self.f_kinetic,((b*COMPONENTS) as u32,1,1),self.plane_threads,self.plane_shared,&[&self.state.pointer,&self.components.pointer,&self.scale.pointer,&tables[0].pointer,&tables[1].pointer])
+        self.planes.kinetic(&self.gpu.stream,&self.state,&self.components,&self.scale,tables,self.settings.trajectories)
     }
     /// One step of φ; with `observe`, its K split around ψ's observation (records, and with
     /// `distributions` the marginals and the density).
@@ -282,8 +356,8 @@ impl Engine{
         self.mark("local")?;
         let every=self.settings.doppler_every.max(1);
         if (self.steps+1)%every as u64==0{
-            let null=0u64;let s=&self.gpu.stream;
-            s.launch(&self.f_derive,((b*COMPONENTS) as u32,1,1),self.plane_threads,self.plane_shared,&[&self.state.pointer,&self.components.pointer,&null,&null,&bb,&self.dx.pointer,&self.dy.pointer,&self.derivative[0].pointer,&self.derivative[1].pointer])?;
+            let s=&self.gpu.stream;
+            self.planes.derive(s,&self.state,&self.components,None,b,&self.dx,&self.dy,&self.derivative)?;
             let tau=(every as f64*self.settings.dt) as f32;
             s.launch(&self.f_doppler,grid_traj,t,0,&[&self.state.pointer,&self.dx.pointer,&self.dy.pointer,&p,&bb,&self.components.pointer,&self.doppler_x.arg(),&self.doppler_y.arg(),&tau,&self.partial.pointer])?;
         }
@@ -333,7 +407,7 @@ impl Engine{
         let(p,n)=(points as i32,tiles as i32);let seed=self.seed(0);let b=self.settings.trajectories as i32;
         s.launch(&self.f_jump_back,(tiles as u32,lanes,1),t,0,&[&self.state.pointer,&p,&self.components.pointer,&self.jumpers.pointer,&self.count.pointer,&self.back_v.arg()])?;
         self.mark("jump back")?;let s=&self.gpu.stream;
-        s.launch(&self.f_derive,((lanes as usize*COMPONENTS) as u32,1,1),self.plane_threads,self.plane_shared,&[&self.state.pointer,&self.components.pointer,&self.jumpers.pointer,&self.count.pointer,&b,&self.dx.pointer,&self.dy.pointer,&self.derivative[0].pointer,&self.derivative[1].pointer])?;
+        self.planes.derive(s,&self.state,&self.components,Some((&self.jumpers,&self.count)),b as usize,&self.dx,&self.dy,&self.derivative)?;
         self.mark("jump derive")?;let s=&self.gpu.stream;
         s.launch(&self.f_jump_rates,(tiles as u32,lanes,1),t,0,&[&self.state.pointer,&self.dx.pointer,&self.dy.pointer,&p,&self.components.pointer,&self.jumpers.pointer,&self.count.pointer,&self.jumps_arg(),&self.rates.pointer])?;
         self.mark("jump rates")?;let s=&self.gpu.stream;
@@ -351,9 +425,7 @@ impl Engine{
         let s=&self.gpu.stream;let b=self.settings.trajectories;
         if !distributions{s.zero(&self.scratch_x)?;s.zero(&self.scratch_y)?;}
         let(mx,my)=if distributions{(self.marginal_x.pointer,self.marginal_y.pointer)}else{(self.scratch_x.pointer,self.scratch_y.pointer)};
-        s.launch(&self.f_observe_kinetic,((b*COMPONENTS) as u32,1,1),self.plane_threads,self.observe_shared,&[&self.state.pointer,&self.components.pointer,&self.scale.pointer,
-            &self.kinetic_half[0].pointer,&self.kinetic_half[1].pointer,&self.kappa[0].pointer,&self.kappa[1].pointer,&self.tails[2],&self.tails[3],
-            &self.records.pointer,&self.weights.pointer,&mx,&my])?;
+        self.planes.observe(s,&self.state,&self.components,&self.scale,&self.kinetic_half,&self.kappa,[self.tails[2],self.tails[3]],&self.records,&self.weights,[mx,my],b)?;
         s.upload(&self.scale,&vec![1f32;b])
     }
     /// The position observables of ψ added to the records (with `distributions` the density).
@@ -363,6 +435,35 @@ impl Engine{
         s.launch(&self.f_observe_points,(self.tiles as u32,b.div_ceil(SUB) as u32,1),THREADS as u32,0,&[&self.state.pointer,&(self.points as i32),&(b as i32),
             &self.components.pointer,&self.jumps_arg(),&self.tails[0],&self.tails[1],&self.records.pointer,&self.weights.pointer,&density])
     }
+
+    pub fn capacity(&self)->usize{self.settings.trajectories}
+    /// The trajectory each slot holds (its random streams).
+    pub fn set_ids(&self,ids:&[u32])->Result<(),String>{self.gpu.stream.upload(&self.ids,ids)}
+    /// A slot's trajectory, its slot left empty.
+    pub fn take(&self,slot:usize)->Result<Carried,String>{
+        let s=&self.gpu.stream;let p=self.points;
+        let mut i=[0u32];s.download_at(&self.ids,slot*4,&mut i)?;
+        let mut c=[0i32];s.download_at(&self.components,slot*4,&mut c)?;
+        let mut sc=[0f32];s.download_at(&self.scale,slot*4,&mut sc)?;
+        let mut ln=[0f64];s.download_at(&self.log_norm,slot*8,&mut ln)?;
+        let mut th=[0f64];s.download_at(&self.threshold,slot*8,&mut th)?;
+        let mut j=[0u32];s.download_at(&self.jumps,slot*4,&mut j)?;
+        let mut w=[0f32];s.download_at(&self.weights,slot*4,&mut w)?;
+        let planes=(0..c[0].max(0) as usize).map(|k|{let mut v=vec![[0f32;2];p];s.download_at(&self.state,((slot*COMPONENTS+k)*p)*8,&mut v).map(|_|v)}).collect::<Result<Vec<_>,_>>()?;
+        s.upload_at(&self.components,slot*4,&[0i32])?;
+        Ok(Carried{id:i[0],components:c[0],scale:sc[0],log_norm:ln[0],threshold:th[0],jumps:j[0],weight:w[0],planes})
+    }
+    /// Puts a trajectory (its planes on this engine's grid) into an empty slot.
+    pub fn put(&self,slot:usize,t:&Carried)->Result<(),String>{
+        let s=&self.gpu.stream;let p=self.points;
+        for(k,plane)in t.planes.iter().enumerate(){assert_eq!(plane.len(),p);s.upload_at(&self.state,((slot*COMPONENTS+k)*p)*8,plane)?;}
+        s.upload_at(&self.ids,slot*4,&[t.id])?;s.upload_at(&self.scale,slot*4,&[t.scale])?;s.upload_at(&self.log_norm,slot*8,&[t.log_norm])?;
+        s.upload_at(&self.threshold,slot*8,&[t.threshold])?;s.upload_at(&self.jumps,slot*4,&[t.jumps])?;s.upload_at(&self.weights,slot*4,&[t.weight])?;
+        s.upload_at(&self.components,slot*4,&[t.components])
+    }
+    /// Empties every slot.
+    pub fn clear(&self)->Result<(),String>{self.gpu.stream.zero(&self.components)}
+    pub fn grid(&self)->Grid{self.settings.grid}
 
     /// The records of the last observation, and the trajectories' blocks (0: lost).
     pub fn read_records(&self)->Result<(Vec<f32>,Vec<i32>),String>{

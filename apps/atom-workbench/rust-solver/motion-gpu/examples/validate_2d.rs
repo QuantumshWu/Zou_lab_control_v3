@@ -15,24 +15,47 @@ const REFERENCE:&str=r"C:\Users\eadri\AppData\Local\Temp\claude\C--Users-eadri--
 
 fn main(){
     let args:Vec<String>=std::env::args().collect();let arg=|i:usize,d:f64|args.get(i).map_or(d,|s|s.parse().unwrap());
-    let(t_end,b,seed,swap,n,dt)=(arg(1,500.),arg(2,1024.) as usize,arg(3,1.) as u64,arg(4,0.)>0.,arg(5,64.) as usize,arg(6,0.2));
+    let(t_end,b,seed,swap,n,dt,dark)=(arg(1,500.),arg(2,1024.) as usize,arg(3,1.) as u64,arg(4,0.)>0.,arg(5,64.) as usize,arg(6,0.2),arg(7,0.)>0.);
     let reference:Value=serde_json::from_str(&std::fs::read_to_string(REFERENCE).unwrap()).unwrap();
     let rows=reference["rows"].as_array().unwrap();
     let mut request=scene::turned(scene::load(scene::PGC));
     if swap{for beam in &mut request.beams{beam.direction.swap(0,1);}request.emission.swap(0,1);}
+    // dark: the tweezer alone, a stationary thermal state.
+    if dark{request.beams.retain(|b|b.waist_um.is_some());}
+    // DIAGNOSTIC: free space -- the tweezer removed, the plane waves kept (a periodic box).
+    let free=std::env::var("ATOM_GPU_FREE_SPACE").is_ok();
+    if free{request.beams.retain(|b|b.waist_um.is_none());}
     let mut model=Model::new(&request).unwrap();
     let index=request.states.iter().position(|s|s=="ground-2-2").unwrap();
     let b22=model.ground.ground_states.iter().position(|&i|i==index).unwrap();
-    let omega=model.trap_frequency(b22,0);
+    let omega=model.trap_frequency(b22,0).max(1e-9);
     // The grid balanced for the trap: half the box and the largest momentum the same number of
     // thermal widths, (L/2)/x_T = κ_max/κ_T, so dx² = 2π ħ/(N m ω).
-    let dx=(std::f64::consts::TAU*model.hbar_over_mass/(n as f64*omega)).sqrt();
+    let dx=if free{0.0075378}else{(std::f64::consts::TAU*model.hbar_over_mass/(n as f64*omega)).sqrt()};
     let grid=Grid{nx:n,ny:n,dx};
-    model.tabulate(grid.reach()).unwrap();let g=&model.ground;
+    // DIAGNOSTIC: a magic tweezer -- its fold and outside shift kept on the ground states only.
+    if std::env::var("ATOM_GPU_MAGIC").is_ok(){
+        let excited=model.ground.excited_states.clone();
+        for m in model.ground.folds.iter_mut().chain(model.ground.outside.iter_mut()){for &i in &excited{for &j in &excited{m[(i,j)]=atom_motion_core::Complex::ZERO;}}}
+    }
+    model.tabulate(grid.reach()).unwrap();
+    // DIAGNOSTIC: a harmonic trap and light independent of the radius -- separable in x and y.
+    if std::env::var("ATOM_GPU_HARMONIC").is_ok(){
+        let step=model.radial.step;let e0=model.radial.eliminations[0].clone();let e1=model.radial.eliminations[1].clone();
+        for(k,e)in model.radial.eliminations.iter_mut().enumerate(){
+            let rho=k as f64*step;
+            for b in 0..e.energies.len(){
+                let c=2.*(e1.energies[b]-e0.energies[b])/(step*step);let u=e0.energies[b]+0.5*c*rho*rho;
+                let shift=u-e.energies[b];e.energies[b]=u;e.hamiltonian[(b,b)].re+=shift;
+            }
+            e.responses=e0.responses.clone();e.derivatives=e0.derivatives.clone();
+        }
+    }
+    let g=&model.ground;
     let doppler_every=(1./dt).round() as usize;
-    let settings=Settings{grid,dt,doppler_every,trajectories:b,seed,cap:|_,_|0.};
+    let settings=Settings{grid,dt,doppler_every,trajectories:b,seed,cap:None};
     let start=std::time::Instant::now();
-    let mut engine=Engine::new(Gpu::new().unwrap(),&model,settings).unwrap();
+    let mut engine=Engine::new(std::rc::Rc::new(Gpu::new().unwrap()),&model,settings).unwrap();
     let thermal=|t_uk:f64|((t_uk*1e-6*atom_motion_gpu::model::BOLTZMANN/(atom_motion_gpu::model::HBAR*omega*1e6))*model.hbar_over_mass/omega).sqrt();
     println!("{n} x {n}, dx {:.2} nm, box ±{:.0} nm ({:.1} x_T at 30 uK), k_max {:.1} hbar k, dt {dt}, o1 every {doppler_every}, {b} trajectories, swap {swap}; tables {:.2} s",
         dx*1e3,grid.half_width()*1e3,grid.half_width()/thermal(30.),std::f64::consts::PI/dx/8.0528,start.elapsed().as_secs_f64());

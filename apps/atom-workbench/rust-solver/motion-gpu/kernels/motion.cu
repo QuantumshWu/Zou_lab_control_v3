@@ -85,8 +85,10 @@ template<int N> struct Fft{
 #define REC_NORM 32
 #define REC_X 33         // <x>, <y>, <x^2>, <y^2> (um)
 #define REC_KX 37        // <kx>, <ky>, <kx^2>, <ky^2> (rad/um)
-#define REC_TAIL 41      // the parts of <x^2>, <y^2>, <kx^2>, <ky^2> beyond 0.7 of the grid's reach
-#define RECORD 48
+#define REC_TAIL 41      // the parts of <x^2>, <y^2>, <kx^2>, <ky^2> beyond 0.7 of the grid's reach,
+#define REC_TAIL2 45     // and beyond 0.7/sqrt(2) of it (0.7 of the next smaller grid's)
+#define RECORD 52
+#define SMALLER 0.70710678f
 
 __device__ __forceinline__ float warp_sum(float v){
     #pragma unroll
@@ -117,13 +119,14 @@ struct PlaneArgs{
     float2* dx;float2* dy;
     const float* kappa_x;const float* kappa_y;float tail_x,tail_y;
     float* record;float weight;float* marginal_x;float* marginal_y;
+    float* records;const float* weights; // the passes of large planes: per trajectory
 };
 template<int NX,int NY,int MODE>
 __device__ void plane_pass(float2* __restrict__ plane,float scale,const PlaneArgs& a,float2* sm,float* smarg){
     using FX=Fft<NX>;using FY=Fft<NY>;
     const int lane=threadIdx.x&31,warp=threadIdx.x>>5,warps=blockDim.x>>5;
     constexpr int S=NX+1; // padded row stride: column reads are free of bank conflicts
-    float m1=0.f,m2=0.f,mt=0.f;
+    float m1=0.f,m2=0.f,mt=0.f,ms=0.f;
     if(MODE==MODE_OBSERVE){for(int i=threadIdx.x;i<NX+NY;i+=blockDim.x)smarg[i]=0.f;__syncthreads();}
     {
         constexpr int teams=32/FX::T;const int t=lane%FX::T,team=lane/FX::T;
@@ -142,7 +145,7 @@ __device__ void plane_pass(float2* __restrict__ plane,float scale,const PlaneArg
             f.forward(v,t);
             if(MODE==MODE_OBSERVE&&ok){
                 #pragma unroll
-                for(int e=0;e<FX::E;e++){const float p=norm2(v[e]),k=kappa[e];m1+=p*k;m2+=p*k*k;if(fabsf(k)>a.tail_x)mt+=p*k*k;atomicAdd(smarg+e*FX::T+t,p);}
+                for(int e=0;e<FX::E;e++){const float p=norm2(v[e]),k=kappa[e];m1+=p*k;m2+=p*k*k;if(fabsf(k)>a.tail_x)mt+=p*k*k;if(fabsf(k)>a.tail_x*SMALLER)ms+=p*k*k;atomicAdd(smarg+e*FX::T+t,p);}
             }
             #pragma unroll
             for(int e=0;e<FX::E;e++)v[e]=cmul(v[e],factor[e]);
@@ -154,10 +157,10 @@ __device__ void plane_pass(float2* __restrict__ plane,float scale,const PlaneArg
         }
     }
     if(MODE==MODE_OBSERVE){
-        const float n=1.f/NX;m1=block_sum(m1,smarg+NX+NY)*n;m2=block_sum(m2,smarg+NX+NY)*n;mt=block_sum(mt,smarg+NX+NY)*n;
-        if(threadIdx.x==0){atomicAdd(a.record+REC_KX,m1);atomicAdd(a.record+REC_KX+2,m2);atomicAdd(a.record+REC_TAIL+2,mt);}
+        const float n=1.f/NX;m1=block_sum(m1,smarg+NX+NY)*n;m2=block_sum(m2,smarg+NX+NY)*n;mt=block_sum(mt,smarg+NX+NY)*n;ms=block_sum(ms,smarg+NX+NY)*n;
+        if(threadIdx.x==0){atomicAdd(a.record+REC_KX,m1);atomicAdd(a.record+REC_KX+2,m2);atomicAdd(a.record+REC_TAIL+2,mt);atomicAdd(a.record+REC_TAIL2+2,ms);}
         for(int i=threadIdx.x;i<NX;i+=blockDim.x)atomicAdd(a.marginal_x+i,a.weight*n*smarg[i]);
-        m1=m2=mt=0.f;
+        m1=m2=mt=ms=0.f;
     }
     __syncthreads();
     if constexpr(NY>1){
@@ -173,7 +176,7 @@ __device__ void plane_pass(float2* __restrict__ plane,float scale,const PlaneArg
             f.forward(v,t);
             if(MODE==MODE_OBSERVE&&ok){
                 #pragma unroll
-                for(int e=0;e<FY::E;e++){const float p=norm2(v[e]),k=kappa[e];m1+=p*k;m2+=p*k*k;if(fabsf(k)>a.tail_y)mt+=p*k*k;atomicAdd(smarg+NX+e*FY::T+t,p);}
+                for(int e=0;e<FY::E;e++){const float p=norm2(v[e]),k=kappa[e];m1+=p*k;m2+=p*k*k;if(fabsf(k)>a.tail_y)mt+=p*k*k;if(fabsf(k)>a.tail_y*SMALLER)ms+=p*k*k;atomicAdd(smarg+NX+e*FY::T+t,p);}
             }
             #pragma unroll
             for(int e=0;e<FY::E;e++)v[e]=cmul(v[e],factor[e]);
@@ -184,8 +187,8 @@ __device__ void plane_pass(float2* __restrict__ plane,float scale,const PlaneArg
             }
         }
         if(MODE==MODE_OBSERVE){
-            const float n=1.f/NY;m1=block_sum(m1,smarg+NX+NY)*n;m2=block_sum(m2,smarg+NX+NY)*n;mt=block_sum(mt,smarg+NX+NY)*n;
-            if(threadIdx.x==0){atomicAdd(a.record+REC_KX+1,m1);atomicAdd(a.record+REC_KX+3,m2);atomicAdd(a.record+REC_TAIL+3,mt);}
+            const float n=1.f/NY;m1=block_sum(m1,smarg+NX+NY)*n;m2=block_sum(m2,smarg+NX+NY)*n;mt=block_sum(mt,smarg+NX+NY)*n;ms=block_sum(ms,smarg+NX+NY)*n;
+            if(threadIdx.x==0){atomicAdd(a.record+REC_KX+1,m1);atomicAdd(a.record+REC_KX+3,m2);atomicAdd(a.record+REC_TAIL+3,mt);atomicAdd(a.record+REC_TAIL2+3,ms);}
             for(int i=threadIdx.x;i<NY;i+=blockDim.x)atomicAdd(a.marginal_y+i,a.weight*n*smarg[NX+i]);
         }
         __syncthreads();
@@ -234,6 +237,109 @@ PLANE_KERNELS(128,1)
 PLANE_KERNELS(256,1)
 PLANE_KERNELS(512,1)
 PLANE_KERNELS(1024,1)
+
+// ---------------------------------------------------------------------------------------------
+// Planes too large for shared memory (N x N, N >= 128): the same passes as two kernels, the rows
+// (K_x) through registers, then the columns (K_y) through a tile of TILE columns in shared
+// memory; a warp takes one row or column. MODE as plane_pass: STEP, OBSERVE (the x moments in
+// the rows, the y moments in the columns) and DERIVE (the rows write kappa_x psi to dx, the
+// columns kappa_y psi to dy; psi unchanged). A pass covers plane slots p: all planes, or with a
+// list the planes of the `count` listed trajectories (slot p: trajectory list[p/5]).
+#define TILE 8
+struct Planes{const int* list;const int* count;};
+// Trajectory and plane of slot p, or false when the slot is empty or the component unused.
+__device__ __forceinline__ bool slot_plane(const Planes& P,const int* components,long long p,int& t,u64& plane){
+    const int c=(int)(p%COMPONENTS);
+    if(P.list){const long long s=p/COMPONENTS;if(s>=*P.count)return false;t=P.list[s];}else t=(int)(p/COMPONENTS);
+    plane=(u64)t*COMPONENTS+c;return c<components[t];
+}
+template<int N,int MODE>
+__device__ void rows_pass(float2* state,const int* components,const float* scale,const PlaneArgs& a,const Planes& P){
+    using F=Fft<N>;
+    const int lane=threadIdx.x&31,warp=threadIdx.x>>5;
+    const long long row=(long long)blockIdx.x*(blockDim.x>>5)+warp;
+    int t;u64 plane;if(!slot_plane(P,components,row/N,t,plane))return;   // the whole warp leaves together
+    const int y=(int)(row%N);
+    F f;f.init(lane);
+    float2* p=state+plane*N*N+(u64)y*N;
+    float2 v[F::E];
+    const float s=MODE==MODE_DERIVE?1.f:scale[t];
+    #pragma unroll
+    for(int e=0;e<F::E;e++)v[e]=cscale(p[e*32+lane],s);
+    f.forward(v,lane);
+    if(MODE==MODE_OBSERVE){
+        float m1=0.f,m2=0.f,mt=0.f,ms=0.f;const float w=a.weights[t]*(1.f/N);
+        #pragma unroll
+        for(int e=0;e<F::E;e++){const float q=norm2(v[e]),k=__ldg(a.kappa_x+e*32+lane);m1+=q*k;m2+=q*k*k;if(fabsf(k)>a.tail_x)mt+=q*k*k;if(fabsf(k)>a.tail_x*SMALLER)ms+=q*k*k;
+            if(a.marginal_x)atomicAdd(a.marginal_x+e*32+lane,q*w);}
+        m1=warp_sum(m1);m2=warp_sum(m2);mt=warp_sum(mt);ms=warp_sum(ms);
+        if(lane==0){float* r=a.records+(u64)t*RECORD;atomicAdd(r+REC_KX,m1/N);atomicAdd(r+REC_KX+2,m2/N);atomicAdd(r+REC_TAIL+2,mt/N);atomicAdd(r+REC_TAIL2+2,ms/N);}
+    }
+    #pragma unroll
+    for(int e=0;e<F::E;e++)v[e]=cmul(v[e],__ldg(a.tx+e*32+lane));
+    f.inverse(v,lane);
+    float2* out=MODE==MODE_DERIVE?a.dx+plane*N*N+(u64)y*N:p;
+    #pragma unroll
+    for(int e=0;e<F::E;e++)out[e*32+lane]=v[e];
+}
+template<int N,int MODE>
+__device__ void cols_pass(float2* state,const int* components,const PlaneArgs& a,const Planes& P,float2* sm){
+    using F=Fft<N>;
+    const int lane=threadIdx.x&31,warp=threadIdx.x>>5;
+    constexpr int tiles=N/TILE;
+    int t;u64 plane;if(!slot_plane(P,components,blockIdx.x/tiles,t,plane))return;  // the whole block leaves together
+    const int x0=(blockIdx.x%tiles)*TILE;
+    float2* p=state+plane*N*N;
+    constexpr int S=TILE+1;
+    for(int i=threadIdx.x;i<N*TILE;i+=blockDim.x)sm[(i/TILE)*S+i%TILE]=p[(u64)(i/TILE)*N+x0+i%TILE];
+    __syncthreads();
+    float m1=0.f,m2=0.f,mt=0.f,ms=0.f;
+    if(warp<TILE){
+        F f;f.init(lane);float2 v[F::E];
+        #pragma unroll
+        for(int e=0;e<F::E;e++)v[e]=sm[(e*32+lane)*S+warp];
+        f.forward(v,lane);
+        if(MODE==MODE_OBSERVE){
+            const float w=a.weights[t]*(1.f/N);
+            #pragma unroll
+            for(int e=0;e<F::E;e++){const float q=norm2(v[e]),k=__ldg(a.kappa_y+e*32+lane);m1+=q*k;m2+=q*k*k;if(fabsf(k)>a.tail_y)mt+=q*k*k;if(fabsf(k)>a.tail_y*SMALLER)ms+=q*k*k;
+                if(a.marginal_y)atomicAdd(a.marginal_y+e*32+lane,q*w);}
+        }
+        #pragma unroll
+        for(int e=0;e<F::E;e++)v[e]=cmul(v[e],__ldg(a.ty+e*32+lane));
+        f.inverse(v,lane);
+        #pragma unroll
+        for(int e=0;e<F::E;e++)sm[(e*32+lane)*S+warp]=v[e];
+        if(MODE==MODE_OBSERVE){
+            m1=warp_sum(m1);m2=warp_sum(m2);mt=warp_sum(mt);ms=warp_sum(ms);
+            if(lane==0){float* r=a.records+(u64)t*RECORD;atomicAdd(r+REC_KX+1,m1/N);atomicAdd(r+REC_KX+3,m2/N);atomicAdd(r+REC_TAIL+3,mt/N);atomicAdd(r+REC_TAIL2+3,ms/N);}
+        }
+    }
+    __syncthreads();
+    float2* out=MODE==MODE_DERIVE?a.dy+plane*N*N:p;
+    for(int i=threadIdx.x;i<N*TILE;i+=blockDim.x)out[(u64)(i/TILE)*N+x0+i%TILE]=sm[(i/TILE)*S+i%TILE];
+}
+// The kernels of an N x N grid: rows (grid: slots N/8 blocks of 256 threads) and columns (slots
+// N/TILE blocks of 256 threads, N (TILE + 1) float2 of shared memory).
+#define BIG_PLANE_KERNELS(N) \
+extern "C" __global__ void __launch_bounds__(256) kinetic_rows_##N(float2* state,const int* components,const float* scale,const float2* tx){ \
+    PlaneArgs a={};a.tx=tx;rows_pass<N,MODE_STEP>(state,components,scale,a,Planes{nullptr,nullptr});} \
+extern "C" __global__ void __launch_bounds__(256) kinetic_cols_##N(float2* state,const int* components,const float2* ty){ \
+    extern __shared__ float2 sm[];PlaneArgs a={};a.ty=ty;cols_pass<N,MODE_STEP>(state,components,a,Planes{nullptr,nullptr},sm);} \
+extern "C" __global__ void __launch_bounds__(256) observe_rows_##N(float2* state,const int* components,const float* scale,const float2* tx,const float* kappa_x,float tail_x, \
+        float* records,const float* weights,float* marginal_x){ \
+    PlaneArgs a={};a.tx=tx;a.kappa_x=kappa_x;a.tail_x=tail_x;a.records=records;a.weights=weights;a.marginal_x=marginal_x; \
+    rows_pass<N,MODE_OBSERVE>(state,components,scale,a,Planes{nullptr,nullptr});} \
+extern "C" __global__ void __launch_bounds__(256) observe_cols_##N(float2* state,const int* components,const float2* ty,const float* kappa_y,float tail_y, \
+        float* records,const float* weights,float* marginal_y){ \
+    extern __shared__ float2 sm[];PlaneArgs a={};a.ty=ty;a.kappa_y=kappa_y;a.tail_y=tail_y;a.records=records;a.weights=weights;a.marginal_y=marginal_y; \
+    cols_pass<N,MODE_OBSERVE>(state,components,a,Planes{nullptr,nullptr},sm);} \
+extern "C" __global__ void __launch_bounds__(256) derive_rows_##N(float2* state,const int* components,const int* list,const int* count,float2* dx,const float2* tx){ \
+    PlaneArgs a={};a.tx=tx;a.dx=dx;rows_pass<N,MODE_DERIVE>(state,components,nullptr,a,Planes{list,count});} \
+extern "C" __global__ void __launch_bounds__(256) derive_cols_##N(float2* state,const int* components,const int* list,const int* count,float2* dy,const float2* ty){ \
+    extern __shared__ float2 sm[];PlaneArgs a={};a.ty=ty;a.dy=dy;cols_pass<N,MODE_DERIVE>(state,components,a,Planes{list,count},sm);}
+BIG_PLANE_KERNELS(128)
+BIG_PLANE_KERNELS(256)
 
 // ---------------------------------------------------------------------------------------------
 // Local matrices at the grid points: block F = 2 (5 x 5) and F = 1 (3 x 3), entry (i, j) of
@@ -338,13 +444,14 @@ __device__ __forceinline__ double open_uniform(u32 a,u32 b){return (((double)(a>
 __device__ double threshold_of(uint2 seed,u32 t,u32 jumps){
     const uint4 r=philox(make_uint4(t,jumps,PURPOSE_THRESHOLD,0u),seed);return log(open_uniform(r.x,r.y));
 }
-extern "C" __global__ void thresholds(double* threshold,const u32* jumps,int trajectories,uint2 seed){
-    const int t=blockIdx.x*blockDim.x+threadIdx.x;if(t<trajectories)threshold[t]=threshold_of(seed,(u32)t,jumps[t]);
+extern "C" __global__ void thresholds(double* threshold,const u32* ids,const u32* jumps,int trajectories,uint2 seed){
+    const int t=blockIdx.x*blockDim.x+threadIdx.x;if(t<trajectories)threshold[t]=threshold_of(seed,ids[t],jumps[t]);
 }
 
 // Per trajectory state.
 struct Trajectories{
-    int* components;   // 5 (F = 2), 3 (F = 1), 0 (lost)
+    const u32* ids;    // the trajectory each slot holds: its random streams
+    int* components;   // 5 (F = 2), 3 (F = 1), 0 (lost or empty)
     float* scale;      // the renormalization the next kinetic pass applies
     double* log_norm;  // ln of the norm's decay since the last jump
     double* threshold; // ln r of the current waiting period
@@ -564,8 +671,9 @@ extern "C" __global__ void jump_choose(Trajectories tr,const int* jumpers,const 
     const int t=jumpers[s];
     double g[G_SLOTS];for(int i=0;i<G_SLOTS;i++){double v=0.;for(int b=0;b<tiles;b++)v+=(double)rates[((u64)s*tiles+b)*G_SLOTS+i];g[i]=v;}
     double total=g[G_SLOTS-1];for(int c=0;c<J.carriers;c++)for(int to=0;to<2;to++){const double* m=g+(c*2+to)*6;total+=m[0]+m[1]+m[2];}
-    const uint4 r1=philox(make_uint4((u32)t,tr.jumps[t],PURPOSE_CHANNEL,0u),seed),r2=philox(make_uint4((u32)t,tr.jumps[t],PURPOSE_DIRECTION,0u),seed),
-                r3=philox(make_uint4((u32)t,tr.jumps[t],PURPOSE_DIRECTION,1u),seed);
+    const u32 id=tr.ids[t];
+    const uint4 r1=philox(make_uint4(id,tr.jumps[t],PURPOSE_CHANNEL,0u),seed),r2=philox(make_uint4(id,tr.jumps[t],PURPOSE_DIRECTION,0u),seed),
+                r3=philox(make_uint4(id,tr.jumps[t],PURPOSE_DIRECTION,1u),seed);
     float* out=choices+(u64)t*CHOICE;
     double u=open_uniform(r1.x,r1.y)*total;
     int pick=-1;
@@ -599,7 +707,7 @@ extern "C" __global__ void jump_finish(Trajectories tr,const int* jumpers,const 
     tr.components[t]=ch[1]>0.f?5:3;
     double n1=0.;for(int i=0;i<tiles;i++)n1+=(double)partial[(u64)t*tiles+i];
     tr.log_norm[t]=log(n1);tr.scale[t]=(float)rsqrt(n1);
-    tr.threshold[t]=threshold_of(seed,(u32)t,tr.jumps[t]);
+    tr.threshold[t]=threshold_of(seed,tr.ids[t],tr.jumps[t]);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -659,7 +767,7 @@ extern "C" __global__ void __launch_bounds__(256) observe_points(const float2* s
         float acc[REC_KX];
         #pragma unroll
         for(int i=0;i<REC_KX;i++)acc[i]=0.f;
-        float tx=0.f,ty=0.f;
+        float tx=0.f,ty=0.f,sx=0.f,sy=0.f;
         if(ok){
             const u64 base=(u64)t*COMPONENTS*points+x;float2 psi[5];float nn=0.f;
             #pragma unroll
@@ -668,13 +776,15 @@ extern "C" __global__ void __launch_bounds__(256) observe_points(const float2* s
             acc[REC_NORM]=nn;acc[REC_X]=nn*r.x;acc[REC_X+1]=nn*r.y;acc[REC_X+2]=nn*r.x*r.x;acc[REC_X+3]=nn*r.y*r.y;
             if(fabsf(r.x)>tail_x)tx=nn*r.x*r.x;
             if(fabsf(r.y)>tail_y)ty=nn*r.y*r.y;
+            if(fabsf(r.x)>tail_x*SMALLER)sx=nn*r.x*r.x;
+            if(fabsf(r.y)>tail_y*SMALLER)sy=nn*r.y*r.y;
             if(density)atomicAdd(density+x,weights[t]*nn);
         }
         float* rec=records+(u64)t*RECORD;
         #pragma unroll
         for(int i=0;i<REC_KX;i++){const float v=block_sum(acc[i],scratch);if(threadIdx.x==0&&v!=0.f)atomicAdd(rec+i,v);}
-        tx=block_sum(tx,scratch);ty=block_sum(ty,scratch);
-        if(threadIdx.x==0){if(tx!=0.f)atomicAdd(rec+REC_TAIL,tx);if(ty!=0.f)atomicAdd(rec+REC_TAIL+1,ty);}
+        tx=block_sum(tx,scratch);ty=block_sum(ty,scratch);sx=block_sum(sx,scratch);sy=block_sum(sy,scratch);
+        if(threadIdx.x==0){if(tx!=0.f)atomicAdd(rec+REC_TAIL,tx);if(ty!=0.f)atomicAdd(rec+REC_TAIL+1,ty);if(sx!=0.f)atomicAdd(rec+REC_TAIL2,sx);if(sy!=0.f)atomicAdd(rec+REC_TAIL2+1,sy);}
     }
 }
 
@@ -682,9 +792,9 @@ extern "C" __global__ void __launch_bounds__(256) observe_points(const float2* s
 // Thermal initial states (random-phase thermal pure states): plane 0 of every trajectory gets
 // white noise of random phases, then is filtered in imaginary time by its potential
 // (`thermal_potential`: one real factor per point) and by the kinetic pass with real tables.
-extern "C" __global__ void thermal_noise(float2* state,int points,int trajectories,uint2 seed){
+extern "C" __global__ void thermal_noise(float2* state,int points,int trajectories,const u32* ids,uint2 seed){
     const int x=blockIdx.x*blockDim.x+threadIdx.x,t=blockIdx.y;if(x>=points||t>=trajectories)return;
-    const uint4 r=philox(make_uint4((u32)t,(u32)x,PURPOSE_NOISE,0u),seed);float s,c;sincospif(2.f*(float)open_uniform(r.x,r.y),&s,&c);
+    const uint4 r=philox(make_uint4(ids[t],(u32)x,PURPOSE_NOISE,0u),seed);float s,c;sincospif(2.f*(float)open_uniform(r.x,r.y),&s,&c);
     state[(u64)t*COMPONENTS*points+x]=make_float2(c,s);
 }
 extern "C" __global__ void thermal_potential(float2* state,int points,int trajectories,const float* factors,const int* potential){

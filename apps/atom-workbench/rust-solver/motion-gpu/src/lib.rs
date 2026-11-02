@@ -10,3 +10,6 @@ pub mod gpu;
 pub mod model;
 pub mod engine;
 pub mod stats;
+pub mod regrid;
+pub mod ensemble;
+pub mod solution;

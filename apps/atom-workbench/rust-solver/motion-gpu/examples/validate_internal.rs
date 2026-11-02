@@ -17,9 +17,9 @@ fn main(){
     let args:Vec<String>=std::env::args().collect();let arg=|i:usize,d:f64|args.get(i).map_or(d,|s|s.parse().unwrap());
     let grid=Grid{nx:16,ny:16,dx:0.05};let dt=arg(1,0.25);let b=arg(2,4096.) as usize;let seed=arg(3,7.) as u64;
     model.tabulate(grid.reach()).unwrap();let g=&model.ground;
-    let settings=Settings{grid,dt,doppler_every:4,trajectories:b,seed,cap:|_,_|0.};
+    let settings=Settings{grid,dt,doppler_every:4,trajectories:b,seed,cap:None};
     let start=std::time::Instant::now();
-    let mut engine=Engine::new(Gpu::new().unwrap(),&model,settings).unwrap();
+    let mut engine=Engine::new(std::rc::Rc::new(Gpu::new().unwrap()),&model,settings).unwrap();
     println!("tables {:.2} s",start.elapsed().as_secs_f64());
     // |2,+2⟩: block 1 (F = 2), its component of ground state "ground-2-2".
     let index=request.states.iter().position(|s|s=="ground-2-2").unwrap();
