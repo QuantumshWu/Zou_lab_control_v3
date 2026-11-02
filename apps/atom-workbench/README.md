@@ -86,8 +86,10 @@ the atom, and the emission is resolved on the axis. The engine
 with the excited states eliminated at every position (GMW-o1 in a box): Strang
 steps with exact per-point exponentials, grids and time step chosen for 1%
 populations and 10% in T and n̄, continued by dynamic mode decomposition once
-consecutive checkpoints agree. A request without light, or whose light does
-not confine the initial state along the axis, is refused.
+its prediction agrees with the one made at half the run (the decomposition's
+eigen-solver is the engine's own, so every build gives the same continuation).
+A request without light, or whose light does not confine the initial state
+along the axis, is refused.
 
 3D motion (运动轴 3D（半经典）, docs/ui-design.md §6.21): the same atom moving in
 3D, semiclassically, whenever a beam is focused at the atom, served by
