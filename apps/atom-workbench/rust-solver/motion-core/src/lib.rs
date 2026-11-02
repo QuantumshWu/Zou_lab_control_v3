@@ -23,8 +23,11 @@
 //!
 //! `solve` is the engine. It is not implemented yet: it serves exact free flight -- no beam,
 //! and an internal state the model leaves as it is -- and refuses everything else with
-//! `NOT_IMPLEMENTED`.
+//! `NOT_IMPLEMENTED`. Its front end is `ground`: the ground manifold's generator with the excited
+//! states eliminated (GMW-o1), on the small dense linear algebra of `linear`.
 mod free_flight;
+pub mod ground;
+pub mod linear;
 
 /// The internal states: the 32 Rb87 states of the model basis.
 pub const STATES:usize=32;

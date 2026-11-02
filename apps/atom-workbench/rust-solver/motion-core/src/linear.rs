@@ -1,0 +1,153 @@
+//! Dense complex linear algebra for the elimination's small matrices (a few dozen rows): complex
+//! arithmetic, products, an LU factorization with partial pivoting and the spectral norm.
+use crate::{Complex,Matrix,STATES};
+use std::ops::{Add,AddAssign,Div,Index,IndexMut,Mul,Neg,Sub,SubAssign};
+
+impl Complex{
+    pub const ZERO:Complex=Complex{re:0.,im:0.};
+    pub const ONE:Complex=Complex{re:1.,im:0.};
+    pub const I:Complex=Complex{re:0.,im:1.};
+    pub const fn new(re:f64,im:f64)->Complex{Complex{re,im}}
+    pub fn conj(self)->Complex{Complex{re:self.re,im:-self.im}}
+    pub fn norm_sqr(self)->f64{self.re*self.re+self.im*self.im}
+    pub fn abs(self)->f64{self.re.hypot(self.im)}
+    /// e^{iφ}.
+    pub fn cis(phase:f64)->Complex{let(sin,cos)=phase.sin_cos();Complex{re:cos,im:sin}}
+}
+impl Add for Complex{type Output=Complex;fn add(self,b:Complex)->Complex{Complex{re:self.re+b.re,im:self.im+b.im}}}
+impl Sub for Complex{type Output=Complex;fn sub(self,b:Complex)->Complex{Complex{re:self.re-b.re,im:self.im-b.im}}}
+impl Mul for Complex{type Output=Complex;fn mul(self,b:Complex)->Complex{Complex{re:self.re*b.re-self.im*b.im,im:self.re*b.im+self.im*b.re}}}
+impl Mul<f64> for Complex{type Output=Complex;fn mul(self,s:f64)->Complex{Complex{re:self.re*s,im:self.im*s}}}
+impl Div for Complex{type Output=Complex;fn div(self,b:Complex)->Complex{self*b.conj()*(1./b.norm_sqr())}}
+impl Neg for Complex{type Output=Complex;fn neg(self)->Complex{Complex{re:-self.re,im:-self.im}}}
+impl AddAssign for Complex{fn add_assign(&mut self,b:Complex){*self=*self+b;}}
+impl SubAssign for Complex{fn sub_assign(&mut self,b:Complex){*self=*self-b;}}
+
+/// A dense complex matrix, row-major.
+#[derive(Clone,Debug,PartialEq)]
+pub struct Dense{pub rows:usize,pub cols:usize,pub entries:Vec<Complex>}
+impl Index<(usize,usize)> for Dense{type Output=Complex;fn index(&self,(i,j):(usize,usize))->&Complex{&self.entries[i*self.cols+j]}}
+impl IndexMut<(usize,usize)> for Dense{fn index_mut(&mut self,(i,j):(usize,usize))->&mut Complex{&mut self.entries[i*self.cols+j]}}
+impl Dense{
+    pub fn zeros(rows:usize,cols:usize)->Dense{Dense{rows,cols,entries:vec![Complex::ZERO;rows*cols]}}
+    pub fn from_fn(rows:usize,cols:usize,mut entry:impl FnMut(usize,usize)->Complex)->Dense{
+        Dense{rows,cols,entries:(0..rows*cols).map(|k|entry(k/cols,k%cols)).collect()}
+    }
+    /// The rows × cols block of a model matrix.
+    pub fn block(matrix:&Matrix,rows:&[usize],cols:&[usize])->Dense{
+        Dense::from_fn(rows.len(),cols.len(),|i,j|{let k=rows[i]*STATES+cols[j];Complex{re:matrix.real[k],im:matrix.imag[k]}})
+    }
+    pub fn adjoint(&self)->Dense{Dense::from_fn(self.cols,self.rows,|i,j|self[(j,i)].conj())}
+    /// self · b.
+    pub fn product(&self,b:&Dense)->Dense{
+        assert_eq!(self.cols,b.rows);let mut out=Dense::zeros(self.rows,b.cols);
+        for i in 0..self.rows{for k in 0..self.cols{let x=self[(i,k)];if x==Complex::ZERO{continue;}
+            for j in 0..b.cols{out[(i,j)]+=x*b[(k,j)];}}}
+        out
+    }
+    /// self† · b.
+    pub fn adjoint_product(&self,b:&Dense)->Dense{
+        assert_eq!(self.rows,b.rows);let mut out=Dense::zeros(self.cols,b.cols);
+        for k in 0..self.rows{for i in 0..self.cols{let x=self[(k,i)].conj();if x==Complex::ZERO{continue;}
+            for j in 0..b.cols{out[(i,j)]+=x*b[(k,j)];}}}
+        out
+    }
+    /// self += z b.
+    pub fn add_scaled(&mut self,z:Complex,b:&Dense){
+        assert_eq!((self.rows,self.cols),(b.rows,b.cols));for(x,&y)in self.entries.iter_mut().zip(&b.entries){*x+=z*y;}
+    }
+    pub fn scaled(&self,z:Complex)->Dense{Dense{rows:self.rows,cols:self.cols,entries:self.entries.iter().map(|&x|z*x).collect()}}
+    pub fn is_zero(&self)->bool{self.entries.iter().all(|&x|x==Complex::ZERO)}
+    /// The largest entry's modulus.
+    pub fn largest(&self)->f64{self.entries.iter().fold(0.,|a,x|a.max(x.abs()))}
+    /// ‖self‖₂, the largest singular value.
+    pub fn spectral_norm(&self)->f64{
+        let gram=if self.rows>=self.cols{self.adjoint_product(self)}else{self.product(&self.adjoint())};
+        hermitian_eigenvalues(&gram).into_iter().fold(0.,f64::max).sqrt()
+    }
+}
+
+/// The LU factorization with partial pivoting of a square matrix: its rows permuted, A = L U.
+#[derive(Clone,Debug)]
+pub struct Lu{factors:Dense,pivots:Vec<usize>}
+impl Lu{
+    /// None when a pivot vanishes: the matrix is singular.
+    pub fn new(matrix:&Dense)->Option<Lu>{
+        let n=matrix.rows;assert_eq!(n,matrix.cols);let mut a=matrix.clone();let mut pivots=vec![0;n];
+        for k in 0..n{
+            let p=(k..n).max_by(|&i,&j|a[(i,k)].norm_sqr().total_cmp(&a[(j,k)].norm_sqr())).unwrap();
+            if a[(p,k)]==Complex::ZERO{return None;}
+            pivots[k]=p;for j in 0..n{a.entries.swap(k*n+j,p*n+j);}
+            let pivot=a[(k,k)];
+            for i in k+1..n{let factor=a[(i,k)]/pivot;a[(i,k)]=factor;for j in k+1..n{let u=a[(k,j)];a[(i,j)]-=factor*u;}}
+        }
+        Some(Lu{factors:a,pivots})
+    }
+    /// b ← A⁻¹ b.
+    pub fn solve(&self,b:&mut [Complex]){
+        let a=&self.factors;let n=a.rows;
+        for(k,&p)in self.pivots.iter().enumerate(){b.swap(k,p);}
+        for i in 0..n{let mut x=b[i];for j in 0..i{x-=a[(i,j)]*b[j];}b[i]=x;}
+        for i in (0..n).rev(){let mut x=b[i];for j in i+1..n{x-=a[(i,j)]*b[j];}b[i]=x/a[(i,i)];}
+    }
+    /// A⁻¹ b for every column of b.
+    pub fn solve_columns(&self,b:&Dense)->Dense{
+        let mut out=b.clone();let mut column=vec![Complex::ZERO;b.rows];
+        for j in 0..b.cols{for i in 0..b.rows{column[i]=b[(i,j)];}self.solve(&mut column);for i in 0..b.rows{out[(i,j)]=column[i];}}
+        out
+    }
+}
+
+/// The eigenvalues of a Hermitian matrix: cyclic Jacobi rotations until the off-diagonal part is
+/// below the double precision of the matrix or stops shrinking.
+pub fn hermitian_eigenvalues(matrix:&Dense)->Vec<f64>{
+    let n=matrix.rows;let mut a=matrix.clone();
+    let total:f64=a.entries.iter().map(|x|x.norm_sqr()).sum();
+    let mut previous=f64::INFINITY;
+    loop{
+        let off:f64=(0..n).map(|i|(0..n).filter(|&j|j!=i).map(|j|a[(i,j)].norm_sqr()).sum::<f64>()).sum();
+        if off<=f64::EPSILON*f64::EPSILON*total||off>=previous{break;}
+        previous=off;
+        for p in 0..n{for q in p+1..n{
+            let modulus=a[(p,q)].abs();if modulus==0.{continue;}
+            // A unitary phase on q makes a_pq real and positive; a real rotation in (p, q) then zeroes it.
+            let phase=a[(p,q)]*(1./modulus);
+            for k in 0..n{a[(k,q)]=a[(k,q)]*phase.conj();a[(q,k)]=a[(q,k)]*phase;}
+            let tau=(a[(q,q)].re-a[(p,p)].re)/(2.*modulus);
+            let t=tau.signum()/(tau.abs()+(1.+tau*tau).sqrt());let c=1./(1.+t*t).sqrt();let s=t*c;
+            for k in 0..n{let(x,y)=(a[(k,p)],a[(k,q)]);a[(k,p)]=x*c-y*s;a[(k,q)]=x*s+y*c;}
+            for k in 0..n{let(x,y)=(a[(p,k)],a[(q,k)]);a[(p,k)]=x*c-y*s;a[(q,k)]=x*s+y*c;}
+            a[(p,q)]=Complex::ZERO;a[(q,p)]=Complex::ZERO;
+        }}
+    }
+    (0..n).map(|i|a[(i,i)].re).collect()
+}
+
+/// A reproducible stream of numbers uniform in [−½, ½), for the tests.
+#[cfg(test)]
+pub(crate) fn uniform(seed:u64)->impl FnMut()->f64{
+    let mut state=seed;
+    move||{state=state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);(state>>11) as f64/(1u64<<53) as f64-0.5}
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    /// A reproducible matrix of unit-scale entries.
+    fn sample(rows:usize,cols:usize,seed:u64)->Dense{let mut next=uniform(seed);Dense::from_fn(rows,cols,|_,_|Complex::new(next(),next()))}
+    #[test]
+    fn the_lu_solves_and_the_jacobi_eigenvalues_give_the_spectral_norm(){
+        let a=sample(24,24,1);let b=sample(24,3,2);
+        let x=Lu::new(&a).unwrap().solve_columns(&b);let mut residual=a.product(&x);residual.add_scaled(-Complex::ONE,&b);
+        assert!(residual.largest()<=1e-12*b.largest(),"{}",residual.largest());
+        // A Hermitian matrix with known eigenvalues: U diag(d) U†, U unitary from a Hermitian H's Cayley transform.
+        let h=sample(6,6,3);let h=Dense::from_fn(6,6,|i,j|(h[(i,j)]+h[(j,i)].conj())*0.5);
+        let mut plus=h.scaled(Complex::I);let mut minus=h.scaled(-Complex::I);for i in 0..6{plus[(i,i)]+=Complex::ONE;minus[(i,i)]+=Complex::ONE;}
+        let u=Lu::new(&plus).unwrap().solve_columns(&minus);
+        let d=[3.,-1.,0.5,2.,-4.,1e-3];let diagonal=Dense::from_fn(6,6,|i,j|if i==j{Complex::new(d[i],0.)}else{Complex::ZERO});
+        let mut eigen=hermitian_eigenvalues(&u.product(&diagonal).product(&u.adjoint()));eigen.sort_by(f64::total_cmp);
+        let mut expected=d.to_vec();expected.sort_by(f64::total_cmp);
+        assert!(eigen.iter().zip(&expected).all(|(x,y)|(x-y).abs()<=1e-13),"{eigen:?}");
+        assert!((u.product(&diagonal).spectral_norm()-4.).abs()<=1e-13);
+    }
+}
