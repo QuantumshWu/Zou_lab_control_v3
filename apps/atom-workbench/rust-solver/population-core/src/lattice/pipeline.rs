@@ -216,7 +216,7 @@ impl Progress{
     /// otherwise (its space no longer growing, its basis memory spent) ends
     /// sooner. Measured on trajectories of 4 to 9 checkpoints (1 to 14 s):
     /// predicted / actual 0.2 to 1.9, median 0.74 from the third checkpoint,
-    /// 0.7 to 2.5 before it (sub-second runs up to 3.6); the mean rate is
+    /// 0.4 to 2.4 before it (sub-second runs up to 3.6); the mean rate is
     /// stable where the latest one is not (a plateau, one step of ratio 1,
     /// asked for the whole budget: six times what was left).
     pub fn remaining_ms(&self,stops:bool)->Option<f64>{

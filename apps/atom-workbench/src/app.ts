@@ -284,7 +284,7 @@ function solverStatus():[string,StatusWord,string?,string?]{
   }
   // A motion result whose later samples are the continuation's says from when; what that is, in the tooltip.
   if(motion){
-    const from=result.motion?.continuedFromUs,since=from===undefined?'':`t > ${durationText(from,dynamics().durationUnit)} 为延拓`;
+    const from=result.motion?.continuedFromUs,since=from===undefined?'':`t > ${continuedSince(from)} 为延拓`;
     return [['1D 运动已计算',since,partial].filter(Boolean).join(' · '),partial?'warning':'idle',elapsed,since?['1D 运动已计算',`${since}（${CONTINUATION_WORDS}）`,partial].filter(Boolean).join(' · '):undefined];
   }
   if(resultPage()==='dynamics'){
@@ -1212,9 +1212,11 @@ function renderDynamics(a:Analysis):void{
   const legend=!(result&&result.timesUs.length>1)?'':continuation+(banded?`<span class="population-legend accuracy-legend"><span class="accuracy-swatch" aria-hidden="true"></span>估计误差 &gt; ${errorPercent(POPULATION_TOLERANCE)}</span>`:'')+ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
   caption(legend);
 }
+/** A continuation's last simulated time (us): a computed time, three digits, in the duration's unit. */
+function continuedSince(us:number):string{const unit=timeDisplayUnit(us,dynamics().durationUnit);return `${formatNumber(us*unit.factor,{digits:3})} ${unit.name}`;}
 /** The legend entry of a 1D motion result's continuation, after the last simulated time `from` (us). */
 function continuationLegend(from:number):string{
-  return `<span class="population-legend continuation-legend" title="${esc(CONTINUATION_WORDS)}"><span class="continuation-swatch" aria-hidden="true"></span>t &gt; ${esc(durationText(from,dynamics().durationUnit))} 延拓（由模拟历史预测）</span>`;
+  return `<span class="population-legend continuation-legend" title="${esc(CONTINUATION_WORDS)}"><span class="continuation-swatch" aria-hidden="true"></span>t &gt; ${esc(continuedSince(from))} 延拓（由模拟历史预测）</span>`;
 }
 
 /** The 沿 B shortcut the selected light's direction is now wears the active face. */

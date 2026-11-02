@@ -82,7 +82,7 @@ const svg=(cls:string,label:string,body:string)=>`<svg class="chart-svg ${cls}" 
  * last simulated time `continuedFromUs`, on their band across both. */
 export function seriesChart(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit,continuedFromUs?:number):string{
   const g=seriesLayout(timesUs,series,timeUnit),xs=timesUs.map(g.x);
-  let body=continuedFromUs===undefined?'':continuationBand(g.x(continuedFromUs),RIGHT,g.panels[0].top,g.panels[1].bottom,`${digits(continuedFromUs*g.unit.factor)} ${g.unit.name}`);
+  let body=continuedFromUs===undefined?'':continuationBand(g.x(continuedFromUs),RIGHT,g.panels[0].top,g.panels[1].bottom,`${formatNumber(continuedFromUs*g.unit.factor,{digits:3})} ${g.unit.name}`);
   for(const p of g.panels)for(const v of p.ticks){const y=p.y(v/p.series.unit.factor);body+=line(LEFT,y,RIGHT,y,`stroke="${GRID}"`)+text(LEFT-12,y+4,digits(v),'text-anchor="end"');}
   for(let i=0;i<=4;i++){const t=timesUs[0]!+(timesUs.at(-1)!-timesUs[0]!)*i/4;body+=text(g.x(t),g.panels[1].bottom+24,digits(t*g.unit.factor),'text-anchor="middle"');}
   body+=text(LEFT,19,g.panels[0].series.title)+text(LEFT,g.panels[1].top-8,g.panels[1].series.title)+text(RIGHT,g.panels[1].bottom+47,`t / ${g.unit.name}`,'text-anchor="end"');

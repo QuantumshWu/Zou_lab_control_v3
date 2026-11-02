@@ -20,8 +20,9 @@ const esc=(value:unknown)=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<'
 /** What a 1D motion result's continuation is (ui-design.md §6.20). */
 export const CONTINUATION_WORDS='延拓，由模拟历史预测，不是逐步模拟';
 /** The continuation's part of a time chart, from plot x `from` (the last simulated time, written
- * `since`) to `to`: a light translucent band behind the curves (the grid shows through), its edge
- * dashed, labelled 延拓 (inside it when it has room, else before its edge), its tooltip what it is. */
+ * `since`: a computed time, three digits) to `to`: a light translucent band behind the curves (the
+ * grid shows through), its edge dashed, labelled 延拓 (inside it when it has room, else before its
+ * edge), its tooltip what it is. */
 export function continuationBand(from:number,to:number,top:number,bottom:number,since:string):string{
   const room=to-from>=32,x=from.toFixed(4);
   return `<g class="continuation"><rect class="continuation-band" x="${x}" y="${top}" width="${Math.max(0,to-from).toFixed(4)}" height="${bottom-top}" fill="#5d87b0" fill-opacity="0.09"><title>${esc(`t > ${since}：${CONTINUATION_WORDS}`)}</title></rect>`+
@@ -94,7 +95,7 @@ export function populationChart(result:PopulationPlot,monitoredIds:string[],labe
   const errors=sampleErrors(result),runs=errors?outsideRuns(errors):[],n=result.timesUs.length;
   const outside=(i:number)=>!!errors&&errors[i]!>POPULATION_TOLERANCE;
   // A 1D motion result's continuation: the samples after the last simulated time, on their band.
-  const from=options.continuedFromUs;if(from!==undefined)svg+=continuationBand(x(from),right,top,bottom,`${digits(from*g.unit.factor)} ${g.unit.name}`);
+  const from=options.continuedFromUs;if(from!==undefined)svg+=continuationBand(x(from),right,top,bottom,`${Number((from*g.unit.factor).toPrecision(3))} ${g.unit.name}`);
   for(const [a,b] of runs){
     const from=a>0?(x(result.timesUs[a-1]!)+x(result.timesUs[a]!))/2:x(result.timesUs[a]!),to=b<n-1?(x(result.timesUs[b]!)+x(result.timesUs[b+1]!))/2:x(result.timesUs[b]!);
     const worst=Math.max(...errors!.slice(a,b+1));
