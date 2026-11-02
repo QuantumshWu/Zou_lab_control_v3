@@ -30,8 +30,16 @@ fn main(){
         for m in model.ground.folds.iter_mut().chain(model.ground.outside.iter_mut()){for &i in &excited{for &j in &excited{m[(i,j)]=atom_motion_core::Complex::ZERO;}}}
     }
     model.tabulate(grid.reach()).unwrap();
-    // DIAGNOSTIC: a harmonic trap and light independent of the radius -- separable in x and y.
-    if std::env::var("ATOM_GPU_HARMONIC").is_ok(){
+    // DIAGNOSTIC: the light independent of the radius (the focus's responses everywhere), the
+    // tweezer's trap kept: what the light's radial dependence does, apart from the trap's.
+    if std::env::var("ATOM_GPU_UNIFORM_LIGHT").is_ok(){
+        let e0=model.radial.eliminations[0].clone();
+        for e in model.radial.eliminations.iter_mut(){e.responses=e0.responses.clone();e.derivatives=e0.derivatives.clone();}
+    }
+    // DIAGNOSTIC: a harmonic trap and light independent of the radius -- separable in x and y;
+    // with ATOM_GPU_HARMONIC_TRAP the trap alone harmonic, the light's radial dependence kept.
+    let harmonic_trap=std::env::var("ATOM_GPU_HARMONIC_TRAP").is_ok();
+    if std::env::var("ATOM_GPU_HARMONIC").is_ok()||harmonic_trap{
         let step=model.radial.step;let e0=model.radial.eliminations[0].clone();let e1=model.radial.eliminations[1].clone();
         for(k,e)in model.radial.eliminations.iter_mut().enumerate(){
             let rho=k as f64*step;
@@ -39,12 +47,12 @@ fn main(){
                 let c=2.*(e1.energies[b]-e0.energies[b])/(step*step);let u=e0.energies[b]+0.5*c*rho*rho;
                 let shift=u-e.energies[b];e.energies[b]=u;e.hamiltonian[(b,b)].re+=shift;
             }
-            e.responses=e0.responses.clone();e.derivatives=e0.derivatives.clone();
+            if !harmonic_trap{e.responses=e0.responses.clone();e.derivatives=e0.derivatives.clone();}
         }
     }
     let g=&model.ground;
     let doppler_every=(1./dt).round() as usize;
-    let settings=Settings{grid,dt,doppler_every,trajectories:b,seed,cap:(half>ABSORB).then_some(Cap{start:ABSORB,rate:20.})};
+    let settings=Settings{grid,dt,doppler_every,trajectories:b,seed,cap:(half>ABSORB).then_some(Cap{start:ABSORB,rate:20.}),scene:0};
     let start=std::time::Instant::now();
     let mut engine=Engine::new(std::rc::Rc::new(Gpu::new().unwrap()),&model,settings).unwrap();
     println!("{} x {}, dx {:.2} nm (k_max {:.0} hbar k), dt {dt} us, o1 every {doppler_every}, {b} trajectories; tables {:.2} s",

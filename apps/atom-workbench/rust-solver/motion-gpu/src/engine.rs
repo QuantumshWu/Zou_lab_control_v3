@@ -134,12 +134,102 @@ fn planar(matrices:&[&Dense])->Vec<[f32;2]>{
 
 /// A pair of device tables for the two blocks (F = 2: 5 × 5, F = 1: 3 × 3).
 struct Local{m5:Buffer,m3:Buffer}
-impl Local{
-    fn new(gpu:&Gpu,points:&[Point],matrix:impl Fn(&Point,usize)->Dense+Sync)->Result<Local,String>{
+/// A pair of local tables on the host, in the kernels' layout (`planar`).
+struct Planar{m5:Vec<[f32;2]>,m3:Vec<[f32;2]>}
+impl Planar{
+    fn new(points:&[Point],matrix:impl Fn(&Point,usize)->Dense+Sync)->Planar{
         let m5:Vec<Dense>=points.par_iter().map(|p|matrix(p,1)).collect();let m3:Vec<Dense>=points.par_iter().map(|p|matrix(p,0)).collect();
-        let upload=|ms:&Vec<Dense>|->Result<Buffer,String>{let data=planar(&ms.iter().collect::<Vec<_>>());let b=Buffer::new(data.len()*8)?;gpu.stream.upload(&b,&data)?;Ok(b)};
-        Ok(Local{m5:upload(&m5)?,m3:upload(&m3)?})
+        Planar{m5:planar(&m5.iter().collect::<Vec<_>>()),m3:planar(&m3.iter().collect::<Vec<_>>())}
     }
+}
+impl Local{
+    fn new(gpu:&Gpu,tables:&Planar)->Result<Local,String>{
+        let upload=|data:&Vec<[f32;2]>|->Result<Buffer,String>{let b=Buffer::new(data.len()*8)?;gpu.stream.upload(&b,data)?;Ok(b)};
+        Ok(Local{m5:upload(&tables.m5)?,m3:upload(&tables.m3)?})
+    }
+}
+
+/// An engine's tables on the host: everything its grid, step and absorbing boundary fix for the
+/// scene. Built once per scene, grid, step and boundary and kept across solves (`tables`).
+struct Tables{
+    step_v:Planar,back_v:Planar,forward_v:Planar,doppler_x:Planar,doppler_y:Planar,
+    jump:Vec<[f32;2]>,response:Vec<[f32;2]>,radial_step:f32,radii:usize,beams:Vec<f32>,beam_count:usize,carriers:usize,
+    caps:Vec<f32>,wave_numbers:Vec<f32>,order:Vec<i32>,energies:Vec<Vec<f64>>,
+}
+/// The tables of the last scene's engines, by grid, step and boundary.
+type TableKey=(usize,usize,u64,u64,Option<(u64,u64)>);
+static TABLES:std::sync::Mutex<Option<(u64,HashMap<TableKey,std::sync::Arc<Tables>>)>>=std::sync::Mutex::new(None);
+/// The engine's tables: kept from an earlier solve of the same scene (`Settings::scene`, 0: never
+/// kept), else built. A new scene drops the last one's.
+fn tables(model:&Model,settings:&Settings)->Result<std::sync::Arc<Tables>,String>{
+    let g=settings.grid;
+    let key:TableKey=(g.nx,g.ny,g.dx.to_bits(),settings.dt.to_bits(),settings.cap.map(|c|(c.start.to_bits(),c.rate.to_bits())));
+    if settings.scene!=0{
+        let cache=TABLES.lock().map_err(|_|"table cache poisoned".to_string())?;
+        if let Some(t)=cache.as_ref().filter(|(scene,_)|*scene==settings.scene).and_then(|(_,entries)|entries.get(&key)){return Ok(t.clone());}
+    }
+    let built=std::sync::Arc::new(build_tables(model,settings)?);
+    if settings.scene!=0{
+        let mut cache=TABLES.lock().map_err(|_|"table cache poisoned".to_string())?;
+        if cache.as_ref().is_none_or(|(scene,_)|*scene!=settings.scene){*cache=Some((settings.scene,HashMap::new()));}
+        cache.as_mut().unwrap().1.insert(key,built.clone());
+    }
+    Ok(built)
+}
+fn build_tables(model:&Model,settings:&Settings)->Result<Tables,String>{
+    let g=settings.grid;let points=g.points();
+    let cap=settings.cap;
+    let cap_at=|r:[f64;3]|cap.map_or(0.,|c|c.at(&g,r));
+    let table=model.points(&g,&cap_at);
+    let dt=settings.dt;
+    let step_v=Planar::new(&table,|p,k|propagator(&p.generator[k],dt));
+    let back_v=Planar::new(&table,|p,k|propagator(&p.generator[k],-dt/2.));
+    let forward_v=Planar::new(&table,|p,k|propagator(&p.generator[k],dt/2.));
+    let doppler_x=Planar::new(&table,|p,k|p.doppler[k][0].clone());
+    let doppler_y=Planar::new(&table,|p,k|p.doppler[k][1].clone());
+    let ground=&model.ground;let carriers=ground.carriers.len();
+    if carriers>2{return Err("2D 运动最多支持两组近共振载波".into());}
+    let(ne,ng)=(ground.excited_states.len(),ground.ground_states.len());
+    if ne!=24||ng!=8{return Err("2D 运动需要完整的 Rb87 32 态模型".into());}
+    // The near beams' responses along the radius, linear between radii a quarter of the
+    // model's radial step apart (its Catmull-Rom interpolation to RADIAL_TOLERANCE between
+    // them): R_l and C_a R_l, C_a R2_l on the ground states in block order (F = 1, then F = 2).
+    let near:Vec<(usize,usize)>=ground.carriers.iter().enumerate().flat_map(|(c,carrier)|carrier.beams.iter().map(move|&l|(c,l))).collect();
+    let order:Vec<usize>=model.block_states[0].iter().chain(&model.block_states[1]).copied().collect();
+    let step=model.radial.step/4.;let radii=(g.reach()/step).ceil() as usize+2;
+    let slots=near.len().max(1);
+    let columns:Vec<(Vec<[f32;2]>,Vec<[f32;2]>)>=(0..radii).into_par_iter().map(|k|{
+        let e=model.radial.at(k as f64*step);
+        let(mut jump,mut response)=(vec![[0f32;2];slots*2*3*8*8],vec![[0f32;2];slots*ne*8]);
+        for(slot,&(_,l))in near.iter().enumerate(){
+            for(term,m)in [&e.responses[l],&e.derivatives[l]].into_iter().enumerate(){for a in 0..3{
+                let cm=ground.emission[a].product(m);
+                for gr in 0..8{for h in 0..8{jump[(((slot*2+term)*3+a)*8+gr)*8+h]=complex32(cm[(order[gr],order[h])]);}}
+            }}
+            for i in 0..ne{for h in 0..8{response[(slot*ne+i)*8+h]=complex32(e.responses[l][(i,order[h])]);}}
+        }
+        (jump,response)
+    }).collect();
+    let mut jump_table=vec![[0f32;2];slots*2*3*8*8*radii];let mut response_table=vec![[0f32;2];slots*ne*8*radii];
+    for(k,(jump,response))in columns.iter().enumerate(){
+        for(i,z)in jump.iter().enumerate(){jump_table[i*radii+k]=*z;}
+        for(i,z)in response.iter().enumerate(){response_table[i*radii+k]=*z;}
+    }
+    let hm=model.hbar_over_mass;
+    let mut beam_table=vec![0f32;near.len().max(1)*8];
+    for(slot,&(c,l))in near.iter().enumerate(){
+        let k=model.in_plane[l];let beam=&ground.beams[l];
+        beam_table[slot*8..slot*8+7].copy_from_slice(&[c as f32,k[0] as f32,k[1] as f32,beam.waist_um.map_or(0.,|w|1./(w*w)) as f32,
+            (hm*(k[0]*k[0]+k[1]*k[1])/2.) as f32,(hm*k[0]) as f32,(hm*k[1]) as f32]);
+    }
+    let caps:Vec<f32>=(0..points).map(|p|cap_at(g.position(p)) as f32).collect();
+    let wave_numbers:Vec<f32>=ground.carriers.iter().map(|c|c.wave_number as f32).collect();
+    // The points by radius (kernels reading the radial tables take them in this order).
+    let radius2=|p:usize|{let r=g.position(p);r[0]*r[0]+r[1]*r[1]};
+    let mut by_radius:Vec<i32>=(0..points as i32).collect();by_radius.sort_by(|&a,&b|radius2(a as usize).total_cmp(&radius2(b as usize)).then(a.cmp(&b)));
+    let energies:Vec<Vec<f64>>=(0..ng).map(|b|table.iter().map(|p|p.energies[b]).collect()).collect();
+    Ok(Tables{step_v,back_v,forward_v,doppler_x,doppler_y,jump:jump_table,response:response_table,radial_step:step as f32,radii,beams:beam_table,beam_count:near.len(),carriers,
+        caps,wave_numbers,order:by_radius,energies})
 }
 
 /// The kernels' `Trajectories`, `Local` and `Jumps` structs as launch arguments.
@@ -167,6 +257,8 @@ pub struct Settings{
     pub seed:u64,
     /// The absorbing boundary, if any.
     pub cap:Option<Cap>,
+    /// The scene's identity for the tables kept across solves (0: built afresh, never kept).
+    pub scene:u64,
 }
 
 /// An absorbing potential: rate × min(((ρ − start)/(half − start)), 1.5)² beyond the radius `start`
@@ -228,62 +320,16 @@ impl Engine{
         if !GRIDS.contains(&(nx,ny)){return Err(format!("no kernels for a {nx} x {ny} grid"));}
         let points=g.points();let tiles=points.div_ceil(THREADS);let b=settings.trajectories;
         if model.radial.eliminations.is_empty()||model.radial.reach()<g.reach(){return Err("Model::tabulate must reach the grid's corners".into());}
-        let cap=settings.cap;
-        let cap_at=|r:[f64;3]|cap.map_or(0.,|c|c.at(&g,r));
-        let table=model.points(&g,&cap_at);
-        let dt=settings.dt;
-        let step_v=Local::new(&gpu,&table,|p,k|propagator(&p.generator[k],dt))?;
-        let back_v=Local::new(&gpu,&table,|p,k|propagator(&p.generator[k],-dt/2.))?;
-        let forward_v=Local::new(&gpu,&table,|p,k|propagator(&p.generator[k],dt/2.))?;
-        let doppler_x=Local::new(&gpu,&table,|p,k|p.doppler[k][0].clone())?;
-        let doppler_y=Local::new(&gpu,&table,|p,k|p.doppler[k][1].clone())?;
-        let ground=&model.ground;let carriers=ground.carriers.len();
-        if carriers>2{return Err("2D 运动最多支持两组近共振载波".into());}
-        let(ne,ng)=(ground.excited_states.len(),ground.ground_states.len());
-        if ne!=24||ng!=8{return Err("2D 运动需要完整的 Rb87 32 态模型".into());}
-        // The near beams' responses along the radius, linear between radii a quarter of the
-        // model's radial step apart (its Catmull-Rom interpolation to RADIAL_TOLERANCE between
-        // them): R_l and C_a R_l, C_a R2_l on the ground states in block order (F = 1, then F = 2).
-        let near:Vec<(usize,usize)>=ground.carriers.iter().enumerate().flat_map(|(c,carrier)|carrier.beams.iter().map(move|&l|(c,l))).collect();
-        let order:Vec<usize>=model.block_states[0].iter().chain(&model.block_states[1]).copied().collect();
-        let step=model.radial.step/4.;let radii=(g.reach()/step).ceil() as usize+2;
-        let slots=near.len().max(1);
-        let columns:Vec<(Vec<[f32;2]>,Vec<[f32;2]>)>=(0..radii).into_par_iter().map(|k|{
-            let e=model.radial.at(k as f64*step);
-            let(mut jump,mut response)=(vec![[0f32;2];slots*2*3*8*8],vec![[0f32;2];slots*ne*8]);
-            for(slot,&(_,l))in near.iter().enumerate(){
-                for(term,m)in [&e.responses[l],&e.derivatives[l]].into_iter().enumerate(){for a in 0..3{
-                    let cm=ground.emission[a].product(m);
-                    for gr in 0..8{for h in 0..8{jump[(((slot*2+term)*3+a)*8+gr)*8+h]=complex32(cm[(order[gr],order[h])]);}}
-                }}
-                for i in 0..ne{for h in 0..8{response[(slot*ne+i)*8+h]=complex32(e.responses[l][(i,order[h])]);}}
-            }
-            (jump,response)
-        }).collect();
-        let mut jump_table=vec![[0f32;2];slots*2*3*8*8*radii];let mut response_table=vec![[0f32;2];slots*ne*8*radii];
-        for(k,(jump,response))in columns.iter().enumerate(){
-            for(i,z)in jump.iter().enumerate(){jump_table[i*radii+k]=*z;}
-            for(i,z)in response.iter().enumerate(){response_table[i*radii+k]=*z;}
-        }
-        let hm=model.hbar_over_mass;
-        let mut beam_table=vec![0f32;near.len().max(1)*8];
-        for(slot,&(c,l))in near.iter().enumerate(){
-            let k=model.in_plane[l];let beam=&ground.beams[l];
-            beam_table[slot*8..slot*8+7].copy_from_slice(&[c as f32,k[0] as f32,k[1] as f32,beam.waist_um.map_or(0.,|w|1./(w*w)) as f32,
-                (hm*(k[0]*k[0]+k[1]*k[1])/2.) as f32,(hm*k[0]) as f32,(hm*k[1]) as f32]);
-        }
-        let caps:Vec<f32>=(0..points).map(|p|cap_at(g.position(p)) as f32).collect();
-        let wave_numbers:Vec<f32>=ground.carriers.iter().map(|c|c.wave_number as f32).collect();
+        let t=tables(model,&settings)?;let dt=settings.dt;let hm=model.hbar_over_mass;
+        let(step_v,back_v,forward_v,doppler_x,doppler_y)=(Local::new(&gpu,&t.step_v)?,Local::new(&gpu,&t.back_v)?,Local::new(&gpu,&t.forward_v)?,Local::new(&gpu,&t.doppler_x)?,Local::new(&gpu,&t.doppler_y)?);
         let up=|data:&[u8]|->Result<Buffer,String>{let b=Buffer::new(data.len())?;gpu.stream.upload(&b,data)?;Ok(b)};
         let bytes=|v:&[[f32;2]]|->Vec<u8>{v.iter().flat_map(|z|[z[0].to_le_bytes(),z[1].to_le_bytes()].concat()).collect()};
-        let jump_table=up(&bytes(&jump_table))?;let response_table=up(&bytes(&response_table))?;
-        let beams=up(&beam_table.iter().flat_map(|x|x.to_le_bytes()).collect::<Vec<u8>>())?;
-        let cap_buffer=up(&caps.iter().flat_map(|x|x.to_le_bytes()).collect::<Vec<u8>>())?;
-        // The points by radius (kernels reading the radial tables take them in this order).
-        let radius2=|p:usize|{let r=g.position(p);r[0]*r[0]+r[1]*r[1]};
-        let mut order:Vec<i32>=(0..points as i32).collect();order.sort_by(|&a,&b|radius2(a as usize).total_cmp(&radius2(b as usize)).then(a.cmp(&b)));
-        let order=up(&order.iter().flat_map(|x|x.to_le_bytes()).collect::<Vec<u8>>())?;
-        let wave_number=up(&wave_numbers.iter().chain([0f32].iter()).flat_map(|x|x.to_le_bytes()).collect::<Vec<u8>>())?;
+        let jump_table=up(&bytes(&t.jump))?;let response_table=up(&bytes(&t.response))?;
+        let beams=up(&t.beams.iter().flat_map(|x|x.to_le_bytes()).collect::<Vec<u8>>())?;
+        let cap_buffer=up(&t.caps.iter().flat_map(|x|x.to_le_bytes()).collect::<Vec<u8>>())?;
+        let order=up(&t.order.iter().flat_map(|x|x.to_le_bytes()).collect::<Vec<u8>>())?;
+        let wave_number=up(&t.wave_numbers.iter().chain([0f32].iter()).flat_map(|x|x.to_le_bytes()).collect::<Vec<u8>>())?;
+        let(radii,step,carriers,beam_count,energies)=(t.radii,t.radial_step,t.carriers,t.beam_count,t.energies.clone());
         // Kinetic factors per frequency position (bit-reversed), with each inverse transform's 1/N.
         let factors=|n:usize,f:&dyn Fn(f64)->Complex|->Vec<[f32;2]>{(0..n).map(|j|{let k=if n==1{0.}else{g.wave_number(bitrev(j,n),n)};complex32(f(k)*(1./n as f64))}).collect()};
         let pair=|f:&dyn Fn(f64)->Complex|->Result<[Buffer;2],String>{Ok([up(&bytes(&factors(nx,f)))?,up(&bytes(&factors(ny,f)))?])};
@@ -294,7 +340,6 @@ impl Engine{
         let kappa=[up(&kappa_of(nx))?,up(&kappa_of(ny))?];
         let reach=0.7;let kmax=std::f64::consts::PI/g.dx;
         let tails=[(reach*g.half_width()) as f32,(reach*g.half_width()) as f32,(reach*kmax) as f32,(reach*kmax) as f32];
-        let energies:Vec<Vec<f64>>=(0..ng).map(|b|table.iter().map(|p|p.energies[b]).collect()).collect();
         let planes=Planes::new(&gpu,nx,ny)?;
         let zeroed=|bytes:usize|->Result<Buffer,String>{let b=Buffer::new(bytes)?;gpu.stream.zero(&b)?;Ok(b)};
         let state_bytes=b*COMPONENTS*points*8;
@@ -303,7 +348,7 @@ impl Engine{
             ids:{let v:Vec<u32>=(0..b as u32).collect();let x=Buffer::new(b*4)?;gpu.stream.upload(&x,&v)?;x},components:zeroed(b*4)?,scale:zeroed(b*4)?,log_norm:zeroed(b*8)?,threshold:zeroed(b*8)?,jumps:zeroed(b*4)?,weights:zeroed(b*4)?,
             partial:zeroed(b*tiles*4)?,jumpers:zeroed(b*4)?,count:zeroed(4)?,rates:zeroed(b*tiles*G_SLOTS*4)?,choices:zeroed(b*CHOICE*4)?,
             records:zeroed(b*RECORD*4)?,marginal_x:zeroed(nx*4)?,marginal_y:zeroed(ny*4)?,density:zeroed(points*4)?,scratch_x:zeroed(nx*4)?,scratch_y:zeroed(ny*4)?,
-            step_v,back_v,forward_v,doppler_x,doppler_y,jump_table,response_table,radial_step:step as f32,radii,beams,beam_count:near.len(),
+            step_v,back_v,forward_v,doppler_x,doppler_y,jump_table,response_table,radial_step:step,radii,beams,beam_count,
             cap:cap_buffer,wave_number,carriers,order,energies,
             kinetic_full,kinetic_half,derivative,kappa,tails,
             planes,

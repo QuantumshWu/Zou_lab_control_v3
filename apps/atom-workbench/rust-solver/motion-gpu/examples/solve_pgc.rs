@@ -1,6 +1,7 @@
 //! The 2D solve end to end on the app's tweezer PGC example in the radial plane:
-//! `cargo run --profile iterate --example solve_pgc -- [t_end_us] [spacing_us] [temperature_uK] [payload.json]` -- a payload already in
-//! the plane's frame (default: the example with beams along x, turned into the plane).
+//! `cargo run --profile iterate --example solve_pgc -- [t_end_us] [spacing_us] [temperature_uK] [payload.json] [runs]` -- a payload
+//! already in the plane's frame (default: the example with beams along x, turned into the plane);
+//! `runs` solves in one process (the later ones find the tables of the first).
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_gpu::solve::solve;
 
@@ -10,6 +11,8 @@ fn main(){
     let mut request=match args.get(4){Some(path)=>scene::load(path),None=>scene::turned(scene::load(scene::PGC))};
     request.temperature_uk=temperature;request.tolerance=0.01;
     request.times_us=(0..=((t_end/spacing).round() as usize)).map(|i|i as f64*spacing).collect();
+    for run in 0..(arg(5,1.) as usize){
+    if run>0{request.temperature_uk*=1.001;println!("-- run {} (same scene, another temperature)",run+1);}
     let started=std::time::Instant::now();
     let report=|s:&atom_motion_gpu::solution::Solution,label:&str|{
         let n=s.temperature_uk.len();
@@ -26,4 +29,5 @@ fn main(){
         println!("running: {:.0} of {:.0} us, {} trajectories done, {}",r.simulated_us,r.duration_us,r.trajectories,r.remaining_ms.map_or("no estimate yet".into(),|ms|format!("about {:.0} s left",ms/1e3)));}).unwrap();
     report(&solution,"final");
     println!("{}",solution.method);
+    }
 }

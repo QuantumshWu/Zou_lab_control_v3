@@ -30,6 +30,13 @@ const BATCH_SECONDS:f64=30.;
 /// How often a running solve says so between its checkpoints (s): well within the app's
 /// two-minute deadline, however long a batch runs.
 pub const BEAT_SECONDS:f64=10.;
+/// The scene's identity for the tables kept across solves: a hash of what the tables depend on
+/// (the model and the mass; not the initial state, the times or the targets). Never 0.
+fn scene(request:&Request)->u64{
+    use std::hash::{Hash,Hasher};
+    let mut r=request.clone();r.times_us.clear();r.initial_density.clear();r.temperature_uk=0.;r.tolerance=0.;
+    let mut h=std::collections::hash_map::DefaultHasher::new();format!("{r:?}").hash(&mut h);h.finish().max(1)
+}
 /// The distributions' sample times.
 const DISTRIBUTION_SAMPLES:usize=11;
 /// The absorbing boundary's rate (1/us): an atom crossing it at the escape speed is absorbed
@@ -173,7 +180,7 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool,running
     let per=((spacing/LARGEST_STEP).ceil() as usize).max(1);let dt=spacing/per as f64;
     let n_times=times.len();
     let samples:Vec<usize>={let s=DISTRIBUTION_SAMPLES.min(n_times);let mut v:Vec<usize>=(0..s).map(|k|((k as f64)*(n_times-1) as f64/((s-1).max(1)) as f64).round() as usize).collect();v.dedup();v};
-    let template=Settings{grid:steps_ladder[0],dt,doppler_every:((1./dt).round() as usize).max(1),trajectories:BATCH,seed:0x5EED_2D,cap:Some(Cap{start,rate:CAP_RATE})};
+    let template=Settings{grid:steps_ladder[0],dt,doppler_every:((1./dt).round() as usize).max(1),trajectories:BATCH,seed:0x5EED_2D,cap:Some(Cap{start,rate:CAP_RATE}),scene:scene(request)};
     let(free,_)=gpu.context.memory()?;
     let tolerance=request.tolerance;
     let groups=groups(&request.states)?;
