@@ -2,10 +2,10 @@
 //! meet their targets -- as QuTiP's mcsolve with a target tolerance: the populations' and the
 //! population groups' errors at most ε absolute, the temperatures' at most
 //! `TEMPERATURE_TOLERANCE` relative -- each batch's merged estimates published as a checkpoint.
-//! The first batch is the fewest trajectories; each next one is sized from the last one's wall
-//! time so that it takes about `BATCH_SECONDS` (a batch's cost per trajectory falls with its size,
-//! so the estimate from a smaller batch is an upper bound), and at most to the count the errors
-//! so far project the targets to need.
+//! The first batch is the fewest trajectories; each next one the count the errors so far project
+//! the targets to need, at most `BATCH` (the GPU's throughput per trajectory grows with the
+//! batch, most on the small grids). A batch runs as long as it takes: between checkpoints the
+//! solve says how far it is every `BEAT_SECONDS`, which keeps the app's deadline.
 use crate::engine::{Cap,Internal,Settings,REC_EXCITED,REC_GROUND,REC_KX,REC_TAIL,REC_X};
 use crate::ensemble::{ladder,Ensemble,Place};
 use crate::gpu::Gpu;
@@ -20,13 +20,13 @@ pub const TEMPERATURE_TOLERANCE:f64=0.1;
 /// The step's largest size (us): the splitting's error in T is about 1.5 % at it (against the 1D
 /// reference over 2 ms: −5 % at 0.8 us, within the 2 % statistics at 0.4 and 0.2 us).
 const LARGEST_STEP:f64=0.4;
+/// The fewest steps per radial period: the Strang phase error of the trap, (2π/8)²/24, within the
+/// T tolerance's share (the 1D engine's coarsest step); a period then holds one kick at most per step.
+const COARSEST:f64=8.;
 /// The most trajectories per batch and per run, and the fewest per batch (the kernels' unit).
 const BATCH:usize=512;
 const MOST_TRAJECTORIES:usize=8192;
 const FEWEST:usize=8;
-/// A batch's planned duration (s): checkpoints come about this often while the cost holds (the
-/// app ends a solve whose checkpoints stop for two minutes).
-const BATCH_SECONDS:f64=30.;
 /// How often a running solve says so between its checkpoints (s): well within the app's
 /// two-minute deadline, however long a batch runs.
 pub const BEAT_SECONDS:f64=10.;
@@ -177,10 +177,11 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool,running
     if times.len()<2||times[0]!=0.{return Err("2D 运动需要从 0 开始的等间隔输出时刻".into());}
     let spacing=times[1]-times[0];
     if times.windows(2).any(|w|((w[1]-w[0])-spacing).abs()>1e-9*spacing.max(1.)){return Err("2D 运动需要等间隔的输出时刻".into());}
-    let per=((spacing/LARGEST_STEP).ceil() as usize).max(1);let dt=spacing/per as f64;
+    let period=std::f64::consts::TAU/(0.5*(omega[0]+omega[1]));
+    let per=((spacing/LARGEST_STEP.min(period/COARSEST)).ceil() as usize).max(1);let dt=spacing/per as f64;
     let n_times=times.len();
     let samples:Vec<usize>={let s=DISTRIBUTION_SAMPLES.min(n_times);let mut v:Vec<usize>=(0..s).map(|k|((k as f64)*(n_times-1) as f64/((s-1).max(1)) as f64).round() as usize).collect();v.dedup();v};
-    let template=Settings{grid:steps_ladder[0],dt,doppler_every:((1./dt).round() as usize).max(1),trajectories:BATCH,seed:0x5EED_2D,cap:Some(Cap{start,rate:CAP_RATE}),scene:scene(request)};
+    let template=Settings{grid:steps_ladder[0],dt,period,trajectories:BATCH,seed:0x5EED_2D,cap:Some(Cap{start,rate:CAP_RATE}),scene:scene(request)};
     let(free,_)=gpu.context.memory()?;
     let tolerance=request.tolerance;
     let groups=groups(&request.states)?;
@@ -247,9 +248,8 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool,running
             if let Some(k)=samples.iter().position(|&s|s==i){collect(&mut ensemble,&positions,&velocities,&mut vbins[k],&mut pbins[k])?;}
             ensemble.migrate(&records,&model)?;
         }
-        // The next batch: this one's size scaled to BATCH_SECONDS (the grids' tables, built once, aside).
+        // This batch's wall time per trajectory (the grids' tables, built once, aside).
         let wall=begun.elapsed().as_secs_f64()-(ensemble.seconds[3]-built);
-        size=((batch_size as f64*BATCH_SECONDS/wall.max(1e-3)) as usize/FEWEST*FEWEST).clamp(FEWEST,BATCH);
         run+=batch_size;cost=wall/batch_size as f64;
         solution=assemble(&model,&sums,omega,&samples,&velocities,&vbins,&positions,&pbins,run,ensemble.refused);
         solution.grids=steps_ladder.iter().map(|q|q.nx).collect();solution.census=census.clone();solution.seconds=ensemble.seconds;
@@ -259,12 +259,12 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool,running
         solution.reason=if met{None}else{Some(format!("{run} 条轨迹后：布居的标准误差 {population:.1e}（目标 {tolerance}），温度的相对标准误差 {:.1}%（目标 {:.0}%）",
             100.*temperature_error,100.*TEMPERATURE_TOLERANCE))};
         if met{break;}
-        // The trajectories the targets need, the errors falling as 1/√n, with two standard errors
-        // of the errors' own estimate on top (relative √(1/(2(n−1))), doubled in the squares): the
-        // next batch at most the rest.
+        // The trajectories the targets need, the errors falling as 1/√n: the next batch the rest,
+        // at most BATCH (a batch that falls short is topped up by the next; one sized with a margin
+        // over the estimate would overshoot by the margin every time).
         let ratio=(population/tolerance).max(temperature_error/TEMPERATURE_TOLERANCE);
-        let projected=((run as f64*ratio*ratio*(1.+2.*(2./(run.max(2)-1) as f64).sqrt())).ceil() as usize).min(MOST_TRAJECTORIES);
-        size=size.min(projected.saturating_sub(run).div_ceil(FEWEST)*FEWEST).max(FEWEST);need=Some(projected);
+        let projected=((run as f64*ratio*ratio).ceil() as usize).min(MOST_TRAJECTORIES);
+        size=BATCH.min(projected.saturating_sub(run).div_ceil(FEWEST)*FEWEST).max(FEWEST);need=Some(projected);
         solution.remaining_ms=Some(projected.saturating_sub(run) as f64*cost*1e3);
         if run<MOST_TRAJECTORIES&&!checkpoint(&solution){break;}
         said=std::time::Instant::now();

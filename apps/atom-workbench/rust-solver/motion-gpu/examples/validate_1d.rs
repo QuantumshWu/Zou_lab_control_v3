@@ -51,18 +51,17 @@ fn main(){
         }
     }
     let g=&model.ground;
-    let doppler_every=(1./dt).round() as usize;
-    let settings=Settings{grid,dt,doppler_every,trajectories:b,seed,cap:(half>ABSORB).then_some(Cap{start:ABSORB,rate:20.}),scene:0};
-    let start=std::time::Instant::now();
-    let mut engine=Engine::new(std::rc::Rc::new(Gpu::new().unwrap()),&model,settings).unwrap();
-    println!("{} x {}, dx {:.2} nm (k_max {:.0} hbar k), dt {dt} us, o1 every {doppler_every}, {b} trajectories; tables {:.2} s",
-        grid.nx,grid.ny,grid.dx*1e3,std::f64::consts::PI/grid.dx/8.0528,start.elapsed().as_secs_f64());
     let index=request.states.iter().position(|s|s=="ground-2-2").unwrap();
     let b22=g.ground_states.iter().position(|&i|i==index).unwrap();
+    let omega=model.trap_frequency(b22,0).max(1e-9);let period=std::f64::consts::TAU/omega/std::env::var("ATOM_GPU_KICK_DIVISOR").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(1.);
+    let settings=Settings{grid,dt,period,trajectories:b,seed,cap:(half>ABSORB).then_some(Cap{start:ABSORB,rate:20.}),scene:0};
+    let start=std::time::Instant::now();
+    let mut engine=Engine::new(std::rc::Rc::new(Gpu::new().unwrap()),&model,settings).unwrap();
+    println!("{} x {}, dx {:.2} nm (k_max {:.0} hbar k), dt {dt} us, o1 kick every {period:.2} us, {b} trajectories; tables {:.2} s",
+        grid.nx,grid.ny,grid.dx*1e3,std::f64::consts::PI/grid.dx/8.0528,start.elapsed().as_secs_f64());
     let c22=model.block_states[1].iter().position(|&s|s==b22).unwrap();
     let mut amplitudes=vec![Complex::ZERO;5];amplitudes[c22]=Complex::ONE;
     engine.initialize(&vec![Internal{block:1,amplitudes};b],30.,&model).unwrap();
-    let omega=model.trap_frequency(b22,0).max(1e-9);
     println!("trap {:.2} kHz",omega/std::f64::consts::TAU*1e3);
     let interval_us=50.;let interval=(interval_us/dt).round() as usize;let outputs=(t_end/interval_us).round() as usize;
     let report=|engine:&Engine,t:f64|{
@@ -83,7 +82,7 @@ fn main(){
     engine.observe_initial(false).unwrap();report(&engine,0.);
     if std::env::var("PROFILE").is_ok(){engine.set_profiling(true).unwrap();}
     let run=std::time::Instant::now();
-    for o in 1..=outputs{for s in 0..interval{engine.step(s+1==interval,false).unwrap();}report(&engine,o as f64*interval_us);}
+    for o in 1..=outputs{for s in 0..interval{engine.step(((o-1)*interval+s) as u64,s+1==interval,false).unwrap();}report(&engine,o as f64*interval_us);}
     // The hottest trajectories' share of ⟨κ²⟩: the tail the temperature's mean rests on.
     {let(records,components)=engine.read_records().unwrap();let w=&engine.trajectory_weights;
      let mut k2:Vec<(f64,usize)>=(0..b).filter(|&t|components[t]>0).map(|t|(w[t]*records[t*atom_motion_gpu::engine::RECORD+atom_motion_gpu::engine::REC_KX+2] as f64,t)).collect();

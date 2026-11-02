@@ -3,10 +3,13 @@
 //! # Step
 //! Strang splitting with the kinetic halves merged: the stored state is φ = K(dt/2) ψ, and a step
 //! is V(dt), the jumps, then K(dt). V is the exact local exponential of the block's generator at
-//! each point (model.rs), K the exact kinetic factor per momentum. Every `doppler_every` steps the
-//! Doppler term W·κ̂ is applied over that span, explicitly, to φ just before V (in V's kernel; on
-//! grids in shared memory the kinetic pass before makes κφ). An output splits the step's K into
-//! halves and observes ψ between them.
+//! each point (model.rs), K the exact kinetic factor per momentum. The first-order Doppler term
+//! W·κ̂ is an explicit kick once per radial period P, of span P, applied to φ just before V (in V's
+//! kernel; on grids in shared memory the kinetic pass before makes κφ), at the middle of one
+//! quarter of the period, the quarters taken in turn (`kicks_in`): over four periods the kicks sit
+//! at the four quarter midpoints, the midpoint rule of a period, which integrates the motion's
+//! harmonics up to the third exactly (as the 1D engine, motion-core). An output splits the step's
+//! K into halves and observes ψ between them.
 //!
 //! # Jumps
 //! Waiting times (Dalibard, Castin, Mølmer 1992; QuTiP's mcsolve): each trajectory draws ln r
@@ -245,14 +248,22 @@ macro_rules! arg_struct{($($t:ty),*)=>{$(impl crate::driver::Arg for $t{fn point
 arg_struct!(TrajectoriesArg,LocalArg,JumpsArg,Seed);
 impl Local{fn arg(&self)->LocalArg{LocalArg{m5:self.m5.pointer,m3:self.m3.pointer}}}
 
+/// Whether step `n` (the time [n dt, (n + 1) dt)) holds a first-order kick: one per radial period
+/// P, at the middle of quarter k mod 4 of period k, t_k = (k + (k mod 4 + ½)/4) P. A period holds
+/// at least eight steps (`solve`), so a step holds at most one kick.
+pub fn kicks_in(n:u64,dt:f64,period:f64)->bool{
+    let(a,b)=(n as f64*dt,(n+1) as f64*dt);
+    (((a/period).floor() as i64-1).max(0)..=(b/period).floor() as i64).any(|k|{let t=(k as f64+((k%4) as f64+0.5)/4.)*period;t>=a&&t<b})
+}
+
 /// What the engine needs of a run.
 #[derive(Clone,Debug)]
 pub struct Settings{
     pub grid:Grid,
     /// The time step (us).
     pub dt:f64,
-    /// The Doppler term's span, in steps.
-    pub doppler_every:usize,
+    /// The radial period P (us): the first-order kick's span, one kick per period (`kicks_in`).
+    pub period:f64,
     pub trajectories:usize,
     pub seed:u64,
     /// The absorbing boundary, if any.
@@ -302,11 +313,10 @@ pub struct Engine{
     graphs:HashMap<u8,Graph>,graph_key:(usize,u64),
     f_jump_back:Function,f_jump_rates:Function,f_jump_choose:Function,f_jump_apply:Function,f_jump_finish:Function,
     f_observe_points:Function,f_thresholds:Function,
-    /// The weight of each trajectory (thermal states' norms), and the steps made.
+    /// The weight of each trajectory (thermal states' norms).
     pub trajectory_weights:Vec<f64>,
     /// The slots in use: the first `active` (the passes cover only them).
     pub active:usize,
-    pub steps:u64,
     hbar_over_mass:f64,
     /// With profiling on: the step's events after each phase, and the milliseconds per phase.
     profile:Option<Profile>,
@@ -356,7 +366,7 @@ impl Engine{
             f_jump_back:gpu.function("jump_back")?,f_jump_rates:gpu.function("jump_rates")?,f_jump_choose:gpu.function("jump_choose")?,
             f_jump_apply:gpu.function("jump_apply")?,f_jump_finish:gpu.function("jump_finish")?,f_observe_points:gpu.function("observe_points")?,
             f_thresholds:gpu.function("thresholds")?,
-            points,tiles,trajectory_weights:vec![1.;b],active:b,steps:0,hbar_over_mass:model.hbar_over_mass,profile:None,gpu,settings,
+            points,tiles,trajectory_weights:vec![1.;b],active:b,hbar_over_mass:model.hbar_over_mass,profile:None,gpu,settings,
         };
         // The tables were zeroed on the shared stream: done before the engine's own runs.
         engine.gpu.stream.synchronize()?;
@@ -442,16 +452,17 @@ impl Engine{
     fn launch_kinetic(&self,tables:&[Buffer;2])->Result<(),String>{
         self.planes.kinetic(&self.stream,&self.state,&self.components,&self.scale,tables,self.active)
     }
-    /// One step of φ; with `observe`, its K split around ψ's observation (records, and with
-    /// `distributions` the marginals and the density).
-    pub fn step(&mut self,observe:bool,distributions:bool)->Result<(),String>{
+    /// Step `n` of the run (the time [n dt, (n + 1) dt), counted alike by every grid's engine) of
+    /// φ; with `observe`, its K split around ψ's observation (records, and with `distributions` the
+    /// marginals and the density).
+    pub fn step(&mut self,n:u64,observe:bool,distributions:bool)->Result<(),String>{
         if self.active==0{return Ok(());}
-        // Every `every` steps the Doppler term over them, an explicit kick of φ before the local
-        // step (κφ from the last kinetic pass, or derived here); when the next step kicks, the
-        // kinetic pass of planes in shared memory makes κφ.
-        let every=self.settings.doppler_every.max(1) as u64;
-        let kick=(self.steps+1)%every==0;let derive=kick&&!self.derived;
-        let derive_next=!observe&&(self.steps+2)%every==0&&self.planes.small();
+        // A step that holds a kick time applies the Doppler term over a period, an explicit kick of
+        // φ before the local step (κφ from the last kinetic pass, or derived here); when the next
+        // step kicks, the kinetic pass of planes in shared memory makes κφ.
+        let(dt,period)=(self.settings.dt,self.settings.period);
+        let kick=kicks_in(n,dt,period);let derive=kick&&!self.derived;
+        let derive_next=!observe&&kicks_in(n+1,dt,period)&&self.planes.small();
         if observe||self.profile.is_some(){self.launch_step(kick,derive,derive_next,observe,distributions)?;}
         else{
             let key=(self.active,self.settings.seed);
@@ -465,9 +476,7 @@ impl Engine{
             self.stream.replay(&self.graphs[&kind])?;
         }
         self.derived=derive_next;
-        self.timed()?;
-        self.steps+=1;
-        Ok(())
+        self.timed()
     }
     /// A step's launches: `kick` with the Doppler term (`derive`: κφ made first), `derive_next`
     /// with κφ from the kinetic pass, `observe` with the observation between the kinetic halves.
@@ -479,7 +488,7 @@ impl Engine{
         self.mark("")?;
         if kick{
             if derive{self.planes.derive(&self.stream,&self.state,&self.components,None,b,&self.dx,&self.dy,&self.derivative)?;self.mark("derive")?;}
-            let tau=(self.settings.doppler_every.max(1) as f64*self.settings.dt) as f32;
+            let tau=self.settings.period as f32;
             self.stream.launch(&self.f_kick_local,grid_traj,t,0,&[&self.state.pointer,&self.dx.pointer,&self.dy.pointer,&p,&bb,&self.components.pointer,
                 &self.doppler_x.arg(),&self.doppler_y.arg(),&self.step_v.arg(),&tau,&self.partial.pointer])?;
             self.mark("doppler+local")?;

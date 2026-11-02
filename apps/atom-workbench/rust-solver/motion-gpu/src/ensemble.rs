@@ -32,6 +32,8 @@ pub struct Ensemble{
     pub tolerance:f64,
     /// The moves made, and the promotions the top grid's capacity refused.
     pub moves:usize,pub refused:usize,
+    /// The steps of the run so far: every grid's engine counts its steps from the batch's start.
+    steps:u64,
     /// Wall seconds spent: launching the steps, reading the records (waiting for the GPU), moving,
     /// and building the grids' tables.
     pub seconds:[f64;4],
@@ -51,7 +53,7 @@ impl Ensemble{
         // State and the two derivative planes per trajectory.
         let limit=ladder.iter().map(|g|(memory/2/(3*5*g.points()*8)).clamp(1,trajectories)).collect();
         Ensemble{gpu,template,classes:ladder.iter().map(|_|None).collect(),occupant:ladder.iter().map(|_|vec![]).collect(),limit,ladder,
-            place:vec![Place::Lost;trajectories],weights:vec![1.;trajectories],tolerance,moves:0,refused:0,seconds:[0.;4],matrices:HashMap::new(),scratch:[None,None,None]}
+            place:vec![Place::Lost;trajectories],weights:vec![1.;trajectories],tolerance,moves:0,refused:0,steps:0,seconds:[0.;4],matrices:HashMap::new(),scratch:[None,None,None]}
     }
     fn engine(&mut self,class:usize,model:&Model)->Result<&mut Engine,String>{
         if self.classes[class].is_none(){
@@ -67,7 +69,7 @@ impl Ensemble{
     /// (Engine::initialize).
     pub fn start(&mut self,class:usize,internal:&[Internal],temperature_uk:f64,model:&Model)->Result<(),String>{
         let n=internal.len();
-        self.place=vec![Place::Lost;n];self.weights=vec![1.;n];
+        self.place=vec![Place::Lost;n];self.weights=vec![1.;n];self.steps=0;
         if self.limit[class]<n{return Err(format!("2D 网格 {}×{} 放不下 {n} 条轨迹（显存不足）",self.ladder[class].nx,self.ladder[class].ny));}
         for c in 0..self.classes.len(){if let Some(e)=self.classes[c].as_mut(){e.clear()?;e.active=0;}self.occupant[c].iter_mut().for_each(|o|*o=None);}
         let engine=self.engine(class,model)?;
@@ -84,8 +86,9 @@ impl Ensemble{
         for c in self.active(){self.classes[c].as_mut().unwrap().observe_initial(distributions)?;}Ok(())
     }
     pub fn step(&mut self,observe:bool,distributions:bool)->Result<(),String>{
-        let t=std::time::Instant::now();
-        for c in self.active(){self.classes[c].as_mut().unwrap().step(observe,distributions)?;}
+        let t=std::time::Instant::now();let n=self.steps;
+        for c in self.active(){self.classes[c].as_mut().unwrap().step(n,observe,distributions)?;}
+        self.steps+=1;
         self.seconds[0]+=t.elapsed().as_secs_f64();Ok(())
     }
     /// The last observation's record of every held trajectory (None: lost), marking the newly lost.
