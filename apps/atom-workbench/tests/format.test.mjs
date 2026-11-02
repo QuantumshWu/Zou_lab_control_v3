@@ -63,10 +63,9 @@ test('the stop and checkpoint reasons the solver formats are shown in Chinese',(
     }
   }
   chinese(formatted(adapterSource,'Checkpoint at',[8,'1.20e-2','5e-3']),'checkpoint');
-  chinese(formatted(adapterSource,"The mean's error bound is",['3.61e0']),'uninformative mean');
+  chinese(formatted(adapterSource,"The mean's error estimate is",['3.61e0']),'uninformative mean');
   // A request stopped before its first solve: nothing computed, the reason alone.
   chinese(formatted(pipelineSource,'The lattice of this request has',[150,'5.3','5']),'memory guard');
-  chinese(formatted(pipelineSource,"The one-mode lattice's eigensystem",['7.30e-3','5e-3']),'one-mode roundoff');
   chinese(formatted(pipelineSource,'An output time is at most',['1e7','1.5e7']),'an output time beyond 10 s');
   // A grid the solver does not solve: refused with the reason.
   assert.match(chinese(formatted(adapterSource,'The trajectory duration is limited',['15']),'too long'),/10 s.*15 s/);

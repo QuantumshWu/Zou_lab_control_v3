@@ -36,8 +36,6 @@ const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
     (n,bound,tolerance)=>`第 ${n} 次求解的检查点：误差估计 ${num(bound)}，误差目标 ${num(tolerance)}；计算继续。`],
   [/^The mean's error estimate is (\S+), at least 1: it carries no information, so no populations are shown$/,
     bound=>`长期布居的误差估计为 ${num(bound)}（不小于 1），不含任何信息，不显示布居。`],
-  [/^The one-mode lattice's eigensystem is too ill-conditioned: its roundoff (\S+) against the tolerance (\S+)$/,
-    (roundoff,tolerance)=>`单模式晶格的本征系统条件数过大：舍入误差 ${num(roundoff)}，误差目标 ${num(tolerance)}。`],
   [/^The lattice of this request has (\d+) modes and would need about (\S+) GB, above the (\S+) GB memory budget: not solved$/,
     (modes,need,budget)=>`未求解（不收敛）：此请求的晶格有 ${modes} 个模式，约需 ${need} GB 内存，超过 ${budget} GB 的内存预算。`],
   [/^The trajectory duration is limited to 10 s \(requested (\S+) s\)$/,seconds=>`轨迹时长最长 10 s（请求为 ${num(seconds)} s），未计算。`],
