@@ -70,11 +70,18 @@ export interface Distributions {grid:number[];samples:number[];probabilities:num
 export interface MotionResult {
   axis:MotionAxis;temperatureUK:number[];meanVelocityMps:number[];trapFrequencyKHz:number;meanOccupation:number[];lossProbability:number[];
   momentum:Distributions;position:Distributions;
+  /** The last simulated time (us) when the samples after it are the engine's continuation (its
+   * prediction from the simulated history), not simulated; absent when every sample was. */
+  continuedFromUs?:number;
 }
-/** The motion block of a result with `samples` samples, read strictly (rust-solver/src/motion_core_adapter.rs). */
-export function readMotionResult(value:unknown,samples:number,axis:MotionAxis):MotionResult {
+/** A sample time the continuation's: after the last simulated one. */
+export function continuedAt(motion:Pick<MotionResult,'continuedFromUs'>,timeUs:number):boolean{return motion.continuedFromUs!==undefined&&timeUs>motion.continuedFromUs;}
+/** The motion block of a result on the grid `timesUs`, read strictly (rust-solver/src/motion_core_adapter.rs). */
+export function readMotionResult(value:unknown,timesUs:readonly number[],axis:MotionAxis):MotionResult {
   const invalid=():never=>{throw new Error('Invalid motion result');};
-  const object=(v:unknown,keys:readonly string[]):Record<string,unknown>=>{if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).length!==keys.length||!keys.every(key=>Object.hasOwn(v,key)))invalid();return v as Record<string,unknown>;};
+  const samples=timesUs.length;
+  const object=(v:unknown,keys:readonly string[],optional:readonly string[]=[]):Record<string,unknown>=>{
+    if(!v||typeof v!=='object'||Array.isArray(v)||!keys.every(key=>Object.hasOwn(v,key))||!Object.keys(v).every(key=>keys.includes(key)||optional.includes(key)))invalid();return v as Record<string,unknown>;};
   const series=(v:unknown,length:number,admits:(x:number)=>boolean):number[]=>{if(!Array.isArray(v)||v.length!==length||!v.every(x=>typeof x==='number'&&Number.isFinite(x)&&admits(x)))invalid();return [...(v as number[])];};
   const distributions=(v:unknown,gridKey:string):Distributions=>{
     const p=object(v,[gridKey,'samples','probabilities']),values=p[gridKey];
@@ -86,12 +93,14 @@ export function readMotionResult(value:unknown,samples:number,axis:MotionAxis):M
     if(rows.some(row=>Math.abs(row.reduce((a,b)=>a+b,0)-1)>5e-6))invalid();
     return {grid,samples:at,probabilities:rows};
   };
-  const m=object(value,['axis','temperatureUK','meanVelocityMps','trapFrequencyKHz','meanOccupation','lossProbability','momentum','position']);
+  const m=object(value,['axis','temperatureUK','meanVelocityMps','trapFrequencyKHz','meanOccupation','lossProbability','momentum','position'],['continuedFromUs']);
   if(m.axis!==axis||typeof m.trapFrequencyKHz!=='number'||!Number.isFinite(m.trapFrequencyKHz)||!(m.trapFrequencyKHz>0))invalid();
   const loss=series(m.lossProbability,samples,x=>x>=0&&x<=1);if(loss.some((p,i)=>i>0&&p<loss[i-1]!))invalid();
+  // The continuation starts at a time of the run before its last sample: some samples are its.
+  const from=m.continuedFromUs;if(from!==undefined&&!(typeof from==='number'&&Number.isFinite(from)&&from>=0&&from<timesUs.at(-1)!))invalid();
   return {axis,temperatureUK:series(m.temperatureUK,samples,x=>x>=0),meanVelocityMps:series(m.meanVelocityMps,samples,()=>true),
     trapFrequencyKHz:m.trapFrequencyKHz as number,meanOccupation:series(m.meanOccupation,samples,()=>true),lossProbability:loss,
-    momentum:distributions(m.momentum,'velocitiesMps'),position:distributions(m.position,'positionsUm')};
+    momentum:distributions(m.momentum,'velocitiesMps'),position:distributions(m.position,'positionsUm'),...(from===undefined?{}:{continuedFromUs:from as number})};
 }
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];

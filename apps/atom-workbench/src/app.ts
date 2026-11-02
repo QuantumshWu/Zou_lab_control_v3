@@ -32,12 +32,14 @@ import type {ScopeNote} from './spectroscopy.js';
 import {defaultMotion,defaultScene,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionAxis,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
 import type {Distributions,DynamicsResult} from './solver-types.js';
+import {continuedAt} from './solver-types.js';
 import {motionAxis,motionRefusal,motionTemperatureReading,radialAxes,setMotionTemperature} from './motion.js';
 import {MOTION_INKS,bindDistribution,bindSeries,distributionChart,distributions,lengthText,motionSeries,rootMeanSquare,seriesChart} from './motion-chart.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
 import {startupScene,validateScene} from './scene-file.js';
 import {incidentTransitions,laserEmits,laserReferenceStateId,setLaserReferenceState,transitionEndpoints} from './transition-view.js';
 import {escapeHtml as esc,levelsChart,number,populationChart,bindPopulationChart,populationColor,populationValue,populationSamplingInfo} from './charts.js';
+import {CONTINUATION_WORDS} from './population-chart.js';
 import {math} from './math.js';
 import {renderSpace3D,type SpaceSelection,type SpaceViewName} from './space3d.js';
 import {laserColour} from './identity.js';
@@ -280,7 +282,11 @@ function solverStatus():[string,StatusWord,string?,string?]{
     const miss=trajectoryMiss(result),words=trajectory?both||(miss?`${miss}（超过 ${tolerance}）`:mean):mean,full=trajectory?[partial,mean].filter(Boolean).join(' · '):mean;
     return [`${head}${words?`：${words}`:trajectory?`（各时刻 ≤ ${tolerance}）`:''}`,'warning',undefined,words!==full?`${head}：${full}`:undefined];
   }
-  if(motion)return [['1D 运动已计算',partial].filter(Boolean).join(' · '),partial?'warning':'idle',elapsed];
+  // A motion result whose later samples are the continuation's says from when; what that is, in the tooltip.
+  if(motion){
+    const from=result.motion?.continuedFromUs,since=from===undefined?'':`t > ${continuedSince(from)} 为延拓`;
+    return [['1D 运动已计算',since,partial].filter(Boolean).join(' · '),partial?'warning':'idle',elapsed,since?['1D 运动已计算',`${since}（${CONTINUATION_WORDS}）`,partial].filter(Boolean).join(' · '):undefined];
+  }
   if(resultPage()==='dynamics'){
     const full=['轨迹已计算',partial,result.mean?.converged?mean:'长期布居未解析'].filter(Boolean).join(' · ');
     return both?[`轨迹已计算 · ${both}`,'warning',elapsed,full]:[full,result.mean?.converged&&!partial&&!mean?'idle':'warning',elapsed];
@@ -959,10 +965,12 @@ function keepLastCheckpoint(cause:'stopped'|'failed'):void{
   if(kept.trajectory)trajectories.set(tKey,last.epochs.trajectory,'trajectory',record);
   for(const mean of horizonRecords(record))if(kept.horizons.includes(mean.horizon))means.set(mKey,last.epochs.mean,mean.horizon,mean);
 }
-/** 停止: the running solve ends here and its last checkpoint stands as the result. Other inputs solve again. */
+/** 停止: the running solve ends here and its last checkpoint stands as the result. What that leaves
+ * missing (a full request's mean before its first checkpoint) is not asked for while these inputs
+ * stand; other inputs solve again. */
 function stopSolve():void{
   if(!currentSolverBusy())return;
-  const key=requestKey(neededSolve());keepLastCheckpoint('stopped');cancelObsoleteSolve();stoppedKey=key;requestedKey=key;
+  keepLastCheckpoint('stopped');cancelObsoleteSolve();const key=requestKey(neededSolve());stoppedKey=key;requestedKey=key;
   if(view==='dynamics')renderDynamics(latestAnalysis);else refreshPopulationOnly();
   refreshStatus();
 }
@@ -1172,23 +1180,27 @@ function renderDynamics(a:Analysis):void{
   // A redraw of the same result (a resize, another scale or curve) keeps an open readout at its sample.
   const host=$('population-chart'),open=host.querySelector<HTMLElement>('.population-readout:not([hidden])')?.dataset.sampleIndex;
   unbindPopulation?.();unbindPopulation=undefined;
-  const plotOptions={showTotalExcited:false,timeUnit:d.durationUnit,scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),...(open===undefined?{}:{cursor:Number(open)})};
-  const stopped=stoppedHere(),waiting=`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
-  // With 1D motion: its refusal, or the chart its view asks for.
+  // With 1D motion: its refusal, or the chart its view asks for; every time view marks the
+  // continuation's samples (after the last simulated time).
   const shown=motionOn()?motionView:'populations',refusal=motionOn()?motionRefusal(scene):'',motion=raw&&raw.timesUs.length>1?raw.motion:undefined;
+  const from=motion?.continuedFromUs,continuation=from===undefined?'':continuationLegend(from);
+  const plotOptions={showTotalExcited:false,timeUnit:d.durationUnit,scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),
+    ...(open===undefined?{}:{cursor:Number(open)}),...(from===undefined?{}:{continuedFromUs:from})};
+  const stopped=stoppedHere(),waiting=`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
   motionViewControl.root.hidden=!motionOn();motionViewControl.setCurrent(shown);populationScaleControl.root.hidden=shown!=='populations';
   distributionToolbar(!refusal&&motion&&(shown==='momentum'||shown==='position')?distributions(motion,shown):undefined,raw?.timesUs??[]);
   const caption=(markup:string)=>{if($('population-caption').innerHTML!==markup)$('population-caption').innerHTML=markup;};
   if(refusal){host.innerHTML=`<div class="empty-state error" role="alert">${esc(refusal)}</div>`;caption('');return;}
   if(shown==='temperature'||shown==='trap'){
     const series=motion&&motionSeries(motion,shown);
-    host.innerHTML=series?seriesChart(raw!.timesUs,series,d.durationUnit):waiting;if(series)unbindPopulation=bindSeries(host,raw!.timesUs,series,d.durationUnit);
-    caption(!motion?'':shown==='temperature'?legendEntry(MOTION_INKS[0],`温度 T = m·Var(v)/k_B（沿 ${motion.axis} 轴）`)+legendEntry(MOTION_INKS[1],'平均速度 ⟨v⟩')
-      :legendEntry(MOTION_INKS[0],`平均振动量子数 n̄（相对焦点处的阱频 ω/2π = ${formatNumber(motion.trapFrequencyKHz,{digits:4})} kHz）`)+legendEntry(MOTION_INKS[1],'累计损失概率（原子离开光阱）'));return;
+    host.innerHTML=series?seriesChart(raw!.timesUs,series,d.durationUnit,from):waiting;if(series)unbindPopulation=bindSeries(host,raw!.timesUs,series,d.durationUnit,from);
+    caption(!motion?'':(shown==='temperature'?legendEntry(MOTION_INKS[0],`温度 T = m·Var(v)/k_B（沿 ${motion.axis} 轴）`)+legendEntry(MOTION_INKS[1],'平均速度 ⟨v⟩')
+      :legendEntry(MOTION_INKS[0],`平均振动量子数 n̄（相对焦点处的阱频 ω/2π = ${formatNumber(motion.trapFrequencyKHz,{digits:4})} kHz）`)+legendEntry(MOTION_INKS[1],'累计损失概率（原子离开光阱）'))+continuation);return;
   }
   if(shown==='momentum'||shown==='position'){
+    // A listed time after the last simulated one is the continuation's: said in its legend.
     const listing=motion&&distributions(motion,shown),last=listing?listing.samples.length-1:0,listed=listing?[last,...(motionCompare===undefined?[]:[motionCompare])]:[];
-    const names=listing?listed.map(i=>{const sample=listing.samples[i]!,time=`t = ${durationText(raw!.timesUs[sample]!,d.durationUnit)}`;
+    const names=listing?listed.map(i=>{const sample=listing.samples[i]!,at=raw!.timesUs[sample]!,time=`t = ${durationText(at,d.durationUnit)}${continuedAt(motion!,at)?'（延拓）':''}`;
       return shown==='momentum'?`${time} · T = ${formatNumber(motion!.temperatureUK[sample]!,{digits:4})} μK`:`${time} · 均方根位置 ${lengthText(rootMeanSquare(listing,i))}`;}):[];
     host.innerHTML=motion?distributionChart(motion,shown,listed):waiting;if(motion)unbindPopulation=bindDistribution(host,motion,shown,listed,names);
     caption(names.map((words,k)=>legendEntry(MOTION_INKS[k]!,words,k>0)).join(''));return;
@@ -1197,8 +1209,14 @@ function renderDynamics(a:Analysis):void{
   if(result&&result.timesUs.length>1)unbindPopulation=bindPopulationChart(host,result,ids,labels,plotOptions);
   const errors=raw&&raw.timesUs.length>1?sampleErrors(raw):undefined,banded=!!errors&&outsideRuns(errors).length>0;
   // The legend names the curves drawn: none until a result is here.
-  const legend=!(result&&result.timesUs.length>1)?'':(banded?`<span class="population-legend accuracy-legend"><span class="accuracy-swatch" aria-hidden="true"></span>估计误差 &gt; ${errorPercent(POPULATION_TOLERANCE)}</span>`:'')+ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
+  const legend=!(result&&result.timesUs.length>1)?'':continuation+(banded?`<span class="population-legend accuracy-legend"><span class="accuracy-swatch" aria-hidden="true"></span>估计误差 &gt; ${errorPercent(POPULATION_TOLERANCE)}</span>`:'')+ids.map(id=>`<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${populationColor(id)}" stroke-width="2"/></svg>${esc(labels[id]??id)}${id===singleInitialId()?'<span class="initial-tag">初态</span>':''}</span>`).join('');
   caption(legend);
+}
+/** A continuation's last simulated time (us): a computed time, three digits, in the duration's unit. */
+function continuedSince(us:number):string{const unit=timeDisplayUnit(us,dynamics().durationUnit);return `${formatNumber(us*unit.factor,{digits:3})} ${unit.name}`;}
+/** The legend entry of a 1D motion result's continuation, after the last simulated time `from` (us). */
+function continuationLegend(from:number):string{
+  return `<span class="population-legend continuation-legend" title="${esc(CONTINUATION_WORDS)}"><span class="continuation-swatch" aria-hidden="true"></span>t &gt; ${esc(continuedSince(from))} 延拓（由模拟历史预测）</span>`;
 }
 
 /** The 沿 B shortcut the selected light's direction is now wears the active face. */
