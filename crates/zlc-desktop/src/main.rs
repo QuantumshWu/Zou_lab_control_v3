@@ -91,7 +91,8 @@ struct Viewer {
     closing: bool,
     /// Its data working copies (Edit data / New data) and their published Applies.
     drafts: manual::Drafts,
-    /// The open asked while its new window's page was not up yet: it runs once the page has given its device ratio.
+    /// An opened archive's presentation while its new window's page is not up yet: the file is read
+    /// meanwhile, its panels are drawn once the page has given its device ratio.
     waiting: Option<Value>,
     /// A preview panel's first target (the archive recipe it starts from), until its document holds it.
     targets: BTreeMap<String, Value>,
@@ -499,9 +500,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let standalone = mode != Mode::Experiment;
     match &mode {
         Mode::Experiment => windows.make(&windows::Kind::Devices, &event_loop, true)?,
-        Mode::FigureViewer(_) => {
+        Mode::FigureViewer(path) => {
             viewers.insert(next_viewer, Viewer::new(next_viewer));
             windows.make(&windows::Kind::FigureViewer(next_viewer), &event_loop, true)?;
+            // Its file is read while the page loads; only the drawing waits for the page.
+            if let Some(path) = path { queue.push_back(json!({"id":0,"action":"open","path":path,"document":next_viewer})); }
             next_viewer += 1;
         }
         Mode::PulseEditor(_) => windows.make(&windows::Kind::PulseEditor, &event_loop, true)?,
@@ -1248,7 +1251,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             windows::Kind::TaskConsole => { share.set_dpr(ratio.unwrap_or(1.0)); queue.push_back(json!({"id":0,"action":"ready","dpr":ratio})); }
                             windows::Kind::FigureViewer(number) => {
                                 queue.push_back(json!({"id":0,"action":"ready","dpr":ratio,"document":number}));
-                                if let Some(open) = viewers.get_mut(number).and_then(|viewer| viewer.waiting.take()) { queue.push_back(open); }
+                                if let Some(present) = viewers.get_mut(number).and_then(|viewer| viewer.waiting.take()) { queue.push_back(present); }
                             }
                             windows::Kind::PulseEditor => { pulse.dpr = ratio.unwrap_or(1.0); pulse.dispatch(); }
                             // A review draws the live document's panel at the Task Console's ratio.
@@ -1283,7 +1286,6 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             // A standalone app's file, once its one window is up.
                             opened = true;
                             match &mode {
-                                Mode::FigureViewer(Some(path)) => queue.push_back(json!({"id":0,"action":"open","path":path,"document":1})),
                                 Mode::PulseEditor(Some(path)) => { let _ = self_proxy.send_event(AppEvent::Command { window: Some(windows::Kind::PulseEditor), command: json!({"id": 0, "action": "pulse_open", "path": path}) }); }
                                 _ => {}
                             }
@@ -1294,7 +1296,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(path) = initial_path.take() {
                                 let number = take_viewer(&mut viewers, &mut next_viewer);
                                 windows.show(&windows::Kind::FigureViewer(number), target)?;
-                                if let Some(viewer) = viewers.get_mut(&number) { viewer.waiting = Some(json!({"id":0,"action":"open","path":path,"document":number})); }
+                                queue.push_back(json!({"id":0,"action":"open","path":path,"document":number}));
                             }
                         }
                         return Ok(());
@@ -1304,13 +1306,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         let number = if in_viewer { document } else { take_viewer(&mut viewers, &mut next_viewer) };
                         command["document"] = json!(number);
                         let kind = windows::Kind::FigureViewer(number);
+                        // A new window's file is read while its page loads (its drawing waits for the page).
                         windows.show(&kind, target)?;
-                        // A new window draws its Figure at its page's device ratio: the open waits for the page.
-                        if !windows.get(&kind).is_some_and(|window| window.ready) {
-                            let request = command["id"].clone();
-                            if let Some(viewer) = viewers.get_mut(&number) { viewer.waiting = Some(command); }
-                            return windows.send(&json!({"type":"busy", "request":request}));
-                        }
                     }
                     // The scientific worker answers its own actions only: any other is refused here, by name,
                     // instead of failing inside the worker (a missing panel read as a KeyError).
@@ -1333,6 +1330,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         // A closed Figure Viewer's last job: its document and its archive go.
                         if let Some(feedback)=completion.decision.take() {let _=feedback.send(science::PresentationDecision::default());}
                         viewers.remove(&document);
+                        // A Figure still waiting for its page goes with the window.
+                        if pending_archive.as_ref().is_some_and(|candidate| candidate.document == document) { pending_archive = None; }
                     } else if let (Some(decoded), Some(viewer)) = (completion.imported.take(), viewers.get_mut(&document)) {
                         // Parsing has not touched the viewer's document. Only
                         // a fully rendered candidate can replace its panels.
@@ -1342,7 +1341,10 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         let data=Arc::new(archive::MountedArchive::mount(runtime.clone(),decoded,ids)?);
                         let candidate=panels::Panels::from_inputs(&runtime,&data.inputs(),&panels::viewer_prefix(document))?;
                         pending_archive=Some(PendingArchive{data,bindings:candidate,request:completion.request,document});
-                        queue.push_front(json!({"id":completion.request,"action":"present_archive","document":document}));
+                        // A new window draws its Figure at its page's device ratio: the drawing waits for the page.
+                        let present = json!({"id":completion.request,"action":"present_archive","document":document});
+                        if windows.get(&windows::Kind::FigureViewer(document)).is_some_and(|window| window.ready) { queue.push_front(present); }
+                        else { viewer.waiting = Some(present); }
                     } else if in_viewer && !viewers.contains_key(&document) {
                         if let Some(feedback)=completion.decision.take() {let _=feedback.send(science::PresentationDecision::default());}
                     } else {
