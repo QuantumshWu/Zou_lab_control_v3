@@ -15,6 +15,10 @@
 //! forward by V(dt/2) -- so the timing error averages out to second order in dt. The channel
 //! (carrier and target block, or the absorbing boundary) is chosen by its rate, the photon's
 //! direction and polarization exactly from the dipole patterns (kernels `jump_*`).
+//!
+//! # Launches
+//! Each engine has its own stream, so the grids' engines run side by side; a step without an
+//! observation is captured once as a graph per kind and replayed with one launch.
 use crate::driver::{Buffer,Event,Function,Graph,Stream};
 use crate::gpu::Gpu;
 use std::collections::HashMap;
