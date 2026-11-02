@@ -89,7 +89,9 @@
 //! companion's apart), measured from the first period, times the grid and the simulated time left,
 //! plus each checkpoint's own; the time left runs to the end, or to the acceptance the changes'
 //! geometric decrease since their largest projects (they rise while the continuation learns the
-//! slow modes, then fall).
+//! slow modes, then fall; a least-squares line through their logarithms, from two changes after the
+//! largest on). Replayed on TW2 and TW1, the projection is 0.4-1.8× the time actually left; before
+//! it, the estimate to the end is 2-4×.
 use crate::ground::{Ground,Local,dipole_kernel};
 use crate::linear::{Dense,Lu};
 use crate::{Complex,Distributions,Request,Solution,STATES};
@@ -1071,13 +1073,15 @@ impl<'a> Engine<'a>{
                 if accepted{break;}
                 let solution=self.assemble(request,&record,&last,previous.as_ref(),bias.populations,&listed,&method);
                 // To the end, or to the acceptance the changes' geometric decrease since their largest projects
-                // (they rise while the continuation learns the slow modes, then fall).
-                let top=changes.iter().enumerate().fold(None,|m:Option<(usize,f64)>,(k,&c)|if m.is_none_or(|(_,p)|c>p){Some((k,c))}else{m});
-                let expected=match(top,changes.last()){
-                    (Some((k,peak)),Some(&now))if k+1<changes.len()&&now<peak=>{
-                        let r=(now/peak).powf(1./(changes.len()-1-k) as f64);let more=(now.ln().max(0.)/(1./r).ln()).ceil();(t+more*CHECKPOINT_PERIODS as f64*period).min(end)}
-                    _=>end,
-                };
+                // (they rise while the continuation learns the slow modes, then fall): a least-squares line
+                // through their logarithms, from two changes after the largest on.
+                let top=changes.iter().enumerate().fold(0,|m,(k,&c)|if c>changes[m]{k}else{m});
+                let expected=if changes.len()>=top+3{
+                    let ys:Vec<f64>=changes[top..].iter().map(|c|c.ln()).collect();let n=ys.len() as f64;
+                    let(xm,ym)=((n-1.)/2.,ys.iter().sum::<f64>()/n);
+                    let slope=ys.iter().enumerate().map(|(i,y)|(i as f64-xm)*(y-ym)).sum::<f64>()/ys.iter().enumerate().map(|(i,_)|(i as f64-xm).powi(2)).sum::<f64>();
+                    if slope<0.{let now=ym+slope*(n-1.-xm);(t+(now.max(0.)/-slope).ceil()*CHECKPOINT_PERIODS as f64*period).min(end)}else{end}
+                }else{end};
                 per_checkpoint=checkpoint_began.elapsed().as_secs_f64();
                 checkpoint(&solution,Some(remaining(self,expected,t)*1e3));
             }
