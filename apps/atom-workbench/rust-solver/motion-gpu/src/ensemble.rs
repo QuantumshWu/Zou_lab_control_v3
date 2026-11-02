@@ -142,6 +142,7 @@ impl Ensemble{
             s.launch(&cols,blocks(count*5*b.ny*b.nx),256,0,&[&tmp.pointer,&(a.ny as i32),&src_components,&list.pointer,&n,&ay.pointer,&(b.nx as i32),&(b.ny as i32),&dst_state,&norm.pointer])?;
             s.launch(&state,(count as u32,1,1),256,0,&[&src_traj,&dst_traj,&src_weights,&dst_weights,&list.pointer,&norm.pointer,&dst_state,&(b.points() as i32)])?;
             s.synchronize()?;
+            for c in [from,to]{self.classes[c].as_mut().unwrap().touched();}
         }
         self.pack()?;
         self.seconds[2]+=started.elapsed().as_secs_f64()-(self.seconds[3]-built);

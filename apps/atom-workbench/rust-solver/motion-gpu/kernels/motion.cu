@@ -110,12 +110,14 @@ __device__ float block_sum(float v,float* scratch){
 // STEP     plane <- K_y K_x (scale * plane), K given per frequency position by `tx`, `ty` (with 1/N);
 // OBSERVE  the same, adding the plane's momentum moments to the trajectory's record and its
 //          weighted |psi(k)|^2 to the marginals (by frequency position);
-// DERIVE   dx <- kappa_x plane, dy <- kappa_y plane (tx, ty: kappa/N), the plane unchanged.
+// DERIVE   dx <- kappa_x plane, dy <- kappa_y plane (tx, ty: kappa/N), the plane unchanged;
+// STEP_DERIVE  STEP, then dx, dy of the stepped plane (kx, ky: kappa/N).
 #define MODE_STEP 0
 #define MODE_OBSERVE 1
 #define MODE_DERIVE 2
+#define MODE_STEP_DERIVE 3
 struct PlaneArgs{
-    const float2* tx;const float2* ty;
+    const float2* tx;const float2* ty;const float2* kx;const float2* ky;
     float2* dx;float2* dy;
     const float* kappa_x;const float* kappa_y;float tail_x,tail_y;
     float* record;float weight;float* marginal_x;float* marginal_y;
@@ -195,6 +197,47 @@ __device__ void plane_pass(float2* __restrict__ plane,float scale,const PlaneArg
     }
     float2* out=MODE==MODE_DERIVE?(NY>1?a.dy:nullptr):plane;
     if(out)for(int i=threadIdx.x;i<NX*NY;i+=blockDim.x)out[i]=sm[(i/NX)*S+i%NX];
+    if constexpr(MODE==MODE_STEP_DERIVE){
+        // kappa_x and kappa_y of the stepped plane, from its copy in shared memory.
+        {
+            constexpr int teams=32/FX::T;const int t=lane%FX::T,team=lane/FX::T;
+            FX f;f.init(t);float2 factor[FX::E];
+            #pragma unroll
+            for(int e=0;e<FX::E;e++)factor[e]=__ldg(a.kx+e*FX::T+t);
+            for(int r0=warp*teams;r0<NY;r0+=warps*teams){
+                const int r=r0+team;const bool ok=r<NY;float2 v[FX::E];
+                #pragma unroll
+                for(int e=0;e<FX::E;e++)v[e]=ok?sm[r*S+e*FX::T+t]:make_float2(0.f,0.f);
+                f.forward(v,t);
+                #pragma unroll
+                for(int e=0;e<FX::E;e++)v[e]=cmul(v[e],factor[e]);
+                f.inverse(v,t);
+                if(ok){
+                    #pragma unroll
+                    for(int e=0;e<FX::E;e++)a.dx[r*NX+e*FX::T+t]=v[e];
+                }
+            }
+        }
+        if constexpr(NY>1){
+            constexpr int teams=32/FY::T;const int t=lane%FY::T,team=lane/FY::T;
+            FY f;f.init(t);float2 factor[FY::E];
+            #pragma unroll
+            for(int e=0;e<FY::E;e++)factor[e]=__ldg(a.ky+e*FY::T+t);
+            for(int c0=warp*teams;c0<NX;c0+=warps*teams){
+                const int c=c0+team;const bool ok=c<NX;float2 v[FY::E];
+                #pragma unroll
+                for(int e=0;e<FY::E;e++)v[e]=ok?sm[(e*FY::T+t)*S+c]:make_float2(0.f,0.f);
+                f.forward(v,t);
+                #pragma unroll
+                for(int e=0;e<FY::E;e++)v[e]=cmul(v[e],factor[e]);
+                f.inverse(v,t);
+                if(ok){
+                    #pragma unroll
+                    for(int e=0;e<FY::E;e++)a.dy[(e*FY::T+t)*NX+c]=v[e];
+                }
+            }
+        }
+    }
 }
 // Shared memory: the plane, then (OBSERVE) NX + NY marginal bins and 32 reduction slots.
 #define PLANE_KERNELS(NX,NY) \
@@ -204,6 +247,15 @@ extern "C" __global__ void __launch_bounds__(256) kinetic_##NX##x##NY(float2* st
     if(c>=components[t])return; \
     PlaneArgs a={};a.tx=tx;a.ty=ty; \
     plane_pass<NX,NY,MODE_STEP>(state+(u64)plane*(NX*NY),scale[t],a,sm,nullptr); \
+} \
+/* The step, and kappa psi of the stepped planes into dx and dy (kx, ky: kappa/N). */ \
+extern "C" __global__ void __launch_bounds__(256) kinetic_derive_##NX##x##NY(float2* state,const int* __restrict__ components,const float* __restrict__ scale,const float2* tx,const float2* ty, \
+        const float2* kx,const float2* ky,float2* dx,float2* dy){ \
+    extern __shared__ float2 sm[]; \
+    const int plane=blockIdx.x,t=plane/COMPONENTS,c=plane%COMPONENTS; \
+    if(c>=components[t])return; \
+    PlaneArgs a={};a.tx=tx;a.ty=ty;a.kx=kx;a.ky=ky;a.dx=dx+(u64)plane*(NX*NY);a.dy=dy+(u64)plane*(NX*NY); \
+    plane_pass<NX,NY,MODE_STEP_DERIVE>(state+(u64)plane*(NX*NY),scale[t],a,sm,nullptr); \
 } \
 extern "C" __global__ void __launch_bounds__(256) observe_kinetic_##NX##x##NY(float2* state,const int* __restrict__ components,const float* __restrict__ scale,const float2* tx,const float2* ty, \
         const float* kappa_x,const float* kappa_y,float tail_x,float tail_y,float* records,const float* weights,float* marginal_x,float* marginal_y){ \
@@ -385,7 +437,7 @@ __device__ void store_partials(float (*sums)[8],int t0,int count,float* partial)
 
 // The local step psi <- V_F psi for every trajectory; grid (tiles, trajectories/SUB): each block
 // takes 256 points of SUB trajectories, so its table entries are read once per SUB of them.
-extern "C" __global__ void __launch_bounds__(256) local_step(float2* state,int points,int trajectories,const int* components,Local m,float* partial){
+extern "C" __global__ void __launch_bounds__(256,3) local_step(float2* state,int points,int trajectories,const int* components,Local m,float* partial){
     __shared__ float sums[SUB][8];
     const int x=blockIdx.x*blockDim.x+threadIdx.x,t0=blockIdx.y*SUB;
     #pragma unroll 1
@@ -397,10 +449,33 @@ extern "C" __global__ void __launch_bounds__(256) local_step(float2* state,int p
     store_partials(sums,t0,min(SUB,trajectories-t0),partial);
 }
 
-// The Doppler term as an explicit step psi <- psi - i tau (W_x kappa_x psi + W_y kappa_y psi) with
-// kappa psi from `derive`; the norm after it to partial, as `local_step`.
-extern "C" __global__ void __launch_bounds__(256) doppler_kick(float2* state,const float2* dxs,const float2* dys,int points,int trajectories,const int* components,
-        Local wx,Local wy,float tau,float* partial){
+// The Doppler term, then the local step, at one point of a trajectory's N components:
+// psi <- V (psi - i tau (W_x dx + W_y dy)); returns the norm after them.
+template<int N>
+__device__ __forceinline__ float kick_point(float2* psi,const float2* dx,const float2* dy,u64 points,const float2* mx,const float2* my,const float2* mv,u64 x,float tau){
+    float2 u[N],w[N],a[N];float n2=0.f;
+    #pragma unroll
+    for(int j=0;j<N;j++){u[j]=dx[(u64)j*points];w[j]=dy[(u64)j*points];}
+    #pragma unroll
+    for(int i=0;i<N;i++){
+        float2 z=make_float2(0.f,0.f);
+        #pragma unroll
+        for(int j=0;j<N;j++){z=cadd(z,cmul(__ldg(mx+(u64)(i*N+j)*points+x),u[j]));z=cadd(z,cmul(__ldg(my+(u64)(i*N+j)*points+x),w[j]));}
+        const float2 p=psi[(u64)i*points];a[i]=make_float2(p.x+tau*z.y,p.y-tau*z.x);
+    }
+    #pragma unroll
+    for(int i=0;i<N;i++){
+        float2 z=make_float2(0.f,0.f);
+        #pragma unroll
+        for(int j=0;j<N;j++)z=cadd(z,cmul(__ldg(mv+(u64)(i*N+j)*points+x),a[j]));
+        psi[(u64)i*points]=z;n2+=norm2(z);
+    }
+    return n2;
+}
+// The Doppler term as an explicit step psi <- psi - i tau (W_x kappa_x psi + W_y kappa_y psi)
+// (kappa psi in dx, dy), then the local step, as `local_step`.
+extern "C" __global__ void __launch_bounds__(256,3) kick_local_step(float2* state,const float2* dxs,const float2* dys,int points,int trajectories,const int* components,
+        Local wx,Local wy,Local m,float tau,float* partial){
     __shared__ float sums[SUB][8];
     const int x=blockIdx.x*blockDim.x+threadIdx.x,t0=blockIdx.y*SUB;
     #pragma unroll 1
@@ -408,14 +483,8 @@ extern "C" __global__ void __launch_bounds__(256) doppler_kick(float2* state,con
         const int t=t0+s;float n2=0.f;
         if(t<trajectories&&x<points){
             const u64 base=(u64)t*COMPONENTS*points+x;const int n=components[t];
-            float2* psi=state+base;const float2* dx=dxs+base;const float2* dy=dys+base;
-            const float2* mx=n==5?wx.m5:wx.m3;const float2* my=n==5?wy.m5:wy.m3;
-            float2 a[5],b[5],c[5];
-            for(int i=0;i<n;i++){a[i]=dx[(u64)i*points];b[i]=dy[(u64)i*points];}
-            for(int i=0;i<n;i++){float2 z=make_float2(0.f,0.f);
-                for(int j=0;j<n;j++){z=cadd(z,cmul(__ldg(mx+(u64)(i*n+j)*points+x),a[j]));z=cadd(z,cmul(__ldg(my+(u64)(i*n+j)*points+x),b[j]));}
-                c[i]=z;}
-            for(int i=0;i<n;i++){float2 p=psi[(u64)i*points];p=make_float2(p.x+tau*c[i].y,p.y-tau*c[i].x);psi[(u64)i*points]=p;n2+=norm2(p);}
+            if(n==5)n2=kick_point<5>(state+base,dxs+base,dys+base,points,wx.m5,wy.m5,m.m5,x,tau);
+            else if(n==3)n2=kick_point<3>(state+base,dxs+base,dys+base,points,wx.m3,wy.m3,m.m3,x,tau);
         }
         n2=warp_sum(n2);if((threadIdx.x&31)==0)sums[s][threadIdx.x>>5]=n2;
     }
@@ -576,9 +645,9 @@ __device__ void rates_point(const Jumps& J,float2 r,float rho2,const float2 (&ps
     }
 }
 // Each jumper's G matrices and loss rate, summed over the block's points into rates[s][tile][25].
-extern "C" __global__ void __launch_bounds__(256) jump_rates(const float2* state,const float2* dxs,const float2* dys,int points,const int* components,
+extern "C" __global__ void __launch_bounds__(256,2) jump_rates(const float2* state,const float2* dxs,const float2* dys,int points,const int* components,
         const int* jumpers,const int* count,Jumps J,float* rates){
-    __shared__ float scratch[32];
+    __shared__ float sums[8][G_SLOTS];
     const int x=blockIdx.x*blockDim.x+threadIdx.x;const bool ok=x<points;
     const float2 r=position(ok?x:0,points,J.nx,J.dx);const float rho2=r.x*r.x+r.y*r.y;
     for(int s=blockIdx.y;s<*count;s+=gridDim.y){
@@ -593,9 +662,12 @@ extern "C" __global__ void __launch_bounds__(256) jump_rates(const float2* state
             acc[G_SLOTS-1]=w*__ldg(J.cap+x);
             if(n==5)rates_point<5,3>(J,r,rho2,psi,dx,dy,acc);else rates_point<3,0>(J,r,rho2,psi,dx,dy,acc);
         }
-        float* out=rates+((u64)s*gridDim.x+blockIdx.x)*G_SLOTS;
+        // The block's sums: per warp, then over the warps.
         #pragma unroll
-        for(int i=0;i<G_SLOTS;i++){const float v=block_sum(acc[i],scratch);if(threadIdx.x==0)out[i]=v;}
+        for(int i=0;i<G_SLOTS;i++){const float v=warp_sum(acc[i]);if((threadIdx.x&31)==0)sums[threadIdx.x>>5][i]=v;}
+        __syncthreads();
+        if(threadIdx.x<G_SLOTS){float v=0.f;for(int w=0;w<(int)(blockDim.x>>5);w++)v+=sums[w][threadIdx.x];rates[((u64)s*gridDim.x+blockIdx.x)*G_SLOTS+threadIdx.x]=v;}
+        __syncthreads();
     }
 }
 
@@ -614,7 +686,7 @@ __device__ void apply_point(const Jumps& J,int c,float2 r,float rho2,const float
 }
 // Applies each jumper's chosen jump at its points and evolves the half step to the step's end,
 // psi <- V_to(dt/2) psi'; the norm after it to partial.
-extern "C" __global__ void __launch_bounds__(256) jump_apply(float2* state,const float2* dxs,const float2* dys,int points,
+extern "C" __global__ void __launch_bounds__(256,2) jump_apply(float2* state,const float2* dxs,const float2* dys,int points,
         const int* components,const int* jumpers,const int* count,Jumps J,const float* choices,Local forward,float* partial){
     __shared__ float scratch[32];
     const int x=blockIdx.x*blockDim.x+threadIdx.x;const bool ok=x<points;
@@ -665,11 +737,20 @@ __device__ void perpendicular(const double u[3],double p[3],double q[3]){
     q[0]=u[1]*p[2]-u[2]*p[1];q[1]=u[2]*p[0]-u[0]*p[2];q[2]=u[0]*p[1]-u[1]*p[0];
 }
 // The choice of a jump: carrier, to-block (-1: lost to the absorbing boundary), the photon's plane
-// components n_x, n_y, its polarization e and 1/|e.L psi|. One thread per jumper.
+// components n_x, n_y, its polarization e and 1/|e.L psi|. A warp per jumper: its lanes sum the
+// tiles' rates, lane 0 chooses.
 extern "C" __global__ void jump_choose(Trajectories tr,const int* jumpers,const int* count,const float* rates,int tiles,Jumps J,uint2 seed,float* choices){
-    const int s=blockIdx.x*blockDim.x+threadIdx.x;if(s>=*count)return;
+    const int s=(blockIdx.x*blockDim.x+threadIdx.x)>>5,lane=threadIdx.x&31;if(s>=*count)return;
     const int t=jumpers[s];
-    double g[G_SLOTS];for(int i=0;i<G_SLOTS;i++){double v=0.;for(int b=0;b<tiles;b++)v+=(double)rates[((u64)s*tiles+b)*G_SLOTS+i];g[i]=v;}
+    double g[G_SLOTS];
+    #pragma unroll
+    for(int i=0;i<G_SLOTS;i++){
+        double v=0.;for(int b=lane;b<tiles;b+=32)v+=(double)rates[((u64)s*tiles+b)*G_SLOTS+i];
+        #pragma unroll
+        for(int o=16;o>0;o/=2)v+=__shfl_xor_sync(0xffffffffu,v,o);
+        g[i]=v;
+    }
+    if(lane!=0)return;
     double total=g[G_SLOTS-1];for(int c=0;c<J.carriers;c++)for(int to=0;to<2;to++){const double* m=g+(c*2+to)*6;total+=m[0]+m[1]+m[2];}
     const u32 id=tr.ids[t];
     const uint4 r1=philox(make_uint4(id,tr.jumps[t],PURPOSE_CHANNEL,0u),seed),r2=philox(make_uint4(id,tr.jumps[t],PURPOSE_DIRECTION,0u),seed),
@@ -756,9 +837,9 @@ __device__ void observe_point(const Jumps& J,float2 r,float rho2,const float2 (&
     #pragma unroll
     for(int j=0;j<N;j++)acc[REC_GROUND+H+j]=norm2(psi[j])-(psi[j].x*y[j].x+psi[j].y*y[j].y);
 }
-extern "C" __global__ void __launch_bounds__(256) observe_points(const float2* state,int points,int trajectories,const int* components,
+extern "C" __global__ void __launch_bounds__(256,2) observe_points(const float2* state,int points,int trajectories,const int* components,
         Jumps J,float tail_x,float tail_y,float* records,const float* weights,float* density){
-    __shared__ float scratch[32];
+    __shared__ float sums[8][REC_KX+4];
     const int x=blockIdx.x*blockDim.x+threadIdx.x;const bool ok=x<points;
     const float2 r=position(ok?x:0,points,J.nx,J.dx);const float rho2=r.x*r.x+r.y*r.y;
     for(int s=0;s<SUB;s++){
@@ -780,11 +861,18 @@ extern "C" __global__ void __launch_bounds__(256) observe_points(const float2* s
             if(fabsf(r.y)>tail_y*SMALLER)sy=nn*r.y*r.y;
             if(density)atomicAdd(density+x,weights[t]*nn);
         }
-        float* rec=records+(u64)t*RECORD;
+        // The block's sums (per warp, then over the warps) added to the record; the tails after
+        // the REC_KX moments: x, y beyond the reach, then beyond the smaller grid's.
+        const float tails[4]={tx,ty,sx,sy};
         #pragma unroll
-        for(int i=0;i<REC_KX;i++){const float v=block_sum(acc[i],scratch);if(threadIdx.x==0&&v!=0.f)atomicAdd(rec+i,v);}
-        tx=block_sum(tx,scratch);ty=block_sum(ty,scratch);sx=block_sum(sx,scratch);sy=block_sum(sy,scratch);
-        if(threadIdx.x==0){if(tx!=0.f)atomicAdd(rec+REC_TAIL,tx);if(ty!=0.f)atomicAdd(rec+REC_TAIL+1,ty);if(sx!=0.f)atomicAdd(rec+REC_TAIL2,sx);if(sy!=0.f)atomicAdd(rec+REC_TAIL2+1,sy);}
+        for(int i=0;i<REC_KX+4;i++){const float v=warp_sum(i<REC_KX?acc[i]:tails[i-REC_KX]);if((threadIdx.x&31)==0)sums[threadIdx.x>>5][i]=v;}
+        __syncthreads();
+        if(threadIdx.x<REC_KX+4){
+            float v=0.f;for(int w=0;w<(int)(blockDim.x>>5);w++)v+=sums[w][threadIdx.x];
+            const int i=threadIdx.x,at=i<REC_KX?i:i<REC_KX+2?REC_TAIL+i-REC_KX:REC_TAIL2+i-REC_KX-2;
+            if(v!=0.f)atomicAdd(records+(u64)t*RECORD+at,v);
+        }
+        __syncthreads();
     }
 }
 

@@ -43,7 +43,7 @@ const TILE:usize=8;
 /// The passes over the planes of one grid: in shared memory, one block per plane, or for a large
 /// grid as a rows pass and a columns pass.
 enum Planes{
-    Small{kinetic:Function,observe:Function,derive:Function,shared:usize,observe_shared:usize,threads:u32},
+    Small{kinetic:Function,kinetic_derive:Function,observe:Function,derive:Function,shared:usize,observe_shared:usize,threads:u32},
     Big{n:usize,kinetic:[Function;2],observe:[Function;2],derive:[Function;2]},
 }
 impl Planes{
@@ -59,9 +59,10 @@ impl Planes{
         let name=|s:&str|format!("{s}_{nx}x{ny}");
         let shared=ny*(nx+1)*8;let observe_shared=shared+(nx+ny+32)*4;
         let kinetic=gpu.function(&name("kinetic"))?;kinetic.allow_shared(shared)?;
+        let kinetic_derive=gpu.function(&name("kinetic_derive"))?;kinetic_derive.allow_shared(shared)?;
         let observe=gpu.function(&name("observe_kinetic"))?;observe.allow_shared(observe_shared)?;
         let derive=gpu.function(&name("derive"))?;derive.allow_shared(shared)?;
-        Ok(Planes::Small{kinetic,observe,derive,shared,observe_shared,threads:if ny==1{32}else{THREADS as u32}})
+        Ok(Planes::Small{kinetic,kinetic_derive,observe,derive,shared,observe_shared,threads:if ny==1{32}else{THREADS as u32}})
     }
     /// K on every plane of `b` trajectory slots, renormalizing by `scale`.
     fn kinetic(&self,s:&Stream,state:&Buffer,components:&Buffer,scale:&Buffer,tables:&[Buffer;2],b:usize)->Result<(),String>{
@@ -72,6 +73,15 @@ impl Planes{
                 s.launch(&kinetic[1],((b*COMPONENTS*n/TILE) as u32,1,1),THREADS as u32,n*(TILE+1)*8,&[&state.pointer,&components.pointer,&tables[1].pointer])
             }
         }
+    }
+    /// K on every plane, and κ_x, κ_y of the result into dx, dy (`derivative`: κ/N): planes in
+    /// shared memory only (false: not done).
+    #[allow(clippy::too_many_arguments)]
+    fn kinetic_derive(&self,s:&Stream,state:&Buffer,components:&Buffer,scale:&Buffer,tables:&[Buffer;2],derivative:&[Buffer;2],dx:&Buffer,dy:&Buffer,b:usize)->Result<bool,String>{
+        let Planes::Small{kinetic_derive,shared,threads,..}=self else{return Ok(false)};
+        s.launch(kinetic_derive,((b*COMPONENTS) as u32,1,1),*threads,*shared,&[&state.pointer,&components.pointer,&scale.pointer,&tables[0].pointer,&tables[1].pointer,
+            &derivative[0].pointer,&derivative[1].pointer,&dx.pointer,&dy.pointer])?;
+        Ok(true)
     }
     /// K with the momentum observables added to the records (and, non-null, the marginals).
     #[allow(clippy::too_many_arguments)]
@@ -164,6 +174,9 @@ impl Cap{
 
 
 
+/// Profiling's events and times.
+struct Profile{events:Vec<Event>,phases:Vec<&'static str>,times:Vec<(&'static str,f64)>}
+
 /// A trajectory's initial internal state: its block (0: F = 1, 1: F = 2) and components.
 #[derive(Clone,Debug)]
 pub struct Internal{pub block:usize,pub amplitudes:Vec<Complex>}
@@ -181,7 +194,9 @@ pub struct Engine{
     energies:Vec<Vec<f64>>,
     kinetic_full:[Buffer;2],kinetic_half:[Buffer;2],derivative:[Buffer;2],kappa:[Buffer;2],
     tails:[f32;4],
-    planes:Planes,f_local:Function,f_doppler:Function,f_epilogue:Function,
+    planes:Planes,f_local:Function,f_kick_local:Function,f_epilogue:Function,
+    /// Whether dx, dy hold κ_x φ, κ_y φ of the current φ (the last kinetic pass made them).
+    derived:bool,
     f_jump_back:Function,f_jump_rates:Function,f_jump_choose:Function,f_jump_apply:Function,f_jump_finish:Function,
     f_observe_points:Function,f_thresholds:Function,
     /// The weight of each trajectory (thermal states' norms), and the steps made.
@@ -190,8 +205,8 @@ pub struct Engine{
     pub active:usize,
     pub steps:u64,
     hbar_over_mass:f64,
-    /// With profiling on: events after each phase of a step, and the milliseconds per phase.
-    profile:Option<(Vec<Event>,usize,Vec<(&'static str,f64)>)>,
+    /// With profiling on: the step's events after each phase, and the milliseconds per phase.
+    profile:Option<Profile>,
 }
 
 impl Engine{
@@ -219,16 +234,24 @@ impl Engine{
         let near:Vec<(usize,usize)>=ground.carriers.iter().enumerate().flat_map(|(c,carrier)|carrier.beams.iter().map(move|&l|(c,l))).collect();
         let order:Vec<usize>=model.block_states[0].iter().chain(&model.block_states[1]).copied().collect();
         let step=model.radial.step/4.;let radii=(g.reach()/step).ceil() as usize+2;
-        let samples:Vec<atom_motion_core::ground::Elimination>=(0..radii).map(|k|model.radial.at(k as f64*step)).collect();
         let slots=near.len().max(1);
+        let columns:Vec<(Vec<[f32;2]>,Vec<[f32;2]>)>=(0..radii).into_par_iter().map(|k|{
+            let e=model.radial.at(k as f64*step);
+            let(mut jump,mut response)=(vec![[0f32;2];slots*2*3*8*8],vec![[0f32;2];slots*ne*8]);
+            for(slot,&(_,l))in near.iter().enumerate(){
+                for(term,m)in [&e.responses[l],&e.derivatives[l]].into_iter().enumerate(){for a in 0..3{
+                    let cm=ground.emission[a].product(m);
+                    for gr in 0..8{for h in 0..8{jump[(((slot*2+term)*3+a)*8+gr)*8+h]=complex32(cm[(order[gr],order[h])]);}}
+                }}
+                for i in 0..ne{for h in 0..8{response[(slot*ne+i)*8+h]=complex32(e.responses[l][(i,order[h])]);}}
+            }
+            (jump,response)
+        }).collect();
         let mut jump_table=vec![[0f32;2];slots*2*3*8*8*radii];let mut response_table=vec![[0f32;2];slots*ne*8*radii];
-        for(k,e)in samples.iter().enumerate(){for(slot,&(_,l))in near.iter().enumerate(){
-            for(term,m)in [&e.responses[l],&e.derivatives[l]].into_iter().enumerate(){for a in 0..3{
-                let cm=ground.emission[a].product(m);
-                for gr in 0..8{for h in 0..8{jump_table[((((slot*2+term)*3+a)*8+gr)*8+h)*radii+k]=complex32(cm[(order[gr],order[h])]);}}
-            }}
-            for i in 0..ne{for h in 0..8{response_table[((slot*ne+i)*8+h)*radii+k]=complex32(e.responses[l][(i,order[h])]);}}
-        }}
+        for(k,(jump,response))in columns.iter().enumerate(){
+            for(i,z)in jump.iter().enumerate(){jump_table[i*radii+k]=*z;}
+            for(i,z)in response.iter().enumerate(){response_table[i*radii+k]=*z;}
+        }
         let hm=model.hbar_over_mass;
         let mut beam_table=vec![0f32;near.len().max(1)*8];
         for(slot,&(c,l))in near.iter().enumerate(){
@@ -267,7 +290,7 @@ impl Engine{
             cap:cap_buffer,wave_number,carriers,energies,
             kinetic_full,kinetic_half,derivative,kappa,tails,
             planes,
-            f_local:gpu.function("local_step")?,f_doppler:gpu.function("doppler_kick")?,f_epilogue:gpu.function("epilogue")?,
+            f_local:gpu.function("local_step")?,f_kick_local:gpu.function("kick_local_step")?,f_epilogue:gpu.function("epilogue")?,derived:false,
             f_jump_back:gpu.function("jump_back")?,f_jump_rates:gpu.function("jump_rates")?,f_jump_choose:gpu.function("jump_choose")?,
             f_jump_apply:gpu.function("jump_apply")?,f_jump_finish:gpu.function("jump_finish")?,f_observe_points:gpu.function("observe_points")?,
             f_thresholds:gpu.function("thresholds")?,
@@ -276,6 +299,8 @@ impl Engine{
     }
 
     fn seed(&self,stream:u64)->Seed{let s=self.settings.seed^stream.wrapping_mul(0x9E3779B97F4A7C15);Seed{lo:s as u32,hi:(s>>32) as u32}}
+    /// Trajectories moved in or out on the device: the derivatives no longer match.
+    pub(crate) fn touched(&mut self){self.derived=false;}
     /// The device addresses the move kernels take: the trajectories' state, their planes and weights.
     pub(crate) fn device(&self)->(TrajectoriesArg,u64,u64,u64){(self.trajectories_arg(),self.state.pointer,self.weights.pointer,self.components.pointer)}
     pub(crate) fn trajectories_arg(&self)->TrajectoriesArg{
@@ -293,7 +318,7 @@ impl Engine{
     /// grid points, ⟨φ|diag E_b(x)|φ⟩; each trajectory weighted by its norm, normalized within the
     /// trajectories of one internal state.
     pub fn initialize(&mut self,internal:&[Internal],temperature_uk:f64,model:&Model)->Result<(),String>{
-        let b=internal.len();assert!(b<=self.settings.trajectories);
+        let b=internal.len();assert!(b<=self.settings.trajectories);self.derived=false;
         let(points,g)=(self.points,self.settings.grid);
         // The distinct internal states and their potentials.
         let mut kinds:Vec<&Internal>=vec![];let mut kind=vec![0i32;b];
@@ -358,16 +383,20 @@ impl Engine{
         let(p,n,bb)=(points as i32,tiles as i32,b as i32);
         let grid_traj=(tiles as u32,b.div_ceil(SUB) as u32,1);
         self.mark("")?;
-        self.gpu.stream.launch(&self.f_local,grid_traj,t,0,&[&self.state.pointer,&p,&bb,&self.components.pointer,&self.step_v.arg(),&self.partial.pointer])?;
-        self.mark("local")?;
-        let every=self.settings.doppler_every.max(1);
-        if (self.steps+1)%every as u64==0{
-            let s=&self.gpu.stream;
-            self.planes.derive(s,&self.state,&self.components,None,b,&self.dx,&self.dy,&self.derivative)?;
+        // Every `every` steps the Doppler term over them, an explicit kick of φ before the local
+        // step (κφ from the last kinetic pass, or derived here).
+        let every=self.settings.doppler_every.max(1) as u64;
+        if (self.steps+1)%every==0{
+            if !self.derived{self.planes.derive(&self.gpu.stream,&self.state,&self.components,None,b,&self.dx,&self.dy,&self.derivative)?;self.mark("derive")?;}
             let tau=(every as f64*self.settings.dt) as f32;
-            s.launch(&self.f_doppler,grid_traj,t,0,&[&self.state.pointer,&self.dx.pointer,&self.dy.pointer,&p,&bb,&self.components.pointer,&self.doppler_x.arg(),&self.doppler_y.arg(),&tau,&self.partial.pointer])?;
+            self.gpu.stream.launch(&self.f_kick_local,grid_traj,t,0,&[&self.state.pointer,&self.dx.pointer,&self.dy.pointer,&p,&bb,&self.components.pointer,
+                &self.doppler_x.arg(),&self.doppler_y.arg(),&self.step_v.arg(),&tau,&self.partial.pointer])?;
+            self.mark("doppler+local")?;
+        }else{
+            self.gpu.stream.launch(&self.f_local,grid_traj,t,0,&[&self.state.pointer,&p,&bb,&self.components.pointer,&self.step_v.arg(),&self.partial.pointer])?;
+            self.mark("local")?;
         }
-        self.mark("doppler")?;
+        self.derived=false;
         self.gpu.stream.zero(&self.count)?;
         self.gpu.stream.launch(&self.f_epilogue,(b.div_ceil(THREADS) as u32,1,1),t,0,&[&self.trajectories_arg(),&bb,&self.partial.pointer,&n,&self.jumpers.pointer,&self.count.pointer])?;
         self.mark("epilogue")?;
@@ -378,29 +407,41 @@ impl Engine{
             self.observe_points(distributions)?;
             self.launch_kinetic(&self.kinetic_half)?;
             self.mark("observe+kinetic")?;
+        }else if (self.steps+2)%every==0&&self.planes.kinetic_derive(&self.gpu.stream,&self.state,&self.components,&self.scale,&self.kinetic_full,&self.derivative,&self.dx,&self.dy,b)?{
+            // The next step kicks: κφ with the kinetic pass.
+            self.derived=true;self.mark("kinetic+derive")?;
         }else{self.launch_kinetic(&self.kinetic_full)?;self.mark("kinetic")?;}
+        self.timed()?;
         self.steps+=1;
         Ok(())
     }
     /// Profiling: on, every step is timed by phase (and synchronized).
     pub fn set_profiling(&mut self,on:bool)->Result<(),String>{
-        self.profile=if on{Some(((0..16).map(|_|Event::new()).collect::<Result<Vec<_>,_>>()?,0,vec![]))}else{None};Ok(())
+        self.profile=if on{Some(Profile{events:(0..16).map(|_|Event::new()).collect::<Result<Vec<_>,_>>()?,phases:vec![],times:vec![]})}else{None};Ok(())
     }
-    /// Profiling: the time since the previous mark is the phase's (an empty phase starts a step).
+    /// Profiling: an event after the phase (an empty phase starts a step); the phases run on
+    /// without waiting, timed when the step ends (`timed`).
     fn mark(&mut self,phase:&'static str)->Result<(),String>{
-        let Some((events,next,times))=&mut self.profile else{return Ok(())};
-        if phase.is_empty(){*next=0;}
-        self.gpu.stream.record(&events[*next])?;
-        if *next>0{
-            events[*next].synchronize()?;let ms=events[*next].since(&events[*next-1])?;
-            match times.iter_mut().find(|(p,_)|*p==phase){Some(e)=>e.1+=ms,None=>times.push((phase,ms))}
+        let Some(p)=&mut self.profile else{return Ok(())};
+        if phase.is_empty(){p.phases.clear();}
+        self.gpu.stream.record(&p.events[p.phases.len()])?;p.phases.push(phase);Ok(())
+    }
+    /// Profiling: the ended step's phases added to the times.
+    fn timed(&mut self)->Result<(),String>{
+        let Some(p)=&mut self.profile else{return Ok(())};
+        let n=p.phases.len();if n<2{return Ok(());}
+        p.events[n-1].synchronize()?;
+        for i in 1..n{
+            let(phase,ms)=(p.phases[i],p.events[i].since(&p.events[i-1])?);
+            match p.times.iter_mut().find(|(q,_)|*q==phase){Some(e)=>e.1+=ms,None=>p.times.push((phase,ms))}
         }
-        *next+=1;Ok(())
+        Ok(())
     }
     /// The milliseconds per phase since profiling was turned on.
-    pub fn profile(&self)->Vec<(&'static str,f64)>{self.profile.as_ref().map_or(vec![],|p|p.2.clone())}
+    pub fn profile(&self)->Vec<(&'static str,f64)>{self.profile.as_ref().map_or(vec![],|p|p.times.clone())}
     /// The observation of the initial state ψ, and the first half kick φ = K(dt/2) ψ.
     pub fn observe_initial(&mut self,distributions:bool)->Result<(),String>{
+        self.derived=false;
         self.gpu.stream.zero(&self.records)?;
         self.observe_points(distributions)?;
         self.observe_momentum(distributions)
@@ -417,7 +458,7 @@ impl Engine{
         self.mark("jump derive")?;let s=&self.gpu.stream;
         s.launch(&self.f_jump_rates,(tiles as u32,lanes,1),t,0,&[&self.state.pointer,&self.dx.pointer,&self.dy.pointer,&p,&self.components.pointer,&self.jumpers.pointer,&self.count.pointer,&self.jumps_arg(),&self.rates.pointer])?;
         self.mark("jump rates")?;let s=&self.gpu.stream;
-        s.launch(&self.f_jump_choose,(self.active.div_ceil(64) as u32,1,1),64,0,&[&self.trajectories_arg(),&self.jumpers.pointer,&self.count.pointer,&self.rates.pointer,&n,&self.jumps_arg(),&seed,&self.choices.pointer])?;
+        s.launch(&self.f_jump_choose,(self.active.div_ceil(2) as u32,1,1),64,0,&[&self.trajectories_arg(),&self.jumpers.pointer,&self.count.pointer,&self.rates.pointer,&n,&self.jumps_arg(),&seed,&self.choices.pointer])?;
         self.mark("jump choose")?;let s=&self.gpu.stream;
         s.launch(&self.f_jump_apply,(tiles as u32,lanes,1),t,0,&[&self.state.pointer,&self.dx.pointer,&self.dy.pointer,&p,&self.components.pointer,&self.jumpers.pointer,&self.count.pointer,&self.jumps_arg(),&self.choices.pointer,&self.forward_v.arg(),&self.partial.pointer])?;
         self.mark("jump apply")?;let s=&self.gpu.stream;
@@ -453,7 +494,8 @@ impl Engine{
     /// The trajectory each slot holds (its random streams).
     pub fn set_ids(&self,ids:&[u32])->Result<(),String>{self.gpu.stream.upload(&self.ids,ids)}
     /// Copies slot `from`'s trajectory into slot `to` and empties `from` (on the device, in order).
-    pub fn copy_slot(&self,from:usize,to:usize)->Result<(),String>{
+    pub fn copy_slot(&mut self,from:usize,to:usize)->Result<(),String>{
+        self.derived=false;
         let s=&self.gpu.stream;let plane=COMPONENTS*self.points*8;
         s.copy(&self.state,to*plane,&self.state,from*plane,plane)?;
         for(buffer,size)in [(&self.ids,4),(&self.components,4),(&self.scale,4),(&self.log_norm,8),(&self.threshold,8),(&self.jumps,4),(&self.weights,4)]{s.copy(buffer,to*size,buffer,from*size,size)?;}
