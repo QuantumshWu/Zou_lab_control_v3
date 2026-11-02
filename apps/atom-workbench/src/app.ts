@@ -1157,16 +1157,16 @@ function renderDynamics(a:Analysis):void{
   const plotOptions={showTotalExcited:false,timeUnit:d.durationUnit,scale:populationScale,viewportWidth:host.clientWidth,initialId:singleInitialId(),meanLabel:meanSymbol(raw),...(open===undefined?{}:{cursor:Number(open)})};
   const stopped=stoppedHere(),waiting=`<div class="empty-state">${currentSolverError()?esc(solverText(currentSolverError())):stopped?'计算已停止':'正在求解当前场景…'}</div>`;
   // With 1D motion: its refusal, or the chart its view asks for.
-  const motionView$=motionOn()?motionView:'populations',refusal=motionOn()?motionRefusal(scene):'',motion=raw&&raw.timesUs.length>1?raw.motion:undefined;
-  motionViewControl.root.hidden=!motionOn();motionViewControl.setCurrent(motionView$);populationScaleControl.root.hidden=motionView$!=='populations';
-  momentumToolbar(!refusal&&motionView$==='momentum'?motion:undefined,raw?.timesUs??[]);
+  const shown=motionOn()?motionView:'populations',refusal=motionOn()?motionRefusal(scene):'',motion=raw&&raw.timesUs.length>1?raw.motion:undefined;
+  motionViewControl.root.hidden=!motionOn();motionViewControl.setCurrent(shown);populationScaleControl.root.hidden=shown!=='populations';
+  momentumToolbar(!refusal&&shown==='momentum'?motion:undefined,raw?.timesUs??[]);
   const caption=(markup:string)=>{if($('population-caption').innerHTML!==markup)$('population-caption').innerHTML=markup;};
   if(refusal){host.innerHTML=`<div class="empty-state error" role="alert">${esc(refusal)}</div>`;caption('');return;}
-  if(motionView$==='temperature'){
+  if(shown==='temperature'){
     host.innerHTML=motion?motionSeriesChart(raw!.timesUs,motion,d.durationUnit):waiting;if(motion)unbindPopulation=bindMotionSeries(host,raw!.timesUs,motion,d.durationUnit);
     caption(motion?legendEntry(MOTION_INKS[0],`温度 T = m·Var(v)/k_B（沿 ${motion.axis} 轴）`)+legendEntry(MOTION_INKS[1],'平均速度 ⟨v⟩'):'');return;
   }
-  if(motionView$==='momentum'){
+  if(shown==='momentum'){
     const last=motion?motion.momentum.samples.length-1:0,listed=motion?[last,...(motionCompare===undefined?[]:[motionCompare])]:[];
     const names=motion?listed.map(i=>{const sample=motion.momentum.samples[i]!;return `t = ${durationText(raw!.timesUs[sample]!,d.durationUnit)} · T = ${formatNumber(motion.temperatureUK[sample]!,{digits:4})} μK`;}):[];
     host.innerHTML=motion?momentumChart(motion,listed):waiting;if(motion)unbindPopulation=bindMomentum(host,motion,listed,names);

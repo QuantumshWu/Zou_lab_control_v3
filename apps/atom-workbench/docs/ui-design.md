@@ -295,7 +295,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 - 场景只有一种格式：`types.ts` 的 `Scene`，`version: 2`（`SCENE_VERSION`）。`scene-file.ts` 严格按它校验：必需字段齐全且在范围内，没有任何其它字段。早先版本写的文件不再读入、也不迁移：导入时拒绝并写明原因（如"场景文件不符合当前格式（version 2）：version 为 1，应为 2"或"lasers[0] 缺少 showLightShift"）。
 - 场景只由操作者载入（导入、示例）。界面不自动保存场景，启动时总是默认场景（`scene-file.ts` 的 `startupScene`），早先版本存在本机浏览器存储里的场景、编辑基准和能级标签在启动时删除；本机只保留求解失败的诊断记录，它不是场景数据。能级标签 1、2 只在本次运行中有效。"替换当前场景"的确认只比较本次载入或导出之后的修改。
 - 必需：`name`、`fields`、`lasers`、`referenceFrequencies`、`references`、`marks`、`dynamics`；磁场的 `direction`；激光的 `frequency`、`frequencyUnit`、`line`（派生，读入后按频率重算）、`showLightShift`、`intensityMode`、`intensityMWcm2`、`powerUnit`、`waistUnit`、`intensityUnit`、`direction`、`polarizationAngleDeg`、`ellipticityDeg`、`phaseDeg`，以及所选强度方式的输入（功率与束腰：`powerMW`、`waistUm`；功率与 NA：`powerMW`、`numericalAperture`）；参考频率的 `frequency`、`frequencyUnit`；参考能级的 `anchorId`、`anchorMode`、`offsetMHz`、`offsetUnit`；`dynamics` 的 `initialStateId`、`monitoredStateIds`、`monitorMode`、`monitoredGroupIds`、`durationUs`、`durationUnit`、`samples`、`meanHorizonUs`。
-- 可选（本身就是可有可无的）：`display`（读数偏好）；激光的 `referenceStateId`、`referenceProcess`，以及别的强度方式留下的 `powerMW`、`waistUm`、`numericalAperture`；参考能级的 `photon`；混合初态的 `dynamics.initialState`，热分布时还有 `dynamics.temperatureUnit`（且只在热分布时有）；派生的 `frequencyAnchor`、`intensityAnchor`（没有时由输入算出，有时只在指纹相符时使用）。
+- 可选（本身就是可有可无的）：`display`（读数偏好）；`dynamics.motion`（1D 运动，§6.20）；激光的 `referenceStateId`、`referenceProcess`，以及别的强度方式留下的 `powerMW`、`waistUm`、`numericalAperture`；参考能级的 `photon`；混合初态的 `dynamics.initialState`，热分布时还有 `dynamics.temperatureUnit`（且只在热分布时有）；派生的 `frequencyAnchor`、`intensityAnchor`（没有时由输入算出，有时只在指纹相符时使用）。
 - 取消的旧写法：`initialF/initialM`、`dynamics.laserId`、`dynamics.quality`、`dynamics.populationTolerance`、激光的 `regime`、`detuningMHz/referenceTransition/frequencyMode/wavelengthNm/detuningUnit`、以角度 `thetaDeg/phiDeg` 和 `directionAnchor` 写的方向、预设与跟随标记，以及缺省 `meanHorizonUs`、单位、`showLightShift`、`phaseDeg`、`intensityMode` 时的补齐。
 
 ### 6.18 两个时刻 T 一次算出，切换 T 即时显示（2026-10-28）
@@ -311,3 +311,17 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 - 没有波长窗口：任何波长的激光都可以设置和计算。模型在哪里不代表激光的作用，就在哪里写明，结果照常计算和显示（`spectroscopy.ts` 的 `modelScope`）。
 - 两种情形。其一，激光接近 32 态以外能级（6P、nS、nD）的共振：这些能级只作为二阶静态（van Vleck）光移进入 H0，耦合/失谐比 |Ω/2Δ| 超过 1%（`STATIC_MIXING_LIMIT`）或虚跃迁失谐不足 10 GHz（`OUTSIDE_GAP_MHZ`）时，二阶项不再代表它们。这与能级图画静态光移的规则是同一条：打开"显示光移"的这束光在能级图中也不画光移（"离共振太近"）；能级图另有 D 线自己的条件（失谐 ≥ 100 MHz），动力学中 D 线是显式驱动，不需要它。原来动力学在这里拒绝构建模型，现在只在恰好共振、二阶项无定义时拒绝。其二，激光波长短于 5P 的光电离阈值（5P₃/₂ 479.1 nm、5P₁/₂ 473.7 nm，由 Rb 电离能 33 690.8048 cm⁻¹ 减去 5P 能量得到）：光电离不在模型内。
 - 显示：状态栏下方一行橙色文字，每页都在："超出模型范围（结果照常给出）："后接每条说明，点名激光与原因，例如"「蓝光」的波长 450 nm 短于 5P₃/₂ 和 5P₁/₂ 的光电离阈值（479.1 nm、473.7 nm）：光电离不在模型内。"或"「telecom」离 4D5/2 的虚跃迁失谐只有 4.69 GHz（不足 10 GHz）：32 态以外的能级（6P、nS、nD）只作为二阶静态光移进入模型，这里超出它的适用范围。"同一频率的几束光作为一个载频一起判断、一起点名。详情页"当前计算"中重复这些说明；没有这些情形时这一行不出现。
+
+### 6.20 1D 运动（2026-11-02）
+
+- **设置**：布居演化页的设置区多一组：开关"1D 运动"，打开后有"运动轴"（x · y · z，分段控件）和"初始温度"（v3 Field，K / mK / μK，≈ 规则；按 §0.4 换单位保留数字，存为 μK 与单位）。关闭时这两行不显示，设置保留在场景中。初态是场景的初态 × 沿运动轴、温度为初始温度的 Maxwell 动量分布 × 均匀分布的位置。三组设置并排放不下时换行（每组至少一个数值框加单位选择器的宽度），窗口跨缩放档位变化时标签列重新测量。
+- **光束**：驱动动力学的每束光（开启且强度非零）都参与，分开保留：同频的对射光是两束光。沿运动轴正向或反向传播的光是行波 e^{±ikx}，与轴垂直的光沿轴均匀。方向是精确的转动（direction.ts），平行与垂直按精确等式判断，没有角度容差；其它角度没有 1D 形式。沿轴传播的光必须都在 D2 线上（频率离 D2 比离 D1 近），共用一个光子动量 ħk。不满足时不计算，状态栏（错误）与图区写明并点名，例如"1D 运动不支持当前光束：「回泵光 +z」（与 z 轴成 45°）与运动轴既不平行也不垂直，1D 运动只含沿运动轴（正向或反向）传播或垂直于它的光。"或"「光镊」（852 nm）沿运动轴传播，但不在 D2 线上；沿运动轴传播的光必须都在 D2 线上。"
+- **结果**：标题行的分段控件"布居 · 温度与速度 · 动量分布"只在 1D 运动打开时出现；"线性 / 对数"只用于布居。
+  - 布居：运动引擎给出的、对位置平均的 32 态布居，与没有运动时同一张图；读数没有 p̄(T) 一列。
+  - 温度与速度：上图 T(t) = m·Var(v)/k_B（μK，纵轴从 0 起），下图平均速度 ⟨v⟩(t)；⟨v⟩ 的纵轴关于 0 对称，范围取 ⟨v⟩ 的最大值与热速度宽度 sqrt(k_B T/m) 中较大者，漂移按它所在的热分布读，单位按量级自动选择（m/s、cm/s、mm/s、μm/s）。悬停读数给出该采样的 T 与 ⟨v⟩。
+  - 动量分布：末时刻沿轴的速度分布（概率密度，横轴是结果的整个速度网格）；"对比时刻"另画一个结果中给出分布的更早时刻（虚线）。图例写出两个时刻和各自的 T。
+  - 没有"冷原子比例"之类的显示阈值。
+- **请求与缓存**：运动的轨迹单独请求（`includeMean: false`），请求选项带 `motion: {axis, temperatureUK}`，模型带 `motion` 块（full-master-model.ts `MotionModel`：每束光的同向/反向旋转耦合、频率坐标、波数与轴向投影，没有光束的 H0，各态的帧频率，相对运动轴的笛卡尔辐射算符，质量）。轨迹的缓存键含运动（关闭时与原来逐字相同）。长期布居 p̄(T) 只是内态的，它的输入与缓存不变：能级图的长期布居模式照常请求内态的 p̄(T)，"指定时刻"读运动的轨迹。
+- **结果契约**：`motion` 块 `{axis, temperatureUK[], meanVelocityMps[], momentum: {velocitiesMps, samples, probabilities}}`，严格读取（solver-types.ts `readMotionResult`）：只在请求了运动时出现，轴与请求一致，每个采样一个 T 与 ⟨v⟩，分布在递增的采样上给出且含末时刻，每个分布是速度网格上的概率。
+- **求解**：rust-solver/motion-core（motion_core_adapter.rs 转接）。运动引擎尚未实现：现在只有精确的自由飞行（没有光束，且内态在模型下不变，布居、温度与 Maxwell 分布保持初值），其余返回"运动引擎尚未实现"。
+- **场景与示例**：可选的 `dynamics.motion: {enabled, axis, temperatureUK, temperatureUnit}`；默认场景没有它，`version` 仍为 2，原有文件照常读入。示例"1D PGC · lin⊥lin"：沿 ±z 的 D2 冷却光对（x、y 线偏振，0.70 mW/cm²，F=2 → F′=3 下方 3Γ）与共振的回泵光对（F=1 → F′=2，0.1 mW/cm²），B = 0，初态 |2,+2⟩，30 μK，1 ms。

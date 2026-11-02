@@ -75,6 +75,13 @@ because it is small or labelled forbidden.
   errors propagated through the dressed blocks; beyond 1 ms the trajectory
   continues as the expansion in the slow eigenmodes.
 
+1D motion (布居演化 · 1D 运动, docs/ui-design.md §6.20): a request whose model
+carries the `motion` block -- the beams kept apart with their axial
+projections and wave numbers, the emission resolved on the axis -- is a
+trajectory alone, served by the motion core in `rust-solver/motion-core`
+(`motion_core_adapter.rs`). Its engine is not implemented yet: exact free
+flight is served, anything else is refused (运动引擎尚未实现).
+
 Every request asks for the same absolute population error,
 `populationTolerance: 0.005` on the probability scale (0.5%); it is not a user
 setting. The estimates are calibrated a-posteriori estimates (checked against
