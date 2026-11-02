@@ -14,9 +14,10 @@ pub const NVRTC_OPTIONS:&[&str]=&["--gpu-architecture=compute_75","--std=c++17",
 /// on every driver of CUDA 12.0 or later, 527.41 on Windows).
 pub const NVRTC_VERSION:&str="12.0.140";
 
-/// The hash a PTX header records: of the options, one per line, then the source.
+/// The hash a PTX header records: of the options, one per line, then the source, with its line
+/// endings as LF (a checkout may have made them CRLF).
 pub fn source_hash(source:&str)->String{
-    let mut text=String::new();for o in NVRTC_OPTIONS{text.push_str(o);text.push('\n');}text.push_str(source);
+    let mut text=String::new();for o in NVRTC_OPTIONS{text.push_str(o);text.push('\n');}text.push_str(&source.replace("\r\n","\n"));
     sha256(text.as_bytes()).iter().map(|b|format!("{b:02x}")).collect()
 }
 /// The PTX header's line for a source.
