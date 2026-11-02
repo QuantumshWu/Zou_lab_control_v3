@@ -1509,7 +1509,7 @@ mod tests {
         let runtime = Runtime::new();
         let generation = runtime.begin("manual", vec![Declaration { signal: "data".into(), schema: schema.clone(), storage: Storage::Latest }], json!({})).unwrap();
         let data = DataBlock::new(schema, OwnedBuffer::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).into(), Validity::Uniform(true), None).unwrap();
-        runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "data".into(), ordinal: 0, data, origin: None }], metadata: json!({}), parents: vec![] }).unwrap();
+        runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "data".into(), ordinal: 0, data, origin: None, shot_time: None }], metadata: json!({}), parents: vec![] }).unwrap();
         let read = runtime.read_coherent_views(&[(generation, Arc::from("data"), None)], &mut Default::default()).pop().unwrap().unwrap();
         let frame = Frame(Arc::new(zlc_plot::projection::Source::from_read(&read).unwrap()));
 

@@ -503,6 +503,68 @@ impl DatasetSchema {
     pub fn value(&self) -> &ValueSchema { &self.value }
     pub fn component_mask_len(&self) -> usize { self.component_mask_len }
     pub fn physical_shape(&self) -> &[usize] { &self.physical_shape }
+
+    /// What a schema IS without what its coordinates currently read
+    /// (`structure_fingerprint`): two schemas with equal keys have one geometry.
+    pub fn structure_key(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        for (role, coded) in [(DomainRole::Repeat, true), (DomainRole::Point, true), (DomainRole::Cell, false)] {
+            let domain = self.domain(role);
+            let sliding: Vec<&str> = domain.axes().iter().filter(|axis| axis.role() == "primary-index").map(|axis| axis.id()).collect();
+            for axis in domain.axes() {
+                let (coordinates, origin, origins) = match axis.coordinates() {
+                    Coordinates::Index { origin, .. } => (None, *origin, None),
+                    Coordinates::Numeric(buffer) => (Some(buffer.len()), 0, None),
+                    Coordinates::Values(values) => (Some(values.len()), 0, None),
+                    Coordinates::OriginsAndOffsets { origins, offsets } => (Some(offsets.len()), 0, Some(origins.len())),
+                };
+                let slides = !sliding.is_empty() && (sliding.contains(&axis.id()) || axis.coordinate_of().is_some_and(|of| sliding.contains(&of))
+                                                      || origins.is_some());
+                let labels = axis.labels().map(<[_]>::len);
+                if slides {
+                    let coordinates = if origins.is_none() && coordinates.is_some() { "sliding".to_owned() } else { format!("{coordinates:?}") };
+                    let _ = write!(out, "[{} {} {} sliding {coordinates} sliding {:?} {:?}]", axis.id(), axis.name(), axis.role(),
+                                   labels.map(|_| "sliding"), origins.map(|_| "sliding"));
+                } else {
+                    let _ = write!(out, "[{} {} {} {} {coordinates:?} {origin} {labels:?} {origins:?}]", axis.id(), axis.name(), axis.role(), axis.len());
+                }
+                let _ = write!(out, "{:?} {:?} {:?};", axis.unit(), axis.coordinate_frame(), axis.coordinate_of());
+            }
+            for (index, size) in domain.physical_shape().iter().enumerate() {
+                let slides = !sliding.is_empty() && (coded || domain.axes().get(index).is_some_and(|axis| sliding.contains(&axis.id())));
+                if slides { out.push_str("shape sliding;") } else { let _ = write!(out, "shape {size};"); }
+            }
+            if !coded { out.push_str("codes none;"); }
+            else if !sliding.is_empty() { out.push_str("codes sliding;"); }
+            else {
+                for axis in domain.axes() {
+                    let mapping = domain.mapping(axis.id()).expect("mapped axis");
+                    let base = match mapping.base() {
+                        CodeBase::Range { start, step, len } => format!("range {start} {step} {len}"),
+                        CodeBase::Explicit(values) => format!("{:?}", values.as_slice()),
+                    };
+                    let _ = write!(out, "code {base} {} {};", mapping.inner(), mapping.outer());
+                }
+            }
+        }
+        let value = self.value();
+        let validity = match value.validity() { ValidityContract::Value => "value".to_owned(), ValidityContract::Components(ids) => format!("{ids:?}") };
+        let _ = write!(out, "value {:?} {:?} {:?} {validity}", self.dtype(), value.unit(), value.name());
+        out
+    }
+
+    /// v2 `_generation_holds_schema`: whether a publication with `other` stays
+    /// in the generation declared with this schema. Equal schemas do; so does a
+    /// result cut from a Runtime history window, whose own coordinates (its
+    /// shots' times, each record's sample-time origin) move on every shot while
+    /// the shape, the axes, their roles and units stand still. Judged as schema,
+    /// a region on a waveform panel would start a new generation on every shot.
+    pub fn holds(&self, other: &DatasetSchema) -> bool {
+        self == other || (self.physical_shape == other.physical_shape
+            && other.domain(DomainRole::Point).axes().iter().any(|axis| axis.role() == "primary-index")
+            && self.structure_key() == other.structure_key())
+    }
 }
 
 impl PartialEq for DatasetSchema {

@@ -38,7 +38,10 @@ impl Output {
             self.runtime.outcome(token).map_or(true,|outcome|outcome.is_some()));
         let reconfigured=self.last_source.as_ref().is_some_and(|last|
             last.generation==source.key().generation && last.revision>=source.key().revision);
-        if self.source_identity.as_ref()!=Some(&identity) || self.schemas!=schemas || self.records!=records
+        // A result cut from a history window keeps its generation while only its coordinates move (v2).
+        let held=self.schemas.len()==schemas.len() && self.schemas.iter().zip(&schemas)
+            .all(|((name,pinned),(other,schema))|name==other && pinned.holds(schema));
+        if self.source_identity.as_ref()!=Some(&identity) || !held || self.records!=records
             || self.definition!=metadata || self.generation.is_none() || ended || reconfigured {
             if let Some(token)=&self.generation {
                 match self.runtime.seal(token,json!({"reason":"replaced"})) {
@@ -60,7 +63,7 @@ impl Output {
                 && part.origin()==[0,0] && part.data().schema()==snapshot.schema())
                 .ok_or("A sample output must contain one complete event block")?;
             Ok(Input::Event {signal,ordinal:source.key().ordinal.ok_or("A sample requires an actual source ordinal")?,
-                data:part.data().clone(),origin:None})
+                data:part.data().clone(),origin:None,shot_time:source.anchor().shot_time()})
         }).collect::<Result<Vec<_>,String>>()?;
         // A history view has one current shot anchor, not N simultaneous roots.
         let accepted=match self.runtime.commit(self.generation.as_ref().unwrap(),&Bundle {inputs,metadata,parents:vec![source.anchor().clone()]}) {

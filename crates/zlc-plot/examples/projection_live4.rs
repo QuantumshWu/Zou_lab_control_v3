@@ -90,7 +90,7 @@ fn main() {
         let generation: Generation = runtime.begin("camera", declarations, json!({})).unwrap();
         let _lease = runtime.retain_history(&generation, "stream", WINDOW).unwrap();
         for (ordinal, data) in history.iter().enumerate() {
-            runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "stream".into(), ordinal: ordinal as u64, data: data.clone(), origin: None }],
+            runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "stream".into(), ordinal: ordinal as u64, data: data.clone(), origin: None, shot_time: None }],
                 metadata: json!({}), parents: vec![] }).unwrap();
         }
         let mut live: Vec<Projection> = (0..4).map(|_| Projection::new()).collect();
@@ -101,7 +101,7 @@ fn main() {
         for shot in 0..shots {
             // Acquisition and publishing are not timed.
             let inputs = panels.iter().enumerate().map(|(k, (name, ..))| Input::Event { signal: (*name).into(),
-                ordinal: if k == 3 { (WINDOW + shot) as u64 } else { shot as u64 }, data: block(&schemas[k], frames(&schemas[k])), origin: None }).collect();
+                ordinal: if k == 3 { (WINDOW + shot) as u64 } else { shot as u64 }, data: block(&schemas[k], frames(&schemas[k])), origin: None, shot_time: None }).collect();
             runtime.commit(&generation, &Bundle { inputs, metadata: json!({}), parents: vec![] }).unwrap();
             let started = Instant::now();
             let reads: Vec<_> = runtime.read_views(&requests).into_iter().map(Result::unwrap).collect();

@@ -38,7 +38,7 @@ fn source(cell: Arc<Domain>, values: Vec<f64>) -> Source {
     let runtime = Runtime::new();
     let generation = runtime.begin("probe", vec![Declaration { signal: "frames".into(), schema: schema.clone(), storage: Storage::Latest }], json!({})).unwrap();
     let data = DataBlock::new(schema, OwnedBuffer::from_vec(values).into(), Validity::Uniform(true), None).unwrap();
-    runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "frames".into(), ordinal: 0, data, origin: None }],
+    runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "frames".into(), ordinal: 0, data, origin: None, shot_time: None }],
                                          metadata: json!({}), parents: vec![] }).unwrap();
     let read = runtime.read_coherent_views(&[(generation, Arc::from("frames"), None)], &mut Default::default()).pop().unwrap().unwrap();
     Source::from_read(&read).unwrap()
