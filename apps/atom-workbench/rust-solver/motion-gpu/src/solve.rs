@@ -4,7 +4,8 @@
 //! `TEMPERATURE_TOLERANCE` relative -- each batch's merged estimates published as a checkpoint.
 //! The first batch is the fewest trajectories; each next one is sized from the last one's wall
 //! time so that it takes about `BATCH_SECONDS` (a batch's cost per trajectory falls with its size,
-//! so the estimate from a smaller batch is an upper bound).
+//! so the estimate from a smaller batch is an upper bound), and at most to the count the errors
+//! so far project the targets to need.
 use crate::engine::{Cap,Internal,Settings,REC_EXCITED,REC_GROUND,REC_KX,REC_TAIL,REC_X};
 use crate::ensemble::{ladder,Ensemble,Place};
 use crate::gpu::Gpu;
@@ -221,6 +222,10 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool)->Resul
         solution.reason=if met{None}else{Some(format!("{run} 条轨迹后：布居的标准误差 {population:.1e}（目标 {tolerance}），温度的相对标准误差 {:.1}%（目标 {:.0}%）",
             100.*temperature_error,100.*TEMPERATURE_TOLERANCE))};
         if met{break;}
+        // The trajectories the targets need, the errors falling as 1/√n: the next batch at most
+        // the rest (a short one is topped up by the next).
+        let need=(run as f64*(population/tolerance).max(temperature_error/TEMPERATURE_TOLERANCE).powi(2)).ceil() as usize;
+        size=size.min(need.saturating_sub(run).div_ceil(FEWEST)*FEWEST).max(FEWEST);
         if run<MOST_TRAJECTORIES&&!checkpoint(&solution){break;}
     }
     Ok(solution)
