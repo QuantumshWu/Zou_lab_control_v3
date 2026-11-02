@@ -36,8 +36,8 @@
 //! A point particle has no zero-point motion: below a few vibrational quanta per axis the method
 //! cools too far. Against the 1D GMW references of the tweezer PGC (the atom on the line through
 //! the focus): heating (TW1, k_B T from 6 to 16 ħω over 10 ms) T within 6 % (mean +2 %) and the
-//! populations within 0.03; cooling (TW2) T within 3 % down to k_B T ≈ 5 ħω, 6 % low at 4.6 ħω,
-//! 10 % low at 4 ħω and 15-55 % low below 3 ħω, the populations within 0.045 but for the first
+//! populations within 0.03; cooling (TW2) T within 4.5 % down to k_B T ≈ 5 ħω, 6 % low at 4.6 ħω,
+//! 7-10 % low at 4 ħω and 10-55 % low below 3.5 ħω, the populations within 0.045 but for the first
 //! 50 µs of optical pumping (up to 0.066). Against the 2D quantum trajectories of the same scene
 //! (x and y free) within 8 % at 4.6 ħω and 15 % low at 3.1 ħω. Each output time says whether it
 //! is in the regime k_B T ≥ `CLASSICAL` ħω on every axis (with T the engine's own, which lies below

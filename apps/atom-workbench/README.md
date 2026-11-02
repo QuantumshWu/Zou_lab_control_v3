@@ -101,7 +101,8 @@ harmonic part is moved exactly, the time step comes from step doubling, and
 trajectories run in batches until two standard errors meet 5% in the
 populations and 10% in T. A point particle has no zero-point motion: results
 are validated for k_B T >= 4 hbar omega on every axis and marked reference-only
-below.
+below. The example 光镊 · 3D PGC cools the same atom with sigma+sigma- pairs along
+x, y and z.
 
 Every request asks for the same absolute population error,
 `populationTolerance: 0.01` on the probability scale (1%); it is not a user

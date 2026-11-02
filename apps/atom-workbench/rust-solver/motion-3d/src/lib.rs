@@ -115,7 +115,7 @@ pub fn simulate_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,f
 }
 fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],origin:Option<[f64;3]>)->Outcome{
     let engine=Engine{model,settings:settings.clone()};
-    // The tasks: (group, its first and last trajectory, the task's first and last), in order.
+    // The tasks in order: (their group, their first trajectory, the one after their last).
     let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
     let tasks:Vec<(u64,u64,u64)>=(0..count.div_ceil(group)).flat_map(|g|{let(start,end)=bounds(g);(start..end).step_by(TASK as usize).map(move|s|(g,s,(s+TASK).min(end)))}).collect();
     let results:Vec<(u64,Group,Vec<Vec<([f64;3],[f64;3])>>,u64)>=tasks.par_iter().map(|&(g,from,to)|{
