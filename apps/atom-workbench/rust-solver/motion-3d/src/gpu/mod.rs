@@ -157,7 +157,7 @@ impl Gpu{
     /// settings' dt between `outputs` output times, in groups of `group`, as tasks of at most `TASK`
     /// trajectories inside a group, (r, κ) kept at `listed`.
     pub fn simulate(&self,program:&Program,model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize])->Result<Outcome,String>{
-        self.context.make_current()?;
+        self.context.make_current()?;let clock=Instant::now();
         // The tasks in order: (their group, their first trajectory, the one after their last), as lib.rs `run`.
         let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
         let tasks:Vec<(u64,u64,u64)>=(0..count.div_ceil(group)).flat_map(|g|{let(start,end)=bounds(g);(start..end).step_by(TASK as usize).map(move|s|(g,s,(s+TASK).min(end)))}).collect();
@@ -186,7 +186,7 @@ impl Gpu{
                 }
             }
         }
-        Ok(Outcome{groups,samples,jumps,doppler})
+        Ok(Outcome{groups,samples,jumps,doppler,seconds:[clock.elapsed().as_secs_f64(),0.]})
     }
 
     /// The trajectories after `steps` steps of the settings' dt on the GPU (engine.rs `Engine::step`

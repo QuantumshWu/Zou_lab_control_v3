@@ -18,8 +18,8 @@ fn main(){
     let f1:Vec<usize>=request.states.iter().enumerate().filter(|(_,s)|s.starts_with("ground-1-")).map(|(i,_)|i).collect();
     for dt in args[5..].iter().map(|x|x.parse::<f64>().unwrap()){
         let steps=(interval/dt).round().max(1.) as usize;let settings=Settings::new(interval/steps as f64,&trap,f64::EPSILON,true);
-        let clock=Instant::now();let outcome=simulate(&model,&settings,&initial,0x3D_5EED,0,count,(count/(2*threads)).max(1),steps,outputs,&[]);
-        let e=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab});
+        let clock=Instant::now();let outcome=simulate(&model,&settings,&initial,0x3D_5EED,0,count,(count/(2*threads)).max(1),steps,outputs,&[],None);
+        let e=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab},&[]);
         println!("{name} dt {:.4} us: {:.1} s",settings.dt,clock.elapsed().as_secs_f64());
         for i in (0..outputs).step_by((outputs/8).max(1)).chain([outputs-1]){
             let x=&e[i];let p:f64=f1.iter().map(|&k|x.populations[k]).sum();

@@ -863,7 +863,11 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     SPAN_END(SPAN_PHOTONS,photons);
     if(!(total>0.)){t.threshold=rng.open_uniform();t.log_threshold=log(t.threshold);return;}
     int pick=C.nclasses-1;
-    {double x=rng.uniform()*total;for(int c=0;c<C.nclasses;c++){const double w=(double)J.weights[c];if(x<w){pick=c;break;}x-=w;}}
+    // The draws the state and the kicks depend on first -- the class, the next threshold, the
+    // polarization, the absorbed beam --, the direction's rejection loop after them (engine.rs `jump`:
+    // a twin on the same stream keeps its thresholds and choices whatever its loop takes).
+    double x=rng.uniform()*total;const double threshold=rng.open_uniform(),polarization=rng.uniform(),absorbed=rng.uniform();
+    for(int c=0;c<C.nclasses;c++){const double w=(double)J.weights[c];if(x<w){pick=c;break;}x-=w;}
     const Class K=P.classes[C.classes+pick];const int nt=P.clusters[K.target].n;
     if(lane<3*nt)J.u[lane%3][lane/3]=amplitude(P,W,C,K,lane%3,lane/3,t.time,M);
     __syncwarp();
@@ -881,7 +885,7 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
         if(lane<nt)for(int a=0;a<3;a++)f[j]+=(float)pair[j][a]*J.u[a][lane];
         weights[j]=warp_sum(lane<nt?norm2(f[j]):0.f);
     }
-    const int chosen=rng.uniform()*((double)weights[0]+(double)weights[1])<(double)weights[0]?0:1;
+    const int chosen=polarization*((double)weights[0]+(double)weights[1])<(double)weights[0]?0:1;
     const double* e=pair[chosen];const float size=weights[chosen];
     if(lane<nt)J.f[lane]=f[chosen];
     __syncwarp();
@@ -894,7 +898,7 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     for(int x=0;x<3;x++)mean[x]=(double)m[x]/(double)size;
     for(int i=0;i<count;i++)sum+=(double)J.shares[i];
     if(sum>0.){
-        double x=rng.uniform()*sum;int drawn=J.beams[count-1];
+        double x=absorbed*sum;int drawn=J.beams[count-1];
         for(int i=0;i<count;i++){const double w=(double)J.shares[i];if(x<w){drawn=J.beams[i];break;}x-=w;}
         double average[3]={0.,0.,0.};
         for(int i=0;i<count;i++){const Beam& b=P.beams[J.beams[i]];for(int a=0;a<3;a++)average[a]+=(double)J.shares[i]*((double)b.direction[a]*(double)b.k);}
@@ -905,7 +909,7 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     for(int i=0;i<3;i++)t.p[i]+=P.axes[i][0]*kick[0]+P.axes[i][1]*kick[1]+P.axes[i][2]*kick[2];
     const float scale=1.f/sqrtf(size);
     __syncwarp();if(lane<MAXN)W.psi[lane]=lane<nt?scale*J.f[lane]:zero2();__syncwarp();
-    t.cluster=K.target;t.logn=0.;t.threshold=rng.open_uniform();t.log_threshold=log(t.threshold);
+    t.cluster=K.target;t.logn=0.;t.threshold=threshold;t.log_threshold=log(threshold);
 }
 
 // ---------------------------------------------------------------------------------------------

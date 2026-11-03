@@ -75,7 +75,7 @@ fn compare(fixture:&str,threshold:Option<f64>,allowance:f64,jumps:bool){
     let(model,settings,trajectories)=setup(fixture,threshold,allowance);
     let program=gpu.program(&model,&settings).unwrap();
     let got=gpu.advance(&program,&settings,&trajectories,1).unwrap();
-    let engine=Engine{model:&model,settings:settings.clone()};
+    let engine=Engine::new(&model,settings.clone());
     let mut jumped=0;
     for(start,g)in trajectories.iter().zip(&got){
         let mut c=start.clone();engine.step(&mut c);
@@ -126,7 +126,7 @@ fn a_batch_s_sums_are_the_cpu_s(){
     let(seed,first,count,group,steps,outputs,listed)=(0x3D_5EED,40,20,10,3,6,[2,5]);
     let program=gpu.program(&model,&settings).unwrap();
     let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed).unwrap();
-    let c=atom_motion_3d::simulate(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed);
+    let c=atom_motion_3d::simulate(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,None);
     assert_eq!(g.groups.len(),c.groups.len());
     let close=|a:f64,b:f64,scale:f64,what:&str|assert!((a-b).abs()<=1e-3*b.abs().max(scale),"{what}: {a} against {b}");
     for(k,(gg,cg))in g.groups.iter().zip(&c.groups).enumerate(){for(i,(x,y))in gg.sums.iter().zip(&cg.sums).enumerate(){

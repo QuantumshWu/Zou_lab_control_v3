@@ -38,7 +38,7 @@ fn main(){
     let clock=Instant::now();
     for _ in 0..steps/10{let q=model.populations(t.cluster,&p,&t.psi,0.);sink+=q[0];}
     let populations=clock.elapsed().as_secs_f64()/(steps/10) as f64;
-    let engine=Engine{model:&model,settings};
+    let engine=Engine::new(&model,settings);
     let clock=Instant::now();
     for _ in 0..steps{engine.step(&mut t);}
     let step=clock.elapsed().as_secs_f64()/steps as f64;

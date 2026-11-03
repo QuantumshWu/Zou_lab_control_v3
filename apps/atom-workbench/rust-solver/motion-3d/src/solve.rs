@@ -59,6 +59,15 @@
 //! around each output (lib.rs `simulate`): its kinetic energy sloshes into potential energy and back
 //! twice a period, so over a period the spread of T between atoms is their energies' alone.
 //!
+//! # Control variates
+//! Each output's κ² and populations are estimated with control variates of exactly known means
+//! (control.rs, stats.rs `estimate`): the harmonic twin's for T, always (it costs a few products per
+//! output), and the held twin's for the populations. β is the regression on the control over every
+//! trajectory so far, recomputed with each group left out, so the jackknife's errors -- what the
+//! stopping rule takes -- hold the β's own spread; where a control follows nothing, β ≈ 0. The held
+//! twin costs a trajectory of its own: it runs in the first batch, and is kept when the trajectories
+//! that batch says are needed with it, times its share of the cost, are fewer than without it.
+//!
 //! # Regime
 //! A point particle has no zero-point motion: below a few vibrational quanta per axis the method
 //! cools too far. Against the 1D GMW references of the tweezer PGC (the atom on the line through
@@ -86,8 +95,9 @@ use crate::gpu;
 use crate::ground::Kind;
 use crate::ledger::{Ledger,BUDGET};
 use crate::model::{Model,Trap};
-use crate::stats::{summarize,Estimate,Scales,KT_PER_UK};
-use crate::{sample_states,simulate,Initial,Outcome};
+use crate::control::{Harmonic,Twin};
+use crate::stats::{summarize,Estimate,Means,Scales,KT_PER_UK};
+use crate::{sample_states,simulate,Initial,Outcome,Variates};
 use crate::{Complex,Request,STATES};
 use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
 use std::time::Instant;
@@ -305,7 +315,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // last checked when none did.
     let mut checked:Vec<(usize,[f64;2])>=vec![];
     for _ in 0..8{
-        let engine=Engine{model:&model,settings:settings(steps)};let ratios=step_excess(&engine,&states,waiting);checked.push((steps,ratios));
+        let engine=Engine::new(&model,settings(steps));let ratios=step_excess(&engine,&states,waiting);checked.push((steps,ratios));
         let next=((steps as f64*ratios[0].max(ratios[1]).sqrt()).ceil() as usize).max(1);
         if checked.iter().any(|c|c.0==next){break;}
         steps=next;
@@ -323,8 +333,17 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         },
     };
     let used=if gpu.is_some(){Device::Gpu}else{Device::Cpu};
-    let batch=|first:u64,count:u64|->Result<Outcome,Stop>{match &gpu{
-        None=>Ok(simulate(&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed)),
+    // The control variates (control.rs): the harmonic twin's, and the held twin where the trap beam's
+    // intensity is the pilot's mean, when the generator is static. The GPU's trajectories carry none
+    // yet: there the estimates are the plain ones.
+    let controlled=gpu.is_none();
+    let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
+    let intensity=states.iter().map(|t|model.geometry[model.trap_beam].intensity(t.r)).sum::<f64>()/states.len().max(1) as f64;
+    let mut twin=if controlled{Twin::new(&model,intensity)}else{None};
+    let twin_means=twin.as_ref().map(|t|t.means(&model,&request.initial_density,interval,outputs));
+    let means=|held:bool|->Vec<Means>{if !controlled{return vec![];}(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:twin_means.as_ref().filter(|_|held).map(|m|m[i])}).collect()};
+    let batch=|first:u64,count:u64,twin:Option<&Twin>|->Result<Outcome,Stop>{match &gpu{
+        None=>Ok(simulate(&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed,Some(&Variates{harmonic:&harmonic,twin}))),
         Some((g,program))=>g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed).map_err(Stop::Gpu),
     }};
     // A batch is at least as wide as the device runs at once: on the CPU two groups per thread, on
@@ -334,17 +353,25 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let whole=|count:u64|if gpu.is_some(){count.div_ceil(width)*width}else{count};
     let clock=Instant::now();
     let count=whole(pilot.max(width));
-    let first=batch(0,count)?;
+    let first=batch(0,count,twin.as_ref())?;
     let wall=clock.elapsed().as_secs_f64();
+    // The held twin is kept where it pays: the trajectories the first batch says are needed with its
+    // control, times its share of the cost, against those needed without it.
+    if twin.is_some(){
+        let needed=|means:&[Means]|{let mut e=summarize(&first.groups,&scales,means);start(&mut e[0],&model,&initial);
+            let(_,accounts)=ledger(&model,&base,&e,times,allowance,bias,trap.lab,false);worst_ratio(&e,&accounts,trap.lab).powi(2)};
+        if needed(&means(true))*(1.+first.seconds[1]/first.seconds[0])>=needed(&means(false)){twin=None;}
+    }
+    let means=means(twin.is_some());
     // Batches until the targets are met.
     let mut outcome=first;let mut done=count;let mut per_trajectory=wall/count as f64;
     loop{
-        let mut estimates=summarize(&outcome.groups,&scales);start(&mut estimates[0],&model,&initial);
+        let mut estimates=summarize(&outcome.groups,&scales,&means);start(&mut estimates[0],&model,&initial);
         let(_,accounts)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,false);
         let ratio=worst_ratio(&estimates,&accounts,trap.lab);
         let needed=((done as f64*ratio*ratio).ceil() as u64).min(MOST_TRAJECTORIES);
         let(ledger,_)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,needed<=done);
-        let mut solution=assemble(&model,&estimates,&outcome,&listed,trap.lab,done,dt,&request.initial_density,ledger);
+        let mut solution=assemble(&model,&estimates,&outcome,&listed,trap.lab,done,dt,&request.initial_density,ledger,twin.is_some());
         solution.device=used;solution.device_note=note.clone();
         if needed<=done{
             if ratio>1.{solution.reason=Some(format!("统计误差为目标的 {ratio:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}"));}
@@ -353,7 +380,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         checkpoint(&solution,Some(per_trajectory*(needed-done) as f64*1e3));
         let next=whole((needed-done).clamp(width,(3*done).max(width)));
         let clock=Instant::now();
-        let more=batch(done,next)?;
+        let more=batch(done,next,twin.as_ref())?;
         per_trajectory=clock.elapsed().as_secs_f64()/next as f64;
         outcome.groups.extend(more.groups);for(a,b)in outcome.samples.iter_mut().zip(more.samples){a.extend(b);}outcome.jumps+=more.jumps;outcome.doppler=outcome.doppler.max(more.doppler);
         done+=next;
@@ -392,7 +419,7 @@ fn start(e:&mut Estimate,model:&Model,initial:&Initial){
 /// The solution of the estimates so far.
 /// At t = 0 the populations are the initial state's, as the request gives them (the light acts
 /// after), and so are T and the mean velocity (`start`).
-fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex],ledger:Ledger)->Solution{
+fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex],ledger:Ledger,twin:bool)->Solution{
     let hm=model.hbar_over_mass;
     let velocity=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.1[a]*hm));
     let position=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.0[a]));
@@ -412,7 +439,7 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
         velocity,position,
         classical:estimates.iter().map(|e|classical(e,frequencies)).collect(),
         trajectories,time_step_us:dt,
-        method:format!("半经典 3D：经典质点（位置、动量）携带消去激发态后的基态内态（子空间 {}），量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度即算损失，{trajectories} 条轨迹，步长 {dt:.3} μs",sizes.join("+")),
+        method:format!("半经典 3D：经典质点（位置、动量）携带消去激发态后的基态内态（子空间 {}），量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度即算损失，{trajectories} 条轨迹，步长 {dt:.3} μs；控制变量：谐振孪生（T）{}",sizes.join("+"),if twin{"与静止孪生（布居）"}else{""}),
         reason:None,
         approximations:ledger,
         device:Device::Cpu,device_note:None,
