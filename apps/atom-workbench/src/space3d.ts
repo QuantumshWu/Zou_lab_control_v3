@@ -6,6 +6,7 @@ import {direction} from './angles.js';
 import {directionVector,referenceAxis} from './direction.js';
 import {identityToken,laserSlot,resolveColour} from './identity.js';
 import {partnerOf} from './reflection.js';
+import {tweezerOf} from './tweezer.js';
 import {withUnit} from './format.js';
 
 /** What the window has selected: the 3D view shows it, never a selection of its own. */
@@ -72,7 +73,8 @@ export function cameraAlong(d:Vec3):{yaw:number;pitch:number}{
  * A retro-reflection (reflection.ts) is drawn dashed, just beside its source's line on the side
  * the camera sees (both cross the atom), from a mirror -- a small plate across the beams beyond
  * the source's arrow, labelled 镜 -- back through the atom; selecting either beam of the pair
- * brings the other forward.
+ * brings the other forward. The tweezer (tweezer.ts) is drawn focused at the atom: its beam narrows
+ * to a waist there and widens away from it.
  */
 export function renderSpace3D(container: HTMLElement, scene: Scene, analysis: Analysis, selection: SpaceSelection, options: SpaceOptions = {}): SpaceView {
   let currentScene = scene, currentAnalysis = analysis, currentSelection = selection;
@@ -202,7 +204,7 @@ export function renderSpace3D(container: HTMLElement, scene: Scene, analysis: An
       }catch{/* An unresolvable reference is reported where it is edited. */}
     }
     // The other beam of the selected one's source–reflection pair, drawn forward with it.
-    const partner=currentSelection.kind==='laser'&&chosen?partnerOf(currentScene,chosen as Laser):undefined;
+    const partner=currentSelection.kind==='laser'&&chosen?partnerOf(currentScene,chosen as Laser):undefined,tweezer=tweezerOf(currentScene);
     currentScene.lasers.forEach(laser => {
       const pol = laser.enabled?currentAnalysis.polarizations[laser.id]:undefined;
       if (!pol) return;
@@ -213,11 +215,19 @@ export function renderSpace3D(container: HTMLElement, scene: Scene, analysis: An
       // beam, along u), so the two directions read apart.
       const across=cross(k,camera.forward),reach=Math.hypot(...across),aside=!reflected?ZERO:reach>.15?mul(across,.1/reach):mul(u,.1);
       const at=(t:number):Vec3=>add(mul(k,t),aside),start = at(-2.05), end = at(1.95);
-      // A translucent, narrow cylinder makes a beam readable from every viewpoint.
-      const side = (t: number): Vec3 => add(mul(u, Math.cos(t) * (selected?.085:.05)), mul(v, Math.sin(t) * (selected?.085:.05)));
+      // A translucent, narrow cylinder makes a beam readable from every viewpoint; the tweezer's
+      // narrows to its waist at the atom, as a beam focused there (schematic, not to scale).
+      const radius=(p:Vec3):number=>laser===tweezer?(selected?.032:.024)*Math.hypot(1,dot(p,k)/.36):selected?.085:.05;
+      const side = (angle: number, r: number): Vec3 => add(mul(u, Math.cos(angle) * r), mul(v, Math.sin(angle) * r));
       for (let n = 0; n < 8; n++) {
-        const a = side(n * TAU / 8), b = side((n + 1) * TAU / 8);
-        for(const [lo,hi]of splitSegment(start,end,.34))face({vertices: [add(lo, a), add(hi, a), add(hi, b), add(lo, b)], color, alpha: selected ? .052 : anySelected?.008:.02});
+        const from = n * TAU / 8, to = (n + 1) * TAU / 8;
+        for(const [lo,hi]of splitSegment(start,end,laser===tweezer?.12:.34)){const rl=radius(lo),rh=radius(hi);face({vertices: [add(lo, side(from,rl)), add(hi, side(from,rh)), add(hi, side(to,rh)), add(lo, side(to,rl))], color, alpha: selected ? .052 : anySelected?.008:.02});}
+      }
+      // The tweezer's outline, seen from the camera: it reads as a beam focused at the atom whether
+      // it is selected or not.
+      if(laser===tweezer){
+        const n=reach>.15?mul(across,1/reach):u;
+        for(const sign of [1,-1])curve(Array.from({length:49},(_,i)=>{const p=at(-2.05+4*i/48);return add(p,mul(n,sign*radius(p)));}),color,selected?1.1:.8,Math.max(alpha,.55));
       }
       if(reflected){
         dashed(start,at(-.08),color,lineWidth,alpha);dashed(at(.1),at(1.82),color,lineWidth,alpha);arrow(at(1.82),end,color,lineWidth,alpha,u);
