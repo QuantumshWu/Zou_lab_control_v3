@@ -305,20 +305,21 @@ impl FitResult {
         let mut covariance = covariance;
         let mut errors = standard_errors;
         if covariance_valid {
-            if covariance.iter().any(|v| !v.is_finite()) || errors.iter().any(|v| !v.is_finite()) {
-                return Err(FitError::value("valid fit covariance and standard errors must be finite"));
+            // A parameter the data do not determine has a NaN error and a
+            // NaN covariance row and column; the determined ones form a
+            // valid covariance.
+            let defined: Vec<bool> = errors.iter().map(|e| e.is_finite()).collect();
+            let pairs = || (0..count).flat_map(|i| (0..count).map(move |j| (i, j))).filter(|&(i, j)| defined[i] && defined[j]);
+            if errors.iter().any(|e| e.is_infinite()) || (0..count).any(|i| defined[i] != covariance[i * count + i].is_finite()) || pairs().any(|(i, j)| !covariance[i * count + j].is_finite()) {
+                return Err(FitError::value("valid fit covariance and standard errors must be finite where determined"));
             }
-            for i in 0..count {
-                for j in 0..count {
-                    if !allclose(covariance[i * count + j], covariance[j * count + i], 1e-12, 1e-15) {
-                        return Err(FitError::value("valid fit covariance must be symmetric"));
-                    }
-                }
+            if pairs().any(|(i, j)| !allclose(covariance[i * count + j], covariance[j * count + i], 1e-12, 1e-15)) {
+                return Err(FitError::value("valid fit covariance must be symmetric"));
             }
-            if (0..count).any(|i| covariance[i * count + i] < 0.0) || errors.iter().any(|&e| e < 0.0) {
+            if (0..count).any(|i| defined[i] && (covariance[i * count + i] < 0.0 || errors[i] < 0.0)) {
                 return Err(FitError::value("valid fit variances and standard errors cannot be negative"));
             }
-            if (0..count).any(|i| !allclose(errors[i] * errors[i], covariance[i * count + i], 1e-10, 1e-15)) {
+            if (0..count).any(|i| defined[i] && !allclose(errors[i] * errors[i], covariance[i * count + i], 1e-10, 1e-15)) {
                 return Err(FitError::value("standard errors must agree with fit covariance"));
             }
         } else {
@@ -392,10 +393,10 @@ impl FitResult {
     pub fn parameter(&self, name: &str) -> Option<f64> { self.model.parameters.iter().position(|p| p.name == name).map(|i| self.parameter_values[i]) }
     pub fn error(&self, name: &str) -> Option<f64> { self.model.parameters.iter().position(|p| p.name == name).map(|i| self.standard_errors[i]) }
 
-    /// `parameter_error_validity`.
+    /// `parameter_error_validity`: an undetermined parameter's error is not.
     pub fn parameter_error_validity(&self) -> Vec<(String, bool)> {
         let valid = self.success && self.covariance_valid;
-        self.model.parameters.iter().map(|p| (p.name.clone(), valid && !self.fixed_parameter_names.contains(&p.name))).collect()
+        self.model.parameters.iter().enumerate().map(|(i, p)| (p.name.clone(), valid && !self.fixed_parameter_names.contains(&p.name) && self.standard_errors[i].is_finite())).collect()
     }
 
     /// `with_parameter_units(units)`.

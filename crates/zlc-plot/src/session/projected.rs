@@ -695,7 +695,7 @@ impl FitProjection {
         for (index, spec) in result.model.parameters.iter().enumerate() {
             let (value, unit) = self.display_parameter(&units, spec, result.parameter_values[index], false, None)?;
             let fixed = result.fixed_parameter_names.contains(&spec.name);
-            let error = if result.covariance_valid && !fixed {
+            let error = if result.covariance_valid && !fixed && result.standard_errors[index].is_finite() {
                 Some(self.display_parameter(&units, spec, result.standard_errors[index], true, None)?.0.abs())
             } else { None };
             rows.push(FitParameterDisplay::new(&spec.name, spec.display_label.as_deref().unwrap_or(&spec.name), value, error, &unit).map_err(fit_error)?);

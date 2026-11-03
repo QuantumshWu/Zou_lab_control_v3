@@ -999,12 +999,14 @@ fn finish_cell(item: &Prepared, mut solved: Solved, parameter_count: usize) -> C
         let n = parameter_count;
         let c = &solved.covariance;
         let e = &solved.errors;
-        let bad = c.iter().any(|v| !v.is_finite())
-            || e.iter().any(|v| !v.is_finite())
-            || (0..n).any(|i| (0..n).any(|j| !isclose(c[i * n + j], c[j * n + i], 1e-12, 1e-15)))
-            || (0..n).any(|i| c[i * n + i] < 0.0)
-            || e.iter().any(|&v| v < 0.0)
-            || (0..n).any(|i| !isclose(e[i] * e[i], c[i * n + i], 1e-10, 1e-15));
+        // An undetermined parameter's error is NaN (and its covariance row
+        // and column); the determined ones form the checked covariance.
+        let defined: Vec<bool> = e.iter().map(|v| v.is_finite()).collect();
+        let pairs = || (0..n).flat_map(|i| (0..n).map(move |j| (i, j))).filter(|&(i, j)| defined[i] && defined[j]);
+        let bad = e.iter().any(|v| v.is_infinite())
+            || (0..n).any(|i| defined[i] != c[i * n + i].is_finite())
+            || pairs().any(|(i, j)| !c[i * n + j].is_finite() || !isclose(c[i * n + j], c[j * n + i], 1e-12, 1e-15))
+            || (0..n).any(|i| defined[i] && (c[i * n + i] < 0.0 || e[i] < 0.0 || !isclose(e[i] * e[i], c[i * n + i], 1e-10, 1e-15)));
         if bad {
             final_error = Some("compiled fit returned invalid covariance");
         }
