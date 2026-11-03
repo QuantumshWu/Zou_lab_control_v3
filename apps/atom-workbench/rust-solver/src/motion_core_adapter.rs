@@ -7,7 +7,10 @@
 //!
 //! # Result contract
 //! The lattice adapter's for a trajectory (lattice_core_adapter.rs): `states`,
-//! `timesUs`, `populations` (the internal populations averaged over position),
+//! `timesUs`, `populations` (the internal populations averaged over position,
+//! projected onto the probability simplex as the population core's rows are: a
+//! continued row can dip below zero on a state the atom has left; each sample's
+//! error in `sampleErrors` grows by the projection's change),
 //! `populationAccuracy` and `diagnostics` (`engine`, `traceError`,
 //! `initialStateError`, `elapsedMs`, `method`), without `meanHorizons`; and
 //! `motion`, read by `readMotionResult` in src/solver-types.ts:
@@ -37,8 +40,8 @@
 use crate::{Model,Operator,Options,lattice_core_adapter};
 use atom_motion_core::{Beam,Complex,Matrix,Remaining,Request,Solution,STATES};
 use atom_population_core::Lapack;
-use atom_population_core::lattice::accuracy::POPULATION_TOLERANCE;
-use atom_population_core::lattice::pipeline::{LONGEST_TIME_US,MOST_SAMPLES};
+use atom_population_core::lattice::accuracy::{self,POPULATION_TOLERANCE};
+use atom_population_core::lattice::pipeline::{self,LONGEST_TIME_US,MOST_SAMPLES};
 use serde::Deserialize;
 use serde_json::{json,Value};
 use std::time::Instant;
@@ -158,15 +161,19 @@ fn check(solution:&Solution,times:usize)->Result<(),String>{
 
 /// The result in the one contract; `remaining` marks a streamed checkpoint (with the core's
 /// estimate of the wall time to the final result when it has one).
-fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,groups:&[String],remaining:Option<Option<Remaining>>,started:Instant)->Result<Value,String>{
+fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,groups:&[lattice_core_adapter::Group],remaining:Option<Option<Remaining>>,started:Instant)->Result<Value,String>{
     let times=request.times_us.len();check(solution,times)?;
     let initial:Vec<f64>=(0..STATES).map(|i|request.initial_density[i*STATES+i].re).collect();
-    let(trace,initial_error)=lattice_core_adapter::row_errors(&solution.populations,&initial)?;
-    let estimated=solution.sample_errors.iter().fold(0_f64,|a,&b|a.max(b));let converged=estimated<=POPULATION_TOLERANCE;
+    let indices:Vec<Vec<usize>>=groups.iter().map(|g|g.indices.clone()).collect();
+    let mut errors=solution.sample_errors.clone();
+    let populations:Vec<Vec<f64>>=solution.populations.iter().zip(&mut errors).map(|(row,error)|{
+        let projected=pipeline::simplex(row);*error+=accuracy::metric(row,&projected,&indices);projected}).collect();
+    let(trace,initial_error)=lattice_core_adapter::row_errors(&populations,&initial)?;
+    let estimated=errors.iter().fold(0_f64,|a,&b|a.max(b));let converged=estimated<=POPULATION_TOLERANCE;
     let(m,x)=(&solution.momentum,&solution.position);
-    let mut result=json!({"states":model.states,"timesUs":request.times_us,"populations":solution.populations,
+    let mut result=json!({"states":model.states,"timesUs":request.times_us,"populations":populations,
         "populationAccuracy":{"status":if converged{"estimated-converged"}else{"estimated-partial"},"requestedTolerance":POPULATION_TOLERANCE,
-            "sampleErrors":solution.sample_errors,"estimatedMaximumError":estimated,"scope":{"states":STATES,"samples":times,"groups":groups}},
+            "sampleErrors":errors,"estimatedMaximumError":estimated,"scope":{"states":STATES,"samples":times,"groups":groups.iter().map(|g|&g.name).collect::<Vec<_>>()}},
         "diagnostics":{"engine":ENGINE,"traceError":trace,"initialStateError":initial_error,"elapsedMs":started.elapsed().as_secs_f64()*1000.,"method":solution.method},
         "motion":{"axis":motion.axis,"temperatureUK":solution.temperature_uk,"meanVelocityMps":solution.mean_velocity_mps,
             "trapFrequencyKHz":solution.trap_frequency_khz,"meanOccupation":solution.mean_occupation,"lossProbability":solution.loss_probability,
@@ -187,11 +194,11 @@ fn result(model:&Model,motion:&MotionModel,request:&Request,solution:&Solution,g
 /// published as it is made, the final solution returned.
 pub fn solve(model:&Model,motion:&MotionModel,options:&Options,publish:&mut dyn FnMut(&Value))->Result<Value,String>{
     let started=Instant::now();
-    let(request,groups)=prepare(model,motion,options)?;let names:Vec<String>=groups.into_iter().map(|g|g.name).collect();
+    let(request,groups)=prepare(model,motion,options)?;
     let mut failure:Option<String>=None;
     let mut observe=|checkpoint:&Solution,remaining:Option<Remaining>|{if failure.is_some(){return;}
-        match result(model,motion,&request,checkpoint,&names,Some(remaining),started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
+        match result(model,motion,&request,checkpoint,&groups,Some(remaining),started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
     let solution=atom_motion_core::solve(&request,&mut observe)?;
     if let Some(e)=failure{return Err(e);}
-    result(model,motion,&request,&solution,&names,None,started)
+    result(model,motion,&request,&solution,&groups,None,started)
 }
