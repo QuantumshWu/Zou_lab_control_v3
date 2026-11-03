@@ -35,7 +35,10 @@
 //!   focus, 0.01–0.79 S_b (SAT, PUMP, THREE, Λ, the 3D PGC). Each ground state keeps its drives from
 //!   the most saturated down until the rest's total fits the budget; those fold.
 //! - H's static coupling between two excited states (the tweezer's tensor shift between hyperfine
-//!   levels): it folds when (g/d)² is within the budget, d their smallest separation over the trap.
+//!   levels and sublevels): it folds when (g/d)² is within the budget, g its largest size and d their
+//!   smallest separation over the whole trap -- each Gaussian beam's intensity from 0 to its peak, the
+//!   tables' range: a pair whose separation closes anywhere there (sublevels whose Zeeman and tensor
+//!   shifts cross) would make an explicit state's first-order dressing singular there.
 //! - The ground states' couplings (below), judged with the folded drives alone; and the two photons
 //!   of an explicit state's jump landing in two ground states, their coherence |Σ_a C_a C_a*|.
 //! An excited state is explicit when a drive into it is kept, or a kept coupling joins it to an
@@ -58,7 +61,9 @@
 //! ```
 //!
 //! and the folded excited amplitude is A_c = −R_c: its physical sign, with which it interferes with
-//! an explicit state's amplitude of the same frequency in a photon.
+//! an explicit state's amplitude of the same frequency in a photon. A jump operator's overall sign is
+//! no physics; the jumps are taken as −(C_a ψ_e + C_a A_c ψ) = C_a R_c ψ − C_a ψ_e, so that a cluster
+//! of ground states keeps the release's photons sign for sign (and the GPU's kernel, gpu/mod.rs).
 //!
 //! # Couplings between ground states
 //! In the frame where every ground state b rotates at its own energy, the folded drives couple the
@@ -99,7 +104,7 @@
 //!       + Σ_kept drives e^{iΩ̃t} V_c[e,b] |e⟩⟨b| + h.c. + Σ_{e,e′∈P} (H_ee′ kept, or its van Vleck shift)
 //!       + Σ_{e,e′∈P} ½ Σ_b V_c^f[e,b] V_c^f[e′,b]* (1/(E_e − δ_c − E_b) + 1/(E_e′ − δ_c − E_b)) |e⟩⟨e′|
 //!       − (i/2) Σ_φ J_φ†J_φ  (on the explicit states; the folded part is X's)
-//! J_{a,φ} = Σ_{(e→b′)∈φ} e^{iω̃t} [C_a]_{b′e} |b′⟩⟨e| + Σ_{(c,b→b′)∈φ} e^{iω̃t} [C_a A_c]_{b′b} |b′⟩⟨b|
+//! J_{a,φ} = Σ_{(c,b→b′)∈φ} e^{iω̃t} [C_a R_c]_{b′b} |b′⟩⟨b| − Σ_{(e→b′)∈φ} e^{iω̃t} [C_a]_{b′e} |b′⟩⟨e|
 //! ```
 //!
 //! ω̃ = θ_b′ − θ_e for an explicit state's photon, θ_b′ − θ_b − δ_c for a folded one.
@@ -178,10 +183,13 @@ pub struct Item{pub kind:Kind,pub frequency:f64,pub size:f64,pub folded:bool}
 #[derive(Clone,Copy,Debug,PartialEq)]
 pub enum ExcitedKind{Drive(Drive),Static{a:usize,b:usize}}
 /// A coupling of an excited state judged by the rule: its size and distance over the trap (rad/us),
-/// the rule's estimate (with its cluster's dressing when the closure judged it again), the verdict,
-/// and whether the closure kept it.
+/// its power (a drive's Σ_l |V_l[e,b]|², the beams' incoherent sum; a static coupling's size²), the
+/// rule's estimates (with its cluster's dressing when the closure judged it again) -- `estimate` with
+/// every beam at its peak in phase, a bound over the positions, and `mean` over the light's pattern,
+/// the beams' interference averaged out, what a moving atom sees --, the verdict, and whether the
+/// closure kept it.
 #[derive(Clone,Debug)]
-pub struct ExcitedItem{pub kind:ExcitedKind,pub size:f64,pub distance:f64,pub estimate:f64,pub folded:bool,pub promoted:bool}
+pub struct ExcitedItem{pub kind:ExcitedKind,pub size:f64,pub power:f64,pub distance:f64,pub estimate:f64,pub mean:f64,pub folded:bool,pub promoted:bool}
 
 /// The kept couplings of a cluster from one carrier to another: absorbing `absorbed`, emitting
 /// into `emitted`, each entry (row a, column b, in the cluster's order) with its residual beat
@@ -291,6 +299,9 @@ pub struct Ground{
     pub reach:Vec<f64>,
     /// The couplings of the excited states, classified, with the closure's verdicts.
     pub excited_items:Vec<ExcitedItem>,
+    /// The fold's charge: the largest total saturation over the light's pattern of a ground state's
+    /// folded drives (with its cluster's dressing), its populations' error bound.
+    pub charge:f64,
     /// The ground states' couplings, classified, the rule's cut between near and far frequencies
     /// and the eliminated generator's ‖L0‖ they were judged against (rad/us).
     pub items:Vec<Item>,
@@ -375,11 +386,12 @@ pub fn classify(items:&[(f64,f64)],l0:f64)->(Vec<bool>,f64){
     let cut=match best{None=>f64::INFINITY,Some((_,0))=>(FOLD_DISTANCE*l0).min(frequencies[0].0),Some((_,i))=>(frequencies[i-1].0*frequencies[i].0).sqrt()};
     (items.iter().map(|&(nu,size)|size==0.||nu.abs()>=cut&&foldable(nu,size)).collect(),cut)
 }
-/// The rule for a coupling of an excited state: k (g / max(d − dressing, 1/T))², k = SATURATION for a
-/// drive and 1 for a static coupling; infinite when the distance left is zero.
-fn excited_estimate(item:&ExcitedItem,dressing:f64,floor:f64)->f64{
+/// The rule's estimates for a coupling of an excited state: k (g / max(d − dressing, 1/T))² and over
+/// the light's pattern k P/max(d − dressing, 1/T)², P its power, k = SATURATION for a drive and 1 for
+/// a static coupling; infinite when the distance left is zero.
+fn excited_estimate(item:&ExcitedItem,dressing:f64,floor:f64)->(f64,f64){
     let k=match item.kind{ExcitedKind::Drive(_)=>SATURATION,ExcitedKind::Static{..}=>1.};let d=(item.distance-dressing).max(floor);
-    if d>0.{k*(item.size/d).powi(2)}else{f64::INFINITY}
+    if d>0.{(k*(item.size/d).powi(2),k*item.power/(d*d))}else{(f64::INFINITY,f64::INFINITY)}
 }
 
 /// A union of sets over 0..n: each element's representative.
@@ -433,9 +445,19 @@ pub(crate) fn same_frame(a:f64,b:f64)->bool{(a-b).abs()<=64.*f64::EPSILON*(a.abs
 struct Partition{items:Vec<Item>,cut:f64,sets:Vec<Vec<usize>>,set:Vec<Option<usize>>,frames:Vec<f64>}
 
 impl Ground{
-    /// The generator of a request, or why it has none: a counter-rotating component that may not
-    /// fold, or a static coupling between ground states that may not.
-    pub fn new(request:&Request)->Result<Ground,String>{
+    /// The generator of a request with every drive folded (`Ground::with` at an infinite allowance).
+    pub fn new(request:&Request)->Result<Ground,String>{Ground::with(request,f64::INFINITY)}
+    /// The generator of a request, its drives kept until each ground state's folded rest is within
+    /// `allowance` (its total saturation over the light's pattern, the fold's charge), or why it has
+    /// none: a counter-rotating component that may not fold, or a static coupling between ground
+    /// states that may not.
+    pub fn with(request:&Request,allowance:f64)->Result<Ground,String>{
+        let mut ground=Ground::bare(request)?;
+        ground.cluster_states(allowance)?;
+        Ok(ground)
+    }
+    /// A request's generator before the rule: its states, components, carriers and reach.
+    fn bare(request:&Request)->Result<Ground,String>{
         let labels=request.states.iter().map(|s|level(s)).collect::<Result<Vec<_>,_>>()?;
         let ground_states:Vec<usize>=(0..STATES).filter(|&i|labels[i].0=="ground").collect();
         let excited_states:Vec<usize>=(0..STATES).filter(|&i|labels[i].0!="ground").collect();
@@ -483,9 +505,8 @@ impl Ground{
         let levels=ground_states.iter().map(|&i|labels[i].1).collect();
         let duration=request.times_us.last().copied().unwrap_or(0.).max(0.);
         let mut ground=Ground{ground_states,excited_states,levels,decay,emission,beams:request.beams.clone(),folded:couplings.clone(),couplings,hamiltonian,outside,folds,components,l0,carriers,
-            duration,reach:vec![],excited_items:vec![],items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],explicit_of:vec![],excited_groups:vec![],dressed:vec![]};
+            duration,reach:vec![],excited_items:vec![],charge:0.,items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],explicit_of:vec![],excited_groups:vec![],dressed:vec![]};
         ground.reach=ground.reach(request);
-        ground.cluster_states()?;
         Ok(ground)
     }
 
@@ -638,55 +659,68 @@ impl Ground{
             (0..3).flat_map(|a|[-1.,1.].map(move|s|(a,s))).map(|(a,s)|b.amplitude_at(axes[a].map(|x|x*s*reach[a])).norm_sqr()).fold(1_f64,f64::min)}).collect()
     }
 
-    /// The couplings of the excited states, unjudged: every drive with its size and distance, and
-    /// H's static coupling of every pair of excited states with its size and smallest separation,
-    /// over the atom's reach (H's energies are affine in the Gaussian beams' intensities: their range
-    /// is reached at the corners of the intensities there, `Ground::reach`).
+    /// The couplings of the excited states, unjudged: every drive with its size and distance over the
+    /// atom's reach (`Ground::reach`), and H's static coupling of every pair of excited states with its
+    /// size and smallest separation over the whole trap (H's energies are affine in the Gaussian beams'
+    /// intensities: their range is reached at the corners of the intensities).
     fn excited_couplings(&self)->Vec<ExcitedItem>{
         let(ng,ne)=(self.ground_states.len(),self.excited_states.len());
         let(mut low,mut high)=(vec![vec![f64::INFINITY;ng];ne],vec![vec![f64::NEG_INFINITY;ng];ne]);
         let(mut elow,mut ehigh,mut esize)=(vec![vec![f64::INFINITY;ne];ne],vec![vec![f64::NEG_INFINITY;ne];ne],vec![vec![0_f64;ne];ne]);
         let gaussian:Vec<usize>=(0..self.beams.len()).filter(|&l|self.beams[l].waist_um.is_some()).collect();
-        let corners:Vec<Vec<f64>>=if std::env::var("XP_WHOLETRAP").is_ok(){intensity_points(&self.beams)}else{(0..1usize<<gaussian.len()).map(|c|{let mut i=vec![1.;self.beams.len()];for(f,&l)in gaussian.iter().enumerate(){if c>>f&1==1{i[l]=self.reach[l];}}i}).collect()};
-        for intensities in corners{
+        // The drives over the reach (each Gaussian beam at its peak or its least intensity there); H's
+        // static couplings over the whole trap (each one from 0 to its peak), the range of the tables.
+        let corners=|low:&dyn Fn(usize)->f64|->Vec<Vec<f64>>{(0..1usize<<gaussian.len()).map(|c|{let mut i=vec![1.;self.beams.len()];for(f,&l)in gaussian.iter().enumerate(){if c>>f&1==1{i[l]=low(l);}}i}).collect()};
+        for intensities in corners(&|l|self.reach[l]){
             let h=self.hamiltonian_with(&intensities);
-            for(e,&x)in self.excited_states.iter().enumerate(){
-                for(b,&y)in self.ground_states.iter().enumerate(){let d=h[(x,x)].re-h[(y,y)].re;low[e][b]=low[e][b].min(d);high[e][b]=high[e][b].max(d);}
-                for(f,&y)in self.excited_states.iter().enumerate(){let d=h[(x,x)].re-h[(y,y)].re;elow[e][f]=elow[e][f].min(d);ehigh[e][f]=ehigh[e][f].max(d);
-                    if e!=f{esize[e][f]=esize[e][f].max(h[(x,y)].abs());}}
-            }
+            for(e,&x)in self.excited_states.iter().enumerate(){for(b,&y)in self.ground_states.iter().enumerate(){let d=h[(x,x)].re-h[(y,y)].re;low[e][b]=low[e][b].min(d);high[e][b]=high[e][b].max(d);}}
+        }
+        for intensities in corners(&|_|0.){
+            let h=self.hamiltonian_with(&intensities);
+            for(e,&x)in self.excited_states.iter().enumerate(){for(f,&y)in self.excited_states.iter().enumerate(){
+                let d=h[(x,x)].re-h[(y,y)].re;elow[e][f]=elow[e][f].min(d);ehigh[e][f]=ehigh[e][f].max(d);
+                if e!=f{esize[e][f]=esize[e][f].max(h[(x,y)].abs());}
+            }}
         }
         // |re − i width| at the nearest point of the range [lo, hi] shifted.
         let distance=|lo:f64,hi:f64,shift:f64,width:f64|{let(lo,hi)=(lo-shift,hi-shift);let re=if lo<=0.&&hi>=0.{0.}else{lo.abs().min(hi.abs())};re.hypot(width)};
         let mut out=vec![];
         for(c,carrier)in self.carriers.iter().enumerate(){for e in 0..ne{for b in 0..ng{
             let size:f64=carrier.beams.iter().map(|&l|self.couplings[l][(e,b)].abs()).sum();
-            if size>0.{out.push(ExcitedItem{kind:ExcitedKind::Drive(Drive{carrier:c,excited:e,ground:b}),size,
-                distance:distance(low[e][b],high[e][b],carrier.detuning,0.5*self.decay[(e,e)].re),estimate:0.,folded:true,promoted:false});}
+            let power:f64=carrier.beams.iter().map(|&l|self.couplings[l][(e,b)].norm_sqr()).sum();
+            if size>0.{out.push(ExcitedItem{kind:ExcitedKind::Drive(Drive{carrier:c,excited:e,ground:b}),size,power,
+                distance:distance(low[e][b],high[e][b],carrier.detuning,0.5*self.decay[(e,e)].re),estimate:0.,mean:0.,folded:true,promoted:false});}
         }}}
         for a in 0..ne{for b in a+1..ne{let size=esize[a][b].max(esize[b][a]);
-            if size>0.{out.push(ExcitedItem{kind:ExcitedKind::Static{a,b},size,distance:distance(elow[a][b],ehigh[a][b],0.,0.),estimate:0.,folded:true,promoted:false});}}}
+            if size>0.{out.push(ExcitedItem{kind:ExcitedKind::Static{a,b},size,power:size*size,distance:distance(elow[a][b],ehigh[a][b],0.,0.),estimate:0.,mean:0.,folded:true,promoted:false});}}}
         out
     }
 
-    /// The drives judged per ground state: kept from the most saturated down until the total
-    /// saturation of the rest (their estimates' sum) fits the budget, the rest folded; a drive kept
-    /// already stays kept. Each one newly kept is passed to `kept` (whose answer says whether it
-    /// counts as a change); whether any did.
-    fn judge_drives(excited:&mut [ExcitedItem],kept:&mut dyn FnMut(&mut ExcitedItem)->bool)->bool{
+    /// The drives judged per ground state: kept from the most saturated down (over the light's
+    /// pattern) until the total saturation of the rest (their means' sum) fits the allowance, the rest
+    /// folded; a drive kept already stays kept. Each one newly kept is passed to `kept` (whose answer
+    /// says whether it counts as a change); whether any did.
+    fn judge_drives(excited:&mut [ExcitedItem],allowance:f64,kept:&mut dyn FnMut(&mut ExcitedItem)->bool)->bool{
         let grounds:Vec<usize>={let mut g:Vec<usize>=excited.iter().filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some(d.ground),_=>None}).collect();g.sort();g.dedup();g};
         let mut changed=false;
         for b in grounds{
             let mut drives:Vec<usize>=(0..excited.len()).filter(|&i|matches!(excited[i].kind,ExcitedKind::Drive(d)if d.ground==b)).collect();
-            drives.sort_by(|&i,&j|excited[j].estimate.total_cmp(&excited[i].estimate));
-            let mut total:f64=drives.iter().filter(|&&i|excited[i].folded).map(|&i|excited[i].estimate).sum();
+            drives.sort_by(|&i,&j|excited[j].mean.total_cmp(&excited[i].mean));
+            let mut total:f64=drives.iter().filter(|&&i|excited[i].folded).map(|&i|excited[i].mean).sum();
             for i in drives{
                 if !excited[i].folded{continue;}
-                if total<=BUDGET{break;}
-                total-=excited[i].estimate;excited[i].folded=false;changed|=kept(&mut excited[i]);
+                if total<=allowance{break;}
+                total-=excited[i].mean;excited[i].folded=false;changed|=kept(&mut excited[i]);
             }
         }
         changed
+    }
+    /// The fold's charge of a set of verdicts: the largest total saturation over the light's pattern
+    /// of a ground state's folded drives (the sum of their means).
+    fn charge_of(excited:&[ExcitedItem],ng:usize)->f64{
+        let mut totals=vec![0.;ng];
+        for x in excited.iter().filter(|x|x.folded){if let ExcitedKind::Drive(d)=x.kind{totals[d.ground]+=x.mean;}}
+        totals.into_iter().fold(0.,f64::max)
     }
     /// The explicit excited states of a set of verdicts: those a kept drive reaches, and those a
     /// kept static coupling joins to them.
@@ -700,18 +734,46 @@ impl Ground{
         }
     }
 
+    /// The excited couplings judged before the closure: their estimates without a dressing, H's static
+    /// couplings folded within the budget, the drives within the allowance.
+    fn judged(&self,allowance:f64)->Vec<ExcitedItem>{
+        let floor=if self.duration>0.{1./self.duration}else{0.};
+        let mut excited=self.excited_couplings();
+        for x in excited.iter_mut(){(x.estimate,x.mean)=excited_estimate(x,0.,floor);}
+        for x in excited.iter_mut(){if let ExcitedKind::Static{..}=x.kind{x.folded=x.estimate<=BUDGET;}}
+        Ground::judge_drives(&mut excited,allowance,&mut |_|false);
+        excited
+    }
+    /// The allowances at which the rule's explicit excited states change (`Ground::with`), from all
+    /// folded (infinite) down to every drive kept, each the largest that gives its set of explicit
+    /// states before the closure: the totals of a ground state's folded drives as it keeps them from
+    /// the most saturated down.
+    pub fn allowances(request:&Request)->Result<Vec<f64>,String>{
+        let g=Ground::bare(request)?;let ne=g.excited_states.len();
+        let excited=g.judged(f64::INFINITY);
+        let mut totals:Vec<f64>=vec![];
+        for b in 0..g.ground_states.len(){
+            let mut means:Vec<f64>=excited.iter().filter_map(|x|match x.kind{ExcitedKind::Drive(d)if d.ground==b=>Some(x.mean),_=>None}).collect();
+            means.sort_by(|x,y|y.total_cmp(x));let mut rest:f64=means.iter().sum();
+            for m in means{rest-=m;totals.push(rest.max(0.));}
+        }
+        totals.sort_by(|x,y|y.total_cmp(x));totals.dedup();
+        let mut out=vec![f64::INFINITY];let mut last=Ground::explicit_states(&excited,ne);
+        for t in totals{
+            let explicit=Ground::explicit_states(&g.judged(t),ne);
+            if explicit!=last{out.push(t);last=explicit;}
+        }
+        Ok(out)
+    }
+
     /// The rule over every coupling (module documentation): the excited couplings judged, the
     /// folded drives eliminated, the couplings between ground states judged with them, the clusters
     /// and frames; the closure judging the folded couplings of each cluster again with its dressing,
     /// until nothing changes; then each cluster's machinery.
-    fn cluster_states(&mut self)->Result<(),String>{
+    fn cluster_states(&mut self,allowance:f64)->Result<(),String>{
         let(ng,ne)=(self.ground_states.len(),self.excited_states.len());
         let floor=if self.duration>0.{1./self.duration}else{0.};
-        let mut excited=self.excited_couplings();
-        for x in excited.iter_mut(){x.estimate=excited_estimate(x,0.,floor);}
-        for x in excited.iter_mut(){if let ExcitedKind::Static{..}=x.kind{x.folded=x.estimate<=BUDGET;}}
-        Ground::judge_drives(&mut excited,&mut |_|false);
-        if std::env::var("XP_PERDRIVE").is_ok(){for x in excited.iter_mut(){x.folded=x.estimate<=BUDGET;}}
+        let mut excited=self.judged(allowance);
         loop{
             let explicit=Ground::explicit_states(&excited,ne);
             // The folded couplings: every kept drive's entry zeroed in each beam of its carrier.
@@ -737,18 +799,17 @@ impl Ground{
                 let reach=match x.kind{ExcitedKind::Drive(d)=>partition.set[d.ground],
                     ExcitedKind::Static{a,b}=>partition.set[ng+a].or(partition.set[ng+b])};
                 let Some(k)=reach else{continue};
-                let estimate=excited_estimate(x,dressing[k],floor);
+                let(estimate,mean)=excited_estimate(x,dressing[k],floor);
                 // A coupling static in the frames between two states of one cluster costs nothing kept.
                 let inside=match x.kind{
                     ExcitedKind::Drive(d)=>partition.set[ng+d.excited]==Some(k)&&same_frame(partition.frames[ng+d.excited],partition.frames[d.ground]+self.carriers[d.carrier].detuning),
                     ExcitedKind::Static{a,b}=>partition.set[ng+a]==Some(k)&&partition.set[ng+b]==Some(k)&&same_frame(partition.frames[ng+a],partition.frames[ng+b])};
-                x.estimate=x.estimate.max(estimate);
+                x.estimate=x.estimate.max(estimate);x.mean=x.mean.max(mean);
                 if inside||(matches!(x.kind,ExcitedKind::Static{..})&&estimate>BUDGET){x.folded=false;x.promoted=true;changed=true;}
             }
-            // The drives with the closure's estimates: each ground state's folded total within the budget.
-            if std::env::var("XP_PERDRIVE").is_err(){changed|=Ground::judge_drives(&mut excited,&mut |x|{x.promoted=true;true});}
-            else{for x in excited.iter_mut().filter(|x|x.folded&&x.estimate>BUDGET){x.folded=false;changed=true;}}
-            if !changed&&!moved{return self.assemble(&b,partition,excited);}
+            // The drives with the closure's estimates: each ground state's folded total within the allowance.
+            changed|=Ground::judge_drives(&mut excited,allowance,&mut |x|{x.promoted=true;true});
+            if !changed&&!moved{self.charge=Ground::charge_of(&excited,ng);return self.assemble(&b,partition,excited);}
         }
     }
 
@@ -1028,14 +1089,15 @@ impl Ground{
         for &(i,j)in &cl.excited_statics{h[(i,j)]+=Complex::cis((cl.frame(i)-cl.frame(j))*t)*e.excited[(cl.excited[i-n0],cl.excited[j-n0])];}
         for &(i,j,g)in &cl.excited_paths{let(s,u)=(cl.excited[i-n0],cl.excited[j-n0]);
             h[(i,j)]+=e.excited[(s,g)]*e.excited[(g,u)]*(0.5*(1./(e.excited_energies[s]-e.excited_energies[g])+1./(e.excited_energies[u]-e.excited_energies[g])));}
-        // The jumps: an explicit state's photon C_a, a folded one's C_a A_c = −C_a R_c.
+        // The jumps (with the overall sign of the module documentation): a folded photon's C_a R_c, an
+        // explicit state's −C_a.
         let jumps:Vec<[Dense;3]>=cl.classes.iter().map(|class|{let target=&self.clusters[class.target];
             std::array::from_fn(|x|{let mut m=Dense::zeros(target.states.len(),n);
                 for &(p,w)in &class.photons{let j=self.emission[x].product(&rc[p.carrier]);
-                    m[(target.position(p.to).unwrap(),cl.position(p.from).unwrap())]-=Complex::cis(w*t)*j[(p.to,p.from)];}
+                    m[(target.position(p.to).unwrap(),cl.position(p.from).unwrap())]+=Complex::cis(w*t)*j[(p.to,p.from)];}
                 for &(i,to,w)in &class.direct{let(s,d)=(cl.excited[i-n0],&dressings[i-n0]);
                     let c=self.emission[x][(to,s)]+(0..ne).fold(Complex::ZERO,|acc,f|acc+self.emission[x][(to,f)]*d[f]);
-                    m[(target.position(to).unwrap(),i)]+=Complex::cis(w*t)*c;}
+                    m[(target.position(to).unwrap(),i)]-=Complex::cis(w*t)*c;}
                 m})}).collect();
         // The decay of the explicit states: −(i/2) Σ_φ J_φ†J_φ on their rows and columns (between ground
         // states it is the folded drives', X's above).
@@ -1083,15 +1145,13 @@ impl Ground{
 
     /// The far components' fold, Σ m² of the folded ones; the couplings', Σ m² of the folded pairs of
     /// channels and static couplings (the jumps' photons split by frequency are exact); and the
-    /// excited states' couplings', the largest folded total saturation of a ground state's drives
-    /// (with its cluster's dressing) or estimate of a folded coupling between excited states.
+    /// largest estimate of a folded static coupling between excited states (the drives' fold is its
+    /// charge, `Ground::charge`).
     pub fn fold_estimates(&self)->(f64,f64,f64){
         let far=self.components.iter().filter(|c|c.folded&&c.size>0.).map(|c|mixing(c.nu,c.size,self.l0).powi(2)).sum();
         let near=self.items.iter().filter(|i|i.folded&&matches!(i.kind,Kind::Static{..}|Kind::Raman{..})).map(|i|mixing(i.frequency,i.size,self.generator_scale).powi(2)).sum();
-        let mut totals=vec![0.;self.ground_states.len()];let mut excited=0_f64;
-        for x in self.excited_items.iter().filter(|x|x.folded){match x.kind{ExcitedKind::Drive(d)=>totals[d.ground]+=x.estimate,ExcitedKind::Static{..}=>excited=excited.max(x.estimate)}}
-        let excited=totals.into_iter().fold(excited,f64::max);
-        (far,near,excited)
+        let statics=self.excited_items.iter().filter(|x|x.folded&&matches!(x.kind,ExcitedKind::Static{..})).map(|x|x.estimate).fold(0.,f64::max);
+        (far,near,statics)
     }
     /// Whether a cluster has explicit excited states.
     pub fn mixed(&self,k:usize)->bool{!self.clusters[k].excited.is_empty()}

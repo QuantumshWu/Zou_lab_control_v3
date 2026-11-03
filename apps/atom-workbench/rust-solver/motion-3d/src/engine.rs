@@ -34,8 +34,9 @@
 //! with the jump inside a step the force of the state before it would act on the whole step, an
 //! error first order in dt that the jump-free step doubling cannot see. The jump draws the class φ
 //! of photons of one frequency -- and the cluster it lands the atom in -- with probability
-//! Σ_a ‖u_a‖², u_a = J_{a,φ} ψ: an explicit state's amplitude C_a ψ_e and the folded drives' C_a A_c ψ,
-//! A_c = −R_c, added (ground.rs); the photon's direction n from the dipole pattern tr G − n·Re(G)·n,
+//! Σ_a ‖u_a‖², u_a = J_{a,φ} ψ: the folded drives' C_a R_c ψ less an explicit state's amplitude
+//! C_a ψ_e (the folded amplitude A_c = −R_c with its physical sign, the jump's overall sign the
+//! release's, ground.rs); the photon's direction n from the dipole pattern tr G − n·Re(G)·n,
 //! G_ab = ⟨u_a|u_b⟩, exactly (rejection from the uniform sphere); its polarization ε across n from
 //! ‖Σ_a ε_a u_a‖² on a real orthonormal pair; then ψ ← f = Σ_a ε_a u_a and the emission recoil
 //! κ −= k_φ n.
@@ -52,15 +53,18 @@
 //! draw adds the beams' spread about that mean at the jump: the mean force stays exact. The
 //! momentum diffusion beyond these kicks is the hook `Diffusion`'s.
 //!
-//! # The transient after a jump
+//! # The transient after a jump into a cluster with explicit states
 //! A jump leaves the atom in a bare ground state, while the folded drives' amplitude of the state it
 //! landed in, X ψ′ (X = Σ e^{−iε̃t} A_c per coherent group of channels, model.rs `Transient`), is
 //! dressed: it builds up from zero, and with probability ‖X ψ′‖² the transient really excites the
-//! folded states and they emit one more photon at once (their decay damps the rest). The map after
-//! each jump is ρ → ρ − ½{Y, ρ} + Σ_s S_s ρ S_s†, S_s = P_B C_a D_g^{−1/2} X_g per group g of nearly
-//! degenerate excited states (which ring apart), Σ_s S_s†S_s = Y: with probability ψ′†Yψ′ one more
-//! photon from the S_s (its class by ‖S_s ψ′‖², its kicks as a jump's), else ψ′ ← (1 − ½Y)ψ′. Its
-//! draws come from the jump's stream before the directions' loops.
+//! folded states and they emit one more photon at once (their decay damps the rest). Where the jump
+//! lands in a cluster with explicit excited states, the map after it is ρ → ρ − ½{Y, ρ} + Σ_s S_s ρ S_s†,
+//! S_s = P_B C_a D_g^{−1/2} X_g per group g of nearly degenerate excited states (which ring apart),
+//! Σ_s S_s†S_s = Y: with probability ψ′†Yψ′ one more photon from the S_s (its class by ‖S_s ψ′‖², its
+//! kicks as a jump's), else ψ′ ← (1 − ½Y)ψ′; its draws come from the jump's stream before the
+//! directions' loops. In a cluster of ground states alone the transient is left out: it is of the
+//! order of the fold's own error, which the fold's charge bounds as validated without it (ground.rs),
+//! and the engine there is the release's, draw for draw (the GPU's kernel, gpu/mod.rs).
 //!
 //! # What the kicks leave out
 //! The Ehrenfest force averages the dipole force over a superposition of ground states, and a kick
@@ -92,15 +96,16 @@
 //! Every jump draws from its own counter-based stream (rng.rs: the run's seed, the trajectory, the
 //! jump's number), so runs that differ only in the time step make the same choices: the
 //! step-doubling check compares them. A jump draws its class, the next threshold, the polarization,
-//! the absorbed beam and the transient's four first and the directions' rejection loops last, so that
+//! the absorbed beam (and into a cluster with explicit states the transient's four) first and the
+//! directions' rejection loops last, so that
 //! a trajectory's twin on the same streams (control.rs) keeps its thresholds and choices whatever its
 //! loops take.
 //!
 //! # A held atom
 //! A held twin (control.rs) does not move and its generator is static: its engine (`Engine::held`)
-//! takes every cluster's generator, jump operators and transient at its point once, steps by the
+//! takes every cluster's generator and jump operators at its point once, steps by the
 //! half step's propagators, and draws a jump's direction and polarization without the kicks.
-use crate::model::{Exact,Generator,Local,Model,Point,Transient,MOST_MIXED,MOST_STATES};
+use crate::model::{Exact,Generator,Local,Model,Point,MOST_MIXED,MOST_STATES};
 use crate::rng::{Purpose,Rng};
 use crate::Complex;
 use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
@@ -340,7 +345,7 @@ pub fn jump_stream(seed:u64,index:u64,jump:u64)->Rng{Rng::new(seed,Purpose::Jump
 /// An atom held at a point (control.rs `Twin`), its generator static there: every cluster's H_eff,
 /// per class and photon axis its jump operator L (target × cluster, row-major), and its post-jump
 /// transient, computed once.
-pub struct Held{pub point:Point,pub locals:Vec<Local>,pub jumps:Vec<Vec<[Vec<Complex>;3]>>,pub transients:Vec<Transient>}
+pub struct Held{pub point:Point,pub locals:Vec<Local>,pub jumps:Vec<Vec<[Vec<Complex>;3]>>}
 
 /// The engine: a model and its settings; for a held atom its generator and jumps there, and each
 /// cluster's propagator exp(−i H dt/2) over half the settings' step; the momentum diffusion's hook.
@@ -446,7 +451,7 @@ impl<'a> Engine<'a>{
     }
     /// A trajectory's state after `count` jump-free steps of dt (the deterministic flow the step check
     /// compares): flow, kick and the internal state's no-jump evolution, no jump, no loss.
-    pub fn coast(&self,t:&Trajectory,dt:f64,count:usize)->Trajectory{let mut x=t.clone();for _ in 0..count{self.advance(&mut x,dt);}x}
+    pub fn coast(&self,t:&Trajectory,dt:f64,count:usize)->Trajectory{let mut x=t.clone();for _ in 0..count{self.free_step(&mut x,dt);}x}
     /// The step-doubling error of one step of dt from a trajectory's state, without jumps: one step
     /// against two of dt/2, as (|Δκ|, |kick|) -- the momentum's difference and the step's
     /// non-harmonic impulse (1/um) --, (max |Δp|, |Δ ln‖ψ‖²|, |ln‖ψ‖²|) -- the largest difference of
@@ -520,10 +525,10 @@ impl<'a> Engine<'a>{
         // them: a twin trajectory on the same stream (control.rs) keeps its thresholds and choices
         // whatever its loops take.
         let(mut x,threshold,polarization,absorbed)=(rng.uniform()*total,rng.open_uniform(),rng.uniform(),rng.uniform());
-        let transient:[f64;4]=std::array::from_fn(|_|rng.uniform());
         let mut pick=weights.len()-1;
         for(i,&w)in weights.iter().enumerate(){if x<w{pick=i;break;}x-=w;}
         let class=&classes[pick];let nt=m.ground_dimension(class.target);
+        let transient:Option<[f64;4]>=(self.held.is_none()&&m.mixed(class.target)).then(||std::array::from_fn(|_|rng.uniform()));
         let(direction,e,f,size)=emit(&mut rng,&amplitude[pick],nt,polarization);
         // The recoils of a moving atom: the photon's, the absorbed beam's and the exact conditional
         // mean's correction.
@@ -533,7 +538,7 @@ impl<'a> Engine<'a>{
         }
         let mut next=[Complex::ZERO;MOST_MIXED];for i in 0..nt{next[i]=f[i]*(1./size.sqrt());}
         t.cluster=class.target;t.psi=next;t.threshold=threshold;
-        self.transient(t,&point,time,transient,&mut rng);
+        if let Some(draws)=transient{self.transient(t,&point,time,draws,&mut rng);}
     }
 
     /// A moving atom's recoils from a photon (direction n, wave number k, polarization ε, the state it
@@ -560,8 +565,7 @@ impl<'a> Engine<'a>{
     /// jump's), else ψ′ ← (1 − ½Y)ψ′. `draws`: whether, which piece, the polarization, the beam.
     fn transient(&self,t:&mut Trajectory,point:&Point,time:f64,draws:[f64;4],rng:&mut Rng){
         let m=self.model;let k=t.cluster;
-        let own;let ops:&Transient=match &self.held{Some((h,_))=>&h.transients[k],None=>{own=m.transient(k,point,time);&own}};
-        let n0=ops.n0;let psi=t.psi;
+        let ops=m.transient(k,point,time);let n0=ops.n0;let psi=t.psi;
         let mut y=[Complex::ZERO;MOST_STATES];for a in 0..n0{for b in 0..n0{y[a]+=ops.y[a*n0+b]*psi[b];}}
         let p:f64=(0..n0).map(|a|(psi[a].conj()*y[a]).re).sum();
         if !(p>0.){return;}
@@ -578,11 +582,9 @@ impl<'a> Engine<'a>{
         let mut x=draws[1]*total;let mut pick=weights.len()-1;for(i,&w)in weights.iter().enumerate(){if x<w{pick=i;break;}x-=w;}
         let piece=&ops.pieces[pick];let nt=m.ground_dimension(piece.target);
         let(direction,e,f,size)=emit(rng,&amplitudes[pick],nt,draws[2]);
-        if self.held.is_none(){
-            let(_,du,beams)=m.transient_photon(k,point,time,piece,&psi);
-            let shares:Vec<(usize,f64)>=beams.iter().map(|(l,v)|(*l,(0..nt).map(|i|(0..3).fold(Complex::ZERO,|s,a|s+v[a][i]*e[a]).norm_sqr()).sum())).collect();
-            self.kick(t,point,direction,piece.wave_number,&e,&f,size,&du,&shares,draws[3]);
-        }
+        let(_,du,beams)=m.transient_photon(k,point,time,piece,&psi);
+        let shares:Vec<(usize,f64)>=beams.iter().map(|(l,v)|(*l,(0..nt).map(|i|(0..3).fold(Complex::ZERO,|s,a|s+v[a][i]*e[a]).norm_sqr()).sum())).collect();
+        self.kick(t,point,direction,piece.wave_number,&e,&f,size,&du,&shares,draws[3]);
         let mut next=[Complex::ZERO;MOST_MIXED];for i in 0..nt{next[i]=f[i]*(1./size.sqrt());}
         t.cluster=piece.target;t.psi=next;
     }

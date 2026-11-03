@@ -7,6 +7,7 @@
 use atom_motion_3d::control::{Harmonic,Twin};
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
 use atom_motion_3d::ground::Path;
+use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Scales,KT_PER_UK};
@@ -57,9 +58,11 @@ fn expectation(m:&[Complex],psi:&[Complex],n:usize)->Complex{let mut s=Complex::
 /// interpolation; and the photons carry the whole decay but the paths' (their second order).
 #[test]
 fn the_tables_give_the_front_end_s_generator_and_the_photons_carry_the_decay(){
-    let mut model=Model::new(&request(&|_|true)).unwrap();model.doppler=false;let g=&model.ground;
+    // Every drive folded, and the drives kept until each ground state's folded rest is within the budget.
+    for allowance in [f64::INFINITY,BUDGET]{
+    let mut model=Model::with(&request(&|_|true),allowance).unwrap();model.doppler=false;let g=&model.ground;
     let tabulated=|p:&Path|model.carriers[p.via.carrier].beams.len()==1;
-    assert!((0..model.clusters()).any(|k|model.mixed(k)),"the fixture has explicit excited states");
+    assert_eq!((0..model.clusters()).any(|k|model.mixed(k)),allowance<f64::INFINITY,"explicit excited states at the allowance {allowance}");
     for(k,r,_,t,psi)in samples(&model,1){
         let n=model.dimension(k);let p=model.point(r,[0.;3]);let local=model.generator(k,&p,t);
         let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();let dense=g.local_with(&e,k,r,t,&tabulated).unwrap();
@@ -74,14 +77,17 @@ fn the_tables_give_the_front_end_s_generator_and_the_photons_carry_the_decay(){
         let shift=-2.*expectation(&dense.shift.entries,&psi,n).im;
         assert!((decay-shift-fast).abs()<=1e-3*fast.max(1e-12),"cluster {k} at {r:?}: decay {decay:e} less the paths' {shift:e} against {fast:e}");
     }
+    }
 }
 
 /// The Ehrenfest force is minus the gradient of the energy Re⟨ψ|H_eff|ψ⟩ (central differences),
-/// the trap's and the light's -- with explicit excited states their own potential and the kept
-/// drives' stimulated force --, the Doppler term's own gradient aside (the kinetic shift off).
+/// the trap's and the light's -- with explicit excited states (the drives kept within the budget)
+/// their own potential and the kept drives' stimulated force --, the Doppler term's own gradient
+/// aside (the kinetic shift off).
 #[test]
 fn the_force_is_the_energy_s_gradient(){
-    let mut model=Model::new(&request(&|_|true)).unwrap();model.doppler=false;
+    for allowance in [f64::INFINITY,BUDGET]{
+    let mut model=Model::with(&request(&|_|true),allowance).unwrap();model.doppler=false;
     let energy=|cluster:usize,r:[f64;3],t:f64,psi:&[Complex;MOST_MIXED]|->f64{
         let n=model.dimension(cluster);let local=model.generator(cluster,&model.point(r,[0.;3]),t);local.scalar+expectation(&local.hamiltonian[..n*n],psi,n).re
     };
@@ -91,6 +97,7 @@ fn the_force_is_the_energy_s_gradient(){
             let(mut plus,mut minus)=(r,r);plus[a]+=h;minus[a]-=h;let numeric=-(energy(cluster,plus,t,&psi)-energy(cluster,minus,t,&psi))/(2.*h);
             assert!((force[a]-numeric).abs()<=1e-5*numeric.abs().max(1.),"cluster {cluster} at {r:?}, axis {a}: {} against {numeric}",force[a]);
         }
+    }
     }
 }
 

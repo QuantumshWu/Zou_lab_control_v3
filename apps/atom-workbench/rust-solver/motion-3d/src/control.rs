@@ -16,7 +16,7 @@
 //! numbers, engine.rs) -- held without motion at a point where the trap beam's intensity is the mean
 //! the moving atoms see (the pilot's states): its populations' mean is the eliminated master equation
 //! there (`Twin::means`): the engine's generator there, its decay its own jumps' (so that its trace
-//! stays one, `Twin::new`), the engine's jumps and each jump's post-jump transient. While the moving
+//! stays one, `Twin::new`), and the engine's jumps. While the moving
 //! atom's light differs little from the point's, its jumps follow the twin's; a light pattern on the
 //! scale of the motion decorrelates them at once. A twin exists when the generator is static (no
 //! residual beats) and every cluster is of ground states (the exact step's clusters with explicit
@@ -114,7 +114,6 @@ impl Twin{
             }}
             local}).collect();
         // The readout's images of the density's basis: ψψ† for ψ = e_i, e_i + e_j and e_i + i e_j.
-        let transients=(0..model.clusters()).map(|k|model.transient(k,&point,0.)).collect();
         let readout=(0..model.clusters()).map(|k|{
             let n=model.dimension(k);let pure=|psi:&[Complex;MOST_STATES]|->[f64;STATES]{let norm:f64=psi[..n].iter().map(|z|z.norm_sqr()).sum();model.populations(k,&point,psi,0.).map(|x|x*norm)};
             let unit=|i:usize|{let mut v=[Complex::ZERO;MOST_STATES];v[i]=Complex::ONE;v};
@@ -126,7 +125,7 @@ impl Twin{
                 out[i*n+j]=std::array::from_fn(|s|px[s]-diagonal[i][s]-diagonal[j][s]);out[j*n+i]=std::array::from_fn(|s|diagonal[i][s]+diagonal[j][s]-py[s]);
             }}
             out}).collect();
-        Some(Twin{held:Held{point,locals,jumps,transients},readout})
+        Some(Twin{held:Held{point,locals,jumps},readout})
     }
     /// A twin's populations: those of its state ψ (in cluster k) at its point.
     pub fn populations(&self,k:usize,psi:&[Complex])->[f64;STATES]{
@@ -141,10 +140,8 @@ impl Twin{
         out
     }
     /// The populations' exact means at `outputs` outputs `interval` apart: the eliminated master
-    /// equation at the twin's point -- H_eff, the jumps and each jump's transient of the engine's
-    /// tables there (engine.rs: σ = Σ_a L ρ L† into its target B, then σ − ½{Y_B, σ} there and
-    /// Σ_a S σ S† into each transient piece's target) -- from the initial density's ground
-    /// populations, by the exponential of its superoperator over an interval.
+    /// equation at the twin's point -- H_eff and the jumps of the engine's tables there -- from the
+    /// initial density's ground populations, by the exponential of its superoperator over an interval.
     pub fn means(&self,model:&Model,initial_density:&[Complex],interval:f64,outputs:usize)->Vec<[f64;STATES]>{
         let g=&model.ground;let sizes:Vec<usize>=(0..model.clusters()).map(|k|model.dimension(k)).collect();
         let offsets:Vec<usize>=sizes.iter().scan(0,|o,&n|{let x=*o;*o+=n*n;Some(x)}).collect();let d:usize=sizes.iter().map(|n|n*n).sum();
@@ -156,28 +153,12 @@ impl Twin{
                 generator[(o+i*n+j,o+m*n+j)]+=Complex::new(0.,-1.)*h[i*n+m];
                 generator[(o+i*n+j,o+i*n+m)]+=Complex::new(0.,1.)*h[j*n+m].conj();
             }}}
-            // Σ L ρ L† into each class's target cluster, through its transient.
+            // Σ L ρ L† into each class's target cluster.
             for(class,c)in g.clusters[k].classes.iter().enumerate(){
-                let(b,nt,ot)=(c.target,sizes[c.target],offsets[c.target]);
-                // σ (nt² × n²).
-                let mut sigma=Dense::zeros(nt*nt,n*n);
+                let(nt,ot)=(sizes[c.target],offsets[c.target]);
                 for a in 0..3{let l=&self.held.jumps[k][class][a];for i in 0..nt{for j in 0..nt{for p in 0..n{for q in 0..n{
-                    sigma[(i*nt+j,p*n+q)]+=l[i*n+p]*l[j*n+q].conj();
+                    generator[(ot+i*nt+j,o+p*n+q)]+=l[i*n+p]*l[j*n+q].conj();
                 }}}}}
-                let transient=&self.held.transients[b];let y=&transient.y;
-                for i in 0..nt{for j in 0..nt{for col in 0..n*n{
-                    // σ − ½(Yσ + σY) into B.
-                    let mut z=sigma[(i*nt+j,col)];
-                    for m in 0..nt{z-=(y[i*nt+m]*sigma[(m*nt+j,col)]+sigma[(i*nt+m,col)]*y[m*nt+j])*0.5;}
-                    generator[(ot+i*nt+j,o+col)]+=z;
-                }}}
-                for piece in &transient.pieces{
-                    let(ns,os)=(sizes[piece.target],offsets[piece.target]);
-                    for a in 0..3{let s=&piece.ops[a];for i in 0..ns{for j in 0..ns{for p in 0..nt{for q in 0..nt{
-                        let w=s[i*nt+p]*s[j*nt+q].conj();if w==Complex::ZERO{continue;}
-                        for col in 0..n*n{generator[(os+i*ns+j,o+col)]+=w*sigma[(p*nt+q,col)];}
-                    }}}}}
-                }
             }
         }
         let propagator=exponential(&generator,interval);

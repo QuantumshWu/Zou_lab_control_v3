@@ -334,7 +334,7 @@ impl program::State{
     fn trajectory(&self,settings:&Settings,seed:u64)->Trajectory{
         let lab=|v:[f64;3]|->[f64;3]{std::array::from_fn(|a|(0..3).map(|i|v[i]*settings.axes[i][a]).sum())};
         let scale=(0.5*self.logn).exp();
-        let psi=std::array::from_fn(|x|Complex::new(self.psi[x][0] as f64*scale,self.psi[x][1] as f64*scale));
+        let mut psi=[Complex::ZERO;crate::model::MOST_MIXED];for(x,z)in self.psi.iter().enumerate(){psi[x]=Complex::new(z[0] as f64*scale,z[1] as f64*scale);}
         Trajectory{cluster:self.cluster as usize,psi,r:lab(self.q),kappa:lab(self.p),time:self.time,threshold:self.threshold,alive:self.death<0,
             jumps:self.jumps as u64,doppler:self.doppler as f64,seed,index:self.index as u64}
     }

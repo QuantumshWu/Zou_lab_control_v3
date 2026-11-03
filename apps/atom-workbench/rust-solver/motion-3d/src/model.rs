@@ -219,10 +219,12 @@ pub struct Local{pub hamiltonian:[Complex;MOST_STATES*MOST_STATES],pub scalar:f6
 #[derive(Clone,Debug)]
 pub struct Generator{pub n:usize,pub hamiltonian:Vec<Complex>,pub scalar:f64,pub gradient:[Vec<Complex>;3]}
 impl Generator{
-    /// A cluster of ground states' generator (`Local`) on its n states.
+    /// A cluster of ground states' generator (`Local`) on its n states, its gradients' Hermitian parts
+    /// (the force reads Re⟨ψ|∇H_eff|ψ⟩ alone).
     pub fn of(local:&Local,n:usize)->Generator{
+        let entry=|a:usize,k:usize|Complex::new(local.gradient[a][2*k],local.gradient[a][2*k+1]);
         Generator{n,hamiltonian:local.hamiltonian[..n*n].to_vec(),scalar:local.scalar,
-            gradient:std::array::from_fn(|a|(0..n*n).map(|k|Complex::new(local.gradient[a][2*k],local.gradient[a][2*k+1])).collect())}
+            gradient:std::array::from_fn(|a|(0..n*n).map(|k|(entry(a,k)+entry(a,(k%n)*n+k/n).conj())*0.5).collect())}
     }
     /// −Re⟨ψ|∇H|ψ⟩/⟨ψ|ψ⟩: the Ehrenfest force on ħκ (rad/us per um).
     pub fn force(&self,psi:&[Complex])->[f64;3]{
@@ -339,11 +341,13 @@ pub(crate) fn symmetric_eigen(m:[[f64;3];3])->([f64;3],[[f64;3];3]){
 }
 
 impl Model{
-    /// The model of a request: its front end, the focused beams, the carriers' bases and the tables.
-    /// `reach` (um per trap axis, None: from the request's temperature) is the atom's reach the
-    /// Gaussian beams' profiles are judged over.
-    pub fn new(request:&Request)->Result<Model,String>{
-        let ground=Ground::new(request)?;
+    /// The model of a request with every drive folded (`Model::with` at an infinite allowance).
+    pub fn new(request:&Request)->Result<Model,String>{Model::with(request,f64::INFINITY)}
+    /// The model of a request: its front end, its drives kept until each ground state's folded rest is
+    /// within `allowance` (ground.rs `Ground::with`), the focused beams, the carriers' bases and the
+    /// tables.
+    pub fn with(request:&Request,allowance:f64)->Result<Model,String>{
+        let ground=Ground::with(request,allowance)?;
         let geometry:Vec<Geometry>=ground.beams.iter().map(|b|Geometry{direction:b.direction,wave_number:b.wave_number_per_um,waist:b.waist_um}).collect();
         let trap_beam=request.trap_beam;
         if trap_beam>=geometry.len()||geometry[trap_beam].waist.is_none(){return Err("光镊（trapBeamId 所指的光束）需要束腰：3D 运动计算聚焦在原子处的光镊中的单个原子".into());}
@@ -684,7 +688,6 @@ impl Model{
                 for(i,s)in points.iter().enumerate(){
                     self.interpolate(b,&self.stencil(s),None,start,&mut out);
                     let e=out.iter().zip(exact(i).chunks_exact(2)).fold(0_f64,|m,(x,y)|m.max((x.re-y[0]).hypot(x.im-y[1])))/scale;
-                    if std::env::var("ATOM_TABLE_DEBUG").is_ok()&&e>TABLE_SHARE{eprintln!("table cluster {b} slice {start}..{end} (h0 {}, emission {}, size {}) at s {s:?}: {e:.2e}",layout.h0,layout.emission,layout.size);}
                     worst=worst.max(e);
                 }
             }
@@ -987,11 +990,11 @@ impl Model{
             let mut u=[[Complex::ZERO;MOST_STATES];3];
             for &(ph,w)in &class.photons{
                 let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=Complex::cis(w*t);
-                for a in 0..3{u[a][row]-=phase*matrices[(ph.carrier*3+a)*size+ph.to*n0+col]*psi[col];}
+                for a in 0..3{u[a][row]+=phase*matrices[(ph.carrier*3+a)*size+ph.to*n0+col]*psi[col];}
             }
             for &(i,to,w)in &class.direct{
                 let row=target.position(to).unwrap();let phase=Complex::cis(w*t)*psi[i];
-                for a in 0..3{u[a][row]+=phase*self.photon(cluster,&p.stencil,i-n0,a,to);}
+                for a in 0..3{u[a][row]-=phase*self.photon(cluster,&p.stencil,i-n0,a,to);}
             }
             u}).collect();
         let mut state=[Complex::ZERO;MOST_MIXED];state[..n].copy_from_slice(&psi[..n]);
@@ -1039,7 +1042,6 @@ impl Model{
         let g=&self.ground;let cl=&g.clusters[cluster];let(n0,ne,ng)=(self.ground_dimension(cluster),g.excited_states.len(),g.ground_states.len());
         let responses=self.responses(cluster,p);
         let mut y=vec![Complex::ZERO;n0*n0];let mut pieces=vec![];
-        if std::env::var("XP_NOTRANSIENT").is_ok(){return Transient{n0,y,pieces};}
         for(k,group)in cl.coherent.iter().enumerate(){
             // X (ne × n0): the group's channels' folded amplitudes.
             let mut x=vec![Complex::ZERO;ne*n0];
@@ -1075,10 +1077,11 @@ impl Model{
         // T_k (and ∂_f T_k) at the point, per carrier and rank.
         let table=|c:usize,k:usize,f:Option<usize>|->Vec<Complex>{let mut buf=vec![Complex::ZERO;ne*n0];self.interpolate(cluster,&p.stencil,f,layout.carriers[c].t+k*ne*n0,&mut buf);buf};
         let tables:Vec<Vec<Vec<Complex>>>=(0..self.carriers.len()).map(|c|(0..self.carriers[c].rank).map(|k|table(c,k,None)).collect()).collect();
-        // A = −Σ e^{−iε̃t} Σ_k w_k M_k[i, b] ψ_b over the group's channels, M the tables or their slopes.
+        // Σ e^{−iε̃t} Σ_k w_k M_k[i, b] ψ_b over the group's channels (the jumps' sign, ground.rs), M the
+        // tables or their slopes.
         let folded=|weights:&dyn Fn(usize,usize)->Complex,matrices:&[Vec<Vec<Complex>>],i:usize|->Complex{
             let mut z=Complex::ZERO;
-            for &(ch,w)in group{let col=cl.position(ch.state).unwrap();let phase=-Complex::cis(-w*t)*psi[col];
+            for &(ch,w)in group{let col=cl.position(ch.state).unwrap();let phase=Complex::cis(-w*t)*psi[col];
                 for k in 0..self.carriers[ch.carrier].rank{let wk=weights(ch.carrier,k);if wk!=Complex::ZERO{z+=phase*wk*matrices[ch.carrier][k][i*n0+col];}}}
             z};
         let u=photon(&|i,_|folded(&|c,k|p.fields[c].e[k],&tables,i));
@@ -1182,7 +1185,7 @@ impl Photons<'_>{
         let(n0,p)=(m.ground_dimension(self.cluster),&self.point);let cl2=&m.layouts[self.cluster].carriers;let size=g.ground_states.len()*n0;
         let mut out=[[[Complex::ZERO;MOST_STATES];3];3];let mut entry=[Complex::ZERO];
         for &(ph,w)in &class.photons{
-            let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=-Complex::cis(w*self.time)*self.psi[col];let fl=&p.fields[ph.carrier];
+            let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=Complex::cis(w*self.time)*self.psi[col];let fl=&p.fields[ph.carrier];
             for k in 0..m.carriers[ph.carrier].rank{for a in 0..3{
                 let j=self.jumps[self.offset(ph.carrier,k,a)+ph.to*n0+col];
                 for x in 0..3{out[a][x][row]+=phase*fl.grad[k][x]*j;}
