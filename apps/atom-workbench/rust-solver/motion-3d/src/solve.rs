@@ -336,10 +336,8 @@ fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance
         let population=(a[0]+bias[0]+p>POPULATION_TARGET).then_some((i,"布居",a[0]+bias[0]+p,a[0]+bias[0],p));
         let temperature=t.and_then(|t|(a[1]+bias[1]+t>TEMPERATURE_TARGET).then_some((i,"温度",a[1]+bias[1]+t,a[1]+bias[1],t)));
         population.or(temperature)}).collect();
-    // The elimination's a-priori bound over the atoms' reach (model.rs `Model::resonance`): beyond the
-    // population target, light near resonance somewhere the atoms go -- the measured η² can miss it.
-    let resonance=(model.resonance>POPULATION_TARGET).then(||format!("光在原子所到之处接近共振：消去激发态的先验界（基态的激发态权重）达 {:.0}%（目标 {:.0}%），近共振处消去激发态不成立",
-        100.*model.resonance,100.*POPULATION_TARGET));
+    // Light near resonance where the atoms go (`resonance`).
+    let resonance=resonance(model);
     // The initial ensemble's cut beyond the budget, on its own: the loss and the populations depend on it.
     let share=cut(base);
     let initial=(share>BUDGET).then(||format!("初始热分布有 {:.0}% 落在势阱区之外（丢失与布居依赖这一截断）",100.*share));
@@ -399,7 +397,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,false,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     // The reference state: the largest initial population; its trap sets ω per axis.
     let trap=pilot_candidate.trap();
-    if trap.frequencies.iter().any(|&w|!(w>0.)){return Err(Stop::Error(NOT_CONFINED.into()));}
+    // A trap the model gives only where the model holds: a strong near beam whose light shift anti-traps the
+    // reference state is the elimination's resonance first (the validation's F8).
+    if trap.frequencies.iter().any(|&w|!(w>0.)){return Err(Stop::Error(match resonance(&pilot_candidate.model){Some(r)=>format!("{r}：光镊的势阱无从判断"),None=>NOT_CONFINED.into()}));}
     // The first step: the light pattern's phase k_max v_T per step at sqrt(η × the temperature
     // target), or without light the trap's own ω.
     let thermal=(KT_PER_UK*request.temperature_uk*pilot_candidate.model.hbar_over_mass).sqrt();
@@ -632,6 +632,14 @@ fn booked(base:&Ledger,bound:f64)->Ledger{
     let mut ledger=base.clone();
     if bound>0.{ledger.add("多速率步略去的残余拍频",bound,"整步影响之界（Duhamel 积分的分部积分）在指数截断份额内的拍频对略去，其余按 CF4 精确传播".into());}
     ledger
+}
+
+/// The elimination's a-priori bound over the atoms' reach (model.rs `Model::resonance`) beyond the population
+/// target: light near resonance somewhere the atoms go -- the measured η² can miss it, and the model's
+/// trap there is no trap's.
+fn resonance(model:&Model)->Option<String>{
+    (model.resonance>POPULATION_TARGET).then(||format!("光在原子所到之处接近共振：消去激发态的先验界（基态的激发态权重）达 {:.0}%（目标 {:.0}%），近共振处消去激发态不成立",
+        100.*model.resonance,100.*POPULATION_TARGET))
 }
 
 /// The ledger's item of a generator whose decay falls below its jumps' rate (`gain`).
