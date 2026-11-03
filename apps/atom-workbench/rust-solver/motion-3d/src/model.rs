@@ -791,23 +791,32 @@ impl Model{
     /// lattice) left out. A tweezer folded at second order is in h0; one that is a near carrier
     /// (the only light): the trap is the same.
     pub fn potential(&self,cluster:usize,x:usize,r:[f64;3])->f64{
-        let at=|r:[f64;3]|->f64{
-            let layout=&self.layouts[cluster];let n=layout.n;let n2=n*n;
-            let s:Vec<f64>=self.focused.iter().map(|&l|self.geometry[l].intensity(r).min(1.)).collect();let stencil=self.stencil(&s);
-            let mut buf=vec![Complex::ZERO;n2];self.interpolate(cluster,&stencil,None,layout.h0,&mut buf);let mut u=buf[x*n+x].re;
-            for gl in layout.groups.iter().filter(|g|g.hermitian){
-                let carrier=&self.carriers[gl.absorbed];
-                for(j,&l)in carrier.beams.iter().enumerate(){
-                    let intensity=self.geometry[l].intensity(r);let coefficient=&carrier.coefficients[j];
-                    for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
-                        self.interpolate(cluster,&stencil,None,gl.s+pi*n2,&mut buf);
-                        u-=intensity*(coefficient[k1].conj()*coefficient[k]*buf[x*n+x]).re*if k1<k{2.}else{1.};
-                    }
+        self.level(cluster,x,&|l|self.geometry[l].intensity(r))-self.level(cluster,x,&|l|self.geometry[l].intensity([0.;3]))
+    }
+    /// A cluster state's trap depth (rad/us): the level its potential tends to far from every
+    /// focused beam -- the Gaussian beams' intensities zero, the plane waves' as everywhere --,
+    /// relative to the focus; positive for a state the trap holds.
+    pub fn depth(&self,cluster:usize,x:usize)->f64{
+        let far=|l:usize|if self.geometry[l].waist.is_some(){0.}else{self.geometry[l].intensity([0.;3])};
+        self.level(cluster,x,&far)-self.level(cluster,x,&|l|self.geometry[l].intensity([0.;3]))
+    }
+    /// The diagonal of h0 and of every beam's own light shift for a cluster state, the beams at the
+    /// intensities `intensity(l)` (`potential`).
+    fn level(&self,cluster:usize,x:usize,intensity:&dyn Fn(usize)->f64)->f64{
+        let layout=&self.layouts[cluster];let n=layout.n;let n2=n*n;
+        let s:Vec<f64>=self.focused.iter().map(|&l|intensity(l).min(1.)).collect();let stencil=self.stencil(&s);
+        let mut buf=vec![Complex::ZERO;n2];self.interpolate(cluster,&stencil,None,layout.h0,&mut buf);let mut u=buf[x*n+x].re;
+        for gl in layout.groups.iter().filter(|g|g.hermitian){
+            let carrier=&self.carriers[gl.absorbed];
+            for(j,&l)in carrier.beams.iter().enumerate(){
+                let at=intensity(l);let coefficient=&carrier.coefficients[j];
+                for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
+                    self.interpolate(cluster,&stencil,None,gl.s+pi*n2,&mut buf);
+                    u-=at*(coefficient[k1].conj()*coefficient[k]*buf[x*n+x]).re*if k1<k{2.}else{1.};
                 }
             }
-            u
-        };
-        at(r)-at([0.;3])
+        }
+        u
     }
 }
 

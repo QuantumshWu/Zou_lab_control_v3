@@ -136,6 +136,46 @@ fn a_thermal_state_stays_thermal_with_the_light_off(){
     let _=(Engine::new(&model,settings),initial_trajectory);
 }
 
+/// The initial positions are the trap's Boltzmann distribution over its region, exactly (lib.rs
+/// `thermal_position`): the tweezer alone at a tenth of its depth and at two thirds of it (the
+/// normal proposal and the uniform one), 2¹⁶ independent initial states' mean potential and mean
+/// squares along the trap's axes against e^{−U/k_BT} over the region (U_h ≤ D) on a grid of the
+/// harmonic coordinates, within four standard errors. On the grid the proposal's bound holds: U ≥
+/// U_h/2 over the region. The region's share at a tenth of the depth lies between a thousandth and
+/// the whole.
+#[test]
+fn the_initial_positions_are_the_trap_s_boltzmann_distribution(){
+    use rayon::prelude::*;
+    let mut r=request(&|b|b["waistUm"].is_number());let model=Model::new(&r).unwrap();let hm=model.hbar_over_mass;
+    let depth={let i=Initial::new(&model,&r).unwrap();i.depths[0]};assert!(depth>0.);
+    for ratio in [10.,1.5]{
+        r.temperature_uk=depth/ratio/KT_PER_UK;let initial=Initial::new(&model,&r).unwrap();assert_eq!(initial.states.len(),1);
+        let(cluster,state,_)=initial.states[0];let trap=initial.traps[0];let kt=KT_PER_UK*r.temperature_uk;
+        if ratio==10.{assert!(initial.outside>1e-3&&initial.outside<1.,"share {}",initial.outside);}
+        let on=|q:[f64;3]|->[f64;3]{std::array::from_fn(|a|(0..3).map(|i|q[i]*trap.axes[i][a]).sum())};
+        // The grid: midpoints of 64 cells per axis over the region's cube, z = q/scale (U_h = k_BT |z|²).
+        let scales:[f64;3]=std::array::from_fn(|i|(2.*kt*hm).sqrt()/trap.frequencies[i]);let edge=ratio.sqrt();let cells:usize=64;
+        let sums=(0..cells*cells*cells).into_par_iter().map(|c|{
+            let z:[f64;3]=std::array::from_fn(|i|edge*(2.*(((c/cells.pow(i as u32))%cells) as f64+0.5)/cells as f64-1.));
+            let z2:f64=z.iter().map(|x|x*x).sum();if z2>ratio{return [0.;5];}
+            let q:[f64;3]=std::array::from_fn(|i|z[i]*scales[i]);let u=model.potential(cluster,state,on(q));
+            assert!(u>=0.5*kt*z2-1e-9*kt,"U {u} below half of U_h {} at z {z:?}",kt*z2);
+            let w=(-u/kt).exp();[w,w*u,w*q[0]*q[0],w*q[1]*q[1],w*q[2]*q[2]]
+        }).reduce(||[0.;5],|a,b|std::array::from_fn(|k|a[k]+b[k]));
+        let exact:[f64;4]=std::array::from_fn(|k|sums[k+1]/sums[0]);
+        // The sampled initial states (each trajectory's own draw), their positions on the trap's axes.
+        let settings=Settings::new(0.25,&trap,f64::EPSILON,true);let count=1u64<<16;
+        let quantum:[f64;3]=std::array::from_fn(|i|{let half=trap.frequencies[i]/(2.*kt);half/half.tanh()});
+        let drawn:Vec<[f64;4]>=(0..count).into_par_iter().map(|i|{let t=initial_trajectory(&model,&settings,&initial,7,i,Stratum::single(i));
+            let q:[f64;3]=std::array::from_fn(|k|(0..3).map(|a|t.r[a]*trap.axes[k][a]).sum::<f64>());
+            [model.potential(cluster,state,t.r),q[0]*q[0]/quantum[0],q[1]*q[1]/quantum[1],q[2]*q[2]/quantum[2]]}).collect();
+        for k in 0..4{
+            let n=count as f64;let m=drawn.iter().map(|x|x[k]).sum::<f64>()/n;let se=(drawn.iter().map(|x|(x[k]-m).powi(2)).sum::<f64>()/(n-1.)/n).sqrt();
+            assert!((m-exact[k]).abs()<=4.*se,"depth/kT {ratio}, statistic {k}: {m} ± {se} against {}",exact[k]);
+        }
+    }
+}
+
 #[test]
 fn the_normal_quantile_is_the_inverse_distribution(){
     // Reference quantiles of the standard normal, and its symmetry.

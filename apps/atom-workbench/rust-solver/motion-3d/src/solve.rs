@@ -14,10 +14,11 @@
 //! # Ledger and the total error
 //! Every a-priori approximation's estimate enters the solve's ledger (ledger.rs), reported against
 //! its budget, the a-priori share of the population target. The decisions take that share: the
-//! couplings' and the far components' folds (ground.rs), a Gaussian beam's intensity axis (model.rs)
-//! and, per step, the first order in the Doppler shift -- what the budget leaves after the model's
-//! estimates and the pilot's elimination, or the budget on its own where the elimination alone
-//! exceeds it (the exact response beyond, engine.rs). The elimination's η² -- each output's mean
+//! couplings' and the far components' folds (ground.rs), a Gaussian beam's intensity axis (model.rs),
+//! the region the initial positions are drawn in (lib.rs `thermal_position`) and, per step, the
+//! first order in the Doppler shift -- what the budget leaves after the model's estimates and the
+//! pilot's elimination, or the budget on its own where the elimination alone exceeds it (the exact
+//! response beyond, engine.rs). The elimination's η² -- each output's mean
 //! excited population, the local expansion parameter ⟨Y⟩ of each atom's state -- is measured along
 //! the trajectories and is no decision yet: it enters the total (validated on resonant probes against
 //! the population core: optical pumping's population error 0.4–1.1 η², a cycling transition's 2η⁴).
@@ -338,7 +339,10 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     if times.windows(2).any(|w|((w[1]-w[0])-interval).abs()>1e-9*interval){return Err(Stop::Error("A 3D motion solve needs evenly spaced times".into()));}
     let listed=listed(outputs);let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
     let seed=0x3D_5EED;
-    let base=model_ledger(&model,request);
+    let mut base=model_ledger(&model,request);
+    // The initial positions' region (lib.rs `thermal_position`): the share of the traps' thermal
+    // positions it leaves out.
+    if initial.outside>0.{base.add("初始热分布（势阱区之外）",initial.outside,"位置取势阱区（谐振近似低于阱深处）内的玻尔兹曼分布".into());}
     // The first step: the light pattern's phase k_max v_T per step at sqrt(η × the temperature
     // target), or without light the trap's own ω.
     let thermal=(KT_PER_UK*request.temperature_uk*model.hbar_over_mass).sqrt();
