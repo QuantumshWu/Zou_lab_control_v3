@@ -4,6 +4,7 @@
 //! dipole pattern's moments, the trap, a thermal state that stays thermal and held with the light
 //! off (its T over a trap period as well, with smaller errors), a group's Latin hypercube of initial
 //! momenta, and a short solve whose t = 0 is the request's initial state.
+use atom_motion_3d::control::{Harmonic,Twin};
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
 use atom_motion_3d::ground::Path;
 use atom_motion_3d::model::{Model,MOST_STATES};
@@ -125,14 +126,14 @@ fn a_thermal_state_stays_thermal_with_the_light_off(){
     let r=request(&|b|b["waistUm"].is_number());let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let trap=initial.traps[0];assert_eq!(model.focused.len(),1);
     let settings=Settings::new(0.25,&trap,f64::EPSILON,false);
-    let outcome=simulate(&model,&settings,&initial,5,0,1024,8,40,21,&[]);assert_eq!(outcome.jumps,0);
-    let e=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab});
+    let outcome=simulate(&model,&settings,&initial,5,0,1024,8,40,21,&[],None);assert_eq!(outcome.jumps,0);
+    let e=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab},&[]);
     for a in 0..3{let start=e[0].temperature[a];for x in &e{
         assert!((x.temperature[a]-start).abs()<=3.*(x.temperature_error[a].hypot(e[0].temperature_error[a])),"axis {a}: {} against {start}",x.temperature[a]);
         assert!((x.temperature[a]-r.temperature_uk).abs()<=4.*x.temperature_error[a],"axis {a}: {} against {}",x.temperature[a],r.temperature_uk);
         assert_eq!(x.loss,0.);
     }}
-    let _=(Engine{model:&model,settings},initial_trajectory);
+    let _=(Engine::new(&model,settings),initial_trajectory);
 }
 
 #[test]
@@ -171,7 +172,7 @@ fn a_thermal_state_s_temperature_over_a_trap_period_is_its_temperature_with_smal
     let trap=initial.traps[0];
     let settings=|average:bool|Settings::new(0.25,&trap,f64::EPSILON,average);
     let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
-    let run=|average:bool|summarize(&simulate(&model,&settings(average),&initial,5,0,1024,1,40,21,&[]).groups,&scales);
+    let run=|average:bool|summarize(&simulate(&model,&settings(average),&initial,5,0,1024,1,40,21,&[],None).groups,&scales,&[]);
     let(at,over)=(run(false),run(true));let mut ratio=0.;
     for i in 1..at.len(){for a in 0..3{
         let(x,y)=(&at[i],&over[i]);
@@ -195,4 +196,66 @@ fn a_solve_starts_from_the_request_s_initial_state(){
     for i in 0..STATES{assert_eq!(s.populations[0][i],r.initial_density[i*STATES+i].re);}
     for e in &s.temperature_errors_uk[1..]{for a in 0..3{assert!(e[a]>0.);}}
     for(t,e)in s.temperature_total_uk.iter().zip(&s.temperature_total_errors_uk).skip(1){assert!(*t>0.&&*e>0.);}
+}
+
+/// The harmonic control's mean (control.rs) against the initial states' own: its value from 4096
+/// drawn initial states at outputs over a trap period, within four standard errors of its exact mean.
+#[test]
+fn the_harmonic_control_s_mean_is_exact(){
+    let r=request(&|_|true);let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();let trap=initial.traps[0];
+    let settings=Settings::new(0.25,&trap,f64::EPSILON,true);let(steps,outputs)=(8,41);
+    let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
+    let starts:Vec<([f64;3],[f64;3])>=(0..4096).map(|i|{let t=initial_trajectory(&model,&settings,&initial,11,i,Stratum::single(i));(t.r,t.kappa)}).collect();
+    for i in (0..outputs).step_by(5){for a in 0..3{
+        let v:Vec<f64>=starts.iter().map(|&(r0,k0)|harmonic.value(i,r0,k0)[a]).collect();let n=v.len() as f64;
+        let m=v.iter().sum::<f64>()/n;let se=(v.iter().map(|x|(x-m).powi(2)).sum::<f64>()/(n-1.)/n).sqrt();
+        assert!((m-harmonic.mean[i][a]).abs()<=4.*se,"output {i} axis {a}: {m} ± {se} against {}",harmonic.mean[i][a]);
+    }}
+}
+
+/// The held twin's exact means (control.rs: the engine's generator and jumps at its point, by the
+/// superoperator's exponential) against the dense front end's master equation at the same point
+/// (ground.rs `local_at`, RK4), from the initial state over 20 us: within the tables' accuracy.
+#[test]
+fn the_held_twin_s_master_equation_is_the_front_end_s(){
+    let r=request(&|_|true);let model=Model::new(&r).unwrap();let g=&model.ground;
+    let twin=Twin::new(&model,0.9).expect("a static generator");let point=twin.held.point.r;
+    let(interval,outputs)=(1.,21);let means=twin.means(&model,&r.initial_density,interval,outputs);
+    let e=g.eliminate(&model.hamiltonian_at_point(point)).unwrap();
+    let locals:Vec<_>=(0..g.clusters.len()).map(|k|g.local_at(&e,k,point,0.).unwrap()).collect();
+    let mut rho:Vec<atom_motion_3d::linear::Dense>=g.clusters.iter().map(|c|{let n=c.states.len();atom_motion_3d::linear::Dense::from_fn(n,n,|i,j|if i==j{let s=g.ground_states[c.states[i]];r.initial_density[s*STATES+s]}else{Complex::ZERO})}).collect();
+    let derivative=|rho:&[atom_motion_3d::linear::Dense]|->Vec<atom_motion_3d::linear::Dense>{
+        let mut out:Vec<_>=rho.iter().zip(&locals).map(|(p,x)|{let h=&x.effective;let mut d=h.product(p).scaled(Complex::new(0.,-1.));d.add_scaled(Complex::new(0.,1.),&p.product(&h.adjoint()));d}).collect();
+        for(k,x)in locals.iter().enumerate(){for(class,jumps)in g.clusters[k].classes.iter().zip(&x.jumps){for j in jumps{out[class.target].add_scaled(Complex::ONE,&j.product(&rho[k]).product(&j.adjoint()));}}}
+        out
+    };
+    let h=0.002;let mut worst=0_f64;
+    for i in 1..outputs{
+        for _ in 0..(interval/h).round() as usize{
+            let add=|a:&[atom_motion_3d::linear::Dense],b:&[atom_motion_3d::linear::Dense],s:f64|->Vec<atom_motion_3d::linear::Dense>{a.iter().zip(b).map(|(x,y)|{let mut z=x.clone();z.add_scaled(Complex::new(s,0.),y);z}).collect()};
+            let k1=derivative(&rho);let k2=derivative(&add(&rho,&k1,h/2.));let k3=derivative(&add(&rho,&k2,h/2.));let k4=derivative(&add(&rho,&k3,h));
+            for(j,x)in rho.iter_mut().enumerate(){for(k,w)in [(&k1,1.),(&k2,2.),(&k3,2.),(&k4,1.)]{x.add_scaled(Complex::new(h*w/6.,0.),&k[j]);}}
+        }
+        let mut p=[0.;STATES];for(k,x)in locals.iter().enumerate(){for(a,b)in p.iter_mut().zip(g.populations(k,x,&rho[k])){*a+=b;}}
+        worst=worst.max((0..STATES).map(|s|(p[s]-means[i][s]).abs()).fold(0.,f64::max));
+    }
+    assert!(worst<=2e-3,"largest |Δp| {worst:.2e}");
+}
+
+/// The held engine (engine.rs `Held`: the twin's generator and jumps computed once, control.rs)
+/// follows the plain engine's atom held at the same point: from the same initial state and streams,
+/// the same jumps and the same internal state over 2000 steps.
+#[test]
+fn the_held_engine_is_the_plain_engine_at_rest(){
+    let r=request(&|_|true);let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();let trap=initial.traps[0];
+    let twin=Twin::new(&model,0.9).expect("a static generator");
+    let mut settings=Settings::new(0.2,&trap,f64::EPSILON,false);settings.free=[false;3];settings.loss=false;
+    let(plain,held)=(Engine::new(&model,settings.clone()),Engine::held(&model,&settings,&twin.held));
+    for index in 0..8{
+        let mut a=initial_trajectory(&model,&settings,&initial,13,index,Stratum::single(index));a.r=twin.held.point.r;a.kappa=[0.;3];let mut b=a.clone();
+        for _ in 0..2000{plain.step(&mut a);held.step(&mut b);}
+        assert_eq!((a.jumps,a.cluster),(b.jumps,b.cluster),"trajectory {index}");
+        let n=model.dimension(a.cluster);let(na,nb):(f64,f64)=(a.psi[..n].iter().map(|z|z.norm_sqr()).sum(),b.psi[..n].iter().map(|z|z.norm_sqr()).sum());
+        for i in 0..n{assert!((a.psi[i].norm_sqr()/na-b.psi[i].norm_sqr()/nb).abs()<1e-9,"trajectory {index} state {i}");}
+    }
 }

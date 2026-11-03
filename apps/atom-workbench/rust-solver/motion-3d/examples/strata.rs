@@ -21,8 +21,8 @@ fn main(){
         // The standard error per axis at each output, averaged over seeds as a variance.
         let seeds=4;let mut variance=vec![[0.;3];outputs];
         for seed in 0..seeds{
-            let outcome=simulate(&model,&settings(average),&initial,100+seed,0,count,group,steps,outputs,&[]);
-            for(v,e)in variance.iter_mut().zip(summarize(&outcome.groups,&scales)){for a in 0..3{v[a]+=(e.temperature_error[a]/e.temperature[a]).powi(2)/seeds as f64;}}
+            let outcome=simulate(&model,&settings(average),&initial,100+seed,0,count,group,steps,outputs,&[],None);
+            for(v,e)in variance.iter_mut().zip(summarize(&outcome.groups,&scales,&[])){for a in 0..3{v[a]+=(e.temperature_error[a]/e.temperature[a]).powi(2)/seeds as f64;}}
         }
         let at=|i:usize|format!("t {:4.0}: {}",i as f64*interval,(0..3).map(|a|format!("{:.2}%",100.*variance[i][a].sqrt())).collect::<Vec<_>>().join(" "));
         println!("{name} groups of {group:2}{}: relative SE of T (x y z) {} | {} | {} | {}",if average{", over a period"}else{",   at the time"},at(0),at(outputs/4),at(outputs/2),at(outputs-1));

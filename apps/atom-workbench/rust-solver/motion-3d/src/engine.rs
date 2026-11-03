@@ -47,8 +47,15 @@
 //! # Randomness
 //! Every jump draws from its own counter-based stream (rng.rs: the run's seed, the trajectory, the
 //! jump's number), so runs that differ only in the time step make the same choices: the
-//! step-doubling check compares them.
-use crate::model::{Exact,Local,Model,MOST_STATES};
+//! step-doubling check compares them. A jump draws its class, the next threshold, the polarization
+//! and the absorbed beam first and the direction's rejection loop last, so that a trajectory's twin
+//! on the same streams (control.rs) keeps its thresholds and choices whatever its loop takes.
+//!
+//! # A held atom
+//! A held twin (control.rs) does not move and its generator is static: its engine (`Engine::held`)
+//! takes every cluster's generator and jump operators at its point once, steps by the half step's
+//! propagators, and draws a jump's direction and polarization without the kicks.
+use crate::model::{Exact,Local,Model,Point,MOST_STATES};
 use crate::rng::{Purpose,Rng};
 use crate::Complex;
 
@@ -161,10 +168,24 @@ pub fn dipole_direction(rng:&mut Rng,gram:&[[Complex;3];3])->[f64;3]{
 /// The stream of a trajectory's jump number `jump` (the initial threshold is jump 0's).
 pub fn jump_stream(seed:u64,index:u64,jump:u64)->Rng{Rng::new(seed,Purpose::Jump,index,jump)}
 
-/// The engine: a model and its settings.
-pub struct Engine<'a>{pub model:&'a Model,pub settings:Settings}
+/// An atom held at a point (control.rs `Twin`), its generator static there: every cluster's H_eff
+/// and, per class and photon axis, its jump operator L (target × cluster, row-major), computed once.
+pub struct Held{pub point:Point,pub locals:Vec<Local>,pub jumps:Vec<Vec<[Vec<Complex>;3]>>}
+
+/// The engine: a model and its settings; for a held atom its generator and jumps there, and each
+/// cluster's propagator exp(−i H dt/2) over half the settings' step.
+pub struct Engine<'a>{pub model:&'a Model,pub settings:Settings,held:Option<(&'a Held,Vec<[Complex;MOST_STATES*MOST_STATES]>)>}
 
 impl<'a> Engine<'a>{
+    pub fn new(model:&'a Model,settings:Settings)->Engine<'a>{Engine{model,settings,held:None}}
+    /// The engine of an atom held at a point: no axis free, no loss, the held generator and jumps;
+    /// the half step's propagators by the exponentials' own series on the basis states.
+    pub fn held(model:&'a Model,settings:&Settings,held:&'a Held)->Engine<'a>{
+        let mut s=settings.clone();s.free=[false;3];s.loss=false;
+        let half=held.locals.iter().enumerate().map(|(k,local)|{let n=model.dimension(k);let mut u=[Complex::ZERO;MOST_STATES*MOST_STATES];
+            for j in 0..n{let mut e=[Complex::ZERO;MOST_STATES];e[j]=Complex::ONE;propagate(&local.hamiltonian,n,0.5*s.dt,&mut e,s.truncation);for i in 0..n{u[i*n+j]=e[i];}}u}).collect();
+        Engine{model,settings:s,held:Some((held,half))}
+    }
     /// The trap's harmonic flow for τ: along its principal axes when every lab axis is free, else
     /// along the free lab axes.
     fn flow(&self,t:&mut Trajectory,tau:f64){
@@ -188,6 +209,15 @@ impl<'a> Engine<'a>{
     /// and the kick's momentum (the light's and the trap's anharmonic part).
     fn advance(&self,t:&mut Trajectory,dt:f64)->(f64,f64,f64,[Complex;MOST_STATES],Local,crate::model::Point,[f64;3]){
         let(m,s)=(self.model,&self.settings);
+        if let Some((h,half))=&self.held{
+            // Held: the internal state alone, by the generator there -- a whole step by the half
+            // step's propagator, a step's part by the series.
+            let n=m.dimension(t.cluster);let local=&h.locals[t.cluster];let psi0=t.psi;let n0=norm2(&t.psi,n);let mut psi=t.psi;
+            let half_step=|psi:&mut [Complex;MOST_STATES]|if dt==s.dt{let u=&half[t.cluster];let v=*psi;for i in 0..n{let mut z=Complex::ZERO;for j in 0..n{z+=u[i*n+j]*v[j];}psi[i]=z;}}
+                else{propagate(&local.hamiltonian,n,0.5*dt,psi,s.truncation);};
+            half_step(&mut psi);let nh=norm2(&psi,n);half_step(&mut psi);let n1=norm2(&psi,n);
+            t.psi=psi;t.time+=dt;return(n0,nh,n1,psi0,*local,h.point,[0.;3]);
+        }
         self.flow(t,0.5*dt);
         let point=m.point(t.r,t.kappa);
         let n=m.dimension(t.cluster);let local=m.local(t.cluster,&point,t.time+0.5*dt);
@@ -259,40 +289,51 @@ impl<'a> Engine<'a>{
     /// response when `exact`.
     pub fn jump(&self,t:&mut Trajectory,r:[f64;3],time:f64,exact:bool){
         let m=self.model;let s=&self.settings;t.jumps+=1;let mut rng=jump_stream(t.seed,t.index,t.jumps);
-        let point=m.point(r,t.kappa);let n=m.dimension(t.cluster);let norm=norm2(&t.psi,n).sqrt();
+        let n=m.dimension(t.cluster);let norm=norm2(&t.psi,n).sqrt();
         let mut psi=t.psi;for z in psi[..n].iter_mut(){*z=*z*(1./norm);}
-        let responses=if exact{Exact::new(m,r,t.kappa).ok()}else{None};
-        let photons=m.photons(t.cluster,&point,&psi,time,responses);
         let classes=&m.ground.clusters[t.cluster].classes;
+        // Each class's amplitudes u_x = L_{φ,x} ψ: from the photons at the point, or a held atom's
+        // jump operators; the photons kept for the kicks of a moving one.
+        let photons=self.held.is_none().then(||{let point=m.point(r,t.kappa);let responses=if exact{Exact::new(m,r,t.kappa).ok()}else{None};m.photons(t.cluster,&point,&psi,time,responses)});
+        let held:Vec<[[Complex;MOST_STATES];3]>=self.held.as_ref().map_or(vec![],|(h,_)|h.jumps[t.cluster].iter().zip(classes).map(|(l,c)|{let nt=m.dimension(c.target);
+            std::array::from_fn(|x|{let mut u=[Complex::ZERO;MOST_STATES];for i in 0..nt{for j in 0..n{u[i]+=l[x][i*n+j]*psi[j];}}u})}).collect());
+        let amplitude=photons.as_ref().map_or(&held,|p|&p.amplitude);
         // The class, and the cluster it lands the atom in.
-        let weights:Vec<f64>=classes.iter().zip(&photons.amplitude).map(|(c,u)|{let nt=m.dimension(c.target);(0..3).map(|a|norm2(&u[a],nt)).sum()}).collect();
+        let weights:Vec<f64>=classes.iter().zip(amplitude).map(|(c,u)|{let nt=m.dimension(c.target);(0..3).map(|a|norm2(&u[a],nt)).sum()}).collect();
         let total:f64=weights.iter().sum();
         if !(total>0.){t.threshold=rng.open_uniform();return;}
-        let mut x=rng.uniform()*total;let mut pick=weights.len()-1;
+        // The draws the state and the kicks depend on first -- the class, the next threshold, the
+        // polarization, the absorbed beam --, the direction's rejection loop after them: a twin
+        // trajectory on the same stream (control.rs) keeps its thresholds and choices whatever its
+        // loop takes.
+        let(mut x,threshold,polarization,absorbed)=(rng.uniform()*total,rng.open_uniform(),rng.uniform(),rng.uniform());let mut pick=weights.len()-1;
         for(i,&w)in weights.iter().enumerate(){if x<w{pick=i;break;}x-=w;}
-        let class=&classes[pick];let nt=m.dimension(class.target);let(u,du)=(&photons.amplitude[pick],photons.gradient(pick));
+        let class=&classes[pick];let nt=m.dimension(class.target);let u=&amplitude[pick];
         let gram:[[Complex;3];3]=std::array::from_fn(|a|std::array::from_fn(|b|(0..nt).fold(Complex::ZERO,|acc,i|acc+u[a][i].conj()*u[b][i])));
         let direction=dipole_direction(&mut rng,&gram);
         // The polarization across it.
         let pair=across(direction);
         let combine=|v:&[[Complex;MOST_STATES];3],e:&[f64;3]|->[Complex;MOST_STATES]{let mut out=[Complex::ZERO;MOST_STATES];for i in 0..nt{for a in 0..3{out[i]+=v[a][i]*e[a];}}out};
         let amplitudes=pair.map(|e|combine(u,&e));let weights=amplitudes.map(|v|norm2(&v,nt));
-        let chosen=if rng.uniform()*(weights[0]+weights[1])<weights[0]{0}else{1};let e=pair[chosen];
+        let chosen=if polarization*(weights[0]+weights[1])<weights[0]{0}else{1};let e=pair[chosen];
         let f=amplitudes[chosen];let size=weights[chosen];
-        // The recoils: the photon's, the absorbed beam's and the exact conditional mean's correction.
-        let k=class.wave_number;let mut kick=direction.map(|x|-k*x);
-        let mean:[f64;3]=std::array::from_fn(|x|{let mut s=0.;for i in 0..nt{let mut g=Complex::ZERO;for a in 0..3{g+=du[a][x][i]*e[a];}s+=(f[i].conj()*g).im;}s/size});
-        let shares:Vec<(usize,f64)>=photons.shares(pick).iter().map(|(l,v)|(*l,norm2(&combine(v,&e),nt))).collect();
-        let sum:f64=shares.iter().map(|x|x.1).sum();
-        if sum>0.{
-            let mut x=rng.uniform()*sum;let mut l=shares[shares.len()-1].0;
-            for &(beam,w)in &shares{if x<w{l=beam;break;}x-=w;}
-            let drawn=m.geometry[l].wave_vector();
-            let average:[f64;3]=std::array::from_fn(|a|shares.iter().map(|&(beam,w)|w*m.geometry[beam].wave_vector()[a]).sum::<f64>()/sum);
-            for a in 0..3{kick[a]+=drawn[a]+mean[a]-average[a];}
-        }else{for a in 0..3{kick[a]+=mean[a];}}
-        for a in 0..3{if s.free[a]{t.kappa[a]+=kick[a];}}
+        // The recoils of a moving atom: the photon's, the absorbed beam's and the exact conditional
+        // mean's correction.
+        if let Some(photons)=&photons{
+            let du=photons.gradient(pick);let k=class.wave_number;let mut kick=direction.map(|x|-k*x);
+            let mean:[f64;3]=std::array::from_fn(|x|{let mut s=0.;for i in 0..nt{let mut g=Complex::ZERO;for a in 0..3{g+=du[a][x][i]*e[a];}s+=(f[i].conj()*g).im;}s/size});
+            let shares:Vec<(usize,f64)>=photons.shares(pick).iter().map(|(l,v)|(*l,norm2(&combine(v,&e),nt))).collect();
+            let sum:f64=shares.iter().map(|x|x.1).sum();
+            if sum>0.{
+                let mut x=absorbed*sum;let mut l=shares[shares.len()-1].0;
+                for &(beam,w)in &shares{if x<w{l=beam;break;}x-=w;}
+                let drawn=m.geometry[l].wave_vector();
+                let average:[f64;3]=std::array::from_fn(|a|shares.iter().map(|&(beam,w)|w*m.geometry[beam].wave_vector()[a]).sum::<f64>()/sum);
+                for a in 0..3{kick[a]+=drawn[a]+mean[a]-average[a];}
+            }else{for a in 0..3{kick[a]+=mean[a];}}
+            for a in 0..3{if s.free[a]{t.kappa[a]+=kick[a];}}
+        }
         let mut next=[Complex::ZERO;MOST_STATES];for i in 0..nt{next[i]=f[i]*(1./size.sqrt());}
-        t.cluster=class.target;t.psi=next;t.threshold=rng.open_uniform();
+        t.cluster=class.target;t.psi=next;t.threshold=threshold;
     }
 }

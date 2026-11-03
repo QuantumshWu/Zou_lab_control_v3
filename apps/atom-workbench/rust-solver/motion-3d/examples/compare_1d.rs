@@ -36,9 +36,9 @@ fn main(){
     println!("trap {:?} kHz",frequencies.map(|f|f/std::f64::consts::TAU*1e3));
     let interval=10.;let steps=(interval/dt).round() as usize;let outputs=(t_end/interval).round() as usize+1;
     let run=std::time::Instant::now();
-    let outcome=simulate(&model,&settings,&initial,seed,0,count,group,steps,outputs,&[outputs-1]);
+    let outcome=simulate(&model,&settings,&initial,seed,0,count,group,steps,outputs,&[outputs-1],None);
     let wall=run.elapsed().as_secs_f64();
-    let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies});
+    let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies},&[]);
     let labels=["ground-1--1","ground-1-0","ground-1-1","ground-2--2","ground-2--1","ground-2-0","ground-2-1","ground-2-2"];
     let ground_index:Vec<usize>=labels.iter().map(|l|request.states.iter().position(|s|s==l).unwrap()).collect();
     let report_every=((t_end/10.)/interval).round().max(1.) as usize;

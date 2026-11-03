@@ -52,7 +52,7 @@ fn main(){
     let mut settings=Settings::new(interval/engine_steps as f64,&trap,f64::EPSILON,false);settings.free=[false;3];settings.loss=false;
     let clock=Instant::now();
     let outcome=simulate_from(&model,&settings,&initial,7,0,count,8,engine_steps,outputs,&[],r);
-    let est=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:[1.;3]});
+    let est=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:[1.;3]},&[]);
     println!("engine: {count} trajectories, {:.1} s, {} jumps",clock.elapsed().as_secs_f64(),outcome.jumps);
     let level=|p:&[f64],f:&str|request.states.iter().enumerate().filter(|(_,s)|s.starts_with(f)).map(|(i,_)|p[i]).sum::<f64>();
     let mut worst=0_f64;

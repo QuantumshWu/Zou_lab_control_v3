@@ -37,9 +37,9 @@ fn main(){
     let clock=std::time::Instant::now();
     // (r, κ) of every held atom at every tenth output: the mechanical energy.
     let listed:Vec<usize>=(0..outputs).step_by((outputs/10).max(1)).collect();
-    let outcome=simulate(&model,&settings,&initial,7,0,count,8,steps,outputs,&listed);
+    let outcome=simulate(&model,&settings,&initial,7,0,count,8,steps,outputs,&listed,None);
     let wall=clock.elapsed().as_secs_f64();
-    let e=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies});
+    let e=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies},&[]);
     let lab=["y","z","x"];
     let every=(outputs/10).max(1);
     for(i,x)in e.iter().enumerate().step_by(every){
