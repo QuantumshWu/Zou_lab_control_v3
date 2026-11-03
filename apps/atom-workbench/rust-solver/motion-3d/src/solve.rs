@@ -718,6 +718,24 @@ fn carried(from:&Model,to:&Model,t:&Trajectory)->Trajectory{
 /// trajectories it rests on --, in whole `unit`s (groups on the CPU, waves on the GPU).
 fn next_batch(needed:u64,done:u64,width:u64,unit:u64)->u64{needed.saturating_sub(done).clamp(width,done.max(width)).div_ceil(unit)*unit}
 
+/// The targets that bind a solve: the populations and the loss at every output; T only at the outputs
+/// in the method's regime (k_B T ≥ CLASSICAL ħω on every axis, as `classical`), outside which T is a
+/// reference only (仅供参考). Here from a pilot's states at the outputs: T binds where some output's
+/// states, their T per axis m⟨δv²⟩/k_B = ħ²⟨δκ²⟩/m, lie in the regime.
+#[derive(Clone,Copy,Debug)]
+pub struct Binding{pub temperature:bool}
+impl Binding{
+    pub fn of(states:&[Trajectory],hbar_over_mass:f64,frequencies:[f64;3])->Binding{
+        let mut times:Vec<f64>=states.iter().map(|t|t.time).collect();times.sort_by(f64::total_cmp);times.dedup();
+        let temperature=times.iter().any(|&time|{
+            let at:Vec<&Trajectory>=states.iter().filter(|t|t.time==time).collect();let n=at.len() as f64;
+            n>1.&&(0..3).all(|a|{let mean=at.iter().map(|t|t.kappa[a]).sum::<f64>()/n;
+                let variance=at.iter().map(|t|(t.kappa[a]-mean).powi(2)).sum::<f64>()/(n-1.);hbar_over_mass*variance>=CLASSICAL*frequencies[a]})
+        });
+        Binding{temperature}
+    }
+}
+
 /// A checked step (module documentation): its steps per interval and its ratios to the shares -- the
 /// population criterion's (its bound's, or where measured the upper confidence bound of its measured
 /// error) and the motion's (the impulse's and the friction's larger); 1 meets each.
