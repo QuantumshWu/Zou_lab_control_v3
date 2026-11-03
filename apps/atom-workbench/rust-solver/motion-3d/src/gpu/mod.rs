@@ -26,10 +26,10 @@ pub mod driver;
 pub mod program;
 pub mod ptx;
 
-use crate::engine::{Settings,Trajectory};
+use crate::engine::{propagate,Settings,Trajectory};
 use crate::model::Model;
 use crate::stats::{Group,Sums};
-use crate::{initial_trajectory,Complex,Initial,Outcome,Stratum,STATES,TASK};
+use crate::{initial_trajectory,Complex,Initial,Outcome,Stratum,Variates,STATES,TASK};
 use driver::{Buffer,Context,DeviceInfo,Function,Module,Stream};
 use program::{Program,MAXN,MOST_LISTED};
 use rayon::prelude::*;
@@ -51,9 +51,14 @@ pub const STARTING:&str="GPU 正在首次准备（驱动编译内核，新版本
 /// windows' held flag and means) and the most intervals of a launch (its MOST_INTERVALS: the room of
 /// each trajectory's records, which the block sums at the launch's end).
 pub(crate) const WARPS:usize=TASK as usize;
-pub(crate) const RECORD:usize=47;
-pub(crate) const SLOT_RECORD:usize=35+30;
+pub(crate) const RECORD:usize=90;
+pub(crate) const SLOT_RECORD:usize=69+3*2*8;
 pub(crate) const MOST_INTERVALS:usize=64;
+/// Where an output's sums (the kernel's record) keep the held twin's, the motion's and the harmonic
+/// control's (`sums_of`).
+pub(crate) const TWIN:usize=35;
+pub(crate) const MOTION:usize=69;
+pub(crate) const HARMONIC:usize=81;
 /// The profiled kernel's counters per trajectory (its SPANS): the cycles of the point, the generator,
 /// the exponential, the evolution with the kick, the jumps -- of them the exact responses, the
 /// photons' matrices with the classes' weights and the absorbed light --, the loss, the steps, the
@@ -155,9 +160,11 @@ impl Gpu{
 
     /// Trajectories [first, first + count) of the run `seed` (lib.rs `simulate`): `steps` steps of the
     /// settings' dt between `outputs` output times, in groups of `group`, as tasks of at most `TASK`
-    /// trajectories inside a group, (r, κ) kept at `listed`.
-    pub fn simulate(&self,program:&Program,model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize])->Result<Outcome,String>{
+    /// trajectories inside a group, (r, κ) kept at `listed`, with the control variates of `variates`.
+    pub fn simulate(&self,program:&Program,model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],
+        variates:Option<&Variates>)->Result<Outcome,String>{
         self.context.make_current()?;let clock=Instant::now();
+        let controls=Controls::new(&self.stream,model,settings,variates)?;let mut cycles=[0u64;2];
         // The tasks in order: (their group, their first trajectory, the one after their last), as lib.rs `run`.
         let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
         let tasks:Vec<(u64,u64,u64)>=(0..count.div_ceil(group)).flat_map(|g|{let(start,end)=bounds(g);(start..end).step_by(TASK as usize).map(move|s|(g,s,(s+TASK).min(end)))}).collect();
@@ -172,7 +179,8 @@ impl Gpu{
             // The wave's runs of tasks of one group, merged on the device in order (lib.rs `run`).
             let mut runs:Vec<(u64,usize,usize)>=vec![];
             for(i,&(g,_,_))in wave.iter().enumerate(){match runs.last_mut(){Some(r)if r.0==g=>r.2+=1,_=>runs.push((g,i,1))}}
-            let(group_sums,kept,finished)=self.run(program,&windows,seed,&states,&runs.iter().map(|r|[r.1 as i32,r.2 as i32]).collect::<Vec<_>>())?;
+            let(group_sums,kept,finished,costs)=self.run(program,&windows,&controls,seed,&states,&runs.iter().map(|r|[r.1 as i32,r.2 as i32]).collect::<Vec<_>>())?;
+            cycles[0]+=costs[0];cycles[1]+=costs[1];
             for(k,&(g,i,count))in runs.iter().enumerate(){
                 let trajectories=wave[i..i+count].iter().map(|t|t.2-t.1).sum::<u64>() as f64;
                 let sums=Group{sums:(0..outputs).map(|o|sums_of(&group_sums[(k*outputs+o)*RECORD..][..RECORD],trajectories)).collect()};
@@ -186,7 +194,9 @@ impl Gpu{
                 }
             }
         }
-        Ok(Outcome{groups,samples,jumps,doppler,seconds:[clock.elapsed().as_secs_f64(),0.]})
+        // The held twins' share of the time: their cycles in the warps' (lib.rs `Outcome::seconds`).
+        let(wall,share)=(clock.elapsed().as_secs_f64(),if cycles[1]>0{cycles[0] as f64/cycles[1] as f64}else{0.});
+        Ok(Outcome{groups,samples,jumps,doppler,seconds:[wall*(1.-share),wall*share]})
     }
 
     /// The trajectories after `steps` steps of the settings' dt on the GPU (engine.rs `Engine::step`
@@ -198,7 +208,7 @@ impl Gpu{
         let mut plain=settings.clone();plain.average=false;
         let windows=Windows::new(&plain,steps,2,&[])?;
         let states:Vec<Option<program::State>>=trajectories.iter().map(|t|Some(program::State::new(t,settings))).chain(std::iter::repeat(None)).take(trajectories.len().div_ceil(WARPS)*WARPS).collect();
-        let(_,_,finished)=self.run(program,&windows,seed,&states,&[])?;
+        let(_,_,finished,_)=self.run(program,&windows,&Controls::none(),seed,&states,&[])?;
         Ok(trajectories.iter().zip(&finished).map(|(t,s)|s.trajectory(settings,t.seed)).collect())
     }
 
@@ -210,19 +220,20 @@ impl Gpu{
     }
     /// One wave: blocks of `WARPS` slots (None: no trajectory), every output interval in launches of
     /// about LAUNCH_MS -- the first a few steps, the next ones sized by the last's pace. The sums per
-    /// output of each run of tasks ([first task, tasks]), the samples kept per slot and the slots'
-    /// final states.
-    fn run(&self,program:&Program,w:&Windows,seed:u64,slots:&[Option<program::State>],runs:&[[i32;2]])->Result<(Vec<f64>,Vec<f64>,Vec<program::State>),String>{
+    /// output of each run of tasks ([first task, tasks]), the samples kept per slot, the slots' final
+    /// states, and the held twins' cycles and all the warps'.
+    fn run(&self,program:&Program,w:&Windows,controls:&Controls,seed:u64,slots:&[Option<program::State>],runs:&[[i32;2]])->Result<(Vec<f64>,Vec<f64>,Vec<program::State>,[u64;2]),String>{
         let n=slots.len()/WARPS;
         let states:Vec<program::State>=slots.iter().map(|s|s.unwrap_or_default()).collect();
         let tasks:Vec<i32>=(0..n).flat_map(|i|{let count=slots[WARPS*i..][..WARPS].iter().filter(|s|s.is_some()).count();[0,count as i32,(WARPS*i) as i32]}).collect();
         let state_buffer=Buffer::with(&self.stream,&states)?;let task_buffer=Buffer::with(&self.stream,&tasks)?;
         let rings=Buffer::new(8*w.ring_stride*WARPS*n)?;let samples=Buffer::new(56*w.listed.len().max(1)*WARPS*n)?;
         let sums=Buffer::new(8*w.outputs*RECORD*n)?;let scratch=Buffer::new(8*program.scratch()*WARPS*n)?;let records=Buffer::new(8*MOST_INTERVALS*SLOT_RECORD*WARPS*n)?;
-        let profile=Buffer::new(if self.profiled.is_some(){8*SPANS.len()*WARPS*n}else{0})?;
-        self.stream.zero(&rings)?;self.stream.zero(&samples)?;self.stream.zero(&sums)?;self.stream.zero(&profile)?;
+        let profile=Buffer::new(if self.profiled.is_some(){8*SPANS.len()*WARPS*n}else{0})?;let costs=Buffer::new(16*WARPS*n)?;
+        self.stream.zero(&rings)?;self.stream.zero(&samples)?;self.stream.zero(&sums)?;self.stream.zero(&profile)?;self.stream.zero(&costs)?;
         let mut run=program::Run{states:state_buffer.pointer,rings:rings.pointer,samples:samples.pointer,sums:sums.pointer,scratch:scratch.pointer,tasks:task_buffer.pointer,
             profile:if self.profiled.is_some(){profile.pointer}else{0},records:records.pointer,
+            harmonic:controls.harmonic.as_ref().map_or(0,|b|b.pointer),costs:costs.pointer,held:controls.held,
             seed,outputs:w.outputs as i32,steps:w.steps as i32,reach:w.reach as i32,begin:0,end:0,half:w.half.map(|h|h as i32),ring:w.ring.map(|l|l as i32),
             ring_at:w.ring_at.map(|x|x as i32),ring_stride:w.ring_stride as i32,scratch_stride:program.scratch() as i32,nlisted:w.listed.len() as i32,pad:0,listed:[0;MOST_LISTED]};
         for(k,&l)in w.listed.iter().enumerate(){run.listed[k]=l as i32;}
@@ -243,11 +254,13 @@ impl Gpu{
         }
         let mut kept=vec![0f64;7*w.listed.len()*WARPS*n];self.stream.download(&samples,&mut kept)?;
         let mut finished=vec![program::State::default();WARPS*n];self.stream.download(&state_buffer,&mut finished)?;
+        let mut cycles=vec![0u64;2*WARPS*n];self.stream.download(&costs,&mut cycles)?;
+        let costs=cycles.chunks_exact(2).fold([0u64;2],|s,c|[s[0]+c[0],s[1]+c[1]]);
         if let Some(spans)=&self.profiled{
             let mut counters=vec![0u64;SPANS.len()*WARPS*n];self.stream.download(&profile,&mut counters)?;
             let mut spans=spans.lock().unwrap_or_else(|e|e.into_inner());for(i,c)in counters.iter().enumerate(){spans[i%SPANS.len()]+=c;}
         }
-        Ok((merged,kept,finished))
+        Ok((merged,kept,finished,costs))
     }
 }
 
@@ -264,13 +277,45 @@ impl Windows{
     }
 }
 
-/// An output's sums of a task (the kernel's record: held, profile, doppler, the populations and the
-/// motion's means per axis) as stats.rs `Sums`.
+/// An output's sums of a task (the kernel's record: held, profile, doppler, the populations, the held
+/// twin's, the motion's means and the harmonic control's per axis) as stats.rs `Sums`.
 fn sums_of(x:&[f64],trajectories:f64)->Sums{
     let mut s=Sums::zero();s.trajectories=trajectories;s.held=x[0];s.profile=x[1];s.doppler=x[2];
-    s.populations.copy_from_slice(&x[3..3+STATES]);
-    for a in 0..3{let m=&x[3+STATES+4*a..][..4];s.kappa[a]=m[0];s.kappa2[a]=m[1];s.position[a]=m[2];s.position2[a]=m[3];}
+    s.populations.copy_from_slice(&x[3..3+STATES]);s.twin.copy_from_slice(&x[TWIN..TWIN+STATES]);s.twin2=[x[TWIN+STATES],x[TWIN+STATES+1]];
+    for a in 0..3{
+        let m=&x[MOTION+4*a..][..4];s.kappa[a]=m[0];s.kappa2[a]=m[1];s.position[a]=m[2];s.position2[a]=m[3];
+        let h=&x[HARMONIC+3*a..][..3];s.harmonic[a]=[h[0],h[1],h[2]];
+    }
     s
+}
+
+/// A batch's control variates on the device (lib.rs `Variates`): the harmonic control's A and B per
+/// output and lab axis, and the held twin's half step's propagators -- engine.rs `Engine::held`'s,
+/// by the same series --, generators, jump operators and populations' readouts.
+struct Controls{harmonic:Option<Buffer>,held:program::Held,_buffers:Vec<Buffer>}
+impl Controls{
+    fn none()->Controls{Controls{harmonic:None,held:program::Held::default(),_buffers:vec![]}}
+    fn new(stream:&Stream,model:&Model,settings:&Settings,variates:Option<&Variates>)->Result<Controls,String>{
+        let Some(v)=variates else{return Ok(Controls::none())};
+        let c32=|z:Complex|[z.re as f32,z.im as f32];
+        let tables:Vec<f64>=v.harmonic.a.iter().zip(&v.harmonic.b).flat_map(|(a,b)|(0..3).flat_map(move|x|a[x].iter().chain(&b[x]).flatten().copied())).collect();
+        let mut out=Controls{harmonic:Some(Buffer::with(stream,&tables)?),held:program::Held::default(),_buffers:vec![]};
+        let Some(twin)=v.twin else{return Ok(out)};
+        let(mut u,mut h,mut readout,mut blocks)=(vec![],vec![],vec![],vec![]);
+        for(k,local)in twin.held.locals.iter().enumerate(){
+            let n=model.dimension(k);blocks.push(u.len() as i32);
+            let mut half=vec![[0f32;2];n*n];
+            for j in 0..n{let mut e=[Complex::ZERO;MAXN];e[j]=Complex::ONE;propagate(&local.hamiltonian,n,0.5*settings.dt,&mut e,settings.truncation);for i in 0..n{half[i*n+j]=c32(e[i]);}}
+            u.extend(half);h.extend(local.hamiltonian[..n*n].iter().map(|&z|c32(z)));
+            readout.extend(twin.readout[k].iter().flat_map(|e|e.iter().map(|&x|x as f32)));
+        }
+        let(mut l,mut jumps)=(vec![],vec![]);
+        for cluster in &twin.held.jumps{for class in cluster{jumps.push(l.len() as i32);for x in class{l.extend(x.iter().map(|&z|c32(z)));}}}
+        let mut put=|buffer:Buffer|{let p=buffer.pointer;out._buffers.push(buffer);p};
+        out.held=program::Held{u:put(Buffer::with(stream,&u)?),h:put(Buffer::with(stream,&h)?),l:put(Buffer::with(stream,&l)?),readout:put(Buffer::with(stream,&readout)?),
+            blocks:put(Buffer::with(stream,&blocks)?),jumps:put(Buffer::with(stream,&jumps)?)};
+        Ok(out)
+    }
 }
 
 impl program::State{
@@ -278,9 +323,11 @@ impl program::State{
     fn new(t:&crate::engine::Trajectory,settings:&Settings)->program::State{
         let along=|v:[f64;3]|->[f64;3]{std::array::from_fn(|i|settings.axes[i][0]*v[0]+settings.axes[i][1]*v[1]+settings.axes[i][2]*v[2])};
         let norm:f64=t.psi.iter().map(|z|z.norm_sqr()).sum();let scale=1./norm.sqrt();
+        let psi=std::array::from_fn(|x|[(t.psi[x].re*scale) as f32,(t.psi[x].im*scale) as f32]);
         program::State{q:along(t.r),p:along(t.kappa),time:t.time,logn:norm.ln(),threshold:t.threshold,log_threshold:t.threshold.ln(),prefix:[0.;15],
-            psi:std::array::from_fn(|x|[(t.psi[x].re*scale) as f32,(t.psi[x].im*scale) as f32]),doppler:t.doppler as f32,cluster:t.cluster as i32,jumps:t.jumps as i32,
-            death:if t.alive{-1}else{0},index:t.index as u32,pad:0}
+            q0:along(t.r),p0:along(t.kappa),twin_logn:norm.ln(),twin_threshold:t.threshold,twin_log_threshold:t.threshold.ln(),
+            psi,twin:psi,doppler:t.doppler as f32,cluster:t.cluster as i32,jumps:t.jumps as i32,death:if t.alive{-1}else{0},
+            index:t.index as u32,twin_cluster:t.cluster as i32,twin_jumps:t.jumps as i32,pad:0}
     }
     /// The trajectory of a state: on the lab axes, ψ with its norm e^{ln‖ψ‖²/2} as the CPU keeps it.
     fn trajectory(&self,settings:&Settings,seed:u64)->Trajectory{

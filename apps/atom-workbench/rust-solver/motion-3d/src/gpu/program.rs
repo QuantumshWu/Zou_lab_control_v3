@@ -56,13 +56,18 @@ pub struct Params{
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct State{
     pub(crate) q:[f64;3],pub(crate) p:[f64;3],pub(crate) time:f64,pub(crate) logn:f64,pub(crate) threshold:f64,pub(crate) log_threshold:f64,pub(crate) prefix:[f64;15],
-    pub(crate) psi:[[f32;2];MAXN],pub(crate) doppler:f32,pub(crate) cluster:i32,pub(crate) jumps:i32,pub(crate) death:i32,pub(crate) index:u32,pub(crate) pad:i32,
+    pub(crate) q0:[f64;3],pub(crate) p0:[f64;3],pub(crate) twin_logn:f64,pub(crate) twin_threshold:f64,pub(crate) twin_log_threshold:f64,
+    pub(crate) psi:[[f32;2];MAXN],pub(crate) twin:[[f32;2];MAXN],pub(crate) doppler:f32,pub(crate) cluster:i32,pub(crate) jumps:i32,pub(crate) death:i32,
+    pub(crate) index:u32,pub(crate) twin_cluster:i32,pub(crate) twin_jumps:i32,pub(crate) pad:i32,
 }
+/// The kernel's `Held`: the held twin's device data (all zero: no twin).
+#[repr(C)]#[derive(Clone,Copy,Default,Debug)]
+pub struct Held{pub(crate) u:u64,pub(crate) h:u64,pub(crate) l:u64,pub(crate) readout:u64,pub(crate) blocks:u64,pub(crate) jumps:u64}
 /// The kernel's `Run`: a launch's wave and output intervals.
 #[repr(C)]#[derive(Clone,Copy,Debug)]
 pub struct Run{
     pub(crate) states:u64,pub(crate) rings:u64,pub(crate) samples:u64,pub(crate) sums:u64,pub(crate) scratch:u64,pub(crate) tasks:u64,pub(crate) profile:u64,
-    pub(crate) records:u64,pub(crate) seed:u64,
+    pub(crate) records:u64,pub(crate) harmonic:u64,pub(crate) costs:u64,pub(crate) held:Held,pub(crate) seed:u64,
     pub(crate) outputs:i32,pub(crate) steps:i32,pub(crate) reach:i32,pub(crate) begin:i32,pub(crate) end:i32,
     pub(crate) half:[i32;3],pub(crate) ring:[i32;3],pub(crate) ring_at:[i32;3],
     pub(crate) ring_stride:i32,pub(crate) scratch_stride:i32,pub(crate) nlisted:i32,pub(crate) pad:i32,
@@ -71,12 +76,12 @@ pub struct Run{
 
 /// The sizes, offsets and constants the kernel's `layout` reports, for the check that the twins and
 /// the constants they share match.
-pub fn layout()->[u32;21]{
+pub fn layout()->[u32;24]{
     use std::mem::{offset_of,size_of};
-    use super::{MOST_INTERVALS,RECORD,SLOT_RECORD,WARPS};
+    use super::{HARMONIC,MOST_INTERVALS,MOTION,RECORD,SLOT_RECORD,TWIN,WARPS};
     [size_of::<Beam>(),size_of::<Carrier>(),size_of::<Cluster>(),size_of::<Group>(),size_of::<Class>(),size_of::<Photon>(),size_of::<Coherent>(),size_of::<Channel>(),
         size_of::<Params>(),size_of::<State>(),size_of::<Run>(),offset_of!(Params,hm),offset_of!(Params,half_flow),offset_of!(Run,listed),offset_of!(State,psi),offset_of!(State,index),
-        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN].map(|x|x as u32)
+        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,TWIN,MOTION,HARMONIC].map(|x|x as u32)
 }
 
 /// The model on the device: the kernel's parameters, the buffers they point into, and the most

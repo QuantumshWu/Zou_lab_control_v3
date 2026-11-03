@@ -42,10 +42,16 @@ typedef unsigned long long u64;
 #define MOST_CLASSES 32
 #define MOST_LISTED 32
 #define WARPS 8                         // trajectories per block: lib.rs `TASK`
-#define RECORD 47                       // an output's sums: held, profile, doppler, 32 populations, 3 × (κ, κ², r, r²)
-#define POINT_RECORD 35                 // the record's part taken at the output time
-#define MOTION 35                       // where the motion windows' means start
-#define SLOT_RECORD (POINT_RECORD+30)   // a trajectory's record of an interval: the point's, and per lab axis and window closing in it held and its 4 means
+// An output's sums (stats.rs `Sums`; src/gpu/mod.rs `sums_of`): held, profile, doppler, the 32
+// populations; the held twin's 32 populations, Σ_k c_k² and Σ_k c_k p_k; per lab axis the motion's
+// Σκ, Σκ², Σr, Σr²; per lab axis the harmonic control's Σc, Σc², Σc κ².
+#define TWIN 35                         // where the held twin's sums start
+#define POINT_RECORD 69                 // the part taken at the output time
+#define MOTION 69                       // where the motion windows' means start
+#define HARMONIC 81                     // where the harmonic control's sums start
+#define RECORD 90
+#define CLOSE 8                         // a closing window's record: held, ⟨κ⟩, ⟨κ²⟩, ⟨r⟩, ⟨r²⟩, the harmonic control's c, c², c ⟨κ²⟩
+#define SLOT_RECORD (POINT_RECORD+3*2*CLOSE)   // a trajectory's record of an interval: the point's, per lab axis two closing windows' 
 #define MOST_INTERVALS 64               // the most output intervals of a launch (the records' room)
 #define FULL 0xffffffffu
 #define TAU 6.283185307179586
@@ -90,6 +96,11 @@ __device__ __forceinline__ float warp_sum(float v){
     return v;
 }
 __device__ __forceinline__ float2 warp_sum(float2 v){return make_float2(warp_sum(v.x),warp_sum(v.y));}
+__device__ __forceinline__ double warp_sum(double v){
+    #pragma unroll
+    for(int o=16;o>0;o>>=1)v+=__shfl_xor_sync(FULL,v,o);
+    return v;
+}
 __device__ __forceinline__ float warp_max(float v){
     #pragma unroll
     for(int o=16;o>0;o>>=1)v=fmaxf(v,__shfl_xor_sync(FULL,v,o));
@@ -184,15 +195,26 @@ struct State{
     double q[3],p[3];                   // position (um) and momentum over ħ (1/um) on the trap's principal axes
     double time,logn,threshold,log_threshold;
     double prefix[15];                  // per lab axis: steps, Σκ, Σκ², Σr, Σr² through the last step (lib.rs `Windows`)
+    double q0[3],p0[3];                 // the initial ones: the harmonic control's
+    double twin_logn,twin_threshold,twin_log_threshold;   // the held twin's (control.rs)
     float2 psi[MAXN];                   // ψ/‖ψ‖ on its cluster
+    float2 twin[MAXN];                  // the held twin's
     float doppler;int cluster,jumps,death;  // death: the step it was lost at, −1 while held
-    u32 index;int pad;
+    u32 index;int twin_cluster,twin_jumps,pad;
 };
+// The held twin (control.rs `Twin`, engine.rs `Engine::held`), none when `u` is null: per cluster k
+// its half step's propagator `u` and its H_eff `h` (n_k² entries from blocks[k], row-major) and its
+// populations' readout (32 coefficients per density entry from 32·blocks[k], control.rs `readout`);
+// per class its jump operators `l` (3 × target × cluster from jumps[class]).
+struct Held{const float2* u;const float2* h;const float2* l;const float* readout;const int* blocks;const int* jumps;};
 // A launch: a wave's tasks over the output intervals [begin, end).
 struct Run{
     State* states;double* rings;double* samples;double* sums;float2* scratch;const int* tasks;
     unsigned long long* profile;        // per slot SPANS counters (with PROFILE)
     double* records;                    // per slot MOST_INTERVALS records of SLOT_RECORD: the launch's intervals
+    const double* harmonic;             // per output and lab axis the harmonic control's A and B (control.rs `Harmonic`); none: no control
+    unsigned long long* costs;          // per slot the held twin's cycles and the launches' (lib.rs `Outcome::seconds`)
+    Held held;
     u64 seed;
     int outputs,steps,reach,begin,end;  // the output times, the steps between two, the steps past the last
     int half[3],ring[3],ring_at[3];     // per lab axis: the window's half-width, its ring's length (steps) and place (doubles)
@@ -219,6 +241,7 @@ struct JumpSpace{float2 u[3][MAXN],f[MAXN];float weights[MOST_CLASSES],shares[MO
 struct Warp{
     Point pt;
     float2 psi[MAXN],start[MAXN],readout[MAXN];   // ψ, ψ at a step's start, the readout's Y ψ
+    float2 twin[MAXN];                  // the held twin's ψ
     union{float2 m[3][MAXN*MAXN];float2 gradient_a[MOST_BEAMS][3];JumpSpace jump;};
 #ifdef PROFILE
     long long profile[SPANS];
@@ -227,6 +250,8 @@ struct Warp{
 
 // The trajectory's scalars (uniform over the warp).
 struct Traj{double q[3],p[3],time,logn,threshold,log_threshold;float doppler;int cluster,jumps,death;u32 index;};
+// The held twin's (control.rs): it does not move.
+struct Twin{double logn,threshold,log_threshold;int cluster,jumps;};
 
 // A lane's entries of an n × n matrix: e = lane + 32 j, its row and column.
 struct Entries{
@@ -552,16 +577,16 @@ __device__ void exponential(const Program& P,Warp& W,const Entries& E,double tau
     }
 }
 
-// ψ ← U ψ (U in W.m[2]), renormalized; returns ‖Uψ‖² relative to the ‖ψ‖² = 1 it had.
-__device__ float apply(Warp& W,int n,int lane){
+// ψ ← U ψ (n × n, row-major), renormalized; returns ‖Uψ‖² relative to the ‖ψ‖² = 1 it had.
+__device__ float apply(const float2* U,float2* psi,int n,int lane){
     float2 v=zero2();
     if(lane<n){
-        const float2* u=W.m[2]+lane*n;
+        const float2* u=U+lane*n;
         #pragma unroll
-        for(int b=0;b<MAXN;b++)if(b<n)v+=u[b]*W.psi[b];
+        for(int b=0;b<MAXN;b++)if(b<n)v+=u[b]*psi[b];
     }
     const float s=warp_sum(lane<n?norm2(v):0.f);
-    __syncwarp();if(lane<n)W.psi[lane]=(1.f/sqrtf(s))*v;__syncwarp();
+    __syncwarp();if(lane<n)psi[lane]=(1.f/sqrtf(s))*v;__syncwarp();
     return s;
 }
 
@@ -603,7 +628,7 @@ __device__ void advance(const Program& P,Warp& W,Traj& t,double dt,int lane,doub
     SPAN_END(SPAN_GENERATOR,generator);SPAN_BEGIN(propagator);
     exponential(P,W,E,0.5*dt,lane);
     SPAN_END(SPAN_EXPONENTIAL,propagator);SPAN_BEGIN(evolve);
-    const float nh=apply(W,C.n,lane);lh=t.logn+(double)logf(nh);
+    const float nh=apply(W.m[2],W.psi,C.n,lane);lh=t.logn+(double)logf(nh);
     // The Ehrenfest force −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ at the middle, less the harmonic part the flow takes.
     float s[3]={0.f,0.f,0.f};
     #pragma unroll
@@ -619,7 +644,7 @@ __device__ void advance(const Program& P,Warp& W,Traj& t,double dt,int lane,doub
     const float tau=(float)dt;
     #pragma unroll
     for(int i=0;i<3;i++)t.p[i]+=(double)(tau*(P.axes32[i][0]*force[0]+P.axes32[i][1]*force[1]+P.axes32[i][2]*force[2]+P.stiffness32[i]*(float)t.q[i]));
-    const float n1=apply(W,C.n,lane);t.logn=lh+(double)logf(n1);
+    const float n1=apply(W.m[2],W.psi,C.n,lane);t.logn=lh+(double)logf(n1);
     flow(P,t,0.5*dt);
     t.time+=dt;
     SPAN_END(SPAN_EVOLVE,evolve);
@@ -838,6 +863,38 @@ __device__ void across(const double n[3],double pair[2][3]){
 // A quantum jump at the trajectory's position and time (engine.rs `Engine::jump`), with the exact
 // response when `exact`: the class and the cluster it lands in, the photon's direction from the
 // dipole pattern, its polarization, the recoils, and the state the photon leaves.
+// A jump's first draws (engine.rs `jump`), each class's weight in J.weights and their total positive:
+// the class, the next threshold, the polarization's and the absorbed beam's uniforms -- before the
+// direction's rejection loop, so that a twin on the same stream keeps its thresholds and choices.
+struct Draws{int pick;double threshold,polarization,absorbed;};
+__device__ Draws draw(Rng& rng,const JumpSpace& J,int nclasses,double total){
+    Draws d;double x=rng.uniform()*total;d.threshold=rng.open_uniform();d.polarization=rng.uniform();d.absorbed=rng.uniform();
+    d.pick=nclasses-1;for(int c=0;c<nclasses;c++){const double w=(double)J.weights[c];if(x<w){d.pick=c;break;}x-=w;}
+    return d;
+}
+// The photon of the picked class's amplitudes J.u (nt rows): its direction n from the dipole pattern
+// tr G − n·Re(G)·n of G_ab = ⟨u_a|u_b⟩, its polarization e across it from ‖Σ_a e_a u_a‖² on a real
+// orthonormal pair, f = Σ_a e_a u_a into J.f; returns ‖f‖².
+__device__ float emit(Rng& rng,JumpSpace& J,int nt,double polarization,int lane,double n[3],double e[3]){
+    double gram[3][3];
+    for(int a=0;a<3;a++)for(int b=0;b<3;b++){float s=0.f;for(int i=0;i<nt;i++){const float2 x=J.u[a][i],y=J.u[b][i];s+=x.x*y.x+x.y*y.y;}gram[a][b]=(double)s;}
+    const double trace=gram[0][0]+gram[1][1]+gram[2][2];
+    for(;;){
+        rng.direction(n);double q=0.;for(int a=0;a<3;a++)for(int b=0;b<3;b++)q+=n[a]*gram[a][b]*n[b];
+        if(rng.uniform()*trace<=trace-q)break;
+    }
+    double pair[2][3];across(n,pair);float weights[2];float2 f[2]={zero2(),zero2()};
+    for(int j=0;j<2;j++){
+        if(lane<nt)for(int a=0;a<3;a++)f[j]+=(float)pair[j][a]*J.u[a][lane];
+        weights[j]=warp_sum(lane<nt?norm2(f[j]):0.f);
+    }
+    const int chosen=polarization*((double)weights[0]+(double)weights[1])<(double)weights[0]?0:1;
+    for(int a=0;a<3;a++)e[a]=pair[chosen][a];
+    if(lane<nt)J.f[lane]=f[chosen];
+    __syncwarp();
+    return weights[chosen];
+}
+
 __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,bool exact,int lane,float2* scratch){
     t.jumps++;Rng rng(R.seed,PURPOSE_JUMP,t.index,(u32)t.jumps);
     point(P,W,t,lane);
@@ -862,33 +919,11 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     __syncwarp();
     SPAN_END(SPAN_PHOTONS,photons);
     if(!(total>0.)){t.threshold=rng.open_uniform();t.log_threshold=log(t.threshold);return;}
-    int pick=C.nclasses-1;
-    // The draws the state and the kicks depend on first -- the class, the next threshold, the
-    // polarization, the absorbed beam --, the direction's rejection loop after them (engine.rs `jump`:
-    // a twin on the same stream keeps its thresholds and choices whatever its loop takes).
-    double x=rng.uniform()*total;const double threshold=rng.open_uniform(),polarization=rng.uniform(),absorbed=rng.uniform();
-    for(int c=0;c<C.nclasses;c++){const double w=(double)J.weights[c];if(x<w){pick=c;break;}x-=w;}
-    const Class K=P.classes[C.classes+pick];const int nt=P.clusters[K.target].n;
+    const Draws d=draw(rng,J,C.nclasses,total);
+    const Class K=P.classes[C.classes+d.pick];const int nt=P.clusters[K.target].n;
     if(lane<3*nt)J.u[lane%3][lane/3]=amplitude(P,W,C,K,lane%3,lane/3,t.time,M);
     __syncwarp();
-    // The photon's direction from the dipole pattern tr G − n·Re(G)·n of G_ab = ⟨u_a|u_b⟩.
-    double gram[3][3];
-    for(int a=0;a<3;a++)for(int b=0;b<3;b++){float s=0.f;for(int i=0;i<nt;i++){const float2 x=J.u[a][i],y=J.u[b][i];s+=x.x*y.x+x.y*y.y;}gram[a][b]=(double)s;}
-    const double trace=gram[0][0]+gram[1][1]+gram[2][2];double n[3];
-    for(;;){
-        rng.direction(n);double q=0.;for(int a=0;a<3;a++)for(int b=0;b<3;b++)q+=n[a]*gram[a][b]*n[b];
-        if(rng.uniform()*trace<=trace-q)break;
-    }
-    // Its polarization across it, from ‖Σ_a ε_a u_a‖² on a real orthonormal pair.
-    double pair[2][3];across(n,pair);float weights[2];float2 f[2]={zero2(),zero2()};
-    for(int j=0;j<2;j++){
-        if(lane<nt)for(int a=0;a<3;a++)f[j]+=(float)pair[j][a]*J.u[a][lane];
-        weights[j]=warp_sum(lane<nt?norm2(f[j]):0.f);
-    }
-    const int chosen=polarization*((double)weights[0]+(double)weights[1])<(double)weights[0]?0:1;
-    const double* e=pair[chosen];const float size=weights[chosen];
-    if(lane<nt)J.f[lane]=f[chosen];
-    __syncwarp();
+    double n[3],e[3];const float size=emit(rng,J,nt,d.polarization,lane,n,e);
     // The recoils: the photon's, the absorbed beam's and the exact conditional mean's correction.
     double kick[3];for(int a=0;a<3;a++)kick[a]=-K.wave_number*n[a];
     SPAN_BEGIN(absorbed);
@@ -898,7 +933,7 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     for(int x=0;x<3;x++)mean[x]=(double)m[x]/(double)size;
     for(int i=0;i<count;i++)sum+=(double)J.shares[i];
     if(sum>0.){
-        double x=absorbed*sum;int drawn=J.beams[count-1];
+        double x=d.absorbed*sum;int drawn=J.beams[count-1];
         for(int i=0;i<count;i++){const double w=(double)J.shares[i];if(x<w){drawn=J.beams[i];break;}x-=w;}
         double average[3]={0.,0.,0.};
         for(int i=0;i<count;i++){const Beam& b=P.beams[J.beams[i]];for(int a=0;a<3;a++)average[a]+=(double)J.shares[i]*((double)b.direction[a]*(double)b.k);}
@@ -909,7 +944,95 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     for(int i=0;i<3;i++)t.p[i]+=P.axes[i][0]*kick[0]+P.axes[i][1]*kick[1]+P.axes[i][2]*kick[2];
     const float scale=1.f/sqrtf(size);
     __syncwarp();if(lane<MAXN)W.psi[lane]=lane<nt?scale*J.f[lane]:zero2();__syncwarp();
-    t.cluster=K.target;t.logn=0.;t.threshold=threshold;t.log_threshold=log(threshold);
+    t.cluster=K.target;t.logn=0.;t.threshold=d.threshold;t.log_threshold=log(d.threshold);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The held twin (control.rs, engine.rs `Engine::held`): the trajectory's internal state on its own
+// streams at the twin's point, its generator and jumps there computed once; it does not move.
+
+// The twin's flow for τ without jumps: ψ ← U ψ twice, U the half step's propagator for a whole step,
+// exp(−i H τ/2) by the exponentials' series for a step's part; ln‖ψ‖² at the middle (`lh`) and the end.
+__device__ void hold_advance(const Program& P,const Run& R,Warp& W,Twin& h,double tau,int lane,double& lh){
+    const int n=P.clusters[h.cluster].n,at=R.held.blocks[h.cluster];const float2* U=R.held.u+at;
+    if(tau!=P.dt){
+        const Entries E(n,lane);
+        __syncwarp();
+        #pragma unroll
+        for(int j=0;j<SLOTS;j++)if(E.has(j,lane))W.m[0][lane+32*j]=R.held.h[at+lane+32*j];
+        __syncwarp();
+        exponential(P,W,E,0.5*tau,lane);U=W.m[2];
+    }
+    const float nh=apply(U,W.twin,n,lane);lh=h.logn+(double)logf(nh);
+    const float n1=apply(U,W.twin,n,lane);h.logn=lh+(double)logf(n1);
+}
+
+// The twin's jump (engine.rs `Engine::jump` of a held atom): the trajectory's stream of the twin's
+// jump number, the classes' amplitudes from the jump operators at its point, the same draws as a
+// moving atom's, no kicks.
+__device__ void hold_jump(const Program& P,const Run& R,Warp& W,Twin& h,u32 index,int lane){
+    h.jumps++;Rng rng(R.seed,PURPOSE_JUMP,index,(u32)h.jumps);
+    const Cluster C=P.clusters[h.cluster];JumpSpace& J=W.jump;
+    // u_x = L_x ψ of a class at the lane's (x, row).
+    auto amplitude=[&](int c,int nt)->float2{
+        float2 u=zero2();if(lane>=3*nt)return u;
+        const int x=lane%3,row=lane/3;const float2* l=R.held.l+R.held.jumps[C.classes+c]+(x*nt+row)*C.n;
+        for(int j=0;j<C.n;j++)u+=l[j]*W.twin[j];
+        return u;
+    };
+    double total=0.;
+    for(int c=0;c<C.nclasses;c++){
+        const int nt=P.clusters[P.classes[C.classes+c].target].n;
+        const float w=warp_sum(norm2(amplitude(c,nt)));if(lane==0)J.weights[c]=w;total+=(double)w;
+    }
+    __syncwarp();
+    if(!(total>0.)){h.threshold=rng.open_uniform();h.log_threshold=log(h.threshold);return;}
+    const Draws d=draw(rng,J,C.nclasses,total);
+    const Class K=P.classes[C.classes+d.pick];const int nt=P.clusters[K.target].n;
+    const float2 u=amplitude(d.pick,nt);if(lane<3*nt)J.u[lane%3][lane/3]=u;
+    __syncwarp();
+    double n[3],e[3];const float size=emit(rng,J,nt,d.polarization,lane,n,e);
+    const float scale=1.f/sqrtf(size);
+    __syncwarp();if(lane<MAXN)W.twin[lane]=lane<nt?scale*J.f[lane]:zero2();__syncwarp();
+    h.cluster=K.target;h.logn=0.;h.threshold=d.threshold;h.log_threshold=log(d.threshold);
+}
+
+// One step of the twin (engine.rs `Engine::step` of a held atom): where ‖ψ‖² crosses the threshold
+// the step is redone to the crossing, the jump made there and the rest taken from the state it left.
+__device__ void hold_step(const Program& P,const Run& R,Warp& W,Twin& h,u32 index,int lane){
+    double left=P.dt;
+    for(;;){
+        const Twin start=h;
+        if(lane<MAXN)W.start[lane]=W.twin[lane];
+        double lh;hold_advance(P,R,W,h,left,lane,lh);
+        if(h.logn>h.log_threshold)break;
+        double ta,tb,la,lb;
+        if(lh<=h.log_threshold){ta=0.;tb=0.5*left;la=start.logn;lb=lh;}else{ta=0.5*left;tb=left;la=lh;lb=h.logn;}
+        const double at=lb<la?fmin(fmax(ta+(h.log_threshold-la)/(lb-la)*(tb-ta),ta),tb):tb;
+        h=start;__syncwarp();if(lane<MAXN)W.twin[lane]=W.start[lane];__syncwarp();
+        if(at>0.){double unused;hold_advance(P,R,W,h,at,lane,unused);}
+        hold_jump(P,R,W,h,index,lane);
+        left-=at;
+        if(!(left>0.))break;
+    }
+}
+
+// The twin's record of an output (control.rs `Twin::populations`, stats.rs `Group::add`): its 32
+// populations c_k at its point -- the readout's map of its density ψψ†/‖ψ‖² -- and Σ_k c_k², Σ_k c_k p_k
+// with the atom's populations p (already in `out`, zero when lost).
+__device__ void hold_record(const Program& P,const Run& R,Warp& W,const Twin& h,int lane,double* out){
+    const int n=P.clusters[h.cluster].n;const float* map=R.held.readout+32*R.held.blocks[h.cluster];
+    float norm=0.f;for(int b=0;b<n;b++)norm+=norm2(W.twin[b]);
+    float c=0.f;
+    for(int i=0;i<n;i++){
+        const float2 pi=W.twin[i];c+=norm2(pi)*map[32*(i*n+i)+lane];
+        for(int j=i+1;j<n;j++){const float2 r=pi*conj(W.twin[j]);c+=r.x*map[32*(i*n+j)+lane]+r.y*map[32*(j*n+i)+lane];}
+    }
+    c/=norm;
+    const double y=out[3+lane];
+    out[TWIN+lane]=(double)c;
+    const double cc=(double)warp_sum(c*c),cy=warp_sum((double)c*y);
+    if(lane==0){out[TWIN+32]=cc;out[TWIN+33]=cy;}
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1053,14 +1176,16 @@ extern "C" __global__ void __launch_bounds__(WARPS*32,2) motion3d(const Program 
     const int count=R.tasks[3*blockIdx.x+1],first=R.tasks[3*blockIdx.x+2],slot=first+wi;const bool active=wi<count;
     State* S=R.states+slot;double* ring=R.rings+(size_t)slot*R.ring_stride;float2* scratch=R.scratch+(size_t)slot*R.scratch_stride;
     double* records=R.records+(size_t)slot*MOST_INTERVALS*SLOT_RECORD;
-    Traj t;double prefix=0.;
+    Traj t;Twin h;double prefix=0.,q0[3],p0[3];const bool held=R.held.u!=nullptr;
+    long long twin_cycles=0;const long long launched=clock64();
     if(active){
         #pragma unroll
-        for(int i=0;i<3;i++){t.q[i]=S->q[i];t.p[i]=S->p[i];}
+        for(int i=0;i<3;i++){t.q[i]=S->q[i];t.p[i]=S->p[i];q0[i]=S->q0[i];p0[i]=S->p0[i];}
         t.time=S->time;t.logn=S->logn;t.threshold=S->threshold;t.log_threshold=S->log_threshold;
         t.doppler=S->doppler;t.cluster=S->cluster;t.jumps=S->jumps;t.death=S->death;t.index=S->index;
+        h.logn=S->twin_logn;h.threshold=S->twin_threshold;h.log_threshold=S->twin_log_threshold;h.cluster=S->twin_cluster;h.jumps=S->twin_jumps;
         if(lane<15)prefix=S->prefix[lane];
-        if(lane<MAXN)W.psi[lane]=S->psi[lane];
+        if(lane<MAXN){W.psi[lane]=S->psi[lane];W.twin[lane]=S->twin[lane];}
     }
 #ifdef PROFILE
     if(lane<SPANS)W.profile[lane]=0;
@@ -1088,6 +1213,12 @@ extern "C" __global__ void __launch_bounds__(WARPS*32,2) motion3d(const Program 
                 }
                 if(lane<15)ring[ring_at(R,lane/5,k)+lane%5]=prefix;
             }
+            // The held twin's steps of the interval, up to the last output.
+            if(held&&i>0&&i<R.outputs){
+                const long long begun=clock64();
+                for(int k=lo+1;k<=hi;k++)hold_step(P,R,W,h,t.index,lane);
+                twin_cycles+=clock64()-begun;
+            }
             // The record of output i.
             double* out=records+(size_t)(i-R.begin)*SLOT_RECORD;
             for(int x=lane;x<SLOT_RECORD;x+=32)out[x]=0.;
@@ -1095,11 +1226,13 @@ extern "C" __global__ void __launch_bounds__(WARPS*32,2) motion3d(const Program 
             SPAN_BEGIN(readout);
             if(i<R.outputs&&t.death<0){
                 record(P,W,t,lane,out);
+                __syncwarp();
                 for(int k=0;k<R.nlisted;k++)if(R.listed[k]==i){
                     double* sample=R.samples+((size_t)slot*R.nlisted+k)*7;double r[3],kappa[3];lab(P,t.q,r);lab(P,t.p,kappa);
                     if(lane<3){sample[lane]=r[lane];sample[3+lane]=kappa[lane];}if(lane==0)sample[6]=1.;
                 }
             }
+            if(held&&i<R.outputs){const long long begun=clock64();__syncwarp();hold_record(P,R,W,h,lane,out);twin_cycles+=clock64()-begun;}
             SPAN_END(SPAN_READOUT,readout);SPAN_BEGIN(windows);
             // The windows ending in the interval: their means while held at their output.
             #pragma unroll
@@ -1117,18 +1250,26 @@ extern "C" __global__ void __launch_bounds__(WARPS*32,2) motion3d(const Program 
                     }
                 }
                 // v: lane 5a + x holds the window's sum of x; the means divide by its steps (x = 0).
-                const double steps=__shfl_sync(FULL,v,5*a);
-                if(lane<15&&lane/5==a){const int x=lane-5*a;out[POINT_RECORD+(2*a+c)*5+x]=x==0?(steps>0.?1.:0.):(steps>0.?v/steps:0.);}
+                const double steps=__shfl_sync(FULL,v,5*a);double* close=out+POINT_RECORD+(2*a+c)*CLOSE;
+                if(lane<15&&lane/5==a){const int x=lane-5*a;close[x]=x==0?(steps>0.?1.:0.):(steps>0.?v/steps:0.);}
+                // The harmonic control of output o along the axis (control.rs `Harmonic::value`): every
+                // trajectory's, held or lost, with its κ²'s mean when held.
+                if(R.harmonic!=nullptr&&lane==5*a+2){
+                    const double* m=R.harmonic+((size_t)o*3+a)*18;double value=0.;
+                    for(int p=0;p<3;p++){double s=0.;for(int q=0;q<3;q++)s+=m[3*p+q]*p0[q]+2.*m[9+3*p+q]*q0[q];value+=p0[p]*s;}
+                    close[5]=value;close[6]=value*value;close[7]=value*close[2];
+                }
             }
             SPAN_END(SPAN_WINDOWS,windows);
         }
     }
     SPAN_BEGIN(summing);
     __syncthreads();
-    // The block's sums of the launch's intervals in the trajectories' order: each 64 threads every
-    // fourth interval, 35 of them the point record's entries and 24 the closing windows' means.
+    // The block's sums of the launch's intervals in the trajectories' order: each 128 threads every
+    // second interval, 69 of them the point record's entries, 24 the closing windows' means and 18
+    // their harmonic controls' sums.
     {
-        const int group=threadIdx.x>>6,x=threadIdx.x&63;const size_t stride=(size_t)MOST_INTERVALS*SLOT_RECORD;
+        const int group=threadIdx.x>>7,x=threadIdx.x&127;const size_t stride=(size_t)MOST_INTERVALS*SLOT_RECORD;
         const double* base=R.records+(size_t)first*stride;
         int next[3]={start[0],start[1],start[2]};
         for(int i=R.begin;i<R.end;i++){
@@ -1136,15 +1277,21 @@ extern "C" __global__ void __launch_bounds__(WARPS*32,2) motion3d(const Program 
             int outputs[3][2],closes[3];
             #pragma unroll
             for(int a=0;a<3;a++){closes[a]=0;while(closes[a]<2&&next[a]<R.outputs&&window_end(R,a,next[a])<=hi)outputs[a][closes[a]++]=next[a]++;}
-            if(((i-R.begin)&3)!=group)continue;
+            if(((i-R.begin)&1)!=group)continue;
             const double* rec=base+(size_t)(i-R.begin)*SLOT_RECORD;
             if(x<POINT_RECORD){
                 if(i<R.outputs){double s=0.;for(int w=0;w<count;w++)s+=rec[w*stride+x];R.sums[((size_t)blockIdx.x*R.outputs+i)*RECORD+x]=s;}
             }else if(x<POINT_RECORD+24){
                 const int j=x-POINT_RECORD,a=j/8,c=(j/4)%2,m=j%4;
                 if(c<closes[a]){
-                    double s=0.;for(int w=0;w<count;w++){const double* close=rec+w*stride+POINT_RECORD+(2*a+c)*5;if(close[0]>0.)s+=close[1+m];}
+                    double s=0.;for(int w=0;w<count;w++){const double* close=rec+w*stride+POINT_RECORD+(2*a+c)*CLOSE;if(close[0]>0.)s+=close[1+m];}
                     R.sums[((size_t)blockIdx.x*R.outputs+outputs[a][c])*RECORD+MOTION+4*a+m]=s;
+                }
+            }else if(x<POINT_RECORD+42){
+                const int j=x-POINT_RECORD-24,a=j/6,c=(j/3)%2,m=j%3;
+                if(c<closes[a]){
+                    double s=0.;for(int w=0;w<count;w++)s+=rec[w*stride+POINT_RECORD+(2*a+c)*CLOSE+5+m];
+                    R.sums[((size_t)blockIdx.x*R.outputs+outputs[a][c])*RECORD+HARMONIC+3*a+m]=s;
                 }
             }
         }
@@ -1162,7 +1309,11 @@ extern "C" __global__ void __launch_bounds__(WARPS*32,2) motion3d(const Program 
             S->doppler=t.doppler;S->cluster=t.cluster;S->jumps=t.jumps;S->death=t.death;
         }
         if(lane<15)S->prefix[lane]=prefix;
-        if(lane<MAXN)S->psi[lane]=W.psi[lane];
+        if(lane<MAXN){S->psi[lane]=W.psi[lane];S->twin[lane]=W.twin[lane];}
+        if(lane==0){
+            S->twin_logn=h.logn;S->twin_threshold=h.threshold;S->twin_log_threshold=h.log_threshold;S->twin_cluster=h.cluster;S->twin_jumps=h.jumps;
+            R.costs[2*slot]+=(unsigned long long)twin_cycles;R.costs[2*slot+1]+=(unsigned long long)(clock64()-launched);
+        }
     }
 }
 
@@ -1190,5 +1341,5 @@ extern "C" __global__ void layout(u32* out){
     out[6]=sizeof(Coherent);out[7]=sizeof(Channel);out[8]=sizeof(Program);out[9]=sizeof(State);out[10]=sizeof(Run);
     out[11]=(u32)OFFSET(Program,hm);out[12]=(u32)OFFSET(Program,half_flow);out[13]=(u32)OFFSET(Run,listed);
     out[14]=(u32)OFFSET(State,psi);out[15]=(u32)OFFSET(State,index);
-    out[16]=MOST_INTERVALS;out[17]=SLOT_RECORD;out[18]=RECORD;out[19]=WARPS;out[20]=MAXN;
+    out[16]=MOST_INTERVALS;out[17]=SLOT_RECORD;out[18]=RECORD;out[19]=WARPS;out[20]=MAXN;out[21]=TWIN;out[22]=MOTION;out[23]=HARMONIC;
 }

@@ -334,18 +334,20 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     };
     let used=if gpu.is_some(){Device::Gpu}else{Device::Cpu};
     // The control variates (control.rs): the harmonic twin's, and the held twin where the trap beam's
-    // intensity is the pilot's mean, when the generator is static. The GPU's trajectories carry none
-    // yet: there the estimates are the plain ones.
-    let controlled=gpu.is_none();
+    // intensity is the pilot's mean, when the generator is static.
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
     let intensity=states.iter().map(|t|model.geometry[model.trap_beam].intensity(t.r)).sum::<f64>()/states.len().max(1) as f64;
-    let mut twin=if controlled{Twin::new(&model,intensity)}else{None};
+    let mut twin=Twin::new(&model,intensity);
     let twin_means=twin.as_ref().map(|t|t.means(&model,&request.initial_density,interval,outputs));
-    let means=|held:bool|->Vec<Means>{if !controlled{return vec![];}(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:twin_means.as_ref().filter(|_|held).map(|m|m[i])}).collect()};
-    let batch=|first:u64,count:u64,twin:Option<&Twin>|->Result<Outcome,Stop>{match &gpu{
-        None=>Ok(simulate(&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed,Some(&Variates{harmonic:&harmonic,twin}))),
-        Some((g,program))=>g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed).map_err(Stop::Gpu),
-    }};
+    let means=|held:bool|->Vec<Means>{(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:twin_means.as_ref().filter(|_|held).map(|m|m[i])}).collect()};
+    let batch=|first:u64,count:u64,twin:Option<&Twin>|->Result<Outcome,Stop>{
+        let variates=Variates{harmonic:&harmonic,twin};
+        match &gpu{
+            None=>Ok(simulate(&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed,Some(&variates))),
+            Some((g,program))=>g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed,Some(&variates))
+                .map_err(Stop::Gpu),
+        }
+    };
     // A batch is at least as wide as the device runs at once: on the CPU two groups per thread, on
     // the GPU as many whole tasks per group as its resident blocks hold -- such a batch costs about
     // what one trajectory does --, and there a whole number of its widths.

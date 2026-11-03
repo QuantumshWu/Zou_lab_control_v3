@@ -7,7 +7,8 @@ use atom_motion_3d::engine::{Engine,Settings,Trajectory};
 use atom_motion_3d::gpu::{self,driver::Buffer,program};
 use atom_motion_3d::model::Model;
 use atom_motion_3d::rng::{Purpose,Rng};
-use atom_motion_3d::{initial_trajectory,Beam,Complex,Initial,Matrix,Request,Stratum,STATES};
+use atom_motion_3d::control::{Harmonic,Twin};
+use atom_motion_3d::{initial_trajectory,Beam,Complex,Initial,Matrix,Request,Stratum,Variates,STATES};
 use serde_json::Value;
 
 fn matrix(v:&Value)->Matrix{
@@ -42,7 +43,7 @@ fn device()->Option<&'static std::sync::Mutex<gpu::Gpu>>{match gpu::gpu(){Ok(g)=
 fn the_kernel_s_structs_match_their_twins(){
     let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let f=gpu.function("layout").unwrap();let out=Buffer::new(128).unwrap();gpu.stream().launch(&f,1,32,&[&out.pointer]).unwrap();
-    let mut words=[0u32;21];gpu.stream().download(&out,&mut words).unwrap();
+    let mut words=[0u32;24];gpu.stream().download(&out,&mut words).unwrap();
     assert_eq!(words,program::layout());
 }
 
@@ -114,19 +115,22 @@ fn on_eight_states_a_step_and_a_jump_are_the_cpu_s(){
 }
 
 /// A batch on the GPU sums what the same batch sums on the CPU (lib.rs `simulate`), to single
-/// precision: 20 trajectories in two groups -- tasks of 8, 2, 8 and 2 (blocks with idle warps) --,
-/// 3 steps between 6 outputs, the motion's means over each output's window of half a trap period
-/// (the windows closing up to the reach past the last output, over several launches) and the
-/// samples kept at two outputs.
-#[test]
-fn a_batch_s_sums_are_the_cpu_s(){
-    let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
-    let r=request(PGC);let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+/// precision, with the control variates (control.rs): 20 trajectories in two groups -- tasks of 8, 2,
+/// 8 and 2 (blocks with idle warps) --, 3 steps between 6 outputs, the motion's means over each
+/// output's window of half a trap period (the windows closing up to the reach past the last output,
+/// over several launches), the samples kept at two outputs, every trajectory's harmonic control and,
+/// where the generator is static, its held twin.
+fn batch(fixture:&str)->bool{
+    let Some(gpu)=device()else{return false};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
+    let r=request(fixture);let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let settings=Settings::new(0.2,&initial.traps[0],1e-6,true);
     let(seed,first,count,group,steps,outputs,listed)=(0x3D_5EED,40,20,10,3,6,[2,5]);
+    let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
+    let twin=Twin::new(&model,0.5*model.geometry[model.trap_beam].intensity([0.;3]));
+    let variates=Variates{harmonic:&harmonic,twin:twin.as_ref()};
     let program=gpu.program(&model,&settings).unwrap();
-    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed).unwrap();
-    let c=atom_motion_3d::simulate(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,None);
+    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates)).unwrap();
+    let c=atom_motion_3d::simulate(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates));
     assert_eq!(g.groups.len(),c.groups.len());
     let close=|a:f64,b:f64,scale:f64,what:&str|assert!((a-b).abs()<=1e-3*b.abs().max(scale),"{what}: {a} against {b}");
     for(k,(gg,cg))in g.groups.iter().zip(&c.groups).enumerate(){for(i,(x,y))in gg.sums.iter().zip(&cg.sums).enumerate(){
@@ -135,8 +139,10 @@ fn a_batch_s_sums_are_the_cpu_s(){
         for a in 0..3{
             close(x.kappa[a],y.kappa[a],(y.kappa2[a]*y.held).sqrt(),&format!("{at}: Σκ[{a}]"));close(x.kappa2[a],y.kappa2[a],0.,&format!("{at}: Σκ²[{a}]"));
             close(x.position[a],y.position[a],(y.position2[a]*y.held).sqrt(),&format!("{at}: Σr[{a}]"));close(x.position2[a],y.position2[a],0.,&format!("{at}: Σr²[{a}]"));
+            for j in 0..3{close(x.harmonic[a][j],y.harmonic[a][j],1e-9*y.harmonic[a][1].sqrt(),&format!("{at}: harmonic[{a}][{j}]"));}
         }
-        for s in 0..STATES{close(x.populations[s],y.populations[s],y.held,&format!("{at}: Σp[{s}]"));}
+        for s in 0..STATES{close(x.populations[s],y.populations[s],y.held,&format!("{at}: Σp[{s}]"));close(x.twin[s],y.twin[s],y.trajectories,&format!("{at}: twin Σc[{s}]"));}
+        for j in 0..2{close(x.twin2[j],y.twin2[j],y.trajectories,&format!("{at}: twin2[{j}]"));}
         close(x.profile,y.profile,1e-6*y.held,&format!("{at}: profile"));close(x.doppler,y.doppler,1e-9*y.held,&format!("{at}: (kv/σ)²"));
     }}
     assert_eq!(g.jumps,c.jumps,"jumps");
@@ -144,5 +150,12 @@ fn a_batch_s_sums_are_the_cpu_s(){
         assert_eq!(gs.len(),cs.len());
         for(x,y)in gs.iter().zip(cs){for a in 0..3{close(x.0[a],y.0[a],1e-3,"a sample's r");close(x.1[a],y.1[a],1.,"a sample's κ");}}
     }
-    println!("{} groups of {} outputs, {} jumps",g.groups.len(),outputs,g.jumps);
+    println!("{} groups of {} outputs, {} jumps, held twin {}",g.groups.len(),outputs,g.jumps,twin.is_some());
+    twin.is_some()
+}
+/// The batches of the tweezer PGC and the gray molasses; one of them has a held twin.
+#[test]
+fn a_batch_s_sums_are_the_cpu_s(){
+    let twins=[batch(PGC),batch(MOLASSES)];
+    if device().is_some(){assert!(twins.iter().any(|&t|t),"a fixture with a held twin");}
 }
