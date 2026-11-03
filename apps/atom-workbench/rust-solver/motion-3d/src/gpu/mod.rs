@@ -149,9 +149,14 @@ impl Gpu{
     pub fn stream(&self)->&Stream{&self.stream}
     /// The kernel's registers and spilled bytes per thread, and its blocks per multiprocessor.
     pub fn resources(&self)->Result<(i32,i32,i32),String>{let(r,l)=self.motion.resources()?;Ok((r,l,self.blocks_per_multiprocessor))}
-    /// The widest batch of `groups` groups of whole tasks the GPU runs at once: as many tasks per
-    /// group as its resident blocks hold (one at least).
-    pub fn width(&self,groups:u64)->u64{groups*TASK*((self.info.multiprocessors*self.blocks_per_multiprocessor) as u64/groups).max(1)}
+    /// The widest batch the GPU runs at once in at least `groups` groups of whole tasks: as many tasks
+    /// per group as its resident blocks hold (one at least), and as many groups as then fill them --
+    /// (groups, width): 36 groups of 2 tasks for 72 resident blocks, not 32 leaving 8 idle.
+    pub fn batch(&self,groups:u64)->(u64,u64){
+        let resident=(self.info.multiprocessors*self.blocks_per_multiprocessor) as u64;
+        let tasks=(resident/groups).max(1);let groups=(resident/tasks).max(groups);
+        (groups,groups*tasks*TASK)
+    }
     /// The motion kernel's time over every launch so far (s).
     pub fn kernel_seconds(&self)->f64{self.kernel_us.load(Ordering::Relaxed) as f64*1e-6}
     /// The profiled kernel's counters summed over every trajectory it ran (`SPANS`); None unprofiled.

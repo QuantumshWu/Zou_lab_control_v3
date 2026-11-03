@@ -107,7 +107,7 @@
 //! streams and sums. The two devices make a solve's choices alike: the model, the ledger, the pilot
 //! and the time step on the CPU in double precision either way, the statistics and their stopping
 //! rule. A batch is at least as wide as the device runs at once: two groups per thread on the CPU,
-//! and on the GPU the same groups of as many whole tasks as its resident blocks hold, a batch that
+//! and on the GPU at least as many groups, of as many whole tasks as fill its resident blocks, a batch that
 //! costs about what one trajectory does -- so there the first batch is usually the last. A GPU that cannot run (none, an older
 //! driver, a model beyond its kernel) leaves the solve on the CPU with the reason
 //! (`Solution::device_note`); one that fails during the batches has the solve redone on the CPU.
@@ -138,10 +138,11 @@ pub const CONFIDENCE:f64=2.;
 pub const CLASSICAL:f64=4.;
 /// The most trajectories a solve runs; a solve stopped there returns its result with the reason.
 pub const MOST_TRAJECTORIES:u64=1<<14;
-/// A batch's group: a batch is cut into two groups per thread (jackknife groups and Latin
-/// hypercubes of initial states, lib.rs `Stratum`), so a batch's groups are as large as its size
-/// allows while the jackknife keeps at least that many.
-fn group(count:u64,threads:u64)->u64{(count/(2*threads)).max(1)}
+/// A batch's group: a batch is cut into `groups` groups -- two per thread on the CPU, at least as
+/// many on the GPU (gpu/mod.rs `Gpu::batch`) -- (jackknife groups and Latin hypercubes of initial
+/// states, lib.rs `Stratum`), so a batch's groups are as large as its size allows while the
+/// jackknife keeps at least that many.
+fn group(count:u64,groups:u64)->u64{(count/groups).max(1)}
 
 pub const NOT_CONFINED:&str="光镊不约束原子：3D 运动计算光镊中的单个原子，需要在焦点处形成势阱的光镊";
 
@@ -448,18 +449,18 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let mut twin=Twin::new(&model,intensity);
     let twin_means=twin.as_ref().map(|t|t.means(&model,&request.initial_density,interval,outputs));
     let means=|held:bool|->Vec<Means>{(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:twin_means.as_ref().filter(|_|held).map(|m|m[i])}).collect()};
+    // A batch is at least as wide as the device runs at once: on the CPU two groups per thread, on
+    // the GPU at least as many groups, of as many whole tasks as fill its resident blocks -- such a
+    // batch costs about what one trajectory does --, and there a whole number of its widths.
+    let(groups,width)=match &gpu{Some((g,_))=>g.lock().unwrap_or_else(|e|e.into_inner()).batch(2*threads),None=>(2*threads,2*threads)};
     let batch=|first:u64,count:u64,twin:Option<&Twin>|->Result<Outcome,Stop>{
         let variates=Variates{harmonic:&harmonic,twin};
         match &gpu{
-            None=>Ok(simulate(&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed,Some(&variates))),
-            Some((g,program))=>g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed,Some(&variates))
+            None=>Ok(simulate(&model,&settings,&initial,seed,first,count,group(count,groups),steps,outputs,&listed,Some(&variates))),
+            Some((g,program))=>g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,group(count,groups),steps,outputs,&listed,Some(&variates))
                 .map_err(Stop::Gpu),
         }
     };
-    // A batch is at least as wide as the device runs at once: on the CPU two groups per thread, on
-    // the GPU as many whole tasks per group as its resident blocks hold -- such a batch costs about
-    // what one trajectory does --, and there a whole number of its widths.
-    let width=match &gpu{Some((g,_))=>g.lock().unwrap_or_else(|e|e.into_inner()).width(2*threads),None=>2*threads};
     let whole=|count:u64|if gpu.is_some(){count.div_ceil(width)*width}else{count};
     let clock=Instant::now();
     let count=whole(pilot.max(width));
