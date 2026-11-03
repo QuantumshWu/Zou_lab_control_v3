@@ -1,18 +1,24 @@
 //! Semiclassical 3D motion of a single Rb87 atom in an optical tweezer: a classical point (r, p)
-//! in 3D carrying the internal state of the eliminated ground manifold (motion-core `ground`),
-//! evolved by quantum jumps.
+//! in 3D carrying the internal state of the eliminated ground manifold (`ground`), evolved by
+//! quantum jumps. The request (`request`) is the scene's model with its motion block; `ground` is
+//! its front end, the generator with the excited states eliminated, on the small dense linear
+//! algebra of `linear`.
 pub mod engine;
+pub mod ground;
+pub mod ledger;
+pub mod linear;
 pub mod model;
+pub mod request;
 pub mod rng;
 pub mod solve;
 pub mod stats;
 
+pub use request::{Beam,Complex,Matrix,Request,STATES};
 use engine::{Engine,Settings,Trajectory};
 use model::Model;
 use rayon::prelude::*;
 use rng::{normal_quantile,Rng};
 use stats::{Group,KT_PER_UK};
-use atom_motion_core::{Complex,Request,STATES};
 
 /// The initial internal states (block, position in the block, probability) and temperature.
 #[derive(Clone,Debug)]

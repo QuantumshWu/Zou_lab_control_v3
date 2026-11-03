@@ -33,7 +33,7 @@
 //! differ only in the time step make the same choices: the step-doubling check compares them.
 use crate::model::{Model,GROUND,MOST_STATES};
 use crate::rng::Rng;
-use atom_motion_core::Complex;
+use crate::Complex;
 
 /// A trajectory's state.
 #[derive(Clone,Debug)]

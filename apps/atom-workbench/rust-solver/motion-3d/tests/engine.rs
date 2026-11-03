@@ -10,7 +10,7 @@ use atom_motion_3d::rng::{normal_quantile,Rng};
 use atom_motion_3d::stats::{summarize,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,simulate,Initial,Stratum};
 use atom_motion_3d::solve::solve;
-use atom_motion_core::{Beam,Complex,Matrix,Request,STATES};
+use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 
 fn fixture()->Value{serde_json::from_str(include_str!("fixtures/tweezer_pgc.json")).unwrap()}
@@ -28,11 +28,12 @@ fn request(keep:&dyn Fn(&Value)->bool)->Request{
     let beams=r["beams"].as_array().unwrap().iter().filter(|b|keep(b)).map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
         direction:[d[0],d[1],d[2]],wave_number_per_um:b["waveNumberPerUm"].as_f64().unwrap(),waist_um:b["waistUm"].as_f64(),intensity_mw_cm2:b["intensityMWcm2"].as_f64().unwrap(),
         frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),
-        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"])}}).collect();
+        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"])}}).collect::<Vec<Beam>>();
+    let trap_beam=beams.iter().position(|b|b.waist_um.is_some()).unwrap_or(0);
     let e=r["emission"].as_array().unwrap();
     Request{states,hamiltonian:matrix(&r["hamiltonian"]),frame_frequencies_mhz:floats(&r["frameFrequenciesMHz"]),frequencies_mhz:floats(&r["frequenciesMHz"]),beams,
         emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],field_vector_g:[0.;3],mass_kg:r["massKg"].as_f64().unwrap(),initial_density:density,
-        temperature_uk:r["temperatureUK"].as_f64().unwrap(),times_us:vec![],tolerance:0.01}
+        temperature_uk:r["temperatureUK"].as_f64().unwrap(),trap_beam,times_us:vec![]}
 }
 /// A reproducible uniform stream in [−½, ½).
 fn uniform(seed:u64)->impl FnMut()->f64{let mut rng=Rng::new(seed,0);move||rng.uniform()-0.5}

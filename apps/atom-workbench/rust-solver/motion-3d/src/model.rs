@@ -1,4 +1,4 @@
-//! The 3D model: the eliminated ground generator of `atom_motion_core::ground` at any point r of
+//! The 3D model: the eliminated ground generator of `ground` at any point r of
 //! the request's frame and any momentum ħκ, from tables over the focused beams' intensities and
 //! the beams' fields at r.
 //!
@@ -41,9 +41,9 @@
 //! In the no-jump generator the term changes the light shift and the scattering by kv/Δ and is
 //! left out: with it, T and the populations of the 1D references TW1 and TW2 moved by less than
 //! their standard errors (8192 trajectories each).
-use atom_motion_core::ground::Ground;
-use atom_motion_core::linear::Dense;
-use atom_motion_core::{Complex,Request,STATES};
+use crate::ground::Ground;
+use crate::linear::Dense;
+use crate::{Complex,Request,STATES};
 use atom_population_core::lattice::accuracy::{A_PRIORI_SHARE,POPULATION_TOLERANCE};
 use rayon::prelude::*;
 

@@ -46,9 +46,10 @@
 //! the quantum T where the method cools too far, so the mark comes early rather than late).
 use crate::engine::{Engine,Settings,Trajectory};
 use crate::model::Model;
+use crate::ledger::Ledger;
 use crate::stats::{summarize,Estimate,Scales,KT_PER_UK};
 use crate::{sample_states,simulate,Initial,Outcome};
-use atom_motion_core::{Complex,Request,STATES};
+use crate::{Complex,Request,STATES};
 use atom_population_core::lattice::accuracy::{A_PRIORI_SHARE,POPULATION_TOLERANCE};
 use std::time::Instant;
 
@@ -84,6 +85,9 @@ pub struct Solution{
     pub sample_errors:Vec<f64>,
     pub temperature_uk:Vec<[f64;3]>,
     pub temperature_errors_uk:Vec<[f64;3]>,
+    /// T_total = (T_x + T_y + T_z)/3 and its standard error (stats.rs `Estimate`).
+    pub temperature_total_uk:Vec<f64>,
+    pub temperature_total_errors_uk:Vec<f64>,
     pub mean_velocity_mps:Vec<[f64;3]>,
     /// ω_a/2π (kHz) at the focus of the reference state's trap, and n̄ per axis relative to it.
     pub trap_frequency_khz:[f64;3],
@@ -98,6 +102,8 @@ pub struct Solution{
     pub time_step_us:f64,
     pub method:String,
     pub reason:Option<String>,
+    /// The a-priori approximations and their estimated errors (ledger.rs).
+    pub approximations:Ledger,
 }
 
 /// An estimate in the validated regime: k_B T ≥ CLASSICAL ħω along every axis (ω per axis).
@@ -140,6 +146,7 @@ fn histograms(samples:&[Vec<([f64;3],[f64;3])>],listed:&[usize],value:&dyn Fn(&(
 pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,String>{
     let model=Model::new(request)?;
     if model.focused.is_empty(){return Err(NOT_CONFINED.into());}
+    let ledger=approximations(&model,request)?;
     let initial=Initial::new(&model,request)?;
     // The reference state: the largest initial population; its trap sets ω per axis and the escape.
     let(block,state,_)=*initial.states.iter().max_by(|a,b|a.2.total_cmp(&b.2)).unwrap();
@@ -182,7 +189,7 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
         let mut estimates=summarize(&outcome.groups,&scales);start(&mut estimates[0],&model,&initial);
         let ratio=worst_ratio(&estimates,frequencies);
         let needed=((done as f64*ratio*ratio).ceil() as u64).min(MOST_TRAJECTORIES);
-        let mut solution=assemble(&model,&estimates,&outcome,&listed,frequencies,done,dt,&request.initial_density);
+        let mut solution=assemble(&model,&estimates,&outcome,&listed,frequencies,done,dt,&request.initial_density,&ledger);
         if needed<=done{
             if ratio>1.{solution.reason=Some(format!("统计误差为目标的 {ratio:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}"));}
             return Ok(solution);
@@ -195,6 +202,24 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
         outcome.groups.extend(more.groups);for(a,b)in outcome.samples.iter_mut().zip(more.samples){a.extend(b);}outcome.jumps+=more.jumps;
         done+=next;
     }
+}
+
+/// The ledger of the model's a-priori approximations (ledger.rs): the far components' fold (each
+/// one's m²), the secular step's largest dropped micromotion ε² (the Raman terms between and within
+/// the hyperfine blocks), the elimination's η², the first order in the Doppler shift at the initial
+/// thermal velocity, (k v_T/σ_min)², and the intensity tables' interpolation.
+fn approximations(model:&Model,request:&Request)->Result<Ledger,String>{
+    let g=&model.ground;let report=g.report()?;let mut ledger=Ledger::new();
+    let folded:f64=g.components.iter().filter(|c|c.folded).map(|c|(c.size/(c.nu.abs()-g.l0).max(f64::MIN_POSITIVE)).powi(2)).sum();
+    ledger.add("远失谐分量（光镊、反旋项）",folded,format!("二阶折叠（van Vleck 能移），{} 个分量",g.components.iter().filter(|c|c.folded).count()));
+    let raman=report.largest().map_or(0.,|t|t.micromotion.powi(2));
+    ledger.add("超精细块间与两组光之间的拉曼项",raman,"久期近似：略去".into());
+    ledger.add("消去激发态",report.eta.powi(2),"零阶绝热消去".into());
+    let thermal=(KT_PER_UK*request.temperature_uk*model.hbar_over_mass).sqrt();
+    let k=model.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max);
+    ledger.add("多普勒与反冲频移",(k*thermal/report.pole).powi(2),"一阶".into());
+    ledger.add("聚焦光的光强插值表",model.table_error,"三次插值".into());
+    Ok(ledger)
 }
 
 /// The step-doubling excess of a step (module documentation): the largest of the internal state's
@@ -220,12 +245,13 @@ fn start(e:&mut Estimate,model:&Model,initial:&Initial){
         for a in 0..3{let half=w[a]/(2.*kt);t[a]+=p*if half>0.{initial.temperature_uk*half/half.tanh()}else{initial.temperature_uk};}
     }
     e.temperature=t;e.temperature_error=[0.;3];e.mean_velocity=[0.;3];
+    e.temperature_total=t.iter().sum::<f64>()/3.;e.temperature_total_error=0.;
 }
 
 /// The solution of the estimates so far.
 /// At t = 0 the populations are the initial state's, as the request gives them (the light acts
 /// after), and so are T and the mean velocity (`start`).
-fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex])->Solution{
+fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex],ledger:&Ledger)->Solution{
     let hm=model.hbar_over_mass;
     let velocity=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.1[a]*hm));
     let position=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.0[a]));
@@ -235,6 +261,8 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
         sample_errors:estimates.iter().enumerate().map(|(i,e)|if i==0{0.}else{e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x))}).collect(),
         temperature_uk:estimates.iter().map(|e|e.temperature).collect(),
         temperature_errors_uk:estimates.iter().map(|e|e.temperature_error).collect(),
+        temperature_total_uk:estimates.iter().map(|e|e.temperature_total).collect(),
+        temperature_total_errors_uk:estimates.iter().map(|e|e.temperature_total_error).collect(),
         mean_velocity_mps:estimates.iter().map(|e|e.mean_velocity).collect(),
         trap_frequency_khz:frequencies.map(|w|w/std::f64::consts::TAU*1e3),
         mean_occupation:estimates.iter().map(|e|e.occupation).collect(),
@@ -244,5 +272,6 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
         trajectories,time_step_us:dt,
         method:format!("半经典 3D：经典质点（位置、动量）携带消去激发态后的基态内态，量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），{trajectories} 条轨迹，步长 {dt:.3} μs"),
         reason:None,
+        approximations:ledger.clone(),
     }
 }

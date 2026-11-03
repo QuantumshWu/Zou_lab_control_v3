@@ -405,14 +405,12 @@ test('the 3D tweezer PGC example: the same tweezer, σ+σ− cooling pairs along
   const [plus,minus]=cooling.map(l=>polarization(l,loaded.fields));
   assert.ok(Math.abs(plus.plus-1)<1e-12&&Math.abs(minus.minus-1)<1e-12,`${plus.plus} ${minus.minus}`);
 });
-test('the motion engines\' sentences are shown in Chinese',()=>{
-  const adapter=readFileSync(new URL('../rust-solver/src/motion_core_adapter.rs',import.meta.url),'utf8');
-  const partial=[...adapter.matchAll(/format!\("(The error bound is[^"]*)"/g)].map(m=>m[1].replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'));
-  assert.equal(partial.length,1);assert.match(solverText(partial[0]),/^误差界为 1，误差目标 1。$/);
+test('the motion engine\'s sentences are shown in Chinese',()=>{
   assert.equal(solverText('A motion request is a trajectory alone: meanOnly and includeMean are false'),'运动只计算时间演化，不计算长期布居。');
-  // The cores' refusals are written in Chinese: the 1D core's, and the 2D engine's without a trap or a GPU.
-  const core=readFileSync(new URL('../rust-solver/motion-core/src/lib.rs',import.meta.url),'utf8');
-  for(const name of ['NO_TRAP','NOT_CONFINED'])assert.match(new RegExp(`pub const ${name}:&str="([^"]+)";`).exec(core)?.[1]??'',/^[一-鿿]/,name);
-  const gpu=readFileSync(new URL('../rust-solver/motion-gpu/src/solve.rs',import.meta.url),'utf8'),device=readFileSync(new URL('../rust-solver/motion-gpu/src/gpu.rs',import.meta.url),'utf8');
-  assert.match(/pub const NO_TRAP:&str="([^"]+)";/.exec(gpu)?.[1]??'',/^[一-鿿]/);assert.match(/format!\("(2D 径向运动需要 NVIDIA 显卡[^"]*)"/.exec(device)?.[1]??'',/^2D 径向运动需要 NVIDIA 显卡/);
+  // The 3D engine's refusals and its device note are written in Chinese: motion along an axis or in
+  // a plane, a request for the GPU, and a scene whose light does not confine the atom.
+  const adapter=readFileSync(new URL('../rust-solver/src/motion3d_adapter.rs',import.meta.url),'utf8');
+  for(const name of ['ONLY_3D','GPU_PENDING'])assert.match(new RegExp(`pub const ${name}:&str="([^"]+)";`).exec(adapter)?.[1]??'',/^[一-鿿]/,name);
+  const solve=readFileSync(new URL('../rust-solver/motion-3d/src/solve.rs',import.meta.url),'utf8');
+  assert.match(/pub const NOT_CONFINED:&str="([^"]+)";/.exec(solve)?.[1]??'',/^[一-鿿]/);
 });

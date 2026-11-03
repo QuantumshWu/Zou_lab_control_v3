@@ -7,8 +7,8 @@ use atom_motion_3d::engine::Settings;
 use atom_motion_3d::model::Model;
 use atom_motion_3d::stats::{summarize,Scales};
 use atom_motion_3d::{simulate,Initial};
-use atom_motion_core::Complex;
-use atom_motion_core::linear::Dense;
+use atom_motion_3d::Complex;
+use atom_motion_3d::linear::Dense;
 
 fn main(){
     let args:Vec<String>=std::env::args().collect();let arg=|i:usize,d:&str|args.get(i).cloned().unwrap_or(d.into());

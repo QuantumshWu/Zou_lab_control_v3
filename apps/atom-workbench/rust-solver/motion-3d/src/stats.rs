@@ -1,6 +1,6 @@
 //! The ensemble's observables: sums over groups of trajectories at every output time, and their
 //! estimates with standard errors by the jackknife over the groups.
-use atom_motion_core::STATES;
+use crate::STATES;
 
 /// kB/ħ in rad/us per μK: a temperature T as the rate kT/ħ.
 pub const KT_PER_UK:f64=1.380649e-23/1.0545718176461565e-34*1e-12;
@@ -51,6 +51,10 @@ pub struct Estimate{
     /// T = m Var(v)/k_B per axis (μK), its standard error, the mean velocity (um/us).
     pub temperature:[f64;3],
     pub temperature_error:[f64;3],
+    /// T_total = (T_x + T_y + T_z)/3, the temperature of the 3D velocity variance (μK), and its
+    /// standard error from the same jackknife, so the axes' correlations are in it.
+    pub temperature_total:f64,
+    pub temperature_total_error:f64,
     pub mean_velocity:[f64;3],
     /// n̄ per axis relative to its trap frequency, and its standard error.
     pub occupation:[f64;3],
@@ -80,6 +84,7 @@ pub fn estimate(g:&Sums,s:&Scales)->Estimate{
         let x2=g.position2[a]/n;e.position2[a]=x2;let w=s.frequencies[a];
         e.occupation[a]=if w>0.{(second*s.hbar_over_mass/2.+w*w/s.hbar_over_mass*x2/2.)/w-0.5}else{0.};
     }
+    e.temperature_total=e.temperature.iter().sum::<f64>()/3.;
     e.populations=g.populations.iter().map(|p|p/n).collect();
     e
 }
@@ -90,11 +95,12 @@ pub fn summarize(groups:&[Group],s:&Scales)->Vec<Estimate>{
     (0..outputs).map(|i|{
         let all=groups.iter().skip(1).fold(groups[0].sums[i].clone(),|acc,g|acc.combine(&g.sums[i],1.));
         let mut e=estimate(&all,s);
-        if count<2{e.population_errors=vec![f64::INFINITY;STATES];e.temperature_error=[f64::INFINITY;3];e.occupation_error=[f64::INFINITY;3];e.loss_error=f64::INFINITY;return e;}
+        if count<2{e.population_errors=vec![f64::INFINITY;STATES];e.temperature_error=[f64::INFINITY;3];e.temperature_total_error=f64::INFINITY;e.occupation_error=[f64::INFINITY;3];e.loss_error=f64::INFINITY;return e;}
         let leave:Vec<Estimate>=groups.iter().map(|g|estimate(&all.combine(&g.sums[i],-1.),s)).collect();
         let factor=(count-1) as f64/count as f64;
         let spread=|f:&dyn Fn(&Estimate)->f64|->f64{let m=leave.iter().map(|x|f(x)).sum::<f64>()/count as f64;(factor*leave.iter().map(|x|(f(x)-m).powi(2)).sum::<f64>()).sqrt()};
         for a in 0..3{e.temperature_error[a]=spread(&|x|x.temperature[a]);e.occupation_error[a]=spread(&|x|x.occupation[a]);}
+        e.temperature_total_error=spread(&|x|x.temperature_total);
         e.population_errors=(0..STATES).map(|k|spread(&|x|x.populations[k])).collect();
         e.loss_error=spread(&|x|x.loss);
         e
