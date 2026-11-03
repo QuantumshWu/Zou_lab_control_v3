@@ -82,9 +82,10 @@ fn outside_share(model:&Model,cluster:usize,state:usize,trap:&Trap,depth:f64,kt:
 
 /// A state's thermal position on its trap's principal axes: the trap's Boltzmann distribution at T,
 /// e^{−U/k_BT} (U the state's potential, `Model::potential`), over the trap's region, where its
-/// harmonic approximation lies below its depth, U_h ≤ D (`Model::depth`). A finite trap's Boltzmann
-/// factor does not fall off past its depth -- U saturates there --, so no region holds all of it: the
-/// region is the trap's, the share a twice as deep one would add booked (`outside_share`). Drawn
+/// harmonic approximation lies below its depth, U_h ≤ D (`Model::depth`; a solve's loss takes the
+/// reference state's, engine.rs `Settings::region`). A finite trap's Boltzmann factor does not fall
+/// off past its depth -- U saturates there --, so no region holds all of it: the region is the trap's,
+/// the share a twice as deep one would add booked (`outside_share`). Drawn
 /// exactly, by rejection, in the coordinates z of the harmonic trap at 2T (U_h = k_BT |z|², the
 /// region |z|² ≤ D/k_BT): from the normal distribution there, accepted with e^{−U/k_BT + |z|²/2} --
 /// at most one where U ≥ U_h/2, as on the region of a Gaussian beam (it lies below its harmonic

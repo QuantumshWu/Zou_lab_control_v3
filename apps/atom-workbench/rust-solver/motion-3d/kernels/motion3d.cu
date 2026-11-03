@@ -215,6 +215,7 @@ struct Program{
     double hm64,dt;
     double axes[3][3],omega[3],stiffness[3];// the trap's principal axes (rows), ω_i (rad/us), ω_i²/(ħ/m)
     double half_flow[3][3];                 // the flow for dt/2 per axis: cos ωτ, (ħ/m) sin ωτ/ω, (m/ħ) ω sin ωτ
+    double region;                          // the trap's region the loss takes (engine.rs `Settings::region`), rad/us
 };
 
 // A trajectory's state between launches.
@@ -741,9 +742,14 @@ __device__ void flow(const Program& P,Traj& t,double tau){
     }
 }
 
+// The step's middle state the loss is judged at (engine.rs `Engine::step`): q and κ -- with half the
+// kick -- on the trap's principal axes, and the lane's entry of ψ after the first half step.
+struct Middle{double q[3],p[3];float2 psi;};
+
 // One step's flow, kick and internal evolution of length dt without jumps (engine.rs `advance`):
-// ln‖ψ‖² at the middle (`lh`) and the end (t.logn), the midpoint's point in W.pt and h0 there in L.
-__device__ void advance(const Program& P,Warp& W,Traj& t,double dt,int lane,double& lh,Local& L){
+// ln‖ψ‖² at the middle (`lh`) and the end (t.logn), the midpoint's point in W.pt and h0 there in L, the
+// middle state in M.
+__device__ void advance(const Program& P,Warp& W,Traj& t,double dt,int lane,double& lh,Local& L,Middle& M){
     COUNT(COUNT_ADVANCES);SPAN_BEGIN(start);
     flow(P,t,0.5*dt);
     point(P,W,t,lane);
@@ -754,6 +760,7 @@ __device__ void advance(const Program& P,Warp& W,Traj& t,double dt,int lane,doub
     exponential(P,W,E,0.5*dt,lane);
     SPAN_END(SPAN_EXPONENTIAL,propagator);SPAN_BEGIN(evolve);
     const float nh=apply(W.m[2],W.psi,C.n,lane);lh=t.logn+(double)logf(nh);
+    if(lane<MAXN)M.psi=W.psi[lane];
     // The Ehrenfest force −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ at the middle, less the harmonic part the flow takes.
     float s[3]={0.f,0.f,0.f};
     #pragma unroll
@@ -768,7 +775,10 @@ __device__ void advance(const Program& P,Warp& W,Traj& t,double dt,int lane,doub
     for(int a=0;a<3;a++)force[a]=-warp_sum(s[a])/norm;
     const float tau=(float)dt;
     #pragma unroll
-    for(int i=0;i<3;i++)t.p[i]+=(double)(tau*(P.axes32[i][0]*force[0]+P.axes32[i][1]*force[1]+P.axes32[i][2]*force[2]+P.stiffness32[i]*(float)t.q[i]));
+    for(int i=0;i<3;i++){
+        const double kick=(double)(tau*(P.axes32[i][0]*force[0]+P.axes32[i][1]*force[1]+P.axes32[i][2]*force[2]+P.stiffness32[i]*(float)t.q[i]));
+        M.q[i]=t.q[i];M.p[i]=t.p[i]+0.5*kick;t.p[i]+=kick;
+    }
     const float n1=apply(W.m[2],W.psi,C.n,lane);t.logn=lh+(double)logf(n1);
     flow(P,t,0.5*dt);
     t.time+=dt;
@@ -1284,32 +1294,46 @@ __device__ float trap(const Program& P,const Warp& W,const Cluster& C,const Entr
 
 // One step of dt (engine.rs `Engine::step`): flow, kick and flow; where ‖ψ‖² crosses the threshold
 // the step is redone to the crossing, the jump made there and the rest taken from the state it left.
-// True when the atom is lost at its end: its mechanical energy above the trap's far level.
+// True when the atom is lost in it: unbound -- its mechanical energy above the trap's far level --
+// outside the trap's region, judged at the step's middle where it went without a jump, else at its
+// end.
 __device__ bool step(const Program& P,const Run& R,Warp& W,Traj& t,int lane,float2* scratch){
     const float ratio=doppler_ratio(P,t,lane);const bool exact=ratio>P.allowance;
     if(!exact)t.doppler=fmaxf(t.doppler,ratio);
-    double left=P.dt;Local L;bool fresh=false;
+    double left=P.dt;Local L;Middle M;bool fresh=false;
     for(;;){
         const Traj start=t;
         if(lane<MAXN)W.start[lane]=W.psi[lane];
-        double lh;advance(P,W,t,left,lane,lh,L);
+        double lh;advance(P,W,t,left,lane,lh,L,M);
         if(t.logn>t.log_threshold)break;
         // The crossing on ln‖ψ‖², linear on the half where it lies; the step redone to it.
         double ta,tb,la,lb;
         if(lh<=t.log_threshold){ta=0.;tb=0.5*left;la=start.logn;lb=lh;}else{ta=0.5*left;tb=left;la=lh;lb=t.logn;}
         const double at=lb<la?fmin(fmax(ta+(t.log_threshold-la)/(lb-la)*(tb-ta),ta),tb):tb;
         t=start;__syncwarp();if(lane<MAXN)W.psi[lane]=W.start[lane];__syncwarp();
-        if(at>0.){double unused;advance(P,W,t,at,lane,unused,L);}
+        if(at>0.){double unused;advance(P,W,t,at,lane,unused,L,M);}
         {COUNT(COUNT_JUMPS);SPAN_BEGIN(jumping);jump(P,R,W,t,exact,lane,scratch);SPAN_END(SPAN_JUMP,jumping);}
         left-=at;
         if(!(left>0.)){point(P,W,t,lane);fresh=true;break;}
     }
     if(!P.loss)return false;
     SPAN_BEGIN(loss);
-    const double kinetic=0.5*P.hm64*(t.p[0]*t.p[0]+t.p[1]*t.p[1]+t.p[2]*t.p[2]);
-    const Cluster C=P.clusters[t.cluster];const Entries E(C.n,lane);
-    if(fresh){float2 slope[MOST_FOCUSED][SLOTS];gather<false>(P,W,false,P.tables+C.table+C.h0,C.size,E.nn,lane,L.h0,slope);}
-    const bool lost=kinetic+(double)trap(P,W,C,E,L.h0,t.time,true,lane)>0.&&kinetic+(double)trap(P,W,C,E,L.h0,t.time,false,lane)>0.;
+    // The state judged: the middle's (W.pt and L.h0 are its point's) where the step went without a jump.
+    const double* q=fresh?t.q:M.q;const double* p=fresh?t.p:M.p;const double time=fresh?t.time:t.time-0.5*left;
+    double harmonic=0.;
+    #pragma unroll
+    for(int i=0;i<3;i++)harmonic+=P.omega[i]*P.omega[i]*q[i]*q[i];
+    bool lost=false;
+    if(0.5*harmonic/P.hm64>P.region){
+        const double kinetic=0.5*P.hm64*(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]);
+        const Cluster C=P.clusters[t.cluster];const Entries E(C.n,lane);
+        if(fresh){float2 slope[MOST_FOCUSED][SLOTS];gather<false>(P,W,false,P.tables+C.table+C.h0,C.size,E.nn,lane,L.h0,slope);}
+        // ψ at the middle in W.psi while judged, the end's kept.
+        float2 end=zero2();
+        if(!fresh){__syncwarp();if(lane<MAXN){end=W.psi[lane];W.psi[lane]=M.psi;}__syncwarp();}
+        lost=kinetic+(double)trap(P,W,C,E,L.h0,time,true,lane)>0.&&kinetic+(double)trap(P,W,C,E,L.h0,time,false,lane)>0.;
+        if(!fresh){__syncwarp();if(lane<MAXN)W.psi[lane]=end;__syncwarp();}
+    }
     SPAN_END(SPAN_LOSS,loss);
     return lost;
 }

@@ -58,6 +58,7 @@ pub struct Params{
     hm64:f64,dt:f64,
     axes:[[f64;3];3],omega:[f64;3],stiffness:[f64;3],
     half_flow:[[f64;3];3],
+    region:f64,
 }
 
 /// The kernel's `State`: a trajectory between launches.
@@ -231,7 +232,7 @@ impl Program{
             field_carrier,field_rank,ground_states:std::array::from_fn(|b|g.ground_states[b] as i32),excited_states:std::array::from_fn(|i|g.excited_states[i] as i32),
             hm:hm as f32,light2:(2.*g.light) as f32,allowance:settings.doppler as f32,truncation:settings.truncation as f32,
             axes32:settings.axes.map(|a|a.map(|x|x as f32)),stiffness32:settings.frequencies.map(|w|(w*w/hm) as f32),
-            hm64:hm,dt:settings.dt,axes:settings.axes,omega:settings.frequencies,stiffness:settings.frequencies.map(|w|w*w/hm),half_flow,
+            hm64:hm,dt:settings.dt,axes:settings.axes,omega:settings.frequencies,stiffness:settings.frequencies.map(|w|w*w/hm),half_flow,region:settings.region,
         };
         let photons=g.clusters.iter().map(|c|c.classes.iter().map(|k|k.photons.len()).sum::<usize>()).max().unwrap_or(0);
         let mut program=Program{params,photons,weights,_buffers:buffers};program.params.weights=(program.scratch()-weights) as i32;
