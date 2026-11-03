@@ -1524,9 +1524,11 @@ impl Model{
 
     /// A cluster's generator against its jumps at a point and time: D = i(H − H†) − Σ L†L over its classes'
     /// photons, which a Lindblad generator keeps positive semidefinite -- its no-jump decay at least its
-    /// jumps' rate in every state. D's smallest eigenvalue, Σ L†L's largest and the eigenvalues' scale, the
-    /// largest of i(H − H†)'s and Σ L†L's (rad/us).
+    /// jumps' rate in every state -- at rest: the photons' first order in the Doppler and recoil shifts,
+    /// which the decay leaves out, aside (its own estimate). D's smallest eigenvalue, Σ L†L's largest and the
+    /// eigenvalues' scale, the largest of i(H − H†)'s and Σ L†L's (rad/us).
     pub fn decay_balance(&self,cluster:usize,p:&Point,t:f64)->(f64,f64,f64){
+        let mut p=*p;for f in p.fields.iter_mut(){f.doppler=[Complex::ZERO;MOST_RANK];}let p=&p;
         let n=self.dimension(cluster);let h=self.generator(cluster,p,t).hamiltonian;
         let decay=Dense::from_fn(n,n,|a,b|(h[a*n+b]-h[b*n+a].conj())*Complex::I);
         // Column b: the photons of the basis state b.

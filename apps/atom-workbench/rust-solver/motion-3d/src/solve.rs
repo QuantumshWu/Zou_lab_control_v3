@@ -417,8 +417,21 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The targets the fold's choice weighs (`Binding`): the populations' always, T's where the pilot's atoms
     // reach the method's regime -- elsewhere T is a reference only, and its charge must not choose.
     let binds=[true,Binding::of(&pilot_states,pilot_candidate.model.hbar_over_mass,trap.lab).temperature];
-    // The trajectories `rooms` need relative to `reference`'s over the binding targets.
-    let need=|reference:&[f64;2],rooms:&[f64;2]|(0..2).filter(|&k|binds[k]).map(|k|if rooms[k]>0.{(reference[k]/rooms[k]).powi(2)}else{f64::INFINITY}).fold(0.,f64::max);
+    // The pilot's statistics per target (its trajectories each a group of one, with the harmonic control):
+    // CONFIDENCE standard errors, the populations' and the loss's largest and T's at the outputs in the
+    // regime (`statistics`). The trajectories a model needs over the binding targets are (statistic/room)²
+    // times the pilot's -- the target with the larger need is what decides its trajectories.
+    let stats:[f64;2]={
+        let scales=Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab};
+        let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
+        let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&pilot_candidate.model,&pilot_candidate.initial);
+        e.iter().skip(1).map(|x|statistics(x,trap.lab)).fold([0.;2],|m,(p,t)|[m[0].max(p),m[1].max(t.unwrap_or(0.))])
+    };
+    let need_at=|rooms:&[f64;2]|(0..2).filter(|&k|binds[k]&&stats[k]>0.).map(|k|if rooms[k]>0.{(stats[k]/rooms[k]).powi(2)}else{f64::INFINITY}).fold(0.,f64::max);
+    // The trajectories `rooms` need relative to `reference`'s; without statistics (none spread), the larger
+    // ratio of the binding targets' rooms.
+    let need=|reference:&[f64;2],rooms:&[f64;2]|{let at=need_at(reference);
+        if at>0.{need_at(rooms)/at}else{(0..2).filter(|&k|binds[k]).map(|k|if rooms[k]>0.{(reference[k]/rooms[k]).powi(2)}else{f64::INFINITY}).fold(0.,f64::max)}};
     let pilot_waiting=pilot as f64*duration/(pilot_jumps.max(1) as f64);
     let mut reference:Option<Candidate>=None;
     // The ladder is walked for a fit only where the fold's charge is what keeps the pilot's model from
