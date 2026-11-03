@@ -22,7 +22,7 @@ fn main(){
     let settings=Settings::new(interval/steps as f64,&trap,f64::EPSILON,true);let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
     let threads=rayon::current_num_threads() as u64;let seed=0x3D_5EED;
     // The twin where the trap beam's intensity is the pilot's mean, as a solve places it.
-    let(states,_)=sample_states(&model,&settings,&initial,seed,2*threads,steps,outputs);
+    let(states,_,_)=sample_states(&model,&settings,&initial,seed,2*threads,steps,outputs,&Harmonic::new(&model,&settings,&initial,steps,outputs));
     let intensity=states.iter().map(|t|model.geometry[model.trap_beam].intensity(t.r)).sum::<f64>()/states.len().max(1) as f64;
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);let twin=Twin::new(&model,intensity);
     let clock=Instant::now();let exact=twin.as_ref().map(|t|t.means(&model,&request.initial_density,interval,outputs));
