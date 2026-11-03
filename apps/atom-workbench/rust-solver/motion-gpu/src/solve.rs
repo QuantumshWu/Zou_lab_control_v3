@@ -7,9 +7,9 @@
 //! batch, most on the small grids). A batch runs as long as it takes: between checkpoints the
 //! solve says how far it is every `BEAT_SECONDS`, which keeps the app's deadline.
 use crate::engine::{Cap,Internal,Settings,REC_EXCITED,REC_GROUND,REC_KX,REC_TAIL,REC_X};
-use crate::ensemble::{ladder,Ensemble,Place};
+use crate::ensemble::{class,levels,Ensemble,Place,LEVELS};
 use crate::gpu::Gpu;
-use crate::model::{Model,BOLTZMANN,HBAR};
+use crate::model::{Grid,Model,BOLTZMANN,HBAR};
 use crate::solution::{Distributions,Map,Running,Solution};
 use atom_motion_core::linear::Dense;
 use atom_motion_core::{Complex,Request,STATES};
@@ -168,10 +168,13 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool,running
     if !(omega[0]>0.&&omega[1]>0.){return Err(NO_TRAP.into());}
     let _=g;
     let hm=model.hbar_over_mass;
-    let steps_ladder=ladder(0.5*(omega[0]+omega[1]),hm);
-    let top=*steps_ladder.last().unwrap();
-    model.tabulate(top.reach())?;
-    let start=half_depth(&model,dominant,top.half_width()).min(0.85*top.half_width());
+    // The levels along each axis, for that axis's trap frequency; the largest grid reaches farthest,
+    // and the absorbing boundary starts within it.
+    let levels=[levels(omega[0],hm),levels(omega[1],hm)];
+    let largest=Grid{nx:levels[0][LEVELS-1].0,ny:levels[1][LEVELS-1].0,dx:levels[0][LEVELS-1].1,dy:levels[1][LEVELS-1].1};
+    model.tabulate(largest.reach())?;
+    let half=largest.half_width(0).min(largest.half_width(1));
+    let start=half_depth(&model,dominant,half).min(0.85*half);
     // Times: uniform from 0.
     let times=&request.times_us;
     if times.len()<2||times[0]!=0.{return Err("2D 运动需要从 0 开始的等间隔输出时刻".into());}
@@ -181,22 +184,24 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool,running
     let per=((spacing/LARGEST_STEP.min(period/COARSEST)).ceil() as usize).max(1);let dt=spacing/per as f64;
     let n_times=times.len();
     let samples:Vec<usize>={let s=DISTRIBUTION_SAMPLES.min(n_times);let mut v:Vec<usize>=(0..s).map(|k|((k as f64)*(n_times-1) as f64/((s-1).max(1)) as f64).round() as usize).collect();v.dedup();v};
-    let template=Settings{grid:steps_ladder[0],dt,period,trajectories:BATCH,seed:0x5EED_2D,cap:Some(Cap{start,rate:CAP_RATE}),scene:scene(request)};
+    let template=Settings{grid:largest,dt,period,trajectories:BATCH,seed:0x5EED_2D,cap:Some(Cap{start,rate:CAP_RATE,half}),scene:scene(request)};
     let(free,_)=gpu.context.memory()?;
     let tolerance=request.tolerance;
     let groups=groups(&request.states)?;
-    let mut ensemble=Ensemble::new(gpu.clone(),template,steps_ladder.clone(),BATCH,free/2,tolerance);
-    // The initial grid: the smallest whose half width and largest momentum are five thermal widths.
+    let mut ensemble=Ensemble::new(gpu.clone(),template,levels,BATCH,free/2,tolerance);
+    // The initial grid: along each axis the smallest level whose half width and largest momentum
+    // are five thermal widths.
     let temperature=request.temperature_uk;
     let kt=BOLTZMANN*temperature*1e-6/HBAR*1e-6; // k_B T in rad/us
-    let x_t=(kt*hm).sqrt()/omega[0].min(omega[1]);let k_t=(kt/hm).sqrt();
-    // (Beyond the top grid's reach the thermal state's tail is above half the trap's depth: the top
-    // grid takes it and its absorbing boundary the tail.)
-    let mut first=steps_ladder.iter().position(|q|q.half_width()>=5.*x_t&&std::f64::consts::PI/q.dx>=5.*k_t).unwrap_or(steps_ladder.len()-1);
-    // Display grids: the first grid's positions and velocities.
-    let display=steps_ladder[first];
+    let(x_t,k_t)=([(kt*hm).sqrt()/omega[0],(kt*hm).sqrt()/omega[1]],(kt/hm).sqrt());
+    // (Beyond the largest grid's reach the thermal state's tail is above half the trap's depth: the
+    // largest grid takes it and its absorbing boundary the tail.)
+    let level=|a:usize|levels[a].iter().position(|&(n,d)|n as f64*d/2.>=5.*x_t[a]&&std::f64::consts::PI/d>=5.*k_t).unwrap_or(LEVELS-1);
+    let mut first=[level(0),level(1)];
+    // Display grids: the first grid's positions and velocities along x (the maps square on them).
+    let display=ensemble.grids[class(first[0],first[1])];
     let positions:Vec<f64>=(0..display.nx).map(|i|display.x(i)).collect();
-    let velocities:Vec<f64>={let mut v:Vec<f64>=(0..display.nx).map(|m|hm*display.wave_number(m,display.nx)).collect();v.sort_by(f64::total_cmp);v};
+    let velocities:Vec<f64>={let mut v:Vec<f64>=(0..display.nx).map(|m|hm*display.wave_number(m,0)).collect();v.sort_by(f64::total_cmp);v};
     let mut sums=vec![Sums::new();n_times];
     let mut vbins:Vec<[Vec<f64>;2]>=samples.iter().map(|_|[vec![0.;velocities.len()],vec![0.;velocities.len()]]).collect();
     let mut pbins:Vec<Vec<f64>>=samples.iter().map(|_|vec![0.;positions.len()*positions.len()]).collect();
@@ -210,18 +215,23 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool,running
     let(steps,duration)=((n_times-1)*per,times[n_times-1]);
     for batch in 0..{
         if run>=MOST_TRAJECTORIES{break;}
-        let batch_size=size.min(MOST_TRAJECTORIES-run).min(ensemble.capacity(first));
+        // At most what the device's budget holds: on the first grid, and at the last batch's
+        // largest footprint per trajectory over the grids.
+        let room=ensemble.batch_room().map_or(usize::MAX,|n|(n/FEWEST*FEWEST).max(FEWEST));
+        let batch_size=size.min(MOST_TRAJECTORIES-run).min(ensemble.capacity(class(first[0],first[1]))).min(room);
         let(internal,weights)=stratified(&initial,batch_size);
         let(begun,built)=(std::time::Instant::now(),ensemble.seconds[3]);
         ensemble.reseed(0x5EED_2D^((batch as u64+1)*0x9E37_79B9_7F4A_7C15))?;
         loop{
-            ensemble.start(first,&internal,temperature,&model)?;
+            ensemble.start(class(first[0],first[1]),&internal,temperature,&model)?;
             ensemble.scale_weights(&weights)?;
             ensemble.observe_initial(samples.contains(&0))?;
             let records=ensemble.records()?;
-            // Tails beyond the start grid: start one higher.
-            if records.iter().flatten().any(|r|{let s=|t:usize,m:usize|if r[m]>0.{(r[t]/r[m]) as f64}else{0.};
-                (0..2).any(|d|s(REC_TAIL+d,REC_X+2+d)>tolerance||s(REC_TAIL+2+d,REC_KX+2+d)>tolerance)})&&first+1<steps_ladder.len(){first+=1;continue;}
+            // Tails beyond the start grid along an axis: start a level higher along it.
+            let over=|a:usize|records.iter().flatten().any(|r|{let s=|t:usize,m:usize|if r[m]>0.{(r[t]/r[m]) as f64}else{0.};
+                s(REC_TAIL+a,REC_X+2+a)>tolerance||s(REC_TAIL+2+a,REC_KX+2+a)>tolerance});
+            let raise=[over(0)&&first[0]+1<LEVELS,over(1)&&first[1]+1<LEVELS];
+            if raise[0]||raise[1]{for a in 0..2{if raise[a]{first[a]+=1;}}continue;}
             accumulate(&model,&groups,&ensemble,&records,&mut sums[0]);census[0]=ensemble.census();
             if let Some(i)=samples.iter().position(|&s|s==0){collect(&mut ensemble,&positions,&velocities,&mut vbins[i],&mut pbins[i])?;}
             ensemble.migrate(&records,&model)?;
@@ -252,7 +262,7 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool,running
         let wall=begun.elapsed().as_secs_f64()-(ensemble.seconds[3]-built);
         run+=batch_size;cost=wall/batch_size as f64;
         solution=assemble(&model,&sums,omega,&samples,&velocities,&vbins,&positions,&pbins,run,ensemble.refused);
-        solution.grids=steps_ladder.iter().map(|q|q.nx).collect();solution.census=census.clone();solution.seconds=ensemble.seconds;
+        solution.grids=ensemble.grids.iter().map(|q|(q.nx,q.ny)).collect();solution.census=census.clone();solution.seconds=ensemble.seconds;
         let(population,temperature_error)=(solution.sample_errors.iter().fold(0.,|a:f64,&b|a.max(b)),
             solution.temperature_uk.iter().zip(&solution.temperature_errors_uk).map(|(t,e)|(0..2).map(|d|if t[d]>0.{e[d]/t[d]}else{0.}).fold(0.,f64::max)).fold(0.,f64::max));
         let met=population<=tolerance&&temperature_error<=TEMPERATURE_TOLERANCE;
@@ -297,12 +307,12 @@ fn collect(ensemble:&mut Ensemble,positions:&[f64],velocities:&[f64],vbins:&mut 
     for engine in ensemble.engines(){
         let g=engine.grid();let hm=engine.hbar_over_mass();
         let(mx,my,density)=engine.read_distributions()?;
-        let v:Vec<f64>=(0..g.nx).map(|m|hm*g.wave_number(m,g.nx)).collect();
-        bin(velocities,&v,&mx.iter().map(|&x|x as f64).collect::<Vec<_>>(),&mut vbins[0]);
-        bin(velocities,&v,&my.iter().map(|&x|x as f64).collect::<Vec<_>>(),&mut vbins[1]);
+        let v=|a:usize|->Vec<f64>{(0..g.axis(a).0).map(|m|hm*g.wave_number(m,a)).collect()};
+        bin(velocities,&v(0),&mx.iter().map(|&x|x as f64).collect::<Vec<_>>(),&mut vbins[0]);
+        bin(velocities,&v(1),&my.iter().map(|&x|x as f64).collect::<Vec<_>>(),&mut vbins[1]);
         for p in 0..g.points(){
             let(r,d)=(g.position(p),density[p] as f64);if d==0.{continue;}
-            let rows:Vec<(usize,f64)>=overlaps(positions,r[1],g.dx).collect();
+            let rows:Vec<(usize,f64)>=overlaps(positions,r[1],g.dy).collect();
             for(i,fx)in overlaps(positions,r[0],g.dx){for &(j,fy)in &rows{pbins[j*n+i]+=d*fx*fy;}}
         }
         engine.clear_distributions()?;
@@ -332,8 +342,8 @@ fn assemble(model:&Model,sums:&[Sums],omega:[f64;2],samples:&[usize],velocities:
     let normalize=|v:&[f64]|->Vec<f64>{let t:f64=v.iter().map(|x|x.max(0.)).sum();v.iter().map(|x|if t>0.{x.max(0.)/t}else{0.}).collect()};
     for d in 0..2{s.velocity[d]=Distributions{grid:velocities.to_vec(),samples:samples.to_vec(),probabilities:vbins.iter().map(|b|normalize(&b[d])).collect()};}
     s.position=Map{grid:positions.to_vec(),samples:samples.to_vec(),probabilities:pbins.iter().map(|b|normalize(b)).collect()};
-    s.method=format!("量子轨迹（蒙特卡洛波函数，{run} 条，GPU）：激发态按位置绝热消去，含一阶多普勒与反冲；Strang 分裂，局部指数精确，跃迁在步中点，光子方向按偶极辐射图样抽样；每条轨迹在能容纳它的最小网格上运行{}",
-        if refused>0{format!("（{refused} 次因显存不足未能升到更大网格）")}else{String::new()});
+    s.method=format!("量子轨迹（蒙特卡洛波函数，{run} 条，GPU）：激发态按位置绝热消去，含一阶多普勒与反冲（多普勒项每个径向周期踢一次）；Strang 分裂，局部指数精确，跃迁在步中点，光子方向按偶极辐射图样抽样；每条轨迹在沿每个轴都能容纳它的最小网格上运行{}",
+        if refused>0{format!("（{refused} 次因显存不足未能换到更大的网格）")}else{String::new()});
     s
 }
 

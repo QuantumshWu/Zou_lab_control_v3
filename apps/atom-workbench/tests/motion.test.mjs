@@ -29,6 +29,8 @@ const N=32,C=299792458;
 const axis=name=>({reference:{kind:'axis',axis:name},thetaDeg:0,phiDeg:0});
 /** The tweezer PGC example: the 852 nm tweezer along z, the cooling and repump pairs along ±x, B = 0, motion along x. */
 const pgc=()=>exampleScene('pgc').scene;
+/** The standard-error bands of a series chart, by their ink. */
+const errorBands=svg=>[...svg.matchAll(/<polygon points="[^"]+" fill="(#[0-9A-Fa-f]+)" fill-opacity="0.16"/g)].map(m=>m[1]);
 /** Another focused beam: a copy of the example's tweezer along `direction`. */
 const tweezer=(scene,id,name,direction)=>({...structuredClone(scene.lasers.find(l=>l.id==='tweezer')),id,name,direction});
 
@@ -228,6 +230,8 @@ test('a motion result is read strictly: its block is there exactly when asked, o
     momentum:[{grid:block.momentum.velocitiesMps,samples:[0,2],probabilities:block.momentum.probabilities}],
     position:[{grid:block.position.positionsUm,samples:[0,2],probabilities:block.position.probabilities}]});
   assert.equal(result.mean.status,'not-requested');
+  // The 1D engine's T has no standard error: no band.
+  assert.deepEqual(errorBands(seriesChart(result.timesUs,motionSeries(result.motion,'temperature'),'ms')),[]);
   const without=motionResult(scene);delete without.motion;assert.throws(()=>read(without),/运动结果/);
   assert.throws(()=>normalizeDynamicsResult(motionResult(scene),scene),/运动结果/,'a block nobody asked for');
   for(const [label,change] of [
@@ -244,7 +248,9 @@ test('a motion result is read strictly: its block is there exactly when asked, o
 test('a 2D motion result is read strictly: per axis of the requested plane, the marginals on one grid, the maps on a uniform one',()=>{
   const scene=pgc();scene.dynamics.motion.axis='xy';
   const request=motionRequest(scene,scene.dynamics),read=data=>normalizeDynamicsResult(data,scene,undefined,undefined,request),block=planeBlock(3);
-  const motion=read(motionResult(scene,3,block)).motion;
+  const read2d=read(motionResult(scene,3,block)),motion=read2d.motion;
+  // Its T carries its standard error: a band of ±1 around each axis's line.
+  assert.deepEqual(errorBands(seriesChart(read2d.timesUs,motionSeries(motion,'temperature'),'ms')),['#517FA6','#B17D4B']);
   // Read per axis of the plane; the maps are kept, their marginals (each summed over the other axis) are the positions.
   const map=block.position.probabilities[0],marginal=along=>[0,1,2].map(i=>[0,1,2].reduce((sum,j)=>sum+map[along===0?j*3+i:i*3+j],0));
   assert.deepEqual(motion,{...block,momentum:block.momentum.map(m=>({grid:m.velocitiesMps,samples:m.samples,probabilities:m.probabilities})),
@@ -316,6 +322,10 @@ test('3D motion (semiclassical): asked for with a tweezer, its block on the lab 
     assert.deepEqual(bands(chart).map(([x,y,w,h])=>[x,x+w,y,y+h]),[[599.5,778,32,176],[599.5,778,212,300]],kind);assert.match(chart,/k_BT ≥ 4ħω 才验证过/);
     assert.deepEqual(bands(seriesChart(timesUs,motionSeries(result.motion,kind),'ms')),[],`${kind}: none unmarked`);
   }
+  // A trajectory method's T carries its standard error, a band of ±1 around each axis's line; n̄'s
+  // panel has none.
+  assert.deepEqual(errorBands(seriesChart(timesUs,motionSeries(result.motion,'temperature'),'ms')),['#517FA6','#B17D4B','#568C79']);
+  assert.deepEqual(errorBands(seriesChart(timesUs,motionSeries(result.motion,'trap'),'ms')),[]);
   const id=scene.dynamics.initialStateId;
   assert.deepEqual(bands(populationChart(result,[id],{[id]:'初态'},{showTotalExcited:false,reference})).map(([x,y,w,h])=>[x,x+w,y,y+h]),[[599.5,778,32,300]]);
   for(const [label,change] of [

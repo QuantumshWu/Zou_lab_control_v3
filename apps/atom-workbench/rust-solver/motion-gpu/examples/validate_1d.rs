@@ -23,7 +23,7 @@ fn main(){
     // DIAGNOSTIC: free space -- the tweezer removed, the plane waves kept (a periodic box).
     if std::env::var("ATOM_GPU_FREE_SPACE").is_ok(){request.beams.retain(|b|b.waist_um.is_none());}
     let mut model=Model::new(&request).unwrap();
-    let grid=Grid{nx,ny:1,dx:2.*half/nx as f64};
+    let grid=Grid{nx,ny:1,dx:2.*half/nx as f64,dy:0.};
     // DIAGNOSTIC: a magic tweezer -- its fold and outside shift kept on the ground states only.
     if std::env::var("ATOM_GPU_MAGIC").is_ok(){
         let excited=model.ground.excited_states.clone();
@@ -53,8 +53,8 @@ fn main(){
     let g=&model.ground;
     let index=request.states.iter().position(|s|s=="ground-2-2").unwrap();
     let b22=g.ground_states.iter().position(|&i|i==index).unwrap();
-    let omega=model.trap_frequency(b22,0).max(1e-9);let period=std::f64::consts::TAU/omega/std::env::var("ATOM_GPU_KICK_DIVISOR").ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(1.);
-    let settings=Settings{grid,dt,period,trajectories:b,seed,cap:(half>ABSORB).then_some(Cap{start:ABSORB,rate:20.}),scene:0};
+    let omega=model.trap_frequency(b22,0).max(1e-9);let period=std::f64::consts::TAU/omega;
+    let settings=Settings{grid,dt,period,trajectories:b,seed,cap:(half>ABSORB).then_some(Cap{start:ABSORB,rate:20.,half}),scene:0};
     let start=std::time::Instant::now();
     let mut engine=Engine::new(std::rc::Rc::new(Gpu::new().unwrap()),&model,settings).unwrap();
     println!("{} x {}, dx {:.2} nm (k_max {:.0} hbar k), dt {dt} us, o1 kick every {period:.2} us, {b} trajectories; tables {:.2} s",

@@ -110,14 +110,12 @@ __device__ float block_sum(float v,float* scratch){
 // STEP     plane <- K_y K_x (scale * plane), K given per frequency position by `tx`, `ty` (with 1/N);
 // OBSERVE  the same, adding the plane's momentum moments to the trajectory's record and its
 //          weighted |psi(k)|^2 to the marginals (by frequency position);
-// DERIVE   dx <- kappa_x plane, dy <- kappa_y plane (tx, ty: kappa/N), the plane unchanged;
-// STEP_DERIVE  STEP, then dx, dy of the stepped plane (kx, ky: kappa/N).
+// DERIVE   dx <- kappa_x plane, dy <- kappa_y plane (tx, ty: kappa/N), the plane unchanged.
 #define MODE_STEP 0
 #define MODE_OBSERVE 1
 #define MODE_DERIVE 2
-#define MODE_STEP_DERIVE 3
 struct PlaneArgs{
-    const float2* tx;const float2* ty;const float2* kx;const float2* ky;
+    const float2* tx;const float2* ty;
     float2* dx;float2* dy;
     const float* kappa_x;const float* kappa_y;float tail_x,tail_y;
     float* record;float weight;float* marginal_x;float* marginal_y;
@@ -197,47 +195,6 @@ __device__ void plane_pass(float2* __restrict__ plane,float scale,const PlaneArg
     }
     float2* out=MODE==MODE_DERIVE?(NY>1?a.dy:nullptr):plane;
     if(out)for(int i=threadIdx.x;i<NX*NY;i+=blockDim.x)out[i]=sm[(i/NX)*S+i%NX];
-    if constexpr(MODE==MODE_STEP_DERIVE){
-        // kappa_x and kappa_y of the stepped plane, from its copy in shared memory.
-        {
-            constexpr int teams=32/FX::T;const int t=lane%FX::T,team=lane/FX::T;
-            FX f;f.init(t);float2 factor[FX::E];
-            #pragma unroll
-            for(int e=0;e<FX::E;e++)factor[e]=__ldg(a.kx+e*FX::T+t);
-            for(int r0=warp*teams;r0<NY;r0+=warps*teams){
-                const int r=r0+team;const bool ok=r<NY;float2 v[FX::E];
-                #pragma unroll
-                for(int e=0;e<FX::E;e++)v[e]=ok?sm[r*S+e*FX::T+t]:make_float2(0.f,0.f);
-                f.forward(v,t);
-                #pragma unroll
-                for(int e=0;e<FX::E;e++)v[e]=cmul(v[e],factor[e]);
-                f.inverse(v,t);
-                if(ok){
-                    #pragma unroll
-                    for(int e=0;e<FX::E;e++)a.dx[r*NX+e*FX::T+t]=v[e];
-                }
-            }
-        }
-        if constexpr(NY>1){
-            constexpr int teams=32/FY::T;const int t=lane%FY::T,team=lane/FY::T;
-            FY f;f.init(t);float2 factor[FY::E];
-            #pragma unroll
-            for(int e=0;e<FY::E;e++)factor[e]=__ldg(a.ky+e*FY::T+t);
-            for(int c0=warp*teams;c0<NX;c0+=warps*teams){
-                const int c=c0+team;const bool ok=c<NX;float2 v[FY::E];
-                #pragma unroll
-                for(int e=0;e<FY::E;e++)v[e]=ok?sm[(e*FY::T+t)*S+c]:make_float2(0.f,0.f);
-                f.forward(v,t);
-                #pragma unroll
-                for(int e=0;e<FY::E;e++)v[e]=cmul(v[e],factor[e]);
-                f.inverse(v,t);
-                if(ok){
-                    #pragma unroll
-                    for(int e=0;e<FY::E;e++)a.dy[(e*FY::T+t)*NX+c]=v[e];
-                }
-            }
-        }
-    }
 }
 // Shared memory: the plane, then (OBSERVE) NX + NY marginal bins and 32 reduction slots.
 #define PLANE_KERNELS(NX,NY) \
@@ -247,15 +204,6 @@ extern "C" __global__ void __launch_bounds__(256) kinetic_##NX##x##NY(float2* st
     if(c>=components[t])return; \
     PlaneArgs a={};a.tx=tx;a.ty=ty; \
     plane_pass<NX,NY,MODE_STEP>(state+(u64)plane*(NX*NY),scale[t],a,sm,nullptr); \
-} \
-/* The step, and kappa psi of the stepped planes into dx and dy (kx, ky: kappa/N). */ \
-extern "C" __global__ void __launch_bounds__(256) kinetic_derive_##NX##x##NY(float2* state,const int* __restrict__ components,const float* __restrict__ scale,const float2* tx,const float2* ty, \
-        const float2* kx,const float2* ky,float2* dx,float2* dy){ \
-    extern __shared__ float2 sm[]; \
-    const int plane=blockIdx.x,t=plane/COMPONENTS,c=plane%COMPONENTS; \
-    if(c>=components[t])return; \
-    PlaneArgs a={};a.tx=tx;a.ty=ty;a.kx=kx;a.ky=ky;a.dx=dx+(u64)plane*(NX*NY);a.dy=dy+(u64)plane*(NX*NY); \
-    plane_pass<NX,NY,MODE_STEP_DERIVE>(state+(u64)plane*(NX*NY),scale[t],a,sm,nullptr); \
 } \
 extern "C" __global__ void __launch_bounds__(256) observe_kinetic_##NX##x##NY(float2* state,const int* __restrict__ components,const float* __restrict__ scale,const float2* tx,const float2* ty, \
         const float* kappa_x,const float* kappa_y,float tail_x,float tail_y,float* records,const float* weights,float* marginal_x,float* marginal_y){ \
@@ -281,22 +229,24 @@ extern "C" __global__ void __launch_bounds__(256) derive_##NX##x##NY(const float
         __syncthreads(); \
     } \
 }
-PLANE_KERNELS(16,16)
-PLANE_KERNELS(32,32)
-PLANE_KERNELS(64,64)
-PLANE_KERNELS(64,1)
-PLANE_KERNELS(128,1)
-PLANE_KERNELS(256,1)
+// The grids of at most 4096 points (src/engine.rs GRIDS): each axis 16 to 256 points; and the
+// row of 512 points (examples/validate_1d.rs).
+PLANE_KERNELS(16,16) PLANE_KERNELS(16,32) PLANE_KERNELS(16,64) PLANE_KERNELS(16,128) PLANE_KERNELS(16,256)
+PLANE_KERNELS(32,16) PLANE_KERNELS(32,32) PLANE_KERNELS(32,64) PLANE_KERNELS(32,128)
+PLANE_KERNELS(64,16) PLANE_KERNELS(64,32) PLANE_KERNELS(64,64)
+PLANE_KERNELS(128,16) PLANE_KERNELS(128,32)
+PLANE_KERNELS(256,16)
 PLANE_KERNELS(512,1)
-PLANE_KERNELS(1024,1)
 
 // ---------------------------------------------------------------------------------------------
-// Planes too large for shared memory (N x N, N >= 128): the same passes as two kernels, the rows
-// (K_x) through registers, then the columns (K_y) through a tile of TILE columns in shared
-// memory; a warp takes one row or column. MODE as plane_pass: STEP, OBSERVE (the x moments in
+// Planes too large for shared memory (NX x NY, more than 4096 points, each axis at least 32): the
+// same passes as two kernels, the rows (K_x) through registers, then the columns (K_y) through a
+// tile of TILE columns in shared memory; a warp takes one row or column. MODE as plane_pass: STEP, OBSERVE (the x moments in
 // the rows, the y moments in the columns) and DERIVE (the rows write kappa_x psi to dx, the
 // columns kappa_y psi to dy; psi unchanged). A pass covers plane slots p: all planes, or with a
-// list the planes of the `count` listed trajectories (slot p: trajectory list[p/5]).
+// list the planes of the `count` listed trajectories (slot p: trajectory list[p/5]). The
+// renormalization `scale` is applied by whichever pass runs first (K_x and K_y commute): the rows
+// pass, or the columns pass before the rows fused with the local step (`rows_local`).
 #define TILE 8
 struct Planes{const int* list;const int* count;};
 // Trajectory and plane of slot p, or false when the slot is empty or the component unused.
@@ -305,45 +255,46 @@ __device__ __forceinline__ bool slot_plane(const Planes& P,const int* components
     if(P.list){const long long s=p/COMPONENTS;if(s>=*P.count)return false;t=P.list[s];}else t=(int)(p/COMPONENTS);
     plane=(u64)t*COMPONENTS+c;return c<components[t];
 }
-template<int N,int MODE>
+template<int NX,int NY,int MODE>
 __device__ void rows_pass(float2* state,const int* components,const float* scale,const PlaneArgs& a,const Planes& P){
-    using F=Fft<N>;
+    using F=Fft<NX>;
     const int lane=threadIdx.x&31,warp=threadIdx.x>>5;
     const long long row=(long long)blockIdx.x*(blockDim.x>>5)+warp;
-    int t;u64 plane;if(!slot_plane(P,components,row/N,t,plane))return;   // the whole warp leaves together
-    const int y=(int)(row%N);
+    int t;u64 plane;if(!slot_plane(P,components,row/NY,t,plane))return;   // the whole warp leaves together
+    const int y=(int)(row%NY);
     F f;f.init(lane);
-    float2* p=state+plane*N*N+(u64)y*N;
+    float2* p=state+plane*NX*NY+(u64)y*NX;
     float2 v[F::E];
     const float s=MODE==MODE_DERIVE?1.f:scale[t];
     #pragma unroll
     for(int e=0;e<F::E;e++)v[e]=cscale(p[e*32+lane],s);
     f.forward(v,lane);
     if(MODE==MODE_OBSERVE){
-        float m1=0.f,m2=0.f,mt=0.f,ms=0.f;const float w=a.weights[t]*(1.f/N);
+        float m1=0.f,m2=0.f,mt=0.f,ms=0.f;const float w=a.weights[t]*(1.f/NX);
         #pragma unroll
         for(int e=0;e<F::E;e++){const float q=norm2(v[e]),k=__ldg(a.kappa_x+e*32+lane);m1+=q*k;m2+=q*k*k;if(fabsf(k)>a.tail_x)mt+=q*k*k;if(fabsf(k)>a.tail_x*SMALLER)ms+=q*k*k;
             if(a.marginal_x)atomicAdd(a.marginal_x+e*32+lane,q*w);}
         m1=warp_sum(m1);m2=warp_sum(m2);mt=warp_sum(mt);ms=warp_sum(ms);
-        if(lane==0){float* r=a.records+(u64)t*RECORD;atomicAdd(r+REC_KX,m1/N);atomicAdd(r+REC_KX+2,m2/N);atomicAdd(r+REC_TAIL+2,mt/N);atomicAdd(r+REC_TAIL2+2,ms/N);}
+        if(lane==0){float* r=a.records+(u64)t*RECORD;atomicAdd(r+REC_KX,m1/NX);atomicAdd(r+REC_KX+2,m2/NX);atomicAdd(r+REC_TAIL+2,mt/NX);atomicAdd(r+REC_TAIL2+2,ms/NX);}
     }
     #pragma unroll
     for(int e=0;e<F::E;e++)v[e]=cmul(v[e],__ldg(a.tx+e*32+lane));
     f.inverse(v,lane);
-    float2* out=MODE==MODE_DERIVE?a.dx+plane*N*N+(u64)y*N:p;
+    float2* out=MODE==MODE_DERIVE?a.dx+plane*NX*NY+(u64)y*NX:p;
     #pragma unroll
     for(int e=0;e<F::E;e++)out[e*32+lane]=v[e];
 }
-template<int N,int MODE>
-__device__ void cols_pass(float2* state,const int* components,const PlaneArgs& a,const Planes& P,float2* sm){
-    using F=Fft<N>;
+template<int NX,int NY,int MODE>
+__device__ void cols_pass(float2* state,const int* components,const float* scale,const PlaneArgs& a,const Planes& P,float2* sm){
+    using F=Fft<NY>;
     const int lane=threadIdx.x&31,warp=threadIdx.x>>5;
-    constexpr int tiles=N/TILE;
+    constexpr int tiles=NX/TILE;
     int t;u64 plane;if(!slot_plane(P,components,blockIdx.x/tiles,t,plane))return;  // the whole block leaves together
     const int x0=(blockIdx.x%tiles)*TILE;
-    float2* p=state+plane*N*N;
+    float2* p=state+plane*NX*NY;
     constexpr int S=TILE+1;
-    for(int i=threadIdx.x;i<N*TILE;i+=blockDim.x)sm[(i/TILE)*S+i%TILE]=p[(u64)(i/TILE)*N+x0+i%TILE];
+    const float s=scale?scale[t]:1.f;
+    for(int i=threadIdx.x;i<NY*TILE;i+=blockDim.x)sm[(i/TILE)*S+i%TILE]=cscale(p[(u64)(i/TILE)*NX+x0+i%TILE],s);
     __syncthreads();
     float m1=0.f,m2=0.f,mt=0.f,ms=0.f;
     if(warp<TILE){
@@ -352,7 +303,7 @@ __device__ void cols_pass(float2* state,const int* components,const PlaneArgs& a
         for(int e=0;e<F::E;e++)v[e]=sm[(e*32+lane)*S+warp];
         f.forward(v,lane);
         if(MODE==MODE_OBSERVE){
-            const float w=a.weights[t]*(1.f/N);
+            const float w=a.weights[t]*(1.f/NY);
             #pragma unroll
             for(int e=0;e<F::E;e++){const float q=norm2(v[e]),k=__ldg(a.kappa_y+e*32+lane);m1+=q*k;m2+=q*k*k;if(fabsf(k)>a.tail_y)mt+=q*k*k;if(fabsf(k)>a.tail_y*SMALLER)ms+=q*k*k;
                 if(a.marginal_y)atomicAdd(a.marginal_y+e*32+lane,q*w);}
@@ -364,34 +315,38 @@ __device__ void cols_pass(float2* state,const int* components,const PlaneArgs& a
         for(int e=0;e<F::E;e++)sm[(e*32+lane)*S+warp]=v[e];
         if(MODE==MODE_OBSERVE){
             m1=warp_sum(m1);m2=warp_sum(m2);mt=warp_sum(mt);ms=warp_sum(ms);
-            if(lane==0){float* r=a.records+(u64)t*RECORD;atomicAdd(r+REC_KX+1,m1/N);atomicAdd(r+REC_KX+3,m2/N);atomicAdd(r+REC_TAIL+3,mt/N);atomicAdd(r+REC_TAIL2+3,ms/N);}
+            if(lane==0){float* r=a.records+(u64)t*RECORD;atomicAdd(r+REC_KX+1,m1/NY);atomicAdd(r+REC_KX+3,m2/NY);atomicAdd(r+REC_TAIL+3,mt/NY);atomicAdd(r+REC_TAIL2+3,ms/NY);}
         }
     }
     __syncthreads();
-    float2* out=MODE==MODE_DERIVE?a.dy+plane*N*N:p;
-    for(int i=threadIdx.x;i<N*TILE;i+=blockDim.x)out[(u64)(i/TILE)*N+x0+i%TILE]=sm[(i/TILE)*S+i%TILE];
+    float2* out=MODE==MODE_DERIVE?a.dy+plane*NX*NY:p;
+    for(int i=threadIdx.x;i<NY*TILE;i+=blockDim.x)out[(u64)(i/TILE)*NX+x0+i%TILE]=sm[(i/TILE)*S+i%TILE];
 }
-// The kernels of an N x N grid: rows (grid: slots N/8 blocks of 256 threads) and columns (slots
-// N/TILE blocks of 256 threads, N (TILE + 1) float2 of shared memory).
-#define BIG_PLANE_KERNELS(N) \
-extern "C" __global__ void __launch_bounds__(256) kinetic_rows_##N(float2* state,const int* components,const float* scale,const float2* tx){ \
-    PlaneArgs a={};a.tx=tx;rows_pass<N,MODE_STEP>(state,components,scale,a,Planes{nullptr,nullptr});} \
-extern "C" __global__ void __launch_bounds__(256) kinetic_cols_##N(float2* state,const int* components,const float2* ty){ \
-    extern __shared__ float2 sm[];PlaneArgs a={};a.ty=ty;cols_pass<N,MODE_STEP>(state,components,a,Planes{nullptr,nullptr},sm);} \
-extern "C" __global__ void __launch_bounds__(256) observe_rows_##N(float2* state,const int* components,const float* scale,const float2* tx,const float* kappa_x,float tail_x, \
+// The kernels of an NX x NY grid: rows (grid: slots NY/8 blocks of 256 threads) and columns (slots
+// NX/TILE blocks of 256 threads, NY (TILE + 1) float2 of shared memory; `scale` null when the rows
+// pass renormalizes).
+#define BIG_PLANE_KERNELS(NX,NY) \
+extern "C" __global__ void __launch_bounds__(256) kinetic_rows_##NX##x##NY(float2* state,const int* components,const float* scale,const float2* tx){ \
+    PlaneArgs a={};a.tx=tx;rows_pass<NX,NY,MODE_STEP>(state,components,scale,a,Planes{nullptr,nullptr});} \
+extern "C" __global__ void __launch_bounds__(256) kinetic_cols_##NX##x##NY(float2* state,const int* components,const float* scale,const float2* ty){ \
+    extern __shared__ float2 sm[];PlaneArgs a={};a.ty=ty;cols_pass<NX,NY,MODE_STEP>(state,components,scale,a,Planes{nullptr,nullptr},sm);} \
+extern "C" __global__ void __launch_bounds__(256) observe_rows_##NX##x##NY(float2* state,const int* components,const float* scale,const float2* tx,const float* kappa_x,float tail_x, \
         float* records,const float* weights,float* marginal_x){ \
     PlaneArgs a={};a.tx=tx;a.kappa_x=kappa_x;a.tail_x=tail_x;a.records=records;a.weights=weights;a.marginal_x=marginal_x; \
-    rows_pass<N,MODE_OBSERVE>(state,components,scale,a,Planes{nullptr,nullptr});} \
-extern "C" __global__ void __launch_bounds__(256) observe_cols_##N(float2* state,const int* components,const float2* ty,const float* kappa_y,float tail_y, \
+    rows_pass<NX,NY,MODE_OBSERVE>(state,components,scale,a,Planes{nullptr,nullptr});} \
+extern "C" __global__ void __launch_bounds__(256) observe_cols_##NX##x##NY(float2* state,const int* components,const float2* ty,const float* kappa_y,float tail_y, \
         float* records,const float* weights,float* marginal_y){ \
     extern __shared__ float2 sm[];PlaneArgs a={};a.ty=ty;a.kappa_y=kappa_y;a.tail_y=tail_y;a.records=records;a.weights=weights;a.marginal_y=marginal_y; \
-    cols_pass<N,MODE_OBSERVE>(state,components,a,Planes{nullptr,nullptr},sm);} \
-extern "C" __global__ void __launch_bounds__(256) derive_rows_##N(float2* state,const int* components,const int* list,const int* count,float2* dx,const float2* tx){ \
-    PlaneArgs a={};a.tx=tx;a.dx=dx;rows_pass<N,MODE_DERIVE>(state,components,nullptr,a,Planes{list,count});} \
-extern "C" __global__ void __launch_bounds__(256) derive_cols_##N(float2* state,const int* components,const int* list,const int* count,float2* dy,const float2* ty){ \
-    extern __shared__ float2 sm[];PlaneArgs a={};a.ty=ty;a.dy=dy;cols_pass<N,MODE_DERIVE>(state,components,a,Planes{list,count},sm);}
-BIG_PLANE_KERNELS(128)
-BIG_PLANE_KERNELS(256)
+    cols_pass<NX,NY,MODE_OBSERVE>(state,components,nullptr,a,Planes{nullptr,nullptr},sm);} \
+extern "C" __global__ void __launch_bounds__(256) derive_rows_##NX##x##NY(float2* state,const int* components,const int* list,const int* count,float2* dx,const float2* tx){ \
+    PlaneArgs a={};a.tx=tx;a.dx=dx;rows_pass<NX,NY,MODE_DERIVE>(state,components,nullptr,a,Planes{list,count});} \
+extern "C" __global__ void __launch_bounds__(256) derive_cols_##NX##x##NY(float2* state,const int* components,const int* list,const int* count,float2* dy,const float2* ty){ \
+    extern __shared__ float2 sm[];PlaneArgs a={};a.ty=ty;a.dy=dy;cols_pass<NX,NY,MODE_DERIVE>(state,components,nullptr,a,Planes{list,count},sm);}
+// The grids of more than 4096 points (src/engine.rs GRIDS).
+BIG_PLANE_KERNELS(32,256)
+BIG_PLANE_KERNELS(64,128) BIG_PLANE_KERNELS(64,256)
+BIG_PLANE_KERNELS(128,64) BIG_PLANE_KERNELS(128,128) BIG_PLANE_KERNELS(128,256)
+BIG_PLANE_KERNELS(256,32) BIG_PLANE_KERNELS(256,64) BIG_PLANE_KERNELS(256,128) BIG_PLANE_KERNELS(256,256)
 
 // ---------------------------------------------------------------------------------------------
 // Local matrices at the grid points: block F = 2 (5 x 5) and F = 1 (3 x 3), entry (i, j) of
@@ -491,6 +446,90 @@ extern "C" __global__ void __launch_bounds__(256,3) kick_local_step(float2* stat
     store_partials(sums,t0,min(SUB,trajectories-t0),partial);
 }
 
+// The rows pass fused with the next step's local step, on planes too large for shared memory (the
+// columns pass, renormalizing, before it): K_x on the rows of one tile of 256 points (256/NX
+// rows) of FUSE trajectories, each component's row through a warp's registers into shared memory,
+// then V at the tile's points -- its entries read once for the FUSE trajectories -- and each
+// trajectory's |V psi|^2 over the tile to partial[t*tiles + tile], as `local_step`. Grid
+// (trajectories/FUSE, tiles): the blocks of one tile run together, so V comes from the cache. It
+// saves the local step's own pass over the state.
+#define FUSE 4
+template<int N>
+__device__ __forceinline__ void local_fused(float2 (*sm)[COMPONENTS][256],const int* n,const float2* m,float2* state,int t0,u64 points,u64 x,float* n2){
+    float2 M[N*N];
+    #pragma unroll
+    for(int k=0;k<N*N;k++)M[k]=__ldg(m+(u64)k*points+x);
+    #pragma unroll
+    for(int s=0;s<FUSE;s++){
+        if(n[s]!=N)continue;
+        float2 a[N];
+        #pragma unroll
+        for(int j=0;j<N;j++)a[j]=sm[s][j][threadIdx.x];
+        float2* q=state+(u64)(t0+s)*COMPONENTS*points+x;
+        #pragma unroll
+        for(int i=0;i<N;i++){
+            float2 z=make_float2(0.f,0.f);
+            #pragma unroll
+            for(int j=0;j<N;j++)z=cadd(z,cmul(M[i*N+j],a[j]));
+            q[(u64)i*points]=z;n2[s]+=norm2(z);
+        }
+    }
+}
+template<int NX,int NY>
+__device__ void rows_local(float2* __restrict__ state,int trajectories,const int* components,const float2* tx,const Local& m,float* partial){
+    using F=Fft<NX>;
+    constexpr int R=256/NX,points=NX*NY,tiles=points/256;
+    __shared__ float2 sm[FUSE][COMPONENTS][256];
+    __shared__ float sums[FUSE][8];
+    const int lane=threadIdx.x&31,warp=threadIdx.x>>5,warps=blockDim.x>>5;
+    const int t0=blockIdx.x*FUSE,tile=blockIdx.y,count=min(FUSE,trajectories-t0);
+    int n[FUSE];
+    #pragma unroll
+    for(int s=0;s<FUSE;s++)n[s]=s<count?components[t0+s]:0;
+    {
+        F f;f.init(lane);
+        float2 factor[F::E];
+        #pragma unroll
+        for(int e=0;e<F::E;e++)factor[e]=__ldg(tx+e*32+lane);
+        for(int task=warp;task<FUSE*COMPONENTS*R;task+=warps){
+            const int s=task/(COMPONENTS*R),c=task/R%COMPONENTS,r=task%R;
+            if(c>=n[s])continue;   // the whole warp
+            const float2* p=state+((u64)(t0+s)*COMPONENTS+c)*points+(u64)tile*256+r*NX;
+            float2 v[F::E];
+            #pragma unroll
+            for(int e=0;e<F::E;e++)v[e]=p[e*32+lane];
+            f.forward(v,lane);
+            #pragma unroll
+            for(int e=0;e<F::E;e++)v[e]=cmul(v[e],factor[e]);
+            f.inverse(v,lane);
+            #pragma unroll
+            for(int e=0;e<F::E;e++)sm[s][c][r*NX+e*32+lane]=v[e];
+        }
+    }
+    __syncthreads();
+    const u64 x=(u64)tile*256+threadIdx.x;
+    float n2[FUSE];
+    #pragma unroll
+    for(int s=0;s<FUSE;s++)n2[s]=0.f;
+    bool five=false,three=false;
+    #pragma unroll
+    for(int s=0;s<FUSE;s++){five|=n[s]==5;three|=n[s]==3;}
+    if(five)local_fused<5>(sm,n,m.m5,state,t0,points,x,n2);
+    if(three)local_fused<3>(sm,n,m.m3,state,t0,points,x,n2);
+    #pragma unroll
+    for(int s=0;s<FUSE;s++){const float v=warp_sum(n2[s]);if(lane==0)sums[s][warp]=v;}
+    __syncthreads();
+    if((int)threadIdx.x<count){float total=0.f;for(int w=0;w<warps;w++)total+=sums[threadIdx.x][w];partial[(u64)(t0+threadIdx.x)*tiles+tile]=total;}
+}
+#define ROWS_LOCAL(NX,NY) \
+extern "C" __global__ void __launch_bounds__(256,2) kinetic_rows_local_##NX##x##NY(float2* state,int trajectories,const int* components,const float2* tx,Local m,float* partial){ \
+    rows_local<NX,NY>(state,trajectories,components,tx,m,partial);}
+// The grids of more than 4096 points (src/engine.rs GRIDS), as BIG_PLANE_KERNELS.
+ROWS_LOCAL(32,256)
+ROWS_LOCAL(64,128) ROWS_LOCAL(64,256)
+ROWS_LOCAL(128,64) ROWS_LOCAL(128,128) ROWS_LOCAL(128,256)
+ROWS_LOCAL(256,32) ROWS_LOCAL(256,64) ROWS_LOCAL(256,128) ROWS_LOCAL(256,256)
+
 // ---------------------------------------------------------------------------------------------
 // Random numbers: Philox4x32-10 (Salmon et al. 2011) keyed by the run's seed, counted by
 // (trajectory, its jump count, purpose, index).
@@ -561,7 +600,7 @@ struct Jumps{
     const float* cap;        // the absorbing potential's rate per point (1/us)
     const float* wave_number;// per carrier (rad/um)
     int carriers;
-    int nx;float dx;         // the grid: point x is at ((x % nx) - nx/2, (x / nx) - ny/2) dx
+    int nx;float dx,dy;      // the grid: point x is at ((x % nx) - nx/2) dx, ((x / nx) - ny/2) dy
     // The points by radius: the threads of a warp take points of about the same radius, so their
     // reads of the radial tables fall on the same few cache lines.
     const int* order;
@@ -572,8 +611,8 @@ struct Jumps{
 #define CHOICE 8   // a jump's choice (jump_choose)
 
 // The plane position (um) of point x.
-__device__ __forceinline__ float2 position(int x,int points,int nx,float dx){
-    const int ny=points/nx;return make_float2(((x%nx)-nx/2)*dx,ny>1?((x/nx)-ny/2)*dx:0.f);
+__device__ __forceinline__ float2 position(int x,int points,int nx,float dx,float dy){
+    const int ny=points/nx;return make_float2(((x%nx)-nx/2)*dx,ny>1?((x/nx)-ny/2)*dy:0.f);
 }
 // Beam l's amplitude a_l(r): its plane wave's phase, a focused beam's Gaussian profile.
 __device__ __forceinline__ float2 amplitude(const float* b,float2 r,float rho2){
@@ -652,7 +691,7 @@ extern "C" __global__ void __launch_bounds__(256,2) jump_rates(const float2* sta
         const int* jumpers,const int* count,Jumps J,float* rates){
     __shared__ float sums[8][G_SLOTS];
     const int i=blockIdx.x*blockDim.x+threadIdx.x;const bool ok=i<points;const int x=ok?__ldg(J.order+i):0;
-    const float2 r=position(ok?x:0,points,J.nx,J.dx);const float rho2=r.x*r.x+r.y*r.y;
+    const float2 r=position(ok?x:0,points,J.nx,J.dx,J.dy);const float rho2=r.x*r.x+r.y*r.y;
     for(int s=blockIdx.y;s<*count;s+=gridDim.y){
         const int t=jumpers[s],n=components[t];
         float acc[G_SLOTS];
@@ -693,7 +732,7 @@ extern "C" __global__ void __launch_bounds__(256,2) jump_apply(float2* state,con
         const int* components,const int* jumpers,const int* count,Jumps J,const float* choices,Local forward,float* partial){
     __shared__ float scratch[32];
     const int i=blockIdx.x*blockDim.x+threadIdx.x;const bool ok=i<points;const int x=ok?__ldg(J.order+i):0;
-    const float2 r=position(ok?x:0,points,J.nx,J.dx);const float rho2=r.x*r.x+r.y*r.y;
+    const float2 r=position(ok?x:0,points,J.nx,J.dx,J.dy);const float rho2=r.x*r.x+r.y*r.y;
     for(int s=blockIdx.y;s<*count;s+=gridDim.y){
         const int t=jumpers[s];const float* ch=choices+(u64)t*CHOICE;const int to=(int)ch[1];
         if(to<0)continue;
@@ -847,7 +886,7 @@ extern "C" __global__ void __launch_bounds__(256,2) observe_points(const float2*
         Jumps J,float tail_x,float tail_y,float* records,const float* weights,float* density){
     __shared__ float sums[8][REC_KX+4];
     const int i=blockIdx.x*blockDim.x+threadIdx.x;const bool ok=i<points;const int x=ok?__ldg(J.order+i):0;
-    const float2 r=position(ok?x:0,points,J.nx,J.dx);const float rho2=r.x*r.x+r.y*r.y;
+    const float2 r=position(ok?x:0,points,J.nx,J.dx,J.dy);const float rho2=r.x*r.x+r.y*r.y;
     for(int s=0;s<SUB;s++){
         const int t=blockIdx.y*SUB+s;if(t>=trajectories)break;
         const int n=components[t];if(n==0)continue;
@@ -898,7 +937,6 @@ extern "C" __global__ void move_rows(const float2* src,int nx,int ny,const int* 
 }
 // psi[to][c][y'][x'] = sum_y A_y[y'][y] tmp[m][c][y][x']; the moved planes' |psi|^2 into norm[m].
 extern "C" __global__ void move_cols(const float2* tmp,int ny,const int* components,const Move* moves,int count,const float* ay,int nx_to,int ny_to,float2* dst,float* norm){
-    __shared__ float scratch[32];
     const u64 i=(u64)blockIdx.x*blockDim.x+threadIdx.x,per=(u64)ny_to*nx_to,total=(u64)count*COMPONENTS*per;
     float n2=0.f;int m=-1;
     if(i<total){
@@ -914,7 +952,6 @@ extern "C" __global__ void move_cols(const float2* tmp,int ny,const int* compone
     const bool uniform=__all_sync(0xffffffffu,m==m0);
     if(uniform){n2=warp_sum(n2);if((threadIdx.x&31)==0&&m0>=0)atomicAdd(norm+m0,n2);}
     else if(m>=0&&n2!=0.f)atomicAdd(norm+m,n2);
-    (void)scratch;
 }
 // The moved trajectories' state: renormalized planes, the per-trajectory scalars copied, the
 // source slot emptied. One block per move.

@@ -23,7 +23,7 @@ pub fn interpolation(from_n:usize,from_dx:f64,to_n:usize,to_dx:f64)->Vec<f64>{
     a
 }
 
-/// One plane resampled from grid `from` to grid `to` (both square, or both one row).
+/// One plane resampled from grid `from` to grid `to` (both of the plane, or both one row).
 pub fn resample(from:&Grid,to:&Grid,plane:&[[f32;2]])->Vec<[f32;2]>{
     let ax=interpolation(from.nx,from.dx,to.nx,to.dx);
     // Rows: t[y][x'] = Σ_x A[x'][x] ψ[y][x].
@@ -32,7 +32,7 @@ pub fn resample(from:&Grid,to:&Grid,plane:&[[f32;2]])->Vec<[f32;2]>{
         for j in 0..from.nx{let w=ax[i*from.nx+j];if w!=0.{let z=plane[y*from.nx+j];re+=w*z[0] as f64;im+=w*z[1] as f64;}}
         t[y*to.nx+i]=[re,im];}}
     if from.ny==1{return t.iter().map(|z|[z[0] as f32,z[1] as f32]).collect();}
-    let ay=interpolation(from.ny,from.dx,to.ny,to.dx);
+    let ay=interpolation(from.ny,from.dy,to.ny,to.dy);
     let mut out=vec![[0f32;2];to.ny*to.nx];
     for i in 0..to.ny{for x in 0..to.nx{let(mut re,mut im)=(0.,0.);
         for j in 0..from.ny{let w=ay[i*from.ny+j];if w!=0.{let z=t[j*to.nx+x];re+=w*z[0];im+=w*z[1];}}
@@ -48,9 +48,11 @@ mod tests{
     #[test]
     fn a_band_limited_packet_is_sampled_on_the_new_grid(){
         let packet=|x:f64,y:f64|{let(a,p)=((-(x*x+y*y)/(2.*0.04f64.powi(2))).exp(),37.*x-11.*y);[(a*p.cos()) as f32,(a*p.sin()) as f32]};
-        let from=Grid{nx:64,ny:64,dx:0.0107};
+        let from=Grid{nx:64,ny:64,dx:0.0107,dy:0.0107};
         let plane:Vec<[f32;2]>=(0..from.points()).map(|p|{let r=from.position(p);packet(r[0],r[1])}).collect();
-        for to in [Grid{nx:128,ny:128,dx:0.0107/2f64.sqrt()},Grid{nx:32,ny:32,dx:0.0107*2f64.sqrt()}]{
+        // A finer grid, a coarser one, and a long narrow one (each axis apart).
+        for to in [Grid{nx:128,ny:128,dx:0.0107/2f64.sqrt(),dy:0.0107/2f64.sqrt()},Grid{nx:32,ny:32,dx:0.0107*2f64.sqrt(),dy:0.0107*2f64.sqrt()},
+            Grid{nx:32,ny:128,dx:0.0107*2f64.sqrt(),dy:0.0107/2f64.sqrt()}]{
             let out=resample(&from,&to,&plane);
             let worst=(0..to.points()).map(|p|{let r=to.position(p);let e=packet(r[0],r[1]);((out[p][0]-e[0]).powi(2)+(out[p][1]-e[1]).powi(2)).sqrt()}).fold(0f32,f32::max);
             assert!(worst<1e-5,"{} x {}: {worst:e}",to.nx,to.ny);

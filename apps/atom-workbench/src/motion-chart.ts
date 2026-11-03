@@ -48,15 +48,18 @@ function ticksWithin(low:number,high:number,intervals:number):number[]{
 }
 const digits=(n:number)=>formatNumber(n,{digits:4});
 
-/** A line of a panel: its name, its values (base units) and its ink. */
-export interface Line {name:string;values:readonly number[];ink:string}
+/** A line of a panel: its name, its values (base units) and its ink; a trajectory method's line
+ * its standard error per sample (`band`, base units), drawn as a band of ±1 around it. */
+export interface Line {name:string;values:readonly number[];ink:string;band?:readonly number[]}
 /** One panel: its name, its axis title, its lines and display unit; its axis runs from 0 to the top
  * of its ticks, or symmetrically about 0 out to `reach` (base units). */
 export interface Series {id:string;name:string;title:string;lines:Line[];unit:Unit;reach?:number}
 export type SeriesKind='temperature'|'trap';
-/** The lines of per-axis values: one in the panel's ink for 1D, one per axis in its ink for 2D and 3D. */
-function axisLines(motion:MotionResult,values:readonly (readonly number[])[],name:string,ink:string):Line[]{
-  return motion.axes.length===1?[{name,values:values[0]!,ink}]:motion.axes.map((axis,k)=>({name:`${name}${subscript(axis)}`,values:values[k]!,ink:AXIS_INKS[axis]}));
+/** The lines of per-axis values: one in the panel's ink for 1D, one per axis in its ink for 2D and
+ * 3D; with `errors`, each with its standard errors. */
+function axisLines(motion:MotionResult,values:readonly (readonly number[])[],name:string,ink:string,errors?:readonly (readonly number[])[]):Line[]{
+  const band=(k:number)=>errors?{band:errors[k]!}:{};
+  return motion.axes.length===1?[{name,values:values[0]!,ink,...band(0)}]:motion.axes.map((axis,k)=>({name:`${name}${subscript(axis)}`,values:values[k]!,ink:AXIS_INKS[axis],...band(k)}));
 }
 const subscript=(axis:MotionAxis)=>`（${axis} 轴）`;
 /** The two panels of a motion result's time chart: T above ⟨v⟩ -- the drift read against the
@@ -69,7 +72,7 @@ export function motionSeries(motion:MotionResult,kind:SeriesKind):[Series,Series
   const reach=Math.max(...motion.meanVelocityMps.flat().map(Math.abs),...motion.temperatureUK.flat().map(thermalVelocity)),velocity=unitFor(VELOCITY_UNITS,reach);
   // A 3D result's T and ⟨v⟩ are each axis's means over one trap period around the sample.
   const period=motion.axis==='3d'?'（各轴一个阱周期内的平均）':'';
-  return [{id:'temperature',name:'温度 T',title:`温度 T / μK${period}`,lines:axisLines(motion,motion.temperatureUK,'T',MOTION_INKS[0]),unit:{name:'μK',factor:1}},
+  return [{id:'temperature',name:'温度 T',title:`温度 T / μK${period}`,lines:axisLines(motion,motion.temperatureUK,'T',MOTION_INKS[0],motion.temperatureErrorUK),unit:{name:'μK',factor:1}},
     {id:'mean-velocity',name:'⟨v⟩',title:`平均速度 ⟨v⟩ / ${velocity.name}${period}`,lines:axisLines(motion,motion.meanVelocityMps,'⟨v⟩',MOTION_INKS[1]),unit:velocity,reach}];
 }
 /** A panel: its series, its vertical span and ticks (display units), and where a value goes. */
@@ -80,7 +83,7 @@ function panel(series:Series,top:number,bottom:number):Panel{
     const reach=ticks(series.reach*factor,2).at(-1)!;
     return {series,top,bottom,ticks:ticks(reach,2).flatMap(v=>v?[-v,v]:[0]),y:v=>(top+bottom)/2-v*factor/reach*(bottom-top)/2};
   }
-  const highest=ticks(Math.max(0,...series.lines.flatMap(l=>l.values))*factor||1).at(-1)!;
+  const highest=ticks(Math.max(0,...series.lines.flatMap(l=>l.values.map((v,i)=>v+(l.band?.[i]??0))))*factor||1).at(-1)!;
   return {series,top,bottom,ticks:ticks(highest),y:v=>bottom-v*factor/highest*(bottom-top)};
 }
 interface SeriesLayout {panels:[Panel,Panel];unit:{name:DurationUnit;factor:number};x:(t:number)=>number}
@@ -105,6 +108,10 @@ export function seriesChart(timesUs:readonly number[],series:readonly [Series,Se
   for(const p of g.panels)for(const v of p.ticks){const y=p.y(v/p.series.unit.factor);body+=line(LEFT,y,RIGHT,y,`stroke="${GRID}"`)+text(LEFT-12,y+4,digits(v),'text-anchor="end"');}
   for(let i=0;i<=4;i++){const t=timesUs[0]!+(timesUs.at(-1)!-timesUs[0]!)*i/4;body+=text(g.x(t),g.panels[1].bottom+24,digits(t*g.unit.factor),'text-anchor="middle"');}
   body+=text(LEFT,19,g.panels[0].series.title)+text(LEFT,g.panels[1].top-8,g.panels[1].series.title)+text(RIGHT,g.panels[1].bottom+47,`t / ${g.unit.name}`,'text-anchor="end"');
+  // A line's standard errors as a band of ±1 behind the lines (a quantity at least 0 kept so).
+  g.panels.forEach(p=>p.series.lines.forEach(l=>{if(!l.band)return;const low=p.series.reach===undefined?0:-Infinity;
+    const upper=l.values.map((v,i)=>`${xs[i]!.toFixed(4)},${p.y(v+l.band![i]!).toFixed(4)}`),lower=l.values.map((v,i)=>`${xs[i]!.toFixed(4)},${p.y(Math.max(low,v-l.band![i]!)).toFixed(4)}`).reverse();
+    body+=`<polygon points="${[...upper,...lower].join(' ')}" fill="${l.ink}" fill-opacity="0.16" stroke="none"/>`;}));
   g.panels.forEach(p=>p.series.lines.forEach((l,k)=>{body+=polyline(xs,l.values.map(p.y),l.ink,`data-series-id="${p.series.id}${p.series.lines.length>1?`-${k}`:''}"`);}));
   return svg('motion-series-svg',`${series.map(s=>s.name).join('与')}随时间的变化。移动指针读取采样值，方向键逐点查看。`,body+'<g class="motion-cursor" pointer-events="none" style="display:none"></g>');
 }
@@ -235,7 +242,7 @@ export function bindSeries(host:HTMLElement,timesUs:readonly number[],series:rea
     cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:String(g.panels[0].top),y2:String(g.panels[1].bottom),stroke:'#a19f9d','stroke-width':'1'}),
       ...g.panels.flatMap(p=>p.series.lines.map(l=>mark('circle',{cx:String(xx),cy:String(p.y(l.values[i]!)),r:'3',fill:l.ink,stroke:'white','stroke-width':'1.5'}))));
     card.innerHTML=`<div class="readout-time">t = ${esc(digits(timesUs[i]!*g.unit.factor))} ${esc(g.unit.name)}${marked}</div>`+g.panels.flatMap(p=>p.series.lines.map(l=>
-      `<div class="readout-row two"><span class="readout-name" style="color:${l.ink}">${esc(l.name)}</span><span>${esc(formatNumber(l.values[i]!*p.series.unit.factor,{digits:4}))}${p.series.unit.name?` ${esc(p.series.unit.name)}`:''}</span></div>`)).join('');
+      `<div class="readout-row two"><span class="readout-name" style="color:${l.ink}">${esc(l.name)}</span><span>${esc(formatNumber(l.values[i]!*p.series.unit.factor,{digits:4}))}${l.band?` ± ${esc(formatNumber(l.band[i]!*p.series.unit.factor,{digits:2}))}`:''}${p.series.unit.name?` ${esc(p.series.unit.name)}`:''}</span></div>`)).join('');
     placeCard(host,svg,card,xx);
   },()=>{card.hidden=true;});
   return ()=>{unbind();card.remove();};
