@@ -8,7 +8,8 @@
 // the force, the photons. Double precision where it accumulates or decides: the time, the position
 // and the momentum with the harmonic flow that turns them, ln‖ψ‖² against ln θ, the random
 // deviates and every choice made with them, the kicks, the phases' angles, the exact response's
-// diagonal, the motion windows and every sum.
+// diagonal, the motion windows and every sum -- and the readouts of the atom's and the held twin's
+// populations, whose rows then sum to one to double precision.
 //
 // # Layout
 // One warp per trajectory, one block per task of the CPU's (lib.rs `TASK`: up to eight consecutive
@@ -89,6 +90,11 @@ __device__ __forceinline__ float2 cexp(float2 z){float s,c;sincosf(z.y,&s,&c);co
 __device__ __forceinline__ float2 cis(double theta){const double x=theta-TAU*rint(theta*(1./TAU));float s,c;sincosf((float)x,&s,&c);return make_float2(c,s);}
 // A photon's or a coupling's residual phase e^{iω̃t}: one for a static one (most), with no double precision.
 __device__ __forceinline__ float2 residual(double w,double t){return w==0.?make_float2(1.f,0.f):cis(w*t);}
+
+// Complex double precision: the readouts.
+__device__ __forceinline__ double2 d2(float2 a){return make_double2((double)a.x,(double)a.y);}
+__device__ __forceinline__ double2 dmul(double2 a,double2 b){return make_double2(a.x*b.x-a.y*b.y,a.x*b.y+a.y*b.x);}
+__device__ __forceinline__ double dnorm2(double2 a){return a.x*a.x+a.y*a.y;}
 
 __device__ __forceinline__ float warp_sum(float v){
     #pragma unroll
@@ -206,7 +212,7 @@ struct State{
 // its half step's propagator `u` and its H_eff `h` (n_k² entries from blocks[k], row-major) and its
 // populations' readout (32 coefficients per density entry from 32·blocks[k], control.rs `readout`);
 // per class its jump operators `l` (3 × target × cluster from jumps[class]).
-struct Held{const float2* u;const float2* h;const float2* l;const float* readout;const int* blocks;const int* jumps;};
+struct Held{const float2* u;const float2* h;const float2* l;const double* readout;const int* blocks;const int* jumps;};
 // A launch: a wave's tasks over the output intervals [begin, end).
 struct Run{
     State* states;double* rings;double* samples;double* sums;float2* scratch;const int* tasks;
@@ -240,7 +246,8 @@ struct Point{
 struct JumpSpace{float2 u[3][MAXN],f[MAXN];float weights[MOST_CLASSES],shares[MOST_BEAMS];int beams[MOST_BEAMS];};
 struct Warp{
     Point pt;
-    float2 psi[MAXN],start[MAXN],readout[MAXN];   // ψ, ψ at a step's start, the readout's Y ψ
+    float2 psi[MAXN],start[MAXN];       // ψ, ψ at a step's start
+    double2 readout[MAXN];              // the readout's Y ψ
     float2 twin[MAXN];                  // the held twin's ψ
     union{float2 m[3][MAXN*MAXN];float2 gradient_a[MOST_BEAMS][3];JumpSpace jump;};
 #ifdef PROFILE
@@ -1021,17 +1028,17 @@ __device__ void hold_step(const Program& P,const Run& R,Warp& W,Twin& h,u32 inde
 // populations c_k at its point -- the readout's map of its density ψψ†/‖ψ‖² -- and Σ_k c_k², Σ_k c_k p_k
 // with the atom's populations p (already in `out`, zero when lost).
 __device__ void hold_record(const Program& P,const Run& R,Warp& W,const Twin& h,int lane,double* out){
-    const int n=P.clusters[h.cluster].n;const float* map=R.held.readout+32*R.held.blocks[h.cluster];
-    float norm=0.f;for(int b=0;b<n;b++)norm+=norm2(W.twin[b]);
-    float c=0.f;
+    // In double precision from ψ as it is, the map's coefficients the CPU's: Σ_k c_k is one to rounding.
+    const int n=P.clusters[h.cluster].n;const double* map=R.held.readout+32*R.held.blocks[h.cluster];
+    double norm=0.;for(int b=0;b<n;b++)norm+=dnorm2(d2(W.twin[b]));
+    double c=0.;
     for(int i=0;i<n;i++){
-        const float2 pi=W.twin[i];c+=norm2(pi)*map[32*(i*n+i)+lane];
-        for(int j=i+1;j<n;j++){const float2 r=pi*conj(W.twin[j]);c+=r.x*map[32*(i*n+j)+lane]+r.y*map[32*(j*n+i)+lane];}
+        const double2 pi=d2(W.twin[i]);c+=dnorm2(pi)*map[32*(i*n+i)+lane];
+        for(int j=i+1;j<n;j++){const double2 r=dmul(pi,d2(conj(W.twin[j])));c+=r.x*map[32*(i*n+j)+lane]+r.y*map[32*(j*n+i)+lane];}
     }
     c/=norm;
-    const double y=out[3+lane];
-    out[TWIN+lane]=(double)c;
-    const double cc=(double)warp_sum(c*c),cy=warp_sum((double)c*y);
+    out[TWIN+lane]=c;
+    const double cc=warp_sum(c*c),cy=warp_sum(c*out[3+lane]);
     if(lane==0){out[TWIN+32]=cc;out[TWIN+33]=cy;}
 }
 
@@ -1119,33 +1126,35 @@ __device__ void record(const Program& P,Warp& W,const Traj& t,int lane,double* o
         if(b.inv_pole>0.f){const float x=W.pt.shift[lane]*b.inv_pole;ratio=x*x;}
     }
     profile=warp_max(profile);ratio=warp_max(ratio);
-    float norm=0.f;for(int b=0;b<n;b++)norm+=norm2(W.psi[b]);
-    float2* y=W.readout;
-    if(lane<MAXN)y[lane]=zero2();
+    // In double precision from the responses and ψ as they are: Re⟨ψ|Y|ψ⟩ is then Σ_i of the excited
+    // ones to rounding, and the populations sum to one.
+    double norm=0.;for(int b=0;b<n;b++)norm+=dnorm2(d2(W.psi[b]));
+    double2* y=W.readout;
+    if(lane<MAXN)y[lane]=make_double2(0.,0.);
     __syncwarp();
     // Each channel's response in its excited row, once: the first CACHED of a group in the matrices' space.
     constexpr int CACHED=3*MAXN*MAXN/NE;float2* cache=W.m[0];
-    float excited=0.f;
+    double excited=0.;
     for(int gi=0;gi<C.ncoherent;gi++){
-        const Coherent G=P.coherent[C.coherent+gi];float2 e=zero2();
+        const Coherent G=P.coherent[C.coherent+gi];double2 e=make_double2(0.,0.);
         if(lane<NE)for(int h=0;h<G.count;h++){
             const Channel ch=P.channels[G.channels+h];const float2 r=response(P,W,C,ch.carrier,lane,ch.col);if(h<CACHED)cache[h*NE+lane]=r;
-            e+=residual(-ch.residual,t.time)*r*W.psi[ch.col];
+            const double2 z=dmul(dmul(d2(residual(-ch.residual,t.time)),d2(r)),d2(W.psi[ch.col]));e.x+=z.x;e.y+=z.y;
         }
         for(int h=0;h<G.count;h++){
-            const Channel ch=P.channels[G.channels+h];float2 z=zero2();
-            if(lane<NE)z=residual(ch.residual,t.time)*conj(h<CACHED?cache[h*NE+lane]:response(P,W,C,ch.carrier,lane,ch.col))*e;
-            z=warp_sum(z);if(lane==0)y[ch.col]+=z;
+            const Channel ch=P.channels[G.channels+h];double2 z=make_double2(0.,0.);
+            if(lane<NE)z=dmul(dmul(d2(residual(ch.residual,t.time)),d2(conj(h<CACHED?cache[h*NE+lane]:response(P,W,C,ch.carrier,lane,ch.col)))),e);
+            z=make_double2(warp_sum(z.x),warp_sum(z.y));if(lane==0){y[ch.col].x+=z.x;y[ch.col].y+=z.y;}
             __syncwarp();
         }
-        excited+=norm2(e)/norm;
+        excited+=dnorm2(e)/norm;
     }
     __syncwarp();
     if(lane<3)out[lane]=lane==0?1.:lane==1?(double)profile:(double)ratio;
-    if(lane<NE)out[3+P.excited_states[lane]]=(double)excited;
+    if(lane<NE)out[3+P.excited_states[lane]]=excited;
     if(lane<NG){
         const int x=lane<n?lane:-1;double v=0.;
-        if(x>=0){const float2 p=W.psi[x],q=y[x];v=(double)((norm2(p)-(p.x*q.x+p.y*q.y))/norm);}
+        if(x>=0){const double2 p=d2(W.psi[x]),q=y[x];v=(dnorm2(p)-(p.x*q.x+p.y*q.y))/norm;}
         // A ground state outside the cluster has no population; the cluster's own by its position.
         if(x>=0)out[3+P.ground_states[C.states[x]]]=v;
     }

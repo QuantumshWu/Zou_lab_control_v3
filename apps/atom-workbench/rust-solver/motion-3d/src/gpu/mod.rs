@@ -308,7 +308,7 @@ impl Controls{
             let mut half=vec![[0f32;2];n*n];
             for j in 0..n{let mut e=[Complex::ZERO;MAXN];e[j]=Complex::ONE;propagate(&local.hamiltonian,n,0.5*settings.dt,&mut e,settings.truncation);for i in 0..n{half[i*n+j]=c32(e[i]);}}
             u.extend(half);h.extend(local.hamiltonian[..n*n].iter().map(|&z|c32(z)));
-            readout.extend(twin.readout[k].iter().flat_map(|e|e.iter().map(|&x|x as f32)));
+            readout.extend(twin.readout[k].iter().flatten().copied());
         }
         let(mut l,mut jumps)=(vec![],vec![]);
         for cluster in &twin.held.jumps{for class in cluster{jumps.push(l.len() as i32);for x in class{l.extend(x.iter().map(|&z|c32(z)));}}}

@@ -7,7 +7,9 @@ use atom_motion_3d::engine::{Engine,Settings,Trajectory};
 use atom_motion_3d::gpu::{self,driver::Buffer,program};
 use atom_motion_3d::model::Model;
 use atom_motion_3d::rng::{Purpose,Rng};
+#[path="../examples/scene/mod.rs"] mod scene;
 use atom_motion_3d::control::{Harmonic,Twin};
+use atom_motion_3d::stats::{summarize,Means,Scales};
 use atom_motion_3d::{initial_trajectory,Beam,Complex,Initial,Matrix,Request,Stratum,Variates,STATES};
 use serde_json::Value;
 
@@ -158,4 +160,27 @@ fn batch(fixture:&str)->bool{
 fn a_batch_s_sums_are_the_cpu_s(){
     let twins=[batch(PGC),batch(MOLASSES)];
     if device().is_some(){assert!(twins.iter().any(|&t|t),"a fixture with a held twin");}
+}
+
+/// The default scene's motion as the app sends it (rust-solver/tests/fixtures/default_scene_motion.json)
+/// with the held twin kept: a GPU batch's estimates, the twin's control correcting the populations,
+/// have rows that sum to one within 1e-9 -- the atom's and the twin's readouts in double precision
+/// (the adapter checks 1e-7).
+#[test]
+fn the_default_scene_s_rows_sum_to_one_with_the_held_twin(){
+    let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
+    let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/default_scene_motion.json")).unwrap();
+    let r=scene::request(&fixture["payload"]);let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let trap=initial.traps[reference];
+    let(outputs,steps,interval)=(101,10,1.);
+    let settings=Settings::new(interval/steps as f64,&trap,1e-7,true);
+    let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
+    let twin=Twin::new(&model,0.5*model.geometry[model.trap_beam].intensity([0.;3])).expect("the default scene's generator is static");
+    let means:Vec<Means>=twin.means(&model,&r.initial_density,interval,outputs).into_iter().enumerate().map(|(i,m)|Means{harmonic:harmonic.mean[i],twin:Some(m)}).collect();
+    let program=gpu.program(&model,&settings).unwrap();
+    let out=gpu.simulate(&program,&model,&settings,&initial,0x3D_5EED,0,256,32,steps,outputs,&[],Some(&Variates{harmonic:&harmonic,twin:Some(&twin)})).unwrap();
+    let estimates=summarize(&out.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab},&means);
+    let worst=estimates.iter().filter(|e|e.loss<1.).map(|e|(e.populations.iter().sum::<f64>()-1.).abs()).fold(0.,f64::max);
+    println!("the rows' largest |sum - 1|: {worst:.2e}");
+    assert!(worst<=1e-9,"a row's sum is off by {worst:.2e}");
 }
