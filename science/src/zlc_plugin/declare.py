@@ -194,9 +194,10 @@ class DeviceType:
     #: takes ``excluded`` is handed the bound resources (``resources``) and touches none.
     discover: Callable[..., tuple[tuple[Mapping[str, Any], ...], tuple[str, ...]]] | None = None
     addable: bool = True
-    #: SPI methods answered on their own thread instead of the lane, for an
-    #: adapter that is thread-safe for them: a phase-movie submit or cancel
-    #: while play_phase_sequence holds the lane.
+    #: Adapter calls answered on their own thread instead of the lane, for an
+    #: adapter that is thread-safe for them: SPI methods (a phase-movie submit or
+    #: cancel while play_phase_sequence holds the lane), commands by name and
+    #: ``make_safe`` (a stage's Stop, and Stop all, while a move holds the lane).
     concurrent: tuple[str, ...] = ()
     #: The window a device's Control opens instead of the generic field form
     #: (v2 control_factory): ``"slm-editor"`` for an SLM; empty for the form.

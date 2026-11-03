@@ -248,4 +248,26 @@ def underscored(text: object) -> str:
     return "".join(c if c.isalnum() else "_" for c in str(text))
 
 
-__all__ = ["RecordQueue", "discovered", "underscored"]
+def serial_name(port: object) -> str:
+    """A COM port as the core names one in ``serial:COM3``: upper-case, without ``\\\\.\\``."""
+
+    text = str(port).strip()
+    return (text[4:] if text.startswith("\\\\.\\") else text).upper()
+
+
+def free_serial_ports(excluded: frozenset[str] = frozenset()) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """This machine's serial ports in order: (those free to open, those bound and passed over).
+
+    ``excluded`` is the core's bound resources (``serial:COM3``); a port an
+    open device or another row of the apparatus binds is never opened -- the
+    pulse board's UART while its server starts, an IMU that is opening.
+    """
+
+    from serial.tools import list_ports
+
+    bound = {serial_name(item.split(":", 1)[1]) for item in excluded if item.lower().startswith("serial:")}
+    ports = [info.device for info in sorted(list_ports.comports(), key=lambda item: item.device)]
+    return tuple(port for port in ports if serial_name(port) not in bound), tuple(port for port in ports if serial_name(port) in bound)
+
+
+__all__ = ["RecordQueue", "discovered", "free_serial_ports", "serial_name", "underscored"]

@@ -305,6 +305,7 @@ def scan_ports_for_devices(
     coupled hardware transaction is atomic.  A field whose bounds leave no
     interval -- a knob pinned to one value by policy -- is a control, not
     an axis, and is passed over rather than failing the whole projection.
+    A ``derived`` field is a reading (a stage's state), never an axis.
     The port's unit is the field's own declared unit -- an RF frequency
     axis publishes hertz -- and its label names the device and the knob;
     it stands at the device's reading, in that unit.
@@ -322,7 +323,7 @@ def scan_ports_for_devices(
             if selected_unit:
                 tunable = read_tunable_in_unit(device, field.name, selected_unit)
                 field = tunable.metadata
-            if field.minimum is None or field.maximum is None:
+            if field.derived or field.minimum is None or field.maximum is None:
                 continue
             if float(field.minimum) >= float(field.maximum):
                 continue
@@ -386,7 +387,7 @@ class DeviceKnob:
             row["name"], row["type"], row["label"], row.get("default"), required=bool(row.get("required")),
             minimum=row.get("minimum"), maximum=row.get("maximum"), step=row.get("step"), unit=row.get("unit"),
             display_unit=row.get("display_unit"), choices=tuple(AuthoringChoice(choice["value"], choice["label"]) for choice in row.get("choices") or ()),
-            description=str(row.get("description") or ""))
+            description=str(row.get("description") or ""), derived=bool(row.get("derived")))
         limits = item.get("device_limits")
         return TunableField(metadata, item.get("current"), bool(item["live_write"]),
                             tuple(item["dependency_group"]), None if limits is None else tuple(limits))

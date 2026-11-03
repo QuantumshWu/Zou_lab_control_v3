@@ -141,6 +141,11 @@ row is read in by, once, at its window's first reading; `read_device
 {units}` re-reads the row in one: the reading is converted, a Desired draft not yet
 applied keeps its digits, read in the new unit, and is never tuned by the change) and
 `status`/`severity` (v2's words at rest: Ready, Protected, Stands outside its bounds).
+A field the device declares `derived` (a stage's controller state) is a reading: its row
+is never `editable` (reason "Read from the device", status "Read only") and `tune_device`
+refuses it. Device Control shows the open device's `commands` as buttons (a stage's Home,
+Stop, Enable, Disable, Reset, Status), each sending its catalogue entry; a button is never
+held back by an Apply in flight, its answer is the page's note, and the rows are read again.
 Once read, the row also has `control: {owners (node names), reason, risk_enabled}`.
 
 Bench fabric (PLUGIN_PROTOCOL §10): `published` (Remote on: handed to another

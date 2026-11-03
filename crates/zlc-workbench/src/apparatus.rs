@@ -105,6 +105,9 @@ fn holds(live: &Live) -> bool { live.close_failed || matches!(live.state, LiveSt
 /// field's own `step` (units::format_reading: an inexact conversion rounded,
 /// "≈ -23.98 dBm"), and exactly with every digit it has (the text's tooltip);
 /// anything else as itself, both ways.
+/// Why Device Control does not tune a `derived` field: the device reports it.
+const READ_FROM_DEVICE: &str = "Read from the device";
+
 fn reading_text(value: &Value, unit: &str, picked: bool, step: Option<f64>) -> (String, String) {
     let number = match value {
         Value::Null => return ("\u{2014}".into(), "\u{2014}".into()),
@@ -974,9 +977,10 @@ impl Workbench {
         let id = text(params, "device")?;
         let field = text(params, "field")?;
         let live = self.devices.get(id).filter(|live| live.state == LiveState::Open).ok_or_else(|| format!("{id} is not open"))?;
-        let live_write = live.fields.as_ref().and_then(|fields| fields.as_array())
-            .and_then(|fields| fields.iter().find(|item| item["field"]["name"] == field))
-            .is_some_and(|item| item["live_write"] == true);
+        let row = live.fields.as_ref().and_then(|fields| fields.as_array())
+            .and_then(|fields| fields.iter().find(|item| item["field"]["name"] == field));
+        if row.is_some_and(|item| item["field"]["derived"] == true) { return Err(format!("{field}: {READ_FROM_DEVICE}")); }
+        let live_write = row.is_some_and(|item| item["live_write"] == true);
         self.tune_policy(id, field, live_write, live.risk.as_deref()).map_err(|reason| format!("{field}: {reason}"))?;
         let ticket = self.ticket(Ticket::Tune { device: id.to_owned(), request });
         let mut call = json!({"field": field, "value": params["value"]});
@@ -1031,7 +1035,8 @@ impl Workbench {
             let current = &item["current"];
             let values: Map<String, Value> = [(field.name.clone(), current.clone())].into_iter().collect();
             let mut row = fields::controls(std::slice::from_ref(&field), &values, "tunable", &[]).pop()?;
-            let policy = self.tune_policy(id, &field.name, live_write, live.risk.as_deref());
+            // A derived field is a reading (a stage's state): shown, never tuned.
+            let policy = if field.derived { Err(READ_FROM_DEVICE.to_owned()) } else { self.tune_policy(id, &field.name, live_write, live.risk.as_deref()) };
             let unit = field.unit.as_deref().unwrap_or("");
             let picked = live.units.contains_key(&field.name);
             let (current_text, current_exact) = reading_text(current, unit, picked, field.step);
@@ -1039,7 +1044,7 @@ impl Workbench {
                 .map(|pair| [&pair[0], &pair[1]].map(|bound| reading_text(bound, unit, picked, field.step)))
                 .map(|[low, high]| (format!("{} to {}", low.0, high.0), format!("{} to {}", low.1, high.1))).unwrap_or_default();
             let outside = current.as_f64().is_some_and(|value| field.minimum.is_some_and(|low| value < low) || field.maximum.is_some_and(|high| value > high));
-            let (status, severity) = if policy.is_err() { ("Protected", "warning") } else if outside { ("Stands outside its bounds", "warning") } else { ("Ready", "idle") };
+            let (status, severity) = if field.derived { ("Read only", "idle") } else if policy.is_err() { ("Protected", "warning") } else if outside { ("Stands outside its bounds", "warning") } else { ("Ready", "idle") };
             let numeric = matches!(field.kind.as_str(), "float" | "int") && field.choices.is_empty();
             for (key, value) in [("current", current.clone()), ("desired", current.clone()), ("live_write", json!(live_write)),
                 ("device_limits", item["device_limits"].clone()), ("dependency_group", item["dependency_group"].clone()),

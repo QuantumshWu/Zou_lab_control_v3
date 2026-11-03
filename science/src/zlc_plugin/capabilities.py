@@ -13,6 +13,7 @@ from typing import Any
 
 CAPABILITIES: dict[str, str] = {
     "camera.adapter": "zlc_atom.devices.camera.contract:CameraAdapter",
+    "motion.axis": "zlc_atom.devices.motion.contract:MotionAxis",
     "rf.source": "zlc_atom.devices.rf.contract:RfSource",
     "slm.phase": "zlc_atom.devices.slm:SlmAdapter",
     "waveform.source": "zlc_atom.devices.waveform.contract:WaveformSource",

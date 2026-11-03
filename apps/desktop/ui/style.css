@@ -216,6 +216,8 @@ button.quiet.disclosure { color: var(--text); }
 /* DeviceControlView: one column budget for the headings and every row. */
 .device-control { display: flex; flex-direction: column; gap: var(--row-gap); padding: var(--window-pad); min-height: 0; overflow: auto; }
 .device-control > .note { margin-bottom: calc(var(--window-pad) - var(--row-gap)); }
+.device-control .device-actions { display: flex; gap: var(--row-gap); }
+.device-control .device-actions:empty { display: none; }
 .device-control > .strip, .device-log > .strip { padding-left: 0; padding-right: 0; }
 .device-control > .strip { margin-top: auto; }
 .control-table {
